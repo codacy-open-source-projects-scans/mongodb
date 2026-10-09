@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/write_ops/write_ops.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -49,6 +22,7 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/update/update_oplog_entry_version.h"
@@ -63,9 +37,12 @@
 
 #include <algorithm>
 #include <memory>
+#include <numeric>
+#include <string_view>
 #include <utility>
 #include <variant>
 
+#include <absl/container/flat_hash_set.h>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
@@ -122,6 +99,7 @@ void checkOpCountForCommand(const T& op, size_t numOps) {
                                                << "stmtIds" << *stmtIds)
                               << ". Write command: " << op.toBSON(),
                 !op.getWriteCommandRequestBase().getStmtId());
+        write_ops::validateStmtIds(*stmtIds);
     }
 }
 
@@ -215,11 +193,13 @@ bool readMultiDeleteProperty(const BSONElement& limitElement) {
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-void writeMultiDeleteProperty(bool isMulti, StringData fieldName, BSONObjBuilder* builder) {
+void writeMultiDeleteProperty(bool isMulti, std::string_view fieldName, BSONObjBuilder* builder) {
     builder->append(fieldName, isMulti ? 0 : 1);
 }
 
-void opTimeSerializerWithTermCheck(repl::OpTime opTime, StringData fieldName, BSONObjBuilder* bob) {
+void opTimeSerializerWithTermCheck(repl::OpTime opTime,
+                                   std::string_view fieldName,
+                                   BSONObjBuilder* bob) {
     if (opTime.getTerm() == repl::OpTime::kUninitializedTerm) {
         bob->append(fieldName, opTime.getTimestamp());
     } else {
@@ -251,6 +231,26 @@ int32_t getStmtIdForWriteAt(const WriteCommandRequestBase& writeCommandBase, siz
     return kFirstStmtId + writePos;
 }
 
+void validateStmtIds(const std::vector<std::int32_t>& stmtIds) {
+    // Statement ids are not allowed to repeat.
+    absl::flat_hash_set<std::int32_t> seen;
+    seen.reserve(stmtIds.size());
+    for (auto stmtId : stmtIds) {
+        if (stmtId == kUninitializedStmtId) {
+            // This sentinel marks a write that is not retryable, so it may repeat.
+            continue;
+        }
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Statement id must be non-negative. Got " << stmtId,
+                stmtId >= 0);
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Statement ids must be unique within a write command. Found "
+                                 "duplicate statement id "
+                              << stmtId,
+                seen.insert(stmtId).second);
+    }
+}
+
 int estimateRuntimeConstantsSize(const mongo::LegacyRuntimeConstants& constants) {
     int size = write_ops::UpdateCommandRequest::kLegacyRuntimeConstantsFieldName.size() +
         static_cast<int>(BSONObj::kMinBSONLength) + kPerElementOverhead;
@@ -277,14 +277,20 @@ int estimateRuntimeConstantsSize(const mongo::LegacyRuntimeConstants& constants)
 
     // $$USER_ROLES
     if (const auto& userRoles = constants.getUserRoles(); userRoles.has_value()) {
-        size += LegacyRuntimeConstants::kUserRolesFieldName.size() + userRoles->objsize() +
-            kPerElementOverhead;
+        size += LegacyRuntimeConstants::kUserRolesFieldName.size() + kPerElementOverhead +
+            std::accumulate(userRoles->begin(),
+                            userRoles->end(),
+                            BSONObj::kMinBSONLength,
+                            [](int acc, const BSONObj& role) {
+                                return acc + role.objsize() +
+                                    kWriteCommandBSONArrayPerElementOverheadBytes;
+                            });
     }
     return size;
 }
 
 int getArrayFiltersFieldSize(const std::vector<mongo::BSONObj>& arrayFilters,
-                             const StringData arrayFiltersFieldName) {
+                             const std::string_view arrayFiltersFieldName) {
     auto size = BSONObj::kMinBSONLength + arrayFiltersFieldName.size() + kPerElementOverhead;
     for (auto&& filter : arrayFilters) {
         // For each filter, we not only need to account for the size of the filter itself,
@@ -446,7 +452,8 @@ int getBulkWriteUpdateSizeEstimate(const BSONObj& filter,
 int getDeleteSizeEstimate(const BSONObj& q,
                           const boost::optional<mongo::BSONObj>& collation,
                           const mongo::BSONObj& hint,
-                          const boost::optional<UUID>& sampleId) {
+                          const boost::optional<UUID>& sampleId,
+                          boost::optional<int32_t> includeQueryStatsMetricsForOpIndex) {
     using DeleteOpEntry = write_ops::DeleteOpEntry;
     int estSize = static_cast<int>(BSONObj::kMinBSONLength);
 
@@ -470,6 +477,12 @@ int getDeleteSizeEstimate(const BSONObj& q,
     // Add the size of the 'sampleId' field, if present.
     if (sampleId) {
         estSize += DeleteOpEntry::kSampleIdFieldName.size() + kUUIDSize + kPerElementOverhead;
+    }
+
+    // Add the size of the 'includeQueryStatsMetricsForOpIndex' field, if present.
+    if (includeQueryStatsMetricsForOpIndex.has_value()) {
+        estSize += DeleteOpEntry::kIncludeQueryStatsMetricsForOpIndexFieldName.size() + kIntSize +
+            kPerElementOverhead;
     }
 
     return estSize;
@@ -540,6 +553,10 @@ bool verifySizeEstimate(const write_ops::UpdateOpEntry& update) {
 bool verifySizeEstimate(const InsertCommandRequest& insertReq,
                         const OpMsgRequest* unparsedRequest) {
     int size = getInsertHeaderSizeEstimate(insertReq);
+    if (insertReq.getIncludeQueryStatsMetrics()) {
+        size += InsertCommandRequest::kIncludeQueryStatsMetricsFieldName.size() + kBoolSize +
+            kPerElementOverhead;
+    }
     for (auto&& docToInsert : insertReq.getDocuments()) {
         size += docToInsert.objsize() + kWriteCommandBSONArrayPerElementOverheadBytes;
     }
@@ -590,7 +607,8 @@ bool verifySizeEstimate(const DeleteCommandRequest& deleteReq,
         size += write_ops::getDeleteSizeEstimate(deleteOp.getQ(),
                                                  deleteOp.getCollation(),
                                                  deleteOp.getHint(),
-                                                 deleteOp.getSampleId()) +
+                                                 deleteOp.getSampleId(),
+                                                 deleteOp.getIncludeQueryStatsMetricsForOpIndex()) +
             kWriteCommandBSONArrayPerElementOverheadBytes;
     }
 
@@ -610,6 +628,7 @@ int getInsertHeaderSizeEstimate(const InsertCommandRequest& insertReq) {
 
     size += InsertCommandRequest::kCommandName.size() + kPerElementOverhead +
         insertReq.getNamespace().size() + 1 /* ns string null terminator */;
+
     return size;
 }
 
@@ -665,12 +684,15 @@ bool verifySizeEstimate(const write_ops::DeleteOpEntry& deleteOp) {
     return write_ops::getDeleteSizeEstimate(deleteOp.getQ(),
                                             deleteOp.getCollation(),
                                             deleteOp.getHint(),
-                                            deleteOp.getSampleId()) >= deleteOp.toBSON().objsize();
+                                            deleteOp.getSampleId(),
+                                            deleteOp.getIncludeQueryStatsMetricsForOpIndex()) >=
+        deleteOp.toBSON().objsize();
 }
 
 bool isClassicalUpdateReplacement(const BSONObj& update) {
-    // An empty update object will be treated as replacement as firstElementFieldName() returns "".
-    return update.firstElementFieldName()[0] != '$';
+    // An empty update object will be treated as replacement as firstElementFieldNameStringData()
+    // returns an empty string, which does not start with '$'.
+    return !update.firstElementFieldNameStringData().starts_with('$');
 }
 
 void checkWriteErrors(const WriteCommandReplyBase& reply) {
@@ -777,7 +799,9 @@ int UpdateModification::objsize() const {
                 return size + kWriteCommandBSONArrayPerElementOverheadBytes;
             },
             [](const DeltaUpdate& delta) -> int { return delta.diff.objsize(); },
-            [](const TransformUpdate& transform) -> int { return 0; }},
+            [](const TransformUpdate& transform) -> int {
+                return 0;
+            }},
         _update);
 }
 
@@ -787,7 +811,9 @@ UpdateModification::Type UpdateModification::type() const {
                           [](const ModifierUpdate& modifier) { return Type::kModifier; },
                           [](const PipelineUpdate& pipelineUpdate) { return Type::kPipeline; },
                           [](const DeltaUpdate& delta) { return Type::kDelta; },
-                          [](const TransformUpdate& transform) { return Type::kTransform; }},
+                          [](const TransformUpdate& transform) {
+                              return Type::kTransform;
+                          }},
         _update);
 }
 
@@ -795,7 +821,7 @@ UpdateModification::Type UpdateModification::type() const {
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-void UpdateModification::serializeToBSON(StringData fieldName, BSONObjBuilder* bob) const {
+void UpdateModification::serializeToBSON(std::string_view fieldName, BSONObjBuilder* bob) const {
 
     visit(OverloadedVisitor{
               [fieldName, bob](const ReplacementUpdate& replacement) {
@@ -812,7 +838,8 @@ void UpdateModification::serializeToBSON(StringData fieldName, BSONObjBuilder* b
                   arrayBuilder.doneFast();
               },
               [fieldName, bob](const DeltaUpdate& delta) { *bob << fieldName << delta.diff; },
-              [](const TransformUpdate& transform) {}},
+              [](const TransformUpdate& transform) {
+              }},
           _update);
 }
 

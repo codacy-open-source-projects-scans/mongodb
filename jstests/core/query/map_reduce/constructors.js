@@ -11,10 +11,10 @@
 //   requires_scripting,
 //   # Time-series collections are views which don't support map-reduce
 //   exclude_from_timeseries_crud_passthrough,
-//   # TODO SERVER-116053: Add support for mapReduce.
-//   mozjs_wasm_unsupported,
+//   uses_map_reduce_internal_merge_pipeline,
+//   # TODO SERVER-128404: ASAN build has incompatible signal handling with Wasmtime's OOM path.
+//   incompatible_aubsan,
 // ]
-
 // Takes a list of constructors and returns a new list with an extra entry for each constructor with
 // "new" prepended
 const out = db.map_reduce_constructors_out;
@@ -71,7 +71,9 @@ function mapReduceConstructorTest(constructorList) {
             const r = eval("dummy = function( k , v ){ return { test : " + constructor + " } }");
 
             out.drop();
-            assert.commandWorked(t.mapReduce(m, r, {out: {merge: "map_reduce_constructors_out"}, scope: {xx: 1}}));
+            assert.commandWorked(
+                t.mapReduce(m, r, {out: {merge: "map_reduce_constructors_out"}, scope: {xx: 1}}),
+            );
         } catch (e) {
             throw "valid constructor: " + constructor + " failed in mapReduce context: " + e;
         }
@@ -139,7 +141,10 @@ let dbrefConstructors = {
 };
 
 let dbpointerConstructors = {
-    "valid": ['DBPointer("namespace", ObjectId())', 'DBPointer("namespace", ObjectId("000000000000000000000000"))'],
+    "valid": [
+        'DBPointer("namespace", ObjectId())',
+        'DBPointer("namespace", ObjectId("000000000000000000000000"))',
+    ],
     "invalid": [
         "DBPointer()",
         "DBPointer(true, ObjectId())",

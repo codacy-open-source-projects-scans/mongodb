@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_tester/command_helpers.h"
 #include "mongo/db/query/query_tester/mock_version_info.h"
@@ -49,6 +23,7 @@
 
 namespace mongo::query_tester {
 namespace {
+using namespace std::literals::string_view_literals;
 struct TestSpec {
     TestSpec(std::filesystem::path path, size_t low = kMinTestNum, size_t high = kMaxTestNum)
         : testPath(path), startTest(low), endTest(high) {};
@@ -105,7 +80,8 @@ std::unique_ptr<DBClientConnection> buildConn(const std::string& uriString,
                 str::stream{} << "URI Parsing failed with message "
                               << mongoURI.getStatus().reason(),
                 mongoURI.isOK());
-        auto conn = std::make_unique<DBClientConnection>(false, 0, mongoURI.getValue());
+        auto conn = std::make_unique<DBClientConnection>(
+            DBClientConnectionOptions{.uri = mongoURI.getValue()});
         auto hostAndPortVec = mongoURI.getValue().getServers();
         uassert(
             9670412, "Expected exactly one host/port in the given URI", hostAndPortVec.size() == 1);
@@ -120,56 +96,6 @@ void exitWithError(const int statusCode, const std::string& msg) {
     std::exit(statusCode);
 }
 
-// Recursively scans a BSON object for operators that require the MozJS JavaScript engine.
-// Operators checked (will be removed from this check in the future when mozjs-wasm supports them):
-// TODO SERVER-116054: Add support for $where.
-// TODO SERVER-116052: Add support for $function.
-// TODO SERVER-116055: Add support for $accumulator.
-// TODO SERVER-116053: Add support for mapReduce.
-bool containsUnsupportedJSWasmOperators(const BSONObj& obj) {
-    for (const auto& elem : obj) {
-        const auto fieldName = elem.fieldNameStringData();
-        if (fieldName == "$where"_sd || fieldName == "$function"_sd ||
-            fieldName == "$accumulator"_sd || fieldName == "mapReduce"_sd ||
-            fieldName == "mapreduce"_sd) {
-            return true;
-        }
-        if (elem.type() == BSONType::object || elem.type() == BSONType::array) {
-            if (containsUnsupportedJSWasmOperators(elem.Obj())) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-// Determines if a query file should be skipped.
-bool shouldSkipFile(const QueryFile& currFile, DBClientConnection* conn) {
-    if (!conn) {
-        return false;
-    }
-
-    // If the server is running mozjs-wasm, we need to check if any queries contain MozJS
-    // operators, and if so, skip the file since those queries won't run successfully.
-    // TODO SERVER-116054, SERVER-116052, SERVER-116055, SERVER-116053: Remove this check once
-    // mozjs-wasm supports all MozJS operators used in the test files.
-    static constexpr auto kMozJsWasmEngine = "mozjs-wasm"_sd;
-    auto bob = BSONObjBuilder{};
-    bob.append("buildInfo", 1);
-    const auto buildInfo = runCommand(conn, "admin", bob.done());
-    if (buildInfo.getStringField("javascriptEngine") == kMozJsWasmEngine) {
-        for (const auto& test : currFile.getTests()) {
-            if (containsUnsupportedJSWasmOperators(test.getQuery())) {
-                std::cout << "Skipping " << currFile.getFilePath().string()
-                          << " (contains MozJS queries; server uses mozjs-wasm)" << std::endl;
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
 int runTestProgram(const std::vector<TestSpec> testsToRun,
                    const std::string& uriString,
                    const bool dropData,
@@ -182,7 +108,8 @@ int runTestProgram(const std::vector<TestSpec> testsToRun,
                    const bool populateAndExit,
                    const ErrorLogLevel errorLogLevel,
                    const DiffStyle diffStyle,
-                   const OverrideOption overrideOption) {
+                   const OverrideOption overrideOption,
+                   const std::filesystem::path& outputDir) {
     // Run the tests.
     auto versionInfo = MockVersionInfo{};
     auto conn = buildConn(uriString, &versionInfo, mode);
@@ -198,17 +125,12 @@ int runTestProgram(const std::vector<TestSpec> testsToRun,
     auto failedQueryCount = size_t{0};
     auto totalTestsRun = size_t{0};
     for (const auto& [testPath, startRange, endRange] : testsToRun) {
-        auto currFile = query_tester::QueryFile(testPath, optimizationsOff, overrideOption);
+        auto currFile =
+            query_tester::QueryFile(testPath, optimizationsOff, overrideOption, outputDir);
 
         // Treat data load errors as failures, too.
         try {
             currFile.readInEntireFile(mode, startRange, endRange);
-
-            // Skip files requiring MozJS when running against a mozjs-wasm server. populateAndExit
-            // mode is excluded since collection setup should proceed regardless.
-            if (!populateAndExit && shouldSkipFile(currFile, conn.get())) {
-                continue;
-            }
 
             currFile.loadCollections(conn.get(),
                                      dropData,
@@ -332,6 +254,9 @@ void printHelpString() {
          "each document on its own line; `oneline` puts the entire result set on one line. "
          "Overwrites existing .results files. Not available with --mode compare or when using "
          "-n or -r."},
+        {"--outputDir",
+         "Directory to write files from a test (.actual, .fail, and the .narrowed "
+         "expected results). Defaults to writing them alongside the test."},
         {"--populateAndExit",
          "Drop and reload collection data, then exit without running any tests. Implicitly "
          "applies --drop and --load. Accepts exactly one -t argument."},
@@ -381,6 +306,7 @@ int queryTesterMain(const int argc, const char** const argv) {
     auto modeExplicitlySet = false;
     auto optimizationsOff = false;
     auto outOpt = WriteOutOptions::kNone;
+    auto outputDir = std::filesystem::path{};
     auto populateAndExit = false;
     auto verbose = false;
     auto diffStyle = DiffStyle::kWord;
@@ -411,6 +337,10 @@ int queryTesterMain(const int argc, const char** const argv) {
         } else if (parsedArgs[argNum] == "--out") {
             assertNextArgExists(parsedArgs, argNum, "--out");
             outOpt = stringToWriteOutOpt(parsedArgs[argNum + 1]);
+            ++argNum;
+        } else if (parsedArgs[argNum] == "--outputDir") {
+            assertNextArgExists(parsedArgs, argNum, "--outputDir");
+            outputDir = parsedArgs[argNum + 1];
             ++argNum;
         } else if (parsedArgs[argNum] == "--populateAndExit") {
             std::tie(dropOpt, loadOpt, populateAndExit) = std::tuple{true, true, true};
@@ -533,7 +463,8 @@ int queryTesterMain(const int argc, const char** const argv) {
                               populateAndExit,
                               errorLogLevel,
                               diffStyle,
-                              overrideOption);
+                              overrideOption,
+                              outputDir);
     } catch (AssertionException& ex) {
         exitWithError(1, ex.reason());
     }

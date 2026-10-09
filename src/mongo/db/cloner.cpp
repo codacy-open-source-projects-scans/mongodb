@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/cloner.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -78,7 +51,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
@@ -92,6 +65,7 @@
 #include <ctime>
 #include <iterator>
 #include <map>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -242,7 +216,7 @@ struct DefaultClonerImpl::BatchHandler {
                 str::stream ss;
                 ss << "Cloner: found corrupt document in " << nss.toStringForErrorMsg() << ": "
                    << redact(status);
-                msgasserted(28531, ss);
+                masserted(28531, ss);
             }
 
             MONGO_verify(collection);
@@ -621,7 +595,7 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
     }
 
     // Get index specs for each collection.
-    std::map<StringData, std::list<BSONObj>> collectionIndexSpecs;
+    std::map<std::string_view, std::list<BSONObj>> collectionIndexSpecs;
     for (auto&& params : createCollectionParams) {
         const auto nss = NamespaceStringUtil::deserialize(dbName, params.collectionName);
         ListIndexes listIndexesCmd(nss);

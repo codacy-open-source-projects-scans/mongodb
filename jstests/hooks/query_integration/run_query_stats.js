@@ -41,10 +41,16 @@ function verifyQueryStats(nodeConn, queryStatsSpec) {
         // here that we are running analyze.
         const analyzeCmdReparseErr =
             e.message.indexOf("Failed to re-parse query") !== -1 &&
-            e.message.indexOf("$_internalConstructStats") !== -1 &&
-            e.message.indexOf("system.statistics") !== -1;
-        if (analyzeCmdReparseErr || (allowFeatureNotSupported && kQueryStatsStoreSize0ErrCode == e.code)) {
-            jsTest.log.info("Encountered an error while running $queryStats. $queryStats will not run for this test.");
+            ((e.message.indexOf("$_internalConstructStats") !== -1 &&
+                e.message.indexOf("system.statistics") !== -1) ||
+                e.message.indexOf("$_internalConstructNdvSketch") !== -1);
+        if (
+            analyzeCmdReparseErr ||
+            (allowFeatureNotSupported && kQueryStatsStoreSize0ErrCode == e.code)
+        ) {
+            jsTest.log.info(
+                "Encountered an error while running $queryStats. $queryStats will not run for this test.",
+            );
         } else {
             throw e;
         }

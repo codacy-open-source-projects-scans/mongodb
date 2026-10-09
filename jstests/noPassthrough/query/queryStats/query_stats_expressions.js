@@ -2,11 +2,12 @@
  * Test that queryStats works properly for a find command that uses agg expressions and produces the
  * proper query shape without issues during re-parsing.
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getQueryStats, resetQueryStatsStore} from "jstests/libs/query/query_stats_utils.js";
 
 // Turn on the collecting of queryStats metrics.
 let options = {
-    setParameter: {internalQueryStatsRateLimit: -1},
+    setParameter: {internalQueryStatsSampleRate: 1},
 };
 
 const conn = MongoRunner.runMongod(options);
@@ -89,22 +90,43 @@ function makeAggCmd(pipeline, collName = coll.getName()) {
         testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {$add: [1, 2]}}}}])),
         3041704,
     );
-    assert.commandFailedWithCode(testDB.runCommand(makeAggCmd([{$project: {a: {$getField: ["a", "b"]}}}])), 3041704);
-    assert.commandFailedWithCode(testDB.runCommand(makeAggCmd([{$project: {a: {$getField: null}}}])), 3041704);
     assert.commandFailedWithCode(
-        testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {field: {$add: [1, 2]}, input: "$$CURRENT"}}}}])),
+        testDB.runCommand(makeAggCmd([{$project: {a: {$getField: ["a", "b"]}}}])),
         3041704,
     );
     assert.commandFailedWithCode(
-        testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {field: ["a", "b"], input: "$$CURRENT"}}}}])),
+        testDB.runCommand(makeAggCmd([{$project: {a: {$getField: null}}}])),
         3041704,
     );
     assert.commandFailedWithCode(
-        testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {field: null, input: "$$CURRENT"}}}}])),
+        testDB.runCommand(
+            makeAggCmd([{$project: {a: {$getField: {field: {$add: [1, 2]}, input: "$$CURRENT"}}}}]),
+        ),
+        3041704,
+    );
+    assert.commandFailedWithCode(
+        testDB.runCommand(
+            makeAggCmd([{$project: {a: {$getField: {field: ["a", "b"], input: "$$CURRENT"}}}}]),
+        ),
+        3041704,
+    );
+    assert.commandFailedWithCode(
+        testDB.runCommand(
+            makeAggCmd([{$project: {a: {$getField: {field: null, input: "$$CURRENT"}}}}]),
+        ),
         3041704,
     );
     let queryStats = getQueryStats(conn);
-    assert.eq(queryStats.length, 0, `Expected no entries but got ${tojson(queryStats)}`);
+
+    // When 'featureFlagQueryStatsErrors' is enabled, these failures are recorded as errored
+    // executions, meaning three entries (for the three distinct query shapes) are expected.
+    const errorsRecorded = FeatureFlagUtil.isEnabled(testDB, "QueryStatsErrors");
+    const expectedNumEntries = errorsRecorded ? 3 : 0;
+    assert.eq(
+        queryStats.length,
+        expectedNumEntries,
+        `Expected ${expectedNumEntries} entries but got ${tojson(queryStats)}`,
+    );
 }
 
 // Tests that $queryStats stage does not fail with a re-parse error for a pipeline with $getField
@@ -117,16 +139,26 @@ function makeAggCmd(pipeline, collName = coll.getName()) {
     // query shape #1
     testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {$add: [1, 2]}}}}], "nocoll"));
     testDB.runCommand(
-        makeAggCmd([{$project: {a: {$getField: {field: {$add: [1, 2]}, input: "$$CURRENT"}}}}], "nocoll"),
+        makeAggCmd(
+            [{$project: {a: {$getField: {field: {$add: [1, 2]}, input: "$$CURRENT"}}}}],
+            "nocoll",
+        ),
     );
 
     // query shape #2
     testDB.runCommand(makeAggCmd([{$project: {a: {$getField: ["a", "b"]}}}], "nocoll"));
-    testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {field: ["a", "b"], input: "$$CURRENT"}}}}], "nocoll"));
+    testDB.runCommand(
+        makeAggCmd(
+            [{$project: {a: {$getField: {field: ["a", "b"], input: "$$CURRENT"}}}}],
+            "nocoll",
+        ),
+    );
 
     // query shape #3
     testDB.runCommand(makeAggCmd([{$project: {a: {$getField: null}}}], "nocoll"));
-    testDB.runCommand(makeAggCmd([{$project: {a: {$getField: {field: null, input: "$$CURRENT"}}}}], "nocoll"));
+    testDB.runCommand(
+        makeAggCmd([{$project: {a: {$getField: {field: null, input: "$$CURRENT"}}}}], "nocoll"),
+    );
 
     let queryStats = getQueryStats(conn);
     assert.eq(queryStats.length, 3, `Expected 3 entries but got ${tojson(queryStats)}`);

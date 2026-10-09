@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/migration_batch_fetcher.h"
 
@@ -41,7 +15,7 @@
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/out_of_line_executor.h"
@@ -106,14 +80,12 @@ MigrationBatchFetcher<Inserter>::MigrationBatchFetcher(
     int maxBufferedSizeBytesPerThread)
     : _nss{std::move(nss)},
       _sessionId{std::move(sessionId)},
-      _inserterWorkers{[&]() {
-          ThreadPool::Options options;
-          options.poolName = "ChunkMigrationInserters";
-          options.minThreads = 1;
-          options.maxThreads = 1;
-          options.onCreateThread = Inserter::onCreateThread;
-          return std::make_unique<ThreadPool>(options);
-      }()},
+      _inserterWorkers{ThreadPool::make({
+          .poolName = "ChunkMigrationInserters",
+          .minThreads = 1,
+          .maxThreads = 1,
+          .onCreateThread = Inserter::onCreateThread,
+      })},
       _migrateCloneRequest{_createMigrateCloneRequest()},
       _outerOpCtx{outerOpCtx},
       _innerOpCtx{innerOpCtx},
@@ -151,14 +123,12 @@ BSONObj MigrationBatchFetcher<Inserter>::_fetchBatch(OperationContext* opCtx) {
 
 template <typename Inserter>
 void MigrationBatchFetcher<Inserter>::fetchAndScheduleInsertion() {
-    auto fetchersThreadPool = [&]() {
-        ThreadPool::Options options;
-        options.poolName = "ChunkMigrationFetchers";
-        options.minThreads = 1;
-        options.maxThreads = 1;
-        options.onCreateThread = onCreateThread;
-        return std::make_unique<ThreadPool>(options);
-    }();
+    auto fetchersThreadPool = ThreadPool::make({
+        .poolName = "ChunkMigrationFetchers",
+        .minThreads = 1,
+        .maxThreads = 1,
+        .onCreateThread = onCreateThread,
+    });
     fetchersThreadPool->startup();
     fetchersThreadPool->schedule([this](Status status) { this->_runFetcher(); });
 

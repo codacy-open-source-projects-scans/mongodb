@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -38,13 +11,14 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/unittest/unittest.h"
@@ -78,20 +52,29 @@ public:
     IndexIteratorTests() {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        AutoGetDb autodb(&opCtx, _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(
+            &opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(&opCtx, _nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(&opCtx);
 
-        autodb.ensureDbExists(&opCtx)->createCollection(&opCtx, _nss);
+        DatabaseHolder::get(&opCtx)->openDb(&opCtx, _nss.dbName())->createCollection(&opCtx, _nss);
         wuow.commit();
     }
 
     ~IndexIteratorTests() {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        AutoGetDb autodb(&opCtx, _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(
+            &opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(&opCtx, _nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(&opCtx);
 
-        autodb.ensureDbExists(&opCtx)->dropCollection(&opCtx, _nss).transitional_ignore();
+        DatabaseHolder::get(&opCtx)
+            ->openDb(&opCtx, _nss.dbName())
+            ->dropCollection(&opCtx, _nss)
+            .transitional_ignore();
         wuow.commit();
     }
 
@@ -136,20 +119,29 @@ public:
     RefreshEntry() {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        AutoGetDb autodb(&opCtx, _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(
+            &opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(&opCtx, _nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(&opCtx);
 
-        autodb.ensureDbExists(&opCtx)->createCollection(&opCtx, _nss);
+        DatabaseHolder::get(&opCtx)->openDb(&opCtx, _nss.dbName())->createCollection(&opCtx, _nss);
         wuow.commit();
     }
 
     ~RefreshEntry() {
         const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
         OperationContext& opCtx = *opCtxPtr;
-        AutoGetDb autodb(&opCtx, _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(
+            &opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(&opCtx, _nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(&opCtx);
 
-        autodb.ensureDbExists(&opCtx)->dropCollection(&opCtx, _nss).transitional_ignore();
+        DatabaseHolder::get(&opCtx)
+            ->openDb(&opCtx, _nss.dbName())
+            ->dropCollection(&opCtx, _nss)
+            .transitional_ignore();
         wuow.commit();
     }
 
@@ -172,8 +164,11 @@ public:
         // Change value of "expireAfterSeconds" on disk. This will update the metadata for the
         // Collection but not propagate the change to the IndexCatalog
         {
-            AutoGetCollection autoColl(&opCtx, _nss, MODE_X);
-            CollectionWriter coll(&opCtx, autoColl);
+            auto acq = acquireCollection(&opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             &opCtx, _nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_X);
+            CollectionWriter coll(&opCtx, &acq);
 
             WriteUnitOfWork wuow(&opCtx);
             coll.getWritableCollection(&opCtx)->updateTTLSetting(&opCtx, "x_1", 10);
@@ -185,8 +180,11 @@ public:
         ASSERT_EQUALS(5, entry->descriptor()->infoObj()["expireAfterSeconds"].numberLong());
 
         {
-            AutoGetCollection autoColl(&opCtx, _nss, MODE_X);
-            CollectionWriter coll(&opCtx, autoColl);
+            auto acq = acquireCollection(&opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             &opCtx, _nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_X);
+            CollectionWriter coll(&opCtx, &acq);
 
             // Notify the catalog of the change.
             WriteUnitOfWork wuow(&opCtx);
@@ -204,9 +202,14 @@ class PrepareUniqueIndexRecords : IndexCatalogTestBase {
 public:
     ~PrepareUniqueIndexRecords() {
         auto opCtx = cc().makeOperationContext();
-        AutoGetDb db{opCtx.get(), _nss.dbName(), LockMode::MODE_X};
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         WriteUnitOfWork wuow{opCtx.get()};
-        ASSERT_OK(db.getDb()->dropCollection(opCtx.get(), _nss));
+        ASSERT_OK(DatabaseHolder::get(opCtx.get())
+                      ->getDb(opCtx.get(), _nss.dbName())
+                      ->dropCollection(opCtx.get(), _nss));
         wuow.commit();
     }
 
@@ -222,14 +225,19 @@ public:
                  << IndexDescriptor::kKeyPatternFieldName << BSON("a" << 1)
                  << IndexDescriptor::kPrepareUniqueFieldName << true)));
 
-        AutoGetCollection coll{opCtx.get(), _nss, LockMode::MODE_X};
+        auto coll = acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
         auto doc1 = BSON("_id" << 1 << "a" << 1);
         auto doc2 = BSON("_id" << 2 << "a" << 1);
 
         {
             WriteUnitOfWork wuow{opCtx.get()};
-            ASSERT_OK(indexCatalog(opCtx.get())
-                          ->indexRecords(opCtx.get(), *coll, {{RecordId{1}, {}, &doc1}}, nullptr));
+            ASSERT_OK(
+                indexCatalog(opCtx.get())
+                    ->indexRecords(
+                        opCtx.get(), coll.getCollectionPtr(), {{RecordId{1}, {}, &doc1}}, nullptr));
             wuow.commit();
         }
 
@@ -237,15 +245,18 @@ public:
             WriteUnitOfWork wuow{opCtx.get()};
             ASSERT_NOT_OK(
                 indexCatalog(opCtx.get())
-                    ->indexRecords(opCtx.get(), *coll, {{RecordId{2}, {}, &doc2}}, nullptr));
+                    ->indexRecords(
+                        opCtx.get(), coll.getCollectionPtr(), {{RecordId{2}, {}, &doc2}}, nullptr));
         }
 
         opCtx->setEnforceConstraints(false);
 
         {
             WriteUnitOfWork wuow{opCtx.get()};
-            ASSERT_OK(indexCatalog(opCtx.get())
-                          ->indexRecords(opCtx.get(), *coll, {{RecordId{2}, {}, &doc2}}, nullptr));
+            ASSERT_OK(
+                indexCatalog(opCtx.get())
+                    ->indexRecords(
+                        opCtx.get(), coll.getCollectionPtr(), {{RecordId{2}, {}, &doc2}}, nullptr));
             wuow.commit();
         }
     }
@@ -255,9 +266,14 @@ class PrepareUniqueUpdateRecord : IndexCatalogTestBase {
 public:
     ~PrepareUniqueUpdateRecord() {
         auto opCtx = cc().makeOperationContext();
-        AutoGetDb db{opCtx.get(), _nss.dbName(), LockMode::MODE_X};
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         WriteUnitOfWork wuow{opCtx.get()};
-        ASSERT_OK(db.getDb()->dropCollection(opCtx.get(), _nss));
+        ASSERT_OK(DatabaseHolder::get(opCtx.get())
+                      ->getDb(opCtx.get(), _nss.dbName())
+                      ->dropCollection(opCtx.get(), _nss));
         wuow.commit();
     }
 
@@ -273,7 +289,10 @@ public:
                  << IndexDescriptor::kKeyPatternFieldName << BSON("a" << 1)
                  << IndexDescriptor::kPrepareUniqueFieldName << true)));
 
-        AutoGetCollection coll{opCtx.get(), _nss, LockMode::MODE_X};
+        auto coll = acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
         auto doc1 = BSON("_id" << 1 << "a" << 1);
         auto doc2 = BSON("_id" << 2 << "a" << 2);
         auto updatedDoc2 = BSON("_id" << 2 << "a" << 1);
@@ -282,7 +301,7 @@ public:
             WriteUnitOfWork wuow{opCtx.get()};
             ASSERT_OK(indexCatalog(opCtx.get())
                           ->indexRecords(opCtx.get(),
-                                         *coll,
+                                         coll.getCollectionPtr(),
                                          {{RecordId{1}, {}, &doc1}, {RecordId{2}, {}, &doc2}},
                                          nullptr));
             wuow.commit();
@@ -293,7 +312,7 @@ public:
             int64_t keysInsertedOut, keysDeletedOut;
             ASSERT_NOT_OK(indexCatalog(opCtx.get())
                               ->updateRecord(opCtx.get(),
-                                             *coll,
+                                             coll.getCollectionPtr(),
                                              doc2,
                                              updatedDoc2,
                                              nullptr,
@@ -311,7 +330,7 @@ public:
             int64_t keysInsertedOut, keysDeletedOut;
             ASSERT_OK(indexCatalog(opCtx.get())
                           ->updateRecord(opCtx.get(),
-                                         *coll,
+                                         coll.getCollectionPtr(),
                                          doc2,
                                          updatedDoc2,
                                          nullptr,

@@ -2,7 +2,11 @@
 #
 # Purpose: Enforce strict “safe-to-dlopen” rules for a MongoDB extension .so by inspecting:
 #     1) Exported symbols (nm)
-#        - The extension must export ONLY the C API entry point get_mongodb_extension
+#        - The extension must export ONLY the C API load-protocol entry points:
+#            * get_mongodb_extension          (phase 2: instantiate at host-chosen version)
+#            * get_mongodb_extension_versions (phase 1: publish supported versions)
+#          The phase 1 symbol is optional to accommodate older extensions that predate
+#          the two-step load protocol; phase 2 (get_mongodb_extension) is always required.
 #     2) Dynamic dependencies (ldd)
 #        - Enumerate the extension’s runtime shared-library dependencies
 #        - Compare against the server’s runtime dependencies to detect major-version conflicts (per MongoDB version)
@@ -38,12 +42,14 @@ EXT_SO="${2:-}"
 
 # ------------------------------------------------------------------------------
 # 1) Exported symbol surface check (nm)
-#    Rule: extension exports ONLY get_mongodb_extension.
+#    Rule: extension exports ONLY the two documented load-protocol entry points:
+#      - get_mongodb_extension          (phase 2: instantiate at host-chosen version)
+#      - get_mongodb_extension_versions (phase 1: publish supported versions)
 #
 # We inspect the dynamic symbol table (-D) and consider only symbols that are defined by the extension (--defined-only).
 # Undefined symbols ('U' / 'w') are references and do not count as exports.
 # ------------------------------------------------------------------------------
-info "1) Checking extension exports only get_mongodb_extension"
+info "1) Checking extension exports only the load-protocol entry point(s)"
 
 ext_defined_exports="$(
     nm -D --defined-only "$EXT_SO" |
@@ -52,16 +58,22 @@ ext_defined_exports="$(
         sort -u
 )"
 
-# Strict expected set.
-expected_exports=$'get_mongodb_extension'
+# Accept either of two valid export sets (sorted, matching the `sort -u` output above):
+#   - get_mongodb_extension                                    (older single-phase extensions)
+#   - get_mongodb_extension + get_mongodb_extension_versions   (current two-step load protocol)
+# In both cases get_mongodb_extension (phase 2) is required, and no other symbols may be exported.
+expected_exports_phase2_only=$'get_mongodb_extension'
+expected_exports_both=$'get_mongodb_extension\nget_mongodb_extension_versions'
 
-if [[ "$ext_defined_exports" != "$expected_exports" ]]; then
-    echo "Expected exported defined dynsym set:"
-    echo "$expected_exports"
+if [[ "$ext_defined_exports" != "$expected_exports_phase2_only" &&
+    "$ext_defined_exports" != "$expected_exports_both" ]]; then
+    echo "Expected exported defined dynsym set to be one of:"
+    echo "  [$expected_exports_phase2_only]"
+    echo "  [${expected_exports_both//$'\n'/, }]"
     echo
     echo "Actual exported defined dynsym set:"
     echo "$ext_defined_exports"
-    die "Extension exports unexpected symbols. Enforce -fvisibility=hidden and export only get_mongodb_extension."
+    die "Extension exports unexpected symbols. Enforce -fvisibility=hidden and export only get_mongodb_extension (and optionally get_mongodb_extension_versions)."
 fi
 
 info "Export surface check passed."
@@ -109,8 +121,16 @@ ext_ldd="$(ldd_libs_basename "$EXT_SO")"
 
 # Base regex for allowed dependencies (common to both direct and transitive)
 # NOTE: This is still a shared object (dlopen), so libc + loader will be dynamic.
+# The loader's name is architecture specific: ld-linux-x86-64.so.2 / ld-linux-aarch64.so.1 on
+# x86_64/arm64, but ld64.so.2 on ppc64le and ld64.so.1 on s390x.
+# ldd resolves to real files, whose names differ by glibc version: glibc <= 2.33 ships
+# libc-2.28.so etc., while glibc >= 2.34 ships libc.so.6 directly. Accept both spellings.
+# Keep this alias set aligned with the canonical lib*.so.N spellings in ALLOWED_DEPS_BASE:
+# if a library is not allowed, its versioned-file form must not be allowed either,
+# otherwise the same dependency is accepted or rejected based only on how ldd renders it.
+GLIBC_VERSIONED_FILES='lib(c|m|dl|pthread|rt|resolv)-[0-9.]+\.so'
 # Policy exceptions: OpenSSL (libcrypto/libssl) may be dynamic. libgcc_s is allowed because the server dynamically links it.
-ALLOWED_DEPS_BASE='ld-linux.*\.so\.[0-9.]+|libc\.so\.[0-9.]+|libm\.so\.[0-9.]+|libresolv\.so\.[0-9.]+|libdl\.so\.[0-9.]+|libpthread\.so\.[0-9.]+|librt\.so\.[0-9.]+|libcrypto\.so\.[0-9.]+|libssl\.so\.[0-9.]+|libgcc_s\.so\.[0-9.]+|linux-vdso\.so\.[0-9.]+'
+ALLOWED_DEPS_BASE="ld-linux.*\.so\.[0-9.]+|ld64\.so\.[0-9.]+|${GLIBC_VERSIONED_FILES}|libc\.so\.[0-9.]+|libm\.so\.[0-9.]+|libresolv\.so\.[0-9.]+|libdl\.so\.[0-9.]+|libpthread\.so\.[0-9.]+|librt\.so\.[0-9.]+|libcrypto\.so\.[0-9.]+|libssl\.so\.[0-9.]+|libgcc_s\.so\.[0-9.]+|linux-vdso\.so\.[0-9.]+"
 
 # 2a) Check direct dependencies (DT_NEEDED) - stricter control
 # Direct dependencies are what the extension explicitly links against.

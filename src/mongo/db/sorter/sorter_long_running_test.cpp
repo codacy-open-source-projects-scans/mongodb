@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/sorter/file.h"
@@ -49,6 +22,7 @@
 #include <numeric>
 #include <queue>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -70,7 +44,7 @@ using test::FileTraits;
 template <typename Traits>
 constexpr bool shouldSkipContainerBasedTestInDebugBuild() {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-    return std::is_same_v<Traits, ContainerTraits>;
+    return std::is_same_v<Traits, ContainerTraits<>>;
 #else
     return false;
 #endif
@@ -88,7 +62,6 @@ protected:
         };
 
         int currentBufSize = 0;
-        // TODO(SERVER-114080): Ensure testing of non-file-based sorter storage is comprehensive.
         FileBasedStorage<IntWrapper, IntWrapper> sorterStorage(makeFile(),
                                                                /*dbName=*/boost::none,
                                                                sorter::kLatestChecksumVersion);
@@ -123,8 +96,18 @@ constexpr std::size_t kLargeNumberOfKeys = 100 * 1000;
 constexpr std::size_t kAggressiveSpillMemLimit = 16 * 1024;
 constexpr std::size_t kManualSpillEveryN = 10;
 
-constexpr std::size_t dataMemLimitFromTotal(std::size_t totalMemLimit) {
-    return totalMemLimit - totalMemLimit / 10;
+// Returns the data-memory budget production will choose: total memory minus the iterator budget,
+// where the iterator budget is the 10% reservation rounded down to a multiple of `iteratorSize`.
+inline std::size_t dataMemLimitFromTotal(std::size_t totalMemLimit, std::size_t iteratorSize) {
+    constexpr std::size_t kIteratorsMaxBytesSizeDefault = 1 * 1024 * 1024;
+    std::size_t reserved = kIteratorsMaxBytesSizeDefault;
+    const auto requested =
+        static_cast<std::size_t>(totalMemLimit * maxIteratorsMemoryUsagePercentage.load());
+    if (requested < reserved) {
+        reserved = std::max(iteratorSize, requested);
+    }
+    reserved = iteratorSize * (reserved / iteratorSize);
+    return reserved >= totalMemLimit ? 0 : totalMemLimit - reserved;
 }
 
 std::string makeSpillDirName() {
@@ -134,7 +117,7 @@ std::string makeSpillDirName() {
     return name;
 }
 
-uint64_t generateShuffleSeed(StringData context = {}) {
+uint64_t generateShuffleSeed(std::string_view context = {}) {
     const auto seed = SecureRandom{}.nextUInt64();
     LOGV2(11974200,
           "Sorter long-running test shuffle seed",
@@ -145,7 +128,7 @@ uint64_t generateShuffleSeed(StringData context = {}) {
 
 std::vector<int> makeInputData(std::size_t length,
                                ShuffleMode shuffleMode = ShuffleMode::kShuffle,
-                               StringData context = {}) {
+                               std::string_view context = {}) {
     std::vector<int> keys(length);
     std::iota(keys.begin(), keys.end(), 0);
     if (shuffleMode == ShuffleMode::kShuffle) {
@@ -180,12 +163,12 @@ struct RangeCoverageExpectation {
 };
 
 RangeCoverageExpectation expectedRangeCoverageForAggressiveSpilling() {
-    const auto dataMemLimit = dataMemLimitFromTotal(kAggressiveSpillMemLimit);
+    constexpr auto iteratorSize = sizeof(FileIterator<IntWrapper, IntWrapper>);
+    const auto dataMemLimit = dataMemLimitFromTotal(kAggressiveSpillMemLimit, iteratorSize);
     const auto expectedNumRanges =
         std::max<std::size_t>(dataMemLimit / sorter::kSortedFileBufferSize, 2);
-    const auto maximumNumberOfIterators = std::max<std::size_t>(
-        (kAggressiveSpillMemLimit - dataMemLimit) / sizeof(FileIterator<IntWrapper, IntWrapper>),
-        1);
+    const auto maximumNumberOfIterators =
+        std::max<std::size_t>((kAggressiveSpillMemLimit - dataMemLimit) / iteratorSize, 1);
 
     const auto recordsPerRange = dataMemLimit / sizeof(IWPair) + 1;
     std::size_t documentsToAdd = kLargeNumberOfKeys;
@@ -281,26 +264,26 @@ void assertOutputMatches(IteratorHandle dataToValidate,
         const auto key = static_cast<int>(pair.first);
         const auto value = static_cast<int>(pair.second);
 
-        ASSERT_EQ(value, -key);
+        EXPECT_EQ(value, -key);
         if (prev) {
             if (direction == ASC) {
-                ASSERT_LTE(*prev, key);
+                EXPECT_LE(*prev, key);
             } else {
-                ASSERT_GTE(*prev, key);
+                EXPECT_GE(*prev, key);
             }
         }
         prev = key;
 
         auto it = expected.frequencies.find(key);
         ASSERT(it != expected.frequencies.end());
-        ASSERT_GT(it->second, 0U);
+        EXPECT_GT(it->second, 0U);
         if (--it->second == 0) {
             expected.frequencies.erase(it);
         }
         ++seen;
     }
 
-    ASSERT_EQ(seen, expected.count);
+    EXPECT_EQ(seen, expected.count);
     ASSERT(expected.frequencies.empty());
 }
 
@@ -310,15 +293,15 @@ void validateSortOutput(const std::shared_ptr<IWSorter>& sorter,
                         Direction direction) {
     auto expected = expectedOutputForLimit(input, opts, direction);
     assertOutputMatches(sorter->done(), std::move(expected), direction);
-    ASSERT_EQ(sorter->stats().numSorted(), input.size());
+    EXPECT_EQ(sorter->stats().numSorted(), input.size());
 }
 
 void assertPersistedRangeInfo(const std::shared_ptr<IWSorter>& sorter,
                               const SortOptions& opts,
                               const RangeCoverageExpectation& expected) {
     auto state = sorter->persistDataForShutdown();
-    ASSERT_EQ(state.ranges.size(), expected.numRanges);
-    ASSERT_EQ(sorter->stats().spilledRanges(), expected.spilledRanges);
+    EXPECT_EQ(state.ranges.size(), expected.numRanges);
+    EXPECT_EQ(sorter->stats().spilledRanges(), expected.spilledRanges);
 }
 
 template <typename Traits>
@@ -326,7 +309,7 @@ class SorterTypedTest : public ServiceContextMongoDTest {
 public:
     static_assert(test::StorageTraits<Traits>);
     // TODO (SERVER-116165): Remove.
-    RAIIServerParameterControllerForTest ffContainerWrites{"featureFlagContainerWrites", true};
+    unittest::ServerParameterGuard ffContainerWrites{"featureFlagContainerWrites", true};
 
 protected:
     void SetUp() override {
@@ -440,10 +423,10 @@ protected:
                 assertPersistedRangeInfo(mergedSorters[1], sortOpts, *expectedRangeCoverage);
             }
         }
-        ASSERT_EQ(expectedRangeCoverage.has_value(),
+        EXPECT_EQ(expectedRangeCoverage.has_value(),
                   !boost::filesystem::is_empty(spillDir().path()));
 #else
-        ASSERT_EQ(expectedRangeCoverage.has_value(),
+        EXPECT_EQ(expectedRangeCoverage.has_value(),
                   !boost::filesystem::is_empty(spillDir().path()));
 #endif
     }
@@ -454,10 +437,10 @@ private:
     boost::optional<Traits> _storage;
 };
 
-using SorterTypedTestTypes = ::testing::Types<FileTraits, ContainerTraits>;
+using SorterTypedTestTypes = ::testing::Types<FileTraits<>, ContainerTraits<>>;
 TYPED_TEST_SUITE(SorterTypedTest, SorterTypedTestTypes);
 
-using SorterFileTest = SorterTypedTest<FileTraits>;
+using SorterFileTest = SorterTypedTest<FileTraits<>>;
 
 template <typename TypeParam>
 class SorterTypedTestManualSpills : public SorterTypedTest<TypeParam> {
@@ -592,17 +575,17 @@ TEST_F(SortedFileWriterAndFileIteratorTests, SortedFileWriterAndFileIterator) {
 
     currentFileSize = appendToFile(opts, spillDir.path(), &sorterFileStats, currentFileSize, 5);
 
-    ASSERT_EQ(sorterFileStats.opened.load(), 1);
-    ASSERT_EQ(sorterFileStats.closed.load(), 1);
-    ASSERT_LTE(sorterTracker.bytesSpilled.load(), currentFileSize);
+    EXPECT_EQ(sorterFileStats.opened.load(), 1);
+    EXPECT_EQ(sorterFileStats.closed.load(), 1);
+    EXPECT_LE(sorterTracker.bytesSpilled.load(), currentFileSize);
 
     currentFileSize =
         appendToFile(opts, spillDir.path(), &sorterFileStats, currentFileSize, 10 * 1000 * 1000);
 
-    ASSERT_EQ(sorterFileStats.opened.load(), 2);
-    ASSERT_EQ(sorterFileStats.closed.load(), 2);
-    ASSERT_LTE(sorterTracker.bytesSpilled.load(), currentFileSize);
-    ASSERT_LTE(sorterFileStats.bytesSpilled(), currentFileSize);
+    EXPECT_EQ(sorterFileStats.opened.load(), 2);
+    EXPECT_EQ(sorterFileStats.closed.load(), 2);
+    EXPECT_LE(sorterTracker.bytesSpilled.load(), currentFileSize);
+    EXPECT_LE(sorterFileStats.bytesSpilled(), currentFileSize);
 
     ASSERT(boost::filesystem::is_empty(spillDir.path()));
 }

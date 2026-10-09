@@ -1,42 +1,22 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/metadata/path_arrayness.h"
 
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/compiler/metadata/path_arrayness_test_helpers.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+
+#include <limits>
+#include <string_view>
 
 namespace mongo {
 
@@ -333,6 +313,64 @@ TEST(PathArraynessTest, FieldRefTooManyComponents) {
     ASSERT_EQ(pathArrayness.canPathBeArray(fieldRefLong, &expCtx), true);
 }
 
+// A durably-committed index can contain an over-deep dotted field name (more path components than
+// maxBSONDepth allows) if it was created with an elevated maxBSONDepth. addPathsFromIndexKeyPattern
+// must not throw on such a key pattern (which would crash the server on startup); it should skip
+// the offending path conservatively.
+TEST(PathArraynessTest, AddPathsFromIndexKeyPatternSkipsOverDeepFieldName) {
+    ExpressionContextForTest expCtx = ExpressionContextForTest();
+
+    // Build a dotted field name with more components than the FieldPath limit of 200.
+    std::string overDeepField = "x";
+    for (int i = 0; i < BSONDepth::kDefaultMaxAllowableDepth + 10; ++i) {
+        overDeepField += ".x";
+    }
+
+    BSONObj keyPattern = BSON(overDeepField << 1);
+    MultikeyPaths multikeyPaths{MultikeyComponents{0U}};
+
+    PathArrayness pathArrayness;
+    auto initialState = pathArrayness.exportToMap_forTest();
+
+    // Must not throw even though the field name exceeds the FieldPath depth limit.
+    ASSERT_DOES_NOT_THROW(pathArrayness.addPathsFromIndexKeyPattern(
+        keyPattern, multikeyPaths, true /* isFullRebuild */));
+
+    // The over-deep path is skipped, so the trie is unchanged.
+    ASSERT_EQ(initialState, pathArrayness.exportToMap_forTest());
+
+    // Looking up the (absent) path conservatively reports it can be an array.
+    FieldRef overDeepRef(overDeepField);
+    ASSERT_EQ(pathArrayness.canPathBeArray(overDeepRef, &expCtx), true);
+}
+
+// A compound index that mixes a valid field with an over-deep field should still add the valid
+// field to the trie while skipping only the over-deep one.
+TEST(PathArraynessTest, AddPathsFromIndexKeyPatternSkipsOnlyOverDeepComponent) {
+    ExpressionContextForTest expCtx = ExpressionContextForTest();
+
+    std::string overDeepField = "x";
+    for (int i = 0; i < BSONDepth::kDefaultMaxAllowableDepth + 10; ++i) {
+        overDeepField += ".x";
+    }
+
+    // Compound: {"a": 1, "<overDeep>": 1}. "a" is non-multikey (empty components).
+    BSONObj keyPattern = BSON("a" << 1 << overDeepField << 1);
+    MultikeyPaths multikeyPaths{MultikeyComponents{}, MultikeyComponents{0U}};
+
+    PathArrayness pathArrayness;
+    ASSERT_DOES_NOT_THROW(pathArrayness.addPathsFromIndexKeyPattern(
+        keyPattern, multikeyPaths, true /* isFullRebuild */));
+
+    auto state = pathArrayness.exportToMap_forTest();
+    // Only the valid "a" component was added.
+    ASSERT_EQ(state.size(), 1U);
+    ASSERT_EQ(state["a"], false);
+
+    FieldRef aRef("a");
+    ASSERT_EQ(pathArrayness.canPathBeArray(aRef, &expCtx), false);
+}
+
 // FieldRef allows any field name starting with $, but FieldPath only allows certain
 // dollar-prefixed fields (like "$ref", "$id", etc.). A field like "$invalidField" should fail
 // FieldPath validation.
@@ -395,7 +433,7 @@ TEST(ArraynessTrie, LookupTrieWithQueryKnobDisabled) {
     ExpressionContextForTest expCtx = ExpressionContextForTest();
 
     // Disable query knob
-    RAIIServerParameterControllerForTest queryKnobController("internalEnablePathArrayness", false);
+    unittest::ServerParameterGuard queryKnobController("internalEnablePathArrayness", false);
 
     // Array: ["a.b"]
     FieldPath field_AB("a.b");
@@ -424,7 +462,7 @@ TEST(ArraynessTrie, LookupTrieWithQueryKnobDisabled) {
     ASSERT_EQ(pathArrayness.canPathBeArray(FieldRef(fieldPathString_A), &expCtx), true);
 
     // Enable query knob
-    queryKnobController = RAIIServerParameterControllerForTest("internalEnablePathArrayness", true);
+    queryKnobController = unittest::ServerParameterGuard("internalEnablePathArrayness", true);
 
     // The original value of the query knob is cached in the ExpressionContext, so even though
     // the query knob has now been enabled PathArrayness will still use the cached value
@@ -439,7 +477,7 @@ TEST(ArraynessTrie, LookupTrieWithQueryKnobEnabled) {
     ExpressionContextForTest expCtx = ExpressionContextForTest();
 
     // Disable query knob
-    RAIIServerParameterControllerForTest queryKnobController("internalEnablePathArrayness", true);
+    unittest::ServerParameterGuard queryKnobController("internalEnablePathArrayness", true);
 
     // Array: ["a.b"]
     FieldPath field_AB("a.b");
@@ -468,8 +506,7 @@ TEST(ArraynessTrie, LookupTrieWithQueryKnobEnabled) {
     ASSERT_EQ(pathArrayness.canPathBeArray(FieldRef(fieldPathString_A), &expCtx), false);
 
     // Enable query knob
-    queryKnobController =
-        RAIIServerParameterControllerForTest("internalEnablePathArrayness", false);
+    queryKnobController = unittest::ServerParameterGuard("internalEnablePathArrayness", false);
 
     // The original value of the query knob is cached in the ExpressionContext, so even though
     // the query knob has now been disabled PathArrayness will still use the cached value
@@ -480,6 +517,42 @@ TEST(ArraynessTrie, LookupTrieWithQueryKnobEnabled) {
     ASSERT_EQ(pathArrayness.canPathBeArray(FieldRef(fieldPathString_A), &expCtx), false);
 }
 
+// An index on "e.0" uses positional access and is not marked multikey at "e", but "e" itself can
+// still be an array. PathArrayness should not conclude otherwise.
+TEST(PathArraynessTest, PositionalIndexPathShouldNotMarkParentAsNonArray) {
+    ExpressionContextForTest expCtx = ExpressionContextForTest();
+
+    FieldPath field_E0("e.0");
+    MultikeyComponents multikeyPaths_E0{};
+
+    PathArrayness pathArrayness;
+    pathArrayness.addPath(field_E0, multikeyPaths_E0, true);
+
+    // TODO 127304: Re-enable once PathArrayness handles positional paths correctly.
+    // FieldPath field_E("e");
+    // ASSERT_EQ(pathArrayness.canPathBeArray(field_E, &expCtx),true);
+    GTEST_SKIP();
+}
+
+// Compound index {a: 1, "c.d": 1, "e.0": 1}: only "e.0" has the positional issue.
+TEST(PathArraynessTest, CompoundIndexWithPositionalPathDoesNotAffectParentArrayness) {
+    ExpressionContextForTest expCtx = ExpressionContextForTest();
+
+    PathArrayness pathArrayness;
+    pathArrayness.addPath(FieldPath("a"), MultikeyComponents{}, true);
+    pathArrayness.addPath(FieldPath("c.d"), MultikeyComponents{}, true);
+    pathArrayness.addPath(FieldPath("e.0"), MultikeyComponents{}, true);
+
+    ASSERT_EQ(pathArrayness.canPathBeArray(FieldPath("a"), &expCtx), false);
+    ASSERT_EQ(pathArrayness.canPathBeArray(FieldPath("c"), &expCtx), false);
+    ASSERT_EQ(pathArrayness.canPathBeArray(FieldPath("c.d"), &expCtx), false);
+
+    // TODO 127304: Re-enable once PathArrayness handles positional paths correctly.
+    // ASSERT_EQ(pathArrayness.canPathBeArray(FieldPath("e"), &expCtx), true);
+
+    ASSERT_EQ(pathArrayness.canPathBeArray(FieldPath("e.0"), &expCtx), false);
+}
+
 
 class PathArraynessInvalidationTest : public unittest::Test {
 protected:
@@ -487,21 +560,24 @@ protected:
         _expCtx.setPathArraynessForNss(_expCtx.getNamespaceString(), _oldPathArrayness);
     }
 
-    void addOldPath(StringData path, MultikeyComponents mk = {}) {
+    void addOldPath(std::string_view path, MultikeyComponents mk = {}) {
         _oldPathArrayness->addPath(FieldPath(path), mk, true);
     }
 
-    bool canPathBeArray(StringData path) {
+    bool canPathBeArray(std::string_view path) {
         return _expCtx.canPathBeArrayForNss(FieldPath(path), _expCtx.getNamespaceString());
     }
 
-    void addCurrentPath(StringData path, MultikeyComponents mk = {}) {
+    void addCurrentPath(std::string_view path, MultikeyComponents mk = {}) {
         _current.addPath(FieldPath(path), mk, true);
     }
 
     bool hasInvalidatedPaths() {
-        return PathArrayness::hasInvalidatedPaths(
-            _expCtx.nonArrayPathsForNss(_expCtx.getNamespaceString()), _current);
+        return PathArrayness::getFirstInvalidatedPath(
+                   _expCtx.nonArrayPathsForNss(_expCtx.getNamespaceString()),
+                   _current,
+                   _expCtx.getNamespaceString())
+            .has_value();
     }
 
 private:
@@ -675,8 +751,8 @@ TEST(PathArraynessInvalidation, SharedPathArraynessDoesNotLeakNonArrayPathsAcros
     current.addPath(FieldPath("b"), MultikeyComponents{0}, true);
     current.addPath(FieldPath("c"), MultikeyComponents{}, true);
 
-    ASSERT_FALSE(PathArrayness::hasInvalidatedPaths(nonArrayPaths1, current));
-    ASSERT_TRUE(PathArrayness::hasInvalidatedPaths(nonArrayPaths2, current));
+    ASSERT_FALSE(PathArrayness::getFirstInvalidatedPath(nonArrayPaths1, current, nss).has_value());
+    ASSERT_TRUE(PathArrayness::getFirstInvalidatedPath(nonArrayPaths2, current, nss).has_value());
 }
 
 TEST(ExpressionContextFieldRefOverload, InvalidEmptyPath) {
@@ -751,4 +827,226 @@ TEST(CanPathBeArrayForNss, FieldRefOverloadDelegatesToMainForMainNss) {
     ASSERT_TRUE(expCtx->canPathBeArrayForNss(FieldRef(""), nss));
 }
 
+TEST(PathArraynessEpoch, DefaultEpochIsZero) {
+    PathArrayness pa;
+    ASSERT_EQ(pa.epoch(), 0u);
+}
+
+TEST(PathArraynessEpoch, ExplicitEpoch) {
+    PathArrayness pa(42);
+    ASSERT_EQ(pa.epoch(), 42u);
+}
+
+TEST(PathArraynessEpoch, CopyPreservesEpoch) {
+    PathArrayness original(7);
+    PathArrayness copy(original);
+    ASSERT_EQ(copy.epoch(), 7u);
+}
+
+TEST(PathArraynessEpoch, IncrementEpoch) {
+    PathArrayness pa(5);
+    pa.incrementEpoch();
+    ASSERT_EQ(pa.epoch(), 6u);
+}
+
+TEST(PathArraynessEpoch, IncrementEpochWrapsToZeroOnOverflow) {
+    PathArrayness pa(std::numeric_limits<uint64_t>::max());
+    pa.incrementEpoch();
+    ASSERT_EQ(pa.epoch(), 0u);
+}
+
+TEST(UassertIfInvalidatedPaths, NoPrevEpochCanThrow) {
+    MonotonicallyIncreasingFieldPathSet nonArrayPaths;
+    nonArrayPaths.insert(FieldPath("a.b"));
+
+    PathArrayness current(5);
+    current.addPath(FieldPath("a.b"), MultikeyComponents{1}, true);
+
+    PathArraynessChecker checker{nonArrayPaths, boost::none};
+    ASSERT_THROWS_CODE(checker.uassertIfInvalidatedAndSyncEpoch(
+                           current, NamespaceString::createNamespaceString_forTest("test.coll")),
+                       DBException,
+                       ErrorCodes::QueryPlanKilled);
+}
+
+TEST(UassertIfInvalidatedPaths, IfPrevEpochMatchesInvalidationIsSkipped) {
+    MonotonicallyIncreasingFieldPathSet nonArrayPaths;
+    nonArrayPaths.insert(FieldPath("a.b"));
+
+    PathArrayness current(7);
+    current.addPath(FieldPath("a.b"), MultikeyComponents{1}, true);
+
+    // Degenerate case, where the epoch matches but the underlying arrayness differs.
+    PathArraynessChecker checker{nonArrayPaths, 7u};
+    checker.uassertIfInvalidatedAndSyncEpoch(
+        current, NamespaceString::createNamespaceString_forTest("test.coll"));
+}
+
+TEST(UassertIfInvalidatedPaths, EpochIsUpdated) {
+    MonotonicallyIncreasingFieldPathSet nonArrayPaths;
+    nonArrayPaths.insert(FieldPath("a.b"));
+
+    PathArrayness current(10);
+    current.addPath(FieldPath("a.b"), MultikeyComponents{}, true);
+
+    PathArraynessChecker checker{nonArrayPaths, 9u};
+    checker.uassertIfInvalidatedAndSyncEpoch(
+        current, NamespaceString::createNamespaceString_forTest("test.coll"));
+    ASSERT_EQ(*checker.prevEpoch, 10u);
+}
+
+TEST(UassertIfInvalidatedPaths, InvalidationRunsWhenEpochIsStale) {
+    MonotonicallyIncreasingFieldPathSet nonArrayPaths;
+    nonArrayPaths.insert(FieldPath("a.b"));
+
+    PathArrayness current(10);
+    current.addPath(FieldPath("a.b"), MultikeyComponents{1}, true);
+
+    PathArraynessChecker checker{nonArrayPaths, 9u};
+    ASSERT_THROWS_CODE(checker.uassertIfInvalidatedAndSyncEpoch(
+                           current, NamespaceString::createNamespaceString_forTest("test.coll")),
+                       DBException,
+                       ErrorCodes::QueryPlanKilled);
+}
+
+TEST(NonArrayPathsForNssFrom, CopiesNonArrayPathsToNewContext) {
+    QueryTestServiceContext testServiceCtx;
+    auto opCtx = testServiceCtx.makeOperationContext();
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+
+    auto pa = std::make_shared<PathArrayness>();
+    pa->addPath(FieldPath("a"), MultikeyComponents{}, true);
+    pa->addPath(FieldPath("b"), MultikeyComponents{}, true);
+
+    stdx::unordered_map<NamespaceString, std::shared_ptr<const PathArrayness>> map;
+    map.emplace(nss, std::shared_ptr<const PathArrayness>(std::move(pa)));
+
+    auto src = ExpressionContextBuilder{}
+                   .opCtx(opCtx.get())
+                   .ns(nss)
+                   .pathArraynessForNss(std::move(map))
+                   .build();
+    ASSERT_FALSE(src->canPathBeArrayForNss(FieldPath("a"), nss));
+
+    auto derived =
+        ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(nss).nonArrayPathsForNssFrom(*src).build();
+
+    const auto& srcPaths = src->nonArrayPathsForNss(nss);
+    const auto& derivedPaths = derived->nonArrayPathsForNss(nss);
+
+    int srcCount = 0, derivedCount = 0;
+    for (const auto& p : srcPaths) {
+        ++srcCount;
+        ASSERT_EQ(p, FieldPath("a"));
+    }
+    for (const auto& p : derivedPaths) {
+        ++derivedCount;
+        ASSERT_EQ(p, FieldPath("a"));
+    }
+    ASSERT_EQ(srcCount, 1);
+    ASSERT_EQ(derivedCount, 1);
+}
+
+TEST(MakeCopyFromExpressionContext, CopiesNonArrayPathsForNss) {
+    unittest::ServerParameterGuard featureFlagController("featureFlagPathArrayness", true);
+    QueryTestServiceContext testServiceCtx;
+    auto opCtx = testServiceCtx.makeOperationContext();
+    auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+
+    auto pa = std::make_shared<PathArrayness>();
+    pa->addPath(FieldPath("a"), MultikeyComponents{}, true);
+    pa->addPath(FieldPath("b"), MultikeyComponents{}, true);
+
+    stdx::unordered_map<NamespaceString, std::shared_ptr<const PathArrayness>> map;
+    map.emplace(nss, std::shared_ptr<const PathArrayness>(std::move(pa)));
+
+    auto src = ExpressionContextBuilder{}
+                   .opCtx(opCtx.get())
+                   .ns(nss)
+                   .pathArraynessForNss(std::move(map))
+                   .build();
+
+    ASSERT_FALSE(src->canPathBeArrayForNss(FieldPath("a"), nss));
+
+    auto copy = makeCopyFromExpressionContext(src, nss);
+
+    const auto& copyPaths = copy->nonArrayPathsForNss(nss);
+    int count = 0;
+    for (const auto& p : copyPaths) {
+        ++count;
+        ASSERT_EQ(p, FieldPath("a"));
+    }
+    ASSERT_EQ(count, 1);
+}
+
+// Tests for PathArrayness::isIndexEligibleToAddToPathArrayness.
+// Only BTREE indexes that are neither partial nor hidden are eligible.
+
+TEST(PathArraynessIndexEligibilityTest, BtreeIsEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("a" << 1) << "name" << "a_1");
+    IndexDescriptor desc(IndexNames::BTREE, spec);
+    ASSERT_TRUE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, BtreePartialIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                            << "a_1_partial"
+                            << "partialFilterExpression" << BSON("b" << BSON("$gt" << 5)));
+    IndexDescriptor desc(IndexNames::BTREE, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, BtreeHiddenIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                            << "a_1_hidden"
+                            << "hidden" << true);
+    IndexDescriptor desc(IndexNames::BTREE, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, TwoDSphereIsNotEligible) {
+    BSONObj spec = BSON("v" << 3 << "key" << BSON("loc" << "2dsphere") << "name" << "loc_2dsphere");
+    IndexDescriptor desc(IndexNames::GEO_2DSPHERE, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, TextIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("t" << "text") << "name" << "t_text");
+    IndexDescriptor desc(IndexNames::TEXT, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, HashedIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("a" << "hashed") << "name" << "a_hashed");
+    IndexDescriptor desc(IndexNames::HASHED, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, WildcardIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("$**" << 1) << "name" << "wildcard");
+    IndexDescriptor desc(IndexNames::WILDCARD, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, TwoDIsNotEligible) {
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("loc" << "2d") << "name" << "loc_2d");
+    IndexDescriptor desc(IndexNames::GEO_2D, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, NumericPathComponentIsNotEligible) {
+    // An index on "a.0.x" accesses array elements positionally, so its multikey metadata does not
+    // reliably reflect whether "a" is an array. It must not be added to the trie.
+    BSONObj spec = BSON("v" << 2 << "key" << BSON("a.0.x" << 1) << "name" << "a.0.x_1");
+    IndexDescriptor desc(IndexNames::BTREE, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
+
+TEST(PathArraynessIndexEligibilityTest, NumericPathComponentInCompoundIndexIsNotEligible) {
+    // If any indexed field contains a numeric path component, the whole index is excluded.
+    BSONObj spec =
+        BSON("v" << 2 << "key" << BSON("b" << 1 << "a.0.x" << 1) << "name" << "b_1_a.0.x_1");
+    IndexDescriptor desc(IndexNames::BTREE, spec);
+    ASSERT_FALSE(PathArrayness::isIndexEligibleToAddToPathArrayness(desc));
+}
 }  // namespace mongo

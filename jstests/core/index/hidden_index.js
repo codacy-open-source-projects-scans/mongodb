@@ -3,6 +3,7 @@
  * it will not be used in planning. It is handled in the same way as other indexes by the index
  * catalog and for TTL purposes.
  * @tags: [
+ *   uses_explain,
  *   # CollMod is not retryable.
  *   requires_non_retryable_commands,
  *   not_allowed_with_signed_security_token,
@@ -23,17 +24,30 @@ function numOfUsedIndexes(explain) {
     return getNumberOfIndexScans(explain);
 }
 
-function validateHiddenIndexBehaviour({query = {}, projection = {}, index_type = 1, wildcard = false}) {
+function validateHiddenIndexBehaviour({
+    query = {},
+    projection = {},
+    index_type = 1,
+    wildcard = false,
+}) {
     let index_name;
     if (wildcard) index_name = "a.$**_" + index_type;
     else index_name = "a_" + index_type;
 
     if (wildcard)
         assert.commandWorked(
-            coll.createIndex({"a.$**": index_type}, add2dsphereVersionIfNeededForSpec({"a.$**": index_type})),
+            coll.createIndex(
+                {"a.$**": index_type},
+                add2dsphereVersionIfNeededForSpec({"a.$**": index_type}),
+            ),
         );
     else
-        assert.commandWorked(coll.createIndex({"a": index_type}, add2dsphereVersionIfNeededForSpec({"a": index_type})));
+        assert.commandWorked(
+            coll.createIndex(
+                {"a": index_type},
+                add2dsphereVersionIfNeededForSpec({"a": index_type}),
+            ),
+        );
 
     let idxSpec = IndexCatalogHelpers.findByName(coll.getIndexes(), index_name);
     assert.eq(idxSpec.hidden, undefined);
@@ -74,7 +88,10 @@ function validateHiddenIndexBehaviour({query = {}, projection = {}, index_type =
         );
     else
         assert.commandWorked(
-            coll.createIndex({"a": index_type}, add2dsphereVersionIfNeededForSpec({"a": index_type}, {hidden: true})),
+            coll.createIndex(
+                {"a": index_type},
+                add2dsphereVersionIfNeededForSpec({"a": index_type}, {hidden: true}),
+            ),
         );
 
     idxSpec = IndexCatalogHelpers.findByName(coll.getIndexes(), index_name);
@@ -131,7 +148,7 @@ validateHiddenIndexBehaviour({query: {$text: {$search: "java"}}, index_type: "te
 validateHiddenIndexBehaviour({query: {"a.f": 1}, index_type: 1, wildcard: true});
 
 // Hidden index on capped collection.
-if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
+if (!FixtureHelpers.isMongos(db)) {
     coll = assertDropAndRecreateCollection(db, collName, {capped: true, size: 100});
     validateHiddenIndexBehaviour({query: {a: 1}, index_type: 1});
     coll = assertDropAndRecreateCollection(db, collName);
@@ -178,7 +195,9 @@ assert.eq(idxSpec.expireAfterSeconds, 1);
 //
 // Ensure that "hidden: false" won't be added to index specification.
 //
-assert.commandWorked(db.runCommand({createIndexes: collName, indexes: [{key: {y: 1}, name: "y", hidden: false}]}));
+assert.commandWorked(
+    db.runCommand({createIndexes: collName, indexes: [{key: {y: 1}, name: "y", hidden: false}]}),
+);
 idxSpec = IndexCatalogHelpers.findByName(coll.getIndexes(), "y");
 assert.eq(idxSpec.hidden, undefined);
 

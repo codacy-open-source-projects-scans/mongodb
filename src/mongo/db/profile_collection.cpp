@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/profile_collection.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
@@ -42,7 +15,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
-#include "mongo/db/query/util/deferred.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/util/throughput_gauge.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -70,8 +43,8 @@
 #include "mongo/util/time_support.h"
 
 #include <memory>
-#include <queue>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -83,11 +56,12 @@
 namespace mongo::profile_collection {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(forceLockTimeoutForProfiler);
 
-AtomicWord<int64_t> profilerWritesTotal{0};
-AtomicWord<int64_t> profilerWritesActive{0};
+Atomic<int64_t> profilerWritesTotal{0};
+Atomic<int64_t> profilerWritesActive{0};
 
 // Under heavy load we will choose to abandon and drop profile writes to preserve availability.
 // The observability tool shouldn't cause an availability problem. This metric serves to capture
@@ -96,19 +70,18 @@ AtomicWord<int64_t> profilerWritesActive{0};
 // smoothly.
 struct AbandonedWriteMetrics {
     ThroughputGauge throughputGauge;
-    AtomicWord<Date_t> tsDisabled;
 };
 
 ConcurrentSharedValuesMap<DatabaseName, AbandonedWriteMetrics> profilerAbandonmentMetrics;
 
 // Track some overall counters to report in serverStatus. Reporting a map by dbName is potentially
 // too large for serverStatus.
-AtomicWord<int64_t> profilerWritesAbandondedGlobally{0};
+Atomic<int64_t> profilerWritesAbandonedGlobally{0};
 
 // Please note that this counter will not ever reset/decrease, but writes to the profiler can be
 // re-activated by raising the cap. If the cap is raised and then hit again, this counter will
 // double-increment for the same db.
-AtomicWord<int64_t> dbsPastThreshold{0};
+Atomic<int64_t> dbsPastThreshold{0};
 
 static const auto profilerDisabledWarningString =
     "The profiler in this db has been automatically disabled due to server load. This tool is "
@@ -136,7 +109,7 @@ public:
         BSONObjBuilder bob;
         bob.append("totalWrites", profilerWritesTotal.loadRelaxed());
         bob.append("activeWriters", profilerWritesActive.loadRelaxed());
-        bob.append("totalAbandonedWrites", profilerWritesAbandondedGlobally.loadRelaxed());
+        bob.append("totalAbandonedWrites", profilerWritesAbandonedGlobally.loadRelaxed());
         bob.append("dbsPastThreshold", dbsPastThreshold.loadRelaxed());
         return bob.obj();
     }
@@ -188,7 +161,7 @@ BSONObj encodeProfileSettings(const ProfileSettings& dbProfileSettings) {
     if (dbProfileSettings.filter) {
         settingsBuilder.append("filter", dbProfileSettings.filter->serialize());
     } else {
-        settingsBuilder.append("filter", "unset"_sd);
+        settingsBuilder.append("filter", "unset"sv);
     }
 
     return settingsBuilder.obj();
@@ -223,10 +196,12 @@ void doProfile(auto opCtx,
 
     boost::optional<CollectionAcquisition> profileCollection;
     while (true) {
-        const auto deadline = std::visit(
-            OverloadedVisitor{[&](const NoTimeoutTag&) { return Date_t::max(); },
-                              [&](const Milliseconds& millis) { return Date_t::now() + millis; }},
-            lockTimeout);
+        const auto deadline =
+            std::visit(OverloadedVisitor{[&](const NoTimeoutTag&) { return Date_t::max(); },
+                                         [&](const Milliseconds& millis) {
+                                             return Date_t::now() + millis;
+                                         }},
+                       lockTimeout);
 
         profileCollection.emplace(acquireCollection(
             newCtx.get(),
@@ -278,8 +253,8 @@ void doProfile(auto opCtx,
  * load. Let's log when this happens, but not every time.
  */
 bool noteThereWasAnAbandonedWrite(auto opCtx, const auto& abandonmentMetrics) {
-    abandonmentMetrics->throughputGauge.recordEvent(Date_t::now());
-    profilerWritesAbandondedGlobally.fetchAndAddRelaxed(1);
+    abandonmentMetrics->throughputGauge.recordEvent(opCtx->fastClockSource().now());
+    profilerWritesAbandonedGlobally.fetchAndAddRelaxed(1);
     static Rarely sampler;
     if (sampler.tick()) {
         // Every once and a while (Rarely's frequency), log the event.
@@ -379,7 +354,6 @@ void profile(OperationContext* opCtx, NetworkOp op) {
     const auto nAbandonedInLastSecond =
         abandonmentMetrics->throughputGauge.nEventsInPreviousSecond(now);
     if (profilingHasBecomeProblematic(opCtx, now, nAbandonedInLastSecond)) {
-
         disableProblematicProfiling(opCtx, nss, now, abandonmentMetrics, nAbandonedInLastSecond);
     }
 }

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/scripting/mozjs/common/valuereader.h"
@@ -59,6 +33,8 @@
 #include <iosfwd>
 
 #if !defined(MONGO_MOZJS_WASI_BUILD)
+#include <string_view>
+
 #include <jscustomallocator.h>
 #endif
 
@@ -112,7 +88,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
                     LOGV2_WARNING(23826, "CodeWScope doesn't transfer to db.eval");
 #endif
                 runtime->newFunction(
-                    StringData(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1), _value);
+                    std::string_view(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1), _value);
             }
             return;
         case BSONType::symbol:
@@ -167,7 +143,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             int len;
             const char* data = elem.binData(len);
             std::stringstream ss;
-            base64::encode(ss, StringData(data, len));
+            base64::encode(ss, std::string_view(data, len));
 
             JS::RootedValueArray<2> args(_context);
 
@@ -236,6 +212,22 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
     _value.setUndefined();
 }
 
+void ValueReader::fromBSONElementUnowned(const BSONElement& elem, bool readOnly) {
+    switch (elem.type()) {
+        case BSONType::array:
+            fromBSONArray(elem.embeddedObject(), nullptr, readOnly);
+            return;
+        case BSONType::object:
+            fromBSON(elem.embeddedObject(), nullptr, readOnly);
+            return;
+        default:
+            // For all non-object types (scalars, OIDs, dates, etc.) no BSONHolder is
+            // created, so parent ownership is irrelevant — delegate to the regular path.
+            fromBSONElement(elem, BSONObj::kEmptyObject, readOnly);
+            return;
+    }
+}
+
 void ValueReader::fromBSON(const BSONObj& obj, const BSONObj* parent, bool readOnly) {
     JS::RootedObject child(_context);
 
@@ -287,7 +279,7 @@ void ValueReader::fromBSONArray(const BSONObj& obj, const BSONObj* parent, bool 
  * Basically, we have to use their routines to convert to utf16, then assign
  * those bytes with JS_NewUCStringCopyN
  */
-void ValueReader::fromStringData(StringData sd) {
+void ValueReader::fromStringData(std::string_view sd) {
     size_t utf16Len;
 
     // TODO SERVER-122825: we have tests that involve dropping garbage in. Do we want to throw, or

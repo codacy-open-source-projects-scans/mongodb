@@ -67,8 +67,14 @@ function dropSessionsCollection(mainConn, priConn, configConn) {
         );
         configConn.getDB("config").getCollection("system.sessions").drop();
         priConn.getDB("config").getCollection("system.sessions").drop();
-        assert.commandWorked(configConn.adminCommand({_flushRoutingTableCacheUpdates: "config.system.sessions"}));
-        assert.commandWorked(priConn.adminCommand({_flushRoutingTableCacheUpdates: "config.system.sessions"}));
+        if (!FeatureFlagUtil.isPresentAndEnabled(priConn, "AuthoritativeShardsCRUD")) {
+            assert.commandWorked(
+                configConn.adminCommand({_flushRoutingTableCacheUpdates: "config.system.sessions"}),
+            );
+            assert.commandWorked(
+                priConn.adminCommand({_flushRoutingTableCacheUpdates: "config.system.sessions"}),
+            );
+        }
     }
 }
 
@@ -95,7 +101,13 @@ function verifyServerStatusFields(serverStatusResponse) {
     );
 }
 
-function verifyServerStatusChanges(initialStats, newStats, newCommands, newStatements, newCollectionWrites) {
+function verifyServerStatusChanges(
+    initialStats,
+    newStats,
+    newCommands,
+    newStatements,
+    newCollectionWrites,
+) {
     assert.eq(
         initialStats.retriedCommandsCount + newCommands,
         newStats.retriedCommandsCount,
@@ -134,8 +146,27 @@ function handleSessionsCollection(mainConn, priConn, configConn) {
         // When shard authoritative collection metadata is enabled, the create coordinator commits
         // metadata to the shard catalog via a retryable write (_shardsvrCommitCreateCollection
         // Metadata), adding another write to config.transactions on the shard.
-        if (FeatureFlagUtil.isPresentAndEnabled(priConn, "ShardAuthoritativeCollMetadata")) {
+        if (FeatureFlagUtil.isPresentAndEnabled(priConn, "AuthoritativeShardsDDL")) {
             extraCollectionWrites += 1;
+
+            // When the collection is committed with chunk operations disallowed, the coordinator
+            // performs one (or two) additional retryable writes to re-enable them once the
+            // critical section has been released:
+            // - _shardsvrSetAllowChunkOperations.
+            // - If the shard is a config shard, _configsvrSetAllowChunkOperations as well.
+            //
+            // TODO (SERVER-133881): remove the `if` and make the body unconditional.
+            if (
+                FeatureFlagUtil.isPresentAndEnabled(
+                    priConn,
+                    "CreateRenameNewSetAllowChunkOperationsBehavior",
+                )
+            ) {
+                extraCollectionWrites += 1;
+                if (TestData.configShard) {
+                    extraCollectionWrites += 1;
+                }
+            }
         }
     }
     return extraCollectionWrites;
@@ -466,7 +497,9 @@ function runFailpointTests(mainConn, priConn) {
 
     // Test connection close (default behaviour). The connection will get closed, but the
     // inserts must succeed
-    assert.commandWorked(priConn.adminCommand({configureFailPoint: "onPrimaryTransactionalWrite", mode: "alwaysOn"}));
+    assert.commandWorked(
+        priConn.adminCommand({configureFailPoint: "onPrimaryTransactionalWrite", mode: "alwaysOn"}),
+    );
 
     try {
         // Set skipRetryOnNetworkError so the shell doesn't automatically retry, since the
@@ -529,7 +562,9 @@ function runFailpointTests(mainConn, priConn) {
     assert.eq(1, writeResult.writeErrors[0].index);
     assert.eq(ErrorCodes.InternalError, writeResult.writeErrors[0].code);
 
-    assert.commandWorked(priConn.adminCommand({configureFailPoint: "onPrimaryTransactionalWrite", mode: "off"}));
+    assert.commandWorked(
+        priConn.adminCommand({configureFailPoint: "onPrimaryTransactionalWrite", mode: "off"}),
+    );
 
     writeResult = testDb.runCommand(cmd);
     assert.eq(2, writeResult.nModified);
@@ -564,7 +599,10 @@ function runRetryableWriteErrorTest(mainConn) {
         txnNumber: NumberLong(1),
     });
     assert.commandFailedWithCode(writeResult, ErrorCodes.TransactionTooOld);
-    assert(writeResult.errmsg.includes("Retryable write with txnNumber 1 is prohibited"), writeResult);
+    assert(
+        writeResult.errmsg.includes("Retryable write with txnNumber 1 is prohibited"),
+        writeResult,
+    );
 }
 
 function runMultiTests(mainConn) {
@@ -584,16 +622,24 @@ function runMultiTests(mainConn) {
         txnNumber: NumberLong(1),
     };
     let res = assert.commandWorkedIgnoringWriteErrors(testDb.runCommand(cmd));
-    assert.eq(1, res.writeErrors.length, "expected only one write error, received: " + tojson(res.writeErrors));
+    assert.eq(
+        1,
+        res.writeErrors.length,
+        "expected only one write error, received: " + tojson(res.writeErrors),
+    );
     assert.eq(
         1,
         res.writeErrors[0].index,
-        "expected the update at index 1 to fail, not the update at index: " + res.writeErrors[0].index,
+        "expected the update at index 1 to fail, not the update at index: " +
+            res.writeErrors[0].index,
     );
     assert.eq(
         ErrorCodes.InvalidOptions,
         res.writeErrors[0].code,
-        "expected to fail with code " + ErrorCodes.InvalidOptions + ", received: " + res.writeErrors[0].code,
+        "expected to fail with code " +
+            ErrorCodes.InvalidOptions +
+            ", received: " +
+            res.writeErrors[0].code,
     );
 
     // Only the delete statements with limit=0 in a batch fail.
@@ -608,16 +654,24 @@ function runMultiTests(mainConn) {
         txnNumber: NumberLong(1),
     };
     res = assert.commandWorkedIgnoringWriteErrors(testDb.runCommand(cmd));
-    assert.eq(1, res.writeErrors.length, "expected only one write error, received: " + tojson(res.writeErrors));
+    assert.eq(
+        1,
+        res.writeErrors.length,
+        "expected only one write error, received: " + tojson(res.writeErrors),
+    );
     assert.eq(
         1,
         res.writeErrors[0].index,
-        "expected the delete at index 1 to fail, not the delete at index: " + res.writeErrors[0].index,
+        "expected the delete at index 1 to fail, not the delete at index: " +
+            res.writeErrors[0].index,
     );
     assert.eq(
         ErrorCodes.InvalidOptions,
         res.writeErrors[0].code,
-        "expected to fail with code " + ErrorCodes.InvalidOptions + ", received: " + res.writeErrors[0].code,
+        "expected to fail with code " +
+            ErrorCodes.InvalidOptions +
+            ", received: " +
+            res.writeErrors[0].code,
     );
 }
 

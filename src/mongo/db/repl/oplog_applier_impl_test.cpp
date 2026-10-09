@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog_applier_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -86,7 +59,6 @@
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/database_holder.h"
@@ -102,8 +74,9 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -123,9 +96,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <ostream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/cstdint.hpp>
@@ -135,6 +110,7 @@
 namespace mongo {
 namespace repl {
 namespace {
+using namespace std::literals::string_view_literals;
 
 CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const NamespaceString& nss) {
     return acquireCollection(
@@ -184,9 +160,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
         NamespaceString::createNamespaceString_forTest(boost::none, "test.t");
     NamespaceString otherNss = NamespaceString::createNamespaceString_forTest("test.othername");
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, {});
-    int prevDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    int prevDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
-    auto postDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    auto postDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     ASSERT_EQ(1, postDeleteFromMissing - prevDeleteFromMissing);
 
     ASSERT_EQ(postDeleteFromMissing,
@@ -225,9 +201,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
     NamespaceString otherNss =
         NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, kUuid);
-    int prevDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    int prevDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
-    auto postDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    auto postDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     ASSERT_EQ(1, postDeleteFromMissing - prevDeleteFromMissing);
 
     ASSERT_EQ(postDeleteFromMissing,
@@ -271,10 +247,10 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
     // which in the case of this test just ignores such errors. This tests mostly that we don't
     // implicitly create the collection.
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
-    int prevDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    int prevDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
     ASSERT_FALSE(collectionExists(_opCtx.get(), nss));
-    auto postDeleteFromMissing = replOpCounters().getDeleteFromMissingNamespace()->load();
+    auto postDeleteFromMissing = replOpCounters().deletesFromMissingNamespace->value();
     ASSERT_EQ(1, postDeleteFromMissing - prevDeleteFromMissing);
 
     ASSERT_EQ(postDeleteFromMissing,
@@ -309,9 +285,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     repl::createCollection(_opCtx.get(), nss, {});
     auto op = makeOplogEntry(OpTypeEnum::kDelete, nss, {});
-    int prevDeleteWasEmpty = replOpCounters().getDeleteWasEmpty()->load();
+    int prevDeleteWasEmpty = replOpCounters().deletesWasEmpty->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
-    auto postDeleteWasEmpty = replOpCounters().getDeleteWasEmpty()->load();
+    auto postDeleteWasEmpty = replOpCounters().deletesWasEmpty->value();
     ASSERT_EQ(1, postDeleteWasEmpty - prevDeleteWasEmpty);
 
     ASSERT_EQ(postDeleteWasEmpty,
@@ -350,9 +326,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
     auto uuid = createCollectionWithUuid(_opCtx.get(), nss);
     ASSERT_OK(getStorageInterface()->insertDocument(_opCtx.get(), nss, {BSON("_id" << 0)}, 0));
     auto op = makeOplogEntry(OpTypeEnum::kInsert, nss, uuid);
-    int prevInsertOnExistingDoc = replOpCounters().getInsertOnExistingDoc()->load();
+    int prevInsertOnExistingDoc = replOpCounters().insertsOnExistingDoc->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
-    auto postInsertOnExistingDoc = replOpCounters().getInsertOnExistingDoc()->load();
+    auto postInsertOnExistingDoc = replOpCounters().insertsOnExistingDoc->value();
     ASSERT_EQ(1, postInsertOnExistingDoc - prevInsertOnExistingDoc);
 
     ASSERT_EQ(postInsertOnExistingDoc,
@@ -382,9 +358,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
                              update_oplog_entry::makeDeltaOplogEntry(
                                  BSON(doc_diff::kUpdateSectionFieldName << fromjson("{a: 1}"))),
                              BSON("_id" << 0));
-    int prevUpdateOnMissingDoc = replOpCounters().getUpdateOnMissingDoc()->load();
+    int prevUpdateOnMissingDoc = replOpCounters().updatesOnMissingDoc->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, true);
-    auto postUpdateOnMissingDoc = replOpCounters().getUpdateOnMissingDoc()->load();
+    auto postUpdateOnMissingDoc = replOpCounters().updatesOnMissingDoc->value();
     ASSERT_EQ(1, postUpdateOnMissingDoc - prevUpdateOnMissingDoc);
 
     ASSERT_EQ(postUpdateOnMissingDoc,
@@ -430,9 +406,9 @@ TEST_F(OplogApplierImplTestDisableSteadyStateConstraints,
     NamespaceString otherNss =
         NamespaceString::createNamespaceString_forTest(nss.getSisterNS("othername"));
     auto op = makeOplogEntry(OpTypeEnum::kDelete, otherNss, options.uuid);
-    int prevDeleteWasEmpty = replOpCounters().getDeleteWasEmpty()->load();
+    int prevDeleteWasEmpty = replOpCounters().deletesWasEmpty->value();
     _testApplyOplogEntryOrGroupedInsertsCrudOperation(ErrorCodes::OK, op, nss, false);
-    auto postDeleteWasEmpty = replOpCounters().getDeleteWasEmpty()->load();
+    auto postDeleteWasEmpty = replOpCounters().deletesWasEmpty->value();
     ASSERT_EQ(1, postDeleteWasEmpty - prevDeleteWasEmpty);
 
     ASSERT_EQ(postDeleteWasEmpty,
@@ -528,7 +504,9 @@ TEST_F(OplogApplierImplTest, applyOplogEntryToRecordChangeStreamPreImages) {
         auto op = makeOplogEntry(
             [opCtx = _opCtx.get()] {
                 WriteUnitOfWork wuow{opCtx};
-                ScopeGuard guard{[&wuow] { wuow.commit(); }};
+                ScopeGuard guard{[&wuow] {
+                    wuow.commit();
+                }};
                 return repl::getNextOpTime(opCtx);
             }(),
             testCase.opType,
@@ -603,7 +581,9 @@ TEST_F(OplogApplierImplTest, ApplyApplyOpsWithMixedFromMigrateRecordsCorrectPreI
     // Get an optime for the applyOps entry.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
 
@@ -832,7 +812,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenant) {
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -860,7 +842,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantRequireTenantIDFa
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -893,7 +877,9 @@ TEST_F(OplogApplierImplTest, RenameCollectionCommandMultitenantAcrossTenantsRequ
     // createCollection uses an actual opTime, so we must generate an actually opTime in the future.
     auto opTime = [opCtx = _opCtx.get()] {
         WriteUnitOfWork wuow{opCtx};
-        ScopeGuard guard{[&wuow] { wuow.commit(); }};
+        ScopeGuard guard{[&wuow] {
+            wuow.commit();
+        }};
         return repl::getNextOpTime(opCtx);
     }();
     auto op = makeCommandOplogEntry(opTime, sourceNss, oRename, {});
@@ -1349,8 +1335,8 @@ DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateRidOnNonRridCollectionGro
 DEATH_TEST_F(OplogApplierImplTestDeathTest, SteadyStateNoRidOnRridCollectionGrouped, "11454703") {
     auto nss = NamespaceString::createNamespaceString_forTest(
         "test.SteadyStateNoRidOnRridCollectionGrouped");
-    RAIIServerParameterControllerForTest featureFlagController =
-        RAIIServerParameterControllerForTest("featureFlagRecordIdsReplicated", true);
+    unittest::ServerParameterGuard featureFlagController =
+        unittest::ServerParameterGuard("featureFlagRecordIdsReplicated", true);
     createCollection(_opCtx.get(), nss, {});
 
     MutableOplogEntry op1Mutable;
@@ -1405,7 +1391,7 @@ bool _testOplogEntryIsForCappedCollection(OperationContext* opCtx,
     return opApplied.isForCappedCollection();
 }
 
-NamespaceString makeNamespace(StringData prefix, StringData suffix = "") {
+NamespaceString makeNamespace(std::string_view prefix, std::string_view suffix = "") {
     return NamespaceString::createNamespaceString_forTest(fmt::format(
         "{}.{}_{}{}", prefix, unittest::getSuiteName(), unittest::getTestName(), suffix));
 }
@@ -1550,7 +1536,7 @@ TEST_F(OplogApplierImplTest, TxnTableUpdatesGetCoalescedForRetryableWritesWithSa
 
 TEST_F(OplogApplierImplTest,
        TxnTableUpdatesDoNotGetCoalescedForRetryableWritesWithDisableTransactionUpdateCoalescing) {
-    RAIIServerParameterControllerForTest ff("featureFlagDisableTransactionUpdateCoalescing", true);
+    unittest::ServerParameterGuard ff("featureFlagDisableTransactionUpdateCoalescing", true);
     const NamespaceString& nss = NamespaceString::createNamespaceString_forTest("test", "foo");
     const auto sessionId = makeLogicalSessionIdForTest();
     std::vector<OplogEntry> insertOps;
@@ -1623,7 +1609,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentInclud
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsInsertDocumentIncorrectTenantId) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
-    const auto commonNss("test.t"_sd);
+    const auto commonNss("test.t"sv);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
     const NamespaceString nssTenant1 =
@@ -1668,7 +1654,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentInclud
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsDeleteDocumentIncorrectTenantId) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
-    const auto commonNss("test.t"_sd);
+    const auto commonNss("test.t"sv);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
     const NamespaceString nssTenant1 =
@@ -1696,7 +1682,7 @@ TEST_F(OplogApplierImplTestEnableSteadyStateConstraints,
        applyOplogEntryOrGroupedInsertsUuidIncludesTenantId) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
-    const auto commonNss("test.t"_sd);
+    const auto commonNss("test.t"sv);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
     const NamespaceString nssTenant1 =
@@ -1749,7 +1735,7 @@ TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentInclud
 TEST_F(OplogApplierImplTest, applyOplogEntryOrGroupedInsertsUpdateDocumentIncorrectTenantId) {
     setServerParameter("multitenancySupport", true);
     setServerParameter("featureFlagRequireTenantID", true);
-    const auto commonNss("test.t"_sd);
+    const auto commonNss("test.t"sv);
     const TenantId tid1(OID::gen());
     const TenantId tid2(OID::gen());
     const NamespaceString nssTenant1 =
@@ -2264,7 +2250,7 @@ TEST_F(OplogApplierImplTest, ApplyApplyOpsSessionDeleteAfterLaterRetryableUpdate
 // candidate for this test's fixture.
 TEST_F(OplogApplierImplTest, ApplyApplyOpsContainerOperations) {
     // TODO (SERVER-116165): Remove.
-    RAIIServerParameterControllerForTest ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
 
@@ -2321,9 +2307,69 @@ TEST_F(OplogApplierImplTest, ApplyApplyOpsContainerOperations) {
 
 // TODO (SERVER-109556): Adjustments to suites coming from this ticket might result in a better
 // candidate for this test's fixture.
+TEST_F(OplogApplierImplTest, ApplyApplyOpsContainerUpdateOperation) {
+    // TODO (SERVER-116165): Remove.
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
+
+    auto storageEngine = serviceContext->getStorageEngine();
+    auto ident = storageEngine->generateNewInternalIdent();
+    auto ru = storageEngine->newRecoveryUnit();
+    StorageWriteTransaction swt(*ru);
+    auto trs = storageEngine->getEngine()->makeInternalRecordStore(*ru, ident, KeyFormat::String);
+    swt.commit();
+
+    auto k = BSONBinData("K", 1, BinDataGeneral);
+    auto v1 = BSONBinData("V1", 2, BinDataGeneral);
+    auto v2 = BSONBinData("V2", 2, BinDataGeneral);
+
+    const auto entryOpTime = nextOpTime();
+    ASSERT(!entryOpTime.isNull());
+
+    const BSONObj containerInsertOp =
+        BSON("op" << "ci"
+                  << "ns" << nss.ns_forTest() << "container" << ident << "o"
+                  << BSON("k" << k << "v" << v1) << "ts" << entryOpTime.getTimestamp());
+    const BSONObj containerUpdateOp = BSON("op" << "cu"
+                                                << "ns" << nss.ns_forTest() << "container" << ident
+                                                << "o" << BSON("k" << k << "v" << v2 << "$v" << 1LL)
+                                                << "ts" << entryOpTime.getTimestamp());
+
+    BSONArray innerOps = BSON_ARRAY(containerInsertOp << containerUpdateOp);
+
+    /**
+     * o: {
+     *   applyOps: [
+     *     {
+     *       op: "ci",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>, v: <BinData>},
+     *       ts: <entryOpTime>
+     *     },
+     *     {
+     *       op: "cu",
+     *       ns: "<db>.<coll>",
+     *       container: "<ident>",
+     *       o: {k: <BinData>, v: <BinData>, $v: 1},
+     *       ts: <entryOpTime>
+     *     }
+     *   ]
+     * }
+     */
+    BSONObj applyOpsCmd = BSON("applyOps" << innerOps);
+    auto entry = makeCommandOplogEntry(entryOpTime, nss, applyOpsCmd, boost::none, boost::none);
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
+}
+
+// TODO (SERVER-109556): Adjustments to suites coming from this ticket might result in a better
+// candidate for this test's fixture.
 TEST_F(OplogApplierImplTest, ApplyContainerOperations) {
     // TODO (SERVER-116165): Remove.
-    RAIIServerParameterControllerForTest ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
 
     auto nss = NamespaceString::createNamespaceString_forTest("test.t");
 
@@ -2344,6 +2390,34 @@ TEST_F(OplogApplierImplTest, ApplyContainerOperations) {
 
     ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
         _opCtx.get(), ApplierOperation{&deleteEntry}, OplogApplication::Mode::kSecondary));
+}
+
+// TODO (SERVER-109556): Adjustments to suites coming from this ticket might result in a better
+// candidate for this test's fixture.
+TEST_F(OplogApplierImplTest, ApplyContainerUpdateOperation) {
+    // TODO (SERVER-116165): Remove.
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+
+    auto nss = NamespaceString::createNamespaceString_forTest("test.t");
+
+    auto storageEngine = serviceContext->getStorageEngine();
+    auto ident = storageEngine->generateNewInternalIdent();
+    auto ru = storageEngine->newRecoveryUnit();
+    StorageWriteTransaction swt(*ru);
+    auto trs = storageEngine->getEngine()->makeInternalRecordStore(*ru, ident, KeyFormat::String);
+    swt.commit();
+
+    auto k = BSONBinData("K", 1, BinDataGeneral);
+    auto v1 = BSONBinData("V1", 2, BinDataGeneral);
+    auto v2 = BSONBinData("V2", 2, BinDataGeneral);
+    auto insertEntry = makeContainerInsertOplogEntry(nextOpTime(), ident, k, v1);
+    auto updateEntry = makeContainerUpdateOplogEntry(nextOpTime(), ident, k, v2);
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), ApplierOperation{&insertEntry}, OplogApplication::Mode::kSecondary));
+
+    ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+        _opCtx.get(), ApplierOperation{&updateEntry}, OplogApplication::Mode::kSecondary));
 }
 
 TEST_F(OplogApplierImplTest, ContainerOplogEntryHashesOnKey) {
@@ -2371,6 +2445,37 @@ TEST_F(OplogApplierImplTest, ContainerOplogEntryHashesOnKey) {
     ASSERT_EQUALS(id1, id2);
     ASSERT_NOT_EQUALS(id1, id3);
     ASSERT_NOT_EQUALS(id1, id4);
+}
+
+TEST_F(OplogApplierImplTest, ContainerUpdateOplogEntryHashesOnKey) {
+    auto nss = NamespaceString::createNamespaceString_forTest("test.hash");
+    auto ident1 = serviceContext->getStorageEngine()->generateNewInternalIdent();
+    auto ident2 = serviceContext->getStorageEngine()->generateNewInternalIdent();
+    auto k1 = BSONBinData("K", 1, BinDataGeneral);
+    auto k2 = BSONBinData("K", 2, BinDataGeneral);
+    auto v = BSONBinData("V", 1, BinDataGeneral);
+
+    auto insertEntry = makeContainerInsertOplogEntry(nextOpTime(), ident1, k1, v);
+    auto updateEntry = makeContainerUpdateOplogEntry(nextOpTime(), ident1, k1, v);
+    auto updateDiffKeyEntry = makeContainerUpdateOplogEntry(nextOpTime(), ident1, k2, v);
+    auto updateDiffIdentEntry = makeContainerUpdateOplogEntry(nextOpTime(), ident2, k1, v);
+
+    CachedCollectionProperties collPropertiesCache;
+    uint32_t insertHash =
+        OplogApplierUtils::getOplogEntryHash(_opCtx.get(), &insertEntry, &collPropertiesCache);
+    uint32_t updateHash =
+        OplogApplierUtils::getOplogEntryHash(_opCtx.get(), &updateEntry, &collPropertiesCache);
+    uint32_t updateDiffKeyHash = OplogApplierUtils::getOplogEntryHash(
+        _opCtx.get(), &updateDiffKeyEntry, &collPropertiesCache);
+    uint32_t updateDiffIdentHash = OplogApplierUtils::getOplogEntryHash(
+        _opCtx.get(), &updateDiffIdentEntry, &collPropertiesCache);
+
+    // Update on the same key should hash the same as insert on that key.
+    ASSERT_EQUALS(insertHash, updateHash);
+    // Updates on different keys should hash differently.
+    ASSERT_NOT_EQUALS(updateHash, updateDiffKeyHash);
+    // Updates on the same key but different idents should hash differently.
+    ASSERT_NOT_EQUALS(updateHash, updateDiffIdentHash);
 }
 
 class MultiOplogEntryOplogApplierImplTest : public OplogApplierImplTest {
@@ -2733,14 +2838,14 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyTwoTransactionsOneBatch) {
     // Note the insert counter so we can check it later.  It is necessary to use globalOpCounters()
     // as inserts are idempotent so we will not detect duplicate inserts just by checking inserts in
     // the opObserver.
-    int insertsBefore = replOpCounters().getInsert()->load();
+    int insertsBefore = replOpCounters().inserts->value();
     // Insert all the oplog entries in one batch.  All inserts should be executed, in order, exactly
     // once.
     ASSERT_OK(oplogApplier.applyOplogBatch(
         _opCtx.get(),
         {insertOps1[0], insertOps1[1], commitOp1, insertOps2[0], insertOps2[1], commitOp2}));
     ASSERT_EQ(6U, getOplogSize());
-    ASSERT_EQ(4, replOpCounters().getInsert()->load() - insertsBefore);
+    ASSERT_EQ(4, replOpCounters().inserts->value() - insertsBefore);
     ASSERT_EQ(4U, _insertedDocs[_nss1].size());
     checkTxnTable(_lsid,
                   txnNum2,
@@ -2928,6 +3033,143 @@ TEST_F(MultiOplogEntryOplogApplierImplTest, MultiApplyNontransactionalRetryableW
     ASSERT_BSONOBJ_EQ(insertDocs[3], *(nss2It++));
     ASSERT_BSONOBJ_EQ(insertDocs[4], *(nss1It++));
     ASSERT_BSONOBJ_EQ(insertDocs[5], *(nss2It++));
+}
+
+/**
+ * Fixture for the boundary between two statements of one retryable write, where the second
+ * statement's applyOps chain links back to the first statement's terminal entry.
+ *
+ * The fixture's own observer records into a set, which would hide an operation being applied
+ * twice, so these tests count every applied insert instead.
+ */
+class RetryableAtomicBatchBoundaryTest : public MultiOplogEntryOplogApplierImplTest {
+protected:
+    void setUp() override {
+        MultiOplogEntryOplogApplierImplTest::setUp();
+        _opObserver->onInsertsFn = [this](OperationContext*,
+                                          const NamespaceString& nss,
+                                          const std::vector<BSONObj>& docs) {
+            if (nss != _nss1 && nss != _nss2) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(_appliedMutex);
+            _applied.insert(_applied.end(), docs.begin(), docs.end());
+        };
+    }
+
+    OplogEntry makeAtomicBatchEntry(Timestamp ts,
+                                    const NamespaceString& nss,
+                                    const UUID& uuid,
+                                    int docId,
+                                    std::vector<StmtId> stmtIds,
+                                    OpTime prevOpTime,
+                                    bool partial,
+                                    boost::optional<long long> count = boost::none) {
+        BSONObjBuilder command;
+        command.append("applyOps",
+                       BSON_ARRAY(BSON("op" << "i"
+                                            << "ns" << nss.ns_forTest() << "ui" << uuid << "o"
+                                            << BSON("_id" << docId))));
+        if (partial) {
+            command.append("partialTxn", true);
+        }
+        if (count) {
+            command.append("count", *count);
+        }
+        return addMultiOpType(makeCommandOplogEntryWithSessionInfoAndStmtIds(
+                                  {ts, 1LL},
+                                  NamespaceString::createNamespaceString_forTest("admin", "$cmd"),
+                                  command.obj(),
+                                  _lsid,
+                                  _txnNum,
+                                  std::move(stmtIds),
+                                  prevOpTime),
+                              MultiOplogEntryType::kApplyOpsAppliedAtomically);
+    }
+
+    std::vector<BSONObj> takeApplied() {
+        std::lock_guard<std::mutex> lock(_appliedMutex);
+        auto applied = _applied;
+        std::sort(
+            applied.begin(), applied.end(), SimpleBSONObjComparator::kInstance.makeLessThan());
+        return applied;
+    }
+
+    std::unique_ptr<OplogApplierImpl> makeApplier(NoopOplogApplierObserver* observer) {
+        return std::make_unique<OplogApplierImpl>(
+            nullptr,  // executor
+            nullptr,  // oplogBuffer
+            observer,
+            ReplicationCoordinator::get(_opCtx.get()),
+            getConsistencyMarkers(),
+            getStorageInterface(),
+            repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary, false),
+            _workerPool.get());
+    }
+
+private:
+    std::mutex _appliedMutex;
+    std::vector<BSONObj> _applied;
+};
+
+TEST_F(RetryableAtomicBatchBoundaryTest, SingleEntryBatchLinkedToPreviousStatementSkipsChainWalk) {
+    // A single-entry batch (no 'count') must extract its op directly, not walk. The link points at
+    // an optime never written, so any walk fails loudly rather than silently stopping.
+    const OpTime neverWritten({Timestamp(Seconds(1), 1), 1LL});
+    auto stmt1 = makeAtomicBatchEntry(Timestamp(Seconds(1), 2),
+                                      _nss1,
+                                      *_uuid1,
+                                      1 /* docId */,
+                                      {StmtId(1)},
+                                      neverWritten,
+                                      false /* partial */);
+
+    NoopOplogApplierObserver observer;
+    auto oplogApplier = makeApplier(&observer);
+
+    ASSERT_OK(oplogApplier->applyOplogBatch(_opCtx.get(), {stmt1}));
+    ASSERT_EQ(1U, getOplogSize());
+
+    auto applied = takeApplied();
+    ASSERT_EQ(1U, applied.size());
+    ASSERT_BSONOBJ_EQ(BSON("_id" << 1), applied[0]);
+}
+
+TEST_F(RetryableAtomicBatchBoundaryTest, MultiEntryBatchDoesNotWalkIntoTruncatedPreviousStatement) {
+    // A multi-entry batch whose previous statement has been truncated (the link points at an
+    // optime never written). Applying each entry in its own batch leaves the partial cache cold, so
+    // the terminal reads the chain from the oplog and must stop by 'count' before the missing
+    // predecessor.
+    const OpTime truncatedPrevStatement({Timestamp(Seconds(1), 1), 1LL});
+    auto stmt1First = makeAtomicBatchEntry(Timestamp(Seconds(1), 2),
+                                           _nss1,
+                                           *_uuid1,
+                                           1 /* docId */,
+                                           {StmtId(1)},
+                                           truncatedPrevStatement /* link to a gone statement */,
+                                           true /* partial */);
+    auto stmt1Terminal = makeAtomicBatchEntry(Timestamp(Seconds(1), 3),
+                                              _nss2,
+                                              *_uuid2,
+                                              2 /* docId */,
+                                              {} /* stmtId op sits in the first entry */,
+                                              stmt1First.getOpTime(),
+                                              false /* partial */,
+                                              2 /* count: two ops across the batch */);
+
+    NoopOplogApplierObserver observer;
+    auto oplogApplier = makeApplier(&observer);
+
+    ASSERT_OK(oplogApplier->applyOplogBatch(_opCtx.get(), {stmt1First}));
+    ASSERT_EQ(0U, takeApplied().size());
+
+    // The terminal collects exactly this batch's two operations, not the truncated predecessor.
+    ASSERT_OK(oplogApplier->applyOplogBatch(_opCtx.get(), {stmt1Terminal}));
+
+    auto applied = takeApplied();
+    ASSERT_EQ(2U, applied.size());
+    ASSERT_BSONOBJ_EQ(BSON("_id" << 1), applied[0]);
+    ASSERT_BSONOBJ_EQ(BSON("_id" << 2), applied[1]);
 }
 
 class MultiOplogEntryOplogApplierImplTestMultitenant : public OplogApplierImplTest {
@@ -3880,6 +4122,378 @@ void testWorkerMultikeyPaths(OperationContext* opCtx,
     ASSERT_EQ(pathInfo.size(), numPaths);
 }
 
+void collectWorkerMultikeyPathInfo(OperationContext* opCtx,
+                                   std::vector<ApplierOperation> ops,
+                                   WorkerMultikeyPathInfo* pathInfo) {
+    TestApplyOplogGroupApplier oplogApplier(
+        nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary, false));
+    const bool dataIsConsistent = true;
+    ASSERT_OK(oplogApplier.applyOplogBatchPerWorker(opCtx, ops, *pathInfo, dataIsConsistent));
+}
+
+void applyOplogBatchAndCollectWorkerMultikeyPathInfo(OperationContext* opCtx,
+                                                     std::vector<OplogEntry>* ops,
+                                                     WorkerMultikeyPathInfo* pathInfo) {
+    NoopOplogApplierObserver observer;
+    auto workerPool = makeReplWorkerPool();
+    OplogApplierImpl oplogApplier(nullptr,
+                                  nullptr,
+                                  &observer,
+                                  ReplicationCoordinator::get(opCtx),
+                                  nullptr,
+                                  nullptr,
+                                  OplogApplier::Options(OplogApplication::Mode::kSecondary, false),
+                                  workerPool.get());
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    oplogApplier.fillWriterVectors_forTest(opCtx, ops, &writerVectors, &derivedOps);
+
+    TestApplyOplogGroupApplier workerApplier(
+        nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary, false));
+    for (auto& writer : writerVectors) {
+        if (writer.empty()) {
+            continue;
+        }
+        WorkerMultikeyPathInfo workerPathInfo;
+        const bool dataIsConsistent = true;
+        ASSERT_OK(workerApplier.applyOplogBatchPerWorker(
+            opCtx, writer, workerPathInfo, dataIsConsistent));
+        pathInfo->insert(pathInfo->end(), workerPathInfo.begin(), workerPathInfo.end());
+    }
+}
+
+BSONObj makeUpdateApplyOpsEntry(const NamespaceString& nss,
+                                const UUID& uuid,
+                                const BSONObj& documentToUpdate,
+                                const BSONObj& updatedDocument) {
+    return BSON("op" << "u"
+                     << "ns" << nss.toString_forTest() << "ui" << uuid << "o" << updatedDocument
+                     << "o2" << documentToUpdate);
+}
+
+TEST_F(OplogApplierImplTest, StartTrackingMultikeyPathInfoDoesNotClearExistingInfo) {
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    tracker.startTrackingMultikeyPathInfo();
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 UUID::gen(),
+                                 "a_1",
+                                 {},
+                                 MultikeyPaths{{0U}},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.stopTrackingMultikeyPathInfo();
+
+    tracker.startTrackingMultikeyPathInfo();
+    ASSERT_EQ(1UL, tracker.getMultikeyPathInfo().size());
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerKeepsDifferentTimestampPathsSeparate) {
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    const auto uuid = UUID::gen();
+    tracker.startTrackingMultikeyPathInfo();
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuid,
+                                 "a_1_b_1",
+                                 {},
+                                 MultikeyPaths{{0U}, {}},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuid,
+                                 "a_1_b_1",
+                                 {},
+                                 MultikeyPaths{{}, {0U}},
+                                 Timestamp(Seconds(2), 0)});
+
+    ASSERT_EQ(2UL, tracker.getMultikeyPathInfo().size());
+    ASSERT_EQ(MultikeyPaths({{0U}, {}}), tracker.getMultikeyPathInfo()[0].multikeyPaths);
+    ASSERT_EQ(MultikeyPaths({{}, {0U}}), tracker.getMultikeyPathInfo()[1].multikeyPaths);
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerEquivalentEntriesCollapseRegardlessOfOrder) {
+    // Three entries with the same index, collection, and timestamp pushed in arbitrary order with
+    // different sub-paths must collapse into a single tracker entry whose paths are the union.
+    const auto uuid = UUID::gen();
+    const auto ts = Timestamp(Seconds(1), 0);
+    const std::vector<MultikeyPathInfo> entries = {
+        {makeNamespace("tracker"), uuid, "a_1_b_1", {}, MultikeyPaths{{0U}, {}}, ts},
+        {makeNamespace("tracker"), uuid, "a_1_b_1", {}, MultikeyPaths{{}, {0U}}, ts},
+        {makeNamespace("tracker"), uuid, "a_1_b_1", {}, MultikeyPaths{{0U}, {0U}}, ts},
+    };
+
+    auto buildPathInfoAndHistory = [&](const std::vector<size_t>& order) {
+        MultikeyPathTracker tracker;
+        tracker.startTrackingMultikeyPathInfo();
+        for (const auto idx : order) {
+            tracker.addMultikeyPathInfo(MultikeyPathInfo(entries[idx]));
+        }
+
+        return std::make_pair(tracker.getMultikeyPathInfo(), tracker.sortByTimestamp());
+    };
+
+    // Every ordering of the equivalent entries must collapse into the same single tracker entry
+    // and the same single-element timestamp history.
+    std::vector<size_t> order(entries.size());
+    std::iota(order.begin(), order.end(), 0);
+    do {
+        auto [pathInfo, history] = buildPathInfoAndHistory(order);
+
+        ASSERT_EQ(1UL, pathInfo.size());
+        ASSERT_EQ(MultikeyPaths({{0U}, {0U}}), pathInfo[0].multikeyPaths);
+        ASSERT_EQ(1UL, history.size());
+        ASSERT_EQ(ts, history[0].earliestTimestamp);
+        ASSERT_EQ(MultikeyPaths({{0U}, {0U}}), history[0].multikeyPaths);
+    } while (std::next_permutation(order.begin(), order.end()));
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryHandlesMultipleIndicesIndependently) {
+    // Two indices interleaved across timestamps must be sorted without merging changes from
+    // different timestamps or indices.
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    const auto uuidA = UUID::gen();
+    const auto uuidB = UUID::gen();
+    tracker.startTrackingMultikeyPathInfo();
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidA,
+                                 "a_1_b_1",
+                                 {},
+                                 MultikeyPaths{{0U}, {}},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidB,
+                                 "c_1",
+                                 {},
+                                 MultikeyPaths{{0U}},
+                                 Timestamp(Seconds(2), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidA,
+                                 "a_1_b_1",
+                                 {},
+                                 MultikeyPaths{{}, {0U}},
+                                 Timestamp(Seconds(3), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidB,
+                                 "c_1",
+                                 {},
+                                 MultikeyPaths{{1U}},
+                                 Timestamp(Seconds(4), 0)});
+
+    auto history = tracker.sortByTimestamp();
+    ASSERT_EQ(4UL, history.size());
+
+    ASSERT_EQ(Timestamp(Seconds(1), 0), history[0].earliestTimestamp);
+    ASSERT_EQ(uuidA, history[0].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{0U}, {}}), history[0].multikeyPaths);
+
+    ASSERT_EQ(Timestamp(Seconds(2), 0), history[1].earliestTimestamp);
+    ASSERT_EQ(uuidB, history[1].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{0U}}), history[1].multikeyPaths);
+
+    ASSERT_EQ(Timestamp(Seconds(3), 0), history[2].earliestTimestamp);
+    ASSERT_EQ(uuidA, history[2].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{}, {0U}}), history[2].multikeyPaths);
+
+    ASSERT_EQ(Timestamp(Seconds(4), 0), history[3].earliestTimestamp);
+    ASSERT_EQ(uuidB, history[3].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{1U}}), history[3].multikeyPaths);
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryDoesNotAccumulateAcrossManyTimestamps) {
+    // Ten distinct timestamps for the same compound index, each adding a new component to one of
+    // the two fields. The history at Tk must contain only the delta observed at Tk. Catalog writes
+    // later merge these deltas into the current durable metadata state.
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    const auto uuid = UUID::gen();
+    tracker.startTrackingMultikeyPathInfo();
+    constexpr int kNumEntries = 10;
+    for (int i = 1; i <= kNumEntries; ++i) {
+        MultikeyPaths paths(2);
+        paths[!(i % 2)].insert(static_cast<size_t>(i));
+        tracker.addMultikeyPathInfo(
+            {makeNamespace("tracker"), uuid, "a_1_b_1", {}, paths, Timestamp(Seconds(i), 0)});
+    }
+
+    auto history = tracker.sortByTimestamp();
+    ASSERT_EQ(static_cast<size_t>(kNumEntries), history.size());
+
+    for (int i = 1; i <= kNumEntries; ++i) {
+        MultikeyPaths expected(2);
+        expected[!(i % 2)].insert(static_cast<size_t>(i));
+        ASSERT_EQ(Timestamp(Seconds(i), 0), history[i - 1].earliestTimestamp)
+            << "at index " << (i - 1);
+        ASSERT_EQ(expected, history[i - 1].multikeyPaths) << "at index " << (i - 1);
+    }
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerKeepsWildcardMetadataKeysDeltaByTimestamp) {
+    auto makeMetadataKeys = [](std::initializer_list<int> values) {
+        KeyStringSet keys;
+        for (const auto value : values) {
+            key_string::HeapBuilder builder(
+                key_string::Version::V1, BSON("" << value), key_string::ALL_ASCENDING);
+            keys.insert(builder.release());
+        }
+        return keys;
+    };
+
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    const auto uuid = UUID::gen();
+    tracker.startTrackingMultikeyPathInfo();
+
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuid,
+                                 "$**_1",
+                                 makeMetadataKeys({1, 2}),
+                                 {},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuid,
+                                 "$**_1",
+                                 makeMetadataKeys({3}),
+                                 {},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuid,
+                                 "$**_1",
+                                 makeMetadataKeys({4, 5}),
+                                 {},
+                                 Timestamp(Seconds(2), 0)});
+
+    auto history = tracker.sortByTimestamp();
+    ASSERT_EQ(2UL, history.size());
+
+    ASSERT_EQ(Timestamp(Seconds(1), 0), history[0].earliestTimestamp);
+    ASSERT_EQ(makeMetadataKeys({1, 2, 3}), history[0].multikeyMetadataKeys);
+
+    ASSERT_EQ(Timestamp(Seconds(2), 0), history[1].earliestTimestamp);
+    ASSERT_EQ(makeMetadataKeys({4, 5}), history[1].multikeyMetadataKeys);
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryIsIndependentOfInsertionOrder) {
+    // The same set of entries inserted in two different orders (forward and shuffled) must
+    // produce the exact same history.
+    const auto uuid = UUID::gen();
+    auto buildHistory = [&](const std::vector<int>& order) {
+        MultikeyPathTracker tracker;
+        tracker.startTrackingMultikeyPathInfo();
+        for (int i : order) {
+            MultikeyPaths paths(2);
+            paths[i % 2].insert(static_cast<size_t>(i));
+            tracker.addMultikeyPathInfo(
+                {makeNamespace("tracker"), uuid, "a_1_b_1", {}, paths, Timestamp(Seconds(i), 0)});
+        }
+        return tracker.sortByTimestamp();
+    };
+
+    auto forward = buildHistory({1, 2, 3, 4, 5});
+    auto shuffled = buildHistory({3, 1, 5, 2, 4});
+
+    ASSERT_EQ(forward.size(), shuffled.size());
+    for (size_t i = 0; i < forward.size(); ++i) {
+        ASSERT_EQ(forward[i].earliestTimestamp, shuffled[i].earliestTimestamp) << "at index " << i;
+        ASSERT_EQ(forward[i].multikeyPaths, shuffled[i].multikeyPaths) << "at index " << i;
+    }
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryTreatsDifferentUUIDsAsDifferentIndices) {
+    // Two entries with the same index name but different collection UUIDs (e.g. drop+recreate)
+    // must be tracked as independent histories.
+    auto& tracker = MultikeyPathTracker::get(_opCtx.get());
+    const auto uuidOld = UUID::gen();
+    const auto uuidNew = UUID::gen();
+    tracker.startTrackingMultikeyPathInfo();
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidOld,
+                                 "a_1",
+                                 {},
+                                 MultikeyPaths{{0U}},
+                                 Timestamp(Seconds(1), 0)});
+    tracker.addMultikeyPathInfo({makeNamespace("tracker"),
+                                 uuidNew,
+                                 "a_1",
+                                 {},
+                                 MultikeyPaths{{1U}},
+                                 Timestamp(Seconds(2), 0)});
+
+    auto history = tracker.sortByTimestamp();
+    ASSERT_EQ(2UL, history.size());
+    ASSERT_EQ(uuidOld, history[0].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{0U}}), history[0].multikeyPaths);
+    ASSERT_EQ(uuidNew, history[1].collectionUUID);
+    ASSERT_EQ(MultikeyPaths({{1U}}), history[1].multikeyPaths);
+
+    tracker.stopTrackingMultikeyPathInfo();
+    tracker.clear();
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryIsEmptyWhenTrackerIsEmpty) {
+    MultikeyPathTracker tracker;
+    ASSERT_TRUE(tracker.sortByTimestamp().empty());
+}
+
+TEST_F(OplogApplierImplTest, MultikeyPathTrackerHistoryAcrossMultipleWorkers) {
+    // Mirrors the real applier flow: multiple worker trackers each contribute a subset of entries,
+    // they get merged into one tracker, and the final history is the same as if all entries had
+    // gone into a single tracker in timestamp order.
+    const auto uuid = UUID::gen();
+
+    MultikeyPathTracker workerOne;
+    workerOne.startTrackingMultikeyPathInfo();
+    workerOne.addMultikeyPathInfo({makeNamespace("tracker"),
+                                   uuid,
+                                   "a_1_b_1",
+                                   {},
+                                   MultikeyPaths{{0U}, {}},
+                                   Timestamp(Seconds(1), 0)});
+    workerOne.addMultikeyPathInfo({makeNamespace("tracker"),
+                                   uuid,
+                                   "a_1_b_1",
+                                   {},
+                                   MultikeyPaths{{}, {0U}},
+                                   Timestamp(Seconds(3), 0)});
+
+    MultikeyPathTracker workerTwo;
+    workerTwo.startTrackingMultikeyPathInfo();
+    workerTwo.addMultikeyPathInfo({makeNamespace("tracker"),
+                                   uuid,
+                                   "a_1_b_1",
+                                   {},
+                                   MultikeyPaths{{1U}, {}},
+                                   Timestamp(Seconds(2), 0)});
+
+    MultikeyPathTracker merged;
+    merged.startTrackingMultikeyPathInfo();
+    for (MultikeyPathInfo info : workerOne.getMultikeyPathInfo()) {
+        merged.addMultikeyPathInfo(std::move(info));
+    }
+    for (MultikeyPathInfo info : workerTwo.getMultikeyPathInfo()) {
+        merged.addMultikeyPathInfo(std::move(info));
+    }
+
+    auto history = merged.sortByTimestamp();
+    ASSERT_EQ(3UL, history.size());
+    ASSERT_EQ(Timestamp(Seconds(1), 0), history[0].earliestTimestamp);
+    ASSERT_EQ(MultikeyPaths({{0U}, {}}), history[0].multikeyPaths);
+    ASSERT_EQ(Timestamp(Seconds(2), 0), history[1].earliestTimestamp);
+    ASSERT_EQ(MultikeyPaths({{1U}, {}}), history[1].multikeyPaths);
+    ASSERT_EQ(Timestamp(Seconds(3), 0), history[2].earliestTimestamp);
+    ASSERT_EQ(MultikeyPaths({{}, {0U}}), history[2].multikeyPaths);
+}
+
 TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsWorkerMultikeyPathInfoOnInsert) {
     // Set the state as secondary as we are going to apply createIndexes oplog entry.
     ASSERT_OK(
@@ -3901,8 +4515,175 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsWorkerMultikeyPathInf
     {
         auto doc = BSON("_id" << 1 << "a" << BSON_ARRAY(4 << 5));
         auto op = makeInsertDocumentOplogEntry({Timestamp(Seconds(3), 0), 1LL}, nss, doc);
-        testWorkerMultikeyPaths(_opCtx.get(), op, 1UL);
+        WorkerMultikeyPathInfo pathInfo;
+        collectWorkerMultikeyPathInfo(_opCtx.get(), {ApplierOperation{&op}}, &pathInfo);
+        ASSERT_EQ(1UL, pathInfo.size());
+        ASSERT_EQ(Timestamp(Seconds(3), 0), pathInfo[0].earliestTimestamp);
     }
+}
+
+TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncUsesTriggeringTimestampForGroupedInserts) {
+    ASSERT_OK(
+        ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
+
+    NamespaceString nss = makeNamespace("test");
+
+    {
+        auto op = makeCreateCollectionOplogEntry(
+            _opCtx.get(), {Timestamp(Seconds(1), 0), 1LL}, nss, kUuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+    {
+        auto keyPattern = BSON("a" << 1);
+        auto op = makeCreateIndexOplogEntry(
+            {Timestamp(Seconds(2), 0), 1LL}, nss, "a_1", keyPattern, kUuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+
+    auto scalarTimeInsert = Timestamp(Seconds(3), 0);
+    auto multikeyTimeInsert = Timestamp(Seconds(4), 0);
+    auto scalarInsert =
+        makeInsertDocumentOplogEntry({scalarTimeInsert, 1LL}, nss, BSON("_id" << 1 << "a" << 1));
+    auto multikeyInsert = makeInsertDocumentOplogEntry(
+        {multikeyTimeInsert, 1LL}, nss, BSON("_id" << 2 << "a" << BSON_ARRAY(4 << 5)));
+
+    std::vector<ApplierOperation> ops = {ApplierOperation{&scalarInsert},
+                                         ApplierOperation{&multikeyInsert}};
+    OplogEntryOrGroupedInserts groupedInserts(ops.begin(), ops.end());
+    ASSERT_TRUE(groupedInserts.isGroupedInserts());
+
+    WorkerMultikeyPathInfo pathInfo;
+    auto& multikeyPathTracker = MultikeyPathTracker::get(_opCtx.get());
+    {
+        ON_BLOCK_EXIT(
+            [&multikeyPathTracker] { multikeyPathTracker.stopTrackingMultikeyPathInfo(); });
+        multikeyPathTracker.startTrackingMultikeyPathInfo();
+        ASSERT_OK(_applyOplogEntryOrGroupedInsertsWrapper(
+            _opCtx.get(), groupedInserts, OplogApplication::Mode::kSecondary));
+    }
+    ASSERT_FALSE(multikeyPathTracker.isTrackingMultikeyPathInfo());
+    pathInfo = multikeyPathTracker.getMultikeyPathInfo();
+    multikeyPathTracker.clear();
+
+    ASSERT_EQ(1UL, pathInfo.size());
+    ASSERT_EQ("a_1", pathInfo[0].indexName);
+    ASSERT_EQ(multikeyTimeInsert, pathInfo[0].earliestTimestamp);
+}
+
+TEST_F(OplogApplierImplTest,
+       OplogApplicationThreadFuncUsesPrepareOpTimestampForApplyOpsMultikeyUpdate) {
+    ASSERT_OK(
+        ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
+
+    createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
+    const NamespaceString nss = makeNamespace("prepared_txn_update");
+    const auto uuid = UUID::gen();
+
+    {
+        auto op = makeCreateCollectionOplogEntry(
+            _opCtx.get(), {Timestamp(Seconds(1), 0), 1LL}, nss, uuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+    {
+        auto op = makeCreateIndexOplogEntry(
+            {Timestamp(Seconds(2), 0), 1LL}, nss, "a_1", BSON("a" << 1), uuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+    {
+        auto op = makeInsertDocumentOplogEntry(
+            {Timestamp(Seconds(3), 0), 1LL}, nss, BSON("_id" << 1 << "a" << 1));
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+
+    const auto lsid = makeLogicalSessionId(_opCtx.get());
+    const TxnNumber txnNum(0);
+    auto prepareOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        {Timestamp(Seconds(4), 0), 1LL},
+        nss,
+        BSON("applyOps"
+             << BSON_ARRAY(makeUpdateApplyOpsEntry(
+                    nss, uuid, BSON("_id" << 1), BSON("_id" << 1 << "a" << BSON_ARRAY(4 << 5))))
+             << "prepare" << true),
+        lsid,
+        txnNum,
+        {StmtId(0)},
+        OpTime());
+
+    WorkerMultikeyPathInfo pathInfo;
+    std::vector<OplogEntry> prepareOps{prepareOp};
+    applyOplogBatchAndCollectWorkerMultikeyPathInfo(_opCtx.get(), &prepareOps, &pathInfo);
+
+    ASSERT_EQ(1UL, pathInfo.size());
+    ASSERT_EQ("a_1", pathInfo[0].indexName);
+    ASSERT(pathInfo[0].earliestTimestamp.isNull());
+
+    auto commitOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        {Timestamp(Seconds(5), 0), 1LL},
+        nss,
+        BSON("commitTransaction" << 1 << "commitTimestamp" << prepareOp.getTimestamp()),
+        lsid,
+        txnNum,
+        {StmtId(1)},
+        prepareOp.getOpTime());
+    WorkerMultikeyPathInfo commitPathInfo;
+    std::vector<OplogEntry> commitOps{commitOp};
+    applyOplogBatchAndCollectWorkerMultikeyPathInfo(_opCtx.get(), &commitOps, &commitPathInfo);
+    ASSERT_TRUE(commitPathInfo.empty());
+}
+
+TEST_F(OplogApplierImplTest,
+       OplogApplicationThreadFuncUsesPrepareOpTimestampForApplyOpsMultikeyInsert) {
+    ASSERT_OK(
+        ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_SECONDARY));
+
+    createCollectionWithUuid(_opCtx.get(), NamespaceString::kSessionTransactionsTableNamespace);
+    const NamespaceString nss = makeNamespace("prepared_txn_insert");
+    const auto uuid = UUID::gen();
+
+    {
+        auto op = makeCreateCollectionOplogEntry(
+            _opCtx.get(), {Timestamp(Seconds(1), 0), 1LL}, nss, uuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+    {
+        auto op = makeCreateIndexOplogEntry(
+            {Timestamp(Seconds(2), 0), 1LL}, nss, "a_1", BSON("a" << 1), uuid);
+        testWorkerMultikeyPaths(_opCtx.get(), op, 0UL);
+    }
+
+    const auto lsid = makeLogicalSessionId(_opCtx.get());
+    const TxnNumber txnNum(0);
+    auto prepareOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        {Timestamp(Seconds(3), 0), 1LL},
+        nss,
+        BSON("applyOps" << BSON_ARRAY(makeInsertApplyOpsEntry(
+                               nss, uuid, BSON("_id" << 1 << "a" << BSON_ARRAY(4 << 5))))
+                        << "prepare" << true),
+        lsid,
+        txnNum,
+        {StmtId(0)},
+        OpTime());
+
+    WorkerMultikeyPathInfo pathInfo;
+    std::vector<OplogEntry> prepareOps{prepareOp};
+    applyOplogBatchAndCollectWorkerMultikeyPathInfo(_opCtx.get(), &prepareOps, &pathInfo);
+
+    ASSERT_EQ(1UL, pathInfo.size());
+    ASSERT_EQ("a_1", pathInfo[0].indexName);
+    ASSERT(pathInfo[0].earliestTimestamp.isNull());
+
+    auto commitOp = makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        {Timestamp(Seconds(4), 0), 1LL},
+        nss,
+        BSON("commitTransaction" << 1 << "commitTimestamp" << prepareOp.getTimestamp()),
+        lsid,
+        txnNum,
+        {StmtId(1)},
+        prepareOp.getOpTime());
+    WorkerMultikeyPathInfo commitPathInfo;
+    std::vector<OplogEntry> commitOps{commitOp};
+    applyOplogBatchAndCollectWorkerMultikeyPathInfo(_opCtx.get(), &commitOps, &commitPathInfo);
+    ASSERT_TRUE(commitPathInfo.empty());
 }
 
 TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsMultipleWorkerMultikeyPathInfo) {
@@ -3933,19 +4714,31 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncAddsMultipleWorkerMultike
     }
 
     {
-        auto docA = BSON("_id" << 1 << "a" << BSON_ARRAY(4 << 5));
-        auto opA = makeInsertDocumentOplogEntry({Timestamp(Seconds(4), 0), 1LL}, nss, docA);
-        auto docB = BSON("_id" << 2 << "b" << BSON_ARRAY(6 << 7));
-        auto opB = makeInsertDocumentOplogEntry({Timestamp(Seconds(5), 0), 1LL}, nss, docB);
+        auto seedDocA = makeInsertDocumentOplogEntry(
+            {Timestamp(Seconds(4), 0), 1LL}, nss, BSON("_id" << 1 << "a" << 1));
+        auto seedDocB = makeInsertDocumentOplogEntry(
+            {Timestamp(Seconds(5), 0), 1LL}, nss, BSON("_id" << 2 << "b" << 1));
+        auto opA = makeUpdateDocumentOplogEntry({Timestamp(Seconds(6), 0), 1LL},
+                                                nss,
+                                                BSON("_id" << 1),
+                                                BSON("_id" << 1 << "a" << BSON_ARRAY(4 << 5)));
+        auto opB = makeUpdateDocumentOplogEntry({Timestamp(Seconds(7), 0), 1LL},
+                                                nss,
+                                                BSON("_id" << 2),
+                                                BSON("_id" << 2 << "b" << BSON_ARRAY(6 << 7)));
 
-        TestApplyOplogGroupApplier oplogApplier(
-            nullptr, nullptr, OplogApplier::Options(OplogApplication::Mode::kSecondary, false));
         WorkerMultikeyPathInfo pathInfo;
-        std::vector<ApplierOperation> ops = {ApplierOperation{&opA}, ApplierOperation{&opB}};
-        const bool dataIsConsistent = true;
-        ASSERT_OK(
-            oplogApplier.applyOplogBatchPerWorker(_opCtx.get(), ops, pathInfo, dataIsConsistent));
+        collectWorkerMultikeyPathInfo(_opCtx.get(),
+                                      {ApplierOperation{&seedDocA},
+                                       ApplierOperation{&seedDocB},
+                                       ApplierOperation{&opA},
+                                       ApplierOperation{&opB}},
+                                      &pathInfo);
         ASSERT_EQ(pathInfo.size(), 2UL);
+        ASSERT_EQ("a_1", pathInfo[0].indexName);
+        ASSERT_EQ(Timestamp(Seconds(6), 0), pathInfo[0].earliestTimestamp);
+        ASSERT_EQ("b_1", pathInfo[1].indexName);
+        ASSERT_EQ(Timestamp(Seconds(7), 0), pathInfo[1].earliestTimestamp);
     }
 }
 
@@ -3997,7 +4790,7 @@ TEST_F(OplogApplierImplTest, OplogApplicationThreadFuncFailsWhenCollectionCreati
     ASSERT_EQUALS(
         ErrorCodes::InvalidOptions,
         oplogApplier.applyOplogBatchPerWorker(_opCtx.get(), ops, pathInfo, dataIsConsistent));
-    ASSERT_EQUALS(1,
+    ASSERT_EQUALS(2,
                   logs.countBSONContainingSubset(BSON(
                       "attr" << BSON("opTime" << BSON("ts" << Timestamp(1, 0) << "t" << 1LL)))));
 }
@@ -4516,7 +5309,7 @@ TEST_F(IdempotencyTest, Geo2dsphereIndexFailedOnUpdate) {
                             update_oplog_entry::makeDeltaOplogEntry(BSON(
                                 doc_diff::kUpdateSectionFieldName << fromjson("{loc: 'hi'}"))));
     auto status = runOpInitialSync(updateOp2);
-    ASSERT_EQ(status.code(), 16755);
+    ASSERT_EQ(status.code(), ErrorCodes::GeoKeyExtractionFailed);
 }
 
 TEST_F(IdempotencyTest, Geo2dsphereIndex) {
@@ -5698,10 +6491,10 @@ TEST_F(IdempotencyTestDisableSteadyStateConstraints, AcceptableErrorsRecordedInS
         nextOpTime(), _nss, collModCmd, boost::none /* object2 */, UUID::gen());
 
     // Ensure that NamespaceNotFound is "acceptable" but counted.
-    int prevAcceptableError = replOpCounters().getAcceptableErrorInCommand()->load();
+    int prevAcceptableError = replOpCounters().acceptableErrorsInCommand->value();
     ASSERT_OK(runOpSteadyState(collModOp));
 
-    auto postAcceptableError = replOpCounters().getAcceptableErrorInCommand()->load();
+    auto postAcceptableError = replOpCounters().acceptableErrorsInCommand->value();
     ASSERT_EQ(1, postAcceptableError - prevAcceptableError);
 
     ASSERT_EQ(postAcceptableError,
@@ -6776,15 +7569,13 @@ TEST_F(PreparedTxnSplitTest, SinglePreparedTxnMultipleOpsOnOneDoc) {
 }
 
 class PreparedTxnSplitSizeMetadataTest : public PreparedTxnSplitTest {
-    RAIIServerParameterControllerForTest _fastCountFlag{"featureFlagReplicatedFastCount", true};
-    RAIIServerParameterControllerForTest _durabilityFlag{"featureFlagReplicatedFastCountDurability",
-                                                         true};
+    unittest::ServerParameterGuard _fastCountFlag{"featureFlagReplicatedFastCount", true};
 };
 
 TEST_F(PreparedTxnSplitSizeMetadataTest, SizeMetadataIsSummedAcrossSplits) {
-    // Use the actual pool size as the modulus so findDocIdWithSeparateWriterId guarantees
-    // the two docs hash to different writer buckets deterministically.
-    const int nWriters = _workerPool->getStats().options.maxThreads;
+    // Use a fixed large writer count so findDocIdWithSeparateWriterId reliably finds two
+    // doc IDs that hash to different buckets regardless of the actual thread pool size.
+    const int nWriters = 100;
     const int kDocID1 = 1001;
     const int kDocID2 =
         findDocIdWithSeparateWriterId(_opCtx.get(), _nss, *_uuid, kDocID1, nWriters);
@@ -6849,6 +7640,487 @@ TEST_F(PreparedTxnSplitSizeMetadataTest, SizeMetadataIsSummedAcrossSplits) {
     EXPECT_EQ(entry.getUuid(), *_uuid);
     EXPECT_EQ(entry.getSz(), kSz1 + kSz2);
     EXPECT_EQ(entry.getCt(), 2);  // two inserts
+}
+
+// Tests that container ops packing multiple keys are split apart before being distributed, so that
+// every op touching a given key is assigned to the same writer thread. Without the split, an insert
+// of a batch of keys and a delete of one of those keys can land on different threads and race.
+class ContainerOpWriterVectorTest : public OplogApplierImplTest {
+protected:
+    void setUp() override {
+        OplogApplierImplTest::setUp();
+        _workerPool = makeReplWorkerPool();
+        _applier = std::make_unique<OplogApplierImpl>(
+            nullptr,  // executor
+            nullptr,  // oplogBuffer
+            &_observer,
+            ReplicationCoordinator::get(_opCtx.get()),
+            getConsistencyMarkers(),
+            getStorageInterface(),
+            OplogApplier::Options(OplogApplication::Mode::kSecondary, false),
+            _workerPool.get());
+    }
+
+    OplogEntry makeContainerOp(OpTime opTime, OpTypeEnum opType, const BSONObj& o) {
+        return OplogEntry(DurableOplogEntry(DurableOplogEntryParams{
+            .opTime = opTime,
+            .opType = opType,
+            .nss = NamespaceString::kContainerNamespace,
+            .container = kIdent,
+            .oField = o,
+            .wallClockTime = Date_t::now(),
+        }));
+    }
+
+    static BSONBinData bytesKey(std::string_view key) {
+        return BSONBinData(key.data(), key.size(), BinDataGeneral);
+    }
+
+    // Builds a container op suitable for nesting in an applyOps entry.
+    static ReplOperation makeContainerReplOp(OpTypeEnum type, const BSONObj& o) {
+        ReplOperation op;
+        op.setOpType(type);
+        op.setNss(NamespaceString::kContainerNamespace);
+        op.setContainer(kIdent);
+        op.setObject(o);
+        return op;
+    }
+
+    size_t countOpsOnNss(const std::vector<std::vector<ApplierOperation>>& writerVectors,
+                         const NamespaceString& nss) {
+        size_t count = 0;
+        for (const auto& writer : writerVectors) {
+            count += std::count_if(writer.begin(), writer.end(), [&](const ApplierOperation& op) {
+                return op->getNss() == nss;
+            });
+        }
+        return count;
+    }
+
+    // Returns the index of the writer vector holding the single container op whose 'o' field equals
+    // 'expectedO', asserting that exactly one op across all writers matches.
+    size_t writerFor(const std::vector<std::vector<ApplierOperation>>& writerVectors,
+                     const BSONObj& expectedO) {
+        boost::optional<size_t> found;
+        for (size_t i = 0; i < writerVectors.size(); ++i) {
+            for (const auto& op : writerVectors[i]) {
+                if (op->isContainerOpType() &&
+                    SimpleBSONObjComparator::kInstance.evaluate(op->getObject() == expectedO)) {
+                    ASSERT_FALSE(found.has_value())
+                        << "more than one writer got " << expectedO.toString();
+                    found = i;
+                }
+            }
+        }
+        ASSERT_TRUE(found.has_value()) << "no writer got " << expectedO.toString();
+        return *found;
+    }
+
+    size_t countContainerOps(const std::vector<std::vector<ApplierOperation>>& writerVectors) {
+        size_t count = 0;
+        for (const auto& writer : writerVectors) {
+            count += std::count_if(writer.begin(), writer.end(), [](const ApplierOperation& op) {
+                return op->isContainerOpType();
+            });
+        }
+        return count;
+    }
+
+    uint32_t hashOf(OplogEntry& op) {
+        CachedCollectionProperties collPropertiesCache;
+        return OplogApplierUtils::getOplogEntryHash(_opCtx.get(), &op, &collPropertiesCache);
+    }
+
+    // Asserts that 'packed' expands to entries hashing exactly like scalar entries built from
+    // 'expectedScalarOs', in order.
+    //
+    // This compares raw hashes rather than writer indices on purpose. A writer index is
+    // 'hash % numWriters', so two different hashes collide onto one writer once every numWriters
+    // times; an expansion that produced the right op count with a wrong key could pass a
+    // writer-index check by luck. Hash equality admits no such collision.
+    void assertExpansionHashesMatchScalars(const OplogEntry& packed,
+                                           OpTypeEnum type,
+                                           const std::vector<BSONObj>& expectedScalarOs) {
+        auto expanded = OplogApplierUtils::expandBatchedContainerOp(packed);
+        ASSERT_TRUE(expanded.has_value());
+        ASSERT_EQ(expectedScalarOs.size(), expanded->size());
+
+        for (size_t i = 0; i < expanded->size(); ++i) {
+            auto scalar = makeContainerOp({Timestamp(9, 9), 1}, type, expectedScalarOs[i]);
+            ASSERT_EQ(hashOf((*expanded)[i]), hashOf(scalar))
+                << "expanded[" << i << "] o=" << (*expanded)[i].getObject().toString()
+                << " did not hash like scalar o=" << expectedScalarOs[i].toString();
+        }
+    }
+
+    static constexpr std::string_view kIdent = "test-ident";
+    NoopOplogApplierObserver _observer;
+    std::unique_ptr<ThreadPool> _workerPool;
+    std::unique_ptr<OplogApplierImpl> _applier;
+};
+
+TEST_F(ContainerOpWriterVectorTest, BytesKeyArrayInsertIsSplitPerKey) {
+    auto value = BSONBinData("V", 1, BinDataGeneral);
+    std::vector<OplogEntry> ops{
+        makeContainerOp({Timestamp(1, 1), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2") << bytesKey("K3"))
+                                 << "v" << value)),
+        // A single-key delete of one of the batched keys, as generated when batching is off or when
+        // only one key is deleted.
+        makeContainerOp(
+            {Timestamp(1, 2), 1}, OpTypeEnum::kContainerDelete, BSON("k" << bytesKey("K2"))),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    // Three single-key inserts plus the delete.
+    ASSERT_EQ(4, countContainerOps(writerVectors));
+
+    // The insert of K2 and the delete of K2 must be applied by the same thread.
+    ASSERT_EQ(writerFor(writerVectors, BSON("k" << bytesKey("K2") << "v" << value)),
+              writerFor(writerVectors, BSON("k" << bytesKey("K2"))));
+}
+
+TEST_F(ContainerOpWriterVectorTest, IntKeyRangeInsertIsSplitPerKey) {
+    const int64_t base = 100;
+    auto v0 = BSONBinData("A", 1, BinDataGeneral);
+    auto v1 = BSONBinData("B", 1, BinDataGeneral);
+
+    std::vector<OplogEntry> ops{
+        // An int base key with an array of values covers the keys 'base' and 'base + 1'.
+        makeContainerOp({Timestamp(1, 1), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << base << "v" << BSON_ARRAY(v0 << v1))),
+        // A delete of the second key in that range, which only hashes to the same thread if the
+        // range was expanded; the packed entry only ever names 'base'.
+        makeContainerOp(
+            {Timestamp(1, 2), 1}, OpTypeEnum::kContainerDelete, BSON("k" << (base + 1))),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(3, countContainerOps(writerVectors));
+    ASSERT_EQ(writerFor(writerVectors, BSON("k" << (base + 1) << "v" << v1)),
+              writerFor(writerVectors, BSON("k" << (base + 1))));
+}
+
+TEST_F(ContainerOpWriterVectorTest, KeyArrayDeleteIsSplitPerKey) {
+    auto value = BSONBinData("V", 1, BinDataGeneral);
+    std::vector<OplogEntry> ops{
+        makeContainerOp({Timestamp(1, 1), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << bytesKey("K2") << "v" << value)),
+        makeContainerOp({Timestamp(1, 2), 1},
+                        OpTypeEnum::kContainerDelete,
+                        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")))),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(3, countContainerOps(writerVectors));
+    ASSERT_EQ(writerFor(writerVectors, BSON("k" << bytesKey("K2") << "v" << value)),
+              writerFor(writerVectors, BSON("k" << bytesKey("K2"))));
+}
+
+TEST_F(ContainerOpWriterVectorTest, PairedKeyAndValueArraysAreSplitPairwise) {
+    auto v1 = BSONBinData("A", 1, BinDataGeneral);
+    auto v2 = BSONBinData("B", 1, BinDataGeneral);
+
+    std::vector<OplogEntry> ops{
+        makeContainerOp({Timestamp(1, 1), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")) << "v"
+                                 << BSON_ARRAY(v1 << v2))),
+        makeContainerOp(
+            {Timestamp(1, 2), 1}, OpTypeEnum::kContainerDelete, BSON("k" << bytesKey("K2"))),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(3, countContainerOps(writerVectors));
+    // Each key keeps its own paired value.
+    ASSERT_EQ(writerFor(writerVectors, BSON("k" << bytesKey("K2") << "v" << v2)),
+              writerFor(writerVectors, BSON("k" << bytesKey("K2"))));
+}
+
+TEST_F(ContainerOpWriterVectorTest, SingleKeyOpsAreNotExpanded) {
+    auto value = BSONBinData("V", 1, BinDataGeneral);
+    std::vector<OplogEntry> ops{
+        makeContainerOp({Timestamp(1, 1), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << bytesKey("K1") << "v" << value)),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(1, countContainerOps(writerVectors));
+    // No expansion means no derived ops were needed to own the split entries.
+    ASSERT_TRUE(derivedOps.empty());
+}
+
+// A packed entry with no keys writes nothing, so it must be dropped rather than passed through.
+// Passing it through would trip the tassert in getContainerKeyHash(), since it is still a packed
+// entry; this is why expandBatchedContainerOp() distinguishes an empty expansion (drop) from
+// boost::none (not packed, apply as is).
+TEST_F(ContainerOpWriterVectorTest, EmptyKeyArrayEntryIsDroppedRatherThanApplied) {
+    auto value = BSONBinData("V", 1, BinDataGeneral);
+    auto emptyInsert = makeContainerOp({Timestamp(1, 1), 1},
+                                       OpTypeEnum::kContainerInsert,
+                                       BSON("k" << BSONArray() << "v" << value));
+    auto emptyDelete = makeContainerOp(
+        {Timestamp(1, 2), 1}, OpTypeEnum::kContainerDelete, BSON("k" << BSONArray()));
+
+    // An empty expansion is not the same as no expansion: both are packed entries, so both return
+    // a value, but that value holds no ops.
+    for (const auto* packed : {&emptyInsert, &emptyDelete}) {
+        auto expanded = OplogApplierUtils::expandBatchedContainerOp(*packed);
+        ASSERT_TRUE(expanded.has_value()) << packed->toStringForLogging();
+        ASSERT_TRUE(expanded->empty()) << packed->toStringForLogging();
+    }
+
+    // The empty entries are dropped and the rest of the batch is distributed as usual.
+    std::vector<OplogEntry> ops{
+        emptyInsert,
+        emptyDelete,
+        makeContainerOp({Timestamp(1, 3), 1},
+                        OpTypeEnum::kContainerInsert,
+                        BSON("k" << bytesKey("K1") << "v" << value)),
+    };
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(1, countContainerOps(writerVectors));
+    // The surviving op is the single-key insert; writerFor() asserts it is present exactly once.
+    writerFor(writerVectors, BSON("k" << bytesKey("K1") << "v" << value));
+}
+
+// Every entry an expansion produces must carry the optime of the packed entry it came from.
+// applyContainerOperations() commits a group of container ops at the timestamp of the first one and
+// uasserts (12337302) that the rest agree, and the recovery unit's commit timestamp is taken from
+// that same field, so an expanded entry that lost or altered its 'ts' would either fail to apply or
+// commit at the wrong point in the oplog.
+TEST_F(ContainerOpWriterVectorTest, ExpandedEntriesKeepOriginalCommitTimestamp) {
+    const OpTime opTime{Timestamp(7, 3), 2};
+    auto v0 = BSONBinData("A", 1, BinDataGeneral);
+    auto v1 = BSONBinData("B", 1, BinDataGeneral);
+
+    // One case per expansion shape, since each rebuilds the 'o' field differently.
+    const std::vector<std::pair<OpTypeEnum, BSONObj>> packedCases{
+        // Array of keys sharing one value.
+        {OpTypeEnum::kContainerInsert,
+         BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")) << "v" << v0)},
+        // Paired arrays of keys and values.
+        {OpTypeEnum::kContainerInsert,
+         BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")) << "v" << BSON_ARRAY(v0 << v1))},
+        // Int base key with an array of values, where the keys are synthesized rather than copied.
+        {OpTypeEnum::kContainerInsert, BSON("k" << int64_t{100} << "v" << BSON_ARRAY(v0 << v1))},
+        // Array of keys to delete.
+        {OpTypeEnum::kContainerDelete, BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")))},
+    };
+
+    for (const auto& [type, o] : packedCases) {
+        auto packed = makeContainerOp(opTime, type, o);
+        auto expanded = OplogApplierUtils::expandBatchedContainerOp(packed);
+        ASSERT_TRUE(expanded.has_value()) << o.toString();
+        ASSERT_EQ(2, expanded->size()) << o.toString();
+
+        for (const auto& op : *expanded) {
+            ASSERT_EQ(opTime, op.getOpTime()) << o.toString();
+            ASSERT_EQ(opTime.getTimestamp(), op.getTimestamp()) << o.toString();
+            ASSERT_EQ(packed.getWallClockTime(), op.getWallClockTime()) << o.toString();
+            // The container the keys belong to must survive the rebuild too, since the commit
+            // grouping keys off of it.
+            ASSERT_EQ(packed.getContainer(), op.getContainer()) << o.toString();
+        }
+    }
+}
+
+// The existing ContainerOplogEntryHashesOnKey and ContainerUpdateOplogEntryHashesOnKey tests pin
+// this invariant for scalar keys. These extend it to the packed shapes, which is the gap the
+// scatter bug slipped through.
+TEST_F(ContainerOpWriterVectorTest, ExpandedBytesKeyArrayHashesLikeScalarEntries) {
+    auto v = BSONBinData("V", 1, BinDataGeneral);
+    auto packed = makeContainerOp(
+        {Timestamp(1, 1), 1},
+        OpTypeEnum::kContainerInsert,
+        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2") << bytesKey("K3")) << "v" << v));
+
+    assertExpansionHashesMatchScalars(packed,
+                                      OpTypeEnum::kContainerInsert,
+                                      {BSON("k" << bytesKey("K1") << "v" << v),
+                                       BSON("k" << bytesKey("K2") << "v" << v),
+                                       BSON("k" << bytesKey("K3") << "v" << v)});
+}
+
+TEST_F(ContainerOpWriterVectorTest, ExpandedIntKeyRangeHashesLikeScalarEntries) {
+    const int64_t base = 100;
+    auto v0 = BSONBinData("A", 1, BinDataGeneral);
+    auto v1 = BSONBinData("B", 1, BinDataGeneral);
+
+    auto packed = makeContainerOp({Timestamp(1, 1), 1},
+                                  OpTypeEnum::kContainerInsert,
+                                  BSON("k" << base << "v" << BSON_ARRAY(v0 << v1)));
+
+    // Note the second key is 'base + 1', which the packed entry never names.
+    assertExpansionHashesMatchScalars(
+        packed,
+        OpTypeEnum::kContainerInsert,
+        {BSON("k" << base << "v" << v0), BSON("k" << (base + 1) << "v" << v1)});
+}
+
+TEST_F(ContainerOpWriterVectorTest, ExpandedPairedArraysHashLikeScalarEntries) {
+    auto v1 = BSONBinData("A", 1, BinDataGeneral);
+    auto v2 = BSONBinData("B", 1, BinDataGeneral);
+
+    auto packed = makeContainerOp(
+        {Timestamp(1, 1), 1},
+        OpTypeEnum::kContainerInsert,
+        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2")) << "v" << BSON_ARRAY(v1 << v2)));
+
+    assertExpansionHashesMatchScalars(
+        packed,
+        OpTypeEnum::kContainerInsert,
+        {BSON("k" << bytesKey("K1") << "v" << v1), BSON("k" << bytesKey("K2") << "v" << v2)});
+}
+
+TEST_F(ContainerOpWriterVectorTest, ExpandedKeyArrayDeleteHashesLikeScalarEntries) {
+    auto packed = makeContainerOp({Timestamp(1, 1), 1},
+                                  OpTypeEnum::kContainerDelete,
+                                  BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2"))));
+
+    assertExpansionHashesMatchScalars(packed,
+                                      OpTypeEnum::kContainerDelete,
+                                      {BSON("k" << bytesKey("K1")), BSON("k" << bytesKey("K2"))});
+}
+
+// Guards against the hash degenerating to something key-independent, which would make every
+// assertion above pass vacuously.
+TEST_F(ContainerOpWriterVectorTest, DistinctKeysInOneExpansionHashDifferently) {
+    auto packed = makeContainerOp(
+        {Timestamp(1, 1), 1},
+        OpTypeEnum::kContainerInsert,
+        BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2") << bytesKey("K3"))));
+
+    auto expanded = OplogApplierUtils::expandBatchedContainerOp(packed);
+    ASSERT_TRUE(expanded.has_value());
+    ASSERT_EQ(3, expanded->size());
+
+    ASSERT_NOT_EQUALS(hashOf((*expanded)[0]), hashOf((*expanded)[1]));
+    ASSERT_NOT_EQUALS(hashOf((*expanded)[1]), hashOf((*expanded)[2]));
+    ASSERT_NOT_EQUALS(hashOf((*expanded)[0]), hashOf((*expanded)[2]));
+}
+
+// The tests above build standalone container entries, which take the single-op expansion path.
+// Container writes generated under a BatchedWriteContext instead arrive nested in a
+// non-transactional applyOps, which is the path primary-driven index build writes actually take,
+// and which goes through the bulk expandBatchedContainerOps() instead.
+TEST_F(ContainerOpWriterVectorTest, PackedContainerOpsNestedInApplyOpsAreExpanded) {
+    auto v = BSONBinData("V", 1, BinDataGeneral);
+    const auto crudNss = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    // A non-container op in the same applyOps, to cover the branch of the bulk loop that carries
+    // ops over untouched.
+    ReplOperation crudOp;
+    crudOp.setOpType(OpTypeEnum::kInsert);
+    crudOp.setNss(crudNss);
+    crudOp.setUuid(UUID::gen());
+    crudOp.setObject(BSON("_id" << 1));
+
+    std::vector<ReplOperation> innerOps{
+        makeContainerReplOp(OpTypeEnum::kContainerInsert,
+                            BSON("k"
+                                 << BSON_ARRAY(bytesKey("K1") << bytesKey("K2") << bytesKey("K3"))
+                                 << "v" << v)),
+        crudOp,
+        makeContainerReplOp(OpTypeEnum::kContainerDelete, BSON("k" << bytesKey("K2"))),
+    };
+
+    std::vector<OplogEntry> ops{
+        addMultiOpType(makeApplyOpsOplogEntry({Timestamp(1, 1), 1},
+                                              innerOps,
+                                              {},
+                                              Date_t::now(),
+                                              {},
+                                              boost::none /* prevWriteOpTimeInTransaction */),
+                       MultiOplogEntryType::kApplyOpsAppliedSeparately)};
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    // The packed insert became three single-key inserts, plus the delete.
+    ASSERT_EQ(4, countContainerOps(writerVectors));
+
+    // The insert of K2 and the delete of K2 must still land on the same thread.
+    ASSERT_EQ(writerFor(writerVectors, BSON("k" << bytesKey("K2") << "v" << v)),
+              writerFor(writerVectors, BSON("k" << bytesKey("K2"))));
+
+    // The non-container op survives the rebuild rather than being dropped.
+    ASSERT_EQ(1, countOpsOnNss(writerVectors, crudNss));
+}
+
+// A packed op holding a single key still has to be expanded, even though doing so leaves the op
+// count unchanged. This guards expandBatchedContainerOps() against deciding whether an expansion is
+// needed from the expanded count alone: were this entry left packed, it would reach writer thread
+// assignment as a packed entry and trip its assertion.
+TEST_F(ContainerOpWriterVectorTest, SingleElementKeyArrayInApplyOpsIsStillExpanded) {
+    auto v = BSONBinData("V", 1, BinDataGeneral);
+
+    std::vector<ReplOperation> innerOps{makeContainerReplOp(
+        OpTypeEnum::kContainerInsert, BSON("k" << BSON_ARRAY(bytesKey("K1")) << "v" << v))};
+
+    std::vector<OplogEntry> ops{
+        addMultiOpType(makeApplyOpsOplogEntry({Timestamp(1, 1), 1},
+                                              innerOps,
+                                              {},
+                                              Date_t::now(),
+                                              {},
+                                              boost::none /* prevWriteOpTimeInTransaction */),
+                       MultiOplogEntryType::kApplyOpsAppliedSeparately)};
+
+    std::vector<std::vector<ApplierOperation>> writerVectors(
+        _workerPool->getStats().options.maxThreads);
+    std::vector<std::vector<OplogEntry>> derivedOps;
+    _applier->fillWriterVectors_forTest(_opCtx.get(), &ops, &writerVectors, &derivedOps);
+
+    ASSERT_EQ(1, countContainerOps(writerVectors));
+
+    // The surviving op holds the scalar key, not the one element array it arrived as. writerFor()
+    // asserts exactly one op matches.
+    std::ignore = writerFor(writerVectors, BSON("k" << bytesKey("K1") << "v" << v));
+}
+
+using ContainerOpWriterVectorDeathTest = ContainerOpWriterVectorTest;
+
+// The backstop for any distribution path that forgets to expand: a packed entry must fail loudly at
+// writer assignment rather than silently scatter its keys across threads.
+DEATH_TEST_F(ContainerOpWriterVectorDeathTest,
+             PackedEntryReachingWriterAssignmentFails,
+             "container op packing multiple keys reached writer thread assignment") {
+    auto packed = makeContainerOp({Timestamp(1, 1), 1},
+                                  OpTypeEnum::kContainerInsert,
+                                  BSON("k" << BSON_ARRAY(bytesKey("K1") << bytesKey("K2"))));
+    std::ignore = hashOf(packed);
 }
 
 }  // namespace

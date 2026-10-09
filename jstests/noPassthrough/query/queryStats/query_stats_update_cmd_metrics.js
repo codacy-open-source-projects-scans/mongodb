@@ -6,400 +6,476 @@
  * @tags: [requires_fcv_90]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
-import {after, before, beforeEach, describe, it} from "jstests/libs/mochalite.js";
+import {describe, it} from "jstests/libs/mochalite.js";
 import {
     assertAggregatedMetricsSingleExec,
-    assertExpectedResults,
     getLatestQueryStatsEntry,
     getQueryStatsUpdateCmd,
     resetQueryStatsStore,
 } from "jstests/libs/query/query_stats_utils.js";
-import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {ShardingTest} from "jstests/libs/shardingtest.js";
-
-function resetCollection(coll) {
-    coll.drop();
-    assert.commandWorked(coll.insert([{v: 1}, {v: 2}, {v: 3}, {v: 4}, {v: 5}, {v: 6}, {v: 7}, {v: 8}]));
-}
+import {
+    assertWriteCmdQueryStatsSingleExec,
+    describeRetryableWriteQueryStatsTests,
+    describeWriteCmdQueryStatsCrossShardTests,
+    describeWriteCmdQueryStatsReplicaSetTests,
+    describeWriteCmdQueryStatsShardedTests,
+} from "jstests/libs/query/query_stats_write_cmd_utils.js";
 
 function testReplacementUpdate(testDB, coll, collName) {
-    const cmd = {
-        update: collName,
-        updates: [
-            {
-                q: {$or: [{v: {$lt: 3}}, {v: {$eq: 4}}]},
-                u: {v: 1000, updated: true},
-                multi: false,
-            },
-        ],
-        comment: "running replacement update!!",
-    };
-
-    assert.commandWorked(testDB.runCommand(cmd));
-
-    const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
-    assert.eq(entry.key.queryShape.command, "update");
-
-    assertAggregatedMetricsSingleExec(entry, {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [
+                {
+                    q: {$or: [{v: {$lt: 3}}, {v: {$eq: 4}}]},
+                    u: {v: 1000, updated: true},
+                    multi: false,
+                },
+            ],
+            comment: "running replacement update!!",
+        }),
+    );
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
         keysExamined: 0,
         docsExamined: 1,
-        hasSortStage: false,
-        usedDisk: false,
-        fromMultiPlanner: false,
-        fromPlanCache: false,
-        writes: {nMatched: 1, nUpserted: 0, nModified: 1, nDeleted: 0, nInserted: 0, nUpdateOps: 1},
-    });
-    assertExpectedResults({
-        results: entry,
-        expectedQueryStatsKey: entry.key,
-        expectedExecCount: 1,
-        expectedDocsReturnedSum: 0,
-        expectedDocsReturnedMax: 0,
-        expectedDocsReturnedMin: 0,
-        expectedDocsReturnedSumOfSq: 0,
+        writes: {
+            nMatched: 1,
+            nUpserted: 0,
+            nModified: 1,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            // Only the non-indexed field v is modified, so no index keys are touched.
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
     });
 }
 
 // Simple _id queries skip parsing during normal update processing (IDHACK optimization),
 // but should still record metrics correctly.
 function testIdUpdate(testDB, coll, collName) {
-    assert.commandWorked(coll.insert({_id: 999, v: 1}));
-
-    const cmd = {
-        update: collName,
-        updates: [{q: {_id: 999}, u: {_id: 999, v: 2000}, multi: false}],
-        comment: "running update filtered on _id!!",
-    };
-
-    assert.commandWorked(testDB.runCommand(cmd));
-
-    const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
-    assert.eq(entry.key.queryShape.command, "update");
-
-    assertAggregatedMetricsSingleExec(entry, {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [{q: {_id: 999}, u: {_id: 999, v: 2000}, multi: false}],
+            comment: "running update filtered on _id!!",
+        }),
+    );
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
         keysExamined: 1,
         docsExamined: 1,
-        hasSortStage: false,
-        usedDisk: false,
-        fromMultiPlanner: false,
-        fromPlanCache: false,
-        writes: {nMatched: 1, nUpserted: 0, nModified: 1, nDeleted: 0, nInserted: 0, nUpdateOps: 1},
+        writes: {
+            nMatched: 1,
+            nUpserted: 0,
+            nModified: 1,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            // The replacement keeps _id unchanged and modifies only non-indexed fields, so no
+            // index keys are touched.
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
     });
-
-    assertExpectedResults({
-        results: entry,
-        expectedQueryStatsKey: entry.key,
-        expectedExecCount: 1,
-        expectedDocsReturnedSum: 0,
-        expectedDocsReturnedMax: 0,
-        expectedDocsReturnedMin: 0,
-        expectedDocsReturnedSumOfSq: 0,
-    });
-
-    assert.commandWorked(coll.remove({_id: 999}));
 }
 
 function testModifierUpdate(testDB, coll, collName) {
-    const cmd = {
-        update: collName,
-        updates: [
-            {
-                q: {},
-                u: {$set: {v: "newValue", documentUpdated: true, count: 42}},
-                multi: true,
-            },
-        ],
-        comment: "running modifier update!!",
-    };
-
-    assert.commandWorked(testDB.runCommand(cmd));
-
-    const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
-    assert.eq(entry.key.queryShape.command, "update");
-
-    assertAggregatedMetricsSingleExec(entry, {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [
+                {q: {}, u: {$set: {v: "newValue", documentUpdated: true, count: 42}}, multi: true},
+            ],
+            comment: "running modifier update!!",
+        }),
+    );
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
         keysExamined: 0,
         docsExamined: 8,
-        hasSortStage: false,
-        usedDisk: false,
-        fromMultiPlanner: false,
-        fromPlanCache: false,
-        writes: {nMatched: 8, nUpserted: 0, nModified: 8, nDeleted: 0, nInserted: 0, nUpdateOps: 1},
+        writes: {
+            nMatched: 8,
+            nUpserted: 0,
+            nModified: 8,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            // Only non-indexed fields are modified, so no index keys are touched.
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
     });
+}
 
-    assertExpectedResults({
-        results: entry,
-        expectedQueryStatsKey: entry.key,
-        expectedExecCount: 1,
-        expectedDocsReturnedSum: 0,
-        expectedDocsReturnedMax: 0,
-        expectedDocsReturnedMin: 0,
-        expectedDocsReturnedSumOfSq: 0,
+// An update that does not touch any indexed field performs no index maintenance, so keysInserted
+// and keysDeleted are both 0. The collection has only the _id index and the updates never change _id.
+function testNonIndexedFieldUpdate(testDB, coll, collName) {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [{q: {v: {$lt: 3}}, u: {$set: {notIndexed: true}}, multi: true}],
+            comment: "running non-indexed-field update!!",
+        }),
+    );
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
+        keysExamined: 0,
+        docsExamined: 8,
+        writes: {
+            nMatched: 2,
+            nUpserted: 0,
+            nModified: 2,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            // No indexed field changed, so no index keys were inserted or deleted.
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
     });
+}
+
+// An update that changes a field covered by a secondary index performs index maintenance: the old
+// index key is deleted and the new one is inserted. On a sharded cluster the shard reports these
+// per-shard key counts in its write response and mongos sums them into the router-side entry, so
+// this runs on both the replica-set and sharded suites.
+function testIndexedFieldUpdate(testDB, coll, collName) {
+    // The collection was reset (and any previous index dropped) in beforeEach. Build a secondary
+    // index on the field 'w' and insert a single document carrying it. The index build and the
+    // insert run before the update command, so they don't contribute to the update's metrics.
+    assert.commandWorked(coll.createIndex({w: 1}));
+    assert.commandWorked(coll.insert({_id: 9999, w: 1}));
+    // Reset the query stats store so the insert doesn't appear when validating the entry.
+    resetQueryStatsStore(testDB.getMongo(), "1MB");
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            // Filter on _id (IDHACK) rather than the mutated field, so the index scan is over the
+            // _id index and the planner doesn't re-examine the {w: 1} index keys we are changing.
+            updates: [{q: {_id: 9999}, u: {$set: {w: 2}}, multi: false}],
+            comment: "running indexed-field update!!",
+        }),
+    );
+    // The _id index targets the single document (keysExamined = docsExamined = 1). Changing the
+    // indexed field w from 1 to 2 deletes the old {w: 1} index key and inserts the new {w: 2} key.
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
+        keysExamined: 1,
+        docsExamined: 1,
+        writes: {
+            nMatched: 1,
+            nUpserted: 0,
+            nModified: 1,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            keysInserted: 1,
+            keysDeleted: 1,
+        },
+    });
+    assert.commandWorked(coll.remove({_id: 9999}));
 }
 
 function testPipelineUpdate(testDB, coll, collName) {
-    const cmd = {
-        update: collName,
-        updates: [
-            {
-                q: {},
-                u: [
-                    {$set: {v: "$$newValue", pipelineUpdated: true, count: 42}},
-                    {$unset: "oldField"},
-                    {$replaceWith: {newDoc: "$$ROOT", timestamp: "$$NOW", processed: true}},
-                ],
-                c: {newValue: 3000},
-                multi: true,
-            },
-        ],
-        comment: "running pipeline update!!",
-    };
-
-    assert.commandWorked(testDB.runCommand(cmd));
-
-    const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
-    assert.eq(entry.key.queryShape.command, "update");
-
-    assertAggregatedMetricsSingleExec(entry, {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [
+                {
+                    q: {},
+                    u: [
+                        {$set: {v: "$$newValue", pipelineUpdated: true, count: 42}},
+                        {$unset: "oldField"},
+                        {$replaceWith: {newDoc: "$$ROOT", timestamp: "$$NOW", processed: true}},
+                    ],
+                    c: {newValue: 3000},
+                    multi: true,
+                },
+            ],
+            comment: "running pipeline update!!",
+        }),
+    );
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
         keysExamined: 0,
         docsExamined: 8,
-        hasSortStage: false,
-        usedDisk: false,
-        fromMultiPlanner: false,
-        fromPlanCache: false,
-        writes: {nMatched: 8, nUpserted: 0, nModified: 8, nDeleted: 0, nInserted: 0, nUpdateOps: 1},
-    });
-
-    assertExpectedResults({
-        results: entry,
-        expectedQueryStatsKey: entry.key,
-        expectedExecCount: 1,
-        expectedDocsReturnedSum: 0,
-        expectedDocsReturnedMax: 0,
-        expectedDocsReturnedMin: 0,
-        expectedDocsReturnedSumOfSq: 0,
+        writes: {
+            nMatched: 8,
+            nUpserted: 0,
+            nModified: 8,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            // Only non-indexed fields are modified, so no index keys are touched.
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
     });
 }
 
-describe("query stats update command metrics (replica set)", function () {
-    let rst;
-    let conn;
-    let testDB;
+function testUpdateNoMatches(testDB, coll, collName) {
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [{q: {v: {$gt: 9}}, u: {$set: {status: "active"}}, multi: true}],
+        }),
+    );
 
-    before(function () {
-        rst = new ReplSetTest({
-            nodes: 1,
-            nodeOptions: {
-                setParameter: {
-                    internalQueryStatsRateLimit: -1,
-                    internalQueryStatsWriteCmdSampleRate: 1,
-                },
-            },
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
+        keysExamined: 0,
+        docsExamined: 8,
+        writes: {
+            nMatched: 0,
+            nUpserted: 0,
+            nModified: 0,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 1,
+            nDeleteOps: 0,
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
+    });
+}
+
+function testMultiUpdatePartialSuccess(testDB, coll, collName, conn) {
+    // First two update operations should fail, third succeeds.
+    const fp = configureFailPoint(conn, "failAllUpdates", {}, {times: 2});
+    testDB.runCommand({
+        update: collName,
+        updates: [
+            {q: {v: {$gt: 5}}, u: {$set: {status: "active"}}, multi: true},
+            {q: {v: {$gt: 6}}, u: {$set: {status: "active"}}, multi: true},
+            {q: {v: {$lte: 1}}, u: {$set: {status: "active"}}, multi: true},
+        ],
+        ordered: false,
+    });
+    fp.off();
+
+    assertWriteCmdQueryStatsSingleExec(testDB, coll, {
+        command: "update",
+        keysExamined: 0,
+        docsExamined: 8,
+        writes: {
+            nMatched: 1,
+            nUpserted: 0,
+            nModified: 1,
+            nDeleted: 0,
+            nInserted: 0,
+            nUpdateOps: 3,
+            nDeleteOps: 0,
+            keysInserted: 0,
+            keysDeleted: 0,
+        },
+    });
+}
+
+describeWriteCmdQueryStatsReplicaSetTests(
+    "query stats update command metrics (replica set)",
+    (ctxFn) => {
+        describe("update types", function () {
+            it("should record replacement update metrics", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testReplacementUpdate(testDB, coll, collName);
+            });
+
+            it("should record simple _id update metrics", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testIdUpdate(testDB, coll, collName);
+            });
+
+            it("should record modifier update metrics", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testModifierUpdate(testDB, coll, collName);
+            });
+
+            it("should record pipeline update metrics", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testPipelineUpdate(testDB, coll, collName);
+            });
+
+            it("should record update metrics when no documents match the filter", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testUpdateNoMatches(testDB, coll, collName);
+            });
+
+            it("should record multi update metrics for partial successes", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testMultiUpdatePartialSuccess(testDB, coll, collName, testDB.getMongo());
+            });
+
+            it("should record zero key maintenance for a non-indexed-field update", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testNonIndexedFieldUpdate(testDB, coll, collName);
+            });
+
+            it("should record key maintenance for an indexed-field update", function () {
+                const {testDB, coll, collName} = ctxFn();
+                testIndexedFieldUpdate(testDB, coll, collName);
+            });
         });
-        rst.startSet();
-        rst.initiate();
-        conn = rst.getPrimary();
-        testDB = conn.getDB("test");
-    });
 
-    after(function () {
-        rst?.stopSet();
-    });
+        // Test retryable writes with a filter on _id (IDHACK path)
+        describeRetryableWriteQueryStatsTests("retried update writes (_id filter)", ctxFn, {
+            makeOp: (val) => ({q: {_id: val}, u: {$set: {b: val * 100}}, multi: false}),
+            opsField: "updates",
+            cmdName: "update",
+            getCount: (r) => r.nModified,
+            getQueryStatsCmd: getQueryStatsUpdateCmd,
+            assertDocModified: (coll, val) =>
+                assert.eq(
+                    coll.findOne({_id: val}).b,
+                    val * 100,
+                    "Document should be modified after successful retry",
+                ),
+        });
 
-    beforeEach(function () {
-        resetQueryStatsStore(conn, "1MB");
-    });
+        // Non-_id filter exercises the regular query planner path (not IDHACK).
+        describeRetryableWriteQueryStatsTests("retried update writes (non-_id filter)", ctxFn, {
+            makeOp: (val) => ({q: {a: val}, u: {$set: {b: val * 100}}, multi: false}),
+            opsField: "updates",
+            cmdName: "update",
+            getCount: (r) => r.nModified,
+            getQueryStatsCmd: getQueryStatsUpdateCmd,
+            assertDocModified: (coll, val) =>
+                assert.eq(
+                    coll.findOne({a: val}).b,
+                    val * 100,
+                    "Document should be modified after successful retry",
+                ),
+        });
+    },
+);
 
+describeWriteCmdQueryStatsShardedTests("query stats update command metrics (sharded)", (ctxFn) => {
     describe("update types", function () {
-        const collName = jsTestName() + "_metrics";
-        let coll;
-
-        before(function () {
-            coll = testDB[collName];
-        });
-
-        beforeEach(function () {
-            resetCollection(coll);
-        });
-
         it("should record replacement update metrics", function () {
+            const {testDB, coll, collName} = ctxFn();
             testReplacementUpdate(testDB, coll, collName);
         });
 
         it("should record simple _id update metrics", function () {
+            const {testDB, coll, collName} = ctxFn();
             testIdUpdate(testDB, coll, collName);
         });
 
         it("should record modifier update metrics", function () {
+            const {testDB, coll, collName} = ctxFn();
             testModifierUpdate(testDB, coll, collName);
         });
 
         it("should record pipeline update metrics", function () {
+            const {testDB, coll, collName} = ctxFn();
             testPipelineUpdate(testDB, coll, collName);
         });
+
+        it("should record multi update metrics when no documents match the filter", function () {
+            const {testDB, coll, collName, st} = ctxFn();
+            testUpdateNoMatches(testDB, coll, collName);
+        });
     });
 
-    // When retryable writes are active (indicated by the presence of a logical session ID and a
-    // transaction ID), we should only record query stats when the write is actually executed,
-    // even if it's retried several times.
-    describe("retried update writes", function () {
-        const collName = jsTestName() + "_retries";
-        let coll;
+    it("should record zero key maintenance for a non-indexed-field update", function () {
+        const {testDB, coll, collName} = ctxFn();
+        testNonIndexedFieldUpdate(testDB, coll, collName);
+    });
 
-        before(function () {
-            coll = testDB[collName];
-        });
+    it("should record key maintenance for an indexed-field update", function () {
+        const {testDB, coll, collName} = ctxFn();
+        testIndexedFieldUpdate(testDB, coll, collName);
+    });
+});
 
-        beforeEach(function () {
-            coll.drop();
+// Tests cross-shard partial success, where shard1's update fails, while shard0's update succeeds for the
+// same operation. Asserts mongos's partial shard aggregation results and shard-level stats independently.
+describeWriteCmdQueryStatsCrossShardTests(
+    "query stats update command metrics (sharded, cross-shard partial success)",
+    (ctxFn) => {
+        it("should record partial success when shard0 update succeeds and shard1 update fails", function () {
+            const {st, testDB, coll, collName} = ctxFn();
             assert.commandWorked(
                 coll.insert([
-                    {_id: 1, v: 1},
-                    {_id: 2, v: 2},
-                    {_id: 3, v: 3},
+                    {_id: -1, v: 4},
+                    {_id: -2, v: 5},
                 ]),
             );
-        });
-
-        it("retried already-executed statements in a batch should not record query stats", function () {
-            const lsid = {id: UUID()};
-            const txnNumber = NumberLong(1);
-
-            const firstCmd = {
-                update: collName,
-                updates: [
-                    {q: {_id: 1}, u: {$set: {v: 100}}, multi: false},
-                    {q: {_id: 2}, u: {$set: {v: 200}}, multi: false},
-                ],
-                lsid: lsid,
-                txnNumber: txnNumber,
-            };
-
-            const firstResult = assert.commandWorked(testDB.runCommand(firstCmd));
-            assert.eq(firstResult.nModified, 2);
-
-            let entries = getQueryStatsUpdateCmd(conn, {collName: collName});
-            assert.eq(entries.length, 1, "Expected 1 query stats entry after initial batch");
-            assert.eq(entries[0].metrics.execCount, 2);
-
-            // Re-send with the same lsid/txnNumber but a 3-statement batch. StmtIds 0 and 1
-            // are already-executed retries; stmtId 2 is new.
-            const retryCmd = {
-                update: collName,
-                updates: [
-                    {q: {_id: 1}, u: {$set: {v: 100}}, multi: false},
-                    {q: {_id: 2}, u: {$set: {v: 200}}, multi: false},
-                    {q: {_id: 3}, u: {$set: {v: 300}}, multi: false},
-                ],
-                lsid: lsid,
-                txnNumber: txnNumber,
-            };
-
-            const retryResult = assert.commandWorked(testDB.runCommand(retryCmd));
-            assert.eq(
-                retryResult.retriedStmtIds,
-                [0, 1],
-                "Expected retriedStmtIds [0, 1]: " + tojson(retryResult.retriedStmtIds),
+            assert.commandWorked(
+                coll.insert([
+                    {_id: 1, v: 6},
+                    {_id: 2, v: 7},
+                ]),
             );
 
-            entries = getQueryStatsUpdateCmd(conn, {collName: collName});
-            assert.eq(entries.length, 1, "Expected still 1 query stats entry after partial retry");
-            assert.eq(
-                entries[0].metrics.execCount,
-                3,
-                "execCount should be 3 (2 original + 1 new; retries not counted)",
-            );
-        });
-
-        it("failed initial attempt should not record query stats; successful retry should", function () {
-            const lsid = {id: UUID()};
-
-            const updateCmd = {
+            const fp = configureFailPoint(st.shard1, "failAllUpdates", {}, {times: 1});
+            testDB.runCommand({
                 update: collName,
-                updates: [{q: {_id: 2}, u: {$set: {v: 200}}, multi: false}],
-                lsid: lsid,
-                txnNumber: NumberLong(1),
-            };
-
-            // Fail the first update with a non-retryable error so the shell does not
-            // transparently retry. The failpoint intercepts before the command handler runs,
-            // so no query stats are registered for the failed attempt.
-            const fp = configureFailPoint(
-                conn,
-                "failCommand",
-                {
-                    errorCode: ErrorCodes.OperationFailed,
-                    failCommands: ["update"],
-                    namespace: "test." + collName,
-                },
-                {times: 1},
-            );
-
-            assert.commandFailedWithCode(testDB.runCommand(updateCmd), ErrorCodes.OperationFailed);
-
-            assert.eq(coll.findOne({_id: 2}).v, 2, "Document should not be modified after failed attempt");
-
-            let entries = getQueryStatsUpdateCmd(conn, {collName: collName});
-            assert.eq(entries.length, 0, "Expected no query stats after failed attempt");
-
-            // The failpoint has expired (times: 1). Retry with the same lsid and txnNumber —
-            // the server never executed the statement, so it will treat this as a fresh
-            // execution rather than an already-executed retry.
-            const retryResult = assert.commandWorked(testDB.runCommand(updateCmd));
-            assert.eq(retryResult.nModified, 1);
-
-            assert.eq(coll.findOne({_id: 2}).v, 200, "Document should be modified after successful retry");
-
-            entries = getQueryStatsUpdateCmd(conn, {collName: collName});
-            assert.eq(entries.length, 1, "Expected 1 query stats entry after successful retry");
-            assert.eq(entries[0].metrics.execCount, 1);
-
+                updates: [{q: {v: {$gt: 3}}, u: {$set: {status: "active"}}, multi: true}],
+                ordered: false,
+            });
             fp.off();
+
+            // shard0 should succeed, examining, matching, and updating 2 docs.
+            const shard0Entries = getQueryStatsUpdateCmd(st.shard0, {collName});
+            assert.eq(shard0Entries.length, 1, "Expected shard0 to have one query stats entry", {
+                shard0Entries,
+            });
+            assertAggregatedMetricsSingleExec(shard0Entries[0], {
+                keysExamined: 0,
+                docsExamined: 2,
+                hasSortStage: false,
+                usedDisk: false,
+                fromMultiPlanner: false,
+                fromPlanCache: false,
+                writes: {
+                    nMatched: 2,
+                    nUpserted: 0,
+                    nModified: 2,
+                    nDeleted: 0,
+                    nInserted: 0,
+                    nUpdateOps: 1,
+                    nDeleteOps: 0,
+                    keysInserted: 0,
+                    keysDeleted: 0,
+                },
+            });
+
+            // shard1 should fail, resulting in no stats.
+            const shard1Entries = getQueryStatsUpdateCmd(st.shard1, {collName});
+            assert.eq(shard1Entries.length, 0, "Expected shard1 to have no query stats entry", {
+                shard1Entries,
+            });
+
+            // mongos shows aggregated stats (equivalent to shard0's stats).
+            const mongosEntry = getLatestQueryStatsEntry(st.s, {collName: coll.getName()});
+            assertAggregatedMetricsSingleExec(mongosEntry, {
+                keysExamined: 0,
+                docsExamined: 2,
+                hasSortStage: false,
+                usedDisk: false,
+                fromMultiPlanner: false,
+                fromPlanCache: false,
+                writes: {
+                    nMatched: 2,
+                    nUpserted: 0,
+                    nModified: 2,
+                    nDeleted: 0,
+                    nInserted: 0,
+                    nUpdateOps: 1,
+                    nDeleteOps: 0,
+                    keysInserted: 0,
+                    keysDeleted: 0,
+                },
+            });
         });
-    });
-});
-
-describe("query stats update command metrics (sharded)", function () {
-    const collName = jsTestName() + "_sharded";
-    let st;
-    let testDB;
-    let coll;
-
-    before(function () {
-        st = new ShardingTest({
-            shards: 2,
-            mongosOptions: {
-                setParameter: {internalQueryStatsRateLimit: -1, internalQueryStatsWriteCmdSampleRate: 1},
-            },
-        });
-        testDB = st.s.getDB("test");
-        coll = testDB[collName];
-        st.shardColl(coll, {_id: 1}, {_id: 1});
-    });
-
-    after(function () {
-        st?.stop();
-    });
-
-    beforeEach(function () {
-        resetCollection(coll);
-        resetQueryStatsStore(st.s, "1MB");
-    });
-
-    it("should record replacement update metrics", function () {
-        testReplacementUpdate(testDB, coll, collName);
-    });
-
-    it("should record simple _id update metrics", function () {
-        testIdUpdate(testDB, coll, collName);
-    });
-
-    it("should record modifier update metrics", function () {
-        testModifierUpdate(testDB, coll, collName);
-    });
-
-    it("should record pipeline update metrics", function () {
-        testPipelineUpdate(testDB, coll, collName);
-    });
-});
+    },
+);

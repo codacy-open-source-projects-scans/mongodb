@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 
@@ -38,6 +12,7 @@
 #include "mongo/db/query/explain_options.h"
 
 #include <iterator>
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -51,7 +26,7 @@ ALLOCATE_DOCUMENT_SOURCE_ID(singleDocumentTransformation,
 DocumentSourceSingleDocumentTransformation::DocumentSourceSingleDocumentTransformation(
     const intrusive_ptr<ExpressionContext>& pExpCtx,
     std::unique_ptr<TransformerInterface> parsedTransform,
-    const StringData name,
+    const std::string_view name,
     bool isIndependentOfAnyCollection)
     : DocumentSource(name, pExpCtx),
       _name(std::string{name}),
@@ -62,8 +37,8 @@ DocumentSourceSingleDocumentTransformation::DocumentSourceSingleDocumentTransfor
     }
 }
 
-const char* DocumentSourceSingleDocumentTransformation::getSourceName() const {
-    return _name.c_str();
+std::string_view DocumentSourceSingleDocumentTransformation::getSourceName() const {
+    return _name;
 }
 
 StageConstraints DocumentSourceSingleDocumentTransformation::constraints(
@@ -78,6 +53,13 @@ StageConstraints DocumentSourceSingleDocumentTransformation::constraints(
                                  UnionRequirement::kAllowed,
                                  ChangeStreamRequirement::kAllowlist);
     constraints.preservesCardinality = true;
+    // TODO SERVER-127594: audit preservesOrderAndMetadata for all TransformerTypes; $replaceRoot
+    // and $replaceWith are fixed here to unblock vectorSearch storedSource:true sort optimization.
+    if (_transformationProcessor &&
+        _transformationProcessor->getTransformer().getType() ==
+            TransformerInterface::TransformerType::kReplaceRoot) {
+        constraints.preservesOrderAndMetadata = true;
+    }
     constraints.canSwapWithMatch = true;
     constraints.canSwapWithSkippingOrLimitingStage = true;
     constraints.isAllowedWithinUpdatePipeline = true;
@@ -102,7 +84,7 @@ intrusive_ptr<DocumentSource> DocumentSourceSingleDocumentTransformation::optimi
 }
 
 Value DocumentSourceSingleDocumentTransformation::serialize(
-    const SerializationOptions& opts) const {
+    const query_shape::SerializationOptions& opts) const {
     return Value(
         Document{{getSourceName(),
                   _transformationProcessor

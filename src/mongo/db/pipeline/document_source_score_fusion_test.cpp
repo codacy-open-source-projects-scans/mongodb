@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_score_fusion.h"
 
@@ -34,10 +8,13 @@
 #include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/lite_parsed_score_fusion.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 namespace {
@@ -51,11 +28,22 @@ class DocumentSourceScoreFusionTest : service_context_test::WithSetupTransportLa
 public:
     DocumentSourceScoreFusionTest() {}
 
-private:
-    RAIIServerParameterControllerForTest scoreFusionFlag{"featureFlagSearchHybridScoringFull",
-                                                         true};
-    // Feature flag needed to use 'score' meta field
-    RAIIServerParameterControllerForTest rankFusionFlag{"featureFlagRankFusionFull", true};
+protected:
+    // Mirrors the production code path: lite-parse validation runs before createFromBson.
+    // Tests that exercise validation errors (or that just want the production LiteParsed path)
+    // should funnel through this helper instead of calling createFromBson directly.
+    std::list<boost::intrusive_ptr<DocumentSource>> parseScoreFusionStage(
+        BSONObj spec, const boost::intrusive_ptr<ExpressionContext>& expCtx = nullptr) {
+        auto ctx = expCtx ? expCtx : getExpCtx();
+        auto nss = ctx->getNamespaceString();
+        auto liteParsed =
+            LiteParsedScoreFusion::parse(nss,
+                                         spec.firstElement(),
+                                         LiteParserOptions{.ifrContext = ctx->getIfrContext(),
+                                                           .opCtx = ctx->getOperationContext()});
+        liteParsed->validate(ctx->getOperationContext());
+        return DocumentSourceScoreFusion::createFromBson(spec.firstElement(), ctx);
+    }
 };
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNoInputField) {
@@ -957,9 +945,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipeline) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402500);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108712);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithFirstPipelineValid) {
@@ -980,9 +966,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithFirstPipeline
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402500);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108712);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithSecondPipelineValid) {
@@ -1003,9 +987,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithSecondPipelin
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402500);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108712);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedRankFusionPipeline) {
@@ -1031,9 +1013,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedRankFusionPipeline) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       10473003);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108711);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedScoreFusionPipeline) {
@@ -1060,9 +1040,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedScoreFusionPipeline) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       10473003);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108711);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfEmptyPipeline) {
@@ -1077,9 +1055,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfEmptyPipeline) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402503);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108710);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, CheckSinglePipelineTextMatchAllowed) {
@@ -3559,9 +3535,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchMetaUsed) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402502);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108713);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchStoredSourceUsed) {
@@ -3592,9 +3566,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchStoredSourceUsed) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402502);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108713);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfInternalSearchMongotRemoteUsed) {
@@ -3624,9 +3596,11 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfInternalSearchMongotRemoteUsed) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402502);
+    // $_internalSearchMongotRemote is an internal-only stage (produced by desugaring $search) and
+    // is not registered with the lite-parse stage registry, so lite-parse rejects it as an
+    // unrecognized stage name. This still satisfies the test's intent: $scoreFusion does not
+    // accept this stage in an input pipeline.
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 40324);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, CheckLimitSampleUnionWithNotAllowed) {
@@ -3672,9 +3646,7 @@ TEST_F(DocumentSourceScoreFusionTest, CheckLimitSampleUnionWithNotAllowed) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), expCtx),
-                       AssertionException,
-                       9402502);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec, expCtx), AssertionException, 12108713);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedUnionWithModifiesFields) {
@@ -3724,9 +3696,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNestedUnionWithModifiesFields) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), expCtx),
-                       AssertionException,
-                       9402502);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec, expCtx), AssertionException, 12108713);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfIncludeProject) {
@@ -3749,9 +3719,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfIncludeProject) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402502);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108713);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfPipelineNameDuplicated) {
@@ -3783,9 +3751,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfPipelineNameDuplicated) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402203);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108715);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfPipelineNameStartsWithDollar) {
@@ -3845,9 +3811,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfPipelineNameContainsDot) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       16412);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 16412);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, QueryShapeDebugString) {
@@ -3890,7 +3854,8 @@ TEST_F(DocumentSourceScoreFusionTest, QueryShapeDebugString) {
         DocumentSourceScoreFusion::createFromBson(spec.firstElement(), expCtx);
     const auto pipeline = Pipeline::create(desugaredList, expCtx);
 
-    SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     BSONObj asOneObj = BSON("expectedStages" << pipeline->serializeToBson(opts));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -4148,7 +4113,8 @@ TEST_F(DocumentSourceScoreFusionTest, RepresentativeQueryShape) {
         DocumentSourceScoreFusion::createFromBson(spec.firstElement(), expCtx);
     const auto pipeline = Pipeline::create(desugaredList, expCtx);
 
-    SerializationOptions opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     BSONObj asOneObj = BSON("expectedStages" << pipeline->serializeToBson(opts));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -4406,9 +4372,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfGeoNearPipeline) {
          }
      })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
-                       AssertionException,
-                       9402500);
+    ASSERT_THROWS_CODE(parseScoreFusionStage(spec), AssertionException, 12108712);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, CheckIfScoreWithGeoNearDistanceMetadataPipeline) {
@@ -8834,7 +8798,7 @@ TEST_F(DocumentSourceScoreFusionTest, InternalFieldBehaviorThroughGroupAndReshap
         } else {
             auto serialized = stage->serialize();
             auto stageDoc = serialized.getDocument();
-            if (!stageDoc["$group"_sd].missing()) {
+            if (!stageDoc["$group"sv].missing()) {
                 foundGroup = true;
                 postGroupStages.push_back(stage);
             }
@@ -8853,11 +8817,11 @@ TEST_F(DocumentSourceScoreFusionTest, InternalFieldBehaviorThroughGroupAndReshap
             Document{{"_internal_scoreFusion_docs",
                       Document{{"_id", 1},
                                {"val", 10},
-                               {"__hs_custom", "alpha"_sd},
-                               {"_internal_scoreFusion_internal_fields", "user_data"_sd}}},
+                               {"__hs_custom", "alpha"sv},
+                               {"_internal_scoreFusion_internal_fields", "user_data"sv}}},
                      {"_internal_scoreFusion_internal_fields", Document{{"name1_score", 3.0}}}},
             Document{{"_internal_scoreFusion_docs",
-                      Document{{"_id", 2}, {"val", 20}, {"__hs_custom", "beta"_sd}}},
+                      Document{{"_id", 2}, {"val", 20}, {"__hs_custom", "beta"sv}}},
                      {"_internal_scoreFusion_internal_fields", Document{{"name1_score", 7.0}}}},
         },
         getExpCtx());
@@ -8880,27 +8844,93 @@ TEST_F(DocumentSourceScoreFusionTest, InternalFieldBehaviorThroughGroupAndReshap
     ASSERT_EQ(results.size(), 2u);
 
     // Results are sorted by score descending then _id ascending, so doc with score 7 comes first.
-    ASSERT_VALUE_EQ(results[0]["_id"_sd], Value(2));
-    ASSERT_VALUE_EQ(results[1]["_id"_sd], Value(1));
+    ASSERT_VALUE_EQ(results[0]["_id"sv], Value(2));
+    ASSERT_VALUE_EQ(results[1]["_id"sv], Value(1));
 
     // Verify user fields with the __hs_ prefix are preserved.
-    ASSERT_VALUE_EQ(results[0]["__hs_custom"_sd], Value("beta"_sd));
-    ASSERT_VALUE_EQ(results[1]["__hs_custom"_sd], Value("alpha"_sd));
+    ASSERT_VALUE_EQ(results[0]["__hs_custom"sv], Value("beta"sv));
+    ASSERT_VALUE_EQ(results[1]["__hs_custom"sv], Value("alpha"sv));
 
     // Verify other user fields are preserved.
-    ASSERT_VALUE_EQ(results[0]["val"_sd], Value(20));
-    ASSERT_VALUE_EQ(results[1]["val"_sd], Value(10));
+    ASSERT_VALUE_EQ(results[0]["val"sv], Value(20));
+    ASSERT_VALUE_EQ(results[1]["val"sv], Value(10));
 
     // A user field named "_internal_scoreFusion_internal_fields" is lost: $mergeObjects overwrites
     // it with the repacked internal fields object, and then $project removes it.
-    ASSERT_TRUE(results[0]["_internal_scoreFusion_internal_fields"_sd].missing());
-    ASSERT_TRUE(results[1]["_internal_scoreFusion_internal_fields"_sd].missing());
+    ASSERT_TRUE(results[0]["_internal_scoreFusion_internal_fields"sv].missing());
+    ASSERT_TRUE(results[1]["_internal_scoreFusion_internal_fields"sv].missing());
 
     // All internal fields are removed from the output.
-    ASSERT_TRUE(results[0]["_internal_scoreFusion_docs"_sd].missing());
-    ASSERT_TRUE(results[1]["_internal_scoreFusion_docs"_sd].missing());
-    ASSERT_TRUE(results[0]["__hs_name1_score"_sd].missing());
-    ASSERT_TRUE(results[1]["__hs_name1_score"_sd].missing());
+    ASSERT_TRUE(results[0]["_internal_scoreFusion_docs"sv].missing());
+    ASSERT_TRUE(results[1]["_internal_scoreFusion_docs"sv].missing());
+    ASSERT_TRUE(results[0]["__hs_name1_score"sv].missing());
+    ASSERT_TRUE(results[1]["__hs_name1_score"sv].missing());
 }
+
+TEST_F(DocumentSourceScoreFusionTest,
+       ErrorsIfNoCombinationMethodButCombinationExpressionSpecified) {
+    auto spec = fromjson(R"({
+         $scoreFusion: {
+             input: {
+                 pipelines: {
+                     name1: [
+                         {
+                             $search: {
+                                 index: "search_index",
+                                 text: {
+                                     query: "mystery",
+                                     path: "genres"
+                                 }
+                             }
+                         },
+                         { $match : { author : "dave" } }
+                     ]
+                 },
+                 normalization: "none"
+             },
+             combination: {
+                 expression: {$sum: ["$$name1", 5.0]}
+             }
+         }
+     })");
+
+    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       10017300);
+}
+
+TEST_F(DocumentSourceScoreFusionTest,
+       ErrorsIfCombinationMethodAvgButCombinationExpressionSpecified) {
+    auto spec = fromjson(R"({
+         $scoreFusion: {
+             input: {
+                 pipelines: {
+                     name1: [
+                         {
+                             $search: {
+                                 index: "search_index",
+                                 text: {
+                                     query: "mystery",
+                                     path: "genres"
+                                 }
+                             }
+                         },
+                         { $match : { author : "dave" } }
+                     ]
+                 },
+                 normalization: "none"
+             },
+             combination: {
+                 method: "avg",
+                 expression: {$sum: ["$$name1", 5.0]}
+             }
+         }
+     })");
+
+    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       10017300);
+}
+
 }  // namespace
 }  // namespace mongo

@@ -233,7 +233,12 @@ coll.drop();
 (function testMetaGroupKey_WithAccumulatorOnMeta_WithFilterOnMeasurement() {
     const t = new Date();
     const docs = [{time: t, myMeta: 1, include: false}];
-    runGroupRewriteTest(coll, docs, [{$match: {include: true}}, {$group: {_id: "$myMeta", x: {$min: "$myMeta"}}}], []);
+    runGroupRewriteTest(
+        coll,
+        docs,
+        [{$match: {include: true}}, {$group: {_id: "$myMeta", x: {$min: "$myMeta"}}}],
+        [],
+    );
 })();
 
 // Test min on the time field (cannot rewrite $min because the control.time.min is rounded
@@ -266,7 +271,9 @@ coll.drop();
         {time: t, myMeta: {a: 3, b: 10}, val: 4},
         {time: t, myMeta: {a: 2, b: 10}, val: 5},
     ];
-    const pipeline = [{$group: {_id: {a: "$myMeta.a", b: "$myMeta.b"}, min: {$min: "$val"}, max: {$max: "$val"}}}];
+    const pipeline = [
+        {$group: {_id: {a: "$myMeta.a", b: "$myMeta.b"}, min: {$min: "$val"}, max: {$max: "$val"}}},
+    ];
     runGroupRewriteTest(coll, docs, pipeline, [
         {_id: {a: 3, b: 10}, min: 4, max: 4},
         {_id: {a: 2, b: 10}, min: 3, max: 5},
@@ -334,7 +341,10 @@ coll.drop();
     runGroupRewriteTest(
         coll,
         docs,
-        [{$group: {_id: "$myMeta", x: {$count: {}}, y: {$min: "$val"}, z: {$max: "$val"}}}, {$match: {_id: 1}}],
+        [
+            {$group: {_id: "$myMeta", x: {$count: {}}, y: {$min: "$val"}, z: {$max: "$val"}}},
+            {$match: {_id: 1}},
+        ],
         [{"_id": 1, "x": 2, "y": 3, "z": 5}],
     );
 })();
@@ -370,6 +380,41 @@ coll.drop();
         docs,
         [{$group: {_id: "$meta", x: {$sum: 7}}}, {$match: {_id: 1}}],
         [{"_id": 1, "x": 2 * 7}],
+    );
+})();
+
+// Test $size directly (not via the $count rewrite) on a meta field that holds an array. This
+// exercises the SBE $size expression independent of the bucket compression/version rewrite.
+(function testGroupKey_WithSizeOnMetaField() {
+    const t = new Date();
+    const docs = [
+        {time: t, myMeta: ["a", "b"], val: 3},
+        {time: t, myMeta: ["a"], val: 4},
+        {time: t, myMeta: ["a", "b", "c"], val: 5},
+    ];
+    runGroupRewriteTest(
+        coll,
+        docs,
+        [{$group: {_id: null, x: {$sum: {$size: "$myMeta"}}}}],
+        [{"_id": null, "x": 2 + 1 + 3}],
+        true /* excludeMeta */,
+    );
+})();
+
+// Test $size directly on a measurement field that holds an array, grouped by meta. This exercises
+// the SBE $size expression on unpacked measurement data.
+(function testMetaGroupKey_WithSizeOnMeasurementField() {
+    const t = new Date();
+    const docs = [
+        {time: t, myMeta: 1, readings: [1, 2]},
+        {time: t, myMeta: 3, readings: [1]},
+        {time: t, myMeta: 1, readings: [1, 2, 3]},
+    ];
+    runGroupRewriteTest(
+        coll,
+        docs,
+        [{$group: {_id: "$myMeta", x: {$sum: {$size: "$readings"}}}}, {$match: {_id: 1}}],
+        [{"_id": 1, "x": 2 + 3}],
     );
 })();
 
@@ -501,7 +546,11 @@ coll.drop();
     runGroupRewriteTest(
         coll,
         docs,
-        [{$project: {myMeta: 0}}, {$addFields: {m: "$myMeta"}}, {$group: {_id: null, o: {$max: "$m"}}}],
+        [
+            {$project: {myMeta: 0}},
+            {$addFields: {m: "$myMeta"}},
+            {$group: {_id: null, o: {$max: "$m"}}},
+        ],
         [{_id: null, o: null}],
         false /* excludeMeta */,
     );
@@ -583,14 +632,22 @@ coll.drop();
     runGroupRewriteTest(
         coll,
         docs,
-        [{$addFields: {myMeta: "y"}}, {$project: {val: "$myMeta"}}, {$group: {_id: {x: "$myMeta"}, o: {$max: "$val"}}}],
+        [
+            {$addFields: {myMeta: "y"}},
+            {$project: {val: "$myMeta"}},
+            {$group: {_id: {x: "$myMeta"}, o: {$max: "$val"}}},
+        ],
         [{_id: {x: null}, o: "y"}],
         false /* excludeMeta */,
     );
     runGroupRewriteTest(
         coll,
         docs,
-        [{$addFields: {myMeta: "$val"}}, {$project: {val: 0}}, {$group: {_id: {x: "$myMeta"}, o: {$max: "$val"}}}],
+        [
+            {$addFields: {myMeta: "$val"}},
+            {$project: {val: 0}},
+            {$group: {_id: {x: "$myMeta"}, o: {$max: "$val"}}},
+        ],
         [
             {_id: {x: 3}, o: null},
             {_id: {x: 4}, o: null},

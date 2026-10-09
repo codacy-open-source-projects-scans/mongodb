@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
@@ -279,12 +252,12 @@ TEST_F(SnapshotManagerTests, FailsWithNoCommittedSnapshot) {
         RecoveryUnit::ReadSource::kMajorityCommitted);
 
     // Before first snapshot is created.
-    ASSERT_EQ(ru->majorityCommittedSnapshotAvailable(),
+    EXPECT_EQ(ru->majorityCommittedSnapshotAvailable(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 
     // There is a snapshot but it isn't committed.
     auto snap = fetchAndIncrementTimestamp();
-    ASSERT_EQ(ru->majorityCommittedSnapshotAvailable(),
+    EXPECT_EQ(ru->majorityCommittedSnapshotAvailable(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 
     // Now there is a committed snapshot.
@@ -293,7 +266,7 @@ TEST_F(SnapshotManagerTests, FailsWithNoCommittedSnapshot) {
 
     // Not anymore!
     snapshotManager->clearCommittedSnapshot();
-    ASSERT_EQ(ru->majorityCommittedSnapshotAvailable(),
+    EXPECT_EQ(ru->majorityCommittedSnapshotAvailable(),
               ErrorCodes::ReadConcernMajorityNotAvailableYet);
 }
 
@@ -313,11 +286,11 @@ TEST_F(SnapshotManagerTests, FailsAfterDropAllSnapshotsWhileYielded) {
     auto snap = fetchAndIncrementTimestamp();
     snapshotManager->setCommittedSnapshot(snap);
     ASSERT_OK(shard_role_details::getRecoveryUnit(op.get())->majorityCommittedSnapshotAvailable());
-    ASSERT_EQ(itCountOn(op), 0);  // acquires a snapshot.
+    EXPECT_EQ(itCountOn(op), 0);  // acquires a snapshot.
 
     // Everything still works until we abandon our snapshot.
     snapshotManager->clearCommittedSnapshot();
-    ASSERT_EQ(itCountOn(op), 0);
+    EXPECT_EQ(itCountOn(op), 0);
 
     // Now it doesn't.
     shard_role_details::getRecoveryUnit(op.get())->abandonSnapshot();
@@ -331,11 +304,11 @@ TEST_F(SnapshotManagerTests, BasicFunctionality) {
 
     auto snap0 = fetchAndIncrementTimestamp();
     snapshotManager->setCommittedSnapshot(snap0);
-    ASSERT_EQ(itCountCommitted(), 0);
+    EXPECT_EQ(itCountCommitted(), 0);
 
     insertRecordAndCommit();
 
-    ASSERT_EQ(itCountCommitted(), 0);
+    EXPECT_EQ(itCountCommitted(), 0);
 
 
     auto snap1 = fetchAndIncrementTimestamp();
@@ -355,11 +328,11 @@ TEST_F(SnapshotManagerTests, BasicFunctionality) {
     auto snap4 = fetchAndIncrementTimestamp();
 
     // If these fail, everything is busted.
-    ASSERT_EQ(itCountCommitted(), 0);
+    EXPECT_EQ(itCountCommitted(), 0);
     snapshotManager->setCommittedSnapshot(snap1);
-    ASSERT_EQ(itCountCommitted(), 1);
+    EXPECT_EQ(itCountCommitted(), 1);
     snapshotManager->setCommittedSnapshot(snap3);
-    ASSERT_EQ(itCountCommitted(), 3);
+    EXPECT_EQ(itCountCommitted(), 3);
 
     // Hold the outer most global lock throughout the remainder of the test to avoid getting
     // snapshots abandoned when inner global locks are destructed. This op should keep its original
@@ -370,18 +343,18 @@ TEST_F(SnapshotManagerTests, BasicFunctionality) {
         ->setTimestampReadSource(RecoveryUnit::ReadSource::kMajorityCommitted);
     ASSERT_OK(
         shard_role_details::getRecoveryUnit(longOp.get())->majorityCommittedSnapshotAvailable());
-    ASSERT_EQ(itCountOn(longOp), 3);
+    EXPECT_EQ(itCountOn(longOp), 3);
 
     // If this fails, the snapshot contains writes that were rolled back.
     snapshotManager->setCommittedSnapshot(snap4);
-    ASSERT_EQ(itCountCommitted(), 4);
+    EXPECT_EQ(itCountCommitted(), 4);
 
     // If this fails, longOp changed snapshots at an illegal time.
-    ASSERT_EQ(itCountOn(longOp), 3);
+    EXPECT_EQ(itCountOn(longOp), 3);
 
     // If this fails, longOp didn't get a new snapshot when it should have.
     shard_role_details::getRecoveryUnit(longOp.get())->abandonSnapshot();
-    ASSERT_EQ(itCountOn(longOp), 4);
+    EXPECT_EQ(itCountOn(longOp), 4);
 }
 
 TEST_F(SnapshotManagerTests, UpdateAndDelete) {
@@ -400,19 +373,19 @@ TEST_F(SnapshotManagerTests, UpdateAndDelete) {
     auto snapAfterDelete = fetchAndIncrementTimestamp();
 
     snapshotManager->setCommittedSnapshot(snapBeforeInsert);
-    ASSERT_EQ(itCountCommitted(), 0);
+    EXPECT_EQ(itCountCommitted(), 0);
     ASSERT(!readRecordCommitted(id));
 
     snapshotManager->setCommittedSnapshot(snapDog);
-    ASSERT_EQ(itCountCommitted(), 1);
-    ASSERT_EQ(readStringCommitted(id), "Dog");
+    EXPECT_EQ(itCountCommitted(), 1);
+    EXPECT_EQ(readStringCommitted(id), "Dog");
 
     snapshotManager->setCommittedSnapshot(snapCat);
-    ASSERT_EQ(itCountCommitted(), 1);
-    ASSERT_EQ(readStringCommitted(id), "Cat");
+    EXPECT_EQ(itCountCommitted(), 1);
+    EXPECT_EQ(readStringCommitted(id), "Cat");
 
     snapshotManager->setCommittedSnapshot(snapAfterDelete);
-    ASSERT_EQ(itCountCommitted(), 0);
+    EXPECT_EQ(itCountCommitted(), 0);
     ASSERT(!readRecordCommitted(id));
 }
 
@@ -429,7 +402,7 @@ TEST_F(SnapshotManagerTests, InsertAndReadOnLastAppliedSnapshot) {
     auto op = makeOperation();
     auto ru = shard_role_details::getRecoveryUnit(op.get());
     ru->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-    ASSERT_EQ(itCountOn(op), 1);
+    EXPECT_EQ(itCountOn(op), 1);
     ASSERT(readRecordOn(op, id));
 
     deleteRecordAndCommit(id);
@@ -437,15 +410,15 @@ TEST_F(SnapshotManagerTests, InsertAndReadOnLastAppliedSnapshot) {
 
     // Reading at the last applied snapshot timestamps returns data in order.
     snapshotManager->setLastApplied(beforeInsert);
-    ASSERT_EQ(itCountLastApplied(), 0);
+    EXPECT_EQ(itCountLastApplied(), 0);
     ASSERT(!readRecordLastApplied(id));
 
     snapshotManager->setLastApplied(afterInsert);
-    ASSERT_EQ(itCountLastApplied(), 1);
+    EXPECT_EQ(itCountLastApplied(), 1);
     ASSERT(readRecordLastApplied(id));
 
     snapshotManager->setLastApplied(afterDelete);
-    ASSERT_EQ(itCountLastApplied(), 0);
+    EXPECT_EQ(itCountLastApplied(), 0);
     ASSERT(!readRecordLastApplied(id));
 }
 
@@ -465,27 +438,27 @@ TEST_F(SnapshotManagerTests, UpdateAndDeleteOnLocalSnapshot) {
     auto op = makeOperation();
     auto ru = shard_role_details::getRecoveryUnit(op.get());
     ru->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
-    ASSERT_EQ(itCountOn(op), 1);
+    EXPECT_EQ(itCountOn(op), 1);
     auto record = readRecordOn(op, id);
-    ASSERT_EQ(std::string(record->data.data()), "Blue spotted stingray");
+    EXPECT_EQ(std::string(record->data.data()), "Blue spotted stingray");
 
     deleteRecordAndCommit(id);
     auto afterDelete = fetchAndIncrementTimestamp();
 
     snapshotManager->setLastApplied(beforeInsert);
-    ASSERT_EQ(itCountLastApplied(), 0);
+    EXPECT_EQ(itCountLastApplied(), 0);
     ASSERT(!readRecordLastApplied(id));
 
     snapshotManager->setLastApplied(afterInsert);
-    ASSERT_EQ(itCountLastApplied(), 1);
-    ASSERT_EQ(readStringLastApplied(id), "Aardvark");
+    EXPECT_EQ(itCountLastApplied(), 1);
+    EXPECT_EQ(readStringLastApplied(id), "Aardvark");
 
     snapshotManager->setLastApplied(afterUpdate);
-    ASSERT_EQ(itCountLastApplied(), 1);
-    ASSERT_EQ(readStringLastApplied(id), "Blue spotted stingray");
+    EXPECT_EQ(itCountLastApplied(), 1);
+    EXPECT_EQ(readStringLastApplied(id), "Blue spotted stingray");
 
     snapshotManager->setLastApplied(afterDelete);
-    ASSERT_EQ(itCountLastApplied(), 0);
+    EXPECT_EQ(itCountLastApplied(), 0);
     ASSERT(!readRecordLastApplied(id));
 }
 }  // namespace mongo

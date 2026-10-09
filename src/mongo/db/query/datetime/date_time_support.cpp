@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/datetime/date_time_support.h"
@@ -46,6 +20,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <timelib.h>
@@ -58,6 +33,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -133,7 +109,7 @@ const std::vector<timelib_format_specifier> kDateToStringFormatMap = {
 // Verifies that any '%' is followed by a valid format character as indicated by 'allowedFormats',
 // and that the 'format' string ends with an even number of '%' symbols.
 template <bool UserErrorMessage>
-bool checkFormatString(StringData format,
+bool checkFormatString(std::string_view format,
                        const std::vector<timelib_format_specifier>& allowedFormats) {
     for (auto it = format.begin(); it != format.end(); ++it) {
         if (*it != '%') {
@@ -162,11 +138,12 @@ bool checkFormatString(StringData format,
     return true;
 }
 
-bool isValidFormat(StringData format, const std::vector<timelib_format_specifier>& allowedFormats) {
+bool isValidFormat(std::string_view format,
+                   const std::vector<timelib_format_specifier>& allowedFormats) {
     return checkFormatString<false>(format, allowedFormats);
 }
 
-void validateFormat(StringData format,
+void validateFormat(std::string_view format,
                     const std::vector<timelib_format_specifier>& allowedFormats) {
     checkFormatString<true>(format, allowedFormats);
 }
@@ -252,9 +229,9 @@ static timelib_tzinfo* timezonedatabase_gettzinfowrapper(const char* tz_id,
     return nullptr;
 }
 
-Date_t TimeZoneDatabase::fromString(StringData dateString,
+Date_t TimeZoneDatabase::fromString(std::string_view dateString,
                                     const TimeZone& tz,
-                                    boost::optional<StringData> format) const {
+                                    boost::optional<std::string_view> format) const {
     std::unique_ptr<timelib_error_container, TimeZoneDatabase::TimelibErrorContainerDeleter>
         errors{};
     timelib_error_container* rawErrors;
@@ -363,7 +340,7 @@ Date_t TimeZoneDatabase::fromString(StringData dateString,
         durationCount<Milliseconds>(Seconds(parsedTime->sse) + Microseconds(parsedTime->us)));
 }
 
-boost::optional<Seconds> TimeZoneDatabase::parseUtcOffset(StringData offsetSpec) const {
+boost::optional<Seconds> TimeZoneDatabase::parseUtcOffset(std::string_view offsetSpec) const {
     // Needs to start with either '+' or '-'.
     if (!offsetSpec.empty() && (offsetSpec[0] == '+' || offsetSpec[0] == '-')) {
         auto bias = offsetSpec[0] == '+' ? 1 : -1;
@@ -407,12 +384,12 @@ boost::optional<Seconds> TimeZoneDatabase::parseUtcOffset(StringData offsetSpec)
     return boost::none;
 }
 
-bool TimeZoneDatabase::isTimeZoneIdentifier(StringData timeZoneId) const {
+bool TimeZoneDatabase::isTimeZoneIdentifier(std::string_view timeZoneId) const {
     return (_timeZones.find(timeZoneId) != _timeZones.end()) ||
         static_cast<bool>(parseUtcOffset(timeZoneId));
 }
 
-TimeZone TimeZoneDatabase::getTimeZone(StringData timeZoneId) const {
+TimeZone TimeZoneDatabase::getTimeZone(std::string_view timeZoneId) const {
     auto tz = _timeZones.find(timeZoneId);
     if (tz != _timeZones.end()) {
         return tz->second;
@@ -675,23 +652,23 @@ std::string TimeZone::threeLetterMonthName(int monthNum) const {
 }
 
 
-bool TimeZone::isValidToStringFormat(StringData format) {
+bool TimeZone::isValidToStringFormat(std::string_view format) {
     return isValidFormat(format, kDateToStringFormatMap);
 }
 
-bool TimeZone::isValidFromStringFormat(StringData format) {
+bool TimeZone::isValidFromStringFormat(std::string_view format) {
     return isValidFormat(format, kDateFromStringFormatMap);
 }
 
-void TimeZone::validateToStringFormat(StringData format) {
+void TimeZone::validateToStringFormat(std::string_view format) {
     return validateFormat(format, kDateToStringFormatMap);
 }
 
-void TimeZone::validateFromStringFormat(StringData format) {
+void TimeZone::validateFromStringFormat(std::string_view format) {
     return validateFormat(format, kDateFromStringFormatMap);
 }
 
-StatusWith<std::string> TimeZone::formatDate(StringData format, Date_t date) const {
+StatusWith<std::string> TimeZone::formatDate(std::string_view format, Date_t date) const {
     StringBuilder formatted;
     if (auto status = outputDateWithFormat(formatted, format, date); status != Status::OK())
         return status;
@@ -939,7 +916,7 @@ long long dateDiffMillisecond(Date_t startDate, Date_t endDate) {
     return result;
 }
 
-TimeUnit parseTimeUnit(StringData unitName) {
+TimeUnit parseTimeUnit(std::string_view unitName) {
     auto iterator = timeUnitNameToTimeUnitMap.find(unitName);
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "unknown time unit value: " << unitName,
@@ -947,35 +924,35 @@ TimeUnit parseTimeUnit(StringData unitName) {
     return iterator->second;
 }
 
-bool isValidTimeUnit(StringData unitName) {
+bool isValidTimeUnit(std::string_view unitName) {
     return timeUnitNameToTimeUnitMap.find(unitName) != timeUnitNameToTimeUnitMap.end();
 }
 
-StringData serializeTimeUnit(TimeUnit unit) {
+std::string_view serializeTimeUnit(TimeUnit unit) {
     switch (unit) {
         case TimeUnit::year:
-            return "year"_sd;
+            return "year"sv;
         case TimeUnit::quarter:
-            return "quarter"_sd;
+            return "quarter"sv;
         case TimeUnit::month:
-            return "month"_sd;
+            return "month"sv;
         case TimeUnit::week:
-            return "week"_sd;
+            return "week"sv;
         case TimeUnit::day:
-            return "day"_sd;
+            return "day"sv;
         case TimeUnit::hour:
-            return "hour"_sd;
+            return "hour"sv;
         case TimeUnit::minute:
-            return "minute"_sd;
+            return "minute"sv;
         case TimeUnit::second:
-            return "second"_sd;
+            return "second"sv;
         case TimeUnit::millisecond:
-            return "millisecond"_sd;
+            return "millisecond"sv;
     }
     MONGO_UNREACHABLE_TASSERT(5339903);
 }
 
-DayOfWeek parseDayOfWeek(StringData dayOfWeek) {
+DayOfWeek parseDayOfWeek(std::string_view dayOfWeek) {
     // Perform case-insensitive lookup.
     auto iterator = dayOfWeekNameToDayOfWeekMap.find(str::toLower(dayOfWeek));
     uassert(ErrorCodes::FailedToParse,
@@ -984,7 +961,7 @@ DayOfWeek parseDayOfWeek(StringData dayOfWeek) {
     return iterator->second;
 }
 
-bool isValidDayOfWeek(StringData dayOfWeek) {
+bool isValidDayOfWeek(std::string_view dayOfWeek) {
     // Perform case-insensitive lookup.
     return dayOfWeekNameToDayOfWeekMap.find(str::toLower(dayOfWeek)) !=
         dayOfWeekNameToDayOfWeekMap.end();

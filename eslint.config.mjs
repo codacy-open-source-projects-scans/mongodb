@@ -1,5 +1,6 @@
 import {FlatCompat} from "@eslint/eslintrc";
 import js from "@eslint/js";
+import mocha_no_only_plugin from "eslint-plugin-mocha-no-only";
 import {default as mongodb_plugin} from "eslint-plugin-mongodb";
 import globals from "globals";
 import path from "node:path";
@@ -24,6 +25,7 @@ export default [
         languageOptions: {
             globals: {
                 ...globals.mongo,
+                internalModule: true,
 
                 // jstests/global.d.ts
                 TestData: true,
@@ -318,14 +320,15 @@ export default [
         },
 
         plugins: {
+            mochaNoOnly: mocha_no_only_plugin,
             mongodb: mongodb_plugin,
         },
 
         rules: {
+            "mochaNoOnly/mocha-no-only": 2,
             // TODO SERVER-99571 : enable mongodb/* rules.
             "mongodb/no-print-fn": 0,
             "mongodb/no-printing-tojson": 0,
-
             "no-prototype-builtins": 0,
             "no-useless-escape": 0,
             "no-irregular-whitespace": 0,
@@ -349,7 +352,8 @@ export default [
             "no-restricted-syntax": [
                 "error",
                 {
-                    message: "Invalid load call. Please convert your library to a module and import it instead.",
+                    message:
+                        "Invalid load call. Please convert your library to a module and import it instead.",
                     selector: 'CallExpression > Identifier[name="load"]',
                 },
             ],
@@ -363,8 +367,8 @@ export default [
         files: [
             "jstests/libs/begin_golden_test.js",
             "jstests/libs/golden_test.js",
-            "jstests/libs/override_methods/golden_overrides.js",
-            "jstests/libs/override_methods/sharded_golden_overrides.js",
+            "jstests/libs/override_methods/query/golden_overrides.js",
+            "jstests/libs/override_methods/query/sharded_golden_overrides.js",
             "jstests/libs/query/golden_test_utils.js",
             "jstests/libs/query/golden_sharding_utils.js",
             "jstests/query_golden/**/*.js",
@@ -404,6 +408,44 @@ export default [
             "prefer-object-spread": 2,
             "prefer-rest-params": 2,
             "prefer-spread": 2,
+        },
+    },
+    {
+        // Shell files must not contain imports that are not packaged into the shell binary. Only imports from
+        // src/mongo/shell/ (embedded at build time) and std: (internal C++ modules) are available
+        // outside the repo. The vscode debugger subdirectory is Node.js code, not shell code.
+        files: ["src/mongo/shell/**"],
+        ignores: ["src/mongo/shell/debugger/vscode/**"],
+        rules: {
+            "mongodb/no-non-shell-imports": "error",
+        },
+    },
+    {
+        // Setup scripts loaded into the server-side JS scopes (the legacy in-process MozJS scope
+        // and the WASM scope) must stay classic scripts: neither has a filesystem-backed module
+        // loader, so module syntax here would load fine in the shell and fail only at runtime on
+        // the server. This rule is what lets these files be shared with the shell instead of
+        // forked -- see the note at the top of common/jsfiles/types.js.
+        files: [
+            "src/mongo/scripting/mozjs/common/jsfiles/**/*.js",
+            "src/mongo/scripting/mozjs/server/**/*.js",
+            "src/mongo/scripting/mozjs/wasm/jsfiles/**/*.js",
+        ],
+        rules: {
+            "no-restricted-syntax": [
+                "error",
+                {
+                    message:
+                        "Server-side JS setup scripts must be classic scripts: the server has no module loader. Do not use 'import' here.",
+                    selector: "ImportDeclaration, ImportExpression",
+                },
+                {
+                    message:
+                        "Server-side JS setup scripts must be classic scripts: the server has no module loader. Do not use 'export' here.",
+                    selector:
+                        "ExportNamedDeclaration, ExportDefaultDeclaration, ExportAllDeclaration",
+                },
+            ],
         },
     },
     {

@@ -2,6 +2,7 @@
 + * Tests releaseMemory in setWindowFields.
 + *
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_82,
  *   # We modify the value of a query knob. setParameter is not persistent.
  *   does_not_support_stepdowns,
@@ -60,7 +61,9 @@ const pipeline = [
         $setWindowFields: {
             partitionBy: "$category",
             sortBy: {date: 1},
-            output: {runningTotal: {$sum: "$amount", window: {documents: ["unbounded", "current"]}}},
+            output: {
+                runningTotal: {$sum: "$amount", window: {documents: ["unbounded", "current"]}},
+            },
         },
     },
 ];

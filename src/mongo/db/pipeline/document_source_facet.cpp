@@ -1,60 +1,43 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include "mongo/db/pipeline/document_source_facet.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/db/database_name_util.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/extension/host/extension_search_server_status.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/pipeline/document_source_tee_consumer.h"
 #include "mongo/db/pipeline/explain_util.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/explain_policy.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
 #include <list>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -131,61 +114,107 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
  * allowed either directly or because of some of the sources inside its sub-pipelines.
  */
 std::string getStageNameNotAllowedInFacet(const DocumentSource& source,
-                                          const std::string& parentName) {
-    auto* subPipeline = source.getSubPipeline();
-    const std::string& sourceName = source.getSourceName();
-    if (!subPipeline) {
-        if (!parentName.empty()) {
-            return str::stream() << sourceName << " inside of " << parentName;
-        } else {
-            return str::stream() << sourceName;
-        }
-    } else {
-        for (const auto& substage : *subPipeline) {
-            auto stageConstraints = substage->constraints();
-            if (!stageConstraints.isAllowedInsideFacetStage()) {
+                                          std::string_view parentName) {
+    auto sourceName = source.getSourceName();
+    if (auto* sub = source.getSubPipeline()) {
+        for (const auto& substage : *sub) {
+            if (auto stageConstraints = substage->constraints();
+                !stageConstraints.isAllowedInsideFacetStage()) {
                 return getStageNameNotAllowedInFacet(*substage, sourceName);
             }
         }
         // If we reach this point, none of the sub-stages is violating the $facet requirement. The
         // 'source' stage itself is not allowed.
-        return str::stream() << sourceName;
+        return std::string{sourceName};
     }
+    if (!parentName.empty()) {
+        return fmt::format("{} inside of {}", sourceName, parentName);
+    }
+    return std::string{sourceName};
+}
 
-    MONGO_UNREACHABLE_TASSERT(8045600);
+// Returns true when any $unionWith or $lookup stage in a facet sub-pipeline names a collection
+// that resolves to a view. Handles the string shorthand, {coll} object, and cross-db {db, coll}
+// object forms for both stages, then checks the resolved-namespace map.
+bool facetSubPipelinesTargetView(const vector<pair<string, vector<BSONObj>>>& rawFacetPipelines,
+                                 const ResolvedNamespaceMap& resolvedNamespaces,
+                                 const DatabaseName& dbName) {
+    // Extract a NamespaceString from a $unionWith spec element (string or {coll[, db]} object)
+    // or a $lookup "from" element (string or {db, coll} object).
+    auto parseNss = [&](const BSONElement& elem) -> boost::optional<NamespaceString> {
+        if (elem.type() == BSONType::string) {
+            return NamespaceStringUtil::deserialize(dbName, elem.String());
+        }
+        if (elem.type() == BSONType::object) {
+            auto collElem = elem.Obj()["coll"];
+            if (collElem.type() != BSONType::string)
+                return boost::none;
+            if (auto dbElem = elem.Obj()["db"]; dbElem.type() == BSONType::string) {
+                auto targetDb = DatabaseNameUtil::deserialize(
+                    dbName.tenantId(), dbElem.String(), SerializationContext::stateDefault());
+                return NamespaceStringUtil::deserialize(targetDb, collElem.String());
+            }
+            return NamespaceStringUtil::deserialize(dbName, collElem.String());
+        }
+        return boost::none;
+    };
+
+    for (const auto& [facetName, pipeline] : rawFacetPipelines) {
+        for (const auto& stageObj : pipeline) {
+            std::string_view stageName = stageObj.firstElementFieldNameStringData();
+            boost::optional<NamespaceString> targetNss;
+
+            if (stageName == "$unionWith") {
+                targetNss = parseNss(stageObj.firstElement());
+            } else if (stageName == "$lookup") {
+                if (stageObj.firstElement().type() == BSONType::object) {
+                    targetNss = parseNss(stageObj.firstElement().Obj()["from"]);
+                }
+            }
+
+            if (targetNss) {
+                if (auto it = resolvedNamespaces.find(*targetNss);
+                    it != resolvedNamespaces.end() && it->second.isInvolvedNamespaceAView()) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 }  // namespace
 
 std::unique_ptr<DocumentSourceFacet::LiteParsed> DocumentSourceFacet::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
-    std::vector<LiteParsedPipeline> liteParsedPipelines;
+    std::vector<OwnedLiteParsedPipeline> ownedPipelines;
 
-    auto subpipelineParseOptions = options;
-    subpipelineParseOptions.makeSubpipelineOwned = true;
     for (auto&& rawPipeline : extractRawPipelines(spec)) {
-        liteParsedPipelines.emplace_back(nss, rawPipeline.second, false, subpipelineParseOptions);
+        ownedPipelines.emplace_back(nss, rawPipeline.second, options);
     }
 
-    return std::make_unique<DocumentSourceFacet::LiteParsed>(spec, std::move(liteParsedPipelines));
+    return std::make_unique<DocumentSourceFacet::LiteParsed>(spec, std::move(ownedPipelines));
 }
 
 intrusive_ptr<DocumentSourceFacet> DocumentSourceFacet::create(
     std::vector<FacetPipeline> facetPipelines,
     const intrusive_ptr<ExpressionContext>& expCtx,
-    size_t bufferSizeBytes,
+    boost::optional<size_t> bufferSizeBytes,
     size_t maxOutputDocBytes) {
+    size_t resolvedBufferSizeBytes = bufferSizeBytes.value_or(
+        static_cast<size_t>(loadMemoryLimit(StageMemoryLimit::QueryFacetBufferSizeBytes)
+                                .get(expCtx->getOperationContext())));
     return new DocumentSourceFacet(
-        std::move(facetPipelines), expCtx, bufferSizeBytes, maxOutputDocBytes);
+        std::move(facetPipelines), expCtx, resolvedBufferSizeBytes, maxOutputDocBytes);
 }
 
-Value DocumentSourceFacet::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceFacet::serialize(const query_shape::SerializationOptions& opts) const {
     MutableDocument serialized;
     for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
         auto&& facet = _facets[facetId];
         if (opts.isSerializingForExplain()) {
-            bool canAddExecPipelineExplain =
-                opts.verbosity >= ExplainOptions::Verbosity::kExecStats &&
+            bool canAddExecPipelineExplain = opts.verbosity &&
+                explainPolicyFor(*opts.verbosity).hasExecStats() &&
                 _execStatsWrapper->isStatsProviderAttached();
             auto explain = canAddExecPipelineExplain
                 ? mergeExplains(facet.pipeline->writeExplainOps(opts),
@@ -266,8 +295,9 @@ StageConstraints DocumentSourceFacet::constraints(PipelineSplitState state) cons
     }
 
     // Clear the captured merging shard if 'host' is incompatible with merging on a shard.
-    if (!(host == HostTypeRequirement::kNone || host == HostTypeRequirement::kRunOnceAnyNode ||
-          host == HostTypeRequirement::kAnyShard)) {
+    if (!(host == HostTypeRequirement::kNone ||
+          host == HostTypeRequirement::kCollectionlessSourceRunOnceAnyNode ||
+          host == HostTypeRequirement::kTargetedShards)) {
         mergeShardId = boost::none;
     }
 
@@ -318,12 +348,34 @@ void DocumentSourceFacet::addVariableRefs(std::set<Variables::Id>* refs) const {
 
 intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
+    auto rawFacetPipelines = extractRawPipelines(elem);
+
+    // $facet bypasses the LPP view resolution code in the aggregate code by reparsing from raw
+    // BSON. When featureFlagExtensionsInsideHybridSearch is on, those inner stages skip
+    // applyViewToLiteParsed assuming that views were already bound. In these scenarios, retry the
+    // aggregate again with the feature flag off so that we have correct view resolution behavior
+    // across all subpipelines.
+    auto ifrCtx = expCtx->getIfrContext();
+    auto hybridSearchFlagEnabled = ifrCtx &&
+        ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+    if (hybridSearchFlagEnabled) {
+        bool hasViewTargetingStage =
+            facetSubPipelinesTargetView(rawFacetPipelines,
+                                        expCtx->getResolvedNamespaces(),
+                                        expCtx->getNamespaceString().dbName());
+        search_helpers::throwIfrKickbackIfNecessary(
+            hasViewTargetingStage,
+            feature_flags::gFeatureFlagExtensionsInsideHybridSearch,
+            search_metrics::inFacetKickbackRetryCount,
+            "$facet with $unionWith/$lookup targeting a view is not supported with "
+            "featureFlagExtensionsInsideHybridSearch enabled.");
+    }
 
     boost::optional<std::string> needsRouter;
     boost::optional<std::string> needsShard;
 
     std::vector<FacetPipeline> facetPipelines;
-    for (auto&& rawFacet : extractRawPipelines(elem)) {
+    for (auto&& rawFacet : rawFacetPipelines) {
         const auto facetName = rawFacet.first;
 
         auto pipeline = pipeline_factory::makeFacetPipeline(

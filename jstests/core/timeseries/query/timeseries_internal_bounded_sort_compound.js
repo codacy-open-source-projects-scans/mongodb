@@ -2,6 +2,7 @@
  * Tests the behavior of the $_internalBoundedSort stage with a compound sort key.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   # Refusing to run a test that issues an aggregation command with explain because it may return
@@ -17,14 +18,20 @@
  *   requires_getmore,
  * ]
  */
-import {getTimeseriesCollForRawOps, kRawOperationSpec} from "jstests/core/libs/raw_operation_utils.js";
+import {
+    getTimeseriesCollForRawOps,
+    kRawOperationSpec,
+} from "jstests/core/libs/raw_operation_utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db[jsTestName()];
 coll.drop();
-assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}));
-const bucketMaxSpanSeconds = db.getCollectionInfos({name: coll.getName()})[0].options.timeseries.bucketMaxSpanSeconds;
+assert.commandWorked(
+    db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}),
+);
+const bucketMaxSpanSeconds = db.getCollectionInfos({name: coll.getName()})[0].options.timeseries
+    .bucketMaxSpanSeconds;
 
 assert.commandWorked(coll.createIndex({m: 1, t: 1}));
 assert.commandWorked(coll.createIndex({m: 1, t: -1}));
@@ -64,7 +71,10 @@ assert.commandWorked(coll.createIndex({m: -1, t: -1}));
             `(${expectedBucketsPerSeries}*${numSeries} total)`,
     );
 
-    TimeseriesTest.ensureDataIsDistributedIfSharded(coll, new Date(+start + (batchSize / 2) * intervalMillis));
+    TimeseriesTest.ensureDataIsDistributedIfSharded(
+        coll,
+        new Date(+start + (batchSize / 2) * intervalMillis),
+    );
 }
 
 const unpackStage = getAggPlanStages(coll.explain().aggregate(), "$_internalUnpackBucket")[0];
@@ -134,7 +144,9 @@ function runTest(sortSpec) {
     // Test sorting the whole collection
     {
         const naiveQuery = [unpackStage, {$_internalInhibitOptimization: {}}, {$sort: sortSpec}];
-        const reference = getTimeseriesCollForRawOps(coll).aggregate(naiveQuery, kRawOperationSpec).toArray();
+        const reference = getTimeseriesCollForRawOps(coll)
+            .aggregate(naiveQuery, kRawOperationSpec)
+            .toArray();
         assertSorted(reference, sortSpec);
 
         // Check plan using control.min.t
@@ -150,7 +162,9 @@ function runTest(sortSpec) {
         // Check plan using control.max.t
         if (sortSpec.t > 0) {
             const optFromMaxQuery = [{$sort: {m: sortSpec.m, t: sortSpec.t}}];
-            const optFromMax = coll.aggregate(optFromMaxQuery, {hint: {m: -sortSpec.m, t: -sortSpec.t}}).toArray();
+            const optFromMax = coll
+                .aggregate(optFromMaxQuery, {hint: {m: -sortSpec.m, t: -sortSpec.t}})
+                .toArray();
             assertSorted(optFromMax, sortSpec);
             assert.eq(reference, optFromMax);
         } else {
@@ -160,8 +174,15 @@ function runTest(sortSpec) {
 
     // Test $sort + $limit.
     {
-        const naiveQuery = [unpackStage, {$_internalInhibitOptimization: {}}, {$sort: sortSpec}, {$limit: 100}];
-        const naive = getTimeseriesCollForRawOps(coll).aggregate(naiveQuery, kRawOperationSpec).toArray();
+        const naiveQuery = [
+            unpackStage,
+            {$_internalInhibitOptimization: {}},
+            {$sort: sortSpec},
+            {$limit: 100},
+        ];
+        const naive = getTimeseriesCollForRawOps(coll)
+            .aggregate(naiveQuery, kRawOperationSpec)
+            .toArray();
         assertSorted(naive, sortSpec);
         assert.eq(100, naive.length);
 
@@ -171,12 +192,17 @@ function runTest(sortSpec) {
             {
                 $_internalBoundedSort: {
                     sortKey: sortSpec,
-                    bound: sortSpec.t > 0 ? {base: "min"} : {base: "min", offsetSeconds: bucketMaxSpanSeconds},
+                    bound:
+                        sortSpec.t > 0
+                            ? {base: "min"}
+                            : {base: "min", offsetSeconds: bucketMaxSpanSeconds},
                     limit: 100,
                 },
             },
         ];
-        const optFromMin = getTimeseriesCollForRawOps(coll).aggregate(optFromMinQuery, kRawOperationSpec).toArray();
+        const optFromMin = getTimeseriesCollForRawOps(coll)
+            .aggregate(optFromMinQuery, kRawOperationSpec)
+            .toArray();
         assertSorted(optFromMin, sortSpec);
         assert.eq(100, optFromMin.length);
         assert.eq(naive, optFromMin);
@@ -187,12 +213,17 @@ function runTest(sortSpec) {
             {
                 $_internalBoundedSort: {
                     sortKey: sortSpec,
-                    bound: sortSpec.t > 0 ? {base: "max", offsetSeconds: -bucketMaxSpanSeconds} : {base: "max"},
+                    bound:
+                        sortSpec.t > 0
+                            ? {base: "max", offsetSeconds: -bucketMaxSpanSeconds}
+                            : {base: "max"},
                     limit: 100,
                 },
             },
         ];
-        const optFromMax = getTimeseriesCollForRawOps(coll).aggregate(optFromMaxQuery, kRawOperationSpec).toArray();
+        const optFromMax = getTimeseriesCollForRawOps(coll)
+            .aggregate(optFromMaxQuery, kRawOperationSpec)
+            .toArray();
         assertSorted(optFromMax, sortSpec);
         assert.eq(100, optFromMax.length);
         assert.eq(naive, optFromMax);

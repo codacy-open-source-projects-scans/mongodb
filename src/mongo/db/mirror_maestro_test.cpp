@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/mirror_maestro.h"
 
@@ -38,10 +12,12 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/basic.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -166,7 +142,8 @@ public:
     }
 
 protected:
-    ServerParameterControllerForTest _serverParameterController{"mirrorReads", BSONObj()};
+    boost::optional<unittest::ServerParameterGuard> _serverParameterController{
+        boost::in_place_init, "mirrorReads", BSONObj()};
     repl::ReplicationCoordinatorMock* _replCoord = nullptr;
     std::shared_ptr<executor::TaskExecutor> _executor;
 
@@ -225,7 +202,7 @@ private:
 class GeneralMirrorMaestroTest : public MirrorMaestroTest {
 protected:
     void setServerParams(double generalSamplingRate) {
-        _serverParameterController = ServerParameterControllerForTest(
+        _serverParameterController.emplace(
             "mirrorReads",
             BSON("samplingRate" << generalSamplingRate << "maxTimeMS" << 500 << "targetedMirroring"
                                 << BSON("samplingRate" << 0.0 << "maxTimeMS" << 500)));
@@ -407,8 +384,7 @@ public:
 private:
     FailPointEnableBlock _skipRegisteringMirroredReadsTopologyObserverCallback{
         "skipRegisteringMirroredReadsTopologyObserverCallback"};
-    RAIIServerParameterControllerForTest _featureFlagController{"featureFlagTargetedMirrorReads",
-                                                                true};
+    unittest::ServerParameterGuard _featureFlagController{"featureFlagTargetedMirrorReads", true};
 };
 
 TEST_F(TargetedMirrorMaestroTest, BasicInitializationEmptyHostsCache) {
@@ -418,68 +394,27 @@ TEST_F(TargetedMirrorMaestroTest, BasicInitializationEmptyHostsCache) {
     ASSERT(hosts.empty());
 }
 
-TEST_F(TargetedMirrorMaestroTest, UpdateCachedHostsOnUpdatedTag) {
-    // Turn the failpoint on so we can directly test the update function when the tag has changed,
-    // without testing the server parameter update path calls into this path correctly
-    FailPointEnableBlock skipTriggeringTargetedHostsListRefreshOnServerParamChange{
-        "skipTriggeringTargetedHostsListRefreshOnServerParamChange"};
-
-    // First, set the server parameter and update the cached hosts list
-    _serverParameterController =
-        ServerParameterControllerForTest("mirrorReads", kDefaultServerParam);
-
-    auto version = kInitialConfigVersion + 1;
-    auto term = kInitialTermVersion;
-    auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
-
-    // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
-
-    // Verify hosts were cached
-    auto hosts = getCachedHosts();
-    ASSERT_EQ(hosts.size(), 1);
-    ASSERT_EQ((hosts)[0].toString(), kHost1);
-
-    // Now update the server parameter to change the tag and call update again
-    auto updatedServerParam =
-        BSON("targetedMirroring" << BSON("samplingRate" << 0.1 << "maxTimeMS" << 500 << "tag"
-                                                        << kWestTag));
-    _serverParameterController =
-        ServerParameterControllerForTest("mirrorReads", updatedServerParam);
-
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), true /* tagChanged */);
-
-    // Verify hosts were updated
-    hosts = getCachedHosts();
-    ASSERT_EQ(hosts.size(), 1);
-    ASSERT_EQ((hosts)[0].toString(), kHost2);
-}
-
 TEST_F(TargetedMirrorMaestroTest, AssertCachedHostsUpdatedOnServerParameterChange) {
     // First, set the server parameter and update the cached hosts list
-    _serverParameterController =
-        ServerParameterControllerForTest("mirrorReads", kDefaultServerParam);
+    _serverParameterController.emplace("mirrorReads", kDefaultServerParam);
 
     auto version = kInitialConfigVersion + 1;
     auto term = kInitialTermVersion;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
     ASSERT_EQ(hosts.size(), 1);
     ASSERT_EQ((hosts)[0].toString(), kHost1);
 
-    // Now update the server parameter to change the tag. This test case does not set the failpoint
-    // to skip updating the hosts list on a server parameter update, so this param change should
-    // trigger the hosts to update
+    // Now update the server parameter to change the tag.
     auto updatedServerParam =
         BSON("targetedMirroring" << BSON("samplingRate" << 0.1 << "maxTimeMS" << 500 << "tag"
                                                         << kWestTag));
-    _serverParameterController =
-        ServerParameterControllerForTest("mirrorReads", updatedServerParam);
+    _serverParameterController.emplace("mirrorReads", updatedServerParam);
 
     // Verify hosts were updated
     hosts = getCachedHosts();
@@ -488,14 +423,14 @@ TEST_F(TargetedMirrorMaestroTest, AssertCachedHostsUpdatedOnServerParameterChang
 }
 
 TEST_F(TargetedMirrorMaestroTest, UpdateCachedHostsOnTopologyVersionChange) {
-    ServerParameterControllerForTest controller("mirrorReads", kDefaultServerParam);
+    unittest::ServerParameterGuard controller("mirrorReads", kDefaultServerParam);
 
     int version = 2;
     int term = 1;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
@@ -506,7 +441,7 @@ TEST_F(TargetedMirrorMaestroTest, UpdateCachedHostsOnTopologyVersionChange) {
     version++;
     config = setAndVerifyConfig(version, term, kTwoHostsEE, 2);
 
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were updated
     hosts = getCachedHosts();
@@ -516,14 +451,14 @@ TEST_F(TargetedMirrorMaestroTest, UpdateCachedHostsOnTopologyVersionChange) {
 }
 
 TEST_F(TargetedMirrorMaestroTest, NoUpdateToCachedHostsIfTopologyVersionUnchanged) {
-    ServerParameterControllerForTest controller("mirrorReads", kDefaultServerParam);
+    unittest::ServerParameterGuard controller("mirrorReads", kDefaultServerParam);
 
     int version = 1;
     int term = 1;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
@@ -535,7 +470,7 @@ TEST_F(TargetedMirrorMaestroTest, NoUpdateToCachedHostsIfTopologyVersionUnchange
     // happen in production that tags are changed without a change in version.
     config = setAndVerifyConfig(version, term, kTwoHostsEE, 2);
 
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were not updated
     hosts = getCachedHosts();
@@ -547,14 +482,14 @@ using TargetedMirrorMaestroTestDeathTest = TargetedMirrorMaestroTest;
 DEATH_TEST_F(TargetedMirrorMaestroTestDeathTest,
              InvariantOnDecreasedConfigVersionForSameTerm,
              "invariant") {
-    ServerParameterControllerForTest controller("mirrorReads", kDefaultServerParam);
+    unittest::ServerParameterGuard controller("mirrorReads", kDefaultServerParam);
 
     auto version = 2;
     auto term = 1;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
@@ -565,18 +500,18 @@ DEATH_TEST_F(TargetedMirrorMaestroTestDeathTest,
     version--;
     config = setAndVerifyConfig(version, term, kTwoHostsWE, 2);
 
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 }
 
 TEST_F(TargetedMirrorMaestroTest, UpdateHostsOnNewTermEvenIfLowerConfigVersion) {
-    ServerParameterControllerForTest controller("mirrorReads", kDefaultServerParam);
+    unittest::ServerParameterGuard controller("mirrorReads", kDefaultServerParam);
 
     auto version = 2;
     auto term = 1;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
@@ -589,7 +524,7 @@ TEST_F(TargetedMirrorMaestroTest, UpdateHostsOnNewTermEvenIfLowerConfigVersion) 
     term++;
     config = setAndVerifyConfig(version, term, kTwoHostsEE, 2);
 
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were updated
     hosts = getCachedHosts();
@@ -603,14 +538,14 @@ TEST_F(TargetedMirrorMaestroTest, AssertExpectedHostsTargeted) {
     auto param = BSON("samplingRate"
                       << 0.0 << "targetedMirroring"
                       << BSON("samplingRate" << 1.0 << "maxTimeMS" << 500 << "tag" << kEastTag));
-    ServerParameterControllerForTest controller("mirrorReads", param);
+    unittest::ServerParameterGuard controller("mirrorReads", param);
 
     int version = 2;
     int term = 1;
     auto config = setAndVerifyConfig(version, term, kTwoHostsEW, 2);
 
     // Update cached hosts
-    updateCachedHostsForTargetedMirroring_forTest(getServiceContext(), false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(getServiceContext());
 
     // Verify hosts were cached
     auto hosts = getCachedHosts();
@@ -636,14 +571,14 @@ TEST_F(TargetedMirrorMaestroTest, UninitializedConfigDefersHostCompute) {
     auto param = BSON("samplingRate"
                       << 0.0 << "targetedMirroring"
                       << BSON("samplingRate" << 1.0 << "maxTimeMS" << 500 << "tag" << kEastTag));
-    ServerParameterControllerForTest controller("mirrorReads", param);
+    unittest::ServerParameterGuard controller("mirrorReads", param);
 
     // Create an uninitialized config.
     auto config = repl::ReplSetConfig();
     _replCoord->setGetConfigReturnValue(config);
 
     // Attempt to update cached hosts and assert host size.
-    updateCachedHostsForTargetedMirroring_forTest(service, false /* tagChanged */);
+    recomputeCachedHostsForTargetedMirroring_forTest(service);
     ASSERT_EQ(0, getCachedHosts().size());
 
     // Update the config to be initialized.
@@ -670,7 +605,7 @@ TEST_F(NoInitMirrorTest, SetParamBeforeInit) {
     auto param = BSON("samplingRate"
                       << 0.0 << "targetedMirroring"
                       << BSON("samplingRate" << 1.0 << "maxTimeMS" << 500 << "tag" << kEastTag));
-    ServerParameterControllerForTest controller("mirrorReads", param);
+    unittest::ServerParameterGuard controller("mirrorReads", param);
 
     // Initializing MirrorMaestro will update the cached hosts according to the param we set above.
     MirrorMaestro::init(getServiceContext());

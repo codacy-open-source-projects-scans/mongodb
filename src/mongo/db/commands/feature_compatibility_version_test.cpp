@@ -1,44 +1,33 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/feature_compatibility_version.h"
 
-#include "mongo/base/string_data.h"
+#include "mongo/base/checked_cast.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/commands/feature_compatibility_version_gen.h"
 #include "mongo/db/commands/set_feature_compatibility_version_gen.h"
+#include "mongo/db/feature_compatibility_version_document_gen.h"
+#include "mongo/db/feature_compatibility_version_parser.h"
+#include "mongo/db/op_observer/fcv_op_observer.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/server_parameter.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_control.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/storage/record_store_write_conflict_fail_points.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+
+#include <functional>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 
@@ -48,6 +37,7 @@ namespace {
 using FCV = multiversion::FeatureCompatibilityVersion;
 
 class FeatureCompatibilityVersionTestFixture : public CatalogTestFixture {
+protected:
     void setUp() override {
         CatalogTestFixture::setUp();
 
@@ -182,8 +172,8 @@ TEST_P(StartupFCVSequenceTestFixtureWithDefaultStartupFCV,
        ReplicaSetCleanStartupDefaultStartupFCVParameterLastLTS) {
     const auto& params = GetParam();
 
-    RAIIServerParameterControllerForTest defaultStartupFCV{"defaultStartupFCV",
-                                                           toString(params.defaultStartupFCV)};
+    unittest::ServerParameterGuard defaultStartupFCV{"defaultStartupFCV",
+                                                     toString(params.defaultStartupFCV)};
 
     serverGlobalParams.clusterRole = params.clusterRole;
 
@@ -214,7 +204,7 @@ TEST_F(FeatureCompatibilityVersionTestFixture, ResolveStartNewUpgrade) {
 
     ASSERT_EQ(result.transitionalVersion, multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
     ASSERT_EQ(result.startPhase, SetFCVPhaseEnum::kStart);
-    ASSERT_EQ(result.endPhase, SetFCVPhaseEnum::kComplete);
+    ASSERT_EQ(result.endPhase, SetFCVPhaseEnum::kCommitAddedFeatures);
     ASSERT_GT(result.changeTimestamp, lastChangeTimestamp);
 }
 
@@ -239,7 +229,7 @@ TEST_F(FeatureCompatibilityVersionTestFixture, ResolveReturnToOriginalFCVBeforeC
     ASSERT_EQ(result.transitionalVersion,
               multiversion::GenericFCV::kDowngradingFromLatestToLastLTS);
     ASSERT_EQ(result.startPhase, SetFCVPhaseEnum::kStart);
-    ASSERT_EQ(result.endPhase, SetFCVPhaseEnum::kComplete);
+    ASSERT_EQ(result.endPhase, SetFCVPhaseEnum::kCommitAddedFeatures);
     ASSERT_GT(result.changeTimestamp, lastChangeTimestamp);
 }
 
@@ -262,29 +252,96 @@ TEST_F(FeatureCompatibilityVersionTestFixture, ResolveReturnToOriginalFCVDuringC
         10778001);
 }
 
+TEST_F(FeatureCompatibilityVersionTestFixture, FindFCVDocumentRetriesWriteConflict) {
+    doStartupFCVSequence(multiversion::GenericFCV::kLatest);
+
+    // Inject a conflict into the first storage read. The FCV lookup should retry the collection
+    // scan and return the document successfully.
+    auto failPoint = enableWriteConflictForReads(
+        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+
+    auto fcvDocument =
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext());
+    EXPECT_EQ(1, failPoint->waitForOneNewEntry());
+    ASSERT_OK(fcvDocument);
+    ASSERT_EQ(FeatureCompatibilityVersionDocument::parse(fcvDocument.getValue()).getVersion(),
+              multiversion::GenericFCV::kLatest);
+}
+
 struct FCVTestParams {
     SetFCVPhaseEnum phase;
-    bool isCleaningServerMetadata;
+    boost::optional<bool> isCleaningServerMetadata;
+    bool symmetricFCVEnabled;
+    SetFCVPhaseEnum expectedStartPhase;
+    SetFCVPhaseEnum expectedEndPhase;
 };
 
 class SetFeatureCompatibilityVersionParamTestFixture
     : public FeatureCompatibilityVersionTestFixture,
       public testing::WithParamInterface<FCVTestParams> {};
 
-INSTANTIATE_TEST_SUITE_P(UpgradingFromDifferentStartingPhases,
+// Without symmetric FCV, the phase stored in the FCV document is ignored and the transition always
+// restarts from kStart with a freshly generated timestamp (legacy "restart from beginning"
+// behavior).
+INSTANTIATE_TEST_SUITE_P(UpgradingFromDifferentStartingPhasesWithoutSymmetricFCV,
                          SetFeatureCompatibilityVersionParamTestFixture,
                          testing::ValuesIn({
-                             FCVTestParams{SetFCVPhaseEnum::kStart, false},
-                             FCVTestParams{SetFCVPhaseEnum::kPrepare, false},
-                             FCVTestParams{SetFCVPhaseEnum::kComplete, true},
+                             FCVTestParams{SetFCVPhaseEnum::kStart,
+                                           false,
+                                           false,
+                                           SetFCVPhaseEnum::kStart,
+                                           SetFCVPhaseEnum::kComplete},
+                             FCVTestParams{SetFCVPhaseEnum::kPrepare,
+                                           false,
+                                           false,
+                                           SetFCVPhaseEnum::kStart,
+                                           SetFCVPhaseEnum::kComplete},
+                             FCVTestParams{SetFCVPhaseEnum::kComplete,
+                                           true,
+                                           false,
+                                           SetFCVPhaseEnum::kStart,
+                                           SetFCVPhaseEnum::kComplete},
+                         }));
+
+// With symmetric FCV, the phase stored in the FCV document is used as the start phase, so the
+// transition resumes from where it was interrupted and reuses the existing change timestamp.
+INSTANTIATE_TEST_SUITE_P(UpgradingFromDifferentStartingPhasesWithSymmetricFCV,
+                         SetFeatureCompatibilityVersionParamTestFixture,
+                         testing::ValuesIn({
+                             FCVTestParams{SetFCVPhaseEnum::kStart,
+                                           false,
+                                           true,
+                                           SetFCVPhaseEnum::kStart,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures},
+                             FCVTestParams{SetFCVPhaseEnum::kPrepare,
+                                           false,
+                                           true,
+                                           SetFCVPhaseEnum::kPrepare,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures},
+                             FCVTestParams{SetFCVPhaseEnum::kComplete,
+                                           true,
+                                           true,
+                                           SetFCVPhaseEnum::kComplete,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures},
+                             FCVTestParams{SetFCVPhaseEnum::kEnableTargetFeatures,
+                                           boost::none,
+                                           true,
+                                           SetFCVPhaseEnum::kEnableTargetFeatures,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures},
+                             FCVTestParams{SetFCVPhaseEnum::kCommitAddedFeatures,
+                                           boost::none,
+                                           true,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures,
+                                           SetFCVPhaseEnum::kCommitAddedFeatures},
                          }));
 
 TEST_P(SetFeatureCompatibilityVersionParamTestFixture, ResolveResumeInterruptedUpgrade) {
-    RAIIServerParameterControllerForTest symmetricFCV{"featureFlagSymmetricFCV", true};
+    const auto& params = GetParam();
+    unittest::ServerParameterGuard symmetricFCV{"featureFlagSymmetricFCV",
+                                                params.symmetricFCVEnabled};
     const Timestamp lastChangeTimestamp =
         VectorClockMutable::get(operationContext())->tickClusterTime(2).asTimestamp();
     serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
-    const auto& params = GetParam();
 
     doStartupFCVSequence(multiversion::GenericFCV::kLastLTS);
     FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
@@ -299,11 +356,408 @@ TEST_P(SetFeatureCompatibilityVersionParamTestFixture, ResolveResumeInterruptedU
         operationContext(), request, multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
 
     ASSERT_EQ(result.transitionalVersion, multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
-    ASSERT_EQ(result.startPhase, params.phase);
-    ASSERT_EQ(result.endPhase, SetFCVPhaseEnum::kComplete);
-    ASSERT_EQ(result.changeTimestamp, lastChangeTimestamp);
+    ASSERT_EQ(result.startPhase, params.expectedStartPhase);
+    ASSERT_EQ(result.endPhase, params.expectedEndPhase);
+    if (params.symmetricFCVEnabled) {
+        ASSERT_EQ(result.changeTimestamp, lastChangeTimestamp);
+    } else {
+        ASSERT_GT(result.changeTimestamp, lastChangeTimestamp);
+    }
 }
 
+struct UpdateDocumentPreviousVersionTestParams {
+    SetFCVPhaseEnum phase;
+    bool expectPreviousVersion;
+    std::string label;
+};
+
+class UpdateDocumentPreviousVersionTestFixture
+    : public FeatureCompatibilityVersionTestFixture,
+      public testing::WithParamInterface<UpdateDocumentPreviousVersionTestParams> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    UpdateDocumentPreviousVersionTests,
+    UpdateDocumentPreviousVersionTestFixture,
+    testing::ValuesIn({
+        UpdateDocumentPreviousVersionTestParams{
+            SetFCVPhaseEnum::kEnableTargetFeatures,
+            true,
+            "writes_previous_version_at_enable_target_features"},
+        UpdateDocumentPreviousVersionTestParams{SetFCVPhaseEnum::kCommitAddedFeatures,
+                                                true,
+                                                "writes_previous_version_at_commit_added_features"},
+        UpdateDocumentPreviousVersionTestParams{
+            SetFCVPhaseEnum::kStart, false, "does_not_write_on_upgrade_previous_version_at_start"},
+    }),
+    [](const testing::TestParamInfo<UpdateDocumentPreviousVersionTestParams>& info) {
+        return info.param.label;
+    });
+
+TEST_P(UpdateDocumentPreviousVersionTestFixture, UpdateDocumentPreviousVersion) {
+    const auto& params = GetParam();
+    unittest::ServerParameterGuard symmetricFCV{"featureFlagSymmetricFCV", true};
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    doStartupFCVSequence(multiversion::GenericFCV::kLastLTS);
+
+    const Timestamp ts =
+        VectorClockMutable::get(operationContext())->tickClusterTime(1).asTimestamp();
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        operationContext(),
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+        params.phase,
+        ts,
+        params.phase >= SetFCVPhaseEnum::kEnableTargetFeatures /* setIsCleaningServerMetadata */);
+
+    auto docResult =
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext());
+    ASSERT_OK(docResult);
+    auto parsedDoc = FeatureCompatibilityVersionDocument::parse(docResult.getValue());
+    if (params.expectPreviousVersion) {
+        ASSERT_TRUE(parsedDoc.getPreviousVersion().has_value());
+        ASSERT_EQ(*parsedDoc.getPreviousVersion(), multiversion::GenericFCV::kLastLTS);
+    } else {
+        ASSERT_FALSE(parsedDoc.getPreviousVersion().has_value());
+    }
+}
+
+TEST_F(FeatureCompatibilityVersionTestFixture, CanInitFCVWithIncompleteForegroundIndexBuild) {
+    // Create an incomplete index build in the catalog for a collection in the admin database
+    {
+        const auto nss =
+            NamespaceString::createNamespaceString_forTest("admin.incompleteForegroundIndexBuild");
+        ASSERT_OK(
+            storageInterface()->createCollection(operationContext(), nss, CollectionOptions()));
+
+        auto coll = acquireCollection(
+            operationContext(),
+            CollectionAcquisitionRequest{nss,
+                                         PlacementConcern::kPretendUnsharded,
+                                         repl::ReadConcernArgs::get(operationContext()),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_X);
+        WriteUnitOfWork wuow(operationContext());
+        CollectionWriter writer{operationContext(), &coll};
+        auto writableColl = writer.getWritableCollection(operationContext());
+        IndexDescriptor desc{IndexNames::BTREE,
+                             BSON("v" << 2 << "name"
+                                      << "x_1"
+                                      << "key" << BSON("x" << 1))};
+        ASSERT_OK(writableColl->prepareForIndexBuild(
+            operationContext(), &desc, "index-ident", boost::none));
+        wuow.commit();
+    }
+
+    // Simulate the startup path by closing the catalog and reopening it without reconciling (as
+    // that happens after FCV is initialized). This would fail if we tried to initialize the entire
+    // admin db as a non-fcv collection is in an invalid state.
+    Lock::GlobalLock globalLk(operationContext(), MODE_X);
+    catalog::closeCatalog(operationContext());
+
+    auto* storageEngine = operationContext()->getServiceContext()->getStorageEngine();
+    storageEngine->loadMDBCatalog(operationContext(), StorageEngine::LastShutdownState::kClean);
+    catalog::initializeCollectionCatalog(
+        operationContext(), storageEngine, catalog::InitMode::kStartup);
+    FeatureCompatibilityVersion::initializeForStartup(operationContext());
+}
+
+TEST_F(FeatureCompatibilityVersionTestFixture, UpdateDocumentClearsPreviousVersionOnFinalize) {
+    unittest::ServerParameterGuard symmetricFCV{"featureFlagSymmetricFCV", true};
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    doStartupFCVSequence(multiversion::GenericFCV::kLastLTS);
+
+    const Timestamp ts =
+        VectorClockMutable::get(operationContext())->tickClusterTime(1).asTimestamp();
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        operationContext(),
+        multiversion::GenericFCV::kLatest,
+        boost::none /* phase */,
+        ts,
+        boost::none /* setIsCleaningServerMetadata */);
+
+    auto docResult =
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext());
+    ASSERT_OK(docResult);
+    auto parsedDoc = FeatureCompatibilityVersionDocument::parse(docResult.getValue());
+    ASSERT_FALSE(parsedDoc.getPreviousVersion().has_value());
+}
+
+TEST_F(FeatureCompatibilityVersionTestFixture,
+       UpdateDocumentDoesNotWritePreviousVersionWhenSymmetricFCVDisabled) {
+    unittest::ServerParameterGuard symmetricFCV{"featureFlagSymmetricFCV", false};
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    doStartupFCVSequence(multiversion::GenericFCV::kLastLTS);
+
+    const Timestamp ts =
+        VectorClockMutable::get(operationContext())->tickClusterTime(1).asTimestamp();
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        operationContext(),
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+        SetFCVPhaseEnum::kPrepare,
+        ts,
+        boost::none /* setIsCleaningServerMetadata */);
+
+    auto docResult =
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext());
+    ASSERT_OK(docResult);
+    auto parsedDoc = FeatureCompatibilityVersionDocument::parse(docResult.getValue());
+    ASSERT_FALSE(parsedDoc.getPreviousVersion().has_value());
+}
+// Helpers for the FeatureCompatibilityVersionParameter::append() tests below.
+
+BSONObj appendFcvParameter(OperationContext* opCtx) {
+    auto* sp = ServerParameterSet::getNodeParameterSet()->get(multiversion::kParameterName);
+    BSONObjBuilder b;
+    sp->append(opCtx, &b, sp->name(), boost::none);
+    return b.obj().getObjectField(sp->name()).getOwned();
+}
+
+void seedFcvDocAtPhase(OperationContext* opCtx,
+                       FCV version,
+                       boost::optional<SetFCVPhaseEnum> phase) {
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        opCtx,
+        version,
+        phase,
+        Timestamp(1, 1),
+        phase &&
+            *phase >= SetFCVPhaseEnum::kEnableTargetFeatures /* setIsCleaningServerMetadata */);
+    // The FCV op observer that normally mirrors disk writes to in-memory FCV does not run in
+    // unit tests. Replicate its effect here so callers see consistent in-memory state.
+    auto docResult = FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(opCtx);
+    ASSERT_OK(docResult.getStatus());
+    serverGlobalParams.mutableFCV.setVersion(
+        uassertStatusOK(FeatureCompatibilityVersionParser::parse(docResult.getValue())));
+}
+
+std::string_view fcvStr(FCV v) {
+    return FeatureCompatibilityVersionParser::serializeVersionForFcvString(v);
+}
+
+struct AppendFCVFormatTestParams {
+    // The version to seed on disk. A non-transitional version with an unset phase yields a
+    // steady-state document; a transitional version paired with a phase yields a transitional one.
+    FCV seedVersion;
+    boost::optional<SetFCVPhaseEnum> phase;
+    std::function<BSONObj()> expectedDoc;
+    std::string label;
+};
+
+class AppendFCVFormatTestFixture : public FeatureCompatibilityVersionTestFixture,
+                                   public testing::WithParamInterface<AppendFCVFormatTestParams> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    AppendFCVFormatTests,
+    AppendFCVFormatTestFixture,
+    testing::ValuesIn({
+        AppendFCVFormatTestParams{multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+                                  SetFCVPhaseEnum::kEnableTargetFeatures,
+                                  []() {
+                                      return BSON("version"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest)
+                                                  << "targetVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest)
+                                                  << "previousVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS));
+                                  },
+                                  "upgrade_enable_target_features"},
+        AppendFCVFormatTestParams{multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+                                  SetFCVPhaseEnum::kCommitAddedFeatures,
+                                  []() {
+                                      return BSON("version"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest)
+                                                  << "targetVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest)
+                                                  << "previousVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS));
+                                  },
+                                  "upgrade_commit_added_features"},
+        AppendFCVFormatTestParams{multiversion::GenericFCV::kDowngradingFromLatestToLastLTS,
+                                  SetFCVPhaseEnum::kEnableTargetFeatures,
+                                  []() {
+                                      return BSON("version"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS)
+                                                  << "targetVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS)
+                                                  << "previousVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest));
+                                  },
+                                  "downgrade_enable_target_features"},
+        AppendFCVFormatTestParams{multiversion::GenericFCV::kDowngradingFromLatestToLastLTS,
+                                  SetFCVPhaseEnum::kCommitAddedFeatures,
+                                  []() {
+                                      return BSON("version"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS)
+                                                  << "targetVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS)
+                                                  << "previousVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest));
+                                  },
+                                  "downgrade_commit_added_features"},
+        AppendFCVFormatTestParams{multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+                                  SetFCVPhaseEnum::kStart,
+                                  []() {
+                                      return BSON("version"
+                                                  << fcvStr(multiversion::GenericFCV::kLastLTS)
+                                                  << "targetVersion"
+                                                  << fcvStr(multiversion::GenericFCV::kLatest));
+                                  },
+                                  "upgrade_start"},
+        // A fully steady-state FCV (no transition in progress) reports just {version}.
+        AppendFCVFormatTestParams{
+            multiversion::GenericFCV::kLatest,
+            boost::none,
+            []() { return BSON("version" << fcvStr(multiversion::GenericFCV::kLatest)); },
+            "steady_state"},
+    }),
+    [](const testing::TestParamInfo<AppendFCVFormatTestParams>& info) { return info.param.label; });
+
+TEST_P(AppendFCVFormatTestFixture, AppendEmitsExpectedFormat) {
+    const auto& params = GetParam();
+    unittest::ServerParameterGuard symmetricFCV{"featureFlagSymmetricFCV", true};
+    serverGlobalParams.clusterRole = ClusterRole::None;
+    doStartupFCVSequence(multiversion::GenericFCV::kLatest);
+    seedFcvDocAtPhase(operationContext(), params.seedVersion, params.phase);
+
+    auto fcv = appendFcvParameter(operationContext());
+
+    ASSERT_BSONOBJ_EQ(fcv, params.expectedDoc());
+}
+
+TEST_F(FeatureCompatibilityVersionTestFixture,
+       FindFeatureCompatibilityVersionDocumentDoesNotRequireIndex) {
+    doStartupFCVSequence(multiversion::GenericFCV::kLatest);
+
+    // Remove the _id index from the collection to verify that FCV lookup doesn't rely on it
+    {
+        auto coll = acquireCollection(
+            operationContext(),
+            CollectionAcquisitionRequest{NamespaceString::kServerConfigurationNamespace,
+                                         PlacementConcern::kPretendUnsharded,
+                                         repl::ReadConcernArgs::get(operationContext()),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_X);
+        WriteUnitOfWork wuow(operationContext());
+        CollectionWriter writer{operationContext(), &coll};
+        auto writableColl = writer.getWritableCollection(operationContext());
+        ASSERT_TRUE(writableColl->isIndexPresent("_id_"));
+        writableColl->removeIndex(operationContext(), "_id_");
+        ASSERT_FALSE(writableColl->isIndexPresent("_id_"));
+        wuow.commit();
+    }
+
+    ASSERT_OK(
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext()));
+}
+
+// ---- InitializeForStartup tests ----
+
+static FeatureCompatibilityVersionDocument getFCVDocument() {
+    FeatureCompatibilityVersionDocument doc;
+    serverGlobalParams.mutableFCV.withAcquiredFCVDocument(
+        [&](const FeatureCompatibilityVersionDocument* fcvDoc) {
+            ASSERT(fcvDoc);
+            doc = *fcvDoc;
+        });
+    return doc;
+}
+
+struct StartupFCVScenario {
+    std::string name;
+    FCV targetVersion;  // Steady or transitional FCV to write before startup.
+    boost::optional<SetFCVPhaseEnum> phase;
+    FCV expectedVersion;
+};
+
+class InitializeForStartupTest : public FeatureCompatibilityVersionTestFixture,
+                                 public testing::WithParamInterface<StartupFCVScenario> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    InitializeForStartup,
+    InitializeForStartupTest,
+    testing::ValuesIn(std::vector<StartupFCVScenario>{
+        {"SteadyState",
+         multiversion::GenericFCV::kLatest,
+         boost::none,
+         multiversion::GenericFCV::kLatest},
+        {"EarlyUpgrade",
+         multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+         SetFCVPhaseEnum::kStart,
+         multiversion::GenericFCV::kUpgradingFromLastLTSToLatest},
+        {"LateUpgrade",
+         multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+         SetFCVPhaseEnum::kEnableTargetFeatures,
+         multiversion::GenericFCV::kLatest},
+        {"Downgrade",
+         multiversion::GenericFCV::kDowngradingFromLatestToLastLTS,
+         SetFCVPhaseEnum::kStart,
+         multiversion::GenericFCV::kDowngradingFromLatestToLastLTS},
+    }),
+    [](const testing::TestParamInfo<InitializeForStartupTest::ParamType>& info) {
+        return info.param.name;
+    });
+
+TEST_P(InitializeForStartupTest, InitializeForStartupSetsFCVDocument) {
+    const auto& s = GetParam();
+
+    doStartupFCVSequence(multiversion::GenericFCV::kLatest);
+
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        operationContext(), s.targetVersion, s.phase, boost::none, boost::none);
+
+    serverGlobalParams.mutableFCV.reset();
+
+    {
+        Lock::GlobalWrite lk(operationContext());
+        FeatureCompatibilityVersion::initializeForStartup(operationContext());
+    }
+
+    auto snapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    ASSERT_EQ(snapshot.getVersion(), s.expectedVersion);
+
+    auto swOnDiskFCVDoc =
+        FeatureCompatibilityVersion::findFeatureCompatibilityVersionDocument(operationContext());
+    ASSERT_OK(swOnDiskFCVDoc.getStatus());
+
+    auto fcvDoc = getFCVDocument();
+    ASSERT_BSONOBJ_EQ(swOnDiskFCVDoc.getValue(), fcvDoc.toBSON());
+}
+
+TEST_F(InitializeForStartupTest, InitializeForStartupNoDocument) {
+    Lock::GlobalWrite lk(operationContext());
+    FeatureCompatibilityVersion::initializeForStartup(operationContext());
+
+    auto snapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    ASSERT_FALSE(snapshot.isVersionInitialized());
+}
+
+// ---- FCVOpObserver E2E test ----
+
+class FCVOpObserverE2ETest : public FeatureCompatibilityVersionTestFixture {
+public:
+    void setUp() override {
+        FeatureCompatibilityVersionTestFixture::setUp();
+        auto* registry = checked_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
+        registry->addObserver(std::make_unique<FcvOpObserver>());
+    }
+};
+
+TEST_F(FCVOpObserverE2ETest, SetsFCVDocumentOnDocumentWrite) {
+    doStartupFCVSequence(multiversion::GenericFCV::kLastLTS);
+
+    FeatureCompatibilityVersion::updateFeatureCompatibilityVersionDocument(
+        operationContext(),
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest,
+        SetFCVPhaseEnum::kEnableTargetFeatures,
+        boost::none,
+        boost::none);
+
+    auto snapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    ASSERT_EQ(snapshot.getVersion(), multiversion::GenericFCV::kLatest);
+
+    auto fcvDoc = getFCVDocument();
+    ASSERT_EQ(fcvDoc.getTargetVersion(), multiversion::GenericFCV::kLatest);
+    ASSERT_EQ(fcvDoc.getPreviousVersion(), multiversion::GenericFCV::kLastLTS);
+}
 
 }  // namespace
 }  // namespace mongo

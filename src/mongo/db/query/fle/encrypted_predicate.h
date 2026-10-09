@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -50,6 +24,7 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <typeindex>
 #include <variant>
 #include <vector>
@@ -76,14 +51,18 @@ namespace fle {
 using BSONValue = std::variant<BSONElement, std::reference_wrapper<Value>>;
 
 /**
- * Parse a find payload from either a BSONElement or a Value. All ParsedFindPayload types should
- * have constructors for both BSONElements and Values, which will enable this function to work on
- * both types.
+ * Parse a find payload from either a BSONElement or a Value, and validate it against the
+ * QueryTypeConfig at `path` in `efc`. Pass efc=boost::none to skip validation (only when there's no
+ * schema context, e.g. inside a runtime Expression constructor that runs after rewrite).
  */
 template <typename T>
-T parseFindPayload(BSONValue payload) {
-    return visit(OverloadedVisitor{[&](BSONElement payload) { return T(payload); },
-                                   [&](Value payload) { return T(payload); }},
+T parseFindPayload(BSONValue payload,
+                   std::string_view path,
+                   boost::optional<const EncryptedFieldConfig&> efc) {
+    return visit(OverloadedVisitor{[&](BSONElement payload) { return T(payload, path, efc); },
+                                   [&](Value payload) {
+                                       return T(payload, path, efc);
+                                   }},
                  payload);
 }
 
@@ -213,7 +192,7 @@ protected:
      * Value so that it can be used in both the MatchExpression and Aggregation contexts. Virtual
      * functions can't also be templated, which is why we need the runtime dispatch on the variant.
      */
-    virtual std::vector<PrfBlock> generateTags(BSONValue payload) const = 0;
+    virtual std::vector<PrfBlock> generateTags(BSONValue payload, std::string_view path) const = 0;
 
     /**
      * Rewrite to a tag disjunction on the __safeContent__ field.

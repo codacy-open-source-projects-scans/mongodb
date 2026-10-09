@@ -137,11 +137,41 @@ assert.eq(spylogerr.length, 4);
 assert.eq(spylogerr[0], "\u001b[31m✘ multiple test failures > test2\u001b[0m");
 assert.eq(spylogerr[1], "\u001b[31m✘ multiple test failures > test4\u001b[0m");
 // these are stack-dependent
-assert.startsWith(spylogerr[2], "\u001b[31m✘ multiple test failures > test2\nIntentional failure\nFAILURE@jstests");
-assert.startsWith(spylogerr[3], "\u001b[31m✘ multiple test failures > test4\nIntentional failure\nFAILURE@jstests");
+assert.startsWith(
+    spylogerr[2],
+    "\u001b[31m✘ multiple test failures > test2\nIntentional failure\nFAILURE@jstests",
+);
+assert.startsWith(
+    spylogerr[3],
+    "\u001b[31m✘ multiple test failures > test4\nIntentional failure\nFAILURE@jstests",
+);
 
 jsTest.log.info = previous_info;
 jsTest.log.error = previous_error;
+
+// A failing assertion with an `attr` object should forward that object to jsTest.log.error so it
+// is preserved as structured data (SERVER-130181).
+let spyErrAttr = [];
+previous_info = jsTest.log.info;
+jsTest.log.info = () => {};
+previous_error = jsTest.log.error;
+jsTest.log.error = (msg, attr) => spyErrAttr.push({msg, attr});
+describe("assertion attr is logged", () => {
+    it("fails with attr", () => {
+        assert(false, "boom", {bar_field: "baz value"});
+    });
+});
+e = await assert.throwsAsync(RUN);
+jsTest.log.info = previous_info;
+jsTest.log.error = previous_error;
+
+assert.eq(e.message, "1 failing tests detected");
+// The reprinted failure (the one carrying the stack) should also carry the attr object.
+const reprinted = spyErrAttr.find(
+    (entry) => entry.attr !== undefined && entry.msg.includes("assert failed : boom\n"),
+);
+assert(reprinted, "Expected the reprinted failure log entry to include the attr object");
+assert.docEq(reprinted.attr, {bar_field: "baz value"});
 
 /*
  * This test may show "0 passing" at the end of its execution, but that's because

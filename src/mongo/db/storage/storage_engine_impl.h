@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/database_name.h"
@@ -61,6 +34,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -132,25 +106,33 @@ public:
                                                KeyFormat keyFormat,
                                                int64_t thresholdBytes) override;
 
-    void dropSpillTable(RecoveryUnit& ru, StringData ident) override;
+    void dropSpillTable(RecoveryUnit& ru, std::string_view ident) override;
 
     std::unique_ptr<RecordStore> makeInternalRecordStore(OperationContext* opCtx,
-                                                         StringData ident,
+                                                         std::string_view ident,
                                                          KeyFormat keyFormat) override;
 
     void cleanShutdown(ServiceContext* svcCtx, bool memLeakAllowed) override;
 
     void setLastMaterializedLsn(uint64_t lsn) override;
 
-    void setRecoveryCheckpointMetadata(StringData checkpointMetadata) override;
+    Status setRecoveryCheckpointMetadata(std::string_view checkpointMetadata) override;
 
     void promoteToLeader() override;
 
-    void demoteFromLeader() override;
+    void demoteToFollower() override;
 
     void setStableTimestamp(Timestamp stableTimestamp, bool force = false) override;
 
     Timestamp getStableTimestamp() const override;
+
+    void setStepDownTimestamp(WithLock, Timestamp stepDownTimestamp) override;
+
+    Timestamp getStepDownTimestamp() const override;
+
+    std::unique_lock<std::mutex> lockStepDown() override {
+        return _engine->lockStepDown();
+    }
 
     void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
 
@@ -181,11 +163,15 @@ public:
 
     bool supportsReadConcernSnapshot() const final;
 
-    Status immediatelyCompletePendingDrop(OperationContext* opCtx, StringData ident) final;
+    Status immediatelyCompletePendingDrop(OperationContext* opCtx, std::string_view ident) final;
 
     SnapshotManager* getSnapshotManager() const final;
 
     void setJournalListener(JournalListener* jl) final;
+
+    void setFlushAllFilesObserver(FlushAllFilesObserver* observer) final;
+
+    FlushAllFilesObserver* getFlushAllFilesObserver() const final;
 
     KVEngine* getEngine() override {
         return _engine.get();
@@ -203,19 +189,17 @@ public:
         return _spillEngine.get();
     }
 
-    void dropIdent(RecoveryUnit& ru, StringData ident) override;
-    void addDropPendingIdent(const DropTime& dropTime,
-                             std::shared_ptr<Ident> ident,
-                             DropIdentCallback&& onDrop) override;
+    void dropIdent(RecoveryUnit& ru, std::string_view ident) override;
+    void addDropPendingIdent(const DropTime& dropTime, std::shared_ptr<Ident> ident) override;
     void dropUnknownIdent(RecoveryUnit& ru,
                           const Timestamp& stableTimestamp,
-                          StringData ident) override;
+                          std::string_view ident) override;
 
     void dropIdentTimestamped(OperationContext* opCtx,
-                              StringData ident,
+                              std::string_view ident,
                               Timestamp timestamp) override;
 
-    std::shared_ptr<Ident> markIdentInUse(StringData ident) override;
+    std::shared_ptr<Ident> markIdentInUse(std::string_view ident) override;
 
     void startTimestampMonitor(
         std::initializer_list<TimestampMonitor::TimestampListener*> listeners) override;
@@ -258,20 +242,21 @@ public:
 
     std::string generateNewCollectionIdent(
         const DatabaseName& dbName,
-        const boost::optional<StringData>& optIdentUniqueTag) const override;
+        const boost::optional<std::string_view>& optIdentUniqueTag) const override;
     std::string generateNewIndexIdent(
         const DatabaseName& dbName,
-        const boost::optional<StringData>& optIdentUniqueTag) const override;
+        const boost::optional<std::string_view>& optIdentUniqueTag) const override;
 
-    StringData getCollectionIdentUniqueTag(StringData ident,
-                                           const DatabaseName& dbName) const override;
-    StringData getIndexIdentUniqueTag(StringData ident, const DatabaseName& dbName) const override;
+    std::string_view getCollectionIdentUniqueTag(std::string_view ident,
+                                                 const DatabaseName& dbName) const override;
+    std::string_view getIndexIdentUniqueTag(std::string_view ident,
+                                            const DatabaseName& dbName) const override;
 
     bool storesFilesInDbPath() const override {
         return !_options.directoryForIndexes && !_options.directoryPerDB;
     }
 
-    int64_t getIdentSize(RecoveryUnit& ru, StringData ident) const final {
+    int64_t getIdentSize(RecoveryUnit& ru, std::string_view ident) const final {
         return _engine->getIdentSize(ru, ident);
     }
 
@@ -297,11 +282,11 @@ public:
     bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
 
     BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
-                                    StringData flagName,
+                                    std::string_view flagName,
                                     boost::optional<bool> flagValue) const override;
 
     boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
-                                                    StringData flagName) const override;
+                                                    std::string_view flagName) const override;
 
     [[nodiscard]] BSONObj setStorageTierToStorageOptions(const BSONObj& storageEngineOptions,
                                                          StorageTierLevelEnum value) const override;
@@ -316,11 +301,24 @@ public:
 
     Status autoCompact(RecoveryUnit&, const AutoCompactOptions& options) override;
 
+    StatusWith<std::string> wiredTigerRepair(const std::string& config) override;
+
+    Status fixDatabaseSize() override;
+
+    void pauseAutoCompactForReplicaSetWritesBlock(OperationContext* opCtx) override;
+
     bool underCachePressure(int concurrentOpOuts) override;
 
     size_t getCacheSizeMB() override;
 
     bool hasOngoingLiveRestore() override;
+
+    bool isInLeaderMode() override;
+
+    StatusWith<int64_t> getIndexStorageSize(
+        OperationContext* opCtx, const std::vector<std::string>& indexIdents) const override;
+
+    StatusWith<int64_t> getSharedHistoryStoreStorageSize(OperationContext* opCtx) const override;
 
 private:
     using CollIter = std::list<std::string>::iterator;
@@ -338,7 +336,7 @@ private:
     Status _recoverOrphanedCollection(OperationContext* opCtx,
                                       RecordId catalogId,
                                       const NamespaceString& collectionName,
-                                      StringData collectionIdent);
+                                      std::string_view collectionIdent);
 
     /**
      * Throws a fatal assertion if there are any missing index idents from the storage engine for

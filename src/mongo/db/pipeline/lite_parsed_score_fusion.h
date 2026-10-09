@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,6 +9,7 @@
 #include "mongo/db/pipeline/document_source_score_fusion_gen.h"
 #include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/stage_params.h"
 
 #include <algorithm>
@@ -56,12 +31,12 @@ class Pipeline;
 class ScoreFusionStageParams : public StageParams {
 public:
     ScoreFusionStageParams(ScoreFusionSpec spec,
-                           const std::vector<LiteParsedPipeline>& pipelines,
+                           const std::vector<OwnedLiteParsedPipeline>& pipelines,
                            BSONObj originalBson)
         : _spec(std::move(spec)), _originalBson(std::move(originalBson)) {
         _pipelines.reserve(pipelines.size());
-        for (const auto& pipeline : pipelines) {
-            _pipelines.push_back(pipeline.clone());
+        for (const auto& ownedPipeline : pipelines) {
+            _pipelines.push_back(ownedPipeline->clone());
         }
     }
 
@@ -107,9 +82,11 @@ public:
     LiteParsedScoreFusion(const BSONElement& spec,
                           const NamespaceString& nss,
                           ScoreFusionSpec parsedSpec,
-                          std::vector<LiteParsedPipeline> pipelines)
+                          std::vector<OwnedLiteParsedPipeline> pipelines,
+                          bool extensionsInHybridSearchEnabled = false)
         : LiteParsedDocumentSourceNestedPipelines(spec, nss, std::move(pipelines)),
-          _parsedSpec(std::move(parsedSpec)) {}
+          _parsedSpec(std::move(parsedSpec)),
+          _extensionsInHybridSearchEnabled(extensionsInHybridSearchEnabled) {}
 
     PrivilegeVector requiredPrivileges(bool isMongos, bool bypassDocumentValidation) const final {
         return requiredPrivilegesBasic(isMongos, bypassDocumentValidation);
@@ -120,11 +97,19 @@ public:
     }
 
     bool isSearchStage() const final {
-        return !_pipelines.empty() && _pipelines[0].hasSearchStage();
+        return !_pipelines.empty() && _pipelines[0]->hasSearchStage();
     }
 
     bool isHybridSearchStage() const final {
         return true;
+    }
+
+    // Suppress recursive subpipeline view resolution. The desugar splices the first input
+    // pipeline directly into the outer pipeline and wraps the others in $unionWith, so applying
+    // the view to '_pipelines[]' here would produce duplicate view stages in the outer pipeline.
+    // TODO SERVER-121094 Remove once the flag is gone and desugaring is unconditional.
+    bool shouldResolveSubpipelineViews() const final {
+        return false;
     }
 
     // $scoreFusion desugars into a pipeline that includes $sort.
@@ -137,6 +122,11 @@ public:
         return true;
     }
 
+    // $scoreFusion produces scoreDetails metadata when the user requests it via the spec.
+    bool isScoreDetailsStage() const final {
+        return _parsedSpec.getScoreDetails();
+    }
+
     // $scoreFusion does not modify documents, only combines and reorders them.
     bool isSelectionStage() const final {
         return true;
@@ -146,17 +136,17 @@ public:
         return {.canRunOnTimeseries = false};
     }
 
-    void validate() const override;
+    void validate(const OperationContext* opCtx) const override;
 
     bool hasExtensionVectorSearchStage() const override {
-        return std::any_of(_pipelines.begin(), _pipelines.end(), [](const auto& pipeline) {
-            return pipeline.hasExtensionVectorSearchStage();
+        return std::any_of(_pipelines.begin(), _pipelines.end(), [](const auto& ownedPipeline) {
+            return ownedPipeline->hasExtensionVectorSearchStage();
         });
     }
 
     bool hasExtensionSearchStage() const override {
-        return std::any_of(_pipelines.begin(), _pipelines.end(), [](const auto& pipeline) {
-            return pipeline.hasExtensionSearchStage();
+        return std::any_of(_pipelines.begin(), _pipelines.end(), [](const auto& ownedPipeline) {
+            return ownedPipeline->hasExtensionSearchStage();
         });
     }
 
@@ -165,8 +155,21 @@ public:
             _parsedSpec, _pipelines, getOriginalBson().wrap().getOwned());
     }
 
+    const ScoreFusionSpec& getSpec() const {
+        return _parsedSpec;
+    }
+
+    bool extensionsInHybridSearchEnabled() const {
+        return _extensionsInHybridSearchEnabled;
+    }
+
 private:
     ScoreFusionSpec _parsedSpec;
+    // True when, at parse time, the IFR context reports featureFlagExtensionsInsideHybridSearch is
+    // enabled. Used by scoreFusionStageExpander to decide whether to desugar at lite-parse time.
+    // TODO SERVER-121094 Remove this field (and extensionsInHybridSearchEnabled()) once the flag is
+    // removed and lite-parse desugaring is unconditional.
+    bool _extensionsInHybridSearchEnabled = false;
 };
 
 }  // namespace mongo

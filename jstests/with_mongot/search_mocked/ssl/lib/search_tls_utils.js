@@ -26,7 +26,11 @@ function shouldSkipWithGRPC({mongotMockTLSMode, mongodTLSMode, searchTLSMode}) {
     return false;
 }
 
-function setUpMongotAndMongodWithTLSOptions({mongotMockTLSMode, mongodTLSMode = "disabled", searchTLSMode = null}) {
+function setUpMongotAndMongodWithTLSOptions({
+    mongotMockTLSMode,
+    mongodTLSMode = "disabled",
+    searchTLSMode = null,
+}) {
     const mongotmock = new MongotMock();
     mongotmock.start({bypassAuth: false, tlsMode: mongotMockTLSMode});
     const mongotConn = mongotmock.getConnection();
@@ -82,7 +86,12 @@ export function verifyTLSConfigurationPasses({mongotMockTLSMode, mongodTLSMode, 
 
     const collUUID = getUUIDFromListCollections(db, coll.getName());
     const searchQuery = {query: "cakes", path: "title"};
-    const searchCmd = {search: coll.getName(), collectionUUID: collUUID, query: searchQuery, $db: "test"};
+    const searchCmd = {
+        search: coll.getName(),
+        collectionUUID: collUUID,
+        query: searchQuery,
+        $db: "test",
+    };
 
     {
         const cursorId = NumberLong(123);
@@ -126,7 +135,9 @@ export function verifyTLSConfigurationPasses({mongotMockTLSMode, mongodTLSMode, 
             },
         ];
 
-        assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}));
+        assert.commandWorked(
+            mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}),
+        );
     }
 
     // Perform a $search query.
@@ -170,11 +181,13 @@ export function verifyTLSConfigurationFails({mongotMockTLSMode, mongodTLSMode, s
     assert.commandWorked(coll.insert({"_id": 3, "title": "vegetables"}));
     const searchQuery = {query: "cakes", path: "title"};
 
-    // Perform a $search query. It should fail with 'HostUnreachable' since the TLS mode of mongod
-    // doesn't match what mongot expects.
+    // Perform a $search query. mongod's egress to mongot fails because the TLS mode doesn't match
+    // what mongot expects, so mongot tears the connection down during the TLS handshake. Whether the
+    // close is a graceful FIN or an abortive RST, the egress client now classifies the peer-close as
+    // ConnectionClosedByPeer; HostUnreachable is kept for a failed connect. We accept either.
     assert.commandFailedWithCode(
         db.runCommand({aggregate: "search", pipeline: [{$search: searchQuery}], cursor: {}}),
-        ErrorCodes.HostUnreachable,
+        [ErrorCodes.HostUnreachable, ErrorCodes.ConnectionClosedByPeer],
     );
 
     MongoRunner.stopMongod(mongodConn);

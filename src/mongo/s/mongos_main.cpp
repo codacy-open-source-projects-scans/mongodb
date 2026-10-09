@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/mongos_main.h"
 
@@ -35,7 +9,6 @@
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclient_rs.h"
@@ -52,6 +25,7 @@
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/extension/host/load_extension.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
@@ -64,6 +38,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/profile_filter_impl.h"
+#include "mongo/db/query/query_settings/query_settings_command_hooks.h"
 #include "mongo/db/query/search/mongot_options.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -103,9 +78,10 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
+#include "mongo/otel/metrics/instrumentation/metrics_installer.h"
 #include "mongo/otel/metrics/metrics_initialization.h"
 #include "mongo/otel/traces/trace_initialization.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
@@ -123,6 +99,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
+#include "mongo/transport/message_filter_hooks.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
@@ -287,15 +264,6 @@ Status waitForSigningKeys(OperationContext* opCtx) {
  * 4. Send abortTransaction.
  */
 void implicitlyAbortAllTransactions(OperationContext* opCtx) {
-    struct AbortTransactionDetails {
-    public:
-        AbortTransactionDetails(LogicalSessionId _lsid, SessionCatalog::KillToken _killToken)
-            : lsid(std::move(_lsid)), killToken(std::move(_killToken)) {}
-
-        LogicalSessionId lsid;
-        SessionCatalog::KillToken killToken;
-    };
-
     const auto catalog = SessionCatalog::get(opCtx);
 
     catalog->setDisallowNewTransactions();
@@ -305,11 +273,7 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
 
     const auto abortDeadline = opCtx->fastClockSource().now() + Seconds(15);
 
-    std::vector<AbortTransactionDetails> toKill;
-    catalog->scanSessions(matcherAllSessions, [&](const ObservableSession& session) {
-        toKill.emplace_back(session.getSessionId(),
-                            session.kill(ErrorCodes::InterruptedAtShutdown));
-    });
+    auto killTokens = catalog->killSessions(matcherAllSessions, ErrorCodes::InterruptedAtShutdown);
 
     // TODO(SERVER-111754): Please revisit if this thread could be made killable.
     auto newClient = opCtx->getServiceContext()->getService()->makeClient(
@@ -321,13 +285,13 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
     Status shutDownStatus(ErrorCodes::InterruptedAtShutdown,
                           "aborting transactions due to shutdown");
 
-    for (auto& killDetails : toKill) {
+    for (auto& killToken : killTokens) {
         auto uniqueNewOpCtx = cc().makeOperationContext();
         auto newOpCtx = uniqueNewOpCtx.get();
 
         newOpCtx->setDeadlineByDate(abortDeadline, ErrorCodes::ExceededTimeLimit);
 
-        OperationContextSession sessionCtx(newOpCtx, std::move(killDetails.killToken));
+        OperationContextSession sessionCtx(newOpCtx, std::move(killToken));
 
         auto session = OperationContextSession::get(newOpCtx);
         {
@@ -502,6 +466,9 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             grid->shutdown(opCtx, &shutdownTimeElapsedBuilder, true /* isMongos */);
         }
 
+        // Reject new search cursors before shutting down the search executors, mirroring mongod.
+        executor::beginSearchExecutorShutdown(serviceContext);
+
         {
             SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                            TimedSectionId::shutDownSearchTaskExecutors,
@@ -509,13 +476,13 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             executor::shutdownSearchExecutorsIfNeeded(serviceContext);
         }
 
-        {
+        if (auto&& rwc = ReadWriteConcernDefaults::getDecoration(serviceContext->getService())) {
             SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                            TimedSectionId::shutDownAndJoinReadWriteConcernDefaults,
                                            &shutdownTimeElapsedBuilder);
             LOGV2_OPTIONS(
                 12370200, {LogComponent::kDefault}, "Shutting down the ReadWriteConcernDefaults");
-            ReadWriteConcernDefaults::get(serviceContext->getService()).shutDownAndJoin();
+            rwc->shutDownAndJoin();
         }
 
         // Finish shutting down the TransportLayers
@@ -541,7 +508,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                            TimedSectionId::shutDownOtelTraces,
                                            &shutdownTimeElapsedBuilder);
-            otel::traces::shutdown(serviceContext);
+            otel::traces::shutdown();
         }
 
         // Shutdown Full-Time Data Capture
@@ -572,6 +539,7 @@ void initializeCommandHooks(ServiceContext* service) {
         void onBeforeRun(OperationContext* opCtx, CommandInvocation* invocation) override {
             _transportHook.onBeforeRun(opCtx, invocation);
             _systemBucketsHook.onBeforeRun(opCtx, invocation);
+            _querySettingsHook.onBeforeRun(opCtx, invocation);
         }
 
         void onAfterRun(OperationContext* opCtx,
@@ -583,6 +551,7 @@ void initializeCommandHooks(ServiceContext* service) {
 
         transport::IngressHandshakeMetricsCommandHooks _transportHook{};
         SystemBucketsMetricsCommandHooks _systemBucketsHook{};
+        query_settings::QuerySettingsCommandHooks _querySettingsHook{};
     };
 
     CommandInvocationHooks::set(service, std::make_unique<MongosCommandInvocationHooks>());
@@ -772,6 +741,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     logMongosVersionInfo(nullptr);
 
+    transport::initMessageFilterPluginLoader("mongos");
+
     // Set up the periodic runner for background job execution
     {
         SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -837,13 +808,18 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     ResourceYielderFactory::set(*serviceContext->getService(),
                                 std::make_unique<RouterResourceYielderFactory>());
 
-    // Since extensions modify the global parserMap, which is not thread-safe, they must be loaded
-    // prior to sharding initialization to avoid a data race. Once sharding is initialized, the
-    // CatalogCacheLoader will issue internal aggregations that can concurrently read from the
-    // parserMap.
+    // Initialize command hooks before freezing the metric tree.
+    initializeCommandHooks(serviceContext);
+
+    // Since extensions modify the global parserMap and register metrics, both of which are not
+    // thread-safe, they must be loaded prior to sharding initialization to avoid data races. Once
+    // sharding is initialized, the CatalogCacheLoader will issue internal aggregations that can
+    // concurrently read from the parserMap. Freeze the metric tree immediately after so that any
+    // post-freeze MetricTree::add() call crashes the server.
     if (!extension::host::loadExtensions(serverGlobalParams.extensions)) {
         return ExitCode::badOptions;
     }
+    globalMetricTreeSet().freeze();
 
     try {
         uassertStatusOK(
@@ -880,8 +856,6 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                       "error"_attr = redact(ex));
     }
 
-    initializeCommandHooks(serviceContext);
-
     // Must happen before FTDC, because Periodic Metadata Collustion calls getClusterParameter
     ClusterServerParameterRefresher::start(serviceContext, opCtx);
 
@@ -891,6 +865,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                                        &startupTimeElapsedBuilder);
         startMongoSFTDC(serviceContext);
     }
+
+    installMongosOtelMetrics(serviceContext);
 
     if (mongosGlobalParams.scriptingEnabled) {
         SectionScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -1083,6 +1059,11 @@ ExitCode mongos_main(int argc, char* argv[]) {
 
     startSignalProcessingThread();
 
+    // Initialize OTel metrics here, once multithreading has been enabled, because the exporter's
+    // PeriodicExportingMetricReader spawns a background thread. This call wires up the exporter and
+    // the already-constructed OTel instruments; it does not modify the MetricTreeSet (OTel
+    // instruments register their server-status adapters at static-initialization time), so its
+    // ordering relative to the MetricTreeSet freeze does not matter.
     uassertStatusOK(otel::metrics::initialize());
 
     try {
@@ -1112,7 +1093,7 @@ ExitCode mongos_main(int argc, char* argv[]) {
         quickExit(ExitCode::auditRotateError);
     }
 
-    uassertStatusOK(otel::traces::initialize(service, "mongos"));
+    uassertStatusOK(otel::traces::initialize("mongos"));
 
     registerShutdownTask(cleanupTask);
 

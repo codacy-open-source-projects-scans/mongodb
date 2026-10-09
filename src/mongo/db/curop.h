@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -58,7 +31,7 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log_options.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -77,6 +50,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -113,7 +87,7 @@ struct PlanSummaryStats;
  * from the thread executing an operation, and as a result its fields may be accessed without
  * any synchronization.
  */
-class MONGO_MOD_PUB CurOp {
+class [[MONGO_MOD_PUBLIC]] CurOp {
     CurOp(const CurOp&) = delete;
     CurOp& operator=(const CurOp&) = delete;
 
@@ -127,7 +101,7 @@ public:
      * report, since this may be called in either a mongoD or mongoS context and the latter does not
      * supply lock stats. The client must be locked before calling this method.
      */
-    MONGO_MOD_NEEDS_REPLACEMENT static void reportCurrentOpForClient(
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] static void reportCurrentOpForClient(
         WithLock,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         Client* client,
@@ -145,24 +119,24 @@ public:
                                                      boost::optional<size_t> maxQuerySize);
 
     // Convenience helpers for testing metrics that are tracked here.
-    MONGO_MOD_PRIVATE static Counter64& totalInterruptChecks_forTest();
-    MONGO_MOD_PRIVATE static Counter64& opsWithOverdueInterruptCheck_forTest();
+    [[MONGO_MOD_PRIVATE]] static Counter64& totalInterruptChecks_forTest();
+    [[MONGO_MOD_PRIVATE]] static Counter64& opsWithOverdueInterruptCheck_forTest();
 
     /**
      * Pushes this CurOp to the top of the given "opCtx"'s CurOp stack.
      */
     void push(OperationContext* opCtx);
 
-    MONGO_MOD_PRIVATE CurOp() = default;
+    [[MONGO_MOD_PRIVATE]] CurOp() = default;
 
     /**
      * This allows the caller to set the command on the CurOp without using setCommand and
      * having to acquire the Client lock or having to leave a comment indicating why the
      * client lock isn't necessary.
      */
-    MONGO_MOD_PRIVATE explicit CurOp(const Command* command) : _command{command} {}
+    [[MONGO_MOD_PRIVATE]] explicit CurOp(const Command* command) : _command{command} {}
 
-    MONGO_MOD_PRIVATE ~CurOp();
+    [[MONGO_MOD_PRIVATE]] ~CurOp();
 
     /**
      * Fills out CurOp and OpDebug with basic info common to all commands. We require the NetworkOp
@@ -559,21 +533,32 @@ public:
      * If called from a thread other than the one executing the operation associated with this
      * CurOp, it is necessary to lock the associated Client object before executing this method.
      */
-    MONGO_MOD_PRIVATE void reportState(BSONObjBuilder* builder,
-                                       const SerializationContext& serializationContext,
-                                       bool truncateOps = false);
+    [[MONGO_MOD_PRIVATE]] void reportState(BSONObjBuilder* builder,
+                                           const SerializationContext& serializationContext,
+                                           bool truncateOps = false);
+
+    /**
+     * Appends a curated subset of this CurOp's state, intended for enriching the lock manager
+     * dump's per-holder "debugInfo" field. Includes the namespace, redacted command,
+     * planCacheShapeHash, planCacheKey, planSummary, seconds running, number of yields, and (if
+     * already collected) storage read bytes.
+     *
+     * If called from a thread other than the one executing the operation associated with this
+     * CurOp, it is necessary to lock the associated Client object before executing this method.
+     */
+    void reportDebugInfo(BSONObjBuilder* builder);
 
     /**
      * Sets the message for FailPoints used.
      */
-    void setFailPointMessage(WithLock, StringData message) {
+    void setFailPointMessage(WithLock, std::string_view message) {
         _failPointMessage = std::string{message};
     }
 
     /**
      * Sets the message for this CurOp.
      */
-    void setMessage(WithLock lk, StringData message);
+    void setMessage(WithLock lk, std::string_view message);
 
     /**
      * Sets the message and the progress meter for this CurOp.
@@ -582,7 +567,7 @@ public:
      * locking scheme as CurOp. It is necessary to hold the lock while this method executes.
      */
     ProgressMeter& setProgress(WithLock,
-                               StringData name,
+                               std::string_view name,
                                unsigned long long progressMeterTotal = 0,
                                int secondsBetween = 3);
 
@@ -666,11 +651,11 @@ public:
     void setNS(WithLock, NamespaceString nss);
     void setNS(WithLock, const DatabaseName& dbName);
 
-    StringData getPlanSummary() const {
+    std::string_view getPlanSummary() const {
         return _planSummary;
     }
 
-    void setPlanSummary(WithLock, StringData summary) {
+    void setPlanSummary(WithLock, std::string_view summary) {
         _planSummary = std::string{summary};
     }
 
@@ -687,7 +672,7 @@ public:
         return _resourceStatsBase->lockStats;
     }
 
-    MONGO_MOD_PRIVATE void setTickSource_forTest(TickSource* tickSource) {
+    [[MONGO_MOD_PRIVATE]] void setTickSource_forTest(TickSource* tickSource) {
         _tickSource = tickSource;
     }
 
@@ -709,6 +694,18 @@ public:
      * of this operation.
      */
     SingleThreadedStorageMetrics getOperationStorageMetrics() const;
+
+    /**
+     * Ensures the current operation's storage statistics have been fetched from the storage engine
+     * and returns them (or nullptr if unavailable, e.g. no storage engine work has occurred yet).
+     * Unlike the storage stats gathered lazily for slow-op logging and query stats (which only
+     * happens when profiling or query stats tracking is enabled), this may be called
+     * unconditionally. It cooperates with the internal storage-stats accumulator so that any later
+     * slow-op logging or query stats collection still observes the full totals. Swallows (and logs)
+     * any exception from the storage engine, returning nullptr in that case. The returned pointer
+     * is owned by this CurOp and remains valid for the lifetime of the operation.
+     */
+    const StorageStats* getOperationStorageStats();
 
     long long getPrepareReadConflicts() const;
 
@@ -739,13 +736,13 @@ private:
     struct AdditiveResourceStats {
         /**
          * Add stats that have accrued before unstashing the Locker and Recovery Unit for a
-         * transaction. Does not add timeQueuedForTickets, which is handled separately.
+         * transaction. Does not add timeQueuedForAdmission, which is handled separately.
          */
         void addForUnstash(const AdditiveResourceStats& other);
 
         /**
          * Subtract stats that have accrued on this transaction's Locker and Recovery Unit since
-         * unstashing. Does not subtract timeQueuedForTickets, which is handled separately.
+         * unstashing. Does not subtract timeQueuedForAdmission, which is handled separately.
          */
         void subtractForStash(const AdditiveResourceStats& other);
 
@@ -760,9 +757,9 @@ private:
         Microseconds cumulativeLockWaitTime{0};
 
         /**
-         * Total time spent queued for tickets.
+         * Total time spent queued for admission, summed across every admission gate.
          */
-        Microseconds timeQueuedForTickets{0};
+        Microseconds timeQueuedForAdmission{0};
 
         /**
          * Total time spent queued for flow control tickets.
@@ -784,8 +781,7 @@ private:
     /**
      * Collects and returns additive resource stats
      */
-    AdditiveResourceStats getAdditiveResourceStats(
-        const boost::optional<ExecutionAdmissionContext>& admCtx);
+    AdditiveResourceStats getAdditiveResourceStats();
 
     void _initializeResourceStatsBaseIfNecessary() {
         if (!_resourceStatsBase) {
@@ -894,7 +890,7 @@ private:
     std::string _failPointMessage;  // Used to store FailPoint information.
     std::string _message;
     boost::optional<ProgressMeter> _progressMeter;
-    AtomicWord<int> _numYields{0};
+    Atomic<int> _numYields{0};
     // A GenericCursor containing information about the active cursor for a getMore operation.
     boost::optional<GenericCursor> _genericCursor;
 
@@ -945,8 +941,8 @@ private:
     // from the operation context and curop::reportState.
     // These metrics refer to local memory use, i.e. on a mongos process, as opposed to rolling up
     // memory from shards.
-    AtomicWord<int64_t> _inUseTrackedMemoryBytes{0};
-    AtomicWord<int64_t> _peakTrackedMemoryBytes{0};
+    Atomic<int64_t> _inUseTrackedMemoryBytes{0};
+    Atomic<int64_t> _peakTrackedMemoryBytes{0};
 
     // Long running queries are logged only once to avoid excessive logging.
     bool _eligibleForLongRunningQueryLogging{true};

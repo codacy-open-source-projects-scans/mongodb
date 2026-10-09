@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/startup_warnings_mongod.h"
 
 #include <fstream>
 #include <ios>
+#include <string_view>
 
 #include <boost/filesystem.hpp>
 #include <fmt/format.h>
@@ -46,11 +21,9 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/bson/bson_validate.h"
 #include "mongo/config.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/startup_warnings_common.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/errno_util.h"
@@ -62,18 +35,19 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 
 #ifdef __linux__
 #if MONGO_CONFIG_TCMALLOC_GOOGLE
 constexpr bool kUsingGoogleTCMallocAllocator = true;
-auto kAllocatorName = "tcmalloc-google"_sd;
+auto kAllocatorName = "tcmalloc-google"sv;
 #elif MONGO_CONFIG_TCMALLOC_GPERF
 constexpr bool kUsingGoogleTCMallocAllocator = false;
-auto kAllocatorName = "tcmalloc-gperftools"_sd;
+auto kAllocatorName = "tcmalloc-gperftools"sv;
 #else
 constexpr bool kUsingGoogleTCMallocAllocator = false;
-auto kAllocatorName = "system"_sd;
+auto kAllocatorName = "system"sv;
 #endif  // MONGO_CONFIG_TCMALLOC_GOOGLE
 
 #endif  // __linux__
@@ -145,9 +119,9 @@ void logNonWinMongodWarnings(const StorageGlobalParams& storageParams,
 #ifdef __linux__
 
 bool isSwapTotalNonZeroInProcMemInfo() {
-    const auto memInfoPath = "/proc/meminfo"_sd;
+    const auto memInfoPath = "/proc/meminfo"sv;
     BSONObjBuilder b;
-    uassertStatusOK(procparser::parseProcMemInfoFile(memInfoPath, {"SwapTotal"_sd}, &b));
+    uassertStatusOK(procparser::parseProcMemInfoFile(memInfoPath, {"SwapTotal"sv}, &b));
     BSONObj obj = b.done();
     uassert(ErrorCodes::FailedToParse,
             "SwapTotal not found in /proc/meminfo",
@@ -219,13 +193,13 @@ void checkMultipleNumaNodes() {
     }
 }
 
-std::string thpParameterPath(StringData parameter) {
+std::string thpParameterPath(std::string_view parameter) {
     return fmt::format("{}/{}", ProcessInfo::kTranparentHugepageDirectory, parameter);
 }
 
-void logIncorrectAllocatorSettings(StringData path,
-                                   StringData desiredValue,
-                                   StringData currentValue) {
+void logIncorrectAllocatorSettings(std::string_view path,
+                                   std::string_view desiredValue,
+                                   std::string_view currentValue) {
     LOGV2_WARNING_OPTIONS(
         9068900,
         {logv2::LogTag::kStartupWarnings},
@@ -565,19 +539,6 @@ void logMongodStartupWarnings(const StorageGlobalParams& storageParams,
                       {logv2::LogTag::kStartupWarnings},
                       "Running with --magicRestore. This should only be used when restoring from a "
                       "backup using magic restore.");
-    }
-
-    if (static_cast<long long>(gTimeseriesBucketMinCount + 1) * BSONObjMaxUserSize >
-        bsonMaxExpandedMemUsage.load()) {
-        LOGV2_OPTIONS(
-            11761701,
-            {logv2::LogTag::kStartupWarnings},
-            "Configuration of 'timeseriesBucketMinCount' combined with 'bsonMaxExpandedMemUsage' "
-            "risks timeseries collections not being restorable or migratable. Either decrease "
-            "'timeseriesBucketMinCount' or increase 'bsonMaxExpandedMemUsage' to ensure that "
-            "internal buckets do not exceed expanded memory usage.",
-            "timeseriesBucketMinCount"_attr = gTimeseriesBucketMinCount,
-            "bsonMaxExpandedMemUsage"_attr = bsonMaxExpandedMemUsage.load());
     }
 }
 

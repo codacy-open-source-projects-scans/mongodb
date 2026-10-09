@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 
 #include "mongo/db/exec/agg/pipeline_builder.h"
@@ -38,15 +12,17 @@
 #include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/pipeline/skip_and_limit.h"
 
+#include <string_view>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using boost::intrusive_ptr;
 
-REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalSearchIdLookup,
-                                     LiteParsedInternalSearchIdLookUp::parse,
-                                     AllowedWithApiStrict::kInternal);
+REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalSearchIdLookup,
+                                              LiteParsedInternalSearchIdLookUp::parse);
 DocumentSourceContainer _internalSearchIdLookupStageParamsToDocumentSourceFn(
     const std::unique_ptr<StageParams>& stageParams,
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -73,23 +49,8 @@ DocumentSourceInternalSearchIdLookUp::DocumentSourceInternalSearchIdLookUp(
     _searchIdLookupMetrics->resetIdLookupMetrics();
 }
 
-intrusive_ptr<DocumentSource> DocumentSourceInternalSearchIdLookUp::createFromBson(
-    BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
-    uassert(ErrorCodes::FailedToParse,
-            str::stream() << "The " << kStageName
-                          << " stage specification must be an object, found "
-                          << typeName(elem.type()),
-            elem.type() == BSONType::object);
-
-    auto specObj = elem.embeddedObject().getOwned();
-    auto searchIdLookupSpec =
-        DocumentSourceIdLookupSpec::parse(std::move(specObj), IDLParserContext(kStageName));
-
-    return make_intrusive<DocumentSourceInternalSearchIdLookUp>(std::move(searchIdLookupSpec),
-                                                                expCtx);
-}
-
-Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceInternalSearchIdLookUp::serialize(
+    const query_shape::SerializationOptions& opts) const {
     MutableDocument outputSpec;
     if (_spec.getLimit()) {
         outputSpec["limit"] =
@@ -101,13 +62,19 @@ Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions
         // _id value is unknown as it is only returned by mongot during execution.
         // TODO SERVER-93637 add comment explaining why subPipeline is only needed for explain.
         std::vector<BSONObj> pipeline = {
-            BSON("$match" << Document({{"_id", Value("_id placeholder"_sd)}}))};
+            BSON("$match" << Document({{"_id", Value("_id placeholder"sv)}}))};
 
         if (_spec.getViewPipeline()) {
-            // Append the view pipeline to subPipeline so it shows what transforms will be applied
-            // after the _id lookup.
+            // Append the view pipeline so explain shows the post-lookup transforms. For a
+            // search-defined view, skip just the leading mongot stage: it is already represented
+            // by the stage this idLookup follows, and '[$match, $search]' would not parse (40602).
             auto bsonViewPipeline = _spec.getViewPipeline().get();
-            pipeline.insert(pipeline.end(), bsonViewPipeline.begin(), bsonViewPipeline.end());
+            auto viewBegin = bsonViewPipeline.begin();
+            if (search_helper_bson_obj::isMongotPipeline(getExpCtx()->getIfrContext(),
+                                                         bsonViewPipeline)) {
+                ++viewBegin;
+            }
+            pipeline.insert(pipeline.end(), viewBegin, bsonViewPipeline.end());
         }
 
         outputSpec["subPipeline"] = Value(
@@ -123,8 +90,8 @@ Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions
     return Value(DOC(getSourceName() << outputSpec.freezeToValue()));
 }
 
-const char* DocumentSourceInternalSearchIdLookUp::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceInternalSearchIdLookUp::getSourceName() const {
+    return kStageName;
 }
 
 void DocumentSourceInternalSearchIdLookUp::bindCatalogInfo(

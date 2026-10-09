@@ -1,40 +1,15 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 #include "mongo/db/extension/sdk/extension_factory.h"
 #include "mongo/db/extension/sdk/host_portal.h"
-#include "mongo/db/extension/sdk/log_util.h"
 #include "mongo/db/extension/sdk/test_extension_util.h"
 #include "mongo/db/extension/sdk/tests/transform_test_stages.h"
+
+#include <string_view>
 
 namespace sdk = mongo::extension::sdk;
 using namespace mongo;
@@ -57,7 +32,8 @@ public:
         return mongo::extension::ExtensionGetNextResult::advanced(
             mongo::extension::ExtensionBSONObj::makeAsByteBuf(
                 input.resultDocument->getUnownedBSONObj()),
-            mongo::extension::ExtensionBSONObj::makeAsByteBuf(BSON("$vectorSearchScore" << 50.0)));
+            mongo::extension::ExtensionBSONObj::makeAsByteBuf(
+                BSON("$vectorSearchScore" << 50.0 << "$sortKey" << BSON_ARRAY(50.0))));
     }
 };
 
@@ -70,17 +46,25 @@ public:
         return std::make_unique<TestVectorSearchLogicalStage>(_name, _arguments);
     }
 
-    bool isSortedByVectorSearchScore_deprecated() const override {
-        return true;
-    }
-
     BSONObj getSortPattern() const override {
         return BSON("vectorSearchScore" << BSON("$meta" << "vectorSearchScore"));
     }
 
+    boost::optional<sdk::DistributedPlanLogic> getDistributedPlanLogic() const override {
+        if (!_arguments.getField("shardedDPL").booleanSafe()) {
+            return boost::none;
+        }
+        std::vector<extension::VariantDPLHandle> shards;
+        shards.emplace_back(
+            extension::LogicalAggStageHandle{new sdk::ExtensionLogicalAggStageAdapter(clone())});
+        return sdk::DistributedPlanLogic(sdk::DPLArrayContainer(std::move(shards)),
+                                         sdk::DPLArrayContainer({}),
+                                         getSortPattern());
+    }
+
     mongo::BSONObj serialize() const override {
         BSONObjBuilder spec;
-        spec.append("limit", _buildSpecWithExtractedLimit());
+        spec.append("limit", _buildLimitSpec());
         spec.append("inPlaceRuleApplied", true);
         return BSON(_name << spec.obj());
     }
@@ -90,7 +74,7 @@ public:
         return serialize();
     }
 
-    bool evaluateRulePrecondition(
+    bool evaluatePipelineRewriteRulePrecondition(
         std::string_view ruleName,
         mongo::extension::ConstPipelineRewriteContextHandle ctx) const override {
         if (ruleName == "eraseStage") {
@@ -101,11 +85,19 @@ public:
             return ctx->hasAtLeastNNextStages(2) &&
                 ctx->getNthNextStage(2)->getName() == "$extensionLimit";
         }
-        return ruleName == "noopInPlace";
+        if (ruleName == "eraseVectorSearchAt1") {
+            return ctx->hasAtLeastNNextStages(1) &&
+                ctx->getNthNextStage(1)->getName() == "$testVectorSearch";
+        }
+        if (ruleName == "eraseVectorSearchAt2") {
+            return ctx->hasAtLeastNNextStages(2) &&
+                ctx->getNthNextStage(2)->getName() == "$testVectorSearch";
+        }
+        return ruleName == "noopInPlace" || ruleName == "applyPipelineBounds";
     }
 
-    bool evaluateRuleTransform(std::string_view ruleName,
-                               mongo::extension::PipelineRewriteContextHandle ctx) override {
+    bool evaluatePipelineRewriteRuleTransform(
+        std::string_view ruleName, mongo::extension::PipelineRewriteContextHandle ctx) override {
         // Reorder Rule Transforms
         if (ruleName == "eraseStage") {
             return ctx->eraseNthNext(1);
@@ -113,25 +105,64 @@ public:
         if (ruleName == "eraseExtensionLimit") {
             return ctx->eraseNthNext(2);
         }
+        if (ruleName == "eraseVectorSearchAt1") {
+            return ctx->eraseNthNext(1);
+        }
+        if (ruleName == "eraseVectorSearchAt2") {
+            return ctx->eraseNthNext(2);
+        }
         // In-Place Rule Transforms
         if (ruleName == "noopInPlace") {
             _inPlaceRuleApplied = true;
         }
+
+        if (ruleName == "applyPipelineBounds") {
+            auto bounds = ctx->getPipelineSuffixBounds();
+            _minBoundsType = bounds.minBounds.type;
+            _maxBoundsType = bounds.maxBounds.type;
+            if (_maxBoundsType == kDocsNeededConstraintDiscrete) {
+                _pipelineBoundsLimit = static_cast<long long>(bounds.maxBounds.value);
+            }
+        }
+
         return false;
     }
 
 private:
-    // Helper to build the stage spec including the extracted limit value for testing purposes.
-    mongo::BSONObj _buildSpecWithExtractedLimit() const {
+    static std::string_view boundsTypeStr(MongoExtensionDocsNeededConstraintType type) {
+        switch (type) {
+            case kDocsNeededConstraintDiscrete:
+                return "discrete";
+            case kDocsNeededConstraintNeedAll:
+                return "needAll";
+            case kDocsNeededConstraintUnknown:
+                return "unknownConstraints";
+            default:
+                return "unknown";
+        }
+    }
+
+    // Helper to build the stage spec including the extracted limit and bounds types for testing.
+    mongo::BSONObj _buildLimitSpec() const {
         mongo::BSONObjBuilder builder;
         builder.appendElements(_arguments);
+        // Old deprecated path: limit set via setExtractedLimitVal_deprecated().
         if (auto limit = getExtractedLimitVal()) {
             builder.append("extractedLimit", *limit);
         }
+        // New path: limit derived directly from getPipelineSuffixBounds().
+        if (_pipelineBoundsLimit) {
+            builder.append("pipelineBoundsLimit", *_pipelineBoundsLimit);
+        }
+        builder.append("minBoundsType", boundsTypeStr(_minBoundsType));
+        builder.append("maxBoundsType", boundsTypeStr(_maxBoundsType));
         return builder.obj();
     }
 
     mutable bool _inPlaceRuleApplied = false;
+    MongoExtensionDocsNeededConstraintType _minBoundsType = kDocsNeededConstraintUnknown;
+    MongoExtensionDocsNeededConstraintType _maxBoundsType = kDocsNeededConstraintUnknown;
+    boost::optional<long long> _pipelineBoundsLimit;
 };
 
 class TestVectorSearchAstNode : public sdk::TestAstNode<TestVectorSearchLogicalStage> {
@@ -142,7 +173,8 @@ public:
     mongo::BSONObj getProperties() const override {
         mongo::extension::MongoExtensionStaticProperties properties;
         mongo::BSONObjBuilder builder;
-        properties.setProvidedMetadataFields(std::vector<std::string>{"vectorSearchScore"});
+        properties.setProvidedMetadataFields(
+            std::vector<std::string>{"vectorSearchScore", "sortKey"});
         properties.serialize(&builder);
         return builder.obj();
     }
@@ -181,20 +213,13 @@ public:
         bool desugars =
             !_arguments.hasField("desugar") || _arguments.getField("desugar").booleanSafe();
         if (desugars) {
-            // The $addFields stage is ineligible for the $sort optimization.
-            if (_arguments.getField("ineligibleForSortOptimization").booleanSafe()) {
-                result.emplace_back(
-                    host->createHostAggStageParseNode(BSON("$addFields" << BSON("cats" << 67))));
+            if (_arguments.getField("storedSource").booleanSafe()) {
+                result.emplace_back(host->createHostAggStageParseNode(BSON(
+                    "$replaceRoot" << BSON(
+                        "newRoot" << BSON("$ifNull" << BSON_ARRAY("$storedSource" << "$$ROOT"))))));
             } else {
-                if (_arguments.getField("storedSource").booleanSafe()) {
-                    result.emplace_back(host->createHostAggStageParseNode(BSON(
-                        "$replaceRoot"
-                        << BSON("newRoot"
-                                << BSON("$ifNull" << BSON_ARRAY("$storedSource" << "$$ROOT"))))));
-                } else {
-                    result.emplace_back(host->createHostAggStageParseNode(
-                        BSON("$_internalSearchIdLookup" << BSON("limit" << 67LL))));
-                }
+                result.emplace_back(host->createHostAggStageParseNode(
+                    BSON("$_internalSearchIdLookup" << BSON("limit" << 67LL))));
             }
         }
         return result;
@@ -209,19 +234,15 @@ public:
  * $testVectorSearchOptimization is a transform stage that can accept the following inputs:
  * - desugar: a boolean input that defaults to true if not present and determines whether the stage
  desugars
- * If desugar is true, then it must specify either a storedSource or an
- ineligibleForSortOptimization input.
+ * If desugar is true, it must specify storedSource.
  * - storedSource: a boolean input that determines whether the stage desugars into an idLookup or
  replaceRoot stage.
- * - ineligibleForSortOptimization: a boolean input that determines whether the stage desugars into
- an pipeline that is ineligible for sort optimization.
  */
 class TestVectorSearchOptStageDescriptor
     : public sdk::TestStageDescriptor<"$testVectorSearchOptimization",
                                       TestVectorSearchOptParseNode> {
 public:
     void validate(const mongo::BSONObj& arguments) const override {
-        // Get desugar field (defaults to true if not present)
         bool desugar = true;
         if (arguments.hasField("desugar")) {
             sdk_uassert(11543601,
@@ -233,25 +254,12 @@ public:
             return;
         }
 
-        bool hasStoredSource = arguments.hasField("storedSource");
-        bool hasIneligibleForSortOptimization = arguments.hasField("ineligibleForSortOptimization");
-
         sdk_uassert(11543602,
-                    "expected either storedSource or ineligibleForSortOptimization input to " +
-                        kStageNameVectorSearchOpt,
-                    hasStoredSource || hasIneligibleForSortOptimization);
-
-        if (hasStoredSource) {
-            sdk_uassert(11543603,
-                        "expected storedSource input to be a boolean " + kStageNameVectorSearchOpt,
-                        arguments.getField("storedSource").isBoolean());
-        }
-        if (hasIneligibleForSortOptimization) {
-            sdk_uassert(11543604,
-                        "expected ineligibleForSortOptimization input to be a boolean " +
-                            kStageNameVectorSearchOpt,
-                        arguments.getField("ineligibleForSortOptimization").isBoolean());
-        }
+                    "expected storedSource input to " + kStageNameVectorSearchOpt,
+                    arguments.hasField("storedSource"));
+        sdk_uassert(11543603,
+                    "expected storedSource input to be a boolean " + kStageNameVectorSearchOpt,
+                    arguments.getField("storedSource").isBoolean());
     }
 };
 
@@ -263,7 +271,10 @@ public:
         std::vector<PipelineRewriteRule> rules{
             {"eraseStage", kPipelineRewriteRuleTagReordering},
             {"eraseExtensionLimit", kPipelineRewriteRuleTagReordering},
+            {"eraseVectorSearchAt1", kPipelineRewriteRuleTagReordering},
+            {"eraseVectorSearchAt2", kPipelineRewriteRuleTagReordering},
             {"noopInPlace", kPipelineRewriteRuleTagInPlace},
+            {"applyPipelineBounds", kPipelineRewriteRuleTagInPlace},
         };
         _registerStageRules<TestVectorSearchStageDescriptor>(portal, rules);
     }

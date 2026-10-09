@@ -17,6 +17,7 @@
  * interrupted.
  *
  * @tags: [
+ *   assumes_against_mongod_not_mongos,
  *   creates_background_indexes,
  *   requires_replication,
  *   uses_write_concern,
@@ -42,7 +43,10 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
                     ErrorCodes.NoMatchingDocument,
                 ]);
             } else {
-                assert.commandFailedWithCode(res, [ErrorCodes.IndexBuildAborted, ErrorCodes.NoMatchingDocument]);
+                assert.commandFailedWithCode(res, [
+                    ErrorCodes.IndexBuildAborted,
+                    ErrorCodes.NoMatchingDocument,
+                ]);
             }
             print("retrying failed createIndex operation: " + tojson(res));
             return false;

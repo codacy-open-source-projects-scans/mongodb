@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumn_fuzzer_util.h"
 
@@ -33,9 +7,12 @@
 #include "mongo/bson/column/simple8b_helpers.h"
 #include "mongo/bson/column/simple8b_type_util.h"
 
+#include <string_view>
+
 #include <absl/numeric/int128.h>
 
 namespace mongo::bsoncolumn {
+using namespace std::literals::string_view_literals;
 
 static constexpr size_t kRecursionLimit = BSONObj::maxToStringRecursionDepth + 1;
 
@@ -46,7 +23,7 @@ BSONElement createBSONColumn(const char* buffer,
                              int size,
                              std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendBinData(""_sd, size, BinDataType::Column, buffer);
+    ob.appendBinData(""sv, size, BinDataType::Column, buffer);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
@@ -54,14 +31,14 @@ BSONElement createBSONColumn(const char* buffer,
 template <typename T>
 BSONElement createElement(T val, std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.append("0"_sd, val);
+    ob.append("0"sv, val);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
 BSONElement createElementDouble(double val, std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.append("0"_sd, val);
+    ob.append("0"sv, val);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
@@ -96,67 +73,69 @@ BSONElement createBool(bool b, std::forward_list<BSONObj>& elementMemory) {
 
 BSONElement createElementMinKey(std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendMinKey("0"_sd);
+    ob.appendMinKey("0"sv);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
 BSONElement createElementMaxKey(std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendMaxKey("0"_sd);
+    ob.appendMaxKey("0"sv);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
 BSONElement createNull(std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendNull("0"_sd);
+    ob.appendNull("0"sv);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
 BSONElement createUndefined(std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendUndefined("0"_sd);
+    ob.appendUndefined("0"sv);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
-BSONElement createRegex(StringData pattern,
-                        StringData options,
+BSONElement createRegex(std::string_view pattern,
+                        std::string_view options,
                         std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendRegex("0"_sd, pattern, options);
+    ob.appendRegex("0"sv, pattern, options);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
-BSONElement createDBRef(StringData ns, const OID& oid, std::forward_list<BSONObj>& elementMemory) {
+BSONElement createDBRef(std::string_view ns,
+                        const OID& oid,
+                        std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendDBRef("0"_sd, ns, oid);
+    ob.appendDBRef("0"sv, ns, oid);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
-BSONElement createElementCode(StringData code, std::forward_list<BSONObj>& elementMemory) {
+BSONElement createElementCode(std::string_view code, std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendCode("0"_sd, code);
+    ob.appendCode("0"sv, code);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
-BSONElement createCodeWScope(StringData code,
+BSONElement createCodeWScope(std::string_view code,
                              const BSONObj& scope,
                              std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendCodeWScope("0"_sd, code, scope);
+    ob.appendCodeWScope("0"sv, code, scope);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
 
-BSONElement createSymbol(StringData symbol, std::forward_list<BSONObj>& elementMemory) {
+BSONElement createSymbol(std::string_view symbol, std::forward_list<BSONObj>& elementMemory) {
     BSONObjBuilder ob;
-    ob.appendSymbol("0"_sd, symbol);
+    ob.appendSymbol("0"sv, symbol);
     elementMemory.emplace_front(ob.obj());
     return elementMemory.front().firstElement();
 }
@@ -171,7 +150,7 @@ BSONElement createElementBinData(BinDataType binDataType,
     return elementMemory.front().firstElement();
 }
 
-BSONElement createElementString(StringData val, std::forward_list<BSONObj>& elementMemory) {
+BSONElement createElementString(std::string_view val, std::forward_list<BSONObj>& elementMemory) {
     return createElement(val, elementMemory);
 }
 
@@ -359,9 +338,12 @@ bool createFuzzedElement(const char*& ptr,
         case BSONType::binData: {
             READ_BYTE(ptr, end, binDataTypeMagnitude, );
             binDataTypeMagnitude %= 10;
-            BinDataType binDataType = binDataTypeMagnitude <= 8
+            // Skip BinDataType::Column (7): it cannot be appended to a BSONColumnBuilder.
+            // Values 0-6 map directly; 7-8 shift up by one (to 8-9); 9 maps to bdtCustom.
+            BinDataType binDataType = binDataTypeMagnitude < 7
                 ? static_cast<BinDataType>(binDataTypeMagnitude)
-                : BinDataType::bdtCustom;
+                : binDataTypeMagnitude <= 8 ? static_cast<BinDataType>(binDataTypeMagnitude + 1)
+                                            : BinDataType::bdtCustom;
             if (!generateBuf(ptr, end, &buf[0], len))
                 return false;
             result = createElementBinData(binDataType, &buf[0], len, elementMemory);
@@ -370,19 +352,12 @@ bool createFuzzedElement(const char*& ptr,
         case BSONType::code: {
             if (!generateBuf(ptr, end, &buf[0], len))
                 return false;
-            result = createElementCode(StringData(buf, len), elementMemory);
+            result = createElementCode(std::string_view(buf, len), elementMemory);
             return true;
         }
         case BSONType::codeWScope: {
-            if (depth >= kRecursionLimit)
-                return false;
-            if (!generateBuf(ptr, end, &buf[0], len))
-                return false;
-            BSONObj obj;
-            if (!createFuzzedObj(ptr, end, elementMemory, obj, depth))
-                return false;
-            result = createCodeWScope(StringData(buf, len), obj, elementMemory);
-            return true;
+            // CodeWScope is not a valid BSONColumn element type; skip this input.
+            return false;
         }
         case BSONType::dbRef: {
             if (!generateBuf(ptr, end, &buf[0], len))
@@ -394,7 +369,7 @@ bool createFuzzedElement(const char*& ptr,
             memcpy(arr, ptr, 12);
             ptr += 12;
             OID oid(arr);
-            result = createDBRef(StringData(buf, len), oid, elementMemory);
+            result = createDBRef(std::string_view(buf, len), oid, elementMemory);
             return true;
         }
         case BSONType::object: {
@@ -409,13 +384,13 @@ bool createFuzzedElement(const char*& ptr,
         case BSONType::regEx: {
             if (!generateBufNoNuls(ptr, end, &buf[0], len))
                 return false;
-            auto patternStr = StringData(buf, len);
+            auto patternStr = std::string_view(buf, len);
 
             char optionsBuf[kMaxBufLength];
             size_t optionsLen;
             if (!generateBufNoNuls(ptr, end, &optionsBuf[0], optionsLen))
                 return false;
-            auto optionsStr = StringData(optionsBuf, optionsLen);
+            auto optionsStr = std::string_view(optionsBuf, optionsLen);
 
             result = createRegex(patternStr, optionsStr, elementMemory);
             return true;
@@ -423,13 +398,13 @@ bool createFuzzedElement(const char*& ptr,
         case BSONType::string: {
             if (!generateBuf(ptr, end, &buf[0], len))
                 return false;
-            result = createElementString(StringData(buf, len), elementMemory);
+            result = createElementString(std::string_view(buf, len), elementMemory);
             return true;
         }
         case BSONType::symbol: {
             if (!generateBuf(ptr, end, &buf[0], len))
                 return false;
-            result = createSymbol(StringData(buf, len), elementMemory);
+            result = createSymbol(std::string_view(buf, len), elementMemory);
             return true;
         }
         case BSONType::boolean: {
@@ -578,7 +553,7 @@ bool createFuzzedObj(const char*& ptr,
         if (elem.eoo())
             return false;
 
-        bob.appendAs(elem, StringData(buf, len));
+        bob.appendAs(elem, std::string_view(buf, len));
     }
     bob.done();
     result = bob.obj();
@@ -716,7 +691,8 @@ bool addFuzzedElements(const char*& ptr,
                                                  [&](mongo::Simple8bTypeUtil::SmallString ss,
                                                      std::forward_list<BSONObj>& elMem) {
                                                      return mongo::bsoncolumn::createElementString(
-                                                         StringData(ss.str.data(), ss.size), elMem);
+                                                         std::string_view(ss.str.data(), ss.size),
+                                                         elMem);
                                                  }))
                     return false;
                 break;
@@ -728,7 +704,8 @@ bool addFuzzedElements(const char*& ptr,
                                                  [&](mongo::Simple8bTypeUtil::SmallString ss,
                                                      std::forward_list<BSONObj>& elMem) {
                                                      return mongo::bsoncolumn::createElementCode(
-                                                         StringData(ss.str.data(), ss.size), elMem);
+                                                         std::string_view(ss.str.data(), ss.size),
+                                                         elMem);
                                                  }))
                     return false;
                 break;
@@ -737,7 +714,7 @@ bool addFuzzedElements(const char*& ptr,
                 int len;
                 const char* val = element.binData(len);
                 boost::optional<int128_t> encodedVal =
-                    Simple8bTypeUtil::encodeString(StringData(val, len));
+                    Simple8bTypeUtil::encodeString(std::string_view(val, len));
                 if (!process_delta_of_buffer_run(
                         encodedVal,
                         [&](mongo::Simple8bTypeUtil::SmallString ss,

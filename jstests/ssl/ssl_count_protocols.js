@@ -1,8 +1,17 @@
+/**
+ * @tags: [
+ *   # Assumes mongod uses the host distro's SSL stack configuration (e.g. RHEL
+ *   # crypto-policies, system FIPS module); custom builds that link a bundled
+ *   # OpenSSL instead exclude this test via --excludeWithAnyTags.
+ *   assumes_system_ssl_stack
+ * ]
+ */
 // Ensure the server counts the server TLS versions used
 import {
     detectDefaultTLSProtocol,
     sslProviderSupportsTLS1_0,
     sslProviderSupportsTLS1_1,
+    clientSupportsTLS1_3,
 } from "jstests/ssl/libs/ssl_helpers.js";
 
 let SERVER_CERT = getX509Path("server.pem");
@@ -69,10 +78,14 @@ function runTestWithoutSubset(client) {
             "assert.eq(db.serverStatus().transportSecurity, a);",
     );
 
-    if (expectedDefaultProtocol === "TLS1_2" && client === "TLS1_3") {
+    if (!clientSupportsTLS1_3() && client === "TLS1_3") {
         // If the runtime environment does not support TLS 1.3, a client cannot connect to a
         // server if TLS 1.3 is its only usable protocol version.
-        assert.neq(0, exitStatus, "A client which does not support TLS 1.3 should not be able to connect with it");
+        assert.neq(
+            0,
+            exitStatus,
+            "A client which does not support TLS 1.3 should not be able to connect with it",
+        );
         MongoRunner.stopMongod(conn);
         return;
     }
@@ -117,4 +130,6 @@ if (sslProviderSupportsTLS1_1()) {
     runTestWithoutSubset("TLS1_1");
 }
 runTestWithoutSubset("TLS1_2");
-runTestWithoutSubset("TLS1_3");
+if (clientSupportsTLS1_3()) {
+    runTestWithoutSubset("TLS1_3");
+}

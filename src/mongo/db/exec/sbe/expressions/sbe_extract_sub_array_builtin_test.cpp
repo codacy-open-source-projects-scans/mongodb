@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -38,12 +11,14 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 class SBEBuiltinExtractSubArrayTest : public EExpressionTestFixture {
 protected:
@@ -137,14 +112,14 @@ protected:
     template <typename T>
     void runAndAssertExpression(const TestCase& testCase, T makeArrayFn) {
         auto array = makeArrayFn(testCase.array);
-        value::ValueGuard arrayGuard{array};
+        value::TagValueOwned arrayOwned = value::TagValueOwned::fromRaw(array);
 
         auto expectedResult =
             testCase.expectedResult ? makeArrayFn(*testCase.expectedResult) : makeNothing();
-        value::ValueGuard expectedResultGuard{expectedResult};
+        value::TagValueOwned expectedResultOwned = value::TagValueOwned::fromRaw(expectedResult);
 
         auto actualResult = runExpression(array, testCase.limit, testCase.skip);
-        value::ValueGuard actualResultGuard{actualResult};
+        value::TagValueOwned actualResultOwned = value::TagValueOwned::fromRaw(actualResult);
 
         auto [compareTag, compareValue] = value::compareValue(
             actualResult.first, actualResult.second, expectedResult.first, expectedResult.second);
@@ -178,7 +153,7 @@ TEST_F(SBEBuiltinExtractSubArrayTest, ArraySetNothing) {
 
 TEST_F(SBEBuiltinExtractSubArrayTest, ArraySet) {
     auto array = makeArraySet(BSON_ARRAY(1 << 2 << 3));
-    value::ValueGuard guard{array};
+    value::TagValueOwned arrayOwned = value::TagValueOwned::fromRaw(array);
 
     const std::vector<std::pair<TypedValue, boost::optional<TypedValue>>> limitAndSkip = {
         {makeInt32(3), boost::none},
@@ -190,11 +165,11 @@ TEST_F(SBEBuiltinExtractSubArrayTest, ArraySet) {
         {makeInt32(10), makeInt32(-10)},
     };
     for (const auto& [limit, skip] : limitAndSkip) {
-        auto [resultTag, resultValue] = runExpression(array, limit, skip);
-        value::ValueGuard guard{resultTag, resultValue};
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runExpression(array, limit, skip));
 
         std::vector<int32_t> elements;
-        value::ArrayEnumerator enumerator{resultTag, resultValue};
+        value::ArrayEnumerator enumerator{result.tag(), result.value()};
         while (!enumerator.atEnd()) {
             auto [tag, value] = enumerator.getViewOfValue();
             ASSERT_EQ(tag, value::TypeTags::NumberInt32);
@@ -239,21 +214,21 @@ TEST_F(SBEBuiltinExtractSubArrayTest, MemoryManagement) {
 
         auto compiledExpr = compileExpression(*extractFromSubArrayExpr);
 
-        auto [tag, value] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, value);
-        ASSERT_TRUE(value::isString(tag));
-        ASSERT_EQ("Item#3", value::getStringView(tag, value));
+        value::TagValueOwned actual =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        ASSERT_TRUE(value::isString(actual.tag()));
+        ASSERT_EQ("Item#3", value::getStringView(actual.tag(), actual.value()));
     }
     {
         const auto [objTag, objVal] = value::makeNewObject();
         auto obj = value::getObjectView(objVal);
 
-        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"_sd);
+        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"sv);
         ASSERT_EQ(value::TypeTags::StringBig, fieldTag);
-        obj->push_back("field"_sd, fieldTag, fieldVal);
+        obj->push_back_raw("field"sv, fieldTag, fieldVal);
         const auto [arrTag, arrVal] = value::makeNewArray();
         auto arr = value::getArrayView(arrVal);
-        arr->push_back(objTag, objVal);
+        arr->push_back_raw(objTag, objVal);
 
         // Use 'extractSubArray' to create a stack owned array and extract object from it, then test
         // if 'getField' can return the value with correct memory management.
@@ -265,14 +240,14 @@ TEST_F(SBEBuiltinExtractSubArrayTest, MemoryManagement) {
                                                makeEs(makeC(arrTag, arrVal),
                                                       makeC(value::TypeTags::NumberInt32, 1))),
                               makeC(value::TypeTags::NumberInt32, 0))),
-                   makeC(value::makeNewString("field"_sd))));
+                   makeC(value::makeNewString("field"sv))));
 
         auto compiledExpr = compileExpression(*extractFromSubArrayExpr);
 
-        auto [tag, value] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, value);
-        ASSERT_TRUE(value::isString(tag));
-        ASSERT_EQ("not so small string"_sd, value::getStringView(tag, value));
+        value::TagValueOwned actual =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        ASSERT_TRUE(value::isString(actual.tag()));
+        ASSERT_EQ("not so small string"sv, value::getStringView(actual.tag(), actual.value()));
     }
 }
 }  // namespace mongo::sbe

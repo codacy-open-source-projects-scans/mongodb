@@ -2,6 +2,7 @@
 // for output collection of aggregation pipeline.
 //
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 //   assumes_write_concern_unchanged,
 //   does_not_support_stepdowns,
@@ -38,7 +39,9 @@ assert.eq(1, outColl.find().itcount());
 outColl.drop();
 
 // Agg should accept writeConcern even if read-only.
-assert.commandWorked(db.runCommand({aggregate: coll.getName(), pipeline: [], cursor: {}, writeConcern: {w: 1}}));
+assert.commandWorked(
+    db.runCommand({aggregate: coll.getName(), pipeline: [], cursor: {}, writeConcern: {w: 1}}),
+);
 
 // Agg should succeed if the last stage is an $out and the explain flag is set.
 assert.commandWorked(

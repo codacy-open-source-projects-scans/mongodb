@@ -59,7 +59,12 @@ function writeStarted(opType) {
         return false;
     }
     return result.inprog.some((op) => {
-        return op.active && op.ns === testColl.getFullName() && op.op === opType && op.writeConflicts > 0;
+        return (
+            op.active &&
+            op.ns === testColl.getFullName() &&
+            op.op === opType &&
+            op.writeConflicts > 0
+        );
     });
 }
 
@@ -102,7 +107,8 @@ function TWriteFirst(txnOp, nonTxnOp, nonTxnOpType, expectedDocs, initOp) {
             assert.commandWorked(sessionColl.runCommand(txnOp));
 
             jsTestLog("Doing conflicting single document write in separate thread.");
-            const writeConflictsBefore = WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
+            const writeConflictsBefore =
+                WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
             let thread = new Thread(singleDocWrite, dbName, collName, nonTxnOp);
             thread.start();
 
@@ -117,7 +123,8 @@ function TWriteFirst(txnOp, nonTxnOp, nonTxnOpType, expectedDocs, initOp) {
             assert.commandWorked(thread.returnData());
 
             // Validate that a write conflict was detected
-            const writeConflictsAfter = WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
+            const writeConflictsAfter =
+                WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
             validateWriteConflictsBeforeAndAfter(writeConflictsBefore, writeConflictsAfter);
         },
         () => {
@@ -157,11 +164,20 @@ function TWriteSecond(txnOp, nonTxnOp, expectedDocs, initOp) {
             assert.commandWorked(testColl.runCommand(nonTxnOp));
 
             jsTestLog("Executing a conflicting document Op inside the multi-document transaction.");
-            const writeConflictsBefore = WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
+            const writeConflictsBefore =
+                WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
             assert.commandFailedWithCode(sessionColl.runCommand(txnOp), ErrorCodes.WriteConflict);
-            assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
-            const writeConflictsAfter = WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
-            validateWriteConflictsBeforeAndAfter(writeConflictsBefore, writeConflictsAfter, true /*exact*/);
+            assert.commandFailedWithCode(
+                session.commitTransaction_forTesting(),
+                ErrorCodes.NoSuchTransaction,
+            );
+            const writeConflictsAfter =
+                WriteConflictHelpers.getWriteConflictsFromAllShards(testColl);
+            validateWriteConflictsBeforeAndAfter(
+                writeConflictsBefore,
+                writeConflictsAfter,
+                true /*exact*/,
+            );
         },
         () => {
             session.abortTransaction_forTesting();
@@ -219,6 +235,90 @@ nonTxnOp = {
 expectedDocs = [{_id: 1, t2: 1}];
 TWriteFirst(txnOp, nonTxnOp, "update", expectedDocs);
 TWriteSecond(txnOp, nonTxnOp, expectedDocs);
+
+jsTestLog("upsert respects maxTimeMS in the presence of a write conflict (SERVER-103347).");
+(function testUpsertRespectsMaxTimeMSWithWriteConflict() {
+    // Make sure the collection is empty.
+    assert.commandWorked(testColl.remove({}, {writeConcern: {w: "majority"}}));
+
+    withRetryOnTransientTxnError(
+        () => {
+            jsTestLog("Start a multi-document transaction that upserts the conflicting document.");
+            session.startTransaction();
+            assert.commandWorked(
+                sessionColl.runCommand({
+                    update: collName,
+                    updates: [{q: {_id: 1}, u: {$set: {t1: 1}}, upsert: true}],
+                }),
+            );
+
+            // Expect the upsert to respect maxTimeMS even in the presence of a write conflict.
+            jsTestLog("Run a conflicting upsert outside of the transaction with maxTimeMS set.");
+            // Use a deadline long enough that the startup wait below can deterministically observe
+            // the op reach its write conflict without racing the deadline. The startup wait is
+            // bounded to half of this value.
+            const opMaxTimeMS = 10 * 1000;
+            const nonTxnOp = {
+                update: collName,
+                updates: [{q: {_id: 1}, u: {$set: {t2: 1}}, upsert: true}],
+                maxTimeMS: opMaxTimeMS,
+            };
+            const thread = new Thread(singleDocWrite, dbName, collName, nonTxnOp);
+            const startTime = Date.now();
+            thread.start();
+
+            try {
+                // Wait for the upsert to start and record a write conflict before checking for
+                // completion. Since writeStarted() only returns true once the op is active and has
+                // recorded at least one write conflict, the completion check below would otherwise
+                // pass before the op even starts, defeating the point of the timeout. Bound this
+                // wait below opMaxTimeMS so it can never lose the race to the deadline.
+                assert.soon(
+                    () => writeStarted("update"),
+                    "Conflicting upsert did not start and record a write conflict",
+                    opMaxTimeMS / 2,
+                );
+
+                // Give the upsert well beyond its own maxTimeMS to respect the timeout and
+                // finish on its own.
+                assert.soon(
+                    () => !writeStarted("update"),
+                    "Conflicting upsert did not respect maxTimeMS and is still running; " +
+                        "SERVER-103347 may have regressed",
+                    30 * 1000,
+                );
+            } finally {
+                // Ensure we never leave a hung op or thread behind, even if the assertion above
+                // failed.
+                const result = testDB.currentOp();
+                if (result.inprog) {
+                    for (const op of result.inprog) {
+                        if (op.active && op.ns === testColl.getFullName() && op.op === "update") {
+                            testDB.killOp(op.opid);
+                        }
+                    }
+                }
+                assert.commandWorked(session.abortTransaction_forTesting());
+                thread.join();
+            }
+
+            const elapsedMs = Date.now() - startTime;
+            // The command should fail close to maxTimeMS, not hang far beyond it.
+            assert.lt(
+                elapsedMs,
+                30 * 1000,
+                `Expected the upsert to fail near maxTimeMS (${opMaxTimeMS}ms) but it took ` +
+                    `${elapsedMs}ms`,
+            );
+            assert.commandFailedWithCode(thread.returnData(), ErrorCodes.MaxTimeMSExpired);
+        },
+        () => {
+            session.abortTransaction_forTesting();
+        },
+    );
+
+    assert.commandWorked(testColl.remove({}, {writeConcern: {w: "majority"}}));
+})();
 
 jsTestLog("delete-delete conflict");
 initOp = {

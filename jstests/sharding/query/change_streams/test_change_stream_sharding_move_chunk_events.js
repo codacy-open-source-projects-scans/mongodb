@@ -10,10 +10,10 @@
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
  *   featureFlagChangeStreamPreciseShardTargeting,
+ *   featureFlagChangeStreamReaderV2,
+ *   requires_fcv_90,
  *   requires_sharding,
  *   uses_change_streams,
- *   # TODO(SERVER-124153): Remove.
- *   featureFlagReplicatedFastCount_incompatible,
  * ]
  */
 import {
@@ -30,31 +30,66 @@ import {createShardingTest} from "jstests/libs/util/change_stream/change_stream_
 import {ChangeStreamTest, ChangeStreamWatchMode} from "jstests/libs/query/change_stream_util.js";
 import {describe, it, before, after} from "jstests/libs/mochalite.js";
 
-const ignoredEventTypes = ["createIndexes", "dropIndexes", "startIndexBuild", "commitIndexBuild"];
+const ignoredEventTypes = [
+    "createIndexes",
+    "dropIndexes",
+    "startIndexBuild",
+    "commitIndexBuild",
+    // Not exercised by this test; upconverted under whole-db/cluster passthrough, which picks up
+    // unrelated internal transactions from resharding's temp collections.
+    "endOfTransaction",
+];
 
 function buildCommands({dbName, collName, shards, shardingType, nonEmpty}) {
     const shardKey = getShardKeySpec(shardingType);
     const commands = [];
     let ctx = {exists: false, nonEmpty: false, shardKeySpec: null, isUnsplittable: false};
 
-    commands.push(new CreateDatabaseCommand(dbName, collName, shards, ctx));
+    commands.push(new CreateDatabaseCommand({dbName, shardSet: shards}));
 
     if (nonEmpty) {
-        commands.push(new InsertDocCommand(dbName, collName, shards, ctx));
+        commands.push(new InsertDocCommand({dbName, collName, collectionCtx: ctx}));
         ctx = {exists: true, nonEmpty: true, shardKeySpec: null, isUnsplittable: false};
-        commands.push(new CreateIndexCommand(dbName, collName, shards, ctx, shardKey));
+        commands.push(
+            new CreateIndexCommand({dbName, collName, shardSet: shards, indexSpec: shardKey}),
+        );
     }
 
-    commands.push(new ShardCollectionCommand(dbName, collName, shards, ctx, shardKey));
+    commands.push(
+        new ShardCollectionCommand({
+            dbName,
+            collName,
+            shardSet: shards,
+            collectionCtx: ctx,
+            shardKey,
+        }),
+    );
 
     const shardedCtx = {exists: true, nonEmpty, shardKeySpec: shardKey, isUnsplittable: false};
-    commands.push(new MoveChunkCommand(dbName, collName, shards, shardedCtx));
-    commands.push(new UnshardCollectionCommand(dbName, collName, shards, shardedCtx));
+    commands.push(
+        new MoveChunkCommand({dbName, collName, shardSet: shards, collectionCtx: shardedCtx}),
+    );
+    commands.push(
+        new UnshardCollectionCommand({
+            dbName,
+            collName,
+            shardSet: shards,
+            collectionCtx: shardedCtx,
+        }),
+    );
 
     return commands;
 }
 
-function runMoveChunkTest({mongos, shards, dbName, collName, shardingType, nonEmpty, expectedTypes}) {
+function runMoveChunkTest({
+    mongos,
+    shards,
+    dbName,
+    collName,
+    shardingType,
+    nonEmpty,
+    expectedTypes,
+}) {
     const db = mongos.getDB(dbName);
     assert.commandWorked(db.dropDatabase());
 
@@ -77,7 +112,11 @@ function runMoveChunkTest({mongos, shards, dbName, collName, shardingType, nonEm
     const actualTypes = events.map((e) => e.operationType);
     jsTest.log.info("Collected events", {shardingType, nonEmpty, types: actualTypes});
 
-    assert.eq(actualTypes, expectedTypes, `Event mismatch for ${shardingType} (nonEmpty=${nonEmpty})`);
+    assert.eq(
+        actualTypes,
+        expectedTypes,
+        `Event mismatch for ${shardingType} (nonEmpty=${nonEmpty})`,
+    );
     csTest.assertNoChange(cursor);
 
     csTest.cleanUp();

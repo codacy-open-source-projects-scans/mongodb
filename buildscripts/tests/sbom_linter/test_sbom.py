@@ -1,13 +1,17 @@
-"""Unit tests for the buildscripts/sbom_linter.py script."""
+"""Unit tests for the buildscripts/tests/sbom_linter/sbom_linter.py script."""
 
 import os
 import shutil
 import sys
+import tempfile
 import unittest
 
-from buildscripts import sbom_linter
+from buildscripts.tests.sbom_linter import sbom_linter
 
-TEST_DIR = os.path.join("buildscripts", "tests", "sbom_linter")
+# Resolved relative to this test file's own directory (not the process cwd), since
+# sbom_linter.main() changes the process cwd to BUILD_WORKSPACE_DIRECTORY when invoked
+# via --check-metadata, and `bazel test` vs `bazel run` resolve relative paths differently.
+TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 @unittest.skipIf(
@@ -17,11 +21,10 @@ TEST_DIR = os.path.join("buildscripts", "tests", "sbom_linter")
 class TestSbom(unittest.TestCase):
     def setUp(self):
         sbom_linter.SKIP_FILE_CHECKING = True
-        self.output_dir = os.path.join(TEST_DIR, "outputs")
+        # A real temp directory (not cwd-relative) so it stays valid even if
+        # sbom_linter.main() changes the process cwd during a test.
+        self.output_dir = tempfile.mkdtemp(prefix="sbom_linter_test_outputs_")
         self.input_dir = os.path.join(TEST_DIR, "inputs")
-
-        if not os.path.exists(self.output_dir):
-            os.mkdir(self.output_dir)
 
     def tearDown(self):
         shutil.rmtree(self.output_dir)
@@ -30,6 +33,11 @@ class TestSbom(unittest.TestCase):
         if not error_manager.find_message_in_errors(message):
             error_manager.print_errors()
             self.fail(f"Could not find error message matching: {message}")
+
+    def assert_message_in_warnings(self, error_manager: sbom_linter.ErrorManager, message: str):
+        if not error_manager.find_message_in_warnings(message):
+            error_manager.print_errors()
+            self.fail(f"Could not find warning message matching: {message}")
 
     def test_valid_sbom(self):
         test_file = os.path.join(self.input_dir, "valid_sbom.json")
@@ -43,7 +51,8 @@ class TestSbom(unittest.TestCase):
         test_file = os.path.join(self.input_dir, "valid_sbom.json")
         third_party_libs = {"librdkafka", "protobuf", "extra_dep"}
         error_manager = sbom_linter.lint_sbom(test_file, test_file, third_party_libs, False)
-        self.assert_message_in_errors(error_manager, sbom_linter.UNDEFINED_THIRD_PARTY_ERROR)
+        self.assert_message_in_warnings(error_manager, sbom_linter.UNDEFINED_THIRD_PARTY_ERROR)
+        self.assertTrue(error_manager.zero_error())
 
     def test_missing_purl_or_cpe(self):
         test_file = os.path.join(self.input_dir, "sbom_missing_purl.json")
@@ -93,9 +102,10 @@ class TestSbom(unittest.TestCase):
         test_file = os.path.join(self.input_dir, "sbom_script_file_missing.json")
         third_party_libs = {"librdkafka"}
         error_manager = sbom_linter.lint_sbom(test_file, test_file, third_party_libs, False)
-        self.assert_message_in_errors(
+        self.assert_message_in_warnings(
             error_manager, sbom_linter.COULD_NOT_FIND_OR_READ_SCRIPT_FILE_ERROR
         )
+        self.assertTrue(error_manager.zero_error())
 
     def test_pedigree_version_match(self):
         test_file = os.path.join(self.input_dir, "sbom_pedigree_version_match.json")
@@ -141,3 +151,43 @@ class TestSbom(unittest.TestCase):
         if not error_manager.zero_error():
             error_manager.print_errors()
         self.assertTrue(error_manager.zero_error())
+
+    def test_licenseref_license(self):
+        test_file = os.path.join(self.input_dir, "sbom_licenseref.json")
+        third_party_libs = {"murmurhash3"}
+        error_manager = sbom_linter.lint_sbom(test_file, test_file, third_party_libs, False)
+        if not error_manager.zero_error():
+            error_manager.print_errors()
+        self.assertTrue(error_manager.zero_error())
+
+    def test_load_metadata_yaml_valid(self):
+        """load_metadata parses a YAML flat-list into a CycloneDX BOM dict."""
+        path = os.path.join(self.input_dir, "metadata_valid.cdx.yaml")
+        bom = sbom_linter.load_metadata(path)
+        self.assertIn("components", bom)
+        self.assertIn("metadata", bom)
+        self.assertEqual(bom["metadata"]["component"]["type"], "application")
+        self.assertEqual(bom["components"][0]["name"], "test-dep")
+        self.assertEqual(bom["dependencies"], [{"ref": "test-app", "dependsOn": ["test-dep"]}])
+
+    def test_load_metadata_invalid_depends_on_type(self):
+        """load_metadata exits 1 when dependsOn is a scalar string instead of a list."""
+        path = os.path.join(self.input_dir, "metadata_invalid_depends_on.cdx.yaml")
+        with self.assertRaises(SystemExit) as cm:
+            sbom_linter.load_metadata(path)
+        self.assertEqual(cm.exception.code, 1)
+
+    def test_check_metadata_valid(self):
+        """--check-metadata returns 0 and prints OK for a valid YAML metadata file."""
+        path = os.path.join(self.input_dir, "metadata_valid.cdx.yaml")
+        saved_argv = sys.argv
+        try:
+            sys.argv = ["buildscripts/tests/sbom_linter/sbom_linter.py", "--check-metadata", path]
+            result = sbom_linter.main()
+        finally:
+            sys.argv = saved_argv
+        self.assertEqual(result, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,53 +1,21 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-#include <absl/container/inlined_vector.h>
-#include <boost/container/flat_set.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/preallocated_container_pool.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/window_function/window_function_top_bottom_n.h"
+#include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_path_tracking_visitor.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_visitor.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/record_id.h"
@@ -66,6 +34,15 @@
 #include "mongo/util/str.h"
 
 #include <algorithm>
+#include <string_view>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
+#include <boost/container/flat_set.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -762,40 +739,28 @@ boost::optional<UnfetchedIxscans> getUnfetchedIxscans(const QuerySolutionNode* r
     return {UnfetchedIxscans{std::move(ixscans), hasFetchesOrCollScans}};
 }
 
-bool isAccumulatorN(StringData name) {
+bool isAccumulatorN(std::string_view name) {
     return name == AccumulatorTop::getName() || name == AccumulatorBottom::getName() ||
         name == AccumulatorTopN::getName() || name == AccumulatorBottomN::getName() ||
         name == AccumulatorMinN::getName() || name == AccumulatorMaxN::getName() ||
         name == AccumulatorFirstN::getName() || name == AccumulatorLastN::getName();
 }
 
-bool isTopBottomN(StringData name) {
+bool isTopBottomN(std::string_view name) {
     return name == AccumulatorTop::getName() || name == AccumulatorBottom::getName() ||
         name == AccumulatorTopN::getName() || name == AccumulatorBottomN::getName();
 }
 
-StringData getAccumulationOpName(const AccumulationStatement& accStmt) {
+std::string_view getAccumulationOpName(const AccumulationStatement& accStmt) {
     return accStmt.expr.name;
-}
-
-StringData getWindowFunctionOpName(const WindowFunctionStatement& wfStmt) {
-    return wfStmt.expr->getOpName();
 }
 
 bool isAccumulatorN(const AccumulationStatement& accStmt) {
     return isAccumulatorN(getAccumulationOpName(accStmt));
 }
 
-bool isAccumulatorN(const WindowFunctionStatement& wfStmt) {
-    return isAccumulatorN(getWindowFunctionOpName(wfStmt));
-}
-
 bool isTopBottomN(const AccumulationStatement& accStmt) {
     return isTopBottomN(getAccumulationOpName(accStmt));
-}
-
-bool isTopBottomN(const WindowFunctionStatement& wfStmt) {
-    return isTopBottomN(getWindowFunctionOpName(wfStmt));
 }
 
 boost::optional<SortPattern> getSortPattern(const AccumulationStatement& accStmt) {
@@ -814,27 +779,6 @@ boost::optional<SortPattern> getSortPattern(const AccumulationStatement& accStmt
         if (accStmt.expr.name == AccumulatorBottomN::getName()) {
             return dynamic_cast<AccumulatorBottomN*>(acc.get())->getSortPattern();
         }
-    }
-    return {};
-}
-
-boost::optional<SortPattern> getSortPattern(const WindowFunctionStatement& wfStmt) {
-    using TopExpr = window_function::ExpressionN<WindowFunctionTop, AccumulatorTop>;
-    using BottomExpr = window_function::ExpressionN<WindowFunctionBottom, AccumulatorBottom>;
-    using TopNExpr = window_function::ExpressionN<WindowFunctionTopN, AccumulatorTopN>;
-    using BottomNExpr = window_function::ExpressionN<WindowFunctionBottomN, AccumulatorBottomN>;
-
-    if (wfStmt.expr->getOpName() == AccumulatorTop::getName()) {
-        return *dynamic_cast<TopExpr*>(wfStmt.expr.get())->sortPattern;
-    }
-    if (wfStmt.expr->getOpName() == AccumulatorBottom::getName()) {
-        return *dynamic_cast<BottomExpr*>(wfStmt.expr.get())->sortPattern;
-    }
-    if (wfStmt.expr->getOpName() == AccumulatorTopN::getName()) {
-        return *dynamic_cast<TopNExpr*>(wfStmt.expr.get())->sortPattern;
-    }
-    if (wfStmt.expr->getOpName() == AccumulatorBottomN::getName()) {
-        return *dynamic_cast<BottomNExpr*>(wfStmt.expr.get())->sortPattern;
     }
     return {};
 }
@@ -861,7 +805,7 @@ std::unique_ptr<sbe::SortSpec> makeSortSpecFromSortPattern(
  */
 std::unique_ptr<SlotTreeNode> buildKeyPatternTree(const BSONObj& keyPattern,
                                                   const SbSlotVector& slots) {
-    std::vector<StringData> paths;
+    std::vector<std::string_view> paths;
     for (auto&& elem : keyPattern) {
         paths.emplace_back(elem.fieldNameStringData());
     }
@@ -1014,7 +958,7 @@ std::pair<SbStage, SbSlotVector> projectFieldsToSlots(SbStage stage,
         SbExprOptSlotVector projects;
 
         for (size_t i = 0; i < fields.size(); ++i) {
-            auto name = std::make_pair(PlanStageSlots::kField, StringData(fields[i]));
+            auto name = std::make_pair(PlanStageSlots::kField, std::string_view(fields[i]));
             auto fieldSlot = slots ? slots->getIfExists(name) : boost::none;
             if (fieldSlot) {
                 projects.emplace_back(*fieldSlot, boost::none);
@@ -1058,7 +1002,7 @@ std::pair<SbStage, SbSlotVector> projectFieldsToSlots(SbStage stage,
             return std::any_of(v.begin(), v.end(), [](auto&& c) { return !c->value.visited; });
         };
         auto preVisit = [&](Node* node, const std::string& path) {
-            auto name = std::make_pair(PlanStageSlots::kField, StringData(path));
+            auto name = std::make_pair(PlanStageSlots::kField, std::string_view(path));
             // Look for a kField slot that corresponds to node's path.
             if (auto slot = slots->getIfExists(name); slot) {
                 // We found a kField slot. Assign it to 'node->value.expr' and mark 'node'

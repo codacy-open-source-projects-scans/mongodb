@@ -4,20 +4,24 @@
  *
  * @tags: [featureFlagExtensionsAPI, requires_profiling]
  */
-import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     generateExtensionConfigs,
     deleteExtensionConfigs,
     checkPlatformCompatibleWithExtensions,
+    getExtensionConfDir,
 } from "jstests/noPassthrough/libs/extension_helpers.js";
 
 checkPlatformCompatibleWithExtensions();
 
-const extensionNames = generateExtensionConfigs(["libvector_search_extension.so", "libsearch_extension.so"]);
+const extensionNames = generateExtensionConfigs([
+    "libvector_search_extension.so",
+    "libsearch_extension.so",
+]);
 
 const options = {
     loadExtensions: extensionNames,
+    extensionsConfigPath: getExtensionConfDir(),
 };
 
 const testData = [
@@ -28,7 +32,7 @@ const testData = [
 const vectorSearchPipeline = [{$vectorSearch: {}}];
 const searchPipeline = [{$search: {}}];
 
-function setupTestCollection(conn, shardingTest) {
+function setupTestCollection(conn) {
     const adminDb = conn.getDB("admin");
     const db = conn.getDB("test");
     const coll = db[jsTestName()];
@@ -80,7 +84,8 @@ function assertIfrFlagOnShards(shardingTest, comment, flagName, expectedFlagValu
             // ifrFlags is a generic argument with forward_to_shards: true, so it appears at the
             // top level of the command. The fallback checks inside command.explain defensively in
             // case the shard's explain handler nests the aggregate command inside {explain: {...}}.
-            const ifrFlags = entry.command.ifrFlags || (entry.command.explain && entry.command.explain.ifrFlags);
+            const ifrFlags =
+                entry.command.ifrFlags || (entry.command.explain && entry.command.explain.ifrFlags);
             assert(
                 ifrFlags,
                 "Expected ifrFlags in command on shard " +
@@ -92,11 +97,19 @@ function assertIfrFlagOnShards(shardingTest, comment, flagName, expectedFlagValu
             );
 
             const flagEntry = ifrFlags.find((f) => f.name === flagName);
-            assert(flagEntry, "Expected ifrFlags to contain " + flagName + ", got: " + tojson(ifrFlags));
+            assert(
+                flagEntry,
+                "Expected ifrFlags to contain " + flagName + ", got: " + tojson(ifrFlags),
+            );
             assert.eq(
                 flagEntry.value,
                 expectedFlagValue,
-                "Expected " + flagName + " to be " + expectedFlagValue + ", got: " + flagEntry.value,
+                "Expected " +
+                    flagName +
+                    " to be " +
+                    expectedFlagValue +
+                    ", got: " +
+                    flagEntry.value,
             );
         }
     }
@@ -114,38 +127,56 @@ function setFlags(adminDb, shard0Admin, shard1Admin, flagName, routerFlag, shard
 }
 
 function runIFRFlagPropagationTests(conn, shardingTest, flagName, pipeline) {
-    const {adminDb, db, coll} = setupTestCollection(conn, shardingTest);
+    const {adminDb, db, coll} = setupTestCollection(conn);
     const {shard0Admin, shard1Admin} = getShardAdmins(shardingTest);
     enableProfilingOnShards(shardingTest);
 
     // Test 1: Router flag=true propagates to shards (shards commit to true)
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
     const comment1 = "ifr_propagation_test_1_" + UUID().hex();
-    assertArrayEq({
-        actual: coll.aggregate(pipeline, {comment: comment1}).toArray(),
-        expected: testData,
-    });
+    assert.commandWorked(coll.runCommand("aggregate", {pipeline, comment: comment1, cursor: {}}));
     assertIfrFlagOnShards(shardingTest, comment1, flagName, /* expectedFlagValue */ true);
 
-    // Test 2: Direct shard request uses shard's flag value
+    // Test 2: Direct shard request is expected to set the flags to false, because it will assume
+    // (without 'ifrFlags' provided), that the router is old and wouldn't be using the features.
     if (shard0Admin) {
         assert.commandWorked(shard0Admin.runCommand({setParameter: 1, [flagName]: false}));
         const shard0Coll = shardingTest.rs0.getPrimary().getDB("test")[coll.getName()];
-        assert.throwsWithCode(() => shard0Coll.aggregate(pipeline).toArray(), ErrorCodes.SearchNotEnabled);
+        assert.throwsWithCode(
+            () => shard0Coll.aggregate(pipeline).toArray(),
+            ErrorCodes.SearchNotEnabled,
+        );
         assert.commandWorked(shard0Admin.runCommand({setParameter: 1, [flagName]: true}));
-        const shard0Result = shard0Coll.aggregate(pipeline).toArray();
-        if (shard0Result.length === 0 && shard1Admin) {
+        assert.throwsWithCode(
+            () => shard0Coll.aggregate(pipeline).toArray(),
+            ErrorCodes.SearchNotEnabled,
+        );
+        if (shard1Admin) {
             assert.commandWorked(shard1Admin.runCommand({setParameter: 1, [flagName]: true}));
             const shard1Coll = shardingTest.rs1.getPrimary().getDB("test")[coll.getName()];
-            const shard1Result = shard1Coll.aggregate(pipeline).toArray();
-            assert(shard1Result.length > 0);
-        } else {
-            assert(shard0Result.length > 0);
+            assert.throwsWithCode(
+                () => shard1Coll.aggregate(pipeline).toArray(),
+                ErrorCodes.SearchNotEnabled,
+            );
         }
     }
 
     // Test 3: Router flag=false propagates to shards (shards commit to false)
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
     assert.throwsWithCode(() => coll.aggregate(pipeline).toArray(), ErrorCodes.SearchNotEnabled);
 
     // Test 3b: Verify router flag=false is serialized to shards via a non-extension-stage pipeline
@@ -154,14 +185,28 @@ function runIFRFlagPropagationTests(conn, shardingTest, flagName, pipeline) {
     assertIfrFlagOnShards(shardingTest, comment3b, flagName, /* expectedFlagValue */ false);
 
     // Test 4: Explain propagates router flag=true to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
     const comment4 = "ifr_propagation_test_4_" + UUID().hex();
     const explainResult = coll.explain().aggregate(pipeline, {comment: comment4});
     assert.commandWorked(explainResult);
     assertIfrFlagOnShards(shardingTest, comment4, flagName, /* expectedFlagValue */ true);
 
     // Test 5: Explain propagates router flag=false to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
     assert.throwsWithCode(() => coll.explain().aggregate(pipeline), ErrorCodes.SearchNotEnabled);
 
     // Test 5b: Verify router flag=false is serialized to shards via a non-extension-stage explain
@@ -174,7 +219,6 @@ function runIFRFlagPropagationTests(conn, shardingTest, flagName, pipeline) {
     const otherColl = db[otherCollName];
     otherColl.drop();
     assert.commandWorked(otherColl.insertMany(testData));
-    const dbName = db.getName();
     assert.commandWorked(
         adminDb.runCommand({
             shardCollection: otherColl.getFullName(),
@@ -201,25 +245,56 @@ function runIFRFlagPropagationTests(conn, shardingTest, flagName, pipeline) {
         /* shardFlag */ true,
     );
 
-    // Test 6: $unionWith propagates router flag=false to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
-    assertArrayEq({
-        actual: coll.aggregate(unionPipeline).toArray(),
-        expected: testData.concat(testData),
-    });
+    // Test 6: $unionWith propagates router flag=true to shards
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
+    assert.commandWorked(coll.runCommand("aggregate", {pipeline: unionPipeline, cursor: {}}));
 
     // Test 7: $unionWith propagates router flag=false to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
-    assert.throwsWithCode(() => coll.aggregate(unionPipeline).toArray(), ErrorCodes.SearchNotEnabled);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
+    assert.throwsWithCode(
+        () => coll.aggregate(unionPipeline).toArray(),
+        ErrorCodes.SearchNotEnabled,
+    );
 
     // Test 8: $unionWith explain propagates router flag=true to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
     const unionExplainResult = coll.explain().aggregate(unionPipeline);
     assert.commandWorked(unionExplainResult);
 
     // Test 9: $unionWith explain propagates router flag=false to shards
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
-    assert.throwsWithCode(() => coll.explain().aggregate(unionPipeline), ErrorCodes.SearchNotEnabled);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
+    assert.throwsWithCode(
+        () => coll.explain().aggregate(unionPipeline),
+        ErrorCodes.SearchNotEnabled,
+    );
 
     // Disable profiling on shards after tests complete.
     for (const primary of getShardPrimaries(shardingTest)) {
@@ -232,30 +307,58 @@ function runIFRFlagPropagationTests(conn, shardingTest, flagName, pipeline) {
 // featureFlagExtensionsInsideHybridSearch) whose effect is only observable inside downstream
 // stages (e.g. $rankFusion/$scoreFusion), not via a direct SearchNotEnabled error path.
 function runIFRFlagSerializationTests(conn, shardingTest, flagName) {
-    const {adminDb, db, coll} = setupTestCollection(conn, shardingTest);
+    const {adminDb, coll} = setupTestCollection(conn);
     const {shard0Admin, shard1Admin} = getShardAdmins(shardingTest);
     enableProfilingOnShards(shardingTest);
 
     // Test 1: Router flag=true is serialized to shards (even when the shard-local value differs).
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
     const comment1 = "ifr_serialization_test_1_" + UUID().hex();
     coll.aggregate([{$match: {}}], {comment: comment1}).toArray();
     assertIfrFlagOnShards(shardingTest, comment1, flagName, /* expectedFlagValue */ true);
 
     // Test 2: Router flag=false is serialized to shards (even when the shard-local value differs).
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
     const comment2 = "ifr_serialization_test_2_" + UUID().hex();
     coll.aggregate([{$match: {}}], {comment: comment2}).toArray();
     assertIfrFlagOnShards(shardingTest, comment2, flagName, /* expectedFlagValue */ false);
 
     // Test 3: Explain serializes router flag=true to shards.
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ true, /* shardFlag */ false);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ true,
+        /* shardFlag */ false,
+    );
     const comment3 = "ifr_serialization_test_3_" + UUID().hex();
     assert.commandWorked(coll.explain().aggregate([{$match: {}}], {comment: comment3}));
     assertIfrFlagOnShards(shardingTest, comment3, flagName, /* expectedFlagValue */ true);
 
     // Test 4: Explain serializes router flag=false to shards.
-    setFlags(adminDb, shard0Admin, shard1Admin, flagName, /* routerFlag */ false, /* shardFlag */ true);
+    setFlags(
+        adminDb,
+        shard0Admin,
+        shard1Admin,
+        flagName,
+        /* routerFlag */ false,
+        /* shardFlag */ true,
+    );
     const comment4 = "ifr_serialization_test_4_" + UUID().hex();
     assert.commandWorked(coll.explain().aggregate([{$match: {}}], {comment: comment4}));
     assertIfrFlagOnShards(shardingTest, comment4, flagName, /* expectedFlagValue */ false);
@@ -282,8 +385,17 @@ try {
         "featureFlagVectorSearchExtension",
         vectorSearchPipeline,
     );
-    runIFRFlagPropagationTests(multiShardTest.s, multiShardTest, "featureFlagSearchExtension", searchPipeline);
-    runIFRFlagSerializationTests(multiShardTest.s, multiShardTest, "featureFlagExtensionsInsideHybridSearch");
+    runIFRFlagPropagationTests(
+        multiShardTest.s,
+        multiShardTest,
+        "featureFlagSearchExtension",
+        searchPipeline,
+    );
+    runIFRFlagSerializationTests(
+        multiShardTest.s,
+        multiShardTest,
+        "featureFlagExtensionsInsideHybridSearch",
+    );
     multiShardTest.stop();
 
     const singleShardTest = new ShardingTest({
@@ -301,8 +413,17 @@ try {
         "featureFlagVectorSearchExtension",
         vectorSearchPipeline,
     );
-    runIFRFlagPropagationTests(singleShardTest.s, singleShardTest, "featureFlagSearchExtension", searchPipeline);
-    runIFRFlagSerializationTests(singleShardTest.s, singleShardTest, "featureFlagExtensionsInsideHybridSearch");
+    runIFRFlagPropagationTests(
+        singleShardTest.s,
+        singleShardTest,
+        "featureFlagSearchExtension",
+        searchPipeline,
+    );
+    runIFRFlagSerializationTests(
+        singleShardTest.s,
+        singleShardTest,
+        "featureFlagExtensionsInsideHybridSearch",
+    );
     singleShardTest.stop();
 } finally {
     deleteExtensionConfigs(extensionNames);

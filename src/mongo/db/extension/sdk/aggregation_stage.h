@@ -1,33 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/sdk/assert_util.h"
 #include "mongo/db/extension/sdk/distributed_plan_logic.h"
@@ -35,7 +10,7 @@
 #include "mongo/db/extension/sdk/operation_metrics_adapter.h"
 #include "mongo/db/extension/sdk/query_execution_context_handle.h"
 #include "mongo/db/extension/sdk/query_shape_opts_handle.h"
-#include "mongo/db/extension/sdk/view_info.h"
+#include "mongo/db/extension/sdk/resolved_namespace.h"
 #include "mongo/db/extension/shared/byte_buf.h"
 #include "mongo/db/extension/shared/extension_status.h"
 #include "mongo/db/extension/shared/get_next_result.h"
@@ -80,12 +55,6 @@ public:
     virtual std::unique_ptr<ExecAggStageBase> compile() const = 0;
     virtual boost::optional<DistributedPlanLogic> getDistributedPlanLogic() const = 0;
     virtual std::unique_ptr<LogicalAggStage> clone() const = 0;
-    // Extension stages (like $vectorSearch) that do sort by vector search score should override
-    // this and return true.
-    virtual bool isSortedByVectorSearchScore_deprecated() const {
-        return false;
-    }
-
     /**
      * Returns the filter predicate applied by this stage for shard targeting. Stages that filter
      * documents should override this to enable shard targeting. Returns an empty BSONObj by default
@@ -126,10 +95,19 @@ public:
     }
 
     /**
+     * Returns DocsNeededBounds info for this stage as a BSON-serialized
+     * MongoExtensionDocsNeededBoundsInfo. Override to declare how this stage affects pipeline
+     * bounds. Return empty BSONObj (the default) to use Unknown bounds.
+     */
+    virtual BSONObj getDocsNeededBounds() const {
+        return BSONObj();
+    }
+
+    /**
      * Evaluates the precondition of the rule identified by name. Extensions override this.
      */
-    virtual bool evaluateRulePrecondition(
-        std::string_view ruleNam, ConstPipelineRewriteContextHandle pipelineRewriteContext) const {
+    virtual bool evaluatePipelineRewriteRulePrecondition(
+        std::string_view ruleName, ConstPipelineRewriteContextHandle pipelineRewriteContext) const {
         return false;
     }
 
@@ -137,8 +115,8 @@ public:
      * Applies the transform of the rule identified by name. Extensions override this.
      * Returns true if the pipeline was modified.
      */
-    virtual bool evaluateRuleTransform(std::string_view ruleName,
-                                       PipelineRewriteContextHandle pipelineRewriteContext) {
+    virtual bool evaluatePipelineRewriteRuleTransform(
+        std::string_view ruleName, PipelineRewriteContextHandle pipelineRewriteContext) {
         return false;
     }
 
@@ -147,6 +125,12 @@ public:
      * 'deps' and update internal state.
      */
     virtual void applyPipelineSuffixDependencies(const PipelineDependenciesHandle& deps) {}
+
+    /**
+     * Notifies the logical stage that the stream identified by streamType will not produce any more
+     * documents.
+     */
+    virtual void skipStream(::MongoExtensionStreamType streamType) {}
 
 protected:
     LogicalAggStage() = delete;  // No default constructor.
@@ -262,16 +246,6 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _extIsStageSortedByVectorSearchScore(
-        const ::MongoExtensionLogicalAggStage* extLogicalStage,
-        bool* outIsSortedByVectorSearchScore) {
-        return wrapCXXAndConvertExceptionToStatus([&]() {
-            const auto& impl =
-                static_cast<const ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
-            *outIsSortedByVectorSearchScore = impl.isSortedByVectorSearchScore_deprecated();
-        });
-    }
-
     static ::MongoExtensionStatus* _extSetVectorSearchLimitForOptimization(
         ::MongoExtensionLogicalAggStage* extLogicalStage, long long* extractedLimitVal) {
         return wrapCXXAndConvertExceptionToStatus([&]() {
@@ -281,7 +255,7 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _extEvaluateRulePrecondition(
+    static ::MongoExtensionStatus* _extEvaluatePipelineRewriteRulePrecondition(
         const ::MongoExtensionLogicalAggStage* extLogicalStage,
         ::MongoExtensionByteView ruleName,
         const ::MongoExtensionPipelineRewriteContext* ctx,
@@ -290,12 +264,12 @@ private:
             *result = false;
             auto& adapter = *static_cast<const ExtensionLogicalAggStageAdapter*>(extLogicalStage);
             ConstPipelineRewriteContextHandle rewriteContext{ctx};
-            *result = adapter.getImpl().evaluateRulePrecondition(byteViewAsStringView(ruleName),
-                                                                 rewriteContext);
+            *result = adapter.getImpl().evaluatePipelineRewriteRulePrecondition(
+                byteViewAsStringView(ruleName), rewriteContext);
         });
     }
 
-    static ::MongoExtensionStatus* _extEvaluateRuleTransform(
+    static ::MongoExtensionStatus* _extEvaluatePipelineRewriteRuleTransform(
         ::MongoExtensionLogicalAggStage* extLogicalStage,
         ::MongoExtensionByteView ruleName,
         ::MongoExtensionPipelineRewriteContext* ctx,
@@ -304,8 +278,8 @@ private:
             *result = false;
             auto& adapter = *static_cast<ExtensionLogicalAggStageAdapter*>(extLogicalStage);
             PipelineRewriteContextHandle rewriteContext{ctx};
-            *result = adapter.getImpl().evaluateRuleTransform(byteViewAsStringView(ruleName),
-                                                              rewriteContext);
+            *result = adapter.getImpl().evaluatePipelineRewriteRuleTransform(
+                byteViewAsStringView(ruleName), rewriteContext);
         });
     }
 
@@ -338,7 +312,7 @@ private:
     }
 
     static ::MongoExtensionStatus* _extGetSortPattern(
-        ::MongoExtensionLogicalAggStage* extLogicalStage,
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
         ::MongoExtensionByteBuf** output) noexcept {
         return wrapCXXAndConvertExceptionToStatus([&]() {
             *output = nullptr;
@@ -352,6 +326,28 @@ private:
         });
     }
 
+    static ::MongoExtensionStatus* _extSkipStream(::MongoExtensionLogicalAggStage* extLogicalStage,
+                                                  ::MongoExtensionStreamType streamType) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            auto& impl = static_cast<ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
+            impl.skipStream(streamType);
+        });
+    }
+
+    static ::MongoExtensionStatus* _extGetDocsNeededBounds(
+        const ::MongoExtensionLogicalAggStage* extLogicalStage,
+        ::MongoExtensionByteBuf** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([&]() {
+            *output = nullptr;
+            const auto& impl =
+                static_cast<const ExtensionLogicalAggStageAdapter*>(extLogicalStage)->getImpl();
+            auto bounds = impl.getDocsNeededBounds();
+            if (!bounds.isEmpty()) {
+                *output = new ByteBuf(bounds);
+            }
+        });
+    }
+
     static constexpr ::MongoExtensionLogicalAggStageVTable VTABLE = {
         .destroy = &_extDestroy,
         .get_name = &_extGetName,
@@ -360,14 +356,15 @@ private:
         .compile = &_extCompile,
         .get_distributed_plan_logic = &_extGetDistributedPlanLogic,
         .clone = &_extClone,
-        .is_stage_sorted_by_vector_search_score_deprecated = &_extIsStageSortedByVectorSearchScore,
         .set_vector_search_limit_for_optimization_deprecated =
             &_extSetVectorSearchLimitForOptimization,
-        .evaluate_rule_precondition = &_extEvaluateRulePrecondition,
-        .evaluate_rule_transform = &_extEvaluateRuleTransform,
+        .evaluate_pipeline_rewrite_rule_precondition = &_extEvaluatePipelineRewriteRulePrecondition,
+        .evaluate_pipeline_rewrite_rule_transform = &_extEvaluatePipelineRewriteRuleTransform,
         .get_filter = &_extGetFilter,
         .apply_pipeline_suffix_dependencies = &_extApplyPipelineSuffixDependencies,
-        .get_sort_pattern = &_extGetSortPattern};
+        .get_sort_pattern = &_extGetSortPattern,
+        .skip_stream = &_extSkipStream,
+        .get_docs_needed_bounds = &_extGetDocsNeededBounds};
     std::unique_ptr<LogicalAggStage> _stage;
 };
 
@@ -391,7 +388,7 @@ public:
         return BSONObj();
     }
 
-    virtual std::unique_ptr<LogicalAggStage> bind(
+    virtual std::unique_ptr<LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const = 0;
 
     virtual std::unique_ptr<AggStageAstNode> clone() const = 0;
@@ -401,10 +398,10 @@ public:
         return MongoExtensionFirstStageViewApplicationPolicy::kDefaultPrepend;
     }
 
-    // Note that viewInfo is non-owning, meaning if an extension wants to access the metadata
-    // outside of the call to bindViewInfo, it must make its own copy of it. There are no guarantees
-    // on the lifetime outside of the scope of this function.
-    virtual void bindViewInfo(const ViewInfo& viewInfo) {
+    // Note that resolvedNamespace is non-owning, meaning if an extension wants to access the
+    // metadata outside of the call to bindResolvedNamespace, it must make its own copy of it. There
+    // are no guarantees on the lifetime outside of the scope of this function.
+    virtual void bindResolvedNamespace(const ResolvedNamespace& resolvedNamespace) {
         // Default implementation is a no-op.
     }
 
@@ -478,7 +475,7 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _extBind(
+    static ::MongoExtensionStatus* _extPromote(
         const ::MongoExtensionAggStageAstNode* astNode,
         const ::MongoExtensionCatalogContext* catalogContext,
         ::MongoExtensionLogicalAggStage** logicalStage) noexcept {
@@ -486,7 +483,7 @@ private:
             sdk_tassert(
                 11647801, "Provided catalog context was invalid!", catalogContext != nullptr);
             auto logicalStagePtr =
-                static_cast<const ExtensionAggStageAstNodeAdapter*>(astNode)->getImpl().bind(
+                static_cast<const ExtensionAggStageAstNodeAdapter*>(astNode)->getImpl().promote(
                     *catalogContext);
 
             *logicalStage = new ExtensionLogicalAggStageAdapter(std::move(logicalStagePtr));
@@ -514,25 +511,26 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _extBindViewInfo(
+    static ::MongoExtensionStatus* _extBindResolvedNamespace(
         ::MongoExtensionAggStageAstNode* astNode,
-        const ::MongoExtensionViewInfo* viewInfo) noexcept {
+        const ::MongoExtensionResolvedNamespace* resolvedNamespace) noexcept {
         return wrapCXXAndConvertExceptionToStatus([&]() {
-            sdk_tassert(11905600, "Provided view info was invalid", viewInfo != nullptr);
+            sdk_tassert(11905600, "Provided view info was invalid", resolvedNamespace != nullptr);
             sdk_tassert(11905604,
                         "If viewPipelineLen is non-zero, viewPipeline must be provided",
-                        viewInfo->viewPipelineLen == 0 || viewInfo->viewPipeline != nullptr);
+                        resolvedNamespace->viewPipelineLen == 0 ||
+                            resolvedNamespace->viewPipeline != nullptr);
             std::vector<mongo::BSONObj> stages;
-            for (size_t i = 0; i < viewInfo->viewPipelineLen; ++i) {
-                stages.emplace_back(bsonObjFromByteView(viewInfo->viewPipeline[i]));
+            for (size_t i = 0; i < resolvedNamespace->viewPipelineLen; ++i) {
+                stages.emplace_back(bsonObjFromByteView(resolvedNamespace->viewPipeline[i]));
             }
-            ViewInfo viewInfoWrapper =
-                ViewInfo(byteViewAsStringView(viewInfo->viewNamespace.databaseName),
-                         byteViewAsStringView(viewInfo->viewNamespace.collectionName),
-                         std::move(stages));
+            ResolvedNamespace resolvedNamespaceWrapper = ResolvedNamespace(
+                byteViewAsStringView(resolvedNamespace->viewNamespace.databaseName),
+                byteViewAsStringView(resolvedNamespace->viewNamespace.collectionName),
+                std::move(stages));
 
-            static_cast<ExtensionAggStageAstNodeAdapter*>(astNode)->getImpl().bindViewInfo(
-                viewInfoWrapper);
+            static_cast<ExtensionAggStageAstNodeAdapter*>(astNode)->getImpl().bindResolvedNamespace(
+                resolvedNamespaceWrapper);
         });
     }
 
@@ -540,10 +538,10 @@ private:
         .destroy = &_extDestroy,
         .get_name = &_extGetName,
         .get_properties = &_extGetProperties,
-        .bind = &_extBind,
+        .promote = &_extPromote,
         .clone = &_extClone,
         .get_first_stage_view_application_policy = &_extGetFirstStageViewApplicationPolicy,
-        .bind_view_info = &_extBindViewInfo};
+        .bind_resolved_namespace = &_extBindResolvedNamespace};
     std::unique_ptr<AggStageAstNode> _astNode;
 };
 
@@ -718,6 +716,15 @@ public:
 
     virtual std::unique_ptr<class AggStageParseNode> parse(BSONObj stageBson) const = 0;
 
+    /**
+     * Returns the type of client permitted to specify this stage. Defaults to internal-only so a
+     * descriptor that forgets to declare its client type fails closed (rejected from user
+     * pipelines) rather than silently becoming user-facing.
+     */
+    virtual ::MongoExtensionClientType getClientType() const {
+        return ::kMongoExtensionClientTypeInternal;
+    }
+
 protected:
     AggStageDescriptor() = delete;  // No default constructor.
     explicit AggStageDescriptor(std::string name) : _name(std::move(name)) {}
@@ -788,8 +795,18 @@ private:
         });
     }
 
-    static constexpr ::MongoExtensionAggStageDescriptorVTable VTABLE = {.get_name = &_extGetName,
-                                                                        .parse = &_extParse};
+    static ::MongoExtensionClientType _extGetClientType(
+        const ::MongoExtensionAggStageDescriptor* descriptor) noexcept {
+        return static_cast<const ExtensionAggStageDescriptorAdapter*>(descriptor)
+            ->getImpl()
+            .getClientType();
+    }
+
+    static constexpr ::MongoExtensionAggStageDescriptorVTable VTABLE = {
+        .get_name = &_extGetName,
+        .get_client_type = &_extGetClientType,
+        .parse = &_extParse,
+    };
 
     std::unique_ptr<AggStageDescriptor> _descriptor;
 };
@@ -852,6 +869,55 @@ protected:
         sdk_tasserted(10957208, "Calling getSource on a source stage is not supported");
         MONGO_UNREACHABLE;
     }
+};
+
+/**
+ * Base class for source stages that produce two logical streams: a document-result stream and a
+ * metadata-result stream. The advanced() helpers wrap BSON in the envelope expected by the host
+ * Exchange: { _streamType: <N>, payload: <doc> }.
+ */
+class ExecAggStageResultsAndMetadataSource : public ExecAggStageSource {
+public:
+    /**
+     * Identifies which stream a produced document belongs to. Mirrors ::MongoExtensionStreamType
+     * from public/api.h.
+     */
+    enum class StreamType : uint8_t {
+        kDocResult = ::MongoExtensionStreamType::kMongoExtensionStreamTypeDocResult,
+        kMetaResult = ::MongoExtensionStreamType::kMongoExtensionStreamTypeMetaResult,
+    };
+
+    ExtensionGetNextResult advanced(const BSONObj& payload, StreamType streamType) {
+        BSONObjBuilder envelopeBob;
+        envelopeBob.append("_streamType", static_cast<int>(streamType));
+        envelopeBob.append("payload", payload);
+        return ExtensionGetNextResult::advanced(ExtensionBSONObj::makeAsByteBuf(envelopeBob.obj()));
+    }
+
+    // Emits an EOS sentinel detected by $_internalStreamTerminator to dispose the Exchange
+    // consumer.
+    ExtensionGetNextResult advancedMetaStreamEOS() {
+        BSONObjBuilder envelopeBob;
+        envelopeBob.append("_streamType", static_cast<int>(StreamType::kMetaResult));
+        envelopeBob.appendBool("_eos", true);
+        return ExtensionGetNextResult::advanced(ExtensionBSONObj::makeAsByteBuf(envelopeBob.obj()));
+    }
+
+    /**
+     * Certain stages (e.g. $searchScore) produce per-document metadata that require this overload.
+     */
+    ExtensionGetNextResult advanced(const BSONObj& payload,
+                                    StreamType streamType,
+                                    const BSONObj& meta) {
+        BSONObjBuilder envelopeBob;
+        envelopeBob.append("_streamType", static_cast<int>(streamType));
+        envelopeBob.append("payload", payload);
+        return ExtensionGetNextResult::advanced(ExtensionBSONObj::makeAsByteBuf(envelopeBob.obj()),
+                                                ExtensionBSONObj::makeAsByteBuf(meta));
+    }
+
+protected:
+    ExecAggStageResultsAndMetadataSource(std::string_view name) : ExecAggStageSource(name) {}
 };
 
 /**

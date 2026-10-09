@@ -1,6 +1,7 @@
 // Tests query settings are applied to aggregate queries regardless of the query engine (SBE or
 // classic).
 // @tags: [
+//   uses_explain,
 //   # TODO SERVER-98659 Investigate why this test is failing on
 //   # 'sharding_kill_stepdown_terminate_jscore_passthrough'.
 //   does_not_support_stepdowns,
@@ -14,10 +15,14 @@
 //   examines_sbe_cache,
 //   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
 //   transitioning_replicaset_incompatible,
+//   needs_query_settings_user_role
 // ]
 //
 
-import {assertDropAndRecreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertDropAndRecreateCollection,
+    assertDropCollection,
+} from "jstests/libs/collection_drop_recreate.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {QuerySettingsIndexHintsTests} from "jstests/libs/query/query_settings_index_hints_tests.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
@@ -111,7 +116,12 @@ function testAggregateQuerySettingsApplicationWithLookupEquiJoin(
         pipeline: [
             {$match: {a: 1, b: 5}},
             {
-                $lookup: {from: secondaryCollOrViewName, localField: "a", foreignField: "a", as: "output"},
+                $lookup: {
+                    from: secondaryCollOrViewName,
+                    localField: "a",
+                    foreignField: "a",
+                    as: "output",
+                },
             },
             // Ensure that the pipeline is only partially pushed down to SBE to verify its
             // integrity after the fallback mechanism is engaged.
@@ -126,12 +136,29 @@ function testAggregateQuerySettingsApplicationWithLookupEquiJoin(
 
     // Ensure query settings index application for 'mainNs', 'secondaryNs' and both.
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
-    qstests.assertQuerySettingsLookupJoinIndexApplication(aggregateCmd, secondaryNs, isSecondaryCollAView);
-    qstests.assertQuerySettingsIndexAndLookupJoinApplications(aggregateCmd, mainNs, secondaryNs, isSecondaryCollAView);
+    qstests.assertQuerySettingsLookupJoinIndexApplication(
+        aggregateCmd,
+        secondaryNs,
+        isSecondaryCollAView,
+    );
+    qstests.assertQuerySettingsIndexAndLookupJoinApplications(
+        aggregateCmd,
+        mainNs,
+        secondaryNs,
+        isSecondaryCollAView,
+    );
 
     if (!isSecondaryCollAView) {
-        qstests.testAggregateQuerySettingsNaturalHintEquiJoinStrategy(aggregateCmd, mainNs, secondaryNs);
-        qstests.testAggregateQuerySettingsNaturalHintDirectionWhenSecondaryHinted(aggregateCmd, mainNs, secondaryNs);
+        qstests.testAggregateQuerySettingsNaturalHintEquiJoinStrategy(
+            aggregateCmd,
+            mainNs,
+            secondaryNs,
+        );
+        qstests.testAggregateQuerySettingsNaturalHintDirectionWhenSecondaryHinted(
+            aggregateCmd,
+            mainNs,
+            secondaryNs,
+        );
     }
 
     // Ensure query settings ignore cursor hints when being set on main collection.
@@ -202,7 +229,10 @@ function testAggregateQuerySettingsApplicationWithMerge(collOrViewName, outputCo
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
 }
 
-function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName, secondaryCollOrViewName) {
+function testAggregateQuerySettingsApplicationWithLookupPipeline(
+    collOrViewName,
+    secondaryCollOrViewName,
+) {
     const qsutils = new QuerySettingsUtils(db, collOrViewName);
     const qstests = new QuerySettingsIndexHintsTests(qsutils);
 
@@ -234,7 +264,11 @@ function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName,
     // Ensure query settings index application for 'mainNs', 'secondaryNs' and both.
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
     qstests.assertQuerySettingsLookupPipelineIndexApplication(aggregateCmd, secondaryNs);
-    qstests.assertQuerySettingsIndexAndLookupPipelineApplications(aggregateCmd, mainNs, secondaryNs);
+    qstests.assertQuerySettingsIndexAndLookupPipelineApplications(
+        aggregateCmd,
+        mainNs,
+        secondaryNs,
+    );
 
     // Ensure query settings ignore cursor hints when being set on main collection.
     qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, mainNs);
@@ -253,7 +287,10 @@ function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName,
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
 }
 
-function testAggregateQuerySettingsApplicationWithGraphLookup(collOrViewName, secondaryCollOrViewName) {
+function testAggregateQuerySettingsApplicationWithGraphLookup(
+    collOrViewName,
+    secondaryCollOrViewName,
+) {
     const qsutils = new QuerySettingsUtils(db, collOrViewName);
     const qstests = new QuerySettingsIndexHintsTests(qsutils);
 
@@ -292,10 +329,12 @@ function testAggregateQuerySettingsApplicationWithGraphLookup(collOrViewName, se
     // TODO SERVER-88561: Ensure query settings index application for 'secondaryNs' after
     // 'indexesUsed' is added to the 'explain' command output for the $graphLookup operation.
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
-    qstests.assertGraphLookupQuerySettingsInCache(aggregateCmd, secondaryNs);
 }
 
-function testAggregateQuerySettingsApplicationWithUnionWithPipeline(collOrViewName, secondaryCollOrViewName) {
+function testAggregateQuerySettingsApplicationWithUnionWithPipeline(
+    collOrViewName,
+    secondaryCollOrViewName,
+) {
     const qsutils = new QuerySettingsUtils(db, collOrViewName);
     const qstests = new QuerySettingsIndexHintsTests(qsutils);
 

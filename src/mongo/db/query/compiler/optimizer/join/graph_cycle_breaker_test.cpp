@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/join/graph_cycle_breaker.h"
 
 #include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <string_view>
 
 namespace mongo::join_ordering {
 namespace {
@@ -80,13 +56,12 @@ public:
         alternativePaths = {{a, pa1}, {b, pb1}, {c, pc1}, {d, pd1}, {e, pe1}, {f, pf1}};
 
         for (size_t i = 0; i <= kMaxEdgeId; ++i) {
-            edgeSelectivities.emplace_back(
-                cost_based_ranker::SelectivityType{static_cast<double>(i + 1) / (2.0 * kMaxEdgeId)},
-                cost_based_ranker::EstimationSource::Code);
+            edgeSelectivities.push_back(
+                makeJoinSelectivityEstimate(static_cast<double>(i + 1) / (2.0 * kMaxEdgeId)));
         }
     }
 
-    NodeId addNode(StringData collName) {
+    NodeId addNode(std::string_view collName) {
         return *graph.addNode(makeNSS(collName), nullptr, {});
     }
 
@@ -124,9 +99,7 @@ public:
     }
 
     void setSelectivity(EdgeId edgeId, double newSelectivity) {
-        edgeSelectivities[edgeId] = cost_based_ranker::SelectivityEstimate(
-            cost_based_ranker::SelectivityType(newSelectivity),
-            cost_based_ranker::EstimationSource::Code);
+        edgeSelectivities[edgeId] = makeJoinSelectivityEstimate(newSelectivity);
     }
 
     GraphCycleBreaker makeCycleBreaker() {

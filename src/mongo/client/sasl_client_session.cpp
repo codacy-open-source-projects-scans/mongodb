@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/sasl_client_session.h"
 
@@ -35,6 +9,7 @@
 
 #include <cstddef>
 #include <limits>
+#include <string_view>
 #include <type_traits>
 
 namespace mongo {
@@ -44,7 +19,7 @@ SaslClientSession::SaslClientSession() {}
 
 SaslClientSession::~SaslClientSession() {}
 
-void SaslClientSession::setParameter(Parameter id, StringData value) {
+void SaslClientSession::setParameter(Parameter id, std::string_view value) {
     fassert(16807, id >= 0 && id < numParameters);
     fassert(28583, value.size() < std::numeric_limits<std::size_t>::max());
 
@@ -67,12 +42,12 @@ bool SaslClientSession::hasParameter(Parameter id) {
     return static_cast<bool>(_parameters[id].data);
 }
 
-StringData SaslClientSession::getParameter(Parameter id) {
+std::string_view SaslClientSession::getParameter(Parameter id) {
     if (!hasParameter(id))
-        return StringData();
+        return std::string_view();
 
     DataBuffer& buffer = _parameters[id];
-    return StringData(buffer.data.get(), buffer.size);
+    return std::string_view(buffer.data.get(), buffer.size);
 }
 
 }  // namespace mongo

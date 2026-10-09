@@ -1,43 +1,19 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/replicated_fast_count/replicated_fast_count_delta_utils.h"
 
-#include "mongo/db/commands.h"
+#include "mongo/db/import_collection_oplog_entry_gen.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
 #include "mongo/db/replicated_fast_count/durable_size_metadata_gen.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
-#include "mongo/db/replicated_fast_count/replicated_fast_count_metrics.h"
+#include "mongo/db/replicated_fast_count/size_count_store.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -117,32 +93,104 @@ CollectionSizeCount extractSizeCountDeltaForTruncateRange(const repl::OplogEntry
                                .count = -truncateRangeEntry.getDocsDeleted()};
 }
 
-// Updates the 'sizeCountDeltasOut' to track the new 'sizeCountDelta' for 'uuid'.
-void recordCollectionSizeCountDelta(const UUID& uuid,
-                                    const CollectionSizeCount& sizeCountDelta,
-                                    SizeCountDeltas& sizeCountDeltasOut) {
-    auto [it, inserted] =
-        sizeCountDeltasOut.try_emplace(uuid, SizeCountDelta{sizeCountDelta, DDLState::kNone});
+// Updates the 'replicatedMetadataDeltasOut' to track the new 'metadataDelta' for 'uuid'.
+void recordCollectionReplicatedMetadataDelta(
+    const UUID& uuid,
+    const CollectionReplicatedMetadata& metadataDelta,
+    ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    auto [it, inserted] = replicatedMetadataDeltasOut.try_emplace(
+        uuid, ReplicatedMetadataDelta{.metadata = metadataDelta, .state = DDLState::kNone});
     if (!inserted) {
         // Entry exists, so update as needed.
-        it->second.sizeCount = it->second.sizeCount + sizeCountDelta;
+        it->second.metadata = it->second.metadata + metadataDelta;
     }
 }
 
-void recordCollectionCreate(const UUID& uuid, SizeCountDeltas& sizeCountDeltasOut) {
-    auto [it, inserted] = sizeCountDeltasOut.try_emplace(
-        uuid, SizeCountDelta{CollectionSizeCount{.size = 0, .count = 0}, DDLState::kCreated});
+void recordCollectionImport(const UUID& uuid,
+                            const ImportCollectionOplogEntry& importEntry,
+                            ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+
+    // Importing a collection means that we have a pre-existing collection without hashes, so we
+    // need to invalidate the collection hash.
+    const CollectionReplicatedMetadata importedMetadata{
+        .sizeCount = {.size = importEntry.getDataSize(), .count = importEntry.getNumRecords()},
+        .hash = boost::none};
+
+    auto it = replicatedMetadataDeltasOut.find(uuid);
+    if (it == replicatedMetadataDeltasOut.end()) {
+        replicatedMetadataDeltasOut.emplace(
+            uuid,
+            ReplicatedMetadataDelta{.metadata = importedMetadata, .state = DDLState::kCreated});
+        return;
+    }
+
+    // We expect to only see a pre-existing entry for this UUID if we had previously dropped it and
+    // then received an importCollection entry for that same uuid.
+    massert(12601900,
+            "Encountered writes to a collection before it was imported",
+            it->second.state == DDLState::kDropped);
+
+    it->second = ReplicatedMetadataDelta{.metadata = importedMetadata,
+                                         .state = DDLState::kDroppedAndRecreated};
+}
+
+void recordCollectionCreate(const UUID& uuid,
+                            ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    // A collection created empty has folded in no document hashes, so its hash is the identity.
+    auto [it, inserted] = replicatedMetadataDeltasOut.try_emplace(
+        uuid,
+        ReplicatedMetadataDelta{
+            .metadata = {.sizeCount = CollectionSizeCount{.size = 0, .count = 0},
+                         .hash = kEmptyCollectionValidationHash},
+            .state = DDLState::kCreated});
     massert(12054100, "Encountered writes to a collection before it was created", inserted);
 }
 
-void recordCollectionDrop(const UUID& uuid, SizeCountDeltas& sizeCountDeltasOut) {
-    auto [it, inserted] = sizeCountDeltasOut.try_emplace(
-        uuid, SizeCountDelta{CollectionSizeCount{.size = 0, .count = 0}, DDLState::kDropped});
+void recordCollectionCreateFromMigrate(const repl::OplogEntry& entry,
+                                       ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    auto it = replicatedMetadataDeltasOut.find(*entry.getUuid());
+    invariant(it != replicatedMetadataDeltasOut.end());
+
+    // When processing oplog entries, we generally expect a collection create oplog entry to precede
+    // any other oplog entries with the same UUID, but there is one exception. During shard
+    // migration, a collection can be created on a shard, migrated away from the shard, then
+    // migrated back to the shard. When this happens, the collection is dropped then re-created with
+    // the same UUID because UUIDs are preserved across migrations. To handle this case, we allow
+    // the existing replicatedMetadataDeltasOut key-value pair to be reset to zero.
+    massert(12554002,
+            fmt::format("Unexpected pre-existing size/count state when processing shard migration "
+                        "collection create oplog entry. entry: {}, sizeCountDelta: {}",
+                        redact(entry.toStringForLogging()),
+                        it->second.toString()),
+            it->second.state == DDLState::kDropped);
+
+    // We use DDLState::kDroppedAndRecreated so that:
+    //  1. persistCheckpoint() permits a pre-existing entry for this UUID in the SizeCountStore. It
+    //  expects no prior entry for kCreated.
+    //  2. readAndIncrementReplicatedMetadata() knows not to increment this ReplicatedMetadataDelta
+    //  entry with the stale persisted size/count of this collection before it was dropped.
+    // Re-created empty by the migration, so the hash restarts from wherever a fresh create would
+    // start it.
+    it->second = ReplicatedMetadataDelta{
+        .metadata = {.sizeCount = CollectionSizeCount{.size = 0, .count = 0},
+                     .hash = kEmptyCollectionValidationHash},
+        .state = DDLState::kDroppedAndRecreated};
+}
+
+void recordCollectionDrop(const UUID& uuid, ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    // A dropped collection has no contents to hash, and the store entry is removed at checkpoint
+    // time.
+    auto [it, inserted] = replicatedMetadataDeltasOut.try_emplace(
+        uuid,
+        ReplicatedMetadataDelta{
+            .metadata = {.sizeCount = CollectionSizeCount{.size = 0, .count = 0},
+                         .hash = boost::none},
+            .state = DDLState::kDropped});
     if (!inserted) {
         if (it->second.state == DDLState::kCreated) {
             // If we had a creation and a drop in the same checkpoint, we can remove the entry since
             // they would cancel each other out.
-            sizeCountDeltasOut.erase(it);
+            replicatedMetadataDeltasOut.erase(it);
         } else {
             it->second.state = DDLState::kDropped;
         }
@@ -150,7 +198,7 @@ void recordCollectionDrop(const UUID& uuid, SizeCountDeltas& sizeCountDeltasOut)
 }
 
 template <OpSizeCountExtractable T>
-boost::optional<CollectionSizeCount> extractSizeCountDeltaForOpImpl(const T& op) {
+boost::optional<CollectionReplicatedMetadata> extractReplicatedMetadataForOpImpl(const T& op) {
     const auto& sizeMd = op.getSizeMetadata();
     if (!sizeMd) {
         return boost::none;
@@ -158,6 +206,8 @@ boost::optional<CollectionSizeCount> extractSizeCountDeltaForOpImpl(const T& op)
 
     const auto* perOpMd = std::get_if<SingleOpSizeMetadata>(&sizeMd.value());
     if (!perOpMd) {
+        // Multi-op metadata on an entry for a single operation is malformed, so this operation's
+        // contribution cannot be determined.
         return boost::none;
     }
 
@@ -182,6 +232,32 @@ boost::optional<CollectionSizeCount> extractSizeCountDeltaForOpImpl(const T& op)
         return boost::none;
     }
 
+    if (!perOpMd->getSz()) {
+        if (perOpMd->getH()) {
+            // Continuous internode validation has a strict dependency on replicated fast count,
+            // meaning that if the sz is absent, the hash should be absent too.
+            LOGV2_WARNING(13321400,
+                          "Unexpected input: Size metadata carries a document hash with no size "
+                          "delta",
+                          "ns"_attr = op.getNss().toStringForErrorMsg(),
+                          "opTime"_attr = opTimeStringForLog(op),
+                          "oplogEntry"_attr = redact(toBSONForLog(op)));
+            // The document hash is still this operation's real contribution to the collection hash,
+            // so it is folded in against a zero size and count delta.
+            //
+            // A UUID is required because callers attribute the returned delta to one; without it
+            // there is no collection to fold into.
+            if (op.getUuid()) {
+                return CollectionReplicatedMetadata{.sizeCount =
+                                                        CollectionSizeCount{.size = 0, .count = 0},
+                                                    .hash = perOpMd->getH()};
+            }
+        }
+        // An absent size delta means the entry is opting out of size and count tracking, so there
+        // is nothing to record for it.
+        return boost::none;
+    }
+
     massert(12116001,
             str::stream() << "Unexpected input: Missing `ui` field for "
                           << op.getNss().toStringForErrorMsg()
@@ -189,96 +265,146 @@ boost::optional<CollectionSizeCount> extractSizeCountDeltaForOpImpl(const T& op)
                           << ", entry opTime: " << opTimeStringForLog(op),
             op.getUuid().has_value());
 
-    return CollectionSizeCount{.size = perOpMd->getSz(), .count = computeCountDeltaForOp(opType)};
+    return CollectionReplicatedMetadata{
+        .sizeCount = {.size = *perOpMd->getSz(), .count = computeCountDeltaForOp(opType)},
+        .hash = perOpMd->getH()};
 }
 
-// Returns true if all operations within the provided oplog entry are on the internal fast count
-// collections.
-bool operationsOnFastCountCollections(const NamespaceString& nss,
-                                      const repl::OplogEntry& oplogEntry) {
-    const auto fastCountStoreNss =
-        NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore);
-    const auto fastCountTimestampNss = NamespaceString::makeGlobalConfigCollection(
-        NamespaceString::kReplicatedFastCountStoreTimestamps);
-
-    if (nss == fastCountStoreNss || nss == fastCountTimestampNss) {
-        return true;
+boost::optional<UUID> getUUIDFromOplogEntry(const repl::OplogEntry& oplogEntry) {
+    if (oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kImportCollection) {
+        const auto catalogEntry =
+            mongo::ImportCollectionOplogEntry::parse(oplogEntry.getObject(),
+                                                     IDLParserContext("importCollectionOplogEntry"))
+                .getCatalogEntry();
+        return invariant(UUID::parse(catalogEntry["md"]["options"]["uuid"]),
+                         str::stream()
+                             << "Oplog entry is unexpectedly missing import collection UUID: "
+                             << redact(oplogEntry.toBSONForLogging()));
     }
-
-    if (oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kCreate ||
-        oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kDrop) {
-        // kCreate/kDrop entries use the $cmd namespace (e.g. config.$cmd), not the target
-        // collection's namespace. Use CommandHelpers::parseNsCollectionRequired to extract the
-        // actual target NSS from the first field of the command object (o.create / o.drop).
-        const auto targetNss =
-            CommandHelpers::parseNsCollectionRequired(nss.dbName(), oplogEntry.getObject());
-        if (targetNss == fastCountStoreNss || targetNss == fastCountTimestampNss) {
-            return true;
-        }
-    }
-
-    if (oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
-        std::vector<repl::OplogEntry> innerEntries;
-        repl::ApplyOps::extractOperationsTo(
-            oplogEntry, oplogEntry.getEntry().toBSON(), &innerEntries);
-
-        for (const auto& op : innerEntries) {
-            const auto& nss = op.getNss();
-            if (nss != fastCountStoreNss && nss != fastCountTimestampNss) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    return false;
+    return oplogEntry.getUuid();
 }
 
-// Processes a single oplog entry and accumulates its size/count contribution into
-// 'sizeCountDeltasOut'. Handles applyOps (including nested), truncateRange, and CRUD operations.
-int processOplogEntry(const repl::OplogEntry& entry,
-                      const boost::optional<UUID>& uuidFilter,
-                      SizeCountDeltas& sizeCountDeltasOut) {
-    if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
-        return extractSizeCountDeltasForApplyOps(entry, uuidFilter, sizeCountDeltasOut);
-    }
-    const auto& entryUuid = entry.getUuid();
-    if (uuidFilter && entryUuid != uuidFilter) {
+// Unpacks MultiOpSizeMetadata from a commitTransaction entry and records per-collection deltas.
+int extractReplicatedMetadataDeltasForCommitTxn(
+    const repl::OplogEntry& entry, ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    tassert(12406401,
+            "extractReplicatedMetadataDeltasForCommitTxn called on non-commitTransaction entry",
+            entry.getCommandType() == repl::OplogEntry::CommandType::kCommitTransaction);
+    const auto& sizeMd = entry.getSizeMetadata();
+    if (!sizeMd) {
         return 0;
     }
-    if (entry.getCommandType() == repl::OplogEntry::CommandType::kTruncateRange) {
-        const auto delta = extractSizeCountDeltaForTruncateRange(entry);
-        recordCollectionSizeCountDelta(*entryUuid, delta, sizeCountDeltasOut);
-        return 1;
+    tassert(12406405,
+            "commitTransaction entry must not carry SingleOpSizeMetadata",
+            std::holds_alternative<std::vector<MultiOpSizeMetadata>>(sizeMd.value()));
+
+    const auto& multiMd = std::get<std::vector<MultiOpSizeMetadata>>(sizeMd.value());
+    int processed = 0;
+    for (const auto& meta : multiMd) {
+        // TODO SERVER-133315: Fold the transaction's accumulated hash in from MultiOpSizeMetadata's
+        // `h` field.
+        recordCollectionReplicatedMetadataDelta(
+            meta.getUuid(),
+            CollectionReplicatedMetadata{
+                .sizeCount = CollectionSizeCount{.size = meta.getSz(), .count = meta.getCt()},
+                .hash = boost::none},
+            replicatedMetadataDeltasOut);
+        ++processed;
     }
-    if (entry.getCommandType() == repl::OplogEntry::CommandType::kCreate) {
-        recordCollectionCreate(*entryUuid, sizeCountDeltasOut);
-        return 1;
-    }
-    if (entry.getCommandType() == repl::OplogEntry::CommandType::kDrop) {
-        recordCollectionDrop(*entryUuid, sizeCountDeltasOut);
-        return 1;
-    }
-    if (auto delta = extractSizeCountDeltaForOp(entry); delta.has_value()) {
-        recordCollectionSizeCountDelta(*entryUuid, *delta, sizeCountDeltasOut);
-        return 1;
-    }
-    return 0;
+    return processed;
 }
 
 }  // namespace
 
-boost::optional<CollectionSizeCount> extractSizeCountDeltaForOp(
+// Processes a single oplog entry and accumulates its size/count contribution into
+// 'replicatedMetadataDeltasOut'. Handles applyOps (including nested), truncateRange,
+// commitTransaction, and CRUD operations.
+int processOplogEntry(const repl::OplogEntry& entry,
+                      ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
+    if (entry.getCommandType() == repl::OplogEntry::CommandType::kCommitTransaction) {
+        return extractReplicatedMetadataDeltasForCommitTxn(entry, replicatedMetadataDeltasOut);
+    }
+    if (entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
+        return extractReplicatedMetadataDeltasForApplyOps(entry, replicatedMetadataDeltasOut);
+    }
+
+    const auto& entryUuid = getUUIDFromOplogEntry(entry);
+    switch (entry.getCommandType()) {
+        case repl::OplogEntry::CommandType::kImportCollection: {
+            const auto importEntry = mongo::ImportCollectionOplogEntry::parse(
+                entry.getObject(), IDLParserContext("importCollectionOplogEntry"));
+            if (importEntry.getDryRun()) {
+                return 0;
+            }
+            recordCollectionImport(*entryUuid, importEntry, replicatedMetadataDeltasOut);
+            return 1;
+        }
+        case repl::OplogEntry::CommandType::kTruncateRange: {
+            const auto delta = extractSizeCountDeltaForTruncateRange(entry);
+            // Truncation returns an estimate on the number of records and bytes that were removed.
+            // We accept that size and count might be slightly off after performing truncation.
+            //
+            // The entry does not carry the hashes of the records it removed, so their contributions
+            // cannot be folded back out. Leaving the hash absent invalidates the hash to be
+            // persisted for this collection.
+            recordCollectionReplicatedMetadataDelta(
+                *entryUuid,
+                CollectionReplicatedMetadata{.sizeCount = delta, .hash = boost::none},
+                replicatedMetadataDeltasOut);
+            return 1;
+        }
+        case repl::OplogEntry::CommandType::kCreate:
+            if (entry.getFromMigrate().value_or(false) &&
+                replicatedMetadataDeltasOut.contains(*entryUuid)) {
+                recordCollectionCreateFromMigrate(entry, replicatedMetadataDeltasOut);
+            } else {
+                recordCollectionCreate(*entryUuid, replicatedMetadataDeltasOut);
+            }
+            return 1;
+        case repl::OplogEntry::CommandType::kDrop:
+            recordCollectionDrop(*entryUuid, replicatedMetadataDeltasOut);
+            return 1;
+        default:
+            break;
+    }
+
+    if (auto delta = extractReplicatedMetadataForOp(entry); delta.has_value()) {
+        recordCollectionReplicatedMetadataDelta(*entryUuid, *delta, replicatedMetadataDeltasOut);
+        return 1;
+    }
+
+    return 0;
+}
+
+void mergeDeltas(const ReplicatedMetadataDeltas& src, ReplicatedMetadataDeltas& dst) {
+    for (const auto& [uuid, delta] : src) {
+        tassert(12406403,
+                "Unexpected kDropped state in mergeDeltas: drops are not permitted in "
+                "multi-document transactions",
+                delta.state != DDLState::kDropped);
+        if (delta.state == DDLState::kCreated) {
+            recordCollectionCreate(uuid, dst);
+            if (delta.metadata.sizeCount.size != 0 || delta.metadata.sizeCount.count != 0 ||
+                delta.metadata.hash != kEmptyCollectionValidationHash) {
+                recordCollectionReplicatedMetadataDelta(uuid, delta.metadata, dst);
+            }
+        } else {
+            recordCollectionReplicatedMetadataDelta(uuid, delta.metadata, dst);
+        }
+    }
+}
+
+boost::optional<CollectionReplicatedMetadata> extractReplicatedMetadataForOp(
     const repl::OplogEntry& oplogEntry) {
-    return extractSizeCountDeltaForOpImpl(oplogEntry);
+    return extractReplicatedMetadataForOpImpl(oplogEntry);
 }
 
 template <OpSizeCountExtractable T>
 std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadataImpl(const std::vector<T>& ops) {
-    SizeCountDeltas deltas;
+    ReplicatedMetadataDeltas deltas;
     for (const auto& op : ops) {
-        if (auto delta = extractSizeCountDeltaForOpImpl(op)) {
-            recordCollectionSizeCountDelta(*op.getUuid(), *delta, deltas);
+        if (auto delta = extractReplicatedMetadataForOpImpl(op)) {
+            recordCollectionReplicatedMetadataDelta(*op.getUuid(), *delta, deltas);
         }
     }
 
@@ -287,8 +413,8 @@ std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadataImpl(const std::vec
     for (const auto& [uuid, sizeCountDelta] : deltas) {
         MultiOpSizeMetadata meta;
         meta.setUuid(uuid);
-        meta.setSz(sizeCountDelta.sizeCount.size);
-        meta.setCt(sizeCountDelta.sizeCount.count);
+        meta.setSz(sizeCountDelta.metadata.sizeCount.size);
+        meta.setCt(sizeCountDelta.metadata.sizeCount.count);
         result.push_back(std::move(meta));
     }
     // Stable UUID order for deterministic serialization and persistence of the result.
@@ -308,9 +434,8 @@ std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadata(
     return aggregateMultiOpSizeMetadataImpl(ops);
 }
 
-int extractSizeCountDeltasForApplyOps(const repl::OplogEntry& applyOpsEntry,
-                                      const boost::optional<UUID>& uuidFilter,
-                                      SizeCountDeltas& sizeCountDeltasOut) {
+int extractReplicatedMetadataDeltasForApplyOps(
+    const repl::OplogEntry& applyOpsEntry, ReplicatedMetadataDeltas& replicatedMetadataDeltasOut) {
     massert(12116000,
             str::stream() << "Unexpected input: Expected applyOps oplog entry for extracting size "
                              "metadata, instead received entry of command type '"
@@ -324,94 +449,11 @@ int extractSizeCountDeltasForApplyOps(const repl::OplogEntry& applyOpsEntry,
 
     int processed = 0;
     for (const auto& op : innerEntries) {
-        processed += processOplogEntry(op, uuidFilter, sizeCountDeltasOut);
+        processed += processOplogEntry(op, replicatedMetadataDeltasOut);
     }
     return processed;
 }
 
-OplogScanResult aggregateSizeCountDeltasInOplog(SeekableRecordCursor& oplogCursor,
-                                                const Timestamp& seekAfterTS,
-                                                const boost::optional<UUID>& uuidFilter,
-                                                bool isCheckpoint) {
-    OplogScanResult result;
-    RecordId seekRid =
-        massertStatusOK(record_id_helpers::keyForOptime(seekAfterTS, KeyFormat::Long));
-
-    for (auto rec = oplogCursor.seek(seekRid, SeekableRecordCursor::BoundInclusion::kExclude); rec;
-         rec = oplogCursor.next()) {
-        const auto entry = massertStatusOK(repl::OplogEntry::parse(rec->data.toBson()));
-        const auto& nss = entry.getNss();
-        // Do not advance lastTimestamp for writes to the fast count store collections themselves.
-        // Otherwise, we create a feedback loop where we'd advance the timestamp in response to
-        // seeing oplog entries for advancing the timestamp.
-        if (operationsOnFastCountCollections(nss, entry)) {
-            if (isCheckpoint) {
-                recordCheckpointOplogEntrySkipped();
-            }
-            continue;
-        }
-        result.lastTimestamp = entry.getTimestamp();
-        int numSizeCountEntries = processOplogEntry(entry, uuidFilter, result.deltas);
-        if (isCheckpoint) {
-            recordCheckpointOplogEntryProcessed();
-            recordCheckpointSizeCountEntryProcessed(numSizeCountEntries);
-        }
-    }
-    return result;
-}
-
-boost::optional<CollectionOrViewAcquisition> acquireFastCountCollectionForRead(
-    OperationContext* opCtx) {
-    CollectionOrViewAcquisition acquisition = acquireCollectionOrViewMaybeLockFree(
-        opCtx,
-        CollectionOrViewAcquisitionRequest::fromOpCtx(
-            opCtx,
-            NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore),
-            AcquisitionPrerequisites::OperationType::kRead));
-
-    if (acquisition.getCollectionPtr()) {
-        return acquisition;
-    }
-
-    return boost::none;
-}
-
-boost::optional<CollectionOrViewAcquisition> acquireFastCountCollectionForWrite(
-    OperationContext* opCtx) {
-    CollectionOrViewAcquisition acquisition = acquireCollectionOrView(
-        opCtx,
-        CollectionOrViewAcquisitionRequest::fromOpCtx(
-            opCtx,
-            NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore),
-            AcquisitionPrerequisites::OperationType::kWrite),
-        LockMode::MODE_IX);
-
-    if (acquisition.getCollectionPtr()) {
-        return acquisition;
-    }
-
-    return boost::none;
-}
-
-void readAndIncrementSizeCounts(OperationContext* opCtx, SizeCountDeltas& deltas) {
-    const auto acquisition = acquireFastCountCollectionForRead(opCtx).value();
-    const CollectionPtr& coll = acquisition.getCollectionPtr();
-
-    for (auto& [uuid, delta] : deltas) {
-        const RecordId rid = record_id_helpers::keyForDoc(
-                                 BSON("_id" << uuid),
-                                 clustered_util::makeDefaultClusteredIdIndex().getIndexSpec(),
-                                 /*collator=*/nullptr)
-                                 .getValue();
-        Snapshotted<BSONObj> doc;
-        if (coll->findDoc(opCtx, rid, &doc)) {
-            const BSONObj& data = doc.value();
-            delta.sizeCount.count += data.getField(kMetadataKey).Obj().getField(kCountKey).Long();
-            delta.sizeCount.size += data.getField(kMetadataKey).Obj().getField(kSizeKey).Long();
-        }
-    }
-}
 }  // namespace replicated_fast_count
-
 
 }  // namespace mongo

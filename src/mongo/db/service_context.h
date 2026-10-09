@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,7 +9,7 @@
 #include "mongo/db/operation_id.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/rwmutex.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/unordered_map.h"
@@ -59,13 +33,14 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -139,7 +114,7 @@ public:
     }
 
 private:
-    AtomicWord<T*> _ptr{nullptr};
+    Atomic<T*> _ptr{nullptr};
 };
 
 template <typename T>
@@ -152,7 +127,7 @@ auto makeLockHandleForObjectLock(T* object) {
  * destroyed.
  */
 template <typename T, typename MutexType = T>
-class MONGO_MOD_PUBLIC ObjectLock {
+class [[MONGO_MOD_PUBLIC]] ObjectLock {
 public:
     ObjectLock() = default;
     explicit ObjectLock(T* obj) : _lk(makeLockHandleForObjectLock(obj)), _object(obj) {}
@@ -199,7 +174,7 @@ using ServiceContextLock =
  * See registerKillOpListener() for more information,
  * including limitations on the lifetime of registered listeners.
  */
-class MONGO_MOD_OPEN KillOpListenerInterface {
+class [[MONGO_MOD_OPEN]] KillOpListenerInterface {
 public:
     KillOpListenerInterface(const KillOpListenerInterface&) = delete;
     KillOpListenerInterface& operator=(const KillOpListenerInterface&) = delete;
@@ -375,7 +350,7 @@ public:
      * Observer interface implemented to hook client and operation context creation and
      * destruction.
      */
-    class MONGO_MOD_OPEN ClientObserver {
+    class [[MONGO_MOD_OPEN]] ClientObserver {
     public:
         virtual ~ClientObserver() = default;
 
@@ -597,7 +572,8 @@ public:
      * Signal all OperationContext(s) that they have been killed except the ones belonging to the
      * excluded clients.
      */
-    void setKillAllOperations(std::function<bool(const StringData)> excludedClientPredicate = {});
+    void setKillAllOperations(
+        std::function<bool(const std::string_view)> excludedClientPredicate = {});
 
     /**
      * Reset the operation kill state after a killAllOperations.
@@ -622,25 +598,16 @@ public:
                        ErrorCodes::Error killCode = ErrorCodes::Interrupted);
 
     /**
-     * Delists the operation by removing it from its client. Both
-     * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
-     * ServiceContext. Also, "opCtx" should never be deleted before this method returns. Finally,
+     * As a performance optimization, we defer actually destroying operation contexts until after
+     * sending a response to the client. In between the operation completing and the operation
+     * context being destroyed, the operation context is "pending destruction" and is not considered
+     * an active operation for things like CurOp.
+     *
+     * Both "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
+     * ServiceContext. Also, "opCtx" should never be deleted before this method returns.  Finally,
      * the thread invoking this method must not hold the client and the service context locks.
      */
-    void delistOperation(OperationContext* opCtx);
-
-    /**
-     * Kills the operation "opCtx" with the code "killCode", if opCtx has not already been killed,
-     * and delists the operation by removing it from its client. Both
-     * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
-     * service context. Also, "opCtx" should never be deleted before this method returns. Finally,
-     * the thread invoking this method must not hold (own) the client and the service context locks.
-     * It is highly recommended to use "ErrorCodes::OperationIsKilledAndDelisted" as the error code
-     * to facilitate debugging.
-     */
-    void killAndDelistOperation(
-        OperationContext* opCtx,
-        ErrorCodes::Error killError = ErrorCodes::OperationIsKilledAndDelisted);
+    void markOperationAsPendingDestruction(OperationContext* opCtx);
 
     /**
      * Registers a listener to be notified each time an op is killed.
@@ -811,14 +778,6 @@ private:
 
     struct ServiceSet;
 
-    /**
-     * Removes the operation from its client. It will acquire both client and service context locks,
-     * and should only be used internally by other ServiceContext methods. To ensure delisted
-     * operations are shortly deleted, this method should only be called after killing an operation
-     * or in its destructor.
-     */
-    void _delistOperation(OperationContext* opCtx);
-
     ObservableMutex<std::mutex> _mutex;
 
     /**
@@ -868,13 +827,13 @@ private:
     SyncUnique<ClockSource> _preciseClockSource;
 
     // Flag set to indicate that all operations are to be interrupted ASAP.
-    AtomicWord<bool> _globalKill{false};
+    Atomic<bool> _globalKill{false};
 
     // protected by _mutex
     std::vector<KillOpListenerInterface*> _killOpListeners;
 
     // Server-wide flag indicating whether users' writes are allowed.
-    AtomicWord<bool> _userWritesAllowed{true};
+    Atomic<bool> _userWritesAllowed{true};
 
     bool _startupComplete = false;
     stdx::condition_variable _startupCompleteCondVar;

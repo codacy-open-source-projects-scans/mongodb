@@ -1,39 +1,11 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
 #include "mongo/db/s/resharding/resharding_metrics_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/unittest/unittest.h"
@@ -44,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -67,12 +40,12 @@ protected:
             static_cast<ReshardingCumulativeMetrics*>(_cumulativeMetrics.get());
     }
 
-    StringData getRootSectionName() override {
+    std::string_view getRootSectionName() override {
         return kResharding;
     }
 
     template <typename T>
-    StringData fieldNameFor(T state) {
+    std::string_view fieldNameFor(T state) {
         auto maybeFieldName = ReshardingCumulativeMetrics::fieldNameFor(state);
         invariant(maybeFieldName.has_value());
         return *maybeFieldName;
@@ -220,6 +193,27 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {
     latencies = getCumulativeMetricsReportForSection(kLatencies);
     ASSERT_EQ(latencies.getIntField("oplogFetchingTotalLocalInserts"), 1);
     ASSERT_EQ(latencies.getIntField("oplogFetchingTotalLocalInsertTimeMillis"), 17);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsCoordinatorRetriesByLabel) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    BSONObjBuilder bob;
+    _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+    auto report = bob.done();
+    ASSERT_FALSE(report.getObjectField(kResharding).hasField("coordinatorRetries"));
+
+    _reshardingCumulativeMetrics->onCoordinatorRetry("_initializeCoordinator");
+    _reshardingCumulativeMetrics->onCoordinatorRetry("_initializeCoordinator");
+    _reshardingCumulativeMetrics->onCoordinatorRetry("_runUntilReadyToCommit");
+
+    BSONObjBuilder bob2;
+    _reshardingCumulativeMetrics->reportForServerStatus(&bob2);
+    auto retries =
+        bob2.done().getObjectField(kResharding).getObjectField("coordinatorRetries").getOwned();
+    ASSERT_EQ(retries.getIntField("_initializeCoordinator"), 2);
+    ASSERT_EQ(retries.getIntField("_runUntilReadyToCommit"), 1);
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchRetrievedDuringApplying) {
@@ -1044,6 +1038,17 @@ TEST_F(ReshardingCumulativeMetricsTest, OldestActiveContainsDiagnosticMetricDefa
     ASSERT_EQ(section.getField("recipientChangeStreamMonitorTotalTimeElapsedMillis").Long(), -1);
 }
 
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsSearchIndexAbortCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    ASSERT_EQ(getCumulativeMetricsReportForSection(kRoot).getIntField("countSearchIndexAborts"), 0);
+
+    _reshardingCumulativeMetrics->onSearchIndexAbort();
+
+    ASSERT_EQ(getCumulativeMetricsReportForSection(kRoot).getIntField("countSearchIndexAborts"), 1);
+}
+
 TEST_F(ReshardingCumulativeMetricsTest, OldestActiveContainsDiagnosticMetricsNoActiveOps) {
     // When _shouldReportMetrics is true but no observers registered for some roles,
     // those roles get defaults. Register a coordinator to trigger reporting.
@@ -1063,6 +1068,59 @@ TEST_F(ReshardingCumulativeMetricsTest, OldestActiveContainsDiagnosticMetricsNoA
     ASSERT_EQ(section.getField("coordinatorVerificationPreApplyingTimeElapsedMillis").Long(), -1);
     ASSERT_EQ(section.getField("donorChangeStreamMonitorLagMillis").Long(), -1);
     ASSERT_EQ(section.getField("recipientChangeStreamMonitorLagMillis").Long(), -1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsPreApplyVerificationCounts) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    auto before = getCumulativeMetricsReportForSection(kRoot);
+    ASSERT_EQ(before.getIntField("countPreApplyVerificationSucceeded"), 0);
+    ASSERT_EQ(before.getIntField("countPreApplyVerificationFailed"), 0);
+    ASSERT_EQ(before.getIntField("countPreApplyVerificationSkipped"), 0);
+    ASSERT_EQ(before.getIntField("countPreApplyVerificationTimedOut"), 0);
+    ASSERT_EQ(before.getIntField("countPreApplyVerificationRetried"), 0);
+
+    _reshardingCumulativeMetrics->onPreApplyVerificationSuccess();
+    _reshardingCumulativeMetrics->onPreApplyVerificationFailure();
+    _reshardingCumulativeMetrics->onPreApplyVerificationSkipped();
+    _reshardingCumulativeMetrics->onPreApplyVerificationTimedOut();
+    _reshardingCumulativeMetrics->onPreApplyVerificationRetry();
+
+    auto after = getCumulativeMetricsReportForSection(kRoot);
+    ASSERT_EQ(after.getIntField("countPreApplyVerificationSucceeded"), 1);
+    ASSERT_EQ(after.getIntField("countPreApplyVerificationFailed"), 1);
+    ASSERT_EQ(after.getIntField("countPreApplyVerificationSkipped"), 1);
+    ASSERT_EQ(after.getIntField("countPreApplyVerificationTimedOut"), 1);
+    ASSERT_EQ(after.getIntField("countPreApplyVerificationRetried"), 1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsPreCommitVerificationCounts) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    auto before = getCumulativeMetricsReportForSection(kRoot);
+    ASSERT_EQ(before.getIntField("countPreCommitVerificationSucceeded"), 0);
+    ASSERT_EQ(before.getIntField("countPreCommitVerificationFailed"), 0);
+    ASSERT_EQ(before.getIntField("countPreCommitVerificationSkipped"), 0);
+    ASSERT_EQ(before.getIntField("countPreCommitVerificationTimedOut"), 0);
+    ASSERT_EQ(before.getIntField("countPreCommitDonorVerificationRetried"), 0);
+    ASSERT_EQ(before.getIntField("countPreCommitRecipientVerificationRetried"), 0);
+
+    _reshardingCumulativeMetrics->onPreCommitVerificationSuccess();
+    _reshardingCumulativeMetrics->onPreCommitVerificationFailure();
+    _reshardingCumulativeMetrics->onPreCommitVerificationSkipped();
+    _reshardingCumulativeMetrics->onPreCommitVerificationTimedOut();
+    _reshardingCumulativeMetrics->onPreCommitDonorVerificationRetry();
+    _reshardingCumulativeMetrics->onPreCommitRecipientVerificationRetry();
+
+    auto after = getCumulativeMetricsReportForSection(kRoot);
+    ASSERT_EQ(after.getIntField("countPreCommitVerificationSucceeded"), 1);
+    ASSERT_EQ(after.getIntField("countPreCommitVerificationFailed"), 1);
+    ASSERT_EQ(after.getIntField("countPreCommitVerificationSkipped"), 1);
+    ASSERT_EQ(after.getIntField("countPreCommitVerificationTimedOut"), 1);
+    ASSERT_EQ(after.getIntField("countPreCommitDonorVerificationRetried"), 1);
+    ASSERT_EQ(after.getIntField("countPreCommitRecipientVerificationRetried"), 1);
 }
 
 }  // namespace

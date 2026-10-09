@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -109,8 +83,9 @@ template <typename CommandType>
 std::vector<AsyncRequestsSender::Response> sendCommandToShards(
     OperationContext* opCtx,
     std::shared_ptr<async_rpc::AsyncRPCOptions<CommandType>> opts,
-    const std::vector<ShardId>& shardIds) {
-    return sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
+    const std::vector<ShardId>& shardIds,
+    bool throwOnError = true) {
+    return sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds, throwOnError);
 }
 
 template <typename CommandType>
@@ -118,9 +93,10 @@ std::vector<AsyncRequestsSender::Response> sendCommandToShards(
     OperationContext* opCtx,
     std::shared_ptr<async_rpc::AsyncRPCOptions<CommandType>> opts,
     const std::map<ShardId, ShardVersion>& shardVersions,
-    const ReadPreferenceSetting& readPref) {
+    const ReadPreferenceSetting& readPref,
+    bool throwOnError = true) {
     return sharding_ddl_util::sendAuthenticatedCommandToShards(
-        opCtx, opts, shardVersions, readPref, true /* throwOnError */);
+        opCtx, opts, shardVersions, readPref, throwOnError);
 }
 
 void sendFlushReshardingStateChangeToShards(OperationContext* opCtx,
@@ -158,22 +134,85 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
                                         boost::optional<bool> isUnsplittable,
                                         TxnNumber txnNumber);
 
-BatchedCommandRequest generateBatchedCommandRequestForConfigCollectionsForTempNss(
+/**
+ * Builds the structurally-required lifecycle write to config.collections for the temporary
+ * resharding namespace: an insert at kPreparingToDonate (which materializes the temp entry)
+ * and a delete at kCommitting (which removes it).
+ *
+ * Returns boost::none for any other state.
+ */
+boost::optional<BatchedCommandRequest> createTempCollectionLifecycleRequest(
     OperationContext* opCtx,
     const ReshardingCoordinatorDocument& coordinatorDoc,
     boost::optional<ChunkVersion> chunkVersion,
     boost::optional<const BSONObj&> collation,
     boost::optional<bool> isUnsplittable);
 
-BSONObj createReshardingFieldsUpdateForOriginalNss(
-    OperationContext* opCtx,
-    const ReshardingCoordinatorDocument& coordinatorDoc,
-    boost::optional<OID> newCollectionEpoch,
-    boost::optional<Timestamp> newCollectionTimestamp);
+/**
+ * Builds the legacy 'reshardingFields' partial-update write to the temp-nss config.collections
+ * entry for transient states (kCloning and the catch-all default branch covering kApplying,
+ * kBlockingWrites, kAborting, kQuiesced, and kDone). Callers must first consult
+ * 'skipReshardingFieldsWritesForCoordinator' to decide whether the legacy path applies.
+ *
+ * Returns boost::none for kPreparingToDonate and kCommitting, which are handled by
+ * 'createTempCollectionLifecycleRequest'.
+ */
+boost::optional<BatchedCommandRequest> createLegacyTempCollectionReshardingFieldsRequest(
+    OperationContext* opCtx, const ReshardingCoordinatorDocument& coordinatorDoc);
+
+/**
+ * Returns true when the coordinator should skip writing the 'reshardingFields' subtree to
+ * config.collections. Under 'featureFlagReshardingInitNoRefresh' participants are initialized
+ * via explicit shardsvr commands instead of the refresh-driven path, so the subtree is unused;
+ * writing it via partial $set would produce a parent missing IDL-required fields.
+ *
+ * Uses the VersionContext pinned on the coordinator doc so the decision is stable across FCV
+ * transitions for the operation's lifetime. Callers should consult this predicate before
+ * invoking 'createLegacyReshardingFieldsUpdate' for the original nss, or before populating
+ * 'reshardingFields' on a temp-nss CollectionType via 'createTempReshardingCollectionType'.
+ */
+bool skipReshardingFieldsWritesForCoordinator(const ReshardingCoordinatorDocument& coordinatorDoc);
+
+/**
+ * Builds the legacy 'reshardingFields' update for the original-nss config.collections entry,
+ * shaped per the coordinator's current state. The function does not gate itself; callers are
+ * expected to first check 'skipReshardingFieldsWritesForCoordinator' to decide whether the
+ * legacy path applies.
+ */
+BSONObj createLegacyReshardingFieldsUpdate(OperationContext* opCtx,
+                                           const ReshardingCoordinatorDocument& coordinatorDoc);
+
+/**
+ * Builds the collection-identity swap for the original-nss config.collections entry during
+ * kCommitting: sets 'uuid', 'key', 'lastmodEpoch', 'lastmod', and (when provided) 'timestamp', plus
+ * 'unsplittable: true' for unshardCollection provenance. This runs unconditionally at commit and
+ * is what flips config.collections.<sourceNss> from the pre-resharding identity to the resharded
+ * one.
+ */
+BSONObj createReshardedCollectionEntryUpdate(OperationContext* opCtx,
+                                             const ReshardingCoordinatorDocument& coordinatorDoc,
+                                             OID newCollectionEpoch,
+                                             boost::optional<Timestamp> newCollectionTimestamp);
 
 boost::optional<UUID> tryRetrieveReshardingUUID(OperationContext* opCtx, const NamespaceString& ns);
 
 UUID retrieveReshardingUUID(OperationContext* opCtx, const NamespaceString& ns);
+
+/**
+ * Translates a user-facing timeseries namespace to its bucket namespace, since resharding metadata
+ * is keyed by the bucket namespace. Returns the namespace unchanged if it is not a tracked
+ * timeseries collection.
+ */
+NamespaceString resolveReshardingSourceNss(OperationContext* opCtx, const NamespaceString& ns);
+
+/**
+ * Returns the deadline the coordinator uses to bound how long it waits for the donor and recipient
+ * deltas during pre-commit verification before giving up and proceeding to commit.
+ * 'reachedStrictConsistencyTime' is the time all recipients reached strict consistency; the
+ * deadline is a configured share of the critical-section time still remaining at that point.
+ */
+Date_t computeVerificationDeadline(const ReshardingCoordinatorDocument& coordinatorDoc,
+                                   Date_t reachedStrictConsistencyTime);
 }  // namespace resharding
 
 }  // namespace mongo

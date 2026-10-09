@@ -12,16 +12,6 @@
 const mongos = db.getMongo();
 
 function handlePossibleInconsistencies(inconsistencies) {
-    // TODO SERVER-107821: do not ignore CorruptedChunkHistory in multiversion suites
-    const isMultiVersion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
-    if (isMultiVersion) {
-        for (let i = inconsistencies.length - 1; i >= 0; i--) {
-            if (inconsistencies[i].type == "CorruptedChunkHistory") {
-                inconsistencies.splice(i, 1); // Remove inconsistency
-            }
-        }
-    }
-
     // Since bucket collections are not created atomically with their view, it may happen that checkMetadataConsistency interleaves with the creation steps in case of stepdown
     const isStepdownSuite = Boolean(jsTest.options().runningWithShardStepdowns);
     if (isStepdownSuite) {
@@ -54,13 +44,21 @@ function assertNoInconsistencies() {
         let db = mongos.getDB(dbName);
         let res = db.checkMetadataConsistency(checkOptions).toArray();
         res = handlePossibleInconsistencies(res);
-        assert.eq(0, res.length, "Found unexpected metadata inconsistencies at database level: " + tojson(res));
+        assert.eq(
+            0,
+            res.length,
+            "Found unexpected metadata inconsistencies at database level: " + tojson(res),
+        );
 
         db.getCollectionNames().forEach((collName) => {
             let coll = db.getCollection(collName);
             res = coll.checkMetadataConsistency(checkOptions).toArray();
             res = handlePossibleInconsistencies(res);
-            assert.eq(0, res.length, "Found unexpected metadata inconsistencies at collection level: " + tojson(res));
+            assert.eq(
+                0,
+                res.length,
+                "Found unexpected metadata inconsistencies at collection level: " + tojson(res),
+            );
         });
     });
 }
@@ -70,10 +68,8 @@ function assertNoInconsistencies() {
     // Check on a clean cluster.
     assertNoInconsistencies();
 
-    const kCollectionName = "coll";
-    const kCollectionName2 = "coll2";
+    const kCollectionName = jsTestName() + "_sharded";
     const kNss = db.getName() + "." + kCollectionName;
-    const kNss2 = db.getName() + "." + kCollectionName2;
     let kDDLCommands = [{enableSharding: db.getName()}, {shardCollection: kNss, key: {_id: 1}}];
 
     for (let cmd of kDDLCommands) {

@@ -14,6 +14,7 @@ import {
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {TTLUtil} from "jstests/libs/ttl/ttl_util.js";
 import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
 
@@ -26,7 +27,7 @@ const recipientShardNames = reshardingTest.recipientShardNames;
 
 const timeseriesInfo = {
     timeField: "ts",
-    metaField: "meta",
+    metaField: "metaTest",
 };
 const expireAfterSeconds = 5;
 // Default maximum range of time for a bucket.
@@ -41,7 +42,8 @@ reshardingTest.createUnshardedCollection({
 });
 const coll = reshardingTest.createShardedCollection({
     ns: ns,
-    shardKeyPattern: {"meta.x": 1},
+    // "metaTest.x" is the user-facing field; it will be translated internally to {"meta.x": 1}.
+    shardKeyPattern: {"metaTest.x": 1},
     chunks: [
         {min: {"meta.x": MinKey}, max: {"meta.x": 0}, shard: donorShardNames[0]},
         {min: {"meta.x": 0}, max: {"meta.x": MaxKey}, shard: donorShardNames[1]},
@@ -55,7 +57,10 @@ function assertNumOfDocs(expected) {
         () => {
             const docs = st.s0.getCollection(ns).find({}).toArray();
             if (expected !== docs.length) {
-                jsTestLog("Didn't find expected number of documents, trying again. Found: " + tojson(docs));
+                jsTestLog(
+                    "Didn't find expected number of documents, trying again. Found: " +
+                        tojson(docs),
+                );
             }
             return expected === docs.length;
         },
@@ -70,8 +75,8 @@ function insertDocsToBeDeleted() {
     const minTime = new Date(maxTime.getTime() - 1000 * 5 * 60);
     assert.commandWorked(
         coll.insert([
-            {data: 3, ts: minTime, meta: {x: -2, y: -2}},
-            {data: 4, ts: maxTime, meta: {x: -2, y: -2}},
+            {data: 3, ts: minTime, metaTest: {x: -2, y: -2}},
+            {data: 4, ts: maxTime, metaTest: {x: -2, y: -2}},
         ]),
     );
 }
@@ -79,8 +84,8 @@ function insertDocsToBeDeleted() {
 // Insert initial documents.
 assert.commandWorked(
     coll.insert([
-        {data: 1, ts: new Date(), meta: {x: -1, y: 1}},
-        {data: 2, ts: new Date(), meta: {x: 1, y: -1}},
+        {data: 1, ts: new Date(), metaTest: {x: -1, y: 1}},
+        {data: 2, ts: new Date(), metaTest: {x: 1, y: -1}},
     ]),
 );
 assertNumOfDocs(2);
@@ -98,7 +103,8 @@ assertNumOfDocs(4);
 
 reshardingTest.withReshardingInBackground(
     {
-        newShardKeyPattern: {"meta.y": 1},
+        // "metaTest.y" is the user-facing field; it will be translated internally to {"meta.y": 1}.
+        newShardKeyPattern: {"metaTest.y": 1},
         newChunks: [
             {min: {"meta.y": MinKey}, max: {"meta.y": 0}, shard: recipientShardNames[0]},
             {min: {"meta.y": 0}, max: {"meta.y": MaxKey}, shard: recipientShardNames[1]},
@@ -109,8 +115,10 @@ reshardingTest.withReshardingInBackground(
         hangTTLMonitorFP.off();
 
         // Refresh donor shards to avoid staleConfig errors.
-        assert.commandWorked(donor0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-        assert.commandWorked(donor1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+        if (!FeatureFlagUtil.isPresentAndEnabled(donor0, "AuthoritativeShardsCRUD")) {
+            assert.commandWorked(donor0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+            assert.commandWorked(donor1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+        }
 
         // Wait for TTL to delete the docs on the source
         // collection.
@@ -134,10 +142,19 @@ assert.eq(1, ttlDeleteEntryRecipient.length, ttlDeleteEntryRecipient);
 if (areViewlessTimeseriesEnabled(db)) {
     assert(ttlDeleteEntryRecipient[0].ns.includes(`${db.getName()}.system.resharding`));
 } else {
-    assert(ttlDeleteEntryRecipient[0].ns.includes(`${db.getName()}.${getTimeseriesBucketsColl("resharding")}`));
+    assert(
+        ttlDeleteEntryRecipient[0].ns.includes(
+            `${db.getName()}.${getTimeseriesBucketsColl("resharding")}`,
+        ),
+    );
 }
 // Ensure TTL deletes works on the resharded collection.
-const pauseTTLMonitor = configureFailPoint(recipient0, "hangTTLMonitorBetweenPasses", {}, "alwaysOn");
+const pauseTTLMonitor = configureFailPoint(
+    recipient0,
+    "hangTTLMonitorBetweenPasses",
+    {},
+    "alwaysOn",
+);
 pauseTTLMonitor.wait();
 insertDocsToBeDeleted();
 assertNumOfDocs(4);

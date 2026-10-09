@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/metrics_scalar_metric.h"
 
@@ -38,10 +12,12 @@
 
 #include <algorithm>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 namespace mongo::otel::metrics {
 namespace {
+using namespace std::literals::string_view_literals;
 using testing::_;
 using testing::DoubleEq;
 using testing::ElementsAre;
@@ -137,6 +113,13 @@ TYPED_TEST(ScalarMetricImplTest, ThrowsIfAttributeNamesDuplicated) {
                        ErrorCodes::BadValue);
 }
 
+TYPED_TEST(ScalarMetricImplTest, ThrowsOnEmptyAttributeValues) {
+    ASSERT_THROWS_CODE(
+        (ScalarMetricImpl<TypeParam, std::string_view>({.name = "type", .values = {}})),
+        DBException,
+        ErrorCodes::BadValue);
+}
+
 TYPED_TEST(ScalarMetricImplTest, ThrowsOnInvalidAttributes) {
     ASSERT_THROWS_CODE(
         (ScalarMetricImpl<TypeParam, bool>({.name = "is_cool", .values = {true, true}})),
@@ -202,12 +185,12 @@ TYPED_TEST(ScalarMetricImplTest, ValuesSkipsZeroAttributes) {
 TYPED_TEST(ScalarMetricImplTest, StringDataAttributeValueIsCopied) {
     auto sourceValues = std::make_unique<std::vector<std::string>>(
         std::initializer_list<std::string>{"foo", "bar"});
-    ScalarMetricImpl<TypeParam, StringData> impl(
+    ScalarMetricImpl<TypeParam, std::string_view> impl(
         {.name = "temperature", .values = {(*sourceValues)[0], (*sourceValues)[1]}});
-    Counter<TypeParam, StringData>& counter = impl;
+    Counter<TypeParam, std::string_view>& counter = impl;
     sourceValues = nullptr;
 
-    counter.add(5, {"foo"_sd});
+    counter.add(5, {"foo"sv});
     EXPECT_THAT(impl.values(), ElementsAre(IsAttributesAndValue(_, 5)));
 }
 
@@ -216,24 +199,24 @@ TYPED_TEST(ScalarMetricImplTest, SpanAttributeValueIsCopied) {
         std::vector<std::vector<int32_t>>{{1, 2}, {3, 4}});
     auto string1 = std::make_unique<std::string>("a");
     auto string2 = std::make_unique<std::string>("b");
-    auto sourceStringData = std::make_unique<std::vector<std::vector<StringData>>>(
-        std::vector<std::vector<StringData>>{{*string1}, {*string1, *string2}});
-    ScalarMetricImpl<TypeParam, std::span<int32_t>, std::span<StringData>> impl(
+    auto sourceStringData = std::make_unique<std::vector<std::vector<std::string_view>>>(
+        std::vector<std::vector<std::string_view>>{{*string1}, {*string1, *string2}});
+    ScalarMetricImpl<TypeParam, std::span<int32_t>, std::span<std::string_view>> impl(
         {.name = "intData",
          .values = {std::span<int32_t>((*sourceIntData)[0]),
                     std::span<int32_t>((*sourceIntData)[1])}},
         {.name = "stringData",
-         .values = {std::span<StringData>((*sourceStringData)[0]),
-                    std::span<StringData>((*sourceStringData)[1])}});
-    Counter<TypeParam, std::span<int32_t>, std::span<StringData>>& counter = impl;
+         .values = {std::span<std::string_view>((*sourceStringData)[0]),
+                    std::span<std::string_view>((*sourceStringData)[1])}});
+    Counter<TypeParam, std::span<int32_t>, std::span<std::string_view>>& counter = impl;
     sourceIntData = nullptr;
     string1 = nullptr;
     string2 = nullptr;
     sourceStringData = nullptr;
 
     std::vector<int32_t> intInput{1, 2};
-    std::vector<StringData> stringInput{"a"_sd, "b"_sd};
-    counter.add(5, {std::span<int32_t>(intInput), std::span<StringData>(stringInput)});
+    std::vector<std::string_view> stringInput{"a"sv, "b"sv};
+    counter.add(5, {std::span<int32_t>(intInput), std::span<std::string_view>(stringInput)});
     EXPECT_THAT(impl.values(), ElementsAre(IsAttributesAndValue(_, 5)));
 }
 
@@ -253,6 +236,18 @@ TEST(DoubleScalarMetricImplTest, AddsFractionalValues) {
                                                               .name = "is_cool", .value = false}),
                                                           DoubleEq(10.5))));
 }
+
+TYPED_TEST(ScalarMetricImplTest, ValueViaBasePointer) {
+    auto counter = std::make_unique<ScalarMetricImpl<TypeParam>>();
+    Counter<TypeParam>* base = counter.get();
+    EXPECT_EQ(base->valueForLegacyUse(), 0);
+    base->add(7);
+    EXPECT_EQ(base->valueForLegacyUse(), 7);
+    base->add(5);
+    EXPECT_EQ(base->valueForLegacyUse(), 12);
+    EXPECT_EQ(base->valueForLegacyUse(), 12);
+}
+
 
 ///////////////////////////////////////////////////////////////////////////////
 // Gauge tests
@@ -328,56 +323,46 @@ TEST(DoubleGaugeTest, SetsFractionalValues) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// GaugeImpl tests
+// NoopCounter tests
 ///////////////////////////////////////////////////////////////////////////////
 
 template <typename T>
-class GaugeImplTest : public testing::Test {};
+class NoopCounterTest : public testing::Test {};
 
-TYPED_TEST_SUITE(GaugeImplTest, GaugeTypes);
+TYPED_TEST_SUITE(NoopCounterTest, ScalarMetricTypes);
 
-TYPED_TEST(GaugeImplTest, SetIfLess) {
-    GaugeImpl<TypeParam> gauge{std::numeric_limits<TypeParam>::max()};
-    gauge.setIfLess(10);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
-    gauge.setIfLess(5);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
-    gauge.setIfLess(10);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
-    gauge.setIfLess(5);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
+TYPED_TEST(NoopCounterTest, AddIsDiscardedAndReadsBackZero) {
+    Counter<TypeParam>& counter = *NoopCounter<TypeParam>::instance();
+    EXPECT_EQ(counter.valueForLegacyUse(), 0);
+    counter.add(5);
+    counter.add(7);
+    EXPECT_EQ(counter.valueForLegacyUse(), 0);
 }
 
-TYPED_TEST(GaugeImplTest, SetIfGreater) {
-    GaugeImpl<TypeParam> gauge{std::numeric_limits<TypeParam>::lowest()};
-    gauge.setIfGreater(5);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
-    gauge.setIfGreater(10);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
-    gauge.setIfGreater(5);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
-    gauge.setIfGreater(10);
-    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
+TYPED_TEST(NoopCounterTest, InstanceIsShared) {
+    EXPECT_EQ(NoopCounter<TypeParam>::instance(), NoopCounter<TypeParam>::instance());
 }
 
-#ifdef MONGO_CONFIG_OTEL
-TYPED_TEST(GaugeImplTest, ResetRestoresInitialValue) {
-    GaugeImpl<TypeParam> minGauge{std::numeric_limits<TypeParam>::max()};
-    minGauge.setIfLess(5);
-    minGauge.reset(nullptr);
-    EXPECT_THAT(
-        minGauge.values(),
-        ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::max())));
+///////////////////////////////////////////////////////////////////////////////
+// NoopGauge tests
+///////////////////////////////////////////////////////////////////////////////
 
-    GaugeImpl<TypeParam> maxGauge{std::numeric_limits<TypeParam>::lowest()};
-    maxGauge.setIfGreater(5);
-    maxGauge.reset(nullptr);
-    EXPECT_THAT(
-        maxGauge.values(),
-        ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::lowest())));
+template <typename T>
+class NoopGaugeTest : public testing::Test {};
+
+TYPED_TEST_SUITE(NoopGaugeTest, ScalarMetricTypes);
+
+TYPED_TEST(NoopGaugeTest, SetDoesNotThrow) {
+    Gauge<TypeParam>& gauge = *NoopGauge<TypeParam>::instance();
+    // The Gauge interface exposes no read-back, so there is nothing on the NoopGauge itself to
+    // observe; this only confirms set() is callable and does not throw.
+    gauge.set(5);
+    gauge.set(0);
 }
-#endif  // MONGO_CONFIG_OTEL
 
+TYPED_TEST(NoopGaugeTest, InstanceIsShared) {
+    EXPECT_EQ(NoopGauge<TypeParam>::instance(), NoopGauge<TypeParam>::instance());
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 // MinGauge tests
@@ -389,15 +374,17 @@ class MinGaugeTest : public testing::Test {};
 TYPED_TEST_SUITE(MinGaugeTest, GaugeTypes);
 
 TYPED_TEST(MinGaugeTest, InitialValueIsSentinel) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::max()};
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::max(),
+                                     ReportingPolicy::kUnconditionally);
     MinGauge<TypeParam>& gauge = impl;
     EXPECT_THAT(
         gauge.values(),
         ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::max())));
 }
 
-TYPED_TEST(MinGaugeTest, SetIfLessThroughInterface) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::max()};
+TYPED_TEST(MinGaugeTest, SetIfLess) {
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::max(),
+                                     ReportingPolicy::kUnconditionally);
     MinGauge<TypeParam>& gauge = impl;
     gauge.setIfLess(10);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
@@ -405,15 +392,119 @@ TYPED_TEST(MinGaugeTest, SetIfLessThroughInterface) {
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
     gauge.setIfLess(20);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
+    gauge.setIfLess(5);
+    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
 }
 
 TYPED_TEST(MinGaugeTest, SetOverwritesUnconditionally) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::max()};
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::max(),
+                                     ReportingPolicy::kUnconditionally);
     MinGauge<TypeParam>& gauge = impl;
     gauge.setIfLess(5);
     gauge.set(100);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 100)));
 }
+
+#ifdef MONGO_CONFIG_OTEL
+TYPED_TEST(MinGaugeTest, ResetRestoresSentinelValue) {
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::max(),
+                                     ReportingPolicy::kUnconditionally);
+    MinGauge<TypeParam>& gauge = impl;
+    gauge.setIfLess(5);
+    impl.reset(nullptr);
+    EXPECT_THAT(
+        gauge.values(),
+        ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::max())));
+}
+#endif  // MONGO_CONFIG_OTEL
+
+
+template <typename T>
+class MinGaugeWithAttributesTest : public testing::Test {};
+
+TYPED_TEST_SUITE(MinGaugeWithAttributesTest, GaugeTypes);
+
+TYPED_TEST(MinGaugeWithAttributesTest, InitialValueIsMaxForAllCombinations) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::max(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MinGauge<TypeParam, bool>& gauge = impl;
+    EXPECT_THAT(gauge.values(),
+                UnorderedElementsAre(
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}),
+                        std::numeric_limits<TypeParam>::max()),
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                        std::numeric_limits<TypeParam>::max())));
+}
+
+TYPED_TEST(MinGaugeWithAttributesTest, TracksMinimumPerAttributeCombination) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::max(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MinGauge<TypeParam, bool>& gauge = impl;
+
+    gauge.setIfLess(10, {true});
+    gauge.setIfLess(5, {true});
+    gauge.setIfLess(20, {true});
+
+    gauge.setIfLess(100, {false});
+    gauge.setIfLess(50, {false});
+
+    EXPECT_THAT(
+        gauge.values(),
+        UnorderedElementsAre(
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 5),
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}), 50)));
+}
+
+TYPED_TEST(MinGaugeWithAttributesTest, CombinationsAreIndependent) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::max(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MinGauge<TypeParam, bool>& gauge = impl;
+
+    gauge.setIfLess(5, {true});
+    // {false} was never written — should still be max().
+    EXPECT_THAT(gauge.values(),
+                UnorderedElementsAre(
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 5),
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                        std::numeric_limits<TypeParam>::max())));
+}
+
+TYPED_TEST(MinGaugeWithAttributesTest, ExceptionOnUndeclaredAttributes) {
+    ScalarMetricImpl<TypeParam, int64_t> impl(std::numeric_limits<TypeParam>::max(),
+                                              ReportingPolicy::kUnconditionally,
+                                              {.name = "size", .values = {1, 2}});
+    MinGauge<TypeParam, int64_t>& gauge = impl;
+    ASSERT_THROWS_CODE(gauge.setIfLess(1, {3}), DBException, ErrorCodes::BadValue);
+}
+
+#ifdef MONGO_CONFIG_OTEL
+TYPED_TEST(MinGaugeWithAttributesTest, ResetRestoresMaxPerCombination) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::max(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MinGauge<TypeParam, bool>& gauge = impl;
+    gauge.setIfLess(5, {true});
+    gauge.setIfLess(3, {false});
+    impl.reset(nullptr);
+    EXPECT_THAT(gauge.values(),
+                UnorderedElementsAre(
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}),
+                        std::numeric_limits<TypeParam>::max()),
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                        std::numeric_limits<TypeParam>::max())));
+}
+#endif  // MONGO_CONFIG_OTEL
 
 ///////////////////////////////////////////////////////////////////////////////
 // MaxGauge tests
@@ -425,15 +516,17 @@ class MaxGaugeTest : public testing::Test {};
 TYPED_TEST_SUITE(MaxGaugeTest, GaugeTypes);
 
 TYPED_TEST(MaxGaugeTest, InitialValueIsSentinel) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::lowest()};
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::lowest(),
+                                     ReportingPolicy::kUnconditionally);
     MaxGauge<TypeParam>& gauge = impl;
     EXPECT_THAT(
         gauge.values(),
         ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::lowest())));
 }
 
-TYPED_TEST(MaxGaugeTest, SetIfGreaterThroughInterface) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::lowest()};
+TYPED_TEST(MaxGaugeTest, SetIfGreater) {
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::lowest(),
+                                     ReportingPolicy::kUnconditionally);
     MaxGauge<TypeParam>& gauge = impl;
     gauge.setIfGreater(5);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 5)));
@@ -441,15 +534,119 @@ TYPED_TEST(MaxGaugeTest, SetIfGreaterThroughInterface) {
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
     gauge.setIfGreater(3);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
+    gauge.setIfGreater(10);
+    EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 10)));
 }
 
 TYPED_TEST(MaxGaugeTest, SetOverwritesUnconditionally) {
-    GaugeImpl<TypeParam> impl{std::numeric_limits<TypeParam>::lowest()};
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::lowest(),
+                                     ReportingPolicy::kUnconditionally);
     MaxGauge<TypeParam>& gauge = impl;
     gauge.setIfGreater(100);
     gauge.set(1);
     EXPECT_THAT(gauge.values(), ElementsAre(IsAttributesAndValue(IsEmpty(), 1)));
 }
+
+#ifdef MONGO_CONFIG_OTEL
+TYPED_TEST(MaxGaugeTest, ResetRestoresSentinelValue) {
+    ScalarMetricImpl<TypeParam> impl(std::numeric_limits<TypeParam>::lowest(),
+                                     ReportingPolicy::kUnconditionally);
+    MaxGauge<TypeParam>& gauge = impl;
+    gauge.setIfGreater(100);
+    impl.reset(nullptr);
+    EXPECT_THAT(
+        gauge.values(),
+        ElementsAre(IsAttributesAndValue(IsEmpty(), std::numeric_limits<TypeParam>::lowest())));
+}
+#endif  // MONGO_CONFIG_OTEL
+
+template <typename T>
+class MaxGaugeWithAttributesTest : public testing::Test {};
+
+TYPED_TEST_SUITE(MaxGaugeWithAttributesTest, GaugeTypes);
+
+TYPED_TEST(MaxGaugeWithAttributesTest, InitialValueIsLowestForAllCombinations) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::lowest(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MaxGauge<TypeParam, bool>& gauge = impl;
+    EXPECT_THAT(gauge.values(),
+                UnorderedElementsAre(
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}),
+                        std::numeric_limits<TypeParam>::lowest()),
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                        std::numeric_limits<TypeParam>::lowest())));
+}
+
+TYPED_TEST(MaxGaugeWithAttributesTest, TracksMaximumPerAttributeCombination) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::lowest(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MaxGauge<TypeParam, bool>& gauge = impl;
+
+    gauge.setIfGreater(5, {true});
+    gauge.setIfGreater(10, {true});
+    gauge.setIfGreater(3, {true});
+
+    gauge.setIfGreater(50, {false});
+    gauge.setIfGreater(100, {false});
+
+    EXPECT_THAT(
+        gauge.values(),
+        UnorderedElementsAre(
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 10),
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}), 100)));
+}
+
+TYPED_TEST(MaxGaugeWithAttributesTest, CombinationsAreIndependent) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::lowest(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MaxGauge<TypeParam, bool>& gauge = impl;
+
+    gauge.setIfGreater(100, {true});
+    // {false} was never written — should still be lowest().
+    EXPECT_THAT(
+        gauge.values(),
+        UnorderedElementsAre(
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 100),
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                std::numeric_limits<TypeParam>::lowest())));
+}
+
+TYPED_TEST(MaxGaugeWithAttributesTest, ExceptionOnUndeclaredAttributes) {
+    ScalarMetricImpl<TypeParam, int64_t> impl(std::numeric_limits<TypeParam>::lowest(),
+                                              ReportingPolicy::kUnconditionally,
+                                              {.name = "size", .values = {1, 2}});
+    MaxGauge<TypeParam, int64_t>& gauge = impl;
+    ASSERT_THROWS_CODE(gauge.setIfGreater(1, {3}), DBException, ErrorCodes::BadValue);
+}
+
+#ifdef MONGO_CONFIG_OTEL
+TYPED_TEST(MaxGaugeWithAttributesTest, ResetRestoresLowestPerCombination) {
+    ScalarMetricImpl<TypeParam, bool> impl(std::numeric_limits<TypeParam>::lowest(),
+                                           ReportingPolicy::kUnconditionally,
+                                           {.name = "is_primary", .values = {true, false}});
+    MaxGauge<TypeParam, bool>& gauge = impl;
+    gauge.setIfGreater(100, {true});
+    gauge.setIfGreater(50, {false});
+    impl.reset(nullptr);
+    EXPECT_THAT(gauge.values(),
+                UnorderedElementsAre(
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}),
+                        std::numeric_limits<TypeParam>::lowest()),
+                    IsAttributesAndValue(
+                        ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}),
+                        std::numeric_limits<TypeParam>::lowest())));
+}
+#endif  // MONGO_CONFIG_OTEL
 
 ///////////////////////////////////////////////////////////////////////////////
 // UpDownCounter tests
@@ -619,8 +816,45 @@ TYPED_TEST(ScalarMetricImplReportingPolicyGlobal,
 }
 #endif  // MONGO_CONFIG_OTEL
 
-// TODO SERVER-124075: Add tests for kIfEverNonZero once Gauge and UpDownCounter support
-// attributes.
+// kIfEverNonZero is meaningful for Gauge and UpDownCounter since their values can reach zero
+// without reset().
+
+TYPED_TEST(ScalarMetricImplReportingPolicyGlobal, KIfEverNonZeroIncludesGaugeAfterSetToZero) {
+    ScalarMetricImpl<TypeParam, bool> impl(ReportingPolicy::kIfEverNonZero,
+                                           {.name = "is_primary", .values = {true, false}});
+    Gauge<TypeParam, bool>& gauge = impl;
+    gauge.set(5, {true});
+    gauge.set(0, {true});
+    // {true} was ever non-zero so it is reported; {false} was never written so it is not.
+    EXPECT_THAT(impl.values(),
+                ElementsAre(IsAttributesAndValue(
+                    ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 0)));
+}
+
+TYPED_TEST(ScalarMetricImplReportingPolicyGlobal,
+           KIfEverNonZeroIncludesUpDownCounterAfterReturningToZero) {
+    ScalarMetricImpl<TypeParam, bool> impl(ReportingPolicy::kIfEverNonZero,
+                                           {.name = "is_primary", .values = {true, false}});
+    UpDownCounter<TypeParam, bool>& counter = impl;
+    counter.add(5, {true});
+    counter.add(-5, {true});
+    // {true} was ever non-zero so it is reported; {false} was never written so it is not.
+    EXPECT_THAT(impl.values(),
+                ElementsAre(IsAttributesAndValue(
+                    ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 0)));
+}
+
+#ifdef MONGO_CONFIG_OTEL
+TYPED_TEST(ScalarMetricImplReportingPolicyGlobal, KIfEverNonZeroExcludesAfterReset) {
+    ScalarMetricImpl<TypeParam, bool> impl(ReportingPolicy::kIfEverNonZero,
+                                           {.name = "is_primary", .values = {true, false}});
+    Gauge<TypeParam, bool>& gauge = impl;
+    gauge.set(5, {true});
+    impl.reset(nullptr);
+    // reset() clears everNonZero, so {true} is no longer reported.
+    EXPECT_THAT(impl.values(), IsEmpty());
+}
+#endif  // MONGO_CONFIG_OTEL
 
 TYPED_TEST(ScalarMetricImplReportingPolicyPerCombination,
            KUnconditionallyOverridesGlobalKIfCurrentlyNonZero) {
@@ -633,23 +867,62 @@ TYPED_TEST(ScalarMetricImplReportingPolicyPerCombination,
                     ElementsAre(AttributeNameAndValue{.name = "is_cool", .value = true}), 0)));
 }
 
+TYPED_TEST(ScalarMetricImplReportingPolicyPerCombination,
+           KIfEverNonZeroOverridesGlobalKIfCurrentlyNonZero) {
+    ScalarMetricImpl<TypeParam, bool> impl(ReportingPolicy::kIfCurrentlyNonZero,
+                                           {.name = "is_primary", .values = {true, false}});
+    Gauge<TypeParam, bool>& gauge = impl;
+    gauge.setReportingPolicy({true}, ReportingPolicy::kIfEverNonZero);
+    gauge.set(5, {true});
+    gauge.set(3, {false});
+    gauge.set(0, {true});
+
+    // - {true} uses per-combination kIfEverNonZero and was set to non-zero, so it is reported
+    //   even after going back to zero.
+    // - {false} uses global kIfCurrentlyNonZero and is still 3, so it is reported.
+    EXPECT_THAT(
+        impl.values(),
+        UnorderedElementsAre(
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = true}), 0),
+            IsAttributesAndValue(
+                ElementsAre(AttributeNameAndValue{.name = "is_primary", .value = false}), 3)));
+}
+
 #ifdef MONGO_CONFIG_OTEL
 TYPED_TEST(ScalarMetricImplReportingPolicyPerCombination, MultiplePoliciesAreIndependent) {
+    // 4 combinations: {true,1}, {true,2}, {false,1}, {false,2}
+    // - {true,1} uses per-combination kUnconditionally so it is reported even though never written.
+    // - {true,2} uses per-combination kIfCurrentlyNonZero and is zero after going to zero, so not
+    //   reported.
+    // - {false,1} uses global kIfCurrentlyNonZero (default) and was never written, so not reported.
+    // - {false,2} uses per-combination kIfEverNonZero and was set non-zero, so reported after
+    //   going to zero (via gauge.set(0)).
     ScalarMetricImpl<TypeParam, bool, int64_t> impl({.name = "is_cool", .values = {true, false}},
                                                     {.name = "size", .values = {1, 2}});
-    Counter<TypeParam, bool, int64_t>& counter = impl;
-    counter.setReportingPolicy({true, 1}, ReportingPolicy::kUnconditionally);
-    counter.setReportingPolicy({true, 2}, ReportingPolicy::kIfCurrentlyNonZero);
-    counter.add(5, {true, 2});
-    counter.add(3, {false, 2});
-    impl.reset(nullptr);
+    Gauge<TypeParam, bool, int64_t>& gauge = impl;
+    gauge.setReportingPolicy({true, 1}, ReportingPolicy::kUnconditionally);
+    gauge.setReportingPolicy({true, 2}, ReportingPolicy::kIfCurrentlyNonZero);
+    gauge.setReportingPolicy({false, 2}, ReportingPolicy::kIfEverNonZero);
+    gauge.set(5, {true, 2});
+    gauge.set(3, {false, 2});
+    gauge.set(0, {false, 2});
 
     EXPECT_THAT(
         impl.values(),
-        ElementsAre(IsAttributesAndValue(
-            UnorderedElementsAre(AttributeNameAndValue{.name = "is_cool", .value = true},
-                                 AttributeNameAndValue{.name = "size", .value = int64_t{1}}),
-            0)));
+        UnorderedElementsAre(
+            IsAttributesAndValue(
+                UnorderedElementsAre(AttributeNameAndValue{.name = "is_cool", .value = true},
+                                     AttributeNameAndValue{.name = "size", .value = int64_t{1}}),
+                0),
+            IsAttributesAndValue(
+                UnorderedElementsAre(AttributeNameAndValue{.name = "is_cool", .value = true},
+                                     AttributeNameAndValue{.name = "size", .value = int64_t{2}}),
+                5),
+            IsAttributesAndValue(
+                UnorderedElementsAre(AttributeNameAndValue{.name = "is_cool", .value = false},
+                                     AttributeNameAndValue{.name = "size", .value = int64_t{2}}),
+                0)));
 }
 #endif  // MONGO_CONFIG_OTEL
 
@@ -683,8 +956,12 @@ TYPED_TEST(ConcurrentTest, AllOperationsConcurrent) {
     UpDownCounter<TypeParam, int32_t, bool>& upDownCounter = impl;
     ObservableScalarMetric<TypeParam>& observableScalarMetric = impl;
 
-    GaugeImpl<TypeParam> minGauge{std::numeric_limits<TypeParam>::max()};
-    GaugeImpl<TypeParam> maxGauge{std::numeric_limits<TypeParam>::lowest()};
+    ScalarMetricImpl<TypeParam> minGaugeImpl(std::numeric_limits<TypeParam>::max(),
+                                             ReportingPolicy::kUnconditionally);
+    ScalarMetricImpl<TypeParam> maxGaugeImpl(std::numeric_limits<TypeParam>::lowest(),
+                                             ReportingPolicy::kUnconditionally);
+    MinGauge<TypeParam>& minGauge = minGaugeImpl;
+    MaxGauge<TypeParam>& maxGauge = maxGaugeImpl;
 
     constexpr int kNumThreads = 10;
     constexpr int kIterationsPerThread = 1000;

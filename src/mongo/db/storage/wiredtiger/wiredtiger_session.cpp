@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 
@@ -33,6 +7,10 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_error_util.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options_gen.h"
 #include "mongo/logv2/log.h"
+
+#include <string_view>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -97,12 +75,11 @@ WiredTigerSession::~WiredTigerSession() {
 }
 
 void WiredTigerSession::_openCursor(WT_SESSION* session,
-                                    StringData uri,
+                                    const std::string& uri,
                                     const char* config,
                                     WT_CURSOR** cursorOut) {
-
     // TODO: SERVER-110391 Add an invariant here to catch stale sessions.
-    int ret = session->open_cursor(session, uri.data(), nullptr, config, cursorOut);
+    int ret = session->open_cursor(session, uri.c_str(), nullptr, config, cursorOut);
     if (ret == 0) {
         return;
     }
@@ -118,17 +95,30 @@ void WiredTigerSession::_openCursor(WT_SESSION* session,
         uassertStatusOK(status);
     } else if (ret == ENOENT) {
         uasserted(ErrorCodes::CursorNotFound,
-                  str::stream() << "Failed to open a WiredTiger cursor. Reason: " << status
-                                << ", uri: " << uri
-                                << ", config: " << stringDataDefaultIfNull(config));
+                  fmt::format("Failed to open a WiredTiger cursor. Reason: {}, uri: {}, config: {}",
+                              status.toString(),
+                              uri,
+                              config ? std::string_view{config} : std::string_view{}));
     }
 
     LOGV2_FATAL_NOTRACE(50882,
                         "Failed to open WiredTiger cursor. This may be due to data corruption",
                         "uri"_attr = uri,
-                        "config"_attr = stringDataDefaultIfNull(config),
+                        "config"_attr = config ? std::string_view{config} : std::string_view{},
                         "error"_attr = status,
                         "message"_attr = kWTRepairMsg);
+}
+
+int WiredTigerSession::verify(const char* uri, const char* config) {
+    Timer timer(_tickSource);
+    ON_BLOCK_EXIT([&] { _storageEngineTime += timer.elapsed(); });
+
+    std::string merged{"skip_per_key_hs,"};
+    if (config) {
+        merged += config;
+    }
+
+    return _session->verify(_session, uri, merged.c_str());
 }
 
 WT_CURSOR* WiredTigerSession::getCachedCursor(uint64_t id, const std::string& config) {
@@ -147,7 +137,7 @@ WT_CURSOR* WiredTigerSession::getCachedCursor(uint64_t id, const std::string& co
     return nullptr;
 }
 
-WT_CURSOR* WiredTigerSession::getNewCursor(StringData uri, const char* config) {
+WT_CURSOR* WiredTigerSession::getNewCursor(const std::string& uri, const char* config) {
     WT_CURSOR* cursor = nullptr;
     _openCursor(_session, uri, config, &cursor);
     _cursorsOut++;
@@ -160,8 +150,10 @@ void WiredTigerSession::releaseCursor(uint64_t id, WT_CURSOR* cursor, std::strin
     WiredTigerConnection::BlockShutdown blockShutdown(_connection);
 
     // Avoids the cursor already being destroyed during the shutdown. Also, avoids releasing a
-    // cursor from an earlier epoch.
-    if (_connection->isShuttingDown() || _getEngineEpoch() < _connection->_engineEpoch.load()) {
+    // cursor from an earlier epoch. A rollback to stable leaves the WT_CONNECTION intact, so the
+    // cursor must still be closed below in that case.
+    if (_connection->isCleanShuttingDown() ||
+        _getEngineEpoch() < _connection->_engineEpoch.load()) {
         return;
     }
 
@@ -198,8 +190,10 @@ void WiredTigerSession::closeCursor(WT_CURSOR* cursor) {
     WiredTigerConnection::BlockShutdown blockShutdown(_connection);
 
     // Avoids the cursor already being destroyed during the shutdown. Also, avoids releasing a
-    // cursor from an earlier epoch.
-    if (_connection->isShuttingDown() || _getEngineEpoch() < _connection->_engineEpoch.load()) {
+    // cursor from an earlier epoch. A rollback to stable leaves the WT_CONNECTION intact, so the
+    // cursor must still be closed below in that case.
+    if (_connection->isCleanShuttingDown() ||
+        _getEngineEpoch() < _connection->_engineEpoch.load()) {
         return;
     }
 

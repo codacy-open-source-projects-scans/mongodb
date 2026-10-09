@@ -11,6 +11,7 @@
  *   requires_scripting,
  *   # Time-series collections are views which don't support map-reduce
  *   exclude_from_timeseries_crud_passthrough,
+ *   uses_map_reduce_internal_merge_pipeline
  * ]
  */
 
@@ -33,13 +34,17 @@ assert.commandWorked(
 let mapFunction = "function() {emit(this._id, this.price);}";
 let reduceFunction = "function(keyCustId, valuesPrices) {return Array.sum(valuesPrices);}";
 out.drop();
-assert.commandWorked(col.mapReduce(mapFunction, reduceFunction, {out: {merge: "map_reduce_example"}}));
+assert.commandWorked(
+    col.mapReduce(mapFunction, reduceFunction, {out: {merge: "map_reduce_example"}}),
+);
 
 // Provided strings may end with semicolons and/or whitespace
 mapFunction += " ; ";
 reduceFunction += " ; ";
 out.drop();
-assert.commandWorked(col.mapReduce(mapFunction, reduceFunction, {out: {merge: "map_reduce_example"}}));
+assert.commandWorked(
+    col.mapReduce(mapFunction, reduceFunction, {out: {merge: "map_reduce_example"}}),
+);
 
 // $where exhibits the same behavior
 let whereFunction = "function() {return this.price === 25;}";

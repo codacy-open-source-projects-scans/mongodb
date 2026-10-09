@@ -1,40 +1,19 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/update/update_node_visitor.h"
 #include "mongo/db/update_index_data.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -74,7 +53,7 @@ public:
 
         // If there was a positional ($) element in the update expression, 'matchedField' is the
         // index of the array element that caused the query to match the document.
-        StringData matchedField;
+        std::string_view matchedField;
 
         // True if the update is being applied to a document to be inserted.
         bool insert = false;
@@ -117,7 +96,16 @@ public:
         // The oplog entry to log. This is only populated if the operation is not considered a
         // noop and if the 'logMode' provided in ApplyParams indicates that an oplog entry should
         // be generated.
+        //
+        // When populated, 'oplogEntry' is owned BSON.
         BSONObj oplogEntry;
+
+        // The diff used to produce the oplog entry, if the oplog entry is a $v:2 delta entry.
+        // Populated whenever oplogEntry is a delta entry.
+        //
+        // NOTE: 'diff' may be a view into BSON owned by 'oplogEntry' and should only be treated as
+        // valid so long as 'oplogEntry' is valid.
+        boost::optional<BSONObj> diff;
     };
 
 

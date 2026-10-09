@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/query_analysis_writer.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,7 +20,7 @@
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
@@ -513,17 +486,17 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
             }
         });
 
-    ThreadPool::Options threadPoolOptions;
-    threadPoolOptions.maxThreads = gQueryAnalysisWriterMaxThreadPoolSize;
-    threadPoolOptions.minThreads = gQueryAnalysisWriterMinThreadPoolSize;
-    threadPoolOptions.threadNamePrefix = "QueryAnalysisWriter-";
-    threadPoolOptions.poolName = "QueryAnalysisWriterThreadPool";
-    threadPoolOptions.onCreateThread = [service =
-                                            opCtx->getService()](const std::string& threadName) {
-        Client::initThread(threadName, service);
-    };
     _executor = executor::ThreadPoolTaskExecutor::create(
-        std::make_unique<ThreadPool>(threadPoolOptions),
+        ThreadPool::make({
+            .poolName = "QueryAnalysisWriterThreadPool",
+            .threadNamePrefix = "QueryAnalysisWriter-",
+            .minThreads = static_cast<size_t>(gQueryAnalysisWriterMinThreadPoolSize),
+            .maxThreads = static_cast<size_t>(gQueryAnalysisWriterMaxThreadPoolSize),
+            .onCreateThread =
+                [service = opCtx->getService()](const std::string& threadName) {
+                    Client::initThread(threadName, service);
+                },
+        }),
         executor::makeNetworkInterface("QueryAnalysisWriterNetwork"));
     _executor->startup();
 }
@@ -554,7 +527,7 @@ void QueryAnalysisWriter::onStepUpComplete(OperationContext* opCtx, long long te
 ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opCtx) {
     invariant(_executor);
 
-    static AtomicWord<unsigned int> tryCount{0};
+    static Atomic<unsigned int> tryCount{0};
 
     auto future =
         AsyncTry([this] {

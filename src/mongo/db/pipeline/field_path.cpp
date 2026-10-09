@@ -1,47 +1,23 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/field_path.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
+#include <string_view>
+
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 const StringDataSet kAllowedDollarPrefixedFields = {
     // For DBRef
-    "$id"_sd,
-    "$ref"_sd,
-    "$db"_sd,
+    "$id"sv,
+    "$ref"sv,
+    "$db"sv,
 
     // Metadata fields.
 
@@ -53,14 +29,14 @@ const StringDataSet kAllowedDollarPrefixedFields = {
     "$recordId",
 
     // This is necessary for $search queries with a specified sort.
-    "$searchSortValues"_sd,
-    "$searchScore"_sd,
-    "$searchRootDocumentId"_sd,
+    "$searchSortValues"sv,
+    "$searchScore"sv,
+    "$searchRootDocumentId"sv,
 };
 
 }  // namespace
 
-std::string FieldPath::getFullyQualifiedPath(StringData prefix, StringData suffix) {
+std::string FieldPath::getFullyQualifiedPath(std::string_view prefix, std::string_view suffix) {
     if (prefix.empty()) {
         return std::string{suffix};
     }
@@ -130,7 +106,7 @@ StatusWith<FieldPath> fieldPathWithValidationStatus(std::string inputPath,
     return {FieldPath(std::move(inputPath), std::move(dotPositions), std::move(fieldHash))};
 }
 
-Status FieldPath::validateFieldName(StringData fieldName) {
+Status FieldPath::validateFieldName(std::string_view fieldName) {
     if (fieldName.empty()) {
         return Status(ErrorCodes::Error{15998}, "FieldPath field names may not be empty strings.");
     }

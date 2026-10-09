@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
+#include "mongo/db/query/query_stats/plan_shape_counters/plan_shape_counts.h"
 #include "mongo/util/modules.h"
 
 #include <cstdint>
@@ -41,7 +16,7 @@ namespace mongo::query_stats {
  * are optionally rolled up from the data-bearing nodes to routers, and are aggregated into cursors
  * and OpDebug. This structure represents those metrics and can be used to store and aggregate them.
  */
-struct MONGO_MOD_PUB DataBearingNodeMetrics {
+struct [[MONGO_MOD_PUBLIC]] DataBearingNodeMetrics {
     uint64_t keysExamined = 0;
     uint64_t docsExamined = 0;
     uint64_t bytesRead = 0;
@@ -68,6 +43,8 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
     uint64_t nModified = 0;
     uint64_t nDeleted = 0;
     uint64_t nInserted = 0;
+    uint64_t keysInserted = 0;
+    uint64_t keysDeleted = 0;
 
     Microseconds totalTimeQueuedMicros{0};
     uint64_t totalAdmissions = 0;
@@ -80,6 +57,7 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
     Microseconds planningTime{0};
     CardinalityEstimationMethods cardinalityEstimationMethods;
     uint64_t nDocsSampled{0};
+    plan_shape_counters::PlanShapeCounts planShapeCounts;
 
     uint64_t clusterPeakTrackedMemBytes{0};
 
@@ -110,6 +88,8 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
         nModified += other.nModified;
         nDeleted += other.nDeleted;
         nInserted += other.nInserted;
+        keysInserted += other.keysInserted;
+        keysDeleted += other.keysDeleted;
         totalTimeQueuedMicros += other.totalTimeQueuedMicros;
         totalAdmissions += other.totalAdmissions;
         totalNormalPriorityAdmissions += other.totalNormalPriorityAdmissions;
@@ -138,6 +118,7 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
             cardinalityEstimationMethods.getCode().value_or(0) +
             other.cardinalityEstimationMethods.getCode().value_or(0));
         nDocsSampled += other.nDocsSampled;
+        planShapeCounts.add(other.planShapeCounts);
         clusterPeakTrackedMemBytes += other.clusterPeakTrackedMemBytes;
     }
 
@@ -174,6 +155,8 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
         nModified += metrics.getNModified();
         nDeleted += metrics.getNDeleted();
         nInserted += metrics.getNInserted();
+        keysInserted += metrics.getKeysInserted();
+        keysDeleted += metrics.getKeysDeleted();
         totalTimeQueuedMicros += Microseconds(metrics.getTotalTimeQueuedMicros());
         totalAdmissions += metrics.getTotalAdmissions();
         totalNormalPriorityAdmissions += metrics.getTotalNormalPriorityAdmissions();
@@ -199,6 +182,9 @@ struct MONGO_MOD_PUB DataBearingNodeMetrics {
         cardinalityEstimationMethods.setCode(cardinalityEstimationMethods.getCode().value_or(0) +
                                              ce.getCode().value_or(0));
         nDocsSampled += metrics.getNDocsSampled();
+        if (const auto& psc = metrics.getPlanShapeCounts()) {
+            planShapeCounts.add(*psc);
+        }
         clusterPeakTrackedMemBytes += metrics.getClusterPeakTrackedMemBytes();
     }
 };

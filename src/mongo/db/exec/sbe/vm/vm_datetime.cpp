@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/vm/vm_datetime.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
@@ -43,20 +16,16 @@ namespace mongo {
 namespace sbe {
 namespace vm {
 
-bool isValidTimezone(value::TypeTags timezoneTag,
-                     value::Value timezoneValue,
-                     const TimeZoneDatabase* timezoneDB) {
-    if (!value::isString(timezoneTag)) {
+bool isValidTimezone(value::TagValueView timezone, const TimeZoneDatabase* timezoneDB) {
+    if (!value::isString(timezone.tag)) {
         return false;
     }
-    auto timezoneStringView = value::getStringView(timezoneTag, timezoneValue);
+    auto timezoneStringView = value::getStringView(timezone.tag, timezone.value);
     return timezoneStringView.empty() || timezoneDB->isTimeZoneIdentifier(timezoneStringView);
 }
 
-TimeZone getTimezone(value::TypeTags timezoneTag,
-                     value::Value timezoneVal,
-                     TimeZoneDatabase* timezoneDB) {
-    auto timezoneStr = value::getStringView(timezoneTag, timezoneVal);
+TimeZone getTimezone(value::TagValueView timezone, TimeZoneDatabase* timezoneDB) {
+    auto timezoneStr = value::getStringView(timezone.tag, timezone.value);
     if (timezoneStr.empty()) {
         return timezoneDB->utcZone();
     } else {
@@ -64,22 +33,22 @@ TimeZone getTimezone(value::TypeTags timezoneTag,
     }
 }
 
-Date_t getDate(value::TypeTags dateTag, value::Value dateVal) {
-    switch (dateTag) {
+Date_t getDate(value::TagValueView date) {
+    switch (date.tag) {
         case value::TypeTags::Date: {
-            return Date_t::fromMillisSinceEpoch(value::bitcastTo<int64_t>(dateVal));
+            return Date_t::fromMillisSinceEpoch(value::bitcastTo<int64_t>(date.value));
         }
         case value::TypeTags::Timestamp: {
             return Date_t::fromMillisSinceEpoch(
-                Timestamp(value::bitcastTo<uint64_t>(dateVal)).getSecs() * 1000LL);
+                Timestamp(value::bitcastTo<uint64_t>(date.value)).getSecs() * 1000LL);
         }
         case value::TypeTags::ObjectId: {
-            auto objIdBuf = value::getObjectIdView(dateVal);
+            auto objIdBuf = value::getObjectIdView(date.value);
             auto objId = OID::from(objIdBuf);
             return objId.asDateT();
         }
         case value::TypeTags::bsonObjectId: {
-            auto objIdBuf = value::getRawPointerView(dateVal);
+            auto objIdBuf = value::getRawPointerView(date.value);
             auto objId = OID::from(objIdBuf);
             return objId.asDateT();
         }
@@ -89,8 +58,11 @@ Date_t getDate(value::TypeTags dateTag, value::Value dateVal) {
 }
 
 bool coercibleToDate(value::TypeTags typeTag) {
-    return typeTag == value::TypeTags::Date || typeTag == value::TypeTags::Timestamp ||
-        typeTag == value::TypeTags::ObjectId || typeTag == value::TypeTags::bsonObjectId;
+    return value::tagIn(typeTag,
+                        value::TypeTags::Date,
+                        value::TypeTags::Timestamp,
+                        value::TypeTags::ObjectId,
+                        value::TypeTags::bsonObjectId);
 }
 
 namespace {
@@ -218,41 +190,38 @@ struct ISOWeek {
  * timezone string as argument
  */
 template <typename Op>
-FastTuple<bool, value::TypeTags, value::Value> genericDateExpressionAcceptingTimeZone(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
+value::TagValueMaybeOwned genericDateExpressionAcceptingTimeZone(value::TagValueView tzDB,
+                                                                 value::TagValueView date,
+                                                                 value::TagValueView tz) {
     // Get date.
-    if (dateTag != value::TypeTags::Date && dateTag != value::TypeTags::Timestamp &&
-        dateTag != value::TypeTags::ObjectId && dateTag != value::TypeTags::bsonObjectId) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::tagIn(date.tag,
+                      value::TypeTags::Date,
+                      value::TypeTags::Timestamp,
+                      value::TypeTags::ObjectId,
+                      value::TypeTags::bsonObjectId)) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto date = getDate(dateTag, dateValue);
+    auto dateMs = getDate(date);
 
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (tzDB.tag != value::TypeTags::timeZoneDB) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBValue);
+    auto timezoneDB = value::getTimeZoneDBView(tzDB.value);
 
     // Get timezone.
-    if (!value::isString(timezoneTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(tz.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto timezone = getTimezone(timezoneTag, timezoneValue, timezoneDB);
+    auto timezone = getTimezone(tz, timezoneDB);
 
     int32_t result;
-    Op::doOperation(date, timezone, result);
+    Op::doOperation(dateMs, timezone, result);
 
     if constexpr (std::is_same<Op, ISOWeekYear>::value) {
         // convert type to long to be compatible with classic
-        return {false,
-                value::TypeTags::NumberInt64,
-                value::bitcastFrom<int64_t>(static_cast<int64_t>(result))};
+        return value::TagValueMaybeOwned::numberInt64(static_cast<int64_t>(result));
     } else {
-        return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(result)};
+        return value::TagValueMaybeOwned::numberInt32(result);
     }
 }
 
@@ -261,284 +230,171 @@ FastTuple<bool, value::TypeTags, value::Value> genericDateExpressionAcceptingTim
  * timezone object as argument
  */
 template <typename Op>
-FastTuple<bool, value::TypeTags, value::Value> genericDateExpressionAcceptingTimeZone(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
+value::TagValueMaybeOwned genericDateExpressionAcceptingTimeZone(value::TagValueView date,
+                                                                 value::TagValueView tz) {
     // Get date.
-    if (dateTag != value::TypeTags::Date && dateTag != value::TypeTags::Timestamp &&
-        dateTag != value::TypeTags::ObjectId && dateTag != value::TypeTags::bsonObjectId) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::tagIn(date.tag,
+                      value::TypeTags::Date,
+                      value::TypeTags::Timestamp,
+                      value::TypeTags::ObjectId,
+                      value::TypeTags::bsonObjectId)) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto date = getDate(dateTag, dateValue);
+    auto dateMs = getDate(date);
 
-    if (!value::isTimeZone(timezoneTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isTimeZone(tz.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto timezone = *value::getTimeZoneView(timezoneValue);
+    auto timezone = *value::getTimeZoneView(tz.value);
 
     int32_t result;
-    Op::doOperation(date, timezone, result);
+    Op::doOperation(dateMs, timezone, result);
 
     if constexpr (std::is_same<Op, ISOWeekYear>::value) {
         // convert type to long to be compatible with classic
-        return {false,
-                value::TypeTags::NumberInt64,
-                value::bitcastFrom<int64_t>(static_cast<int64_t>(result))};
+        return value::TagValueMaybeOwned::numberInt64(static_cast<int64_t>(result));
     } else {
-        return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(result)};
+        return value::TagValueMaybeOwned::numberInt32(result);
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfYear(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfYear>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfYear(value::TagValueView tzDB,
+                                                     value::TagValueView date,
+                                                     value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfYear>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfYear(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfYear>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfYear(value::TagValueView date,
+                                                     value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfYear>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfMonth(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfMonth>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfMonth(value::TagValueView tzDB,
+                                                      value::TagValueView date,
+                                                      value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfMonth>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfMonth(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfMonth>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfMonth(value::TagValueView date,
+                                                      value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfMonth>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfWeek(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfWeek>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfWeek(value::TagValueView tzDB,
+                                                     value::TagValueView date,
+                                                     value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfWeek>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDayOfWeek(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<DayOfWeek>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericDayOfWeek(value::TagValueView date,
+                                                     value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<DayOfWeek>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericYear(value::TypeTags timezoneDBTag,
-                                                                     value::Value timezoneDBValue,
-                                                                     value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Year>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericYear(value::TagValueView tzDB,
+                                                value::TagValueView date,
+                                                value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Year>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericYear(value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Year>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericYear(value::TagValueView date, value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Year>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMonth(value::TypeTags timezoneDBTag,
-                                                                      value::Value timezoneDBValue,
-                                                                      value::TypeTags dateTag,
-                                                                      value::Value dateValue,
-                                                                      value::TypeTags timezoneTag,
-                                                                      value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Month>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMonth(value::TagValueView tzDB,
+                                                 value::TagValueView date,
+                                                 value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Month>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMonth(value::TypeTags dateTag,
-                                                                      value::Value dateValue,
-                                                                      value::TypeTags timezoneTag,
-                                                                      value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Month>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMonth(value::TagValueView date, value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Month>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericHour(value::TypeTags timezoneDBTag,
-                                                                     value::Value timezoneDBValue,
-                                                                     value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Hour>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericHour(value::TagValueView tzDB,
+                                                value::TagValueView date,
+                                                value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Hour>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericHour(value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Hour>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericHour(value::TagValueView date, value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Hour>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMinute(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Minute>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMinute(value::TagValueView tzDB,
+                                                  value::TagValueView date,
+                                                  value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Minute>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMinute(value::TypeTags dateTag,
-                                                                       value::Value dateValue,
-                                                                       value::TypeTags timezoneTag,
-                                                                       value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Minute>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMinute(value::TagValueView date,
+                                                  value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Minute>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericSecond(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Second>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericSecond(value::TagValueView tzDB,
+                                                  value::TagValueView date,
+                                                  value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Second>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericSecond(value::TypeTags dateTag,
-                                                                       value::Value dateValue,
-                                                                       value::TypeTags timezoneTag,
-                                                                       value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Second>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericSecond(value::TagValueView date,
+                                                  value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Second>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMillisecond(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Millisecond>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMillisecond(value::TagValueView tzDB,
+                                                       value::TagValueView date,
+                                                       value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Millisecond>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMillisecond(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Millisecond>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericMillisecond(value::TagValueView date,
+                                                       value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Millisecond>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericWeek(value::TypeTags timezoneDBTag,
-                                                                     value::Value timezoneDBValue,
-                                                                     value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Week>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericWeek(value::TagValueView tzDB,
+                                                value::TagValueView date,
+                                                value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Week>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericWeek(value::TypeTags dateTag,
-                                                                     value::Value dateValue,
-                                                                     value::TypeTags timezoneTag,
-                                                                     value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<Week>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericWeek(value::TagValueView date, value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<Week>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISOWeekYear(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISOWeekYear>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISOWeekYear(value::TagValueView tzDB,
+                                                       value::TagValueView date,
+                                                       value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISOWeekYear>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISOWeekYear(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISOWeekYear>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISOWeekYear(value::TagValueView date,
+                                                       value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISOWeekYear>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISODayOfWeek(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISODayOfWeek>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISODayOfWeek(value::TagValueView tzDB,
+                                                        value::TagValueView date,
+                                                        value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISODayOfWeek>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISODayOfWeek(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISODayOfWeek>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISODayOfWeek(value::TagValueView date,
+                                                        value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISODayOfWeek>(date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISOWeek(
-    value::TypeTags timezoneDBTag,
-    value::Value timezoneDBValue,
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISOWeek>(
-        timezoneDBTag, timezoneDBValue, dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISOWeek(value::TagValueView tzDB,
+                                                   value::TagValueView date,
+                                                   value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISOWeek>(tzDB, date, tz);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericISOWeek(
-    value::TypeTags dateTag,
-    value::Value dateValue,
-    value::TypeTags timezoneTag,
-    value::Value timezoneValue) {
-    return genericDateExpressionAcceptingTimeZone<ISOWeek>(
-        dateTag, dateValue, timezoneTag, timezoneValue);
+value::TagValueMaybeOwned ByteCode::genericISOWeek(value::TagValueView date,
+                                                   value::TagValueView tz) {
+    return genericDateExpressionAcceptingTimeZone<ISOWeek>(date, tz);
 }
 }  // namespace vm
 }  // namespace sbe

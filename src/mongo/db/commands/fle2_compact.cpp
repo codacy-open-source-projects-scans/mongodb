@@ -1,46 +1,12 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <cstdint>
+#include "mongo/db/commands/fle2_compact.h"
 
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/data_builder.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -52,7 +18,6 @@
 #include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_options_gen.h"
-#include "mongo/db/commands/fle2_compact.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -60,7 +25,6 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/transaction/transaction_api.h"
@@ -74,12 +38,24 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -91,10 +67,11 @@ MONGO_FAIL_POINT_DEFINE(fleCompactFailAfterTransactionCommit);
 MONGO_FAIL_POINT_DEFINE(fleCleanupFailDuringAnchorDeletes);
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
-constexpr auto kId = "_id"_sd;
-constexpr auto kValue = "value"_sd;
+constexpr auto kId = "_id"sv;
+constexpr auto kValue = "value"sv;
 
 constexpr double kDefaultAnchorPaddingFactor = 1.0;
 
@@ -165,7 +142,7 @@ FLEEdgeCountInfo fetchEdgeCountInfo(FLEQueryInterface* queryImpl,
                                     const T& token,
                                     const NamespaceString& escNss,
                                     FLEQueryInterface::TagQueryType queryType,
-                                    const StringData queryTypeStr) {
+                                    const std::string_view queryTypeStr) {
     std::vector<std::vector<FLEEdgePrfBlock>> tags;
     tags.emplace_back().push_back(FLEEdgePrfBlock{token.asPrfBlock(), boost::none});
     auto countInfoSets = queryImpl->getTags(escNss, tags, queryType);
@@ -229,7 +206,7 @@ void upsertNullAnchor(FLEQueryInterface* queryImpl,
 
 void checkSchemaAndCompactionOrCleanupTokens(const BSONObj& tokens,
                                              const Collection& edc,
-                                             StringData tokenType) {
+                                             std::string_view tokenType) {
     uassert(6346807,
             "Target namespace is not an encrypted collection",
             edc.getCollectionOptions().encryptedFieldConfig);
@@ -314,20 +291,20 @@ EncryptedStateCollectionsNamespaces::createFromDataCollection(const Collection& 
 
     auto& cfg = *(edc.getCollectionOptions().encryptedFieldConfig);
     auto dbName = edc.ns().dbName();
-    StringData missingColl;
+    std::string_view missingColl;
     EncryptedStateCollectionsNamespaces namespaces;
 
-    auto f = [&missingColl](StringData coll) {
+    auto f = [&missingColl](std::string_view coll) {
         missingColl = coll;
-        return StringData();
+        return std::string_view();
     };
 
     namespaces.edcNss = edc.ns();
     namespaces.escNss = NamespaceStringUtil::deserialize(
-        dbName, cfg.getEscCollection().value_or_eval([&f]() { return f("state"_sd); }));
+        dbName, cfg.getEscCollection().value_or_eval([&f]() { return f("state"sv); }));
 
     namespaces.ecocNss = NamespaceStringUtil::deserialize(
-        dbName, cfg.getEcocCollection().value_or_eval([&f]() { return f("compaction"_sd); }));
+        dbName, cfg.getEcocCollection().value_or_eval([&f]() { return f("compaction"sv); }));
 
     if (!missingColl.empty()) {
         return Status(ErrorCodes::BadValue,
@@ -373,11 +350,11 @@ stdx::unordered_set<ECOCCompactionDocumentV2> getUniqueCompactionDocuments(
                     fmt::format("Compaction token for field '{}' is of type '{}', but ECOCDocument "
                                 "is of type '{}'",
                                 compactionToken.fieldPathName,
-                                compactionToken.hasPaddingToken() ? "range-or-text-search"_sd
-                                                                  : "equality"_sd,
-                                ecocDoc.isRange()            ? "range"_sd
-                                    : ecocDoc.isTextSearch() ? "text-search"_sd
-                                                             : "equality"_sd),
+                                compactionToken.hasPaddingToken() ? "range-or-text-search"sv
+                                                                  : "equality"sv,
+                                ecocDoc.isRange()            ? "range"sv
+                                    : ecocDoc.isTextSearch() ? "text-search"sv
+                                                             : "equality"sv),
                     (ecocDoc.isRange() || ecocDoc.isTextSearch()) ==
                         compactionToken.hasPaddingToken());
             if (compactionToken.hasPaddingToken()) {
@@ -406,7 +383,7 @@ void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
      * emuBinary.
      */
     auto countInfo = fetchEdgeCountInfo(
-        queryImpl, ecocDoc.esc, escNss, FLEQueryInterface::TagQueryType::kCompact, "compact"_sd);
+        queryImpl, ecocDoc.esc, escNss, FLEQueryInterface::TagQueryType::kCompact, "compact"sv);
     auto& emuBinaryResult = countInfo.searchedCounts.value();
 
     stats.add(countInfo.stats.get());
@@ -479,7 +456,7 @@ void padOneField(FLEQueryInterface* queryImpl,
                                         anchorPaddingRootToken,
                                         escNss,
                                         FLEQueryInterface::TagQueryType::kPadding,
-                                        "padding"_sd);
+                                        "padding"sv);
     auto& emuBinaryResult = countInfo.searchedCounts.value();
 
     stats.add(countInfo.stats.get());
@@ -513,7 +490,7 @@ void padOneField(FLEQueryInterface* queryImpl,
 void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
                              HmacContext* hmacCtx,
                              const NamespaceString& escNss,
-                             StringData fieldPath,
+                             std::string_view fieldPath,
                              BSONType fieldType,
                              const QueryTypeConfig& queryTypeConfig,
                              double anchorPaddingFactor,
@@ -525,8 +502,30 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
     // Compact 4.f.i, Calculate pathLength := #Edges_SPH(lb, lb, uh, prc, theta)
     const auto pathLength = getEdgesLength(fieldType, fieldPath, queryTypeConfig);
     // Compact 4.f.ii, Calculate numPads := ceil( gamma * (pathLength * uniqueLeaves - len(C_f)) )
-    // This assumes that (pathLength * uniqueLeaves) >= uniqueTokens
-    dassert((pathLength * uniqueLeaves) >= uniqueTokens);
+    // This assumes that (pathLength * uniqueLeaves) >= uniqueTokens: if this doesn't hold, then
+    // it could mean that the parameters for calculating the path length have changed. In that case
+    // skip padding insertions for this field.
+    if (uniqueLeaves > 0 && pathLength > (std::numeric_limits<std::size_t>::max() / uniqueLeaves)) {
+        // Skip padding insertions if pathLength * uniqueLeaves would overflow.
+        LOGV2_DEBUG(13062801,
+                    2,
+                    "Skipping insertion of padding documents for range field",
+                    "field"_attr = fieldPath,
+                    "edgesLength"_attr = pathLength,
+                    "uniqueLeaves"_attr = uniqueLeaves,
+                    "uniqueTokens"_attr = uniqueTokens);
+        return;
+    }
+    if ((pathLength * uniqueLeaves) < uniqueTokens) {
+        LOGV2_WARNING(13062802,
+                      "Encountered invalid edges length when compacting a range field",
+                      "field"_attr = fieldPath,
+                      "edgesLength"_attr = pathLength,
+                      "uniqueLeaves"_attr = uniqueLeaves,
+                      "uniqueTokens"_attr = uniqueTokens);
+        uasserted(13062800, "Encountered invalid edges length when compacting a range field");
+    }
+
     const size_t numPads =
         std::ceil(anchorPaddingFactor * ((pathLength * uniqueLeaves) - uniqueTokens));
     if (numPads <= 0) {
@@ -548,7 +547,7 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
 void compactOneTextSearchFieldPad(FLEQueryInterface* queryImpl,
                                   HmacContext* hmacCtx,
                                   const NamespaceString& escNss,
-                                  StringData fieldPath,
+                                  std::string_view fieldPath,
                                   std::size_t totalMsize,
                                   std::size_t uniqueTokens,
                                   const AnchorPaddingRootToken& anchorPaddingRootToken,
@@ -587,7 +586,7 @@ auto generateCompactionTokenPair(const AnchorPaddingRootToken& rootToken) {
 template <typename Generator, typename T>
 std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
                                                    HmacContext* hmacCtx,
-                                                   StringData fieldName,
+                                                   std::string_view fieldName,
                                                    const T& rootToken,
                                                    const NamespaceString& escNss,
                                                    std::size_t maxAnchorListLength,
@@ -614,7 +613,7 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
         rootToken,
         escNss,
         tagQueryType,
-        tagQueryType == FLEQueryInterface::TagQueryType::kPadding ? "padding"_sd : "cleanup"_sd);
+        tagQueryType == FLEQueryInterface::TagQueryType::kPadding ? "padding"sv : "cleanup"sv);
     auto& emuBinaryResult = countInfo.searchedCounts.value();
 
     stats.add(countInfo.stats.get());
@@ -816,8 +815,8 @@ void processFLECompactV2(OperationContext* opCtx,
         std::size_t uniqueTokens{0};
         boost::optional<AnchorPaddingRootToken> anchorPaddingRootToken;
     };
-    std::map<StringData, RangeFieldInfo> rangeFields;
-    std::map<StringData, TextSearchFieldInfo> textSearchFields;
+    std::map<std::string_view, RangeFieldInfo> rangeFields;
+    std::map<std::string_view, TextSearchFieldInfo> textSearchFields;
     for (auto& ecocDoc : *uniqueEcocEntries) {
         if (ecocDoc.isRange()) {
             auto& rangeField = rangeFields[ecocDoc.fieldName];
@@ -1066,7 +1065,8 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
 
     // Each entry in 'C_f' represents a unique field/value pair. For each field/value pair,
     // compact the ESC entries for that field/value pair in one transaction.
-    auto paddedFieldsToCleanup = std::make_shared<std::map<StringData, AnchorPaddingRootToken>>();
+    auto paddedFieldsToCleanup =
+        std::make_shared<std::map<std::string_view, AnchorPaddingRootToken>>();
     for (auto& ecocDoc : *uniqueEcocEntries) {
         // start a new transaction
         std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx, boost::none);
@@ -1178,11 +1178,11 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
 }
 
 void validateCompactRequest(const CompactStructuredEncryptionData& request, const Collection& edc) {
-    checkSchemaAndCompactionOrCleanupTokens(request.getCompactionTokens(), edc, "Compact"_sd);
+    checkSchemaAndCompactionOrCleanupTokens(request.getCompactionTokens(), edc, "Compact"sv);
 }
 
 void validateCleanupRequest(const CleanupStructuredEncryptionData& request, const Collection& edc) {
-    checkSchemaAndCompactionOrCleanupTokens(request.getCleanupTokens(), edc, "Cleanup"_sd);
+    checkSchemaAndCompactionOrCleanupTokens(request.getCleanupTokens(), edc, "Cleanup"sv);
 }
 
 const PrfBlock& FLECompactESCDeleteSet::at(size_t index) const {

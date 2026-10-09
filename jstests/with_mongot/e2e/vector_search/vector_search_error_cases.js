@@ -31,12 +31,11 @@ assert.commandFailedWithCode(
     [7912700, 65137 /** Extension error code */],
 );
 
-// $vectorSearch is not allowed in a sub-pipeline.
+// $vectorSearch is never allowed in a $facet sub-pipeline.
 assert.commandFailedWithCode(
-    runPipeline([{$lookup: {from: collName, pipeline: [makeVectorSearchStage()], as: "lookup1"}}]),
-    51047,
+    runPipeline([{$facet: {originalPipeline: [makeVectorSearchStage()]}}]),
+    40600,
 );
-assert.commandFailedWithCode(runPipeline([{$facet: {originalPipeline: [makeVectorSearchStage()]}}]), 40600);
 
 // $vectorSearch does not support $SEARCH_META.
 assert.commandFailedWithCode(

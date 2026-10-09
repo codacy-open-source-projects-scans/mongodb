@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   requires_getmore,
 //   # Does not support multiplanning, because it makes explain fail
@@ -40,11 +41,20 @@ function assertExecError(explain) {
     for (let execStats of allExecStats) {
         if (!execStats.executionSuccess) {
             haveSeenExecutionFailure = true;
-            assert("errorMessage" in execStats, `Expected "errorMessage" to be present in ${tojson(execStats)}`);
-            assert("errorCode" in execStats, `Expected "errorCode" to be present in ${tojson(execStats)}`);
+            assert(
+                "errorMessage" in execStats,
+                `Expected "errorMessage" to be present in ${tojson(execStats)}`,
+            );
+            assert(
+                "errorCode" in execStats,
+                `Expected "errorCode" to be present in ${tojson(execStats)}`,
+            );
         }
     }
-    assert(haveSeenExecutionFailure, `Expected at least one shard to have failed: ${tojson(explain)}`);
+    assert(
+        haveSeenExecutionFailure,
+        `Expected at least one shard to have failed: ${tojson(explain)}`,
+    );
 }
 
 /**
@@ -54,7 +64,10 @@ function assertExecSuccess(explain) {
     let errorObjs = [];
 
     let execStats = explain.executionStats;
-    if (execStats.executionStages.stage == "SINGLE_SHARD" || execStats.executionStages.stage == "SHARD_MERGE_SORT") {
+    if (
+        execStats.executionStages.stage == "SINGLE_SHARD" ||
+        execStats.executionStages.stage == "SHARD_MERGE_SORT"
+    ) {
         errorObjs = execStats.executionStages.shards;
     } else {
         errorObjs.push(execStats);
@@ -62,8 +75,14 @@ function assertExecSuccess(explain) {
 
     for (let errorObj of errorObjs) {
         assert.eq(true, errorObj.executionSuccess);
-        assert(!("errorMessage" in errorObj), `Expected "errorMessage" not to be present in ${tojson(errorObj)}`);
-        assert(!("errorCode" in errorObj), `Expected "errorCode" not to be present in ${tojson(errorObj)}`);
+        assert(
+            !("errorMessage" in errorObj),
+            `Expected "errorMessage" not to be present in ${tojson(errorObj)}`,
+        );
+        assert(
+            !("errorCode" in errorObj),
+            `Expected "errorCode" not to be present in ${tojson(errorObj)}`,
+        );
     }
 }
 

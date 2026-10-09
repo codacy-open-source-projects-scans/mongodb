@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/idl/idl_parser.h"
 
@@ -39,10 +13,12 @@
 #include <span>
 #include <stack>
 #include <string>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -67,9 +43,9 @@ std::string toCommaDelimitedList(std::span<const BSONType> types) {
 
 }  // namespace
 
-constexpr StringData IDLParserContext::kOpMsgDollarDBDefault;
-constexpr StringData IDLParserContext::kOpMsgDollarDB;
-constexpr auto collectionlessAggregateCursorCol = "$cmd.aggregate"_sd;
+constexpr std::string_view IDLParserContext::kOpMsgDollarDBDefault;
+constexpr std::string_view IDLParserContext::kOpMsgDollarDB;
+constexpr auto collectionlessAggregateCursorCol = "$cmd.aggregate"sv;
 
 bool IDLParserContext::checkAndAssertTypeSlowPath(const BSONElement& element, BSONType type) const {
     auto elementType = element.type();
@@ -126,7 +102,7 @@ std::string IDLParserContext::getElementPath(const BSONElement& element) const {
     return getElementPath(element.fieldNameStringData());
 }
 
-std::string IDLParserContext::getElementPath(StringData fieldName) const {
+std::string IDLParserContext::getElementPath(std::string_view fieldName) const {
     if (_predecessor == nullptr) {
         str::stream builder;
 
@@ -138,7 +114,7 @@ std::string IDLParserContext::getElementPath(StringData fieldName) const {
 
         return builder;
     } else {
-        std::stack<StringData> pieces;
+        std::stack<std::string_view> pieces;
 
         if (!fieldName.empty()) {
             pieces.push(fieldName);
@@ -167,7 +143,7 @@ std::string IDLParserContext::getElementPath(StringData fieldName) const {
     }
 }
 
-void IDLParserContext::throwDuplicateField(StringData fieldName) const {
+void IDLParserContext::throwDuplicateField(std::string_view fieldName) const {
     std::string path = getElementPath(fieldName);
     uasserted(ErrorCodes::IDLDuplicateField,
               str::stream() << "BSON field '" << path << "' is a duplicate field");
@@ -177,17 +153,17 @@ void IDLParserContext::throwDuplicateField(const BSONElement& element) const {
     throwDuplicateField(element.fieldNameStringData());
 }
 
-void IDLParserContext::throwMissingField(StringData fieldName) const {
+void IDLParserContext::throwMissingField(std::string_view fieldName) const {
     std::string path = getElementPath(fieldName);
     uasserted(ErrorCodes::IDLFailedToParse,
               str::stream() << "BSON field '" << path << "' is missing but a required field");
 }
 
-bool isMongocryptdArgument(StringData arg) {
-    return arg == "jsonSchema"_sd;
+bool isMongocryptdArgument(std::string_view arg) {
+    return arg == "jsonSchema"sv;
 }
 
-void IDLParserContext::throwUnknownField(StringData fieldName) const {
+void IDLParserContext::throwUnknownField(std::string_view fieldName) const {
     std::string path = getElementPath(fieldName);
     if (isMongocryptdArgument(fieldName)) {
         uasserted(
@@ -201,25 +177,25 @@ void IDLParserContext::throwUnknownField(StringData fieldName) const {
               str::stream() << "BSON field '" << path << "' is an unknown field.");
 }
 
-void IDLParserContext::throwBadArrayFieldNumberSequence(StringData actual,
-                                                        StringData expected) const {
+void IDLParserContext::throwBadArrayFieldNumberSequence(std::string_view actual,
+                                                        std::string_view expected) const {
     uasserted(
         ErrorCodes::BadValue,
         fmt::format("BSON array field '{}' has an invalid index field name: '{}', expected '{}'",
-                    getElementPath(StringData()),
+                    getElementPath(std::string_view()),
                     actual,
                     expected));
 }
 
 void IDLParserContext::throwBadEnumValue(int enumValue) const {
-    std::string path = getElementPath(StringData());
+    std::string path = getElementPath(std::string_view());
     uasserted(ErrorCodes::BadValue,
               str::stream() << "Enumeration value '" << enumValue << "' for field '" << path
                             << "' is not a valid value.");
 }
 
-void IDLParserContext::throwBadEnumValue(StringData enumValue) const {
-    std::string path = getElementPath(StringData());
+void IDLParserContext::throwBadEnumValue(std::string_view enumValue) const {
+    std::string path = getElementPath(std::string_view());
     uasserted(ErrorCodes::BadValue,
               str::stream() << "Enumeration value '" << enumValue << "' for field '" << path
                             << "' is not a valid value.");
@@ -235,8 +211,8 @@ void IDLParserContext::throwBadType(const BSONElement& element,
                             << "]'");
 }
 
-StringData IDLParserContext::checkAndAssertCollectionName(const BSONElement& element,
-                                                          bool allowGlobalCollectionName) {
+std::string_view IDLParserContext::checkAndAssertCollectionName(const BSONElement& element,
+                                                                bool allowGlobalCollectionName) {
     const bool isUUID =
         (element.type() == BSONType::binData && element.binDataType() == BinDataType::newUUID);
     uassert(ErrorCodes::InvalidNamespace,
@@ -258,7 +234,7 @@ StringData IDLParserContext::checkAndAssertCollectionName(const BSONElement& ele
     return element.valueStringData();
 }
 
-std::variant<UUID, StringData> IDLParserContext::checkAndAssertCollectionNameOrUUID(
+std::variant<UUID, std::string_view> IDLParserContext::checkAndAssertCollectionNameOrUUID(
     const BSONElement& element) {
     if (element.type() == BSONType::binData && element.binDataType() == BinDataType::newUUID) {
         return uassertStatusOK(UUID::parse(element));
@@ -284,11 +260,11 @@ const boost::optional<auth::ValidatedTenancyScope>& IDLParserContext::getValidat
     return _validatedTenancyScope;
 }
 
-std::vector<StringData> transformVector(const std::vector<std::string>& input) {
-    return std::vector<StringData>(begin(input), end(input));
+std::vector<std::string_view> transformVector(const std::vector<std::string>& input) {
+    return std::vector<std::string_view>(begin(input), end(input));
 }
 
-std::vector<std::string> transformVector(const std::vector<StringData>& input) {
+std::vector<std::string> transformVector(const std::vector<std::string_view>& input) {
     std::vector<std::string> output;
 
     output.reserve(input.size());

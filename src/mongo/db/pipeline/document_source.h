@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -64,6 +37,7 @@
 #include <list>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -90,7 +64,7 @@ namespace mongo {
  * 3. Registers the mapping between StageParams and DocumentSource.
  *
  * Assumptions:
- * - DocSourceClass has a static member `kStageName` of type StringData.
+ * - DocSourceClass has a static member `kStageName` of type std::string_view.
  * - DocSourceClass has a static method `createFromBson(BSONElement,
  * intrusive_ptr<ExpressionContext>)`.
  * - StageParamsClass has a static member `id` of type StageParams::Id.
@@ -103,6 +77,9 @@ namespace mongo {
         const std::unique_ptr<StageParams>& stageParams,                               \
         const boost::intrusive_ptr<ExpressionContext>& expCtx) {                       \
         auto* typedParams = dynamic_cast<StageParamsClass*>(stageParams.get());        \
+        tassert(13162200,                                                              \
+                "Stage params for " #registrationName " have unexpected type",         \
+                typedParams != nullptr);                                               \
         return DocSourceClass::createFromBson(typedParams->getOriginalBson(), expCtx); \
     }                                                                                  \
     ALLOCATE_AND_REGISTER_STAGE_PARAMS(registrationName, StageParamsClass)
@@ -114,6 +91,9 @@ namespace mongo {
         const std::unique_ptr<StageParams>& stageParams,                                 \
         const boost::intrusive_ptr<ExpressionContext>& expCtx) {                         \
         auto* typedParams = dynamic_cast<StageParamsClass*>(stageParams.get());          \
+        tassert(12992000,                                                                \
+                "Stage params for " #registrationName " have unexpected type",           \
+                typedParams != nullptr);                                                 \
         return {DocSourceClass::createFromBson(typedParams->getOriginalBson(), expCtx)}; \
     }                                                                                    \
     ALLOCATE_AND_REGISTER_STAGE_PARAMS(registrationName, StageParamsClass)
@@ -153,8 +133,10 @@ namespace mongo {
     const DocumentSource::Id& constName = _dsid_##name;
 
 class DocumentSource;
-using DocumentSourceContainer MONGO_MOD_UNFORTUNATELY_OPEN =
+using DocumentSourceContainer [[MONGO_MOD_UNFORTUNATELY_OPEN]] =
     std::list<boost::intrusive_ptr<DocumentSource>>;
+using ConstDocumentSourceContainer [[MONGO_MOD_PRIVATE]] =
+    std::list<boost::intrusive_ptr<const DocumentSource>>;
 
 class Pipeline;
 
@@ -162,7 +144,7 @@ namespace exec::agg {
 class ListMqlEntitiesStage;
 }  // namespace exec::agg
 
-class MONGO_MOD_UNFORTUNATELY_OPEN DocumentSource : public RefCountable {
+class [[MONGO_MOD_UNFORTUNATELY_OPEN]] DocumentSource : public RefCountable {
 public:
     // In general a parser returns a list of DocumentSources, to accommodate "multi-stage aliases"
     // like $bucket.
@@ -257,8 +239,6 @@ public:
         const boost::optional<OrderedPathSet>& shardKeyPaths;
     };
 
-    ~DocumentSource() override {}
-
     /**
      * Makes a deep clone of the DocumentSource by serializing and re-parsing it. DocumentSources
      * that cannot be safely cloned this way should override this method. Callers can optionally
@@ -269,7 +249,8 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
         tassert(7406001, "expCtx passed to clone must not be null", expCtx);
         std::vector<Value> serializedDoc;
-        serializeToArray(serializedDoc, SerializationOptions{.serializeForCloning = true});
+        serializeToArray(serializedDoc,
+                         query_shape::SerializationOptions{.serializeForCloning = true});
         tassert(5757900,
                 str::stream() << "DocumentSource " << getSourceName()
                               << " should have serialized to exactly one document. This stage may "
@@ -308,7 +289,7 @@ public:
     /**
      * Get the stage's name.
      */
-    virtual const char* getSourceName() const = 0;
+    virtual std::string_view getSourceName() const = 0;
 
     /**
      * Returns the DocumentSource::Id value of a given stage object.
@@ -336,8 +317,20 @@ public:
      * A subclass may choose to overwrite this, rather than serialize, if it should output multiple
      * stages (eg, $sort sometimes also outputs a $limit).
      */
-    virtual void serializeToArray(std::vector<Value>& array,
-                                  const SerializationOptions& opts = SerializationOptions{}) const;
+    virtual void serializeToArray(
+        std::vector<Value>& array,
+        const query_shape::SerializationOptions& opts = query_shape::SerializationOptions{}) const;
+
+    /**
+     * Whether this stage may serialize to more than one entry when serializing for an
+     * executionStats explain. A stage that lowers to multiple exec::agg stages at build time
+     * (rather than desugaring at the DocumentSource layer) overrides this to true so it can emit
+     * one explain entry per exec stage, keeping the DocumentSource and exec pipelines aligned for
+     * mergeExplains().
+     */
+    virtual bool serializesToMultipleExecStatsExplainOps() const {
+        return false;
+    }
 
     /**
      * Create a Value that represents the document source.
@@ -346,7 +339,8 @@ public:
      * to a pipeline being serialized. Returning a missing() Value results in no entry
      * being added to the array for this stage (DocumentSource).
      */
-    virtual Value serialize(const SerializationOptions& opts = SerializationOptions{}) const = 0;
+    virtual Value serialize(const query_shape::SerializationOptions& opts =
+                                query_shape::SerializationOptions{}) const = 0;
 
     /**
      * Shortcut method to get a BSONObj for debugging. Often useful in log messages, but is not
@@ -390,7 +384,7 @@ public:
      * DO NOT call this method directly. Instead, use the ALLOCATE_DOCUMENT_SOURCE_ID macro defined
      * in this file.
      */
-    static Id allocateId(StringData name);
+    static Id allocateId(std::string_view name);
 
     /**
      * Returns true if the DocumentSource has a query.
@@ -403,12 +397,28 @@ public:
     virtual BSONObj getQuery() const;
 
     /**
-     * Returns the sort pattern produced by this stage, or an empty SortPattern if this stage does
-     * not produce documents in a defined sort order. Subclasses that produce sorted output should
-     * override this method.
+     * Returns the sort order this stage establishes on its output. Stages that establish a sort
+     * order ($sort, $vectorSearch, $search, etc.) pass a SortPattern to the DocumentSource
+     * constructor. Stages that do not establish a sort order return an empty SortPattern.
+     *
+     * Virtual to allow DocumentSourceExtensionOptimizable to override: its sort pattern comes from
+     * its logical stage, which is a derived member initialized after the base DocumentSource
+     * constructor runs. Other DocumentSource subclasses shouldn't need to override this method and
+     * can provide the sort pattern via the base DocumentSource constructor.
+     *
+     * TODO SERVER-96067: audit every stage's preservesOrderAndMetadata value.
      */
-    virtual SortPattern getSortPattern() const {
-        return SortPattern({});
+    const SortPattern& getSortPattern() const {
+        return _sortPattern;
+    }
+
+    /**
+     * Returns true if this stage unconditionally sets $sortKey metadata on every output document.
+     * Note that `getSortPattern()` returns the sort pattern that defines a given stage's sorting
+     * behavior. Not all stages that exhibit sorting behavior set the sort key metadata.
+     */
+    virtual bool providesSortKeyMetadata() const {
+        return false;
     }
 
     /**
@@ -620,6 +630,17 @@ public:
     virtual void reattachSourceToOperationContext(OperationContext* opCtx) {}
 
     /**
+     * Returns true if this DocumentSource is a pre-desugar placeholder that will be replaced by
+     * its desugared form before execution. Validators that perform semantic checks (e.g. variable
+     * scoping) may treat the placeholder as a permissive stand-in; the post-desugar validation
+     * pass on the fully expanded pipeline is authoritative.
+     * TODO SPM-4488: Remove this function when query shapes are generated at LiteParsed time.
+     */
+    virtual bool isUnexpandedDesugarPlaceholder() const {
+        return false;
+    }
+
+    /**
      * Validate that all operation contexts associated with this document source, including any
      * subpipelines, match the argument.
      */
@@ -644,8 +665,10 @@ public:
         boost::intrusive_ptr<ShardRoleTransactionResourcesStasherForPipeline> stasher) {}
 
 protected:
-    DocumentSource(StringData stageName, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
-
+    DocumentSource(
+        std::string_view stageName,
+        const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
+        SortPattern sortPattern = SortPattern(std::vector<SortPattern::SortPatternPart>{}));
 
     /**
      * Utility which describes when a stage needs to nominate a merging shard.
@@ -668,6 +691,7 @@ protected:
 
 private:
     boost::intrusive_ptr<ExpressionContext> _expCtx;
+    const SortPattern _sortPattern;
 };
 
 }  // namespace mongo

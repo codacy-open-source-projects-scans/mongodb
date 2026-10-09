@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 
@@ -40,6 +14,7 @@
 #include "mongo/db/stats/counters.h"
 
 #include <cmath>
+#include <string_view>
 #include <tuple>
 
 #include <boost/none.hpp>
@@ -50,16 +25,14 @@ using boost::intrusive_ptr;
 using boost::optional;
 
 namespace mongo::window_function {
+using namespace std::literals::string_view_literals;
 using namespace std::string_literals;
 using namespace window_function_n_traits;
 REGISTER_STABLE_WINDOW_FUNCTION(derivative, ExpressionDerivative::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(first, ExpressionFirst::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(last, ExpressionLast::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(linearFill, ExpressionLinearFill::parse);
-REGISTER_WINDOW_FUNCTION_WITH_FEATURE_FLAG(minMaxScaler,
-                                           ExpressionMinMaxScaler::parse,
-                                           &feature_flags::gFeatureFlagSearchHybridScoringFull,
-                                           AllowedWithApiStrict::kNeverInVersion1);
+REGISTER_STABLE_WINDOW_FUNCTION(minMaxScaler, ExpressionMinMaxScaler::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(minN, (ExpressionN<WindowFunctionMinN, AccumulatorMinN>::parse));
 REGISTER_STABLE_WINDOW_FUNCTION(maxN, (ExpressionN<WindowFunctionMaxN, AccumulatorMaxN>::parse));
 REGISTER_STABLE_WINDOW_FUNCTION(firstN,
@@ -94,7 +67,7 @@ intrusive_ptr<Expression> Expression::parse(BSONObj obj,
         // Check if window function is $-prefixed.
         auto fieldName = field.fieldNameStringData();
 
-        if (fieldName.starts_with("$"_sd)) {
+        if (fieldName.starts_with("$"sv)) {
             auto exprName = field.fieldNameStringData();
             if (auto parserFCV = parserMap.find(exprName); parserFCV != parserMap.end()) {
                 // Found one valid window function. If there are multiple window functions they will
@@ -166,7 +139,7 @@ void Expression::registerParser(std::string functionName,
 boost::intrusive_ptr<Expression> ExpressionExpMovingAvg::parse(
     BSONObj obj, const boost::optional<SortPattern>& sortBy, ExpressionContext* expCtx) {
     // 'obj' is something like '{$expMovingAvg: {input: <arg>, <N/alpha>: <int/float>}}'
-    boost::optional<StringData> accumulatorName;
+    boost::optional<std::string_view> accumulatorName;
     boost::intrusive_ptr<::mongo::Expression> input;
     uassert(ErrorCodes::FailedToParse,
             "$expMovingAvg must have exactly one argument that is an object",
@@ -243,7 +216,7 @@ boost::intrusive_ptr<Expression> ExpressionFirstLast::parse(
                                   << "' expression",
                     bounds == boost::none);
             bounds = WindowBounds::parse(arg, sortBy, expCtx);
-        } else if (argName == StringData(accumulatorName)) {
+        } else if (argName == std::string_view(accumulatorName)) {
             input = ::mongo::Expression::parseOperand(expCtx, arg, expCtx->variablesParseState);
 
         } else {
@@ -378,7 +351,7 @@ MinMaxScalerArguments getMinMaxScalerArgumentsFromSpec(const MinMaxScalerSpec& s
         expCtx, minMaxScaler.getInput().getElement(), expCtx->variablesParseState);
 
     // This helper function takes in a constant numerical expression and evaluates it into a Value.
-    auto parseNumericalValueConstant = [&expCtx](StringData argName,
+    auto parseNumericalValueConstant = [&expCtx](std::string_view argName,
                                                  BSONElement expressionElem) -> Value {
         auto expr =
             ::mongo::Expression::parseOperand(expCtx, expressionElem, expCtx->variablesParseState)
@@ -436,14 +409,13 @@ boost::intrusive_ptr<Expression> ExpressionMinMaxScaler::parse(
     auto bounds = getMinMaxScalerWindowBoundsFromSpec(minMaxScalerSpec, sortBy, expCtx);
     auto minMaxArgs = getMinMaxScalerArgumentsFromSpec(minMaxScalerSpec, expCtx);
 
-    expCtx->setSbeWindowCompatibility(SbeCompatibility::notCompatible);
     return make_intrusive<ExpressionMinMaxScaler>(
         expCtx, minMaxArgs.input, std::move(bounds), std::move(minMaxArgs.minAndMax));
 }
 
 template <typename WindowFunctionN, typename AccumulatorNType>
 Value ExpressionN<WindowFunctionN, AccumulatorNType>::serialize(
-    const SerializationOptions& opts) const {
+    const query_shape::SerializationOptions& opts) const {
     // Create but don't initialize the accumulator for serialization. This is because initialization
     // evaluates and validates the 'n' expression, which is unnecessary for this case and can cause
     // errors for query stats.
@@ -610,7 +582,8 @@ boost::intrusive_ptr<Expression> ExpressionQuantile<AccumulatorTType>::parse(
 }
 
 template <typename AccumulatorTType>
-Value ExpressionQuantile<AccumulatorTType>::serialize(const SerializationOptions& opts) const {
+Value ExpressionQuantile<AccumulatorTType>::serialize(
+    const query_shape::SerializationOptions& opts) const {
     MutableDocument result;
 
     MutableDocument md;

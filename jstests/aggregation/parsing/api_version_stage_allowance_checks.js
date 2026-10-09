@@ -99,7 +99,7 @@ result = testDB.runCommand({
 assert.commandFailedWithCode(result, 5491300);
 
 // Tests that the 'exchange' option cannot be specified by external client with 'apiStrict' set to
-// true.
+// true. The exchange check fires before the apiStrict check, so expect BadValue.
 result = testDB.runCommand({
     aggregate: collName,
     pipeline: [{$project: {_id: 0}}],
@@ -109,10 +109,10 @@ result = testDB.runCommand({
     apiStrict: true,
     exchange: {policy: "broadcast", consumers: NumberInt(10)},
 });
-assert.commandFailedWithCode(result, ErrorCodes.APIStrictError);
+assert.commandFailedWithCode(result, [ErrorCodes.BadValue, ErrorCodes.APIStrictError]);
 
-// Tests that the 'fromRouter' option cannot be specified by external client with 'apiStrict' set to
-// true.
+// Tests that the 'fromRouter' option cannot be specified by an external client at all - the
+// BadValue check fires before the APIStrictError check.
 result = testDB.runCommand({
     aggregate: collName,
     pipeline: [{$project: {_id: 0}}],
@@ -122,7 +122,7 @@ result = testDB.runCommand({
     apiStrict: true,
     fromRouter: true,
 });
-assert.commandFailedWithCode(result, ErrorCodes.APIStrictError);
+assert.commandFailedWithCode(result, ErrorCodes.BadValue);
 
 // Tests that the 'fromRouter' option should not fail by internal client with 'apiStrict' set to
 // true.
@@ -173,5 +173,9 @@ assert.commandWorked(result);
         }),
     );
     const plans = [coll.find().explain(), coll.explain().aggregate([{$match: {}}])];
-    assert(plans.every((plan) => plan.stages.map((x) => Object.keys(x)[0]).includes("$_internalUnpackBucket")));
+    assert(
+        plans.every((plan) =>
+            plan.stages.map((x) => Object.keys(x)[0]).includes("$_internalUnpackBucket"),
+        ),
+    );
 })();

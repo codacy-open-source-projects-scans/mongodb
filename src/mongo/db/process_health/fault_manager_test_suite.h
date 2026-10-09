@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,9 +9,9 @@
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/modules.h"
@@ -66,7 +40,7 @@ inline std::unique_ptr<FaultManagerConfig> getConfigWithDisabledPeriodicChecks()
  * Test wrapper class for FaultManager that has access to protected methods
  * for testing.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT FaultManagerTestImpl : public FaultManager {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] FaultManagerTestImpl : public FaultManager {
 public:
     FaultManagerTestImpl(ServiceContext* svcCtx,
                          std::shared_ptr<executor::TaskExecutor> taskExecutor,
@@ -120,15 +94,27 @@ public:
     }
 };
 
+/** Clears the observer factory registry during its lifetime. */
+class ObserverFactoryResetGuard {
+public:
+    ~ObserverFactoryResetGuard() {
+        HealthObserverRegistration::setObserverFactories_ForTest(std::move(_saved));
+    }
+
+private:
+    std::vector<HealthObserverFactory> _saved{
+        HealthObserverRegistration::setObserverFactories_ForTest({})};
+};
+
 /**
  * Test suite for fault manager.
  */
-class MONGO_MOD_PUBLIC FaultManagerTest : service_context_test::WithSetupTransportLayer,
-                                          service_context_test::RouterRoleOverride,
-                                          public ClockSourceMockServiceContextTest {
+class [[MONGO_MOD_PUBLIC]] FaultManagerTest : service_context_test::WithSetupTransportLayer,
+                                              service_context_test::RouterRoleOverride,
+                                              public ClockSourceMockServiceContextTest {
 public:
     void setUp() override {
-        HealthObserverRegistration::resetObserverFactoriesForTest();
+        ClockSourceMockServiceContextTest::setUp();
 
         advanceTime(Seconds(100));
         bumpUpLogging();
@@ -146,6 +132,7 @@ public:
         LOGV2(6007905, "Clean up test resources");
         // Shutdown the executor before the context is deleted.
         resetManager();
+        ClockSourceMockServiceContextTest::tearDown();
     }
 
     void constructTaskExecutor() {
@@ -154,12 +141,8 @@ public:
             _executor->join();
         }
 
-        auto network = std::shared_ptr<executor::NetworkInterface>(
-            executor::makeNetworkInterface("FaultManagerTest").release());
-        ThreadPool::Options options;
-        auto pool = std::make_unique<ThreadPool>(options);
-
-        _executor = executor::ThreadPoolTaskExecutor::create(std::move(pool), std::move(network));
+        _executor = executor::ThreadPoolTaskExecutor::create(
+            ThreadPool::make({}), executor::makeNetworkInterface("FaultManagerTest"));
     }
 
     void resetManager(std::unique_ptr<FaultManagerConfig> config = nullptr) {
@@ -237,8 +220,8 @@ public:
 
     static inline const int kActiveFaultDurationSecs = 5;
 
-    RAIIServerParameterControllerForTest serverParamController{"activeFaultDurationSecs",
-                                                               kActiveFaultDurationSecs};
+    unittest::ServerParameterGuard serverParamController{"activeFaultDurationSecs",
+                                                         kActiveFaultDurationSecs};
 
     void assertSoon(std::function<bool()> predicate, Milliseconds timeout = kWaitTimeout) {
         Timer t;
@@ -267,6 +250,7 @@ public:
     }
 
 private:
+    ObserverFactoryResetGuard _observerFactoryResetGuard;
     std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
 };
 

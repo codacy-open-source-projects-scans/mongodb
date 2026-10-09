@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 
@@ -37,6 +11,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -46,6 +21,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(mergeCursors, MergeCursorsLiteParsed::parse);
 
@@ -55,7 +31,7 @@ REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(mergeCursors,
 
 ALLOCATE_DOCUMENT_SOURCE_ID(mergeCursors, DocumentSourceMergeCursors::id)
 
-constexpr StringData DocumentSourceMergeCursors::kStageName;
+constexpr std::string_view DocumentSourceMergeCursors::kStageName;
 
 DocumentSourceMergeCursors::DocumentSourceMergeCursors(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, AsyncResultsMergerParams armParams)
@@ -113,7 +89,7 @@ std::shared_ptr<BlockingResultsMerger>& DocumentSourceMergeCursors::populateMerg
         // Assumes this is only called from the 'aggregate' or 'getMore' commands.  The code which
         // relies on this parameter does not distinguish/care about the difference so we simply
         // always pass 'aggregate'.
-        resourceYielder ? resourceYielder->make(opCtx, "aggregate"_sd) : nullptr);
+        resourceYielder ? resourceYielder->make(opCtx, "aggregate"sv) : nullptr);
     _armParams = boost::none;
 
     // '_blockingResultsMerger' now owns the cursors.
@@ -134,7 +110,7 @@ std::unique_ptr<RouterStageMerge> DocumentSourceMergeCursors::convertToRouterSta
     return result;
 }
 
-Value DocumentSourceMergeCursors::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceMergeCursors::serialize(const query_shape::SerializationOptions& opts) const {
     // This method is the only reason 'DocumentSourceMergeCursors' needs '_blockingResultsMerger'.
     // We cannot cache '_armParams->toBSON()', because remotes can change during the execution in
     // case of change streams.
@@ -166,12 +142,34 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMergeCursors::createFromBson(
     uassert(17026,
             "$mergeCursors stage expected an object as argument",
             elem.type() == BSONType::object);
-    auto armParams = AsyncResultsMergerParams::parseOwned(
-        elem.embeddedObject().getOwned(),
-        IDLParserContext(kStageName,
-                         auth::ValidatedTenancyScope::get(expCtx->getOperationContext()),
-                         expCtx->getNamespaceString().tenantId(),
-                         SerializationContext::stateDefault()));
+
+    auto armParams = [&]() {
+        // Check if the stage definition contains the 'recordRemoteOpWaitTime' field.
+        // The 'recordRemoteOpWaitTime' field has no meaning since version 6.2 and has been removed
+        // from the IDL for 9.0. The field is still present in the BSON serialization output of
+        // '$mergeCursors' stages in versions < 9.0.
+        // In order to safely parse the stage definition from both older versions, check if the
+        // field is present and remove it if necessary. The field will not be present in stage
+        // definitions created by 9.0 or higher, so the necessity to rewrite here should be rare.
+        // TODO SERVER-126134: remove the check and the rewrite once 9.0 is last LTS.
+        constexpr std::string_view kRecordRemoteOpWaitTimeFieldName = "recordRemoteOpWaitTime"sv;
+        BSONObj toParse;
+        if (elem.embeddedObject().hasElement(kRecordRemoteOpWaitTimeFieldName)) {
+            // 'recordRemoteOpWaitTime' is present, so remove it before parsing the stage
+            // definition.
+            toParse = elem.embeddedObject().removeField(kRecordRemoteOpWaitTimeFieldName);
+        } else {
+            // 'recordRemoteOpWaitTime' is not present, so use the provided stage definition as is
+            // for parsing.
+            toParse = elem.embeddedObject().getOwned();
+        }
+        return AsyncResultsMergerParams::parseOwned(
+            std::move(toParse),
+            IDLParserContext(kStageName,
+                             auth::ValidatedTenancyScope::get(expCtx->getOperationContext()),
+                             expCtx->getNamespaceString().tenantId(),
+                             SerializationContext::stateDefault()));
+    }();
     return new DocumentSourceMergeCursors(expCtx, std::move(armParams));
 }
 

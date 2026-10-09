@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/keys_collection_client.h"
@@ -48,6 +21,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -58,7 +32,7 @@ class OperationContext;
 class LogicalTime;
 class BSONObj;
 
-class MONGO_MOD_NEEDS_REPLACEMENT KeysCollectionClientDirect : public KeysCollectionClient {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] KeysCollectionClientDirect : public KeysCollectionClient {
 public:
     KeysCollectionClientDirect(bool mustUseLocalReads);
 
@@ -66,28 +40,28 @@ public:
      * Returns internal keys for the given purpose and have an expiresAt value greater than
      * newerThanThis. Uses readConcern level majority if possible.
      */
-    MONGO_MOD_PRIVATE StatusWith<std::vector<KeysCollectionDocument>> getNewInternalKeys(
+    [[MONGO_MOD_PRIVATE]] StatusWith<std::vector<KeysCollectionDocument>> getNewInternalKeys(
         OperationContext* opCtx,
-        StringData purpose,
+        std::string_view purpose,
         const LogicalTime& newerThanThis,
         bool tryUseMajority) override;
 
     /**
      * Returns all external (i.e. validation-only) keys for the given purpose.
      */
-    MONGO_MOD_PRIVATE StatusWith<std::vector<ExternalKeysCollectionDocument>> getAllExternalKeys(
-        OperationContext* opCtx, StringData purpose) override;
+    [[MONGO_MOD_PRIVATE]] StatusWith<std::vector<ExternalKeysCollectionDocument>>
+    getAllExternalKeys(OperationContext* opCtx, std::string_view purpose) override;
 
     /**
      * Directly inserts a key document to the storage
      */
-    MONGO_MOD_PRIVATE Status insertNewKey(OperationContext* opCtx, const BSONObj& doc) override;
+    [[MONGO_MOD_PRIVATE]] Status insertNewKey(OperationContext* opCtx, const BSONObj& doc) override;
 
     /**
      * Returns true if getNewKeys always uses readConcern level:local, so the documents returned can
      * be rolled back.
      */
-    MONGO_MOD_PRIVATE bool mustUseLocalReads() const final {
+    [[MONGO_MOD_PRIVATE]] bool mustUseLocalReads() const final {
         return _mustUseLocalReads;
     }
 
@@ -99,13 +73,13 @@ private:
     template <typename KeyDocumentType>
     StatusWith<std::vector<KeyDocumentType>> _getNewKeys(OperationContext* opCtx,
                                                          const NamespaceString& nss,
-                                                         StringData purpose,
+                                                         std::string_view purpose,
                                                          const LogicalTime& newerThanThis,
                                                          bool tryUseMajority);
 
     StatusWith<Shard::QueryResponse> _query(OperationContext* opCtx,
                                             const ReadPreferenceSetting& readPref,
-                                            const repl::ReadConcernLevel& readConcernLevel,
+                                            const repl::ReadConcernArgs& readConcern,
                                             const NamespaceString& nss,
                                             const BSONObj& query,
                                             const BSONObj& sort,

@@ -7,7 +7,6 @@ import {moveDatabaseAndUnshardedColls} from "jstests/sharding/libs/move_database
 import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
 
 // Checking UUID consistency involves talking to shards, but this test shuts down shards.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
@@ -44,7 +43,9 @@ const dbName = "TestDB";
     let router0ShardedColl = st.s0.getDB(dbName)[shardedCollName];
     let router1ShardedColl = st.s1.getDB(dbName)[shardedCollName];
 
-    assert.commandWorked(st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}));
+    assert.commandWorked(
+        st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}),
+    );
     assert.commandWorked(st.s0.adminCommand({shardCollection: shardedCollNs, key: {_id: 1}}));
 
     // Make sure data is inserted into shard0.
@@ -80,7 +81,8 @@ const dbName = "TestDB";
         st.rs0.stopSet();
     }
 
-    const initCatalogCacheStats = st.s1.getDB(dbName).serverStatus({}).shardingStatistics.catalogCache;
+    const initCatalogCacheStats = st.s1.getDB(dbName).serverStatus({})
+        .shardingStatistics.catalogCache;
 
     // Ensure that s1, the router which did not run removeShard, eventually stops targeting chunks
     // for the sharded collection which previously resided on a shard that no longer exists.
@@ -99,10 +101,12 @@ const dbName = "TestDB";
     // (instead of a full refresh) of its catalog cache. Additional incremental refreshes may
     // occur due to concurrent balancer activity or other background operations, but no full
     // refreshes should be needed since the shard removal properly invalidates the cache.
-    const updatedCatalogCacheStats = st.s1.getDB(dbName).serverStatus({}).shardingStatistics.catalogCache;
+    const updatedCatalogCacheStats = st.s1.getDB(dbName).serverStatus({})
+        .shardingStatistics.catalogCache;
     assert.eq(
         0,
-        updatedCatalogCacheStats.countFullRefreshesStarted - initCatalogCacheStats.countFullRefreshesStarted,
+        updatedCatalogCacheStats.countFullRefreshesStarted -
+            initCatalogCacheStats.countFullRefreshesStarted,
         "No full refreshes should be triggered by shard removal",
     );
     assert.gte(
@@ -141,7 +145,9 @@ const dbName = "TestDB";
     let router0UnshardedColl = st.s0.getDB(dbName)[unshardedCollName];
     let router1UnshardedColl = st.s1.getDB(dbName)[unshardedCollName];
 
-    assert.commandWorked(st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+    );
 
     // Insert some documents into the unsharded collection whose primary is the to-be-removed
     // shard0.

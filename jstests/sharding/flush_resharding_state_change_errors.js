@@ -1,6 +1,10 @@
 /**
  * Tests that _flushReshardingStateChange command retries sharding metadata refresh on transient
  * errors until there is a failover.
+ *
+ * @tags: [
+ *   resource_intensive,
+ * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -13,7 +17,9 @@ function runMoveCollection(host, ns, toShard) {
 }
 
 function getFlushReshardingStateChangeMetrics(conn) {
-    const shardingStatistics = assert.commandWorked(conn.adminCommand({serverStatus: 1})).shardingStatistics;
+    const shardingStatistics = assert.commandWorked(
+        conn.adminCommand({serverStatus: 1}),
+    ).shardingStatistics;
     return {
         countFlushReshardingStateChangeTotalShardingMetadataRefreshes:
             shardingStatistics.countFlushReshardingStateChangeTotalShardingMetadataRefreshes,
@@ -26,7 +32,11 @@ function getFlushReshardingStateChangeMetrics(conn) {
 
 function validateFlushReshardingStateChangeMetrics(metrics) {
     assert.gte(metrics.countFlushReshardingStateChangeTotalShardingMetadataRefreshes, 0, metrics);
-    assert.gte(metrics.countFlushReshardingStateChangeSuccessfulShardingMetadataRefreshes, 0, metrics);
+    assert.gte(
+        metrics.countFlushReshardingStateChangeSuccessfulShardingMetadataRefreshes,
+        0,
+        metrics,
+    );
     assert.gte(metrics.countFlushReshardingStateChangeFailedShardingMetadataRefreshes, 0, metrics);
     assert.gte(
         metrics.countFlushReshardingStateChangeTotalShardingMetadataRefreshes,
@@ -43,7 +53,9 @@ function assertSoonFlushReshardingStateChangeStartRetryingOnRefreshErrors(conn) 
         const metrics = getFlushReshardingStateChangeMetrics(conn);
         validateFlushReshardingStateChangeMetrics(metrics);
         if (numTries % 100 == 0) {
-            jsTest.log("Waiting for _flushReshardingStateChange to hit refresh errors: " + tojson(metrics));
+            jsTest.log(
+                "Waiting for _flushReshardingStateChange to hit refresh errors: " + tojson(metrics),
+            );
         }
         return (
             metrics.countFlushReshardingStateChangeTotalShardingMetadataRefreshes > 1 &&
@@ -103,18 +115,19 @@ function stepUpNewPrimary(rst) {
     assert.eq(newPrimary, oldSecondary);
 }
 
-function testRetryOnTransientError(st, {enableCloneNoRefresh}) {
+function testRetryOnTransientError(st) {
     jsTest.log(
         "Start testing that _flushReshardingStateChange retries sharding metadata refresh " +
-            "on transient error " +
-            tojsononeline({enableCloneNoRefresh}),
+            "on transient error",
     );
     // Set up the collection to reshard.
     const dbName = "testDbBasic";
     const collName = "testColl";
     const ns = dbName + "." + collName;
     const testColl = st.s.getCollection(ns);
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+    );
     assert.commandWorked(testColl.insert([{x: -1}, {x: 0}, {x: 1}]));
     assert.commandWorked(testColl.createIndex({x: 1}));
 
@@ -151,11 +164,10 @@ function testRetryOnTransientError(st, {enableCloneNoRefresh}) {
     }
 }
 
-function testStopRetryingOnFailover(st, {enableCloneNoRefresh}) {
+function testStopRetryingOnFailover(st) {
     jsTest.log(
         "Start testing that _flushReshardingStateChange stops retrying sharding metadata " +
-            "refresh on failover " +
-            tojsononeline({enableCloneNoRefresh}),
+            "refresh on failover",
     );
 
     // Set up the collection to reshard.
@@ -163,7 +175,9 @@ function testStopRetryingOnFailover(st, {enableCloneNoRefresh}) {
     const collName = "testColl";
     const ns = dbName + "." + collName;
     const testColl = st.s.getCollection(ns);
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+    );
     assert.commandWorked(testColl.insert([{x: -1}, {x: 0}, {x: 1}]));
     assert.commandWorked(testColl.createIndex({x: 1}));
 
@@ -179,19 +193,14 @@ function testStopRetryingOnFailover(st, {enableCloneNoRefresh}) {
     const moveThread = new Thread(runMoveCollection, st.s.host, ns, st.shard1.shardName);
     moveThread.start();
 
-    jsTest.log("Waiting for _flushReshardingStateChange on shard0 to start retrying on refresh errors");
-    assertSoonFlushReshardingStateChangeStartRetryingOnRefreshErrors(primary0BeforeFailover);
-
-    const skipCloningAndApplyingEnabled = FeatureFlagUtil.isPresentAndEnabled(
-        st.s,
-        "ReshardingSkipCloningAndApplyingIfApplicable",
+    jsTest.log(
+        "Waiting for _flushReshardingStateChange on shard0 to start retrying on refresh errors",
     );
-    if (!(enableCloneNoRefresh && skipCloningAndApplyingEnabled)) {
-        // With both features enabled, recipient shards do not receive _flushReshardingStateChange and
-        // the coordinator uses other commands instead, so refresh-error retry verification is unnecessary.
-        jsTest.log("Waiting for _flushReshardingStateChange to shard1 to start retrying on refresh errors");
-        assertSoonFlushReshardingStateChangeStartRetryingOnRefreshErrors(primary1BeforeFailover);
-    }
+    assertSoonFlushReshardingStateChangeStartRetryingOnRefreshErrors(primary0BeforeFailover);
+    jsTest.log(
+        "Waiting for _flushReshardingStateChange to shard1 to start retrying on refresh errors",
+    );
+    assertSoonFlushReshardingStateChangeStartRetryingOnRefreshErrors(primary1BeforeFailover);
 
     jsTest.log("Triggering a failover on shard0");
     stepUpNewPrimary(st.rs0);
@@ -221,30 +230,41 @@ function testStopRetryingOnFailover(st, {enableCloneNoRefresh}) {
     }
 }
 
-function runTests({enableCloneNoRefresh}) {
-    jsTest.log("Start testing with " + tojsononeline({enableCloneNoRefresh}));
+function runTests() {
     const st = new ShardingTest({
         shards: 2,
         rs: {
             nodes: 3,
-            setParameter: {
-                featureFlagReshardingCloneNoRefresh: enableCloneNoRefresh,
-            },
-        },
-        other: {
-            configOptions: {
-                setParameter: {
-                    featureFlagReshardingCloneNoRefresh: enableCloneNoRefresh,
-                },
-            },
         },
     });
 
-    testRetryOnTransientError(st, {enableCloneNoRefresh});
-    testStopRetryingOnFailover(st, {enableCloneNoRefresh});
+    // This test exercises the legacy _flushReshardingStateChange retry path, which only runs when
+    // the resharding no-refresh feature flags are disabled. Those flags (along with the
+    // authoritative-shards flags that depend on them) are FCV-gated and enabled by default on the
+    // latest FCV, so the only realistic way to disable them is to run on an older FCV.
+    assert.commandWorked(
+        st.s.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+    );
+
+    // If the ReshardingCloneNoRefresh feature flag is enabled even when FCV is lastLTS, that means
+    // the legacy _flushReshardingStateChange refresh path is no longer exercised. Skip rather than
+    // have the test fail in that case.
+    //
+    // TODO (SERVER-98023): Remove this test entirely once the resharding no-refresh feature flags
+    // are removed.
+    if (FeatureFlagUtil.isPresentAndEnabled(st.configRS.getPrimary(), "ReshardingCloneNoRefresh")) {
+        jsTest.log.info(
+            "Skipping test: resharding no-refresh feature flags are enabled at " +
+                "lastLTSFCV, so the legacy refresh path cannot be exercised",
+        );
+        st.stop();
+        return;
+    }
+
+    testRetryOnTransientError(st);
+    testStopRetryingOnFailover(st);
 
     st.stop();
 }
 
-runTests({enableCloneNoRefresh: false});
-runTests({enableCloneNoRefresh: true});
+runTests();

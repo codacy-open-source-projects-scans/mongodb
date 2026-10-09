@@ -1,48 +1,125 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/ce/ce_common.h"
 #include "mongo/db/query/compiler/ce/sampling/ce_multikey_dotted_path_support.h"
+#include "mongo/db/query/compiler/ce/sampling/persistent_sample_gen.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/string_map.h"
+
+#include <functional>
+#include <utility>
 
 namespace mongo::ce {
 /**
+ * Represents the top-level fields that must be present in a sample.
+ */
+class TopLevelSampleFields {
+public:
+    /**
+     * Creates a set that represents all fields.
+     */
+    static TopLevelSampleFields allFields() {
+        return {};
+    }
+
+    explicit TopLevelSampleFields(StringSet fieldNames) : _fieldNames(std::move(fieldNames)) {}
+
+    bool needsAllFields() const {
+        return _fieldNames == kAllFields;
+    }
+
+    /**
+     * Only valid when not all fields are needed.
+     */
+    const StringSet& fieldNames() const;
+
+    /**
+     * Adds the fields of 'other' to 'this'. If either side needs all fields, marks 'this' as
+     * needing all fields.
+     */
+    void merge(TopLevelSampleFields other);
+
+    /**
+     * Helper to construct relevant indexes for the query planner.
+     */
+    boost::optional<StringSet&> relevantIndexOutput();
+
+    /**
+     * Helper to construct projection params from these top level fields.
+     */
+    ProjectionParams toProjectionParams() &&;
+
+private:
+    // boost::none denotes that all fields are needed.
+    static inline const boost::optional<StringSet> kAllFields = boost::none;
+
+    TopLevelSampleFields() = default;
+
+    boost::optional<StringSet> _fieldNames = kAllFields;
+};
+
+/**
  * Helper function to extract the top level fields from a given MatchExpression.
  */
-StringSet extractTopLevelFieldsFromMatchExpression(const MatchExpression* expr);
+TopLevelSampleFields extractTopLevelFieldsFromMatchExpression(const MatchExpression* expr);
+
+/**
+ * The canonically (lexicographically) sorted field paths a persisted NDV statistic describes.
+ */
+using SortedFieldPaths = std::vector<std::string>;
+
+/**
+ * Caches persisted NDV statistics for one estimator, and therefore for one query's planning:
+ * plan enumeration costs the same join edge in many candidate orders, so estimateNDV() is
+ * called with the same field paths many times within one optimization. Caching the compact
+ * document summary per sorted path set and the estimate per (path set, sketch variant) makes
+ * only the first such call read the statistics document. Nothing is shared across queries.
+ */
+class PersistedNDVStatsCache {
+public:
+    /**
+     * Returns the memoized estimate for the given path set and sketch variant, or nullptr when
+     * none was stored yet. The pointee may be an empty optional: misses are memoized too.
+     */
+    const boost::optional<CardinalityEstimate>* findEstimate(const SortedFieldPaths& sortedPaths,
+                                                             size_t sketchIndex) const;
+
+    void storeEstimate(const SortedFieldPaths& sortedPaths,
+                       size_t sketchIndex,
+                       boost::optional<CardinalityEstimate> estimate);
+
+    /**
+     * Returns the cached document summary for the given path set, invoking 'load' on the first
+     * request. The entry is boost::none when no usable document exists; that outcome is cached
+     * as well, so an absent document is looked up only once.
+     */
+    const boost::optional<PersistedNDVEntry>& getOrLoadDoc(
+        const SortedFieldPaths& sortedPaths,
+        const std::function<boost::optional<PersistedNDVEntry>()>& load);
+
+private:
+    // Loaded statistics (including misses) per sorted path set as compact PersistedNDVEntry
+    // summaries (no 16KB sketch registers), so serving several folding variants of one statistic
+    // reads the document once.
+    stdx::unordered_map<SortedFieldPaths, boost::optional<PersistedNDVEntry>> _docs;
+    // Persisted-NDV estimates (including misses), keyed by the sorted field paths plus the
+    // folding variant the request's equality semantics select, so repeated estimateNDV() calls
+    // during plan enumeration do not recompute.
+    stdx::unordered_map<std::pair<SortedFieldPaths, size_t>, boost::optional<CardinalityEstimate>>
+        _estimates;
+};
 
 /**
  * This CE Estimator estimates cardinality of predicates by running a filter/MatchExpression against
@@ -59,37 +136,41 @@ public:
         const CanonicalQuery& cq,
         CardinalityEstimate collCard,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
-        const MultipleCollectionAccessor& collections);
-
-    /**
-     * 'opCtx' is used to create a new CanonicalQuery for the sampling SBE plan.
-     * 'collections' is needed to create a sampling SBE plan. 'samplingStyle' can specify the
-     * sampling method. Prefer the factory method above outside tests.
-     */
-    SamplingEstimatorImpl(OperationContext* opCtx,
-                          const MultipleCollectionAccessor& collections,
-                          const NamespaceString& nss,
-                          PlanYieldPolicy::YieldPolicy yieldPolicy,
-                          SamplingCEMethodEnum samplingStyle,
-                          CardinalityEstimate collectionCard,
-                          SamplingConfidenceIntervalEnum ci,
-                          double marginOfError,
-                          boost::optional<int> numChunks);
+        const MultipleCollectionAccessor& collections,
+        SamplingSourceEnum samplingSource = SamplingSourceEnum::kPersistentSample);
 
     /*
-     * This constructor allows the caller to specify the sample size if necessary. This constructor
-     * is useful when a certain scale of sample is more appropriate, for example, the planner wants
-     * to do preliminary data distribution analysis with a small sample size. Testing cases may
-     * require only a small sample. Prefer the factory method above outside tests.
+     * Lets the caller specify an exact sample size. Prefer the factory method above for most use
+     * cases outside tests.
      */
-    SamplingEstimatorImpl(OperationContext* opCtx,
-                          const MultipleCollectionAccessor& collections,
-                          const NamespaceString& nss,
-                          PlanYieldPolicy::YieldPolicy yieldPolicy,
-                          size_t sampleSize,
-                          SamplingCEMethodEnum samplingStyle,
-                          boost::optional<int> numChunks,
-                          CardinalityEstimate collectionCard);
+    SamplingEstimatorImpl(
+        OperationContext* opCtx,
+        const MultipleCollectionAccessor& collections,
+        const NamespaceString& nss,
+        PlanYieldPolicy::YieldPolicy yieldPolicy,
+        size_t sampleSize,
+        SamplingCEMethodEnum samplingStyle,
+        boost::optional<int> numChunks,
+        CardinalityEstimate collectionCard,
+        boost::intrusive_ptr<const ExpressionContext> customerQueryExpCtx,
+        SamplingSourceEnum samplingSource = SamplingSourceEnum::kPersistentSample,
+        SamplingCEMethodEnum persistentSampleMethod = PersistentSampleCEMethod::kDataDefault);
+
+    /*
+     * Convenience constructor that accepts a raw record count instead of a CardinalityEstimate,
+     * for callers outside the cost_based_ranker module that cannot construct CardinalityType.
+     */
+    SamplingEstimatorImpl(
+        OperationContext* opCtx,
+        const MultipleCollectionAccessor& collections,
+        const NamespaceString& nss,
+        PlanYieldPolicy::YieldPolicy yieldPolicy,
+        size_t sampleSize,
+        SamplingCEMethodEnum samplingStyle,
+        boost::optional<int> numChunks,
+        long long numRecords,
+        boost::intrusive_ptr<const ExpressionContext> customerQueryExpCtx,
+        SamplingSourceEnum samplingSource = SamplingSourceEnum::kPersistentSample);
 
     ~SamplingEstimatorImpl() override;
 
@@ -98,13 +179,6 @@ public:
      * sample.
      */
     CardinalityEstimate estimateCardinality(const MatchExpression* expr) const override;
-
-    /**
-     * Batch Estimates the Cardinality of a vector of filter/MatchExpression by running the given
-     * MEs against the sample.
-     */
-    std::vector<CardinalityEstimate> estimateCardinality(
-        const std::vector<const MatchExpression*>& expr) const override;
 
     /**
      * Estimates the number of keys scanned for the given IndexBounds. This function extracts all
@@ -159,22 +233,6 @@ public:
     using SamplingEstimator::estimateNDVMultiKey;
 
     /*
-     * Generates a sample using a random cursor. The caller can call this function to draw a sample
-     * of 'sampleSize'. If it's a re-sample request, the old sample will be freed and replaced by
-     * the new sample.
-     */
-    void generateRandomSample(size_t sampleSize);
-    void generateRandomSample();
-
-    /*
-     * Generates a sample using a chunk-based sampling method. The sample consists of multiple
-     * random chunks. Similar to the other sampling function, the caller can call this function to
-     * re-sample. The old sample will be freed.
-     */
-    void generateChunkSample(size_t sampleSize);
-    void generateChunkSample();
-
-    /*
      * Generates a sample of documents from the collection using random, chunk-based, sequential
      * scan or full collection scan sampling strategies based on configuration. 'projectionParams'
      * is a std::variant that specifies whether we want to project the top level fields in a sample.
@@ -188,6 +246,30 @@ public:
      */
     inline size_t getSampleSize() const final {
         return _sampleSize;
+    }
+
+    /**
+     * Returns the collected sample documents.
+     */
+    const std::vector<BSONObj>& getSample() const {
+        return _sample;
+    }
+
+    /*
+     * Returns the sampling metadata for the generated sample, which includes:
+     * - the sampling technique
+     * - the requested sample size
+     * - the actual sample size
+     * - the memory size of the sample in bytes
+     * - the sampling source (persistent vs on-the-fly)
+     * - the date and time when the sample was generated
+     */
+    SamplingMetadata getSamplingMetadata() const final;
+
+    std::vector<PersistedNDVEntry> getPersistedNDVMetadata() const final;
+
+    size_t getNumPersistedNDVStatsUsed() const final {
+        return _persistedNDVStatsUsed.size();
     }
 
     /**
@@ -259,17 +341,34 @@ public:
         }
     }
 
-    double getCollCard() const override {
-        return _collectionCard.toDouble();
+    CardinalityEstimate getCollCard() const override {
+        return _collectionCard;
     }
 
     /*
-     * The sample size is calculated based on the confidence level and margin of error(MoE)
-     * required.  n = Z^2 / W^2
-     * where Z is the z-score for the confidence interval and
-     * W is the width of the confidence interval, W = 2 * MoE.
+     * Returns the sample size as set by the relevant knobs. Unless overridden, calculated from
+     * confidence interval and margin of error:
+     * n = Z^2 / W^2
+     * where Z is the z-score for the confidence interval
+     * and W is the width of the confidence interval, W = 2 * MoE.
      */
-    static size_t calculateSampleSize(SamplingConfidenceIntervalEnum ci, double marginOfError);
+    static size_t calculateSampleSize(const QueryKnobConfiguration& qkc);
+
+    /**
+     * TODO SERVER-129240: Remove this helper once types are unified
+     * Converts a SamplingCEMethodEnum value into its equivalent SamplingTechniqueEnum value.
+     */
+    static ce::SamplingTechniqueEnum samplingMethodToTechnique(
+        SamplingCEMethodEnum samplingMethod) {
+        switch (samplingMethod) {
+            case SamplingCEMethodEnum::kRandom:
+                return ce::SamplingTechniqueEnum::kRandom;
+            case SamplingCEMethodEnum::kChunk:
+                return ce::SamplingTechniqueEnum::kChunk;
+            default:
+                MONGO_UNREACHABLE;
+        }
+    }
 
 protected:
     /*
@@ -278,8 +377,10 @@ protected:
      * preparing the sampling plan for execution in SBE. That function uses the CanonicalQuery to
      * bind input parameters, but this is a no-op for sampling CE.
      */
-    static std::unique_ptr<CanonicalQuery> makeEmptyCanonicalQuery(const NamespaceString& nss,
-                                                                   OperationContext* opCtx);
+    static std::unique_ptr<CanonicalQuery> makeEmptyCanonicalQuery(
+        const NamespaceString& nss,
+        OperationContext* opCtx,
+        boost::intrusive_ptr<const ExpressionContext> customerQueryExpCtx);
 
     /**
      * This helper calls the given callback for each document
@@ -315,8 +416,56 @@ protected:
     // Lazily computed on the first estimateNDV() call. Counts the number of documents with
     // distinct _id values in the sample to detect duplicates from sampling with replacement.
     mutable boost::optional<size_t> _uniqueDocCount;
+    // Lazily computed on the first estimateNDV() call: whether persisted NDV statistics may be
+    // served (feature flag and knob).
+    mutable boost::optional<bool> _persistentNDVEnabled;
+    // Caches loaded statistics documents and memoized estimates for this estimator.
+    mutable PersistedNDVStatsCache _persistedNDVCache;
+    // Field paths whose NDV was served from persisted statistics; surfaced in explain via
+    // getSamplingMetadata().
+    mutable std::vector<PersistedNDVEntry> _persistedNDVStatsUsed;
+    // Set to true when tryLoadPersistentSample() successfully loads sample from stats collection.
+    bool _wasSamplePersisted = false;
+    SamplingCEMethodEnum _persistentSampleMethod;
+    // On-the-fly sampling technique used when no persisted sample is loaded.
+    SamplingCEMethodEnum _samplingStyle;
 
 private:
+    /**
+     * Serves the NDV from persisted field statistics (built by analyze mode "ndv") when
+     * eligible: feature flag and knob enabled, at most kNdvMaxFields fields and no bounds.
+     * The request's equality semantics select the persisted folding variant; composite requests
+     * folding several fields have none and are ineligible. Returns boost::none when ineligible
+     * or when no usable statistics exist; the caller then falls back to the sample-based
+     * estimate. Loaded documents are cached per sorted path set and results, including misses,
+     * are memoized per path set and variant.
+     */
+    boost::optional<CardinalityEstimate> tryEstimateNDVFromPersistentStats(
+        const std::vector<FieldPathAndEqSemantics>& fields,
+        boost::optional<std::span<const OrderedIntervalList>> bounds) const;
+
+    /**
+     * Whether persisted NDV statistics may be served, i.e. featureFlagPersistentStats and the
+     * internalQueryEnablePersistentNDVStats knob are both enabled. Computed once per instance.
+     */
+    bool persistentNDVStatsEnabled() const;
+
+    /**
+     * Picks the persisted sketch variant a request's equality semantics need: 0 for the strict
+     * tuple sketch, i + 1 for the variant folding the i-th sorted field. Returns boost::none
+     * when no persisted variant can serve the request (several folded fields).
+     */
+    boost::optional<size_t> selectPersistedNDVSketchIndex(
+        const std::vector<std::pair<std::string, bool>>& sortedFields,
+        const SortedFieldPaths& sortedPaths) const;
+
+    /**
+     * Loads and validates the field-stats document for the given sorted path set, returning a
+     * compact summary, or boost::none when no usable document exists.
+     */
+    boost::optional<PersistedNDVEntry> loadPersistedNDVStats(const SortedFieldPaths& sortedPaths,
+                                                             size_t numFields) const;
+
     /**
      * Constructs a sampling SBE plan using the random-walk method.
      * The SBE plan consists of a sbe::ScanStage which uses a random cursor to read documents
@@ -339,6 +488,11 @@ private:
     void generateFullCollScanSample();
 
     /**
+     * Builds and runs an on-the-fly sampling plan for 'technique'.
+     */
+    void generateSampleForTechnique(SamplingTechniqueEnum technique);
+
+    /**
      * This function executes the sampling query and generates the sample from the documents
      * produced by the query.
      */
@@ -348,25 +502,66 @@ private:
         std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy);
 
     /**
-     * Generates a sample by sequentially scanning documents from the start of the target
-     * collection. The sample is generated from the first '_sampleSize' documents of the collection.
-     * This sampling method is only used for testing purposes where a repeatable sample is needed.
+     * Generates a repeatable sample for testing using one of the deterministic scan-based
+     * techniques:
+     *   - kSeqScan: sequentially scan from the start of the collection and take the first
+     *     '_sampleSize' documents.
+     *   - kStrides: sequentially scan and keep documents whose _id satisfies
+     *     shardHash(_id) % M == 0, where M = max(1, collCard / sampleSize). shardHash uses
+     *     BSONElementHasher, which is stable across process restarts. The result is capped at
+     *     '_sampleSize' documents.
      */
-    void generateSampleBySeqScanningForTesting();
+    void generateSampleForTesting(SamplingTechniqueEnum technique);
+
+    /**
+     * Helper to get SamplingTechnique from test-only knobs
+     */
+    boost::optional<SamplingTechniqueEnum> getTestOnlySamplingModeIfSet();
+
+    /**
+     * If '_samplingSource' is kPersistentSample, attempts to load a previously persisted sample
+     * for the given method + size from `<db>.system.stats.samples` using a DBDirectClient point
+     * lookup. Returns Status::OK() and populates '_sample' and '_sampleSize' on hit. Returns a
+     * non-OK status otherwise: NoSuchKey for a clean miss or misconfiguration, another code for
+     * a malformed doc. The caller is responsible for logging non-NoSuchKey failures and falling
+     * back to SBE sampling.
+     */
+    Status tryLoadPersistentSample(SamplingTechniqueEnum method);
 
     OperationContext* _opCtx;
     // The collection the sampling plan runs against and is the one accessed by the query being
     // optimized.
     const MultipleCollectionAccessor& _collections;
+    boost::intrusive_ptr<const ExpressionContext> _customerQueryExpCtx;
     NamespaceString _nss;
     PlanYieldPolicy::YieldPolicy _yieldPolicy;
-    SamplingCEMethodEnum _samplingStyle;
     // The set of top level fields that we want to include in the sampled documents.
     StringSet _topLevelSampleFieldNames;
 
     boost::optional<int> _numChunks;
 
     CardinalityEstimate _collectionCard;
+
+    // Controls whether persistent samples are consulted before falling back to SBE sampling.
+    // 'analyze' constructs its estimator with kOnTheFlySample so it always collects a fresh sample
+    // (otherwise a refresh would just re-read the sample it's about to replace).
+    SamplingSourceEnum _samplingSource;
+
+    // The timestamp when the sample was created. For persisted samples this is read from the
+    // stored document; for on-the-fly samples it is set to Date_t::now() at the end of
+    // generateSample(). Always valid after generateSample() completes.
+    boost::optional<Date_t> _sampleCreatedAt;
+    // The number of documents requested when generateSample() was called. May differ from the
+    // actual sample size (_sampleSize) in the following cases:
+    //   1. The collection is smaller than the requested sample size (full collection scan used).
+    //   2. Chunk-based sampling: if a random cursor lands on the last document in the collection,
+    //      no full chunk can be collected for that cursor, so the actual sample is smaller.
+    size_t _requestedSampleSize = 0;
+    // The actual sampling strategy used. Set by generateSample() before dispatch.
+    boost::optional<SamplingTechniqueEnum> _usedSamplingTechnique;
+
+    // Only set when tryLoadPersistentSample() successfully loads a persisted sample.
+    boost::optional<size_t> _numPages;
 };
 
 }  // namespace mongo::ce

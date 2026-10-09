@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,6 +15,7 @@
 #include "mongo/db/index_builds/index_build_oplog_entry.h"
 #include "mongo/db/index_builds/index_builds.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/index_builds/primary_driven/registry.h"
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
@@ -64,8 +38,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -83,7 +59,7 @@ namespace mongo {
  * accessible via the ServiceContext. It owns an IndexBuildsManager that manages all MultiIndexBlock
  * index builder instances.
  */
-class MONGO_MOD_PUBLIC IndexBuildsCoordinator {
+class [[MONGO_MOD_PUBLIC]] IndexBuildsCoordinator {
 public:
     /**
      * Represents the set of different application modes used around building indexes that differ
@@ -191,7 +167,8 @@ public:
         const UUID& collectionUUID,
         const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
-        const ResumeIndexInfo& resumeInfo) = 0;
+        const ResumeIndexInfo& resumeInfo,
+        IndexBuildOptions indexBuildOptions) = 0;
 
     /**
      * Resumes and restarts index builds for recovery. Anything that fails to resume will be started
@@ -277,7 +254,11 @@ public:
                                   const DatabaseName& dbName,
                                   const std::string& reason);
 
-    void abortUserIndexBuildsForUserWriteBlocking(OperationContext* opCtx);
+    /**
+     * Aborts non-internal DBs index builds and waits for any that are already finishing
+     * (and thus cannot be aborted) to complete.
+     */
+    void abortIndexBuildsForWriteBlocking(OperationContext* opCtx);
 
     /**
      * Signals all of the index builds to abort and then waits until the index builds are no longer
@@ -325,13 +306,6 @@ public:
                                                       std::string reason);
 
     /**
-     * Aborts all in progress index builds with the specified status.
-     *
-     * May throw if InterruptedDueToReplStateChange, but suppresses other exceptions.
-     */
-    void abortAllTwoPhaseIndexBuildsForStepUp(OperationContext* opCtx, Status abortStatus);
-
-    /**
      * Signals all of the index builds to abort and then waits until the index builds are no longer
      * running. The provided 'reason' will be used in the error message that the index builders
      * return to their callers.
@@ -341,6 +315,12 @@ public:
      * Does not stop new index builds from starting.
      */
     void abortAllIndexBuildsWithReason(OperationContext* opCtx, const std::string& reason);
+
+    /**
+     * Returns whether this node is running the given index build, meaning it has a builder thread
+     * that has to be signalled and joined to stop it.
+     */
+    bool isIndexBuildRunning(const UUID& buildUUID) const;
 
     /**
      * Returns true if there is an index builder building the given index names on a collection.
@@ -377,7 +357,7 @@ public:
     virtual Status voteAbortIndexBuild(OperationContext* opCtx,
                                        const UUID& buildUUID,
                                        const HostAndPort& hostAndPort,
-                                       StringData reason) = 0;
+                                       std::string_view reason) = 0;
 
     /**
      * Handles the 'VoteCommitIndexBuild' command request.
@@ -395,7 +375,7 @@ public:
      */
     virtual Status setCommitQuorum(OperationContext* opCtx,
                                    const NamespaceString& nss,
-                                   const std::vector<StringData>& indexNames,
+                                   const std::vector<std::string_view>& indexNames,
                                    const CommitQuorumOptions& newCommitQuorum) = 0;
 
     /**
@@ -446,7 +426,9 @@ public:
     /**
      * Waits for all index builds on a specified database to finish.
      */
-    void awaitNoBgOpInProgForDb(OperationContext* opCtx, const DatabaseName& dbName);
+    void awaitNoBgOpInProgForDb(OperationContext* opCtx,
+                                const DatabaseName& dbName,
+                                std::initializer_list<IndexBuildProtocol> protocols);
 
     /**
      * Waits until an index build completes or the deadline expires. If there are no index builds in
@@ -516,6 +498,8 @@ public:
 
     void verifyNoIndexBuilds_forTestOnly() const;
 
+    void awaitStepUpThread_forTestOnly();
+
     /**
      * Preprocesses a list of index specs and idents to normalize them and remove any indexes which
      * already exist in the ready state. Collation defaults are added to each spec if needed,
@@ -545,6 +529,19 @@ public:
     static int getNumIndexesTotal(OperationContext* opCtx, const CollectionPtr& collection);
 
 private:
+    /**
+     * Creates a pending interceptor for each primary-driven index build awaiting resume, so writes
+     * accepted before those builds set themselves up are recorded. Must run before the node accepts
+     * writes.
+     */
+    void _attachInterceptorsForResumableBuildsOnStepUp(OperationContext* opCtx);
+
+    /**
+     * Resumes primary-driven index builds on step-up to primary. Resumed index builds will be
+     * continued in a background thread. Index builds that cannot be resumed will be aborted.
+     */
+    void _resumePrimaryDrivenIndexBuildsOnStepUp(OperationContext* opCtx);
+
     /**
      * Sets up the in-memory and durable state of the index build.
      *
@@ -667,15 +664,25 @@ protected:
                                                const std::vector<IndexBuildInfo>& indexes,
                                                const UUID& buildUUID);
     /**
-     * Reconstructs the in-memory state of the index build so that it can be resumed from the phase
-     * it was in when the node cleanly shut down.
+     * Registers an index build to be resumed, validating the state against the catalog. Can be
+     * called on any thread, as no actual setup is performed.
+     */
+    Status _registerResumeIndexBuild(OperationContext* opCtx,
+                                     const DatabaseName& dbName,
+                                     const UUID& collectionUUID,
+                                     const std::vector<IndexBuildInfo>& indexes,
+                                     const UUID& buildUUID,
+                                     const ResumeIndexInfo& resumeInfo,
+                                     IndexBuildProtocol protocol);
+
+    /**
+     * Sets up an already-registerd index build to be resumed. Must be called on the builder thread
+     * if the protocol involves establishing resources tied to the calling thread.
      */
     Status _setUpResumeIndexBuild(OperationContext* opCtx,
-                                  const DatabaseName& dbName,
-                                  const UUID& collectionUUID,
-                                  const std::vector<IndexBuildInfo>& indexes,
                                   const UUID& buildUUID,
-                                  const ResumeIndexInfo& resumeInfo);
+                                  const ResumeIndexInfo& resumeInfo,
+                                  IndexBuildProtocol protocol);
 
     /**
      * Runs the index build on the caller thread. Handles unregistering the index build and setting
@@ -749,6 +756,19 @@ protected:
     void _completeAbortForShutdown(OperationContext* opCtx,
                                    std::shared_ptr<ReplIndexBuildState> replState,
                                    const CollectionPtr& collection);
+
+    /**
+     * Marks the two-phase resumability state in both ReplIndexBuildState and MultiIndexBlock to be
+     * resumable.
+     */
+    void _markTwoPhaseBuildResumable(ReplIndexBuildState& replState,
+                                     repl::OpTime lastOpTimeBeforeInterceptors);
+
+    /**
+     * Marks the two-phase resumability state in both ReplIndexBuildState and MultiIndexBlock to NOT
+     * be resumable.
+     */
+    void _markTwoPhaseBuildNonResumable(ReplIndexBuildState& replState);
 
     /**
      * Waits for the last optime before the interceptors were installed on the node to be majority
@@ -911,6 +931,30 @@ protected:
      * Looks up active index build by UUID. Returns NoSuchKey if the build does not exist.
      */
     StatusWith<std::shared_ptr<ReplIndexBuildState>> _getIndexBuild(const UUID& buildUUID) const;
+
+    /**
+     * Aborts a primary-driven index build that is registered but not yet running. There is no
+     * builder thread to signal, so this aborts the build's durable state directly, under the
+     * collection X lock.
+     *
+     * Returns whether the build was aborted; it may have been resumed or aborted concurrently.
+     */
+    bool _abortUnresumedPrimaryDrivenIndexBuild(
+        OperationContext* opCtx,
+        const UUID& buildUUID,
+        const index_builds::primary_driven::Registry::Entry& build,
+        const std::string& reason);
+
+    /**
+     * Aborts the registered primary-driven index builds that 'match' and are not running here.
+     * Returns the UUIDs of the builds that were aborted. Callers must deal with running builds
+     * first: a build the coordinator is running is registered too, and aborting its durable state
+     * from underneath its builder thread would corrupt it.
+     */
+    std::vector<UUID> _abortUnresumedPrimaryDrivenIndexBuilds(
+        OperationContext* opCtx,
+        const std::function<bool(const index_builds::primary_driven::Registry::Entry&)>& match,
+        const std::string& reason);
 
     /** Called by implementations to bump the waitForCommitQuorum counter when they do so.*/
     void _incWaitForCommitQuorum();

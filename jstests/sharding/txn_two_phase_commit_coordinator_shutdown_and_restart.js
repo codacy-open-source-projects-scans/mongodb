@@ -7,10 +7,6 @@
  * @tags: [uses_transactions, uses_multi_shard_transaction, requires_persistence]
  */
 
-// The UUID consistency check uses connections to shards cached on the ShardingTest object, but this
-// test causes failovers on a shard, so the cached connection is not usable.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 // Since we expect prepared transactions in progress when shutting down a node, we will need to skip
 // these validation checks.
 TestData.skipCheckDBHashes = true;
@@ -26,7 +22,11 @@ const rs0_opts = {
 const rs1_opts = {
     nodes: [{}, {rsConfig: {priority: 0}}],
 };
-const st = new ShardingTest({shards: {rs0: rs0_opts, rs1: rs1_opts}, mongos: 1, causallyConsistent: true});
+const st = new ShardingTest({
+    shards: {rs0: rs0_opts, rs1: rs1_opts},
+    mongos: 1,
+    causallyConsistent: true,
+});
 
 // Create a sharded collection:
 // shard0: [-inf, 0)
@@ -34,7 +34,9 @@ const st = new ShardingTest({shards: {rs0: rs0_opts, rs1: rs1_opts}, mongos: 1, 
 assert.commandWorked(st.s0.adminCommand({enableSharding: "test", primaryShard: st.shard0.name}));
 assert.commandWorked(st.s0.adminCommand({shardCollection: "test.user", key: {x: 1}}));
 assert.commandWorked(st.s0.adminCommand({split: "test.user", middle: {x: 0}}));
-assert.commandWorked(st.s0.adminCommand({moveChunk: "test.user", find: {x: 0}, to: st.shard1.name}));
+assert.commandWorked(
+    st.s0.adminCommand({moveChunk: "test.user", find: {x: 0}, to: st.shard1.name}),
+);
 
 const testDB = st.s0.getDB("test");
 assert.commandWorked(testDB.runCommand({insert: "user", documents: [{x: -10}, {x: 10}]}));
@@ -82,7 +84,12 @@ let failPoint = configureFailPoint(coordinatorPrimaryConn, "hangBeforeWritingDec
 
 // Run commit through mongos in a parallel thread. This should timeout since we have set the
 // failpoint.
-const commitThread = runCommitThroughMongosInParallelThread(lsid, txnNumber, st.s.host, ErrorCodes.MaxTimeMSExpired);
+const commitThread = runCommitThroughMongosInParallelThread(
+    lsid,
+    txnNumber,
+    st.s.host,
+    ErrorCodes.MaxTimeMSExpired,
+);
 commitThread.start();
 failPoint.wait();
 commitThread.join();

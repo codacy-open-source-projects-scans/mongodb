@@ -1,36 +1,12 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/vm/code_fragment.h"
 
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -85,7 +61,7 @@ void CodeFragment::removeFrame(FrameId frameId) {
             str::stream() << "Can't remove frame that has outstanding fixups. frameId:" << frameId,
             p->second.fixupOffsets.empty());
 
-    _frames.erase(frameId);
+    _frames.erase(p);
 }
 
 bool CodeFragment::hasFrames() const {
@@ -139,7 +115,7 @@ void CodeFragment::removeLabel(LabelId labelId) {
             str::stream() << "Can't remove label that has outstanding fixups. labelId:" << labelId,
             p->second.fixupOffsets.empty());
 
-    _labels.erase(labelId);
+    _labels.erase(p);
 }
 
 void CodeFragment::appendLabel(LabelId labelId) {
@@ -447,8 +423,26 @@ void CodeFragment::appendPop() {
     appendSimpleInstruction(Instruction::pop);
 }
 
-void CodeFragment::appendSwap() {
-    appendSimpleInstruction(Instruction::swap);
+void CodeFragment::appendSwapAndPop(size_t numPops) {
+    auto popOperation = [&](unsigned char numPops) {
+        Instruction i;
+        i.tag = Instruction::swapAndPop;
+
+        auto offset = allocateSpace(sizeof(Instruction) + sizeof(numPops));
+
+        offset += writeToMemory(offset, i);
+        offset += writeToMemory(offset, numPops);
+        _stackSize -= numPops;
+    };
+
+    size_t maxPops = std::numeric_limits<unsigned char>::max();
+    while (numPops > maxPops) {
+        popOperation(maxPops);
+        numPops -= maxPops;
+    }
+    if (numPops > 0) {
+        popOperation(numPops);
+    }
 }
 
 void CodeFragment::appendMakeOwn(Instruction::Parameter arg) {
@@ -607,7 +601,7 @@ void CodeFragment::appendGetField(Instruction::Parameter lhs, Instruction::Param
     appendSimpleInstruction(Instruction::getField, lhs, rhs);
 }
 
-void CodeFragment::appendGetField(Instruction::Parameter input, StringData fieldName) {
+void CodeFragment::appendGetField(Instruction::Parameter input, std::string_view fieldName) {
     auto size = fieldName.size();
     tassert(11086817, "Field name is too long", size < Instruction::kMaxInlineStringSize);
 
@@ -640,10 +634,6 @@ void CodeFragment::appendGetFieldOrElement(Instruction::Parameter lhs, Instructi
 
 void CodeFragment::appendGetArraySize(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::getArraySize, input);
-}
-
-void CodeFragment::appendSetField() {
-    appendSimpleInstruction(Instruction::setField);
 }
 
 void CodeFragment::appendSum() {
@@ -684,6 +674,10 @@ void CodeFragment::appendExists(Instruction::Parameter input) {
 
 void CodeFragment::appendIsNull(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isNull, input);
+}
+
+void CodeFragment::appendIsNullish(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isNullish, input);
 }
 
 void CodeFragment::appendIsObject(Instruction::Parameter input) {
@@ -734,6 +728,10 @@ void CodeFragment::appendIsMaxKey(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isMaxKey, input);
 }
 
+void CodeFragment::appendMqlComparisonRank(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::mqlComparisonRank, input);
+}
+
 void CodeFragment::appendIsTimestamp(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isTimestamp, input);
 }
@@ -765,9 +763,6 @@ void CodeFragment::appendTraverseP(int codePosition, size_t numArgs, Instruction
     adjustStackSimple(i);
 }
 
-void CodeFragment::appendMagicTraverseF() {
-    appendSimpleInstruction(Instruction::magicTraverseF);
-}
 void CodeFragment::appendTraverseF() {
     appendSimpleInstruction(Instruction::traverseF);
 }

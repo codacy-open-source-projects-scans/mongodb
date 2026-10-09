@@ -86,6 +86,9 @@ selector:
     # Uses mongod generated UUID which is different between the clusters
     - jstests/core/query/parsing/collection_uuid_write_commands.js
 
+    # The test sets stmtIds manually.
+    - jstests/core/query/parsing/write_command_duplicate_stmt_ids_validation.js
+
     # update with $ modifiers can sometimes change field ordering
     - jstests/core/query/update/update_multi5.js
     - jstests/core/query/update/upsert_and.js
@@ -117,8 +120,6 @@ selector:
     - jstests/core/query/update/update_set_unset.js
 
     # batching can cause planCache to be different than expectations
-    - jstests/core/query/sbe/sbe_plan_cache_duplicate_or_clauses.js
-    - jstests/core/query/sbe/sbe_plan_cache_autoparameterize_ixscan.js
     - jstests/core/index/index_filter_commands_invalidate_plan_cache_entries.js
     - jstests/core/query/plan_cache/plan_cache_sbe.js
 
@@ -212,7 +213,7 @@ executor:
         await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
         TestData.preOverrideRunCommand = Mongo.prototype.runCommand;
         await import("jstests/libs/override_methods/enable_sessions.js");
-        await import('jstests/libs/override_methods/multiple_crud_ops_as_bulk_write.js');
+        await import('jstests/libs/override_methods/query/multiple_crud_ops_as_bulk_write.js');
   hooks:
     - class: CheckReplDBHash
     - class: ValidateCollections

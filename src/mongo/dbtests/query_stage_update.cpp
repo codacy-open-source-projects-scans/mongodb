@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file tests the UpdateStage class
  */
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -57,6 +30,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration_test_util.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
@@ -65,7 +39,7 @@
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -73,6 +47,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -236,7 +211,8 @@ public:
                 write_ops::UpdateModification::parseFromClassicUpdate(updates));
             request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-            const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+            const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>>
+                arrayFilters;
             const auto constants = boost::none;
 
             ASSERT_DOES_NOT_THROW(driver.parse(
@@ -318,7 +294,8 @@ public:
                 write_ops::UpdateModification::parseFromClassicUpdate(updates));
             request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-            const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+            const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>>
+                arrayFilters;
             const auto constants = boost::none;
 
             ASSERT_DOES_NOT_THROW(driver.parse(
@@ -442,7 +419,7 @@ public:
         request.setReturnDocs(UpdateRequest::RETURN_OLD);
         request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+        const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
         const auto constants = boost::none;
 
         ASSERT_DOES_NOT_THROW(driver.parse(
@@ -538,7 +515,7 @@ public:
         request.setReturnDocs(UpdateRequest::RETURN_NEW);
         request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+        const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
         const auto constants = boost::none;
 
         ASSERT_DOES_NOT_THROW(driver.parse(
@@ -624,7 +601,7 @@ public:
             write_ops::UpdateModification::parseFromClassicUpdate(fromjson("{$inc: {x: 1}}")));
         request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+        const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
         const auto constants = boost::none;
         ASSERT_DOES_NOT_THROW(driver.parse(
             request.getUpdateModification(), arrayFilters, constants, request.isMulti()));
@@ -657,7 +634,9 @@ class QueryStageUpdateMemoryLimitExceeded : public QueryStageUpdateBase {
 public:
     void run() {
         // Set an absurdly small limit so the deduplicator overhead alone exceeds it.
-        RAIIServerParameterControllerForTest maxMemoryBytes{"internalUpdateStageMaxMemoryBytes", 1};
+        // The knob guard also resets the cached per-operation QueryKnobConfiguration, which may
+        // have materialized with the default limit earlier in this test.
+        QueryKnobGuardForTest maxMemoryBytes{&_opCtx, "internalUpdateStageMaxMemoryBytes", 1LL};
 
         for (int i = 0; i < 10; ++i) {
             insert(BSON("_id" << i << "x" << i));
@@ -684,7 +663,7 @@ public:
             write_ops::UpdateModification::parseFromClassicUpdate(fromjson("{$inc: {x: 1}}")));
         request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
-        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+        const std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
         const auto constants = boost::none;
         ASSERT_DOES_NOT_THROW(driver.parse(
             request.getUpdateModification(), arrayFilters, constants, request.isMulti()));

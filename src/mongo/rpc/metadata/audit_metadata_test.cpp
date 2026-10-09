@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/rpc/metadata/audit_metadata.h"
 
@@ -40,17 +14,20 @@
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/net/hostandport.h"
 
+#include <string_view>
+
 namespace mongo::rpc {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kLocalAddr = "127.0.0.1:2000"_sd;
-constexpr auto kRemoteAddr = "127.0.0.2:27018"_sd;
-constexpr auto kProxyAddr = "10.0.0.1:8080"_sd;
-constexpr std::array<StringData, 2> kExpectedProxies = {kLocalAddr, kProxyAddr};
+constexpr auto kLocalAddr = "127.0.0.1:2000"sv;
+constexpr auto kRemoteAddr = "127.0.0.2:27018"sv;
+constexpr auto kProxyAddr = "10.0.0.1:8080"sv;
+constexpr std::array<std::string_view, 2> kExpectedProxies = {kLocalAddr, kProxyAddr};
 
-constexpr auto kUserName = "testUser"_sd;
-constexpr auto kDBName = "admin"_sd;
-constexpr auto kRoleName = "root"_sd;
+constexpr auto kUserName = "testUser"sv;
+constexpr auto kDBName = "admin"sv;
+constexpr auto kRoleName = "root"sv;
 
 class AuditMetadataTest : public ServiceContextTest {
 protected:
@@ -85,8 +62,9 @@ protected:
         std::vector<RoleName> roleNames{RoleName{kRoleName, kDBName}};
 
         AuditClientAttrs::set(_client,
-                              AuditClientAttrs(std::move(local),
-                                               std::move(remote),
+                              AuditClientAttrs(local,
+                                               remote,
+                                               remote /* directRemote */,
                                                std::move(proxies),
                                                true /* isImpersonating */));
         AuditUserAttrs::set(opCtx(), userName, roleNames, true /* isImpersonating */);

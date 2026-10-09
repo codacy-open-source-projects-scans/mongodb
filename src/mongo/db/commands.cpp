@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands.h"
 
@@ -46,6 +20,7 @@
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/namespace_string_util.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/version_context.h"
@@ -53,6 +28,7 @@
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/otel/traces/sampler/sampler.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
@@ -70,6 +46,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/node_hash_map.h>
@@ -82,6 +59,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 const std::set<std::string> kNoApiVersions = {};
 const std::set<std::string> kApiVersions1 = {"1"};
@@ -150,14 +128,14 @@ auto getCommandInvocationHooks =
 
 class CommandNameAtomRegistry {
 public:
-    size_t lookup(StringData s);
+    size_t lookup(std::string_view s);
 
 private:
     StringMap<size_t> _atoms;
     std::mutex _mutex;
 };
 
-size_t CommandNameAtomRegistry::lookup(StringData s) {
+size_t CommandNameAtomRegistry::lookup(std::string_view s) {
     std::lock_guard lock(_mutex);
 
     auto itr = _atoms.find(s);
@@ -200,8 +178,15 @@ bool prepareForFLERewrite(OperationContext* opCtx,
         std::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
     }
+    const auto processed = encryptionInformation->getCrudProcessed().value_or(false);
+    uassert(12783100,
+            "External users cannot have encryptionInformation.crudProcessed enabled",
+            !processed ||
+                AuthorizationSession::get(opCtx->getClient())
+                    ->isAuthorizedForActionsOnResource(
+                        ResourcePattern::forClusterResource(boost::none), ActionType::internal));
     // Prevent duplicate rewriting.
-    return !encryptionInformation->getCrudProcessed().value_or(false);
+    return !processed;
 }
 
 void CommandInvocationHooks::set(ServiceContext* serviceContext,
@@ -281,14 +266,14 @@ void CommandHelpers::auditLogAuthEvent(OperationContext* opCtx,
             }
         }
 
-        std::set<StringData> sensitiveFieldNames() const override {
+        std::set<std::string_view> sensitiveFieldNames() const override {
             if (_invocation) {
                 return _invocation->definition()->sensitiveFieldNames();
             }
             return {};
         }
 
-        StringData getName() const override {
+        std::string_view getName() const override {
             return _name;
         }
 
@@ -317,7 +302,7 @@ void CommandHelpers::auditLogAuthEvent(OperationContext* opCtx,
     }
 }
 
-void CommandHelpers::uassertNoDocumentSequences(StringData commandName,
+void CommandHelpers::uassertNoDocumentSequences(std::string_view commandName,
                                                 const OpMsgRequest& request) {
     uassert(40472,
             str::stream() << "The " << commandName
@@ -366,7 +351,7 @@ void CommandHelpers::ensureValidCollectionName(const NamespaceString& nss) {
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
                                                    const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
-    if (first.type() != BSONType::string)
+    if (first.type() != BSONType::string && first.type() != BSONType::symbol)
         return NamespaceString(dbName);
     return NamespaceStringUtil::deserialize(dbName, cmdObj.firstElement().valueStringData());
 }
@@ -560,7 +545,7 @@ bool CommandHelpers::uassertShouldAttemptParse(OperationContext* opCtx,
     }
 }
 
-void CommandHelpers::uassertCommandRunWithMajority(StringData commandName,
+void CommandHelpers::uassertCommandRunWithMajority(std::string_view commandName,
                                                    const WriteConcernOptions& writeConcern) {
     uassert(ErrorCodes::InvalidOptions,
             fmt::format("\"{}\" must be called with majority writeConcern, got: {} ",
@@ -570,7 +555,7 @@ void CommandHelpers::uassertCommandRunWithMajority(StringData commandName,
 }
 
 namespace {
-const CommandNameAtom countAtom("count"_sd);
+const CommandNameAtom countAtom("count"sv);
 }  // namespace
 
 void CommandHelpers::canUseTransactions(const std::vector<NamespaceString>& namespaces,
@@ -612,7 +597,7 @@ void CommandHelpers::canUseTransactions(const std::vector<NamespaceString>& name
     }
 }
 
-constexpr StringData CommandHelpers::kHelpFieldName;
+constexpr std::string_view CommandHelpers::kHelpFieldName;
 
 MONGO_FAIL_POINT_DEFINE(failCommand);
 MONGO_FAIL_POINT_DEFINE(waitInCommandMarkKillOnClientDisconnect);
@@ -643,7 +628,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
                                                         const NamespaceString& nss,
                                                         const Command* cmd,
                                                         Client* client) {
-    if (cmd->getName() == "configureFailPoint"_sd)  // Banned even if in failCommands.
+    if (cmd->getName() == "configureFailPoint"sv)  // Banned even if in failCommands.
         return false;
 
     if (!(data.hasField("failLocalClients") && data.getBoolField("failLocalClients")) &&
@@ -652,7 +637,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
     }
 
     auto threadName = client->desc();
-    auto appName = StringData();
+    auto appName = std::string_view();
     if (auto clientMetadata = ClientMetadata::get(client)) {
         appName = clientMetadata->getApplicationName();
     }
@@ -675,7 +660,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
     }
 
     if (data.hasField("namespace")) {
-        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"_sd);
+        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"sv);
         if (nss != fpNss) {
             return false;
         }
@@ -695,16 +680,41 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
         }
     }
 
-    if (data.hasField("failAllCommands")) {
-        LOGV2(6348500,
-              "Activating 'failCommand' failpoint for all commands",
-              "data"_attr = data,
-              "threadName"_attr = threadName,
-              "appName"_attr = appName,
-              logAttrs(nss),
-              "isInternalClient"_attr = isInternalThreadOrClient,
-              "isOnPriorityPort"_attr = isOnPriorityPort,
-              "command"_attr = cmd->getName());
+    if (data.hasField("failAllCommands") && data.getBoolField("failAllCommands")) {
+        // "failCommandsExcept" is an allowlist that only applies when "failAllCommands" is set:
+        // commands matching any entry are exempt from the failpoint. Aliases registered on the
+        // same command class are honored (e.g. listing "isMaster" also exempts "ismaster"), but
+        // "hello" and "isMaster" are separate command classes and must each be listed to exempt
+        // both.
+        if (auto exemptField = data["failCommandsExcept"]; exemptField.type() == BSONType::array) {
+            for (auto&& exemptCmd : exemptField.Array()) {
+                if (exemptCmd.type() == BSONType::string &&
+                    cmd->hasAlias(exemptCmd.valueStringData())) {
+                    LOGV2_DEBUG(12322200,
+                                1,
+                                "Skipping 'failCommand' failpoint for command exempt via "
+                                "'failCommandsExcept'",
+                                "data"_attr = data,
+                                "threadName"_attr = threadName,
+                                "appName"_attr = appName,
+                                logAttrs(nss),
+                                "isInternalClient"_attr = isInternalThreadOrClient,
+                                "isOnPriorityPort"_attr = isOnPriorityPort,
+                                "command"_attr = cmd->getName());
+                    return false;
+                }
+            }
+        }
+        LOGV2_DEBUG(6348500,
+                    1,
+                    "Activating 'failCommand' failpoint for all commands",
+                    "data"_attr = data,
+                    "threadName"_attr = threadName,
+                    "appName"_attr = appName,
+                    logAttrs(nss),
+                    "isInternalClient"_attr = isInternalThreadOrClient,
+                    "isOnPriorityPort"_attr = isOnPriorityPort,
+                    "command"_attr = cmd->getName());
         return true;
     }
 
@@ -1046,7 +1056,7 @@ private:
     const GenericArguments _genericArgs;
 };
 
-CommandNameAtom::CommandNameAtom(StringData s) {
+CommandNameAtom::CommandNameAtom(std::string_view s) {
     static StaticImmortal<CommandNameAtomRegistry> registry;
     _atom = registry->lookup(s);
 }
@@ -1067,6 +1077,12 @@ void Command::snipForLogging(mutablebson::Document* cmdObj) const {
     }
 }
 
+BSONObj snipCommandForLogging(const Command* command, const BSONObj& cmdObj) {
+    mutablebson::Document cmdToLog(cmdObj, mutablebson::Document::kInPlaceDisabled);
+    command->snipForLogging(&cmdToLog);
+    return cmdToLog.getObject();
+}
+
 
 std::unique_ptr<CommandInvocation> BasicCommandWithReplyBuilderInterface::parse(
     OperationContext* opCtx, const OpMsgRequest& request) {
@@ -1074,16 +1090,26 @@ std::unique_ptr<CommandInvocation> BasicCommandWithReplyBuilderInterface::parse(
     return std::make_unique<Invocation>(opCtx, request, this);
 }
 
-Command::Command(StringData name, std::vector<StringData> aliases)
+Command::Command(std::string_view name, std::vector<std::string_view> aliases)
     : _name(std::string{name}), _aliases(std::move(aliases)) {}
 
 void Command::initializeClusterRole(ClusterRole role) {
-    for (auto&& [ptr, stat] : {
-             std::pair{&_commandsExecuted, "total"},
-             std::pair{&_commandsFailed, "failed"},
-             std::pair{&_commandsRejected, "rejected"},
-         })
-        *ptr = &*MetricBuilder<Counter64>{fmt::format("commands.{}.{}", _name, stat)}.setRole(role);
+    // Commands served by mongos are entry points for sharded operations, so they are "upgraded" to
+    // be sampled by default. Commands served by mongod inherit the sampling decision from the
+    // mongos that dispatched them, if applicable.
+    if (role.hasExclusively(ClusterRole::RouterServer)) {
+        otel::traces::TracingSampler::get().sampleByDefault(_traceSpanName);
+    }
+
+    if (includeInCommandStats()) {
+        for (auto&& [ptr, stat] : {
+                 std::pair{&_commandsExecuted, "total"},
+                 std::pair{&_commandsFailed, "failed"},
+                 std::pair{&_commandsRejected, "rejected"},
+             })
+            *ptr = &*MetricBuilder<Counter64>{fmt::format("commands.{}.{}", _name, stat)}.setRole(
+                role);
+    }
     doInitializeClusterRole(role);
 }
 
@@ -1095,7 +1121,7 @@ const std::set<std::string>& Command::deprecatedApiVersions() const {
     return kNoApiVersions;
 }
 
-bool Command::hasAlias(StringData alias) const {
+bool Command::hasAlias(std::string_view alias) const {
     return getName() == alias ||
         std::find(_aliases.begin(), _aliases.end(), alias) != _aliases.end();
 }
@@ -1131,31 +1157,65 @@ bool ErrmsgCommandDeprecated::run(OperationContext* opCtx,
 //////////////////////////////////////////////////////////////
 // CommandRegistry
 
-CommandRegistry* getCommandRegistry(Service* service) {
-    auto role = service->role();
-    static auto makeReg = [](Service* service) {
+CommandRegistry* getCommandRegistry(ClusterRole role) {
+    // Helper to build the registry for a given role. Called at most once per role, on the first
+    // getCommandRegistry() call for that role -- normally the prewarmCommandRegistryMetrics Service
+    // constructor action below, which runs during Service creation; otherwise the first command
+    // dispatch. The result is stored in a static singleton and reused thereafter.
+    static auto makeReg = [](ClusterRole role) {
         CommandRegistry reg;
-        // `reg` will be a singleton registry, so create a per-service unknowns
-        // counter for it.
-        auto unknowns = &*MetricBuilder<Counter64>{"commands.<UNKNOWN>"}.setRole(service->role());
+        // Create a per-role unknown-command counter.
+        auto unknowns = &*MetricBuilder<Counter64>{"commands.<UNKNOWN>"}.setRole(role);
         reg.setOnUnknownCommandCallback([unknowns] { unknowns->increment(); });
-        globalCommandConstructionPlan().execute(&reg, service);
+        globalCommandConstructionPlan().execute(&reg, role);
         return reg;
     };
     if (role.hasExclusively(ClusterRole::ShardServer)) {
-        static StaticImmortal obj = makeReg(service);
+        static StaticImmortal obj = makeReg(role);
         return &*obj;
     }
     if (role.hasExclusively(ClusterRole::RouterServer)) {
-        static StaticImmortal obj = makeReg(service);
+        static StaticImmortal obj = makeReg(role);
         return &*obj;
     }
-    MONGO_UNREACHABLE;  // Service role has to be exclusively Shard or Router.
+    MONGO_UNREACHABLE;  // ClusterRole must be exclusively Shard or Router.
 }
 
+CommandRegistry* getCommandRegistry(Service* service) {
+    return getCommandRegistry(service->role());
+}
+
+namespace {
+// Pre-warm the per-role command registry as soon as a Service is created. Building the registry
+// registers the `commands.<UNKNOWN>` counter and the per-command server-status metrics, which must
+// happen on the main thread and (in mongod/mongos) before the MetricTreeSet is frozen.
+//
+// Services are created during ServiceContext construction (ServiceSet), which runs on the main
+// thread at startup -- in mongod/mongos before the loadExtensions()/freeze() call during server
+// startup (_initAndListen in mongod, runMongosServer in mongos), and in unit-test fixtures during
+// setUp before any worker thread dispatches a command. Hooking here
+// guarantees the metrics are registered on the main thread, pre-freeze, in *every* binary that has
+// a command-dispatching Service: mongod, mongos, mongocryptd/mongotmock, and the unit-test
+// binaries. This replaces the per-binary RegisterCommandMetrics initializers, which only covered
+// mongod/mongos (missing mongod's router role and every other server-derived binary).
+//
+// Warming only the created Service's own role keeps this role-accurate: a binary never constructs
+// commands for a role it does not serve.
+const Service::ConstructorActionRegisterer prewarmCommandRegistryMetrics{
+    "PrewarmCommandRegistryMetrics", [](Service* service) {
+        // ServiceSet only ever creates ShardServer/RouterServer Services; guard defensively so an
+        // unexpected role cannot trip the MONGO_UNREACHABLE in getCommandRegistry(ClusterRole).
+        const auto role = service->role();
+        if (role.hasExclusively(ClusterRole::ShardServer) ||
+            role.hasExclusively(ClusterRole::RouterServer)) {
+            getCommandRegistry(role);
+        }
+    }};
+}  // namespace
+
 void CommandRegistry::registerCommand(Command* command) {
-    StringData name = command->getName();
-    std::vector<StringData> aliases = command->getAliases();
+    std::string_view name = command->getName();
+    std::vector<std::string_view> aliases = command->getAliases();
     auto ep = std::make_unique<Entry>();
     ep->command = command;
     auto [cIt, cOk] = _commands.emplace(command, std::move(ep));
@@ -1164,7 +1224,7 @@ void CommandRegistry::registerCommand(Command* command) {
     // When a `Command*` is introduced to `_commands`, its names are introduced
     // to `_commandNames`.
     aliases.push_back(name);
-    for (StringData key : aliases) {
+    for (std::string_view key : aliases) {
         if (key.empty())
             continue;
         auto [nIt, nOk] = _commandNames.try_emplace(key, command);
@@ -1172,7 +1232,7 @@ void CommandRegistry::registerCommand(Command* command) {
     }
 }
 
-Command* CommandRegistry::findCommand(StringData name) const {
+Command* CommandRegistry::findCommand(std::string_view name) const {
     auto it = _commandNames.find(name);
     if (it == _commandNames.end()) {
         LOGV2_DEBUG(
@@ -1197,7 +1257,7 @@ BSONObj toBSON(const CommandConstructionPlan::Entry& e) {
 }
 
 void CommandConstructionPlan::execute(CommandRegistry* registry,
-                                      Service* service,
+                                      ClusterRole role,
                                       const std::function<bool(const Entry&)>& pred) const {
     LOGV2_DEBUG(8043400, 3, "Constructing Command objects from specs");
     StringMap<boost::optional<SourceLocation>> dupCheck;
@@ -1223,13 +1283,13 @@ void CommandConstructionPlan::execute(CommandRegistry* registry,
                 LOGV2_FATAL(10205200,
                             "Duplicate command",
                             "name"_attr = name,
-                            "role"_attr = service->role(),
+                            "role"_attr = role,
                             "location"_attr = loc,
                             "dupLocation"_attr = dup->second);
             }
             dupCheck.insert({c->getName(), loc});
         }
-        c->initializeClusterRole(service ? service->role() : ClusterRole{});
+        c->initializeClusterRole(role);
         LOGV2_DEBUG(8043404, 3, "Created", "command"_attr = c->getName(), "entry"_attr = *entry);
         registry->registerCommand(&*c);
 
@@ -1241,11 +1301,21 @@ void CommandConstructionPlan::execute(CommandRegistry* registry,
     }
 }
 
-void CommandConstructionPlan::execute(CommandRegistry* registry, Service* service) const {
-    execute(registry, service, [r = service->role()](const auto& e) {
+void CommandConstructionPlan::execute(CommandRegistry* registry, ClusterRole role) const {
+    execute(registry, role, [role](const auto& e) {
         invariant(e.roles, "All commands must have a role.");
-        return e.roles->has(r);
+        return e.roles->has(role);
     });
+}
+
+void CommandConstructionPlan::execute(CommandRegistry* registry,
+                                      Service* service,
+                                      const std::function<bool(const Entry&)>& pred) const {
+    execute(registry, service ? service->role() : ClusterRole{}, pred);
+}
+
+void CommandConstructionPlan::execute(CommandRegistry* registry, Service* service) const {
+    execute(registry, service->role());
 }
 
 }  // namespace mongo

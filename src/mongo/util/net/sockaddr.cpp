@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/net/sockaddr.h"
@@ -33,6 +7,7 @@
 #include <iterator>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -62,6 +37,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 constexpr int SOCK_FAMILY_UNKNOWN_ERROR = 13078;
 
@@ -72,7 +48,7 @@ struct AddrInfoDeleter {
 };
 using AddrInfoPtr = std::unique_ptr<addrinfo, AddrInfoDeleter>;
 
-AddrInfoPtr resolveAddrInfo(StringData hostOrIp, int port, sa_family_t familyHint) {
+AddrInfoPtr resolveAddrInfo(std::string_view hostOrIp, int port, sa_family_t familyHint) {
     struct AddrError {
         AddrInfoPtr addr;
         int err;
@@ -139,7 +115,7 @@ SockAddr::SockAddr(int sourcePort) {
     _isValid = true;
 }
 
-void SockAddr::initUnixDomainSocket(StringData path, int port) {
+void SockAddr::initUnixDomainSocket(std::string_view path, int port) {
 #ifdef _WIN32
     uassert(13080, "no unix socket support on windows", false);
 #endif
@@ -151,9 +127,9 @@ void SockAddr::initUnixDomainSocket(StringData path, int port) {
     _isValid = true;
 }
 
-SockAddr SockAddr::create(StringData target, int port, sa_family_t familyHint) {
+SockAddr SockAddr::create(std::string_view target, int port, sa_family_t familyHint) {
     if (target == "localhost") {
-        target = "127.0.0.1"_sd;
+        target = "127.0.0.1"sv;
     }
 
     if (str::contains(target, '/') || familyHint == AF_UNIX) {
@@ -182,7 +158,9 @@ SockAddr SockAddr::create(StringData target, int port, sa_family_t familyHint) {
     }
 }
 
-std::vector<SockAddr> SockAddr::createAll(StringData target, int port, sa_family_t familyHint) {
+std::vector<SockAddr> SockAddr::createAll(std::string_view target,
+                                          int port,
+                                          sa_family_t familyHint) {
     if (str::contains(target, '/')) {
         std::vector<SockAddr> ret = {SockAddr()};
         ret[0].initUnixDomainSocket(target, port);
@@ -216,7 +194,7 @@ SockAddr::SockAddr(const sockaddr* other, socklen_t size) : addressSize(size), _
     _isValid = true;
 }
 
-SockAddr::SockAddr(const sockaddr* other, socklen_t size, StringData hostOrIp)
+SockAddr::SockAddr(const sockaddr* other, socklen_t size, std::string_view hostOrIp)
     : addressSize(size), _hostOrIp(std::string{hostOrIp}), sa() {
     memcpy(&sa, other, size);
     _isValid = true;
@@ -332,15 +310,15 @@ std::string SockAddr::getAddr() const {
 }
 
 namespace {
-constexpr auto kIPField = "ip"_sd;
-constexpr auto kPortField = "port"_sd;
-constexpr auto kUnixField = "unix"_sd;
-constexpr auto kAnonymous = "anonymous"_sd;
+constexpr auto kIPField = "ip"sv;
+constexpr auto kPortField = "port"sv;
+constexpr auto kUnixField = "unix"sv;
+constexpr auto kAnonymous = "anonymous"sv;
 
-constexpr auto kOCSFInterfaceNameField = "interface_name"_sd;
+constexpr auto kOCSFInterfaceNameField = "interface_name"sv;
 }  // namespace
 
-void SockAddr::serializeToBSON(StringData fieldName, BSONObjBuilder* builder) const {
+void SockAddr::serializeToBSON(std::string_view fieldName, BSONObjBuilder* builder) const {
     BSONObjBuilder bob(builder->subobjStart(fieldName));
     if (isIP()) {
         bob.append(kIPField, getAddr());

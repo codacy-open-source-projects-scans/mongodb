@@ -1,44 +1,20 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/storage/wiredtiger/spill_wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 #include <wiredtiger.h>
 
@@ -51,6 +27,7 @@
 namespace moe = mongo::optionenvironment;
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 WiredTigerGlobalOptions wiredTigerGlobalOptions;
 
@@ -74,10 +51,10 @@ Status WiredTigerGlobalOptions::store(const moe::Environment& params) {
 }
 
 Status WiredTigerGlobalOptions::validateWiredTigerCompressor(const std::string& value) {
-    if (!(str::equalCaseInsensitive(value, "none"_sd) ||
-          str::equalCaseInsensitive(value, "snappy"_sd) ||
-          str::equalCaseInsensitive(value, "zlib"_sd) ||
-          str::equalCaseInsensitive(value, "zstd"_sd))) {
+    if (!(str::equalCaseInsensitive(value, "none"sv) ||
+          str::equalCaseInsensitive(value, "snappy"sv) ||
+          str::equalCaseInsensitive(value, "zlib"sv) ||
+          str::equalCaseInsensitive(value, "zstd"sv))) {
         return {ErrorCodes::BadValue,
                 "Compression option must be one of: 'none', 'snappy', 'zlib', or 'zstd'"};
     }
@@ -109,16 +86,16 @@ Status WiredTigerGlobalOptions::validateWiredTigerLiveRestoreReadSizeMB(const in
 
 void WiredTigerEngineRuntimeConfigParameter::append(OperationContext* opCtx,
                                                     BSONObjBuilder* b,
-                                                    StringData name,
+                                                    std::string_view name,
                                                     const boost::optional<TenantId>&) {
-    *b << name << StringData{*_data.first};
+    *b << name << **_data.first;
 }
 
 void SpillWiredTigerEngineRuntimeConfigParameter::append(OperationContext* opCtx,
                                                          BSONObjBuilder* b,
-                                                         StringData name,
+                                                         std::string_view name,
                                                          const boost::optional<TenantId>&) {
-    *b << name << StringData{*_data.first};
+    *b << name << **_data.first;
 }
 
 Status validateExtraDiagnostics(const std::vector<std::string>& value,
@@ -146,7 +123,7 @@ Status validateExtraDiagnostics(const std::vector<std::string>& value,
 }
 
 
-Status validateNoNullCharacter(StringData str) {
+Status validateNoNullCharacter(std::string_view str) {
     size_t pos = str.find('\0');
     if (pos != std::string::npos) {
         return Status(ErrorCodes::BadValue,
@@ -158,12 +135,12 @@ Status validateNoNullCharacter(StringData str) {
 }
 
 Status WiredTigerGlobalOptions::validateStatisticsSetting(const std::string& setting) {
-    if (!(str::equalCaseInsensitive(setting, "all"_sd) ||
-          str::equalCaseInsensitive(setting, "cache_walk"_sd) ||
-          str::equalCaseInsensitive(setting, "fast"_sd) ||
-          str::equalCaseInsensitive(setting, "none"_sd) ||
-          str::equalCaseInsensitive(setting, "clear"_sd) ||
-          str::equalCaseInsensitive(setting, "tree_walk"_sd))) {
+    if (!(str::equalCaseInsensitive(setting, "all"sv) ||
+          str::equalCaseInsensitive(setting, "cache_walk"sv) ||
+          str::equalCaseInsensitive(setting, "fast"sv) ||
+          str::equalCaseInsensitive(setting, "none"sv) ||
+          str::equalCaseInsensitive(setting, "clear"sv) ||
+          str::equalCaseInsensitive(setting, "tree_walk"sv))) {
         return {ErrorCodes::BadValue,
                 "storage.wiredTiger.engineConfig.statistics expects one of 'all', 'cache_walk', "
                 "'fast', 'none', 'clear', or 'tree_walk'"};
@@ -172,8 +149,12 @@ Status WiredTigerGlobalOptions::validateStatisticsSetting(const std::string& set
     return Status::OK();
 }
 
+Status WiredTigerGlobalOptions::validateWiredTigerConfigString(const std::string& config) {
+    return WiredTigerUtil::checkConfigStringBannedKeys(config);
+}
+
 template <typename T>
-Status setFromStringImpl(T& data, StringData str) {
+Status setFromStringImpl(T& data, std::string_view str) {
     invariant(data.second);
 
     int ret = data.second->reconfigure(std::string(str).c_str());
@@ -193,7 +174,7 @@ Status setFromStringImpl(T& data, StringData str) {
     return Status::OK();
 }
 
-Status WiredTigerEngineRuntimeConfigParameter::setFromString(StringData str,
+Status WiredTigerEngineRuntimeConfigParameter::setFromString(std::string_view str,
                                                              const boost::optional<TenantId>&) {
     if (auto s = validateNoNullCharacter(str); !s.isOK())
         return s;
@@ -207,7 +188,7 @@ Status WiredTigerEngineRuntimeConfigParameter::setFromString(StringData str,
 }
 
 Status SpillWiredTigerEngineRuntimeConfigParameter::setFromString(
-    StringData str, const boost::optional<TenantId>&) {
+    std::string_view str, const boost::optional<TenantId>&) {
     if (auto s = validateNoNullCharacter(str); !s.isOK())
         return s;
 
@@ -219,14 +200,14 @@ Status SpillWiredTigerEngineRuntimeConfigParameter::setFromString(
     return setFromStringImpl(_data, str);
 }
 
-Status WiredTigerDirectoryForIndexesParameter::setFromString(StringData,
+Status WiredTigerDirectoryForIndexesParameter::setFromString(std::string_view,
                                                              const boost::optional<TenantId>&) {
     return {ErrorCodes::IllegalOperation,
             str::stream() << name() << " cannot be set via setParameter"};
 };
 void WiredTigerDirectoryForIndexesParameter::append(OperationContext* opCtx,
                                                     BSONObjBuilder* builder,
-                                                    StringData name,
+                                                    std::string_view name,
                                                     const boost::optional<TenantId>&) {
     builder->append(name, wiredTigerGlobalOptions.directoryForIndexes);
 }

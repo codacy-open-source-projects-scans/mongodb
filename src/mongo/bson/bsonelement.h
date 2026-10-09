@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,7 +8,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bson_comparator_interface_base.h"
 #include "mongo/bson/bsontypes.h"
@@ -56,13 +29,14 @@
 #include <cstring>  // strlen
 #include <limits>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <fmt/format.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 class BSONObj;
@@ -135,7 +109,7 @@ public:
     std::string String() const {
         return chk(BSONType::string).str();
     }
-    StringData checkAndGetStringData() const {
+    std::string_view checkAndGetStringData() const {
         return chk(BSONType::string).valueStringData();
     }
     Date_t Date() const {
@@ -258,26 +232,27 @@ public:
                              fmt::memory_buffer& buffer,
                              size_t writeLimit = 0) const;
 
-    MONGO_MOD_PRIVATE BSONObj jsonStringGenerator(ExtendedCanonicalV200Generator const& generator,
-                                                  bool includeSeparator,
-                                                  bool includeFieldNames,
-                                                  int pretty,
-                                                  fmt::memory_buffer& buffer,
-                                                  size_t writeLimit = 0) const;
-    MONGO_MOD_PRIVATE BSONObj jsonStringGenerator(ExtendedRelaxedV200Generator const& generator,
-                                                  bool includeSeparator,
-                                                  bool includeFieldNames,
-                                                  int pretty,
-                                                  fmt::memory_buffer& buffer,
-                                                  size_t writeLimit = 0) const;
-    MONGO_MOD_PRIVATE BSONObj jsonStringGenerator(LegacyStrictGenerator const& generator,
-                                                  bool includeSeparator,
-                                                  bool includeFieldNames,
-                                                  int pretty,
-                                                  fmt::memory_buffer& buffer,
-                                                  size_t writeLimit = 0) const;
+    [[MONGO_MOD_PRIVATE]] BSONObj jsonStringGenerator(
+        ExtendedCanonicalV200Generator const& generator,
+        bool includeSeparator,
+        bool includeFieldNames,
+        int pretty,
+        fmt::memory_buffer& buffer,
+        size_t writeLimit = 0) const;
+    [[MONGO_MOD_PRIVATE]] BSONObj jsonStringGenerator(ExtendedRelaxedV200Generator const& generator,
+                                                      bool includeSeparator,
+                                                      bool includeFieldNames,
+                                                      int pretty,
+                                                      fmt::memory_buffer& buffer,
+                                                      size_t writeLimit = 0) const;
+    [[MONGO_MOD_PRIVATE]] BSONObj jsonStringGenerator(LegacyStrictGenerator const& generator,
+                                                      bool includeSeparator,
+                                                      bool includeFieldNames,
+                                                      int pretty,
+                                                      fmt::memory_buffer& buffer,
+                                                      size_t writeLimit = 0) const;
 
-    MONGO_MOD_USE_REPLACEMENT(toString()) operator std::string() const {
+    [[MONGO_MOD_USE_REPLACEMENT(toString())]] operator std::string() const {
         return toString();
     }
 
@@ -293,7 +268,7 @@ public:
      * retrieve a field within this element
      * throws exception if *this is not an embedded object
      */
-    BSONElement operator[](StringData field) const;
+    BSONElement operator[](std::string_view field) const;
 
     /**
      * See canonicalizeBSONType in bsontypes.h
@@ -325,7 +300,7 @@ public:
     /**
      * Wrap this element up as a singleton object with a new name.
      */
-    BSONObj wrap(StringData newName) const;
+    BSONObj wrap(std::string_view newName) const;
 
     /**
      * field name of the element.  e.g., for
@@ -345,12 +320,12 @@ public:
         return _fieldNameSize;
     }
 
-    StringData fieldNameStringData() const {
+    std::string_view fieldNameStringData() const {
         // if this dassert fails, someone passed bad arguments to the TrustedInit ctor.
         // TODO SERVER-104907: delete this check once the 'dassert' in TrustedInitTag ctor is
         // enabled.
         dassert(bool(eoo()) != bool(fieldNameSize()));
-        return StringData(fieldName(), _fieldNameSize ? _fieldNameSize - 1 : 0);
+        return std::string_view(fieldName(), _fieldNameSize ? _fieldNameSize - 1 : 0);
     }
 
     /**
@@ -597,9 +572,9 @@ public:
      * Get a string's value. Returns a valid empty string if
      * `type() != BSONType::string`.
      */
-    StringData valueStringDataSafe() const {
-        return type() == BSONType::string ? StringData(valuestr(), valuestrsize() - 1)
-                                          : StringData();
+    std::string_view valueStringDataSafe() const {
+        return type() == BSONType::string ? std::string_view(valuestr(), valuestrsize() - 1)
+                                          : std::string_view();
     }
 
     /**
@@ -610,11 +585,11 @@ public:
     }
 
     /**
-     * Returns a StringData pointing into this element's data.  Does not validate that the
+     * Returns a std::string_view pointing into this element's data.  Does not validate that the
      * element is actually of type String.
      */
-    StringData valueStringData() const {
-        return StringData(valuestr(), valuestrsize() - 1);
+    std::string_view valueStringData() const {
+        return std::string_view(valuestr(), valuestrsize() - 1);
     }
 
     /**
@@ -904,7 +879,7 @@ public:
     constexpr BSONElement(const char* d, int fieldNameSize, TrustedInitTag)
         : _data(d), _fieldNameSize(fieldNameSize) {
         // TODO SERVER-104907: enable validation here once all callers have been adjusted/fixed.
-        // dassert((*d == stdx::to_underlying(BSONType::eoo)) != bool(fieldNameSize));
+        // dassert((static_cast<BSONType>(*_data) == BSONType::eoo) == (_fieldNameSize == 0));
     }
 
     std::string _asCode() const;
@@ -1019,7 +994,7 @@ private:
     /**
      * This is to enable structured bindings for BSONElement, it should not be used explicitly.
      * When used in a structed binding, BSONElement behaves as-if it is a
-     * std::pair<StringData, BSONElement>.
+     * std::pair<std::string_view, BSONElement>.
      *
      * Example:
      *   for (auto [name, elem] : someBsonObj) {...}
@@ -1372,5 +1347,5 @@ template <>
 struct tuple_size<mongo::BSONElement> : std::integral_constant<size_t, 2> {};
 template <size_t I>
 struct tuple_element<I, mongo::BSONElement>
-    : std::tuple_element<I, std::pair<mongo::StringData, mongo::BSONElement>> {};
+    : std::tuple_element<I, std::pair<std::string_view, mongo::BSONElement>> {};
 }  // namespace std

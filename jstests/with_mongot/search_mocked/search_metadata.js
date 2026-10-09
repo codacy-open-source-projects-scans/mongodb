@@ -1,6 +1,7 @@
 /**
  * Tests that "searchScore", "searchHighlights", and "searchScoreDetails" metadata is properly
  * plumbed through the $search agg stage.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite. Note that the null/missing-metadata response-injection cases below are not covered by the e2e version.
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
@@ -60,7 +61,9 @@ const collUUID = getUUIDFromListCollections(testDB, coll.getName());
         },
     ];
     const responseOk = 1;
-    const expectedDocs = [{_id: 0, foo: 1, score: 1.234, highlights: highlights, scoreInfo: searchScoreDetails}];
+    const expectedDocs = [
+        {_id: 0, foo: 1, score: 1.234, highlights: highlights, scoreInfo: searchScoreDetails},
+    ];
 
     const history = [
         {
@@ -70,7 +73,12 @@ const collUUID = getUUIDFromListCollections(testDB, coll.getName());
                 db: dbName,
                 collectionUUID: collUUID,
             }),
-            response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), coll.getFullName(), responseOk),
+            response: mongotResponseForBatch(
+                mongotResponseBatch,
+                NumberLong(0),
+                coll.getFullName(),
+                responseOk,
+            ),
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
@@ -275,7 +283,9 @@ const collUUID = getUUIDFromListCollections(testDB, coll.getName());
         assert.eq(coll.aggregate(pipeline, {cursor: {batchSize: 2}}).toArray(), expectedDoc);
     }
 
-    const response3 = [{_id: 1, $searchScore: 0.1, $searchHighlights: [], $searchScoreDetails: null}];
+    const response3 = [
+        {_id: 1, $searchScore: 0.1, $searchHighlights: [], $searchScoreDetails: null},
+    ];
 
     mongotMock.setMockResponses(makeHistory(response3), cursorId);
     assert.throwsWithCode(() => coll.aggregate(pipeline), [7856603, 8107800, 10065]);

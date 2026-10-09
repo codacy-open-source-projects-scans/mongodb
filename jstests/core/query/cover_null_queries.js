@@ -1,10 +1,10 @@
 /**
  * Test to verify that null queries can be fully covered by an index.
  * @tags: [
+ *   uses_explain,
  *   assumes_unsharded_collection,
  *   requires_non_retryable_writes,
- *   # In 8.0, we changed behavior for equality to null.
- *   requires_fcv_80,
+ *   requires_fcv_91,
  *   # This test could produce unexpected explain output if additional indexes are created.
  *   assumes_no_implicit_index_creation,
  *   requires_getmore,
@@ -451,7 +451,17 @@ validateCountAggCmdOutputAndPlan({
 validateFindCmdOutputAndPlan({
     filter: {a: {$in: [null, [], 1]}},
     projection: {_id: 1},
-    expectedOutput: [{_id: 1}, {_id: 2}, {_id: 3}, {_id: 4}, {_id: 6}, {_id: 7}, {_id: 8}, {_id: 9}, {_id: 10}],
+    expectedOutput: [
+        {_id: 1},
+        {_id: 2},
+        {_id: 3},
+        {_id: 4},
+        {_id: 6},
+        {_id: 7},
+        {_id: 8},
+        {_id: 9},
+        {_id: 10},
+    ],
     expectedStages: {"IXSCAN": 1, "FETCH": 1, "PROJECTION_SIMPLE": 1},
 });
 validateCountAggCmdOutputAndPlan({
@@ -484,7 +494,15 @@ validateFindCmdOutputAndPlan({
 validateFindCmdOutputAndPlan({
     filter: {a: {$in: [null, []]}},
     projection: {_id: 1, b: 1},
-    expectedOutput: [{_id: 3, b: 1}, {_id: 4, b: null}, {_id: 6, b: 2}, {_id: 7}, {_id: 8}, {_id: 9}, {_id: 10}],
+    expectedOutput: [
+        {_id: 3, b: 1},
+        {_id: 4, b: null},
+        {_id: 6, b: 2},
+        {_id: 7},
+        {_id: 8},
+        {_id: 9},
+        {_id: 10},
+    ],
     expectedStages: {"IXSCAN": 1, "FETCH": 1, "PROJECTION_SIMPLE": 1},
 });
 
@@ -940,7 +958,13 @@ validateGroupCountAggCmdOutputAndPlan({
 validateFindCmdOutputAndPlan({
     filter: {"a.b": null},
     projection: {_id: 1, a: 1},
-    expectedOutput: [{_id: 1, a: 1}, {_id: 2, a: null}, {_id: 3}, {_id: 5, a: {b: null}}, {_id: 6, a: {c: 1}}],
+    expectedOutput: [
+        {_id: 1, a: 1},
+        {_id: 2, a: null},
+        {_id: 3},
+        {_id: 5, a: {b: null}},
+        {_id: 6, a: {c: 1}},
+    ],
     expectedStages: {"IXSCAN": 1, "FETCH": 1},
 });
 
@@ -963,7 +987,17 @@ assert.commandWorked(
 validateFindCmdOutputAndPlan({
     filter: {"a.b": null},
     projection: {_id: 1},
-    expectedOutput: [{_id: 1}, {_id: 2}, {_id: 3}, {_id: 5}, {_id: 6}, {_id: 7}, {_id: 11}, {_id: 13}, {_id: 15}],
+    expectedOutput: [
+        {_id: 1},
+        {_id: 2},
+        {_id: 3},
+        {_id: 5},
+        {_id: 6},
+        {_id: 7},
+        {_id: 11},
+        {_id: 13},
+        {_id: 15},
+    ],
     expectedStages: {"IXSCAN": 1, "PROJECTION_SIMPLE": 1, "FETCH": 1},
 });
 validateSimpleCountCmdOutputAndPlan({

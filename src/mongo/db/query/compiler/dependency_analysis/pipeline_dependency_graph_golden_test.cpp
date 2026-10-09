@@ -1,37 +1,7 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/bson/json.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/compiler/dependency_analysis/pipeline_dependency_graph.h"
 #include "mongo/db/query/compiler/dependency_analysis/pipeline_dependency_graph_test_util.h"
 #include "mongo/unittest/golden_test.h"
@@ -59,7 +29,7 @@ public:
         {
             unittest::GoldenTestContext ctx(&_cfg);
             ctx.outStream() << "VARIATION " << name << std::endl;
-            ctx.outStream() << "input: " << toString(pipeline) << std::endl;
+            ctx.outStream() << "input: " << toString(*pipeline) << std::endl;
             ctx.outStream() << "output: " << graph.toDebugString() << std::endl;
             ctx.outStream() << std::endl;
         }
@@ -80,27 +50,6 @@ private:
             std::string current = graph.toDebugString();
             ASSERT_EQ(base, current);
         });
-    }
-
-    static std::string toString(const std::unique_ptr<Pipeline>& pipeline) {
-        auto bson = pipeline->serializeToBson();
-        BSONArrayBuilder ba{};
-        ba.append(bson.begin(), bson.end());
-        return BSON("pipeline" << ba.arr()).jsonString(ExtendedRelaxedV2_0_0, true /*pretty*/);
-    }
-
-    std::unique_ptr<Pipeline> parsePipeline(const std::string& inputPipeJson) const {
-        const BSONObj inputBson = fromjson("{pipeline: " + inputPipeJson + "}");
-        std::vector<BSONObj> rawPipeline;
-        for (auto&& stageElem : inputBson["pipeline"].Array()) {
-            rawPipeline.push_back(stageElem.embeddedObject());
-        }
-        const NamespaceString kTestNss =
-            NamespaceString::createNamespaceString_forTest("test", "collection");
-        AggregateCommandRequest request(kTestNss, rawPipeline);
-        boost::intrusive_ptr<ExpressionContextForTest> ctx = new ExpressionContextForTest(kTestNss);
-        return pipeline_factory::makePipeline(
-            request.getPipeline(), ctx, pipeline_factory::kOptionsMinimal);
     }
 
     unittest::GoldenTestConfig _cfg;
@@ -292,6 +241,22 @@ TEST_F(PipelineDependencyGraphGoldenTest, InclusionDottedKnownSubfields) {
     });
 }
 
+TEST_F(PipelineDependencyGraphGoldenTest, InclusionAndModificationOfSubfields) {
+    runVariation({
+        .name = "InclusionAndModificationOfSubfields",
+        .pipeline = "[{$set: { 'a.b.c': 1 }},"
+                    " {$project: { 'a.str': 'value', 'a.b.c': 1 }}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ModificationOfSubfieldDropsPriorSiblings) {
+    runVariation({
+        .name = "ModificationOfSubfieldDropsPriorSiblings",
+        .pipeline = "[{$set: { 'a.b.c': 1 }},"
+                    " {$project: { 'a.str': 'value' }}]",
+    });
+}
+
 TEST_F(PipelineDependencyGraphGoldenTest, ChainedInclusionProjections) {
     runVariation({
         .name = "ChainedInclusionProjections",
@@ -461,12 +426,89 @@ TEST_F(PipelineDependencyGraphGoldenTest, NonExpressionModificationDependencies)
     });
 }
 
+TEST_F(PipelineDependencyGraphGoldenTest, RedeclaredArraySibling) {
+    runVariation({
+        .name = "RedeclaredArraySibling",
+        .pipeline = "[{$set: {a: [{b: 99}]}},"
+                    " {$set: {'a.c': 1}},"
+                    " {$match: {'a.b': 1}}]",
+    });
+}
+
 TEST_F(PipelineDependencyGraphGoldenTest, ExpressionWholeDocumentDependencyInLaterStage) {
     runVariation({
         .name = "ExpressionWholeDocumentDependencyInLaterStage",
         .pipeline = "[{$set: {a: 1}},"
                     " {$set: {b: '$$ROOT'}},"
                     " {$set: {c: 2}}]",
+    });
+}
+
+// Since we don't know if 'a' is an array, we should assume that as: "a.b" could
+// discard the array and replace it with {a: {b: <result>}}
+TEST_F(PipelineDependencyGraphGoldenTest, LookupDottedAsPrefixCanBeArray) {
+    runVariation({
+        .name = "LookupDottedAsPrefixCanBeArray",
+        .pipeline = R"([{$set: {'a.c': 1}},
+                        {$lookup: {from: "coll_b", as: "a.b", pipeline: []}}])",
+    });
+}
+
+// Since we know 'a' cannot be an array, the field 'c' can be preserved.
+TEST_F(PipelineDependencyGraphGoldenTest, LookupDottedAsPrefixCannotBeArray) {
+    runVariation({
+        .name = "LookupDottedAsPrefixCannotBeArray",
+        .pipeline = R"([{$set: {a: 1}},
+                        {$set: {'a.c': 1}},
+                        {$lookup: {from: "coll_b", as: "a.b", pipeline: []}}])",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantScalarSet) {
+    runVariation({
+        .name = "ConstantScalarSet",
+        .pipeline = "[{$set: {a: 1, b: 'foo', c: true, d: null}}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantDottedPath) {
+    runVariation({
+        .name = "ConstantDottedPath",
+        .pipeline = "[{$set: {'a.b.c': 42}}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantPropagatedThroughRename) {
+    runVariation({
+        .name = "ConstantPropagatedThroughRename",
+        .pipeline = "[{$set: {a: 7}},"
+                    " {$set: {b: '$a'}},"
+                    " {$set: {c: '$b'}}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantNotTrackedForRuntimeVariable) {
+    runVariation({
+        .name = "ConstantNotTrackedForRuntimeVariable",
+        .pipeline = "[{$set: {a: '$$NOW'}}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantArrayLiteral) {
+    // $literal forces an ExpressionConstant so the array is captured as a constant Value (whereas
+    // a plain `[1,2,3]` parses as ExpressionArray, which would only fold to a constant after
+    // 'optimize()' — the fixture parses with 'kOptionsMinimal' and skips optimize).
+    runVariation({
+        .name = "ConstantArrayLiteral",
+        .pipeline = "[{$set: {a: {$literal: [1, 2, 3]}}}]",
+    });
+}
+
+TEST_F(PipelineDependencyGraphGoldenTest, ConstantOverwritten) {
+    runVariation({
+        .name = "ConstantOverwritten",
+        .pipeline = "[{$set: {a: 1}},"
+                    " {$set: {a: 2}}]",
     });
 }
 

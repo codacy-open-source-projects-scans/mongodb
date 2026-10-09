@@ -8,7 +8,11 @@
  * ]
  */
 
-import {getUriForColl, getUriForIndex, runWiredTigerTool} from "jstests/disk/libs/wt_file_helper.js";
+import {
+    getUriForColl,
+    getUriForIndex,
+    runWiredTigerTool,
+} from "jstests/disk/libs/wt_file_helper.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
@@ -55,7 +59,7 @@ const indexIdent = getUriForIndex(coll(), "_id_");
 
 // TODO SERVER-121845: Re-enable this test when replicated fast count is correctly persisted on step
 // down.
-if (!FeatureFlagUtil.isPresentAndEnabled(primary, "featureFlagReplicatedFastCount")) {
+if (!FeatureFlagUtil.isPresentAndEnabled(primary, "ReplicatedFastCount")) {
     assert.eq(coll().count(), 1);
 }
 assert(coll().drop());

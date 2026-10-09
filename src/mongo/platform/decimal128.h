@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_type.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -43,10 +16,11 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * Wrapper class for the MongoDB Decimal128 data type. Sample usage:
@@ -527,8 +501,9 @@ private:
     constexpr static std::uint64_t kCombinationNaN = 0x1f << 12;
     constexpr static std::uint64_t kCanonicalCoefficientHighFieldMask = (1ull << 49) - 1;
 
-    std::string _convertToScientificNotation(StringData coefficient, int adjustedExponent) const;
-    std::string _convertToStandardDecimalNotation(StringData coefficient, int exponent) const;
+    std::string _convertToScientificNotation(std::string_view coefficient,
+                                             int adjustedExponent) const;
+    std::string _convertToStandardDecimalNotation(std::string_view coefficient, int exponent) const;
 
     /**
      * This function quantizes the current decimal given a quantum reference without normalizing its
@@ -650,4 +625,4 @@ struct DataType::Handler<Decimal128> {
     static constexpr size_t kSizeOfDecimal = 2 * sizeof(uint64_t);
 };
 
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

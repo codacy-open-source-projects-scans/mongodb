@@ -11,7 +11,9 @@ import {
     assertOnlyForViewlessTimeseries,
     getTimeseriesBucketsColl,
     isViewfulTimeseriesOnlySuite,
+    isViewlessTimeseriesOnlySuite,
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const testDB = db.getSiblingDB(jsTestName());
 
@@ -21,7 +23,8 @@ const metaFieldName = "m";
 const collNamePrefix = jsTestName() + "_";
 let collCount = 0;
 
-const bucketMaxSpanSecondsFromMinutes = TimeseriesTest.getBucketMaxSpanSecondsFromGranularity("minutes");
+const bucketMaxSpanSecondsFromMinutes =
+    TimeseriesTest.getBucketMaxSpanSecondsFromGranularity("minutes");
 
 const testOptions = function (options) {
     const coll = testDB.getCollection(collNamePrefix + collCount++);
@@ -35,7 +38,9 @@ const testOptions = function (options) {
     }
     if (!options.timeseries.hasOwnProperty("bucketMaxSpanSeconds")) {
         Object.assign(options.timeseries, {
-            bucketMaxSpanSeconds: TimeseriesTest.getBucketMaxSpanSecondsFromGranularity(options.timeseries.granularity),
+            bucketMaxSpanSeconds: TimeseriesTest.getBucketMaxSpanSecondsFromGranularity(
+                options.timeseries.granularity,
+            ),
         });
     }
     // When we are using default 'granularity' values we won't actually set
@@ -58,7 +63,8 @@ const testOptions = function (options) {
         });
     }
 
-    const collections = assert.commandWorked(testDB.runCommand({listCollections: 1})).cursor.firstBatch;
+    const collections = assert.commandWorked(testDB.runCommand({listCollections: 1})).cursor
+        .firstBatch;
     jsTestLog("Checking listCollections result: " + tojson(collections));
     if (isViewfulTimeseriesOnlySuite(testDB)) {
         // Expected number of collections >= system.views + 2 * timeseries collections
@@ -72,13 +78,28 @@ const testOptions = function (options) {
     }
 
     const bucketsCollName = getTimeseriesBucketsColl(coll).getName();
-    assertOnlyForViewlessTimeseries(testDB, !collections.some((entry) => entry.name === bucketsCollName));
+    assertOnlyForViewlessTimeseries(
+        testDB,
+        !collections.some((entry) => entry.name === bucketsCollName),
+    );
 
     const collectionDocument = collections.find((entry) => entry.name === coll.getName());
 
     // Exclude the collection UUID from the comparison, as it is randomly generated.
     assertOnlyForViewlessTimeseries(testDB, collectionDocument.info.uuid !== undefined);
     delete collectionDocument.info.uuid;
+
+    if (
+        isViewlessTimeseriesOnlySuite(testDB) &&
+        FeatureFlagUtil.isPresentAndEnabled(testDB, "FixedBucketingCatalog")
+    ) {
+        // fixedBucketing is FCV-gated; since the field is omitted on create here, it defaults to
+        // true on viewless timeseries collections, so add it to the expected options.
+        Object.assign(options.timeseries, {fixedBucketing: true});
+    } else {
+        // fixedBucketing presence is racy under background FCV changes; ignore it here.
+        delete collectionDocument.options.timeseries.fixedBucketing;
+    }
 
     assert.docEq(
         {name: coll.getName(), type: "timeseries", options: options, info: {readOnly: false}},

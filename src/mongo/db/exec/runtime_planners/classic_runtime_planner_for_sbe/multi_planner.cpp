@@ -1,35 +1,11 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
+#include "mongo/db/curop.h"
 #include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/exec/runtime_planners/classic_runtime_planner_for_sbe/planner_interface.h"
 #include "mongo/db/query/plan_executor_factory.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/plan_yield_policy_impl.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
 #include "mongo/logv2/log.h"
@@ -44,8 +20,9 @@ MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
                            std::vector<std::unique_ptr<QuerySolution>> candidatePlans,
                            bool shouldWriteToPlanCache,
                            const std::function<void()>& incrementReplannedPlanIsCachedPlanCounterCb,
-                           boost::optional<std::string> replanReason)
-    : PlannerBase(std::move(plannerData)),
+                           boost::optional<std::string> replanReason,
+                           PlanSelectionStrategy planSelectionStrategy)
+    : PlannerBase(std::move(plannerData), planSelectionStrategy),
       _shouldWriteToPlanCache(shouldWriteToPlanCache),
       _incrementReplannedPlanIsCachedPlanCounterCb(incrementReplannedPlanIsCachedPlanCounterCb),
       _replanReason(replanReason) {
@@ -104,7 +81,9 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
                                            plannerOptions(),
                                            std::move(nss),
                                            nullptr /* querySolution */,
-                                           cachedPlanHash());
+                                           cachedPlanHash(),
+                                           boost::none /* replanReason */,
+                                           planSelectionStrategy());
     }
 
     // The winning plan did not reach EOF during the trial period, or we were otherwise unable
@@ -154,7 +133,7 @@ void MultiPlanner::_buildSbePlanAndMaybeCache(
 
     // If classic plan cache is enabled, write to it. We need to do this before we extend the
     // QSN tree with the agg pipeline, since the agg portion does not get cached in classic.
-    if (_shouldWriteToPlanCache && !useSbePlanCache()) {
+    if (_shouldWriteToPlanCache) {
         plan_cache_util::updateClassicPlanCacheFromClassicCandidates(
             opCtx(),
             collections().getMainCollectionAcquisition(),
@@ -183,14 +162,6 @@ void MultiPlanner::_buildSbePlanAndMaybeCache(
     }
 
     _sbePlanAndData = prepareSbePlanAndData(*solnToCache, std::move(_replanReason));
-    if (_shouldWriteToPlanCache && useSbePlanCache()) {
-        plan_cache_util::updateSbePlanCacheWithPlanCacheDecisionMetrics(opCtx(),
-                                                                        collections(),
-                                                                        queryToCache,
-                                                                        *planCacheDecisionMetrics,
-                                                                        *_sbePlanAndData,
-                                                                        solnToCache);
-    }
 }
 
 }  // namespace mongo::classic_runtime_planner_for_sbe

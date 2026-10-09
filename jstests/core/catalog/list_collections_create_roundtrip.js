@@ -22,7 +22,8 @@ import {beforeEach, describe, it} from "jstests/libs/mochalite.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 
-const isImplicitlyShardedCollection = typeof globalThis.ImplicitlyShardAccessCollSettings !== "undefined";
+const isImplicitlyShardedCollection =
+    typeof globalThis.ImplicitlyShardAccessCollSettings !== "undefined";
 
 const TEST_CASES = [
     {
@@ -85,9 +86,28 @@ const TEST_CASES = [
 ];
 
 function listCollectionEntry(db, name) {
-    const entries = new DBCommandCursor(db, db.runCommand({listCollections: 1, filter: {name}})).toArray();
-    assert.eq(1, entries.length, `Expected exactly one listCollections entry for '${name}', got: ${tojson(entries)}`);
+    const entries = new DBCommandCursor(
+        db,
+        db.runCommand({listCollections: 1, filter: {name}}),
+    ).toArray();
+    assert.eq(
+        1,
+        entries.length,
+        `Expected exactly one listCollections entry for '${name}', got: ${tojson(entries)}`,
+    );
     return entries[0];
+}
+
+// Return a copy of 'options' with FCV-unstable fields removed when running in an FCV upgrade/downgrade suite.
+//
+// NOTE: 'fixedBucketing' is removed during FCV downgrades, and re-added and set to 'false' during FCV upgrade.
+// TODO(SERVER-128768): Remove once 9.0 becomes last LTS.
+function normalizeOptionsForFCVSuite(options) {
+    const normalized = Object.extend({}, options, true /* deep */);
+    if (TestData.isRunningFCVUpgradeDowngradeSuite && normalized.timeseries) {
+        delete normalized.timeseries.fixedBucketing;
+    }
+    return normalized;
 }
 
 function recreateFromOptions(db, name, reportedOptions, label) {
@@ -119,7 +139,7 @@ describe("ListCollectionsCreateRoundtrip", function () {
 
             // 2. Snapshot listCollections output.
             const initialEntry = listCollectionEntry(testDb, collName);
-            const reportedOptions = initialEntry.options;
+            const reportedOptions = normalizeOptionsForFCVSuite(initialEntry.options);
             jsTest.log.info(`listCollections snapshot for '${collName}'`, {entry: initialEntry});
 
             // 3. Re-create using the options returned by listCollections. Must succeed — create is
@@ -128,10 +148,14 @@ describe("ListCollectionsCreateRoundtrip", function () {
             recreateFromOptions(testDb, collName, reportedOptions, "first recreate");
 
             const secondEntry = listCollectionEntry(testDb, collName);
-            assert.eq(initialEntry.type, secondEntry.type, `Type diverged after first recreate for '${collName}'`);
+            assert.eq(
+                initialEntry.type,
+                secondEntry.type,
+                `Type diverged after first recreate for '${collName}'`,
+            );
             assert.docEq(
-                initialEntry.options,
-                secondEntry.options,
+                reportedOptions,
+                normalizeOptionsForFCVSuite(secondEntry.options),
                 `Options diverged after first recreate for '${collName}'`,
             );
 
@@ -139,10 +163,14 @@ describe("ListCollectionsCreateRoundtrip", function () {
             recreateFromOptions(testDb, collName, reportedOptions, "second recreate");
 
             const thirdEntry = listCollectionEntry(testDb, collName);
-            assert.eq(initialEntry.type, thirdEntry.type, `Type diverged after second recreate for '${collName}'`);
+            assert.eq(
+                initialEntry.type,
+                thirdEntry.type,
+                `Type diverged after second recreate for '${collName}'`,
+            );
             assert.docEq(
-                initialEntry.options,
-                thirdEntry.options,
+                reportedOptions,
+                normalizeOptionsForFCVSuite(thirdEntry.options),
                 `Options diverged after second recreate for '${collName}'`,
             );
         });

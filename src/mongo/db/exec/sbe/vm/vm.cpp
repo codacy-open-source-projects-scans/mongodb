@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/vm/vm.h"
 
@@ -34,6 +8,8 @@
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/util.h"
 #include "mongo/db/exec/sbe/values/value.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -58,112 +34,99 @@ void ByteCode::allocStackImpl(size_t newSizeDelta) noexcept {
 
 ByteCode::TopBottomArgs::~TopBottomArgs() {}
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::getField(value::TypeTags objTag,
-                                                                  value::Value objValue,
-                                                                  value::TypeTags fieldTag,
-                                                                  value::Value fieldValue) {
-    if (!value::isString(fieldTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+value::TagValueView ByteCode::getField(value::TagValueView obj, value::TagValueView field) {
+    if (!value::isString(field.tag)) {
+        return value::TagValueView::nothing();
     }
-
-    auto fieldStr = value::getStringView(fieldTag, fieldValue);
-
-    return getField(objTag, objValue, fieldStr);
+    return getField(obj, value::getStringView(field.tag, field.value));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::getField(value::TypeTags objTag,
-                                                                  value::Value objValue,
-                                                                  StringData fieldStr) {
-    if (MONGO_likely(objTag == value::TypeTags::bsonObject)) {
-        auto be = value::bitcastTo<const char*>(objValue);
-        auto [tag, val] = bson::getField(be, fieldStr);
-        return {false, tag, val};
-    } else if (objTag == value::TypeTags::Object) {
-        auto [tag, val] = value::getObjectView(objValue)->getField(fieldStr);
-        return {false, tag, val};
+value::TagValueView ByteCode::getField(value::TagValueView obj, std::string_view fieldStr) {
+    if (MONGO_likely(obj.tag == value::TypeTags::bsonObject)) {
+        auto be = value::bitcastTo<const char*>(obj.value);
+        return bson::getField(be, fieldStr);
+    } else if (obj.tag == value::TypeTags::Object) {
+        return value::getObjectView(obj.value)->getField(fieldStr);
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueView::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::getElement(value::TypeTags arrTag,
-                                                                    value::Value arrValue,
-                                                                    value::TypeTags idxTag,
-                                                                    value::Value idxValue) {
+value::TagValueView ByteCode::getElement(value::TagValueView arr, value::TagValueView idx) {
     // We need to ensure that 'size_t' is wide enough to store 32-bit index.
     static_assert(sizeof(size_t) >= sizeof(int32_t), "size_t must be at least 32-bits");
 
-    if (!value::isArray(arrTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isArray(arr.tag)) {
+        return value::TagValueView::nothing();
     }
 
-    if (idxTag != value::TypeTags::NumberInt32) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (idx.tag != value::TypeTags::NumberInt32) {
+        return value::TagValueView::nothing();
     }
 
-    const auto idxInt32 = value::bitcastTo<int32_t>(idxValue);
+    const auto idxInt32 = value::bitcastTo<int32_t>(idx.value);
     const bool isNegative = idxInt32 < 0;
 
-    size_t idx = 0;
+    size_t i = 0;
     if (isNegative) {
         // Upcast 'idxInt32' to 'int64_t' prevent overflow during the sign change.
-        idx = static_cast<size_t>(-static_cast<int64_t>(idxInt32));
+        i = static_cast<size_t>(-static_cast<int64_t>(idxInt32));
     } else {
-        idx = static_cast<size_t>(idxInt32);
+        i = static_cast<size_t>(idxInt32);
     }
 
-    if (arrTag == value::TypeTags::Array) {
-        // If 'arr' is an SBE array, use Array::getAt() to retrieve the element at index 'idx'.
-        auto arrayView = value::getArrayView(arrValue);
+    if (arr.tag == value::TypeTags::Array) {
+        // If 'arr' is an SBE array, use Array::getAt() to retrieve the element at index 'i'.
+        auto arrayView = value::getArrayView(arr.value);
 
-        size_t convertedIdx = idx;
+        size_t convertedIdx = i;
         if (isNegative) {
-            if (idx > arrayView->size()) {
-                return {false, value::TypeTags::Nothing, 0};
+            if (i > arrayView->size()) {
+                return value::TagValueView::nothing();
             }
-            convertedIdx = arrayView->size() - idx;
+            convertedIdx = arrayView->size() - i;
         }
 
-        auto [tag, val] = value::getArrayView(arrValue)->getAt(convertedIdx);
-        return {false, tag, val};
-    } else if (arrTag == value::TypeTags::bsonArray || arrTag == value::TypeTags::ArraySet ||
-               arrTag == value::TypeTags::ArrayMultiSet) {
-        value::ArrayEnumerator enumerator(arrTag, arrValue);
+        return arrayView->getAt(convertedIdx);
+    } else if (value::tagIn(arr.tag,
+                            value::TypeTags::bsonArray,
+                            value::TypeTags::ArraySet,
+                            value::TypeTags::ArrayMultiSet)) {
+        value::ArrayEnumerator enumerator(arr.tag, arr.value);
 
         if (!isNegative) {
-            // Loop through array until we meet element at position 'idx'.
-            size_t i = 0;
-            while (i < idx && !enumerator.atEnd()) {
-                i++;
+            // Loop through array until we meet element at position 'i'.
+            size_t j = 0;
+            while (j < i && !enumerator.atEnd()) {
+                j++;
                 enumerator.advance();
             }
-            // If the array didn't have an element at index 'idx', return Nothing.
+            // If the array didn't have an element at index 'i', return Nothing.
             if (enumerator.atEnd()) {
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueView::nothing();
             }
-            auto [tag, val] = enumerator.getViewOfValue();
-            return {false, tag, val};
+            return enumerator.getViewOfValue();
         }
 
         // For negative indexes we use two pointers approach. We start two array enumerators at the
-        // distance of 'idx' and move them at the same time. Once one of the enumerators reaches the
-        // end of the array, the second one points to the element at position '-idx'.
+        // distance of 'i' and move them at the same time. Once one of the enumerators reaches the
+        // end of the array, the second one points to the element at position '-i'.
         //
-        // First, move one of the enumerators 'idx' elements forward.
-        size_t i = 0;
-        while (i < idx && !enumerator.atEnd()) {
+        // First, move one of the enumerators 'i' elements forward.
+        size_t j = 0;
+        while (j < i && !enumerator.atEnd()) {
             enumerator.advance();
-            i++;
+            j++;
         }
 
-        if (i != idx) {
+        if (j != i) {
             // Array is too small to have an element at the requested index.
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueView::nothing();
         }
 
         // Initiate second enumerator at the start of the array. Now the distance between
-        // 'enumerator' and 'windowEndEnumerator' is exactly 'idx' elements. Move both enumerators
+        // 'enumerator' and 'windowEndEnumerator' is exactly 'i' elements. Move both enumerators
         // until the first one reaches the end of the array.
-        value::ArrayEnumerator windowEndEnumerator(arrTag, arrValue);
+        value::ArrayEnumerator windowEndEnumerator(arr.tag, arr.value);
         while (!enumerator.atEnd() && !windowEndEnumerator.atEnd()) {
             enumerator.advance();
             windowEndEnumerator.advance();
@@ -173,32 +136,27 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::getElement(value::TypeT
                 "Enumerator should not have reached the end of the array",
                 !windowEndEnumerator.atEnd());
 
-        auto [tag, val] = windowEndEnumerator.getViewOfValue();
-        return {false, tag, val};
+        return windowEndEnumerator.getViewOfValue();
     } else {
-        // Earlier in this function we bailed out if the 'arrTag' wasn't Array, ArraySet or
+        // Earlier in this function we bailed out if the 'arr.tag' wasn't Array, ArraySet or
         // bsonArray, so it should be impossible to reach this point.
         MONGO_UNREACHABLE_TASSERT(11122951);
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::getFieldOrElement(
-    value::TypeTags objTag,
-    value::Value objValue,
-    value::TypeTags fieldTag,
-    value::Value fieldValue) {
+value::TagValueView ByteCode::getFieldOrElement(value::TagValueView obj,
+                                                value::TagValueView field) {
     // If this is an array and we can convert the "field name" to a reasonable number then treat
     // this as getElement call.
-    if (value::isArray(objTag) && value::isString(fieldTag)) {
+    if (value::isArray(obj.tag) && value::isString(field.tag)) {
         int idx;
-        auto status = NumberParser{}(value::getStringView(fieldTag, fieldValue), &idx);
+        auto status = NumberParser{}(value::getStringView(field.tag, field.value), &idx);
         if (!status.isOK()) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueView::nothing();
         }
-        return getElement(
-            objTag, objValue, value::TypeTags::NumberInt32, value::bitcastFrom<int>(idx));
+        return getElement(obj, value::TagValueView::numberInt32(idx));
     } else {
-        return getField(objTag, objValue, fieldTag, fieldValue);
+        return getField(obj, field);
     }
 }
 
@@ -233,7 +191,7 @@ void ByteCode::traverseP(const CodeFragment* code,
     auto [own, tag, val] = getFromStack(0);
 
     if (value::isArray(tag) && maxDepth > 0) {
-        value::ValueGuard input(own, tag, val);
+        value::TagValueMaybeOwned input(own, tag, val);
         popStack();
 
         if (maxDepth != std::numeric_limits<int64_t>::max()) {
@@ -267,9 +225,8 @@ void ByteCode::traverseP_nested(const CodeFragment* code,
         return d == std::numeric_limits<int64_t>::max() ? d : d - 1;
     };
 
-    auto [tagArrOutput, valArrOutput] = value::makeNewArray();
-    auto arrOutput = value::getArrayView(valArrOutput);
-    value::ValueGuard guard{tagArrOutput, valArrOutput};
+    value::TagValueOwned newArr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto arrOutput = value::getArrayView(newArr.value());
     // The array position we will be sending to the lambda holds the depth in the highest 32 bit,
     // and the actual index in the current array in the lowest 32 bit.
     size_t arrayPos = curDepth << 32;
@@ -303,94 +260,10 @@ void ByteCode::traverseP_nested(const CodeFragment* code,
             retTag = copyTag;
             retVal = copyVal;
         }
-        arrOutput->push_back(retTag, retVal);
+        arrOutput->push_back_raw(retTag, retVal);
     });
-    guard.reset();
+    auto [tagArrOutput, valArrOutput] = newArr.releaseToRaw();
     pushStack(true, tagArrOutput, valArrOutput);
-}
-
-void ByteCode::magicTraverseF(const CodeFragment* code) {
-    // A combined filter traversal (i.e. non-recursive visit of both array elements and the array
-    // itself) with getField/getElement to simulate numeric paths.
-    // The semantics are controlled by 2 runtime conditions:
-    // 1. is a value to be examined coming from an object (i.e. getField) or from an array (i.e.
-    // getElement)? Values originating from objects are further traversed whereas array values are
-    // not.
-    // 2. is this traversal at the leaf position of the path? If so then the further object
-    // traversals are followed. Otherwise there is no further traversals.
-    auto [ownFlag, tagFlag, valFlag] = getFromStack(0, true);
-    value::ValueGuard firstGuard{ownFlag, tagFlag, valFlag};
-    auto [lamOwn, lamTag, lamVal] = getFromStack(0, true);
-    value::ValueGuard lamGuard{lamOwn, lamTag, lamVal};
-    auto arrayIndex = getFromStack(0, true);
-    value::ValueGuard indexGuard{arrayIndex};
-    auto fieldName = getFromStack(0, true);
-    value::ValueGuard fieldGuard{fieldName};
-    auto [ownInput, tagInput, valInput] = getFromStack(0, true);
-    value::ValueGuard inputGuard{ownInput, tagInput, valInput};
-
-    const bool preTraverse = value::bitcastTo<int32_t>(valFlag) & MagicTraverse::kPreTraverse;
-    const bool postTraverse = value::bitcastTo<int32_t>(valFlag) & MagicTraverse::kPostTraverse;
-
-    auto lambdaPtr = value::bitcastTo<int64_t>(lamVal);
-
-    enum class Traverse { document, array };
-    auto innerTraverse = [&](value::TypeTags tagElem,
-                             value::Value valElem,
-                             Traverse type,
-                             bool nested) {
-        auto [ownArrayIndex, tagArrayIndex, valArrayIndex] = arrayIndex;
-        auto [ownFieldName, tagFieldName, valFieldName] = fieldName;
-
-        auto [ownInner, tagInner, valInner] = type == Traverse::document
-            ? getField(tagElem, valElem, tagFieldName, valFieldName)
-            : getElement(tagElem, valElem, tagArrayIndex, valArrayIndex);
-
-        // Follow on with a traversal only if the flag is set.
-        if (value::isArray(tagInner) && nested) {
-            const bool passed = value::arrayAny(
-                tagInner, valInner, [&](value::TypeTags tagElem, value::Value valElem) {
-                    pushStack(false, tagElem, valElem);
-                    if (runLambdaPredicate(code, lambdaPtr)) {
-                        pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
-                        return true;
-                    }
-                    return false;
-                });
-            if (passed) {
-                return passed;
-            }
-        }
-        pushStack(ownInner, tagInner, valInner);
-        if (runLambdaPredicate(code, lambdaPtr)) {
-            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
-            return true;
-        }
-        return false;
-    };
-
-    if (value::isArray(tagInput)) {
-        const bool passed =
-            value::arrayAny(tagInput, valInput, [&](value::TypeTags tagElem, value::Value valElem) {
-                return innerTraverse(tagElem, valElem, Traverse::document, preTraverse);
-            });
-
-        if (passed) {
-            return;
-        }
-
-        // For values originating from arrays we do not run the inner traversal unless the flag is
-        // set.
-        if (!innerTraverse(tagInput, valInput, Traverse::array, postTraverse)) {
-            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
-        }
-        return;
-    } else {
-        if (!innerTraverse(tagInput, valInput, Traverse::document, preTraverse)) {
-            pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
-        }
-        return;
-    }
 }
 
 void ByteCode::traverseF(const CodeFragment* code) {
@@ -439,14 +312,9 @@ void ByteCode::traverseF(const CodeFragment* code,
 
 bool ByteCode::runLambdaPredicate(const CodeFragment* code, int64_t position) {
     runLambdaInternal(code, position);
-    auto [retOwn, retTag, retVal] = getFromStack(0);
+    auto ret = getMaybeOwnedFromStack(0);
     popStack();
-
-    bool isTrue = (retTag == value::TypeTags::Boolean) && value::bitcastTo<bool>(retVal);
-    if (retOwn) {
-        value::releaseValue(retTag, retVal);
-    }
-    return isTrue;
+    return (ret.tag() == value::TypeTags::Boolean) && value::bitcastTo<bool>(ret.value());
 }
 
 void ByteCode::traverseFInArray(const CodeFragment* code,
@@ -455,7 +323,7 @@ void ByteCode::traverseFInArray(const CodeFragment* code,
                                 bool compareArray) {
     auto [ownInput, tagInput, valInput] = getFromStack(0);
 
-    value::ValueGuard input(ownInput, tagInput, valInput);
+    value::TagValueMaybeOwned input(ownInput, tagInput, valInput);
     popStack();
 
     size_t arrayPos = 0;
@@ -491,7 +359,7 @@ void ByteCode::traverseFInArray(const CodeFragment* code,
         if (providePosition) {
             pushStack(false, value::TypeTags::NumberInt64, value::bitcastTo<int64_t>(-1));
         }
-        input.reset();
+        input.disown();
         runLambdaInternal(code, position);
         if (providePosition) {
             swapStack();
@@ -503,167 +371,53 @@ void ByteCode::traverseFInArray(const CodeFragment* code,
     pushStack(false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::setField() {
-    auto [newOwn, newTag, newVal] = moveFromStack(0);
-    value::ValueGuard guardNewElem{newTag, newVal};
-    auto [fieldOwn, fieldTag, fieldVal] = getFromStack(1);
-    // Consider using a moveFromStack optimization.
-    auto [objOwn, objTag, objVal] = getFromStack(2);
 
-    if (!value::isString(fieldTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-
-    auto fieldName = value::getStringView(fieldTag, fieldVal);
-
-    if (newTag == value::TypeTags::Nothing) {
-        // Setting a field value to nothing means removing the field.
-        if (value::isObject(objTag)) {
-            auto [tagOutput, valOutput] = value::makeNewObject();
-            auto objOutput = value::getObjectView(valOutput);
-            value::ValueGuard guard{tagOutput, valOutput};
-
-            if (objTag == value::TypeTags::bsonObject) {
-                auto be = value::bitcastTo<const char*>(objVal);
-                const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
-
-                // Skip document length.
-                be += 4;
-                while (be != end - 1) {
-                    auto sv = bson::fieldNameAndLength(be);
-
-                    if (sv != fieldName) {
-                        auto [tag, val] = bson::convertToOwned(be, end, sv.size()).releaseToRaw();
-                        objOutput->push_back(sv, tag, val);
-                    }
-
-                    be = bson::advance(be, sv.size());
-                }
-            } else {
-                auto objRoot = value::getObjectView(objVal);
-                for (size_t idx = 0; idx < objRoot->size(); ++idx) {
-                    StringData sv(objRoot->field(idx));
-
-                    if (sv != fieldName) {
-                        auto [tag, val] = objRoot->getAt(idx);
-                        auto [copyTag, copyVal] = value::copyValue(tag, val);
-                        objOutput->push_back(sv, copyTag, copyVal);
-                    }
-                }
-            }
-
-            guard.reset();
-            return {true, tagOutput, valOutput};
-        } else {
-            // Removing field from non-object value hardly makes any sense.
-            return {false, value::TypeTags::Nothing, 0};
-        }
-    } else {
-        // New value is not Nothing. We will be returning a new Object no matter what.
-        auto [tagOutput, valOutput] = value::makeNewObject();
-        auto objOutput = value::getObjectView(valOutput);
-        value::ValueGuard guard{tagOutput, valOutput};
-
-        if (objTag == value::TypeTags::bsonObject) {
-            auto be = value::bitcastTo<const char*>(objVal);
-            const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
-
-            // Skip document length.
-            be += 4;
-            while (be != end - 1) {
-                auto sv = bson::fieldNameAndLength(be);
-
-                if (sv != fieldName) {
-                    auto [tag, val] = bson::convertToOwned(be, end, sv.size()).releaseToRaw();
-                    objOutput->push_back(sv, tag, val);
-                }
-
-                be = bson::advance(be, sv.size());
-            }
-        } else if (objTag == value::TypeTags::Object) {
-            auto objRoot = value::getObjectView(objVal);
-            for (size_t idx = 0; idx < objRoot->size(); ++idx) {
-                StringData sv(objRoot->field(idx));
-
-                if (sv != fieldName) {
-                    auto [tag, val] = objRoot->getAt(idx);
-                    auto [copyTag, copyVal] = value::copyValue(tag, val);
-                    objOutput->push_back(sv, copyTag, copyVal);
-                }
-            }
-        }
-        guardNewElem.reset();
-        if (!newOwn) {
-            auto [copyTag, copyVal] = value::copyValue(newTag, newVal);
-            newTag = copyTag;
-            newVal = copyVal;
-        }
-        objOutput->push_back(fieldName, newTag, newVal);
-
-        guard.reset();
-        return {true, tagOutput, valOutput};
-    }
-    return {false, value::TypeTags::Nothing, 0};
-}
-
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::getArraySize(value::TypeTags tag,
-                                                                      value::Value val) {
+value::TagValueView ByteCode::getArraySize(value::TagValueView arr) {
     size_t result = 0;
 
-    switch (tag) {
+    switch (arr.tag) {
         case value::TypeTags::Array: {
-            result = value::getArrayView(val)->size();
+            result = value::getArrayView(arr.value)->size();
             break;
         }
         case value::TypeTags::ArraySet: {
-            result = value::getArraySetView(val)->size();
+            result = value::getArraySetView(arr.value)->size();
             break;
         }
         case value::TypeTags::ArrayMultiSet: {
-            result = value::getArrayMultiSetView(val)->size();
+            result = value::getArrayMultiSetView(arr.value)->size();
             break;
         }
         case value::TypeTags::bsonArray: {
             value::arrayForEach(
-                tag, val, [&](value::TypeTags t_unused, value::Value v_unused) { result++; });
+                arr.tag, arr.value, [&](value::TypeTags, value::Value) { result++; });
             break;
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueView::nothing();
     }
 
-    return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
+    return value::TagValueView::numberInt64(static_cast<int64_t>(result));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggSum(value::TypeTags accTag,
-                                                                value::Value accValue,
-                                                                value::TypeTags fieldTag,
-                                                                value::Value fieldValue) {
-    value::ValueGuard guard{accTag, accValue};
-
+value::TagValueOwned ByteCode::aggSum(value::TagValueOwned acc, value::TagValueView field) {
     // Skip aggregation step if the input is Nothing or non-numeric.
-    if (!value::isNumber(fieldTag)) {
-        guard.reset();
-        return {true, accTag, accValue};
+    if (!value::isNumber(field.tag)) {
+        return acc;
     }
 
     // Initialize the accumulator.
-    if (accTag == value::TypeTags::Nothing) {
-        accTag = value::TypeTags::NumberInt32;
-        accValue = value::bitcastFrom<int32_t>(0);
+    if (acc.tag() == value::TypeTags::Nothing) {
+        acc = value::TagValueOwned::numberInt32(0);
     }
 
-    auto result = genericAdd(accTag, accValue, fieldTag, fieldValue);
-
-    guard.reset();
-    return result.releaseToRaw();
+    return genericAdd(acc.tag(), acc.value(), field.tag, field.value).moveToOwned();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggCount(value::TypeTags accTag,
-                                                                  value::Value accValue) {
-    value::ValueGuard guard{accTag, accValue};
-    int64_t n = accTag == value::TypeTags::NumberInt64 ? value::bitcastTo<int64_t>(accValue) : 0;
-    return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(n + 1)};
+value::TagValueOwned ByteCode::aggCount(value::TagValueOwned acc) {
+    int64_t n =
+        acc.tag() == value::TypeTags::NumberInt64 ? value::bitcastTo<int64_t>(acc.value()) : 0;
+    return value::TagValueOwned::numberInt64(n + 1);
 }
 
 void ByteCode::genericResetDoubleDoubleSumState(value::Array* state) {
@@ -671,83 +425,69 @@ void ByteCode::genericResetDoubleDoubleSumState(value::Array* state) {
     // The order of the following three elements should match to 'AggSumValueElems'. An absent
     // 'kDecimalTotal' element means that we've not seen any decimal value. So, we're not adding
     // 'kDecimalTotal' element yet.
-    state->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
-    state->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
-    state->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+    state->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
+    state->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+    state->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
 }
 
 std::pair<value::TypeTags, value::Value> ByteCode::genericInitializeDoubleDoubleSumState() {
-    auto [accTag, accValue] = value::makeNewArray();
-    value::ValueGuard newArrGuard{accTag, accValue};
-    auto arr = value::getArrayView(accValue);
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto arr = value::getArrayView(result.value());
     arr->reserve(AggSumValueElems::kMaxSizeOfArray);
 
     genericResetDoubleDoubleSumState(arr);
 
-    newArrGuard.reset();
-    return {accTag, accValue};
+    return result.releaseToRaw();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags accTag,
-                                                                value::Value accValue,
-                                                                value::TypeTags fieldTag,
-                                                                value::Value fieldValue,
-                                                                CollatorInterface* collator) {
+value::TagValueOwned ByteCode::aggMin(value::TagValueView acc,
+                                      value::TagValueView field,
+                                      CollatorInterface* collator) {
     // Skip aggregation step if we don't have the input.
-    if (fieldTag == value::TypeTags::Nothing) {
-        auto [tag, val] = value::copyValue(accTag, accValue);
-        return {true, tag, val};
+    if (field.tag == value::TypeTags::Nothing) {
+        return acc.copy();
     }
 
     // Initialize the accumulator.
-    if (accTag == value::TypeTags::Nothing) {
-        auto [tag, val] = value::copyValue(fieldTag, fieldValue);
-        return {true, tag, val};
+    if (acc.tag == value::TypeTags::Nothing) {
+        return field.copy();
     }
 
-    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(acc.tag, acc.value, field.tag, field.value, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) < 0) {
-        auto [tag, val] = value::copyValue(accTag, accValue);
-        return {true, tag, val};
+        return acc.copy();
     } else {
-        auto [tag, val] = value::copyValue(fieldTag, fieldValue);
-        return {true, tag, val};
+        return field.copy();
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMax(value::TypeTags accTag,
-                                                                value::Value accValue,
-                                                                value::TypeTags fieldTag,
-                                                                value::Value fieldValue,
-                                                                CollatorInterface* collator) {
+value::TagValueOwned ByteCode::aggMax(value::TagValueView acc,
+                                      value::TagValueView field,
+                                      CollatorInterface* collator) {
     // Skip aggregation step if we don't have the input.
-    if (fieldTag == value::TypeTags::Nothing) {
-        auto [tag, val] = value::copyValue(accTag, accValue);
-        return {true, tag, val};
+    if (field.tag == value::TypeTags::Nothing) {
+        return acc.copy();
     }
 
     // Initialize the accumulator.
-    if (accTag == value::TypeTags::Nothing) {
-        auto [tag, val] = value::copyValue(fieldTag, fieldValue);
-        return {true, tag, val};
+    if (acc.tag == value::TypeTags::Nothing) {
+        return field.copy();
     }
 
-    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(acc.tag, acc.value, field.tag, field.value, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) > 0) {
-        auto [tag, val] = value::copyValue(accTag, accValue);
-        return {true, tag, val};
+        return acc.copy();
     } else {
-        auto [tag, val] = value::copyValue(fieldTag, fieldValue);
-        return {true, tag, val};
+        return field.copy();
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggFirst(value::TypeTags accTag,
-                                                                  value::Value accValue,
-                                                                  value::TypeTags fieldTag,
-                                                                  value::Value fieldValue) {
+value::TagValueMaybeOwned ByteCode::aggFirst(value::TypeTags accTag,
+                                             value::Value accValue,
+                                             value::TypeTags fieldTag,
+                                             value::Value fieldValue) {
     // Skip aggregation step if we don't have the input.
     if (fieldTag == value::TypeTags::Nothing) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -765,10 +505,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggFirst(value::TypeTag
     return {true, tag, val};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggLast(value::TypeTags accTag,
-                                                                 value::Value accValue,
-                                                                 value::TypeTags fieldTag,
-                                                                 value::Value fieldValue) {
+value::TagValueMaybeOwned ByteCode::aggLast(value::TypeTags accTag,
+                                            value::Value accValue,
+                                            value::TypeTags fieldTag,
+                                            value::Value fieldValue) {
     // Skip aggregation step if we don't have the input.
     if (fieldTag == value::TypeTags::Nothing) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -787,7 +527,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggLast(value::TypeTags
 }
 
 
-bool hasSeparatorAt(size_t idx, StringData input, StringData separator) {
+bool hasSeparatorAt(size_t idx, std::string_view input, std::string_view separator) {
     return (idx + separator.size() <= input.size()) &&
         input.substr(idx, separator.size()) == separator;
 }
@@ -809,8 +549,9 @@ value::TagValueMaybeOwned ByteCode::addToSetCappedImpl(value::TagValueOwned accu
         // The order is important! The accumulated array should be at index
         // AggArrayWithSize::kValues, and the size should be at index
         // AggArrayWithSize::kSizeOfValues.
-        accumulatorState->push_back(tagAccSet, valAccSet);
-        accumulatorState->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
+        accumulatorState->push_back_raw(tagAccSet, valAccSet);
+        accumulatorState->push_back_raw(value::TypeTags::NumberInt64,
+                                        value::bitcastFrom<int64_t>(0));
     }
     tassert(10936800,
             "Expected array for set accumulator state",
@@ -823,19 +564,19 @@ value::TagValueMaybeOwned ByteCode::addToSetCappedImpl(value::TagValueOwned accu
 
     // Check that the accumulated size of the set won't exceed the limit after adding the new value,
     // and if so, add the value.
-    auto [tagAccSet, valAccSet] =
-        accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
-    tassert(
-        10936802, "Expected ArraySet in accumulator state", tagAccSet == value::TypeTags::ArraySet);
-    auto accSet = value::getArraySetView(valAccSet);
+    auto accSetTagVal = accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
+    tassert(10936802,
+            "Expected ArraySet in accumulator state",
+            accSetTagVal.tag == value::TypeTags::ArraySet);
+    auto accSet = value::getArraySetView(accSetTagVal.value);
     if (!accSet->values().contains(newElem.raw())) {
         auto elemSize = value::getApproximateSize(newElem.tag(), newElem.value());
-        auto [tagAccSize, valAccSize] =
+        auto accSizeTagVal =
             accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues));
         tassert(10936803,
                 "Expected integer value for ArraySet size",
-                tagAccSize == value::TypeTags::NumberInt64);
-        const int64_t currentSize = value::bitcastTo<int64_t>(valAccSize);
+                accSizeTagVal.tag == value::TypeTags::NumberInt64);
+        const int64_t currentSize = value::bitcastTo<int64_t>(accSizeTagVal.value);
         int64_t newSize = currentSize + elemSize;
 
         uassert(ErrorCodes::ExceededMemoryLimit,
@@ -852,7 +593,7 @@ value::TagValueMaybeOwned ByteCode::addToSetCappedImpl(value::TagValueOwned accu
 
         // Insert the new value. Note that array will ignore Nothing.
         if (newElem.owned()) {
-            accSet->push_back(newElem.releaseToOwnedRaw());
+            accSet->push_back_raw(newElem.releaseToOwnedRaw());
         } else {
             accSet->push_back_clone(newElem.tag(), newElem.value());
         }
@@ -878,8 +619,9 @@ value::TagValueMaybeOwned ByteCode::setUnionAccumImpl(value::TagValueOwned accum
         // The order is important! The accumulated array should be at index
         // AggArrayWithSize::kValues, and the size should be at index
         // AggArrayWithSize::kSizeOfValues.
-        accumulatorState->push_back(tagAccSet, valAccSet);
-        accumulatorState->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
+        accumulatorState->push_back_raw(tagAccSet, valAccSet);
+        accumulatorState->push_back_raw(value::TypeTags::NumberInt64,
+                                        value::bitcastFrom<int64_t>(0));
     }
     tassert(7039521,
             "Expected array for set accumulator state",
@@ -894,26 +636,27 @@ value::TagValueMaybeOwned ByteCode::setUnionAccumImpl(value::TagValueOwned accum
             "Set accumulator with invalid length",
             accumulatorState->size() == static_cast<size_t>(AggArrayWithSize::kLast));
 
-    auto [tagAccSet, valAccSet] =
-        accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
-    tassert(
-        7039523, "Expected ArraySet in accumulator state", tagAccSet == value::TypeTags::ArraySet);
-    auto accSet = value::getArraySetView(valAccSet);
+    auto accSetTagVal = accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
+    tassert(7039523,
+            "Expected ArraySet in accumulator state",
+            accSetTagVal.tag == value::TypeTags::ArraySet);
+    auto accSet = value::getArraySetView(accSetTagVal.value);
 
     // Extract the current size of the accumulator. As we add elements to the set, we will increment
     // the current size accordingly and throw an exception if we ever exceed the size limit. We
     // cannot simply sum the two sizes, since the two sets could have a substantial intersection.
-    auto [accSizeTag, accSizeVal] =
+    auto accSizeTagVal =
         accumulatorState->getAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues));
-    tassert(7039524, "expected 64-bit int", accSizeTag == value::TypeTags::NumberInt64);
-    int64_t currentSize = value::bitcastTo<int64_t>(accSizeVal);
+    tassert(7039524, "expected 64-bit int", accSizeTagVal.tag == value::TypeTags::NumberInt64);
+    int64_t currentSize = value::bitcastTo<int64_t>(accSizeTagVal.value);
 
     if (newSetMembers.tag() != value::TypeTags::Nothing) {
         value::arrayForEach<true>(
             newSetMembers.tag(),
             newSetMembers.value(),
             [&](value::TypeTags tagNewElem, value::Value valNewElem) {
-                value::ValueGuard guardNewElem{tagNewElem, valNewElem};
+                value::TagValueOwned newElem =
+                    value::TagValueOwned::fromRaw(tagNewElem, valNewElem);
 
                 if (accSet->values().contains({tagNewElem, valNewElem})) {
                     // Skip this element, because it's already in the set, and continue with the
@@ -929,8 +672,7 @@ value::TagValueMaybeOwned ByteCode::setUnionAccumImpl(value::TagValueOwned accum
                                       << " elements and is " << currentSize << " bytes.",
                         currentSize < static_cast<int64_t>(sizeCap));
 
-                guardNewElem.reset();
-                accSet->push_back(tagNewElem, valNewElem);
+                accSet->push_back(std::move(newElem));
             });
     }
 
@@ -942,55 +684,52 @@ value::TagValueMaybeOwned ByteCode::setUnionAccumImpl(value::TagValueOwned accum
     return accumulatorStateTagVal;
 }
 
-ByteCode::MultiAccState ByteCode::getMultiAccState(value::TypeTags stateTag,
-                                                   value::Value stateVal) {
+ByteCode::MultiAccState ByteCode::getMultiAccState(value::TagValueView state) {
     uassert(
-        7548600, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
-    auto state = value::getArrayView(stateVal);
+        7548600, "The accumulator state should be an array", state.tag == value::TypeTags::Array);
+    auto stateArray = value::getArrayView(state.value);
 
     uassert(7548601,
             "The accumulator state should have correct number of elements",
-            state->size() == static_cast<size_t>(AggMultiElems::kSizeOfArray));
+            stateArray->size() == static_cast<size_t>(AggMultiElems::kSizeOfArray));
 
-    auto [arrayTag, arrayVal] = state->getAt(static_cast<size_t>(AggMultiElems::kInternalArr));
+    auto arrayTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kInternalArr));
     uassert(7548602,
             "Internal array component is not of correct type",
-            arrayTag == value::TypeTags::Array);
-    auto array = value::getArrayView(arrayVal);
+            arrayTagVal.tag == value::TypeTags::Array);
+    auto array = value::getArrayView(arrayTagVal.value);
 
-    auto [startIndexTag, startIndexVal] =
-        state->getAt(static_cast<size_t>(AggMultiElems::kStartIdx));
+    auto startIndexTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kStartIdx));
     uassert(7548700,
             "Index component be a 64-bit integer",
-            startIndexTag == value::TypeTags::NumberInt64);
-    int64_t startIndex = value::bitcastTo<int64_t>(startIndexVal);
+            startIndexTagVal.tag == value::TypeTags::NumberInt64);
+    int64_t startIndex = value::bitcastTo<int64_t>(startIndexTagVal.value);
 
-    auto [maxSizeTag, maxSizeVal] = state->getAt(static_cast<size_t>(AggMultiElems::kMaxSize));
+    auto maxSizeTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kMaxSize));
     uassert(7548603,
             "MaxSize component should be a 64-bit integer",
-            maxSizeTag == value::TypeTags::NumberInt64);
-    int64_t maxSize = value::bitcastTo<int64_t>(maxSizeVal);
+            maxSizeTagVal.tag == value::TypeTags::NumberInt64);
+    int64_t maxSize = value::bitcastTo<int64_t>(maxSizeTagVal.value);
 
-    auto [memUsageTag, memUsageVal] = state->getAt(static_cast<size_t>(AggMultiElems::kMemUsage));
+    auto memUsageTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kMemUsage));
     uassert(7548612,
             "MemUsage component should be a 32-bit integer",
-            memUsageTag == value::TypeTags::NumberInt32);
-    int32_t memUsage = value::bitcastTo<int32_t>(memUsageVal);
+            memUsageTagVal.tag == value::TypeTags::NumberInt32);
+    int32_t memUsage = value::bitcastTo<int32_t>(memUsageTagVal.value);
 
-    auto [memLimitTag, memLimitVal] = state->getAt(static_cast<size_t>(AggMultiElems::kMemLimit));
+    auto memLimitTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kMemLimit));
     uassert(7548613,
             "MemLimit component should be a 32-bit integer",
-            memLimitTag == value::TypeTags::NumberInt32);
-    auto memLimit = value::bitcastTo<int32_t>(memLimitVal);
+            memLimitTagVal.tag == value::TypeTags::NumberInt32);
+    auto memLimit = value::bitcastTo<int32_t>(memLimitTagVal.value);
 
-    auto [isGroupAccumTag, isGroupAccumVal] =
-        state->getAt(static_cast<size_t>(AggMultiElems::kIsGroupAccum));
+    auto isGroupAccumTagVal = stateArray->getAt(static_cast<size_t>(AggMultiElems::kIsGroupAccum));
     uassert(8070611,
             "IsGroupAccum component should be a boolean",
-            isGroupAccumTag == value::TypeTags::Boolean);
-    auto isGroupAccum = value::bitcastTo<bool>(isGroupAccumVal);
+            isGroupAccumTagVal.tag == value::TypeTags::Boolean);
+    auto isGroupAccum = value::bitcastTo<bool>(isGroupAccumTagVal.value);
 
-    return {state, array, startIndex, maxSize, memUsage, memLimit, isGroupAccum};
+    return {stateArray, array, startIndex, maxSize, memUsage, memLimit, isGroupAccum};
 }
 
 int32_t updateAndCheckMemUsage(
@@ -1097,52 +836,49 @@ ByteCode::genericRemovableSumState(value::Array* state) {
             "incorrect size of state array",
             state->size() == static_cast<size_t>(AggRemovableSumElems::kSizeOfArray));
 
-    auto [sumAccTag, sumAccVal] = state->getAt(static_cast<size_t>(AggRemovableSumElems::kSumAcc));
+    auto sumAccTagVal = state->getAt(static_cast<size_t>(AggRemovableSumElems::kSumAcc));
     uassert(7795102,
             "sum accumulator elem should be of array type",
-            sumAccTag == value::TypeTags::Array);
-    auto sumAcc = value::getArrayView(sumAccVal);
+            sumAccTagVal.tag == value::TypeTags::Array);
+    auto sumAcc = value::getArrayView(sumAccTagVal.value);
 
-    auto [nanCountTag, nanCountVal] =
-        state->getAt(static_cast<size_t>(AggRemovableSumElems::kNanCount));
+    auto nanCountTagVal = state->getAt(static_cast<size_t>(AggRemovableSumElems::kNanCount));
     uassert(7795103,
             "nanCount elem should be of int64 type",
-            nanCountTag == value::TypeTags::NumberInt64);
-    auto nanCount = value::bitcastTo<int64_t>(nanCountVal);
+            nanCountTagVal.tag == value::TypeTags::NumberInt64);
+    auto nanCount = value::bitcastTo<int64_t>(nanCountTagVal.value);
 
-    auto [posInfinityCountTag, posInfinityCountVal] =
+    auto posInfinityCountTagVal =
         state->getAt(static_cast<size_t>(AggRemovableSumElems::kPosInfinityCount));
     uassert(7795104,
             "posInfinityCount elem should be of int64 type",
-            posInfinityCountTag == value::TypeTags::NumberInt64);
-    auto posInfinityCount = value::bitcastTo<int64_t>(posInfinityCountVal);
+            posInfinityCountTagVal.tag == value::TypeTags::NumberInt64);
+    auto posInfinityCount = value::bitcastTo<int64_t>(posInfinityCountTagVal.value);
 
-    auto [negInfinityCountTag, negInfinityCountVal] =
+    auto negInfinityCountTagVal =
         state->getAt(static_cast<size_t>(AggRemovableSumElems::kNegInfinityCount));
     uassert(7795105,
             "negInfinityCount elem should be of int64 type",
-            negInfinityCountTag == value::TypeTags::NumberInt64);
-    auto negInfinityCount = value::bitcastTo<int64_t>(negInfinityCountVal);
+            negInfinityCountTagVal.tag == value::TypeTags::NumberInt64);
+    auto negInfinityCount = value::bitcastTo<int64_t>(negInfinityCountTagVal.value);
 
-    auto [doubleCountTag, doubleCountVal] =
-        state->getAt(static_cast<size_t>(AggRemovableSumElems::kDoubleCount));
+    auto doubleCountTagVal = state->getAt(static_cast<size_t>(AggRemovableSumElems::kDoubleCount));
     uassert(7795106,
             "doubleCount elem should be of int64 type",
-            doubleCountTag == value::TypeTags::NumberInt64);
-    auto doubleCount = value::bitcastTo<int64_t>(doubleCountVal);
+            doubleCountTagVal.tag == value::TypeTags::NumberInt64);
+    auto doubleCount = value::bitcastTo<int64_t>(doubleCountTagVal.value);
 
-    auto [decimalCountTag, decimalCountVal] =
+    auto decimalCountTagVal =
         state->getAt(static_cast<size_t>(AggRemovableSumElems::kDecimalCount));
     uassert(7795107,
             "decimalCount elem should be of int64 type",
-            decimalCountTag == value::TypeTags::NumberInt64);
-    auto decimalCount = value::bitcastTo<int64_t>(decimalCountVal);
+            decimalCountTagVal.tag == value::TypeTags::NumberInt64);
+    auto decimalCount = value::bitcastTo<int64_t>(decimalCountTagVal.value);
 
     return {sumAcc, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggRemovableSumFinalizeImpl(
-    value::Array* state) {
+value::TagValueMaybeOwned ByteCode::aggRemovableSumFinalizeImpl(value::Array* state) {
     auto [sumAcc, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount] =
         genericRemovableSumState(state);
 
@@ -1192,7 +928,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggRemovableSumFinalize
     }
 
     auto [sumOwned, sumTag, sumVal] = aggDoubleDoubleSumFinalizeImpl(sumAcc).releaseToRaw();
-    value::ValueGuard sumGuard{sumOwned, sumTag, sumVal};
+    value::TagValueMaybeOwned sum{sumOwned, sumTag, sumVal};
 
     if (sumTag == value::TypeTags::NumberDecimal && decimalCount == 0) {
         auto decimalVal = value::bitcastTo<Decimal128>(sumVal);
@@ -1226,8 +962,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggRemovableSumFinalize
         auto [numTag, numVal] = value::makeIntOrLong(longVal);
         return {false, numTag, numVal};
     }
-    sumGuard.reset();
-    return {sumOwned, sumTag, sumVal};
+    return sum;
 }
 
 }  // namespace vm

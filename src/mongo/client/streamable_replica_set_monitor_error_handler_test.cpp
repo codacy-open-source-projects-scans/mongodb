@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/client/streamable_replica_set_monitor_error_handler.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/unittest.h"
@@ -46,7 +19,7 @@
 
 
 namespace mongo {
-using HandshakeStage = StreamableReplicaSetMonitorErrorHandler::HandshakeStage;
+using TriggerEvent = StreamableReplicaSetMonitorErrorHandler::TriggerEvent;
 using ErrorActions = StreamableReplicaSetMonitorErrorHandler::ErrorActions;
 using Error = ErrorCodes::Error;
 
@@ -69,38 +42,36 @@ public:
         }
     }
 
-    void testScenario(HandshakeStage stage,
-                      bool isApplicationOperation,
+    void testScenario(TriggerEvent triggerEvent,
                       std::vector<Error> errors,
                       std::function<ErrorActions(const Status&)> expectedResultGenerator,
+                      const BSONObj& errorResponse,
                       int numAttempts = 1) {
         auto testSubject = subject();
 
-        const auto prePost = (stage == HandshakeStage::kPreHandshake) ? "pre" : "post";
-        const auto applicationOperation = (isApplicationOperation) ? "application" : "monitoring";
-        LOGV2_INFO(4712105,
-                   "Check Scenario",
-                   "handshake"_attr = prePost,
-                   "operationType"_attr = applicationOperation);
+        LOGV2_INFO(4712105, "Check Scenario", "event"_attr = triggerEvent);
         for (auto error : errors) {
             LOGV2_INFO(4712106, "Check error", "error"_attr = ErrorCodes::errorString(error));
             for (int attempt = 0; attempt < numAttempts; attempt++) {
                 auto result = testSubject->computeErrorActions(
-                    kHost, makeStatus(error), stage, isApplicationOperation, kErrorBson);
+                    kHost, makeStatus(error), triggerEvent, errorResponse);
                 verifyActions(result, expectedResultGenerator(makeStatus(error)));
                 LOGV2_INFO(4712107, "Attempt Successful", "num"_attr = attempt);
             }
         }
     }
 
-    void testScenario(HandshakeStage stage,
-                      bool isApplicationOperation,
+    void testScenario(TriggerEvent triggerEvent,
                       std::vector<Error> errors,
                       ErrorActions expectedResult,
+                      const BSONObj& errorResponse,
                       int numAttempts = 1) {
-        testScenario(stage, isApplicationOperation, errors, [expectedResult](const Status&) {
-            return expectedResult;
-        });
+        testScenario(
+            triggerEvent,
+            errors,
+            [expectedResult](const Status&) { return expectedResult; },
+            errorResponse,
+            numAttempts);
     }
 
     std::unique_ptr<StreamableReplicaSetMonitorErrorHandler> subject() {
@@ -130,32 +101,30 @@ public:
     inline static const sdam::HelloOutcome kErrorHelloOutcome =
         sdam::HelloOutcome(kHost, kErrorBson, kErrorMessage);
 
-    static constexpr bool kApplicationOperation = true;
-    static constexpr bool kMonitoringOperation = false;
-
     static constexpr int kThreeAttempts = 3;
 };
 
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, ApplicationNetworkErrorsPreHandshake) {
     testScenario(
-        HandshakeStage::kPreHandshake,
-        kApplicationOperation,
+        TriggerEvent::kApplicationPreHandshake,
         kNetworkErrors,
-        StreamableReplicaSetMonitorErrorHandler::ErrorActions{true, false, kErrorHelloOutcome});
+        StreamableReplicaSetMonitorErrorHandler::ErrorActions{true, false, kErrorHelloOutcome},
+        kErrorBson);
 };
 
 // https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-discovery-and-monitoring.rst#network-error-when-reading-or-writing
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, ApplicationNetworkErrorsPostHandshake) {
     testScenario(
-        HandshakeStage::kPostHandshake,
-        kApplicationOperation,
+        TriggerEvent::kApplicationPostHandshake,
         kNetworkErrorsNoTimeout,
-        StreamableReplicaSetMonitorErrorHandler::ErrorActions{true, false, kErrorHelloOutcome});
+        StreamableReplicaSetMonitorErrorHandler::ErrorActions{true, false, kErrorHelloOutcome},
+        kErrorBson);
 };
 
 // https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-error-during-server-check
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, MonitoringNetworkErrorsPostHandshake) {
     // Two consecutive errors must occur to expect an unknown server description.
+    // Network errors have no server response, so bson is empty (not ok:0).
     const auto errorServerDescriptionOnSecondNetworkFailure = [](const Status& status) {
         static int count = 0;
         count = (count + 1) % 2;
@@ -165,20 +134,20 @@ TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, MonitoringNetworkErro
                   true, false, kErrorHelloOutcome};
     };
 
-    testScenario(HandshakeStage::kPostHandshake,
-                 kMonitoringOperation,
+    testScenario(TriggerEvent::kHeartbeatFailure,
                  kNetworkErrors,
                  errorServerDescriptionOnSecondNetworkFailure,
+                 BSONObj(),  // Local errors don't send a response.
                  kThreeAttempts);
 }
 
 // https://github.com/mongodb/specifications/blob/master/source/server-discovery-and-monitoring/server-monitoring.rst#network-error-during-server-check
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, MonitoringNetworkErrorsPreHandshake) {
     testScenario(
-        HandshakeStage::kPreHandshake,
-        kMonitoringOperation,
+        TriggerEvent::kHandshakeFailure,
         kNetworkErrors,
         StreamableReplicaSetMonitorErrorHandler::ErrorActions{true, false, kErrorHelloOutcome},
+        BSONObj(),  // Local errors don't send a response.
         kThreeAttempts);
 }
 
@@ -194,26 +163,43 @@ TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, ApplicationNotMasterO
         }
     };
 
-    testScenario(HandshakeStage::kPostHandshake,
-                 kApplicationOperation,
+    testScenario(TriggerEvent::kApplicationPostHandshake,
                  kNotMasterAndNodeRecovering,
-                 shutdownErrorsDropConnections);
+                 shutdownErrorsDropConnections,
+                 kErrorBson);
 }
 
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, MonitoringNonNetworkError) {
     testScenario(
-        HandshakeStage::kPostHandshake,
-        kMonitoringOperation,
+        TriggerEvent::kHeartbeatFailure,
         kInternalError,
-        StreamableReplicaSetMonitorErrorHandler::ErrorActions{false, false, kErrorHelloOutcome});
+        StreamableReplicaSetMonitorErrorHandler::ErrorActions{false, false, kErrorHelloOutcome},
+        BSONObj());  // Local errors don't send a response.
 }
 
 TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture,
-       ApplicationNonNetworkHelloOrRecoveringError) {
+       MonitoringNonNetworkHelloOrRecoveringError) {
     testScenario(
-        HandshakeStage::kPostHandshake,
-        kMonitoringOperation,
+        TriggerEvent::kHeartbeatFailure,
         kInternalError,
-        StreamableReplicaSetMonitorErrorHandler::ErrorActions{false, false, kErrorHelloOutcome});
+        StreamableReplicaSetMonitorErrorHandler::ErrorActions{false, false, kErrorHelloOutcome},
+        BSONObj());  // Local errors don't send a response.
+}
+
+TEST_F(StreamableReplicaSetMonitorErrorHandlerTestFixture, MonitoringRemoteHelloError) {
+    for (auto triggerEvent : {TriggerEvent::kHeartbeatFailure, TriggerEvent::kHandshakeFailure}) {
+        auto testSubject = subject();
+        const auto status = makeStatus(ErrorCodes::ShutdownInProgress);
+        const auto bsonWithCode =
+            BSONObjBuilder()
+                .append("ok", 0)
+                .append("code", static_cast<int>(ErrorCodes::ShutdownInProgress))
+                .obj();
+
+        auto result = testSubject->computeErrorActions(kHost, status, triggerEvent, bsonWithCode);
+        verifyActions(result,
+                      StreamableReplicaSetMonitorErrorHandler::ErrorActions{
+                          false, false, kErrorHelloOutcome});
+    }
 }
 }  // namespace mongo

@@ -2,6 +2,7 @@
 // variables for use in expressions within the command.
 // Before 7.2, $rand was evaluated more than once in sharded find (SERVER-75927).
 // @tags: [
+//   uses_explain,
 //   # Requires a batch size greater than one.
 //   does_not_support_config_fuzzer,
 //   requires_fcv_81,
@@ -12,11 +13,15 @@
 //   # Primary-driven index builds must have batched writes enabled which config.image_collection
 //   # does not support.
 //   primary_driven_index_builds_incompatible_with_retryable_writes,
+//   # fromRouter: true requires an internalClient connection; secondary_reads suites route
+//   # connections through a secondary without the internalClient handshake.
+//   assumes_read_preference_unchanged,
 // ]
 //
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {getPlanStage, getSingleNodeExplain, planHasStage} from "jstests/libs/query/analyze_plan.js";
-import {checkSbeFullFeatureFlagEnabled} from "jstests/libs/query/sbe_util.js";
+import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const testDB = db.getSiblingDB("command_let_variables");
 const coll = testDB.command_let_variables;
@@ -72,34 +77,60 @@ const pipeline = [
 let expectedResults = [
     {
         Species: "Bullfinch (Pyrrhula pyrrhula)",
-        population_trends: {term: {start: 2009, end: 2014}, pct_change: 12, annual: 2.38, trend: "weak increase"},
+        population_trends: {
+            term: {start: 2009, end: 2014},
+            pct_change: 12,
+            annual: 2.38,
+            trend: "weak increase",
+        },
     },
 ];
 
-assert.eq(coll.aggregate(pipeline, {let: {target_trend: "weak increase"}}).toArray(), expectedResults);
+assert.eq(
+    coll.aggregate(pipeline, {let: {target_trend: "weak increase"}}).toArray(),
+    expectedResults,
+);
 
 expectedResults = [
     {
         Species: "Chaffinch (Fringilla coelebs)",
-        population_trends: {term: {start: 2009, end: 2014}, pct_change: -7, annual: -1.49, trend: "weak decline"},
+        population_trends: {
+            term: {start: 2009, end: 2014},
+            pct_change: -7,
+            annual: -1.49,
+            trend: "weak decline",
+        },
     },
     {
         Species: "Song Thrush (Turdus philomelos)",
-        population_trends: {term: {start: 1970, end: 2014}, pct_change: -53, annual: -1.7, trend: "weak decline"},
+        population_trends: {
+            term: {start: 1970, end: 2014},
+            pct_change: -53,
+            annual: -1.7,
+            trend: "weak decline",
+        },
     },
 ];
-assert.eq(coll.aggregate(pipeline, {let: {target_trend: "weak decline"}}).toArray(), expectedResults);
+assert.eq(
+    coll.aggregate(pipeline, {let: {target_trend: "weak decline"}}).toArray(),
+    expectedResults,
+);
 
 // Test that running explain on the agg command works as expected.
 let explain = assert.commandWorked(
     testDB.runCommand({
-        explain: {aggregate: coll.getName(), pipeline, let: {target_trend: "weak decline"}, cursor: {}},
+        explain: {
+            aggregate: coll.getName(),
+            pipeline,
+            let: {target_trend: "weak decline"},
+            cursor: {},
+        },
         verbosity: "executionStats",
     }),
 );
 
 if (!isMongos) {
-    if (checkSbeFullFeatureFlagEnabled(testDB)) {
+    if (checkSbeFullyEnabled(testDB) && FeatureFlagUtil.isPresentAndEnabled(testDB, "SbeUnwind")) {
         // $unwind should be pushed down to SBE.
         assert(planHasStage(testDB, explain, "UNWIND"), explain);
     } else {
@@ -111,21 +142,34 @@ if (!isMongos) {
     }
 }
 
-if (!isMongos && !TestData.testingReplicaSetEndpoint) {
+if (!isMongos) {
     // Test that if runtimeConstants and let are both specified, both will coexist.
     // Runtime constants are not allowed on mongos passthroughs.
     // Must set 'fromRouter: true' as otherwise 'runtimeConstants' is disallowed on mongod.
+    // fromRouter requires an internal client connection.
+    const internalConn = new Mongo(testDB.getMongo().host);
+    assert.commandWorked(
+        internalConn.getDB("admin").runCommand({
+            hello: 1,
+            internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)},
+        }),
+    );
+    const internalDB = internalConn.getDB(testDB.getName());
+    const internalColl = internalDB[coll.getName()];
+
     let constants = {
         localNow: new Date(),
         clusterTime: new Timestamp(0, 0),
     };
 
     assert.eq(
-        coll
+        internalColl
             .aggregate(pipeline, {
                 runtimeConstants: constants,
                 let: {target_trend: "weak decline"},
                 fromRouter: true,
+                readConcern: {},
+                writeConcern: {},
             })
             .toArray(),
         expectedResults,
@@ -133,13 +177,15 @@ if (!isMongos && !TestData.testingReplicaSetEndpoint) {
 
     // Test that undefined let params in the pipeline fail gracefully.
     assert.commandFailedWithCode(
-        testDB.runCommand({
+        internalDB.runCommand({
             aggregate: coll.getName(),
             pipeline: pipeline,
             runtimeConstants: constants,
             cursor: {},
             let: {cat: "not_a_bird"},
             fromRouter: true,
+            readConcern: {},
+            writeConcern: {},
         }),
         17276,
     );
@@ -151,29 +197,41 @@ if (!isMongos && !TestData.testingReplicaSetEndpoint) {
         {$sort: {Species: 1}},
     ];
     assert.eq(
-        coll.aggregate(pipeline_no_lets, {runtimeConstants: constants, let: {}, fromRouter: true}).toArray(),
+        internalColl
+            .aggregate(pipeline_no_lets, {
+                runtimeConstants: constants,
+                let: {},
+                fromRouter: true,
+                readConcern: {},
+                writeConcern: {},
+            })
+            .toArray(),
         expectedResults,
     );
 
     assert.commandWorked(
-        testDB.runCommand({
+        internalDB.runCommand({
             aggregate: coll.getName(),
             pipeline: pipeline_no_lets,
             runtimeConstants: constants,
             cursor: {},
             let: null,
             fromRouter: true,
+            readConcern: {},
+            writeConcern: {},
         }),
     );
 
     assert.commandFailedWithCode(
-        testDB.runCommand({
+        internalDB.runCommand({
             aggregate: coll.getName(),
             pipeline: pipeline_no_lets,
             runtimeConstants: constants,
             cursor: {},
             let: 1,
             fromRouter: true,
+            readConcern: {},
+            writeConcern: {},
         }),
         ErrorCodes.TypeMismatch,
     );
@@ -332,12 +390,15 @@ assert.commandWorked(
     testDB.runCommand({
         delete: coll.getName(),
         let: {target_species: "Song Thrush (Turdus philomelos)"},
-        deletes: [{q: {$and: [{_id: 4}, {$expr: {$eq: ["$Species", "$$target_species"]}}]}, limit: 1}],
+        deletes: [
+            {q: {$and: [{_id: 4}, {$expr: {$eq: ["$Species", "$$target_species"]}}]}, limit: 1},
+        ],
     }),
 );
 
-result = assert.commandWorked(testDB.runCommand({find: coll.getName(), filter: {$expr: {$eq: ["$_id", "4"]}}})).cursor
-    .firstBatch;
+result = assert.commandWorked(
+    testDB.runCommand({find: coll.getName(), filter: {$expr: {$eq: ["$_id", "4"]}}}),
+).cursor.firstBatch;
 assert.eq(result.length, 0);
 
 assert.commandWorked(coll.insert({_id: 4, Species: "bird_to_remove"}));
@@ -348,7 +409,9 @@ explain = assert.commandWorked(
         explain: {
             delete: coll.getName(),
             let: {target_species: "bird_to_remove"},
-            deletes: [{q: {$and: [{_id: 4}, {$expr: {$eq: ["$Species", "$$target_species"]}}]}, limit: 1}],
+            deletes: [
+                {q: {$and: [{_id: 4}, {$expr: {$eq: ["$Species", "$$target_species"]}}]}, limit: 1},
+            ],
         },
         verbosity: "executionStats",
     }),
@@ -367,8 +430,9 @@ result = assert.commandWorked(
 );
 assert.eq(result.nRemoved, 1);
 
-result = assert.commandWorked(testDB.runCommand({find: coll.getName(), filter: {$expr: {$eq: ["$_id", "4"]}}})).cursor
-    .firstBatch;
+result = assert.commandWorked(
+    testDB.runCommand({find: coll.getName(), filter: {$expr: {$eq: ["$_id", "4"]}}}),
+).cursor.firstBatch;
 assert.eq(result.length, 0);
 
 // Test that reserved names are not allowed as let variable names.
@@ -384,12 +448,21 @@ assert.eq(result.length, 0);
     const reservedName = caseInfo.name;
     const expectedError = caseInfo.errorCode;
     assert.commandFailedWithCode(
-        testDB.runCommand({aggregate: coll.getName(), pipeline: [], cursor: {}, let: {[reservedName]: "failure"}}),
+        testDB.runCommand({
+            aggregate: coll.getName(),
+            pipeline: [],
+            cursor: {},
+            let: {[reservedName]: "failure"},
+        }),
         expectedError,
         `Expected an aggregate with the variable ${reservedName} to fail.`,
     );
     assert.commandFailedWithCode(
-        testDB.runCommand({update: coll.getName(), updates: [{q: {}, u: []}], let: {[reservedName]: "failure"}}),
+        testDB.runCommand({
+            update: coll.getName(),
+            updates: [{q: {}, u: []}],
+            let: {[reservedName]: "failure"},
+        }),
         expectedError,
         `Expected a pipeline style update with the variable ${reservedName} to fail.`,
     );
@@ -507,7 +580,10 @@ assert.eq(result.n, 1);
 assert.eq(result.nModified, 1);
 
 result = assert.commandWorked(
-    testDB.runCommand({find: coll.getName(), filter: {$expr: {$eq: ["$Species", "Chaffinch (Fringilla coelebs)"]}}}),
+    testDB.runCommand({
+        find: coll.getName(),
+        filter: {$expr: {$eq: ["$Species", "Chaffinch (Fringilla coelebs)"]}},
+    }),
 );
 assert.eq(result.cursor.firstBatch.length, 0);
 
@@ -580,9 +656,13 @@ assert.commandFailedWithCode(
 
 // Test that the .update() shell helper supports let parameters.
 result = assert.commandWorked(
-    coll.update({_id: 3, $expr: {$eq: ["$Species", "$$target_species"]}}, [{$set: {Species: "$$new_name"}}], {
-        let: {target_species: "Pied Piper", new_name: "Chaffinch"},
-    }),
+    coll.update(
+        {_id: 3, $expr: {$eq: ["$Species", "$$target_species"]}},
+        [{$set: {Species: "$$new_name"}}],
+        {
+            let: {target_species: "Pied Piper", new_name: "Chaffinch"},
+        },
+    ),
 );
 assert.eq(result.nMatched, 1);
 assert.eq(result.nModified, 1);

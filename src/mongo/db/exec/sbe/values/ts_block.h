@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/bson/column/bson_element_storage.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/path_request.h"
@@ -37,8 +12,11 @@
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <absl/container/flat_hash_map.h>
 
 namespace mongo::sbe::value {
 class TsBlock;
@@ -57,7 +35,7 @@ public:
         std::vector<std::unique_ptr<CellBlock>> cellBlocks;
     };
 
-    TsBucketPathExtractor(std::vector<PathRequest> reqs, StringData timeField);
+    TsBucketPathExtractor(std::vector<PathRequest> reqs, std::string_view timeField);
 
     /*
      * Returns one CellBlock per path given in the constructor. A CellBlock represents all of the
@@ -89,7 +67,7 @@ private:
     stdx::unordered_set<size_t> _nonTopLevelGetPathIdxes;
 
 
-    StringData _timeField;
+    std::string_view _timeField;
 
     // This maps [top-level field -> [index into '_paths' which start with this field]]
     //
@@ -181,20 +159,10 @@ public:
         return static_cast<bool>(_decompressedBlock);
     }
 
-    boost::optional<size_t> argMin() override {
-        ensureDeblocked();
-        return _decompressedBlock->argMin();
-    }
+    boost::optional<size_t> argMin() override;
+    boost::optional<size_t> argMax() override;
 
-    boost::optional<size_t> argMax() override {
-        ensureDeblocked();
-        return _decompressedBlock->argMax();
-    }
-
-    TagValueView at(size_t idx) override {
-        ensureDeblocked();
-        return _decompressedBlock->at(idx);
-    }
+    TagValueView at(size_t idx) override;
 
     TypeTags getBlockTag() const {
         return _block.tag();
@@ -211,8 +179,23 @@ public:
         return _decompressedBlock.get();
     }
 
+    int getApproximateSize() const final {
+        int result = sizeof(*this) + _atCache.capacity() * sizeof(decltype(_atCache)::value_type);
+        if (_block.owned()) {
+            result += sbe::value::getApproximateSize(_block.tag(), _block.value());
+        }
+        if (_decompressedBlock) {
+            result += _decompressedBlock->getApproximateSize();
+        }
+        if (_atCacheAllocator) {
+            result += _atCacheAllocator->totalBlocksMemory() + sizeof(BSONElementStorage);
+        }
+        return result;
+    }
+
 private:
     void ensureDeblocked();
+    void ensureAtCacheAllocator();
 
     /**
      * Deblocks the values from a BSON object block.
@@ -257,6 +240,17 @@ private:
     // Cached result of tryDense(). Populated lazily on first call. Mutable because tryDense()
     // is const.
     mutable boost::optional<bool> _densenessCache;
+
+    // Maps logical row index -> tag/value view for elements materialized by argMin/argMax or at()
+    // boundary fast paths. For deep types, the view's Value points into _atCacheAllocator's
+    // storage. Clones start empty: BSONElementStorage uses thread_unsafe_counter refcounting, and
+    // the class invariant requires clones to be fully owned with no pointers into outside data.
+    absl::flat_hash_map<size_t, TagValueView> _atCache;
+
+    // Owns BSONElementStorage for any deep-type bytes referenced by _atCache. Lazily constructed by
+    // ensureAtCacheAllocator() on the first cache-miss path that materializes via a bsoncolumn
+    // expression.
+    boost::intrusive_ptr<BSONElementStorage> _atCacheAllocator;
 };
 
 /**
@@ -284,8 +278,17 @@ public:
         return _positionInfo;
     }
 
+    int getApproximateSize() const override {
+        int result = sizeof(*this);
+        result += static_cast<int>(_positionInfo.capacity() * sizeof(int32_t));
+        if (_ownedTsBlock) {
+            result += _ownedTsBlock->getApproximateSize();
+        }
+        return result;
+    }
+
 private:
-    TsCellBlockForTopLevelField(size_t count, std::unique_ptr<TsBlock> tsBlock);
+    TsCellBlockForTopLevelField(std::unique_ptr<TsBlock> tsBlock);
 
     std::unique_ptr<TsBlock> _ownedTsBlock;
     // If _ownedTsBlock is non-null, this points to _ownedTsBlock.

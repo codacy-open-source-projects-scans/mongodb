@@ -15,6 +15,7 @@
  *   requires_non_retryable_writes,
  *   requires_sharding,
  *   uses_transactions,
+ *   requires_getmore,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
@@ -33,7 +34,13 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         exactIdDelete(db, this.getCurrentOrPreviousLatchCollName(collName), this.session);
     };
     $config.states.multiDelete = function (db, collName, connCache) {
-        multiDelete(db, this.getCurrentOrPreviousLatchCollName(collName), this.session, this.tid, this.partitionSize);
+        multiDelete(
+            db,
+            this.getCurrentOrPreviousLatchCollName(collName),
+            this.session,
+            this.tid,
+            this.partitionSize,
+        );
     };
     $config.states.verifyDocuments = function (db, collName, connCache) {
         verifyDocuments(db, this.getCurrentOrPreviousLatchCollName(collName), this.tid);

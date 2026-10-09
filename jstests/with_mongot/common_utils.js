@@ -2,6 +2,38 @@
  * Utility functions that are common for both mocked and e2e search tests.
  */
 
+// Internal DRM container that wraps extension `$search` when featureFlagSearchExtension is on.
+export const kDocumentResultsAndMetadataStage = "$_internalDocumentResultsAndMetadata";
+
+export function isMongotProducerStageName(stageName) {
+    return (
+        stageName === "$_internalSearchMongotRemote" ||
+        stageName === kDocumentResultsAndMetadataStage ||
+        stageName === "$searchMeta" ||
+        stageName === "$vectorSearch"
+    );
+}
+
+// Extracts the $search/$searchMeta stage from shardsPart[0], unwrapping the extension DRM and
+// $_extensionSearchMeta shapes. Returns null if not found.
+export function getShardsPartSearchStage(shardsPart0, searchType) {
+    if (shardsPart0.hasOwnProperty(searchType)) {
+        return shardsPart0[searchType];
+    }
+    // Extension `$search` is nested under DRM's source.
+    if (searchType === "$search" && shardsPart0.hasOwnProperty(kDocumentResultsAndMetadataStage)) {
+        const source = shardsPart0[kDocumentResultsAndMetadataStage].source;
+        if (source && source.hasOwnProperty(searchType)) {
+            return source[searchType];
+        }
+    }
+    // Extension `$searchMeta` serializes as the internal extension stage name.
+    if (searchType === "$searchMeta" && shardsPart0.hasOwnProperty("$_extensionSearchMeta")) {
+        return shardsPart0["$_extensionSearchMeta"];
+    }
+    return null;
+}
+
 /**
  * Checks that the explain object for a sharded search query contains the correct "protocolVersion".
  * Checks 'metaPipeline' and 'sortSpec' if it's provided.
@@ -21,18 +53,34 @@ export function verifyShardsPartExplainOutput({
     protocolVersion = NumberInt(1),
     sortSpec = null,
 }) {
-    // Checks index 0 of 'shardsPart' since $search, $searchMeta need to come first in the pipeline
-    assert(result.splitPipeline.shardsPart[0][searchType].hasOwnProperty("metadataMergeProtocolVersion"));
-    assert(result.splitPipeline.shardsPart[0][searchType].hasOwnProperty("mergingPipeline"));
+    // Checks index 0 of 'shardsPart' since $search, $searchMeta need to come first in the pipeline.
+    const searchStage = getShardsPartSearchStage(result.splitPipeline.shardsPart[0], searchType);
+    assert(
+        searchStage,
+        "Expected shardsPart[0] to contain " +
+            searchType +
+            " (possibly nested under " +
+            kDocumentResultsAndMetadataStage +
+            " or as $_extensionSearchMeta): " +
+            tojson(result.splitPipeline.shardsPart[0]),
+    );
 
-    assert.eq(NumberInt(result.splitPipeline.shardsPart[0][searchType].metadataMergeProtocolVersion), protocolVersion);
-
-    if (metaPipeline) {
-        assert.eq(result.splitPipeline.shardsPart[0][searchType].mergingPipeline, metaPipeline);
-    }
-    if (sortSpec) {
-        assert(result.splitPipeline.shardsPart[0][searchType].hasOwnProperty("sortSpec"));
-        assert.eq(result.splitPipeline.shardsPart[0][searchType].sortSpec, sortSpec);
+    // Legacy stages embed merge metadata on the stage; extension DPL uses splitPipeline.mergerPart.
+    if (searchStage.hasOwnProperty("metadataMergeProtocolVersion")) {
+        assert(searchStage.hasOwnProperty("mergingPipeline"), searchStage);
+        assert.eq(NumberInt(searchStage.metadataMergeProtocolVersion), protocolVersion);
+        if (metaPipeline) {
+            assert.eq(searchStage.mergingPipeline, metaPipeline);
+        }
+        if (sortSpec) {
+            assert(searchStage.hasOwnProperty("sortSpec"), searchStage);
+            assert.eq(searchStage.sortSpec, sortSpec);
+        }
+    } else {
+        assert(
+            Array.isArray(result.splitPipeline.mergerPart),
+            "Extension sharded search explain should include mergerPart: " + tojson(result),
+        );
     }
 }
 
@@ -62,18 +110,22 @@ export function prepareUnionWithExplain(unionSubExplain) {
             tojson(unionSubExplain),
     );
 
-    // The first stage of the explain array should be a initial mongot stage.
+    // The first stage of the explain array should be an initial mongot stage.
     assert(
-        Object.keys(unionSubExplain[0]).includes("$_internalSearchMongotRemote") ||
-            Object.keys(unionSubExplain[0]).includes("$searchMeta") ||
-            Object.keys(unionSubExplain[0]).includes("$vectorSearch"),
+        isMongotProducerStageName(Object.keys(unionSubExplain[0])[0]),
         "The first stage of the array should be a mongot stage.",
     );
 
     return {stages: unionSubExplain};
 }
 
-const mongotStages = ["$_internalSearchMongotRemote", "$searchMeta", "$_internalSearchIdLookup", "$vectorSearch"];
+const mongotStages = [
+    "$_internalSearchMongotRemote",
+    kDocumentResultsAndMetadataStage,
+    "$searchMeta",
+    "$_internalSearchIdLookup",
+    "$vectorSearch",
+];
 
 /**
  * Validates that the mongot stage from the explain output includes the required execution metrics.
@@ -101,8 +153,14 @@ export function validateMongotStageExplainExecutionStats({
     isE2E = false,
     numFiltered = null,
 }) {
-    assert(mongotStages.includes(stageType), "stageType must be a mongot stage found in mongotStages.");
-    assert(stage[stageType], "Given stage isn't the expected stage. " + stageType + " is not found.");
+    assert(
+        mongotStages.includes(stageType),
+        "stageType must be a mongot stage found in mongotStages.",
+    );
+    assert(
+        stage[stageType],
+        "Given stage isn't the expected stage. " + stageType + " is not found.",
+    );
 
     const isIdLookup = stageType === "$_internalSearchIdLookup";
 
@@ -120,17 +178,39 @@ export function validateMongotStageExplainExecutionStats({
         }
     }
 
-    // Non $_internalSearchIdLookup mongot stages must contain an explain object.
+    // Non $_internalSearchIdLookup mongot stages must contain an explain object. Extension DRM
+    // nests it under source.$search.explain.
     if (!isIdLookup) {
         const explainStage = stage[stageType];
-        assert(explainStage.hasOwnProperty("explain"), explainStage);
-        // We don't know the actual value of the explain object for e2e tests and can't check it.
-        if (!isE2E) {
-            assert(explain, "Explain is null but needs to be provided for initial mongot stage.");
-            assert.eq(explain, explainStage["explain"]);
-            if (numFiltered) {
-                assert(explainStage.hasOwnProperty("numDocsFilteredByIdLookup"), explainStage);
-                assert.eq(explainStage["numDocsFilteredByIdLookup"], numFiltered);
+        if (stageType === kDocumentResultsAndMetadataStage) {
+            const sourceSearch =
+                explainStage.source && explainStage.source.$search
+                    ? explainStage.source.$search
+                    : null;
+            assert(
+                sourceSearch && sourceSearch.hasOwnProperty("explain"),
+                "Expected DRM source.$search.explain: " + tojson(explainStage),
+            );
+            if (!isE2E) {
+                assert(
+                    explain,
+                    "Explain is null but needs to be provided for initial mongot stage.",
+                );
+                assert.eq(explain, sourceSearch["explain"]);
+            }
+        } else {
+            assert(explainStage.hasOwnProperty("explain"), explainStage);
+            // We don't know the actual value of the explain object for e2e tests and can't check it.
+            if (!isE2E) {
+                assert(
+                    explain,
+                    "Explain is null but needs to be provided for initial mongot stage.",
+                );
+                assert.eq(explain, explainStage["explain"]);
+                if (numFiltered) {
+                    assert(explainStage.hasOwnProperty("numDocsFilteredByIdLookup"), explainStage);
+                    assert.eq(explainStage["numDocsFilteredByIdLookup"], numFiltered);
+                }
             }
         }
     }

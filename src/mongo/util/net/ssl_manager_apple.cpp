@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/checked_cast.h"
@@ -53,6 +27,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -97,12 +72,27 @@ StatusWith<std::string> toString(::CFStringRef str) {
         return std::string();
     }
 
+    // Convert with CFStringGetBytes, which reports the true byte count, rather than treating the
+    // result as a C string: a certificate name with an embedded NUL would otherwise truncate at the
+    // NUL and spoof hostname/subject matching.
     std::string ret;
-    ret.resize(len + 1);
-    if (!::CFStringGetCString(str, &ret[0], len, ::kCFStringEncodingUTF8)) {
+    ret.resize(len);
+    ::CFIndex byteLen = 0;
+    if (::CFStringGetBytes(str,
+                           ::CFRangeMake(0, ::CFStringGetLength(str)),
+                           ::kCFStringEncodingUTF8,
+                           0,      // lossByte
+                           false,  // isExternalRepresentation
+                           reinterpret_cast<UInt8*>(ret.data()),
+                           len,
+                           &byteLen) == 0) {
         return Status(ErrorCodes::InternalError, "Unable to convert CoreFoundation string");
     }
-    ret.resize(strlen(ret.c_str()));
+    ret.resize(byteLen);
+    if (ret.find('\0') != std::string::npos) {
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      "String from certificate contains an embedded null byte");
+    }
     return ret;
 }
 
@@ -227,13 +217,14 @@ void uassertOSStatusOK(::OSStatus status, SocketErrorKind kind) {
 }
 
 namespace detail {
+using namespace std::literals::string_view_literals;
 template <typename T>
 struct CFTypeMap;
 
 template <>
 struct CFTypeMap<::CFStringRef> {
-    static constexpr StringData typeName() {
-        return "string"_sd;
+    static constexpr std::string_view typeName() {
+        return "string"sv;
     }
 
     static ::CFTypeID type() {
@@ -243,8 +234,8 @@ struct CFTypeMap<::CFStringRef> {
 
 template <>
 struct CFTypeMap<::CFDataRef> {
-    static constexpr StringData typeName() {
-        return "data"_sd;
+    static constexpr std::string_view typeName() {
+        return "data"sv;
     }
 
     static ::CFTypeID type() {
@@ -254,8 +245,8 @@ struct CFTypeMap<::CFDataRef> {
 
 template <>
 struct CFTypeMap<::CFNumberRef> {
-    static constexpr StringData typeName() {
-        return "number"_sd;
+    static constexpr std::string_view typeName() {
+        return "number"sv;
     }
 
     static ::CFTypeID type() {
@@ -265,8 +256,8 @@ struct CFTypeMap<::CFNumberRef> {
 
 template <>
 struct CFTypeMap<::CFArrayRef> {
-    static constexpr StringData typeName() {
-        return "array"_sd;
+    static constexpr std::string_view typeName() {
+        return "array"sv;
     }
 
     static ::CFTypeID type() {
@@ -276,8 +267,8 @@ struct CFTypeMap<::CFArrayRef> {
 
 template <>
 struct CFTypeMap<::CFDictionaryRef> {
-    static constexpr StringData typeName() {
-        return "dictionary"_sd;
+    static constexpr std::string_view typeName() {
+        return "dictionary"sv;
     }
 
     static ::CFTypeID type() {
@@ -289,7 +280,7 @@ struct CFTypeMap<::CFDictionaryRef> {
 
 template <typename T>
 StatusWith<T> extractDictionaryValue(::CFDictionaryRef dict, ::CFStringRef key) {
-    const auto badValue = [key](StringData msg) -> Status {
+    const auto badValue = [key](std::string_view msg) -> Status {
         auto swKey = toString(key);
         if (!swKey.isOK()) {
             return {ErrorCodes::InvalidSSLConfiguration, msg};
@@ -411,7 +402,7 @@ StatusWith<SSLX509Name> extractSubjectName(::CFDictionaryRef dict) {
 
 StatusWith<mongo::Date_t> extractValidityDate(::CFDictionaryRef dict,
                                               ::CFStringRef oid,
-                                              StringData name) {
+                                              std::string_view name) {
     auto swVal = extractDictionaryValue<::CFDictionaryRef>(dict, oid);
     if (!swVal.isOK()) {
         return swVal.getStatus();
@@ -479,7 +470,7 @@ StatusWith<stdx::unordered_set<RoleName>> parsePeerRoles(::CFDictionaryRef dict)
 }
 
 StatusWith<std::vector<std::string>> extractSubjectAlternateNames(::CFDictionaryRef dict) {
-    const auto badValue = [](StringData msg) -> Status {
+    const auto badValue = [](std::string_view msg) -> Status {
         return {ErrorCodes::InvalidSSLConfiguration,
                 str::stream() << "Certificate contains invalid SAN: " << msg};
     };
@@ -775,7 +766,7 @@ StatusWith<CFUniquePtr<::CFArrayRef>> loadPEM(const std::string& keyfilepath,
         // Attempt to detect early and give a useful error message.
         // We'll use the key marker as a tombstone to determine that we're
         // not actually looking at a PKCS#12.
-        StringData pemDataView(reinterpret_cast<char*>(pemdata.data()), pemdata.size());
+        std::string_view pemDataView(reinterpret_cast<char*>(pemdata.data()), pemdata.size());
         if (pemDataView.find("PRIVATE KEY-----") != std::string::npos) {
             return {ErrorCodes::InvalidSSLConfiguration,
                     "Using encrypted PKCS#1/PKCS#8 PEM files is not supported on this platform"};
@@ -1448,7 +1439,7 @@ StatusWith<std::pair<::SSLProtocol, ::SSLProtocol>> parseProtocolRange(
         } else if (protocol == SSLParams::Protocols::TLS1_2) {
             tls12 = false;
         } else if (protocol == SSLParams::Protocols::TLS1_3) {
-            // SERVER-98279: support tls 1.3 for windows & apple
+            // SERVER-121261: support tls 1.3 for apple
             // By ignoring this value, we are disabling support until we have access to the
             // modern library.
         } else {
@@ -1583,7 +1574,7 @@ StatusWith<TLSVersion> mapTLSVersion(SSLContextRef ssl) {
             return TLSVersion::kTLS12;
         default:  // Some system headers may define additional protocols, so suppress warnings.
             return TLSVersion::kUnknown;
-            // SERVER-98279: support tls 1.3 for windows & apple
+            // SERVER-121261: support tls 1.3 for apple
     }
 }
 
@@ -1610,7 +1601,7 @@ Future<SSLPeerInfo> SSLManagerApple::parseAndValidatePeerCertificate(
 
     recordTLSVersion(tlsVersionStatus.getValue(), hostForLogging);
 
-    const auto badCert = [&](StringData msg, bool warn = false) -> Future<SSLPeerInfo> {
+    const auto badCert = [&](std::string_view msg, bool warn = false) -> Future<SSLPeerInfo> {
         if (warn) {
             LOGV2_WARNING(23209, "SSL peer certificate validation failed", "error"_attr = msg);
             return Future<SSLPeerInfo>::makeReady(SSLPeerInfo(sniName));

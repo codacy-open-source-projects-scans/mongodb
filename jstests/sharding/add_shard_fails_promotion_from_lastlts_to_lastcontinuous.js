@@ -5,6 +5,11 @@
  *   config_shard_incompatible,
  *   # This restriction was introduced in binary v8.3.
  *   requires_fcv_83,
+ *   # The test drives the cluster through lastLTS -> lastContinuous -> latest FCV transitions
+ *   # using setFeatureCompatibilityVersion: latestFCV. In multiversion suites where mongos is on
+ *   # the last-continuous binary, latestFCV is not reachable. The body also requires the new shard
+ *   # to start at lastLTSFCV, which is not guaranteed when nodes get random binaries.
+ *   multiversion_incompatible,
  * ]
  */
 import {afterEach, beforeEach, describe, it} from "jstests/libs/mochalite.js";
@@ -21,7 +26,10 @@ describe("addShard with lastLTS shard and lastContinuous cluster", function () {
         // Create an empty sharded cluster on lastContinuous FCV
         this.st = new ShardingTest({name: jsTestName(), shards: 0, config: 1, useHostname: false});
         assert.commandWorked(
-            this.st.s.adminCommand({setFeatureCompatibilityVersion: lastContinuousFCV, confirm: true}),
+            this.st.s.adminCommand({
+                setFeatureCompatibilityVersion: lastContinuousFCV,
+                confirm: true,
+            }),
         );
 
         // Create a shard on lastLTS FCV
@@ -29,11 +37,15 @@ describe("addShard with lastLTS shard and lastContinuous cluster", function () {
         this.newShardRs.startSet({shardsvr: ""});
         this.newShardRs.initiate();
         assert.commandWorked(
-            this.newShardRs.getPrimary().adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+            this.newShardRs
+                .getPrimary()
+                .adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
         );
 
         // Add a database; for the first shard we allow data on the replica set.
-        assert.commandWorked(this.newShardRs.getPrimary().getDB("testDB").xyzzy.insertOne({foo: "bar"}));
+        assert.commandWorked(
+            this.newShardRs.getPrimary().getDB("testDB").xyzzy.insertOne({foo: "bar"}),
+        );
     });
 
     afterEach(() => {
@@ -61,7 +73,9 @@ describe("addShard with lastLTS shard and lastContinuous cluster", function () {
             ErrorCodes.IllegalOperation,
         );
 
-        assert.commandWorked(this.st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        assert.commandWorked(
+            this.st.s.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}),
+        );
         checkFCV(this.st.configRS.getPrimary().getDB("admin"), latestFCV);
         checkFCV(this.newShardRs.getPrimary().getDB("admin"), lastLTSFCV);
 

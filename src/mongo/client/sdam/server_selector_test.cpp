@@ -1,39 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/client/sdam/server_selector.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -43,6 +12,7 @@
 #include "mongo/client/sdam/topology_description.h"
 #include "mongo/client/sdam/topology_state_machine.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -52,6 +22,11 @@
 #include <ratio>
 #include <string>
 #include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo::sdam {
 
@@ -149,6 +124,104 @@ public:
     };
 
     ServerSelector selector = ServerSelector(sdamConfiguration);
+
+    static ServerDescriptionPtr makeReplicaSetPrimary(HostAndPort address,
+                                                      std::initializer_list<HostAndPort> hosts,
+                                                      std::string processType = "") {
+        auto builder = ServerDescriptionBuilder()
+                           .withAddress(address)
+                           .withType(ServerType::kRSPrimary)
+                           .withLastUpdateTime(Date_t::now())
+                           .withLastWriteDate(Date_t::now())
+                           .withRtt(Milliseconds{1})
+                           .withSetName(SET_NAME)
+                           .withMinWireVersion(WireVersion::SUPPORTS_OP_MSG)
+                           .withMaxWireVersion(WireVersion::LATEST_WIRE_VERSION)
+                           .withElectionId(kOidOne)
+                           .withSetVersion(100);
+        for (const auto& host : hosts) {
+            builder.withHost(host);
+        }
+        if (!processType.empty()) {
+            builder.withTag(ServerDescription::kProcessTypeTagKey, processType);
+        }
+        return builder.instance();
+    }
+
+    static ServerDescriptionPtr makeReplicaSetSecondary(HostAndPort address,
+                                                        std::string processType = "") {
+        auto builder = ServerDescriptionBuilder()
+                           .withAddress(address)
+                           .withType(ServerType::kRSSecondary)
+                           .withRtt(Milliseconds{1})
+                           .withSetName(SET_NAME)
+                           .withMinWireVersion(WireVersion::SUPPORTS_OP_MSG)
+                           .withMaxWireVersion(WireVersion::LATEST_WIRE_VERSION)
+                           .withLastUpdateTime(Date_t::now())
+                           .withLastWriteDate(Date_t::now());
+        if (!processType.empty()) {
+            builder.withTag(ServerDescription::kProcessTypeTagKey, processType);
+        }
+        return builder.instance();
+    }
+
+    // Topology with a normal primary (s0), an injector-tagged secondary (s1) and a normal
+    // secondary (s2).
+    struct InjectorSecondaryTopology {
+        std::shared_ptr<TopologyDescription> topologyDescription;
+        TopologyStateMachine stateMachine;
+
+        InjectorSecondaryTopology(const SdamConfiguration& config)
+            : topologyDescription(std::make_shared<TopologyDescription>(config)),
+              stateMachine(config) {
+            stateMachine.onServerDescription(
+                *topologyDescription,
+                makeReplicaSetPrimary(HostAndPort("s0"),
+                                      {HostAndPort("s0"), HostAndPort("s1"), HostAndPort("s2")}));
+            stateMachine.onServerDescription(
+                *topologyDescription,
+                makeReplicaSetSecondary(HostAndPort("s1"), ServerDescription::kInjectorTagValue));
+            stateMachine.onServerDescription(*topologyDescription,
+                                             makeReplicaSetSecondary(HostAndPort("s2")));
+        }
+    };
+
+    // Topology with an injector-tagged primary (s0) and a normal secondary (s1).
+    struct InjectorPrimaryTopology {
+        std::shared_ptr<TopologyDescription> topologyDescription;
+        TopologyStateMachine stateMachine;
+
+        InjectorPrimaryTopology(const SdamConfiguration& config)
+            : topologyDescription(std::make_shared<TopologyDescription>(config)),
+              stateMachine(config) {
+            stateMachine.onServerDescription(
+                *topologyDescription,
+                makeReplicaSetPrimary(HostAndPort("s0"),
+                                      {HostAndPort("s0"), HostAndPort("s1")},
+                                      ServerDescription::kInjectorTagValue));
+            stateMachine.onServerDescription(*topologyDescription,
+                                             makeReplicaSetSecondary(HostAndPort("s1")));
+        }
+    };
+
+    // Topology where every node is injector-tagged (s0 primary, s1 secondary).
+    struct AllInjectorsTopology {
+        std::shared_ptr<TopologyDescription> topologyDescription;
+        TopologyStateMachine stateMachine;
+
+        AllInjectorsTopology(const SdamConfiguration& config)
+            : topologyDescription(std::make_shared<TopologyDescription>(config)),
+              stateMachine(config) {
+            stateMachine.onServerDescription(
+                *topologyDescription,
+                makeReplicaSetPrimary(HostAndPort("s0"),
+                                      {HostAndPort("s0"), HostAndPort("s1")},
+                                      ServerDescription::kInjectorTagValue));
+            stateMachine.onServerDescription(
+                *topologyDescription,
+                makeReplicaSetSecondary(HostAndPort("s1"), ServerDescription::kInjectorTagValue));
+        }
+    };
 };
 
 TEST_F(ServerSelectorTestFixture, ShouldFilterCorrectlyByLatencyWindow) {
@@ -971,5 +1044,217 @@ TEST_F(ServerSelectorTestFixture, ShouldIgnoreMinClusterTimeIfNotSatisfiable) {
 
     ASSERT_EQ(result->size(), 1);
     ASSERT_EQ((*result)[0]->getAddress(), s0->getAddress());
+}
+
+class ConfigOnlyServerSelectorTest : public ServerSelectorTestFixture {
+public:
+    void setUp() override {
+        ServerSelectorTestFixture::setUp();
+        serverGlobalParams.configOnly = true;
+    }
+
+    void tearDown() override {
+        serverGlobalParams.configOnly = false;
+        ServerSelectorTestFixture::tearDown();
+    }
+};
+
+TEST_F(ConfigOnlyServerSelectorTest, ShouldExcludeInjectorFromPrimaryOnlySelection) {
+    InjectorPrimaryTopology topo(sdamConfiguration);
+
+    auto result = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryOnly), {});
+    ASSERT_EQ(adaptForAssert(boost::none), adaptForAssert(result));
+}
+
+TEST_F(ConfigOnlyServerSelectorTest, ShouldExcludeInjectorFromNearestSelection) {
+    InjectorPrimaryTopology topo(sdamConfiguration);
+
+    std::map<HostAndPort, int> frequencyInfo{{HostAndPort("s0"), 0}, {HostAndPort("s1"), 0}};
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        auto server = selector.selectServer(
+            topo.topologyDescription, ReadPreferenceSetting(ReadPreference::Nearest), {});
+        if (server) {
+            frequencyInfo[(*server)->getAddress()]++;
+        }
+    }
+
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s0")]);
+    ASSERT_EQ(frequencyInfo[HostAndPort("s1")], NUM_ITERATIONS);
+}
+
+TEST_F(ConfigOnlyServerSelectorTest, ShouldExcludeInjectorFromPrimaryPreferredSelection) {
+    InjectorPrimaryTopology topo(sdamConfiguration);
+
+    std::map<HostAndPort, int> frequencyInfo{{HostAndPort("s0"), 0}, {HostAndPort("s1"), 0}};
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        auto server = selector.selectServer(
+            topo.topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryPreferred), {});
+        if (server) {
+            frequencyInfo[(*server)->getAddress()]++;
+        }
+    }
+
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s0")]);
+    ASSERT_EQ(frequencyInfo[HostAndPort("s1")], NUM_ITERATIONS);
+}
+
+TEST_F(ServerSelectorTestFixture, ShouldNotExcludeInjectorWhenNotConfigOnly) {
+    InjectorPrimaryTopology topo(sdamConfiguration);
+
+    auto primaryOnlyResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryOnly), {});
+    ASSERT(primaryOnlyResult);
+    ASSERT_EQ(1, primaryOnlyResult->size());
+    ASSERT_EQ(HostAndPort("s0"), (*primaryOnlyResult)[0]->getAddress());
+
+    auto nearestResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::Nearest), {});
+    ASSERT(nearestResult);
+    ASSERT_EQ(2, nearestResult->size());
+    bool foundInjectorPrimary = false;
+    bool foundSecondary = false;
+    for (const auto& server : *nearestResult) {
+        foundInjectorPrimary |= server->getAddress() == HostAndPort("s0");
+        foundSecondary |= server->getAddress() == HostAndPort("s1");
+    }
+    ASSERT_TRUE(foundInjectorPrimary);
+    ASSERT_TRUE(foundSecondary);
+
+    auto primaryPreferredResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryPreferred), {});
+    ASSERT(primaryPreferredResult);
+    ASSERT_EQ(1, primaryPreferredResult->size());
+    ASSERT_EQ(HostAndPort("s0"), (*primaryPreferredResult)[0]->getAddress());
+}
+
+TEST_F(ConfigOnlyServerSelectorTest, ShouldExcludeInjectorSecondaryFromSecondaryOnlySelection) {
+    InjectorSecondaryTopology topo(sdamConfiguration);
+
+    std::map<HostAndPort, int> frequencyInfo{
+        {HostAndPort("s0"), 0}, {HostAndPort("s1"), 0}, {HostAndPort("s2"), 0}};
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        auto server = selector.selectServer(
+            topo.topologyDescription, ReadPreferenceSetting(ReadPreference::SecondaryOnly), {});
+        if (server) {
+            frequencyInfo[(*server)->getAddress()]++;
+        }
+    }
+
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s0")]);
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s1")]);
+    ASSERT_EQ(frequencyInfo[HostAndPort("s2")], NUM_ITERATIONS);
+}
+
+TEST_F(ConfigOnlyServerSelectorTest,
+       ShouldExcludeInjectorSecondaryFromSecondaryPreferredSelection) {
+    InjectorSecondaryTopology topo(sdamConfiguration);
+
+    std::map<HostAndPort, int> frequencyInfo{
+        {HostAndPort("s0"), 0}, {HostAndPort("s1"), 0}, {HostAndPort("s2"), 0}};
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        auto server =
+            selector.selectServer(topo.topologyDescription,
+                                  ReadPreferenceSetting(ReadPreference::SecondaryPreferred),
+                                  {});
+        if (server) {
+            frequencyInfo[(*server)->getAddress()]++;
+        }
+    }
+
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s0")]);
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s1")]);
+    ASSERT_EQ(frequencyInfo[HostAndPort("s2")], NUM_ITERATIONS);
+}
+
+TEST_F(ConfigOnlyServerSelectorTest, ShouldExcludeInjectorSecondaryFromNearestSelection) {
+    InjectorSecondaryTopology topo(sdamConfiguration);
+
+    std::map<HostAndPort, int> frequencyInfo{
+        {HostAndPort("s0"), 0}, {HostAndPort("s1"), 0}, {HostAndPort("s2"), 0}};
+    for (int i = 0; i < NUM_ITERATIONS; i++) {
+        auto server = selector.selectServer(
+            topo.topologyDescription, ReadPreferenceSetting(ReadPreference::Nearest), {});
+        if (server) {
+            frequencyInfo[(*server)->getAddress()]++;
+        }
+    }
+
+    ASSERT_FALSE(frequencyInfo[HostAndPort("s1")]);
+    ASSERT(frequencyInfo[HostAndPort("s0")] || frequencyInfo[HostAndPort("s2")]);
+}
+
+TEST_F(ServerSelectorTestFixture, ShouldNotExcludeInjectorSecondaryWhenNotConfigOnly) {
+    InjectorSecondaryTopology topo(sdamConfiguration);
+
+    auto secondaryOnlyResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::SecondaryOnly), {});
+    ASSERT(secondaryOnlyResult);
+    ASSERT_EQ(2, secondaryOnlyResult->size());
+
+    auto secondaryPreferredResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::SecondaryPreferred), {});
+    ASSERT(secondaryPreferredResult);
+    ASSERT_EQ(2, secondaryPreferredResult->size());
+
+    auto nearestResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::Nearest), {});
+    ASSERT(nearestResult);
+    ASSERT_EQ(3, nearestResult->size());
+}
+
+class ConfigOnlyAllInjectorsTest : public ConfigOnlyServerSelectorTest,
+                                   public ::testing::WithParamInterface<ReadPreference> {};
+
+TEST_P(ConfigOnlyAllInjectorsTest, ShouldReturnNoneWhenAllNodesAreInjectors) {
+    AllInjectorsTopology topo(sdamConfiguration);
+
+    auto pref = GetParam();
+    auto result = selector.selectServers(topo.topologyDescription, ReadPreferenceSetting(pref), {});
+    ASSERT_EQ(adaptForAssert(boost::none), adaptForAssert(result));
+}
+
+INSTANTIATE_TEST_SUITE_P(ReadPreferences,
+                         ConfigOnlyAllInjectorsTest,
+                         ::testing::Values(ReadPreference::PrimaryOnly,
+                                           ReadPreference::SecondaryOnly,
+                                           ReadPreference::PrimaryPreferred,
+                                           ReadPreference::SecondaryPreferred,
+                                           ReadPreference::Nearest));
+
+TEST_F(ServerSelectorTestFixture, ShouldNotExcludeAnyNodesWhenAllInjectorsAndNotConfigOnly) {
+    AllInjectorsTopology topo(sdamConfiguration);
+
+    auto primaryOnlyResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryOnly), {});
+    ASSERT(primaryOnlyResult);
+    ASSERT_EQ(1, primaryOnlyResult->size());
+    ASSERT_EQ(HostAndPort("s0"), (*primaryOnlyResult)[0]->getAddress());
+
+    auto secondaryOnlyResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::SecondaryOnly), {});
+    ASSERT(secondaryOnlyResult);
+    ASSERT_EQ(1, secondaryOnlyResult->size());
+    ASSERT_EQ(HostAndPort("s1"), (*secondaryOnlyResult)[0]->getAddress());
+
+    auto nearestResult = selector.selectServers(
+        topo.topologyDescription, ReadPreferenceSetting(ReadPreference::Nearest), {});
+    ASSERT(nearestResult);
+    ASSERT_EQ(2, nearestResult->size());
+}
+
+TEST_F(ServerSelectorTestFixture, ShouldNotExcludeNonInjectorWithOtherTags) {
+    TopologyStateMachine stateMachine(sdamConfiguration);
+    auto topologyDescription = std::make_shared<TopologyDescription>(sdamConfiguration);
+
+    stateMachine.onServerDescription(
+        *topologyDescription,
+        makeReplicaSetPrimary(HostAndPort("s0"), {HostAndPort("s0")}, "NORMAL"));
+
+    auto result = selector.selectServers(
+        topologyDescription, ReadPreferenceSetting(ReadPreference::PrimaryOnly), {});
+    ASSERT(result);
+    ASSERT_EQ(1, result->size());
+    ASSERT_EQ(HostAndPort("s0"), (*result)[0]->getAddress());
 }
 }  // namespace mongo::sdam

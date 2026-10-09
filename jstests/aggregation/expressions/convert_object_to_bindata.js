@@ -4,7 +4,6 @@
  * BSON representation of the input.
  * @tags: [
  *   requires_fcv_90,
- *   featureFlagConvertObjectToBinData,
  * ]
  */
 
@@ -112,6 +111,9 @@ const invalidArgumentValueDocs = [
     {_id: 1, input: {a: "a"}, target: {type: "binData", subtype: "zero"}, expectedCode: 4341108},
     {_id: 2, input: {a: "a"}, target: "binData", format: "bson", expectedCode: 4341125},
     {_id: 3, input: {a: "a"}, target: "binData", format: 123, expectedCode: 4341114},
+    // Fixed-size subtypes (bdtUUID=3, MD5=5) require exactly 16 bytes; a small object's BSON is
+    // not 16 bytes, so the conversion is rejected rather than producing invalid fixed-size BinData.
+    {_id: 4, input: {a: "a"}, target: {type: "binData", subtype: 5}, expectedCode: 13016802},
 ];
 
 const illegalConversionTestDocs = [
@@ -122,7 +124,11 @@ const illegalConversionTestDocs = [
     {_id: 4, input: Timestamp(0, 1), target: "binData"},
 ];
 
-const nullTestDocs = [{_id: 0, input: null}, {_id: 1, input: undefined}, {_id: 2 /* input is missing */}];
+const nullTestDocs = [
+    {_id: 0, input: null},
+    {_id: 1, input: undefined},
+    {_id: 2 /* input is missing */},
+];
 
 runConvertTests({
     coll,

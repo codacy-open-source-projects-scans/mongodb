@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/bson/multikey_dotted_path_support.h"
 
@@ -41,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace multikey_dotted_path_support {
@@ -52,7 +27,7 @@ const BSONElement kNullElt = kNullObj.firstElement();
 
 template <typename BSONElementColl>
 void _extractAllElementsAlongPath(const BSONObj& obj,
-                                  StringData path,
+                                  std::string_view path,
                                   BSONElementColl& elements,
                                   bool expandArrayOnTrailingField,
                                   BSONDepthIndex depth,
@@ -68,8 +43,8 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
                 depth,
                 std::numeric_limits<BSONDepthIndex>::max()),
             depth != std::numeric_limits<BSONDepthIndex>::max());
-        StringData left = path.substr(0, idx);
-        StringData next = path.substr(idx + 1, path.size());
+        std::string_view left = path.substr(0, idx);
+        std::string_view next = path.substr(idx + 1, path.size());
 
         BSONElement e = obj.getField(left);
 
@@ -136,7 +111,7 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
 }  // namespace
 
 void extractAllElementsAlongPath(const BSONObj& obj,
-                                 StringData path,
+                                 std::string_view path,
                                  BSONElementSet& elements,
                                  bool expandArrayOnTrailingField,
                                  MultikeyComponents* arrayComponents) {
@@ -146,7 +121,7 @@ void extractAllElementsAlongPath(const BSONObj& obj,
 }
 
 void extractAllElementsAlongPath(const BSONObj& obj,
-                                 StringData path,
+                                 std::string_view path,
                                  BSONElementMultiSet& elements,
                                  bool expandArrayOnTrailingField,
                                  MultikeyComponents* arrayComponents) {
@@ -161,7 +136,7 @@ namespace {
  * This is the implementation as it existed before SERVER-76875.
  */
 void _extractAllElementsAlongPathLegacy(const BSONObj& obj,
-                                        StringData path,
+                                        std::string_view path,
                                         BSONElementSet& elements,
                                         bool expandArrayOnTrailingField,
                                         BSONDepthIndex depth,
@@ -172,8 +147,8 @@ void _extractAllElementsAlongPathLegacy(const BSONObj& obj,
         size_t idx = path.find('.');
         if (idx != std::string::npos) {
             invariant(depth != std::numeric_limits<BSONDepthIndex>::max());
-            StringData left = path.substr(0, idx);
-            StringData next = path.substr(idx + 1, path.size());
+            std::string_view left = path.substr(0, idx);
+            std::string_view next = path.substr(idx + 1, path.size());
 
             BSONElement e = obj.getField(left);
 
@@ -236,7 +211,7 @@ void _extractAllElementsAlongPathLegacy(const BSONObj& obj,
 }  // namespace
 
 void extractAllElementsAlongPathLegacy_forValidationOnly(const BSONObj& obj,
-                                                         StringData path,
+                                                         std::string_view path,
                                                          BSONElementSet& elements,
                                                          bool expandArrayOnTrailingField,
                                                          MultikeyComponents* arrayComponents) {

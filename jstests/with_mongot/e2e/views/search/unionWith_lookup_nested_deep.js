@@ -4,7 +4,7 @@
  * all stages have a $search query on a view. The test verifies that the results are as expected
  * with the respective view definition applied to each document.
  *
- * @tags: [ requires_fcv_81, featureFlagMongotIndexedViews ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {assertUnionWithSearchSubPipelineAppliedViews} from "jstests/with_mongot/e2e_lib/explain_utils.js";
@@ -241,7 +241,9 @@ const productsView = testDb.productsView;
 const categoriesViewPipeline = [
     {
         $addFields: {
-            display_name: {$concat: ["$name", " (", {$toString: "$popularity_score"}, "% popularity)"]},
+            display_name: {
+                $concat: ["$name", " (", {$toString: "$popularity_score"}, "% popularity)"],
+            },
             popularity_tier: {
                 $switch: {
                     branches: [
@@ -255,7 +257,9 @@ const categoriesViewPipeline = [
         },
     },
 ];
-assert.commandWorked(testDb.createView("categoriesView", categories.getName(), categoriesViewPipeline));
+assert.commandWorked(
+    testDb.createView("categoriesView", categories.getName(), categoriesViewPipeline),
+);
 const categoriesView = testDb.categoriesView;
 
 const suppliersViewPipeline = [
@@ -274,7 +278,9 @@ const suppliersViewPipeline = [
         },
     },
 ];
-assert.commandWorked(testDb.createView("suppliersView", suppliers.getName(), suppliersViewPipeline));
+assert.commandWorked(
+    testDb.createView("suppliersView", suppliers.getName(), suppliersViewPipeline),
+);
 const suppliersView = testDb.suppliersView;
 
 const customersViewPipeline = [
@@ -293,14 +299,21 @@ const customersViewPipeline = [
         },
     },
 ];
-assert.commandWorked(testDb.createView("customersView", customers.getName(), customersViewPipeline));
+assert.commandWorked(
+    testDb.createView("customersView", customers.getName(), customersViewPipeline),
+);
 const customersView = testDb.customersView;
 
 const ordersViewPipeline = [
     {
         $addFields: {
             order_summary: {
-                $concat: ["Order #", {$toString: "$_id"}, " - $", {$toString: {$round: ["$total", 2]}}],
+                $concat: [
+                    "Order #",
+                    {$toString: "$_id"},
+                    " - $",
+                    {$toString: {$round: ["$total", 2]}},
+                ],
             },
             order_size: {
                 $switch: {
@@ -341,7 +354,10 @@ const indexConfigs = [
         coll: customersView,
         definition: {name: customersIndexName, definition: {mappings: {dynamic: true}}},
     },
-    {coll: ordersView, definition: {name: ordersIndexName, definition: {mappings: {dynamic: true}}}},
+    {
+        coll: ordersView,
+        definition: {name: ordersIndexName, definition: {mappings: {dynamic: true}}},
+    },
 ];
 
 const unionWithLookupNestedDeepTestCases = (isStoredSource) => {

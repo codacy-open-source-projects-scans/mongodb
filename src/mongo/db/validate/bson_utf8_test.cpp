@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/validate/bson_utf8.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes_util.h"
@@ -41,6 +14,7 @@
 #include "mongo/util/str.h"
 
 #include <algorithm>
+#include <string_view>
 
 namespace mongo {
 
@@ -51,7 +25,7 @@ namespace mongo {
 const std::string replacementCharacter = u8"\ufffd"_as_char_ptr;
 
 /** Repeat the `s` string, `x` times. */
-std::string repeat(StringData s, size_t x) {
+std::string repeat(std::string_view s, size_t x) {
     std::string result;
     result.reserve(x * s.size());
     auto it = std::back_inserter(result);
@@ -125,13 +99,15 @@ const std::map<std::string, std::string> scrubMap{
     {"\xf0\x9d\xdc\x80", "\xef\xbf\xbd\xef\xbf\xbd\xdc\x80"},  // Surrogate pairs are not valid
 };
 
-void unchangedStrInput(StringData fieldName, const std::string& s) {
+void unchangedStrInput(std::string_view fieldName, const std::string& s) {
     auto originalBSONObj = BSON(fieldName << s);
     auto newBSONObj = checkAndScrubInvalidUTF8(originalBSONObj);
     ASSERT_BSONOBJ_EQ(newBSONObj, BSON(fieldName << s));
 }
 
-void scrubbedStrInput(StringData fieldName, const std::string& s, const std::string& scrubbedS) {
+void scrubbedStrInput(std::string_view fieldName,
+                      const std::string& s,
+                      const std::string& scrubbedS) {
     auto originalBSONObj = BSON(fieldName << s);
     auto scrubbedBSONObj = checkAndScrubInvalidUTF8(originalBSONObj);
     ASSERT_BSONOBJ_EQ(scrubbedBSONObj, BSON(fieldName << scrubbedS));
@@ -157,7 +133,7 @@ BSONObj scrubAndAssertUTF8Valid(BSONObj obj) {
 }
 
 template <typename T>
-BSONObj makeBSONArrayObject(StringData fieldName, const std::vector<T>& values) {
+BSONObj makeBSONArrayObject(std::string_view fieldName, const std::vector<T>& values) {
     BSONObjBuilder builder;
     {
         BSONArrayBuilder arr(builder.subarrayStart(fieldName));
@@ -167,11 +143,11 @@ BSONObj makeBSONArrayObject(StringData fieldName, const std::vector<T>& values) 
     return builder.obj();
 }
 
-BSONObj makeBSONCodeObject(StringData fieldName, const std::string codeStr) {
+BSONObj makeBSONCodeObject(std::string_view fieldName, const std::string codeStr) {
     return BSON(fieldName << BSONCode(codeStr));
 }
 
-BSONObj makeBSONCodeWScopeObject(StringData fieldName,
+BSONObj makeBSONCodeWScopeObject(std::string_view fieldName,
                                  const std::string codeStr,
                                  const BSONObj codeScope) {
     return BSON(fieldName << BSONCodeWScope(codeStr, codeScope));
@@ -462,8 +438,8 @@ TEST(checkAndScrubInvalidUTF8, SimpleArrays) {
 
     // Code that is all valid UTF-8 in arrays
     // {codeSnippets: [BSONCode{"x = 0"}, BSONCode{(function(){})();}]}
-    BSONCode validCode1{StringData("(function(){})();")};
-    BSONCode validCode2{StringData("x = 0")};
+    BSONCode validCode1{std::string_view("(function(){})();")};
+    BSONCode validCode2{std::string_view("x = 0")};
     BSONObj codeSnippetArr =
         makeBSONArrayObject<BSONCode>("codeSnippets", {validCode1, validCode2});
     unchangedBSONInput(codeSnippetArr);
@@ -536,7 +512,7 @@ TEST(checkAndScrubInvalidUTF8, DoesNotScrubNestedValidUTF8) {
 
     // Test valid BSONCode.
     // {code: {code1: BSONCode{(function(){})());}}}
-    BSONCode code1{StringData("(function(){})());")};
+    BSONCode code1{std::string_view("(function(){})());")};
     BSONObj bsonCodeOneNest = BSON("code" << BSON("code1" << code1));
     unchangedBSONInput(bsonCodeOneNest);
 

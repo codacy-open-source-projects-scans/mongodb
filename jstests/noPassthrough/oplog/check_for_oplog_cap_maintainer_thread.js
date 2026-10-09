@@ -11,18 +11,33 @@
  */
 import {verifyOplogCapMaintainerThreadNotStarted} from "jstests/libs/oplog_truncation_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {skipTestIfSizeBasedOplogTruncationDisabled} from "jstests/libs/oplog_truncation_util.js";
 
 // Verify that the oplog cap maintainer thread is running under normal circumstances.
 jsTestLog("Testing single node replica set mode");
-const rst = new ReplSetTest({nodes: 1, nodeOptions: {setParameter: {logComponentVerbosity: tojson({storage: 1})}}});
+const rst = new ReplSetTest({
+    nodes: 1,
+    nodeOptions: {setParameter: {logComponentVerbosity: tojson({storage: 1})}},
+});
 rst.startSet();
 rst.initiate();
 
 const primary = rst.getPrimary();
+
+// This test relies on marker-based oplog truncation, which may be disabled in disagg.
+// TODO(SERVER-125068) remove this once this feature flag is deleted
+const isDsc = skipTestIfSizeBasedOplogTruncationDisabled(rst.getPrimary(), () => rst.stopSet());
+
 checkLog.containsJson(primary, 5295000); // OplogCapMaintainerThread started.
 checkLog.containsJson(primary, 22382); // Oplog truncate markers calculated.
 
 rst.stopSet(/*signal=*/ null, /*forRestart=*/ true);
+
+if (isDsc) {
+    // None of the other startup options are supported in DSC
+    jsTest.log.info("Skipping other modes because they are unsupported in this architecture");
+    quit();
+}
 
 // A subset of startup options prevent the oplog cap maintainer thread from being started. These
 // startup options are currently limited to skipOplogSampling, readOnly,

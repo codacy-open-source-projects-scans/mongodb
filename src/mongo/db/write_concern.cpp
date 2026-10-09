@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/write_concern.h"
@@ -50,6 +24,9 @@
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/otel/metrics/metric_names.h"
+#include "mongo/otel/metrics/metrics_service.h"
+#include "mongo/otel/metrics/server_status_options.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_name.h"
@@ -60,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <variant>
 
 #include <absl/container/node_hash_map.h>
@@ -73,15 +51,57 @@
 
 namespace mongo {
 
+std::function<void(WriteConcernOptions&)> remapWriteConcernHook;
+
 using repl::OpTime;
 using std::string;
 
 namespace {
-auto& gleWtimeStats = *MetricBuilder<TimerStats>{"getLastError.wtime"};
-auto& gleWtimeouts = *MetricBuilder<Counter64>{"getLastError.wtimeouts"};
-auto& gleDefaultWtimeouts = *MetricBuilder<Counter64>{"getLastError.default.wtimeouts"};
-auto& gleDefaultUnsatisfiable = *MetricBuilder<Counter64>{"getLastError.default.unsatisfiable"};
+
+using otel::metrics::MetricNames;
+using otel::metrics::MetricsService;
+using otel::metrics::MetricUnit;
+using otel::metrics::ServerStatusOptions;
+
+auto& gleWtimeNumMetric = MetricsService::instance().createInt64Counter(
+    MetricNames::kGetLastErrorWtimeNum,
+    "The total number of operations with a specified write concern (i.e. `w`) that wait for one or "
+    "more members of a replica set to acknowledge the write operation (i.e. `w > 1`).",
+    MetricUnit::kOperations,
+    {.serverStatusOptions = ServerStatusOptions({.dottedPath = "getLastError.wtime.num"})});
+
+auto& gleWTimeTotalMillisMetric = MetricsService::instance().createInt64Counter(
+    MetricNames::kGetLastErrorWtimeTotalMillis,
+    "The total amount of time in milliseconds that the mongod has spent performing operations with "
+    "a write concern (i.e. `w`) that waits for one or more members of a replica set to acknowledge "
+    "the write operation (i.e. a `w` value greater than `1`.).",
+    MetricUnit::kMilliseconds,
+    {.serverStatusOptions = ServerStatusOptions({.dottedPath = "getLastError.wtime.totalMillis"})});
+
+auto& gleWtimeoutsMetric = MetricsService::instance().createInt64Counter(
+    MetricNames::kGetLastErrorWtimeouts,
+    "The number of times that write concern operations have timed out as a result of the "
+    "`wtimeout` threshold. This number increments for both default and non-default write concern "
+    "specifications.",
+    MetricUnit::kOperations,
+    {.serverStatusOptions = ServerStatusOptions({.dottedPath = "getLastError.wtimeouts"})});
+
+auto& gleDefaultWtimeoutsMetric = MetricsService::instance().createInt64Counter(
+    MetricNames::kGetLastErrorDefaultWtimeouts,
+    "The number of times a non-`clientSupplied` write concern timed out.",
+    MetricUnit::kOperations,
+    {.serverStatusOptions = ServerStatusOptions({.dottedPath = "getLastError.default.wtimeouts"})});
+
+auto& gleDefaultUnsatisfiableMetric = MetricsService::instance().createInt64Counter(
+    MetricNames::kGetLastErrorDefaultUnsatisfiable,
+    "The number of times that a non-`clientSupplied` write concern returned the "
+    "`UnsatisfiableWriteConcern` error code.",
+    MetricUnit::kOperations,
+    {.serverStatusOptions =
+         ServerStatusOptions({.dottedPath = "getLastError.default.unsatisfiable"})});
+
 }  // namespace
+
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeWaitingForWriteConcern);
 MONGO_FAIL_POINT_DEFINE(failWaitForWriteConcernIfTimeoutSet);
@@ -117,7 +137,7 @@ _tryGetWCFailureFromFailPoint_ForTest(const OpTime& replOpTime,
 
 StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
                                                     const GenericArguments& genericArgs,
-                                                    StringData commandName,
+                                                    std::string_view commandName,
                                                     bool isInternalClient) {
     WriteConcernOptions writeConcern =
         genericArgs.getWriteConcern().value_or_eval([]() { return WriteConcernOptions(); });
@@ -212,6 +232,10 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
             writeConcern.majorityJFalseOverridden = true;
             writeConcern.syncMode = WriteConcernOptions::SyncMode::JOURNAL;
         }
+    }
+
+    if (remapWriteConcernHook) {
+        remapWriteConcernHook(writeConcern);
     }
 
     Status wcStatus = validateWriteConcern(opCtx, writeConcern);
@@ -414,20 +438,21 @@ Status waitForWriteConcern(OperationContext* opCtx,
     }
 
     if (replStatus.status == ErrorCodes::WriteConcernTimeout) {
-        gleWtimeouts.increment();
+        gleWtimeoutsMetric.add(1);
         if (!writeConcern.getProvenance().isClientSupplied()) {
-            gleDefaultWtimeouts.increment();
+            gleDefaultWtimeoutsMetric.add(1);
         }
         result->err = "timeout";
         result->wTimedOut = true;
     }
     if (replStatus.status == ErrorCodes::UnsatisfiableWriteConcern) {
         if (!writeConcern.getProvenance().isClientSupplied()) {
-            gleDefaultUnsatisfiable.increment();
+            gleDefaultUnsatisfiableMetric.add(1);
         }
     }
 
-    gleWtimeStats.recordMillis(durationCount<Milliseconds>(replStatus.duration));
+    gleWtimeNumMetric.add(1);
+    gleWTimeTotalMillisMetric.add(durationCount<Milliseconds>(replStatus.duration));
     result->wTime = durationCount<Milliseconds>(replStatus.duration);
 
     result->wcUsed = writeConcern;

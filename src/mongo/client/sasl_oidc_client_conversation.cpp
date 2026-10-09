@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/sasl_oidc_client_conversation.h"
 
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
-#include "mongo/base/data_type_validated.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,13 +21,14 @@
 #include "mongo/db/auth/oidc_protocol_gen.h"
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
+#include "mongo/rpc/object_check.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/http_client.h"
 #include "mongo/util/str.h"
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -65,23 +39,24 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
-constexpr auto kClientIdParameterName = "client_id"_sd;
-constexpr auto kRequestScopesParameterName = "scope"_sd;
-constexpr auto kGrantTypeParameterName = "grant_type"_sd;
+constexpr auto kClientIdParameterName = "client_id"sv;
+constexpr auto kRequestScopesParameterName = "scope"sv;
+constexpr auto kGrantTypeParameterName = "grant_type"sv;
 constexpr auto kGrantTypeParameterDeviceCodeValue =
-    "urn:ietf:params:oauth:grant-type:device_code"_sd;
-constexpr auto kGrantTypeParameterRefreshTokenValue = "refresh_token"_sd;
-constexpr auto kDeviceCodeParameterName = "device_code"_sd;
-constexpr auto kCodeParameterName = "code"_sd;
+    "urn:ietf:params:oauth:grant-type:device_code"sv;
+constexpr auto kGrantTypeParameterRefreshTokenValue = "refresh_token"sv;
+constexpr auto kDeviceCodeParameterName = "device_code"sv;
+constexpr auto kCodeParameterName = "code"sv;
 constexpr auto kRefreshTokenParameterName = kGrantTypeParameterRefreshTokenValue;
 
-inline void appendPostBodyRequiredParams(StringBuilder* sb, StringData clientId) {
+inline void appendPostBodyRequiredParams(StringBuilder* sb, std::string_view clientId) {
     *sb << kClientIdParameterName << "=" << uriEncode(clientId);
 }
 
 inline void appendPostBodyDeviceCodeRequestParams(
-    StringBuilder* sb, const boost::optional<std::vector<StringData>>& requestScopes) {
+    StringBuilder* sb, const boost::optional<std::vector<std::string_view>>& requestScopes) {
     if (requestScopes) {
         *sb << "&" << kRequestScopesParameterName << "=";
         for (std::size_t i = 0; i < requestScopes->size(); i++) {
@@ -93,23 +68,25 @@ inline void appendPostBodyDeviceCodeRequestParams(
     }
 }
 
-inline void appendPostBodyTokenRequestParams(StringBuilder* sb, StringData deviceCode) {
+inline void appendPostBodyTokenRequestParams(StringBuilder* sb, std::string_view deviceCode) {
     // kDeviceCodeParameterName and kCodeParameterName are the same, IDP's use different names.
     *sb << "&" << kGrantTypeParameterName << "=" << kGrantTypeParameterDeviceCodeValue << "&"
         << kDeviceCodeParameterName << "=" << uriEncode(deviceCode) << "&" << kCodeParameterName
         << "=" << uriEncode(deviceCode);
 }
 
-inline void appendPostBodyRefreshFlowParams(StringBuilder* sb, StringData refreshToken) {
+inline void appendPostBodyRefreshFlowParams(StringBuilder* sb, std::string_view refreshToken) {
     *sb << "&" << kGrantTypeParameterName << "=" << kGrantTypeParameterRefreshTokenValue << "&"
         << kRefreshTokenParameterName << "=" << uriEncode(refreshToken);
 }
 
-BSONObj doPostRequest(HttpClient* httpClient, StringData endPoint, const std::string& requestBody) {
+BSONObj doPostRequest(HttpClient* httpClient,
+                      std::string_view endPoint,
+                      const std::string& requestBody) {
     auto response = httpClient->post(endPoint, requestBody);
     ConstDataRange responseCdr = response.getCursor();
-    StringData responseStr;
-    responseCdr.readInto<StringData>(&responseStr);
+    std::string_view responseStr;
+    responseCdr.readInto<std::string_view>(&responseStr);
     return fromjson(responseStr);
 }
 
@@ -117,12 +94,10 @@ BSONObj doPostRequest(HttpClient* httpClient, StringData endPoint, const std::st
 std::pair<std::string, std::string> doDeviceAuthorizationGrantFlow(
     const OAuthAuthorizationServerMetadata& discoveryReply,
     const auth::OIDCMechanismServerStep1& serverReply,
-    StringData principalName) {
+    std::string_view principalName) {
     auto deviceAuthorizationEndpoint = discoveryReply.getDeviceAuthorizationEndpoint().get();
-    uassert(ErrorCodes::BadValue,
-            "Device authorization endpoint in server reply must be an https endpoint or localhost",
-            deviceAuthorizationEndpoint.starts_with("https://"_sd) ||
-                deviceAuthorizationEndpoint.starts_with("http://localhost"_sd));
+    uassertStatusOK(HttpClient::endpointIsSecure(deviceAuthorizationEndpoint)
+                        .withContext("device authorization endpoint in discovery document"));
 
     auto clientId = serverReply.getClientId();
     uassert(ErrorCodes::BadValue,
@@ -218,7 +193,8 @@ std::pair<std::string, std::string> doAuthorizationCodeFlow(
 }  // namespace
 OIDCClientGlobalParams oidcClientGlobalParams;
 
-StatusWith<bool> SaslOIDCClientConversation::step(StringData inputData, std::string* outputData) {
+StatusWith<bool> SaslOIDCClientConversation::step(std::string_view inputData,
+                                                  std::string* outputData) {
     switch (++_step) {
         case 1:
             return _firstStep(outputData);
@@ -294,14 +270,14 @@ StatusWith<bool> SaslOIDCClientConversation::_firstStep(std::string* outputData)
     return false;
 }
 
-StatusWith<bool> SaslOIDCClientConversation::_secondStep(StringData input,
+StatusWith<bool> SaslOIDCClientConversation::_secondStep(std::string_view input,
                                                          std::string* outputData) try {
     // If the client already has a non-empty access token, then token acquisition can be skipped.
     if (_accessToken.empty()) {
         // Currently, only device authorization flow is supported for token acquisition.
         // Parse device authorization endpoint from input.
         ConstDataRange inputCdr(input.data(), input.size());
-        auto payload = inputCdr.read<Validated<BSONObj>>().val;
+        BSONObj payload{inputCdr.read<rpc::ValidatedBSONObj>()};
         auto serverReply = auth::OIDCMechanismServerStep1::parse(
             payload, IDLParserContext{"oidcServerStep1Reply"});
 
@@ -313,10 +289,10 @@ StatusWith<bool> SaslOIDCClientConversation::_secondStep(StringData input,
         // The token endpoint must be provided for both device auth and authz code flows.
         auto tokenEndpoint = discoveryReply.getTokenEndpoint();
         uassert(ErrorCodes::BadValue,
-                "Missing or invalid token endpoint in server reply",
-                tokenEndpoint && !tokenEndpoint->empty() &&
-                    (tokenEndpoint->starts_with("https://"_sd) ||
-                     tokenEndpoint->starts_with("http://localhost"_sd)));
+                "Missing token endpoint in server reply",
+                tokenEndpoint && !tokenEndpoint->empty());
+        uassertStatusOK(HttpClient::endpointIsSecure(*tokenEndpoint)
+                            .withContext("token endpoint in discovery document"));
 
         // Cache the token endpoint for potential reuse during the refresh flow.
         oidcClientGlobalParams.oidcTokenEndpoint = std::string{*tokenEndpoint};

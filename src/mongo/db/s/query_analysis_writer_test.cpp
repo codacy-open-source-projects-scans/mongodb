@@ -1,44 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/query_analysis_writer.h"
 
-#include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
-#include "mongo/db/admission/execution_control/ticketing_system.h"
-#include "mongo/db/admission/ticketing/ticketholder.h"
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,6 +11,9 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
+#include "mongo/db/admission/execution_control/ticketing_system.h"
+#include "mongo/db/admission/ticketing/ticketholder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/query/find_command.h"
@@ -54,11 +22,11 @@
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -74,6 +42,11 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -738,8 +711,8 @@ TEST_F(QueryAnalysisWriterTest, FindQuery) {
                                  const BSONObj& collation,
                                  int expirationSecs,
                                  const boost::optional<BSONObj>& letParameters = boost::none) {
-        RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                        expirationSecs};
+        unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs",
+                                                  expirationSecs};
         auto sampleId = UUID::gen();
 
         writer.addFindQuery(sampleId, nss0, filter, collation, letParameters).get();
@@ -771,8 +744,8 @@ TEST_F(QueryAnalysisWriterTest, CountQuery) {
 
     auto testCountCmdCommon =
         [&](const BSONObj& filter, const BSONObj& collation, int expirationSecs) {
-            RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                            expirationSecs};
+            unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs",
+                                                      expirationSecs};
 
             auto sampleId = UUID::gen();
 
@@ -804,8 +777,8 @@ TEST_F(QueryAnalysisWriterTest, DistinctQuery) {
 
     auto testDistinctCmdCommon =
         [&](const BSONObj& filter, const BSONObj& collation, int expirationSecs) {
-            RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                            expirationSecs};
+            unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs",
+                                                      expirationSecs};
             auto sampleId = UUID::gen();
 
             writer.addDistinctQuery(sampleId, nss0, filter, collation).get();
@@ -838,8 +811,8 @@ TEST_F(QueryAnalysisWriterTest, AggregateQuery) {
                                       const BSONObj& collation,
                                       int expirationSecs,
                                       const boost::optional<BSONObj>& letParameters = boost::none) {
-        RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                        expirationSecs};
+        unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs",
+                                                  expirationSecs};
         auto sampleId = UUID::gen();
 
         writer.addAggregateQuery(sampleId, nss0, filter, collation, letParameters).get();
@@ -882,8 +855,7 @@ TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
     auto expirationSecs = oneYearExpirationSecs;
-    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                    expirationSecs};
+    unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs", expirationSecs};
 
     writer.addUpdateQuery(operationContext(), originalCmd, 0).get();
     writer.addUpdateQuery(operationContext(), originalCmd, 2).get();
@@ -915,8 +887,7 @@ TEST_F(QueryAnalysisWriterTest, DeleteQueriesMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
     auto expirationSecs = oneYearExpirationSecs;
-    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                    expirationSecs};
+    unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs", expirationSecs};
 
     writer.addDeleteQuery(operationContext(), originalCmd, 1).get();
     writer.addDeleteQuery(operationContext(), originalCmd, 2).get();
@@ -952,8 +923,7 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryUpdateMarkedForSampling) {
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
     auto expirationSecs = oneYearExpirationSecs;
-    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                    expirationSecs};
+    unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs", expirationSecs};
 
     writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
@@ -977,8 +947,7 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryRemoveMarkedForSampling) {
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
     auto expirationSecs = oneYearExpirationSecs;
-    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
-                                                    expirationSecs};
+    unittest::ServerParameterGuard expiration{"queryAnalysisSampleExpirationSecs", expirationSecs};
 
     writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
@@ -1112,8 +1081,7 @@ TEST_F(QueryAnalysisWriterTest, RemoveDuplicateQueriesAfterOtherWriteError) {
               "test"_attr = unittest::getTestName(),
               "batchSize"_attr = batchSize);
 
-        RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize",
-                                                          batchSize};
+        unittest::ServerParameterGuard maxBatchSize{"queryAnalysisWriterMaxBatchSize", batchSize};
 
         auto sampleId0 = UUID::gen();
         auto filter0 = makeNonEmptyFilter();
@@ -1265,7 +1233,7 @@ TEST_F(QueryAnalysisWriterTest, RemoveBadQueriesWriteError) {
 TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatches_MaxBatchSize) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
-    RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize", 2};
+    unittest::ServerParameterGuard maxBatchSize{"queryAnalysisWriterMaxBatchSize", 2};
     auto numQueries = 5;
 
     std::vector<SampledReadQuery> expectedSampledCmds;
@@ -1343,8 +1311,8 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddReadIfExceedsSizeLimit) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto maxMemoryUsageBytes = 1024;
-    RAIIServerParameterControllerForTest maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
-                                                        maxMemoryUsageBytes};
+    unittest::ServerParameterGuard maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
+                                                  maxMemoryUsageBytes};
 
     auto sampleId0 = UUID::gen();
     auto filter0 = BSON(std::string(maxMemoryUsageBytes / 2, 'a') << 1);
@@ -1374,8 +1342,8 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddUpdateIfExceedsSizeLimit) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto maxMemoryUsageBytes = 1024;
-    RAIIServerParameterControllerForTest maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
-                                                        maxMemoryUsageBytes};
+    unittest::ServerParameterGuard maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
+                                                  maxMemoryUsageBytes};
     auto [originalCmd, expectedSampledCmds] =
         makeUpdateCommandRequest(nss0,
                                  3,
@@ -1402,8 +1370,8 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddDeleteIfExceedsSizeLimit) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto maxMemoryUsageBytes = 1024;
-    RAIIServerParameterControllerForTest maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
-                                                        maxMemoryUsageBytes};
+    unittest::ServerParameterGuard maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
+                                                  maxMemoryUsageBytes};
     auto [originalCmd, expectedSampledCmds] =
         makeDeleteCommandRequest(nss0,
                                  3,
@@ -1430,8 +1398,8 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddFindAndModifyIfExceedsSizeLimit) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto maxMemoryUsageBytes = 1024;
-    RAIIServerParameterControllerForTest maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
-                                                        maxMemoryUsageBytes};
+    unittest::ServerParameterGuard maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
+                                                  maxMemoryUsageBytes};
 
     auto [originalCmd0, expectedSampledCmds0] = makeFindAndModifyCommandRequest(
         nss0,
@@ -1494,7 +1462,7 @@ TEST_F(QueryAnalysisWriterTestAfterWriteError, AddQueriesBackAfterWriteError) {
     ASSERT_EQ(writer.getQueriesCountForTest(), numQueries);
 
     // Force the documents to get inserted in three batches of size 3, 3 and 2, respectively.
-    RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize", 3};
+    unittest::ServerParameterGuard maxBatchSize{"queryAnalysisWriterMaxBatchSize", 3};
 
     // Hang after inserting the documents in the first batch.
     auto hangFp = globalFailPointRegistry().find("hangAfterCollectionInserts");
@@ -1734,8 +1702,7 @@ TEST_F(QueryAnalysisWriterTest, RemoveDuplicateDiffsAfterOtherWriteError) {
               "test"_attr = unittest::getTestName(),
               "batchSize"_attr = batchSize);
 
-        RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize",
-                                                          batchSize};
+        unittest::ServerParameterGuard maxBatchSize{"queryAnalysisWriterMaxBatchSize", batchSize};
 
         auto sampleId0 = UUID::gen();
         auto preImage0 = BSON("a0" << 0);
@@ -1883,7 +1850,7 @@ TEST_F(QueryAnalysisWriterTest, RemoveBadDiffsWriteError) {
 TEST_F(QueryAnalysisWriterTest, DiffsMultipleBatches_MaxBatchSize) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
-    RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize", 2};
+    unittest::ServerParameterGuard maxBatchSize{"queryAnalysisWriterMaxBatchSize", 2};
     auto numDiffs = 5;
     auto collUuid0 = getCollectionUUID(nss0);
 
@@ -1937,8 +1904,8 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddDiffIfExceedsSizeLimit) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto maxMemoryUsageBytes = 1024;
-    RAIIServerParameterControllerForTest maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
-                                                        maxMemoryUsageBytes};
+    unittest::ServerParameterGuard maxMemoryBytes{"queryAnalysisWriterMaxMemoryUsageBytes",
+                                                  maxMemoryUsageBytes};
 
     auto collUuid0 = getCollectionUUID(nss0);
     auto sampleId0 = UUID::gen();

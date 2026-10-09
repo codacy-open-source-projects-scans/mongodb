@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/exec/serialize_ejson_utils.h"
@@ -38,6 +12,7 @@
 
 namespace mongo::exec::expression::serialize_ejson_utils {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /// Specify if the input contains any BSON-only types or values.
 enum class JsonCompatible { no, yes };
@@ -76,7 +51,7 @@ const TestCase testCases[]{
      BSON("$numberDouble" << "NaN"),
      JsonCompatible::no},
     // string
-    {"string"_sd, "string"_sd, "string"_sd, JsonCompatible::yes},
+    {"string"sv, "string"sv, "string"sv, JsonCompatible::yes},
     // object
     {BSON("foo" << 1),
      BSON("foo" << BSON("$numberInt" << "1")),
@@ -92,9 +67,9 @@ const TestCase testCases[]{
      BSON_ARRAY(1 << 2),
      JsonCompatible::yes},
     // binData
-    {BSONBinData("123", 3, BinDataType::newUUID),
-     BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "4")),
-     BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "4")),
+    {BSONBinData("123", 3, BinDataType::BinDataGeneral),
+     BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "0")),
+     BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "0")),
      JsonCompatible::no},
     {BSONBinData(kUuidBytes, 16, BinDataType::newUUID),
      BSON("$uuid" << "00000000-0000-4000-8000-000000000000"),
@@ -200,12 +175,12 @@ const Value invalidExtendedJsonTestCases[]{
     Value(BSON("extra" << "field" << "$minKey" << 1)),
     // numberDouble
     Value(BSON("$numberDouble" << 0)),
-    Value(BSON("$numberDouble" << "inf"_sd)),
-    Value(BSON("$numberDouble" << "infinity"_sd)),
-    Value(BSON("$numberDouble" << "-inf"_sd)),
-    Value(BSON("$numberDouble" << "-infinity"_sd)),
-    Value(BSON("$numberDouble" << "nan"_sd)),
-    Value(BSON("$numberDouble" << "bad"_sd)),
+    Value(BSON("$numberDouble" << "inf"sv)),
+    Value(BSON("$numberDouble" << "infinity"sv)),
+    Value(BSON("$numberDouble" << "-inf"sv)),
+    Value(BSON("$numberDouble" << "-infinity"sv)),
+    Value(BSON("$numberDouble" << "nan"sv)),
+    Value(BSON("$numberDouble" << "bad"sv)),
     Value(BSON("extra" << "field" << "$numberDouble" << "0")),
     // binData
     Value(BSON("$binary" << 0)),
@@ -436,6 +411,25 @@ TEST(SerializeExtendedJsonUtilsTest, DeserializeFailsWithConversionFailureOnInva
                 << value << " failed with " << e.what() << " instead";
         }
     }
+}
+
+TEST(SerializeExtendedJsonUtilsTest, DeserializeRejectsMalformedBinData) {
+    // Three bytes for a subtype that requires sixteen.
+    ASSERT_THROWS_CODE(deserializeFromExtendedJson(
+                           Value(BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "4")))),
+                       AssertionException,
+                       13016802);
+    // Unassigned subtype.
+    ASSERT_THROWS_CODE(deserializeFromExtendedJson(
+                           Value(BSON("$binary" << BSON("base64" << "MTIz" << "subType" << "10")))),
+                       AssertionException,
+                       12978507);
+}
+
+TEST(SerializeExtendedJsonUtilsTest, DeserializeEmptyFieldName) {
+    auto input = Value(BSON("" << 1));
+    auto output = deserializeFromExtendedJson(input);
+    ASSERT_VALUE_EQ(input, output);
 }
 
 TEST(SerializeExtendedJsonUtilsTest, DeserializeThrowsOnMissingValues) {

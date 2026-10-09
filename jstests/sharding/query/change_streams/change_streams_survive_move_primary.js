@@ -20,10 +20,14 @@ const dbName = "test";
 const untrackedCollName = "untrackedCollection";
 const db = st.s.getDB(dbName);
 
-assert.commandWorked(db.adminCommand({enableSharding: db.getName(), primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    db.adminCommand({enableSharding: db.getName(), primaryShard: st.shard0.shardName}),
+);
 let untrackedColl = assertCreateCollection(db, untrackedCollName);
 
-const cst = new ChangeStreamTest(ChangeStreamTest.getDBForChangeStream(ChangeStreamWatchMode.kCollection, db));
+const cst = new ChangeStreamTest(
+    ChangeStreamTest.getDBForChangeStream(ChangeStreamWatchMode.kCollection, db),
+);
 
 // 1. Verify that an open change stream can collect all the relevant events occurring before and
 // after the execution of movePrimary().
@@ -64,16 +68,15 @@ const expectedEvents = [
         operationType: "drop",
         ns: {db: dbName, coll: untrackedColl.getName()},
     },
-    {
-        operationType: "invalidate",
-    },
 ];
 
+// The invalidate is asserted separately below via cst.assertInvalidateOp(), since a
+// whole-db/whole-cluster stream doesn't invalidate on a single collection's drop.
 const observedEvents = cst.assertNextChangesEqual({
     cursor: changeStreamCursor,
     expectedChanges: expectedEvents,
-    expectInvalidate: true,
 });
+cst.assertInvalidateOp({cursor: changeStreamCursor, opType: "drop"});
 
 // 2. Verify that a change stream started pulling past events can also collect all the relevant
 // events occurring before and after the execution of removeShard(). The first event retrieved from
@@ -88,7 +91,7 @@ changeStreamCursor = cst.startWatchingChanges({
 cst.assertNextChangesEqual({
     cursor: changeStreamCursor,
     expectedChanges: expectedEvents.slice(1),
-    expectInvalidate: true,
 });
+cst.assertInvalidateOp({cursor: changeStreamCursor, opType: "drop"});
 
 st.stop();

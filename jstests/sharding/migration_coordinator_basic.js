@@ -6,9 +6,11 @@
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {ShardVersioningUtil} from "jstests/sharding/libs/shard_versioning_util.js";
+import {setAllowChunkOperationsOnConfigsvr} from "jstests/sharding/libs/set_allow_chunk_operations_util.js";
 
 function is81orAbove() {
     // Requires all primary shard nodes to be running the fcvRequired version.
@@ -35,7 +37,14 @@ const dbName = "test";
 
 var st = new ShardingTest({shards: 2});
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
+
+const usesMoveRangeCoordinatorPath = FeatureFlagUtil.isPresentAndEnabled(
+    st.s.getDB("admin"),
+    "AuthoritativeShardsDDL",
+);
 
 function getCollectionUuidAndEpoch(ns) {
     const collectionDoc = st.s.getDB("config").getCollection("collections").findOne({_id: ns});
@@ -78,7 +87,15 @@ function assertEventuallyDoesNotHaveMigrationCoordinatorDoc(conn) {
     });
 }
 
-function assertHasRangeDeletionDoc({conn, pending, whenToClean, ns, uuid, processing, preMigrationShardVersion}) {
+function assertHasRangeDeletionDoc({
+    conn,
+    pending,
+    whenToClean,
+    ns,
+    uuid,
+    processing,
+    preMigrationShardVersion,
+}) {
     const query = {
         nss: ns,
         collectionUuid: uuid,
@@ -108,7 +125,8 @@ function assertHasRangeDeletionDoc({conn, pending, whenToClean, ns, uuid, proces
     } else {
         assert(
             !doc.hasOwnProperty("pending"),
-            "Field `pending` was not expected to be present. Range deletion doc found: " + tojson(doc),
+            "Field `pending` was not expected to be present. Range deletion doc found: " +
+                tojson(doc),
         );
     }
     if (processing) {
@@ -120,14 +138,16 @@ function assertHasRangeDeletionDoc({conn, pending, whenToClean, ns, uuid, proces
     } else {
         assert(
             !doc.hasOwnProperty("processing"),
-            "Field `processing` was not expected to be present. Range deletion doc found: " + tojson(doc),
+            "Field `processing` was not expected to be present. Range deletion doc found: " +
+                tojson(doc),
         );
     }
     if (is81orAbove()) {
         assert.eq(
             preMigrationShardVersion,
             doc.preMigrationShardVersion,
-            "Unexpected value on `preMigrationShardVersion` field. Range deletion doc found: " + tojson(doc),
+            "Unexpected value on `preMigrationShardVersion` field. Range deletion doc found: " +
+                tojson(doc),
         );
     }
 }
@@ -153,7 +173,11 @@ function assertEventuallyDoesNotHaveRangeDeletionDoc(conn) {
     // Shard the collection.
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
     const [uuid, epoch] = getCollectionUuidAndEpoch(ns);
-    const preMigrationShardVersion = ShardVersioningUtil.getShardVersion(st.shard0, ns, true /* waitForRefresh */);
+    const preMigrationShardVersion = ShardVersioningUtil.getShardVersion(
+        st.shard0,
+        ns,
+        true /* waitForRefresh */,
+    );
 
     // Run the moveChunk asynchronously, pausing during cloning to allow the test to make
     // assertions.
@@ -161,7 +185,9 @@ function assertEventuallyDoesNotHaveRangeDeletionDoc(conn) {
     const awaitResult = startParallelShell(
         funWithArgs(
             function (ns, toShardName) {
-                assert.commandWorked(db.adminCommand({moveChunk: ns, find: {_id: 0}, to: toShardName}));
+                assert.commandWorked(
+                    db.adminCommand({moveChunk: ns, find: {_id: 0}, to: toShardName}),
+                );
             },
             ns,
             st.shard1.shardName,
@@ -209,7 +235,9 @@ function assertEventuallyDoesNotHaveRangeDeletionDoc(conn) {
 
 (() => {
     const [collName, ns] = getNewNs(dbName);
-    jsTest.log("Test end-to-end migration when migration commit fails due to StaleConfig, ns is " + ns);
+    jsTest.log(
+        "Test end-to-end migration when migration commit fails due to StaleConfig, ns is " + ns,
+    );
 
     // Insert some docs into the collection.
     const numDocs = 1000;
@@ -222,29 +250,44 @@ function assertEventuallyDoesNotHaveRangeDeletionDoc(conn) {
     // Shard the collection.
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
     const [uuid, epoch] = getCollectionUuidAndEpoch(ns);
-    const preMigrationShardVersion = ShardVersioningUtil.getShardVersion(st.shard0, ns, true /* waitForRefresh */);
-
-    // Turn on a failpoint to make the migration commit fail on the config server.
-    let migrationCommitVersionErrorFailpoint = configureFailPoint(
-        st.configRS.getPrimary(),
-        "migrationCommitVersionError",
+    const preMigrationShardVersion = ShardVersioningUtil.getShardVersion(
+        st.shard0,
+        ns,
+        true /* waitForRefresh */,
     );
+
+    // Make the migration commit fail on the config server. The authoritative path only aborts the
+    // commit for an error that proves the commit did not take effect: disallowing chunk operations
+    // makes the commit fail with ConflictingOperationInProgress. The legacy path infers the abort
+    // from placement, so a forced version error (StaleEpoch) is enough.
+    let migrationCommitVersionErrorFailpoint;
+    if (usesMoveRangeCoordinatorPath) {
+        setAllowChunkOperationsOnConfigsvr(st, ns, false);
+    } else {
+        migrationCommitVersionErrorFailpoint = configureFailPoint(
+            st.configRS.getPrimary(),
+            "migrationCommitVersionError",
+        );
+    }
 
     // Run the moveChunk asynchronously, pausing during cloning to allow the test to make
     // assertions.
     let step4Failpoint = configureFailPoint(st.shard0, "moveChunkHangAtStep4");
     let step5Failpoint = configureFailPoint(st.shard0, "moveChunkHangAtStep5");
+    const expectedMigrationCommitFailureCodes = usesMoveRangeCoordinatorPath
+        ? [ErrorCodes.ConflictingOperationInProgress]
+        : [ErrorCodes.StaleEpoch];
     const awaitResult = startParallelShell(
         funWithArgs(
-            function (ns, toShardName) {
-                // Expect StaleEpoch because of the failpoint that will make the migration commit fail.
+            function (ns, toShardName, expectedMigrationCommitFailureCodes) {
                 assert.commandFailedWithCode(
                     db.adminCommand({moveChunk: ns, find: {_id: 0}, to: toShardName}),
-                    ErrorCodes.StaleEpoch,
+                    expectedMigrationCommitFailureCodes,
                 );
             },
             ns,
             st.shard1.shardName,
+            expectedMigrationCommitFailureCodes,
         ),
         st.s.port,
     );
@@ -291,22 +334,38 @@ function assertEventuallyDoesNotHaveRangeDeletionDoc(conn) {
     assertEventuallyDoesNotHaveRangeDeletionDoc(st.shard0);
     assertEventuallyDoesNotHaveRangeDeletionDoc(st.shard1);
 
-    migrationCommitVersionErrorFailpoint.off();
+    if (usesMoveRangeCoordinatorPath) {
+        setAllowChunkOperationsOnConfigsvr(st, ns, true);
+    } else {
+        migrationCommitVersionErrorFailpoint.off();
+    }
 })();
 
-(() => {
-    const [collName, ns] = getNewNs(dbName);
-    jsTest.log("Test end-to-end migration when migration commit fails to due to invalid chunk query, ns is " + ns);
+// The authoritative MoveRangeCoordinator only aborts the commit for an error that proves the commit
+// did not take effect (a missing recipient or disallowed chunk operations). A failed chunk update
+// inside the commit transaction is not one of those, so the idempotent commit is retried rather than
+// aborted, and this scenario only applies to the legacy path.
+if (!usesMoveRangeCoordinatorPath) {
+    (() => {
+        const [collName, ns] = getNewNs(dbName);
+        jsTest.log(
+            "Test end-to-end migration when migration commit fails to due to invalid chunk query, ns is " +
+                ns,
+        );
 
-    assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
-    const invalidChunkQueryFailPoint = configureFailPoint(st.configRS.getPrimary(), "migrateCommitInvalidChunkQuery");
+        assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
+        const invalidChunkQueryFailPoint = configureFailPoint(
+            st.configRS.getPrimary(),
+            "migrateCommitInvalidChunkQuery",
+        );
 
-    assert.commandFailedWithCode(
-        st.s.adminCommand({moveChunk: ns, find: {x: MinKey}, to: st.shard1.shardName}),
-        ErrorCodes.UpdateOperationFailed,
-    );
+        assert.commandFailedWithCode(
+            st.s.adminCommand({moveChunk: ns, find: {x: MinKey}, to: st.shard1.shardName}),
+            ErrorCodes.UpdateOperationFailed,
+        );
 
-    invalidChunkQueryFailPoint.off();
-})();
+        invalidChunkQueryFailPoint.off();
+    })();
+}
 
 st.stop();

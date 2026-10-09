@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Utility functions for parsing numbers from strings.
@@ -34,13 +8,13 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/modules.h"
 
 #include <cstdint>
+#include <string_view>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -102,28 +76,26 @@ public:
      * Parsing overloads for different supported numerical types.
      *
      * On success, the parsed value is stored into *result and returns Status::OK().
-     * If endPtr is not nullptr, the end of the number portion of the string will be stored at
-     * *endPtr (like strtol).
+     * If end is not nullptr, the end of the number portion of the string will be stored at
+     * *end (like strtol).
      * This will return with Status::FailedToParse if the string does not represent a number value.
      * See skipWhitespace and allowTrailingText for ways to expand the parser's capabilities.
      * Returns with Status::Overflow if the parsed number cannot be represented by the desired type.
      * If the status is not OK, then there are no guarantees about what value will be stored in
      * result.
      */
-    Status operator()(StringData strData, long* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, long long* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, unsigned long* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData,
-                      unsigned long long* result,
-                      char** endPtr = nullptr) const;
-    Status operator()(StringData strData, short* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, unsigned short* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, int* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, unsigned int* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, int8_t* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, uint8_t* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, double* result, char** endPtr = nullptr) const;
-    Status operator()(StringData strData, Decimal128* result, char** endPtr = nullptr) const;
+    Status operator()(std::string_view s, long* out, const char** end = {}) const;
+    Status operator()(std::string_view s, long long* out, const char** end = {}) const;
+    Status operator()(std::string_view s, unsigned long* out, const char** end = {}) const;
+    Status operator()(std::string_view s, unsigned long long* out, const char** end = {}) const;
+    Status operator()(std::string_view s, short* out, const char** end = {}) const;
+    Status operator()(std::string_view s, unsigned short* out, const char** end = {}) const;
+    Status operator()(std::string_view s, int* out, const char** end = {}) const;
+    Status operator()(std::string_view s, unsigned int* out, const char** end = {}) const;
+    Status operator()(std::string_view s, int8_t* out, const char** end = {}) const;
+    Status operator()(std::string_view s, uint8_t* out, const char** end = {}) const;
+    Status operator()(std::string_view s, double* out, const char** end = {}) const;
+    Status operator()(std::string_view s, Decimal128* out, const char** end = {}) const;
 
     int _base = 0;
     Decimal128::RoundingMode _roundingMode = Decimal128::RoundingMode::kRoundTowardZero;

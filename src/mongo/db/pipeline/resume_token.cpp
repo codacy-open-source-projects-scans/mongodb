@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/resume_token.h"
 
@@ -36,7 +10,9 @@
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
+#include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
@@ -46,20 +22,30 @@
 
 #include <ostream>
 #include <set>
+#include <span>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
+
 namespace {
 // This is our default resume token for the representative query shape.
 const auto kDefaultTokenQueryStats = ResumeToken::makeHighWaterMarkToken(Timestamp(), 1);
+
+// Redeclared here to avoid dependency on pipeline library.
+const HashedFieldName kResumeTokenData =
+    FieldNameHasher().hashedFieldName(ResumeToken::kDataFieldName);
+const HashedFieldName kResumeTokenTypeBits =
+    FieldNameHasher().hashedFieldName(ResumeToken::kTypeBitsFieldName);
 }  // namespace
 
 ResumeTokenData::ResumeTokenData(Timestamp clusterTimeIn,
                                  int versionIn,
                                  size_t txnOpIndexIn,
                                  const boost::optional<UUID>& uuidIn,
-                                 StringData opType,
+                                 std::string_view opType,
                                  Value documentKey,
                                  Value opDescription)
     : clusterTime(clusterTimeIn), version(versionIn), txnOpIndex(txnOpIndexIn), uuid(uuidIn) {
@@ -76,10 +62,10 @@ ResumeTokenData::ResumeTokenData(Timestamp clusterTimeIn,
     // If we are here, then this is either a v2 classic event or an expanded event. In both cases,
     // the resume token is the operationType plus the documentKey or operationDescription.
     auto opDescOrDocKey = documentKey.missing()
-        ? std::make_pair("operationDescription"_sd, opDescription)
-        : std::make_pair("documentKey"_sd, documentKey);
+        ? std::make_pair("operationDescription"sv, opDescription)
+        : std::make_pair("documentKey"sv, documentKey);
 
-    eventIdentifier = Value(Document{{"operationType"_sd, opType}, std::move(opDescOrDocKey)});
+    eventIdentifier = Value(Document{{"operationType"sv, opType}, std::move(opDescOrDocKey)});
 };
 
 bool ResumeTokenData::operator==(const ResumeTokenData& other) const {
@@ -116,14 +102,14 @@ std::ostream& operator<<(std::ostream& out, const ResumeTokenData& tokenData) {
 }
 
 ResumeToken::ResumeToken(const Document& resumeDoc) {
-    auto dataVal = resumeDoc[kDataFieldName];
+    auto dataVal = resumeDoc[kResumeTokenData];
     uassert(40647,
             str::stream()
                 << "Bad resume token: _data of missing or of wrong type. Expected string, got "
                 << resumeDoc.toString(),
             dataVal.getType() == BSONType::string);
     _hexKeyString = dataVal.getString();
-    _typeBits = resumeDoc[kTypeBitsFieldName];
+    _typeBits = resumeDoc[kResumeTokenTypeBits];
     uassert(40648,
             str::stream() << "Bad resume token: _typeBits of wrong type " << resumeDoc.toString(),
             _typeBits.missing() ||
@@ -310,7 +296,7 @@ ResumeTokenData ResumeToken::getData() const {
     return result;
 }
 
-Document ResumeToken::toDocument(const SerializationOptions& options) const {
+Document ResumeToken::toDocument(const query_shape::SerializationOptions& options) const {
     return Document{
         {kDataFieldName,
          options.serializeLiteral(_hexKeyString, Value(kDefaultTokenQueryStats._hexKeyString))},
@@ -325,12 +311,52 @@ Document ResumeToken::toDocument(const SerializationOptions& options) const {
              : options.serializeLiteral(_typeBits, kDefaultTokenQueryStats._typeBits)}};
 }
 
-BSONObj ResumeToken::toBSON(const SerializationOptions& options) const {
+BSONObj ResumeToken::toBSON(const query_shape::SerializationOptions& options) const {
     return toDocument(options).toBson();
 }
 
 ResumeToken ResumeToken::parse(const Document& resumeDoc) {
     return ResumeToken(resumeDoc);
+}
+
+Timestamp ResumeToken::extractClusterTimeFromHexData(std::string_view hex) {
+    uassert(ErrorCodes::FailedToParse, "resume token too short", hex.size() >= 18);
+
+    auto byteAt = [&](size_t pos) -> uint8_t {
+        return hexblob::decodePair(hex.substr(pos, 2));
+    };
+
+    // The 0x82 here is equivalent to the kTimestamp = 130 value in key_string.cpp
+    uassert(ErrorCodes::FailedToParse,
+            "resume token does not start with a timestamp",
+            byteAt(0) == 0x82);
+
+    auto readValue = [&](size_t offset) -> uint32_t {
+        uint32_t value = 0;
+        for (size_t i = 0; i < sizeof(uint32_t); ++i)
+            value = (value << 8) | byteAt(offset + i * 2);
+        return value;
+    };
+
+    uint32_t secs = readValue(2);
+    uint32_t inc = readValue(10);
+    return Timestamp(secs, inc);
+}
+
+Timestamp ResumeToken::extractClusterTime(const BSONObj& token) {
+    auto dataElem = token[kDataFieldName];
+    uassert(ErrorCodes::FailedToParse,
+            "Bad resume token: _data missing or wrong type",
+            dataElem.type() == BSONType::string);
+    return extractClusterTimeFromHexData(dataElem.valueStringData());
+}
+
+Timestamp ResumeToken::extractClusterTime(const Document& token) {
+    const auto& dataElem = token[kDataFieldName];
+    uassert(ErrorCodes::FailedToParse,
+            "Bad resume token: _data missing or wrong type",
+            dataElem.getType() == BSONType::string);
+    return extractClusterTimeFromHexData(dataElem.getStringData());
 }
 
 ResumeTokenData ResumeToken::makeHighWaterMarkTokenData(Timestamp clusterTime, int version) {

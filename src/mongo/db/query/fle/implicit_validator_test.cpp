@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/fle/implicit_validator.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -55,9 +28,11 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -78,14 +53,14 @@ BSONBinData makeFleBinData(const FleBlobHeader& blob) {
 const UUID kTestKeyId = UUID::parse("deadbeef-0000-0000-0000-0000deadbeef").getValue();
 
 
-void replace_str(std::string& str, StringData search, StringData replace) {
+void replace_str(std::string& str, std::string_view search, std::string_view replace) {
     auto pos = str.find(search.data(), 0, search.size());
     if (pos == std::string::npos)
         return;
     str.replace(pos, search.size(), replace.data(), replace.size());
 }
 
-void replace_all(std::string& str, StringData search, StringData replace) {
+void replace_all(std::string& str, std::string_view search, std::string_view replace) {
     auto pos = str.find(search.data(), 0, search.size());
     while (pos != std::string::npos) {
         str.replace(pos, search.size(), replace.data(), replace.size());
@@ -103,21 +78,21 @@ std::string expectedLeafExpr(const EncryptedField& field) {
                 ]}
             ]})";
     FieldRef ref(field.getPath());
-    replace_all(tmpl, "<NAME>"_sd, ref.getPart(ref.numParts() - 1));
+    replace_all(tmpl, "<NAME>"sv, ref.getPart(ref.numParts() - 1));
     if (field.getBsonType().has_value()) {
         // {"$numberInt":"<TYPE>"}
         replace_all(tmpl,
-                    "<TYPE>"_sd,
+                    "<TYPE>"sv,
                     str::stream() << "{\"$numberInt\":\""
                                   << static_cast<int>(typeFromName(field.getBsonType().value()))
                                   << "\"}");
     } else {
-        replace_all(tmpl, "<TYPE>"_sd, "");
+        replace_all(tmpl, "<TYPE>"sv, "");
     }
     return tmpl;
 }
 
-std::string expectedNonLeafExpr(StringData fieldName, StringData subschema) {
+std::string expectedNonLeafExpr(std::string_view fieldName, std::string_view subschema) {
     std::string tmpl = R"(
             {"$or":[
                 {"<NAME>":{"$not":{"$exists":true}}},
@@ -129,18 +104,18 @@ std::string expectedNonLeafExpr(StringData fieldName, StringData subschema) {
                     {"<NAME>":{"$not":{"$_internalSchemaType":[{"$numberInt":"4"}]}}}
                 ]}
             ]})";
-    replace_all(tmpl, "<NAME>"_sd, fieldName);
-    replace_all(tmpl, "<SUBSCHEMA>"_sd, subschema);
+    replace_all(tmpl, "<NAME>"sv, fieldName);
+    replace_all(tmpl, "<SUBSCHEMA>"sv, subschema);
     return tmpl;
 }
 
 class GenerateFLE2MatchExpression : public unittest::Test {
 public:
     GenerateFLE2MatchExpression() {
-        kFieldAbc.setBsonType("string"_sd);
-        kFieldAbd.setBsonType("int"_sd);
-        kFieldC.setBsonType("array"_sd);
-        kFieldAxy.setBsonType("bool"_sd);
+        kFieldAbc.setBsonType("string"sv);
+        kFieldAbd.setBsonType("int"sv);
+        kFieldC.setBsonType("array"sv);
+        kFieldAxy.setBsonType("bool"sv);
 
         kValueAbc = makeFleHeader(kFieldAbc, EncryptedBinDataType::kFLE2EqualityIndexedValue);
         kValueAbd = makeFleHeader(kFieldAbd, EncryptedBinDataType::kFLE2EqualityIndexedValue);
@@ -179,9 +154,9 @@ TEST_F(GenerateFLE2MatchExpression, EmptyInput) {
 
 TEST_F(GenerateFLE2MatchExpression, SimpleInput) {
     EncryptedField foo(UUID::gen(), "foo");
-    foo.setBsonType("string"_sd);
+    foo.setBsonType("string"sv);
     EncryptedField bar(UUID::gen(), "bar");
-    bar.setBsonType("string"_sd);
+    bar.setBsonType("string"sv);
 
     std::string expectedJSON = R"({"$and":[
         {"$and":[
@@ -229,9 +204,9 @@ TEST_F(GenerateFLE2MatchExpression, NormalInputWithNestedFields) {
 
 DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested1Level, "6364302") {
     EncryptedField a(UUID::gen(), "a");
-    a.setBsonType("string"_sd);
+    a.setBsonType("string"sv);
     EncryptedField ab(UUID::gen(), "a.b");
-    ab.setBsonType("int"_sd);
+    ab.setBsonType("int"sv);
 
     [[maybe_unused]] auto expr =
         generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {a, ab});
@@ -239,9 +214,9 @@ DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested1
 
 DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested2Levels, "6364302") {
     EncryptedField ab(UUID::gen(), "a.b");
-    ab.setBsonType("int"_sd);
+    ab.setBsonType("int"sv);
     EncryptedField abc(UUID::gen(), "a.b.c");
-    abc.setBsonType("int"_sd);
+    abc.setBsonType("int"sv);
 
     [[maybe_unused]] auto expr =
         generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, ab});
@@ -249,7 +224,7 @@ DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested2
 
 DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested3Levels, "6364302") {
     EncryptedField abc(UUID::gen(), "a.b.c");
-    abc.setBsonType("int"_sd);
+    abc.setBsonType("int"sv);
 
     [[maybe_unused]] auto expr =
         generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, abc});

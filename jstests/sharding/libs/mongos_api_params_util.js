@@ -79,7 +79,11 @@ export let MongosAPIParametersUtil = (function () {
 
         assert(testCase.shardCommandName ? typeof testCase.shardCommandName === "string" : true);
         assert(testCase.shardPrimary ? typeof testCase.shardPrimary === "function" : true);
-        assert(testCase.configServerCommandName ? typeof testCase.configServerCommandName === "string" : true);
+        assert(
+            testCase.configServerCommandName
+                ? typeof testCase.configServerCommandName === "string"
+                : true,
+        );
         assert(
             testCase.shardCommandName || testCase.configServerCommandName,
             "must specify shardCommandName and/or configServerCommandName: " + tojson(testCase),
@@ -186,10 +190,20 @@ export let MongosAPIParametersUtil = (function () {
                     assert.commandWorked(
                         st.s0.getDB("db").runCommand({
                             insert: "collection",
-                            documents: [{_id: 1}, {_id: 2}, {_id: 3}, {_id: 11}, {_id: 12}, {_id: 13}],
+                            documents: [
+                                {_id: 1},
+                                {_id: 2},
+                                {_id: 3},
+                                {_id: 11},
+                                {_id: 12},
+                                {_id: 13},
+                            ],
                         }),
                     );
-                    const findCmd = Object.assign({find: "collection", batchSize: 1}, context.apiParameters);
+                    const findCmd = Object.assign(
+                        {find: "collection", batchSize: 1},
+                        context.apiParameters,
+                    );
                     const res = assert.commandWorked(context.db.runCommand(findCmd));
                     context.cursorId = res.cursor.id;
                 },
@@ -215,8 +229,15 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 permittedOnShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                    );
                 },
                 command: () => ({checkMetadataConsistency: 1}),
             },
@@ -236,8 +257,15 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 permittedOnShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                    );
                 },
                 command: () => ({
                     configureCollectionBalancing: "db.collection",
@@ -272,7 +300,9 @@ export let MongosAPIParametersUtil = (function () {
                     getQueryableEncryptionCountInfo: "db.collection",
                     tokens: [
                         {
-                            tokens: [{"s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=")}],
+                            tokens: [
+                                {"s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=")},
+                            ],
                         },
                     ],
                     "queryType": "insert",
@@ -285,16 +315,27 @@ export let MongosAPIParametersUtil = (function () {
             commandName: "mergeAllChunksOnShard",
             run: {
                 inAPIVersion1: false,
-                configServerCommandName: "_configsvrCommitMergeAllChunksOnShard",
+                // TODO (SERVER-108802): Re-enable this test case after the api version is propagated to the config server.
+                // configServerCommandName: "_configsvrCommitMergeAllChunksOnShard",
                 shardCommandName: "_shardsvrMergeAllChunksOnShard",
                 runsAgainstAdminDb: true,
                 permittedInTxn: false,
                 permittedOnShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                    );
                 },
-                command: () => ({mergeAllChunksOnShard: "db.collection", shard: st.shard0.shardName}),
+                command: () => ({
+                    mergeAllChunksOnShard: "db.collection",
+                    shard: st.shard0.shardName,
+                }),
             },
         },
         {
@@ -324,30 +365,26 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 permittedOnShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                    );
                 },
-                command: () => ({moveRange: "db.collection", toShard: st.shard0.shardName, min: {_id: 1}}),
+                command: () => ({
+                    moveRange: "db.collection",
+                    toShard: st.shard0.shardName,
+                    min: {_id: 1},
+                }),
             },
         },
         {commandName: "oidcListKeys", skip: "TODO(SERVER-108802)", conditional: true},
         {commandName: "oidcRefreshKeys", skip: "TODO(SERVER-108802)", conditional: true},
         {commandName: "removeQuerySettings", skip: "TODO(SERVER-108802)"},
-        {
-            commandName: "repairShardedCollectionChunksHistory",
-            run: {
-                inAPIVersion1: false,
-                configServerCommandName: "_configsvrRepairShardedCollectionChunksHistory",
-                runsAgainstAdminDb: true,
-                permittedInTxn: false,
-                permittedOnShardedCollection: true,
-                setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
-                },
-                command: () => ({repairShardedCollectionChunksHistory: "db.collection"}),
-            },
-        },
         {
             commandName: "resetPlacementHistory",
             // The command is expected to fail when the featureFlagChangeStreamPreciseShardTargeting is disabled.
@@ -440,7 +477,9 @@ export let MongosAPIParametersUtil = (function () {
                                 documents: [{_id: 1}, {_id: 21}],
                             };
                             assert.commandWorked(
-                                session.getDatabase("db").runCommand(Object.assign(cmd, context.apiParameters)),
+                                session
+                                    .getDatabase("db")
+                                    .runCommand(Object.assign(cmd, context.apiParameters)),
                             );
                         },
                         () => {
@@ -507,7 +546,9 @@ export let MongosAPIParametersUtil = (function () {
                 command: () => ({addShardToZone: st.shard0.shardName, zone: "foo"}),
                 cleanUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("admin").runCommand({removeShardFromZone: st.shard0.shardName, zone: "foo"}),
+                        st.s0
+                            .getDB("admin")
+                            .runCommand({removeShardFromZone: st.shard0.shardName, zone: "foo"}),
                     ),
             },
         },
@@ -548,6 +589,50 @@ export let MongosAPIParametersUtil = (function () {
         {
             commandName: "buildInfo",
             skip: "executes locally on mongos (not sent to any remote node)",
+        },
+        {
+            commandName: "clearJoinPlanCache",
+            run: {
+                inAPIVersion1: false,
+                shardCommandName: "clearJoinPlanCache",
+                runsAgainstAdminDb: true,
+                permittedInTxn: false,
+                // The command is gated behind the join plan cache knobs, which are off by default.
+                // It is broadcast to all shards, which includes the config server.
+                setUp: () => {
+                    for (const conn of [
+                        st.s0,
+                        st.configRS.getPrimary(),
+                        st.rs0.getPrimary(),
+                        st.rs1.getPrimary(),
+                    ]) {
+                        assert.commandWorked(
+                            conn.adminCommand({
+                                setParameter: 1,
+                                internalEnableJoinOptimization: true,
+                                internalEnableJoinPlanCache: true,
+                            }),
+                        );
+                    }
+                },
+                command: () => ({clearJoinPlanCache: 1}),
+                cleanUp: () => {
+                    for (const conn of [
+                        st.s0,
+                        st.configRS.getPrimary(),
+                        st.rs0.getPrimary(),
+                        st.rs1.getPrimary(),
+                    ]) {
+                        assert.commandWorked(
+                            conn.adminCommand({
+                                setParameter: 1,
+                                internalEnableJoinOptimization: false,
+                                internalEnableJoinPlanCache: false,
+                            }),
+                        );
+                    }
+                },
+            },
         },
         {
             commandName: "clearJumboFlag",
@@ -594,7 +679,9 @@ export let MongosAPIParametersUtil = (function () {
                         };
 
                         assert.commandWorked(
-                            session.getDatabase("db").runCommand(Object.assign(cmd, context.apiParameters)),
+                            session
+                                .getDatabase("db")
+                                .runCommand(Object.assign(cmd, context.apiParameters)),
                         );
                     });
 
@@ -680,7 +767,10 @@ export let MongosAPIParametersUtil = (function () {
                 inAPIVersion1: true,
                 shardCommandName: "createIndexes",
                 permittedInTxn: false,
-                command: () => ({createIndexes: "collection", indexes: [{key: {a: 1}, name: "index"}]}),
+                command: () => ({
+                    createIndexes: "collection",
+                    indexes: [{key: {a: 1}, name: "index"}],
+                }),
             },
         },
         {
@@ -690,7 +780,8 @@ export let MongosAPIParametersUtil = (function () {
                 configServerCommandName: "createRole",
                 permittedInTxn: false,
                 command: () => ({createRole: "foo", privileges: [], roles: []}),
-                cleanUp: () => assert.commandWorked(st.s0.getDB("db").runCommand({dropRole: "foo"})),
+                cleanUp: () =>
+                    assert.commandWorked(st.s0.getDB("db").runCommand({dropRole: "foo"})),
             },
         },
         {
@@ -700,7 +791,8 @@ export let MongosAPIParametersUtil = (function () {
                 configServerCommandName: "createUser",
                 permittedInTxn: false,
                 command: () => ({createUser: "foo", pwd: "bar", roles: []}),
-                cleanUp: () => assert.commandWorked(st.s0.getDB("db").runCommand({dropUser: "foo"})),
+                cleanUp: () =>
+                    assert.commandWorked(st.s0.getDB("db").runCommand({dropUser: "foo"})),
             },
         },
         {
@@ -742,7 +834,9 @@ export let MongosAPIParametersUtil = (function () {
                 inAPIVersion1: true,
                 shardCommandName: "explain",
                 permittedInTxn: false,
-                command: () => ({explain: {delete: "collection", deletes: [{q: {_id: 1}, limit: 1}]}}),
+                command: () => ({
+                    explain: {delete: "collection", deletes: [{q: {_id: 1}, limit: 1}]},
+                }),
             },
         },
         {
@@ -777,9 +871,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({dropAllRolesFromDatabase: 1}),
             },
@@ -792,7 +889,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createUser: "foo",
+                            pwd: "bar",
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({dropAllUsersFromDatabase: 1}),
             },
@@ -827,9 +929,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({dropRole: "foo"}),
             },
@@ -842,7 +947,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createUser: "foo",
+                            pwd: "bar",
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({dropUser: "foo"}),
             },
@@ -889,7 +999,9 @@ export let MongosAPIParametersUtil = (function () {
                 setUp: function () {
                     st.s.getDB("db")["view"].drop();
                     assert.commandWorked(
-                        st.s.getDB("db").runCommand({create: "view", viewOn: "collection", pipeline: []}),
+                        st.s
+                            .getDB("db")
+                            .runCommand({create: "view", viewOn: "collection", pipeline: []}),
                     );
                 },
                 command: () => ({find: "view", filter: {x: 1}}),
@@ -901,7 +1013,9 @@ export let MongosAPIParametersUtil = (function () {
                 setUp: function () {
                     st.s.getDB("db")["view"].drop();
                     assert.commandWorked(
-                        st.s.getDB("db").runCommand({create: "view", viewOn: "collection", pipeline: []}),
+                        st.s
+                            .getDB("db")
+                            .runCommand({create: "view", viewOn: "collection", pipeline: []}),
                     );
                 },
                 command: () => ({explain: {find: "view", filter: {x: 1}}}),
@@ -918,7 +1032,9 @@ export let MongosAPIParametersUtil = (function () {
                 inAPIVersion1: true,
                 shardCommandName: "explain",
                 permittedInTxn: false,
-                command: () => ({explain: {findAndModify: "collection", query: {_id: 0}, remove: true}}),
+                command: () => ({
+                    explain: {findAndModify: "collection", query: {_id: 0}, remove: true},
+                }),
             },
         },
         {
@@ -955,6 +1071,10 @@ export let MongosAPIParametersUtil = (function () {
         },
         {commandName: "getLog", skip: "executes locally on mongos (not sent to any remote node)"},
         {
+            commandName: "getMetricsFilteringAllowlist",
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
+        {
             commandName: "getMore",
             run: {
                 inAPIVersion1: true,
@@ -965,10 +1085,20 @@ export let MongosAPIParametersUtil = (function () {
                     assert.commandWorked(
                         st.s0.getDB("db").runCommand({
                             insert: "collection",
-                            documents: [{_id: 1}, {_id: 2}, {_id: 3}, {_id: 11}, {_id: 12}, {_id: 13}],
+                            documents: [
+                                {_id: 1},
+                                {_id: 2},
+                                {_id: 3},
+                                {_id: 11},
+                                {_id: 12},
+                                {_id: 13},
+                            ],
                         }),
                     );
-                    const findCmd = Object.assign({find: "collection", batchSize: 1}, context.apiParameters);
+                    const findCmd = Object.assign(
+                        {find: "collection", batchSize: 1},
+                        context.apiParameters,
+                    );
                     const res = assert.commandWorked(context.db.runCommand(findCmd));
                     context.cursorId = res.cursor.id;
                 },
@@ -997,15 +1127,21 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({
                     grantPrivilegesToRole: "foo",
-                    privileges: [{resource: {db: "db", collection: "collection"}, actions: ["find"]}],
+                    privileges: [
+                        {resource: {db: "db", collection: "collection"}, actions: ["find"]},
+                    ],
                 }),
-                cleanUp: () => assert.commandWorked(st.s0.getDB("db").runCommand({dropRole: "foo"})),
+                cleanUp: () =>
+                    assert.commandWorked(st.s0.getDB("db").runCommand({dropRole: "foo"})),
             },
         },
         {
@@ -1016,14 +1152,20 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: function () {
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "bar", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "bar",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                 },
                 command: () => ({grantRolesToRole: "foo", roles: [{role: "bar", db: "db"}]}),
@@ -1041,12 +1183,20 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () => {
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createUser: "foo",
+                            pwd: "bar",
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                 },
                 command: () => ({grantRolesToUser: "foo", roles: [{role: "foo", db: "db"}]}),
@@ -1084,13 +1234,22 @@ export let MongosAPIParametersUtil = (function () {
                 // Global setup puts one doc on shard 0, we need several.
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({insert: "collection", documents: [{_id: 1}, {_id: 2}, {_id: 3}]}),
+                        st.s0.getDB("db").runCommand({
+                            insert: "collection",
+                            documents: [{_id: 1}, {_id: 2}, {_id: 3}],
+                        }),
                     ),
                 command: () => {
                     // Some extra logging should this test case ever fail.
-                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {"command": {"verbosity": 2}});
-                    const res = assert.commandWorked(st.s0.getDB("db").runCommand({find: "collection", batchSize: 1}));
-                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {"command": {"verbosity": 0}});
+                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {
+                        "command": {"verbosity": 2},
+                    });
+                    const res = assert.commandWorked(
+                        st.s0.getDB("db").runCommand({find: "collection", batchSize: 1}),
+                    );
+                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {
+                        "command": {"verbosity": 0},
+                    });
                     jsTestLog(`"find" reply: ${tojson(res)}`);
                     const cursorId = res.cursor.id;
                     return {killCursors: "collection", cursors: [cursorId]};
@@ -1127,7 +1286,10 @@ export let MongosAPIParametersUtil = (function () {
                 setUp: (context) => {
                     function threadRoutine(connStr, uuidStr) {
                         const client = new Mongo(connStr);
-                        jsTestLog(`Calling find on "${connStr}" from thread,` + ` with comment ${uuidStr}`);
+                        jsTestLog(
+                            `Calling find on "${connStr}" from thread,` +
+                                ` with comment ${uuidStr}`,
+                        );
                         // Target shard 0 with an _id filter.
                         const res = client.getDB("db").runCommand({
                             find: "collection",
@@ -1138,7 +1300,9 @@ export let MongosAPIParametersUtil = (function () {
                     }
 
                     // Some extra logging should this test case ever fail.
-                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {"command": {"verbosity": 2}});
+                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {
+                        "command": {"verbosity": 2},
+                    });
 
                     const uuidStr = UUID().toString();
                     context.thread = new Thread(threadRoutine, st.s0.host, uuidStr);
@@ -1146,7 +1310,8 @@ export let MongosAPIParametersUtil = (function () {
                     const adminDb = st.s0.getDB("admin");
 
                     jsTestLog(
-                        `Waiting for "find" on "${st.shard0.shardName}" ` + `with comment ${uuidStr} in currentOp`,
+                        `Waiting for "find" on "${st.shard0.shardName}" ` +
+                            `with comment ${uuidStr} in currentOp`,
                     );
                     assert.soon(() => {
                         const filter = {
@@ -1161,9 +1326,15 @@ export let MongosAPIParametersUtil = (function () {
                             return true;
                         }
 
-                        assert.lt(inprog.length, 2, `More than one command found in currentOp: ${tojson(inprog)}`);
+                        assert.lt(
+                            inprog.length,
+                            2,
+                            `More than one command found in currentOp: ${tojson(inprog)}`,
+                        );
                     });
-                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {"command": {"verbosity": 0}});
+                    setLogVerbosity([st.s0, st.rs0.getPrimary(), st.rs1.getPrimary()], {
+                        "command": {"verbosity": 0},
+                    });
                 },
                 command: (context) => ({killOp: 1, op: context.findOpId}),
                 cleanUp: (context) => {
@@ -1275,8 +1446,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 requiresShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({split: "db.collection", middle: {_id: -5}}));
-                    assert.commandWorked(st.s.adminCommand({split: "db.collection", middle: {_id: 10}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({split: "db.collection", middle: {_id: -5}}),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({split: "db.collection", middle: {_id: 10}}),
+                    );
                     // Now the chunks are: [MinKey, -5], (-5, 10], (10, MaxKey].
                 },
                 command: () => ({mergeChunks: "db.collection", bounds: [{_id: MinKey}, {_id: 10}]}),
@@ -1342,9 +1517,11 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({planCacheSetFilter: "collection", query: {_id: 1}, indexes: [{_id: 1}]}),
+                        st.s0.getDB("db").runCommand({
+                            planCacheSetFilter: "collection",
+                            query: {_id: 1},
+                            indexes: [{_id: 1}],
+                        }),
                     ),
                 command: () => ({planCacheListFilters: "collection"}),
             },
@@ -1355,7 +1532,11 @@ export let MongosAPIParametersUtil = (function () {
                 inAPIVersion1: false,
                 shardCommandName: "planCacheSetFilter",
                 permittedInTxn: false,
-                command: () => ({planCacheSetFilter: "collection", query: {_id: 1}, indexes: [{_id: 1}]}),
+                command: () => ({
+                    planCacheSetFilter: "collection",
+                    query: {_id: 1},
+                    indexes: [{_id: 1}],
+                }),
             },
         },
         {commandName: "profile", skip: "not supported in mongos"},
@@ -1409,7 +1590,9 @@ export let MongosAPIParametersUtil = (function () {
                     awaitRemoveShard(st.shard1.shardName);
                     st.restartShardClean(st.shard1);
                     assert.commandWorked(
-                        st.s0.getDB("admin").runCommand({addShard: st.rs1.getURL(), name: st.shard1.shardName}),
+                        st.s0
+                            .getDB("admin")
+                            .runCommand({addShard: st.rs1.getURL(), name: st.shard1.shardName}),
                     );
                 },
             },
@@ -1426,7 +1609,9 @@ export let MongosAPIParametersUtil = (function () {
                 cleanUp: () => {
                     // Wait for the shard to be removed completely before re-adding it.
                     awaitTransitionToDedicatedConfigServer(st.shard0.shardName);
-                    assert.commandWorked(st.s0.getDB("admin").runCommand({transitionFromDedicatedConfigServer: 1}));
+                    assert.commandWorked(
+                        st.s0.getDB("admin").runCommand({transitionFromDedicatedConfigServer: 1}),
+                    );
                 },
             },
         },
@@ -1437,7 +1622,8 @@ export let MongosAPIParametersUtil = (function () {
                 runsAgainstAdminDb: true,
                 configServerCommandName: "_configsvrRemoveShardFromZone",
                 permittedInTxn: false,
-                setup: () => assert.commandWorked({addShardToZone: st.shard0.shardName, zone: "foo"}),
+                setup: () =>
+                    assert.commandWorked({addShardToZone: st.shard0.shardName, zone: "foo"}),
                 command: () => ({removeShardFromZone: st.shard0.shardName, zone: "foo"}),
             },
         },
@@ -1491,14 +1677,18 @@ export let MongosAPIParametersUtil = (function () {
                     assert.commandWorked(
                         st.s0.getDB("db").runCommand({
                             createRole: "foo",
-                            privileges: [{resource: {db: "db", collection: "collection"}, actions: ["find"]}],
+                            privileges: [
+                                {resource: {db: "db", collection: "collection"}, actions: ["find"]},
+                            ],
                             roles: [],
                             writeConcern: {w: 1},
                         }),
                     ),
                 command: () => ({
                     revokePrivilegesFromRole: "foo",
-                    privileges: [{resource: {db: "db", collection: "collection"}, actions: ["find"]}],
+                    privileges: [
+                        {resource: {db: "db", collection: "collection"}, actions: ["find"]},
+                    ],
                 }),
                 cleanUp: () => {
                     assert.commandWorked(st.s0.getDB("db").runCommand({dropRole: "foo"}));
@@ -1513,17 +1703,26 @@ export let MongosAPIParametersUtil = (function () {
                 configServerCommandName: "revokeRolesFromRole",
                 setUp: () => {
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "bar", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "bar",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({grantRolesToRole: "foo", roles: [{role: "bar", db: "db"}]}),
+                        st.s0.getDB("db").runCommand({
+                            grantRolesToRole: "foo",
+                            roles: [{role: "bar", db: "db"}],
+                        }),
                     );
                 },
                 command: () => ({revokeRolesFromRole: "foo", roles: [{role: "bar", db: "db"}]}),
@@ -1541,15 +1740,26 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () => {
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createUser: "foo",
+                            pwd: "bar",
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     );
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({grantRolesToUser: "foo", roles: [{role: "foo", db: "db"}]}),
+                        st.s0.getDB("db").runCommand({
+                            grantRolesToUser: "foo",
+                            roles: [{role: "foo", db: "db"}],
+                        }),
                     );
                 },
                 command: () => ({revokeRolesFromUser: "foo", roles: [{role: "foo", db: "db"}]}),
@@ -1597,8 +1807,15 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 requiresShardedCollection: true,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
-                    assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
+                    assert.commandWorked(
+                        st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                    );
                 },
                 command: () => ({setAllowMigrations: "db.collection", allowMigrations: true}),
             },
@@ -1655,7 +1872,12 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 permittedOnShardedCollection: false,
                 setUp: () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
                 },
                 command: () => ({shardCollection: "db.collection", key: {_id: 1}}),
             },
@@ -1665,8 +1887,9 @@ export let MongosAPIParametersUtil = (function () {
             commandName: "split",
             run: {
                 inAPIVersion1: false,
-                configServerCommandName: "_configsvrCommitChunkSplit",
-                shardCommandName: "splitChunk",
+                // TODO (SERVER-108802): Re-enable this test case after the api version is propagated to the config server.
+                // configServerCommandName: "_configsvrCommitChunkSplit",
+                shardCommandName: "_shardsvrSplitChunk",
                 runsAgainstAdminDb: true,
                 permittedInTxn: false,
                 requiresShardedCollection: true,
@@ -1748,6 +1971,10 @@ export let MongosAPIParametersUtil = (function () {
             },
         },
         {
+            commandName: "updateMetricsFilteringAllowlist",
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
+        {
             commandName: "updateRole",
             run: {
                 inAPIVersion1: false,
@@ -1755,12 +1982,18 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0
-                            .getDB("db")
-                            .runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createRole: "foo",
+                            privileges: [],
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({updateRole: "foo", authenticationRestrictions: []}),
-                cleanUp: () => assert.commandWorked(st.s0.getDB("db").runCommand({dropAllRolesFromDatabase: 1})),
+                cleanUp: () =>
+                    assert.commandWorked(
+                        st.s0.getDB("db").runCommand({dropAllRolesFromDatabase: 1}),
+                    ),
             },
         },
         {
@@ -1771,10 +2004,18 @@ export let MongosAPIParametersUtil = (function () {
                 permittedInTxn: false,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("db").runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                        st.s0.getDB("db").runCommand({
+                            createUser: "foo",
+                            pwd: "bar",
+                            roles: [],
+                            writeConcern: {w: 1},
+                        }),
                     ),
                 command: () => ({updateUser: "foo", authenticationRestrictions: []}),
-                cleanUp: () => assert.commandWorked(st.s0.getDB("db").runCommand({dropAllUsersFromDatabase: 1})),
+                cleanUp: () =>
+                    assert.commandWorked(
+                        st.s0.getDB("db").runCommand({dropAllUsersFromDatabase: 1}),
+                    ),
             },
         },
         {
@@ -1786,7 +2027,9 @@ export let MongosAPIParametersUtil = (function () {
                 runsAgainstAdminDb: true,
                 setUp: () =>
                     assert.commandWorked(
-                        st.s0.getDB("admin").runCommand({addShardToZone: st.shard0.shardName, zone: "foo"}),
+                        st.s0
+                            .getDB("admin")
+                            .runCommand({addShardToZone: st.shard0.shardName, zone: "foo"}),
                     ),
                 command: () => ({
                     updateZoneKeyRange: "db.collection",
@@ -1805,7 +2048,9 @@ export let MongosAPIParametersUtil = (function () {
                         }),
                     );
                     assert.commandWorked(
-                        st.s0.getDB("admin").runCommand({removeShardFromZone: st.shard0.shardName, zone: "foo"}),
+                        st.s0
+                            .getDB("admin")
+                            .runCommand({removeShardFromZone: st.shard0.shardName, zone: "foo"}),
                     );
                 },
             },
@@ -1851,8 +2096,9 @@ export let MongosAPIParametersUtil = (function () {
     const listCommandsRes = st.s0.adminCommand({listCommands: 1});
     assert.commandWorked(listCommandsRes);
 
-    const supportsCommittedReads = assert.commandWorked(st.rs0.getPrimary().adminCommand({serverStatus: 1}))
-        .storageEngine.supportsCommittedReads;
+    const supportsCommittedReads = assert.commandWorked(
+        st.rs0.getPrimary().adminCommand({serverStatus: 1}),
+    ).storageEngine.supportsCommittedReads;
 
     const isConfigShardEnabled = ShardTransitionUtil.isConfigServerTransitionEnabledIgnoringFCV(st);
 
@@ -1864,7 +2110,10 @@ export let MongosAPIParametersUtil = (function () {
                 ...testCasesFirstHalf.filter((elem) => elem.commandName === command),
                 ...testCasesSecondHalf.filter((elem) => elem.commandName === command),
             ];
-            assert(matchingCases.length > 0, "coverage failure: must define a test case for " + command);
+            assert(
+                matchingCases.length > 0,
+                "coverage failure: must define a test case for " + command,
+            );
             for (const testCase of matchingCases) {
                 validateTestCase(testCase);
                 testCase.validated = true;
@@ -1924,7 +2173,9 @@ export let MongosAPIParametersUtil = (function () {
                 }
 
                 if (lastCommandInvocation === undefined) {
-                    msg = `Primary didn't log ${commandName} with API parameters ` + `${tojson(apiParameters)}.`;
+                    msg =
+                        `Primary didn't log ${commandName} with API parameters ` +
+                        `${tojson(apiParameters)}.`;
                     return false;
                 }
 
@@ -2025,14 +2276,23 @@ export let MongosAPIParametersUtil = (function () {
 
             withRetryOnTransientTxnError(
                 () => {
-                    assert.commandWorked(st.s.adminCommand({enableSharding: "db", primaryShard: st.shard0.shardName}));
+                    assert.commandWorked(
+                        st.s.adminCommand({
+                            enableSharding: "db",
+                            primaryShard: st.shard0.shardName,
+                        }),
+                    );
 
                     if (shardedCollection) {
-                        assert.commandWorked(st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}));
+                        assert.commandWorked(
+                            st.s.adminCommand({shardCollection: "db.collection", key: {_id: 1}}),
+                        );
                     }
 
                     assert.commandWorked(
-                        st.s.getDB("db")["collection"].insert({_id: 0}, {writeConcern: {w: "majority"}}),
+                        st.s
+                            .getDB("db")
+                            ["collection"].insert({_id: 0}, {writeConcern: {w: "majority"}}),
                     );
 
                     configPrimary = st.configRS.getPrimary();
@@ -2052,11 +2312,16 @@ export let MongosAPIParametersUtil = (function () {
                         jsTestLog(`setUp function for ${commandName} completed`);
                     }
 
-                    shardPrimary = runOrExplain.shardPrimary ? runOrExplain.shardPrimary() : st.rs0.getPrimary();
+                    shardPrimary = runOrExplain.shardPrimary
+                        ? runOrExplain.shardPrimary()
+                        : st.rs0.getPrimary();
 
                     // Make a copy of the test's command body, and set its API parameters.
                     const commandBody = runOrExplain.command(context);
-                    const commandWithAPIParams = Object.assign(Object.assign({}, commandBody), apiParameters);
+                    const commandWithAPIParams = Object.assign(
+                        Object.assign({}, commandBody),
+                        apiParameters,
+                    );
 
                     assert.commandWorked(configPrimary.adminCommand({clearLog: "global"}));
                     assert.commandWorked(shardPrimary.adminCommand({clearLog: "global"}));
@@ -2093,7 +2358,9 @@ export let MongosAPIParametersUtil = (function () {
                         };
 
                         assert.commandWorked(
-                            context.session.getDatabase("admin").runCommand(Object.assign(commitCmd, apiParameters)),
+                            context.session
+                                .getDatabase("admin")
+                                .runCommand(Object.assign(commitCmd, apiParameters)),
                         );
                     }
                 },
@@ -2128,7 +2395,9 @@ export let MongosAPIParametersUtil = (function () {
                 checkPrimaryLog(shardPrimary, shardCommandName, apiParameters);
             }
 
-            setLogVerbosity([configPrimary, st.rs0.getPrimary(), st.rs1.getPrimary()], {"command": {"verbosity": 0}});
+            setLogVerbosity([configPrimary, st.rs0.getPrimary(), st.rs1.getPrimary()], {
+                "command": {"verbosity": 0},
+            });
 
             st.s0.getDB("db").runCommand({dropDatabase: 1});
             if (runOrExplain.cleanUp) {

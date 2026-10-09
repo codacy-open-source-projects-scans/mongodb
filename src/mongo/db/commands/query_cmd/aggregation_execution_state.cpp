@@ -1,42 +1,20 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/query_cmd/aggregation_execution_state.h"
 
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/profile_settings.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/shard_role/initialize_auto_get_helper.h"
@@ -57,6 +35,9 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringCollectionCatalog);
+
+Counter64& timeseriesViewKickbackRetryCount =
+    *MetricBuilder<Counter64>("query.extensionsInsideHybridSearch.timeseriesViewKickbackRetries");
 
 /**
  * This class represents catalog state for normal (i.e., not change stream or collectionless)
@@ -114,7 +95,7 @@ public:
         return _catalog;
     }
 
-    StatusWith<ResolvedView> resolveView(
+    StatusWith<ResolvedNamespace> resolveView(
         OperationContext* opCtx,
         const NamespaceString& nss,
         boost::optional<BSONObj> timeSeriesCollator) const override {
@@ -123,7 +104,6 @@ public:
 
     StatusWith<ResolvedNamespaceMap> resolveInvolvedNamespaces(
         OperationContext* opCtx) const override {
-        auto request = _aggExState.getRequest();
         auto pipelineInvolvedNamespaces = _aggExState.getInvolvedNamespaces();
 
         // If there are no involved namespaces, return before attempting to take any locks.
@@ -131,10 +111,22 @@ public:
             return {ResolvedNamespaceMap()};
         }
 
-        std::deque<NamespaceString> involvedNamespacesQueue(pipelineInvolvedNamespaces.begin(),
-                                                            pipelineInvolvedNamespaces.end());
         ResolvedNamespaceMap resolvedNamespaces;
+        for (const auto& [nss, rn] : _aggExState.getPreResolvedForeignViews()) {
+            resolvedNamespaces.insert_or_assign(nss, rn);
+        }
+        std::deque<NamespaceString> namespaces(pipelineInvolvedNamespaces.begin(),
+                                               pipelineInvolvedNamespaces.end());
+        auto status = extendResolvedNamespaces(opCtx, std::move(namespaces), resolvedNamespaces);
+        if (!status.isOK()) {
+            return status;
+        }
+        return resolvedNamespaces;
+    }
 
+    Status extendResolvedNamespaces(OperationContext* opCtx,
+                                    std::deque<NamespaceString> involvedNamespacesQueue,
+                                    ResolvedNamespaceMap& resolvedNamespaces) const override {
         while (!involvedNamespacesQueue.empty()) {
             NamespaceString involvedNs = std::move(involvedNamespacesQueue.front());
             involvedNamespacesQueue.pop_front();
@@ -152,18 +144,45 @@ public:
                         << "Failed to resolve view '" << involvedNs.toStringForErrorMsg());
                 }
 
-                auto&& underlyingNs = resolvedView.getValue().getNamespace();
+                // The mongos all-view resolution path doesn't correctly handle timeseries views. We
+                // still need to handle timeseries views in 9.0 because of FCV downgrades. We
+                // perform a kickback here to retry the aggregation without hybrid search enabled to
+                // ensure we handle the view correctly.
+                const auto& ifrContext = getIfrContext();
+                const bool extensionsInsideHybridSearchEnabled = ifrContext &&
+                    ifrContext->getSavedFlagValue(
+                        feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+                search_helpers::throwIfrKickbackIfNecessary(
+                    extensionsInsideHybridSearchEnabled && resolvedView.getValue().isTimeseries(),
+                    feature_flags::gFeatureFlagExtensionsInsideHybridSearch,
+                    timeseriesViewKickbackRetryCount,
+                    "Aggregations involving timeseries views are not yet supported under "
+                    "featureFlagExtensionsInsideHybridSearch. Retrying with the flag disabled.");
+
+                auto&& underlyingNs = resolvedView.getValue().getResolvedNamespace();
                 // Attempt to acquire UUID of the underlying collection using lock free method.
                 boost::optional<UUID> uuid = _catalog->lookupUUIDByNSS(opCtx, underlyingNs);
-                resolvedNamespaces[ns] = {underlyingNs,
-                                          resolvedView.getValue().getPipeline(),
-                                          uuid,
-                                          true /*involvedNamespaceIsAView*/};
+                ResolvedNamespaceViewOptions viewOpts;
+                viewOpts.involvedNamespaceIsAView = true;
+                viewOpts.shouldParseLpp = true;
+                viewOpts.collUUID = uuid;
+                viewOpts.options = std::make_shared<LiteParserOptions>(
+                    LiteParserOptions{.ifrContext = getIfrContext()});
+                resolvedNamespaces[ns] =
+                    ResolvedNamespace(ns,
+                                      underlyingNs,
+                                      resolvedView.getValue().getBsonPipeline(),
+                                      resolvedView.getValue().getDefaultCollation(),
+                                      std::move(viewOpts));
 
                 // We parse the pipeline corresponding to the resolved view in case we must
                 // resolve other view namespaces that are also involved.
-                LiteParsedPipeline resolvedViewLitePipeline(resolvedView.getValue().getNamespace(),
-                                                            resolvedView.getValue().getPipeline());
+                LiteParserOptions resolvedViewLpOpts{.ifrContext = getIfrContext()};
+                LiteParsedPipeline resolvedViewLitePipeline(
+                    resolvedView.getValue().getResolvedNamespace(),
+                    resolvedView.getValue().getBsonPipeline(),
+                    /*makeSubpipelineOwned=*/false,
+                    resolvedViewLpOpts);
 
                 const auto& resolvedViewInvolvedNamespaces =
                     resolvedViewLitePipeline.getInvolvedNamespaces();
@@ -196,7 +215,36 @@ public:
             }
         }
 
-        return resolvedNamespaces;
+        // Now that all transitively-involved namespaces are in the map, walk each view entry's
+        // parsed pipeline and recursively resolve any subpipeline-target views in place. After
+        // this loop, every view entry's '_parsedPipeline' has its nested view references
+        // already stitched in, so a downstream consumer that clones it via
+        // ResolvedNamespace::getViewPipeline() gets a fully-resolved pipeline rather than one that
+        // still
+        // refers to other map entries by namespace.
+        //
+        // The 'mainNss' passed to the recursive resolver is each entry's BACKING namespace, not the
+        // view's own key. Backing namespaces are never view entries, so the
+        // top-level binding branch in resolveInvolvedNamespacesOnLiteParsedPipeline is skipped — we
+        // don't apply this view to itself, we only recurse into its subpipelines.
+        for (auto& [_, entry] : resolvedNamespaces) {
+            if (entry.getMutableParsedPipeline()) {
+                // Desugar the view's lite-parsed pipeline before resolving its subpipeline views.
+                // TODO SERVER-131677: combine desugaring and resolveInvolvedNamespaces into a
+                // single API so callers cannot resolve a non-desugared pipeline by mistake.
+                if (!entry.getLiteParserOptions()) {
+                    entry.setLiteParserOptions(std::make_shared<LiteParserOptions>(
+                        LiteParserOptions{.ifrContext = getIfrContext()}));
+                }
+                entry.desugarViewPipeline();
+                PipelineResolver::resolveInvolvedNamespacesOnLiteParsedPipeline(
+                    &entry.getMutableParsedPipeline()->pipeline(),
+                    entry.getResolvedNamespace(),
+                    resolvedNamespaces);
+            }
+        }
+
+        return Status::OK();
     }
 
     boost::optional<UUID> getUUID() const override {
@@ -479,6 +527,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    bool isCollectionlessAggregation() const override {
+        return true;
+    }
+
     query_shape::CollectionType getMainCollectionType() const override {
         MONGO_UNREACHABLE;
     }
@@ -491,7 +543,7 @@ public:
         return _catalog;
     }
 
-    StatusWith<ResolvedView> resolveView(
+    StatusWith<ResolvedNamespace> resolveView(
         OperationContext* opCtx,
         const NamespaceString& nss,
         boost::optional<BSONObj> timeSeriesCollator) const override {
@@ -501,6 +553,12 @@ public:
     StatusWith<ResolvedNamespaceMap> resolveInvolvedNamespaces(
         OperationContext* opCtx) const override {
         return {ResolvedNamespaceMap()};
+    }
+
+    Status extendResolvedNamespaces(OperationContext* opCtx,
+                                    std::deque<NamespaceString> namespaces,
+                                    ResolvedNamespaceMap& resolvedNamespaces) const override {
+        return Status::OK();
     }
 
     boost::optional<UUID> getUUID() const override {
@@ -671,16 +729,18 @@ ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
                                                const ViewDefinition& view)
     : AggExState(std::move(baseState)),
       _originalAggReqDerivatives(std::move(_aggReqDerivatives)),
-      _resolvedView(uassertStatusOK(aggCatalogState.resolveView(
+      _resolvedNamespace(uassertStatusOK(aggCatalogState.resolveView(
           _opCtx,
           _originalAggReqDerivatives->request.getNamespace(),
           view.timeseries() ? _originalAggReqDerivatives->request.getCollation() : boost::none))),
       _resolvedViewRequest_DO_NOT_USE_DIRECTLY(PipelineResolver::buildRequestWithResolvedPipeline(
-          _ifrContext, _resolvedView, _originalAggReqDerivatives->request)),
-      _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY(_resolvedViewRequest_DO_NOT_USE_DIRECTLY,
-                                                          true) {
+          _ifrContext, _resolvedNamespace, _originalAggReqDerivatives->request)),
+      _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY(
+          _resolvedViewRequest_DO_NOT_USE_DIRECTLY,
+          true,
+          LiteParserOptions{.ifrContext = _ifrContext}) {
     bool isExplain = _originalAggReqDerivatives->request.getExplain().get_value_or(false);
-    uassert(std::move(_resolvedView),
+    uassert(std::move(_resolvedNamespace),
             "Explain of a resolved view must be executed by mongos",
             !ShardingState::get(_opCtx)->enabled() || !isExplain);
 
@@ -689,7 +749,7 @@ ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
         _resolvedViewRequest_DO_NOT_USE_DIRECTLY,
         _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY);
 
-    setExecutionNss(_resolvedView.getNamespace());
+    setExecutionNss(_resolvedNamespace.getResolvedNamespace());
 }
 
 StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::create(
@@ -759,6 +819,126 @@ ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingI
     }
 }
 
+void AggCatalogState::maybeProactivelyResolveInvolvedNamespaces(AggExState& aggExState) {
+    OperationContext* opCtx = aggExState.getOpCtx();
+    const auto& ifrContext = aggExState.getIfrContext();
+    const bool extensionsInsideHybridSearchEnabled = ifrContext &&
+        ifrContext->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+    // Only kick back when the request came from a router. On standalone mongod (or direct shard
+    // connections), there is no mongos to receive the ResolvedView exception — the existing
+    // ExpressionContext view-resolution path handles those cases in-line.
+    const bool fromRouter = OperationShardingState::get(opCtx).shouldBeTreatedAsFromRouter(opCtx);
+
+    // The merging half of a sharded aggregation is dispatched by mongos with a leading
+    // $mergeCursors, but - because it merges already-established cursors rather than targeting a
+    // versioned collection - it carries no shard/database version, so shouldBeTreatedAsFromRouter()
+    // returns false for it. A mongos is nonetheless present to receive a kickback, and the merging
+    // pipeline is the only place a merge-stage $lookup/$unionWith foreign view surfaces as an
+    // involved namespace. Treat it as from-router so the proactive resolver inspects those
+    // namespaces and can kick the view resolution back to mongos.
+    const auto& lpp = aggExState.getOriginalLiteParsedPipeline();
+    if (!extensionsInsideHybridSearchEnabled || (!fromRouter && !lpp.isMergePipeline())) {
+        return;
+    }
+
+    const bool mainIsView = shouldExpandMainView();
+    if (lpp.getInvolvedNamespaces().empty() && !mainIsView) {
+        return;
+    }
+
+    auto resolvedMap = getResolvedInvolvedNamespaces(opCtx);
+
+    // Used to validate that every involved namespace uses the same collation as the top-level
+    // namespace does.
+    boost::optional<BSONObj> operationCollationSpec;
+
+    if (mainIsView) {
+        auto mainViewResolved = uassertStatusOK(
+            resolveView(opCtx, aggExState.getExecutionNss(), boost::none /* timeSeriesCollator */));
+        operationCollationSpec = mainViewResolved.getDefaultCollation();
+        LiteParsedPipeline mainViewLpp(mainViewResolved.getResolvedNamespace(),
+                                       mainViewResolved.getBsonPipeline(),
+                                       /*makeSubpipelineOwned=*/false,
+                                       LiteParserOptions{.ifrContext = ifrContext});
+        const auto& namespacesSet = mainViewLpp.getInvolvedNamespaces();
+        std::deque<NamespaceString> namespaces(namespacesSet.begin(), namespacesSet.end());
+        uassertStatusOK(extendResolvedNamespaces(opCtx, std::move(namespaces), resolvedMap));
+    } else {
+        auto resolvedCollator = resolveCollator();
+        operationCollationSpec =
+            resolvedCollator.first ? resolvedCollator.first->getSpec().toBSON() : BSONObj();
+    }
+
+    auto* collatorFactory = CollatorFactoryInterface::get(opCtx->getServiceContext());
+    std::unique_ptr<CollatorInterface> operationCollator;
+    if (operationCollationSpec && !operationCollationSpec->isEmpty()) {
+        operationCollator = uassertStatusOK(collatorFactory->makeFromBSON(*operationCollationSpec));
+    }
+
+    stdx::unordered_set<NamespaceString> writeTargetNamespaces;
+    for (const auto& stage : lpp.getStages()) {
+        if (stage->isWriteStage()) {
+            auto stageInvolved = stage->getInvolvedNamespaces();
+            writeTargetNamespaces.insert(stageInvolved.begin(), stageInvolved.end());
+        }
+    }
+
+    std::vector<ResolvedNamespace> viewEntries;
+    for (const auto& [userNss, rn] : resolvedMap) {
+        if (rn.getNamespace() == rn.getResolvedNamespace()) {
+            continue;
+        }
+        if (writeTargetNamespaces.contains(userNss)) {
+            continue;
+        }
+        std::unique_ptr<CollatorInterface> viewCollator;
+        if (const BSONObj& viewCollation = rn.getDefaultCollation(); !viewCollation.isEmpty()) {
+            viewCollator = uassertStatusOK(collatorFactory->makeFromBSON(viewCollation));
+        }
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                str::stream() << "Cannot override a view's default collation for view "
+                              << userNss.toStringForErrorMsg(),
+                CollatorInterface::collatorsMatch(viewCollator.get(), operationCollator.get()));
+
+        ResolvedNamespaceViewOptions opts{
+            .collUUID = rn.getCollUUID(),
+            .involvedNamespaceIsAView = true,
+            .timeseriesMetadata = rn.getTimeseriesViewMetadata(),
+        };
+        viewEntries.emplace_back(userNss,
+                                 rn.getResolvedNamespace(),
+                                 rn.getBsonPipeline(),
+                                 rn.getDefaultCollation(),
+                                 std::move(opts));
+    }
+    if (viewEntries.empty()) {
+        return;
+    }
+
+    if (shouldExpandMainView()) {
+        auto topLevelResolved = uassertStatusOK(
+            resolveView(opCtx, aggExState.getExecutionNss(), boost::none /* timeSeriesCollator */));
+        topLevelResolved.setAdditionalResolvedNamespaces(std::move(viewEntries));
+        uassertStatusOK(Status(std::move(topLevelResolved),
+                               "Involved namespaces include views; kickback to mongos with "
+                               "top-level view folded in"));
+    } else {
+        uassertStatusOK(Status(ResolvedNamespace::makeWithSentinelPrimary(std::move(viewEntries)),
+                               "Involved namespaces include views; kickback to mongos"));
+    }
+}
+
+bool AggCatalogState::shouldExpandMainView() const {
+    if (!lockAcquired() || !getMainCollectionOrView().isView()) {
+        return false;
+    }
+    // $collStats is supported directly on a view namespace, so its presence at the start of the
+    // pipeline avoids expansion — except on timeseries views, where the user-facing view is
+    // abstracted over a buckets collection the server must resolve to.
+    return !_aggExState.startsWithCollStats() ||
+        getMainCollectionOrView().getView().getViewDefinition().timeseries();
+}
+
 bool AggCatalogState::requiresExtendedRangeSupportForTimeseries(
     const ResolvedNamespaceMap& resolvedNamespaces) const {
     auto requiresExtendedRange = false;
@@ -774,7 +954,7 @@ bool AggCatalogState::requiresExtendedRangeSupportForTimeseries(
     // range support (e.g. in the foreign coll of a $lookup), so we check for that as well.
     if (!requiresExtendedRange) {
         for (auto& [_, resolvedNs] : resolvedNamespaces) {
-            const auto& nss = resolvedNs.ns;
+            const auto& nss = resolvedNs.getResolvedNamespace();
             auto readTimestamp = shard_role_details::getRecoveryUnit(_aggExState.getOpCtx())
                                      ->getPointInTimeReadTimestamp();
             auto collPtr = CollectionPtr(getCatalog()->establishConsistentCollection(
@@ -791,13 +971,11 @@ bool AggCatalogState::requiresExtendedRangeSupportForTimeseries(
 
 boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext() {
     auto [collator, collationMatchesDefault] = resolveCollator();
-    const bool canPipelineBeRejected =
-        query_settings::canPipelineBeRejected(_aggExState.getRequest().getPipeline());
-
     // If any involved collection contains extended-range data, set a flag which individual
-    // DocumentSource parsers can check.
-    const auto& resolvedNamespaces =
-        uassertStatusOK(resolveInvolvedNamespaces(_aggExState.getOpCtx()));
+    // DocumentSource parsers can check. Route through the memoized accessor so that if the
+    // proactive kickback path already resolved involved namespaces earlier in _runAggregate(), we
+    // reuse that result rather than re-walking the catalog.
+    ResolvedNamespaceMap resolvedNamespaces = getResolvedInvolvedNamespaces(_aggExState.getOpCtx());
     auto requiresExtendedRange = requiresExtendedRangeSupportForTimeseries(resolvedNamespaces);
 
     const auto& mainNss = _aggExState.hasChangeStream() ? _aggExState.getOriginalNss()
@@ -816,7 +994,6 @@ boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext
         .requiresTimeseriesExtendedRangeSupport(requiresExtendedRange)
         .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
         .collationMatchesDefault(collationMatchesDefault)
-        .canBeRejected(canPipelineBeRejected)
         .explain(_aggExState.getVerbosity())
         .ifrContext(_aggExState.getIfrContext());
 
@@ -881,6 +1058,9 @@ void AggCatalogState::validate() const {
             !(_aggExState.getRequest().getIsMapReduceCommand() && isTimeseriesQuery));
 
     if (_aggExState.getRequest().getResumeAfter() || _aggExState.getRequest().getStartAt()) {
+        uassert(12848201,
+                "$_resumeAfter is not supported for collectionless aggregations",
+                !isCollectionlessAggregation());
         const auto& collectionOrView = getMainCollectionOrView();
         uassert(ErrorCodes::InvalidPipelineOperator,
                 "$_resumeAfter is not supported on timeseries collections",

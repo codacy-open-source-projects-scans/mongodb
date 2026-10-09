@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/fle_crypto.h"
@@ -63,6 +36,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -74,6 +48,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(preImagesEnabledOnAllCollectionsByDefault);
 
@@ -95,7 +70,7 @@ constexpr auto kCreateCommandHelp =
     "  collation: <document: default collation for the collection or view>,\n"
     "  changeStreamPreAndPostImages: <document: pre- and post-images options for change streams>,\n"
     "  writeConcern: <document: write concern expression for the operation>]\n"
-    "}"_sd;
+    "}"sv;
 
 class CmdCreate final : public CreateCmdVersion1Gen<CmdCreate> {
 public:
@@ -212,6 +187,9 @@ public:
                         !hasQueryType(cmd.getEncryptedFields().get(),
                                       QueryTypeEnum::RangePreviewDeprecated));
 
+                EncryptionInformationHelpers::checkMaxContentionFactorNotExceeded(
+                    cmd.getEncryptedFields().get());
+
                 if (!gFeatureFlagQETextSearchPreview.isEnabledUseLastLTSFCVWhenUninitialized(
                         VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -219,7 +197,7 @@ public:
                             "Cannot create a collection with an encrypted field with query type "
                             "substringPreview unless featureFlagQETextSearchPreview is enabled",
                             !hasQueryType(cmd.getEncryptedFields().get(),
-                                          QueryTypeEnum::SubstringPreview));
+                                          QueryTypeEnum::SubstringPreviewDeprecated));
                     uassert(9783416,
                             "Cannot create a collection with an encrypted field with query type "
                             "suffixPreview unless featureFlagQETextSearchPreview is enabled",
@@ -264,6 +242,26 @@ public:
                             !hasQueryType(cmd.getEncryptedFields().get(),
                                           QueryTypeEnum::SuffixPreviewDeprecated));
                 }
+
+
+                if (!gFeatureFlagQESubstringSearch.isEnabledUseLastLTSFCVWhenUninitialized(
+                        VersionContext::getDecoration(opCtx),
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                    uassert(
+                        12860000,
+                        "Cannot create a collection with an encrypted field with query type "
+                        "substring unless featureFlagQESubstringSearch is enabled (must be on FCV "
+                        ">= 9.0)",
+                        !hasQueryType(cmd.getEncryptedFields().get(), QueryTypeEnum::Substring));
+                } else {
+                    uassert(12915800,
+                            "Cannot create a collection with an encrypted field with query "
+                            "type substringPreview, as it is deprecated",
+                            !hasQueryType(cmd.getEncryptedFields().get(),
+                                          QueryTypeEnum::SubstringPreviewDeprecated));
+                    EncryptionInformationHelpers::checkSubstringParameterLimitsNotExceeded(
+                        cmd.getEncryptedFields().get());
+                }
             }
 
             if (auto timeseries = cmd.getTimeseries()) {
@@ -296,10 +294,10 @@ public:
                                 isGenericArgument(fieldName));
                 }
 
-                auto hasDot = [](StringData field) -> bool {
+                auto hasDot = [](std::string_view field) -> bool {
                     return field.find('.') != std::string::npos;
                 };
-                auto mustBeTopLevel = [&cmd](StringData field) -> std::string {
+                auto mustBeTopLevel = [&cmd](std::string_view field) -> std::string {
                     return str::stream() << cmd.getNamespace().toStringForErrorMsg() << ": '"
                                          << field << "' must be a top-level field "
                                          << "and not contain a '.'";

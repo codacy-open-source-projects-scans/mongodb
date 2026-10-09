@@ -15,18 +15,33 @@ import {
 
 const testDB = db.getSiblingDB(jsTestName());
 
+// TODO SERVER-128633: Remove replicated fast count handling once these fields are removed.
+// When featureFlagReplicatedFastCount and featureFlagContainerWrites are enabled, listCollections
+// in rawData mode emits a test-only 'info.fastCount' field. Strip it so the comparisons below hold
+// whether or not those feature flags are enabled.
+function stripFastCountFields(doc) {
+    if (doc?.info?.fastCount !== undefined) {
+        delete doc.info.fastCount;
+    }
+    return doc;
+}
+
 const timeFieldName = "time";
 const coll = testDB.getCollection(jsTestName());
 coll.drop();
 
-assert.commandWorked(testDB.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
+assert.commandWorked(
+    testDB.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}),
+);
 
 (function assertHasCollectionTypeAndAdditionalProperties() {
     if (!isViewfulTimeseriesOnlySuite(testDB) && !isViewlessTimeseriesOnlySuite(testDB)) {
         return;
     }
 
-    const collectionDocument = getTimeseriesCollForDDLOps(testDB, coll).getMetadata(kRawOperationSpec);
+    const collectionDocument = stripFastCountFields(
+        getTimeseriesCollForDDLOps(testDB, coll).getMetadata(kRawOperationSpec),
+    );
 
     const expectedCollectionDocument = getTimeseriesCollForDDLOps(testDB, coll).getMetadata();
     // In rawData mode, the type is reported as 'collection', rather than 'timeseries'.
@@ -42,15 +57,25 @@ assert.commandWorked(testDB.createCollection(coll.getName(), {timeseries: {timeF
         return;
     }
 
-    const collectionDocument = assert.commandWorked(
-        testDB.runCommand({
-            listCollections: 1,
-            filter: {type: "collection", name: getTimeseriesCollForDDLOps(testDB, coll).getName()},
-            ...kRawOperationSpec,
-        }),
-    ).cursor.firstBatch[0];
+    const collectionDocument = stripFastCountFields(
+        assert.commandWorked(
+            testDB.runCommand({
+                listCollections: 1,
+                filter: {
+                    type: "collection",
+                    name: getTimeseriesCollForDDLOps(testDB, coll).getName(),
+                },
+                ...kRawOperationSpec,
+            }),
+        ).cursor.firstBatch[0],
+    );
 
-    assert.docEq(getTimeseriesCollForDDLOps(testDB, coll).getMetadata(kRawOperationSpec), collectionDocument);
+    assert.docEq(
+        stripFastCountFields(
+            getTimeseriesCollForDDLOps(testDB, coll).getMetadata(kRawOperationSpec),
+        ),
+        collectionDocument,
+    );
 })();
 
 (function assertLegacyTimeseriesNotAffectedByRawData() {
@@ -68,7 +93,7 @@ assert.commandWorked(testDB.createCollection(coll.getName(), {timeseries: {timeF
     assert.commandWorked(testDB.createCollection(regularCollName));
     assert.docEq(
         testDB.getCollection(regularCollName).getMetadata(),
-        testDB.getCollection(regularCollName).getMetadata(kRawOperationSpec),
+        stripFastCountFields(testDB.getCollection(regularCollName).getMetadata(kRawOperationSpec)),
     );
 
     const viewName = "view";

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/unittest/unittest_main_core.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -62,6 +36,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -78,6 +53,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::unittest {
+using namespace std::literals::string_view_literals;
 
 static EnhancedReporter* gEnhancedReporter = nullptr;
 
@@ -88,7 +64,9 @@ EnhancedReporter* getGlobalEnhancedReporter() {
 namespace {
 
 void _dumpOutputSignalHandlerCb() {
-    gEnhancedReporter->dumpBufferedOutputForSignalHandler();
+    if (gEnhancedReporter) {
+        gEnhancedReporter->dumpBufferedOutputForSignalHandler();
+    }
 }
 
 /** Sets and resets the FCV as each test starts and ends. */
@@ -123,7 +101,7 @@ class ThrowListener : public testing::EmptyTestEventListener {
         if (result.type() == testing::TestPartResult::kNonFatalFailure)
             return;
 
-        StringData msg = result.message();
+        std::string_view msg = result.message();
         // Try to avoid throwing an exception when reporting that an unexpected C++ exception
         // was thrown. That is because we are already in the top-level block, and if we throw
         // an exception here, it won't be able to be caught by the same block.
@@ -133,7 +111,7 @@ class ThrowListener : public testing::EmptyTestEventListener {
             (std::current_exception() &&
              (msg.starts_with("C++ exception with description") ||
               msg.starts_with("Unknown C++ exception")) &&
-             msg.contains(" thrown in "));
+             msg.find(" thrown in ") != std::string_view::npos);
         if (!unexpectedException)
             throw testing::AssertionException(result);
     }
@@ -159,7 +137,7 @@ std::vector<const testing::TestSuite*> allSuites() {
 }
 
 /** The only special character is `*`. */
-bool matchesGooglePattern(StringData p, StringData s) {
+bool matchesGooglePattern(std::string_view p, std::string_view s) {
     if (p.empty())
         return s.empty();
     if (p.front() == '*') {
@@ -172,15 +150,15 @@ bool matchesGooglePattern(StringData p, StringData s) {
     return false;
 }
 
-bool matchesGoogleFilter(StringData filt, StringData suite, StringData test) {
+bool matchesGoogleFilter(std::string_view filt, std::string_view suite, std::string_view test) {
     std::string fullName = fmt::format("{}.{}", suite, test);
     while (!filt.empty()) {
         if (filt.front() == ':') {
             filt.remove_prefix(1);
             continue;
         }
-        size_t pos = filt.find_first_of(":");
-        StringData elem = filt.substr(0, pos);
+        size_t pos = filt.find_first_of(':');
+        std::string_view elem = filt.substr(0, pos);
         filt = filt.substr(pos);
         if (matchesGooglePattern(elem, fullName))
             return true;
@@ -251,8 +229,9 @@ void initializeDeathTestChild() {
 
 void installEnhancedReporter(EnhancedReporter::Options options) {
     auto& listeners = testing::UnitTest::GetInstance()->listeners();
-    std::unique_ptr<testing::TestEventListener> originalPrinter{
-        listeners.Release(listeners.default_result_printer())};
+    auto* defaultListener = listeners.default_result_printer();
+    invariant(defaultListener, "GoogleTest default listener already removed.");
+    std::unique_ptr<testing::TestEventListener> originalPrinter{listeners.Release(defaultListener)};
     auto enhanced =
         std::make_unique<EnhancedReporter>(std::move(originalPrinter), std::move(options));
     gEnhancedReporter = enhanced.get();
@@ -263,7 +242,11 @@ void installEnhancedReporter(EnhancedReporter::Options options) {
 
 class MongoExceptionPrinter : public testing::EmptyTestEventListener {
 public:
-    void OnTestPartResult(const testing::TestPartResult& res) override {
+    void OnTestPartResult(const testing::TestPartResult& result) override {
+        if (result.type() == testing::TestPartResult::kSuccess ||
+            result.type() == testing::TestPartResult::kSkip)
+            return;
+
         details::printExceptionInfo(stdout);
         fflush(stdout);
         printStackTrace();
@@ -297,10 +280,10 @@ void callInitGoogleTest(std::vector<std::string>& argVec) {
 
 std::string gtestFilterForSelection(const std::vector<SelectedTest>& selection) {
     std::string filt;
-    StringData sep;
+    std::string_view sep;
     for (const auto& [s, t, k] : selection) {
         if (k)
-            filt += fmt::format("{}{}.{}", std::exchange(sep, ":"_sd), s, t);
+            filt += fmt::format("{}{}.{}", std::exchange(sep, ":"sv), s, t);
     }
     return filt;
 }
@@ -312,6 +295,31 @@ void MainProgress::initialize() {
     setDefaultMockBehavior(MockBehavior::nice);
     callInitGoogleTest(_argVec);
 
+    clearSignalMask();
+    setupSynchronousSignalHandlers();
+
+    if (isDeathTestChild()) {
+        initializeDeathTestChild();
+    } else {
+        if (_options.enhancedReporter) {
+            EnhancedReporter::Options ero;
+            ero.showEachTest = _options.showEachTest;
+            installEnhancedReporter(ero);
+        } else {
+            installMongoReporter();
+        }
+
+        // Start signal processing thread after signal mask cleared.
+        if (_options.startSignalProcessingThread) {
+            // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
+            // initialize_server_global_state::forkServerOrDie) and before the creation of any other
+            // threads
+            startSignalProcessingThread();
+        }
+    }
+
+    GTEST_FLAG_SET(show_internal_stack_frames, false);
+
     // Colorize when explicitly asked to. If no position is taken, colorize when we are writing
     // to a TTY.
     if (details::gtestColorDefaulted() && details::stdoutIsTty()) {
@@ -322,17 +330,11 @@ void MainProgress::initialize() {
         GTEST_FLAG_SET(break_on_failure, true);
     }
 
-    if (isDeathTestChild()) {
-        initializeDeathTestChild();
-    } else {
-        // Googletest takes ownership of the listener.
+    if (!isDeathTestChild()) {
         testing::UnitTest::GetInstance()->listeners().Append(new FCVEventListener{});
     }
 
     testing::UnitTest::GetInstance()->listeners().Append(new ThrowListener{});
-
-    clearSignalMask();
-    setupSynchronousSignalHandlers();
 
     if (auto&& tp = TestingProctor::instance(); !tp.isInitialized())
         tp.setEnabled(true);
@@ -347,6 +349,15 @@ boost::optional<ExitCode> MainProgress::_parseAndAcceptOptions() {
     auto uto = parseUnitTestOptions(args());
     if (uto.help) {
         std::cerr << getUnitTestOptionsHelpString(_argVec) << std::endl;
+
+        // Hard coded construction of argv with `--gtest_help`. This is to ensure
+        // GTest help output also displays.
+        const char* gtestHelpArgv[] = {_argVec[0].c_str(), "--gtest_help", nullptr};
+        int gtestHelpArgc = 2;
+        testing::InitGoogleTest(&gtestHelpArgc, const_cast<char**>(gtestHelpArgv));
+        // This is required because we quickExit() without flushing the stdio buffer
+        // required for GTest help output.
+        std::cout.flush();
         return ExitCode::clean;
     }
 
@@ -354,13 +365,6 @@ boost::optional<ExitCode> MainProgress::_parseAndAcceptOptions() {
         for (auto&& s : allSuites())
             std::cout << s->name() << std::endl;
         return ExitCode::clean;
-    }
-
-    if (_options.startSignalProcessingThread) {
-        // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
-        // initialize_server_global_state::forkServerOrDie) and before the creation of any other
-        // threads
-        startSignalProcessingThread();
     }
 
     if (uto.verbose) {
@@ -409,15 +413,9 @@ boost::optional<ExitCode> MainProgress::_parseAndAcceptOptions() {
         getAutoUpdateConfig() = std::move(auc);
     }
 
-    if (!isDeathTestChild()) {
-        if (uto.enhancedReporter.value_or(false)) {
-            EnhancedReporter::Options ero;
-            ero.showEachTest = uto.showEachTest.value_or(ero.showEachTest);
-            installEnhancedReporter(ero);
-        } else {
-            installMongoReporter();
-        }
-    }
+    _options.enhancedReporter = uto.enhancedReporter.value_or(true);
+    _options.showEachTest = uto.showEachTest.value_or(false);
+
     return {};
 }
 

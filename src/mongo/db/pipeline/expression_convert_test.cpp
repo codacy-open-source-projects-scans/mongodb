@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -44,8 +17,8 @@
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
@@ -53,10 +26,13 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 
@@ -84,7 +60,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithoutOptionalArguments) {
 
     ASSERT_VALUE_EQ(
         Value(fromjson("{$convert: {input: '$path1', to: {$const: 'int'}}}")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 }
 
@@ -125,7 +101,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithToSubDocument) {
                     format: {$const: 'uuid'}
                 }
             })")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 
     ASSERT_VALUE_EQ(
@@ -137,17 +113,19 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithToSubDocument) {
                     format: {$const: "?"}
                 }
             })")),
-        convertExp->serialize(SerializationOptions::kRepresentativeQueryShapeSerializeOptions));
+        convertExp->serialize(
+            query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions));
 
-    ASSERT_VALUE_EQ(Value(fromjson(  // NOLINT
-                        R"({
+    ASSERT_VALUE_EQ(
+        Value(fromjson(  // NOLINT
+            R"({
                             $convert: {
                                 input: '$path1', 
                                 to: "?object",
                                 format: "?string"
                             }
                         })")),
-                    convertExp->serialize(SerializationOptions::kDebugQueryShapeSerializeOptions));
+        convertExp->serialize(query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions));
 }
 
 TEST_F(ExpressionConvertTest, ParseAndSerializeWithOnError) {
@@ -165,7 +143,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithOnError) {
 
     ASSERT_VALUE_EQ(
         Value(fromjson("{$convert: {input: '$path1', to: {$const: 'int'}, onError: {$const: 0}}}")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 }
 
@@ -184,7 +162,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithOnNull) {
 
     ASSERT_VALUE_EQ(
         Value(fromjson("{$convert: {input: '$path1', to: {$const: 'int'}, onNull: {$const: 0}}}")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 }
 
@@ -203,7 +181,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithBase) {
 
     ASSERT_VALUE_EQ(
         Value(fromjson("{$convert: {input: '$path1', to: {$const: 'int'}, base: {$const: 8}}}")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 
     spec = BSON("$convert" << BSON("input" << "$path1"
@@ -218,7 +196,7 @@ TEST_F(ExpressionConvertTest, ParseAndSerializeWithBase) {
 
     ASSERT_VALUE_EQ(
         Value(fromjson("{$convert: {input: '$path1', to: {$const: 'int'}, base: '$path2'}}")),
-        convertExp->serialize(SerializationOptions{
+        convertExp->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
 }
 
@@ -260,7 +238,8 @@ TEST_F(ExpressionConvertTest, RoundTripSerialization) {
                          << "string"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     auto serialized = convertExp->serialize(opts);
     ASSERT_VALUE_EQ(Value(BSON("$convert" << BSON("input" << BSON("$const" << BSON("?" << "?"))
                                                           << "to" << BSON("$const" << "string")))),
@@ -317,7 +296,7 @@ TEST_F(ExpressionConvertTest, ConvertWithOnErrorOptimizesToExpressionConstant) {
 
     auto constResult = dynamic_cast<ExpressionConstant*>(convertExp.get());
     ASSERT(constResult);
-    ASSERT_VALUE_CONTENTS_AND_TYPE(constResult->getValue(), "X"_sd, BSONType::string);
+    ASSERT_VALUE_CONTENTS_AND_TYPE(constResult->getValue(), "X"sv, BSONType::string);
 }
 
 TEST_F(ExpressionConvertTest, ConvertWithBaseOptimizesToExpressionConstant) {
@@ -329,7 +308,7 @@ TEST_F(ExpressionConvertTest, ConvertWithBaseOptimizesToExpressionConstant) {
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
     convertExp = convertExp->optimize();
 
-    Value result{"A0"_sd};
+    Value result{"A0"sv};
 
     auto constResult = dynamic_cast<ExpressionConstant*>(convertExp.get());
     ASSERT(constResult);
@@ -337,8 +316,7 @@ TEST_F(ExpressionConvertTest, ConvertWithBaseOptimizesToExpressionConstant) {
 }
 
 TEST_F(ExpressionConvertTest, ConvertBinDataToIntFeatureFlagOffFails) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBinDataConvertNumeric",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBinDataConvertNumeric", false);
 
     auto expCtx = getExpCtx();
 
@@ -350,8 +328,7 @@ TEST_F(ExpressionConvertTest, ConvertBinDataToIntFeatureFlagOffFails) {
 }
 
 TEST_F(ExpressionConvertTest, ConvertIntToBindataFeatureFlagOffFails) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBinDataConvertNumeric",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBinDataConvertNumeric", false);
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', byteOrder: 'little'}}");
@@ -362,8 +339,7 @@ TEST_F(ExpressionConvertTest, ConvertIntToBindataFeatureFlagOffFails) {
 }
 
 TEST_F(ExpressionConvertTest, ConvertBinDataToLongFeatureFlagOffFails) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBinDataConvertNumeric",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBinDataConvertNumeric", false);
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'long', byteOrder: 'little'}}");
@@ -374,8 +350,7 @@ TEST_F(ExpressionConvertTest, ConvertBinDataToLongFeatureFlagOffFails) {
 }
 
 TEST_F(ExpressionConvertTest, ConvertLongToBinDataFeatureFlagOffFails) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBinDataConvertNumeric",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBinDataConvertNumeric", false);
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', byteOrder: 'big'}}");
@@ -386,8 +361,7 @@ TEST_F(ExpressionConvertTest, ConvertLongToBinDataFeatureFlagOffFails) {
 }
 
 TEST_F(ExpressionConvertTest, ConvertBinDataToDoubleFeatureFlagOffFails) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBinDataConvertNumeric",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBinDataConvertNumeric", false);
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'double', byteOrder: 'little'}}");

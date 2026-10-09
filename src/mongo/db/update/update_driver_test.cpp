@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/update_driver.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,6 +23,7 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -57,6 +31,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using unittest::assertGet;
 
@@ -67,7 +42,7 @@ write_ops::UpdateModification makeUpdateMod(const BSONObj& bson) {
 TEST(Parse, Normal) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(driver.parse(makeUpdateMod(fromjson("{$set:{a:1}}")), arrayFilters));
     ASSERT_FALSE(driver.type() == UpdateDriver::UpdateType::kReplacement);
 }
@@ -75,7 +50,7 @@ TEST(Parse, Normal) {
 TEST(Parse, MultiMods) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(driver.parse(makeUpdateMod(fromjson("{$set:{a:1, b:1}}")), arrayFilters));
     ASSERT_FALSE(driver.type() == UpdateDriver::UpdateType::kReplacement);
 }
@@ -83,7 +58,7 @@ TEST(Parse, MultiMods) {
 TEST(Parse, MixingMods) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(
         driver.parse(makeUpdateMod(fromjson("{$set:{a:1}, $unset:{b:1}}")), arrayFilters));
     ASSERT_FALSE(driver.type() == UpdateDriver::UpdateType::kReplacement);
@@ -92,7 +67,7 @@ TEST(Parse, MixingMods) {
 TEST(Parse, ObjectReplacment) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(
         driver.parse(makeUpdateMod(fromjson("{obj: \"obj replacement\"}")), arrayFilters));
     ASSERT_TRUE(driver.type() == UpdateDriver::UpdateType::kReplacement);
@@ -101,7 +76,7 @@ TEST(Parse, ObjectReplacment) {
 TEST(Parse, ParseUpdateWithPipeline) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     auto updateObj = BSON("u" << BSON_ARRAY(BSON("$addFields" << BSON("a" << 1))));
     ASSERT_DOES_NOT_THROW(driver.parse(updateObj["u"], arrayFilters));
     ASSERT_TRUE(driver.type() == UpdateDriver::UpdateType::kPipeline);
@@ -110,7 +85,7 @@ TEST(Parse, ParseUpdateWithPipeline) {
 TEST(Parse, ParseUpdateWithPipelineAndVariables) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     const auto variables = BSON("var1" << 1 << "var2"
                                        << "foo");
     auto updateObj = BSON("u" << BSON_ARRAY(BSON("$set" << BSON("a" << "$$var1"
@@ -123,7 +98,7 @@ TEST(Parse, ParseUpdateWithPipelineAndVariables) {
 TEST(Parse, EmptyMod) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     // Verifies that {$set: {}} is accepted.
     ASSERT_DOES_NOT_THROW(driver.parse(makeUpdateMod(fromjson("{$set: {}}")), arrayFilters));
 }
@@ -131,7 +106,7 @@ TEST(Parse, EmptyMod) {
 TEST(Parse, WrongMod) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(driver.parse(makeUpdateMod(fromjson("{$xyz:{a:1}}")), arrayFilters),
                                 AssertionException,
                                 ErrorCodes::FailedToParse,
@@ -142,7 +117,7 @@ TEST(Parse, WrongMod) {
 TEST(Parse, WrongType) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(
         driver.parse(makeUpdateMod(fromjson("{$set:[{a:1}]}")), arrayFilters),
         AssertionException,
@@ -154,7 +129,7 @@ TEST(Parse, WrongType) {
 TEST(Parse, ModsWithLaterObjReplacement) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(
         driver.parse(makeUpdateMod(fromjson("{$set:{a:1}, obj: \"obj replacement\"}")),
                      arrayFilters),
@@ -167,7 +142,7 @@ TEST(Parse, ModsWithLaterObjReplacement) {
 TEST(Parse, SetOnInsert) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(
         driver.parse(makeUpdateMod(fromjson("{$setOnInsert:{a:1}}")), arrayFilters));
     ASSERT_FALSE(driver.type() == UpdateDriver::UpdateType::kReplacement);
@@ -178,7 +153,7 @@ TEST(Parse, V1OplogUpdatesOnNonOplogApplicationPath) {
     UpdateDriver driver(expCtx);
     // Oplog updates cannot be applied on the fromOplogApplication path
     driver.setFromOplogApplication(false);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(
         driver.parse(makeUpdateMod(fromjson("{$v: 1, $set: {a:1}}")), arrayFilters),
         AssertionException,
@@ -191,7 +166,7 @@ TEST(Parse, V2OplogUpdatesOnNonOplogApplicationPath) {
     UpdateDriver driver(expCtx);
     // Oplog updates cannot be applied on the fromOplogApplication path
     driver.setFromOplogApplication(false);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(
         driver.parse(makeUpdateMod(fromjson("{$v: 2, diff: {i: {a:1}}}")), arrayFilters),
         AssertionException,
@@ -204,7 +179,7 @@ TEST(Parse, ExplicitV1OplogEntry) {
     UpdateDriver driver(expCtx);
     // Oplog updates can only be applied on the fromOplogApplication path
     driver.setFromOplogApplication(true);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(
         driver.parse(makeUpdateMod(fromjson("{$v: 1, $set: {a:1}}")), arrayFilters));
     ASSERT_TRUE(driver.type() == UpdateDriver::UpdateType::kOperator);
@@ -215,7 +190,7 @@ TEST(Parse, ImplicitV1OplogEntry) {
     UpdateDriver driver(expCtx);
     // Oplog updates can only be applied on the fromOplogApplication path
     driver.setFromOplogApplication(true);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_DOES_NOT_THROW(driver.parse(makeUpdateMod(fromjson("{$set: {a:1}}")), arrayFilters));
     ASSERT_TRUE(driver.type() == UpdateDriver::UpdateType::kOperator);
 }
@@ -225,7 +200,7 @@ TEST(Parse, V1WithDuplicateVersionField) {
     UpdateDriver driver(expCtx);
     // Oplog updates can only be applied on the fromOplogApplication path
     driver.setFromOplogApplication(true);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
     ASSERT_THROWS_CODE_AND_WHAT(
         driver.parse(makeUpdateMod(fromjson("{$v: 1, $set: {a:1}, $v: 1}")), arrayFilters),
         AssertionException,
@@ -238,7 +213,7 @@ TEST(Collator, SetCollationUpdatesModifierInterfaces) {
     CollatorInterfaceMock reverseStringCollator(CollatorInterfaceMock::MockType::kReverseString);
     BSONObj updateDocument = fromjson("{$max: {a: 'abd'}}");
     UpdateDriver driver(expCtx);
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
 
     ASSERT_DOES_NOT_THROW(driver.parse(makeUpdateMod(updateDocument), arrayFilters));
 
@@ -249,7 +224,7 @@ TEST(Collator, SetCollationUpdatesModifierInterfaces) {
     mutablebson::Document doc(fromjson("{a: 'cba'}"));
     driver.setCollator(&reverseStringCollator);
     ASSERT_OK(driver.update(expCtx->getOperationContext(),
-                            StringData(),
+                            std::string_view(),
                             &doc,
                             validateForStorage,
                             emptyImmutablePaths,
@@ -302,7 +277,7 @@ public:
 private:
     ServiceContext::UniqueOperationContext _opCtx{makeOperationContext()};
 
-    std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> _arrayFilters;
+    std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> _arrayFilters;
     std::unique_ptr<UpdateDriver> _driverOps;
     std::unique_ptr<UpdateDriver> _driverRepl;
     mutablebson::Document _doc;
@@ -347,7 +322,7 @@ static void assertSameFields(const BSONObj& docA, const BSONObj& docB) {
         FAIL(std::string(str::stream()
                          << "document " << docA << " has different fields than " << docB));
 
-    std::map<StringData, BSONElement> docAMap;
+    std::map<std::string_view, BSONElement> docAMap;
     BSONObjIterator itA(docA);
     while (itA.more()) {
         BSONElement elA = itA.next();
@@ -358,7 +333,7 @@ static void assertSameFields(const BSONObj& docA, const BSONObj& docB) {
     while (itB.more()) {
         BSONElement elB = itB.next();
 
-        std::map<StringData, BSONElement>::iterator seenIt =
+        std::map<std::string_view, BSONElement>::iterator seenIt =
             docAMap.find(elB.fieldNameStringData());
         if (seenIt == docAMap.end())
             FAIL(std::string(str::stream() << "element " << elB << " not found in " << docA));
@@ -635,12 +610,12 @@ class ModifiedPathsTestFixture : public unittest::Test {
 public:
     void runUpdate(mutablebson::Document* doc,
                    const write_ops::UpdateModification& updateSpec,
-                   StringData matchedField = StringData(),
+                   std::string_view matchedField = std::string_view(),
                    std::vector<BSONObj> arrayFilterSpec = {},
                    bool fromOplog = false) {
         boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
         _driver = std::make_unique<UpdateDriver>(expCtx);
-        std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+        std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
 
         for (const auto& filter : arrayFilterSpec) {
             auto parsedFilter = assertGet(MatchExpressionParser::parse(filter, expCtx));
@@ -724,14 +699,14 @@ TEST_F(ModifiedPathsTestFixture, InsertingAndUpdatingArrayShouldReturnPathToArra
 TEST_F(ModifiedPathsTestFixture, UpdateWithPositionalOperator) {
     BSONObj spec = fromjson("{$set: {'a.$': 1}}");
     mutablebson::Document doc(fromjson("{a: [0, 1, 2]}"));
-    runUpdate(&doc, makeUpdateMod(spec), "0"_sd);
+    runUpdate(&doc, makeUpdateMod(spec), "0"sv);
     ASSERT_EQ(_modifiedPaths, "{a.0}");
 }
 
 TEST_F(ModifiedPathsTestFixture, UpdateWithPositionalOperatorToNestedField) {
     BSONObj spec = fromjson("{$set: {'a.$.b': 1}}");
     mutablebson::Document doc(fromjson("{a: [{b: 1}, {b: 2}]}"));
-    runUpdate(&doc, makeUpdateMod(spec), "1"_sd);
+    runUpdate(&doc, makeUpdateMod(spec), "1"sv);
     ASSERT_EQ(_modifiedPaths, "{a.1.b}");
 }
 
@@ -739,7 +714,7 @@ TEST_F(ModifiedPathsTestFixture, ArrayFilterThatMatchesNoElements) {
     BSONObj spec = fromjson("{$set: {'a.$[i]': 1}}");
     BSONObj arrayFilter = fromjson("{i: 0}");
     mutablebson::Document doc(fromjson("{a: [1, 2, 3]}"));
-    runUpdate(&doc, makeUpdateMod(spec), ""_sd, {arrayFilter});
+    runUpdate(&doc, makeUpdateMod(spec), ""sv, {arrayFilter});
     ASSERT_EQ(_modifiedPaths, "{a}");
 }
 
@@ -754,7 +729,7 @@ TEST_F(ModifiedPathsTestFixture, ReplaceFullDocumentAlwaysAffectsIndex) {
 TEST_F(ModifiedPathsTestFixture, NeedsMatchDetailsIsTrueForPositionalUpdate) {
     BSONObj spec = fromjson("{$set: {'a.$': 1}}");
     mutablebson::Document doc(fromjson("{a: [0, 1, 2]}"));
-    runUpdate(&doc, makeUpdateMod(spec), "0"_sd);
+    runUpdate(&doc, makeUpdateMod(spec), "0"sv);
     ASSERT_EQ(true, _driver->needMatchDetails());
 }
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/storage_interface_impl.h"
 
@@ -37,6 +11,7 @@
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/clean_shutdown_gen.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
@@ -53,11 +28,13 @@
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/platform/compiler.h"
@@ -74,6 +51,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <boost/container/vector.hpp>
@@ -85,6 +63,7 @@
 namespace mongo {
 namespace repl {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 
@@ -96,7 +75,7 @@ BSONObj makeIdIndexSpec(const NamespaceString& nss) {
 /**
  * Generates a unique namespace from the test registration agent.
  */
-NamespaceString makeNamespace(StringData suffix = "") {
+NamespaceString makeNamespace(std::string_view suffix = "") {
     std::string prefix =
         fmt::format("local.{}_{}", unittest::getSuiteName(), unittest::getTestName());
     return NamespaceString::createNamespaceString_forTest(
@@ -141,8 +120,11 @@ void createCollection(OperationContext* opCtx,
                       const NamespaceString& nss,
                       const CollectionOptions& options = generateOptionsWithUuid()) {
     writeConflictRetry(opCtx, "createCollection", nss, [&] {
-        AutoGetDb autodb(opCtx, nss.dbName(), MODE_X);
-        auto db = autodb.ensureDbExists(opCtx);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        auto db = DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName());
         ASSERT_TRUE(db);
         mongo::WriteUnitOfWork wuow(opCtx);
         auto coll = db->createCollection(opCtx, nss, options);
@@ -156,11 +138,13 @@ void createCollection(OperationContext* opCtx,
  * collection after the given index is created.
  */
 int _createIndexOnEmptyCollection(OperationContext* opCtx, NamespaceString nss, BSONObj indexSpec) {
-    Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_X);
-    AutoGetCollection coll(opCtx, nss, MODE_X);
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_X);
 
     WriteUnitOfWork wunit(opCtx);
-    CollectionWriter writer{opCtx, coll};
+    CollectionWriter writer{opCtx, &coll};
 
     auto indexCatalog = writer.getWritableCollection(opCtx)->getIndexCatalog();
     ASSERT(indexCatalog);
@@ -419,6 +403,216 @@ TEST_F(StorageInterfaceImplTest, GetRollbackIDReturnsBadStatusIfRollbackIDIsNotI
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, storage.getRollbackID(opCtx).getStatus());
 }
 
+TEST_F(StorageInterfaceImplTest, InitializeCleanShutdownCollectionCreatesACappedCollection) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+    NamespaceString nss = NamespaceString::kCleanShutdownLogNamespace;
+
+    {
+        const auto coll = getCollectionForRead(opCtx, nss);
+        ASSERT_FALSE(coll.exists());
+    }
+
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    {
+        const auto coll = getCollectionForRead(opCtx, nss);
+        ASSERT_TRUE(coll.exists());
+        ASSERT_TRUE(coll.getCollectionPtr()->isCapped());
+    }
+}
+
+TEST_F(StorageInterfaceImplTest, InitializeCleanShutdownCollectionIsIdempotent) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    // Unlike initializeRollbackID, this runs on every startup, so an existing collection is not an
+    // error and must not disturb the documents already recorded in it.
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp(1, 1)));
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    auto doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(0LL, doc->getId());
+}
+
+TEST_F(StorageInterfaceImplTest,
+       GetLastCleanShutdownDocumentReturnsNamespaceNotFoundOnMissingCollection) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    // Startup creates the collection before anything reads it, so a missing collection here is a
+    // broken invariant rather than a state to report as "nothing recorded".
+    ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
+                  storage.getLastCleanShutdownDocument(opCtx).getStatus());
+}
+
+TEST_F(StorageInterfaceImplTest, GetLastCleanShutdownDocumentReturnsNoneOnEmptyCollection) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    // Created directly rather than through initializeCleanShutdownCollection, which seeds a
+    // sentinel document precisely so that this state does not arise in practice.
+    ASSERT_OK(storage.createCollection(opCtx, NamespaceString::kCleanShutdownLogNamespace, {}));
+    ASSERT_FALSE(unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx)));
+}
+
+TEST_F(StorageInterfaceImplTest, InitializeCleanShutdownCollectionSeedsASentinelDocument) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    // The collection is never left present and empty, so that "has never cleanly shut down" stays
+    // distinct from "has no such collection". The sentinel's _id is one below the first real
+    // shutdown's, which is what makes it read as the absence of one.
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    auto doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(-1LL, doc->getId());
+    ASSERT_TRUE(doc->getCleanShutdownLastCheckpointTimestamp().isNull());
+}
+
+TEST_F(StorageInterfaceImplTest, InitializeCleanShutdownCollectionSeedsTheSentinelOnlyOnce) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    _assertDocumentsInCollectionEquals(
+        opCtx,
+        NamespaceString::kCleanShutdownLogNamespace,
+        {BSON("_id" << -1LL << "cleanShutdownLastCheckpointTimestamp" << Timestamp())});
+}
+
+TEST_F(StorageInterfaceImplTest, RecordCleanShutdownIncrementsIdAndRoundTripsTheTimestamp) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    // The first clean shutdown recorded on a node uses _id 0, and each subsequent one is exactly
+    // one greater, so a gap in the ids means the capped collection truncated documents away.
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp(1, 1)));
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp(2, 2)));
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp(3, 3)));
+
+    auto doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(2LL, doc->getId());
+    ASSERT_EQUALS(Timestamp(3, 3), doc->getCleanShutdownLastCheckpointTimestamp());
+
+    _assertDocumentsInCollectionEquals(
+        opCtx,
+        NamespaceString::kCleanShutdownLogNamespace,
+        {BSON("_id" << -1LL << "cleanShutdownLastCheckpointTimestamp" << Timestamp()),
+         BSON("_id" << 0LL << "cleanShutdownLastCheckpointTimestamp" << Timestamp(1, 1)),
+         BSON("_id" << 1LL << "cleanShutdownLastCheckpointTimestamp" << Timestamp(2, 2)),
+         BSON("_id" << 2LL << "cleanShutdownLastCheckpointTimestamp" << Timestamp(3, 3))});
+}
+
+TEST_F(StorageInterfaceImplTest, CleanShutdownCollectionTruncatesTheOldestDocumentsWhenFull) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+    const auto nss = NamespaceString::kCleanShutdownLogNamespace;
+
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    // Fill the collection past its cap so that the sentinel and the oldest records are truncated
+    // away. In practice a node only reaches this state after tens of thousands of clean shutdowns;
+    // the filler documents here are padded instead so that a handful of them suffice, which only
+    // works because nothing ever parses them: getLastCleanShutdownDocument parses the last document
+    // in the collection, and the real record appended below takes that place.
+    const long long kCollectionSizeBytes = 1 * 1024 * 1024;
+    const int kPaddingSizeBytes = 16 * 1024;
+    const std::size_t kPaddingCount = 5 * kCollectionSizeBytes / 4 / kPaddingSizeBytes;
+    const std::string padding(kPaddingSizeBytes, 'x');
+    std::vector<BSONObj> fillerDocs;
+    for (std::size_t i = 0; i < kPaddingCount; i++) {
+        fillerDocs.push_back(BSON("_id" << static_cast<long long>(i) << "padding" << padding));
+    }
+    ASSERT_OK(storage.insertDocuments(opCtx, nss, transformInserts(fillerDocs)));
+
+    // The last document has to be one that getLastCleanShutdownDocument can parse, so the filler
+    // stands in for the shutdowns recorded before this one rather than after it.
+    const long long lastId = static_cast<long long>(kPaddingCount);
+    ASSERT_OK(storage.insertDocument(
+        opCtx,
+        nss,
+        TimestampedBSONObj{
+            BSON("_id" << lastId << "cleanShutdownLastCheckpointTimestamp" << Timestamp(1, 1)),
+            Timestamp()},
+        OpTime::kUninitializedTerm));
+
+    {
+        // The collection stayed within its cap, and the sentinel is one of the documents it dropped
+        // to do so. Nothing depends on the sentinel surviving: it exists only to keep the
+        // collection from being present and empty, which a collection that has wrapped never is.
+        const auto coll = getCollectionForRead(opCtx, nss);
+        ASSERT_LESS_THAN(coll.getCollectionPtr()->numRecords(opCtx),
+                         static_cast<long long>(kPaddingCount + 1));
+
+        auto oldest =
+            unittest::assertGet(storage.findDocuments(opCtx,
+                                                      nss,
+                                                      boost::none,  // Collection scan.
+                                                      StorageInterface::ScanDirection::kForward,
+                                                      BSONObj(),
+                                                      BoundInclusion::kIncludeStartKeyOnly,
+                                                      1U));
+        // The sentinel is the only document with a negative _id, and it was the first one written,
+        // so an oldest surviving document with a non-negative _id means truncation happened and
+        // took the sentinel with it.
+        ASSERT_EQUALS(1U, oldest.size());
+        ASSERT_GREATER_THAN_OR_EQUALS(oldest.front()["_id"].numberLong(), 0LL);
+    }
+
+    // Truncation takes documents off the front, so the most recent one is still the last in natural
+    // order and the ids continue from it rather than restarting at 0.
+    auto doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(lastId, doc->getId());
+
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp(2, 2)));
+    doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(lastId + 1, doc->getId());
+    ASSERT_EQUALS(Timestamp(2, 2), doc->getCleanShutdownLastCheckpointTimestamp());
+
+    // The next startup must not seed a second sentinel behind the records that outlived the first
+    // one, which would put an _id of -1 at the end of the collection and read as a node that has
+    // never cleanly shut down.
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+    doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(lastId + 1, doc->getId());
+}
+
+TEST_F(StorageInterfaceImplTest, RecordCleanShutdownRecordsANullTimestampAsIs) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    ASSERT_OK(storage.initializeCleanShutdownCollection(opCtx));
+
+    // A node with no stable checkpoint records a null timestamp rather than skipping the document,
+    // so the shutdown still shows up in the history.
+    ASSERT_OK(storage.recordCleanShutdown(opCtx, Timestamp()));
+
+    auto doc = unittest::assertGet(storage.getLastCleanShutdownDocument(opCtx));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(0LL, doc->getId());
+    ASSERT_TRUE(doc->getCleanShutdownLastCheckpointTimestamp().isNull());
+}
+
+TEST_F(StorageInterfaceImplTest, RecordCleanShutdownReturnsNamespaceNotFoundOnMissingCollection) {
+    StorageInterfaceImpl storage;
+    auto opCtx = getOperationContext();
+
+    ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
+                  storage.recordCleanShutdown(opCtx, Timestamp(1, 1)));
+}
+
 TEST_F(StorageInterfaceImplTest, InsertDocumentsReturnsOKWhenNoOperationsAreGiven) {
     auto opCtx = getOperationContext();
     auto nss = makeNamespace();
@@ -467,10 +661,14 @@ TEST_F(StorageInterfaceImplTest,
     auto doc2 = BSON("_id" << 2);
     // Confirm that Collection::insertDocuments fails to insert the batch all at once.
     {
-        AutoGetCollection autoCollection(opCtx, nss, MODE_IX);
+        auto autoCollection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
         WriteUnitOfWork wunit(opCtx);
-        ASSERT_EQUALS(ErrorCodes::OperationCannotBeBatched,
-                      Helpers::insert(opCtx, *autoCollection, std::vector{doc1, doc2}));
+        ASSERT_EQUALS(
+            ErrorCodes::OperationCannotBeBatched,
+            Helpers::insert(opCtx, autoCollection.getCollectionPtr(), std::vector{doc1, doc2}));
     }
     ASSERT_OK(storage.insertDocuments(
         opCtx, nss, std::vector{InsertStatement{doc1}, InsertStatement{doc2}}));
@@ -919,7 +1117,7 @@ TEST_F(StorageInterfaceImplTest, FindDocumentsReturnsIndexNotFoundIfIndexIsMissi
     auto opCtx = getOperationContext();
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
-    auto indexName = "nonexistent"_sd;
+    auto indexName = "nonexistent"sv;
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     ASSERT_EQUALS(ErrorCodes::IndexNotFound,
                   storage
@@ -947,7 +1145,7 @@ TEST_F(StorageInterfaceImplTest, FindDocumentsReturnsIndexOptionsConflictIfIndex
         ASSERT_OK(loader->insertDocuments(docs));
         ASSERT_OK(loader->commit());
     }
-    auto indexName = "x_1"_sd;
+    auto indexName = "x_1"sv;
     ASSERT_EQUALS(ErrorCodes::IndexOptionsConflict,
                   storage
                       .findDocuments(opCtx,
@@ -1392,7 +1590,7 @@ TEST_F(StorageInterfaceImplTest, DeleteDocumentsReturnsIndexNotFoundIfIndexIsMis
     auto opCtx = getOperationContext();
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
-    auto indexName = "nonexistent"_sd;
+    auto indexName = "nonexistent"sv;
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     ASSERT_EQUALS(ErrorCodes::IndexNotFound,
                   storage
@@ -2066,7 +2264,7 @@ TEST_F(StorageInterfaceImplTest, ClusteredDeleteDocumentsReturnsIndexNotFoundIfI
     auto opCtx = getOperationContext();
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
-    auto indexName = "nonexistent"_sd;
+    auto indexName = "nonexistent"sv;
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuidClustered()));
     ASSERT_EQUALS(ErrorCodes::IndexNotFound,
                   storage
@@ -2836,7 +3034,7 @@ TEST_F(StorageInterfaceImplTest,
     StorageInterfaceImpl storage;
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("mydb.coll");
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     auto doc = BSON("_id" << 0 << "x" << 1);
     auto status = storage.upsertById(opCtx, wrongColl, doc["_id"], doc);
@@ -3111,7 +3309,7 @@ TEST_F(StorageInterfaceImplTest, DeleteByFilterReturnsNamespaceNotFoundWhenColle
     StorageInterfaceImpl storage;
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("mydb.coll");
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     auto filter = BSON("x" << 1);
     auto status = storage.deleteByFilter(opCtx, wrongColl, filter);
@@ -3280,7 +3478,7 @@ TEST_F(StorageInterfaceImplTest,
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
                   storage.getCollectionCount(opCtx, wrongColl).getStatus());
@@ -3324,7 +3522,7 @@ TEST_F(StorageInterfaceImplTest,
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound, storage.setCollectionCount(opCtx, wrongColl, 3));
 }
@@ -3343,7 +3541,7 @@ TEST_F(StorageInterfaceImplTest,
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, generateOptionsWithUuid()));
     ASSERT_EQUALS(ErrorCodes::NamespaceNotFound,
                   storage.getCollectionSize(opCtx, wrongColl).getStatus());
@@ -3387,7 +3585,7 @@ TEST_F(StorageInterfaceImplTest, SetIndexIsMultikeyReturnsNamespaceNotFoundForMi
     StorageInterfaceImpl storage;
     auto nss = makeNamespace();
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_OK(storage.createCollection(opCtx, nss, CollectionOptions()));
     ASSERT_EQUALS(
         ErrorCodes::NamespaceNotFound,
@@ -3401,7 +3599,7 @@ TEST_F(StorageInterfaceImplTest, SetIndexIsMultikeyLooksUpCollectionByUUID) {
     auto options = generateOptionsWithUuid();
     ASSERT_OK(storage.createCollection(opCtx, nss, options));
     NamespaceString wrongColl =
-        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"_sd);
+        NamespaceString::createNamespaceString_forTest(nss.dbName(), "wrongColl"sv);
     ASSERT_EQUALS(ErrorCodes::IndexNotFound,
                   storage.setIndexIsMultikey(
                       opCtx, wrongColl, *options.uuid, "foo", {}, {}, Timestamp(3, 3)));

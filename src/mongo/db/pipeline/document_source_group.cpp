@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_group.h"
 
@@ -44,6 +18,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
 #include <utility>
 
 #include <absl/container/flat_hash_map.h>
@@ -55,7 +30,7 @@
 
 namespace mongo {
 
-constexpr StringData DocumentSourceGroup::kStageName;
+constexpr std::string_view DocumentSourceGroup::kStageName;
 
 REGISTER_LITE_PARSED_DOCUMENT_SOURCE(group, GroupLiteParsed::parse, AllowedWithApiStrict::kAlways);
 
@@ -63,8 +38,8 @@ REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(group, DocumentSourceGroup, G
 
 ALLOCATE_DOCUMENT_SOURCE_ID(group, DocumentSourceGroup::id)
 
-const char* DocumentSourceGroup::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceGroup::getSourceName() const {
+    return kStageName;
 }
 
 boost::intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
@@ -177,7 +152,7 @@ namespace {
 template <TopBottomSense sense, bool single = true>
 AccumulationStatement makeAccStmtForTopBottom(boost::intrusive_ptr<ExpressionContext> pExpCtx,
                                               const SortPattern& sortPattern,
-                                              StringData fieldName,
+                                              std::string_view fieldName,
                                               boost::intrusive_ptr<Expression> origExpr) {
     static_assert(
         single,
@@ -228,7 +203,7 @@ bool DocumentSourceGroup::tryToAbsorbTopKSort(DocumentSourceSort* prospectiveSor
         return false;
     }
 
-    auto sortPattern = prospectiveSort->getSortPattern();
+    const auto sortPattern = prospectiveSort->getSortPattern();
     // Does not support sort by meta field(s).
     for (auto&& sortPatternPart : sortPattern) {
         if (sortPatternPart.expression) {
@@ -273,6 +248,7 @@ bool DocumentSourceGroup::tryToAbsorbTopKSort(DocumentSourceSort* prospectiveSor
 }
 
 namespace {
+using namespace std::literals::string_view_literals;
 // The key to group $top(N)/$bottom(N) with the same sort pattern and the same N into a hash table.
 struct TopBottomAccKey {
     SortPattern sortPattern;
@@ -334,15 +310,15 @@ TopBottomAccKey getTopBottomAccKey(AccumulatorN* accN) {
 }
 
 template <TopBottomSense sense, bool single>
-constexpr StringData getMergeFieldNameForAcc() {
+constexpr std::string_view getMergeFieldNameForAcc() {
     if constexpr (sense == TopBottomSense::kTop && single) {
-        return "ts"_sd;
+        return "ts"sv;
     } else if constexpr (sense == TopBottomSense::kTop && !single) {
-        return "tns"_sd;
+        return "tns"sv;
     } else if constexpr (sense == TopBottomSense::kBottom && single) {
-        return "bs"_sd;
+        return "bs"sv;
     } else if constexpr (sense == TopBottomSense::kBottom && !single) {
-        return "bns"_sd;
+        return "bns"sv;
     }
 };
 
@@ -405,7 +381,7 @@ AccumulationStatement mergeAccStmtFor(boost::intrusive_ptr<ExpressionContext> pE
                         {
                             // Composes {$ifNull: ["outputExpression", null]}.
                             BSONArrayBuilder ifNullArrayBuilder(
-                                ifNullOutputBuilder.subarrayStart("$ifNull"_sd));
+                                ifNullOutputBuilder.subarrayStart("$ifNull"sv));
                             getOutputArgExpr(accStmts[accIdx].expr.argument)
                                 ->serialize()
                                 .addToBsonArray(&ifNullArrayBuilder);
@@ -433,7 +409,7 @@ AccumulationStatement mergeAccStmtFor(boost::intrusive_ptr<ExpressionContext> pE
 
 AccumulationStatement makeAccStmtForFirstLast(boost::intrusive_ptr<ExpressionContext> pExpCtx,
                                               AccumulatorFirstLastN::Sense sense,
-                                              StringData fieldName,
+                                              std::string_view fieldName,
                                               boost::intrusive_ptr<Expression> origExpr) {
     const auto accName =
         sense == AccumulatorFirstLastN::kFirst ? AccumulatorFirst::kName : AccumulatorLast::kName;
@@ -465,7 +441,7 @@ struct AccumulatorInfo {
 // Contains info about all allowed accumulators for the tryToOptimizeAccN() optimization. The info
 // is useful to determine whether accumulators can be converted (i.e. are `multi`), and to compare
 // senses of different accumulators.
-const std::map<StringData, AccumulatorInfo> kAccNameToInfoMap{
+const std::map<std::string_view, AccumulatorInfo> kAccNameToInfoMap{
     {AccumulatorFirst::kName, {false, AccumulatorFirstLastN::kFirst}},
     {AccumulatorLast::kName, {false, AccumulatorFirstLastN::kLast}},
     {AccumulatorFirstN::kName, {true, AccumulatorFirstLastN::kFirst}},

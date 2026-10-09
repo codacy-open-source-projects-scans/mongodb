@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumn_test_util.h"
 
@@ -130,31 +104,22 @@ bool areSBEBinariesEqual(sbe::bsoncolumn::SBEColumnMaterializer::Element& actual
     }
 }
 
-std::pair<BSONElement, BSONElement> expectedMinMax(std::vector<BSONElement>& elems) {
-    // Compute expected min/max from iterator elements.
-    BSONElement expectedMin;
-    BSONElement expectedMax;
-    for (auto&& elem : elems) {
-        // Nothing to do for skipped elements
-        if (elem.eoo())
+ExpectedMinMax expectedMinMax(std::vector<BSONElement>& elems) {
+    BSONElement minElem, maxElem;
+    size_t minIdx = 0, maxIdx = 0;
+    for (size_t i = 0; i < elems.size(); ++i) {
+        if (elems[i].eoo())
             continue;
-
-        // Initialize min & max to the first non-skipped element
-        if (expectedMin.eoo()) {
-            expectedMin = elem;
-            expectedMax = elem;
-            continue;
+        if (minElem.eoo() || elems[i].woCompare(minElem) < 0) {
+            minElem = elems[i];
+            minIdx = i;
         }
-
-        // Compare and set expected min/max as values change.
-        if (elem.woCompare(expectedMin) < 0) {
-            expectedMin = elem;
-        }
-        if (elem.woCompare(expectedMax) > 0) {
-            expectedMax = elem;
+        if (maxElem.eoo() || elems[i].woCompare(maxElem) > 0) {
+            maxElem = elems[i];
+            maxIdx = i;
         }
     }
-    return std::make_pair(expectedMin, expectedMax);
+    return {{minElem, minIdx}, {maxElem, maxIdx}};
 }
 
 }  // namespace mongo::bsoncolumn

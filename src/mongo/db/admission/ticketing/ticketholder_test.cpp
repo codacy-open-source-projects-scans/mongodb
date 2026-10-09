@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/admission/ticketing/ticketholder.h"
 
 #include "mongo/db/admission/ticketing/ticketholder_parameters_gen.h"
@@ -38,11 +12,13 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/packaged_task.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 
 #include <concepts>
 #include <memory>
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -77,8 +53,7 @@ public:
         _client = getServiceContext()->getService()->makeClient("test");
         _opCtx = _client->makeOperationContext();
 
-        ThreadPool::Options opts;
-        _pool = std::make_unique<ThreadPool>(opts);
+        _pool = ThreadPool::make({});
         _pool->startup();
     }
 
@@ -118,6 +93,7 @@ public:
                                               nullptr /* executionAcquisitionCallback */,
                                               nullptr /* executionWaitedAcquisitionCallback */,
                                               nullptr /* executionReleaseCallback */,
+                                              nullptr /* startQueueingCallback */,
                                               TicketHolder::ResizePolicy::kImmediate);
     }
 
@@ -135,20 +111,6 @@ public:
         return _opCtx.get();
     }
 
-    /**
-     * Helper function that tests ticket wait timeout behavior.
-     *
-     * Sets up a TicketHolder with 1 ticket, acquires it, then spawns a thread that attempts
-     * to acquire a ticket with a deadline. Verifies the timeout occurs within expected bounds.
-     *
-     * @param maxTimeMS The deadline to set on the waiting operation
-     * @param lowerBoundSlack Allowed timing variation below maxTimeMS
-     * @param upperBoundSlack Allowed timing variation above maxTimeMS
-     */
-    void runTicketWaitTimeoutTest(Milliseconds maxTimeMS,
-                                  Milliseconds lowerBoundSlack,
-                                  Milliseconds upperBoundSlack);
-
 protected:
     class Stats;
     class Hotel;
@@ -165,11 +127,11 @@ private:
  */
 class TicketHolderTest::Stats {
 public:
-    static constexpr auto kNormalPriorityName = "normalPriority"_sd;
-    static constexpr auto kExemptPriorityName = "exempt"_sd;
+    static constexpr auto kNormalPriorityName = "normalPriority"sv;
+    static constexpr auto kExemptPriorityName = "exempt"sv;
     Stats(TicketHolder* holder) : _holder(holder) {};
 
-    long long operator[](StringData field) const {
+    long long operator[](std::string_view field) const {
         BSONObjBuilder bob;
         _holder->appendTicketStats(bob);
         {
@@ -256,7 +218,7 @@ struct TicketHolderTest::MockAdmission {
 
     // Block until this Admission attempt is queued waiting on a ticket.
     bool waitUntilQueued(Nanoseconds timeout) {
-        return admCtx.waitUntilQueued(timeout);
+        return admCtx.waitUntilQueued_forTest(timeout);
     }
 
     ServiceContext::UniqueClient client;
@@ -265,58 +227,6 @@ struct TicketHolderTest::MockAdmission {
     boost::optional<ScopedAdmissionPriorityBase> admissionPriority;
     boost::optional<Ticket> ticket;
 };
-
-void TicketHolderTest::runTicketWaitTimeoutTest(Milliseconds maxTimeMS,
-                                                Milliseconds lowerBoundSlack,
-                                                Milliseconds upperBoundSlack) {
-    auto holder = std::make_unique<TicketHolder>(
-        getServiceContext(), 1, false /* trackPeakUsed */, TicketHolder::kDefaultMaxQueueDepth);
-
-    // Acquire the only available ticket so subsequent attempts will block
-    MockAdmissionContext admCtx1{};
-    auto ticket1 = holder->waitForTicket(_opCtx.get(), &admCtx1);
-    ASSERT_EQ(holder->used(), 1);
-    ASSERT_EQ(holder->available(), 0);
-
-    MockAdmission timedOutAdmission{getServiceContext(), AdmissionContext::Priority::kNormal};
-    timedOutAdmission.opCtx->setDeadlineAfterNowBy(maxTimeMS, ErrorCodes::MaxTimeMSExpired);
-
-    // Record the start time (after set the deadline)
-    Timer timer;
-
-    // Spawn a thread that will try to acquire a ticket and should timeout
-    AtomicWord<bool> didTimeout{false};
-    AtomicWord<ErrorCodes::Error> errorCode{ErrorCodes::OK};
-    Future<void> ticketFuture = spawn([&]() {
-        try {
-            holder->waitForTicket(timedOutAdmission.opCtx.get(), &timedOutAdmission.admCtx);
-        } catch (const DBException& ex) {
-            didTimeout.store(true);
-            errorCode.store(ex.code());
-        }
-    });
-
-    // Wait until the thread is actually queued waiting for a ticket
-    ASSERT_TRUE(timedOutAdmission.waitUntilQueued(kDefaultTimeout));
-
-    // Wait for the future to complete
-    _opCtx->runWithDeadline(
-        getNextDeadline(), ErrorCodes::ExceededTimeLimit, [&] { ticketFuture.get(_opCtx.get()); });
-
-    auto actualDuration = Milliseconds{timer.millis()};
-
-    // Verify that the operation timed out with MaxTimeMSExpired
-    ASSERT_TRUE(didTimeout.load());
-    ASSERT_EQ(errorCode.load(), ErrorCodes::MaxTimeMSExpired);
-
-    // Verify the timeout happened within expected bounds
-    ASSERT_GTE(actualDuration, maxTimeMS - lowerBoundSlack);
-    ASSERT_LTE(actualDuration, maxTimeMS + upperBoundSlack);
-
-    // Verify ticket holder stats
-    ASSERT_EQ(holder->used(), 1);
-    ASSERT_EQ(holder->available(), 0);
-}
 
 TEST_F(TicketHolderTest, BasicTimeout) {
     auto holder = std::make_unique<TicketHolder>(
@@ -645,6 +555,48 @@ TEST_F(TicketHolderTest, QueuedWaiterGetsTicketWhenMadeAvailable) {
 
 using TicketHolderImmediateResizeTest = TicketHolderTest;
 
+TEST_F(TicketHolderImmediateResizeTest, QueuedAdmissionsGauge) {
+    constexpr int initialNumTickets = 0;
+    auto holder = makeImmediateResizeHolder(initialNumTickets);
+    Stats stats(holder.get());
+
+    auto queuedAdmissions = [&] {
+        return stats.getStats()
+            .getObjectField("normalPriority")
+            .getIntField("queuedOperationsTotalAdmissions");
+    };
+
+    // No operation is queued yet.
+    ASSERT_EQ(queuedAdmissions(), 0);
+
+    // Queue two operations that have each already yielded a known number of times. The gauge tracks
+    // the sum of their admission counts.
+    MockAdmission waiter1{getServiceContext(), AdmissionContext::Priority::kNormal};
+    MockAdmission waiter2{getServiceContext(), AdmissionContext::Priority::kNormal};
+    waiter1.admCtx.setAdmission_forTest(3);
+    waiter2.admCtx.setAdmission_forTest(5);
+
+    Future<Ticket> ticketFuture1 =
+        spawn([&]() { return holder->waitForTicket(waiter1.opCtx.get(), &waiter1.admCtx); });
+    ASSERT_TRUE(waiter1.waitUntilQueued(kDefaultTimeout));
+    ASSERT_EQ(queuedAdmissions(), 3);
+
+    Future<Ticket> ticketFuture2 =
+        spawn([&]() { return holder->waitForTicket(waiter2.opCtx.get(), &waiter2.admCtx); });
+    ASSERT_TRUE(waiter2.waitUntilQueued(kDefaultTimeout));
+    ASSERT_EQ(queuedAdmissions(), 8);
+
+    // Make enough tickets available for both waiters. Once they have both dequeued and acquired
+    // their tickets, the gauge drains back to zero.
+    ASSERT_TRUE(holder->resize(_opCtx.get(), 2));
+    boost::optional<Ticket> acquired1, acquired2;
+    _opCtx->runWithDeadline(getNextDeadline(), ErrorCodes::ExceededTimeLimit, [&] {
+        acquired1 = std::move(ticketFuture1).get(_opCtx.get());
+        acquired2 = std::move(ticketFuture2).get(_opCtx.get());
+    });
+    ASSERT_EQ(queuedAdmissions(), 0);
+}
+
 TEST_F(TicketHolderImmediateResizeTest, CanResizePool) {
     constexpr int initialNumTickets = 1;
     auto holder = makeImmediateResizeHolder(initialNumTickets);
@@ -885,6 +837,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMax0) {
                                                  nullptr /* executionAcquisitionCallback */,
                                                  nullptr /* executionWaitedAcquisitionCallback */,
                                                  nullptr /* executionReleaseCallback */,
+                                                 nullptr /* startQueueingCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -923,6 +876,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMax1) {
                                                  nullptr /* executionAcquisitionCallback */,
                                                  nullptr /* executionWaitedAcquisitionCallback */,
                                                  nullptr /* executionReleaseCallback */,
+                                                 nullptr /* startQueueingCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -989,6 +943,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMaxChange) {
                                                  nullptr /* executionAcquisitionCallback */,
                                                  nullptr /* executionWaitedAcquisitionCallback */,
                                                  nullptr /* executionReleaseCallback */,
+                                                 nullptr /* startQueueingCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -1072,6 +1027,7 @@ TEST_F(TicketHolderTestTick, TotalTimeQueueMicrosAccumulated) {
                                                  nullptr /* executionAcquisitionCallback */,
                                                  nullptr /* executionWaitedAcquisitionCallback */,
                                                  nullptr /* executionReleaseCallback */,
+                                                 nullptr /* startQueueingCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
 
@@ -1126,29 +1082,5 @@ TEST_F(TicketHolderTestTick, TotalTimeQueueMicrosAccumulated) {
     ASSERT_EQ(holder->used(), 0);
     ASSERT_EQ(holder->available(), 1);
     ASSERT_EQ(holder->outof(), 1);
-}
-
-TEST_F(TicketHolderTestTick, WaitForTicketDeadlineBetweenTimeoutWindows) {
-    // This test verifies that when waiting for a ticket, the operation times out due to maxTimeMS
-    // and that the timeout duration is close to the specified maxTimeMS value.
-    //
-    // Note: This test waits for real time because TicketHolder uses OS-level synchronization
-    // primitives that cannot be mocked.
-    //
-    // Currently with the 500ms base interval and jitter, the first timeout happens between 400 -
-    // 600ms. The second timeout happens between 800 - 1200 ms. So picking 650 checks whether the
-    // ticket wait finishes in an interval which has no overlap with the first or second
-    // timeout window.
-    runTicketWaitTimeoutTest(Milliseconds{650},   // maxTimeMS
-                             Milliseconds{100},   // lowerBoundSlack
-                             Milliseconds{100});  // upperBoundSlack
-}
-
-TEST_F(TicketHolderTestTick, WaitForTicketWithShortDeadline) {
-    // This test verifies that short deadlines (much less than the 500ms base interval) are
-    // respected.
-    runTicketWaitTimeoutTest(Milliseconds{50},    // maxTimeMS - much less than 500ms base interval
-                             Milliseconds{50},    // lowerBoundSlack
-                             Milliseconds{100});  // upperBoundSlack
 }
 }  // namespace

@@ -10,7 +10,8 @@
  *  # TODO SERVER-93382 investigate excessive resource usage under TSAN.
  *  tsan_incompatible,
  *  # TODO SERVER-112745 investigate how can we fix this test elegantly for config fuzzers
- *  does_not_support_config_fuzzer
+ *  does_not_support_config_fuzzer,
+ *  requires_getmore,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
@@ -39,10 +40,29 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         const updateField = this.metaField + ".tid" + this.tid;
         const oldValue = Random.randInt(numValues);
 
-        jsTestLog("Executing bucket level update on: " + collName + " on field '" + updateField + "'");
-        assert.commandWorked(
-            shardedColl.update({[updateField]: {$gte: oldValue}}, {$inc: {[updateField]: 1}}, {multi: true}),
+        jsTestLog(
+            "Executing bucket level update on: " + collName + " on field '" + updateField + "'",
         );
+        const res = shardedColl.update(
+            {[updateField]: {$gte: oldValue}},
+            {$inc: {[updateField]: 1}},
+            {multi: true},
+        );
+
+        // A multi:true update can run while a chunk migration commits on the same shard. During the
+        // commit the shard bumps its placement version, so an update that has already changed some
+        // documents stops with a placement version mismatch, which the server reports as
+        // QueryPlanKilled. The server does this on purpose: the update is not a retryable write and
+        // not in a transaction, so a retry could apply the change twice.
+        if (res.hasWriteError()) {
+            assert.eq(
+                res.getWriteError().code,
+                ErrorCodes.QueryPlanKilled,
+                () => "Unexpected write error during bucket level update: " + tojson(res),
+            );
+            return;
+        }
+        assert.commandWorked(res);
     };
 
     $config.data.validateCollection = function validate(db, collName) {
@@ -54,7 +74,11 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             db[collName].aggregate(pipeline),
             db[this.nonShardCollName].aggregate(pipeline),
         );
-        assert.eq(diff, {docsWithDifferentContents: [], docsMissingOnFirst: [], docsMissingOnSecond: []});
+        assert.eq(diff, {
+            docsWithDifferentContents: [],
+            docsMissingOnFirst: [],
+            docsMissingOnSecond: [],
+        });
     };
 
     $config.transitions = {

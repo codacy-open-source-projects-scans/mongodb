@@ -26,7 +26,12 @@ describe("$vectorSearch query stats", function () {
 
         // Needed to reset state and prevent failures in burn_in tests which repeatedly run this test and expect the execCount to be 1.
         resetQueryStatsStore(db.getMongo(), "1MB");
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryStatsRateLimit: -1}));
+        assert.commandWorked(
+            db.adminCommand({
+                setParameter: 1,
+                internalQueryStatsSampleRate: 1,
+            }),
+        );
 
         // Query shape is determined by 'filter' and 'index' fields only.
         // 'queryVector', 'limit', and 'numCandidates' values don't affect shape but are tracked
@@ -95,7 +100,17 @@ describe("$vectorSearch query stats", function () {
         assert.commandWorked(
             db.runCommand({
                 aggregate: collName,
-                pipeline: [{$vectorSearch: {index: "index_3", path: "x", queryVector: [], numCandidates: 1, limit: 1}}],
+                pipeline: [
+                    {
+                        $vectorSearch: {
+                            index: "index_3",
+                            path: "x",
+                            queryVector: [],
+                            numCandidates: 1,
+                            limit: 1,
+                        },
+                    },
+                ],
                 cursor: {},
             }),
         );

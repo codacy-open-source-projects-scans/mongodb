@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_union_with.h"
 
@@ -33,6 +7,7 @@
 #include "mongo/db/pipeline/document_source_documents.h"       // for kStageName in validation
 #include "mongo/db/pipeline/document_source_queue.h"           // for kStageName in validation
 #include "mongo/db/pipeline/document_source_union_with_gen.h"  // UnionWithSpec IDL
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/stage_params_to_document_source_registry.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/idl/idl_parser.h"
@@ -54,13 +29,11 @@ REGISTER_LITE_PARSED_DOCUMENT_SOURCE(unionWith,
 
 LiteParsedUnionWith::LiteParsedUnionWith(const BSONElement& spec,
                                          NamespaceString foreignNss,
-                                         boost::optional<LiteParsedPipeline> pipeline,
+                                         boost::optional<OwnedLiteParsedPipeline> pipeline,
                                          std::vector<BSONObj> rawPipeline,
-                                         bool hasForeignDB,
                                          bool isHybridSearch)
     : LiteParsedDocumentSourceNestedPipelines(spec, std::move(foreignNss), std::move(pipeline)),
       _rawPipeline(std::move(rawPipeline)),
-      _hasForeignDB(hasForeignDB),
       _isHybridSearch(isHybridSearch) {}
 
 std::unique_ptr<LiteParsedUnionWith> LiteParsedUnionWith::parse(const NamespaceString& nss,
@@ -73,9 +46,8 @@ std::unique_ptr<LiteParsedUnionWith> LiteParsedUnionWith::parse(const NamespaceS
             spec.type() == BSONType::object || spec.type() == BSONType::string);
 
     NamespaceString unionNss;
-    boost::optional<LiteParsedPipeline> liteParsedPipeline;
+    boost::optional<OwnedLiteParsedPipeline> ownedPipeline;
     std::vector<BSONObj> rawPipeline;
-    bool hasForeignDb = false;
     bool isHybridSearch = false;
     if (spec.type() == BSONType::string) {
         unionNss = NamespaceStringUtil::deserialize(nss.dbName(), spec.valueStringData());
@@ -83,31 +55,18 @@ std::unique_ptr<LiteParsedUnionWith> LiteParsedUnionWith::parse(const NamespaceS
         auto unionWithSpec =
             UnionWithSpec::parse(spec.embeddedObject(), IDLParserContext(kStageName));
         if (unionWithSpec.getColl()) {
-            if (unionWithSpec.getDb()) {
-                // For LiteParsing, we just assume this is not a view definition, and thus do not
-                // assert when 'db' is specified.
-                const auto tenantId = nss.dbName().tenantId();
-                auto dbName = DatabaseNameUtil::deserialize(
-                    tenantId, *unionWithSpec.getDb(), SerializationContext::stateDefault());
-                unionNss = NamespaceStringUtil::deserialize(dbName, *unionWithSpec.getColl());
-                hasForeignDb = true;
-            } else {
-                unionNss = NamespaceStringUtil::deserialize(nss.dbName(), *unionWithSpec.getColl());
-            }
+            unionNss = NamespaceStringUtil::deserialize(nss.dbName(), *unionWithSpec.getColl());
         } else {
             // If no collection specified, it must have $documents as first field in pipeline.
             validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
             unionNss = NamespaceString::makeCollectionlessAggregateNSS(nss.dbName());
         }
 
-        // Recursively lite parse the nested pipeline, if one exists.
+        // Recursively lite-parse the nested pipeline, threading the IFR context: a hybrid stage
+        // here LP-desugars and the view machinery resolves the inner $unionWith shard-safely,
+        // and extension stages need the context for their view-policy checks.
         if (auto pipeline = unionWithSpec.getPipeline()) {
-            // The pipeline returned to us by the IDL is owned by us, but since it is a local
-            // variable, it will not be saved after parse() returns. We call makeOwned() so that the
-            // LiteParsedPipeline will own the BSON after this point.
-            auto optsCopy = options;
-            optsCopy.makeSubpipelineOwned = true;
-            liteParsedPipeline = LiteParsedPipeline(unionNss, *pipeline, false, optsCopy);
+            ownedPipeline = OwnedLiteParsedPipeline(unionNss, *pipeline, options);
             rawPipeline = *pipeline;
         }
 
@@ -116,9 +75,8 @@ std::unique_ptr<LiteParsedUnionWith> LiteParsedUnionWith::parse(const NamespaceS
 
     return std::make_unique<LiteParsedUnionWith>(spec,
                                                  std::move(unionNss),
-                                                 std::move(liteParsedPipeline),
-                                                 rawPipeline,
-                                                 hasForeignDb,
+                                                 std::move(ownedPipeline),
+                                                 std::move(rawPipeline),
                                                  isHybridSearch);
 }
 
@@ -136,7 +94,7 @@ PrivilegeVector LiteParsedUnionWith::requiredPrivileges(bool isMongos,
     // If no pipeline is specified, then assume that we're reading directly from the collection.
     // Otherwise check whether the pipeline starts with an "initial source" indicating that we don't
     // require the "find" privilege.
-    if (_pipelines.empty() || !_pipelines[0].startsWithInitialSource()) {
+    if (_pipelines.empty() || !_pipelines[0]->startsWithInitialSource()) {
         Privilege::addPrivilegeToPrivilegeVector(
             &requiredPrivileges,
             Privilege(ResourcePattern::forExactNamespace(*_foreignNss), ActionType::find));
@@ -144,7 +102,7 @@ PrivilegeVector LiteParsedUnionWith::requiredPrivileges(bool isMongos,
 
     // Add the sub-pipeline privileges, if one was specified.
     if (!_pipelines.empty()) {
-        const LiteParsedPipeline& pipeline = _pipelines[0];
+        const LiteParsedPipeline& pipeline = *_pipelines[0];
         Privilege::addPrivilegesToPrivilegeVector(
             &requiredPrivileges, pipeline.requiredPrivileges(isMongos, bypassDocumentValidation));
     }
@@ -152,24 +110,24 @@ PrivilegeVector LiteParsedUnionWith::requiredPrivileges(bool isMongos,
 }
 
 std::unique_ptr<StageParams> LiteParsedUnionWith::getStageParams() const {
-    boost::optional<LiteParsedPipeline> lpp;
+    boost::optional<StageParamsPipeline> subParams;
     if (!_pipelines.empty()) {
-        lpp = _pipelines[0].clone();
+        subParams = _pipelines[0]->getStageParams();
     }
     return std::make_unique<UnionWithStageParams>(*_foreignNss,
                                                   _rawPipeline,
-                                                  _hasForeignDB,
                                                   _isHybridSearch,
-                                                  getOriginalBson(),
-                                                  std::move(lpp));
+                                                  getOriginalBson().wrap(),
+                                                  std::move(subParams),
+                                                  getResolvedBackingNss());
 }
 
 bool LiteParsedUnionWith::hasExtensionVectorSearchStage() const {
-    return !_pipelines.empty() && _pipelines[0].hasExtensionVectorSearchStage();
+    return !_pipelines.empty() && _pipelines[0]->hasExtensionVectorSearchStage();
 }
 
 bool LiteParsedUnionWith::hasExtensionSearchStage() const {
-    return !_pipelines.empty() && _pipelines[0].hasExtensionSearchStage();
+    return !_pipelines.empty() && _pipelines[0]->hasExtensionSearchStage();
 }
 
 void LiteParsedUnionWith::validateUnionWithCollectionlessPipeline(

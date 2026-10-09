@@ -1,71 +1,40 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/client/read_preference.h"
-#include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/basic_types_gen.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/global_catalog/metadata_consistency_validation/check_metadata_consistency_gen.h"
 #include "mongo/db/global_catalog/metadata_consistency_validation/metadata_consistency_types_gen.h"
 #include "mongo/db/global_catalog/metadata_consistency_validation/metadata_consistency_util.h"
-#include "mongo/db/global_catalog/sharding_catalog_client.h"
-#include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
-#include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
-#include "mongo/db/shard_role/shard_catalog/collection.h"
-#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/s/query/exec/async_results_merger_params_gen.h"
+#include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
+#include "mongo/util/testing_proctor.h"
 
-#include <algorithm>
-#include <iterator>
 #include <memory>
 #include <string>
 #include <utility>
@@ -113,244 +82,250 @@ public:
             opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
             const auto nss = ns();
-            const auto shardId = ShardingState::get(opCtx)->shardId();
             const auto& primaryShardId = request().getPrimaryShardId();
-            const auto commandLevel = metadata_consistency_util::getCommandLevel(nss);
-
-            tassert(1011703,
-                    str::stream()
-                        << "Unexpected parameter during the internal execution of "
-                           "checkMetadataConsistency command. The shard server was expecting to "
-                           "receive a database or collection level parameter, but received "
-                        << idl::serialize(commandLevel) << " with namespace "
-                        << nss.toStringForErrorMsg(),
-                    commandLevel == MetadataConsistencyCommandLevelEnum::kCollectionLevel ||
-                        commandLevel == MetadataConsistencyCommandLevelEnum::kDatabaseLevel);
-
-            // Get the list of collections from configsvr sorted by namespace
-            const auto configsvrCollections =
-                getCollectionsListFromConfigServer(opCtx, nss, commandLevel);
-
             const auto checkRangeDeletionIndexes =
                 request().getCommonFields().getCheckRangeDeletionIndexes();
-            uassert(ErrorCodes::InvalidOptions,
-                    "Range deletion missing shard key index inconsistency check is not supported "
-                    "with the current FCV. Upgrade to the highest FCV for performing the check.",
-                    !checkRangeDeletionIndexes ||
-                        feature_flags::gCheckRangeDeletionsWithMissingShardKeyIndex.isEnabled(
-                            VersionContext::getDecoration(opCtx),
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+            const auto checkIndexes = request().getCommonFields().getCheckIndexes();
 
-            const auto optionalCheckIndexes = request().getCommonFields().getCheckIndexes();
-            auto inconsistencies = checkCollectionMetadataConsistency(opCtx,
-                                                                      nss,
-                                                                      commandLevel,
-                                                                      shardId,
-                                                                      primaryShardId,
-                                                                      configsvrCollections,
-                                                                      checkRangeDeletionIndexes,
-                                                                      optionalCheckIndexes);
+            _invokeCommandOnSecondaries(opCtx, primaryShardId);
 
-            // If this is the primary shard of the db coordinate index check across shards
-            if (shardId == primaryShardId) {
-                if (optionalCheckIndexes) {
-                    auto indexInconsistencies =
-                        metadata_consistency_util::checkIndexesConsistencyAcrossShards(
-                            opCtx, configsvrCollections);
-                    inconsistencies.insert(inconsistencies.end(),
-                                           std::make_move_iterator(indexInconsistencies.begin()),
-                                           std::make_move_iterator(indexInconsistencies.end()));
-                }
+            auto [inconsistencies, _] =
+                metadata_consistency_util::runCheckMetadataConsistencyOnParticipant(
+                    opCtx,
+                    nss,
+                    primaryShardId,
+                    checkRangeDeletionIndexes,
+                    checkIndexes,
+                    request().getPerformStrictChunkChecksIfBelowThreshold(),
+                    metadata_consistency_util::RSNodeMode::kPrimary);
 
-                if (feature_flags::gShardAuthoritativeDbMetadataCRUD.isEnabled(
-                        VersionContext::getDecoration(opCtx),
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-                    !nss.isConfigDB()) {
-                    const auto dbInGlobalCatalog =
-                        getDatabaseMetadataFromConfigServer(opCtx, nss.dbName());
-
-                    auto dbMetadataInconsistencies =
-                        metadata_consistency_util::checkDatabaseMetadataConsistency(
-                            opCtx, dbInGlobalCatalog);
-                    inconsistencies.insert(
-                        inconsistencies.end(),
-                        std::make_move_iterator(dbMetadataInconsistencies.begin()),
-                        std::make_move_iterator(dbMetadataInconsistencies.end()));
-                }
-
-                auto collMetadataInconsistencies =
-                    metadata_consistency_util::checkCollectionMetadataConsistencyAcrossShards(
-                        opCtx, configsvrCollections);
-                inconsistencies.insert(inconsistencies.end(),
-                                       std::make_move_iterator(collMetadataInconsistencies.begin()),
-                                       std::make_move_iterator(collMetadataInconsistencies.end()));
-            }
-
-            auto exec = metadata_consistency_util::makeQueuedPlanExecutor(
-                opCtx, std::move(inconsistencies), nss);
-
-            ClientCursorParams cursorParams{
-                std::move(exec),
-                nss,
-                AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName(),
-                APIParameters::get(opCtx),
-                opCtx->getWriteConcern(),
-                repl::ReadConcernArgs::get(opCtx),
-                ReadPreferenceSetting::get(opCtx),
-                request().toBSON(),
-                {Privilege(ResourcePattern::forClusterResource(nss.tenantId()),
-                           ActionType::internal)}};
-
-            const auto batchSize = [&]() -> long long {
-                const auto& cursorOpts = request().getCursor();
-                if (cursorOpts && cursorOpts->getBatchSize()) {
-                    return *cursorOpts->getBatchSize();
-                } else {
-                    return query_request_helper::getDefaultBatchSize();
-                }
-            }();
+            // Build a streaming executor that merges the secondaries' cursors (or null if there are
+            // none). The locally-computed inconsistencies are prepended by
+            // 'createInitialCursorReplyMongod' so they are emitted before the streamed results.
+            auto secondaryCursorsExec = _mergeSecondaryCursors(opCtx);
 
             return metadata_consistency_util::createInitialCursorReplyMongod(
-                opCtx, std::move(cursorParams), batchSize);
+                opCtx,
+                nss,
+                std::move(inconsistencies),
+                request().getCursor(),
+                request().toBSON(),
+                std::move(secondaryCursorsExec));
         }
 
     private:
-        std::vector<CollectionType> getCollectionsListFromConfigServer(
-            OperationContext* opCtx,
-            const NamespaceString& nss,
-            const MetadataConsistencyCommandLevelEnum& commandLevel) {
-            switch (commandLevel) {
-                case MetadataConsistencyCommandLevelEnum::kDatabaseLevel: {
-                    return Grid::get(opCtx)->catalogClient()->getCollections(
-                        opCtx,
-                        nss.dbName(),
-                        repl::ReadConcernLevel::kMajorityReadConcern,
-                        BSON(CollectionType::kNssFieldName << 1) /*sort*/);
+        void _invokeCommandOnSecondaries(OperationContext* opCtx,
+                                         const mongo::ShardId& primaryShardId) {
+            if (!TestingProctor::instance().isEnabled() || !getTestCommandsEnabled()) {
+                return;
+            }
+
+            const auto secondaryCheckMode = request().getCommonFields().get_checkSecondariesMode();
+            // TODO (SERVER-98118): this should be a uassert or even a tassert.
+            if (!secondaryCheckMode) {
+                LOGV2_WARNING(
+                    13165400,
+                    "Called _shardsvrCheckMetadataConsistencyParticipant with empty "
+                    "secondaryCheckMode, skipping checkMetadataConsistency on secondary nodes");
+                return;
+            }
+
+            if (secondaryCheckMode ==
+                CheckMetadataConsistencySecondaryModeEnum::kNoSecondaryCheck) {
+                return;
+            }
+
+            const auto& nss = ns();
+            const auto* const replCoord = repl::ReplicationCoordinator::get(opCtx);
+            const auto replSetConfig = replCoord->getConfig();
+            const auto& members = replSetConfig.members();
+
+            ShardsvrCheckMetadataConsistencySecondaryParticipant command{nss};
+            command.setCommonFields(request().getCommonFields());
+            command.setPrimaryShardId(request().getPrimaryShardId());
+            command.setCursor(request().getCursor());
+
+            // Secondaries may be lagged, so we need to make sure they see a consistent metadata
+            // view. With kCheckAtPrimaryTimestamp, we achieve this by sending a readConcern with
+            // afterClusterTime set at majority commit time. With kCheckAtSecondaryTimestamp, we
+            // don't set any readConcern. That signals the secondary to perform
+            // checkMetadataConsistency assuming it may be lagged.
+            if (*secondaryCheckMode ==
+                CheckMetadataConsistencySecondaryModeEnum::kCheckAtPrimaryTimestamp) {
+                const auto snapshotTimestamp = replCoord->getCurrentCommittedSnapshotOpTime();
+                if (snapshotTimestamp.isNull()) {
+                    LOGV2_WARNING(13017701,
+                                  "The majority committed timestamp is null. Skipping calling "
+                                  "checkMetadataConsistency on secondary nodes");
+                    return;
                 }
-                case MetadataConsistencyCommandLevelEnum::kCollectionLevel: {
-                    try {
-                        auto collectionType =
-                            Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
-                        return {std::move(collectionType)};
-                    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                        // If we don't find the nss, it means that the collection is not sharded.
-                        return {};
-                    }
+                repl::ReadConcernArgs readConcern{
+                    LogicalTime{snapshotTimestamp.getTimestamp()} /* afterClusterTime */,
+                    repl::ReadConcernLevel::kMajorityReadConcern};
+                command.setReadConcern(std::move(readConcern));
+                command.setReadPreference(ReadPreferenceSetting{ReadPreference::SecondaryOnly});
+            }
+
+            _executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+            const auto commandBSON = command.toBSON();
+
+            for (const auto& member : members) {
+                if (member.getHostAndPort() == replCoord->getMyHostAndPort()) {
+                    continue;
                 }
-                default:
-                    tasserted(
-                        1011704,
-                        str::stream()
-                            << "Unexpected parameter during the internal execution of "
-                               "checkMetadataConsistency command. The shard server was expecting "
-                               "to receive a database or collection level parameter, but received "
-                            << idl::serialize(commandLevel) << " with namespace "
-                            << nss.toStringForErrorMsg());
+                if (member.isArbiter()) {
+                    continue;
+                }
+
+                _secondaryJobs.emplace_back();
+                auto& [hostAndPort, handle, response] = _secondaryJobs.back();
+                response = std::make_shared<executor::RemoteCommandResponse>();
+
+                executor::RemoteCommandRequest request{
+                    member.getHostAndPort(), nss.dbName(), commandBSON, opCtx};
+
+                auto statusWithHandle = _executor->scheduleRemoteCommand(
+                    request,
+                    [response](const executor::TaskExecutor::RemoteCommandCallbackArgs& cbk) {
+                        *response = cbk.response;
+                    });
+
+                if (!statusWithHandle.isOK()) {
+                    // The executor is shutting down. Leave this entry's handle invalid so the
+                    // caller skips it; no callback was scheduled, so 'response' stays unset.
+                    LOGV2_WARNING(
+                        12922002,
+                        "Failed to schedule command on member (the node is likely shutting down)",
+                        "hostAndPort"_attr = member.getHostAndPort(),
+                        "error"_attr = statusWithHandle.getStatus());
+                    _secondaryJobs.pop_back();
+                    continue;
+                }
+
+                hostAndPort = member.getHostAndPort();
+                handle = statusWithHandle.getValue();
             }
         }
 
-        DatabaseType getDatabaseMetadataFromConfigServer(OperationContext* opCtx,
-                                                         const DatabaseName& dbName) {
-            return Grid::get(opCtx)->catalogClient()->getDatabase(
-                opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern);
-        }
+        // Waits for the commands scheduled on the secondaries, collects their cursors and returns a
+        // streaming plan executor that merges them. Returns null if there are no secondary cursors
+        // to merge.
+        std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _mergeSecondaryCursors(
+            OperationContext* opCtx) {
+            if (_secondaryJobs.empty()) {
+                return nullptr;
+            }
 
-        std::vector<MetadataInconsistencyItem> checkCollectionMetadataConsistency(
-            OperationContext* opCtx,
-            const NamespaceString& nss,
-            const MetadataConsistencyCommandLevelEnum& commandLevel,
-            const ShardId& shardId,
-            const ShardId& primaryShardId,
-            const std::vector<mongo::CollectionType>& shardingCatalogCollections,
-            const bool checkRangeDeletionIndexes,
-            const bool optionalCheckIndexes) {
-            std::vector<CollectionPtr> localCatalogCollections;
-            auto collCatalogSnapshot = [&] {
-                switch (commandLevel) {
-                    case MetadataConsistencyCommandLevelEnum::kDatabaseLevel: {
-                        auto collCatalogSnapshot = [&] {
-                            // Lock db in mode IS while taking the collection catalog snapshot to
-                            // ensure that we serialize with non-atomic collection and index
-                            // creation performed by the MigrationDestinationManager. Without this
-                            // lock we could potentially acquire a snapshot in which a collection
-                            // have been already created by the MigrationDestinationManager but the
-                            // relative shardkey index is still missing.
-                            AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IS);
-                            return CollectionCatalog::get(opCtx);
-                        }();
+            invariant(_executor);
 
-                        for (auto&& coll : collCatalogSnapshot->range(nss.dbName())) {
-                            if (!coll) {
-                                continue;
-                            }
-                            // The collection catalog snapshot will be in scope until the end of
-                            // the command execution, so we can safely use CollectionPtr_UNSAFE as
-                            // the instance pointed by Collection* will stay in scope as a
-                            // consequence.
-                            localCatalogCollections.emplace_back(
-                                CollectionPtr::CollectionPtr_UNSAFE(coll));
-                        }
-                        std::sort(localCatalogCollections.begin(),
-                                  localCatalogCollections.end(),
-                                  [](const CollectionPtr& prev, const CollectionPtr& next) {
-                                      return prev->ns() < next->ns();
-                                  });
+            const auto& nss = ns();
+            const auto& shardId = ShardingState::get(opCtx)->shardId();
 
-                        return collCatalogSnapshot;
-                    }
-                    case MetadataConsistencyCommandLevelEnum::kCollectionLevel: {
-                        auto collCatalogSnapshot = [&] {
-                            // Lock collection in mode IS while taking the collection catalog
-                            // snapshot to ensure that we serialize with non-atomic collection and
-                            // index creation performed by the MigrationDestinationManager. Without
-                            // this lock we could potentially acquire a snapshot in which a
-                            // collection have been already created by the
-                            // MigrationDestinationManager but the relative shardkey index is still
-                            // missing.
-                            AutoGetCollection coll(
-                                opCtx,
-                                nss,
-                                MODE_IS,
-                                auto_get_collection::Options{}.viewMode(
-                                    auto_get_collection::ViewMode::kViewsPermitted));
-                            return CollectionCatalog::get(opCtx);
-                        }();
+            std::vector<RemoteCursor> remoteCursors;
+            remoteCursors.reserve(_secondaryJobs.size());
 
-                        // The collection catalog snapshot will be in scope until the end of
-                        // the command execution, so we can safely use CollectionPtr_UNSAFE as
-                        // the instance pointed by Collection* will stay in scope as a
-                        // consequence.
-                        if (auto coll =
-                                collCatalogSnapshot->lookupCollectionByNamespace(opCtx, nss)) {
-                            localCatalogCollections.emplace_back(
-                                CollectionPtr::CollectionPtr_UNSAFE(coll));
-                        }
-
-                        return collCatalogSnapshot;
-                    }
-                    default:
-                        tasserted(1011705,
-                                  str::stream()
-                                      << "Unexpected parameter during the internal execution of "
-                                         "checkMetadataConsistency command. The shard server was "
-                                         "expecting "
-                                         "to receive a database or collection level parameter, but "
-                                         "received "
-                                      << idl::serialize(commandLevel) << " with namespace "
-                                      << nss.toStringForErrorMsg());
+            for (const auto& [hostAndPort, handle, response] : _secondaryJobs) {
+                _executor->wait(handle, opCtx);
+                // There's no replica set topology stability guarantees, i.e. this is a best effort.
+                // If we receive command invokation errors (for example, network errors) just log it
+                // and continue.
+                if (!response->isOK()) {
+                    LOGV2_WARNING(
+                        12922001,
+                        "Error from checkMetadataConsistency command invocation on secondary node",
+                        "hostAndPort"_attr = hostAndPort,
+                        "error"_attr = response->status);
+                    continue;
                 }
-            }();
 
-            // Check consistency between local metadata and configsvr metadata
-            return metadata_consistency_util::checkCollectionMetadataConsistency(
-                opCtx,
-                shardId,
-                primaryShardId,
-                shardingCatalogCollections,
-                collCatalogSnapshot,
-                localCatalogCollections,
-                checkRangeDeletionIndexes,
-                optionalCheckIndexes);
+                auto cursorWithStatus = CursorResponse::parseFromBSON(response->data);
+
+                if (cursorWithStatus.getStatus().code() == ErrorCodes::NotYetInitialized ||
+                    cursorWithStatus.getStatus().code() ==
+                        ErrorCodes::ShardingStateNotInitialized) {
+                    LOGV2_WARNING(12922003,
+                                  "Secondary node hasn't completed initialization",
+                                  "hostAndPort"_attr = hostAndPort,
+                                  "error"_attr = cursorWithStatus.getStatus());
+                    continue;
+                }
+
+                if (cursorWithStatus.getStatus().isA<ErrorCategory::SnapshotError>()) {
+                    // The secondary or config server can't serve the snapshot read.
+                    LOGV2_WARNING(13017700,
+                                  "Secondary node can't read at the requested timestamp",
+                                  "hostAndPort"_attr = hostAndPort,
+                                  "error"_attr = cursorWithStatus.getStatus());
+                    continue;
+                }
+
+                if (cursorWithStatus.getStatus().code() == ErrorCodes::CallbackCanceled) {
+                    // Thrown if interrupted while waiting for readConcern.
+                    LOGV2_WARNING(12922308,
+                                  "Secondary node was interrupted",
+                                  "hostAndPort"_attr = hostAndPort,
+                                  "error"_attr = cursorWithStatus.getStatus());
+                    continue;
+                }
+
+                // TODO SERVER-98118 Remove this. Secondary replicas may be running a version that
+                // does not support the _shardsvrCheckMetadataConsistencySecondaryParticipant
+                // command yet.
+                if (cursorWithStatus.getStatus().code() == ErrorCodes::CommandNotFound) {
+                    LOGV2_DEBUG(13310700,
+                                2,
+                                "Secondary does not support the "
+                                "_shardsvrCheckMetadataConsistencySecondaryParticipant command",
+                                "hostAndPort"_attr = hostAndPort,
+                                "error"_attr = cursorWithStatus.getStatus());
+                    continue;
+                }
+
+                // In multiversion (or just when upgrading a patch version) the secondary could
+                // answer with InvalidOptions because it doesn't expect the readConcern option. Just
+                // tolerate it.
+                // TODO (SERVER-135565): this check is only needed when interacting with server
+                // binaries that do not support readConcern. After 10.0 has branched out, this
+                // situation is no longer possible.
+                if (cursorWithStatus.getStatus().code() == ErrorCodes::InvalidOptions &&
+                    cursorWithStatus.getStatus().toString().find(
+                        "Command _shardsvrCheckMetadataConsistencySecondaryParticipant does not "
+                        "support") != std::string::npos) {
+                    LOGV2_DEBUG(13556300,
+                                2,
+                                "Secondary does not accept readConcern in the "
+                                "_shardsvrCheckMetadataConsistencySecondaryParticipant command",
+                                "hostAndPort"_attr = hostAndPort,
+                                "error"_attr = cursorWithStatus.getStatus());
+                    continue;
+                }
+
+                auto cursor = uassertStatusOK(std::move(cursorWithStatus));
+
+                // All other members belong to this same shard, so they share its shardId.
+                remoteCursors.emplace_back(shardId.toString(), response->target, std::move(cursor));
+            }
+
+            if (remoteCursors.empty()) {
+                return nullptr;
+            }
+
+            ResolvedNamespaceMap resolvedNamespaces;
+            resolvedNamespaces[nss] = {nss, {}};
+
+            auto expCtx = ExpressionContextBuilder{}
+                              .opCtx(opCtx)
+                              .mongoProcessInterface(MongoProcessInterface::create(opCtx))
+                              .ns(nss)
+                              .resolvedNamespace(std::move(resolvedNamespaces))
+                              .build();
+
+            // 'DocumentSourceMergeCursors' is the only source: a pipeline that streams the
+            // secondaries' cursors as they are consumed.
+            AsyncResultsMergerParams armParams{std::move(remoteCursors), nss};
+            auto mergeStage = DocumentSourceMergeCursors::create(expCtx, std::move(armParams));
+            auto pipeline = Pipeline::create({std::move(mergeStage)}, expCtx);
+            return plan_executor_factory::make(expCtx, std::move(pipeline));
         }
 
         NamespaceString ns() const override {
@@ -369,6 +344,12 @@ public:
                             ResourcePattern::forClusterResource(request().getDbName().tenantId()),
                             ActionType::internal));
         }
+
+        std::shared_ptr<executor::TaskExecutor> _executor;
+        std::vector<std::tuple<HostAndPort,
+                               executor::TaskExecutor::CallbackHandle,
+                               std::shared_ptr<executor::RemoteCommandResponse>>>
+            _secondaryJobs;
     };
 };
 MONGO_REGISTER_COMMAND(ShardsvrCheckMetadataConsistencyParticipantCommand).forShard();

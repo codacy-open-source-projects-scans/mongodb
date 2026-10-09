@@ -15,6 +15,7 @@ import {
     checkPlatformCompatibleWithExtensions,
     generateExtensionConfigWithOptions,
     deleteExtensionConfigs,
+    getExtensionConfDir,
 } from "jstests/noPassthrough/libs/extension_helpers.js";
 
 checkPlatformCompatibleWithExtensions();
@@ -30,6 +31,7 @@ mongotMock.start();
 const conn = MongoRunner.runMongod({
     setParameter: {mongotHost: mongotMock.getConnection().host},
     loadExtensions: [extensionName],
+    extensionsConfigPath: getExtensionConfDir(),
 });
 const adminDb = conn.getDB("admin");
 const testDB = conn.getDB(dbName);
@@ -45,14 +47,18 @@ coll.insert([
 
 function testExtensionVectorSearch() {
     // Flag enabled; extension $vectorSearch expects an empty spec and acts as a no-op.
-    assert.commandWorked(adminDb.runCommand({setParameter: 1, featureFlagVectorSearchExtension: true}));
+    assert.commandWorked(
+        adminDb.runCommand({setParameter: 1, featureFlagVectorSearchExtension: true}),
+    );
     const results = coll.aggregate([{$vectorSearch: {}}]).toArray();
     assert.eq(results.length, 3, "Extension should return all docs: " + tojson(results));
 }
 
 function testLegacyVectorSearch() {
     // Flag disabled; legacy $vectorSearch calls on mongotmock.
-    assert.commandWorked(adminDb.runCommand({setParameter: 1, featureFlagVectorSearchExtension: false}));
+    assert.commandWorked(
+        adminDb.runCommand({setParameter: 1, featureFlagVectorSearchExtension: false}),
+    );
     const queryVector = [1.0, 2.0, 3.0];
     const path = "x";
     const limit = 5;
@@ -75,17 +81,44 @@ function testLegacyVectorSearch() {
                     dbName,
                     collectionUUID,
                 }),
-                response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), dbName + "." + collName, 1),
+                response: mongotResponseForBatch(
+                    mongotResponseBatch,
+                    NumberLong(0),
+                    dbName + "." + collName,
+                    1,
+                ),
             },
         ],
         NumberLong(123),
     );
 
     const results = coll.aggregate([{$vectorSearch: {queryVector, path, limit}}]).toArray();
-    assert.eq(results, expectedDocs, "Legacy $vectorSearch should return mongot results: " + tojson(results));
+    assert.eq(
+        results,
+        expectedDocs,
+        "Legacy $vectorSearch should return mongot results: " + tojson(results),
+    );
+}
+
+function assertFlagValue(expected) {
+    assert.eq(
+        assert.commandWorked(
+            adminDb.runCommand({getParameter: 1, featureFlagVectorSearchExtension: 1}),
+        ).featureFlagVectorSearchExtension.value,
+        expected,
+        `featureFlagVectorSearchExtension should be ${expected}`,
+    );
 }
 
 try {
+    // The flag now ships enabled by default; verify that, then reset to the disabled state and
+    // confirm it took effect so the cases below run from a known starting point.
+    assertFlagValue(true);
+    assert.commandWorked(
+        adminDb.runCommand({setParameter: 1, featureFlagVectorSearchExtension: false}),
+    );
+    assertFlagValue(false);
+
     testExtensionVectorSearch();
     testLegacyVectorSearch();
 } finally {

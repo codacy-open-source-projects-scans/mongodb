@@ -2,6 +2,7 @@
  * Test validating the expected behavior of resetPlacementHistory.
  * @tags: [
  *   featureFlagChangeStreamPreciseShardTargeting,
+ *   requires_fcv_90,
  *  ]
  */
 
@@ -24,7 +25,11 @@ const initialPlacementHistoryResetTimestamp = (() => {
             .toArray();
         return accumulator.concat(matchingEvents);
     }, []);
-    assert.eq(retrievedEvents.length, 1, "Expected to find exactly one 'namespacePlacementChanged' across the cluster");
+    assert.eq(
+        retrievedEvents.length,
+        1,
+        "Expected to find exactly one 'namespacePlacementChanged' across the cluster",
+    );
     return retrievedEvents[0].o2.committedAt;
 })();
 
@@ -58,7 +63,9 @@ function launchAndPauseResetPlacementHistory() {
 }
 
 {
-    jsTest.log.info("resetPlacementHistory produces the expected oplog entries across the shards of the cluster");
+    jsTest.log.info(
+        "resetPlacementHistory produces the expected oplog entries across the shards of the cluster",
+    );
 
     const initializationMetadataBeforeReset = st.config.placementHistory
         .find({nss: initializationMetadataNssId})
@@ -67,8 +74,10 @@ function launchAndPauseResetPlacementHistory() {
 
     assert.eq(initializationMetadataBeforeReset.length, 2);
     assert(
-        timestampCmp(initializationMetadataBeforeReset[0].timestamp, initializationMetadataBeforeReset[1].timestamp) !==
-            0,
+        timestampCmp(
+            initializationMetadataBeforeReset[0].timestamp,
+            initializationMetadataBeforeReset[1].timestamp,
+        ) !== 0,
     );
     const initializationTimeBeforeReset = initializationMetadataBeforeReset[1].timestamp;
 
@@ -81,8 +90,10 @@ function launchAndPauseResetPlacementHistory() {
 
     assert.eq(initializationMetadataAfterReset.length, 2);
     assert(
-        timestampCmp(initializationMetadataAfterReset[0].timestamp, initializationMetadataAfterReset[1].timestamp) !==
-            0,
+        timestampCmp(
+            initializationMetadataAfterReset[0].timestamp,
+            initializationMetadataAfterReset[1].timestamp,
+        ) !== 0,
     );
     const initializationTimeAfterReset = initializationMetadataAfterReset[1].timestamp;
 
@@ -106,7 +117,9 @@ function launchAndPauseResetPlacementHistory() {
 }
 
 {
-    jsTest.log.info("resetPlacementHistory produces the expected oplog entries across the shards of the cluster");
+    jsTest.log.info(
+        "resetPlacementHistory produces the expected oplog entries across the shards of the cluster",
+    );
 
     const initializationMetadataBeforeReset = st.config.placementHistory
         .find({nss: initializationMetadataNssId})
@@ -115,8 +128,10 @@ function launchAndPauseResetPlacementHistory() {
 
     assert.eq(initializationMetadataBeforeReset.length, 2);
     assert(
-        timestampCmp(initializationMetadataBeforeReset[0].timestamp, initializationMetadataBeforeReset[1].timestamp) !==
-            0,
+        timestampCmp(
+            initializationMetadataBeforeReset[0].timestamp,
+            initializationMetadataBeforeReset[1].timestamp,
+        ) !== 0,
     );
     const initializationTimeBeforeReset = initializationMetadataBeforeReset[1].timestamp;
 
@@ -129,8 +144,10 @@ function launchAndPauseResetPlacementHistory() {
 
     assert.eq(initializationMetadataAfterReset.length, 2);
     assert(
-        timestampCmp(initializationMetadataAfterReset[0].timestamp, initializationMetadataAfterReset[1].timestamp) !==
-            0,
+        timestampCmp(
+            initializationMetadataAfterReset[0].timestamp,
+            initializationMetadataAfterReset[1].timestamp,
+        ) !== 0,
     );
     const initializationTimeAfterReset = initializationMetadataAfterReset[1].timestamp;
 
@@ -165,8 +182,12 @@ function launchAndPauseResetPlacementHistory() {
     const collShardedThenDropped = "collCreatedThenDropped";
     const nssShardedThenDropped = `${dbName}.${collShardedThenDropped}`;
     // Setup: shard 2 collections (expected to be captured by the snapshot read).
-    assert.commandWorked(st.s.adminCommand({shardCollection: nssShardedBeforeReset, key: {_id: 1}}));
-    assert.commandWorked(st.s.adminCommand({shardCollection: nssShardedThenDropped, key: {_id: 1}}));
+    assert.commandWorked(
+        st.s.adminCommand({shardCollection: nssShardedBeforeReset, key: {_id: 1}}),
+    );
+    assert.commandWorked(
+        st.s.adminCommand({shardCollection: nssShardedThenDropped, key: {_id: 1}}),
+    );
 
     let resetPlacementHistoryRequest = launchAndPauseResetPlacementHistory();
 
@@ -178,7 +199,11 @@ function launchAndPauseResetPlacementHistory() {
 
     // Before resuming the execution, tag each the existing config.placementHistory documents for later inspection.
     assert.commandWorked(
-        st.config.placementHistory.updateMany({}, {$set: {createdAfterReset: true}}, {writeConcern: {w: "majority"}}),
+        st.config.placementHistory.updateMany(
+            {},
+            {$set: {createdAfterReset: true}},
+            {writeConcern: {w: "majority"}},
+        ),
     );
 
     resetPlacementHistoryRequest.resumeAndJoin();
@@ -266,7 +291,10 @@ function launchAndPauseResetPlacementHistory() {
     const snapshotHistoryWindowSecs = 10;
     const testMarginSecs = 1;
     assert.commandWorked(
-        configPrimary.adminCommand({setParameter: 1, minSnapshotHistoryWindowInSeconds: snapshotHistoryWindowSecs}),
+        configPrimary.adminCommand({
+            setParameter: 1,
+            minSnapshotHistoryWindowInSeconds: snapshotHistoryWindowSecs,
+        }),
     );
 
     let resetPlacementHistoryRequest = launchAndPauseResetPlacementHistory();

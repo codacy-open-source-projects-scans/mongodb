@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -44,6 +17,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -59,13 +33,14 @@ struct _timelib_tzinfo;
 /**
  * TODO SERVER-114888: Remove external dependencies on this module.
  */
-namespace MONGO_MOD_NEEDS_REPLACEMENT mongo {
+namespace [[MONGO_MOD_NEEDS_REPLACEMENT]] mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Default format values for date-times, e.g. for $dateToString aggregations.
  */
-static constexpr StringData kIsoFormatStringZ = "%Y-%m-%dT%H:%M:%S.%LZ"_sd;
-static constexpr StringData kIsoFormatStringNonZ = "%Y-%m-%dT%H:%M:%S.%L"_sd;
+static constexpr std::string_view kIsoFormatStringZ = "%Y-%m-%dT%H:%M:%S.%LZ"sv;
+static constexpr std::string_view kIsoFormatStringNonZ = "%Y-%m-%dT%H:%M:%S.%L"sv;
 
 /**
  * A set of standard measures of time used to express a length of time interval.
@@ -263,13 +238,13 @@ public:
      * a valid format string for 'format', i.e. one that has already been passed to
      * validateFormat(). May return a Status indicating that the date value is an unprintable range.
      */
-    StatusWith<std::string> formatDate(StringData format, Date_t) const;
+    StatusWith<std::string> formatDate(std::string_view format, Date_t) const;
 
     /**
      * Like formatDate, except outputs to an output stream like a std::ostream or a StringBuilder.
      */
     template <typename OutputStream>
-    auto outputDateWithFormat(OutputStream& os, StringData format, Date_t date) const {
+    auto outputDateWithFormat(OutputStream& os, std::string_view format, Date_t date) const {
         auto parts = dateParts(date);
         for (auto&& it = format.begin(); it != format.end(); ++it) {
             if (*it != '%') {
@@ -380,10 +355,10 @@ public:
      * Verifies that any '%' is followed by a valid format character, and that 'format' string
      * ends with an even number of '%' symbols.
      */
-    static bool isValidToStringFormat(StringData format);
-    static bool isValidFromStringFormat(StringData format);
-    static void validateToStringFormat(StringData format);
-    static void validateFromStringFormat(StringData format);
+    static bool isValidToStringFormat(std::string_view format);
+    static bool isValidFromStringFormat(std::string_view format);
+    static void validateToStringFormat(std::string_view format);
+    static void validateFromStringFormat(std::string_view format);
     std::unique_ptr<_timelib_time, TimelibTimeDeleter> getTimelibTime(Date_t) const;
 
     _timelib_tzinfo* getTzInfo() const {
@@ -505,9 +480,9 @@ public:
      *    in the string '2017-07-04 -0400'.
      *  * The string does not match the 'format' specifier.
      */
-    Date_t fromString(StringData dateString,
+    Date_t fromString(std::string_view dateString,
                       const TimeZone& tz,
-                      boost::optional<StringData> format = boost::none) const;
+                      boost::optional<std::string_view> format = boost::none) const;
 
     /**
      * Returns a TimeZone object representing the UTC time zone.
@@ -517,13 +492,13 @@ public:
     /**
      * Returns a boolean based on if 'timeZoneId' represents a valid timezone.
      */
-    bool isTimeZoneIdentifier(StringData timeZoneId) const;
+    bool isTimeZoneIdentifier(std::string_view timeZoneId) const;
 
     /**
      * Returns a TimeZone object representing the zone given by 'timeZoneId', or throws an exception
      * if it is not a recognized time zone.
      */
-    TimeZone getTimeZone(StringData timeZoneId) const;
+    TimeZone getTimeZone(std::string_view timeZoneId) const;
 
     /**
      * Creates a TimeZoneDatabase object with time zone data loaded from timelib's built-in timezone
@@ -542,7 +517,7 @@ public:
      * Tries to find a UTC offset in 'offsetSpec' in an ISO8601 format (±HH, ±HHMM, or ±HH:MM) and
      * returns it as an offset to UTC in seconds.
      */
-    boost::optional<Seconds> parseUtcOffset(StringData offsetSpec) const;
+    boost::optional<Seconds> parseUtcOffset(std::string_view offsetSpec) const;
 
 private:
     struct TimelibTZInfoDeleter {
@@ -571,33 +546,33 @@ private:
  * TimeUnit. Throws an exception with error code ErrorCodes::FailedToParse when passed an invalid
  * name.
  */
-TimeUnit parseTimeUnit(StringData unitName);
+TimeUnit parseTimeUnit(std::string_view unitName);
 
 /**
  * Returns true if 'unitName' is a valid time unit, meaning that it can be parsed by the
  * 'parseTimeUnit()' function into one of the units represented by the 'TimeUnit' enum. Otherwise
  * returns 'false'.
  */
-bool isValidTimeUnit(StringData unitName);
+bool isValidTimeUnit(std::string_view unitName);
 
 /**
  * Inverse of parseTimeUnit.
  */
-StringData serializeTimeUnit(TimeUnit unit);
+std::string_view serializeTimeUnit(TimeUnit unit);
 
 /**
  * Parses a string 'dayOfWeek' to a DayOfWeek value. Supported day of week representations are
  * case-insensitive full words or three letter abbreviations - for example, sunday, Sun. Throws an
  * exception with error code ErrorCodes::FailedToParse when passed an invalid value.
  */
-DayOfWeek parseDayOfWeek(StringData dayOfWeek);
+DayOfWeek parseDayOfWeek(std::string_view dayOfWeek);
 
 /**
  * Returns true if 'dayOfWeek' is a valid representation of a day of a week, meaning that it can be
  * parsed by the 'parseDayOfWeek()' function into one of the days represented by the 'DayOfWeek'
  * enum. Otherwise returns 'false'.
  */
-bool isValidDayOfWeek(StringData dayOfWeek);
+bool isValidDayOfWeek(std::string_view dayOfWeek);
 
 /**
  * A custom-deleter which destructs a timelib_rel_time* when it goes out of scope.
@@ -751,4 +726,4 @@ Date_t truncateDate(Date_t date,
 Date_t truncateDateMillis(Date_t date, Date_t referencePoint, unsigned long long binSizeMillis);
 
 long long getBinSizeInMillis(unsigned long long binSize, TimeUnit unit);
-}  // namespace MONGO_MOD_NEEDS_REPLACEMENT mongo
+}  // namespace mongo

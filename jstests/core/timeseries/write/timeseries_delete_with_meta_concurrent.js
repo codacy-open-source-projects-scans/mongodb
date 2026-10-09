@@ -13,6 +13,8 @@
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
  *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   # Uses deleteMany on a time-series collection.
+ *   requires_multi_updates,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   # Uses parallel shell to wait on fail point
@@ -27,7 +29,10 @@ import {runningWithViewlessTimeseriesUpgradeDowngrade} from "jstests/core/timese
 import {waitForCurOpByFailPoint} from "jstests/libs/curop_helpers.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 
-if (runningWithViewlessTimeseriesUpgradeDowngrade(db) && !db.getSession().getOptions().shouldRetryWrites()) {
+if (
+    runningWithViewlessTimeseriesUpgradeDowngrade(db) &&
+    !db.getSession().getOptions().shouldRetryWrites()
+) {
     jsTest.log.info(
         "Skipping test using parallel shell & failpoints since in this suite it may get interrupted by viewless timeseries upgrade/downgrade (SERVER-122589).",
     );
@@ -45,11 +50,25 @@ const testCases = {
     REPLACE_METAFIELD: 2,
 };
 
-const validateDeleteIndex = (docsToInsert, deleteQuery, expectedErrorCode, testCase, newMetaField = null) => {
+const validateDeleteIndex = (
+    docsToInsert,
+    deleteQuery,
+    expectedErrorCode,
+    testCase,
+    newMetaField = null,
+) => {
     const testDB = db.getSiblingDB(dbName);
     const awaitTestDelete = startParallelShell(
         funWithArgs(
-            function (docsToInsert, deleteQuery, timeFieldName, metaFieldName, collName, expectedErrorCode, dbName) {
+            function (
+                docsToInsert,
+                deleteQuery,
+                timeFieldName,
+                metaFieldName,
+                collName,
+                expectedErrorCode,
+                dbName,
+            ) {
                 const testDB = db.getSiblingDB(dbName);
                 const coll = testDB.getCollection(collName);
 
@@ -62,7 +81,10 @@ const validateDeleteIndex = (docsToInsert, deleteQuery, expectedErrorCode, testC
                 assert.commandWorked(coll.insert(docsToInsert));
 
                 assert.commandWorked(
-                    testDB.adminCommand({configureFailPoint: "hangDuringBatchRemove", mode: "alwaysOn"}),
+                    testDB.adminCommand({
+                        configureFailPoint: "hangDuringBatchRemove",
+                        mode: "alwaysOn",
+                    }),
                 );
                 assert.commandFailedWithCode(
                     testDB.runCommand({delete: coll.getName(), deletes: deleteQuery}),
@@ -99,7 +121,9 @@ const validateDeleteIndex = (docsToInsert, deleteQuery, expectedErrorCode, testC
             break;
     }
 
-    assert.commandWorked(testDB.adminCommand({configureFailPoint: "hangDuringBatchRemove", mode: "off"}));
+    assert.commandWorked(
+        testDB.adminCommand({configureFailPoint: "hangDuringBatchRemove", mode: "off"}),
+    );
 
     // Wait for testDelete to finish.
     awaitTestDelete();

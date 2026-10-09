@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 
@@ -50,6 +24,8 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/transport/transport_layer.h"
+
+#include <string_view>
 
 #include <boost/none.hpp>
 
@@ -79,14 +55,18 @@ DocumentSourceInternalSearchMongotRemote::DocumentSourceInternalSearchMongotRemo
                 "spec"_attr = redact(_spec.toBSON()));
 }
 
-const char* DocumentSourceInternalSearchMongotRemote::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceInternalSearchMongotRemote::getSourceName() const {
+    return kStageName;
 }
 
 Value DocumentSourceInternalSearchMongotRemote::addMergePipelineIfNeeded(
-    Value innerSpecVal, const SerializationOptions& opts) const {
+    Value innerSpecVal, const query_shape::SerializationOptions& opts) const {
     if (!innerSpecVal.isObject()) {
         // We've redacted the interesting parts of the stage, return early.
+        return innerSpecVal;
+    }
+    // Don't emit mergingPipeline on the re-parse path; LiteParse would reject it.
+    if (opts.serializeForReparse) {
         return innerSpecVal;
     }
     if ((!opts.isSerializingForExplain() || getExpCtx()->getInRouter()) &&
@@ -100,7 +80,13 @@ Value DocumentSourceInternalSearchMongotRemote::addMergePipelineIfNeeded(
 }
 
 Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
-    const SerializationOptions& opts) const {
+    const query_shape::SerializationOptions& opts) const {
+    // For re-parseable output, emit just the user mongotQuery. After planShardedSearch, the
+    // mergingPipeline is set on _spec; emitting the full IDL form would trip the
+    // LiteParse-layer check on re-parse.
+    if (opts.serializeForReparse) {
+        return opts.serializeLiteral(_spec.getMongotQuery());
+    }
     // Though router can generate explain output, it should never make a remote call to the mongot.
     if (!opts.isSerializingForExplain() || getExpCtx()->getInRouter()) {
         if (_spec.getMetadataMergeProtocolVersion().has_value()) {
@@ -171,10 +157,6 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
         mDoc.addField(InternalSearchMongotRemoteSpec::kSortSpecFieldName,
                       opts.serializeLiteral(*_spec.getSortSpec()));
     }
-    if (_spec.getMongotDocsRequested().has_value()) {
-        mDoc.addField(InternalSearchMongotRemoteSpec::kMongotDocsRequestedFieldName,
-                      opts.serializeLiteral((long long)*_spec.getMongotDocsRequested()));
-    }
     mDoc.addField(InternalSearchMongotRemoteSpec::kRequiresSearchMetaCursorFieldName,
                   opts.serializeLiteral(_spec.getRequiresSearchMetaCursor()));
 
@@ -194,7 +176,8 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
     return mDoc.freezeToValue();
 }
 
-Value DocumentSourceInternalSearchMongotRemote::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceInternalSearchMongotRemote::serialize(
+    const query_shape::SerializationOptions& opts) const {
     auto innerSpecVal = serializeWithoutMergePipeline(opts);
     return Value(
         Document{{getSourceName(), addMergePipelineIfNeeded(std::move(innerSpecVal), opts)}});

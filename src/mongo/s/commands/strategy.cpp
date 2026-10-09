@@ -1,44 +1,19 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/commands/strategy.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/admission/ingress_request_rate_limiter_gen.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/cluster_umc_error_with_write_concern_error_info.h"
 #include "mongo/db/client.h"
@@ -87,6 +62,7 @@
 #include "mongo/otel/telemetry_context_holder.h"
 #include "mongo/otel/traces/span/span.h"
 #include "mongo/otel/traces/telemetry_context_serialization.h"
+#include "mongo/otel/traces/tracing_enablement.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
@@ -114,6 +90,7 @@
 #include "mongo/util/scopeguard.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -129,9 +106,10 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeCheckingMongosShutdownInterrupt);
-const auto kOperationTime = "operationTime"_sd;
+const auto kOperationTime = "operationTime"sv;
 
 void runCommandInvocation(const RequestExecutionContext* rec, CommandInvocation* invocation) {
     CommandHelpers::runCommandInvocation(rec->getOpCtx(), invocation, rec->getReplyBuilder());
@@ -182,6 +160,9 @@ void invokeInTransactionRouter(TransactionRouter::Router& txnRouter,
 
     try {
         runCommandInvocation(rec, invocation);
+        // Surface any abort latched by this command's own cursor-cleanup drains (killCursors, or a
+        // getMore's cursor check-in);
+        txnRouter.raiseDeferredAbortIfNeeded();
     } catch (const DBException& ex) {
         auto status = ex.toStatus();
 
@@ -207,10 +188,10 @@ void invokeInTransactionRouter(TransactionRouter::Router& txnRouter,
 /**
  * Adds info from the active transaction and the given reason as context to the active exception.
  */
-void addContextForTransactionAbortingError(StringData txnIdAsString,
+void addContextForTransactionAbortingError(std::string_view txnIdAsString,
                                            StmtId latestStmtId,
                                            Status& status,
-                                           StringData reason) {
+                                           std::string_view reason) {
     status.addContext(fmt::format("Transaction {} was aborted on statement {} due to: {}",
                                   txnIdAsString,
                                   latestStmtId,
@@ -284,7 +265,7 @@ void ExecCommandClient::_epilogue() {
         failCommand.executeIf(
             [&](const BSONObj& data) {
                 rpc::RewriteStateChangeErrors::onActiveFailCommand(opCtx, data);
-                result->getBodyBuilder().append(data["writeConcernError"_sd]);
+                result->getBodyBuilder().append(data["writeConcernError"sv]);
                 if (data.hasField(kErrorLabelsFieldName) &&
                     data[kErrorLabelsFieldName].type() == BSONType::array) {
                     auto labels = data.getObjectField(kErrorLabelsFieldName).getOwned();
@@ -296,8 +277,8 @@ void ExecCommandClient::_epilogue() {
             [&](const BSONObj& data) {
                 return CommandHelpers::shouldActivateFailCommandFailPoint(
                            data, _invocation, opCtx->getClient()) &&
-                    data.hasField("writeConcernError"_sd) &&
-                    !result->getBodyBuilder().hasField("writeConcernError"_sd);
+                    data.hasField("writeConcernError"sv) &&
+                    !result->getBodyBuilder().hasField("writeConcernError"sv);
             });
     }
 
@@ -377,7 +358,7 @@ private:
     RequestExecutionContext* _rec;
     BSONObjBuilder* _errorBuilder;
     const NetworkOp _opType;
-    const StringData _commandName;
+    const std::string_view _commandName;
 
     std::shared_ptr<CommandInvocation> _invocation;
     boost::optional<rpc::ImpersonatedClientSessionGuard> _clientSessionGuard;
@@ -401,6 +382,7 @@ public:
 
 private:
     Status _setup();
+    void _maybeWaitForAdmission();
 
     ParseAndRunCommand* const _parc;
 
@@ -491,8 +473,20 @@ void ParseAndRunCommand::_parseCommand() {
     }
 
     _rec->setCommand(command);
+    auto& telemetryCtx = _rec->getTelemetryContext();
+    _rec->setOtelSpan(otel::traces::Span::startIngressSpan(
+        telemetryCtx,
+        command->getTraceSpanName(),
+        /*options=*/
+        {.kind = _rec->hasMoreToComeFlag() ? otel::traces::SpanKind::kConsumer
+                                           : otel::traces::SpanKind::kServer}));
+    // Keep the OpCtx decoration in sync so later Span::start(opCtx, ...) calls see the same
+    // context. Skip when null so the common no-tracing path never touches the decoration.
+    if (telemetryCtx) {
+        otel::TelemetryContextHolder::getDecoration(opCtx).setTelemetryContext(telemetryCtx);
+    }
 
-    _isHello.emplace(command->getName() == "hello"_sd || command->getName() == "isMaster"_sd);
+    _isHello.emplace(command->getName() == "hello"sv || command->getName() == "isMaster"sv);
 
     opCtx->setExhaust(OpMsg::isFlagSet(m, OpMsg::kExhaustSupported));
     Client* client = opCtx->getClient();
@@ -517,14 +511,6 @@ void ParseAndRunCommand::_parseCommand() {
     if (auto& commentField = _invocation->getGenericArguments().getComment()) {
         std::lock_guard<Client> lk(*client);
         opCtx->setComment(commentField->getElement().wrap());
-    }
-
-    if (auto& traceCtx = _invocation->getGenericArguments().getTraceCtx()) {
-        auto telemetryCtx = otel::traces::TelemetryContextSerializer::fromBSON(*traceCtx);
-        if (telemetryCtx) {
-            auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(opCtx);
-            telemetryCtxHolder.setTelemetryContext(telemetryCtx);
-        }
     }
 
     auto apiParams = parseAndValidateAPIParameters(*_invocation);
@@ -609,6 +595,17 @@ void ParseAndRunCommand::_parseCommand() {
     }
 }
 
+void ParseAndRunCommand::RunInvocation::_maybeWaitForAdmission() {
+    const auto opCtx = _parc->_rec->getOpCtx();
+    if (!gFeatureFlagIngressRateLimiting.isEnabled()) {
+        return;
+    }
+
+    // Deferred admission must run after maxTimeMS is applied to the opCtx so that queued requests
+    // respect the deadline.
+    uassertStatusOK(admission::IngressRequestRateLimiter::waitForAdmission(opCtx));
+}
+
 bool isInternalClient(OperationContext* opCtx) {
     return opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
 }
@@ -632,11 +629,13 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         opCtx->setUsesDefaultMaxTimeMS(usesDefaultMaxTimeMS);
     }
 
+    _maybeWaitForAdmission();
+
     if (MONGO_unlikely(
             hangBeforeCheckingMongosShutdownInterrupt.shouldFail([&](const BSONObj& data) {
                 if (data.hasField("cmdName") && data.hasField("ns")) {
                     const auto cmdNss = _parc->_ns.value();
-                    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
+                    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"sv);
                     return (data.getStringField("cmdName") == _parc->_commandName &&
                             fpNss == cmdNss);
                 }
@@ -802,13 +801,15 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     }
 
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    bool clientSuppliedReadConcern = readConcernArgs.isSpecified();
+    // True only when the client set a level. Partial RCs (e.g. {afterClusterTime: T}) get the
+    // level filled in below, so provenance resolves to customDefault / implicitDefault.
+    bool clientSuppliedReadConcern = readConcernArgs.hasLevel();
     bool customDefaultReadConcernWasApplied = false;
 
     auto readConcernSupport = invocation->supportsReadConcern(readConcernArgs.getLevel(),
                                                               readConcernArgs.isImplicitDefault());
 
-    auto applyDefaultReadConcern = [&](const repl::ReadConcernArgs rcDefault) -> void {
+    auto applyReadConcernDefault = [&](repl::ReadConcernArgs rcDefault) {
         // We must obtain the client lock to set ReadConcernArgs, because it's an
         // in-place reference to the object on the operation context, which may be
         // concurrently used elsewhere (eg. read by currentOp).
@@ -817,16 +818,31 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                     2,
                     "Applying default readConcern on command",
                     "command"_attr = invocation->definition()->getName(),
-                    "readConcern"_attr = rcDefault);
-        readConcernArgs = std::move(rcDefault);
-        // Update the readConcernSupport, since the default RC was applied.
+                    "readConcern"_attr = rcDefault,
+                    "providedReadConcern"_attr = readConcernArgs,
+                    "isImplicit"_attr = !readConcernSupport.defaultReadConcernPermit.isOK());
+        if (readConcernArgs.isEmpty()) {
+            readConcernArgs = std::move(rcDefault);
+        } else if (rcDefault.getLevel() == repl::ReadConcernLevel::kAvailableReadConcern &&
+                   readConcernArgs.getArgsAfterClusterTime()) {
+            // A default level of "available" cannot be combined with afterClusterTime (see
+            // ReadConcernArgs::validate()). Promote to "local": afterClusterTime is honored
+            // and the level resolves as if no default were configured.
+            readConcernArgs.setLevel(repl::ReadConcernLevel::kLocalReadConcern);
+        } else {
+            readConcernArgs.setLevel(rcDefault.getLevel());
+        }
+        // Applying a default must never produce an invalid combination.
+        uassertStatusOK(readConcernArgs.validate());
         readConcernSupport = invocation->supportsReadConcern(readConcernArgs.getLevel(),
                                                              !customDefaultReadConcernWasApplied);
     };
 
     auto shouldApplyDefaults = startTransaction || !TransactionRouter::get(opCtx);
     if (readConcernSupport.defaultReadConcernPermit.isOK() && shouldApplyDefaults) {
-        if (readConcernArgs.isEmpty()) {
+        // Apply the CWRC default when the client did not set a level. Empty RC: replace
+        // whole; partial RC: merge level only to preserve afterClusterTime / opTime.
+        if (!readConcernArgs.hasLevel()) {
             const auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
             const auto rcDefault = rwcDefaults.getDefaultReadConcern();
             if (rcDefault) {
@@ -834,19 +850,18 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
                 customDefaultReadConcernWasApplied =
                     (readConcernSource &&
                      readConcernSource.value() == DefaultReadConcernSourceEnum::kGlobal);
-
-                applyDefaultReadConcern(*rcDefault);
+                applyReadConcernDefault(*rcDefault);
             }
         }
     }
 
-    // Apply the implicit default read concern even if the command does not support a cluster wide
-    // read concern.
+    // Apply the implicit default RC when the command does not support CWRC and the client did
+    // not set a level.
     if (!readConcernSupport.defaultReadConcernPermit.isOK() &&
         readConcernSupport.implicitDefaultReadConcernPermit.isOK() && shouldApplyDefaults &&
-        readConcernArgs.isEmpty()) {
-        const auto rcDefault = ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern();
-        applyDefaultReadConcern(rcDefault);
+        !readConcernArgs.hasLevel()) {
+        applyReadConcernDefault(
+            ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern());
     }
 
     auto& provenance = readConcernArgs.getProvenance();
@@ -1087,11 +1102,6 @@ void ParseAndRunCommand::RunAndRetry::_onCannotImplicitlyCreateCollection(Status
 }
 
 void ParseAndRunCommand::RunAndRetry::run() {
-    // We do not want to create a span for every incoming command, we only want a span when
-    // $traceCtx is specified on the command so we call Span::startIfExistingTraceParent instead of
-    // Span::start.
-    auto otelSpan = otel::traces::Span::startIfExistingTraceParent(
-        _parc->_rec->getOpCtx(), _parc->_rec->getCommand()->getName());
     do {
         try {
             // Try gMaxNumStaleVersionRetries times. On the last try, exceptions are
@@ -1141,6 +1151,7 @@ void ParseAndRunCommand::RunInvocation::run() {
 void ParseAndRunCommand::run() {
     try {
         _parseCommand();
+
         RunInvocation runner(this);
         runner.run();
     } catch (const DBException& ex) {
@@ -1169,7 +1180,7 @@ public:
     DbResponse run();
 
 private:
-    StringData _getDatabaseStringForLogging() const {
+    std::string_view _getDatabaseStringForLogging() const {
         return _rec->getRequest().readDatabaseForLogging();
     }
 
@@ -1198,6 +1209,13 @@ void ClientCommand::_parseMessage() try {
         checkAllowedOpQueryCommand(*(_rec->getOpCtx()->getClient()), opMsgReq.getCommandName());
     }
     _rec->setRequest(opMsgReq);
+
+    // Check for the presence of a telemetry context in the request first as that is much cheaper
+    // than checking if tracing is enabled.
+    if (_rec->getRequest().telemetryContext && otel::traces::isTracingEnabled(_rec->getOpCtx())) {
+        _rec->setTelemetryContext(otel::traces::TelemetryContextSerializer::fromSection(
+            _rec->getRequest().telemetryContext));
+    }
 } catch (const DBException& ex) {
     // If this error needs to fail the connection, propagate it out.
     if (ErrorCodes::isConnectionFatalMessageParseError(ex.code()))
@@ -1268,10 +1286,10 @@ void ClientCommand::_handleException(Status status) {
     if (status.code() == ErrorCodes::ClusterUMCErrorWithWriteConcernError) {
         auto ei = status.extraInfo<ClusterUMCErrorWithWriteConcernErrorInfo>();
         status = ei->getMainStatus();
-        wceBuilder.append("writeConcernError"_sd, ei->getWriteConcernErrorDetail().toBSON());
+        wceBuilder.append("writeConcernError"sv, ei->getWriteConcernErrorDetail().toBSON());
     } else {
         auto bob = reply->getBodyBuilder().asTempObj();
-        if (auto f = bob.getField("writeConcernError"_sd); !f.eoo()) {
+        if (auto f = bob.getField("writeConcernError"sv); !f.eoo()) {
             wceBuilder.append(f);
             wceBuilder.done();
         }
@@ -1307,7 +1325,7 @@ DbResponse ClientCommand::_produceResponse() {
     const auto& m = _rec->getMessage();
     auto reply = _rec->getReplyBuilder();
 
-    if (OpMsg::isFlagSet(m, OpMsg::kMoreToCome)) {
+    if (_rec->hasMoreToComeFlag()) {
         return {};  // Don't reply.
     }
 

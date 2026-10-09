@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -56,6 +30,7 @@
 #include "mongo/platform/compiler.h"
 
 #include <limits>
+#include <string_view>
 
 namespace mongo::sbe::vm {
 namespace {  // NOLINT(google-build-namespaces) See WHITELIST comment above.
@@ -65,14 +40,14 @@ public:
     using BaseT::BaseT;
 
     template <typename ObjWriterT, typename ArrWriterT>
-    MONGO_COMPILER_ALWAYS_INLINE FastTuple<bool, value::TypeTags, value::Value> makeObj() const {
+    MONGO_COMPILER_ALWAYS_INLINE value::TagValueMaybeOwned makeObj() const {
         constexpr int64_t maxInt64 = std::numeric_limits<int64_t>::max();
 
         auto [specOwned, specTag, specVal] = getSpec();
         auto [objOwned, objTag, objVal] = getInputObject();
 
         if (specTag != value::TypeTags::makeObjSpec) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
 
         auto spec = value::getMakeObjSpecView(specVal);
@@ -85,12 +60,12 @@ public:
             if (spec->nonObjInputBehavior == MakeObjSpec::NonObjInputBehavior::kReturnNothing) {
                 // If the input is Nothing or not an Object and if 'nonObjInputBehavior' equals
                 // 'kReturnNothing', then return Nothing.
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueMaybeOwned::nothing();
             } else if (spec->nonObjInputBehavior ==
                        MakeObjSpec::NonObjInputBehavior::kReturnInput) {
                 // If the input is Nothing or not an Object and if 'nonObjInputBehavior' equals
                 // 'kReturnInput', then return the input.
-                return extractInputObject();
+                return value::TagValueMaybeOwned::fromRaw(extractInputObject());
             }
         }
 
@@ -234,7 +209,7 @@ private:
 
                 // Get the field name for this field, and then consult 'action' to see what
                 // action should be taken.
-                StringData fieldName = fields[fieldIdx];
+                std::string_view fieldName = fields[fieldIdx];
                 const auto& action = actions[fieldIdx];
 
                 const auto tag = TypeTags::Nothing;
@@ -297,7 +272,7 @@ private:
     void traverseAndProduceObj(const MakeObjSpec* spec,
                                value::TypeTags tag,
                                value::Value val,
-                               StringData fieldName,
+                               std::string_view fieldName,
                                ObjWriterT& bob) const {
         constexpr int64_t maxInt64 = std::numeric_limits<int64_t>::max();
 
@@ -332,7 +307,7 @@ private:
 
     template <typename ObjWriterT>
     MONGO_COMPILER_ALWAYS_INLINE void performSetArgAction(const MakeObjSpec::FieldAction& action,
-                                                          StringData fieldName,
+                                                          std::string_view fieldName,
                                                           ObjWriterT& bob) const {
         size_t argIdx = action.getSetArgIdx();
         auto [_, tag, val] = getArg(argIdx);
@@ -341,7 +316,7 @@ private:
 
     template <typename ObjWriterT>
     MONGO_COMPILER_ALWAYS_INLINE void performAddArgAction(const MakeObjSpec::FieldAction& action,
-                                                          StringData fieldName,
+                                                          std::string_view fieldName,
                                                           ObjWriterT& bob) const {
         size_t argIdx = action.getAddArgIdx();
         auto [_, tag, val] = getArg(argIdx);
@@ -352,7 +327,7 @@ private:
     MONGO_COMPILER_ALWAYS_INLINE void performLambdaArgAction(const MakeObjSpec::FieldAction& action,
                                                              value::TypeTags tag,
                                                              value::Value val,
-                                                             StringData fieldName,
+                                                             std::string_view fieldName,
                                                              ObjWriterT& bob) const {
         const auto& lambdaArg = action.getLambdaArg();
         size_t argIdx = lambdaArg.argIdx;
@@ -364,7 +339,7 @@ private:
         int64_t lamPos = value::bitcastTo<int64_t>(lamVal);
 
         auto [outputOwned, outputTag, outputVal] = invokeLambda(lamPos, tag, val);
-        value::ValueGuard guard(outputOwned, outputTag, outputVal);
+        value::TagValueMaybeOwned output{outputOwned, outputTag, outputVal};
 
         bob.appendValue(fieldName, outputTag, outputVal);
     }
@@ -373,7 +348,7 @@ private:
     MONGO_COMPILER_ALWAYS_INLINE void performMakeObjAction(const MakeObjSpec::FieldAction& action,
                                                            value::TypeTags tag,
                                                            value::Value val,
-                                                           StringData fieldName,
+                                                           std::string_view fieldName,
                                                            ObjWriterT& bob) const {
         const MakeObjSpec* spec = action.getMakeObjSpec();
         traverseAndProduceObj(spec, tag, val, fieldName, bob);

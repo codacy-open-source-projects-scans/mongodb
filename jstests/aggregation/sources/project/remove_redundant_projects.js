@@ -17,8 +17,8 @@ import {
     checkSbeCompletelyDisabled,
     checkSbeFullyEnabled,
     checkSbeRestrictedOrFullyEnabled,
+    checkSbeTransformStagesEnabled,
 } from "jstests/libs/query/sbe_util.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 let coll = db.remove_redundant_projects;
 coll.drop();
@@ -29,7 +29,7 @@ let indexSpec = {a: 1, "c.d": 1, "e.0": 1};
 
 const sbeFullyEnabled = checkSbeFullyEnabled(db);
 const sbeRestricted = checkSbeRestrictedOrFullyEnabled(db);
-const sbeTransformStagesEnabled = FeatureFlagUtil.isPresentAndEnabled(db, "SbeTransformStages") || sbeFullyEnabled;
+const sbeRestrictedWithTransform = sbeRestricted && checkSbeTransformStagesEnabled(db);
 
 /**
  * Helper to test that for a given pipeline, the same results are returned whether or not an
@@ -85,11 +85,13 @@ function assertResultsMatch({
 
             assert.gte(projects.length, 1, explain);
 
-            const areAllexpectedCoalescedProjectsPresent = expectedCoalescedProjects.every((coalescedProject) => {
-                return projects.some((project) => {
-                    return documentEq(project.transformBy, coalescedProject);
-                });
-            });
+            const areAllexpectedCoalescedProjectsPresent = expectedCoalescedProjects.every(
+                (coalescedProject) => {
+                    return projects.some((project) => {
+                        return documentEq(project.transformBy, coalescedProject);
+                    });
+                },
+            );
 
             assert(
                 areAllexpectedCoalescedProjectsPresent,
@@ -103,7 +105,8 @@ function assertResultsMatch({
         if (!pipelineOptimizedAway) {
             // Check that $project was removed from pipeline and pushed to the query system.
             explain.stages.forEach(function (stage) {
-                if (stage.hasOwnProperty("$project")) assert.neq(removedProjectStage, stage["$project"], explain);
+                if (stage.hasOwnProperty("$project"))
+                    assert.neq(removedProjectStage, stage["$project"], explain);
             });
         }
     }
@@ -137,7 +140,11 @@ assertResultsMatch({
     pipelineOptimizedAway: true,
 });
 assertResultsMatch({
-    pipeline: [{$sort: {a: 1, "c.d": 1}}, {$project: {_id: 0, a: 1}}, {$group: {_id: "$a", a: {$sum: "$a"}}}],
+    pipeline: [
+        {$sort: {a: 1, "c.d": 1}},
+        {$project: {_id: 0, a: 1}},
+        {$group: {_id: "$a", a: {$sum: "$a"}}},
+    ],
     expectProjectToCoalesce: true,
     expectedCoalescedProjects: [{"a": true, "_id": false}],
     removedProjectStage: {_id: 0, a: 1},
@@ -176,9 +183,11 @@ assertResultsMatch({
 // aggregation subsystem's dependency analysis logic.
 assertResultsMatch({
     pipeline: [{$sort: {a: 1}}, {$group: {_id: "$_id", a: {$sum: "$a"}}}, {$project: {arr: 1}}],
-    expectProjectToCoalesce: checkSbeCompletelyDisabled(db) || sbeTransformStagesEnabled,
-    expectedCoalescedProjects: sbeTransformStagesEnabled ? [{"_id": true, "arr": true}] : [{"_id": 1, "a": 1}],
-    pipelineOptimizedAway: sbeTransformStagesEnabled,
+    expectProjectToCoalesce: checkSbeCompletelyDisabled(db) || sbeRestrictedWithTransform,
+    expectedCoalescedProjects: sbeRestrictedWithTransform
+        ? [{"_id": true, "arr": true}]
+        : [{"_id": 1, "a": 1}],
+    pipelineOptimizedAway: sbeRestrictedWithTransform || sbeFullyEnabled,
 });
 
 // Test that projections with computed fields are removed from the pipeline.
@@ -195,13 +204,19 @@ assertResultsMatch({
     pipelineOptimizedAway: true,
 });
 assertResultsMatch({
-    pipeline: [{$project: {e: {$filter: {input: "$e", as: "item", cond: {"$eq": ["$$item", "elem0"]}}}}}],
+    pipeline: [
+        {$project: {e: {$filter: {input: "$e", as: "item", cond: {"$eq": ["$$item", "elem0"]}}}}},
+    ],
     expectProjectToCoalesce: true,
     expectedCoalescedProjects: [
         {
             "_id": true,
             "e": {
-                "$filter": {"input": "$e", "as": "item", "cond": {"$eq": ["$$item", {"$const": "elem0"}]}},
+                "$filter": {
+                    "input": "$e",
+                    "as": "item",
+                    "cond": {"$eq": ["$$item", {"$const": "elem0"}]},
+                },
             },
         },
     ],
@@ -214,11 +229,12 @@ assertResultsMatch({
         {$group: {_id: "$a", c: {$sum: "$c"}, a: {$sum: "$a"}}},
         {$project: {_id: 0}},
     ],
+    // The pipeline is only fully optimized away if the SBE transform stage flag is on.
     expectProjectToCoalesce: true,
-    expectedCoalescedProjects: sbeTransformStagesEnabled
+    expectedCoalescedProjects: sbeRestrictedWithTransform
         ? [{"a": true, "_id": false}, {"_id": false}]
         : [{"a": true, "_id": false}],
-    pipelineOptimizedAway: sbeTransformStagesEnabled,
+    pipelineOptimizedAway: sbeRestrictedWithTransform || sbeFullyEnabled,
 });
 
 // Test that projections on _id with nested fields are removed from pipeline.

@@ -1,13 +1,18 @@
 /**
  * Tests the pipeline-style update is accepted by the findAndModify command.
  * @tags: [
+ *   uses_explain,
  *   requires_non_retryable_writes,
  *   # Ignore because the find command is rewritten for TS collections before reaching the failpoint.
  *   exclude_from_timeseries_crud_passthrough,
  * ]
  */
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {getPlanStage, planHasStage} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStage,
+    getWinningPlanFromExplain,
+    planHasStage,
+} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -48,15 +53,19 @@ assert.eq(found, {_id: 3, x: 3});
 // Tests for explain using findAndModify with an _id equality query.
 //
 {
-    let explain = coll.explain("queryPlanner").findAndModify({query: {_id: 3}, update: [{$set: {y: 999}}]});
+    let explain = coll
+        .explain("queryPlanner")
+        .findAndModify({query: {_id: 3}, update: [{$set: {y: 999}}]});
     // post 8.0, EXPRESS will handle update-by-id
-    if (!planHasStage(db, explain.queryPlanner.winningPlan, "EXPRESS_UPDATE")) {
-        assert(planHasStage(db, explain.queryPlanner.winningPlan, "IDHACK"));
-        assert(planHasStage(db, explain.queryPlanner.winningPlan, "UPDATE"));
+    if (!planHasStage(db, getWinningPlanFromExplain(explain), "EXPRESS_UPDATE")) {
+        assert(planHasStage(db, getWinningPlanFromExplain(explain), "IDHACK"));
+        assert(planHasStage(db, getWinningPlanFromExplain(explain), "UPDATE"));
     }
 
     // Run explain with execution-level verbosity.
-    explain = coll.explain("executionStats").findAndModify({query: {_id: 3}, update: [{$set: {y: 999}}]});
+    explain = coll
+        .explain("executionStats")
+        .findAndModify({query: {_id: 3}, update: [{$set: {y: 999}}]});
     assert.eq(explain.executionStats.nReturned, 1);
     // UPDATE stage would modify one document.
     let updateStage = getPlanStage(explain.executionStats.executionStages, "UPDATE");
@@ -75,12 +84,16 @@ if (!FixtureHelpers.isMongos(db)) {
     //
     // Tests for explain with a query that requires a COLLSCAN.
     //
-    let explain = coll.explain("queryPlanner").findAndModify({query: {y: 3}, update: [{$set: {y: 999}}]});
-    assert(planHasStage(db, explain.queryPlanner.winningPlan, "COLLSCAN"));
-    assert(planHasStage(db, explain.queryPlanner.winningPlan, "UPDATE"));
+    let explain = coll
+        .explain("queryPlanner")
+        .findAndModify({query: {y: 3}, update: [{$set: {y: 999}}]});
+    assert(planHasStage(db, getWinningPlanFromExplain(explain), "COLLSCAN"));
+    assert(planHasStage(db, getWinningPlanFromExplain(explain), "UPDATE"));
 
     // Run explain with execution-level verbosity.
-    explain = coll.explain("executionStats").findAndModify({query: {y: 3}, update: [{$set: {y: 999}}]});
+    explain = coll
+        .explain("executionStats")
+        .findAndModify({query: {y: 3}, update: [{$set: {y: 999}}]});
     assert.eq(explain.executionStats.nReturned, 1);
     // UPDATE stage would modify one document.
     const updateStage = getPlanStage(explain.executionStats.executionStages, "UPDATE");

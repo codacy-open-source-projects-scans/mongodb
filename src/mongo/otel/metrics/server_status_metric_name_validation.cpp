@@ -1,41 +1,17 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/server_status_metric_name_validation.h"
 
 #include "mongo/base/error_codes.h"
 
+#include <string_view>
+
 namespace mongo::otel::metrics {
 
 namespace {
 
-bool isAscii(StringData s) {
+bool isAscii(std::string_view s) {
     for (size_t i = 0; i < s.size(); ++i) {
         if (static_cast<unsigned char>(s[i]) > 127) {
             return false;
@@ -44,7 +20,7 @@ bool isAscii(StringData s) {
     return true;
 }
 
-bool isCamelCaseSegment(StringData seg) {
+bool isCamelCaseSegment(std::string_view seg) {
     if (seg.empty()) {
         return false;
     }
@@ -68,7 +44,7 @@ bool isCamelCaseSegment(StringData seg) {
     return true;
 }
 
-Status validateOneSegment(StringData seg) {
+Status validateOneSegment(std::string_view seg) {
     if (seg.empty()) {
         return {ErrorCodes::InvalidOptions,
                 "serverStatus metric path cannot contain empty segments"};
@@ -81,7 +57,7 @@ Status validateOneSegment(StringData seg) {
 
 }  // namespace
 
-Status validateServerStatusMetricPath(StringData dottedPath) {
+Status validateServerStatusMetricPath(std::string_view dottedPath) {
     if (dottedPath.empty()) {
         return {ErrorCodes::InvalidOptions, "serverStatus metric path cannot be empty"};
     }
@@ -103,7 +79,7 @@ Status validateServerStatusMetricPath(StringData dottedPath) {
         if (dottedPath[i] != '.') {
             continue;
         }
-        const StringData seg = dottedPath.substr(segStart, i - segStart);
+        const std::string_view seg = dottedPath.substr(segStart, i - segStart);
         if (auto st = validateOneSegment(seg); !st.isOK()) {
             return st;
         }

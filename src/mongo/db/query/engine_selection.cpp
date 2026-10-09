@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/engine_selection.h"
 
 #include "mongo/db/pipeline/sbe_pushdown.h"
+#include "mongo/db/pipeline/sbe_pushdown_util.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/engine_selection_plan.h"
 #include "mongo/db/query/planner_analysis.h"
@@ -84,13 +59,9 @@ bool isQuerySbeCompatible(const CollectionPtr& collection,
     auto expCtx = cq.getExpCtxRaw();
 
     // If we don't support all expressions used or the query is eligible for IDHack, don't use SBE.
-    // Relies on the pre-computed isIdHackQuery() flag being up-to-date: callers must invoke
-    // maybeUpgradeIdHackFlag() before calling isQuerySbeCompatible() so that filters which
-    // normalize to a simple _id equality after MatchExpression parsing (e.g. {_id:{$in:[v]}})
-    // are correctly reflected here.
     if (!expCtx || expCtx->getSbeCompatibility() == SbeCompatibility::notCompatible ||
         expCtx->getSbePipelineCompatibility() == SbeCompatibility::notCompatible ||
-        (collection && expCtx->isIdHackQuery())) {
+        (collection && isIdHackEligibleQuery(collection, cq))) {
         return false;
     }
 
@@ -125,7 +96,9 @@ bool isQuerySbeCompatible(const CollectionPtr& collection,
 
     // Queries against collections with a particular shape of compound hashed indexes are not
     // supported.
-    if (!feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled() && collection &&
+    const bool deferredExecutorEnabled = cq.getExpCtx()->getIfrContext()->getSavedFlagValue(
+        feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice);
+    if (!deferredExecutorEnabled && collection &&
         collectionHasIndexWithHashedPathPrefixOfNonHashedPath(collection, expCtx)) {
         return false;
     }
@@ -140,7 +113,7 @@ bool isQuerySbeCompatible(const CollectionPtr& collection,
         return false;
     }
 
-    if (solution && !isPlanSbeEligible(solution)) {
+    if (solution && !isPlanSbeCompatible(solution)) {
         return false;
     }
 
@@ -155,7 +128,6 @@ EngineSelectionResult shouldUseRegularSbeDeferredEngineSelection(
     const QuerySolution* solution,
     const std::function<void()>& extendSolutionWithPipelineFn) {
     if (mainCollection && mainCollection->isTimeseriesCollection()) {
-        // TODO SERVER-120734 decide engine selection logic for TS collections.
         // TS queries only use SBE when there's a pipeline.
         return {cq.cqPipeline().empty() ? EngineChoice::kClassic : EngineChoice::kSbe, nullptr};
     }
@@ -176,7 +148,7 @@ EngineSelectionResult shouldUseRegularSbeDeferredEngineSelection(
 
     const QuerySolutionNode* dataAccessNode = solution->root();
     extendSolutionWithPipelineFn();
-    return engineSelectionForPlan(solution, dataAccessNode);
+    return engineSelectionForPlan(solution, dataAccessNode, *cq.getExpCtx()->getIfrContext());
 }
 
 /**
@@ -220,8 +192,8 @@ EngineSelectionResult chooseEngine(OperationContext* opCtx,
                                    const QuerySolution* solution,
                                    const std::function<void()>& extendSolutionWithPipelineFn) {
     const bool hasSolution = solution != nullptr;
-    const bool deferredEngineChoice =
-        feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled();
+    const bool deferredEngineChoice = cq->getExpCtx()->getIfrContext()->getSavedFlagValue(
+        feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice);
     tassert(11742301,
             "Expected to choose engine based on solution only if "
             "featureFlagGetExecutorDeferredEngineChoice is "
@@ -335,6 +307,9 @@ EngineChoice extendSolutionAndSelectEngine(std::unique_ptr<QuerySolution>& solut
             solution =
                 QueryPlannerAnalysis::removeInclusionProjectionBelowGroup(std::move(solution));
         }
+
+        // Increment non-leading pushdown stage counters.
+        incrementNonLeadingPushdownCounters(*cq);
     }
     return engine;
 }

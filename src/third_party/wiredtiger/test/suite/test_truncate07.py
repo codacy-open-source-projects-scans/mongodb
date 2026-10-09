@@ -31,7 +31,6 @@ from wiredtiger import WiredTigerError, wiredtiger_strerror, WT_ROLLBACK, WT_PRE
 from wtdataset import SimpleDataSet
 from wtscenario import make_scenarios
 
-# test_truncate07.py
 #
 # Check what happens if you try to truncate prepared values.
 
@@ -134,6 +133,15 @@ class test_truncate07(wttest.WiredTigerTestCase):
         self.conn.set_timestamp('oldest_timestamp=' + self.timestamp_str(1) +
             ',stable_timestamp=' + self.timestamp_str(1))
 
+        # FIXME-WT-18706: Re-enable once debug eviction is safe across table publication.
+        if (
+            self.runningHook("disagg")
+            and self.getDisaggParameters().schema_epochs
+            and (self.key_format != 'r' and self.do_evict)
+        ):
+            self.skipTest(
+                "debug eviction bypasses the eviction guard and can race with btree publication")
+
         # Write a bunch of data at time 10.
         cursor = self.session.open_cursor(ds.uri)
         self.session.begin_transaction()
@@ -184,4 +192,3 @@ class test_truncate07(wttest.WiredTigerTestCase):
         # Move the stable timestamp forward before exiting so we don't waste time rolling
         # back the rest of the changes during shutdown.
         self.conn.set_timestamp('stable_timestamp=' + self.timestamp_str(50))
-

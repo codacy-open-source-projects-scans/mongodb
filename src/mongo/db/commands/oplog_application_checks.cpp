@@ -1,37 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/commands/oplog_application_checks.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/util/bson_check.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_checks.h"
@@ -58,13 +30,26 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
+
+void checkBSONType(BSONType type, const BSONElement& elem) {
+    uassert(elem.type() == BSONType::eoo ? ErrorCodes::NoSuchKey : ErrorCodes::TypeMismatch,
+            fmt::format("Wrong type for {:?}. Expected a {}, got a {}.",
+                        elem.fieldNameStringData(),
+                        typeName(type),
+                        typeName(elem.type())),
+            elem.type() == type);
+}
+
 UUID OplogApplicationChecks::getUUIDFromOplogEntry(const BSONObj& oplogEntry) {
     BSONElement uiElem = oplogEntry["ui"];
     return uassertStatusOK(UUID::parse(uiElem));
@@ -76,9 +61,9 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
                                                            AuthorizationSession* authSession) {
     BSONElement opTypeElem = oplogEntry["op"];
     checkBSONType(BSONType::string, opTypeElem);
-    const StringData opType = opTypeElem.checkAndGetStringData();
+    const std::string_view opType = opTypeElem.checkAndGetStringData();
 
-    if (opType == "n"_sd) {
+    if (opType == "n"sv) {
         // oplog notes require cluster permissions, and may not have a ns
         if (!authSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(dbName.tenantId()),
@@ -94,7 +79,11 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
     NamespaceString nss = NamespaceStringUtil::deserialize(
         tid, nsElem.checkAndGetStringData(), SerializationContext::stateDefault());
 
-    if (oplogEntry.hasField("ui"_sd)) {
+    // The database named in the 'ns' field, before the UUID override below. dropDatabase ignores
+    // any 'ui' at execution time and drops this database, so it must be authorized against it.
+    const DatabaseName nsFieldDbName = nss.dbName();
+
+    if (oplogEntry.hasField("ui"sv)) {
         // ns by UUID overrides the ns specified if they are different.
         auto catalog = CollectionCatalog::get(opCtx);
         boost::optional<NamespaceString> uuidCollNS =
@@ -108,8 +97,8 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
     checkBSONType(BSONType::object, oElem);
     BSONObj o = oElem.Obj();
 
-    if (opType == "c"_sd) {
-        StringData commandName = o.firstElement().fieldNameStringData();
+    if (opType == "c"sv) {
+        std::string_view commandName = o.firstElement().fieldNameStringData();
         Command* commandInOplogEntry = CommandHelpers::findCommand(opCtx, commandName);
         if (!commandInOplogEntry) {
             // Some oplog entries are internal-only and not registered in the global command
@@ -117,7 +106,7 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
             // TODO(SERVER-114573): Remove upgradeDowngradeViewlessTimeseries from this list once
             // 9.0 becomes last-lts, as the oplog entry will no longer exist.
             static const StringDataSet kInternalOplogCommands{
-                "upgradeDowngradeViewlessTimeseries"_sd,
+                "upgradeDowngradeViewlessTimeseries"sv,
             };
             if (kInternalOplogCommands.contains(commandName)) {
                 if (!authSession->isAuthorizedForActionsOnResource(
@@ -131,12 +120,16 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
         }
 
         auto dbNameForAuthCheck = nss.dbName();
-        if (commandName == "renameCollection"_sd) {
+        if (commandName == "renameCollection"sv) {
             // renameCollection commands must be run on the 'admin' database. Its arguments are
             // fully qualified namespaces. Catalog internals don't know the op produced by running
             // renameCollection was originally run on 'admin', so we must restore this.
             dbNameForAuthCheck = DatabaseNameUtil::deserialize(
                 nss.tenantId(), "admin", SerializationContext::stateDefault());
+        } else if (commandName == "dropDatabase"sv) {
+            // dropDatabase ignores any 'ui' at execution time and drops the database named in the
+            // 'ns' field, so authorize that database rather than the UUID-resolved one.
+            dbNameForAuthCheck = nsFieldDbName;
         }
 
         // TODO SERVER-123371 reuse the parse result for when we run() later. Note that when
@@ -160,9 +153,9 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
         }();
     }
 
-    if (opType == "i"_sd) {
+    if (opType == "i"sv) {
         return auth::checkAuthForInsert(authSession, opCtx, nss);
-    } else if (opType == "u"_sd) {
+    } else if (opType == "u"sv) {
         BSONElement o2Elem = oplogEntry["o2"];
         checkBSONType(BSONType::object, o2Elem);
         BSONObj o2 = o2Elem.Obj();
@@ -182,9 +175,9 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
                                         write_ops::UpdateModification::parseFromOplogEntry(
                                             o, write_ops::UpdateModification::DiffOptions{}),
                                         upsert);
-    } else if (opType == "d"_sd) {
+    } else if (opType == "d"sv) {
         return auth::checkAuthForDelete(authSession, opCtx, nss, o);
-    } else if (opType == "db"_sd) {
+    } else if (opType == "db"sv) {
         // It seems that 'db' isn't used anymore. Require all actions to prevent casual use.
         ActionSet allActions;
         allActions.addAllActions();
@@ -193,18 +186,24 @@ Status OplogApplicationChecks::checkOperationAuthorization(OperationContext* opC
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
-    } else if (opType == "ci"_sd) {
-        if (!authSession->isAuthorizedForActionsOnNamespace(nss, ActionType::containerInsert)) {
+    } else if (opType == "ci"sv) {
+        // Container ops write to the storage ident named by the op's "container" field, not to
+        // "nss" -- the two are unrelated, so this cannot be scoped to nss like the other ops
+        // above. Require the action on any resource instead.
+        if (!authSession->isAuthorizedForActionsOnResource(
+                ResourcePattern::forAnyResource(nss.tenantId()), ActionType::containerInsert)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
-    } else if (opType == "cd"_sd) {
-        if (!authSession->isAuthorizedForActionsOnNamespace(nss, ActionType::containerDelete)) {
+    } else if (opType == "cd"sv) {
+        if (!authSession->isAuthorizedForActionsOnResource(
+                ResourcePattern::forAnyResource(nss.tenantId()), ActionType::containerDelete)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
-    } else if (opType == "cu"_sd) {
-        if (!authSession->isAuthorizedForActionsOnNamespace(nss, ActionType::containerUpdate)) {
+    } else if (opType == "cu"sv) {
+        if (!authSession->isAuthorizedForActionsOnResource(
+                ResourcePattern::forAnyResource(nss.tenantId()), ActionType::containerUpdate)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
         return Status::OK();
@@ -246,7 +245,7 @@ Status OplogApplicationChecks::checkOperation(const BSONElement& e) {
                 str::stream() << "\"op\" field is not a string: " << e.fieldName()};
     }
     // operation type -- see logOp() comments for types
-    StringData opType = opElement.valueStringDataSafe();
+    std::string_view opType = opElement.valueStringDataSafe();
     if (opType.empty()) {
         return {ErrorCodes::IllegalOperation,
                 str::stream() << "\"op\" field value cannot be empty: " << e.fieldName()};
@@ -267,7 +266,7 @@ Status OplogApplicationChecks::checkOperation(const BSONElement& e) {
         return {ErrorCodes::IllegalOperation,
                 str::stream() << "namespaces cannot have embedded null characters"};
     }
-    if (opType != "n"_sd && nsElement.String().empty()) {
+    if (opType != "n"sv && nsElement.String().empty()) {
         return {ErrorCodes::IllegalOperation,
                 str::stream() << "\"ns\" field value cannot be empty when op type is not 'n': "
                               << e.fieldName()};

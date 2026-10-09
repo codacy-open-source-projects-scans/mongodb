@@ -60,7 +60,11 @@ function runPipelineUpdateKeyTests(topologyName, setupFn, teardownFn) {
         });
 
         it("should validate complex pipeline update key fields", function () {
-            const queryShapePipelineUpdateFieldsComplex = [...queryShapeUpdateFieldsRequired, "collation", "c"];
+            const queryShapePipelineUpdateFieldsComplex = [
+                ...queryShapeUpdateFieldsRequired,
+                "collation",
+                "c",
+            ];
             const pipelineUpdateCommandObjComplex = {
                 update: collName,
                 updates: [
@@ -78,6 +82,7 @@ function runPipelineUpdateKeyTests(topologyName, setupFn, teardownFn) {
                 bypassDocumentValidation: true,
                 comment: "pipeline update test!!!",
                 readConcern: {level: "local"},
+                writeConcern: {w: "majority", wtimeout: 5000},
                 maxTimeMS: 50 * 1000,
                 apiDeprecationErrors: false,
                 apiVersion: "1",
@@ -115,7 +120,7 @@ runPipelineUpdateKeyTests(
     "Standalone",
     () => {
         const conn = MongoRunner.runMongod({
-            setParameter: {internalQueryStatsRateLimit: -1, internalQueryStatsWriteCmdSampleRate: 1},
+            setParameter: {internalQueryStatsWriteCmdSampleRate: 1},
         });
         const testDB = conn.getDB("test");
         testDB[collName].drop();
@@ -129,7 +134,7 @@ runPipelineUpdateKeyTests(
     () => {
         const st = new ShardingTest({
             shards: 2,
-            mongosOptions: {setParameter: {internalQueryStatsRateLimit: -1, internalQueryStatsWriteCmdSampleRate: 1}},
+            mongosOptions: {setParameter: {internalQueryStatsWriteCmdSampleRate: 1}},
         });
         const testDB = st.s.getDB("test");
         st.shardColl(testDB[collName], {_id: 1}, {_id: 1});

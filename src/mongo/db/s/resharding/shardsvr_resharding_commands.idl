@@ -1,30 +1,5 @@
-# Copyright (C) 2026-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 
 # This file defines the internal commands sent by the resharding coordinator to shard servers.
 
@@ -45,6 +20,24 @@ structs:
             documentsDelta:
                 type: safeInt64
                 description: "The change in the number of documents since the provided cloneTimestamp."
+
+    ShardsvrReshardingRecipientFetchFinalCollectionStatsResponse:
+        description: "Response for the _shardsvrReshardingRecipientFetchFinalCollectionStats command."
+        is_command_reply: true
+        strict: false
+        fields:
+            documentsDelta:
+                type: safeInt64
+                description: "The change in the number of documents during the applying phase."
+
+    ShardsvrReshardingDonorGetCloneCountResponse:
+        description: "Response for the _shardsvrReshardingDonorGetCloneCount command."
+        is_command_reply: true
+        strict: false
+        fields:
+            documentsToCopy:
+                type: safeInt64
+                description: "Number of owned documents on this donor at the clone timestamp."
 
 commands:
     _shardsvrReshardDonorInitialize:
@@ -100,6 +93,41 @@ commands:
             reshardingUUID:
                 type: uuid
                 description: "The UUID for the resharding operation."
+
+    _shardsvrReshardingRecipientFetchFinalCollectionStats:
+        command_name: _shardsvrReshardingRecipientFetchFinalCollectionStats
+        cpp_name: ShardsvrReshardingRecipientFetchFinalCollectionStats
+        description:
+            "The internal command for querying a resharding recipient shard for the changes in
+            the number of documents in the collection being resharded during the applying phase."
+        namespace: type
+        type: namespacestring
+        reply_type: ShardsvrReshardingRecipientFetchFinalCollectionStatsResponse
+        api_version: ""
+        strict: false
+        fields:
+            reshardingUUID:
+                type: uuid
+                description: "The UUID for the resharding operation."
+
+    _shardsvrReshardingDonorGetCloneCount:
+        command_name: _shardsvrReshardingDonorGetCloneCount
+        cpp_name: ShardsvrReshardingDonorGetCloneCount
+        description:
+            "The internal command sent by the coordinator to a resharding donor shard to count
+            the documents owned by this donor at the clone timestamp."
+        namespace: type
+        type: namespacestring
+        reply_type: ShardsvrReshardingDonorGetCloneCountResponse
+        api_version: ""
+        strict: false
+        fields:
+            reshardingUUID:
+                type: uuid
+                description: "The UUID for the resharding operation."
+            cloneTimestamp:
+                type: timestamp
+                description: "The clone timestamp for the resharding operation."
 
     _shardsvrReshardRecipientInitialize:
         description:
@@ -171,3 +199,19 @@ commands:
         namespace: type
         reply_type: OkReply
         api_version: ""
+
+    _shardsvrReshardCleanupStaleChunks:
+        description:
+            "Internal command meant to clean up stale chunk information from the authoritative
+            shard catalog"
+        command_name: _shardsvrReshardCleanupStaleChunks
+        cpp_name: ShardsvrReshardCleanupStaleChunks
+        type: namespacestring
+        strict: false
+        namespace: type
+        reply_type: OkReply
+        api_version: ""
+        fields:
+            oldUUID:
+                type: uuid
+                description: "Old UUID of the collection before resharding succeeded"

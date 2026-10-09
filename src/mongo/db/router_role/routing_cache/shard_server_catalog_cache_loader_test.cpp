@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -52,12 +26,14 @@
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <string_view>
 #include <type_traits>
 
 #include <boost/move/utility_core.hpp>
@@ -166,6 +142,9 @@ public:
 private:
     void setUp() override;
     void tearDown() override;
+
+    // The SSCCL refuses to persist any data once Authoritative Shards is enabled.
+    unittest::ServerParameterGuard _disableAuthShards{"featureFlagAuthoritativeShardsCRUD", false};
 };
 
 void ShardServerCatalogCacheLoaderTest::setUp() {
@@ -588,11 +567,11 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindMixedChun
 
 TEST_F(ShardServerCatalogCacheLoaderTest, PersistedCachedDataIsDroppedWhenCorrupted) {
     //  Required fields for documents in config.cache.collections
-    std::vector<StringData> requiredFieldNames = {ShardCollectionType::kEpochFieldName,
-                                                  ShardCollectionType::kTimestampFieldName,
-                                                  ShardCollectionType::kUuidFieldName,
-                                                  ShardCollectionType::kKeyPatternFieldName,
-                                                  ShardCollectionType::kUniqueFieldName};
+    std::vector<std::string_view> requiredFieldNames = {ShardCollectionType::kEpochFieldName,
+                                                        ShardCollectionType::kTimestampFieldName,
+                                                        ShardCollectionType::kUuidFieldName,
+                                                        ShardCollectionType::kKeyPatternFieldName,
+                                                        ShardCollectionType::kUniqueFieldName};
 
     const auto collAndChunks = setUpChunkLoaderWithFiveChunks();
     _shardLoader->waitForCollectionFlush(operationContext(), kNss);
@@ -828,6 +807,19 @@ TEST_F(ShardServerCatalogCacheLoaderTest, GetDatabaseMarksOpsNonDeprioritizable)
     // The dbTask opCtx isn't destroyed before waitForDatabaseFlush returns. However, it is
     // destroyed just after, so we just wait a little until the update happens.
     assertSoon([&] { return getTotalMarkedNonDeprioritizable() - countBefore == 2; });
+}
+
+TEST_F(ShardServerCatalogCacheLoaderTest, NewLoadsFailWhenAuthoritativeShardsEnabled) {
+    unittest::ServerParameterGuard enableAuthShardsCRUD{"featureFlagAuthoritativeShardsCRUD", true};
+    unittest::ServerParameterGuard enableAuthShardsDDL{"featureFlagAuthoritativeShardsDDL", true};
+
+    ASSERT_THROWS_CODE(_shardLoader->getChunksSince(kNss, ChunkVersion::UNTRACKED()).get(),
+                       DBException,
+                       ErrorCodes::MetadataRefreshCanceledDueToFCVTransition);
+
+    ASSERT_THROWS_CODE(_shardLoader->getDatabase(kNss.dbName()).get(),
+                       DBException,
+                       ErrorCodes::MetadataRefreshCanceledDueToFCVTransition);
 }
 
 }  // namespace

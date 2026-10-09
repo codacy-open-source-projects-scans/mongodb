@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -109,33 +82,45 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
 
     // Verify bsoncolumn::min, max, minmax
     {
-        auto [expectedMin, expectedMax] = bsoncolumn::expectedMinMax(generatedElements);
+        auto expected = bsoncolumn::expectedMinMax(generatedElements);
 
         boost::intrusive_ptr allocator{new BSONElementStorage()};
 
-        auto minElem = bsoncolumn::min<bsoncolumn::BSONElementMaterializer>(
+        auto minResult = bsoncolumn::min<bsoncolumn::BSONElementMaterializer>(
             diff.data(), diff.size(), allocator);
-        invariant(minElem.binaryEqualValues(expectedMin),
-                  str::stream() << "min() returned: " << minElem.toString()
-                                << " but expected: " << expectedMin.toString()
+        invariant(minResult.first.binaryEqualValues(expected.min.first),
+                  str::stream() << "min() returned: " << minResult.first.toString()
+                                << " but expected: " << expected.min.first.toString()
                                 << ". Column: " << base64::encode(diff.data(), diff.size()));
+        if (!minResult.first.eoo()) {
+            invariant(minResult.second == expected.min.second,
+                      str::stream() << "min() returned index " << minResult.second
+                                    << " but expected index " << expected.min.second
+                                    << ". Column: " << base64::encode(diff.data(), diff.size()));
+        }
 
-        auto maxElem = bsoncolumn::max<bsoncolumn::BSONElementMaterializer>(
+        auto maxResult = bsoncolumn::max<bsoncolumn::BSONElementMaterializer>(
             diff.data(), diff.size(), allocator);
-        invariant(maxElem.binaryEqualValues(expectedMax),
-                  str::stream() << "max() returned: " << maxElem.toString()
-                                << " but expected: " << expectedMax.toString()
+        invariant(maxResult.first.binaryEqualValues(expected.max.first),
+                  str::stream() << "max() returned: " << maxResult.first.toString()
+                                << " but expected: " << expected.max.first.toString()
                                 << ". Column: " << base64::encode(diff.data(), diff.size()));
+        if (!maxResult.first.eoo()) {
+            invariant(maxResult.second == expected.max.second,
+                      str::stream() << "max() returned index " << maxResult.second
+                                    << " but expected index " << expected.max.second
+                                    << ". Column: " << base64::encode(diff.data(), diff.size()));
+        }
 
         auto [minmaxMin, minmaxMax] = bsoncolumn::minmax<bsoncolumn::BSONElementMaterializer>(
             diff.data(), diff.size(), allocator);
-        invariant(minmaxMin.binaryEqualValues(expectedMin),
+        invariant(minmaxMin.binaryEqualValues(expected.min.first),
                   str::stream() << "minmax().first returned: " << minmaxMin.toString()
-                                << " but expected: " << expectedMin.toString()
+                                << " but expected: " << expected.min.first.toString()
                                 << ". Column: " << base64::encode(diff.data(), diff.size()));
-        invariant(minmaxMax.binaryEqualValues(expectedMax),
+        invariant(minmaxMax.binaryEqualValues(expected.max.first),
                   str::stream() << "minmax().second returned: " << minmaxMax.toString()
-                                << " but expected: " << expectedMax.toString()
+                                << " but expected: " << expected.max.first.toString()
                                 << ". Column: " << base64::encode(diff.data(), diff.size()));
     }
 

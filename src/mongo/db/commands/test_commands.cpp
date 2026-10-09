@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/test_commands.h"
 
@@ -33,7 +7,6 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -136,6 +109,10 @@ public:
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
         LOGV2(20505, "Test-only command 'godinsert' invoked", "collection"_attr = nss.coll());
         BSONObj obj = cmdObj["obj"].embeddedObjectUserCheck();
+
+        // The insert below runs under an UnreplicatedWritesBlock, so no oplog entry is logged and
+        // nothing supplies a commit timestamp, even though the target collection is replicated.
+        shard_role_details::allowOneUntimestampedWrite(opCtx);
 
         AutoGetDb autodb(
             opCtx,
@@ -276,69 +253,13 @@ public:
 
 MONGO_REGISTER_COMMAND(DurableHistoryReplicatedTestCmd).testOnly().forShard();
 
-// TODO SERVER-80003 remove this test command when 8.0 branches off.
-class TimeseriesCatalogBucketParamsChangedTestCmd : public BasicCommand {
-public:
-    TimeseriesCatalogBucketParamsChangedTestCmd()
-        : BasicCommand("timeseriesCatalogBucketParamsChanged") {}
-
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
-        return AllowedOnSecondary::kAlways;
-    }
-
-    bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return false;
-    }
-
-    bool adminOnly() const override {
-        return false;
-    }
-
-    bool requiresAuth() const override {
-        return false;
-    }
-
-    // No auth needed because it only works when enabled via command line.
-    Status checkAuthForOperation(OperationContext*,
-                                 const DatabaseName&,
-                                 const BSONObj&) const override {
-        return Status::OK();
-    }
-
-    bool requiresAuthzChecks() const override {
-        return false;
-    }
-
-    std::string help() const override {
-        return "return the value of timeseriesCatalogBucketParamsChanged";
-    }
-
-    bool run(OperationContext* opCtx,
-             const DatabaseName& dbName,
-             const BSONObj& cmdObj,
-             BSONObjBuilder& result) override {
-        const NamespaceString fullNs = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
-        const auto coll = acquireCollection(
-            opCtx,
-            CollectionAcquisitionRequest::fromOpCtx(opCtx, fullNs, AcquisitionPrerequisites::kRead),
-            MODE_IS);
-        uassert(7927100, "Could not find a collection with the requested namespace", coll.exists());
-        auto output = coll.getCollectionPtr()->timeseriesBucketingParametersHaveChanged();
-        if (output) {
-            result.append("changed", *output);
-        }
-        return true;
-    }
-};
-
-MONGO_REGISTER_COMMAND(TimeseriesCatalogBucketParamsChangedTestCmd).testOnly().forShard();
 
 // TODO SERVER-110189: Make testing this command resilient to releases or update the name of this
 // command.
-class CommandFeatureFlaggedOnLatestFCVTestCmd83 : public BasicCommand {
+class CommandFeatureFlaggedOnLatestFCVTestCmd91 : public BasicCommand {
 public:
-    CommandFeatureFlaggedOnLatestFCVTestCmd83()
-        : BasicCommand("testCommandFeatureFlaggedOnLatestFCV83") {}
+    CommandFeatureFlaggedOnLatestFCVTestCmd91()
+        : BasicCommand("testCommandFeatureFlaggedOnLatestFCV91") {}
 
     bool adminOnly() const override {
         return false;
@@ -371,12 +292,12 @@ public:
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
-        LOGV2(10044800, "Test-only command 'testCommandFeatureFlaggedOnLatestFCV83' invoked");
+        LOGV2(10044800, "Test-only command 'testCommandFeatureFlaggedOnLatestFCV91' invoked");
         return true;
     }
 };
 
-MONGO_REGISTER_COMMAND(CommandFeatureFlaggedOnLatestFCVTestCmd83)
+MONGO_REGISTER_COMMAND(CommandFeatureFlaggedOnLatestFCVTestCmd91)
     .testOnly()
     .requiresFeatureFlag(feature_flags::gFeatureFlagBlender)
     .forShard();
@@ -467,11 +388,13 @@ public:
 
 #define BUILD_DESCRIPTOR_FOR_BOOL_CAPABILITIES(BOOL_FIELD_BUILDER_FN)        \
     BOOL_FIELD_BUILDER_FN(mustUsePrimaryDrivenIndexBuilds)                   \
+    BOOL_FIELD_BUILDER_FN(mustUseContainerWrites)                            \
     BOOL_FIELD_BUILDER_FN(shouldAvoidDuplicateCheckpoints)                   \
     BOOL_FIELD_BUILDER_FN(shouldDelayDataAccessDuringStartup)                \
     BOOL_FIELD_BUILDER_FN(shouldDisableTransactionUpdateCoalescing)          \
     BOOL_FIELD_BUILDER_FN(shouldStepDownForShutdown)                         \
     BOOL_FIELD_BUILDER_FN(usesSchemaEpochs)                                  \
+    BOOL_FIELD_BUILDER_FN(shouldUseClusteredCollectionOplogFastPath)         \
     BOOL_FIELD_BUILDER_FN(shouldUseOplogWritesForFlowControlSampling)        \
     BOOL_FIELD_BUILDER_FN(shouldUseReplicatedCatalogIdentifiers)             \
     BOOL_FIELD_BUILDER_FN(shouldUseReplicatedFastCount)                      \
@@ -485,9 +408,11 @@ public:
     BOOL_FIELD_BUILDER_FN(supportsPersistentOplogCapMaintainerThread)        \
     BOOL_FIELD_BUILDER_FN(supportsAsyncOplogMarkerGeneration)                \
     BOOL_FIELD_BUILDER_FN(supportsOplogSampling)                             \
+    BOOL_FIELD_BUILDER_FN(supportsOplogScanning)                             \
     BOOL_FIELD_BUILDER_FN(supportsPreservingPreparedTxnInPreciseCheckpoints) \
     BOOL_FIELD_BUILDER_FN(supportsTableLogging)                              \
     BOOL_FIELD_BUILDER_FN(supportsUnstableCheckpoints)                       \
+    BOOL_FIELD_BUILDER_FN(supportsVersionCursor)                             \
     BOOL_FIELD_BUILDER_FN(supportsColdCollections)
 
         // For each method listed in PERSISTENCE_PROVIDER_BOOL_CAPABILITIES, call the method and

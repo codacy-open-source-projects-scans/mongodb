@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/bson/bson_mutator/bson_mutator.h"
@@ -44,8 +18,12 @@ namespace mongo::bson_mutator {
         bsontype, BSONElementDomainVariant(defaultdomain)        \
     }
 
-static BSONDomainMap default_domains_{
-    BSON_MUTATOR_TAIL(BSON_MUTATOR_EXPAND_FIELD_TYPES(DOMAIN_MAP_INIT))};
+// Dynamically initialized singleton, safe for access cross-TU.
+static BSONDomainMap& defaultDomains() {
+    static BSONDomainMap kDefaultDomains{
+        BSON_MUTATOR_TAIL(BSON_MUTATOR_EXPAND_FIELD_TYPES(DOMAIN_MAP_INIT))};
+    return kDefaultDomains;
+}
 
 void BSONPrinter::PrintCorpusValue(const CorpusType& val,
                                    fuzztest::domain_implementor::RawSink out,
@@ -374,8 +352,9 @@ void BSONObjImpl::RemoveRandomElement(BSONObjBuilder& bob,
 
 void BSONObjImpl::CreateRandomObj(BSONObjBuilder& bob, absl::BitGenRef prng) {
     // select a random type from the full list of default bson element domains
-    auto b = default_domains_.begin();
-    std::advance(b, absl::Uniform(prng, 0UL, default_domains_.size()));
+    auto& defaults = defaultDomains();
+    auto b = defaults.begin();
+    std::advance(b, absl::Uniform(prng, 0UL, defaults.size()));
     auto type = b->first;
 
     // get a random field name. This may collide with a preconfigured field name, but that is
@@ -484,8 +463,9 @@ void BSONObjImpl::ModifyRandomElement(
             } else {
                 // change the type
                 // This won't change the type for fields defined in _inputElements
-                auto b = default_domains_.begin();
-                std::advance(b, absl::Uniform(prng, 0UL, default_domains_.size()));
+                auto& defaults = defaultDomains();
+                auto b = defaults.begin();
+                std::advance(b, absl::Uniform(prng, 0UL, defaults.size()));
                 auto new_type = b->first;
 
                 visitDomain(OverloadedVisitor{
@@ -514,7 +494,7 @@ void BSONObjImpl::ModifyRandomElement(
 }
 
 BSONObjImpl& BSONObjImpl::WithAny(const std::string& name) {
-    _inputElements.try_emplace(name, default_domains_);
+    _inputElements.try_emplace(name, defaultDomains());
     return *this;
 }
 
@@ -534,7 +514,7 @@ void BSONObjImpl::visitDomain(F visitor, std::string fieldName, BSONType domainT
             std::visit(visitor, std::get<BSONElementDomainVariant>(domain->second));
         }
 
-    } else if (auto domain = default_domains_.find(domainType); domain != default_domains_.end()) {
+    } else if (auto domain = defaultDomains().find(domainType); domain != defaultDomains().end()) {
         std::visit(visitor, domain->second);
     } else {
         GTEST_FAIL() << "invalid BSON type: fieldname: " << fieldName

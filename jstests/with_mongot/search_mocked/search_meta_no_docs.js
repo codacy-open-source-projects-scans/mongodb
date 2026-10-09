@@ -1,6 +1,7 @@
 /**
  * Verify that `$searchMeta` extracts SEARCH_META variable returned by mongot even if no docs
  * returned.
+ * TODO (SERVER-131069): Remove this mocked test file now that its coverage is provided by the zero-results case in e2e/search/search_meta.js.
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {MongotMock} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -48,7 +49,9 @@ const cursorId = NumberLong(17);
             },
         },
     ];
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}),
+    );
 
     let cursorMeta = coll.aggregate([{$searchMeta: searchQuery}], {cursor: {}});
     const expectedMeta = [{value: 42}];

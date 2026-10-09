@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 
@@ -82,11 +56,7 @@ void ShardServerTestFixture::setUp() {
 
     if (!_catalogCache) {
         _catalogCache =
-            std::make_unique<CatalogCache>(getServiceContext(),
-                                           _configServerCatalogCacheLoader,
-                                           _shardServerCatalogCacheLoader,
-                                           true /* cascadeDatabaseCacheLoaderShutdown */,
-                                           false /* cascadeCollectionCacheLoaderShutdown */);
+            std::make_unique<CatalogCache>(getServiceContext(), _configServerCatalogCacheLoader);
     }
 
     uassertStatusOK(
@@ -121,8 +91,8 @@ std::unique_ptr<ShardingCatalogClient> ShardServerTestFixture::makeShardingCatal
 }
 
 void ShardServerTestFixtureWithCatalogCacheMock::setUp() {
-    auto loader = std::make_shared<ShardServerCatalogCacheLoaderMock>();
-    setShardServerCatalogCacheLoader(loader);
+    auto loader = std::make_shared<ConfigServerCatalogCacheLoaderMock>();
+    setConfigServerCatalogCacheLoader(loader);
     setCatalogCache(std::make_unique<CatalogCacheMock>(getServiceContext(), std::move(loader)));
     ShardServerTestFixture::setUp();
 }
@@ -131,10 +101,10 @@ CatalogCacheMock* ShardServerTestFixtureWithCatalogCacheMock::getCatalogCacheMoc
     return static_cast<CatalogCacheMock*>(catalogCache());
 }
 
-std::shared_ptr<ShardServerCatalogCacheLoaderMock>
-ShardServerTestFixtureWithCatalogCacheMock::getCatalogCacheLoaderMock() {
-    auto mockLoader = std::dynamic_pointer_cast<ShardServerCatalogCacheLoaderMock>(
-        _shardServerCatalogCacheLoader);
+std::shared_ptr<ConfigServerCatalogCacheLoaderMock>
+ShardServerTestFixtureWithCatalogCacheMock::getConfigServerCatalogCacheLoaderMock() {
+    auto mockLoader = std::dynamic_pointer_cast<ConfigServerCatalogCacheLoaderMock>(
+        _configServerCatalogCacheLoader);
     invariant(mockLoader);
     return mockLoader;
 }
@@ -162,7 +132,7 @@ ShardServerTestFixtureWithCatalogCacheLoaderMock::getConfigServerCatalogCacheLoa
 }
 
 std::shared_ptr<ShardServerCatalogCacheLoaderMock>
-ShardServerTestFixtureWithCatalogCacheLoaderMock::getCatalogCacheLoaderMock() {
+ShardServerTestFixtureWithCatalogCacheLoaderMock::getShardServerCatalogCacheLoaderMock() {
     auto mockLoader = std::dynamic_pointer_cast<ShardServerCatalogCacheLoaderMock>(
         _shardServerCatalogCacheLoader);
     invariant(mockLoader);

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/db/extension/public/api.h"
@@ -155,28 +129,56 @@ private:
     REGISTER_EXTENSION_WITH_VERSION(MyExtensionType, (MONGODB_EXTENSION_API_VERSION))
 
 /**
- * Base case macro to define get_mongodb_extension.
+ * Base case macro to define both halves of the two-phase load protocol:
  *
- * setHostServices() is called BEFORE wrapCXXAndConvertExceptionToStatus so that sdk_uassert
- * and sdk_tassert (which rely on HostServices to throw across the C API boundary) are
- * available during version negotiation inside the lambda. setHostServices itself cannot throw.
+ *   - get_mongodb_extension_versions: publishes the registered set of supported API versions.
+ *     This runs BEFORE the host has selected a version, so no HostServices is available and
+ *     exceptions MUST NOT escape across the C boundary. The body is wrapped in a noexcept
+ *     try/catch that swallows any thrown exception, leaving 'len=0' so the host treats it
+ *     as "extension supports no versions" and rejects in negotiation.
+ *
+ *   - get_mongodb_extension: instantiates the extension at the host-selected version.
+ *     HostServices is delivered with this call and is laid out per the chosen version's
+ *     major, so 'setHostServices' is safe before the wrap and sdk_uassert/sdk_tassert
+ *     work normally inside the lambda.
  */
-#define DEFINE_GET_EXTENSION()                                                               \
-    extern "C" {                                                                             \
-    ::MongoExtensionStatus* get_mongodb_extension(                                           \
-        const ::MongoExtensionAPIVersionVector* hostVersions,                                \
-        const ::MongoExtensionHostServices* hostServices,                                    \
-        const ::MongoExtension** extension) {                                                \
-        mongo::extension::sdk::HostServicesAPI::setHostServices(hostServices);               \
-        return mongo::extension::wrapCXXAndConvertExceptionToStatus([&] {                    \
-            const auto& versionedExtensionContainer =                                        \
-                mongo::extension::sdk::VersionedExtensionContainer::getInstance();           \
-            static auto wrapper = std::make_unique<mongo::extension::sdk::ExtensionAdapter>( \
-                versionedExtensionContainer.getVersionedExtension(                           \
-                    mongo::extension::sdk::to_span(hostVersions)));                          \
-            *extension = reinterpret_cast<const ::MongoExtension*>(wrapper.get());           \
-        });                                                                                  \
-    }                                                                                        \
+#define DEFINE_GET_EXTENSION()                                                                     \
+    extern "C" {                                                                                   \
+    void get_mongodb_extension_versions(                                                           \
+        ::MongoExtensionAPIVersionVector* extensionVersions) noexcept {                            \
+        extensionVersions->len = 0;                                                                \
+        extensionVersions->versions = nullptr;                                                     \
+        try {                                                                                      \
+            /* The static vector of versions is materialized once, on the first call, from the */  \
+            /* singleton container. This is safe, given that version negotiation happens once  */  \
+            /* during an extension's lifetime, at which point all versions have already been   */  \
+            /* registered. */                                                                      \
+            static const std::vector<::MongoExtensionAPIVersion> kVersions =                       \
+                mongo::extension::sdk::VersionedExtensionContainer::getInstance()                  \
+                    .getVersionsList();                                                            \
+            extensionVersions->len = kVersions.size();                                             \
+            extensionVersions->versions = kVersions.data();                                        \
+        } catch (...) {                                                                            \
+            /* Swallow error. No HostServices available, no error-reporting path. Host will see */ \
+            /* len=0 and reject during negotiation. */                                             \
+            extensionVersions->len = 0;                                                            \
+            extensionVersions->versions = nullptr;                                                 \
+        }                                                                                          \
+    }                                                                                              \
+                                                                                                   \
+    ::MongoExtensionStatus* get_mongodb_extension(                                                 \
+        ::MongoExtensionAPIVersion version,                                                        \
+        const ::MongoExtensionHostServices* hostServices,                                          \
+        const ::MongoExtension** extension) {                                                      \
+        mongo::extension::sdk::HostServicesAPI::setHostServices(hostServices);                     \
+        return mongo::extension::wrapCXXAndConvertExceptionToStatus([&] {                          \
+            const auto& container =                                                                \
+                mongo::extension::sdk::VersionedExtensionContainer::getInstance();                 \
+            static auto wrapper = std::make_unique<mongo::extension::sdk::ExtensionAdapter>(       \
+                container.getVersionedExtension(version));                                         \
+            *extension = reinterpret_cast<const ::MongoExtension*>(wrapper.get());                 \
+        });                                                                                        \
+    }                                                                                              \
     }
 
 }  // namespace mongo::extension::sdk

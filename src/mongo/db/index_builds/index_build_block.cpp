@@ -1,48 +1,23 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/index_builds/index_build_block.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/aggregated_index_usage_tracker.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_index_usage_tracker.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_builds/primary_driven/enabled.h"
 #include "mongo/db/index_key_validate.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/plan_cache/join_plan_cache.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
@@ -51,7 +26,6 @@
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/ttl/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -97,7 +71,7 @@ void IndexBuildBlock::_completeInit(OperationContext* opCtx, Collection* collect
 Status IndexBuildBlock::initForResume(OperationContext* opCtx,
                                       Collection* collection,
                                       const IndexBuildInfo& indexBuildInfo,
-                                      IndexBuildPhaseEnum phase) {
+                                      IndexTableResumeBehavior behavior) {
     _indexBuildInfo = indexBuildInfo;
     auto writableEntry = collection->getIndexCatalog()->getWritableEntryByName(
         opCtx,
@@ -107,11 +81,13 @@ Status IndexBuildBlock::initForResume(OperationContext* opCtx,
     uassert(4945000,
             "Index catalog entry not found while attempting to resume index build",
             writableEntry);
+    // TODO (SERVER-109664): Remove kPrimaryDriven method check.
     uassert(4945001,
             "Cannot resume a non-hybrid index build",
-            _method == IndexBuildMethodEnum::kHybrid);
+            _method == IndexBuildMethodEnum::kHybrid ||
+                _method == IndexBuildMethodEnum::kPrimaryDriven);
 
-    if (phase == IndexBuildPhaseEnum::kBulkLoad) {
+    if (behavior == IndexTableResumeBehavior::recreate) {
         // A bulk cursor can only be opened on a fresh table, so we drop the table that was created
         // before shutdown and recreate it.
         auto collectionOptions = collection->getCollectionOptions();
@@ -125,12 +101,30 @@ Status IndexBuildBlock::initForResume(OperationContext* opCtx,
             return status;
     }
 
-    _indexBuildInterceptor =
-        std::make_unique<IndexBuildInterceptor>(opCtx,
-                                                indexBuildInfo,
-                                                LazyRecordStore::CreateMode::openExisting,
-                                                writableEntry->descriptor()->unique());
-    writableEntry->setIndexBuildInterceptor(_indexBuildInterceptor.get());
+    // Pending interceptors are keyed by the ident the write path reads off the catalog entry.
+    tassert(13491002,
+            "resumed index build's ident does not match its catalog entry",
+            writableEntry->getIdent() == indexBuildInfo.indexIdent);
+
+    // Adopt the pending interceptor a step-up created for this build rather than starting a second
+    // one over the same tables. It is released on commit, so a rollback leaves it where the write
+    // path can still find it.
+    _indexBuildInterceptor = index_builds::getPendingInterceptors(opCtx->getServiceContext())
+                                 .find(indexBuildInfo.indexIdent);
+    if (_indexBuildInterceptor) {
+        shard_role_details::getRecoveryUnit(opCtx)->onCommit(
+            [svcCtx = opCtx->getServiceContext(), indexIdent = indexBuildInfo.indexIdent](
+                OperationContext*, boost::optional<Timestamp>) {
+                index_builds::getPendingInterceptors(svcCtx).erase(indexIdent);
+            });
+    } else {
+        _indexBuildInterceptor =
+            std::make_shared<IndexBuildInterceptor>(opCtx,
+                                                    indexBuildInfo,
+                                                    LazyRecordStore::CreateMode::openExisting,
+                                                    writableEntry->descriptor()->unique());
+    }
+    writableEntry->setIndexBuildInterceptor(_indexBuildInterceptor);
 
     _completeInit(opCtx, collection);
 
@@ -172,20 +166,17 @@ Status IndexBuildBlock::init(OperationContext* opCtx,
         // Primary-driven index builds use replicated tables rather than temporary local tables, so
         // they need to be created at a consistent timestamp on all nodes. Currently this is done by
         // creating them eagerly rather than as needed.
-        // TODO(SERVER-110289): Use utility function instead of checking fcvSnapshot.
-        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-        auto isPrimaryDrivenIndexBuild = fcvSnapshot.isVersionInitialized() &&
-            feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
-                VersionContext::getDecoration(opCtx), fcvSnapshot);
+        auto isPrimaryDrivenIndexBuild = index_builds::primary_driven::enabled(
+            opCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
         auto mode = isPrimaryDrivenIndexBuild ? LazyRecordStore::CreateMode::immediate
                                               : LazyRecordStore::CreateMode::deferred;
 
         auto indexCatalog = collection->getIndexCatalog();
         auto indexCatalogEntry = indexCatalog->getWritableEntryByName(
             opCtx, getIndexName(), IndexCatalog::InclusionPolicy::kUnfinished);
-        _indexBuildInterceptor = std::make_unique<IndexBuildInterceptor>(
+        _indexBuildInterceptor = std::make_shared<IndexBuildInterceptor>(
             opCtx, *_indexBuildInfo, mode, indexCatalogEntry->descriptor()->unique());
-        indexCatalogEntry->setIndexBuildInterceptor(_indexBuildInterceptor.get());
+        indexCatalogEntry->setIndexBuildInterceptor(_indexBuildInterceptor);
     }
 
     _completeInit(opCtx, collection);
@@ -210,9 +201,6 @@ void IndexBuildBlock::fail(OperationContext* opCtx, Collection* collection) {
                           ErrorCodes::IndexBuildAborted);
 
     if (auto indexCatalogEntry = getWritableEntry(opCtx, collection)) {
-        if (_indexBuildInterceptor) {
-            indexCatalogEntry->setIndexBuildInterceptor(nullptr);
-        }
         invariant(
             collection->getIndexCatalog()->dropIndexEntry(opCtx, collection, indexCatalogEntry));
     } else {
@@ -329,6 +317,7 @@ Status IndexBuildBlock::buildEmptyIndex(OperationContext* opCtx,
     if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
         CollectionQueryInfo::get(collection).rebuildPathArrayness(opCtx, collection);
     }
+    join_ordering::bumpCollectionVersionForDDL(collection);
 
     return Status::OK();
 }

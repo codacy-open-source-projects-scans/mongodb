@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/audit.h"
 
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -49,8 +25,9 @@ void rotateAuditLog() {}
 namespace {
 const auto getAuditInterface = ServiceContext::declareDecoration<std::unique_ptr<AuditInterface>>();
 ServiceContext::ConstructorActionRegisterer registerCreateNoopAudit{
-    "initializeNoopAuditInterface",
-    [](ServiceContext* svcCtx) { AuditInterface::set(svcCtx, std::make_unique<AuditNoOp>()); }};
+    "initializeNoopAuditInterface", [](ServiceContext* svcCtx) {
+        AuditInterface::set(svcCtx, std::make_unique<AuditNoOp>());
+    }};
 }  // namespace
 
 AuditInterface* AuditInterface::get(ServiceContext* service) {
@@ -182,7 +159,7 @@ void logReplSetReconfig(Client* client, const BSONObj* oldConfig, const BSONObj*
         ->logReplSetReconfig(client, oldConfig, newConfig);
 }
 
-void logApplicationMessage(Client* client, StringData msg) {
+void logApplicationMessage(Client* client, std::string_view msg) {
     AuditInterface::get(client->getServiceContext())->logApplicationMessage(client, msg);
 }
 
@@ -195,7 +172,7 @@ void logShutdown(Client* client) {
 }
 
 void logLogout(Client* client,
-               StringData reason,
+               std::string_view reason,
                const BSONArray& initialUsers,
                const BSONArray& updatedUsers,
                const boost::optional<Date_t>& loginTime) {
@@ -205,9 +182,9 @@ void logLogout(Client* client,
 
 void logCreateIndex(Client* client,
                     const BSONObj* indexSpec,
-                    StringData indexname,
+                    std::string_view indexname,
                     const NamespaceString& nsname,
-                    StringData indexBuildState,
+                    std::string_view indexBuildState,
                     ErrorCodes::Error result) {
     AuditInterface::get(client->getServiceContext())
         ->logCreateIndex(client, indexSpec, indexname, nsname, indexBuildState, result);
@@ -235,7 +212,7 @@ void logCreateDatabase(Client* client, const DatabaseName& dbname) {
 }
 
 
-void logDropIndex(Client* client, StringData indexname, const NamespaceString& nsname) {
+void logDropIndex(Client* client, std::string_view indexname, const NamespaceString& nsname) {
     AuditInterface::get(client->getServiceContext())->logDropIndex(client, indexname, nsname);
 }
 
@@ -262,15 +239,15 @@ void logRenameCollection(Client* client,
     AuditInterface::get(client->getServiceContext())->logRenameCollection(client, source, target);
 }
 
-void logEnableSharding(Client* client, StringData dbname) {
+void logEnableSharding(Client* client, std::string_view dbname) {
     AuditInterface::get(client->getServiceContext())->logEnableSharding(client, dbname);
 }
 
-void logAddShard(Client* client, StringData name, const std::string& servers) {
+void logAddShard(Client* client, std::string_view name, const std::string& servers) {
     AuditInterface::get(client->getServiceContext())->logAddShard(client, name, servers);
 }
 
-void logRemoveShard(Client* client, StringData shardname) {
+void logRemoveShard(Client* client, std::string_view shardname) {
     AuditInterface::get(client->getServiceContext())->logRemoveShard(client, shardname);
 }
 

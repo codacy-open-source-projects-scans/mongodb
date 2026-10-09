@@ -1,39 +1,17 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/util/modules.h"
 
+#include <functional>
+
 namespace mongo {
-namespace MONGO_MOD_PUBLIC pipeline_factory {
+class LiteParsedPipeline;
+
+namespace [[MONGO_MOD_PUBLIC]] pipeline_factory {
 /**
  * Options for creating a pipeline.
  */
@@ -53,6 +31,10 @@ struct MakePipelineOptions {
     ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed;
     PipelineValidatorCallback validator = nullptr;
     boost::optional<BSONObj> readConcern;
+
+    // Optional caller-supplied hook invoked on the desugared LiteParsedPipeline to resolve/bind
+    // involved-namespace views onto its stages.
+    std::function<void(LiteParsedPipeline&)> resolveInvolvedNamespacesFn;
 };
 
 static const MakePipelineOptions kOptionsMinimal{
@@ -108,6 +90,28 @@ std::unique_ptr<Pipeline> makePipelineFromViewDefinition(
     const NamespaceString& originalNs);
 
 /**
+ * If 'resolvedNs' refers to a view with a non-simple default collation, builds the corresponding
+ * collator and installs it on 'expCtx'. No-op for collections and simple-collation views.
+ */
+void applyViewDefaultCollation(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                               const ResolvedNamespace& resolvedNs);
+
+
+/**
+ * StageParams-input sibling of makePipelineFromViewDefinitionLPP(). Builds a sub-pipeline from
+ * pre-computed StageParams rather than a LiteParsedPipeline. Unlike the LPP overload, this
+ * function never stitches the view onto the pipeline: StageParams are produced by the LiteParsed
+ * layer, which has already applied view resolution, so stitching is structurally unnecessary.
+ */
+std::unique_ptr<Pipeline> makePipelineFromViewDefinitionStageParams(
+    const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
+    const ResolvedNamespace& resolvedNs,
+    StageParamsPipeline stageParams,
+    const std::vector<BSONObj>& rawPipeline,
+    const NamespaceString& userNss,
+    const MakePipelineOptions& opts);
+
+/**
  * Parses a facet sub-pipeline from a vector of raw BSONObjs by sending the raw pipeline through
  * LiteParsed before creating the Pipeline. This skips top-level validation because facet
  * sub-pipelines have different validation requirements than top-level pipelines.
@@ -116,5 +120,5 @@ std::unique_ptr<Pipeline> makeFacetPipeline(const std::vector<BSONObj>& rawPipel
                                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             PipelineValidatorCallback validator = nullptr);
 
-}  // namespace MONGO_MOD_PUBLIC pipeline_factory
+}  // namespace pipeline_factory
 }  // namespace mongo

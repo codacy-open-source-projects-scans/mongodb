@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/transport/service_executor_reserved.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/service_executor_utils.h"
@@ -41,7 +14,9 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/out_of_line_executor.h"
 
+#include <algorithm>
 #include <mutex>
+#include <string_view>
 #include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
@@ -50,13 +25,14 @@
 namespace mongo {
 namespace transport {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kExecutorName = "reserved"_sd;
+constexpr auto kExecutorName = "reserved"sv;
 
-constexpr auto kThreadsRunning = "threadsRunning"_sd;
-constexpr auto kClientsInTotal = "clientsInTotal"_sd;
-constexpr auto kClientsRunning = "clientsRunning"_sd;
-constexpr auto kClientsWaiting = "clientsWaitingForData"_sd;
+constexpr auto kThreadsRunning = "threadsRunning"sv;
+constexpr auto kClientsInTotal = "clientsInTotal"sv;
+constexpr auto kClientsRunning = "clientsRunning"sv;
+constexpr auto kClientsWaiting = "clientsWaitingForData"sv;
 
 const auto getServiceExecutorReserved =
     ServiceContext::declareDecoration<std::unique_ptr<ServiceExecutorReserved>>();
@@ -84,7 +60,7 @@ void ServiceExecutorReserved::start() {
     {
         std::unique_lock<std::mutex> lk(_mutex);
         _stillRunning.store(true);
-        _numStartingThreads = _reservedThreads;
+        _numStartingThreads.store(_reservedThreads);
     }
 
     for (size_t i = 0; i < _reservedThreads; i++) {
@@ -102,8 +78,8 @@ Status ServiceExecutorReserved::_startWorker() {
             _shutdownCondition.notify_one();
         });
 
-        _numStartingThreads--;
-        _numReadyThreads++;
+        _numStartingThreads.subtractAndFetch(1);
+        _numReadyThreads.addAndFetch(1);
 
         while (_stillRunning.load()) {
             _threadWakeup.wait(lk, [&] { return (!_stillRunning.load() || !_readyTasks.empty()); });
@@ -118,10 +94,11 @@ Status ServiceExecutorReserved::_startWorker() {
 
             auto task = std::move(_readyTasks.front());
             _readyTasks.pop_front();
-            _numReadyThreads -= 1;
+            _numReadyThreads.subtractAndFetch(1);
             bool launchReplacement = false;
-            if (_numReadyThreads + _numStartingThreads < _reservedThreads) {
-                _numStartingThreads++;
+            // lk is still needed here to prevent a toctou bug.
+            if (_numReadyThreads.load() + _numStartingThreads.load() < _reservedThreads) {
+                _numStartingThreads.addAndFetch(1);
                 launchReplacement = true;
             }
 
@@ -133,9 +110,7 @@ Status ServiceExecutorReserved::_startWorker() {
                     LOGV2_WARNING(22981,
                                   "Could not start new reserve worker thread",
                                   "error"_attr = threadStartStatus);
-                    lk.lock();
-                    _numStartingThreads--;
-                    lk.unlock();
+                    _numStartingThreads.subtractAndFetch(1);
                 }
             }
 
@@ -146,10 +121,10 @@ Status ServiceExecutorReserved::_startWorker() {
             }
 
             lk.lock();
-            if (_numReadyThreads + 1 > _reservedThreads) {
+            if (_numReadyThreads.load() + 1 > _reservedThreads) {
                 break;
             } else {
-                _numReadyThreads += 1;
+                _numReadyThreads.addAndFetch(1);
             }
         }
 
@@ -208,9 +183,11 @@ void ServiceExecutorReserved::appendStats(BSONObjBuilder* bob) const {
     };
 
     auto statlet = [&] {
-        std::lock_guard lk(_mutex);
         auto threads = static_cast<int>(_numRunningWorkerThreads.loadRelaxed());
-        auto total = static_cast<int>(threads - _numReadyThreads - _numStartingThreads);
+        auto ready = static_cast<int>(_numReadyThreads.loadRelaxed());
+        auto starting = static_cast<int>(_numStartingThreads.loadRelaxed());
+        // Clamp to 0 in case there is a race condition where ready + starting > threads.
+        auto total = std::max(threads - ready - starting, 0);
         auto running = total;
         auto waiting = 0;
         return Statlet{threads, total, running, waiting};

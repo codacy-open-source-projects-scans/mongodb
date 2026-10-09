@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_project.h"
 
@@ -49,11 +23,13 @@
 #include "mongo/util/str.h"
 
 #include <cstddef>
+#include <string_view>
 #include <vector>
 
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 using std::vector;
 
 //
@@ -68,7 +44,7 @@ using UnsetTest = AggregationContextFixture;
 
 TEST_F(ProjectStageTest, InclusionProjectionShouldRemoveUnspecifiedFields) {
     auto project = DocumentSourceProject::create(
-        BSON("a" << true << "c" << BSON("d" << true)), getExpCtx(), "$project"_sd);
+        BSON("a" << true << "c" << BSON("d" << true)), getExpCtx(), "$project"sv);
     auto mockStage =
         exec::agg::MockStage::createForTest("{_id: 0, a: 1, b: 1, c: {d: 1}}", getExpCtx());
     auto projectStage = exec::agg::buildStageAndStitch(project, mockStage);
@@ -85,9 +61,7 @@ TEST_F(ProjectStageTest, InclusionProjectionShouldRemoveUnspecifiedFields) {
 
 TEST_F(ProjectStageTest, ShouldOptimizeInnerExpressions) {
     auto project = DocumentSourceProject::create(
-        BSON("a" << BSON("$and" << BSON_ARRAY(BSON("$const" << true)))),
-        getExpCtx(),
-        "$project"_sd);
+        BSON("a" << BSON("$and" << BSON_ARRAY(BSON("$const" << true)))), getExpCtx(), "$project"sv);
     checked_cast<DocumentSourceSingleDocumentTransformation*>(project.get())->optimize();
     // The $and should have been replaced with its only argument.
     vector<Value> serializedArray;
@@ -108,7 +82,7 @@ TEST_F(ProjectStageTest, ShouldErrorOnNonObjectSpec) {
  * projection.
  */
 TEST_F(ProjectStageTest, InclusionShouldBeAbleToProcessMultipleDocuments) {
-    auto project = DocumentSourceProject::create(BSON("a" << true), getExpCtx(), "$project"_sd);
+    auto project = DocumentSourceProject::create(BSON("a" << true), getExpCtx(), "$project"sv);
     auto mockStage =
         exec::agg::MockStage::createForTest({"{a: 1, b: 2}", "{a: 3, b: 4}"}, getExpCtx());
     auto projectStage = exec::agg::buildStageAndStitch(project, mockStage);
@@ -132,7 +106,7 @@ TEST_F(ProjectStageTest, InclusionShouldBeAbleToProcessMultipleDocuments) {
  * projection.
  */
 TEST_F(ProjectStageTest, ExclusionShouldBeAbleToProcessMultipleDocuments) {
-    auto project = DocumentSourceProject::create(BSON("a" << false), getExpCtx(), "$project"_sd);
+    auto project = DocumentSourceProject::create(BSON("a" << false), getExpCtx(), "$project"sv);
     auto source =
         exec::agg::MockStage::createForTest({"{a: 1, b: 2}", "{a: 3, b: 4}"}, getExpCtx());
     auto projectStage = exec::agg::buildStageAndStitch(project, source);
@@ -152,7 +126,7 @@ TEST_F(ProjectStageTest, ExclusionShouldBeAbleToProcessMultipleDocuments) {
 }
 
 TEST_F(ProjectStageTest, ShouldPropagatePauses) {
-    auto project = DocumentSourceProject::create(BSON("a" << false), getExpCtx(), "$project"_sd);
+    auto project = DocumentSourceProject::create(BSON("a" << false), getExpCtx(), "$project"sv);
     auto mockStage =
         exec::agg::MockStage::createForTest({Document(),
                                              DocumentSource::GetNextResult::makePauseExecution(),
@@ -179,7 +153,7 @@ TEST_F(ProjectStageTest, InclusionShouldAddDependenciesOfIncludedAndComputedFiel
     auto project = DocumentSourceProject::create(
         fromjson("{a: true, x: '$b', y: {$and: ['$c','$d']}, z: {$meta: 'textScore'}}"),
         getExpCtx(),
-        "$project"_sd);
+        "$project"sv);
     DepsTracker dependencies(DepsTracker::kOnlyTextScore);
     ASSERT_EQUALS(DepsTracker::State::EXHAUSTIVE_FIELDS, project->getDependencies(&dependencies));
     ASSERT_EQUALS(5U, dependencies.fields.size());
@@ -202,7 +176,7 @@ TEST_F(ProjectStageTest, InclusionShouldAddDependenciesOfIncludedAndComputedFiel
 
 TEST_F(ProjectStageTest, ExclusionShouldNotAddDependencies) {
     auto project = DocumentSourceProject::create(
-        fromjson("{a: false, 'b.c': false}"), getExpCtx(), "$project"_sd);
+        fromjson("{a: false, 'b.c': false}"), getExpCtx(), "$project"sv);
 
     DepsTracker dependencies;
     ASSERT_EQUALS(DepsTracker::State::SEE_NEXT, project->getDependencies(&dependencies));
@@ -216,7 +190,7 @@ TEST_F(ProjectStageTest, InclusionProjectionReportsIncludedPathsFromGetModifiedP
     auto project = DocumentSourceProject::create(
         fromjson("{a: true, 'b.c': {d: true}, e: {f: {g: true}}, h: {i: {$literal: true}}}"),
         getExpCtx(),
-        "$project"_sd);
+        "$project"sv);
 
     auto modifiedPaths = project->getModifiedPaths();
     ASSERT(modifiedPaths.type == DocumentSource::GetModPathsReturn::Type::kAllExcept);
@@ -231,7 +205,7 @@ TEST_F(ProjectStageTest, InclusionProjectionReportsIncludedPathsButExcludesId) {
     auto project = DocumentSourceProject::create(
         fromjson("{_id: false, 'b.c': {d: true}, e: {f: {g: true}}, h: {i: {$literal: true}}}"),
         getExpCtx(),
-        "$project"_sd);
+        "$project"sv);
 
     auto modifiedPaths = project->getModifiedPaths();
     ASSERT(modifiedPaths.type == DocumentSource::GetModPathsReturn::Type::kAllExcept);
@@ -242,7 +216,7 @@ TEST_F(ProjectStageTest, InclusionProjectionReportsIncludedPathsButExcludesId) {
 
 TEST_F(ProjectStageTest, ExclusionProjectionReportsExcludedPathsAsModifiedPaths) {
     auto project = DocumentSourceProject::create(
-        fromjson("{a: false, 'b.c': {d: false}, e: {f: {g: false}}}"), getExpCtx(), "$project"_sd);
+        fromjson("{a: false, 'b.c': {d: false}, e: {f: {g: false}}}"), getExpCtx(), "$project"sv);
 
     auto modifiedPaths = project->getModifiedPaths();
     ASSERT(modifiedPaths.type == DocumentSource::GetModPathsReturn::Type::kFiniteSet);
@@ -254,9 +228,7 @@ TEST_F(ProjectStageTest, ExclusionProjectionReportsExcludedPathsAsModifiedPaths)
 
 TEST_F(ProjectStageTest, ExclusionProjectionReportsExcludedPathsWithIdExclusion) {
     auto project = DocumentSourceProject::create(
-        fromjson("{_id: false, 'b.c': {d: false}, e: {f: {g: false}}}"),
-        getExpCtx(),
-        "$project"_sd);
+        fromjson("{_id: false, 'b.c': {d: false}, e: {f: {g: false}}}"), getExpCtx(), "$project"sv);
 
     auto modifiedPaths = project->getModifiedPaths();
     ASSERT(modifiedPaths.type == DocumentSource::GetModPathsReturn::Type::kFiniteSet);
@@ -270,7 +242,7 @@ TEST_F(ProjectStageTest, CanUseRemoveSystemVariableToConditionallyExcludeProject
     auto project = DocumentSourceProject::create(
         fromjson("{a: 1, b: {$cond: [{$eq: ['$b', 4]}, '$$REMOVE', '$b']}}"),
         getExpCtx(),
-        "$project"_sd);
+        "$project"sv);
     auto source =
         exec::agg::MockStage::createForTest({"{a: 2, b: 2}", "{a: 3, b: 4}"}, getExpCtx());
     auto projectStage = exec::agg::buildStageAndStitch(project, source);
@@ -289,7 +261,7 @@ TEST_F(ProjectStageTest, CanUseRemoveSystemVariableToConditionallyExcludeProject
 
 TEST_F(ProjectStageTest, ProjectionCorrectlyReportsRenamesForwards) {
     auto project =
-        DocumentSourceProject::create(fromjson("{'renamedB' : '$b'}"), getExpCtx(), "$project"_sd);
+        DocumentSourceProject::create(fromjson("{'renamedB' : '$b'}"), getExpCtx(), "$project"sv);
     auto renames =
         semantic_analysis::renamedPaths({"b"}, *project, semantic_analysis::Direction::kForward);
     // renamedPaths should return a mapping of old name->new name for each path in interestingPaths
@@ -303,7 +275,7 @@ TEST_F(ProjectStageTest, ProjectionCorrectlyReportsRenamesForwards) {
 
 TEST_F(ProjectStageTest, ProjectionRenameModifiesDestination) {
     auto project = DocumentSourceProject::create(
-        fromjson("{'somePath' : '$otherField'}"), getExpCtx(), "$project"_sd);
+        fromjson("{'somePath' : '$otherField'}"), getExpCtx(), "$project"sv);
 
     // Forwards: "somePath" is _not_ preserved by this projection - any existing value has been
     // overwritten.
@@ -333,7 +305,7 @@ TEST_F(ProjectStageTest, ProjectionRenameModifiesDestination) {
 
 TEST_F(ProjectStageTest, ProjectionCorrectlyReportsRenamesBackwards) {
     auto project =
-        DocumentSourceProject::create(fromjson("{'renamedB' : '$b'}"), getExpCtx(), "$project"_sd);
+        DocumentSourceProject::create(fromjson("{'renamedB' : '$b'}"), getExpCtx(), "$project"sv);
     auto renames = semantic_analysis::renamedPaths(
         {"renamedB"}, *project, semantic_analysis::Direction::kBackward);
     auto single_rename = renames->extract("renamedB");
@@ -358,9 +330,7 @@ BSONObj makeProjectForNestedDocument(size_t depth) {
 
 TEST_F(ProjectStageTest, CanAddNestedDocumentExactlyAtDepthLimit) {
     auto project = DocumentSourceProject::create(
-        makeProjectForNestedDocument(BSONDepth::getMaxAllowableDepth()),
-        getExpCtx(),
-        "$project"_sd);
+        makeProjectForNestedDocument(BSONDepth::getMaxAllowableDepth()), getExpCtx(), "$project"sv);
     auto mock = exec::agg::MockStage::createForTest(Document{{"_id", 1}}, getExpCtx());
     auto projectStage = exec::agg::buildStageAndStitch(project, mock);
 
@@ -372,7 +342,7 @@ TEST_F(ProjectStageTest, CannotAddNestedDocumentExceedingDepthLimit) {
     ASSERT_THROWS_CODE(DocumentSourceProject::create(
                            makeProjectForNestedDocument(BSONDepth::getMaxAllowableDepth() + 1),
                            getExpCtx(),
-                           "$project"_sd),
+                           "$project"sv),
                        AssertionException,
                        ErrorCodes::Overflow);
 }
@@ -380,7 +350,7 @@ TEST_F(ProjectStageTest, CannotAddNestedDocumentExceedingDepthLimit) {
 /**
  * A default redaction strategy that generates easy to check results for testing purposes.
  */
-std::string transformIdentifiersForTest(StringData s) {
+std::string transformIdentifiersForTest(std::string_view s) {
     return str::stream() << "HASH<" << s << ">";
 }
 
@@ -388,7 +358,7 @@ TEST_F(ProjectStageTest, ShapifyAndRedact) {
     auto inclusionProject = DocumentSourceProject::create(
         fromjson("{a: true, x: '$b', y: {$and: ['$c','$d']}, z: {$meta: 'textScore'}}"),
         getExpCtx(),
-        "$project"_sd);
+        "$project"sv);
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -405,7 +375,7 @@ TEST_F(ProjectStageTest, ShapifyAndRedact) {
         redact(*inclusionProject));
 
     auto exclusionProject = DocumentSourceProject::create(
-        fromjson("{a: false, 'b.c': false}"), getExpCtx(), "$project"_sd);
+        fromjson("{a: false, 'b.c': false}"), getExpCtx(), "$project"sv);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$project": {

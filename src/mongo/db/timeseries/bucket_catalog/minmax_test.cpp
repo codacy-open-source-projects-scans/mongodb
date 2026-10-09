@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -38,6 +11,7 @@
 #include <iterator>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -45,6 +19,7 @@
 
 namespace mongo::timeseries::bucket_catalog {
 namespace {
+using namespace std::literals::string_view_literals;
 using Entry = FlatBSONStore<MinMaxElement, BSONElementValueBuffer>::Entry;
 
 std::string concatFieldNames(const MinMaxStore::Obj& obj) {
@@ -87,15 +62,15 @@ TEST(MinMax, Insert) {
 
     // No subelements to start
     auto obj = minmax.root();
-    ASSERT_EQ(std::distance(obj.begin(), obj.end()), 0);
+    EXPECT_EQ(std::distance(obj.begin(), obj.end()), 0);
 
     // We can insert at begin
     {
         auto [inserted, end] = obj.insert(obj.begin(), "b");
         ASSERT(obj.begin() == inserted);
         ASSERT(obj.end() == end);
-        ASSERT_EQ(std::distance(inserted, end), 1);
-        ASSERT_EQ(inserted->fieldName(), "b");
+        EXPECT_EQ(std::distance(inserted, end), 1);
+        EXPECT_EQ(inserted->fieldName(), "b");
 
         // parent should be pointing to obj
         ASSERT(obj.object(inserted).parent().iterator() == obj.iterator());
@@ -106,14 +81,14 @@ TEST(MinMax, Insert) {
         auto [inserted, end] = obj.insert(obj.begin(), "a");
         ASSERT(obj.begin() == inserted);
         ASSERT(obj.end() == end);
-        ASSERT_EQ(std::distance(inserted, end), 2);
-        ASSERT_EQ(inserted->fieldName(), "a");
+        EXPECT_EQ(std::distance(inserted, end), 2);
+        EXPECT_EQ(inserted->fieldName(), "a");
         ASSERT(obj.object(inserted).parent().iterator() == obj.iterator());
 
         // Validate the existing element
         ++inserted;
-        ASSERT_EQ(inserted->fieldName(), "b");
-        ASSERT_EQ(concatFieldNames(obj), "ab");
+        EXPECT_EQ(inserted->fieldName(), "b");
+        EXPECT_EQ(concatFieldNames(obj), "ab");
         ASSERT(obj.object(inserted).parent().iterator() == obj.iterator());
     }
 
@@ -121,10 +96,10 @@ TEST(MinMax, Insert) {
     {
         auto [inserted, end] = obj.insert(obj.end(), "d");
         ASSERT(obj.end() == end);
-        ASSERT_EQ(std::distance(inserted, end), 1);
-        ASSERT_EQ(std::distance(obj.begin(), obj.end()), 3);
-        ASSERT_EQ(inserted->fieldName(), "d");
-        ASSERT_EQ(concatFieldNames(obj), "abd");
+        EXPECT_EQ(std::distance(inserted, end), 1);
+        EXPECT_EQ(std::distance(obj.begin(), obj.end()), 3);
+        EXPECT_EQ(inserted->fieldName(), "d");
+        EXPECT_EQ(concatFieldNames(obj), "abd");
         ASSERT(obj.object(inserted).parent().iterator() == obj.iterator());
     }
 
@@ -134,9 +109,9 @@ TEST(MinMax, Insert) {
         ++it;
         ++it;
         auto [inserted, end] = obj.insert(it, "c");
-        ASSERT_EQ(concatFieldNames(obj), "abcd");
-        ASSERT_EQ(std::distance(inserted, end), 2);
-        ASSERT_EQ(std::distance(obj.begin(), obj.end()), 4);
+        EXPECT_EQ(concatFieldNames(obj), "abcd");
+        EXPECT_EQ(std::distance(inserted, end), 2);
+        EXPECT_EQ(std::distance(obj.begin(), obj.end()), 4);
         ASSERT(obj.object(inserted).parent().iterator() == obj.iterator());
 
         // Validate last element that it got parent updated
@@ -149,11 +124,11 @@ TEST(MinMax, MinMaxNoUpdatesAfterFullMinMax) {
     tracking::Context trackingContext;
     MinMax minMaxObj{trackingContext};
     const auto* strCmp = &simpleStringDataComparator;
-    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.min(), BSON("a" << 2 << "b" << 3));
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSONObj());
 
-    minMaxObj.update(BSON("a" << 1 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 1 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.max(), BSON("a" << 2 << "b" << 3));
     ASSERT_BSONOBJ_EQ(minMaxObj.maxUpdates(), BSONObj());
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSON("u" << BSON("a" << 1)));
@@ -165,7 +140,7 @@ TEST(MinMax, MinMaxNoUpdatesAfterFullMinMaxNested) {
     const auto* strCmp = &simpleStringDataComparator;
 
     auto obj = BSON("a" << BSON("z" << 1) << "b" << BSON_ARRAY(BSON("z" << 1) << BSON("z" << 2)));
-    minMaxObj.update(obj, "_meta"_sd, strCmp);
+    minMaxObj.update(obj, "_meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.min(), obj);
     ASSERT_BSONOBJ_EQ(minMaxObj.max(), obj);
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSONObj{});
@@ -173,7 +148,7 @@ TEST(MinMax, MinMaxNoUpdatesAfterFullMinMaxNested) {
 
     minMaxObj.update(
         BSON("a" << BSON_ARRAY(BSON("z" << 1) << BSON("z" << 2)) << "b" << BSON("z" << 1)),
-        "_meta"_sd,
+        "_meta"sv,
         strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSON("u" << BSON("b" << BSON("z" << 1))));
     ASSERT_BSONOBJ_EQ(minMaxObj.maxUpdates(),
@@ -186,10 +161,10 @@ TEST(MinMax, MinMaxInitialUpdates) {
     tracking::Context trackingContext;
     MinMax minMaxObj{trackingContext};
     const auto* strCmp = &simpleStringDataComparator;
-    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSON("u" << BSON("a" << 2 << "b" << 3)));
 
-    minMaxObj.update(BSON("a" << 1 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 1 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSON("u" << BSON("a" << 1)));
 }
 
@@ -197,13 +172,13 @@ TEST(MinMax, MinMaxMixedUpdates) {
     tracking::Context trackingContext;
     MinMax minMaxObj{trackingContext};
     const auto* strCmp = &simpleStringDataComparator;
-    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 2 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.min(), BSON("a" << 2 << "b" << 3));
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSONObj());
     ASSERT_BSONOBJ_EQ(minMaxObj.maxUpdates(), BSON("u" << BSON("a" << 2 << "b" << 3)));
     ASSERT_BSONOBJ_EQ(minMaxObj.max(), BSON("a" << 2 << "b" << 3));
 
-    minMaxObj.update(BSON("a" << 5 << "b" << 3 << "meta" << 4), "meta"_sd, strCmp);
+    minMaxObj.update(BSON("a" << 5 << "b" << 3 << "meta" << 4), "meta"sv, strCmp);
     ASSERT_BSONOBJ_EQ(minMaxObj.minUpdates(), BSONObj());
     ASSERT_BSONOBJ_EQ(minMaxObj.maxUpdates(), BSON("u" << BSON("a" << 5)));
 }
@@ -215,7 +190,7 @@ TEST(MinMax, SubObjInsert) {
     auto [inserted, _] = obj.insert(obj.end(), "b");
 
     auto subobjB = obj.object(inserted);
-    ASSERT_EQ(std::distance(subobjB.begin(), subobjB.end()), 0);
+    EXPECT_EQ(std::distance(subobjB.begin(), subobjB.end()), 0);
     ASSERT(obj.begin() != subobjB.begin());
     ASSERT(obj.end() == subobjB.end());
     ASSERT(obj.begin() == subobjB.parent().begin());
@@ -224,27 +199,27 @@ TEST(MinMax, SubObjInsert) {
     subobjB.insert(subobjB.end(), "3");
     obj = subobjB.parent();
 
-    ASSERT_EQ(concatFieldNames(obj), "b");
-    ASSERT_EQ(concatFieldNames(obj.object(obj.begin())), "13");
+    EXPECT_EQ(concatFieldNames(obj), "b");
+    EXPECT_EQ(concatFieldNames(obj.object(obj.begin())), "13");
 
     obj.insert(obj.end(), "c");
-    ASSERT_EQ(concatFieldNames(obj), "bc");
-    ASSERT_EQ(concatFieldNames(obj.object(obj.begin())), "13");
+    EXPECT_EQ(concatFieldNames(obj), "bc");
+    EXPECT_EQ(concatFieldNames(obj.object(obj.begin())), "13");
 
     std::tie(inserted, _) = obj.insert(obj.begin(), "a");
-    ASSERT_EQ(concatFieldNames(obj), "abc");
+    EXPECT_EQ(concatFieldNames(obj), "abc");
 
     subobjB = obj.object(std::next(inserted));
-    ASSERT_EQ(concatFieldNames(subobjB), "13");
+    EXPECT_EQ(concatFieldNames(subobjB), "13");
 
     // Insert in subobj and check that the last element in obj 'c' got its parent updated.
     std::tie(inserted, _) = subobjB.insert(std::next(subobjB.begin()), "2");
     obj = subobjB.parent();
-    ASSERT_EQ(concatFieldNames(obj), "abc");
-    ASSERT_EQ(concatFieldNames(subobjB), "123");
+    EXPECT_EQ(concatFieldNames(obj), "abc");
+    EXPECT_EQ(concatFieldNames(subobjB), "123");
     auto itC = obj.begin();
     std::advance(itC, 2);
-    ASSERT_EQ(itC->fieldName(), "c");
+    EXPECT_EQ(itC->fieldName(), "c");
     ASSERT(obj.object(itC).parent().iterator() == obj.iterator());
 
     // Create a third level, validate that all iterators is updated
@@ -252,12 +227,12 @@ TEST(MinMax, SubObjInsert) {
     subobjB2.insert(subobjB2.begin(), "x");
     subobjB = subobjB2.parent();
     obj = subobjB.parent();
-    ASSERT_EQ(concatFieldNames(obj), "abc");
-    ASSERT_EQ(concatFieldNames(subobjB), "123");
-    ASSERT_EQ(concatFieldNames(subobjB2), "x");
+    EXPECT_EQ(concatFieldNames(obj), "abc");
+    EXPECT_EQ(concatFieldNames(subobjB), "123");
+    EXPECT_EQ(concatFieldNames(subobjB2), "x");
     itC = obj.begin();
     std::advance(itC, 2);
-    ASSERT_EQ(itC->fieldName(), "c");
+    EXPECT_EQ(itC->fieldName(), "c");
     ASSERT(obj.object(itC).parent().iterator() == obj.iterator());
 }
 
@@ -269,11 +244,11 @@ TEST(MinMax, Search) {
     obj.insert(obj.end(), "b");
     obj.insert(obj.end(), "c");
     obj.insert(obj.end(), "d");
-    ASSERT_EQ(concatFieldNames(obj), "abcd");
+    EXPECT_EQ(concatFieldNames(obj), "abcd");
 
-    ASSERT_EQ(obj.search(obj.begin(), "a")->fieldName(), "a");
-    ASSERT_EQ(obj.search(obj.begin(), "c")->fieldName(), "c");
-    ASSERT_EQ(obj.search(obj.begin(), "d")->fieldName(), "d");
+    EXPECT_EQ(obj.search(obj.begin(), "a")->fieldName(), "a");
+    EXPECT_EQ(obj.search(obj.begin(), "c")->fieldName(), "c");
+    EXPECT_EQ(obj.search(obj.begin(), "d")->fieldName(), "d");
     ASSERT(obj.search(obj.begin(), "e") == obj.end());
     ASSERT(obj.search(std::next(obj.begin()), "a") == obj.end());
 
@@ -291,10 +266,10 @@ TEST(MinMax, SearchLookupMap) {
     }
 
     // Trigger lookup map to be created by requiring a long search
-    ASSERT_EQ(obj.search(obj.begin(), "99")->fieldName(), "99");
+    EXPECT_EQ(obj.search(obj.begin(), "99")->fieldName(), "99");
 
     // When lookup map exists we find things outside of the provided range
-    ASSERT_EQ(obj.search(std::next(obj.begin()), "0")->fieldName(), "0");
+    EXPECT_EQ(obj.search(std::next(obj.begin()), "0")->fieldName(), "0");
 
     // Provided last is still respected when something is not found
     auto last = std::next(obj.begin());
@@ -302,7 +277,50 @@ TEST(MinMax, SearchLookupMap) {
 
     // Map based search is still accurate after inserts
     obj.insert(obj.begin(), "x");
-    ASSERT_EQ(obj.search(obj.begin(), "50")->fieldName(), "50");
+    EXPECT_EQ(obj.search(obj.begin(), "50")->fieldName(), "50");
+}
+
+TEST(MinMax, DuplicateFieldNamesWithLookupMap) {
+    tracking::Context trackingContext;
+    MinMaxStore minmax{trackingContext};
+    auto obj = minmax.root();
+
+    // Insert 12 (kMaxLinearSearchLength) distinct fields ("0".."11") followed by two duplicate "a"
+    // entries. This will trigger the lookup map internally in flat_bson.
+    for (int i = 0; i < 12; ++i) {
+        obj.insert(obj.end(), std::to_string(i));
+    }
+    obj.insert(obj.end(), "a");
+    obj.insert(obj.end(), "a");
+
+    // Try to search for "a", this will trigger the lookup map internally in flat_bson as we fail to
+    // find it within 'kMaxLinearSearchLength' attempts. The map cannot contain duplicates so this
+    // search is well defined and throws.
+    ASSERT_THROWS(obj.search(obj.begin(), "a"), AssertionException);
+
+    // Try to insert another duplicate which will throw earlier as the lookup map exists and needs
+    // to be maintained.
+    obj.insert(obj.begin(), "x");
+    ASSERT_THROWS(obj.insert(obj.begin(), "x"), AssertionException);
+
+    // Ensure that the _entries vector is still well-formed by checking that searching for each
+    // field 'field', using the offset values from before the aborted duplicate insert, still
+    // retrieves the correct field 'field'.
+    for (int i = 0; i < 12; ++i) {
+        auto field = std::to_string(i);
+        auto it = obj.search(obj.begin(), field);
+        ASSERT(it != obj.end());
+        ASSERT_EQ(it->fieldName(), field);
+    }
+
+    // Searching for "a" or "x" is possible as we inserted one of them into the map.
+    auto found = obj.search(obj.begin(), "a");
+    ASSERT(found != obj.end());
+    ASSERT_EQ(found->fieldName(), "a");
+
+    found = obj.search(obj.begin(), "x");
+    ASSERT(found != obj.end());
+    ASSERT_EQ(found->fieldName(), "x");
 }
 
 }  // namespace

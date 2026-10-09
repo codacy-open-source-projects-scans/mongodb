@@ -2,6 +2,10 @@
  * Specifies for each command whether it is expected to send a databaseVersion, and verifies that
  * the commands match the specification.
  *
+ * Each command is executed against two different scenarios: after movePrimary, and after
+ * dropDatabase + recreate on a different primary shard; to verify that the command behaves correctly
+ * when run with a stale dbVersion.
+ *
  * Each command must have exactly one corresponding test defined. Each defined test case must
  * correspond to an existing command. The allowable fields for the test cases are as follows:
  *
@@ -29,6 +33,7 @@
  */
 
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {isServerSideJavaScriptEnabled} from "jstests/libs/js_engine_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     commandsAddedToMongodSinceLastLTS,
@@ -119,8 +124,16 @@ function validateCommandTestCase(testCase, validateSendsDbVersion) {
     if (validateSendsDbVersion) {
         assert(typeof testCase.sendsDbVersion === "boolean");
     }
-    assert(testCase.explicitlyCreateCollection ? typeof testCase.explicitlyCreateCollection === "boolean" : true);
-    assert(testCase.expectNonEmptyCollection ? typeof testCase.expectNonEmptyCollection === "boolean" : true);
+    assert(
+        testCase.explicitlyCreateCollection
+            ? typeof testCase.explicitlyCreateCollection === "boolean"
+            : true,
+    );
+    assert(
+        testCase.expectNonEmptyCollection
+            ? typeof testCase.expectNonEmptyCollection === "boolean"
+            : true,
+    );
     assert(
         testCase.cleanUp ? typeof testCase.cleanUp === "function" : true,
         "cleanUp must be a function: " + tojson(testCase),
@@ -134,13 +147,18 @@ function validateCommandTestCase(testCase, validateSendsDbVersion) {
 function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName) {
     const primaryShardBefore = st.getPrimaryShard(dbName);
     const primaryShardAfter = st.getOther(primaryShardBefore);
-    const dbVersionBefore = st.s0.getDB("config").getCollection("databases").findOne({_id: dbName}).version;
+    const dbVersionBefore = st.s0
+        .getDB("config")
+        .getCollection("databases")
+        .findOne({_id: dbName}).version;
 
     if (testCase.explicitlyCreateCollection) {
         assert.commandWorked(primaryShardBefore.getDB(dbName).runCommand({create: collName}));
     }
     if (testCase.expectNonEmptyCollection) {
-        assert.commandWorked(primaryShardBefore.getDB(dbName).runCommand({insert: collName, documents: [{x: 0}]}));
+        assert.commandWorked(
+            primaryShardBefore.getDB(dbName).runCommand({insert: collName, documents: [{x: 0}]}),
+        );
     }
 
     // Ensure all nodes know the dbVersion before the movePrimary.
@@ -166,7 +184,10 @@ function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName)
     // Run movePrimary through the second mongos.
     assert.commandWorked(st.s1.adminCommand({movePrimary: dbName, to: primaryShardAfter.name}));
 
-    const dbVersionAfter = st.s1.getDB("config").getCollection("databases").findOne({_id: dbName}).version;
+    const dbVersionAfter = st.s1
+        .getDB("config")
+        .getCollection("databases")
+        .findOne({_id: dbName}).version;
 
     // After the movePrimary, the old primary shard should have cleared/removed the dbVersion.
     assertMatchingDatabaseVersion(st.s0, dbName, dbVersionBefore);
@@ -200,7 +221,9 @@ function testCommandAfterMovePrimary(testCase, connection, st, dbName, collName)
     );
 
     // Run the test case's command.
-    const res = targetConnection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
+    const res = targetConnection
+        .getDB(testCase.runsAgainstAdminDb ? "admin" : dbName)
+        .runCommand(command);
     if (testCase.expectedFailureCode) {
         assert.commandFailedWithCode(res, testCase.expectedFailureCode);
     } else {
@@ -255,7 +278,10 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
 
     // Create the database by creating a collection in it.
     assert.commandWorked(st.s0.getDB(dbName).createCollection(collName));
-    const dbVersionBefore = st.s0.getDB("config").getCollection("databases").findOne({_id: dbName}).version;
+    const dbVersionBefore = st.s0
+        .getDB("config")
+        .getCollection("databases")
+        .findOne({_id: dbName}).version;
     const primaryShardBefore = st.getPrimaryShard(dbName);
     const primaryShardAfter = st.getOther(primaryShardBefore);
 
@@ -267,15 +293,22 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
 
     // Drop and recreate the database through the second mongos.
     assert.commandWorked(st.s1.getDB(dbName).dropDatabase());
-    assert.commandWorked(st.s1.adminCommand({enableSharding: dbName, primaryShard: primaryShardAfter.shardName}));
+    assert.commandWorked(
+        st.s1.adminCommand({enableSharding: dbName, primaryShard: primaryShardAfter.shardName}),
+    );
 
-    const dbVersionAfter = st.s1.getDB("config").getCollection("databases").findOne({_id: dbName}).version;
+    const dbVersionAfter = st.s1
+        .getDB("config")
+        .getCollection("databases")
+        .findOne({_id: dbName}).version;
 
     if (testCase.explicitlyCreateCollection) {
         assert.commandWorked(primaryShardAfter.getDB(dbName).runCommand({create: collName}));
     }
     if (testCase.expectNonEmptyCollection) {
-        assert.commandWorked(primaryShardAfter.getDB(dbName).runCommand({insert: collName, documents: [{x: 0}]}));
+        assert.commandWorked(
+            primaryShardAfter.getDB(dbName).runCommand({insert: collName, documents: [{x: 0}]}),
+        );
     }
 
     // The only change after the drop/recreate database should be that the old primary shard should
@@ -308,7 +341,9 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
     );
 
     // Run the test case's command.
-    const res = targetConnection.getDB(testCase.runsAgainstAdminDb ? "admin" : dbName).runCommand(command);
+    const res = targetConnection
+        .getDB(testCase.runsAgainstAdminDb ? "admin" : dbName)
+        .runCommand(command);
     if (testCase.expectedFailureCode) {
         assert.commandFailedWithCode(res, testCase.expectedFailureCode);
     } else {
@@ -358,8 +393,12 @@ function testCommandAfterDropRecreateDatabase(testCase, connection, st) {
 
 const allTestCases = {
     mongos: {
-        _clusterQueryWithoutShardKey: {skip: "executed locally on a mongos (not sent to any remote node)"},
-        _clusterWriteWithoutShardKey: {skip: "executed locally on a mongos (not sent to any remote node)"},
+        _clusterQueryWithoutShardKey: {
+            skip: "executed locally on a mongos (not sent to any remote node)",
+        },
+        _clusterWriteWithoutShardKey: {
+            skip: "executed locally on a mongos (not sent to any remote node)",
+        },
         _hashBSONElement: {skip: "executes locally on mongos (not sent to any remote node)"},
         _isSelf: {skip: "executes locally on mongos (not sent to any remote node)"},
         _killOperations: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -387,7 +426,11 @@ const allTestCases = {
                     };
                 },
                 checkResponse: function (res) {
-                    assert.eq(res.cursor.firstBatch.length, 0, "aggregate should return empty results");
+                    assert.eq(
+                        res.cursor.firstBatch.length,
+                        0,
+                        "aggregate should return empty results",
+                    );
                 },
             },
             explain: {
@@ -453,6 +496,7 @@ const allTestCases = {
             },
         },
         cleanupStructuredEncryptionData: {skip: "requires encrypted collections"},
+        clearJoinPlanCache: {skip: "unversioned and executes on all shards"},
         clearJumboFlag: {skip: "does not forward command to primary shard"},
         clearLog: {skip: "executes locally on mongos (not sent to any remote node)"},
         collMod: {
@@ -606,7 +650,10 @@ const allTestCases = {
         echo: {skip: "does not forward command to primary shard"},
         enableSharding: {skip: "does not forward command to primary shard"},
         endSessions: {skip: "goes through the cluster write path"},
-        eseRotateActiveKEK: {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
+        eseRotateActiveKEK: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
         explain: {skip: "already tested by each CRUD command through the 'explain' field"},
         features: {skip: "executes locally on mongos (not sent to any remote node)"},
         filemd5: {
@@ -658,12 +705,19 @@ const allTestCases = {
         getDatabaseVersion: {skip: "executes locally on mongos (not sent to any remote node)"},
         getDefaultRWConcern: {skip: "executes locally on mongos (not sent to any remote node)"},
         getDiagnosticData: {skip: "executes locally on mongos (not sent to any remote node)"},
+        getESECMKIdentifierListStatus: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
         getESERotateActiveKEKStatus: {
             skip: "executes locally on mongos (not sent to any remote node)",
             conditional: true,
         },
         getTransitionToDedicatedConfigServerStatus: {skip: "not on a user database"},
         getLog: {skip: "executes locally on mongos (not sent to any remote node)"},
+        getMetricsFilteringAllowlist: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
         getMore: {skip: "requires a previously established cursor"},
         getParameter: {skip: "executes locally on mongos (not sent to any remote node)"},
         getQueryableEncryptionCountInfo: {
@@ -676,7 +730,10 @@ const allTestCases = {
                             {
                                 tokens: [
                                     {
-                                        "s": BinData(0, "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ="),
+                                        "s": BinData(
+                                            0,
+                                            "lUBO7Mov5Sb+c/D4cJ9whhhw/+PZFLCk/AQU2+BpumQ=",
+                                        ),
                                     },
                                 ],
                             },
@@ -742,7 +799,11 @@ const allTestCases = {
                     return {listIndexes: collName};
                 },
                 checkResponse: function (res) {
-                    assert.gte(res.cursor.firstBatch.length, 1, "listIndexes should return at least the _id index");
+                    assert.gte(
+                        res.cursor.firstBatch.length,
+                        1,
+                        "listIndexes should return at least the _id index",
+                    );
                 },
             },
         },
@@ -795,8 +856,14 @@ const allTestCases = {
         moveRange: {skip: "does not forward command to primary shard"},
         multicast: {skip: "does not forward command to primary shard"},
         netstat: {skip: "executes locally on mongos (not sent to any remote node)"},
-        oidcListKeys: {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
-        oidcRefreshKeys: {skip: "executes locally on mongos (not sent to any remote node)", conditional: true},
+        oidcListKeys: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
+        oidcRefreshKeys: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
         ping: {skip: "executes locally on mongos (not sent to any remote node)"},
         planCacheClear: {
             run: {
@@ -869,7 +936,6 @@ const allTestCases = {
                 },
             },
         },
-        repairShardedCollectionChunksHistory: {skip: "always targets the config server"},
         replicateSearchIndexCommand: {skip: "internal command for testing only"},
         replSetGetStatus: {skip: "not supported in mongos"},
         resetPlacementHistory: {skip: "always targets the config server"},
@@ -903,7 +969,9 @@ const allTestCases = {
             },
         },
         setFeatureCompatibilityVersion: {skip: "not on a user database"},
-        setProfilingFilterGlobally: {skip: "executes locally on mongos (not sent to any remote node)"},
+        setProfilingFilterGlobally: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
         setParameter: {skip: "executes locally on mongos (not sent to any remote node)"},
         setClusterParameter: {skip: "always targets the config server"},
         setQuerySettings: {skip: "not on a user database"},
@@ -912,7 +980,19 @@ const allTestCases = {
         shardCollection: {skip: "does not forward command to primary shard"},
         shardDrainingStatus: {skip: "not on a user database"},
         shutdown: {skip: "does not forward command to primary shard"},
-        split: {skip: "does not forward command to primary shard"},
+        split: {
+            run: {
+                sendsDbVersion: false,
+                runsAgainstAdminDb: true,
+                command: function (dbName, collName) {
+                    return {
+                        split: dbName + "." + collName,
+                        middle: {_id: 0},
+                    };
+                },
+                expectedFailureCode: ErrorCodes.NamespaceNotSharded,
+            },
+        },
         splitVector: {skip: "does not forward command to primary shard"},
         getTrafficRecordingStatus: {skip: "executes locally on targeted node"},
         startRecordingTraffic: {skip: "Renamed to startTrafficRecording"},
@@ -925,8 +1005,12 @@ const allTestCases = {
         stopTrafficRecording: {skip: "executes locally on mongos (not sent to any remote node)"},
         stopTransitionToDedicatedConfigServer: {skip: "not on a user database"},
         testDeprecation: {skip: "executes locally on mongos (not sent to any remote node)"},
-        testDeprecationInVersion2: {skip: "executes locally on mongos (not sent to any remote node)"},
-        testInternalTransactions: {skip: "executes locally on mongos (not sent to any remote node)"},
+        testDeprecationInVersion2: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
+        testInternalTransactions: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
         testRemoval: {skip: "executes locally on mongos (not sent to any remote node)"},
         testVersion2: {skip: "executes locally on mongos (not sent to any remote node)"},
         testVersions1And2: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -957,6 +1041,13 @@ const allTestCases = {
                 },
             },
         },
+        updateESECMKIdentifierList: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+            conditional: true,
+        },
+        updateMetricsFilteringAllowlist: {
+            skip: "executes locally on mongos (not sent to any remote node)",
+        },
         updateRole: {skip: "always targets the config server"},
         updateSearchIndex: {skip: "executes locally on mongos", conditional: true},
         updateUser: {skip: "always targets the config server"},
@@ -986,7 +1077,6 @@ const allTestCases = {
     },
     mongod: {
         _addShard: {skip: "not on a user database"},
-        _internalClearCollectionShardingMetadata: {skip: "internal command"},
         _configsvrAbortReshardCollection: {skip: "TODO"},
         _configsvrAddShard: {skip: "not on a user database"},
         _configsvrAddShardToZone: {skip: "TODO"},
@@ -1002,23 +1092,26 @@ const allTestCases = {
         _configsvrCommitChunkSplit: {skip: "TODO"},
         _configsvrCommitChunksMerge: {skip: "TODO"},
         _configsvrCommitMergeAllChunksOnShard: {skip: "TODO"},
+        _configsvrCommitMergeAllPrecomputedChunksOnShard: {skip: "internal command"},
+        _configsvrCommitMergeChunks: {skip: "internal command"},
         _configsvrCommitMovePrimary: {skip: "TODO"},
+        _configsvrCommitMoveRange: {skip: "internal command"},
         _configsvrCommitRefineCollectionShardKey: {skip: "TODO"},
         _configsvrCommitReshardCollection: {skip: "TODO"},
         _configsvrCommitShardRemoval: {skip: "runs on the configserver"},
+        _configsvrCommitSplitChunk: {skip: "internal command"},
         _configsvrConfigureCollectionBalancing: {skip: "TODO"},
         _configsvrCreateDatabase: {skip: "TODO"},
         _configsvrEnsureChunkVersionIsGreaterThan: {skip: "TODO"},
         _configsvrGetHistoricalPlacement: {skip: "TODO"},
         _configsvrMoveRange: {skip: "TODO"},
-        _configsvrRemoveChunks: {skip: "TODO"},
         _configsvrRemoveShard: {skip: "TODO"},
         _configsvrRemoveShardFromZone: {skip: "TODO"},
         _configsvrRemoveTags: {skip: "TODO"},
-        _configsvrRepairShardedCollectionChunksHistory: {skip: "TODO"},
         _configsvrResetPlacementHistory: {skip: "TODO"},
         _configsvrReshardCollection: {skip: "TODO"},
         _configsvrRunRestore: {skip: "TODO"},
+        _configsvrSetAllowChunkOperations: {skip: "internal command"},
         _configsvrSetAllowMigrations: {skip: "TODO"},
         _configsvrSetClusterParameter: {skip: "TODO"},
         _configsvrSetUserWriteBlockMode: {skip: "TODO"},
@@ -1064,6 +1157,7 @@ const allTestCases = {
             },
         },
         _shardsvrCheckMetadataConsistencyParticipant: {skip: "TODO"},
+        _shardsvrCheckMetadataConsistencySecondaryParticipant: {skip: "TODO"},
         _shardsvrCleanupStructuredEncryptionData: {skip: "TODO"},
         _shardsvrCloneAuthoritativeMetadata: {skip: "TODO"},
         _shardsvrCloneCatalogData: {skip: "TODO"},
@@ -1114,8 +1208,12 @@ const allTestCases = {
         _shardsvrRecreateRangeDeletionTasksParticipant: {skip: "TODO"},
         _shardsvrRefineCollectionShardKey: {skip: "TODO"},
         _shardsvrCommitRefineCollectionShardKey: {skip: "internal command"},
+        _shardsvrCommitCollModCollectionMetadata: {skip: "internal command"},
+        _shardsvrCommitChunkOperationsMetadata: {skip: "internal command"},
         _shardsvrCommitDropCollectionMetadata: {skip: "internal command"},
         _shardsvrCommitCreateCollectionMetadata: {skip: "internal command"},
+        _shardsvrCommitCreateCollectionChunklessMetadata: {skip: "internal command"},
+        _shardsvrCommitRenameCollectionMetadata: {skip: "internal command"},
         _shardsvrRenameCollection: {skip: "TODO"},
         _shardsvrRenameCollectionParticipant: {skip: "TODO"},
         _shardsvrRenameCollectionParticipantUnblock: {skip: "TODO"},
@@ -1131,6 +1229,7 @@ const allTestCases = {
                         _shardsvrReshardDonorCriticalSectionStarted: UUID(),
                     };
                 },
+                expectedFailureCode: ErrorCodes.IllegalOperation,
             },
         },
         _shardsvrReshardDonorRecipientsFinishedCloning: {
@@ -1162,9 +1261,13 @@ const allTestCases = {
                 expectedFailureCode: ErrorCodes.NotWritablePrimary,
             },
         },
+        _shardsvrReshardingDonorGetCloneCount: {skip: "TODO"},
         _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: "TODO"},
+        _shardsvrReshardingRecipientFetchFinalCollectionStats: {skip: "TODO"},
         _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: "TODO"},
+        _shardsvrReshardingStepDown: {skip: "TODO"},
         _shardsvrReshardingOperationTime: {skip: "TODO"},
+        _shardsvrReshardCleanupStaleChunks: {skip: "internal command"},
         _shardsvrResolveView: {
             run: [
                 {
@@ -1208,9 +1311,27 @@ const allTestCases = {
             ],
         },
         _shardsvrRunSearchIndexCommand: {skip: "TODO"},
+        _shardsvrSetAllowChunkOperations: {skip: "internal command"},
         _shardsvrSetAllowMigrations: {skip: "TODO"},
         _shardsvrSetClusterParameter: {skip: "TODO"},
         _shardsvrSetUserWriteBlockMode: {skip: "TODO"},
+        _shardsvrSplitChunk: {
+            run: {
+                runsAgainstAdminDb: true,
+                command: function (dbName, collName) {
+                    return {
+                        _shardsvrSplitChunk: dbName + "." + collName,
+                        keyPattern: {_id: 1},
+                        min: {_id: MinKey},
+                        max: {_id: MaxKey},
+                        splitKeys: [{_id: 0}],
+                        from: "shard0",
+                        epoch: ObjectId(),
+                    };
+                },
+                expectedFailureCode: ErrorCodes.StaleConfig,
+            },
+        },
         _shardsvrUpgradeDowngradeViewlessTimeseries: {skip: "internal command"},
         _shardsvrTimeseriesUpgradeDowngradePrepare: {skip: "internal command"},
         _shardsvrTimeseriesUpgradeDowngradeCommit: {skip: "internal command"},
@@ -1231,6 +1352,7 @@ const allTestCases = {
         checkShardingIndex: {skip: "TODO"},
         cleanupOrphaned: {skip: "TODO"},
         cleanupStructuredEncryptionData: {skip: "TODO"},
+        clearJoinPlanCache: {skip: "not on a user database"},
         clearLog: {skip: "TODO"},
         cloneCollectionAsCapped: {skip: "TODO"},
         clusterAbortTransaction: {skip: "TODO"},
@@ -1297,8 +1419,10 @@ const allTestCases = {
         getDatabaseVersion: {skip: "TODO"},
         getDefaultRWConcern: {skip: "TODO"},
         getDiagnosticData: {skip: "TODO"},
+        getESECMKIdentifierListStatus: {skip: "TODO", conditional: true},
         getESERotateActiveKEKStatus: {skip: "TODO", conditional: true},
         getLog: {skip: "TODO"},
+        getMetricsFilteringAllowlist: {skip: "TODO"},
         getMore: {skip: "TODO"},
         getParameter: {skip: "TODO"},
         getQueryableEncryptionCountInfo: {skip: "TODO"},
@@ -1355,6 +1479,7 @@ const allTestCases = {
         releaseMemory: {skip: "TODO"},
         removeQuerySettings: {skip: "TODO"},
         renameCollection: {skip: "TODO"},
+        repairReplicatedMetadata: {skip: "Never routed via mongos"},
         replSetAbortPrimaryCatchUp: {skip: "TODO"},
         replSetFreeze: {skip: "TODO"},
         replSetGetConfig: {skip: "TODO"},
@@ -1395,18 +1520,21 @@ const allTestCases = {
         shardingState: {skip: "TODO"},
         shutdown: {skip: "TODO"},
         sleep: {skip: "TODO"},
-        splitChunk: {skip: "TODO"},
+        splitChunk: {skip: "is deprecated", conditional: true},
         splitVector: {skip: "TODO"},
         startSession: {skip: "TODO"},
         startTrafficRecording: {skip: "TODO"},
         stopTrafficRecording: {skip: "TODO"},
         streams_getMetrics: {skip: "TODO", conditional: true},
+        streams_getMorePreview: {skip: "TODO", conditional: true},
         streams_getMoreStreamSample: {skip: "TODO", conditional: true},
         streams_getStats: {skip: "TODO", conditional: true},
         streams_listStreamProcessors: {skip: "TODO", conditional: true},
+        streams_previewStream: {skip: "TODO", conditional: true},
         streams_sendEvent: {skip: "TODO", conditional: true},
         streams_startStreamProcessor: {skip: "TODO", conditional: true},
         streams_startStreamSample: {skip: "TODO", conditional: true},
+        streams_stopPreview: {skip: "TODO", conditional: true},
         streams_stopStreamProcessor: {skip: "TODO", conditional: true},
         streams_testOnlyGetFeatureFlags: {skip: "TODO", conditional: true},
         streams_testOnlyInsert: {skip: "TODO", conditional: true},
@@ -1414,7 +1542,7 @@ const allTestCases = {
         streams_updateFeatureFlags: {skip: "TODO", conditional: true},
         streams_writeCheckpoint: {skip: "TODO", conditional: true},
         sysprofile: {skip: "TODO"},
-        testCommandFeatureFlaggedOnLatestFCV83: {skip: "internal command", conditional: true},
+        testCommandFeatureFlaggedOnLatestFCV91: {skip: "internal command", conditional: true},
         testDeprecation: {skip: "TODO", conditional: true},
         testDeprecationInVersion2: {skip: "TODO", conditional: true},
         testInternalTransactions: {skip: "TODO", conditional: true},
@@ -1422,10 +1550,11 @@ const allTestCases = {
         testReshardCloneCollection: {skip: "TODO", conditional: true},
         testVersion2: {skip: "TODO", conditional: true},
         testVersions1And2: {skip: "TODO", conditional: true},
-        timeseriesCatalogBucketParamsChanged: {skip: "TODO", conditional: true},
         top: {skip: "TODO"},
         transitionToShardedCluster: {skip: "TODO"},
         update: {skip: "TODO"},
+        updateESECMKIdentifierList: {skip: "TODO", conditional: true},
+        updateMetricsFilteringAllowlist: {skip: "admin write command"},
         updateRole: {skip: "TODO"},
         updateSearchIndex: {skip: "TODO"},
         updateUser: {skip: "TODO"},
@@ -1438,6 +1567,7 @@ const allTestCases = {
         waitForFailPoint: {skip: "TODO", conditional: true},
         whatsmysni: {skip: "TODO"},
         whatsmyuri: {skip: "TODO"},
+        wiredTigerRepair: {skip: "not on a user database"},
     },
 };
 
@@ -1448,10 +1578,16 @@ const st = new ShardingTest({
 
 // Helper function to check if authoritative database shards feature is enabled.
 function isAuthoritativeShardsEnabled(conn) {
-    return FeatureFlagUtil.isPresentAndEnabled(conn, "ShardAuthoritativeDbMetadataCRUD");
+    return FeatureFlagUtil.isPresentAndEnabled(conn, "AuthoritativeShardsCRUD");
 }
 
-const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemovedSinceLastLTS, isMongodTest) => {
+const doTest = (
+    connection,
+    testCases,
+    commandsAddedSinceLastLTS,
+    commandsRemovedSinceLastLTS,
+    isMongodTest,
+) => {
     const listCommandsRes = connection.adminCommand({listCommands: 1});
     assert.commandWorked(listCommandsRes);
     print("--------------------------------------------");
@@ -1460,6 +1596,19 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
     }
 
     const isMultiversion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
+
+    // mapReduce with JS map/reduce functions needs a server-side JS engine, which is absent on some
+    // builds (e.g. ppc64le links scripting_none). Skip just that command there so the rest of the
+    // coverage still runs, rather than tagging out the whole test.
+    if (
+        testCases.mapReduce &&
+        testCases.mapReduce.run &&
+        !isServerSideJavaScriptEnabled(connection)
+    ) {
+        testCases.mapReduce = {
+            skip: "mapReduce uses server-side JS, which is unavailable on this build (e.g. PPC)",
+        };
+    }
 
     commandsRemovedSinceLastLTS.forEach(function (cmd) {
         testCases[cmd] = {
@@ -1474,7 +1623,10 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
         // well formed.
         for (const command of Object.keys(listCommandsRes.commands)) {
             const testCase = testCases[command];
-            assert(testCase !== undefined, "coverage failure: must define a test case for " + command);
+            assert(
+                testCase !== undefined,
+                "coverage failure: must define a test case for " + command,
+            );
             validateTestCase(testCase, connection == st.s);
             testCases[command].validated = true;
         }
@@ -1489,7 +1641,10 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
             // removed since the last LTS version so the test case is defined in last stable
             // suites (in which these commands still exist on the mongos), but these test cases
             // won't be run in regular suites, so we skip processing them below as well.
-            if (commandsAddedSinceLastLTS.includes(key) || commandsRemovedSinceLastLTS.includes(key)) {
+            if (
+                commandsAddedSinceLastLTS.includes(key) ||
+                commandsRemovedSinceLastLTS.includes(key)
+            ) {
                 continue;
             }
             assert(
@@ -1580,15 +1735,31 @@ const doTest = (connection, testCases, commandsAddedSinceLastLTS, commandsRemove
         // get dropped on the old primary shard after movePrimary.
         const shardedCollNs = dbName + "." + shardedCollName;
         assert.commandWorked(st.s0.adminCommand({enableSharding: dbName}));
-        assert.commandWorked(st.s0.adminCommand({addShardToZone: st.shard0.shardName, zone: "x < 0"}));
-        assert.commandWorked(st.s0.adminCommand({addShardToZone: st.shard1.shardName, zone: "x >= 0"}));
         assert.commandWorked(
-            st.s0.adminCommand({updateZoneKeyRange: shardedCollNs, min: {x: MinKey}, max: {x: 0}, zone: "x < 0"}),
+            st.s0.adminCommand({addShardToZone: st.shard0.shardName, zone: "x < 0"}),
         );
         assert.commandWorked(
-            st.s0.adminCommand({updateZoneKeyRange: shardedCollNs, min: {x: 0}, max: {x: MaxKey}, zone: "x >= 0"}),
+            st.s0.adminCommand({addShardToZone: st.shard1.shardName, zone: "x >= 0"}),
         );
-        assert.commandWorked(st.s0.getDB("admin").admin.runCommand({shardCollection: shardedCollNs, key: {"x": 1}}));
+        assert.commandWorked(
+            st.s0.adminCommand({
+                updateZoneKeyRange: shardedCollNs,
+                min: {x: MinKey},
+                max: {x: 0},
+                zone: "x < 0",
+            }),
+        );
+        assert.commandWorked(
+            st.s0.adminCommand({
+                updateZoneKeyRange: shardedCollNs,
+                min: {x: 0},
+                max: {x: MaxKey},
+                zone: "x >= 0",
+            }),
+        );
+        assert.commandWorked(
+            st.s0.getDB("admin").admin.runCommand({shardCollection: shardedCollNs, key: {"x": 1}}),
+        );
         assert(containsCollection(st.shard0, dbName, shardedCollName));
         assert(containsCollection(st.shard1, dbName, shardedCollName));
 

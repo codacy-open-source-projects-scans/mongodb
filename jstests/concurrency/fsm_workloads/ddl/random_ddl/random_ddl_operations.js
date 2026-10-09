@@ -6,6 +6,7 @@
  *  ]
  */
 
+import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
 import {ShardingTopologyHelpers} from "jstests/concurrency/fsm_workload_helpers/catalog_and_routing/sharding_topology_helpers.js";
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 
@@ -15,8 +16,15 @@ export const $config = (function () {
         dbCount: 2,
         collPrefix: "sharded_coll_",
         collCount: 2,
+        originalImplicitRetryDdlOnConflictWithMigration: null,
         getRandomDb: function (db) {
             return db.getSiblingDB(this.dbPrefix + Random.randInt(this.dbCount));
+        },
+        getOtherDb: function (db) {
+            let splitName = db.getName().split("_");
+            let currentDbIndex = Number(splitName[splitName.length - 1]);
+            let newIndex = (currentDbIndex + 1) % this.dbCount;
+            return db.getSiblingDB(this.dbPrefix + newIndex);
         },
         getRandomCollection: function (db) {
             return db[this.collPrefix + Random.randInt(this.collCount)];
@@ -46,7 +54,35 @@ export const $config = (function () {
             const fullNs = coll.getFullName();
 
             jsTestLog("Executing create state: " + fullNs);
-            assert.commandWorked(db.adminCommand({shardCollection: fullNs, key: {_id: 1}, unique: false}));
+            assert.commandWorked(
+                db.adminCommand({shardCollection: fullNs, key: {_id: 1}, unique: false}),
+            );
+        },
+        createUnsplittable: function (db, collName, connCache) {
+            db = this.getRandomDb(db);
+            const coll = this.getRandomCollection(db);
+            const fullNs = coll.getFullName();
+            jsTest.log.info("Executing createUnsplittable state: " + fullNs);
+
+            const res = assert.commandWorkedOrFailedWithCode(
+                db.runCommand({
+                    createUnsplittableCollection: coll.getName(),
+                }),
+                [
+                    ErrorCodes.MovePrimaryInProgress,
+                    ErrorCodes.ConflictingOperationInProgress,
+                    ErrorCodes.AlreadyInitialized,
+                    ErrorCodes.InvalidOptions,
+                    ErrorCodes.NamespaceExists,
+                ],
+            );
+            if (!res.ok) {
+                // If we're running with transactions and an acceptable error occurred then the transaction will
+                // fail due to an implicit abort. If the returned error is sticky then that would cause the
+                // operation to be retried indefinitely. To prevent this we force this command to be executed
+                // again outside of the transaction where it will see the acceptable error and succeed.
+                fsm.forceRunningOutsideTransaction(this);
+            }
         },
         drop: function (db, collName, connCache) {
             db = this.getRandomDb(db);
@@ -64,10 +100,41 @@ export const $config = (function () {
             const destCollName = destCollNS.split(".")[1];
 
             jsTestLog("Executing rename state:" + srcCollName + " to " + destCollNS);
-            assert.commandWorkedOrFailedWithCode(srcColl.renameCollection(destCollName, true /* dropTarget */), [
+            assert.commandWorkedOrFailedWithCode(
+                srcColl.renameCollection(destCollName, true /* dropTarget */),
+                [
+                    ErrorCodes.NamespaceNotFound,
+                    ErrorCodes.ConflictingOperationInProgress,
+                    ErrorCodes.IllegalOperation,
+                ],
+            );
+        },
+        renameAcrossDatabases: function (db, collName, connCache) {
+            // TODO (SERVER-131660): Re-enable this once rename across databases is fixed on older
+            // versions.
+            if (Boolean(TestData.multiversionBinVersion) || Boolean(TestData.mixedBinVersions)) {
+                jsTestLog("Skipping rename across databases state as multiversion is enabled");
+                return;
+            }
+            db = this.getRandomDb(db);
+            const srcColl = this.getRandomCollection(db);
+            const srcCollName = srcColl.getFullName();
+            const destDb = this.getOtherDb(db);
+            const destCollNS = this.getRandomCollection(destDb).getFullName();
+
+            jsTestLog(
+                "Executing rename across databases state:" + srcCollName + " to " + destCollNS,
+            );
+            const res = db.adminCommand({
+                renameCollection: srcCollName,
+                to: destCollNS,
+                dropTarget: true,
+            });
+            assert.commandWorkedOrFailedWithCode(res, [
                 ErrorCodes.NamespaceNotFound,
                 ErrorCodes.ConflictingOperationInProgress,
                 ErrorCodes.IllegalOperation,
+                ErrorCodes.CommandFailed,
             ]);
         },
         movePrimary: function (db, collName, connCache) {
@@ -83,10 +150,10 @@ export const $config = (function () {
             const coll = this.getRandomCollection(db);
 
             jsTestLog("Executing collMod state: " + coll.getFullName());
-            assert.commandWorkedOrFailedWithCode(db.runCommand({collMod: coll.getName(), validator: {a: {$gt: 0}}}), [
-                ErrorCodes.NamespaceNotFound,
-                ErrorCodes.ConflictingOperationInProgress,
-            ]);
+            assert.commandWorkedOrFailedWithCode(
+                db.runCommand({collMod: coll.getName(), validator: {a: {$gt: 0}}}),
+                [ErrorCodes.NamespaceNotFound, ErrorCodes.ConflictingOperationInProgress],
+            );
         },
         checkDatabaseMetadataConsistency: function (db, collName, connCache) {
             db = this.getRandomDb(db);
@@ -97,13 +164,40 @@ export const $config = (function () {
         checkCollectionMetadataConsistency: function (db, collName, connCache) {
             db = this.getRandomDb(db);
             const coll = this.getRandomCollection(db);
-            jsTestLog("Executing checkMetadataConsistency state for collection: " + coll.getFullName());
+            jsTestLog(
+                "Executing checkMetadataConsistency state for collection: " + coll.getFullName(),
+            );
             const inconsistencies = coll.checkMetadataConsistency().toArray();
             assert.eq(0, inconsistencies.length, tojson(inconsistencies));
         },
+        unshardCollection: function (db, collName, connCache) {
+            db = this.getRandomDb(db);
+            const coll = this.getRandomCollection(db);
+            const namespace = coll.getFullName();
+            jsTest.log.info(`Started to unshard collection ${namespace}`);
+            assert.commandWorkedOrFailedWithCode(db.adminCommand({unshardCollection: namespace}), [
+                // Handles the case where the collection/db does not exist
+                ErrorCodes.NamespaceNotFound,
+                // Handles the case where another resharding operation is in progress
+                ErrorCodes.ConflictingOperationInProgress,
+                ErrorCodes.ReshardCollectionInProgress,
+                // The command is sent while a FCV transition is in progress
+                ErrorCodes.CommandNotSupported,
+                ErrorCodes.ReshardCollectionAborted,
+                // The command is sent while a node is undergoing initial sync
+                ErrorCodes.SnapshotTooOld,
+                // Handles the case where the collection is already unsharded
+                ErrorCodes.NamespaceNotSharded,
+            ]);
+            jsTest.log.info(`Unsharding completed ${namespace}`);
+        },
         untrackUnshardedCollection: function untrackUnshardedCollection(db, collName, connCache) {
             // SERVER-111231 Remove early exit when untrackUnshardedCollection is re-enabled.
-            if (TestData.runningWithConfigStepdowns || TestData.runningWithShardStepdowns || TestData.killShards) {
+            if (
+                TestData.runningWithConfigStepdowns ||
+                TestData.runningWithShardStepdowns ||
+                TestData.killShards
+            ) {
                 jsTestLog("Skipping untrackUnshardedCollection as stepdowns are enabled");
                 return;
             }
@@ -132,19 +226,28 @@ export const $config = (function () {
             jsTestLog(`Unsharding completed ${namespace}`);
             jsTestLog(`2. Untracking collection ${namespace}`);
             // Note this command will behave as no-op in case the collection is not tracked.
-            assert.commandWorkedOrFailedWithCode(db.adminCommand({untrackUnshardedCollection: namespace}), [
-                // Handles the case where the collection is not located on its primary
-                ErrorCodes.OperationFailed,
-                // Handles the case where the collection is sharded
-                ErrorCodes.InvalidNamespace,
-                // Handles the case where the collection/db does not exist
-                ErrorCodes.NamespaceNotFound,
-            ]);
+            assert.commandWorkedOrFailedWithCode(
+                db.adminCommand({untrackUnshardedCollection: namespace}),
+                [
+                    // Handles the case where the collection is not located on its primary
+                    ErrorCodes.OperationFailed,
+                    // Handles the case where the collection is sharded
+                    ErrorCodes.InvalidNamespace,
+                    // Handles the case where the collection/db does not exist
+                    ErrorCodes.NamespaceNotFound,
+                ],
+            );
             jsTestLog(`Untrack collection completed`);
         },
     };
 
     let setup = function (db, collName, cluster) {
+        // Balancer-based suites inject background hook to automatically handle errors caused
+        // by multiple incompatible DDL operations on each request.
+        // Such a behavior may cause this workload to starve, so it gets disabled.
+        this.originalImplicitRetryDdlOnConflictWithMigration =
+            TestData.implicitRetryDdlOnConflictWithMigration;
+        TestData.implicitRetryDdlOnConflictWithMigration = false;
         for (let i = 0; i < this.dbCount; i++) {
             const dbName = this.dbPrefix + i;
             const newDb = db.getSiblingDB(dbName);
@@ -153,12 +256,16 @@ export const $config = (function () {
     };
 
     let teardown = function (db, collName, cluster) {
+        TestData.implicitRetryDdlOnConflictWithMigration =
+            this.originalImplicitRetryDdlOnConflictWithMigration;
         const configDB = db.getSiblingDB("config");
         // All the DDLs executed within the context of this workload should have completed, unblocking migrations on each targeted namespace.
         // Allow some grace time for operations issued by background hooks (or the balancer) that might still be inflight.
         assert.soon(
             () => {
-                return configDB.collections.countDocuments({allowMigrations: {$exists: true}}) === 0;
+                return (
+                    configDB.collections.countDocuments({allowMigrations: {$exists: true}}) === 0
+                );
             },
             `Found unexpected "allowMigration" field on one or more tracked collections ${tojson(configDB.collections.findOne({allowMigrations: {$exists: true}}))}`,
         );

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -50,11 +24,12 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/optional.hpp>
 
 namespace mongo::transport {
-namespace MONGO_MOD_PARENT_PRIVATE grpc {
+namespace [[MONGO_MOD_PARENT_PRIVATE]] grpc {
 
 /**
  * Captures the common semantics for ingress and egress gRPC sessions.
@@ -86,7 +61,7 @@ namespace MONGO_MOD_PARENT_PRIVATE grpc {
  */
 class GRPCSession : public Session {
 public:
-    explicit GRPCSession(TransportLayer* tl, HostAndPort remote);
+    explicit GRPCSession(bool isIngress, TransportLayer* tl, HostAndPort remote);
 
     ~GRPCSession() override = default;
 
@@ -153,33 +128,7 @@ public:
         return !_terminationStatus->has_value() && !_isCancelled();
     }
 
-    /**
-     * For ingress sessions, we do not distinguish between load-balanced and non-load-balanced
-     * streams. Egress sessions never originate from load-balancers.
-     */
-    bool isConnectedToLoadBalancerPort() const final {
-        return false;
-    }
-
-    bool isLoadBalancerPeer() const final {
-        return false;
-    }
-
-    void setisLoadBalancerPeer(bool helloHasLoadBalancedOption) final;
-
-    /**
-     * The priority port is unavailable with grpc enabled.
-     */
-    bool isConnectedToPriorityPort() const final {
-        return false;
-    }
-
-    /**
-     * Returns true if the connection is on the proxy unix socket.
-     */
-    bool isConnectedToProxyUnixSocket() const final {
-        return false;
-    }
+    void setIsLoadBalancerPeer(bool helloHasLoadBalancedOption) final;
 
     /**
      * Returns the status of unix socket peer permission validation
@@ -317,7 +266,7 @@ public:
                    ServerStream* stream,
                    boost::optional<UUID> clientId,
                    boost::optional<std::string> authToken,
-                   boost::optional<StringData> encodedClientMetadata);
+                   boost::optional<std::string_view> encodedClientMetadata);
 
     ~IngressSession() override;
 
@@ -396,7 +345,7 @@ private:
 
     boost::optional<std::string> _authToken;
     boost::optional<UUID> _remoteClientId;
-    boost::optional<StringData> _encodedClientMetadata;
+    boost::optional<std::string_view> _encodedClientMetadata;
     mutable synchronized_value<boost::optional<ClientMetadata>> _decodedClientMetadata;
 };
 
@@ -439,7 +388,7 @@ public:
      * No alignment is needed as the shared state is not expected to be modified frequently.
      */
     struct SharedState {
-        AtomicWord<int> clusterMaxWireVersion;
+        Atomic<int> clusterMaxWireVersion;
     };
 
     EgressSession(TransportLayer* tl,
@@ -532,7 +481,7 @@ private:
 
     const std::shared_ptr<GRPCReactor> _reactor;
 
-    AtomicWord<bool> _checkedWireVersion;
+    Atomic<bool> _checkedWireVersion;
     const std::shared_ptr<ClientContext> _ctx;
     const std::shared_ptr<ClientStream> _stream;
     UUID _channelId;
@@ -543,5 +492,5 @@ private:
     boost::optional<SSLConfiguration> _sslConfig;
 };
 
-}  // namespace MONGO_MOD_PARENT_PRIVATE grpc
+}  // namespace grpc
 }  // namespace mongo::transport

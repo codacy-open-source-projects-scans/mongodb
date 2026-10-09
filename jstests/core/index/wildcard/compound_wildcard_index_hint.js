@@ -1,6 +1,7 @@
 /**
  * Tests that Compound Wildcard Indexes indexes obey hinting.
  * @tags: [
+ *   uses_explain,
  *   assumes_read_concern_local,
  *   requires_fcv_70,
  * ]
@@ -61,12 +62,16 @@ for (const indexSpec of cwiList) {
 
 // Test that CWIs obey hinting using index name.
 for (const testCase of cwiList) {
-    const explain = assert.commandWorked(coll.find(testCase.query).hint(testCase.indexName).explain("executionStats"));
+    const explain = assert.commandWorked(
+        coll.find(testCase.query).hint(testCase.indexName).explain("executionStats"),
+    );
     WildcardIndexHelpers.assertExpectedIndexIsUsed(explain, testCase.indexName);
 }
 
 // Test that CWIs obey hinting using index key pattern.
 for (const testCase of cwiList) {
-    const explain = assert.commandWorked(coll.find(testCase.query).hint(testCase.keyPattern).explain("executionStats"));
+    const explain = assert.commandWorked(
+        coll.find(testCase.query).hint(testCase.keyPattern).explain("executionStats"),
+    );
     WildcardIndexHelpers.assertExpectedIndexIsUsed(explain, testCase.indexName);
 }

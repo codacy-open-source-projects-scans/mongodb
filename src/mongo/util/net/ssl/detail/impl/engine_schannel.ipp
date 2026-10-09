@@ -1,35 +1,11 @@
-
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
+
+#include "mongo/logv2/log.h"
 #include "mongo/platform/shared_library.h"
 #include "mongo/util/net/ssl/detail/engine.hpp"
 #include "mongo/util/net/ssl/error.hpp"
@@ -46,8 +22,10 @@ namespace asio {
 namespace ssl {
 namespace detail {
 
+// Bring in the _attr UDL (defined in mongo::literals) needed by LOGV2_DEBUG.
+using namespace mongo::literals;
 
-engine::engine(SCHANNEL_CRED* context, const std::string& remoteHostName)
+engine::engine(SCH_CREDENTIALS* context, const std::string& remoteHostName)
     : _pCred(context),
       _remoteHostName(mongo::toNativeString(remoteHostName.c_str())),
       _inBuffer(kDefaultBufferSize),
@@ -55,7 +33,7 @@ engine::engine(SCHANNEL_CRED* context, const std::string& remoteHostName)
       _extraBuffer(kDefaultBufferSize),
       _handshakeManager(
           &_hcxt, &_hcred, _remoteHostName, &_inBuffer, &_outBuffer, &_extraBuffer, _pCred),
-      _readManager(&_hcxt, &_hcred, &_inBuffer, &_extraBuffer),
+      _readManager(&_hcxt, &_hcred, &_inBuffer, &_extraBuffer, &_outBuffer, &_remoteHostName),
       _writeManager(&_hcxt, &_outBuffer) {
     SecInvalidateHandle(&_hcxt);
     SecInvalidateHandle(&_hcred);
@@ -96,13 +74,29 @@ engine::want engine::handshake(stream_base::handshake_type type, asio::error_cod
         return want::want_nothing;
     }
 
-    _handshakeManager.setMode((type == asio::ssl::stream_base::client)
-                                  ? SSLHandshakeManager::HandshakeMode::Client
-                                  : SSLHandshakeManager::HandshakeMode::Server);
+    const bool isClient = (type == asio::ssl::stream_base::client);
+    _handshakeManager.setMode(isClient ? SSLHandshakeManager::HandshakeMode::Client
+                                       : SSLHandshakeManager::HandshakeMode::Server);
+    _readManager.setIsClient(isClient);
     SSLHandshakeManager::HandshakeState state;
     auto w = _handshakeManager.nextHandshake(ec, &state);
-    if (w == ssl_want::want_nothing || state == SSLHandshakeManager::HandshakeState::Done) {
+    if (!ec &&
+        (w == ssl_want::want_nothing || state == SSLHandshakeManager::HandshakeState::Done)) {
         _state = EngineState::InProgress;
+
+        // TLS 1.3: the peer may bundle application data alongside its final handshake
+        // flight (e.g. the client's Certificate+Finished + first MongoDB message arrive in
+        // one TCP segment).  AcceptSecurityContext / InitializeSecurityContext leaves those
+        // encrypted bytes in _inBuffer, but the SSLReadManager is still in its initial
+        // NeedMoreEncryptedData state and will stall waiting for more network data.  Signal
+        // it so readDecryptedData processes the leftover bytes immediately.
+        if (!_inBuffer.empty()) {
+            LOGV2_DEBUG(7998008,
+                        2,
+                        "TLS handshake complete with leftover application data in input buffer",
+                        "bytes"_attr = _inBuffer.size());
+            _readManager.notifyHandshakeLeftoverData();
+        }
     }
 
     return ssl_want_to_engine(w);

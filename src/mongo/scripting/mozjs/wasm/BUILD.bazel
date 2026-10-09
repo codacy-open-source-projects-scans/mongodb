@@ -1,7 +1,8 @@
-load("//bazel/wasm_rules:wasm_cc_binary.bzl", "wasm_cc_binary")
 load("//bazel:mongo_src_rules.bzl", "mongo_cc_library", "mongo_cc_unit_test")
+load("//bazel/config:render_template.bzl", "render_template")
 load("//bazel/wasm_rules:embed_binary.bzl", "embed_binary_obj", "embed_binary_rc")
 load("//bazel/wasm_rules:wasm_aot_compile.bzl", "aot_compile_wasm")
+load("//bazel/wasm_rules:wasm_cc_binary.bzl", "wasm_cc_binary")
 load("//bazel/wasm_rules:wit_bindgen_c.bzl", "wit_bindgen_c")
 
 package(default_visibility = ["//visibility:public"])
@@ -48,9 +49,43 @@ genrule(
         "manual",
         "no-sandbox",
     ],
-    toolchains = ["@bazel_tools//tools/cpp:current_cc_toolchain"],
+    toolchains = ["@rules_cc//cc:current_cc_toolchain"],
     tools = [
         "@wasi_sdk//:bin",
+    ],
+)
+
+MONGO_WASM_JS_CPP_JSFILES = [
+    "//src/mongo/scripting/mozjs/wasm/jsfiles:assert_wasm.js",
+    "//src/mongo/scripting/mozjs/common/jsfiles:types.js",
+]
+
+# Converts core JS file content into CPP structures to be loaded directly
+# into the native binary via bytecode upon startup.
+render_template(
+    name = "mongowasmjs_cpp",
+    srcs = MONGO_WASM_JS_CPP_JSFILES,
+    cmd = [
+        "$(location mongowasmjs.cpp)",
+    ] + [
+        "$(location {})".format(file)
+        for file in MONGO_WASM_JS_CPP_JSFILES
+    ],
+    output = "mongowasmjs.cpp",
+    python_file = "//buildscripts:jstoh.py",
+)
+
+mongo_cc_library(
+    name = "mongowasmjs",
+    srcs = [
+        "mongowasmjs.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = [
+        "//src/mongo/scripting/mozjs/common:jsfile.h",
+    ],
+    deps = [
+        "//src/mongo:base",
     ],
 )
 
@@ -61,13 +96,13 @@ mongo_cc_library(
         exclude = [
             "status.cpp",  # Included in wasi_sources filegroup
             "wasmtime_engine.cpp",
+            "wasmtime_engine_killop_proxy_test.cpp",  # Host-side test, not compiled for WASM
         ],
     ) + [
         ":api.c",
         "//src/mongo/scripting/mozjs/wasm/engine:api.cpp",
         "//src/mongo/scripting/mozjs/wasm/engine:engine.cpp",
         "//src/mongo/scripting/mozjs/wasm/engine:error.cpp",
-        "//src/mongo/scripting/mozjs/wasm/engine:exception_stubs.cpp",
     ],
     hdrs = [
         ":api.h",
@@ -86,7 +121,9 @@ mongo_cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        ":mongowasmjs",
         "//src/mongo:base",
+        "//src/mongo/scripting/mozjs/common:hex_md5",
         "//src/mongo/scripting/mozjs/common:mozjs_common",
         "//src/mongo/scripting/mozjs/shared:mozjs_shared_types",
         "@spidermonkey_wasi//:spidermonkey",
@@ -104,6 +141,11 @@ wasm_cc_binary(
         "-Wl,--no-entry",
         "-Wl,--export-memory",
         "-Wl,--stack-first",
+        # SpiderMonkey's WASI recursion counter fires at depth 350; each SM
+        # interpreter frame uses several KB of C++ shadow stack, so 350 levels
+        # can require > 1 MB.  The default 64 KB shadow stack is far too small.
+        # Use 8 MB to leave headroom for exception-unwind overhead.
+        "-Wl,-z,stack-size=8388608",
         "-Wl,--export=cabi_realloc",
     ],
     target_compatible_with = select({
@@ -123,12 +165,13 @@ exports_files([
 mongo_cc_library(
     name = "bridge",
     srcs = [
-        "//src/mongo/scripting:config_engine_gen",
+        "//src/mongo/scripting:config_engine_wasm_gen",
         "//src/mongo/scripting/mozjs/wasm/bridge:bridge.cpp",
         "//src/mongo/scripting/mozjs/wasm/bridge:wasm_helpers.cpp",
     ],
     hdrs = [
         "//src/mongo/scripting:config_engine_gen",
+        "//src/mongo/scripting:config_engine_wasm_gen",
         "//src/mongo/scripting/mozjs/wasm/bridge:bridge.h",
         "//src/mongo/scripting/mozjs/wasm/bridge:wasm_helpers.h",
     ],
@@ -138,7 +181,9 @@ mongo_cc_library(
     }),
     deps = [
         "//src/mongo:base",
+        "//src/mongo/bson:bson_validate",
         "//src/mongo/db:server_parameter",
+        "//src/mongo/scripting:scripting_common",
         "@crates//:wasmtime_c",
     ] + select({
         "@platforms//os:windows": ["//bazel/rules_rust:win_allocator_shim"],
@@ -160,12 +205,15 @@ mongo_cc_unit_test(
         "mozjs_wasm_tests",
     ],
     target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
         "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
         "//conditions:default": [],
     }),
     deps = [
         ":bridge",
         "//src/mongo:base",
+        "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/scripting:scripting_common",
         "@crates//:wasmtime_c",
     ] + select({
@@ -214,24 +262,185 @@ embed_binary_rc(
 )
 
 mongo_cc_unit_test(
-    name = "wasm_scope_test",
-    size = "large",
+    name = "wasm_scope_test_invocation",
     timeout = "long",
     srcs = [
-        "//src/mongo/scripting/mozjs/wasm/scope:scope_test.cpp",
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_invocation.cpp",
     ],
     auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
     tags = [
-        "mongo_unittest_second_group",
+        "mongo_unittest_fifth_group",
         "mozjs_wasm_tests",
     ],
     target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
         "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
         "//conditions:default": [],
     }),
     deps = [
         ":wasmtime_engine",
         "//src/mongo:base",
+        "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_test_type_handling",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_type_handling.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
+    tags = [
+        "mongo_unittest_fourth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_test_lifecycle",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_lifecycle.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
+    tags = [
+        "mongo_unittest_fifth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_test_memory_limits",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_memory_limits.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
+    tags = [
+        "mongo_unittest_eighth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_test_error_handling",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_error_handling.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
+    tags = [
+        "mongo_unittest_fifth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_test_concurrency",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_concurrency.cpp",
+    ],
+    auto_header = False,
+    tags = [
+        "mongo_unittest_fourth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/db/query:query_knobs",
+        "//src/mongo/scripting:scripting_common",
+        "//src/mongo/transport:transport_layer_mock",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "wasm_scope_security_test",
+    timeout = "long",
+    srcs = [
+        "//src/mongo/scripting/mozjs/wasm/scope:scope_test_security.cpp",
+    ],
+    auto_header = False,
+    private_hdrs = ["//src/mongo/scripting/mozjs/wasm/scope:scope_test_fixture.h"],
+    tags = [
+        "mongo_unittest_first_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db/query:query_knobs",
         "//src/mongo/scripting:scripting_common",
     ],
 )
@@ -246,14 +455,43 @@ mongo_cc_library(
         "wasmtime_engine.h",
         "//src/mongo/scripting/mozjs/wasm/scope:scope.h",
     ],
+    private_hdrs = ["embedded_wasm_resource.h"],
     deps = [
         ":bridge",
-        ":embed_mozjs_wasm_obj",
         "//src/mongo:base",
         "//src/mongo/db:server_options",
         "//src/mongo/db:service_context",
+        "//src/mongo/db/query:query_knobs",
         "//src/mongo/scripting:scripting_common",
         "//src/mongo/util/concurrency:spin_lock",
         "@crates//:wasmtime_c",
+    ] + select({
+        "@platforms//os:windows": [":embed_mozjs_wasm_rc"],
+        "//conditions:default": [":embed_mozjs_wasm_obj"],
+    }),
+)
+
+mongo_cc_unit_test(
+    name = "wasmtime_engine_killop_proxy_test",
+    timeout = "long",
+    srcs = [
+        "wasmtime_engine_killop_proxy_test.cpp",
+    ],
+    auto_header = False,
+    tags = [
+        "mongo_unittest_eighth_group",
+        "mozjs_wasm_tests",
+    ],
+    target_compatible_with = select({
+        # WASM-designated tests must not run under the legacy MozJS engine build.
+        "//bazel/config:js_engine_use_legacy": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":wasmtime_engine",
+        "//src/mongo:base",
+        "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/scripting:scripting_common",
     ],
 )

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/pattern_cmp.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -42,10 +15,12 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using mongo::mutablebson::Element;
 using mongo::mutablebson::sortChildren;
@@ -65,7 +40,7 @@ public:
         _objs[_size] = obj;
         _size++;
 
-        ASSERT_OK(_doc.root()["x"].appendObject(mongo::StringData(), obj));
+        ASSERT_OK(_doc.root()["x"].appendObject(std::string_view(), obj));
     }
 
     BSONObj getOrigObj(size_t i) {
@@ -231,7 +206,7 @@ TEST(PatternValueCmpTest, PatternValueCmpDescendingOrder) {
 
 TEST(PatternValueCmpTest, PatternValueCmpStrings) {
     assertExpectedSortResults(
-        {Value("a"_sd), Value("b"_sd)}, {Value("a"_sd), Value("b"_sd)}, fromjson("{'': 1}"));
+        {Value("a"sv), Value("b"sv)}, {Value("a"sv), Value("b"sv)}, fromjson("{'': 1}"));
 }
 
 TEST(PatternValueCmpTest, PatternValueCmpObjects) {
@@ -284,11 +259,11 @@ TEST(PatternValueCmpTest, PatternValueCmpWithCollator) {
     const auto sortPattern = fromjson("{'': 1}");
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
 
-    assertExpectedSortResults({Value("abc"_sd), Value("acb"_sd), Value("cba"_sd)},
-                              {Value("abc"_sd), Value("acb"_sd), Value("cba"_sd)},
+    assertExpectedSortResults({Value("abc"sv), Value("acb"sv), Value("cba"sv)},
+                              {Value("abc"sv), Value("acb"sv), Value("cba"sv)},
                               sortPattern);
-    assertExpectedSortResults({Value("abc"_sd), Value("acb"_sd), Value("cba"_sd)},
-                              {Value("cba"_sd), Value("acb"_sd), Value("abc"_sd)},
+    assertExpectedSortResults({Value("abc"sv), Value("acb"sv), Value("cba"sv)},
+                              {Value("cba"sv), Value("acb"sv), Value("abc"sv)},
                               sortPattern,
                               &collator);
 }

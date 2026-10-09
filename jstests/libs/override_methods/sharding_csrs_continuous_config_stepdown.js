@@ -1,7 +1,13 @@
 import {ContinuousStepdown} from "jstests/libs/override_methods/continuous_stepdown.js";
 import "jstests/libs/override_methods/implicitly_retry_on_config_stepdowns.js";
-import {kOverrideConstructor as kOverrideConstructorForRST, ReplSetTest} from "jstests/libs/replsettest.js";
-import {kOverrideConstructor as kOverrideConstructorForST, ShardingTest} from "jstests/libs/shardingtest.js";
+import {
+    kOverrideConstructor as kOverrideConstructorForRST,
+    ReplSetTest,
+} from "jstests/libs/replsettest.js";
+import {
+    kOverrideConstructor as kOverrideConstructorForST,
+    ShardingTest,
+} from "jstests/libs/shardingtest.js";
 
 const stepdownIntervalMS = 8 * 1000;
 
@@ -33,7 +39,9 @@ ShardingTest[kOverrideConstructorForST] = class ShardingTestWithContinuousFailov
      * server is still stabilizing during startup.
      */
     _stopBalancerForInit() {
-        retryOnRetryableError(() => this.stopBalancer(10000), 10, 2000, [ErrorCodes.FailedToSatisfyReadPreference]);
+        retryOnRetryableError(() => this.stopBalancer(10000), 10, 2000, [
+            ErrorCodes.FailedToSatisfyReadPreference,
+        ]);
     }
 
     constructor(params) {
@@ -46,8 +54,3 @@ ShardingTest[kOverrideConstructorForST] = class ShardingTestWithContinuousFailov
         this.startContinuousFailover();
     }
 };
-
-// The checkUUIDsConsistentAcrossCluster() function is defined on ShardingTest's prototype, but
-// ShardingTest's prototype gets reset when ShardingTest is reassigned. We reload the override
-// to redefine checkUUIDsConsistentAcrossCluster() on the new ShardingTest's prototype.
-await import("jstests/libs/override_methods/check_uuids_consistent_across_cluster.js");

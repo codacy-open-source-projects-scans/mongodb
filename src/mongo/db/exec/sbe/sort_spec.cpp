@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/exec/sbe/sort_spec.h"
@@ -45,23 +19,19 @@ key_string::Value SortSpec::generateSortKey(const BSONObj& obj, const CollatorIn
 }
 
 value::SortKeyComponentVector* SortSpec::generateSortKeyComponentVector(
-    FastTuple<bool, value::TypeTags, value::Value> obj, const CollatorInterface* collator) {
-    auto [objOwned, objTag, objVal] = obj;
-    ValueGuard guard(objOwned, objTag, objVal);
-
+    value::TagValueMaybeOwned obj, const CollatorInterface* collator) {
     // While this function accepts any type of object, for now we simply convert everything
     // to BSON. In the future, we may change this function to avoid the conversion.
-    auto bsonObj = [&, objTag = objTag, objVal = objVal, objOwned = objOwned]() {
-        if (objTag == value::TypeTags::bsonObject) {
-            if (objOwned) {
-                // Take ownership of the temporary object here.
-                _tempVal.emplace(objTag, objVal);
-                guard.reset();
+    auto bsonObj = [&]() {
+        if (obj.tag() == value::TypeTags::bsonObject) {
+            auto bsonVal = obj.value();
+            if (obj.owned()) {
+                _tempVal = std::move(obj);
             }
-            return BSONObj{value::bitcastTo<const char*>(objVal)};
-        } else if (objTag == value::TypeTags::Object) {
+            return BSONObj{value::bitcastTo<const char*>(bsonVal)};
+        } else if (obj.tag() == value::TypeTags::Object) {
             BSONObjBuilder objBuilder;
-            bson::convertToBsonObj(objBuilder, value::getObjectView(objVal));
+            bson::convertToBsonObj(objBuilder, value::getObjectView(obj.value()));
             _tempObj = objBuilder.obj();
             return _tempObj;
         } else {
@@ -110,10 +80,13 @@ std::pair<TypeTags, Value> SortSpec::compare(TypeTags leftTag,
     }
 
     for (size_t i = 0; i < _sortPattern.size(); i++) {
-        auto [leftElemTag, leftElemVal] = leftArray->getAt(i);
-        auto [rightElemTag, rightElemVal] = rightArray->getAt(i);
-        auto [cmpTag, cmpVal] =
-            value::compareValue(leftElemTag, leftElemVal, rightElemTag, rightElemVal, collator);
+        auto leftElemTagVal = leftArray->getAt(i);
+        auto rightElemTagVal = rightArray->getAt(i);
+        auto [cmpTag, cmpVal] = value::compareValue(leftElemTagVal.tag,
+                                                    leftElemTagVal.value,
+                                                    rightElemTagVal.tag,
+                                                    rightElemTagVal.value,
+                                                    collator);
         if (cmpTag == TypeTags::NumberInt32) {
             if (cmpVal != 0) {
                 auto sign = _sortPattern[i].isAscending ? 1 : -1;

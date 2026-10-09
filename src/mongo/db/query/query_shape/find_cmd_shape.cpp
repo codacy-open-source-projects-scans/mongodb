@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_shape/find_cmd_shape.h"
 
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_util.h"
 #include "mongo/db/query/query_shape/shape_helpers.h"
+
+#include <string_view>
 
 namespace mongo::query_shape {
 namespace {
@@ -48,22 +24,24 @@ static_assert(
     "If the class's members have changed, this assert and the extraSize() calculation may "
     "need to be updated with a new value.");
 
-BSONObj projectionShape(const boost::optional<projection_ast::Projection>& proj,
-                        const SerializationOptions& opts =
-                            SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
+BSONObj projectionShape(
+    const boost::optional<projection_ast::Projection>& proj,
+    const query_shape::SerializationOptions& opts =
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
     return proj ? projection_ast::serialize(*proj->root(), opts) : BSONObj();
 }
 
-BSONObj sortShape(const boost::optional<SortPattern>& sort,
-                  const SerializationOptions& opts =
-                      SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
+BSONObj sortShape(
+    const boost::optional<SortPattern>& sort,
+    const query_shape::SerializationOptions& opts =
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
     return sort
         ? sort->serialize(SortPattern::SortKeySerialization::kForPipelineSerialization, opts)
               .toBson()
         : BSONObj();
 }
 
-void maybeAddWithName(const OptionalBool& optBool, BSONObjBuilder& bob, StringData name) {
+void maybeAddWithName(const OptionalBool& optBool, BSONObjBuilder& bob, std::string_view name) {
     if (optBool.has_value()) {
         bob.append(name, bool(optBool));
     }
@@ -85,7 +63,7 @@ void addRemainingFindCommandFields(const FindCmdShapeComponents& components, BSO
 FindCmdShapeComponents::FindCmdShapeComponents(
     const ParsedFindCommand& request,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const SerializationOptions& opts)
+    const query_shape::SerializationOptions& opts)
     : filter(request.filter->serialize(opts)),
       projection(projectionShape(request.proj, opts)),
       sort(sortShape(request.sort, opts)),
@@ -109,7 +87,7 @@ FindCmdShapeComponents::FindCmdShapeComponents(
       serializationOpts(opts) {}
 
 void FindCmdShapeComponents::appendTo(BSONObjBuilder& bob,
-                                      const SerializationOptions& opts,
+                                      const query_shape::SerializationOptions& opts,
                                       const boost::intrusive_ptr<ExpressionContext>& expCtx) const {
     let.appendTo(bob, opts, expCtx);
 
@@ -229,6 +207,8 @@ std::unique_ptr<FindCommandRequest> FindCmdShape::toFindCommandRequest() const {
         fcr->setMirrored(bool(_components.mirrored));
     if (_components.oplogReplay.has_value())
         fcr->setOplogReplay(bool(_components.oplogReplay));
+    if (rawData)
+        fcr->setRawData(rawData);
 
     // Common shape components.
     if (_components.let.hasLet)
@@ -243,20 +223,23 @@ std::unique_ptr<FindCommandRequest> FindCmdShape::toFindCommandRequest() const {
 FindCmdShape::FindCmdShape(const ParsedFindCommand& findRequest,
                            const boost::intrusive_ptr<ExpressionContext>& expCtx)
     : Shape(findRequest.findCommandRequest->getNamespaceOrUUID(),
-            findRequest.findCommandRequest->getCollation()),
+            findRequest.findCommandRequest->getCollation(),
+            findRequest.findCommandRequest->getRawData().value_or(false)),
       _components(findRequest, expCtx) {}
 
-void FindCmdShape::appendCmdSpecificShapeComponents(BSONObjBuilder& bob,
-                                                    OperationContext* opCtx,
-                                                    const SerializationOptions& opts) const {
+void FindCmdShape::appendCmdSpecificShapeComponents(
+    BSONObjBuilder& bob,
+    OperationContext* opCtx,
+    const query_shape::SerializationOptions& opts) const {
     auto expCtx = makeBlankExpressionContext(opCtx, nssOrUUID, _components.let.shapifiedLet);
-    if (opts == SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
+    if (opts == query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions) {
         // Fast path: we already have this.
         _components.appendTo(bob, opts, expCtx);
         return;
     }
 
     // Slow path: we need to re-parse from our representative shapes.
+    expCtx->setIsReparsingRepresentativeQueryShape(true);
     auto request = uassertStatusOKWithContext(
         parsed_find_command::parse(
             expCtx,
@@ -280,6 +263,13 @@ QueryShapeHash FindCmdShape::sha256Hash(OperationContext*, const SerializationCo
     // whether the command specification includes a namespace or a UUID of a collection.
     findCommandShapeBuffer.appendNum(_components.optionalArgumentsEncoding() << 1 |
                                      (nssOrUUID.isNamespaceString() ? 1 : 0));
+
+    // Common command options (e.g. rawData) are appended as a separate word, and only when one of
+    // them is set, so that commands without any common options keep their historical hashes. See
+    // Shape::commonOptionsWord() for the bit layout.
+    if (const auto commonOptions = commonOptionsWord()) {
+        findCommandShapeBuffer.appendNum(static_cast<short>(commonOptions));
+    }
     auto nssDataRange = nssOrUUID.asDataRange();
     findCommandShapeBuffer.appendBuf(nssDataRange.data(), nssDataRange.length());
     findCommandShapeBuffer.appendBuf(_components.min.objdata(), _components.min.objsize());

@@ -1,6 +1,7 @@
 // Failing due to queries on a sharded collection not able to be covered when they aren't on the
 // shard key since the document needs to be fetched in order to apply the SHARDING_FILTER stage.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 //   requires_getmore,
 // ]
@@ -129,5 +130,9 @@ assert.eq(resultDoc, {x: {y: {y: null, z: null}, z: null}});
     assert.commandWorked(coll.insert({a: {x: 1, b: {x: 2}}, b: {c: 3}}));
 
     assert(arrayEq(coll.find({}, {_id: 0, "a": "$p", "b.c": "$q"}).toArray(), [{b: {}}]));
-    assert(arrayEq(coll.find({}, {_id: 0, "a.x": "$a.x", "a.b.x": "$a.x"}).toArray(), [{a: {x: 1, b: {x: 1}}}]));
+    assert(
+        arrayEq(coll.find({}, {_id: 0, "a.x": "$a.x", "a.b.x": "$a.x"}).toArray(), [
+            {a: {x: 1, b: {x: 1}}},
+        ]),
+    );
 }

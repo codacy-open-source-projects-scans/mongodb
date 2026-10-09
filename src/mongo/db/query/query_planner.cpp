@@ -1,45 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <cstring>
+#include "mongo/db/query/query_planner.h"
 
-#include <s2cellid.h>
-
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -56,7 +22,6 @@
 #include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
-#include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
@@ -76,30 +41,42 @@
 #include "mongo/db/query/distinct_access.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_tag.h"
+#include "mongo/db/query/max_estimated_scan_bytes_metrics.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_diagnostic_printer.h"
 #include "mongo/db/query/plan_enumerator/plan_enumerator.h"
 #include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/plan_ranking/plan_ranker.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
-#include "mongo/db/query/query_knob_configuration.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <cstring>
 #include <deque>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <s2cellid.h>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -126,8 +103,14 @@ auto& cbrChoseWinningPlan = *MetricBuilder<Counter64>{"query.cbr.choseWinningPla
 }  // namespace
 
 namespace {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(queryPlannerAlwaysFails);
 MONGO_FAIL_POINT_DEFINE(planFromCacheAlwaysFails);
+
+// Rate-limits rejection logging per namespace: first at Info, subsequent within the window at
+// Debug(2).
+logv2::KeyedSeveritySuppressor<std::string> maxEstimatedScanBytesRejectionLogSeverity{
+    Seconds{1}, logv2::LogSeverity::Info(), logv2::LogSeverity::Debug(2)};
 
 /**
  * Attempts to apply the index tags from 'branchCacheData' to 'orChild'. If the index assignments
@@ -176,11 +159,11 @@ size_t hashTaggedMatchExpression(MatchExpression* expr, const std::vector<IndexE
  * pattern (eg: {_id: 1}).
  */
 bool hintMatchesNameOrPattern(const BSONObj& hintObj,
-                              StringData indexName,
+                              std::string_view indexName,
                               BSONObj indexKeyPattern) {
 
     BSONElement firstHintElt = hintObj.firstElement();
-    if (firstHintElt.fieldNameStringData() == "$hint"_sd &&
+    if (firstHintElt.fieldNameStringData() == "$hint"sv &&
         firstHintElt.type() == BSONType::string) {
         // An index name is provided by the hint.
         return indexName == firstHintElt.valueStringData();
@@ -220,7 +203,7 @@ bool isSolutionBoundedCollscan(const QuerySolution* querySoln) {
                               << numCollscanNodes,
                 count == 1);
         auto collscan = static_cast<const CollectionScanNode*>(node);
-        return collscan->minRecord || collscan->maxRecord;
+        return !collscan->rangeList.isUnbounded();
     }
     return false;
 }
@@ -255,18 +238,14 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
     if (query.cqPipeline().empty()) {
         static const auto status =
             Status{ErrorCodes::InvalidOptions,
-                   "not building $search node because the query pipeline is empty"_sd};
+                   "not building $search node because the query pipeline is empty"sv};
         return status;
     }
 
     if (query.isSearchQuery()) {
         tassert(7816300,
-                "Pushing down $search into SBE but forceClassicEngine is on"_sd,
+                "Pushing down $search into SBE but forceClassicEngine is on"sv,
                 !query.getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled());
-
-        tassert(7816301,
-                "Pushing down $search into SBE but featureFlagSearchInSbe is disabled."_sd,
-                feature_flags::gFeatureFlagSearchInSbe.isEnabled());
 
         // Build a SearchNode in order to retrieve the search info.
         auto searchNode =
@@ -284,13 +263,24 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
 
     {
         static const auto status =
-            Status{ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"_sd};
+            Status{ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"sv};
         return status;
     }
 }
 }  // namespace
 
 using std::unique_ptr;
+
+bool isClusteredIDXScanSoln(QuerySolution* collscanSoln);
+
+/**
+ * Returns true if 'soln' is an unbounded COLLSCAN that must be rejected because
+ * COLLECTION_EXCEEDS_SCAN_BYTES is active. Exempts bounded clustered scans (minRecord/maxRecord)
+ * and resumeScanPoint, as well as queries with an effective limit.
+ */
+bool rejectsUnboundedCollscan(const CanonicalQuery& query,
+                              const QueryPlannerParams& params,
+                              QuerySolution* soln);
 
 static bool is2DIndex(const BSONObj& pattern) {
     BSONObjIterator it(pattern);
@@ -360,6 +350,12 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::TARGET_SBE_STAGE_BUILDER:
                 ss << "TARGET_SBE_STAGE_BUILDER ";
+                break;
+            case QueryPlannerParams::COLLECTION_EXCEEDS_SCAN_BYTES:
+                ss << "COLLECTION_EXCEEDS_SCAN_BYTES ";
+                break;
+            case QueryPlannerParams::MAX_ESTIMATED_SCAN_BYTES_DRY_RUN:
+                ss << "MAX_ESTIMATED_SCAN_BYTES_DRY_RUN ";
                 break;
             case QueryPlannerParams::DEFAULT:
                 MONGO_UNREACHABLE;
@@ -732,7 +728,8 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     // knob blocks new cache entries from being inserted and blocks existing entries from
     // being retrieved, meaning that in the exception case we would end up in a state where a query
     // should not be cached, but is in the cache. This is why we check the knob.
-    dassert(internalQueryDisablePlanCache.load() || shouldCacheQuery(query));
+    dassert(query.getExpCtx()->getQueryKnobConfiguration().getDisablePlanCache() ||
+            shouldCacheQuery(query));
 
     if (SolutionCacheData::WHOLE_IXSCAN_SOLN == solnCacheData.solnType) {
         // The solution can be constructed by a scan over the entire index.
@@ -754,9 +751,44 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
         if (!soln) {
             return Status(ErrorCodes::NoQueryExecutionPlans,
                           "plan cache error: collection scan soln");
-        } else {
-            return {std::move(soln)};
         }
+        // Re-check COLLECTION_EXCEEDS_SCAN_BYTES on cache replay so that setting the parameter at
+        // runtime takes effect even for queries whose COLLSCAN was already cached.
+        if (rejectsUnboundedCollscan(query, params, soln.get())) {
+            if (QueryPlannerCommon::isMaxEstimatedScanBytesDryRun(params.mainCollectionInfo)) {
+                if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                    LOGV2(10130231,
+                          "maxEstimatedScanBytesDryRun: query would be rejected by "
+                          "maxEstimatedScanBytes",
+                          "namespace"_attr = query.nss().toStringForErrorMsg(),
+                          "estimatedSize"_attr =
+                              params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                          "threshold"_attr =
+                              params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                    maxEstimatedScanBytesMetrics::maxEstimatedScanDryRunWouldReject.increment();
+                }
+            } else {
+                if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                    LOGV2_DEBUG(
+                        13466400,
+                        maxEstimatedScanBytesRejectionLogSeverity(query.nss().toStringForErrorMsg())
+                            .toInt(),
+                        "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                        "COLLSCAN on a collection that exceeds the configured size threshold",
+                        "namespace"_attr = query.nss().toStringForErrorMsg(),
+                        "estimatedSize"_attr =
+                            params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                        "threshold"_attr =
+                            params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                    maxEstimatedScanBytesMetrics::maxEstimatedScanRejected.increment();
+                }
+                return Status(
+                    ErrorCodes::NoQueryExecutionPlans,
+                    "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                    "COLLSCAN on a collection that exceeds the configured size threshold");
+            }
+        }
+        return {std::move(soln)};
     } else if (SolutionCacheData::VIRTSCAN_SOLN == solnCacheData.solnType) {
         tassert(9049200,
                 "Constructing a virtual scan plan from cache requires 'VirtualScanCacheData",
@@ -895,6 +927,14 @@ bool isClusteredIDXScanSoln(QuerySolution* collscanSoln) {
     return false;
 }
 
+bool rejectsUnboundedCollscan(const CanonicalQuery& query,
+                              const QueryPlannerParams& params,
+                              QuerySolution* soln) {
+    return (params.mainCollectionInfo.options &
+            QueryPlannerParams::COLLECTION_EXCEEDS_SCAN_BYTES) &&
+        !isClusteredIDXScanSoln(soln) && !QueryPlannerCommon::hasEffectiveLimit(query);
+}
+
 StatusWith<std::vector<std::unique_ptr<QuerySolution>>> attemptCollectionScan(
     const CanonicalQuery& query, bool isTailable, const QueryPlannerParams& params) {
     if (auto soln = tryEofSoln(query)) {
@@ -904,7 +944,41 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> attemptCollectionScan(
         return Status(ErrorCodes::NoQueryExecutionPlans,
                       "not allowed to output a collection scan because 'notablescan' is enabled");
     }
-    if (auto soln = buildCollscanSoln(query, isTailable, params)) {
+    auto soln = buildCollscanSoln(query, isTailable, params);
+    // Check COLLECTION_EXCEEDS_SCAN_BYTES after building the solution to exempt bounded clustered
+    // scans (minRecord/maxRecord) and resumeScanPoint from rejection.
+    if (soln && rejectsUnboundedCollscan(query, params, soln.get())) {
+        if (QueryPlannerCommon::isMaxEstimatedScanBytesDryRun(params.mainCollectionInfo)) {
+            if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                LOGV2(10130232,
+                      "maxEstimatedScanBytesDryRun: query would be rejected by "
+                      "maxEstimatedScanBytes",
+                      "namespace"_attr = query.nss().toStringForErrorMsg(),
+                      "estimatedSize"_attr =
+                          params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                      "threshold"_attr = params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                maxEstimatedScanBytesMetrics::maxEstimatedScanDryRunWouldReject.increment();
+            }
+        } else {
+            if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                LOGV2_DEBUG(
+                    13466401,
+                    maxEstimatedScanBytesRejectionLogSeverity(query.nss().toStringForErrorMsg())
+                        .toInt(),
+                    "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                    "COLLSCAN on a collection that exceeds the configured size threshold",
+                    "namespace"_attr = query.nss().toStringForErrorMsg(),
+                    "estimatedSize"_attr =
+                        params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                    "threshold"_attr = params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                maxEstimatedScanBytesMetrics::maxEstimatedScanRejected.increment();
+            }
+            return Status(ErrorCodes::NoQueryExecutionPlans,
+                          "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                          "COLLSCAN on a collection that exceeds the configured size threshold");
+        }
+    }
+    if (soln) {
         return singleSolution(std::move(soln));
     }
     return Status(ErrorCodes::NoQueryExecutionPlans, "Failed to build collection scan soln");
@@ -1454,8 +1528,9 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                           "need exactly one text index for $text query");
         }
 
-        // Error if the text node is tagged with zero indices.
-        if (0 == tag->first.size() && 0 == tag->notFirst.size()) {
+        // Error if the text node is untagged (e.g. nested inside a kOther operator such as
+        // $_internalSchemaCond that rateIndices does not recurse into) or tagged with zero indices.
+        if (!tag || (0 == tag->first.size() && 0 == tag->notFirst.size())) {
             // Don't leave tags on query tree.
             query.getPrimaryMatchExpression()->resetTag();
             return Status(ErrorCodes::NoQueryExecutionPlans,
@@ -1486,10 +1561,19 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     std::vector<std::unique_ptr<QuerySolution>> out;
 
+    // Accumulates the planner-global explain flags so we can merge the same final state onto every
+    // candidate solution before explain reads it from the winning plan.
+    PlanEnumeratorExplainInfo enumeratorExplainInfo;
+
+    // 'hitScanLimit' is computed from the built solution tree during analysis/setRoot(),
+    // not by PlanEnumerator itself, so we need a separate accumulator.
+    bool anyHitScanLimit = false;
+
     // If we have any relevant indices, we try to create indexed plans.
     if (!relevantIndices.empty()) {
         // The enumerator spits out trees tagged with IndexTag(s).
-        plan_enumerator::PlanEnumeratorParams enumParams;
+        plan_enumerator::PlanEnumeratorParams enumParams(
+            query.getExpCtx()->getQueryKnobConfiguration());
         enumParams.intersect =
             params.mainCollectionInfo.options & QueryPlannerParams::INDEX_INTERSECTION;
         enumParams.root = query.getPrimaryMatchExpression();
@@ -1510,9 +1594,11 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         plan_enumerator::PlanEnumerator planEnumerator(enumParams);
         uassertStatusOKWithContext(planEnumerator.init(), "failed to initialize plan enumerator");
 
+        const size_t maxIndexedSolutions = static_cast<size_t>(
+            QueryKnobConfiguration::get(query.getExpCtx()->getOperationContext())
+                .getPlannerMaxIndexedSolutions());
         unique_ptr<MatchExpression> nextTaggedTree;
-        while ((nextTaggedTree = planEnumerator.getNext()) &&
-               (out.size() < params.maxIndexedSolutions)) {
+        while ((nextTaggedTree = planEnumerator.getNext()) && (out.size() < maxIndexedSolutions)) {
             LOGV2_DEBUG(20976,
                         5,
                         "About to build solntree from tagged tree",
@@ -1557,6 +1643,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
             if (soln) {
                 soln->taggedMatchExpressionHash = taggedMatchExpressionHash;
                 soln->_enumeratorExplainInfo.merge(planEnumerator._explainInfo);
+                anyHitScanLimit = anyHitScanLimit || soln->_enumeratorExplainInfo.hitScanLimit;
                 LOGV2_DEBUG(20978,
                             5,
                             "Planner: adding solution",
@@ -1569,6 +1656,14 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 out.push_back(std::move(soln));
             }
         }
+        // The PlanEnumerator explain flags are only generated while producing indexed plans, so we
+        // capture them here after indexed enumeration finishes. However, we propagate outside this
+        // if block such all plans (index and table scans) have the same/correct flag values.
+        // If we were to propagate inside this if block, `out` would only contain indexed solutions
+        // and thus the PlanEnumerator explain flags wouldn't be set on any table scan solutions
+        // produced below.
+        enumeratorExplainInfo = planEnumerator._explainInfo;
+        enumeratorExplainInfo.hitScanLimit = enumeratorExplainInfo.hitScanLimit || anyHitScanLimit;
     }
 
     // Don't leave tags on query tree.
@@ -1654,13 +1749,23 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     bool collscanRequested =
         (params.mainCollectionInfo.options & QueryPlannerParams::INCLUDE_COLLSCAN);
 
+    // Suppress INCLUDE_COLLSCAN when COLLECTION_EXCEEDS_SCAN_BYTES is active and the query has no
+    // limit. An unbounded COLLSCAN on a large collection is disallowed in this case.
+    // Note: this site does not branch on MAX_ESTIMATED_SCAN_BYTES_DRY_RUN. This is enumeration
+    // suppression, not a rejection point, and it applies identically in both real and dry-run
+    // mode; the actual reject-vs-dry-run branching happens later at the collScanRequired path.
+    if (collscanRequested &&
+        (params.mainCollectionInfo.options & QueryPlannerParams::COLLECTION_EXCEEDS_SCAN_BYTES) &&
+        !QueryPlannerCommon::hasEffectiveLimit(query)) {
+        collscanRequested = false;
+    }
+
     // No indexed plans?  We must provide a collscan if possible or else we can't run the query.
     bool collScanRequired = out.empty();
     if (collScanRequired && noTableAndClusteredIDXScan(params)) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
                       "No indexed plans available, and running with 'notablescan'");
     }
-
     bool clusteredCollection = params.clusteredInfo.has_value();
 
     if (collScanRequired && mustUseIndexedPlan) {
@@ -1707,6 +1812,56 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     if (collScanRequired && noTableScan(params) && !isClusteredIDXScan) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
                       "No indexed plans available, and running with 'notablescan' 2");
+    }
+    if (collScanRequired &&
+        (params.mainCollectionInfo.options & QueryPlannerParams::COLLECTION_EXCEEDS_SCAN_BYTES) &&
+        // Exempt bounded clustered scans (minRecord/maxRecord) and resumeScanPoint.
+        !isClusteredIDXScan) {
+        if (!QueryPlannerCommon::hasEffectiveLimit(query)) {
+            if (QueryPlannerCommon::isMaxEstimatedScanBytesDryRun(params.mainCollectionInfo)) {
+                if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                    LOGV2(10130233,
+                          "maxEstimatedScanBytesDryRun: query would be rejected by "
+                          "maxEstimatedScanBytes",
+                          "namespace"_attr = query.nss().toStringForErrorMsg(),
+                          "estimatedSize"_attr =
+                              params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                          "threshold"_attr =
+                              params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                    maxEstimatedScanBytesMetrics::maxEstimatedScanDryRunWouldReject.increment();
+                }
+            } else {
+                if (query.getExpCtx()->tryClaimMaxEstimatedScanBytesMetric()) {
+                    LOGV2_DEBUG(
+                        13466402,
+                        maxEstimatedScanBytesRejectionLogSeverity(query.nss().toStringForErrorMsg())
+                            .toInt(),
+                        "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                        "COLLSCAN on a collection that exceeds the configured size threshold",
+                        "namespace"_attr = query.nss().toStringForErrorMsg(),
+                        "estimatedSize"_attr =
+                            params.mainCollectionInfo.maxEstimatedScanBytesCollectionSize,
+                        "threshold"_attr =
+                            params.mainCollectionInfo.maxEstimatedScanBytesThreshold);
+                    maxEstimatedScanBytesMetrics::maxEstimatedScanRejected.increment();
+                }
+                return Status(
+                    ErrorCodes::NoQueryExecutionPlans,
+                    "Query rejected by maxEstimatedScanBytes: plan requires an unbounded "
+                    "COLLSCAN on a collection that exceeds the configured size threshold");
+            }
+        }
+    }
+
+    // Explain reads the plan enumerator's explain info from the winning plan's solution.
+    // The hitIndexedOrLimit flag is set only on the advanced plan that trips the limit so plans
+    // generated before the limit will have a stale hitIndexedOrLimit value (false). Moreover, the
+    // winning plan could be the fallback collection scan, which is built outside the indexed plan
+    // enumerator loop and therefore would also have an incorrect hitIndexedOrLimit value. For these
+    // reasons, we need to we need to propagate the plan enumerator's explain info onto every
+    // candidate solution so whichever plan wins, we always report the limit flag correctly.
+    for (auto& soln : out) {
+        soln->_enumeratorExplainInfo.merge(enumeratorExplainInfo);
     }
 
     // If CanonicalQuery is distinct-like and we haven't generated a plan that features
@@ -1767,18 +1922,16 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
     const QueryPlannerParams& params,
     ce::SamplingEstimator* samplingEstimator,
     const ce::ExactCardinalityEstimator* exactCardinality,
-    StatusWith<std::vector<std::unique_ptr<QuerySolution>>> statusWithMultiPlanSolns,
-    bool isExplain) {
+    std::vector<std::unique_ptr<QuerySolution>> allSoln,
+    const CanonicalQuery& query,
+    QueryCBRCEModeEnum ceMode) {
     using namespace cost_based_ranker;
-    auto cbrMode = params.planRankerMode;
+    auto cbrMode = ceMode;
     EstimateMap estimates;
     const auto& collInfo = params.mainCollectionInfo;
     tassert(9969001, "CBR received incomplete catalog statistics", collInfo.collStats != nullptr);
     CardinalityEstimator cardEstimator(collInfo, samplingEstimator, estimates, cbrMode);
     CostEstimator costEstimator(estimates);
-
-    std::vector<std::unique_ptr<QuerySolution>> allSoln =
-        std::move(statusWithMultiPlanSolns.getValue());
     // This set of plans contains the optimal plan. If 'acceptedSoln' contains a single
     // plan, then that is the optimal (winning) plan chosen by the planner. Otherwise, if there is
     // more than one plan, those plans are sent to the multi-planner to choose the winning plan.
@@ -1787,20 +1940,20 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
     // explain to show all rejected plans.
     std::vector<std::unique_ptr<QuerySolution>> rejectedSoln;
 
+    const size_t numCandidates = allSoln.size();
+
     CostEstimate bestCost = maxCost;
     std::unique_ptr<QuerySolution> bestSoln;
     for (auto&& soln : allSoln) {
-        const auto& ceRes = cbrMode == QueryPlanRankerModeEnum::kExactCE
+        const auto& ceRes = cbrMode == QueryCBRCEModeEnum::kExactCE
             ? exactCardinality->calculateExactCardinality(*soln, estimates)
             : cardEstimator.estimatePlan(*soln);
         if (!ceRes.isOK()) {
             // This plan's cardinality cannot be estimated.
             numPlansFailedCostEstimation.increment();
-            if (cbrMode == QueryPlanRankerModeEnum::kAutomaticCE ||
-                ceRes.getStatus().code() == ErrorCodes::UnsupportedCbrNode) {
-                // We'll fallback to multi-planning for an inestimable plan if either:
-                // * We are in automatic CE mode
-                // * The reason for the inestimable plan was an unsupported node
+            if (ceRes.getStatus().code() == ErrorCodes::UnsupportedCbrNode) {
+                // Fallback to multi-planning when the reason for the inestimable plan was an
+                // unsupported node.
                 acceptedSoln.push_back(std::move(soln));
             } else {
                 // All other CE modes are considered "strict", that is, when a CE method couldn't
@@ -1809,9 +1962,9 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
             }
         } else {
             CostEstimate curCost = costEstimator.estimatePlan(*soln);
-            // Note that the cost comparison operators used here are approximate within some
-            // epsilon as implemented by the overloaded comparisons for estimates.
-            if (curCost < bestCost) {
+            // The cost comparison here is epsilon-approximate (approxLt), so plans whose costs are
+            // within epsilon of the best are treated as tied.
+            if (approxLt(curCost, bestCost)) {
                 if (bestSoln) {
                     rejectedSoln.push_back(std::move(bestSoln));
                 }
@@ -1822,7 +1975,9 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
                 // For now, we pick one and put the other in rejected plans.
                 rejectedSoln.push_back(std::move(soln));
 
-                numPlansTiedCostEstimation.increment();
+                if (curCost == bestCost) {
+                    numPlansTiedCostEstimation.increment();
+                }
             }
         }
     }
@@ -1835,7 +1990,7 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
     }
     tassert(9751901,
             "Some plan has fallen into the gray zone between accepted and rejected QSNs.",
-            acceptedSoln.size() + rejectedSoln.size() == allSoln.size());
+            acceptedSoln.size() + rejectedSoln.size() == numCandidates);
 
     // If only the best plan is in the accepted solutions, CBR successfully chose a winner.
     bool successfullyChoseWinner = acceptedSoln.size() == 1;
@@ -1843,11 +1998,17 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
         cbrChoseWinningPlan.increment();
     }
 
+    // With a sole candidate there is nothing to rank even if CBR was called to
+    // estimate it for explain purposes.
+    auto strategy = numCandidates == 1 ? PlanSelectionStrategy::kSinglePlan
+        : successfullyChoseWinner      ? PlanSelectionStrategy::kCostBasedRanker
+                                       : PlanSelectionStrategy::kMultiPlanner;
     auto planRankingResult =
         PlanRankingResult{.solutions = std::move(acceptedSoln),
                           .maybeExplainData = PlanExplainerData{.estimates = std::move(estimates)},
-                          .needsWorksMeasuredForPlanCache = successfullyChoseWinner};
-    if (isExplain) {
+                          .needsWorksMeasuredForPlanCache = successfullyChoseWinner,
+                          .planSelectionStrategy = strategy};
+    if (query.getExplain()) {
         std::vector<SolutionWithPlanStage> rejectedSolnWithStages;
         rejectedSolnWithStages.reserve(rejectedSoln.size());
         std::transform(std::make_move_iterator(rejectedSoln.begin()),
@@ -1858,6 +2019,17 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
                        });
         planRankingResult.maybeExplainData->rejectedPlansWithStages =
             std::move(rejectedSolnWithStages);
+        if (samplingEstimator) {
+            const std::string serializedNss = NamespaceStringUtil::serialize(
+                query.nss(), query.getExpCtx()->getSerializationContext());
+            planRankingResult.maybeExplainData->ceSamplingMetadata.emplace(
+                serializedNss, samplingEstimator->getSamplingMetadata());
+            if (auto ndvMetadata = samplingEstimator->getPersistedNDVMetadata();
+                !ndvMetadata.empty()) {
+                planRankingResult.maybeExplainData->fieldStatsMetadata.emplace(
+                    serializedNss, std::move(ndvMetadata));
+            }
+        }
     }
     return std::move(planRankingResult);
 }
@@ -1875,7 +2047,11 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
     if (query.cqPipeline().empty()) {
         return std::move(solution);
     }
-
+    // Sub-pipelines created over secondary collections need to reference slots via internal
+    // parameters. Use parameter indexes that are above the number of parameters that are injected
+    // externally before a query starts.
+    MatchExpression::InputParamId nextInternalParam = static_cast<MatchExpression::InputParamId>(
+        query.getInputParamIdToMatchExpressionMap().size());
     std::unique_ptr<QuerySolutionNode> solnForAgg = std::make_unique<SentinelNode>();
     const std::vector<boost::intrusive_ptr<DocumentSource>>& innerPipelineStages =
         query.cqPipeline();
@@ -1897,13 +2073,12 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
 
         auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(innerStage);
         if (lookupStage) {
-            auto [strategy, idxEntry, scanDirection] =
+            auto [strategy, idxEntry, scanDirection, collationCompatibleForDilj] =
                 QueryPlannerAnalysis::determineLookupStrategy(
+                    query,
                     lookupStage->getFromNs(),
                     lookupStage->getForeignField()->fullPath(),
-                    secondaryCollInfos,
-                    query.getExpCtx()->getAllowDiskUse(),
-                    query.getCollator());
+                    secondaryCollInfos);
 
             std::vector<std::unique_ptr<QuerySolutionNode>> children;
             children.emplace_back(std::move(solnForAgg));
@@ -1913,9 +2088,59 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             }
             if (strategy == EqLookupNode::LookupStrategy::kIndexedLoopJoin ||
                 strategy == EqLookupNode::LookupStrategy::kDynamicIndexedLoopJoin) {
-                children.emplace_back(std::make_unique<FetchNode>(
-                    std::make_unique<IndexScanNode>(lookupStage->getFromNs(), std::move(*idxEntry)),
-                    lookupStage->getFromNs()));
+                auto ixScan =
+                    std::make_unique<IndexScanNode>(lookupStage->getFromNs(), std::move(*idxEntry));
+                if (ixScan->index.type == IndexType::INDEX_WILDCARD) {
+                    // The expanded wildcard IndexEntry's keyPattern is the logical
+                    // {foreignField: 1}, but on-disk keys are {$_path: 1, foreignField: 1}.
+                    // Insert '$_path' so the key pattern (and the 'iets' below) match reality.
+                    BSONObjBuilder newKeyPattern;
+                    size_t idx = 0;
+                    for (auto&& elem : ixScan->index.keyPattern) {
+                        if (idx == ixScan->index.wildcardFieldPos) {
+                            newKeyPattern.append("$_path", 1);
+                        }
+                        newKeyPattern.append(elem);
+                        idx++;
+                    }
+                    ixScan->index.keyPattern = newKeyPattern.obj();
+                    // 'multikeyPaths' must stay the same size as 'keyPattern'.
+                    ixScan->index.multikeyPaths.insert(ixScan->index.multikeyPaths.begin() +
+                                                           ixScan->index.wildcardFieldPos,
+                                                       MultikeyComponents{});
+                    ixScan->index.wildcardFieldPos++;
+                    // 'multikey' on an expanded wildcard entry can't be trusted, and dedup is
+                    // needed across the searched local keys, so force both.
+                    ixScan->index.multikey = true;
+                    ixScan->shouldDedup = true;
+                }
+                BSONObjIterator it(ixScan->index.keyPattern);
+                // For each key field, add an IET entry: a constant point interval for '$_path', a
+                // new input parameter for the foreign field, or a full range otherwise.
+                while (it.more()) {
+                    BSONElement kpElt = it.next();
+                    if (kpElt.fieldNameStringData() == "$_path"sv) {
+                        OrderedIntervalList oil("$_path");
+                        oil.intervals.push_back(IndexBoundsBuilder::makePointInterval(
+                            lookupStage->getForeignField()->fullPath()));
+                        ixScan->iets.push_back(
+                            interval_evaluation_tree::IET::make<
+                                interval_evaluation_tree::ConstNode>(std::move(oil)));
+                    } else if (lookupStage->getForeignField()->fullPath() ==
+                               kpElt.fieldNameStringData()) {
+                        ixScan->iets.push_back(
+                            interval_evaluation_tree::IET::make<interval_evaluation_tree::EvalNode>(
+                                nextInternalParam++, MatchExpression::EQ));
+                    } else {
+                        OrderedIntervalList oil;
+                        IndexBoundsBuilder::allValuesForField(kpElt, &oil);
+                        ixScan->iets.push_back(
+                            interval_evaluation_tree::IET::make<
+                                interval_evaluation_tree::ConstNode>(std::move(oil)));
+                    }
+                }
+                children.emplace_back(
+                    std::make_unique<FetchNode>(std::move(ixScan), lookupStage->getFromNs()));
             }
             if (strategy == EqLookupNode::LookupStrategy::kHashJoin ||
                 strategy == EqLookupNode::LookupStrategy::kNestedLoopJoin ||
@@ -1932,7 +2157,8 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                    lookupStage->getForeignField()->fullPath(),
                                                    lookupStage->getAsField().fullPath(),
                                                    strategy,
-                                                   isLastSource /* shouldProduceBson */);
+                                                   isLastSource /* shouldProduceBson */,
+                                                   collationCompatibleForDilj);
             } else {
                 const boost::intrusive_ptr<DocumentSourceUnwind>& unwindSrc =
                     lookupStage->getUnwindSource();
@@ -1947,7 +2173,8 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                    isLastSource /* shouldProduceBson */,
                                                    // $unwind-specific data members.
                                                    unwindSrc->preserveNullAndEmptyArrays(),
-                                                   unwindSrc->indexPath());
+                                                   unwindSrc->indexPath(),
+                                                   collationCompatibleForDilj);
             }
             continue;
         }
@@ -1992,10 +2219,14 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                     .serialize(SortPattern::SortKeySerialization::kForPipelineSerialization)
                     .toBson();
             auto limit = sortStage->getLimit().get_value_or(0);
-            solnForAgg = std::make_unique<SortNodeDefault>(std::move(solnForAgg),
-                                                           std::move(pattern),
-                                                           limit,
-                                                           LimitSkipParameterization::Disabled);
+            solnForAgg =
+                std::make_unique<SortNodeDefault>(std::move(solnForAgg),
+                                                  std::move(pattern),
+                                                  limit,
+                                                  LimitSkipParameterization::Disabled,
+                                                  query.getExpCtx()
+                                                      ->getQueryKnobConfiguration()
+                                                      .getQueryMaxBlockingSortMemoryUsageBytes());
             continue;
         }
 
@@ -2019,16 +2250,6 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             // In the $search case, we create the $search query solution node in
             // QueryPlanner::Plan instead of here. The empty branch here assures that we don't
             // hit the tassert below and continue in creating the query plan.
-            continue;
-        }
-
-        auto windowStage = dynamic_cast<DocumentSourceInternalSetWindowFields*>(innerStage);
-        if (windowStage) {
-            auto windowNode = std::make_unique<WindowNode>(std::move(solnForAgg),
-                                                           windowStage->getPartitionBy(),
-                                                           windowStage->getSortBy(),
-                                                           windowStage->getOutputFields());
-            solnForAgg = std::move(windowNode);
             continue;
         }
 

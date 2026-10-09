@@ -3,6 +3,7 @@
  * Verifies some basic eligibility restrictions such as match expression shape and index options,
  * and checks the query results.
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_81,
  *   requires_non_retryable_commands,
  *   requires_non_retryable_writes,
@@ -46,7 +47,9 @@ function runExpressTest({command, expectedDocs, usesExpress}) {
     // Reset the collection docs then run explain.
     assert.commandWorked(coll.remove({}));
     assert.commandWorked(coll.insert(docs));
-    const explain = assert.commandWorked(db.runCommand({explain: command, verbosity: "executionStats"}));
+    const explain = assert.commandWorked(
+        db.runCommand({explain: command, verbosity: "executionStats"}),
+    );
 
     assert.eq(
         usesExpress,

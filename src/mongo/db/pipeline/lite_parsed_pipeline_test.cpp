@@ -1,56 +1,35 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/json.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/lite_parsed_internal_hybrid_search.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/test_lite_parsed.h"
 #include "mongo/unittest/assert.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const NamespaceString kTestNss =
-    NamespaceString::createNamespaceString_forTest("test.liteParsedPipeline"_sd);
-const NamespaceString kViewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
+    NamespaceString::createNamespaceString_forTest("test.liteParsedPipeline"sv);
+const NamespaceString kViewNss = NamespaceString::createNamespaceString_forTest("test.view"sv);
 const NamespaceString kResolvedNss =
-    NamespaceString::createNamespaceString_forTest("test.collection"_sd);
+    NamespaceString::createNamespaceString_forTest("test.collection"sv);
 
 /**
- * Helper function to create a ViewInfo with a simple pipeline.
+ * Helper function to create a view ResolvedNamespace with a simple pipeline.
  */
-ViewInfo createTestViewInfo(std::vector<BSONObj> viewPipeline) {
-    return ViewInfo(kViewNss, kResolvedNss, std::move(viewPipeline));
+ResolvedNamespace createTestView(std::vector<BSONObj> viewPipeline) {
+    return ResolvedNamespace::makeForView(kViewNss, kResolvedNss, std::move(viewPipeline));
 }
 
 TEST(LiteParsedPipelineTest, HandleViewStitchesViewBeforeUserPipe) {
@@ -59,9 +38,9 @@ TEST(LiteParsedPipelineTest, HandleViewStitchesViewBeforeUserPipe) {
     LiteParsedPipeline pipeline(kTestNss, userStages);
 
     std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)), BSON("$limit" << 10)};
-    const auto viewInfo = createTestViewInfo(std::move(viewStages));
+    const auto view = createTestView(std::move(viewStages));
 
-    pipeline.handleView(viewInfo, {});
+    pipeline.handleView(view, {});
 
     // Verify the pipeline now contains the view stages in the correct order.
     const auto& stages = pipeline.getStages();
@@ -72,6 +51,19 @@ TEST(LiteParsedPipelineTest, HandleViewStitchesViewBeforeUserPipe) {
     ASSERT_EQ(stages[3]->getParseTimeName(), "$sort");
 }
 
+DEATH_TEST_REGEX(LiteParsedInternalHybridSearchDeathTest,
+                 ViewApplicationPolicyIsUnreachable,
+                 "Tripwire assertion.*12109100") {
+    // The desugarer only ever appends the marker, never at position 0, so view application must
+    // never consult its policy.
+    LiteParsedInternalHybridSearch stage;
+    try {
+        stage.getFirstStageViewApplicationPolicy();
+    } catch (const DBException&) {
+        // Expected: the tassert throws and trips the tripwire; the process aborts at exit.
+    }
+}
+
 TEST(LiteParsedPipelineTest, HandleViewEmptyUserPipelineBecomesViewPipeline) {
     // Create an empty user pipeline.
     LiteParsedPipeline pipeline(kTestNss, std::vector<BSONObj>{});
@@ -79,9 +71,9 @@ TEST(LiteParsedPipelineTest, HandleViewEmptyUserPipelineBecomesViewPipeline) {
     // Create a view with two stages.
     std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)),
                                        BSON("$project" << BSON("y" << 1))};
-    const auto viewInfo = createTestViewInfo(std::move(viewStages));
+    const auto view = createTestView(std::move(viewStages));
 
-    pipeline.handleView(viewInfo, {});
+    pipeline.handleView(view, {});
 
     // Final pipeline should be view pipeline.
     const auto& stages = pipeline.getStages();
@@ -96,9 +88,9 @@ TEST(LiteParsedPipelineTest, HandleViewEmptyViewPipelineIsNoop) {
     LiteParsedPipeline pipeline(kTestNss, userStages);
 
     // Create an empty view pipeline.
-    const auto viewInfo = createTestViewInfo({});
+    const auto view = createTestView({});
 
-    pipeline.handleView(viewInfo, {});
+    pipeline.handleView(view, {});
 
     // User pipeline should be the same.
     const auto& stages = pipeline.getStages();
@@ -106,34 +98,34 @@ TEST(LiteParsedPipelineTest, HandleViewEmptyViewPipelineIsNoop) {
     ASSERT_EQ(stages[0]->getParseTimeName(), "$match");
 }
 
-TEST(LiteParsedPipelineTest, HandleViewDoesNotConsumeOrMutateViewInfo) {
+TEST(LiteParsedPipelineTest, HandleViewDoesNotConsumeOrMutateView) {
     LiteParsedPipeline pipeline(kTestNss, std::vector<BSONObj>{});
 
     std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1))};
-    const auto viewInfo = createTestViewInfo(std::move(viewStages));
+    const auto view = createTestView(std::move(viewStages));
 
-    ASSERT_FALSE(viewInfo.getOriginalBson().empty());
-    const auto before = viewInfo.getOriginalBson();
+    ASSERT_FALSE(view.getOriginalBson().empty());
+    const auto before = view.getOriginalBson();
     ASSERT_EQ(before.size(), 1U);
 
-    pipeline.handleView(viewInfo, {});
+    pipeline.handleView(view, {});
 
-    ASSERT_FALSE(viewInfo.getOriginalBson().empty());
-    const auto after = viewInfo.getOriginalBson();
+    ASSERT_FALSE(view.getOriginalBson().empty());
+    const auto after = view.getOriginalBson();
     ASSERT_EQ(after.size(), 1U);
     ASSERT_BSONOBJ_EQ(before[0], after[0]);
 }
 
-TEST(LiteParsedPipelineTest, HandleViewStitchedPipelineSurvivesViewInfoLifetime) {
+TEST(LiteParsedPipelineTest, HandleViewStitchedPipelineSurvivesViewLifetime) {
     // User pipeline has one stage so we can see ordering.
     LiteParsedPipeline pipeline(kTestNss, std::vector<BSONObj>{BSON("$sort" << BSON("x" << 1))});
     {
-        // ViewInfo lives only in this scope.
+        // The view ResolvedNamespace lives only in this scope.
         std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)), BSON("$limit" << 5)};
-        auto viewInfo = createTestViewInfo(std::move(viewStages));
-        pipeline.handleView(viewInfo, {});
+        auto view = createTestView(std::move(viewStages));
+        pipeline.handleView(view, {});
     }
-    // View pipeline stages own their backing BSON, so they remain valid after ViewInfo is
+    // View pipeline stages own their backing BSON, so they remain valid after the view entry is
     // destroyed. Verify the pipeline now contains the view stages in the correct order.
     const auto& stages = pipeline.getStages();
     ASSERT_EQ(stages.size(), 3U);
@@ -142,13 +134,13 @@ TEST(LiteParsedPipelineTest, HandleViewStitchedPipelineSurvivesViewInfoLifetime)
     ASSERT_EQ(stages[2]->getParseTimeName(), "$sort");
 }
 
-TEST(LiteParsedPipelineTest, ViewInfoCloneIsIndependentOfOriginalLifetime) {
-    ViewInfo cloned;
+TEST(LiteParsedPipelineTest, ViewCloneIsIndependentOfOriginalLifetime) {
+    ResolvedNamespace cloned;
     {
         std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)),
                                            BSON("$project" << BSON("y" << 1))};
-        auto viewInfo = createTestViewInfo(std::move(viewStages));
-        cloned = viewInfo.clone();
+        auto view = createTestView(std::move(viewStages));
+        cloned = view.clone();
     }
     ASSERT_FALSE(cloned.getOriginalBson().empty());
     LiteParsedPipeline userPipe(kTestNss, std::vector<BSONObj>{BSON("$sort" << BSON("y" << 1))});
@@ -163,19 +155,19 @@ TEST(LiteParsedPipelineTest, ViewInfoCloneIsIndependentOfOriginalLifetime) {
 }
 
 TEST(LiteParsedPipelineTest, GetSerializedViewPipelineReturnsEquivalentBsonWhenNotDesugared) {
-    // Build a ViewInfo with a two-stage pipeline that has NOT been desugared.
+    // Build a view ResolvedNamespace with a two-stage pipeline that has NOT been desugared.
     std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)),
                                        BSON("$project" << BSON("y" << 1))};
-    const auto viewInfo = createTestViewInfo(viewStages);
+    const auto view = createTestView(viewStages);
 
-    auto serialized = viewInfo.getSerializedViewPipeline();
+    auto serialized = view.getSerializedViewPipeline();
     ASSERT_EQ(serialized.size(), viewStages.size());
     for (size_t i = 0; i < viewStages.size(); ++i) {
         ASSERT_BSONOBJ_EQ(serialized[i], viewStages[i]);
     }
 
     // And it should also match getOriginalBson() exactly.
-    auto original = viewInfo.getOriginalBson();
+    auto original = view.getOriginalBson();
     ASSERT_EQ(original.size(), serialized.size());
     for (size_t i = 0; i < original.size(); ++i) {
         ASSERT_BSONOBJ_EQ(original[i], serialized[i]);
@@ -184,9 +176,9 @@ TEST(LiteParsedPipelineTest, GetSerializedViewPipelineReturnsEquivalentBsonWhenN
 
 TEST(LiteParsedPipelineTest,
      GetSerializedViewPipelineReflectsModifiedStagesWhileOriginalBsonIsPreserved) {
-    // Build a ViewInfo with a single-stage pipeline.
+    // Build a view ResolvedNamespace with a single-stage pipeline.
     std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1))};
-    auto viewInfo = createTestViewInfo(viewStages);
+    auto view = createTestView(viewStages);
 
     BSONObj newStage1 = BSON("$match" << BSON("a" << 2));
     BSONObj newStage2 = BSON("$limit" << 5);
@@ -198,17 +190,17 @@ TEST(LiteParsedPipelineTest,
         stage->makeOwned();
     }
 
-    // getViewPipeline() returns a copy. Modify the copy, not the ViewInfo's internal pipeline.
-    auto modifiedPipeline = viewInfo.getViewPipeline();
+    // getViewPipeline() returns a copy. Modify the copy, not the view entry's internal pipeline.
+    auto modifiedPipeline = view.getViewPipeline();
     modifiedPipeline.replaceStageWith(0, std::move(replacements));
 
-    // getOriginalBson() and getSerializedViewPipeline() on the original ViewInfo should still
+    // getOriginalBson() and getSerializedViewPipeline() on the original view entry should still
     // return the original, unmodified pipeline since we only mutated the copy.
-    auto original = viewInfo.getOriginalBson();
+    auto original = view.getOriginalBson();
     ASSERT_EQ(original.size(), 1U);
     ASSERT_BSONOBJ_EQ(original[0], viewStages[0]);
 
-    auto serialized = viewInfo.getSerializedViewPipeline();
+    auto serialized = view.getSerializedViewPipeline();
     ASSERT_EQ(serialized.size(), 1U);
     ASSERT_BSONOBJ_EQ(serialized[0], viewStages[0]);
 }
@@ -218,11 +210,12 @@ TEST(LiteParsedPipelineTest, ClonedPipelineWithViewStagesPreservesOwnership) {
     LiteParsedPipeline original(kTestNss, std::vector<BSONObj>{BSON("$sort" << BSON("x" << 1))});
     {
         std::vector<BSONObj> viewStages = {BSON("$match" << BSON("x" << 1)), BSON("$limit" << 5)};
-        auto viewInfo = createTestViewInfo(std::move(viewStages));
-        original.handleView(viewInfo, {});
+        auto view = createTestView(std::move(viewStages));
+        original.handleView(view, {});
     }
 
-    // Clone the pipeline after ViewInfo is destroyed. The cloned stages should also own their BSON.
+    // Clone the pipeline after the view entry is destroyed. The cloned stages should also own
+    // their BSON.
     auto cloned = original.clone();
 
     // Verify both pipelines have the correct stages.
@@ -238,10 +231,103 @@ TEST(LiteParsedPipelineTest, ClonedPipelineWithViewStagesPreservesOwnership) {
     ASSERT_EQ(clonedStages[2]->getParseTimeName(), "$sort");
 }
 
+TEST(LiteParsedPipelineTest, ReplaceStageWithOwnsUnownedClonedSubpipelineStages) {
+    // The replacements are unowned clones of the $unionWith's sub-pipeline stages, which are
+    // backed by the stage's OwnedLiteParsedPipeline buffers (the hybrid-search desugar shape:
+    // the first input pipeline's stages are spliced inline as clones). Erasing the stage frees
+    // that backing, so without the makeOwned() pass in replaceStageWith() the replacements
+    // dangle — a use-after-free caught under ASAN.
+    BSONObj unionSpec =
+        BSON("$unionWith" << BSON(
+                 "coll" << "other"
+                        << "pipeline"
+                        << BSON_ARRAY(BSON("$match" << BSON("x" << 1)) << BSON("$limit" << 5))));
+    LiteParsedPipeline pipeline(kTestNss, std::vector<BSONObj>{unionSpec});
+
+    // Unowned clones backed by the $unionWith stage's OwnedLiteParsedPipeline.
+    const auto* subPipelines = pipeline.getStages()[0]->getSubPipelines();
+    ASSERT(subPipelines);
+    ASSERT_EQ(subPipelines->size(), 1U);
+    std::vector<std::unique_ptr<LiteParsedDocumentSource>> replacements;
+    for (const auto& subStage : (*subPipelines)[0]->getStages()) {
+        replacements.push_back(subStage->clone());
+    }
+
+    // Erases the sole owner of the replacements' backing BSON.
+    pipeline.replaceStageWith(0, std::move(replacements));
+
+    const auto& stages = pipeline.getStages();
+    ASSERT_EQ(stages.size(), 2U);
+    ASSERT_EQ(stages[0]->getParseTimeName(), "$match");
+    ASSERT_EQ(stages[1]->getParseTimeName(), "$limit");
+    ASSERT_BSONOBJ_EQ(stages[0]->getOriginalBson().wrap(), BSON("$match" << BSON("x" << 1)));
+    ASSERT_BSONOBJ_EQ(stages[1]->getOriginalBson().wrap(), BSON("$limit" << 5));
+}
+
+TEST(LiteParsedInternalHybridSearchTest, ParseRejectsInvalidSpecs) {
+    // The lite parser must validate the spec itself: the StageParams registry hands
+    // createFromBson this stage's _originalBson, so a parse() that discarded the user's spec
+    // would silently normalize garbage to {}.
+    ASSERT_THROWS_CODE(LiteParsedInternalHybridSearch::parse(
+                           kTestNss, BSON("$_internalHybridSearch" << 1).firstElement(), {}),
+                       AssertionException,
+                       ErrorCodes::TypeMismatch);
+    ASSERT_THROWS_CODE(
+        LiteParsedInternalHybridSearch::parse(
+            kTestNss, BSON("$_internalHybridSearch" << BSON("unexpected" << 1)).firstElement(), {}),
+        AssertionException,
+        ErrorCodes::FailedToParse);
+}
+
+TEST(LiteParsedPipelineTest, ReplaceStageWithNestedPipelineReplacementOwnsSubStages) {
+    // A replacement stage that itself holds sub-pipelines: the sub-stages must stay valid after
+    // the erased stage's buffer dies. OwnedLiteParsedPipeline guarantees this by giving every
+    // sub-pipeline stage self-owned BSON at construction/copy.
+    LiteParsedPipeline pipeline = [&] {
+        BSONObj unionSpec =
+            BSON("$unionWith" << BSON("coll" << "other"
+                                             << "pipeline"
+                                             << BSON_ARRAY(BSON("$match" << BSON("x" << 1)))));
+        LiteParsedPipeline parsed(kTestNss, std::vector<BSONObj>{unionSpec});
+        auto cloned = parsed.clone();
+        // clone() copies parse state but does not take ownership of unowned stages; own them
+        // explicitly so the pipeline outlives 'unionSpec'.
+        cloned.makeOwned();
+        return cloned;
+    }();
+
+    // Clone the whole $unionWith (a nested-pipelines stage) as the replacement.
+    std::vector<std::unique_ptr<LiteParsedDocumentSource>> replacements;
+    replacements.push_back(pipeline.getStages()[0]->clone());
+
+    pipeline.replaceStageWith(0, std::move(replacements));
+
+    const auto& stages = pipeline.getStages();
+    ASSERT_EQ(stages.size(), 1U);
+    const auto* subPipelines = stages[0]->getSubPipelines();
+    ASSERT(subPipelines);
+    ASSERT_EQ(subPipelines->size(), 1U);
+    const auto& subStages = (*subPipelines)[0]->getStages();
+    ASSERT_EQ(subStages.size(), 1U);
+    ASSERT_BSONOBJ_EQ(subStages[0]->getOriginalBson().wrap(), BSON("$match" << BSON("x" << 1)));
+}
+
 TEST(LiteParsedPipelineTest, GetParseNssMatchesConstructorNss) {
     std::vector<BSONObj> stages = {BSON("$match" << BSON("x" << 1))};
     LiteParsedPipeline pipeline(kTestNss, stages);
     ASSERT_EQ(pipeline.getOriginalParseNss(), kTestNss);
+}
+
+TEST(LiteParsedPipelineTest, RejectableStagesDoNotBypassQuerySettingsRejection) {
+    LiteParsedPipeline pipeline(kTestNss, {fromjson("{$match: {x: 1}}"), fromjson("{$limit: 10}")});
+    ASSERT_FALSE(pipeline.shouldBypassQuerySettingsRejection());
+}
+
+TEST(LiteParsedPipelineTest, RejectionIncompatibleStageBypassesQuerySettingsRejection) {
+    // A single rejection-incompatible ("system") stage exempts the whole pipeline.
+    LiteParsedPipeline pipeline(kTestNss,
+                                {fromjson("{$indexStats: {}}"), fromjson("{$match: {x: 1}}")});
+    ASSERT_TRUE(pipeline.shouldBypassQuerySettingsRejection());
 }
 
 TEST(LiteParsedPipelineTest, NestedLookupSubpipelineGetParseNssIsForeignCollection) {
@@ -257,15 +343,37 @@ TEST(LiteParsedPipelineTest, NestedLookupSubpipelineGetParseNssIsForeignCollecti
 
     ASSERT_EQ(pipeline.getOriginalParseNss(), kTestNss);
 
-    const auto& subPipelines = pipeline.getStages()[0]->getSubPipelines();
+    auto* subPipelinesPtr = pipeline.getStages()[0]->getSubPipelines();
+    ASSERT_NE(subPipelinesPtr, nullptr);
+    const auto& subPipelines = *subPipelinesPtr;
     ASSERT_EQ(subPipelines.size(), 1U);
-    ASSERT_EQ(subPipelines[0].getOriginalParseNss(), kForeignNss);
+    ASSERT_EQ(subPipelines[0]->getOriginalParseNss(), kForeignNss);
+}
+
+TEST(LiteParsedPipelineTest, NestedMergeSubpipelineGetParseNssIsTargetCollection) {
+    // The whenMatched update pipeline runs against the target collection, so its parse nss should
+    // be the target namespace - matching the convention $lookup/$unionWith already follow.
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$merge" << BSON("into" << "targetCollection"
+                                     << "whenMatched"
+                                     << BSON_ARRAY(BSON("$addFields" << BSON("x" << 1))))),
+    };
+    LiteParsedPipeline pipeline(kTestNss, pipelineStages);
+    const NamespaceString kTargetNss =
+        NamespaceString::createNamespaceString_forTest(kTestNss.dbName(), "targetCollection");
+
+    ASSERT_EQ(pipeline.getOriginalParseNss(), kTestNss);
+
+    const auto* subPipelines = pipeline.getStages()[0]->getSubPipelines();
+    ASSERT_NE(subPipelines, nullptr);
+    ASSERT_EQ(subPipelines->size(), 1U);
+    ASSERT_EQ((*subPipelines)[0]->getOriginalParseNss(), kTargetNss);
 }
 
 TEST(LiteParsedPipelineTest, HandleViewPreservesParseNss) {
     std::vector<BSONObj> userStages = {BSON("$match" << BSON("x" << 1))};
     LiteParsedPipeline pipeline(kTestNss, userStages);
-    pipeline.handleView(createTestViewInfo({BSON("$limit" << 1)}), {});
+    pipeline.handleView(createTestView({BSON("$limit" << 1)}), {});
     ASSERT_EQ(pipeline.getOriginalParseNss(), kTestNss);
 }
 
@@ -318,20 +426,133 @@ protected:
         return BSON(_doNothingStageName << BSONObj());
     }
 
-    ViewInfo makeViewInfo() const {
-        return createTestViewInfo({BSON("$match" << BSON("x" << 1))});
+    ResolvedNamespace makeView() const {
+        return createTestView({BSON("$match" << BSON("x" << 1))});
     }
 
     std::string _defaultStageName;
     std::string _doNothingStageName;
 };
 
+/**
+ * Builds one lite-parsed stage of 'stageName' for use with replaceStageWith().
+ */
+std::vector<std::unique_ptr<LiteParsedDocumentSource>> makeStages(
+    const std::vector<BSONObj>& specs) {
+    std::vector<std::unique_ptr<LiteParsedDocumentSource>> out;
+    for (const auto& spec : specs) {
+        out.push_back(LiteParsedDocumentSource::parse(kTestNss, spec, LiteParserOptions{}));
+    }
+    return out;
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, UserFirstStagePolicySkipsPrependedViewStages) {
+    // handleView() prepends the view definition, so getStages().front() is a view stage. The user
+    // policy accessor must look past it and report the user's own first stage.
+    std::vector<BSONObj> userStages = {defaultStageSpec()};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({doNothingStageSpec()}), {});
+
+    ASSERT_EQ(pipeline.getStages().front()->getParseTimeName(), _doNothingStageName);
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDefaultPrepend);
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, UserFirstStagePolicyDefaultsWhenOnlyViewStages) {
+    // A pipeline consisting entirely of prepended view stages has no user stage to consult.
+    std::vector<BSONObj> userStages = {};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({doNothingStageSpec()}), {});
+
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDefaultPrepend);
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, ReplaceStageWithGrowsViewPrefixWhenExpandingViewStage) {
+    // Desugaring a prepended VIEW stage into 3 stages must move the view/user boundary by +2, so
+    // the user's own stage is still identified correctly.
+    std::vector<BSONObj> userStages = {defaultStageSpec()};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({doNothingStageSpec()}), {});
+    ASSERT_EQ(pipeline.getStages().size(), 2U);
+
+    pipeline.replaceStageWith(0,
+                              makeStages({BSON("$match" << BSON("a" << 1)),
+                                          BSON("$match" << BSON("b" << 1)),
+                                          BSON("$match" << BSON("c" << 1))}));
+
+    ASSERT_EQ(pipeline.getStages().size(), 4U);
+    ASSERT_EQ(pipeline.getStages()[3]->getParseTimeName(), _defaultStageName);
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDefaultPrepend);
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, ReplaceStageWithLeavesViewPrefixWhenExpandingUserStage) {
+    // Desugaring a USER stage must NOT move the view/user boundary (index >= prefix length). The
+    // user pipeline must start with kDefaultPrepend, or handleView() would not prepend at all and
+    // there would be no prefix to test.
+    std::vector<BSONObj> userStages = {defaultStageSpec()};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({BSON("$match" << BSON("x" << 1))}), {});
+    ASSERT_EQ(pipeline.getStages().size(), 2U);
+
+    // Expand the user stage (index 1) into [kDoNothing, $match]. If the boundary wrongly advanced,
+    // the accessor would read the trailing $match (kDefaultPrepend) instead of the kDoNothing
+    // stage.
+    pipeline.replaceStageWith(1,
+                              makeStages({doNothingStageSpec(), BSON("$match" << BSON("y" << 1))}));
+
+    ASSERT_EQ(pipeline.getStages().size(), 3U);
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDoNothing);
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, ReplaceStageWithHandlesOneForOneViewStageExpansion) {
+    // numInserted == 1 must leave the boundary unchanged (+1 - 1 == 0).
+    std::vector<BSONObj> userStages = {defaultStageSpec()};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({BSON("$match" << BSON("x" << 1))}), {});
+    ASSERT_EQ(pipeline.getStages().size(), 2U);
+
+    // Replace the single VIEW stage with exactly one stage. If the boundary wrongly moved to 0, the
+    // accessor would read that replacement (kDoNothing) rather than the user's stage.
+    pipeline.replaceStageWith(0, makeStages({doNothingStageSpec()}));
+
+    ASSERT_EQ(pipeline.getStages().size(), 2U);
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDefaultPrepend);
+}
+
+TEST_F(LiteParsedPipelineViewPolicyTest, CopyAndAssignmentPreserveViewPrefixBoundary) {
+    // The view/user boundary is part of the class invariant, so copying or assigning a stitched
+    // pipeline must carry it along. If it resets to 0, the accessor reads the prepended view stage
+    // and the view gets dropped from the join.
+    std::vector<BSONObj> userStages = {defaultStageSpec()};
+    LiteParsedPipeline pipeline(kTestNss, userStages);
+    pipeline.handleView(createTestView({BSON("$match" << BSON("x" << 1))}), {});
+    // Make the user's own first stage kDoNothing, so it is distinguishable from the prepended
+    // $match's kDefaultPrepend.
+    pipeline.replaceStageWith(1, makeStages({doNothingStageSpec()}));
+    ASSERT_EQ(pipeline.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDoNothing);
+
+    auto cloned = pipeline.clone();
+    ASSERT_EQ(std::string{cloned.getStages().front()->getParseTimeName()}, "$match");
+    ASSERT_EQ(cloned.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDoNothing);
+
+    LiteParsedPipeline assigned(kTestNss, std::vector<BSONObj>{});
+    assigned = pipeline.clone();
+    ASSERT_EQ(assigned.getUserFirstStageViewApplicationPolicy(),
+              FirstStageViewApplicationPolicy::kDoNothing);
+}
+
 TEST_F(LiteParsedPipelineViewPolicyTest, FirstDoNothingSuppressesPrepend) {
     std::vector<BSONObj> userStages = {doNothingStageSpec(), defaultStageSpec()};
     LiteParsedPipeline pipeline(kTestNss, userStages);
 
-    auto viewInfo = makeViewInfo();
-    pipeline.handleView(viewInfo, {});
+    auto view = makeView();
+    pipeline.handleView(view, {});
 
     const auto& out = pipeline.getStages();
     ASSERT_EQ(out.size(), 2U);
@@ -344,8 +565,8 @@ TEST_F(LiteParsedPipelineViewPolicyTest,
     std::vector<BSONObj> userStages = {defaultStageSpec(), doNothingStageSpec()};
     LiteParsedPipeline pipeline(kTestNss, userStages);
 
-    auto viewInfo = makeViewInfo();
-    pipeline.handleView(viewInfo, {});
+    auto view = makeView();
+    pipeline.handleView(view, {});
 
     const auto& out = pipeline.getStages();
     ASSERT_EQ(out.size(), 3U);
@@ -358,8 +579,8 @@ TEST_F(LiteParsedPipelineViewPolicyTest, PrependWhenDefaultPrependIsTrueForAllSt
     std::vector<BSONObj> userStages = {defaultStageSpec(), defaultStageSpec()};
     LiteParsedPipeline pipeline(kTestNss, userStages);
 
-    auto viewInfo = makeViewInfo();
-    pipeline.handleView(viewInfo, {});
+    auto view = makeView();
+    pipeline.handleView(view, {});
 
     const auto& out = pipeline.getStages();
     ASSERT_EQ(out.size(), 3U);

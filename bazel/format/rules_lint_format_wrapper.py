@@ -5,14 +5,12 @@ import subprocess
 from typing import Union
 
 from git import Repo
-from utils.evergreen_git import get_mongodb_remote
+from utils.evergreen_git import get_default_origin_branch
 
-from buildscripts.bazel_custom_formatter import (
-    validate_bazel_groups,
-    validate_clang_tidy_configs,
-    validate_idl_naming,
-    validate_private_headers,
+from bazel.toolchains.cc.mongo_linux.gdb_python_version_check import (
+    check_gdb_wrapper_python_version,
 )
+from buildscripts.sort_backport_multiversion import sort_backport_multiversion
 
 
 def _git_distance(args: list) -> int:
@@ -45,10 +43,10 @@ def _git_unstaged_files() -> str:
     return result.stdout.strip() + os.linesep
 
 
-def _get_files_changed_since_fork_point(origin_branch: str = "origin/master") -> list[str]:
+def _get_files_changed_since_fork_point(origin_branch: str) -> list[str]:
     """Query git to get a list of files in the repo from a diff."""
     # There are 3 diffs we run:
-    # 1. List of commits between origin/master and HEAD of current branch
+    # 1. List of commits between the origin branch and HEAD of current branch
     # 2. Cached/Staged files (--cached)
     # 3. Working Tree files git tracks
 
@@ -66,6 +64,18 @@ def _get_files_changed_since_fork_point(origin_branch: str = "origin/master") ->
     }
 
     return list(file_set)
+
+
+def _split_file_args(file_args: list[str]) -> list[str]:
+    """Flatten --file values, each of which may be a comma or newline separated list."""
+    files = []
+    for file_arg in file_args:
+        for line in file_arg.splitlines():
+            for entry in line.split(","):
+                entry = entry.strip()
+                if entry and entry not in files:
+                    files.append(entry)
+    return files
 
 
 def run_rules_lint(
@@ -111,7 +121,6 @@ def run_prettier(
     try:
         command = [
             str(prettier),
-            "--cache",
             "--log-level",
             "warn",
             # Changed-files mode may include extensions prettier does not parse (for example .py, .sky).
@@ -126,14 +135,34 @@ def run_prettier(
         else:
             command += files_to_format
         command += list(force_exclude_dirs)
+        write_command = command + ["--no-cache", "--write"]
+        check_command = command + ["--no-cache", "--check"]
         if check:
-            command.append("--check")
-        else:
-            command.append("--write")
-        print("Running prettier")
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError:
-        print("Found formatting errors. Run 'bazel run //:format' to fix")
+            print("Running prettier")
+            subprocess.run(check_command, check=True)
+        else:  # write mode
+            # Run without --cache and loop until prettier converges. Prettier is not always
+            # idempotent: a single pass may produce output that a second pass would reformat
+            # differently. Looping ensures write mode always reaches the fixed point.
+
+            for _ in range(
+                3  # this should only take 2 runs at most, but cap it at 3 to be flexible (and not infinite if something goes wrong)
+            ):
+                print("Running prettier")
+                subprocess.run(write_command, check=True)
+                result = subprocess.run(check_command, capture_output=True)
+                if result.returncode == 0:
+                    break
+            else:
+                raise subprocess.CalledProcessError(
+                    result.returncode, check_command, result.stdout, result.stderr
+                )
+    except subprocess.CalledProcessError as e:
+        if e.stdout:
+            print(e.stdout.decode())
+        if e.stderr:
+            print(e.stderr.decode())
+        print("Found formatting errors. Run 'bazel run format' to fix")
         print("*** IF BAZEL IS NOT INSTALLED, RUN THE FOLLOWING: ***\n")
         print("python buildscripts/install_bazel.py")
 
@@ -153,7 +182,9 @@ def main() -> int:
     # If we are running in bazel, default the directory to the workspace
     default_dir = os.environ.get("BUILD_WORKSPACE_DIRECTORY")
     if not default_dir:
-        print("This script must be run though bazel. Please run 'bazel run //:format' instead")
+        # The formatter needs Bazel's workspace environment to locate the
+        # checkout and its runfiles; direct Python execution is unsupported.
+        print("This script must be run through Bazel. Please run 'bazel run format' instead")
         print("*** IF BAZEL IS NOT INSTALLED, RUN THE FOLLOWING: ***\n")
         print("python buildscripts/install_bazel.py")
         return 1
@@ -189,13 +220,15 @@ def main() -> int:
     )
     parser.add_argument(
         "--origin-branch",
-        help="The branch to use as the fork point for changed files (example: origin/master)",
+        help="The branch to use as the fork point for changed files (example: origin/<branch>)",
         default="auto",
     )
     parser.add_argument(
         "--file",
-        help="The file to format",
-        type=pathlib.Path,
+        help="A file to format. May be repeated, and each value may be a comma or newline "
+        "separated list of files.",
+        action="append",
+        default=[],
     )
 
     args = parser.parse_args()
@@ -203,14 +236,23 @@ def main() -> int:
 
     os.chdir(default_dir)
 
+    gdb_python_version_errors = check_gdb_wrapper_python_version(
+        pathlib.Path("bazel/toolchains/cc/mongo_linux/mongo_gdb.bzl")
+    )
+    if gdb_python_version_errors:
+        print("GDB wrapper Python version check failed:")
+        for error in gdb_python_version_errors:
+            print(f"- {error}")
+        return 1
+
     origin_branch = args.origin_branch
     if origin_branch == "auto":
-        remote = get_mongodb_remote(Repo())
-        origin_branch = f"{remote.name}/master"
+        origin_branch = get_default_origin_branch(Repo())
 
     files_to_format = "all"
-    if args.file:
-        files_to_format = [str(args.file)]
+    explicit_files = _split_file_args(args.file)
+    if explicit_files:
+        files_to_format = explicit_files
     elif not args.all:
         max_distance = 100
         distance = _git_distance([f"{origin_branch}..HEAD"])
@@ -220,7 +262,10 @@ def main() -> int:
             )
             print("WARNING!!! Defaulting to formatting all files, this may take a while.")
             print(
-                "Please update your local branch with the latest changes from origin, or use `bazel run format -- --origin-branch other_branch` to select a different origin branch"
+                "Please update your local branch with the latest changes from origin, or use "
+                "`bazel run format --origin-branch=other_branch` to select a different origin "
+                "branch. The legacy `bazel run format -- --origin-branch other_branch` form "
+                "is also supported."
             )
             args.all = True
         else:
@@ -240,23 +285,29 @@ def main() -> int:
             )
             files_to_format = "all"
 
-    def files_to_format_contains_bazel_file(files: Union[list[str], str]) -> bool:
-        if files == "all":
-            return True
-        return any(file.endswith(".bazel") or "BUILD" in file for file in files)
-
-    if files_to_format_contains_bazel_file(files_to_format):
-        validate_clang_tidy_configs(generate_report=True, fix=not args.check)
-        validate_bazel_groups(generate_report=True, fix=not args.check)
-        validate_idl_naming(generate_report=True, fix=not args.check)
-        validate_private_headers(generate_report=True, fix=not args.check)
-
     if files_to_format != "all":
         files_to_format = [str(file) for file in files_to_format if os.path.isfile(file)]
+        print(f"Formatting {len(files_to_format)} file(s)")
+
+    def files_to_format_contain_backports(files: Union[list[str], str]) -> bool:
+        if files == "all":
+            return True
+        return any("backports_required_for_multiversion_tests" in f for f in files)
+
+    backports_ok = True
+    if files_to_format_contain_backports(files_to_format):
+        print("Sorting etc/backports_required_for_multiversion_tests.yml")
+        backports_ok = sort_backport_multiversion(
+            check=args.check,
+            path=pathlib.Path(default_dir)
+            / "etc"
+            / "backports_required_for_multiversion_tests.yml",
+        )
 
     return (
         0
-        if run_prettier(prettier_path, args.check, files_to_format)
+        if backports_ok
+        and run_prettier(prettier_path, args.check, files_to_format)
         and run_rules_lint(
             args.rules_lint_format, args.rules_lint_format_check, args.check, files_to_format
         )

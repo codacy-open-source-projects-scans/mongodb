@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/analyze_shard_key_cmd_util.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -53,6 +26,8 @@
 #include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/logical_time.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/query_memory_load_shedding.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
@@ -70,6 +45,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/analyze_shard_key_read_write_distribution.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
@@ -90,7 +66,7 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/analyze_shard_key_server_parameters_gen.h"
@@ -114,6 +90,7 @@
 #include <numeric>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -131,20 +108,21 @@ namespace mongo {
 namespace analyze_shard_key {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(analyzeShardKeyPauseBeforeCalculatingKeyCharacteristicsMetrics);
 MONGO_FAIL_POINT_DEFINE(analyzeShardKeyPauseBeforeCalculatingReadWriteDistributionMetrics);
 MONGO_FAIL_POINT_DEFINE(analyzeShardKeyPauseBeforeCalculatingCollStatsMetrics);
 MONGO_FAIL_POINT_DEFINE(analyzeShardKeyHangInClusterAggregate);
 
-constexpr StringData kIndexKeyFieldName = "key"_sd;
-constexpr StringData kDocFieldName = "doc"_sd;
-constexpr StringData kNumDocsFieldName = "numDocs"_sd;
-constexpr StringData kNumBytesFieldName = "numBytes"_sd;
-constexpr StringData kNumDistinctValuesFieldName = "numDistinctValues"_sd;
-constexpr StringData kMostCommonValuesFieldName = "mostCommonValues"_sd;
-constexpr StringData kFrequencyFieldName = "frequency"_sd;
-constexpr StringData kNumOrphanDocsFieldName = "numOrphanDocs"_sd;
+constexpr std::string_view kIndexKeyFieldName = "key"sv;
+constexpr std::string_view kDocFieldName = "doc"sv;
+constexpr std::string_view kNumDocsFieldName = "numDocs"sv;
+constexpr std::string_view kNumBytesFieldName = "numBytes"sv;
+constexpr std::string_view kNumDistinctValuesFieldName = "numDistinctValues"sv;
+constexpr std::string_view kMostCommonValuesFieldName = "mostCommonValues"sv;
+constexpr std::string_view kFrequencyFieldName = "frequency"sv;
+constexpr std::string_view kNumOrphanDocsFieldName = "numOrphanDocs"sv;
 
 const std::string kOrphanDocsWarningMessage =
     "Due to performance reasons, the analyzeShardKey command does not filter out orphan documents "
@@ -410,6 +388,10 @@ void runClusterAggregate(OperationContext* opCtx,
 void runAggregate(OperationContext* opCtx,
                   AggregateCommandRequest aggRequest,
                   std::function<void(const BSONObj&)> callbackFn) {
+    // Opt in to query-memory load shedding: analyzeShardKey's metrics aggregations are heavy
+    // diagnostic work for which a retryable back-off under memory pressure is acceptable.
+    markOperationQueryMemorySheddingEligible(opCtx);
+
     if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         return runClusterAggregate(opCtx, aggRequest, callbackFn);
     }
@@ -565,7 +547,7 @@ CardinalityFrequencyMetrics calculateCardinalityAndFrequencyUnique(OperationCont
     pipeline.push_back(BSON("$match" << BSONObj()));
     pipeline.push_back(BSON("$limit" << numMostCommonValues));
     AggregateCommandRequest aggRequest(nss, pipeline);
-    aggRequest.setReadConcern(extractReadConcern(opCtx));
+    setReadWriteConcern(opCtx, aggRequest, true /* setRC */, false /* setWC */);
 
     runAggregate(opCtx, aggRequest, [&](const BSONObj& doc) {
         auto value = bson::extractElementsBasedOnTemplate(doc.getOwned(), shardKey);
@@ -900,7 +882,7 @@ CollStatsMetrics calculateCollStats(OperationContext* opCtx, const NamespaceStri
                                << BSON("$sum" << "$storageStats.count") << kNumOrphanDocsFieldName
                                << BSON("$sum" << "$storageStats.numOrphanDocs"))));
     AggregateCommandRequest aggRequest(nss, pipeline);
-    aggRequest.setReadConcern(extractReadConcern(opCtx));
+    setReadWriteConcern(opCtx, aggRequest, true /* setRC */, false /* setWC */);
 
     auto isShardedCollection = [&] {
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
@@ -1237,7 +1219,7 @@ std::pair<ReadDistributionMetrics, WriteDistributionMetrics> calculateReadWriteD
     pipeline.push_back(
         BSON(DocumentSourceAnalyzeShardKeyReadWriteDistribution::kStageName << spec.toBSON()));
     AggregateCommandRequest aggRequest(nss, pipeline);
-    aggRequest.setReadConcern(extractReadConcern(opCtx));
+    setReadWriteConcern(opCtx, aggRequest, true /* setRC */, false /* setWC */);
 
     runAggregate(opCtx, aggRequest, [&](const BSONObj& doc) {
         const auto response = DocumentSourceAnalyzeShardKeyReadWriteDistributionResponse::parse(

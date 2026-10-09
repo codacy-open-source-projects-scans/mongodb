@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog.h"
 
@@ -45,12 +19,13 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/storage/checkpointer.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/unittest/barrier.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -121,7 +96,10 @@ TEST_F(OplogTest, LogOpReturnsOpTimeOnSuccessfulInsertIntoOplogCollection) {
         oplogEntry.setNss(nss);
         oplogEntry.setObject(msgObj);
         oplogEntry.setWallClockTime(Date_t::now());
-        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opTime = logOp(opCtx.get(), &oplogEntry);
         ASSERT_FALSE(opTime.isNull());
@@ -142,6 +120,42 @@ TEST_F(OplogTest, LogOpReturnsOpTimeOnSuccessfulInsertIntoOplogCollection) {
 
     // Ensure that the msg optime returned is the same as the last optime in the ReplClientInfo.
     ASSERT_EQUALS(ReplClientInfo::forClient(&cc()).getLastOp(), opTime);
+}
+
+TEST_F(OplogTest, HashSingleOpRoundTrip) {
+    auto opCtx = cc().makeOperationContext();
+
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    const std::int64_t hash = 8622950721748590592LL;
+    SingleOpSizeMetadata expectedMetadata;
+    expectedMetadata.setH(hash);
+
+    MutableOplogEntry op;
+    op.setOpType(repl::OpTypeEnum::kInsert);
+    op.setNss(nss);
+    op.setUuid(UUID::gen());
+    op.setObject(BSON("_id" << 0 << "x" << 10));
+    op.setWallClockTime(Date_t::now());
+    op.setSizeMetadata(OplogEntrySizeMetadata{expectedMetadata});
+
+    {
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        logOp(opCtx.get(), &op);
+        wunit.commit();
+    }
+
+    const OplogEntry entry = _getSingleOplogEntry(opCtx.get());
+    const auto& sizeMetadata = entry.getSizeMetadata();
+    ASSERT_TRUE(sizeMetadata.has_value());
+    ASSERT_TRUE(std::holds_alternative<SingleOpSizeMetadata>(*sizeMetadata));
+    const boost::optional<std::int64_t> parsedDocHash =
+        std::get<SingleOpSizeMetadata>(*sizeMetadata).getH();
+    ASSERT_TRUE(parsedDocHash.has_value());
+    EXPECT_EQ(hash, *parsedDocHash);
 }
 
 /**
@@ -263,7 +277,11 @@ TEST_F(OplogTest, ConcurrentLogOp) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+                auto acq =
+                    acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -294,7 +312,11 @@ TEST_F(OplogTest, ConcurrentLogOpRevertFirstOplogEntry) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+                auto acq =
+                    acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 auto opTime = _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -340,7 +362,11 @@ TEST_F(OplogTest, ConcurrentLogOpRevertLastOplogEntry) {
            unittest::Barrier* barrier) {
             return [=] {
                 auto opCtx = cc().makeOperationContext();
-                AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+                auto acq =
+                    acquireCollection(opCtx.get(),
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
                 WriteUnitOfWork wunit(opCtx.get());
 
                 auto opTime = _logOpNoopWithMsg(opCtx.get(), mtx, opTimeNssMap, nss);
@@ -383,7 +409,10 @@ public:
         auto opCtx = cc().makeOperationContext();
 
         auto uuid = UUID::gen();
-        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
                                               _nss.dbName(),
                                               boost::none,
@@ -400,7 +429,10 @@ public:
 TEST_F(CreateIndexForApplyOpsTest, GeneratesNewIdentIfNone) {
     auto opCtx = cc().makeOperationContext();
     {
-        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         createIndexForApplyOps(opCtx.get(),
                                BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
                                         << "a_1"),
@@ -425,7 +457,10 @@ TEST_F(CreateIndexForApplyOpsTest, UsesIdentIfSpecified) {
     const std::string ident = "index-test-ident";
     const std::string identUniqueTag = "test-ident";
     {
-        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         createIndexForApplyOps(opCtx.get(),
                                BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
                                         << "a_1"),
@@ -447,7 +482,10 @@ TEST_F(CreateIndexForApplyOpsTest, UsesIdentIfSpecified) {
 
 TEST_F(CreateIndexForApplyOpsTest, MetadataValidation) {
     auto opCtx = cc().makeOperationContext();
-    Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto acq = acquireCollection(opCtx.get(),
+                                 CollectionAcquisitionRequest::fromOpCtx(
+                                     opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                 MODE_X);
     auto spec = BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
                          << "a_1");
     ASSERT_THROWS_CODE(createIndexForApplyOps(
@@ -499,8 +537,11 @@ public:
     bool shouldUseOplogWritesForFlowControlSampling() const override {
         return true;
     }
-    bool shouldForceUpdateWithFullDocument() const override {
-        return true;
+    bool shouldUseReplicatedFastCount() const override {
+        return false;
+    }
+    std::string getMainWiredTigerTableSettings() const override {
+        return "";
     }
 };
 
@@ -525,7 +566,10 @@ TEST_F(ApplyCreateWithRecordIdsReplicatedTest,
     auto opCtx = cc().makeOperationContext();
     auto entry = unittest::assertGet(OplogEntry::parse(makeCreateOplogEntry(_nss, true)));
 
-    Lock::DBLock dbLock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto acq = acquireCollection(opCtx.get(),
+                                 CollectionAcquisitionRequest::fromOpCtx(
+                                     opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                 MODE_X);
     auto status = applyCommand_inlock(
         opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kApplyOpsCmd);
     ASSERT_EQ(ErrorCodes::CommandNotSupported, status.code());
@@ -542,7 +586,10 @@ TEST_F(ApplyCreateWithRecordIdsReplicatedTest,
 
     auto entry = unittest::assertGet(OplogEntry::parse(makeCreateOplogEntry(_nss, true)));
 
-    Lock::DBLock dbLock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto acq = acquireCollection(opCtx.get(),
+                                 CollectionAcquisitionRequest::fromOpCtx(
+                                     opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                 MODE_X);
     ASSERT_OK(applyCommand_inlock(
         opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kApplyOpsCmd));
 }
@@ -551,12 +598,14 @@ TEST_F(ApplyCreateWithRecordIdsReplicatedTest,
 // when the persistence provider does not mandate it.
 TEST_F(ApplyCreateWithRecordIdsReplicatedTest,
        ApplyOpsCreate_Allowed_WhenFeatureFlagEnabledWithoutProvider) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRecordIdsReplicated",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRecordIdsReplicated", true);
     auto opCtx = cc().makeOperationContext();
     auto entry = unittest::assertGet(OplogEntry::parse(makeCreateOplogEntry(_nss, true)));
 
-    Lock::DBLock dbLock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto acq = acquireCollection(opCtx.get(),
+                                 CollectionAcquisitionRequest::fromOpCtx(
+                                     opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                 MODE_X);
     ASSERT_OK(applyCommand_inlock(
         opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kApplyOpsCmd));
 }
@@ -568,9 +617,73 @@ TEST_F(ApplyCreateWithRecordIdsReplicatedTest,
     auto opCtx = cc().makeOperationContext();
     auto entry = unittest::assertGet(OplogEntry::parse(makeCreateOplogEntry(_nss, true)));
 
-    Lock::DBLock dbLock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto acq = acquireCollection(opCtx.get(),
+                                 CollectionAcquisitionRequest::fromOpCtx(
+                                     opCtx.get(), _nss, AcquisitionPrerequisites::kWrite),
+                                 MODE_X);
     ASSERT_OK(applyCommand_inlock(
         opCtx.get(), ApplierOperation{&entry}, OplogApplication::Mode::kSecondary));
+}
+
+// ------------------------------------------------------------------
+// Test: oplog writes notify the injected CheckpointSchedulePolicy
+// ------------------------------------------------------------------
+
+class MockCheckpointPolicy : public CheckpointSchedulePolicy {
+public:
+    void waitUntilReady(std::unique_lock<std::mutex>&,
+                        stdx::condition_variable&,
+                        std::function<bool()>) override {}
+    bool accumulateOplogBytes(int64_t bytes) override {
+        _accumulated.fetchAndAdd(bytes);
+        return false;
+    }
+    int64_t accumulated() const {
+        return _accumulated.load();
+    }
+
+private:
+    AtomicWord<int64_t> _accumulated{0};
+};
+
+// Fixture that installs a spy checkpointer and removes it before teardown.
+// The checkpointer is never started, so stopStorageControls must not see it.
+class OplogCheckpointNotificationTest : public OplogTest {
+protected:
+    void tearDown() override {
+        Checkpointer::set(getServiceContext(), nullptr);
+        OplogTest::tearDown();
+    }
+};
+
+TEST_F(OplogCheckpointNotificationTest, OplogWriteNotifiesCheckpointPolicy) {
+    auto opCtx = cc().makeOperationContext();
+
+    MockCheckpointPolicy* mock = nullptr;
+    {
+        auto owned = std::make_unique<MockCheckpointPolicy>();
+        mock = owned.get();
+        Checkpointer::set(getServiceContext(), std::make_unique<Checkpointer>(std::move(owned)));
+    }
+
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    int64_t expectedBytes = 0;
+    {
+        MutableOplogEntry entry;
+        entry.setOpType(repl::OpTypeEnum::kNoop);
+        entry.setNss(nss);
+        entry.setObject(BSON("msg" << "test"));
+        entry.setWallClockTime(Date_t::now());
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        logOp(opCtx.get(), &entry);
+        wunit.commit();
+        // logOp fills in all oplog fields (ts, t, v, op, ns, …); toBSON() reflects the full
+        // serialized size that notifyOplogWrite accumulates.
+        expectedBytes = entry.toBSON().objsize();
+    }
+
+    ASSERT_GTE(mock->accumulated(), expectedBytes);
 }
 
 }  // namespace

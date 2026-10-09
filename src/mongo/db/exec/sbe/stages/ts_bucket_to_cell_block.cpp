@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
@@ -42,8 +15,10 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 TsBucketToCellBlockStage::TsBucketToCellBlockStage(std::unique_ptr<PlanStage> input,
                                                    value::SlotId bucketSlot,
                                                    std::vector<value::PathRequest> pathReqs,
@@ -53,7 +28,7 @@ TsBucketToCellBlockStage::TsBucketToCellBlockStage(std::unique_ptr<PlanStage> in
                                                    const std::string& timeField,
                                                    PlanNodeId nodeId,
                                                    bool participateInTrialRunTracking)
-    : PlanStage("ts_bucket_to_cellblock"_sd,
+    : PlanStage("ts_bucket_to_cellblock"sv,
                 nullptr /* yieldPolicy */,
                 nodeId,
                 participateInTrialRunTracking),
@@ -111,7 +86,6 @@ void TsBucketToCellBlockStage::open(bool reOpen) {
 
     _commonStats.opens++;
     _children[0]->open(reOpen);
-    _childOpened = true;
 
     // Until we have valid data, we disable access to slots.
     disableSlotAccess();
@@ -152,10 +126,7 @@ void TsBucketToCellBlockStage::close() {
     auto optTimer(getOptTimer(_opCtx));
 
     trackClose();
-    if (_childOpened) {
-        _children[0]->close();
-        _childOpened = false;
-    }
+    _children[0]->close();
 }
 
 std::unique_ptr<PlanStageStats> TsBucketToCellBlockStage::getStats(bool includeDebugInfo) const {
@@ -225,8 +196,8 @@ void TsBucketToCellBlockStage::doSaveState() {
         // and will not need to be decompressed again.
         auto [cellBlockTag, cellBlockVal] = _blocksOutAccessor[i].getViewOfValue();
 
-        auto [cpyTag, cpyVal] = value::copyValue(cellBlockTag, cellBlockVal);
-        _blocksOutAccessor[i].reset(true, cpyTag, cpyVal);
+        _blocksOutAccessor[i].reset(
+            value::TagValueOwned::fromRaw(value::copyValue(cellBlockTag, cellBlockVal)));
     }
 
     if (_metaOutSlotId) {
@@ -242,7 +213,7 @@ void TsBucketToCellBlockStage::initCellBlocks() {
     if (_metaOutSlotId) {
         auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
         auto [metaTag, metaVal] = bson::convertToView(metaElt);
-        _metaOutAccessor.reset(false, metaTag, metaVal);
+        _metaOutAccessor.reset(value::TagValueView{metaTag, metaVal});
     }
 
     auto [nMeasurements, tsBlocks, cellBlocks] = _pathExtractor.extractCellBlocks(bucketObj);
@@ -251,18 +222,17 @@ void TsBucketToCellBlockStage::initCellBlocks() {
             "Number of cell blocks doesn't match the number of accessors",
             cellBlocks.size() == _blocksOutAccessor.size());
     for (size_t i = 0; i < cellBlocks.size(); ++i) {
-        _blocksOutAccessor[i].reset(true,
-                                    value::TypeTags::cellBlock,
-                                    value::bitcastFrom<value::CellBlock*>(cellBlocks[i].release()));
+        _blocksOutAccessor[i].reset(value::TagValueOwned::fromRaw(
+            value::TypeTags::cellBlock,
+            value::bitcastFrom<value::CellBlock*>(cellBlocks[i].release())));
     }
 
     // Initialize an all-1s bitset.
-    _bitmapOutAccessor.reset(true,
-                             value::TypeTags::valueBlock,
-                             value::bitcastFrom<value::ValueBlock*>(
-                                 std::make_unique<value::MonoBlock>(nMeasurements,
-                                                                    value::TypeTags::Boolean,
-                                                                    value::bitcastFrom<bool>(true))
-                                     .release()));
+    _bitmapOutAccessor.reset(value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(
+            std::make_unique<value::MonoBlock>(
+                nMeasurements, value::TypeTags::Boolean, value::bitcastFrom<bool>(true))
+                .release())));
 }
 }  // namespace mongo::sbe

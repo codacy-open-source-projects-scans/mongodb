@@ -52,7 +52,11 @@ import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
  * @param {Object} keys Name(s) and definitions of the desired search indexes.
  * @param {Object} blockUntilSearchIndexQueryable Object that represents how the
  */
-function _validateSearchIndexArguments(searchIndexCommandName, keys, blockUntilSearchIndexQueryable) {
+function _validateSearchIndexArguments(
+    searchIndexCommandName,
+    keys,
+    blockUntilSearchIndexQueryable,
+) {
     if (!keys.hasOwnProperty("definition")) {
         throw new Error(searchIndexCommandName + " must have a definition");
     }
@@ -63,7 +67,8 @@ function _validateSearchIndexArguments(searchIndexCommandName, keys, blockUntilS
         !blockUntilSearchIndexQueryable.hasOwnProperty("blockUntilSearchIndexQueryable")
     ) {
         throw new Error(
-            searchIndexCommandName + " only accepts index definition object and blockUntilSearchIndexQueryable object",
+            searchIndexCommandName +
+                " only accepts index definition object and blockUntilSearchIndexQueryable object",
         );
     }
 
@@ -96,34 +101,50 @@ function isShardedHelper(coll) {
 
 function _runListSearchIndexOnNode(coll, indexName, latestDefinition) {
     let name = indexName;
-    let dbName = coll.getDB().getName();
-    let collName = coll.getName();
     let searchIndexArray = coll.aggregate([{$listSearchIndexes: {name}}]).toArray();
-    assert.eq(searchIndexArray.length, 1, searchIndexArray);
+
+    // Wait for the index to appear.
+    if (searchIndexArray.length !== 1) {
+        assert.soon(
+            () => {
+                searchIndexArray = coll.aggregate([{$listSearchIndexes: {name}}]).toArray();
+                return searchIndexArray.length === 1;
+            },
+            `Search index '${name}' never appeared in $listSearchIndexes`,
+            60000 /* 60s */,
+            1000,
+            {runHangAnalyzer: false},
+        );
+    }
 
     if (latestDefinition != null) {
         /**
-         * We're running $listSearchIndexes after an update, need to confirm that we're looking at
-         * index entry for latest definition.
+         * We're running $listSearchIndexes after an update, need to confirm that we're looking
+         * at index entry for latest definition.
          */
         assert.eq(searchIndexArray[0].latestDefinition, latestDefinition);
     }
 
-    let queryable = searchIndexArray[0]["queryable"];
-
-    if (queryable) {
+    if (searchIndexArray[0]["queryable"]) {
         return;
     }
 
-    assert.soon(() => {
-        searchIndexArray = coll.aggregate([{$listSearchIndexes: {name}}]).toArray();
-        if (searchIndexArray[0]["queryable"]) {
-            if (latestDefinition == null) {
-                return true;
+    // Wait for the index to become queryable.
+    assert.soon(
+        () => {
+            searchIndexArray = coll.aggregate([{$listSearchIndexes: {name}}]).toArray();
+            if (searchIndexArray.length === 1 && searchIndexArray[0]["queryable"]) {
+                return (
+                    latestDefinition == null ||
+                    bsonWoCompare(searchIndexArray[0].latestDefinition, latestDefinition) === 0
+                );
             }
-            return bsonWoCompare(searchIndexArray[0].latestDefinition, latestDefinition) === 0;
-        }
-    });
+        },
+        `Search index '${name}' never became queryable`,
+        120000 /* 120s */,
+        1000,
+        {runHangAnalyzer: false},
+    );
 }
 
 function _verifySearchIndexDropped(coll, indexName) {
@@ -141,10 +162,23 @@ function _runAndReplicateSearchIndexCommand(coll, userCmd, indexName, latestDefi
     let response = assert.commandWorked(coll.getDB().runCommand(userCmd));
     // Please see block comment at the top of this file to understand the sharded implementation.
     if (isShardedHelper(coll) || FixtureHelpers.isMongos(coll.getDB())) {
-        assert.commandWorked(coll.getDB().runCommand({replicateSearchIndexCommand: coll.getName(), userCmd}));
+        assert.commandWorked(
+            coll.getDB().runCommand({replicateSearchIndexCommand: coll.getName(), userCmd}),
+        );
     } else {
         if (Object.keys(userCmd)[0] != "dropSearchIndex") {
-            _runListSearchIndexOnNode(coll, indexName, latestDefinition);
+            const kMaxRetries = 3;
+            for (let attempt = 0; attempt < kMaxRetries; attempt++) {
+                try {
+                    _runListSearchIndexOnNode(coll, indexName, latestDefinition);
+                    break;
+                } catch (e) {
+                    if (attempt === kMaxRetries - 1) {
+                        throw e;
+                    }
+                    coll.getDB().runCommand(userCmd);
+                }
+            }
         }
     }
     return response;
@@ -160,7 +194,11 @@ function _runAndReplicateSearchIndexCommand(coll, userCmd, indexName, latestDefi
 export function waitForSearchIndexQueryable(coll, indexName) {
     if (isShardedHelper(coll) || FixtureHelpers.isMongos(coll.getDB())) {
         const listCmd = {$listSearchIndexes: {name: indexName}};
-        assert.commandWorked(coll.getDB().runCommand({replicateSearchIndexCommand: coll.getName(), userCmd: listCmd}));
+        assert.commandWorked(
+            coll
+                .getDB()
+                .runCommand({replicateSearchIndexCommand: coll.getName(), userCmd: listCmd}),
+        );
     } else {
         _runListSearchIndexOnNode(coll, indexName, null);
     }

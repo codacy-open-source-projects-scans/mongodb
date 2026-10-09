@@ -2,7 +2,7 @@
  * Tests hybrid search with the rank fusion using the $rankFusion stage and more than 2 input
  * pipelines. We manually observe returned results and see that they clearly relate to the input
  * pipeline criteria specified, then codify the results as an ordered list of document ids.
- * @tags: [ featureFlagRankFusionFull, requires_fcv_81 ]
+ * @tags: [requires_fcv_81]
  */
 
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
@@ -35,7 +35,12 @@ let testQuery = [
                                 index: getRentalSearchIndexSpec().name,
                                 text: {
                                     query: "brooklyn",
-                                    path: ["name", "summary", "description", "neighborhood_overview"],
+                                    path: [
+                                        "name",
+                                        "summary",
+                                        "description",
+                                        "neighborhood_overview",
+                                    ],
                                 },
                             },
                         },
@@ -73,7 +78,9 @@ let testQuery = [
 
 let results = coll.aggregate(testQuery).toArray();
 
-let expectedResultIds = [21, 41, 24, 14, 13, 15, 28, 44, 47, 26, 40, 1, 11, 31, 42, 22, 2, 6, 20, 25];
+let expectedResultIds = [
+    21, 41, 24, 14, 13, 15, 28, 44, 47, 26, 40, 1, 11, 31, 42, 22, 2, 6, 20, 25,
+];
 assertDocArrExpectedFuzzy(buildExpectedResults(expectedResultIds, datasets.RENTALS), results);
 
 dropSearchIndex(coll, {name: getRentalSearchIndexSpec().name});

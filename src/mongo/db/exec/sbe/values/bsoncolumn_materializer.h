@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,7 +11,9 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/modules.h"
 
-// TODO(SERVER-114140): Remove all MONGO_MOD_NEEDS_REPLACEMENT annotations
+#include <string_view>
+
+// TODO(SERVER-114140): Remove all [[MONGO_MOD_NEEDS_REPLACEMENT]] annotations
 
 namespace mongo::sbe {
 namespace bsoncolumn {
@@ -50,7 +26,7 @@ namespace bsoncolumn {
  * instance doing the decompressing will be responsible for freeing any heap-allocated memory
  * referenced by the produced SBE values.
  */
-struct MONGO_MOD_NEEDS_REPLACEMENT SBEColumnMaterializer {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] SBEColumnMaterializer {
     using Element = std::pair<value::TypeTags, value::Value>;
 
     static inline Element materialize(BSONElementStorage& allocator, bool val) {
@@ -78,14 +54,14 @@ struct MONGO_MOD_NEEDS_REPLACEMENT SBEColumnMaterializer {
     }
 
     static inline Element materialize(BSONElementStorage& allocator, Date_t val) {
-        return {value::TypeTags::Date, value::bitcastFrom<long long>(val.toMillisSinceEpoch())};
+        return value::TagValueView::date(val.toMillisSinceEpoch());
     }
 
     static inline Element materialize(BSONElementStorage& allocator, Timestamp val) {
-        return {value::TypeTags::Timestamp, value::bitcastFrom<unsigned long long>(val.asULL())};
+        return value::TagValueView::timestamp(val.asULL());
     }
 
-    static inline Element materialize(BSONElementStorage& allocator, StringData val) {
+    static inline Element materialize(BSONElementStorage& allocator, std::string_view val) {
         if (value::canUseSmallString(val)) {
             return value::makeSmallString(val);
         }
@@ -155,11 +131,11 @@ private:
      * This helper method is used for both bsonJavascript and bsonString data. They both have
      * identical binary representations.
      *
-     * A copy is needed here because the StringData instance will be referencing a 16-byte
+     * A copy is needed here because the std::string_view instance will be referencing a 16-byte
      * decompressed value that is allocated on the stack.
      */
     static inline value::Value copyStringWithLengthPrefix(BSONElementStorage& allocator,
-                                                          StringData data) {
+                                                          std::string_view data) {
         char* storage = allocator.allocate(sizeof(int32_t) + data.size() + 1);
 
         // The length prefix should include the terminating null byte.
@@ -227,11 +203,11 @@ inline SBEColumnMaterializer::Element SBEColumnMaterializer::materialize<Timesta
     dassert(val.type() == BSONType::timestamp,
             "materialize invoked with incorrect BSONElement type");
     uint64_t u = ConstDataView(val.value()).read<LittleEndian<uint64_t>>();
-    return {value::TypeTags::Timestamp, value::bitcastFrom<uint64_t>(u)};
+    return value::TagValueView::timestamp(u);
 }
 
 template <>
-inline SBEColumnMaterializer::Element SBEColumnMaterializer::materialize<StringData>(
+inline SBEColumnMaterializer::Element SBEColumnMaterializer::materialize<std::string_view>(
     BSONElementStorage& allocator, BSONElement val) {
     dassert(val.type() == BSONType::string, "materialize invoked with incorrect BSONElement type");
 
@@ -284,7 +260,7 @@ inline double SBEColumnMaterializer::get<double>(const Element& elem) {
     return value::bitcastTo<double>(elem.second);
 }
 template <>
-inline StringData SBEColumnMaterializer::get<StringData>(const Element& elem) {
+inline std::string_view SBEColumnMaterializer::get<std::string_view>(const Element& elem) {
     return value::getStringView(elem.first, elem.second);
 }
 template <>
@@ -402,6 +378,15 @@ public:
 
     std::unique_ptr<ValueBlock> clone() const override {
         return std::make_unique<BSONElementStorageValueBlock>(_storage, _tags, _vals);
+    }
+
+    int getApproximateSize() const final {
+        int result =
+            sizeof(*this) + _tags.capacity() * sizeof(TypeTags) + _vals.capacity() * sizeof(Value);
+        if (_storage) {
+            result += _storage->totalBlocksMemory() + sizeof(BSONElementStorage);
+        }
+        return result;
     }
 
 private:

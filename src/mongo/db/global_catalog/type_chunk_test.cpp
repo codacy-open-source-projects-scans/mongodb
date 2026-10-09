@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/type_chunk.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/logv2/log_debug.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -233,6 +207,58 @@ TEST(ChunkType, ToFromConfigBSON) {
     ASSERT_OK(chunk.validate());
 }
 
+namespace {
+// Builds a valid config-server chunk document for the given collection over range [min, max).
+BSONObj makeConfigChunkDoc(
+    const UUID& collUuid, const ChunkVersion& version, int min, int max, const std::string& shard) {
+    const auto onCurrentShardSince = Timestamp(4);
+    return BSON(
+        ChunkType::name(OID::gen())
+        << ChunkType::collectionUUID() << collUuid << ChunkType::min(BSON("a" << min))
+        << ChunkType::max(BSON("a" << max)) << ChunkType::shard(shard) << "lastmod"
+        << Timestamp(version.toLong()) << ChunkType::onCurrentShardSince() << onCurrentShardSince
+        << ChunkType::history()
+        << BSON_ARRAY(BSON(ChunkHistoryBase::kValidAfterFieldName
+                           << onCurrentShardSince << ChunkHistoryBase::kShardFieldName << shard)));
+}
+}  // namespace
+
+TEST(ChunkType, ParseConfigBSONDocuments) {
+    const auto collUuid = UUID::gen();
+    const auto collEpoch = OID::gen();
+    const auto collTimestamp = Timestamp(1);
+    ChunkVersion version({collEpoch, collTimestamp}, {1, 0});
+
+    std::vector<BSONObj> docs{makeConfigChunkDoc(collUuid, version, 0, 10, "shard0001"),
+                              makeConfigChunkDoc(collUuid, version, 10, 20, "shard0002")};
+
+    auto chunks = ChunkType::parseConfigBSONDocuments(docs, collUuid, collEpoch, collTimestamp);
+    ASSERT_EQUALS(chunks.size(), 2u);
+    ASSERT_EQUALS(chunks[0].getCollectionUUID(), collUuid);
+    ASSERT_BSONOBJ_EQ(chunks[0].getMin(), BSON("a" << 0));
+    ASSERT_BSONOBJ_EQ(chunks[1].getMax(), BSON("a" << 20));
+}
+
+TEST(ChunkType, ParseConfigBSONDocumentsRejectsMismatchedUUID) {
+    const auto collEpoch = OID::gen();
+    const auto collTimestamp = Timestamp(1);
+    ChunkVersion version({collEpoch, collTimestamp}, {1, 0});
+
+    // The chunk document carries a different collection UUID than the one requested.
+    std::vector<BSONObj> docs{makeConfigChunkDoc(UUID::gen(), version, 0, 10, "shard0001")};
+
+    ASSERT_THROWS_CODE(
+        ChunkType::parseConfigBSONDocuments(docs, UUID::gen(), collEpoch, collTimestamp),
+        DBException,
+        12698702);
+}
+
+TEST(ChunkType, ParseConfigBSONDocumentsRejectsMalformedDoc) {
+    std::vector<BSONObj> docs{BSON(ChunkType::name() << 0)};
+    ASSERT_THROWS(ChunkType::parseConfigBSONDocuments(docs, UUID::gen(), OID::gen(), Timestamp(1)),
+                  DBException);
+}
+
 TEST(ChunkType, BadType) {
     const auto collEpoch = OID::gen();
     const auto collTimestamp = Timestamp(1);
@@ -284,7 +310,7 @@ TEST(ChunkType, ParseFromNetworkRequest) {
                                 << onCurrentShardSince << ChunkHistoryBase::kShardFieldName
                                 << "shard0001")))));
 
-    ASSERT_EQ("shard0001"_sd, chunk.getShard());
+    ASSERT_EQ("shard0001", chunk.getShard().toString());
     ASSERT_EQ(chunkVersion, chunk.getVersion());
 }
 

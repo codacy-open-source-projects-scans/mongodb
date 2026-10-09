@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/timeseries/bucket_level_comparison_predicate_generator.h"
 
@@ -38,6 +12,8 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 
+#include <string_view>
+
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -46,14 +22,15 @@ namespace mongo {
 namespace timeseries {
 
 namespace {
+using namespace std::literals::string_view_literals;
 static const long long max32BitEpochMillis =
     static_cast<long long>(std::numeric_limits<uint32_t>::max()) * 1000;
 
 // Checks for the situations when it's not possible to create a bucket-level predicate (against the
 // computed control values) for the given event-level predicate ('matchExpr').
-boost::optional<StringData> checkComparisonPredicateEligibility(
+boost::optional<std::string_view> checkComparisonPredicateEligibility(
     const ComparisonMatchExpressionBase* matchExpr,
-    const StringData matchExprPath,
+    const std::string_view matchExprPath,
     const BSONElement& matchExprData,
     const BucketSpec& bucketSpec,
     ExpressionContextCollationMatchesDefault collationMatchesDefault) {
@@ -61,7 +38,7 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     // MatchExpressions use a comparator that treats field-order as significant. Because of this we
     // will not perform this optimization on queries with operands of compound types.
     if (matchExprData.type() == BSONType::object || matchExprData.type() == BSONType::array)
-        return "operand can't be an object or array"_sd;
+        return "operand can't be an object or array"sv;
 
     const auto isTimeField = (matchExprPath == bucketSpec.timeField());
 
@@ -79,11 +56,11 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     //    3) if the collection might have mixed schema data, we'll compare the types of min and
     //       max when _creating_ the bucket-level predicate (that check won't help with missing).
     if (matchExprData.type() == BSONType::null)
-        return "can't handle comparison to null"_sd;
+        return "can't handle comparison to null"sv;
     if (!isTimeField &&
         (matchExpr->matchType() == MatchExpression::INTERNAL_EXPR_LTE ||
          matchExpr->matchType() == MatchExpression::INTERNAL_EXPR_LT)) {
-        return "can't handle a non-type-bracketing LT or LTE comparisons"_sd;
+        return "can't handle a non-type-bracketing LT or LTE comparisons"sv;
     }
 
     // The control field's min and max are chosen based on the collation of the collection. If the
@@ -91,32 +68,31 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     // string or compound type (skipped above) we will not perform this optimization.
     if (collationMatchesDefault == ExpressionContextCollationMatchesDefault::kNo &&
         matchExprData.type() == BSONType::string) {
-        return "can't handle string comparison with a non-default collation"_sd;
+        return "can't handle string comparison with a non-default collation"sv;
     }
 
-    // This function only handles time and measurement predicates--not metadata.
+    // This function only handles time and measurement predicates--not metadata. Metadata predicates
+    // are expected to be handled before in 'BucketSpec::createPredicatesOnBucketLevelField'.
     if (bucketSpec.metaField() &&
         (matchExprPath == bucketSpec.metaField().value() ||
          expression::isPathPrefixOf(bucketSpec.metaField().value(), matchExprPath))) {
-        tasserted(6707200,
-                  str::stream() << "createPredicate() does not handle metadata predicates: "
-                                << matchExpr);
+        return "createPredicate() does not handle metadata predicates"sv;
     }
 
     // We must avoid mapping predicates on fields computed via $addFields or a computed $project.
     if (bucketSpec.fieldIsComputed(std::string{matchExprPath})) {
-        return "can't handle a computed field"_sd;
+        return "can't handle a computed field"sv;
     }
 
     // We must avoid mapping predicates on fields removed by $project.
     if (!determineIncludeField(matchExprPath, bucketSpec.behavior(), bucketSpec.fieldSet())) {
-        return "can't handle a field removed by projection"_sd;
+        return "can't handle a field removed by projection"sv;
     }
 
     if (isTimeField && matchExprData.type() != BSONType::date) {
         // Users are not allowed to insert non-date measurements into the time field. So this query
         // would not match anything. We do not need to optimize for this case.
-        return "can't handle comparison of time field to a non-Date type"_sd;
+        return "can't handle comparison of time field to a non-Date type"sv;
     }
 
     return boost::none;
@@ -153,7 +129,7 @@ std::unique_ptr<MatchExpression> makeOr(std::vector<std::unique_ptr<MatchExpress
  */
 std::unique_ptr<MatchExpression> createTypeEqualityPredicate(
     boost::intrusive_ptr<ExpressionContext> pExpCtx,
-    StringData matchExprPath,
+    std::string_view matchExprPath,
     bool assumeNoMixedSchemaData) {
 
     std::vector<std::unique_ptr<MatchExpression>> typeEqualityPredicates;
@@ -207,9 +183,9 @@ std::unique_ptr<MatchExpression> createTypeEqualityPredicate(
 BucketLevelComparisonPredicateGeneratorBase::Output generateNonTimeFieldPredicate(
     const ComparisonMatchExpressionBase* matchExpr,
     const BucketLevelComparisonPredicateGeneratorBase::Params params,
-    StringData minPathStringData,
-    StringData maxPathStringData,
-    StringData matchExprPath,
+    std::string_view minPathStringData,
+    std::string_view maxPathStringData,
+    std::string_view matchExprPath,
     const BSONElement& matchExprData) {
     switch (matchExpr->matchType()) {
         case MatchExpression::EQ:
@@ -281,9 +257,9 @@ BucketLevelComparisonPredicateGeneratorBase::createTightPredicate(
                     .tightPredicate};
     }
     auto minPath = std::string{timeseries::kControlMinFieldNamePrefix} + std::string{matchExprPath};
-    const StringData minPathStringData(minPath);
+    const std::string_view minPathStringData(minPath);
     auto maxPath = std::string{timeseries::kControlMaxFieldNamePrefix} + std::string{matchExprPath};
-    const StringData maxPathStringData(maxPath);
+    const std::string_view maxPathStringData(maxPath);
 
     switch (matchExpr->matchType()) {
         // All events satisfy $eq if bucket min and max both satisfy $eq.
@@ -347,10 +323,10 @@ BucketLevelComparisonPredicateGeneratorBase::createLoosePredicate(
     const bool isTimeField = (matchExprPath == _params.bucketSpec.timeField());
     const auto minPath =
         std::string{timeseries::kControlMinFieldNamePrefix} + std::string{matchExprPath};
-    const StringData minPathStringData(minPath);
+    const std::string_view minPathStringData(minPath);
     const auto maxPath =
         std::string{timeseries::kControlMaxFieldNamePrefix} + std::string{matchExprPath};
-    const StringData maxPathStringData(maxPath);
+    const std::string_view maxPathStringData(maxPath);
 
     if (isTimeField) {
         Date_t timeField = matchExprData.Date();
@@ -375,11 +351,11 @@ BucketLevelComparisonPredicateGeneratorBase::createLoosePredicate(
 BucketLevelComparisonPredicateGeneratorBase::Output
 DefaultBucketLevelComparisonPredicateGenerator::generateTimeFieldPredicate(
     const ComparisonMatchExpressionBase* matchExpr,
-    StringData minPathStringData,
-    StringData maxPathStringData,
+    std::string_view minPathStringData,
+    std::string_view maxPathStringData,
     Date_t timeField,
     BSONObj maxTime,
-    StringData matchExprPath,
+    std::string_view matchExprPath,
     const BSONElement& matchExprData) const {
     BSONObj minTime = BSON("" << timeField - Seconds(_params.bucketMaxSpanSeconds));
 
@@ -484,11 +460,11 @@ DefaultBucketLevelComparisonPredicateGenerator::generateTimeFieldPredicate(
 BucketLevelComparisonPredicateGeneratorBase::Output
 FixedBucketsLevelComparisonPredicateGenerator::generateTimeFieldPredicate(
     const ComparisonMatchExpressionBase* matchExpr,
-    StringData minPathStringData,
-    StringData maxPathStringData,
+    std::string_view minPathStringData,
+    std::string_view maxPathStringData,
     Date_t timeField,
     BSONObj maxTime,
-    StringData matchExprPath,
+    std::string_view matchExprPath,
     const BSONElement& matchExprData) const {
     Date_t roundedTimeField =
         timeseries::roundTimestampBySeconds(timeField, _params.bucketMaxSpanSeconds);

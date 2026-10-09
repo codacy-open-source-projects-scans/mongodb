@@ -1,6 +1,7 @@
 /**
  * Verify that `$search` queries that set '$$SEARCH_META' succeed on unsharded collections on
  * sharded clusters.
+ * TODO (SERVER-131069): Remove this mocked test file now that its coverage is provided by e2e/search/search_collector.js running in the sharded-cluster e2e passthrough suite.
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {ShardingTestWithMongotMock} from "jstests/with_mongot/mongotmock/lib/shardingtest_with_mongotmock.js";
@@ -21,7 +22,9 @@ const st = stWithMock.st;
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
 // Ensure db's primary shard is shard1 so we only set the correct mongot to have history.
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard1.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard1.name}),
+);
 
 const testColl = testDB.getCollection(collName);
 
@@ -84,7 +87,10 @@ const searchCmd = {
     mongosMongot.setMockResponses(historyObj, NumberLong(123));
 }
 
-let cursor = testColl.aggregate([{$search: mongotQuery}, {$project: {_id: 1, meta: "$$SEARCH_META"}}], {cursor: {}});
+let cursor = testColl.aggregate(
+    [{$search: mongotQuery}, {$project: {_id: 1, meta: "$$SEARCH_META"}}],
+    {cursor: {}},
+);
 
 const expected = [
     {"_id": 2, "meta": {value: 1}},

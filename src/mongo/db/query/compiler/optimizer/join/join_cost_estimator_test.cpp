@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/cbr_test_utils.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
@@ -52,10 +26,14 @@ public:
             *graph.addNode(extremelySmallNss, makeCanonicalQuery(extremelySmallNss), boost::none);
         selectiveNodeId =
             *graph.addNode(largeNss, makeCanonicalQuery(extremelySmallNss), boost::none);
+        pointRightNodeId = *graph.addNode(largeNss, makeCanonicalQuery(largeNss), boost::none);
+        rangeRightNodeId = *graph.addNode(largeNss, makeCanonicalQuery(largeNss), boost::none);
 
         graph.addEdge(smallNodeId, unselectiveNodeId, {});
         graph.addEdge(largeNodeId, unselectiveNodeId, {});
         graph.addEdge(smallNodeId, largeNodeId, {});
+        graph.addEdge(smallNodeId, pointRightNodeId, {});
+        graph.addEdge(smallNodeId, rangeRightNodeId, {});
 
         collCards = {
             makeCard(1000),         // smallNode
@@ -63,6 +41,8 @@ public:
             makeCard(20'000),       // unselectiveNode
             makeCard(1),            // extremelySmallNode
             makeCard(100'000'000),  // selectiveNode
+            makeCard(20'000),       // pointRightNode
+            makeCard(20'000),       // rangeRightNode
         };
 
         constexpr double docSizeBytes = 500;
@@ -87,14 +67,24 @@ public:
             {makeNodeSet(unselectiveNodeId), makeCard(20'000)},
             {makeNodeSet(extremelySmallNodeId), makeCard(1)},
             {makeNodeSet(selectiveNodeId), makeCard(1)},
+            {makeNodeSet(pointRightNodeId), makeCard(20'000)},
+            {makeNodeSet(rangeRightNodeId), makeCard(20'000)},
             {makeNodeSet(smallNodeId, largeNodeId), makeCard(10)},
             {makeNodeSet(smallNodeId, unselectiveNodeId), makeCard(1000)},
             {makeNodeSet(largeNodeId, unselectiveNodeId), makeCard(1000)},
+            {makeNodeSet(smallNodeId, pointRightNodeId), makeCard(100)},
+            {makeNodeSet(smallNodeId, rangeRightNodeId), makeCard(100)},
         };
         EdgeSelectivities edgeSel{
-            makeSel(1000.0 / (1'000 * 20'000)),   // smallNode <--> unselectiveNode
-            makeSel(1000.0 / (20'000 * 20'000)),  // largeNode <--> unselectiveNode
-            makeSel(1.0 / (1000 * 20'000)),       // smallNode <--> largeId
+            makeJoinSelectivityEstimate(1000.0 /
+                                        (1'000 * 20'000)),  // smallNode <--> unselectiveNode
+            makeJoinSelectivityEstimate(1000.0 /
+                                        (20'000 * 20'000)),      // largeNode <--> unselectiveNode
+            makeJoinSelectivityEstimate(1.0 / (1000 * 20'000)),  // smallNode <--> largeId
+            makeJoinSelectivityEstimate(1.0 /
+                                        20'000),  // smallNode <--> pointRightNode: 1 doc/probe
+            makeJoinSelectivityEstimate(100.0 /
+                                        20'000),  // smallNode <--> rangeRightNode: 100 docs/probe
         };
         cardEstimator = std::make_unique<FakeJoinCardinalityEstimator>(*jCtx, subsetCards, edgeSel);
 
@@ -122,6 +112,8 @@ public:
     NodeId unselectiveNodeId;
     NodeId extremelySmallNodeId;
     NodeId selectiveNodeId;
+    NodeId pointRightNodeId;
+    NodeId rangeRightNodeId;
     boost::optional<JoinReorderingContext> jCtx;
     std::unique_ptr<PlanEnumeratorContext> planEnumCtx;
     std::unique_ptr<JoinCostEstimator> costEstimator;
@@ -274,6 +266,19 @@ TEST_F(JoinCostEstimatorTest, NLJLowerCostThanHashJoin) {
     ASSERT_LT(nljCost, hjCost);
 }
 
+TEST_F(JoinCostEstimatorTest, PointINLJCheaperThanRangeINLJ) {
+    // A point index probe returns 1 doc per probe (selectivity = 1/collCard), while a range probe
+    // returns 100 docs per probe (selectivity = 100/collCard). With the same left side driving the
+    // same number of probes, the range scan incurs far more sorted-sparse I/O within each probe,
+    // making it more expensive.
+    BaseNode smallBaseNode{.nss = smallNss, .node = smallNodeId, .cost = zeroJoinCost};
+    auto pointCost = costEstimator->costINLJFragment(
+        smallBaseNode, pointRightNodeId, nullptr, getEdge(smallNodeId, pointRightNodeId));
+    auto rangeCost = costEstimator->costINLJFragment(
+        smallBaseNode, rangeRightNodeId, nullptr, getEdge(smallNodeId, rangeRightNodeId));
+    ASSERT_LT(pointCost, rangeCost);
+}
+
 class IndexScanNDVCostTest : public JoinOrderingTestFixture {
 public:
     void setUp() override {
@@ -330,6 +335,25 @@ TEST_F(IndexScanNDVCostTest, LowNDVHasLowerCostThanHighNDV) {
     ASSERT_GT(costWithoutNDV, costWithLowNDV);
 }
 
+TEST_F(IndexScanNDVCostTest, LowNDVCostsMoreUnderCachePressure) {
+    // An IXSCAN+FETCH on a low-NDV index fetches multiple docs per distinct key. Pages past the
+    // first random seek per key are sorted-sparse I/Os: charged as cheap sequential I/Os when the
+    // working set fits in cache, but as additional random I/Os under cache pressure. Verify the
+    // fragment cost reflects that by forcing cache pressure and asserting it is strictly more
+    // expensive than the same scan under a cache that comfortably fits the collection.
+    auto fakeNdvEstimator = std::make_unique<FakeNdvEstimator>(makeCard(1000));
+    fakeNdvEstimator->addFakeNDVEstimate({FieldPath("a")}, makeCard(50));
+    SamplingEstimatorMap samplingEstimators;
+    samplingEstimators.emplace(nss, std::move(fakeNdvEstimator));
+    jCtx->samplingEstimators = &samplingEstimators;
+
+    auto costFitsInCache = costEstimator->costIndexScanFragment(nodeId, zeroCost);
+    jCtx->catStats.bytesInStorageEngineCache = 32 * 1024;
+    auto costEviction = costEstimator->costIndexScanFragment(nodeId, zeroCost);
+
+    ASSERT_LT(costFitsInCache, costEviction);
+}
+
 TEST(JoinEstimatesTest, NumDocsProcessedFromCpuCost) {
     ASSERT_EQ(0.0, numDocsProcessedFromCpuCost(zeroCost).toDouble());
 
@@ -361,6 +385,38 @@ TEST(MackerLohmanTest, CollectionDoesntFitInCacheResultSetDoesntFitInCache) {
     auto result = estimateMackertLohmanRandIO(1000, 100, 1000);
     ASSERT_EQ(910, result.randIOPages);
     ASSERT_EQ(MackertLohmanCase::kPartialEviction, result.theCase);
+}
+
+TEST(SortedSparseIOTest, NoTailWhenLogicalRequestsExceedPages) {
+    // When the number of logical page requests exceeds the number of distinct pages accessed there
+    // is no sorted-sparse IO, so the helper returns {0, 0} regardless of cache size.
+    auto result = estimateSortedSparseIO(10, 100, MackertLohmanCase::kPartialEviction, 1);
+    ASSERT_EQ(0, result.numSeqIOs);
+    ASSERT_EQ(0, result.numRandIOs);
+}
+
+TEST(SortedSparseIOTest, CollectionFitsCacheChargesNothing) {
+    auto result = estimateSortedSparseIO(100, 10, MackertLohmanCase::kCollectionFitsCache, 1000);
+    ASSERT_EQ(0, result.numSeqIOs);
+    ASSERT_EQ(0, result.numRandIOs);
+}
+
+TEST(SortedSparseIOTest, SmallCacheOverflowChargesDampedRandom) {
+    auto result = estimateSortedSparseIO(100, 10, MackertLohmanCase::kReturnedDocsFitCache, 96);
+    ASSERT_EQ(0, result.numSeqIOs);
+    ASSERT_DOUBLE_EQ(9, result.numRandIOs);
+}
+
+TEST(SortedSparseIOTest, LargerCacheOverflowChargesMoreRandom) {
+    auto result = estimateSortedSparseIO(100, 10, MackertLohmanCase::kReturnedDocsFitCache, 64);
+    ASSERT_EQ(0, result.numSeqIOs);
+    ASSERT_DOUBLE_EQ(27, result.numRandIOs);
+}
+
+TEST(SortedSparseIOTest, ZeroPagesAccessedReturnsZero) {
+    auto result = estimateSortedSparseIO(0, 10, MackertLohmanCase::kReturnedDocsFitCache, 64);
+    ASSERT_EQ(0, result.numSeqIOs);
+    ASSERT_EQ(0, result.numRandIOs);
 }
 
 }  // namespace mongo::join_ordering

@@ -15,7 +15,9 @@
 import {AllCommandsTest} from "jstests/libs/all_commands_test.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {isServerSideJavaScriptEnabled} from "jstests/libs/js_engine_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const name = jsTestName();
@@ -30,9 +32,29 @@ const commandIsDisabledOnLastLTS = "skip command on downgrading fcv";
 const requiresParallelShell = "requires parallel shell";
 const cannotRunWhileDowngrading = "cannot run command while downgrading";
 
+// Commands that perform a chunk operation (split / merge / move), are rejected with ConflictingOperationInProgress while the authoritative shard metadata is mid-transition, i.e. while featureFlagAuthoritativeShardsDDL is enabled but featureFlagAuthoritativeShardsCRUD is not yet enabled
+// TODO (SERVER-98118): Remove this handling.
+const chunkOperationCommands = new Set([
+    "split",
+    "mergeChunks",
+    "mergeAllChunksOnShard",
+    "moveChunk",
+    "moveRange",
+    // clearJumboFlag is not itself a blocked chunk operation, but its setUp performs a split, which
+    // is rejected during the transition.
+    "clearJumboFlag",
+]);
+
+function chunkOperationsBlockedByAuthShardTransition(shardConn) {
+    const adminDB = shardConn.getDB("admin");
+    return (
+        FeatureFlagUtil.isPresentAndEnabled(adminDB, "AuthoritativeShardsDDL") &&
+        !FeatureFlagUtil.isPresentAndEnabled(adminDB, "AuthoritativeShardsCRUD")
+    );
+}
+
 const allCommands = {
     _addShard: {skip: isAnInternalCommand},
-    _internalClearCollectionShardingMetadata: {skip: isAnInternalCommand},
     _clusterQueryWithoutShardKey: {skip: isAnInternalCommand},
     _clusterWriteWithoutShardKey: {skip: isAnInternalCommand},
     _configsvrAbortReshardCollection: {skip: isAnInternalCommand},
@@ -50,24 +72,27 @@ const allCommands = {
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
     _configsvrCommitChunkSplit: {skip: isAnInternalCommand},
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
+    _configsvrCommitMergeAllPrecomputedChunksOnShard: {skip: isAnInternalCommand},
+    _configsvrCommitMergeChunks: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary: {skip: isAnInternalCommand},
+    _configsvrCommitMoveRange: {skip: isAnInternalCommand},
     _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _configsvrCommitShardRemoval: {skip: isAnInternalCommand},
+    _configsvrCommitSplitChunk: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
     _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},
     _configsvrHelloMe: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
-    _configsvrRemoveChunks: {skip: isAnInternalCommand},
     _configsvrRemoveShard: {skip: isAnInternalCommand},
     _configsvrRemoveShardFromZone: {skip: isAnInternalCommand},
     _configsvrRemoveTags: {skip: isAnInternalCommand},
-    _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrResetPlacementHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrRunRestore: {skip: isAnInternalCommand},
+    _configsvrSetAllowChunkOperations: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
@@ -112,6 +137,7 @@ const allCommands = {
     _shardsvrCommitCreateDatabaseMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitDropDatabaseMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrCommitRenameCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
@@ -142,8 +168,11 @@ const allCommands = {
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorGetCloneCount: {skip: isAnInternalCommand},
     _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: isAnInternalCommand},
+    _shardsvrReshardingRecipientFetchFinalCollectionStats: {skip: isAnInternalCommand},
     _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: isAnInternalCommand},
+    _shardsvrReshardingStepDown: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrReshardDonorInitialize: {skip: isAnInternalCommand},
     _shardsvrReshardDonorCriticalSectionStarted: {skip: isAnInternalCommand},
@@ -151,13 +180,19 @@ const allCommands = {
     _shardsvrReshardRecipientInitialize: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientClone: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientCriticalSectionStarted: {skip: isAnInternalCommand},
+    _shardsvrReshardCleanupStaleChunks: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
+    _shardsvrCommitCollModCollectionMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitChunkOperationsMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitDropCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitCreateCollectionMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitCreateCollectionChunklessMetadata: {skip: isAnInternalCommand},
+    _shardsvrSetAllowChunkOperations: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _shardsvrSplitChunk: {skip: isAnInternalCommand},
     _shardsvrValidateShardKeyCandidate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
@@ -169,6 +204,7 @@ const allCommands = {
     _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
+    _shardsvrCheckMetadataConsistencySecondaryParticipant: {skip: isAnInternalCommand},
     _shardsvrFetchCollMetadata: {skip: isAnInternalCommand},
     streams_startStreamProcessor: {skip: isAnInternalCommand},
     streams_startStreamSample: {skip: isAnInternalCommand},
@@ -183,6 +219,9 @@ const allCommands = {
     streams_writeCheckpoint: {skip: isAnInternalCommand},
     streams_sendEvent: {skip: isAnInternalCommand},
     streams_updateConnection: {skip: "internal command"},
+    streams_previewStream: {skip: "internal command"},
+    streams_getMorePreview: {skip: "internal command"},
+    streams_stopPreview: {skip: "internal command"},
     _transferMods: {skip: isAnInternalCommand},
     abortMoveCollection: {
         // Skipping command because it requires testing through a parallel shell.
@@ -199,7 +238,9 @@ const allCommands = {
     abortTransaction: {
         doesNotRunOnStandalone: true,
         fullScenario: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({create: collName, writeConcern: {w: "majority"}}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({create: collName, writeConcern: {w: "majority"}}),
+            );
 
             let _lsid = UUID();
             // Start the transaction.
@@ -236,8 +277,12 @@ const allCommands = {
     addShardToZone: {
         isShardedOnly: true,
         fullScenario: function (conn, fixture) {
-            assert.commandWorked(conn.adminCommand({addShardToZone: fixture.shard0.shardName, zone: "x"}));
-            assert.commandWorked(conn.adminCommand({removeShardFromZone: fixture.shard0.shardName, zone: "x"}));
+            assert.commandWorked(
+                conn.adminCommand({addShardToZone: fixture.shard0.shardName, zone: "x"}),
+            );
+            assert.commandWorked(
+                conn.adminCommand({removeShardFromZone: fixture.shard0.shardName, zone: "x"}),
+            );
         },
     },
     aggregate: {
@@ -276,7 +321,9 @@ const allCommands = {
     analyzeShardKey: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
             for (let i = 0; i < 1000; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -311,7 +358,9 @@ const allCommands = {
     autoSplitVector: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB("admin").runCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -335,7 +384,9 @@ const allCommands = {
         isAdminCommand: true,
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
         },
         teardown: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
@@ -387,16 +438,28 @@ const allCommands = {
         command: {checkMetadataConsistency: 1},
     },
     checkShardingIndex: {
-        setUp: function (conn, fixture) {
-            assert.commandWorked(fixture.shard0.getDB(dbName).runCommand({create: collName}));
-            const f = fixture.shard0.getCollection(fullNs);
-            f.createIndex({x: 1, y: 1});
-        },
-        command: {checkShardingIndex: fullNs, keyPattern: {x: 1, y: 1}},
         isShardedOnly: true,
-        isShardSvrOnly: true,
-        teardown: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
+        fullScenario: function (conn, fixture) {
+            const testDb = "testDB";
+            // Manually specify the primary shard since the command can only run against the shard node.
+            assert.commandWorked(
+                conn.adminCommand({
+                    enableSharding: testDb,
+                    primaryShard: fixture.shard0.shardName,
+                }),
+            );
+            assert.commandWorked(conn.getDB(testDb).runCommand({create: collName}));
+            const fullNamespace = testDb + "." + collName;
+            conn.getCollection(fullNamespace).createIndex({x: 1, y: 1});
+
+            assert.commandWorked(
+                fixture.shard0
+                    .getDB(testDb)
+                    .runCommand({checkShardingIndex: fullNamespace, keyPattern: {x: 1, y: 1}}),
+            );
+
+            // Drop testDB to leave the status clean
+            assert.commandWorked(conn.getDB(testDb).dropDatabase());
         },
     },
     cleanupOrphaned: {
@@ -417,11 +480,21 @@ const allCommands = {
         },
     },
     cleanupStructuredEncryptionData: {skip: "requires additional encrypted collection setup"},
+    clearJoinPlanCache: {
+        command: {clearJoinPlanCache: 1},
+        isAdminCommand: true,
+        // The join plan cache knobs are off by default. Rather than toggling them on every node of
+        // the fixture, assert the command is reachable and reaches its feature gate.
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.QueryFeatureNotAllowed,
+    },
     clearJumboFlag: {
         isShardedOnly: true,
         fullScenario: function (conn, fixture) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
 
             assert.commandWorked(conn.adminCommand({split: fullNs, middle: {a: 5}}));
 
@@ -430,7 +503,9 @@ const allCommands = {
             // them so that the chunk cannot be split.
             const largeString = "X".repeat(1024 * 1024);
             for (let i = 0; i < 10; i++) {
-                assert.commandWorked(conn.getCollection(fullNs).insert({a: 0, big: largeString, i: i}));
+                assert.commandWorked(
+                    conn.getCollection(fullNs).insert({a: 0, big: largeString, i: i}),
+                );
             }
 
             assert.commandWorked(conn.adminCommand({clearJumboFlag: fullNs, find: {a: 0}}));
@@ -504,7 +579,9 @@ const allCommands = {
     commitTransaction: {
         doesNotRunOnStandalone: true,
         fullScenario: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({create: collName, writeConcern: {w: "majority"}}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({create: collName, writeConcern: {w: "majority"}}),
+            );
             let _lsid = UUID();
             // Start the transaction.
             assert.commandWorked(
@@ -550,7 +627,9 @@ const allCommands = {
     configureCollectionBalancing: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
         },
         command: {configureCollectionBalancing: fullNs, chunkSize: 1},
         teardown: function (conn) {
@@ -695,13 +774,17 @@ const allCommands = {
     },
     dropAllRolesFromDatabase: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {dropAllRolesFromDatabase: 1},
     },
     dropAllUsersFromDatabase: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {dropAllUsersFromDatabase: 1},
     },
@@ -718,7 +801,9 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(conn.getCollection(fullNs).insert({x: 1}));
             assert.commandWorked(
-                conn.getDB(dbName).runCommand({createIndexes: collName, indexes: [{key: {x: 1}, name: "foo"}]}),
+                conn
+                    .getDB(dbName)
+                    .runCommand({createIndexes: collName, indexes: [{key: {x: 1}, name: "foo"}]}),
             );
         },
         command: {dropIndexes: collName, index: {x: 1}},
@@ -728,7 +813,9 @@ const allCommands = {
     },
     dropRole: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {dropRole: "foo"},
     },
@@ -739,7 +826,9 @@ const allCommands = {
     },
     dropUser: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {dropUser: "foo"},
     },
@@ -831,10 +920,19 @@ const allCommands = {
         isAdminCommand: true,
         command: {getDiagnosticData: 1},
     },
+    getESECMKIdentifierListStatus: {skip: "requires additional setup"},
     getESERotateActiveKEKStatus: {skip: "requires additional setup"},
     getLog: {
         isAdminCommand: true,
         command: {getLog: "global"},
+    },
+    getMetricsFilteringAllowlist: {
+        isAdminCommand: true,
+        command: {getMetricsFilteringAllowlist: 1, category: "serverStatus"},
+        // The metrics filtering feature flags are not enabled in tests by default, so this
+        // command is expected to fail with IllegalOperation.
+        expectFailure: true,
+        expectedErrorCode: ErrorCodes.IllegalOperation,
     },
     getMore: {
         fullScenario: function (conn) {
@@ -845,9 +943,13 @@ const allCommands = {
 
             const res = db.runCommand({find: collName, batchSize: 1});
             assert.commandWorked(res);
-            assert.commandWorked(db.runCommand({getMore: NumberLong(res.cursor.id), collection: collName}));
+            assert.commandWorked(
+                db.runCommand({getMore: NumberLong(res.cursor.id), collection: collName}),
+            );
 
-            assert.commandWorked(db.runCommand({killCursors: collName, cursors: [NumberLong(res.cursor.id)]}));
+            assert.commandWorked(
+                db.runCommand({killCursors: collName, cursors: [NumberLong(res.cursor.id)]}),
+            );
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -887,7 +989,9 @@ const allCommands = {
     },
     grantPrivilegesToRole: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
         },
         command: {
@@ -901,8 +1005,12 @@ const allCommands = {
     },
     grantRolesToRole: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}),
+            );
         },
         command: {grantRolesToRole: "foo", roles: [{role: "bar", db: dbName}]},
         teardown: function (conn) {
@@ -912,8 +1020,12 @@ const allCommands = {
     },
     grantRolesToUser: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
-            assert.commandWorked(conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {grantRolesToUser: "foo", roles: [{role: "foo", db: dbName}]},
         teardown: function (conn) {
@@ -1065,7 +1177,9 @@ const allCommands = {
         isShardedOnly: true,
         fullScenario: function (conn, fixture) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -1086,7 +1200,9 @@ const allCommands = {
                     _waitForDelete: true,
                 }),
             );
-            assert.commandWorked(conn.adminCommand({mergeAllChunksOnShard: fullNs, shard: fixture.shard0.shardName}));
+            assert.commandWorked(
+                conn.adminCommand({mergeAllChunksOnShard: fullNs, shard: fixture.shard0.shardName}),
+            );
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -1095,7 +1211,9 @@ const allCommands = {
         isAdminCommand: true,
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -1111,7 +1229,9 @@ const allCommands = {
         isAdminCommand: true,
         fullScenario: function (conn, fixture) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -1136,13 +1256,19 @@ const allCommands = {
         isAdminCommand: true,
         fullScenario: function (conn, fixture) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
             assert.commandWorked(conn.adminCommand({split: fullNs, middle: {a: 5}}));
             assert.commandWorked(
-                conn.adminCommand({moveRange: fullNs, min: {a: 1}, toShard: fixture.shard0.shardName}),
+                conn.adminCommand({
+                    moveRange: fullNs,
+                    min: {a: 1},
+                    toShard: fixture.shard0.shardName,
+                }),
             );
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -1249,7 +1375,9 @@ const allCommands = {
         isShardedOnly: true,
         isAdminCommand: false,
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: "hashed"}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: "hashed"}}),
+            );
         },
         command: {recreateRangeDeletionTasks: collName, skipEmptyRanges: false},
         teardown: function (conn) {
@@ -1261,7 +1389,9 @@ const allCommands = {
         isAdminCommand: true,
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i, b: i}));
             }
@@ -1335,7 +1465,12 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName + "2"}));
         },
     },
-    repairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
+    repairReplicatedMetadata: {
+        command: {repairReplicatedMetadata: 1, uuid: UUID(), metadata: {}},
+        isAdminCommand: true,
+        doesNotRunOnStandalone: true,
+        doesNotRunOnMongos: true,
+    },
     replicateSearchIndexCommand: {skip: isAnInternalCommand},
     replSetAbortPrimaryCatchUp: {
         // This will be tested in FCV upgrade/downgrade passthroughs through the replsets directory.
@@ -1344,8 +1479,12 @@ const allCommands = {
     replSetFreeze: {
         isReplSetOnly: true,
         fullScenario: function (conn, fixture) {
-            assert.commandWorked(fixture.getSecondary().getDB("admin").runCommand({replSetFreeze: 1}));
-            assert.commandWorked(fixture.getSecondary().getDB("admin").runCommand({replSetFreeze: 0}));
+            assert.commandWorked(
+                fixture.getSecondary().getDB("admin").runCommand({replSetFreeze: 1}),
+            );
+            assert.commandWorked(
+                fixture.getSecondary().getDB("admin").runCommand({replSetFreeze: 0}),
+            );
         },
     },
     replSetGetConfig: {isReplSetOnly: true, isAdminCommand: true, command: {replSetGetConfig: 1}},
@@ -1359,8 +1498,12 @@ const allCommands = {
     replSetMaintenance: {
         isReplSetOnly: true,
         fullScenario: function (conn, fixture) {
-            assert.commandWorked(fixture.getSecondary().getDB("admin").runCommand({replSetMaintenance: 1}));
-            assert.commandWorked(fixture.getSecondary().getDB("admin").runCommand({replSetMaintenance: 0}));
+            assert.commandWorked(
+                fixture.getSecondary().getDB("admin").runCommand({replSetMaintenance: 1}),
+            );
+            assert.commandWorked(
+                fixture.getSecondary().getDB("admin").runCommand({replSetMaintenance: 0}),
+            );
         },
     },
     replSetReconfig: {
@@ -1429,7 +1572,9 @@ const allCommands = {
     },
     revokeRolesFromRole: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}),
+            );
             assert.commandWorked(
                 conn.getDB(dbName).runCommand({
                     createRole: "foo",
@@ -1446,7 +1591,9 @@ const allCommands = {
     },
     revokeRolesFromUser: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
             assert.commandWorked(
                 conn.getDB(dbName).runCommand({
                     createUser: "foo",
@@ -1463,7 +1610,9 @@ const allCommands = {
     },
     rolesInfo: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {rolesInfo: 1},
         teardown: function (conn) {
@@ -1483,7 +1632,9 @@ const allCommands = {
         isAdminCommand: true,
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
         },
         command: {setAllowMigrations: fullNs, allowMigrations: true},
         teardown: function (conn) {
@@ -1493,7 +1644,11 @@ const allCommands = {
     },
     setCommittedSnapshot: {skip: isAnInternalCommand},
     setDefaultRWConcern: {
-        command: {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}},
+        command: {
+            setDefaultRWConcern: 1,
+            defaultWriteConcern: {w: 1},
+            writeConcern: {w: "majority"},
+        },
         teardown: function (conn) {
             assert.commandWorked(
                 conn.adminCommand({
@@ -1518,7 +1673,9 @@ const allCommands = {
         isAdminCommand: true,
         teardown: function (conn) {
             assert.commandWorked(
-                conn.getDB("admin").runCommand({setParameter: 1, requireApiVersion: false, apiVersion: "1"}),
+                conn
+                    .getDB("admin")
+                    .runCommand({setParameter: 1, requireApiVersion: false, apiVersion: "1"}),
             );
         },
     },
@@ -1547,7 +1704,9 @@ const allCommands = {
     setUserWriteBlockMode: {
         command: {setUserWriteBlockMode: 1, global: true},
         teardown: function (conn) {
-            assert.commandWorked(conn.getDB("admin").runCommand({setUserWriteBlockMode: 1, global: false}));
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({setUserWriteBlockMode: 1, global: false}),
+            );
         },
         doesNotRunOnStandalone: true,
     },
@@ -1565,11 +1724,18 @@ const allCommands = {
     shardDrainingStatus: {
         fullScenario: function (conn, fixture) {
             // Add unsharded collection and start draining
-            assert.commandWorked(conn.adminCommand({enableSharding: "testDB", primaryShard: fixture.shard1.shardName}));
+            assert.commandWorked(
+                conn.adminCommand({
+                    enableSharding: "testDB",
+                    primaryShard: fixture.shard1.shardName,
+                }),
+            );
             assert.commandWorked(conn.getDB("testDB").CollUnsharded.insert({_id: 1}));
             assert.commandWorked(conn.adminCommand({startShardDraining: fixture.shard1.shardName}));
             // Check draining status is ongoing
-            const drainingStatus = conn.adminCommand({shardDrainingStatus: fixture.shard1.shardName});
+            const drainingStatus = conn.adminCommand({
+                shardDrainingStatus: fixture.shard1.shardName,
+            });
             assert.commandWorked(drainingStatus);
             assert.eq("ongoing", drainingStatus.state);
             // Stop draining
@@ -1589,7 +1755,9 @@ const allCommands = {
     split: {
         setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {_id: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -1601,7 +1769,6 @@ const allCommands = {
         isAdminCommand: true,
         isShardedOnly: true,
     },
-    splitChunk: {skip: isAnInternalCommand},
     splitVector: {skip: isAnInternalCommand},
     startRecordingTraffic: {
         skip: "Renamed to startTrafficRecording",
@@ -1654,7 +1821,7 @@ const allCommands = {
         skip: "requires a sharded cluster with embedded config server",
     },
     sysprofile: {skip: isAnInternalCommand},
-    testCommandFeatureFlaggedOnLatestFCV83: {skip: isAnInternalCommand},
+    testCommandFeatureFlaggedOnLatestFCV91: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},
@@ -1662,7 +1829,6 @@ const allCommands = {
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
-    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     upgradeDowngradeViewlessTimeseries: {skip: isAnInternalCommand},
     top: {
         command: {top: 1},
@@ -1694,9 +1860,16 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
+    updateESECMKIdentifierList: {skip: "requires additional setup"},
+    updateMetricsFilteringAllowlist: {
+        command: {updateMetricsFilteringAllowlist: 1, category: "serverStatus", add: ["test.path"]},
+        isAdminCommand: true,
+    },
     updateRole: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {updateRole: "foo", privileges: []},
         teardown: function (conn) {
@@ -1710,7 +1883,9 @@ const allCommands = {
     },
     updateUser: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {updateUser: "foo", pwd: "bar2"},
         teardown: function (conn) {
@@ -1721,9 +1896,13 @@ const allCommands = {
         isAdminCommand: true,
         isShardedOnly: true,
         setUp: function (conn, fixture) {
-            assert.commandWorked(conn.adminCommand({addShardToZone: fixture.shard0.shardName, zone: "zone0"}));
+            assert.commandWorked(
+                conn.adminCommand({addShardToZone: fixture.shard0.shardName, zone: "zone0"}),
+            );
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(
+                conn.getDB(dbName).adminCommand({shardCollection: fullNs, key: {a: 1}}),
+            );
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
@@ -1731,12 +1910,16 @@ const allCommands = {
         command: {updateZoneKeyRange: fullNs, min: {a: MinKey}, max: {a: 5}, zone: "zone0"},
         teardown: function (conn, fixture) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
-            assert.commandWorked(conn.adminCommand({removeShardFromZone: fixture.shard0.shardName, zone: "zone0"}));
+            assert.commandWorked(
+                conn.adminCommand({removeShardFromZone: fixture.shard0.shardName, zone: "zone0"}),
+            );
         },
     },
     usersInfo: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}));
+            assert.commandWorked(
+                conn.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {usersInfo: "foo"},
         teardown: function (conn) {
@@ -1774,6 +1957,7 @@ const allCommands = {
         command: {whatsmyuri: 1},
         isAdminCommand: true,
     },
+    wiredTigerRepair: {skip: isAnInternalCommand},
 };
 
 /**
@@ -1827,12 +2011,21 @@ let runAllCommands = function (command, test, conn, fixture) {
                     test.checkFeatureFlag,
                 )
             ) {
-                jsTestLog("Skipping " + tojson(command) + " because its feature flag is not enabled.");
+                jsTestLog(
+                    "Skipping " + tojson(command) + " because its feature flag is not enabled.",
+                );
                 return;
             }
         } else {
-            if (!FeatureFlagUtil.isPresentAndEnabled(cmdDb.getSiblingDB("admin"), test.checkFeatureFlag)) {
-                jsTestLog("Skipping " + tojson(command) + " because its feature flag is not enabled.");
+            if (
+                !FeatureFlagUtil.isPresentAndEnabled(
+                    cmdDb.getSiblingDB("admin"),
+                    test.checkFeatureFlag,
+                )
+            ) {
+                jsTestLog(
+                    "Skipping " + tojson(command) + " because its feature flag is not enabled.",
+                );
                 return;
             }
         }
@@ -1871,7 +2064,9 @@ let runAllCommands = function (command, test, conn, fixture) {
     jsTestLog("Running command: " + tojson(cmdObj));
     if (test.expectFailure) {
         const expectedErrorCode = test.expectedErrorCode;
-        assertCommandOrWriteFailed(cmdDb.runCommand(cmdObj), expectedErrorCode, () => tojson(cmdObj));
+        assertCommandOrWriteFailed(cmdDb.runCommand(cmdObj), expectedErrorCode, () =>
+            tojson(cmdObj),
+        );
     } else {
         assert.commandWorked(cmdDb.runCommand(cmdObj), () => tojson(cmdObj));
     }
@@ -1883,15 +2078,35 @@ let runAllCommands = function (command, test, conn, fixture) {
 };
 
 let runTest = function (conn, adminDB, fixture) {
-    assert.commandFailed(conn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
+    assert.commandFailed(
+        conn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+    );
 
     jsTestLog("Running all commands in the downgradingToLastLTS FCV");
     // First check that the map contains all available commands.
     let commandsList = AllCommandsTest.checkCommandCoverage(conn, allCommands);
     if (FixtureHelpers.isMongos(adminDB)) {
-        let shardCommandsList = AllCommandsTest.checkCommandCoverage(fixture.shard0.rs.getPrimary(), allCommands);
+        let shardCommandsList = AllCommandsTest.checkCommandCoverage(
+            fixture.shard0.rs.getPrimary(),
+            allCommands,
+        );
         commandsList = new Set(commandsList.concat(shardCommandsList));
     }
+
+    // On sharded clusters, chunk operations are rejected while the authoritative shard metadata is
+    // transitioning, which is exactly the state this phase exercises (the downgrade is stuck in the
+    // transitional FCV via the failDowngrading failpoint). Skip those commands for this phase only;
+    // they are exercised again after the FCV is restored to latest.
+    let skipChunkOperations = false;
+    if (FixtureHelpers.isMongos(adminDB)) {
+        skipChunkOperations = chunkOperationsBlockedByAuthShardTransition(
+            fixture.configRS.getPrimary(),
+        );
+    }
+
+    // mapReduce with JS map/reduce functions needs a server-side JS engine, which is absent on some
+    // builds (e.g. ppc64le links scripting_none). Skip just that command there.
+    const skipScriptingCommands = !isServerSideJavaScriptEnabled(conn);
 
     for (const command of commandsList) {
         const test = allCommands[command];
@@ -1904,16 +2119,37 @@ let runTest = function (conn, adminDB, fixture) {
             continue;
         }
 
+        if (skipScriptingCommands && command === "mapReduce") {
+            jsTestLog("Skipping " + command + ": server-side JS is unavailable on this build");
+            continue;
+        }
+
+        if (skipChunkOperations && chunkOperationCommands.has(command)) {
+            jsTestLog(
+                "Skipping " +
+                    command +
+                    " in the downgrading FCV: chunk operations are blocked while the authoritative " +
+                    "shard metadata is transitioning",
+            );
+            continue;
+        }
+
         // Run all commands.
         runAllCommands(command, test, conn, fixture);
     }
 
-    assert.commandWorked(conn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    // A two-phase index build run during the commands loop may still have its async coordinator
+    // thread alive with a stale operation FCV, causing setFCV's drain barrier to reject the
+    // transition with BackgroundOperationInProgressForNamespace. Retry until the thread exits.
+    setFCVWithRetryOnBackgroundOpInProgress(conn, latestFCV);
 
     jsTestLog("Running all commands after upgrading back to the latest FCV");
     commandsList = AllCommandsTest.checkCommandCoverage(conn, allCommands);
     if (FixtureHelpers.isMongos(adminDB)) {
-        let shardCommandsList = AllCommandsTest.checkCommandCoverage(fixture.shard0.rs.getPrimary(), allCommands);
+        let shardCommandsList = AllCommandsTest.checkCommandCoverage(
+            fixture.shard0.rs.getPrimary(),
+            allCommands,
+        );
         commandsList = new Set(commandsList.concat(shardCommandsList));
     }
 
@@ -1937,7 +2173,9 @@ let runStandaloneTest = function () {
     const conn = MongoRunner.runMongod();
     const adminDB = conn.getDB("admin");
 
-    assert.commandWorked(conn.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
+    assert.commandWorked(
+        conn.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}),
+    );
 
     runTest(conn, adminDB);
     MongoRunner.stopMongod(conn);
@@ -1945,14 +2183,19 @@ let runStandaloneTest = function () {
 
 let runReplicaSetTest = function () {
     jsTestLog("Starting replica set test");
-    const rst = new ReplSetTest({name: name, nodes: [{}, {rsConfig: {priority: 0}}, {rsConfig: {priority: 0}}]});
+    const rst = new ReplSetTest({
+        name: name,
+        nodes: [{}, {rsConfig: {priority: 0}}, {rsConfig: {priority: 0}}],
+    });
     rst.startSet();
     rst.initiate();
 
     const primary = rst.getPrimary();
     const primaryAdminDB = primary.getDB("admin");
 
-    assert.commandWorked(primary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
+    assert.commandWorked(
+        primary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}),
+    );
 
     runTest(primary, primaryAdminDB, rst);
     rst.stopSet();
@@ -1964,7 +2207,9 @@ let runShardedClusterTest = function () {
     const mongos = st.s;
     const mongosAdminDB = mongos.getDB("admin");
     const configPrimary = st.configRS.getPrimary();
-    assert.commandWorked(configPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
+    assert.commandWorked(
+        configPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}),
+    );
     runTest(mongos, mongosAdminDB, st);
     st.stop();
 };

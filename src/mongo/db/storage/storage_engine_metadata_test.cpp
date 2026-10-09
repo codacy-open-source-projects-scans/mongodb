@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/storage_engine_metadata.h"
 
@@ -51,7 +25,7 @@ TEST(StorageEngineMetadataTest, ReadNonExistentMetadataFile) {
     StorageEngineMetadata metadata("no_such_directory");
     Status status = metadata.read();
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::NonExistentPath, status.code());
+    EXPECT_EQ(ErrorCodes::NonExistentPath, status.code());
 }
 
 TEST(StorageEngineMetadataTest, WriteToNonexistentDirectory) {
@@ -163,15 +137,15 @@ TEST(StorageEngineMetadataTest, IgnoreUnknownField) {
     {
         StorageEngineMetadata metadata(tempDir.path());
         ASSERT_OK(metadata.read());
-        ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
-        ASSERT_TRUE(metadata.getStorageEngineOptions().isEmpty());
+        EXPECT_EQ("storageEngine1", metadata.getStorageEngine());
+        EXPECT_TRUE(metadata.getStorageEngineOptions().isEmpty());
     }
 }
 
 TEST(StorageEngineMetadataTest, WriteEmptyStorageEngineName) {
     TempDir tempDir("StorageEngineMetadataTest_WriteEmptyStorageEngineName");
     StorageEngineMetadata metadata(tempDir.path());
-    ASSERT_EQUALS("", metadata.getStorageEngine());
+    EXPECT_EQ("", metadata.getStorageEngine());
     // Write empty storage engine name to metadata file.
     ASSERT_NOT_OK(metadata.write());
 }
@@ -189,12 +163,12 @@ TEST(StorageEngineMetadataTest, Roundtrip) {
     {
         StorageEngineMetadata metadata(tempDir.path());
         ASSERT_OK(metadata.read());
-        ASSERT_EQUALS("storageEngine1", metadata.getStorageEngine());
+        EXPECT_EQ("storageEngine1", metadata.getStorageEngine());
         ASSERT_BSONOBJ_EQ(options, metadata.getStorageEngineOptions());
 
         metadata.reset();
-        ASSERT_TRUE(metadata.getStorageEngine().empty());
-        ASSERT_TRUE(metadata.getStorageEngineOptions().isEmpty());
+        EXPECT_TRUE(metadata.getStorageEngine().empty());
+        EXPECT_TRUE(metadata.getStorageEngineOptions().isEmpty());
     }
 }
 
@@ -206,9 +180,8 @@ TEST(StorageEngineMetadataTest, ValidateStorageEngineOption) {
     metadata.setStorageEngineOptions(options);
 
     // Non-existent field.
-    ASSERT_EQUALS(
-        ErrorCodes::InvalidOptions,
-        metadata.validateStorageEngineOption("w", true, boost::optional<bool>(false)).code());
+    EXPECT_EQ(ErrorCodes::InvalidOptions,
+              metadata.validateStorageEngineOption("w", true, boost::optional<bool>(false)).code());
     ASSERT_OK(metadata.validateStorageEngineOption("w", false, boost::optional<bool>(false)));
     ASSERT_OK(metadata.validateStorageEngineOption("w", true));
     ASSERT_OK(metadata.validateStorageEngineOption("w", false));
@@ -216,28 +189,28 @@ TEST(StorageEngineMetadataTest, ValidateStorageEngineOption) {
     // Non-boolean field.
     Status status = metadata.validateStorageEngineOption("z", true);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::FailedToParse, status.code());
+    EXPECT_EQ(ErrorCodes::FailedToParse, status.code());
     status = metadata.validateStorageEngineOption("z", false);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::FailedToParse, status.code());
+    EXPECT_EQ(ErrorCodes::FailedToParse, status.code());
 
     // Boolean fields.
     ASSERT_OK(metadata.validateStorageEngineOption("x", true));
     status = metadata.validateStorageEngineOption("x", false);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::InvalidOptions, status.code());
+    EXPECT_EQ(ErrorCodes::InvalidOptions, status.code());
 
     ASSERT_OK(metadata.validateStorageEngineOption("y", false));
     status = metadata.validateStorageEngineOption("y", true);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::InvalidOptions, status.code());
+    EXPECT_EQ(ErrorCodes::InvalidOptions, status.code());
 }
 
 // Do not override the active storage engine when the data directory is empty.
 TEST(StorageEngineMetadataTest, StorageEngineForPath_EmptyDirectory) {
     TempDir tempDir("StorageEngineMetadataTest_StorageEngineForPath_EmptyDirectory");
     auto storageEngine = StorageEngineMetadata::getStorageEngineForPath(tempDir.path());
-    ASSERT_FALSE(storageEngine);
+    EXPECT_FALSE(storageEngine);
 }
 
 // Do not override the active storage engine when the data directory is nonempty, but does not
@@ -250,7 +223,7 @@ TEST(StorageEngineMetadataTest, StorageEngineForPath_NoDataFilesExist) {
         ofs << "unused data" << std::endl;
     }
     auto storageEngine = StorageEngineMetadata::getStorageEngineForPath(tempDir.path());
-    ASSERT_FALSE(storageEngine);
+    EXPECT_FALSE(storageEngine);
 }
 
 // Override the active storage engine whatever the metadata file specifies.
@@ -261,8 +234,8 @@ TEST(StorageEngineMetadataTest, StorageEngineForPath_MetadataFile_someEngine) {
         metadata.setStorageEngine("someEngine");
         ASSERT_OK(metadata.write());
     }
-    ASSERT_EQUALS(std::string("someEngine"),
-                  StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
+    EXPECT_EQ(std::string("someEngine"),
+              StorageEngineMetadata::getStorageEngineForPath(tempDir.path()));
 }
 
 }  // namespace

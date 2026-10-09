@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Unit tests for the MozJS Wasm component API via wasmtime.
@@ -49,13 +23,22 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/config_engine_gen.h"
+#include "mongo/scripting/config_engine_wasm_gen.h"
+#include "mongo/scripting/mozjs/wasm/bridge/wasm_helpers.h"
 #include "mongo/scripting/mozjs/wasm/embedded_wasm_resource.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/fail_point.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 namespace mongo {
@@ -70,6 +53,14 @@ public:
     static void SetUpTestSuite() {
         auto [wasmData, wasmSize] = getEmbeddedWasmResource();
         _s_engineCtx = WasmEngineContext::createFromPrecompiled(wasmData, wasmSize);
+    }
+
+    static void TearDownTestSuite() {
+        // Release the WasmEngineContext while wasmLifecycleMutex() is still alive.
+        // Without this, _s_engineCtx outlives the function-local wasmLifecycleMutex()
+        // static (destroyed first in reverse-init order), causing ~WasmEngineContext()
+        // to lock an already-destroyed mutex → EINVAL → system_error on macOS.
+        _s_engineCtx.reset();
     }
 
 protected:
@@ -96,9 +87,28 @@ protected:
     }
 
     BSONObj invokeFunction(uint64_t handle, const BSONObj& args) {
-        auto result = _bridge->invokeFunction(handle, args);
+        auto result = _bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(args));
         uassert(result.getStatus().code(), result.getStatus().reason(), result.isOK());
-        return result.getValue();
+        BSONObj bson = result.getValue();
+        // invokeFunction returns {"__returnValue": value}. Normalize to match the old
+        // _getReturnValueBson() contract: object returns as the object itself, primitives
+        // as {"__value": primitive}.
+        BSONElement inner = bson["__returnValue"];
+        if (inner.eoo())
+            return bson;
+        if (inner.type() == BSONType::object || inner.type() == BSONType::array)
+            return inner.Obj().getOwned();
+        BSONObjBuilder bob;
+        bob.appendAs(inner, "__value");
+        return bob.obj();
+    }
+
+    // Uses the production-path (same as scope.cpp::invoke) to get the return value.
+    // The returned object has key "__returnValue" (from kInvokeResult in engine.cpp).
+    BSONObj invokeFunctionGetWrapped(uint64_t handle, const BSONObj& args) {
+        auto result = _bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(args));
+        uassert(result.getStatus().code(), result.getStatus().reason(), result.isOK());
+        return _bridge->getReturnValueWrapped();
     }
 
     void setGlobal(std::string_view name, const BSONObj& value) {
@@ -120,11 +130,11 @@ protected:
     }
 
     void invokeMap(uint64_t handle, const BSONObj& value) {
-        _bridge->invokeMap(handle, value);
+        _bridge->invokeMap(handle, wasm_helpers::convertBsonToWcVal(value));
     }
 
     bool invokePredicate(uint64_t handle, const BSONObj& value) {
-        return _bridge->invokePredicate(handle, value);
+        return _bridge->invokePredicate(handle, wasm_helpers::convertBsonToWcVal(value));
     }
 
     BSONObj drainEmitBuffer() {
@@ -158,6 +168,65 @@ TEST_F(WasmMozJSBridgeTest, EngineInitializeAndShutdown) {
 
     _bridge->shutdown();
     ASSERT_FALSE(_bridge->isInitialized());
+}
+
+TEST_F(WasmMozJSBridgeTest, GetMemoryStatsReportsLinearMemoryAndGcHeap) {
+    auto stats = _bridge->getMemoryStats();
+    ASSERT_FALSE(stats.isEmpty());
+
+    const auto linearBytes = stats["linearMemoryBytes"].numberLong();
+    const auto gcHeapBytes = stats["gcHeapBytes"].numberLong();
+    ASSERT_GT(linearBytes, 0);
+    ASSERT_GTE(gcHeapBytes, 0);
+    // Linear memory backs the entire WASM instance, so it must be at least as large
+    // as the GC-managed heap inside it.
+    ASSERT_GTE(linearBytes, gcHeapBytes);
+    ASSERT_TRUE(stats.hasField("gcNumber"));
+
+    // Allocating inside JS must not shrink linear memory (it only grows).
+    auto handle = createFunction("function() { return new Array(100000).fill('x').join(''); }");
+    invokeFunction(handle, BSONObj());
+    auto after = _bridge->getMemoryStats();
+    ASSERT_GTE(after["linearMemoryBytes"].numberLong(), linearBytes);
+}
+
+TEST_F(WasmMozJSBridgeTest, InvokeFunctionArgsDoNotLeakLinearMemory) {
+    // Regression: the canonical ABI hands ownership of lowered argument
+    // buffers to the in-WASM bindings, which must free them. Before the ArgListGuard fix
+    // in engine/api.cpp, every invoke-function call leaked its full BSON input, so linear
+    // memory grew by ~bytesIn until the wasmtime store cap trapped with "cannot leave
+    // component instance".
+    auto handle = createFunction("function(doc) { return doc.n; }");
+
+    BSONObjBuilder bob;
+    {
+        BSONObjBuilder nested(bob.subobjStart("doc"));
+        nested.append("n", 1);
+        nested.append("blob", std::string(300 * 1024, 'x'));
+    }
+    const auto args = bob.obj();
+
+    // Warm up so one-time allocations (JIT, lazily-grown malloc arenas) don't count.
+    // resetEngine() runs a GC, so each sample sees the post-collection floor rather than
+    // whatever garbage the GC heuristics happened to let accumulate.
+    constexpr int kIterations = 100;
+    for (int i = 0; i < kIterations; ++i) {
+        invokeFunction(handle, args);
+    }
+    _bridge->resetEngine();
+    const auto before = _bridge->getMemoryStats()["linearMemoryBytes"].numberLong();
+
+    for (int i = 0; i < kIterations; ++i) {
+        invokeFunction(handle, args);
+    }
+    _bridge->resetEngine();
+    const auto after = _bridge->getMemoryStats()["linearMemoryBytes"].numberLong();
+
+    // 100 calls x ~300 KB input = ~30 MB passed in. With the leak, linear memory grows by
+    // the full ~30 MB; without it, growth after a GC should be near zero. Allow generous
+    // slack for malloc-arena growth and GC laziness.
+    const long long inputVolume = static_cast<long long>(kIterations) * args.objsize();
+    ASSERT_LT(after - before, inputVolume / 2);
 }
 
 TEST_F(WasmMozJSBridgeTest, CreateFunctionReturnsHandle) {
@@ -616,6 +685,65 @@ TEST_F(WasmMozJSBridgeTest, BsonArgsRegex) {
     ASSERT_EQ(reElem.type(), BSONType::regEx);
     ASSERT_EQ(std::string(reElem.regex()), "Hello");
     ASSERT_EQ(std::string(reElem.regexFlags()), "i");
+}
+
+TEST_F(WasmMozJSBridgeTest, BsonArgsRegexWithSlashInPattern) {
+    // An unescaped '/' inside a BSON regex pattern must survive a $function round-trip.
+    // toString() escapes it to '\/', so the stored pattern changes; GetRegExpSource() does not.
+    auto handle = createFunction(
+        "function(re) {"
+        "  return { val: re };"
+        "}");
+
+    BSONObjBuilder bob;
+    bob.appendRegex("re", "something/extend|SMS", "i");
+
+    auto result = invokeFunction(handle, bob.obj());
+
+    BSONElement reElem = result.getField("val");
+    ASSERT_EQ(reElem.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(reElem.regex()), "something/extend|SMS");
+    ASSERT_EQ(std::string(reElem.regexFlags()), "i");
+}
+
+TEST_F(WasmMozJSBridgeTest, BsonArgsRegexPatternIsSingleSlash) {
+    // Pattern that is a single '/' character.
+    // toString() wraps it as /\//; rfind('/') finds the trailing delimiter correctly, but
+    // the extracted pattern is '\/' instead of '/'.
+    auto handle = createFunction(
+        "function(re) {"
+        "  return { val: re };"
+        "}");
+
+    BSONObjBuilder bob;
+    bob.appendRegex("re", "/", "");
+
+    auto result = invokeFunction(handle, bob.obj());
+
+    BSONElement reElem = result.getField("val");
+    ASSERT_EQ(reElem.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(reElem.regex()), "/");
+    ASSERT_EQ(std::string(reElem.regexFlags()), "");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexWithToStringOverride) {
+    // A JS-level toString() override on a regex instance poisons the current implementation:
+    // JS::ToString() follows the prototype chain and calls the override, so the wrong pattern
+    // and flags are extracted.  GetRegExpSource/GetRegExpFlags read [[OriginalSource]] and
+    // [[OriginalFlags]] directly and are immune to the override.
+    auto handle = createFunction(
+        "function() {"
+        "  var re = /real/i;"
+        "  re.toString = function() { return '/hijacked/'; };"
+        "  return re;"
+        "}");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(retVal.regex()), "real");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "i");
 }
 
 TEST_F(WasmMozJSBridgeTest, BsonArgsMinKeyMaxKey) {
@@ -1517,22 +1645,20 @@ TEST_F(WasmMozJSBridgeTest, RuntimeErrorHasCorrectErrorCode) {
 
 TEST_F(WasmMozJSBridgeTest, RuntimeErrorContainsMessage) {
     auto handle = createFunction("function() { throw new Error('specific error text'); }");
-    auto doubleCheck = [&](auto&& ex) {
+    auto check = [&](auto&& ex) {
         getContainsCheck(ErrorCodes::JSInterpreterFailure, "specific error text")(ex);
         getContainsCheck(ErrorCodes::JSInterpreterFailure, "e-runtime")(ex);
     };
-    ASSERT_THROWS_WITH_CHECK(invokeFunction(handle, BSONObj()), AssertionException, doubleCheck);
+    ASSERT_THROWS_WITH_CHECK(invokeFunction(handle, BSONObj()), AssertionException, check);
 }
 
 TEST_F(WasmMozJSBridgeTest, RuntimeErrorFromUndefinedVariable) {
     auto handle = createFunction("function() { return nonexistentVariable.property; }");
-
-
-    auto doubleCheck = [&](auto&& ex) {
+    auto check = [&](auto&& ex) {
         getContainsCheck(ErrorCodes::JSInterpreterFailure, "nonexistentVariable")(ex);
         getContainsCheck(ErrorCodes::JSInterpreterFailure, "e-runtime")(ex);
     };
-    ASSERT_THROWS_WITH_CHECK(invokeFunction(handle, BSONObj()), AssertionException, doubleCheck);
+    ASSERT_THROWS_WITH_CHECK(invokeFunction(handle, BSONObj()), AssertionException, check);
 }
 
 TEST_F(WasmMozJSBridgeTest, RuntimeErrorFromTypeError) {
@@ -2410,13 +2536,7 @@ TEST_F(WasmMozJSBridgeTest, MapReduceOomRecoveryAfterDrain) {
 
 // Triggers the store limiter OOM path — the WASM module hits the linear memory
 // ceiling, SpiderMonkey aborts inside WASM, and wasmtime catches the resulting trap.
-// The bridge's _callFunc/_callFuncNoArgs methods latch hasTrapped() before re-throwing.
-//
-// Disabled under TSan: when the store limiter denies memory.grow, SpiderMonkey
-// MOZ_CRASHes during GC. Wasmtime catches the SIGABRT via a signal handler that
-// performs allocations (signal-unsafe). TSan intercepts the signal, flags the
-// malloc, and aborts the process before wasmtime can convert it into a trap.
-#if !__has_feature(thread_sanitizer)
+// The bridge's _callFunc/_callFuncNoArgs method latches hasTrapped() before re-throwing.
 TEST_F(WasmMozJSBridgeTest, StoreLimiterTrapSetsFlag) {
     _bridge->shutdown();
     _bridge.reset();
@@ -2444,12 +2564,81 @@ TEST_F(WasmMozJSBridgeTest, StoreLimiterTrapSetsFlag) {
         "  return big.length;"
         "}");
 
-    ASSERT_THROWS((void)_bridge->invokeFunction(handle, BSONObj()), DBException);
+    ASSERT_THROWS(
+        (void)_bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(BSONObj())),
+        DBException);
     ASSERT_TRUE(_bridge->hasTrapped());
     // The store is in a broken state after the trap; discard without calling shutdown.
     _bridge.reset();
 }
-#endif  // !__has_feature(thread_sanitizer)
+
+// Verifies that a store-limiter trap is classified as ExceededMemoryLimit (146) rather
+// than the generic kWasmtimeTrapErrorCode. When memory.grow is denied by the store
+// limiter, SpiderMonkey MOZ_CRASHes via `unreachable`, which _throwAfterTrap() detects.
+TEST_F(WasmMozJSBridgeTest, StoreLimiterTrapClassifiedAsExceededMemoryLimit) {
+    _bridge->shutdown();
+    _bridge.reset();
+
+    MozJSWasmBridge::Options opts{};
+    opts.jsHeapLimitMB = 50;
+    opts.linearMemoryLimitMB = 114;
+    _bridge = std::make_unique<MozJSWasmBridge>(_s_engineCtx, opts);
+    ASSERT_TRUE(initEngine());
+
+    auto handle = createFunction(
+        "function() {"
+        "  var big = [];"
+        "  for (var i = 0; i < 2000000; i++) {"
+        "    big.push({x: i, y: i * 2, z: 'padding_string_to_consume_memory'});"
+        "  }"
+        "  return big.length;"
+        "}");
+
+    bool threw = false;
+    try {
+        (void)_bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(BSONObj()));
+    } catch (DBException& ex) {
+        threw = true;
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit)
+            << "Store-limiter OOM should throw ExceededMemoryLimit; got: " << ex.toString();
+    }
+    ASSERT_TRUE(threw) << "invokeFunction should have thrown on store-limiter OOM";
+    ASSERT_TRUE(_bridge->hasTrapped());
+    _bridge.reset();
+}
+
+#if defined(MONGO_CONFIG_DEBUG_BUILD)
+// Core regression for this change: a trap that is NOT caused by a denied memory.grow (e.g. a
+// SpiderMonkey MOZ_ASSERT lowering to `unreachable`) must surface as the generic wasmtime trap
+// code, NOT ExceededMemoryLimit. Previously any unreachable trap was blanket-classified as OOM,
+// masking real internal crashes.
+//
+// Such a trap cannot be provoked deterministically from guest JS, so the
+// 'wasmBridgeInjectEpochTrap' failpoint makes this bridge's epoch-deadline callback return an
+// error, producing a genuine non-kill wasmtime trap inside the running guest. The epoch deadline is
+// armed at current+1 (see the constructor) and invokeFunction never re-arms it, so bumping the
+// epoch once *before* the invoke leaves the deadline already reached: the first epoch check inside
+// the guest fires the callback synchronously -- no second thread needed. The trap must surface as
+// kWasmtimeTrapErrorCode with no kill pending and memory.grow never denied. The complementary
+// memory-limit case (a real OOM classified as ExceededMemoryLimit) is covered by
+// StoreLimiterTrapClassifiedAsExceededMemoryLimit. Debug-build only: the hook does not exist in
+// production binaries.
+TEST_F(WasmMozJSBridgeTest, NonMemoryTrapClassifiedAsGenericTrapCode) {
+    auto fn = createFunction("function() { return 1; }");
+
+    FailPointEnableBlock injectTrap("wasmBridgeInjectEpochTrap");
+    // Pass the epoch deadline before invoking so the guest's first epoch check traps immediately.
+    _bridge->_testTriggerEpochInterrupt();
+
+    ASSERT_THROWS_CODE(
+        (void)_bridge->invokeFunction(fn, wasm_helpers::convertBsonToWcVal(BSONObj())),
+        DBException,
+        ErrorCodes::Error{kWasmtimeTrapErrorCode});
+    ASSERT_TRUE(_bridge->hasTrapped());
+    // The store is in a trapped state; discard without calling shutdown.
+    _bridge.reset();
+}
+#endif
 
 TEST_F(WasmMozJSBridgeTest, StoreLimiterAllowsWithinLimit) {
     // Shut down the default bridge and create one with an explicit memory limit.
@@ -2463,7 +2652,7 @@ TEST_F(WasmMozJSBridgeTest, StoreLimiterAllowsWithinLimit) {
     ASSERT_TRUE(initEngine());
 
     auto handle = createFunction("function() { return 1 + 2; }");
-    auto result = _bridge->invokeFunction(handle, BSONObj());
+    auto result = _bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(BSONObj()));
     ASSERT_TRUE(result.isOK());
 }
 
@@ -2487,11 +2676,869 @@ TEST_F(WasmMozJSBridgeTest, ServerParam_DefaultLimitAllowsExecution) {
     ASSERT_TRUE(initEngine());
 
     auto handle = createFunction("function() { return 42; }");
-    auto result = _bridge->invokeFunction(handle, BSONObj());
+    auto result = _bridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(BSONObj()));
     ASSERT_TRUE(result.isOK());
+}
+
+// ---------------------------------------------------------------------------
+// Within-JS::Call exception tests (ExecutionCheck::capture() boundary)
+// ---------------------------------------------------------------------------
+
+// NumberLong.compare() with no args hits uassert(ErrorCodes::BadValue, ...) in the C++ binding
+// compiled into the WASM binary — a reliable trigger for the capture-cpp-exception path.
+// Three named JS wrappers around the native compare() call so the captured SpiderMonkey stack
+// contains multiple identifiable named frames.
+constexpr auto kNestedCallToNumberLongCompare =
+    "function() {"
+    " function c() { NumberLong(1).compare(); }"
+    " function b() { c(); }"
+    " function a() { b(); }"
+    " a();"
+    "}";
+
+TEST_F(WasmMozJSBridgeTest, CppMongoExceptionPreservesCodeAndMessage) {
+    // C++ MongoDB exceptions thrown inside WASM are wrapped in JSExceptionInfo so the JS stack is
+    // attached. The original error code and message are preserved in
+    // JSExceptionInfo::originalError. The named frames (a, b, c) defined in
+    // kNestedCallToNumberLongCompare must appear in the reason as "name@wasm:function:" entries
+    // from the captured stack property.
+    auto handle = createFunction(kNestedCallToNumberLongCompare);
+    auto check = [&](auto&& ex) {
+        ASSERT_EQUALS(ex.code(), ErrorCodes::BadValue);
+        const auto& s = ex.reason();
+
+        // SpiderMonkey reports innermost frame first: c (NumberLong.compare() call site) → b → a.
+        // Each find starts from the previous frame's position to enforce ordering.
+        // NumberLong.compare() is a C++ native and has no JS frame; c@wasm:function: covers it.
+        const auto posC = s.find("c@wasm:function:");
+        ASSERT_NE(posC, std::string::npos);
+        const auto posB = s.find("b@wasm:function:", posC);
+        ASSERT_NE(posB, std::string::npos);
+        const auto posA = s.find("a@wasm:function:", posB);
+        ASSERT_NE(posA, std::string::npos);
+    };
+    ASSERT_THROWS_WITH_CHECK(invokeFunction(handle, BSONObj()), DBException, check);
+}
+
+TEST_F(WasmMozJSBridgeTest, CppMongoExceptionDoesNotTrapBridge) {
+    // A C++ exception caught cleanly at the WASM boundary (via ExecutionCheck) should not mark
+    // the bridge as Trapped; the engine remains usable for subsequent calls.
+    auto handle = createFunction(kNestedCallToNumberLongCompare);
+    ASSERT_THROWS(invokeFunction(handle, BSONObj()), DBException);
+    ASSERT_FALSE(_bridge->hasTrapped());
+    // The function itself still throws the same error on re-invocation.
+    ASSERT_THROWS_CODE(invokeFunction(handle, BSONObj()), DBException, ErrorCodes::BadValue);
+}
+
+// ---------------------------------------------------------------------------
+// post-JS::Call exception tests (runSafely boundary)
+// ---------------------------------------------------------------------------
+
+// JS::Call succeeds (the function returns normally), but the returned value is an invalid
+// Timestamp whose fields have been set to out-of-range values. toBSON() detects the invalid
+// fields and throws DBException(BadValue) during BSON serialization — after JS::Call has
+// already returned true and ExecutionCheck has already cleared. runSafely catches this at
+// the extern "C" boundary and converts it to a WIT error with mongo_error_code set, so the
+// bridge can rethrow with the original BadValue code rather than a trap code.
+constexpr auto kReturnInvalidTimestamp =
+    "function() {"
+    " let ts = Timestamp(1, 1);"
+    " ts.t = 20000000000;"  // overflows uint32_t — invalid Timestamp
+    " return ts;"
+    "}";
+
+TEST_F(WasmMozJSBridgeTest, PostJsCallExceptionPreservesCode) {
+    auto handle = createFunction(kReturnInvalidTimestamp);
+    ASSERT_THROWS_CODE(invokeFunction(handle, BSONObj()), DBException, ErrorCodes::BadValue);
+}
+
+TEST_F(WasmMozJSBridgeTest, PostJsCallExceptionDoesNotTrapBridge) {
+    // A DBException caught cleanly at the WASM boundary (via runSafely after JS::Call) should
+    // not mark the bridge as Trapped; the engine remains usable for subsequent calls.
+    auto handle = createFunction(kReturnInvalidTimestamp);
+    ASSERT_THROWS_CODE(invokeFunction(handle, BSONObj()), DBException, ErrorCodes::BadValue);
+    ASSERT_FALSE(_bridge->hasTrapped());
+    // The function itself still throws the same error on re-invocation.
+    ASSERT_THROWS_CODE(invokeFunction(handle, BSONObj()), DBException, ErrorCodes::BadValue);
+}
+
+// ---------------------------------------------------------------------------
+// Return-type tests: JS-constructed values returned from $function-style invocations
+// ---------------------------------------------------------------------------
+
+TEST_F(WasmMozJSBridgeTest, ReturnTimestampDirectly) {
+    // A JS function that returns a Timestamp as the top-level return value (not wrapped in an
+    // object). Exercises the TimestampInfo branch in ValueWriter::_writeObject() via the
+    // production path (getReturnValueBson()).
+    auto handle = createFunction("function() { return new Timestamp(1700000000, 42); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::timestamp)
+        << "Expected timestamp type; got type " << (int)retVal.type();
+    ASSERT_EQ(retVal.timestamp(), Timestamp(1700000000, 42));
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnTimestampFromArg) {
+    // Round-trip: pass a Timestamp as an argument, return it directly as the top-level value.
+    auto handle = createFunction("function(ts) { return ts; }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSON("ts" << Timestamp(1700000000, 42)));
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::timestamp);
+    ASSERT_EQ(retVal.timestamp(), Timestamp(1700000000, 42));
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexLiteral) {
+    auto handle = createFunction("function() { return /methodologies|Advanced|extend|SMS/; }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::regEx)
+        << "Expected regEx type; got type " << (int)retVal.type();
+    ASSERT_EQ(std::string(retVal.regex()), "methodologies|Advanced|extend|SMS");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexLiteralWithFlags) {
+    auto handle = createFunction("function() { return /hello\\/world/gi; }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(retVal.regex()), "hello\\/world");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "gi");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexWithLeadingSlash) {
+    auto handle = createFunction("function() { return /\\/foo/g; }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(retVal.regex()), "\\/foo");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "g");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexWithTrailingSlash) {
+    auto handle = createFunction("function() { return /abc\\//; }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(retVal.regex()), "abc\\/");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnRegexPrototype) {
+    auto handle = createFunction("function() { return RegExp.prototype; }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::regEx);
+    ASSERT_EQ(std::string(retVal.regex()), "(?:)");
+    ASSERT_EQ(std::string(retVal.regexFlags()), "");
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromString) {
+    // A JS function that creates a Date from an ISO string and returns it.
+    // Uses the production path (invokeFunctionGetWrapped) which matches scope.cpp::invoke().
+    // In WASM/WASI the C-runtime date parser may produce an invalid Date (getTime() == NaN),
+    // causing ValueWriter to emit epoch 0 instead of the correct millisecond value.
+    auto handle = createFunction("function() { return new Date('2020-01-01T09:41:13.790Z'); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::date)
+        << "Expected date type; got type " << (int)retVal.type();
+    // 2020-01-01T09:41:13.790Z = 1577871673790 ms since epoch
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 1577871673790LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromStringEpoch) {
+    // Unix epoch expressed as an ISO string must parse to exactly 0ms.
+    auto handle = createFunction("function() { return new Date('1970-01-01T00:00:00.000Z'); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::date)
+        << "Expected date type; got type " << (int)retVal.type();
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 0LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromStringOneMillisBeforeEpoch) {
+    // One millisecond before epoch — exercises the negative-value path through ValueWriter.
+    auto handle = createFunction("function() { return new Date('1969-12-31T23:59:59.999Z'); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::date)
+        << "Expected date type; got type " << (int)retVal.type();
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), -1LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromStringFarPast) {
+    // A date well before epoch (1900-01-01T00:00:00.000Z = -2208988800000ms).
+    // Validates that large-magnitude negative values survive the string-parse path in WASM.
+    auto handle = createFunction("function() { return new Date('1900-01-01T00:00:00.000Z'); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::date)
+        << "Expected date type; got type " << (int)retVal.type();
+    // 1900-01-01T00:00:00.000Z = -2208988800000ms (70 years before epoch, 17 leap years)
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), -2208988800000LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromStringFarFuture) {
+    // Near the practical upper boundary: 9999-12-31T23:59:59.999Z = 253402300799999ms.
+    // Validates that large positive values survive the string-parse path in WASM.
+    auto handle = createFunction("function() { return new Date('9999-12-31T23:59:59.999Z'); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo()) << "Expected __returnValue field; got: " << wrapped.toString();
+    ASSERT_EQ(retVal.type(), BSONType::date)
+        << "Expected date type; got type " << (int)retVal.type();
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 253402300799999LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateBeyondMaxBoundary) {
+    // JS Date max is 8640000000000000ms. One millisecond past it produces an Invalid Date whose
+    // getTime() returns NaN. JS::ToInt64(NaN) = 0 per ECMAScript spec, so the result is epoch 0.
+    // TODO SERVER-126786: investigate whether to throw instead, consistent with NumberLong.
+    auto handle = createFunction("function() { return new Date(8640000000000001); }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::date);
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 0LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateBeyondMinBoundary) {
+    // JS Date min is -8640000000000000ms. One millisecond before it produces an Invalid Date
+    // whose getTime() returns NaN. JS::ToInt64(NaN) = 0 per ECMAScript spec, so the result is
+    // epoch 0.
+    // TODO SERVER-126786: investigate whether to throw instead, consistent with NumberLong.
+    auto handle = createFunction("function() { return new Date(-8640000000000001); }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::date);
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 0LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromInvalidString) {
+    // A Date constructed from a non-parseable string is an Invalid Date (getTime() == NaN).
+    // JS::ToInt64(NaN) = 0 per ECMAScript spec, so the result is epoch 0.
+    // TODO SERVER-126786: investigate whether to throw instead, consistent with NumberLong.
+    auto handle = createFunction("function() { return new Date('not-a-date'); }");
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::date);
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 0LL);
+}
+
+TEST_F(WasmMozJSBridgeTest, ReturnDateFromMillis) {
+    auto handle = createFunction("function() { return new Date(1577871673790); }");
+
+    BSONObj wrapped = invokeFunctionGetWrapped(handle, BSONObj());
+
+    BSONElement retVal = wrapped.getField("__returnValue");
+    ASSERT_FALSE(retVal.eoo());
+    ASSERT_EQ(retVal.type(), BSONType::date);
+    ASSERT_EQ(retVal.Date().toMillisSinceEpoch(), 1577871673790LL);
+}
+
+// resetRealm() security tests
+//
+// These tests hit the bridge directly (no scope layer) to verify that
+// resetRealm() — the cross-request isolation primitive — actually erases
+// each class of attacker state.
+// ---------------------------------------------------------------------------
+
+// A global variable written by the attacker must not be readable after resetRealm().
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_GlobalVarDoesNotPersist) {
+    auto write = createFunction("function() { globalThis.__stolen__ = 'secret'; return 1; }");
+    ASSERT_EQ(1, invokeFunction(write, BSONObj()).getField("__value").numberInt());
+
+    _bridge->resetRealm();
+
+    auto read =
+        createFunction("function() { return typeof globalThis.__stolen__ === 'undefined'; }");
+    ASSERT_TRUE(invokeFunction(read, BSONObj()).getField("__value").boolean());
+}
+
+// Object.prototype getter trap must not survive resetRealm().
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_ObjectPrototypeGetterGone) {
+    auto plant = createFunction(
+        "function() {"
+        "  try {"
+        "    Object.defineProperty(Object.prototype, '__trap__', {"
+        "      get: function() { return 'EXFILTRATED'; }, configurable: true"
+        "    });"
+        "  } catch(e) {}"
+        "  return 1;"
+        "}");
+    invokeFunction(plant, BSONObj());
+
+    _bridge->resetRealm();
+
+    auto check = createFunction("function() { return typeof ({}).__trap__ === 'undefined'; }");
+    ASSERT_TRUE(invokeFunction(check, BSONObj()).getField("__value").boolean());
+}
+
+// Poisoned JSON.stringify must be restored to the native implementation by resetRealm().
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_JSONStringifyRestored) {
+    auto poison = createFunction(
+        "function() { JSON.stringify = function() { return 'POISONED'; }; return 1; }");
+    invokeFunction(poison, BSONObj());
+
+    _bridge->resetRealm();
+
+    auto check = createFunction("function() { return JSON.stringify({x: 1}) !== 'POISONED'; }");
+    ASSERT_TRUE(invokeFunction(check, BSONObj()).getField("__value").boolean());
+}
+
+// A non-configurable property planted on globalThis must be gone after resetRealm()
+// because the entire global object is replaced.
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_NonConfigurableGlobalGone) {
+    auto plant = createFunction(
+        "function() {"
+        "  try {"
+        "    Object.defineProperty(globalThis, '__nc__', {"
+        "      value: 'PERSISTENT', writable: false, configurable: false"
+        "    });"
+        "  } catch(e) {}"
+        "  return 1;"
+        "}");
+    invokeFunction(plant, BSONObj());
+
+    _bridge->resetRealm();
+
+    auto check = createFunction("function() { return typeof globalThis.__nc__ === 'undefined'; }");
+    ASSERT_TRUE(invokeFunction(check, BSONObj()).getField("__value").boolean());
+}
+
+// A closure capturing sensitive data, installed as a global function, must not be
+// callable after resetRealm() — the handle is invalidated and the global is gone.
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_ClosureHandleInvalidated) {
+    auto plant = createFunction(
+        "function() {"
+        "  var secret = 'TOP_SECRET';"
+        "  globalThis.__leak = function() { return secret; };"
+        "  return 1;"
+        "}");
+    invokeFunction(plant, BSONObj());
+
+    // Capture the handle to the exfil function before reset.
+    auto exfilHandle = createFunction("function() { return __leak(); }");
+
+    _bridge->resetRealm();
+
+    // The handle is invalidated by resetRealm(); invoking it must throw.
+    ASSERT_THROWS_CODE(
+        invokeFunction(exfilHandle, BSONObj()), DBException, ErrorCodes::JSInterpreterFailure);
+}
+
+// Array.prototype.push replacement must be scrubbed by resetRealm().
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_ArrayPrototypePushRestored) {
+    auto poison = createFunction(
+        "function() { Array.prototype.push = function() { return 'POISONED'; }; return 1; }");
+    invokeFunction(poison, BSONObj());
+
+    _bridge->resetRealm();
+
+    auto check = createFunction(
+        "function() {"
+        "  var a = [1, 2];"
+        "  a.push(3);"
+        "  return a.length === 3 && a[2] === 3;"
+        "}");
+    ASSERT_TRUE(invokeFunction(check, BSONObj()).getField("__value").boolean());
+}
+
+// A Symbol.toPrimitive trap planted on Object.prototype must not survive resetRealm().
+TEST_F(WasmMozJSBridgeTest, Security_RealmReset_SymbolToPrimitiveTrapGone) {
+    auto plant = createFunction(
+        "function() {"
+        "  try {"
+        "    Object.defineProperty(Object.prototype, Symbol.toPrimitive, {"
+        "      value: function() { return 'POISONED'; }, configurable: true"
+        "    });"
+        "  } catch(e) {}"
+        "  return 1;"
+        "}");
+    invokeFunction(plant, BSONObj());
+
+    _bridge->resetRealm();
+
+    auto check = createFunction(
+        "function() {"
+        "  var obj = { valueOf: function() { return 42; } };"
+        "  return +obj === 42;"
+        "}");
+    ASSERT_TRUE(invokeFunction(check, BSONObj()).getField("__value").boolean());
+}
+
+// ---------------------------------------------------------------------------
+// _throwAfterTrap error-code mapping tests
+// ---------------------------------------------------------------------------
+
+// When kill() fires with no explicit reason, _throwAfterTrap() throws the default,
+// plain Interrupted -- there's no opCtx-based translation layer above the bridge anymore;
+// callers that know a real reason (e.g. WasmtimeScriptEngine::interrupt()/registerOperation())
+// pass it explicitly via kill(reason).
+TEST_F(WasmMozJSBridgeTest, ThrowAfterTrap_NoOpCtx_FallsBackToInterrupted) {
+    auto fn = createFunction("while (true) {}");
+
+    std::exception_ptr invokeEx;
+
+    std::thread invoker([&] {
+        try {
+            (void)_bridge->invokeFunction(fn, wasm_helpers::convertBsonToWcVal(BSONObj()));
+        } catch (...) {
+            invokeEx = std::current_exception();
+        }
+    });
+
+    // _killPending is sticky: even if kill() fires before WASM starts, the bridge traps on
+    // the first epoch check point inside invokeFunction(). One kill() is sufficient.
+    _bridge->kill();
+    invoker.join();
+
+    ASSERT(invokeEx) << "invokeFunction returned without throwing";
+    try {
+        std::rethrow_exception(invokeEx);
+    } catch (const DBException& e) {
+        ASSERT_EQ(e.code(), ErrorCodes::Interrupted);
+    } catch (...) {
+        FAIL("invokeFunction threw an unexpected exception type");
+    }
+}
+
+// Regression test for a real CI failure (server_status_with_time_out_cursors.js, TSAN):
+// DeadlineMonitor's background thread periodically re-signals kill() on any task with
+// isKillPending() still set (see deadlineMonitorThread()'s re-arm loop in deadline_monitor.h),
+// using the plain, reason-less kill() -- regardless of what reason a prior, correctly-attributed
+// kill() call already recorded. Before this was fixed, a second kill() call unconditionally
+// overwrote _killReason, silently downgrading a real MaxTimeMSExpired (correctly forwarded by
+// e.g. registerOperation()) back to a generic Interrupted by the time the trap was thrown.
+TEST_F(WasmMozJSBridgeTest, Kill_FirstReasonWins_SubsequentKillDoesNotOverwrite) {
+    auto fn = createFunction("while (true) {}");
+
+    std::exception_ptr invokeEx;
+    std::thread invoker([&] {
+        try {
+            (void)_bridge->invokeFunction(fn, wasm_helpers::convertBsonToWcVal(BSONObj()));
+        } catch (...) {
+            invokeEx = std::current_exception();
+        }
+    });
+
+    // First kill: a real, correctly-attributed reason (e.g. from registerOperation()).
+    _bridge->kill(ErrorCodes::MaxTimeMSExpired);
+    // Second kill: simulates DeadlineMonitor's periodic re-arm, which always uses the
+    // reason-less default. Must not clobber the reason recorded above.
+    _bridge->kill();
+    invoker.join();
+
+    ASSERT(invokeEx) << "invokeFunction returned without throwing";
+    try {
+        std::rethrow_exception(invokeEx);
+    } catch (const DBException& e) {
+        ASSERT_EQ(e.code(), ErrorCodes::MaxTimeMSExpired)
+            << "second kill() call overwrote the first call's real reason";
+    } catch (...) {
+        FAIL("invokeFunction threw an unexpected exception type");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BSON-holder generation tests
+// ---------------------------------------------------------------------------
+//
+// The engine increments its internal generation counter at the start of every invocation
+// (invokeFunction, invokePredicate, invokeMap). Any unowned BSONHolder created in a prior
+// invocation becomes stale: accessing a field on it from JS throws ErrorCodes::BadValue.
+
+// The key behavioral guarantee: a BSON arg stored by JS in a global from invocation N is
+// stale in invocation N+1 because invokeFunction auto-increments the generation counter.
+TEST_F(WasmMozJSBridgeTest, InvokeFunction_StalesBsonArgFromPriorInvocation) {
+    // Invocation 1: store the BSON document arg in a global.
+    auto store = createFunction("function(doc) { globalThis.__saved__ = doc; return 1; }");
+    auto r1 = invokeFunction(store, BSON("arg0" << BSON("x" << 42)));
+    ASSERT_EQ(r1["__value"].numberInt(), 1);
+
+    // Invocation 2: invokeFunction auto-increments generation, making __saved__ stale.
+    auto read = createFunction("function() { return globalThis.__saved__.x; }");
+    ASSERT_THROWS_CODE(invokeFunction(read, BSONObj()), DBException, ErrorCodes::BadValue);
+}
+
+TEST_F(WasmMozJSBridgeTest, InvokeFunction_FreshArgInNewInvocationIsValid) {
+    // Args passed in the current invocation receive the post-increment generation and are valid.
+    auto handle = createFunction("function(doc) { return doc.a + doc.b; }");
+    auto result = invokeFunction(handle, BSON("arg0" << BSON("a" << 10 << "b" << 32)));
+    ASSERT_EQ(result["__value"].numberInt(), 42);
+}
+
+TEST_F(WasmMozJSBridgeTest, InvokeFunction_SameInvocationArgIsNotStale) {
+    // An arg stored to globalThis within a single invocation and read back in the same
+    // invocation has the current generation and is not stale.
+    auto handle = createFunction(
+        "function(doc) {"
+        "  globalThis.__cur__ = doc;"
+        "  return globalThis.__cur__.x;"
+        "}");
+    auto result = invokeFunction(handle, BSON("arg0" << BSON("x" << 99)));
+    ASSERT_EQ(result["__value"].numberInt(), 99);
+}
+
+TEST_F(WasmMozJSBridgeTest, InvokeFunction_GenerationsStackAcrossMultipleInvocations) {
+    // Each invocation advances the generation. A wrapper saved two invocations ago is stale
+    // even if it was overwritten by a newer wrapper in between.
+    auto store = createFunction("function(doc) { globalThis.__saved__ = doc; return 1; }");
+
+    // Invocation 1 → generation G: save a wrapper with generation G.
+    auto r1 = invokeFunction(store, BSON("arg0" << BSON("v" << 1)));
+    ASSERT_EQ(r1["__value"].numberInt(), 1);
+
+    // Invocation 2 → generation G+1: __saved__ is overwritten with a G+1 wrapper.
+    auto r2 = invokeFunction(store, BSON("arg0" << BSON("v" << 2)));
+    ASSERT_EQ(r2["__value"].numberInt(), 1);
+
+    // Invocation 3 → generation G+2: __saved__ holds a G+1 wrapper, now stale.
+    auto read = createFunction("function() { return globalThis.__saved__.v; }");
+    ASSERT_THROWS_CODE(invokeFunction(read, BSONObj()), DBException, ErrorCodes::BadValue);
+}
+
+// ---------------------------------------------------------------------------
+// Per-bridge epoch isolation tests
+// ---------------------------------------------------------------------------
+
+// Sequential isolation: after bridge A is killed (causing an engine epoch increment), a fresh
+// call on bridge B (sharing the same engine context) should succeed without interruption.
+// Bridge B's epoch callback re-arms on the first epoch tick of its next invocation.
+TEST_F(WasmMozJSBridgeTest, EpochIsolation_KillingBridgeADoesNotPreventBridgeBFromExecuting) {
+    MozJSWasmBridge::Options opts{};
+    opts.linearMemoryLimitMB = gWasmtimeStoreMemoryLimitMB.load();
+    auto bridgeB = std::make_unique<MozJSWasmBridge>(_s_engineCtx, opts);
+    ASSERT_TRUE(bridgeB->initialize());
+
+    // Bridge A: infinite loop in a background thread
+    auto infLoopA = createFunction("while (true) {}");
+
+    std::exception_ptr bridgeAEx;
+
+    std::thread threadA([&] {
+        try {
+            (void)_bridge->invokeFunction(infLoopA, wasm_helpers::convertBsonToWcVal(BSONObj()));
+        } catch (...) {
+            bridgeAEx = std::current_exception();
+        }
+    });
+
+    // _killPending is sticky: one kill() is sufficient to interrupt bridge A.
+    _bridge->kill();
+    threadA.join();
+
+    // Bridge A must have thrown Interrupted.
+    ASSERT(bridgeAEx) << "Bridge A should have thrown";
+    try {
+        std::rethrow_exception(bridgeAEx);
+    } catch (const DBException& e) {
+        ASSERT_EQ(e.code(), ErrorCodes::Interrupted) << "Bridge A: " << e.toString();
+    } catch (...) {
+        FAIL("Bridge A threw an unexpected non-DBException type");
+    }
+
+    // Bridge B was not killed. Its per-bridge epoch callback re-arms on the first epoch
+    // tick inside invokeFunction(), so it should complete the computation normally.
+    auto handleB = bridgeB->createFunction("function(n) { return n + 1; }");
+    ASSERT_NE(handleB, 0u);
+    auto resultB =
+        bridgeB->invokeFunction(handleB, wasm_helpers::convertBsonToWcVal(BSON("0" << 41)));
+    ASSERT_TRUE(resultB.isOK()) << "Bridge B should succeed after bridge A was killed; got: "
+                                << resultB.getStatus().toString();
+
+    bridgeB->shutdown();
+}
+
+// Concurrent isolation: bridge B executes a finite loop WHILE bridge A is being killed.
+// Bridge B's per-bridge callback re-arms mid-execution when the kill epoch fires, and
+// bridge B completes its loop normally.
+TEST_F(WasmMozJSBridgeTest, EpochIsolation_BridgeBCompletesWhileBridgeAIsKilled) {
+    MozJSWasmBridge::Options opts{};
+    opts.linearMemoryLimitMB = gWasmtimeStoreMemoryLimitMB.load();
+    auto bridgeB = std::make_unique<MozJSWasmBridge>(_s_engineCtx, opts);
+    ASSERT_TRUE(bridgeB->initialize());
+
+    // Bridge A: infinite loop — will be killed
+    auto infLoopA = createFunction("while (true) {}");
+
+    // Bridge B: a finite computation long enough to overlap with bridge A's kill
+    auto handleB = bridgeB->createFunction(
+        "function() {"
+        "  var s = 0;"
+        "  for (var i = 0; i < 10000000; i++) { s += i; }"
+        "  return s;"
+        "}");
+    ASSERT_NE(handleB, 0u);
+
+    std::exception_ptr bridgeAEx;
+    bool bridgeBSucceeded = false;
+
+    // Signal from bridge B's thread once it is about to invoke (so we wait for it to be
+    // inside WASM before killing bridge A, ensuring the epoch fires mid-execution in B).
+    std::mutex bReadyMutex;
+    std::condition_variable bReadyCv;
+    bool bridgeBReady = false;
+
+    std::thread threadA([&] {
+        try {
+            (void)_bridge->invokeFunction(infLoopA, wasm_helpers::convertBsonToWcVal(BSONObj()));
+        } catch (...) {
+            bridgeAEx = std::current_exception();
+        }
+    });
+
+    std::thread threadB([&] {
+        {
+            std::lock_guard<std::mutex> lk(bReadyMutex);
+            bridgeBReady = true;
+        }
+        bReadyCv.notify_one();
+        auto r = bridgeB->invokeFunction(handleB, wasm_helpers::convertBsonToWcVal(BSONObj()));
+        bridgeBSucceeded = r.isOK();
+    });
+
+    // Wait until bridge B is about to invoke, then kill bridge A.
+    {
+        std::unique_lock<std::mutex> lk(bReadyMutex);
+        bReadyCv.wait(lk, [&] { return bridgeBReady; });
+    }
+
+    // _killPending is sticky: one kill() is sufficient to interrupt bridge A.
+    _bridge->kill();
+    threadA.join();
+    threadB.join();
+
+    ASSERT(bridgeAEx) << "Bridge A should have thrown";
+    try {
+        std::rethrow_exception(bridgeAEx);
+    } catch (const DBException& e) {
+        ASSERT_EQ(e.code(), ErrorCodes::Interrupted);
+    }
+
+    ASSERT_TRUE(bridgeBSucceeded) << "Bridge B should have completed normally";
+
+    if (bridgeB->isInitialized())
+        bridgeB->shutdown();
+}
+
+/**
+ * Tests exposed javascript functions.
+ */
+TEST_F(WasmMozJSBridgeTest, InvokeToJSON) {
+    auto handle = createFunction("function() { return {answer: tojson(42)}; }");
+
+    // Invoke with empty BSON args
+    BSONObj emptyArgs;
+    auto result = invokeFunction(handle, emptyArgs);
+
+    // Retrieve result
+    ASSERT_FALSE(result.isEmpty());
+    ASSERT_EQ(result.getStringField("answer"), "42");
+}
+
+TEST_F(WasmMozJSBridgeTest, InvokeHex) {
+    auto handle = createFunction("function() { return {answer: hex_md5(\"42\")}; }");
+
+    // Invoke with empty BSON args
+    BSONObj emptyArgs;
+    auto result = invokeFunction(handle, emptyArgs);
+
+    // Retrieve result
+    ASSERT_FALSE(result.isEmpty());
+    ASSERT_EQ(result.getStringField("answer"), "a1d0c6e83f027327d8461063f4ac58a6");
+}
+
+TEST_F(WasmMozJSBridgeTest, AssertTest) {
+    // No args (empty BSON) — function receives no arguments
+    auto handle = createFunction(
+        "function() {"
+        "  assert(true);"
+        "  assert.eq(true, true);"
+        "}");
+
+    BSONObj emptyArgs;
+    auto result = invokeFunction(handle, emptyArgs);
+}
+
+// ---------------------------------------------------------------------------
+// OOM trap classification tests
+//
+// These tests exercise the full _throwAfterTrap() → classify → uassert pipeline
+// end-to-end by running a real JS allocation workload against a tight Wasmtime
+// store limit, verifying that ExceededMemoryLimit is thrown (not a generic
+// kWasmtimeTrapErrorCode).  The store limit is set just above the minimum valid
+// value (jsHeapLimitMB + max(64, jsHeapLimitMB/10)) so the test is fast: OOM
+// occurs during the first large allocation, not after a long warmup.
+//
+// ---------------------------------------------------------------------------
+
+TEST_F(WasmMozJSBridgeTest, OomTrapThrowsExceededMemoryLimit) {
+    // Use jsHeapLimitMB=50 → minOverhead=max(64,5)=64 → minStore=114 MB.
+    // A 117 MB store is tight: it satisfies the constraint but OOMs when the
+    // JS function below allocates ~2 M objects (matching the sharding JS test).
+    constexpr uint32_t kJsHeapMB = 50;
+    constexpr uint32_t kStoreMB = 117;
+    // kAllocCount = ceil((kStoreMB * 1024 * 1024 / 64) * 1.05) ≈ 2012775.
+    // Each object occupies one 64-byte GC arena slot; 5% margin ensures we cross
+    // the store ceiling on ARM64 and x86_64.
+    constexpr int kAllocCount = 2012775;
+
+    auto savedHeap = gJSHeapLimitMB.load();
+    gJSHeapLimitMB.store(kJsHeapMB);
+    ON_BLOCK_EXIT([&] { gJSHeapLimitMB.store(savedHeap); });
+
+    MozJSWasmBridge::Options opts{};
+    opts.linearMemoryLimitMB = kStoreMB;
+    opts.jsHeapLimitMB = kJsHeapMB;
+    auto tightBridge = std::make_unique<MozJSWasmBridge>(_s_engineCtx, opts);
+    ASSERT_TRUE(tightBridge->initialize());
+
+    // Build the allocating function with the count as a literal so it is
+    // self-contained when the source is compiled inside the WASM store.
+    const std::string src = fmt::format(
+        "function() {{"
+        "  var arr = [];"
+        "  for (var i = 0; i < {}; i++) {{"
+        "    arr.push({{x: i, y: i * 2, z: 'padding_string_to_consume_memory'}});"
+        "  }}"
+        "  return true;"
+        "}}",
+        kAllocCount);
+
+    auto handle = tightBridge->createFunction(src);
+    ASSERT_THROWS_CODE(
+        tightBridge->invokeFunction(handle, wasm_helpers::convertBsonToWcVal(BSONObj())),
+        AssertionException,
+        ErrorCodes::ExceededMemoryLimit);
 }
 
 }  // namespace
 }  // namespace wasm
 }  // namespace mozjs
 }  // namespace mongo
+
+namespace mongo::mozjs::wasm {
+
+TEST(WasmBridgeStatsTest, ToBSONContainsAllCounters) {
+    WasmBridgeStats stats;
+    stats.setupEmitCallCount.store(1);
+    stats.invokeFunctionCallCount.store(2);
+    stats.invokeMapCallCount.store(3);
+    stats.invokePredicateCallCount.store(4);
+    stats.resetEngineCallCount.store(5);
+    stats.resetRealmCallCount.store(6);
+    stats.createFunctionCallCount.store(7);
+    stats.drainEmitBufferCallCount.store(8);
+    stats.setGlobalCallCount.store(9);
+    stats.bytesInToWasm.store(100);
+    stats.bytesOutFromWasm.store(200);
+    stats.maxSingleCallBytesIn.store(50);
+    stats.maxSingleCallBytesOut.store(60);
+    stats.maxEmitByteLimit.store(1000);
+    stats.killCount.store(11);
+
+    BSONObj bson = stats.toBSON();
+
+    ASSERT_EQ(bson["setupEmitCalls"].Long(), 1);
+    ASSERT_EQ(bson["invokeFunctionCalls"].Long(), 2);
+    ASSERT_EQ(bson["invokeMapCalls"].Long(), 3);
+    ASSERT_EQ(bson["invokePredicateCalls"].Long(), 4);
+    ASSERT_EQ(bson["resetEngineCalls"].Long(), 5);
+    ASSERT_EQ(bson["resetRealmCalls"].Long(), 6);
+    ASSERT_EQ(bson["createFunctionCalls"].Long(), 7);
+    ASSERT_EQ(bson["drainEmitBufferCalls"].Long(), 8);
+    ASSERT_EQ(bson["setGlobalCalls"].Long(), 9);
+    ASSERT_EQ(bson["bytesInToWasm"].Long(), 100);
+    ASSERT_EQ(bson["bytesOutFromWasm"].Long(), 200);
+    ASSERT_EQ(bson["maxSingleCallBytesIn"].Long(), 50);
+    ASSERT_EQ(bson["maxSingleCallBytesOut"].Long(), 60);
+    ASSERT_EQ(bson["maxEmitByteLimit"].Long(), 1000);
+    ASSERT_EQ(bson["killCount"].Long(), 11);
+}
+
+// The WASM guest is untrusted. validatedBsonFromGuestBytes must fully validate the
+// guest-produced bytes against the actual buffer size so a compromised sandbox cannot forge a BSON
+// length header that walks downstream readers past the allocation (heap over-read) or aborts the
+// process. All rejections must throw (uassert), never fire a fatal invariant.
+
+TEST(WasmValidatedBsonFromGuestBytes, RoundTripsValidBson) {
+    BSONObj obj = BSON("__returnValue" << "hello" << "n" << 42);
+    auto out = wasm_helpers::validatedBsonFromGuestBytes(
+        reinterpret_cast<const uint8_t*>(obj.objdata()), static_cast<size_t>(obj.objsize()));
+    ASSERT_BSONOBJ_EQ(out, obj);
+    // The returned object owns its own copy of the bytes.
+    ASSERT_NE(out.objdata(), obj.objdata());
+}
+
+TEST(WasmValidatedBsonFromGuestBytes, RejectsForgedOversizedHeader) {
+    // Exploit shape from the ticket: a tiny buffer whose embedded objsize header claims a huge
+    // document (here 4 MiB). isValid() alone would accept this because 4 MiB <= 125 MiB; only
+    // comparing against the actual buffer size catches it.
+    std::vector<uint8_t> bytes = {
+        0x00,
+        0x00,
+        0x40,
+        0x00,  // objsize = 4 MiB (far larger than the 5-byte buffer)
+        0x00   // EOO
+    };
+    ASSERT_THROWS_CODE(wasm_helpers::validatedBsonFromGuestBytes(bytes.data(), bytes.size()),
+                       DBException,
+                       ErrorCodes::InvalidBSON);
+}
+
+TEST(WasmValidatedBsonFromGuestBytes, RejectsForgedInnerStringLength) {
+    // A structurally plausible top-level header, but an inner string whose length runs past the
+    // end of the buffer. Downstream readers would over-read; validateBSON must reject it.
+    std::vector<uint8_t> bytes = {
+        0x1a, 0x00, 0x00, 0x00,  // objsize = 26 (matches)
+        0x02,                    // type: string
+        0x5f, 0x5f, 0x72, 0x65, 0x74, 0x75, 0x72,
+        0x6e, 0x56, 0x61, 0x6c, 0x75, 0x65, 0x00,  // "__returnValue\0"
+        0x00, 0x00, 0x20, 0x00,                    // strlen = 2 MiB (forged)
+        0x41, 0x00, 0x00                           // "A" + trailing
+    };
+    ASSERT_EQ(bytes.size(), 26u);
+    ASSERT_THROWS_CODE(wasm_helpers::validatedBsonFromGuestBytes(bytes.data(), bytes.size()),
+                       DBException,
+                       ErrorCodes::InvalidBSON);
+}
+
+TEST(WasmValidatedBsonFromGuestBytes, RejectsTruncatedBufferWithoutAborting) {
+    // Fewer than kMinBSONLength bytes: previously a fatal invariant (guest-triggerable DoS); must
+    // now throw with the dedicated undersized-buffer code instead of aborting.
+    std::vector<uint8_t> bytes = {0x00, 0x00};
+    ASSERT_THROWS_CODE(wasm_helpers::validatedBsonFromGuestBytes(bytes.data(), bytes.size()),
+                       DBException,
+                       11543000);
+}
+
+}  // namespace mongo::mozjs::wasm

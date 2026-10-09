@@ -1,39 +1,14 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 /**
  * Namespace for static methods that are shared between explain on mongod and on mongos.
@@ -56,6 +31,17 @@ void generateServerParameters(const boost::intrusive_ptr<ExpressionContext>& exp
                               BSONObjBuilder* out);
 
 /**
+ * Adds the 'queryKnobs' explain section to the BSON object being built by 'out'.
+ *
+ * Contains every query knob with a non-default source, keyed by wire name with nested "value" and
+ * "source" fields. setParameter overrides appear with source "setParameter"; QuerySettings
+ * overrides appear with source "querySettings" (even when the value equals the compiled-in
+ * default). Knobs at their default source are omitted. The section is absent entirely when no knob
+ * has been overridden.
+ */
+void generateQueryKnobs(const boost::intrusive_ptr<ExpressionContext>& expCtx, BSONObjBuilder* out);
+
+/**
  * Adds the 'queryShapeHash' value to the BSON object being built by 'out'.
  */
 void generateQueryShapeHash(OperationContext* opCtx, BSONObjBuilder* out);
@@ -69,11 +55,11 @@ void generatePeakTrackedMemBytes(const OperationContext* opCtx, BSONObjBuilder* 
  * Conditionally appends a BSONObj to 'bob' depending on whether or not the maximum user size for a
  * BSON object will be exceeded.
  */
-bool appendIfRoom(const BSONObj& toAppend, StringData fieldName, BSONObjBuilder* out);
+bool appendIfRoom(const BSONObj& toAppend, std::string_view fieldName, BSONObjBuilder* out);
 
 /**
  * Conditionally appends a BSONArray to 'bob' depending on whether or not the maximum user size for
  * a BSON object will be exceeded.
  */
-bool appendIfRoom(const BSONArray& toAppend, StringData fieldName, BSONObjBuilder* out);
+bool appendIfRoom(const BSONArray& toAppend, std::string_view fieldName, BSONObjBuilder* out);
 }  // namespace mongo::explain_common

@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace sbe {
@@ -49,7 +25,7 @@ bool arrayAny(TypeTags tag, Value val, const Cb& cb) {
 
         while (cur != end - 1) {
             auto* fieldName = bson::fieldNameRaw(cur);
-            size_t keySize = TinyStrHelpers::strlen(fieldName);
+            size_t keySize = bson::fieldNameLength(fieldName, end);
             auto [elemTag, elemVal] = bson::convertToView(cur, end, keySize);
 
             if (cb(elemTag, elemVal)) {
@@ -61,8 +37,8 @@ bool arrayAny(TypeTags tag, Value val, const Cb& cb) {
     } else if (tag == TypeTags::Array) {
         auto array = getArrayView(val);
         for (size_t i = 0; i < array->size(); ++i) {
-            auto [t, v] = array->getAt(i);
-            if (cb(t, v)) {
+            auto tagVal = array->getAt(i);
+            if (cb(tagVal.tag, tagVal.value)) {
                 return true;
             }
         }
@@ -115,7 +91,7 @@ inline void arrayForEach(TypeTags tag, Value val, const Cb& cb) {
 
         while (cur != end - 1) {
             auto* fieldName = bson::fieldNameRaw(cur);
-            size_t keySize = TinyStrHelpers::strlen(fieldName);
+            size_t keySize = bson::fieldNameLength(fieldName, end);
             auto [elemTag, elemVal] = bson::convertToView(cur, end, keySize);
 
             if constexpr (MoveOrCopy) {
@@ -169,7 +145,7 @@ inline void arrayForEach(TypeTags tag, Value val, const Cb& cb) {
  * true.
  */
 template <class Cb>
-requires std::predicate<Cb&, StringData, TypeTags, Value, const char*>
+requires std::predicate<Cb&, std::string_view, TypeTags, Value, const char*>
 inline void objectForEach(TypeTags tag, Value val, const Cb& cb) {
     if (tag == TypeTags::bsonObject) {
         auto bson = getRawPointerView(val);
@@ -178,7 +154,7 @@ inline void objectForEach(TypeTags tag, Value val, const Cb& cb) {
         const char* cur = bson + 4;
         bool done = false;
         while (!done && (cur != end - 1)) {
-            StringData currFieldName = bson::fieldNameAndLength(cur);
+            std::string_view currFieldName = bson::fieldNameAndLength(cur, end);
             auto [eltTag, eltVal] = bson::convertToView(cur, end, currFieldName.size());
             done = cb(currFieldName, eltTag, eltVal, cur);
             cur = bson::advance(cur, currFieldName.size());
@@ -188,8 +164,8 @@ inline void objectForEach(TypeTags tag, Value val, const Cb& cb) {
         auto obj = getObjectView(val);
         bool done = false;
         for (size_t i = 0; !done && (i < obj->size()); i++) {
-            auto [eltTag, eltVal] = obj->getAt(i);
-            done = cb(obj->field(i), eltTag, eltVal, nullptr);
+            auto eltTagVal = obj->getAt(i);
+            done = cb(obj->field(i), eltTagVal.tag, eltTagVal.value, nullptr);
         }
     }
 }

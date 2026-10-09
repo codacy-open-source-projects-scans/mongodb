@@ -7,7 +7,7 @@
  * `$config.data.collWithMigrations` which will be used by the moveChunk stage in this file.
  */
 import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
-import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/chunks.js";
+import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/cluster_scalability/chunks.js";
 import {isMoveChunkErrorAcceptableWithConcurrent} from "jstests/concurrency/fsm_workload_helpers/cluster_scalability/move_chunk_errors.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
@@ -28,7 +28,10 @@ export function randomManualMigration($config, $super) {
 
         // Get a chunk from config.chunks - this may be stale by the time we issue the migration but
         // this will be handled in the acceptable errors.
-        const chunksJoinClause = findChunksUtil.getChunksJoinClause(configDB, db.getName() + "." + moveChunkCollName);
+        const chunksJoinClause = findChunksUtil.getChunksJoinClause(
+            configDB,
+            db.getName() + "." + moveChunkCollName,
+        );
         let chunks = configDB
             .getCollection("chunks")
             .aggregate([{$match: chunksJoinClause}, {$sample: {size: 1}}])
@@ -44,7 +47,11 @@ export function randomManualMigration($config, $super) {
         // filter of draining shards.
         let shards = configDB
             .getCollection("shards")
-            .aggregate([{$match: {"_id": {$ne: fromShard}}}, {$match: {"draining": {$ne: true}}}, {$sample: {size: 1}}])
+            .aggregate([
+                {$match: {"_id": {$ne: fromShard}}},
+                {$match: {"draining": {$ne: true}}},
+                {$sample: {size: 1}},
+            ])
             .toArray();
         // If there are no non-draining shards, return early.
         if (shards.length == 0) {

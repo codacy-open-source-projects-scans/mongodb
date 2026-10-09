@@ -2,10 +2,13 @@
  * Tests that the dots and dollars hint encouraging users to use $getField/$setField is only
  * provided when that is a valid option.
  *
- * @tags: [ featureFlagRankFusionFull, requires_fcv_81 ]
+ * @tags: [requires_fcv_81]
  */
 
-import {assertErrMsgContains, assertErrMsgDoesNotContain} from "jstests/aggregation/extras/utils.js";
+import {
+    assertErrMsgContains,
+    assertErrMsgDoesNotContain,
+} from "jstests/aggregation/extras/utils.js";
 
 const collName = jsTestName();
 const coll = db[collName];

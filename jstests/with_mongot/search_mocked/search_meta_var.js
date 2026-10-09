@@ -1,5 +1,6 @@
 /**
  * Verify the behavior of the '$$SEARCH_META' variable in aggregation sub-pipelines.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite (e2e/search/search_meta_var.js).
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {MongotMock} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -54,7 +55,9 @@ function setupMocks(searchMetaValue) {
         },
     ];
 
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}),
+    );
     cursorId = NumberLong(cursorId + 1);
 }
 

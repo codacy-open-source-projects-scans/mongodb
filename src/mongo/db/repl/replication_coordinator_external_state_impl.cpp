@@ -1,42 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/replication_coordinator_external_state_impl.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -59,7 +27,6 @@
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
@@ -114,16 +81,15 @@
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
-#include "mongo/db/topology/user_write_block/write_block_bypass.h"
+#include "mongo/db/topology/user_write_block/user_write_block_bypass.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/topology/vector_clock/vector_clock_metadata_hook.h"
-#include "mongo/db/version_context.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
@@ -144,6 +110,12 @@
 #include <string>
 #include <vector>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "cxxabi.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 namespace mongo {
@@ -152,6 +124,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 MONGO_FAIL_POINT_DEFINE(hangAfterJournalFlusherGetToken);
+MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringLastVoteCollection);
 
 // The maximum size of the oplog write buffer is set to 256MB.
 constexpr std::size_t kOplogWriteBufferSize = 256 * 1024 * 1024;
@@ -169,24 +142,25 @@ constexpr std::size_t kOplogApplyBufferCount = 10 * 1000;
 constexpr std::size_t kOplogApplyBufferSizeLegacy = 256 * 1024 * 1024;
 
 // The count of items in the oplog application buffer
-OplogBufferMetrics& oplogBufferMetrics = *MetricBuilder<OplogBufferMetrics>("repl.buffer");
+OplogBufferMetrics oplogBufferMetrics;
 
 /**
  * Returns new thread pool for thread pool task executor.
  */
 auto makeThreadPool(const std::string& poolName, const std::string& threadName) {
-    ThreadPool::Options threadPoolOptions;
-    threadPoolOptions.threadNamePrefix = threadName + "-";
-    threadPoolOptions.poolName = poolName;
-    threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName,
-                           getGlobalServiceContext()->getService(),
-                           Client::noSession(),
-                           ClientOperationKillableByStepdown{false});
+    return ThreadPool::make({
+        .poolName = poolName,
+        .threadNamePrefix = fmt::format("{}-", threadName),
+        .onCreateThread =
+            [](const std::string& threadName) {
+                Client::initThread(threadName,
+                                   getGlobalServiceContext()->getService(),
+                                   Client::noSession(),
+                                   ClientOperationKillableByStepdown{false});
 
-        AuthorizationSession::get(cc())->grantInternalAuthorization();
-    };
-    return std::make_unique<ThreadPool>(threadPoolOptions);
+                AuthorizationSession::get(cc())->grantInternalAuthorization();
+            },
+    });
 }
 
 /**
@@ -200,7 +174,7 @@ auto makeTaskExecutor(ServiceContext* service,
     auto networkName = threadName + "Network";
     return executor::ThreadPoolTaskExecutor::create(
         makeThreadPool(poolName, threadName),
-        executor::makeNetworkInterface(networkName, nullptr, std::move(hookList)));
+        executor::makeNetworkInterface(networkName, {.metadataHook = std::move(hookList)}));
 }
 
 /**
@@ -228,7 +202,9 @@ ReplicationCoordinatorExternalStateImpl::ReplicationCoordinatorExternalStateImpl
     ReplicationProcess* replicationProcess)
     : _service(service),
       _storageInterface(storageInterface),
-      _replicationProcess(replicationProcess) {
+      _replicationProcess(replicationProcess),
+      _taskExecutor(makeTaskExecutor(service, "ReplCoordExternExecutorPool", "ReplCoordExtern")),
+      _workerPool(makeReplWorkerPool()) {
     uassert(ErrorCodes::BadValue, "A StorageInterface is required.", _storageInterface);
 }
 ReplicationCoordinatorExternalStateImpl::~ReplicationCoordinatorExternalStateImpl() {}
@@ -242,7 +218,13 @@ bool ReplicationCoordinatorExternalStateImpl::isInitialSyncFlagSet(OperationCont
 void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     OperationContext* opCtx, ReplicationCoordinator* replCoord) {
 
-    std::unique_lock<std::mutex> lk(_threadMutex);
+    // Capture whether the node is already primary before taking _threadMutex. We must not call into
+    // the ReplicationCoordinator while holding _threadMutex, to avoid a lock-order inversion with
+    // stopProducer(), which is called while holding the ReplicationCoordinator mutex and acquires
+    // _threadMutex.
+    const bool nodeIsAlreadyPrimary = replCoord->getMemberState().primary();
+
+    clang_checked::unique_lock<ThreadMutex> lk(_threadMutex);
 
     // We've shut down the external state, don't start again.
     if (_inShutdown)
@@ -310,6 +292,29 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     _bgSync = std::make_unique<BackgroundSync>(
         replCoord, this, _replicationProcess, _oplogWriter.get(), _oplogApplier.get());
 
+    // Prevent the oplog producer from starting and having the primary read its own writes from its
+    // sync source. This is a rare race that can happen if we step up when _bgSync had not been
+    // created yet. The internal state defaults to Starting, but we expect it to be Stopped during
+    // stepup, so we call stop to set the state correctly before proceeding. If startup is called
+    // below and the state is not Stopped we will begin actively fetching oplog which we do not
+    // want, since we are primary.
+    //
+    // We check both nodeIsAlreadyPrimary (captured before _threadMutex) and _stopProducerRequested
+    // (set by stopProducer() under _threadMutex). Together they prevent race conditions: if the
+    // node won an election after nodeIsAlreadyPrimary was captured but before _bgSync was created,
+    // stopProducer() will have set _stopProducerRequested and we catch it here.
+    if (nodeIsAlreadyPrimary || _stopProducerRequested) {
+        _stopProducerRequested = false;
+        _bgSync->stop(false /* resetLastFetchedOptime */);
+        // The oplog writer automatically drains the oplog applier once it has drained. This pattern
+        // is used in stopProcuer() also.
+        if (_oplogWriteBuffer) {
+            _oplogWriteBuffer->enterDrainMode();
+        } else if (_oplogApplyBuffer) {
+            _oplogApplyBuffer->enterDrainMode();
+        }
+    }
+
     LOGV2(21299, "Starting replication fetcher thread");
     _bgSync->startup(opCtx);
 
@@ -339,10 +344,14 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     storageEngine->notifyReplStartupRecoveryComplete(*shard_role_details::getRecoveryUnit(opCtx));
 }
 
+// Uses NO_THREAD_SAFETY_ANALYSIS because this function temporarily unlocks and re-locks
+// _threadMutex (via the unique_lock reference), which clang's thread safety analysis cannot model.
 void ReplicationCoordinatorExternalStateImpl::_stopDataReplication(
-    OperationContext* opCtx, std::unique_lock<std::mutex>& lock) {
-    // Make sue no other _stopDataReplication calls are in progress.
-    _dataReplicationStopped.wait(lock, [this]() { return !_stoppingDataReplication; });
+    OperationContext* opCtx,
+    clang_checked::unique_lock<ThreadMutex>& lock) MONGO_LOCKING_NO_THREAD_SAFETY_ANALYSIS {
+    // Make sure no other _stopDataReplication calls are in progress.
+    _dataReplicationStopped.wait(
+        lock, [this]() MONGO_LOCKING_REQUIRES(_threadMutex) { return !_stoppingDataReplication; });
     _stoppingDataReplication = true;
 
     auto oldSSF = std::move(_syncSourceFeedbackThread);
@@ -351,9 +360,10 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication(
     auto oldBgSync = std::move(_bgSync);
     auto oldWriter = std::move(_oplogWriter);
     auto oldApplier = std::move(_oplogApplier);
-    auto oldWorkerPool = std::move(_workerPool);
     auto oldWriterExecutor = std::move(_oplogWriterTaskExecutor);
     auto oldApplierExecutor = std::move(_oplogApplierTaskExecutor);
+    auto oldWriterShutdownFuture = std::move(_oplogWriterShutdownFuture);
+    auto oldApplierShutdownFuture = std::move(_oplogApplierShutdownFuture);
     lock.unlock();
 
     // The _syncSourceFeedbackThread should be joined before _bgSync's shutdown because it
@@ -394,9 +404,9 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication(
     // for OplogWriter to finish before shutting down the OplogApplier and its buffer,
     // to make sure that no more oplog entries will be written.
     if (oldWriter) {
-        _oplogWriterShutdownFuture.get();
+        oldWriterShutdownFuture.get();
     } else if (oldApplier) {
-        _oplogApplierShutdownFuture.get();
+        oldApplierShutdownFuture.get();
     }
 
     if (oldWriter && oldApplier) {
@@ -409,16 +419,15 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication(
     }
 
     if (oldWriter && oldApplier) {
-        _oplogApplierShutdownFuture.get();
+        oldApplierShutdownFuture.get();
     }
 
     // Once the writer pool's shutdown() is called, scheduling new tasks will return error, so
     // we shutdown writer pool after the applier exits to avoid new tasks being scheduled.
-    if (oldWorkerPool) {
-        LOGV2(5698300, "Stopping replication applier writer pool");
-        oldWorkerPool->shutdown();
-        oldWorkerPool->join();
-    }
+    // _workerPool is a const member (immutable pointer), so no lock is needed.
+    LOGV2(5698300, "Stopping replication applier writer pool");
+    _workerPool->shutdown();
+    _workerPool->join();
 
     if (oldWriterExecutor) {
         LOGV2(8569802, "Stopping replication writer executor threads");
@@ -443,7 +452,7 @@ JournalListener* ReplicationCoordinatorExternalStateImpl::getReplicationJournalL
 }
 
 void ReplicationCoordinatorExternalStateImpl::startThreads() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     if (_startedThreads) {
         return;
     }
@@ -463,16 +472,13 @@ void ReplicationCoordinatorExternalStateImpl::startThreads() {
         makeTaskExecutor(_service, "OplogApplierExecutorPool", "OplogApplier");
     _oplogApplierTaskExecutor->startup();
 
-    _taskExecutor = makeTaskExecutor(_service, "ReplCoordExternExecutorPool", "ReplCoordExtern");
     _taskExecutor->startup();
-
-    _workerPool = makeReplWorkerPool();
 
     _startedThreads = true;
 }
 
 void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) {
-    std::unique_lock<std::mutex> lk(_threadMutex);
+    clang_checked::unique_lock<ThreadMutex> lk(_threadMutex);
     _inShutdown = true;
     if (!_startedThreads) {
         return;
@@ -481,6 +487,8 @@ void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) 
     _stopDataReplication(opCtx, lk);
 
     LOGV2(21307, "Stopping replication storage threads");
+    // _taskExecutor is a const member (immutable pointer), so it can be used safely
+    // without the lock and without capturing to a local.
     _taskExecutor->shutdown();
     lk.unlock();
 
@@ -494,8 +502,7 @@ void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) 
     _noopWriter->stopWritingPeriodicNoops();
 
     // We should wait for _taskExecutor outside of _threadMutex, in case some of its task would take
-    // data base locks. It is safe to access _taskExecutor outside of _threadMutex because once
-    // _startedThreads is set to true, the _taskExecutor pointer never changes.
+    // data base locks.
     _taskExecutor->join();
 
     // The oplog truncate after point must be cleared, if we are still primary for shutdown, so
@@ -578,6 +585,7 @@ void ReplicationCoordinatorExternalStateImpl::onWriterDrainComplete(OperationCon
                   AdmissionContext::Priority::kExempt,
               "Replica Set state changes are critical to the cluster and should not be throttled");
 
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     if (_oplogApplyBuffer) {
         _oplogApplyBuffer->enterDrainMode();
     }
@@ -589,6 +597,7 @@ void ReplicationCoordinatorExternalStateImpl::onApplierDrainComplete(OperationCo
                   AdmissionContext::Priority::kExempt,
               "Replica Set state changes are critical to the cluster and should not be throttled");
 
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     // When _oplogWriteBuffer is not null, featureFlagReduceMajorityWriteLatency is enabled.
     // We call exitDrainMode() on both buffers, since onWriterDrainComplete() does not call
     // exitDrainMode() on the write buffer.
@@ -696,10 +705,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     auto role = ShardingState::get(opCtx)->pollClusterRole();
     const bool isConfigsvr = role && role->has(ClusterRole::ConfigServer);
     const bool isReplSet = !role.has_value();
-    if (::mongo::feature_flags::gFeatureFlagPQSBackfill.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-        (isConfigsvr || isReplSet)) {
+    if (isConfigsvr || isReplSet) {
         query_settings::QuerySettingsService::get(opCtx)
             .createQueryShapeRepresentativeQueriesCollection(opCtx);
     }
@@ -864,22 +870,7 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
                   AdmissionContext::Priority::kExempt,
               "Writes that are part of elections should not be throttled");
 
-    try {
-        // If we are casting a vote in a new election immediately after stepping down, we
-        // don't want to have this process interrupted due to us stepping down, since we
-        // want to be able to cast our vote for a new primary right away. Both the write's lock
-        // acquisition and the "waitUntilDurable" lock acquisition must be uninterruptible.
-        //
-        // It is not safe to take an uninterruptible lock during STARTUP2, so we only take this lock
-        // if we are primary or secondary.  We do not have the RSTL but that is OK because we never
-        // move in to STARTUP2 from PRIMARY or SECONDARY, so the consequence of a stale state is
-        // only that we don't take an uninterruptible lock when we should.
-        auto* replCoord = ReplicationCoordinator::get(opCtx);
-
-        boost::optional<UninterruptibleLockGuard> noInterrupt;
-        if (replCoord->isInPrimaryOrSecondaryState_UNSAFE())
-            noInterrupt.emplace(opCtx);
-
+    auto storeLastVote = [&]() -> Status {
         Status status = writeConflictRetry(
             opCtx, "save replica set lastVote", NamespaceString::kLastVoteNamespace, [&] {
                 auto coll =
@@ -890,6 +881,13 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
                                           repl::ReadConcernArgs::get(opCtx),
                                           AcquisitionPrerequisites::kWrite),
                                       MODE_IX);
+
+                if (MONGO_unlikely(hangAfterAcquiringLastVoteCollection.shouldFail())) {
+                    LOGV2(12885000,
+                          "Hanging due to hangAfterAcquiringLastVoteCollection failpoint");
+                    hangAfterAcquiringLastVoteCollection.pauseWhileSet(opCtx);
+                }
+
                 WriteUnitOfWork wunit(opCtx);
 
                 // We only want to replace the last vote document if the new last vote document
@@ -919,6 +917,30 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
         JournalFlusher::get(opCtx)->waitForJournalFlush();
 
         return Status::OK();
+    };
+
+    try {
+        // If we are casting a vote in a new election immediately after stepping down, we
+        // don't want to have this process interrupted due to us stepping down, since we
+        // want to be able to cast our vote for a new primary right away. Beyond making the lock
+        // acquisitions uninterruptible, we must also ignore the kill flag since the stepdown
+        // kill-ops sweep can mark this operation killed.
+        //
+        // It is not safe to do either during STARTUP2, so we only do so if we are primary or
+        // secondary. We never move in to STARTUP2 from PRIMARY or SECONDARY, so the consequence of
+        // a stale state is only that we don't protect the write when we should.
+        //
+        // TODO(SERVER-91733): Both the UninterruptibleLockGuard and the
+        // runWithoutInterruptionExceptAtGlobalShutdown below can be removed once intent based
+        // kill-ops is used exclusively.
+        auto* replCoord = ReplicationCoordinator::get(opCtx);
+
+        boost::optional<UninterruptibleLockGuard> noInterrupt;
+        if (replCoord->isInPrimaryOrSecondaryState_UNSAFE()) {
+            noInterrupt.emplace(opCtx);
+            return opCtx->runWithoutInterruptionExceptAtGlobalShutdown(storeLastVote);
+        }
+        return storeLastVote();
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -1038,14 +1060,18 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
 }
 
 void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     if (_bgSync) {
         _bgSync->clearSyncTarget();
     }
 }
 
 void ReplicationCoordinatorExternalStateImpl::stopProducer() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
+    // Set the flag regardless of whether _bgSync exists yet. If _bgSync is null here (because
+    // startSteadyStateReplication hasn't run yet), startSteadyStateReplication will check this
+    // flag after creating _bgSync and stop the producer immediately.
+    _stopProducerRequested = true;
     if (_bgSync) {
         _bgSync->stop(false);
     }
@@ -1061,7 +1087,7 @@ void ReplicationCoordinatorExternalStateImpl::stopProducer() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     // When _oplogWriteBuffer is not null, featureFlagReduceMajorityWriteLatency is enabled.
     // We call exitDrainMode() on both buffers, but it is possible that the apply buffer is
     // not even in drain mode when exitDrainMode() is called, which can happen if the node
@@ -1079,14 +1105,14 @@ void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::notifyOtherMemberDataChanged() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     if (_bgSync) {
         _bgSync->notifySyncSourceSelectionDataChanged();
     }
 }
 
 bool ReplicationCoordinatorExternalStateImpl::tooStale() {
-    std::lock_guard<std::mutex> lk(_threadMutex);
+    clang_checked::lock_guard<ThreadMutex> lk(_threadMutex);
     if (_bgSync) {
         return _bgSync->tooStale();
     }

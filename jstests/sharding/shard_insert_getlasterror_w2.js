@@ -11,7 +11,6 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // The UUID and index check must be able to contact the shard primaries, but this test manually
 // stops 2/3 nodes of a replica set.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
@@ -70,7 +69,9 @@ assert.commandWorked(mongosConn.adminCommand({addshard: replSet1.getURL()}));
 assert.commandWorked(mongosConn.getDB("admin").runCommand({enablesharding: testDBName}));
 testDB[testCollName].createIndex({x: 1});
 assert.commandWorked(
-    mongosConn.getDB("admin").runCommand({shardcollection: testDBName + "." + testCollName, key: {x: 1}}),
+    mongosConn
+        .getDB("admin")
+        .runCommand({shardcollection: testDBName + "." + testCollName, key: {x: 1}}),
 );
 
 // Test case where GLE should return an error

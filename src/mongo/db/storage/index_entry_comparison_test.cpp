@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/index_entry_comparison.h"
 
@@ -37,8 +11,10 @@
 #include "mongo/util/overloaded_visitor.h"
 
 #include <memory>
+#include <string_view>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 void buildDupKeyErrorStatusProducesExpectedErrorObject(
     DuplicateKeyErrorInfo::FoundValue&& foundValue) {
@@ -64,7 +40,7 @@ void buildDupKeyErrorStatusProducesExpectedErrorObject(
     auto dupKeyStatus = buildDupKeyErrorStatus(
         keyValue, collNss, indexName, keyPattern, BSONObj{}, std::move(foundValue));
     ASSERT_NOT_OK(dupKeyStatus);
-    ASSERT_EQUALS(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
+    EXPECT_EQ(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
 
     auto extraInfo = dupKeyStatus.extraInfo<DuplicateKeyErrorInfo>();
     ASSERT(extraInfo);
@@ -124,7 +100,7 @@ void duplicateKeyErrorSerializationAndParseReturnTheSameObject(
 
 TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectWithCollation) {
     auto keyPattern = BSON("a" << 1 << "b" << 1);
-    auto str = "abc"_sd;
+    auto str = "abc"sv;
     auto keyValue = BSON("" << 10 << "" << str);
     auto collation = BSON("x" << 'y');
     auto keyValueWithFieldName = BSON("a" << 10 << "b" << str);
@@ -135,7 +111,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectW
 
 TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectForInvalidUtf8) {
     auto keyPattern = BSON("a" << 1 << "b" << 1);
-    auto str = StringData("\xc3\x28");
+    auto str = std::string_view("\xc3\x28");
     auto keyValue = BSON("" << 10 << "" << str);
     auto collation = BSONObj();
     auto keyValueWithFieldName = BSON("a" << 10 << "b" << str);
@@ -145,7 +121,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectF
 }
 
 TEST(IndexEntryComparison, BuildDupKeyErrorMessageIncludesCollationAndHexEncodedCollationKey) {
-    StringData mockCollationKey("bar");
+    std::string_view mockCollationKey("bar");
 
     NamespaceString collNss = NamespaceString::createNamespaceString_forTest("test.foo");
     std::string indexName("a_1");
@@ -155,7 +131,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorMessageIncludesCollationAndHexEncoded
 
     auto dupKeyStatus = buildDupKeyErrorStatus(keyValue, collNss, indexName, keyPattern, collation);
     ASSERT_NOT_OK(dupKeyStatus);
-    ASSERT_EQUALS(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
+    EXPECT_EQ(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
 
     ASSERT(dupKeyStatus.reason().find("collation:") != std::string::npos);
 
@@ -181,7 +157,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorMessageHexEncodesInvalidUTF8ForIndexW
     auto keyValue = BSON("" << "\xc0\x16");
     auto dupKeyStatus = buildDupKeyErrorStatus(keyValue, collNss, indexName, keyPattern, BSONObj{});
     ASSERT_NOT_OK(dupKeyStatus);
-    ASSERT_EQUALS(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
+    EXPECT_EQ(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
 
     // We expect to find a hex-encoded version of the illegal UTF-8 byte sequence inside the error
     // string.

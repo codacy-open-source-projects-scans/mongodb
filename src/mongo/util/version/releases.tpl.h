@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // clang-format off
 /*
@@ -41,14 +15,14 @@ commentStartToken = //##
 
 #include <array>
 #include <fmt/format.h>
+#include <string_view>
 #include <utility>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 //##
 //##
@@ -97,6 +71,7 @@ k$(transition)_$(underscores(first))_To_$(underscores(second))//#slurp
 //#end def
 
 namespace mongo::multiversion {
+using namespace std::literals::string_view_literals;
 /* <%
 fcvs = self.getVar('fcvs')
 last_lts, last_continuous, latest = self.getVar('last_lts'), self.getVar('last_continuous'), self.getVar('latest')
@@ -193,7 +168,7 @@ inline constexpr size_t kSince_$underscores(Version('4.0')) = ${bisect_left(fcvs
 // Last LTS was "$last_lts".
 inline constexpr size_t kSinceLastLTS = ${bisect_left(fcvs, latest) - bisect_left(fcvs, last_lts)};
 
-inline constexpr StringData kParameterName = "featureCompatibilityVersion"_sd;
+inline constexpr std::string_view kParameterName = "featureCompatibilityVersion"sv;
 
 class GenericFCV {
 //#def define_fcv_alias(id, v):
@@ -242,10 +217,10 @@ public:
  */
 inline constexpr std::array extendedFCVTable {
     // The table's entries must appear in the same order in which the enums were defined.
-    std::pair{FeatureCompatibilityVersion::kInvalid, "invalid"_sd},
-    std::pair{FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior, "unset"_sd},
+    std::pair{FeatureCompatibilityVersion::kInvalid, "invalid"sv},
+    std::pair{FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior, "unset"sv},
 //#for fcv, fcv_string in fcv_list:
-    std::pair{FeatureCompatibilityVersion::$fcv, "$fcv_string"_sd},
+    std::pair{FeatureCompatibilityVersion::$fcv, "$fcv_string"sv},
 //#end for
 };
 
@@ -253,7 +228,7 @@ constexpr decltype(auto) findExtended(FeatureCompatibilityVersion v) {
     return extendedFCVTable[static_cast<size_t>(v)];
 }
 
-constexpr StringData toString(FeatureCompatibilityVersion v) {
+constexpr std::string_view toString(FeatureCompatibilityVersion v) {
     return findExtended(v).second;
 }
 
@@ -312,7 +287,7 @@ constexpr TransitionFCVInfo getTransitionFCVInfo(FeatureCompatibilityVersion v) 
  * Parses 'versionString' to its corresponding FCV enum.
  * Throws 'ErrorCodes::BadValue' when 'versionString' has no matching enum.
  */
-inline FeatureCompatibilityVersion parseVersion(StringData versionString) {
+inline FeatureCompatibilityVersion parseVersion(std::string_view versionString) {
     for (auto&& [fcv, name] : multiversion::extendedFCVTable)
         if (name == versionString)
             return fcv;
@@ -326,7 +301,7 @@ inline FeatureCompatibilityVersion parseVersion(StringData versionString) {
  * Throws 'ErrorCodes::BadValue' when 'versionString' is not of the form "X.Y", and has no matching
  * enum.
  */
-inline FeatureCompatibilityVersion parseVersionForFeatureFlags(StringData versionString) {
+inline FeatureCompatibilityVersion parseVersionForFeatureFlags(std::string_view versionString) {
     for (auto ptr : standardFCVTable)
         if (ptr->second == versionString)
             return ptr->first;

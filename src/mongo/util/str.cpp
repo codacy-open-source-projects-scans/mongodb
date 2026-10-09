@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/str.h"
 
@@ -37,6 +11,7 @@
 
 #include <cstdio>
 #include <memory>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -58,6 +33,31 @@ void splitStringDelim(const std::string& str, std::vector<std::string>* res, cha
     res->push_back(str.substr(beg));
 }
 
+boost::optional<std::string_view> SplitIterator::next() {
+    if (!_remaining.has_value()) {
+        return boost::none;
+    }
+
+    auto it = _remaining->find(_delim);
+    if (it == std::string::npos) {
+        auto r = _remaining.value();
+        _remaining = boost::none;
+        return r;
+    } else {
+        auto r = _remaining->substr(0, it);
+        _remaining = _remaining->substr(it + 1);
+        return r;
+    }
+}
+
+std::vector<std::string_view> SplitIterator::collect() {
+    std::vector<std::string_view> components;
+    for (auto maybe = next(); maybe.has_value(); maybe = next()) {
+        components.push_back(*maybe);
+    }
+    return components;
+}
+
 void joinStringDelim(const std::vector<std::string>& strs, std::string* res, char delim) {
     for (auto it = strs.begin(); it != strs.end(); ++it) {
         if (it != strs.begin())
@@ -68,7 +68,7 @@ void joinStringDelim(const std::vector<std::string>& strs, std::string* res, cha
 
 LexNumCmp::LexNumCmp(bool lexOnly) : _lexOnly(lexOnly) {}
 
-int LexNumCmp::cmp(StringData sd1, StringData sd2, bool lexOnly) {
+int LexNumCmp::cmp(std::string_view sd1, std::string_view sd2, bool lexOnly) {
     bool startWord = true;
 
     size_t s1 = 0;
@@ -166,14 +166,14 @@ int LexNumCmp::cmp(StringData sd1, StringData sd2, bool lexOnly) {
     return 0;
 }
 
-int LexNumCmp::cmp(StringData s1, StringData s2) const {
+int LexNumCmp::cmp(std::string_view s1, std::string_view s2) const {
     return cmp(s1, s2, _lexOnly);
 }
-bool LexNumCmp::operator()(StringData s1, StringData s2) const {
+bool LexNumCmp::operator()(std::string_view s1, std::string_view s2) const {
     return cmp(s1, s2) < 0;
 }
 
-std::string escape(StringData sd, bool escape_slash) {
+std::string escape(std::string_view sd, bool escape_slash) {
     StringBuilder ret;
     ret.reset(sd.size());
     for (const auto& c : sd) {
@@ -214,7 +214,7 @@ std::string escape(StringData sd, bool escape_slash) {
     return ret.str();
 }
 
-boost::optional<size_t> parseUnsignedBase10Integer(StringData fieldName) {
+boost::optional<size_t> parseUnsignedBase10Integer(std::string_view fieldName) {
     // Do not accept positions like '-4' or '+4'
     if (!ctype::isDigit(fieldName[0])) {
         return boost::none;

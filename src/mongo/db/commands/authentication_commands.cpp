@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/commands/authentication_commands.h"
@@ -59,7 +33,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
@@ -71,6 +45,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_set.h>
@@ -84,10 +59,10 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kDBFieldName = "db"_sd;
-constexpr auto kSASLPayloadUsernameField = "username"_sd;
-constexpr StringData kX509AuthMechanism = "MONGODB-X509"_sd;
+constexpr auto kDBFieldName = "db"sv;
+constexpr auto kSASLPayloadUsernameField = "username"sv;
 
 class CmdLogout : public TypedCommand<CmdLogout> {
 public:
@@ -192,7 +167,7 @@ std::unique_ptr<UserRequest> getX509UserRequest(OperationContext* opCtx, const U
         username, roles, sslPeerInfo, true, insertAuthenticatedMechanism));
 }
 
-constexpr auto kX509AuthenticationDisabledMessage = "x.509 authentication is disabled."_sd;
+constexpr auto kX509AuthenticationDisabledMessage = "x.509 authentication is disabled."sv;
 
 // TODO SERVER-78809: remove
 /**
@@ -251,7 +226,7 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
         const auto& v = saslGlobalParams.authenticationMechanisms;
         uassert(ErrorCodes::BadValue,
                 kX509AuthenticationDisabledMessage,
-                std::find(v.begin(), v.end(), kX509AuthMechanism) != v.end());
+                std::find(v.begin(), v.end(), auth::kMechanismMongoX509) != v.end());
 
         uassertStatusOK(
             authorizationSession->addAndAuthorizeUser(opCtx, std::move(request), boost::none));
@@ -301,7 +276,9 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
 #endif  // MONGO_CONFIG_SSL
 
 // TODO SERVER-78809: remove
-void _authenticate(OperationContext* opCtx, AuthenticationSession* session, StringData mechanism) {
+void _authenticate(OperationContext* opCtx,
+                   AuthenticationSession* session,
+                   std::string_view mechanism) {
 #ifdef MONGO_CONFIG_SSL
     if (mechanism == auth::kMechanismMongoX509) {
         return _authenticateX509(opCtx, session);
@@ -310,7 +287,7 @@ void _authenticate(OperationContext* opCtx, AuthenticationSession* session, Stri
     uasserted(ErrorCodes::BadValue, "Unsupported mechanism: " + std::string{mechanism});
 }
 
-auth::SaslPayload generateSaslPayload(const boost::optional<StringData>& user,
+auth::SaslPayload generateSaslPayload(const boost::optional<std::string_view>& user,
                                       const DatabaseName& dbname) {
     auth::X509MechanismClientStep1 step;
     step.setPrincipalName(user);
@@ -328,6 +305,51 @@ std::string getNameFromPeerInfo(Client* client) {
 #else
     uasserted(ErrorCodes::BadValue, "MONGODB-X509 is unsupported on no-ssl builds");
 #endif
+}
+
+AuthenticateReply _runSaslStartForX509(OperationContext* opCtx,
+                                       AuthenticationSession* session,
+                                       const AuthenticateCommand& cmd) {
+    auto client = opCtx->getClient();
+    auto dbname = cmd.getDbName();
+    auto user = cmd.getUser();
+    auto mechanism = cmd.getMechanism();
+
+    // Synthesize the SASLStartCommand.
+    auth::SaslStartCommand request;
+    auto payload = generateSaslPayload(user, dbname);
+
+    request.setPayload(std::move(payload));
+    request.setDbName(dbname);
+    request.setMechanism(mechanism);
+    request.setSerializationContext(cmd.getSerializationContext());
+
+    // Log Authenticate command.
+    if (!serverGlobalParams.quiet.load()) {
+        LOGV2_DEBUG(8209201,
+                    2,
+                    "Authenticate Command",
+                    "client"_attr = client->getRemote(),
+                    "mechanism"_attr = mechanism,
+                    "user"_attr = user,
+                    logAttrs(dbname));
+    }
+
+    // Run SASL Start.
+    // We do not need to check the response to runSaslStart because that function
+    // will throw and we will eventually get caught by the AuthenticationSession
+    // stepguard.
+    auto saslStartReply = runSaslStart(opCtx, session, request);
+    uassert(ErrorCodes::InternalError,
+            "saslStart unexpectedly did not complete for authenticate",
+            saslStartReply.getDone() == true);
+
+    // Translate SASLStartReply and return AuthenticateReply.
+    AuthenticateReply reply;
+    reply.setUser(session->getUserName());
+    reply.setDbname(session->getDatabase());
+
+    return reply;
 }
 
 /**
@@ -394,39 +416,13 @@ AuthenticateReply authCommand(OperationContext* opCtx,
         return reply;
     }
 
-    // Synthesize the SASLStartCommand.
-    auth::SaslStartCommand request;
-    auto payload = generateSaslPayload(user, dbname);
-
-    request.setPayload(std::move(payload));
-    request.setDbName(dbname);
-    request.setMechanism(mechanism);
-    request.setSerializationContext(cmd.getSerializationContext());
-
-    // Log Authenticate command.
-    if (!serverGlobalParams.quiet.load()) {
-        LOGV2_DEBUG(8209201,
-                    2,
-                    "Authenticate Command",
-                    "client"_attr = client->getRemote(),
-                    "mechanism"_attr = mechanism,
-                    "user"_attr = user,
-                    logAttrs(dbname));
+    // Before converting this to SaslStart, ensure that the mechanism is X.509.
+#ifdef MONGO_CONFIG_SSL
+    if (mechanism == auth::kMechanismMongoX509) {
+        return _runSaslStartForX509(opCtx, session, cmd);
     }
-
-    // Run SASL Start.
-    // We do not need to check the response to runSaslStart because that function
-    // will throw and we will eventually get caught by the AuthenticationSession
-    // stepguard.
-    auto saslStartReply = runSaslStart(opCtx, session, request);
-    invariant(saslStartReply.getDone() == true);
-
-    // Translate SASLStartReply and return AuthenticateReply.
-    AuthenticateReply reply;
-    reply.setUser(session->getUserName());
-    reply.setDbname(session->getDatabase());
-
-    return reply;
+#endif
+    uasserted(ErrorCodes::BadValue, str::stream() << "Unsupported mechanism: " << mechanism);
 }
 
 class CmdAuthenticate final : public AuthenticateCmdVersion1Gen<CmdAuthenticate> {

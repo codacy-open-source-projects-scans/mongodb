@@ -4,6 +4,7 @@
  * intersection is empty.
  *
  * @tags: [
+ * uses_explain,
  * query_intensive_pbt,
  * # This test runs commands that are not allowed with security token: setParameter.
  * not_allowed_with_signed_security_token,
@@ -75,7 +76,8 @@ function logicalPartitioningProperty(getQuery, testHelpers) {
             if (missingFromUnion.length > 0) {
                 return {
                     passed: false,
-                    message: "The union of pred and $nor(pred) does not cover all documents in the collection.",
+                    message:
+                        "The union of pred and $nor(pred) does not cover all documents in the collection.",
                     pred,
                     missingFromUnion,
                     posExplain: experimentColl.explain().aggregate([{$match: pred}]),

@@ -11,7 +11,13 @@ const collName = "foo";
 const testDB = db.getSiblingDB(dbName);
 const testColl = testDB.getCollection(collName);
 
-const validateErrorResponse = function (res, db, collectionUUID, expectedCollection, actualCollection) {
+const validateErrorResponse = function (
+    res,
+    db,
+    collectionUUID,
+    expectedCollection,
+    actualCollection,
+) {
     assert.eq(res.db, db);
     assert.eq(res.collectionUUID, collectionUUID);
     assert.eq(res.expectedCollection, expectedCollection);
@@ -31,21 +37,34 @@ assert(uuid, "Expected collection " + collName + " to have a UUID.");
 // An aggregation with the UUID should succeed and find the same documents as an aggregation with
 // the collection name.
 let uuidRes = assert.commandWorked(
-    testDB.runCommand({aggregate: collName, collectionUUID: uuid, pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: collName,
+        collectionUUID: uuid,
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
 );
 assert.sameMembers(uuidRes.cursor.firstBatch, docs);
 
-let collNameRes = assert.commandWorked(testDB.runCommand({aggregate: collName, pipeline: [{$match: {}}], cursor: {}}));
+let collNameRes = assert.commandWorked(
+    testDB.runCommand({aggregate: collName, pipeline: [{$match: {}}], cursor: {}}),
+);
 assert.sameMembers(collNameRes.cursor.firstBatch, uuidRes.cursor.firstBatch);
 
 // getMore should work with cursors created by an aggregation with a uuid.
 uuidRes = assert.commandWorked(
-    testDB.runCommand({aggregate: collName, pipeline: [{$match: {}}, {$sort: {_id: 1}}], cursor: {batchSize: 1}}),
+    testDB.runCommand({
+        aggregate: collName,
+        pipeline: [{$match: {}}, {$sort: {_id: 1}}],
+        cursor: {batchSize: 1},
+    }),
 );
 assert.eq(1, uuidRes.cursor.firstBatch.length, tojson(uuidRes));
 assert.eq(docs[0], uuidRes.cursor.firstBatch[0], tojson(uuidRes));
 
-const getMoreRes = assert.commandWorked(testDB.runCommand({getMore: uuidRes.cursor.id, collection: collName}));
+const getMoreRes = assert.commandWorked(
+    testDB.runCommand({getMore: uuidRes.cursor.id, collection: collName}),
+);
 assert.eq(1, getMoreRes.cursor.nextBatch.length, tojson(getMoreRes));
 assert.eq(docs[1], getMoreRes.cursor.nextBatch[0], tojson(getMoreRes));
 assert.eq(0, getMoreRes.cursor.id, tojson(getMoreRes));
@@ -53,7 +72,12 @@ assert.eq(0, getMoreRes.cursor.id, tojson(getMoreRes));
 // An aggregation with collectionUUID throws NamespaceNotFound if the namespace does not exist, even
 // if a collection does exist with the given uuid.
 let res = assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: "doesNotExist", collectionUUID: uuid, pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: "doesNotExist",
+        collectionUUID: uuid,
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
     ErrorCodes.CollectionUUIDMismatch,
 );
 validateErrorResponse(res, dbName, uuid, "doesNotExist", testColl.getName());
@@ -63,7 +87,12 @@ testColl.drop({writeConcern: {w: "majority"}});
 
 // An aggregation with the initial UUID should fail since the namespace doesn't exist.
 res = assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: collName, collectionUUID: uuid, pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: collName,
+        collectionUUID: uuid,
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
     ErrorCodes.CollectionUUIDMismatch,
 );
 validateErrorResponse(res, dbName, uuid, testColl.getName(), null);
@@ -73,23 +102,40 @@ assert.commandWorked(testColl.insert(docs));
 
 // An aggregation with the initial UUID should still fail despite the namespace existing.
 res = assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: collName, collectionUUID: uuid, pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: collName,
+        collectionUUID: uuid,
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
     ErrorCodes.CollectionUUIDMismatch,
 );
 validateErrorResponse(res, dbName, uuid, testColl.getName(), null);
 
-collNameRes = assert.commandWorked(testDB.runCommand({aggregate: collName, pipeline: [{$match: {}}], cursor: {}}));
+collNameRes = assert.commandWorked(
+    testDB.runCommand({aggregate: collName, pipeline: [{$match: {}}], cursor: {}}),
+);
 assert.sameMembers(collNameRes.cursor.firstBatch, docs);
 
 // An aggregation with a collectionUUID should fail with CollectionUUIDMismatch if the namespace is
 // a view.
 const viewName = "view";
 assert.commandWorked(
-    testDB.runCommand({create: viewName, viewOn: testColl.getName(), pipeline: [], writeConcern: {w: "majority"}}),
+    testDB.runCommand({
+        create: viewName,
+        viewOn: testColl.getName(),
+        pipeline: [],
+        writeConcern: {w: "majority"},
+    }),
 );
 
 res = assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: "viewCollection", collectionUUID: uuid, pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: "viewCollection",
+        collectionUUID: uuid,
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
     ErrorCodes.CollectionUUIDMismatch,
 );
 validateErrorResponse(res, dbName, uuid, "viewCollection", null);
@@ -100,18 +146,50 @@ validateErrorResponse(res, dbName, uuid, "viewCollection", null);
 
 // collectionUUID must be a UUID.
 assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: collName, collectionUUID: "NotAUUID", pipeline: [{$match: {}}], cursor: {}}),
+    testDB.runCommand({
+        aggregate: collName,
+        collectionUUID: "NotAUUID",
+        pipeline: [{$match: {}}],
+        cursor: {},
+    }),
     ErrorCodes.TypeMismatch,
 );
 
-// collectionUUID is not allowed with change streams.
-assert.commandFailedWithCode(
-    testDB.runCommand({aggregate: collName, collectionUUID: uuid, pipeline: [{$changeStream: {}}], cursor: {}}),
-    4928900,
-);
+// collectionUUID is not allowed with change streams. The v1 reader establishes shard cursors
+// eagerly during the aggregate command, so the rejection surfaces on the initial response.
+// The v2 reader opens shard cursors lazily, so we issue a getMore to force shard-cursor
+// establishment.
+{
+    const startAtOperationTime = new Timestamp(0, 1);
+    let response = testDB.runCommand({
+        aggregate: collName,
+        collectionUUID: uuid,
+        pipeline: [{$changeStream: {startAtOperationTime}}],
+        cursor: {},
+    });
+    if (response.ok) {
+        // v2 returned a routing cursor without contacting shards; force shard-cursor establishment
+        // via getMore so the rejection can surface.
+        assert.eq(
+            response._changeStreamVersion,
+            "v2",
+            "Change stream of version v1 should fail immediately",
+        );
+        response = testDB.runCommand({getMore: response.cursor.id, collection: collName});
+    }
+
+    // 'RetryChangeStream' is accepted because v2 can surface placement/migration churn on getMore
+    // (e.g. in FCV upgrade/downgrade suites) before reaching the collectionUUID validation.
+    assert.commandFailedWithCode(response, [4928900, ErrorCodes.RetryChangeStream]);
+}
 
 // collectionUUID is not allowed with collectionless aggregations.
 assert.commandFailedWithCode(
-    testDB.adminCommand({aggregate: 1, collectionUUID: uuid, pipeline: [{$currentOp: {}}], cursor: {}}),
+    testDB.adminCommand({
+        aggregate: 1,
+        collectionUUID: uuid,
+        pipeline: [{$currentOp: {}}],
+        cursor: {},
+    }),
     4928901,
 );

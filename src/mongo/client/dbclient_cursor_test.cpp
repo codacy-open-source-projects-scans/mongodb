@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/client/dbclient_cursor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -43,15 +16,16 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <cstdint>
 #include <initializer_list>
+#include <string_view>
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
@@ -106,6 +80,10 @@ public:
         _lastSent = Message();
     }
 
+    void setRequestFlags(uint32_t flags) {
+        _requestFlags = flags;
+    }
+
 private:
     Message _call(Message& toSend, std::string* actualServer) override {
 
@@ -113,6 +91,12 @@ private:
         const auto reqId = nextMessageId();
         toSend.header().setId(reqId);
         toSend.header().setResponseToMsgId(0);
+
+        // Apply any configured flags to the request (e.g., 'moreToCome').
+        if (_requestFlags != 0) {
+            OpMsg::setFlag(&toSend, _requestFlags);
+        }
+
         OpMsg::appendChecksum(&toSend);
         _lastSent = toSend;
 
@@ -129,6 +113,7 @@ private:
     Message _mockRecvResponse;
     Message _lastSent;
     stdx::unordered_set<long long> _killedCursorIds;
+    uint32_t _requestFlags = 0;
 };
 
 class DBClientCursorTest : public unittest::Test {
@@ -194,7 +179,7 @@ TEST_F(DBClientCursorTest, DBClientCursorCallsMetaDataReaderOncePerBatch) {
 
     int numMetaRead = 0;
     conn.setReplyMetadataReader(
-        [&](OperationContext* opCtx, const BSONObj& metadataObj, StringData target) {
+        [&](OperationContext* opCtx, const BSONObj& metadataObj, std::string_view target) {
             numMetaRead++;
             return Status::OK();
         });
@@ -233,11 +218,11 @@ TEST_F(DBClientCursorTest, DBClientCursorGetMoreWithTenant) {
         NamespaceString::createNamespaceString_forTest(tenantId, "test", "coll");
     FindCommandRequest findCmd{nss};
 
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     for (bool flagStatus : {false, true}) {
-        RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID",
-                                                                   flagStatus);
+        unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID",
+                                                             flagStatus);
 
         DBClientCursor cursor(&conn, findCmd, ReadPreferenceSetting{}, false);
         cursor.setBatchSize(2);
@@ -311,7 +296,7 @@ TEST_F(DBClientCursorTest, DBClientCursorHandlesOpMsgExhaustCorrectly) {
 
     ASSERT(!m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT(OpMsg::isFlagSet(m, OpMsg::kExhaustSupported));
@@ -373,7 +358,7 @@ TEST_F(DBClientCursorTest, DBClientCursorResendsGetMoreIfMoreToComeFlagIsOmitted
     m = conn.getLastSentMessage();
     ASSERT(!m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_EQ(msg.body["batchSize"].number(), 2);
@@ -396,7 +381,7 @@ TEST_F(DBClientCursorTest, DBClientCursorResendsGetMoreIfMoreToComeFlagIsOmitted
     m = conn.getLastSentMessage();
     ASSERT(!m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT(OpMsg::isFlagSet(m, OpMsg::kExhaustSupported));
@@ -635,7 +620,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailable) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_BSONOBJ_EQ(docObj(1), cursor.next());
@@ -655,7 +640,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailable) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_FALSE(cursor.moreInCurrentBatch());
@@ -673,7 +658,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailable) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_BSONOBJ_EQ(docObj(3), cursor.next());
@@ -734,7 +719,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailableAwaitData) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     // Make sure the correct awaitData timeout is sent.
@@ -803,7 +788,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailableAwaitDataExhaust) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_EQ(msg.body["maxTimeMS"].number(), 5000);
@@ -875,7 +860,7 @@ TEST_F(DBClientCursorTest, DBClientCursorTailableAwaitDataExhaust) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong);
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId);
     ASSERT_EQ(msg.body["maxTimeMS"].number(), 5000);
@@ -956,7 +941,7 @@ TEST_F(DBClientCursorTest, DBClientCursorOplogQuery) {
     m = conn.getLastSentMessage();
     ASSERT_FALSE(m.empty());
     msg = OpMsg::parse(m);
-    ASSERT_EQ(StringData(msg.body.firstElement().fieldName()), "getMore") << msg.body;
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore") << msg.body;
     ASSERT_EQ(msg.body["getMore"].type(), BSONType::numberLong) << msg.body;
     ASSERT_EQ(msg.body["getMore"].numberLong(), cursorId) << msg.body;
     // Make sure the correct awaitData timeout is sent.
@@ -1108,6 +1093,77 @@ TEST_F(DBClientCursorTest, DBClientCursorDestructorRespectsKeepCursorOpen_Existi
         ASSERT_EQ(conn.killedCursor(cursorId), !keepCursorOpen);
 
         cursorId++;
+    }
+}
+
+TEST_F(DBClientCursorTest, DBClientCursorDetectsUnexpectedResponseToMoreToComeInitialRequest) {
+    DBClientConnectionForTest conn;
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+    FindCommandRequest findCmd{nss};
+    DBClientCursor cursor(&conn, findCmd, ReadPreferenceSetting{}, false);
+
+    // Configure the mock connection to set the 'moreToCome' flag on the next outgoing requests.
+    conn.setRequestFlags(OpMsg::kMoreToCome);
+
+    // Create a response without the required 'cursor' field to verify that a ProtocolError error
+    // is thrown before the response is even parsed.
+    OpMsgBuilder builder;
+    BSONObjBuilder bodyBob;
+    bodyBob.append("ok", 1);
+    builder.setBody(bodyBob.done());
+    Message malformedResponseMsg = builder.finish();
+
+    conn.setCallResponse(malformedResponseMsg);
+    try {
+        cursor.init();
+        FAIL("Expected ProtocolError exception");
+    } catch (const DBException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ProtocolError);
+        ASSERT_STRING_SEARCH_REGEX(
+            ex.what(),
+            "Received an unexpected response for a request with the 'moreToCome' flag set\\. "
+            "Reply: op=msg, size=\\d+, requestID=\\d+, responseTo=\\d+");
+    }
+}
+
+TEST_F(DBClientCursorTest, DBClientCursorDetectsUnexpectedResponseToMoreToComeGetMoreRequest) {
+    DBClientConnectionForTest conn;
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "coll");
+    FindCommandRequest findCmd{nss};
+    DBClientCursor cursor(&conn, findCmd, ReadPreferenceSetting{}, false);
+
+    // Initialize the cursor normally with a response that indicates more data is available.
+    const long long cursorId = 42;
+    Message findResponseMsg = mockFindResponse(nss, cursorId, {docObj(1), docObj(2)});
+    conn.setCallResponse(findResponseMsg);
+    ASSERT(cursor.init());
+
+    // Consume the initial batch.
+    ASSERT_BSONOBJ_EQ(docObj(1), cursor.next());
+    ASSERT_BSONOBJ_EQ(docObj(2), cursor.next());
+    ASSERT_FALSE(cursor.moreInCurrentBatch());
+
+    // Configure the mock connection to set the 'moreToCome' flag the next outgoing requests.
+    conn.setRequestFlags(OpMsg::kMoreToCome);
+
+    // Create a malformed response to verify that a ProtocolError error is thrown before the
+    // response is even parsed.
+    OpMsgBuilder builder;
+    BSONObjBuilder bodyBob;
+    bodyBob.append("ok", 1);
+    builder.setBody(bodyBob.done());
+    Message malformedResponseMsg = builder.finish();
+
+    conn.setCallResponse(malformedResponseMsg);
+    try {
+        cursor.more();
+        FAIL("Expected ProtocolError exception");
+    } catch (const DBException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ProtocolError);
+        ASSERT_STRING_SEARCH_REGEX(
+            ex.what(),
+            "Received an unexpected response for a request with the 'moreToCome' flag set\\. "
+            "Reply: op=msg, size=\\d+, requestID=\\d+, responseTo=\\d+");
     }
 }
 

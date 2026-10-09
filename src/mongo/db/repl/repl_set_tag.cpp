@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/repl_set_tag.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/util/assert_util.h"
@@ -38,6 +11,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <string_view>
 
 namespace mongo {
 namespace repl {
@@ -97,7 +71,7 @@ bool ReplSetTagMatch::BoundTagValue::isSatisfied() const {
     return constraint.getMinCount() <= int32_t(boundValues.size());
 }
 
-ReplSetTag ReplSetTagConfig::makeTag(StringData key, StringData value) {
+ReplSetTag ReplSetTagConfig::makeTag(std::string_view key, std::string_view value) {
     int32_t keyIndex = _findKeyIndex(key);
     if (size_t(keyIndex) == _tagData.size()) {
         _tagData.push_back(make_pair(std::string{key}, ValueVector()));
@@ -112,7 +86,7 @@ ReplSetTag ReplSetTagConfig::makeTag(StringData key, StringData value) {
     return ReplSetTag(keyIndex, int32_t(values.size()) - 1);
 }
 
-ReplSetTag ReplSetTagConfig::findTag(StringData key, StringData value) const {
+ReplSetTag ReplSetTagConfig::findTag(std::string_view key, std::string_view value) const {
     int32_t keyIndex = _findKeyIndex(key);
     if (size_t(keyIndex) == _tagData.size())
         return ReplSetTag(-1, -1);
@@ -130,7 +104,7 @@ ReplSetTagPattern ReplSetTagConfig::makePattern() const {
 }
 
 Status ReplSetTagConfig::addTagCountConstraintToPattern(ReplSetTagPattern* pattern,
-                                                        StringData tagKey,
+                                                        std::string_view tagKey,
                                                         int32_t minCount) const {
     int32_t keyIndex = _findKeyIndex(tagKey);
     if (size_t(keyIndex) == _tagData.size()) {
@@ -141,7 +115,7 @@ Status ReplSetTagConfig::addTagCountConstraintToPattern(ReplSetTagPattern* patte
     return Status::OK();
 }
 
-int32_t ReplSetTagConfig::_findKeyIndex(StringData key) const {
+int32_t ReplSetTagConfig::_findKeyIndex(std::string_view key) const {
     size_t i;
     for (i = 0; i < _tagData.size(); ++i) {
         if (_tagData[i].first == key) {

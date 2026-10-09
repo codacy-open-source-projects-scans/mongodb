@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 
@@ -43,14 +17,11 @@
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
-#include "mongo/db/query/query_execution_knobs_gen.h"
-#include "mongo/db/query/query_integration_knobs_gen.h"
-#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -293,6 +264,7 @@ struct AccumOpInfo {
 };
 
 namespace {
+using namespace std::literals::string_view_literals;
 /**
  * Wraps an SbExpr in a let-if that resolves null, missing, and undefined values all to a
  * TypeTags::Nothing constant, else retains the original value.
@@ -760,11 +732,11 @@ SbExpr::Vector buildAccumAggsConcatArraysHelper(SbExpr arg,
     auto expr = b.makeIf(b.makeFunction(sbe::EFn::kIsArray, argValue),
                          argValue,
                          b.makeFail(ErrorCodes::TypeMismatch,
-                                    "Expected new value for $concatArrays to be an array"_sd));
+                                    "Expected new value for $concatArrays to be an array"sv));
 
     auto argWithTypeCheck = b.makeLet(frameId, SbExpr::makeSeq(std::move(arg)), std::move(expr));
 
-    const int cap = internalQueryMaxConcatArraysBytes.load();
+    const int cap = state.expCtx->getQueryKnobConfiguration().getMaxConcatArraysBytes();
 
     return SbExpr::makeSeq(
         b.makeFunction(funcName, std::move(argWithTypeCheck), b.makeInt32Constant(cap)));
@@ -799,11 +771,11 @@ SbExpr::Vector buildAccumAggsSetUnionHelper(SbExpr arg,
     auto expr = b.makeIf(
         b.makeFunction(sbe::EFn::kIsArray, argValue),
         argValue,
-        b.makeFail(ErrorCodes::TypeMismatch, "Expected new value for $setUnion to be an array"_sd));
+        b.makeFail(ErrorCodes::TypeMismatch, "Expected new value for $setUnion to be an array"sv));
 
     auto argWithTypeCheck = b.makeLet(frameId, SbExpr::makeSeq(std::move(arg)), std::move(expr));
 
-    const int cap = internalQueryMaxSetUnionBytes.load();
+    const int cap = state.expCtx->getQueryKnobConfiguration().getMaxSetUnionBytes();
 
     auto collatorSlot = state.getCollatorSlot();
 
@@ -844,7 +816,7 @@ SbExpr::Vector buildAccumAggsAddToSetHelper(SbExpr arg,
                                             StageBuilderState& state) {
     SbExprBuilder b(state);
 
-    const int cap = internalQueryMaxAddToSetBytes.load();
+    const int cap = state.expCtx->getQueryKnobConfiguration().getMaxAddToSetBytes();
 
     auto collatorSlot = state.getCollatorSlot();
 
@@ -902,7 +874,7 @@ SbExpr::Vector buildAccumAggsPushHelper(SbExpr arg,
                                         StageBuilderState& state) {
     SbExprBuilder b(state);
 
-    const int cap = internalQueryMaxPushBytes.load();
+    const int cap = state.expCtx->getQueryKnobConfiguration().getMaxPushBytes();
     return SbExpr::makeSeq(b.makeFunction(aggFuncName, std::move(arg), b.makeInt32Constant(cap)));
 }
 
@@ -968,11 +940,11 @@ SbExpr buildFinalizePartialStdDevHelper(SbSlot stdDevSlot, StageBuilderState& st
                        b.makeInt32Constant(static_cast<int>(sbe::vm::AggStdDevValueElems::kCount)));
 
     return b.makeFunction(sbe::EFn::kNewObj,
-                          b.makeStrConstant("m2"_sd),
+                          b.makeStrConstant("m2"sv),
                           std::move(m2Field),
-                          b.makeStrConstant("mean"_sd),
+                          b.makeStrConstant("mean"sv),
                           std::move(meanField),
-                          b.makeStrConstant("count"_sd),
+                          b.makeStrConstant("count"sv),
                           std::move(countField));
 }
 
@@ -1066,7 +1038,7 @@ SbExpr::Vector buildInitializeAccumN(const AccumOp& acc,
 
     // Create an array of four elements [value holder, max size, memory used, memory limit,
     // isGroupAccum].
-    auto maxAccumulatorBytes = internalQueryTopNAccumulatorBytes.load();
+    auto maxAccumulatorBytes = state.expCtx->getQueryKnobConfiguration().getTopNAccumulatorBytes();
     if (maxSizeExpr.isConstantExpr()) {
         auto [tag, val] = maxSizeExpr.getConstantValue();
         auto convert = genericNumConvert(tag, val, sbe::value::TypeTags::NumberInt64);

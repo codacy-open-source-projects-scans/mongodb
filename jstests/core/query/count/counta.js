@@ -1,7 +1,9 @@
 // Check that count returns 0 in some exception cases.
 //
 // @tags: [
-//   requires_fastcount
+//   requires_fastcount,
+//   # Uses $where with a JS predicate executed server-side, which requires server-side scripting.
+//   requires_scripting,
 // ]
 
 const t = db.jstests_counta;
@@ -26,4 +28,7 @@ assert.throws(function () {
 });
 
 // count must return error if collection name is absent
-assert.commandFailedWithCode(db.runCommand("count"), [ErrorCodes.InvalidNamespace, ErrorCodes.TypeMismatch]);
+assert.commandFailedWithCode(db.runCommand("count"), [
+    ErrorCodes.InvalidNamespace,
+    ErrorCodes.TypeMismatch,
+]);

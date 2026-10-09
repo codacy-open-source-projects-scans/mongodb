@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_applier.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -59,6 +32,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader_mock.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
@@ -77,6 +51,7 @@
 #include "mongo/db/topology/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/network_connection_hook.h"
@@ -101,6 +76,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -114,6 +90,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class OplogIteratorMock : public ReshardingDonorOplogIteratorInterface {
 public:
@@ -182,11 +159,7 @@ public:
         _mockConfigServerCacheLoader = std::make_shared<ConfigServerCatalogCacheLoaderMock>();
         _mockShardServerCacheLoader = std::make_shared<ShardServerCatalogCacheLoaderMock>();
         auto catalogCache =
-            std::make_unique<CatalogCache>(getServiceContext(),
-                                           _mockConfigServerCacheLoader,
-                                           _mockShardServerCacheLoader,
-                                           true /* cascadeDatabaseCacheLoaderShutdown */,
-                                           false /* cascadeCollectionCacheLoaderShutdown */);
+            std::make_unique<CatalogCache>(getServiceContext(), _mockConfigServerCacheLoader);
         uassertStatusOK(
             initializeGlobalShardingStateForMongodForTest(ConnectionString(kConfigHostAndPort),
                                                           std::move(catalogCache),
@@ -242,21 +215,21 @@ public:
         StaticCatalogClient(std::vector<ShardType> shards) : _shards(std::move(shards)) {}
 
         repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
-                                                              repl::ReadConcernLevel readConcern,
+                                                              repl::ReadConcernArgs readConcern,
                                                               BSONObj filter) override {
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
 
         std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
                                                           const DatabaseName& dbName,
-                                                          repl::ReadConcernLevel readConcernLevel,
+                                                          repl::ReadConcernArgs readConcern,
                                                           const BSONObj& sort) override {
             return {};
         }
 
         std::vector<CollectionType> getCollections(OperationContext* opCtx,
                                                    const DatabaseName& dbName,
-                                                   repl::ReadConcernLevel readConcernLevel,
+                                                   repl::ReadConcernArgs readConcern,
                                                    const BSONObj& sort) override {
             return _colls;
         }
@@ -429,7 +402,7 @@ public:
 
     long long metricsAppliedCount() const {
         auto fullCurOp = _metrics->reportForCurrentOp();
-        return fullCurOp["oplogEntriesApplied"_sd].Long();
+        return fullCurOp["oplogEntriesApplied"sv].Long();
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> getExecutor() {
@@ -468,27 +441,35 @@ protected:
                                                              _applierMetrics.get());
     }
 
+    ForwardableOperationMetadata makeTestFom() {
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        return fom;
+    }
+
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeTaskExecutorForApplier() {
         // The ReshardingOplogApplier expects there to already be a Client associated with the
         // thread from the thread pool. We set up the ThreadPoolTaskExecutor identically to how the
         // recipient's primary-only service is set up.
-        ThreadPool::Options threadPoolOptions;
-        threadPoolOptions.maxThreads = kWriterPoolSize;
-        threadPoolOptions.threadNamePrefix = "TestReshardOplogApplication-";
-        threadPoolOptions.poolName = "TestReshardOplogApplicationThreadPool";
-        threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName, getGlobalServiceContext()->getService());
-            auto* client = Client::getCurrent();
-            AuthorizationSession::get(*client)->grantInternalAuthorization();
-        };
 
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
         hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(getServiceContext()));
 
         auto executor = executor::ThreadPoolTaskExecutor::create(
-            std::make_unique<ThreadPool>(std::move(threadPoolOptions)),
-            executor::makeNetworkInterface(
-                "TestReshardOplogApplicationNetwork", nullptr, std::move(hookList)));
+            ThreadPool::make({
+                .poolName = "TestReshardOplogApplicationThreadPool",
+                .threadNamePrefix = "TestReshardOplogApplication-",
+                .maxThreads = kWriterPoolSize,
+                .onCreateThread =
+                    [](const std::string& threadName) {
+                        Client::initThread(threadName, getGlobalServiceContext()->getService());
+                        auto* client = Client::getCurrent();
+                        AuthorizationSession::get(*client)->grantInternalAuthorization();
+                    },
+            }),
+            executor::makeNetworkInterface("TestReshardOplogApplicationNetwork",
+                                           {.metadataHook = std::move(hookList)}));
 
         return executor;
     }
@@ -551,7 +532,9 @@ TEST_F(ReshardingOplogApplierTest, NothingToIterate) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -591,7 +574,9 @@ TEST_F(ReshardingOplogApplierTest, ApplyBasicCrud) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -639,7 +624,9 @@ TEST_F(ReshardingOplogApplierTest, CanceledApplyingBatch) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto abortSource = CancellationSource();
     abortSource.cancel();
@@ -673,7 +660,9 @@ TEST_F(ReshardingOplogApplierTest, InsertTypeOplogAppliedInMultipleBatches) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -717,7 +706,9 @@ TEST_F(ReshardingOplogApplierTest, ErrorDuringFirstBatchApply) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -751,7 +742,7 @@ TEST_F(ReshardingOplogApplierTest, ErrorDuringSecondBatchApply) {
     crudOps.push_back(makeOplog(repl::OpTime(Timestamp(8, 3), 1),
                                 repl::OpTypeEnum::kUpdate,
                                 BSON("$invalidOperator" << BSON("x" << 1)),
-                                BSON("_id" << 1)));
+                                BSON("_id" << 3)));
 
     auto iterator = std::make_unique<OplogIteratorMock>(std::move(crudOps), 2 /* batchSize */);
     boost::optional<ReshardingOplogApplier> applier;
@@ -763,7 +754,9 @@ TEST_F(ReshardingOplogApplierTest, ErrorDuringSecondBatchApply) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -807,7 +800,9 @@ TEST_F(ReshardingOplogApplierTest, ErrorWhileIteratingFirstOplog) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -846,7 +841,9 @@ TEST_F(ReshardingOplogApplierTest, ErrorWhileIteratingFirstBatch) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -891,7 +888,9 @@ TEST_F(ReshardingOplogApplierTest, ErrorWhileIteratingSecondBatch) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -933,7 +932,9 @@ TEST_F(ReshardingOplogApplierTest, ExecutorIsShutDown) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     getExecutor()->shutdown();
 
@@ -978,7 +979,9 @@ TEST_F(ReshardingOplogApplierTest, UnsupportedCommandOpsShouldError) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -1017,7 +1020,9 @@ TEST_F(ReshardingOplogApplierTest, DropSourceCollectionCmdShouldError) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -1057,7 +1062,9 @@ TEST_F(ReshardingOplogApplierTest, MetricsAreReported) {
                                    stashCollections(),
                                    0U /* myStashIdx */,
                                    chunkManager(),
-                                   std::move(iterator));
+                                   std::move(iterator),
+                                   /* isCapped */ false,
+                                   makeTestFom());
 
     ASSERT_EQ(metricsAppliedCount(), 0);
 
@@ -1084,7 +1091,7 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApplyBasic) {
     auto batchSize = 2;
     auto smoothingFactor = 0.3;
 
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     loadCatalogCacheValues();
@@ -1096,10 +1103,10 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApplyBasic) {
                   "movingAvgFeatureFlag"_attr = movingAvgFeatureFlag,
                   "movingAvgServerParameter"_attr = movingAvgServerParameter);
 
-            const RAIIServerParameterControllerForTest movingAvgFeatureFlagRAII{
+            const unittest::ServerParameterGuard movingAvgFeatureFlagRAII{
                 "featureFlagReshardingRemainingTimeEstimateBasedOnMovingAverage",
                 movingAvgFeatureFlag};
-            const RAIIServerParameterControllerForTest movingAvgServerParameterRAII{
+            const unittest::ServerParameterGuard movingAvgServerParameterRAII{
                 "reshardingRemainingTimeEstimateBasedOnMovingAverage", movingAvgServerParameter};
 
             // Verify that the average started out uninitialized.
@@ -1158,6 +1165,9 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApplyBasic) {
 
             advanceTime(Milliseconds(100));
             auto iterator = std::make_unique<OplogIteratorMock>(std::move(ops), batchSize);
+            ForwardableOperationMetadata fom;
+            fom.setVersionContext(
+                VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
             boost::optional<ReshardingOplogApplier> applier;
             applier.emplace(makeApplierEnv(),
                             kApplierBatchTaskCount,
@@ -1167,7 +1177,9 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApplyBasic) {
                             stashCollections(),
                             0U /* myStashIdx */,
                             chunkManager(),
-                            std::move(iterator));
+                            std::move(iterator),
+                            /* isCapped */ false,
+                            std::move(fom));
 
             auto cancelToken = operationContext()->getCancellationToken();
             auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -1225,7 +1237,9 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApply_EmptyBatch) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    makeTestFom());
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(
@@ -1252,6 +1266,9 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApply_ClockSkew) {
                             now() + Milliseconds(100)));
 
     auto iterator = std::make_unique<OplogIteratorMock>(std::move(ops), batchSize);
+    ForwardableOperationMetadata fom;
+    fom.setVersionContext(
+        VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
     boost::optional<ReshardingOplogApplier> applier;
     applier.emplace(makeApplierEnv(),
                     kApplierBatchTaskCount,
@@ -1261,7 +1278,9 @@ TEST_F(ReshardingOplogApplierTest, UpdateAverageTimeToApply_ClockSkew) {
                     stashCollections(),
                     0U /* myStashIdx */,
                     chunkManager(),
-                    std::move(iterator));
+                    std::move(iterator),
+                    /* isCapped */ false,
+                    std::move(fom));
 
     auto cancelToken = operationContext()->getCancellationToken();
     auto factory = std::make_shared<HierarchicalCancelableOperationContextFactory>(

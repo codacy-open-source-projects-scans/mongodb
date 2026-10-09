@@ -1,8 +1,6 @@
 /**
  * Helper functions that are used in change streams rewrite test cases.
  */
-
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     assertCreateCollection,
     assertDropAndRecreateCollection,
@@ -23,13 +21,21 @@ const isResumableError = (e) => {
 
 // Function which generates a write workload on the specified collection, including all events that
 // a change stream may consume. Assumes that the specified collection does not already exist.
-export function generateChangeStreamWriteWorkload(db, collName, numDocs, includeInvalidatingEvents = true) {
+export function generateChangeStreamWriteWorkload(
+    db,
+    collName,
+    numDocs,
+    includeInvalidatingEvents = true,
+) {
     // If this is a sharded passthrough, make sure we shard on something other than _id so that a
     // non-id field appears in the documentKey. This will generate 'create' and 'shardCollection'.
     if (FixtureHelpers.isMongos(db)) {
         assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
         assert.commandWorked(
-            db.adminCommand({shardCollection: `${db.getName()}.${collName}`, key: {shardKey: "hashed"}}),
+            db.adminCommand({
+                shardCollection: `${db.getName()}.${collName}`,
+                key: {shardKey: "hashed"},
+            }),
         );
     }
 
@@ -69,7 +75,13 @@ export function generateChangeStreamWriteWorkload(db, collName, numDocs, include
     // Insert some documents.
     for (let i = 0; i < numDocs; ++i) {
         assert.commandWorked(
-            testColl.insert({_id: i, shardKey: i, a: [1, [2], {b: 3}], f1: {subField: true}, f2: false}),
+            testColl.insert({
+                _id: i,
+                shardKey: i,
+                a: [1, [2], {b: 3}],
+                f1: {subField: true},
+                f2: false,
+            }),
         );
     }
 
@@ -82,7 +94,9 @@ export function generateChangeStreamWriteWorkload(db, collName, numDocs, include
         [{$set: {a: [1, [2]], f2: true}}, {$unset: ["f1"]}], // populates all fields
     ];
     for (let i = 0; i < numDocs / 2; ++i) {
-        assert.commandWorked(testColl.update({_id: i, shardKey: i}, updateSpecs[i % updateSpecs.length]));
+        assert.commandWorked(
+            testColl.update({_id: i, shardKey: i}, updateSpecs[i % updateSpecs.length]),
+        );
     }
 
     // Replace the other half.
@@ -121,7 +135,13 @@ export function generateChangeStreamWriteWorkload(db, collName, numDocs, include
 }
 
 // Helper function to fully exhaust a change stream from the specified point and return all events.
-export function getAllChangeStreamEvents(db, extraPipelineStages = [], csOptions = {}, startTime, endTime) {
+export function getAllChangeStreamEvents(
+    db,
+    extraPipelineStages = [],
+    csOptions = {},
+    startTime,
+    endTime,
+) {
     // Retrieve current cluster time. We need to read all change events from the specified start
     // time until this end time is reached over exceeded.
     if (!endTime) {
@@ -131,7 +151,10 @@ export function getAllChangeStreamEvents(db, extraPipelineStages = [], csOptions
     // Open a whole-cluster stream based on the supplied arguments.
     const csCursor = db
         .getMongo()
-        .watch(extraPipelineStages, Object.assign({startAtOperationTime: startTime, maxAwaitTimeMS: 1}, csOptions));
+        .watch(
+            extraPipelineStages,
+            Object.assign({startAtOperationTime: startTime, maxAwaitTimeMS: 1}, csOptions),
+        );
 
     // Run getMore until the post-batch resume token advances. In a sharded passthrough, this will
     // guarantee that all shards have returned results.
@@ -140,8 +163,10 @@ export function getAllChangeStreamEvents(db, extraPipelineStages = [], csOptions
     while (true) {
         assert(!csCursor.isClosed(), "change stream cursor was closed unexpectedly");
 
+        let idle = true;
         while (csCursor.hasNext()) {
             result.push(csCursor.next());
+            idle = false;
         }
         const cursorTime = decodeResumeToken(csCursor.getResumeToken()).clusterTime;
         if (bsonWoCompare(cursorTime, endTime) >= 0) {
@@ -149,9 +174,9 @@ export function getAllChangeStreamEvents(db, extraPipelineStages = [], csOptions
             break;
         }
 
-        // Add a little delay after the initial getMore requests, so that we do not pound that
-        // server with requests in a tight loop.
-        if (iterations++ > 3) {
+        if (idle && iterations++ >= 5) {
+            // Add a little delay after the initial getMore requests, so that we do not pound that
+            // server with requests in a tight loop.
             sleep(10);
         }
     }
@@ -167,6 +192,36 @@ export function isPlainObject(value) {
     return value && typeof value == "object" && value.constructor === Object;
 }
 
+// Returns true if the change stream explain 'stats' was produced by a v1 reader. We look at the
+// transform stage in splitPipeline.shardsPart (sharded) or stages (unsharded) for its 'version'.
+function isV1Explain(stats) {
+    if (!stats || typeof stats !== "object") {
+        return false;
+    }
+    const stageLists = [];
+    if (stats.splitPipeline && Array.isArray(stats.splitPipeline.shardsPart)) {
+        stageLists.push(stats.splitPipeline.shardsPart);
+    }
+    if (Array.isArray(stats.stages)) {
+        stageLists.push(stats.stages);
+    }
+    for (const stages of stageLists) {
+        for (const stage of stages) {
+            if (!stage || !stage.$changeStream || !stage.$changeStream.options) {
+                continue;
+            }
+            const version = stage.$changeStream.options.version;
+            if (version === "v1") {
+                return true;
+            }
+            if (version === "v2") {
+                return false;
+            }
+        }
+    }
+    return false;
+}
+
 // Verifies the number of change streams events returned from a particular shard.
 export function assertNumChangeStreamDocsReturnedFromShard(
     stats,
@@ -177,9 +232,10 @@ export function assertNumChangeStreamDocsReturnedFromShard(
     // TODO SERVER-119944: the following checks rely on the shards property to be set in the explain plan,
     // but for change streams v2 that field is unset, which causes the asserts to fail. Skip the check when
     // running change streams v2.
-    if (FeatureFlagUtil.isPresentAndEnabled(db, "ChangeStreamPreciseShardTargeting")) {
+    if (!isV1Explain(stats)) {
         return;
     }
+
     assert(stats.shards.hasOwnProperty(shardName), stats);
     const stages = stats.shards[shardName].stages;
     const lastStage = stages[stages.length - 1];
@@ -223,9 +279,10 @@ export function assertNumMatchingOplogEventsForShard(
     // TODO SERVER-119944: the following checks rely on the shards property to be set in the explain plan,
     // but for change streams v2 that field is unset, which causes the asserts to fail. Skip the check when
     // running change streams v2.
-    if (FeatureFlagUtil.isPresentAndEnabled(db, "ChangeStreamPreciseShardTargeting")) {
+    if (!isV1Explain(stats)) {
         return;
     }
+
     const executionStats = getExecutionStatsForShard(stats, shardName);
     // We verify the number of documents from the unwind stage instead of the oplog cursor, so we
     // are testing that the filter is applied to the output of batched oplog entries as well.
@@ -250,7 +307,12 @@ export function assertNumMatchingOplogEventsForShard(
 
 // Returns a newly created sharded collection sharded by caller provided shard key.
 export function createShardedCollection(shardingTest, shardKey, dbName, collName, splitAt) {
-    assert.commandWorked(shardingTest.s.adminCommand({enableSharding: dbName, primaryShard: shardingTest.shard0.name}));
+    assert.commandWorked(
+        shardingTest.s.adminCommand({
+            enableSharding: dbName,
+            primaryShard: shardingTest.shard0.name,
+        }),
+    );
 
     const db = shardingTest.s.getDB(dbName);
     assertDropAndRecreateCollection(db, collName);
@@ -299,7 +361,9 @@ export function verifyChangeStreamOnWholeCluster({
                 assert.eq(
                     event.operationType,
                     op,
-                    () => `Expected "${op}" but got "${event.operationType}". Full event: ` + `${tojson(event)}`,
+                    () =>
+                        `Expected "${op}" but got "${event.operationType}". Full event: ` +
+                        `${tojson(event)}`,
                 );
 
                 if (op == "dropDatabase") {

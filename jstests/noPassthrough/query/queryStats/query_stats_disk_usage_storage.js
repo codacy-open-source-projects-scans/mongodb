@@ -6,7 +6,6 @@
  *      requires_fcv_80
  * ]
  */
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     assertAggregatedMetricsSingleExec,
     assertExpectedResults,
@@ -68,7 +67,11 @@ function runStorageStatsTestFind(conn, coll) {
     const shape = {filter: {}};
     const expectedDocs = 7;
 
-    const queryStatsKey = getFindQueryStatsKey({conn: conn, collName: coll.getName(), queryShapeExtra: shape});
+    const queryStatsKey = getFindQueryStatsKey({
+        conn: conn,
+        collName: coll.getName(),
+        queryShapeExtra: shape,
+    });
     clearPlanCacheAndQueryStatsStore(conn, coll);
 
     const queryStats = exhaustCursorAndGetQueryStats({
@@ -88,8 +91,6 @@ function runStorageStatsTestFind(conn, coll) {
 }
 
 function runStorageStatsTestDistinct(conn, coll) {
-    if (!FeatureFlagUtil.isEnabled(conn, "QueryStatsCountDistinct")) return;
-
     const testDB = conn.getDB("test");
     const cmd = {distinct: coll.getName(), key: "y"};
     const shape = {key: "y"};
@@ -133,8 +134,6 @@ function runStorageStatsTestDistinct(conn, coll) {
  * @param {*} coll - The collection to run the count command on.
  */
 function runStorageStatsTestCount(conn, coll) {
-    if (!FeatureFlagUtil.isEnabled(conn, "QueryStatsCountDistinct")) return;
-
     const testDB = conn.getDB("test");
     // Query provided so that the count command doesn't just use the collection metadata and skip
     // any keys due to the index.
@@ -187,7 +186,11 @@ function runStorageStatsTestCount(conn, coll) {
  */
 function runTestMongod(setupConn, collName, callback) {
     const conn = MongoRunner.runMongod(
-        Object.assign(getQueryStatsServerParameters(), {restart: true, cleanData: false, dbpath: setupConn.dbpath}),
+        Object.assign(getQueryStatsServerParameters(), {
+            restart: true,
+            cleanData: false,
+            dbpath: setupConn.dbpath,
+        }),
     );
     const coll = conn.getDB("test")[collName];
     callback(conn, coll);
@@ -261,9 +264,14 @@ function runTestMongos(st, collName, callback) {
 }
 
 {
-    const st = new ShardingTest({shards: 2, other: {mongosOptions: getQueryStatsServerParameters()}});
+    const st = new ShardingTest({
+        shards: 2,
+        other: {mongosOptions: getQueryStatsServerParameters()},
+    });
     const testDB = st.s.getDB("test");
-    assert.commandWorked(testDB.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        testDB.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}),
+    );
     const collName = makeShardedCollection(st).getName();
 
     runTestMongos(st, collName, runStorageStatsTestCount);

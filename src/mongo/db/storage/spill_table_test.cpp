@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/spill_table.h"
 
@@ -34,6 +8,9 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/disk_space_monitor.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/record_store_write_conflict_fail_points.h"
+#include "mongo/db/storage/storage_engine_mock.h"
 #include "mongo/db/storage/storage_engine_test_fixture.h"
 #include "mongo/unittest/join_thread.h"
 #include "mongo/unittest/unittest.h"
@@ -41,10 +18,12 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 constexpr int32_t kCacheSizeMB = 50;
 
@@ -70,9 +49,9 @@ TEST_F(SpillTableTest, InsertRecords) {
     for (auto&& record : records) {
         auto next = cursor->next();
         ASSERT_TRUE(next);
-        ASSERT_EQ(next->data.size(), record.data.size());
+        EXPECT_EQ(next->data.size(), record.data.size());
     }
-    ASSERT_FALSE(cursor->next());
+    EXPECT_FALSE(cursor->next());
 }
 
 TEST_F(SpillTableTest, InsertRecordsWriteConflict) {
@@ -83,18 +62,17 @@ TEST_F(SpillTableTest, InsertRecordsWriteConflict) {
     std::vector<Record> records(kCacheSizeMB,
                                 {.id = {}, .data = {data.data(), static_cast<int>(data.size())}});
 
-    FailPointEnableBlock writeConflict{
-        "WTWriteConflictException",
-        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1}};
+    auto writeConflict = enableWriteConflictForWrites(
+        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
     ASSERT_OK(spillTable->insertRecords(opCtx.get(), &records));
 
     auto cursor = spillTable->getCursor(opCtx.get());
     for (auto&& record : records) {
         auto next = cursor->next();
         ASSERT_TRUE(next);
-        ASSERT_EQ(next->data.size(), record.data.size());
+        EXPECT_EQ(next->data.size(), record.data.size());
     }
-    ASSERT_FALSE(cursor->next());
+    EXPECT_FALSE(cursor->next());
 }
 
 TEST_F(SpillTableTest, InsertRecordsRandomWriteConflicts) {
@@ -105,20 +83,18 @@ TEST_F(SpillTableTest, InsertRecordsRandomWriteConflicts) {
     std::vector<Record> records(kCacheSizeMB,
                                 {.id = {}, .data = {data.data(), static_cast<int>(data.size())}});
 
-    FailPointEnableBlock writeConflict{
-        "WTWriteConflictException",
-        FailPoint::ModeOptions{
-            .mode = FailPoint::Mode::random,
-            .val = static_cast<int32_t>(std::numeric_limits<int32_t>::max() * 0.1)}};
+    auto writeConflict = enableWriteConflictForWrites(FailPoint::ModeOptions{
+        .mode = FailPoint::Mode::random,
+        .val = static_cast<int32_t>(std::numeric_limits<int32_t>::max() * 0.1)});
     ASSERT_OK(spillTable->insertRecords(opCtx.get(), &records));
 
     auto cursor = spillTable->getCursor(opCtx.get());
     for (auto&& record : records) {
         auto next = cursor->next();
         ASSERT_TRUE(next);
-        ASSERT_EQ(next->data.size(), record.data.size());
+        EXPECT_EQ(next->data.size(), record.data.size());
     }
-    ASSERT_FALSE(cursor->next());
+    EXPECT_FALSE(cursor->next());
 }
 
 TEST_F(SpillTableTest, ImmediatelyBelowDiskSpaceThreshold) {
@@ -130,14 +106,14 @@ TEST_F(SpillTableTest, ImmediatelyBelowDiskSpaceThreshold) {
     auto obj = BSON("a" << 1);
     std::vector<Record> records{{RecordId(), {obj.objdata(), obj.objsize()}}};
 
-    ASSERT_EQ(spillTable->insertRecords(opCtx.get(), &records), ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->updateRecord(opCtx.get(), RecordId{1}, obj.objdata(), obj.objsize()),
+    EXPECT_EQ(spillTable->insertRecords(opCtx.get(), &records), ErrorCodes::OutOfDiskSpace);
+    EXPECT_EQ(spillTable->updateRecord(opCtx.get(), RecordId{1}, obj.objdata(), obj.objsize()),
               ErrorCodes::OutOfDiskSpace);
     ASSERT_THROWS_CODE(spillTable->deleteRecord(opCtx.get(), RecordId{1}),
                        DBException,
                        ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->truncate(opCtx.get()), ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->rangeTruncate(opCtx.get(), RecordId::minLong(), RecordId::maxLong()),
+    EXPECT_EQ(spillTable->truncate(opCtx.get()), ErrorCodes::OutOfDiskSpace);
+    EXPECT_EQ(spillTable->rangeTruncate(opCtx.get(), RecordId::minLong(), RecordId::maxLong()),
               ErrorCodes::OutOfDiskSpace);
 }
 
@@ -161,25 +137,25 @@ TEST_F(SpillTableTest, LaterBelowDiskSpaceThreshold) {
     FailPointEnableBlock fp{"simulateAvailableDiskSpace", BSON("bytes" << thresholdBytes - 1)};
     DiskSpaceMonitor::get(opCtx->getServiceContext())->runAllActions(opCtx.get());
 
-    ASSERT_EQ(spillTable->insertRecords(opCtx.get(), &records), ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->updateRecord(opCtx.get(), rid, obj.objdata(), obj.objsize()),
+    EXPECT_EQ(spillTable->insertRecords(opCtx.get(), &records), ErrorCodes::OutOfDiskSpace);
+    EXPECT_EQ(spillTable->updateRecord(opCtx.get(), rid, obj.objdata(), obj.objsize()),
               ErrorCodes::OutOfDiskSpace);
     ASSERT_THROWS_CODE(
         spillTable->deleteRecord(opCtx.get(), rid), DBException, ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->truncate(opCtx.get()), ErrorCodes::OutOfDiskSpace);
-    ASSERT_EQ(spillTable->rangeTruncate(opCtx.get(), rid, rid), ErrorCodes::OutOfDiskSpace);
+    EXPECT_EQ(spillTable->truncate(opCtx.get()), ErrorCodes::OutOfDiskSpace);
+    EXPECT_EQ(spillTable->rangeTruncate(opCtx.get(), rid, rid), ErrorCodes::OutOfDiskSpace);
 }
 
 TEST_F(SpillTableTest, SpillTableDroppedOnDestruction) {
     auto opCtx = makeOperationContext();
 
     constexpr int64_t kThresholdBytes = 1024;
-    const StringData kRecordId = "1"_sd;
-    const StringData kPayload = "data"_sd;
+    const std::string_view kRecordId = "1"sv;
+    const std::string_view kPayload = "data"sv;
 
     auto spillTable = makeSpillTable(opCtx.get(), KeyFormat::String, kThresholdBytes);
     auto ident = std::string(spillTable->ident());
-    ASSERT_TRUE(spillIdentExists(opCtx.get(), ident));
+    EXPECT_TRUE(spillIdentExists(opCtx.get(), ident));
 
     std::vector<Record> records(1);
     records[0].id = RecordId(kRecordId);
@@ -190,11 +166,11 @@ TEST_F(SpillTableTest, SpillTableDroppedOnDestruction) {
 
     records[0].data = RecordData();
     ASSERT_TRUE(spillTable->findRecord(opCtx.get(), records[0].id, &records[0].data));
-    ASSERT_EQ(0, memcmp(kPayload.data(), records[0].data.data(), kPayload.size()));
+    EXPECT_EQ(0, memcmp(kPayload.data(), records[0].data.data(), kPayload.size()));
 
     spillTable.reset();
 
-    ASSERT_FALSE(spillIdentExists(opCtx.get(), ident));
+    EXPECT_FALSE(spillIdentExists(opCtx.get(), ident));
 }
 
 TEST_F(StorageEngineTest, TestSpillTableDropRetries) {
@@ -202,7 +178,7 @@ TEST_F(StorageEngineTest, TestSpillTableDropRetries) {
     auto spillTable = makeSpillTable(opCtx.get(), KeyFormat::Long, 1024 * 1024 * 100);
 
     const auto initialStatus = _storageEngine->getStatus(opCtx.get());
-    ASSERT_EQ(0, initialStatus.getField("dropSpillTableRetries").Long());
+    EXPECT_EQ(0, initialStatus.getField("dropSpillTableRetries").Long());
 
     // Start a thread that tries to drop the spill table and use a barrier to synchronize the
     // thread, it needs to clean up after the cursors to avoid a deadlock
@@ -236,7 +212,64 @@ TEST_F(StorageEngineTest, TestSpillTableDropRetries) {
 
     cursor->detachFromOperationContext();
 
-    ASSERT_GT(retries, 0);
+    EXPECT_GT(retries, 0);
+}
+
+/**
+ * Forwards to a real StorageEngine, except that dropSpillTable() throws for a designated ident.
+ */
+class SpillTableDropShim : public StorageEngineMock {
+public:
+    explicit SpillTableDropShim(StorageEngine& engine) : _engine(engine) {}
+
+    void failDropForIdent(std::string failIdent, Status statusToRaise) {
+        _failIdent = std::move(failIdent);
+        _statusToRaise = std::move(statusToRaise);
+    }
+
+    void dropSpillTable(RecoveryUnit& ru, std::string_view ident) override {
+        if (_failIdent && ident == *_failIdent) {
+            uassertStatusOK(_statusToRaise);
+        }
+        _engine.dropSpillTable(ru, ident);
+    }
+
+private:
+    StorageEngine& _engine;
+    boost::optional<std::string> _failIdent;
+    Status _statusToRaise = Status::OK();
+};
+
+TEST_F(SpillTableTest, DropFailureOnDestruction) {
+    constexpr int64_t kThresholdBytes = 1024;
+    const auto opCtx = makeOperationContext();
+
+    SpillTableDropShim shim{*_storageEngine};
+
+    auto* const spillEngine = _storageEngine->getSpillEngine();
+    auto ru = spillEngine->newRecoveryUnit();
+    auto rs = spillEngine->makeInternalRecordStore(
+        *ru, ident::generateNewInternalIdent(), KeyFormat::Long);
+    const auto ident = std::string(rs->getIdent());
+    auto spillTable =
+        std::make_unique<SpillTable>(std::move(ru),
+                                     std::move(rs),
+                                     shim,
+                                     *DiskSpaceMonitor::get(opCtx->getServiceContext()),
+                                     kThresholdBytes);
+
+    const auto obj = BSON("a" << 1);
+    std::vector<Record> records{{RecordId(), {obj.objdata(), obj.objsize()}}};
+    ASSERT_OK(spillTable->insertRecords(opCtx.get(), &records));
+
+    shim.failDropForIdent(ident, {ErrorCodes::UnknownError, "simulated spill table drop failure"});
+
+    spillTable.reset();
+
+    // The failed drop leaves the table behind rather than terminating the process.
+    EXPECT_TRUE(spillIdentExists(opCtx.get(), ident));
+    _storageEngine->dropSpillTable(*spillEngine->newRecoveryUnit(), ident);
+    EXPECT_FALSE(spillIdentExists(opCtx.get(), ident));
 }
 
 }  // namespace

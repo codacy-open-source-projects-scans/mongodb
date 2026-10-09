@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,13 +8,16 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/compiler/ce/ce_test_utils.h"
+#include "mongo/db/query/compiler/ce/sampling/persistent_sample_loader.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator_impl.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/stats/value_utils.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/modules.h"
 
@@ -54,20 +31,32 @@ public:
         return _sample;
     }
 
+    boost::optional<size_t> getUniqueDocCountForTesting() const {
+        return _uniqueDocCount;
+    }
+
+    void setUniqueDocCountForTesting(size_t count) {
+        _uniqueDocCount = count;
+    }
+
     /**
      * Directly sets the sample data, bypassing query execution. This allows tests to inject
      * specific samples (including duplicate documents that simulate sampling with replacement)
      * without needing a real collection.
      */
-    void setSampleForTesting(std::vector<BSONObj> sample) {
+    void setSampleForTesting(std::vector<BSONObj> sample, bool wasPersisted = false) {
         _sample = std::move(sample);
         _sampleSize = _sample.size();
         _uniqueDocCount = boost::none;
         _isSampleGenerated = true;
+        _wasSamplePersisted = wasPersisted;
     }
 
-    static size_t calculateSampleSize(SamplingConfidenceIntervalEnum ci, double marginOfError) {
-        return SamplingEstimatorImpl::calculateSampleSize(ci, marginOfError);
+    /**
+     * Overrides the persisted-sample method independently of the on-the-fly sampling style.
+     */
+    void setPersistentSampleMethodForTesting(SamplingCEMethodEnum method) {
+        _persistentSampleMethod = method;
     }
 
     static bool matches(const OrderedIntervalList& oil, BSONElement val) {
@@ -85,7 +74,7 @@ public:
     std::pair<CardinalityEstimate, CardinalityEstimate> confidenceInterval(double card,
                                                                            double z = 1.96) {
         auto moe = marginOfError(z);
-        double collCard = getCollCard();
+        double collCard = getCollCard().toDouble();
 
         double minCard = std::max(card - moe * collCard, 0.0);
         // maxCard could be greater than collCard if we're estimating the index keys scanned.
@@ -101,15 +90,16 @@ public:
     bool assertEstimateInConfidenceInterval(CardinalityEstimate estimate, double expectedCard) {
         auto expectedInterval = confidenceInterval(expectedCard);
         bool estimateInInterval =
-            (estimate >= expectedInterval.first && estimate <= expectedInterval.second);
+            (cost_based_ranker::approxGtEq(estimate, expectedInterval.first) &&
+             cost_based_ranker::approxLtEq(estimate, expectedInterval.second));
         if (!estimateInInterval) {
             // This is a functionality test. Print the error in case the estimate is outside of the
             // confidence interval.
-            double error = abs(estimate.cardinality().v() - expectedCard) / getCollCard();
+            double error = abs(estimate.toDouble() - expectedCard) / getCollCard().toDouble();
             std::cout << "=== " << estimate.toString() << ", Interval = ("
-                      << expectedInterval.first.cardinality().v() << ", "
-                      << expectedInterval.second.cardinality().v() << "), Error " << error * 100
-                      << "%" << std::endl;
+                      << expectedInterval.first.toDouble() << ", "
+                      << expectedInterval.second.toDouble() << "), Error " << error * 100 << "%"
+                      << std::endl;
             return false;
         }
         return true;
@@ -136,6 +126,9 @@ class SamplingEstimatorTest : public CatalogTestFixture {
 public:
     void setUp() override {
         _kTestNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
+
+        // (Generic FCV reference): Set FCV so feature flag checks don't tassert on undefined FCV.
+        serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 
         CatalogTestFixture::setUp();
         ASSERT_OK(storageInterface()->createCollection(
@@ -212,6 +205,14 @@ struct PlanRankingExecutionStatistics {
     std::vector<double> selectivities;
 };
 
+/**
+ * Sets the confidence interval, margin of error, and sample size override knobs to the given values
+ * and returns the sample size that the sampling estimator derives from them.
+ */
+size_t sampleSizeForKnobs(SamplingConfidenceIntervalEnum ci,
+                          double marginOfError,
+                          int sampleSizeOverride = 0);
+
 size_t translateSampleDefToActualSampleSize(SampleSizeDef sampleSizeDef);
 
 std::pair<SamplingCEMethodEnum, boost::optional<int>> iniitalizeSamplingAlgoBasedOnChunks(
@@ -253,10 +254,15 @@ bool dataConfigurationCoversQueryWorkload(DataConfiguration& dataConfig,
 void initializeSamplingEstimator(DataConfiguration& configuration,
                                  SamplingEstimatorTest& samplingEstimatorTest);
 
-
+/**
+ * Create a collection with the given name and insert the given documents.
+ * Persistent sample docs must be stored in a clustered collection indexed on _id, so clustered =
+ * true must be passed when this helper is used to simulate the persisted samples collection.
+ */
 void createCollAndInsertDocuments(OperationContext* opCtx,
                                   const NamespaceString& nss,
-                                  const std::vector<BSONObj>& docs);
+                                  const std::vector<BSONObj>& docs,
+                                  bool clustered = false);
 
 /**
  * Given a MatchExpression and a vector of BSONObj, evaluate the MatchExpression against all the
@@ -306,4 +312,26 @@ IndexBounds getIndexBounds(const QueryConfiguration& queryConfig,
 size_t numberKeysMatch(const IndexBounds& bounds,
                        const BSONObj& document,
                        bool skipDuplicateMatches = false);
+
+/**
+ * Build a v1 persistent-sample BSON doc for test inputs.
+ *
+ * `overrides` lets tests replace individual top-level fields of the built document — any field
+ * present in `overrides` wins over the field this helper would have written. Use this for
+ * malformed-doc cases (bad schema_version, non-array docs, wrong collection_uuid type, etc.).
+ */
+BSONObj buildPersistentSampleDoc(const UUID& collUuid,
+                                 SamplingTechniqueEnum method,
+                                 size_t sampleSize,
+                                 const std::vector<BSONObj>& docs,
+                                 boost::optional<int> numChunks = boost::none,
+                                 int schemaVersion = kPersistentSampleSchemaVersion,
+                                 BSONObj overrides = BSONObj(),
+                                 int pageNo = 0);
+
+/**
+ * Build a BSON document of size `sizeBytes`, or at minimum the size of the BSON overhead of the
+ * field names if `sizeBytes` is less than that.
+ */
+BSONObj makeSizedDoc(int id, size_t sizeBytes);
 }  // namespace mongo::ce

@@ -64,12 +64,34 @@ mongo_cc_library(
     ],
 )
 
+# Standalone library for extension DocumentSource types to avoid circular dependencies.
+# Both pipeline (e.g. docs_needed_bounds_visitor) and extension_host can depend on this.
+# Must not depend on host_adapters or host_services_adapter.
+mongo_cc_library(
+    name = "extension_host_document_source_types",
+    hdrs = [
+        "catalog_context.h",
+        "document_source_extension_for_query_shape.h",
+        "document_source_extension_optimizable.h",
+    ],
+    deps = [
+        ":extension_host_utils",
+        ":extension_mongot_server_status",
+        "//src/mongo:base",
+        "//src/mongo/db:commands",
+        "//src/mongo/db:shard_role_api",
+        "//src/mongo/db/extension/host/aggregation_stage",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage:aggregation_stage_handles",
+        "//src/mongo/db/pipeline",
+        "//src/mongo/db/pipeline:lite_parsed_desugarer",
+    ],
+)
+
 mongo_cc_library(
     name = "extension_host",
     srcs = [
         "document_source_extension_for_query_shape.cpp",
         "document_source_extension_optimizable.cpp",
-        "document_source_visitor_docs_needed_bounds.cpp",
         "extension_stage.cpp",
     ],
     deps = [
@@ -186,6 +208,20 @@ mongo_cc_unit_test(
         "//conditions:default": ["@platforms//:incompatible"],
     }) + select({
         "//bazel/platforms:amazon_linux_2": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }) + select({
+        # The fixture extensions are signed with the test key. Secure builds
+        # intentionally hard-code the production key, so this test cannot
+        # validate or load those fixtures in either release or secure mode.
+        "//bazel/config:extensions_signature_verification_secure_enabled_release": [
+            "@platforms//:incompatible",
+        ],
+        "//bazel/config:extensions_signature_verification_secure_disabled_release": [
+            "@platforms//:incompatible",
+        ],
+        "//bazel/config:extensions_signature_verification_secure_enabled_no_release": [
+            "@platforms//:incompatible",
+        ],
         "//conditions:default": [],
     }),
     deps = [

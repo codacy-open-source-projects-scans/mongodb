@@ -38,6 +38,25 @@
 %include "attribute.i"
 %include "carrays.i"
 
+/*
+ * SWIG doesn't support nested classes when bridging to Python.
+ * Use 'flatnested' feature to generate a non-nested proxy class.
+ */
+%feature("flatnested");
+
+/*
+ * WT_CURSOR is only referenced for its type below, never wrapped, so
+ * drop the unused next field rather than rename it; the actual struct
+ * tag behind the WT_CURSOR typedef is __wt_cursor.
+ */
+%ignore __wt_cursor::next;
+
+/* help() shadows a Python built-in, which SWIG flags as Warning 321. */
+%rename(help_str) workgen::TableOptions::help;
+%rename(help_str) workgen::ParetoOptions::help;
+%rename(help_str) workgen::ThreadOptions::help;
+%rename(help_str) workgen::WorkloadOptions::help;
+
 /* We only need to reference WiredTiger types. */
 %import "wiredtiger.h"
 
@@ -55,12 +74,12 @@
 %}
 
 %exception {
-	try {
-		$action
-	}
-	catch (workgen::WorkgenException &wge) {
-		SWIG_exception_fail(SWIG_RuntimeError, wge._str.c_str());
-	}
+    try {
+        $action
+    }
+    catch (workgen::WorkgenException &wge) {
+        SWIG_exception_fail(SWIG_RuntimeError, wge._str.c_str());
+    }
 }
 
 /*
@@ -72,14 +91,14 @@
  */
 %define InterruptableFunction(funcname)
 %exception funcname {
-	try {
-		void (*savesig)(int) = signal(SIGINT, SIG_DFL);
-		$action
-		(void)signal(SIGINT, savesig);
-	}
-	catch (workgen::WorkgenException &wge) {
-		SWIG_exception_fail(SWIG_RuntimeError, wge._str.c_str());
-	}
+    try {
+        void (*savesig)(int) = signal(SIGINT, SIG_DFL);
+        $action
+        (void)signal(SIGINT, savesig);
+    }
+    catch (workgen::WorkgenException &wge) {
+        SWIG_exception_fail(SWIG_RuntimeError, wge._str.c_str());
+    }
 }
 %enddef
 
@@ -88,11 +107,11 @@
  */
 %define WorkgenClass(classname)
 %extend workgen::classname {
-	const std::string __str__() {
-		std::ostringstream out;
-		$self->describe(out);
-		return out.str();
-	}
+    const std::string __str__() {
+        std::ostringstream out;
+        $self->describe(out);
+        return out.str();
+    }
 };
 %enddef
 
@@ -119,6 +138,24 @@ InterruptableFunction(workgen::Workload::run)
 %module workgen
 /* Parse the header to generate wrappers. */
 %include "workgen.h"
+
+/*
+ * Keep help() working for existing workload scripts written against the
+ * pre-rename API.
+ */
+%define OptionsHelpCompat(classname)
+%extend classname {
+%pythoncode %{
+    def help(self):
+        return self.help_str()
+%}
+}
+%enddef
+
+OptionsHelpCompat(workgen::TableOptions)
+OptionsHelpCompat(workgen::ParetoOptions)
+OptionsHelpCompat(workgen::ThreadOptions)
+OptionsHelpCompat(workgen::WorkloadOptions)
 
 %template(OpList) std::vector<workgen::Operation>;
 %template(ThreadList) std::vector<workgen::Thread>;

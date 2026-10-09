@@ -1,10 +1,6 @@
 // Wrapper around the validate command that can be used to validate index key counts.
 import {Thread} from "jstests/libs/parallelTester.js";
 import newMongoWithRetry from "jstests/libs/retryable_mongo.js";
-import {
-    filterGetAllCollectionsExcludingViews,
-    filterGetAllCollectionsExcludingViewsAndTimeseries,
-} from "src/mongo/shell/data_consistency_checker.js";
 
 export class CollectionValidator {
     validateCollections(db, obj) {
@@ -18,7 +14,12 @@ export class CollectionValidator {
 
         try {
             hostList.forEach((host) => {
-                const thread = new Thread(validateCollectionsThread, newMongoWithRetry, validateCollectionsImpl, host);
+                const thread = new Thread(
+                    validateCollectionsThread,
+                    newMongoWithRetry,
+                    validateCollectionsImpl,
+                    host,
+                );
                 threads.push(thread);
                 thread.start();
             });
@@ -37,7 +38,9 @@ export class CollectionValidator {
             returnData.forEach((res) => {
                 assert.commandWorked(res, "Collection validation failed");
                 if (TestData.skipInterNodeCollectionHashValidation) {
-                    jsTest.log.info("Skipping inter-node collection hash validation as per test configuration");
+                    jsTest.log.info(
+                        "Skipping inter-node collection hash validation as per test configuration",
+                    );
                     return;
                 }
 
@@ -70,7 +73,8 @@ export class CollectionValidator {
                             }
                             if (
                                 db == "config" &&
-                                (coll == "fast_count_metadata_store" || coll == "fast_count_metadata_store_timestamps")
+                                (coll == "fast_count_metadata_store" ||
+                                    coll == "fast_count_metadata_store_timestamps")
                             ) {
                                 // The contents of the fast count store collections can temporarily differ if
                                 // validation is called when the primary has updated entries based on writes it
@@ -126,7 +130,7 @@ function validateCollectionsImpl(db, obj) {
     let full_res = {ok: 1, failed_res: [], hashes: {}};
 
     // Don't run validate on view namespaces.
-    let filter = filterGetAllCollectionsExcludingViews();
+    let filter = {type: {$ne: "view"}};
 
     // Optionally skip collections.
     if (
@@ -166,9 +170,11 @@ function validateCollectionsImpl(db, obj) {
                 return false;
             }
             // If the new filter {type: {$ne: "view"}} fails with InvalidViewDefinition in
-            // multiversion environments, fall back to the old filter
+            // multiversion environments, fall back to the legacy "exclude views and
+            // timeseries" filter that matches only collections (or entries with no 'type'
+            // field on older servers).
             if (ex.code === ErrorCodes.InvalidViewDefinition) {
-                filter = filterGetAllCollectionsExcludingViewsAndTimeseries();
+                filter = {$or: [{type: "collection"}, {type: {$exists: false}}]};
                 return false; // Retry with the fallback filter
             }
             throw ex;
@@ -181,12 +187,19 @@ function validateCollectionsImpl(db, obj) {
         const res = coll.validate(obj);
 
         if (!res.ok || !res.valid) {
-            if (jsTest.options().skipValidationOnNamespaceNotFound && res.codeName === "NamespaceNotFound") {
+            if (
+                jsTest.options().skipValidationOnNamespaceNotFound &&
+                res.codeName === "NamespaceNotFound"
+            ) {
                 // During a 'stopStart' backup/restore on the secondary node, the actual list of
                 // collections can be out of date if ops are still being applied from the oplog.
                 // In this case we skip the collection if the ns was not found at time of
                 // validation and continue to next.
-                print("Skipping collection validation for " + coll.getFullName() + " since collection was not found");
+                print(
+                    "Skipping collection validation for " +
+                        coll.getFullName() +
+                        " since collection was not found",
+                );
                 continue;
             } else if (
                 res.codeName === "NamespaceNotFound" &&
@@ -204,11 +217,15 @@ function validateCollectionsImpl(db, obj) {
                 // Even though we pass a filter to getCollectionInfos() to only fetch
                 // collections, nothing is preventing the collection from being dropped and
                 // recreated as a view.
-                print("Skipping collection validation for " + coll.getFullName() + " as it is a view");
+                print(
+                    "Skipping collection validation for " + coll.getFullName() + " as it is a view",
+                );
                 continue;
             }
             const host = db.getMongo().host;
-            print("Collection validation failed on host " + host + " with response: " + tojson(res));
+            print(
+                "Collection validation failed on host " + host + " with response: " + tojson(res),
+            );
             dumpCollection(coll, 100);
             full_res.failed_res.push(res);
             full_res.ok = 0;
@@ -238,7 +255,10 @@ function validateCollectionsThread(newMongoWithRetry, validatorFunc, host) {
 
         // Skip fast count validation on nodes using FCBIS since FCBIS can result in inaccurate fast
         // counts.
-        if (conn.adminCommand({getParameter: 1, initialSyncMethod: 1}).initialSyncMethod === "fileCopyBased") {
+        if (
+            conn.adminCommand({getParameter: 1, initialSyncMethod: 1}).initialSyncMethod ===
+            "fileCopyBased"
+        ) {
             print(
                 "Skipping fast count validation against test node: " +
                     host +
@@ -276,8 +296,10 @@ function validateCollectionsThread(newMongoWithRetry, validatorFunc, host) {
                     full: false,
                     // TODO (SERVER-24266): Always enforce fast counts, once they are always
                     // accurate.
-                    enforceFastCount: !TestData.skipEnforceFastCountOnValidate && !TestData.allowUncleanShutdowns,
-                    enforceFastSize: !TestData.allowUncleanShutdowns && TestData.enforceFastSizeOnValidate,
+                    enforceFastCount:
+                        !TestData.skipEnforceFastCountOnValidate && !TestData.allowUncleanShutdowns,
+                    enforceFastSize:
+                        !TestData.allowUncleanShutdowns && TestData.enforceFastSizeOnValidate,
                     collHash: true,
                 });
                 if (validateRes.ok !== 1) {

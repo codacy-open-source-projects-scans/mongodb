@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/server_status/server_status_metric.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/service_context.h"
@@ -43,6 +16,8 @@
 #include <deque>
 #include <memory>
 #include <new>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 #include <absl/container/node_hash_set.h>
@@ -65,7 +40,7 @@ class AppendMergedTreesInvocation {
         }
 
         /** The name of the child element to which this refers. Requires `!done()`. */
-        StringData key() const {
+        std::string_view key() const {
             return _iter->first;
         }
 
@@ -133,7 +108,7 @@ class AppendMergedTreesInvocation {
         BSONObjBuilder* bob;
         std::unique_ptr<BSONObjBuilder> bobStorage;
         bool inSubtreePhase;
-        StringData key;
+        std::string_view key;
         BSONObj excludePaths;
     };
 
@@ -190,7 +165,7 @@ private:
      * excluded, then this returns false and the embedded subtree under that key
      * for use in recursive descent, hence the `std::pair` return type.
      */
-    std::pair<bool, BSONObj> _applyExclusion(StringData key) {
+    std::pair<bool, BSONObj> _applyExclusion(std::string_view key) {
         Frame& frame = _stack.back();
         auto el = frame.excludePaths.getField(key);
         if (!el)
@@ -211,6 +186,7 @@ private:
         auto sub = std::make_unique<BSONObjBuilder>(frame.bob->subobjStart(key));
         auto subPtr = &*sub;
         std::vector<TreeNodeCursor> cursors;
+        cursors.reserve(relevant.size());
         for (auto&& cp : relevant)
             cursors.push_back(TreeNodeCursor{&cp->getSubtree()});
         return Frame{
@@ -234,6 +210,7 @@ private:
     /** Initialize with a frame pointing at the start of the roots of all trees. */
     void _init(std::vector<const MetricTree*> trees, BSONObjBuilder* b, BSONObj excludePaths) {
         std::vector<TreeNodeCursor> cursors;
+        cursors.reserve(trees.size());
         for (const MetricTree* node : trees)
             cursors.push_back(TreeNodeCursor{node});
         _stack.push_back(Frame{std::move(cursors), b, nullptr, false, "", std::move(excludePaths)});
@@ -263,8 +240,9 @@ private:
     }
 
     /** Returns current path built from the `_stack` keys. */
-    std::vector<StringData> _pathDiag() const {
-        std::vector<StringData> parts;
+    std::vector<std::string_view> _pathDiag() const {
+        std::vector<std::string_view> parts;
+        parts.reserve(_stack.size());
         for (auto&& fr : _stack)
             parts.push_back(fr.key);
         return parts;
@@ -273,7 +251,7 @@ private:
     /** The `_pathDiag` vector, joined by dots. */
     std::string _pathDiagJoin() const {
         std::string r;
-        StringData sep;
+        std::string_view sep;
         for (auto s : _pathDiag()) {
             (r += sep) += s;
             sep = ".";
@@ -285,9 +263,26 @@ private:
     std::deque<Frame> _stack;
 };
 
+/**
+ * Returns true iff called on the process's main thread.
+ *
+ * The main thread's id is captured on the first call. For metric registration that first call
+ * always happens during single-threaded startup -- static MetricBuilder construction and
+ * MONGO_INITIALIZERs run on the main thread before any other thread is created -- so the captured
+ * id is the main thread's. This is correct on every platform, unlike a getpid()==gettid()
+ * comparison (on macOS and Windows the main thread's OS thread id never equals the process id).
+ */
+bool isMainThread() {
+    static const std::thread::id mainThreadId = std::this_thread::get_id();
+    return std::this_thread::get_id() == mainThreadId;
+}
+
 }  // namespace
 
-void MetricTree::add(StringData path, std::unique_ptr<ServerStatusMetric> metric) {
+void MetricTree::add(std::string_view path, std::unique_ptr<ServerStatusMetric> metric) {
+    invariant(!_frozen,
+              fmt::format("Cannot add metric '{}' after the MetricTreeSet has been frozen", path));
+    invariant(isMainThread(), fmt::format("Cannot add metric '{}' from a non-main thread", path));
     // Never add metrics with empty names.
     // If there's a leading ".", strip it.
     // Otherwise, we're really adding with an implied "metrics." prefix.
@@ -302,8 +297,8 @@ void MetricTree::add(StringData path, std::unique_ptr<ServerStatusMetric> metric
     }
 }
 
-void MetricTree::_add(StringData path, std::unique_ptr<ServerStatusMetric> metric) {
-    StringData tail = path;
+void MetricTree::_add(std::string_view path, std::unique_ptr<ServerStatusMetric> metric) {
+    std::string_view tail = path;
     MetricTree* sub = this;
     while (true) {
         // Walk the tree popping heads and creating interior nodes until there's no more tail.
@@ -316,7 +311,7 @@ void MetricTree::_add(StringData path, std::unique_ptr<ServerStatusMetric> metri
             return;
         }
         // Found a dot, so hop to an interior node, creating it if necessary.
-        StringData part = tail.substr(0, dot);
+        std::string_view part = tail.substr(0, dot);
         tail = tail.substr(dot + 1);
         auto iter = sub->_children.find(part);
         if (iter != sub->_children.end()) {
@@ -331,7 +326,7 @@ void MetricTree::_add(StringData path, std::unique_ptr<ServerStatusMetric> metri
     }
 }
 
-void MetricTree::removeForTests(StringData path) {
+void MetricTree::removeForTests(std::string_view path) {
     if (path.empty()) {
         return;
     }
@@ -343,16 +338,17 @@ void MetricTree::removeForTests(StringData path) {
     } else {
         _removeForTests(fmt::format("metrics.{}", path));
     }
+    _frozen = false;
 }
 
-void MetricTree::_removeForTests(StringData path) {
+void MetricTree::_removeForTests(std::string_view path) {
     // Walk the path, recording (parent, key) pairs so we can prune empty subtrees afterward.
     struct Node {
         MetricTree* parent;
         std::string key;
     };
     std::vector<Node> stack;
-    StringData tail = path;
+    std::string_view tail = path;
     MetricTree* subTree = this;
 
     while (true) {
@@ -363,7 +359,7 @@ void MetricTree::_removeForTests(StringData path) {
             break;
         }
 
-        StringData part = tail.substr(0, dot);
+        std::string_view part = tail.substr(0, dot);
         tail = tail.substr(dot + 1);
         auto iter = subTree->_children.find(part);
 
@@ -405,6 +401,12 @@ MetricTree& MetricTreeSet::operator[](ClusterRole role) {
     if (role.hasExclusively(ClusterRole::RouterServer))
         return _router;
     MONGO_UNREACHABLE;
+}
+
+void MetricTreeSet::freeze() {
+    _none.freeze();
+    _shard.freeze();
+    _router.freeze();
 }
 
 MetricTreeSet& globalMetricTreeSet() {

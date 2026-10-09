@@ -6,9 +6,9 @@
 import {getCommandName} from "jstests/libs/cmd_object_utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {isFCVlt, isStableFCVSuite} from "jstests/libs/feature_compatibility_version.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
+import {RetryableWritesUtil} from "jstests/libs/retryable_writes_util.js";
 
 // Checks if the viewless timeseries feature flag is currently enabled.
 // Do not use this function in passthrough tests, because the feature flag may get enabled or
@@ -39,7 +39,10 @@ export function runningWithViewlessTimeseriesUpgradeDowngrade(db) {
         return false;
     }
 
-    const flagDoc = FeatureFlagUtil.getFeatureFlagDoc(db.getMongo(), "CreateViewlessTimeseriesCollections");
+    const flagDoc = FeatureFlagUtil.getFeatureFlagDoc(
+        db.getMongo(),
+        "CreateViewlessTimeseriesCollections",
+    );
     if (!flagDoc.value) {
         // The feature flag is disabled (in all FCVs).
         return false;
@@ -59,7 +62,10 @@ export function isViewlessTimeseriesOnlySuite(db) {
     // In FCV upgrade/downgrade suite, the suite is viewless-only if the flag has been enabled since
     // last LTS (example: viewless timeseries released in FCV 9.0, we are in binary 9.1 running a
     // FCV 9.0 - FCV 9.1 upgrade/downgrade suite --> all collections are viewless).
-    const flagDoc = FeatureFlagUtil.getFeatureFlagDoc(db.getMongo(), "CreateViewlessTimeseriesCollections");
+    const flagDoc = FeatureFlagUtil.getFeatureFlagDoc(
+        db.getMongo(),
+        "CreateViewlessTimeseriesCollections",
+    );
     return flagDoc.value && MongoRunner.compareBinVersions(lastLTSFCV, flagDoc.version) >= 0;
 }
 
@@ -70,7 +76,11 @@ export function isViewfulTimeseriesOnlySuite(db) {
     }
 
     // Check if the viewless timeseries feature flag is disabled in the latest FCV.
-    return !FeatureFlagUtil.isPresentAndEnabled(db, "CreateViewlessTimeseriesCollections", true /* ignoreFCV */);
+    return !FeatureFlagUtil.isPresentAndEnabled(
+        db,
+        "CreateViewlessTimeseriesCollections",
+        true /* ignoreFCV */,
+    );
 }
 
 /**
@@ -78,7 +88,10 @@ export function isViewfulTimeseriesOnlySuite(db) {
  * TODO SERVER-101609 remove this function once 9.0 becomes lastLTS.
  */
 export function assertTimeseriesConsistentWithViewlessFlag(db) {
-    const viewlessEnabled = FeatureFlagUtil.isPresentAndEnabled(db, "CreateViewlessTimeseriesCollections");
+    const viewlessEnabled = FeatureFlagUtil.isPresentAndEnabled(
+        db,
+        "CreateViewlessTimeseriesCollections",
+    );
     const dbNames = assert
         .commandWorked(db.adminCommand({listDatabases: 1, nameOnly: true}))
         .databases.map((d) => d.name);
@@ -201,12 +214,15 @@ export function runTimeseriesChunkCommand(db, cmdObj) {
             if (
                 lastRes.ok ||
                 (!expectedErrorCodes.includes(lastRes.code) &&
-                    lastRes.code !== ErrorCodes.CommandNotSupportedOnLegacyTimeseriesBucketsNamespace)
+                    lastRes.code !==
+                        ErrorCodes.CommandNotSupportedOnLegacyTimeseriesBucketsNamespace)
             ) {
                 return true;
             }
 
-            jsTest.log.info(`Backing off because timeseries chunk operation ${cmdName} failed on both namespaces`);
+            jsTest.log.info(
+                `Backing off because timeseries chunk operation ${cmdName} failed on both namespaces`,
+            );
             return false;
         },
         () => `Chunk command failed for ${originalNs}: ${tojson(lastRes)}`,
@@ -226,7 +242,14 @@ export function findTimeseriesConfigCollectionsDocument(coll) {
                     .getDB()
                     .getSiblingDB("config")
                     .collections.findOne(
-                        {_id: {$in: [coll.getFullName(), getTimeseriesBucketsColl(coll).getFullName()]}},
+                        {
+                            _id: {
+                                $in: [
+                                    coll.getFullName(),
+                                    getTimeseriesBucketsColl(coll).getFullName(),
+                                ],
+                            },
+                        },
                         {} /* projection */,
                         {} /* options */,
                         "snapshot",
@@ -239,8 +262,8 @@ export function findTimeseriesConfigCollectionsDocument(coll) {
                     return null;
                 }
 
-                if (e.code === ErrorCodes.HostUnreachable) {
-                    // Retry if the host is not available.
+                if (RetryableWritesUtil.isRetryableCode(e.code) && retries > 0) {
+                    // Retry if the error is retryable.
                     sleep(500);
                     continue;
                 }
@@ -271,18 +294,6 @@ export function isTrackedTimeseries(coll) {
 }
 
 /**
- * TODO SERVER-101609 once 9.0 becomes last LTS we can remove this function and directly use
- * FixtureHelpers::numberOfShardsForCollection on the given collection.
- */
-export function numberOfShardsForTimeseriesCollection(coll) {
-    const collEntry = findTimeseriesConfigCollectionsDocument(coll);
-    if (collEntry === null) {
-        return 1;
-    }
-    return coll.getDB().getSiblingDB("config").chunks.distinct("shard", {uuid: collEntry.uuid}).length;
-}
-
-/**
  * Checks that the namespace targeted by `commandResult` the command matches `coll`,
  * modulo quirks of translation to system.buckets for legacy timeseries.
  */
@@ -298,7 +309,9 @@ export function assertExplainTargetsExpectedTimeseriesNamespace(
     if (commandResult.command.findAndModify && !isViewlessTimeseriesOnlySuite(db)) {
         if (
             mayConcurrentlyTrackOrUntrack ||
-            (TestData.runningWithBalancer && isTrackedTimeseries(coll) && !isShardedTimeseries(coll))
+            (TestData.runningWithBalancer &&
+                isTrackedTimeseries(coll) &&
+                !isShardedTimeseries(coll))
         ) {
             // If the collection is tracked or untracked findAndModify explain returns either the buckets or main timeseries namespace
             // In suites with enabled balancer the collection could randomly became tracked.
@@ -309,15 +322,6 @@ export function assertExplainTargetsExpectedTimeseriesNamespace(
         }
 
         if (isTrackedTimeseries(coll)) {
-            if (isFCVlt(db.getMongo(), "8.3")) {
-                // In versions 8.2 findAndModify explain return the main namespace instead of the system.buckets
-                // TODO SERVER-114161 enable the check once the fix have been backported to previous versions
-                jsTest.log(
-                    "Skipping namespace check for findAndModify explain output since FCV is less then 8.3 (BACKPORT-26389)",
-                );
-                return;
-            }
-
             // In sharded clusters for findAndModify over legacy tracked timeseries we convert the namespace on the router and we send the command
             // with translated namespace to the shard,
             // thus we expect explain to report the command targeting system.buckets internal namespace.

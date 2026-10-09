@@ -1,44 +1,20 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
+#include "mongo/db/exec/sbe/stages/extract_field_paths.h"
 #include "mongo/db/exec/sbe/stages/fetch.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
-#include "mongo/db/exec/sbe/stages/window.h"
 #include "mongo/db/exec/sbe/values/path_request.h"
 #include "mongo/db/query/stage_builder/sbe/builder_state.h"
 #include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo::stage_builder {
 inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result) {}
@@ -120,6 +96,11 @@ inline SbIndexInfoType operator~(SbIndexInfoType t) {
     return static_cast<SbIndexInfoType>(~static_cast<uint32_t>(t));
 }
 
+/**
+ * Bounds for a single-range or unbounded scan that the stage builder turns into a ScanStage (or
+ * a GenericScanStage when both slots are absent). For non-contiguous multi-range scans, pass in
+ * the RecordIdRangeList object directly instead.
+ */
 struct SbScanBounds {
     boost::optional<SbSlot> minRecordIdSlot;
     boost::optional<SbSlot> maxRecordIdSlot;
@@ -168,7 +149,7 @@ public:
     SbExpr makeInt64Constant(int64_t num);
     SbExpr makeDoubleConstant(double num);
     SbExpr makeDecimalConstant(const Decimal128& num);
-    SbExpr makeStrConstant(StringData str);
+    SbExpr makeStrConstant(std::string_view str);
     SbExpr makeUndefinedConstant();
 
     SbExpr makeFunction(sbe::EFn fn, SbExpr::Vector args);
@@ -187,7 +168,7 @@ public:
 
     SbExpr makeNumericConvert(SbExpr expr, sbe::value::TypeTags tag);
 
-    SbExpr makeFail(ErrorCodes::Error error, StringData errorMessage);
+    SbExpr makeFail(ErrorCodes::Error error, std::string_view errorMessage);
 
     /**
      * Check if expression returns Nothing and return 'altExpr' if so. Otherwise, return the
@@ -309,11 +290,6 @@ public:
     sbe::SlotExprPairVector lower(SbExprSlotVector& sbSlotSbExprVec,
                                   const VariableTypes* varTypes = nullptr);
 
-    sbe::WindowStage::Window lower(SbWindow& sbWindow, const VariableTypes* varTypes = nullptr);
-
-    std::vector<sbe::WindowStage::Window> lower(std::vector<SbWindow>& sbWindows,
-                                                const VariableTypes* varTypes = nullptr);
-
 protected:
     StageBuilderState& _state;
 };
@@ -335,20 +311,30 @@ public:
         _nodeId = nodeId;
     }
 
-    std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> makeScan(
-        UUID collectionUuid,
-        DatabaseName dbName,
-        bool forward = true,
-        std::vector<std::string> scanFieldNames = {},
-        const SbScanBounds& scanBounds = {},
-        const SbIndexInfoSlots& indexInfoSlots = {},
-        sbe::ScanOpenCallback scanOpenCallback = {},
-        boost::optional<SbSlot> oplogTsSlot = boost::none);
+    using MakeScanResult = std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector>;
+
+    MakeScanResult makeScan(UUID collectionUuid,
+                            DatabaseName dbName,
+                            bool forward = true,
+                            std::vector<std::string> scanFieldNames = {},
+                            const SbScanBounds& scanBounds = {},
+                            const SbIndexInfoSlots& indexInfoSlots = {},
+                            sbe::ScanOpenCallback scanOpenCallback = {},
+                            boost::optional<SbSlot> oplogTsSlot = boost::none);
+
+    // Multi-range overload: produces a MultiRangeClusteredScanStage.
+    MakeScanResult makeScan(UUID collectionUuid,
+                            DatabaseName dbName,
+                            bool forward,
+                            std::vector<std::string> scanFieldNames,
+                            RecordIdRangeList scanBounds,
+                            const SbIndexInfoSlots& indexInfoSlots = {},
+                            sbe::ScanOpenCallback scanOpenCallback = {});
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeSimpleIndexScan(
         UUID collectionUuid,
         DatabaseName dbName,
-        StringData indexName,
+        std::string_view indexName,
         const BSONObj& keyPattern,
         bool forward = true,
         SbExpr lowKeyExpr = SbExpr{},
@@ -371,7 +357,7 @@ public:
         const VariableTypes& varTypes,
         UUID collectionUuid,
         DatabaseName dbName,
-        StringData indexName,
+        std::string_view indexName,
         const BSONObj& keyPattern,
         bool forward = true,
         SbExpr lowKeyExpr = SbExpr{},
@@ -382,7 +368,7 @@ public:
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeGenericIndexScan(
         UUID collectionUuid,
         DatabaseName dbName,
-        StringData indexName,
+        std::string_view indexName,
         const BSONObj& keyPattern,
         bool forward,
         SbExpr boundsExpr,
@@ -407,7 +393,7 @@ public:
         const VariableTypes& varTypes,
         UUID collectionUuid,
         DatabaseName dbName,
-        StringData indexName,
+        std::string_view indexName,
         const BSONObj& keyPattern,
         bool forward,
         SbExpr boundsExpr,
@@ -547,29 +533,6 @@ public:
     std::tuple<SbStage, SbSlotVector> makeAggProject(const VariableTypes& varTypes,
                                                      SbStage stage,
                                                      SbBlockAggExprVector sbBlockAggExprs);
-
-    SbStage makeWindow(SbStage stage,
-                       const SbSlotVector& currSlots,
-                       const SbSlotVector& boundTestingSlots,
-                       size_t partitionSlotCount,
-                       std::vector<SbWindow> windows,
-                       boost::optional<sbe::value::SlotId> collatorSlot) {
-        return makeWindow(VariableTypes{},
-                          std::move(stage),
-                          currSlots,
-                          boundTestingSlots,
-                          partitionSlotCount,
-                          std::move(windows),
-                          collatorSlot);
-    }
-
-    SbStage makeWindow(const VariableTypes& varTypes,
-                       SbStage stage,
-                       const SbSlotVector& currSlots,
-                       const SbSlotVector& boundTestingSlots,
-                       size_t partitionSlotCount,
-                       std::vector<SbWindow> windows,
-                       boost::optional<sbe::value::SlotId> collatorSlot);
 
     std::tuple<SbStage, SbSlot, SbSlot> makeUnwind(SbStage stage,
                                                    SbSlot inputSlot,
@@ -740,6 +703,10 @@ public:
                                const SbIndexInfoSlots& indexInfoSlots,
                                sbe::FetchCallbacks scanCallbacks);
 
+    SbStage makeExtractFieldPaths(SbStage child,
+                                  std::vector<sbe::PathSlot> inputs,
+                                  std::vector<sbe::PathSlot> outputs,
+                                  PlanNodeId nodeId);
 
 protected:
     SbIndexInfoSlots allocateIndexInfoSlots(SbIndexInfoType indexInfoTypeMask,

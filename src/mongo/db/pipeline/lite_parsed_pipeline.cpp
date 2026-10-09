@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/server_options.h"
@@ -42,6 +16,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <string_view>
 
 
 namespace mongo {
@@ -145,8 +121,10 @@ void LiteParsedPipeline::tickGlobalStageCounters() const {
         // Tick counter corresponding to current stage.
         aggStageCounters.increment(stage->getParseTimeName(), 1);
         // Recursively step through any sub-pipelines.
-        for (auto&& subPipeline : stage->getSubPipelines()) {
-            subPipeline.tickGlobalStageCounters();
+        if (auto* subPipelines = stage->getSubPipelines()) {
+            for (auto&& subPipeline : *subPipelines) {
+                subPipeline->tickGlobalStageCounters();
+            }
         }
     }
 }
@@ -155,14 +133,14 @@ void LiteParsedPipeline::validate(const OperationContext* opCtx,
                                   bool performApiVersionChecks) const {
     for (auto stage_it = _stageSpecs.begin(); stage_it != _stageSpecs.end(); stage_it++) {
         const auto& stage = *stage_it;
-        // TODO SERVER-121974 This can be removed once hybrid search views are validated in
+        // TODO SERVER-121094 This can be removed once hybrid search views are validated in
         // LiteParsed using the LiteParsedConstraints.
         uassert(10170100,
                 "$rankFusion/$scoreFusion can only be the first stage of an aggregation pipeline.",
                 !((stage_it != _stageSpecs.begin()) && stage->isHybridSearchStage() &&
                   !isRunningAgainstView_ForHybridSearch()));
 
-        stage->validate();
+        stage->validate(opCtx);
 
         const auto& stageName = (*stage_it)->getParseTimeName();
         const auto& stageApiStrict = (*stage_it)->getApiStrict();
@@ -182,17 +160,45 @@ void LiteParsedPipeline::validate(const OperationContext* opCtx,
                 opCtx, stageName, stageApiStrict, stageClientType, sometimesCallback);
         }
 
-        for (auto&& subPipeline : stage->getSubPipelines()) {
-            subPipeline.validate(opCtx, performApiVersionChecks);
+        if (auto* subPipelines = stage->getSubPipelines()) {
+            for (auto&& subPipeline : *subPipelines) {
+                subPipeline->validate(opCtx, performApiVersionChecks);
+            }
         }
     }
+}
+
+void LiteParsedPipeline::validateAllowPartialResults(const AggregateCommandRequest& request) const {
+    if (!request.getAllowPartialResults().value_or(false)) {
+        return;
+    }
+
+    // Write stages ($out/$merge) persist data on the shards. Silently dropping the contribution of
+    // an unreachable shard could produce an incorrect or partial write, so partial results are not
+    // permitted.
+    uassert(ErrorCodes::InvalidOptions,
+            "allowPartialResults is not supported for aggregations with write stages",
+            !endsWithWriteStage());
+
+    // Change streams are continuous, tailable cursors that must observe every shard to avoid
+    // silently missing events; returning partial results would break their correctness guarantees.
+    uassert(ErrorCodes::InvalidOptions,
+            "allowPartialResults is not supported for change stream aggregations",
+            !hasChangeStream());
+
+    // Search-family stages ($search, $vectorSearch, $rankFusion, $scoreFusion, and their extension
+    // variants) are served by mongot, not the regular shard cursor path, so the router-level
+    // partial-results mechanism does not apply to them.
+    uassert(ErrorCodes::InvalidOptions,
+            "allowPartialResults is not supported for search aggregations",
+            !hasMongotStage());
 }
 
 void LiteParsedPipeline::validateTimeseries() const {
     for (const auto& stage : _stageSpecs) {
         auto stageConstraints = stage->constraints();
         auto unsupportedStage = stageConstraints.timeseriesUnsupportedStageName.value_or(
-            StringData(stage->getParseTimeName()));
+            std::string_view(stage->getParseTimeName()));
         uassert(12093200,
                 str::stream() << unsupportedStage << " is unsupported for timeseries collections",
                 stageConstraints.canRunOnTimeseries);
@@ -211,8 +217,10 @@ void LiteParsedPipeline::checkStagesAllowedInViewDefinition() const {
                 "$score is currently unsupported in a view definition",
                 !(stage->getParseTimeName() == "$score"));
 
-        for (auto&& subPipeline : stage->getSubPipelines()) {
-            subPipeline.checkStagesAllowedInViewDefinition();
+        if (auto* subPipelines = stage->getSubPipelines()) {
+            for (auto&& subPipeline : *subPipelines) {
+                subPipeline->checkStagesAllowedInViewDefinition();
+            }
         }
     }
 }
@@ -224,6 +232,12 @@ size_t LiteParsedPipeline::replaceStageWith(
                           << _stageSpecs.size(),
             index < _stageSpecs.size());
 
+    // Own each new stage's BSON before erasing the old stage: the old stage may own the backing
+    // of cloned subpipeline stages in newSources (e.g. a desugared $rankFusion/$scoreFusion).
+    for (auto& src : newSources) {
+        src->makeOwned();
+    }
+
     auto& stages = _stageSpecs;
     const auto numInserted = newSources.size();
 
@@ -232,12 +246,19 @@ size_t LiteParsedPipeline::replaceStageWith(
                   std::make_move_iterator(newSources.begin()),
                   std::make_move_iterator(newSources.end()));
 
+    // If we just expanded one of the view-definition stages prepended by handleView(), the boundary
+    // between view stages and user stages moves by the number of stages we added (or removed).
+    if (index < _numPrependedViewStages) {
+        _numPrependedViewStages = _numPrependedViewStages + numInserted - 1;
+    }
+
     return index + numInserted;
 }
 
 void LiteParsedPipeline::_stitchFront(LiteParsedPipeline&& prefix) {
+    const size_t numPrefixStages = prefix._stageSpecs.size();
     std::vector<std::unique_ptr<LiteParsedDocumentSource>> newStages;
-    newStages.reserve(prefix._stageSpecs.size() + _stageSpecs.size());
+    newStages.reserve(numPrefixStages + _stageSpecs.size());
 
     // Move prefix stages first.
     for (auto& stage : prefix._stageSpecs) {
@@ -249,14 +270,39 @@ void LiteParsedPipeline::_stitchFront(LiteParsedPipeline&& prefix) {
         newStages.push_back(std::move(stage));
     }
 
+    _numPrependedViewStages += numPrefixStages;
     _stageSpecs = std::move(newStages);
     resetDeferredCaches();
 }
 
-void LiteParsedPipeline::handleView(const ViewInfo& viewInfo,
+FirstStageViewApplicationPolicy LiteParsedPipeline::getUserFirstStageViewApplicationPolicy() const {
+    if (!_hasUserStages()) {
+        // Either the pipeline is empty or it consists entirely of prepended view stages: there is
+        // no user stage that could apply the view on its own.
+        return FirstStageViewApplicationPolicy::kDefaultPrepend;
+    }
+    return _getFirstUserStage()->getFirstStageViewApplicationPolicy();
+}
+
+bool LiteParsedPipeline::_hasUserStages() const {
+    return _numPrependedViewStages < _stageSpecs.size();
+}
+
+const LiteParsedDocumentSource* LiteParsedPipeline::_getFirstUserStage() const {
+    tassert(13296301,
+            "Cannot get the first user stage of a pipeline that has no user stages",
+            _hasUserStages());
+    return _stageSpecs[_numPrependedViewStages].get();
+}
+
+void LiteParsedPipeline::handleView(const ResolvedNamespace& view,
                                     const ResolvedNamespaceMap& resolvedNamespaces) {
-    for (auto& stage : _stageSpecs) {
-        stage->bindViewInfo(viewInfo, resolvedNamespaces);
+    bindResolvedNamespaceToStages(view, resolvedNamespaces, 0, _stageSpecs.size());
+
+    if (view.getNamespace().isEmpty()) {
+        // No top-level view to prepend; bindResolvedNamespace has already done all the work that's
+        // possible against an empty sentinel view.
+        return;
     }
 
     const auto firstStagePolicy = _stageSpecs.empty()
@@ -265,8 +311,28 @@ void LiteParsedPipeline::handleView(const ViewInfo& viewInfo,
     if (firstStagePolicy == FirstStageViewApplicationPolicy::kDefaultPrepend) {
         // If the first stage doesn't explicitly disallow it, clone and prepend the desugared view
         // pipeline to the current pipeline.
-        auto clonedViewPipe = viewInfo.getViewPipeline();
+        auto clonedViewPipe = view.getViewPipeline();
+
+        // The view-definition stages may themselves carry subpipelines that target views (e.g. a
+        // $unionWith inside the view definition). Bind view info on them so they can inspect
+        // 'resolvedNamespaces'.
+        for (auto& stage : clonedViewPipe._stageSpecs) {
+            if (!stage->isHybridSearchStage()) {
+                stage->bindResolvedNamespace(ResolvedNamespace{}, resolvedNamespaces);
+            }
+        }
+
         _stitchFront(std::move(clonedViewPipe));
+    }
+}
+
+void LiteParsedPipeline::bindResolvedNamespaceToStages(
+    const ResolvedNamespace& view,
+    const ResolvedNamespaceMap& resolvedNamespaces,
+    size_t start,
+    size_t end) {
+    for (size_t i = start; i < end; ++i) {
+        _stageSpecs[i]->bindResolvedNamespace(view, resolvedNamespaces);
     }
 }
 

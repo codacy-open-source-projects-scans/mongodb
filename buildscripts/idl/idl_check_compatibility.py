@@ -1,30 +1,5 @@
-# Copyright (C) 2021-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 """Checks compatibility of old and new IDL files.
 
 In order to support user-selectable API versions for the server, server commands are now
@@ -43,6 +18,7 @@ import re
 import sys
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Union
 
 import yaml
@@ -55,19 +31,18 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-# Load rules from "compatibility_rules.yml" file in this directory.
+# The rules live under buildscripts/private/idl
+RULES_FILE = Path(__file__).resolve().parent.parent / "private" / "idl" / "compatibility_rules.yml"
+
+
 def load_rules_file() -> dict:
-    abs_filename = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "compatibility_rules.yml"
-    )
-    if not os.path.exists(abs_filename):
-        raise ValueError(f"Rules file {abs_filename} not found")
+    if not RULES_FILE.exists():
+        raise ValueError(f"Rules file {RULES_FILE} not found")
 
-    with open(abs_filename, encoding="utf8") as file:
-        return yaml.safe_load(file)
+    return yaml.safe_load(RULES_FILE.read_text(encoding="utf8"))
 
 
-# Load compatibility rules from "compatibility_rules.yml" file in this directory.
+# Load compatibility rules from the private "compatibility_rules.yml" file.
 rules = load_rules_file()
 
 # Load the subsections from the global "rules.yml" file into separate global variables.
@@ -113,7 +88,10 @@ class AllowedNewPrivilege:
 ALLOWED_NEW_ACCESS_CHECK_PRIVILEGES: dict[str, list[AllowedNewPrivilege]] = dict(
     # Do not add any command other than the aggregate command or any privilege that is not required
     # only by an aggregation stage not present in previously released versions.
-    aggregate=[],
+    aggregate=[
+        # Added in 9.1 for $collStats to support querying unfiltered metrics (SERVER-133544).
+        AllowedNewPrivilege("cluster", ["getUnfilteredMetrics"], "collStats"),
+    ],
     # This list is only used in unit-tests.
     complexChecksSupersetAllowed=[
         AllowedNewPrivilege("resourcePatternTwo", ["actionTypeTwo"]),
@@ -560,8 +538,19 @@ def check_reply_field_type(ctxt: IDLCompatibilityContext, field_pair: FieldCompa
         return
 
     if array_check == ArrayTypeCheckResult.TRUE:
-        old_field.field_type = old_field.field_type.element_type
-        new_field.field_type = new_field.field_type.element_type
+        if not isinstance(old_field.field_type, syntax.ArrayType) or not isinstance(
+            new_field.field_type, syntax.ArrayType
+        ):
+            # One side uses an unparameterized 'array' type which has no element_type.
+            # This path is only reachable for unstable fields, so the change is permitted
+            # and no element-level compatibility check is needed.
+            return
+        # Only unwrap values that are ArrayType instances. For unstable fields, the array check
+        # may pass even if only one side is an ArrayType, so each side is unwrapped independently.
+        if isinstance(old_field.field_type, syntax.ArrayType):
+            old_field.field_type = old_field.field_type.element_type
+        if isinstance(new_field.field_type, syntax.ArrayType):
+            new_field.field_type = new_field.field_type.element_type
 
     old_field_type = old_field.field_type
     new_field_type = new_field.field_type
@@ -1091,8 +1080,19 @@ def check_param_or_command_type(
         return
 
     if array_check == ArrayTypeCheckResult.TRUE:
-        old_field.field_type = old_field.field_type.element_type
-        new_field.field_type = new_field.field_type.element_type
+        if not isinstance(old_field.field_type, syntax.ArrayType) or not isinstance(
+            new_field.field_type, syntax.ArrayType
+        ):
+            # One side uses an unparameterized 'array' type which has no element_type.
+            # This path is only reachable for unstable fields, so the change is permitted
+            # and no element-level compatibility check is needed.
+            return
+        # Only unwrap values that are ArrayType instances. For unstable fields, the array check
+        # may pass even if only one side is an ArrayType, so each side is unwrapped independently.
+        if isinstance(old_field.field_type, syntax.ArrayType):
+            old_field.field_type = old_field.field_type.element_type
+        if isinstance(new_field.field_type, syntax.ArrayType):
+            new_field.field_type = new_field.field_type.element_type
 
     old_type = old_field.field_type
     new_type = new_field.field_type

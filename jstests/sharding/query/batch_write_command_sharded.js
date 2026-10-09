@@ -6,9 +6,8 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// Checking UUID and index consistency involves talking to the config server primary, but there is
-// no config server primary by the end of this test.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+// Checking index consistency involves talking to the config server primary, but there is no config
+// server primary by the end of this test.
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
@@ -47,7 +46,9 @@ var result;
 // Mongos _id autogeneration tests for sharded collections
 
 let coll = st.s.getCollection("foo.bar");
-assert.commandWorked(st.s.adminCommand({enableSharding: coll.getDB().toString(), primaryShard: st.shard1.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: coll.getDB().toString(), primaryShard: st.shard1.shardName}),
+);
 assert.commandWorked(st.s.adminCommand({shardCollection: coll.toString(), key: {_id: 1}}));
 
 //

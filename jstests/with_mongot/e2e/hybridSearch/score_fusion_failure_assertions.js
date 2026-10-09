@@ -7,8 +7,6 @@
  * TODO SERVER-100404: Re-enable this for sharded queries.
  * @tags: [
  *   assumes_unsharded_collection,
- *   featureFlagRankFusionFull,
- *   featureFlagSearchHybridScoringFull,
  *   requires_fcv_82
  * ]
  */
@@ -32,7 +30,10 @@ const vectorSearchClauseAndSearchClause = {
 };
 
 const searchMatchAsClause = {
-    score2: [{$search: {index: "search_index", text: {query: "mystery", path: "genres"}}}, {$match: {author: "dave"}}],
+    score2: [
+        {$search: {index: "search_index", text: {query: "mystery", path: "genres"}}},
+        {$match: {author: "dave"}},
+    ],
 };
 
 const scoreInputPipelines = {
@@ -60,7 +61,9 @@ assert.commandWorked(
     ]),
 );
 
-// Error if the weights array doesn't have elements of type safe double
+// Error if the weights array doesn't have elements of type safe double: the lite-parse desugar
+// path reports 12559404, the legacy flag-off numeric-type check reports 13118.
+// TODO SERVER-121094: drop the flag-off code once featureFlagExtensionsInsideHybridSearch is gone.
 assert.commandFailedWithCode(
     runPipeline([
         {
@@ -70,7 +73,7 @@ assert.commandFailedWithCode(
             },
         },
     ]),
-    13118,
+    [12559404, 13118],
 );
 
 // Check that an array of ints for weights is a valid input
@@ -137,7 +140,9 @@ assert.commandWorked(
 
 // Check that $text match is valid.
 assert.commandWorked(coll.createIndex({text: "text"}));
-assert.commandWorked(runPipeline([{$scoreFusion: {input: {pipelines: textMatchClause, normalization: "none"}}}]));
+assert.commandWorked(
+    runPipeline([{$scoreFusion: {input: {pipelines: textMatchClause, normalization: "none"}}}]),
+);
 
 // Check that unscored pipeline is invalid.
 assert.commandFailedWithCode(
@@ -158,7 +163,10 @@ assert.commandFailedWithCode(
             $scoreFusion: {
                 input: {
                     pipelines: {
-                        pipeOne: [{$score: {score: 2, normalization: "none"}}, {$project: {score3: 1}}],
+                        pipeOne: [
+                            {$score: {score: 2, normalization: "none"}},
+                            {$project: {score3: 1}},
+                        ],
                     },
                     normalization: "none",
                 },

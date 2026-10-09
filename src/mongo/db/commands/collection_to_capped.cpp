@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,10 +23,12 @@
 #include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace {
@@ -115,8 +90,8 @@ public:
                 "'toCollection' must be of type String",
                 toElt.type() == BSONType::string);
 
-        const StringData from(fromElt.valueStringData());
-        const StringData to(toElt.valueStringData());
+        const std::string_view from(fromElt.valueStringData());
+        const std::string_view to(toElt.valueStringData());
 
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid source collection name: " << from,
@@ -134,6 +109,9 @@ public:
 
         NamespaceString fromNs(NamespaceStringUtil::deserialize(dbName, from));
         NamespaceString toNs(NamespaceStringUtil::deserialize(dbName, to));
+
+        ReplicaSetWriteBlockState::get(opCtx)->checkReplicaSetWritesAllowed(
+            opCtx, toNs, ReplicaSetWriteBlockRejectedWriteOp::kInsert);
 
         ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
             opCtx, std::vector<NamespaceString>{fromNs, toNs});

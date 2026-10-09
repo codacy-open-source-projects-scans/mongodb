@@ -36,7 +36,8 @@ export var WriteConflictHelpers = (function () {
 
         if (typeof getWriteConflictsFromAllShards.incompatible === "undefined") {
             const version = getCurrentFCV(coll.getDB());
-            getWriteConflictsFromAllShards.incompatible = MongoRunner.compareBinVersions(version, "7.3") < 0;
+            getWriteConflictsFromAllShards.incompatible =
+                MongoRunner.compareBinVersions(version, "7.3") < 0;
             if (getWriteConflictsFromAllShards.incompatible) {
                 print(`getWriteConflictsFromAllShards skipped for mongod ${version}`);
             }
@@ -47,7 +48,10 @@ export var WriteConflictHelpers = (function () {
         }
 
         try {
-            const results = FixtureHelpers.runCommandOnEachPrimary({db: coll.getDB(), cmdObj: {serverStatus: 1}});
+            const results = FixtureHelpers.runCommandOnEachPrimary({
+                db: coll.getDB(),
+                cmdObj: {serverStatus: 1},
+            });
             return results.reduce((sum, res) => sum + res.metrics.operation.writeConflicts, 0);
         } catch (e) {
             // Errors such as "operation was interrupted" have been seen.
@@ -59,10 +63,11 @@ export var WriteConflictHelpers = (function () {
     function validateWriteConflictsBeforeAndAfter(coll, before, after) {
         if (before != null && after != null) {
             // Transactions on sharded collections can land on multiple shards and increment the
-            // total WCE metric by the number of shards involved. Similarly, BulkWriteOverride turns
-            // a single op into multiple writes and causes multiple WCEs. The unified write executor
-            // implements some writes as bulk writes internally.
-            if (FixtureHelpers.isSharded(coll) || TestData.runningWithBulkWriteOverride) {
+            // total WCE metric by the number of shards involved. Additionaly, on sharded clusters
+            // some background operations can cause WCE and increase the metric. Similarly,
+            // BulkWriteOverride turns a single op into multiple writes and causes multiple WCEs.
+            // The unified write executor implements some writes as bulk writes internally.
+            if (FixtureHelpers.isMongos(coll.getDB()) || TestData.runningWithBulkWriteOverride) {
                 assert.gte(after, before + 1);
             } else {
                 assert.eq(after, before + 1);
@@ -104,7 +109,10 @@ export var WriteConflictHelpers = (function () {
                 assert(!res.hasOwnProperty("writeErrors"));
                 assert.commandFailedWithCode(res, ErrorCodes.WriteConflict);
                 assert.commandWorked(session1.commitTransaction_forTesting());
-                assert.commandFailedWithCode(session2.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+                assert.commandFailedWithCode(
+                    session2.commitTransaction_forTesting(),
+                    ErrorCodes.NoSuchTransaction,
+                );
             },
             () => {
                 session1.abortTransaction_forTesting();
@@ -166,7 +174,10 @@ export var WriteConflictHelpers = (function () {
                 assert.eq(res.ok, 0);
                 assert(!res.hasOwnProperty("writeErrors"));
                 assert.commandFailedWithCode(res, ErrorCodes.WriteConflict);
-                assert.commandFailedWithCode(session1.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+                assert.commandFailedWithCode(
+                    session1.commitTransaction_forTesting(),
+                    ErrorCodes.NoSuchTransaction,
+                );
             },
             () => {
                 session1.abortTransaction_forTesting();

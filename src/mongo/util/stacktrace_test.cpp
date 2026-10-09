@@ -1,41 +1,12 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "bits/types/__sigset_t.h"
 // IWYU pragma: no_include "bits/types/siginfo_t.h"
 // IWYU pragma: no_include "bits/types/stack_t.h"
-#include <fmt/format.h>
-#include <fmt/printf.h>  // IWYU pragma: keep
-#include <fmt/ranges.h>  // IWYU pragma: keep
-// IWYU pragma: no_include "syscall.h"
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/util/stacktrace.h"
+
 #include "mongo/base/parse_number.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/json.h"
@@ -48,7 +19,6 @@
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/signal_handlers_synchronous.h"
-#include "mongo/util/stacktrace.h"
 #include "mongo/util/stacktrace_test_helpers.h"
 
 #include <algorithm>
@@ -66,12 +36,18 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string_view>
 #include <thread>
 #include <vector>
+
+#include <fmt/format.h>
+#include <fmt/printf.h>  // IWYU pragma: keep
+#include <fmt/ranges.h>  // IWYU pragma: keep
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+#include <sys/syscall.h>
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -106,6 +82,7 @@ MONGO_COMPILER_NOINLINE int recurseWithLinkage(RecursionParam& p, std::uint64_t 
 }  // namespace stacktrace_test_detail
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace std::literals::chrono_literals;
 
@@ -136,13 +113,13 @@ private:
 template <typename T>
 class LogVec : public LogAdapter {
 public:
-    explicit LogVec(const T& v, StringData sep = ","_sd) : v(v), sep(sep) {}
+    explicit LogVec(const T& v, std::string_view sep = ","sv) : v(v), sep(sep) {}
 
 private:
     void doPrint(std::ostream& os) const override {
         os << std::hex;
         os << "{";
-        StringData s;
+        std::string_view s;
         for (auto&& e : v) {
             os << s << e;
             s = sep;
@@ -151,14 +128,14 @@ private:
         os << std::dec;
     }
     const T& v;
-    StringData sep = ","_sd;
+    std::string_view sep = ","sv;
 };
 
 uintptr_t fromHex(const std::string& s) {
     return static_cast<uintptr_t>(std::stoull(s, nullptr, 16));
 }
 
-bool consume(const pcre::Regex& re, StringData* in, std::string* out) {
+bool consume(const pcre::Regex& re, std::string_view* in, std::string* out) {
     auto m = re.matchView(*in);
     if (!m)
         return false;
@@ -188,7 +165,7 @@ TEST(StackTrace, PosixFormat) {
     // Each "Frame:" line holds a full json object, but we only examine its "a" field here.
     std::string jsonLine;
     std::vector<uintptr_t> humanAddrs;
-    StringData in{trace};
+    std::string_view in{trace};
     static const pcre::Regex jsonLineRE(R"re(^BACKTRACE: (\{.*\})\n?)re");
     ASSERT_TRUE(consume(jsonLineRE, &in, &jsonLine)) << "\"" << in << "\"";
     while (true) {
@@ -569,10 +546,10 @@ public:
 };
 
 TEST_F(JsonTest, Hex) {
-    ASSERT_EQ(StringData(Hex(static_cast<void*>(0))), "0");
-    ASSERT_EQ(StringData(Hex(0xffff)), "FFFF");
-    ASSERT_EQ(StringData(Hex(0xfff0)), "FFF0");
-    ASSERT_EQ(StringData(Hex(0x8000'0000'0000'0000)), "8000000000000000");
+    ASSERT_EQ(std::string_view(Hex(static_cast<void*>(0))), "0");
+    ASSERT_EQ(std::string_view(Hex(0xffff)), "FFFF");
+    ASSERT_EQ(std::string_view(Hex(0xfff0)), "FFF0");
+    ASSERT_EQ(std::string_view(Hex(0x8000'0000'0000'0000)), "8000000000000000");
     ASSERT_EQ(Hex::fromHex("FFFF"), 0xffff);
     ASSERT_EQ(Hex::fromHex("0"), 0);
     ASSERT_EQ(Hex::fromHex("FFFFFFFFFFFFFFFF"), 0xffff'ffff'ffff'ffff);
@@ -647,6 +624,7 @@ public:
         reapWorkers();
 
         std::set<int> seenTids;
+        std::set<int> missedTids;
 
         // Make some assertions about `dumped`.
         BSONObj jsonObj = fromjson(dumped);
@@ -657,8 +635,35 @@ public:
             ASSERT(obj.hasElement("backtrace"));
         }
 
-        for (auto&& w : workers)
-            ASSERT(seenTids.find(w.tid) != seenTids.end()) << "missing tid:" << w.tid;
+        // Collect missing thread ids. Check after we've checked for lost thread ids, since lost is
+        // worse than missing.
+        for (const auto& el : jsonObj.getObjectField("missedThreadIds")) {
+            missedTids.insert(el.Int());
+        }
+        // Confirm all the threads we spawned are accounted for in either seenTids or missedTids.
+        //
+        // Since non-test controlled threads may be running, we can only assert behavior for the
+        // worker threads spawned.
+        //
+        // TODO(SERVER-134299): It's rare but possible some worker threads have exited before we
+        // dump them during testing, leading to test flakiness.
+        std::set<int> lostTids;
+        std::set<int> missedWorkerTids;
+        for (auto&& w : workers) {
+            const int tid = w.tid;
+            if (missedTids.contains(tid)) {
+                missedWorkerTids.insert(tid);
+            } else if (!seenTids.contains(tid)) {
+                lostTids.insert(tid);
+            }
+        }
+        ASSERT_THAT(lostTids, ::testing::IsEmpty())
+            << "spawned threads unaccounted for. Recorded missedTids:" << LogVec(missedTids)
+            << ", Recorded seenTids:" << LogVec(seenTids);
+        ASSERT_THAT(missedWorkerTids, ::testing::IsEmpty()) << "spawned threads missing backtraces";
+        for (auto&& w : workers) {
+            ASSERT_TRUE(seenTids.contains(w.tid));
+        }
     }
 
     std::mutex mutex;
@@ -728,7 +733,9 @@ TEST_F(PrintAllThreadStacksTest, SessionBasic) {
     stacktrace_details::PrintAllStacksSession session;
 
     auto waiter = boost::make_optional(session.waiter());
-    stdx::thread producer{[&] { auto notifier = session.notifier(); }};
+    stdx::thread producer{[&] {
+        auto notifier = session.notifier();
+    }};
     waiter = {};
     producer.join();
 }

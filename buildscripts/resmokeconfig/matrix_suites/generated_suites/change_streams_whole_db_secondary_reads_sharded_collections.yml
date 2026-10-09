@@ -20,8 +20,9 @@ executor:
       eval:
         globalThis.testingReplication = true; await import('jstests/libs/override_methods/set_read_and_write_concerns.js');;
         await import('jstests/libs/override_methods/set_read_preference_secondary.js');;
+        await import('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');;
         await import('jstests/libs/override_methods/implicitly_shard_accessed_collections.js');;
-        await import('jstests/libs/override_methods/implicit_whole_db_changestreams.js');
+        await import('jstests/libs/override_methods/query/implicit_whole_db_changestreams.js');
       global_vars:
         TestData:
           defaultReadConcernLevel: null
@@ -59,6 +60,8 @@ executor:
 matrix_suite: true
 selector:
   exclude_files:
+    - jstests/change_streams/create_event_from_chunk_migration.js
+    - jstests/change_streams/migrate_last_chunk_from_shard_event.js
     - jstests/change_streams/metadata_notifications.js
     - jstests/change_streams/only_wake_getmore_for_relevant_changes.js
   exclude_with_any_tags:
@@ -68,6 +71,7 @@ selector:
     - assumes_unsharded_collection
     - assumes_no_implicit_collection_creation_on_get_collection
     - assumes_read_preference_unchanged
+    - does_not_support_causal_consistency
   roots:
     - jstests/change_streams/**/*.js
 test_kind: js_test

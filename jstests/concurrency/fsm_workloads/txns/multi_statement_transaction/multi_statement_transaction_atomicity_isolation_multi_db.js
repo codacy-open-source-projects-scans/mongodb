@@ -1,7 +1,7 @@
 /**
  * Test transactions atomicity and isolation guarantees for transactions across multiple DBs.
  *
- * @tags: [uses_transactions, assumes_snapshot_transactions]
+ * @tags: [uses_transactions, assumes_snapshot_transactions, requires_getmore]
  */
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
@@ -17,7 +17,9 @@ export const $config = extendWorkload($baseConfig, ($config, $super) => {
         const collections = [];
         for (let i = 0; i < nsCount; ++i) {
             for (let j = 0; j < nsCount; ++j) {
-                collections.push(db.getSiblingDB(db.getName() + "_" + i).getCollection(collName + "_" + j));
+                collections.push(
+                    db.getSiblingDB(db.getName() + "_" + i).getCollection(collName + "_" + j),
+                );
             }
         }
         return collections;

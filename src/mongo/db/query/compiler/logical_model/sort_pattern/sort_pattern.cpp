@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -42,6 +15,7 @@
 #include "mongo/util/str.h"
 
 #include <string>
+#include <string_view>
 
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -49,13 +23,14 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-static const StringDataSet kValidMetaSorts{"textScore"_sd,
-                                           "randVal"_sd,
-                                           "geoNearDistance"_sd,
-                                           "searchScore"_sd,
-                                           "vectorSearchScore"_sd,
-                                           "score"_sd};
+static const StringDataSet kValidMetaSorts{"textScore"sv,
+                                           "randVal"sv,
+                                           "geoNearDistance"sv,
+                                           "searchScore"sv,
+                                           "vectorSearchScore"sv,
+                                           "score"sv};
 
 boost::intrusive_ptr<ExpressionMeta> parseMetaExpression(
     const BSONObj& metaDoc, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -72,14 +47,6 @@ boost::intrusive_ptr<ExpressionMeta> parseMetaExpression(
 
     const auto metaName = metaElem.valueStringDataSafe();
 
-    if (metaName == "searchScore"_sd || metaName == "vectorSearchScore"_sd ||
-        metaName == "score"_sd) {
-        if (!bypassRankFusionFCVGate) {
-            expCtx->ignoreFeatureInParserOrRejectAndThrow(
-                "Sorting by searchScore, vectorSearchScore, or score",
-                feature_flags::gFeatureFlagRankFusionFull);
-        }
-    }
     uassert(31138,
             str::stream() << "Illegal $meta sort: " << metaElem,
             kValidMetaSorts.contains(metaName));
@@ -145,7 +112,7 @@ QueryMetadataBitSet SortPattern::metadataDeps(
 }
 
 Document SortPattern::serialize(SortKeySerialization serializationMode,
-                                const SerializationOptions& options) const {
+                                const query_shape::SerializationOptions& options) const {
     MutableDocument keyObj;
     const size_t n = _sortPattern.size();
     for (size_t i = 0; i < n; ++i) {
@@ -159,7 +126,7 @@ Document SortPattern::serialize(SortKeySerialization serializationMode,
                 case SortKeySerialization::kForExplain:
                 case SortKeySerialization::kForPipelineSerialization: {
                     const bool isExplain = (serializationMode == SortKeySerialization::kForExplain);
-                    auto opts = SerializationOptions{};
+                    auto opts = query_shape::SerializationOptions{};
                     if (isExplain) {
                         opts.verbosity =
                             boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner);

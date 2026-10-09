@@ -2,6 +2,7 @@
  * Test that verifies the behavior of multi-key index scan when memory limit is set.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_stable_shard_list,
  *   does_not_support_transactions,
  *   not_allowed_with_signed_security_token,
@@ -70,8 +71,16 @@ const originalUniqueStageMemory = assert.commandWorked(
 
 const kMemoryLimit = 256 * 1024;
 try {
-    setParameterOnAllNonConfigNodes(db.getMongo(), "internalIndexScanStageMaxMemoryBytes", kMemoryLimit);
-    setParameterOnAllNonConfigNodes(db.getMongo(), "internalSlotBasedExecutionUniqueStageMaxMemoryBytes", kMemoryLimit);
+    setParameterOnAllNonConfigNodes(
+        db.getMongo(),
+        "internalIndexScanStageMaxMemoryBytes",
+        kMemoryLimit,
+    );
+    setParameterOnAllNonConfigNodes(
+        db.getMongo(),
+        "internalSlotBasedExecutionUniqueStageMaxMemoryBytes",
+        kMemoryLimit,
+    );
     run_tests(coll, true /*expectFailure*/);
 } finally {
     setParameterOnAllNonConfigNodes(

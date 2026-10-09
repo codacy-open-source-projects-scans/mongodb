@@ -10,10 +10,16 @@ const st = new ShardingTest({
     shards: 2,
     other: {
         rs0: {
-            nodes: [{rsConfig: {priority: 1}}, {rsConfig: {priority: 0, tags: {"tag": "secondary"}}}],
+            nodes: [
+                {rsConfig: {priority: 1}},
+                {rsConfig: {priority: 0, tags: {"tag": "secondary"}}},
+            ],
         },
         rs1: {
-            nodes: [{rsConfig: {priority: 1}}, {rsConfig: {priority: 0, tags: {"tag": "secondary"}}}],
+            nodes: [
+                {rsConfig: {priority: 1}},
+                {rsConfig: {priority: 0, tags: {"tag": "secondary"}}},
+            ],
         },
         enableBalancer: false,
     },
@@ -24,11 +30,15 @@ const config = mongos.getDB("config");
 const mongosDB = mongos.getDB("view_rewrite");
 const coll = mongosDB.getCollection("coll");
 
-assert.commandWorked(config.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    config.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.shard0.shardName}),
+);
 
 assert.commandWorked(config.adminCommand({shardCollection: coll.getFullName(), key: {a: 1}}));
 assert.commandWorked(mongos.adminCommand({split: coll.getFullName(), middle: {a: 5}}));
-assert.commandWorked(mongosDB.adminCommand({moveChunk: coll.getFullName(), find: {a: 5}, to: st.shard1.shardName}));
+assert.commandWorked(
+    mongosDB.adminCommand({moveChunk: coll.getFullName(), find: {a: 5}, to: st.shard1.shardName}),
+);
 
 for (let i = 0; i < 10; ++i) {
     assert.commandWorked(coll.insert({a: i}));
@@ -62,7 +72,7 @@ function confirmOptionsInProfiler(shardPrimary) {
             "command.aggregate": coll.getName(),
             "command.comment": "agg_rewrite",
             "command.maxTimeMS": {"$exists": true},
-            "command.readConcern": {level: "linearizable"},
+            "command.readConcern.level": "linearizable",
             "command.pipeline.$mergeCursors": {"$exists": false},
             "nreturned": {"$exists": true},
         },
@@ -85,7 +95,7 @@ function confirmOptionsInProfiler(shardPrimary) {
             "command.aggregate": coll.getName(),
             "command.comment": "find_rewrite",
             "command.maxTimeMS": {"$exists": true},
-            "command.readConcern": {level: "linearizable"},
+            "command.readConcern.level": "linearizable",
             "command.pipeline.$mergeCursors": {"$exists": false},
             "nreturned": {"$exists": true},
         },
@@ -108,7 +118,7 @@ function confirmOptionsInProfiler(shardPrimary) {
             "command.aggregate": coll.getName(),
             "command.comment": "count_rewrite",
             "command.maxTimeMS": {"$exists": true},
-            "command.readConcern": {level: "linearizable"},
+            "command.readConcern.level": "linearizable",
             "command.pipeline.$mergeCursors": {"$exists": false},
             "nreturned": {"$exists": true},
         },
@@ -132,7 +142,7 @@ function confirmOptionsInProfiler(shardPrimary) {
             "command.aggregate": coll.getName(),
             "command.comment": "distinct_rewrite",
             "command.maxTimeMS": {"$exists": true},
-            "command.readConcern": {level: "linearizable"},
+            "command.readConcern.level": "linearizable",
             "command.pipeline.$mergeCursors": {"$exists": false},
             "nreturned": {"$exists": true},
         },

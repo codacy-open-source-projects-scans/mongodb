@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/database_impl.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/audit.h"
@@ -44,6 +17,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
@@ -63,6 +37,7 @@
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
+#include "mongo/db/shard_role/shard_catalog/collection_impl.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
 #include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
@@ -86,7 +61,6 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/system_index.h"
 #include "mongo/db/timeseries/viewless_timeseries_collection_creation_helpers.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
@@ -106,6 +80,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -119,6 +94,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(throwWCEDuringTxnCollCreate);
@@ -139,7 +115,7 @@ MONGO_FAIL_POINT_DEFINE(skipCreateTimeseriesBucketsWithoutOptionsCheck);
 MONGO_FAIL_POINT_DEFINE(skipCreateTimeseriesVersionMismatchCheck);
 
 
-Status validateDBNameForWindows(StringData dbname) {
+Status validateDBNameForWindows(std::string_view dbname) {
     const std::vector<std::string> windowsReservedNames = {
         "con",  "prn",  "aux",  "nul",  "com1", "com2", "com3", "com4", "com5", "com6", "com7",
         "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"};
@@ -362,7 +338,7 @@ void DatabaseImpl::init(OperationContext* const opCtx) {
                 }
 
                 // The name of the most resolved namespace, which is a collection.
-                auto resolvedNs = swResolvedView.getValue().getNamespace();
+                auto resolvedNs = swResolvedView.getValue().getResolvedNamespace();
 
                 if (catalog->lookupCollectionByNamespace(opCtx, resolvedNs)) {
                     // The collection exists for this view.
@@ -829,7 +805,7 @@ Collection* DatabaseImpl::_createCollection(
             uasserted(51267, "hangAndFailAfterCreateCollectionReservesOpTime fail point enabled");
         },
         [&](const BSONObj& data) {
-            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"_sd);
+            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"sv);
             return fpNss.isEmpty() || fpNss == nss;
         });
 
@@ -871,7 +847,7 @@ Collection* DatabaseImpl::_createCollection(
     openCreateCollectionWindowFp.executeIf(
         [&](const BSONObj& data) { sleepsecs(3); },
         [&](const BSONObj& data) {
-            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "collectionNS"_sd);
+            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "collectionNS"sv);
             return fpNss.isEmpty() || nss == fpNss;
         });
 
@@ -1067,7 +1043,18 @@ Status DatabaseImpl::userCreateNS(
         // We check the status of the parse to see if there are any banned features, but we don't
         // actually need the result for now.
         if (!statusWithMatcher.isOK()) {
-            return statusWithMatcher.getStatus();
+            // Do not enforce an OK result during oplog application: as at startup, the
+            // validator may have been well formed on the version that wrote it. Keeping it
+            // rejects writes to the collection (fail closed) rather than allowing them
+            // unvalidated (SERVER-134863).
+            if (opCtx->writesAreReplicated() &&
+                !MONGO_unlikely(allowSettingMalformedCollectionValidators.shouldFail())) {
+                return statusWithMatcher.getStatus();
+            }
+            LOGV2_WARNING(13486302,
+                          "Creating collection with a malformed collection validator",
+                          logAttrs(nss),
+                          "validatorStatus"_attr = statusWithMatcher.getStatus());
         }
 
         hangAfterParsingValidator.pauseWhileSet();
@@ -1111,6 +1098,13 @@ Status DatabaseImpl::userCreateNS(
             str::stream() << "Collection creation failed after validating options: "
                           << nss.toStringForErrorMsg()
                           << ". Options: " << collectionOptions.toBSON());
+    }
+
+    // Skip counting on participant shards: the coordinator already counted this operation, and
+    // participant shards call userCreateNS via MigrationDestinationManager with fromMigrate=true.
+    if (!fromMigrate &&
+        (!collectionOptions.validator.isEmpty() || collectionOptions.validationLevel)) {
+        validationLevelCounters.increment("create", collectionOptions.validationLevel);
     }
 
     return Status::OK();

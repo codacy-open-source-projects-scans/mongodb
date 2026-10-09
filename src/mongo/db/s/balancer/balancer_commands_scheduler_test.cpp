@@ -1,40 +1,11 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/db/s/balancer/balancer_commands_scheduler.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,7 +16,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
 #include "mongo/db/global_catalog/type_shard.h"
-#include "mongo/db/s/balancer/balancer_commands_scheduler.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/config_server_test_fixture.h"
@@ -66,6 +36,11 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 namespace mongo {
 namespace {
@@ -171,8 +146,10 @@ TEST_F(BalancerCommandsSchedulerTest, StartAndStopScheduler) {
 }
 
 TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveRangeCommand) {
-    auto remoteResponsesFuture = setRemoteResponses(
-        {[&](const executor::RemoteCommandRequest& request) { return OkReply().toBSON(); }});
+    auto remoteResponsesFuture =
+        setRemoteResponses({[&](const executor::RemoteCommandRequest& request) {
+            return OkReply().toBSON();
+        }});
     _scheduler.start(operationContext());
     ShardsvrMoveRange shardsvrRequest(kNss);
     shardsvrRequest.setCollectionTimestamp(Timestamp(10));
@@ -192,8 +169,10 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveRangeCommand) {
 }
 
 TEST_F(BalancerCommandsSchedulerTest, SuccessfulMergeChunkCommand) {
-    auto remoteResponsesFuture = setRemoteResponses(
-        {[&](const executor::RemoteCommandRequest& request) { return OkReply().toBSON(); }});
+    auto remoteResponsesFuture =
+        setRemoteResponses({[&](const executor::RemoteCommandRequest& request) {
+            return OkReply().toBSON();
+        }});
     _scheduler.start(operationContext());
 
     ChunkRange range(BSON("x" << 0), BSON("x" << 20));
@@ -223,8 +202,10 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulRequestChunkDataSizeCommand) {
     chunkSizeResponse.append("ok", "1");
     chunkSizeResponse.append("size", 156);
     chunkSizeResponse.append("numObjects", 25);
-    auto remoteResponsesFuture = setRemoteResponses(
-        {[&](const executor::RemoteCommandRequest& request) { return chunkSizeResponse.obj(); }});
+    auto remoteResponsesFuture =
+        setRemoteResponses({[&](const executor::RemoteCommandRequest& request) {
+            return chunkSizeResponse.obj();
+        }});
 
     _scheduler.start(operationContext());
     ChunkType chunk = makeChunk(0, kShardId0);
@@ -285,7 +266,7 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveCollectionRequest) {
 
     auto catalogClient = ShardingCatalogManager::get(operationContext())->localCatalogClient();
     const auto dbEntry = catalogClient->getDatabase(
-        operationContext(), kNss.dbName(), repl::ReadConcernLevel::kMajorityReadConcern);
+        operationContext(), kNss.dbName(), repl::ReadConcernArgs::kMajority);
     auto futureResponse = _scheduler.requestMoveCollection(
         operationContext(), kNss, kShardId0, kShardId1, dbEntry.getVersion());
     ASSERT_OK(futureResponse.getNoThrow());
@@ -295,8 +276,10 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveCollectionRequest) {
 
 TEST_F(BalancerCommandsSchedulerTest, CommandFailsWhenNetworkReturnsError) {
     auto timeoutError = Status{ErrorCodes::NetworkTimeout, "Mock error: network timed out"};
-    auto remoteResponsesFuture = setRemoteResponses(
-        {[&](const executor::RemoteCommandRequest& request) { return timeoutError; }});
+    auto remoteResponsesFuture =
+        setRemoteResponses({[&](const executor::RemoteCommandRequest& request) {
+            return timeoutError;
+        }});
     _scheduler.start(operationContext());
     auto req = makeMoveRangeRequest(0, kShardId1, kShardId0);
     auto futureResponse = _scheduler.requestMoveRange(

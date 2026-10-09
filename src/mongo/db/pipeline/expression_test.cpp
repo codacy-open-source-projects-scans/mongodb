@@ -1,34 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include "mongo/db/pipeline/expression.h"
+
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -43,16 +17,15 @@
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
-#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/record_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -62,9 +35,16 @@
 #include <climits>
 #include <cmath>
 #include <limits>
+#include <string_view>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+
+using namespace std::literals::string_view_literals;
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
+using namespace std::literals::string_view_literals;
 namespace mongo {
 namespace ExpressionTests {
 
@@ -195,12 +175,12 @@ TEST(ExpressionConstantTest, ConstantOfValueMissingSerializesToRemoveSystemVar) 
 }
 
 TEST(ExpressionConstantTest, ConstantRedaction) {
-    SerializationOptions options;
-    options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+    query_shape::SerializationOptions options;
+    options.literalPolicy = query_shape::LiteralSerializationPolicy::kToDebugTypeString;
 
     // Test that a constant is replaced.
     auto expCtx = ExpressionContextForTest{};
-    intrusive_ptr<Expression> expression = ExpressionConstant::create(&expCtx, Value("my_ssn"_sd));
+    intrusive_ptr<Expression> expression = ExpressionConstant::create(&expCtx, Value("my_ssn"sv));
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({"field":"?string"})",
         BSON("field" << expression->serialize(options)));
@@ -677,8 +657,8 @@ TEST(ParseExpression, ShouldParseExpressionWithMultipleArguments) {
     auto resultExpression = parseExpression(BSON("$strcasecmp" << BSON_ARRAY("foo" << "FOO")));
     auto strCaseCmpExpression = dynamic_cast<ExpressionStrcasecmp*>(resultExpression.get());
     ASSERT_TRUE(strCaseCmpExpression);
-    vector<Value> arguments = {Value(Document{{"$const", "foo"_sd}}),
-                               Value(Document{{"$const", "FOO"_sd}})};
+    vector<Value> arguments = {Value(Document{{"$const", "foo"sv}}),
+                               Value(Document{{"$const", "FOO"sv}})};
     ASSERT_VALUE_EQ(strCaseCmpExpression->serialize(), Value(Document{{"$strcasecmp", arguments}}));
 }
 
@@ -751,22 +731,22 @@ TEST(ParseOperand, ShouldRecognizeFieldPath) {
     auto resultExpression = parseOperand(BSON("" << "$field"));
     auto fieldPathExpression = dynamic_cast<ExpressionFieldPath*>(resultExpression.get());
     ASSERT_TRUE(fieldPathExpression);
-    ASSERT_VALUE_EQ(fieldPathExpression->serialize(), Value("$field"_sd));
+    ASSERT_VALUE_EQ(fieldPathExpression->serialize(), Value("$field"sv));
 }
 
 TEST(ParseOperand, ShouldRecognizeStringLiteral) {
     auto resultExpression = parseOperand(BSON("" << "foo"));
     auto constantExpression = dynamic_cast<ExpressionConstant*>(resultExpression.get());
     ASSERT_TRUE(constantExpression);
-    ASSERT_VALUE_EQ(constantExpression->serialize(), Value(Document{{"$const", "foo"_sd}}));
+    ASSERT_VALUE_EQ(constantExpression->serialize(), Value(Document{{"$const", "foo"sv}}));
 }
 
 TEST(ParseOperand, ShouldRecognizeNestedArray) {
     auto resultExpression = parseOperand(BSON("" << BSON_ARRAY("foo" << "$field")));
     auto arrayExpression = dynamic_cast<ExpressionArray*>(resultExpression.get());
     ASSERT_TRUE(arrayExpression);
-    vector<Value> expectedSerializedArray = {Value(Document{{"$const", "foo"_sd}}),
-                                             Value("$field"_sd)};
+    vector<Value> expectedSerializedArray = {Value(Document{{"$const", "foo"sv}}),
+                                             Value("$field"sv)};
     ASSERT_VALUE_EQ(arrayExpression->serialize(), Value(expectedSerializedArray));
 }
 
@@ -1099,7 +1079,7 @@ TEST(ExpressionMetaTest, ExpressionMetaStreamNotSupported) {
         ExpressionMeta::parse(&expCtx, expr.firstElement(), vps), DBException, 17308);
 
     // Even with feature flag on, field path only supported for $meta: "stream.path".
-    RAIIServerParameterControllerForTest streamsFeatureFlag("featureFlagStreams", true);
+    unittest::ServerParameterGuard streamsFeatureFlag("featureFlagStreams", true);
     auto ctxWithFlag = ExpressionContextForTest{};
     expr = fromjson("{$meta: \"textScore.foo\"}");
     ASSERT_THROWS_CODE(
@@ -1165,9 +1145,9 @@ TEST(ExpressionToHashedIndexKeyTest, DoesAddInputDependencies) {
 TEST(ExpressionGetFieldTest, GetFieldTestNullByte) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    StringData str("fo\0o", 4);
+    std::string_view str("fo\0o", 4);
     BSONObjBuilder b;
-    b.append("$meta"_sd, str);
+    b.append("$meta"sv, str);
     BSONObj expr{b.obj()};
     auto expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
     BSONObj expr1 = fromjson("{$meta: \"foo\"}");
@@ -1260,7 +1240,7 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesCorrectly) {
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1274,7 +1254,7 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesCorrectly) {
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 }
 
 TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrectly) {
@@ -1330,7 +1310,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1348,7 +1328,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 
     expr = fromjson("{$meta: {\"field\": {$toBool: \"$foo\"}, \"input\": {a: 1}}}");
     expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
@@ -1394,7 +1374,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1411,7 +1391,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 
     expr = fromjson(
         "{$meta: {\"field\": {$convert: {\"input\": \"$foo\", \"to\": \"bool\"}}, \"input\": {a: "
@@ -1459,7 +1439,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1476,7 +1456,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 
     expr = fromjson(
         "{$meta: {\"field\": {$convert: {\"input\": \"$foo\", \"to\": {\"$add\": [7, 2]}}}, "
@@ -1532,7 +1512,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1551,7 +1531,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 
     expr = fromjson("{$meta: {\"field\": \"$foo\", \"input\": {a: 1}}}");
     expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
@@ -1583,7 +1563,7 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -1595,11 +1575,12 @@ TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrect
             }
         })",
         BSON("ignoredField" << expression->serialize(
-                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+                 query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions)));
 }
 
 TEST(ExpressionGetFieldTest, GetFieldSerializesAndRedactsCorrectly) {
-    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions options =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
 
@@ -1667,7 +1648,8 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesAndRedactsCorrectly) {
 }
 
 TEST(ExpressionSetFieldTest, SetFieldRedactsCorrectly) {
-    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions options =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
 
@@ -1795,7 +1777,7 @@ TEST(ExpressionSetFieldTest, SetFieldSerializesCorrectly) {
 
 TEST(ExpressionSetFieldTest, SetFieldRejectsNullCharInFieldArgument) {
     auto expCtx = ExpressionContextForTest{};
-    auto fieldExpr = make_intrusive<ExpressionConstant>(&expCtx, Value("ab\0c"_sd));
+    auto fieldExpr = make_intrusive<ExpressionConstant>(&expCtx, Value("ab\0c"sv));
     auto inputExpr = make_intrusive<ExpressionConstant>(&expCtx, Value(BSON("a" << 1)));
     auto valueExpr = make_intrusive<ExpressionConstant>(&expCtx, Value(true));
     ASSERT_THROWS_CODE(
@@ -1822,7 +1804,7 @@ TEST(ExpressionIfNullTest,
     auto expr = fromjson("{$ifNull: [null, \"$a\"]}");
     auto exprIfNull = ExpressionIfNull::parse(&expCtx, expr.firstElement(), vps);
     auto optimizedNullRemoved = exprIfNull->optimize();
-    ASSERT_VALUE_EQ(optimizedNullRemoved->serialize(), Value("$a"_sd));
+    ASSERT_VALUE_EQ(optimizedNullRemoved->serialize(), Value("$a"sv));
 }
 
 TEST(ExpressionIfNullTest, OptimizedExpressionIfNullShouldRemoveAllNullConstantsButLast) {
@@ -2047,7 +2029,8 @@ TEST(ExpressionSigmoidTest, RoundTripSerialization) {
     auto spec = BSON("$sigmoid" << 100);
     auto sigmoidExp = Expression::parseExpression(&expCtx, spec, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     auto serialized = sigmoidExp->serialize(opts);
     // The query shape for $sigmoid is recorded in its desugared form as there's no
     // ExpressionSigmoid after parsing.
@@ -2067,7 +2050,8 @@ TEST(ExpressionSigmoidTest, CorrectRedaction) {
     auto spec = BSON("$sigmoid" << 100);
     auto sigmoidExp = Expression::parseExpression(&expCtx, spec, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToDebugTypeString};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToDebugTypeString};
     auto serialized = sigmoidExp->serialize(opts);
     // The query shape for $sigmoid is recorded in its desugared form as there's no
     // ExpressionSigmoid after parsing.
@@ -2083,7 +2067,7 @@ TEST(ExpressionMapTest, CorrectRedaction) {
     auto spec = fromjson(R"({$map: {input: "$a", as: "x", in : '$$x'}})");
     auto mapExp = Expression::parseExpression(&expCtx, spec, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = mapExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO(  // NOLINT
         "{$map: {input: \"$HASH<a>\", as: \"HASH<x>\", in: \"$$HASH<x>\"}}",
@@ -2096,7 +2080,7 @@ TEST(ExpressionFilterTest, CorrectRedaction) {
     auto spec = fromjson("{$filter: {input: '$a', as: 'x', cond: {$gt: ['$$x', 2]}}}");
     auto filterExp = Expression::parseExpression(&expCtx, spec, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = filterExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO(  // NOLINT
         "{$filter: {input: \"$HASH<a>\", as: \"HASH<x>\", cond: {$gt: [\"$$HASH<x>\", "
@@ -2110,7 +2094,7 @@ TEST(ExpressionFilterTest, CorrectRedactionWithLimit) {
     auto spec = fromjson("{$filter: {input: '$a', as: 'x', cond: {$gt: ['$$x', 2]}, limit: 10}}");
     auto filterExp = Expression::parseExpression(&expCtx, spec, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = filterExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO(  // NOLINT
         "{$filter: {input: \"$HASH<a>\", as: \"HASH<x>\", cond: {$gt: [\"$$HASH<x>\", "
@@ -2722,15 +2706,15 @@ TEST(ExpressionSplitTest, CorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$split: ["abcabc", "b"]})");
     auto splitExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = splitExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(fromjson(R"({$split: ["?string", "?string"]})"), serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = splitExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(fromjson(R"({$split: ["?string", "?string"]})"), serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     serialized = splitExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(fromjson(R"({$split: ["?", "?"]})"), serialized);
 }
@@ -2741,15 +2725,15 @@ TEST(ExpressionSplitTest, RegExCorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$split: ["abcabc", /.*/]})");
     auto splitExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = splitExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(fromjson(R"({$split: ["?string", "?regex"]})"), serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = splitExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(fromjson(R"({$split: ["?string", "?regex"]})"), serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     auto serializedStr = splitExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO("{$split: [\"?\", //?//]}", serializedStr);
 }
@@ -2760,19 +2744,19 @@ TEST(ExpressionReplaceOneTest, CorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$replaceOne: {input: "abcabc", find: "b", replacement: "d"}})");
     auto replaceExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceOne: {input: "?string", find: "?string", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceOne: {input: "?string", find: "?string", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(
@@ -2786,19 +2770,19 @@ TEST(ExpressionReplaceOneTest, RegExCorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$replaceOne: {input: "abcabc", find: /.*/, replacement: "d"}})");
     auto replaceExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceOne: {input: "?string", find: "?regex", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceOne: {input: "?string", find: "?regex", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     auto serializedStr = replaceExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO(
         "{$replaceOne: {input: {$const: \"?\"}, find: {$const: //?//}, replacement: {$const: "
@@ -2812,19 +2796,19 @@ TEST(ExpressionReplaceAllTest, CorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$replaceAll: {input: "abcabc", find: "b", replacement: "d"}})");
     auto replaceExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceAll: {input: "?string", find: "?string", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceAll: {input: "?string", find: "?string", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(
@@ -2838,24 +2822,35 @@ TEST(ExpressionReplaceAllTest, RegExCorrectSerializationTest) {
     auto exprBSON = fromjson(R"({$replaceAll: {input: "abcabc", find: /.*/, replacement: "d"}})");
     auto replaceExp = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
 
-    auto opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceAll: {input: "?string", find: "?regex", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     serialized = replaceExp->serialize(opts).getDocument().toBson();
     ASSERT_BSONOBJ_EQ(
         fromjson(R"({$replaceAll: {input: "?string", find: "?regex", replacement: "?string"}})"),
         serialized);
 
-    opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     auto serializedStr = replaceExp->serialize(opts);
     ASSERT_VALUE_EQ_AUTO(
         "{$replaceAll: {input: {$const: \"?\"}, find: {$const: //?//}, replacement: {$const: "
         "\"?\"}}}",
         serializedStr);
+}
+
+TEST(ExpressionDeserializeEJSONTest, EmptyFieldNameInInputDocument) {
+    auto expCtx = ExpressionContextForTest{};
+
+    // User MQL can supply an object whose field name is the empty string via $literal.
+    auto exprBSON = fromjson(R"({$deserializeEJSON: {input: {$literal: {"": 1}}}})");
+    auto expr = Expression::parseExpression(&expCtx, exprBSON, expCtx.variablesParseState);
+
+    auto result = expr->evaluate(Document{}, &expCtx.variables);
+    ASSERT_VALUE_EQ(result, Value(BSON("" << 1)));
 }
 
 }  // namespace ExpressionTests

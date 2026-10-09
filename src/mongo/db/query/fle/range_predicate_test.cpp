@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/fle/range_predicate.h"
 
@@ -51,6 +25,7 @@
 #include <functional>
 #include <initializer_list>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -58,13 +33,14 @@
 
 namespace mongo::fle {
 namespace {
+using namespace std::literals::string_view_literals;
 class MockRangePredicate : public RangePredicate {
 public:
     MockRangePredicate(const QueryRewriterInterface* rewriter) : RangePredicate(rewriter) {}
 
     MockRangePredicate(const QueryRewriterInterface* rewriter,
                        TagMap tags,
-                       std::set<StringData> encryptedFields)
+                       std::set<std::string_view> encryptedFields)
         : RangePredicate(rewriter) {}
 
     bool payloadValid = true;
@@ -87,7 +63,7 @@ protected:
         return isStubPayload;
     }
 
-    std::vector<PrfBlock> generateTags(BSONValue payload) const override {
+    std::vector<PrfBlock> generateTags(BSONValue payload, std::string_view) const override {
         return visit(
             OverloadedVisitor{[&](BSONElement p) {
                                   if (p.isABSONObj()) {
@@ -143,12 +119,12 @@ TEST_F(RangePredicateRewriteTest, MatchRangeRewrite_Stub) {
 
     auto payload = fromjson("{x: [1, 2, 3, 4, 5, 6, 7, 8, 9]}");
 
-#define ASSERT_REWRITE_TO_TRUE(T)                                                             \
-    {                                                                                         \
-        std::unique_ptr<MatchExpression> inputExpr = std::make_unique<T>("age"_sd, Value(0)); \
-        _predicate.isStubPayload = true;                                                      \
-        auto rewrite = _predicate.rewrite(inputExpr.get());                                   \
-        ASSERT_EQ(rewrite->matchType(), MatchExpression::ALWAYS_TRUE);                        \
+#define ASSERT_REWRITE_TO_TRUE(T)                                                            \
+    {                                                                                        \
+        std::unique_ptr<MatchExpression> inputExpr = std::make_unique<T>("age"sv, Value(0)); \
+        _predicate.isStubPayload = true;                                                     \
+        auto rewrite = _predicate.rewrite(inputExpr.get());                                  \
+        ASSERT_EQ(rewrite->matchType(), MatchExpression::ALWAYS_TRUE);                       \
     }
 
     // Rewrites that would normally go to disjunctions.
@@ -217,7 +193,7 @@ TEST_F(RangePredicateRewriteTest, AggRangeRewriteNoOp) {
     }
 }
 
-BSONObj generateFFP(StringData path, int lb, int ub, int min, int max) {
+BSONObj generateFFP(std::string_view path, int lb, int ub, int min, int max) {
     auto indexKey = getIndexKey();
     FLEIndexKeyAndId indexKeyAndId(indexKey.data, indexKeyId);
     auto userKey = getUserKey();
@@ -234,12 +210,12 @@ BSONObj generateFFP(StringData path, int lb, int ub, int min, int max) {
 }
 
 template <typename T>
-std::unique_ptr<MatchExpression> generateOpWithFFP(StringData path, BSONObj ffp) {
+std::unique_ptr<MatchExpression> generateOpWithFFP(std::string_view path, BSONObj ffp) {
     return std::make_unique<T>(path, ffp.firstElement());
 }
 
 std::unique_ptr<Expression> generateBetweenWithFFP(
-    ExpressionContext* expCtx, ExpressionCompare::CmpOp op, StringData path, int lb, int ub) {
+    ExpressionContext* expCtx, ExpressionCompare::CmpOp op, std::string_view path, int lb, int ub) {
     auto ffp = Value(generateFFP(path, lb, ub, 0, 255).firstElement());
     auto ffpExpr = make_intrusive<ExpressionConstant>(expCtx, ffp);
     auto fieldpath = ExpressionFieldPath::createPathFromString(

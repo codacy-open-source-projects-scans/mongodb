@@ -27,15 +27,22 @@ const sourceCollection = reshardingTest.createShardedCollection({
 
 assert.commandWorked(sourceCollection.insert({_id: 0, oldKey: -20, yak: 50}));
 assert.commandWorked(
-    sourceCollection.createIndexes([{indexToDropDuringResharding: 1}, {indexToDropAfterResharding: 1}]),
+    sourceCollection.createIndexes([
+        {indexToDropDuringResharding: 1},
+        {indexToDropAfterResharding: 1},
+    ]),
 );
 
 const recipientShardNames = reshardingTest.recipientShardNames;
 reshardingTest.withUnshardCollectionInBackground({toShard: recipientShardNames[0]}, () => {}, {
     postCheckConsistencyFn: () => {
         jsTestLog("Attempting insert");
-        let res = sourceCollection.runCommand({insert: collName, documents: [{_id: 1, oldKey: -10}], maxTimeMS: 5000});
-        assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
+        let res = sourceCollection.runCommand({
+            insert: collName,
+            documents: [{_id: 1, oldKey: -10}],
+            maxTimeMS: 5000,
+        });
+        assert(ErrorCodes.isExceededTimeLimitError(res.code ?? res.writeErrors?.[0].code));
 
         jsTestLog("Attempting update");
         res = sourceCollection.runCommand({
@@ -43,7 +50,7 @@ reshardingTest.withUnshardCollectionInBackground({toShard: recipientShardNames[0
             updates: [{q: {_id: 0}, u: {$set: {yak: 15}}}],
             maxTimeMS: 5000,
         });
-        assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
+        assert(ErrorCodes.isExceededTimeLimitError(res.code ?? res.writeErrors?.[0].code));
 
         jsTestLog("Attempting delete");
         res = sourceCollection.runCommand({
@@ -51,7 +58,7 @@ reshardingTest.withUnshardCollectionInBackground({toShard: recipientShardNames[0
             deletes: [{q: {_id: 0, oldKey: -20}, limit: 1}],
             maxTimeMS: 5000,
         });
-        assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
+        assert(ErrorCodes.isExceededTimeLimitError(res.code ?? res.writeErrors?.[0].code));
 
         jsTestLog("Attempting createIndex");
         res = sourceCollection.runCommand({
@@ -101,19 +108,36 @@ reshardingTest.withUnshardCollectionInBackground({toShard: recipientShardNames[0
 
 jsTestLog("Verify that writes succeed after resharding operation has completed");
 
-assert.commandWorked(sourceCollection.runCommand({insert: collName, documents: [{_id: 1, oldKey: -10}]}));
-
 assert.commandWorked(
-    sourceCollection.runCommand({update: collName, updates: [{q: {_id: 0}, u: {$set: {oldKey: 15}}}]}),
+    sourceCollection.runCommand({insert: collName, documents: [{_id: 1, oldKey: -10}]}),
 );
 
-assert.commandWorked(sourceCollection.runCommand({delete: collName, deletes: [{q: {_id: 0, oldKey: -20}, limit: 1}]}));
+assert.commandWorked(
+    sourceCollection.runCommand({
+        update: collName,
+        updates: [{q: {_id: 0}, u: {$set: {oldKey: 15}}}],
+    }),
+);
 
-assert.commandWorked(sourceCollection.runCommand({createIndexes: collName, indexes: [{key: {yak: 1}, name: "yak_0"}]}));
+assert.commandWorked(
+    sourceCollection.runCommand({
+        delete: collName,
+        deletes: [{q: {_id: 0, oldKey: -20}, limit: 1}],
+    }),
+);
+
+assert.commandWorked(
+    sourceCollection.runCommand({
+        createIndexes: collName,
+        indexes: [{key: {yak: 1}, name: "yak_0"}],
+    }),
+);
 
 assert.commandWorked(sourceCollection.runCommand({collMod: sourceCollection.getName()}));
 
-assert.commandWorked(sourceCollection.runCommand({dropIndexes: collName, index: {indexToDropAfterResharding: 1}}));
+assert.commandWorked(
+    sourceCollection.runCommand({dropIndexes: collName, index: {indexToDropAfterResharding: 1}}),
+);
 
 assert.commandWorked(sourceCollection.runCommand({drop: collName}));
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,15 +11,17 @@
 #include "mongo/util/synchronized_value.h"
 
 #include <string>
+#include <string_view>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
+using namespace std::literals::string_view_literals;
 
-constexpr StringData kOID_CommonName = "2.5.4.3"_sd;
-constexpr StringData kOID_CountryName = "2.5.4.6"_sd;
-constexpr StringData kOID_LocalityName = "2.5.4.7"_sd;
-constexpr StringData kOID_StateName = "2.5.4.8"_sd;
-constexpr StringData kOID_OName = "2.5.4.10"_sd;
-constexpr StringData kOID_OUName = "2.5.4.11"_sd;
+constexpr std::string_view kOID_CommonName = "2.5.4.3"sv;
+constexpr std::string_view kOID_CountryName = "2.5.4.6"sv;
+constexpr std::string_view kOID_LocalityName = "2.5.4.7"sv;
+constexpr std::string_view kOID_StateName = "2.5.4.8"sv;
+constexpr std::string_view kOID_OName = "2.5.4.10"sv;
+constexpr std::string_view kOID_OUName = "2.5.4.11"sv;
 
 /**
  * Represents a structed X509 certificate subject name.
@@ -79,7 +55,7 @@ public:
      * Retrieve the first instance of the value for a given OID in this name.
      * Returns ErrorCodes::KeyNotFound if the OID does not exist.
      */
-    StatusWith<std::string> getOID(StringData oid) const;
+    StatusWith<std::string> getOID(std::string_view oid) const;
 
     bool empty() const {
         return std::all_of(
@@ -125,7 +101,7 @@ inline bool operator<(const SSLX509Name::Entry& lhs, const SSLX509Name::Entry& r
 
 class SSLConfiguration {
 public:
-    bool isClusterMember(StringData subjectName,
+    bool isClusterMember(std::string_view subjectName,
                          const boost::optional<std::string>& clusterExtensionValue) const;
     bool isClusterMember(SSLX509Name subjectName,
                          const boost::optional<std::string>& clusterExtensionValue) const;
@@ -144,7 +120,9 @@ public:
         bool containsClusterMembershipConfig = false;
         bool containsOverrideClusterMembershipConfig = false;
         auto visitor = OverloadedVisitor{[](const SSLX509Name&) { return false; },
-                                         [](const std::string&) { return true; }};
+                                         [](const std::string&) {
+                                             return true;
+                                         }};
 
         if (_clusterAuthX509Config._configCriteria) {
             containsClusterMembershipConfig =
@@ -185,4 +163,4 @@ private:
     ClusterAuthX509Config _clusterAuthX509Config;
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -80,9 +54,6 @@ public:
 protected:
     void doSaveState() override;
 
-    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
-        return;
-    }
 
 private:
     PlanState getNextFromDeblockedValues();
@@ -96,16 +67,13 @@ private:
     const value::SlotVector _valsOutSlotIds;
     const value::SlotId _bitmapSlotId;
 
-    // Values extracted from the blocks. The memory for these values are owned by the blocks in the
-    // '_blocks' member.
-    std::vector<std::vector<std::pair<value::TypeTags, value::Value>>> _deblockedValueRuns;
-    bool _deblockedOwned = false;
+    // Values extracted from the blocks. Initially non-owning views into the block data; after
+    // doSaveState() copies them, each element becomes an owning TagValueMaybeOwned.
+    std::vector<std::vector<value::TagValueMaybeOwned>> _deblockedValueRuns;
 
     std::vector<value::SlotAccessor*> _blockAccessors;
     value::SlotAccessor* _bitmapAccessor = nullptr;
     std::vector<value::ViewOfValueAccessor> _valsOutAccessors;
-
-    bool _childOpened{false};
 
     // Keeps track of the current reading index of the blocks.
     size_t _curIdx = 0;

@@ -29,15 +29,24 @@ let shards = [
     st.shard9,
 ];
 
-assert.commandWorked(admin.runCommand({enableSharding: "" + collA.getDB(), primaryShard: st.shard1.shardName}));
+assert.commandWorked(
+    admin.runCommand({enableSharding: "" + collA.getDB(), primaryShard: st.shard1.shardName}),
+);
 assert.commandWorked(admin.runCommand({shardCollection: "" + collA, key: {_id: 1}}));
 
 jsTestLog("Splitting up the collection...");
 
-// Split up the collection
+// Split up the collection into narrow chunks first, then distribute them. Splitting before moving
+// keeps every migration a whole-chunk move: no shard ever donates a wide chunk and later receives a
+// narrower overlapping sub-range, which would be rejected because the donated range stays reachable
+// by point-in-time reads on its former owner.
 for (var i = 0; i < shards.length; i++) {
     assert.commandWorked(admin.runCommand({split: "" + collA, middle: {_id: i}}));
-    assert.commandWorked(admin.runCommand({moveChunk: "" + collA, find: {_id: i}, to: shards[i].shardName}));
+}
+for (var i = 0; i < shards.length; i++) {
+    assert.commandWorked(
+        admin.runCommand({moveChunk: "" + collA, find: {_id: i}, to: shards[i].shardName}),
+    );
 }
 
 mongosB.getDB("admin").runCommand({flushRouterConfig: 1});
@@ -49,7 +58,11 @@ printjson(collC.count());
 // Change up all the versions...
 for (var i = 0; i < shards.length; i++) {
     assert.commandWorked(
-        admin.runCommand({moveChunk: "" + collA, find: {_id: i}, to: shards[(i + 1) % shards.length].shardName}),
+        admin.runCommand({
+            moveChunk: "" + collA,
+            find: {_id: i},
+            to: shards[(i + 1) % shards.length].shardName,
+        }),
     );
 }
 

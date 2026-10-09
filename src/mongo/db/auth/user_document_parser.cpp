@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/auth/user_document_parser.h"
@@ -34,7 +8,6 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/address_restriction.h"
@@ -56,6 +29,7 @@
 #include <array>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
@@ -64,22 +38,22 @@
 namespace mongo {
 
 namespace {
-constexpr StringData ADMIN_DBNAME = "admin"_sd;
+using namespace std::literals::string_view_literals;
+constexpr std::string_view ADMIN_DBNAME = "admin"sv;
 
-constexpr StringData ROLES_FIELD_NAME = "roles"_sd;
-constexpr StringData PRIVILEGES_FIELD_NAME = "inheritedPrivileges"_sd;
-constexpr StringData INHERITED_ROLES_FIELD_NAME = "inheritedRoles"_sd;
-constexpr StringData OTHER_DB_ROLES_FIELD_NAME = "otherDBRoles"_sd;
-constexpr StringData READONLY_FIELD_NAME = "readOnly"_sd;
-constexpr StringData CREDENTIALS_FIELD_NAME = "credentials"_sd;
-constexpr StringData ROLE_NAME_FIELD_NAME = "role"_sd;
-constexpr StringData ROLE_DB_FIELD_NAME = "db"_sd;
-constexpr StringData SCRAMSHA1_CREDENTIAL_FIELD_NAME = "SCRAM-SHA-1"_sd;
-constexpr StringData SCRAMSHA256_CREDENTIAL_FIELD_NAME = "SCRAM-SHA-256"_sd;
-constexpr StringData MONGODB_EXTERNAL_CREDENTIAL_FIELD_NAME = "external"_sd;
-constexpr StringData AUTHENTICATION_RESTRICTIONS_FIELD_NAME = "authenticationRestrictions"_sd;
-constexpr StringData INHERITED_AUTHENTICATION_RESTRICTIONS_FIELD_NAME =
-    "inheritedAuthenticationRestrictions"_sd;
+constexpr std::string_view ROLES_FIELD_NAME = "roles"sv;
+constexpr std::string_view PRIVILEGES_FIELD_NAME = "inheritedPrivileges"sv;
+constexpr std::string_view INHERITED_ROLES_FIELD_NAME = "inheritedRoles"sv;
+constexpr std::string_view OTHER_DB_ROLES_FIELD_NAME = "otherDBRoles"sv;
+constexpr std::string_view READONLY_FIELD_NAME = "readOnly"sv;
+constexpr std::string_view CREDENTIALS_FIELD_NAME = "credentials"sv;
+constexpr std::string_view ROLE_NAME_FIELD_NAME = "role"sv;
+constexpr std::string_view ROLE_DB_FIELD_NAME = "db"sv;
+
+constexpr std::string_view MONGODB_EXTERNAL_CREDENTIAL_FIELD_NAME = "external"sv;
+constexpr std::string_view AUTHENTICATION_RESTRICTIONS_FIELD_NAME = "authenticationRestrictions"sv;
+constexpr std::string_view INHERITED_AUTHENTICATION_RESTRICTIONS_FIELD_NAME =
+    "inheritedAuthenticationRestrictions"sv;
 
 inline Status _badValue(const char* reason) {
     return Status(ErrorCodes::BadValue, reason);
@@ -92,7 +66,7 @@ inline Status _badValue(const std::string& reason) {
 template <typename Credentials>
 bool parseSCRAMCredentials(const BSONElement& credentialsElement,
                            Credentials& scram,
-                           StringData fieldName) {
+                           std::string_view fieldName) {
     const auto scramElement = credentialsElement[fieldName];
     if (scramElement.eoo()) {
         return false;
@@ -178,7 +152,7 @@ Status V2UserDocumentParser::checkValidUserDocument(const BSONObj& doc) const {
     if (userDBElement.type() != BSONType::string || userDBElement.valueStringData().empty()) {
         return _badValue("User document needs 'db' field to be a non-empty string");
     }
-    StringData userDBStr = userDBElement.valueStringData();
+    std::string_view userDBStr = userDBElement.valueStringData();
     if (!DatabaseName::validDBName(userDBStr, DatabaseName::DollarInDbNameBehavior::Allow) &&
         userDBStr != "$external") {
         return _badValue(str::stream()
@@ -220,11 +194,11 @@ Status V2UserDocumentParser::checkValidUserDocument(const BSONObj& doc) const {
             return Status::OK();
         };
 
-        auto sha1status = validateScram(SCRAMSHA1_CREDENTIAL_FIELD_NAME);
+        auto sha1status = validateScram(auth::kMechanismScramSha1);
         if (!sha1status.isOK() && (sha1status.code() != ErrorCodes::NoSuchKey)) {
             return sha1status;
         }
-        auto sha256status = validateScram(SCRAMSHA256_CREDENTIAL_FIELD_NAME);
+        auto sha256status = validateScram(auth::kMechanismScramSha256);
         if (!sha256status.isOK() && (sha256status.code() != ErrorCodes::NoSuchKey)) {
             return sha256status;
         }
@@ -278,9 +252,9 @@ Status V2UserDocumentParser::initializeUserCredentialsFromUserDocument(
             }
         } else {
             const bool haveSha1 = parseSCRAMCredentials(
-                credentialsElement, credentials.scram_sha1, SCRAMSHA1_CREDENTIAL_FIELD_NAME);
+                credentialsElement, credentials.scram_sha1, auth::kMechanismScramSha1);
             const bool haveSha256 = parseSCRAMCredentials(
-                credentialsElement, credentials.scram_sha256, SCRAMSHA256_CREDENTIAL_FIELD_NAME);
+                credentialsElement, credentials.scram_sha256, auth::kMechanismScramSha256);
 
             if (!haveSha1 && !haveSha256) {
                 return Status(

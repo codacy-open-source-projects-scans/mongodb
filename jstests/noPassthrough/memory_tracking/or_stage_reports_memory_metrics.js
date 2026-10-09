@@ -31,7 +31,9 @@ if (checkSbeFullyEnabled(db)) {
     quit();
 }
 
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}),
+);
 
 const collName = jsTestName();
 const coll = db[collName];
@@ -64,6 +66,8 @@ runMemoryStatsTest({
     // This stage does not release memory on EOF.
     checkInUseTrackedMemBytesResets: false,
     skipServerStatusStageCheck: false,
+    // 10 unique docs from a=5 scan + 45 new docs from b=1 scan (5 overlap).
+    expectedServerStatusRecords: 55,
 });
 
 // Clean up.

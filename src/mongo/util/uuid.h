@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -49,8 +22,9 @@
 #include <functional>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -74,7 +48,7 @@ public:
      * If the given string represents a valid UUID, constructs and returns the UUID,
      * otherwise returns an error.
      */
-    static StatusWith<UUID> parse(StringData s);
+    static StatusWith<UUID> parse(std::string_view s);
 
     /**
      * If the given BSONElement represents a valid UUID, constructs and returns the UUID,
@@ -103,7 +77,7 @@ public:
     /**
      * Returns whether this string represents a valid UUID.
      */
-    static bool isUUIDString(StringData s);
+    static bool isUUIDString(std::string_view s);
 
     /*
      * Return the underlying 128-bit array.
@@ -122,7 +96,7 @@ public:
     /**
      * Appends to builder as BinData(4, "...") element with the given name.
      */
-    void appendToBuilder(BSONObjBuilder* builder, StringData name) const;
+    void appendToBuilder(BSONObjBuilder* builder, std::string_view name) const;
 
     /**
      * Appends to array builder as BinData(4, "...").
@@ -179,7 +153,7 @@ public:
      * Supports use of UUID with the BSON macro:
      *     BSON("uuid" << uuid) -> { uuid: BinData(4, "...") }
      */
-    friend void appendToBson(BSONObjBuilder& bob, StringData fieldName, const UUID& value) {
+    friend void appendToBson(BSONObjBuilder& bob, std::string_view fieldName, const UUID& value) {
         value.appendToBuilder(&bob, fieldName);
     }
 

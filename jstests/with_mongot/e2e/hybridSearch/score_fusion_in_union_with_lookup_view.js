@@ -4,7 +4,7 @@
  *
  * This includes when the view is at the top-level of the query, and/or in the $unionWith/$lookup.
  *
- * @tags: [featureFlagSearchHybridScoringFull, requires_fcv_82]
+ * @tags: [requires_fcv_82]
  */
 import {
     runHybridSearchInUnionWithLookupSubViewTest,
@@ -29,7 +29,12 @@ function buildScoreFusionPipeline(inputPipelines) {
     // and a view on the $unionWith/$lookup. Test queries like:
     // db.coll.aggregate([{$unionWith/$lookup: { from: "view", pipeline: [{$scoreFusion}] }}])
     function runScoreFusionInUnionWithLookupSubViewTest(testName, viewPipeline, inputPipelines) {
-        runHybridSearchInUnionWithLookupSubViewTest(testName, viewPipeline, inputPipelines, buildScoreFusionPipeline);
+        runHybridSearchInUnionWithLookupSubViewTest(
+            testName,
+            viewPipeline,
+            inputPipelines,
+            buildScoreFusionPipeline,
+        );
     }
 
     (function testMatchView() {
@@ -106,7 +111,11 @@ function buildScoreFusionPipeline(inputPipelines) {
     // Tests when the query is running on the underlying collection at the top-level,
     // and a view on the $unionWith/$lookup. Test queries like:
     // db.view.aggregate([{$unionWith/$lookup: { from: "coll", pipeline: [{$scoreFusion}] }}])
-    function runScoreFusionInUnionWithLookupTopLevelViewTest(testName, viewPipeline, inputPipelines) {
+    function runScoreFusionInUnionWithLookupTopLevelViewTest(
+        testName,
+        viewPipeline,
+        inputPipelines,
+    ) {
         runHybridSearchInUnionWithLookupTopLevelViewTest(
             testName,
             viewPipeline,

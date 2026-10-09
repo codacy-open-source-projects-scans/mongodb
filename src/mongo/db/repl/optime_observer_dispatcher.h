@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -45,12 +19,11 @@ namespace mongo::repl {
  * Dispatches `onOpTime` notifications to registered observers on a dedicated background thread.
  * The thread is started lazily on the first `addObserver` call and is stopped by `shutdown()`.
  *
- * Coalescing: this dispatcher may skip intermediate opTime values when multiple `notify()` calls
- * arrive faster than the background thread can drain them. This is intentional. Guaranteeing
- * delivery of every opTime would require `notify()` to block until the background thread
- * acknowledges each call, introducing back-pressure onto callers that may hold critical locks.
- * Observers are guaranteed to observe the most recently applied opTime eventually, but not
- * necessarily every intermediate value.
+ * Coalescing and rate-limiting: `notify()` wakes the background thread at most once per
+ * wall-clock second (derived from the opTime seconds field). Both the pending-timestamp store and
+ * the wakeup are skipped for calls within the same second, so the common path is read-only and
+ * causes no cache-line invalidations. Observers must tolerate skipped intermediate values and are
+ * only guaranteed to observe the most recently applied opTime for each second, eventually.
  *
  * Thread-safety:
  * - `notify()` is entirely lock-free and safe to call while holding any external lock.
@@ -88,9 +61,20 @@ public:
     /**
      * Signals the dispatcher that the opTime has advanced. This is cheap and lock-free. Safe to
      * call while holding any external lock (e.g. the ReplicationCoordinator mutex).
+     *
+     * Wakeups are rate-limited to at most once per wall-clock second (derived from the opTime
+     * seconds field, which advances with real time). Both `_pendingTs` and the wakeup are skipped
+     * entirely within a second, keeping the common path read-only on the shared cache line.
      */
     void notify(WithLock, const Timestamp& ts) {
+        // getSecs() is a free bitshift on the already-in-hand value — no extra clock syscall.
+        // Skip everything when still inside the same wall-clock second: the common path touches
+        // only _lastNotifiedSecs (read-only), avoiding cache-line write-invalidation traffic
+        // across cores on every primary write.
+        if (Timestamp(_pendingTs.loadRelaxed()).getSecs() == ts.getSecs())
+            return;
         _pendingTs.storeRelaxed(ts.asULL());
+
         _event.fetchAndAdd(1);
         _event.notifyAll();
     }

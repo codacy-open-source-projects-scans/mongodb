@@ -3,10 +3,6 @@ import "jstests/libs/query/sbe_assert_error_override.js";
 import {executeAggregationTestCase} from "jstests/libs/query/aggregation_pipeline_utils.js";
 import {configureFailPointForAllShardsAndMongos} from "jstests/libs/fail_point_util.js";
 
-// The test sets a failpoint on a specific mongos and expects subsequent commands to hit that same mongos.
-// In case of multiple mongos, disable random dispatching of command by enforcing pinToSingleMongos and route against a single mongos.
-TestData.pinToSingleMongos = true;
-
 const coll = db.regex_error_cases;
 coll.drop();
 
@@ -37,7 +33,10 @@ function assertFails(parameters, errorCode, allowNullResponse = false) {
     );
     executeAggregationTestCase(
         coll,
-        Object.assign({pipeline: [{$project: {"_id": 0, result: {"$regexFind": constantParameters}}}]}, regexFindTest),
+        Object.assign(
+            {pipeline: [{$project: {"_id": 0, result: {"$regexFind": constantParameters}}}]},
+            regexFindTest,
+        ),
     );
     executeAggregationTestCase(
         coll,
@@ -96,11 +95,17 @@ function assertFails(parameters, errorCode, allowNullResponse = false) {
     }
     executeAggregationTestCase(
         coll,
-        Object.assign({pipeline: [{$project: {"_id": 0, result: {"$regexMatch": dynamicParameters}}}]}, regexMatchTest),
+        Object.assign(
+            {pipeline: [{$project: {"_id": 0, result: {"$regexMatch": dynamicParameters}}}]},
+            regexMatchTest,
+        ),
     );
     executeAggregationTestCase(
         coll,
-        Object.assign({pipeline: [{$project: {"_id": 0, result: {"$regexFind": dynamicParameters}}}]}, regexFindTest),
+        Object.assign(
+            {pipeline: [{$project: {"_id": 0, result: {"$regexFind": dynamicParameters}}}]},
+            regexFindTest,
+        ),
     );
     executeAggregationTestCase(
         coll,

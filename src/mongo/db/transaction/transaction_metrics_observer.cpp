@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/transaction/transaction_metrics_observer.h"
 
@@ -37,6 +11,7 @@
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 
@@ -44,24 +19,29 @@
 #include <memory>
 #include <utility>
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
+
 namespace mongo {
 
 void TransactionMetricsObserver::onStart(ServerTransactionsMetrics* serverTransactionsMetrics,
                                          bool isAutoCommit,
                                          TickSource* tickSource,
                                          Date_t curWallClockTime,
-                                         Date_t expireDate) {
+                                         Date_t expireDate,
+                                         bool isServerInitiated) {
     //
     // Per transaction metrics.
     //
     _singleTransactionStats.setStartTime(tickSource->getTicks(), curWallClockTime);
     _singleTransactionStats.setAutoCommit(isAutoCommit);
     _singleTransactionStats.setExpireDate(expireDate);
+    _singleTransactionStats.setIsServerInitiatedTransaction(isServerInitiated);
 
     //
     // Server wide transactions metrics.
     //
-    serverTransactionsMetrics->incrementTotalStarted();
+    serverTransactionsMetrics->incrementTotalStarted(
+        _singleTransactionStats.isServerInitiatedTransaction());
     serverTransactionsMetrics->incrementCurrentOpen();
     serverTransactionsMetrics->incrementCurrentInactive();
 }
@@ -70,11 +50,19 @@ void TransactionMetricsObserver::onChooseReadTimestamp(Timestamp readTimestamp) 
     _singleTransactionStats.setReadTimestamp(readTimestamp);
 }
 
-void TransactionMetricsObserver::onStash(ServerTransactionsMetrics* serverTransactionsMetrics,
+void TransactionMetricsObserver::onStash(OperationContext* opCtx,
+                                         ServerTransactionsMetrics* serverTransactionsMetrics,
                                          TickSource* tickSource) {
     //
     // Per transaction metrics.
     //
+    if (!_singleTransactionStats.isActive()) {
+        // Dump transaction info before hitting invariant.
+        LOGV2(12336500,
+              "Attempting to stash transaction metrics which were never unstashed",
+              "lsid"_attr = opCtx->getLogicalSessionId(),
+              "txnNumber"_attr = opCtx->getTxnNumber());
+    }
     invariant(_singleTransactionStats.isActive());
     _singleTransactionStats.setInactive(tickSource, tickSource->getTicks());
 
@@ -86,11 +74,19 @@ void TransactionMetricsObserver::onStash(ServerTransactionsMetrics* serverTransa
     serverTransactionsMetrics->incrementCurrentInactive();
 }
 
-void TransactionMetricsObserver::onUnstash(ServerTransactionsMetrics* serverTransactionsMetrics,
+void TransactionMetricsObserver::onUnstash(OperationContext* opCtx,
+                                           ServerTransactionsMetrics* serverTransactionsMetrics,
                                            TickSource* tickSource) {
     //
     // Per transaction metrics.
     //
+    if (_singleTransactionStats.isActive()) {
+        // Dump transaction info before hitting invariant.
+        LOGV2(12336501,
+              "Attempting to unstash metrics which are already active",
+              "lsid"_attr = opCtx->getLogicalSessionId(),
+              "txnNumber"_attr = opCtx->getTxnNumber());
+    }
     invariant(!_singleTransactionStats.isActive());
     _singleTransactionStats.setActive(tickSource->getTicks());
 
@@ -121,12 +117,14 @@ void TransactionMetricsObserver::onCommit(OperationContext* opCtx,
     //
     // Server wide transactions metrics.
     //
-    serverTransactionsMetrics->incrementTotalCommitted();
+    serverTransactionsMetrics->incrementTotalCommitted(
+        _singleTransactionStats.isServerInitiatedTransaction());
     serverTransactionsMetrics->decrementCurrentOpen();
     serverTransactionsMetrics->decrementCurrentActive();
 
     if (_singleTransactionStats.isPrepared()) {
-        serverTransactionsMetrics->incrementTotalPreparedThenCommitted();
+        serverTransactionsMetrics->incrementTotalPreparedThenCommitted(
+            _singleTransactionStats.isServerInitiatedTransaction());
         serverTransactionsMetrics->decrementCurrentPrepared();
     }
 
@@ -168,6 +166,7 @@ void TransactionMetricsObserver::_onAbortInactive(
     OperationContext* opCtx,
     ServerTransactionsMetrics* serverTransactionsMetrics,
     TickSource* tickSource) {
+
     auto curTick = tickSource->getTicks();
     invariant(!_singleTransactionStats.isActive());
     _onAbort(opCtx, serverTransactionsMetrics, curTick, tickSource);
@@ -238,11 +237,13 @@ void TransactionMetricsObserver::_onAbort(OperationContext* opCtx,
     //
     // Server wide transactions metrics.
     //
-    serverTransactionsMetrics->incrementTotalAborted();
+    serverTransactionsMetrics->incrementTotalAborted(
+        _singleTransactionStats.isServerInitiatedTransaction());
     serverTransactionsMetrics->decrementCurrentOpen();
 
     if (_singleTransactionStats.isPrepared()) {
-        serverTransactionsMetrics->incrementTotalPreparedThenAborted();
+        serverTransactionsMetrics->incrementTotalPreparedThenAborted(
+            _singleTransactionStats.isServerInitiatedTransaction());
         serverTransactionsMetrics->decrementCurrentPrepared();
     }
 
@@ -263,7 +264,8 @@ void TransactionMetricsObserver::onPrepare(ServerTransactionsMetrics* serverTran
     _singleTransactionStats.setPreparedStartTime(curTick);
 
     serverTransactionsMetrics->incrementCurrentPrepared();
-    serverTransactionsMetrics->incrementTotalPrepared();
+    serverTransactionsMetrics->incrementTotalPrepared(
+        _singleTransactionStats.isServerInitiatedTransaction());
 }
 
 }  // namespace mongo

@@ -4,8 +4,7 @@
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-
-const numIterations = 10;
+import {LogicalSessionCacheRefreshSerializationTest} from "jstests/noPassthrough/replication/libs/logical_session_cache_refresh_serialization_test.js";
 
 const rst = new ReplSetTest({
     nodes: 1,
@@ -20,28 +19,6 @@ const rst = new ReplSetTest({
 rst.startSet();
 rst.initiate();
 
-const primary = rst.getPrimary();
-const adminDB = primary.getDB("admin");
-const sessionsColl = primary.getDB("config").system.sessions;
+LogicalSessionCacheRefreshSerializationTest.run(rst.getPrimary());
 
-const sessions = [];
-for (let i = 0; i < numIterations; i++) {
-    jsTestLog.info(`Starting session ${i} and using it to add to the cache`);
-    const session = primary.startSession();
-    sessions.push(session);
-    const sessionId = session.getSessionId();
-    const sessionDB = session.getDatabase("test");
-    assert.commandWorked(sessionDB.runCommand({insert: "coll", documents: [{_id: i}]}));
-
-    jsTestLog.info(`Call refreshLogicalSessionCacheNow iteration ${i}`);
-    assert.commandWorked(adminDB.runCommand({refreshLogicalSessionCacheNow: 1}));
-    assert.eq(
-        1,
-        sessionsColl.find({"_id.id": sessionId.id}).itcount(),
-        "Session should be present after refreshLogicalSessionCacheNow finishes",
-    );
-}
-for (const session of sessions) {
-    session.endSession();
-}
 rst.stopSet();

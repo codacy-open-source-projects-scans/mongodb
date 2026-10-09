@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
 
@@ -35,27 +9,30 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::sbe {
 namespace {
+using namespace std::literals::string_view_literals;
 
 // Every canonical name round-trips through fromString -> toString.
 TEST(SbeFnNamesTest, RoundTrip) {
     for (size_t i = 0; i < static_cast<size_t>(EFn::kNumFunctions); ++i) {
         auto fn = static_cast<EFn>(i);
-        StringData name = toString(fn);
+        std::string_view name = toString(fn);
         ASSERT_EQUALS(fn, fromString(name)) << "round-trip failed for EFn(" << i << ") = " << name;
     }
 }
 
 // Dollar-prefixed ABT aliases resolve to the correct canonical enum values.
 TEST(SbeFnNamesTest, Aliases) {
-    ASSERT_EQUALS(EFn::kAddToArray, fromString("$push"_sd));
-    ASSERT_EQUALS(EFn::kAddToSet, fromString("$addToSet"_sd));
-    ASSERT_EQUALS(EFn::kFirst, fromString("$first"_sd));
-    ASSERT_EQUALS(EFn::kLast, fromString("$last"_sd));
-    ASSERT_EQUALS(EFn::kMax, fromString("$max"_sd));
-    ASSERT_EQUALS(EFn::kMin, fromString("$min"_sd));
-    ASSERT_EQUALS(EFn::kSum, fromString("$sum"_sd));
+    ASSERT_EQUALS(EFn::kAddToArray, fromString("$push"sv));
+    ASSERT_EQUALS(EFn::kAddToSet, fromString("$addToSet"sv));
+    ASSERT_EQUALS(EFn::kFirst, fromString("$first"sv));
+    ASSERT_EQUALS(EFn::kLast, fromString("$last"sv));
+    ASSERT_EQUALS(EFn::kMax, fromString("$max"sv));
+    ASSERT_EQUALS(EFn::kMin, fromString("$min"sv));
+    ASSERT_EQUALS(EFn::kSum, fromString("$sum"sv));
 }
 
 // EFunction::debugPrint() must emit the canonical string name of its EFn value.
@@ -72,7 +49,7 @@ TEST(SbeFnNamesTest, DebugPrintEmitsFunctionName) {
 
 // An unrecognised name must trigger a tassert (death test).
 DEATH_TEST_REGEX(SbeFnNamesDeathTest, UnknownNameTasserts, "8026700") {
-    fromString("noSuchFunction"_sd);
+    fromString("noSuchFunction"sv);
 }
 
 // Compiling an EFunction whose EFn is absent from both dispatch tables must uassert 4822847.

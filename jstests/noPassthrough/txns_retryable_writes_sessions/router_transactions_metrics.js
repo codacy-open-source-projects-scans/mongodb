@@ -34,13 +34,15 @@ function verifyServerStatusFields(res) {
     assert.hasFields(
         res.transactions,
         expectedFields,
-        "The 'transactions' field did not have all of the expected fields, res: " + tojson(res.transactions),
+        "The 'transactions' field did not have all of the expected fields, res: " +
+            tojson(res.transactions),
     );
 
     assert.eq(
         expectedFields.length,
         Object.keys(res.transactions).length,
-        "the 'transactions' field had an unexpected number of fields, res: " + tojson(res.transactions),
+        "the 'transactions' field had an unexpected number of fields, res: " +
+            tojson(res.transactions),
     );
 
     // Verify the "commitTypes" sub-object has the expected fields.
@@ -50,6 +52,8 @@ function verifyServerStatusFields(res) {
         "singleWriteShard",
         "readOnly",
         "twoPhaseCommit",
+        "twoPhaseCommitInternal",
+        "twoPhaseCommitExternal",
         "recoverWithToken",
     ];
     const commitTypeFields = ["initiated", "successful", "successfulDurationMicros"];
@@ -57,13 +61,15 @@ function verifyServerStatusFields(res) {
     assert.hasFields(
         res.transactions.commitTypes,
         commitTypes,
-        "The 'transactions' field did not have each expected commit type, res: " + tojson(res.transactions),
+        "The 'transactions' field did not have each expected commit type, res: " +
+            tojson(res.transactions),
     );
 
     assert.eq(
         commitTypes.length,
         Object.keys(res.transactions.commitTypes).length,
-        "the 'transactions' field had an unexpected number of commit types, res: " + tojson(res.transactions),
+        "the 'transactions' field had an unexpected number of commit types, res: " +
+            tojson(res.transactions),
     );
 
     commitTypes.forEach((type) => {
@@ -117,6 +123,8 @@ class ExpectedTransactionServerStatus {
             singleWriteShard: new ExpectedCommitType(),
             readOnly: new ExpectedCommitType(),
             twoPhaseCommit: new ExpectedCommitType(),
+            twoPhaseCommitInternal: new ExpectedCommitType(),
+            twoPhaseCommitExternal: new ExpectedCommitType(),
             recoverWithToken: new ExpectedCommitType(),
         };
     }
@@ -128,16 +136,36 @@ function verifyServerStatusValues(st, expectedStats) {
     verifyServerStatusFields(res);
 
     const stats = res.transactions;
-    assert.eq(expectedStats.currentOpen, stats.currentOpen, "unexpected currentOpen, res: " + tojson(stats));
-    assert.eq(expectedStats.currentActive, stats.currentActive, "unexpected currentActive, res: " + tojson(stats));
+    assert.eq(
+        expectedStats.currentOpen,
+        stats.currentOpen,
+        "unexpected currentOpen, res: " + tojson(stats),
+    );
+    assert.eq(
+        expectedStats.currentActive,
+        stats.currentActive,
+        "unexpected currentActive, res: " + tojson(stats),
+    );
     assert.eq(
         expectedStats.currentInactive,
         stats.currentInactive,
         "unexpected currentInactive, res: " + tojson(stats),
     );
-    assert.eq(expectedStats.totalStarted, stats.totalStarted, "unexpected totalStarted, res: " + tojson(stats));
-    assert.eq(expectedStats.totalAborted, stats.totalAborted, "unexpected totalAborted, res: " + tojson(stats));
-    assert.eq(expectedStats.totalCommitted, stats.totalCommitted, "unexpected totalCommitted, res: " + tojson(stats));
+    assert.eq(
+        expectedStats.totalStarted,
+        stats.totalStarted,
+        "unexpected totalStarted, res: " + tojson(stats),
+    );
+    assert.eq(
+        expectedStats.totalAborted,
+        stats.totalAborted,
+        "unexpected totalAborted, res: " + tojson(stats),
+    );
+    assert.eq(
+        expectedStats.totalCommitted,
+        stats.totalCommitted,
+        "unexpected totalCommitted, res: " + tojson(stats),
+    );
     assert.eq(
         expectedStats.totalContactedParticipants,
         stats.totalContactedParticipants,
@@ -171,7 +199,10 @@ function verifyServerStatusValues(st, expectedStats) {
         assert.lte(
             expectedStats.commitTypes[commitType].successfulDurationMicros,
             commitTypes[commitType].successfulDurationMicros,
-            "unexpected successfulDurationMicros for " + commitType + ", commit types: " + tojson(commitTypes),
+            "unexpected successfulDurationMicros for " +
+                commitType +
+                ", commit types: " +
+                tojson(commitTypes),
         );
         expectedStats.commitTypes[commitType].successfulDurationMicros =
             commitTypes[commitType].successfulDurationMicros;
@@ -180,10 +211,27 @@ function verifyServerStatusValues(st, expectedStats) {
             assert.gt(
                 commitTypes[commitType].successfulDurationMicros,
                 0,
-                "unexpected successfulDurationMicros for " + commitType + ", commit types: " + tojson(commitTypes),
+                "unexpected successfulDurationMicros for " +
+                    commitType +
+                    ", commit types: " +
+                    tojson(commitTypes),
             );
         }
     });
+
+    assert.eq(
+        commitTypes.twoPhaseCommit.initiated,
+        commitTypes.twoPhaseCommitInternal.initiated + commitTypes.twoPhaseCommitExternal.initiated,
+        "twoPhaseCommit.initiated should equal internal + external",
+        {commitTypes: commitTypes},
+    );
+    assert.eq(
+        commitTypes.twoPhaseCommit.successful,
+        commitTypes.twoPhaseCommitInternal.successful +
+            commitTypes.twoPhaseCommitExternal.successful,
+        "twoPhaseCommit.successful should equal internal + external",
+        {commitTypes: commitTypes},
+    );
 
     const abortCause = res.transactions.abortCause;
     Object.keys(abortCause).forEach((cause) => {
@@ -224,11 +272,15 @@ const st = new ShardingTest({
     mongos: 2,
     config: 1,
     other: {
-        mongosOptions: {setParameter: {"failpoint.skipClusterParameterRefresh": "{'mode':'alwaysOn'}"}},
+        mongosOptions: {
+            setParameter: {"failpoint.skipClusterParameterRefresh": "{'mode':'alwaysOn'}"},
+        },
     },
 });
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 
 const session = st.s.startSession();
 const sessionDB = session.getDatabase(dbName);
@@ -335,7 +387,10 @@ function startTwoPhaseCommitTransaction() {
 function setUpTransactionToRecoverCommit({shouldCommit}) {
     otherRouterSession.startTransaction();
     let resWithRecoveryToken = assert.commandWorked(
-        otherRouterSessionDB.runCommand({insert: collName, documents: [{skey: uniqueSkey(), x: 5}]}),
+        otherRouterSessionDB.runCommand({
+            insert: collName,
+            documents: [{skey: uniqueSkey(), x: 5}],
+        }),
     );
     if (shouldCommit) {
         assert.commandWorked(otherRouterSession.commitTransaction_forTesting());
@@ -394,7 +449,10 @@ jsTest.log("Failed single shard transaction.");
     startSingleShardTransaction();
 
     abortFromUnderneath(st, session);
-    assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.commitTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     expectedStats.currentOpen -= 1;
     expectedStats.currentInactive -= 1;
@@ -428,7 +486,10 @@ jsTest.log("Failed single write shard transaction.");
     startSingleWriteShardTransaction();
 
     abortFromUnderneath(st, session);
-    assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.commitTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     expectedStats.currentOpen -= 1;
     expectedStats.currentInactive -= 1;
@@ -464,7 +525,10 @@ jsTest.log("Failed read only transaction.");
     startReadOnlyTransaction();
 
     abortFromUnderneath(st, session);
-    assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.commitTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     expectedStats.currentOpen -= 1;
     expectedStats.currentInactive -= 1;
@@ -488,6 +552,8 @@ jsTest.log("Successful two phase commit transaction.");
     expectedStats.totalCommitted += 1;
     expectedStats.commitTypes.twoPhaseCommit.initiated += 1;
     expectedStats.commitTypes.twoPhaseCommit.successful += 1;
+    expectedStats.commitTypes.twoPhaseCommitExternal.initiated += 1;
+    expectedStats.commitTypes.twoPhaseCommitExternal.successful += 1;
     expectedStats.totalParticipantsAtCommit += 2;
     expectedStats.totalRequestsTargeted += 1;
     verifyServerStatusValues(st, expectedStats);
@@ -501,13 +567,17 @@ jsTest.log("Failed two phase commit transaction.");
     startTwoPhaseCommitTransaction();
 
     abortFromUnderneath(st, session);
-    assert.commandFailedWithCode(session.commitTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.commitTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     expectedStats.currentOpen -= 1;
     expectedStats.currentInactive -= 1;
     expectedStats.totalAborted += 1;
     expectedStats.abortCause["NoSuchTransaction"] += 1;
     expectedStats.commitTypes.twoPhaseCommit.initiated += 1;
+    expectedStats.commitTypes.twoPhaseCommitExternal.initiated += 1;
     expectedStats.totalParticipantsAtCommit += 2;
     // There are no implicit aborts after two phase commit, so the coordinator is targeted once.
     expectedStats.totalRequestsTargeted += 1;
@@ -568,7 +638,9 @@ jsTest.log("Recover failed commit result.");
 jsTest.log("Empty recovery token.");
 (() => {
     otherRouterSession.startTransaction();
-    let resWithEmptyRecoveryToken = assert.commandWorked(otherRouterSessionDB.runCommand({find: collName}));
+    let resWithEmptyRecoveryToken = assert.commandWorked(
+        otherRouterSessionDB.runCommand({find: collName}),
+    );
     assert.commandWorked(otherRouterSession.commitTransaction_forTesting());
 
     // The stats on the main mongos shouldn't have changed.
@@ -621,7 +693,10 @@ jsTest.log("Implicitly aborted transaction.");
     assert.commandWorked(sessionDB[collName].insert({_id: 1, skey: 1}));
 
     session.startTransaction();
-    assert.commandFailedWithCode(sessionDB[collName].insert({_id: 1, skey: 1}), ErrorCodes.DuplicateKey);
+    assert.commandFailedWithCode(
+        sessionDB[collName].insert({_id: 1, skey: 1}),
+        ErrorCodes.DuplicateKey,
+    );
 
     expectedStats.totalStarted += 1;
     expectedStats.totalAborted += 1;
@@ -630,7 +705,10 @@ jsTest.log("Implicitly aborted transaction.");
     expectedStats.totalRequestsTargeted += 2; // Plus one for the implicit abort.
     verifyServerStatusValues(st, expectedStats);
 
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.abortTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     // A failed abortTransaction leads to an implicit abort, so two requests are targeted.
     expectedStats.totalRequestsTargeted += 2;
@@ -682,7 +760,9 @@ jsTest.log("Active transaction.");
             const threadSession = mongosConn.startSession();
 
             threadSession.startTransaction();
-            assert.commandWorked(threadSession.getDatabase(dbName).runCommand({find: collName, filter: {}}));
+            assert.commandWorked(
+                threadSession.getDatabase(dbName).runCommand({find: collName, filter: {}}),
+            );
             assert.commandWorked(threadSession.abortTransaction_forTesting());
             threadSession.endSession();
         },
@@ -730,6 +810,8 @@ jsTest.log("Change shard key with retryable write - findAndModify.");
     expectedStats.totalCommitted += 1;
     expectedStats.commitTypes.twoPhaseCommit.initiated += 1;
     expectedStats.commitTypes.twoPhaseCommit.successful += 1;
+    expectedStats.commitTypes.twoPhaseCommitInternal.initiated += 1;
+    expectedStats.commitTypes.twoPhaseCommitInternal.successful += 1;
     expectedStats.totalContactedParticipants += 2;
     expectedStats.totalParticipantsAtCommit += 2;
     expectedStats.totalRequestsTargeted += 4;
@@ -749,6 +831,8 @@ jsTest.log("Change shard key with retryable write - batch write command.");
     expectedStats.totalCommitted += 1;
     expectedStats.commitTypes.twoPhaseCommit.initiated += 1;
     expectedStats.commitTypes.twoPhaseCommit.successful += 1;
+    expectedStats.commitTypes.twoPhaseCommitInternal.initiated += 1;
+    expectedStats.commitTypes.twoPhaseCommitInternal.successful += 1;
     expectedStats.totalContactedParticipants += 2;
     expectedStats.totalParticipantsAtCommit += 2;
     expectedStats.totalRequestsTargeted += 4;

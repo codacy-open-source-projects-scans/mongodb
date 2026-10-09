@@ -5,9 +5,7 @@
  * These will be picked up/ran by the js fuzzer suite.
  *
  * @tags: [
- *   featureFlagRankFusionFull,
  *   # Needed for the nested $scoreFusion.
- *   featureFlagSearchHybridScoringFull,
  *   requires_fcv_82
  * ]
  */
@@ -29,7 +27,9 @@ assert.commandFailedWithCode(
 assert.commandFailedWithCode(
     runPipeline([
         {
-            $rankFusion: {input: {pipelines: {searchone: [{$sort: {_id: 1}}, {$project: {score1: 1}}]}}},
+            $rankFusion: {
+                input: {pipelines: {searchone: [{$sort: {_id: 1}}, {$project: {score1: 1}}]}},
+            },
         },
     ]),
     [9191103, 12108704],
@@ -40,7 +40,11 @@ assert.commandFailedWithCode(
         {
             $rankFusion: {
                 input: {
-                    pipelines: {nested: [{$rankFusion: {input: {pipelines: {simple: [{$sort: {_id: 1}}]}}}}]},
+                    pipelines: {
+                        nested: [
+                            {$rankFusion: {input: {pipelines: {simple: [{$sort: {_id: 1}}]}}}},
+                        ],
+                    },
                 },
             },
         },
@@ -78,7 +82,10 @@ assert.commandFailedWithCode(
             $rankFusion: {
                 input: {
                     pipelines: {
-                        nested: [{$limit: 10}, {$rankFusion: {input: {pipelines: {simple: [{$sort: {_id: 1}}]}}}}],
+                        nested: [
+                            {$limit: 10},
+                            {$rankFusion: {input: {pipelines: {simple: [{$sort: {_id: 1}}]}}}},
+                        ],
                     },
                 },
             },
@@ -99,7 +106,9 @@ assert.commandFailedWithCode(
     runPipeline([
         {
             $rankFusion: {
-                input: {pipelines: {scoreInputPipeline: [{$score: {score: "$_id"}}, {$sort: {_id: 1}}]}},
+                input: {
+                    pipelines: {scoreInputPipeline: [{$score: {score: "$_id"}}, {$sort: {_id: 1}}]},
+                },
             },
         },
     ]),
@@ -109,7 +118,9 @@ assert.commandFailedWithCode(
     runPipeline([
         {
             $rankFusion: {
-                input: {pipelines: {scoreInputPipeline: [{$sort: {_id: 1}}, {$score: {score: "$_id"}}]}},
+                input: {
+                    pipelines: {scoreInputPipeline: [{$sort: {_id: 1}}, {$score: {score: "$_id"}}]},
+                },
             },
         },
     ]),

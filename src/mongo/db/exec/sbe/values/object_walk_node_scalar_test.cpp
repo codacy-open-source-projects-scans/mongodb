@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/sbe/values/object_walk_node.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo::sbe {
 
@@ -76,7 +52,7 @@ value::Array convertToArray(value::TypeTags inputTag, value::Value inputVal) {
                 outVal = inVal;
             }
         }
-        ret.push_back(outTag, outVal);
+        ret.push_back_raw(outTag, outVal);
     };
     arrayForEach(inputTag, inputVal, callback);
     return ret;
@@ -84,7 +60,7 @@ value::Array convertToArray(value::TypeTags inputTag, value::Value inputVal) {
 
 value::Object convertToObject(value::TypeTags inputTag, value::Value inputVal) {
     value::Object ret;
-    auto callback = [&](StringData fieldName,
+    auto callback = [&](std::string_view fieldName,
                         value::TypeTags inTag,
                         value::Value inVal,
                         const char* cur) -> bool {
@@ -104,7 +80,7 @@ value::Object convertToObject(value::TypeTags inputTag, value::Value inputVal) {
                 outVal = inVal;
             }
         }
-        ret.push_back(fieldName, outTag, outVal);
+        ret.push_back_raw(fieldName, outTag, outVal);
         return false;
     };
     objectForEach(inputTag, inputVal, callback);
@@ -133,8 +109,9 @@ public:
             << ", converted value: " << obj << ".";
 
         // Free value memory on exit.
-        value::ValueGuard inputGuard{inputTag, inputVal};
-        value::ValueGuard convertedGuard{convertedTag, convertedVal};
+        value::TagValueOwned inputOwner = value::TagValueOwned::fromRaw(inputTag, inputVal);
+        value::TagValueOwned convertedOwner =
+            value::TagValueOwned::fromRaw(convertedTag, convertedVal);
 
         auto verifyWalk = [&](value::TypeTags t, value::Value v) {
             // Extract paths from input data in a single pass.
@@ -145,9 +122,8 @@ public:
             size_t idx = 0;
             for (auto& tc : testCases) {
                 value::TagValueMaybeOwned output = recorders[idx].extractValue();
-                auto [resultsTag, resultsVal] = output.raw();
                 BSONObjBuilder tmp;
-                bson::appendValueToBsonObj(tmp, "result", resultsTag, resultsVal);
+                bson::appendValueToBsonObj(tmp, "result", output.tag(), output.value());
                 BSONObj resultObj = tmp.obj();  // Frees memory in tmp.
                 ASSERT_TRUE(
                     SimpleBSONObjComparator::kInstance.evaluate(resultObj == tc.projectValue))

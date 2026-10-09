@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/db/commands/query_cmd/bulk_write.h"
@@ -44,14 +17,19 @@
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
 #include "mongo/db/timeseries/write_ops/internal/timeseries_write_ops_internal.h"
+#include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils_internal.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class TimeseriesWriteOpsTest : public timeseries::TimeseriesTestFixture {};
 
@@ -129,9 +107,9 @@ TEST_F(TimeseriesWriteOpsTest, BatchInsertMissingCollection) {
                                                    OperationSource::kTimeseriesInsert,
                                                    &fixer,
                                                    &result);
-    ASSERT_FALSE(shouldInsertMore);
+    EXPECT_FALSE(shouldInsertMore);
     ASSERT_EQ(1, result.results.size());
-    ASSERT_EQ(ErrorCodes::NamespaceNotFound, result.results[0].getStatus());
+    EXPECT_EQ(ErrorCodes::NamespaceNotFound, result.results[0].getStatus());
 
     result.results.clear();
     insertStatements.push_back(InsertStatement{fromjson("{_id: 1, foo: 2}")});
@@ -146,9 +124,9 @@ TEST_F(TimeseriesWriteOpsTest, BatchInsertMissingCollection) {
                                                    OperationSource::kTimeseriesInsert,
                                                    &fixer,
                                                    &result);
-    ASSERT_FALSE(shouldInsertMore);
+    EXPECT_FALSE(shouldInsertMore);
     ASSERT_EQ(1, result.results.size());
-    ASSERT_EQ(ErrorCodes::NamespaceNotFound, result.results[0].getStatus());
+    EXPECT_EQ(ErrorCodes::NamespaceNotFound, result.results[0].getStatus());
 }
 
 TEST_F(TimeseriesWriteOpsTest, PerformInsertsNoCollection) {
@@ -159,9 +137,9 @@ TEST_F(TimeseriesWriteOpsTest, PerformInsertsNoCollection) {
     auto source = OperationSource::kTimeseriesInsert;
     auto writeResult =
         write_ops_exec::performInserts(_opCtx, request, /*preConditions=*/boost::none, source);
-    ASSERT_FALSE(writeResult.canContinue);
+    EXPECT_FALSE(writeResult.canContinue);
     ASSERT_EQ(1, writeResult.results.size());
-    ASSERT_EQ(ErrorCodes::NamespaceNotFound, writeResult.results[0].getStatus());
+    EXPECT_EQ(ErrorCodes::NamespaceNotFound, writeResult.results[0].getStatus());
 }
 
 TEST_F(TimeseriesWriteOpsTest, PerformTimeseriesDeletesNoCollection) {
@@ -173,9 +151,9 @@ TEST_F(TimeseriesWriteOpsTest, PerformTimeseriesDeletesNoCollection) {
     auto source = OperationSource::kTimeseriesDelete;
     auto writeResult =
         write_ops_exec::performDeletes(_opCtx, request, /*preConditions=*/boost::none, source);
-    ASSERT_FALSE(writeResult.canContinue);
+    EXPECT_FALSE(writeResult.canContinue);
     ASSERT_EQ(1, writeResult.results.size());
-    ASSERT_EQ(8555700, writeResult.results[0].getStatus().code());
+    EXPECT_EQ(8555700, writeResult.results[0].getStatus().code());
 }
 
 TEST_F(TimeseriesWriteOpsTest, PerformTimeseriesWritesNoCollection) {
@@ -222,7 +200,7 @@ public:
         const std::vector<ChunkType> chunks{
             ChunkType(_uuid, cr, _shardVersion.placementVersion(), shardName)};
 
-        constexpr StringData shardKey("skey");
+        constexpr std::string_view shardKey("skey");
         const ShardKeyPattern shardKeyPattern{BSON(shardKey << 1)};
 
         const auto epoch = chunks.front().getVersion().epoch();
@@ -250,7 +228,7 @@ public:
             CollectionMetadata(CurrentChunkManager(rtHandle), shardName);
 
         CollectionShardingRuntime::acquireExclusive(_opCtx, _nss)
-            ->setFilteringMetadata_nonAuthoritative(_opCtx, collectionMetadata);
+            ->setCollectionMetadata(_opCtx, collectionMetadata);
     }
 
 protected:
@@ -306,6 +284,59 @@ TEST_F(TimeseriesWriteOpsShardedTest, PerformTimeseriesWritesFailCollectionAcqui
     const auto status = cmdReply.getWriteErrors()->front().getStatus();
     EXPECT_EQ(status.code(), ErrorCodes::FailPointEnabled) << status;
 }
+
+
+// Verify that the invariant in performAtomicTimeseriesWrites fires when a transform update
+// changes control.min.time.
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+using TimeseriesWriteOpsDeathTest = TimeseriesWriteOpsTest;
+DEATH_TEST_F(TimeseriesWriteOpsDeathTest,
+             PerformAtomicTimeseriesWritesInvariantFailsWhenControlMinTimeChanges,
+             "control.min.time must not change in a bucket update") {
+    const BSONObj bucketDoc = ::mongo::fromjson(
+        R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
+            "control":{"version":1,"min":{"time":{"$date":"2022-06-06T15:34:00.000Z"},"a":1,"b":1},
+                                   "max":{"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3}},
+            "data":{"time":{"0":{"$date":"2022-06-06T15:34:30.000Z"},
+                            "1":{"$date":"2022-06-06T15:34:30.000Z"},
+                            "2":{"$date":"2022-06-06T15:34:30.000Z"}},
+                    "a":{"0":1,"1":2,"2":3},
+                    "b":{"0":1,"1":2,"2":3}}})");
+    OID bucketId = OID::createFromString("629e1e680958e279dc29a517"sv);
+    auto compressionResult = timeseries::compressBucket(bucketDoc, "time", _nsNoMeta, false);
+    ASSERT_TRUE(compressionResult.compressedBucket.has_value());
+    const BSONObj compressedBucket = compressionResult.compressedBucket.value();
+
+    const auto bucketsNss = _resolveTimeseriesNss(_nsNoMeta);
+    AutoGetCollection bucketsColl(_opCtx, bucketsNss, LockMode::MODE_IX);
+    {
+        WriteUnitOfWork wunit{_opCtx};
+        ASSERT_OK(Helpers::insert(_opCtx, *bucketsColl, compressedBucket));
+        wunit.commit();
+    }
+
+    // Delta diff that changes control.min.time -- this must trigger the invariant.
+    // performAtomicTimeseriesWrites only handles kDelta updates, so we use the doc_diff format.
+    auto badDiff = BSON(
+        "scontrol" << BSON("smin" << BSON("u" << BSON("time" << Date_t::fromMillisSinceEpoch(0)))));
+    mongo::write_ops::UpdateModification::DiffOptions diffOptions;
+    write_ops::UpdateModification u(
+        badDiff, write_ops::UpdateModification::DeltaTag{}, diffOptions);
+    write_ops::UpdateOpEntry update(BSON("_id" << bucketId), std::move(u));
+    write_ops::UpdateCommandRequest op(bucketsNss, {update});
+
+    write_ops::WriteCommandRequestBase base;
+    base.setBypassDocumentValidation(true);
+    base.setStmtIds(std::vector<StmtId>{kUninitializedStmtId});
+    op.setWriteCommandRequestBase(std::move(base));
+    op.setCollectionUUID(bucketsColl->uuid());
+
+    auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
+        _opCtx, _nsNoMeta, /*expectedUUID=*/boost::none);
+    uassertStatusOK(timeseries::write_ops::internal::performAtomicTimeseriesWrites(
+        _opCtx, preConditions, {}, {op}));
+}
+#endif  // MONGO_CONFIG_DEBUG_BUILD
 
 }  // namespace
 }  // namespace mongo

@@ -3,6 +3,7 @@
  * unpacking all buckets, while ensuring no incorrect results are created
 
  * @tags: [
+ *     uses_explain,
  *     # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
  *     # migrations may result in writes splitting between two primaries, and thus different
  *     # buckets.
@@ -16,7 +17,9 @@
  *     # Refusing to run a test that issues an aggregation command with explain because it may
  *     # return incomplete results if interrupted by a stepdown.
  *     does_not_support_stepdowns,
- *     requires_fcv_71
+ *     requires_fcv_71,
+ *     # The test assumes that the collection will remain on a single shard.
+ *     assumes_balancer_off,
  * ]
  */
 
@@ -33,7 +36,9 @@ const setupColl = (coll, collName, usesMeta) => {
 
     // If usesMeta is true, we want the collection to have a onlyMeta field
     if (usesMeta) {
-        assert.commandWorked(db.createCollection(collName, {timeseries: {timeField: "t", metaField: "m"}}));
+        assert.commandWorked(
+            db.createCollection(collName, {timeseries: {timeField: "t", metaField: "m"}}),
+        );
     } else {
         assert.commandWorked(db.createCollection(collName, {timeseries: {timeField: "t"}}));
     }
@@ -67,24 +72,30 @@ const assertPlanStagesInPipeline = ({
     let colls = onlyMeta ? [metaColl] : [coll, metaColl];
     for (const c of colls) {
         const aggRes = c.explain().aggregate(pipeline);
-        const planStage = getExplainedPipelineFromAggregation(db, c, pipeline, {inhibitOptimization: false});
+        const planStage = getExplainedPipelineFromAggregation(db, c, pipeline, {
+            inhibitOptimization: false,
+        });
         // We check index at i in the PlanStage against the i'th index in expectedStages
         // Should rewrite [{$_unpack}, {$limit: x}] pipeline as [{$limit:
         // x}, {$_unpack}, {$limit: x}]
-        assert(expectedStages.length == planStage.length);
+        assert.eq(
+            expectedStages.length,
+            planStage.length,
+            `Expected pipeline: ${tojson(expectedStages)}, found pipeline: ${tojson(planStage)}, full explain: ${tojson(aggRes)}`,
+        );
         for (var i = 0; i < expectedStages.length; i++) {
             assert(planStage[i].hasOwnProperty(expectedStages[i]), tojson(aggRes));
         }
 
         if (expectedResults.length != 0) {
             const result = c.aggregate(pipeline).toArray();
-            assert(expectedResults.length == result.length);
+            assert.eq(expectedResults.length, result.length, tojson(result));
             for (var i = 0; i < expectedResults.length; i++) {
                 assert.docEq(result[i], expectedResults[i], tojson(result));
             }
         } else if (expectedResultLength) {
             const result = c.aggregate(pipeline).toArray();
-            assert(expectedResultLength == result.length);
+            assert.eq(expectedResultLength, result.length, tojson(result));
         }
     }
 };
@@ -110,7 +121,10 @@ const metaDocs = setupColl(metaColl, metaCollName, true);
 // Simple limit test. Because the pushed down limit is in the PlanStage now,
 // getExplainedPipelineFromAggregation does not display it and we don't see the first limit / sort
 // stage. The presence of the pushed limit is tested in unit tests.
-assertPlanStagesInPipeline({pipeline: [{$limit: 2}], expectedStages: ["$_internalUnpackBucket", "$limit"]});
+assertPlanStagesInPipeline({
+    pipeline: [{$limit: 2}],
+    expectedStages: ["$_internalUnpackBucket", "$limit"],
+});
 // Test that when two limits are present, they get squashed into 1 taking limit of the smaller
 // (tighter) value
 assertPlanStagesInPipeline({

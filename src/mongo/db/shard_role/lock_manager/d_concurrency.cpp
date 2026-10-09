@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -48,6 +21,35 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
+
+namespace {
+
+/**
+ * Acquires a lock on the given resource. If lockEnqueuedAction is provided, the lock
+ * acquisition is split into lockBegin + lockComplete, and the action is invoked between them
+ * when the lock is contended.
+ */
+void lockWithOptionalAction(OperationContext* opCtx,
+                            ResourceId resId,
+                            LockMode mode,
+                            Lock::LockEnqueuedAction lockEnqueuedAction,
+                            Date_t deadline) {
+    auto* locker = shard_role_details::getLocker(opCtx);
+    if (lockEnqueuedAction) {
+        auto result = locker->lockBegin(opCtx, resId, mode);
+        invariant(result == LOCK_OK || result == LOCK_WAITING);
+        if (result == LOCK_WAITING) {
+            ScopeGuard unlockOnError([&] { locker->unlock(resId); });
+            lockEnqueuedAction(opCtx);
+            locker->lockComplete(opCtx, resId, mode, deadline, nullptr);
+            unlockOnError.dismiss();
+        }
+    } else {
+        locker->lock(opCtx, resId, mode, deadline);
+    }
+}
+
+}  // namespace
 
 Lock::ResourceLock::ResourceLock(ResourceLock&& other)
     : _opCtx(other._opCtx), _rid(std::move(other._rid)), _result(other._result) {
@@ -170,6 +172,21 @@ void Lock::GlobalLock::_declareIntent(
     }
 }
 
+boost::optional<rss::consensus::IntentRegistry::Intent> Lock::GlobalLock::releaseIntent() {
+    if (!_guard) {
+        return boost::none;
+    }
+    auto intent = _guard->intent();
+    // Destroying the guard deregisters the intent.
+    _guard = boost::none;
+    return intent;
+}
+
+void Lock::GlobalLock::reacquireIntent(rss::consensus::IntentRegistry::Intent intent) {
+    invariant(!_guard);
+    _guard.emplace(intent, _opCtx);
+}
+
 Lock::GlobalLock::GlobalLock(GlobalLock&& otherLock)
     : _opCtx(otherLock._opCtx),
       _result(otherLock._result),
@@ -193,10 +210,29 @@ Lock::GlobalLock::~GlobalLock() {
         // prevent lock release.
         const bool willReleaseLock =
             !locker->isGlobalLockedRecursively() && !locker->inAWriteUnitOfWork();
+
+        // The lock will be two-phase deferred when we are in a WUOW and this is not a recursive
+        // unlock. Computed before _unlock() modifies lock state.
+        const bool lockWillBeDeferred =
+            !locker->isGlobalLockedRecursively() && locker->inAWriteUnitOfWork();
+
         if (willReleaseLock) {
             shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
         }
         _unlock();
+
+        // Mirror the lock deferral for the intent: keep the IntentGuard alive until the WUOW
+        // ends so the intent lifetime matches the global lock lifetime. The guard is wrapped in a
+        // shared_ptr because the Change lambdas must be copyable.
+        if (lockWillBeDeferred && _guard) {
+            auto sharedGuard = std::make_shared<rss::consensus::IntentGuard>(std::move(*_guard));
+            _guard = boost::none;
+            shard_role_details::getRecoveryUnit(_opCtx)->registerChange(
+                [sharedGuard](OperationContext*, boost::optional<Timestamp>) noexcept {
+                    sharedGuard->reset();
+                },
+                [sharedGuard](OperationContext*) noexcept { sharedGuard->reset(); });
+        }
     }
 
     if (!_skipRSTLLock && (lockResult == LOCK_OK || lockResult == LOCK_WAITING)) {
@@ -326,6 +362,13 @@ Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
                                      const NamespaceString& ns,
                                      LockMode mode,
                                      Date_t deadline)
+    : CollectionLock(opCtx, ns, mode, nullptr, deadline) {}
+
+Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
+                                     const NamespaceString& ns,
+                                     LockMode mode,
+                                     LockEnqueuedAction lockEnqueuedAction,
+                                     Date_t deadline)
     : _id(RESOURCE_COLLECTION, ns),
       _opCtx(opCtx),
       _oldBlockingAllowed(shard_role_details::getRecoveryUnit((_opCtx))->getBlockingAllowed()) {
@@ -333,7 +376,12 @@ Lock::CollectionLock::CollectionLock(OperationContext* opCtx,
     dassert(shard_role_details::getLocker(_opCtx)->isDbLockedForMode(
         ns.dbName(), isSharedLockMode(mode) ? MODE_IS : MODE_IX));
 
-    shard_role_details::getLocker(_opCtx)->lock(_opCtx, _id, mode, deadline);
+    if (lockEnqueuedAction) {
+        invariant(mode == MODE_S || mode == MODE_X,
+                  "CollectionLock with callback only supports MODE_S and MODE_X");
+    }
+
+    lockWithOptionalAction(_opCtx, _id, mode, std::move(lockEnqueuedAction), deadline);
 
     // If a user operation on secondaries acquires a lock in MODE_S and then blocks on a prepare
     // conflict with a prepared transaction, a deadlock will occur at the commit time of the

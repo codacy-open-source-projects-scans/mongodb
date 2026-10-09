@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -39,6 +13,7 @@
 #include "mongo/db/s/resharding/resharding_coordinator_dao.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service_util.h"
 #include "mongo/db/s/resharding/resharding_donor_post_cloning_delta_collector.h"
+#include "mongo/db/s/resharding/resharding_recipient_post_cloning_delta_collector.h"
 #include "mongo/db/s/resharding/shardsvr_resharding_commands_gen.h"
 #include "mongo/executor/async_rpc.h"
 #include "mongo/otel/telemetry_context.h"
@@ -50,6 +25,8 @@
 #include <vector>
 
 namespace mongo {
+
+class FixedFCVRegion;
 
 namespace resharding {
 class CoordinatorCommitMonitor;
@@ -90,6 +67,15 @@ public:
     }
 
     /**
+     * Returns whether the operation has been aborted or the node is stepping down/shutting down.
+     * Since the abort token is a child of the stepdown token, this is equivalent to checking
+     * whether the abort token has been canceled.
+     */
+    bool isAbortedOrSteppingDown() {
+        return _abortToken.isCanceled();
+    }
+
+    /**
      * Cancels the source for the abort token and sets the abort reason to indicate that the
      * resharding operation has been aborted.
      */
@@ -101,6 +87,23 @@ public:
 
     void cancelQuiescePeriod() {
         _quiesceCancellationSource.cancel();
+    }
+
+    /**
+     * Returns the cancellation token for the donor documentsToCopy fetch, creating the source on
+     * the first call. Must be called before cancelDocumentFetch.
+     */
+    CancellationToken createDocumentFetchToken() {
+        if (!_fetchCancellationSource) {
+            _fetchCancellationSource.emplace(_abortToken);
+        }
+        return _fetchCancellationSource->token();
+    }
+
+    void cancelDocumentFetch() {
+        if (_fetchCancellationSource) {
+            _fetchCancellationSource->cancel();
+        }
     }
 
     boost::optional<Status> getAbortReason() const;
@@ -143,6 +146,10 @@ private:
     // A source created by inheriting from the stepdown token.
     // Provides the means to cancel the quiesce period.
     CancellationSource _quiesceCancellationSource;
+
+    // A source created by inheriting from the abort token.
+    // Provides the means to cancel the background documentsToCopy fetch once cloning is done.
+    boost::optional<CancellationSource> _fetchCancellationSource;
 };
 
 class ReshardingCoordinator final
@@ -160,6 +167,17 @@ public:
         std::shared_ptr<ReshardingCoordinatorExternalState> externalState,
         ServiceContext* serviceContext);
     ~ReshardingCoordinator() override = default;
+
+    /**
+     * Same as PrimaryOnlyService::TypedInstance::getOrCreate, but requires the caller to hold a
+     * FixedFCVRegion for the duration of the call, since the coordinator's creation must not race
+     * with an FCV transition.
+     */
+    static std::shared_ptr<ReshardingCoordinator> getOrCreate(OperationContext* opCtx,
+                                                              repl::PrimaryOnlyService* service,
+                                                              BSONObj initialState,
+                                                              const FixedFCVRegion& fcvRegion,
+                                                              bool checkOptions = true);
 
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                          const CancellationToken& token) noexcept override;
@@ -186,6 +204,15 @@ public:
 
     CommonReshardingMetadata getMetadata() const {
         return _metadata;
+    }
+
+    /**
+     * Returns true if this instance was recovered from a coordinator document that had already
+     * reached kQuiesced, i.e. the resharding operation it represents finished on a previous
+     * primary.
+     */
+    bool isRecoveryInQuiesce() const {
+        return _isRecoveryInQuiesce;
     }
 
     /**
@@ -273,9 +300,9 @@ private:
     void _stopMigrations(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
-     * Helper to re-enable chunk migrations on abort.
+     * Re-enables chunk migrations on the source namespace during teardown.
      */
-    void _resumeMigrations(OperationContext* opCtx, boost::optional<Status> abortReason);
+    void _resumeMigrations(OperationContext* opCtx);
 
     /**
      * Runs resharding up through preparing to persist the decision.
@@ -386,11 +413,30 @@ private:
     void _startCommitMonitor(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
-     * If verification is enabled, fetches the number of documents to clone from all donor shards
-     * involved in resharding and persists the value for each donor shard in the coordinator state
-     * document.
+     * Waits for all background futures to halt on cleanup.
      */
-    ExecutorFuture<void> _fetchAndPersistNumDocumentsToCloneFromDonors(
+    ExecutorFuture<void> _drainBackgroundFutures(Status outerStatus);
+
+    /**
+     * Launches donor validation work:
+     *   1. Starts change-stream monitors on all donor shards.
+     *   2. Fires off the documentsToCopy fetch from donors.
+     */
+    void _launchDonorValidations(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                 std::shared_ptr<otel::TelemetryContext> telemetryCtx);
+
+    /**
+     * If verification is enabled, fetches the number of documents to clone from all donor shards.
+     * Returns the per-shard counts.
+     */
+    ExecutorFuture<std::map<ShardId, int64_t>> _fetchNumDocumentsToCloneFromDonors(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    /**
+     * Waits for documentsToCopy fetch to complete, then verifies the cloned document count. Skips
+     * verification if the fetch times out or fails.
+     */
+    ExecutorFuture<void> _verifyClonedCollection(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
@@ -411,7 +457,15 @@ private:
      * Computes the final document count for each donor shard from the given per-shard delta map
      * and persists the result in the coordinator state document.
      */
-    void _persistDocumentsDelta(OperationContext* opCtx, std::map<ShardId, int64_t> documentsDelta);
+    void _persistDonorDocumentsDelta(OperationContext* opCtx,
+                                     std::map<ShardId, int64_t> documentsDelta);
+
+    /**
+     * Computes each recipient's documentsFinal = numDocumentsCloned + delta, and persists the
+     * result in the coordinator state document.
+     */
+    void _persistRecipientDocumentsDelta(OperationContext* opCtx,
+                                         const std::map<ShardId, int64_t>& recipientDelta);
 
     /**
      * Waits on _reshardingCoordinatorObserver to notify that all recipients have entered
@@ -425,6 +479,7 @@ private:
      * collection verification check. Returns the (possibly refreshed) coordinator document.
      */
     ReshardingCoordinatorDocument _verifyFinalCollection(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         ReshardingCoordinatorDocument coordinatorDocChangedOnDisk);
 
     /**
@@ -489,12 +544,13 @@ private:
         resharding::PhaseTransitionFn phaseTransitionFn);
 
     /**
-     * Updates the entry for this resharding operation in config.reshardingOperations to the
-     * quiesced state, or removes it if quiesce isn't being done.  Removes the resharding fields
-     * from the catalog entries.
+     * Tears down the resharding coordinator: re-enables migrations, releases the internal session,
+     * then removes or quiesces the coordinator document and resharding fields. The whole sequence
+     * is retried until it succeeds or the coordinator steps down.
      */
-    void _removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
-        OperationContext* opCtx, boost::optional<Status> abortReason = boost::none);
+    ExecutorFuture<void> _cleanupCoordinator(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        boost::optional<Status> abortReason = boost::none);
 
     /**
      * Sends '_flushRoutingTableCacheUpdatesWithWriteConcern' to ensure donor state machine creation
@@ -540,6 +596,12 @@ private:
     void _tellAllDonorsToRefresh(const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
 
     /**
+     * Sends '_shardsvrReshardDonorCriticalSectionStarted' to all donor shards.
+     */
+    void _notifyDonorsCriticalSectionStarted(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+
+    /**
      * If verification is enabled, sends '_shardsvrReshardingDonorStartChangeStreamsMonitor' to all
      * donor shards.
      */
@@ -573,6 +635,15 @@ private:
         std::shared_ptr<otel::TelemetryContext> telemetryCtx);
 
     /**
+     * When the new verification flow is enabled, pre-launches async commands to all recipients to
+     * wait for their change-stream monitors and stores the results in _recipientDeltaFuture, so
+     * that network time overlaps with waiting for recipients to reach strict consistency.
+     */
+    void _launchRecipientDeltaCollector(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        std::shared_ptr<otel::TelemetryContext> telemetryCtx);
+
+    /**
      * Best effort attempt to update the chunk imbalance metrics.
      */
     void _updateChunkImbalanceMetrics(const NamespaceString& nss);
@@ -590,6 +661,12 @@ private:
     void _logStatsOnCompletion(bool success);
 
     /**
+     * Builds a BSON sub-object summarising the cloning and final-collection validation outcomes,
+     * derived from persisted shard-entry fields.
+     */
+    BSONObj _buildValidationStats() const;
+
+    /**
      * Returns the identity of the shard ID in charge of generating the pre-post commit control
      * events for change stream readers.
      */
@@ -605,8 +682,7 @@ private:
      * Creates a new span with the resharding UUID set as an attribute.
      */
     otel::traces::Span _startSpan(std::shared_ptr<otel::TelemetryContext> telemetryCtx,
-                                  const std::string& spanName,
-                                  bool keepSpan = false);
+                                  otel::traces::SpanName spanName);
 
     // OperationSessionPersistence functions.
     boost::optional<OperationSessionInfo> readSession(OperationContext* opCtx) const override;
@@ -655,7 +731,7 @@ private:
     // CancelableOperationContext must have a thread that is always available to it to mark its
     // opCtx as killed when the cancelToken has been cancelled.
     const std::shared_ptr<ThreadPool> _markKilledExecutor;
-    std::unique_ptr<HierarchicalCancelableOperationContextFactory> _cancelableOpCtxFactory;
+    std::shared_ptr<HierarchicalCancelableOperationContextFactory> _cancelableOpCtxFactory;
 
     /**
      * Must be locked while the `_canEnterCritical` promise is being fulfilled.
@@ -689,8 +765,12 @@ private:
     SharedSemiFuture<void> _commitMonitorQuiesced;
     std::shared_ptr<resharding::CoordinatorCommitMonitor> _commitMonitor;
 
-    std::shared_ptr<ReshardingDonorPostCloningDeltaCollector> _deltaCollector;
-    boost::optional<SharedSemiFuture<std::map<ShardId, int64_t>>> _deltaFuture;
+    std::shared_ptr<ReshardingDonorPostCloningDeltaCollector> _donorDeltaCollector;
+    boost::optional<SharedSemiFuture<std::map<ShardId, int64_t>>> _donorDeltaFuture;
+    std::shared_ptr<ReshardingRecipientPostCloningDeltaCollector> _recipientDeltaCollector;
+    boost::optional<SharedSemiFuture<std::map<ShardId, int64_t>>> _recipientDeltaFuture;
+
+    boost::optional<SharedSemiFuture<std::map<ShardId, int64_t>>> _fetchNumDocumentsToCopyFuture;
 
     std::shared_ptr<ReshardingCoordinatorExternalState> _reshardingCoordinatorExternalState;
 
@@ -705,6 +785,7 @@ private:
     OperationSessionTracker _sessionTracker;
 
     const bool _isRecovery;
+    const bool _isRecoveryInQuiesce;
 };
 
 }  // namespace mongo

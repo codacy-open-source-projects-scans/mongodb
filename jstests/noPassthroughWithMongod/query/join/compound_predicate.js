@@ -4,7 +4,6 @@
  * @tags: [
  *   requires_fcv_90,
  *   requires_sbe,
- *   featureFlagPathArrayness
  * ]
  */
 
@@ -48,7 +47,9 @@ try {
                 $lookup: {
                     from: foreignColl1.getName(),
                     let: {a: "$a", d: "$d"},
-                    pipeline: [{$match: {$expr: {$and: [{$eq: ["$a", "$$a"]}, {$eq: ["$d", "$$d"]}]}}}],
+                    pipeline: [
+                        {$match: {$expr: {$and: [{$eq: ["$a", "$$a"]}, {$eq: ["$d", "$$d"]}]}}},
+                    ],
                     as: "foreignColl1",
                 },
             },

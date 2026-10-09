@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,6 +8,8 @@
 #include "mongo/db/exec/sbe/vm/vm_instruction.h"
 #include "mongo/db/exec/sbe/vm/vm_types.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -79,7 +55,7 @@ public:
     void appendLocalVal(FrameId frameId, int variable, bool moveFrom);
     void appendLocalLambda(int codePosition, size_t numArgs);
     void appendPop();
-    void appendSwap();
+    void appendSwapAndPop(size_t numPops);
     void appendMakeOwn(Instruction::Parameter arg);
     void appendAdd(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendSub(Instruction::Parameter lhs, Instruction::Parameter rhs);
@@ -128,7 +104,7 @@ public:
     void appendFillEmpty();
     void appendFillEmpty(Instruction::Constants k);
     void appendGetField(Instruction::Parameter lhs, Instruction::Parameter rhs);
-    void appendGetField(Instruction::Parameter input, StringData fieldName);
+    void appendGetField(Instruction::Parameter input, std::string_view fieldName);
     void appendGetElement(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendCollComparisonKey(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendGetFieldOrElement(Instruction::Parameter lhs, Instruction::Parameter rhs);
@@ -136,8 +112,6 @@ public:
     void appendTraverseP(int codePosition, size_t numArgs, Instruction::Constants k);
     void appendTraverseF();
     void appendTraverseF(int codePosition, size_t numArgs, Instruction::Constants k);
-    void appendMagicTraverseF();
-    void appendSetField();
     void appendGetArraySize(Instruction::Parameter input);
     void appendDateTrunc(TimeUnit unit, int64_t binSize, TimeZone timezone, DayOfWeek startOfWeek);
     void appendValueBlockApplyLambda();
@@ -152,6 +126,7 @@ public:
     void appendCollMax();
     void appendExists(Instruction::Parameter input);
     void appendIsNull(Instruction::Parameter input);
+    void appendIsNullish(Instruction::Parameter input);
     void appendIsObject(Instruction::Parameter input);
     void appendIsArray(Instruction::Parameter input);
     void appendIsInList(Instruction::Parameter input);
@@ -166,6 +141,7 @@ public:
     void appendIsMaxKey(Instruction::Parameter input);
     void appendIsTimestamp(Instruction::Parameter input);
     void appendIsKeyString(Instruction::Parameter input);
+    void appendMqlComparisonRank(Instruction::Parameter input);
     void appendTypeMatch(Instruction::Parameter input, uint32_t mask);
     void appendFunction(Builtin f, ArityType arity);
     void appendLabelJump(LabelId labelId);

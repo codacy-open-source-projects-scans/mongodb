@@ -1,37 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
+
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,7 +18,6 @@
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/db/s/balancer/migration_test_fixture.h"
 #include "mongo/db/sharding_environment/grid.h"
@@ -55,10 +26,10 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/request_types/get_stats_for_balancing_gen.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -73,6 +44,10 @@
 #include <set>
 #include <string>
 #include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -302,7 +277,7 @@ protected:
 
     std::unique_ptr<ClusterStatistics> _clusterStats;
     stdx::unordered_set<NamespaceString> _imbalancedCollectionsCache;
-    RAIIServerParameterControllerForTest _balancerChunksSelectionTimeout{
+    unittest::ServerParameterGuard _balancerChunksSelectionTimeout{
         "balancerChunksSelectionTimeoutMs", 60000};
 
     // Object under test
@@ -531,7 +506,7 @@ TEST_F(BalancerChunkSelectionTest, MaxTimeToScheduleBalancingOperationsExceeded)
         auto opCtx = Client::getCurrent()->makeOperationContext();
 
         // Forcing timeout to exceed by setting it to 0
-        RAIIServerParameterControllerForTest balancerChunksSelectionTimeoutMsIsZero(
+        unittest::ServerParameterGuard balancerChunksSelectionTimeoutMsIsZero(
             "balancerChunksSelectionTimeoutMs", 0);
 
         const auto& chunksToMove = selectChunksToMove(opCtx.get());
@@ -669,6 +644,40 @@ TEST_F(BalancerChunkSelectionTest, DontSelectChunksFromCollectionsWithBalancingD
                                        BSON(CollectionType::kUuidFieldName << uuid1),
                                        BSON("$set" << BSON("noBalance" << true)),
                                        false));
+
+    auto future = launchAsync([&] {
+        ThreadClient tc(getServiceContext()->getService());
+        auto opCtx = Client::getCurrent()->makeOperationContext();
+
+        const auto& chunksToMove = selectChunksToMove(opCtx.get());
+
+        ASSERT_EQ(1, chunksToMove.size());
+        ASSERT_EQ(uuid2, chunksToMove[0].uuid);
+    });
+
+    expectGetStatsForBalancingCommandsWithOneMigration(
+        2 /*numShards*/, kShardId0 /*donor*/, kShardId1 /*recipient*/);
+    future.default_timed_get();
+}
+
+TEST_F(BalancerChunkSelectionTest, DontSelectChunksFromCollectionsWithChunkOperationsDisabled) {
+    setupShards({kShard0, kShard1});
+    setupDatabase(kDbName, kShardId0);
+
+    const auto uuid1 = setUpCollectionWithChunks(
+        NamespaceString::createNamespaceString_forTest(kDbName, "TestColl1"),
+        generateDefaultChunkRanges({kShardId0, kShardId1}));
+    const auto uuid2 = setUpCollectionWithChunks(
+        NamespaceString::createNamespaceString_forTest(kDbName, "TestColl2"),
+        generateDefaultChunkRanges({kShardId0, kShardId1}));
+
+    // Disable chunk operations on collection 1
+    ASSERT_OK(updateToConfigCollection(
+        operationContext(),
+        NamespaceString::kConfigsvrCollectionsNamespace,
+        BSON(CollectionType::kUuidFieldName << uuid1),
+        BSON("$set" << BSON(CollectionType::kAllowChunkOperationsFieldName << false)),
+        false));
 
     auto future = launchAsync([&] {
         ThreadClient tc(getServiceContext()->getService());

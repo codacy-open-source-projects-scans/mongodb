@@ -2,6 +2,7 @@
  * Test using the forcedPlanSolutionHash parameter to the find and
  * explain commands.
  * @tags: [
+ *    uses_explain,
  *    assumes_unsharded_collection,
  *    assumes_against_mongod_not_mongos,
  *    # We modify the value of a query knob. setParameter is not persistent.
@@ -20,10 +21,9 @@
  */
 import {getAllPlans} from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
-import {getPlanRankerMode} from "jstests/libs/query/cbr_utils.js";
 
 // Enabling SBE affects plan enumeration under CBR.
-if (checkSbeFullyEnabled(db) || getPlanRankerMode(db) != "multiPlanning") {
+if (checkSbeFullyEnabled(db)) {
     jsTestLog(`Skipping ${jsTestName()} as SBE executor is not supported yet`);
     quit();
 }
@@ -40,7 +40,9 @@ assert.commandWorked(coll.insertMany([{a: 4}, {a: 5}, {a: 6}]));
  * Run all plans in the provided candidate list one by one using it's solution hash.
  */
 function explainAndRunAllPlans(command) {
-    const explainRes = assert.commandWorked(db.runCommand({explain: command, verbosity: "queryPlanner"}));
+    const explainRes = assert.commandWorked(
+        db.runCommand({explain: command, verbosity: "queryPlanner"}),
+    );
     const candidates = getAllPlans(explainRes);
 
     for (const candidate of candidates) {
@@ -66,7 +68,11 @@ function explainAndRunAllPlans(command) {
 }
 
 function testQueryWithMultipleEnumeratedPlans() {
-    const allPlans = explainAndRunAllPlans({find: jsTestName(), filter: {a: {$gt: 0}}, sort: {b: 1}});
+    const allPlans = explainAndRunAllPlans({
+        find: jsTestName(),
+        filter: {a: {$gt: 0}},
+        sort: {b: 1},
+    });
 
     // We should see a plan with a bounds on index a:1 and a plan with a sort on b:1.
     assert.eq(2, allPlans.length);
@@ -127,7 +133,9 @@ let originalParamValue;
 // solution hash is included in the explain output.
 try {
     originalParamValue = db.adminCommand({getParameter: 1, internalQueryAllowForcedPlanByHash: 1});
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryAllowForcedPlanByHash: true}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryAllowForcedPlanByHash: true}),
+    );
 
     testQueryWithThreeEnumeratedPlans();
     testQueryWithMultipleEnumeratedPlans();
@@ -138,7 +146,8 @@ try {
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
-            internalQueryAllowForcedPlanByHash: originalParamValue.internalQueryAllowForcedPlanByHash,
+            internalQueryAllowForcedPlanByHash:
+                originalParamValue.internalQueryAllowForcedPlanByHash,
         }),
     );
 }

@@ -6,7 +6,7 @@
  * Also, this test should only run in single-node environments because a $sort after a $vectorSearch
  * in a sharded cluster will end up with the $vectorSearch on mongod and $sort on mongos.
  *
- * @tags: [featureFlagRankFusionFull, requires_fcv_81, assumes_against_mongod_not_mongos]
+ * @tags: [requires_fcv_81, assumes_against_mongod_not_mongos]
  */
 
 import {getIndexOfStageOnSingleNode} from "jstests/libs/query/analyze_plan.js";
@@ -24,7 +24,8 @@ function assertSortExistsAfterVectorSearch(aggPipeline) {
     // A $sort stage must exist somewhere in the pipeline after $_internalSearchMongotRemote.
     assert(
         getIndexOfStageOnSingleNode(explain, "$sort") > 0,
-        "'$sort' does not exist in the pipeline after $search. explain for query: " + tojson(explain),
+        "'$sort' does not exist in the pipeline after $search. explain for query: " +
+            tojson(explain),
     );
 }
 
@@ -58,7 +59,9 @@ const indexName = "sort-after-vector-search-test-index";
 const vectorIndex = {
     name: indexName,
     type: "vectorSearch",
-    definition: {"fields": [{"type": "vector", "numDimensions": 5, "path": "v", "similarity": "euclidean"}]},
+    definition: {
+        "fields": [{"type": "vector", "numDimensions": 5, "path": "v", "similarity": "euclidean"}],
+    },
 };
 
 createSearchIndex(coll, vectorIndex);
@@ -93,14 +96,24 @@ assertNoSortExistsAfterVectorSearch([
 // Implicit $sort after $vectorSearch from desugared $setWindowFields should get removed.
 assertNoSortExistsAfterVectorSearch([
     {$vectorSearch: vectorSearchQuery},
-    {$setWindowFields: {sortBy: {score: {$meta: "vectorSearchScore"}}, output: {rank: {$rank: {}}}}},
+    {
+        $setWindowFields: {
+            sortBy: {score: {$meta: "vectorSearchScore"}},
+            output: {rank: {$rank: {}}},
+        },
+    },
 ]);
 
 // Mixed explicit and implicit $sort after $vectorSearch should both get removed.
 assertNoSortExistsAfterVectorSearch([
     {$vectorSearch: vectorSearchQuery},
     {$sort: {score: {$meta: "vectorSearchScore"}}},
-    {$setWindowFields: {sortBy: {score: {$meta: "vectorSearchScore"}}, output: {rank: {$rank: {}}}}},
+    {
+        $setWindowFields: {
+            sortBy: {score: {$meta: "vectorSearchScore"}},
+            output: {rank: {$rank: {}}},
+        },
+    },
 ]);
 
 // Cases where optimization should not apply and $sort should remain:
@@ -115,7 +128,7 @@ assertSortExistsAfterVectorSearch([
 ]);
 
 // Currently cannot optimize $sort that is not directly after $vectorSearch.
-// TODO SERVER-96068: check that $sort is removed for these types of pipelines.
+// TODO SERVER-127594: check that $sort is removed for these types of pipelines.
 assertSortExistsAfterVectorSearch([
     {$vectorSearch: vectorSearchQuery},
     {$limit: 10},

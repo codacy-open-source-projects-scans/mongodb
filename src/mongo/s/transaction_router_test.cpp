@@ -1,44 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include "mongo/bson/bsonobj.h"
+#include "mongo/s/transaction_router.h"
 
-#include <absl/container/flat_hash_map.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/commands.h"
@@ -60,16 +29,17 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/s/router_transactions_metrics.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
+#include "mongo/transport/mock_session.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
@@ -88,6 +58,13 @@
 #include <set>
 #include <tuple>
 #include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -864,8 +841,8 @@ TEST_F(TransactionRouterTestWithDefaultSession,
         {shard1.toString(), false /* readOnly */}, {shard2.toString(), true /* readOnly */}};
     std::set<std::pair<std::string, bool>> seenAdditionalParticipants;
     for (const auto& p : *participants) {
-        ASSERT(p.second);
-        seenAdditionalParticipants.insert({p.first, *p.second});
+        ASSERT(p.second.readOnly);
+        seenAdditionalParticipants.insert({p.first, *p.second.readOnly});
     }
 
     ASSERT(expectedAdditionalParticipants == seenAdditionalParticipants);
@@ -899,7 +876,7 @@ TEST_F(TransactionRouterTestWithDefaultSession, SubRouterReturnsAdditionalPartic
     ASSERT_EQ(participants->size(), 1);
     auto p = participants->find(shard1.toString());
     ASSERT(p != participants->end());
-    ASSERT(!p->second);
+    ASSERT(!p->second.readOnly);
 }
 
 TEST_F(
@@ -938,7 +915,7 @@ TEST_F(
         {shard3.toString(), boost::none /* readOnly */}};
     std::set<std::pair<std::string, boost::optional<bool>>> seenAdditionalParticipants;
     for (const auto& p : *participants) {
-        seenAdditionalParticipants.insert({p.first, p.second});
+        seenAdditionalParticipants.insert({p.first, p.second.readOnly});
     }
 
     ASSERT(expectedAdditionalParticipants == seenAdditionalParticipants);
@@ -1022,7 +999,7 @@ TEST_F(TransactionRouterTestWithDefaultSession, NotReadOnlyParticipantUnchangedO
     ASSERT(participants);
     auto shard3Res = participants->find(shard3.toString());
     ASSERT(shard3Res != participants->end());
-    ASSERT(shard3Res->second == boost::make_optional<bool>(false));
+    ASSERT(shard3Res->second.readOnly == boost::make_optional<bool>(false));
 
     // Shard1 targets shard3, and responds back to router before getting response from shard3.
     // Shard3 was previously marked as having done a write, so the readOnly value will not be
@@ -1038,7 +1015,399 @@ TEST_F(TransactionRouterTestWithDefaultSession, NotReadOnlyParticipantUnchangedO
     ASSERT(participants);
     shard3Res = participants->find(shard3.toString());
     ASSERT(shard3Res != participants->end());
-    ASSERT(shard3Res->second == boost::make_optional<bool>(false));
+    ASSERT(shard3Res->second.readOnly == boost::make_optional<bool>(false));
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, ParticipantTermRecordedOnFirstResponse) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    ASSERT_FALSE(txnRouter.getParticipant(shard1)->term);
+
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 5LL))));
+
+    ASSERT(txnRouter.getParticipant(shard1)->term);
+    ASSERT_EQ(*txnRouter.getParticipant(shard1)->term, 5);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, ParticipantTermSameOnSecondResponseSucceeds) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 5LL))));
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 5LL))));
+
+    ASSERT_EQ(*txnRouter.getParticipant(shard1)->term, 5);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, ParticipantTermMismatchOnSecondResponseThrows) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 5LL))));
+
+    // A different term on a later response means the participant's primary changed
+    // mid-transaction; the router must abort with a retryable error.
+    ASSERT_THROWS_CODE(
+        txnRouter.processParticipantResponse(
+            operationContext(),
+            shard1,
+            TransactionRouter::Router::parseParticipantResponseMetadata(
+                BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 6LL)))),
+        AssertionException,
+        ErrorCodes::NoSuchTransaction);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, ParticipantTermAbsentIsNoOp) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(kOkReadOnlyFalseResponse));
+    ASSERT_FALSE(txnRouter.getParticipant(shard1)->term);
+
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "$replData" << BSON("term" << 5LL))));
+    ASSERT_EQ(*txnRouter.getParticipant(shard1)->term, 5);
+
+    // A later response without the field (e.g. mixed-version participant) leaves the
+    // recorded term untouched and does not throw.
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(kOkReadOnlyFalseResponse));
+    ASSERT_EQ(*txnRouter.getParticipant(shard1)->term, 5);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       AdditionalParticipantTermRecordedForNewParticipant) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    ASSERT_FALSE(txnRouter.getParticipant(shard3));
+
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "additionalParticipants"
+                      << BSONArray(BSON("0" << BSON("shardId" << ShardId("shard3") << "readOnly"
+                                                              << false << "term" << 7LL))))));
+
+    ASSERT(txnRouter.getParticipant(shard3));
+    ASSERT(txnRouter.getParticipant(shard3)->term);
+    ASSERT_EQ(*txnRouter.getParticipant(shard3)->term, 7);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, AdditionalParticipantTermMismatchThrows) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "additionalParticipants"
+                      << BSONArray(BSON("0" << BSON("shardId" << ShardId("shard3") << "readOnly"
+                                                              << false << "term" << 7LL))))));
+    ASSERT_EQ(*txnRouter.getParticipant(shard3)->term, 7);
+
+    // The sub-router reports a different term for shard3 on a later response: shard3's
+    // primary changed mid-transaction, so its pre-failover state is lost.
+    ASSERT_THROWS_CODE(
+        txnRouter.processParticipantResponse(
+            operationContext(),
+            shard1,
+            TransactionRouter::Router::parseParticipantResponseMetadata(
+                BSON("ok" << 1 << "readOnly" << false << "additionalParticipants"
+                          << BSONArray(BSON("0" << BSON("shardId" << ShardId("shard3") << "readOnly"
+                                                                  << false << "term" << 8LL)))))),
+        AssertionException,
+        ErrorCodes::NoSuchTransaction);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, DeferredAbortRaiseSurfacesStatus) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, BSON("insert" << "test"));
+    ASSERT(txnRouter.getParticipant(shard1));
+
+    // Simulate a cursor-cleanup drain latching a participant term mismatch.
+    const Status latched{ErrorCodes::NoSuchTransaction,
+                         "Participant shard1 changed primaries during the transaction"};
+    txnRouter.recordDeferredAbort(latched);
+
+    // The raise surfaces the latched status without consuming it and sends nothing on the network
+    // (none is mocked): the abort is the caller's error path, mirroring the strategy.cpp hook.
+    ASSERT_THROWS_CODE(
+        txnRouter.raiseDeferredAbortIfNeeded(), AssertionException, ErrorCodes::NoSuchTransaction);
+    ASSERT_THROWS_CODE(
+        txnRouter.raiseDeferredAbortIfNeeded(), AssertionException, ErrorCodes::NoSuchTransaction);
+
+    // The error path's implicit abort fans out and consumes the latch; a later raise is a no-op.
+    auto future =
+        launchAsync([&] { txnRouter.implicitlyAbortTransaction(operationContext(), latched); });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.default_timed_get();
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       TwoPassEnrollmentSurvivesMidArrayValidationFailure) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, BSON("insert" << "test"));
+
+    // First response: shard1 (sub-router) reports shard2 as an additional participant with term 7.
+    // shard2 is enrolled and its term recorded; shard3 is not yet known.
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 1 << "readOnly" << false << "additionalParticipants"
+                      << BSON_ARRAY(BSON("shardId" << ShardId("shard2") << "readOnly" << false
+                                                   << "term" << 7LL)))));
+    ASSERT(txnRouter.getParticipant(shard2));
+    ASSERT_EQ(*txnRouter.getParticipant(shard2)->term, 7);
+    ASSERT_FALSE(txnRouter.getParticipant(shard3));
+
+    // Second response: shard1 reports shard2 with a changed term (8 -> mismatch -> raise) AND a
+    // newly-discovered shard3 (term 7) later in the same array. The raise validating shard2 must
+    // not skip enrollment of shard3.
+    ASSERT_THROWS_CODE(
+        txnRouter.processParticipantResponse(
+            operationContext(),
+            shard1,
+            TransactionRouter::Router::parseParticipantResponseMetadata(
+                BSON("ok" << 1 << "readOnly" << false << "additionalParticipants"
+                          << BSON_ARRAY(BSON("shardId" << ShardId("shard2") << "readOnly" << false
+                                                       << "term" << 8LL)
+                                        << BSON("shardId" << ShardId("shard3") << "readOnly"
+                                                          << false << "term" << 7LL))))),
+        AssertionException,
+        ErrorCodes::NoSuchTransaction);
+
+    // shard3 (later in the array) is enrolled despite shard2's validation raise — the point of
+    // two-pass enrollment. shard2 stays enrolled with its recorded term unchanged (the mismatch
+    // raised before recording term 8).
+    ASSERT(txnRouter.getParticipant(shard3));
+    ASSERT(txnRouter.getParticipant(shard2));
+    ASSERT_EQ(*txnRouter.getParticipant(shard2)->term, 7);
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, DeferredAbortClearedOnNewTxnNumber) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, BSON("insert" << "test"));
+
+    // Latch a deferred abort for this transaction.
+    txnRouter.recordDeferredAbort(
+        Status(ErrorCodes::NoSuchTransaction, "Participant shard1 changed primaries"));
+
+    // Start a new transaction with a higher txnNumber; _resetRouterState clears the latch.
+    TxnNumber newTxnNum{4};
+    operationContext()->setTxnNumber(newTxnNum);
+    txnRouter.beginOrContinueTxn(
+        operationContext(), newTxnNum, TransactionRouter::TransactionActions::kStart);
+
+    // The deferred abort must NOT fire for the new transaction: a surviving latch would throw
+    // NoSuchTransaction here.
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, DeferredAbortNotRecordedAfterTerminationInitiated) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+
+    const Status latched{ErrorCodes::NoSuchTransaction,
+                         "Participant shard1 changed primaries during the transaction"};
+    txnRouter.recordDeferredAbort(latched);
+    ASSERT_THROWS_CODE(
+        txnRouter.raiseDeferredAbortIfNeeded(), AssertionException, ErrorCodes::NoSuchTransaction);
+    auto future =
+        launchAsync([&] { txnRouter.implicitlyAbortTransaction(operationContext(), latched); });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.default_timed_get();
+
+    // terminationInitiated is now set. A late cleanup drain discovering another failure must not
+    // latch, so this raise neither throws nor sends another abortTransaction (no network mock is
+    // queued; a wrongly-latched abort would block this call on the network).
+    txnRouter.recordDeferredAbort(
+        Status(ErrorCodes::NoSuchTransaction, "late cleanup failure must not latch"));
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, DeferredAbortNotRecordedOnSubRouter) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    repl::ReadConcernArgs readConcernArgs;
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kAtClusterTimeFieldName
+                            << kInMemoryLogicalTime.asTimestamp()
+                            << repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
+    repl::ReadConcernArgs::get(operationContext()) = readConcernArgs;
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStartOrContinue);
+
+    // If a latch were wrongly recorded, the raise would throw the latched status synchronously.
+    txnRouter.recordDeferredAbort(
+        Status(ErrorCodes::NoSuchTransaction, "sub-router cleanup failure must not latch"));
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, DeferredAbortNotRecordedOnUninitializedRouter) {
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.recordDeferredAbort(
+        Status(ErrorCodes::NoSuchTransaction, "must not latch on an uninitialized router"));
+    // A wrongly-recorded latch would trip raiseDeferredAbortIfNeeded's tassert here.
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, ImplicitAbortConsumesDeferredAbort) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+
+    // A cleanup drain latches a failure...
+    txnRouter.recordDeferredAbort(
+        Status(ErrorCodes::NoSuchTransaction,
+               "Participant shard1 changed primaries during the transaction"));
+
+    // ...but a live-path error aborts first (the invokeInTransactionRouter catch): the abort
+    // consumes the latch, so a later raise is a no-op — no throw, and no second abortTransaction
+    // on the network (none is mocked; a wrongly-fired abort would block).
+    auto future = launchAsync([&] {
+        txnRouter.implicitlyAbortTransaction(
+            operationContext(), Status(ErrorCodes::HostUnreachable, "live-path failure"));
+    });
+    expectAbortTransactions({hostAndPort1}, getSessionId(), txnNum);
+    future.default_timed_get();
+
+    txnRouter.raiseDeferredAbortIfNeeded();
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession, AdditionalParticipantTermValidatedOnErrorResponse) {
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
+
+    // Terms carried on an error response are still recorded: the statement error may be
+    // swallowed upstream, making this the only observation before commit.
+    txnRouter.processParticipantResponse(
+        operationContext(),
+        shard1,
+        TransactionRouter::Router::parseParticipantResponseMetadata(
+            BSON("ok" << 0 << "additionalParticipants"
+                      << BSONArray(
+                             BSON("0" << BSON("shardId" << ShardId("shard3") << "term" << 7LL))))));
+    ASSERT(txnRouter.getParticipant(shard3));
+    ASSERT_EQ(*txnRouter.getParticipant(shard3)->term, 7);
+
+    // ... and validated: a mismatched term on an error response must still abort.
+    ASSERT_THROWS_CODE(txnRouter.processParticipantResponse(
+                           operationContext(),
+                           shard1,
+                           TransactionRouter::Router::parseParticipantResponseMetadata(BSON(
+                               "ok" << 0 << "additionalParticipants"
+                                    << BSONArray(BSON("0" << BSON("shardId" << ShardId("shard3")
+                                                                            << "term" << 8LL)))))),
+                       AssertionException,
+                       ErrorCodes::NoSuchTransaction);
 }
 
 TEST_F(TransactionRouterTestWithDefaultSession, NoAdditionalParticipantsIfNotSubRouter) {
@@ -3054,13 +3423,13 @@ TEST_F(TransactionRouterTest, AppendFieldsForContinueTransactionWithShardVersion
     // The behavior should not depend on the feature flag
     // 'gAddTransactionRuntimeContextAsAGenericArgument'.
     {
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", false);
         test(false /* hasTxnCreatedAnyDatabase */);
         test(true /* hasTxnCreatedAnyDatabase */);
     }
     {
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", true);
         test(false /* hasTxnCreatedAnyDatabase */);
         test(true /* hasTxnCreatedAnyDatabase */);
@@ -3096,13 +3465,13 @@ TEST_F(TransactionRouterTest, AppendFieldsForContinueTransactionWithShardVersion
     // The behavior should not depend on the feature flag
     // 'gAddTransactionRuntimeContextAsAGenericArgument'.
     {
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", false);
         test(false /* hasTxnCreatedAnyDatabase */);
         test(true /* hasTxnCreatedAnyDatabase */);
     }
     {
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", true);
         test(false /* hasTxnCreatedAnyDatabase */);
         test(true /* hasTxnCreatedAnyDatabase */);
@@ -3177,14 +3546,14 @@ TEST_F(TransactionRouterTest,
 
     {
         const bool ffEnabled = false;
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", ffEnabled);
         test(false /* hasTxnCreatedAnyDatabase */, ffEnabled);
         test(true /* hasTxnCreatedAnyDatabase */, ffEnabled);
     }
     {
         const bool ffEnabled = true;
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", ffEnabled);
         test(false /* hasTxnCreatedAnyDatabase */, ffEnabled);
         test(true /* hasTxnCreatedAnyDatabase */, ffEnabled);
@@ -3264,14 +3633,14 @@ TEST_F(TransactionRouterTest,
 
     {
         const bool ffEnabled = false;
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", ffEnabled);
         test(false /* hasTxnCreatedAnyDatabase */, ffEnabled);
         test(true /* hasTxnCreatedAnyDatabase */, ffEnabled);
     }
     {
         const bool ffEnabled = true;
-        RAIIServerParameterControllerForTest ff(
+        unittest::ServerParameterGuard ff(
             "featureFlagAddTransactionRuntimeContextAsAGenericArgument", ffEnabled);
         test(false /* hasTxnCreatedAnyDatabase */, ffEnabled);
         test(true /* hasTxnCreatedAnyDatabase */, ffEnabled);
@@ -5673,23 +6042,59 @@ protected:
     }
 
     void runTwoPhaseCommit() {
-        txnRouter().attachTxnFieldsIfNeeded(operationContext(), shard1, kDummyFindCmd);
-        txnRouter().processParticipantResponse(
-            operationContext(),
+        runTwoPhaseCommit(operationContext());
+    }
+
+    void runTwoPhaseCommit(OperationContext* opCtx) {
+        auto txnRouter = TransactionRouter::get(opCtx);
+        txnRouter.attachTxnFieldsIfNeeded(opCtx, shard1, kDummyFindCmd);
+        txnRouter.processParticipantResponse(
+            opCtx,
             shard1,
             TransactionRouter::Router::parseParticipantResponseMetadata(kOkReadOnlyFalseResponse));
-        txnRouter().attachTxnFieldsIfNeeded(operationContext(), shard2, kDummyFindCmd);
-        txnRouter().processParticipantResponse(
-            operationContext(),
+        txnRouter.attachTxnFieldsIfNeeded(opCtx, shard2, kDummyFindCmd);
+        txnRouter.processParticipantResponse(
+            opCtx,
             shard2,
             TransactionRouter::Router::parseParticipantResponseMetadata(kOkReadOnlyFalseResponse));
 
         logs.start();
-        auto future = launchAsync(
-            [&] { txnRouter().commitTransaction(operationContext(), kDummyRecoveryToken); });
+        auto future = launchAsync([&] { txnRouter.commitTransaction(opCtx, kDummyRecoveryToken); });
         expectCoordinateCommitTransaction();
         future.default_timed_get();
         logs.stop();
+    }
+
+    // Runs a full two-phase commit from a manually set up client via AlternativeClientRegion and
+    // exercises the internal/external classification computed in _resetRouterState.
+    // If withSession is true, this function will provide the client client with a mock network
+    // session.
+    void runTwoPhaseCommitOnClient(bool withSession, bool markServerInitiatedExplicitly) {
+        auto clientOwned = withSession
+            ? getServiceContext()->getService()->makeClient(
+                  "externalClient", std::make_shared<transport::MockSession>(nullptr))
+            : getServiceContext()->getService()->makeClient("SEP-internal-txn-client");
+        AlternativeClientRegion acr(clientOwned);
+        auto opCtxHolder = cc().makeOperationContext();
+        auto* opCtx = opCtxHolder.get();
+
+        // Fresh lsid so we don't collide with the fixture's checked-out default session.
+        opCtx->setLogicalSessionId(makeLogicalSessionIdForTest());
+        opCtx->setTxnNumber(kTxnNumber);
+        opCtx->setInMultiDocumentTransaction();
+        repl::ReadConcernArgs::get(opCtx) = repl::ReadConcernArgs();
+
+        RouterOperationContextSession routerOpCtxSession(opCtx);
+        auto txnRouter = TransactionRouter::get(opCtx);
+
+        txnRouter.beginOrContinueTxn(
+            opCtx, kTxnNumber, TransactionRouter::TransactionActions::kStart);
+        if (markServerInitiatedExplicitly) {
+            txnRouter.setIsServerInitiatedTransaction(opCtx);
+        }
+        txnRouter.setDefaultAtClusterTime(opCtx);
+
+        runTwoPhaseCommit(opCtx);
     }
 
     void runRecoverWithTokenCommit(boost::optional<ShardId> recoveryShard) {
@@ -7650,6 +8055,66 @@ TEST_F(TransactionRouterMetricsTest, IsTrackingOverIfTxnImplicitlyAborted) {
     ASSERT(txnRouter().isTrackingOver());
 }
 
+TEST_F(TransactionRouterMetricsTest, TwoPhaseCommitExternalStatsForUserTxn) {
+    runTwoPhaseCommitOnClient(true /* withSession */, false /* markServerInitiatedExplicitly */);
+
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().successful.load());
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().successful.load());
+}
+
+TEST_F(TransactionRouterMetricsTest, TwoPhaseCommitInternalStatsForSessionlessClient) {
+    // A sessionless client (e.g. the internal transaction API's "SEP-internal-txn-client") is
+    // classified internal by the base !session() predicate when no explicit override is provided.
+    // This is the mechanism internal txn_api transactions rely on for classification.
+    runTwoPhaseCommitOnClient(false /* withSession */, false /* markServerInitiatedExplicitly */);
+
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().successful.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().successful.load());
+}
+
+TEST_F(TransactionRouterMetricsTest, TwoPhaseCommitInternalStatsForServerInitiatedTxn) {
+    // Runs on a client with a session and relies on the explicit override (the legacy WCOS path) to
+    // classify internal, so this exercises setIsServerInitiatedTransaction().
+    runTwoPhaseCommitOnClient(true /* withSession */, true /* markServerInitiatedExplicitly */);
+
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(1L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().successful.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().successful.load());
+}
+
+TEST_F(TransactionRouterMetricsTest, InternalExternalStatsUntouchedByNonTwoPhaseCommit) {
+    // The internal/external split only applies to two-phase commits. A single-write-shard commit
+    // must not touch either the internal or external 2PC counter.
+    beginTxnWithDefaultTxnNumber();
+    runSingleWriteShardCommit();
+
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().initiated.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitInternalStats_forTest().successful.load());
+    ASSERT_EQUALS(0L,
+                  routerTxnMetrics()->getTwoPhaseCommitExternalStats_forTest().successful.load());
+}
+
 bool doesExistInCatalog(const LogicalSessionId& lsid, SessionCatalog* sessionCatalog) {
     bool existsInCatalog{false};
     sessionCatalog->scanSession(lsid,
@@ -7986,6 +8451,43 @@ TEST_F(TransactionRouterTest, ParticipantCannotBeAddedOnRetryableStmtInRetryable
                            DBException,
                            ErrorCodes::IllegalOperation);
     }
+}
+
+TEST_F(TransactionRouterTestWithDefaultSession,
+       IsServerInitiatedTransactionAttachedOncePerParticipant) {
+    // TODO SERVER-135549: Remove this guard once
+    // featureFlagServerInitiatedTransactionClassification is
+    // enabled by default, and update the existing attachTxnFieldsIfNeeded test cases to assert on
+    // isServerInitiatedTransaction.
+    unittest::ServerParameterGuard ff("featureFlagServerInitiatedTransactionClassification", true);
+
+    TxnNumber txnNum{3};
+    operationContext()->setTxnNumber(txnNum);
+
+    auto txnRouter = TransactionRouter::get(operationContext());
+    txnRouter.beginOrContinueTxn(
+        operationContext(), txnNum, TransactionRouter::TransactionActions::kStart);
+    txnRouter.setDefaultAtClusterTime(operationContext());
+
+    // The fixture's client has no network session, so the router classifies this transaction as
+    // server-initiated and forwards that to every participant it recruits.
+    auto firstCmd =
+        txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, BSON("insert" << "test"));
+    ASSERT_TRUE(firstCmd["startTransaction"].booleanSafe());
+    ASSERT_TRUE(firstCmd["isServerInitiatedTransaction"].booleanSafe());
+
+    // shard1 has already begun the transaction, so neither field is repeated.
+    auto secondCmd =
+        txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard1, BSON("update" << "test"));
+    ASSERT_FALSE(secondCmd.hasField("startTransaction"));
+    ASSERT_FALSE(secondCmd.hasField("isServerInitiatedTransaction"));
+
+    // shard2 is new to the transaction, so it receives the classification on its own first
+    // statement.
+    auto newParticipantCmd =
+        txnRouter.attachTxnFieldsIfNeeded(operationContext(), shard2, BSON("update" << "test"));
+    ASSERT_TRUE(newParticipantCmd["startTransaction"].booleanSafe());
+    ASSERT_TRUE(newParticipantCmd["isServerInitiatedTransaction"].booleanSafe());
 }
 
 class TransactionRouterSnapshotReadConcern : public TransactionRouterTestWithDefaultSession {

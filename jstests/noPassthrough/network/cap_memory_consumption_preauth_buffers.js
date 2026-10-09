@@ -9,7 +9,7 @@
  */
 
 import {findMatchingLogLine} from "jstests/libs/log.js";
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 
 if (!isLinux()) {
     jsTest.log("Skipping test since it requires Linux-specific features.");
@@ -49,7 +49,10 @@ if (!isLinux()) {
     }
 
     // Get all log messages (including warnings)
-    const logResults = assert.commandWorked(db.adminCommand({getLog: "global"}), "Failed to get global log");
+    const logResults = assert.commandWorked(
+        db.adminCommand({getLog: "global"}),
+        "Failed to get global log",
+    );
 
     assert(
         !!findMatchingLogLine(logResults.log, {id: 11621101}),

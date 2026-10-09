@@ -1,37 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog_applier_impl.h"
 
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
@@ -79,7 +51,7 @@
 #include "mongo/otel/metrics/metrics_counter.h"
 #include "mongo/otel/metrics/metrics_service.h"
 #include "mongo/otel/metrics/server_status_options.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/condition_variable.h"
@@ -110,6 +82,7 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -128,9 +101,6 @@ auto& opsAppliedStats = *MetricBuilder<Counter64>{"repl.apply.ops"};
 // Tracks the oplog application batch size.
 auto& oplogApplicationBatchSize = *MetricBuilder<Counter64>{"repl.apply.batchSize"};
 
-// Number and time of each ApplyOps worker pool round
-auto& applyBatchStats = *MetricBuilder<TimerStats>("repl.apply.batches");
-
 // Total bytes of uncompressed oplog entries applied.
 auto& oplogBytesApplied = otel::metrics::MetricsService::instance().createInt64Counter(
     otel::metrics::MetricNames::kOplogApplyBytes,
@@ -138,6 +108,24 @@ auto& oplogBytesApplied = otel::metrics::MetricsService::instance().createInt64C
     otel::metrics::MetricUnit::kBytes,
     {.serverStatusOptions = otel::metrics::ServerStatusOptions{
          .dottedPath = "repl.apply.bytes",
+         .role = ClusterRole{ClusterRole::None},
+     }});
+
+auto& applyBatchesNumMetric = otel::metrics::MetricsService::instance().createInt64Counter(
+    otel::metrics::MetricNames::kApplyBatchesNum,
+    "The total number of batches applied across all databases.",
+    otel::metrics::MetricUnit::kOperations,
+    {.serverStatusOptions = otel::metrics::ServerStatusOptions{
+         .dottedPath = "repl.apply.batches.num",
+         .role = ClusterRole{ClusterRole::None},
+     }});
+
+auto& applyBatchesTotalMillisMetric = otel::metrics::MetricsService::instance().createInt64Counter(
+    otel::metrics::MetricNames::kApplyBatchesTotalMillis,
+    "Total time spent on applying oplog batches.",
+    otel::metrics::MetricUnit::kMilliseconds,
+    {.serverStatusOptions = otel::metrics::ServerStatusOptions{
+         .dottedPath = "repl.apply.batches.totalMillis",
          .role = ClusterRole{ClusterRole::None},
      }});
 
@@ -184,6 +172,19 @@ Status finishAndLogApply(OperationContext* opCtx,
     return finalStatus;
 }
 
+WorkerMultikeyPathInfo mergeAndSortWorkerMultikeyPathInfo(
+    std::vector<WorkerMultikeyPathInfo> multikeyVector) {
+    MultikeyPathTracker mergedMultikeyPathInfo;
+    mergedMultikeyPathInfo.startTrackingMultikeyPathInfo();
+    for (auto& infoVector : multikeyVector) {
+        for (auto& info : infoVector) {
+            mergedMultikeyPathInfo.addMultikeyPathInfo(std::move(info));
+        }
+    }
+
+    return mergedMultikeyPathInfo.sortByTimestamp();
+}
+
 namespace {
 // Tracks writes to the side table config.image_collection.  This collection is implicitly
 // replicated, and to avoid out-of-order writes, we only want to do the last write
@@ -219,7 +220,10 @@ public:
     bool shouldSkipOp(OplogEntry* op) {
         boost::optional<LogicalSessionId> retryImageKey;
         if (op->getNeedsRetryImage()) {
-            retryImageKey = *op->getSessionId();
+            auto sessionId = op->getSessionId();
+            invariant(sessionId.has_value(),
+                      "Oplog entry with `needsRetryImage` should also have a session id");
+            retryImageKey = *sessionId;
         } else if (_isSkippableDelete(op)) {
             try {
                 retryImageKey = LogicalSessionId::parse(
@@ -344,6 +348,11 @@ void _dispatchTxnOpsToWriterVectors(OperationContext* opCtx,
                                     std::vector<std::vector<ApplierOperation>>* writerVectors,
                                     CachedCollectionProperties* collPropertiesCache,
                                     RetryImageRectifier* retryImageRectifier) {
+    // Split multi-key container ops so that each key is hashed to a writer thread on its own. This
+    // must happen after any aggregation over 'txnOps' (affected namespaces, size metadata), which
+    // counts packed entries once.
+    OplogApplierUtils::expandBatchedContainerOps(txnOps);
+
     auto& extractedOps = retryImageRectifier->storeExtractedOpsAndDeletes(
         std::move(txnOps), derivedOps, op->shouldPrepare());
 
@@ -375,7 +384,7 @@ boost::optional<repl::PreparedTxnDerivedFields> _dispatchOpsFromPreparedTransact
     const bool persistAffectedNamespaces = rss::ReplicatedStorageService::get(opCtx)
                                                .getPersistenceProvider()
                                                .supportsPreservingPreparedTxnInPreciseCheckpoints();
-    const bool persistSizeMetadata = shouldPersistPreparedTxnSizeMetadata(opCtx);
+    const bool persistSizeMetadata = isReplicatedFastCountEnabled(opCtx);
 
     boost::optional<repl::PreparedTxnDerivedFields> preparedDerivedFields;
     if (persistAffectedNamespaces || persistSizeMetadata) {
@@ -679,7 +688,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         std::lock_guard<std::mutex> fsynclk(oplogApplierLockedFsync);
 
         // Obtain the validation lock to synchronise batch application with validation.
-        auto lk = CollectionValidation::obtainExclusiveValidationLock(&opCtx);
+        auto lk = collection_validation::obtainExclusiveValidationLock(&opCtx);
 
         // Apply the operations in this batch. '_applyOplogBatch' returns the optime of the
         // last op that was applied, which should be the last optime in the batch.
@@ -744,7 +753,12 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
     std::vector<WorkerMultikeyPathInfo> multikeyVector(nWorkers);
     {
         // Each node records cumulative batch application stats for itself using this timer.
-        TimerHolder timer(&applyBatchStats);
+        Timer timer;
+        ON_BLOCK_EXIT([&] {
+            const auto elapsed = timer.elapsed();
+            applyBatchesNumMetric.add(1);
+            applyBatchesTotalMillisMetric.add(durationCount<Milliseconds>(elapsed));
+        });
 
         // We must wait for the all work we've dispatched to complete before leaving this block
         // because the spawned threads refer to objects on the stack
@@ -907,23 +921,31 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         }
     }
 
-    Timestamp firstTimeInBatch = ops.front().getTimestamp();
-    // Set any indexes to multikey that this batch ignored.
-    for (const WorkerMultikeyPathInfo& infoVector : multikeyVector) {
-        for (const MultikeyPathInfo& info : infoVector) {
-            // We timestamp every multikey write with the first timestamp in the batch. It is always
-            // safe to set an index as multikey too early, just not too late. We conservatively pick
-            // the first timestamp in the batch since we do not have enough information to find out
-            // the timestamp of the first write that set the given multikey path.
-            fassert(50686,
-                    _storageInterface->setIndexIsMultikey(opCtx,
-                                                          info.nss,
-                                                          info.collectionUUID,
-                                                          info.indexName,
-                                                          info.multikeyMetadataKeys,
-                                                          info.multikeyPaths,
-                                                          firstTimeInBatch));
-        }
+    // Merge worker-local multikey info before applying deferred catalog writes. The same index can
+    // appear more than once when different paths become multikey at different timestamps.
+    const Timestamp firstTimeInBatch = ops.front().getTimestamp();
+    const WorkerMultikeyPathInfo mergedMultikeyPathInfo =
+        mergeAndSortWorkerMultikeyPathInfo(std::move(multikeyVector));
+    for (const MultikeyPathInfo& info : mergedMultikeyPathInfo) {
+        // TODO(SERVER-129361): Once featureFlagReplicateMultikeynessInTransactions is removed,
+        // remove this comment and the firstTimeInBatch fallback below; use info.earliestTimestamp
+        // directly.
+        // A null earliestTimestamp is only expected when
+        // featureFlagReplicateMultikeynessInTransactions was off when the oplog entry was emitted.
+        // That is acceptable: with the flag off we fall back to pre-9.0 behavior where any "early
+        // enough" timestamp suffices; with the flag on we require the exact timestamp. Null can
+        // only occur for prepared transactions, and when the flag is on those now emit a new
+        // setMultikeyMetadata entry, so this case cannot arise.
+        const Timestamp ts =
+            info.earliestTimestamp.isNull() ? firstTimeInBatch : info.earliestTimestamp;
+        fassert(50686,
+                _storageInterface->setIndexIsMultikey(opCtx,
+                                                      info.nss,
+                                                      info.collectionUUID,
+                                                      info.indexName,
+                                                      info.multikeyMetadataKeys,
+                                                      info.multikeyPaths,
+                                                      ts));
     }
 
     // Increment the counter for the number of ops applied during catchup if the node is in catchup
@@ -1068,7 +1090,20 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
 
         // Extract applyOps operations and fill writers with extracted operations.
         if (op.isTerminalApplyOps()) {
-            if (op.applyOpsIsLinkedTransactionally()) {
+            // A retryable terminal without 'count' is a single-entry batch with no chain: extract
+            // it directly rather than walk the oplog once per statement on every secondary.
+            const bool isLinked = op.applyOpsIsLinkedTransactionally();
+            const bool isSingleEntryRetryableBatch = isLinked &&
+                op.getMultiOpType() == MultiOplogEntryType::kApplyOpsAppliedAtomically &&
+                op.getObject()["count"].eoo();
+            if (isSingleEntryRetryableBatch) {
+                // Anything cached would be dropped by skipping the walk.
+                tassert(13423904,
+                        "Single-entry retryable batch has cached partial operations",
+                        getPartialTxnList(op)->empty());
+            }
+
+            if (isLinked && !isSingleEntryRetryableBatch) {
                 // On commit of unprepared transactions, get transactional operations from the
                 // oplog and fill writers with those operations.
                 // Flush partialTxnList operations for current transaction.
@@ -1083,8 +1118,10 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                 invariant(partialTxnList->empty(), op.toStringForLogging());
             } else {
                 // The applyOps entry was not generated as part of a transaction.
+                auto applyOpsOps = ApplyOps::extractOperations(op);
+                OplogApplierUtils::expandBatchedContainerOps(applyOpsOps);
                 auto& extractedOps = retryImageRectifier.storeExtractedOpsAndDeletes(
-                    ApplyOps::extractOperations(op), derivedOps, false /* isPrepared */);
+                    std::move(applyOpsOps), derivedOps, false /* isPrepared */);
 
                 // Nested entries cannot have different session updates.
                 OplogApplierUtils::addDerivedOps(
@@ -1116,6 +1153,22 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                              &retryImageRectifier);
             invariant(partialTxnList->empty(), op.toStringForLogging());
             continue;
+        }
+
+        // A container op logged outside of an applyOps may still pack multiple keys, which have to
+        // be split apart before they can be hashed to writer threads individually.
+        if (derivedOps && op.isContainerOpType()) {
+            // Note an empty expansion is not the same as no expansion: it means the op was packed
+            // but had no keys, so it is dropped rather than applied as it is.
+            if (auto expandedOps = OplogApplierUtils::expandBatchedContainerOp(op)) {
+                derivedOps->emplace_back(std::move(*expandedOps));
+                OplogApplierUtils::addDerivedOps(opCtx,
+                                                 &derivedOps->back(),
+                                                 writerVectors,
+                                                 &collPropertiesCache,
+                                                 false /*serial*/);
+                continue;
+            }
         }
 
         OplogApplierUtils::addToWriterVector(opCtx, &op, writerVectors, &collPropertiesCache);
@@ -1198,13 +1251,22 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
         }
     }
 
+    if (op->getOpType() == OpTypeEnum::kCMKRotation) {
+        if (!status.isOK()) {
+            // We were unable to apply a CMK rotation oplog, we should log and shutdown server.
+            LOGV2_ERROR(12725001, "Unable to apply CMKRotation oplog entry", "error"_attr = status);
+            return status;
+        }
+    }
+
     if (op->getOpType() == OpTypeEnum::kNoop) {
         // No-ops should never fail application, since there's nothing to do.
-        // If keyMaterial has failed, it should be caught above
+        // If keyMaterial or CMKRotation have failed, it should be caught above.
         invariant(status);
     }
 
-    if (op->getOpType() == OpTypeEnum::kNoop || op->getOpType() == OpTypeEnum::kKeyMaterial) {
+    if (op->getOpType() == OpTypeEnum::kNoop || op->getOpType() == OpTypeEnum::kKeyMaterial ||
+        op->getOpType() == OpTypeEnum::kCMKRotation) {
         if (op->isNewPrimaryNoop()) {
             ReplicationMetrics::get(opCtx).setParticipantNewTermDates(op->getWallClockTime(),
                                                                       applyStartTime);
@@ -1247,10 +1309,12 @@ Status OplogApplierImpl::applyOplogBatchPerWorker(OperationContext* opCtx,
 
     invariant(!MultikeyPathTracker::get(opCtx).isTrackingMultikeyPathInfo());
     invariant(workerMultikeyPathInfo.empty());
-    auto newPaths = MultikeyPathTracker::get(opCtx).getMultikeyPathInfo();
+    auto& multikeyPathTracker = MultikeyPathTracker::get(opCtx);
+    const auto& newPaths = multikeyPathTracker.getMultikeyPathInfo();
     if (!newPaths.empty()) {
-        std::swap(workerMultikeyPathInfo, newPaths);
+        workerMultikeyPathInfo = newPaths;
     }
+    multikeyPathTracker.clear();
 
     return Status::OK();
 }

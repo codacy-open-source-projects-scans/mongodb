@@ -3,7 +3,8 @@
  *
  * @tags: [
  *  requires_sharding,
- *  requires_fcv_83
+ *  requires_fcv_83,
+ *  resource_intensive,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -77,7 +78,9 @@ function testWriteConcernBasic(st) {
     // 3. Set the failWriteConcernFailpoint on shard 0, shard 2, and the config shard.
     // 4. Move the collection from shard 0 to shard 2.
 
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}),
+    );
     assert.commandWorked(testColl.insert([{x: -1}, {x: 0}, {x: 1}]));
     assert.commandWorked(testColl.createIndex({x: 1}));
 
@@ -131,7 +134,9 @@ function testWriteConcernFailover(st) {
     // 3. Set the failWriteConcernFailpoint on shard 0, shard 2, and the config shard.
     // 4. Move the collection from shard 0 to shard 2.
 
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard1.shardName}),
+    );
     assert.commandWorked(testColl.insert([{x: -1}, {x: 0}, {x: 1}]));
     assert.commandWorked(testColl.createIndex({x: 1}));
 
@@ -160,15 +165,19 @@ function testWriteConcernFailover(st) {
 }
 
 function runTests() {
-    // TODO Do not explicitly set this feature flag after SERVER-109032 is done.
-    const featureFlagReshardingVerification = false;
     const st = new ShardingTest({
         shards: 3,
-        rs: {nodes: 3, setParameter: {featureFlagReshardingVerification}},
-        other: {
-            configOptions: {setParameter: {featureFlagReshardingVerification}},
-        },
+        rs: {nodes: 3},
     });
+
+    // The failWaitForWriteConcernIfTimeoutSet failpoint below also applies to the routing table
+    // refreshes triggered by this test's own writes, which the unified write executor retries a
+    // bounded number of times before giving up with NoProgressMade. Raise that bound so the test
+    // does not fail on the fault injection it installs for moveCollection.
+    assert.commandWorked(
+        st.s.adminCommand({setParameter: 1, maxRoundsWithoutProgressParameter: 20}),
+    );
+
     testWriteConcernBasic(st);
     testWriteConcernFailover(st);
 

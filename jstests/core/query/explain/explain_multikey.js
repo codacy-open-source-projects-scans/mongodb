@@ -3,9 +3,14 @@
 // This test examines the explain output to verify that certain indexes are multi-key, which may not
 // be the case on all shards.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 // ]
-import {getPlanStage, getWinningPlanFromExplain, planHasStage} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStage,
+    getWinningPlanFromExplain,
+    planHasStage,
+} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db.explain_multikey;
 const keyPattern = {
@@ -36,7 +41,10 @@ function createIndexAndRunExplain(testOptions) {
     assert.commandWorked(explain);
     const winningPlan = getWinningPlanFromExplain(explain);
 
-    assert(planHasStage(db, winningPlan, testOptions.stage), "expected stage to be present: " + tojson(explain));
+    assert(
+        planHasStage(db, winningPlan, testOptions.stage),
+        "expected stage to be present: " + tojson(explain),
+    );
     return getPlanStage(winningPlan, testOptions.stage);
 }
 

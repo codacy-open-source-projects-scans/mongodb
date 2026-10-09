@@ -13,13 +13,7 @@
  * TODO SERVER-100443 Expand on this test by adding more complex pipeline shapes with at least 3
  * stages.
  *
- * featureFlagRankFusionFull is required to enable use of "score".
- * featureFlagSearchHybridScoringFull is required to enable use of $score.
- * The $rankFusion feature flag is required to enable use of "score" and "searchScore".
  * @tags: [
- *   featureFlagRankFusionBasic,
- *   featureFlagRankFusionFull,
- *   featureFlagSearchHybridScoringFull,
  *   requires_fcv_82
  * ]
  */
@@ -61,12 +55,16 @@ assert.commandWorked(
 );
 assert.commandWorked(coll.createIndex({textField: "text"}));
 assert.commandWorked(coll.createIndex({geoField: "2d"}));
-assert.commandWorked(createSearchIndex(coll, {name: "search-index", definition: {mappings: {dynamic: true}}}));
+assert.commandWorked(
+    createSearchIndex(coll, {name: "search-index", definition: {mappings: {dynamic: true}}}),
+);
 assert.commandWorked(
     createSearchIndex(coll, {
         name: "vector-search-index",
         type: "vectorSearch",
-        definition: {fields: [{type: "vector", numDimensions: 5, path: "vector", similarity: "euclidean"}]},
+        definition: {
+            fields: [{type: "vector", numDimensions: 5, path: "vector", similarity: "euclidean"}],
+        },
     }),
 );
 
@@ -82,7 +80,9 @@ const FirstStageOptions = Object.freeze({
     FTS_MATCH: {$match: {$text: {$search: "three"}}},
     NON_FTS_MATCH: {$match: {a: {$gt: 3}}},
     SEARCH: searchStage,
-    SEARCH_W_DETAILS: {$search: {index: "search-index", exists: {path: "textField"}, scoreDetails: true}},
+    SEARCH_W_DETAILS: {
+        $search: {index: "search-index", exists: {path: "textField"}, scoreDetails: true},
+    },
     VECTOR_SEARCH: {
         $vectorSearch: {
             queryVector: [-0.012674698, 0.013308106, -0.005494981, -0.008286549, -0.00289768],
@@ -93,10 +93,17 @@ const FirstStageOptions = Object.freeze({
         },
     },
     RANK_FUSION: {$rankFusion: {input: {pipelines: {search: [searchStage]}}}},
-    RANK_FUSION_W_DETAILS: {$rankFusion: {input: {pipelines: {search: [searchStage]}}, scoreDetails: true}},
-    SCORE_FUSION: {$scoreFusion: {input: {pipelines: {search: [searchStage]}, normalization: "none"}}},
+    RANK_FUSION_W_DETAILS: {
+        $rankFusion: {input: {pipelines: {search: [searchStage]}}, scoreDetails: true},
+    },
+    SCORE_FUSION: {
+        $scoreFusion: {input: {pipelines: {search: [searchStage]}, normalization: "none"}},
+    },
     SCORE_FUSION_W_DETAILS: {
-        $scoreFusion: {input: {pipelines: {search: [searchStage]}, normalization: "none"}, scoreDetails: true},
+        $scoreFusion: {
+            input: {pipelines: {search: [searchStage]}, normalization: "none"},
+            scoreDetails: true,
+        },
     },
     SORT: {$sort: {a: -1}},
     SCORE: {$score: {score: {$divide: [1, "$a"]}}},
@@ -127,7 +134,12 @@ const MetaFields = Object.freeze({
         validSortKey: false,
         firstStageRequired: [FirstStageOptions.GEO_NEAR],
     },
-    RAND_VAL: {name: "randVal", shouldBeValidated: false, debugName: "rand val", validSortKey: true},
+    RAND_VAL: {
+        name: "randVal",
+        shouldBeValidated: false,
+        debugName: "rand val",
+        validSortKey: true,
+    },
     SEARCH_SCORE: {
         name: "searchScore",
         shouldBeValidated: true,
@@ -151,8 +163,18 @@ const MetaFields = Object.freeze({
         debugName: "$search highlights",
         validSortKey: false,
     },
-    RECORD_ID: {name: "recordId", shouldBeValidated: false, debugName: "record ID", validSortKey: false},
-    INDEX_KEY: {name: "indexKey", shouldBeValidated: false, debugName: "index key", validSortKey: false},
+    RECORD_ID: {
+        name: "recordId",
+        shouldBeValidated: false,
+        debugName: "record ID",
+        validSortKey: false,
+    },
+    INDEX_KEY: {
+        name: "indexKey",
+        shouldBeValidated: false,
+        debugName: "index key",
+        validSortKey: false,
+    },
     SORT_KEY: {
         name: "sortKey",
         shouldBeValidated: true,
@@ -254,7 +276,8 @@ let testCaseArb = fc.record({
 
 // Filter out cases where we use a $sort with a meta field that is not a valid sort key.
 testCaseArb = testCaseArb.filter(
-    ({metaField, metaReferencingStageName}) => metaReferencingStageName !== "$sort" || metaField.validSortKey,
+    ({metaField, metaReferencingStageName}) =>
+        metaReferencingStageName !== "$sort" || metaField.validSortKey,
 );
 
 function generateMetaReferencingStages(stageName, metaFieldName) {
@@ -287,7 +310,11 @@ function shouldQuerySucceed(
         // TODO SERVER-100404: If you have a query with a $sort but no $geoNear on a sharded
         // collection, then try to reference $geoNear-related metadata from within a $project or
         // $group (but not $sort), the query will not throw an error as expected.
-        if (isSharded && firstStage === FirstStageOptions.SORT && metaReferencingStageName !== "$sort") {
+        if (
+            isSharded &&
+            firstStage === FirstStageOptions.SORT &&
+            metaReferencingStageName !== "$sort"
+        ) {
             return true;
         }
 
@@ -361,7 +388,12 @@ fc.assert(
         if (
             metaField == MetaFields.SCORE ||
             metaField == MetaFields.SCORE_DETAILS ||
-            !shouldQuerySucceed(metaField, firstStage, metaReferencingStageName, hasBlockingStageBeforeMetaReference)
+            !shouldQuerySucceed(
+                metaField,
+                firstStage,
+                metaReferencingStageName,
+                hasBlockingStageBeforeMetaReference,
+            )
         ) {
             assertErrCodeAndErrMsgContains(coll, pipeline, expectedErrCodes, metaField.debugName);
         } else {

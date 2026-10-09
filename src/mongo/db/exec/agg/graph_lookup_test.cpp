@@ -1,46 +1,28 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/graph_lookup_mock_mongo_interface.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 
 #include <algorithm>
 #include <deque>
 #include <initializer_list>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -48,6 +30,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 using namespace test;
 
 // This provides access to getExpCtx(), but we'll use a different name for this test suite.
@@ -103,7 +86,7 @@ TEST_F(GraphLookUpTest, ShouldErrorWhenExploringGraphIfDocumentInFromCollectionI
     auto inputMock = exec::agg::MockStage::createForTest(std::move(inputs), expCtx);
 
     std::deque<DocumentSource::GetNextResult> fromContents{
-        Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}}, Document{{"to", 1}}};
+        Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}}, Document{{"to", 1}}};
 
     NamespaceString fromNs =
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "graph_lookup");
@@ -171,10 +154,10 @@ TEST_F(GraphLookUpTest, ShouldTraverseSubgraphIfIdOfDocumentsInFromCollectionAre
     std::deque<DocumentSource::GetNextResult> inputs{Document{{"_id", 0}}};
     auto inputMock = exec::agg::MockStage::createForTest(std::move(inputs), expCtx);
 
-    Document to0from1{{"_id", "a"_sd}, {"to", 0}, {"from", 1}};
-    Document to0from2{{"_id", "a"_sd}, {"to", 0}, {"from", 2}};
-    Document to1{{"_id", "b"_sd}, {"to", 1}};
-    Document to2{{"_id", "c"_sd}, {"to", 2}};
+    Document to0from1{{"_id", "a"sv}, {"to", 0}, {"from", 1}};
+    Document to0from2{{"_id", "a"sv}, {"to", 0}, {"from", 2}};
+    Document to1{{"_id", "b"sv}, {"to", 1}};
+    Document to2{{"_id", "c"sv}, {"to", 2}};
     std::deque<DocumentSource::GetNextResult> fromContents{
         Document(to1), Document(to2), Document(to0from1), Document(to0from2)};
 
@@ -229,6 +212,77 @@ TEST_F(GraphLookUpTest, ShouldTraverseSubgraphIfIdOfDocumentsInFromCollectionAre
     }
 }
 
+// A single sharded-view resolution is the normal case: makePipeline catches the first
+// CommandOnShardedViewNotSupportedOnMongod, rebuilds from the resolved definition, and the retry
+// succeeds.
+TEST_F(GraphLookUpTest, ShouldResolveForeignShardedViewOnRetry) {
+    auto expCtx = getExpCtx();
+
+    std::deque<DocumentSource::GetNextResult> inputs{Document{{"_id", 0}}};
+    auto inputMock = exec::agg::MockStage::createForTest(std::move(inputs), expCtx);
+
+    std::deque<DocumentSource::GetNextResult> fromContents{Document{{"_id", "a"sv}, {"to", 0}}};
+
+    NamespaceString fromNs =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "graph_lookup");
+    expCtx->setResolvedNamespaces(ResolvedNamespaceMap{{fromNs, {fromNs, std::vector<BSONObj>()}}});
+    auto mockInterface = std::make_shared<GraphLookUpMockMongoInterface>(std::move(fromContents));
+    mockInterface->setShardedViewResolutionThrowCount(1);
+    expCtx->setMongoProcessInterface(mockInterface);
+    auto graphLookupDS = DocumentSourceGraphLookUp::create(
+        expCtx,
+        fromNs,
+        "results",
+        "from",
+        "to",
+        ExpressionFieldPath::createPathFromString(expCtx.get(), "_id", expCtx->variablesParseState),
+        boost::none,
+        boost::none,
+        boost::none,
+        boost::none);
+    auto graphLookupStage = exec::agg::buildStageAndStitch(graphLookupDS, inputMock);
+
+    auto next = graphLookupStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_TRUE(graphLookupStage->getNext().isEOF());
+}
+
+// If the foreign view's definition keeps getting concurrently remapped to a sharded view, every
+// build attempt throws CommandOnShardedViewNotSupportedOnMongod. Once the retries are exhausted
+// this must propagate as that (retryable) error.
+TEST_F(GraphLookUpTest, ShouldPropagateWhenForeignShardedViewResolutionRepeats) {
+    auto expCtx = getExpCtx();
+
+    std::deque<DocumentSource::GetNextResult> inputs{Document{{"_id", 0}}};
+    auto inputMock = exec::agg::MockStage::createForTest(std::move(inputs), expCtx);
+
+    std::deque<DocumentSource::GetNextResult> fromContents{Document{{"_id", "a"sv}, {"to", 0}}};
+
+    NamespaceString fromNs =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "graph_lookup");
+    expCtx->setResolvedNamespaces(ResolvedNamespaceMap{{fromNs, {fromNs, std::vector<BSONObj>()}}});
+    auto mockInterface = std::make_shared<GraphLookUpMockMongoInterface>(std::move(fromContents));
+    // Throw on every attempt, exceeding makePipeline's retry cap, so the error must propagate.
+    mockInterface->setShardedViewResolutionThrowCount(100);
+    expCtx->setMongoProcessInterface(mockInterface);
+    auto graphLookupDS = DocumentSourceGraphLookUp::create(
+        expCtx,
+        fromNs,
+        "results",
+        "from",
+        "to",
+        ExpressionFieldPath::createPathFromString(expCtx.get(), "_id", expCtx->variablesParseState),
+        boost::none,
+        boost::none,
+        boost::none,
+        boost::none);
+    auto graphLookupStage = exec::agg::buildStageAndStitch(graphLookupDS, inputMock);
+
+    ASSERT_THROWS_CODE(graphLookupStage->getNext(),
+                       AssertionException,
+                       ErrorCodes::CommandOnShardedViewNotSupportedOnMongod);
+}
+
 TEST_F(GraphLookUpTest, ShouldPropagatePauses) {
     auto expCtx = getExpCtx();
 
@@ -240,7 +294,7 @@ TEST_F(GraphLookUpTest, ShouldPropagatePauses) {
                                             expCtx);
 
     std::deque<DocumentSource::GetNextResult> fromContents{
-        Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}}, Document{{"_id", "b"_sd}, {"to", 1}}};
+        Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}}, Document{{"_id", "b"sv}, {"to", 1}}};
 
     NamespaceString fromNs =
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "foreign");
@@ -273,9 +327,9 @@ TEST_F(GraphLookUpTest, ShouldPropagatePauses) {
     ASSERT_EQ(result["results"].getArray().size(), 2UL);
     ASSERT_TRUE(arrayContains(expCtx,
                               result["results"].getArray(),
-                              Value(Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}})));
+                              Value(Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}})));
     ASSERT_TRUE(arrayContains(
-        expCtx, result["results"].getArray(), Value(Document{{"_id", "b"_sd}, {"to", 1}})));
+        expCtx, result["results"].getArray(), Value(Document{{"_id", "b"sv}, {"to", 1}})));
 
     ASSERT_TRUE(graphLookupStage->getNext().isPaused());
 
@@ -287,9 +341,9 @@ TEST_F(GraphLookUpTest, ShouldPropagatePauses) {
     ASSERT_EQ(result["results"].getArray().size(), 2UL);
     ASSERT_TRUE(arrayContains(expCtx,
                               result["results"].getArray(),
-                              Value(Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}})));
+                              Value(Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}})));
     ASSERT_TRUE(arrayContains(
-        expCtx, result["results"].getArray(), Value(Document{{"_id", "b"_sd}, {"to", 1}})));
+        expCtx, result["results"].getArray(), Value(Document{{"_id", "b"sv}, {"to", 1}})));
 
     ASSERT_TRUE(graphLookupStage->getNext().isPaused());
 
@@ -308,7 +362,7 @@ TEST_F(GraphLookUpTest, ShouldPropagatePausesWhileUnwinding) {
                                             expCtx);
 
     std::deque<DocumentSource::GetNextResult> fromContents{
-        Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}}, Document{{"_id", "b"_sd}, {"to", 1}}};
+        Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}}, Document{{"_id", "b"sv}, {"to", 1}}};
 
     NamespaceString fromNs =
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "foreign");
@@ -339,8 +393,8 @@ TEST_F(GraphLookUpTest, ShouldPropagatePausesWhileUnwinding) {
 
     // Assert it has the expected results. Note the results can be in either order.
     auto expectedA =
-        Document{{"startPoint", 0}, {"results", Document{{"_id", "a"_sd}, {"to", 0}, {"from", 1}}}};
-    auto expectedB = Document{{"startPoint", 0}, {"results", Document{{"_id", "b"_sd}, {"to", 1}}}};
+        Document{{"startPoint", 0}, {"results", Document{{"_id", "a"sv}, {"to", 0}, {"from", 1}}}};
+    auto expectedB = Document{{"startPoint", 0}, {"results", Document{{"_id", "b"sv}, {"to", 1}}}};
     auto next = graphLookupStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     if (expCtx->getDocumentComparator().evaluate(next.getDocument() == expectedA)) {
@@ -376,7 +430,7 @@ TEST_F(GraphLookUpTest, ShouldPropagatePausesWhileUnwinding) {
 
 TEST_F(DocumentSourceGraphLookUpSpillingTest, ShouldSpillVisitedDocuments) {
     static constexpr long long kMemoryLimit = 100 * 1024;
-    RAIIServerParameterControllerForTest memoryLimitController(
+    unittest::ServerParameterGuard memoryLimitController(
         "internalDocumentSourceGraphLookupMaxMemoryBytes", kMemoryLimit);
 
     auto expCtx = getExpCtx();
@@ -436,7 +490,7 @@ TEST_F(DocumentSourceGraphLookUpSpillingTest, ShouldSpillVisitedDocuments) {
 
 TEST_F(DocumentSourceGraphLookUpSpillingTest, ShouldSpillSeveralStructures) {
     static constexpr long long kMemoryLimit = 200 * 1024;
-    RAIIServerParameterControllerForTest memoryLimitController(
+    unittest::ServerParameterGuard memoryLimitController(
         "internalDocumentSourceGraphLookupMaxMemoryBytes", kMemoryLimit);
 
     auto expCtx = getExpCtx();
@@ -564,6 +618,52 @@ TEST_F(DocumentSourceGraphLookUpSpillingTest, CanForceSpill) {
     ASSERT_EQ(stats.getSpilledRecords(), 90);
 }
 
+
+TEST_F(DocumentSourceGraphLookUpSpillingTest,
+       ShouldNotCrashWhenDestroyedWhileUnwindIteratorHasDiskDocuments) {
+    auto expCtx = getExpCtx();
+    auto inputMock = exec::agg::MockStage::createForTest({Document{{"startPoint", 0}}}, expCtx);
+
+    std::deque<DocumentSource::GetNextResult> fromContents;
+    for (long long i = 0; i < 3; ++i) {
+        fromContents.push_back(Document{{{"_id", Value{i}}, {"to", 0}, {"from", 1}}});
+    }
+
+    NamespaceString fromNs =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "foreign");
+    expCtx->setResolvedNamespaces(ResolvedNamespaceMap{{fromNs, {fromNs, std::vector<BSONObj>()}}});
+    expCtx->setMongoProcessInterface(
+        std::make_shared<GraphLookUpMockMongoInterface>(std::move(fromContents)));
+    expCtx->setAllowDiskUse(true);
+
+    auto unwindStage = DocumentSourceUnwind::create(expCtx, "results", false, boost::none);
+    auto graphLookupDS = DocumentSourceGraphLookUp::create(
+        expCtx,
+        fromNs,
+        "results",
+        "from",
+        "to",
+        ExpressionFieldPath::createPathFromString(
+            expCtx.get(), "startPoint", expCtx->variablesParseState),
+        boost::none,
+        boost::none,
+        boost::none,
+        unwindStage);
+
+    {
+        auto graphLookupStage = exec::agg::buildStageAndStitch(graphLookupDS, inputMock);
+
+        // Call getNext() to populate _visitedDocuments and start unwinding.
+        auto next = graphLookupStage->getNext();
+        ASSERT_TRUE(next.isAdvanced());
+
+        // Spill to disk to populate the unwind iterator with disk documents.
+        graphLookupStage->forceSpill();
+
+        // Stage destroyed mid-iteration with unwind iterator populated.
+        ASSERT_TRUE(graphLookupStage->usedDisk());
+    }
+}
 
 TEST_F(GraphLookUpTest, GraphLookupWithComparisonExpressionForStartWith) {
     auto expCtx = getExpCtx();
@@ -745,6 +845,149 @@ TEST_F(GraphLookUpTest, ShouldNotExpandArraysWithinArraysAtEndOfConnectFromField
     ASSERT(arrayContains(expCtx, resultsArray, Value(target2)));
     ASSERT(!arrayContains(expCtx, resultsArray, Value(soloDoc)));
     ASSERT(graphLookupStage->getNext().isEOF());
+}
+
+// Expression that records whether it was called with a non-null tracker, and what the limit was.
+// Passed directly as the startWith expression so no REGISTER_TEST_EXPRESSION is needed.
+class MemoryTrackerObservingExpression final : public Expression {
+public:
+    static inline int gEvaluations = 0;
+    static inline int gEvaluationsWithTracker = 0;
+    static inline int64_t gLastTrackerMaxBytes = -1;
+    static inline std::string_view gLastStageName;
+    static void resetObservations() {
+        gEvaluations = 0;
+        gEvaluationsWithTracker = 0;
+        gLastTrackerMaxBytes = -1;
+        gLastStageName = std::string_view{};
+    }
+
+    explicit MemoryTrackerObservingExpression(ExpressionContext* expCtx) : Expression(expCtx) {}
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement,
+                                                  const VariablesParseState&) {
+        return make_intrusive<MemoryTrackerObservingExpression>(expCtx);
+    }
+
+    Value evaluate(const Document&, Variables*, const EvaluationContext& ctx) const final {
+        ++gEvaluations;
+        if (ctx.tracker != nullptr) {
+            ++gEvaluationsWithTracker;
+            gLastTrackerMaxBytes = ctx.tracker->maxAllowedMemoryUsageBytes(
+                getExpressionContext()->getOperationContext());
+        }
+        gLastStageName = ctx.stageName;
+        return Value(0);
+    }
+
+    Value serialize(const query_shape::SerializationOptions&) const final {
+        return Value(Document{});
+    }
+    boost::intrusive_ptr<Expression> clone(ExpressionContext& expCtx) const final {
+        return make_intrusive<MemoryTrackerObservingExpression>(&expCtx);
+    }
+    void acceptVisitor(ExpressionMutableVisitor*) final {
+        MONGO_UNREACHABLE;
+    }
+    void acceptVisitor(ExpressionConstVisitor*) const final {
+        MONGO_UNREACHABLE;
+    }
+};
+
+struct GraphLookupTestResult {
+    exec::agg::StagePtr stage;
+    boost::intrusive_ptr<exec::agg::MockStage> source;  // must outlive stage
+};
+
+GraphLookupTestResult runGraphLookupWithObservingStartWith(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    MemoryTrackerObservingExpression::resetObservations();
+
+    NamespaceString fromNs =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
+    expCtx->setResolvedNamespaces(ResolvedNamespaceMap{{fromNs, {fromNs, std::vector<BSONObj>()}}});
+    expCtx->setMongoProcessInterface(std::make_shared<GraphLookUpMockMongoInterface>(
+        std::deque<DocumentSource::GetNextResult>{}));
+
+    auto observerExpr = make_intrusive<MemoryTrackerObservingExpression>(expCtx.get());
+    auto graphLookupDS = DocumentSourceGraphLookUp::create(expCtx,
+                                                           fromNs,
+                                                           "results",
+                                                           "from",
+                                                           "to",
+                                                           std::move(observerExpr),
+                                                           boost::none,
+                                                           boost::none,
+                                                           boost::none,
+                                                           boost::none);
+    auto inputMock = exec::agg::MockStage::createForTest({Document{{"_id", 0}}}, expCtx);
+    auto stage = exec::agg::buildStageAndStitch(graphLookupDS, inputMock);
+    while (stage->getNext().isAdvanced()) {
+    }
+    return {stage, inputMock};
+}
+
+TEST_F(GraphLookUpTest, ThreadsMemoryTrackerWhenEvaluatingStartWithExpression) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    runGraphLookupWithObservingStartWith(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluations, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 1);
+}
+
+TEST_F(GraphLookUpTest, DoesNotThreadMemoryTrackerWhenExpressionMemoryTrackingDisabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", false);
+
+    runGraphLookupWithObservingStartWith(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluations, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 0);
+}
+
+TEST_F(GraphLookUpTest, MemoryTrackerHasNoPerStageLimit) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+    const long long customLimit = 2 * 1024 * 1024;
+    unittest::ServerParameterGuard knobGuard("internalDocumentSourceGraphLookupMaxMemoryBytes",
+                                             customLimit);
+
+    runGraphLookupWithObservingStartWith(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gLastTrackerMaxBytes, INT64_MAX);
+}
+
+TEST_F(GraphLookUpTest, StageNameIsSetInEvaluationContext) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    auto [stage, source] = runGraphLookupWithObservingStartWith(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gLastStageName, "$graphLookup");
+}
+
+TEST_F(GraphLookUpTest, ExplainOutputIncludesExpressionEvaluationPeakMemoryBytesWhenEnabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    auto [stage, source] = runGraphLookupWithObservingStartWith(getExpCtx());
+
+    auto explain = stage->getExplainOutput();
+    ASSERT(!explain.getNestedField("expressionEvaluationPeakMemoryBytes").missing());
+}
+
+TEST_F(GraphLookUpTest, ExplainOutputOmitsExpressionEvaluationPeakMemoryBytesWhenDisabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", false);
+
+    auto [stage, source] = runGraphLookupWithObservingStartWith(getExpCtx());
+
+    auto explain = stage->getExplainOutput();
+    ASSERT(explain.getNestedField("expressionEvaluationPeakMemoryBytes").missing());
 }
 
 }  // namespace

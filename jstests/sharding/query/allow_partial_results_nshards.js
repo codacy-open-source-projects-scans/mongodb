@@ -19,7 +19,6 @@ TestData.disableImplicitSessions = true;
 TestData.skipGossipingClusterTime = true;
 
 // Skip the following checks across the cluster at the end, since the test shuts down a shard.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
@@ -31,7 +30,9 @@ const mongosDB = st.s.getDB(jsTestName());
 const testColl = mongosDB.test;
 
 // Enable sharding on the the test database and ensure that the primary is on shard0.
-assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs1.getURL()}));
+assert.commandWorked(
+    mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs1.getURL()}),
+);
 
 // Shard the collection on _id, split at {_id:0}, and move the upper chunk to the second shard.
 st.shardColl(testColl, {_id: 1}, {_id: 0}, {_id: 1}, mongosDB.getName(), true);
@@ -47,7 +48,9 @@ assert.commandWorked(mongosDB.adminCommand({profile: 0, slowms: -1}));
 // Helper to find a logline containing all the specified fields. Throws if no such line exists.
 function assertMatchingLogLineExists(fields) {
     function escapeRegex(input) {
-        return typeof input === "string" ? input.replace(/[\^\$\\\.\*\+\?\(\)\[\]\{\}]/g, "\\$&") : input;
+        return typeof input === "string"
+            ? input.replace(/[\^\$\\\.\*\+\?\(\)\[\]\{\}]/g, "\\$&")
+            : input;
     }
     function lineMatches(line, fields) {
         const fieldNames = Object.keys(fields);

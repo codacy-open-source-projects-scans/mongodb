@@ -55,7 +55,10 @@ class ShardingCommandGenerator {
     };
 
     constructor(seed) {
-        assert(seed !== null && seed !== undefined, "Seed must be explicitly provided to ShardingCommandGenerator");
+        assert(
+            seed !== null && seed !== undefined,
+            "Seed must be explicitly provided to ShardingCommandGenerator",
+        );
         this.seed = seed;
     }
 
@@ -75,19 +78,20 @@ class ShardingCommandGenerator {
         const CommandClass = ShardingCommandGenerator.actionToCommandClass[action];
         assert(CommandClass !== undefined, `No command class found for action ${action}`);
 
+        const baseOpts = {
+            dbName: params.getDbName(),
+            collName: params.getCollName(),
+            shardSet: params.getShardSet(),
+            collectionCtx: {...collectionCtx},
+        };
+
         // Commands that need the target shard key as a separate parameter.
         if (CommandClass === ShardCollectionCommand || CommandClass === ReshardCollectionCommand) {
             assert(targetShardKey, `${CommandClass.name} requires targetShardKey`);
-            return new CommandClass(
-                params.getDbName(),
-                params.getCollName(),
-                params.getShardSet(),
-                {...collectionCtx},
-                targetShardKey,
-            );
+            return new CommandClass({...baseOpts, shardKey: targetShardKey});
         }
 
-        return new CommandClass(params.getDbName(), params.getCollName(), params.getShardSet(), {...collectionCtx});
+        return new CommandClass(baseOpts);
     }
 
     /**
@@ -119,16 +123,28 @@ class ShardingCommandGenerator {
         // Step 4: While there are unvisited actions.
         while (unvisitedActions.size > 0) {
             // 4a: For each unvisited self-loop action (state → state), visit and mark as visited.
-            let selfLoopAction = this._getRandomUnvisitedSelfLoop(testModel, currentState, unvisitedActions);
+            let selfLoopAction = this._getRandomUnvisitedSelfLoop(
+                testModel,
+                currentState,
+                unvisitedActions,
+            );
             while (selfLoopAction !== null) {
                 this._appendAction(commands, selfLoopAction, params, collectionCtx);
                 this._updateCollectionCtxForAction(selfLoopAction, collectionCtx);
                 this._markActionAsVisited(unvisitedActions, currentState, selfLoopAction);
-                selfLoopAction = this._getRandomUnvisitedSelfLoop(testModel, currentState, unvisitedActions);
+                selfLoopAction = this._getRandomUnvisitedSelfLoop(
+                    testModel,
+                    currentState,
+                    unvisitedActions,
+                );
             }
 
             // 4b: If exists unvisited non-self-loop action, visit it and move to target state.
-            const action = this._getRandomUnvisitedNonSelfLoop(testModel, currentState, unvisitedActions);
+            const action = this._getRandomUnvisitedNonSelfLoop(
+                testModel,
+                currentState,
+                unvisitedActions,
+            );
             if (action !== null) {
                 this._appendAction(commands, action.action, params, collectionCtx);
                 this._updateCollectionCtxForAction(action.action, collectionCtx);
@@ -142,7 +158,10 @@ class ShardingCommandGenerator {
                     shortestPaths,
                 );
 
-                assert(targetState !== null, "State machine has unreachable states with unvisited actions");
+                assert(
+                    targetState !== null,
+                    "State machine has unreachable states with unvisited actions",
+                );
 
                 const path = shortestPaths.get(currentState).get(targetState).path;
                 for (const step of path) {
@@ -457,19 +476,20 @@ class ShardingCommandGenerator {
             // RESHARD_COLLECTION_* requires an existing sharded collection (enforced by state machine).
             // We return early because ShardCollectionCommand handles everything (create + index + shard).
             assert(
-                action === Action.SHARD_COLLECTION_RANGE || action === Action.SHARD_COLLECTION_HASHED,
+                action === Action.SHARD_COLLECTION_RANGE ||
+                    action === Action.SHARD_COLLECTION_HASHED,
                 `Unexpected action ${action} on non-existent collection - only SHARD_COLLECTION_* allowed`,
             );
 
             const shardCtx = {...ctx, exists: false};
             commands.push(
-                new ShardCollectionCommand(
-                    params.getDbName(),
-                    params.getCollName(),
-                    params.getShardSet(),
-                    shardCtx,
-                    targetShardKey,
-                ),
+                new ShardCollectionCommand({
+                    dbName: params.getDbName(),
+                    collName: params.getCollName(),
+                    shardSet: params.getShardSet(),
+                    collectionCtx: shardCtx,
+                    shardKey: targetShardKey,
+                }),
             );
             // Update context - collection is now sharded
             ctx.exists = true;
@@ -480,13 +500,12 @@ class ShardingCommandGenerator {
         // Create shard key index if action requires it (collection must already exist).
         if (ShardingCommandGenerator.actionsRequiringIndex.has(action)) {
             commands.push(
-                new CreateIndexCommand(
-                    params.getDbName(),
-                    params.getCollName(),
-                    params.getShardSet(),
-                    ctx,
-                    targetShardKey,
-                ),
+                new CreateIndexCommand({
+                    dbName: params.getDbName(),
+                    collName: params.getCollName(),
+                    shardSet: params.getShardSet(),
+                    indexSpec: targetShardKey,
+                }),
             );
         }
         // NOTE: We intentionally do NOT drop indexes before dropping collections.
@@ -496,10 +515,14 @@ class ShardingCommandGenerator {
         // Drop collection before dropping database (simplifies change event matching).
         if (action === Action.DROP_DATABASE && collectionCtx.exists) {
             // NOTE: We do NOT drop indexes here - see comment above about dropIndexes coverage.
-            // Pass a COPY to DropCollectionCommand so it sees exists:true.
-            // We'll set ctx.exists = false for the subsequent DropDatabaseCommand.
+            // DropCollectionCommand defaults to {exists: true}, which is what we want here
+            // (we only enter this branch when ctx.exists is true).
             commands.push(
-                new DropCollectionCommand(params.getDbName(), params.getCollName(), params.getShardSet(), {...ctx}),
+                new DropCollectionCommand({
+                    dbName: params.getDbName(),
+                    collName: params.getCollName(),
+                    shardSet: params.getShardSet(),
+                }),
             );
             // After dropping collection, update context for DropDatabaseCommand to reflect that collection no longer exists.
             ctx.exists = false;
@@ -517,20 +540,16 @@ class ShardingCommandGenerator {
             // For reshard: only drop old index if it's different from the new one.
             // For unshard: always drop the old shard key index (targetShardKey is null).
             const shouldDropIndex =
-                action === Action.UNSHARD_COLLECTION || bsonWoCompare(oldShardKey, targetShardKey) !== 0;
+                action === Action.UNSHARD_COLLECTION ||
+                bsonWoCompare(oldShardKey, targetShardKey) !== 0;
             if (shouldDropIndex && oldShardKey) {
-                // Update context for DropIndexCommand's event count calculation:
-                // - After reshard: shardKeySpec = new shard key (collection still sharded)
-                // - After unshard: shardKeySpec = null (collection is now untracked, no shard key)
-                const postActionCtx = {...ctx, shardKeySpec: targetShardKey};
                 commands.push(
-                    new DropIndexCommand(
-                        params.getDbName(),
-                        params.getCollName(),
-                        params.getShardSet(),
-                        postActionCtx,
-                        oldShardKey,
-                    ),
+                    new DropIndexCommand({
+                        dbName: params.getDbName(),
+                        collName: params.getCollName(),
+                        shardSet: params.getShardSet(),
+                        indexSpec: oldShardKey,
+                    }),
                 );
             }
         }

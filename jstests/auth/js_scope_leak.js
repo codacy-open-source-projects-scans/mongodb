@@ -1,9 +1,6 @@
 /**
  * @tags: [
  *   requires_scripting,
- *   # TODO SERVER-116053: Add support for mapReduce.
- *   # TODO SERVER-116054: Add support for $where.
- *   mozjs_wasm_unsupported,
  * ]
  */
 // Test for SERVER-9129
@@ -45,7 +42,11 @@ function testWhere() {
 
     // test new user auth causes scope to be cleared
     assert(test.auth("a", "a"));
-    assert.eq(1, test.foo.count({$where: "return " + missingOrEquals("a")}), "$where: Auth user 'a");
+    assert.eq(
+        1,
+        test.foo.count({$where: "return " + missingOrEquals("a")}),
+        "$where: Auth user 'a",
+    );
 
     // test auth as another user causes scope to be cleared
     test.foo.findOne({$where: 'someGlobal = "a";'});

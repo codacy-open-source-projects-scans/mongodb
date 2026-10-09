@@ -2,7 +2,7 @@
  * FLE-supported commands that contain an invalid 'jsonSchema' field should return to the user a
  * more specific error message for diagnostic purposes.
  *
- * @tags: [requires_non_retryable_writes]
+ * @tags: [requires_non_retryable_writes, uses_explain]
  */
 const coll = db.command_json_schema_field;
 coll.drop();
@@ -16,10 +16,10 @@ function assertCommandFailsWithCorrectError(command, code) {
 }
 
 // Aggregate
-assertCommandFailsWithCorrectError({aggregate: coll.getName(), pipeline: [], cursor: {}, jsonSchema: {}}, [
-    ErrorCodes.FailedToParse,
-    ErrorCodes.IDLUnknownFieldPossibleMongocryptd,
-]);
+assertCommandFailsWithCorrectError(
+    {aggregate: coll.getName(), pipeline: [], cursor: {}, jsonSchema: {}},
+    [ErrorCodes.FailedToParse, ErrorCodes.IDLUnknownFieldPossibleMongocryptd],
+);
 
 // Find
 assertCommandFailsWithCorrectError({find: coll.getName(), jsonSchema: {}}, [
@@ -28,10 +28,10 @@ assertCommandFailsWithCorrectError({find: coll.getName(), jsonSchema: {}}, [
 ]);
 
 // FindAndModify
-assertCommandFailsWithCorrectError({findAndModify: coll.getName(), query: {_id: 0}, remove: true, jsonSchema: {}}, [
-    ErrorCodes.FailedToParse,
-    ErrorCodes.IDLUnknownFieldPossibleMongocryptd,
-]);
+assertCommandFailsWithCorrectError(
+    {findAndModify: coll.getName(), query: {_id: 0}, remove: true, jsonSchema: {}},
+    [ErrorCodes.FailedToParse, ErrorCodes.IDLUnknownFieldPossibleMongocryptd],
+);
 
 // Count
 assertCommandFailsWithCorrectError(

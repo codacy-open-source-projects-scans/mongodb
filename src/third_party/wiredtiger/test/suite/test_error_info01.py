@@ -27,15 +27,16 @@
 # OTHER DEALINGS IN THE SOFTWARE.
 
 import wiredtiger, time, errno
+import wttest
 from wttest import open_cursor
 from error_info_util import error_info_util
 from compact_util import compact_util
 
-# test_error_info01.py
-#   Test that the get_last_error() session API returns the last error to occur in the session.
+# Test that the get_last_error() session API returns the last error to occur in the session.
 class test_error_info01(error_info_util, compact_util):
 
-    uri = "table:test_error_info01"
+    test_name = __qualname__
+    uri = f"table:{test_name}"
 
     def api_call_with_success(self):
         """
@@ -101,6 +102,10 @@ class test_error_info01(error_info_util, compact_util):
         self.assertEqual(self.session.checkpoint(), 0)
         self.assertEqual(self.session.drop(self.uri, None), 0)
 
+    @wttest.skip_for_hook(
+        "disagg",
+        "tables awaiting btree publication skip checkpoint-on-close, so drop may not return EBUSY",
+        param="schema_epochs")
     def test_ebusy_wt_dirty_data(self):
         self.api_call_with_ebusy_wt_dirty_data()
         self.assert_error_equal(errno.EBUSY, wiredtiger.WT_DIRTY_DATA, "the table has dirty data and cannot be closed yet")

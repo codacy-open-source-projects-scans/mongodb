@@ -3,6 +3,7 @@
  * cause any errors.
  *
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_70,
  *   # explain does not support majority read concern
  *   assumes_read_concern_local,
@@ -35,7 +36,11 @@ const ixscans = getPlanStages(plan, "IXSCAN");
 assert.gt(ixscans.length, 0, explain);
 ixscans.forEach((ixscan) => {
     assert.eq({a: 1, $_path: 1}, ixscan.keyPattern, explain);
-    assert.eq({a: ["[MinKey, MaxKey]"], $_path: ["[MinKey, MinKey]", '["", {})']}, ixscan.indexBounds, explain);
+    assert.eq(
+        {a: ["[MinKey, MaxKey]"], $_path: ["[MinKey, MinKey]", '["", {})']},
+        ixscan.indexBounds,
+        explain,
+    );
 });
 
 const assertNoIndexCorruption = (executionStats) => {

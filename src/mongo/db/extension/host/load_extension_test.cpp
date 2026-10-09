@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/host/load_extension.h"
 
@@ -43,10 +17,11 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/server_options.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/scopeguard.h"
 
 #include <filesystem>
 
@@ -64,6 +39,7 @@ protected:
     LoadExtensionsTest() : expCtx(make_intrusive<ExpressionContextForTest>()) {}
 
     static inline const std::string kTestFooStageName = "$testFoo";
+    static inline const std::string kDesugarFooStageName = "$desugarFoo";
     static inline const std::string kTestFooLibExtensionPath = "libfoo_mongo_extension.so";
 
     /**
@@ -73,17 +49,22 @@ protected:
     static inline const std::string kMatchTopNLibExtensionPath = "libmatch_topN_mongo_extension.so";
 
     void setUp() override {
+#ifndef MONGO_CONFIG_EXT_SIG_SECURE
         _previousExtensionsSignaturePublicKeyPath =
             serverGlobalParams.extensionsSignaturePublicKeyPath;
         serverGlobalParams.extensionsSignaturePublicKeyPath =
             mongo::extension::host::test_util::getPublicKeyPath();
+#endif
     }
     void tearDown() override {
+#ifndef MONGO_CONFIG_EXT_SIG_SECURE
         if (!_previousExtensionsSignaturePublicKeyPath.empty()) {
             serverGlobalParams.extensionsSignaturePublicKeyPath =
                 _previousExtensionsSignaturePublicKeyPath;
         }
+#endif
         LiteParsedDocumentSource::unregisterParser_forTest(kTestFooStageName);
+        LiteParsedDocumentSource::unregisterParser_forTest(kDesugarFooStageName);
         ExtensionLoader::unload_forTest("foo");
         LiteParsedDocumentSource::unregisterParser_forTest(kMatchTopNStageName);
         ExtensionLoader::unload_forTest("matchTopN");
@@ -101,15 +82,46 @@ protected:
         return test_util::makeEmptyExtensionConfig(kMatchTopNLibExtensionPath);
     }
 
+    /**
+     * Copies a signed test extension and its detached signature into a temp directory we own, so
+     * tests can control the on-disk file (permissions, etc.). Normalizes the copy to owner
+     * read/write with no group/other write, so it passes the loader's permission gate by default;
+     * individual tests loosen this to exercise rejection. Returns the path to the copied .so.
+     */
+    std::filesystem::path copySignedExtensionToTempDir(const std::string& libName) {
+        namespace fs = std::filesystem;
+        // Use a fresh subdirectory per call so repeated copies don't have to overwrite read-only
+        // files left behind by a previous call (copied .so/.sig inherit the source's read-only
+        // mode, which would make a subsequent copy_file fail with EACCES).
+        const fs::path destDir = fs::path(_tempDir.path()) / std::to_string(_tempCopyCounter++);
+        fs::create_directories(destDir);
+        const fs::path dest = destDir / libName;
+        const auto src = test_util::getExtensionPath(libName);
+        fs::copy_file(src, dest, fs::copy_options::overwrite_existing);
+        fs::copy_file(std::string{src} + ".sig",
+                      std::string{dest} + ".sig",
+                      fs::copy_options::overwrite_existing);
+        fs::permissions(
+            dest, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
+        return dest;
+    }
+
+    static ExtensionConfig makeConfigForPath(const std::filesystem::path& path) {
+        return ExtensionConfig{.sharedLibraryPath = path.string(),
+                               .extOptions = YAML::Node(YAML::NodeType::Map)};
+    }
+
     boost::intrusive_ptr<ExpressionContext> expCtx;
 
     static inline NamespaceString nss =
         NamespaceString::createNamespaceString_forTest(boost::none, "load_extension_test");
 
+    unittest::TempDir _tempDir{"load_extension_test"};
+    size_t _tempCopyCounter{0};
+
 private:
-    RAIIServerParameterControllerForTest _featureFlagExtensionsAPI{"featureFlagExtensionsAPI",
-                                                                   true};
-    RAIIServerParameterControllerForTest _featureFlagExtensionsApiSignatureValidation{
+    unittest::ServerParameterGuard _featureFlagExtensionsAPI{"featureFlagExtensionsAPI", true};
+    unittest::ServerParameterGuard _featureFlagExtensionsApiSignatureValidation{
         "featureFlagExtensionsApiSignatureValidation", true};
     std::string _previousExtensionsSignaturePublicKeyPath{""};
 };
@@ -140,12 +152,20 @@ TEST_F(LoadExtensionsTest, LoadExtensionErrorCases) {
         AssertionException,
         11528800);
 
-    // no_symbol_bad_extension is missing the get_mongodb_extension symbol definition.
+    // no_symbol_bad_extension does not define get_mongodb_extension_versions.
     ASSERT_THROWS_CODE(
         ExtensionLoader::load("no_symbol_bad_extension",
                               test_util::makeEmptyExtensionConfig("libno_symbol_bad_extension.so")),
         AssertionException,
         10615501);
+
+    // no_get_extension_symbol_bad_extension defines get_mongodb_extension_versions but does not
+    // define get_mongodb_extension.
+    ASSERT_THROWS_CODE(ExtensionLoader::load("no_get_extension_symbol_bad_extension",
+                                             test_util::makeEmptyExtensionConfig(
+                                                 "libno_get_extension_symbol_bad_extension.so")),
+                       AssertionException,
+                       12688600);
 
     // null_mongo_extension_bad_extension returns null from get_mongodb_extension.
     ASSERT_THROWS_CODE(ExtensionLoader::load("null_mongo_extension_bad_extension",
@@ -197,19 +217,12 @@ TEST_F(LoadExtensionsTest, LoadExtensionErrorCases) {
                                                  "libduplicate_version_bad_extension.so")),
                        AssertionException,
                        10930201);
-
-    // no_compatible_version_bad_extension registers a version incompatible with the host,
-    // which triggers sdk_uasserted during get_mongodb_extension's version negotiation.
-    ASSERT_THROWS_CODE(ExtensionLoader::load("no_compatible_version_bad_extension",
-                                             test_util::makeEmptyExtensionConfig(
-                                                 "libno_compatible_version_bad_extension.so")),
-                       AssertionException,
-                       10930202);
 }
 
-// null_initialize_function_bad_extension has a null initialization function.
 using LoadExtensionsTestDeathTest = LoadExtensionsTest;
-DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullInitialize, "10930101") {
+
+// null_initialize_function_bad_extension has a null initialization function.
+DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullInitialize, "517") {
     ExtensionLoader::load(
         "null_initialize_function_bad_extension",
         test_util::makeEmptyExtensionConfig("libnull_initialize_function_bad_extension.so"));
@@ -252,6 +265,28 @@ TEST_F(LoadExtensionsTest, LoadExtensionSucceeds) {
         parsedPipeline->getSources().front().get());
     ASSERT_TRUE(firstStage != nullptr);
     ASSERT_EQUALS(std::string(firstStage->getSourceName()), std::string(kTestFooStageName));
+}
+
+// The loader pins the extension to a file descriptor and verifies/loads it through
+// "/proc/self/fd/N", and (when signature validation is enabled) refuses to load a file that an
+// untrusted party could mutate underneath us. A read-only, owner-owned copy must still load.
+TEST_F(LoadExtensionsTest, LoadExtensionAcceptsOwnerOwnedNonWritableFile) {
+    const auto path = copySignedExtensionToTempDir(kTestFooLibExtensionPath);
+    ASSERT_DOES_NOT_THROW(ExtensionLoader::load("foo", makeConfigForPath(path)));
+    ASSERT_TRUE(ExtensionLoader::isLoaded("foo"));
+}
+
+// A group- or other-writable extension file is rejected: such a file could be overwritten in place
+// by another user between signature verification and dlopen.
+TEST_F(LoadExtensionsTest, LoadExtensionRejectsGroupOrOtherWritableFile) {
+    namespace fs = std::filesystem;
+    for (const auto writeBit : {fs::perms::group_write, fs::perms::others_write}) {
+        const auto path = copySignedExtensionToTempDir(kTestFooLibExtensionPath);
+        fs::permissions(path, writeBit, fs::perm_options::add);
+        ASSERT_THROWS_CODE(
+            ExtensionLoader::load("foo", makeConfigForPath(path)), AssertionException, 10929854);
+        ASSERT_FALSE(ExtensionLoader::isLoaded("foo"));
+    }
 }
 
 // Tests successful desugar extension loading and verifies stage registration works in pipelines.
@@ -350,11 +385,13 @@ TEST_F(LoadExtensionsTest, LoadExtensionHostVersionParameterSucceeds) {
 }
 
 TEST_F(LoadExtensionsTest, LoadExtensionHostVersionParameterFails) {
+    // Extension publishes two versions: one with an incompatible major, one whose minor exceeds
+    // the host's max for the matching major.
     ASSERT_THROWS_CODE(ExtensionLoader::load("host_version_fails_bad_extension",
                                              test_util::makeEmptyExtensionConfig(
                                                  "libhost_version_fails_bad_extension.so")),
                        AssertionException,
-                       10615503);
+                       10615505);
 }
 
 TEST_F(LoadExtensionsTest, LoadExtensionInitializeVersionFails) {
@@ -365,7 +402,7 @@ TEST_F(LoadExtensionsTest, LoadExtensionInitializeVersionFails) {
                        10726600);
 }
 
-DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullStageDescriptor, "10596400") {
+DEATH_TEST_F(LoadExtensionsTestDeathTest, LoadExtensionNullStageDescriptor, "519") {
     ExtensionLoader::load(
         "null_stage_descriptor_bad_extension",
         test_util::makeEmptyExtensionConfig("libnull_stage_descriptor_bad_extension.so"));
@@ -564,6 +601,144 @@ DEATH_TEST_REGEX_F(ExtensionErrorsTestDeathTest, ExtensionTasserts, "98765.*anot
                                         << "tassert"))};
     [[maybe_unused]] auto parsedPipeline =
         pipeline_factory::makePipeline(pipeline, expCtx, pipeline_factory::kOptionsMinimal);
+}
+
+// -----------------------------------------------------------------------------
+// selectCompatibleVersion tests.
+//
+// These exercise the host-side negotiation function in isolation, without going through the full
+// extension-loading machinery.
+// -----------------------------------------------------------------------------
+
+namespace {
+
+::MongoExtensionAPIVersionVector makeVec(const std::vector<::MongoExtensionAPIVersion>& storage) {
+    return {.len = storage.size(), .versions = storage.data()};
+}
+
+}  // namespace
+
+TEST(SelectCompatibleVersionTest, NullExtensionVersionsListFiresAssertion) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    auto hostVec = makeVec(host);
+    ::MongoExtensionAPIVersionVector extVec{.len = 0, .versions = nullptr};
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 12688601);
+}
+
+TEST(SelectCompatibleVersionTest, EmptyExtensionVersionsListFiresAssertion) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    auto hostVec = makeVec(host);
+    // A non-null buffer with len == 0 must still be rejected by the length guard, distinct from the
+    // null-pointer guard above.
+    const std::vector<::MongoExtensionAPIVersion> storage = {{1, 0}};
+    ::MongoExtensionAPIVersionVector extVec{.len = 0, .versions = storage.data()};
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 12688602);
+}
+
+TEST(SelectCompatibleVersionTest, ExactMatchReturned) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 5}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    auto chosen = selectCompatibleVersion(hostVec, extVec);
+    ASSERT_EQ(chosen.major, 1u);
+    ASSERT_EQ(chosen.minor, 5u);
+}
+
+TEST(SelectCompatibleVersionTest, HostMinorAheadReturnsExtensionVersion) {
+    // Host supports up to {1, 5}; extension only knows {1, 3}. Forward-compat path: extension's
+    // version is what gets returned (the lower bound).
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 3}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    auto chosen = selectCompatibleVersion(hostVec, extVec);
+    ASSERT_EQ(chosen.major, 1u);
+    ASSERT_EQ(chosen.minor, 3u);
+}
+
+TEST(SelectCompatibleVersionTest, ExtensionMajorTooHighFiresNoMatchingMajor) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{2, 0}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 10615504);
+}
+
+TEST(SelectCompatibleVersionTest, ExtensionMajorTooLowFiresNoMatchingMajor) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{2, 0}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 0}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 10615504);
+}
+
+TEST(SelectCompatibleVersionTest, ExtensionMinorAheadFiresIncompatibleMinor) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 3}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 5}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 10615505);
+}
+
+TEST(SelectCompatibleVersionTest, MultipleVersionsPicksTheCompatibleOne) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    // First entry incompatible (wrong major), second compatible.
+    const std::vector<::MongoExtensionAPIVersion> ext = {{2, 0}, {1, 3}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    auto chosen = selectCompatibleVersion(hostVec, extVec);
+    ASSERT_EQ(chosen.major, 1u);
+    ASSERT_EQ(chosen.minor, 3u);
+}
+
+TEST(SelectCompatibleVersionTest, PicksHighestCompatibleEvenWhenInputIsAscending) {
+    // Verify the sort actually does work: feed in ascending order, expect highest returned.
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 0}, {1, 2}, {1, 4}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    auto chosen = selectCompatibleVersion(hostVec, extVec);
+    ASSERT_EQ(chosen.major, 1u);
+    ASSERT_EQ(chosen.minor, 4u);
+}
+
+TEST(SelectCompatibleVersionTest, AllMatchingMajorsButMinorsTooHighFiresIncompatibleMinor) {
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 3}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 5}, {1, 7}, {1, 4}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 10615505);
+}
+
+TEST(SelectCompatibleVersionTest, MixedNoMatchAndMinorTooHighFiresIncompatibleMinor) {
+    // Even with a non-matching major in the mix, the matching-major-but-minor-too-high case wins
+    // the diagnostic because at least one major did match.
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 3}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{2, 0}, {1, 5}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    ASSERT_THROWS_CODE(selectCompatibleVersion(hostVec, extVec), AssertionException, 10615505);
+}
+
+TEST(SelectCompatibleVersionTest, MultipleHostMajorsPicksHighestCompatible) {
+    // Forward-looking: when the host advertises two majors simultaneously, the extension's
+    // highest-major-compatible version should win.
+    const std::vector<::MongoExtensionAPIVersion> host = {{1, 5}, {2, 3}};
+    const std::vector<::MongoExtensionAPIVersion> ext = {{1, 2}, {2, 1}};
+    auto hostVec = makeVec(host);
+    auto extVec = makeVec(ext);
+    auto chosen = selectCompatibleVersion(hostVec, extVec);
+    ASSERT_EQ(chosen.major, 2u);
+    ASSERT_EQ(chosen.minor, 1u);
+}
+
+TEST_F(LoadExtensionsTest, LoadExtensionConfigFailsWhenConfigPathEmpty) {
+    const auto previousExtensionsConfigPath = serverGlobalParams.extensionsConfigPath;
+    ON_BLOCK_EXIT([&] { serverGlobalParams.extensionsConfigPath = previousExtensionsConfigPath; });
+
+    serverGlobalParams.extensionsConfigPath = "";
+    ASSERT_THROWS_CODE(ExtensionLoader::loadExtensionConfig("foo"), AssertionException, 12773200);
 }
 
 }  // namespace mongo::extension::host

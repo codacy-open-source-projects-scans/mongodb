@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/query_analysis_sampler.h"
 
@@ -44,7 +18,7 @@
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/analyze_shard_key_role.h"
@@ -63,6 +37,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -77,6 +52,7 @@ namespace mongo {
 namespace analyze_shard_key {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
 using ConfigurationRefreshSecs =
@@ -88,7 +64,7 @@ MONGO_FAIL_POINT_DEFINE(queryAnalysisSamplerFilterByComment);
 
 const auto getQueryAnalysisSampler = ServiceContext::declareDecoration<QueryAnalysisSampler>();
 
-constexpr auto kActiveCollectionsFieldName = "activeCollections"_sd;
+constexpr auto kActiveCollectionsFieldName = "activeCollections"sv;
 
 bool isApproximatelyEqual(double val0, double val1, double epsilon) {
     return std::fabs(val0 - val1) < (epsilon + std::numeric_limits<double>::epsilon());
@@ -206,11 +182,9 @@ void QueryAnalysisSampler::onShutdown() {
     }
 }
 
-void QueryAnalysisSampler::QueryStats::gotCommand(StringData cmdName) {
+void QueryAnalysisSampler::QueryStats::gotCommand(std::string_view cmdName) {
     if (cmdName == "findAndModify" || cmdName == "findandmodify") {
         _lastFindAndModifyQueriesCount++;
-    } else if (cmdName == "aggregate") {
-        _lastAggregateQueriesCount++;
     } else if (cmdName == "count") {
         _lastCountQueriesCount++;
     } else if (cmdName == "distinct") {
@@ -229,23 +203,23 @@ QueryAnalysisSampler::QueryStats::QueryStats() : _opCounters(&globalOpCounters()
 
 void QueryAnalysisSampler::QueryStats::refreshTotalCount() {
     const auto& thisNodesClusterRole = serverGlobalParams.clusterRole;
-    long long newTotalCount = [&] {
+    long long newTotalCount = [&]() -> long long {
         if (thisNodesClusterRole.hasExclusively(ClusterRole::RouterServer) ||
             thisNodesClusterRole.has(ClusterRole::None)) {
             // This node represents the 'front door' for queries entering the cluster.
-            return _opCounters->getUpdate()->load() +  //
-                _opCounters->getDelete()->load() +     //
-                _opCounters->getQuery()->load() +      //
-                _lastFindAndModifyQueriesCount +       //
-                _lastAggregateQueriesCount +           //
-                _lastCountQueriesCount +               //
+            return _opCounters->updates->value() +  //
+                _opCounters->deletes->value() +     //
+                _opCounters->queries->value() +     //
+                _opCounters->aggregates->value() +  //
+                _lastFindAndModifyQueriesCount +    //
+                _lastCountQueriesCount +            //
                 _lastDistinctQueriesCount;
         } else if (thisNodesClusterRole.has(ClusterRole::ShardServer)) {
             // This node captures mostly internal traffic, which has already been routed and
             // performed shard targeting and the like. However, for queries in sub-pipelines, this
             // shard may still act as a router and need to perform nested shard targeting. So we
             // count these operations.
-            return _opCounters->getNestedAggregate()->load();
+            return _opCounters->nestedAggregates->value();
         }
         MONGO_UNREACHABLE;
     }();

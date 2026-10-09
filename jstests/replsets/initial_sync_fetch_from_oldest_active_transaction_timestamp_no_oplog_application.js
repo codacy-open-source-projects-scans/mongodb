@@ -17,6 +17,8 @@
  * @tags: [
  *   uses_prepare_transaction,
  *   uses_transactions,
+ *   # TODO (SERVER-133476): Relies on a specific beginFetchingTimestamp being set.
+ *   featureFlagReplicatedFastCount_incompatible,
  * ]
  */
 
@@ -32,7 +34,11 @@ let secondary = replTest.getSecondary();
 
 // The default WC is majority and this test can't satisfy majority writes.
 assert.commandWorked(
-    primary.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+    primary.adminCommand({
+        setDefaultRWConcern: 1,
+        defaultWriteConcern: {w: 1},
+        writeConcern: {w: "majority"},
+    }),
 );
 
 const dbName = "test";
@@ -93,7 +99,11 @@ replTest.stop(
     // Validation would encounter a prepare conflict on the open transaction.
     {skipValidation: true},
 );
-secondary = replTest.start(secondary, {startClean: true, setParameter: {"numInitialSyncAttempts": 1}}, true /* wait */);
+secondary = replTest.start(
+    secondary,
+    {startClean: true, setParameter: {"numInitialSyncAttempts": 1}},
+    true /* wait */,
+);
 replTest.awaitSecondaryNodes();
 replTest.awaitReplication();
 

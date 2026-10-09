@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -50,6 +23,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -178,7 +152,7 @@ struct AccumulationExpression {
     AccumulationExpression(boost::intrusive_ptr<Expression> initializer,
                            boost::intrusive_ptr<Expression> argument,
                            AccumulatorState::Factory factory,
-                           StringData name)
+                           std::string_view name)
         : initializer(initializer), argument(argument), factory(factory), name(name) {
         tassert(11294828, "Expecting initializer expression", this->initializer);
         tassert(11294827, "Expecting argument expression", this->argument);
@@ -195,9 +169,9 @@ struct AccumulationExpression {
 
     // The name of the accumulator expression. It is the caller's responsibility to make sure the
     // memory this points to does not get freed. This can best be accomplished by passing in a
-    // pointer to a string constant. This StringData is always required to point to a valid
+    // pointer to a string constant. This std::string_view is always required to point to a valid
     // null-terminated string.
-    StringData name;
+    std::string_view name;
 };
 
 /**
@@ -317,7 +291,7 @@ public:
      * Retrieves the Parser for the accumulator specified by the given name, and raises an error if
      * there is no such Parser registered.
      */
-    static ParserRegistration& getParser(StringData name);
+    static ParserRegistration& getParser(std::string_view name);
 
     // The field name is used to store the results of the accumulation in a result document.
     std::string fieldName;

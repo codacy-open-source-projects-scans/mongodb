@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/sessions_collection_config_server.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -68,6 +41,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -78,8 +52,10 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(preventSessionsCollectionSharding);
+MONGO_FAIL_POINT_DEFINE(hangBeforeGeneratingSessionsCollectionIndexes);
 
 void SessionsCollectionConfigServer::_shardCollectionIfNeeded(OperationContext* opCtx) {
     // First, check if the collection is already sharded.
@@ -138,7 +114,7 @@ void SessionsCollectionConfigServer::_generateIndexesIfNeeded(OperationContext* 
     const auto nss = NamespaceString::kLogicalSessionsNamespace;
     sharding::router::CollectionRouter router(opCtx, nss);
     router.routeWithRoutingContext(
-        "SessionsCollectionConfigServer::_generateIndexesIfNeeded"_sd,
+        "SessionsCollectionConfigServer::_generateIndexesIfNeeded"sv,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
             // (SERVER-61214) This assertion ensures that the catalog cache recognizes
@@ -151,6 +127,8 @@ void SessionsCollectionConfigServer::_generateIndexesIfNeeded(OperationContext* 
                     str::stream() << "Collection " << nss.toStringForErrorMsg()
                                   << " is not sharded",
                     cri.isSharded());
+
+            hangBeforeGeneratingSessionsCollectionIndexes.pauseWhileSet(opCtx);
 
             auto shardResults = scatterGatherVersionedTargetByRoutingTable(
                 opCtx,

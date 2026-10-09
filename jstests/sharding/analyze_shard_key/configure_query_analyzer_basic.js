@@ -4,15 +4,13 @@
  * @tags: [requires_fcv_70]
  */
 
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     testExistingCollection,
     testNonExistingCollection,
 } from "jstests/sharding/analyze_shard_key/libs/configure_query_analyzer_common.js";
-
-// This test requires running commands directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
 
 // Set this to opt into the 'samplesPerSecond' check.
 TestData.testingDiagnosticsEnabled = false;
@@ -84,7 +82,10 @@ const dbNameBase = "testDb";
         ErrorCodes.IllegalOperation,
     );
     // Verify that the error message is as expected.
-    assert.eq(configureRes.errmsg, "Cannot run configureQueryAnalyzer command directly against a shardsvr mongod");
+    assert.eq(
+        configureRes.errmsg,
+        "Cannot run configureQueryAnalyzer command directly against a shardsvr mongod",
+    );
 
     st.stop();
 }
@@ -131,12 +132,20 @@ if (!TestData.auth) {
 
     // Prepare an authenticated user for testing.
     // Must be authenticated as a user with ActionType::useTenant in order to use security token
-    assert.commandWorked(adminDb.runCommand({createUser: "admin", pwd: "pwd", roles: ["__system"]}));
+    assert.commandWorked(
+        adminDb.runCommand({createUser: "admin", pwd: "pwd", roles: ["__system"]}),
+    );
     assert(adminDb.auth("admin", "pwd"));
 
     // The configureQueryAnalyzer command is not supported even on primary mongod.
     const testCases = [];
-    testCases.push(Object.assign({conn: primary, isSupported: false, expectedErrorCode: ErrorCodes.IllegalOperation}));
+    testCases.push(
+        Object.assign({
+            conn: primary,
+            isSupported: false,
+            expectedErrorCode: ErrorCodes.IllegalOperation,
+        }),
+    );
     testNonExistingCollection(testCases, "admin", dbNameBase);
 
     rst.stopSet();
@@ -145,9 +154,14 @@ if (!TestData.auth) {
 {
     const mongod = MongoRunner.runMongod();
 
-    // The configureQueryAnalyzer command is not supported on standalone mongod.
-    const testCases = [{conn: mongod, isSupported: false, expectedErrorCode: ErrorCodes.IllegalOperation}];
-    testNonExistingCollection(testCases, dbNameBase);
+    // Some suites implicitly converts standalone to a replica set, so we need to make sure.
+    if (FixtureHelpers.isStandalone(mongod.getDB("admin"))) {
+        // The configureQueryAnalyzer command is not supported on standalone mongod.
+        const testCases = [
+            {conn: mongod, isSupported: false, expectedErrorCode: ErrorCodes.IllegalOperation},
+        ];
+        testNonExistingCollection(testCases, dbNameBase);
+    }
 
     MongoRunner.stopMongod(mongod);
 }

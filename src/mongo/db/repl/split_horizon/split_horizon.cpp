@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/split_horizon/split_horizon.h"
 
@@ -36,6 +10,7 @@
 #include <algorithm>
 #include <iterator>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -107,7 +82,7 @@ SplitHorizon::ForwardMapping computeForwardMappings(
 
         // Process all of the BSON description of horizons into a linear list.
         auto convert = [](auto&& horizonObj) -> MapMember {
-            const StringData horizonName = horizonObj.fieldName();
+            const std::string_view horizonName = horizonObj.fieldName();
 
             if (horizonObj.type() != BSONType::string) {
                 uasserted(ErrorCodes::TypeMismatch,
@@ -210,7 +185,7 @@ void SplitHorizon::toBSON(BSONObjBuilder& configBuilder) const {
         return;
 
     // StringMaps are iterated in arbitrary order, so we sort before returning the horizons.
-    std::vector<std::pair<StringData, std::string>> sortedHorizons;
+    std::vector<std::pair<std::string_view, std::string>> sortedHorizons;
     for (const auto& horizon : _forwardMapping) {
         // The "__default" horizon should never be emitted in the horizon table.
         if (horizon.first == SplitHorizon::kDefaultHorizon)

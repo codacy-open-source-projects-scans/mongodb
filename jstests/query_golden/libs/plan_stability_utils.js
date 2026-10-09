@@ -1,4 +1,4 @@
-import {getPlanRankerMode} from "jstests/libs/query/cbr_utils.js";
+import {getPlanRanker} from "jstests/libs/query/cbr_utils.js";
 import {
     joinPlanToString,
     jsonifyMultilineString,
@@ -91,7 +91,8 @@ function sumCounters(tree, counter) {
  *
  */
 function getNReturned(explain) {
-    const lastStage = explain.stages !== undefined ? explain.stages[explain.stages.length - 1] : explain;
+    const lastStage =
+        explain.stages !== undefined ? explain.stages[explain.stages.length - 1] : explain;
     let nReturned;
 
     if (lastStage.executionStats !== undefined) {
@@ -149,20 +150,22 @@ export function runPlanStabilityPipelines(db, collName, pipelines) {
     // knobs. Set them before starting the tests & restore them
     // after, as the query_golden_classic suite runs other
     // golden tests, which do not expect these knobs.
-    if (getPlanRankerMode(db) !== "multiPlanning") {
+    if (getPlanRanker(db) !== "multiPlanning") {
         // CBR enabled
         paramsToRestore = assert.commandWorked(
             db.adminCommand({
                 getParameter: 1,
                 internalQueryPlannerEnableSortIndexIntersection: 1,
                 internalQuerySamplingBySequentialScan: 1,
+                internalQuerySamplingByStrides: 1,
             }),
         );
         assert.commandWorked(
             db.adminCommand({
                 setParameter: 1,
                 internalQueryPlannerEnableSortIndexIntersection: true,
-                internalQuerySamplingBySequentialScan: true,
+                internalQuerySamplingBySequentialScan: false,
+                internalQuerySamplingByStrides: true,
             }),
         );
     }
@@ -238,29 +241,51 @@ export function runPlanStabilityPipelines(db, collName, pipelines) {
                 `"errors": ${padNumber(totalErrors)}},`,
         );
 
-        const parameters = {
-            featureFlagCostBasedRanker: null,
-            internalQueryCBRCEMode: null,
+        const featureFlagCostBasedRanker = db.adminCommand({
+            getParameter: 1,
+            featureFlagCostBasedRanker: 1,
+        }).featureFlagCostBasedRanker;
+
+        let internalQueryPlanRanker = db.adminCommand({
+            getParameter: 1,
+            internalQueryPlanRanker: 1,
+        }).internalQueryPlanRanker;
+
+        // Override plan ranker with multiPlanning if feature flag is false.
+        if (!(featureFlagCostBasedRanker ?? {}).value) {
+            internalQueryPlanRanker = "multiPlanning";
+        }
+
+        const samplingParams = {
             samplingMarginOfError: null,
             samplingConfidenceInterval: null,
             internalQuerySamplingCEMethod: null,
             internalQuerySamplingBySequentialScan: null,
+            internalQuerySamplingByStrides: null,
         };
 
-        for (const param in parameters) {
-            const result = db.adminCommand({getParameter: 1, [param]: 1});
-            parameters[param] = result[param];
-        }
+        let parameters = {featureFlagCostBasedRanker, internalQueryPlanRanker};
 
-        if (!(parameters["featureFlagCostBasedRanker"] ?? {})["value"]) {
-            // internalQueryCBRCEMode does not matter unless
-            // CBR is enabled, and is likely to confuse the
-            // reader.
-            delete parameters["internalQueryCBRCEMode"];
-        } else if (parameters["internalQueryCBRCEMode"] === "automaticCE") {
-            const param = "automaticCEPlanRankingStrategy";
-            const result = db.adminCommand({getParameter: 1, [param]: 1});
-            parameters[param] = result[param];
+        if (internalQueryPlanRanker !== "multiPlanning") {
+            const internalQueryCBRCEMode = db.adminCommand({
+                getParameter: 1,
+                internalQueryCBRCEMode: 1,
+            }).internalQueryCBRCEMode;
+            parameters["internalQueryCBRCEMode"] = internalQueryCBRCEMode;
+
+            if (internalQueryPlanRanker === "mixed") {
+                parameters["internalQueryMixedPlanRankingStrategy"] = db.adminCommand({
+                    getParameter: 1,
+                    internalQueryMixedPlanRankingStrategy: 1,
+                }).internalQueryMixedPlanRankingStrategy;
+            }
+
+            if (internalQueryCBRCEMode === "samplingCE") {
+                for (const param in samplingParams) {
+                    samplingParams[param] = db.adminCommand({getParameter: 1, [param]: 1})[param];
+                }
+                Object.assign(parameters, samplingParams);
+            }
         }
 
         // Strip the FCV version from any server parameters that have it.
@@ -281,8 +306,14 @@ export function runPlanStabilityPipelines(db, collName, pipelines) {
                     Object.fromEntries([
                         ["setParameter", 1],
                         ...Object.entries(paramsToRestore)
-                            .filter(([k, _]) => k !== "ok" && k !== "operationTime" && k !== "$clusterTime")
-                            .map(([param, value]) => [param, typeof value === "string" ? value : value["value"]]),
+                            .filter(
+                                ([k, _]) =>
+                                    k !== "ok" && k !== "operationTime" && k !== "$clusterTime",
+                            )
+                            .map(([param, value]) => [
+                                param,
+                                typeof value === "string" ? value : value["value"],
+                            ]),
                     ]),
                 ),
             );
@@ -374,9 +405,12 @@ export function runPlanStabilityCommands(
 
         // Fish for the query plan that we want to dump
         const queryPlanner =
-            explain.queryPlanner !== undefined ? explain.queryPlanner : explain.stages[0]["$cursor"].queryPlanner;
+            explain.queryPlanner !== undefined
+                ? explain.queryPlanner
+                : explain.stages[0]["$cursor"].queryPlanner;
         const winningPlan = queryPlanner.winningPlan;
-        const queryPlan = winningPlan.queryPlan !== undefined ? [winningPlan.queryPlan] : [winningPlan];
+        const queryPlan =
+            winningPlan.queryPlan !== undefined ? [winningPlan.queryPlan] : [winningPlan];
 
         if (explain.stages !== undefined && explain.stages.length > 1) {
             // If there are any classic stages after the SBE stage,
@@ -399,7 +433,9 @@ export function runPlanStabilityCommands(
         if (showRows) {
             // JSON does not allow trailing commas, so we need to check if there are more fields after the "rows" field
             const hasMoreAfterRows = showFull || showChecksum;
-            print(`    "rows" : ${padNumber(nReturned, 9)}${hasMoreAfterRows ? "," : `}${separator}`}`);
+            print(
+                `    "rows" : ${padNumber(nReturned, 9)}${hasMoreAfterRows ? "," : `}${separator}`}`,
+            );
         }
 
         if (showFull) {
@@ -426,7 +462,4 @@ export function runPlanStabilityCommands(
     );
 
     print("}");
-
-    // Unlock the database in case it was locked just after populating the data
-    assert.commandWorked(db.getMongo().getDB("admin").fsyncUnlock());
 }

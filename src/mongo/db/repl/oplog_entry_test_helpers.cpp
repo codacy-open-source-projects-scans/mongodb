@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 
@@ -34,12 +8,14 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/repl/container_oplog_entry_gen.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/container.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/unittest/assert.h"
+
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -128,7 +104,7 @@ ContainerVal toContainerVal(BSONBinData binData) {
 }  // namespace
 
 OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          int64_t key,
                                          BSONBinData value) {
     ContainerInsertOplogEntryO insertO;
@@ -145,7 +121,7 @@ OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
 }
 
 OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          BSONBinData key,
                                          BSONBinData value) {
     ContainerInsertOplogEntryO insertO;
@@ -162,7 +138,7 @@ OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
 }
 
 OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          int64_t key,
                                          BSONBinData value) {
     ContainerUpdateOplogEntryO updateO;
@@ -181,7 +157,7 @@ OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
 }
 
 OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          BSONBinData key,
                                          BSONBinData value) {
     ContainerUpdateOplogEntryO updateO;
@@ -199,7 +175,9 @@ OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
     }}};
 }
 
-OplogEntry makeContainerDeleteOplogEntry(OpTime opTime, StringData containerIdent, int64_t key) {
+OplogEntry makeContainerDeleteOplogEntry(OpTime opTime,
+                                         std::string_view containerIdent,
+                                         int64_t key) {
     ContainerDeleteOplogEntryO deleteO;
     deleteO.setKey(ContainerKey(key));
     return {DurableOplogEntry{DurableOplogEntryParams{
@@ -213,7 +191,7 @@ OplogEntry makeContainerDeleteOplogEntry(OpTime opTime, StringData containerIden
 }
 
 OplogEntry makeContainerDeleteOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          BSONBinData key) {
     ContainerDeleteOplogEntryO deleteO;
     deleteO.setKey(toContainerKey(key));
@@ -259,7 +237,7 @@ OplogEntry makeStartIndexBuildOplogEntry(OpTime opTime,
                                          const UUID& uuid,
                                          const UUID& indexBuildUUID,
                                          const IndexBuildInfo& indexBuildInfo,
-                                         StringData indexIdent) {
+                                         std::string_view indexIdent) {
     BSONObjBuilder oplogEntryBuilder;
     oplogEntryBuilder.append("startIndexBuild", nss.coll());
     indexBuildUUID.appendToBuilder(&oplogEntryBuilder, "indexBuildUUID");
@@ -490,6 +468,7 @@ OplogEntry makeInsertOplogEntryWithRecordId(OpTime opTime,
     return {DurableOplogEntry(builder.obj())};
 }
 
+// TODO SERVER-131416: Rename to makeUpdateOplogEntryWithSingleOpMetadataNoSz
 OplogEntry makeUpdateOplogEntryWithRecordId(OpTime opTime,
                                             const NamespaceString& nss,
                                             const BSONObj& documentToUpdate,
@@ -506,6 +485,7 @@ OplogEntry makeUpdateOplogEntryWithRecordId(OpTime opTime,
     return {DurableOplogEntry(builder.obj())};
 }
 
+// TODO SERVER-131416: Rename to makeDeleteOplogEntryWithSingleOpMetadataNoSz
 OplogEntry makeUpdateOplogEntryWithUpsert(OpTime opTime,
                                           const NamespaceString& nss,
                                           const BSONObj& documentToUpdate,
@@ -552,6 +532,52 @@ OplogEntry makeDeleteOplogEntryWithRecordId(OpTime opTime,
     return {DurableOplogEntry(builder.obj())};
 }
 
+OplogEntry makeInsertOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const UUID& uuid,
+                                                   const BSONObj& docToInsert,
+                                                   const RecordId& rid,
+                                                   int64_t hash) {
+    OplogEntry baseEntry = makeInsertOplogEntryWithRecordId(opTime, nss, uuid, docToInsert, rid);
+
+    BSONObjBuilder builder;
+    builder.appendElements(baseEntry.getEntry().toBSON());
+    builder.append("m", BSON("h" << hash));
+
+    return {DurableOplogEntry(builder.obj())};
+}
+
+OplogEntry makeDeleteOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const UUID& uuid,
+                                                   const BSONObj& docToDelete,
+                                                   const RecordId& rid,
+                                                   int64_t hash) {
+    OplogEntry baseEntry = makeDeleteOplogEntryWithRecordId(opTime, nss, uuid, docToDelete, rid);
+
+    BSONObjBuilder builder;
+    builder.appendElements(baseEntry.getEntry().toBSON());
+    builder.append("m", BSON("h" << hash));
+
+    return {DurableOplogEntry(builder.obj())};
+}
+
+OplogEntry makeUpdateOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const BSONObj& documentToUpdate,
+                                                   const BSONObj& updatedDocument,
+                                                   const RecordId& rid,
+                                                   int64_t hash) {
+    OplogEntry baseEntry =
+        makeUpdateOplogEntryWithRecordId(opTime, nss, documentToUpdate, updatedDocument, rid);
+
+    BSONObjBuilder builder;
+    builder.appendElements(baseEntry.getEntry().toBSON());
+    builder.append("m", BSON("h" << hash));
+
+    return {DurableOplogEntry(builder.obj())};
+}
+
 OplogEntry makeUpdateOplogEntryWithRecordIdAndSizeMetadata(OpTime opTime,
                                                            const NamespaceString& nss,
                                                            const BSONObj& documentToUpdate,
@@ -583,6 +609,35 @@ OplogEntry makeDeleteOplogEntryWithRecordIdAndSizeMetadata(OpTime opTime,
     return {DurableOplogEntry(builder.obj())};
 }
 
+OplogEntry makeUpdateOplogEntryWithRecordIdWithoutSz(OpTime opTime,
+                                                     const NamespaceString& nss,
+                                                     const BSONObj& documentToUpdate,
+                                                     const BSONObj& updatedDocument,
+                                                     const RecordId& rid) {
+    OplogEntry baseEntry =
+        makeUpdateOplogEntryWithRecordId(opTime, nss, documentToUpdate, updatedDocument, rid);
+
+    BSONObjBuilder builder;
+    builder.appendElements(baseEntry.getEntry().toBSON());
+    builder.append("m", BSONObj());
+
+    return {DurableOplogEntry(builder.obj())};
+}
+
+OplogEntry makeDeleteOplogEntryWithRecordIdWithoutSz(OpTime opTime,
+                                                     const NamespaceString& nss,
+                                                     const UUID& uuid,
+                                                     const BSONObj& docToDelete,
+                                                     const RecordId& rid) {
+    OplogEntry baseEntry = makeDeleteOplogEntryWithRecordId(opTime, nss, uuid, docToDelete, rid);
+
+    BSONObjBuilder builder;
+    builder.appendElements(baseEntry.getEntry().toBSON());
+    builder.append("m", BSONObj());
+
+    return {DurableOplogEntry(builder.obj())};
+}
+
 UUID getCollectionUUID(OperationContext* opCtx, const NamespaceString& nss) {
     const auto optUuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss);
     ASSERT_TRUE(optUuid);
@@ -594,12 +649,15 @@ void insertDocumentAtRecordId(OperationContext* opCtx,
                               const BSONObj& doc,
                               const RecordId& rid) {
     WriteUnitOfWork wuow(opCtx);
-    AutoGetCollection coll(opCtx, nss, MODE_IX);
-    ASSERT_TRUE(coll);
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    ASSERT_TRUE(coll.exists());
 
     InsertStatement stmt{doc};
     stmt.replicatedRecordId = rid;
-    ASSERT_OK(collection_internal::insertDocument(opCtx, *coll, stmt, nullptr /* opDebug */));
+    ASSERT_OK(collection_internal::insertDocument(opCtx, coll.getCollectionPtr(), stmt, nullptr));
 
     wuow.commit();
 }
@@ -607,11 +665,14 @@ void insertDocumentAtRecordId(OperationContext* opCtx,
 boost::optional<BSONObj> documentAtRecordId(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             const RecordId& rid) {
-    AutoGetCollection coll(opCtx, nss, MODE_IS);
-    if (!coll) {
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    if (!coll.exists()) {
         return boost::none;
     }
-    auto cursor = coll->getCursor(opCtx);
+    auto cursor = coll.getCollectionPtr()->getCursor(opCtx);
     auto record = cursor->seekExact(rid);
     if (record.has_value()) {
         return record->data.getOwned().releaseToBson();

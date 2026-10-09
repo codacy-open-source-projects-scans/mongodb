@@ -7,7 +7,12 @@ set -o errexit
 set -o verbose
 
 # Extract version from .bazelrc.target_mongo_version (e.g., "common --define=MONGO_VERSION=8.3.0-rc1003")
-MONGO_VERSION="r$(grep -oP '(?<=MONGO_VERSION=)[^\s]+' .bazelrc.target_mongo_version)"
+target_mongo_version=$(awk -F'MONGO_VERSION=' '/MONGO_VERSION=/ { split($2, version, /[[:space:]]/); print version[1]; exit }' .bazelrc.target_mongo_version)
+if [[ -z "${target_mongo_version}" ]]; then
+    echo "Unable to extract MONGO_VERSION from .bazelrc.target_mongo_version" >&2
+    exit 1
+fi
+MONGO_VERSION="r${target_mongo_version}"
 
 # If the project is sys-perf (or related), add the string -sys-perf to the version
 if [[ "${project}" == sys-perf* ]]; then
@@ -32,13 +37,7 @@ if [[ -n "${MONGO_VERSION_OVERRIDE}" ]]; then
     MONGO_VERSION="${MONGO_VERSION_OVERRIDE}"
 fi
 
-# For commit builds, append the last 8 characters of the git revision to the version string.
-if [[ "${requester}" == "commit" ]]; then
-    GIT_REV=$(git rev-parse HEAD)
-    MONGO_VERSION="${MONGO_VERSION}-${GIT_REV: -8}"
-fi
-
 echo "MONGO_VERSION = ${MONGO_VERSION}"
 
 activate_venv
-MONGO_VERSION=${MONGO_VERSION} IS_PATCH=${is_patch} IS_COMMIT_QUEUE=${is_commit_queue} $python buildscripts/generate_version_expansions.py --out version_expansions.yml
+MONGO_VERSION=${MONGO_VERSION} IS_PATCH=${is_patch} IS_RELEASE=${is_release:-} IS_COMMIT_QUEUE=${is_commit_queue} $python buildscripts/generate_version_expansions.py --out version_expansions.yml

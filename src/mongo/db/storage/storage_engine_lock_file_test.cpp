@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include <cstdint>
 #include <filesystem>
@@ -66,7 +40,7 @@ void touch(std::string filename) {
 TEST(StorageEngineLockFileTest, UncleanShutdownNoExistingFile) {
     TempDir tempDir("StorageEngineLockFileTest_UncleanShutdownNoExistingFile");
     StorageEngineLockFile lockFile(tempDir.path());
-    ASSERT_FALSE(lockFile.createdByUncleanShutdown());
+    EXPECT_FALSE(lockFile.createdByUncleanShutdown());
 }
 
 TEST(StorageEngineLockFileTest, UncleanShutdownEmptyExistingFile) {
@@ -76,7 +50,7 @@ TEST(StorageEngineLockFileTest, UncleanShutdownEmptyExistingFile) {
         std::ofstream(filename.c_str());
     }
     StorageEngineLockFile lockFile(tempDir.path());
-    ASSERT_FALSE(lockFile.createdByUncleanShutdown());
+    EXPECT_FALSE(lockFile.createdByUncleanShutdown());
 }
 
 TEST(StorageEngineLockFileTest, UncleanShutdownNonEmptyExistingFile) {
@@ -87,16 +61,16 @@ TEST(StorageEngineLockFileTest, UncleanShutdownNonEmptyExistingFile) {
         ofs << 12345 << std::endl;
     }
     StorageEngineLockFile lockFile(tempDir.path());
-    ASSERT_TRUE(lockFile.createdByUncleanShutdown());
+    EXPECT_TRUE(lockFile.createdByUncleanShutdown());
 }
 
 TEST(StorageEngineLockFileTest, OpenInvalidDirectory) {
     StorageEngineLockFile lockFile("no_such_directory");
-    ASSERT_EQUALS((boost::filesystem::path("no_such_directory") / "mongod.lock").string(),
-                  lockFile.getFilespec());
+    EXPECT_EQ((boost::filesystem::path("no_such_directory") / "mongod.lock").string(),
+              lockFile.getFilespec());
     Status status = lockFile.open();
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::NonExistentPath, status.code());
+    EXPECT_EQ(ErrorCodes::NonExistentPath, status.code());
 }
 
 // Cause ::open() to fail by providing a regular file instead of a directory for 'dbpath'.
@@ -107,7 +81,7 @@ TEST(StorageEngineLockFileTest, OpenInvalidFilename) {
     StorageEngineLockFile lockFile(filename);
     Status status = lockFile.open();
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::DBPathInUse, status.code());
+    EXPECT_EQ(ErrorCodes::DBPathInUse, status.code());
 }
 
 TEST(StorageEngineLockFileTest, OpenNoExistingLockFile) {
@@ -131,7 +105,7 @@ TEST(StorageEngineLockFileTest, WritePidFileNotOpened) {
     StorageEngineLockFile lockFile(tempDir.path());
     Status status = lockFile.writePid();
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(ErrorCodes::FileNotOpen, status.code());
+    EXPECT_EQ(ErrorCodes::FileNotOpen, status.code());
 }
 
 TEST(StorageEngineLockFileTest, WritePidFileOpened) {
@@ -146,7 +120,7 @@ TEST(StorageEngineLockFileTest, WritePidFileOpened) {
     std::ifstream ifs(filename.c_str());
     int64_t pidFromLockFile = 0;
     ASSERT_TRUE(ifs >> pidFromLockFile);
-    ASSERT_EQUALS(ProcessId::getCurrent().asInt64(), pidFromLockFile);
+    EXPECT_EQ(ProcessId::getCurrent().asInt64(), pidFromLockFile);
 }
 
 // Existing data in lock file must be removed before writing process ID.
@@ -157,7 +131,7 @@ TEST(StorageEngineLockFileTest, WritePidTruncateExistingFile) {
         std::string filename(tempDir.path() + "/mongod.lock");
         std::ofstream ofs(filename.c_str());
         std::string currentPidStr = ProcessId::getCurrent().toString();
-        ASSERT_FALSE(currentPidStr.empty());
+        EXPECT_FALSE(currentPidStr.empty());
         ofs << std::string(currentPidStr.size() * 100, 'X') << std::endl;
     }
     ASSERT_OK(lockFile.open());
@@ -169,11 +143,11 @@ TEST(StorageEngineLockFileTest, WritePidTruncateExistingFile) {
     std::ifstream ifs(filename.c_str());
     int64_t pidFromLockFile = 0;
     ASSERT_TRUE(ifs >> pidFromLockFile);
-    ASSERT_EQUALS(ProcessId::getCurrent().asInt64(), pidFromLockFile);
+    EXPECT_EQ(ProcessId::getCurrent().asInt64(), pidFromLockFile);
 
     // There should not be any data in the file after the process ID.
     std::string extraData;
-    ASSERT_FALSE(ifs >> extraData);
+    EXPECT_FALSE(ifs >> extraData);
 }
 
 TEST(StorageEngineLockFileTest, ClearPidAndUnlock) {
@@ -184,8 +158,8 @@ TEST(StorageEngineLockFileTest, ClearPidAndUnlock) {
 
     // Clear lock file contents.
     lockFile.clearPidAndUnlock();
-    ASSERT_TRUE(boost::filesystem::exists(lockFile.getFilespec()));
-    ASSERT_EQUALS(0U, boost::filesystem::file_size(lockFile.getFilespec()));
+    EXPECT_TRUE(boost::filesystem::exists(lockFile.getFilespec()));
+    EXPECT_EQ(0U, boost::filesystem::file_size(lockFile.getFilespec()));
 }
 
 class ScopedReadOnlyDirectory {
@@ -248,7 +222,7 @@ TEST(StorageEngineLockFileTest, ReadOnlyDirectory) {
     auto openStatus = lockFile.open();
 
     ASSERT_NOT_OK(openStatus);
-    ASSERT_EQ(openStatus, ErrorCodes::IllegalOperation);
+    EXPECT_EQ(openStatus, ErrorCodes::IllegalOperation);
 }
 
 #endif
@@ -278,7 +252,7 @@ TEST(StorageEngineLockFileTest, ReadOnlyDirectoryWithLockFile) {
     auto openStatus = lockFile2.open();
 
     ASSERT_NOT_OK(openStatus);
-    ASSERT_EQ(openStatus, ErrorCodes::IllegalOperation);
+    EXPECT_EQ(openStatus, ErrorCodes::IllegalOperation);
 }
 
 }  // namespace

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/inclusion_projection_executor.h"
 
@@ -34,6 +8,7 @@
 #include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -43,12 +18,13 @@
 namespace mongo::projection_executor {
 using ComputedFieldsPolicy = ProjectionPolicies::ComputedFieldsPolicy;
 
-Document FastPathEligibleInclusionNode::applyToDocument(const Document& inputDoc) const {
+Document FastPathEligibleInclusionNode::applyToDocument(const Document& inputDoc,
+                                                        const EvaluationContext& ctx) const {
     if (auto outputDoc = tryApplyFastPathProjection(inputDoc)) {
         return outputDoc.get();
     }
     // A fast-path projection is not feasible, fall back to default implementation.
-    return InclusionNode::applyToDocument(inputDoc);
+    return InclusionNode::applyToDocument(inputDoc, ctx);
 }
 
 namespace {
@@ -113,7 +89,9 @@ bool computedExprDependsOnField(const std::vector<OrderedPathSet>& topLevelDeps,
 }  // namespace
 
 std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInProject(
-    StringData oldName, StringData newName, const std::set<StringData>& reservedNames) {
+    std::string_view oldName,
+    std::string_view newName,
+    const std::set<std::string_view>& reservedNames) {
     if (_policies.computedFieldsPolicy != ComputedFieldsPolicy::kAllowComputedFields) {
         return {BSONObj{}, false};
     }
@@ -130,7 +108,7 @@ std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInProject(
     // Auxiliary vector with extracted computed projections: <name, expression, replacement
     // strategy>. If the replacement strategy flag is true, the expression is replaced with a
     // projected field. If it is false - the expression is replaced with an identity projection.
-    std::vector<std::tuple<StringData, boost::intrusive_ptr<Expression>, bool>>
+    std::vector<std::tuple<std::string_view, boost::intrusive_ptr<Expression>, bool>>
         addFieldsExpressions;
     bool replaceWithProjField = true;
     for (size_t i = 0; i < _orderToProcessAdditionsAndChildren.size(); i++) {
@@ -188,7 +166,7 @@ std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInProject(
             if (std::get<2>(expressionSpec)) {
                 // Replace the expression with an inclusion projected field.
                 auto it = _projectedFields.insert(_projectedFields.end(), fieldName);
-                _projectedFieldsSet.insert(StringData(*it));
+                _projectedFieldsSet.insert(std::string_view(*it));
                 _expressions.erase(fieldName);
                 // Only computed projections at the beginning of the list were marked to become
                 // projected fields. The new projected field is at the beginning of the
@@ -210,7 +188,9 @@ std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInProject(
 }
 
 std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInAddFields(
-    StringData oldName, StringData newName, const std::set<StringData>& reservedNames) {
+    std::string_view oldName,
+    std::string_view newName,
+    const std::set<std::string_view>& reservedNames) {
     if (_policies.computedFieldsPolicy != ComputedFieldsPolicy::kAllowComputedFields) {
         return {BSONObj{}, false};
     }
@@ -227,7 +207,7 @@ std::pair<BSONObj, bool> InclusionNode::extractComputedProjectionsInAddFields(
     // Auxiliary vector with extracted computed projections: <name, expression>.
     // To preserve the original fields order, only projections at the beginning of the
     // _orderToProcessAdditionsAndChildren list can be extracted for pushdown.
-    std::vector<std::pair<StringData, boost::intrusive_ptr<Expression>>> addFieldsExpressions;
+    std::vector<std::pair<std::string_view, boost::intrusive_ptr<Expression>>> addFieldsExpressions;
     for (size_t i = 0; i < _orderToProcessAdditionsAndChildren.size(); i++) {
         auto&& field = _orderToProcessAdditionsAndChildren[i];
         // Do not extract for pushdown computed projection with reserved name.

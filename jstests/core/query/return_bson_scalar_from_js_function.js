@@ -5,11 +5,16 @@
  * @tags: [
  *   requires_fcv_60,
  *   requires_scripting,
- *   # TODO SERVER-116052: Add support for $function.
- *   mozjs_wasm_unsupported,
+ *   # The implicitly_shard_accessed_collections.js override races with background shard create
+ *   # collection ops triggered by active downgrade, causing ConflictingOperationInProgress.
+ *   cannot_run_during_upgrade_downgrade,
+ *   # TODO SERVER-128404: Wasmtime's rayon thread pool bypasses TSAN's pthread_create interception,
+ *   # triggering a TSAN internal assertion (thr->slot == 0). Re-enable once SERVER-128404 is fixed.
+ *   tsan_incompatible,
+ *   # TODO SERVER-128404: ASAN build has incompatible signal handling with Wasmtime's OOM path.
+ *   incompatible_aubsan,
  * ]
  */
-
 const coll = db.return_bson_scalare_from_js_function;
 
 coll.drop();

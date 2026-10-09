@@ -1,41 +1,15 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/util/dynamic_bitset.h"
 #include "mongo/util/modules.h"
 
 #include <initializer_list>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo::boolean_simplification {
@@ -50,7 +24,7 @@ namespace mongo::boolean_simplification {
 using Bitset = DynamicBitset<size_t, 1>;
 
 inline Bitset operator""_b(const char* bits, size_t len) {
-    return Bitset{StringData{bits, len}};
+    return Bitset{std::string_view{bits, len}};
 }
 
 /**
@@ -61,7 +35,7 @@ struct BitsetTerm {
 
     BitsetTerm(Bitset bitset, Bitset mask) : predicates(bitset), mask(mask) {}
 
-    BitsetTerm(StringData bits, StringData mask)
+    BitsetTerm(std::string_view bits, std::string_view mask)
         : BitsetTerm{Bitset{std::string{bits}}, Bitset{std::string{mask}}} {}
 
     BitsetTerm(size_t nbits, size_t bitIndex, bool val) : predicates(nbits), mask(nbits) {
@@ -82,6 +56,26 @@ struct BitsetTerm {
 
         mask.set(bitIndex, true);
         predicates.set(bitIndex, value);
+    }
+
+    /**
+     * Sets the bit at 'bitIndex' to 'value', just like set(), but detects a conflict with the
+     * current content of the term: if the bit is already set to the opposite value, the bit is
+     * overwritten and false is returned. Otherwise returns true.
+     */
+    bool safeSet(size_t bitIndex, bool value) {
+        if (mask.size() <= bitIndex) {
+            // This is fine from the performance perspective, because DynamicBitset will increase
+            // the size by 1 block, not 1 bit.
+            resize(bitIndex + 1);
+        } else if (mask.test(bitIndex) && predicates.test(bitIndex) != value) {
+            predicates.set(bitIndex, value);
+            return false;
+        }
+
+        mask.set(bitIndex, true);
+        predicates.set(bitIndex, value);
+        return true;
     }
 
     size_t size() const {

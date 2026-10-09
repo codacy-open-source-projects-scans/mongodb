@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/index/wildcard_key_generator.h"
@@ -49,6 +23,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 KeyStringSet makeKeySet(std::initializer_list<BSONObj> init = {}, RecordId id = RecordId()) {
     KeyStringSet keys;
@@ -1180,10 +1155,10 @@ TEST_F(WildcardKeyGeneratorCollationTest, CollationMixedPathAndKeyTypes) {
                                 rsKeyFormat};
 
     // Verify that the collation is only applied to String values, but all types are indexed.
-    auto dateVal = "{'$date': 1529453450288}"_sd;
-    auto oidVal = "{'$oid': '520e6431b7fa4ea22d6b1872'}"_sd;
-    auto tsVal = "{'$timestamp': {'t': 1, 'i': 100}}"_sd;
-    auto undefVal = "{'$undefined': true}"_sd;
+    auto dateVal = "{'$date': 1529453450288}"sv;
+    auto oidVal = "{'$oid': '520e6431b7fa4ea22d6b1872'}"sv;
+    auto tsVal = "{'$timestamp': {'t': 1, 'i': 100}}"sv;
+    auto undefVal = "{'$undefined': true}"sv;
 
     auto inputDoc = fromjson(
         "{a: [1, null, {b: 'one', c: 2}, {c: 2, d: 3}, {c: 'two', d: " + std::string(dateVal) +

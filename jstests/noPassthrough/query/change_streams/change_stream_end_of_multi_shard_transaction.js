@@ -3,7 +3,7 @@
  * transactions.
  * @tags: [
  *   uses_transactions,
- *   requires_fcv_71,
+ *   featureFlagEndOfTransactionChangeEvent,
  * ]
  */
 
@@ -147,7 +147,10 @@ const expectedChangesCollSession = [
     endOfTransactionEvent(2),
 ];
 
-const expectedChangesColl = expectedChangesCollSession.concat([dropEvent(collName), {operationType: "invalidate"}]);
+const expectedChangesColl = expectedChangesCollSession.concat([
+    dropEvent(collName),
+    {operationType: "invalidate"},
+]);
 
 const expectedChangesDb = [
     insertEvent(collName, 0, 1),

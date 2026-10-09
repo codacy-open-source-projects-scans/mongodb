@@ -1,102 +1,77 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/str_trim_utils.h"
 #include "mongo/db/exec/substr_utils.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+
+#include <string_view>
 
 #include <boost/algorithm/string/case_conv.hpp>
 
 namespace mongo {
 namespace sbe {
 namespace vm {
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSplit(ArityType arity) {
-    auto [ownedSeparator, tagSeparator, valSeparator] = getFromStack(1);
-    auto [ownedInput, tagInput, valInput] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinSplit(ArityType arity) {
+    auto separator = viewFromStack(1);
+    auto input = viewFromStack(0);
 
-    if (!value::isString(tagSeparator) || !value::isString(tagInput)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(separator.tag) || !value::isString(input.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto input = value::getStringView(tagInput, valInput);
-    auto separator = value::getStringView(tagSeparator, valSeparator);
+    auto inputStr = value::getStringView(input.tag, input.value);
+    auto separatorStr = value::getStringView(separator.tag, separator.value);
 
-    auto [tag, val] = value::makeNewArray();
-    auto arr = value::getArrayView(val);
-    value::ValueGuard guard{tag, val};
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto arr = value::getArrayView(result.value());
 
     size_t splitPos;
-    while ((splitPos = input.find(separator)) != std::string::npos) {
-        auto [tag, val] = value::makeNewString(input.substr(0, splitPos));
-        arr->push_back(tag, val);
+    while ((splitPos = inputStr.find(separatorStr)) != std::string::npos) {
+        auto [tag, val] = value::makeNewString(inputStr.substr(0, splitPos));
+        arr->push_back_raw(tag, val);
 
-        splitPos += separator.size();
-        input = input.substr(splitPos);
+        splitPos += separatorStr.size();
+        inputStr = inputStr.substr(splitPos);
     }
 
     // This is the last string.
     {
-        auto [tag, val] = value::makeNewString(input);
-        arr->push_back(tag, val);
+        auto [tag, val] = value::makeNewString(inputStr);
+        arr->push_back_raw(tag, val);
     }
 
-    guard.reset();
-    return {true, tag, val};
+    return std::move(result);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinReplaceOne(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinReplaceOne(ArityType arity) {
     tassert(11080005, "Unexpected arity value", arity == 3);
 
-    auto [ownedInputStr, typeTagInputStr, valueInputStr] = getFromStack(0);
-    auto [ownedFindStr, typeTagFindStr, valueFindStr] = getFromStack(1);
-    auto [ownedReplacementStr, typeTagReplacementStr, valueReplacementStr] = getFromStack(2);
+    auto inputStr = viewFromStack(0);
+    auto findStr = viewFromStack(1);
+    auto replacementStr = viewFromStack(2);
 
-    if (!value::isString(typeTagInputStr) || !value::isString(typeTagFindStr) ||
-        !value::isString(typeTagReplacementStr)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(inputStr.tag) || !value::isString(findStr.tag) ||
+        !value::isString(replacementStr.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto input = value::getStringView(typeTagInputStr, valueInputStr);
-    auto find = value::getStringView(typeTagFindStr, valueFindStr);
-    auto replacement = value::getStringView(typeTagReplacementStr, valueReplacementStr);
+    auto input = value::getStringView(inputStr.tag, inputStr.value);
+    auto find = value::getStringView(findStr.tag, findStr.value);
+    auto replacement = value::getStringView(replacementStr.tag, replacementStr.value);
 
-    // If find string is empty, return nothing, since an empty find will match every position in a
+    // If 'find' string is empty, return nothing, since an empty find will match every position in a
     // string.
     if (find.empty()) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    // If find string is not found, return the original string.
+    // If 'find' string is not found, return the original string. Ownership is only transferred on
+    // this path; the found path lets popAndReleaseStack clean up slot 0.
     size_t startIndex = input.find(find);
     if (startIndex == std::string::npos) {
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {ownedInputStr, typeTagInputStr, valueInputStr};
+        return moveMaybeOwnedFromStack(0);
     }
 
     StringBuilder output;
@@ -110,62 +85,62 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinReplaceOne(Arity
     return {true, outputStrTypeTag, outputStrValue};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinStrLenBytes(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinStrLenBytes(ArityType arity) {
     tassert(11080004, "Unexpected arity value", arity == 1);
 
-    auto [_, operandTag, operandVal] = getFromStack(0);
+    auto operand = viewFromStack(0);
 
-    if (value::isString(operandTag)) {
-        StringData str = value::getStringView(operandTag, operandVal);
+    if (value::isString(operand.tag)) {
+        std::string_view str = value::getStringView(operand.tag, operand.value);
         size_t strLenBytes = str.size();
         uassert(5155801,
                 "string length could not be represented as an int.",
                 strLenBytes <= std::numeric_limits<int>::max());
         return {false, value::TypeTags::NumberInt32, strLenBytes};
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinStrLenCP(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinStrLenCP(ArityType arity) {
     tassert(11080003, "Unexpected arity value", arity == 1);
 
-    auto [_, operandTag, operandVal] = getFromStack(0);
+    auto operand = viewFromStack(0);
 
-    if (value::isString(operandTag)) {
-        StringData str = value::getStringView(operandTag, operandVal);
+    if (value::isString(operand.tag)) {
+        std::string_view str = value::getStringView(operand.tag, operand.value);
         size_t strLenCP = str::lengthInUTF8CodePoints(str);
         uassert(5155901,
                 "string length could not be represented as an int.",
                 strLenCP <= std::numeric_limits<int>::max());
         return {false, value::TypeTags::NumberInt32, strLenCP};
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSubstrBytes(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinSubstrBytes(ArityType arity) {
     tassert(11080002, "Unexpected arity value", arity == 3);
 
-    auto [strOwned, strTag, strVal] = getFromStack(0);
-    auto [startIndexOwned, startIndexTag, startIndexVal] = getFromStack(1);
-    auto [lenOwned, lenTag, lenVal] = getFromStack(2);
+    auto strView = viewFromStack(0);
+    auto startIndexView = viewFromStack(1);
+    auto lenView = viewFromStack(2);
 
-    if (!value::isString(strTag) || startIndexTag != value::TypeTags::NumberInt64 ||
-        lenTag != value::TypeTags::NumberInt64) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(strView.tag) || startIndexView.tag != value::TypeTags::NumberInt64 ||
+        lenView.tag != value::TypeTags::NumberInt64) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    StringData str = value::getStringView(strTag, strVal);
-    int64_t startIndexBytes = value::bitcastTo<int64_t>(startIndexVal);
-    int64_t lenBytes = value::bitcastTo<int64_t>(lenVal);
+    std::string_view str = value::getStringView(strView.tag, strView.value);
+    int64_t startIndexBytes = value::bitcastTo<int64_t>(startIndexView.value);
+    int64_t lenBytes = value::bitcastTo<int64_t>(lenView.value);
 
     // Check start index is positive.
     if (startIndexBytes < 0) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     // If passed length is negative, we should return rest of string.
-    const StringData::size_type length =
-        lenBytes < 0 ? str.length() : static_cast<StringData::size_type>(lenBytes);
+    const std::string_view::size_type length =
+        lenBytes < 0 ? str.length() : static_cast<std::string_view::size_type>(lenBytes);
 
     // Check 'startIndexBytes' and byte after last char is not continuation byte.
     uassert(5155604,
@@ -174,7 +149,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSubstrBytes(Arit
              !str::isUTF8ContinuationByte(str[startIndexBytes])));
     uassert(5155605,
             "Invalid range: ending index is a UTF-8 continuation character",
-            (startIndexVal + length >= str.length() ||
+            (startIndexBytes + length >= str.length() ||
              !str::isUTF8ContinuationByte(str[startIndexBytes + length])));
 
     // If 'startIndexVal' > str.length() then string::substr() will throw out_of_range, so return
@@ -187,94 +162,99 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSubstrBytes(Arit
     return {true, outTag, outVal};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSubstrCP(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinSubstrCP(ArityType arity) {
     tassert(11080001, "Unexpected arity value", arity == 3);
 
-    auto [strOwned, strTag, strVal] = getFromStack(0);
-    auto [startIndexOwned, startIndexTag, startIndexVal] = getFromStack(1);
-    auto [lenOwned, lenTag, lenVal] = getFromStack(2);
+    auto strView = viewFromStack(0);
+    auto startIndexView = viewFromStack(1);
+    auto lenView = viewFromStack(2);
 
-    if (!value::isString(strTag) || startIndexTag != value::TypeTags::NumberInt32 ||
-        lenTag != value::TypeTags::NumberInt32 || startIndexVal < 0 || lenVal < 0) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(strView.tag) || startIndexView.tag != value::TypeTags::NumberInt32 ||
+        lenView.tag != value::TypeTags::NumberInt32) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    StringData str = value::getStringView(strTag, strVal);
+    int32_t startIndex = value::bitcastTo<int32_t>(startIndexView.value);
+    int32_t len = value::bitcastTo<int32_t>(lenView.value);
+    if (startIndex < 0 || len < 0) {
+        return value::TagValueMaybeOwned::nothing();
+    }
+
+    std::string_view str = value::getStringView(strView.tag, strView.value);
     auto [outTag, outVal] =
-        value::makeNewString(substr_utils::getSubstringCP(str, startIndexVal, lenVal));
+        value::makeNewString(substr_utils::getSubstringCP(str, startIndex, len));
     return {true, outTag, outVal};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinToUpper(ArityType arity) {
-    auto [_, operandTag, operandVal] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinToUpper(ArityType arity) {
+    auto operand = viewFromStack(0);
 
-    if (value::isString(operandTag)) {
-        auto [strTag, strVal] = value::copyValue(operandTag, operandVal);
+    if (value::isString(operand.tag)) {
+        auto [strTag, strVal] = value::copyValue(operand.tag, operand.value);
         auto buf = value::getRawStringView(strTag, strVal);
         auto range = std::make_pair(buf, buf + value::getStringLength(strTag, strVal));
         boost::to_upper(range);
         return {true, strTag, strVal};
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinToLower(ArityType arity) {
-    auto [_, operandTag, operandVal] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinToLower(ArityType arity) {
+    auto operand = viewFromStack(0);
 
-    if (value::isString(operandTag)) {
-        auto [strTag, strVal] = value::copyValue(operandTag, operandVal);
+    if (value::isString(operand.tag)) {
+        auto [strTag, strVal] = value::copyValue(operand.tag, operand.value);
         auto buf = value::getRawStringView(strTag, strVal);
         auto range = std::make_pair(buf, buf + value::getStringLength(strTag, strVal));
         boost::to_lower(range);
         return {true, strTag, strVal};
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCoerceToString(ArityType arity) {
-    auto [operandOwn, operandTag, operandVal] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinCoerceToString(ArityType arity) {
+    auto operand = moveMaybeOwnedFromStack(0);
 
-    if (value::isString(operandTag)) {
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {operandOwn, operandTag, operandVal};
+    if (value::isString(operand.tag())) {
+        return operand;
     }
 
-    if (operandTag == value::TypeTags::bsonSymbol) {
+    if (operand.tag() == value::TypeTags::bsonSymbol) {
         // Values of type StringBig and Values of type bsonSymbol have identical representations,
         // so we can simply take ownership of the argument, change the type tag to StringBig, and
         // return it.
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {operandOwn, value::TypeTags::StringBig, operandVal};
+        auto [owned, _, val] = operand.releaseToRaw();
+        return {owned, value::TypeTags::StringBig, val};
     }
 
-    switch (operandTag) {
+    switch (operand.tag()) {
         case value::TypeTags::NumberInt32: {
             str::stream str;
-            str << value::bitcastTo<int32_t>(operandVal);
-            auto [strTag, strVal] = value::makeNewString(StringData(str));
+            str << value::bitcastTo<int32_t>(operand.value());
+            auto [strTag, strVal] = value::makeNewString(std::string_view(str));
             return {true, strTag, strVal};
         }
         case value::TypeTags::NumberInt64: {
             str::stream str;
-            str << value::bitcastTo<int64_t>(operandVal);
-            auto [strTag, strVal] = value::makeNewString(StringData(str));
+            str << value::bitcastTo<int64_t>(operand.value());
+            auto [strTag, strVal] = value::makeNewString(std::string_view(str));
             return {true, strTag, strVal};
         }
         case value::TypeTags::NumberDouble: {
             str::stream str;
-            str << value::bitcastTo<double>(operandVal);
-            auto [strTag, strVal] = value::makeNewString(StringData(str));
+            str << value::bitcastTo<double>(operand.value());
+            auto [strTag, strVal] = value::makeNewString(std::string_view(str));
             return {true, strTag, strVal};
         }
         case value::TypeTags::NumberDecimal: {
-            std::string str = value::bitcastTo<Decimal128>(operandVal).toString();
+            std::string str = value::bitcastTo<Decimal128>(operand.value()).toString();
             auto [strTag, strVal] = value::makeNewString(str);
             return {true, strTag, strVal};
         }
         case value::TypeTags::Date: {
             if (auto formatted = TimeZoneDatabase::utcZone().formatDate(
                     kIsoFormatStringZ,
-                    Date_t::fromMillisSinceEpoch(value::bitcastTo<int64_t>(operandVal)));
+                    Date_t::fromMillisSinceEpoch(value::bitcastTo<int64_t>(operand.value())));
                 formatted.isOK()) {
                 // Date formatting successful.
                 auto [strTag, strVal] = value::makeNewString(formatted.getValue());
@@ -283,12 +263,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCoerceToString(A
                 // Date formatting failed. Return stringified status.
                 str::stream str;
                 str << formatted.getStatus();
-                auto [strTag, strVal] = value::makeNewString(StringData(str));
+                auto [strTag, strVal] = value::makeNewString(std::string_view(str));
                 return {true, strTag, strVal};
             }
         }
         case value::TypeTags::Timestamp: {
-            Timestamp ts{value::bitcastTo<uint64_t>(operandVal)};
+            Timestamp ts{value::bitcastTo<uint64_t>(operand.value())};
             auto [strTag, strVal] = value::makeNewString(ts.toString());
             return {true, strTag, strVal};
         }
@@ -299,40 +279,51 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCoerceToString(A
         default:
             break;
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinConcat(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinConcat(ArityType arity) {
+    SimpleMemoryUsageToken token;
+    if (_memoryTracker) {
+        token = SimpleMemoryUsageToken(0, _memoryTracker);
+    }
     StringBuilder result;
     for (ArityType idx = 0; idx < arity; ++idx) {
-        auto [_, tag, value] = getFromStack(idx);
-        if (!value::isString(tag)) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto kv = viewFromStack(idx);
+        if (!value::isString(kv.tag)) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        result << sbe::value::getStringView(tag, value);
+        auto sv = sbe::value::getStringView(kv.tag, kv.value);
+        if (_memoryTracker) {
+            token.add(sv.size());
+            // The SBE VM has no OperationContext; a null opCtx resolves knob-backed limits to
+            // their global value. Today only the concat unit test and benchmark install a tracker
+            // here, with fixed-value limits.
+            // TODO SERVER-131139: reconsider the null-opCtx fallback API.
+            _memoryTracker->assertWithinMemoryLimit(nullptr, "SBE concat builtin");
+        }
+        result << sv;
     }
 
     auto [strTag, strValue] = sbe::value::makeNewString(result.stringData());
     return {true, strTag, strValue};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTrim(ArityType arity,
-                                                                     bool trimLeft,
-                                                                     bool trimRight) {
-    auto [ownedChars, tagChars, valChars] = getFromStack(1);
-    auto [ownedInput, tagInput, valInput] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinTrim(ArityType arity, bool trimLeft, bool trimRight) {
+    auto charsView = viewFromStack(1);
+    auto inputView = viewFromStack(0);
 
-    if (!value::isString(tagInput)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(inputView.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    std::vector<StringData> replacementChars;
+    std::vector<std::string_view> replacementChars;
     // Nullish 'chars' indicates that it was not provided and the default whitespace characters will
     // be used.
-    if (value::isNullish(tagChars)) {
-        replacementChars = str_trim_utils::kDefaultTrimWhitespaceChars;
+    if (value::isNullish(charsView.tag)) {
+        replacementChars = str_trim_utils::defaultTrimWhitespaceChars();
     } else {
-        auto charsStringData = value::getStringView(tagChars, valChars);
+        auto charsStringData = value::getStringView(charsView.tag, charsView.value);
         uassert(12066801,
                 str::stream() << "$trim/$ltrim/$rtrim requires 'chars' to be not greater than "
                               << str_trim_utils::kMaximumAllowedTrimStringBytes << " bytes, got "
@@ -341,105 +332,104 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTrim(ArityType a
         replacementChars = str_trim_utils::extractCodePointsFromChars(charsStringData);
     }
 
-    auto inputString = value::getStringView(tagInput, valInput);
+    auto inputString = value::getStringView(inputView.tag, inputView.value);
 
     auto [strTag, strValue] = sbe::value::makeNewString(
         str_trim_utils::doTrim(inputString, replacementChars, trimLeft, trimRight));
     return {true, strTag, strValue};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIndexOfBytes(ArityType arity) {
-    auto [strOwn, strTag, strVal] = getFromStack(0);
-    auto [substrOwn, substrTag, substrVal] = getFromStack(1);
-    if ((!value::isString(strTag)) || (!value::isString(substrTag))) {
-        return {false, value::TypeTags::Nothing, 0};
+value::TagValueMaybeOwned ByteCode::builtinIndexOfBytes(ArityType arity) {
+    auto strView = viewFromStack(0);
+    auto substrView = viewFromStack(1);
+    if ((!value::isString(strView.tag)) || (!value::isString(substrView.tag))) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto str = value::getStringView(strTag, strVal);
-    auto substring = value::getStringView(substrTag, substrVal);
+    auto str = value::getStringView(strView.tag, strView.value);
+    auto substring = value::getStringView(substrView.tag, substrView.value);
     int64_t startIndex = 0, endIndex = str.size();
 
     if (arity >= 3) {
-        auto [startOwn, startTag, startVal] = getFromStack(2);
-        if (startTag != value::TypeTags::NumberInt64) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto startView = viewFromStack(2);
+        if (startView.tag != value::TypeTags::NumberInt64) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        startIndex = value::bitcastTo<int64_t>(startVal);
+        startIndex = value::bitcastTo<int64_t>(startView.value);
         // Check index is positive.
         if (startIndex < 0) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
         // Check for valid bounds.
         if (static_cast<size_t>(startIndex) > str.size()) {
-            return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+            return value::TagValueMaybeOwned::numberInt32(-1);
         }
     }
     if (arity >= 4) {
-        auto [endOwn, endTag, endVal] = getFromStack(3);
-        if (endTag != value::TypeTags::NumberInt64) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto endView = viewFromStack(3);
+        if (endView.tag != value::TypeTags::NumberInt64) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        endIndex = value::bitcastTo<int64_t>(endVal);
+        endIndex = value::bitcastTo<int64_t>(endView.value);
         // Check index is positive.
         if (endIndex < 0) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
         // Check for valid bounds.
         if (endIndex < startIndex) {
-            return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+            return value::TagValueMaybeOwned::numberInt32(-1);
         }
     }
     auto index = str.substr(startIndex, endIndex - startIndex).find(substring);
     if (index != std::string::npos) {
-        return {
-            false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(startIndex + index)};
+        return value::TagValueMaybeOwned::numberInt32(static_cast<int32_t>(startIndex + index));
     }
-    return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+    return value::TagValueMaybeOwned::numberInt32(-1);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIndexOfCP(ArityType arity) {
-    auto [strOwn, strTag, strVal] = getFromStack(0);
-    auto [substrOwn, substrTag, substrVal] = getFromStack(1);
-    if ((!value::isString(strTag)) || (!value::isString(substrTag))) {
-        return {false, value::TypeTags::Nothing, 0};
+value::TagValueMaybeOwned ByteCode::builtinIndexOfCP(ArityType arity) {
+    auto strView = viewFromStack(0);
+    auto substrView = viewFromStack(1);
+    if ((!value::isString(strView.tag)) || (!value::isString(substrView.tag))) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto str = value::getStringView(strTag, strVal);
-    auto substr = value::getStringView(substrTag, substrVal);
+    auto str = value::getStringView(strView.tag, strView.value);
+    auto substr = value::getStringView(substrView.tag, substrView.value);
     int64_t startCodePointIndex = 0, endCodePointIndexArg = str.size();
 
     if (arity >= 3) {
-        auto [startOwn, startTag, startVal] = getFromStack(2);
-        if (startTag != value::TypeTags::NumberInt64) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto startView = viewFromStack(2);
+        if (startView.tag != value::TypeTags::NumberInt64) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        startCodePointIndex = value::bitcastTo<int64_t>(startVal);
+        startCodePointIndex = value::bitcastTo<int64_t>(startView.value);
         // Check index is positive.
         if (startCodePointIndex < 0) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
         // Check for valid bounds.
         if (static_cast<size_t>(startCodePointIndex) > str.size()) {
-            return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+            return value::TagValueMaybeOwned::numberInt32(-1);
         }
     }
     if (arity >= 4) {
-        auto [endOwn, endTag, endVal] = getFromStack(3);
-        if (endTag != value::TypeTags::NumberInt64) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto endView = viewFromStack(3);
+        if (endView.tag != value::TypeTags::NumberInt64) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        endCodePointIndexArg = value::bitcastTo<int64_t>(endVal);
+        endCodePointIndexArg = value::bitcastTo<int64_t>(endView.value);
         // Check index is positive.
         if (endCodePointIndexArg < 0) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
         // Check for valid bounds.
         if (endCodePointIndexArg < startCodePointIndex) {
-            return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+            return value::TagValueMaybeOwned::numberInt32(-1);
         }
     }
 
     // Handle edge case if both string and substring are empty strings.
     if (startCodePointIndex == 0 && str.empty() && substr.empty()) {
-        return {true, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0)};
+        return value::TagValueMaybeOwned::numberInt32(0);
     }
 
     // Need to get byte indexes for start and end indexes.
@@ -459,50 +449,47 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIndexOfCP(ArityT
     for (codePointIndex = startCodePointIndex; codePointIndex < endCodePointIndex;
          ++codePointIndex) {
         if (str.substr(byteIndex, substr.size()) == substr) {
-            return {
-                false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(codePointIndex)};
+            return value::TagValueMaybeOwned::numberInt32(static_cast<int32_t>(codePointIndex));
         }
         byteIndex += str::getCodePointLength(str[byteIndex]);
     }
-    return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-1)};
+    return value::TagValueMaybeOwned::numberInt32(-1);
 }  // ByteCode::builtinIndexOfCP
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsValidToStringFormat(
-    ArityType arity) {
-    auto [formatOwn, formatTag, formatVal] = getFromStack(0);
-    if (!value::isString(formatTag)) {
-        return {false, value::TypeTags::Boolean, false};
+value::TagValueMaybeOwned ByteCode::builtinIsValidToStringFormat(ArityType arity) {
+    auto formatView = viewFromStack(0);
+    if (!value::isString(formatView.tag)) {
+        return value::TagValueMaybeOwned::boolean(false);
     }
-    auto formatStr = value::getStringView(formatTag, formatVal);
+    auto formatStr = value::getStringView(formatView.tag, formatView.value);
     if (TimeZone::isValidToStringFormat(formatStr)) {
-        return {false, value::TypeTags::Boolean, true};
+        return value::TagValueMaybeOwned::boolean(true);
     }
-    return {false, value::TypeTags::Boolean, false};
+    return value::TagValueMaybeOwned::boolean(false);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValidateFromStringFormat(
-    ArityType arity) {
-    auto [formatOwn, formatTag, formatVal] = getFromStack(0);
-    if (!value::isString(formatTag)) {
-        return {false, value::TypeTags::Boolean, false};
+value::TagValueMaybeOwned ByteCode::builtinValidateFromStringFormat(ArityType arity) {
+    auto formatView = viewFromStack(0);
+    if (!value::isString(formatView.tag)) {
+        return value::TagValueMaybeOwned::boolean(false);
     }
-    auto formatStr = value::getStringView(formatTag, formatVal);
+    auto formatStr = value::getStringView(formatView.tag, formatView.value);
     TimeZone::validateFromStringFormat(formatStr);
-    return {false, value::TypeTags::Boolean, true};
+    return value::TagValueMaybeOwned::boolean(true);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinHasNullBytes(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinHasNullBytes(ArityType arity) {
     tassert(11080000, "Unexpected arity value", arity == 1);
-    auto [strOwned, strType, strValue] = getFromStack(0);
+    auto strView = viewFromStack(0);
 
-    if (!value::isString(strType)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(strView.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto stringView = value::getStringView(strType, strValue);
+    auto stringView = value::getStringView(strView.tag, strView.value);
     auto hasNullBytes = stringView.find('\0') != std::string::npos;
 
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(hasNullBytes)};
+    return value::TagValueMaybeOwned::boolean(hasNullBytes);
 }
 
 }  // namespace vm

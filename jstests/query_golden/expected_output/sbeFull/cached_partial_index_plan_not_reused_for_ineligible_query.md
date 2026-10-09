@@ -139,12 +139,12 @@ Creating Index
 {
 	"stage" : "FETCH",
 	"planNodeId" : 2,
+	"nss" : "test.cached_partial_index_plan_not_reused_for_ineligible_query_md",
 	"filter" : {
 		"_id" : {
 			"$lte" : 5
 		}
 	},
-	"nss" : "test.cached_partial_index_plan_not_reused_for_ineligible_query_md",
 	"inputStage" : {
 		"stage" : "IXSCAN",
 		"planNodeId" : 1,
@@ -226,7 +226,7 @@ Verifying that the plan cache contains an entry with the partial index
 			"sort" : { }
 		},
 		"isActive" : true,
-		"planCacheKey" : "7D81D3A7"
+		"planCacheKey" : "E41825BB"
 	}
 ]
 ```
@@ -527,7 +527,7 @@ Verifying that the plan cache contains an entry with the partial index
 			}
 		},
 		"isActive" : true,
-		"planCacheKey" : "BFDF7AB4"
+		"planCacheKey" : "7949C151"
 	}
 ]
 ```

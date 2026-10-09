@@ -1,39 +1,14 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/otel/metrics/metrics_service.h"
 #include "mongo/util/modules.h"
 
 #ifdef MONGO_CONFIG_OTEL
+#include <string_view>
+
 #include <opentelemetry/exporters/memory/in_memory_data.h>
 #include <opentelemetry/exporters/memory/in_memory_metric_data.h>
 #include <opentelemetry/exporters/memory/in_memory_metric_exporter_factory.h>
@@ -151,7 +126,7 @@ HistogramData<T>::HistogramData(opentelemetry::sdk::metrics::HistogramPointData 
  * OtelMetricsCapturer, otherwise the values will vary depending on the platform. On
  * non-OpenTelemetry platforms, it is only possible to read metrics via serverStatus.
  */
-class MONGO_MOD_PUBLIC OtelMetricsCapturer {
+class [[MONGO_MOD_PUBLIC]] OtelMetricsCapturer {
 public:
     /**
      * Default constructor which uses the static MetricsService object.
@@ -165,14 +140,10 @@ public:
      * constructor allows unit testing the MetricsService, but tests in server code should use the
      * static instance.
      */
-    MONGO_MOD_PRIVATE OtelMetricsCapturer(MetricsService& metricsService);
+    [[MONGO_MOD_PRIVATE]] OtelMetricsCapturer(MetricsService& metricsService);
 
 #ifdef MONGO_CONFIG_OTEL
-    ~OtelMetricsCapturer() {
-        opentelemetry::metrics::Provider::SetMeterProvider(
-            opentelemetry::nostd::shared_ptr<opentelemetry::metrics::MeterProvider>(
-                new opentelemetry::metrics::NoopMeterProvider()));
-    }
+    ~OtelMetricsCapturer();
 #endif  // MONGO_CONFIG_OTEL
 
     /**
@@ -245,7 +216,7 @@ public:
     static bool canReadMetrics();
 
 private:
-    static constexpr StringData kUsingOtelOnWindows =
+    static constexpr std::string_view kUsingOtelOnWindows =
         "You're trying to read metrics in an environment that doesn't have otel enabled (likely "
         "Windows). In tests this can be avoided by checking OtelMetricsCapturer::canReadMetrics()";
 
@@ -258,6 +229,13 @@ private:
     // this DS, and the get() function will read from it.
     opentelemetry::exporter::memory::SimpleAggregateInMemoryMetricData* _metrics;
 #endif  // MONGO_CONFIG_OTEL
+};
+
+class DynamicMetricNameTestPasskeyMaker {
+public:
+    static DynamicMetricNameMaker::Passkey make() {
+        return DynamicMetricNameMaker::Passkey{};
+    }
 };
 
 ////////////////////////////////////////////////////////////
@@ -291,7 +269,7 @@ opentelemetry::sdk::common::OrderedAttributeMap buildAttrMap(
         [&attrNames, &nameAndValues](const auto&... vals) {
             size_t i = 0;
             (nameAndValues.push_back(
-                 {.name = StringData(attrNames[i++]), .value = AnyAttributeType(vals)}),
+                 {.name = std::string_view(attrNames[i++]), .value = AnyAttributeType(vals)}),
              ...);
         },
         attributes);
@@ -315,8 +293,7 @@ DataType getMetricData(opentelemetry::exporter::memory::SimpleAggregateInMemoryM
 
     const opentelemetry::exporter::memory::SimpleAggregateInMemoryMetricData::AttributeToPoint&
         attributeToPoint =
-            metrics.Get(std::string(toStdStringViewForInterop(MetricsService::kMeterName)),
-                        std::string(toStdStringViewForInterop(name.getName())));
+            metrics.Get(std::string(MetricsService::kMeterName), std::string(name.getName()));
 
     opentelemetry::sdk::common::OrderedAttributeMap attrMap =
         buildAttrMap(metricsService, name, attributes);

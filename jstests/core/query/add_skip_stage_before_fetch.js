@@ -4,13 +4,14 @@
 // The skip operation in a sharded query always occurs in the mongoS, so this test doesn't make
 // sense on a sharded collection.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 //   operations_longer_than_stepdown_interval_in_txns,
 //   # The test inserts a lot of data which can fail in stepdown suites.
 //   does_not_support_stepdowns,
 // ]
 
-import {isIndexOnly} from "jstests/libs/query/analyze_plan.js";
+import {getWinningPlanFromExplain, isIndexOnly} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db.add_skip_stage_before_fetch;
 
@@ -44,7 +45,12 @@ assert.gte(explainResult.executionStats.totalKeysExamined, 2500);
 assert.eq(explainResult.executionStats.totalDocsExamined, 100);
 
 // This sort can also be computed using the index.
-explainResult = coll.find({a: 0, b: 2}).hint(testIndex).sort({c: 1}).skip(2400).explain("executionStats");
+explainResult = coll
+    .find({a: 0, b: 2})
+    .hint(testIndex)
+    .sort({c: 1})
+    .skip(2400)
+    .explain("executionStats");
 assert.gte(explainResult.executionStats.totalKeysExamined, 2500);
 assert.eq(explainResult.executionStats.totalDocsExamined, 100);
 
@@ -57,10 +63,15 @@ explainResult = coll
     .explain("executionStats");
 assert.gte(explainResult.executionStats.totalKeysExamined, 2500);
 assert.eq(explainResult.executionStats.totalDocsExamined, 0);
-assert(isIndexOnly(db, explainResult.queryPlanner.winningPlan));
+assert(isIndexOnly(db, getWinningPlanFromExplain(explainResult)));
 
 // This sort requires a field that is not in the index, so we should be fetching all 2500
 // documents that match the find predicate.
-explainResult = coll.find({a: 0, b: 2}).hint(testIndex).sort({d: 1}).skip(2400).explain("executionStats");
+explainResult = coll
+    .find({a: 0, b: 2})
+    .hint(testIndex)
+    .sort({d: 1})
+    .skip(2400)
+    .explain("executionStats");
 assert.gte(explainResult.executionStats.totalKeysExamined, 2500);
 assert.eq(explainResult.executionStats.totalDocsExamined, 2500);

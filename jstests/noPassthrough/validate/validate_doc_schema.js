@@ -11,12 +11,19 @@ const db = conn.getDB(dbName);
 
 function testSchemaValidation(validationAction) {
     assert.commandWorked(
-        db.createCollection(collName, {validator: {a: {$exists: true}}, validationAction: validationAction}),
+        db.createCollection(collName, {
+            validator: {a: {$exists: true}},
+            validationAction: validationAction,
+        }),
     );
     const coll = db.getCollection(collName);
 
     assert.commandWorked(
-        db.runCommand({insert: collName, documents: [{a: 1}, {b: 1}, {c: 1}], bypassDocumentValidation: true}),
+        db.runCommand({
+            insert: collName,
+            documents: [{a: 1}, {b: 1}, {c: 1}],
+            bypassDocumentValidation: true,
+        }),
     );
 
     // Validation detects documents not adhering to the collection schema rules.
@@ -30,6 +37,21 @@ function testSchemaValidation(validationAction) {
     assert.eq(res.errors.length, 0);
     assert.eq(res.warnings.length, 1);
     assert.eq(res.nNonCompliantDocuments, 2);
+    assert(
+        res.warnings.some((w) => w.includes("collection's schema")),
+        "Expected 'collection's schema' in warnings",
+        {warnings: res.warnings},
+    );
+    assert(
+        res.warnings.some((w) => w.includes(validationAction)),
+        "Expected validationAction '" + validationAction + "' in warnings",
+        {warnings: res.warnings},
+    );
+    assert(
+        res.warnings.some((w) => w.includes("5363500")),
+        "Expected log id 5363500 in warnings",
+        {warnings: res.warnings},
+    );
 
     checkLog.containsJson(conn, 5363500, {recordId: "2"});
     checkLog.containsJson(conn, 5363500, {recordId: "3"});

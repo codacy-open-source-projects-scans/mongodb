@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 
@@ -53,9 +27,12 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future_util.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 MONGO_FAIL_POINT_DEFINE(pauseDuringMultiUpdateCoordinatorPhaseTransition);
 MONGO_FAIL_POINT_DEFINE(pauseDuringMultiUpdateCoordinatorPhaseTransitionAlternate);
@@ -70,7 +47,7 @@ primary_only_service_helpers::PauseDuringPhaseTransitionFailPoint<MultiUpdateCoo
     pauseDuringPhaseTransitions{
         {pauseDuringMultiUpdateCoordinatorPhaseTransition,
          pauseDuringMultiUpdateCoordinatorPhaseTransitionAlternate},
-        [](StringData phase) {
+        [](std::string_view phase) {
             IDLParserContext ectx(
                 "pauseDuringMultiUpdateCoordinatorPhaseTransition::readPhaseArgument");
             return idl::deserialize<MultiUpdateCoordinatorPhaseEnum>(phase, ectx);
@@ -138,7 +115,7 @@ MultiUpdateCoordinatorService::MultiUpdateCoordinatorService(
     std::unique_ptr<MultiUpdateCoordinatorExternalStateFactory> factory)
     : PrimaryOnlyService{serviceContext}, _externalStateFactory{std::move(factory)} {}
 
-StringData MultiUpdateCoordinatorService::getServiceName() const {
+std::string_view MultiUpdateCoordinatorService::getServiceName() const {
     return kServiceName;
 }
 
@@ -146,11 +123,9 @@ NamespaceString MultiUpdateCoordinatorService::getStateDocumentsNS() const {
     return NamespaceString::kMultiUpdateCoordinatorsNamespace;
 }
 
-ThreadPool::Limits MultiUpdateCoordinatorService::getThreadPoolLimits() const {
-    ThreadPool::Limits limits;
-    limits.minThreads = gMultiUpdateCoordinatorServiceMinThreadCount;
-    limits.maxThreads = gMultiUpdateCoordinatorServiceMaxThreadCount;
-    return limits;
+auto MultiUpdateCoordinatorService::getThreadPoolLimits() const -> ThreadPoolLimits {
+    return {.minThreads = static_cast<size_t>(gMultiUpdateCoordinatorServiceMinThreadCount),
+            .maxThreads = static_cast<size_t>(gMultiUpdateCoordinatorServiceMaxThreadCount)};
 }
 
 void MultiUpdateCoordinatorService::checkIfConflictsWithOtherInstances(
@@ -291,7 +266,7 @@ Message MultiUpdateCoordinatorInstance::getUpdateAsClusterCommand() const {
     auto cmdName = updateCmdObj.firstElement().fieldNameStringData();
     uassert(8126601,
             str::stream() << "Unsupported cmd specified for multi update: " << cmdName,
-            (cmdName == "update"_sd) || (cmdName == "delete"_sd) || (cmdName == "bulkWrite"_sd));
+            (cmdName == "update"sv) || (cmdName == "delete"sv) || (cmdName == "bulkWrite"sv));
 
     auto modifiedCmdObj =
         cluster::cmd::translations::replaceCommandNameWithClusterCommandName(updateCmdObj);
@@ -433,7 +408,11 @@ bool MultiUpdateCoordinatorInstance::_shouldReleaseSession() const {
 }
 
 bool MultiUpdateCoordinatorInstance::_shouldUnblockMigrations() const {
-    return _getCurrentPhase() > Phase::kBlockMigrations;
+    // Once we have reached kBlockMigrations, migrations may have been blocked: the phase is
+    // persisted before we run allowMigrations(false), so we could have blocked migrations and then
+    // been aborted before transitioning to the next phase. In that case we must still unblock them,
+    // otherwise migrations would be left blocked with no coordinator to release them.
+    return _getCurrentPhase() >= Phase::kBlockMigrations;
 }
 
 bool MultiUpdateCoordinatorInstance::_updatesPossiblyRunningFromPreviousTerm() const {

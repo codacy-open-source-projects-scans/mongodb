@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,13 +19,15 @@
 #include <functional>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUB mongo {
+namespace mongo {
+namespace [[MONGO_MOD_PUBLIC]] query_shape {
 /**
  * A policy enum for how to serialize literal values.
  */
@@ -76,7 +51,7 @@ enum class LiteralSerializationPolicy {
  * A struct with options for how you want to serialize a match or aggregation expression.
  */
 struct SerializationOptions {
-    using TokenizeIdentifierFunc = std::function<std::string(StringData)>;
+    using TokenizeIdentifierFunc = std::function<std::string(std::string_view)>;
 
     // The default serialization options for a query shape. No need to redact identifiers for the
     // this purpose. We may do that on the $queryStats read path.
@@ -102,7 +77,7 @@ struct SerializationOptions {
     // Helper function for removing identifiable information (like collection/db names).
     // Note: serializeFieldPath/serializeFieldPathFromString should be used for field
     // names.
-    std::string serializeIdentifier(StringData str) const {
+    std::string serializeIdentifier(std::string_view str) const {
         if (transformIdentifiers) {
             return transformIdentifier(str);
         }
@@ -127,19 +102,19 @@ struct SerializationOptions {
         return "$" + serializeFieldPath(path);
     }
 
-    std::string transformIdentifier(StringData fieldPathPart) const {
+    std::string transformIdentifier(std::string_view fieldPathPart) const {
         // Update paths may contain array filter identifiers like "$[identifier]".
         if (serializeForUpdateArrayFilters && fieldPathPart.size() >= 3 &&
             fieldPathPart[0] == '$' && fieldPathPart[1] == '[' &&
             fieldPathPart[fieldPathPart.size() - 1] == ']') {
-            StringData identifier = fieldPathPart.substr(2, fieldPathPart.size() - 3);
+            std::string_view identifier = fieldPathPart.substr(2, fieldPathPart.size() - 3);
             return std::string{"$[" + transformIdentifiersCallback(identifier) + "]"};
         } else {
             return std::string{transformIdentifiersCallback(fieldPathPart)};
         }
     }
 
-    std::string serializeFieldPathFromString(StringData path) const;
+    std::string serializeFieldPathFromString(std::string_view path) const;
 
     std::string serializeFieldRef(const FieldRef& fieldRef) const;
 
@@ -194,13 +169,13 @@ struct SerializationOptions {
      * using the same name as 'e'.
      */
     void appendLiteral(BSONObjBuilder* bob, const BSONElement& e) const;
-    void appendLiteral(BSONObjBuilder* bob, StringData name, const BSONElement& e) const;
+    void appendLiteral(BSONObjBuilder* bob, std::string_view name, const BSONElement& e) const;
     /**
      * Helper method to call 'serializeLiteral()' on 'v' and append the result to 'bob' using field
      * name 'fieldName'.
      */
     void appendLiteral(BSONObjBuilder* bob,
-                       StringData fieldName,
+                       std::string_view fieldName,
                        const ImplicitValue& v,
                        const boost::optional<Value>& representativeValue = boost::none) const;
 
@@ -221,7 +196,7 @@ struct SerializationOptions {
                            const boost::optional<Value>& representativeValue = boost::none) const;
 
     // Should never be called, throw to ensure we catch this in tests.
-    static std::string defaultHmacStrategy(StringData s) {
+    static std::string defaultHmacStrategy(std::string_view s) {
         MONGO_UNREACHABLE_TASSERT(7332410);
     }
 
@@ -240,7 +215,7 @@ struct SerializationOptions {
     // with a strategy the redaction strategy will be called on any personal identifiable
     // information (e.g., field paths/names, collection names) encountered before serializing them.
     bool transformIdentifiers = false;
-    std::function<std::string(StringData)> transformIdentifiersCallback = defaultHmacStrategy;
+    std::function<std::string(std::string_view)> transformIdentifiersCallback = defaultHmacStrategy;
 
     // For aggregation indicate whether we should use the more verbose serialization format.
     boost::optional<ExplainOptions::Verbosity> verbosity = boost::none;
@@ -267,13 +242,32 @@ struct SerializationOptions {
     // If set to true, serializes each stage and expression as needed for pull modifier in updates.
     bool serializeForUpdatePullModifier = false;
 
+    // True when serializing a pipeline that's about to be sent to another node (router-to-shard
+    // or shard-sub-router-to-peer). View-aware stages key off this to rewrite 'from:' to the
+    // resolved backing collection and emit the matching sidecar markers, so the receiver doesn't
+    // re-resolve the view. getInRouter() alone isn't enough — it's false on a shard sub-router.
+    bool isSerializingForRemoteDispatch = false;
+
+    // If true, the output will be re-parsed (e.g., view-resolution round-trip on the
+    // router). Stages that envelop user input into an internal IDL spec at parse time (e.g.
+    // $search, $searchMeta, $vectorSearch) must emit the original user form so re-parse is
+    // idempotent and does not trip internal-field validation.
+    // TODO SERVER-118740: Remove this flag once the DocumentSource-layer parse→serialize→reparse
+    // round-trip is no longer needed.
+    bool serializeForReparse = false;
+
     // Serialization state check helpers.
     bool isDefaultSerialization() const;
     bool isKeepingLiteralsUnchanged() const;
     bool isSerializingLiteralsAsDebugTypes() const;
     bool isReplacingLiteralsWithRepresentativeValues() const;
     bool isSerializingForExplain() const;
-    bool isSerializingForQueryStats() const;
+
+    // True when serializing to a query shape, i.e. literals are abstracted and/or identifiers are
+    // transformed. This is the case for shape consumers such as query stats and persistent query
+    // settings.
+    bool isShapifying() const;
 };
 
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace query_shape
+}  // namespace mongo

@@ -1,36 +1,12 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/bson/column/bsoncolumnbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo::bsoncolumn {
 namespace {
@@ -98,9 +74,9 @@ TEST_F(BSONColumnBlockBasedTest, BSONMaterializer) {
     assertRoundtrip(Timestamp{date});
     assertRoundtrip(date);
     assertRoundtrip(OID::gen());
-    assertRoundtrip(StringData{"foo/bar"});
+    assertRoundtrip(std::string_view{"foo/bar"});
     assertRoundtrip(BSONBinData{binData, sizeof(binData), BinDataGeneral});
-    assertRoundtrip(BSONCode{StringData{"x = 0"}});
+    assertRoundtrip(BSONCode{std::string_view{"x = 0"}});
 }
 
 TEST_F(BSONColumnBlockBasedTest, BSONMaterializerBSONElement) {
@@ -120,14 +96,14 @@ TEST_F(BSONColumnBlockBasedTest, BSONMaterializerBSONElement) {
     ASSERT(bsonElem.binaryEqual(elem));
     // Since we are making a copy and storing it in the BSONElementStorage, the address of the data
     // should not be the same.
-    ASSERT_NOT_EQUALS(elem.value(), bsonElem.value());
+    EXPECT_NE(elem.value(), bsonElem.value());
 
     // Test without copying.
     collector.appendPreallocated(bsonElem);
     elem = vec.back();
     ASSERT(bsonElem.binaryEqual(elem));
     // Assert that we did not make a copy, because the address of the data is the same.
-    ASSERT_EQ(elem.value(), bsonElem.value());
+    EXPECT_EQ(elem.value(), bsonElem.value());
 }
 
 TEST_F(BSONColumnBlockBasedTest, BSONMaterializerMissing) {
@@ -158,7 +134,7 @@ void extractValueTo<int32_t>(int32_t& val, BSONElement elem) {
 }
 
 template <>
-void extractValueTo<StringData>(StringData& val, BSONElement elem) {
+void extractValueTo<std::string_view>(std::string_view& val, BSONElement elem) {
     val = elem.valueStringDataSafe();
 }
 
@@ -197,23 +173,23 @@ void extractValueTo(T& val, BSONElement elem) {
 
 template <>
 void assertEquals<Decimal128>(const Decimal128& lhs, const Decimal128& rhs) {
-    ASSERT_EQ(lhs.toString(), rhs.toString());
+    EXPECT_EQ(lhs.toString(), rhs.toString());
 }
 
 template <>
 void assertEquals<BSONBinData>(const BSONBinData& lhs, const BSONBinData& rhs) {
-    ASSERT_EQ(lhs.type, rhs.type);
-    ASSERT_EQ(lhs.length, rhs.length);
+    EXPECT_EQ(lhs.type, rhs.type);
+    EXPECT_EQ(lhs.length, rhs.length);
     auto lhsData = (const uint8_t*)lhs.data;
     auto rhsData = (const uint8_t*)rhs.data;
     for (int i = 0; i < lhs.length; ++i) {
-        ASSERT_EQ(lhsData[i], rhsData[i]);
+        EXPECT_EQ(lhsData[i], rhsData[i]);
     }
 }
 
 template <>
 void assertEquals<BSONCode>(const BSONCode& lhs, const BSONCode& rhs) {
-    ASSERT_EQ(lhs.code, rhs.code);
+    EXPECT_EQ(lhs.code, rhs.code);
 }
 
 template <>
@@ -228,7 +204,7 @@ void assertEquals<MinKeyLabeler>(const MinKeyLabeler& lhs, const MinKeyLabeler& 
 
 template <typename T>
 void assertEquals(const T& lhs, const T& rhs) {
-    ASSERT_EQ(lhs, rhs);
+    EXPECT_EQ(lhs, rhs);
 }
 
 /**
@@ -283,16 +259,16 @@ TEST_F(BSONColumnBlockBasedTest, DecompressScalars) {
     col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
 
     ASSERT_EQ(paths[0].second.size(), 4);
-    ASSERT_EQ(paths[0].second[0].Int(), 10);
-    ASSERT_EQ(paths[0].second[1].Int(), 11);
-    ASSERT_EQ(paths[0].second[2].Int(), 12);
-    ASSERT_EQ(paths[0].second[3].Int(), 13);
+    EXPECT_EQ(paths[0].second[0].Int(), 10);
+    EXPECT_EQ(paths[0].second[1].Int(), 11);
+    EXPECT_EQ(paths[0].second[2].Int(), 12);
+    EXPECT_EQ(paths[0].second[3].Int(), 13);
 
     ASSERT_EQ(paths[1].second.size(), 4);
-    ASSERT_EQ(paths[1].second[0].Long(), 20);
-    ASSERT_EQ(paths[1].second[1].Long(), 21);
-    ASSERT_EQ(paths[1].second[2].Long(), 22);
-    ASSERT_EQ(paths[1].second[3].Long(), 23);
+    EXPECT_EQ(paths[1].second[0].Long(), 20);
+    EXPECT_EQ(paths[1].second[1].Long(), 21);
+    EXPECT_EQ(paths[1].second[2].Long(), 22);
+    EXPECT_EQ(paths[1].second[3].Long(), 23);
 }
 
 TEST_F(BSONColumnBlockBasedTest, DecompressSomeScalars) {
@@ -319,12 +295,12 @@ TEST_F(BSONColumnBlockBasedTest, DecompressSomeScalars) {
 
     ASSERT_EQ(paths[0].second.size(), kN);
     for (size_t i = 0; i < kN; ++i) {
-        ASSERT_EQ(paths[0].second[i].Int(), i);
+        EXPECT_EQ(paths[0].second[i].Int(), i);
     }
 
     ASSERT_EQ(paths[1].second.size(), kN);
     for (size_t i = 0; i < kN; ++i) {
-        ASSERT_EQ(paths[1].second[i].Int(), i * 100000);
+        EXPECT_EQ(paths[1].second[i].Int(), i * 100000);
     }
 }
 
@@ -401,10 +377,10 @@ TEST_F(BSONColumnBlockBasedTest, DecompressNestedObjects) {
 
         ASSERT_EQ(paths[0].second.size(), 4);
         ASSERT_EQ(paths[0].second[0].type(), BSONType::numberInt);
-        ASSERT_EQ(paths[0].second[0].Int(), 10);
-        ASSERT_EQ(paths[0].second[1].Int(), 11);
-        ASSERT_EQ(paths[0].second[2].Int(), 12);
-        ASSERT_EQ(paths[0].second[3].Int(), 13);
+        EXPECT_EQ(paths[0].second[0].Int(), 10);
+        EXPECT_EQ(paths[0].second[1].Int(), 11);
+        EXPECT_EQ(paths[0].second[2].Int(), 12);
+        EXPECT_EQ(paths[0].second[3].Int(), 13);
 
         ASSERT_EQ(paths[1].second.size(), 4);
         ASSERT_EQ(paths[1].second[0].type(), BSONType::object);
@@ -499,7 +475,7 @@ void verifyDecompressPaths(const std::vector<T>& values) {
         // decompressGeneral().
         std::vector<BSONElement> vec0;
         TestPath testPath{};
-        ASSERT_EQ(testPath.elementsToMaterialize(mockRefObj, true).size(), 1);
+        EXPECT_EQ(testPath.elementsToMaterialize(mockRefObj, true).size(), 1);
         std::vector<std::pair<TestPath, std::vector<BSONElement>&>> testPaths{{testPath, vec0}};
 
         // This is decompressing the whole column, in which there are scalars within objects.
@@ -518,7 +494,7 @@ void verifyDecompressPaths(const std::vector<T>& values) {
         // must materialize elements from both scalar streams, the output elements must be
         // interleaved. Hence this will also use decompressGeneral().
         TestArrayPath arrayPath;
-        ASSERT_EQ(arrayPath.elementsToMaterialize(mockRefObj, true).size(), 2);
+        EXPECT_EQ(arrayPath.elementsToMaterialize(mockRefObj, true).size(), 2);
 
         std::vector<BSONElement> vec1;
         std::vector<std::pair<TestArrayPath, std::vector<BSONElement>&>> arrayPaths{
@@ -550,7 +526,7 @@ void verifyDecompressPaths(const std::vector<T>& values) {
         auto col = BSONColumnBlockBased{cb.finalize()};
         std::vector<BSONElement> vec0;
         TestPath testPath{{"a"}};
-        ASSERT_EQ(testPath.elementsToMaterialize(BSON("a" << 1), true).size(), 1);
+        EXPECT_EQ(testPath.elementsToMaterialize(BSON("a" << 1), true).size(), 1);
 
         std::vector<std::pair<TestPath, std::vector<BSONElement>&>> testPaths{{testPath, vec0}};
         col.decompress<BSONElementMaterializer>(allocator, std::span(testPaths));
@@ -576,7 +552,7 @@ void verifyDecompressPaths(const std::vector<T>& values) {
         auto col = BSONColumnBlockBased{cb.finalize()};
         std::vector<BSONElement> vec0;
         TestPath testPath{{"a"}};
-        ASSERT_EQ(testPath.elementsToMaterialize(BSON("a" << 1), true).size(), 1);
+        EXPECT_EQ(testPath.elementsToMaterialize(BSON("a" << 1), true).size(), 1);
 
         std::vector<std::pair<TestPath, std::vector<BSONElement>&>> testPaths{{testPath, vec0}};
         col.decompress<BSONElementMaterializer>(allocator, std::span(testPaths));
@@ -616,12 +592,12 @@ TEST_F(BSONColumnBlockBasedTest, DecompressWithOID) {
 }
 
 TEST_F(BSONColumnBlockBasedTest, DecompressWithStrings) {
-    std::vector<StringData> strs = {StringData("hello_world0"),
-                                    StringData("hello_world1"),
-                                    StringData("hello_world2"),
-                                    StringData("hello_world3"),
-                                    StringData("hello_world4"),
-                                    StringData("hello_world5")};
+    std::vector<std::string_view> strs = {std::string_view("hello_world0"),
+                                          std::string_view("hello_world1"),
+                                          std::string_view("hello_world2"),
+                                          std::string_view("hello_world3"),
+                                          std::string_view("hello_world4"),
+                                          std::string_view("hello_world5")};
     verifyDecompressPaths(strs);
 }
 
@@ -647,12 +623,12 @@ TEST_F(BSONColumnBlockBasedTest, DecompressWithTimestamp) {
 }
 
 TEST_F(BSONColumnBlockBasedTest, DecompressWithCode) {
-    std::vector<BSONCode> codes = {BSONCode(StringData{"x = 0"}),
-                                   BSONCode(StringData{"x = 1"}),
-                                   BSONCode(StringData{"x = 2"}),
-                                   BSONCode(StringData{"x = 3"}),
-                                   BSONCode(StringData{"x = 4"}),
-                                   BSONCode(StringData{"x = 5"})};
+    std::vector<BSONCode> codes = {BSONCode(std::string_view{"x = 0"}),
+                                   BSONCode(std::string_view{"x = 1"}),
+                                   BSONCode(std::string_view{"x = 2"}),
+                                   BSONCode(std::string_view{"x = 3"}),
+                                   BSONCode(std::string_view{"x = 4"}),
+                                   BSONCode(std::string_view{"x = 5"})};
     verifyDecompressPaths(codes);
 }
 
@@ -706,7 +682,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingArrays) {
     // Create a path that will get the "b" fields of both array elements.
     TestArrayPath path;
     auto mockRefObj = fromjson("{a: [{b: 0}, {b: 10}]}");
-    ASSERT_EQ(path.elementsToMaterialize(mockRefObj, true).size(), 2);
+    EXPECT_EQ(path.elementsToMaterialize(mockRefObj, true).size(), 2);
 
     boost::intrusive_ptr allocator{new BSONElementStorage()};
     std::vector<BSONElement> vec0;
@@ -724,7 +700,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingArrays) {
         if (i == 1 || i == 5) {
             ASSERT(paths[0].second[i].eoo());
         } else {
-            ASSERT_EQ(paths[0].second[i].Int(), i * 10);
+            EXPECT_EQ(paths[0].second[i].Int(), i * 10);
         }
     }
 }
@@ -762,7 +738,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingScalar) {
         col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
         ASSERT_EQ(paths[0].second.size(), nObjs);
         for (int i = 0; i < nObjs; ++i) {
-            ASSERT_EQ(paths[0].second[i].Int(), i * 10);
+            EXPECT_EQ(paths[0].second[i].Int(), i * 10);
         }
 
         ASSERT_EQ(paths[1].second.size(), nObjs);
@@ -770,7 +746,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingScalar) {
             if (i % 2) {
                 ASSERT(paths[1].second[i].eoo());
             } else {
-                ASSERT_EQ(paths[1].second[i].Int(), i * 100);
+                EXPECT_EQ(paths[1].second[i].Int(), i * 100);
             }
         }
     }
@@ -782,7 +758,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingScalar) {
         ASSERT_EQ(paths[0].second.size(), nObjs);
         for (int i = 0; i < nObjs; ++i) {
             if (i % 2) {
-                ASSERT_EQ(paths[0].second[i].Int(), i * 100);
+                EXPECT_EQ(paths[0].second[i].Int(), i * 100);
             } else {
                 ASSERT(paths[0].second[i].eoo());
             }
@@ -844,7 +820,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingObject) {
             if (i % 2) {
                 ASSERT(paths[0].second[i].eoo());
             } else {
-                ASSERT_EQ(paths[0].second[i].Int(), i * 100);
+                EXPECT_EQ(paths[0].second[i].Int(), i * 100);
             }
         }
     }
@@ -886,7 +862,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingNestedObject) {
             if (i % 2) {
                 ASSERT(paths[1].second[i].eoo());
             } else {
-                ASSERT_EQ(paths[1].second[i].Int(), i * 100);
+                EXPECT_EQ(paths[1].second[i].Int(), i * 100);
             }
         }
     }
@@ -959,7 +935,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingPath) {
 
         ASSERT_EQ(paths[2].second.size(), 4);
         for (int i = 0; i < 4; ++i) {
-            ASSERT_EQ(paths[2].second[i].Int(), i * 10);
+            EXPECT_EQ(paths[2].second[i].Int(), i * 10);
         }
 
         ASSERT_EQ(paths[3].second.size(), 4);
@@ -986,7 +962,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingPathWithMinKey) {
     TestArrayPath path;
     auto mockRefObj = BSON("a" << BSON_ARRAY(BSON("b" << MINKEY) << BSON("b" << MINKEY)));
 
-    ASSERT_EQ(path.elementsToMaterialize(mockRefObj, true).size(), 2);
+    EXPECT_EQ(path.elementsToMaterialize(mockRefObj, true).size(), 2);
 
     boost::intrusive_ptr allocator{new BSONElementStorage()};
     std::vector<BSONElement> vec0;
@@ -1003,7 +979,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressMissingPathWithMinKey) {
         if (i == 3 || i == 7) {
             ASSERT(paths[0].second[i].eoo());
         } else {
-            ASSERT_EQ(paths[0].second[i].type(), BSONType::minKey);
+            EXPECT_EQ(paths[0].second[i].type(), BSONType::minKey);
         }
     }
 }

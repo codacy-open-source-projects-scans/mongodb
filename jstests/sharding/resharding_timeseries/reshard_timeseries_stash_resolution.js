@@ -18,12 +18,13 @@ const recipientShardNames = reshardingTest.recipientShardNames;
 
 const timeseriesInfo = {
     timeField: "ts",
-    metaField: "meta",
+    metaField: "metaTest",
 };
 
 const coll = reshardingTest.createShardedCollection({
     ns: ns,
-    shardKeyPattern: {"meta.x": 1},
+    // "metaTest.x" is the user-facing field; it will be translated internally to {"meta.x": 1}.
+    shardKeyPattern: {"metaTest.x": 1},
     chunks: [
         {min: {"meta.x": MinKey}, max: {"meta.x": 0}, shard: donorShardNames[0]},
         {min: {"meta.x": 0}, max: {"meta.x": MaxKey}, shard: donorShardNames[1]},
@@ -37,16 +38,19 @@ const db = coll.getDB();
 const bucket2 = {
     data: 3,
     ts: new Date(),
-    meta: {x: 2, y: 2},
+    metaTest: {x: 2, y: 2},
 };
 
 // Create two buckets one on each donor.
-assert.commandWorked(coll.insert([{data: 1, ts: new Date(), meta: {x: -2, y: 1}}, bucket2]));
+assert.commandWorked(coll.insert([{data: 1, ts: new Date(), metaTest: {x: -2, y: 1}}, bucket2]));
 
 reshardingTest.withReshardingInBackground(
     {
-        newShardKeyPattern: {"meta.y": 1},
-        newChunks: [{min: {"meta.y": MinKey}, max: {"meta.y": MaxKey}, shard: recipientShardNames[0]}],
+        // "metaTest.y" is the user-facing field; it will be translated internally to {"meta.y": 1}.
+        newShardKeyPattern: {"metaTest.y": 1},
+        newChunks: [
+            {min: {"meta.y": MinKey}, max: {"meta.y": MaxKey}, shard: recipientShardNames[0]},
+        ],
     },
     () => {
         const mongos = coll.getMongo();
@@ -59,7 +63,9 @@ reshardingTest.withReshardingInBackground(
 
         // Change bucket2's _id to match bucket1's _id.
         const newId = getTimeseriesCollForRawOps(db, coll).findOneWithRawData({"meta.x": -2})._id;
-        const replacementBucket = getTimeseriesCollForRawOps(db, coll).findOneWithRawData({"meta.x": 2});
+        const replacementBucket = getTimeseriesCollForRawOps(db, coll).findOneWithRawData({
+            "meta.x": 2,
+        });
         const oldId = replacementBucket._id;
         replacementBucket._id = newId;
         getTimeseriesCollForRawOps(db, coll).remove({_id: oldId}, getRawOperationSpec(db));
@@ -75,6 +81,7 @@ reshardingTest.withReshardingInBackground(
 // Make sure bucket2 exists in the resharded collection.
 const res = getTimeseriesCollForRawOps(db, coll).find().rawData().toArray();
 assert.eq(res.length, 1);
-assert.eq(res[0].meta, bucket2.meta);
+// res[0].meta is the internal bucket field name; bucket2.metaTest is the user-facing field.
+assert.eq(res[0].meta, bucket2.metaTest);
 
 reshardingTest.teardown();

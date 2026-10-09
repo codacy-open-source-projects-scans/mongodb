@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/exec/classic/multi_plan.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/commands/server_status/histogram_server_status_metric.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/exec/classic/multi_plan_rate_limiter.h"
@@ -47,13 +20,14 @@
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/plan_ranker_util.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
@@ -75,8 +49,6 @@ namespace mongo {
 using namespace cost_based_ranker;
 using std::unique_ptr;
 
-// static
-const char* MultiPlanStage::kStageType = "MULTI_PLAN";
 
 namespace {
 void markShouldCollectTimingInfoOnSubtree(PlanStage* root) {
@@ -157,11 +129,17 @@ auto& multiPlannerAllPlansHitMemoryLimitTotal =
 
 /**
  * Aggregation of the total number of times multiplanning chose the winning plan. With the
- * introduction of automaticCE mode, this may differ from the number of times multiplanning is
+ * introduction of the mixed plan ranker, this may differ from the number of times multiplanning is
  * invoked.
  */
 auto& multiPlannerChoseWinningPlan =
     *MetricBuilder<Counter64>{"query.multiPlanner.choseWinningPlan"};
+
+/**
+ * Total number of times the winning plan errored and we switched to the backup plan.
+ */
+auto& multiPlannerSwitchedToBackupPlan =
+    *MetricBuilder<Counter64>{"query.multiPlanner.switchedToBackupPlan"};
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(sleepWhileMultiplanning);
@@ -228,6 +206,7 @@ PlanStage::StageState MultiPlanStage::doWork(WorkingSetID* out) {
         }
 
         LOGV2_DEBUG(20588, 5, "Best plan errored, switching to backup plan");
+        multiPlannerSwitchedToBackupPlan.increment();
 
         CollectionQueryInfo::get(collectionPtr())
             .getPlanCache()
@@ -335,10 +314,9 @@ Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy,
     auto tickSource = opCtx()->getServiceContext()->getTickSource();
     auto startTicks = tickSource->getTicks();
 
-    if (!_shouldNotCollectMetrics) {
-        classicNumPlansHistogram.increment(childrenSize);
-        classicNumPlansTotal.increment(childrenSize);
-        classicCount.increment();
+    // Record numPlans from the first trial only (not overwritten on subsequent calls).
+    if (!_shouldNotCollectMetrics && _accumulatedNumPlans == 0) {
+        _accumulatedNumPlans = childrenSize;
     }
 
     try {
@@ -351,17 +329,52 @@ Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy,
         auto totalWorks = ix * childrenSize;
 
         if (!_shouldNotCollectMetrics) {
-            classicWorksHistogram.increment(totalWorks);
-            classicWorksTotal.increment(totalWorks);
+            _accumulatedWorks += totalWorks;
         }
 
         if (moreToDo && !trialConfig.isCappedTrialPhase && !_shouldNotCollectMetrics) {
             multiPlannerHitWorksLimitTotal.incrementRelaxed();
         }
 
-        int numDocsFound = 0;
-        for (const auto& candidate : _candidates) {
+        // The condition for candidates that met no early-exit condition of their own. 'moreToDo'
+        // distinguishes the two reasons the works loop above can end: still true means it ran to
+        // the per-plan budget, false means some candidate exited early and stopped the trial for
+        // everyone, leaving the rest with budget to spare. This is the same discriminator the
+        // 'multiPlannerHitWorksLimitTotal' counter uses.
+        const auto noEarlyExitCondition = moreToDo ? MultiPlannerStopCondition::kExhaustedBudget
+                                                   : MultiPlannerStopCondition::kTrialEndedEarly;
+
+        // Count the results this trial phase produced and set the stop condition of each
+        // candidate that ran it. This loop and the capped-phase-stats loop below cover only
+        // _candidates[0..childrenSize) - the non-rejected set workAllPlans() iterates; a candidate
+        // rejected before this phase (e.g. abandoned when CBR chose the winner) keeps the stop
+        // condition its own trial ended with.
+        size_t numDocsFound = 0;
+        for (size_t i = 0; i < childrenSize; ++i) {
+            auto& candidate = _candidates[i];
             numDocsFound += candidate.results.size();
+            // Every candidate of this phase now has a stop condition. A candidate that did exit
+            // early keeps the reason recorded by workAllPlans(). In the capped trial flow this
+            // may set a no-early-exit condition for a candidate that a later trial phase resumes
+            // and exits early - that phase overwrites it with the real reason. The capped phase's
+            // own value is saved below ('estimatePhaseStopCondition'). A candidate that failed in
+            // a recoverable fashion already recorded kFailed at the moment it failed - so the
+            // status check preserves that reason rather than overwriting it.
+            if (!candidate.exitedEarly && candidate.status.isOK()) {
+                candidate.stopCondition = noEarlyExitCondition;
+            }
+        }
+
+        // At the end of a capped trial phase, save a copy of each candidate's stats and stop
+        // condition before a resumed phase keeps adding to the same counters. V3 explain reports
+        // the capped phase's stats as the estimate phase and computes the finalize phase as the
+        // cumulative counters minus the capped phase's.
+        if (trialConfig.isCappedTrialPhase && _query->getExplain()) {
+            for (size_t i = 0; i < childrenSize; ++i) {
+                auto& candidate = _candidates[i];
+                candidate.estimatePhaseStats = candidate.root->getStats();
+                candidate.estimatePhaseStopCondition = candidate.stopCondition;
+            }
         }
 
         _specificStats.totalWorks += totalWorks;
@@ -375,8 +388,24 @@ Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy,
     if (!_shouldNotCollectMetrics) {
         auto durationMicros =
             tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startTicks);
-        classicMicrosHistogram.increment(durationCount<Microseconds>(durationMicros));
-        classicMicrosTotal.increment(durationMicros);
+        _accumulatedMicros += durationMicros;
+    }
+
+    // Emit accumulated metrics once on the last runTrials() call. That is either:
+    //  - sole trial in normal MP flow;
+    //  - a non-capped finishing-up trial in automatic flow
+    //  - a capped trial that exited early, so this is the only place to emit.
+    //  In the CBR-chosen plan case
+    // _accumulatedWorks/_accumulatedMicros hold only the first trial's values.
+    if (!_shouldNotCollectMetrics &&
+        (!trialConfig.isCappedTrialPhase || _specificStats.earlyExit)) {
+        classicNumPlansHistogram.increment(_accumulatedNumPlans);
+        classicNumPlansTotal.increment(_accumulatedNumPlans);
+        classicCount.increment();
+        classicWorksHistogram.increment(_accumulatedWorks);
+        classicWorksTotal.increment(_accumulatedWorks);
+        classicMicrosHistogram.increment(durationCount<Microseconds>(_accumulatedMicros));
+        classicMicrosTotal.increment(_accumulatedMicros);
     }
 
     // Save state after running trials so that we are safe to yield or do other things
@@ -386,12 +415,33 @@ Status MultiPlanStage::runTrials(PlanYieldPolicy* yieldPolicy,
     return Status::OK();
 }
 
+void MultiPlanStage::emitAccumulatedStats() {
+    if (_shouldNotCollectMetrics) {
+        return;
+    }
+    classicNumPlansHistogram.increment(_accumulatedNumPlans);
+    classicNumPlansTotal.increment(_accumulatedNumPlans);
+    classicCount.increment();
+    classicWorksHistogram.increment(_accumulatedWorks);
+    classicWorksTotal.increment(_accumulatedWorks);
+    classicMicrosHistogram.increment(durationCount<Microseconds>(_accumulatedMicros));
+    classicMicrosTotal.increment(_accumulatedMicros);
+}
+
+void MultiPlanStage::markCBRChoseWinner() {
+    emitAccumulatedStats();
+    _shouldNotCollectMetrics = true;
+}
+
 trial_period::TrialPhaseConfig MultiPlanStage::getTrialPhaseConfig() const {
     const double collFraction =
         trial_period::getCollFractionPerCandidatePlan(*_query, _candidates.size());
 
     const size_t numWorks = trial_period::getTrialPeriodMaxWorks(
-        opCtx(), collectionPtr(), internalQueryPlanEvaluationWorks.load(), collFraction);
+        opCtx(),
+        collectionPtr(),
+        _query->getExpCtx()->getQueryKnobConfiguration().getPlanEvaluationWorks(),
+        collFraction);
 
     size_t numResults = trial_period::getTrialPeriodNumToReturn(*_query);
     return {numWorks, numResults};
@@ -457,8 +507,10 @@ Status MultiPlanStage::pickBestPlan() {
 
     removeRejectedPlans();
 
-    // Increment relevant server status metric.
-    if (!_shouldNotCollectMetrics) {
+    // Increment the server status metric when MP genuinely chose the winner. Skip for CBR-chosen
+    // plans (where MP is only used for plan-cache hydration) and for branch planners.
+    // Note: planSelectionStrategy is decided by the plan ranking strategy, not here.
+    if (!_shouldNotCollectMetrics && !_isBranchPlanner) {
         multiPlannerChoseWinningPlan.increment();
     }
 
@@ -488,6 +540,11 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             // as a whole only fails if _all_ candidates hit their resource consumption limit, or if
             // a different, query-fatal error code is thrown.
             candidate.status = ex.toStatus();
+            // The failure is what ended this candidate's trial. Recording it keeps every candidate
+            // that ran a trial reporting a stop condition: a failed candidate is ranked out but
+            // still displayed among the rejected plans, carrying the counters it accumulated
+            // before failing.
+            candidate.stopCondition = MultiPlannerStopCondition::kFailed;
             ++_failureCount;
 
             // If all children have failed, then rethrow. Otherwise, swallow the error and move onto
@@ -511,8 +568,13 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             candidate.results.push_back(id);
 
             // Once a plan returns enough results, stop working.
-            if (candidate.results.size() >= numResults || candidate.root->isEOF()) {
+            const bool isEof = candidate.root->isEOF();
+            if (candidate.results.size() >= numResults || isEof) {
                 candidate.exitedEarly = true;
+                // Reaching EOF on the same work() call that produced a result is an EOF exit, even
+                // when the result also completed the batch: the plan is out of results either way.
+                candidate.stopCondition =
+                    isEof ? MultiPlannerStopCondition::kEof : MultiPlannerStopCondition::kFullBatch;
                 doneWorking = true;
 
                 if (!_shouldNotCollectMetrics) {
@@ -524,6 +586,7 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             // Assumes that the ranking will pick this plan.
             doneWorking = true;
             candidate.exitedEarly = true;
+            candidate.stopCondition = MultiPlannerStopCondition::kEof;
 
             if (!_shouldNotCollectMetrics) {
                 multiPlannerHitEofTotal.incrementRelaxed();
@@ -611,7 +674,8 @@ bool MultiPlanStage::hasBackupPlan() const {
 [[nodiscard]] PlanExplainerData MultiPlanStage::extractPlanExplainerData() {
     tassert(11540200,
             "expected some plans to have been rejected before extracting their explain data",
-            _rejected.size() > 0 || (hasBackupPlan() && _candidates.size() == 2));
+            _candidates.size() == 1 || _rejected.size() > 0 ||
+                (hasBackupPlan() && _candidates.size() == 2));
     PlanExplainerData planExplainerData;
     planExplainerData.rejectedPlansWithStages.reserve(_rejected.size());
 
@@ -619,13 +683,28 @@ bool MultiPlanStage::hasBackupPlan() const {
         planExplainerData.multiPlannerWinningPlanTrialStats =
             _candidates[_bestPlanIdx].root->getStats();
         planExplainerData.multiPlannerWinningPlanScore = getCandidateScore(_bestPlanIdx);
+        planExplainerData.multiPlannerWinningPlanStopCondition =
+            _candidates[_bestPlanIdx].stopCondition;
+        // The capped phase's stats are moved, not cloned: this extraction is their only consumer.
+        planExplainerData.multiPlannerWinningPlanEstimateStats =
+            std::move(_candidates[_bestPlanIdx].estimatePhaseStats);
+        planExplainerData.multiPlannerWinningPlanEstimateStopCondition =
+            _candidates[_bestPlanIdx].estimatePhaseStopCondition;
     }
 
     for (size_t i = 0; i < _rejected.size(); ++i) {
+        // Rejected plans are reordered after the non-rejected plans in the _candidates vector.
+        // See _candidates and _rejected. These stage trees ran a multi-planning trial, so
+        // their counters are trial statistics ('ranTrial').
+        auto& candidate = _candidates[i + _children.size()];
         planExplainerData.rejectedPlansWithStages.push_back(
-            // Rejected plans are reordered after the non-rejected plans in the _candidates vector.
-            // See _candidates and _rejected.
-            {std::move(_candidates[i + _children.size()].solution), std::move(_rejected[i])});
+            {std::move(candidate.solution),
+             std::move(_rejected[i]),
+             /*ranTrial*/ true,
+             candidate.adjustedScore,
+             candidate.stopCondition,
+             std::move(candidate.estimatePhaseStats),
+             candidate.estimatePhaseStopCondition});
     }
     _rejected.clear();
     return planExplainerData;
@@ -735,7 +814,7 @@ StatusWith<MultiPlanStage::EstimationResult> MultiPlanStage::estimateAllPlans() 
             bestProductivity = planProductivity;
         }
     }
-    tassert(11306809, "Total MP cost must be > 0", totalCost > zeroCost);
+    tassert(11306809, "Total MP cost must be > 0", approxGt(totalCost, zeroCost));
     return StatusWith<EstimationResult>({totalCost, bestProductivity, bestPlanNumResults});
 }
 

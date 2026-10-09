@@ -6,7 +6,7 @@
 //   does_not_support_stepdowns,
 //   featureFlagSbeFull,
 // ]
-import {getPlanStage, getPlanStages} from "jstests/libs/query/analyze_plan.js";
+import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db.index_bounds_static_limit;
 coll.drop();
@@ -20,7 +20,10 @@ const staticLimit = db.adminCommand({
 }).internalQuerySlotBasedExecutionMaxStaticIndexScanIntervals;
 
 const setStaticLimit = function (limit) {
-    return db.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionMaxStaticIndexScanIntervals: limit});
+    return db.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionMaxStaticIndexScanIntervals: limit,
+    });
 };
 
 /**
@@ -31,17 +34,11 @@ const setStaticLimit = function (limit) {
  */
 function assertIndexScanPlan(explain, isGeneric) {
     const stages = explain.executionStats.executionStages;
-
-    // Asserts whether this plan is generic or optimized.
-    const branchStage = getPlanStage(stages, "branch");
-    const filterSlot = branchStage.filter.trim();
-    const isGenericSlotValue = `${filterSlot} = ${isGeneric}`;
-    const slotValues = explain.queryPlanner.winningPlan.slotBasedPlan.slots;
-    assert(slotValues.search(isGenericSlotValue) != -1, explain);
-
-    // Asserts that this plan contains ixseek stage.
-    const ixseekStages = getPlanStages(stages, "ixseek");
-    assert.neq(0, ixseekStages.length, explain);
+    if (isGeneric) {
+        assert.neq(0, getPlanStages(stages, "ixscan_generic").length, explain);
+    } else {
+        assert.neq(0, getPlanStages(stages, "ixseek").length, explain);
+    }
 }
 
 try {

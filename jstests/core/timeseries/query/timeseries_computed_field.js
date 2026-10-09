@@ -1,6 +1,7 @@
 /**
  * Test use of computed fields in aggregations on time series collections.
  * @tags: [
+ *   uses_explain,
  *   requires_timeseries,
  *   does_not_support_stepdowns,
  *   directly_against_shardsvrs_incompatible,
@@ -16,7 +17,10 @@
  */
 
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {getSbePlanStages, getQueryInfoAtTopLevelOrFirstStage} from "jstests/libs/query/sbe_explain_helpers.js";
+import {
+    getSbePlanStages,
+    getQueryInfoAtTopLevelOrFirstStage,
+} from "jstests/libs/query/sbe_explain_helpers.js";
 
 TimeseriesTest.run((insert) => {
     const datePrefix = 1680912440;
@@ -338,7 +342,10 @@ TimeseriesTest.run((insert) => {
     {
         // Try a project stage which adds and remove subfields.
         const res = coll
-            .aggregate([{$project: {"obj.newField": "$topLevelScalar"}}, {$project: {"_id": 0, "obj.a": 0}}])
+            .aggregate([
+                {$project: {"obj.newField": "$topLevelScalar"}},
+                {$project: {"_id": 0, "obj.a": 0}},
+            ])
             .toArray();
         assert.eq(res.length, 3, res);
         assert.eq(res[0], {"obj": {"newField": 123}}, res);
@@ -441,43 +448,57 @@ TimeseriesTest.run((insert) => {
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$exists: true}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$exists: true}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 2, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$lt: 456}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$lt: 456}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 1, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$lte: 456}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$lte: 456}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 2, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$gt: 123}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$gt: 123}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 1, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$gte: 123}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$gte: 123}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 2, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$eq: 123}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$eq: 123}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 1, res);
     }
 
     {
-        const res = coll.aggregate([{$match: {topLevelScalar: {$ne: 123}}}, {$count: "count"}]).toArray();
+        const res = coll
+            .aggregate([{$match: {topLevelScalar: {$ne: 123}}}, {$count: "count"}])
+            .toArray();
         assert.eq(res.length, 1, res);
         assert.eq(res[0].count, 2, res);
     }
@@ -785,7 +806,9 @@ TimeseriesTest.run((insert) => {
             .aggregate([
                 {
                     $addFields: {
-                        "computedField": {$dateAdd: {startDate: "$time", unit: "millisecond", amount: 100}},
+                        "computedField": {
+                            $dateAdd: {startDate: "$time", unit: "millisecond", amount: 100},
+                        },
                     },
                 },
                 {$match: {computedField: new Date(datePrefix + 400)}},
@@ -816,7 +839,9 @@ TimeseriesTest.run((insert) => {
 
     {
         // Test the case where a computed meta field is computed to missing.
-        const res = coll.aggregate([{"$project": {"_id": 0, [metaFieldName]: "$$REMOVE"}}]).toArray();
+        const res = coll
+            .aggregate([{"$project": {"_id": 0, [metaFieldName]: "$$REMOVE"}}])
+            .toArray();
         assert.eq(res.length, coll.count(), res);
         for (let doc of res) {
             assert.eq(doc, {}, res);
@@ -854,7 +879,10 @@ TimeseriesTest.run((insert) => {
     {
         // Test the case where a field is projected out and then projected back in.
         const res = coll
-            .aggregate([{"$project": {"_id": 0, [metaFieldName]: 1}}, {"$project": {"_id": 0, [timeFieldName]: 1}}])
+            .aggregate([
+                {"$project": {"_id": 0, [metaFieldName]: 1}},
+                {"$project": {"_id": 0, [timeFieldName]: 1}},
+            ])
             .toArray();
         assert.eq(res.length, coll.count(), res);
         for (let doc of res) {
@@ -897,7 +925,9 @@ TimeseriesTest.run((insert) => {
         const coll2 = db[jsTestName() + "_dense"];
         coll2.drop();
         assert.commandWorked(
-            db.createCollection(coll2.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+            db.createCollection(coll2.getName(), {
+                timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+            }),
         );
 
         // Single bucket with:
@@ -910,7 +940,10 @@ TimeseriesTest.run((insert) => {
         // Case 1: $ifNull over the dense column "c". tryDense() must return true so
         // fillEmpty() takes the short-circuit path; the fallback is never consulted.
         // Expected sum of x: 1 + 2 + 3 = 6.
-        const densePipeline = [{$addFields: {x: {$ifNull: ["$c", -999]}}}, {$group: {_id: null, total: {$sum: "$x"}}}];
+        const densePipeline = [
+            {$addFields: {x: {$ifNull: ["$c", -999]}}},
+            {$group: {_id: null, total: {$sum: "$x"}}},
+        ];
         let results = coll2.aggregate(densePipeline).toArray();
         assert.eq(results.length, 1, () => tojson(results));
         assert.eq(results[0].total, 6, () => tojson(results));
@@ -919,7 +952,10 @@ TimeseriesTest.run((insert) => {
         // so fillEmpty() actually replaces the Nothing on doc 2 with the fallback.
         // A false positive in tryDense() would leak the Nothing, which $sum would
         // skip, giving 40 instead of 140.
-        const sparsePipeline = [{$addFields: {x: {$ifNull: ["$d", 100]}}}, {$group: {_id: null, total: {$sum: "$x"}}}];
+        const sparsePipeline = [
+            {$addFields: {x: {$ifNull: ["$d", 100]}}},
+            {$group: {_id: null, total: {$sum: "$x"}}},
+        ];
         results = coll2.aggregate(sparsePipeline).toArray();
         assert.eq(results.length, 1, () => tojson(results));
         assert.eq(results[0].total, 140, () => tojson(results));
@@ -935,8 +971,144 @@ TimeseriesTest.run((insert) => {
             const queryInfo = getQueryInfoAtTopLevelOrFirstStage(explain);
             if (queryInfo.explainVersion === "2") {
                 const bucketStages = getSbePlanStages(explain, "ts_bucket_to_cellblock");
-                assert.eq(bucketStages.length, 1, () => "Expected one bucket stage " + tojson(explain));
+                assert.eq(
+                    bucketStages.length,
+                    1,
+                    () => "Expected one bucket stage " + tojson(explain),
+                );
             }
         }
+    }
+
+    {
+        // Tests correctness of the argMin/argMax + at() fast paths used by $top/$bottom
+        // in SBE block processing.  The collection has value extremes at interior bucket
+        // positions and a sparse field to exercise the deblocked fallback.
+        const coll3 = db[jsTestName() + "_argMinMax"];
+        coll3.drop();
+        assert.commandWorked(
+            db.createCollection(coll3.getName(), {
+                timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+            }),
+        );
+
+        const docs = [];
+        const base = ISODate("2024-01-01T00:00:00Z");
+
+        // Meta "A": 1500 docs spanning 2 buckets. value min at i=0 (first slot of the
+        // first bucket) and max at i=1499 (last slot of the second bucket), so that
+        // at(argMin) and at(argMax) hit the bsoncolumn::first/last boundary fast path.
+        // sparseValue is present on 3 docs in the first bucket (making it non-dense):
+        // it is also at i=0 so that the sparse-column query (which sorts by value) can
+        // look up sparseValue via at(0), where tryDense() is false and at() falls
+        // through to ensureDeblocked().
+        for (let i = 0; i < 1500; i++) {
+            let v = 100 + i;
+            if (i === 0) v = 1;
+            if (i === 1499) v = 9999;
+            const doc = {
+                [timeFieldName]: new Date(base.getTime() + i * 1000),
+                [metaFieldName]: "A",
+                value: v,
+            };
+            if (i === 0) doc.sparseValue = 99;
+            if (i === 100) doc.sparseValue = 88;
+            if (i === 500) doc.sparseValue = 42;
+            docs.push(doc);
+        }
+
+        // Meta "B": 1100 docs spanning 2 buckets (>1000). value min at i=0 (first slot
+        // of the first bucket) and max at i=1099 (last slot of the second bucket).
+        for (let i = 0; i < 1100; i++) {
+            let v = 200 + i;
+            if (i === 0) v = 5;
+            if (i === 1099) v = 8888;
+            docs.push({
+                [timeFieldName]: new Date(base.getTime() + (1500 + i) * 1000),
+                [metaFieldName]: "B",
+                value: v,
+            });
+        }
+        assert.commandWorked(coll3.insertMany(docs));
+
+        // Assert that block_group appears in the SBE plan, which confirms the block
+        // accumulator path is used (not just block bucket reading).  Skipped on
+        // variants that fall back to classic (explainVersion "1").
+        function assertBlockGroup(pipeline) {
+            const explain = coll3.explain("executionStats").aggregate(pipeline);
+            const queryInfo = getQueryInfoAtTopLevelOrFirstStage(explain);
+            if (queryInfo.explainVersion === "2") {
+                const groupStages = getSbePlanStages(explain, "block_group");
+                assert.eq(
+                    groupStages.length,
+                    1,
+                    () => "Expected block_group in SBE plan: " + tojson(explain),
+                );
+            }
+        }
+
+        // Query 1: $top/$bottom sorted by value.
+        // Exercises argMin/argMax on the value column.  Unlike $min/$max, $top/$bottom
+        // cannot be answered from the bucket control document alone: the control doc
+        // records the extreme value but not the row index where it occurs, and without
+        // the index we cannot look up correlated fields such as the timestamp.
+        //
+        // Each accumulator's output must be a single field path (not a multi-field
+        // document) so that the stage builder can vectorize the value expression and
+        // use the block accumulator (valueBlockAggTopN), which is what triggers the
+        // argMin/argMax fast path.
+        //
+        // Note: $top and $bottom accumulators sharing the same sortBy key but of the
+        // same type (e.g. two $top with sortBy:{value:1}) would be merged by the
+        // pipeline optimizer into a single accumulator with an object output, which
+        // the SBE vectorizer cannot handle, causing block_group to fall back to scalar
+        // mode.  We therefore use one $top and one $bottom (different types) with the
+        // same sortBy, which avoids the merge and keeps block processing enabled.
+        {
+            const pipeline = [
+                {
+                    $group: {
+                        _id: "$" + metaFieldName,
+                        minVal: {$top: {sortBy: {value: 1}, output: "$value"}},
+                        maxVal: {$bottom: {sortBy: {value: 1}, output: "$value"}},
+                    },
+                },
+                {$sort: {_id: 1}},
+            ];
+            const result = coll3.aggregate(pipeline).toArray();
+            assert.eq(result.length, 2);
+            assert.eq(result[0]._id, "A");
+            assert.eq(result[0].minVal, 1, "A: min value");
+            assert.eq(result[0].maxVal, 9999, "A: max value");
+            assert.eq(result[1]._id, "B");
+            assert.eq(result[1].minVal, 5, "B: min value");
+            assert.eq(result[1].maxVal, 8888, "B: max value");
+
+            assertBlockGroup(pipeline);
+        }
+
+        // Query 2: sparse output field.
+        // sparseValue is non-dense (present on only 3 of the 1000 docs in the first
+        // "A" bucket), so tryDense() returns false and at() falls through to
+        // ensureDeblocked() rather than using bsoncolumn::first/last.  argMin on the
+        // dense value column returns i=750; at(750) on the sparse sparseValue column
+        // deblocks and returns 99.
+        {
+            const result = coll3
+                .aggregate([
+                    {
+                        $group: {
+                            _id: "$" + metaFieldName,
+                            minSparse: {$top: {sortBy: {value: 1}, output: "$sparseValue"}},
+                        },
+                    },
+                    {$match: {_id: "A"}},
+                ])
+                .toArray();
+            assert.eq(result.length, 1);
+            assert.eq(result[0].minSparse, 99, "sparse field at min-value position must be 99");
+        }
+
+        coll3.drop();
     }
 });

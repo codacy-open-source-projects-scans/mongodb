@@ -1,37 +1,11 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/op_observer/batched_write_context.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
@@ -74,7 +48,7 @@ DEATH_TEST_REGEX_F(BatchedWriteContextTestDeathTest,
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     ASSERT(!bwc.writesAreBatched());
 
@@ -106,7 +80,7 @@ DEATH_TEST_REGEX_F(BatchedWriteContextTestDeathTest,
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     // Need to explicitly set writes are batched to simulate op observer starting batched write.
     bwc.setWritesAreBatched(true);
@@ -130,7 +104,7 @@ DEATH_TEST_REGEX_F(BatchedWriteContextTestDeathTest,
     auto opCtx = opCtxRaii.get();
     opCtx->setInMultiDocumentTransaction();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     // Need to explicitly set writes are batched to simulate op observer starting batched write.
     bwc.setWritesAreBatched(true);
@@ -146,7 +120,7 @@ TEST_F(BatchedWriteContextTest, TestAcceptedBatchOperationsSucceeds) {
     auto opCtx = opCtxRaii.get();
     auto& bwc = BatchedWriteContext::get(opCtx);
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     // Need to explicitly set writes are batched to simulate op observer
     bwc.setWritesAreBatched(true);
 
@@ -157,24 +131,24 @@ TEST_F(BatchedWriteContextTest, TestAcceptedBatchOperationsSucceeds) {
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
     auto op = repl::MutableOplogEntry::makeDeleteOperation(nss, UUID::gen(), BSON("_id" << 0));
     bwc.addBatchedOperation(opCtx, op);
-    ASSERT_FALSE(ops->isEmpty());
-    ASSERT_EQ(ops->numOperations(), 1U);
+    EXPECT_FALSE(ops->isEmpty());
+    EXPECT_EQ(ops->numOperations(), 1U);
 
     op = repl::MutableOplogEntry::makeInsertOperation(
         nss, UUID::gen(), BSON("a" << 0), BSON("_id" << 1));
     bwc.addBatchedOperation(opCtx, op);
-    ASSERT_EQ(ops->numOperations(), 2U);
+    EXPECT_EQ(ops->numOperations(), 2U);
 
     op = repl::MutableOplogEntry::makeInsertOperation(
         nss, UUID::gen(), BSON("a" << 1), BSON("_id" << 2));
     bwc.addBatchedOperation(opCtx, op);
-    ASSERT_EQ(ops->numOperations(), 3U);
+    EXPECT_EQ(ops->numOperations(), 3U);
 
     op = repl::MutableOplogEntry::makeDeleteOperation(nss, UUID::gen(), BSON("_id" << 0));
     op.setChangeStreamPreImageRecordingMode(
         repl::ReplOperation::ChangeStreamPreImageRecordingMode::kPreImagesCollection);
     bwc.addBatchedOperation(opCtx, op);
-    ASSERT_EQ(ops->numOperations(), 4U);
+    EXPECT_EQ(ops->numOperations(), 4U);
 
     // Batched write committing is handled outside of the batched write context and involves the
     // oplog so it is not necessary to commit the WriteUnitOfWork in this test.
@@ -185,7 +159,7 @@ TEST_F(BatchedWriteContextTest, TestDDLSucceedsWithEmptyBatch) {
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     bwc.setWritesAreBatched(true);
 
@@ -197,7 +171,7 @@ TEST_F(BatchedWriteContextTest, TestCRUDSucceedsWithNoPriorDDL) {
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     bwc.setWritesAreBatched(true);
 
@@ -209,7 +183,7 @@ TEST_F(BatchedWriteContextTest, TestDDLFailsWithCRUDOpsInBatch) {
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     bwc.setWritesAreBatched(true);
 
@@ -221,7 +195,7 @@ TEST_F(BatchedWriteContextTest, TestDDLFailsWithCRUDOpsInBatch) {
     // DDL assertion should fail because CRUD ops are already in the batch.
     ASSERT_THROWS_WITH_CHECK(
         bwc.assertNoMixedBatchedOps(/*isDDL=*/true), DBException, [](const DBException& ex) {
-            ASSERT_EQUALS(ex.code(), 12073500);
+            EXPECT_EQ(ex.code(), 12073500);
             assertionCount.tripwire.subtractAndFetch(1);
         });
 }
@@ -230,7 +204,7 @@ TEST_F(BatchedWriteContextTest, TestCRUDFailsAfterDDL) {
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     bwc.setWritesAreBatched(true);
 
@@ -240,7 +214,7 @@ TEST_F(BatchedWriteContextTest, TestCRUDFailsAfterDDL) {
     // CRUD assertion should fail because DDL has occurred.
     ASSERT_THROWS_WITH_CHECK(
         bwc.assertNoMixedBatchedOps(/*isDDL=*/false), DBException, [](const DBException& ex) {
-            ASSERT_EQUALS(ex.code(), 12073501);
+            EXPECT_EQ(ex.code(), 12073501);
             assertionCount.tripwire.subtractAndFetch(1);
         });
 }
@@ -249,7 +223,7 @@ TEST_F(BatchedWriteContextTest, TestClearResetsDDLFlag) {
     auto opCtxRaii = makeOperationContext();
     auto opCtx = opCtxRaii.get();
 
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
     auto& bwc = BatchedWriteContext::get(opCtx);
     bwc.setWritesAreBatched(true);
 
@@ -261,6 +235,43 @@ TEST_F(BatchedWriteContextTest, TestClearResetsDDLFlag) {
 
     // CRUD should now succeed.
     bwc.assertNoMixedBatchedOps(/*isDDL=*/false);
+}
+
+TEST_F(BatchedWriteContextTest, AtomicOperationGroupStampsStagedOperations) {
+    auto opCtxRaii = makeOperationContext();
+    auto opCtx = opCtxRaii.get();
+    auto& bwc = BatchedWriteContext::get(opCtx);
+
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
+    bwc.setWritesAreBatched(true);
+    EXPECT_FALSE(bwc.hasAtomicOperationGroups());
+
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
+    const RecordId recordId(42);
+
+    // An operation staged inside an AtomicOperationGroup is stamped with the group's record.
+    {
+        BatchedWriteContext::AtomicOperationGroup group(opCtx, recordId);
+        auto op = repl::MutableOplogEntry::makeInsertOperation(
+            nss, UUID::gen(), BSON("a" << 0), BSON("_id" << 0));
+        bwc.addBatchedOperation(opCtx, op);
+    }
+    // An operation staged outside any group is not stamped.
+    auto op2 = repl::MutableOplogEntry::makeInsertOperation(
+        nss, UUID::gen(), BSON("a" << 1), BSON("_id" << 1));
+    bwc.addBatchedOperation(opCtx, op2);
+
+    const auto& staged = bwc.getBatchedOperations(opCtx)->getOperationsForOpObserver();
+    ASSERT_EQ(staged.size(), 2U);
+    ASSERT_TRUE(staged[0].getGroupRecordId().has_value());
+    EXPECT_EQ(*staged[0].getGroupRecordId(), recordId);
+    EXPECT_FALSE(staged[1].getGroupRecordId().has_value());
+    EXPECT_TRUE(bwc.hasAtomicOperationGroups());
+
+    // clear() resets grouping state.
+    bwc.clearBatchedOperations(opCtx);
+    EXPECT_FALSE(bwc.hasAtomicOperationGroups());
 }
 
 }  // namespace

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/classic/projection.h"
 
@@ -35,13 +9,16 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/projection_executor_builder.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/util/assert_util.h"
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -132,7 +109,7 @@ ProjectionStage::ProjectionStage(ExpressionContext* expCtx,
                                  const BSONObj& projObj,
                                  WorkingSet* ws,
                                  std::unique_ptr<PlanStage> child,
-                                 const char* stageType)
+                                 std::string_view stageType)
     : PlanStage{expCtx, std::move(child), stageType},
       _projObj{expCtx->getExplain() ? boost::make_optional(projObj.getOwned()) : boost::none},
       _ws{*ws} {}
@@ -165,6 +142,9 @@ std::unique_ptr<PlanStageStats> ProjectionStage::getStats() {
 
     auto projStats = std::make_unique<ProjectionStats>(_specificStats);
     projStats->projObj = _projObj.value_or(BSONObj{});
+    if (const auto* tracker = expressionMemoryTracker()) {
+        projStats->peakTrackedMemBytes = static_cast<uint64_t>(tracker->peakTrackedMemoryBytes());
+    }
     ret->specific = std::move(projStats);
 
     ret->children.emplace_back(child()->getStats());
@@ -180,7 +160,15 @@ ProjectionStageDefault::ProjectionStageDefault(boost::intrusive_ptr<ExpressionCo
       _requestedMetadata{projection->metadataDeps()},
       _projectType{projection->type()},
       _executor{projection_executor::buildProjectionExecutor(
-          expCtx, projection, {}, projection_executor::kDefaultBuilderParams)} {}
+          expCtx, projection, {}, projection_executor::kDefaultBuilderParams)} {
+    if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled() &&
+        feature_flags::gFeatureFlagExpressionMemoryTracking.isEnabled()) {
+        _memoryTracker =
+            OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForStage(*expCtx);
+        _expressionEvalCtx.tracker = &_memoryTracker;
+    }
+    _expressionEvalCtx.stageName = _commonStats.stageTypeStr;
+}
 
 void ProjectionStageDefault::transform(WorkingSetMember* member) const {
     Document input;
@@ -220,9 +208,10 @@ void ProjectionStageDefault::transform(WorkingSetMember* member) const {
     // has been applied.
     auto projected = _requestedMetadata.any()
         ? attachMetadataToWorkingSetMember(
-              _executor->applyTransformation(attachMetadataToDocument(std::move(input), member)),
+              _executor->applyTransformation(attachMetadataToDocument(std::move(input), member),
+                                             _expressionEvalCtx),
               member)
-        : _executor->applyTransformation(input);
+        : _executor->applyTransformation(input, _expressionEvalCtx);
 
     // An exclusion projection can return an unowned object since the output document is
     // constructed from the input one backed by BSON which is owned by the storage system, so we
@@ -257,7 +246,7 @@ ProjectionStageCovered::ProjectionStageCovered(ExpressionContext* expCtx,
         if (_includedFields.end() == fieldIt) {
             // Push an unused value on the back to keep _includeKey and _keyFieldNames
             // in sync.
-            _keyFieldNames.push_back(StringData());
+            _keyFieldNames.push_back(std::string_view());
             _includeKey.push_back(false);
         } else {
             // If we are including this key field store its field name.
@@ -305,40 +294,6 @@ ProjectionStageSimple::ProjectionStageSimple(ExpressionContext* expCtx,
         _fields = {projection->getExcludedPaths().begin(), projection->getExcludedPaths().end()};
     }
 }
-
-template <typename Container>
-BSONObj ProjectionStageSimple::transform(const BSONObj& doc,
-                                         const Container& projFields,
-                                         projection_ast::ProjectType projectType) {
-    BSONObjBuilder bob;
-    auto nFieldsLeft = projFields.size();
-
-    if (projectType == projection_ast::ProjectType::kInclusion) {
-
-        for (const auto& elt : doc) {
-            if (projFields.count(elt.fieldNameStringData()) > 0) {
-                bob.append(elt);
-                if (--nFieldsLeft == 0) {
-                    break;
-                }
-            }
-        }
-    } else {
-
-        for (const auto& elt : doc) {
-            if (nFieldsLeft == 0 || projFields.count(elt.fieldNameStringData()) == 0) {
-                bob.append(elt);
-            } else {
-                --nFieldsLeft;
-            }
-        }
-    }
-    return bob.obj();
-}
-template BSONObj ProjectionStageSimple::transform<StringSet>(
-    const BSONObj& doc, const StringSet& fields, projection_ast::ProjectType projectType);
-template BSONObj ProjectionStageSimple::transform<OrderedPathSet>(
-    const BSONObj& doc, const OrderedPathSet& fields, projection_ast::ProjectType projectType);
 
 void ProjectionStageSimple::transform(WorkingSetMember* member) const {
     // SIMPLE_DOC implies that we expect an object so it's kind of redundant.

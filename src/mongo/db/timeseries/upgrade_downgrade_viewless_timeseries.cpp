@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/upgrade_downgrade_viewless_timeseries.h"
 
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -125,6 +100,15 @@ Status canUpgradeToViewlessTimeseries(OperationContext* opCtx,
                                     << " does not have valid timeseries options");
     }
 
+    // We can not rename a collection with an index build in progress.
+    // Here we uassert to force a retry (rather than returning a non-OK code to the caller, which
+    // will tassert during commit). This is because in sharded clusters an index build can start
+    // at any time; even if the viewless timeseries upgrade/downgrade holds the DDL lock.
+    // Note however that this will hit SERVER-117624 (A rename that encounters a concurrent index
+    // build can loop in the DDL commit phase while holding the collection critical section,
+    // temporarily blocking CRUD on sharded clusters).
+    IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(bucketsColl->uuid());
+
     // Check for metadata inconsistencies. Return an error so the coordinator can handle it.
     auto inconsistencies = checkBucketCollectionInconsistencies(
         opCtx,
@@ -198,6 +182,15 @@ Status canDowngradeFromViewlessTimeseries(OperationContext* opCtx,
                                     << mainNs.toStringForErrorMsg()
                                     << " is not a viewless timeseries collection");
     }
+
+    // We can not rename a collection with an index build in progress.
+    // Here we uassert to force a retry (rather than returning a non-OK code to the caller, which
+    // will tassert during commit). This is because in sharded clusters an index build can start
+    // at any time; even if the viewless timeseries upgrade/downgrade holds the DDL lock.
+    // Note however that this will hit SERVER-117624 (A rename that encounters a concurrent index
+    // build can loop in the DDL commit phase while holding the collection critical section,
+    // temporarily blocking CRUD on sharded clusters).
+    IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(mainColl->uuid());
 
     // No conflicting buckets collection
     if (bucketsColl) {
@@ -308,6 +301,14 @@ void upgradeToViewlessTimeseries(OperationContext* opCtx,
                                                           BSONObj() /* newValidator */,
                                                           boost::none /* validationLevel */,
                                                           boost::none /* validatorAction */));
+
+            // Conservatively set the viewless-only 'fixedBucketing' option to false: a legacy
+            // collection predates this option, so we cannot prove its buckets are fixed.
+            if (gFeatureFlagFixedBucketingCatalog.isEnabled(VersionContext::getDecoration(opCtx))) {
+                auto options = *writableColl->getTimeseriesOptions();
+                options.setFixedBucketing(false);
+                writableColl->setTimeseriesOptions(opCtx, options);
+            }
         }
 
         // Log a oplog entry giving a single, atomic timestamp to all operations done above.
@@ -402,6 +403,12 @@ void downgradeFromViewlessTimeseries(OperationContext* opCtx,
                 timeseries::generateTimeseriesValidator(bucketVersion, timeField),
                 boost::none /* validationLevel */,
                 boost::none /* validatorAction */));
+
+            // Strip the viewless-only 'fixedBucketing' option from the timeseries collection;
+            // the viewful (legacy) format does not carry it.
+            auto strippedOptions = *mainColl->getTimeseriesOptions();
+            strippedOptions.setFixedBucketing(OptionalBool{});
+            writableColl->setTimeseriesOptions(opCtx, strippedOptions);
         }
 
         // Log a oplog entry giving a single, atomic timestamp to all operations done above.

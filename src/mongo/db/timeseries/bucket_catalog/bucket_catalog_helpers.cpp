@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 
@@ -44,6 +18,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
@@ -189,7 +165,7 @@ StatusWith<Schema> generateSchemaFromBucketDoc(tracking::Context& trackingContex
     }
 }
 
-StatusWith<Date_t> extractTime(const BSONObj& doc, StringData timeFieldName) {
+StatusWith<Date_t> extractTime(const BSONObj& doc, std::string_view timeFieldName) {
     auto timeElem = doc[timeFieldName];
     if (!timeElem || BSONType::date != timeElem.type()) {
         return {ErrorCodes::BadValue,
@@ -199,15 +175,15 @@ StatusWith<Date_t> extractTime(const BSONObj& doc, StringData timeFieldName) {
     return timeElem.Date();
 }
 
-BSONObj buildControlMinTimestampDoc(StringData timeField, Date_t roundedTime) {
+BSONObj buildControlMinTimestampDoc(std::string_view timeField, Date_t roundedTime) {
     BSONObjBuilder builder;
     builder.append(timeField, roundedTime);
     return builder.obj();
 }
 
 StatusWith<std::pair<Date_t, BSONElement>> extractTimeAndMeta(const BSONObj& doc,
-                                                              StringData timeFieldName,
-                                                              StringData metaFieldName) {
+                                                              std::string_view timeFieldName,
+                                                              std::string_view metaFieldName) {
     // Iterate the document once, checking for both fields.
     BSONElement timeElem;
     BSONElement metaElem;

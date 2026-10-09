@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/idl/server_parameter_specialized_test.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -45,7 +18,7 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/server_parameter_specialized_test_gen.h"
 #include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
@@ -53,6 +26,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -60,9 +34,10 @@
 
 namespace mongo {
 namespace test {
+using namespace std::literals::string_view_literals;
 
 template <typename T = ServerParameter>
-T* getServerParameter(StringData name) {
+T* getServerParameter(std::string_view name) {
     return ServerParameterSet::getNodeParameterSet()->get<T>(name);
 }
 
@@ -89,7 +64,7 @@ void ASSERT_APPENDED_INT(ServerParameter* sp, long exp) {
     });
 }
 
-void ASSERT_APPENDED_STRING(ServerParameter* sp, StringData exp) {
+void ASSERT_APPENDED_STRING(ServerParameter* sp, std::string_view exp) {
     ASSERT_APPENDED_VALUE(sp, [&exp](const BSONElement& elem) {
         ASSERT_EQ(elem.type(), BSONType::string);
         ASSERT_EQ(elem.String(), exp);
@@ -135,7 +110,7 @@ TEST(SpecializedServerParameter, withValue) {
 
 TEST(SpecializedServerParameter, withStringValue) {
     using cls = SpecializedWithStringValueServerParameter;
-    ASSERT_EQ(cls::kDataDefault, "Hello World"_sd);
+    ASSERT_EQ(cls::kDataDefault, "Hello World"sv);
 
     auto* wsv = getServerParameter<cls>("specializedWithStringValue");
     ASSERT_EQ(wsv->_data, cls::kDataDefault);
@@ -243,7 +218,7 @@ TEST(SpecializedServerParameter, withScope) {
     auto* nodeSet = ServerParameterSet::getNodeParameterSet();
     auto* clusterSet = ServerParameterSet::getClusterParameterSet();
 
-    static constexpr auto kSpecializedWithOptions = "specializedWithOptions"_sd;
+    static constexpr auto kSpecializedWithOptions = "specializedWithOptions"sv;
     auto* nodeSWO = nodeSet->getIfExists(kSpecializedWithOptions);
     ASSERT(nullptr != nodeSWO);
     ASSERT(nullptr == clusterSet->getIfExists(kSpecializedWithOptions));
@@ -262,7 +237,7 @@ TEST(SpecializedServerParameter, withScope) {
                        23784);
 
     // Require runtime only.
-    static constexpr auto kSpecializedRuntimeOnly = "specializedRuntimeOnly"_sd;
+    static constexpr auto kSpecializedRuntimeOnly = "specializedRuntimeOnly"sv;
     auto clusterSRO =
         std::make_unique<SpecializedRuntimeOnly>(kSpecializedRuntimeOnly, SPT::kClusterWide);
     ASSERT(clusterSRO);
@@ -273,7 +248,7 @@ TEST(SpecializedServerParameter, withScope) {
 TEST(SpecializedServerParameter, withValidate) {
     auto* nodeSet = ServerParameterSet::getNodeParameterSet();
 
-    constexpr auto kSpecializedWithValidate = "specializedWithValidate"_sd;
+    constexpr auto kSpecializedWithValidate = "specializedWithValidate"sv;
     auto* validateSP = nodeSet->getIfExists(kSpecializedWithValidate);
     ASSERT(nullptr != validateSP);
 
@@ -294,7 +269,7 @@ TEST(SpecializedServerParameter, withValidate) {
 
 TEST(SpecializedServerParameter, clusterServerParameter) {
     auto* clusterSet = ServerParameterSet::getClusterParameterSet();
-    constexpr auto kSpecializedCSPName = "specializedCluster"_sd;
+    constexpr auto kSpecializedCSPName = "specializedCluster"sv;
 
     auto* specializedCsp = clusterSet->getIfExists(kSpecializedCSPName);
     ASSERT(nullptr != specializedCsp);
@@ -321,10 +296,10 @@ TEST(SpecializedServerParameter, clusterServerParameter) {
     specializedCsp->append(nullptr, &builder, std::string{kSpecializedCSPName}, boost::none);
     auto obj = builder.asTempObj();
     ASSERT_EQ(obj.nFields(), 4);
-    ASSERT_EQ(obj["_id"_sd].String(), kSpecializedCSPName);
-    ASSERT_EQ(obj["clusterParameterTime"_sd].timestamp(), updateTime.asTimestamp());
-    ASSERT_EQ(obj["strData"_sd].String(), "hello");
-    ASSERT_EQ(obj["intData"_sd].Int(), 50);
+    ASSERT_EQ(obj["_id"sv].String(), kSpecializedCSPName);
+    ASSERT_EQ(obj["clusterParameterTime"sv].timestamp(), updateTime.asTimestamp());
+    ASSERT_EQ(obj["strData"sv].String(), "hello");
+    ASSERT_EQ(obj["intData"sv].Int(), 50);
 
     // Assert that invalid parameter values fail validation directly and implicitly during set.
     builder.resetToEmpty();
@@ -342,10 +317,10 @@ TEST(SpecializedServerParameter, clusterServerParameter) {
     specializedCsp->append(nullptr, &builder, std::string{kSpecializedCSPName}, boost::none);
     obj = builder.asTempObj();
     ASSERT_EQ(obj.nFields(), 4);
-    ASSERT_EQ(obj["_id"_sd].String(), kSpecializedCSPName);
-    ASSERT_EQ(obj["clusterParameterTime"_sd].timestamp(), LogicalTime().asTimestamp());
-    ASSERT_EQ(obj["strData"_sd].String(), "default");
-    ASSERT_EQ(obj["intData"_sd].Int(), 30);
+    ASSERT_EQ(obj["_id"sv].String(), kSpecializedCSPName);
+    ASSERT_EQ(obj["clusterParameterTime"sv].timestamp(), LogicalTime().asTimestamp());
+    ASSERT_EQ(obj["strData"sv].String(), "default");
+    ASSERT_EQ(obj["intData"sv].Int(), 30);
 }
 
 TEST_F(DeprecatedServerParameterTest, SpecializedIsDeprecated) {

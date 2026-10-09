@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/index/wildcard_key_generator.h"
 
@@ -47,6 +21,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -57,10 +32,11 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 // If the user does not specify any projection, then we default to a projection of {_id: 0} in order
 // to prevent the _id field from being indexed, since it already has its own dedicated index.
-static const BSONObj kDefaultProjection = BSON("_id"_sd << 0);
+static const BSONObj kDefaultProjection = BSON("_id"sv << 0);
 
 // If the enclosing object is an array, then the current element's fieldname is the array index, so
 // we omit this when computing the full path. Otherwise, the full path is the pathPrefix plus the
@@ -87,20 +63,12 @@ void appendToKeyString(const std::vector<BSONElement>& elems,
                        key_string::PooledBuilder* keyString) {
     for (const auto& elem : elems) {
         if (collator) {
-            keyString->appendBSONElement(elem, [&](StringData stringData) {
+            keyString->appendBSONElement(elem, [&](std::string_view stringData) {
                 return collator->getComparisonString(stringData);
             });
         } else {
             keyString->appendBSONElement(elem);
         }
-    }
-}
-
-// Append 'MinKey' to 'keyString'. Multikey path keys use 'MinKey' for non-wildcard fields.
-void appendToMultiKeyString(const std::vector<BSONElement>& elems,
-                            key_string::PooledBuilder* keyString) {
-    for (size_t i = 0; i < elems.size(); i++) {
-        keyString->appendBSONElement(kMinBSONKey.firstElement());
     }
 }
 
@@ -208,7 +176,7 @@ void SingleDocumentKeyEncoder::_addKey(BSONElement elem, const FieldRef& fullPat
 
     keyString.appendString(fullPath.dottedField());
     if (_collator && elem) {
-        keyString.appendBSONElement(elem, [&](StringData stringData) {
+        keyString.appendBSONElement(elem, [&](std::string_view stringData) {
             return _collator->getComparisonString(stringData);
         });
     } else if (elem) {
@@ -232,22 +200,14 @@ void SingleDocumentKeyEncoder::_addMultiKey(const FieldRef& fullPath) {
     // 'multikeyPaths' may be nullptr if the access method is being used in an operation which does
     // not require multikey path generation.
     if (_multikeyPaths) {
-        key_string::PooledBuilder keyString(_pooledBufferBuilder, _keyStringVersion, _ordering);
-
-        if (!_preElems.empty()) {
-            appendToMultiKeyString(_preElems, &keyString);
-        }
-        for (auto elem : BSON("" << 1 << "" << fullPath.dottedField())) {
-            keyString.appendBSONElement(elem);
-        }
-        if (!_postElems.empty()) {
-            appendToMultiKeyString(_postElems, &keyString);
-        }
-
-        keyString.appendRecordId(record_id_helpers::reservedIdFor(
-            record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, *_rsKeyFormat));
-
-        _multikeyPaths->push_back(keyString.release());
+        _multikeyPaths->push_back(
+            WildcardKeyGenerator::makeMultikeyMetadataKey(fullPath.dottedField(),
+                                                          _preElems.size(),
+                                                          _postElems.size(),
+                                                          _keyStringVersion,
+                                                          _ordering,
+                                                          *_rsKeyFormat,
+                                                          _pooledBufferBuilder));
     }
 }
 
@@ -274,14 +234,14 @@ bool SingleDocumentKeyEncoder::_addKeyForEmptyLeaf(BSONElement elem, const Field
 }
 }  // namespace
 
-constexpr StringData WildcardKeyGenerator::kSubtreeSuffix;
+constexpr std::string_view WildcardKeyGenerator::kSubtreeSuffix;
 
 WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPattern,
                                                                   BSONObj pathProjection) {
-    StringData indexRoot = "";
+    std::string_view indexRoot = "";
     size_t suffixPos = std::string::npos;
     for (auto elem : keyPattern) {
-        StringData fieldName(elem.fieldNameStringData());
+        std::string_view fieldName(elem.fieldNameStringData());
         if (WildcardNames::isWildcardFieldName(fieldName)) {
             // The _keyPattern is either {..., "$**": 1, ..} for all paths or
             // {.., "path.$**": 1, ...} for a single subtree. If we are indexing a single subtree
@@ -401,7 +361,7 @@ void WildcardKeyGenerator::generateKeys(SharedBufferFragmentBuilder& pooledBuffe
                                         postElems};
 
     keyEncoder.traverseWildcard(
-        _proj.exec()->applyTransformation(Document{inputDoc}).toBson(), false, &rootPath);
+        _proj.exec()->applyTransformation(Document{inputDoc}, {}).toBson(), false, &rootPath);
 
     // If no key is generated for this index at this point, that means the document doesn't have any
     // field that is indexed by the wildcard field. We should still add index keys for this
@@ -432,5 +392,30 @@ void WildcardKeyGenerator::generateKeys(SharedBufferFragmentBuilder& pooledBuffe
     if (multikeyPaths)
         multikeyPaths->adopt_sequence(std::move(multikeyPathsSequence));
     keys->adopt_sequence(std::move(keysSequence));
+}
+
+key_string::Value WildcardKeyGenerator::makeMultikeyMetadataKey(
+    std::string_view fieldPath,
+    size_t prefixFieldCount,
+    size_t suffixFieldCount,
+    key_string::Version version,
+    Ordering ordering,
+    KeyFormat rsKeyFormat,
+    SharedBufferFragmentBuilder& pooledBuilder) {
+    key_string::PooledBuilder keyString(pooledBuilder, version, ordering);
+
+    for (size_t i = 0; i < prefixFieldCount; ++i) {
+        keyString.appendBSONElement(kMinBSONKey.firstElement());
+    }
+    for (auto elem : BSON("" << 1 << "" << fieldPath)) {
+        keyString.appendBSONElement(elem);
+    }
+    for (size_t i = 0; i < suffixFieldCount; ++i) {
+        keyString.appendBSONElement(kMinBSONKey.firstElement());
+    }
+    keyString.appendRecordId(record_id_helpers::reservedIdFor(
+        record_id_helpers::ReservationId::kWildcardMultikeyMetadataId, rsKeyFormat));
+
+    return keyString.release();
 }
 }  // namespace mongo

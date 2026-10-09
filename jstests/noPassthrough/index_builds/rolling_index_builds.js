@@ -5,7 +5,6 @@
  *
  * @tags: [
  *   requires_persistence,
- *   requires_replicated_fast_count_recovery,
  *   requires_replication,
  *   rolling_index_builds,
  * ]
@@ -48,7 +47,11 @@ replTest.awaitReplication();
 assert.commandWorked(coll.createIndex({a: 1}, {name: "replicated_index_a_1"}));
 
 const secondaries = replTest.getSecondaries();
-assert.eq(nodes.length - 1, secondaries.length, "unexpected number of secondaries: " + tojson(secondaries));
+assert.eq(
+    nodes.length - 1,
+    secondaries.length,
+    "unexpected number of secondaries: " + tojson(secondaries),
+);
 
 const standalonePort = allocatePort();
 jsTestLog("Standalone server will listen on port: " + standalonePort);
@@ -74,12 +77,17 @@ IndexBuildTest.buildIndexOnNodeAsStandalone(
     "rolling_index_b_1",
 );
 
-replTest.awaitNodesAgreeOnPrimary(replTest.timeoutMS, replTest.nodes, replTest.getNodeId(primary));
+replTest.awaitNodesAgreeOnPrimary(replTest.timeoutMS, replTest.nodes, primary);
 
 jsTestLog("Build index on the primary: " + primary.host);
 assert.commandWorked(primaryDB.adminCommand({replSetStepDown: 60}));
 const newPrimary = replTest.getPrimary();
-jsTestLog("Stepped down primary for index build: " + primary.host + ". New primary elected: " + newPrimary.host);
+jsTestLog(
+    "Stepped down primary for index build: " +
+        primary.host +
+        ". New primary elected: " +
+        newPrimary.host,
+);
 IndexBuildTest.buildIndexOnNodeAsStandalone(
     replTest,
     primary,

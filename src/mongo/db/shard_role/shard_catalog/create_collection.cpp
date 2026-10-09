@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/create_collection.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -127,6 +100,12 @@ Status validateClusteredIndexSpec(OperationContext* opCtx,
                       "The clusteredIndex option requires unique: true to be specified");
     }
 
+    if (const auto& name = spec.getName()) {
+        if (auto status = index_key_validate::validateIndexName(*name); !status.isOK()) {
+            return status.withContext("Invalid clusteredIndex name");
+        }
+    }
+
     bool clusterKeyOnId =
         SimpleBSONObjComparator::kInstance.evaluate(spec.getKey() == BSON("_id" << 1));
 
@@ -147,7 +126,7 @@ Status validateClusteredIndexSpec(OperationContext* opCtx,
     }
 
     const auto arbitraryClusterKeyField = clustered_util::getClusterKeyFieldName(spec);
-    if (arbitraryClusterKeyField.find(".", 0) != std::string::npos) {
+    if (arbitraryClusterKeyField.find('.', 0) != std::string::npos) {
         return Status(
             ErrorCodes::Error(6053701),
             "The clusteredIndex option does not support a cluster key with nested fields");
@@ -637,6 +616,13 @@ void checkExistingCollectionIsCompatible(OperationContext* opCtx,
         normalizedRequestedOptions.validator = BSONObj();
         normalizedRequestedOptions.clusteredIndex = boost::none;
 
+        // An omitted 'fixedBucketing' is defaulted to true only when creating a brand-new
+        // collection. For an existing collection an omitted value inherits the stored value, so
+        // that an idempotent re-create that omits the field never conflicts regardless of the
+        // existing value (unset/true/false). Explicit values still compare exactly.
+        timeseries::inheritFixedBucketingIfOmitted(*normalizedRequestedOptions.timeseries,
+                                                   *existingOptions.timeseries);
+
         existingOptions = uassertStatusOK(CollectionOptions::parse(existingOptions.toBSON(
             false /* includeUUID */, timeseries::kAllowedCollectionCreationOptions)));
     }
@@ -771,11 +757,6 @@ Status _setBucketingParametersAndAddClusteredIndex(CollectionOptions& options) {
         return timeseriesOptionsValidateAndSetStatus;
     }
 
-    // TODO(SERVER-101611): Initialize timeseriesBucketingParametersHaveChanged to false
-    // when TSBucketingParametersUnchanged is enabled. Currently, this is not done because the
-    // flag is stored in the WiredTiger config string (SERVER-91195), so doing it changes the
-    // output of listCollections and breaks creation idempotency with no straightforward fixes
-
     // Cluster time-series buckets collections by _id.
     if (options.expireAfterSeconds) {
         uassertStatusOK(index_key_validate::validateExpireAfterSeconds(
@@ -885,6 +866,9 @@ void _createTimeseriesCollection(
     const auto viewlessTimeseriesEnabled =
         gFeatureFlagCreateViewlessTimeseriesCollections.isEnabledUseLatestFCVWhenUninitialized(
             VersionContext::getDecoration(opCtx));
+    const auto fixedBucketingEnabled =
+        gFeatureFlagFixedBucketingCatalog.isEnabledUseLatestFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx));
 
     // This uassert is used to signal $out that is attempting to create a legacy timeseries temp
     // collection when we are already in FCV 9.0. $out has special logic to catch this and switch to
@@ -953,6 +937,33 @@ void _createTimeseriesCollection(
 
         if (!bucketsCollExists) {
             auto bucketsOptions = optionsArg;
+            // Gate 'fixedBucketing' on the feature flag only when creating a brand-new collection.
+            // During the transient window of an FCV downgrade the timeseries collection is still
+            // viewless (not yet converted) and still carries 'fixedBucketing', but FCV is no longer
+            // 9.0 so the flag is disabled. A 'shardCollection' in that window has
+            // 'CreateCollectionCoordinator' re-issue an internal create with options read back from
+            // the catalog (carrying 'fixedBucketing'): in this case we must ensure that
+            // 'fixedBucketing' is not rejected even if FCV is not 9.0 anymore.
+            // NOTE: the field is stripped on downgrade completion, after which a re-create
+            // specifying 'fixedBucketing' is correctly rejected as NamespaceExists (the value can't
+            // match the stored one).
+            if (bucketsOptions.timeseries->getFixedBucketing().has_value()) {
+                uassert(ErrorCodes::InvalidOptions,
+                        "the 'fixedBucketing' option requires featureFlagFixedBucketingCatalog to "
+                        "be enabled",
+                        fixedBucketingEnabled);
+                uassert(ErrorCodes::InvalidOptions,
+                        "the 'fixedBucketing' option can only be set on viewless time-series "
+                        "collections",
+                        viewlessTimeseriesEnabled);
+            }
+            // Default 'fixedBucketing' to true for a newly created viewless time-series collection.
+            // This branch runs only when the buckets collection does not already exist, so existing
+            // collections are never modified.
+            if (viewlessTimeseriesEnabled) {
+                timeseries::setFixedBucketingDefaultForNewCollection(*bucketsOptions.timeseries,
+                                                                     fixedBucketingEnabled);
+            }
             uassertStatusOK(_setBucketingParametersAndAddClusteredIndex(bucketsOptions));
 
             if (viewlessTimeseriesEnabled) {

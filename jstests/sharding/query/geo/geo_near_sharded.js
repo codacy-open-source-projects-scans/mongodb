@@ -10,10 +10,19 @@ function test(st, db, sharded, indexType) {
     if (sharded) {
         let shards = [st.shard0, st.shard1, st.shard2];
 
-        assert.commandWorked(st.s0.adminCommand({shardCollection: db[coll].getFullName(), key: {rand: 1}}));
+        assert.commandWorked(
+            st.s0.adminCommand({shardCollection: db[coll].getFullName(), key: {rand: 1}}),
+        );
+        // Split at 0.1, 0.2, ... 0.9 first, then distribute the narrow chunks. Splitting before
+        // moving keeps every migration a whole-chunk move: no shard ever donates a wide chunk and
+        // later receives a narrower overlapping sub-range, which would be rejected because the
+        // donated range stays reachable by point-in-time reads on its former owner.
         for (let i = 1; i < 10; i++) {
-            // split at 0.1, 0.2, ... 0.9
-            assert.commandWorked(st.s0.adminCommand({split: db[coll].getFullName(), middle: {rand: i / 10}}));
+            assert.commandWorked(
+                st.s0.adminCommand({split: db[coll].getFullName(), middle: {rand: i / 10}}),
+            );
+        }
+        for (let i = 1; i < 10; i++) {
             assert.commandWorked(
                 st.s0.adminCommand({
                     moveChunk: db[coll].getFullName(),
@@ -62,7 +71,9 @@ function test(st, db, sharded, indexType) {
 }
 
 let st = new ShardingTest({shards: 3, mongos: 1});
-assert.commandWorked(st.s0.adminCommand({enablesharding: "test", primaryShard: st.shard1.shardName}));
+assert.commandWorked(
+    st.s0.adminCommand({enablesharding: "test", primaryShard: st.shard1.shardName}),
+);
 
 test(st, st.getDB("test"), true, "2dsphere");
 st.stop();

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/metrics_prometheus_file_exporter.h"
 
@@ -61,6 +35,8 @@ using ::opentelemetry::sdk::instrumentationscope::InstrumentationScope;
 using testing::_;
 using testing::AllOf;
 using testing::ContainsRegex;
+using testing::Ge;
+using testing::Gt;
 using testing::HasSubstr;
 using testing::Not;
 using unittest::match::StatusIs;
@@ -160,6 +136,37 @@ TEST_F(PrometheusFileExporterTest, ExportWritesMetricsToFile) {
               0);
 }
 
+TEST_F(PrometheusFileExporterTest, WriteRecordsDurationHistogram) {
+    OtelMetricsCapturer metricsCapturer;
+    // makeExporter triggers one initialization write; Export+ForceFlush triggers one more.
+    std::unique_ptr<PushMetricExporter> exporter = makeExporter();
+    ASSERT_EQ(exporter->Export(makeResourceMetrics("requests_total", 42)), ExportResult::kSuccess);
+    ASSERT_TRUE(exporter->ForceFlush());
+
+    HistogramData<int64_t> data =
+        metricsCapturer.readInt64Histogram(MetricNames::kPrometheusFileExporterWriteDuration);
+    EXPECT_EQ(data.count, 2u);
+    EXPECT_THAT(data.sum, Ge(0));
+}
+
+TEST_F(PrometheusFileExporterTest, WriteRecordsSizeHistogram) {
+    OtelMetricsCapturer metricsCapturer;
+    // makeExporter triggers one initialization write (empty, size 0); Export+ForceFlush triggers
+    // one more with the actual metric content.
+    std::unique_ptr<PushMetricExporter> exporter = makeExporter();
+    ASSERT_EQ(exporter->Export(makeResourceMetrics("requests_total", 42)), ExportResult::kSuccess);
+    ASSERT_TRUE(exporter->ForceFlush());
+
+    std::string fileContents = readFileContents(filepath());
+    ASSERT_THAT(fileContents, ContainsRegex("requests_total.*42"));
+
+    HistogramData<int64_t> data =
+        metricsCapturer.readInt64Histogram(MetricNames::kPrometheusFileExporterWriteSize);
+    EXPECT_EQ(data.count, 2u);
+    // sum = init write size (0) + actual write size (== file content size)
+    EXPECT_EQ(data.sum, static_cast<int64_t>(fileContents.size()));
+}
+
 TEST_F(PrometheusFileExporterTest, ExportEmptyMetrics) {
     std::unique_ptr<PushMetricExporter> exporter = makeExporter();
     ResourceMetrics emptyMetrics;
@@ -189,7 +196,9 @@ TEST_F(PrometheusFileExporterTest, SkippedExportIncrementsCounter) {
     // guarantee that one export is skipped.
     auto [promise, future] = makePromiseFuture<void>();
     std::unique_ptr<PushMetricExporter> exporter =
-        makeExporter(/*options=*/{.testOnlyFailpointCallback = [&future]() { future.wait(); }});
+        makeExporter(/*options=*/{.testOnlyFailpointCallback = [&future]() {
+            future.wait();
+        }});
 
     FailPointEnableBlock fp("metricsPrometheusFileExporterThreadCallback",
                             BSON("UnlockOnly" << true));
@@ -460,8 +469,9 @@ TEST_F(PrometheusFileExporterTest, ExactlyMaxConsecutiveSkipsIsOk) {
     // The writer thread blocks on this future.
     auto [promise, future] = makePromiseFuture<void>();
     std::unique_ptr<PushMetricExporter> exporter = makeExporter(
-        /*options=*/{.maxConsecutiveFailures = 3,
-                     .testOnlyFailpointCallback = [&future]() { future.wait(); }});
+        /*options=*/{.maxConsecutiveFailures = 3, .testOnlyFailpointCallback = [&future]() {
+                         future.wait();
+                     }});
 
     FailPointEnableBlock fp("metricsPrometheusFileExporterThreadCallback",
                             BSON("UnlockOnly" << true));
@@ -481,8 +491,9 @@ DEATH_TEST_F(PrometheusFileExporterDeathTest,
     // The writer thread blocks on this future.
     auto [promise, future] = makePromiseFuture<void>();
     std::unique_ptr<PushMetricExporter> exporter = makeExporter(
-        /*options=*/{.maxConsecutiveFailures = 3,
-                     .testOnlyFailpointCallback = [&future]() { future.wait(); }});
+        /*options=*/{.maxConsecutiveFailures = 3, .testOnlyFailpointCallback = [&future]() {
+                         future.wait();
+                     }});
 
     FailPointEnableBlock fp("metricsPrometheusFileExporterThreadCallback",
                             BSON("UnlockOnly" << true));

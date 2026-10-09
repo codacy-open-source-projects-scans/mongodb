@@ -1,37 +1,8 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/db/query/query_execution_knobs_gen.h"
-#include "mongo/db/query/query_integration_knobs_gen.h"
-#include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/sorter/file.h"
 #include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_file_name.h"
@@ -43,12 +14,13 @@
 
 #include <snappy.h>
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 namespace sorter {
 
 constexpr inline std::size_t kSortedFileBufferSize = size_t{64} << 10;
@@ -370,9 +342,13 @@ void SortedFileWriter<Key, Value>::writeChunk() {
     // The size is both written to and read from in platform-specific endian order. In the unlikely
     // event that data files are written and read by platforms of differing endianness, the result
     // will be a read checksum mismatch in the worst case, which callers must recover from.
+    //
+    // One writer is one logical spill: only its first chunk counts as a spill.
+    const bool isFirstChunk = _file->currentOffset() == _fileStartOffset;
     _file->write(reinterpret_cast<const char*>(&signedSize), sizeof(signedSize));
     _file->write(outBuffer, size);
-    sortCounters.incrementSortCountersPerSpilling(/*sortSpills=*/1, sizeof(signedSize) + size);
+    sortCounters.incrementSortCountersPerSpilling(/*sortSpills=*/isFirstChunk ? 1 : 0,
+                                                  sizeof(signedSize) + size);
 
     this->_buffer.reset();
 }
@@ -516,12 +492,15 @@ public:
               std::make_unique<FileBasedStorage<Key, Value>>(file, dbName, checksumVersion),
               minAvailableDiskBytesToSpill),
           _fileStats(file->getFileStats()),
-          _spillDir(spillDir) {}
+          _spillDir(spillDir) {
+        uassert(16815,
+                str::stream() << "Unexpected empty file: " << file->path().string(),
+                boost::filesystem::file_size(file->path()) != 0);
+    }
 
     void mergeSpills(const SortOptions& opts,
                      const Settings& settings,
                      SorterStats& stats,
-                     std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
                      Comparator comp,
                      std::size_t numTargetedSpills,
                      std::size_t maxSpillsPerMerge) override;
@@ -547,22 +526,20 @@ private:
 };
 
 template <typename Key, typename Value, typename Comparator>
-void FileBasedSpiller<Key, Value, Comparator>::mergeSpills(
-    const SortOptions& opts,
-    const Settings& settings,
-    SorterStats& sorterStats,
-    std::vector<std::shared_ptr<sorter::Iterator<Key, Value>>>& iters,
-    Comparator comp,
-    std::size_t numTargetedSpills,
-    std::size_t maxSpillsPerMerge) {
+void FileBasedSpiller<Key, Value, Comparator>::mergeSpills(const SortOptions& opts,
+                                                           const Settings& settings,
+                                                           SorterStats& sorterStats,
+                                                           Comparator comp,
+                                                           std::size_t numTargetedSpills,
+                                                           std::size_t maxSpillsPerMerge) {
     std::shared_ptr<File> newSpillsFile =
         std::make_shared<File>(sorter::nextFileName(_spillDir), _fileStats);
     FileBasedStorage<Key, Value> sorterStorage(
         newSpillsFile, this->getStorage().getDbName(), this->getStorage().getChecksumVersion());
 
     std::vector<std::shared_ptr<Iterator>> iterators;
-    while (iters.size() > numTargetedSpills) {
-        iterators.swap(iters);
+    while (this->_iterators.size() > numTargetedSpills) {
+        iterators.swap(this->_iterators);
 
         newSpillsFile = std::make_shared<File>(sorter::nextFileName(_spillDir), _fileStats);
         LOGV2_DEBUG(6033103,
@@ -601,7 +578,7 @@ void FileBasedSpiller<Key, Value, Comparator>::mergeSpills(
                 writer->addAlreadySorted(pair.first, pair.second);
                 ++pairCount;
             }
-            iters.push_back(writer->done());
+            this->_iterators.push_back(writer->done());
             sorterStats.incrementMergedSpills();
             sorterStats.incrementSpilledRanges();
             sorterStats.incrementSpilledKeyValuePairs(pairCount);
@@ -611,7 +588,7 @@ void FileBasedSpiller<Key, Value, Comparator>::mergeSpills(
         LOGV2_DEBUG(6033101,
                     1,
                     "Merged spills",
-                    "currentNumSpills"_attr = iters.size(),
+                    "currentNumSpills"_attr = this->_iterators.size(),
                     "targetNumSpills"_attr = numTargetedSpills);
     }
 
@@ -625,5 +602,5 @@ boost::filesystem::path FileBasedSpiller<Key, Value, Comparator>::getSpillDir() 
 }
 
 }  // namespace sorter
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo
 #undef MONGO_LOGV2_DEFAULT_COMPONENT

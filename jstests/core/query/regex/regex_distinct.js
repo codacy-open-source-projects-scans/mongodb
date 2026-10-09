@@ -2,6 +2,7 @@
  * Verify the usage of DISTINCT_SCAN when a regex ending with .* is a prefix of an index.
  *
  * @tags: [
+ *  uses_explain,
  *  requires_fcv_53,
  *  assumes_read_concern_local,
  *  # Makes checks about the number of shards in the collection.
@@ -47,6 +48,9 @@ if (FixtureHelpers.isMongos(db)) {
     assert.eq(results[0], "abc", formatResultsFn);
     assert.eq(results[1], "abd", formatResultsFn);
 }
-const distinctScanStages = getPlanStages(coll.explain().distinct("a", {a: {"$regex": "^ab.*"}}), "DISTINCT_SCAN");
+const distinctScanStages = getPlanStages(
+    coll.explain().distinct("a", {a: {"$regex": "^ab.*"}}),
+    "DISTINCT_SCAN",
+);
 
 assert.eq(distinctScanStages.length, FixtureHelpers.numberOfShardsForCollection(coll));

@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
@@ -66,8 +39,8 @@ std::vector<HostAndPort> generateCommitReadyMembers(size_t numMembers) {
 }
 
 void checkIfEqual(IndexBuildEntry lhs, IndexBuildEntry rhs) {
-    ASSERT_EQ(lhs.getBuildUUID(), rhs.getBuildUUID());
-    ASSERT_EQ(lhs.getCollectionUUID(), rhs.getCollectionUUID());
+    EXPECT_EQ(lhs.getBuildUUID(), rhs.getBuildUUID());
+    EXPECT_EQ(lhs.getCollectionUUID(), rhs.getCollectionUUID());
 
     BSONObj commitQuorumOptionsBsonLHS = lhs.getCommitQuorum().toBSON();
     BSONObj commitQuorumOptionsBsonRHS = rhs.getCommitQuorum().toBSON();
@@ -75,15 +48,15 @@ void checkIfEqual(IndexBuildEntry lhs, IndexBuildEntry rhs) {
 
     auto lhsIndexNames = lhs.getIndexNames();
     auto rhsIndexNames = rhs.getIndexNames();
-    ASSERT_TRUE(std::equal(lhsIndexNames.begin(), lhsIndexNames.end(), rhsIndexNames.begin()));
+    EXPECT_TRUE(std::equal(lhsIndexNames.begin(), lhsIndexNames.end(), rhsIndexNames.begin()));
 
     if (lhs.getCommitReadyMembers() && rhs.getCommitReadyMembers()) {
         auto lhsMembers = lhs.getCommitReadyMembers().value();
         auto rhsMembers = rhs.getCommitReadyMembers().value();
-        ASSERT_TRUE(std::equal(lhsMembers.begin(), lhsMembers.end(), rhsMembers.begin()));
+        EXPECT_TRUE(std::equal(lhsMembers.begin(), lhsMembers.end(), rhsMembers.begin()));
     } else {
-        ASSERT_FALSE(lhs.getCommitReadyMembers());
-        ASSERT_FALSE(rhs.getCommitReadyMembers());
+        EXPECT_FALSE(lhs.getCommitReadyMembers());
+        EXPECT_FALSE(rhs.getCommitReadyMembers());
     }
 }
 
@@ -95,10 +68,10 @@ TEST(IndexBuildEntryTest, IndexBuildEntryWithRequiredFields) {
 
     IndexBuildEntry entry(id, collectionUUID, commitQuorum, indexes);
 
-    ASSERT_EQUALS(entry.getBuildUUID(), id);
-    ASSERT_EQUALS(entry.getCollectionUUID(), collectionUUID);
-    ASSERT_EQUALS(entry.getCommitQuorum().numNodes, 1);
-    ASSERT_EQUALS(entry.getIndexNames().size(), indexes.size());
+    EXPECT_EQ(entry.getBuildUUID(), id);
+    EXPECT_EQ(entry.getCollectionUUID(), collectionUUID);
+    EXPECT_EQ(entry.getCommitQuorum().numNodes, 1);
+    EXPECT_EQ(entry.getIndexNames().size(), indexes.size());
 }
 
 TEST(IndexBuildEntryTest, IndexBuildEntryWithOptionalFields) {
@@ -111,11 +84,11 @@ TEST(IndexBuildEntryTest, IndexBuildEntryWithOptionalFields) {
 
     entry.setCommitReadyMembers(generateCommitReadyMembers(2));
 
-    ASSERT_EQUALS(entry.getBuildUUID(), id);
-    ASSERT_EQUALS(entry.getCollectionUUID(), collectionUUID);
-    ASSERT_EQUALS(entry.getCommitQuorum().mode, CommitQuorumOptions::kMajority);
-    ASSERT_EQUALS(entry.getIndexNames().size(), indexes.size());
-    ASSERT_EQ(entry.getCommitReadyMembers()->size(), 2U);
+    EXPECT_EQ(entry.getBuildUUID(), id);
+    EXPECT_EQ(entry.getCollectionUUID(), collectionUUID);
+    EXPECT_EQ(entry.getCommitQuorum().mode, CommitQuorumOptions::kMajority);
+    EXPECT_EQ(entry.getIndexNames().size(), indexes.size());
+    EXPECT_EQ(entry.getCommitReadyMembers()->size(), 2U);
 }
 
 TEST(IndexBuildEntryTest, SerializeAndDeserialize) {
@@ -128,7 +101,7 @@ TEST(IndexBuildEntryTest, SerializeAndDeserialize) {
     entry.setCommitReadyMembers(generateCommitReadyMembers(3));
 
     BSONObj obj = entry.toBSON();
-    ASSERT_TRUE(validateBSON(obj).isOK());
+    EXPECT_TRUE(validateBSON(obj).isOK());
 
     IDLParserContext ctx("IndexBuildsEntry Parser");
     IndexBuildEntry rebuiltEntry = IndexBuildEntry::parse(obj, ctx);

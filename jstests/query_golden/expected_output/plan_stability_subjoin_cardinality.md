@@ -15,146 +15,7 @@
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_type":"LARGE BURNISHED NICKEL"},{"p_retailprice":{"$gt":1699.79}}]}}],"cursor":{},"idx":1}
 ```
-### >>> Subjoin 1-0
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}
-```
-Estimated cardinality: 0  
-Actual cardinality: 29  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 1-1
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ p_partkey = ps_partkey
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]} 
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 8  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 1-2
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ partsupp.ps_suppkey = s_suppkey
-  -> [none] INLJ p_partkey = ps_partkey
-      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]} 
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 1-3
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"BRAZIL"}},{"n_name":{"$not":{"$in":["CHINA","GERMANY"]}}}]},{}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_nationkey = n_nationkey
-  -> [none] INLJ partsupp.ps_suppkey = s_suppkey
-      -> [none] INLJ p_partkey = ps_partkey
-          -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]} 
-          -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"BRAZIL"}},{"n_name":{"$not":{"$in":["CHINA","GERMANY"]}}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 1-4
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"BRAZIL"}},{"n_name":{"$not":{"$in":["CHINA","GERMANY"]}}}]},{}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}}]},{}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ nation_s.n_regionkey = r_regionkey
-  -> [none] INLJ supplier.s_nationkey = n_nationkey
-      -> [none] INLJ partsupp.ps_suppkey = s_suppkey
-          -> [none] INLJ p_partkey = ps_partkey
-              -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"LARGE BURNISHED NICKEL"}},{"p_retailprice":{"$gt":1699.79}}]} 
-              -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_supplycost":{"$lt":68.15}},{"ps_comment":{"$regex":"^ ab"}}]} 
-                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000255"}},{"s_acctbal":{"$lte":7307.62}}]} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"BRAZIL"}},{"n_name":{"$not":{"$in":["CHINA","GERMANY"]}}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
-  -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 3  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 2
 ```
 {"aggregate":"supplier","pipeline":[
@@ -168,7 +29,70 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_name":"AFRICA"},{"region_s.r_name":"AMERICA"}]}}],"cursor":{},"idx":2}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 2-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 2-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":0}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":0}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 2-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":0}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":4}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AMERICA"}}]},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_name":{"$eq":"AFRICA"}}]}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":0}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 80  
+Actual cardinality: 204  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 3
 ```
 {"aggregate":"part","pipeline":[
@@ -225,15 +149,16 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]}},
 {"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}}]}},
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-NLJ s_nationkey = n_nationkey
+INLJ s_nationkey = n_nationkey
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
 ```
 Estimated cardinality: 1  
 Actual cardinality: 1  
@@ -246,7 +171,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]}},
 {"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}}]}},
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"$and":[{"r_regionkey":{"$eq":0}},{}]}}]}},
@@ -256,9 +181,10 @@ db.supplier.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ nation_s.n_regionkey = r_regionkey
-  -> [none] NLJ s_nationkey = n_nationkey
+  -> [none] INLJ s_nationkey = n_nationkey
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
   -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":0}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
 ```
@@ -273,7 +199,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]}},
 {"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}}]}},
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"$and":[{"r_regionkey":{"$eq":0}},{}]}}]}},
@@ -287,9 +213,10 @@ Subjoin plan:
 ```
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] INLJ nation_s.n_regionkey = r_regionkey
-      -> [none] NLJ s_nationkey = n_nationkey
+      -> [none] INLJ s_nationkey = n_nationkey
           -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
       -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":0}} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^l"}} 
@@ -306,7 +233,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]}},
 {"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}}]}},
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"$and":[{"r_regionkey":{"$eq":0}},{}]}}]}},
@@ -324,9 +251,10 @@ Subjoin plan:
 INLJ partsupp.ps_partkey = p_partkey
   -> [none] INLJ supplier.s_suppkey = ps_suppkey
       -> [none] INLJ nation_s.n_regionkey = r_regionkey
-          -> [none] NLJ s_nationkey = n_nationkey
+          -> [none] INLJ s_nationkey = n_nationkey
               -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000749"}},{"s_acctbal":{"$lt":7182.24}}]} 
-              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
           -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":0}} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
       -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^l"}} 
@@ -363,15 +291,15 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}}]
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}
 ```
 Estimated cardinality: 3  
-Actual cardinality: 3  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
@@ -379,7 +307,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
@@ -388,7 +316,7 @@ db.region.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
   -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
 ```
@@ -401,7 +329,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -414,7 +342,7 @@ Subjoin plan:
 ```
 INLJ nation_s.n_nationkey = s_nationkey
   -> [none] INLJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
       -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$eq":6399.78}}} 
@@ -429,7 +357,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -446,7 +374,7 @@ Subjoin plan:
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] INLJ nation_s.n_nationkey = s_nationkey
       -> [none] INLJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
           -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$eq":6399.78}}} 
@@ -454,7 +382,7 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":2021}},{"ps_availqty":{"$gt":5420}},{"ps_availqty":{"$gte":3530}}]},{"$or":[{"ps_availqty":{"$eq":5432}},{"ps_supplycost":{"$gt":941.7}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 269  
+Estimated cardinality: 327  
 Actual cardinality: 621  
 Orders of magnitude: 0
 
@@ -463,7 +391,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -485,7 +413,7 @@ HJ p_partkey = partsupp.ps_partkey
   -> [none] INLJ supplier.s_suppkey = ps_suppkey
       -> [none] INLJ nation_s.n_nationkey = s_nationkey
           -> [none] INLJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}}]} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
               -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$not":{"$eq":1}}},{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_name":{"$eq":"UNITED KINGDOM"}}]}]} 
                   -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
           -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$eq":6399.78}}} 
@@ -493,7 +421,7 @@ HJ p_partkey = partsupp.ps_partkey
       -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":2021}},{"ps_availqty":{"$gt":5420}},{"ps_availqty":{"$gte":3530}}]},{"$or":[{"ps_availqty":{"$eq":5432}},{"ps_supplycost":{"$gt":941.7}}]}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 2  
+Estimated cardinality: 4  
 Actual cardinality: 7  
 Orders of magnitude: 0
 
@@ -683,7 +611,7 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$lt":6696}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 1718  
+Estimated cardinality: 1709  
 Actual cardinality: 1245  
 Orders of magnitude: 0
 
@@ -720,7 +648,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$regex":"^ECONOMY"}}
 ```
-Estimated cardinality: 249  
+Estimated cardinality: 304  
 Actual cardinality: 193  
 Orders of magnitude: 0
 
@@ -816,7 +744,105 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"supplier.s_name":"Supplier#000000148"},{"p_retailprice":{"$lte":1699.79}}]}}],"cursor":{},"idx":10}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 10-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 13  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 10-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_retailprice":{"$not":{"$lte":1699.79}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$not":{"$lte":1699.79}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 0  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 10-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_retailprice":{"$not":{"$lte":1699.79}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000148"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$eq":20}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_suppkey = s_suppkey
+  -> [none] INLJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]} 
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$not":{"$lte":1699.79}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000148"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$eq":20}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
+```
+Estimated cardinality: 0  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 10-3
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_retailprice":{"$not":{"$lte":1699.79}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000148"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$eq":20}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["IRAQ","PERU","SAUDI ARABIA"]}}]},{"n_name":{"$not":{"$in":["ETHIOPIA","MOZAMBIQUE"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ supplier.s_nationkey = n_nationkey
+  -> [none] INLJ partsupp.ps_suppkey = s_suppkey
+      -> [none] INLJ ps_partkey = p_partkey
+          -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$eq":1414}},{"ps_comment":{"$not":{"$regex":"^usl"}}}]} 
+          -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$not":{"$lte":1699.79}}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000148"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$eq":20}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["IRAQ","PERU","SAUDI ARABIA"]}}]},{"n_name":{"$not":{"$in":["ETHIOPIA","MOZAMBIQUE"]}}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 11
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -834,7 +860,106 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$and":[{"customer.c_mktsegment":"MACHINERY"}]}}],"cursor":{},"idx":11}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 11-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 11-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_nationkey = c_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+```
+Estimated cardinality: 97  
+Actual cardinality: 87  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 11-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_orderdate":{"$gt":"1998-02-20T00:00:00.000Z"}}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ customer.c_custkey = o_custkey
+  -> [none] INLJ s_nationkey = c_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderpriority":{"$eq":"3-MEDIUM"}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(887932800000), new Date(9223372036854775807)]"]}
+```
+Estimated cardinality: 10  
+Actual cardinality: 17  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 11-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_orderdate":{"$gt":"1998-02-20T00:00:00.000Z"}}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] HJ customer.c_custkey = o_custkey
+      -> [none] INLJ s_nationkey = c_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":3580.35}},{"s_name":{"$eq":"Supplier#000000338"}}]},{"$nor":[{"s_acctbal":{"$eq":3839.44}},{"s_acctbal":{"$gt":9583.11}}]},{"$nor":[{"s_nationkey":{"$eq":13}},{"s_nationkey":{"$eq":6}}]}]} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_acctbal":{"$gte":6089.13}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderpriority":{"$eq":"3-MEDIUM"}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(887932800000), new Date(9223372036854775807)]"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 42  
+Actual cardinality: 80  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 12
 ```
 {"aggregate":"part","pipeline":[
@@ -852,141 +977,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_name":{"$regex":{"$regex":"^d","$options":""}}}]}}],"cursor":{},"idx":12}
 ```
-### >>> Subjoin 12-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 12-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["CHINA","KENYA"]}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["CHINA","KENYA"]}}}
-```
-Estimated cardinality: 9  
-Actual cardinality: 9  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 12-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["CHINA","KENYA"]}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_nationkey":9}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["CHINA","KENYA"]}}} 
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
-```
-Estimated cardinality: 17  
-Actual cardinality: 45  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 12-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["CHINA","KENYA"]}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_nationkey":9}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_availqty":{"$gt":6300}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] HJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["CHINA","KENYA"]}}} 
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
-          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$gt":6300}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 484  
-Actual cardinality: 1333  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 12-4
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["CHINA","KENYA"]}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_nationkey":9}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_availqty":{"$gt":6300}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"p_name":{"$regex":"^d"}}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ partsupp.ps_partkey = p_partkey
-  -> [none] INLJ supplier.s_suppkey = ps_suppkey
-      -> [none] HJ nation_s.n_nationkey = s_nationkey
-          -> [none] HJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$eq":2}}]} 
-              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["CHINA","KENYA"]}}} 
-          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
-              -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$gt":6300}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_name":{"$regex":"^d"}}
-```
-Estimated cardinality: 28  
-Actual cardinality: 66  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 13
 ```
 {"aggregate":"supplier","pipeline":[
@@ -1011,7 +1002,69 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_regionkey":2}]}}],"cursor":{},"idx":14}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 14-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]}
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 14-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_regionkey":{"$not":{"$eq":3}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":3}}}
+```
+Estimated cardinality: 12  
+Actual cardinality: 10  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 14-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_regionkey":{"$not":{"$eq":3}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":0}}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":3}}} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier
+```
+Estimated cardinality: 480  
+Actual cardinality: 392  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 15
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -1053,7 +1106,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]},{"s_nationkey":13}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
 ));
 ```
@@ -1062,10 +1115,10 @@ Subjoin plan:
 INLJ s_nationkey = c_nationkey
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]} 
       -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[13.0, 13.0]"]}
-  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
 ```
-Estimated cardinality: 375  
+Estimated cardinality: 363  
 Actual cardinality: 355  
 Orders of magnitude: 0
 
@@ -1076,24 +1129,25 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]},{"s_nationkey":13}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
 {"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
-{"$match":{"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]}}]}},
+{"$match":{"$and":[{"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]},{}]}}]}},
 {"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-HJ customer.c_custkey = o_custkey
+INLJ customer.c_custkey = o_custkey
   -> [none] INLJ s_nationkey = c_nationkey
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]} 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[13.0, 13.0]"]}
-      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
-  -> [orders] COLLSCAN: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]}
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
 ```
-Estimated cardinality: 15  
+Estimated cardinality: 14  
 Actual cardinality: 23  
 Orders of magnitude: 0
 
@@ -1104,10 +1158,10 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]},{"s_nationkey":13}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
 {"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
-{"$match":{"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]}}]}},
+{"$match":{"$and":[{"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]},{}]}}]}},
 {"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
 {"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
 {"$match":{"$and":[{"l_receiptdate":{"$not":{"$gte":"1996-12-14T00:00:00.000Z"}}},{}]}}]}},
@@ -1117,17 +1171,18 @@ db.supplier.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ orders.o_orderkey = l_orderkey
-  -> [none] HJ customer.c_custkey = o_custkey
+  -> [none] INLJ customer.c_custkey = o_custkey
       -> [none] INLJ s_nationkey = c_nationkey
           -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$gte":-707.02}},{"s_name":{"$eq":"Supplier#000000717"}}]} 
               -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[13.0, 13.0]"]}
-          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":13}},{"c_acctbal":{"$gt":1687.58}},{"c_mktsegment":{"$not":{"$eq":"MACHINERY"}}}]} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
-      -> [orders] COLLSCAN: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]} 
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$not":{"$gt":"1996-01-31T00:00:00.000Z"}}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000052"}},{"o_orderstatus":{"$eq":"P"}},{"o_shippriority":{"$gt":0}}]},{"$nor":[{"o_orderpriority":{"$eq":"5-LOW"}},{"o_orderpriority":{"$eq":"3-MEDIUM"}},{"o_totalprice":{"$gt":6549.4}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_receiptdate":{"$not":{"$gte":"1996-12-14T00:00:00.000Z"}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
 ```
-Estimated cardinality: 44  
+Estimated cardinality: 40  
 Actual cardinality: 24  
 Orders of magnitude: 0
 
@@ -1308,7 +1363,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_regionkey":1}]}}],"cursor":{},"idx":22}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 22-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 22-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT","ETHIOPIA"]}}},{"n_name":{"$not":{"$in":["IRAQ","VIETNAM"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["INDONESIA","MOROCCO","VIETNAM"]}}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT","ETHIOPIA"]}}},{"n_name":{"$not":{"$in":["IRAQ","VIETNAM"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["INDONESIA","MOROCCO","VIETNAM"]}}}]}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 22-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT","ETHIOPIA"]}}},{"n_name":{"$not":{"$in":["IRAQ","VIETNAM"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["INDONESIA","MOROCCO","VIETNAM"]}}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$in":[1,2]}},{"r_regionkey":{"$not":{"$eq":1}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT","ETHIOPIA"]}}},{"n_name":{"$not":{"$in":["IRAQ","VIETNAM"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["INDONESIA","MOROCCO","VIETNAM"]}}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 16  
+Actual cardinality: 84  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 23
 ```
 {"aggregate":"part","pipeline":[
@@ -1355,7 +1473,7 @@ INLJ s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":9578}},{"ps_supplycost":{"$lte":161.52}}]},{"$or":[{"ps_availqty":{"$lte":1414}},{"ps_availqty":{"$gte":2826}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 716  
+Estimated cardinality: 785  
 Actual cardinality: 758  
 Orders of magnitude: 0
 
@@ -1382,7 +1500,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["JUMBO BAG","LG CASE","MED PACK","SM CAN"]}}
 ```
-Estimated cardinality: 72  
+Estimated cardinality: 81  
 Actual cardinality: 69  
 Orders of magnitude: 0
 
@@ -1402,7 +1520,116 @@ Orders of magnitude: 0
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.o_orderstatus":"F"}]}}],"cursor":{},"idx":24}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 24-0
+```
+db.orders.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_orderstatus":{"$eq":"O"}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderstatus":{"$eq":"O"}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(901670400000), new Date(9223372036854775807)]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 242  
+Orders of magnitude: 2
+> [!WARNING]
+> Estimate discrepancy is more than 2 orders of magnitude.
+
+---
+### >>> Subjoin 24-1
+```
+db.orders.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_orderstatus":{"$eq":"O"}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
+{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ o_custkey = c_custkey
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderstatus":{"$eq":"O"}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(901670400000), new Date(9223372036854775807)]"]}
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_custkey_1
+```
+Estimated cardinality: 0  
+Actual cardinality: 47  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 24-2
+```
+db.orders.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_orderstatus":{"$eq":"O"}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
+{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] INLJ o_custkey = c_custkey
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderstatus":{"$eq":"O"}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(901670400000), new Date(9223372036854775807)]"]}
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_custkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 201  
+Orders of magnitude: 2
+> [!WARNING]
+> Estimate discrepancy is more than 2 orders of magnitude.
+
+---
+### >>> Subjoin 24-3
+```
+db.orders.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_orderstatus":{"$eq":"O"}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
+{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
+{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderstatus":{"$not":{"$eq":"F"}}},{"$nor":[{"s_acctbal":{"$lte":6399.78}},{"s_acctbal":{"$gte":7619.85}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ customer.c_nationkey = s_nationkey
+  -> [none] INLJ orders.o_orderkey = l_orderkey
+      -> [none] INLJ o_custkey = c_custkey
+          -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderstatus":{"$eq":"O"}} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(901670400000), new Date(9223372036854775807)]"]}
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$not":{"$eq":"Customer#000010639"}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_custkey_1
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_orderstatus":{"$not":{"$eq":"F"}}},{"$nor":[{"s_acctbal":{"$lte":6399.78}},{"s_acctbal":{"$gte":7619.85}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 882  
+Orders of magnitude: 2
+> [!WARNING]
+> Estimate discrepancy is more than 2 orders of magnitude.
+
+---
 ## >>> Command idx 25
 ```
 {"aggregate":"part","pipeline":[
@@ -1425,15 +1652,15 @@ Query is not eligible, as it does not have an SBE-only plan.
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"r_regionkey":{"$not":{"$eq":4}}}}]
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":4}}}
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}
 ```
 Estimated cardinality: 4  
-Actual cardinality: 4  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
@@ -1441,7 +1668,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"r_regionkey":{"$not":{"$eq":4}}}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"n_regionkey":{"$eq":3}},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
@@ -1450,7 +1677,7 @@ db.region.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":4}}} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]} 
   -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":3}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
 ```
@@ -1463,7 +1690,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"r_regionkey":{"$not":{"$eq":4}}}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"n_regionkey":{"$eq":3}},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -1476,7 +1703,7 @@ Subjoin plan:
 ```
 HJ nation_s.n_nationkey = s_nationkey
   -> [none] INLJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":4}}} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]} 
       -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":3}} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":7082.37}}
@@ -1490,7 +1717,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"r_regionkey":{"$not":{"$eq":4}}}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"n_regionkey":{"$eq":3}},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -1507,14 +1734,14 @@ Subjoin plan:
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] HJ nation_s.n_nationkey = s_nationkey
       -> [none] INLJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":4}}} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]} 
           -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":3}} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":7082.37}} 
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^. de"}},{"ps_availqty":{"$not":{"$gte":8163}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 28  
+Estimated cardinality: 36  
 Actual cardinality: 50  
 Orders of magnitude: 0
 
@@ -1523,7 +1750,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"r_regionkey":{"$not":{"$eq":4}}}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"n_regionkey":{"$eq":3}},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -1544,7 +1771,7 @@ INLJ partsupp.ps_partkey = p_partkey
   -> [none] INLJ supplier.s_suppkey = ps_suppkey
       -> [none] HJ nation_s.n_nationkey = s_nationkey
           -> [none] INLJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":4}}} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":4}}}]} 
               -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":3}} 
                   -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
           -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":7082.37}} 
@@ -1553,7 +1780,7 @@ INLJ partsupp.ps_partkey = p_partkey
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_partkey":{"$not":{"$eq":5801}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
 ```
-Estimated cardinality: 28  
+Estimated cardinality: 36  
 Actual cardinality: 50  
 Orders of magnitude: 0
 
@@ -1609,7 +1836,7 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^ r"}}
 ```
-Estimated cardinality: 180  
+Estimated cardinality: 188  
 Actual cardinality: 201  
 Orders of magnitude: 0
 
@@ -1631,7 +1858,7 @@ INLJ p_partkey = l_partkey
   -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_shipmode":{"$eq":"REG AIR"}},{"l_linenumber":{"$gt":4}},{"l_partkey":{"$not":{"$eq":6234}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
 ```
-Estimated cardinality: 168  
+Estimated cardinality: 178  
 Actual cardinality: 169  
 Orders of magnitude: 0
 
@@ -1659,11 +1886,9 @@ INLJ p_partkey = ps_partkey, lineitem.l_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$not":{"$gte":495.17}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 26225  
+Estimated cardinality: 267  
 Actual cardinality: 358  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
+Orders of magnitude: 0
 
 ---
 ## >>> Command idx 29
@@ -1754,7 +1979,7 @@ Orders of magnitude: 0
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"lineitem.l_suppkey":169},{"p_mfgr":{"$in":["Manufacturer#2","Manufacturer#5","Manufacturer#3"]}},{"lineitem.l_linenumber":{"$lte":6}}]}}],"cursor":{},"idx":30}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 31
 ```
 {"aggregate":"part","pipeline":[
@@ -1865,7 +2090,7 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$lte":285.82}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 112  
+Estimated cardinality: 118  
 Actual cardinality: 142  
 Orders of magnitude: 0
 
@@ -1902,7 +2127,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["MED BOX","MED PACK"]}}
 ```
-Estimated cardinality: 5  
+Estimated cardinality: 6  
 Actual cardinality: 10  
 Orders of magnitude: 1
 
@@ -1923,36 +2148,38 @@ Orders of magnitude: 1
 ```
 ### >>> Subjoin 32-0
 ```
-db.nation.aggregate(EJSON.deserialize(
+db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]}}]
+{"$match":{"r_regionkey":4}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]}
+FETCH: plan_stability_subjoin_cardinality_md.region 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.region r_regionkey_1 {"r_regionkey":["[4.0, 4.0]"]}
 ```
-Estimated cardinality: 3  
-Actual cardinality: 3  
+Estimated cardinality: 1  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
 ### >>> Subjoin 32-1
 ```
-db.nation.aggregate(EJSON.deserialize(
+db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+{"$match":{"r_regionkey":4}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-INLJ n_regionkey = r_regionkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]} 
-  -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":4}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
+NLJ r_regionkey = n_regionkey
+  -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.region r_regionkey_1 {"r_regionkey":["[4.0, 4.0]"]}
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
 ```
 Estimated cardinality: 1  
 Actual cardinality: 1  
@@ -1961,12 +2188,12 @@ Orders of magnitude: 0
 ---
 ### >>> Subjoin 32-2
 ```
-db.nation.aggregate(EJSON.deserialize(
+db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$match":{"r_regionkey":4}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$nor":[{"s_nationkey":{"$eq":1}},{"s_nationkey":{"$eq":14}},{"s_acctbal":{"$gte":2060.13}}]},{}]}}]}},
 {"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
@@ -1975,10 +2202,11 @@ db.nation.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ nation_s.n_nationkey = s_nationkey
-  -> [none] INLJ n_regionkey = r_regionkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]} 
-      -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":4}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.region r_regionkey_1 {"r_regionkey":["[4.0, 4.0]"]}
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_nationkey":{"$eq":1}},{"s_nationkey":{"$eq":14}},{"s_acctbal":{"$gte":2060.13}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
 ```
@@ -1989,12 +2217,12 @@ Orders of magnitude: 1
 ---
 ### >>> Subjoin 32-3
 ```
-db.nation.aggregate(EJSON.deserialize(
+db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$match":{"r_regionkey":4}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$nor":[{"s_nationkey":{"$eq":1}},{"s_nationkey":{"$eq":14}},{"s_acctbal":{"$gte":2060.13}}]},{}]}}]}},
 {"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
@@ -2007,16 +2235,17 @@ Subjoin plan:
 ```
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] INLJ nation_s.n_nationkey = s_nationkey
-      -> [none] INLJ n_regionkey = r_regionkey
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["EGYPT","INDONESIA"]}},{"n_name":{"$not":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}}]} 
-          -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$eq":4}} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.region r_regionkey_1
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] FETCH: plan_stability_subjoin_cardinality_md.region 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.region r_regionkey_1 {"r_regionkey":["[4.0, 4.0]"]}
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"ALGERIA"}}},{"n_name":{"$not":{"$in":["EGYPT","INDONESIA"]}}},{"n_name":{"$in":["CHINA","ROMANIA","SAUDI ARABIA"]}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_nationkey":{"$eq":1}},{"s_nationkey":{"$eq":14}},{"s_acctbal":{"$gte":2060.13}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^he"}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 8  
+Estimated cardinality: 7  
 Actual cardinality: 11  
 Orders of magnitude: 1
 
@@ -2044,7 +2273,75 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$or":[{"supplier.s_nationkey":1},{"supplier.s_acctbal":{"$gt":9524.84}}]}}],"cursor":{},"idx":34}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 34-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]},{"s_nationkey":14}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[14.0, 14.0]"]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 34-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]},{"s_nationkey":14}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":2977}},{"ps_supplycost":{"$lte":548.54}},{"ps_supplycost":{"$gt":659.13}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[14.0, 14.0]"]}
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":2977}},{"ps_supplycost":{"$lte":548.54}},{"ps_supplycost":{"$gt":659.13}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 16  
+Actual cardinality: 16  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 34-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]},{"s_nationkey":14}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":2977}},{"ps_supplycost":{"$lte":548.54}},{"ps_supplycost":{"$gt":659.13}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gt":9524.84}},{"s_nationkey":{"$eq":1}}]},{"s_acctbal":{"$gt":2152.23}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[14.0, 14.0]"]}
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":2977}},{"ps_supplycost":{"$lte":548.54}},{"ps_supplycost":{"$gt":659.13}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 16  
+Actual cardinality: 16  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 35
 ```
 {"aggregate":"supplier","pipeline":[
@@ -2056,7 +2353,69 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_name":"Supplier#000000690"},{"region_s.r_name":"ASIA"}]}}],"cursor":{},"idx":35}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 35-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]}
+```
+Estimated cardinality: 4  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 35-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"JORDAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"JORDAN"}}}
+```
+Estimated cardinality: 19  
+Actual cardinality: 19  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 35-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"JORDAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000690"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"ASIA"}}},{"r_name":{"$not":{"$eq":"ASIA"}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"JORDAN"}}} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000690"}}}
+```
+Estimated cardinality: 767  
+Actual cardinality: 746  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 36
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -2073,107 +2432,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"ps_comment":{"$regex":{"$regex":"^. ","$options":""}}}]}}],"cursor":{},"idx":36}
 ```
-### >>> Subjoin 36-0
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":1}]}}]
-));
-```
-Subjoin plan:
-```
-FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"CANADA"}} 
-  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
-```
-Estimated cardinality: 1  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 36-1
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":1}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
-));
-```
-Subjoin plan:
-```
-NLJ n_regionkey = r_regionkey
-  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"CANADA"}} 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]}
-```
-Estimated cardinality: 1  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 36-2
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":1}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000448"}}},{"$nor":[{"s_acctbal":{"$lte":6537.07}},{"s_acctbal":{"$gt":7174.74}}]}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ nation_s.n_nationkey = s_nationkey
-  -> [none] NLJ n_regionkey = r_regionkey
-      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"CANADA"}} 
-          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]} 
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000448"}}},{"$nor":[{"s_acctbal":{"$lte":6537.07}},{"s_acctbal":{"$gt":7174.74}}]}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-```
-Estimated cardinality: 1  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 36-3
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":1}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000448"}}},{"$nor":[{"s_acctbal":{"$lte":6537.07}},{"s_acctbal":{"$gt":7174.74}}]}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^. "}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] INLJ nation_s.n_nationkey = s_nationkey
-      -> [none] NLJ n_regionkey = r_regionkey
-          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"CANADA"}} 
-              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE"]}}]} 
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000448"}}},{"$nor":[{"s_acctbal":{"$lte":6537.07}},{"s_acctbal":{"$gt":7174.74}}]}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^. "}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 14  
-Actual cardinality: 33  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 37
 ```
 {"aggregate":"part","pipeline":[
@@ -2188,7 +2447,105 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"nation_s.n_name":{"$nin":["INDIA","RUSSIA"]}}]}}],"cursor":{},"idx":37}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 37-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 37-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 4  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 37-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$lte":889.05}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$lte":889.05}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 314  
+Actual cardinality: 205  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 37-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$lte":889.05}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ n_nationkey = s_nationkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":0}}},{"$nor":[{"n_name":{"$not":{"$in":["INDIA","RUSSIA"]}}}]}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":1871.86}},{"s_acctbal":{"$gte":1218.59}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$lte":889.05}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 314  
+Actual cardinality: 205  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 38
 ```
 {"aggregate":"part","pipeline":[
@@ -2208,7 +2565,146 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"supplier.o_totalprice":{"$gt":82814.62}}]}}],"cursor":{},"idx":38}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 38-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 38-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$eq":0}},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":0}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 38-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$eq":0}},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":0}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 4  
+Actual cardinality: 12  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 38-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$eq":0}},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^nic"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] INLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":0}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^nic"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 38-4
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$eq":0}},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^nic"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] INLJ r_regionkey = n_regionkey
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$eq":0}} 
+                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$gt":82814.62}}},{"$nor":[{"s_acctbal":{"$eq":5322.35}},{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":-128.86}},{"s_acctbal":{"$gt":1033.1}}]}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^nic"}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 39
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -2221,69 +2717,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$or":[{"ps_comment":{"$regex":{"$regex":"^th","$options":""}}}]}}],"cursor":{},"idx":39}
 ```
-### >>> Subjoin 39-0
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]}
-```
-Estimated cardinality: 7  
-Actual cardinality: 7  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 39-1
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"s_acctbal":{"$gte":1084.18}},{"$nor":[{"s_acctbal":{"$eq":7337.45}},{"s_nationkey":{"$eq":13}}]}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ n_nationkey = s_nationkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":1084.18}},{"$nor":[{"s_acctbal":{"$eq":7337.45}},{"s_nationkey":{"$eq":13}}]}]}
-```
-Estimated cardinality: 220  
-Actual cardinality: 221  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 39-2
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"s_acctbal":{"$gte":1084.18}},{"$nor":[{"s_acctbal":{"$eq":7337.45}},{"s_nationkey":{"$eq":13}}]}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"ps_comment":{"$regex":"^th"}}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ n_nationkey = s_nationkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"INDIA"}},{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["PERU","VIETNAM"]}}]} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":1084.18}},{"$nor":[{"s_acctbal":{"$eq":7337.45}},{"s_nationkey":{"$eq":13}}]}]} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^th"}}
-```
-Estimated cardinality: 351  
-Actual cardinality: 285  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 40
 ```
 {"aggregate":"supplier","pipeline":[
@@ -2325,7 +2759,103 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"supplier.s_name":"Supplier#000000540"}]}}],"cursor":{},"idx":42}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 42-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 42-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ s_nationkey = n_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 42-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_comment":{"$regex":"^t"}},{"$nor":[{"ps_availqty":{"$lte":5420}},{"ps_comment":{"$regex":"^ "}}]},{"$nor":[{"ps_comment":{"$regex":"^ bl"}},{"ps_comment":{"$regex":"^are"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] NLJ s_nationkey = n_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^t"}},{"$nor":[{"ps_availqty":{"$lte":5420}},{"ps_comment":{"$regex":"^ "}}]},{"$nor":[{"ps_comment":{"$regex":"^ bl"}},{"ps_comment":{"$regex":"^are"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 42-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_comment":{"$regex":"^t"}},{"$nor":[{"ps_availqty":{"$lte":5420}},{"ps_comment":{"$regex":"^ "}}]},{"$nor":[{"ps_comment":{"$regex":"^ bl"}},{"ps_comment":{"$regex":"^are"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] NLJ s_nationkey = n_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":6835.16}},{"s_name":{"$eq":"Supplier#000000085"}},{"s_acctbal":{"$gte":1218.59}}]},{"s_name":{"$eq":"Supplier#000000540"}}]} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^t"}},{"$nor":[{"ps_availqty":{"$lte":5420}},{"ps_comment":{"$regex":"^ "}}]},{"$nor":[{"ps_comment":{"$regex":"^ bl"}},{"ps_comment":{"$regex":"^are"}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 43
 ```
 {"aggregate":"part","pipeline":[
@@ -2401,7 +2931,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_size":{"$lt":8}}
 ```
-Estimated cardinality: 20  
+Estimated cardinality: 22  
 Actual cardinality: 25  
 Orders of magnitude: 0
 
@@ -2430,7 +2960,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_regionkey":0}]}}],"cursor":{},"idx":45}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 45-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 45-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$in":["AFRICA","ASIA"]}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$in":["AFRICA","ASIA"]}},{"r_regionkey":{"$not":{"$eq":0}}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 45-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$in":["AFRICA","ASIA"]}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$in":["AFRICA","ASIA"]}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 8  
+Actual cardinality: 47  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 46
 ```
 {"aggregate":"part","pipeline":[
@@ -2490,18 +3083,19 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$match":{"$and":[{"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-NLJ r_regionkey = n_regionkey
+INLJ r_regionkey = n_regionkey
   -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}}
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
 ```
 Estimated cardinality: 5  
-Actual cardinality: 5  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
@@ -2511,7 +3105,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$match":{"$and":[{"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]},{"s_nationkey":22}]}}]}},
@@ -2521,9 +3115,10 @@ db.region.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 HJ nation_s.n_nationkey = s_nationkey
-  -> [none] NLJ r_regionkey = n_regionkey
+  -> [none] INLJ r_regionkey = n_regionkey
       -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]} 
       -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[22.0, 22.0]"]}
 ```
@@ -2538,7 +3133,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$match":{"$and":[{"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]},{"s_nationkey":22}]}}]}},
@@ -2552,15 +3147,16 @@ Subjoin plan:
 ```
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] NLJ r_regionkey = n_regionkey
+      -> [none] INLJ r_regionkey = n_regionkey
           -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]} 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[22.0, 22.0]"]}
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$nor":[{"ps_availqty":{"$lte":8052}},{"ps_comment":{"$regex":"^fina"}}]},{"$nor":[{"ps_supplycost":{"$lte":528.21}},{"ps_availqty":{"$lt":4947}},{"ps_supplycost":{"$lt":13.2}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 27  
+Estimated cardinality: 30  
 Actual cardinality: 154  
 Orders of magnitude: 1
 
@@ -2571,7 +3167,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"CHINA"}}}}]}},
+{"$match":{"$and":[{"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]},{"s_nationkey":22}]}}]}},
@@ -2589,9 +3185,10 @@ Subjoin plan:
 INLJ partsupp.ps_partkey = p_partkey
   -> [none] INLJ supplier.s_suppkey = ps_suppkey
       -> [none] HJ nation_s.n_nationkey = s_nationkey
-          -> [none] NLJ r_regionkey = n_regionkey
+          -> [none] INLJ r_regionkey = n_regionkey
               -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"$or":[{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
-              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CHINA"}}} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_nationkey":{"$eq":22}},{"n_name":{"$not":{"$eq":"CHINA"}}}]} 
+                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
           -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":7241.4}},{"s_acctbal":{"$lte":5302.37}},{"s_nationkey":{"$eq":13}}]} 
               -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[22.0, 22.0]"]}
       -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$nor":[{"ps_availqty":{"$lte":8052}},{"ps_comment":{"$regex":"^fina"}}]},{"$nor":[{"ps_supplycost":{"$lte":528.21}},{"ps_availqty":{"$lt":4947}},{"ps_supplycost":{"$lt":13.2}}]}]} 
@@ -2599,7 +3196,7 @@ INLJ partsupp.ps_partkey = p_partkey
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$lt":1102.18}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
 ```
-Estimated cardinality: 5  
+Estimated cardinality: 6  
 Actual cardinality: 39  
 Orders of magnitude: 1
 
@@ -2620,7 +3217,106 @@ Orders of magnitude: 1
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^y ac","$options":""}}},{"region_s.r_name":"ASIA"},{"region_s.r_name":"ASIA"}]}}],"cursor":{},"idx":48}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 48-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 48-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 48-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_nationkey":{"$eq":12}},{"s_acctbal":{"$lte":5046.81}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_name":{"$eq":"Supplier#000000920"}},{"s_nationkey":{"$eq":7}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_nationkey":{"$eq":12}},{"s_acctbal":{"$lte":5046.81}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_name":{"$eq":"Supplier#000000920"}},{"s_nationkey":{"$eq":7}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 9  
+Actual cardinality: 51  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 48-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_nationkey":{"$eq":12}},{"s_acctbal":{"$lte":5046.81}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_name":{"$eq":"Supplier#000000920"}},{"s_nationkey":{"$eq":7}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^y ac"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["INDIA","INDONESIA","KENYA"]}} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_nationkey":{"$eq":12}},{"s_acctbal":{"$lte":5046.81}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_name":{"$eq":"Supplier#000000920"}},{"s_nationkey":{"$eq":7}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^y ac"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 49
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -2706,7 +3402,7 @@ INLJ s_nationkey = c_nationkey
   -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_acctbal":{"$lt":108.03}},{"c_mktsegment":{"$in":["BUILDING","HOUSEHOLD"]}}]},{"c_name":{"$not":{"$eq":"Customer#000013077"}}},{"$nor":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_mktsegment":{"$eq":"BUILDING"}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
 ```
-Estimated cardinality: 33  
+Estimated cardinality: 39  
 Actual cardinality: 40  
 Orders of magnitude: 0
 
@@ -2734,7 +3430,7 @@ INLJ customer.c_custkey = o_custkey
   -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderpriority":{"$eq":"4-NOT SPECIFIED"}},{"o_orderstatus":{"$eq":"O"}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
 ```
-Estimated cardinality: 32  
+Estimated cardinality: 35  
 Actual cardinality: 39  
 Orders of magnitude: 0
 
@@ -2792,7 +3488,142 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"supplier.o_orderpriority":"1-URGENT"}]}}],"cursor":{},"idx":52}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 52-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 52-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_regionkey":{"$not":{"$eq":1}}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 52-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_regionkey":{"$not":{"$eq":1}}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 59  
+Actual cardinality: 63  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 52-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_regionkey":{"$not":{"$eq":1}}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_supplycost":{"$gt":47.97}},{"ps_supplycost":{"$gte":632.83}},{"ps_comment":{"$regex":"^s a"}}]},{"ps_availqty":{"$gt":298}},{"ps_comment":{"$regex":"^b"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] HJ n_regionkey = r_regionkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$gt":47.97}},{"ps_supplycost":{"$gte":632.83}},{"ps_comment":{"$regex":"^s a"}}]},{"ps_availqty":{"$gt":298}},{"ps_comment":{"$regex":"^b"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 71  
+Actual cardinality: 64  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 52-4
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_regionkey":{"$not":{"$eq":1}}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_supplycost":{"$gt":47.97}},{"ps_supplycost":{"$gte":632.83}},{"ps_comment":{"$regex":"^s a"}}]},{"ps_availqty":{"$gt":298}},{"ps_comment":{"$regex":"^b"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] HJ n_regionkey = r_regionkey
+              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"INDONESIA"}}},{"$nor":[{"n_name":{"$not":{"$in":["ALGERIA","ETHIOPIA"]}}}]}]} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":9166.95}},{"o_orderpriority":{"$not":{"$eq":"1-URGENT"}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$gt":47.97}},{"ps_supplycost":{"$gte":632.83}},{"ps_comment":{"$regex":"^s a"}}]},{"ps_availqty":{"$gt":298}},{"ps_comment":{"$regex":"^b"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 71  
+Actual cardinality: 64  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 53
 ```
 {"aggregate":"part","pipeline":[
@@ -2806,7 +3637,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"lineitem.l_suppkey":2},{"p_type":{"$regex":{"$regex":"^MEDIUM","$options":""}}}]}}],"cursor":{},"idx":53}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 54
 ```
 {"aggregate":"part","pipeline":[
@@ -2822,102 +3653,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"p_container":{"$nin":["LG PACK","WRAP BOX"]}}]}}],"cursor":{},"idx":54}
 ```
-### >>> Subjoin 54-0
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]}
-```
-Estimated cardinality: 6  
-Actual cardinality: 6  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 54-1
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ s_nationkey = n_nationkey
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 3  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 54-2
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$nor":[{"ps_supplycost":{"$gt":528.21}},{"ps_comment":{"$regex":"^gula"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ s_nationkey = n_nationkey
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]} 
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_supplycost":{"$gt":528.21}},{"ps_comment":{"$regex":"^gula"}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 91  
-Actual cardinality: 132  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 54-3
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$nor":[{"ps_supplycost":{"$gt":528.21}},{"ps_comment":{"$regex":"^gula"}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"$nor":[{"p_container":{"$not":{"$in":["LG PACK","WRAP BOX"]}}}]}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ partsupp.ps_partkey = p_partkey
-  -> [none] INLJ supplier.s_suppkey = ps_suppkey
-      -> [none] HJ s_nationkey = n_nationkey
-          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$lt":-942.73}},{"s_name":{"$in":["Supplier#000000543","Supplier#000000643"]}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["ALGERIA","BRAZIL"]}}}]} 
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_supplycost":{"$gt":528.21}},{"ps_comment":{"$regex":"^gula"}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_container":{"$not":{"$in":["LG PACK","WRAP BOX"]}}}]}
-```
-Estimated cardinality: 4  
-Actual cardinality: 5  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 55
 ```
 {"aggregate":"part","pipeline":[
@@ -2960,101 +3696,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"ps_comment":{"$regex":{"$regex":"^in","$options":""}}}]}}],"cursor":{},"idx":57}
 ```
-### >>> Subjoin 57-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_regionkey":{"$not":{"$eq":1}}}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}}
-```
-Estimated cardinality: 4  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 57-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_regionkey":{"$not":{"$eq":1}}}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"MOROCCO"}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"MOROCCO"}}}
-```
-Estimated cardinality: 19  
-Actual cardinality: 19  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 57-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_regionkey":{"$not":{"$eq":1}}}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"MOROCCO"}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gt":9747.16}},{"s_name":{"$in":["Supplier#000000439","Supplier#000000517"]}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"MOROCCO"}}} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gt":9747.16}},{"s_name":{"$in":["Supplier#000000439","Supplier#000000517"]}}]}
-```
-Estimated cardinality: 49  
-Actual cardinality: 19  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 57-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_regionkey":{"$not":{"$eq":1}}}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$eq":"MOROCCO"}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gt":9747.16}},{"s_name":{"$in":["Supplier#000000439","Supplier#000000517"]}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^in"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] HJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$not":{"$eq":1}}} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"MOROCCO"}}} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gt":9747.16}},{"s_name":{"$in":["Supplier#000000439","Supplier#000000517"]}}]} 
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^in"}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 102  
-Actual cardinality: 24  
-Orders of magnitude: 1
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 58
 ```
 {"aggregate":"part","pipeline":[
@@ -3099,7 +3741,7 @@ INLJ s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$gte":5937}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 96  
+Estimated cardinality: 99  
 Actual cardinality: 86  
 Orders of magnitude: 0
 
@@ -3126,7 +3768,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_comment":{"$regex":"^ "}},{"p_container":{"$not":{"$in":["LG BAG","MED DRUM"]}}}]}
 ```
-Estimated cardinality: 3  
+Estimated cardinality: 4  
 Actual cardinality: 4  
 Orders of magnitude: 0
 
@@ -3147,102 +3789,7 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"p_type":"SMALL BRUSHED NICKEL"}]}}],"cursor":{},"idx":59}
 ```
-### >>> Subjoin 59-0
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]}
-```
-Estimated cardinality: 8  
-Actual cardinality: 8  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 59-1
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ n_nationkey = s_nationkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]}
-```
-Estimated cardinality: 13  
-Actual cardinality: 1  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 59-2
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_availqty":{"$eq":2826}},{"ps_supplycost":{"$gt":240.39}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ n_nationkey = s_nationkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]} 
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_availqty":{"$eq":2826}},{"ps_supplycost":{"$gt":240.39}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 795  
-Actual cardinality: 59  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 59-3
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$or":[{"ps_availqty":{"$eq":2826}},{"ps_supplycost":{"$gt":240.39}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"p_type":{"$not":{"$eq":"SMALL BRUSHED NICKEL"}}}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ partsupp.ps_partkey = p_partkey
-  -> [none] INLJ supplier.s_suppkey = ps_suppkey
-      -> [none] HJ n_nationkey = s_nationkey
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$in":["CANADA","MOZAMBIQUE","VIETNAM"]}}]}]} 
-          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_nationkey":{"$eq":21}}]} 
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$or":[{"ps_availqty":{"$eq":2826}},{"ps_supplycost":{"$gt":240.39}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$not":{"$eq":"SMALL BRUSHED NICKEL"}}}
-```
-Estimated cardinality: 789  
-Actual cardinality: 59  
-Orders of magnitude: 1
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 60
 ```
 {"aggregate":"part","pipeline":[
@@ -3258,7 +3805,107 @@ Orders of magnitude: 1
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"supplier.o_orderpriority":"5-LOW"}]}}],"cursor":{},"idx":60}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 60-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_regionkey":1}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 60-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_regionkey":1}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}
+```
+Estimated cardinality: 138  
+Actual cardinality: 133  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 60-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_regionkey":1}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$gte":9820}},{"ps_comment":{"$regex":"^ "}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gte":9820}},{"ps_comment":{"$regex":"^ "}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 10  
+Actual cardinality: 23  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 60-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_regionkey":1}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$gte":9820}},{"ps_comment":{"$regex":"^ "}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ n_nationkey = s_nationkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":6537.07}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gte":9820}},{"ps_comment":{"$regex":"^ "}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 10  
+Actual cardinality: 23  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 61
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -3419,7 +4066,7 @@ db.nation.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]},{"n_regionkey":4}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
 ));
 ```
@@ -3428,7 +4075,7 @@ Subjoin plan:
 NLJ n_regionkey = r_regionkey
   -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]} 
       -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]}
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}
 ```
 Estimated cardinality: 1  
 Actual cardinality: 1  
@@ -3441,7 +4088,7 @@ db.nation.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]},{"n_regionkey":4}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"s_acctbal":{"$gte":2697.53}},{}]}}]}},
@@ -3454,7 +4101,7 @@ INLJ nation_s.n_nationkey = s_nationkey
   -> [none] NLJ n_regionkey = r_regionkey
       -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]} 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gte":2697.53}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
 ```
@@ -3469,7 +4116,7 @@ db.nation.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]},{"n_regionkey":4}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"s_acctbal":{"$gte":2697.53}},{}]}}]}},
@@ -3486,13 +4133,13 @@ INLJ supplier.s_suppkey = ps_suppkey
       -> [none] NLJ n_regionkey = r_regionkey
           -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["FRANCE","JAPAN","VIETNAM"]}}},{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$in":[0,1,2]}}]},{"n_name":{"$eq":"JORDAN"}}]} 
               -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AMERICA"}},{"r_name":{"$eq":"EUROPE"}}]}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gte":2697.53}} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$lte":4022}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 745  
+Estimated cardinality: 761  
 Actual cardinality: 828  
 Orders of magnitude: 0
 
@@ -3512,7 +4159,109 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"supplier.o_orderpriority":"5-LOW"}]}}],"cursor":{},"idx":66}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 66-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]},{"n_regionkey":1}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 66-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]},{"n_regionkey":1}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 70  
+Actual cardinality: 65  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 66-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]},{"n_regionkey":1}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":146.47}},{"ps_availqty":{"$gt":5069}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":146.47}},{"ps_availqty":{"$gt":5069}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 400  
+Actual cardinality: 395  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 66-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]},{"n_regionkey":1}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":146.47}},{"ps_availqty":{"$gt":5069}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ n_nationkey = s_nationkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["CANADA","INDIA","UNITED STATES"]}}},{"n_regionkey":{"$eq":0}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}},{"s_acctbal":{"$not":{"$gte":8724.42}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":146.47}},{"ps_availqty":{"$gt":5069}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 400  
+Actual cardinality: 395  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 67
 ```
 {"aggregate":"part","pipeline":[
@@ -3564,7 +4313,69 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_name":"Supplier#000000686"},{"region_s.r_regionkey":3},{"s_acctbal":{"$gt":505.92}}]}}],"cursor":{},"idx":70}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 70-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 70-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$nor":[{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$eq":0}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$eq":0}}]}
+```
+Estimated cardinality: 11  
+Actual cardinality: 10  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 70-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$nor":[{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$eq":0}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$nor":[{"s_name":{"$eq":"Supplier#000000686"}},{"s_acctbal":{"$gt":505.92}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"RUSSIA"}},{"n_regionkey":{"$eq":0}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000686"}},{"s_acctbal":{"$gt":505.92}}]}
+```
+Estimated cardinality: 62  
+Actual cardinality: 61  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 71
 ```
 {"aggregate":"part","pipeline":[
@@ -3585,7 +4396,146 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"nation_s.n_regionkey":0},{"nation_s.n_regionkey":0}]}}],"cursor":{},"idx":71}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 71-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 71-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_regionkey = r_regionkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 71-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":8}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ n_regionkey = r_regionkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":8}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 30  
+Actual cardinality: 67  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 71-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":8}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$lte":724}},{"ps_availqty":{"$gt":9149}},{"ps_comment":{"$regex":"^y r"}}]},{"$nor":[{"ps_supplycost":{"$eq":770.46}},{"ps_supplycost":{"$lt":546.77}},{"ps_comment":{"$regex":"^quic"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] HJ n_regionkey = r_regionkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":8}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lte":724}},{"ps_availqty":{"$gt":9149}},{"ps_comment":{"$regex":"^y r"}}]},{"$nor":[{"ps_supplycost":{"$eq":770.46}},{"ps_supplycost":{"$lt":546.77}},{"ps_comment":{"$regex":"^quic"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 148  
+Actual cardinality: 358  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 71-4
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":8}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$lte":724}},{"ps_availqty":{"$gt":9149}},{"ps_comment":{"$regex":"^y r"}}]},{"$nor":[{"ps_supplycost":{"$eq":770.46}},{"ps_supplycost":{"$lt":546.77}},{"ps_comment":{"$regex":"^quic"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] HJ n_regionkey = r_regionkey
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ETHIOPIA","MOZAMBIQUE"]}} 
+                  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":0}},{"r_name":{"$in":["AFRICA","MIDDLE EAST"]}},{"r_name":{"$not":{"$eq":"AMERICA"}}}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":8}}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lte":724}},{"ps_availqty":{"$gt":9149}},{"ps_comment":{"$regex":"^y r"}}]},{"$nor":[{"ps_supplycost":{"$eq":770.46}},{"ps_supplycost":{"$lt":546.77}},{"ps_comment":{"$regex":"^quic"}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 148  
+Actual cardinality: 358  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 72
 ```
 {"aggregate":"part","pipeline":[
@@ -3652,7 +4602,69 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.s_name":"Supplier#000000439"}]}}],"cursor":{},"idx":75}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 75-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^lu"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^lu"}}
+```
+Estimated cardinality: 152  
+Actual cardinality: 181  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 75-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^lu"}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000439"}}},{"s_nationkey":{"$not":{"$eq":19}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_suppkey = s_suppkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^lu"}} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000439"}}},{"s_nationkey":{"$not":{"$eq":19}}}]}
+```
+Estimated cardinality: 146  
+Actual cardinality: 173  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 75-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^lu"}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000439"}}},{"s_nationkey":{"$not":{"$eq":19}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] HJ ps_suppkey = s_suppkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^lu"}} 
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000439"}}},{"s_nationkey":{"$not":{"$eq":19}}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 146  
+Actual cardinality: 173  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 76
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -3685,100 +4697,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"ps_comment":{"$regex":{"$regex":"^req","$options":""}}}]}}],"cursor":{},"idx":77}
 ```
-### >>> Subjoin 77-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 77-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_regionkey":{"$not":{"$eq":2}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":2}}}
-```
-Estimated cardinality: 8  
-Actual cardinality: 5  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 77-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_regionkey":{"$not":{"$eq":2}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$lt":9681.99}},{"s_acctbal":{"$gte":7627.85}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":2}}} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$lt":9681.99}},{"s_acctbal":{"$gte":7627.85}}]}
-```
-Estimated cardinality: 320  
-Actual cardinality: 198  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 77-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_regionkey":{"$not":{"$eq":2}}}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$lt":9681.99}},{"s_acctbal":{"$gte":7627.85}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"ps_comment":{"$regex":"^req"}}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] HJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":3}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":2}}} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$lt":9681.99}},{"s_acctbal":{"$gte":7627.85}}]} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^req"}}
-```
-Estimated cardinality: 128  
-Actual cardinality: 68  
-Orders of magnitude: 1
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 78
 ```
 {"aggregate":"part","pipeline":[
@@ -3799,7 +4718,143 @@ Orders of magnitude: 1
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"nation_s.n_regionkey":1}]}}],"cursor":{},"idx":78}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 78-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"r_regionkey":{"$in":[1,2]}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,2]}}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 78-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"r_regionkey":{"$in":[1,2]}}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,2]}} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 6  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 78-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"r_regionkey":{"$in":[1,2]}}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,2]}} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]}
+```
+Estimated cardinality: 22  
+Actual cardinality: 7  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 78-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"r_regionkey":{"$in":[1,2]}}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":161.52}},{"ps_availqty":{"$lt":854}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ nation_s.n_nationkey = s_nationkey
+      -> [none] INLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,2]}} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":161.52}},{"ps_availqty":{"$lt":854}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 20  
+Actual cardinality: 6  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 78-4
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"r_regionkey":{"$in":[1,2]}}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":161.52}},{"ps_availqty":{"$lt":854}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ nation_s.n_nationkey = s_nationkey
+          -> [none] INLJ r_regionkey = n_regionkey
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,2]}} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$in":["IRAN","UNITED STATES"]}},{"n_name":{"$not":{"$in":["MOZAMBIQUE","SAUDI ARABIA"]}}}]},{"n_regionkey":{"$in":[1,2]}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$lte":-685.94}},{"s_nationkey":{"$in":[2,17]}}]},{"$nor":[{"s_nationkey":{"$eq":5}},{"s_acctbal":{"$gt":9166.95}},{"s_acctbal":{"$gt":9537.73}}]}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":161.52}},{"ps_availqty":{"$lt":854}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 20  
+Actual cardinality: 6  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 79
 ```
 {"aggregate":"part","pipeline":[
@@ -3819,7 +4874,142 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"supplier.s_acctbal":{"$eq":868.36}}]}}],"cursor":{},"idx":79}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 79-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 79-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 79-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 6  
+Actual cardinality: 9  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 79-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$gte":997.82}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ n_regionkey = r_regionkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":997.82}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 79-4
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$gte":997.82}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ n_regionkey = r_regionkey
+              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"KENYA"}}},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_regionkey":{"$eq":3}}]},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$in":["GERMANY","IRAQ","MOZAMBIQUE"]}}}]}]} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":1}}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":3222.71}},{"s_acctbal":{"$not":{"$eq":868.36}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":997.82}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 80
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -3858,7 +5048,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]},{"s_nationkey":23}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
 ));
 ```
@@ -3867,10 +5057,10 @@ Subjoin plan:
 INLJ s_nationkey = c_nationkey
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]} 
       -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[23.0, 23.0]"]}
-  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"c_mktsegment":{"$not":{"$eq":"BUILDING"}}} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
 ```
-Estimated cardinality: 468  
+Estimated cardinality: 475  
 Actual cardinality: 486  
 Orders of magnitude: 0
 
@@ -3881,7 +5071,7 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]},{"s_nationkey":23}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
 {"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
 {"$match":{"$and":[{"o_clerk":{"$not":{"$eq":"Clerk#000000567"}}},{}]}}]}},
@@ -3894,12 +5084,12 @@ INLJ customer.c_custkey = o_custkey
   -> [none] INLJ s_nationkey = c_nationkey
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]} 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[23.0, 23.0]"]}
-      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"c_mktsegment":{"$not":{"$eq":"BUILDING"}}} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
   -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$not":{"$eq":"Clerk#000000567"}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
 ```
-Estimated cardinality: 4675  
+Estimated cardinality: 4739  
 Actual cardinality: 4548  
 Orders of magnitude: 0
 
@@ -3910,33 +5100,33 @@ db.supplier.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]},{"s_nationkey":23}]}},
 {"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}},{}]}}]}},
+{"$match":{"$and":[{"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]},{}]}}]}},
 {"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
 {"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
 {"$match":{"$and":[{"o_clerk":{"$not":{"$eq":"Clerk#000000567"}}},{}]}}]}},
 {"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
 {"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"l_commitdate":{"$gte":null,"$lte":"1992-04-13T00:00:00.000Z"}}}]}},
+{"$match":{"l_commitdate":{"$lte":"1992-04-13T00:00:00.000Z"}}}]}},
 {"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-HJ l_orderkey = orders.o_orderkey
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_commitdate_1 {"l_commitdate":["[new Date(-9223372036854775808), new Date(703123200000)]"]}
+HJ orders.o_orderkey = l_orderkey
   -> [none] INLJ customer.c_custkey = o_custkey
       -> [none] INLJ s_nationkey = c_nationkey
           -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":4663.08}},{"s_name":{"$eq":"Supplier#000000949"}}]} 
               -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[23.0, 23.0]"]}
-          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"c_mktsegment":{"$not":{"$eq":"BUILDING"}}} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_nationkey":{"$eq":23}},{"c_mktsegment":{"$not":{"$eq":"BUILDING"}}}]} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
       -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$not":{"$eq":"Clerk#000000567"}}} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_commitdate_1 {"l_commitdate":["[new Date(-9223372036854775808), new Date(703123200000)]"]}
 ```
-Estimated cardinality: 94  
+Estimated cardinality: 381  
 Actual cardinality: 387  
-Orders of magnitude: 1
+Orders of magnitude: 0
 
 ---
 ## >>> Command idx 81
@@ -3969,7 +5159,7 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^egul"}}
 ```
-Estimated cardinality: 100  
+Estimated cardinality: 132  
 Actual cardinality: 110  
 Orders of magnitude: 0
 
@@ -3991,7 +5181,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":941.7}},{"ps_availqty":{"$gt":5124}},{"ps_availqty":{"$gte":756}}]},{"ps_availqty":{"$lte":854}},{"ps_comment":{"$regex":"^ "}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 7  
+Estimated cardinality: 6  
 Actual cardinality: 6  
 Orders of magnitude: 0
 
@@ -4018,7 +5208,7 @@ HJ partsupp.ps_suppkey = s_suppkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":4269.56}}
 ```
-Estimated cardinality: 4  
+Estimated cardinality: 3  
 Actual cardinality: 4  
 Orders of magnitude: 0
 
@@ -4076,8 +5266,7 @@ db.part.aggregate(EJSON.deserialize(
 ```
 Subjoin plan:
 ```
-HJ r_regionkey = nation_s.n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}}]} 
+HJ nation_s.n_regionkey = r_regionkey
   -> [none] HJ supplier.s_nationkey = n_nationkey
       -> [none] HJ partsupp.ps_suppkey = s_suppkey
           -> [none] INLJ p_partkey = ps_partkey
@@ -4085,7 +5274,8 @@ HJ r_regionkey = nation_s.n_regionkey
               -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":941.7}},{"ps_availqty":{"$gt":5124}},{"ps_availqty":{"$gte":756}}]},{"ps_availqty":{"$lte":854}},{"ps_comment":{"$regex":"^ "}}]} 
                   -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
           -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":4269.56}} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["FRANCE","RUSSIA"]}}}
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["FRANCE","RUSSIA"]}}} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}}]}
 ```
 Estimated cardinality: 2  
 Actual cardinality: 3  
@@ -4103,7 +5293,72 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_regionkey":0},{"s_acctbal":{"$eq":-707.02}}]}}],"cursor":{},"idx":82}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 82-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 82-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["FRANCE","IRAQ"]}},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["FRANCE","IRAQ"]}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 82-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["FRANCE","IRAQ"]}},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$not":{"$eq":-707.02}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["FRANCE","IRAQ"]}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$eq":-707.02}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 16  
+Actual cardinality: 43  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 83
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -4119,7 +5374,107 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"customer.c_acctbal":{"$gte":-540.14}},{"l_shipmode":{"$in":["MAIL","AIR","REG AIR","FOB","RAIL"]}}]}}],"cursor":{},"idx":83}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 83-0
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]},{"c_nationkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.customer c_nationkey_1 {"c_nationkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 649  
+Actual cardinality: 30  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 83-1
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]},{"c_nationkey":0}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"o_totalprice":{"$lte":42850.94}}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ c_custkey = o_custkey
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.customer c_nationkey_1 {"c_nationkey":["[0.0, 0.0]"]}
+  -> [orders] COLLSCAN: plan_stability_subjoin_cardinality_md.orders {"o_totalprice":{"$lte":42850.94}}
+```
+Estimated cardinality: 780  
+Actual cardinality: 48  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 83-2
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]},{"c_nationkey":0}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"o_totalprice":{"$lte":42850.94}}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"l_shipmode":{"$not":{"$in":["AIR","FOB","MAIL","RAIL","REG AIR"]}}},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] HJ c_custkey = o_custkey
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.customer c_nationkey_1 {"c_nationkey":["[0.0, 0.0]"]}
+      -> [orders] COLLSCAN: plan_stability_subjoin_cardinality_md.orders {"o_totalprice":{"$lte":42850.94}} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipmode":{"$not":{"$in":["AIR","FOB","MAIL","RAIL","REG AIR"]}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 924  
+Actual cardinality: 13  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 83-3
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]},{"c_nationkey":0}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"o_totalprice":{"$lte":42850.94}}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"l_shipmode":{"$not":{"$in":["AIR","FOB","MAIL","RAIL","REG AIR"]}}},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
+{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_nationkey":0}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ s_nationkey = customer.c_nationkey
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[0.0, 0.0]"]}
+  -> [none] INLJ orders.o_orderkey = l_orderkey
+      -> [none] HJ c_custkey = o_custkey
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$not":{"$gte":-540.14}}},{"c_name":{"$not":{"$eq":"Customer#000008556"}}},{"c_acctbal":{"$lte":4306.41}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.customer c_nationkey_1 {"c_nationkey":["[0.0, 0.0]"]}
+          -> [orders] COLLSCAN: plan_stability_subjoin_cardinality_md.orders {"o_totalprice":{"$lte":42850.94}} 
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipmode":{"$not":{"$in":["AIR","FOB","MAIL","RAIL","REG AIR"]}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 1331  
+Actual cardinality: 468  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 84
 ```
 {"aggregate":"part","pipeline":[
@@ -4192,7 +5547,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"r_regionkey":{"$in":[1,4]}}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}}]}},
+{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
 ));
 ```
@@ -4200,7 +5555,7 @@ Subjoin plan:
 ```
 HJ r_regionkey = n_regionkey
   -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,4]}} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]}
 ```
 Estimated cardinality: 9  
 Actual cardinality: 10  
@@ -4213,7 +5568,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"r_regionkey":{"$in":[1,4]}}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}}]}},
+{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"s_nationkey":{"$not":{"$eq":2}}}}]}},
@@ -4225,7 +5580,7 @@ Subjoin plan:
 HJ nation_s.n_nationkey = s_nationkey
   -> [none] HJ r_regionkey = n_regionkey
       -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,4]}} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]} 
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":2}}}
 ```
 Estimated cardinality: 352  
@@ -4239,7 +5594,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"r_regionkey":{"$in":[1,4]}}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}}]}},
+{"$match":{"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"s_nationkey":{"$not":{"$eq":2}}}}]}},
@@ -4255,11 +5610,11 @@ HJ supplier.s_suppkey = ps_suppkey
   -> [none] HJ nation_s.n_nationkey = s_nationkey
       -> [none] HJ r_regionkey = n_regionkey
           -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,4]}} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,4]}},{"n_name":{"$not":{"$in":["JAPAN","UNITED KINGDOM"]}}}]} 
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":2}}} 
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^y "}}
 ```
-Estimated cardinality: 648  
+Estimated cardinality: 507  
 Actual cardinality: 659  
 Orders of magnitude: 0
 
@@ -4296,7 +5651,75 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"p_type":{"$regex":{"$regex":"^SMALL","$options":""}}},{"p_comment":{"$regex":{"$regex":"^ck","$options":""}}},{"supplier.o_shippriority":{"$gt":0}}]}}],"cursor":{},"idx":89}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 89-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_shippriority":{"$not":{"$gt":0}}},{"s_nationkey":17}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.supplier {"o_shippriority":{"$not":{"$gt":0}}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[17.0, 17.0]"]}
+```
+Estimated cardinality: 40  
+Actual cardinality: 40  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 89-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_shippriority":{"$not":{"$gt":0}}},{"s_nationkey":17}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$gte":969.52}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"o_shippriority":{"$not":{"$gt":0}}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[17.0, 17.0]"]}
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":969.52}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 88  
+Actual cardinality: 92  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 89-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_shippriority":{"$not":{"$gt":0}}},{"s_nationkey":17}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_supplycost":{"$gte":969.52}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"$nor":[{"p_comment":{"$regex":"^ck"}},{"p_type":{"$regex":"^SMALL"}}]},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"o_shippriority":{"$not":{"$gt":0}}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[17.0, 17.0]"]}
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":969.52}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_comment":{"$regex":"^ck"}},{"p_type":{"$regex":"^SMALL"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 72  
+Actual cardinality: 74  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 90
 ```
 {"aggregate":"supplier","pipeline":[
@@ -4332,7 +5755,7 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^egul"}}
 ```
-Estimated cardinality: 100  
+Estimated cardinality: 132  
 Actual cardinality: 110  
 Orders of magnitude: 0
 
@@ -4354,7 +5777,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$eq":705.79}},{"ps_availqty":{"$lte":4022}}]},{"ps_comment":{"$in":[{"$regex":"^ar d","$options":""},{"$regex":"^ ","$options":""}]}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 23  
+Estimated cardinality: 32  
 Actual cardinality: 23  
 Orders of magnitude: 0
 
@@ -4382,11 +5805,9 @@ INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
   -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_linenumber":{"$gte":3}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
 ```
-Estimated cardinality: 28844  
+Estimated cardinality: 412  
 Actual cardinality: 384  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
+Orders of magnitude: 0
 
 ---
 ## >>> Command idx 92
@@ -4401,7 +5822,70 @@ Orders of magnitude: 2
 {"$unwind":"$lineitem"},
 {"$match":{"$or":[{"lineitem.l_linenumber":{"$gte":5}}]}}],"cursor":{},"idx":92}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 92-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]}
+```
+Estimated cardinality: 455  
+Actual cardinality: 381  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 92-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 455  
+Actual cardinality: 381  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 92-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_linenumber":{"$gte":5}},{"l_shipmode":{"$in":["RAIL","REG AIR"]}}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":6218}},{"ps_comment":{"$in":[{"$regex":"^ nag","$options":""},{"$regex":"^t ","$options":""}]}}]},{"ps_availqty":{"$not":{"$gt":7214}}}]} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part 
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_linenumber":{"$gte":5}},{"l_shipmode":{"$in":["RAIL","REG AIR"]}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 567  
+Actual cardinality: 708  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 93
 ```
 {"aggregate":"part","pipeline":[
@@ -4446,7 +5930,7 @@ INLJ s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_supplycost":{"$lt":354.85}},{"ps_comment":{"$regex":"^ pa"}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 1790  
+Estimated cardinality: 1749  
 Actual cardinality: 1782  
 Orders of magnitude: 0
 
@@ -4473,7 +5957,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_size":{"$not":{"$lte":28}}}
 ```
-Estimated cardinality: 750  
+Estimated cardinality: 786  
 Actual cardinality: 773  
 Orders of magnitude: 0
 
@@ -4490,7 +5974,75 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$or":[{"nation_s.n_regionkey":0}]}}],"cursor":{},"idx":94}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 94-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 94-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":4111.07}},{"s_acctbal":{"$lte":9537.73}},{"s_acctbal":{"$lt":6113.96}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":4111.07}},{"s_acctbal":{"$lte":9537.73}},{"s_acctbal":{"$lt":6113.96}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 2  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 94-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":4111.07}},{"s_acctbal":{"$lte":9537.73}},{"s_acctbal":{"$lt":6113.96}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$not":{"$in":["ARGENTINA","EGYPT"]}}},{"n_name":{"$eq":"MOROCCO"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$in":["CANADA","MOROCCO"]}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":4111.07}},{"s_acctbal":{"$lte":9537.73}},{"s_acctbal":{"$lt":6113.96}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 141  
+Actual cardinality: 240  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 95
 ```
 {"aggregate":"part","pipeline":[
@@ -4533,15 +6085,15 @@ Query is not eligible, as it does not have an SBE-only plan.
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}}]
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}
 ```
 Estimated cardinality: 4  
-Actual cardinality: 4  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
@@ -4549,7 +6101,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
@@ -4558,7 +6110,7 @@ db.region.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
   -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
 ```
@@ -4571,7 +6123,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -4584,7 +6136,7 @@ Subjoin plan:
 ```
 HJ nation_s.n_nationkey = s_nationkey
   -> [none] INLJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
       -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000326"}},{"s_nationkey":{"$eq":7}}]}
@@ -4598,7 +6150,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -4615,14 +6167,14 @@ Subjoin plan:
 INLJ supplier.s_suppkey = ps_suppkey
   -> [none] HJ nation_s.n_nationkey = s_nationkey
       -> [none] INLJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
           -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]} 
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000326"}},{"s_nationkey":{"$eq":7}}]} 
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ "}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 1739  
+Estimated cardinality: 1612  
 Actual cardinality: 1613  
 Orders of magnitude: 0
 
@@ -4631,7 +6183,7 @@ Orders of magnitude: 0
 ```
 db.region.aggregate(EJSON.deserialize(
 [
-{"$match":{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
 {"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]},{}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
@@ -4652,7 +6204,7 @@ HJ partsupp.ps_partkey = p_partkey
   -> [none] INLJ supplier.s_suppkey = ps_suppkey
       -> [none] HJ nation_s.n_nationkey = s_nationkey
           -> [none] INLJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_name":{"$not":{"$eq":"AFRICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
               -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$eq":"BRAZIL"}}}]} 
                   -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
           -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000326"}},{"s_nationkey":{"$eq":7}}]} 
@@ -4660,7 +6212,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_mfgr":{"$not":{"$in":["Manufacturer#1","Manufacturer#2","Manufacturer#3"]}}}
 ```
-Estimated cardinality: 676  
+Estimated cardinality: 623  
 Actual cardinality: 665  
 Orders of magnitude: 0
 
@@ -4677,7 +6229,74 @@ Orders of magnitude: 0
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"p_mfgr":"Manufacturer#3"},{"supplier.s_acctbal":{"$lte":-609.59}}]}}],"cursor":{},"idx":97}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 97-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$not":{"$lte":-609.59}}},{"s_nationkey":2}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":-609.59}}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 41  
+Actual cardinality: 41  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 97-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$not":{"$lte":-609.59}}},{"s_nationkey":2}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$not":{"$lt":836.01}}},{"$nor":[{"ps_availqty":{"$lte":5069}},{"ps_availqty":{"$lt":1843}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":-609.59}}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[2.0, 2.0]"]}
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$lt":836.01}}},{"$nor":[{"ps_availqty":{"$lte":5069}},{"ps_availqty":{"$lt":1843}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 273  
+Actual cardinality: 255  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 97-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$not":{"$lte":-609.59}}},{"s_nationkey":2}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$not":{"$lt":836.01}}},{"$nor":[{"ps_availqty":{"$lte":5069}},{"ps_availqty":{"$lt":1843}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_mfgr":{"$not":{"$eq":"Manufacturer#3"}}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":-609.59}}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[2.0, 2.0]"]}
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$lt":836.01}}},{"$nor":[{"ps_availqty":{"$lte":5069}},{"ps_availqty":{"$lt":1843}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_mfgr":{"$not":{"$eq":"Manufacturer#3"}}}
+```
+Estimated cardinality: 218  
+Actual cardinality: 198  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 98
 ```
 {"aggregate":"supplier","pipeline":[
@@ -4717,69 +6336,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"s_acctbal":{"$gt":8924.02}}]}}],"cursor":{},"idx":100}
 ```
-### >>> Subjoin 100-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 100-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$eq":"IRAN"}},{"n_regionkey":{"$in":[1,3]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"IRAN"}},{"n_regionkey":{"$in":[1,3]}}]}
-```
-Estimated cardinality: 4  
-Actual cardinality: 6  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 100-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$eq":"IRAN"}},{"n_regionkey":{"$in":[1,3]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_acctbal":{"$gt":8924.02}}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":2}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"IRAN"}},{"n_regionkey":{"$in":[1,3]}}]} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":8924.02}}
-```
-Estimated cardinality: 19  
-Actual cardinality: 29  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 101
 ```
 {"aggregate":"part","pipeline":[
@@ -4806,9 +6363,9 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^ions"}}
 ```
-Estimated cardinality: 40  
+Estimated cardinality: 1  
 Actual cardinality: 38  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 101-1
@@ -4828,7 +6385,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lte":298}},{"ps_supplycost":{"$lt":707.48}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 3  
+Estimated cardinality: 0  
 Actual cardinality: 5  
 Orders of magnitude: 0
 
@@ -4856,7 +6413,7 @@ INLJ partsupp.ps_suppkey = s_suppkey
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000547"}},{"s_name":{"$eq":"Supplier#000000906"}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
 ```
-Estimated cardinality: 3  
+Estimated cardinality: 0  
 Actual cardinality: 5  
 Orders of magnitude: 0
 
@@ -4879,7 +6436,7 @@ db.part.aggregate(EJSON.deserialize(
 ```
 Subjoin plan:
 ```
-HJ supplier.s_nationkey = n_nationkey
+NLJ supplier.s_nationkey = n_nationkey
   -> [none] INLJ partsupp.ps_suppkey = s_suppkey
       -> [none] INLJ p_partkey = ps_partkey
           -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^ions"}} 
@@ -4889,7 +6446,7 @@ HJ supplier.s_nationkey = n_nationkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
   -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$in":[2,3]}}
 ```
-Estimated cardinality: 1  
+Estimated cardinality: 0  
 Actual cardinality: 3  
 Orders of magnitude: 0
 
@@ -4967,7 +6524,7 @@ HJ supplier.s_suppkey = ps_suppkey
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000290"}},{"s_nationkey":{"$eq":5}}]} 
   -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gt":5464}},{"ps_comment":{"$regex":"^p"}}]}
 ```
-Estimated cardinality: 476  
+Estimated cardinality: 943  
 Actual cardinality: 443  
 Orders of magnitude: 0
 
@@ -4998,7 +6555,7 @@ HJ partsupp.ps_partkey = p_partkey
       -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gt":5464}},{"ps_comment":{"$regex":"^p"}}]} 
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_mfgr":{"$not":{"$eq":"Manufacturer#1"}}}
 ```
-Estimated cardinality: 384  
+Estimated cardinality: 742  
 Actual cardinality: 359  
 Orders of magnitude: 0
 
@@ -5015,7 +6572,69 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"region_s.r_name":"MIDDLE EAST"},{"s_name":"Supplier#000000926"}]}}],"cursor":{},"idx":103}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 103-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_name":{"$eq":"Supplier#000000926"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$eq":"Supplier#000000926"}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 103-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_name":{"$eq":"Supplier#000000926"}}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_regionkey":{"$eq":3}},{"n_name":{"$in":["INDIA","KENYA","MOZAMBIQUE"]}},{"n_name":{"$not":{"$in":["CANADA","MOZAMBIQUE"]}}}]},{"n_name":{"$not":{"$eq":"ALGERIA"}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ s_nationkey = n_nationkey
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$eq":"Supplier#000000926"}} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_regionkey":{"$eq":3}},{"n_name":{"$in":["INDIA","KENYA","MOZAMBIQUE"]}},{"n_name":{"$not":{"$in":["CANADA","MOZAMBIQUE"]}}}]},{"n_name":{"$not":{"$eq":"ALGERIA"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 103-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_name":{"$eq":"Supplier#000000926"}}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_regionkey":{"$eq":3}},{"n_name":{"$in":["INDIA","KENYA","MOZAMBIQUE"]}},{"n_name":{"$not":{"$in":["CANADA","MOZAMBIQUE"]}}}]},{"n_name":{"$not":{"$eq":"ALGERIA"}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ nation_s.n_regionkey = r_regionkey
+  -> [none] NLJ s_nationkey = n_nationkey
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$eq":"Supplier#000000926"}} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_regionkey":{"$eq":3}},{"n_name":{"$in":["INDIA","KENYA","MOZAMBIQUE"]}},{"n_name":{"$not":{"$in":["CANADA","MOZAMBIQUE"]}}}]},{"n_name":{"$not":{"$eq":"ALGERIA"}}}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":3}}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 104
 ```
 {"aggregate":"part","pipeline":[
@@ -5028,7 +6647,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.o_shippriority":{"$gte":0}},{"p_type":"MEDIUM ANODIZED NICKEL"},{"supplier.s_name":"Supplier#000000803"},{"p_name":{"$regex":{"$regex":"^b","$options":""}}}]}}],"cursor":{},"idx":104}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 104-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^bea"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^bea"}}
+```
+Estimated cardinality: 152  
+Actual cardinality: 143  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 104-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^bea"}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_acctbal":{"$gte":7448.46}}]},{"$nor":[{"s_acctbal":{"$eq":7888.41}},{"s_nationkey":{"$eq":7}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000803"}},{"o_shippriority":{"$gte":0}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_suppkey = s_suppkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^bea"}} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_acctbal":{"$gte":7448.46}}]},{"$nor":[{"s_acctbal":{"$eq":7888.41}},{"s_nationkey":{"$eq":7}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000803"}},{"o_shippriority":{"$gte":0}}]}]}
+```
+Estimated cardinality: 33  
+Actual cardinality: 25  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 104-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^bea"}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_acctbal":{"$gte":7448.46}}]},{"$nor":[{"s_acctbal":{"$eq":7888.41}},{"s_nationkey":{"$eq":7}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000803"}},{"o_shippriority":{"$gte":0}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"$nor":[{"p_type":{"$eq":"MEDIUM ANODIZED NICKEL"}},{"p_name":{"$regex":"^b"}}]},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] HJ ps_suppkey = s_suppkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^bea"}} 
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_acctbal":{"$gte":7448.46}}]},{"$nor":[{"s_acctbal":{"$eq":7888.41}},{"s_nationkey":{"$eq":7}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000803"}},{"o_shippriority":{"$gte":0}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_type":{"$eq":"MEDIUM ANODIZED NICKEL"}},{"p_name":{"$regex":"^b"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 29  
+Actual cardinality: 21  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 105
 ```
 {"aggregate":"part","pipeline":[
@@ -5040,7 +6722,71 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.s_nationkey":4}]}}],"cursor":{},"idx":105}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 105-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]}
+```
+Estimated cardinality: 25  
+Actual cardinality: 25  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 105-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":7155}},{"ps_availqty":{"$gt":4947}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":7155}},{"ps_availqty":{"$gt":4947}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 451  
+Actual cardinality: 449  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 105-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":7155}},{"ps_availqty":{"$gt":4947}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lt":-686.97}},{"s_nationkey":{"$not":{"$eq":4}}}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":7155}},{"ps_availqty":{"$gt":4947}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part
+```
+Estimated cardinality: 451  
+Actual cardinality: 449  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 106
 ```
 {"aggregate":"part","pipeline":[
@@ -5125,7 +6871,7 @@ INLJ s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":6925}},{"ps_availqty":{"$not":{"$eq":298}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 223  
+Estimated cardinality: 222  
 Actual cardinality: 217  
 Orders of magnitude: 0
 
@@ -5152,7 +6898,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_type":{"$eq":"ECONOMY BRUSHED COPPER"}},{"p_comment":{"$regex":"^s"}}]}
 ```
-Estimated cardinality: 205  
+Estimated cardinality: 204  
 Actual cardinality: 199  
 Orders of magnitude: 0
 
@@ -5171,103 +6917,7 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^slyl","$options":""}}}]}}],"cursor":{},"idx":109}
 ```
-### >>> Subjoin 109-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}
-```
-Estimated cardinality: 1  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 109-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-NLJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]}
-```
-Estimated cardinality: 0  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 109-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$nor":[{"s_name":{"$eq":"Supplier#000000832"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$gte":6835.16}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ nation_s.n_nationkey = s_nationkey
-  -> [none] NLJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]} 
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000832"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$gte":6835.16}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-```
-Estimated cardinality: 11  
-Actual cardinality: 23  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 109-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$nor":[{"s_name":{"$eq":"Supplier#000000832"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$gte":6835.16}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^slyl"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] INLJ nation_s.n_nationkey = s_nationkey
-      -> [none] NLJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ALGERIA","UNITED STATES"]}}}]} 
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000832"}},{"s_nationkey":{"$eq":19}},{"s_acctbal":{"$gte":6835.16}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^slyl"}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 7  
-Actual cardinality: 13  
-Orders of magnitude: 1
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 110
 ```
 {"aggregate":"part","pipeline":[
@@ -5280,7 +6930,74 @@ Orders of magnitude: 1
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"lineitem.l_linenumber":{"$gt":6}}]}}],"cursor":{},"idx":110}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 110-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 96  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 110-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 96  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 110-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_linenumber":{"$not":{"$gt":6}}},{"$nor":[{"l_orderkey":{"$eq":342531}},{"l_suppkey":{"$eq":237}},{"l_suppkey":{"$eq":40}},{"l_linenumber":{"$lte":3}},{"l_shipdate":{"$lte":"1992-11-11T00:00:00.000Z"}}]}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] INLJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lt":72.58}},{"$nor":[{"ps_availqty":{"$lt":9806}},{"ps_comment":{"$regex":"^i"}}]}]} 
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_linenumber":{"$not":{"$gt":6}}},{"$nor":[{"l_orderkey":{"$eq":342531}},{"l_suppkey":{"$eq":237}},{"l_suppkey":{"$eq":40}},{"l_linenumber":{"$lte":3}},{"l_shipdate":{"$lte":"1992-11-11T00:00:00.000Z"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 7  
+Actual cardinality: 842  
+Orders of magnitude: 2
+> [!WARNING]
+> Estimate discrepancy is more than 2 orders of magnitude.
+
+---
 ## >>> Command idx 111
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -5296,106 +7013,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"ps_availqty":{"$lt":5779}}]}}],"cursor":{},"idx":111}
 ```
-### >>> Subjoin 111-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 111-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]},{}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]} 
-  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
-```
-Estimated cardinality: 2  
-Actual cardinality: 5  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 111-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]},{}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"s_acctbal":{"$lte":10.33}},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ nation_s.n_nationkey = s_nationkey
-  -> [none] INLJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]} 
-      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":10.33}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-```
-Estimated cardinality: 7  
-Actual cardinality: 13  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 111-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]},{}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"s_acctbal":{"$lte":10.33}},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_availqty":{"$lt":5779}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] INLJ nation_s.n_nationkey = s_nationkey
-      -> [none] INLJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[0,4]}}]} 
-          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_name":{"$not":{"$eq":"RUSSIA"}}}]} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":10.33}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$lt":5779}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 335  
-Actual cardinality: 566  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 112
 ```
 {"aggregate":"supplier","pipeline":[
@@ -5424,7 +7042,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"lineitem.l_shipinstruct":"DELIVER IN PERSON"},{"p_comment":{"$regex":{"$regex":"^uick","$options":""}}}]}}],"cursor":{},"idx":113}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 114
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -5440,7 +7058,105 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$and":[{"l_returnflag":{"$in":["N","R"]}},{"customer.c_name":"Customer#000010639"}]}}],"cursor":{},"idx":114}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 114-0
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 114-1
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ c_custkey = o_custkey
+  -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]} 
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+```
+Estimated cardinality: 2  
+Actual cardinality: 6  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 114-2
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"l_returnflag":{"$in":["N","R"]}},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] INLJ c_custkey = o_custkey
+      -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]} 
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_returnflag":{"$in":["N","R"]}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 6  
+Actual cardinality: 6  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 114-3
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"l_returnflag":{"$in":["N","R"]}},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
+{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000119"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ customer.c_nationkey = s_nationkey
+  -> [none] INLJ orders.o_orderkey = l_orderkey
+      -> [none] INLJ c_custkey = o_custkey
+          -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$in":["AUTOMOBILE","FURNITURE"]}},{"c_name":{"$in":["Customer#000002309","Customer#000013077"]}}]},{"c_name":{"$eq":"Customer#000010639"}}]} 
+          -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"o_orderdate":{"$lte":"1995-02-03T00:00:00.000Z"}},{"o_shippriority":{"$lte":0}},{"o_totalprice":{"$lte":116740.24}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_returnflag":{"$in":["N","R"]}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000119"}}}
+```
+Estimated cardinality: 244  
+Actual cardinality: 246  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 115
 ```
 {"aggregate":"part","pipeline":[
@@ -5458,7 +7174,107 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_regionkey":3}]}}],"cursor":{},"idx":115}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 115-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]},{"n_regionkey":3}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+```
+Estimated cardinality: 4  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 115-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]},{"n_regionkey":3}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$lte":9524.84}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":9524.84}}}
+```
+Estimated cardinality: 7  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 115-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]},{"n_regionkey":3}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$lte":9524.84}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$not":{"$lt":2302}}},{"$nor":[{"ps_supplycost":{"$lte":892.51}},{"ps_supplycost":{"$lt":175.44}},{"ps_comment":{"$regex":"^ordi"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":9524.84}}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$not":{"$lt":2302}}},{"$nor":[{"ps_supplycost":{"$lte":892.51}},{"ps_supplycost":{"$lt":175.44}},{"ps_comment":{"$regex":"^ordi"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 42  
+Actual cardinality: 27  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 115-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]},{"n_regionkey":3}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$lte":9524.84}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$not":{"$lt":2302}}},{"$nor":[{"ps_supplycost":{"$lte":892.51}},{"ps_supplycost":{"$lt":175.44}},{"ps_comment":{"$regex":"^ordi"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ n_nationkey = s_nationkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ROMANIA"}},{"n_name":{"$eq":"INDIA"}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":9524.84}}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$not":{"$lt":2302}}},{"$nor":[{"ps_supplycost":{"$lte":892.51}},{"ps_supplycost":{"$lt":175.44}},{"ps_comment":{"$regex":"^ordi"}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 42  
+Actual cardinality: 27  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 116
 ```
 {"aggregate":"part","pipeline":[
@@ -5489,7 +7305,71 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_acctbal":{"$lte":7619.85}},{"region_s.r_regionkey":3}]}}],"cursor":{},"idx":117}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 117-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 117-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$not":{"$eq":0}}},{"n_name":{"$not":{"$in":["ETHIOPIA","GERMANY","INDONESIA","JAPAN"]}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$not":{"$eq":0}}},{"n_name":{"$not":{"$in":["ETHIOPIA","GERMANY","INDONESIA","JAPAN"]}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 117-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$not":{"$eq":0}}},{"n_name":{"$not":{"$in":["ETHIOPIA","GERMANY","INDONESIA","JAPAN"]}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$lte":7619.85}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$not":{"$eq":0}}},{"n_name":{"$not":{"$in":["ETHIOPIA","GERMANY","INDONESIA","JAPAN"]}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$lte":7619.85}}}
+```
+Estimated cardinality: 29  
+Actual cardinality: 28  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 118
 ```
 {"aggregate":"part","pipeline":[
@@ -5624,137 +7504,7 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"p_partkey":12630}]}}],"cursor":{},"idx":119}
 ```
-### >>> Subjoin 119-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 119-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]}
-```
-Estimated cardinality: 9  
-Actual cardinality: 10  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 119-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]}
-```
-Estimated cardinality: 227  
-Actual cardinality: 237  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 119-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^blit"}},{"ps_availqty":{"$not":{"$eq":3385}}}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] HJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]} 
-  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^blit"}},{"ps_availqty":{"$not":{"$eq":3385}}}]}
-```
-Estimated cardinality: 91  
-Actual cardinality: 80  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 119-4
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^blit"}},{"ps_availqty":{"$not":{"$eq":3385}}}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"$and":[{"p_partkey":{"$not":{"$eq":12630}}},{}]}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ partsupp.ps_partkey = p_partkey
-  -> [none] HJ supplier.s_suppkey = ps_suppkey
-      -> [none] HJ nation_s.n_nationkey = s_nationkey
-          -> [none] HJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$eq":1}}]} 
-              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$not":{"$in":["ROMANIA","UNITED STATES"]}}}]} 
-          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$gte":2781.03}},{"s_acctbal":{"$gte":7182.24}}]},{"s_nationkey":{"$not":{"$eq":20}}}]} 
-      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^blit"}},{"ps_availqty":{"$not":{"$eq":3385}}}]} 
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_partkey":{"$not":{"$eq":12630}}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
-```
-Estimated cardinality: 91  
-Actual cardinality: 80  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 120
 ```
 {"aggregate":"supplier","pipeline":[
@@ -5766,7 +7516,70 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_nationkey":19},{"region_s.r_regionkey":3}]}}],"cursor":{},"idx":120}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 120-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 120-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$not":{"$eq":3}}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 120-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"n_name":{"$eq":"INDIA"}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$not":{"$eq":3}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":19}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDIA"}} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$not":{"$eq":3}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":19}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 8  
+Actual cardinality: 47  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 121
 ```
 {"aggregate":"supplier","pipeline":[
@@ -5918,9 +7731,9 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":7155}},{"ps_comment":{"$regex":"^s. "}},{"ps_comment":{"$not":{"$regex":"^ "}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 124  
+Estimated cardinality: 59  
 Actual cardinality: 124  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 122-3
@@ -5950,7 +7763,7 @@ HJ partsupp.ps_partkey = p_partkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_name":{"$regex":"^co"}}
 ```
-Estimated cardinality: 4  
+Estimated cardinality: 2  
 Actual cardinality: 6  
 Orders of magnitude: 0
 
@@ -5967,7 +7780,70 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_name":"AFRICA"}]}}],"cursor":{},"idx":123}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 123-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 123-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$in":[2,4]}}]},{"n_name":{"$in":["JORDAN","UNITED STATES","VIETNAM"]}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$in":[2,4]}}]},{"n_name":{"$in":["JORDAN","UNITED STATES","VIETNAM"]}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 123-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$in":[2,4]}}]},{"n_name":{"$in":["JORDAN","UNITED STATES","VIETNAM"]}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":4}}]},{"r_name":{"$not":{"$eq":"AFRICA"}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$in":[2,4]}}]},{"n_name":{"$in":["JORDAN","UNITED STATES","VIETNAM"]}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 16  
+Actual cardinality: 28  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 124
 ```
 {"aggregate":"supplier","pipeline":[
@@ -5979,69 +7855,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"s_acctbal":{"$gte":8797.4}},{"s_name":"Supplier#000000676"}]}}],"cursor":{},"idx":124}
 ```
-### >>> Subjoin 124-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_name":{"$not":{"$eq":"AMERICA"}}}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$not":{"$eq":"AMERICA"}}}
-```
-Estimated cardinality: 4  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 124-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_name":{"$not":{"$eq":"AMERICA"}}}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":4}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$not":{"$eq":"AMERICA"}}} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":4}}]}
-```
-Estimated cardinality: 5  
-Actual cardinality: 6  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 124-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"r_name":{"$not":{"$eq":"AMERICA"}}}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":4}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_acctbal":{"$gte":8797.4}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$not":{"$eq":"AMERICA"}}} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":4}}]} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000676"}},{"s_acctbal":{"$gte":8797.4}}]}
-```
-Estimated cardinality: 23  
-Actual cardinality: 26  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 125
 ```
 {"aggregate":"part","pipeline":[
@@ -6069,7 +7883,106 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$and":[{"customer.c_acctbal":{"$lte":2998.55}},{"l_shipmode":"RAIL"}]}}],"cursor":{},"idx":126}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 126-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":5704.81}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":5704.81}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 126-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":5704.81}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_nationkey = c_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":5704.81}} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+```
+Estimated cardinality: 173  
+Actual cardinality: 186  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 126-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":5704.81}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"o_totalprice":{"$lt":37208.13}},{"o_shippriority":{"$gt":0}}]},{"$or":[{"o_totalprice":{"$lt":141506.52}},{"o_shippriority":{"$gt":0}}]}]},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ customer.c_custkey = o_custkey
+  -> [none] INLJ s_nationkey = c_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":5704.81}} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"$or":[{"o_totalprice":{"$lt":37208.13}},{"o_shippriority":{"$gt":0}}]},{"$or":[{"o_totalprice":{"$lt":141506.52}},{"o_shippriority":{"$gt":0}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+```
+Estimated cardinality: 176  
+Actual cardinality: 177  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 126-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":5704.81}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"o_totalprice":{"$lt":37208.13}},{"o_shippriority":{"$gt":0}}]},{"$or":[{"o_totalprice":{"$lt":141506.52}},{"o_shippriority":{"$gt":0}}]}]},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"l_shipmode":{"$eq":"RAIL"}},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] INLJ customer.c_custkey = o_custkey
+      -> [none] INLJ s_nationkey = c_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":5704.81}} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$lte":2998.55}},{"$nor":[{"c_mktsegment":{"$eq":"AUTOMOBILE"}},{"c_mktsegment":{"$eq":"AUTOMOBILE"}}]}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$and":[{"$or":[{"o_totalprice":{"$lt":37208.13}},{"o_shippriority":{"$gt":0}}]},{"$or":[{"o_totalprice":{"$lt":141506.52}},{"o_shippriority":{"$gt":0}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipmode":{"$eq":"RAIL"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 89  
+Actual cardinality: 23  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 127
 ```
 {"aggregate":"part","pipeline":[
@@ -6082,7 +7995,75 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.s_acctbal":{"$eq":3222.71}},{"p_size":{"$gt":40}}]}}],"cursor":{},"idx":127}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 127-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]},{"s_nationkey":9}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
+```
+Estimated cardinality: 36  
+Actual cardinality: 36  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 127-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]},{"s_nationkey":9}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lte":7831}},{"ps_comment":{"$regex":"^ar"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lte":7831}},{"ps_comment":{"$regex":"^ar"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 30  
+Actual cardinality: 34  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 127-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]},{"s_nationkey":9}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lte":7831}},{"ps_comment":{"$regex":"^ar"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_size":{"$not":{"$gt":40}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$not":{"$eq":3222.71}}},{"s_acctbal":{"$gt":1209.3}},{"s_acctbal":{"$gte":1432.69}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]"]}
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lte":7831}},{"ps_comment":{"$regex":"^ar"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_size":{"$not":{"$gt":40}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 23  
+Actual cardinality: 27  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 128
 ```
 {"aggregate":"supplier","pipeline":[
@@ -6170,7 +8151,7 @@ Orders of magnitude: 0
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"p_mfgr":"Manufacturer#2"},{"lineitem.l_shipinstruct":"NONE"}]}}],"cursor":{},"idx":129}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 130
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -6182,7 +8163,72 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"nation_s.n_name":"CANADA"},{"nation_s.n_name":{"$nin":["ARGENTINA","SAUDI ARABIA"]}},{"ps_availqty":{"$eq":6133}}]}}],"cursor":{},"idx":130}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 130-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 130-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_nationkey":{"$eq":20}},{"s_acctbal":{"$gt":7182.24}},{"s_acctbal":{"$gte":-128.86}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_nationkey":{"$eq":20}},{"s_acctbal":{"$gt":7182.24}},{"s_acctbal":{"$gte":-128.86}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 6  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 130-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_nationkey":{"$eq":20}},{"s_acctbal":{"$gt":7182.24}},{"s_acctbal":{"$gte":-128.86}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$eq":6133}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$eq":"FRANCE"}}]},{"$nor":[{"n_name":{"$eq":"CANADA"}},{"n_name":{"$not":{"$in":["ARGENTINA","SAUDI ARABIA"]}}}]}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_nationkey":{"$eq":20}},{"s_acctbal":{"$gt":7182.24}},{"s_acctbal":{"$gte":-128.86}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$eq":6133}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 474  
+Actual cardinality: 400  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 131
 ```
 {"aggregate":"part","pipeline":[
@@ -6207,9 +8253,9 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^li"}}
 ```
-Estimated cardinality: 160  
+Estimated cardinality: 94  
 Actual cardinality: 132  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 131-1
@@ -6229,7 +8275,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":17.49}},{"ps_supplycost":{"$not":{"$gt":944.57}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 6  
+Estimated cardinality: 4  
 Actual cardinality: 10  
 Orders of magnitude: 1
 
@@ -6257,11 +8303,9 @@ INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
   -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_discount":{"$gte":0.02}},{"$nor":[{"l_linestatus":{"$eq":"O"}},{"l_linenumber":{"$lt":5}}]}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
 ```
-Estimated cardinality: 1166  
+Estimated cardinality: 6  
 Actual cardinality: 20  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
+Orders of magnitude: 1
 
 ---
 ## >>> Command idx 132
@@ -6278,7 +8322,69 @@ Orders of magnitude: 2
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.s_nationkey":9},{"p_retailprice":{"$gte":1103.19}}]}}],"cursor":{},"idx":132}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 132-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]}
+```
+Estimated cardinality: 606  
+Actual cardinality: 924  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 132-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_retailprice":{"$not":{"$gte":1103.19}}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$not":{"$gte":1103.19}}}
+```
+Estimated cardinality: 127  
+Actual cardinality: 183  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 132-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_retailprice":{"$not":{"$gte":1103.19}}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_name":{"$not":{"$eq":"Supplier#000000046"}}},{"s_nationkey":{"$not":{"$eq":9}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_suppkey = s_suppkey
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$regex":"^s. "}},{"$nor":[{"ps_availqty":{"$lte":758}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^req"}}]},{"$nor":[{"ps_comment":{"$regex":"^. "}},{"ps_comment":{"$regex":"^ea"}}]}]} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_retailprice":{"$not":{"$gte":1103.19}}} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_name":{"$not":{"$eq":"Supplier#000000046"}}},{"s_nationkey":{"$not":{"$eq":9}}}]}
+```
+Estimated cardinality: 121  
+Actual cardinality: 177  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 133
 ```
 {"aggregate":"part","pipeline":[
@@ -6293,7 +8399,100 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"p_brand":"Brand#15"},{"supplier.o_clerk":"Clerk#000000062"},{"supplier.o_orderpriority":"1-URGENT"},{"p_mfgr":{"$in":["Manufacturer#3","Manufacturer#1"]}}]}}],"cursor":{},"idx":133}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 133-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^b"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^b"}}
+```
+Estimated cardinality: 1364  
+Actual cardinality: 1021  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 133-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^b"}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^b"}} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}
+```
+Estimated cardinality: 798  
+Actual cardinality: 588  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 133-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^b"}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gte":2800.6}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000062"}},{"o_orderpriority":{"$eq":"1-URGENT"}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ s_suppkey = partsupp.ps_suppkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":2800.6}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000062"}},{"o_orderpriority":{"$eq":"1-URGENT"}}]}]} 
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^b"}} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}
+```
+Estimated cardinality: 515  
+Actual cardinality: 386  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 133-3
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"ps_comment":{"$regex":"^b"}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gte":2800.6}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000062"}},{"o_orderpriority":{"$eq":"1-URGENT"}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$nor":[{"n_name":{"$eq":"UNITED STATES"}},{"n_name":{"$eq":"CHINA"}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = supplier.s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"UNITED STATES"}},{"n_name":{"$eq":"CHINA"}}]} 
+  -> [none] HJ s_suppkey = partsupp.ps_suppkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":2800.6}},{"$nor":[{"o_clerk":{"$eq":"Clerk#000000062"}},{"o_orderpriority":{"$eq":"1-URGENT"}}]}]} 
+      -> [none] HJ ps_partkey = p_partkey
+          -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^b"}} 
+          -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_brand":{"$eq":"Brand#15"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#3"]}}]}
+```
+Estimated cardinality: 474  
+Actual cardinality: 346  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 134
 ```
 {"aggregate":"part","pipeline":[
@@ -6316,9 +8515,9 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^x"}}
 ```
-Estimated cardinality: 120  
+Estimated cardinality: 94  
 Actual cardinality: 119  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 134-1
@@ -6338,7 +8537,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$lt":892.51}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 431  
+Estimated cardinality: 338  
 Actual cardinality: 430  
 Orders of magnitude: 0
 
@@ -6365,7 +8564,7 @@ HJ s_suppkey = partsupp.ps_suppkey
       -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$lt":892.51}} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 78  
+Estimated cardinality: 61  
 Actual cardinality: 74  
 Orders of magnitude: 0
 
@@ -6383,7 +8582,70 @@ Orders of magnitude: 0
 {"$unwind":"$lineitem"},
 {"$match":{"$and":[{"p_container":{"$in":["WRAP PACK","LG CAN","LG CAN","WRAP CAN"]}},{"lineitem.l_shipmode":{"$in":["REG AIR","RAIL","RAIL","RAIL"]}}]}}],"cursor":{},"idx":135}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 135-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]}
+```
+Estimated cardinality: 379  
+Actual cardinality: 269  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 135-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_container":{"$in":["LG CAN","WRAP CAN","WRAP PACK"]}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["LG CAN","WRAP CAN","WRAP PACK"]}}
+```
+Estimated cardinality: 33  
+Actual cardinality: 18  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 135-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_container":{"$in":["LG CAN","WRAP CAN","WRAP PACK"]}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_shipinstruct":{"$eq":"DELIVER IN PERSON"}},{"l_discount":{"$lte":0.09}},{"l_shipmode":{"$in":["RAIL","REG AIR"]}},{"l_tax":{"$not":{"$lte":0.06}}}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":240.39}},{"ps_comment":{"$regex":"^lu"}}]},{"ps_comment":{"$regex":"^ f"}}]} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["LG CAN","WRAP CAN","WRAP PACK"]}} 
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_shipinstruct":{"$eq":"DELIVER IN PERSON"}},{"l_discount":{"$lte":0.09}},{"l_shipmode":{"$in":["RAIL","REG AIR"]}},{"l_tax":{"$not":{"$lte":0.06}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 9  
+Actual cardinality: 6  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 136
 ```
 {"aggregate":"part","pipeline":[
@@ -6402,138 +8664,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_comment":{"$regex":{"$regex":"^egu","$options":""}}}]}}],"cursor":{},"idx":136}
 ```
-### >>> Subjoin 136-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 136-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]}
-```
-Estimated cardinality: 3  
-Actual cardinality: 5  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 136-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]}
-```
-Estimated cardinality: 15  
-Actual cardinality: 30  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 136-3
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":9209}},{"ps_supplycost":{"$lt":255.03}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ nation_s.n_nationkey = s_nationkey
-      -> [none] HJ r_regionkey = n_regionkey
-          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]} 
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":9209}},{"ps_supplycost":{"$lt":255.03}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 273  
-Actual cardinality: 587  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 136-4
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":9209}},{"ps_supplycost":{"$lt":255.03}}]},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"p_comment":{"$regex":"^egu"}}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ p_partkey = partsupp.ps_partkey
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^egu"}} 
-  -> [none] INLJ supplier.s_suppkey = ps_suppkey
-      -> [none] HJ nation_s.n_nationkey = s_nationkey
-          -> [none] HJ r_regionkey = n_regionkey
-              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]} 
-              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_regionkey":{"$eq":2}},{"n_name":{"$in":["ARGENTINA","ROMANIA","UNITED KINGDOM"]}}]} 
-          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_name":{"$eq":"Supplier#000000924"}},{"s_acctbal":{"$gte":8797.4}}]} 
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":9209}},{"ps_supplycost":{"$lt":255.03}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 1  
-Actual cardinality: 5  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 137
 ```
 {"aggregate":"part","pipeline":[
@@ -6573,7 +8704,7 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^aref"}}
 ```
-Estimated cardinality: 560  
+Estimated cardinality: 379  
 Actual cardinality: 399  
 Orders of magnitude: 0
 
@@ -6594,7 +8725,7 @@ HJ ps_suppkey = s_suppkey
   -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^aref"}} 
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":5704.81}}
 ```
-Estimated cardinality: 338  
+Estimated cardinality: 228  
 Actual cardinality: 231  
 Orders of magnitude: 0
 
@@ -6620,7 +8751,7 @@ HJ partsupp.ps_partkey = p_partkey
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":5704.81}} 
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_size":{"$not":{"$eq":15}}}
 ```
-Estimated cardinality: 333  
+Estimated cardinality: 223  
 Actual cardinality: 222  
 Orders of magnitude: 0
 
@@ -6639,7 +8770,103 @@ Orders of magnitude: 0
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"supplier.o_orderpriority":"5-LOW"},{"p_type":"LARGE POLISHED COPPER"}]}}],"cursor":{},"idx":139}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 139-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 139-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_regionkey":{"$not":{"$eq":0}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ s_nationkey = n_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":0}}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 139-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_regionkey":{"$not":{"$eq":0}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$gt":3160}},{"ps_availqty":{"$gt":9530}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] NLJ s_nationkey = n_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":0}}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gt":3160}},{"ps_availqty":{"$gt":9530}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 139-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"n_regionkey":{"$not":{"$eq":0}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$gt":3160}},{"ps_availqty":{"$gt":9530}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_type":{"$not":{"$eq":"LARGE POLISHED COPPER"}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] NLJ s_nationkey = n_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000836"}},{"o_orderpriority":{"$not":{"$eq":"5-LOW"}}}]} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_regionkey":{"$not":{"$eq":0}}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gt":3160}},{"ps_availqty":{"$gt":9530}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_type":{"$not":{"$eq":"LARGE POLISHED COPPER"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 140
 ```
 {"aggregate":"part","pipeline":[
@@ -6677,7 +8904,107 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"nation_s.n_regionkey":4},{"p_type":"STANDARD POLISHED BRASS"}]}}],"cursor":{},"idx":141}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 141-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]},{"n_regionkey":2}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 141-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]}
+```
+Estimated cardinality: 33  
+Actual cardinality: 26  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 141-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":836.01}},{"ps_supplycost":{"$gt":498.13}},{"ps_comment":{"$regex":"^b"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":836.01}},{"ps_supplycost":{"$gt":498.13}},{"ps_comment":{"$regex":"^b"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 8  
+Actual cardinality: 7  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 141-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$lte":836.01}},{"ps_supplycost":{"$gt":498.13}},{"ps_comment":{"$regex":"^b"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_type":{"$not":{"$eq":"STANDARD POLISHED BRASS"}}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ n_nationkey = s_nationkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"MOROCCO"}},{"n_name":{"$in":["CHINA","EGYPT"]}},{"n_regionkey":{"$in":[1,2]}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":7082.37}}]},{"$or":[{"s_acctbal":{"$lt":8724.42}},{"s_name":{"$in":["Supplier#000000602","Supplier#000000928"]}}]}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$lte":836.01}},{"ps_supplycost":{"$gt":498.13}},{"ps_comment":{"$regex":"^b"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_type":{"$not":{"$eq":"STANDARD POLISHED BRASS"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 7  
+Actual cardinality: 7  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 142
 ```
 {"aggregate":"part","pipeline":[
@@ -6690,7 +9017,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$and":[{"p_comment":{"$regex":{"$regex":"^e","$options":""}}},{"lineitem.l_shipmode":{"$in":["TRUCK","REG AIR"]}}]}}],"cursor":{},"idx":142}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 142-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]}
+```
+Estimated cardinality: 303  
+Actual cardinality: 358  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 142-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_comment":{"$regex":"^e"}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^e"}}
+```
+Estimated cardinality: 32  
+Actual cardinality: 31  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 142-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_comment":{"$regex":"^e"}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_shipmode":{"$in":["REG AIR","TRUCK"]}},{"l_orderkey":{"$not":{"$eq":555271}}}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$lte":485.1}}},{"ps_availqty":{"$not":{"$lt":9913}}}]} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^e"}} 
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_shipmode":{"$in":["REG AIR","TRUCK"]}},{"l_orderkey":{"$not":{"$eq":555271}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 221  
+Actual cardinality: 264  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 143
 ```
 {"aggregate":"part","pipeline":[
@@ -6750,7 +9140,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$nor":[{"lineitem.l_extendedprice":{"$gte":1236.32}},{"p_size":{"$gt":44}},{"lineitem.l_shipdate":{"$eq":"1998-06-20T00:00:00.000Z"}},{"lineitem.l_partkey":12202},{"lineitem.l_shipdate":{"$lt":"1997-11-20T00:00:00.000Z"}}]}}],"cursor":{},"idx":146}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 147
 ```
 {"aggregate":"part","pipeline":[
@@ -6779,7 +9169,73 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_regionkey":1},{"ps_comment":{"$regex":{"$regex":"^y","$options":""}}}]}}],"cursor":{},"idx":148}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 148-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]},{"n_regionkey":1}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+```
+Estimated cardinality: 4  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 148-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]},{"n_regionkey":1}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000137"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000137"}}}
+```
+Estimated cardinality: 160  
+Actual cardinality: 158  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 148-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]},{"n_regionkey":1}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000137"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^y"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$in":["GERMANY","KENYA","UNITED STATES"]}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[1.0, 1.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000137"}}} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^y"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 327  
+Actual cardinality: 412  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 149
 ```
 {"aggregate":"part","pipeline":[
@@ -6798,7 +9254,146 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"p_partkey":15534},{"nation_s.n_regionkey":4}]}}],"cursor":{},"idx":149}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 149-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"INDONESIA"}},{"n_regionkey":2}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDONESIA"}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 149-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"INDONESIA"}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDONESIA"}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 149-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"INDONESIA"}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDONESIA"}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 2  
+Actual cardinality: 12  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 149-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"INDONESIA"}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":7854}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^bold"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ n_regionkey = r_regionkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDONESIA"}} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":7854}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^bold"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 109  
+Actual cardinality: 676  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 149-4
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"INDONESIA"}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":7854}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^bold"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_partkey":{"$not":{"$eq":15534}}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ n_regionkey = r_regionkey
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$eq":"INDONESIA"}} 
+                  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AMERICA"}},{"r_regionkey":{"$in":[1,2,3]}}]},{"r_regionkey":{"$eq":2}}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":837.27}},{"s_name":{"$eq":"Supplier#000000201"}},{"s_acctbal":{"$lte":7174.74}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":7854}},{"ps_supplycost":{"$gt":705.79}},{"ps_comment":{"$regex":"^bold"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_partkey":{"$not":{"$eq":15534}}}
+```
+Estimated cardinality: 109  
+Actual cardinality: 676  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 150
 ```
 {"aggregate":"part","pipeline":[
@@ -6842,9 +9437,9 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"PROMO BRUSHED NICKEL"}}
 ```
-Estimated cardinality: 100  
+Estimated cardinality: 94  
 Actual cardinality: 148  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 151-1
@@ -6864,7 +9459,7 @@ INLJ p_partkey = ps_partkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gt":257.33}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 301  
+Estimated cardinality: 279  
 Actual cardinality: 431  
 Orders of magnitude: 0
 
@@ -6891,7 +9486,7 @@ HJ partsupp.ps_suppkey = s_suppkey
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
   -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":1050.66}},{"s_acctbal":{"$gte":1050.66}}]}
 ```
-Estimated cardinality: 244  
+Estimated cardinality: 226  
 Actual cardinality: 348  
 Orders of magnitude: 0
 
@@ -6923,7 +9518,7 @@ HJ n_nationkey = supplier.s_nationkey
               -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
       -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":1050.66}},{"s_acctbal":{"$gte":1050.66}}]}
 ```
-Estimated cardinality: 205  
+Estimated cardinality: 190  
 Actual cardinality: 285  
 Orders of magnitude: 0
 
@@ -7016,7 +9611,104 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"ps_availqty":{"$lte":7969}},{"region_s.r_regionkey":1}]}}],"cursor":{},"idx":153}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 153-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 153-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 153-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$gte":1209.3}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$gte":1209.3}}}
+```
+Estimated cardinality: 37  
+Actual cardinality: 47  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 153-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_acctbal":{"$not":{"$gte":1209.3}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$lte":7969}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ nation_s.n_nationkey = s_nationkey
+      -> [none] INLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$not":{"$eq":1}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":3}},{"n_name":{"$not":{"$in":["ARGENTINA","CANADA"]}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$gte":1209.3}}} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$lte":7969}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 586  
+Actual cardinality: 769  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 154
 ```
 {"aggregate":"part","pipeline":[
@@ -7036,7 +9728,143 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"supplier.s_name":"Supplier#000000200"},{"p_mfgr":{"$nin":["Manufacturer#2","Manufacturer#2"]}}]}}],"cursor":{},"idx":154}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 154-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 154-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_nationkey = n_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 154-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ nation_s.n_regionkey = r_regionkey
+  -> [none] INLJ s_nationkey = n_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 154-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":724}},{"ps_supplycost":{"$gt":548.54}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] NLJ nation_s.n_regionkey = r_regionkey
+      -> [none] INLJ s_nationkey = n_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":724}},{"ps_supplycost":{"$gt":548.54}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 5  
+Actual cardinality: 46  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 154-4
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$nor":[{"ps_availqty":{"$eq":724}},{"ps_supplycost":{"$gt":548.54}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"$nor":[{"p_mfgr":{"$not":{"$eq":"Manufacturer#2"}}}]},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] NLJ nation_s.n_regionkey = r_regionkey
+          -> [none] INLJ s_nationkey = n_nationkey
+              -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000661"}},{"s_name":{"$not":{"$eq":"Supplier#000000200"}}}]} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"n_name":{"$not":{"$eq":"FRANCE"}}},{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_nationkey_1
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$eq":4}}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$nor":[{"ps_availqty":{"$eq":724}},{"ps_supplycost":{"$gt":548.54}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_mfgr":{"$not":{"$eq":"Manufacturer#2"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 9  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 155
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7048,70 +9876,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^ly s","$options":""}}}]}}],"cursor":{},"idx":155}
 ```
-### >>> Subjoin 155-0
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]}
-```
-Estimated cardinality: 4  
-Actual cardinality: 4  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 155-1
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_acctbal":{"$gt":8724.42}}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ n_nationkey = s_nationkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]} 
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":8724.42}}
-```
-Estimated cardinality: 19  
-Actual cardinality: 13  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 155-2
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_acctbal":{"$gt":8724.42}}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^ly s"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ supplier.s_suppkey = ps_suppkey
-  -> [none] HJ n_nationkey = s_nationkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$eq":"KENYA"}},{"n_name":{"$in":["CANADA","FRANCE","MOZAMBIQUE"]}}]} 
-      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":8724.42}} 
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ly s"}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 6  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 156
 ```
 {"aggregate":"part","pipeline":[
@@ -7155,7 +9920,73 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_regionkey":0},{"ps_comment":{"$regex":{"$regex":"^f","$options":""}}}]}}],"cursor":{},"idx":158}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 158-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"CANADA"}}},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CANADA"}}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 158-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"CANADA"}}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000879"}}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":2781.03}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CANADA"}}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000879"}}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":2781.03}}]}]}
+```
+Estimated cardinality: 122  
+Actual cardinality: 122  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 158-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"CANADA"}}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000879"}}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":2781.03}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^f"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"CANADA"}}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000879"}}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$lt":2781.03}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^f"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 278  
+Actual cardinality: 258  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 159
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7200,7 +10031,106 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"nation_s.n_regionkey":4}]}}],"cursor":{},"idx":161}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 161-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 161-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 2  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 161-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":-942.73}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":-942.73}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 161-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":-942.73}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] INLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"r_name":{"$not":{"$eq":"EUROPE"}}},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":4}},{"$nor":[{"n_name":{"$eq":"MOZAMBIQUE"}},{"n_regionkey":{"$eq":2}}]}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":-942.73}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 32  
+Actual cardinality: 80  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 162
 ```
 {"aggregate":"part","pipeline":[
@@ -7219,7 +10149,142 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"nation_s.n_name":"JAPAN"}]}}],"cursor":{},"idx":162}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 162-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 162-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_name":{"$eq":"ASIA"}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$eq":"ASIA"}}
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 162-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_name":{"$eq":"ASIA"}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000527"}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$eq":"ASIA"}} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000527"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 8  
+Actual cardinality: 41  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 162-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_name":{"$eq":"ASIA"}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000527"}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^ts "}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ n_regionkey = r_regionkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$eq":"ASIA"}} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000527"}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ts "}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 5  
+Actual cardinality: 20  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 162-4
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"r_name":{"$eq":"ASIA"}}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000527"}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^ts "}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ n_regionkey = r_regionkey
+              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"JAPAN"}},{"n_name":{"$not":{"$eq":"RUSSIA"}}},{"n_name":{"$not":{"$eq":"EGYPT"}}}]} 
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_name":{"$eq":"ASIA"}} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000527"}}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ts "}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 5  
+Actual cardinality: 20  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 163
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7233,7 +10298,73 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"ps_availqty":{"$lte":5124}},{"nation_s.n_name":"ARGENTINA"}]}}],"cursor":{},"idx":163}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 163-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"ARGENTINA"}}},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"ARGENTINA"}}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 163-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"ARGENTINA"}}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$in":[11,14]}}]},{"s_acctbal":{"$not":{"$gt":8561.72}}},{"$nor":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$gt":5119.09}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"ARGENTINA"}}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$in":[11,14]}}]},{"s_acctbal":{"$not":{"$gt":8561.72}}},{"$nor":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$gt":5119.09}}]}]}
+```
+Estimated cardinality: 10  
+Actual cardinality: 23  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 163-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$eq":"ARGENTINA"}}},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$in":[11,14]}}]},{"s_acctbal":{"$not":{"$gt":8561.72}}},{"$nor":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$gt":5119.09}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$lte":5124}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"ARGENTINA"}}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000137"}},{"s_nationkey":{"$in":[11,14]}}]},{"s_acctbal":{"$not":{"$gt":8561.72}}},{"$nor":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$gt":5119.09}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$lte":5124}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 401  
+Actual cardinality: 902  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 164
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7247,7 +10378,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"nation_s.n_regionkey":0}]}}],"cursor":{},"idx":164}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 164-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]}
+```
+Estimated cardinality: 4  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 164-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[1,3]}},{"n_regionkey":{"$not":{"$eq":0}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ s_nationkey = n_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,3]}},{"n_regionkey":{"$not":{"$eq":0}}}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 164-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[1,3]}},{"n_regionkey":{"$not":{"$eq":0}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ s_nationkey = n_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000556"}},{"s_nationkey":{"$eq":3}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000055"}},{"s_acctbal":{"$lt":-467.16}},{"s_acctbal":{"$gt":8512.48}}]},{"s_acctbal":{"$gte":6835.16}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[1,3]}},{"n_regionkey":{"$not":{"$eq":0}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 128  
+Actual cardinality: 320  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 165
 ```
 {"aggregate":"part","pipeline":[
@@ -7278,7 +10472,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$and":[{"p_size":{"$gt":22}},{"lineitem.l_shipinstruct":{"$in":["TAKE BACK RETURN","TAKE BACK RETURN","DELIVER IN PERSON"]}},{"p_retailprice":{"$gt":1416.49}}]}}],"cursor":{},"idx":166}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 166-0
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]}
+```
+Estimated cardinality: 1212  
+Actual cardinality: 724  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 166-1
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_retailprice":{"$gt":1416.49}},{"p_size":{"$gt":22}}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ ps_partkey = p_partkey
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_retailprice":{"$gt":1416.49}},{"p_size":{"$gt":22}}]}
+```
+Estimated cardinality: 323  
+Actual cardinality: 201  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 166-2
+```
+db.partsupp.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_retailprice":{"$gt":1416.49}},{"p_size":{"$gt":22}}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_quantity":{"$gt":33}},{"l_shipinstruct":{"$in":["DELIVER IN PERSON","TAKE BACK RETURN"]}},{"$nor":[{"l_linenumber":{"$gt":3}},{"l_quantity":{"$gte":47}}]}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] HJ ps_partkey = p_partkey
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$eq":739.85}},{"ps_comment":{"$regex":"^ i"}}]},{"ps_comment":{"$not":{"$regex":"^si"}}}]} 
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_retailprice":{"$gt":1416.49}},{"p_size":{"$gt":22}}]} 
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_quantity":{"$gt":33}},{"l_shipinstruct":{"$in":["DELIVER IN PERSON","TAKE BACK RETURN"]}},{"$nor":[{"l_linenumber":{"$gt":3}},{"l_quantity":{"$gte":47}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 699  
+Actual cardinality: 508  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 167
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7296,7 +10553,101 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"nation_s.n_regionkey":4},{"ps_comment":{"$regex":{"$regex":"^d","$options":""}}},{"region_s.r_name":"AMERICA"}]}}],"cursor":{},"idx":167}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 167-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 167-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 8  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 167-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":958.07}},{"s_acctbal":{"$lte":-609.59}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":958.07}},{"s_acctbal":{"$lte":-609.59}}]}
+```
+Estimated cardinality: 7  
+Actual cardinality: 10  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 167-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":958.07}},{"s_acctbal":{"$lte":-609.59}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$not":{"$regex":"^d"}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ nation_s.n_nationkey = s_nationkey
+      -> [none] HJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[3,4]}}]},{"r_name":{"$not":{"$eq":"AMERICA"}}},{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":4}}},{"n_name":{"$not":{"$in":["IRAQ","MOROCCO","RUSSIA","VIETNAM"]}}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":1}}]}]} 
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":958.07}},{"s_acctbal":{"$lte":-609.59}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$not":{"$regex":"^d"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 511  
+Actual cardinality: 791  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 168
 ```
 {"aggregate":"part","pipeline":[
@@ -7373,7 +10724,7 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lt":4038}},{"ps_comment":{"$regex":"^ts i"}}]},{"ps_comment":{"$not":{"$regex":"^sly"}}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 942  
+Estimated cardinality: 921  
 Actual cardinality: 768  
 Orders of magnitude: 0
 
@@ -7405,7 +10756,7 @@ HJ p_partkey = partsupp.ps_partkey
       -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lt":4038}},{"ps_comment":{"$regex":"^ts i"}}]},{"ps_comment":{"$not":{"$regex":"^sly"}}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
 ```
-Estimated cardinality: 3  
+Estimated cardinality: 4  
 Actual cardinality: 4  
 Orders of magnitude: 0
 
@@ -7424,7 +10775,106 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^ly ","$options":""}}},{"region_s.r_name":"AFRICA"}]}}],"cursor":{},"idx":169}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 169-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 169-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 169-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":8}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] INLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":8}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 114  
+Actual cardinality: 179  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 169-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]},{}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_nationkey":{"$not":{"$eq":8}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^ly "}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] INLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$not":{"$eq":1}}},{"n_regionkey":{"$not":{"$eq":2}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.nation n_regionkey_1
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_nationkey":{"$not":{"$eq":8}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ly "}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 260  
+Actual cardinality: 355  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 170
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7436,7 +10886,72 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"ps_supplycost":{"$gte":773.39}},{"ps_availqty":{"$gte":9209}},{"nation_s.n_name":"ROMANIA"}]}}],"cursor":{},"idx":170}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 170-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 170-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gt":5364.99}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":5364.99}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 17  
+Actual cardinality: 13  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 170-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gt":5364.99}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$gte":9209}},{"ps_supplycost":{"$gte":773.39}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"ROMANIA"}},{"n_regionkey":{"$not":{"$eq":4}}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$gt":5364.99}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$gte":9209}},{"ps_supplycost":{"$gte":773.39}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 18  
+Actual cardinality: 18  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 171
 ```
 {"aggregate":"part","pipeline":[
@@ -7455,7 +10970,136 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"p_partkey":14923},{"region_s.r_regionkey":0},{"region_s.r_regionkey":1}]}}],"cursor":{},"idx":171}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 171-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 171-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"IRAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"IRAN"}}}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 171-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"IRAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000390"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"IRAN"}}} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000390"}}}
+```
+Estimated cardinality: 192  
+Actual cardinality: 203  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 171-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"IRAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000390"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"ps_comment":{"$regex":"^d"}}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"IRAN"}}} 
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000390"}}} 
+  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^d"}}
+```
+Estimated cardinality: 334  
+Actual cardinality: 309  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 171-4
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"n_name":{"$not":{"$eq":"IRAN"}}}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_name":{"$not":{"$eq":"Supplier#000000390"}}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"ps_comment":{"$regex":"^d"}}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_partkey":{"$not":{"$eq":14923}}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] HJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ r_regionkey = n_regionkey
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"$nor":[{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":1}}]},{"$nor":[{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$eq":2}}]}]} 
+              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$eq":"IRAN"}}} 
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000390"}}} 
+      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^d"}} 
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_partkey":{"$not":{"$eq":14923}}}
+```
+Estimated cardinality: 334  
+Actual cardinality: 309  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 172
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7468,7 +11112,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$nor":[{"nation_s.n_name":{"$in":["JORDAN","ETHIOPIA"]}},{"ps_availqty":{"$gte":724}}]}}],"cursor":{},"idx":172}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 172-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]}
+```
+Estimated cardinality: 22  
+Actual cardinality: 22  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 172-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000558"}},{"s_acctbal":{"$gte":10.33}}]},{"$nor":[{"s_nationkey":{"$eq":11}},{"s_acctbal":{"$lte":9747.16}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]} 
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000558"}},{"s_acctbal":{"$gte":10.33}}]},{"$nor":[{"s_nationkey":{"$eq":11}},{"s_acctbal":{"$lte":9747.16}}]}]}
+```
+Estimated cardinality: 21  
+Actual cardinality: 23  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 172-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000558"}},{"s_acctbal":{"$gte":10.33}}]},{"$nor":[{"s_nationkey":{"$eq":11}},{"s_acctbal":{"$lte":9747.16}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$gte":724}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["ETHIOPIA","FRANCE"]}}},{"n_name":{"$not":{"$in":["ETHIOPIA","JORDAN"]}}}]} 
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000558"}},{"s_acctbal":{"$gte":10.33}}]},{"$nor":[{"s_nationkey":{"$eq":11}},{"s_acctbal":{"$lte":9747.16}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$gte":724}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 85  
+Actual cardinality: 136  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 173
 ```
 {"aggregate":"part","pipeline":[
@@ -7520,7 +11227,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"region_s.r_regionkey":2}]}}],"cursor":{},"idx":175}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 175-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 175-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["INDONESIA","JORDAN","KENYA"]}}]},{"n_name":{"$not":{"$eq":"IRAQ"}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["INDONESIA","JORDAN","KENYA"]}}]},{"n_name":{"$not":{"$eq":"IRAQ"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 175-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["INDONESIA","JORDAN","KENYA"]}}]},{"n_name":{"$not":{"$eq":"IRAQ"}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":1}},{"r_name":{"$in":["AFRICA","EUROPE","MIDDLE EAST"]}}]},{"r_name":{"$eq":"MIDDLE EAST"}},{"r_regionkey":{"$not":{"$eq":2}}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_regionkey":{"$eq":0}},{"n_name":{"$in":["INDONESIA","JORDAN","KENYA"]}}]},{"n_name":{"$not":{"$eq":"IRAQ"}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 56  
+Actual cardinality: 28  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 176
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7533,7 +11303,75 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_name":"JAPAN"},{"nation_s.n_regionkey":2},{"ps_comment":{"$regex":{"$regex":"^ar ","$options":""}}}]}}],"cursor":{},"idx":176}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 176-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]},{"n_regionkey":2}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 176-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_acctbal":{"$not":{"$gt":1209.3}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_acctbal":{"$not":{"$gt":1209.3}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 8  
+Actual cardinality: 9  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 176-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_acctbal":{"$not":{"$gt":1209.3}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^ar "}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":3}}]},{"n_name":{"$eq":"JAPAN"}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000556"}}},{"s_acctbal":{"$not":{"$gt":1209.3}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ar "}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 4  
+Actual cardinality: 6  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 177
 ```
 {"aggregate":"part","pipeline":[
@@ -7545,7 +11383,72 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"p_mfgr":"Manufacturer#5"},{"p_partkey":14703},{"supplier.o_totalprice":{"$lte":47090.46}}]}}],"cursor":{},"idx":177}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 177-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]}
+```
+Estimated cardinality: 102  
+Actual cardinality: 102  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 177-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$gte":210.63}},{"ps_comment":{"$regex":"^ pac"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_suppkey = ps_suppkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$gte":210.63}},{"ps_comment":{"$regex":"^ pac"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 23  
+Actual cardinality: 27  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 177-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$gte":210.63}},{"ps_comment":{"$regex":"^ pac"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"$nor":[{"p_mfgr":{"$eq":"Manufacturer#5"}},{"p_partkey":{"$eq":14703}}]},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ s_suppkey = ps_suppkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"o_totalprice":{"$not":{"$lte":47090.46}}},{"s_acctbal":{"$not":{"$gt":167.56}}}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$gte":210.63}},{"ps_comment":{"$regex":"^ pac"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"$nor":[{"p_mfgr":{"$eq":"Manufacturer#5"}},{"p_partkey":{"$eq":14703}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 19  
+Actual cardinality: 24  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 178
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7562,7 +11465,103 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"nation_s.n_regionkey":1},{"nation_s.n_name":{"$nin":["EGYPT","VIETNAM"]}},{"ps_comment":{"$regex":{"$regex":"^fin","$options":""}}}]}}],"cursor":{},"idx":178}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 178-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 178-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 178-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":-707.02}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$gt":747.88}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":-707.02}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$gt":747.88}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 178-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"s_acctbal":{"$lte":-707.02}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$gt":747.88}}]}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$not":{"$regex":"^fin"}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ n_regionkey = r_regionkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[0,3,4]}},{"$nor":[{"n_name":{"$eq":"JAPAN"}},{"n_regionkey":{"$eq":1}}]},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_name":{"$not":{"$in":["EGYPT","VIETNAM"]}}}]}]} 
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$in":[0,3,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$lte":-707.02}},{"$nor":[{"s_nationkey":{"$eq":22}},{"s_acctbal":{"$gt":747.88}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$not":{"$regex":"^fin"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 64  
+Actual cardinality: 159  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 179
 ```
 {"aggregate":"part","pipeline":[
@@ -7580,7 +11579,107 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"p_name":{"$regex":{"$regex":"^bisq","$options":""}}},{"supplier.s_acctbal":{"$gt":1432.69}},{"nation_s.n_name":{"$nin":["IRAN","MOZAMBIQUE"]}}]}}],"cursor":{},"idx":179}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 179-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 4  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 179-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]}
+```
+Estimated cardinality: 89  
+Actual cardinality: 80  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 179-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$lt":3930}},{"ps_supplycost":{"$gt":889.05}}]},{"$or":[{"ps_availqty":{"$gte":6415}},{"ps_comment":{"$regex":"^th"}}]},{"ps_supplycost":{"$not":{"$gt":670.76}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lt":3930}},{"ps_supplycost":{"$gt":889.05}}]},{"$or":[{"ps_availqty":{"$gte":6415}},{"ps_comment":{"$regex":"^th"}}]},{"ps_supplycost":{"$not":{"$gt":670.76}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 40  
+Actual cardinality: 32  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 179-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$lt":3930}},{"ps_supplycost":{"$gt":889.05}}]},{"$or":[{"ps_availqty":{"$gte":6415}},{"ps_comment":{"$regex":"^th"}}]},{"ps_supplycost":{"$not":{"$gt":670.76}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_name":{"$regex":"^bisq"}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] HJ n_nationkey = s_nationkey
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$in":["IRAN","MOZAMBIQUE"]}}},{"$nor":[{"n_name":{"$eq":"ARGENTINA"}},{"n_regionkey":{"$eq":2}}]}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gt":1432.69}},{"s_acctbal":{"$not":{"$gte":7448.46}}}]} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$lt":3930}},{"ps_supplycost":{"$gt":889.05}}]},{"$or":[{"ps_availqty":{"$gte":6415}},{"ps_comment":{"$regex":"^th"}}]},{"ps_supplycost":{"$not":{"$gt":670.76}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_name":{"$regex":"^bisq"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
+```
+Estimated cardinality: 0  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 180
 ```
 {"aggregate":"supplier","pipeline":[
@@ -7592,69 +11691,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_acctbal":{"$gte":-686.97}}]}}],"cursor":{},"idx":180}
 ```
-### >>> Subjoin 180-0
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 180-1
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$not":{"$in":["INDONESIA","IRAQ","JAPAN","VIETNAM"]}}},{"n_name":{"$not":{"$in":["EGYPT","JAPAN"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$not":{"$in":["INDONESIA","IRAQ","JAPAN","VIETNAM"]}}},{"n_name":{"$not":{"$in":["EGYPT","JAPAN"]}}}]}
-```
-Estimated cardinality: 10  
-Actual cardinality: 9  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 180-2
-```
-db.region.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]}},
-{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$or":[{"n_name":{"$not":{"$in":["INDONESIA","IRAQ","JAPAN","VIETNAM"]}}},{"n_name":{"$not":{"$in":["EGYPT","JAPAN"]}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"s_acctbal":{"$not":{"$gte":-686.97}}}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ r_regionkey = n_regionkey
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$in":[2]}}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$or":[{"n_name":{"$not":{"$in":["INDONESIA","IRAQ","JAPAN","VIETNAM"]}}},{"n_name":{"$not":{"$in":["EGYPT","JAPAN"]}}}]} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$not":{"$gte":-686.97}}}
-```
-Estimated cardinality: 10  
-Actual cardinality: 9  
-Orders of magnitude: 1
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 181
 ```
 {"aggregate":"supplier","pipeline":[
@@ -7741,7 +11778,70 @@ Orders of magnitude: 0
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_name":"Supplier#000000290"},{"region_s.r_name":"AFRICA"},{"s_acctbal":{"$gt":7619.85}},{"region_s.r_name":"MIDDLE EAST"}]}}],"cursor":{},"idx":182}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 182-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 182-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$nor":[{"n_name":{"$not":{"$in":["FRANCE","INDONESIA","IRAQ"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["FRANCE","INDONESIA","IRAQ"]}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 182-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$nor":[{"n_name":{"$not":{"$in":["FRANCE","INDONESIA","IRAQ"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_name":{"$eq":"Supplier#000000290"}},{"s_acctbal":{"$gt":7619.85}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"$or":[{"r_regionkey":{"$eq":3}},{"r_name":{"$in":["MIDDLE EAST"]}}]},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"MIDDLE EAST"}}]}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["FRANCE","INDONESIA","IRAQ"]}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000290"}},{"s_acctbal":{"$gt":7619.85}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 19  
+Actual cardinality: 29  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 183
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -7754,7 +11854,73 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$or":[{"nation_s.n_regionkey":2}]}}],"cursor":{},"idx":183}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 183-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}},{"n_regionkey":2}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 183-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_nationkey":{"$eq":2}},{"s_acctbal":{"$lte":8561.72}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000928"}},{"s_acctbal":{"$gt":4327.86}},{"s_acctbal":{"$gte":-609.59}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_nationkey":{"$eq":2}},{"s_acctbal":{"$lte":8561.72}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000928"}},{"s_acctbal":{"$gt":4327.86}},{"s_acctbal":{"$gte":-609.59}}]}]}
+```
+Estimated cardinality: 7  
+Actual cardinality: 8  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 183-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}},{"n_regionkey":2}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_nationkey":{"$eq":2}},{"s_acctbal":{"$lte":8561.72}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000928"}},{"s_acctbal":{"$gt":4327.86}},{"s_acctbal":{"$gte":-609.59}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$not":{"$in":["FRANCE","KENYA"]}}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000103"}},{"s_nationkey":{"$eq":2}},{"s_acctbal":{"$lte":8561.72}}]},{"$nor":[{"s_name":{"$eq":"Supplier#000000928"}},{"s_acctbal":{"$gt":4327.86}},{"s_acctbal":{"$gte":-609.59}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 528  
+Actual cardinality: 640  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 184
 ```
 {"aggregate":"part","pipeline":[
@@ -7774,19 +11940,145 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_name":{"$regex":{"$regex":"^h","$options":""}}},{"region_s.r_regionkey":3}]}}],"cursor":{},"idx":184}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
-## >>> Command idx 185
+### >>> Subjoin 184-0
 ```
-{"aggregate":"part","pipeline":[
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^t","$options":""}}}]}}],"as":"partsupp"}},
-{"$unwind":"$partsupp"},
-{"$lookup":{"from":"lineitem","localField":"partsupp.ps_partkey","foreignField":"l_partkey","pipeline":[
-{"$match":{"$or":[{"l_suppkey":162},{"l_partkey":13647}]}}],"as":"lineitem"}},
-{"$unwind":"$lineitem"},
-{"$match":{"$nor":[{"lineitem.l_returnflag":{"$in":["A","A"]}}]}}],"cursor":{},"idx":185}
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}}]
+));
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 184-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["ROMANIA","RUSSIA"]}},{"n_regionkey":3}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["ROMANIA","RUSSIA"]}} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+```
+Estimated cardinality: 0  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 184-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["ROMANIA","RUSSIA"]}},{"n_regionkey":3}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":3580.35}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["ROMANIA","RUSSIA"]}} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":3580.35}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 7  
+Actual cardinality: 33  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 184-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["ROMANIA","RUSSIA"]}},{"n_regionkey":3}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":3580.35}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":9806}},{"ps_supplycost":{"$gt":164.22}},{"$nor":[{"ps_availqty":{"$gte":5275}},{"ps_comment":{"$regex":"^fil"}},{"ps_comment":{"$regex":"^s"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["ROMANIA","RUSSIA"]}} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":3580.35}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":9806}},{"ps_supplycost":{"$gt":164.22}},{"$nor":[{"ps_availqty":{"$gte":5275}},{"ps_comment":{"$regex":"^fil"}},{"ps_comment":{"$regex":"^s"}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 221  
+Actual cardinality: 1012  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 184-4
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_name":{"$in":["ROMANIA","RUSSIA"]}},{"n_regionkey":3}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":3580.35}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_availqty":{"$lt":9806}},{"ps_supplycost":{"$gt":164.22}},{"$nor":[{"ps_availqty":{"$gte":5275}},{"ps_comment":{"$regex":"^fil"}},{"ps_comment":{"$regex":"^s"}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_name":{"$regex":"^h"}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ r_regionkey = n_regionkey
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"EUROPE"}},{"r_name":{"$eq":"EUROPE"}},{"r_regionkey":{"$eq":3}}]} 
+              -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["ROMANIA","RUSSIA"]}} 
+                  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[3.0, 3.0]"]}
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":3580.35}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_availqty":{"$lt":9806}},{"ps_supplycost":{"$gt":164.22}},{"$nor":[{"ps_availqty":{"$gte":5275}},{"ps_comment":{"$regex":"^fil"}},{"ps_comment":{"$regex":"^s"}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_name":{"$regex":"^h"}}
+```
+Estimated cardinality: 5  
+Actual cardinality: 22  
+Orders of magnitude: 1
+
+---
 ## >>> Command idx 186
 ```
 {"aggregate":"part","pipeline":[
@@ -7803,7 +12095,104 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"p_comment":{"$regex":{"$regex":"^rio","$options":""}}},{"nation_s.n_regionkey":4}]}}],"cursor":{},"idx":186}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 186-0
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^rio"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^rio"}}
+```
+Estimated cardinality: 94  
+Actual cardinality: 110  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 186-1
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^rio"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ p_partkey = ps_partkey
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^rio"}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+```
+Estimated cardinality: 354  
+Actual cardinality: 415  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 186-2
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^rio"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000904"}}},{"s_name":{"$not":{"$eq":"Supplier#000000162"}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_suppkey = s_suppkey
+  -> [none] INLJ p_partkey = ps_partkey
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^rio"}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000904"}}},{"s_name":{"$not":{"$eq":"Supplier#000000162"}}}]}
+```
+Estimated cardinality: 353  
+Actual cardinality: 413  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 186-3
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^rio"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000904"}}},{"s_name":{"$not":{"$eq":"Supplier#000000162"}}}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$nor":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$eq":1}}]},{"n_regionkey":4}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = supplier.s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_regionkey":{"$eq":2}},{"n_regionkey":{"$eq":1}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
+  -> [none] HJ partsupp.ps_suppkey = s_suppkey
+      -> [none] INLJ p_partkey = ps_partkey
+          -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^rio"}} 
+          -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_comment":{"$not":{"$regex":"^ si"}}},{"$nor":[{"ps_availqty":{"$eq":1972}},{"ps_availqty":{"$gte":9410}}]}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000904"}}},{"s_name":{"$not":{"$eq":"Supplier#000000162"}}}]}
+```
+Estimated cardinality: 71  
+Actual cardinality: 75  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 187
 ```
 {"aggregate":"supplier","pipeline":[
@@ -7816,7 +12205,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_name":"Supplier#000000920"},{"s_acctbal":{"$gt":3222.71}},{"region_s.r_regionkey":2}]}}],"cursor":{},"idx":187}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 187-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 187-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$eq":3}}]}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$eq":3}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 187-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$eq":3}}]}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_name":{"$eq":"Supplier#000000920"}},{"s_acctbal":{"$gt":3222.71}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","ETHIOPIA","JAPAN"]}},{"$nor":[{"n_regionkey":{"$eq":4}},{"n_regionkey":{"$eq":0}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$not":{"$eq":2}}},{"$nor":[{"r_regionkey":{"$eq":4}},{"r_regionkey":{"$eq":3}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000920"}},{"s_acctbal":{"$gt":3222.71}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 13  
+Actual cardinality: 12  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 188
 ```
 {"aggregate":"supplier","pipeline":[
@@ -7828,7 +12280,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_nationkey":15},{"region_s.r_name":"EUROPE"},{"s_acctbal":{"$gte":-609.59}}]}}],"cursor":{},"idx":188}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 188-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 188-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$in":[2,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$in":[2,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 188-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_regionkey":{"$in":[2,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gte":-609.59}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["JAPAN","SAUDI ARABIA"]}},{"n_regionkey":{"$in":[2,4]}}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$in":[2,4]}},{"r_name":{"$not":{"$eq":"EUROPE"}}}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_nationkey":{"$eq":15}},{"s_acctbal":{"$gte":-609.59}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 189
 ```
 {"aggregate":"supplier","pipeline":[
@@ -7841,7 +12356,70 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$nor":[{"s_name":"Supplier#000000517"},{"region_s.r_name":"MIDDLE EAST"},{"s_acctbal":{"$gte":10.33}}]}}],"cursor":{},"idx":189}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 189-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 189-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}}]}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_regionkey = r_regionkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]} 
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 189-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]}},
+{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
+{"$match":{"$and":[{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}}]}]}}]}},
+{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$nor":[{"s_name":{"$eq":"Supplier#000000517"}},{"s_acctbal":{"$gte":10.33}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] HJ n_regionkey = r_regionkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["INDIA","JORDAN","KENYA"]}},{"$nor":[{"n_regionkey":{"$eq":1}},{"n_regionkey":{"$eq":4}}]}]} 
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$not":{"$eq":"MIDDLE EAST"}}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}}]}]} 
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_name":{"$eq":"Supplier#000000517"}},{"s_acctbal":{"$gte":10.33}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 4  
+Actual cardinality: 5  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 190
 ```
 {"aggregate":"part","pipeline":[
@@ -7858,7 +12436,105 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_name":{"$nin":["EGYPT","MOROCCO","UNITED KINGDOM"]}},{"p_brand":"Brand#22"}]}}],"cursor":{},"idx":190}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 190-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 190-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":8436.92}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":8436.92}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 34  
+Actual cardinality: 46  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 190-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":8436.92}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_supplycost":{"$lt":780.26}},{"ps_supplycost":{"$gte":636.17}},{"ps_comment":{"$in":[{"$regex":"^ f","$options":""},{"$regex":"^hin","$options":""}]}}]},{"$or":[{"ps_supplycost":{"$lt":977.14}},{"ps_comment":{"$regex":"^s "}}]},{"ps_supplycost":{"$not":{"$eq":184.87}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":8436.92}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":780.26}},{"ps_supplycost":{"$gte":636.17}},{"ps_comment":{"$in":[{"$regex":"^ f","$options":""},{"$regex":"^hin","$options":""}]}}]},{"$or":[{"ps_supplycost":{"$lt":977.14}},{"ps_comment":{"$regex":"^s "}}]},{"ps_supplycost":{"$not":{"$eq":184.87}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 2670  
+Actual cardinality: 3599  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 190-3
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lte":8436.92}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_supplycost":{"$lt":780.26}},{"ps_supplycost":{"$gte":636.17}},{"ps_comment":{"$in":[{"$regex":"^ f","$options":""},{"$regex":"^hin","$options":""}]}}]},{"$or":[{"ps_supplycost":{"$lt":977.14}},{"ps_comment":{"$regex":"^s "}}]},{"ps_supplycost":{"$not":{"$eq":184.87}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_brand":{"$eq":"Brand#22"}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ p_partkey = partsupp.ps_partkey
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_brand":{"$eq":"Brand#22"}} 
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ n_nationkey = s_nationkey
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$eq":"CHINA"}},{"n_name":{"$not":{"$in":["EGYPT","MOROCCO","UNITED KINGDOM"]}}}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":8436.92}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_supplycost":{"$lt":780.26}},{"ps_supplycost":{"$gte":636.17}},{"ps_comment":{"$in":[{"$regex":"^ f","$options":""},{"$regex":"^hin","$options":""}]}}]},{"$or":[{"ps_supplycost":{"$lt":977.14}},{"ps_comment":{"$regex":"^s "}}]},{"ps_supplycost":{"$not":{"$eq":184.87}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 108  
+Actual cardinality: 121  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 191
 ```
 {"aggregate":"part","pipeline":[
@@ -7870,7 +12546,71 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$and":[{"p_comment":{"$regex":{"$regex":"^usu","$options":""}}},{"supplier.s_acctbal":{"$gte":7337.45}}]}}],"cursor":{},"idx":191}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 191-0
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^usu"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^usu"}}
+```
+Estimated cardinality: 113  
+Actual cardinality: 39  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 191-1
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^usu"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$lt":3991}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ p_partkey = ps_partkey
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^usu"}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$lt":3991}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+```
+Estimated cardinality: 272  
+Actual cardinality: 94  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 191-2
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^usu"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$not":{"$lt":3991}}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gte":7337.45}},{"$nor":[{"s_name":{"$eq":"Supplier#000000478"}},{"s_nationkey":{"$eq":18}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ s_suppkey = partsupp.ps_suppkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":7337.45}},{"$nor":[{"s_name":{"$eq":"Supplier#000000478"}},{"s_nationkey":{"$eq":18}}]}]} 
+  -> [none] INLJ p_partkey = ps_partkey
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^usu"}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$not":{"$lt":3991}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+```
+Estimated cardinality: 62  
+Actual cardinality: 16  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 192
 ```
 {"aggregate":"part","pipeline":[
@@ -7884,7 +12624,72 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$and":[{"p_comment":{"$regex":{"$regex":"^lit","$options":""}}},{"lineitem.l_shipdate":{"$gte":"1997-06-13T00:00:00.000Z"}}]}}],"cursor":{},"idx":192}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 192-0
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^lit"}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^lit"}}
+```
+Estimated cardinality: 94  
+Actual cardinality: 129  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 192-1
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^lit"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$eq":9578}},{"ps_availqty":{"$lt":8052}}]},{"ps_supplycost":{"$gt":587.19}},{"ps_comment":{"$regex":"^f"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ p_partkey = ps_partkey
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^lit"}} 
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":9578}},{"ps_availqty":{"$lt":8052}}]},{"ps_supplycost":{"$gt":587.19}},{"ps_comment":{"$regex":"^f"}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+```
+Estimated cardinality: 3  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 192-2
+```
+db.part.aggregate(EJSON.deserialize(
+[
+{"$match":{"p_comment":{"$regex":"^lit"}}},
+{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"ps_availqty":{"$eq":9578}},{"ps_availqty":{"$lt":8052}}]},{"ps_supplycost":{"$gt":587.19}},{"ps_comment":{"$regex":"^f"}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
+{"$match":{"$and":[{"$and":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_shipdate":{"$gte":"1997-06-13T00:00:00.000Z"}},{"l_shipmode":{"$in":["AIR","FOB","MAIL","SHIP"]}}]},{}]}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
+  -> [none] INLJ p_partkey = ps_partkey
+      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_comment":{"$regex":"^lit"}} 
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"$or":[{"ps_availqty":{"$eq":9578}},{"ps_availqty":{"$lt":8052}}]},{"ps_supplycost":{"$gt":587.19}},{"ps_comment":{"$regex":"^f"}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
+  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_shipdate":{"$gte":"1997-06-13T00:00:00.000Z"}},{"l_shipmode":{"$in":["AIR","FOB","MAIL","SHIP"]}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
+```
+Estimated cardinality: 2  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 193
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -8003,7 +12808,106 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"ps_comment":{"$regex":{"$regex":"^ bli","$options":""}}},{"region_s.r_name":"ASIA"},{"nation_s.n_regionkey":2}]}}],"cursor":{},"idx":196}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 196-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 196-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 196-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000783"}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000783"}}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 32  
+Actual cardinality: 186  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 196-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]},{"n_regionkey":2}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_name":{"$not":{"$eq":"Supplier#000000783"}}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^ bli"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":2}},{"r_regionkey":{"$not":{"$eq":0}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$eq":"VIETNAM"}},{"n_regionkey":{"$eq":0}},{"n_regionkey":{"$eq":4}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[2.0, 2.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_name":{"$not":{"$eq":"Supplier#000000783"}}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^ bli"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 15  
+Actual cardinality: 54  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 197
 ```
 {"aggregate":"part","pipeline":[
@@ -8023,7 +12927,141 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_name":{"$regex":{"$regex":"^li","$options":""}}},{"nation_s.n_name":{"$nin":["SAUDI ARABIA","GERMANY","KENYA"]}}]}}],"cursor":{},"idx":197}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 197-0
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 197-1
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
+));
+```
+Subjoin plan:
+```
+NLJ r_regionkey = n_regionkey
+  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]}
+```
+Estimated cardinality: 2  
+Actual cardinality: 4  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 197-2
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ nation_s.n_nationkey = s_nationkey
+  -> [none] NLJ r_regionkey = n_regionkey
+      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]} 
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 10  
+Actual cardinality: 21  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 197-3
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$not":{"$gte":587.19}}},{"ps_comment":{"$not":{"$regex":"^ula"}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ nation_s.n_nationkey = s_nationkey
+      -> [none] NLJ r_regionkey = n_regionkey
+          -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]} 
+          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]} 
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$gte":587.19}}},{"ps_comment":{"$not":{"$regex":"^ula"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 461  
+Actual cardinality: 1004  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 197-4
+```
+db.region.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]}},
+{"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
+{"$match":{"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]}}]}},
+{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"$and":[{"ps_supplycost":{"$not":{"$gte":587.19}}},{"ps_comment":{"$not":{"$regex":"^ula"}}}]},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
+{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"p_name":{"$regex":"^li"}}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ partsupp.ps_partkey = p_partkey
+  -> [none] INLJ supplier.s_suppkey = ps_suppkey
+      -> [none] INLJ nation_s.n_nationkey = s_nationkey
+          -> [none] NLJ r_regionkey = n_regionkey
+              -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":3}},{"r_regionkey":{"$in":[3,4]}}]} 
+              -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$in":[3,4]}},{"n_name":{"$not":{"$in":["GERMANY","KENYA","SAUDI ARABIA"]}}}]} 
+          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_acctbal":{"$eq":7844.41}},{"s_acctbal":{"$gte":8210.13}}]},{"s_name":{"$not":{"$eq":"Supplier#000000921"}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"$and":[{"ps_supplycost":{"$not":{"$gte":587.19}}},{"ps_comment":{"$not":{"$regex":"^ula"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_name":{"$regex":"^li"}}
+```
+Estimated cardinality: 14  
+Actual cardinality: 37  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 198
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -8052,7 +13090,75 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_name":{"$in":["ETHIOPIA","INDONESIA","EGYPT"]}},{"nation_s.n_regionkey":0},{"ps_comment":{"$regex":{"$regex":"^hi","$options":""}}}]}}],"cursor":{},"idx":199}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 199-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]},{"n_regionkey":0}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 199-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lt":5364.99}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lt":5364.99}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+```
+Estimated cardinality: 23  
+Actual cardinality: 24  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 199-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]},{"n_regionkey":0}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$lt":5364.99}},{}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_comment":{"$regex":"^hi"}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] INLJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":0}}]},{"n_name":{"$in":["EGYPT","ETHIOPIA","INDONESIA"]}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[0.0, 0.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lt":5364.99}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^hi"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 4  
+Actual cardinality: 2  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 200
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -8134,74 +13240,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$or":[{"p_size":{"$lt":24}},{"p_size":{"$gt":42}}]}}],"cursor":{},"idx":208}
 ```
-### >>> Subjoin 208-0
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"s_nationkey":{"$in":[9,13,23]}}}]
-));
-```
-Subjoin plan:
-```
-FETCH: plan_stability_subjoin_cardinality_md.supplier 
-  -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]","[13.0, 13.0]","[23.0, 23.0]"]}
-```
-Estimated cardinality: 112  
-Actual cardinality: 112  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 208-1
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"s_nationkey":{"$in":[9,13,23]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^s a"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ s_suppkey = ps_suppkey
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]","[13.0, 13.0]","[23.0, 23.0]"]}
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^s a"}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-```
-Estimated cardinality: 108  
-Actual cardinality: 47  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 208-2
-```
-db.supplier.aggregate(EJSON.deserialize(
-[
-{"$match":{"s_nationkey":{"$in":[9,13,23]}}},
-{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^s a"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"$or":[{"p_size":{"$lt":24}},{"p_size":{"$gt":42}}]}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ partsupp.ps_partkey = p_partkey
-  -> [none] INLJ s_suppkey = ps_suppkey
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
-          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[9.0, 9.0]","[13.0, 13.0]","[23.0, 23.0]"]}
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^s a"}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$or":[{"p_size":{"$lt":24}},{"p_size":{"$gt":42}}]}
-```
-Estimated cardinality: 67  
-Actual cardinality: 24  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 209
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -8230,70 +13269,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$region_s"},
 {"$match":{"$or":[{"s_acctbal":{"$lte":958.07}}]}}],"cursor":{},"idx":210}
 ```
-### >>> Subjoin 210-0
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]}
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 210-1
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":3}}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ n_regionkey = r_regionkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]} 
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":3}}]}
-```
-Estimated cardinality: 1  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 210-2
-```
-db.nation.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":3}}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
-{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"s_acctbal":{"$lte":958.07}},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ nation_s.n_nationkey = s_nationkey
-  -> [none] HJ n_regionkey = r_regionkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["CANADA","JAPAN","UNITED KINGDOM"]}},{"$nor":[{"n_name":{"$eq":"ETHIOPIA"}},{"n_regionkey":{"$eq":3}},{"n_regionkey":{"$eq":3}}]}]} 
-      -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$or":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":3}}]} 
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$lte":958.07}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-```
-Estimated cardinality: 6  
-Actual cardinality: 9  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 211
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -8310,112 +13286,7 @@ Orders of magnitude: 0
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"l_shipdate":{"$lte":"1994-01-25T00:00:00.000Z"}}]}}],"cursor":{},"idx":211}
 ```
-### >>> Subjoin 211-0
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"o_clerk":{"$eq":"Clerk#000000849"}},{"o_orderdate":{"$gt":"1992-06-03T00:00:00.000Z","$lt":"1993-12-19T00:00:00.000Z"}}]}}]
-));
-```
-Subjoin plan:
-```
-FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$eq":"Clerk#000000849"}} 
-  -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(707529600000), new Date(756259200000))"]}
-```
-Estimated cardinality: 0  
-Actual cardinality: 32  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 211-1
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"o_clerk":{"$eq":"Clerk#000000849"}},{"o_orderdate":{"$gt":"1992-06-03T00:00:00.000Z","$lt":"1993-12-19T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ o_orderkey = l_orderkey
-  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$eq":"Clerk#000000849"}} 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(707529600000), new Date(756259200000))"]}
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 11  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 211-2
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"o_clerk":{"$eq":"Clerk#000000849"}},{"o_orderdate":{"$gt":"1992-06-03T00:00:00.000Z","$lt":"1993-12-19T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
-{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"$or":[{"c_name":{"$eq":"Customer#000005090"}},{"c_acctbal":{"$gt":-624.49}}]},{}]}}]}},
-{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ orders.o_custkey = c_custkey
-  -> [none] INLJ o_orderkey = l_orderkey
-      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$eq":"Clerk#000000849"}} 
-          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(707529600000), new Date(756259200000))"]}
-      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
-  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$or":[{"c_name":{"$eq":"Customer#000005090"}},{"c_acctbal":{"$gt":-624.49}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_custkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 11  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 211-3
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$and":[{"o_clerk":{"$eq":"Clerk#000000849"}},{"o_orderdate":{"$gt":"1992-06-03T00:00:00.000Z","$lt":"1993-12-19T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
-{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
-{"$match":{"$and":[{"$or":[{"c_name":{"$eq":"Customer#000005090"}},{"c_acctbal":{"$gt":-624.49}}]},{}]}}]}},
-{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
-{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_nationkey":{"$eq":23}},{"s_acctbal":{"$gt":6089.75}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000920"}},{"s_acctbal":{"$lt":9537.73}},{"s_acctbal":{"$gte":7448.46}}]}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ customer.c_nationkey = s_nationkey
-  -> [none] INLJ orders.o_custkey = c_custkey
-      -> [none] INLJ o_orderkey = l_orderkey
-          -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_clerk":{"$eq":"Clerk#000000849"}} 
-              -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["(new Date(707529600000), new Date(756259200000))"]}
-          -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipdate":{"$not":{"$lte":"1994-01-25T00:00:00.000Z"}}} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
-      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$or":[{"c_name":{"$eq":"Customer#000005090"}},{"c_acctbal":{"$gt":-624.49}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_custkey_1
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000836"}},{"s_nationkey":{"$eq":23}},{"s_acctbal":{"$gt":6089.75}}]},{"$or":[{"s_name":{"$eq":"Supplier#000000920"}},{"s_acctbal":{"$lt":9537.73}},{"s_acctbal":{"$gte":7448.46}}]}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
-```
-Estimated cardinality: 0  
-Actual cardinality: 159  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 212
 ```
 {"aggregate":"part","pipeline":[
@@ -8436,143 +13307,7 @@ Orders of magnitude: 2
 {"$unwind":"$region_s"},
 {"$match":{"$and":[{"p_type":"LARGE PLATED NICKEL"}]}}],"cursor":{},"idx":212}
 ```
-### >>> Subjoin 212-0
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"p_type":{"$eq":"LARGE PLATED NICKEL"}}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"LARGE PLATED NICKEL"}}
-```
-Estimated cardinality: 80  
-Actual cardinality: 115  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 212-1
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"p_type":{"$eq":"LARGE PLATED NICKEL"}}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^gul"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ p_partkey = ps_partkey
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"LARGE PLATED NICKEL"}} 
-  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^gul"}} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 212-2
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"p_type":{"$eq":"LARGE PLATED NICKEL"}}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^gul"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ partsupp.ps_suppkey = s_suppkey
-  -> [none] INLJ p_partkey = ps_partkey
-      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"LARGE PLATED NICKEL"}} 
-      -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^gul"}} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-```
-Estimated cardinality: 2  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 212-3
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"p_type":{"$eq":"LARGE PLATED NICKEL"}}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^gul"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"n_name":{"$not":{"$eq":"UNITED KINGDOM"}}},{"n_regionkey":{"$not":{"$eq":2}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ supplier.s_nationkey = n_nationkey
-  -> [none] INLJ partsupp.ps_suppkey = s_suppkey
-      -> [none] INLJ p_partkey = ps_partkey
-          -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"LARGE PLATED NICKEL"}} 
-          -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^gul"}} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"UNITED KINGDOM"}}},{"n_regionkey":{"$not":{"$eq":2}}}]}
-```
-Estimated cardinality: 1  
-Actual cardinality: 2  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 212-4
-```
-db.part.aggregate(EJSON.deserialize(
-[
-{"$match":{"p_type":{"$eq":"LARGE PLATED NICKEL"}}},
-{"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"$and":[{"ps_comment":{"$regex":"^gul"}},{}]}}]}},
-{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}},
-{"$lookup":{"from":"supplier","localField":"ps_suppkey","foreignField":"s_suppkey","as":"supplier","pipeline":[
-{"$match":{"$and":[{"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]},{}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
-{"$lookup":{"from":"nation","localField":"s_nationkey","foreignField":"n_nationkey","as":"nation","pipeline":[
-{"$match":{"$and":[{"n_name":{"$not":{"$eq":"UNITED KINGDOM"}}},{"n_regionkey":{"$not":{"$eq":2}}}]}}]}},
-{"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
-{"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
-{"$match":{"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"MIDDLE EAST"}},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}]}}]}},
-{"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ r_regionkey = nation_s.n_regionkey
-  -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_name":{"$eq":"MIDDLE EAST"}},{"r_name":{"$eq":"MIDDLE EAST"}},{"$nor":[{"r_name":{"$eq":"ASIA"}},{"r_regionkey":{"$eq":0}}]}]} 
-  -> [none] HJ supplier.s_nationkey = n_nationkey
-      -> [none] INLJ partsupp.ps_suppkey = s_suppkey
-          -> [none] INLJ p_partkey = ps_partkey
-              -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_type":{"$eq":"LARGE PLATED NICKEL"}} 
-              -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^gul"}} 
-                  -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
-          -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$or":[{"s_acctbal":{"$gt":-942.73}},{"s_acctbal":{"$gt":5364.99}}]} 
-              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_suppkey_1
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$not":{"$eq":"UNITED KINGDOM"}}},{"n_regionkey":{"$not":{"$eq":2}}}]}
-```
-Estimated cardinality: 0  
-Actual cardinality: 1  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 213
 ```
 {"aggregate":"supplier","pipeline":[
@@ -8589,12 +13324,12 @@ Orders of magnitude: 0
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]}}]
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]}
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]}
 ```
 Estimated cardinality: 1  
 Actual cardinality: 1  
@@ -8605,7 +13340,7 @@ Orders of magnitude: 0
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]}},
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"r_regionkey":{"$in":[1,4]}}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
@@ -8614,7 +13349,7 @@ db.nation.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 NLJ n_regionkey = r_regionkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]} 
   -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,4]}}
 ```
 Estimated cardinality: 0  
@@ -8626,7 +13361,7 @@ Orders of magnitude: 0
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]}},
+{"$match":{"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"r_regionkey":{"$in":[1,4]}}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
@@ -8639,7 +13374,7 @@ Subjoin plan:
 ```
 INLJ nation_s.n_nationkey = s_nationkey
   -> [none] NLJ n_regionkey = r_regionkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}}]} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"$or":[{"n_name":{"$eq":"ALGERIA"}},{"n_regionkey":{"$eq":1}}]},{"n_name":{"$eq":"PERU"}},{"n_regionkey":{"$in":[1,4]}}]} 
       -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,4]}} 
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":7307.62}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
@@ -8666,7 +13401,106 @@ Orders of magnitude: 0
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"supplier.o_clerk":"Clerk#000000591"}]}}],"cursor":{},"idx":214}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 214-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 214-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_nationkey = c_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+```
+Estimated cardinality: 201  
+Actual cardinality: 229  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 214-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$nor":[{"o_clerk":{"$eq":"Clerk#000000013"}},{"o_orderdate":{"$eq":"1995-07-14T00:00:00.000Z"}}]},{"o_orderdate":{"$lt":"1992-01-19T00:00:00.000Z"}}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ customer.c_custkey = o_custkey
+  -> [none] INLJ s_nationkey = c_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$nor":[{"o_clerk":{"$eq":"Clerk#000000013"}},{"o_orderdate":{"$eq":"1995-07-14T00:00:00.000Z"}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[new Date(-9223372036854775808), new Date(695779200000))"]}
+```
+Estimated cardinality: 20  
+Actual cardinality: 11  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 214-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$nor":[{"o_clerk":{"$eq":"Clerk#000000013"}},{"o_orderdate":{"$eq":"1995-07-14T00:00:00.000Z"}}]},{"o_orderdate":{"$lt":"1992-01-19T00:00:00.000Z"}}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] HJ customer.c_custkey = o_custkey
+      -> [none] INLJ s_nationkey = c_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_name":{"$eq":"Supplier#000000766"}},{"o_clerk":{"$not":{"$eq":"Clerk#000000591"}}},{"$nor":[{"s_name":{"$eq":"Supplier#000000469"}},{"s_acctbal":{"$gte":10.33}}]}]} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_acctbal":{"$gte":-588.23}},{"c_acctbal":{"$gte":6089.13}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$nor":[{"o_clerk":{"$eq":"Clerk#000000013"}},{"o_orderdate":{"$eq":"1995-07-14T00:00:00.000Z"}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[new Date(-9223372036854775808), new Date(695779200000))"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 79  
+Actual cardinality: 41  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 215
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -8681,106 +13515,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$nor":[{"l_shipinstruct":{"$in":["TAKE BACK RETURN","TAKE BACK RETURN"]}},{"l_suppkey":771}]}}],"cursor":{},"idx":215}
 ```
-### >>> Subjoin 215-0
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}}]
-));
-```
-Subjoin plan:
-```
-FETCH: plan_stability_subjoin_cardinality_md.orders 
-  -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","(new Date(901670400000), MaxKey]"]}
-```
-Estimated cardinality: 150  
-Actual cardinality: 242  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 215-1
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
-{"$match":{"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]}}]}},
-{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ o_custkey = c_custkey
-  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders 
-      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","(new Date(901670400000), MaxKey]"]}
-  -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]}
-```
-Estimated cardinality: 31  
-Actual cardinality: 67  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 215-2
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
-{"$match":{"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]}}]}},
-{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
-{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"$nor":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_suppkey":{"$eq":771}}]},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ orders.o_orderkey = l_orderkey
-  -> [none] HJ o_custkey = c_custkey
-      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders 
-          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","(new Date(901670400000), MaxKey]"]}
-      -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]} 
-  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$nor":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_suppkey":{"$eq":771}}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
-```
-Estimated cardinality: 97  
-Actual cardinality: 214  
-Orders of magnitude: 1
-
----
-### >>> Subjoin 215-3
-```
-db.orders.aggregate(EJSON.deserialize(
-[
-{"$match":{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gt":"1998-07-29T00:00:00.000Z"}}]}},
-{"$lookup":{"from":"customer","localField":"o_custkey","foreignField":"c_custkey","as":"customer","pipeline":[
-{"$match":{"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]}}]}},
-{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
-{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"$nor":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_suppkey":{"$eq":771}}]},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
-{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
-{"$match":{"$nor":[{"s_acctbal":{"$eq":-170.22}},{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":-334.52}}]}}]}},
-{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ s_nationkey = customer.c_nationkey
-  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":-170.22}},{"s_nationkey":{"$eq":24}},{"s_acctbal":{"$gt":-334.52}}]} 
-  -> [none] INLJ orders.o_orderkey = l_orderkey
-      -> [none] HJ o_custkey = c_custkey
-          -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders 
-              -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","(new Date(901670400000), MaxKey]"]}
-          -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$or":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000013959"}},{"c_acctbal":{"$gte":9523.62}}]} 
-      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$nor":[{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_suppkey":{"$eq":771}}]} 
-          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
-```
-Estimated cardinality: 228  
-Actual cardinality: 495  
-Orders of magnitude: 0
-
----
+Query is not eligible, as it does not have an SBE-only plan.
 ## >>> Command idx 216
 ```
 {"aggregate":"partsupp","pipeline":[
@@ -8820,7 +13555,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]}}]}},
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]},{"n_regionkey":4}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}}]
 ));
 ```
@@ -8828,7 +13563,8 @@ Subjoin plan:
 ```
 NLJ r_regionkey = n_regionkey
   -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]} 
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]}
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
 ```
 Estimated cardinality: 1  
 Actual cardinality: 2  
@@ -8841,7 +13577,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]}}]}},
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]},{"n_regionkey":4}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000690"}},{"s_nationkey":{"$eq":20}}]},{"$or":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$lt":7619.85}}]},{"s_acctbal":{"$in":[-334.52,8724.42]}}]},{}]}}]}},
@@ -8853,7 +13589,8 @@ Subjoin plan:
 INLJ nation_s.n_nationkey = s_nationkey
   -> [none] NLJ r_regionkey = n_regionkey
       -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]} 
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]} 
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
   -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000690"}},{"s_nationkey":{"$eq":20}}]},{"$or":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$lt":7619.85}}]},{"s_acctbal":{"$in":[-334.52,8724.42]}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
 ```
@@ -8868,7 +13605,7 @@ db.region.aggregate(EJSON.deserialize(
 [
 {"$match":{"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]}},
 {"$lookup":{"from":"nation","localField":"r_regionkey","foreignField":"n_regionkey","as":"nation","pipeline":[
-{"$match":{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]}}]}},
+{"$match":{"$and":[{"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]},{"n_regionkey":4}]}}]}},
 {"$unwind":"$nation"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$nation"]}}},
 {"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
 {"$match":{"$and":[{"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000690"}},{"s_nationkey":{"$eq":20}}]},{"$or":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$lt":7619.85}}]},{"s_acctbal":{"$in":[-334.52,8724.42]}}]},{}]}}]}},
@@ -8884,7 +13621,8 @@ INLJ supplier.s_suppkey = ps_suppkey
   -> [none] INLJ nation_s.n_nationkey = s_nationkey
       -> [none] NLJ r_regionkey = n_regionkey
           -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"$and":[{"r_regionkey":{"$eq":4}},{"$nor":[{"r_name":{"$eq":"AFRICA"}},{"r_name":{"$eq":"AFRICA"}},{"r_regionkey":{"$eq":0}},{"r_regionkey":{"$eq":2}}]}]} 
-          -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]} 
+          -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$nor":[{"n_name":{"$not":{"$in":["EGYPT","PERU","SAUDI ARABIA"]}}}]} 
+              -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_regionkey_1 {"n_regionkey":["[4.0, 4.0]"]}
       -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"$or":[{"s_name":{"$eq":"Supplier#000000690"}},{"s_nationkey":{"$eq":20}}]},{"$or":[{"s_nationkey":{"$eq":7}},{"s_acctbal":{"$lt":7619.85}}]},{"s_acctbal":{"$in":[-334.52,8724.42]}}]} 
           -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":27.55}} 
@@ -8920,72 +13658,7 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$lineitem"},
 {"$match":{"$and":[{"p_container":{"$in":["JUMBO PKG","LG JAR","WRAP DRUM"]}}]}}],"cursor":{},"idx":218}
 ```
-### >>> Subjoin 218-0
-```
-db.partsupp.aggregate(EJSON.deserialize(
-[
-{"$match":{"ps_comment":{"$regex":"^pe"}}}]
-));
-```
-Subjoin plan:
-```
-COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^pe"}}
-```
-Estimated cardinality: 400  
-Actual cardinality: 508  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 218-1
-```
-db.partsupp.aggregate(EJSON.deserialize(
-[
-{"$match":{"ps_comment":{"$regex":"^pe"}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"p_container":{"$in":["JUMBO PKG","LG JAR","WRAP DRUM"]}}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
-));
-```
-Subjoin plan:
-```
-HJ ps_partkey = p_partkey
-  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^pe"}} 
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["JUMBO PKG","LG JAR","WRAP DRUM"]}}
-```
-Estimated cardinality: 36  
-Actual cardinality: 42  
-Orders of magnitude: 0
-
----
-### >>> Subjoin 218-2
-```
-db.partsupp.aggregate(EJSON.deserialize(
-[
-{"$match":{"ps_comment":{"$regex":"^pe"}}},
-{"$lookup":{"from":"part","localField":"ps_partkey","foreignField":"p_partkey","as":"part","pipeline":[
-{"$match":{"p_container":{"$in":["JUMBO PKG","LG JAR","WRAP DRUM"]}}}]}},
-{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
-{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
-{"$match":{"$and":[{"$and":[{"l_shipdate":{"$lt":"1993-05-14T00:00:00.000Z"}},{"l_extendedprice":{"$gte":75749.12}},{"l_shipmode":{"$in":["FOB","MAIL","RAIL","REG AIR"]}},{"$nor":[{"l_orderkey":{"$eq":232065}},{"l_quantity":{"$eq":35}},{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_shipmode":{"$eq":"TRUCK"}},{"l_suppkey":{"$eq":543}},{"l_commitdate":{"$lt":"1992-11-21T00:00:00.000Z"}}]}]},{}]}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
-));
-```
-Subjoin plan:
-```
-INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
-  -> [none] HJ ps_partkey = p_partkey
-      -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$regex":"^pe"}} 
-      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$in":["JUMBO PKG","LG JAR","WRAP DRUM"]}} 
-  -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"$and":[{"l_shipdate":{"$lt":"1993-05-14T00:00:00.000Z"}},{"l_extendedprice":{"$gte":75749.12}},{"l_shipmode":{"$in":["FOB","MAIL","RAIL","REG AIR"]}},{"$nor":[{"l_orderkey":{"$eq":232065}},{"l_quantity":{"$eq":35}},{"l_shipinstruct":{"$eq":"TAKE BACK RETURN"}},{"l_shipmode":{"$eq":"TRUCK"}},{"l_suppkey":{"$eq":543}},{"l_commitdate":{"$lt":"1992-11-21T00:00:00.000Z"}}]}]} 
-      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
-```
-Estimated cardinality: 419  
-Actual cardinality: 1  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
-
----
+Test does not currently support joins with multiple predicates over resolved fields.
 ## >>> Command idx 219
 ```
 {"aggregate":"part","pipeline":[
@@ -8999,50 +13672,54 @@ Orders of magnitude: 2
 ```
 ### >>> Subjoin 219-0
 ```
-db.part.aggregate(EJSON.deserialize(
+db.lineitem.aggregate(EJSON.deserialize(
 [
-{"$match":{"p_container":{"$eq":"JUMBO CASE"}}}]
+{"$match":{"l_shipdate":"1998-03-11T00:00:00.000Z"}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$eq":"JUMBO CASE"}}
+FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_shipdate_1 {"l_shipdate":["[new Date(889574400000), new Date(889574400000)]"]}
 ```
-Estimated cardinality: 500  
-Actual cardinality: 501  
-Orders of magnitude: 0
+Estimated cardinality: 1  
+Actual cardinality: 243  
+Orders of magnitude: 2
+> [!WARNING]
+> Estimate discrepancy is more than 2 orders of magnitude.
 
 ---
 ### >>> Subjoin 219-1
 ```
-db.part.aggregate(EJSON.deserialize(
+db.lineitem.aggregate(EJSON.deserialize(
 [
-{"$match":{"p_container":{"$eq":"JUMBO CASE"}}},
-{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
-{"$match":{"l_shipdate":"1998-03-11T00:00:00.000Z"}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+{"$match":{"l_shipdate":"1998-03-11T00:00:00.000Z"}},
+{"$lookup":{"from":"part","localField":"l_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_container":{"$eq":"JUMBO CASE"}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-HJ p_partkey = l_partkey
-  -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$eq":"JUMBO CASE"}} 
+INLJ l_partkey = p_partkey
   -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
       -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_shipdate_1 {"l_shipdate":["[new Date(889574400000), new Date(889574400000)]"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_container":{"$eq":"JUMBO CASE"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
 ```
-Estimated cardinality: 15  
+Estimated cardinality: 0  
 Actual cardinality: 6  
-Orders of magnitude: 1
+Orders of magnitude: 0
 
 ---
 ### >>> Subjoin 219-2
 ```
-db.part.aggregate(EJSON.deserialize(
+db.lineitem.aggregate(EJSON.deserialize(
 [
-{"$match":{"p_container":{"$eq":"JUMBO CASE"}}},
-{"$lookup":{"from":"lineitem","localField":"p_partkey","foreignField":"l_partkey","as":"lineitem","pipeline":[
-{"$match":{"l_shipdate":"1998-03-11T00:00:00.000Z"}}]}},
-{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
+{"$match":{"l_shipdate":"1998-03-11T00:00:00.000Z"}},
+{"$lookup":{"from":"part","localField":"l_partkey","foreignField":"p_partkey","as":"part","pipeline":[
+{"$match":{"$and":[{"p_container":{"$eq":"JUMBO CASE"}},{}]}}]}},
+{"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
 {"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
 {"$match":{"$and":[{"ps_comment":{"$not":{"$regex":"^ am"}}},{}]}}]}},
 {"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
@@ -9051,18 +13728,17 @@ db.part.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 INLJ p_partkey = ps_partkey, lineitem.l_partkey = ps_partkey
-  -> [none] HJ p_partkey = l_partkey
-      -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_container":{"$eq":"JUMBO CASE"}} 
+  -> [none] INLJ l_partkey = p_partkey
       -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_shipdate_1 {"l_shipdate":["[new Date(889574400000), new Date(889574400000)]"]}
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.part {"p_container":{"$eq":"JUMBO CASE"}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.part p_partkey_1
   -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_comment":{"$not":{"$regex":"^ am"}}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 4705  
+Estimated cardinality: 0  
 Actual cardinality: 24  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
+Orders of magnitude: 1
 
 ---
 ## >>> Command idx 220
@@ -9080,15 +13756,15 @@ Orders of magnitude: 2
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"n_name":{"$in":["EGYPT","ROMANIA"]}}}]
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]}}]
 ));
 ```
 Subjoin plan:
 ```
-COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ROMANIA"]}}
+COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]}
 ```
 Estimated cardinality: 2  
-Actual cardinality: 2  
+Actual cardinality: 1  
 Orders of magnitude: 0
 
 ---
@@ -9096,7 +13772,7 @@ Orders of magnitude: 0
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"n_name":{"$in":["EGYPT","ROMANIA"]}}},
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"r_regionkey":{"$in":[1,3]}}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}}]
@@ -9105,7 +13781,7 @@ db.nation.aggregate(EJSON.deserialize(
 Subjoin plan:
 ```
 HJ n_regionkey = r_regionkey
-  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ROMANIA"]}} 
+  -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]} 
   -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,3]}}
 ```
 Estimated cardinality: 1  
@@ -9117,7 +13793,7 @@ Orders of magnitude: 0
 ```
 db.nation.aggregate(EJSON.deserialize(
 [
-{"$match":{"n_name":{"$in":["EGYPT","ROMANIA"]}}},
+{"$match":{"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]}},
 {"$lookup":{"from":"region","localField":"n_regionkey","foreignField":"r_regionkey","as":"region","pipeline":[
 {"$match":{"r_regionkey":{"$in":[1,3]}}}]}},
 {"$unwind":"$region"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$region"]}}},
@@ -9130,7 +13806,7 @@ Subjoin plan:
 ```
 INLJ nation_s.n_nationkey = s_nationkey
   -> [none] HJ n_regionkey = r_regionkey
-      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"n_name":{"$in":["EGYPT","ROMANIA"]}} 
+      -> [nation_s] COLLSCAN: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_name":{"$in":["EGYPT","ROMANIA"]}},{"n_regionkey":{"$in":[1,3]}}]} 
       -> [region_s] COLLSCAN: plan_stability_subjoin_cardinality_md.region {"r_regionkey":{"$in":[1,3]}} 
   -> [none] FETCH: plan_stability_subjoin_cardinality_md.supplier {"$nor":[{"s_acctbal":{"$eq":9537.73}},{"s_name":{"$eq":"Supplier#000000924"}}]} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1
@@ -9176,7 +13852,7 @@ Subjoin plan:
 ```
 COLLSCAN: plan_stability_subjoin_cardinality_md.part {"$and":[{"p_type":{"$eq":"MEDIUM BRUSHED STEEL"}},{"p_mfgr":{"$in":["Manufacturer#1","Manufacturer#4"]}}]}
 ```
-Estimated cardinality: 80  
+Estimated cardinality: 75  
 Actual cardinality: 45  
 Orders of magnitude: 0
 
@@ -9226,7 +13902,7 @@ INLJ partsupp.ps_partkey = l_partkey, p_partkey = l_partkey
   -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem {"l_shipmode":{"$eq":"MAIL"}} 
       -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_partkey_1
 ```
-Estimated cardinality: 310  
+Estimated cardinality: 2  
 Actual cardinality: 13  
 Orders of magnitude: 1
 
@@ -9254,9 +13930,9 @@ Subjoin plan:
 FETCH: plan_stability_subjoin_cardinality_md.lineitem 
   -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_suppkey_1 {"l_suppkey":["[646.0, 646.0]","[943.0, 943.0]"]}
 ```
-Estimated cardinality: 1802  
+Estimated cardinality: 575  
 Actual cardinality: 1283  
-Orders of magnitude: 0
+Orders of magnitude: 1
 
 ---
 ### >>> Subjoin 223-1
@@ -9276,7 +13952,7 @@ HJ l_partkey = p_partkey
       -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_suppkey_1 {"l_suppkey":["[646.0, 646.0]","[943.0, 943.0]"]}
   -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_mfgr":{"$not":{"$in":["Manufacturer#1","Manufacturer#2","Manufacturer#3"]}}}
 ```
-Estimated cardinality: 701  
+Estimated cardinality: 222  
 Actual cardinality: 497  
 Orders of magnitude: 0
 
@@ -9290,24 +13966,23 @@ db.lineitem.aggregate(EJSON.deserialize(
 {"$match":{"p_mfgr":{"$not":{"$in":["Manufacturer#1","Manufacturer#2","Manufacturer#3"]}}}}]}},
 {"$unwind":"$part"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$part"]}}},
 {"$lookup":{"from":"partsupp","localField":"p_partkey","foreignField":"ps_partkey","as":"partsupp","pipeline":[
-{"$match":{"ps_supplycost":{"$gte":587.19}}}]}},
+{"$match":{"$and":[{"ps_supplycost":{"$gte":587.19}},{}]}}]}},
 {"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
 ));
 ```
 Subjoin plan:
 ```
-HJ p_partkey = ps_partkey, lineitem.l_partkey = ps_partkey
+INLJ p_partkey = ps_partkey, lineitem.l_partkey = ps_partkey
   -> [none] HJ l_partkey = p_partkey
       -> [lineitem] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
           -> IXSCAN: plan_stability_subjoin_cardinality_md.lineitem l_suppkey_1 {"l_suppkey":["[646.0, 646.0]","[943.0, 943.0]"]}
       -> [none] COLLSCAN: plan_stability_subjoin_cardinality_md.part {"p_mfgr":{"$not":{"$in":["Manufacturer#1","Manufacturer#2","Manufacturer#3"]}}} 
-  -> [partsupp] COLLSCAN: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":587.19}}
+  -> [partsupp] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_supplycost":{"$gte":587.19}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_partkey_1
 ```
-Estimated cardinality: 90350  
+Estimated cardinality: 296  
 Actual cardinality: 708  
-Orders of magnitude: 2
-> [!WARNING]
-> Estimate discrepancy is more than 2 orders of magnitude.
+Orders of magnitude: 0
 
 ---
 ## >>> Command idx 224
@@ -9323,7 +13998,75 @@ Orders of magnitude: 2
 {"$unwind":"$nation_s"},
 {"$match":{"$and":[{"nation_s.n_regionkey":1},{"ps_availqty":{"$lte":2592}}]}}],"cursor":{},"idx":224}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 224-0
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]},{"n_nationkey":{"$in":[2,5]}}]}}]
+));
+```
+Subjoin plan:
+```
+FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]} 
+  -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_nationkey_1 {"n_nationkey":["[2.0, 2.0]","[5.0, 5.0]"]}
+```
+Estimated cardinality: 5  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 224-1
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]},{"n_nationkey":{"$in":[2,5]}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_nationkey":{"$in":[2,5]}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ n_nationkey = s_nationkey
+  -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_nationkey_1 {"n_nationkey":["[2.0, 2.0]","[5.0, 5.0]"]}
+  -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[2.0, 2.0]","[5.0, 5.0]"]}
+```
+Estimated cardinality: 15  
+Actual cardinality: 43  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 224-2
+```
+db.nation.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]},{"n_nationkey":{"$in":[2,5]}}]}},
+{"$lookup":{"from":"supplier","localField":"n_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"s_nationkey":{"$in":[2,5]}}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}},
+{"$lookup":{"from":"partsupp","localField":"s_suppkey","foreignField":"ps_suppkey","as":"partsupp","pipeline":[
+{"$match":{"$and":[{"ps_availqty":{"$lte":2592}},{}]}}]}},
+{"$unwind":"$partsupp"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$partsupp"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ supplier.s_suppkey = ps_suppkey
+  -> [none] HJ n_nationkey = s_nationkey
+      -> [nation_s] FETCH: plan_stability_subjoin_cardinality_md.nation {"$and":[{"n_regionkey":{"$not":{"$eq":3}}},{"n_regionkey":{"$not":{"$eq":2}}},{"n_regionkey":{"$not":{"$eq":4}}},{"n_regionkey":{"$eq":1}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.nation n_nationkey_1 {"n_nationkey":["[2.0, 2.0]","[5.0, 5.0]"]}
+      -> [supplier] FETCH: plan_stability_subjoin_cardinality_md.supplier 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.supplier s_nationkey_1 {"s_nationkey":["[2.0, 2.0]","[5.0, 5.0]"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.partsupp {"ps_availqty":{"$lte":2592}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.partsupp ps_suppkey_1
+```
+Estimated cardinality: 299  
+Actual cardinality: 847  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 225
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -9357,7 +14100,105 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$or":[{"customer.c_name":"Customer#000012350"}]}}],"cursor":{},"idx":226}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 226-0
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 226-1
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ c_custkey = o_custkey
+  -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]} 
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+```
+Estimated cardinality: 1  
+Actual cardinality: 3  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 226-2
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] INLJ c_custkey = o_custkey
+      -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]} 
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 5  
+Actual cardinality: 14  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 226-3
+```
+db.customer.aggregate(EJSON.deserialize(
+[
+{"$match":{"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}},{}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}},
+{"$lookup":{"from":"supplier","localField":"c_nationkey","foreignField":"s_nationkey","as":"supplier","pipeline":[
+{"$match":{"$and":[{"s_acctbal":{"$gte":1432.69}},{"$nor":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":1}}]}]}}]}},
+{"$unwind":"$supplier"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$supplier"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ customer.c_nationkey = s_nationkey
+  -> [none] INLJ orders.o_orderkey = l_orderkey
+      -> [none] INLJ c_custkey = o_custkey
+          -> [customer] COLLSCAN: plan_stability_subjoin_cardinality_md.customer {"$and":[{"c_mktsegment":{"$eq":"MACHINERY"}},{"c_name":{"$eq":"Customer#000012350"}}]} 
+          -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"o_orderdate":{"$lt":"1992-08-16T00:00:00.000Z"}} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.orders o_custkey_1
+      -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"$and":[{"s_acctbal":{"$gte":1432.69}},{"$nor":[{"s_name":{"$eq":"Supplier#000000719"}},{"s_nationkey":{"$eq":1}}]}]}
+```
+Estimated cardinality: 142  
+Actual cardinality: 364  
+Orders of magnitude: 0
+
+---
 ## >>> Command idx 227
 ```
 {"aggregate":"lineitem","pipeline":[
@@ -9374,4 +14215,103 @@ Query is not eligible, as it does not have an SBE-only plan.
 {"$unwind":"$supplier"},
 {"$match":{"$and":[{"customer.c_acctbal":{"$lt":8496.37}}]}}],"cursor":{},"idx":227}
 ```
-Query is not eligible, as it does not have an SBE-only plan.
+### >>> Subjoin 227-0
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":7901.42}}}]
+));
+```
+Subjoin plan:
+```
+COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":7901.42}}
+```
+Estimated cardinality: 1  
+Actual cardinality: 1  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 227-1
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":7901.42}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ s_nationkey = c_nationkey
+  -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":7901.42}} 
+  -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]} 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+```
+Estimated cardinality: 91  
+Actual cardinality: 105  
+Orders of magnitude: 1
+
+---
+### >>> Subjoin 227-2
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":7901.42}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$or":[{"o_orderstatus":{"$eq":"P"}},{"o_totalprice":{"$lt":34828.99}}]},{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gte":"1997-09-10T00:00:00.000Z"}}]}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}}]
+));
+```
+Subjoin plan:
+```
+HJ customer.c_custkey = o_custkey
+  -> [none] INLJ s_nationkey = c_nationkey
+      -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":7901.42}} 
+      -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]} 
+          -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+  -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$or":[{"o_orderstatus":{"$eq":"P"}},{"o_totalprice":{"$lt":34828.99}}]} 
+      -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","[new Date(873849600000), MaxKey]"]}
+```
+Estimated cardinality: 12  
+Actual cardinality: 10  
+Orders of magnitude: 0
+
+---
+### >>> Subjoin 227-3
+```
+db.supplier.aggregate(EJSON.deserialize(
+[
+{"$match":{"s_acctbal":{"$eq":7901.42}}},
+{"$lookup":{"from":"customer","localField":"s_nationkey","foreignField":"c_nationkey","as":"customer","pipeline":[
+{"$match":{"$and":[{"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]},{}]}}]}},
+{"$unwind":"$customer"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$customer"]}}},
+{"$lookup":{"from":"orders","localField":"c_custkey","foreignField":"o_custkey","as":"orders","pipeline":[
+{"$match":{"$and":[{"$or":[{"o_orderstatus":{"$eq":"P"}},{"o_totalprice":{"$lt":34828.99}}]},{"$or":[{"o_orderdate":{"$lt":null}},{"o_orderdate":{"$gte":"1997-09-10T00:00:00.000Z"}}]}]}}]}},
+{"$unwind":"$orders"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$orders"]}}},
+{"$lookup":{"from":"lineitem","localField":"o_orderkey","foreignField":"l_orderkey","as":"lineitem","pipeline":[
+{"$match":{}}]}},
+{"$unwind":"$lineitem"},{"$replaceRoot":{"newRoot":{"$mergeObjects":["$$ROOT","$lineitem"]}}}]
+));
+```
+Subjoin plan:
+```
+INLJ orders.o_orderkey = l_orderkey
+  -> [none] HJ customer.c_custkey = o_custkey
+      -> [none] INLJ s_nationkey = c_nationkey
+          -> [supplier] COLLSCAN: plan_stability_subjoin_cardinality_md.supplier {"s_acctbal":{"$eq":7901.42}} 
+          -> [customer] FETCH: plan_stability_subjoin_cardinality_md.customer {"$and":[{"$or":[{"c_mktsegment":{"$eq":"HOUSEHOLD"}},{"c_name":{"$eq":"Customer#000001342"}}]},{"c_acctbal":{"$lt":8496.37}},{"c_name":{"$not":{"$eq":"Customer#000011646"}}}]} 
+              -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.customer c_nationkey_1
+      -> [orders] FETCH: plan_stability_subjoin_cardinality_md.orders {"$or":[{"o_orderstatus":{"$eq":"P"}},{"o_totalprice":{"$lt":34828.99}}]} 
+          -> IXSCAN: plan_stability_subjoin_cardinality_md.orders o_orderdate_1 {"o_orderdate":["[MinKey, new Date(-9223372036854775808))","[new Date(873849600000), MaxKey]"]}
+  -> [none] FETCH: plan_stability_subjoin_cardinality_md.lineitem 
+      -> INDEX_PROBE_NODE: plan_stability_subjoin_cardinality_md.lineitem l_orderkey_1
+```
+Estimated cardinality: 50  
+Actual cardinality: 15  
+Orders of magnitude: 0
+
+---

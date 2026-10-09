@@ -23,13 +23,31 @@ function assertCorrectResult(res, shouldWork, user) {
     }
 }
 
+function assertNonexistentCursorReported(conn, user) {
+    const admin = conn.getDB("admin");
+    admin.auth(user, "pass");
+
+    const db1 = conn.getDB(db1Name);
+    const nonexistentCursorId = NumberLong("424242424242");
+    const res = assert.commandWorked(db1.runCommand({releaseMemory: [nonexistentCursorId]}));
+    assert.eq(res.cursorsNotFound, [nonexistentCursorId], "user: " + user, {res});
+
+    admin.logout();
+}
+
 const createInactiveCursor = function (db, collName) {
     const cmdRes = db.runCommand({find: collName, filter: {}, batchSize: 1});
     assert.commandWorked(cmdRes);
     return cmdRes.cursor.id;
 };
 
-function testReleaseMemory(conn, user, shouldWorkCollection, shouldWorkDatabase, shouldWorkCluster) {
+function testReleaseMemory(
+    conn,
+    user,
+    shouldWorkCollection,
+    shouldWorkDatabase,
+    shouldWorkCluster,
+) {
     const admin = conn.getDB("admin");
     admin.auth(user, "pass");
 
@@ -104,4 +122,7 @@ export function runTest(conn) {
     testReleaseMemory(conn, "userCollection", true, false, false);
     testReleaseMemory(conn, "userDatabase", true, true, false);
     testReleaseMemory(conn, "userCluster", true, true, true);
+
+    assertNonexistentCursorReported(conn, "admin");
+    assertNonexistentCursorReported(conn, "userCluster");
 }

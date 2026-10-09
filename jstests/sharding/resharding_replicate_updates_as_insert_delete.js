@@ -31,7 +31,8 @@ let txnWriteTs;
 
 const mongos = testColl.getMongo();
 
-const updateDocumentShardKeyUsingTransactionApiEnabled = isUpdateDocumentShardKeyUsingTransactionApiEnabled(mongos);
+const updateDocumentShardKeyUsingTransactionApiEnabled =
+    isUpdateDocumentShardKeyUsingTransactionApiEnabled(mongos);
 
 const recipientShardNames = reshardingTest.recipientShardNames;
 reshardingTest.withReshardingInBackground(
@@ -43,11 +44,10 @@ reshardingTest.withReshardingInBackground(
             {min: {y: 5, s: 5}, max: {y: MaxKey, s: MaxKey}, shard: recipientShardNames[1]},
         ],
     },
-    (tempNs) => {
+    () => {
         // Wait for cloning to have at least started on the recipient shards to know that the donor
         // shards have begun including the "destinedRecipient" field in their oplog entries.
-        const tempColl = mongos.getCollection(tempNs);
-        assert.soon(() => tempColl.findOne(docToUpdate) !== null);
+        reshardingTest.awaitCloneTimestampChosen();
 
         // When the updateDocumentShardKeyUsingTransactionApi feature flag is enabled, ordinary
         // updates that modify a document's shard key will complete.
@@ -64,7 +64,9 @@ reshardingTest.withReshardingInBackground(
         }
 
         const session = testColl.getMongo().startSession({retryWrites: true});
-        const sessionColl = session.getDatabase(testColl.getDB().getName()).getCollection(testColl.getName());
+        const sessionColl = session
+            .getDatabase(testColl.getDB().getName())
+            .getCollection(testColl.getName());
 
         assert.commandFailedWithCode(
             sessionColl.update({_id: 0, x: 2, s: 2}, {$set: {y: 10}}, {multi: true}),
@@ -91,7 +93,8 @@ reshardingTest.withReshardingInBackground(
                 ]);
                 return false;
             },
-            () => `was unable to update value under new shard key as retryable write: ${tojson(res)}`,
+            () =>
+                `was unable to update value under new shard key as retryable write: ${tojson(res)}`,
         );
 
         assert.soon(
@@ -124,7 +127,10 @@ reshardingTest.withReshardingInBackground(
                         ErrorCodes.WriteConflict,
                     ]);
                 } else {
-                    assert.commandFailedWithCode(res, [ErrorCodes.NoSuchTransaction, ErrorCodes.WriteConflict]);
+                    assert.commandFailedWithCode(res, [
+                        ErrorCodes.NoSuchTransaction,
+                        ErrorCodes.WriteConflict,
+                    ]);
                 }
                 session.abortTransaction();
                 return false;

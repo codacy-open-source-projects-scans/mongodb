@@ -7,9 +7,9 @@
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {getDBNameAndCollNameFromFullNamespace} from "jstests/libs/namespace_utils.js";
 
 // Skip cross-cluster consistency checks, since this test prematurely shuts down a shard.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
@@ -53,12 +53,20 @@ function testFailGetMoreAfterCursorCheckoutFailpoint({mongos, errorCode, expecte
     );
 
     // Now open a valid $changeStream cursor...
-    const aggCmdRes = assert.commandWorked(coll.runCommand("aggregate", {pipeline: [{$changeStream: {}}], cursor: {}}));
+    const aggCmdRes = assert.commandWorked(
+        coll.runCommand("aggregate", {pipeline: [{$changeStream: {}}], cursor: {}}),
+    );
 
-    // ... run a getMore using the cursorID from the original command response, and confirm that the
-    // expected error was thrown...
+    // ... run a getMore using the cursorID, database, and collection from the original command
+    // response (rather than 'testDB'/'coll.getName()' directly, since a whole-db/whole-cluster
+    // passthrough may have upconverted the aggregate, changing the cursor's real bound
+    // namespace and executing database), and confirm that the expected error was thrown...
+    const [aggDbName, aggCollName] = getDBNameAndCollNameFromFullNamespace(aggCmdRes.cursor.ns);
     const getMoreRes = assert.commandFailedWithCode(
-        testDB.runCommand({getMore: aggCmdRes.cursor.id, collection: coll.getName()}),
+        testDB.getSiblingDB(aggDbName).runCommand({
+            getMore: aggCmdRes.cursor.id,
+            collection: aggCollName,
+        }),
         errorCode,
     );
 
@@ -68,7 +76,9 @@ function testFailGetMoreAfterCursorCheckoutFailpoint({mongos, errorCode, expecte
     assert.eq(errorLabels.includes("ResumableChangeStreamError"), expectedLabel, getMoreRes);
 
     // Finally, disable the failpoint.
-    assert.commandWorked(testDB.adminCommand({configureFailPoint: "failGetMoreAfterCursorCheckout", mode: "off"}));
+    assert.commandWorked(
+        testDB.adminCommand({configureFailPoint: "failGetMoreAfterCursorCheckout", mode: "off"}),
+    );
 }
 // Test the expected output for both resumable and non-resumable error codes.
 testFailGetMoreAfterCursorCheckoutFailpoint({
@@ -76,11 +86,17 @@ testFailGetMoreAfterCursorCheckoutFailpoint({
     errorCode: ErrorCodes.ShutdownInProgress,
     expectedLabel: true,
 });
-testFailGetMoreAfterCursorCheckoutFailpoint({mongos: st.s, errorCode: ErrorCodes.FailedToParse, expectedLabel: false});
+testFailGetMoreAfterCursorCheckoutFailpoint({
+    mongos: st.s,
+    errorCode: ErrorCodes.FailedToParse,
+    expectedLabel: false,
+});
 
 // Now test both aggregate and getMore under conditions of an actual cluster outage. Shard the
 // collection on shard0, split at {_id: 0}, and move the upper chunk to the other shard.
-assert.commandWorked(st.s.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}),
+);
 st.shardColl(coll, {_id: 1}, {_id: 0}, {_id: 0});
 
 // Open a change stream on the collection...
@@ -146,7 +162,18 @@ assert(!("errorLabels" in err), err);
         let res = coll.watch([]);
         assert.soon(() => {
             const cursorId = res._cursorid ?? res.cursor.id;
-            res = assert.commandWorked(testDB.runCommand({getMore: cursorId, collection: collName}));
+            // Derive the database and collection from the cursor's own bound namespace rather
+            // than 'testDB'/the outer 'collName' variable, since a whole-db/whole-cluster
+            // passthrough may have upconverted the watch, changing the cursor's real namespace
+            // and executing database.
+            const cursorNs = res._ns ?? res.cursor.ns;
+            const [cursorDbName, cursorCollName] = getDBNameAndCollNameFromFullNamespace(cursorNs);
+            res = assert.commandWorked(
+                testDB.getSiblingDB(cursorDbName).runCommand({
+                    getMore: cursorId,
+                    collection: cursorCollName,
+                }),
+            );
         });
     });
 }

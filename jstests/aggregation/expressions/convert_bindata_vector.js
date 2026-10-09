@@ -3,7 +3,6 @@
  * @tags: [
  *   # BinData $convert array was added in v8.3.
  *   requires_fcv_83,
- *   featureFlagConvertBinDataVectors,
  * ]
  */
 
@@ -180,9 +179,13 @@ function bitArrayToBase64String(bitArray) {
 function createBindataVectorBitArray(dataTypeByte, vector, numPaddingBits, littleEndian = true) {
     let dTypeBitArray = hexToBitArray(dataTypeByte);
     let paddingBitArray =
-        dataTypeByte == kPackedBitByte ? int8VectorToBitArray([numPaddingBits]) : int8VectorToBitArray([0]);
+        dataTypeByte == kPackedBitByte
+            ? int8VectorToBitArray([numPaddingBits])
+            : int8VectorToBitArray([0]);
     let arrayElemsBitArray =
-        dataTypeByte == kFloat32Byte ? float32VectorToBitArray(vector, littleEndian) : int8VectorToBitArray(vector);
+        dataTypeByte == kFloat32Byte
+            ? float32VectorToBitArray(vector, littleEndian)
+            : int8VectorToBitArray(vector);
     return [...dTypeBitArray, ...paddingBitArray, ...arrayElemsBitArray];
 }
 
@@ -238,7 +241,10 @@ testCases.forEach((testCase) => {
             // assert.close() does not work on arrays so manually compare each value.
             assert.eq(doc.output.length, doc.expected.length);
             for (let i = 0; i < doc.output.length; i++) {
-                if (doc.output[i] == Number.NEGATIVE_INFINITY || doc.output[i] == Number.POSITIVE_INFINITY) {
+                if (
+                    doc.output[i] == Number.NEGATIVE_INFINITY ||
+                    doc.output[i] == Number.POSITIVE_INFINITY
+                ) {
                     assert.eq(doc.output[i], doc.expected[i]);
                 } else {
                     assert.close(doc.output[i], doc.expected[i]);
@@ -254,7 +260,8 @@ testCases.forEach((testCase) => {
 
     // BSON arrays that only contain integer 0's and 1's will convert to a packed bit array.
     let canBeRepresentedAsPackedBit = array_elems.every((n) => n == 1 || n == 0);
-    let intArrayCanConvertToPackedBit = canBeRepresentedAsPackedBit && dtype == kInt8Byte && array_elems.length > 0;
+    let intArrayCanConvertToPackedBit =
+        canBeRepresentedAsPackedBit && dtype == kInt8Byte && array_elems.length > 0;
     if (intArrayCanConvertToPackedBit) {
         let arrayFilledWithZeros = array_elems;
         let numZeros = 0;
@@ -278,12 +285,17 @@ testCases.forEach((testCase) => {
 
     // BSON arrays that only contain integer values from [-128, 127] will convert to INT8
     // arrays.
-    let canBeRepresentedAsIntArray = array_elems.every((n) => Number.isInteger(n) && n <= 127 && n >= -128);
-    let floatArrayCanConvertToInt8 = canBeRepresentedAsIntArray && dtype == kFloat32Byte && array_elems.length > 0;
+    let canBeRepresentedAsIntArray = array_elems.every(
+        (n) => Number.isInteger(n) && n <= 127 && n >= -128,
+    );
+    let floatArrayCanConvertToInt8 =
+        canBeRepresentedAsIntArray && dtype == kFloat32Byte && array_elems.length > 0;
     if (floatArrayCanConvertToInt8) {
         expectedBindataVector = BinData(
             kBindataVectorSubtype,
-            bitArrayToBase64String(createBindataVectorBitArray(kInt8Byte, array_elems, 0, littleEndian)),
+            bitArrayToBase64String(
+                createBindataVectorBitArray(kInt8Byte, array_elems, 0, littleEndian),
+            ),
         );
     }
 
@@ -292,7 +304,9 @@ testCases.forEach((testCase) => {
     if (arrayIsEmpty) {
         expectedBindataVector = BinData(
             kBindataVectorSubtype,
-            bitArrayToBase64String(createBindataVectorBitArray(kPackedBitByte, [], 0, littleEndian)),
+            bitArrayToBase64String(
+                createBindataVectorBitArray(kPackedBitByte, [], 0, littleEndian),
+            ),
         );
     }
 
@@ -317,7 +331,10 @@ testCases.forEach((testCase) => {
             // assert.close() does not work on arrays so manually compare each value.
             assert.eq(doc.output.length, doc.expected.length);
             for (let i = 0; i < doc.output.length; i++) {
-                if (doc.output[i] == Number.NEGATIVE_INFINITY || doc.output[i] == Number.POSITIVE_INFINITY) {
+                if (
+                    doc.output[i] == Number.NEGATIVE_INFINITY ||
+                    doc.output[i] == Number.POSITIVE_INFINITY
+                ) {
                     assert.eq(doc.output[i], doc.expected[i]);
                 } else {
                     assert.close(doc.output[i], doc.expected[i]);
@@ -364,7 +381,10 @@ binToBsonErrorCases.forEach((testCase) => {
     // Verify conversion from bindata vector to BSON array.
     let bindataToBsonPipeline = [
         {
-            $project: {_id: 0, output: {$convert: {to: {type: "array"}, input: "$bindata_array_base64"}}},
+            $project: {
+                _id: 0,
+                output: {$convert: {to: {type: "array"}, input: "$bindata_array_base64"}},
+            },
         },
     ];
 
@@ -377,7 +397,7 @@ binToBsonErrorCases.forEach((testCase) => {
 let bsonToBinErrorCases = [
     // Invalid string BSON array
     {invalid_bson_array: ["oh", "hi", "mark"], error_code: ErrorCodes.ConversionFailure},
-    // Must be an array
+    // Must be an array. Subtype 9 is rejected for non-array input.
     {invalid_bson_array: "theroom", error_code: ErrorCodes.ConversionFailure},
     // TODO SERVER-106059 Remove this test.
     {
@@ -402,14 +422,45 @@ bsonToBinErrorCases.forEach((testCase) => {
             $project: {
                 _id: 0,
                 output: {
-                    $convert: {to: {type: "binData", subtype: 9}, input: "$bson_array", format: "base64"},
+                    $convert: {
+                        to: {type: "binData", subtype: 9},
+                        input: "$bson_array",
+                        format: "base64",
+                    },
                 },
             },
         },
     ];
 
-    assert.throwsWithCode(() => coll.aggregate(bsonToBindataPipeline).toArray(), testCase.error_code);
+    assert.throwsWithCode(
+        () => coll.aggregate(bsonToBindataPipeline).toArray(),
+        testCase.error_code,
+    );
 });
+
+(function nonArrayInputWithOnErrorReturnsFallback() {
+    const coll = db.expression_convert_bindata_vector;
+    coll.drop();
+    assert.commandWorked(coll.insertMany([{_id: 0, bson_array: "theroom"}]));
+
+    let bsonToBindataPipeline = [
+        {
+            $project: {
+                _id: 0,
+                output: {
+                    $convert: {
+                        to: {type: "binData", subtype: 9},
+                        input: "$bson_array",
+                        format: "base64",
+                        onError: "fallback",
+                    },
+                },
+            },
+        },
+    ];
+
+    assert.eq(coll.aggregate(bsonToBindataPipeline).toArray(), [{output: "fallback"}]);
+})();
 
 (function bsonArrayWithLargePositiveIntFailsToBeConverted() {
     let doc = {_id: 0, bson_array: [NumberInt(5), NumberInt(6), NumberInt(200)]};
@@ -426,5 +477,8 @@ bsonToBinErrorCases.forEach((testCase) => {
         },
     ];
 
-    assert.throwsWithCode(() => coll.aggregate(bsonToBindataPipeline).toArray(), ErrorCodes.ConversionFailure);
+    assert.throwsWithCode(
+        () => coll.aggregate(bsonToBindataPipeline).toArray(),
+        ErrorCodes.ConversionFailure,
+    );
 })();

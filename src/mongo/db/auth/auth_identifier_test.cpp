@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Unit tests of the UserName and RoleName types.
@@ -33,7 +7,6 @@
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -49,6 +22,7 @@
 #include <iosfwd>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -59,6 +33,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const std::string& getName(const UserName& obj) {
     return obj.getUser();
@@ -80,7 +55,8 @@ void checkValueAssertions(const T& obj,
                           Name name,
                           Db db,
                           const boost::optional<TenantId>& tenant = boost::none) {
-    const bool expectEmpty = StringData(name).empty() && StringData(db).empty() && !tenant;
+    const bool expectEmpty =
+        std::string_view(name).empty() && std::string_view(db).empty() && !tenant;
     ASSERT_EQ(obj.empty(), expectEmpty);
 
     ASSERT_EQ(obj.getDB(), db);
@@ -111,8 +87,8 @@ void doConstructorTest() {
 
     checkValueAssertions(T("", ""), "", "");
     checkValueAssertions(T(std::string(), std::string()), "", "");
-    checkValueAssertions(T(StringData(), StringData()), "", "");
-    checkValueAssertions(T(std::string(), StringData()), "", "");
+    checkValueAssertions(T(std::string_view(), std::string_view()), "", "");
+    checkValueAssertions(T(std::string(), std::string_view()), "", "");
 
     checkValueAssertions(T("name1", "db1"), "name1", "db1");
     checkValueAssertions(T("name1", ""), "name1", "");
@@ -184,8 +160,8 @@ TEST(AuthName, StringParseTests) {
 
 TEST(AuthName, UserName) {
     const std::vector<UserName> userNames = {
-        UserName(std::string("alice"), "db1"_sd),
-        UserName("bob"_sd, std::string("db2")),
+        UserName(std::string("alice"), "db1"sv),
+        UserName("bob"sv, std::string("db2")),
         uassertStatusOK(UserName::parse("db3.claire")),
     };
 
@@ -224,8 +200,8 @@ TEST(AuthName, UserName) {
 
 TEST(AuthName, RoleName) {
     const std::vector<RoleName> roleNames = {
-        RoleName(std::string("alice"), "db1"_sd),
-        RoleName("bob"_sd, std::string("db2")),
+        RoleName(std::string("alice"), "db1"sv),
+        RoleName("bob"sv, std::string("db2")),
         uassertStatusOK(RoleName::parse("db3.claire")),
     };
 

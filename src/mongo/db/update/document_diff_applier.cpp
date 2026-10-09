@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/document_diff_applier.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -46,6 +19,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -84,7 +58,7 @@ struct DocumentDiffTables {
      * Inserts to the table and throws if the key exists already, which would mean that the
      * diff is invalid.
      */
-    void safeInsert(StringData fieldName, FieldModification mod) {
+    void safeInsert(std::string_view fieldName, FieldModification mod) {
         auto [it, inserted] = fieldMap.insert({fieldName, std::move(mod)});
         uassert(4728000, str::stream() << "duplicate field name in diff: " << fieldName, inserted);
     }
@@ -103,7 +77,7 @@ DocumentDiffTables buildObjDiffTables(DocumentDiffReader* reader,
     DocumentDiffTables out;
     out.insertOnly = true;
 
-    boost::optional<StringData> optFieldName;
+    boost::optional<std::string_view> optFieldName;
     while ((optFieldName = reader->nextDelete())) {
         out.safeInsert(*optFieldName, Delete{});
         out.insertOnly = false;
@@ -483,7 +457,8 @@ int32_t computeDamageOnArray(const BSONObj& preImageRoot,
         }
     }
 
-    invariant(!resizeVal || *resizeVal == idx);
+    uassert(
+        12495900, "array diff update index exceeds resize value", !resizeVal || *resizeVal == idx);
 
     // Updates the bytes of total size.
     DataView(bufBuilder->buf() + sizeBytesPos)
@@ -572,7 +547,7 @@ public:
                             std::copy(diffData, diffData + diffLen, std::back_inserter(newData));
 
                             BSONBinData postBinData(&newData[0], newLen, elt.binDataType());
-                            builder->append(binary.newElt.fieldName(), postBinData);
+                            builder->append(binary.newElt.fieldNameStringData(), postBinData);
                         } else {
                             // Offset is larger than the length of the preimage. This means that we
                             // are re-applying this diff and some future oplog entry will shrink
@@ -730,7 +705,9 @@ private:
             }
         }
 
-        invariant(!resizeVal || *resizeVal == idx);
+        uassert(12495901,
+                "array diff update index exceeds resize value",
+                !resizeVal || *resizeVal == idx);
     }
 
     bool _mustCheckExistenceForInsertOperations = true;

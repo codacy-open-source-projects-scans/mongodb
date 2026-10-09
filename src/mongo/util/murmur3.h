@@ -1,43 +1,18 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 #include <MurmurHash3.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -47,25 +22,25 @@ namespace mongo {
  * This interface is intended to be easier to consume safely.
  */
 template <int SizeOfOutput>
-inline size_t murmur3(StringData str, size_t seed);
+inline size_t murmur3(std::string_view str, size_t seed);
 
 /**
- * Template specialization for hashing a 'StringData' to a 32-bit hash code.
+ * Template specialization for hashing a 'std::string_view' to a 32-bit hash code.
  */
 template <>
-inline size_t murmur3<4>(StringData str, size_t seed) {
+inline size_t murmur3<4>(std::string_view str, size_t seed) {
     char hash[4];
     MurmurHash3_x86_32(str.data(), str.size(), seed, &hash);
     return ConstDataView(hash).read<LittleEndian<std::uint32_t>>();
 }
 
 /**
- * Template specialization for hashing a 'StringData' to a 64-bit hash code. Returns the first 8
- * bytes of the 128-bit version of MurmurHash, interpreting these 8 bytes as having a little-endian
- * byte order.
+ * Template specialization for hashing a 'std::string_view' to a 64-bit hash code. Returns the first
+ * 8 bytes of the 128-bit version of MurmurHash, interpreting these 8 bytes as having a
+ * little-endian byte order.
  */
 template <>
-inline size_t murmur3<8>(StringData str, size_t seed) {
+inline size_t murmur3<8>(std::string_view str, size_t seed) {
     char hash[16];
     MurmurHash3_x64_128(str.data(), str.size(), seed, hash);
     return static_cast<size_t>(ConstDataView(hash).read<LittleEndian<std::uint64_t>>());
@@ -73,7 +48,7 @@ inline size_t murmur3<8>(StringData str, size_t seed) {
 
 /**
  * Overload for callers which use a byte-array representation for the data and thus cannot easily
- * represent the input as a 'StringData'.
+ * represent the input as a 'std::string_view'.
  */
 template <int SizeOfOutput>
 inline size_t murmur3(ConstDataRange data, size_t seed);
@@ -103,7 +78,7 @@ inline size_t murmur3<8>(ConstDataRange data, size_t seed) {
 /**
  * Writes the full output of the 128-bit version of MurmurHash to the given 'output' array.
  */
-inline void murmur3(StringData str, size_t seed, std::array<char, 16>& output) {
+inline void murmur3(std::string_view str, size_t seed, std::array<char, 16>& output) {
     MurmurHash3_x64_128(str.data(), str.size(), seed, output.data());
 }
 

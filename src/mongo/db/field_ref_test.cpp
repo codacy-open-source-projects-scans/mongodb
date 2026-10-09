@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/field_ref.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -37,9 +10,11 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 TEST(FieldRefTest, NoFields) {
     FieldRef fieldRef("");
@@ -133,13 +108,13 @@ TEST(FieldRefTest, MultiplePartsVariable) {
 }
 
 TEST(FieldRefTest, ConstructorRejectsEmbeddedNullChars) {
-    const auto embeddedNull = "a\0"_sd;
+    const auto embeddedNull = "a\0"sv;
     FieldRef fieldRef;
     ASSERT_THROWS_CODE(FieldRef(embeddedNull), AssertionException, 9867600);
 }
 
 TEST(FieldRefTest, ParseRejectsEmbeddedNullChars) {
-    const auto embeddedNull = "a\0"_sd;
+    const auto embeddedNull = "a\0"sv;
     FieldRef fieldRef;
     ASSERT_THROWS_CODE(fieldRef.parse(embeddedNull), AssertionException, 9867600);
 }
@@ -186,7 +161,7 @@ TEST(FieldRefTest, SameFieldMultipleReplacements) {
 
 TEST(FieldRefTest, SetPartRejectsEmbeddedNullChars) {
     FieldRef fieldRef("f");
-    const auto embeddedNull = "a\0"_sd;
+    const auto embeddedNull = "a\0"sv;
     ASSERT_THROWS_CODE(fieldRef.setPart(0, embeddedNull), AssertionException, 9867600);
 }
 
@@ -477,7 +452,7 @@ TEST(FieldRefTest, SetEmptyPartThenAppendShort) {
 
 TEST(FieldRefTest, AppendPartRejectsEmbeddedNullChars) {
     FieldRef fieldRef("f");
-    const auto embeddedNull = "a\0"_sd;
+    const auto embeddedNull = "a\0"sv;
     ASSERT_THROWS_CODE(fieldRef.appendPart(embeddedNull), AssertionException, 9867600);
     ASSERT_THROWS_CODE(
         FieldRef::FieldRefTempAppend(fieldRef, embeddedNull), AssertionException, 9867600);
@@ -981,40 +956,40 @@ TEST(FieldRefTest, RemovingFirstPartFromLongPathMultipleTimes) {
 }
 
 TEST(FieldRefTest, CanonicalIndexField) {
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("aaa")), FieldRef("aaa"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.b")), FieldRef("a.b"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("aaa")), FieldRef("aaa"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.b")), FieldRef("a.b"sv));
 
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123")), FieldRef("a"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123")), FieldRef("a"sv));
 
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$.b")), FieldRef("a.b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.b")), FieldRef("a.b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123.b")), FieldRef("a.b"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$.b")), FieldRef("a.b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.b")), FieldRef("a.b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123.b")), FieldRef("a.b"sv));
 
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$ref")), FieldRef("a.$ref"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$ref.b")), FieldRef("a.$ref.b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.c$d.b")), FieldRef("a.c$d.b"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$ref")), FieldRef("a.$ref"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$ref.b")), FieldRef("a.$ref.b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.c$d.b")), FieldRef("a.c$d.b"sv));
 
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123a")), FieldRef("a.123a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.a123")), FieldRef("a.a123"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123a.b")), FieldRef("a.123a.b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.a123.b")), FieldRef("a.a123.b"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123a")), FieldRef("a.123a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.a123")), FieldRef("a.a123"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.123a.b")), FieldRef("a.123a.b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.a123.b")), FieldRef("a.a123.b"sv));
 
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.")), FieldRef("a."_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("$")), FieldRef("$"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("$.a")), FieldRef("$.a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$")), FieldRef("a"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.")), FieldRef("a."sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("$")), FieldRef("$"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("$.a")), FieldRef("$.a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.$")), FieldRef("a"sv));
 }
 
 TEST(FieldRefTest, CanonicalIndexFieldForNestedNumericFieldNames) {
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.0")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.55.01")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.0.b.1")), FieldRef("a"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0b.1")), FieldRef("a.0b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.b.1.2")), FieldRef("a.b"_sd));
-    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.01.02.b.c")), FieldRef("a"_sd));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.0")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.55.01")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.0.b.1")), FieldRef("a"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0b.1")), FieldRef("a.0b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.0.b.1.2")), FieldRef("a.b"sv));
+    ASSERT_EQ(FieldRef::getCanonicalIndexField(FieldRef("a.01.02.b.c")), FieldRef("a"sv));
 }
 
 }  // namespace

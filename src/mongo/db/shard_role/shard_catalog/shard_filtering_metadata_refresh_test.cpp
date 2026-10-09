@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 
@@ -35,19 +9,26 @@
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 #include "mongo/db/shard_role/shard_catalog/commit_collection_metadata_locally.h"
 #include "mongo/db/shard_role/shard_catalog/database_sharding_state_mock.h"
+#include "mongo/db/shard_role/shard_catalog/shard_catalog_recoverer_tracker.h"
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/sharding_environment/sharding_statistics.h"
+#include "mongo/db/sharding_environment/stale_config_retry_attempt.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/log_capture.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -58,7 +39,6 @@ const NamespaceString kTestNss =
     NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 const std::string kShardKey = "_id";
 const BSONObj kShardKeyPattern = BSON(kShardKey << 1);
-const HostAndPort kSelfShardHostAndPort{"selfShardHost", 12345};
 
 std::pair<CollectionType, std::vector<ChunkType>> makeShardedMetadataForDisk(
     OperationContext* opCtx, int nChunks, ShardId shardId) {
@@ -130,37 +110,6 @@ protected:
         replicationCoordinator()->setCurrentCommittedSnapshotOpTime(opTime);
     }
 
-    void addSelfShardToRegistry() {
-        addRemoteShards({{kMyShardName, kSelfShardHostAndPort}});
-    }
-
-    /**
-     * Answers the appendOplogNote noop issued by _waitForConfigTimeOrChunkVersionChange when the
-     * self-shard is registered as a remote HostAndPort (see addSelfShardToRegistry). Must run on a
-     * different thread than the code that calls runCommand (e.g. pair with launchAsync).
-     */
-    void expectAppendOplogNoteNoopFromSelfShard() {
-        onCommand([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQ(kSelfShardHostAndPort, request.target);
-            ASSERT_EQ(DatabaseName::kAdmin, request.dbname);
-            ASSERT_TRUE(request.cmdObj.hasField("appendOplogNote"));
-            return BSON("ok" << 1);
-        });
-    }
-
-    /**
-     * Runs onCollectionPlacementVersionMismatch on an async task and serves the self-shard
-     * appendOplogNote from the mock network (required whenever recovery reaches the configTime /
-     * chunk-version wait after addSelfShardToRegistry).
-     */
-    Status onShardVersionMismatchExpectSelfShardNoop(OperationContext* opCtx,
-                                                     const NamespaceString& nss,
-                                                     boost::optional<ChunkVersion> received) {
-        auto future = launchAsync([&] { return onShardVersionMismatch(opCtx, nss, received); });
-        expectAppendOplogNoteNoopFromSelfShard();
-        return future.default_timed_get();
-    }
-
     void populateDiskCatalog(OperationContext* opCtx,
                              const CollectionType& collType,
                              const std::vector<ChunkType>& chunks) {
@@ -208,7 +157,7 @@ protected:
     Status onShardVersionMismatch(OperationContext* opCtx,
                                   const NamespaceString& nss,
                                   boost::optional<ChunkVersion> receivedShardVersion) {
-        return FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+        return FilteringMetadataCache::get(opCtx)->onShardVersionMismatch(
             opCtx, nss, receivedShardVersion);
     }
 
@@ -217,14 +166,11 @@ protected:
         BSONObjBuilder builder;
         shardingStatistics.report(&builder);
         auto fullMetrics = builder.obj();
-        return fullMetrics.getObjectField("collectionShardingMetadataRecoveryStatistics")
-            .getOwned();
+        return fullMetrics.getObjectField("collectionShardingMetadataStatistics").getOwned();
     };
 };
 
 TEST_F(AuthoritativeRefreshFixture, UntrackedIsCorrectlyRecoveredFromDisk) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto untrackedNss =
@@ -235,7 +181,7 @@ TEST_F(AuthoritativeRefreshFixture, UntrackedIsCorrectlyRecoveredFromDisk) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, untrackedNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, untrackedNss, boost::none);
@@ -246,8 +192,6 @@ TEST_F(AuthoritativeRefreshFixture, UntrackedIsCorrectlyRecoveredFromDisk) {
 }
 
 TEST_F(AuthoritativeRefreshFixture, NoChunkVersionTriggersRecoveryFromDisk) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -255,7 +199,7 @@ TEST_F(AuthoritativeRefreshFixture, NoChunkVersionTriggersRecoveryFromDisk) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -268,8 +212,6 @@ TEST_F(AuthoritativeRefreshFixture, NoChunkVersionTriggersRecoveryFromDisk) {
 }
 
 TEST_F(AuthoritativeRefreshFixture, ChunkVersionMatchReturnsEarly) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -279,7 +221,7 @@ TEST_F(AuthoritativeRefreshFixture, ChunkVersionMatchReturnsEarly) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, matchingVersion);
@@ -289,15 +231,13 @@ TEST_F(AuthoritativeRefreshFixture, ChunkVersionMatchReturnsEarly) {
     ASSERT_TRUE(csr->getCurrentMetadataIfKnown().has_value());
     ASSERT_EQ(csr->getCurrentMetadataIfKnown()->getCollPlacementVersion(), matchingVersion);
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedAfterRecovery"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 1);
 }
 
-TEST_F(AuthoritativeRefreshFixture,
-       UntrackedRouterVersionWithKnownTrackedMetadataSkipsSecondDiskRecovery) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
+// Refresh uses the node FCV, not the operation's OFCV (see SERVER-128194 for details).
+TEST_F(AuthoritativeRefreshFixture, RefreshUsesGlobalFCVRatherThanOperationFCV) {
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -305,30 +245,52 @@ TEST_F(AuthoritativeRefreshFixture,
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    // Set OFCV=kUpgrading, so refreshes should still be non-authoritative according to OFCV.
+    // (Generic FCV reference): used for testing.
+    const auto savedFCV = serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+    ON_BLOCK_EXIT([&] { serverGlobalParams.mutableFCV.setVersion(savedFCV); });
+    serverGlobalParams.mutableFCV.setVersion(
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
+    VersionContext::FixedOperationFCVRegion fixedOperationFcvRegion(opCtx);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
+
+    // Despite the OFCV, the refresh recovers authoritatively (from disk) per the node FCV.
+    ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
+    ASSERT_EQ(getStatistics(opCtx).getIntField("countDiskRecoveriesPerformed"), 1);
+}
+
+TEST_F(AuthoritativeRefreshFixture,
+       UntrackedRouterVersionWithKnownTrackedMetadataSkipsSecondDiskRecovery) {
+    auto* opCtx = operationContext();
+
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
+    populateDiskCatalog(opCtx, collType, chunks);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
 
     auto statsAfterFirst = getStatistics(opCtx);
-    ASSERT_EQ(statsAfterFirst.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(statsAfterFirst.getIntField("recoverersCreated"), 1);
+    ASSERT_EQ(statsAfterFirst.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(statsAfterFirst.getIntField("countMetadataSynchronizersCreated"), 1);
 
-    addSelfShardToRegistry();
-    ASSERT_OK(
-        onShardVersionMismatchExpectSelfShardNoop(opCtx, kTestNss, ChunkVersion::UNTRACKED()));
+    ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, ChunkVersion::UNTRACKED()));
 
     auto statsAfterSecond = getStatistics(opCtx);
-    ASSERT_EQ(statsAfterSecond.getIntField("diskRecoveriesPerformed"), 1)
+    ASSERT_EQ(statsAfterSecond.getIntField("countDiskRecoveriesPerformed"), 1)
         << "Second placement mismatch should not re-run disk recovery when CSS already has "
            "metadata";
-    ASSERT_EQ(statsAfterSecond.getIntField("recoverersCreated"), 1);
+    ASSERT_EQ(statsAfterSecond.getIntField("countMetadataSynchronizersCreated"), 1);
 }
 
 TEST_F(AuthoritativeRefreshFixture,
        IgnoredReceivedVersionResolvesAfterRecoveryWithoutPostRecoveryWait) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -336,7 +298,7 @@ TEST_F(AuthoritativeRefreshFixture,
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, ChunkVersion::IGNORED());
@@ -347,16 +309,14 @@ TEST_F(AuthoritativeRefreshFixture,
     ASSERT_EQ(csr->getCurrentMetadataIfKnown()->getCollPlacementVersion(),
               chunks.back().getVersion());
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedAfterRecovery"), 1);
-    ASSERT_EQ(stats.getIntField("postRecoveryWaitResolvedByConfigTime"), 0);
-    ASSERT_EQ(stats.getIntField("postRecoveryWaitResolvedByVersionChange"), 0);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 1);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 0);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByVersionChange"), 0);
 }
 
 TEST_F(AuthoritativeRefreshFixture, HigherRouterVersionTriggersRecoveryThenConfigTimeWait) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -368,25 +328,130 @@ TEST_F(AuthoritativeRefreshFixture, HigherRouterVersionTriggersRecoveryThenConfi
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
-    addSelfShardToRegistry();
-    auto status = onShardVersionMismatchExpectSelfShardNoop(opCtx, kTestNss, higherVersion);
+    auto status = onShardVersionMismatch(opCtx, kTestNss, higherVersion);
     ASSERT_OK(status);
 
     auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
     ASSERT_TRUE(csr->getCurrentMetadataIfKnown().has_value());
     ASSERT_EQ(csr->getCurrentMetadataIfKnown()->getCollPlacementVersion(), currentVersion);
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("postRecoveryWaitResolvedByConfigTime"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 1);
+    ASSERT_TRUE(stats.hasField("totalPostRecoveryWaitMillis"));
+    ASSERT_GTE(stats["totalPostRecoveryWaitMillis"].safeNumberLong(), 0);
+}
+
+// Helper to drive an incomparable-version recovery that reaches the configTime wait: the router
+// sends a higher tracked version than what is recovered from disk, so the post-recovery
+// compatibility check falls through to waitForConfigTimeOrShardVersionChange.
+class IncomparableVersionNoopFailureFixture : public AuthoritativeRefreshFixture {
+protected:
+    ChunkVersion setupHigherRouterVersion(OperationContext* opCtx) {
+        const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
+        populateDiskCatalog(opCtx, collType, chunks);
+
+        auto higherVersion = chunks.back().getVersion();
+        higherVersion.incMajor();
+
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+        return higherVersion;
+    }
+};
+
+TEST_F(IncomparableVersionNoopFailureFixture,
+       FailedNoopWriteOnFirstRouterAttemptThrowsStaleConfig) {
+    auto* opCtx = operationContext();
+    auto higherVersion = setupHigherRouterVersion(opCtx);
+
+    unittest::ServerParameterGuard bounceEnabled("enableIncomparableShardVersionRouterBounce",
+                                                 true);
+
+    FailPointEnableBlock failNoopWrite{"forceNoopWriteToAdvanceConfigTimeToFail"};
+
+    // Router advertised that this is its first attempt (retry counter 0). Because the noop write
+    // fails, the shard surfaces StaleConfig so the router refreshes and retries, instead of
+    // blocking on the configTime wait.
+    staleConfigRetryAttempt(opCtx) = 0;
+
+    auto status = onShardVersionMismatch(opCtx, kTestNss, higherVersion);
+    ASSERT_EQ(status.code(), ErrorCodes::StaleConfig);
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 0);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByVersionChange"), 0);
+}
+
+TEST_F(IncomparableVersionNoopFailureFixture,
+       FailedNoopWriteOnLaterRouterAttemptFallsBackToConfigTimeWait) {
+    auto* opCtx = operationContext();
+    auto higherVersion = setupHigherRouterVersion(opCtx);
+
+    unittest::ServerParameterGuard bounceEnabled("enableIncomparableShardVersionRouterBounce",
+                                                 true);
+
+    FailPointEnableBlock failNoopWrite{"forceNoopWriteToAdvanceConfigTimeToFail"};
+
+    // Router advertised that it has already retried (retry counter > 0). Even though the noop write
+    // fails, the shard falls back to the configTime wait.
+    staleConfigRetryAttempt(opCtx) = 1;
+
+    auto status = onShardVersionMismatch(opCtx, kTestNss, higherVersion);
+    ASSERT_OK(status);
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 1);
+}
+
+TEST_F(IncomparableVersionNoopFailureFixture,
+       FailedNoopWriteWithoutRouterCounterFallsBackToConfigTimeWait) {
+    auto* opCtx = operationContext();
+    auto higherVersion = setupHigherRouterVersion(opCtx);
+
+    unittest::ServerParameterGuard bounceEnabled("enableIncomparableShardVersionRouterBounce",
+                                                 true);
+
+    FailPointEnableBlock failNoopWrite{"forceNoopWriteToAdvanceConfigTimeToFail"};
+
+    // The router did not advertise the retry counter (old or FCV-disabled router). The shard must
+    // never surface the StaleConfig bounce and instead falls back to the configTime wait,
+    // preserving mixed-version behavior.
+    ASSERT_FALSE(staleConfigRetryAttempt(opCtx).has_value());
+
+    auto status = onShardVersionMismatch(opCtx, kTestNss, higherVersion);
+    ASSERT_OK(status);
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 1);
+}
+
+TEST_F(IncomparableVersionNoopFailureFixture,
+       FailedNoopWriteWithBounceDisabledFallsBackToConfigTimeWait) {
+    auto* opCtx = operationContext();
+    auto higherVersion = setupHigherRouterVersion(opCtx);
+
+    // 'enableIncomparableShardVersionRouterBounce' is disabled (its default). Even though the
+    // router advertised its first attempt (retry counter 0) and the noop write fails, the shard
+    // must not surface StaleConfig; it falls back to the configTime wait.
+    unittest::ServerParameterGuard bounceDisabled("enableIncomparableShardVersionRouterBounce",
+                                                  false);
+
+    FailPointEnableBlock failNoopWrite{"forceNoopWriteToAdvanceConfigTimeToFail"};
+
+    staleConfigRetryAttempt(opCtx) = 0;
+
+    auto status = onShardVersionMismatch(opCtx, kTestNss, higherVersion);
+    ASSERT_OK(status);
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 1);
 }
 
 TEST_F(AuthoritativeRefreshFixture, ConfigTimeReachedWithEmptyCSRTriggersFullRecovery) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -396,7 +461,7 @@ TEST_F(AuthoritativeRefreshFixture, ConfigTimeReachedWithEmptyCSRTriggersFullRec
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, dummyVersion);
@@ -407,60 +472,11 @@ TEST_F(AuthoritativeRefreshFixture, ConfigTimeReachedWithEmptyCSRTriggersFullRec
     ASSERT_TRUE(metadataOpt.has_value());
     ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-}
-
-TEST_F(AuthoritativeRefreshFixture, NonAuthoritativeTransitionDuringRecoveryReturnsEarly) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
-    auto* opCtx = operationContext();
-
-    auto dummyVersion = ChunkVersion({OID::gen(), Timestamp(50, 1)}, {1, 0});
-    addSelfShardToRegistry();
-
-    {
-        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
-        csr->enterCriticalSectionCatchUpPhase(opCtx, BSONObj());
-        csr->enterCriticalSectionCommitPhase(opCtx, BSONObj());
-    }
-
-    auto* fp = globalFailPointRegistry().find("hangBeforePlacementVersionCriticalSectionWait");
-    auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
-
-    stdx::thread noopResponder([&] { expectAppendOplogNoteNoopFromSelfShard(); });
-
-    stdx::thread recoveryThread([&] {
-        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgFlip");
-        auto bgOpCtx = bgClient->makeOperationContext();
-        auto bgStatus = onShardVersionMismatch(bgOpCtx.get(), kTestNss, dummyVersion);
-        ASSERT_OK(bgStatus);
-    });
-
-    fp->waitForTimesEntered(initialTimesEntered + 1);
-
-    {
-        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->setFilteringMetadata_nonAuthoritative(opCtx, CollectionMetadata::UNTRACKED());
-        csr->exitCriticalSection(opCtx, BSONObj());
-    }
-
-    advanceCommittedSnapshot(opCtx);
-
-    fp->setMode(FailPoint::off);
-
-    recoveryThread.join();
-    noopResponder.join();
-
-    auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
-    ASSERT_EQ(csr->getAuthoritativeState(),
-              CollectionShardingRuntime::AuthoritativeState::kNonAuthoritative);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
 }
 
 TEST_F(AuthoritativeRefreshFixture, CriticalSectionBlocksRecoveryThenProceeds) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -470,7 +486,7 @@ TEST_F(AuthoritativeRefreshFixture, CriticalSectionBlocksRecoveryThenProceeds) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
         csr->enterCriticalSectionCatchUpPhase(opCtx, BSONObj());
         csr->enterCriticalSectionCommitPhase(opCtx, BSONObj());
     }
@@ -502,9 +518,7 @@ TEST_F(AuthoritativeRefreshFixture, CriticalSectionBlocksRecoveryThenProceeds) {
     ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
 }
 
-TEST_F(AuthoritativeRefreshFixture, RecoveryCreatesExactlyOneRecoverer) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
+TEST_F(AuthoritativeRefreshFixture, CollectionCriticalSectionWaitAllowsRecoveryToComplete) {
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -514,7 +528,97 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryCreatesExactlyOneRecoverer) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
+        csr->enterCriticalSectionCatchUpPhase(opCtx, BSONObj());
+        csr->enterCriticalSectionCommitPhase(opCtx, BSONObj());
+    }
+
+    auto* fp = globalFailPointRegistry().find("hangBeforePlacementVersionCriticalSectionWait");
+    auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    stdx::thread recoveryThread([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgCriticalSection");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(onShardVersionMismatch(bgOpCtx.get(), kTestNss, dummyVersion));
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->exitCriticalSection(opCtx, BSONObj());
+    }
+
+    fp->setMode(FailPoint::off);
+    recoveryThread.join();
+
+    auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+    auto metadataOpt = csr->getCurrentMetadataIfKnown();
+    ASSERT_TRUE(metadataOpt.has_value());
+    ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
+}
+
+TEST_F(AuthoritativeRefreshFixture, ClearFilteringMetadataDuringPostRecoveryWaitTriggersRetry) {
+    auto* opCtx = operationContext();
+
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
+    populateDiskCatalog(opCtx, collType, chunks);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    // Force the recovery thread to ignore the majority waiter since it's an immediately fulfilled
+    // future in unit tests.
+    auto* fp = globalFailPointRegistry().find("forceWaitForVersionOnly");
+    auto initialTimesEntered = fp->setMode(FailPoint::nTimes, 1);
+
+    // Router reports UNTRACKED while the shard's on-disk metadata is tracked: the post-recovery
+    // comparison cannot order the two, so recovery falls into Step 4's wait.
+    stdx::thread recoveryThread([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgInterrupt");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(onShardVersionMismatch(bgOpCtx.get(), kTestNss, ChunkVersion::UNTRACKED()));
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    // Cancel the registered version waiter and clear the CSS metadata. The wait should observe
+    // CallbackCanceled and return kYes so the outer recovery loop performs another disk
+    // recovery iteration.
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    fp->setMode(FailPoint::off);
+
+    recoveryThread.join();
+
+    auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+    auto metadataOpt = csr->getCurrentMetadataIfKnown();
+    ASSERT_TRUE(metadataOpt.has_value());
+    ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
+
+    // The retry path must have run disk recovery a second time: once for the original wait that was
+    // interrupted, and once for the retried iteration that completed.
+    auto stats = getStatistics(opCtx);
+    ASSERT_GTE(stats.getIntField("countDiskRecoveriesPerformed"), 2)
+        << "Expected the wait interrupt to trigger a second disk recovery";
+}
+
+TEST_F(AuthoritativeRefreshFixture, RecoveryCreatesExactlyOneMetadataSynchronizer) {
+    auto* opCtx = operationContext();
+
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
+    populateDiskCatalog(opCtx, collType, chunks);
+
+    auto dummyVersion = ChunkVersion({OID::gen(), Timestamp(50, 1)}, {1, 0});
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, dummyVersion);
@@ -525,13 +629,11 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryCreatesExactlyOneRecoverer) {
     ASSERT_TRUE(metadataOpt.has_value());
     ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
 }
 
-TEST_F(AuthoritativeRefreshFixture, RecovererCleanedUpAfterRecovery) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
+TEST_F(AuthoritativeRefreshFixture, MetadataSynchronizerCleanedUpAfterRecovery) {
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 3, kMyShardName);
@@ -539,7 +641,7 @@ TEST_F(AuthoritativeRefreshFixture, RecovererCleanedUpAfterRecovery) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -547,12 +649,10 @@ TEST_F(AuthoritativeRefreshFixture, RecovererCleanedUpAfterRecovery) {
 
     auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
     ASSERT_TRUE(csr->getCurrentMetadataIfKnown().has_value());
-    ASSERT_FALSE(csr->getCollectionCacheRecoverer());
+    ASSERT_FALSE(csr->getMetadataSynchronizer());
 }
 
 TEST_F(AuthoritativeRefreshFixture, ThreeConcurrentCallersAllSucceed) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 10, kMyShardName);
@@ -562,7 +662,7 @@ TEST_F(AuthoritativeRefreshFixture, ThreeConcurrentCallersAllSucceed) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     Notification<void> ready1, ready2, ready3;
@@ -592,12 +692,10 @@ TEST_F(AuthoritativeRefreshFixture, ThreeConcurrentCallersAllSucceed) {
     auto metadataOpt = csr->getCurrentMetadataIfKnown();
     ASSERT_TRUE(metadataOpt.has_value());
     ASSERT_EQ(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
-    ASSERT_FALSE(csr->getCollectionCacheRecoverer());
+    ASSERT_FALSE(csr->getMetadataSynchronizer());
 }
 
 TEST_F(AuthoritativeRefreshFixture, RecoveryWithSingleChunkVerifiesExactMetadata) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 1, kMyShardName);
@@ -605,7 +703,7 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryWithSingleChunkVerifiesExactMetadata
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -620,8 +718,6 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryWithSingleChunkVerifiesExactMetadata
 }
 
 TEST_F(AuthoritativeRefreshFixture, RecoveryWithManyChunksVerifiesVersionSorting) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 100, kMyShardName);
@@ -629,7 +725,7 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryWithManyChunksVerifiesVersionSorting
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -644,8 +740,6 @@ TEST_F(AuthoritativeRefreshFixture, RecoveryWithManyChunksVerifiesVersionSorting
 
 TEST_F(AuthoritativeRefreshFixture,
        RecoveryWithChunksOnDifferentShardReportsUntrackedForThisShard) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     // All chunks belong to "otherShard", not kMyShardName.
@@ -655,7 +749,7 @@ TEST_F(AuthoritativeRefreshFixture,
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -670,8 +764,6 @@ TEST_F(AuthoritativeRefreshFixture,
 }
 
 TEST_F(AuthoritativeRefreshFixture, PartialRangeDiskCatalogRecoversWithoutChunkMetadata) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const UUID uuid = UUID::gen();
@@ -700,7 +792,7 @@ TEST_F(AuthoritativeRefreshFixture, PartialRangeDiskCatalogRecoversWithoutChunkM
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -713,13 +805,11 @@ TEST_F(AuthoritativeRefreshFixture, PartialRangeDiskCatalogRecoversWithoutChunkM
     ASSERT_TRUE(metadataOpt->getShardPlacementVersion().isSet());
     ASSERT_EQ(metadataOpt->getShardPlacementVersion(), myOwnedChunks.back().getVersion());
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
 }
 
 TEST_F(AuthoritativeRefreshFixture, SequentialCallsAreIdempotent) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -729,7 +819,7 @@ TEST_F(AuthoritativeRefreshFixture, SequentialCallsAreIdempotent) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     // First call: recovers from disk.
@@ -742,7 +832,8 @@ TEST_F(AuthoritativeRefreshFixture, SequentialCallsAreIdempotent) {
     ASSERT_EQ(recoveredVersion, chunks.back().getVersion());
 
     // Second call with the same stale version: the pre-recovery comparison sees that the current
-    // metadata is already newer, so the request returns without creating another recoverer.
+    // metadata is already newer, so the request returns without creating another metadata
+    // synchronizer.
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, dummyVersion));
 
     auto secondVersion = [&] {
@@ -752,13 +843,12 @@ TEST_F(AuthoritativeRefreshFixture, SequentialCallsAreIdempotent) {
     ASSERT_EQ(secondVersion, recoveredVersion);
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedBeforeRecovery"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    // One resolution after recovery, one from the subsequent cached short-circuit.
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 2);
 }
 
 TEST_F(AuthoritativeRefreshFixture, RecoveredVersionMatchSkipsRecoveryLoopOnNextCall) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -766,7 +856,7 @@ TEST_F(AuthoritativeRefreshFixture, RecoveredVersionMatchSkipsRecoveryLoopOnNext
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     // First call: recover from disk using boost::none (no version match possible).
@@ -788,13 +878,12 @@ TEST_F(AuthoritativeRefreshFixture, RecoveredVersionMatchSkipsRecoveryLoopOnNext
     ASSERT_EQ(finalVersion, recoveredVersion);
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedBeforeRecovery"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    // One resolution after forced recovery, one from the follow-up matching-version call.
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 2);
 }
 
 TEST_F(AuthoritativeRefreshFixture, OngoingRecoverySatisfiesVersionSkipsDiskRecovery) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -804,7 +893,7 @@ TEST_F(AuthoritativeRefreshFixture, OngoingRecoverySatisfiesVersionSkipsDiskReco
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     // Pause the background recovery thread so Thread A's disk recovery is in-flight when Thread B
@@ -849,13 +938,12 @@ TEST_F(AuthoritativeRefreshFixture, OngoingRecoverySatisfiesVersionSkipsDiskReco
     ASSERT_EQ(csr->getCurrentMetadataIfKnown()->getCollPlacementVersion(), matchingVersion);
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedBeforeRecovery"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    // Thread A resolves after forced recovery; Thread B resolves once installed metadata matches.
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 2);
 }
 
 TEST_F(AuthoritativeRefreshFixture, ReRecoveryAfterMetadataCleared) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -863,15 +951,15 @@ TEST_F(AuthoritativeRefreshFixture, ReRecoveryAfterMetadataCleared) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     // First recovery.
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 1);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
 
     {
         auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
@@ -882,7 +970,7 @@ TEST_F(AuthoritativeRefreshFixture, ReRecoveryAfterMetadataCleared) {
     // state.
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
         DBDirectClient client(opCtx);
         client.remove(NamespaceString::kConfigShardCatalogCollectionsNamespace, BSONObj{});
         client.remove(NamespaceString::kConfigShardCatalogChunksNamespace, BSONObj{});
@@ -894,8 +982,8 @@ TEST_F(AuthoritativeRefreshFixture, ReRecoveryAfterMetadataCleared) {
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
 
     stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 2);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 2);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 2);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 2);
 
     auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
     auto metadataOpt = csr->getCurrentMetadataIfKnown();
@@ -905,8 +993,6 @@ TEST_F(AuthoritativeRefreshFixture, ReRecoveryAfterMetadataCleared) {
 }
 
 TEST_F(AuthoritativeRefreshFixture, CriticalSectionExitedWithExternalMetadataSkipsDiskRecovery) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 5, kMyShardName);
@@ -916,7 +1002,7 @@ TEST_F(AuthoritativeRefreshFixture, CriticalSectionExitedWithExternalMetadataSki
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
         csr->enterCriticalSectionCatchUpPhase(opCtx, BSONObj());
         csr->enterCriticalSectionCommitPhase(opCtx, BSONObj());
     }
@@ -940,7 +1026,7 @@ TEST_F(AuthoritativeRefreshFixture, CriticalSectionExitedWithExternalMetadataSki
     auto externalMetadata = makeShardedMetadataInMemory(opCtx);
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->setFilteringMetadata_authoritative(
+        csr->setCollectionMetadata(
             opCtx, externalMetadata, CollectionShardingRuntime::NoRoutingTableAs::kUntracked);
         csr->exitCriticalSection(opCtx, BSONObj());
     }
@@ -955,14 +1041,52 @@ TEST_F(AuthoritativeRefreshFixture, CriticalSectionExitedWithExternalMetadataSki
     ASSERT_EQ(metadataOpt->getCollPlacementVersion(), externalMetadata.getCollPlacementVersion());
     ASSERT_NE(metadataOpt->getCollPlacementVersion(), chunks.back().getVersion());
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 0);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 0);
-    ASSERT_EQ(stats.getIntField("versionResolvedBeforeRecovery"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 0);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 0);
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 1);
+}
+
+TEST_F(AuthoritativeRefreshFixture, KnownMetadataShortCircuitDoesNotRecordDiskRecoveryMillis) {
+    auto* opCtx = operationContext();
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+        csr->enterCriticalSectionCatchUpPhase(opCtx, BSONObj());
+        csr->enterCriticalSectionCommitPhase(opCtx, BSONObj());
+    }
+
+    auto* fp = globalFailPointRegistry().find("hangBeforePlacementVersionCriticalSectionWait");
+    auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    stdx::thread recoveryThread([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgCS");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        auto bgStatus = onShardVersionMismatch(bgOpCtx.get(), kTestNss, boost::none);
+        ASSERT_OK(bgStatus);
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    auto externalMetadata = makeShardedMetadataInMemory(opCtx);
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->setCollectionMetadata(
+            opCtx, externalMetadata, CollectionShardingRuntime::NoRoutingTableAs::kUntracked);
+        csr->exitCriticalSection(opCtx, BSONObj());
+    }
+
+    fp->setMode(FailPoint::off);
+
+    recoveryThread.join();
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 0);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 0);
+    ASSERT_EQ(stats.getIntField("totalDiskRecoveryMillis"), 0);
 }
 
 TEST_F(AuthoritativeRefreshFixture, UnownedRecoveryAcceptsTrackedWithNoChunksVersion) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -970,7 +1094,7 @@ TEST_F(AuthoritativeRefreshFixture, UnownedRecoveryAcceptsTrackedWithNoChunksVer
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     const auto trackedZeroChunksVersion =
@@ -988,17 +1112,15 @@ TEST_F(AuthoritativeRefreshFixture, UnownedRecoveryAcceptsTrackedWithNoChunksVer
     ASSERT_FALSE(metadataOpt->isSharded());
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
-    ASSERT_EQ(stats.getIntField("versionResolvedAfterRecovery"), 1)
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countVersionMismatchResolutions"), 1)
         << "Expected the post-recovery compatibility check to accept UNOWNED + 0-chunks without "
            "falling through to a configTime wait";
-    ASSERT_EQ(stats.getIntField("postRecoveryWaitResolvedByConfigTime"), 0);
-    ASSERT_EQ(stats.getIntField("postRecoveryWaitResolvedByVersionChange"), 0);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByConfigTime"), 0);
+    ASSERT_EQ(stats.getIntField("countPostRecoveryWaitsResolvedByVersionChange"), 0);
 }
 
 TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckAcceptsTrackedWithNoChunksVersion) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -1006,7 +1128,7 @@ TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckAcceptsTrackedWithNo
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
@@ -1028,8 +1150,6 @@ TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckAcceptsTrackedWithNo
 }
 
 TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckRejectsTrackedVersionWithChunks) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -1037,7 +1157,7 @@ TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckRejectsTrackedVersio
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
@@ -1054,8 +1174,6 @@ TEST_F(AuthoritativeRefreshFixture, UnownedShardVersionCheckRejectsTrackedVersio
 }
 
 TEST_F(AuthoritativeRefreshFixture, TrackedCollectionWithNoChunksOnDiskRecoveredCorrectly) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     const UUID uuid = UUID::gen();
@@ -1063,26 +1181,16 @@ TEST_F(AuthoritativeRefreshFixture, TrackedCollectionWithNoChunksOnDiskRecovered
     const Timestamp timestamp(Date_t::now());
     CollectionType collType{kTestNss, epoch, timestamp, Date_t::now(), uuid, kShardKeyPattern};
 
-    auto keyPattern = KeyPattern(kShardKeyPattern);
-    auto range = ChunkRange(keyPattern.globalMin(), keyPattern.globalMax());
-    ChunkType placeholder(uuid,
-                          std::move(range),
-                          ChunkVersion({epoch, timestamp}, {1, 0}),
-                          shard_catalog_commit::kChunklessPlaceholderShardId);
-    placeholder.setName(OID::gen());
-
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
     {
         DBDirectClient client(opCtx);
         client.insert(NamespaceString::kConfigShardCatalogCollectionsNamespace, collType.toBSON());
-        client.insert(NamespaceString::kConfigShardCatalogChunksNamespace,
-                      placeholder.toConfigBSON());
     }
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
@@ -1096,7 +1204,8 @@ TEST_F(AuthoritativeRefreshFixture, TrackedCollectionWithNoChunksOnDiskRecovered
 }
 
 // Runs recovery on a background thread and pauses it inside the Mode B attempt (Mode A's
-// failpoint hit is skipped), invokes `duringPauseFn` on the main thread, then resumes.
+// hangInRecoverRefreshThread hit is skipped), invokes `duringPauseFn` on the main thread, then
+// resumes.
 template <typename Fn>
 void runRecoveryAndInjectInModeB(OperationContext* opCtx,
                                  const NamespaceString& nss,
@@ -1108,7 +1217,7 @@ void runRecoveryAndInjectInModeB(OperationContext* opCtx,
         auto client = getGlobalServiceContext()->getService()->makeClient("recoveryThread");
         auto threadOpCtx = client->makeOperationContext();
         ASSERT_OK(FilteringMetadataCache::get(threadOpCtx.get())
-                      ->onCollectionPlacementVersionMismatch(
+                      ->onShardVersionMismatch(
                           threadOpCtx.get(), nss, boost::none /* receivedShardVersion */));
     });
 
@@ -1131,8 +1240,6 @@ void setDbPrimaryShardForTest(OperationContext* opCtx,
 // Non-primary shard, transient primary window (set+clear) keeps the primary at `boost::none` but
 // bumps the counter by two: only the counter catches the ABA. Converges to kUnowned after retry.
 TEST_F(AuthoritativeRefreshFixture, TransientPrimaryAbaForcesModeBRetry) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -1140,7 +1247,7 @@ TEST_F(AuthoritativeRefreshFixture, TransientPrimaryAbaForcesModeBRetry) {
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     runRecoveryAndInjectInModeB(opCtx, kTestNss, [&] {
@@ -1157,15 +1264,15 @@ TEST_F(AuthoritativeRefreshFixture, TransientPrimaryAbaForcesModeBRetry) {
     ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 3);  // 1 Mode A + 2 Mode B (one retry).
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"),
+              3);  // 1 Mode A + 2 Mode B (one retry).
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    ASSERT_GTE(stats.getIntField("totalDiskRecoveryMillis"), 0);
 }
 
 // Stable DB primary baseline: no mid-flight mutation, no retry. Converges to kUntracked with
-// exactly 1 Mode A + 1 Mode B recoverer.
+// exactly 1 Mode A + 1 Mode B metadata synchronizer.
 TEST_F(AuthoritativeRefreshFixture, DbPrimaryShardInstallsUntrackedOnEmptyDisk) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -1175,7 +1282,7 @@ TEST_F(AuthoritativeRefreshFixture, DbPrimaryShardInstallsUntrackedOnEmptyDisk) 
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
@@ -1185,16 +1292,69 @@ TEST_F(AuthoritativeRefreshFixture, DbPrimaryShardInstallsUntrackedOnEmptyDisk) 
     ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 2);  // 1 Mode A + 1 Mode B, no retry.
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"),
+              2);  // 1 Mode A + 1 Mode B, no retry.
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+}
+
+// A retained DSR entry from the legacy non-authoritative model only says which shard the cached
+// metadata names as primary. It does not prove that this shard is the DB primary.
+TEST_F(AuthoritativeRefreshFixture, RetainedNonAuthoritativeDsrEntryInstallsUnownedOnEmptyDisk) {
+    auto* opCtx = operationContext();
+
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    {
+        auto scopedDsr = DatabaseShardingRuntime::acquireExclusive(opCtx, kTestNss.dbName());
+        scopedDsr->setDbInfo_DEPRECATED(
+            opCtx,
+            DatabaseType{kTestNss.dbName(), ShardId("otherShard"), {UUID::gen(), Timestamp(1, 1)}});
+    }
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
+
+    auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+    ASSERT_TRUE(csr->isUnowned());
+    ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"),
+              2);  // 1 Mode A + 1 Mode B, no retry.
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+}
+
+TEST_F(AuthoritativeRefreshFixture, ConfigSystemSessionsEmptyDiskRecoversAsUnownedNotUntracked) {
+    auto* opCtx = operationContext();
+    const auto& nss = NamespaceString::kLogicalSessionsNamespace;
+
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, nss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    ASSERT_OK(onShardVersionMismatch(opCtx, nss, boost::none));
+
+    auto csr = CollectionShardingRuntime::acquireShared(opCtx, nss);
+    ASSERT_TRUE(csr->isUnowned()) << "config.system.sessions with no on-disk entry must recover as "
+                                     "kUnowned, never kUntracked";
+    auto metadataOpt = csr->getCurrentMetadataIfKnown();
+    ASSERT_TRUE(metadataOpt.has_value());
+    ASSERT_FALSE(metadataOpt->isSharded());
 }
 
 // Non-ABA primary identity change: DSR starts empty, a movePrimary during the drain makes this
 // shard the new primary. Caught by the simple pre/post compare. Converges to kUntracked after
 // retry.
 TEST_F(AuthoritativeRefreshFixture, PrimaryChangeDuringRecoveryForcesModeBRetry) {
-    RAIIServerParameterControllerForTest featureFlag("featureFlagShardAuthoritativeCollMetadata",
-                                                     true);
     auto* opCtx = operationContext();
 
     createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
@@ -1202,7 +1362,7 @@ TEST_F(AuthoritativeRefreshFixture, PrimaryChangeDuringRecoveryForcesModeBRetry)
 
     {
         auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
-        csr->clearFilteringMetadata_authoritative(opCtx);
+        csr->clearCollectionMetadata(opCtx);
     }
 
     runRecoveryAndInjectInModeB(opCtx, kTestNss, [&] {
@@ -1218,8 +1378,501 @@ TEST_F(AuthoritativeRefreshFixture, PrimaryChangeDuringRecoveryForcesModeBRetry)
     ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
 
     auto stats = getStatistics(opCtx);
-    ASSERT_EQ(stats.getIntField("recoverersCreated"), 3);
-    ASSERT_EQ(stats.getIntField("diskRecoveriesPerformed"), 1);
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 3);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+}
+
+class RefreshCancellationFixture : public ShardServerTestFixtureWithCatalogCacheLoaderMock {
+protected:
+    // The individual tests toggle 'featureFlagAuthoritativeShardsCRUD' to switch between the
+    // authoritative and non-authoritative refresh paths. The authoritative CRUD flag is only valid
+    // when the authoritative DDL flag is also enabled, so keep DDL enabled for the lifetime of the
+    // fixture.
+    unittest::ServerParameterGuard ddlFeatureFlag{"featureFlagAuthoritativeShardsDDL", true};
+
+    // Cancel incompatible recoveries off-thread (interrupt blocks on drain), then unhang `fp`.
+    void interruptRecoveriesThenUnhangFailpoint(FailPoint* fp) {
+        auto* hangAfterCancelingFp =
+            globalFailPointRegistry().find("hangAfterCancelingIncompatibleRecoveries");
+        const auto initialTimesEntered = hangAfterCancelingFp->setMode(FailPoint::alwaysOn);
+
+        stdx::thread interruptThread([&] {
+            auto client = getGlobalServiceContext()->getService()->makeClient("bgInterrupt");
+            auto interruptOpCtx = client->makeOperationContext();
+            ShardCatalogRecovererTracker::get(interruptOpCtx.get())
+                ->interruptIncompatibleRecoveries(interruptOpCtx.get());
+        });
+
+        hangAfterCancelingFp->waitForTimesEntered(initialTimesEntered + 1);
+        fp->setMode(FailPoint::off);
+        hangAfterCancelingFp->setMode(FailPoint::off);
+        interruptThread.join();
+    }
+};
+TEST_F(RefreshCancellationFixture, CancelNonAuthRefreshRetriesAsAuthoritative) {
+    auto* opCtx = operationContext();
+
+    // Force the flag off so the bg thread picks the non-auth path on the first attempt.
+    unittest::ServerParameterGuard nonAuthoritativeScope("featureFlagAuthoritativeShardsCRUD",
+                                                         false);
+
+    // Set a dbVersion lower than receivedDbVersion, to actually run the non-authoritative refresh.
+    setDbPrimaryShardForTest(opCtx, kTestNss, kMyShardName, Timestamp(1, 0));
+    const auto receivedDbVersion = DatabaseVersion(UUID::gen(), Timestamp(2, 0));
+
+    auto* fp = globalFailPointRegistry().find("hangInRecoverRefreshDbVersionThread");
+    const auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    stdx::thread t([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgNonAuth");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(FilteringMetadataCache::get(bgOpCtx.get())
+                      ->onDbVersionMismatch(bgOpCtx.get(), kTestNss.dbName(), receivedDbVersion));
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    // Bump the cached version so the auth retry's inner loop sees a matching version.
+    setDbPrimaryShardForTest(opCtx, kTestNss, kMyShardName, Timestamp(2, 0));
+
+    // Flip the flag before cancelling so the outer retry dispatches to the auth path.
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    interruptRecoveriesThenUnhangFailpoint(fp);
+    t.join();
+    // Succeeded after setFCV cancel: outer loop re-sampled FCV and finished on the auth path.
+}
+
+TEST_F(RefreshCancellationFixture, CancelAuthCollectionRefreshRetriesAsNonAuthoritative) {
+    auto* opCtx = operationContext();
+
+    // Force the flag on so the bg thread picks the auth path on the first attempt.
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    // Populate on-disk catalog so authoritative recovery runs the synchronizer.
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 1, kMyShardName);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+    {
+        DBDirectClient client(opCtx);
+        client.insert(NamespaceString::kConfigShardCatalogCollectionsNamespace, collType.toBSON());
+        for (const auto& chunk : chunks) {
+            client.insert(NamespaceString::kConfigShardCatalogChunksNamespace,
+                          chunk.toConfigBSON());
+        }
+    }
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    auto sharedMetadata =
+        makeShardedMetadataInMemory(opCtx, UUID::gen(), kMyShardName, kMyShardName);
+    const auto receivedShardVersion = sharedMetadata.getShardPlacementVersion();
+
+    auto* fp = globalFailPointRegistry().find("hangInRecoverRefreshThread");
+    const auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    stdx::thread t([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgAuthColl");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(FilteringMetadataCache::get(bgOpCtx.get())
+                      ->onShardVersionMismatch(bgOpCtx.get(), kTestNss, receivedShardVersion));
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    // Install matching metadata so the retry's non-auth handler observes that the cached version
+    // satisfies receivedShardVersion and returns immediately.
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->setCollectionMetadata(opCtx, sharedMetadata);
+    }
+
+    // Flip the flag before cancelling so the outer retry dispatches to the non-auth path.
+    unittest::ServerParameterGuard nonAuthoritativeScope("featureFlagAuthoritativeShardsCRUD",
+                                                         false);
+
+    interruptRecoveriesThenUnhangFailpoint(fp);
+    t.join();
+    // Succeeded after setFCV cancel: outer loop re-sampled FCV and finished on the non-auth path.
+}
+
+TEST_F(RefreshCancellationFixture, CancelNonAuthCollectionRefreshRetriesAsAuthoritative) {
+    auto* opCtx = operationContext();
+
+    // Force the flag off so the bg thread picks the non-auth path on the first attempt.
+    unittest::ServerParameterGuard nonAuthoritativeScope("featureFlagAuthoritativeShardsCRUD",
+                                                         false);
+
+    auto sharedMetadata =
+        makeShardedMetadataInMemory(opCtx, UUID::gen(), kMyShardName, kMyShardName);
+    const auto receivedShardVersion = sharedMetadata.getShardPlacementVersion();
+
+    auto* fp = globalFailPointRegistry().find("hangInRecoverRefreshThread");
+    const auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    stdx::thread t([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgNonAuthColl");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(FilteringMetadataCache::get(bgOpCtx.get())
+                      ->onShardVersionMismatch(bgOpCtx.get(), kTestNss, receivedShardVersion));
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    // Install matching metadata so the retry's auth path sees the version as already sufficient
+    // and returns without performing full disk recovery.
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->setCollectionMetadata(
+            opCtx, sharedMetadata, CollectionShardingRuntime::NoRoutingTableAs::kUntracked);
+    }
+
+    // Flip the flag before cancelling so the outer retry dispatches to the auth path.
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    interruptRecoveriesThenUnhangFailpoint(fp);
+    t.join();
+    // Succeeded after setFCV cancel: outer loop re-sampled FCV and finished on the auth path.
+}
+
+// Tests that after interrupted refreshes, we block until they have drained.
+TEST_F(RefreshCancellationFixture, InterruptIncompatibleRefreshesWaitsForDrain) {
+    auto* opCtx = operationContext();
+    unittest::ServerParameterGuard nonAuthoritativeScope("featureFlagAuthoritativeShardsCRUD",
+                                                         false);
+    setDbPrimaryShardForTest(opCtx, kTestNss, kMyShardName, Timestamp(1, 0));
+    const auto receivedDbVersion = DatabaseVersion(UUID::gen(), Timestamp(2, 0));
+
+    // Hang a non-authoritative refresh then interrupt it.
+    auto* fp = globalFailPointRegistry().find("hangInRecoverRefreshDbVersionThread");
+    const auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+    stdx::thread t([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgNonAuth");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        ASSERT_OK(FilteringMetadataCache::get(bgOpCtx.get())
+                      ->onDbVersionMismatch(bgOpCtx.get(), kTestNss.dbName(), receivedDbVersion));
+    });
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    setDbPrimaryShardForTest(opCtx, kTestNss, kMyShardName, Timestamp(2, 0));
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    Atomic<bool> interruptFinished{false};
+    stdx::thread interruptThread([&] {
+        auto client = getGlobalServiceContext()->getService()->makeClient("bgInterrupt");
+        auto interruptOpCtx = client->makeOperationContext();
+        ShardCatalogRecovererTracker::get(interruptOpCtx.get())
+            ->interruptIncompatibleRecoveries(interruptOpCtx.get());
+        interruptFinished.store(true);
+    });
+
+    // Interrupt can't return while the refresh is hung; unhanging it lets the interrupt drain.
+    sleepmillis(15);
+    ASSERT_FALSE(interruptFinished.load());
+    fp->setMode(FailPoint::off);
+    interruptThread.join();
+    ASSERT_TRUE(interruptFinished.load());
+
+    t.join();
+}
+
+// Waiter expires via maxTimeMS; in-flight disk recovery stays tracked and is canceled by setFCV.
+TEST_F(AuthoritativeRefreshFixture, SetFcvCancelsDiskRecoveryAfterWaiterMaxTimeMs) {
+    auto* opCtx = operationContext();
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 1, kMyShardName);
+    populateDiskCatalog(opCtx, collType, chunks);
+    advanceCommittedSnapshot(opCtx);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    const auto receivedShardVersion = chunks.back().getVersion();
+
+    auto* hangRecoveryFp = globalFailPointRegistry().find("hangInRecoverRefreshThread");
+    const auto recoveryTimesEntered = hangRecoveryFp->setMode(FailPoint::alwaysOn);
+    ON_BLOCK_EXIT([&] { hangRecoveryFp->setMode(FailPoint::off); });
+
+    stdx::thread waiterThread([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgMaxTimeMsFcv");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        bgOpCtx->setDeadlineAfterNowBy(Milliseconds(500), ErrorCodes::MaxTimeMSExpired);
+        ASSERT_EQ(onShardVersionMismatch(bgOpCtx.get(), kTestNss, receivedShardVersion),
+                  ErrorCodes::MaxTimeMSExpired);
+    });
+
+    hangRecoveryFp->waitForTimesEntered(recoveryTimesEntered + 1);
+
+    SharedSemiFuture<void> diskRecoveryFuture;
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_TRUE(csr->getMetadataRefreshFuture().has_value());
+        diskRecoveryFuture = *csr->getMetadataRefreshFuture();
+    }
+
+    waiterThread.join();
+
+    // Waiter is gone; recovery must still be tracked so setFCV can cancel it.
+    unittest::ServerParameterGuard nonAuthoritativeScope("featureFlagAuthoritativeShardsCRUD",
+                                                         false);
+
+    auto* hangAfterCancelingFp =
+        globalFailPointRegistry().find("hangAfterCancelingIncompatibleRecoveries");
+    const auto cancelTimesEntered = hangAfterCancelingFp->setMode(FailPoint::alwaysOn);
+    ON_BLOCK_EXIT([&] { hangAfterCancelingFp->setMode(FailPoint::off); });
+
+    stdx::thread interruptThread([&] {
+        auto client = getGlobalServiceContext()->getService()->makeClient("bgInterruptMaxTimeMs");
+        auto interruptOpCtx = client->makeOperationContext();
+        ShardCatalogRecovererTracker::get(interruptOpCtx.get())
+            ->interruptIncompatibleRecoveries(interruptOpCtx.get());
+    });
+
+    hangAfterCancelingFp->waitForTimesEntered(cancelTimesEntered + 1);
+    hangRecoveryFp->setMode(FailPoint::off);
+    hangAfterCancelingFp->setMode(FailPoint::off);
+    interruptThread.join();
+
+    ASSERT_EQ(diskRecoveryFuture.getNoThrow(opCtx), ErrorCodes::PlacementVersionRefreshCanceled);
+}
+
+// maxTimeMS cancels only the waiter; disk recovery keeps running and installs metadata.
+TEST_F(AuthoritativeRefreshFixture, MaxTimeMsCancelsWaiterButRefreshCompletes) {
+    auto* opCtx = operationContext();
+    unittest::ServerParameterGuard authoritativeScope("featureFlagAuthoritativeShardsCRUD", true);
+
+    const auto [collType, chunks] = makeShardedMetadataForDisk(opCtx, 1, kMyShardName);
+    populateDiskCatalog(opCtx, collType, chunks);
+    advanceCommittedSnapshot(opCtx);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    const auto receivedShardVersion = chunks.back().getVersion();
+
+    auto* fp = globalFailPointRegistry().find("hangInRecoverRefreshThread");
+    const auto initialTimesEntered = fp->setMode(FailPoint::alwaysOn);
+    ON_BLOCK_EXIT([&] { fp->setMode(FailPoint::off); });
+
+    stdx::thread waiterThread([&] {
+        auto bgClient = getGlobalServiceContext()->getService()->makeClient("bgMaxTimeMsOnly");
+        auto bgOpCtx = bgClient->makeOperationContext();
+        bgOpCtx->setDeadlineAfterNowBy(Milliseconds(500), ErrorCodes::MaxTimeMSExpired);
+        ASSERT_EQ(onShardVersionMismatch(bgOpCtx.get(), kTestNss, receivedShardVersion),
+                  ErrorCodes::MaxTimeMSExpired);
+    });
+
+    fp->waitForTimesEntered(initialTimesEntered + 1);
+
+    SharedSemiFuture<void> diskRecoveryFuture;
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_TRUE(csr->getMetadataRefreshFuture().has_value());
+        diskRecoveryFuture = *csr->getMetadataRefreshFuture();
+    }
+
+    waiterThread.join();
+
+    fp->setMode(FailPoint::off);
+    ASSERT_OK(diskRecoveryFuture.getNoThrow(opCtx));
+
+    auto stats = getStatistics(opCtx);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+    auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+    ASSERT_TRUE(csr->getCurrentMetadataIfKnown().has_value());
+}
+
+// Starts in the post-phase-1 empty-catalog state (needsDbPrimaryClassification set, no metadata)
+// with no DSR write critical section held. With nothing to wait on,
+// waitDbPrimaryCriticalSectionIfNeeded must re-acquire the CSR so the following join can continue
+// into phase-2 rather than returning kRetry forever. Asserts recovery converges to untracked
+// metadata and skips a redundant phase-1 synchronizer.
+TEST_F(AuthoritativeRefreshFixture,
+       NeedsDbPrimaryClassificationWithNoDsrWriteCritSecConvergesWithoutSpin) {
+    auto* opCtx = operationContext();
+
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    setDbPrimaryShardForTest(opCtx, kTestNss, kMyShardName, Timestamp(1, 1));
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+        csr->setNeedsDbPrimaryClassification(true);
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown());
+        ASSERT_TRUE(csr->needsDbPrimaryClassification());
+    }
+
+    {
+        // Preconditions for the spin: DSR has no write critical section to wait out.
+        auto scopedDsr = DatabaseShardingRuntime::acquireShared(opCtx, kTestNss.dbName());
+        ASSERT_FALSE(scopedDsr->getCriticalSectionSignal(ShardingMigrationCriticalSection::kWrite));
+    }
+
+    ASSERT_OK(onShardVersionMismatch(opCtx, kTestNss, boost::none));
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_FALSE(csr->needsDbPrimaryClassification());
+        ASSERT_FALSE(csr->isUnowned());
+        ASSERT_TRUE(csr->getCurrentMetadataIfKnown());
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
+    }
+
+    auto stats = getStatistics(opCtx);
+    // Flag was already set, so phase-1 is skipped; only phase-2 creates a synchronizer.
+    ASSERT_EQ(stats.getIntField("countMetadataSynchronizersCreated"), 1);
+    ASSERT_EQ(stats.getIntField("countDiskRecoveriesPerformed"), 1);
+}
+
+TEST_F(AuthoritativeRefreshFixture, UnownedIsClearedOutAfterUpgrade) {
+    auto* opCtx = operationContext();
+
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+
+    const auto trackedZeroChunksVersion =
+        ChunkVersion({OID::gen(), Timestamp(50, 1)}, {0 /* major */, 0 /* minor */});
+
+    auto status = onShardVersionMismatch(opCtx, kTestNss, trackedZeroChunksVersion);
+    ASSERT_OK(status);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_TRUE(csr->isUnowned())
+            << "Expected CSS state kUnowned after recovery of a collection with no on-disk entry "
+               "on a non-DB-primary shard";
+    }
+
+    FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+        opCtx,
+        multiversion::FeatureCompatibilityVersion::kVersion_8_0,
+        multiversion::FeatureCompatibilityVersion::kVersion_9_0);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown().has_value());
+    }
+}
+
+TEST_F(AuthoritativeRefreshFixture, UntrackedIsClearedOutAfterUpgrade) {
+    auto* opCtx = operationContext();
+
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    createTestCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        csr->clearCollectionMetadata(opCtx);
+    }
+    auto status = onShardVersionMismatch(opCtx, kTestNss, boost::none);
+    ASSERT_OK(status);
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        ASSERT_TRUE(csr->getCurrentMetadataIfKnown());
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown()->isSharded());
+    }
+
+    FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+        opCtx,
+        multiversion::FeatureCompatibilityVersion::kVersion_8_0,
+        multiversion::FeatureCompatibilityVersion::kVersion_9_0);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown().has_value());
+    }
+}
+
+TEST_F(AuthoritativeRefreshFixture, TrackedWithZeroOwnedChunksIsClearedOutAfterUpgrade) {
+    auto* opCtx = operationContext();
+
+    // Install TRACKED filtering metadata whose routing table has chunks only on another
+    // shard, so this shard's placement version is unset.
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        auto metadata =
+            makeShardedMetadataInMemory(opCtx, UUID::gen(), ShardId("other"), kMyShardName);
+        ASSERT_TRUE(metadata.hasRoutingTable());
+        ASSERT_FALSE(metadata.getShardPlacementVersion().isSet());
+        csr->setCollectionMetadata(opCtx, std::move(metadata));
+    }
+
+    FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+        opCtx,
+        multiversion::FeatureCompatibilityVersion::kVersion_8_0,
+        multiversion::FeatureCompatibilityVersion::kVersion_9_0);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        ASSERT_FALSE(csr->getCurrentMetadataIfKnown().has_value());
+    }
+}
+
+TEST_F(AuthoritativeRefreshFixture, TrackedWithOwnedChunksIsPreservedAfterUpgrade) {
+    auto* opCtx = operationContext();
+
+    {
+        auto csr = CollectionShardingRuntime::acquireExclusive(opCtx, kTestNss);
+        auto metadata = makeShardedMetadataInMemory(opCtx, UUID::gen(), kMyShardName, kMyShardName);
+        ASSERT_TRUE(metadata.hasRoutingTable());
+        ASSERT_TRUE(metadata.getShardPlacementVersion().isSet());
+        csr->setCollectionMetadata(opCtx, std::move(metadata));
+    }
+
+    FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+        opCtx,
+        multiversion::FeatureCompatibilityVersion::kVersion_8_0,
+        multiversion::FeatureCompatibilityVersion::kVersion_9_0);
+
+    {
+        auto csr = CollectionShardingRuntime::acquireShared(opCtx, kTestNss);
+        auto metadataOpt = csr->getCurrentMetadataIfKnown();
+        ASSERT_TRUE(metadataOpt.has_value());
+        ASSERT_TRUE(metadataOpt->hasRoutingTable());
+        ASSERT_TRUE(metadataOpt->getShardPlacementVersion().isSet());
+    }
+}
+
+TEST_F(AuthoritativeRefreshFixture, NonDbPrimaryMetadataIsClearedOutAfterUpgrade) {
+    auto* opCtx = operationContext();
+
+    {
+        unittest::ServerParameterGuard crudFeatureFlag{"featureFlagAuthoritativeShardsCRUD", false};
+
+        const auto kOtherShardId = ShardId{kMyShardName.toString() + "_suffix"};
+        BypassDatabaseMetadataAccess bypass(
+            opCtx,
+            BypassDatabaseMetadataAccess::Type::kWriteOnly);  // NOLINT
+        auto scopedDsr = DatabaseShardingRuntime::acquireExclusive(opCtx, kTestNss.dbName());
+        scopedDsr->setDbInfo_DEPRECATED(
+            opCtx, DatabaseType{kTestNss.dbName(), kOtherShardId, {UUID::gen(), Timestamp{1, 1}}});
+    }
+
+    FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+        opCtx,
+        multiversion::FeatureCompatibilityVersion::kVersion_8_0,
+        multiversion::FeatureCompatibilityVersion::kVersion_9_0);
+
+    {
+        auto dsr = DatabaseShardingRuntime::acquireShared(opCtx, kTestNss.dbName());
+        auto primaryShard = dsr->getDbPrimaryShard(opCtx);
+        ASSERT_FALSE(primaryShard);
+    }
 }
 
 }  // namespace

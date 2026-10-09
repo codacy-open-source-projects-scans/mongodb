@@ -1,30 +1,5 @@
-# Copyright (C) 2018-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 """IDL C++ Code Generator."""
 
 from abc import ABCMeta, abstractmethod
@@ -143,7 +118,7 @@ class CppTypeBase(metaclass=ABCMeta):
     def get_storage_type_setter_body(self, member_name, validator_method_name):
         # type: (str, str) -> str
         """Get the body of the setter that takes a parameter of the storage type."""
-        return f'{_optionally_make_call(validator_method_name, "value")} {member_name} = std::move(value);'
+        return f"{_optionally_make_call(validator_method_name, 'value')} {member_name} = std::move(value);"
 
     @abstractmethod
     def get_transform_to_getter_type(self, expression):
@@ -191,7 +166,7 @@ class _CppTypeBasic(CppTypeBase):
 
     def get_setter_body(self, member_name, validator_method_name):
         # type: (str, str) -> str
-        return f'{_optionally_make_call(validator_method_name, "value")} {member_name} = std::move(value);'
+        return f"{_optionally_make_call(validator_method_name, 'value')} {member_name} = std::move(value);"
 
     def get_transform_to_getter_type(self, expression):
         # type: (str) -> Optional[str]
@@ -427,7 +402,7 @@ class _CppTypeOptional(_CppTypeDelegating):
         if convert:
             # We need to convert between two different types of optional<T> and yet provide
             # the ability for the user specifiy an uninitialized optional. This occurs
-            # for vector<mongo::StringData> and vector<std::string> paired together.
+            # for vector<std::string_view> and vector<std::string> paired together.
             return f"""\
 if ({member_name}.is_initialized()) {{
     return {convert};
@@ -472,7 +447,7 @@ def get_cpp_type_from_cpp_type_name(field, cpp_type_name, array):
     """Get the C++ Type information for the given C++ type name, e.g. std::string."""
     cpp_type_info: CppTypeBase
     if cpp_type_name == "std::string":
-        cpp_type_info = _CppTypeView(field, "std::string", "std::string", "StringData")
+        cpp_type_info = _CppTypeView(field, "std::string", "std::string", "std::string_view")
     elif cpp_type_name == "std::vector<std::uint8_t>":
         cpp_type_info = _CppTypeVector(field)
     else:

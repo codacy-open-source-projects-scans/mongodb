@@ -1,7 +1,9 @@
 /**
  * Test $merge and exchange with explain.
  *
- * @tags: [requires_sharding]
+ * @tags: [
+ *   requires_sharding
+ * ]
  */
 import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -145,7 +147,8 @@ assertErrorCode(
     [51132, 51185],
 );
 
-// SERVER-38349 Make sure mongos rejects specifying exchange directly.
+// SERVER-38349 Make sure external clients cannot specify exchange directly.
+// External clients are now rejected with BadValue before reaching the mongos-level check (51028).
 assert.commandFailedWithCode(
     mongosDB.runCommand({
         aggregate: inColl.getName(),
@@ -159,7 +162,7 @@ assert.commandFailedWithCode(
             consumerIds: [NumberInt(0), NumberInt(1)],
         },
     }),
-    51028,
+    [ErrorCodes.BadValue, 51028],
 );
 
 assert.commandFailedWithCode(
@@ -167,7 +170,11 @@ assert.commandFailedWithCode(
         aggregate: inColl.getName(),
         pipeline: [
             {
-                $merge: {into: targetCollRange.getName(), whenMatched: "replace", whenNotMatched: "insert"},
+                $merge: {
+                    into: targetCollRange.getName(),
+                    whenMatched: "replace",
+                    whenNotMatched: "insert",
+                },
             },
         ],
         cursor: {},
@@ -179,7 +186,7 @@ assert.commandFailedWithCode(
             consumerIds: [NumberInt(0), NumberInt(1)],
         },
     }),
-    51028,
+    [ErrorCodes.BadValue, 51028],
 );
 
 st.stop();

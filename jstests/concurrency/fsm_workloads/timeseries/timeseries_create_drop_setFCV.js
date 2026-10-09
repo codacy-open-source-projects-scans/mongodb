@@ -16,6 +16,7 @@
  */
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 export const $config = (function () {
     const states = {
@@ -27,7 +28,9 @@ export const $config = (function () {
             const targetFCV = fcvValues[Random.randInt(2)];
             jsTestLog("Executing FCV state, setting to:" + targetFCV);
             try {
-                assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
+                assert.commandWorked(
+                    db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
+                );
             } catch (e) {
                 if (handleRandomSetFCVErrors(e, targetFCV)) return;
                 throw e;
@@ -46,7 +49,7 @@ export const $config = (function () {
         const remaining = db.getCollectionInfos({name: {$regex: new RegExp(jsTestName())}});
         assert.eq(remaining.length, 0, tojson(remaining));
 
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
     };
 
     return {

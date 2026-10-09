@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/sasl_scram_client_conversation.h"
 
@@ -41,6 +15,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <string_view>
 
 #include <absl/strings/str_split.h>
 #include <boost/algorithm/string/replace.hpp>
@@ -51,7 +26,8 @@ namespace mongo {
 
 using std::string;
 
-StatusWith<bool> SaslSCRAMClientConversation::step(StringData inputData, std::string* outputData) {
+StatusWith<bool> SaslSCRAMClientConversation::step(std::string_view inputData,
+                                                   std::string* outputData) {
     _step++;
 
     switch (_step) {
@@ -97,7 +73,7 @@ StatusWith<bool> SaslSCRAMClientConversation::_firstStep(std::string* outputData
 
     encodeSCRAMUsername(user);
     _clientNonce =
-        base64::encode(StringData(reinterpret_cast<char*>(binaryNonce), sizeof(binaryNonce)));
+        base64::encode(std::string_view(reinterpret_cast<char*>(binaryNonce), sizeof(binaryNonce)));
 
     // Append client-first-message-bare to authMessage
     _authMessage = "n=" + user + ",r=" + _clientNonce;
@@ -117,13 +93,12 @@ StatusWith<bool> SaslSCRAMClientConversation::_firstStep(std::string* outputData
  * c=channel-binding(base64),r=client-nonce|server-nonce,p=ClientProof
  *
  **/
-StatusWith<bool> SaslSCRAMClientConversation::_secondStep(StringData inputData,
+StatusWith<bool> SaslSCRAMClientConversation::_secondStep(std::string_view inputData,
                                                           std::string* outputData) {
     if (inputData.starts_with("m=")) {
         return Status(ErrorCodes::BadValue, "SCRAM required extensions not supported");
     }
-    const std::vector<std::string> input =
-        absl::StrSplit(toStdStringViewForInterop(inputData), ",", absl::SkipEmpty());
+    const std::vector<std::string> input = absl::StrSplit(inputData, ",", absl::SkipEmpty());
 
     if (input.size() < 3) {
         return Status(ErrorCodes::BadValue,
@@ -185,10 +160,9 @@ StatusWith<bool> SaslSCRAMClientConversation::_secondStep(StringData inputData,
  * or failed authentication server-final-message on the form:
  * e=message
  **/
-StatusWith<bool> SaslSCRAMClientConversation::_thirdStep(StringData inputData,
+StatusWith<bool> SaslSCRAMClientConversation::_thirdStep(std::string_view inputData,
                                                          std::string* outputData) {
-    const std::vector<std::string> input =
-        absl::StrSplit(toStdStringViewForInterop(inputData), ",", absl::SkipEmpty());
+    const std::vector<std::string> input = absl::StrSplit(inputData, ",", absl::SkipEmpty());
 
     if (input.empty()) {
         return Status(

@@ -22,8 +22,12 @@ import {runMemoryStatsTest} from "jstests/libs/query/memory_tracking_utils.js";
 const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to start up");
 const db = conn.getDB("test");
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}));
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}),
+);
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}),
+);
 
 const collName = jsTestName();
 const coll = db[collName];
@@ -42,7 +46,11 @@ const pipeline = [{$geoNear: {near: {type: "Point", coordinates: [0, 0]}, distan
 
 const preliminaryExplain = coll.explain("executionStats").aggregate(pipeline);
 const nearStages = getAggPlanStages(preliminaryExplain, "GEO_NEAR_2DSPHERE");
-assert.gt(nearStages.length, 0, "Expected query to use GEO_NEAR_2DSPHERE stage with forceClassicEngine");
+assert.gt(
+    nearStages.length,
+    0,
+    "Expected query to use GEO_NEAR_2DSPHERE stage with forceClassicEngine",
+);
 
 const kBatchSize = 10;
 runMemoryStatsTest({
@@ -59,6 +67,15 @@ runMemoryStatsTest({
     expectedNumGetMores: kDocCount / kBatchSize - 1,
     // near stage still holds the memory used for the record id deduplication at the last batch.
     checkInUseTrackedMemBytesResets: false,
+    // The serverStatus counter key is "NEAR" (shared by GEO_NEAR_2DSPHERE and GEO_NEAR_2D since
+    // _dedupReporter lives in the NearStage base class), which does not match stageName
+    // "GEO_NEAR_2DSPHERE". We pass serverStatusStageName explicitly to check the correct counter.
+    skipServerStatusStageCheck: false,
+    serverStatusStageName: "NEAR",
+    // The near stage frees every record it inserts into _seenDocuments (via early-free or
+    // result-free), so each insert (+1) is always cancelled by a free (-1). The net delta
+    // is 0 regardless of the data, which verifies the counter does not leak.
+    expectedServerStatusRecords: 0,
 });
 
 // Test that in-use memory decreases as buffered documents are returned across batches.
@@ -82,9 +99,16 @@ runMemoryStatsTest({
         .filter((e) => e.hasOwnProperty("inUseTrackedMemBytes"))
         .map((e) => e.inUseTrackedMemBytes);
 
-    assert.gt(inUseValues.length, 1, "Expected multiple profiler entries with inUseTrackedMemBytes");
+    assert.gt(
+        inUseValues.length,
+        1,
+        "Expected multiple profiler entries with inUseTrackedMemBytes",
+    );
     const foundDecrease = inUseValues.some((val, i) => i > 0 && val < inUseValues[i - 1]);
-    assert(foundDecrease, "Expected in-use memory to decrease between consecutive batches: " + tojson(inUseValues));
+    assert(
+        foundDecrease,
+        "Expected in-use memory to decrease between consecutive batches: " + tojson(inUseValues),
+    );
     db.setProfilingLevel(0);
 }
 

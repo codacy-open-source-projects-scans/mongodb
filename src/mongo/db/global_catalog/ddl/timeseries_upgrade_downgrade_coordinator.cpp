@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // TODO (SERVER-116499): Remove this file once 9.0 becomes last LTS.
 
@@ -54,6 +28,8 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
@@ -100,6 +76,10 @@ void populateTimeseriesFields(OperationContext* opCtx,
     // state into the global catalog.
     tsFields.setTimeseriesBucketsMayHaveMixedSchemaData(
         coll->getTimeseriesMixedSchemaBucketsState().mustConsiderMixedSchemaBucketsInReads());
+
+    // Mirror the shard-local 'fixedBucketing' state into the global catalog (false when the
+    // upgrade set it, unset when the feature is disabled).
+    tsFields.setFixedBucketing(coll->getTimeseriesOptions()->getFixedBucketing());
 }
 
 }  // namespace
@@ -235,17 +215,17 @@ void TimeseriesUpgradeDowngradeCoordinator::_releaseCriticalSectionFor(
     const CancellationToken& token,
     const std::vector<ShardId>& participants,
     const NamespaceString& nss) {
-    ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss);
-    unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-    unblockCRUDOperationsRequest.setReason(_critSecReason);
-
-    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, participants);
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss,
+        participants,
+        CriticalSectionBlockTypeEnum::kUnblock,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 }
 
 ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
@@ -280,18 +260,18 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
 
                 // Freeze migrations on both namespaces. One of them will be the tracked namespace
                 // and the other will be a no-op since it doesn't exist in the sharding catalog.
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::stopMigrations(opCtx, originalNss(), boost::none, session);
-                }
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::stopMigrations(
-                        opCtx,
-                        originalNss().makeTimeseriesBucketsNamespace(),
-                        boost::none,
-                        session);
-                }
+                sharding_ddl_util::stopMigrations(
+                    opCtx,
+                    originalNss(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
+                sharding_ddl_util::stopMigrations(
+                    opCtx,
+                    originalNss().makeTimeseriesBucketsNamespace(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
             }))
         .then(_buildPhaseHandler(
             Phase::kAcquireCriticalSection,
@@ -309,19 +289,17 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
                 auto participants = getParticipantShards(opCtx, isTracked);
 
                 auto acquireCriticalSectionFor = [&](const NamespaceString& ns) {
-                    ShardsvrParticipantBlock blockCRUDOperationsRequest(ns);
-                    blockCRUDOperationsRequest.setBlockType(
-                        CriticalSectionBlockTypeEnum::kReadsAndWrites);
-                    blockCRUDOperationsRequest.setReason(_critSecReason);
-
-                    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-                    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                                   getNewSession(opCtx));
-
-                    auto opts =
-                        std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                            **executor, token, blockCRUDOperationsRequest);
-                    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, participants);
+                    const auto session = getNewSession(opCtx);
+                    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+                        opCtx,
+                        ns,
+                        participants,
+                        CriticalSectionBlockTypeEnum::kReadsAndWrites,
+                        _critSecReason,
+                        _doc.getAuthoritativeMetadataAccessLevel(),
+                        session,
+                        executor,
+                        token);
                 };
 
                 // Acquire critical section on both user namespace and bucket namespace
@@ -428,6 +406,7 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
                     // On downgrade: remove viewless-only fields from the entry,
                     // since legacy format does not include them.
                     updatedTsFields.setTimeseriesBucketsMayHaveMixedSchemaData(boost::none);
+                    updatedTsFields.setFixedBucketing(OptionalBool{});
                 }
                 newCollType.setTimeseriesFields(updatedTsFields);
 
@@ -467,12 +446,7 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
                     sharding_ddl_util::upsertPlacementHistoryDocInTransaction(
                         txnClient, oldTrackedNss, collUuid, newTimestamp, {}, stmtId++);
                     sharding_ddl_util::upsertPlacementHistoryDocInTransaction(
-                        txnClient,
-                        newTrackedNss,
-                        collUuid,
-                        newTimestamp,
-                        std::move(currentShards),
-                        stmtId++);
+                        txnClient, newTrackedNss, collUuid, newTimestamp, currentShards, stmtId++);
 
                     return SemiFuture<void>::makeReady();
                 };
@@ -482,11 +456,35 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
                                                                    defaultMajorityWriteConcern(),
                                                                    osi,
                                                                    **executor);
-
-                // TODO SERVER-117481: Generate placement change notifications for change streams.
-                // Similar to rename coordinator (kSetupChangeStreamsPreconditions phase), we need
-                // to notify change stream readers about the namespace change from oldTrackedNss
-                // to newTrackedNss using generatePlacementChangeNotificationOnShard().
+            }))
+        .then(_buildPhaseHandler(
+            Phase::kCommitOnShardCatalog,
+            [this](OperationContext* opCtx) {
+                (void)opCtx;
+                return _isTracked() &&
+                    _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+            },
+            [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
+                const auto collUuid = _doc.getOptTrackedCollInfo()->getUuid();
+                const bool isUpgrade =
+                    _doc.getMode() == TimeseriesUpgradeDowngradeModeEnum::kToViewless;
+                const auto bucketsNss = originalNss().makeTimeseriesBucketsNamespace();
+                const auto& oldTrackedNss = isUpgrade ? bucketsNss : originalNss();
+                const auto& newTrackedNss = isUpgrade ? originalNss() : bucketsNss;
+                const auto session = getNewSession(opCtx);
+                sharding_ddl_util::commitRenameCollectionMetadataToShardCatalog(
+                    opCtx,
+                    oldTrackedNss,
+                    newTrackedNss,
+                    collUuid,
+                    boost::none /* targetUUID */,
+                    boost::none /* newTargetUUID */,
+                    _doc.getAuthoritativeMetadataAccessLevel(),
+                    Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+                    session,
+                    executor,
+                    token);
             }))
         .then(_buildPhaseHandler(
             Phase::kReleaseCriticalSection,
@@ -522,18 +520,18 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_runImpl(
 
                 // Resume migrations on both namespaces. One of them will be the tracked namespace
                 // and the other will be a no-op since it doesn't exist in the sharding catalog.
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::resumeMigrations(opCtx, originalNss(), boost::none, session);
-                }
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::resumeMigrations(
-                        opCtx,
-                        originalNss().makeTimeseriesBucketsNamespace(),
-                        boost::none,
-                        session);
-                }
+                sharding_ddl_util::resumeMigrations(
+                    opCtx,
+                    originalNss(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
+                sharding_ddl_util::resumeMigrations(
+                    opCtx,
+                    originalNss().makeTimeseriesBucketsNamespace(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
             }))
         .then([this, anchor = shared_from_this()] {
             auto opCtxHolder = makeOperationContext();
@@ -630,18 +628,18 @@ ExecutorFuture<void> TimeseriesUpgradeDowngradeCoordinator::_cleanupOnAbort(
 
                 // Resume migrations on both namespaces. One of them will be the tracked namespace
                 // and the other will be a no-op since it doesn't exist in the sharding catalog.
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::resumeMigrations(opCtx, originalNss(), boost::none, session);
-                }
-                {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::resumeMigrations(
-                        opCtx,
-                        originalNss().makeTimeseriesBucketsNamespace(),
-                        boost::none,
-                        session);
-                }
+                sharding_ddl_util::resumeMigrations(
+                    opCtx,
+                    originalNss(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
+                sharding_ddl_util::resumeMigrations(
+                    opCtx,
+                    originalNss().makeTimeseriesBucketsNamespace(),
+                    boost::none,
+                    [&] { return getNewSession(opCtx); },
+                    _doc.getAuthoritativeMetadataAccessLevel());
             }
         });
 }

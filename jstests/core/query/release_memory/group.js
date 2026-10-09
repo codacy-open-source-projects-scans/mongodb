@@ -2,6 +2,7 @@
  * Tests releaseMemory in groupBy.
  *
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_82,
  *   # We use explain and we modify the value of a query knob using setParameter.
  *   does_not_support_stepdowns,
@@ -62,7 +63,10 @@ setServerParameter(classicIncreasedSpillingKnob, false);
 
 // For _internalInhibitOptimization tests, prevent DSCursor from reading all the data in a single
 // batch.
-const dsCursorKnobs = ["internalDocumentSourceCursorInitialBatchSize", "internalDocumentSourceCursorBatchSizeBytes"];
+const dsCursorKnobs = [
+    "internalDocumentSourceCursorInitialBatchSize",
+    "internalDocumentSourceCursorBatchSizeBytes",
+];
 const dsCursorKnobNewValues = [1, 1024];
 const dsCursorKnobValues = [];
 for (let i = 0; i < dsCursorKnobs.length; i++) {
@@ -168,7 +172,9 @@ for (let pipelineIndex = 0; pipelineIndex < pipelines.length; pipelineIndex++) {
         const {explain, expectedResults} = pipelineData[pipelineIndex][collIndex];
 
         const willNotSpill =
-            isTimeSeriesCollection(db, coll.getName()) && expectedResults.length <= 128 && getEngine(explain) === "sbe";
+            isTimeSeriesCollection(db, coll.getName()) &&
+            expectedResults.length <= 128 &&
+            getEngine(explain) === "sbe";
         if (willNotSpill) {
             continue;
         }
@@ -267,7 +273,9 @@ for (let pipelineIndex = 0; pipelineIndex < pipelines.length; pipelineIndex++) {
     }
 }
 
-jsTest.log.info(`Leaving available memory to 100MB and running \`return all results in the first batch\` test case`);
+jsTest.log.info(
+    `Leaving available memory to 100MB and running \`return all results in the first batch\` test case`,
+);
 for (let pipelineIndex = 0; pipelineIndex < pipelines.length; pipelineIndex++) {
     const pipeline = pipelines[pipelineIndex];
     for (let collIndex = 0; collIndex < collections.length; collIndex++) {

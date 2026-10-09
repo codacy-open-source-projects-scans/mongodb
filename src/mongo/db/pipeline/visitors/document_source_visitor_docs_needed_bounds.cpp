@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
 
 #include "mongo/db/pipeline/document_source_group.h"
@@ -51,7 +25,8 @@ using NeedAll = docs_needed_bounds::NeedAll;
 using Unknown = docs_needed_bounds::Unknown;
 
 namespace {
-void extractDocsNeededBoundsHelper(const DocumentSourceContainer& sources,
+template <typename Container>
+void extractDocsNeededBoundsHelper(const Container& sources,
                                    const ExpressionContext& expCtx,
                                    DocsNeededBoundsContext* ctx) {
     ServiceContext* serviceCtx = expCtx.getOperationContext()->getServiceContext();
@@ -256,6 +231,11 @@ void visit(DocsNeededBoundsContext* ctx, const DocumentSourceInternalDensify& so
     ctx->applyPossibleIncreaseStage();
 }
 
+void visit(DocsNeededBoundsContext* ctx, const DocumentSourceInternalHybridSearch& source) {
+    // No-op passthrough marker: stay transparent to the bounds analysis (like
+    // $_internalTeeConsumer) instead of overriding the desugared pipeline's bounds with unknown.
+}
+
 void visit(DocsNeededBoundsContext* ctx, const DocumentSourceTeeConsumer& source) {
     // DocumentSourceTeeConsumer is an internal proxy stage between a pipeline within a $facet stage
     // and the buffer of incoming documents. Because a DocumentSourceTeeConsumer stage is uniquely
@@ -296,6 +276,14 @@ void visit(DocsNeededBoundsContext* ctx, const DocumentSourceFacet& source) {
     // Apply the most restrictive bounds.
     ctx->minBounds = mostRestrictiveMinBounds;
     ctx->maxBounds = mostRestrictiveMaxBounds;
+}
+
+void visit(DocsNeededBoundsContext* ctx, const DocumentSourceInternalSearchIdLookUp& source) {
+    // No change. $_internalSearchIdLookup is a 1:1 lookup stage produced by desugaring $search and
+    // $vectorSearch. It may skip documents whose _id is not found locally, but for the purposes
+    // of up-front pipeline bounds estimation we will ignore this. (Batch size tuning, the main
+    // consumer of the maximum bound, will also dynamically adjust batch sizes based on the idLookup
+    // success rate.)
 }
 
 void visit(DocsNeededBoundsContext* ctx, const DocumentSourceSearch& source) {
@@ -357,11 +345,19 @@ void visit(DocsNeededBoundsContext* ctx, const DocumentSourceSequentialDocumentC
 }
 
 const ServiceContext::ConstructorActionRegisterer docsNeededBoundsRegisterer{
-    "DocsNeededBoundsRegisterer",
-    [](ServiceContext* service) { registerMongodVisitor<DocsNeededBoundsContext>(service); }};
+    "DocsNeededBoundsRegisterer", [](ServiceContext* service) {
+        registerMongodVisitor<DocsNeededBoundsContext>(service);
+    }};
 
 
 DocsNeededBounds extractDocsNeededBounds(const DocumentSourceContainer& sources,
+                                         const ExpressionContext& expCtx) {
+    DocsNeededBoundsContext ctx;
+    extractDocsNeededBoundsHelper(sources, expCtx, &ctx);
+    return DocsNeededBounds(ctx.minBounds, ctx.maxBounds);
+}
+
+DocsNeededBounds extractDocsNeededBounds(const ConstDocumentSourceContainer& sources,
                                          const ExpressionContext& expCtx) {
     DocsNeededBoundsContext ctx;
     extractDocsNeededBoundsHelper(sources, expCtx, &ctx);

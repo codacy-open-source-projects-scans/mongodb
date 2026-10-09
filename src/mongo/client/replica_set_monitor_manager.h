@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/counter.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/connection_string.h"
@@ -60,12 +33,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class BSONObjBuilder;
 class ConnectionString;
@@ -119,7 +93,7 @@ class ReplicaSetMonitorManager {
 
 public:
     ReplicaSetMonitorManager() {
-        ObservableMutexRegistry::get().add("ReplicaSetMonitorManager::_mutex", _mutex);
+        ObservableMutexRegistry::get().add("replicaSetMonitorManagerMutex", _mutex);
     }
     ~ReplicaSetMonitorManager();
 
@@ -130,7 +104,7 @@ public:
      * nullptr if there is no monitor registered for the particular replica set.
      * @param cleanupCallback will be executed when the instance of ReplicaSetMonitor is deleted.
      */
-    std::shared_ptr<ReplicaSetMonitor> getMonitor(StringData setName);
+    std::shared_ptr<ReplicaSetMonitor> getMonitor(std::string_view setName);
     std::shared_ptr<ReplicaSetMonitor> getOrCreateMonitor(const ConnectionString& connStr,
                                                           std::function<void()> cleanupCallback);
     std::shared_ptr<ReplicaSetMonitor> getOrCreateMonitor(const MongoURI& uri,
@@ -152,13 +126,13 @@ public:
      * does nothing. Once all shared_ptr references to that monitor are released, the monitor
      * will be destroyed and will no longer be tracked.
      */
-    void removeMonitor(StringData setName);
+    void removeMonitor(std::string_view setName);
 
     /**
      * Adds the 'setName' to the garbage collect queue for later cleanup.
      * The 2-step GC is implemented to avoid deadlocks.
      */
-    void registerForGarbageCollection(StringData setName);
+    void registerForGarbageCollection(std::string_view setName);
 
     std::shared_ptr<ReplicaSetMonitor> getMonitorForHost(const HostAndPort& host);
 
@@ -222,7 +196,7 @@ private:
     // Needs to be after `_taskExecutor`, so that it will be destroyed before the `_taskExecutor`.
     ReplicaSetMonitorsMap _monitors;
 
-    int _numMonitorsCreated;
+    int _numMonitorsCreated{0};
 
     void _setupTaskExecutorAndStats(WithLock);
 
@@ -252,4 +226,4 @@ private:
         std::make_shared<ReplicaSetMonitorManagerStats>();
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,207 +1,176 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/values/bson.h"
+#include "mongo/db/exec/sbe/values/value_size.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace sbe {
 namespace vm {
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDropFields(ArityType arity) {
-    auto [ownedSeparator, tagInObj, valInObj] = getFromStack(0);
+using namespace std::literals::string_view_literals;
+value::TagValueMaybeOwned ByteCode::builtinDropFields(ArityType arity) {
+    auto inObj = viewFromStack(0);
 
     // We operate only on objects.
-    if (!value::isObject(tagInObj)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isObject(inObj.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
     // Build the set of fields to drop.
     StringSet restrictFieldsSet;
     for (ArityType idx = 1; idx < arity; ++idx) {
-        auto [owned, tag, val] = getFromStack(idx);
+        auto field = viewFromStack(idx);
 
-        if (!value::isString(tag)) {
-            return {false, value::TypeTags::Nothing, 0};
+        if (!value::isString(field.tag)) {
+            return value::TagValueMaybeOwned::nothing();
         }
 
-        restrictFieldsSet.emplace(value::getStringView(tag, val));
+        restrictFieldsSet.emplace(value::getStringView(field.tag, field.value));
     }
 
-    auto [tag, val] = value::makeNewObject();
-    auto obj = value::getObjectView(val);
-    value::ValueGuard guard{tag, val};
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewObject());
+    auto obj = value::getObjectView(result.value());
 
-    if (tagInObj == value::TypeTags::bsonObject) {
-        auto be = value::bitcastTo<const char*>(valInObj);
+    if (inObj.tag == value::TypeTags::bsonObject) {
+        auto be = value::bitcastTo<const char*>(inObj.value);
         const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
         // Skip document length.
         be += 4;
         while (be != end - 1) {
-            auto sv = bson::fieldNameAndLength(be);
+            auto sv = bson::fieldNameAndLength(be, end);
 
             if (restrictFieldsSet.count(sv) == 0) {
                 auto [tag, val] = bson::convertToOwned(be, end, sv.size()).releaseToRaw();
-                obj->push_back(sv, tag, val);
+                obj->push_back_raw(sv, tag, val);
             }
 
             be = bson::advance(be, sv.size());
         }
-    } else if (tagInObj == value::TypeTags::Object) {
-        auto objRoot = value::getObjectView(valInObj);
+    } else if (inObj.tag == value::TypeTags::Object) {
+        auto objRoot = value::getObjectView(inObj.value);
         for (size_t idx = 0; idx < objRoot->size(); ++idx) {
-            StringData sv(objRoot->field(idx));
+            std::string_view sv(objRoot->field(idx));
 
             if (restrictFieldsSet.count(sv) == 0) {
 
-                auto [tag, val] = objRoot->getAt(idx);
-                auto [copyTag, copyVal] = value::copyValue(tag, val);
-                obj->push_back(sv, copyTag, copyVal);
+                auto tagVal = objRoot->getAt(idx);
+                auto [copyTag, copyVal] = value::copyValue(tagVal.tag, tagVal.value);
+                obj->push_back_raw(sv, copyTag, copyVal);
             }
         }
     }
 
-    guard.reset();
-    return {true, tag, val};
+    return std::move(result);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeepFields(ArityType arity) {
-    auto [ownedInObj, tagInObj, valInObj] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinKeepFields(ArityType arity) {
+    auto inObj = viewFromStack(0);
 
     // We operate only on objects.
-    if (!value::isObject(tagInObj)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isObject(inObj.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
     // Build the set of fields to keep.
     StringSet keepFieldsSet;
     for (ArityType idx = 1; idx < arity; ++idx) {
-        auto [owned, tag, val] = getFromStack(idx);
+        auto field = viewFromStack(idx);
 
-        if (!value::isString(tag)) {
-            return {false, value::TypeTags::Nothing, 0};
+        if (!value::isString(field.tag)) {
+            return value::TagValueMaybeOwned::nothing();
         }
 
-        keepFieldsSet.emplace(value::getStringView(tag, val));
+        keepFieldsSet.emplace(value::getStringView(field.tag, field.value));
     }
 
-    auto [tag, val] = value::makeNewObject();
-    auto obj = value::getObjectView(val);
-    value::ValueGuard guard{tag, val};
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewObject());
+    auto obj = value::getObjectView(result.value());
 
-    if (tagInObj == value::TypeTags::bsonObject) {
-        auto be = value::bitcastTo<const char*>(valInObj);
+    if (inObj.tag == value::TypeTags::bsonObject) {
+        auto be = value::bitcastTo<const char*>(inObj.value);
         const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
         // Skip document length.
         be += 4;
         while (be != end - 1) {
-            auto sv = bson::fieldNameAndLength(be);
+            auto sv = bson::fieldNameAndLength(be, end);
 
             if (keepFieldsSet.count(sv) == 1) {
                 auto [tag, val] = bson::convertToView(be, end, sv.size());
                 auto [copyTag, copyVal] = value::copyValue(tag, val);
-                obj->push_back(sv, copyTag, copyVal);
+                obj->push_back_raw(sv, copyTag, copyVal);
             }
 
             be = bson::advance(be, sv.size());
         }
-    } else if (tagInObj == value::TypeTags::Object) {
-        auto objRoot = value::getObjectView(valInObj);
+    } else if (inObj.tag == value::TypeTags::Object) {
+        auto objRoot = value::getObjectView(inObj.value);
         for (size_t idx = 0; idx < objRoot->size(); ++idx) {
-            StringData sv(objRoot->field(idx));
+            std::string_view sv(objRoot->field(idx));
 
             if (keepFieldsSet.count(sv) == 1) {
-                auto [tag, val] = objRoot->getAt(idx);
-                auto [copyTag, copyVal] = value::copyValue(tag, val);
-                obj->push_back(sv, copyTag, copyVal);
+                auto tagVal = objRoot->getAt(idx);
+                auto [copyTag, copyVal] = value::copyValue(tagVal.tag, tagVal.value);
+                obj->push_back_raw(sv, copyTag, copyVal);
             }
         }
     }
 
-    guard.reset();
-    return {true, tag, val};
+    return std::move(result);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityType arity) {
-    std::vector<value::TypeTags> typeTags;
-    std::vector<value::Value> values;
-    std::vector<std::string> names;
+value::TagValueMaybeOwned ByteCode::builtinNewObj(ArityType arity) {
+    // Build the object directly from the stack in a single pass.
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewObject());
+    auto obj = value::getObjectView(result.value());
+    if (arity > 0) {
+        // 'Object::reserve()' normalizes its argument to at least 1, so calling it for an empty
+        // object would allocate rather than leave the object's vectors empty.
+        obj->reserve(arity / 2);
+    }
 
-    size_t tmpVectorLen = arity >> 1;
-    typeTags.reserve(tmpVectorLen);
-    values.reserve(tmpVectorLen);
-    names.reserve(tmpVectorLen);
+    size_t currentMemoryBytes = 0;
+    const size_t maxMemoryBytes = internalQueryMaxSingleExpressionMemoryUsageBytes.loadRelaxed();
 
     for (ArityType idx = 0; idx < arity; idx += 2) {
-        {
-            auto [owned, tag, val] = getFromStack(idx);
+        auto nameView = viewFromStack(idx);
 
-            if (!value::isString(tag)) {
-                return {false, value::TypeTags::Nothing, 0};
-            }
+        if (!value::isString(nameView.tag)) {
+            return value::TagValueMaybeOwned::nothing();
+        }
 
-            names.emplace_back(value::getStringView(tag, val));
+        auto name = value::getStringView(nameView.tag, nameView.value);
+        auto fieldView = viewFromStack(idx + 1);
+        currentMemoryBytes +=
+            name.size() + value::getApproximateSize(fieldView.tag, fieldView.value);
+        if (MONGO_unlikely(currentMemoryBytes > maxMemoryBytes)) {
+            uasserted(ErrorCodes::ExceededMemoryLimit,
+                      str::stream() << "$object would use too much memory (" << currentMemoryBytes
+                                    << " bytes) and cannot spill to disk. Memory limit: "
+                                    << maxMemoryBytes << " bytes");
         }
-        {
-            auto [owned, tag, val] = getFromStack(idx + 1);
-            typeTags.push_back(tag);
-            values.push_back(val);
-        }
+        obj->push_back(
+            name, value::TagValueOwned::fromRaw(value::copyValue(fieldView.tag, fieldView.value)));
     }
 
-    auto [tag, val] = value::makeNewObject();
-    auto obj = value::getObjectView(val);
-    value::ValueGuard guard{tag, val};
-
-    if (typeTags.size()) {
-        obj->reserve(typeTags.size());
-        for (size_t idx = 0; idx < typeTags.size(); ++idx) {
-            auto [tagCopy, valCopy] = value::copyValue(typeTags[idx], values[idx]);
-            obj->push_back(names[idx], tagCopy, valCopy);
-        }
-    }
-
-    guard.reset();
-    return {true, tag, val};
+    return std::move(result);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewBsonObj(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinNewBsonObj(ArityType arity) {
     UniqueBSONObjBuilder bob;
 
     for (ArityType idx = 0; idx < arity; idx += 2) {
-        auto [_, nameTag, nameVal] = getFromStack(idx);
-        auto [__, fieldTag, fieldVal] = getFromStack(idx + 1);
-        if (!value::isString(nameTag)) {
-            return {false, value::TypeTags::Nothing, 0};
+        auto nameView = viewFromStack(idx);
+        auto fieldView = viewFromStack(idx + 1);
+        if (!value::isString(nameView.tag)) {
+            return value::TagValueMaybeOwned::nothing();
         }
 
-        auto name = value::getStringView(nameTag, nameVal);
-        bson::appendValueToBsonObj(bob, name, fieldTag, fieldVal);
+        auto name = value::getStringView(nameView.tag, nameView.value);
+        bson::appendValueToBsonObj(bob, name, fieldView.tag, fieldView.value);
     }
 
     bob.doneFast();
@@ -209,31 +178,15 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewBsonObj(Arity
     return {true, value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMergeObjects(ArityType arity) {
-    auto [_, tagField, valField] = getFromStack(1);
-    // Move the incoming accumulator state from the stack. Given that we are now the owner of the
-    // state we are free to do any in-place update as we see fit.
-    auto [tagAgg, valAgg] = moveOwnedFromStack(0);
-
-    value::ValueGuard guard{tagAgg, valAgg};
-    // Create a new object if it does not exist yet.
-    if (tagAgg == value::TypeTags::Nothing) {
-        std::tie(tagAgg, valAgg) = value::makeNewObject();
-    }
-
-    tassert(11086807, "Unexpected type of Agg parameter", tagAgg == value::TypeTags::Object);
-
-    // If our field is nothing or null or it's not an object, return the accumulator state.
-    if (tagField == value::TypeTags::Nothing || tagField == value::TypeTags::Null ||
-        (tagField != value::TypeTags::Object && tagField != value::TypeTags::bsonObject)) {
-        guard.reset();
-        return {true, tagAgg, valAgg};
-    }
-
-    auto obj = value::getObjectView(valAgg);
-
+namespace {
+/**
+ * Merges the fields of the object 'field' into 'obj'. Fields already present in 'obj' are
+ * overwritten in place, preserving their original position, while new fields are appended in the
+ * order they appear in 'field'.
+ */
+void mergeObjectInto(value::Object* obj, value::TagValueView field) {
     StringMap<value::TagValueView> currObjMap;
-    for (auto currObjEnum = value::ObjectEnumerator{tagField, valField}; !currObjEnum.atEnd();
+    for (auto currObjEnum = value::ObjectEnumerator{field.tag, field.value}; !currObjEnum.atEnd();
          currObjEnum.advance()) {
         currObjMap[currObjEnum.getFieldName()] = currObjEnum.getViewOfValue();
     }
@@ -255,78 +208,119 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMergeObjects(Ari
     // Copy the remaining fields of the current object being processed to the
     // accumulator. Fields that were already present in the accumulated fields
     // have been set already. Preserves the relative order of the new fields
-    for (auto currObjEnum = value::ObjectEnumerator{tagField, valField}; !currObjEnum.atEnd();
+    for (auto currObjEnum = value::ObjectEnumerator{field.tag, field.value}; !currObjEnum.atEnd();
          currObjEnum.advance()) {
         auto it = currObjMap.find(currObjEnum.getFieldName());
         if (it != currObjMap.end()) {
             auto [currObjTag, currObjVal] = it->second;
             auto [currObjTagCopy, currObjValCopy] = value::copyValue(currObjTag, currObjVal);
-            obj->push_back(currObjEnum.getFieldName(), currObjTagCopy, currObjValCopy);
+            obj->push_back_raw(currObjEnum.getFieldName(), currObjTagCopy, currObjValCopy);
         }
     }
-
-    guard.reset();
-    return {true, tagAgg, valAgg};
 }
+}  // namespace
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBsonSize(ArityType arity) {
-    auto [_, tagOperand, valOperand] = getFromStack(0);
-
-    if (tagOperand == value::TypeTags::Object) {
-        BSONObjBuilder objBuilder;
-        bson::convertToBsonObj(objBuilder, value::getObjectView(valOperand));
-        int32_t sz = objBuilder.done().objsize();
-        return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(sz)};
-    } else if (tagOperand == value::TypeTags::bsonObject) {
-        auto beginObj = value::getRawPointerView(valOperand);
-        int32_t sz = ConstDataView(beginObj).read<LittleEndian<int32_t>>();
-        return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(sz)};
+value::TagValueMaybeOwned ByteCode::builtinMergeObjects(ArityType arity) {
+    auto fieldView = viewFromStack(1);
+    // Move the incoming accumulator state from the stack. Given that we are now the owner of the
+    // state we are free to do any in-place update as we see fit.
+    value::TagValueOwned aggState = moveOwnedFromStack(0);
+    // Create a new object if it does not exist yet.
+    if (aggState.tag() == value::TypeTags::Nothing) {
+        aggState = value::TagValueOwned::fromRaw(value::makeNewObject());
     }
-    return {false, value::TypeTags::Nothing, 0};
+
+    tassert(
+        11086807, "Unexpected type of Agg parameter", aggState.tag() == value::TypeTags::Object);
+
+    // If our field is nothing or null or it's not an object, return the accumulator state.
+    if (fieldView.tag == value::TypeTags::Nothing || fieldView.tag == value::TypeTags::Null ||
+        (fieldView.tag != value::TypeTags::Object &&
+         fieldView.tag != value::TypeTags::bsonObject)) {
+        return std::move(aggState);
+    }
+
+    mergeObjectInto(value::getObjectView(aggState.value()), fieldView);
+
+    return std::move(aggState);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinObjectToArray(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinMergeObjectsForExpr(ArityType arity) {
+    value::TagValueOwned result = value::TagValueOwned::fromRaw(value::makeNewObject());
+    auto obj = value::getObjectView(result.value());
+
+    auto processOne = [&](value::TypeTags tag, value::Value val) {
+        // Mirror classic AccumulatorMergeObjects::processInternal: nullish inputs are ignored and
+        // anything else that is not an object is an error.
+        if (value::isNullish(tag)) {
+            return;
+        }
+        uassert(5158600,
+                str::stream() << "$mergeObjects requires object inputs, but input "
+                              << std::make_pair(tag, val) << " is of type " << tag,
+                value::isObject(tag));
+
+        mergeObjectInto(obj, value::TagValueView{tag, val});
+    };
+
+    processStackRange(0, arity, processOne);
+
+    return std::move(result);
+}
+
+value::TagValueMaybeOwned ByteCode::builtinBsonSize(ArityType arity) {
+    auto operand = viewFromStack(0);
+
+    if (operand.tag == value::TypeTags::Object) {
+        BSONObjBuilder objBuilder;
+        bson::convertToBsonObj(objBuilder, value::getObjectView(operand.value));
+        int32_t sz = objBuilder.done<BSONObj::LargeSizeTrait>().objsize();
+        return value::TagValueMaybeOwned::numberInt32(sz);
+    } else if (operand.tag == value::TypeTags::bsonObject) {
+        auto beginObj = value::getRawPointerView(operand.value);
+        int32_t sz = ConstDataView(beginObj).read<LittleEndian<int32_t>>();
+        return value::TagValueMaybeOwned::numberInt32(sz);
+    }
+    return value::TagValueMaybeOwned::nothing();
+}
+
+value::TagValueMaybeOwned ByteCode::builtinObjectToArray(ArityType arity) {
     tassert(11080026, "Unexpected arity value", arity == 1);
 
-    auto [objOwned, objTag, objVal] = getFromStack(0);
+    auto obj = viewFromStack(0);
 
-    if (!value::isObject(objTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isObject(obj.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto [arrTag, arrVal] = value::makeNewArray();
-    value::ValueGuard arrGuard{arrTag, arrVal};
-    auto array = value::getArrayView(arrVal);
+    value::TagValueOwned arr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto array = value::getArrayView(arr.value());
 
-    value::ObjectEnumerator objectEnumerator(objTag, objVal);
+    value::ObjectEnumerator objectEnumerator(obj.tag, obj.value);
     while (!objectEnumerator.atEnd()) {
         // get key
         auto fieldName = objectEnumerator.getFieldName();
-        auto [keyTag, keyVal] = value::makeNewString(fieldName);
-        value::ValueGuard keyGuard{keyTag, keyVal};
+        value::TagValueOwned key = value::TagValueOwned::fromRaw(value::makeNewString(fieldName));
 
         // get value
         auto [valueTag, valueVal] = objectEnumerator.getViewOfValue();
-        auto [valueCopyTag, valueCopyVal] = value::copyValue(valueTag, valueVal);
+        value::TagValueOwned valueCopy =
+            value::TagValueOwned::fromRaw(value::copyValue(valueTag, valueVal));
 
-        // create a new obejct
-        auto [elemTag, elemVal] = value::makeNewObject();
-        value::ValueGuard elemGuard{elemTag, elemVal};
-        auto elemObj = value::getObjectView(elemVal);
+        // create a new object
+        value::TagValueOwned elem = value::TagValueOwned::fromRaw(value::makeNewObject());
+        auto elemObj = value::getObjectView(elem.value());
 
         // insert key and value to the object
-        elemObj->push_back("k"_sd, keyTag, keyVal);
-        keyGuard.reset();
-        elemObj->push_back("v"_sd, valueCopyTag, valueCopyVal);
+        elemObj->push_back_raw("k"sv, key.releaseToRaw());
+        elemObj->push_back_raw("v"sv, valueCopy.releaseToRaw());
 
         // insert the object to array
-        array->push_back(elemTag, elemVal);
-        elemGuard.reset();
+        array->push_back(std::move(elem));
 
         objectEnumerator.advance();
     }
-    arrGuard.reset();
-    return {true, arrTag, arrVal};
+    return std::move(arr);
 }
 
 }  // namespace vm

@@ -1,43 +1,21 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/active_migrations_registry.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/migration_source_manager.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/version_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -45,6 +23,7 @@
 #include "mongo/util/str.h"
 
 #include <mutex>
+#include <string_view>
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
@@ -58,6 +37,27 @@ namespace mongo {
 namespace {
 
 const auto getRegistry = ServiceContext::declareDecoration<ActiveMigrationsRegistry>();
+
+Status makeChunkOperationBlockedByFCVStatus() {
+    return {
+        ErrorCodes::ConflictingOperationInProgress,
+        "Unable to start new chunk operation while authoritative shard metadata is transitioning"};
+}
+
+bool isAuthoritativeShardMetadataTransitionInProgress(OperationContext* opCtx,
+                                                      bool isRecoveryRegistration) {
+    // (Ignore FCV check): Chunk operations may carry an OFCV from before setFCV started, but the
+    // registration gate needs to observe this node's current FCV transition state.
+    // Recovery registrations are different: they only reacquire local registry state for a
+    // persisted operation after failover, so they must be allowed to use their stable old OFCV and
+    // reach their recovery/abort path. The config-server commit gate still ignores OFCV and blocks
+    // any metadata commit while authoritative shard metadata is transitioning.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    return sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
+               isRecoveryRegistration ? VersionContext::getDecoration(opCtx)
+                                      : kVersionContextIgnored_UNSAFE,
+               fcvSnapshot) == AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+}
 
 }  // namespace
 
@@ -75,9 +75,22 @@ ActiveMigrationsRegistry& ActiveMigrationsRegistry::get(OperationContext* opCtx)
     return get(opCtx->getServiceContext());
 }
 
-void ActiveMigrationsRegistry::lock(OperationContext* opCtx, StringData reason) {
-    // The method requires the requesting operation to be interruptible
+void ActiveMigrationsRegistry::setRecoverable(Recoverable* recoverable) {
+    _recoverable = recoverable;
+}
+
+void ActiveMigrationsRegistry::lock(OperationContext* opCtx,
+                                    std::string_view reason,
+                                    boost::optional<BypassRecoveryWait> bypass) {
+    // The method requires the requesting operation to be interruptible. Asserted before
+    // waitForRecovery() so a misused non-interruptible opCtx fails fast instead of hanging on the
+    // recovery condvar.
     invariant(opCtx->shouldAlwaysInterruptAtStepDownOrUp());
+
+    if (!bypass && _recoverable) {
+        _recoverable->waitForRecovery(opCtx);
+    }
+
     std::unique_lock<std::mutex> lock(_mutex);
 
     // This wait is to hold back additional lock requests while there is already one in progress
@@ -92,7 +105,8 @@ void ActiveMigrationsRegistry::lock(OperationContext* opCtx, StringData reason) 
 
     // Wait for any ongoing chunk modifications to complete
     opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, lock, [this] {
-        return !(_activeMoveChunkState || _activeReceiveChunkState);
+        return !_activeMoveChunkState && !_activeReceiveChunkState &&
+            _activeSplitMergeChunkStates.empty();
     });
 
     // lock() may be called while the node is still completing its draining mode; if so, reject the
@@ -109,7 +123,7 @@ void ActiveMigrationsRegistry::lock(OperationContext* opCtx, StringData reason) 
     unblockMigrationsOnError.dismiss();
 }
 
-void ActiveMigrationsRegistry::unlock(StringData reason) {
+void ActiveMigrationsRegistry::unlock(std::string_view reason) {
     std::lock_guard<std::mutex> lock(_mutex);
 
     LOGV2(467561, "Going to stop blocking migrations", "reason"_attr = reason);
@@ -119,11 +133,17 @@ void ActiveMigrationsRegistry::unlock(StringData reason) {
 }
 
 StatusWith<ScopedDonateChunk> ActiveMigrationsRegistry::registerDonateChunk(
-    OperationContext* opCtx, const ShardsvrMoveRange& args) {
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const ShardsvrMoveRangeRequest& request,
+    boost::optional<BypassRecoveryWait> bypass) {
+    if (!bypass && _recoverable) {
+        _recoverable->waitForRecovery(opCtx);
+    }
     std::unique_lock<std::mutex> ul(_mutex);
 
     opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, ul, [&] {
-        return !_activeSplitMergeChunkStates.count(args.getCommandParameter());
+        return _migrationsBlocked || !_activeSplitMergeChunkStates.count(nss);
     });
 
     if (_activeReceiveChunkState) {
@@ -131,31 +151,25 @@ StatusWith<ScopedDonateChunk> ActiveMigrationsRegistry::registerDonateChunk(
     }
 
     if (_activeMoveChunkState) {
-        auto moveChunkStateToBSON = [](ShardsvrMoveRange mr) {
-            // Reset the generic args so that the comparison below only considers
-            // shardSvrModeRange-specific fields.
-            mr.setGenericArguments({});
-            return mr.toBSON();
-        };
+        auto activeRequestBSON = _activeMoveChunkState->request.toBSON();
+        auto requestBSON = request.toBSON();
 
-        auto activeMoveChunkStateBSON = moveChunkStateToBSON(_activeMoveChunkState->args);
-        auto argsBSON = moveChunkStateToBSON(args);
-
-        if (activeMoveChunkStateBSON.woCompare(argsBSON) == 0) {
+        if (_activeMoveChunkState->nss == nss && activeRequestBSON.woCompare(requestBSON) == 0) {
             LOGV2(6386800,
                   "Registering new chunk donation",
-                  logAttrs(args.getCommandParameter()),
-                  "min"_attr = args.getMin(),
-                  "max"_attr = args.getMax(),
-                  "toShardId"_attr = args.getToShard());
-            return {ScopedDonateChunk(nullptr, false, _activeMoveChunkState->notification)};
+                  logAttrs(nss),
+                  "min"_attr = request.getMin(),
+                  "max"_attr = request.getMax(),
+                  "toShardId"_attr = request.getToShard());
+            return {ScopedDonateChunk(nullptr, false, _activeMoveChunkState->promise)};
         }
 
         LOGV2(6386801,
               "Rejecting donate chunk due to conflicting migration in progress",
-              logAttrs(args.getCommandParameter()),
-              "runningMigration"_attr = activeMoveChunkStateBSON,
-              "requestedMigration"_attr = argsBSON);
+              logAttrs(nss),
+              "runningMigrationNamespace"_attr = _activeMoveChunkState->nss,
+              "runningMigration"_attr = activeRequestBSON,
+              "requestedMigration"_attr = requestBSON);
 
         return _activeMoveChunkState->constructErrorStatus();
     }
@@ -166,9 +180,19 @@ StatusWith<ScopedDonateChunk> ActiveMigrationsRegistry::registerDonateChunk(
                 "this shard is temporarily locked"};
     }
 
-    _activeMoveChunkState.emplace(args);
+    // Best-effort early rejection: if this shard already observes its own FCV transitioning the
+    // authoritative shard metadata, reject the chunk operation now rather than doing work that the
+    // authoritative commit on the config server would reject anyway. This is only an optimization
+    // to fail early: it reads this node's local FCV, which may still lag the cluster-wide
+    // transition, so it cannot guarantee correctness on its own. The actual guarantee lives in the
+    // commit check on the CSRS, which is the first node to enter the transitional FCV.
+    if (isAuthoritativeShardMetadataTransitionInProgress(opCtx, bypass.has_value())) {
+        return makeChunkOperationBlockedByFCVStatus();
+    }
 
-    return {ScopedDonateChunk(this, true, _activeMoveChunkState->notification)};
+    _activeMoveChunkState.emplace(nss, request);
+
+    return {ScopedDonateChunk(this, true, _activeMoveChunkState->promise)};
 }
 
 StatusWith<ScopedReceiveChunk> ActiveMigrationsRegistry::registerReceiveChunk(
@@ -176,14 +200,25 @@ StatusWith<ScopedReceiveChunk> ActiveMigrationsRegistry::registerReceiveChunk(
     const NamespaceString& nss,
     const ChunkRange& chunkRange,
     const ShardId& fromShardId,
-    bool waitForCompletionOfConflictingOps) {
+    bool waitForCompletionOfMigrationOps,
+    boost::optional<BypassRecoveryWait> bypass) {
+    if (!bypass && _recoverable) {
+        _recoverable->waitForRecovery(opCtx);
+    }
     std::unique_lock<std::mutex> ul(_mutex);
 
-    if (waitForCompletionOfConflictingOps) {
-        opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, ul, [this] {
-            return !_migrationsBlocked && !_activeMoveChunkState && !_activeReceiveChunkState;
+    if (waitForCompletionOfMigrationOps) {
+        opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, ul, [&] {
+            return !_migrationsBlocked && !_activeMoveChunkState && !_activeReceiveChunkState &&
+                !_activeSplitMergeChunkStates.count(nss);
         });
     } else {
+        // Wait for any split/merge of the same namespace to finish before receiving, since both
+        // would take the collection critical section.
+        opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, ul, [&] {
+            return !_activeSplitMergeChunkStates.count(nss);
+        });
+
         if (_activeReceiveChunkState) {
             return _activeReceiveChunkState->constructErrorStatus();
         }
@@ -191,8 +226,8 @@ StatusWith<ScopedReceiveChunk> ActiveMigrationsRegistry::registerReceiveChunk(
         if (_activeMoveChunkState) {
             LOGV2(6386802,
                   "Rejecting receive chunk due to conflicting donate chunk in progress",
-                  logAttrs(_activeMoveChunkState->args.getCommandParameter()),
-                  "runningMigration"_attr = _activeMoveChunkState->args.toBSON());
+                  logAttrs(_activeMoveChunkState->nss),
+                  "runningMigration"_attr = _activeMoveChunkState->request.toBSON());
             return _activeMoveChunkState->constructErrorStatus();
         }
 
@@ -204,19 +239,55 @@ StatusWith<ScopedReceiveChunk> ActiveMigrationsRegistry::registerReceiveChunk(
         }
     }
 
+    // Best-effort early rejection: if this shard already observes its own FCV transitioning the
+    // authoritative shard metadata, reject the chunk operation now rather than doing work that the
+    // authoritative commit on the config server would reject anyway. This is only an optimization
+    // to fail early: it reads this node's local FCV, which may still lag the cluster-wide
+    // transition, so it cannot guarantee correctness on its own. The actual guarantee lives in the
+    // commit check on the CSRS, which is the first node to enter the transitional FCV.
+    if (isAuthoritativeShardMetadataTransitionInProgress(opCtx, bypass.has_value())) {
+        return makeChunkOperationBlockedByFCVStatus();
+    }
+
     _activeReceiveChunkState.emplace(nss, chunkRange, fromShardId);
     return {ScopedReceiveChunk(this)};
 }
 
 StatusWith<ScopedSplitMergeChunk> ActiveMigrationsRegistry::registerSplitOrMergeChunk(
-    OperationContext* opCtx, const NamespaceString& nss, const ChunkRange& chunkRange) {
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const ChunkRange& chunkRange,
+    boost::optional<BypassRecoveryWait> bypass) {
+    if (!bypass && _recoverable) {
+        _recoverable->waitForRecovery(opCtx);
+    }
     std::unique_lock<std::mutex> ul(_mutex);
 
+    // Wait for any donate, receive, or split/merge of the same namespace to finish before
+    // starting, since they would all take the collection critical section. Operations on other
+    // namespaces do not block this one.
     opCtx->waitForConditionOrInterrupt(_chunkOperationsStateChangedCV, ul, [&] {
-        return !(_activeMoveChunkState &&
-                 _activeMoveChunkState->args.getCommandParameter() == nss) &&
-            !_activeSplitMergeChunkStates.count(nss);
+        return _migrationsBlocked ||
+            (!(_activeMoveChunkState && _activeMoveChunkState->nss == nss) &&
+             !(_activeReceiveChunkState && _activeReceiveChunkState->nss == nss) &&
+             !_activeSplitMergeChunkStates.count(nss));
     });
+
+    if (_migrationsBlocked) {
+        return {ErrorCodes::ConflictingOperationInProgress,
+                "Unable to start new chunk operation because the ActiveMigrationsRegistry of this "
+                "shard is temporarily locked"};
+    }
+
+    // Best-effort early rejection: if this shard already observes its own FCV transitioning the
+    // authoritative shard metadata, reject the chunk operation now rather than doing work that the
+    // authoritative commit on the config server would reject anyway. This is only an optimization
+    // to fail early: it reads this node's local FCV, which may still lag the cluster-wide
+    // transition, so it cannot guarantee correctness on its own. The actual guarantee lives in the
+    // commit check on the CSRS, which is the first node to enter the transitional FCV.
+    if (isAuthoritativeShardMetadataTransitionInProgress(opCtx, bypass.has_value())) {
+        return makeChunkOperationBlockedByFCVStatus();
+    }
 
     auto [it, inserted] =
         _activeSplitMergeChunkStates.emplace(nss, ActiveSplitMergeChunkState(nss, chunkRange));
@@ -228,7 +299,7 @@ StatusWith<ScopedSplitMergeChunk> ActiveMigrationsRegistry::registerSplitOrMerge
 boost::optional<NamespaceString> ActiveMigrationsRegistry::getActiveDonateChunkNss() {
     std::lock_guard<std::mutex> lk(_mutex);
     if (_activeMoveChunkState) {
-        return _activeMoveChunkState->args.getCommandParameter();
+        return _activeMoveChunkState->nss;
     }
 
     return boost::none;
@@ -240,7 +311,7 @@ BSONObj ActiveMigrationsRegistry::getActiveMigrationStatusReport(OperationContex
         std::lock_guard<std::mutex> lk(_mutex);
 
         if (_activeMoveChunkState) {
-            nss = _activeMoveChunkState->args.getCommandParameter();
+            nss = _activeMoveChunkState->nss;
         } else if (_activeReceiveChunkState) {
             nss = _activeReceiveChunkState->nss;
         }
@@ -269,10 +340,10 @@ void ActiveMigrationsRegistry::_clearDonateChunk() {
     invariant(_activeMoveChunkState);
     LOGV2(6386803,
           "Unregistering donate chunk",
-          logAttrs(_activeMoveChunkState->args.getCommandParameter()),
-          "min"_attr = _activeMoveChunkState->args.getMin().get_value_or(BSONObj()),
-          "max"_attr = _activeMoveChunkState->args.getMax().get_value_or(BSONObj()),
-          "toShardId"_attr = _activeMoveChunkState->args.getToShard());
+          logAttrs(_activeMoveChunkState->nss),
+          "min"_attr = _activeMoveChunkState->request.getMin().get_value_or(BSONObj()),
+          "max"_attr = _activeMoveChunkState->request.getMax().get_value_or(BSONObj()),
+          "toShardId"_attr = _activeMoveChunkState->request.getToShard());
     _activeMoveChunkState.reset();
     _chunkOperationsStateChangedCV.notify_all();
 }
@@ -299,10 +370,10 @@ Status ActiveMigrationsRegistry::ActiveMoveChunkState::constructErrorStatus() co
     std::string errMsg = fmt::format(
         "Unable to start new balancer operation because this shard is currently donating range "
         "'{}{}' for namespace {} to shard {}",
-        (args.getMin() ? "min: " + args.getMin()->toString() + " - " : ""),
-        (args.getMax() ? "max: " + args.getMax()->toString() : ""),
-        args.getCommandParameter().toStringForErrorMsg(),
-        args.getToShard().toString());
+        (request.getMin() ? "min: " + request.getMin()->toString() + " - " : ""),
+        (request.getMax() ? "max: " + request.getMax()->toString() : ""),
+        nss.toStringForErrorMsg(),
+        request.getToShard().toString());
     return {ErrorCodes::ConflictingOperationInProgress, std::move(errMsg)};
 }
 
@@ -316,17 +387,12 @@ Status ActiveMigrationsRegistry::ActiveReceiveChunkState::constructErrorStatus()
 
 ScopedDonateChunk::ScopedDonateChunk(ActiveMigrationsRegistry* registry,
                                      bool shouldExecute,
-                                     std::shared_ptr<Notification<Status>> completionNotification)
-    : _registry(registry),
-      _shouldExecute(shouldExecute),
-      _completionNotification(std::move(completionNotification)) {}
+                                     std::shared_ptr<SharedPromise<void>> promise)
+    : _registry(registry), _shouldExecute(shouldExecute), _promise(std::move(promise)) {}
 
 ScopedDonateChunk::~ScopedDonateChunk() {
     if (_registry && _shouldExecute) {
-        // If this is a newly started migration the outcome must have been set by the holder
-        invariant(_completionOutcome);
         _registry->_clearDonateChunk();
-        _completionNotification->set(*_completionOutcome);
     }
 }
 
@@ -339,7 +405,7 @@ ScopedDonateChunk& ScopedDonateChunk::operator=(ScopedDonateChunk&& other) {
         _registry = other._registry;
         other._registry = nullptr;
         _shouldExecute = other._shouldExecute;
-        _completionNotification = std::move(other._completionNotification);
+        _promise = std::move(other._promise);
     }
 
     return *this;
@@ -347,13 +413,12 @@ ScopedDonateChunk& ScopedDonateChunk::operator=(ScopedDonateChunk&& other) {
 
 void ScopedDonateChunk::signalComplete(Status status) {
     invariant(_shouldExecute);
-    invariant(!_completionOutcome.has_value());
-    _completionOutcome = status;
+    _promise->setFrom(std::move(status));
 }
 
 Status ScopedDonateChunk::waitForCompletion(OperationContext* opCtx) {
     invariant(!_shouldExecute);
-    return _completionNotification->get(opCtx);
+    return _promise->getFuture().getNoThrow(opCtx);
 }
 
 ScopedReceiveChunk::ScopedReceiveChunk(ActiveMigrationsRegistry* registry) : _registry(registry) {}

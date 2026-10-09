@@ -102,13 +102,20 @@ function runTest({committedTxnOpts, inProgressTxnOpts, expectInterrupt}) {
         primary.host,
         extractUUIDFromObject(inProgressTxnOpts.lsid.id),
         inProgressTxnOpts.lsid.txnNumber ? inProgressTxnOpts.lsid.txnNumber.toNumber() : null,
-        inProgressTxnOpts.lsid.txnUUID ? extractUUIDFromObject(inProgressTxnOpts.lsid.txnUUID) : null,
+        inProgressTxnOpts.lsid.txnUUID
+            ? extractUUIDFromObject(inProgressTxnOpts.lsid.txnUUID)
+            : null,
         inProgressTxnOpts.txnNumber,
         dbName,
         collName,
         inProgressTxnOpts.isRetryableWrite,
     );
-    let fp = configureFailPoint(primary, "hangDuringBatchInsert", {shouldCheckForInterrupt: true});
+    // Scope the failpoint to this test's collection so a concurrent background insert (e.g. HMAC
+    // key initialization into admin.system.keys) cannot satisfy fp.wait() before ours hangs.
+    let fp = configureFailPoint(primary, "hangDuringBatchInsert", {
+        shouldCheckForInterrupt: true,
+        nss: ns,
+    });
     inProgressTxnThread.start();
 
     fp.wait();
@@ -169,7 +176,10 @@ jsTest.log("Test deleting config.transactions document for an external/client se
     });
 }
 
-jsTest.log("Test deleting config.transactions document for an internal session for a " + "non-retryable write");
+jsTest.log(
+    "Test deleting config.transactions document for an internal session for a " +
+        "non-retryable write",
+);
 
 {
     const parentLsid = {id: UUID()};
@@ -213,7 +223,10 @@ jsTest.log("Test deleting config.transactions document for an internal session f
     });
 }
 
-jsTest.log("Test deleting config.transactions document for an internal session for the current " + "retryable write");
+jsTest.log(
+    "Test deleting config.transactions document for an internal session for the current " +
+        "retryable write",
+);
 
 {
     const parentLsid = {id: UUID()};

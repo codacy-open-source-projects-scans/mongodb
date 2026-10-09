@@ -1,41 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/abt/explain.h"
 
-#include <cstddef>
-#include <cstdint>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/query/algebra/operator.h"
 #include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
@@ -45,12 +12,19 @@
 #include "mongo/util/assert_util.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <iterator>
 #include <map>
 #include <sstream>
+#include <string_view>
 #include <tuple>
 #include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 
 namespace mongo::abt {
@@ -129,7 +103,7 @@ public:
         return *this;
     }
 
-    ExplainPrinterImpl& print(StringData s) {
+    ExplainPrinterImpl& print(std::string_view s) {
         print(s.empty() ? "<empty>" : s.data());
         return *this;
     }
@@ -460,7 +434,7 @@ public:
         return *this;
     }
 
-    ExplainPrinterImpl& print(StringData s) {
+    ExplainPrinterImpl& print(std::string_view s) {
         printStringInternal(s);
         return *this;
     }
@@ -544,7 +518,7 @@ public:
     }
 
 private:
-    ExplainPrinterImpl& printStringInternal(StringData s) {
+    ExplainPrinterImpl& printStringInternal(std::string_view s) {
         auto [tag, val] = sbe::value::makeNewString(s);
         addValue(tag, val);
         return *this;
@@ -573,7 +547,7 @@ private:
         sbe::value::Array* arr = sbe::value::getArrayView(val);
         for (auto&& element : other) {
             auto [tag1, val1] = element.moveValue();
-            arr->push_back(tag1, val1);
+            arr->push_back_raw(tag1, val1);
         }
         addValue(tag, val, append);
         return *this;
@@ -617,7 +591,7 @@ private:
 
     void addField(const std::string& fieldName, sbe::value::TypeTags tag, sbe::value::Value val) {
         uassert(6624075, "Duplicate field name", _fieldNameSet.insert(fieldName).second);
-        sbe::value::getObjectView(_val)->push_back(fieldName, tag, val);
+        sbe::value::getObjectView(_val)->push_back_raw(fieldName, tag, val);
     }
 
     void reset() {
@@ -988,8 +962,8 @@ static void printBSONstr(PrinterType& printer,
                     local.print(", ");
                     local.newLine();
                 }
-                const auto [tag1, val1] = array->getAt(index);
-                printBSONstr(local, tag1, val1);
+                const auto eltTagVal = array->getAt(index);
+                printBSONstr(local, eltTagVal.tag, eltTagVal.value);
             }
             printer.print("[").print(local).print("]");
 
@@ -1006,8 +980,8 @@ static void printBSONstr(PrinterType& printer,
                     local.newLine();
                 }
                 local.fieldName(obj->field(index));
-                const auto [tag1, val1] = obj->getAt(index);
-                printBSONstr(local, tag1, val1);
+                const auto eltTagVal = obj->getAt(index);
+                printBSONstr(local, eltTagVal.tag, eltTagVal.value);
             }
             printer.print("{").print(local).print("}");
 
@@ -1023,10 +997,9 @@ static void printBSONstr(PrinterType& printer,
 }
 
 std::string ExplainGenerator::explainBSONStr(const ABT::reference_type node) {
-    const auto [tag, val] = explainBSON(node);
-    sbe::value::ValueGuard vg(tag, val);
+    sbe::value::TagValueOwned bson = sbe::value::TagValueOwned::fromRaw(explainBSON(node));
     ExplainPrinterImpl<ExplainVersion::V2> printer;
-    printBSONstr(printer, tag, val);
+    printBSONstr(printer, bson.tag(), bson.value());
     return printer.str();
 }
 }  // namespace mongo::abt

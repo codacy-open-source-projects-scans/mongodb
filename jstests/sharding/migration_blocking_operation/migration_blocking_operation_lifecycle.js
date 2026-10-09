@@ -11,6 +11,11 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
 import {ShardVersioningUtil} from "jstests/sharding/libs/shard_versioning_util.js";
 
+// _shardsvrBeginMigrationBlockingOperation and _shardsvrEndMigrationBlockingOperation internally
+// send commands with an OSI, which conflicts with the implicit session created by the shell
+// (tassert 10090100)
+TestData.disableImplicitSessions = true;
+
 const st = new ShardingTest({shards: {rs0: {nodes: 3}}});
 const replicaSet = new ReplSetTest({nodes: 1});
 replicaSet.startSet();
@@ -48,14 +53,19 @@ for (const command of [kBeginCommand, kEndCommand]) {
     // Verify _shardsvrCoordinateMultiUpdate only runs on shard servers.
     assertCommandReturns(st.rs0.getSecondary(), command, uuid, ErrorCodes.NotWritablePrimary);
     assertCommandReturns(st.s, command, uuid, ErrorCodes.CommandNotFound);
-    assertCommandReturns(replicaSet.getPrimary(), command, uuid, ErrorCodes.ShardingStateNotInitialized);
+    assertCommandReturns(
+        replicaSet.getPrimary(),
+        command,
+        uuid,
+        ErrorCodes.ShardingStateNotInitialized,
+    );
 }
 
 assert(migrationsAreAllowed(db, collName));
 assertCommandReturns(st.rs0.getPrimary(), kBeginCommand, uuid, ErrorCodes.OK);
 assert(!migrationsAreAllowed(db, collName));
 assertCommandReturns(st.rs0.getPrimary(), kEndCommand, uuid, ErrorCodes.OK);
-assert(migrationsAreAllowed(db, collName));
+assert.soon(() => migrationsAreAllowed(db, collName));
 
 replicaSet.stopSet();
 st.stop();

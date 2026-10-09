@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/record_id_range.h"
 
@@ -88,6 +62,41 @@ void RecordIdRange::maybeNarrowMax(const RecordIdBound& newMax, bool inclusive) 
     _maxInclusive = inclusive;
 }
 
+bool RecordIdRange::isEmpty() const {
+    if (!_min || !_max) {
+        return false;  // at least one side is unbounded → the range is not empty
+    }
+    auto cmp = *_min <=> *_max;
+    if (std::is_gt(cmp)) {
+        return true;  // min > max → no records can satisfy the range
+    }
+    if (std::is_eq(cmp)) {
+        // Same bound value: empty unless both sides are inclusive ([x,x] contains x)
+        return !_minInclusive || !_maxInclusive;
+    }
+    return false;
+}
+
+int RecordIdRange::compare(const RecordId& rid) const {
+    if (_min) {
+        int cmp = _min->recordId().compare(rid);
+        // cmp > 0: _min > rid → rid is before the range start
+        // cmp == 0 with exclusive bound: rid is at an excluded start → also before range
+        if (cmp > 0 || (cmp == 0 && !_minInclusive)) {
+            return -1;
+        }
+    }
+    if (_max) {
+        int cmp = _max->recordId().compare(rid);
+        // cmp < 0: _max < rid → rid is past the range end
+        // cmp == 0 with exclusive bound: rid is at an excluded end → also past range
+        if (cmp < 0 || (cmp == 0 && !_maxInclusive)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void RecordIdRange::intersectRange(const RecordIdRange& other) {
     intersectRange(other._min, other._max, other._minInclusive, other._maxInclusive);
 }
@@ -102,6 +111,19 @@ void RecordIdRange::intersectRange(const boost::optional<RecordIdBound>& min,
     if (max) {
         maybeNarrowMax(*max, maxInclusive);
     }
+}
+
+auto RecordIdRange::makeSeekParams(bool forward) const
+    -> boost::optional<std::tuple<const RecordId&, SeekableRecordCursor::BoundInclusion>> {
+    const auto& seekTarget = forward ? _min : _max;
+    if (seekTarget) {
+        bool seekTargetInclusive = forward ? _minInclusive : _maxInclusive;
+        auto inclusivity = seekTargetInclusive ? SeekableRecordCursor::BoundInclusion::kInclude
+                                               : SeekableRecordCursor::BoundInclusion::kExclude;
+        return std::make_tuple(std::cref(seekTarget->recordId()), inclusivity);
+    }
+
+    return boost::none;
 }
 
 }  // namespace mongo

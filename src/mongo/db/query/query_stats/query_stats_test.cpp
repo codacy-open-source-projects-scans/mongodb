@@ -1,46 +1,20 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_stats/query_stats.h"
 
+#include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/query_stats/find_key.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/shard_role/shard_catalog/collection_type.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -64,7 +38,6 @@ TEST_F(QueryStatsTest, TwoRegisterRequestsWithSameOpCtxRateLimitedFirstCall) {
     auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcrCopy)}));
     query_shape::FindCmdShape findShape(*parsedFind, expCtx);
 
-    RAIIServerParameterControllerForTest controller("featureFlagQueryStats", true);
     auto& opDebug = CurOp::get(*opCtx)->debug();
     ASSERT_EQ(opDebug.getQueryStatsInfo().disableForSubqueryExecution, false);
 
@@ -239,17 +212,15 @@ TEST_F(QueryStatsTest, TestConfiguringQueryStatsViaServerParameters) {
     auto opCtx = makeOperationContext();
 
     {
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
         auto& rateLimiter = QueryStatsStoreManager::getRateLimiter(opCtx->getServiceContext());
         ASSERT_EQ(rateLimiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
         ASSERT_EQ(rateLimiter.getSamplingRate(), 42);
     }
 
     {  // Test that window-based rate limiting will be elected when sampling rate is set to 0.0
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest rateLimitCtrl("internalQueryStatsRateLimit", 10);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsSampleRate", 0.0);
+        unittest::ServerParameterGuard rateLimitCtrl("internalQueryStatsRateLimit", 10);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsSampleRate", 0.0);
 
         auto& rateLimiter = QueryStatsStoreManager::getRateLimiter(opCtx->getServiceContext());
         ASSERT_EQ(rateLimiter.getPolicyType(), RateLimiter::kWindowBasedPolicy);
@@ -258,9 +229,8 @@ TEST_F(QueryStatsTest, TestConfiguringQueryStatsViaServerParameters) {
 
     {  // Test that sampling-based rate limiting takes precedence over window-based policy when both
        // are enabled.
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest rateLimitCtrl("internalQueryStatsRateLimit", 10);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
+        unittest::ServerParameterGuard rateLimitCtrl("internalQueryStatsRateLimit", 10);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
 
         auto& rateLimiter = QueryStatsStoreManager::getRateLimiter(opCtx->getServiceContext());
         ASSERT_EQ(rateLimiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
@@ -268,9 +238,8 @@ TEST_F(QueryStatsTest, TestConfiguringQueryStatsViaServerParameters) {
     }
 
     {  // Test idempotency when both parameters are set but being set in different order.
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
-        RAIIServerParameterControllerForTest rateLimitCtrl("internalQueryStatsRateLimit", 10);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsSampleRate", 0.042);
+        unittest::ServerParameterGuard rateLimitCtrl("internalQueryStatsRateLimit", 10);
 
         auto& rateLimiter = QueryStatsStoreManager::getRateLimiter(opCtx->getServiceContext());
         ASSERT_EQ(rateLimiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
@@ -278,9 +247,8 @@ TEST_F(QueryStatsTest, TestConfiguringQueryStatsViaServerParameters) {
     }
 
     {  // Test that query stats is disabled when both rate limit and sample rate are set to 0.
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest rateLimitCtrl("internalQueryStatsRateLimit", 0.0);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsSampleRate", 0.0);
+        unittest::ServerParameterGuard rateLimitCtrl("internalQueryStatsRateLimit", 0.0);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsSampleRate", 0.0);
 
         auto& rateLimiter = QueryStatsStoreManager::getRateLimiter(opCtx->getServiceContext());
         ASSERT_EQ(rateLimiter.getPolicyType(), RateLimiter::kWindowBasedPolicy);
@@ -294,9 +262,8 @@ TEST_F(QueryStatsTest, TestConfiguringWriteCmdRateLimiterViaServerParameters) {
     auto serviceCtx = opCtx->getServiceContext();
 
     {
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsWriteCmdSampleRate",
-                                                            0.042);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsWriteCmdSampleRate",
+                                                      0.042);
 
         auto& limiter = QueryStatsStoreManager::getWriteCmdRateLimiter(serviceCtx);
         ASSERT_EQ(limiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
@@ -304,9 +271,7 @@ TEST_F(QueryStatsTest, TestConfiguringWriteCmdRateLimiterViaServerParameters) {
     }
 
     {  // Full sampling rate of 1.0 should yield a per-thousand rate of 1000.
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsWriteCmdSampleRate",
-                                                            1.0);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsWriteCmdSampleRate", 1.0);
 
         auto& limiter = QueryStatsStoreManager::getWriteCmdRateLimiter(serviceCtx);
         ASSERT_EQ(limiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
@@ -314,14 +279,24 @@ TEST_F(QueryStatsTest, TestConfiguringWriteCmdRateLimiterViaServerParameters) {
     }
 
     {  // A rate of 0.0 should disable write command sampling.
-        RAIIServerParameterControllerForTest flagCtrl("featureFlagQueryStats", true);
-        RAIIServerParameterControllerForTest sampleRateCtrl("internalQueryStatsWriteCmdSampleRate",
-                                                            0.0);
+        unittest::ServerParameterGuard sampleRateCtrl("internalQueryStatsWriteCmdSampleRate", 0.0);
 
         auto& limiter = QueryStatsStoreManager::getWriteCmdRateLimiter(serviceCtx);
         ASSERT_EQ(limiter.getPolicyType(), RateLimiter::kSampleBasedPolicy);
         ASSERT_EQ(limiter.getSamplingRate(), 0);
     }
+}
+
+TEST(QueryStatsKeyBsonValidation, AcceptsShallowKey) {
+    ASSERT_OK(validateQueryStatsKeyBson(BSON("queryShape" << BSON("command" << "find"))));
+}
+
+TEST(QueryStatsKeyBsonValidation, RejectsKeyTooDeepToBeWrappedInAReply) {
+    BSONObj deep = BSON("a" << 1);
+    for (std::uint32_t i = 1; i <= BSONDepth::getMaxDepthForUserStorage(); ++i) {
+        deep = BSON("a" << deep);
+    }
+    ASSERT_EQ(validateQueryStatsKeyBson(deep).code(), ErrorCodes::Overflow);
 }
 
 }  // namespace mongo::query_stats

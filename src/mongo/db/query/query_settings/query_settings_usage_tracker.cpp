@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_settings/query_settings_usage_tracker.h"
 
 #include "mongo/db/commands/server_status/server_status.h"
 
 namespace mongo::query_settings {
+using namespace std::literals::string_view_literals;
 namespace {
 
 const auto getQuerySettingsUsageTracker =
@@ -67,33 +42,29 @@ QuerySettingsUsageTracker& QuerySettingsUsageTracker::get(OperationContext* opCt
 BSONObj QuerySettingsUsageTracker::generateServerStatusSection(OperationContext* opCtx) const {
     BSONObjBuilder root;
     serializeUsageMetrics(root);
-    if (feature_flags::gFeatureFlagPQSBackfill.isEnabledUseLastLTSFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        BSONObjBuilder nested(root.subobjStart("backfill"));
-        serializeBackfillMetrics(nested);
-        nested.doneFast();
-    }
+    BSONObjBuilder nested(root.subobjStart("backfill"));
+    serializeBackfillMetrics(nested);
+    nested.doneFast();
     return root.obj();
 }
 
 void QuerySettingsUsageTracker::serializeUsageMetrics(BSONObjBuilder& bob) const {
     auto metrics = _usageMetrics.get();
-    bob.append("count"_sd, metrics.count);
-    bob.append("size"_sd, metrics.size);
-    bob.append("rejectCount"_sd, metrics.rejectCount);
+    bob.append("count"sv, metrics.count);
+    bob.append("size"sv, metrics.size);
+    bob.append("rejectCount"sv, metrics.rejectCount);
 }
 
 void QuerySettingsUsageTracker::serializeBackfillMetrics(BSONObjBuilder& bob) const {
-    bob.append("memoryUsedBytes"_sd, _backfillMetrics.memoryUsedBytes.loadRelaxed());
-    bob.append("missingRepresentativeQueries"_sd,
+    bob.append("memoryUsedBytes"sv, _backfillMetrics.memoryUsedBytes.loadRelaxed());
+    bob.append("missingRepresentativeQueries"sv,
                _backfillMetrics.missingRepresentativeQueries.loadRelaxed());
-    bob.append("bufferedRepresentativeQueries"_sd,
+    bob.append("bufferedRepresentativeQueries"sv,
                _backfillMetrics.bufferedRepresentativeQueries.loadRelaxed());
-    bob.append("insertedRepresentativeQueries"_sd,
+    bob.append("insertedRepresentativeQueries"sv,
                _backfillMetrics.insertedRepresentativeQueries.loadRelaxed());
-    bob.append("succeededBackfills"_sd, _backfillMetrics.succeededBackfills.loadRelaxed());
-    bob.append("failedBackfills"_sd, _backfillMetrics.failedBackfills.loadRelaxed());
+    bob.append("succeededBackfills"sv, _backfillMetrics.succeededBackfills.loadRelaxed());
+    bob.append("failedBackfills"sv, _backfillMetrics.failedBackfills.loadRelaxed());
 }
 
 void QuerySettingsUsageTracker::setQuerySettingsUsageMetrics(int count, int size, int rejectCount) {

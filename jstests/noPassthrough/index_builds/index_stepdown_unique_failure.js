@@ -2,10 +2,6 @@
  * Confirms that unique index builds fail after a primary steps down during the collection
  * scan phase. The new primary will discover a duplicate key violation and abort the build.
  * @tags: [
- *   # This test passes for the wrong reason until primary driven index builds support
- *   # failover because it expects the index not to exist for a different reason. Excluding
- *   # it so as not to generate noise in test coverage.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   requires_replication,
  * ]
  */
@@ -29,7 +25,12 @@ assert.commandWorked(coll.insert({a: 1}));
 IndexBuildTest.pauseIndexBuilds(primary);
 IndexBuildTest.pauseIndexBuilds(rst.getSecondary());
 
-const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {unique: true});
+const createIdx = IndexBuildTest.startIndexBuild(
+    primary,
+    coll.getFullName(),
+    {a: 1},
+    {unique: true},
+);
 
 // When the index build starts, find its op id.
 const opId = IndexBuildTest.waitForIndexBuildToScanCollection(testDB, coll.getName(), "a_1");

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/net/hostandport.h"
@@ -38,6 +12,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 TEST(HostAndPort, BasicLessThanComparison) {
     // Not less than self.
@@ -113,6 +88,10 @@ TEST(HostAndPort, RoundTripAbility) {
     ASSERT_EQUALS(HostAndPort("abc.def:3421"), HostAndPort(HostAndPort("abc.def:3421").toString()));
     ASSERT_EQUALS(HostAndPort("[124d:]:34"), HostAndPort(HostAndPort("[124d:]:34").toString()));
     ASSERT_EQUALS(HostAndPort("[124d:]"), HostAndPort(HostAndPort("[124d:]").toString()));
+    ASSERT_EQUALS(HostAndPort("/dev/mongod.sock"),
+                  HostAndPort(HostAndPort("/dev/mongod.sock").toString()));
+    ASSERT_EQUALS(HostAndPort("anonymous unix socket"),
+                  HostAndPort(HostAndPort("anonymous unix socket").toString()));
 }
 
 TEST(HostAndPort, CanIdentifyDefaultRoutes) {
@@ -125,13 +104,27 @@ TEST(HostAndPort, CanIdentifyDefaultRoutes) {
     ASSERT_TRUE(HostAndPort("[0:0:0::00:0:0]").isDefaultRoute());
 }
 
+TEST(HostAndPort, PortRemovedFromUds) {
+    // If a UDS is created with a port, that port should not be printed via toString().
+    const auto uds = "/dev/mongod.sock"sv;
+    const auto uds_port = "/dev/mongod.sock:1234"sv;
+    ASSERT_EQUALS(HostAndPort(uds).toString(), uds);
+    ASSERT_EQUALS(HostAndPort(uds).toString(), HostAndPort(uds_port).toString());
+
+    const auto anon_uds = "anonymous unix socket"sv;
+    const auto anon_uds_port = "anonymous unix socket:1234"sv;
+    ASSERT_EQUALS(HostAndPort(anon_uds).toString(), anon_uds);
+    ASSERT_EQUALS(HostAndPort(anon_uds).toString(), HostAndPort(anon_uds_port).toString());
+}
+
 TEST(HostAndPort, Fmt) {
     const std::string specs[] = {
-        "1.2.3.4",           //
-        "1.2.3.4:123",       //
-        "[1:2:3:4]",         //
-        "[1:2:3:4]:123",     //
-        "/dev/mongod.sock",  //
+        "1.2.3.4",                //
+        "1.2.3.4:123",            //
+        "[1:2:3:4]",              //
+        "[1:2:3:4]:123",          //
+        "/dev/mongod.sock",       //
+        "anonymous unix socket",  //
     };
     for (const auto& spec : specs) {
         const HostAndPort hp(spec);

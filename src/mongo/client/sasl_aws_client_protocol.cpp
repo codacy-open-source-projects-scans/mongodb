@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/sasl_aws_client_protocol.h"
 
@@ -47,6 +21,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -79,7 +54,7 @@ std::vector<char> generateClientNonce() {
  * Good: a.b  or a.b.c or a
  * Bad: a..b or a.b..c
  */
-bool validateHostNameParts(StringData str) {
+bool validateHostNameParts(std::string_view str) {
     size_t pos = str.find('.');
     if (pos != std::string::npos) {
         while (true) {
@@ -107,7 +82,7 @@ void uassertKmsRequestInternal(kms_request_t* request, const char* file, int lin
 }
 
 template <typename T>
-AWSCredentials parseCredentials(StringData data) {
+AWSCredentials parseCredentials(std::string_view data) {
     BSONObj obj = fromjson(std::string{data});
 
     auto creds = T::parse(obj, IDLParserContext("security-credentials"));
@@ -131,7 +106,7 @@ std::string generateClientFirst(std::vector<char>* clientNonce) {
 
 #define uassertKmsRequest(X) uassertKmsRequestInternal(request.get(), __FILE__, __LINE__, (X));
 
-std::string generateClientSecond(StringData serverFirstBase64,
+std::string generateClientSecond(std::string_view serverFirstBase64,
                                  const std::vector<char>& clientNonce,
                                  const AWSCredentials& credentials) {
     dassert(clientNonce.size() == kClientFirstNonceLength);
@@ -168,7 +143,7 @@ std::string generateClientSecond(StringData serverFirstBase64,
         kms_request_set_region(request.get(), getRegionFromHost(serverFirst.getStsHost()).c_str()));
 
     // sts is always the name of the service
-    uassertKmsRequest(kms_request_set_service(request.get(), kAwsServiceName.data()));
+    uassertKmsRequest(kms_request_set_service(request.get(), std::string{kAwsServiceName}.c_str()));
 
     uassertKmsRequest(kms_request_add_header_field(
         request.get(), "Host", std::string{serverFirst.getStsHost()}.c_str()));
@@ -176,11 +151,12 @@ std::string generateClientSecond(StringData serverFirstBase64,
     auto serverNonce = serverFirst.getServerNonce();
     uassertKmsRequest(kms_request_add_header_field(
         request.get(),
-        kMongoServerNonceHeader.data(),
-        base64::encode(StringData(serverNonce.data(), serverNonce.length())).c_str()));
+        std::string{kMongoServerNonceHeader}.c_str(),
+        base64::encode(std::string_view(serverNonce.data(), serverNonce.length())).c_str()));
 
-    uassertKmsRequest(kms_request_add_header_field(
-        request.get(), kMongoGS2CBHeader.data(), kMongoDefaultGS2CBFlag.data()));
+    uassertKmsRequest(kms_request_add_header_field(request.get(),
+                                                   std::string{kMongoGS2CBHeader}.c_str(),
+                                                   std::string{kMongoDefaultGS2CBFlag}.c_str()));
 
     uassertKmsRequest(
         kms_request_set_access_key_id(request.get(), credentials.accessKeyId.c_str()));
@@ -201,12 +177,13 @@ std::string generateClientSecond(StringData serverFirstBase64,
     UniqueKmsCharBuffer kmsSignature(kms_request_get_signature(request.get()));
     second.setAuthHeader(kmsSignature.get());
 
-    second.setXAmzDate(kms_request_get_canonical_header(request.get(), kXAmzDateHeader.data()));
+    second.setXAmzDate(
+        kms_request_get_canonical_header(request.get(), std::string{kXAmzDateHeader}.c_str()));
 
     return convertToByteString(second);
 }
 
-std::string getRegionFromHost(StringData host) {
+std::string getRegionFromHost(std::string_view host) {
     if (host == kAwsDefaultStsHost) {
         return std::string{kAwsDefaultRegion};
     }
@@ -224,7 +201,7 @@ std::string getRegionFromHost(StringData host) {
     return std::string{host.substr(firstPeriod + 1, secondPeriod - firstPeriod - 1)};
 }
 
-std::string parseRoleFromEC2IamSecurityCredentials(StringData data) {
+std::string parseRoleFromEC2IamSecurityCredentials(std::string_view data) {
     // Before the Nov 2019 AWS update, they added \n to the role_name.
     size_t pos = data.find('\n');
 
@@ -235,11 +212,11 @@ std::string parseRoleFromEC2IamSecurityCredentials(StringData data) {
     return std::string{data.substr(0, pos)};
 }
 
-AWSCredentials parseCredentialsFromEC2IamSecurityCredentials(StringData data) {
+AWSCredentials parseCredentialsFromEC2IamSecurityCredentials(std::string_view data) {
     return parseCredentials<Ec2SecurityCredentials>(data);
 }
 
-AWSCredentials parseCredentialsFromECSTaskIamCredentials(StringData data) {
+AWSCredentials parseCredentialsFromECSTaskIamCredentials(std::string_view data) {
     return parseCredentials<EcsTaskSecurityCredentials>(data);
 }
 

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -55,6 +28,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -63,6 +37,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Return type of the 'rewriteGroupAsTransformOnFirstDocument' function. See the function
@@ -77,6 +52,10 @@ struct RewriteOnFirstDocumentResult {
 
     // The rewritten $group stage. nullptr is the rewrite is impossible.
     std::unique_ptr<GroupFromFirstDocumentTransformation> rewrittenGroupStage;
+
+    // True if the $group is preceded by an eligible $unwind (i.e. one with
+    // preserveNullAndEmptyArrays=true) on the grouped field.
+    bool groupFollowsUnwind = false;
 };
 
 /**
@@ -87,12 +66,13 @@ struct RewriteOnFirstDocumentResult {
  *  - Computing the group key
  *  - Accumulating values in a hash table and populating output documents.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceGroupBase : public DocumentSource {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DocumentSourceGroupBase : public DocumentSource {
 public:
     using Accumulators = std::vector<boost::intrusive_ptr<AccumulatorState>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
     boost::intrusive_ptr<DocumentSource> optimize();
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
@@ -162,7 +142,8 @@ public:
      * Returns maximum allowed memory footprint.
      */
     size_t getMaxMemoryUsageBytes() const {
-        return _groupProcessor->getMemoryTracker().maxAllowedMemoryUsageBytes();
+        return _groupProcessor->getMemoryTracker().maxAllowedMemoryUsageBytes(
+            getExpCtx()->getOperationContext());
     }
 
     /**
@@ -227,15 +208,16 @@ public:
                            const boost::optional<OrderedPathSet>& initialShardKeyPaths) const;
 
 protected:
-    DocumentSourceGroupBase(StringData stageName,
+    DocumentSourceGroupBase(std::string_view stageName,
                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
                             boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
 
     void initializeFromBson(BSONElement elem);
-    virtual bool isSpecFieldReserved(StringData fieldName) = 0;
+    virtual bool isSpecFieldReserved(std::string_view fieldName) = 0;
 
-    virtual void serializeAdditionalFields(
-        MutableDocument& out, const SerializationOptions& opts = SerializationOptions{}) const {};
+    virtual void serializeAdditionalFields(MutableDocument& out,
+                                           const query_shape::SerializationOptions& opts =
+                                               query_shape::SerializationOptions{}) const {};
 
     using RewriteGroupRequirements =
         std::tuple<AccumulatorDocumentsNeeded, std::string, boost::optional<SortPattern>>;
@@ -252,8 +234,8 @@ protected:
     std::shared_ptr<GroupProcessor> _groupProcessor;
 
 private:
-    static constexpr StringData kDoingMergeSpecField = "$doingMerge"_sd;
-    static constexpr StringData kWillBeMergedSpecField = "$willBeMerged"_sd;
+    static constexpr std::string_view kDoingMergeSpecField = "$doingMerge"sv;
+    static constexpr std::string_view kWillBeMergedSpecField = "$willBeMerged"sv;
 
     /**
      * Returns true if 'dottedPath' is one of the group keys present in '_idExpressions'.

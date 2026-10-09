@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/mutable_bson/const_element.h"
 #include "mongo/db/exec/mutable_bson/element.h"
@@ -44,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -101,7 +75,7 @@ protected:
         ModifyResult() {};
         ModifyResult(ModifyResult::Type type) : type(type) {}
 
-        Type type;
+        Type type = Type::kNoOp;
         std::variant<EmptyDescription, ArrayAppendUpdateDescription> description =
             EmptyDescription{};
     };
@@ -154,7 +128,8 @@ protected:
                                 std::uint32_t recursionLevel,
                                 ModifyResult modifyResult,
                                 bool validateForStorage,
-                                bool* containsDotsAndDollarsField) const;
+                                bool* containsDotsAndDollarsField,
+                                bool fromOplogApplication) const;
 
     /**
      * ModifierNode::apply() calls this method after validation to create an oplog entry for the
@@ -215,7 +190,7 @@ protected:
         FieldRef* currentPath,
         std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
             operatorOrientedUpdates,
-        const SerializationOptions& opts) const override {
+        const query_shape::SerializationOptions& opts) const override {
         (*operatorOrientedUpdates)[std::string{operatorName()}].emplace_back(
             opts.serializeFieldRef(*currentPath), operatorValue(opts));
     }
@@ -225,14 +200,14 @@ private:
      * Retrieve the name of the operator this node represents in input syntax. For example, for the
      * input syntax: {$set: {a: 3}}, this function would return "$set".
      */
-    virtual StringData operatorName() const = 0;
+    virtual std::string_view operatorName() const = 0;
 
     /**
      * Retrieve the value this operator applies as a single-element BSONObj with an empty string as
      * the keyname. For example, for the input syntax: {$set: {a: 3}}, this function would return:
      * {"": 3} in BSON.
      */
-    virtual BSONObj operatorValue(const SerializationOptions& opts) const = 0;
+    virtual BSONObj operatorValue(const query_shape::SerializationOptions& opts) const = 0;
 
     ApplyResult applyToNonexistentElement(ApplyParams applyParams,
                                           UpdateNodeApplyParams updateNodeApplyParams) const;

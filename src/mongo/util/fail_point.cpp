@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/fail_point.h"
 
@@ -48,6 +22,7 @@
 #include <limits>
 #include <new>
 #include <random>
+#include <string_view>
 #include <thread>
 
 #include <absl/container/flat_hash_map.h>
@@ -59,6 +34,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(dummy);  // used by tests in jstests/fail_point
@@ -69,7 +45,10 @@ MONGO_INITIALIZER_GENERAL(AllFailPointsRegistered, (), ())
 }
 
 /** The per-thread PRNG used by fail-points. */
-thread_local PseudoRandom threadPrng{SecureRandom().nextInt64()};
+PseudoRandom& threadPrng() {
+    thread_local PseudoRandom threadPrng{SecureRandom().nextInt64()};
+    return threadPrng;
+}
 
 template <typename Pred>
 void spinWait(const Pred& pred) {
@@ -93,7 +72,7 @@ void spinWait(const Pred& pred) {
 }  // namespace
 
 void FailPoint::setThreadPRNGSeed(int32_t seed) {
-    threadPrng = PseudoRandom(seed);
+    threadPrng() = PseudoRandom(seed);
 }
 
 FailPoint::FailPoint(std::string name, bool immortal) : _immortal(immortal) {
@@ -149,7 +128,7 @@ bool FailPoint::Impl::_evaluateByMode() {
         case alwaysOn:
             return true;
         case random:
-            return std::uniform_int_distribution<int>{}(threadPrng.urbg()) < _modeValue.load();
+            return std::uniform_int_distribution<int>{}(threadPrng().urbg()) < _modeValue.load();
         case nTimes:
             if (_modeValue.subtractAndFetch(1) <= 0)
                 _disable();
@@ -287,13 +266,14 @@ auto setGlobalFailPoint(const std::string& failPointName, const BSONObj& cmdObj)
     return timesEntered;
 }
 
-FailPointEnableBlock::FailPointEnableBlock(StringData failPointName)
+FailPointEnableBlock::FailPointEnableBlock(std::string_view failPointName)
     : FailPointEnableBlock(failPointName, BSONObj{}) {}
 
-FailPointEnableBlock::FailPointEnableBlock(StringData failPointName, BSONObj data)
+FailPointEnableBlock::FailPointEnableBlock(std::string_view failPointName, BSONObj data)
     : FailPointEnableBlock(globalFailPointRegistry().find(failPointName), std::move(data)) {}
 
-FailPointEnableBlock::FailPointEnableBlock(StringData failPointName, FailPoint::ModeOptions mode)
+FailPointEnableBlock::FailPointEnableBlock(std::string_view failPointName,
+                                           FailPoint::ModeOptions mode)
     : FailPointEnableBlock(globalFailPointRegistry().find(failPointName), std::move(mode)) {}
 
 FailPointEnableBlock::FailPointEnableBlock(FailPoint* failPoint)
@@ -338,7 +318,7 @@ Status FailPointRegistry::add(FailPoint* failPoint) {
     return Status::OK();
 }
 
-FailPoint* FailPointRegistry::find(StringData name) const {
+FailPoint* FailPointRegistry::find(std::string_view name) const {
     auto iter = _fpMap.find(name);
     return (iter == _fpMap.end()) ? nullptr : iter->second;
 }
@@ -360,9 +340,9 @@ void FailPointRegistry::disableAllFailpoints() {
     }
 }
 
-static constexpr auto kFailPointServerParameterPrefix = "failpoint."_sd;
+static constexpr auto kFailPointServerParameterPrefix = "failpoint."sv;
 
-FailPointServerParameter::FailPointServerParameter(StringData name, ServerParameterType spt)
+FailPointServerParameter::FailPointServerParameter(std::string_view name, ServerParameterType spt)
     : ServerParameter(fmt::format("{}{}", kFailPointServerParameterPrefix, name), spt),
       _data(globalFailPointRegistry().find(std::string{name})) {
     invariant(name != "failpoint.*", "Failpoint prototype was auto-registered from IDL");
@@ -371,12 +351,13 @@ FailPointServerParameter::FailPointServerParameter(StringData name, ServerParame
 
 void FailPointServerParameter::append(OperationContext* opCtx,
                                       BSONObjBuilder* b,
-                                      StringData name,
+                                      std::string_view name,
                                       const boost::optional<TenantId>&) {
     *b << name << _data->toBSON();
 }
 
-Status FailPointServerParameter::setFromString(StringData str, const boost::optional<TenantId>&) {
+Status FailPointServerParameter::setFromString(std::string_view str,
+                                               const boost::optional<TenantId>&) {
     BSONObj failPointOptions;
     try {
         failPointOptions = fromjson(str);

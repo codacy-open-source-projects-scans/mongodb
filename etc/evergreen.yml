@@ -62,53 +62,63 @@ include:
   - filename: etc/evergreen_yml_components/tasks/compile_tasks.yml
   - filename: etc/evergreen_yml_components/tasks/compile_tasks_shared.yml
   - filename: etc/evergreen_yml_components/tasks/misc_tasks.yml
-  - filename: etc/evergreen_yml_components/tasks/release_tasks.yml
-  - filename: etc/evergreen_yml_components/tasks/devcontainer_tasks.yml
+  - filename: etc/evergreen_yml_components/tasks/security_tasks.yml
 
   - filename: etc/evergreen_yml_components/variants/misc/task_generation.yml
   - filename: etc/evergreen_yml_components/variants/misc/misc.yml
   - filename: etc/evergreen_yml_components/variants/misc/misc_master_branch_only.yml
+  - filename: etc/evergreen_yml_components/variants/misc/legacy_js_engine.yml
 
   - filename: etc/evergreen_yml_components/variants/amazon/test_dev.yml
   - filename: etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+  - filename: etc/evergreen_yml_components/variants/amazon/message_filter_plugin_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/macos/test_dev_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/mongot/test_dev.yml
 
   - filename: etc/evergreen_yml_components/variants/rhel/test_dev.yml
-  - filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml
   - filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
   - filename: etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
 
-  - filename: etc/evergreen_yml_components/variants/ubuntu/test_dev_master_and_lts_branches_only.yml
-  - filename: etc/evergreen_yml_components/variants/ubuntu/test_dev_master_branch_only.yml
+  - filename: etc/evergreen_yml_components/variants/ubuntu/test_dev.yml
 
   - filename: etc/evergreen_yml_components/variants/windows/test_dev.yml
-  - filename: etc/evergreen_yml_components/variants/windows/test_dev_master_and_lts_branches_only.yml
   - filename: etc/evergreen_yml_components/variants/windows/test_dev_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/wiredtiger/test_dev_master_branch_only.yml
 
-  - filename: etc/evergreen_yml_components/variants/codecoverage/test_dev.yml
+  - filename: etc/evergreen_yml_components/variants/codecoverage/test_dev_master_branch_only.yml
 
   - filename: etc/evergreen_yml_components/variants/amazon/streams/streams_dev.yml
 
   - filename: src/mongo/db/modules/atlas/atlas_dev.yml
+  - filename: src/mongo/db/modules/atlas/atlas_sls_pin_bump.yml
+  - filename: src/mongo/db/modules/atlas/atlas_commit_queue.yml
+  - filename: etc/evergreen_yml_components/copybara/copybara.yml
+  - filename: etc/evergreen_yml_components/copybara/copybara_gen.yml
 
-  - filename: monguard/.evergreen/config.yml
+  - filename: monguard/.evergreen/config_mongodb_master.yml
+  - filename: monguard/.evergreen/config_tasks.yml
 
 parameters:
   - key: evergreen_config_file_path
     value: "etc/evergreen.yml"
     description: "path to this file"
-  - key: enable_evergreen_api_test_selection
-    value: true
-    description: "Enable test selection using Evergreen API"
   - key: test_selection_strategies_array
     description: "Array of test selection strategies"
+  - key: use_tss_staging
+    description: "Set to true to ask the staging test selection deployment instead of production"
+  - key: runtime_params_json
+    description: 'JSON of runtime params (e.g. {"enable_linux_perf":true}) to enable on-CPU profiling on benchmark tasks.'
+  - key: antithesis_suites
+    description: "Comma-separated ds-antithesis suite tasks (e.g. mongod-sls-multi-cell-encryption) to run against this patch's mongod image. No antithesis run is triggered if this parameter is empty or not set."
+  - key: message_filter_plugin_release_version
+    description: "Dev release version string of the message filter plugin artifact to promote to GA, in the form YYYYMMDD.hhmmss.<githash>. Used by promote_message_filter_plugin to locate the existing dev tarball in origin-message-filter-plugin-dev and re-import it via URP at the GA artifact name. No rebuild is performed."
+  # Note: the `urp_input_bucket_override` parameter is already declared by the merged
+  # monguard config (monguard/.evergreen/config_mongodb_master.yml) and is reused here.
 
 commit_queue_aliases:
   # TODO(SERVER-124155): add check_for_todos to the commit queue variant's task list once the codebase is free of existing violations
@@ -120,6 +130,10 @@ commit_queue_aliases:
     variant_tags: []
     task_tags: ["clang_tidy"]
   - variant: "^(commit-queue-monorepo)$"
+    task: ".*"
+    variant_tags: []
+    task_tags: []
+  - variant: "^(commit-queue-atlas)$"
     task: ".*"
     variant_tags: []
     task_tags: []
@@ -145,6 +159,10 @@ github_pr_aliases:
     task: ".*"
     variant_tags: []
     task_tags: []
+  - variant: "^(commit-queue-atlas)$"
+    task: ".*"
+    variant_tags: []
+    task_tags: []
   # Monguard
   - variant: "^(amazon-linux2023-arm|Lint)$"
     task: "^(.*)$"
@@ -156,10 +174,13 @@ patch_aliases:
     variant_tags: ["required"]
     task: ".*"
   - alias: query
-    variant: "^(.*query-patch-only|amazon-linux2023-arm64-static-compile)$"
+    variant: "^(.*query-patch-only|amazon-linux2023-arm64-static-compile|enterprise-amazon-linux2-arm64-all-feature-flags-sbe-full)$"
     task: ".*"
   - alias: query-quick
     variant: "^(.*query-quick-patch-only|linux-x86-dynamic-compile)$"
+    task: ".*"
+  - alias: query-joo
+    variant: "^(.*join-optimization-query-patch-only|amazon-linux2023-arm64-static-compile|run-all-affected-jstests)"
     task: ".*"
   - alias: security
     variant: "^(.*security-patch-only|linux-x86-dynamic-compile|windows-compile-required)$"
@@ -183,21 +204,32 @@ patch_aliases:
       to only select tests that use a real mongot.
     variant_tags: ["required", "mongot_e2e"]
     task: ".*"
+  - alias: mongot-extension
+    description: >
+      Runs only the with_mongot_extension_* and concurrency_with_mongot_extension_* tasks on the
+      variants that use a real mongot. Use this instead of `required-and-mongot-e2e-tests` when you
+      only want the extension suites and not the required variants.
+    variant_tags: ["mongot_e2e"]
+    task: "^(concurrency_)?with_mongot_extension_.*"
   - alias: codecoverage
-    description: "Run tests and report code coverage"
+    description: "Run the code coverage tasks"
     variant: ".*-coverage"
     task: ".*"
   - alias: unittestcoverage
-    description: "Run unit tests and report code coverage"
+    description: "Run the unittest code coverage task only (skips any integration tests)"
     variant: ".*-coverage"
     task: "^(unit_test_group.*|bazel_coverage)$"
   - alias: cluster_scalability
     variant_tags: ["cluster_scalability_only"]
     task_tags: ["cluster_scalability_only"]
-  - alias: blocking-emergency-atlas-release-tasks
-    description: "Run variants that would potentially block an emergency release"
-    variant_tags: ["emergency_release"]
-    task: ".*"
+  - alias: disagg
+    description: >
+      Runs the disagg (DSC) tests from every required variant that has them, a strict subset of the
+      `required` alias. Not yet a merge gate on its own as it skips packaging and the non-atlas
+      variants that a build-system or buildscripts change can break. Pair it with `required` until
+      SERVER-133156 lands the safeties.
+    variant_tags: ["disagg"]
+    task_tags: ["requires_extra_system_deps !streams_release_test"]
   - alias: streams
     description: "Runs all streams variants"
     variant: "^(enterprise-amazon2023-streams|enterprise-rhel8-streams-tsan|enterprise-rhel8-streams-aubsan)$"

@@ -50,26 +50,6 @@ evergreen_buildvariants:
     platform: ubuntu1804
     architecture: s390x
 
-  - name: ubuntu2004
-    edition: targeted
-    platform: ubuntu2004
-    architecture: x86_64
-
-  - name: enterprise-ubuntu2004-64
-    edition: enterprise
-    platform: ubuntu2004
-    architecture: x86_64
-
-  - name: ubuntu2004-arm64
-    edition: targeted
-    platform: ubuntu2004
-    architecture: aarch64
-
-  - name: enterprise-ubuntu2004-arm64
-    edition: enterprise
-    platform: ubuntu2004
-    architecture: aarch64
-
   - name: amazon
     edition: targeted
     platform: amazon
@@ -155,6 +135,11 @@ evergreen_buildvariants:
     platform: rhel9
     architecture: ppc64le
 
+  - name: enterprise-rhel-10-ppc64le
+    edition: enterprise
+    platform: rhel10
+    architecture: ppc64le
+
   - name: rhel-67-s390x
     edition: targeted
     platform: rhel67
@@ -173,6 +158,11 @@ evergreen_buildvariants:
   - name: enterprise-rhel-72-s390x
     edition: enterprise
     platform: rhel72
+    architecture: s390x
+
+  - name: enterprise-rhel-10-s390x
+    edition: enterprise
+    platform: rhel10
     architecture: s390x
 
   - name: suse12
@@ -225,6 +215,11 @@ evergreen_buildvariants:
     platform: debian12
     architecture: x86_64
 
+  - name: debian13
+    edition: targeted
+    platform: debian13
+    architecture: x86_64
+
   - name: enterprise-debian11-64
     edition: enterprise
     platform: debian11
@@ -233,6 +228,11 @@ evergreen_buildvariants:
   - name: enterprise-debian12-64
     edition: enterprise
     platform: debian12
+    architecture: x86_64
+
+  - name: enterprise-debian13-64
+    edition: enterprise
+    platform: debian13
     architecture: x86_64
 
   - name: windows

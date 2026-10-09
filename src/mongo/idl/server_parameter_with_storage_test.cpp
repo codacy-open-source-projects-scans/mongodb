@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/server_parameter_with_storage.h"
 
@@ -43,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
@@ -52,6 +27,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using SPT = ServerParameterType;
 
@@ -68,7 +44,7 @@ void ASSERT_EQ_OR_NAN(const T& a, const U& b) {
 }
 
 template <typename T, ServerParameterType spt>
-void doStorageTest(StringData name,
+void doStorageTest(std::string_view name,
                    const std::vector<std::string>& valid,
                    const std::vector<std::string>& invalid) {
     T val = T();
@@ -165,10 +141,10 @@ TEST(ServerParameterWithStorage, StorageTest) {
     doStorageTestByType<double>("DoubleD", doubleVals, stringVals);
     doStorageTestByType<std::string>("String", stringVals, {});
 
-    doStorageTestByAtomic<AtomicWord<bool>>("AtomicWord<bool>", boolVals, stringVals);
-    doStorageTestByAtomic<AtomicWord<int>>("AtomicWord<int>", numberVals, stringVals);
-    doStorageTestByAtomic<AtomicWord<double>>("AtomicWord<double>I", numberVals, stringVals);
-    doStorageTestByAtomic<AtomicWord<double>>("AtomicWord<double>D", doubleVals, stringVals);
+    doStorageTestByAtomic<Atomic<bool>>("Atomic<bool>", boolVals, stringVals);
+    doStorageTestByAtomic<Atomic<int>>("Atomic<int>", numberVals, stringVals);
+    doStorageTestByAtomic<Atomic<double>>("Atomic<double>I", numberVals, stringVals);
+    doStorageTestByAtomic<Atomic<double>>("Atomic<double>D", doubleVals, stringVals);
 }
 
 TEST(ServerParameterWithStorage, BoundsTest) {
@@ -302,9 +278,9 @@ TEST(IDLServerParameterWithStorage, annotationsAccessible) {
     auto* sp = getNodeServerParameter("storageIntAnnotated");
     ASSERT_BSONOBJ_EQ(
         sp->annotations(),
-        BSON("query_knob" << BSON("wire_name" << "intAnnotatedWire"
-                                              << "applicability" << BSON_ARRAY("queryShape")
-                                              << "fcv" << BSON("min" << "9.0"))));
+        BSON("mock_query_knob" << BSON("wire_name" << "intAnnotatedWire"
+                                                   << "applicability" << BSON_ARRAY("queryShape")
+                                                   << "fcv" << BSON("min" << "9.0"))));
 }
 
 TEST(IDLServerParameterWithStorage, noAnnotationsReturnsEmpty) {
@@ -335,14 +311,14 @@ TEST(IDLServerParameterWithStorage, annotationsOnClusterParameter) {
     ASSERT_BSONOBJ_EQ(sp->annotations(), BSON("cluster_meta" << BSON("scope" << "global")));
 }
 
-// Test that the RAIIServerParameterControllerForTest works correctly on IDL-generated types.
+// Test that the unittest::ServerParameterGuard works correctly on IDL-generated types.
 TEST(IDLServerParameterWithStorage, RAIIServerParameterController) {
     // Test int
     auto* stdIntDeclared = getNodeServerParameter("stdIntDeclared");
     ASSERT_OK(stdIntDeclared->setFromString("42", boost::none));
     ASSERT_EQ(test::gStdIntDeclared.load(), 42);
     {
-        RAIIServerParameterControllerForTest controller("stdIntDeclared", 10);
+        unittest::ServerParameterGuard controller("stdIntDeclared", 10);
         ASSERT_EQ(test::gStdIntDeclared.load(), 10);
     }
     ASSERT_EQ(test::gStdIntDeclared.load(), 42);
@@ -352,7 +328,7 @@ TEST(IDLServerParameterWithStorage, RAIIServerParameterController) {
     ASSERT_OK(uglyComplicated->setFromString("false", boost::none));
     ASSERT_EQ(test::gUglyComplicatedNameSp, false);
     {
-        RAIIServerParameterControllerForTest controller("ugly complicated-name.sp", true);
+        unittest::ServerParameterGuard controller("ugly complicated-name.sp", true);
         ASSERT_EQ(test::gUglyComplicatedNameSp, true);
     }
     ASSERT_EQ(test::gUglyComplicatedNameSp, false);
@@ -364,7 +340,7 @@ TEST(IDLServerParameterWithStorage, RAIIServerParameterController) {
     ASSERT_EQ(test::gStartupString, coolStartupString);
     {
         const auto badStartupString = "Bad startup string";
-        RAIIServerParameterControllerForTest controller("startupString", badStartupString);
+        unittest::ServerParameterGuard controller("startupString", badStartupString);
         ASSERT_EQ(test::gStartupString, badStartupString);
     }
     ASSERT_EQ(test::gStartupString, coolStartupString);
@@ -392,7 +368,7 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
     updatedPrePostImgs.setExpireAfterSeconds(40);
     LogicalTime updateTime = LogicalTime(Timestamp(Date_t::now()));
     baseCSP.setClusterParameterTime(updateTime);
-    baseCSP.set_id("testClusterServerParameter"_sd);
+    baseCSP.set_id("testClusterServerParameter"sv);
 
     updatedParam.setClusterServerParameter(baseCSP);
     updatedParam.setPreAndPostImages(updatedPrePostImgs);
@@ -412,10 +388,10 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
         clusterParam->append(nullptr, &b, clusterParam->name(), boost::none);
         auto obj = b.obj();
         ASSERT_EQ(obj.nFields(), 4);
-        ASSERT_EQ(obj["_id"_sd].String(), "testClusterServerParameter");
-        ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 40);
-        ASSERT_EQ(obj["testStringField"_sd].String(), "testString");
-        ASSERT_EQ(obj["clusterParameterTime"_sd].timestamp(), updateTime.asTimestamp());
+        ASSERT_EQ(obj["_id"sv].String(), "testClusterServerParameter");
+        ASSERT_EQ(obj["preAndPostImages"sv].Obj()["expireAfterSeconds"].Long(), 40);
+        ASSERT_EQ(obj["testStringField"sv].String(), "testString");
+        ASSERT_EQ(obj["clusterParameterTime"sv].timestamp(), updateTime.asTimestamp());
     }
 
     // setFromString should fail for cluster server parameters.
@@ -510,19 +486,19 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
         BSONObjBuilder b;
         clusterParam->append(nullptr, &b, clusterParam->name(), boost::none);
         auto obj = b.obj();
-        ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 40);
+        ASSERT_EQ(obj["preAndPostImages"sv].Obj()["expireAfterSeconds"].Long(), 40);
     }
     {
         BSONObjBuilder b;
         clusterParam->append(nullptr, &b, clusterParam->name(), tenant1);
         auto obj = b.obj();
-        ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 35);
+        ASSERT_EQ(obj["preAndPostImages"sv].Obj()["expireAfterSeconds"].Long(), 35);
     }
     {
         BSONObjBuilder b;
         clusterParam->append(nullptr, &b, clusterParam->name(), tenant2);
         auto obj = b.obj();
-        ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 45);
+        ASSERT_EQ(obj["preAndPostImages"sv].Obj()["expireAfterSeconds"].Long(), 45);
     }
 }
 

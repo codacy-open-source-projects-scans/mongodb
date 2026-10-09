@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/canonical_query_encoder.h"
 
@@ -48,9 +22,9 @@
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/intrusive_counter.h"
@@ -58,6 +32,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -224,13 +199,14 @@ protected:
     }
 
     void testComputeKeyForPipeline(unittest::GoldenTestContext& gctx,
-                                   StringData matchStr,
-                                   StringData projStr) {
+                                   std::string_view matchStr,
+                                   std::string_view projStr) {
         auto& stream = gctx.outStream();
         stream << "==== VARIATION: sbe pipeline: " << matchStr << ", " << projStr;
         stream << std::endl;
 
-        auto pipelineObj = [](StringData matchStr, StringData projStr) -> std::vector<BSONObj> {
+        auto pipelineObj = [](std::string_view matchStr,
+                              std::string_view projStr) -> std::vector<BSONObj> {
             auto matchObj = fromjson(matchStr);
             if (projStr == "{}") {
                 return {matchObj};
@@ -255,8 +231,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKey) {
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
 
     // No sorts
     testComputeKey(gctx, "{}", "{}", "{}");
@@ -330,8 +306,8 @@ TEST_F(CanonicalQueryEncoderTest, EncodeNotEqualNullPredicates) {
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
 
     // With '$eq', '$gte', and '$lte' negation comparison to 'null'.
     testComputeKey(gctx, "{a: {$not: {$eq: null}}}", "{}", "{_id: 0, a: 1}");
@@ -350,8 +326,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyEscaped) {
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
     // Field name in query.
     testComputeKey(gctx, "{'a,[]~|-<>': 1}", "{}", "{}");
 
@@ -388,8 +364,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyGeoNear) {
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
 
     testComputeKey(gctx, "{a: {$near: [0,0], $maxDistance:0.3 }}", "{}", "{}");
     testComputeKey(gctx, "{a: {$nearSphere: [0,0], $maxDistance: 0.31 }}", "{}", "{}");
@@ -398,6 +374,17 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyGeoNear) {
                    "$maxDistance:100}}}",
                    "{}",
                    "{}");
+}
+
+TEST_F(CanonicalQueryEncoderTest, ComputeKeyDistinctUnwindsArrays) {
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
+    unique_ptr<CanonicalQuery> cqPlain(canonicalize(opCtx(), "{}"));
+    cqPlain->setDistinct(CanonicalDistinct("a"));
+    unique_ptr<CanonicalQuery> cqUnwound(canonicalize(opCtx(), "{}"));
+    cqUnwound->setDistinct(
+        CanonicalDistinct("a", false, boost::none, boost::none, false, true /*unwindsArrays*/));
+    ASSERT_NOT_EQUALS(canonical_query_encoder::encodeClassic(*cqPlain),
+                      canonical_query_encoder::encodeClassic(*cqUnwound));
 }
 
 // Cache keys for $_internalBucketGeoWithin with flat and spherical geometry should
@@ -421,8 +408,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyRegexDependsOnFlags) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // The computed key depends on which execution engine is enabled. As such, we enable SBE for
     // this test in order to ensure that we have coverage for both SBE and the classic engine.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl", "trySbeEngine");
     testComputeKey(gctx, "{a: {$regex: \"sometext\"}}", "{}", "{}");
     testComputeKey(gctx, "{a: {$regex: \"sometext\", $options: \"\"}}", "{}", "{}");
 
@@ -456,8 +442,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyMatchInDependsOnPresenceOfRegexAndFl
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
 
     // Test that an $in containing a single regex is unwrapped to $regex.
     testComputeKey(gctx, "{a: {$in: [/foo/]}}", "{}", "{}");
@@ -502,8 +488,8 @@ TEST_F(CanonicalQueryEncoderTest, CheckCollationIsEncoded) {
     // The computed key depends on which execution engine is enabled. As such, we disable SBE for
     // this test so that the test doesn't break should the default value of
     // 'internalQueryFrameworkControl' change in the future.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "forceClassicEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                 "forceClassicEngine");
 
     unique_ptr<CanonicalQuery> cq(canonicalize(
         opCtx(), fromjson("{a: 1, b: 1}"), {}, {}, fromjson("{locale: 'mock_reverse_string'}")));
@@ -581,7 +567,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
     // Generated cache keys should be treated as opaque to the user.
 
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
+    unittest::ServerParameterGuard sbeFullController("featureFlagSbeFull", true);
 
     testComputeSBEKey(gctx, "{}", "{}", "{}");
     testComputeSBEKey(gctx, "{$or: [{a: 1}, {b: 2}]}", "{}", "{}");
@@ -667,10 +653,12 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithPipeline) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
+    unittest::ServerParameterGuard sbeFullController("featureFlagSbeFull", true);
 
 
-    auto getLookupBson = [](StringData localField, StringData foreignField, StringData asField) {
+    auto getLookupBson = [](std::string_view localField,
+                            std::string_view foreignField,
+                            std::string_view asField) {
         return BSON("$lookup" << BSON("from" << foreignNss.coll() << "localField" << localField
                                              << "foreignField" << foreignField << "as" << asField));
     };
@@ -696,7 +684,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithPipeline) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithReadConcern) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
+    unittest::ServerParameterGuard sbeFullController("featureFlagSbeFull", true);
 
     // Find command without read concern.
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
@@ -716,8 +704,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithReadConcern) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeyWithApiStrict) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     {
-        RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                           "forceClassicEngine");
+        unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                     "forceClassicEngine");
         APIParameters::get(opCtx()).setAPIStrict(false);
         testComputeKey(gctx, "{}", "{}", "{}");
 
@@ -726,8 +714,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyWithApiStrict) {
     }
 
     {
-        RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                           "trySbeEngine");
+        unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl",
+                                                     "trySbeEngine");
 
         APIParameters::get(opCtx()).setAPIStrict(false);
         testComputeSBEKey(gctx, "{}", "{}", "{}");
@@ -739,8 +727,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyWithApiStrict) {
 
 TEST_F(CanonicalQueryEncoderTest, ComputeKeyWithNeedsMerge) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl", "trySbeEngine");
     const auto groupStage = fromjson("{$group: {_id: '$a', out: {$sum: 1}}}");
     testComputeSBEKey(gctx,
                       "{}",
@@ -764,8 +751,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyWithNeedsMerge) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeyForPipeline) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    unittest::ServerParameterGuard controllerSBE("internalQueryFrameworkControl", "trySbeEngine");
 
     testComputeKeyForPipeline(gctx, "{$match: {a: 1}}", "{}");
     testComputeKeyForPipeline(gctx, "{$match: {a: 2}}", "{}");

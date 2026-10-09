@@ -9,6 +9,9 @@ filters:
   - "*oplog*":
     approvers:
       - 10gen/server-oplog
+  - "internode_validation_hash*":
+    approvers:
+      - 10gen/server-collection-write-path
   - "change_stream_oplog_notification*":
     approvers:
       - 10gen/query-execution-change-streams
@@ -58,3 +61,6 @@ filters:
   - "set_multikey_metadata_oplog_entry.idl":
     approvers:
       - 10gen/server-catalog-and-routing-shard-catalog
+  - "container_oplog_entry*":
+    approvers:
+      - 10gen/server-index-builds

@@ -9,6 +9,14 @@
 //   requires_fastcount,
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
+//   uses_map_reduce_internal_merge_pipeline,
+//   # On the WASM JS engine each context reserves ~1.2 GB virtual memory; serialize in
+//   # Evergreen to avoid host-level OOM when multiple mongods share the same machine.
+//   resource_intensive,
+//   # The test inserts ~30 MB of data; combined with per-process WASM module overhead
+//   # (~200 MB each) the initsync suite's 3-node RS + initial-sync node OOM-kills the
+//   # primary on memory-constrained CI hosts.
+//   incompatible_with_initial_sync,
 // ]
 const coll = db.mr_bigobject;
 coll.drop();

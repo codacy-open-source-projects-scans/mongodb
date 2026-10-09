@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/commands/query_cmd/cluster_write_cmd.h"
 
@@ -91,8 +65,8 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
-
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(hangAfterThrowWouldChangeOwningShardRetryableWrite);
 namespace {
@@ -577,7 +551,7 @@ bool cluster_write_cmd::runExplainWithoutShardKey(OperationContext* opCtx,
     sharding::router::CollectionRouter router(opCtx, originalNss);
     try {
         return router.routeWithRoutingContext(
-            "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            "explain write"sv, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // If supported, compute QueryShapeHash and record it in CurOp
                 query_stats::WriteCmdQueryStatsRegistrar::parseAndRegisterRequest(
                     opCtx, WriteCommandRef{req}, true /* skipRegistration */);
@@ -585,16 +559,16 @@ bool cluster_write_cmd::runExplainWithoutShardKey(OperationContext* opCtx,
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, originalNss);
                 auto [translatedNss, translatedReqBSON] = translateRequestForTimeseriesIfNeeded(
                     opCtx, originalRoutingCtx, originalNss, req, targeter);
-                if (!write_without_shard_key::useTwoPhaseProtocol(
-                        opCtx,
-                        translatedNss,
-                        true /* isUpdateOrDelete */,
-                        isUpsert,
-                        query,
-                        collation,
-                        req.getLet(),
-                        req.getLegacyRuntimeConstants(),
-                        false /* isTimeseriesViewRequest */)) {
+                const bool isTimeseriesViewRequest = (translatedNss != originalNss);
+                if (!write_without_shard_key::useTwoPhaseProtocol(opCtx,
+                                                                  translatedNss,
+                                                                  true /* isUpdateOrDelete */,
+                                                                  isUpsert,
+                                                                  query,
+                                                                  collation,
+                                                                  req.getLet(),
+                                                                  req.getLegacyRuntimeConstants(),
+                                                                  isTimeseriesViewRequest)) {
                     return false;
                 }
 
@@ -654,7 +628,8 @@ void cluster_write_cmd::executeWriteOpExplain(OperationContext* opCtx,
                                               ExplainOptions::Verbosity verbosity,
                                               rpc::ReplyBuilderInterface* result) {
     std::unique_ptr<BatchedCommandRequest> req;
-    if (batchedRequest.hasEncryptionInformation() &&
+    if (prepareForFLERewrite(
+            opCtx, batchedRequest.getWriteCommandRequestBase().getEncryptionInformation()) &&
         (batchedRequest.getBatchType() == BatchedCommandRequest::BatchType_Delete ||
          batchedRequest.getBatchType() == BatchedCommandRequest::BatchType_Update)) {
         req = processFLEBatchExplain(opCtx, batchedRequest);
@@ -673,7 +648,7 @@ void cluster_write_cmd::executeWriteOpExplain(OperationContext* opCtx,
     sharding::router::CollectionRouter router(opCtx, originalNss);
     try {
         router.routeWithRoutingContext(
-            "explain write"_sd, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
+            "explain write"sv, [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                 // If supported, compute QueryShapeHash and record it in CurOp
                 query_stats::WriteCmdQueryStatsRegistrar::parseAndRegisterRequest(
                     opCtx, WriteCommandRef{*requestPtr}, true /* skipRegistration */);
@@ -777,6 +752,8 @@ bool cluster_write_cmd::runImpl(OperationContext* opCtx,
         case BatchedCommandRequest::BatchType_Delete:
             globalOpCounters().gotDeletes(numAttempts);
             debug.getAdditiveMetrics().ndeleted = response.getN();
+            debug.getAdditiveMetrics().nDeleteOps =
+                batchedRequest.getDeleteRequest().getDeletes().size();
             break;
     }
 

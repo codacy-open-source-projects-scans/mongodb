@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/index/multikey_paths.h"
@@ -52,12 +25,17 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+
+namespace doc_diff {
+class IndexUpdateIdentifier;
+}  // namespace doc_diff
 
 class Client;
 class Collection;
@@ -66,7 +44,7 @@ class IndexDescriptor;
 
 struct InsertDeleteOptions;
 
-struct MONGO_MOD_NEEDS_REPLACEMENT BsonRecord {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] BsonRecord {
     RecordId id;
     Timestamp ts;
     const BSONObj* docPtr;
@@ -78,9 +56,9 @@ struct MONGO_MOD_NEEDS_REPLACEMENT BsonRecord {
  * WiredTiger to do blind unindexing for efficacy. When set to 'On', disables blind deletes and
  * forces recordid-matching for unindex operations.
  */
-enum class MONGO_MOD_NEEDS_REPLACEMENT CheckRecordId { Off, On };
+enum class [[MONGO_MOD_NEEDS_REPLACEMENT]] CheckRecordId { Off, On };
 
-enum class MONGO_MOD_PRIVATE CreateIndexEntryFlags : int {
+enum class [[MONGO_MOD_PRIVATE]] CreateIndexEntryFlags : int {
     kNone = 0x0,
     /**
      * kInitFromDisk avoids registering a change to undo this operation when set to true. You
@@ -113,12 +91,12 @@ enum class MONGO_MOD_PRIVATE CreateIndexEntryFlags : int {
     kForceUpdateMetadata = 0x10,
 };
 
-MONGO_MOD_PRIVATE inline bool operator&(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
+[[MONGO_MOD_PRIVATE]] inline bool operator&(CreateIndexEntryFlags lhs, CreateIndexEntryFlags rhs) {
     return (static_cast<int>(lhs) & static_cast<int>(rhs)) != 0;
 }
 
-MONGO_MOD_PRIVATE inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags lhs,
-                                                         CreateIndexEntryFlags rhs) {
+[[MONGO_MOD_PRIVATE]] inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags lhs,
+                                                             CreateIndexEntryFlags rhs) {
     return CreateIndexEntryFlags(static_cast<int>(lhs) | static_cast<int>(rhs));
 }
 
@@ -140,7 +118,7 @@ MONGO_MOD_PRIVATE inline CreateIndexEntryFlags operator|(CreateIndexEntryFlags l
  *     int numIndexesReady();
  *     int numIndexesInProgress();
  */
-class MONGO_MOD_NEEDS_REPLACEMENT IndexCatalog {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] IndexCatalog {
 public:
     class IndexIterator {
     public:
@@ -199,6 +177,12 @@ public:
     virtual int numIndexesInProgress() const = 0;
 
     /**
+     * Returns the cached IndexUpdateIdentifier for this catalog, or nullptr if not available.
+     * The identifier is kept in sync with ongoing DDL operations.
+     */
+    virtual const doc_diff::IndexUpdateIdentifier* getIndexUpdateIdentifier() const = 0;
+
+    /**
      * Returns true if the _id index exists.
      */
     virtual bool haveIdIndex(OperationContext* opCtx) const = 0;
@@ -217,7 +201,7 @@ public:
      */
     virtual const IndexCatalogEntry* findIndexByName(
         OperationContext* opCtx,
-        StringData name,
+        std::string_view name,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
 
     /**
@@ -255,7 +239,7 @@ public:
      */
     virtual const IndexCatalogEntry* findIndexByIdent(
         OperationContext* opCtx,
-        StringData ident,
+        std::string_view ident,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) const = 0;
 
     /**
@@ -282,7 +266,7 @@ public:
      */
     virtual IndexCatalogEntry* getWritableEntryByName(
         OperationContext* opCtx,
-        StringData name,
+        std::string_view name,
         InclusionPolicy inclusionPolicy = InclusionPolicy::kReady) = 0;
     virtual IndexCatalogEntry* getWritableEntryByKeyPatternAndOptions(
         OperationContext* opCtx,
@@ -368,7 +352,7 @@ public:
         RemoveExistingIndexesFlags() {};
         RemoveExistingIndexesFlags(
             bool removeInProgressIndexBuilds,
-            const std::map<StringData, std::set<IndexType>>* fieldsToUseForComparison)
+            const std::map<std::string_view, std::set<IndexType>>* fieldsToUseForComparison)
             : removeInProgressIndexBuilds(removeInProgressIndexBuilds),
               fieldsToUseForComparison(fieldsToUseForComparison) {};
         // Flag indicating whether we should also check unfinished index builds for wether the given
@@ -381,7 +365,7 @@ public:
         //
         // Useful when comapring against output that has been fixed beforehand and won't affect the
         // correctness of the check.
-        const std::map<StringData, std::set<IndexType>>* fieldsToUseForComparison = nullptr;
+        const std::map<std::string_view, std::set<IndexType>>* fieldsToUseForComparison = nullptr;
     };
     /**
      * Filters out ready and in-progress indexes that already exist and returns the remaining
@@ -607,15 +591,15 @@ public:
                           const BSONObj& indexSpec) const;
 };
 
-MONGO_MOD_NEEDS_REPLACEMENT inline IndexCatalog::InclusionPolicy operator|(
+[[MONGO_MOD_NEEDS_REPLACEMENT]] inline IndexCatalog::InclusionPolicy operator|(
     IndexCatalog::InclusionPolicy lhs, IndexCatalog::InclusionPolicy rhs) {
     return static_cast<IndexCatalog::InclusionPolicy>(
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(lhs) |
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(rhs));
 }
 
-MONGO_MOD_PRIVATE inline bool operator&(IndexCatalog::InclusionPolicy lhs,
-                                        IndexCatalog::InclusionPolicy rhs) {
+[[MONGO_MOD_PRIVATE]] inline bool operator&(IndexCatalog::InclusionPolicy lhs,
+                                            IndexCatalog::InclusionPolicy rhs) {
     return static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(lhs) &
         static_cast<std::underlying_type_t<IndexCatalog::InclusionPolicy>>(rhs);
 }

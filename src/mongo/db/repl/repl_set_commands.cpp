@@ -1,43 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <cstdint>
-#include <cstring>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -71,6 +39,7 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/update_position_args.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
@@ -80,22 +49,29 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decimal_counter.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <cstring>
 #include <iosfwd>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -107,15 +83,21 @@ namespace mongo {
 namespace repl {
 
 namespace {
-constexpr StringData kInternalIncludeNewlyAddedFieldName = "$_internalIncludeNewlyAdded"_sd;
+using namespace std::literals::string_view_literals;
+constexpr std::string_view kInternalIncludeNewlyAddedFieldName = "$_internalIncludeNewlyAdded"sv;
 
 struct ExecutorMetricPolicy {
-    void appendTo(BSONObjBuilder& b, StringData leafName) const {
+    void appendTo(BSONObjBuilder& b, std::string_view leafName) const {
         ReplicationCoordinator::get(getGlobalServiceContext())->appendDiagnosticBSON(&b, leafName);
     }
 };
 
 auto& replExecutorSSM = *CustomMetricBuilder<ExecutorMetricPolicy>{"repl.executor"};
+
+// Stores the stream-end deadline for an exhaust replSetHeartbeat session. The same Client is reused
+// across exhaust iterations so we are able to use a decoration on it to store the timestamp between
+// invocations.
+const auto exhaustHeartbeatStreamDeadline = Client::declareDecoration<Date_t>();
 }  // namespace
 
 // Test-only, enabled via command-line. See docs/test_commands.md.
@@ -226,6 +208,13 @@ public:
              const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+
+        const auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        uassert(ErrorCodes::CommandNotSupported,
+                str::stream() << "replSetGetRBID command is not supported in this storage mode: "
+                              << provider.name(),
+                provider.supportsLegacyReplSetCommands());
+
         Status status = ReplicationCoordinator::get(opCtx)->checkReplEnabledForCommand(&result);
         uassertStatusOK(status);
 
@@ -368,7 +357,7 @@ public:
             auto appendMember =
                 [&members, serial = DecimalCounter<uint32_t>()](const HostAndPort& host) mutable {
                     members.append(
-                        StringData{serial},
+                        std::string_view{serial},
                         BSON("_id" << static_cast<int>(serial) << "host" << host.toString()));
                     ++serial;
                 };
@@ -740,6 +729,55 @@ bool replHasDatabases(OperationContext* opCtx) {
 class CmdReplSetHeartbeat : public ReplSetCommand {
 public:
     CmdReplSetHeartbeat() : ReplSetCommand("replSetHeartbeat") {}
+
+    bool runWithReplyBuilder(OperationContext* opCtx,
+                             const DatabaseName& dbName,
+                             const BSONObj& cmdObj,
+                             rpc::ReplyBuilderInterface* replyBuilder) override {
+        if (!opCtx->isExhaust()) {
+            // Non-exhaust path: standard request/response heartbeat.
+            return BasicCommand::runWithReplyBuilder(opCtx, dbName, cmdObj, replyBuilder);
+        }
+
+        auto* replCoord = ReplicationCoordinator::get(opCtx);
+
+        // Compute the stream deadline once per stream and cache it on the Client for subsequent
+        // exhaust iterations. This allows us to close and reopen the stream once per heartbeat
+        // interval so the standby can receive updated replData from the primary node to calculate
+        // lag metrics.
+        auto& streamDeadline = exhaustHeartbeatStreamDeadline(opCtx->getClient());
+        if (streamDeadline == Date_t{}) {
+            streamDeadline = opCtx->getServiceContext()->getFastClockSource()->now() +
+                replCoord->getConfig().getHeartbeatInterval();
+        }
+        // Block until a value reported in the heartbeat response advances (lastApplied or the last
+        // installed checkpoint timestamp, if getNextHeartbeatNotificationFuture is overridden) or
+        // the heartbeat interval expires. Timeout is intentional — it drives the periodic liveness
+        auto future = replCoord->getNextHeartbeatNotificationFuture();
+        const auto waitStatus = opCtx->runWithDeadline(
+            streamDeadline, ErrorCodes::MaxTimeMSExpired, [&] { return future.getNoThrow(opCtx); });
+        if (!waitStatus.isOK() && waitStatus != ErrorCodes::MaxTimeMSExpired) {
+            uassertStatusOK(waitStatus);
+        }
+
+        // Delegate heartbeat processing and response building to run() via the standard path.
+        const bool ok = BasicCommand::runWithReplyBuilder(opCtx, dbName, cmdObj, replyBuilder);
+
+        // Keep the exhaust stream alive when a reported value advanced so the primary is notified
+        // promptly for each advance within an interval. End the stream on interval expiry so the
+        // primary reschedules with fresh $replData gossip (lastApplied, lastSent, lastCheckpoint).
+        const bool intervalExpired = (waitStatus == ErrorCodes::MaxTimeMSExpired);
+        if (intervalExpired) {
+            // Reset so the next stream computes a fresh deadline.
+            streamDeadline = Date_t{};
+        } else {
+            // Signal the transport layer to re-invoke this command on the same connection without
+            // waiting for a new client request (sets kMoreToCome on the outgoing response).
+            replyBuilder->setNextInvocation(boost::none);
+        }
+        return ok;
+    }
+
     bool run(OperationContext* opCtx,
              const DatabaseName&,
              const BSONObj& cmdObj,
@@ -762,7 +800,7 @@ public:
         uassertStatusOK(args.initialize(cmdObj));
 
         ReplSetHeartbeatResponse response;
-        status = ReplicationCoordinator::get(opCtx)->processHeartbeatV1(args, &response);
+        status = ReplicationCoordinator::get(opCtx)->processHeartbeatV1(opCtx, args, &response);
         if (status.isOK())
             response.addToBSON(&result);
 
@@ -791,7 +829,12 @@ public:
         LOGV2(21581, "Received replSetStepUp request");
 
         const bool skipDryRun = cmdObj["skipDryRun"].trueValue();
-        status = ReplicationCoordinator::get(opCtx)->stepUpIfEligible(opCtx, skipDryRun);
+        boost::optional<Date_t> priorPrimaryStopAcceptingWritesTime;
+        if (auto elem = cmdObj["priorPrimaryStopAcceptingWritesTime"]; !elem.eoo()) {
+            priorPrimaryStopAcceptingWritesTime = elem.Date();
+        }
+        status = ReplicationCoordinator::get(opCtx)->stepUpIfEligible(
+            opCtx, skipDryRun, priorPrimaryStopAcceptingWritesTime);
 
         if (!status.isOK()) {
             LOGV2(21582, "replSetStepUp request failed", "error"_attr = causedBy(status));

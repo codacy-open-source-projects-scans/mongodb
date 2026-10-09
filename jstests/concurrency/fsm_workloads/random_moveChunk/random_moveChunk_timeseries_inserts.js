@@ -9,11 +9,12 @@
  *  requires_non_retryable_writes,
  *  does_not_support_transactions,
  *  requires_fcv_51,
+ *  requires_getmore,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {ShardingTopologyHelpers} from "jstests/concurrency/fsm_workload_helpers/catalog_and_routing/sharding_topology_helpers.js";
-import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/chunks.js";
+import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/cluster_scalability/chunks.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/sharded_partitioned/sharded_moveChunk_partitioned.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
@@ -57,7 +58,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.states.insert = function insert(db, collName, connCache) {
         for (let i = 0; i < 10; i++) {
             // Generate a random timestamp between 'startTime' and largest timestamp we inserted.
-            const timer = this.startTime + Math.floor(Random.rand() * this.numInitialDocs * this.increment);
+            const timer =
+                this.startTime + Math.floor(Random.rand() * this.numInitialDocs * this.increment);
             const metaVal = this.generateMetaFieldValueForInsertStage(this.tid);
             const doc = {
                 _id: new ObjectId(),
@@ -89,7 +91,13 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         });
         const toShard = destinationShards[Random.randInt(destinationShards.length)];
         const waitForDelete = false;
-        ChunkHelper.moveChunk(db, coll.getName(), [chunkToMove.min, chunkToMove.max], toShard, waitForDelete);
+        ChunkHelper.moveChunk(
+            db,
+            coll.getName(),
+            [chunkToMove.min, chunkToMove.max],
+            toShard,
+            waitForDelete,
+        );
     };
 
     $config.states.init = function init(db, collName, connCache) {};
@@ -101,16 +109,26 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     };
 
     $config.data.validateCollection = function validate(db, collName) {
-        const pipeline = [{$project: {_id: "$_id", m: "$m", t: "$t"}}, {$sort: {m: 1, t: 1, _id: 1}}];
+        const pipeline = [
+            {$project: {_id: "$_id", m: "$m", t: "$t"}},
+            {$sort: {m: 1, t: 1, _id: 1}},
+        ];
         const diff = DataConsistencyChecker.getDiff(
             db[collName].aggregate(pipeline),
             db[this.nonShardCollName].aggregate(pipeline),
         );
-        assert.eq(diff, {docsWithDifferentContents: [], docsMissingOnFirst: [], docsMissingOnSecond: []});
+        assert.eq(diff, {
+            docsWithDifferentContents: [],
+            docsMissingOnFirst: [],
+            docsMissingOnSecond: [],
+        });
     };
 
     $config.teardown = function teardown(db, collName, cluster) {
-        const numBuckets = getTimeseriesCollForRawOps(db, db[collName]).find({}).rawData().itcount();
+        const numBuckets = getTimeseriesCollForRawOps(db, db[collName])
+            .find({})
+            .rawData()
+            .itcount();
         const numInitialDocs = db[collName].find().itcount();
 
         jsTestLog(
@@ -159,7 +177,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         db[this.nonShardCollName].drop();
 
         assert.commandWorked(
-            db.createCollection(collName, {timeseries: {metaField: this.metaField, timeField: this.timeField}}),
+            db.createCollection(collName, {
+                timeseries: {metaField: this.metaField, timeField: this.timeField},
+            }),
         );
         cluster.shardCollection(db[collName], {t: 1}, false);
 
@@ -206,9 +226,13 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         for (let i = 0; i < this.threadCount - 1; ++i) {
             currentTimeStamp += chunkRange;
             assert.commandWorked(
-                ChunkHelper.splitChunkAt(db, getTimeseriesCollForDDLOps(db, db[collName]).getName(), {
-                    "control.min.t": new Date(currentTimeStamp),
-                }),
+                ChunkHelper.splitChunkAt(
+                    db,
+                    getTimeseriesCollForDDLOps(db, db[collName]).getName(),
+                    {
+                        "control.min.t": new Date(currentTimeStamp),
+                    },
+                ),
             );
         }
 
@@ -218,9 +242,13 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         for (const destinationShard of destinationShards) {
             currentTimeStamp += chunkRange;
             assert.commandWorked(
-                ChunkHelper.splitChunkAt(db, getTimeseriesCollForDDLOps(db, db[collName]).getName(), {
-                    "control.min.t": new Date(currentTimeStamp),
-                }),
+                ChunkHelper.splitChunkAt(
+                    db,
+                    getTimeseriesCollForDDLOps(db, db[collName]).getName(),
+                    {
+                        "control.min.t": new Date(currentTimeStamp),
+                    },
+                ),
             );
 
             ChunkHelper.moveChunk(

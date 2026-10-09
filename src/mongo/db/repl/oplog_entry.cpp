@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/oplog_entry.h"
@@ -45,6 +19,7 @@
 #include "mongo/util/time_support.h"
 
 #include <array>
+#include <string_view>
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
@@ -58,6 +33,7 @@
 
 namespace mongo {
 namespace repl {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -66,13 +42,11 @@ namespace {
  */
 BSONObj makeOplogEntryDoc(DurableOplogEntryParams p) {
     BSONObjBuilder builder;
-    if (p.idField) {
-        p.idField->addToBsonObj(&builder, OplogEntryBase::k_idFieldName);
-    }
+
+    // OperationSessionInfo
     p.sessionInfo.serialize(&builder);
-    builder.append(OplogEntryBase::kTimestampFieldName, p.opTime.getTimestamp());
-    builder.append(OplogEntryBase::kTermFieldName, p.opTime.getTerm());
-    builder.append(OplogEntryBase::kVersionFieldName, p.version);
+
+    // DurableReplOperation fields
     builder.append(OplogEntryBase::kOpTypeFieldName, idl::serialize(p.opType));
     if (p.nss.tenantId() && gMultitenancySupport &&
         gFeatureFlagRequireTenantID.isEnabled(
@@ -81,22 +55,11 @@ BSONObj makeOplogEntryDoc(DurableOplogEntryParams p) {
     }
     builder.append(OplogEntryBase::kNssFieldName,
                    NamespaceStringUtil::serialize(p.nss, SerializationContext::stateDefault()));
-    builder.append(OplogEntryBase::kWallClockTimeFieldName, p.wallClockTime);
     if (p.uuid) {
         p.uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
     }
     if (p.container) {
         builder.append(OplogEntryBase::kContainerFieldName, p.container.value());
-    }
-    if (p.fromMigrate) {
-        builder.append(OplogEntryBase::kFromMigrateFieldName, p.fromMigrate.value());
-    }
-    if (p.checkExistenceForDiffInsert) {
-        builder.append(OplogEntryBase::kCheckExistenceForDiffInsertFieldName,
-                       p.checkExistenceForDiffInsert.value());
-    }
-    if (p.versionContext) {
-        builder.append(OplogEntryBase::kVersionContextFieldName, p.versionContext.value().toBSON());
     }
     builder.append(OplogEntryBase::kObjectFieldName, p.oField);
     if (p.o2Field) {
@@ -120,15 +83,6 @@ BSONObj makeOplogEntryDoc(DurableOplogEntryParams p) {
         invariant(p.o2Field);
         builder.append(OplogEntryBase::kUpsertFieldName, p.isUpsert.value());
     }
-    if (p.statementIds.size() == 1) {
-        builder.append(OplogEntryBase::kStatementIdsFieldName, p.statementIds.front());
-    } else if (!p.statementIds.empty()) {
-        builder.append(OplogEntryBase::kStatementIdsFieldName, p.statementIds);
-    }
-    if (p.prevWriteOpTimeInTransaction) {
-        const BSONObj localObject = p.prevWriteOpTimeInTransaction.value().toBSON();
-        builder.append(OplogEntryBase::kPrevWriteOpTimeInTransactionFieldName, localObject);
-    }
     if (p.preImageOpTime) {
         const BSONObj localObject = p.preImageOpTime.value().toBSON();
         builder.append(OplogEntryBase::kPreImageOpTimeFieldName, localObject);
@@ -137,16 +91,45 @@ BSONObj makeOplogEntryDoc(DurableOplogEntryParams p) {
         const BSONObj localObject = p.postImageOpTime.value().toBSON();
         builder.append(OplogEntryBase::kPostImageOpTimeFieldName, localObject);
     }
-
-    if (p.destinedRecipient) {
-        builder.append(OplogEntryBase::kDestinedRecipientFieldName,
-                       p.destinedRecipient.value().toString());
-    }
-
     if (p.needsRetryImage) {
         builder.append(OplogEntryBase::kNeedsRetryImageFieldName,
                        idl::serialize(p.needsRetryImage.value()));
     }
+    if (p.destinedRecipient) {
+        builder.append(OplogEntryBase::kDestinedRecipientFieldName,
+                       p.destinedRecipient.value().toString());
+    }
+    if (p.statementIds.size() == 1) {
+        builder.append(OplogEntryBase::kStatementIdsFieldName, p.statementIds.front());
+    } else if (!p.statementIds.empty()) {
+        builder.append(OplogEntryBase::kStatementIdsFieldName, p.statementIds);
+    }
+    if (p.fromMigrate) {
+        builder.append(OplogEntryBase::kFromMigrateFieldName, p.fromMigrate.value());
+    }
+    if (p.checkExistenceForDiffInsert) {
+        builder.append(OplogEntryBase::kCheckExistenceForDiffInsertFieldName,
+                       p.checkExistenceForDiffInsert.value());
+    }
+    if (p.versionContext) {
+        builder.append(OplogEntryBase::kVersionContextFieldName, p.versionContext.value().toBSON());
+    }
+
+    // OpTimeBase fields
+    builder.append(OplogEntryBase::kTimestampFieldName, p.opTime.getTimestamp());
+    builder.append(OplogEntryBase::kTermFieldName, p.opTime.getTerm());
+
+    // OplogEntryBase own fields
+    builder.append(OplogEntryBase::kVersionFieldName, p.version);
+    builder.append(OplogEntryBase::kWallClockTimeFieldName, p.wallClockTime);
+    if (p.idField) {
+        p.idField->addToBsonObj(&builder, OplogEntryBase::k_idFieldName);
+    }
+    if (p.prevWriteOpTimeInTransaction) {
+        const BSONObj localObject = p.prevWriteOpTimeInTransaction.value().toBSON();
+        builder.append(OplogEntryBase::kPrevWriteOpTimeInTransactionFieldName, localObject);
+    }
+
     return builder.obj();
 }
 }  // namespace
@@ -185,7 +168,7 @@ void ReplOperation::extractPrePostImageForTransaction(boost::optional<ImageBundl
 }
 
 void ReplOperation::setTid(boost::optional<mongo::TenantId> value) & {
-    if (gMultitenancySupport &&
+    if (value && gMultitenancySupport &&
         gFeatureFlagRequireTenantID.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         DurableReplOperation::setTid(value);
@@ -262,9 +245,10 @@ BSONObj MutableOplogEntry::makeCreateCollObject(const NamespaceString& collectio
     return b.obj();
 }
 
-BSONObj MutableOplogEntry::makeCreateCollObject2(const RecordId& catalogId,
-                                                 StringData ident,
-                                                 const boost::optional<StringData>& idIndexIdent) {
+BSONObj MutableOplogEntry::makeCreateCollObject2(
+    const RecordId& catalogId,
+    std::string_view ident,
+    const boost::optional<std::string_view>& idIndexIdent) {
     BSONObjBuilder b;
     catalogId.serializeToken("catalogId", &b);
     b.append("ident", ident);
@@ -356,21 +340,39 @@ DurableOplogEntry::DurableOplogEntry(BSONObj rawInput) : _raw(std::move(rawInput
 
         const BSONObj& o = getObject();
         switch (opType) {
-            case OpTypeEnum::kContainerInsert:
-                ContainerInsertOplogEntryO::parse(o,
-                                                  IDLParserContext("ContainerInsertOplogEntryO"));
-                break;
-            case OpTypeEnum::kContainerUpdate:
-                ContainerUpdateOplogEntryO::parse(o,
-                                                  IDLParserContext("ContainerUpdateOplogEntryO"));
-                break;
-            case OpTypeEnum::kContainerDelete:
+            case OpTypeEnum::kContainerInsert: {
+                const auto containerInsertEntryO = ContainerInsertOplogEntryO::parse(
+                    o, IDLParserContext("ContainerInsertOplogEntryO"));
+                const auto& key = containerInsertEntryO.getKey();
+                const auto& maybeVal = containerInsertEntryO.getValue();
+                uassert(13064100,
+                        "inserts must specify key with type array, bytes, or integer",
+                        key.isArrayKey() || key.isBytesKey() || key.isIntKey());
+                if (maybeVal && maybeVal->isArrayVal()) {
+                    uassert(13174600,
+                            "array-valued inserts must specify a single int key or an equivalent "
+                            "length array of keys",
+                            key.isIntKey() ||
+                                (key.isArrayKey() &&
+                                 key.getArrayKey().size() == maybeVal->getArrayVal().size()));
+                }
+            } break;
+            case OpTypeEnum::kContainerUpdate: {
+                const auto containerUpdateEntryO = ContainerUpdateOplogEntryO::parse(
+                    o, IDLParserContext("ContainerUpdateOplogEntryO"));
+                const auto& key = containerUpdateEntryO.getKey();
+                const auto& val = containerUpdateEntryO.getValue();
+                uassert(13064101,
+                        "One key and one value must be specified for container update",
+                        !key.isArrayKey() && !val.isArrayVal());
+            } break;
+            case OpTypeEnum::kContainerDelete: {
                 ContainerDeleteOplogEntryO::parse(o,
                                                   IDLParserContext("ContainerDeleteOplogEntryO"));
                 uassert(10704704,
                         str::stream() << "delete should not contain value: " << redact(o),
                         !o["v"]);
-                break;
+            } break;
             default:
                 MONGO_UNREACHABLE;
         }
@@ -441,6 +443,7 @@ bool DurableOplogEntry::isCrudOpType(OpTypeEnum opType) {
         case OpTypeEnum::kCommand:
         case OpTypeEnum::kNoop:
         case OpTypeEnum::kKeyMaterial:
+        case OpTypeEnum::kCMKRotation:
             return false;
     }
     MONGO_UNREACHABLE;
@@ -467,6 +470,7 @@ bool DurableOplogEntry::isUpdateOrDelete() const {
         case OpTypeEnum::kContainerDelete:
         case OpTypeEnum::kNoop:
         case OpTypeEnum::kKeyMaterial:
+        case OpTypeEnum::kCMKRotation:
             return false;
     }
     MONGO_UNREACHABLE;
@@ -483,11 +487,18 @@ bool DurableOplogEntry::shouldPrepare() const {
 }
 
 bool DurableOplogEntry::applyOpsIsLinkedTransactionally() const {
-    // An applyOps with a prevWriteOpTime is part of a transaction, unless multiOpType is
-    // kApplyOpsAppliedSeparately.
-    return bool(getPrevWriteOpTimeInTransaction()) &&
+    return static_cast<bool>(getPrevWriteOpTimeInTransaction()) &&
         getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) !=
         MultiOplogEntryType::kApplyOpsAppliedSeparately;
+}
+
+bool DurableOplogEntry::applyOpsIsMarkedRetryable() const {
+    if (getCommandType() != CommandTypeEnum::kApplyOps) {
+        return false;
+    }
+    auto t = getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType);
+    return t == MultiOplogEntryType::kApplyOpsAppliedSeparately ||
+        t == MultiOplogEntryType::kApplyOpsAppliedAtomically;
 }
 
 bool DurableOplogEntry::isInTransaction() const {
@@ -498,7 +509,12 @@ bool DurableOplogEntry::isInTransaction() const {
         return true;
     if (getCommandType() != CommandTypeEnum::kApplyOps)
         return false;
-    return applyOpsIsLinkedTransactionally();
+    // Only kLegacyMultiOpType applyOps entries are multi-document transactions. Retryable-write
+    // applyOps (kApplyOpsAppliedSeparately, kApplyOpsAppliedAtomically) carry prevOpTime for
+    // chain-walking on secondaries but are not transactions.
+    return static_cast<bool>(getPrevWriteOpTimeInTransaction()) &&
+        getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) ==
+        MultiOplogEntryType::kLegacyMultiOpType;
 }
 
 bool DurableOplogEntry::isSingleOplogEntryTransaction() const {
@@ -508,9 +524,8 @@ bool DurableOplogEntry::isSingleOplogEntryTransaction() const {
     }
     auto prevOptimeOpt = getPrevWriteOpTimeInTransaction();
     if (!prevOptimeOpt ||
-        getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) ==
-            MultiOplogEntryType::kApplyOpsAppliedSeparately) {
-        // If there is no prevWriteOptime, then this oplog entry is not a part of a transaction.
+        getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) !=
+            MultiOplogEntryType::kLegacyMultiOpType) {
         return false;
     }
     return prevOptimeOpt->isNull();
@@ -529,11 +544,11 @@ bool DurableOplogEntry::isEndOfLargeTransaction() const {
     }
     // There should be a previous oplog entry in a multiple oplog entry transaction if this is
     // supposed to be the last one. The first oplog entry in a large transaction will have a null
-    // ts.  The end of a large transaction should not have a partialTxn field, nor should
-    // multiOpType be set to kApplyOpsAppliedSeparately
+    // ts.  The end of a large transaction should not have a partialTxn field, and only
+    // kLegacyMultiOpType entries are multi-document transactions.
     return !prevOptimeOpt->isNull() && !isPartialTransaction() &&
-        getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) !=
-        MultiOplogEntryType::kApplyOpsAppliedSeparately;
+        getMultiOpType().value_or(MultiOplogEntryType::kLegacyMultiOpType) ==
+        MultiOplogEntryType::kLegacyMultiOpType;
 }
 
 bool DurableOplogEntry::isSingleOplogEntryTransactionWithCommand() const {
@@ -548,7 +563,7 @@ bool DurableOplogEntry::isSingleOplogEntryTransactionWithCommand() const {
     // entries with commands at the beginning.
     for (BSONElement e : applyOps.Array()) {
         auto const opType = e.Obj().getStringField(OplogEntry::kOpTypeFieldName);
-        if (opType == "c"_sd) {
+        if (opType == "c"sv) {
             return true;
         }
     }
@@ -727,7 +742,7 @@ const boost::optional<mongo::UUID>& OplogEntry::getUuid() const {
     return _entry.getUuid();
 }
 
-boost::optional<StringData> OplogEntry::getContainer() const {
+boost::optional<std::string_view> OplogEntry::getContainer() const {
     return _entry.getContainer();
 }
 
@@ -819,6 +834,10 @@ bool OplogEntry::applyOpsIsLinkedTransactionally() const {
     return _entry.applyOpsIsLinkedTransactionally();
 }
 
+bool OplogEntry::applyOpsIsMarkedRetryable() const {
+    return _entry.applyOpsIsMarkedRetryable();
+}
+
 bool OplogEntry::isInTransaction() const {
     return _entry.isInTransaction();
 }
@@ -864,13 +883,13 @@ bool OplogEntry::isNewPrimaryNoop() const {
 }
 
 bool OplogEntry::shouldLogAsDDLOperation() const {
-    static constexpr std::array ddlOpsToLog{"create"_sd,
-                                            "drop"_sd,
-                                            "renameCollection"_sd,
-                                            "collMod"_sd,
-                                            "dropDatabase"_sd,
-                                            "createIndexes"_sd,
-                                            "dropIndexes"_sd};
+    static constexpr std::array ddlOpsToLog{"create"sv,
+                                            "drop"sv,
+                                            "renameCollection"sv,
+                                            "collMod"sv,
+                                            "dropDatabase"sv,
+                                            "createIndexes"sv,
+                                            "dropIndexes"sv};
     return _entry.isCommand() &&
         std::find(ddlOpsToLog.begin(),
                   ddlOpsToLog.end(),

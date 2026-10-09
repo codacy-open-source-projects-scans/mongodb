@@ -3,6 +3,7 @@
  * Compound Wildcard Indexes objey index filters.
  *
  * @tags: [
+ *   uses_explain,
  *   not_allowed_with_signed_security_token,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
@@ -20,7 +21,11 @@ import {WildcardIndexHelpers} from "jstests/libs/query/wildcard_index_helpers.js
 function findFilter(cwiFilter, filterList) {
     for (const filter of filterList) {
         if (bsonWoCompare(cwiFilter.query, filter.query) == 0) {
-            if (filter.indexes.find((keyPattern) => bsonWoCompare(cwiFilter.keyPattern, keyPattern) == 0)) {
+            if (
+                filter.indexes.find(
+                    (keyPattern) => bsonWoCompare(cwiFilter.keyPattern, keyPattern) == 0,
+                )
+            ) {
                 return filter;
             }
             if (filter.indexes.find((indexName) => cwiFilter.indexName == indexName)) {
@@ -45,13 +50,25 @@ function getFilters(coll) {
  * Sets an index filter given a query shape then confirms that the expected index was used
  * to answer a query.
  */
-function assertExpectedIndexAnswersQueryWithFilter(coll, filterQuery, filterIndexes, query, expectedIndexName) {
+function assertExpectedIndexAnswersQueryWithFilter(
+    coll,
+    filterQuery,
+    filterIndexes,
+    query,
+    expectedIndexName,
+) {
     // Clear existing cache filters.
     assert.commandWorked(coll.runCommand("planCacheClearFilters"), "planCacheClearFilters failed");
 
     // Make sure that the filter is set correctly.
-    assert.commandWorked(coll.runCommand("planCacheSetFilter", {query: filterQuery, indexes: filterIndexes}));
-    assert.eq(1, getFilters(coll).length, "no change in query settings after successfully setting index filters");
+    assert.commandWorked(
+        coll.runCommand("planCacheSetFilter", {query: filterQuery, indexes: filterIndexes}),
+    );
+    assert.eq(
+        1,
+        getFilters(coll).length,
+        "no change in query settings after successfully setting index filters",
+    );
 
     // Check that expectedIndex index was used over another index.
     const explain = assert.commandWorked(coll.find(query).explain("executionStats"));

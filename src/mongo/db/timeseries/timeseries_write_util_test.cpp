@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/timeseries_write_util.h"
 
@@ -48,6 +22,7 @@
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils_internal.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 #include <cstdint>
@@ -57,8 +32,11 @@
 #include <boost/date_time/posix_time/time_parsers.hpp>
 #include <boost/optional/optional.hpp>
 
+using namespace std::literals::string_view_literals;
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
+using namespace std::literals::string_view_literals;
 namespace mongo::timeseries {
 namespace {
 
@@ -66,7 +44,7 @@ class TimeseriesWriteUtilTest : public TimeseriesTestFixture {
 protected:
     std::shared_ptr<bucket_catalog::WriteBatch> generateBatch(
         const UUID& uuid, bucket_catalog::BucketMetadata bucketMetadata) {
-        OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
+        OID oid = OID::createFromString("629e1e680958e279dc29a517"sv);
         std::uint8_t stripe = 0;
         bucket_catalog::BucketId bucketId(uuid, oid, stripe);
         auto opId = 0;
@@ -125,7 +103,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatch) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(newDoc, bucketDoc));
+    EXPECT_EQ(0, comparator.compare(newDoc, bucketDoc));
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatchWithMeta) {
@@ -157,7 +135,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatchWithMeta) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(newDoc, bucketDoc));
+    EXPECT_EQ(0, comparator.compare(newDoc, bucketDoc));
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
@@ -178,7 +156,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
     // makeNewDocumentForWrite() can return the uncompressed bucket if an error was encountered
     // during compression. Check that compression was successful.
     ASSERT(!bucketDoc.compressionFailed);
-    ASSERT_EQ(timeseries::kTimeseriesControlCompressedSortedVersion,
+    EXPECT_EQ(timeseries::kTimeseriesControlCompressedSortedVersion,
               bucketDoc.compressedBucket->getObjectField(timeseries::kBucketControlFieldName)
                   .getIntField(timeseries::kBucketControlVersionFieldName));
 
@@ -197,7 +175,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(*decompressedDoc, expectedDoc));
+    EXPECT_EQ(0, comparator.compare(*decompressedDoc, expectedDoc));
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
@@ -218,7 +196,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
     // makeNewDocumentForWrite() can return the uncompressed bucket if an error was encountered
     // during compression. Check that compression was successful.
     ASSERT(!bucketDoc.compressionFailed);
-    ASSERT_EQ(timeseries::kTimeseriesControlCompressedSortedVersion,
+    EXPECT_EQ(timeseries::kTimeseriesControlCompressedSortedVersion,
               bucketDoc.compressedBucket->getObjectField(timeseries::kBucketControlFieldName)
                   .getIntField(timeseries::kBucketControlVersionFieldName));
 
@@ -238,12 +216,12 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(*decompressedDoc, expectedDoc));
+    EXPECT_EQ(0, comparator.compare(*decompressedDoc, expectedDoc));
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurements) {
     UUID uuid = UUID::gen();
-    OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
+    OID oid = OID::createFromString("629e1e680958e279dc29a517"sv);
     TimeseriesOptions options("time");
     options.setGranularity(BucketGranularityEnum::Seconds);
     const std::vector<BSONObj> measurements = {
@@ -274,12 +252,12 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurements) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(newDoc, bucketDoc));
+    EXPECT_EQ(0, comparator.compare(newDoc, bucketDoc));
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurementsWithMeta) {
     UUID uuid = UUID::gen();
-    OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
+    OID oid = OID::createFromString("629e1e680958e279dc29a517"sv);
     TimeseriesOptions options("time");
     options.setGranularity(BucketGranularityEnum::Seconds);
     const std::vector<BSONObj> measurements = {
@@ -307,7 +285,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurementsWithMeta) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(newDoc, bucketDoc));
+    EXPECT_EQ(0, comparator.compare(newDoc, bucketDoc));
 }
 
 /**
@@ -367,7 +345,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpFromBatch) {
     // The update command request should return the document diff of the batch applied on the pre
     // image.
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(updates[0].getU().getDiff(), expectedDiff));
+    EXPECT_EQ(0, comparator.compare(updates[0].getU().getDiff(), expectedDiff));
 }
 
 /**
@@ -435,7 +413,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpFromBatchWit
     // The update command request should return the document diff of the batch applied on the pre
     // image.
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(updates[0].getU().getDiff(), expectedDiff));
+    EXPECT_EQ(0, comparator.compare(updates[0].getU().getDiff(), expectedDiff));
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
@@ -449,7 +427,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
                             "2":{"$date":"2022-06-06T15:34:30.000Z"}},
                     "a":{"0":1,"1":2,"2":3},
                     "b":{"0":1,"1":2,"2":3}}})");
-    OID bucketId = OID::createFromString("629e1e680958e279dc29a517"_sd);
+    OID bucketId = OID::createFromString("629e1e680958e279dc29a517"sv);
     auto recordId = record_id_helpers::keyForOID(bucketId);
 
     AutoGetCollection autoColl(_opCtx, _resolveTimeseriesNss(_nsNoMeta), LockMode::MODE_IX);
@@ -486,7 +464,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
     {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId, &doc);
-        ASSERT_FALSE(found);
+        EXPECT_FALSE(found);
     }
 }
 
@@ -501,7 +479,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
                             "2":{"$date":"2022-06-06T15:34:30.000Z"}},
                     "a":{"0":1,"1":2,"2":3},
                     "b":{"0":1,"1":2,"2":3}}})");
-    OID bucketId = OID::createFromString("629e1e680958e279dc29a517"_sd);
+    OID bucketId = OID::createFromString("629e1e680958e279dc29a517"sv);
     auto recordId = record_id_helpers::keyForOID(bucketId);
 
     AutoGetCollection autoColl(_opCtx, _resolveTimeseriesNss(_nsNoMeta), LockMode::MODE_IX);
@@ -548,9 +526,9 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId, &doc);
 
-        ASSERT_TRUE(found);
+        EXPECT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
-        ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
+        EXPECT_EQ(0, comparator.compare(doc.value(), replaceDoc));
     }
 }
 
@@ -620,12 +598,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
     {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId1, &doc);
-        ASSERT_FALSE(found);
+        EXPECT_FALSE(found);
 
         found = autoColl->findDoc(_opCtx, recordId2, &doc);
-        ASSERT_TRUE(found);
+        EXPECT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
-        ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
+        EXPECT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
     }
 }
 
@@ -720,17 +698,17 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdateAndInserts) {
     {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId1, &doc);
-        ASSERT_TRUE(found);
+        EXPECT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
-        ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
+        EXPECT_EQ(0, comparator.compare(doc.value(), replaceDoc));
 
         found = autoColl->findDoc(_opCtx, recordId2, &doc);
-        ASSERT_TRUE(found);
-        ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
+        EXPECT_TRUE(found);
+        EXPECT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
 
         found = autoColl->findDoc(_opCtx, recordId3, &doc);
-        ASSERT_TRUE(found);
-        ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc3));
+        EXPECT_TRUE(found);
+        EXPECT_EQ(0, comparator.compare(doc.value(), bucketDoc3));
     }
 }
 
@@ -806,7 +784,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
                                   .getObjectField(kBucketControlMinFieldName)
                                   .getField("time")
                                   .Date();
-        ASSERT_NE(remainingMeasurementMinTime, controlMinTime);
+        EXPECT_NE(remainingMeasurementMinTime, controlMinTime);
         CompressionResult compressionResult = compressBucket(uncompressedReplaceDoc,
                                                              _timeField,
                                                              _nsNoMeta,
@@ -816,9 +794,9 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId, &doc);
 
-        ASSERT_TRUE(found);
+        EXPECT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
-        ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
+        EXPECT_EQ(0, comparator.compare(doc.value(), replaceDoc));
     }
 
     // Deletes the last measurement from the bucket.
@@ -836,7 +814,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
     {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId, &doc);
-        ASSERT_FALSE(found);
+        EXPECT_FALSE(found);
     }
 }
 
@@ -881,7 +859,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
             minTime));
-        ASSERT_EQ(bucketIds.size(), 1);
+        EXPECT_EQ(bucketIds.size(), 1);
     }
 
     // Checks only one measurement is left in the original bucket and a new document was inserted.
@@ -897,11 +875,11 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
         Snapshotted<BSONObj> doc;
         bool found = autoColl->findDoc(_opCtx, recordId, &doc);
 
-        ASSERT_TRUE(found);
+        EXPECT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
-        ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
+        EXPECT_EQ(0, comparator.compare(doc.value(), replaceDoc));
 
-        ASSERT_EQ(2, autoColl->numRecords(_opCtx));
+        EXPECT_EQ(2, autoColl->numRecords(_opCtx));
     }
 }
 
@@ -949,7 +927,7 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
             minTime));
-        ASSERT_EQ(bucketIds.size(), 1);
+        EXPECT_EQ(bucketIds.size(), 1);
     }
 
     // Updates another measurement. No new bucket should be created.
@@ -968,7 +946,7 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
             minTime));
-        ASSERT_EQ(bucketIds.size(), 1);
+        EXPECT_EQ(bucketIds.size(), 1);
     }
 
     // Updates the last measurement with different schema. One more bucket is created.
@@ -987,9 +965,68 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
             minTime));
-        ASSERT_EQ(bucketIds.size(), 2);
+        EXPECT_EQ(bucketIds.size(), 2);
     }
 }
+
+// Verifies that the debug-only invariant in updateTimeseriesDocument fires when a user delete
+// would change control.min.time. This is the path SERVER-94559 regressed on: deleting the
+// earliest measurement and recomputing (rather than preserving) the bucket's minimum time. For
+// collections sharded on time, control.min.time is the shard key, so silently changing it would
+// orphan the bucket. The companion insert-path invariant is covered by
+// PerformAtomicTimeseriesWritesInvariantFailsWhenControlMinTimeChanges in
+// timeseries_write_ops_test.cpp.
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+using TimeseriesWriteUtilDeathTest = TimeseriesWriteUtilTest;
+DEATH_TEST_F(TimeseriesWriteUtilDeathTest,
+             PerformAtomicWritesForDeleteInvariantFailsWhenControlMinTimeChanges,
+             "control.min.time must not change in a bucket update") {
+    // Inserts a bucket whose control.min.time is 2024-09-11T17:51:00.
+    const BSONObj uncompressedDoc = ::mongo::fromjson(
+        R"({"_id":{"$oid":"66e1d884953633cfd2c479f2"},
+            "control":{"version":1,"min":{"time":{"$date":"2024-09-11T17:51:00.000Z"},"a":1,"b":1},
+                                   "max":{"time":{"$date":"2024-09-11T17:53:18.428Z"},"a":3,"b":3},
+                                   "count":3},
+            "data":{"time":{"0":{"$date":"2024-09-11T17:51:30.000Z"},
+                            "1":{"$date":"2024-09-11T17:52:12.000Z"},
+                            "2":{"$date":"2024-09-11T17:53:18.428Z"}},
+                    "a":{"0":1,"1":2,"2":3},
+                    "b":{"0":1,"1":2,"2":3}}})");
+
+    CompressionResult compressionResult = compressBucket(uncompressedDoc,
+                                                         _timeField,
+                                                         _nsNoMeta,
+                                                         /*validateDecompression*/ true);
+    const BSONObj& bucketDoc = compressionResult.compressedBucket.value();
+    auto originalMinTime = bucketDoc.getObjectField(kBucketControlFieldName)
+                               .getObjectField(kBucketControlMinFieldName)
+                               .getField("time")
+                               .Date();
+    OID bucketId = bucketDoc["_id"].OID();
+    auto recordId = record_id_helpers::keyForOID(bucketId);
+
+    AutoGetCollection autoColl(_opCtx, _resolveTimeseriesNss(_nsNoMeta), LockMode::MODE_IX);
+    {
+        WriteUnitOfWork wunit{_opCtx};
+        ASSERT_OK(Helpers::insert(_opCtx, *autoColl, bucketDoc));
+        wunit.commit();
+    }
+
+    // Deletes the earliest measurement but passes a currentMinTime that differs from the bucket's
+    // actual minimum. The rebuilt bucket therefore carries a changed control.min.time, which must
+    // trip the invariant in updateTimeseriesDocument.
+    auto changedMinTime = originalMinTime + Seconds(60);
+    ASSERT_NE(changedMinTime, originalMinTime);
+    performAtomicWritesForDelete(
+        _opCtx,
+        *autoColl,
+        recordId,
+        {::mongo::fromjson(R"({"time":{"$date":"2024-09-11T17:53:18.428Z"},"a":3,"b":3})")},
+        /*fromMigrate=*/false,
+        /*stmtId=*/kUninitializedStmtId,
+        changedMinTime);
+}
+#endif  // MONGO_CONFIG_DEBUG_BUILD
 
 }  // namespace
 }  // namespace mongo::timeseries

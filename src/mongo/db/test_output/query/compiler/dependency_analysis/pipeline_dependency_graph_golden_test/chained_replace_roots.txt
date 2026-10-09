@@ -45,7 +45,8 @@ output: {
                 "a:1": {
                     "declaringScope": "scope:0",
                     "metadata": {
-                        "array": false
+                        "array": false,
+                        "constant": 1
                     },
                     "dependencies": []
                 }
@@ -59,7 +60,9 @@ output: {
             "fields": {
                 "<missing>:2": {
                     "declaringScope": "scope:1",
-                    "dependencies": []
+                    "dependencies": [
+                        "a:1"
+                    ]
                 }
             }
         },
@@ -73,7 +76,9 @@ output: {
             "fields": {
                 "<missing>:3": {
                     "declaringScope": "scope:2",
-                    "dependencies": []
+                    "dependencies": [
+                        "<missing>:2"
+                    ]
                 }
             }
         },
@@ -92,7 +97,8 @@ output: {
                 "c:5": {
                     "declaringScope": "scope:3",
                     "metadata": {
-                        "array": false
+                        "array": false,
+                        "constant": 1
                     },
                     "dependencies": []
                 }

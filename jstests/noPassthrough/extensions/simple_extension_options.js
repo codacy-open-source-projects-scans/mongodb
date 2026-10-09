@@ -3,6 +3,11 @@
  *
  * @tags: [featureFlagExtensionsAPI]
  */
+
+// mongod fasserts on extension load failure, raising SIGABRT signal.
+// This flag must remain true at test end so resmoke cleans up the dump in its post-test scan.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
@@ -10,6 +15,7 @@ import {
     checkPlatformCompatibleWithExtensions,
     deleteExtensionConfigs,
     generateExtensionConfigWithOptions,
+    getExtensionConfDir,
     withExtensions,
 } from "jstests/noPassthrough/libs/extension_helpers.js";
 
@@ -19,16 +25,25 @@ function testStageRegistration(expectedOptionA, conn) {
     const db = conn.getDB("test");
     const coll = db[jsTestName()];
 
-    const [registered, unregistered] = expectedOptionA ? ["$optionA", "$optionB"] : ["$optionB", "$optionA"];
+    const [registered, unregistered] = expectedOptionA
+        ? ["$optionA", "$optionB"]
+        : ["$optionB", "$optionA"];
 
     {
         const pipeline = [{[registered]: {}}];
-        assert.commandWorked(db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}));
+        assert.commandWorked(
+            db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}),
+        );
     }
 
     {
         const pipeline = [{[unregistered]: {}}];
-        assertErrorCode(coll, pipeline, 40324, `Unrecognized pipeline stage name: '${unregistered}'`);
+        assertErrorCode(
+            coll,
+            pipeline,
+            40324,
+            `Unrecognized pipeline stage name: '${unregistered}'`,
+        );
     }
 }
 
@@ -52,7 +67,13 @@ withExtensions({"libtest_options_mongo_extension.so": {optionA: false}}, (conn) 
             extensionOptions,
         );
         try {
-            checkExtensionFailsToLoad({options: {loadExtensions: extensionName}, st: st});
+            checkExtensionFailsToLoad({
+                options: {
+                    loadExtensions: extensionName,
+                    extensionsConfigPath: getExtensionConfDir(),
+                },
+                st: st,
+            });
         } finally {
             deleteExtensionConfigs([extensionName]);
         }

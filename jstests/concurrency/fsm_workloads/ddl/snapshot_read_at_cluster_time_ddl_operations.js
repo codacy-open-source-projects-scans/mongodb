@@ -3,8 +3,13 @@
  * CRUD operations.
  *
  * @tags: [
+ *   # Relies on a snapshot find that spans a getMore.
+ *   assumes_no_implicit_cursor_exhaustion,
  *   creates_background_indexes,
  *   does_not_support_causal_consistency,
+ *   # Stepdown suites force defaultReadConcernLevel=majority for network-error retryability, which
+ *   # conflicts with this test's explicit snapshot readConcern.
+ *   does_not_support_stepdowns,
  *   requires_majority_read_concern,
  *   requires_replication,
  *   does_not_support_transactions,
@@ -123,13 +128,17 @@ export const $config = (function () {
         // sharded clusters.
         if (cluster.isSharded()) {
             cluster.executeOnConfigNodes((db) => {
-                assert.commandWorked(db.adminCommand({setParameter: 1, minSnapshotHistoryWindowInSeconds: 3600}));
+                assert.commandWorked(
+                    db.adminCommand({setParameter: 1, minSnapshotHistoryWindowInSeconds: 3600}),
+                );
             });
         }
         assert.commandWorked(db.runCommand({create: collName}));
         const docs = [...Array(this.numIds).keys()].map((i) => ({a: i, x: 1}));
         assert.commandWorked(db.runCommand({insert: collName, documents: docs}));
-        assert.commandWorked(db.runCommand({createIndexes: collName, indexes: [{key: {a: 1}, name: "a_1"}]}));
+        assert.commandWorked(
+            db.runCommand({createIndexes: collName, indexes: [{key: {a: 1}, name: "a_1"}]}),
+        );
     }
 
     function teardown(db, collName, cluster) {

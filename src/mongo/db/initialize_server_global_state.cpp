@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include <cerrno>
@@ -34,11 +8,11 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <system_error>
 
 #include <boost/filesystem/operations.hpp>
 #include <fmt/format.h>
-// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -53,7 +27,6 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -85,6 +58,7 @@
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -92,7 +66,7 @@
 namespace mongo::initialize_server_global_state {
 
 #ifndef _WIN32
-static void croak(StringData prefix, int savedErr = errno) {
+static void croak(std::string_view prefix, int savedErr = errno) {
     std::cout << prefix << ": " << errorMessage(posixError(savedErr)) << std::endl;
     quickExit(ExitCode::abrupt);
 }
@@ -289,7 +263,7 @@ static bool forkServer() {
 
     std::cout << fmt::format("forked process: {}", getpid()) << std::endl;
 
-    auto stdioDetach = [](FILE* fp, const char* mode, StringData name) {
+    auto stdioDetach = [](FILE* fp, const char* mode, std::string_view name) {
         if (!freopen("/dev/null", mode, fp)) {
             int saved = errno;
             std::cout << fmt::format("Cannot reassign {} while forking server process: {}",
@@ -498,7 +472,7 @@ MONGO_INITIALIZER_GENERAL(MungeUmask, ("EndStartupOptionHandling"), ("ServerLogR
 #endif
 
 // --setParameter honorSystemUmask
-Status HonorSystemUMaskServerParameter::setFromString(StringData value,
+Status HonorSystemUMaskServerParameter::setFromString(std::string_view value,
                                                       const boost::optional<TenantId>&) {
 #ifndef _WIN32
     if ((value == "0") || (value == "false")) {
@@ -526,7 +500,7 @@ Status HonorSystemUMaskServerParameter::setFromString(StringData value,
 
 void HonorSystemUMaskServerParameter::append(OperationContext*,
                                              BSONObjBuilder* b,
-                                             StringData name,
+                                             std::string_view name,
                                              const boost::optional<TenantId>&) {
 #ifndef _WIN32
     *b << name << honorSystemUmask;
@@ -534,7 +508,7 @@ void HonorSystemUMaskServerParameter::append(OperationContext*,
 }
 
 // --setParameter processUmask
-Status ProcessUMaskServerParameter::setFromString(StringData value,
+Status ProcessUMaskServerParameter::setFromString(std::string_view value,
                                                   const boost::optional<TenantId>&) {
 #ifndef _WIN32
     if (honorSystemUmask) {
@@ -567,7 +541,7 @@ Status ProcessUMaskServerParameter::setFromString(StringData value,
 
 void ProcessUMaskServerParameter::append(OperationContext*,
                                          BSONObjBuilder* b,
-                                         StringData name,
+                                         std::string_view name,
                                          const boost::optional<TenantId>&) {
 #ifndef _WIN32
     *b << name << static_cast<int>(getUmaskOverride());

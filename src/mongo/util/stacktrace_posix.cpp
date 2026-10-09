@@ -1,54 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #ifndef __wasi__
 #include <dlfcn.h>
 #endif
 
-#include <fmt/format.h>
-// IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <array>
-#include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
-#include <string>
-#include <vector>
-
-#include <cxxabi.h>
-// IWYU pragma: no_include "libunwind-x86_64.h"
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -58,6 +15,22 @@
 #include "mongo/util/hex.h"
 #include "mongo/util/stacktrace.h"
 #include "mongo/util/stacktrace_somap.h"
+
+#include <algorithm>
+#include <array>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <cxxabi.h>
+
+#include <fmt/format.h>
 
 #define MONGO_STACKTRACE_BACKEND_NONE 0
 #define MONGO_STACKTRACE_BACKEND_LIBUNWIND 1
@@ -84,6 +57,8 @@
 #elif MONGO_STACKTRACE_BACKEND == MONGO_STACKTRACE_BACKEND_EXECINFO
 #include <execinfo.h>
 #endif
+// IWYU pragma: no_include "cxxabi.h"
+// IWYU pragma: no_include "libunwind-x86_64.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -91,9 +66,10 @@
 namespace mongo {
 namespace stacktrace_details {
 namespace {
+using namespace std::literals::string_view_literals;
 
 constexpr size_t kSymbolMax = 512;
-constexpr StringData kUnknownFileName = "???"_sd;
+constexpr std::string_view kUnknownFileName = "???"sv;
 
 // Answer might be negative, but that should be a peculiar case.
 ptrdiff_t offsetFromBase(uintptr_t base, uintptr_t addr) {
@@ -113,7 +89,7 @@ struct Options {
 
 
 // E.g., for "/foo/bar/my.txt", returns "my.txt".
-StringData getBaseName(StringData path) {
+std::string_view getBaseName(std::string_view path) {
     size_t lastSlash = path.rfind('/');
     if (lastSlash == std::string::npos)
         return path;
@@ -183,8 +159,8 @@ void appendProcessInfoTrimmed(const BSONObj& bsonProcInfo,
                               const std::vector<uintptr_t>& bases,
                               BSONObjBuilder* bob) {
     for (const BSONElement& be : bsonProcInfo) {
-        StringData key = be.fieldNameStringData();
-        if (be.type() != BSONType::array || key != "somap"_sd) {
+        std::string_view key = be.fieldNameStringData();
+        if (be.type() != BSONType::array || key != "somap"sv) {
             bob->append(be);
             continue;
         }
@@ -216,9 +192,9 @@ void appendStackTraceObject(BSONObjBuilder* obj, IterationIface& iter, const Opt
 void printMetadata(StackTraceSink& sink, const StackTraceAddressMetadata& meta) {
     auto printOffset = [&sink](uintptr_t base, uintptr_t address) {
         ptrdiff_t offset = offsetFromBase(base, address);
-        StringData sign = "+"_sd;
+        std::string_view sign = "+"sv;
         if (offset < 0) {
-            sign = "-"_sd;
+            sign = "-"sv;
             offset = -offset;
         }
         sink << sign << Hex(static_cast<uint64_t>(offset), true);

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -67,7 +41,7 @@ extern FailPoint stopReplProducer;
 
 };
 
-namespace MONGO_MOD_PARENT_PRIVATE repl {
+namespace [[MONGO_MOD_PARENT_PRIVATE]] repl {
 
 /**
  * The oplog fetcher, once started, reads operations from a remote oplog using a tailable,
@@ -127,8 +101,10 @@ public:
      * Statistics on current batch of operations returned by the sync source.
      */
     struct DocumentsInfo {
+        // The count of the bytes of the documents read off the network.
         size_t networkDocumentCount = 0;
         size_t networkDocumentBytes = 0;
+
         size_t toApplyDocumentCount = 0;
         size_t toApplyDocumentBytes = 0;
         OpTime lastDocument = OpTime();
@@ -146,7 +122,7 @@ public:
     using EnqueueDocumentsFn = std::function<Status(
         Documents::const_iterator begin, Documents::const_iterator end, const DocumentsInfo& info)>;
 
-    class MONGO_MOD_OPEN OplogFetcherRestartDecision {
+    class [[MONGO_MOD_OPEN]] OplogFetcherRestartDecision {
     public:
         OplogFetcherRestartDecision() {};
 
@@ -429,14 +405,14 @@ private:
      * Returns OplogStartMissing if we should go into rollback.
      */
     Status _checkRemoteOplogStart(const OplogFetcher::Documents& documents,
-                                  OpTime remoteLastOpApplied);
+                                  OpTime remoteLastOpApplied) const;
 
     /**
      * Distinguishes between needing to rollback and being too stale to sync from our sync source.
      * This will be called when we check the first batch of results and our last fetched optime does
      * not equal the first document in that batch. This function should never return Status::OK().
      */
-    Status _checkTooStaleToSyncFromSource(OpTime lastFetched, OpTime firstOpTimeInBatch);
+    Status _checkTooStaleToSyncFromSource(OpTime lastFetched, OpTime firstOpTimeInBatch) const;
 
     // Protects member data of this OplogFetcher.
     mutable ObservableMutex<std::mutex> _mutex;
@@ -528,5 +504,5 @@ public:
 
 typedef OplogFetcherFactoryImpl<OplogFetcher> CreateOplogFetcherFn;
 
-}  // namespace MONGO_MOD_PARENT_PRIVATE repl
+}  // namespace repl
 }  // namespace mongo

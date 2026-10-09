@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_service.h"
@@ -44,6 +18,7 @@
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
+#include "mongo/db/s/primary_only_service_helpers/cancel_state.h"
 #include "mongo/db/s/primary_only_service_helpers/operation_session_tracker.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -56,6 +31,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/modules.h"
@@ -63,9 +39,11 @@
 
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -74,16 +52,17 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
-MONGO_MOD_NEEDS_REPLACEMENT ShardingCoordinatorMetadata
-extractShardingCoordinatorMetadata(const BSONObj& coorDoc);
+[[MONGO_MOD_NEEDS_REPLACEMENT]] ShardingCoordinatorMetadata extractShardingCoordinatorMetadata(
+    const BSONObj& coorDoc);
 
 /**
  * Generic coordinator phase enum.
  * It may be converted to any enum used by coordinator implementations, provided that it has the
  * same underlying type and that it has a kUnset member with the value `0`.
  */
-enum class MONGO_MOD_PRIVATE CoordinatorGenericPhase : std::int32_t {
+enum class [[MONGO_MOD_PRIVATE]] CoordinatorGenericPhase : std::int32_t {
     kUnset = 0,
 };
 
@@ -91,9 +70,9 @@ enum class MONGO_MOD_PRIVATE CoordinatorGenericPhase : std::int32_t {
  * Represents a "generic" coordinator StateDoc.
  * This interface is implemented by the template class `CoordinatorStateDocImpl` defined below.
  */
-class MONGO_MOD_PRIVATE CoordinatorStateDoc {
+class [[MONGO_MOD_PRIVATE]] CoordinatorStateDoc {
 public:
-    static constexpr auto kIdFieldName = "_id"_sd;
+    static constexpr auto kIdFieldName = "_id"sv;
 
     virtual ~CoordinatorStateDoc() = default;
     virtual const ShardingCoordinatorMetadata& getShardingCoordinatorMetadata() const = 0;
@@ -105,7 +84,7 @@ public:
     virtual std::unique_ptr<CoordinatorStateDoc> clone() const = 0;
 };
 
-class MONGO_MOD_NEEDS_REPLACEMENT ShardingCoordinator
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ShardingCoordinator
     : public repl::PrimaryOnlyService::TypedInstance<ShardingCoordinator> {
 public:
     static inline const auto kExponentialBackoff = Backoff(Seconds(1), Milliseconds::max());
@@ -168,11 +147,14 @@ public:
             : boost::none;
     }
 
-protected:
+    /**
+     * Returns the namespace of the coordinator's ID.
+     */
     const NamespaceString& originalNss() const {
         return _coordId.getNss();
     }
 
+protected:
     virtual const NamespaceString& nss() const {
         if (const auto& bucketNss = metadata().getBucketNss()) {
             return bucketNss.get();
@@ -227,7 +209,7 @@ protected:
      * This version will automatically mark the `OperationContext` as non-deprioritizable if the
      * current phase is in the critical section.
      */
-    ServiceContext::UniqueOperationContext makeOperationContext() {
+    CancelableOperationContext makeOperationContext() {
         const auto currentPhase = getDoc().getGenericPhase();
         const auto deprioritizable = !_isInCriticalSectionGeneric(currentPhase);
         return makeOperationContext(deprioritizable);
@@ -236,9 +218,12 @@ protected:
     /**
      * Create an `OperationContext` with the `ForwardableOperationMetadata` from the coordinator
      * document set on it. Use this instead of `cc().makeOperationContext()`.
-     * If deprioritizable is false, then the `OperationContext` wil be marked as non-deprioritizable
+     * If deprioritizable is false, then the `OperationContext` wil be marked as
+     * non-deprioritizable. When `_shouldUseCancelableOpCtx()` returns true, the returned context is
+     * backed by the coordinator's abort-or-stepdown token; otherwise it uses an uncancelable token
+     * so behaviour is identical to a plain opCtx for coordinators that have not opted in.
      */
-    ServiceContext::UniqueOperationContext makeOperationContext(bool deprioritizable) {
+    CancelableOperationContext makeOperationContext(bool deprioritizable) {
         auto opCtxHolder = cc().makeOperationContext();
         getForwardableOpMetadata().setOn(opCtxHolder.get());
         if (!deprioritizable) {
@@ -246,7 +231,13 @@ protected:
                 .setTaskType(opCtxHolder.get(),
                              ExecutionAdmissionContext::TaskType::NonDeprioritizable);
         }
-        return opCtxHolder;
+        auto token = _shouldUseCancelableOpCtx() ? _cancelState.getAbortOrStepdownToken()
+                                                 : CancellationToken::uncancelable();
+        return CancelableOperationContext(std::move(opCtxHolder), token, _markKilledExecutor);
+    }
+
+    virtual bool _shouldUseCancelableOpCtx() const {
+        return false;
     }
 
     /**
@@ -261,8 +252,8 @@ protected:
 
     virtual void _initialize(OperationContext* opCtx) = 0;
 
-    virtual void _checkCoordinatorPreconditions(OperationContext* opCtx,
-                                                bool afterAcquiringLocks) = 0;
+    virtual void _checkCoordinatorPreconditions(OperationContext* opCtx, bool afterAcquiringLocks) {
+    }
 
     virtual ExecutorFuture<void> _acquireLocksAsync(
         OperationContext* opCtx,
@@ -271,12 +262,25 @@ protected:
 
     virtual void _releaseLocks(OperationContext* opCtx) = 0;
 
+    /**
+     * Hook invoked by `run()` at the start of every execution that is not the first one.
+     * Recoverable coordinators override this to perform a causality barrier that invalidates any
+     * retryable writes issued by previous executions. The base implementation is a no-op since
+     * non-recoverable coordinators do not persist sessions.
+     */
+    virtual void _performCausalityBarrier(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token) {}
+
     virtual void appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {}
 
     virtual BSONObjBuilder basicReportBuilder() const noexcept;
 
     const std::string _coordinatorName;
     mutable std::mutex _docMutex;
+
+    primary_only_service_helpers::CancelState _cancelState;
+    const std::shared_ptr<ThreadPool> _markKilledExecutor;
 
     ShardingCoordinatorService* _service;
     const ShardingCoordinatorId _coordId;
@@ -309,6 +313,7 @@ private:
         const Status& status) noexcept;
 
     virtual void _onCleanup(OperationContext* opCtx) {}
+    virtual void _onInterrupt(Status status) {}
 
     void interrupt(Status status) final;
 
@@ -332,7 +337,7 @@ private:
     friend class ShardingDDLCoordinatorTest;
 };
 
-class MONGO_MOD_UNFORTUNATELY_OPEN RecoverableShardingCoordinator
+class [[MONGO_MOD_UNFORTUNATELY_OPEN]] RecoverableShardingCoordinator
     : public ShardingCoordinator,
       public OperationSessionPersistence {
 protected:
@@ -344,13 +349,16 @@ protected:
     /**
      * Serialize a CoordinatorGenericPhase using the implementation's Phase.
      */
-    virtual StringData serializeGenericPhase(CoordinatorGenericPhase phase) const = 0;
+    virtual std::string_view serializeGenericPhase(CoordinatorGenericPhase phase) const = 0;
 
     /**
      * Advances and persists the txnNumber to ensure causality between requests, then returns the
      * updated operation session information (OSI).
      */
     OperationSessionInfo getNewSession(OperationContext* opCtx) {
+        tassert(12834404,
+                "Attempted to bump the session when _allowedToInvalidateOSI is false",
+                _allowedToInvalidateOSI());
         return _sessionTracker.getNextSession(opCtx);
     }
 
@@ -359,6 +367,9 @@ protected:
      * session state. No-op if no session is currently held.
      */
     void releaseSession(OperationContext* opCtx) {
+        tassert(12834405,
+                "Attempted to release the session when _allowedToInvalidateOSI is false",
+                _allowedToInvalidateOSI());
         _sessionTracker.releaseSession(opCtx);
     }
 
@@ -367,7 +378,14 @@ protected:
      * reads on the barrier's participants will reflect all prior writes.
      */
     void performCausalityBarrier(OperationContext* opCtx, CausalityBarrier& barrier) {
+        tassert(12834406,
+                "Attempted to bump the session when _allowedToInvalidateOSI is false",
+                _allowedToInvalidateOSI());
         _sessionTracker.performCausalityBarrier(opCtx, barrier);
+    }
+
+    boost::optional<OperationSessionInfo> getCurrentSession(OperationContext* opCtx) {
+        return _sessionTracker.getCurrentSession(opCtx);
     }
 
     std::function<void()> _buildPhaseHandlerGeneric(
@@ -401,9 +419,20 @@ protected:
      */
     void triggerCleanup(OperationContext* opCtx, const Status& status);
 
-private:
+    /**
+     * If this function returns `false`, any call to `getNewSession`, `releaseSession` or
+     * `performCausalityBarrier` will tassert. Used to ensure stability of the curret OSI.
+     */
+    virtual bool _allowedToInvalidateOSI() const noexcept {
+        return true;
+    }
+
     void _onCleanup(OperationContext* opCtx) override;
 
+    void _performCausalityBarrier(const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                  const CancellationToken& token) override;
+
+private:
     boost::optional<OperationSessionInfo> readSession(OperationContext* opCtx) const override;
 
     void writeSession(OperationContext* opCtx,
@@ -413,7 +442,7 @@ private:
 };
 
 template <typename StateDoc>
-class MONGO_MOD_PRIVATE CoordinatorStateDocImpl : public CoordinatorStateDoc {
+class [[MONGO_MOD_PRIVATE]] CoordinatorStateDocImpl : public CoordinatorStateDoc {
     constexpr static bool kDocHasPhase = requires(StateDoc doc) { doc.getPhase(); };
 
     consteval static auto getPhaseTypeHelper() {
@@ -476,7 +505,17 @@ public:
     }
 
     BSONObj toBSON() const override {
-        return _doc.toBSON();
+        auto bson = _doc.toBSON();
+        // TODO (SERVER-98118): Remove once v9.0 becomes last-LTS.
+        // In v8.x, some coordinators parse the document with strict:true, so do not serialize the
+        // default "none" value of authoritativeMetadataAccessLevel (see SERVER-127097).
+        // This is also correct for newer binaries, which interpret the missing field as "none".
+        if (_doc.getShardingCoordinatorMetadata().getAuthoritativeMetadataAccessLevel() ==
+            AuthoritativeMetadataAccessLevelEnum::kNone) {
+            bson = bson.removeField(
+                ShardingCoordinatorMetadata::kAuthoritativeMetadataAccessLevelFieldName);
+        }
+        return bson;
     }
 
     void replace(std::unique_ptr<CoordinatorStateDoc> newDoc) override {
@@ -502,7 +541,7 @@ public:
  * Provide a typed StateDoc _doc for coordinator implementations.
  */
 template <typename TStateDoc>
-class MONGO_MOD_UNFORTUNATELY_OPEN NonRecoverableTypedDocMixin {
+class [[MONGO_MOD_UNFORTUNATELY_OPEN]] NonRecoverableTypedDocMixin {
 protected:
     using StateDoc = TStateDoc;
     using Phase = CoordinatorStateDocImpl<TStateDoc>::DocPhase;
@@ -528,7 +567,7 @@ protected:
  * Provide typed protected functions for recoverable coordinators.
  */
 template <typename Base, typename TStateDoc>
-class MONGO_MOD_UNFORTUNATELY_OPEN RecoverableTypedDocMixin
+class [[MONGO_MOD_UNFORTUNATELY_OPEN]] RecoverableTypedDocMixin
     : protected NonRecoverableTypedDocMixin<TStateDoc> {
 
 protected:
@@ -566,11 +605,11 @@ protected:
             opCtx, std::make_unique<CoordinatorStateDocImpl<StateDoc>>(std::move(newDoc)));
     }
 
-    StringData serializePhase(Phase phase) const {
+    std::string_view serializePhase(Phase phase) const {
         return idl::serialize(phase);
     }
 
-    StringData serializePhase(CoordinatorGenericPhase phase) const {
+    std::string_view serializePhase(CoordinatorGenericPhase phase) const {
         return serializePhase(CoordinatorStateDocImpl<StateDoc>::castToCoordinatorPhase(phase));
     }
 

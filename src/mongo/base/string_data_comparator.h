@@ -1,38 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/util/modules.h"
 
-MONGO_MOD_PUBLIC;
+#include <string_view>
+
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -42,7 +17,7 @@ namespace mongo {
  * associative containers. These closely related operations are bundled into
  * this one interface.
  */
-class MONGO_MOD_OPEN StringDataComparator {
+class [[MONGO_MOD_OPEN]] StringDataComparator {
 public:
     virtual ~StringDataComparator() = default;
 
@@ -53,24 +28,24 @@ public:
      *    0 if `left == right`
      *   >0 if `left > right`
      */
-    virtual int compare(StringData left, StringData right) const = 0;
+    virtual int compare(std::string_view left, std::string_view right) const = 0;
 
     /**
      * Hash `str` in a way consistent with this comparator, storing the
      * result in the `seed` in-out parameter. Strings which `compare` equal
      * must have the same effect on all `seed` values.
      */
-    virtual void hash_combine(size_t& seed, StringData str) const = 0;
+    virtual void hash_combine(size_t& seed, std::string_view str) const = 0;
 };
 
-/** Uses `StringData::compare` and Murmur3 hashing. */
+/** Uses `std::string_view::compare` and Murmur3 hashing. */
 class SimpleStringDataComparator final : public StringDataComparator {
 public:
-    constexpr int compare(StringData left, StringData right) const override {
+    constexpr int compare(std::string_view left, std::string_view right) const override {
         return left.compare(right);
     }
 
-    void hash_combine(size_t& seed, StringData stringToHash) const override;
+    void hash_combine(size_t& seed, std::string_view stringToHash) const override;
 };
 
 /** Singleton instance for use in basic string comparisons. */

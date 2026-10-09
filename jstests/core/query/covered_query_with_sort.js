@@ -1,6 +1,7 @@
 // Test covered query with sort stage between index scan and projection.
 //
 // @tags: [
+//   uses_explain,
 //   # Cannot implicitly shard accessed collections because queries on a sharded collection are not
 //   # able to be covered when they aren't on the shard key since the document needs to be fetched
 //   # in order to apply the SHARDING_FILTER stage.
@@ -11,7 +12,11 @@
 //   exclude_from_timeseries_crud_passthrough,
 // ]
 
-import {getPlanStage, getWinningPlanFromExplain, isIndexOnly} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStage,
+    getWinningPlanFromExplain,
+    isIndexOnly,
+} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db.covered_query_with_sort;
 coll.drop();

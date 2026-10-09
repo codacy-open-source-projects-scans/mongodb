@@ -34,7 +34,15 @@ export function moveChunkParallel(
         "Specify either findCriteria or bounds, but not both.",
     );
 
-    function runMoveChunk(mongosURL, findCriteria, bounds, ns, toShardId, expectSuccess, forceJumbo) {
+    function runMoveChunk(
+        mongosURL,
+        findCriteria,
+        bounds,
+        ns,
+        toShardId,
+        expectSuccess,
+        forceJumbo,
+    ) {
         assert(mongosURL && ns && toShardId, "Missing arguments.");
         assert(
             (findCriteria || bounds) && !(findCriteria && bounds),
@@ -145,7 +153,10 @@ export function configureMoveChunkFailPoint(shardConnection, stepNumber, mode) {
         true,
     );
     assert.commandWorked(
-        shardConnection.adminCommand({configureFailPoint: "moveChunkHangAtStep" + stepNumber, mode: mode}),
+        shardConnection.adminCommand({
+            configureFailPoint: "moveChunkHangAtStep" + stepNumber,
+            mode: mode,
+        }),
     );
 }
 
@@ -180,7 +191,15 @@ export function waitForMoveChunkStep(shardConnection, stepNumber) {
             let op = in_progress.next();
             inProgressStr += tojson(op);
 
-            if (op.desc && op.desc === "MoveChunk") {
+            // The donor's migration thread surfaces in $currentOp with `desc === "MoveChunk"` on
+            // the legacy path (the executor lambda creates a `ThreadClient("MoveChunk", ...)`) or
+            // with a `desc === "MoveRangeCoordinator::MigrationAttempt"` on the coordinator path
+            // (MoveRangeCoordinator creates a dedicated client for the MigrationSourceManager).
+            // TODO SERVER-127253 Remove op.desc === "MoveChunk" once the legacy path is removed.
+            if (
+                op.desc &&
+                (op.desc === "MoveChunk" || op.desc === "MoveRangeCoordinator::MigrationAttempt")
+            ) {
                 // Note: moveChunk in join mode will not have the "step" message. So keep on
                 // looking if searchString is not found.
                 if (op.msg && op.msg.startsWith(searchString)) {
@@ -241,7 +260,9 @@ export function configureMigrateFailPoint(shardConnection, stepNumber, mode) {
     );
 
     let admin = shardConnection.getDB("admin");
-    assert.commandWorked(admin.runCommand({configureFailPoint: "migrateThreadHangAtStep" + stepNumber, mode: mode}));
+    assert.commandWorked(
+        admin.runCommand({configureFailPoint: "migrateThreadHangAtStep" + stepNumber, mode: mode}),
+    );
 }
 
 //
@@ -299,7 +320,14 @@ export function runCommandDuringTransferMods(
 ) {
     // Turn on the fail point and wait for moveChunk to hit the fail point.
     pauseMoveChunkAtStep(fromShard, moveChunkStepNames.startedMoveChunk);
-    let joinMoveChunk = moveChunkParallel(staticMongod, mongos.host, findCriteria, bounds, ns, toShard.shardName);
+    let joinMoveChunk = moveChunkParallel(
+        staticMongod,
+        mongos.host,
+        findCriteria,
+        bounds,
+        ns,
+        toShard.shardName,
+    );
     waitForMoveChunkStep(fromShard, moveChunkStepNames.startedMoveChunk);
 
     // Run the commands.
@@ -310,31 +338,18 @@ export function runCommandDuringTransferMods(
     joinMoveChunk();
 }
 
-export function killRunningMoveChunk(admin) {
-    let inProgressOps = admin.aggregate([{$currentOp: {"allUsers": true}}]);
-    let abortedMigration = false;
-    let inProgressStr = "";
-    let opIdsToKill = {};
-    while (inProgressOps.hasNext()) {
-        let op = inProgressOps.next();
-        inProgressStr += tojson(op);
-
-        // For 4.4 binaries and later.
-        if (op.desc && op.desc === "MoveChunk") {
-            opIdsToKill["MoveChunk"] = op.opid;
-        }
-    }
-
-    if (opIdsToKill.MoveChunk) {
-        admin.killOp(opIdsToKill.MoveChunk);
-        abortedMigration = true;
-    }
-
-    assert.eq(true, abortedMigration, "Failed to abort migration, current running ops: " + inProgressStr);
-}
-
 export function migrationsAreAllowed(db, collName) {
     const configDB = db.getSiblingDB("config");
     const nss = `${db.getName()}.${collName}`;
-    return configDB.collections.countDocuments({_id: nss, allowMigrations: {$ne: false}}) > 0;
+    // Migrations can be blocked through two independent mechanisms: the legacy `allowMigrations`
+    // flag and, when authoritative DDL is enabled, the `allowChunkOperations` flag (setAllowMigrations
+    // V2). Both default to true when absent, so this mirrors the server-side
+    // checkAllowMigrationsOnConfigServer() which requires both to be not-false.
+    return (
+        configDB.collections.countDocuments({
+            _id: nss,
+            allowMigrations: {$ne: false},
+            allowChunkOperations: {$ne: false},
+        }) > 0
+    );
 }

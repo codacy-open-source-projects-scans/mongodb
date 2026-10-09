@@ -4,11 +4,7 @@
  *
  * TODO SERVER-100945 Enable this test to be run in $facets.
  *
- * featureFlagRankFusionBasic is required to enable use of "score".
- * featureFlagSearchHybridScoringFull is required to enable use of $score.
  * @tags: [
- *   featureFlagRankFusionFull,
- *   featureFlagSearchHybridScoringFull,
  *   do_not_wrap_aggregations_in_facets,
  *   requires_fcv_82
  *  ]
@@ -74,16 +70,46 @@ function runPipelineAndCheckExpectedMetaScoreResult(scorePipeline, expectedResul
 // Project'ing "score" many stages after $score works.
 (function projectScoreManyStagesAfterScoreStageWorks() {
     runPipelineAndCheckExpectedMetaScoreResult(
-        [scoreStage, matchStage, skipStage, limitStage, metaProjectScoreStage, inhibitOptimizationStage, sortStage],
-        [matchStage, skipStage, limitStage, constantProjectMyScoreStage, inhibitOptimizationStage, sortStage],
+        [
+            scoreStage,
+            matchStage,
+            skipStage,
+            limitStage,
+            metaProjectScoreStage,
+            inhibitOptimizationStage,
+            sortStage,
+        ],
+        [
+            matchStage,
+            skipStage,
+            limitStage,
+            constantProjectMyScoreStage,
+            inhibitOptimizationStage,
+            sortStage,
+        ],
     );
 })();
 
 // Project'ing "score" works when $score isn't the first stage.
 (function projectScoreWhenScoreStageIsNotFirst() {
     runPipelineAndCheckExpectedMetaScoreResult(
-        [matchStage, skipStage, scoreStage, limitStage, metaProjectScoreStage, inhibitOptimizationStage, sortStage],
-        [matchStage, skipStage, limitStage, constantProjectMyScoreStage, inhibitOptimizationStage, sortStage],
+        [
+            matchStage,
+            skipStage,
+            scoreStage,
+            limitStage,
+            metaProjectScoreStage,
+            inhibitOptimizationStage,
+            sortStage,
+        ],
+        [
+            matchStage,
+            skipStage,
+            limitStage,
+            constantProjectMyScoreStage,
+            inhibitOptimizationStage,
+            sortStage,
+        ],
     );
 })();
 
@@ -99,7 +125,14 @@ function runPipelineAndCheckExpectedMetaScoreResult(scorePipeline, expectedResul
             inhibitOptimizationStage,
             sortStage,
         ],
-        [matchStage, skipStage, limitStage, {$project: {myScore: "$a"}}, inhibitOptimizationStage, sortStage],
+        [
+            matchStage,
+            skipStage,
+            limitStage,
+            {$project: {myScore: "$a"}},
+            inhibitOptimizationStage,
+            sortStage,
+        ],
     );
 })();
 

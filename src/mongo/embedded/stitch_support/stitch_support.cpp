@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/embedded/stitch_support/stitch_support.h"
 
@@ -33,7 +7,6 @@
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
@@ -73,6 +46,7 @@
 #include <mutex>
 #include <new>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -287,7 +261,7 @@ struct stitch_support_v1_update {
 
     stitch_support_v1_matcher* matcher;
 
-    std::map<mongo::StringData, std::unique_ptr<mongo::ExpressionWithPlaceholder>> parsedFilters;
+    std::map<std::string_view, std::unique_ptr<mongo::ExpressionWithPlaceholder>> parsedFilters;
     mongo::UpdateDriver updateDriver;
 };
 
@@ -549,7 +523,7 @@ stitch_support_v1_projection_apply(stitch_support_v1_projection* const projectio
         mongo::BSONObj document(mongo::fromInterfaceType(documentBSON));
 
         auto outputObj =
-            projection->projectionExec->applyTransformation(mongo::Document{document}).toBson();
+            projection->projectionExec->applyTransformation(mongo::Document{document}, {}).toBson();
         auto outputSize = static_cast<size_t>(outputObj.objsize());
         auto output = new (std::nothrow) char[outputSize];
 
@@ -628,7 +602,7 @@ stitch_support_v1_update_apply(stitch_support_v1_update* const update,
                                                     false /* validateForStorage */,
                                                     immutablePaths,
                                                     false /* isInsert */,
-                                                    nullptr /* logOpRec*/,
+                                                    nullptr /* updateRecord */,
                                                     &docWasModified,
                                                     &modifiedPaths));
 
@@ -670,12 +644,12 @@ uint8_t* MONGO_API_CALL stitch_support_v1_update_upsert(stitch_support_v1_update
         }
 
         uassertStatusOK(update->updateDriver.update(update->opCtx.get(),
-                                                    mongo::StringData() /* matchedField */,
+                                                    std::string_view() /* matchedField */,
                                                     &mutableDoc,
                                                     false /* validateForStorage */,
                                                     immutablePaths,
                                                     true /* isInsert */,
-                                                    nullptr /* logOpRec */,
+                                                    nullptr /* updateRecord */,
                                                     &docWasModified,
                                                     nullptr /* modifiedPaths */));
 

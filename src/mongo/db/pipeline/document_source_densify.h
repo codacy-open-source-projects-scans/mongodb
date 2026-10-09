@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -52,6 +25,7 @@
 #include <list>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -62,6 +36,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Densify);
 DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalDensify);
@@ -84,7 +59,9 @@ public:
      */
     Value toValue() const {
         return visit(OverloadedVisitor{[&](Value unwrappedVal) { return unwrappedVal; },
-                                       [&](Date_t dateVal) { return Value(dateVal); }
+                                       [&](Date_t dateVal) {
+                                           return Value(dateVal);
+                                       }
 
                      },
                      _value);
@@ -128,7 +105,9 @@ public:
 
     std::string toString() const {
         return visit(OverloadedVisitor{[&](Value v) { return v.toString(); },
-                                       [&](Date_t d) { return d.toString(); }},
+                                       [&](Date_t d) {
+                                           return d.toString();
+                                       }},
                      _value);
     }
 
@@ -147,7 +126,9 @@ public:
      */
     size_t getApproximateSize() const {
         return visit(OverloadedVisitor{[&](Value v) { return v.getApproximateSize(); },
-                                       [&](Date_t d) { return Value(d).getApproximateSize(); }},
+                                       [&](Date_t d) {
+                                           return Value(d).getApproximateSize();
+                                       }},
                      _value);
     }
 
@@ -228,12 +209,12 @@ private:
 };
 class RangeStatement {
 public:
-    static constexpr StringData kArgUnit = "unit"_sd;
-    static constexpr StringData kArgBounds = "bounds"_sd;
-    static constexpr StringData kArgStep = "step"_sd;
+    static constexpr std::string_view kArgUnit = "unit"sv;
+    static constexpr std::string_view kArgBounds = "bounds"sv;
+    static constexpr std::string_view kArgStep = "step"sv;
 
-    static constexpr StringData kValFull = "full"_sd;
-    static constexpr StringData kValPartition = "partition"_sd;
+    static constexpr std::string_view kValFull = "full"sv;
+    static constexpr std::string_view kValPartition = "partition"sv;
 
     struct Full {};
     struct Partition {};
@@ -257,13 +238,13 @@ public:
 
     static RangeStatement parse(RangeSpec spec);
 
-    Value serialize(const SerializationOptions& opts) const {
+    Value serialize(const query_shape::SerializationOptions& opts) const {
         MutableDocument spec;
         spec[kArgStep] = opts.serializeLiteral(_step);
         spec[kArgBounds] =
-            visit(OverloadedVisitor{[&](Full) { return Value(kValFull); },
-                                    [&](Partition) { return Value(kValPartition); },
-                                    [&](ExplicitBounds bounds) {
+            visit(OverloadedVisitor{[&](const Full&) { return Value(kValFull); },
+                                    [&](const Partition&) { return Value(kValPartition); },
+                                    [&](const ExplicitBounds& bounds) {
                                         return Value(std::vector<Value>(
                                             {opts.serializeLiteral(bounds.first.toValue()),
                                              opts.serializeLiteral(bounds.second.toValue())}));
@@ -281,7 +262,7 @@ private:
 };
 
 namespace document_source_densify {
-constexpr StringData kStageName = "$densify"_sd;
+constexpr std::string_view kStageName = "$densify"sv;
 
 /**
  * The 'internal' parameter specifies whether or not we create a sort stage that is required for
@@ -290,7 +271,7 @@ constexpr StringData kStageName = "$densify"_sd;
 std::list<boost::intrusive_ptr<DocumentSource>> createFromBsonInternal(
     BSONElement elem,
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
-    StringData stageName,
+    std::string_view stageName,
     bool isInternal);
 std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
@@ -309,10 +290,10 @@ std::list<boost::intrusive_ptr<DocumentSource>> create(
 
 class DocumentSourceInternalDensify final : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$_internalDensify"_sd;
-    static constexpr StringData kPartitionByFieldsFieldName = "partitionByFields"_sd;
-    static constexpr StringData kFieldFieldName = "field"_sd;
-    static constexpr StringData kRangeFieldName = "range"_sd;
+    static constexpr std::string_view kStageName = "$_internalDensify"sv;
+    static constexpr std::string_view kPartitionByFieldsFieldName = "partitionByFields"sv;
+    static constexpr std::string_view kFieldFieldName = "field"sv;
+    static constexpr std::string_view kRangeFieldName = "range"sv;
 
     DocumentSourceInternalDensify(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                   FieldPath field,
@@ -346,8 +327,8 @@ public:
                 UnionRequirement::kAllowed};
     }
 
-    const char* getSourceName() const final {
-        return kStageName.data();
+    std::string_view getSourceName() const final {
+        return kStageName;
     }
 
     static const Id& id;
@@ -356,7 +337,8 @@ public:
         return id;
     }
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final {
         deps->fields.insert(_field.fullPath());

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/accumulator_multi.h"
 
@@ -33,17 +7,21 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/memory_tracking/memory_usage_limit.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_knob_descriptors_execution.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
 #include <iterator>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -73,14 +51,15 @@ namespace {
 template <typename AccumulatorState>
 Value evaluateAccumulatorN(const ExpressionFromAccumulatorN<AccumulatorState>& expr,
                            const Document& root,
-                           Variables* variables) {
+                           Variables* variables,
+                           const EvaluationContext& ctx) {
     AccumulatorState accum(expr.getExpressionContext());
 
     // Evaluate and initialize 'n'.
-    accum.startNewGroup(expr.getN()->evaluate(root, variables));
+    accum.startNewGroup(expr.getN()->evaluate(root, variables, ctx));
 
     // Verify that '_output' produces an array and pass each element to 'process'.
-    auto output = expr.getOutput()->evaluate(root, variables);
+    auto output = expr.getOutput()->evaluate(root, variables, ctx);
     uassert(5788200, "Input must be an array", output.isArray());
     for (const auto& item : output.getArray()) {
         accum.process(item, false);
@@ -92,30 +71,34 @@ Value evaluateAccumulatorN(const ExpressionFromAccumulatorN<AccumulatorState>& e
 
 template <>
 Value ExpressionFromAccumulatorN<AccumulatorMinN>::evaluate(const Document& root,
-                                                            Variables* variables) const {
-    return evaluateAccumulatorN(*this, root, variables);
+                                                            Variables* variables,
+                                                            const EvaluationContext& ctx) const {
+    return evaluateAccumulatorN(*this, root, variables, ctx);
 }
 
 template <>
 Value ExpressionFromAccumulatorN<AccumulatorMaxN>::evaluate(const Document& root,
-                                                            Variables* variables) const {
-    return evaluateAccumulatorN(*this, root, variables);
+                                                            Variables* variables,
+                                                            const EvaluationContext& ctx) const {
+    return evaluateAccumulatorN(*this, root, variables, ctx);
 }
 
 template <>
 Value ExpressionFromAccumulatorN<AccumulatorFirstN>::evaluate(const Document& root,
-                                                              Variables* variables) const {
-    return evaluateAccumulatorN(*this, root, variables);
+                                                              Variables* variables,
+                                                              const EvaluationContext& ctx) const {
+    return evaluateAccumulatorN(*this, root, variables, ctx);
 }
 
 template <>
 Value ExpressionFromAccumulatorN<AccumulatorLastN>::evaluate(const Document& root,
-                                                             Variables* variables) const {
-    return evaluateAccumulatorN(*this, root, variables);
+                                                             Variables* variables,
+                                                             const EvaluationContext& ctx) const {
+    return evaluateAccumulatorN(*this, root, variables, ctx);
 }
 
 AccumulatorN::AccumulatorN(ExpressionContext* const expCtx)
-    : AccumulatorState(expCtx, internalQueryTopNAccumulatorBytes.load()) {}
+    : AccumulatorState(expCtx, MemoryUsageLimit{query_knobs::kTopNAccumulatorBytes}) {}
 
 long long AccumulatorN::validateN(const Value& input) {
     // Obtain the value for 'n' and error if it's not a positive integral.
@@ -153,7 +136,7 @@ void AccumulatorN::processInternal(const Value& input, bool merging) {
 }
 
 AccumulatorMinMaxN::AccumulatorMinMaxN(ExpressionContext* const expCtx, MinMaxSense sense)
-    : AccumulatorN(expCtx), _set(createMultiSet()), _sense(sense) {
+    : AccumulatorN(expCtx), _sense(sense) {
     _memUsageTracker.set(sizeof(*this));
 }
 
@@ -167,7 +150,7 @@ const char* AccumulatorMinMaxN::getOpName() const {
 
 Document AccumulatorMinMaxN::serialize(boost::intrusive_ptr<Expression> initializer,
                                        boost::intrusive_ptr<Expression> argument,
-                                       const SerializationOptions& options) const {
+                                       const query_shape::SerializationOptions& options) const {
     MutableDocument args;
     AccumulatorN::serializeHelper(initializer, argument, options, args);
     return DOC(getOpName() << args.freeze());
@@ -209,7 +192,7 @@ AccumulatorN::parseArgs(ExpressionContext* const expCtx,
 
 void AccumulatorN::serializeHelper(const boost::intrusive_ptr<Expression>& initializer,
                                    const boost::intrusive_ptr<Expression>& argument,
-                                   const SerializationOptions& options,
+                                   const query_shape::SerializationOptions& options,
                                    MutableDocument& md) {
     md.addField(kFieldNameN, Value(initializer->serialize(options)));
     md.addField(kFieldNameInput, Value(argument->serialize(options)));
@@ -246,44 +229,58 @@ AccumulationExpression AccumulatorMinMaxN::parseMinMaxN(ExpressionContext* const
 }
 
 void AccumulatorMinMaxN::_processValue(const Value& val) {
-    // Ignore nullish values.
     if (val.nullish()) {
         return;
     }
+    // For kMin we maintain a max-heap (largest value at front) so we can quickly evict the worst
+    // kept element. For kMax we maintain a min-heap (smallest value at front) for the same reason.
+    auto heapComp = [&](const std::pair<Value, int64_t>& a, const std::pair<Value, int64_t>& b) {
+        return _valueComp.compare(a.first, b.first) * _sense < 0;
+    };
 
-    // Only compare if we have 'n' elements.
-    if (static_cast<long long>(_set.size()) == *_n) {
-        // Get an iterator to the element we want to compare against.
-        auto cmpElem = _sense == MinMaxSense::kMin ? std::prev(_set.end()) : _set.begin();
-
-        auto cmp =
-            getExpressionContext()->getValueComparator().compare(cmpElem->value(), val) * _sense;
-        if (cmp > 0) {
-            _set.erase(cmpElem);
-        } else {
-            return;
-        }
+    // Defer computing getApproximateSize() until we know we will keep the value. In steady state
+    // the heap is full and most incoming values are rejected by the comparison below, so computing
+    // the (recursively-walked) approximate size up front would be wasted work on the common path.
+    if (static_cast<long long>(_heap.size()) < *_n) {
+        auto sz = static_cast<int64_t>(val.getApproximateSize());
+        _heap.push_back({val, sz});
+        std::push_heap(_heap.begin(), _heap.end(), heapComp);
+        _memUsageTracker.add(sz);
+        checkMemUsage();
+    } else if (_valueComp.compare(_heap.front().first, val) * _sense > 0) {
+        // The heap root is strictly worse than val (larger for kMin, smaller for kMax), so evict
+        // it and insert val. Adjust memory before modifying the heap so the tracker stays
+        // consistent if checkMemUsage throws.
+        auto sz = static_cast<int64_t>(val.getApproximateSize());
+        std::pop_heap(_heap.begin(), _heap.end(), heapComp);
+        _memUsageTracker.add(sz - _heap.back().second);
+        _heap.back().first = val;
+        _heap.back().second = sz;
+        std::push_heap(_heap.begin(), _heap.end(), heapComp);
+        checkMemUsage();
     }
-
-    _set.emplace(SimpleMemoryUsageToken{val.getApproximateSize(), &_memUsageTracker}, val);
-    checkMemUsage();
-}
-
-AccumulatorMinMaxN::MultiSet AccumulatorMinMaxN::createMultiSet() const {
-    return MultiSet(MemoryTokenValueComparator(&getExpressionContext()->getValueComparator()));
 }
 
 Value AccumulatorMinMaxN::getValue(bool toBeMerged) {
-    // Return the values in ascending order for 'kMin' and descending order for 'kMax'.
-    if (_sense == MinMaxSense::kMin) {
-        return convertToValueFromMemoryTokenWithValue(_set.begin(), _set.end(), _set.size());
-    } else {
-        return convertToValueFromMemoryTokenWithValue(_set.rbegin(), _set.rend(), _set.size());
+    std::vector<Value> vals;
+    vals.reserve(_heap.size());
+    for (auto& entry : _heap) {
+        vals.push_back(entry.first);
     }
+    // vals is a valid heap by Value compare: the heap property is preserved.
+    std::sort_heap(vals.begin(), vals.end(), [&](const Value& a, const Value& b) {
+        return _valueComp.compare(a, b) * _sense < 0;
+    });
+    return Value{std::move(vals)};
 }
 
 void AccumulatorMinMaxN::reset() {
-    _set = createMultiSet();
+    for (auto& entry : _heap) {
+        _memUsageTracker.add(-entry.second);
+    }
+    _heap.clear();
+    // Reserve space is not tracked by _memUsageTracker, so get rid of it.
+    _heap.shrink_to_fit();
 }
 
 const char* AccumulatorMinN::getName() {
@@ -295,7 +292,7 @@ const char* AccumulatorMaxN::getName() {
 }
 
 AccumulatorFirstLastN::AccumulatorFirstLastN(ExpressionContext* const expCtx, FirstLastSense sense)
-    : AccumulatorN(expCtx), _deque(), _variant(sense) {
+    : AccumulatorN(expCtx), _variant(sense) {
     _memUsageTracker.set(sizeof(*this));
 }
 
@@ -331,24 +328,27 @@ AccumulationExpression AccumulatorFirstLastN::parseFirstLastN(ExpressionContext*
 }
 
 void AccumulatorFirstLastN::_processValue(const Value& val) {
-    // Convert missing values to null.
-    auto valToProcess = val.missing() ? Value(BSONNULL) : val;
-
-    // Only insert in the lastN case if we have 'n' elements.
-    if (static_cast<long long>(_deque.size()) == *_n) {
-        if (_variant == Sense::kLast) {
-            _deque.pop_front();
-        } else {
-            // If our deque has 'n' elements and this is $firstN, we don't need to call process
-            // anymore.
+    if (_ring.size() == static_cast<size_t>(*_n)) {
+        if (_variant == Sense::kFirst) {
+            // Once _ring contains 'n' elements and this is $firstN, we don't need to call process
+            // anymore. Return before copying 'val' since it is discarded here.
             _needsInput = false;
             return;
         }
+        // $lastN full: evict the oldest slot. The stored size lets us update the tracker without
+        // recomputing getApproximateSize() on the outgoing value.
+        auto valToProcess = val.missing() ? Value(BSONNULL) : val;
+        const int64_t newSize = valToProcess.getApproximateSize();
+        _memUsageTracker.add(newSize - _ring[_ringHead].second);
+        _ring[_ringHead] = {std::move(valToProcess), newSize};
+        _ringHead = (_ringHead + 1) % _ring.size();
+    } else {
+        auto valToProcess = val.missing() ? Value(BSONNULL) : val;
+        const int64_t newSize = valToProcess.getApproximateSize();
+        _memUsageTracker.add(newSize);
+        _ring.push_back({std::move(valToProcess), newSize});
     }
 
-    _deque.emplace_back(
-        SimpleMemoryUsageToken{valToProcess.getApproximateSize(), &_memUsageTracker},
-        std::move(valToProcess));
     checkMemUsage();
 }
 
@@ -362,7 +362,7 @@ const char* AccumulatorFirstLastN::getOpName() const {
 
 Document AccumulatorFirstLastN::serialize(boost::intrusive_ptr<Expression> initializer,
                                           boost::intrusive_ptr<Expression> argument,
-                                          const SerializationOptions& options) const {
+                                          const query_shape::SerializationOptions& options) const {
     MutableDocument args;
     AccumulatorN::serializeHelper(initializer, argument, options, args);
     return DOC(getOpName() << args.freeze());
@@ -382,11 +382,21 @@ boost::intrusive_ptr<Expression> AccumulatorFirstLastN::parseExpression(
 }
 
 void AccumulatorFirstLastN::reset() {
-    _deque = std::deque<SimpleMemoryUsageTokenWith<Value>>();
+    _ring.clear();
+    // memoryUsageTracker doesn't track reserved space so get rid of it.
+    _ring.shrink_to_fit();
+    _memUsageTracker.set(sizeof(*this));
+    _ringHead = 0;
 }
 
 Value AccumulatorFirstLastN::getValue(bool toBeMerged) {
-    return convertToValueFromMemoryTokenWithValue(_deque.begin(), _deque.end(), _deque.size());
+    std::vector<Value> result;
+    size_t const n = _ring.size();
+    result.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        result.emplace_back(_ring[(_ringHead + i) % n].first);
+    }
+    return Value{std::move(result)};
 }
 
 const char* AccumulatorFirstN::getName() {
@@ -402,7 +412,7 @@ template <bool single>
 std::tuple<boost::intrusive_ptr<Expression>, BSONElement, boost::optional<BSONObj>>
 accumulatorNParseArgs(ExpressionContext* expCtx,
                       const BSONElement& elem,
-                      const char* name,
+                      std::string_view name,
                       bool needSortBy,
                       const VariablesParseState& vps) {
     uassert(5788001,
@@ -512,7 +522,7 @@ template <TopBottomSense sense, bool single>
 Document AccumulatorTopBottomN<sense, single>::serialize(
     boost::intrusive_ptr<Expression> initializer,
     boost::intrusive_ptr<Expression> argument,
-    const SerializationOptions& options) const {
+    const query_shape::SerializationOptions& options) const {
     MutableDocument args;
 
     if constexpr (!single) {
@@ -578,8 +588,7 @@ template <TopBottomSense sense, bool single>
 AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
     ExpressionContext* const expCtx, BSONElement elem, VariablesParseState vps) {
     auto name = AccumulatorTopBottomN<sense, single>::getName();
-    const auto [n, output, sortBy] =
-        accumulatorNParseArgs<single>(expCtx, elem, name.data(), true, vps);
+    const auto [n, output, sortBy] = accumulatorNParseArgs<single>(expCtx, elem, name, true, vps);
     auto [sortPattern, sortFieldsExp, hasMeta] =
         parseAccumulatorTopBottomNSortBy<sense>(expCtx, *sortBy);
 

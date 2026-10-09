@@ -14,14 +14,18 @@
  *
  * @tags: [uses_transactions, uses_multi_shard_transaction]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {waitForFailpoint} from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 // Helper to add generic txn fields to a command.
 function addTxnFieldsToCmd(cmd, lsid, txnNumber) {
-    return Object.extend(cmd, {lsid, txnNumber: NumberLong(txnNumber), stmtId: NumberInt(0), autocommit: false});
+    return Object.extend(cmd, {
+        lsid,
+        txnNumber: NumberLong(txnNumber),
+        stmtId: NumberInt(0),
+        autocommit: false,
+    });
 }
 
 const dbName = "test";
@@ -31,7 +35,9 @@ const ns = dbName + "." + collName;
 const st = new ShardingTest({shards: [{verbose: 1}, {verbose: 1}]});
 
 // Set up sharded collection with two chunks - [-inf, 0), [0, inf)
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 0}}));
 
@@ -39,8 +45,27 @@ st.rs0.getPrimary().adminCommand({configureFailPoint: "suspendRangeDeletion", mo
 // Move a chunk away from Shard0 (the donor) so its range deleter will asynchronously delete the
 // chunk's range. Flush its metadata to avoid StaleConfig during the later transaction.
 assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: st.shard1.shardName}));
-assert.commandWorked(st.rs0.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: ns}));
+if (!FeatureFlagUtil.isPresentAndEnabled(st.rs0.getPrimary(), "AuthoritativeShardsCRUD")) {
+    assert.commandWorked(st.rs0.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: ns}));
+}
 st.refreshCatalogCacheForNs(st.s, ns);
+
+// Wait for the MaxKey orphan guard to finish classifying tasks before preparing the transaction, so
+// the range deletion below and not the MaxKey classification read meets the prepare conflict.
+//
+// Poll the durable completion marker rather than the log. The guard logs once when the
+// range deleter starts at step-up during ShardingTest setup. In suites where the setup is
+// slow, the entry is evicted before this point and the wait is never satisfied.
+// persistBlockedTasks() writes 'blockedTasks' before that log line, so its presence marks the same event.
+assert.soon(
+    () =>
+        st.rs0
+            .getPrimary()
+            .getDB("config")
+            .maxKeyOrphanScanState.findOne({_id: "scanState", blockedTasks: {$exists: true}}) !==
+        null,
+    "MaxKey orphan guard did not finish classifying range-deletion tasks",
+);
 
 // Insert a doc into the chunk still owned by the donor shard in a transaction then prepare the
 // transaction so readers of that doc will enter a prepare conflict retry loop.
@@ -52,11 +77,17 @@ assert.commandWorked(
     st.s
         .getDB(dbName)
         .runCommand(
-            addTxnFieldsToCmd({insert: collName, documents: [{_id: -5}], startTransaction: true}, lsid, txnNumber),
+            addTxnFieldsToCmd(
+                {insert: collName, documents: [{_id: -5}], startTransaction: true},
+                lsid,
+                txnNumber,
+            ),
         ),
 );
 
-assert.commandWorked(st.rs0.getPrimary().adminCommand(addTxnFieldsToCmd({prepareTransaction: 1}, lsid, txnNumber)));
+assert.commandWorked(
+    st.rs0.getPrimary().adminCommand(addTxnFieldsToCmd({prepareTransaction: 1}, lsid, txnNumber)),
+);
 
 // Set a failpoint to hang right after beginning the index scan for documents to delete.
 st.rs0.getPrimary().adminCommand({configureFailPoint: "hangBeforeDoingDeletion", mode: "alwaysOn"});
@@ -74,6 +105,8 @@ st.rs0.getPrimary().adminCommand({configureFailPoint: "hangBeforeDoingDeletion",
 assert.commandWorked(st.rs0.getPrimary().adminCommand({replSetStepDown: 5, force: true}));
 
 // Cleanup the transaction so the sharding test can shut down.
-assert.commandWorked(st.rs0.getPrimary().adminCommand(addTxnFieldsToCmd({abortTransaction: 1}, lsid, txnNumber)));
+assert.commandWorked(
+    st.rs0.getPrimary().adminCommand(addTxnFieldsToCmd({abortTransaction: 1}, lsid, txnNumber)),
+);
 
 st.stop();

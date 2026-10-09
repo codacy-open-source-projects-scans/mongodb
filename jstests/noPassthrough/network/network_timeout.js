@@ -4,8 +4,8 @@
  * cluster `find` will use a higher level API that will retry on retryable error codes.
  *
  * @tags: [
- *   # TODO SERVER-116054: Add support for $where.
- *   mozjs_wasm_unsupported,
+ *   # Uses $where with server-side JS, which requires server-side scripting.
+ *   requires_scripting,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -13,7 +13,6 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Skip various checks that require talking to shard primaries (a primary is dropped as part
 // of the test).
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
@@ -64,7 +63,12 @@ configureFailPoint(st.s, "connectionPoolDropConnectionsBeforeGetConnection", {},
  * Mimic timeout from timer in the NetworkInterface. This general timeout should not return a
  * retryable error.
  */
-configureFailPoint(st.s, "triggerSendRequestNetworkTimeout", {"collectionNS": testColl}, {times: 1});
+configureFailPoint(
+    st.s,
+    "triggerSendRequestNetworkTimeout",
+    {"collectionNS": testColl},
+    {times: 1},
+);
 // Run a long query to make sure the network fail points fail the command.
 assert.throwsWithCode(function () {
     coll.findOne({

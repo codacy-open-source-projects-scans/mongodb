@@ -1,35 +1,13 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
+
+#pragma once
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
+#include "mongo/db/query/compiler/optimizer/cost_based_ranker/cbr_test_utils.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
 #include "mongo/db/query/compiler/optimizer/join/cardinality_estimator.h"
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
@@ -43,6 +21,9 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
+
+#include <algorithm>
+#include <string_view>
 
 namespace mongo::join_ordering {
 
@@ -83,7 +64,8 @@ public:
     JoinOrderingTestFixture() : goldenTestConfig{"src/mongo/db/test_output/query/join"} {}
 
     std::unique_ptr<CanonicalQuery> makeCanonicalQuery(NamespaceString nss,
-                                                       BSONObj filter = BSONObj::kEmptyObject);
+                                                       BSONObj filter = BSONObj::kEmptyObject,
+                                                       BSONObj projection = BSONObj::kEmptyObject);
 
     std::unique_ptr<QuerySolution> makeCollScanPlan(
         NamespaceString nss, std::unique_ptr<MatchExpression> filter = nullptr);
@@ -117,14 +99,14 @@ public:
         SingleTableAccessPlansResult singleTableAccess{
             .cbrCqQsns = std::move(cbrCqQsns),
             .estimate = {},
-            .nodeCardinalities = std::move(nodeCardinalities),
+            .nodeCardinalitiesOriginalFilter = std::move(nodeCardinalities),
             .collCardinalities = std::move(collCardinalities),
             .nodeCBRCosts = std::move(costs)};
 
         JoinReorderingContext jCtx{.joinGraph = joinGraphStorage.value(),
                                    .resolvedPaths = std::move(resolvedPaths),
                                    .singleTableAccess = std::move(singleTableAccess),
-                                   .perCollIdxs = std::move(perCollIdxs),
+                                   .perCollIdxs = perCollIdxs,
                                    .catStats = std::move(catStats)};
 
         return jCtx;
@@ -169,10 +151,6 @@ public:
     FakeNdvEstimator(CardinalityEstimate collCard) : _collCard(collCard) {};
 
     CardinalityEstimate estimateCardinality(const MatchExpression* expr) const override {
-        MONGO_UNREACHABLE;
-    }
-    std::vector<CardinalityEstimate> estimateCardinality(
-        const std::vector<const MatchExpression*>& expr) const override {
         MONGO_UNREACHABLE;
     }
     CardinalityEstimate estimateKeysScanned(const IndexBounds& bounds) const override {
@@ -224,18 +202,49 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
-    double getCollCard() const override {
-        return _collCard.toDouble();
+    CardinalityEstimate getCollCard() const override {
+        return _collCard;
     }
 
     size_t getSampleSize() const override {
         MONGO_UNREACHABLE;
     }
 
+    ce::SamplingMetadata getSamplingMetadata() const override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::vector<ce::PersistedNDVEntry> getPersistedNDVMetadata() const override {
+        return _persistedNDVMetadata;
+    }
+
+    size_t getNumPersistedNDVStatsUsed() const override {
+        return _numPersistedNDVStatsUsed;
+    }
+
+    void addPersistedNDVStats(std::vector<std::string> sortedFieldPaths) {
+        ce::PersistedNDVEntry entry;
+        entry.sortedFieldPaths = std::move(sortedFieldPaths);
+        _persistedNDVMetadata.push_back(std::move(entry));
+    }
+
 private:
     CardinalityEstimate _collCard;
     stdx::unordered_map<std::vector<FieldPath>, CardinalityEstimate> _fakeEstimates;
+    std::vector<ce::PersistedNDVEntry> _persistedNDVMetadata;
+    // Incremented by 'estimateNDV()' when the estimate is served from a persisted statistic added
+    // via 'addPersistedNDVStats()'. 'estimateNDV' is const, hence mutable.
+    mutable size_t _numPersistedNDVStatsUsed = 0;
 };
+
+/**
+ * Builds a join-edge selectivity estimate whose only meaningful field is the selectivity, for
+ * tests that inject fabricated edge selectivities by hand. The NDV and provenance are left at
+ * benign defaults.
+ */
+inline JoinEdgeSelectivityEstimate makeJoinSelectivityEstimate(double s) {
+    return {.ndv = cost_based_ranker::oneCE, .selectivity = makeSel(s)};
+}
 
 /**
  * Fake implementation of JoinCardinalityEstimator useful for tests which need to inject artificial
@@ -249,7 +258,8 @@ public:
      */
     FakeJoinCardinalityEstimator(const JoinReorderingContext& jCtx)
         : JoinCardinalityEstimator(
-              jCtx, EdgeSelectivities(jCtx.joinGraph.numEdges(), cost_based_ranker::zeroSel)) {
+              jCtx,
+              EdgeSelectivities(jCtx.joinGraph.numEdges(), makeJoinSelectivityEstimate(0.1))) {
         for (uint64_t i = 0; i < std::pow(2, jCtx.joinGraph.numNodes()); ++i) {
             _subsetCardinalities.emplace(
                 NodeSet::fromUIntBitSet(i),
@@ -266,7 +276,8 @@ public:
      */
     FakeJoinCardinalityEstimator(const JoinReorderingContext& jCtx, SubsetCardinalities subsetCards)
         : JoinCardinalityEstimator(
-              jCtx, EdgeSelectivities(jCtx.joinGraph.numEdges(), cost_based_ranker::zeroSel)) {
+              jCtx,
+              EdgeSelectivities(jCtx.joinGraph.numEdges(), makeJoinSelectivityEstimate(0.1))) {
         _subsetCardinalities = std::move(subsetCards);
     }
 
@@ -281,9 +292,20 @@ public:
     }
 };
 
-
 /**
  * Small utility function to make a namepace string from collection name.
  */
-NamespaceString makeNSS(StringData collName);
+NamespaceString makeNSS(std::string_view collName);
+
+/**
+ * Pipeline construction helpers for use in tests.
+ */
+std::unique_ptr<Pipeline> makePipelineForTest(
+    std::vector<BSONObj> bsonStages,
+    std::vector<std::string_view> collNames,
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx);
+std::unique_ptr<Pipeline> makePipelineForTest(
+    std::string_view query,
+    std::vector<std::string_view> collNames,
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx);
 }  // namespace mongo::join_ordering

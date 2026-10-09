@@ -28,7 +28,11 @@ let nss = primaryColl.getFullName();
 
 // The default WC is majority and this test can't satisfy majority writes.
 assert.commandWorked(
-    primary.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+    primary.adminCommand({
+        setDefaultRWConcern: 1,
+        defaultWriteConcern: {w: 1},
+        writeConcern: {w: "majority"},
+    }),
 );
 
 // This function adds data to the collection, restarts the secondary node with the given
@@ -51,7 +55,10 @@ function setupTest({failPoint, extraFailPointData, secondaryStartupParams}) {
     // can check initialSyncStatus fields after initial sync is complete.
     secondaryStartupParams["failpoint.skipClearInitialSyncState"] = tojson({mode: "alwaysOn"});
     secondaryStartupParams["numInitialSyncAttempts"] = 1;
-    secondary = replTest.restart(secondary, {startClean: true, setParameter: secondaryStartupParams});
+    secondary = replTest.restart(secondary, {
+        startClean: true,
+        setParameter: secondaryStartupParams,
+    });
     secondaryDB = secondary.getDB(dbName);
     secondaryColl = secondaryDB[collName];
 
@@ -139,14 +146,17 @@ runDropTest({
     extraFailPointData: {cloner: "CollectionCloner", stage: "query"},
 });
 
-jsTestLog("[2] Testing dropping between listIndexes and find, with new same-name collection created.");
+jsTestLog(
+    "[2] Testing dropping between listIndexes and find, with new same-name collection created.",
+);
 runDropTest({
     failPoint: "hangBeforeClonerStage",
     extraFailPointData: {cloner: "CollectionCloner", stage: "query"},
     createNew: true,
 });
 
-let expectedLogFor3and4 = "{code: 21132, attr: { namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}";
+let expectedLogFor3and4 =
+    "{code: 21132, attr: { namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}";
 
 jsTestLog("[3] Testing drop-pending between getMore calls.");
 runDropTest({
@@ -176,7 +186,9 @@ runDropTest({
     expectedLog: "{code: 21132, attr:{namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}",
 });
 
-jsTestLog("[6] Testing committed drop with new same-name collection created, between getMore calls.");
+jsTestLog(
+    "[6] Testing committed drop with new same-name collection created, between getMore calls.",
+);
 runDropTest({
     failPoint: "initialSyncHangCollectionClonerAfterHandlingBatchResponse",
     secondaryStartupParams: {collectionClonerBatchSize: 1},

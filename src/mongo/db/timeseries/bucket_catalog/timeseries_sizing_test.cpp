@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::timeseries::bucket_catalog {
+using namespace std::literals::string_view_literals;
 /**
  * The tests in this file estimate memory usage constants for time-series deployments. If any tests
  * in this file fail, please update the constant below and update the timeseries sizing sheet.
@@ -58,11 +33,11 @@ TEST(TimeseriesSizingConstants, OpenBucket) {
         contexts,
         BucketId{UUID::gen(), OID{}, BucketKey::Signature{}},
         BucketKey{UUID::gen(), BucketMetadata{contexts.global, BSONElement{}, boost::none}},
-        ""_sd,
+        ""sv,
         Date_t{},
         registry);
 
-    ASSERT_EQ(contexts.global.allocated(), kExpectedOpenBucketSize);
+    EXPECT_EQ(contexts.global.allocated(), kExpectedOpenBucketSize);
 }
 
 TEST(TimeseriesSizingConstants, ArchivedBucket) {
@@ -85,7 +60,7 @@ TEST(TimeseriesSizingConstants, ArchivedBucket) {
         numBuckets += stripe.archivedBuckets.size();
     }
 
-    ASSERT_EQ(memUsage / numBuckets, kExpectedArchivedBucketSize);
+    EXPECT_EQ(memUsage / numBuckets, kExpectedArchivedBucketSize);
 }
 
 TEST(TimeseriesSizingConstants, Schema) {
@@ -101,7 +76,7 @@ TEST(TimeseriesSizingConstants, Schema) {
 
     // Calculate overhead of storing an object in MinMax. Assuming that the element is stored once
     // internally.
-    ASSERT_EQ(context.allocated() - empty - obj.firstElement().size(),
+    EXPECT_EQ(context.allocated() - empty - obj.firstElement().size(),
               kExpectedSchemaSizePerElement);
 }
 
@@ -118,7 +93,7 @@ TEST(TimeseriesSizingConstants, MinMax) {
 
     // Calculate overhead of storing an object in MinMax. Assuming that the element is stored twice
     // internally.
-    ASSERT_EQ(context.allocated() - empty - (obj.firstElement().size() * 2),
+    EXPECT_EQ(context.allocated() - empty - (obj.firstElement().size() * 2),
               kExpectedMinMaxSizePerElement);
 }
 
@@ -138,7 +113,7 @@ TEST(TimeseriesSizingConstants, BSONColumnBuilder) {
         {
             BSONObjBuilder b;
             // Ensure we don't use RLE internally.
-            b.appendNumber(""_sd, i * kDelta + i % 2);
+            b.appendNumber(""sv, i * kDelta + i % 2);
             column.append(b.obj().firstElement());
             // Discard any unused data.
             [[maybe_unused]] auto diff = column.intermediate();
@@ -146,7 +121,7 @@ TEST(TimeseriesSizingConstants, BSONColumnBuilder) {
         memUsage += context.allocated();
     }
 
-    ASSERT_EQ(sizeof(column) + (memUsage - empty) / kMaxColumnSize,
+    EXPECT_EQ(sizeof(column) + (memUsage - empty) / kMaxColumnSize,
               kExpectedBSONColumnBuilderPerElement);
 }
 

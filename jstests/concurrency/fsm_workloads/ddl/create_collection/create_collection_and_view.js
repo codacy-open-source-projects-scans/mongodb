@@ -2,7 +2,12 @@
  * Repeatedly creates a collection and a view with the same namespace. Validates that we never
  * manage to have both a Collection and View created on the same namespace at the same time.
  *
- * @tags: [catches_command_failures, antithesis_incompatible]
+ * @tags: [
+ *   catches_command_failures,
+ *   antithesis_incompatible,
+ *   # TODO SERVER-132934: Enable test on the sharded TSAN variant.
+ *   incompatible_disaggregated_storage_sharded_tsan,
+ * ]
  */
 
 import {isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
@@ -61,11 +66,16 @@ export const $config = (function () {
             );
         },
         createCollection: (db, collName) => {
-            assert.commandWorkedOrFailedWithCode(db.createCollection(getCollectionName(collName)), allowedErrorCodes);
+            assert.commandWorkedOrFailedWithCode(
+                db.createCollection(getCollectionName(collName)),
+                allowedErrorCodes,
+            );
         },
         verifyNoDuplicates: (db, collName) => {
             // Check how many collections/views match our namespace.
-            const res = db.runCommand("listCollections", {filter: {name: getCollectionName(collName)}});
+            const res = db.runCommand("listCollections", {
+                filter: {name: getCollectionName(collName)},
+            });
             assert.commandWorked(res);
             // We expect that we only ever find 0 or 1. If we find 2 or more, then we managed to
             // create a view and collection on the same namespace simultaneously, which is a bug.

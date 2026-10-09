@@ -8,11 +8,15 @@
  * ]
  */
 
-import {seedWithTickerData, testAccumAgainstGroup} from "jstests/aggregation/extras/window_function_helpers.js";
+import {
+    seedWithTickerData,
+    testAccumAgainstGroup,
+} from "jstests/aggregation/extras/window_function_helpers.js";
 import {
     assertResultCloseToVal,
     assertResultEqToVal,
     runSetWindowStage,
+    testError,
 } from "jstests/aggregation/sources/setWindowFields/percentiles/percentile_util.js";
 
 const coll = db[jsTestName()];
@@ -57,7 +61,11 @@ for (let paramValue of paramValues) {
 
     // Run the suite of partition and bounds tests against the $percentile function. Will run
     // tests with removable and non-removable windows.
-    testAccumAgainstGroup(coll, "$percentile", [null, null], {p: [0.1, 0.6], input: "$price", method: "continuous"});
+    testAccumAgainstGroup(coll, "$percentile", [null, null], {
+        p: [0.1, 0.6],
+        input: "$price",
+        method: "continuous",
+    });
     testAccumAgainstGroup(coll, "$median", null, {input: "$price", method: "continuous"});
 
     // Test that $median and $percentile return null for windows which do not contain numeric
@@ -144,3 +152,9 @@ for (let paramValue of paramValues) {
         assert.eq(median, results[index].runningMedian);
     }
 }
+
+// A non-finite percentile must be rejected; see approximate_percentiles.js for context.
+testError(coll, {$percentile: {p: [NaN], input: "$price", method: "continuous"}}, 7750303);
+testError(coll, {$percentile: {p: [0.5, NaN], input: "$price", method: "continuous"}}, 7750303);
+testError(coll, {$percentile: {p: [Infinity], input: "$price", method: "continuous"}}, 7750303);
+testError(coll, {$percentile: {p: [-Infinity], input: "$price", method: "continuous"}}, 7750303);

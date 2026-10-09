@@ -1,40 +1,40 @@
 """Repository rules for db-contrib-tool"""
 
 load("//bazel:utils.bzl", "retry_download")
-load("@bazel_rules_mongo//utils:platforms_normalize.bzl", "ARCH_NORMALIZE_MAP", "OS_NORMALIZE_MAP")
+load("//bazel/platforms:normalize.bzl", "ARCH_NORMALIZE_MAP", "OS_NORMALIZE_MAP")
 
 URLS_MAP = {
     "linux_aarch64": {
-        "sha": "e45c30a8c1e1adf47569661f59c2239ee7f4b0e9ddd298cf205fce7ecc9daefa",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_linux_arm64.gz",
+        "sha": "c17e01efd76490d26a687d8198eba30992ed997742ec1d3f6f80444f0bb3cfb3",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_linux_arm64.gz",
     },
     "linux_x86_64": {
-        "sha": "6cadfa717715c174c48e49baf7c305538e8b907b4b7364947caa303dec651124",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_linux_x64.gz",
+        "sha": "9a3345195569ba106e699297bd5c692c68c83c4711f7d44ba1293a707ab66a3d",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_linux_x64.gz",
     },
     "linux_s390x": {
-        "sha": "71fef0159edf443cbce3be242c13f999a506cdf6962611df63d3dcc36e0137d9",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_linux_s390x.gz",
+        "sha": "5eeb99d829ced8586c2d68df8b5b5b2e986a06838f2d589d32fdf4c0237a4568",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_linux_s390x.gz",
     },
     "rhel8_ppc64le": {
-        "sha": "26cc9f44d741e7cdce1b69bd12b9111c47e78a1cb8de02fe0a0cbd7263da963b",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_rhel8_ppc64le.gz",
+        "sha": "3abc47feed9ae80f113a6e740a94e235f894efedcd7c4b38ad2bde354fbcd395",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_rhel8_ppc64le.gz",
     },
     "rhel9_ppc64le": {
-        "sha": "9f14cd09eee01ab82595dc6cc1819dbe96f6bb89e4661012d9e159231d999925",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_rhel9_ppc64le.gz",
+        "sha": "79121a0798ae644d5d9417405d1d790ea73e3c83e91ef6ed96ec43b03bcdbd2c",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_rhel9_ppc64le.gz",
     },
     "macos_x86_64": {
-        "sha": "def80ad7ee23ccd25870b4576936b14155f5bea36f71a998d6ba59214c06b895",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_darwin_x64.gz",
+        "sha": "cd2cd3db5c2944244267467f8014f648d73729cdbaa1b5a30d7ee60bbeabd48f",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_darwin_x64.gz",
     },
     "macos_aarch64": {
-        "sha": "c01c17a22974c133c3f7c039684824773a3357cd7f669c95ded204cc52f4e7f7",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_darwin_arm64.gz",
+        "sha": "b482d4769dfae740c79ec9a2e1e036272ab3985a0b0c400a750d5d939aae41bd",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_darwin_arm64.gz",
     },
     "windows_x86_64": {
-        "sha": "accb4fe32b554e5ed5f3339b03cb4358138eea2d1f4e6e395f4ddaea2e282589",
-        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.2.9/db-contrib-tool_v2.2.9_windows_x64.exe.gz",
+        "sha": "89de6772413f1e6665bfd9a7f30aeecf8bfacc9f1af8eccde687470d09cde640",
+        "url": "https://mdb-build-public.s3.amazonaws.com/db-contrib-tool-binaries/v2.4.6/db-contrib-tool_v2.4.6_windows_x64.exe.gz",
     },
 }
 
@@ -99,6 +99,7 @@ package(default_visibility = [
     "@//:__pkg__",
     "@//bazel/db_contrib_tool:__pkg__",
     "@//bazel/resmoke/multiversion:__pkg__",
+    "@//bazel/resmoke/mongot:__pkg__",
 ])
 load("@bazel_skylib//rules:native_binary.bzl", "native_binary")
 
@@ -112,10 +113,7 @@ native_binary(
 
     return None
 
-_db_contrib_tool = repository_rule(
+db_contrib_tool = repository_rule(
     implementation = _db_contrib_tool_download,
     attrs = {},
 )
-
-def db_contrib_tool():
-    _db_contrib_tool(name = "db_contrib_tool")

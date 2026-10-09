@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/hybrid_search_pipeline_builder.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -40,14 +13,18 @@
 #include "mongo/db/pipeline/document_source_union_with.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/string_map.h"
+
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 boost::intrusive_ptr<DocumentSource> HybridSearchPipelineBuilder::buildReplaceRootStage(
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -58,7 +35,7 @@ boost::intrusive_ptr<DocumentSource> HybridSearchPipelineBuilder::buildReplaceRo
 BSONObj HybridSearchPipelineBuilder::projectRemoveInternalFieldsObject() {
     BSONObjBuilder bob;
     {
-        BSONObjBuilder projectBob(bob.subobjStart("$project"_sd));
+        BSONObjBuilder projectBob(bob.subobjStart("$project"sv));
         projectBob.append(getInternalFieldsName(), 0);
         projectBob.done();
     }
@@ -73,7 +50,7 @@ HybridSearchPipelineBuilder::constructCalculatedFinalScoreDetails(
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     BSONObjBuilder bob;
     {
-        BSONObjBuilder addFieldsBob(bob.subobjStart("$addFields"_sd));
+        BSONObjBuilder addFieldsBob(bob.subobjStart("$addFields"sv));
         {
             BSONObjBuilder internalFieldsBob(addFieldsBob.subobjStart(getInternalFieldsName()));
             {
@@ -86,7 +63,7 @@ HybridSearchPipelineBuilder::constructCalculatedFinalScoreDetails(
                         fmt::format("${}_scoreDetails", pipelineName);
                     double weight = hybrid_scoring_util::getPipelineWeight(weights, pipelineName);
                     BSONObjBuilder mergeObjectsArrSubObj;
-                    mergeObjectsArrSubObj.append("inputPipelineName"_sd, pipelineName);
+                    mergeObjectsArrSubObj.append("inputPipelineName"sv, pipelineName);
                     constructCalculatedFinalScoreDetailsStageSpecificScoreDetails(
                         mergeObjectsArrSubObj, internalFieldsPipelineName, weight);
                     mergeObjectsArrSubObj.done();
@@ -95,7 +72,7 @@ HybridSearchPipelineBuilder::constructCalculatedFinalScoreDetails(
                     mergeObjectsArr.append(
                         fmt::format("${}.{}_scoreDetails", getInternalFieldsName(), pipelineName));
                     mergeObjectsArr.done();
-                    BSONObj mergeObjectsObj = BSON("$mergeObjects"_sd << mergeObjectsArr.arr());
+                    BSONObj mergeObjectsObj = BSON("$mergeObjects"sv << mergeObjectsArr.arr());
                     calculatedScoreDetailsArr.append(mergeObjectsObj);
                 }
                 calculatedScoreDetailsArr.done();
@@ -113,14 +90,9 @@ std::list<boost::intrusive_ptr<DocumentSource>>
 HybridSearchPipelineBuilder::constructDesugaredOutput(
     const std::map<std::string, std::unique_ptr<Pipeline>>& inputPipelines,
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
-    // It is currently necessary to annotate on the ExpressionContext that this is a
-    // hybrid search ($rankFusion or $scoreFusion) query. Once desugaring happens, there's no
-    // way to identity from the (desugared) pipeline alone that it came from hybrid search. We
-    // need to know if it came from hybrid search so we can reject the query if it is run over a
-    // view.
-
-    // This flag's value is also used to gate an internal client error. See
-    // search_helper::validateViewNotSetByUser(...) for more details.
+    // Annotate on the ExpressionContext that this is a hybrid search ($rankFusion/$scoreFusion)
+    // query: once desugared, the pipeline alone no longer reveals its hybrid-search origin, which
+    // downstream view handling needs to know so it can reject the query if it is run over a view.
     pExpCtx->setIsHybridSearch();
 
     std::list<boost::intrusive_ptr<DocumentSource>> outputStages;
@@ -158,23 +130,41 @@ HybridSearchPipelineBuilder::constructDesugaredOutput(
             // to append it to the total desugared output. The input pipeline consists of the
             // same stages returned by 'buildInputPipelineDesugaringStages'.
             auto unionWithPipeline = Pipeline::create(initialStagesInInputPipeline, pExpCtx);
-            std::vector<BSONObj> bsonPipeline = unionWithPipeline->serializeToBson();
+            // Serialize the $unionWith sub-pipeline in user-facing form so that any nested
+            // $search/$searchMeta/$vectorSearch stage re-lite-parses cleanly. Without this,
+            // the serialized form would carry internal routing fields (e.g. mongotQuery), which
+            // would be rejected by the recursive LiteParse field check on external clients.
+            query_shape::SerializationOptions opts{.serializeForReparse = true};
+            std::vector<BSONObj> bsonPipeline = unionWithPipeline->serializeToBson(opts);
 
-            // TODO SERVER-121091 This should have been moved into the LiteParsedDesugarer so the
+            // TODO SERVER-121094 This should have been moved into the LiteParsedDesugarer so the
             // check should be redundant.
             auto ifrCtx = pExpCtx->getIfrContext();
             auto hybridSearchFlagEnabled = ifrCtx &&
                 ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
             if (hybridSearchFlagEnabled) {
                 auto unionNss = pExpCtx->getUserNss();
-                UnionWithStageParams params(
-                    std::move(unionNss), std::move(bsonPipeline), false, true, BSONElement());
+
+                // Build the internal $unionWith's LPP from the raw input pipeline, WITHOUT view
+                // stages: parsePipelineFromLPPWithMaybeViewDefinition applies the view exactly
+                // once, and pre-stitching here applied it twice, breaking position-sensitive
+                // first stages ($text, $search).
+                LiteParsedPipeline lpp(
+                    unionNss, bsonPipeline, false, LiteParserOptions{.ifrContext = ifrCtx});
+                lpp.makeOwned();
+                auto subParams = lpp.getStageParams();
+
+                UnionWithStageParams params(std::move(unionNss),
+                                            std::move(bsonPipeline),
+                                            /* isHybridSearch= */ true,
+                                            /* ownedBsonObj= */ BSONObj{},
+                                            std::move(subParams));
                 auto docSources = DocumentSourceUnionWith::createFromStageParams(params, pExpCtx);
                 outputStages.emplace_back(docSources.front());
             } else {
-                auto collName = pExpCtx->getUserNss().coll();
-                BSONObj inputToUnionWith =
-                    BSON("$unionWith" << BSON("coll" << collName << "pipeline" << bsonPipeline));
+                auto unionNss = pExpCtx->getUserNss();
+                BSONObj inputToUnionWith = BSON(
+                    "$unionWith" << BSON("coll" << unionNss.coll() << "pipeline" << bsonPipeline));
                 auto unionWithStage = DocumentSourceUnionWith::createFromBson(
                     inputToUnionWith.firstElement(), pExpCtx);
                 outputStages.emplace_back(unionWithStage);
@@ -226,11 +216,11 @@ HybridSearchPipelineBuilder::buildGroupAndReplaceRootStages(
     // }}
     BSONObjBuilder groupSpecBob;
     {
-        BSONObjBuilder gBob(groupSpecBob.subobjStart("$group"_sd));
+        BSONObjBuilder gBob(groupSpecBob.subobjStart("$group"sv));
         gBob.append("_id", fmt::format("${}._id", internalDocsName));
         gBob.append(internalDocsName, BSON("$first" << fmt::format("${}", internalDocsName)));
 
-        auto accumulateScalarField = [&](StringData field, const std::string& internalPath) {
+        auto accumulateScalarField = [&](std::string_view field, const std::string& internalPath) {
             gBob.append(fmt::format("{}{}", kHsFlatFieldPrefix, field),
                         BSON("$max" << BSON("$ifNull"
                                             << BSON_ARRAY(fmt::format("${}", internalPath) << 0))));
@@ -280,17 +270,17 @@ HybridSearchPipelineBuilder::buildGroupAndReplaceRootStages(
 
     BSONObjBuilder rrSpecBob;
     {
-        BSONObjBuilder rrBob(rrSpecBob.subobjStart("$replaceRoot"_sd));
-        BSONObjBuilder newRootBob(rrBob.subobjStart("newRoot"_sd));
+        BSONObjBuilder rrBob(rrSpecBob.subobjStart("$replaceRoot"sv));
+        BSONObjBuilder newRootBob(rrBob.subobjStart("newRoot"sv));
         {
-            BSONArrayBuilder mergeArr(newRootBob.subarrayStart("$mergeObjects"_sd));
+            BSONArrayBuilder mergeArr(newRootBob.subarrayStart("$mergeObjects"sv));
             // Add 'internalDocsName' to promote user doc.
             mergeArr.append(fmt::format("${}", internalDocsName));
             BSONObjBuilder wrapperBob;
             {
                 BSONObjBuilder internalFieldsBob(wrapperBob.subobjStart(internalFieldsName));
 
-                auto appendFlatRef = [&](StringData field) {
+                auto appendFlatRef = [&](std::string_view field) {
                     internalFieldsBob.append(field,
                                              fmt::format("${}{}", kHsFlatFieldPrefix, field));
                 };

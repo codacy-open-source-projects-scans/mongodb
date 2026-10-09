@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/lock_manager/locker.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/admission/ticketing/admission_context.h"
@@ -41,7 +14,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/shard_role/lock_manager/fast_map_noalloc.h"
+#include "mongo/db/shard_role/lock_manager/fast_list_based_map.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/lock_manager/lock_stats.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
@@ -201,7 +174,8 @@ TEST_F(LockerTest, FailPointInLockFailsNonIntentLocksIfTheyCannotBeImmediatelyGr
 
         // The timed out MODE_S attempt shouldn't be present in the map of lock requests because it
         // won't ever be granted.
-        ASSERT(locker2.getRequestsForTest().find(resId).finished());
+        auto requestsMap = locker2.getRequestsForTest();
+        ASSERT(requestsMap.find(resId) == requestsMap.end());
         locker2.unlockGlobal();
 
         // MODE_X attempt.
@@ -213,7 +187,8 @@ TEST_F(LockerTest, FailPointInLockFailsNonIntentLocksIfTheyCannotBeImmediatelyGr
 
         // The timed out MODE_X attempt shouldn't be present in the map of lock requests because it
         // won't ever be granted.
-        ASSERT(locker3.getRequestsForTest().find(resId).finished());
+        requestsMap = locker3.getRequestsForTest();
+        ASSERT(requestsMap.find(resId) == requestsMap.end());
         locker3.unlockGlobal();
     }
 
@@ -466,7 +441,7 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
 
     // Recursive global lock.
     locker.lockGlobal(opCtx.get(), MODE_IX);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 2U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 2U);
 
     ASSERT_FALSE(locker.unlockGlobal());
 
@@ -475,10 +450,10 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
     ASSERT_FALSE(locker.unlock(resIdDatabase));
     ASSERT_FALSE(locker.unlockGlobal());
     ASSERT_EQ(locker.numResourcesToUnlockAtEndUnitOfWorkForTest(), 3UL);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
 
     locker.releaseWriteUnitOfWork(&lockInfo);
     ASSERT_EQ(lockInfo.unlockPendingLocks.size(), 3UL);
@@ -486,11 +461,11 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
     // Things should still be locked.
     ASSERT_EQUALS(MODE_X, locker.getLockMode(resIdCollection));
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdDatabase));
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
     ASSERT(locker.isLocked());
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
 
     // The locker is no longer participating the two-phase locking.
     ASSERT_FALSE(locker.inAWriteUnitOfWork());
@@ -512,16 +487,16 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
 
         locker.unlock(resIdCollection2);
         ASSERT_EQ(locker.numResourcesToUnlockAtEndUnitOfWorkForTest(), 1UL);
-        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 0U);
-        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 2U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 0U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 2U);
         locker.unlock(resIdDatabase);
         ASSERT_EQ(locker.numResourcesToUnlockAtEndUnitOfWorkForTest(), 1UL);
-        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 0U);
-        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 0U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
         locker.unlockGlobal();
         ASSERT_EQ(locker.numResourcesToUnlockAtEndUnitOfWorkForTest(), 1UL);
-        ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 0U);
-        ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 0U);
+        ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
         locker.endWriteUnitOfWork();
     }
     ASSERT_FALSE(locker.inAWriteUnitOfWork());
@@ -529,11 +504,11 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
 
     ASSERT_EQUALS(MODE_X, locker.getLockMode(resIdCollection));
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdDatabase));
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
     ASSERT(locker.isLocked());
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
     // The new locks has been released.
     ASSERT_EQUALS(MODE_NONE, locker.getLockMode(resIdCollection2));
 
@@ -545,11 +520,11 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
     // Make sure things are still locked.
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdDatabase));
     ASSERT_EQUALS(MODE_X, locker.getLockMode(resIdCollection));
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
     ASSERT(locker.isLocked());
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
 
     locker.endWriteUnitOfWork();
 
@@ -560,7 +535,8 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithoutUnlock) {
     ASSERT_EQUALS(MODE_NONE, locker.getLockMode(resIdCollection2));
     ASSERT_FALSE(locker.isLocked());
     ASSERT_EQ(locker.numResourcesToUnlockAtEndUnitOfWorkForTest(), 0U);
-    ASSERT(locker.getRequestsForTest().find(resourceIdGlobal).finished());
+    auto requestsSnapshot = locker.getRequestsForTest();
+    ASSERT(requestsSnapshot.find(resourceIdGlobal) == requestsSnapshot.end());
 }
 
 TEST_F(LockerTest, releaseAndRestoreReadOnlyWriteUnitOfWork) {
@@ -655,9 +631,9 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithRecursiveLocks) {
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdDatabase));
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdCollection));
     ASSERT_TRUE(locker.isWriteLocked());
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 2U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 2U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->recursiveCount, 2U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 2U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 2U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().recursiveCount, 2U);
 
     // Unlock them so that they will be pending to unlock.
     ASSERT_FALSE(locker.unlock(resIdCollection));
@@ -669,23 +645,23 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithRecursiveLocks) {
     ASSERT_TRUE(locker.isWriteLocked());
     // Make sure unlocking converted locks decrements the locks' recursiveCount instead of
     // incrementing unlockPending.
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 0U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 0U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().unlockPending, 0U);
 
     // Unlock again so unlockPending == recursiveCount.
     ASSERT_FALSE(locker.unlock(resIdCollection));
     ASSERT_FALSE(locker.unlock(resIdDatabase));
     ASSERT_FALSE(locker.unlockGlobal());
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().unlockPending, 1U);
 
     locker.releaseWriteUnitOfWorkAndUnlock(&lockInfo);
 
@@ -702,12 +678,12 @@ TEST_F(LockerTest, releaseAndRestoreWriteUnitOfWorkWithRecursiveLocks) {
     ASSERT_EQUALS(MODE_IX, locker.getLockMode(resIdCollection));
     ASSERT_TRUE(locker.isWriteLocked());
     // Make sure locks were coalesced after restore and are pending to unlock as before.
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->recursiveCount, 1U);
-    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection).objAddr()->unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resourceIdGlobal)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdDatabase)->value().unlockPending, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().recursiveCount, 1U);
+    ASSERT_EQ(locker.getRequestsForTest().find(resIdCollection)->value().unlockPending, 1U);
 
     locker.endWriteUnitOfWork();
 
@@ -1191,12 +1167,12 @@ TEST_F(LockerTest, ReaquireLockPendingUnlock) {
     ASSERT_FALSE(locker.unlock(resId));
     ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
     ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
-    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+    ASSERT(locker.getRequestsForTest().find(resId)->value().unlockPending == 1);
 
     // Reacquire lock pending unlock.
     locker.lock(opCtx.get(), resId, MODE_X);
     ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
-    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 0);
+    ASSERT(locker.getRequestsForTest().find(resId)->value().unlockPending == 0);
 
     locker.endWriteUnitOfWork();
 
@@ -1223,12 +1199,12 @@ TEST_F(LockerTest, AcquireLockPendingUnlockWithCoveredMode) {
     ASSERT_FALSE(locker.unlock(resId));
     ASSERT_TRUE(locker.isLockHeldForMode(resId, MODE_X));
     ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 1);
-    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 1);
+    ASSERT(locker.getRequestsForTest().find(resId)->value().unlockPending == 1);
 
     // Attempt to lock the resource with a mode that is covered by the existing mode.
     locker.lock(opCtx.get(), resId, MODE_IX);
     ASSERT(locker.numResourcesToUnlockAtEndUnitOfWorkForTest() == 0);
-    ASSERT(locker.getRequestsForTest().find(resId).objAddr()->unlockPending == 0);
+    ASSERT(locker.getRequestsForTest().find(resId)->value().unlockPending == 0);
 
     locker.endWriteUnitOfWork();
 
@@ -1357,6 +1333,82 @@ DEATH_TEST_F(LockerTestDeathTest, LockOrderingViolationCrashesTheServer, "991500
     Lock::ResourceLock lockA{opCtx.get(), mutexA.getRid(), MODE_X};
 }
 #endif
+
+TEST_F(LockerTest, GetConflictingLockerIds_ReturnsEmptyWhenNoConflicts) {
+    auto opCtx = makeOperationContext();
+
+    const ResourceId resId(
+        RESOURCE_COLLECTION,
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection"));
+
+    Locker locker1(opCtx->getServiceContext());
+    locker1.lockGlobal(opCtx.get(), MODE_IS);
+    locker1.lock(opCtx.get(), resId, MODE_IS);
+
+    // MODE_S is compatible with MODE_IS, so no conflicts.
+    auto conflicting = locker1.getConflictingLockerIds(resId, MODE_S);
+    ASSERT_TRUE(conflicting.empty());
+
+    locker1.unlock(resId);
+    locker1.unlockGlobal();
+}
+
+TEST_F(LockerTest, GetConflictingLockerIds_ReturnsConflictingHolder) {
+    auto opCtx = makeOperationContext();
+
+    const ResourceId resId(
+        RESOURCE_COLLECTION,
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection"));
+
+    // Use MODE_X (non-intent) for testing to avoid the partitioned lock fast path.
+    Locker locker1(opCtx->getServiceContext());
+    locker1.lockGlobal(opCtx.get(), MODE_IX);
+    locker1.lock(opCtx.get(), resId, MODE_X);
+
+    // MODE_S conflicts with MODE_X.
+    auto conflicting = locker1.getConflictingLockerIds(resId, MODE_S);
+    ASSERT_EQ(conflicting.size(), 1U);
+    ASSERT_EQ(conflicting[0], locker1.getId());
+
+    locker1.unlock(resId);
+    locker1.unlockGlobal();
+}
+
+TEST_F(LockerTest, GetConflictingLockerIds_ReturnsEmptyForUnlockedResource) {
+    auto opCtx = makeOperationContext();
+
+    const ResourceId resId(
+        RESOURCE_COLLECTION,
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection"));
+
+    Locker locker1(opCtx->getServiceContext());
+
+    // No one holds the lock.
+    auto conflicting = locker1.getConflictingLockerIds(resId, MODE_X);
+    ASSERT_TRUE(conflicting.empty());
+}
+
+DEATH_TEST_F(LockerTestDeathTest,
+             GetConflictingLockerIdsInvariantModeIS,
+             "getConflictingLockerIds does not support intent modes") {
+    auto opCtx = makeOperationContext();
+    const ResourceId resId(
+        RESOURCE_COLLECTION,
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection"));
+    Locker locker(opCtx->getServiceContext());
+    locker.getConflictingLockerIds(resId, MODE_IS);
+}
+
+DEATH_TEST_F(LockerTestDeathTest,
+             GetConflictingLockerIdsInvariantModeIX,
+             "getConflictingLockerIds does not support intent modes") {
+    auto opCtx = makeOperationContext();
+    const ResourceId resId(
+        RESOURCE_COLLECTION,
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection"));
+    Locker locker(opCtx->getServiceContext());
+    locker.getConflictingLockerIds(resId, MODE_IX);
+}
 
 }  // namespace
 }  // namespace mongo

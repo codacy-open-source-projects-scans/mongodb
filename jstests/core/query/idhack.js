@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   requires_multi_updates,
 //   requires_non_retryable_writes,
@@ -10,7 +11,11 @@
 //   exclude_from_timeseries_crud_passthrough,
 // ]
 // Include helpers for analyzing explain output.
-import {getWinningPlanFromExplain, isExpress, isIdhackOrExpress} from "jstests/libs/query/analyze_plan.js";
+import {
+    getWinningPlanFromExplain,
+    isExpress,
+    isIdhackOrExpress,
+} from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
 
@@ -184,6 +189,9 @@ assert(!isIdhackOrExpress(db, winningPlan), winningPlan);
         const qsutils = new QuerySettingsUtils(db, viewName);
         const query = qsutils.makeFindQueryInstance({filter: {_id: 1}});
         const queryShapeHash = qsutils.getQueryShapeHashFromExplain(query);
-        assert(!queryShapeHash, `Expected no QueryShapeHash for IDHACK query, found ${queryShapeHash}`);
+        assert(
+            !queryShapeHash,
+            `Expected no QueryShapeHash for IDHACK query, found ${queryShapeHash}`,
+        );
     }
 }

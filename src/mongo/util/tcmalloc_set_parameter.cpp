@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #ifdef _WIN32
 #define NVALGRIND
@@ -53,6 +27,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
@@ -69,11 +44,12 @@
 namespace mongo {
 namespace {
 
-constexpr absl::string_view toStringView(StringData s) {
+constexpr absl::string_view toStringView(std::string_view s) {
     return {s.data(), s.size()};
 }
 
-StatusWith<size_t> validateTCMallocValue(StringData name, const BSONElement& newValueElement) {
+StatusWith<size_t> validateTCMallocValue(std::string_view name,
+                                         const BSONElement& newValueElement) {
     if (!newValueElement.isNumber()) {
         return {ErrorCodes::TypeMismatch,
                 fmt::format(
@@ -98,7 +74,7 @@ StatusWith<size_t> validateTCMallocValue(StringData name, const BSONElement& new
 #ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
 // Although there is only one valid property to get, we use a function to conform to the get/set
 // tcmalloc api.
-size_t getTcmallocProperty(StringData propName) {
+size_t getTcmallocProperty(std::string_view propName) {
     iassert(ErrorCodes::InternalError,
             fmt::format("Failed to retreive tcmalloc property: {}", propName),
             propName == kMaxPerCPUCacheSizePropertyName);
@@ -107,7 +83,7 @@ size_t getTcmallocProperty(StringData propName) {
 
 // Although there is only one valid property to set, we use a function to conform to the get/set
 // tcmalloc api.
-void setTcmallocProperty(StringData propName, size_t value) {
+void setTcmallocProperty(std::string_view propName, size_t value) {
     if (!RUNNING_ON_VALGRIND) {  // NOLINT
         iassert(ErrorCodes::InternalError,
                 fmt::format("Failed to set internal tcmalloc property: {}", propName),
@@ -126,7 +102,7 @@ void setMemoryReleaseRate(TcmallocReleaseRateT val) {
 }
 
 #elif defined(MONGO_CONFIG_TCMALLOC_GPERF)
-size_t getTcmallocProperty(StringData propName) {
+size_t getTcmallocProperty(std::string_view propName) {
     size_t value;
     iassert(ErrorCodes::InternalError,
             fmt::format("Failed to retreive tcmalloc property: {}", propName),
@@ -134,7 +110,7 @@ size_t getTcmallocProperty(StringData propName) {
     return value;
 }
 
-void setTcmallocProperty(StringData propName, size_t value) {
+void setTcmallocProperty(std::string_view propName, size_t value) {
     if (!RUNNING_ON_VALGRIND) {  // NOLINT
         iassert(
             ErrorCodes::InternalError,
@@ -154,22 +130,22 @@ void setMemoryReleaseRate(TcmallocReleaseRateT val) {
 
 namespace {
 template <typename T>
-constexpr StringData kParameterName;
+constexpr std::string_view kParameterName;
 
 template <>
-constexpr StringData kParameterName<TCMallocMaxPerCPUCacheSizeServerParameter> =
+constexpr std::string_view kParameterName<TCMallocMaxPerCPUCacheSizeServerParameter> =
     kMaxPerCPUCacheSizePropertyName;
 
 template <>
-constexpr StringData kParameterName<TCMallocMaxTotalThreadCacheBytesServerParameter> =
+constexpr std::string_view kParameterName<TCMallocMaxTotalThreadCacheBytesServerParameter> =
     kMaxTotalThreadCacheBytesPropertyName;
 
 template <>
-constexpr StringData kParameterName<TCMallocAggressiveMemoryDecommitServerParameter> =
+constexpr std::string_view kParameterName<TCMallocAggressiveMemoryDecommitServerParameter> =
     kAggressiveMemoryDecommitPropertyName;
 
 template <typename T>
-void doAppendProperty(BSONObjBuilder* b, StringData name) {
+void doAppendProperty(BSONObjBuilder* b, std::string_view name) {
     try {
         b->appendNumber(name, static_cast<long long>(getTcmallocProperty(kParameterName<T>)));
     } catch (const ExceptionFor<ErrorCodes::InternalError>& ex) {
@@ -178,7 +154,7 @@ void doAppendProperty(BSONObjBuilder* b, StringData name) {
 }
 
 template <typename T>
-Status doSetProperty(StringData name, const BSONElement& newValueElement) {
+Status doSetProperty(std::string_view name, const BSONElement& newValueElement) {
     auto swValue = validateTCMallocValue(name, newValueElement);
     if (!swValue.isOK()) {
         return swValue.getStatus();
@@ -192,7 +168,7 @@ Status doSetProperty(StringData name, const BSONElement& newValueElement) {
 }
 
 template <typename T>
-Status doSetPropertyFromString(StringData str) {
+Status doSetPropertyFromString(std::string_view str) {
     size_t value;
     Status status = NumberParser{}(str, &value);
     if (!status.isOK()) {
@@ -209,7 +185,7 @@ Status doSetPropertyFromString(StringData str) {
 
 void TCMallocMaxPerCPUCacheSizeServerParameter::append(OperationContext*,
                                                        BSONObjBuilder* b,
-                                                       StringData name,
+                                                       std::string_view name,
                                                        const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
     doAppendProperty<TCMallocMaxPerCPUCacheSizeServerParameter>(b, name);
@@ -229,7 +205,7 @@ Status TCMallocMaxPerCPUCacheSizeServerParameter::set(const BSONElement& newValu
     return Status::OK();
 }
 
-Status TCMallocMaxPerCPUCacheSizeServerParameter::setFromString(StringData str,
+Status TCMallocMaxPerCPUCacheSizeServerParameter::setFromString(std::string_view str,
                                                                 const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
     return doSetPropertyFromString<TCMallocMaxPerCPUCacheSizeServerParameter>(str);
@@ -244,7 +220,7 @@ Status TCMallocMaxPerCPUCacheSizeServerParameter::setFromString(StringData str,
 
 void TCMallocMaxTotalThreadCacheBytesServerParameter::append(OperationContext*,
                                                              BSONObjBuilder* b,
-                                                             StringData name,
+                                                             std::string_view name,
                                                              const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GPERF
     doAppendProperty<TCMallocMaxTotalThreadCacheBytesServerParameter>(b, name);
@@ -265,7 +241,7 @@ Status TCMallocMaxTotalThreadCacheBytesServerParameter::set(const BSONElement& n
 }
 
 Status TCMallocMaxTotalThreadCacheBytesServerParameter::setFromString(
-    StringData str, const boost::optional<TenantId>&) {
+    std::string_view str, const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GPERF
     return doSetPropertyFromString<TCMallocMaxTotalThreadCacheBytesServerParameter>(str);
 #endif  // MONGO_CONFIG_TCMALLOC_GPERF
@@ -279,7 +255,7 @@ Status TCMallocMaxTotalThreadCacheBytesServerParameter::setFromString(
 
 void TCMallocAggressiveMemoryDecommitServerParameter::append(OperationContext*,
                                                              BSONObjBuilder* b,
-                                                             StringData name,
+                                                             std::string_view name,
                                                              const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GPERF
     doAppendProperty<TCMallocAggressiveMemoryDecommitServerParameter>(b, name);
@@ -300,7 +276,7 @@ Status TCMallocAggressiveMemoryDecommitServerParameter::set(const BSONElement& n
 }
 
 Status TCMallocAggressiveMemoryDecommitServerParameter::setFromString(
-    StringData str, const boost::optional<TenantId>&) {
+    std::string_view str, const boost::optional<TenantId>&) {
 #ifdef MONGO_CONFIG_TCMALLOC_GPERF
     return doSetPropertyFromString<TCMallocAggressiveMemoryDecommitServerParameter>(str);
 #endif  //  MONGO_CONFIG_TCMALLOC_GPERF
@@ -314,12 +290,12 @@ Status TCMallocAggressiveMemoryDecommitServerParameter::setFromString(
 
 void TCMallocReleaseRateServerParameter::append(OperationContext*,
                                                 BSONObjBuilder* builder,
-                                                StringData fieldName,
+                                                std::string_view fieldName,
                                                 const boost::optional<TenantId>&) {
     builder->append(fieldName, getMemoryReleaseRate());
 }
 
-Status TCMallocReleaseRateServerParameter::setFromString(StringData tcmallocReleaseRate,
+Status TCMallocReleaseRateServerParameter::setFromString(std::string_view tcmallocReleaseRate,
                                                          const boost::optional<TenantId>&) {
     double value;
     Status status = NumberParser{}(tcmallocReleaseRate, &value);

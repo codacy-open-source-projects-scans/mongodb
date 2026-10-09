@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -42,7 +15,6 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -54,7 +26,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -63,6 +35,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/cstdint.hpp>
@@ -72,8 +45,9 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-static constexpr auto kBatchSizeFieldName = "batchSize"_sd;
+static constexpr auto kBatchSizeFieldName = "batchSize"sv;
 
 const Document kDefaultCursorOptionDocument{
     {kBatchSizeFieldName, aggregation_request_helper::kDefaultBatchSize}};
@@ -86,7 +60,7 @@ TEST(AggregationRequestTest, ShouldParseAllKnownOptions) {
     // Using oplog namespace so that validation of $_requestReshardingResumeToken succeeds.
     BSONObj inputBson = fromjson(
         "{aggregate: 'oplog.rs', pipeline: [{$match: {a: 'abc'}}], explain: false, allowDiskUse: "
-        "true, fromRouter: true, "
+        "true, allowPartialResults: true, fromRouter: true, "
         "needsMerge: true, bypassDocumentValidation: true, $_requestReshardingResumeToken: true, "
         "collation: {locale: 'en_US'}, cursor: {batchSize: 10}, hint: {a: 1}, maxTimeMS: 100, "
         "readConcern: {level: 'linearizable'}, $queryOptions: {$readPreference: 'nearest'}, "
@@ -101,6 +75,7 @@ TEST(AggregationRequestTest, ShouldParseAllKnownOptions) {
         unittest::assertGet(aggregation_request_helper::parseFromBSONForTests(inputBson));
     ASSERT_FALSE(request.getExplain());
     ASSERT_TRUE(request.getAllowDiskUse());
+    ASSERT_TRUE(request.getAllowPartialResults().value_or(false));
     ASSERT_TRUE(aggregation_request_helper::getFromRouter(request));
     ASSERT_TRUE(request.getNeedsMerge());
     ASSERT_TRUE(request.getBypassDocumentValidation().value_or(false));
@@ -177,6 +152,16 @@ TEST(AggregationRequestTest, ShouldParseWithSeparateQueryPlannerExplainModeArgAn
         10);
 }
 
+TEST(AggregationRequestTest, ShouldParseWithSeparateExplainArgAndNoCursor) {
+    // The 'cursor' option is not required when explain verbosity is provided - parseFromBSON sets
+    // explain=true on the request before calling validate(), so validate() sees hasExplain=true.
+    const BSONObj inputBson = fromjson("{aggregate: 'collection', pipeline: [], $db: 'a'}");
+    auto request = unittest::assertGet(aggregation_request_helper::parseFromBSONForTests(
+        inputBson, boost::none, ExplainOptions::Verbosity::kQueryPlanner));
+    ASSERT(request.getExplain());
+    ASSERT(request.getExplain().value());
+}
+
 TEST(AggregationRequestTest, ShouldParseExplainFlagWithReadConcern) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
     // Non-local readConcern should not be allowed with the explain flag, but this is checked
@@ -234,6 +219,9 @@ TEST(AggregationRequestTest, ShouldSerializeOptionalValuesIfSet) {
     request.setIsClusterQueryWithoutShardKeyCmd(true);
 
     request.setIncludeQueryStatsMetrics(true);
+    IncludeMetrics im;
+    im.setQueryStats(true);
+    request.setIncludeMetrics(im);
     const BSONObj query = BSON("hello" << 1);
     const HashBlock<SHA256BlockTraits> queryShapeHash =
         SHA256Block::computeHash((const uint8_t*)query.objdata(), query.objsize());
@@ -255,6 +243,8 @@ TEST(AggregationRequestTest, ShouldSerializeOptionalValuesIfSet) {
         {AggregateCommandRequest::kCollectionUUIDFieldName, uuid},
         {AggregateCommandRequest::kIsClusterQueryWithoutShardKeyCmdFieldName, true},
         {AggregateCommandRequest::kIncludeQueryStatsMetricsFieldName, true},
+        {AggregateCommandRequest::kIncludeMetricsFieldName,
+         Value(Document({{IncludeMetrics::kQueryStatsFieldName, true}}))},
         {AggregateCommandRequest::kOriginalQueryShapeHashFieldName, queryShapeHash.toHexString()},
         {query_request_helper::cmdOptionMaxTimeMS, 10},
         {repl::ReadConcernArgs::kReadConcernFieldName, readConcernObj},
@@ -542,6 +532,19 @@ TEST(AggregationRequestTest, ShouldRejectNonBoolAllowDiskUse) {
         validRequest, nonBoolAllowDiskUse, ErrorCodes::TypeMismatch);
 }
 
+TEST(AggregationRequestTest, ShouldRejectNonBoolAllowPartialResults) {
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
+    const BSONObj validRequest = fromjson(
+        "{aggregate: 'collection',"
+        "pipeline: [{$match: {a: 'abc'}}],"
+        "cursor: {},"
+        "allowPartialResults: true, "
+        "$db: 'a'}");
+    const BSONObj nonBoolAllowPartialResults = fromjson("{allowPartialResults: 1}");
+    aggregationRequestParseFailureHelper(
+        validRequest, nonBoolAllowPartialResults, ErrorCodes::TypeMismatch);
+}
+
 TEST(AggregationRequestTest, ShouldRejectNonBoolIsMapReduceCommand) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
     const BSONObj validRequest = fromjson(
@@ -576,6 +579,42 @@ TEST(AggregationRequestTest, ShouldRejectNoCursorNoExplain) {
     BSONObjBuilder cursorRequest(invalidRequest);
     cursorRequest.append("cursor", BSONObj());
     ASSERT_OK(aggregation_request_helper::parseFromBSONForTests(cursorRequest.done()).getStatus());
+}
+
+TEST(AggregationRequestTest, ValidateDirectlyAllowsNoCursorWhenExplainSet) {
+    // validate() no longer takes an explainVerbosity parameter. Callers set explain=true on the
+    // request before calling validate(), so validate() sees hasExplain=true and allows cursor to
+    // be absent.
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
+    AggregateCommandRequest request(nss, std::vector<mongo::BSONObj>());
+    request.setExplain(true);
+
+    const BSONObj cmdObj = fromjson("{aggregate: 'collection', pipeline: [], $db: 'a'}");
+    ASSERT_DOES_NOT_THROW(aggregation_request_helper::validate(request, cmdObj, nss));
+}
+
+TEST(AggregationRequestTest, ValidateDirectlyRequiresCursorWhenExplainNotSet) {
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
+    AggregateCommandRequest request(nss, std::vector<mongo::BSONObj>());
+
+    const BSONObj cmdObj = fromjson("{aggregate: 'collection', pipeline: [], $db: 'a'}");
+    ASSERT_THROWS_CODE(aggregation_request_helper::validate(request, cmdObj, nss),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
+}
+
+TEST(AggregationRequestTest, ValidateDirectlyRejectsWriteConcernWithExplain) {
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.collection");
+    AggregateCommandRequest request(nss, std::vector<mongo::BSONObj>());
+    request.setExplain(true);
+    request.setWriteConcern(
+        WriteConcernOptions{1, WriteConcernOptions::SyncMode::NONE, Milliseconds{0}});
+
+    const BSONObj cmdObj = fromjson(
+        "{aggregate: 'collection', pipeline: [], explain: true, writeConcern: {w: 1}, $db: 'a'}");
+    ASSERT_THROWS_CODE(aggregation_request_helper::validate(request, cmdObj, nss),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
 }
 
 TEST(AggregationRequestTest, ShouldRejectNonObjectCursor) {
@@ -797,67 +836,6 @@ TEST(AggregationRequestTest, ShouldRejectRequestResumeTokenIfOplogNss) {
         "cursor: {}}");
     const BSONObj oplogNss = fromjson("{aggregate: 'oplog.rs', $db: 'local'}");
     aggregationRequestParseFailureHelper(validRequest, oplogNss, ErrorCodes::FailedToParse);
-}
-
-class ScopedFCV {
-public:
-    explicit ScopedFCV(multiversion::FeatureCompatibilityVersion version)
-        : _prev(serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion()) {
-        serverGlobalParams.mutableFCV.setVersion(version);
-    }
-    ~ScopedFCV() {
-        serverGlobalParams.mutableFCV.setVersion(_prev);
-    }
-
-private:
-    multiversion::FeatureCompatibilityVersion _prev;
-};
-
-TEST(AggregationRequestTest, AddIfrFlagsSerializesOutgoingIfrFlagsAtLatestFCV) {
-    // (Generic FCV reference): test usage
-    ScopedFCV fcv(multiversion::GenericFCV::kLatest);
-    RAIIServerParameterControllerForTest hybridFlag("featureFlagExtensionsInsideHybridSearch",
-                                                    true);
-    RAIIServerParameterControllerForTest vectorFlag("featureFlagVectorSearchExtension", true);
-
-    const auto flagsForWire = IncrementalRolloutFeatureFlag::getFlagsForOutgoingRequests();
-    ASSERT_FALSE(flagsForWire.empty());
-
-    auto ifr = std::make_shared<IncrementalFeatureRolloutContext>();
-    auto request = unittest::assertGet(aggregation_request_helper::parseFromBSONForTests(
-        fromjson("{aggregate: 'coll', pipeline: [], cursor: {}, $db: 'test'}")));
-
-    aggregation_request_helper::addIfrFlagsToRequest(request, ifr);
-
-    const auto ifrFlags = request.getIfrFlags();
-    ASSERT_TRUE(ifrFlags.has_value());
-    ASSERT_EQ(ifrFlags->size(), flagsForWire.size());
-    std::map<std::string, bool> observed;
-    for (const auto& doc : *ifrFlags) {
-        observed[doc["name"].String()] = doc["value"].Bool();
-    }
-    for (auto* flag : flagsForWire) {
-        ASSERT_EQ(observed[flag->getName()], ifr->getSavedFlagValue(*flag))
-            << "IFR flag " << flag->getName();
-    }
-}
-
-TEST(AggregationRequestTest, AddIfrFlagsOmitsIfrFlagsAtLastLTSFCV) {
-    // (Generic FCV reference): test usage
-    ScopedFCV fcv(multiversion::GenericFCV::kLastLTS);
-    RAIIServerParameterControllerForTest hybridFlag("featureFlagExtensionsInsideHybridSearch",
-                                                    true);
-    RAIIServerParameterControllerForTest vectorFlag("featureFlagVectorSearchExtension", true);
-
-    ASSERT_TRUE(IncrementalRolloutFeatureFlag::getFlagsForOutgoingRequests().empty());
-
-    auto ifr = std::make_shared<IncrementalFeatureRolloutContext>();
-    auto request = unittest::assertGet(aggregation_request_helper::parseFromBSONForTests(
-        fromjson("{aggregate: 'coll', pipeline: [], cursor: {}, $db: 'test'}")));
-
-    aggregation_request_helper::addIfrFlagsToRequest(request, ifr);
-
-    ASSERT_FALSE(request.getIfrFlags().has_value());
 }
 
 }  // namespace

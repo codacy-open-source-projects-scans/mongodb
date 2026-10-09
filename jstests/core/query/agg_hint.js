@@ -3,27 +3,15 @@
 // command against views, which is converted to a hinted aggregation on execution.
 //
 // @tags: [
+//   uses_explain,
 //   does_not_support_stepdowns,
 //   # Explain of a resolved view must be executed by mongos.
 //   directly_against_shardsvrs_incompatible,
 //   # Time series collections cannot be used as a source for `viewOn` or have view-like limitations in this context.
 //   exclude_from_timeseries_crud_passthrough,
-//   # TODO(SERVER-124153): Remove.
-//   featureFlagReplicatedFastCount_incompatible,
 // ]
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 import {getAggPlanStages, getPlanStages} from "jstests/libs/query/analyze_plan.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 const isHintsToQuerySettingsSuite = TestData.isHintsToQuerySettingsSuite || false;
 
@@ -34,7 +22,12 @@ const coll = testDB.getCollection(collName);
 const viewName = jsTestName() + "_view";
 const view = testDB.getCollection(viewName);
 
-function confirmWinningPlanUsesExpectedIndex(explainResult, expectedKeyPattern, stageName, pipelineOptimizedAway) {
+function confirmWinningPlanUsesExpectedIndex(
+    explainResult,
+    expectedKeyPattern,
+    stageName,
+    pipelineOptimizedAway,
+) {
     const planStages = pipelineOptimizedAway
         ? getPlanStages(explainResult, stageName)
         : getAggPlanStages(explainResult, stageName);
@@ -58,7 +51,9 @@ function confirmCommandUsesIndex({
     if (hintKeyPattern) {
         command["hint"] = hintKeyPattern;
     }
-    const res = assert.commandWorked(testDB.runCommand({explain: command, verbosity: "queryPlanner"}));
+    const res = assert.commandWorked(
+        testDB.runCommand({explain: command, verbosity: "queryPlanner"}),
+    );
     confirmWinningPlanUsesExpectedIndex(res, expectedKeyPattern, stageName, pipelineOptimizedAway);
 }
 

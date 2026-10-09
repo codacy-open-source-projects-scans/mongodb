@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_donor_service.h"
@@ -57,11 +31,11 @@
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -100,6 +74,7 @@ class ExternalStateForTestImpl {
 public:
     enum class ExternalFunction {
         kRefreshCollectionPlacementInfo,
+        kUpdateCoordinatorDocument,
         kAbortUnpreparedTransactionIfNecessary,
     };
 
@@ -111,18 +86,22 @@ public:
 
     void updateCoordinatorDocument(OperationContext* opCtx,
                                    const BSONObj& query,
-                                   const BSONObj& update) {}
+                                   const BSONObj& update) {
+        _maybeThrowErrorForFunction(opCtx, ExternalFunction::kUpdateCoordinatorDocument);
+    }
 
     void refreshCollectionPlacementInfo(OperationContext* opCtx, const NamespaceString& sourceNss) {
         _maybeThrowErrorForFunction(opCtx, ExternalFunction::kRefreshCollectionPlacementInfo);
     }
 
     std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction>
-    getOnReleaseCriticalSectionCustomAction() {
+    getOnReleaseCriticalSectionCustomAction(bool mustClearMetadata) {
         return std::make_unique<ShardingRecoveryService::NoCustomAction>();
     }
 
-    void abortUnpreparedTransactionIfNecessary(OperationContext* opCtx) {
+    void abortUnpreparedTransactionIfNecessary(
+        OperationContext* opCtx,
+        const boost::optional<ForwardableOperationMetadata> forwardableMetadata) {
         _maybeThrowErrorForFunction(opCtx,
                                     ExternalFunction::kAbortUnpreparedTransactionIfNecessary);
     }
@@ -181,12 +160,14 @@ public:
     }
 
     std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction>
-    getOnReleaseCriticalSectionCustomAction() override {
-        return _impl->getOnReleaseCriticalSectionCustomAction();
+    getOnReleaseCriticalSectionCustomAction(bool mustClearMetadata) override {
+        return _impl->getOnReleaseCriticalSectionCustomAction(mustClearMetadata);
     }
 
-    void abortUnpreparedTransactionIfNecessary(OperationContext* opCtx) override {
-        _impl->abortUnpreparedTransactionIfNecessary(opCtx);
+    void abortUnpreparedTransactionIfNecessary(
+        OperationContext* opCtx,
+        const boost::optional<ForwardableOperationMetadata>& metadata) override {
+        _impl->abortUnpreparedTransactionIfNecessary(opCtx, metadata);
     }
 
 private:
@@ -295,6 +276,11 @@ public:
         commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
         commonMetadata.setPerformVerification(testOptions.performVerification);
 
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        commonMetadata.setForwardableOpMetadata(std::move(fom));
+
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         return doc;
     }
@@ -375,10 +361,19 @@ public:
     void notifyRecipientsDoneCloning(OperationContext* opCtx,
                                      DonorStateMachine& donor,
                                      const ReshardingDonorDocument& donorDoc) {
+        notifyRecipientsDoneCloningNoWait(opCtx, donor, donorDoc);
         if (resharding::gFeatureFlagReshardingNoRefreshApplyingAndBlockingWrites
                 .isEnabledAndIgnoreFCVUnsafe()) {
-            donor.notifyAllRecipientsDoneCloning();
             ASSERT_OK(donor.awaitInDonatingOplogEntries().waitNoThrow(opCtx));
+        }
+    }
+
+    void notifyRecipientsDoneCloningNoWait(OperationContext* opCtx,
+                                           DonorStateMachine& donor,
+                                           const ReshardingDonorDocument& donorDoc) {
+        if (resharding::gFeatureFlagReshardingNoRefreshApplyingAndBlockingWrites
+                .isEnabledAndIgnoreFCVUnsafe()) {
+            donor.onCoordinatorStateAdvanced(CoordinatorStateEnum::kApplying);
         } else {
             _onReshardingFieldsChanges(opCtx, donor, donorDoc, CoordinatorStateEnum::kApplying);
         }
@@ -396,7 +391,7 @@ public:
                                            const ReshardingDonorDocument& donorDoc) {
         if (resharding::gFeatureFlagReshardingNoRefreshApplyingAndBlockingWrites
                 .isEnabledAndIgnoreFCVUnsafe()) {
-            donor.notifyAllRecipientsDoneApplying();
+            donor.onCoordinatorStateAdvanced(CoordinatorStateEnum::kBlockingWrites);
         } else {
             _onReshardingFieldsChanges(
                 opCtx, donor, donorDoc, CoordinatorStateEnum::kBlockingWrites);
@@ -518,7 +513,7 @@ private:
                               DonorStateMachine& donor,
                               const ReshardingDonorDocument& donorDoc,
                               DonorStateEnum targetState) {
-        if (targetState >= DonorStateEnum::kDonatingInitialData) {
+        if (targetState > DonorStateEnum::kDonatingInitialData) {
             notifyToStartChangeStreamsMonitor(opCtx, donor, donorDoc);
         }
 
@@ -540,7 +535,7 @@ private:
     const int64_t _numDeletes = 2;
 
     // Set the batch size 1 to test multi-batch processing in unit tests with multiple events.
-    RAIIServerParameterControllerForTest _batchSize{
+    unittest::ServerParameterGuard _batchSize{
         "reshardingVerificationChangeStreamsEventsBatchSizeLimit", 1};
 
 protected:
@@ -722,15 +717,6 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
         {DonorStateEnum::kDone, true}};
 
     for (auto& testOptions : makeAllTestOptions()) {
-        // TODO SERVER-123091: Remove skip once the intermittent hang is fixed (SERVER-121975)
-        if (testOptions.performVerification) {
-            LOGV2(12308701,
-                  "Skipping case when performVerification is enabled",
-                  "test"_attr = unittest::getTestName(),
-                  "testOptions"_attr = testOptions);
-            continue;
-        }
-
         LOGV2(5641801,
               "Running case",
               "test"_attr = unittest::getTestName(),
@@ -777,7 +763,7 @@ TEST_F(ReshardingDonorServiceTest, StepDownStepUpEachTransition) {
             switch (state) {
                 case DonorStateEnum::kDonatingOplogEntries: {
                     notifyToStartChangeStreamsMonitor(opCtx.get(), *donor, doc);
-                    notifyRecipientsDoneCloning(opCtx.get(), *donor, doc);
+                    notifyRecipientsDoneCloningNoWait(opCtx.get(), *donor, doc);
                     break;
                 }
                 case DonorStateEnum::kPreparingToBlockWrites: {
@@ -1010,15 +996,6 @@ TEST_F(ReshardingDonorServiceTest, RenamesTemporaryReshardingCollectionWhenDone)
 
 TEST_F(ReshardingDonorServiceTest, CompletesWithStepdownAfterAbort) {
     for (auto& testOptions : makeAllTestOptions()) {
-        // TODO SERVER-123091: Remove skip once the intermittent hang is fixed (SERVER-121975)
-        if (testOptions.performVerification) {
-            LOGV2(12308702,
-                  "Skipping case when performVerification is enabled",
-                  "test"_attr = unittest::getTestName(),
-                  "testOptions"_attr = testOptions);
-            continue;
-        }
-
         LOGV2(5641802,
               "Running case",
               "test"_attr = unittest::getTestName(),
@@ -1085,82 +1062,49 @@ TEST_F(ReshardingDonorServiceTest, CompletesWithStepdownAfterAbort) {
     }
 }
 
-TEST_F(ReshardingDonorServiceTest, AbortRacesWithInitCancelStateOnStepUp) {
-    auto fpBeforeInit = globalFailPointRegistry().find("reshardingPauseDonorBeforeInitCancelState");
-    auto fpAfterInit = globalFailPointRegistry().find("reshardingPauseDonorAfterInitCancelState");
-    auto fpInAbort = globalFailPointRegistry().find("reshardingPauseDonorInAbortBeforePromiseSet");
+TEST_F(ReshardingDonorServiceTest, StepDownBeforeRunFulfillsCompletionPromise) {
+    auto& fp = repl::PrimaryOnlyServiceHangBeforeRunningInstance;
+    auto timesEntered = fp.setMode(FailPoint::alwaysOn);
 
-    for (auto& testOptions : makeAllTestOptions()) {
-        LOGV2(11513900,
-              "Running case",
-              "test"_attr = unittest::getTestName(),
-              "testOptions"_attr = testOptions);
+    auto doc = makeStateDocument({.isAlsoRecipient = false});
+    auto opCtx = makeOperationContext();
+    DonorStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
 
-        auto doc = makeStateDocument(testOptions);
-        auto instanceId =
-            BSON(ReshardingDonorDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
+    fp.waitForTimesEntered(timesEntered + 1);
+    stepDown();
 
-        auto opCtx = makeOperationContext();
-        createSourceCollection(opCtx.get(), doc);
-        if (testOptions.isAlsoRecipient) {
-            createTemporaryReshardingCollection(opCtx.get(), doc);
-        }
+    ASSERT_EQ(donor->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
 
-        DonorStateMachine::insertStateDocument(opCtx.get(), doc);
-        auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+    fp.setMode(FailPoint::off);
+}
 
-        // Drive instance 1 to kDonatingInitialData so stepDown() interrupts a
-        // fully-initialized run(). Calling stepDown() directly after getOrCreate races
-        // with run() scheduling and the completion future does not resolve.
-        notifyToStartChangeStreamsMonitor(opCtx.get(), *donor, doc);
-        stepDown();
-        ASSERT_EQ(donor->getCompletionFuture().getNoThrow(),
-                  ErrorCodes::InterruptedDueToReplStateChange);
-        donor.reset();
+TEST_F(ReshardingDonorServiceTest, OnReshardingFieldsChangesTassertsInAuthoritativePath) {
+    auto doc = makeStateDocument({.isAlsoRecipient = false});
+    auto commonMetadata = doc.getCommonReshardingMetadata();
+    commonMetadata.setAuthoritativeMetadataAccessLevel(
+        ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAllowed);
+    doc.setCommonReshardingMetadata(std::move(commonMetadata));
 
-        // Arm failpoints before stepUp so instance 2's run() pauses at the start of
-        // _initCancelState the moment it is scheduled.
-        auto fpBeforeBaseline = fpBeforeInit->setMode(FailPoint::alwaysOn);
-        auto fpAfterBaseline = fpAfterInit->setMode(FailPoint::alwaysOn);
-        auto fpAbortBaseline = fpInAbort->setMode(FailPoint::alwaysOn);
+    DonorStateMachine donor{checked_cast<ReshardingDonorService*>(_service),
+                            doc,
+                            std::make_unique<ExternalStateForTest>(),
+                            getServiceContext()};
 
-        stepUp(opCtx.get());
+    auto opCtx = makeOperationContext();
+    auto reshardingFields = TypeCollectionReshardingFields{doc.getReshardingUUID()};
+    reshardingFields.setDonorFields(TypeCollectionDonorFields{
+        doc.getTempReshardingNss(), doc.getReshardingKey(), doc.getRecipientShards()});
+    reshardingFields.setState(CoordinatorStateEnum::kCloning);
 
-        auto [maybeDonor, isPausedOrShutdown] =
-            DonorStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(maybeDonor);
-        ASSERT_FALSE(isPausedOrShutdown);
-        donor = *maybeDonor;
-
-        // Instance 2's run() paused at the start of _initCancelState; _cancelState is null.
-        fpBeforeInit->waitForTimesEntered(fpBeforeBaseline + 1);
-
-        // abort() will observe _cancelState == nullptr, skip the fast-path cancel, and
-        // pause before setting _coordinatorHasDecisionPersisted.
-        stdx::thread abortThread([&] { donor->abort(false); });
-        ON_BLOCK_EXIT([&] {
-            if (abortThread.joinable()) {
-                abortThread.join();
-            }
-        });
-        fpInAbort->waitForTimesEntered(fpAbortBaseline + 1);
-
-        // Let _initCancelState publish _cancelState. Its isReady() safety-net check sees
-        // the promise is not yet set (abort is paused), so it skips the safety-net cancel.
-        fpBeforeInit->setMode(FailPoint::off);
-        fpAfterInit->waitForTimesEntered(fpAfterBaseline + 1);
-
-        // Release abort() and let it finish its late cancel.
-        fpInAbort->setMode(FailPoint::off);
-        abortThread.join();
-
-        fpAfterInit->setMode(FailPoint::off);
-
-        // The donor must complete the abort path even though abort() and _initCancelState
-        // raced; a regression would leave _cancelState uncanceled and hang here.
-        ASSERT_OK(donor->getCompletionFuture().getNoThrow());
-        checkStateDocumentRemoved(opCtx.get());
-    }
+    // onReshardingFieldsChanges throws when called in the authoritative path.
+    ASSERT_THROWS_WITH_CHECK(donor.onReshardingFieldsChanges(opCtx.get(), reshardingFields),
+                             DBException,
+                             [](const DBException& ex) {
+                                 EXPECT_EQ(ex.code(), 12862900);
+                                 assertionCount.tripwire.subtractAndFetch(1);
+                             });
 }
 
 TEST_F(ReshardingDonorServiceTest, RetainsSourceCollectionOnAbort) {
@@ -1295,13 +1239,16 @@ TEST_F(ReshardingDonorServiceTest, RestoreMetricsOnKBlockingWrites) {
 
     // This acquires the critical section required by resharding donor machine when it is in
     // kBlockingWrites.
+    const auto critSecReason =
+        BSON("command" << "resharding_donor"
+                       << "collection" << doc.getSourceNss().toString_forTest());
     ShardingRecoveryService::get(opCtx.get())
         ->acquireRecoverableCriticalSectionBlockWrites(
             opCtx.get(),
             doc.getSourceNss(),
-            BSON("command" << "resharding_donor"
-                           << "collection" << doc.getSourceNss().toString_forTest()),
-            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
+            critSecReason,
+            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
+            true /* clearShardCatalogCache */);
 
     auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
     notifyReshardingCommitting(opCtx.get(), *donor, doc);
@@ -1359,7 +1306,8 @@ TEST_F(ReshardingDonorServiceTest, AbortWhileChangeStreamsMonitorInProgress) {
             doc.getSourceNss(),
             BSON("command" << "resharding_donor"
                            << "collection" << doc.getSourceNss().toString_forTest()),
-            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
+            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
+            true /* clearShardCatalogCache */);
 
     auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
     ASSERT_OK(donor->awaitChangeStreamsMonitorStarted().getNoThrow());
@@ -1498,22 +1446,49 @@ TEST_F(ReshardingDonorServiceTest, UnrecoverableErrorDuringPreparingToDonate) {
     }
 }
 
-// TODO (SERVER-108852): Enable this test once the resharding donor is able to handle
-// errors from the resharding change streams monitor.
-// TEST_F(ReshardingDonorServiceTest, UnrecoverableErrorDuringDonatingInitialData) {
-//     for (auto& test :
-//          std::vector<TestOptions>{{.isAlsoRecipient = false}, {.isAlsoRecipient = true}}) {
-//         LOGV2(10885200,
-//               "Running case",
-//               "test"_attr = unittest::getTestName(),
-//               "testOptions"_attr = test);
+TEST_F(ReshardingDonorServiceTest, UnrecoverableErrorDuringDonatingInitialData) {
+    externalState()->throwUnrecoverableErrorIn(DonorStateEnum::kDonatingInitialData,
+                                               kUpdateCoordinatorDocument);
 
-//         FailPointEnableBlock
-//         failpoint("reshardingDonorFailsUpdatingChangeStreamsMonitorProgress");
+    for (auto& test : makeAllTestOptions()) {
+        LOGV2(12732500,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = test);
 
-//         runUnrecoverableErrorTest(test, DonorStateEnum::kDonatingInitialData);
-//     }
-// }
+        runUnrecoverableErrorTest(test, DonorStateEnum::kDonatingInitialData);
+    }
+}
+
+TEST_F(ReshardingDonorServiceTest, RetryableErrorDuringChangeStreamsMonitorTriggersRecreation) {
+    TestOptions testOptions{.isAlsoRecipient = false, .performVerification = true};
+    LOGV2(10903206,
+          "Running case",
+          "test"_attr = unittest::getTestName(),
+          "testOptions"_attr = testOptions);
+
+    auto doc = makeStateDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    createSourceCollection(opCtx.get(), doc);
+
+    DonorStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    // Fire the failpoint once with a retryable error. The monitor should clean up, recreate
+    // itself from the last persisted resume token, and complete normally.
+    auto fp =
+        globalFailPointRegistry().find("reshardingDonorFailsUpdatingChangeStreamsMonitorProgress");
+    fp->setMode(FailPoint::nTimes, 1, BSON("errorCode" << ErrorCodes::HostUnreachable));
+
+    notifyToStartChangeStreamsMonitor(opCtx.get(), *donor, doc);
+    notifyRecipientsDoneCloning(opCtx.get(), *donor, doc);
+    notifyToStartBlockingWrites(opCtx.get(), *donor, doc);
+    awaitChangeStreamsMonitorCompleted(opCtx.get(), *donor, doc);
+    notifyReshardingCommitting(opCtx.get(), *donor, doc);
+
+    ASSERT_OK(donor->getCompletionFuture().getNoThrow());
+    checkStateDocumentRemoved(opCtx.get());
+}
 
 TEST_F(ReshardingDonorServiceTest, UnrecoverableErrorDuringPreparingToBlockWrites) {
     externalState()->throwUnrecoverableErrorIn(DonorStateEnum::kPreparingToBlockWrites,
@@ -1527,6 +1502,32 @@ TEST_F(ReshardingDonorServiceTest, UnrecoverableErrorDuringPreparingToBlockWrite
 
         runUnrecoverableErrorTest(test, DonorStateEnum::kPreparingToBlockWrites);
     }
+}
+
+TEST_F(ReshardingDonorServiceTest, OnCoordinatorStateAdvancedCascadesPromisesIdempotently) {
+    auto testOptions = TestOptions{.isAlsoRecipient = false, .performVerification = false};
+    auto doc = makeStateDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    createSourceCollection(opCtx.get(), doc);
+    DonorStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto donor = DonorStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    // A single call with kBlockingWrites fulfills both _allRecipientsDoneCloning and
+    // _allRecipientsDoneApplying promises. Models the step-up case where the coordinator is already
+    // past kApplying.
+    donor->onCoordinatorStateAdvanced(CoordinatorStateEnum::kBlockingWrites);
+    ASSERT_TRUE(donor->awaitAllRecipientsDoneCloningForTest().isReady());
+    ASSERT_TRUE(donor->awaitAllRecipientsDoneApplyingForTest().isReady());
+
+    // Calling again with the same state must not throw and must not change state.
+    donor->onCoordinatorStateAdvanced(CoordinatorStateEnum::kBlockingWrites);
+    ASSERT_TRUE(donor->awaitAllRecipientsDoneCloningForTest().isReady());
+    ASSERT_TRUE(donor->awaitAllRecipientsDoneApplyingForTest().isReady());
+
+    // Advance to kCommitting -> fulfills _coordinatorHasDecisionPersisted -> donor completes.
+    donor->onCoordinatorStateAdvanced(CoordinatorStateEnum::kCommitting);
+    ASSERT_OK(donor->getCompletionFuture().getNoThrow());
+    checkStateDocumentRemoved(opCtx.get());
 }
 
 MONGO_FAIL_POINT_DEFINE(failFinishOpWithWCE);

@@ -1044,7 +1044,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1230,7 +1229,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1421,7 +1419,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1612,7 +1609,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1803,7 +1799,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1922,6 +1917,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -1945,6 +1941,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2002,6 +1999,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -2025,6 +2023,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2078,7 +2077,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2271,7 +2269,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2394,6 +2391,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -2417,6 +2415,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2474,6 +2473,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -2497,6 +2497,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2550,7 +2551,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2679,6 +2679,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -2702,6 +2703,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2761,6 +2763,7 @@
 					}
 				},
 				{
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "FETCH"
 				},
 				{
@@ -2784,6 +2787,7 @@
 					"multiKeyPaths" : {
 						"shardKey" : [ ]
 					},
+					"nss" : "test.distinct_scan_multi_chunk",
 					"stage" : "IXSCAN"
 				}
 			]
@@ -2838,7 +2842,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3042,7 +3045,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3246,7 +3248,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3467,7 +3468,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"notShardKey" : 1,
@@ -3692,7 +3692,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"notShardKey" : 1,
@@ -3916,7 +3915,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"notShardKey" : 1,
@@ -4141,7 +4139,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"notShardKey" : 1,
@@ -4426,7 +4423,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -4695,7 +4691,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -4964,7 +4959,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -5233,7 +5227,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -5438,7 +5431,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -5643,7 +5635,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -5849,7 +5840,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6054,7 +6044,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6219,7 +6208,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6382,7 +6370,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6546,7 +6533,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6709,7 +6695,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -6970,7 +6955,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -7231,7 +7215,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -7492,7 +7475,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -7753,7 +7735,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -7946,7 +7927,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -8139,7 +8119,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -8334,7 +8313,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -8529,7 +8507,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -8699,7 +8676,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -8860,7 +8836,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -9160,7 +9135,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -9477,7 +9451,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -9669,7 +9642,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -9842,7 +9814,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -10101,7 +10072,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -10374,7 +10344,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.distinct_scan_multi_chunk",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}

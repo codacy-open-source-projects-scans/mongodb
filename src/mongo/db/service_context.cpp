@@ -1,38 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/db/service_context.h"
+
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/db/client.h"
@@ -40,7 +11,6 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -51,7 +21,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/observable_mutex_registry.h"
-#include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/system_tick_source.h"
@@ -60,6 +29,11 @@
 #include <list>
 #include <memory>
 #include <queue>
+#include <string_view>
+
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -150,7 +124,7 @@ ServiceContext::ServiceContext(std::unique_ptr<ClockSource> fastClockSource,
       _fastClockSource(std::move(fastClockSource)),
       _preciseClockSource(std::move(preciseClockSource)),
       _serviceSet(std::make_unique<ServiceSet>(this)) {
-    ObservableMutexRegistry::get().add("ServiceContext::_mutex", _mutex);
+    ObservableMutexRegistry::get().add("serviceContextMutex", _mutex);
 }
 
 
@@ -371,7 +345,13 @@ void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx
     invariant(service);
 
     onDestroy(opCtx, service->_clientObservers);
-    service->_delistOperation(opCtx);
+    {
+        std::lock_guard clientLock(*client);
+        // Assigning a new opCtx to the client must never precede the destruction of any existing
+        // opCtx that references the client.
+        invariant(client->getOperationContext() == opCtx);
+        client->_setOperationContext({});
+    }
     opCtx->getBaton()->detach();
 
     delete opCtx;
@@ -400,7 +380,7 @@ ClientLock Service::LockedClientsCursor::next() {
 }
 
 void ServiceContext::setKillAllOperations(
-    std::function<bool(const StringData)> excludedClientPredicate) {
+    std::function<bool(const std::string_view)> excludedClientPredicate) {
     ServiceContextLock svcCtxLock(this);
 
     // Ensure that all newly created operation contexts will immediately be in the interrupted state
@@ -465,44 +445,20 @@ void ServiceContext::killOperation(ClientLock& clientLock,
     }
 }
 
-void ServiceContext::_delistOperation(OperationContext* opCtx) {
-    auto client = opCtx->getClient();
-    {
-        std::lock_guard clientLock(*client);
-        if (!client->getOperationContext()) {
-            // We've already delisted this operation.
-            return;
-        }
-        // Assigning a new opCtx to the client must never precede the destruction of any existing
-        // opCtx that references the client.
-        invariant(client->getOperationContext() == opCtx);
-        client->_setOperationContext({});
-    }
-    opCtx->releaseOperationKey();
-}
-
-void ServiceContext::delistOperation(OperationContext* opCtx) {
+void ServiceContext::markOperationAsPendingDestruction(OperationContext* opCtx) {
     auto client = opCtx->getClient();
     invariant(client);
 
     auto service = client->getServiceContext();
     invariant(service == this);
-
-    _delistOperation(opCtx);
-}
-
-void ServiceContext::killAndDelistOperation(OperationContext* opCtx, ErrorCodes::Error killCode) {
-
-    auto client = opCtx->getClient();
-    invariant(client);
-
-    auto service = client->getServiceContext();
-    invariant(service == this);
-
-    _delistOperation(opCtx);
 
     ClientLock clientLock(client);
-    killOperation(clientLock, opCtx, killCode);
+    opCtx->releaseOperationKey();
+
+    client->_opCtxIsPendingDestruction = true;
+    if (client->_session) {
+        client->_session->setInOperation(false);
+    }
 }
 
 void ServiceContext::unsetKillAllOperations() {

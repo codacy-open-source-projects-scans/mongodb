@@ -2,6 +2,7 @@
  * Test $natural hint on a time-series collection, for find and aggregate.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   # Refusing to run a test that issues an aggregation command with explain because it may
@@ -52,7 +53,11 @@ function runTest({command, expectedResult, expectedDirection}) {
     const plan = db.runCommand({explain: command});
     const scan = getAggPlanStage(plan, "COLLSCAN");
     assert(scan, "Expected a COLLSCAN stage" + tojson(plan));
-    assert.eq(scan.direction, expectedDirection, "Expected a " + expectedDirection + " COLLSCAN " + tojson(scan));
+    assert.eq(
+        scan.direction,
+        expectedDirection,
+        "Expected a " + expectedDirection + " COLLSCAN " + tojson(scan),
+    );
 }
 
 // Test find: ascending and descending.

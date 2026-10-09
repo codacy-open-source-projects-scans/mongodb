@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/feature_compatibility_version_parser.h"
 
@@ -35,10 +9,14 @@
 #include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/version_context_feature_flags_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version/releases.h"
+
+#include <string_view>
+#include <tuple>
 
 #include <fmt/format.h>
 #include <fmt/ostream.h>
@@ -109,7 +87,8 @@ constexpr UniqueArray validFcvVersions = makeValidVersions(
  * Helper used to parse the `versionString` against the `validVersions`
  */
 template <std::size_t N>
-StatusWith<FCV> parseVersion(const UniqueArray<FCV, N>& validVersions, StringData versionString) {
+StatusWith<FCV> parseVersion(const UniqueArray<FCV, N>& validVersions,
+                             std::string_view versionString) {
     try {
         const auto version = multiversion::parseVersion(versionString);
         if (validVersions.contains(version)) {
@@ -120,7 +99,7 @@ StatusWith<FCV> parseVersion(const UniqueArray<FCV, N>& validVersions, StringDat
 
     // Create a comma-separated list of valid versions
     std::ostringstream validVersionsStream;
-    StringData sep;
+    std::string_view sep;
     for (const auto& ver : validVersions) {
         validVersionsStream << sep << "'" << toString(ver) << "'";
         sep = ", ";
@@ -134,11 +113,11 @@ StatusWith<FCV> parseVersion(const UniqueArray<FCV, N>& validVersions, StringDat
 
 }  // namespace
 
-FCV FeatureCompatibilityVersionParser::parseVersionForOfcvString(StringData versionString) {
+FCV FeatureCompatibilityVersionParser::parseVersionForOfcvString(std::string_view versionString) {
     return uassertStatusOK(parseVersion(validOfcvVersions, versionString));
 }
 
-FCV FeatureCompatibilityVersionParser::parseVersionForFcvString(StringData versionString) {
+FCV FeatureCompatibilityVersionParser::parseVersionForFcvString(std::string_view versionString) {
     const auto version = parseVersion(validFcvVersions, versionString);
     if (version.isOK()) {
         return version.getValue();
@@ -149,25 +128,25 @@ FCV FeatureCompatibilityVersionParser::parseVersionForFcvString(StringData versi
                             << ".");
 }
 
-FCV FeatureCompatibilityVersionParser::parseVersionForFeatureFlags(StringData versionString) {
+FCV FeatureCompatibilityVersionParser::parseVersionForFeatureFlags(std::string_view versionString) {
     return multiversion::parseVersionForFeatureFlags(versionString);
 }
 
-StringData FeatureCompatibilityVersionParser::serializeVersionForOfcvString(FCV version) {
+std::string_view FeatureCompatibilityVersionParser::serializeVersionForOfcvString(FCV version) {
     invariant(validOfcvVersions.contains(version),
               str::stream() << "Invalid feature compatibility version value: "
                             << multiversion::toString(version));
     return multiversion::toString(version);
 }
 
-StringData FeatureCompatibilityVersionParser::serializeVersionForFcvString(FCV version) {
+std::string_view FeatureCompatibilityVersionParser::serializeVersionForFcvString(FCV version) {
     invariant(validFcvVersions.contains(version),
               str::stream() << "Invalid feature compatibility version value: "
                             << multiversion::toString(version));
     return multiversion::toString(version);
 }
 
-StringData FeatureCompatibilityVersionParser::serializeVersionForFeatureFlags(FCV version) {
+std::string_view FeatureCompatibilityVersionParser::serializeVersionForFeatureFlags(FCV version) {
     if (multiversion::isStandardFCV(version)) {
         return multiversion::toString(version);
     }
@@ -176,11 +155,12 @@ StringData FeatureCompatibilityVersionParser::serializeVersionForFeatureFlags(FC
 }
 
 Status FeatureCompatibilityVersionParser::validatePreviousVersionField(FCV version) {
-    if (version == GenericFCV::kLatest) {
+    if (version == GenericFCV::kLatest || version == GenericFCV::kLastLTS ||
+        version == GenericFCV::kLastContinuous) {
         return Status::OK();
     }
-    return Status(ErrorCodes::Error(4926901),
-                  "when present, 'previousVersion' field must be the latest binary version");
+    return Status(ErrorCodes::Error(11948401),
+                  "when present, 'previousVersion' field must be a standard FCV version");
 }
 
 StatusWith<FCV> FeatureCompatibilityVersionParser::parse(
@@ -190,11 +170,70 @@ StatusWith<FCV> FeatureCompatibilityVersionParser::parse(
         auto version = fcvDoc.getVersion();
         auto targetVersion = fcvDoc.getTargetVersion();
         auto previousVersion = fcvDoc.getPreviousVersion();
+        auto phase = fcvDoc.getPhase();
+
+        // The 'phase' field is only ever written under Symmetric FCV (see
+        // feature_compatibility_version.cpp's updateFeatureCompatibilityVersionDocument). Seeing it
+        // in the doc while the flag is disabled means the on-disk state was written by a different
+        // binary and this binary cannot safely interpret it — fail rather than silently mis-project
+        // the in-memory FCV.
+        if (phase.has_value() && !gFeatureFlagSymmetricFCV.isEnabled()) {
+            return Status(ErrorCodes::Error(11948500),
+                          str::stream()
+                              << "FCV document has 'phase' field but Symmetric FCV is disabled: "
+                              << featureCompatibilityVersionDoc);
+        }
+
+        // Under Symmetric FCV, kEnableTargetFeatures and kCommitAddedFeatures are the phases where
+        // target features are already active. However, only project the in-memory FCV to the
+        // target after confirming the document has a valid transitional shape; otherwise fall
+        // through to the existing validation below so malformed documents still fail to parse.
+        if (phase.has_value() && *phase >= SetFCVPhaseEnum::kEnableTargetFeatures) {
+
+            if (!targetVersion.has_value()) {
+                return Status(ErrorCodes::Error(11948501),
+                              str::stream() << "Missing 'targetVersion' field in FCV document with "
+                                            << "'phase' >= kEnableTargetFeatures: "
+                                            << featureCompatibilityVersionDoc);
+            }
+            if (!previousVersion.has_value()) {
+                return Status(ErrorCodes::Error(11948502),
+                              str::stream()
+                                  << "Missing 'previousVersion' field in FCV document with "
+                                  << "'phase' >= kEnableTargetFeatures: "
+                                  << featureCompatibilityVersionDoc);
+            }
+
+            auto upgradingOrDowngradingShapes = {
+                // version, targetVersion, previousVersion (upgrading)
+                std::tuple{GenericFCV::kLatest, GenericFCV::kLatest, GenericFCV::kLastLTS},
+                std::tuple{GenericFCV::kLatest, GenericFCV::kLatest, GenericFCV::kLastContinuous},
+                std::tuple{
+                    GenericFCV::kLastContinuous, GenericFCV::kLastContinuous, GenericFCV::kLastLTS},
+                // (downgrading)
+                std::tuple{GenericFCV::kLastLTS, GenericFCV::kLastLTS, GenericFCV::kLatest},
+                std::tuple{
+                    GenericFCV::kLastContinuous, GenericFCV::kLastContinuous, GenericFCV::kLatest}};
+
+            const bool isUpgradingOrDowngradingShape =
+                std::any_of(upgradingOrDowngradingShapes.begin(),
+                            upgradingOrDowngradingShapes.end(),
+                            [&](const auto& t) {
+                                return t == std::tuple{version, *targetVersion, *previousVersion};
+                            });
+            if (!isUpgradingOrDowngradingShape) {
+                return Status(ErrorCodes::Error(11948503),
+                              str::stream() << "Invalid transitional shape for FCV document with "
+                                            << "'phase' >= kEnableTargetFeatures: "
+                                            << featureCompatibilityVersionDoc);
+            }
+            return *targetVersion;
+        }
 
         // Downgrading FCV.
         if ((version == GenericFCV::kLastLTS || version == GenericFCV::kLastContinuous) &&
             version == targetVersion) {
-            // Downgrading FCV must have a "previousVersion" field.
+            // Downgrading FCV must have a "previousVersion" field equal to kLatest.
             if (!previousVersion) {
                 return Status(
                     ErrorCodes::Error(4926902),
@@ -207,26 +246,23 @@ StatusWith<FCV> FeatureCompatibilityVersionParser::parse(
                         << ": " << featureCompatibilityVersionDoc << ". See "
                         << feature_compatibility_version_documentation::compatibilityLink() << ".");
             }
+            if (previousVersion != GenericFCV::kLatest) {
+                return Status(
+                    ErrorCodes::Error(4926901),
+                    str::stream()
+                        << "When present in downgrading states, '"
+                        << FeatureCompatibilityVersionDocument::kPreviousVersionFieldName
+                        << "' field must be the latest binary version in "
+                        << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg()
+                        << ": " << featureCompatibilityVersionDoc << ". See "
+                        << feature_compatibility_version_documentation::compatibilityLink() << ".");
+            }
             if (version == GenericFCV::kLastLTS) {
                 // Downgrading to last-lts.
                 return GenericFCV::kDowngradingFromLatestToLastLTS;
             } else {
                 return GenericFCV::kDowngradingFromLatestToLastContinuous;
             }
-        }
-
-        // Non-downgrading FCV must not have a "previousVersion" field.
-        if (previousVersion) {
-            return Status(
-                ErrorCodes::Error(4926903),
-                str::stream()
-                    << "Unexpected field "
-                    << FeatureCompatibilityVersionDocument::kPreviousVersionFieldName
-                    << " in non-downgrading states for " << multiversion::kParameterName
-                    << " document in "
-                    << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg() << ": "
-                    << featureCompatibilityVersionDoc << ". See "
-                    << feature_compatibility_version_documentation::compatibilityLink() << ".");
         }
 
         // Upgrading FCV.
@@ -258,6 +294,20 @@ StatusWith<FCV> FeatureCompatibilityVersionParser::parse(
                         version == GenericFCV::kLastContinuous);
                 return GenericFCV::kUpgradingFromLastContinuousToLatest;
             }
+        }
+
+        // Steady-state FCV must not have a "previousVersion" field.
+        if (previousVersion) {
+            return Status(
+                ErrorCodes::Error(4926903),
+                str::stream()
+                    << "Unexpected field "
+                    << FeatureCompatibilityVersionDocument::kPreviousVersionFieldName
+                    << " in non-transitioning states for " << multiversion::kParameterName
+                    << " document in "
+                    << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg() << ": "
+                    << featureCompatibilityVersionDoc << ". See "
+                    << feature_compatibility_version_documentation::compatibilityLink() << ".");
         }
 
         // No "targetVersion" or "previousVersion" field.

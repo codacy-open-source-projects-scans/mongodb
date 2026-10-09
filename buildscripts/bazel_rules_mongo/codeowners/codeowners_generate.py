@@ -5,11 +5,19 @@ import subprocess
 import sys
 import tempfile
 from functools import cache
+from pathlib import Path
 from typing import Optional
 
 import yaml
-from codeowners.parsers import owners_v1, owners_v2
-from codeowners.validate_codeowners import run_validator
+
+# Bazel executes this file as __main__ from a generated runfiles tree. Add the
+# local source directories explicitly so the bundled parsers are not shadowed
+# by the third-party package with the same top-level name.
+_CODEOWNERS_SOURCE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(_CODEOWNERS_SOURCE_DIR))
+sys.path.insert(0, str(_CODEOWNERS_SOURCE_DIR.parent))
+from parsers import owners_v1, owners_v2
+from validate_codeowners import run_validator
 from utils import evergreen_git
 
 OWNERS_FILE_NAMES = ("OWNERS.yml", "OWNERS.yaml")
@@ -92,7 +100,9 @@ def print_diff_and_instructions(old_codeowners_contents, new_codeowners_contents
     )
     sys.stdout.writelines(diff)
 
-    print("If you are seeing this message in CI you likely need to run `bazel run codeowners`")
+    print("\n" + "#" * 90)
+    print("# ACTION REQUIRED: If you are seeing this in CI you need to run `bazel run codeowners`")
+    print("#" * 90 + "\n")
 
 
 def validate_generated_codeowners(validator_path: str) -> int:

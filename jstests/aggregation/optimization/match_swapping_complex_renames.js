@@ -4,11 +4,13 @@
  * @tags: [
  *   do_not_wrap_aggregations_in_facets,
  *   requires_pipeline_optimization,
- *   featureFlagImprovedDepsAnalysis,
+ *   # Tests a rewrite that was added in v9.0.
+ *   requires_fcv_90,
  *   # The test asserts on explain output.
  *   assumes_unsharded_collection,
  * ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {describe, it} from "jstests/libs/mochalite.js";
 import {getAggPlanStage} from "jstests/libs/query/analyze_plan.js";
 
@@ -31,7 +33,11 @@ function runTest({name, pipeline, positive, negative}) {
                 createIndexes(positive.index);
                 assert.eq(positive.expectedCount, coll.aggregate(pipeline).itcount());
                 const explain = coll.explain().aggregate(pipeline);
-                assert.neq(null, getAggPlanStage(explain, "IXSCAN"), "Expected IXSCAN (pushdown): " + tojson(explain));
+                assert.neq(
+                    null,
+                    getAggPlanStage(explain, "IXSCAN"),
+                    "Expected IXSCAN (pushdown): " + tojson(explain),
+                );
             });
         }
 
@@ -42,7 +48,11 @@ function runTest({name, pipeline, positive, negative}) {
                 createIndexes(negative.index);
                 assert.eq(negative.expectedCount, coll.aggregate(pipeline).itcount());
                 const explain = coll.explain().aggregate(pipeline);
-                assert.eq(null, getAggPlanStage(explain, "IXSCAN"), "Expected NO IXSCAN: " + tojson(explain));
+                assert.eq(
+                    null,
+                    getAggPlanStage(explain, "IXSCAN"),
+                    "Expected NO IXSCAN: " + tojson(explain),
+                );
             });
         }
     });
@@ -230,6 +240,36 @@ runTest({
             {orderDetails: {postalAddress: [{city: "Dublin"}], zip: "D02"}},
         ],
         index: {"orderDetails.postalAddress.city": 1},
+        expectedCount: 2,
+    },
+});
+
+runTest({
+    name: "$set scalar + $addFields deeper left-dotted rename {'a.b.c': '$x'}",
+    pipeline: [{$set: {a: 1}}, {$addFields: {"a.b.c": "$x"}}, {$match: {"a.b.c": 42}}],
+    positive: {
+        docs: [{x: 42}, {x: 99}, {x: 42}],
+        index: {x: 1},
+        expectedCount: 2,
+    },
+});
+
+const typeInferenceEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "featureFlagQueryTypeInference",
+);
+
+runTest({
+    name: "$match non-array type predicate + $addFields complex rename {a: '$x.y'}",
+    pipeline: [
+        {$match: {x: {$not: {$type: "array"}}}},
+        {$addFields: {a: "$x.y"}},
+        {$match: {a: 42}},
+    ],
+    [typeInferenceEnabled ? "positive" : "negative"]: {
+        // 'x.y' is multikey here.
+        docs: [{x: {y: 42}}, {x: {y: 99}}, {x: {y: 42}}, {x: [{y: 42}]}],
+        index: {"x.y": 1},
         expectedCount: 2,
     },
 });

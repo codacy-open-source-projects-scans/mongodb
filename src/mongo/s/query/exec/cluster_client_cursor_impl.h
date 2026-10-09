@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -68,7 +42,7 @@ class RouterStageMock;
 /**
  * TODO SERVER-111290 Remove external dependencies on this class.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT ClusterClientCursorImpl final : public ClusterClientCursor {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ClusterClientCursorImpl final : public ClusterClientCursor {
     ClusterClientCursorImpl(const ClusterClientCursorImpl&) = delete;
     ClusterClientCursorImpl& operator=(const ClusterClientCursorImpl&) = delete;
 
@@ -118,6 +92,8 @@ public:
 
     long long getNumReturnedSoFar() const final;
 
+    void recordChangeStreamThroughputMetricsForBatch() final;
+
     void queueResult(ClusterQueryResult&& result) final;
 
     bool remotesExhausted() const final;
@@ -140,11 +116,15 @@ public:
 
     bool getRawData() const final;
 
+    std::shared_ptr<IncrementalFeatureRolloutContext> cloneIfrContext() const final;
+
     Date_t getCreatedDate() const final;
 
     Date_t getLastUseDate() const final;
 
     bool isChangeStreamCursor() const final;
+
+    bool usesChangeStreamV2ShardTargeting() const final;
 
     void setLastUseDate(Date_t now) final;
 
@@ -153,8 +133,6 @@ public:
     boost::optional<query_shape::QueryShapeHash> getQueryShapeHash() const final;
 
     boost::optional<std::size_t> getQueryStatsKeyHash() const final;
-
-    bool getQueryStatsWillNeverExhaust() const final;
 
     bool shouldOmitDiagnosticInformation() const final;
 
@@ -197,6 +175,24 @@ private:
     // Number of documents already returned by next().
     long long _numReturnedSoFar = 0;
 
+    // Cumulative count and size in bytes of the documents returned to the client. Only accumulated
+    // for change stream cursors, and recorded to the
+    // changeStreams.cursor.{docsReturned,bytesReturned} throughput counters incrementally as each
+    // batch is returned to the client.
+    long long _docsReturned = 0;
+    long long _bytesReturned = 0;
+
+    // Watermarks tracking how much of _docsReturned / _bytesReturned has already been reported to
+    // the global change stream throughput counters, so each batch only records its own delta.
+    long long _lastReportedDocsReturned = 0;
+    long long _lastReportedBytesReturned = 0;
+
+    // Watermarks tracking how much of the docsExamined / bytesRead totals aggregated from the
+    // shards (in '_metrics') has already been reported to the global change stream throughput
+    // counters, so each batch only records its own delta.
+    long long _lastReportedDocsExamined = 0;
+    long long _lastReportedBytesRead = 0;
+
     // The root stage of the pipeline used to return the result set, merged from the remote nodes.
     std::unique_ptr<RouterExecStage> _root;
 
@@ -212,6 +208,9 @@ private:
 
     // Whether the originating command was a rawData operation.
     bool _rawData = false;
+    // The IFR context this cursor's plan was built under. Restored onto each getMore's
+    // OperationContext so remote dispatch stamps the same flag values the plan was planned with.
+    std::shared_ptr<IncrementalFeatureRolloutContext> _ifrContext;
 
     // The time the cursor was created.
     Date_t _createdDate;
@@ -239,9 +238,11 @@ private:
     // The Key used by query stats to generate the query stats store key.
     std::unique_ptr<query_stats::Key> _queryStatsKey;
 
-    bool _queryStatsWillNeverExhaust = false;
-
     bool _isChangeStreamQuery = false;
+
+    // True iff this change stream cursor was opened on the v2 precise shard-targeting path. Used by
+    // the router getMore precondition to kill-and-resume the cursor if the IFR flag is turned off.
+    bool _usesChangeStreamV2ShardTargeting = false;
 
     // Tracks if kill() has been called on the cursor. Multiple calls to kill() is an error.
     bool _hasBeenKilled = false;

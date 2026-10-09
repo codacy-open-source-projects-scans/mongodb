@@ -1,46 +1,23 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/explain_common.h"
 
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
-#include "mongo/db/query/query_knob_configuration.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
-#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
+#include "mongo/db/version_context.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
+
+#include <string_view>
 
 namespace mongo::explain_common {
 namespace append_if_room {
@@ -53,7 +30,7 @@ namespace append_if_room {
  */
 constexpr int OutputObjectMaxSize = BSONObjMaxUserSize - 10 * 1024;
 
-void appendWarningMessage(StringData fieldName, BSONObjBuilder* out) {
+void appendWarningMessage(std::string_view fieldName, BSONObjBuilder* out) {
     constexpr int kWarningMsgOverhead = 60;
     // The reserved buffer size for the warning message if 'out' exceeds the max BSON user size.
     const int warningMsgSize = fieldName.size() + kWarningMsgOverhead;
@@ -81,22 +58,37 @@ void generateServerInfo(BSONObjBuilder* out) {
 void generateServerParameters(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                               BSONObjBuilder* out) {
     BSONObjBuilder serverBob(out->subobjStart("serverParameters"));
-    appendStageMemoryLimitsToExplain(serverBob);
     serverBob.appendNumber("internalQueryFacetMaxOutputDocSizeBytes",
                            internalQueryFacetMaxOutputDocSizeBytes.load());
     serverBob.appendNumber("internalLookupStageIntermediateDocumentMaxSizeBytes",
                            internalLookupStageIntermediateDocumentMaxSizeBytes.load());
     serverBob.appendNumber("internalQueryProhibitBlockingMergeOnMongoS",
                            internalQueryProhibitBlockingMergeOnMongoS.load());
-    serverBob.appendNumber("internalQueryMaxAddToSetBytes", internalQueryMaxAddToSetBytes.load());
-    auto queryControl = expCtx->getQueryKnobConfiguration().getInternalQueryFrameworkControlForOp();
-    serverBob.append("internalQueryFrameworkControl", idl::serialize(queryControl));
+    const auto& knobs = expCtx->getQueryKnobConfiguration();
+    serverBob.append("internalQueryFrameworkControl",
+                     idl::serialize(knobs.getInternalQueryFrameworkControlForOp()));
     serverBob.appendNumber("internalQueryPlannerIgnoreIndexWithCollationForRegex",
                            internalQueryPlannerIgnoreIndexWithCollationForRegex.load());
+    serverBob.append("internalQueryPlanRanker", idl::serialize(knobs.getPlanRanker()));
+    serverBob.append("internalQueryCBRCEMode", idl::serialize(knobs.getCBRCEMode()));
+    serverBob.append("internalQueryMixedPlanRankingStrategy",
+                     idl::serialize(knobs.getMixedPlanRankingStrategy()));
+    serverBob.appendBool("featureFlagCostBasedRanker",
+                         feature_flags::gFeatureFlagCostBasedRanker.checkEnabled());
     serverBob.doneFast();
 }
 
+void generateQueryKnobs(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        BSONObjBuilder* out) {
+    auto serializedKnobs = expCtx->getQueryKnobConfiguration().serializeForExplain();
+    if (!serializedKnobs.isEmpty()) {
+        appendIfRoom(serializedKnobs, "queryKnobs", out);
+    }
+}
+
 void generateQueryShapeHash(OperationContext* opCtx, BSONObjBuilder* out) {
+    // TODO SERVER-132079: source the hash from the query itself instead of the per-operation
+    // diagnostics state.
     if (auto&& queryShapeHash = mongo::CurOp::get(opCtx)->debug().getQueryShapeHash()) {
         out->append("queryShapeHash", queryShapeHash->toHexString());
     }
@@ -108,7 +100,7 @@ void generatePeakTrackedMemBytes(const OperationContext* opCtx, BSONObjBuilder* 
     }
 }
 
-bool appendIfRoom(const BSONObj& toAppend, StringData fieldName, BSONObjBuilder* out) {
+bool appendIfRoom(const BSONObj& toAppend, std::string_view fieldName, BSONObjBuilder* out) {
     if ((out->len() + toAppend.objsize()) < append_if_room::OutputObjectMaxSize) {
         out->append(fieldName, toAppend);
         return true;
@@ -119,7 +111,7 @@ bool appendIfRoom(const BSONObj& toAppend, StringData fieldName, BSONObjBuilder*
     return false;
 }
 
-bool appendIfRoom(const BSONArray& toAppend, StringData fieldName, BSONObjBuilder* out) {
+bool appendIfRoom(const BSONArray& toAppend, std::string_view fieldName, BSONObjBuilder* out) {
     if ((out->len() + toAppend.objsize()) < append_if_room::OutputObjectMaxSize) {
         out->appendArray(fieldName, toAppend);
         return true;

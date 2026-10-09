@@ -1,49 +1,23 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/modules.h"
 
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <pdh.h>
 #include <pdhmsg.h>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class BSONObjBuilder;
 
@@ -85,7 +59,7 @@ public:
      *   }
      * }
      */
-    Status addCountersGroup(StringData groupName, const std::vector<StringData>& paths);
+    Status addCountersGroup(std::string_view groupName, const std::vector<std::string_view>& paths);
 
     /**
      * Add vector of counters grouped under 'name', and grouped by instance name.
@@ -114,15 +88,15 @@ public:
      *   }
      * }
      */
-    Status addCountersGroupedByInstanceName(StringData groupName,
-                                            const std::vector<StringData>& paths);
+    Status addCountersGroupedByInstanceName(std::string_view groupName,
+                                            const std::vector<std::string_view>& paths);
 
 private:
     /**
      * Check for duplicate group and counters.
      */
-    StatusWith<std::vector<std::string>> checkCounters(StringData groupName,
-                                                       const std::vector<StringData>& paths);
+    StatusWith<std::vector<std::string>> checkCounters(std::string_view groupName,
+                                                       const std::vector<std::string_view>& paths);
 
 private:
     // Vector of counters which are not sub-grouped by instance name.
@@ -244,23 +218,23 @@ private:
     /**
      * Add the specified counter group to the PDH Query.
      */
-    Status addCountersGroup(StringData groupName, const std::vector<std::string>& paths);
+    Status addCountersGroup(std::string_view groupName, const std::vector<std::string>& paths);
 
     /**
      * Add the specified counter group to the PDH Query grouped by instance name.
      */
-    Status addCountersGroupedByInstanceName(StringData groupName,
+    Status addCountersGroupedByInstanceName(std::string_view groupName,
                                             const std::vector<std::string>& paths);
 
     /**
      * Add a counter to the PDH query and get a description of it.
      */
-    StatusWith<CounterInfo> addCounter(StringData path);
+    StatusWith<CounterInfo> addCounter(std::string_view path);
 
     /**
      * Add a set of counters to the PDH query, and get descriptions of them.
      */
-    StatusWith<std::vector<CounterInfo>> addCounters(StringData path);
+    StatusWith<std::vector<CounterInfo>> addCounters(std::string_view path);
 
     /**
      * Collect a vector of counters and output them to builder.
@@ -276,7 +250,7 @@ private:
      * Add and get a counter by an English name in a language independent way.
      */
     StatusWith<std::tuple<PDH_HCOUNTER, std::unique_ptr<PDH_COUNTER_INFO>>> addAndGetCounter(
-        StringData path);
+        std::string_view path);
 
 private:
     // PDH Query
@@ -292,4 +266,4 @@ private:
     const CounterInfo* _timeBaseTicksCounter{nullptr};
 };
 
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

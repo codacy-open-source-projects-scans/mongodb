@@ -1,37 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/storage_validation.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
+#include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/mutable_bson/algorithm.h"
 #include "mongo/db/exec/mutable_bson/const_element.h"
@@ -41,13 +15,16 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 namespace mongo {
 
 namespace storage_validation {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-const StringData idFieldName = "_id"_sd;
+const std::string_view idFieldName = "_id"sv;
 
 void scanDocumentChildren(mutablebson::ConstElement elem,
                           const bool deep,
@@ -55,7 +32,8 @@ void scanDocumentChildren(mutablebson::ConstElement elem,
                           const bool allowTopLevelDollarPrefixes,
                           const bool shouldValidate,
                           const bool isEmbeddedInIdField,
-                          bool* containsDotsAndDollarsField) {
+                          bool* containsDotsAndDollarsField,
+                          const bool fromOplogApplication) {
     if (!elem.hasChildren()) {
         return;
     }
@@ -68,7 +46,8 @@ void scanDocumentChildren(mutablebson::ConstElement elem,
                      allowTopLevelDollarPrefixes,
                      shouldValidate,
                      isEmbeddedInIdField,
-                     containsDotsAndDollarsField);
+                     containsDotsAndDollarsField,
+                     fromOplogApplication);
         curr = curr.rightSibling();
     }
 }
@@ -132,7 +111,8 @@ void validateDollarPrefixElement(mutablebson::ConstElement elem) {
 void scanDocument(const mutablebson::Document& doc,
                   const bool allowTopLevelDollarPrefixes,
                   const bool shouldValidate,
-                  bool* containsDotsAndDollarsField) {
+                  bool* containsDotsAndDollarsField,
+                  const bool fromOplogApplication) {
     bool hasId = false;
     auto currElem = doc.root().leftChild();
     while (currElem.ok()) {
@@ -146,7 +126,8 @@ void scanDocument(const mutablebson::Document& doc,
                              false /* Top-level _id fields cannot be $-prefixed. */,
                              shouldValidate,
                              true /* Indicates the element is embedded inside an _id field. */,
-                             containsDotsAndDollarsField);
+                             containsDotsAndDollarsField,
+                             fromOplogApplication);
             } else {
                 uassertStatusOK(validIdField(currElem.getValue()));
             }
@@ -162,7 +143,8 @@ void scanDocument(const mutablebson::Document& doc,
                          allowTopLevelDollarPrefixes,
                          shouldValidate,
                          false /* Not embedded inside an _id field. */,
-                         containsDotsAndDollarsField);
+                         containsDotsAndDollarsField,
+                         fromOplogApplication);
         }
 
         currElem = currElem.rightSibling();
@@ -175,7 +157,8 @@ void scanDocument(mutablebson::ConstElement elem,
                   const bool allowTopLevelDollarPrefixes,
                   const bool shouldValidate,
                   const bool isEmbeddedInIdField,
-                  bool* containsDotsAndDollarsField) {
+                  bool* containsDotsAndDollarsField,
+                  const bool fromOplogApplication) {
     if (shouldValidate) {
         uassert(ErrorCodes::BadValue, "Invalid elements cannot be stored.", elem.ok());
 
@@ -210,6 +193,20 @@ void scanDocument(mutablebson::ConstElement elem,
         }
     }
 
+    if (shouldValidate && fromOplogApplication && elem.getType() == BSONType::binData) {
+        BSONElement bsonElem = elem.getValue();
+        if (bsonElem.binDataType() == BinDataType::Column) {
+            int len = 0;
+            const char* buf = bsonElem.binData(len /*out*/);
+            auto status = validateBSONColumn(buf, len);
+            if (!status.isOK()) {
+                uasserted(ErrorCodes::InvalidBSONColumn,
+                          str::stream()
+                              << "Invalid BSONColumn at field '" << elem.getFieldName() << "'");
+            }
+        }
+    }
+
     if (deep) {
 
         // Check children if there are any.
@@ -219,7 +216,8 @@ void scanDocument(mutablebson::ConstElement elem,
                              allowTopLevelDollarPrefixes,
                              shouldValidate,
                              isEmbeddedInIdField,
-                             containsDotsAndDollarsField);
+                             containsDotsAndDollarsField,
+                             fromOplogApplication);
     }
 }
 

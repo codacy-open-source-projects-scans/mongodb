@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 
@@ -62,6 +36,7 @@
 #include <cstdint>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/node_hash_map.h>
@@ -75,6 +50,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 using CollectionAndChangedChunks = CatalogCacheLoader::CollectionAndChangedChunks;
 namespace {
 
@@ -196,8 +172,8 @@ ShardVersion CollectionRoutingInfo::getShardVersion(const ShardId& shardId) cons
     return sv;
 }
 
-AtomicWord<uint64_t> ComparableDatabaseVersion::_disambiguatingSequenceNumSource{1ULL};
-AtomicWord<uint64_t> ComparableDatabaseVersion::_forcedRefreshSequenceNumSource{1ULL};
+Atomic<uint64_t> ComparableDatabaseVersion::_disambiguatingSequenceNumSource{1ULL};
+Atomic<uint64_t> ComparableDatabaseVersion::_forcedRefreshSequenceNumSource{1ULL};
 
 ComparableDatabaseVersion ComparableDatabaseVersion::makeComparableDatabaseVersion(
     const boost::optional<DatabaseVersion>& version) {
@@ -220,14 +196,13 @@ void ComparableDatabaseVersion::setDatabaseVersion(const DatabaseVersion& versio
 std::string ComparableDatabaseVersion::toString() const {
     BSONObjBuilder builder;
     if (_dbVersion)
-        builder.append("dbVersion"_sd, _dbVersion->toBSON());
+        builder.append("dbVersion"sv, _dbVersion->toBSON());
     else
-        builder.append("dbVersion"_sd, "None");
+        builder.append("dbVersion"sv, "None");
 
-    builder.append("disambiguatingSequenceNum"_sd,
-                   static_cast<int64_t>(_disambiguatingSequenceNum));
+    builder.append("disambiguatingSequenceNum"sv, static_cast<int64_t>(_disambiguatingSequenceNum));
 
-    builder.append("forcedRefreshSequenceNum"_sd, static_cast<int64_t>(_forcedRefreshSequenceNum));
+    builder.append("forcedRefreshSequenceNum"sv, static_cast<int64_t>(_forcedRefreshSequenceNum));
 
     return builder.obj().toString();
 }
@@ -268,7 +243,7 @@ CatalogCache::CatalogCache(ServiceContext* const service,
                            std::shared_ptr<CatalogCacheLoader> collectionCacheLoader,
                            bool cascadeDatabaseCacheLoaderShutdown,
                            bool cascadeCollectionCacheLoaderShutdown,
-                           StringData kind)
+                           std::string_view kind)
     : _kind(kind),
       _executor([this] {
           ThreadPool::Options options;
@@ -286,7 +261,7 @@ CatalogCache::CatalogCache(ServiceContext* const service,
 
 CatalogCache::CatalogCache(ServiceContext* const service,
                            std::shared_ptr<CatalogCacheLoader> cacheLoader,
-                           StringData kind)
+                           std::string_view kind)
     : _kind(kind),
       _executor([this] {
           ThreadPool::Options options;
@@ -310,6 +285,10 @@ CatalogCache::~CatalogCache() {
 }
 
 void CatalogCache::shutDownAndJoin() {
+    if (_hasShutDownAndJoined.swap(true)) {
+        return;
+    }
+
     // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as the
     // CatalogCache may try to schedule work on CatalogCacheLoader and fail.
     _executor.shutdown();
@@ -578,9 +557,9 @@ void CatalogCache::onStaleCollectionVersion(const NamespaceString& nss,
                                             const boost::optional<ShardVersion>& wantedVersion) {
     _stats.countStaleConfigErrors.addAndFetch(1);
 
-    const auto newChunkVersion = wantedVersion
-        ? ComparableChunkVersion::makeComparableChunkVersion(wantedVersion->placementVersion())
-        : ComparableChunkVersion::makeComparableChunkVersionForForcedRefresh();
+    const auto newChunkVersion = (!wantedVersion || !wantedVersion->placementVersion().isSet())
+        ? ComparableChunkVersion::makeComparableChunkVersionForForcedRefresh()
+        : ComparableChunkVersion::makeComparableChunkVersion(wantedVersion->placementVersion());
     _collectionCache.advanceTimeInStore(nss, newChunkVersion);
 }
 
@@ -664,6 +643,7 @@ void CatalogCache::report(BSONObjBuilder* builder) const {
 
     _stats.report(&cacheStatsBuilder);
     _collectionCache.reportStats(&cacheStatsBuilder);
+    _databaseCache.reportStats(&cacheStatsBuilder);
 }
 
 void CatalogCache::invalidateDatabaseEntry_LINEARIZABLE(const DatabaseName& dbName) {
@@ -712,7 +692,7 @@ CatalogCache::DatabaseCache::DatabaseCache(ServiceContext* service,
           },
           gCatalogCacheDatabaseMaxEntries),
       _catalogCacheLoader(catalogCacheLoader) {
-    ObservableMutexRegistry::get().add("Router Cache Mutexes", _mutex);
+    ObservableMutexRegistry::get().add("routerCacheMutexes", _mutex);
 }
 
 CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDatabase(
@@ -724,7 +704,7 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
         LOGV2(8023400, "Hanging before refreshing cached database entry");
         blockDatabaseCacheLookup.pauseWhileSet();
     }
-    // TODO (SERVER-34164): Track and increment stats for database refreshes
+    _updateRefreshesStats(true);
 
     LOGV2_FOR_CATALOG_REFRESH(24102, 2, "Refreshing cached database entry", "db"_attr = dbName);
 
@@ -748,8 +728,11 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
                                   "newDbVersion"_attr = newDbVersion,
                                   "oldDbVersion"_attr = previousDbVersion,
                                   "duration"_attr = Milliseconds(t.millis()));
+        _updateRefreshesStats(false);
         return CatalogCache::DatabaseCache::LookupResult(std::move(newDb), std::move(newDbVersion));
     } catch (const DBException& ex) {
+        _stats.countFailedDatabaseRefreshes.addAndFetch(1);
+        _updateRefreshesStats(false);
         LOGV2_FOR_CATALOG_REFRESH(24100,
                                   1,
                                   "Error refreshing cached database entry",
@@ -761,6 +744,26 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
         }
         throw;
     }
+}
+
+void CatalogCache::DatabaseCache::reportStats(BSONObjBuilder* builder) const {
+    _stats.report(builder);
+}
+
+void CatalogCache::DatabaseCache::_updateRefreshesStats(const bool add) {
+    if (add) {
+        _stats.numActiveDatabaseFullRefreshes.addAndFetch(1);
+        _stats.countDatabaseFullRefreshesStarted.addAndFetch(1);
+    } else {
+        _stats.numActiveDatabaseFullRefreshes.subtractAndFetch(1);
+    }
+}
+
+void CatalogCache::DatabaseCache::Stats::report(BSONObjBuilder* builder) const {
+    builder->append("numActiveFullDatabaseRefreshes", numActiveDatabaseFullRefreshes.load());
+    builder->append("countDatabaseFullRefreshesStarted", countDatabaseFullRefreshesStarted.load());
+
+    builder->append("countFailedDatabaseRefreshes", countFailedDatabaseRefreshes.load());
 }
 
 CatalogCache::CollectionCache::CollectionCache(
@@ -779,7 +782,7 @@ CatalogCache::CollectionCache::CollectionCache(
           },
           gCatalogCacheCollectionMaxEntries),
       _catalogCacheLoader(catalogCacheLoader) {
-    ObservableMutexRegistry::get().add("Router Cache Mutexes", _mutex);
+    ObservableMutexRegistry::get().add("routerCacheMutexes", _mutex);
 }
 
 void CatalogCache::CollectionCache::reportStats(BSONObjBuilder* builder) const {

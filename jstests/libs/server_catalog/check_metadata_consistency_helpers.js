@@ -13,6 +13,15 @@ export var MetadataConsistencyChecker = (function () {
                 return true;
             }
 
+            const isStepdownSuite =
+                Boolean(TestData.runningWithShardStepdowns) ||
+                Boolean(TestData.runningWithStepdowns);
+            if (isStepdownSuite && e.code === ErrorCodes.CallbackCanceled) {
+                // Metadata consistency check can fail with CallbackCanceled if a node gets
+                // killed or steps down while the check is establishing cursors on it.
+                return true;
+            }
+
             if (
                 ErrorCodes.isRetriableError(e.code) ||
                 ErrorCodes.isInterruption(e.code) ||
@@ -61,19 +70,11 @@ export var MetadataConsistencyChecker = (function () {
 
             let inconsistencies = adminDB.checkMetadataConsistency(checkOptions).toArray();
 
-            // TODO SERVER-107821: do not ignore CorruptedChunkHistory in multiversion suites
-            const isMultiVersion = Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet);
-            if (isMultiVersion) {
-                for (let i = inconsistencies.length - 1; i >= 0; i--) {
-                    if (inconsistencies[i].type == "CorruptedChunkHistory") {
-                        inconsistencies.splice(i, 1); // Remove inconsistency
-                    }
-                }
-            }
-
             // Since bucket collections are not created atomically with their view, it may happen
             // that checkMetadataConsistency interleaves with the creation steps in case of stepdown
-            const isStepdownSuite = Boolean(jsTest.options().runningWithShardStepdowns);
+            const isStepdownSuite =
+                Boolean(TestData.runningWithShardStepdowns) ||
+                Boolean(TestData.runningWithStepdowns);
             if (isStepdownSuite) {
                 for (let i = inconsistencies.length - 1; i >= 0; i--) {
                     if (inconsistencies[i].type == "MalformedTimeseriesBucketsCollection") {
@@ -96,7 +97,11 @@ export var MetadataConsistencyChecker = (function () {
                 }
             }
 
-            assert.eq(0, inconsistencies.length, `Found metadata inconsistencies: ${tojson(inconsistencies)}`);
+            assert.eq(
+                0,
+                inconsistencies.length,
+                `Found metadata inconsistencies: ${tojson(inconsistencies)}`,
+            );
 
             jsTest.log("Completed metadata consistency check");
         };
@@ -110,19 +115,25 @@ export var MetadataConsistencyChecker = (function () {
             } else if (e.code === ErrorCodes.LockBusy) {
                 const buildInfo = adminDB.getServerBuildInfo();
                 const slowBuild =
-                    buildInfo.isAddressSanitizerActive() || buildInfo.isThreadSanitizerActive() || buildInfo.isDebug();
+                    buildInfo.isAddressSanitizerActive() ||
+                    buildInfo.isThreadSanitizerActive() ||
+                    buildInfo.isDebug();
                 if (slowBuild) {
                     jsTest.log(
                         `Ignoring LockBusy error on checkMetadataConsistency because we are running with very slow build (e.g. ASAN enabled)`,
                     );
                 } else {
-                    jsTest.log("Caught error during check metadata consistency hook: " + errorWithCode);
+                    jsTest.log(
+                        "Caught error during check metadata consistency hook: " + errorWithCode,
+                    );
                     throw e;
                 }
             } else if (e.code === ErrorCodes.ConflictingOperationInProgress) {
                 // If this were an unexpected collection disappearance, the test would tassert so
                 // simply accept the error here.
-                jsTest.log("Ignoring ConflictingOperationInProgress error during checkMetadataConsistency");
+                jsTest.log(
+                    "Ignoring ConflictingOperationInProgress error during checkMetadataConsistency",
+                );
             } else {
                 // For all the other errors re-throw the exception
                 jsTest.log("Caught error during check metadata consistency hook: " + errorWithCode);

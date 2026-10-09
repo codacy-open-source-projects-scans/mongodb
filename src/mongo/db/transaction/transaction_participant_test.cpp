@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/transaction/transaction_participant.h"
 
@@ -48,6 +22,8 @@
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/intent_guard.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/mock_repl_coord_server_fixture.h"
 #include "mongo/db/repl/oplog.h"
@@ -59,6 +35,8 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/repl/transaction_oplog_application.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
@@ -89,15 +67,15 @@
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/decorable.h"
@@ -115,6 +93,7 @@
 #include <cstdint>
 #include <functional>
 #include <future>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -122,6 +101,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
 
@@ -1333,6 +1313,9 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitFails) {
 }
 
 TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
@@ -1400,7 +1383,63 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesRSTL) {
     runFunctionFromDifferentOpCtx(func);
 }
 
+TEST_F(TxnParticipantTest, StepDownDuringPreparedAbortReleasesIntentTokens) {
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    auto& intentRegistry = rss::consensus::IntentRegistry::get(opCtx()->getServiceContext());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+    // The BlockingWrite guard inside unstashTransactionResources is ephemeral — it is
+    // deregistered when the function returns, so no token persists between operations.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    // Simulate the locking of an insert.
+    {
+        Lock::DBLock dbLock(
+            opCtx(), DatabaseName::createDatabaseName_forTest(boost::none, "test"), MODE_IX);
+        Lock::CollectionLock collLock(
+            opCtx(), NamespaceString::createNamespaceString_forTest("test.foo"), MODE_IX);
+    }
+
+    txnParticipant.stashTransactionResources(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+
+    // Hold a Write intent token on behalf of this session to simulate an in-flight write.
+    // prepareTransaction must call deregisterTokensForSession to clear such tokens so
+    // prepared transactions don't block the stepdown/shutdown intent drain.
+    boost::optional<rss::consensus::IntentGuard> mockGuard;
+    mockGuard.emplace(rss::consensus::IntentRegistry::Intent::Write, opCtx());
+    ASSERT_TRUE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    txnParticipant.prepareTransaction(opCtx(), {});
+    // deregisterTokensForSession cleared the token above.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+    mockGuard.reset();  // safe: token already gone, deregistering a second time is a no-op
+
+    txnParticipant.stashTransactionResources(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
+        repl::MemberState::RS_SECONDARY));
+    ASSERT_THROWS_CODE(txnParticipant.abortTransaction(opCtx()),
+                       AssertionException,
+                       ErrorCodes::NotWritablePrimary);
+
+    // The BlockingWrite token created inside abortTransaction is deregistered during
+    // exception unwind — no tokens leak that could block a future state transition drain.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+}
+
 TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
@@ -1468,6 +1507,61 @@ TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesRSTL) {
         shard_role_details::getLocker(newOpCtx)->unlock(resourceIdReplicationStateTransitionLock);
     };
     runFunctionFromDifferentOpCtx(func);
+}
+
+TEST_F(TxnParticipantTest, StepDownDuringPreparedCommitReleasesIntentTokens) {
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    auto& intentRegistry = rss::consensus::IntentRegistry::get(opCtx()->getServiceContext());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+    // The BlockingWrite guard inside unstashTransactionResources is ephemeral — it is
+    // deregistered when the function returns, so no token persists between operations.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    // Simulate the locking of an insert.
+    {
+        Lock::DBLock dbLock(
+            opCtx(), DatabaseName::createDatabaseName_forTest(boost::none, "test"), MODE_IX);
+        Lock::CollectionLock collLock(
+            opCtx(), NamespaceString::createNamespaceString_forTest("test.foo"), MODE_IX);
+    }
+
+    txnParticipant.stashTransactionResources(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+
+    // Hold a Write intent token on behalf of this session to simulate an in-flight write.
+    // prepareTransaction must call deregisterTokensForSession to clear such tokens so
+    // prepared transactions don't block the stepdown/shutdown intent drain.
+    boost::optional<rss::consensus::IntentGuard> mockGuard;
+    mockGuard.emplace(rss::consensus::IntentRegistry::Intent::Write, opCtx());
+    ASSERT_TRUE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    const auto prepareResponse = txnParticipant.prepareTransaction(opCtx(), {});
+    const auto& prepareTimestamp = prepareResponse.first;
+    // deregisterTokensForSession cleared the token above.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+    mockGuard.reset();  // safe: token already gone, deregistering a second time is a no-op
+
+    txnParticipant.stashTransactionResources(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
+
+    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
+        repl::MemberState::RS_SECONDARY));
+    ASSERT_THROWS_CODE(
+        txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, boost::none),
+        AssertionException,
+        ErrorCodes::NotWritablePrimary);
+
+    // The BlockingWrite token created inside commitPreparedTransaction is deregistered during
+    // exception unwind — no tokens leak that could block a future state transition drain.
+    ASSERT_FALSE(intentRegistry.hasWriteIntentDeclared(opCtx()));
 }
 
 TEST_F(TxnParticipantTest, ThrowDuringUnpreparedCommitLetsTheAbortAtEntryPointToCleanUp) {
@@ -1812,7 +1906,7 @@ TEST_F(TxnParticipantTest, CorrectlyStashAPIParameters) {
 }
 
 TEST_F(TxnParticipantTest, PrepareReturnsAListOfAffectedNamespaces) {
-    RAIIServerParameterControllerForTest controller("featureFlagEndOfTransactionChangeEvent", true);
+    unittest::ServerParameterGuard controller("featureFlagEndOfTransactionChangeEvent", true);
 
     const std::vector<NamespaceString> kNamespaces = {
         NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl1"),
@@ -2332,7 +2426,7 @@ TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithLesserRetryCounterShouldEr
 }
 
 TEST_F(ShardTxnParticipantTest,
-       StartOrContinueTxnWithEqualRetryCounterAndAbortedWithoutPrepareStateShouldRestart) {
+       StartOrContinueTxnWithEqualRetryCounterAndAbortedWithoutPrepareStateShouldError) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
     ASSERT(txnParticipant.transactionIsInProgress());
@@ -2341,10 +2435,28 @@ TEST_F(ShardTxnParticipantTest,
     txnParticipant.abortTransaction(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsAbortedWithoutPrepare());
 
+    ASSERT_THROWS_CODE(txnParticipant.beginOrContinue(
+                           opCtx(),
+                           {*opCtx()->getTxnNumber(), 0},
+                           false /* autocommit */,
+                           TransactionParticipant::TransactionActions::kStartOrContinue),
+                       AssertionException,
+                       ErrorCodes::NoSuchTransaction);
+}
+
+TEST_F(ShardTxnParticipantTest,
+       StartTxnWithEqualRetryCounterAndAbortedWithoutPrepareStateShouldRestart) {
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    ASSERT(txnParticipant.transactionIsInProgress());
+
+    txnParticipant.abortTransaction(opCtx());
+    ASSERT_TRUE(txnParticipant.transactionIsAbortedWithoutPrepare());
+
     txnParticipant.beginOrContinue(opCtx(),
                                    {*opCtx()->getTxnNumber(), 0},
                                    false /* autocommit */,
-                                   TransactionParticipant::TransactionActions::kStartOrContinue);
+                                   TransactionParticipant::TransactionActions::kStart);
     ASSERT_TRUE(txnParticipant.transactionIsInProgress());
     ASSERT_EQ(txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber(),
               *opCtx()->getTxnNumber());
@@ -2769,11 +2881,34 @@ protected:
         executionAdmission.setTotalTimeQueuedMicros_forTest(micros);
         return executionAdmission;
     }
+
+    /**
+     * Like checkOutSession(), but starts the transaction explicitly classified as external. The
+     * fixture's client has no transport session, so without an explicit classification every
+     * transaction would fall back to being counted as server-initiated.
+     */
+    std::unique_ptr<MongoDSessionCatalog::Session> checkOutSessionAsExternal() {
+        opCtx()->setInMultiDocumentTransaction();
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
+        auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
+        TransactionParticipant::get(opCtx()).beginOrContinue(
+            opCtx(),
+            {*opCtx()->getTxnNumber()},
+            false /* autocommit */,
+            TransactionParticipant::TransactionActions::kStart,
+            boost::none /* transactionRuntimeContext */,
+            false /* isServerInitiatedTransaction */);
+        return opCtxSession;
+    }
 };
 
 TEST_F(TransactionsMetricsTest, IncrementTotalStartedUponStartTransaction) {
     unsigned long long beforeTransactionStart =
         ServerTransactionsMetrics::get(opCtx())->getTotalStarted();
+    unsigned long long beforeStartedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalStartedInternal();
+    unsigned long long beforeStartedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalStartedExternal();
 
     auto sessionCheckout = checkOutSession();
 
@@ -2781,6 +2916,30 @@ TEST_F(TransactionsMetricsTest, IncrementTotalStartedUponStartTransaction) {
     // is started.
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalStarted(),
               beforeTransactionStart + 1U);
+
+    // The test fixture's client has no transport session, so the transaction is classified as
+    // server-initiated and only the internal counter moves.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalStartedInternal(),
+              beforeStartedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalStartedExternal(),
+              beforeStartedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, ForwardedClassificationOverridesClientSessionFallback) {
+    unsigned long long beforeStartedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalStartedInternal();
+    unsigned long long beforeStartedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalStartedExternal();
+
+    // Without an explicit value this participant would fall back to classifying the transaction as
+    // server-initiated. Starting it as external checks that an explicit classification takes
+    // precedence over the fallback.
+    auto sessionCheckout = checkOutSessionAsExternal();
+
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalStartedExternal(),
+              beforeStartedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalStartedInternal(),
+              beforeStartedInternal);
 }
 
 TEST_F(TransactionsMetricsTest, IncrementPreparedTransaction) {
@@ -2788,10 +2947,40 @@ TEST_F(TransactionsMetricsTest, IncrementPreparedTransaction) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     unsigned long long beforePrepareCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalPrepared();
+    unsigned long long beforePreparedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedInternal();
+    unsigned long long beforePreparedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedExternal();
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
     txnParticipant.prepareTransaction(opCtx(), {});
 
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPrepared(), beforePrepareCount + 1U);
+
+    // The test fixture's client has no transport session, so the transaction was classified as
+    // server-initiated when it started and must be counted out of the same bucket on prepare.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedInternal(),
+              beforePreparedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedExternal(),
+              beforePreparedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, IncrementPreparedTransactionExternal) {
+    auto sessionCheckout = checkOutSessionAsExternal();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    unsigned long long beforePrepareCount =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPrepared();
+    unsigned long long beforePreparedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedInternal();
+    unsigned long long beforePreparedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedExternal();
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+    txnParticipant.prepareTransaction(opCtx(), {});
+
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPrepared(), beforePrepareCount + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedExternal(),
+              beforePreparedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedInternal(),
+              beforePreparedInternal);
 }
 
 TEST_F(TransactionsMetricsTest, IncrementTotalCommittedOnCommit) {
@@ -2801,11 +2990,44 @@ TEST_F(TransactionsMetricsTest, IncrementTotalCommittedOnCommit) {
 
     unsigned long long beforeCommitCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalCommitted();
+    unsigned long long beforeCommittedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalCommittedInternal();
+    unsigned long long beforeCommittedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalCommittedExternal();
 
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     // Assert that the committed counter is incremented by 1.
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommitted(), beforeCommitCount + 1U);
+
+    // The test fixture's client has no transport session, so the transaction was classified as
+    // server-initiated when it started and must be counted out of the same bucket on commit.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommittedInternal(),
+              beforeCommittedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommittedExternal(),
+              beforeCommittedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, IncrementTotalCommittedOnCommitExternal) {
+    auto sessionCheckout = checkOutSessionAsExternal();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
+
+    unsigned long long beforeCommitCount =
+        ServerTransactionsMetrics::get(opCtx())->getTotalCommitted();
+    unsigned long long beforeCommittedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalCommittedInternal();
+    unsigned long long beforeCommittedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalCommittedExternal();
+
+    txnParticipant.commitUnpreparedTransaction(opCtx());
+
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommitted(), beforeCommitCount + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommittedExternal(),
+              beforeCommittedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalCommittedInternal(),
+              beforeCommittedInternal);
 }
 
 TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenCommitted) {
@@ -2817,12 +3039,48 @@ TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenCommitted) {
 
     unsigned long long beforePreparedThenCommittedCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommitted();
+    unsigned long long beforePreparedThenCommittedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedInternal();
+    unsigned long long beforePreparedThenCommittedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedExternal();
 
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
 
     ASSERT_TRUE(txnParticipant.transactionIsCommitted());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommitted(),
               beforePreparedThenCommittedCount + 1U);
+
+    // The test fixture's client has no transport session, so the transaction was classified as
+    // server-initiated when it started and must be counted out of the same bucket on commit.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedInternal(),
+              beforePreparedThenCommittedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedExternal(),
+              beforePreparedThenCommittedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenCommittedExternal) {
+    auto sessionCheckout = checkOutSessionAsExternal();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
+    const auto [prepareTimestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
+
+    unsigned long long beforePreparedThenCommittedCount =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommitted();
+    unsigned long long beforePreparedThenCommittedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedInternal();
+    unsigned long long beforePreparedThenCommittedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedExternal();
+
+    txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
+
+    ASSERT_TRUE(txnParticipant.transactionIsCommitted());
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommitted(),
+              beforePreparedThenCommittedCount + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedExternal(),
+              beforePreparedThenCommittedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenCommittedInternal(),
+              beforePreparedThenCommittedInternal);
 }
 
 
@@ -2833,16 +3091,52 @@ TEST_F(TransactionsMetricsTest, IncrementTotalAbortedUponAbort) {
 
     unsigned long long beforeAbortCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalAborted();
+    unsigned long long beforeAbortedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalAbortedInternal();
+    unsigned long long beforeAbortedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalAbortedExternal();
 
     txnParticipant.abortTransaction(opCtx());
 
     // Assert that the aborted counter is incremented by 1.
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAborted(), beforeAbortCount + 1U);
+
+    // The test fixture's client has no transport session, so the transaction was classified as
+    // server-initiated when it started and must be counted out of the same bucket on abort.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAbortedInternal(),
+              beforeAbortedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAbortedExternal(),
+              beforeAbortedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, IncrementTotalAbortedUponAbortExternal) {
+    auto sessionCheckout = checkOutSessionAsExternal();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "insert");
+
+    unsigned long long beforeAbortCount =
+        ServerTransactionsMetrics::get(opCtx())->getTotalAborted();
+    unsigned long long beforeAbortedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalAbortedInternal();
+    unsigned long long beforeAbortedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalAbortedExternal();
+
+    txnParticipant.abortTransaction(opCtx());
+
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAborted(), beforeAbortCount + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAbortedExternal(),
+              beforeAbortedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAbortedInternal(),
+              beforeAbortedInternal);
 }
 
 TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenAborted) {
     unsigned long long beforePreparedThenAbortedCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAborted();
+    unsigned long long beforePreparedThenAbortedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedInternal();
+    unsigned long long beforePreparedThenAbortedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedExternal();
 
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -2853,6 +3147,36 @@ TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenAborted) {
     ASSERT(txnParticipant.transactionIsAborted());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAborted(),
               beforePreparedThenAbortedCount + 1U);
+
+    // The test fixture's client has no transport session, so the transaction was classified as
+    // server-initiated when it started and must be counted out of the same bucket on abort.
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedInternal(),
+              beforePreparedThenAbortedInternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedExternal(),
+              beforePreparedThenAbortedExternal);
+}
+
+TEST_F(TransactionsMetricsTest, IncrementTotalPreparedThenAbortedExternal) {
+    unsigned long long beforePreparedThenAbortedCount =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAborted();
+    unsigned long long beforePreparedThenAbortedInternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedInternal();
+    unsigned long long beforePreparedThenAbortedExternal =
+        ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedExternal();
+
+    auto sessionCheckout = checkOutSessionAsExternal();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
+    txnParticipant.prepareTransaction(opCtx(), {});
+
+    txnParticipant.abortTransaction(opCtx());
+    ASSERT(txnParticipant.transactionIsAborted());
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAborted(),
+              beforePreparedThenAbortedCount + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedExternal(),
+              beforePreparedThenAbortedExternal + 1U);
+    ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalPreparedThenAbortedInternal(),
+              beforePreparedThenAbortedInternal);
 }
 
 TEST_F(TransactionsMetricsTest, IncrementCurrentPreparedWithCommit) {
@@ -4185,7 +4509,7 @@ namespace {
 /*
  * Constructs a ClientMetadata BSONObj with the given application name.
  */
-BSONObj constructClientMetadata(StringData appName) {
+BSONObj constructClientMetadata(std::string_view appName) {
     BSONObjBuilder builder;
     ASSERT_OK(ClientMetadata::serializePrivate("driverName",
                                                "driverVersion",
@@ -4689,7 +5013,8 @@ TEST_F(TransactionsMetricsTest, TransactionLogAggregatesQueueStats) {
     auto expectedBson = BSON(
         "execution" << BSON("admissions" << expectedVal << "totalTimeQueuedMicros" << expectedVal)
                     << "ingress"
-                    << BSON("admissions" << expectedVal << "totalTimeQueuedMicros" << expectedVal));
+                    << BSON("admissions" << expectedVal << "totalTimeQueuedMicros" << expectedVal)
+                    << "ingress_request" << BSONObj() << "writeThrottle" << BSONObj());
     ASSERT_BSONOBJ_EQ_UNORDERED(queueBsonStats, expectedBson);
 }
 
@@ -5296,38 +5621,38 @@ TEST_F(TxnParticipantTest, ResponseMetadataHasHasReadOnlyFalseIfNothingInProgres
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 }
 
 TEST_F(TxnParticipantTest, ResponseMetadataHasReadOnlyFalseIfInRetryableWrite) {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     // Start a retryable write.
     txnParticipant.beginOrContinue(opCtx(),
                                    {*opCtx()->getTxnNumber()},
                                    boost::none /* autocommit */,
                                    TransactionParticipant::TransactionActions::kNone);
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 }
 
 TEST_F(TxnParticipantTest, ResponseMetadataHasReadOnlyTrueIfInProgressAndOperationsVectorEmpty) {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     // Start a transaction.
     txnParticipant.beginOrContinue(opCtx(),
                                    {*opCtx()->getTxnNumber()},
                                    false /* autocommit */,
                                    TransactionParticipant::TransactionActions::kStart);
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     txnParticipant.unstashTransactionResources(opCtx(), "find");
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 }
 
 TEST_F(TxnParticipantTest,
@@ -5335,43 +5660,57 @@ TEST_F(TxnParticipantTest,
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     // Start a transaction.
     txnParticipant.beginOrContinue(opCtx(),
                                    {*opCtx()->getTxnNumber()},
                                    false /* autocommit */,
                                    TransactionParticipant::TransactionActions::kStart);
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     // Simulate an insert.
     auto operation = repl::DurableOplogEntry::makeInsertOperation(
         kNss, _uuid, BSON("_id" << 0), BSON("_id" << 0));
     txnParticipant.addTransactionOperation(opCtx(), operation);
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 }
 
 TEST_F(TxnParticipantTest, ResponseMetadataHasReadOnlyFalseIfAborted) {
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     // Start a transaction.
     txnParticipant.beginOrContinue(opCtx(),
                                    {*opCtx()->getTxnNumber()},
                                    false /* autocommit */,
                                    TransactionParticipant::TransactionActions::kStart);
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     txnParticipant.unstashTransactionResources(opCtx(), "find");
-    ASSERT_TRUE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_TRUE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
 
     txnParticipant.abortTransaction(opCtx());
-    ASSERT_FALSE(txnParticipant.getResponseMetadata().getBoolField("readOnly"));
+    ASSERT_FALSE(txnParticipant.getResponseMetadata(opCtx()).getBoolField("readOnly"));
+}
+
+TEST_F(TxnParticipantTest, ResponseMetadataHasParticipantTermWhenReplSet) {
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
+    auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    // The fixture runs a one-node replica set, so the metadata must carry the participant's
+    // current replication term for the router-side failover validation.
+    auto metadata = txnParticipant.getResponseMetadata(opCtx());
+    ASSERT_TRUE(metadata.hasField("$replData"));
+    ASSERT_TRUE(metadata["$replData"].Obj().hasField("term"));
+    ASSERT_EQ(metadata["$replData"]["term"].numberLong(),
+              repl::ReplicationCoordinator::get(opCtx())->getTerm());
 }
 
 TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
@@ -5392,7 +5731,7 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
         auto cursor = coll->getCursor(opCtx());
         while (auto record = cursor->next()) {
             auto bson = record.value().data.toBson();
-            if (bson["state"].String() != "prepared"_sd) {
+            if (bson["state"].String() != "prepared"sv) {
                 continue;
             }
 
@@ -7317,7 +7656,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         auto swStableTimestamp =
             opCtx->getServiceContext()->getStorageEngine()->recoverToStableTimestamp(opCtx);
         ASSERT_OK(swStableTimestamp);
-        catalog::openCatalog(opCtx, state, swStableTimestamp.getValue());
+        catalog::openCatalogAfterRollbackToStable(opCtx, state, swStableTimestamp.getValue());
     }
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
@@ -8270,6 +8609,19 @@ TEST_F(TxnParticipantStartupRecoveryTest, CanRecoverPreparedInternalTxnFromSessi
 
     // We should have stashed in the "secondary" style and released the locks taken above.
     ASSERT_FALSE(txnParticipant.getTxnResourceStashLockerForTest()->isLocked());
+}
+
+TEST_F(TxnParticipantStartupRecoveryTest,
+       RecoverPreparedTransactionsFromPreciseCheckpointThrowsOnShutdown) {
+    setUpPreparedTransaction(_sessionId, _txnNumber);
+
+    // Simulate a shutdown racing with recovery: the opCtx is killed before recovery gets a
+    // chance to run. This must throw the interruption rather than crash.
+    opCtx()->markKilled(ErrorCodes::InterruptedAtShutdown);
+
+    ASSERT_THROWS_CODE(recoverPreparedTransactionsFromPreciseCheckpoint(opCtx()),
+                       DBException,
+                       ErrorCodes::InterruptedAtShutdown);
 }
 
 using TxnParticipantStartupRecoveryDeathTest = TxnParticipantStartupRecoveryTest;

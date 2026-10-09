@@ -4,7 +4,11 @@
 //   requires_majority_read_concern,
 //   uses_change_streams,
 // ]
-import {ChangeStreamTest} from "jstests/libs/query/change_stream_util.js";
+import {
+    ChangeStreamTest,
+    validateChangeStreamHistoryLostException,
+} from "jstests/libs/query/change_stream_util.js";
+import {skipTestIfSizeBasedOplogTruncationDisabled} from "jstests/libs/oplog_truncation_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {getFirstOplogEntry, getLatestOp} from "jstests/replsets/rslib.js";
 
@@ -14,13 +18,36 @@ const st = new ShardingTest({
     rs: {
         nodes: 1,
         oplogSize: oplogSize,
+        oplogMinRetentionHours: 0.000001,
         // Use the noop writer with a higher frequency for periodic noops to speed up the test.
         setParameter: {periodicNoopIntervalSecs: 1, writePeriodicNoops: true},
     },
 });
 
+// This test relies on marker-based oplog truncation, which may be disabled in disagg.
+// TODO(SERVER-125068) remove this once this feature flag is deleted
+skipTestIfSizeBasedOplogTruncationDisabled(st.rs0.getPrimary(), () => st.stop());
+
 const mongosDB = st.s0.getDB(jsTestName());
 const mongosColl = mongosDB[jsTestName()];
+
+// Workaround required to make the test work in multiversion setup.
+const changeStreamHistoryLostExceptionMessageValidatorFactory = () => {
+    const isMultiversion =
+        Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) ||
+        Boolean(TestData.multiversionBinVersion);
+    const is90OrHigher = MongoRunner.compareBinVersions(lastLTSFCV, "9.0") >= 0;
+    if (!isMultiversion || is90OrHigher) {
+        // If all servers are guaranteed to run 9.0 or higher, use the actual exception message
+        // validation function from the library.
+        return validateChangeStreamHistoryLostException;
+    }
+
+    // In multiversion tests, we cannot rely on the exception message to be as desired, so instead
+    // perform a no-op validation.
+    return () => {};
+};
+const validateExceptionMessage = changeStreamHistoryLostExceptionMessageValidatorFactory();
 
 let cst = new ChangeStreamTest(mongosDB);
 
@@ -28,17 +55,27 @@ function testResume(mongosColl, collToWatch) {
     mongosColl.drop();
 
     // Enable sharding on the test DB and ensure its primary is st.shard0.shardName.
-    assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs0.getURL()}));
+    assert.commandWorked(
+        mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs0.getURL()}),
+    );
 
     // Shard the test collection on _id.
-    assert.commandWorked(mongosDB.adminCommand({shardCollection: mongosColl.getFullName(), key: {_id: 1}}));
+    assert.commandWorked(
+        mongosDB.adminCommand({shardCollection: mongosColl.getFullName(), key: {_id: 1}}),
+    );
 
     // Split the collection into 2 chunks: [MinKey, 0), [0, MaxKey].
-    assert.commandWorked(mongosDB.adminCommand({split: mongosColl.getFullName(), middle: {_id: 0}}));
+    assert.commandWorked(
+        mongosDB.adminCommand({split: mongosColl.getFullName(), middle: {_id: 0}}),
+    );
 
     // Move the [0, MaxKey] chunk to st.shard1.shardName.
     assert.commandWorked(
-        mongosDB.adminCommand({moveChunk: mongosColl.getFullName(), find: {_id: 1}, to: st.rs1.getURL()}),
+        mongosDB.adminCommand({
+            moveChunk: mongosColl.getFullName(),
+            find: {_id: 1},
+            to: st.rs1.getURL(),
+        }),
     );
 
     // Write a document to each chunk.
@@ -48,7 +85,6 @@ function testResume(mongosColl, collToWatch) {
     let changeStream = cst.startWatchingChanges({
         pipeline: [{$changeStream: {}}],
         collection: collToWatch,
-        includeToken: true,
     });
 
     // We awaited the replication of the first writes, so the change stream shouldn't return
@@ -93,30 +129,34 @@ function testResume(mongosColl, collToWatch) {
     assert.neq(mostRecentOplogEntry, null);
     const largeStr = "abcdefghi".repeat(4 * 1024 * oplogSize);
     let i = 0;
-
-    function oplogIsRolledOver() {
-        // The oplog has rolled over if the op that used to be newest is now older than the
-        // oplog's current oldest entry. Said another way, the oplog is rolled over when
-        // everything in the oplog is newer than what used to be the newest entry.
-        return (
+    assert.soon(() => {
+        // The oplog has rolled over when everything in it is newer than what used to be the newest entry.
+        if (
             bsonWoCompare(
                 mostRecentOplogEntry.ts,
                 getFirstOplogEntry(shardWithResumeToken, {readConcern: "majority"}).ts,
             ) < 0
-        );
-    }
+        )
+            return true;
 
-    while (!oplogIsRolledOver()) {
-        let idVal = 100 + i++;
-        assert.commandWorked(mongosColl.insert({_id: idVal, long_str: largeStr}, {writeConcern: {w: "majority"}}));
+        assert.commandWorked(
+            mongosColl.insert(
+                {_id: 100 + i++, long_str: largeStr},
+                {writeConcern: {w: "majority"}},
+            ),
+        );
         sleep(100);
-    }
+        return false;
+    }, "Timeout waiting for oplog to roll over on primary");
 
     ChangeStreamTest.assertChangeStreamThrowsCode({
         db: mongosDB,
         collName: collToWatch,
         pipeline: [{$changeStream: {resumeAfter: resumeTokenFromFirstUpdateOnShard1}}],
         expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+        validateExceptionDetails: validateExceptionMessage(
+            decodeResumeToken(resumeTokenFromFirstUpdateOnShard1).clusterTime,
+        ),
     });
 
     ChangeStreamTest.assertChangeStreamThrowsCode({
@@ -124,6 +164,7 @@ function testResume(mongosColl, collToWatch) {
         collName: collToWatch,
         pipeline: [{$changeStream: {startAtOperationTime: resumeTimeFirstUpdate}}],
         expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+        validateExceptionDetails: validateExceptionMessage(resumeTimeFirstUpdate),
     });
 
     // Test that the change stream can't resume if the resume token *is* present in the oplog,
@@ -136,20 +177,31 @@ function testResume(mongosColl, collToWatch) {
         collName: collToWatch,
         pipeline: [{$changeStream: {resumeAfter: resumeTokenFromFirstUpdateOnShard0}}],
         expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+        validateExceptionDetails: validateExceptionMessage(
+            decodeResumeToken(resumeTokenFromFirstUpdateOnShard0).clusterTime,
+        ),
     });
 
     // Drop the collection.
     assert(mongosColl.drop());
 
     // Shard the test collection on shardKey.
-    assert.commandWorked(mongosDB.adminCommand({shardCollection: mongosColl.getFullName(), key: {shardKey: 1}}));
+    assert.commandWorked(
+        mongosDB.adminCommand({shardCollection: mongosColl.getFullName(), key: {shardKey: 1}}),
+    );
 
     // Split the collection into 2 chunks: [MinKey, 50), [50, MaxKey].
-    assert.commandWorked(mongosDB.adminCommand({split: mongosColl.getFullName(), middle: {shardKey: 50}}));
+    assert.commandWorked(
+        mongosDB.adminCommand({split: mongosColl.getFullName(), middle: {shardKey: 50}}),
+    );
 
     // Move the [50, MaxKey] chunk to st.shard1.shardName.
     assert.commandWorked(
-        mongosDB.adminCommand({moveChunk: mongosColl.getFullName(), find: {shardKey: 51}, to: st.rs1.getURL()}),
+        mongosDB.adminCommand({
+            moveChunk: mongosColl.getFullName(),
+            find: {shardKey: 51},
+            to: st.rs1.getURL(),
+        }),
     );
 
     const numberOfDocs = 100;
@@ -157,26 +209,40 @@ function testResume(mongosColl, collToWatch) {
     // Insert test documents.
     for (let counter = 0; counter < numberOfDocs / 5; ++counter) {
         assert.commandWorked(
-            mongosColl.insert({_id: "abcd" + counter, shardKey: counter * 5 + 0}, {writeConcern: {w: "majority"}}),
+            mongosColl.insert(
+                {_id: "abcd" + counter, shardKey: counter * 5 + 0},
+                {writeConcern: {w: "majority"}},
+            ),
         );
         assert.commandWorked(
-            mongosColl.insert({_id: "Abcd" + counter, shardKey: counter * 5 + 1}, {writeConcern: {w: "majority"}}),
+            mongosColl.insert(
+                {_id: "Abcd" + counter, shardKey: counter * 5 + 1},
+                {writeConcern: {w: "majority"}},
+            ),
         );
         assert.commandWorked(
-            mongosColl.insert({_id: "aBcd" + counter, shardKey: counter * 5 + 2}, {writeConcern: {w: "majority"}}),
+            mongosColl.insert(
+                {_id: "aBcd" + counter, shardKey: counter * 5 + 2},
+                {writeConcern: {w: "majority"}},
+            ),
         );
         assert.commandWorked(
-            mongosColl.insert({_id: "abCd" + counter, shardKey: counter * 5 + 3}, {writeConcern: {w: "majority"}}),
+            mongosColl.insert(
+                {_id: "abCd" + counter, shardKey: counter * 5 + 3},
+                {writeConcern: {w: "majority"}},
+            ),
         );
         assert.commandWorked(
-            mongosColl.insert({_id: "abcD" + counter, shardKey: counter * 5 + 4}, {writeConcern: {w: "majority"}}),
+            mongosColl.insert(
+                {_id: "abcD" + counter, shardKey: counter * 5 + 4},
+                {writeConcern: {w: "majority"}},
+            ),
         );
     }
 
     let allChangesCursor = cst.startWatchingChanges({
         pipeline: [{$changeStream: {}}],
         collection: collToWatch,
-        includeToken: true,
     });
 
     // Perform the multi-update that will induce timestamp collisions

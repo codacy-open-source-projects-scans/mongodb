@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/perfctr_collect.h"
@@ -36,6 +10,8 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
@@ -94,7 +70,7 @@ std::string errnoWithPdhDescription(PDH_STATUS status) {
 /**
  * Format an error message for a PDH function call failure.
  */
-std::string formatFunctionCallError(StringData functionName, PDH_STATUS status) {
+std::string formatFunctionCallError(std::string_view functionName, PDH_STATUS status) {
     return str::stream() << functionName << " failed with '" << errnoWithPdhDescription(status)
                          << "'";
 }
@@ -102,7 +78,7 @@ std::string formatFunctionCallError(StringData functionName, PDH_STATUS status) 
 /**
  * Transform a vector of string data into a vector of strings.
  */
-void transformStringDataVector(const std::vector<StringData>& input,
+void transformStringDataVector(const std::vector<std::string_view>& input,
                                std::vector<std::string>* output) {
     output->reserve(input.size());
     for (const auto& str : input) {
@@ -123,7 +99,7 @@ bool counterHasTickBasedTimeBase(uint32_t type) {
 }  // namespace
 
 StatusWith<std::vector<std::string>> PerfCounterCollection::checkCounters(
-    StringData name, const std::vector<StringData>& paths) {
+    std::string_view name, const std::vector<std::string_view>& paths) {
 
     if (_counters.find(std::string{name}) != _counters.end() ||
         _nestedCounters.find(std::string{name}) != _nestedCounters.end()) {
@@ -144,8 +120,8 @@ StatusWith<std::vector<std::string>> PerfCounterCollection::checkCounters(
     return {stringPaths};
 }
 
-Status PerfCounterCollection::addCountersGroup(StringData name,
-                                               const std::vector<StringData>& paths) {
+Status PerfCounterCollection::addCountersGroup(std::string_view name,
+                                               const std::vector<std::string_view>& paths) {
 
     auto swCounters = checkCounters(name, paths);
     if (!swCounters.getStatus().isOK()) {
@@ -158,7 +134,7 @@ Status PerfCounterCollection::addCountersGroup(StringData name,
 }
 
 Status PerfCounterCollection::addCountersGroupedByInstanceName(
-    StringData name, const std::vector<StringData>& paths) {
+    std::string_view name, const std::vector<std::string_view>& paths) {
 
     auto swCounters = checkCounters(name, paths);
     if (!swCounters.getStatus().isOK()) {
@@ -223,7 +199,7 @@ Status PerfCounterCollector::open() {
 }
 
 StatusWith<std::tuple<PDH_HCOUNTER, std::unique_ptr<PDH_COUNTER_INFO>>>
-PerfCounterCollector::addAndGetCounter(StringData path) {
+PerfCounterCollector::addAndGetCounter(std::string_view path) {
     PDH_HCOUNTER counter{0};
 
     PDH_STATUS status = PdhAddEnglishCounterW(
@@ -254,7 +230,8 @@ PerfCounterCollector::addAndGetCounter(StringData path) {
                                                                        std::move(counterInfo)};
 }
 
-StatusWith<PerfCounterCollector::CounterInfo> PerfCounterCollector::addCounter(StringData path) {
+StatusWith<PerfCounterCollector::CounterInfo> PerfCounterCollector::addCounter(
+    std::string_view path) {
     auto swCounterInfo = addAndGetCounter(path);
     if (!swCounterInfo.isOK()) {
         return swCounterInfo.getStatus();
@@ -297,7 +274,7 @@ StatusWith<PerfCounterCollector::CounterInfo> PerfCounterCollector::addCounter(S
 }
 
 StatusWith<std::vector<PerfCounterCollector::CounterInfo>> PerfCounterCollector::addCounters(
-    StringData path) {
+    std::string_view path) {
 
     auto swCounterInfo = addAndGetCounter(path);
     if (!swCounterInfo.isOK()) {
@@ -361,7 +338,7 @@ StatusWith<std::vector<PerfCounterCollector::CounterInfo>> PerfCounterCollector:
     return {std::move(counters)};
 }
 
-Status PerfCounterCollector::addCountersGroup(StringData groupName,
+Status PerfCounterCollector::addCountersGroup(std::string_view groupName,
                                               const std::vector<std::string>& paths) {
     CounterGroup group;
     group.name = std::string{groupName};
@@ -383,7 +360,7 @@ Status PerfCounterCollector::addCountersGroup(StringData groupName,
 }
 
 Status PerfCounterCollector::addCountersGroupedByInstanceName(
-    StringData groupName, const std::vector<std::string>& paths) {
+    std::string_view groupName, const std::vector<std::string>& paths) {
     NestedCounterGroup group;
     group.name = std::string{groupName};
 

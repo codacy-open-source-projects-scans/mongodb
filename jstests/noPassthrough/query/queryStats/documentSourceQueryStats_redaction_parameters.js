@@ -30,7 +30,9 @@ function runTest(conn) {
     // Turning on hmac should apply hmac to all field names on all entries, even previously cached
     // ones.
     const queryStatsKey = getQueryStatsFindCmd(conn, {transformIdentifiers: true})[0]["key"];
-    assert.eq(queryStatsKey.queryShape.filter, {"fNWkKfogMv6MJ77LpBcuPrO7Nq+R+7TqtD+Lgu3Umc4=": {"$lte": "?number"}});
+    assert.eq(queryStatsKey.queryShape.filter, {
+        "fNWkKfogMv6MJ77LpBcuPrO7Nq+R+7TqtD+Lgu3Umc4=": {"$lte": "?number"},
+    });
     assert.eq(queryStatsKey.queryShape.sort, {"CDDQIXZmDehLKmQcRxtdOQjMqoNqfI2nGt2r4CgJ52o=": -1});
     assert.eq(queryStatsKey.queryShape.limit, "?number");
 
@@ -40,7 +42,9 @@ function runTest(conn) {
     assertQueryStatsKeyWithoutHmac(queryStats.queryShape);
 
     // Explicitly set transformIdentifiers to false.
-    assertQueryStatsKeyWithoutHmac(getQueryStatsFindCmd(conn, {transformIdentifiers: false})[0]["key"].queryShape);
+    assertQueryStatsKeyWithoutHmac(
+        getQueryStatsFindCmd(conn, {transformIdentifiers: false})[0]["key"].queryShape,
+    );
 
     // Wrong parameter name throws error.
     let pipeline = [{$queryStats: {redactFields: true}}];
@@ -105,7 +109,9 @@ function runTest(conn) {
     );
 
     // Parameter object with unrecognized key throws error.
-    pipeline = [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacStrategy: "on"}}}];
+    pipeline = [
+        {$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacStrategy: "on"}}},
+    ];
     assertAdminDBErrCodeAndErrMsgContains(
         coll,
         pipeline,
@@ -114,9 +120,13 @@ function runTest(conn) {
     );
 }
 
+// In replica set suites, cluster-time key generation runs a find on admin.system.keys shortly
+// after startup, which is recorded in the queryStats store (it is attributed to the shell's
+// application name, so it is not filtered out) and perturbs the exact entries asserted below.
 const conn = MongoRunner.runMongod({
     setParameter: {
-        internalQueryStatsRateLimit: -1,
+        internalQueryStatsSampleRate: 1,
+        "failpoint.disableKeyGeneration": "{'mode':'alwaysOn'}",
     },
 });
 runTest(conn);
@@ -129,7 +139,7 @@ const st = new ShardingTest({
     rs: {nodes: 1},
     mongosOptions: {
         setParameter: {
-            internalQueryStatsRateLimit: -1,
+            internalQueryStatsSampleRate: 1,
             "failpoint.skipClusterParameterRefresh": "{'mode':'alwaysOn'}",
         },
     },

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -36,11 +10,15 @@
 #include "mongo/db/extension/shared/byte_buf_utils.h"
 #include "mongo/db/extension/shared/get_next_result.h"
 
+#include <string_view>
+
+using namespace std::literals::string_view_literals;
+
 namespace sdk = mongo::extension::sdk;
 using namespace mongo;
 
 /**
- * Test extension that defines $testShardId. It reads catalogContext.shardId in bind(),
+ * Test extension that defines $testShardId. It reads catalogContext.shardId in promote(),
  * propagates the value through LogicalStage to ExecStage, and appends a "shardId" string
  * field to each output document.
  *
@@ -49,7 +27,7 @@ using namespace mongo;
  *   {$testShardId: {runOnRouter: true}}     - runs on mongos via DistributedPlanLogic
  */
 
-static constexpr auto kRunOnRouterField = "runOnRouter"_sd;
+static constexpr auto kRunOnRouterField = "runOnRouter"sv;
 
 class ShardIdExecStage : public sdk::ExecAggStageTransform {
 public:
@@ -128,7 +106,7 @@ public:
     ShardIdAstNode(std::string_view stageName, const BSONObj& arguments)
         : sdk::AggStageAstNode(stageName), _arguments(arguments.getOwned()) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         std::string shardId(extension::byteViewAsStringView(catalogContext.shardId));
         bool runOnRouter =

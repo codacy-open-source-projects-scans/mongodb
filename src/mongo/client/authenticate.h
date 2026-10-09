@@ -1,44 +1,16 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/credential.h"
 #include "mongo/client/internal_auth.h"
-#include "mongo/client/mongo_uri.h"
 #include "mongo/client/sasl_client_session.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/database_name.h"
-#include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/future.h"
 #include "mongo/util/modules.h"
@@ -48,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -55,28 +28,17 @@
 namespace mongo {
 
 class BSONObj;
+class MongoURI;
 
-namespace MONGO_MOD_PUBLIC auth {
+namespace [[MONGO_MOD_PUBLIC]] auth {
+using namespace std::literals::string_view_literals;
 
 using RunCommandHook = std::function<Future<BSONObj>(OpMsgRequest request)>;
 
-/**
- * Names for supported authentication mechanisms.
- */
-
-constexpr auto kMechanismMongoX509 = "MONGODB-X509"_sd;
-constexpr auto kMechanismSaslPlain = "PLAIN"_sd;
-constexpr auto kMechanismGSSAPI = "GSSAPI"_sd;
-constexpr auto kMechanismScramSha1 = "SCRAM-SHA-1"_sd;
-constexpr auto kMechanismScramSha256 = "SCRAM-SHA-256"_sd;
-constexpr auto kMechanismMongoAWS = "MONGODB-AWS"_sd;
-constexpr auto kMechanismMongoOIDC = "MONGODB-OIDC"_sd;
-constexpr auto kInternalAuthFallbackMechanism = kMechanismScramSha1;
-
-constexpr auto kSaslSupportedMechanisms = "saslSupportedMechs"_sd;
-constexpr auto kSpeculativeAuthenticate = "speculativeAuthenticate"_sd;
-constexpr auto kClusterAuthenticate = "clusterAuthenticate"_sd;
-constexpr auto kAuthenticateCommand = "authenticate"_sd;
+constexpr auto kSaslSupportedMechanisms = "saslSupportedMechs"sv;
+constexpr auto kSpeculativeAuthenticate = "speculativeAuthenticate"sv;
+constexpr auto kClusterAuthenticate = "clusterAuthenticate"sv;
+constexpr auto kAuthenticateCommand = "authenticate"sv;
 
 /**
  * On replication step down, should the current connection be killed or left open.
@@ -91,12 +53,12 @@ public:
     virtual ~InternalAuthParametersProvider() = default;
 
     /**
-     * Get the information for a given SASL mechanism.
+     * Get the credential for a given SASL mechanism.
      *
-     * If there are multiple entries for a mechanism, suppots retrieval by index. Used when rotating
-     * the security key.
+     * If there are multiple entries for a mechanism, supports retrieval by index. Used when
+     * rotating the security key. Returns boost::none if no credential is available at that index.
      */
-    virtual BSONObj get(size_t index, StringData mechanism) = 0;
+    virtual boost::optional<Credential> get(size_t index, std::string_view mechanism) = 0;
 };
 
 std::shared_ptr<InternalAuthParametersProvider> createDefaultInternalAuthProvider();
@@ -108,27 +70,17 @@ std::shared_ptr<InternalAuthParametersProvider> createDefaultInternalAuthProvide
  * there is a stored client subject name, pass that through the "clientSubjectName" parameter.
  * Otherwise, "clientSubjectName" will be silently ignored, pass in any string.
  *
- * The "params" BSONObj should be initialized with some of the fields below.  Which fields
- * are required depends on the mechanism, which is mandatory.
- *
- *     "mechanism": The std::string name of the sasl mechanism to use.  Mandatory.
- *     "user": The std::string name of the user to authenticate.  Mandatory.
- *     "db": The database target of the auth command, which identifies the location
- *         of the credential information for the user.  May be "$external" if
- *         credential information is stored outside of the mongo cluster.  Mandatory.
- *     "pwd": The password data.
- *     "digestPassword": Boolean, set to true if the "pwd" is undigested (default).
- *     "serviceName": The GSSAPI service name to use.  Defaults to "mongodb".
- *     "serviceHostname": The GSSAPI hostname to use.  Defaults to the name of the remote
- *          host.
- *
- * Other fields in "params" are silently ignored. A "params" object can be constructed
- * using the buildAuthParams() method.
+ * The "credential" struct must have "mechanism" set. Other fields are mechanism-dependent:
+ *   - "username": required for SCRAM, PLAIN, GSSAPI; omitted for X.509, AWS, OIDC.
+ *   - "db": auth-source database; uses mechanism default ($external or admin) when absent.
+ *   - "password": required for SCRAM and PLAIN; absent for other mechanisms.
+ *   - "mechanismProperties": mechanism-specific options such as serviceName, serviceHostname,
+ *       awsIamSessionToken, oidcAccessToken, digestPassword.
  *
  * This function will return a future that will be filled with the final result of the
  * authentication command on success or a Status on error.
  */
-Future<void> authenticateClient(const BSONObj& params,
+Future<void> authenticateClient(const Credential& credential,
                                 const HostAndPort& hostname,
                                 const std::string& clientSubjectName,
                                 RunCommandHook runCommand);
@@ -165,9 +117,9 @@ Future<void> authenticateInternalClient(
  *     @mechanism: The std::string authentication mechanism to be used
  */
 BSONObj buildAuthParams(const DatabaseName& dbname,
-                        StringData username,
-                        StringData passwordText,
-                        StringData mechanism);
+                        std::string_view username,
+                        std::string_view passwordText,
+                        std::string_view mechanism);
 
 /**
  * Run a "hello" exchange to negotiate a SASL mechanism for authentication.
@@ -180,12 +132,12 @@ Future<std::string> negotiateSaslMechanism(RunCommandHook runCommand,
 /**
  * Return the field name for the database containing credential information.
  */
-StringData getSaslCommandUserDBFieldName();
+std::string_view getSaslCommandUserDBFieldName();
 
 /**
  * Return the field name for the user to authenticate.
  */
-StringData getSaslCommandUserFieldName();
+std::string_view getSaslCommandUserFieldName();
 
 /**
  * Which type of speculative authentication was performed (if any).
@@ -212,5 +164,6 @@ SpeculativeAuthType speculateInternalAuth(const HostAndPort& remoteHost,
                                           BSONObjBuilder* helloRequestBuilder,
                                           std::shared_ptr<SaslClientSession>* saslClientSession);
 
-}  // namespace MONGO_MOD_PUBLIC auth
+
+}  // namespace auth
 }  // namespace mongo

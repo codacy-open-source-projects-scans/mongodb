@@ -11,7 +11,7 @@
 // ]
 
 import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 let testDB = db.getSiblingDB("profile_find");
@@ -22,12 +22,16 @@ let coll = testDB.getCollection(collName);
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
 assert.commandWorked(
-    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+    testDB.setProfilingLevel(1, {
+        filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}},
+    }),
 );
 
 // Increase this deadline in order to prevent flakiness in this test.
 assert.commandWorked(
-    testDB.getSiblingDB("admin").runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
+    testDB
+        .getSiblingDB("admin")
+        .runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
 );
 
 const profileEntryFilter = {
@@ -68,6 +72,8 @@ if (isLinux()) {
     assert(profileObj.hasOwnProperty("cpuNanos"), tojson(profileObj));
 }
 assert(profileObj.hasOwnProperty("millis"), profileObj);
+assert(profileObj.hasOwnProperty("micros"), profileObj);
+assert.gte(profileObj.micros, profileObj.millis * 1000, profileObj);
 assert(profileObj.hasOwnProperty("numYield"), profileObj);
 assert(profileObj.hasOwnProperty("locks"), profileObj);
 assert(profileObj.locks.hasOwnProperty("Global"), profileObj);
@@ -85,6 +91,8 @@ assert.eq(profileObj.appName, "MongoDB Shell", profileObj);
     assert(profileObj.execStats.hasOwnProperty("stage"), profileObj);
     if (!ClusteredCollectionUtil.areAllCollectionsClustered(testDB)) {
         // Clustered collections are not always eligible for express path.
+        assert.eq(profileObj.execStats.stage, "EXPRESS_IXSCAN", profileObj);
+        assert.eq(profileObj.execStats.keyPattern, {a: 1}, profileObj);
         assert.eq(profileObj.planSummary, "EXPRESS_IXSCAN { a: 1 }", profileObj);
         assert(profileObj.execStats.hasOwnProperty("indexName"), profileObj);
     }

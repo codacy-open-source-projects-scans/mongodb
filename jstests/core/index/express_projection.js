@@ -1,6 +1,7 @@
 /**
  * Tests how express code path works with projections.
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_83,
  *   # "Refusing to run a test that issues an aggregation command with explain because it may return
  *   # incomplete results"
@@ -191,7 +192,12 @@ describe("Express path handles collation when covering projections", () => {
 
     before(() => {
         recreateCollWith(docs);
-        assert.commandWorked(coll.createIndex({a: 1, extra1: 1, c: 1, extra2: 1, b: 1}, {collation: caseInsensitive}));
+        assert.commandWorked(
+            coll.createIndex(
+                {a: 1, extra1: 1, c: 1, extra2: 1, b: 1},
+                {collation: caseInsensitive},
+            ),
+        );
         assert.commandWorked(coll.createIndex({a: 1}, {collation: caseInsensitive}));
     });
 
@@ -255,11 +261,17 @@ describe("Express path includes projection into explain", () => {
         assert.commandWorked(coll.createIndex({a: 1}, {unique: true}));
         assert.commandWorked(coll.createIndex({a: 1, b: 1}));
 
-        const explainCovered = getWinningPlanFromExplain(coll.find({a: 1}, {b: 1, _id: 0}).explain());
+        const explainCovered = getWinningPlanFromExplain(
+            coll.find({a: 1}, {b: 1, _id: 0}).explain(),
+        );
 
         assert.eq(explainCovered.stage, "EXPRESS_IXSCAN", explainCovered);
         assert.eq(explainCovered.projection, {b: 1, _id: 0}, explainCovered);
-        assert.eq(explainCovered.projectionCovered, !expectedNonZeroFetchCountWhenCovered, explainCovered);
+        assert.eq(
+            explainCovered.projectionCovered,
+            !expectedNonZeroFetchCountWhenCovered,
+            explainCovered,
+        );
 
         const explainNotCovered = getWinningPlanFromExplain(coll.find({a: 1}, {_id: 0}).explain());
 

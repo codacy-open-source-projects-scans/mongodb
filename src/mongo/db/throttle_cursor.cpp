@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/throttle_cursor.h"
 
@@ -55,9 +29,14 @@ MONGO_FAIL_POINT_DEFINE(fixedCursorDataSizeOf2MBForDataThrottle);
 
 SeekableRecordThrottleCursor::SeekableRecordThrottleCursor(OperationContext* opCtx,
                                                            const RecordStore* rs,
-                                                           DataThrottle* dataThrottle) {
-    _cursor = rs->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), /*forward=*/true);
-    _dataThrottle = dataThrottle;
+                                                           DataThrottle* dataThrottle,
+                                                           bool forward)
+    : _rs(*rs), _forward(forward), _dataThrottle(dataThrottle) {
+    seekToStart(opCtx);
+}
+
+void SeekableRecordThrottleCursor::seekToStart(OperationContext* opCtx) {
+    _cursor = _rs.getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), _forward);
 }
 
 boost::optional<Record> SeekableRecordThrottleCursor::seekExact(OperationContext* opCtx,
@@ -171,11 +150,12 @@ void DataThrottle::awaitIfNeeded(OperationContext* opCtx, const int64_t dataSize
         return;
     }
 
-    // No throttling should take place if '_maxMBperSec()' is zero.
-    uint64_t maxBytesPerSec = _maxMBperSec() * 1024 * 1024;
-    if (maxBytesPerSec == 0) {
+    // No throttling should take place if '_maxMBperSec()' is zero or negative.
+    const int maxMBPerSec = _maxMBperSec();
+    if (maxMBPerSec <= 0) {
         return;
     }
+    const uint64_t maxBytesPerSec = static_cast<uint64_t>(maxMBPerSec) * 1024 * 1024;
 
     if (_bytesProcessed < maxBytesPerSec) {
         return;

@@ -2,7 +2,7 @@
  * Tests that the "text score" metadata (previously known as 'textScore') is accessible by the
  * 'score' metadata field in aggregation pipelines.
  *
- * @tags: [featureFlagRankFusionFull, requires_fcv_81]
+ * @tags: [requires_fcv_81]
  */
 
 const kScoreMetadataArg = "score";
@@ -69,7 +69,9 @@ function runProjectionTest({forceProjectionOnMerger}) {
         assert.eq(
             result[kTextScoreMetadataArg],
             result[kScoreMetadataArg],
-            "the legacy metadata value '" + kTextScoreMetadataArg + "' is not equal to the 'score' metadata value",
+            "the legacy metadata value '" +
+                kTextScoreMetadataArg +
+                "' is not equal to the 'score' metadata value",
         );
     }
 

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
@@ -44,6 +17,7 @@
 #include "mongo/db/s/primary_only_service_helpers/cancel_state.h"
 #include "mongo/db/s/resharding/donor_document_gen.h"
 #include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
+#include "mongo/db/s/resharding/resharding_donor_promises.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/service_context.h"
@@ -55,6 +29,7 @@
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/modules.h"
@@ -62,6 +37,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -69,37 +45,41 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
-class MONGO_MOD_PUBLIC ReshardingDonorService : public repl::PrimaryOnlyService {
+class [[MONGO_MOD_PUBLIC]] ReshardingDonorService : public repl::PrimaryOnlyService {
 public:
-    static constexpr StringData kServiceName = "ReshardingDonorService"_sd;
+    static constexpr std::string_view kServiceName = "ReshardingDonorService"sv;
 
     explicit ReshardingDonorService(ServiceContext* serviceContext)
         : PrimaryOnlyService(serviceContext), _serviceContext(serviceContext) {}
     ~ReshardingDonorService() override = default;
 
-    class MONGO_MOD_PRIVATE DonorStateMachine;
+    class [[MONGO_MOD_PRIVATE]] DonorStateMachine;
 
-    class MONGO_MOD_PRIVATE DonorStateMachineExternalState;
+    class [[MONGO_MOD_PRIVATE]] DonorStateMachineExternalState;
 
-    MONGO_MOD_PRIVATE StringData getServiceName() const override {
+    [[MONGO_MOD_PRIVATE]] std::string_view getServiceName() const override {
         return kServiceName;
     }
 
-    MONGO_MOD_PRIVATE NamespaceString getStateDocumentsNS() const override {
+    [[MONGO_MOD_PRIVATE]] NamespaceString getStateDocumentsNS() const override {
         return NamespaceString::kDonorReshardingOperationsNamespace;
     }
 
-    MONGO_MOD_PRIVATE ThreadPool::Limits getThreadPoolLimits() const override;
+    [[MONGO_MOD_PRIVATE]] ThreadPoolLimits getThreadPoolLimits() const override;
 
     // The service implemented its own conflict check before this method was added.
-    MONGO_MOD_PRIVATE void checkIfConflictsWithOtherInstances(
+    [[MONGO_MOD_PRIVATE]] void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
         const std::vector<const Instance*>& existingInstances) override {}
 
-    MONGO_MOD_PRIVATE std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
+    [[MONGO_MOD_PRIVATE]] std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override;
+
+    [[MONGO_MOD_PRIVATE]] void stepDown_forTest();
+    [[MONGO_MOD_PRIVATE]] void stepUp_forTest();
 
 private:
     ServiceContext* _serviceContext;
@@ -129,6 +109,7 @@ public:
      * completed running.
      */
     SharedSemiFuture<void> getCompletionFuture() const {
+        // coverity[missing_lock]
         return _completionPromise.getFuture();
     }
 
@@ -142,9 +123,18 @@ public:
     void onReadDuringCriticalSection();
     void onWriteDuringCriticalSection();
 
-    void notifyAllRecipientsDoneCloning();
-
-    void notifyAllRecipientsDoneApplying();
+    /**
+     * Fulfills the subset of donor promises that are driven by the coordinator advancing through
+     * its state machine. Shared entry point for command handlers and onReshardingFieldsChanges.
+     * Idempotent and cascading: invoking with a later state also fulfills promises associated with
+     * all earlier coordinator states.
+     *
+     * Promises fulfilled here:
+     *   newState >= kApplying        -> _allRecipientsDoneCloning   (via _promises)
+     *   newState >= kBlockingWrites  -> _allRecipientsDoneApplying  (via _promises)
+     *   newState >= kCommitting      -> _coordinatorHasDecisionPersisted
+     */
+    void onCoordinatorStateAdvanced(CoordinatorStateEnum newState);
 
     SharedSemiFuture<void> awaitCriticalSectionAcquired();
 
@@ -177,7 +167,15 @@ public:
      * reaching that state.
      */
     SharedSemiFuture<void> awaitInDonatingOplogEntries() const {
-        return _inDonatingOplogEntries.getFuture();
+        return _promises.getInDonatingOplogEntriesFuture();
+    }
+
+    SharedSemiFuture<void> awaitAllRecipientsDoneCloningForTest() {
+        return _promises.getAllRecipientsDoneCloningFuture();
+    }
+
+    SharedSemiFuture<void> awaitAllRecipientsDoneApplyingForTest() {
+        return _promises.getAllRecipientsDoneApplyingFuture();
     }
 
     /**
@@ -186,7 +184,7 @@ public:
      * DonorStateEnum::kBlockingWrites).
      */
     SharedSemiFuture<void> awaitInBlockingWritesOrError() const {
-        return _inBlockingWritesOrError.getFuture();
+        return _promises.getInBlockingWritesOrErrorFuture();
     }
 
     static void insertStateDocument(OperationContext* opCtx,
@@ -206,6 +204,19 @@ public:
     void checkIfOptionsConflict(const BSONObj& stateDoc) const final {}
 
 private:
+    /**
+     * Fulfills in-memory promises that can be inferred from the persisted donor state on step-up.
+     * The workflow promises are recovered via _promises.recover(); the remaining SharedPromise
+     * members (coordinator decision and change-streams-monitor promises) are recovered inline.
+     */
+    void _fulfillPromisesOnStepup(const ReshardingDonorDocument& donorDoc);
+
+    /**
+     * With-lock implementation of onCoordinatorStateAdvanced. Used by callers that already hold
+     * _mutex.
+     */
+    void _onCoordinatorStateAdvanced(WithLock lk, CoordinatorStateEnum newState);
+
     /**
      * Helper to construct an opCtx and set non-deprioritizable state if needed.
      */
@@ -254,6 +265,10 @@ private:
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
 
+    void _createChangeStreamsMonitor(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
+
     ExecutorFuture<void> _awaitAllRecipientsDoneCloningThenTransitionToDonatingOplogEntries(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
@@ -269,7 +284,8 @@ private:
      * If verification is enabled, waits for the the change streams monitor to complete.
      */
     ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
-        const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
 
     // Drops the original collection and throws if the returned status is not either Status::OK()
     // or NamespaceNotFound.
@@ -318,17 +334,11 @@ private:
     void _removeDonorDocument(
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
 
-    // Initializes the _cancelState and generates an abort token. If an
-    // abort was reported prior to the initialization, automatically cancels the _cancelState before
-    // returning. Note: Should only be called once per lifetime.
-    void _initCancelState(const CancellationToken& stepdownToken);
-
     /**
      * Creates a new span with the resharding UUID set as an attribute.
      */
     otel::traces::Span _startSpan(std::shared_ptr<otel::TelemetryContext> telemetryCtx,
-                                  const std::string& spanName,
-                                  bool keepSpan = false);
+                                  otel::traces::SpanName spanName);
 
     // The primary-only service instance corresponding to the donor instance. Not owned.
     const ReshardingDonorService* const _donorService;
@@ -366,9 +376,8 @@ private:
     // Protects the state below
     mutable std::mutex _mutex;
 
-    // Manages abort state and provides cancellation tokens for async operations. Initialized in
-    // _initCancelState().
-    std::unique_ptr<primary_only_service_helpers::CancelState> _cancelState;
+    // Manages abort state and provides cancellation tokens for async operations.
+    primary_only_service_helpers::CancelState _cancelState;
 
     // The identifier associated to the recoverable critical section.
     const BSONObj _critSecReason;
@@ -376,29 +385,34 @@ private:
     // It states whether the current node has also the recipient role.
     const bool _isAlsoRecipient;
 
-    // Each promise below corresponds to a state on the donor state machine. They are listed in
-    // ascending order, such that the first promise below will be the first promise fulfilled -
-    // fulfillment order is not necessarily maintained if the operation gets aborted.
-    SharedPromise<void> _allRecipientsDoneCloning;
+    // Owns the donor-state-machine workflow promises (allRecipientsDoneCloning,
+    // allRecipientsDoneApplying, inDonatingOplogEntries, inBlockingWritesOrError,
+    // critSecWasAcquired, critSecWasPromoted). Stepup recovery, terminal-error broadcast, and
+    // per-state fulfillment all flow through this wrapper. See ReshardingDonorPromises for the
+    // per-promise recovery rules.
+    ReshardingDonorPromises _promises;
 
-    SharedPromise<void> _inDonatingOplogEntries;
+    // Fulfilled once the coordinator has persisted its commit/abort decision. Set with success
+    // by commit(), with an abort status by abort(), or by stepup recovery when the donor
+    // already reflects the coordinator decision locally.
+    SharedPromise<void> _coordinatorHasDecisionPersisted;
 
-    SharedPromise<void> _allRecipientsDoneApplying;
+    // Fulfilled when all the work associated with this Instance has finished, including the
+    // local state document being removed. Errored from interrupt() so that consumers waiting on
+    // completion observe an error rather than hang if run() is never called by POS during
+    // stepdown.
+    SharedPromise<void> _completionPromise;
 
-    SharedPromise<void> _inBlockingWritesOrError;
-
+    // Change-streams-monitor SharedPromises (only used when verification is enabled). Kept out
+    // of _promises because they have independent error semantics from the donor's main state
+    // machine: a monitor failure does not necessarily error the workflow promises and vice
+    // versa.
     SharedPromise<Timestamp> _changeStreamMonitorStartTimeSelected;
     SharedPromise<void> _changeStreamsMonitorStarted;
     SharedPromise<int64_t> _changeStreamsMonitorCompleted;
+
+    // The change-streams-monitor quiesce future is wired up by the monitor itself.
     SharedSemiFuture<void> _changeStreamsMonitorQuiesced;
-
-    SharedPromise<void> _coordinatorHasDecisionPersisted;
-
-    SharedPromise<void> _completionPromise;
-
-    // Promises used to synchronize the acquisition/promotion of the recoverable critical section.
-    SharedPromise<void> _critSecWasAcquired;
-    SharedPromise<void> _critSecWasPromoted;
 };
 
 /**
@@ -423,12 +437,13 @@ public:
                                            const BSONObj& update) = 0;
 
     virtual std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction>
-    getOnReleaseCriticalSectionCustomAction() = 0;
+    getOnReleaseCriticalSectionCustomAction(bool mustClearCollectionMetadata) = 0;
 
     virtual void refreshCollectionPlacementInfo(OperationContext* opCtx,
                                                 const NamespaceString& sourceNss) = 0;
 
-    virtual void abortUnpreparedTransactionIfNecessary(OperationContext* opCtx) = 0;
+    virtual void abortUnpreparedTransactionIfNecessary(
+        OperationContext* opCtx, const boost::optional<ForwardableOperationMetadata>& metadata) = 0;
 };
 
 }  // namespace mongo

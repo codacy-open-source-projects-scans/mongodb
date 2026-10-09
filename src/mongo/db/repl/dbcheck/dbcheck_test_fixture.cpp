@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/dbcheck/dbcheck_test_fixture.h"
 
@@ -43,10 +17,12 @@
 #include "mongo/db/repl/dbcheck/health_log_gen.h"
 #include "mongo/db/repl/dbcheck/health_log_interface.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/util/fail_point.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -106,9 +82,12 @@ void DbCheckTest::insertDocs(OperationContext* opCtx,
         inserts.push_back(bsonBuilder.obj());
     }
 
-    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
     WriteUnitOfWork wuow(opCtx);
-    ASSERT_OK(Helpers::insert(opCtx, *coll, inserts));
+    ASSERT_OK(Helpers::insert(opCtx, coll.getCollectionPtr(), inserts));
     wuow.commit();
 }
 
@@ -122,9 +101,12 @@ void DbCheckTest::insertInvalidUuid(OperationContext* opCtx,
     bsonBuilder << "invalid uuid" << BSONBinData(uuidBytes, 10, newUUID);
     const auto obj = bsonBuilder.obj();
 
-    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
     WriteUnitOfWork wuow(opCtx);
-    ASSERT_OK(Helpers::insert(opCtx, *coll, obj));
+    ASSERT_OK(Helpers::insert(opCtx, coll.getCollectionPtr(), obj));
     wuow.commit();
 }
 
@@ -186,8 +168,11 @@ DbCheckCollectionInfo DbCheckTest::createDbCheckCollectionInfo(
  * Builds an index on kNss. 'indexKey' specifies the index key, e.g. {'a': 1};
  */
 void DbCheckTest::createIndex(OperationContext* opCtx, const BSONObj& indexKey) {
-    AutoGetCollection collection(opCtx, kNss, MODE_X);
-    ASSERT(collection);
+    auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
+        MODE_X);
+    ASSERT(collection.exists());
 
     ASSERT_EQ(1, indexKey.nFields()) << kNss.toStringForErrorMsg() << "/" << indexKey;
     auto spec = BSON("v" << int(IndexConfig::kLatestIndexVersion) << "key" << indexKey << "name"
@@ -196,7 +181,7 @@ void DbCheckTest::createIndex(OperationContext* opCtx, const BSONObj& indexKey) 
     auto indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
     auto indexConstraints = IndexBuildsManager::IndexConstraints::kEnforce;
     auto fromMigrate = false;
-    indexBuildsCoord->createIndex(opCtx, collection->uuid(), spec, indexConstraints, fromMigrate);
+    indexBuildsCoord->createIndex(opCtx, collection.uuid(), spec, indexConstraints, fromMigrate);
 }
 
 Status DbCheckTest::runHashForCollectionCheck(
@@ -257,7 +242,7 @@ Status DbCheckTest::runHashForExtraIndexKeysCheck(
 
 SecondaryIndexCheckParameters DbCheckTest::createSecondaryIndexCheckParams(
     DbCheckValidationModeEnum validateMode,
-    StringData secondaryIndex,
+    std::string_view secondaryIndex,
     bool skipLookupForExtraKeys,
     BSONValidateModeEnum bsonValidateMode) {
     auto params = SecondaryIndexCheckParameters();

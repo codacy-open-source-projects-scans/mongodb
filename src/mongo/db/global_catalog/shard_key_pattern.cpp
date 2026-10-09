@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -44,10 +17,13 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
-constexpr auto kIdField = "_id"_sd;
+constexpr auto kIdField = "_id"sv;
 
 const BSONObj kNullObj = BSON("" << BSONNULL);
 
@@ -79,7 +55,7 @@ std::vector<std::unique_ptr<FieldRef>> parseShardKeyPattern(const BSONObj& keyPa
 
         // Empty parts of the path, ".."?
         for (size_t i = 0; i < newFieldRef->numParts(); ++i) {
-            const StringData part = newFieldRef->getPart(i);
+            const std::string_view part = newFieldRef->getPart(i);
 
             uassert(ErrorCodes::BadValue,
                     str::stream() << "Field " << patternEl.fieldNameStringData()
@@ -106,13 +82,12 @@ std::vector<std::unique_ptr<FieldRef>> parseShardKeyPattern(const BSONObj& keyPa
                               << patternEl.fieldNameStringData(),
                 numHashedFields == 1);
         } else {
-            uassert(
-                ErrorCodes::BadValue,
-                str::stream() << "Shard key " << keyPattern.toString()
-                              << "numerical fields must be set to a value of 1 (ascending). Failed "
-                                 "to parse field "
-                              << patternEl.fieldNameStringData(),
-                (patternEl.isNumber() && patternEl.safeNumberInt() == 1));
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "Shard key " << keyPattern.toString()
+                                  << " is invalid. Non-hashed fields must be set to a value of 1 "
+                                     "(ascending). Failed to parse field "
+                                  << patternEl.fieldNameStringData(),
+                    (patternEl.isNumber() && patternEl.safeNumberInt() == 1));
         }
         parsedPaths.emplace_back(std::move(newFieldRef));
     }
@@ -128,7 +103,7 @@ bool isValidShardKeyElement(const BSONElement& element) {
     return !element.eoo() && element.type() != BSONType::array;
 }
 
-BSONElement extractKeyElementFromDoc(const BSONObj& obj, StringData pathStr) {
+BSONElement extractKeyElementFromDoc(const BSONObj& obj, std::string_view pathStr) {
     // Any arrays found get immediately returned. We are equipped up the call stack to specifically
     // deal with array values.
     size_t idxPath;
@@ -142,7 +117,8 @@ BSONElement extractKeyElementFromDoc(const BSONObj& obj, StringData pathStr) {
  * first matching non-hashed value.
  */
 std::pair<BSONElement, bool> extractFieldFromIndexData(
-    const std::vector<ShardKeyPattern::IndexKeyData>& indexKeyDataVector, StringData fieldName) {
+    const std::vector<ShardKeyPattern::IndexKeyData>& indexKeyDataVector,
+    std::string_view fieldName) {
     std::pair<BSONElement, bool> output;
     for (auto&& indexKeyData : indexKeyDataVector) {
         BSONObjIterator keyDataIt(indexKeyData.data);
@@ -164,7 +140,7 @@ std::pair<BSONElement, bool> extractFieldFromIndexData(
     return output;
 }
 
-BSONElement extractFieldFromDocumentKey(const BSONObj& documentKey, StringData fieldName) {
+BSONElement extractFieldFromDocumentKey(const BSONObj& documentKey, std::string_view fieldName) {
     BSONElement output;
     for (auto&& documentKeyElt : documentKey) {
         if (fieldName == documentKeyElt.fieldNameStringData()) {
@@ -198,7 +174,7 @@ BSONElement ShardKeyPattern::extractHashedField(BSONObj keyPattern) {
 ShardKeyPattern::ShardKeyPattern(const BSONObj& keyPattern)
     : _keyPattern(keyPattern),
       _keyPatternPaths(parseShardKeyPattern(keyPattern)),
-      _hasId(keyPattern.hasField("_id"_sd)),
+      _hasId(keyPattern.hasField("_id"sv)),
       _hashedField(extractHashedField(keyPattern)) {}
 
 ShardKeyPattern::ShardKeyPattern(const KeyPattern& keyPattern)
@@ -212,7 +188,7 @@ bool ShardKeyPattern::isHashedPattern() const {
     return !_hashedField.eoo();
 }
 
-bool ShardKeyPattern::isHashedOnField(StringData fieldName) const {
+bool ShardKeyPattern::isHashedOnField(std::string_view fieldName) const {
     return !_hashedField.eoo() && _hashedField.fieldNameStringData() == fieldName;
 }
 
@@ -428,7 +404,7 @@ bool ShardKeyPattern::isIndexUniquenessAndCollationCompatible(const BSONObj& ind
         return true;
     }
     const bool hasSimpleCollation = collation.isEmpty() ||
-        SimpleBSONObjComparator::kInstance.evaluate(collation == CollationSpec::kSimpleSpec);
+        Collation::parse(collation) == Collation::parse(CollationSpec::kSimpleSpec);
     return _keyPattern.toBSON().isFieldNamePrefixOf(indexPattern) && hasSimpleCollation;
 }
 

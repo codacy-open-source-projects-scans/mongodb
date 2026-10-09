@@ -15,8 +15,6 @@
  *    stepdown by holding the RSTL in MODE_IX.
  *
  * @tags: [
- *   # This test may fail only because primary driven index builds are aborted when a new primary steps up.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   uses_prepare_transaction,
  *   uses_transactions,
  * ]
@@ -157,7 +155,12 @@ IndexBuildTest.waitForIndexBuildToStop(newPrimary.getDB(dbName), collName, index
 IndexBuildTest.waitForIndexBuildToStop(primary.getDB(dbName), collName, indexName);
 rst.awaitReplication();
 
-IndexBuildTest.assertIndexes(newPrimary.getDB(dbName).getCollection(collName), 2, ["_id_", indexName], []);
+IndexBuildTest.assertIndexes(
+    newPrimary.getDB(dbName).getCollection(collName),
+    2,
+    ["_id_", indexName],
+    [],
+);
 IndexBuildTest.assertIndexes(primaryColl, 2, ["_id_", indexName], []);
 
 rst.stopSet();

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
@@ -41,11 +14,11 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/lite_parsed_document_source_nested_pipelines.h"
-#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/lite_parsed_union_with.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/stage_params.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -58,6 +31,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -67,6 +41,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 struct UnionWithSharedState {
     enum class ExecutionProgress {
@@ -108,30 +83,33 @@ struct UnionWithSharedState {
 };
 
 
-class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceUnionWith final : public DocumentSource {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DocumentSourceUnionWith final : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$unionWith"_sd;
+    static constexpr std::string_view kStageName = "$unionWith"sv;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     // Builds a DocumentSourceUnionWith from pre-parsed StageParams.
-    // Performs expCtx-dependent validations (hasForeignDB, hybrid search timeseries).
+    // Performs expCtx-dependent validations (hybrid search timeseries).
     static DocumentSourceContainer createFromStageParams(
         UnionWithStageParams& params, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                             NamespaceString unionNss,
-                            std::vector<BSONObj> pipeline,
-                            bool hasForeignDB = false);
+                            std::vector<BSONObj> pipeline);
 
-    // Constructor that accepts a pre-desugared LiteParsedPipeline for the subpipeline.
-    // Uses Pipeline::parseFromLiteParsed instead of re-parsing from BSON.
+    // Constructor used by createFromStageParams(): accepts pre-parsed StageParams for the
+    // subpipeline together with the user-facing fields that the copy constructor and serialize()
+    // require. 'resolvedBackingNss' is the resolved backing namespace recorded by
+    // bindResolvedNamespace at parse time; when it is a view (involvedNamespaceIsAView), it
+    // short-circuits the expCtx->getResolvedNamespaces() lookup because the view was already
+    // resolved.
     DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                             NamespaceString unionNss,
-                            LiteParsedPipeline desugaredPipeline,
+                            StageParamsPipeline subpipelineStageParams,
                             std::vector<BSONObj> userPipeline,
-                            bool hasForeignDB);
+                            ResolvedNamespace resolvedBackingNss);
 
     // Expose a constructor that skips the parsing step for testing purposes.
     DocumentSourceUnionWith(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -143,8 +121,8 @@ public:
 
     ~DocumentSourceUnionWith() override;
 
-    const char* getSourceName() const final {
-        return kStageName.data();
+    std::string_view getSourceName() const final {
+        return kStageName;
     }
 
     static const Id& id;
@@ -164,7 +142,7 @@ public:
         StageConstraints unionConstraints(
             StreamType::kStreaming,
             PositionRequirement::kNone,
-            HostTypeRequirement::kAnyShard,
+            HostTypeRequirement::kTargetedShards,
             DiskUseRequirement::kNoDiskUse,
             FacetRequirement::kAllowed,
             TransactionRequirement::kNotAllowed,
@@ -244,16 +222,19 @@ public:
         return _sharedState;
     }
 
+    // 'isHybridSearch' forces the sub-pipeline expCtx to be marked hybrid when 'currentPipeline'
+    // is already desugared (explain-serialize reparse) and shape detection cannot tell.
     static std::unique_ptr<Pipeline> parsePipelineWithMaybeViewDefinition(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const ResolvedNamespace& resolvedNs,
         std::vector<BSONObj> currentPipeline,
-        const NamespaceString& userNss);
+        const NamespaceString& userNss,
+        bool isHybridSearch = false);
 
-    static std::unique_ptr<Pipeline> parsePipelineFromLPPWithMaybeViewDefinition(
+    static std::unique_ptr<Pipeline> parsePipelineFromStageParamsWithMaybeViewDefinition(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const ResolvedNamespace& resolvedNs,
-        LiteParsedPipeline& desugaredPipeline,
+        StageParamsPipeline stageParams,
         const std::vector<BSONObj>& rawPipeline,
         const NamespaceString& userNss);
 
@@ -269,11 +250,19 @@ private:
     friend exec::agg::StagePtr documentSourceUnionWithToStageFn(
         const boost::intrusive_ptr<const DocumentSource>& documentSource);
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
 
-    // Builds the complete {$unionWith: {coll: ..., db: ..., pipeline: ...}} Value from
-    // pre-computed components. Handles collectionless and cross-db variations.
-    Value buildUnionWithResult(Value pipelineValue, Value db, Value coll) const;
+    // Builds the complete {$unionWith: {coll: ..., pipeline: ...}} Value from
+    // pre-computed components. Handles collectionless variations.
+    Value buildUnionWithResult(Value pipelineValue, Value coll) const;
+
+    // TODO SERVER-121094: Remove when featureFlagExtensionsInsideHybridSearch is removed.
+    Value legacyUnionWithSerialize(const query_shape::SerializationOptions& opts) const;
+
+    // Appends the internal-only isHybridSearch flag to a serialized spec when appropriate.
+    void appendIsHybridSearchFlag(MutableDocument& spec,
+                                  const query_shape::SerializationOptions& opts) const;
 
     std::shared_ptr<UnionWithSharedState> _sharedState;
 
@@ -283,6 +272,9 @@ private:
     // The aggregation pipeline defined with the user request, prior to optimization and view
     // resolution.
     std::vector<BSONObj> _userPipeline;
+    // Cached hybrid_scoring_util::isHybridSearchPipeline(_userPipeline); kept in sync with
+    // '_userPipeline' assignments.
+    bool _userPipelineIsHybridSearch = false;
 
     // Match and/or project stages after a $unionWith can be pushed down into the $unionWith (and
     // the head of the pipeline). If we're doing an explain with execution stats, we will need
@@ -294,9 +286,7 @@ private:
     // the view pipeline in the explain result.
     boost::optional<ResolvedNamespace> _resolvedNsForView;
 
-    // States whether this unionWith is crossDB and thus needs to serialize the db name in the
-    // namespace.
-    bool _hasForeignDB = false;
+    bool _fromNsIsAView = false;
 };
 
 }  // namespace mongo

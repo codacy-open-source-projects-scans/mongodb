@@ -1,40 +1,11 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_size_count.h"
-#include "mongo/db/shard_role/shard_role.h"
-#include "mongo/db/storage/record_store.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
@@ -46,99 +17,82 @@
 namespace mongo {
 namespace replicated_fast_count {
 
-inline constexpr StringData kMetadataKey = "meta"_sd;
-inline constexpr StringData kSizeKey = "sz"_sd;
-inline constexpr StringData kCountKey = "ct"_sd;
-inline constexpr StringData kValidAsOfKey = "valid-as-of"_sd;
-
 /**
- * Data structure mapping collection UUIDs to their size and count deltas.
+ * Returns the size, count and validation hash delta extracted from the oplog entry's size metadata
+ * ('m' field).
  *
- * Useful for tracking changes to collections' size and count while scanning the oplog during
- * both checkpoints and size/count lookups.
- */
-using SizeCountDeltas = absl::flat_hash_map<UUID, SizeCountDelta>;
-
-/**
- * Returns the size and count delta extracted from the oplog entry's size metadata ('m' field), if
- * present.
+ * Returns boost::none when there is nothing to record: the entry opted out of tracking by carrying
+ * no 'm' field or no 'sz' within it, it carries the multi-op form of 'm', which is malformed for a
+ * single operation, or it is out of scope for fast count with an ineligible namespace or an
+ * operation type that cannot carry a top-level 'm'.
+ *
+ * The returned delta's hash is absent when the entry carried no 'h'. Folding that in invalidates
+ * the hash to be persisted, so that a contribution we never read is not mistaken for one that was
+ * folded in. An entry carrying an 'h' with no 'sz' is fatal: the two are written under the same
+ * conditions, so one without the other means no accumulated hash can be trusted.
  *
  * This function expects to be called on an oplog entry for a single operation. For 'applyOps'
  * entries, the top-level entry cannot have an 'm' (size metadata) field; however, the inner
  * operations within the 'applyOps' array can and should be parsed separately.
  */
-boost::optional<CollectionSizeCount> extractSizeCountDeltaForOp(const repl::OplogEntry& oplogEntry);
+boost::optional<CollectionReplicatedMetadata> extractReplicatedMetadataForOp(
+    const repl::OplogEntry& oplogEntry);
 
 /**
  * Aggregates per-collection size and count deltas across a list of operations. Returns one
  * `MultiOpSizeMetadata` entry per collection UUID touched. Operations without size metadata
  * (`m` field) are skipped.
  */
-MONGO_MOD_PUBLIC std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadata(
+[[MONGO_MOD_PUBLIC]] std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadata(
     const std::vector<repl::ReplOperation>& ops);
 
-MONGO_MOD_PUBLIC std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadata(
+[[MONGO_MOD_PUBLIC]] std::vector<MultiOpSizeMetadata> aggregateMultiOpSizeMetadata(
     const std::vector<repl::OplogEntry>& ops);
 
 /**
  * Accumulates cumulative size and count deltas for each uuid across the inner operations of the
- * 'applyOpsEntry' into 'sizeCountDeltasOut'. If 'uuidFilter' is provided, only entries for that
- * UUID are collected. Returns the number of size/count entries processed.
+ * 'applyOpsEntry' into 'replicatedMetadataDeltasOut'. Returns the number of size/count entries
+ * processed.
  *
  * The OplogEntry provided must be of type 'repl::OplogEntry::CommandType::kApplyOps'; otherwise,
  * the method throws and terminates the current operation.
  */
-int extractSizeCountDeltasForApplyOps(const repl::OplogEntry& applyOpsEntry,
-                                      const boost::optional<UUID>& uuidFilter,
-                                      SizeCountDeltas& sizeCountDeltasOut);
+int extractReplicatedMetadataDeltasForApplyOps(
+    const repl::OplogEntry& applyOpsEntry, ReplicatedMetadataDeltas& replicatedMetadataDeltasOut);
 
 /**
- * The result of scanning the oplog for size and count deltas.
+ * Processes a single oplog entry and accumulates its size/count contribution into
+ * 'replicatedMetadataDeltasOut'. Handles applyOps (including nested), truncateRange,
+ * commitTransaction, and CRUD operations. Returns the number of size/count entries processed.
+ */
+int processOplogEntry(const repl::OplogEntry& entry,
+                      ReplicatedMetadataDeltas& replicatedMetadataDeltasOut);
+
+/**
+ * Merges per-UUID deltas from 'src' into 'dst', handling DDL states (kCreated requires recording
+ * a create; kDropped is not permitted as drops are disallowed in multi-document transactions).
+ */
+void mergeDeltas(const ReplicatedMetadataDeltas& src, ReplicatedMetadataDeltas& dst);
+
+/**
+ * Fast-scan eligibility predicate used inside the cursor scan's Layer 2 / Layer 2.5 fast path.
+ * Equivalent to `isReplicatedFastCountEligible(nss)` for any namespace that is NOT
+ * `config.fast_count_metadata_store` or `config.fast_count_metadata_store_timestamps`. Layer 1
+ * and Layer 2.5 callers filter those store namespaces upstream so this helper can skip the two
+ * extra `NamespaceString` constructions the canonical function performs to check for them.
  *
- * `deltas` contains an entry for each `uuid` which has replicated size count information within the
- * scanned oplog range. May include entries where size count deltas sum to 0.
- *
- * `lastTimestamp` is the timestamp of the final oplog entry visited during the scan that is NOT
- * from an internal fast count store collection, or boost::none if no such entries were scanned
- * (i.e. the seek landed past the end of the oplog).
+ * Defined inline so the fast-scan hot path in
+ * `replicated_fast_count_streaming_oplog_delta_accumulator.cpp` can inline it across the
+ * translation unit boundary. Exposed for parity testing against `isReplicatedFastCountEligible`;
+ * the two functions must agree on every input outside the store namespaces.
  */
-struct OplogScanResult {
-    SizeCountDeltas deltas;
-    boost::optional<Timestamp> lastTimestamp;
-};
-
-/**
- * Given a cursor to the oplog, scans the oplog starting after "seekAfterTS" (exclusive bound) and
- * aggregates the size count deltas across UUIDs. Only accumulates size count information for
- * "uuidFilter" when provided. Pass 'isCheckpoint=true' only on the checkpoint scan path to
- * increment checkpoint scan counters; leave false (the default) on read paths.
- */
-OplogScanResult aggregateSizeCountDeltasInOplog(
-    SeekableRecordCursor& oplogCursor,
-    const Timestamp& seekAfterTS,
-    const boost::optional<UUID>& uuidFilter = boost::none,
-    bool isCheckpoint = false);
-
-/**
- * Acquires the replicated fast count collection for read access.
- * Returns boost::none if the collection does not exist.
- */
-boost::optional<CollectionOrViewAcquisition> acquireFastCountCollectionForRead(
-    OperationContext* opCtx);
-
-/**
- * Acquire the fastcount collection that underpins this class with write intent.
- * Returns boost::none if it doesn't exist.
- */
-boost::optional<CollectionOrViewAcquisition> acquireFastCountCollectionForWrite(
-    OperationContext* opCtx);
-
-/**
- * For each entry in 'deltas', looks up the persisted size and count for that UUID in the
- * on-disk fast count collection and adds the persisted values to the entry's size and count
- * in place. If a UUID has no on-disk entry, its delta is left unchanged.
- */
-void readAndIncrementSizeCounts(OperationContext* opCtx, SizeCountDeltas& deltas);
+inline bool isFastCountEligibleNonStore(const NamespaceString& nss) {
+    if (nss.isOplog() && gFeatureFlagSizeBasedOplogTruncationForDisagg.isEnabled()) {
+        return true;
+    }
+    return !nss.isLocalDB() && !nss.isImplicitlyReplicated() &&
+        !nss.isServerConfigurationCollection() && !nss.isSystemDotProfile();
+}
 }  // namespace replicated_fast_count
 
 

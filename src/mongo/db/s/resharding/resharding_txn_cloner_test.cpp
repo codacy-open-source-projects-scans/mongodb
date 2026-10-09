@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_txn_cloner.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -71,8 +44,6 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/router_role/routing_cache/catalog_cache_loader.h"
-#include "mongo/db/router_role/routing_cache/catalog_cache_loader_mock.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner_progress_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -102,9 +73,9 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -145,11 +116,11 @@ class ReshardingTxnClonerTest : service_context_test::WithSetupTransportLayer,
         ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp();
 
         // The config database's primary shard is always config, and it is always sharded.
-        getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(DatabaseType{
+        getConfigServerCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(DatabaseType{
             DatabaseName::kConfig, ShardId::kConfigServerId, DatabaseVersion::makeFixed()});
 
         // The config.transactions collection is always unsharded.
-        getCatalogCacheLoaderMock()->setCollectionRefreshReturnValue(
+        getConfigServerCatalogCacheLoaderMock()->setCollectionRefreshReturnValue(
             {ErrorCodes::NamespaceNotFound, "collection not found"});
 
         for (const auto& shardId : kTwoShardIdList) {
@@ -204,10 +175,9 @@ class ReshardingTxnClonerTest : service_context_test::WithSetupTransportLayer,
         public:
             StaticCatalogClient(std::vector<ShardId> shardIds) : _shardIds(std::move(shardIds)) {}
 
-            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
-                OperationContext* opCtx,
-                repl::ReadConcernLevel readConcern,
-                BSONObj filter) override {
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
+                                                                  repl::ReadConcernArgs readConcern,
+                                                                  BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : _shardIds) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(
@@ -385,7 +355,7 @@ protected:
             client.findOne(NamespaceString::kRsOplogNamespace,
                            BSON(repl::OplogEntryBase::kSessionIdFieldName << sessionId.toBSON()));
 
-        ASSERT_BSONOBJ_EQ(bsonOplog, {});
+        ASSERT_BSONOBJ_EQ(bsonOplog, BSONObj());
         ASSERT_EQ(txnParticipant.getActiveTxnNumberAndRetryCounter().getTxnNumber(), txnNum);
     }
 
@@ -606,23 +576,24 @@ private:
         // The ReshardingTxnCloner expects there to already be a Client associated with the thread
         // from the thread pool. We set up the ThreadPoolTaskExecutor identically to how the
         // recipient's primary-only service is set up.
-        ThreadPool::Options threadPoolOptions;
-        threadPoolOptions.maxThreads = 1;
-        threadPoolOptions.threadNamePrefix = "TestReshardCloneConfigTransactions-";
-        threadPoolOptions.poolName = "TestReshardCloneConfigTransactionsThreadPool";
-        threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName, getGlobalServiceContext()->getService());
-            auto* client = Client::getCurrent();
-            AuthorizationSession::get(*client)->grantInternalAuthorization();
-        };
 
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
         hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(getServiceContext()));
 
         auto executor = executor::ThreadPoolTaskExecutor::create(
-            std::make_unique<ThreadPool>(std::move(threadPoolOptions)),
-            executor::makeNetworkInterface(
-                "TestReshardCloneConfigTransactionsNetwork", nullptr, std::move(hookList)));
+            ThreadPool::make({
+                .poolName = "TestReshardCloneConfigTransactionsThreadPool",
+                .threadNamePrefix = "TestReshardCloneConfigTransactions-",
+                .maxThreads = 1,
+                .onCreateThread =
+                    [](const std::string& threadName) {
+                        Client::initThread(threadName, getGlobalServiceContext()->getService());
+                        auto* client = Client::getCurrent();
+                        AuthorizationSession::get(*client)->grantInternalAuthorization();
+                    },
+            }),
+            executor::makeNetworkInterface("TestReshardCloneConfigTransactionsNetwork",
+                                           {.metadataHook = std::move(hookList)}));
 
         return executor;
     }
@@ -631,7 +602,7 @@ private:
         return HostAndPort(str::stream() << shardId << ":123");
     }
 
-    RAIIServerParameterControllerForTest controller{"reshardingTxnClonerProgressBatchSize", 1};
+    unittest::ServerParameterGuard controller{"reshardingTxnClonerProgressBatchSize", 1};
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
     std::shared_ptr<ThreadPool> _threadPool;

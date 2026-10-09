@@ -26,9 +26,13 @@ coll.drop();
 // Test that you cannot open a tailable cursor on a non-existent collection.
 assert.eq(0, assert.commandWorked(testDB.runCommand({find: collName})).cursor.id);
 assert.eq(0, assert.commandWorked(testDB.runCommand({find: collName, tailable: true})).cursor.id);
-assert.eq(0, assert.commandWorked(testDB.runCommand({find: collName, tailable: true, awaitData: true})).cursor.id);
+assert.eq(
+    0,
+    assert.commandWorked(testDB.runCommand({find: collName, tailable: true, awaitData: true}))
+        .cursor.id,
+);
 
-if (FixtureHelpers.isMongos(testDB) || TestData.testingReplicaSetEndpoint) {
+if (FixtureHelpers.isMongos(testDB)) {
     // In sharded cluster, if the database exists, the mongos will let you establish a cursor with
     // batch size 0 and return to you before it realizes the shard's cursor is exhausted. The next
     // getMore should return a 0 cursor id though.
@@ -42,7 +46,9 @@ if (FixtureHelpers.isMongos(testDB) || TestData.testingReplicaSetEndpoint) {
 
 assert.eq(
     0,
-    assert.commandWorked(testDB.runCommand({find: collName, tailable: true, awaitData: true, batchSize: 0})).cursor.id,
+    assert.commandWorked(
+        testDB.runCommand({find: collName, tailable: true, awaitData: true, batchSize: 0}),
+    ).cursor.id,
 );
 
 function dropAndRecreateColl() {
@@ -62,7 +68,9 @@ dropAndRecreateColl();
  * cursor id is not 0, then returns the cursor id.
  */
 function openCursor({tailable, awaitData}) {
-    const findRes = assert.commandWorked(testDB.runCommand({find: collName, tailable: tailable, awaitData: awaitData}));
+    const findRes = assert.commandWorked(
+        testDB.runCommand({find: collName, tailable: tailable, awaitData: awaitData}),
+    );
     assert.neq(findRes.cursor.id, 0);
     assert.eq(findRes.cursor.ns, coll.getFullName());
     return findRes.cursor.id;

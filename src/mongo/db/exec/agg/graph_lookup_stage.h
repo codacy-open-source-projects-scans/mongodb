@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/agg/stage.h"
@@ -40,6 +13,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lookup_set_cache.h"
 #include "mongo/db/pipeline/spilling/spillable_deque.h"
@@ -49,12 +23,14 @@
 #include "mongo/util/modules.h"
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::exec::agg {
+using namespace std::literals::string_view_literals;
 
 /**
  * This class handles the execution part of the graph lookup aggregation stage and
@@ -63,11 +39,10 @@ namespace mongo::exec::agg {
  */
 class GraphLookUpStage final : public Stage {
 public:
-    GraphLookUpStage(StringData stageName,
+    GraphLookUpStage(std::string_view stageName,
                      const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                      GraphLookUpParams params,
                      boost::intrusive_ptr<ExpressionContext> fromExpCtx,
-                     std::vector<BSONObj> fromPipeline,
                      boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> unwind,
                      Variables variables,
                      VariablesParseState variablesParseState);
@@ -92,12 +67,12 @@ public:
         spill(0);
     }
 
-    Document getExplainOutput(
-        const SerializationOptions& opts = SerializationOptions{}) const final;
+    Document getExplainOutput(const query_shape::SerializationOptions& opts =
+                                  query_shape::SerializationOptions{}) const final;
 
 private:
-    static constexpr StringData kFrontierValueField = "f"_sd;
-    static constexpr StringData kDepthField = "d"_sd;
+    static constexpr std::string_view kFrontierValueField = "f"sv;
+    static constexpr std::string_view kDepthField = "d"sv;
 
     GetNextResult doGetNext() final;
 
@@ -197,16 +172,12 @@ private:
     // namespace.
     boost::intrusive_ptr<ExpressionContext> _fromExpCtx;
 
-    // The aggregation pipeline to perform against the '_from' namespace.
-    std::vector<BSONObj> _fromPipeline;
-
     // Keep track of a $unwind that was absorbed into this stage.
     boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> _unwind;
-    boost::optional<SpillableDocumentMap::Iterator> _unwindIterator;
 
     // Holds variables defined both in this stage and in parent pipelines. These are copied to the
     // '_fromExpCtx' ExpressionContext's 'variables' and 'variablesParseState' for use in the
-    // '_fromPipeline' execution.
+    // '_params.fromLpp' execution.
     Variables _variables;
     VariablesParseState _variablesParseState;
 
@@ -219,6 +190,15 @@ private:
     // Tracks memory for _queue and _visited. _cache is allowed to use the remaining memory limit.
     MemoryUsageTracker _memoryUsageTracker;
 
+    // Tracks memory used while evaluating expressions. Reports to the operation-wide
+    // tracker so all stages contribute to the operation memory total.
+    SimpleMemoryUsageTracker _expressionEvaluationMemoryTracker;
+
+    // _expressionEvaluationMemoryTracker when expression memory tracking is enabled, and is null
+    // otherwise. stageName is always set so it can be reported in ExceededMemoryLimit errors.
+    // Both fields are stable for the stage's lifetime.
+    EvaluationContext _expressionEvalCtx;
+
     // Only used during the breadth-first search, tracks the set of values on the current frontier.
     // Contains documents with two fields: kFrontierValueField with a lookup value and kDepthField
     // with depth.
@@ -230,6 +210,10 @@ private:
     // Contains visited or already enqueued values of "connectFromField" to avoid duplicated
     // queries.
     SpillableValueSet _visitedFromValues;
+
+    // Keeps track of the current position in the _visitedDocuments when processing an absorbed
+    // $unwind.
+    boost::optional<SpillableDocumentMap::Iterator> _unwindIterator;
 
     // Caches query results to avoid repeating any work. This structure is maintained across calls
     // to getNext().

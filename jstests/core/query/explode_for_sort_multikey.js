@@ -2,6 +2,7 @@
  * Test the "explode for sort" optimization when the index contains a multikey field after the sort
  * field. This is a regression test for SERVER-56865.
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_81,
  *   # Makes assertions about the number of rejected plans
  *   assumes_no_implicit_index_creation,
@@ -19,7 +20,11 @@ function runTest({index, query, sort, assertSortMergeUsed}) {
     assert.commandWorked(coll.createIndex(index));
     const results = coll.find(query).sort(sort).toArray();
     const collScanResults = coll.find(query).sort(sort).hint({$natural: 1}).toArray();
-    assert.eq(results, collScanResults, `Index: ${tojson(index)} Query: ${tojson(query)} Sort: ${tojson(sort)}`);
+    assert.eq(
+        results,
+        collScanResults,
+        `Index: ${tojson(index)} Query: ${tojson(query)} Sort: ${tojson(sort)}`,
+    );
 
     const explain = coll.find(query).sort(sort).explain();
     assert.eq(0, hasRejectedPlans(explain), explain);

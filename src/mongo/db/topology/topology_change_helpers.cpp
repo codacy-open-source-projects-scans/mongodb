@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/topology_change_helpers.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -92,17 +65,15 @@
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
-#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/add_shard_gen.h"
 #include "mongo/db/topology/cluster_parameters/cluster_server_parameter_common.h"
 #include "mongo/db/topology/cluster_parameters/set_cluster_parameter_invocation.h"
 #include "mongo/db/topology/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/topology/remove_shard_draining_progress_gen.h"
-#include "mongo/db/topology/topology_change_helpers.h"
 #include "mongo/db/topology/user_write_block/set_user_write_block_mode_gen.h"
 #include "mongo/db/topology/user_write_block/user_writes_critical_section_document_gen.h"
-#include "mongo/db/topology/user_write_block/user_writes_recoverable_critical_section_service.h"
+#include "mongo/db/topology/user_write_block/writes_recoverable_critical_section_service.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/write_concern_options.h"
@@ -118,19 +89,22 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(hangAddShardBeforeUpdatingClusterCardinalityParameter);
 MONGO_FAIL_POINT_DEFINE(skipBlockingDDLCoordinatorsDuringAddAndRemoveShard);
 MONGO_FAIL_POINT_DEFINE(hangAfterDroppingDatabaseInTransitionToDedicatedConfigServer);
 
-constexpr StringData kNumDocsFieldName = "numDocs"_sd;
-constexpr StringData kNumBytesFieldName = "numBytes"_sd;
-constexpr StringData kAvgObjSizeFieldName = "avgObjSize"_sd;
-constexpr StringData kNumOrphanDocsFieldName = "numOrphanDocs"_sd;
+constexpr std::string_view kNumDocsFieldName = "numDocs"sv;
+constexpr std::string_view kNumBytesFieldName = "numBytes"sv;
+constexpr std::string_view kAvgObjSizeFieldName = "avgObjSize"sv;
+constexpr std::string_view kNumOrphanDocsFieldName = "numOrphanDocs"sv;
 
 const Seconds kRemoteCommandTimeout{60};
 
@@ -139,8 +113,8 @@ const WriteConcernOptions kMajorityWriteConcern{WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::kNoTimeout};
 
 const ReadPreferenceSetting kConfigReadSelector(ReadPreference::Nearest, TagSet{});
-constexpr StringData kAddOrRemoveShardInProgressRecoveryDocumentId =
-    "addOrRemoveShardInProgressRecovery"_sd;
+constexpr std::string_view kAddOrRemoveShardInProgressRecoveryDocumentId =
+    "addOrRemoveShardInProgressRecovery"sv;
 
 
 AggregateCommandRequest makeChunkCountAggregation(OperationContext* opCtx, const ShardId& shardId) {
@@ -193,12 +167,10 @@ long long getCollectionsToMoveForShardCount(OperationContext* opCtx,
 
     long long collectionsCounter = 0;
 
-    // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only aggregation
-    // processes to be restarted.
     uassertStatusOK(shard->runAggregation(
         opCtx,
         listCollectionAggReq,
-        Shard::RetryPolicy::kStrictlyNotIdempotent,
+        Shard::RetryPolicy::kIdempotent,
         [&collectionsCounter](const std::vector<BSONObj>& batch,
                               const boost::optional<BSONObj>& postBatchResumeToken) {
             if (batch.size() > 0) {
@@ -344,12 +316,10 @@ long long getChunkForShardCount(OperationContext* opCtx, Shard* shard, const Sha
 
     long long chunkCounter = 0;
 
-    // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only aggregation
-    // processes to be restarted.
     uassertStatusOK(shard->runAggregation(
         opCtx,
         chunkCounterAggReq,
-        Shard::RetryPolicy::kStrictlyNotIdempotent,
+        Shard::RetryPolicy::kIdempotent,
         [&chunkCounter](const std::vector<BSONObj>& batch,
                         const boost::optional<BSONObj>& postBatchResumeToken) {
             if (batch.size() > 0) {
@@ -399,6 +369,28 @@ void setAddOrRemoveShardInProgressClusterParam(OperationContext* opCtx, bool new
             continue;
         }
     }
+}
+
+boost::optional<RemoveShardProgress> checkCollectionsAreEmpty(
+    OperationContext* opCtx, const std::vector<NamespaceString>& collections) {
+    for (const auto& nss : collections) {
+        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+        if (!autoColl) {
+            // Can't find the collection, so it must not have data.
+            continue;
+        }
+
+        if (!autoColl->isEmpty(opCtx)) {
+            LOGV2(9022300, "removeShard: found non-empty local collection", logAttrs(nss));
+            RemoveShardProgress progress(ShardDrainingStateEnum::kPendingDataCleanup);
+            progress.setFirstNonEmptyCollection(nss);
+            progress.setPendingRangeDeletions(
+                0);  // Set this to 0 so that it is serialized in the response
+            return {progress};
+        }
+    }
+
+    return boost::none;
 }
 
 void waitUntilReadyToBlockNewDDLCoordinators(OperationContext* opCtx) {
@@ -671,12 +663,17 @@ void removeAllClusterParametersFromReplicaSet(
 
 namespace topology_change_helpers {
 
-ShardIdentityType createShardIdentity(OperationContext* opCtx, const ShardId& shardName) {
+ShardIdentityType createShardIdentity(OperationContext* opCtx,
+                                      const ShardId& shardName,
+                                      boost::optional<UUID> shardUuid) {
     ShardIdentityType shardIdentity;
     shardIdentity.setShardName(shardName.toString());
     shardIdentity.setClusterId(ClusterIdentityLoader::get(opCtx)->getClusterId());
     shardIdentity.setConfigsvrConnectionString(
         repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString());
+    if (shardUuid) {
+        shardIdentity.setUuid(*shardUuid);
+    }
 
     return shardIdentity;
 }
@@ -712,49 +709,6 @@ long long getRangeDeletionCount(OperationContext* opCtx) {
     return static_cast<long long>(store.count(opCtx, BSONObj()));
 }
 
-boost::optional<RangeDeletionTask> getLatestNonProcessingRangeDeletionTask(
-    OperationContext* opCtx) {
-    AutoGetCollection collRangeDeletionLock(
-        opCtx, NamespaceString::kRangeDeletionNamespace, MODE_S);
-    DBDirectClient client(opCtx);
-
-    // Get latest non processing range deletion task scheduled for future cleanup
-    // We include pending tasks to avoid a race condition where moveChunk commits
-    // before marking the range deletion task as non-pending (SERVER-119117).
-    FindCommandRequest findCommand(NamespaceString::kRangeDeletionNamespace);
-    findCommand.setFilter(BSON(RangeDeletionTask::kProcessingFieldName << BSON("$ne" << true)));
-    findCommand.setSort(BSON(RangeDeletionTask::kTimestampFieldName << -1));
-    auto bsonDoc = client.findOne(std::move(findCommand));
-    if (bsonDoc.isEmpty()) {
-        return boost::none;
-    }
-    return RangeDeletionTask::parse(bsonDoc,
-                                    IDLParserContext("getLatestNonProcessingRangeDeletionTask"));
-}
-
-void checkOrphanCleanupDelayElapsed(OperationContext* opCtx, const RangeDeletionTask& task) {
-    auto elapsedSec =
-        getGlobalServiceContext()->getFastClockSource()->now().toMillisSinceEpoch() / 1000 -
-        task.getTimestamp()->getSecs();
-    // Note that in the normal range deletions workflow we begin waiting for
-    // orphanCleanupDelaySecs after pending field is unset and it is marked as processing by the
-    // range deleter service. Here the behavior is different and we wait since the time the task
-    // was registered in DB.
-    if (elapsedSec < orphanCleanupDelaySecs.load()) {
-        LOGV2(1039900,
-              "removeShard: waiting for orphanCleanupDelaySecs to complete",
-              "elapsed"_attr = elapsedSec,
-              "orphanCleanupDelaySecs"_attr = orphanCleanupDelaySecs.load());
-        RemoveShardProgress progress(ShardDrainingStateEnum::kPendingDataCleanup);
-        progress.setPendingRangeDeletionTask(task.toBSON());
-        uasserted(RemoveShardDrainingInfo(progress),
-                  "The configured orphanCleanupDelaySecs must elapse before transitioning "
-                  "to a dedicated config server. Elapsed time: " +
-                      std::to_string(elapsedSec) + " seconds, orphanCleanupDelaySecs: " +
-                      std::to_string(orphanCleanupDelaySecs.load()));
-    }
-}
-
 void joinMigrations(OperationContext* opCtx) {
     // Join migrations to make sure there's no ongoing MigrationDestinationManager. New ones
     // will observe the draining state and abort before performing any work that could re-create
@@ -768,15 +722,15 @@ void joinMigrations(OperationContext* opCtx) {
     uassert(8955101, "Failed to await ongoing migrations before removing catalog shard", result);
 }
 
-boost::optional<ShardType> getExistingShard(OperationContext* opCtx,
-                                            const ConnectionString& proposedShardConnectionString,
-                                            const boost::optional<StringData>& proposedShardName,
-                                            ShardingCatalogClient& localCatalogClient) {
+boost::optional<ShardType> getExistingShard(
+    OperationContext* opCtx,
+    const ConnectionString& proposedShardConnectionString,
+    const boost::optional<std::string_view>& proposedShardName,
+    ShardingCatalogClient& localCatalogClient) {
     // Check whether any host in the connection is already part of the cluster.
     const auto existingShards = [&] {
         try {
-            return localCatalogClient.getAllShards(opCtx,
-                                                   repl::ReadConcernLevel::kLocalReadConcern);
+            return localCatalogClient.getAllShards(opCtx, repl::ReadConcernArgs::kLocal);
         } catch (DBException& ex) {
             ex.addContext("Failed to load existing shards during addShard");
             throw;
@@ -1308,7 +1262,7 @@ void getClusterTimeKeysFromReplicaSet(OperationContext* opCtx,
 std::string createShardName(OperationContext* opCtx,
                             RemoteCommandTargeter& targeter,
                             bool isConfigShard,
-                            const boost::optional<StringData>& proposedShardName,
+                            const boost::optional<std::string_view>& proposedShardName,
                             std::shared_ptr<executor::TaskExecutor> executor) {
     std::string selectedName;
 
@@ -1550,7 +1504,7 @@ TenantIdMap<std::vector<BSONObj>> getClusterParametersLocally(OperationContext* 
         auto findResponse = uassertStatusOK(localConfigShard->exhaustiveFindOnConfig(
             opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            repl::ReadConcernLevel::kLocalReadConcern,
+            repl::ReadConcernArgs::kLocal,
             NamespaceString::makeClusterParametersNSS(tenantId),
             BSONObj(),
             BSONObj(),
@@ -1684,10 +1638,26 @@ boost::optional<RemoveShardProgress> dropLocalCollectionsAndDatabases(
     // config server can transition back to catalog shard mode without requiring users to
     // manually drop them.
 
+    // First, verify all collections we would drop are empty. In normal operation, a
+    // collection may still have data because of a sharded drop (which non-atomically
+    // updates metadata before dropping user data). If this state persists, manual
+    // intervention will be required to complete the transition, so we don't accidentally
+    // delete real data.
+    LOGV2(9022301, "Checking all local collections are empty", "shardId"_attr = shardName);
+
     for (auto&& db : trackedDBs) {
         tassert(7783700,
                 "Cannot drop admin or config database from the config server",
                 !db.getDbName().isConfigDB() && !db.getDbName().isAdminDB());
+
+        auto collections = [&] {
+            Lock::DBLock dbLock(opCtx, db.getDbName(), MODE_S);
+            auto catalog = CollectionCatalog::get(opCtx);
+            return catalog->getAllCollectionNamesFromDb(opCtx, db.getDbName());
+        }();
+        if (auto pendingDataCleanupState = checkCollectionsAreEmpty(opCtx, collections)) {
+            return *pendingDataCleanupState;
+        }
     }
 
     // Now actually drop the databases; each request must either succeed or resolve into a
@@ -1702,6 +1672,14 @@ boost::optional<RemoveShardProgress> dropLocalCollectionsAndDatabases(
         hangAfterDroppingDatabaseInTransitionToDedicatedConfigServer.pauseWhileSet(opCtx);
     }
 
+    // Check if the sessions collection is empty. We defer dropping this collection to the caller
+    // since it should only be dropped if featureFlagSessionsCollectionCoordinatorOnConfigServer is
+    // disabled so the drop must be done in a fixed FCV region.
+    if (auto pendingDataCleanupState =
+            checkCollectionsAreEmpty(opCtx, {NamespaceString::kLogicalSessionsNamespace})) {
+        return *pendingDataCleanupState;
+    }
+
     return boost::none;
 }
 
@@ -1714,7 +1692,7 @@ void commitRemoveShard(const Lock::ExclusiveLock&,
     auto controlShardQueryStatus =
         localConfigShard->exhaustiveFindOnConfig(opCtx,
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrShardsNamespace,
                                                  BSON(ShardType::name.ne(shardName)),
                                                  {},
@@ -1782,7 +1760,7 @@ void addShardInTransaction(OperationContext* opCtx,
                            [&](const DatabaseName& dbName) {
                                return NamespacePlacementType(NamespaceString(dbName),
                                                              newShard.getTopologyTime(),
-                                                             {ShardId(newShard.getName())})
+                                                             {newShard.getName()})
                                    .toBSON();
                            });
             write_ops::InsertCommandRequest insertPlacementEntries(
@@ -1856,7 +1834,7 @@ boost::optional<ShardType> getShardIfExists(OperationContext* opCtx,
     auto findShardResponse = uassertStatusOK(
         localConfigShard->exhaustiveFindOnConfig(opCtx,
                                                  kConfigReadSelector,
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrShardsNamespace,
                                                  BSON(ShardType::name() << shardId.toString()),
                                                  BSONObj(),

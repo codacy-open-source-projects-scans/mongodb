@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/client/credential.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -45,6 +19,7 @@
 #include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -52,7 +27,7 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class ClientAPIVersionParameters;
 
@@ -62,9 +37,9 @@ class ClientAPIVersionParameters;
  *
  * Optionally allows passthrough characters to remain unescaped.
  */
-void uriEncode(std::ostream& ss, StringData str, StringData passthrough = ""_sd);
+void uriEncode(std::ostream& ss, std::string_view str, std::string_view passthrough = {});
 
-inline std::string uriEncode(StringData str, StringData passthrough = ""_sd) {
+inline std::string uriEncode(std::string_view str, std::string_view passthrough = {}) {
     std::ostringstream ss;
     uriEncode(ss, str, passthrough);
     return ss.str();
@@ -74,7 +49,7 @@ inline std::string uriEncode(StringData str, StringData passthrough = ""_sd) {
  * Decode a URI encoded string.
  * Replaces + and %xx sequences with their original byte.
  */
-StatusWith<std::string> uriDecode(StringData str);
+StatusWith<std::string> uriDecode(std::string_view str);
 
 /**
  * MongoURI handles parsing of URIs for mongodb, and falls back to old-style
@@ -119,7 +94,7 @@ public:
     public:
         CaseInsensitiveString(std::string str);
 
-        CaseInsensitiveString(StringData sd) : CaseInsensitiveString(std::string(sd)) {}
+        CaseInsensitiveString(std::string_view sd) : CaseInsensitiveString(std::string(sd)) {}
         CaseInsensitiveString(const char* str) : CaseInsensitiveString(std::string(str)) {}
 
         friend bool operator<(const CaseInsensitiveString& lhs, const CaseInsensitiveString& rhs) {
@@ -146,41 +121,53 @@ public:
     // whichever map type is used provides that guarantee.
     using OptionsMap = std::map<CaseInsensitiveString, std::string>;
 
-    static StatusWith<MongoURI> parse(StringData url);
+    static StatusWith<MongoURI> parse(std::string_view url);
 
     /*
      * Returns true if str starts with one of the uri schemes (e.g. mongodb:// or mongodb+srv://)
      */
-    static bool isMongoURI(StringData str);
+    static bool isMongoURI(std::string_view str);
 
     /*
      * Returns a copy of the input url as a string with the password and connection options
      * removed. This may uassert or return a mal-formed string if the input is not a valid URI
      */
-    static std::string redact(StringData url);
+    static std::string redact(std::string_view url);
 
     DBClientBase* connect(
-        StringData applicationName,
+        std::string_view applicationName,
         std::string& errmsg,
         boost::optional<double> socketTimeoutSecs = boost::none,
         const ClientAPIVersionParameters* apiParameters = nullptr,
         const boost::optional<TransientSSLParams>& transientSSLParams = boost::none,
         ErrorCodes::Error* errcode = nullptr) const;
 
-    const std::string& getUser() const {
-        return _user;
-    }
-
     void setUser(std::string newUsername) {
-        _user = std::move(newUsername);
-    }
-
-    const std::string& getPassword() const {
-        return _password;
+        if (_credential) {
+            _credential->username = std::move(newUsername);
+        } else {
+            _credential = auth::Credential{auth::AuthMechanism::kScramSha256,
+                                           /* db= */ boost::none,
+                                           std::move(newUsername),
+                                           /* password= */ boost::none,
+                                           BSONObj{}};
+        }
     }
 
     void setPassword(std::string newPassword) {
-        _password = std::move(newPassword);
+        if (_credential) {
+            _credential->password = std::move(newPassword);
+        } else {
+            _credential = auth::Credential{auth::AuthMechanism::kScramSha256,
+                                           /* db= */ boost::none,
+                                           /* username= */ boost::none,
+                                           std::move(newPassword),
+                                           BSONObj{}};
+        }
+    }
+
+    const boost::optional<auth::Credential>& getCredential() const {
+        return _credential;
     }
 
     const OptionsMap& getOptions() const {
@@ -282,7 +269,7 @@ public:
     // server (say a member of a replica-set), you can pass in its HostAndPort information to
     // get a new URI with the same info, except type() will be kStandalone and getServers() will
     // be the single host you pass in.
-    MongoURI cloneURIForServer(HostAndPort hostAndPort, StringData applicationName) const {
+    MongoURI cloneURIForServer(HostAndPort hostAndPort, std::string_view applicationName) const {
         auto out = *this;
         out._connectString = ConnectionString(std::move(hostAndPort));
 
@@ -310,16 +297,14 @@ public:
 
 private:
     MongoURI(ConnectionString connectString,
-             const std::string& user,
-             const std::string& password,
+             boost::optional<auth::Credential> credential,
              const std::string& database,
              boost::optional<bool> retryWrites,
              transport::ConnectSSLMode sslMode,
              boost::optional<bool> helloOk,
              OptionsMap options)
         : _connectString(std::move(connectString)),
-          _user(user),
-          _password(password),
+          _credential(std::move(credential)),
           _database(database),
           _retryWrites(std::move(retryWrites)),
           _sslMode(sslMode),
@@ -328,8 +313,7 @@ private:
 
 #ifdef MONGO_CONFIG_GRPC
     MongoURI(ConnectionString connectString,
-             const std::string& user,
-             const std::string& password,
+             boost::optional<auth::Credential> credential,
              const std::string& database,
              boost::optional<bool> retryWrites,
              transport::ConnectSSLMode sslMode,
@@ -337,8 +321,7 @@ private:
              boost::optional<bool> grpc,
              OptionsMap options)
         : _connectString(std::move(connectString)),
-          _user(user),
-          _password(password),
+          _credential(std::move(credential)),
           _database(database),
           _retryWrites(std::move(retryWrites)),
           _sslMode(sslMode),
@@ -347,11 +330,10 @@ private:
           _options(std::move(options)) {}
 #endif
 
-    static MongoURI parseImpl(StringData url);
+    static MongoURI parseImpl(std::string_view url);
 
     ConnectionString _connectString;
-    std::string _user;
-    std::string _password;
+    boost::optional<auth::Credential> _credential;
     std::string _database;
     boost::optional<bool> _retryWrites;
     transport::ConnectSSLMode _sslMode = transport::kGlobalSSLMode;
@@ -369,4 +351,4 @@ inline std::ostream& operator<<(std::ostream& ss, const MongoURI& uri) {
 inline StringBuilder& operator<<(StringBuilder& sb, const MongoURI& uri) {
     return sb << uri._connectString;
 }
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

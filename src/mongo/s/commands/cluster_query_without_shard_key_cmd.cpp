@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -71,6 +44,7 @@
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/db/update/update_util.h"
 #include "mongo/db/version_context.h"
@@ -99,6 +73,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -110,9 +85,10 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeMetadataRefreshClusterQuery);
-constexpr auto kIdFieldName = "_id"_sd;
+constexpr auto kIdFieldName = "_id"sv;
 
 struct ParsedCommandInfo {
     NamespaceString nss;
@@ -134,6 +110,29 @@ struct AsyncRequestSenderResponseData {
     AsyncRequestSenderResponseData(ShardId shardId, CursorResponse cursorResponse)
         : shardId(shardId), cursorResponse(std::move(cursorResponse)) {}
 };
+
+// Returns the timeseries fields from the chunk manager if this is a sharded timeseries collection
+// being accessed at the logical (user-facing) level, meaning we need to add an unpack bucket stage
+// and potentially translate hints. Returns boost::none otherwise. All conditions must hold:
+// - isSharded: the collection must be sharded.
+// - getTimeseriesFields: the routing table must have timeseries metadata, confirming this is a
+//   timeseries collection.
+// - !isRawDataOperation: the client is not requesting raw bucket access. Raw data operations bypass
+//   timeseries translation and operate directly on the underlying bucket format.
+// - isNewTimeseriesWithoutView || isTimeseriesNamespace: covers both timeseries formats.
+//   isNewTimeseriesWithoutView is true for viewless timeseries (where the routing table tracks the
+//   user-facing namespace). isTimeseriesNamespace is true for viewful timeseries (where the
+//   namespace was already rewritten to system.buckets.* and the flag records that fact).
+boost::optional<TypeCollectionTimeseriesFields> getShardedTimeseriesFieldsIfLogicalOp(
+    OperationContext* opCtx,
+    const CollectionRoutingInfo& cri,
+    const ParsedCommandInfo& parsedInfo) {
+    const auto& cm = cri.getChunkManager();
+    const auto isShardedTimeseriesLogicalOperation = cm.isSharded() &&
+        cm.isTimeseriesCollection() && !isRawDataOperation(opCtx) &&
+        (cm.isNewTimeseriesWithoutView() || parsedInfo.isTimeseriesNamespace);
+    return isShardedTimeseriesLogicalOperation ? cm.getTimeseriesFields() : boost::none;
+}
 
 // Computes the final sort pattern if necessary metadata is needed.
 BSONObj parseSortPattern(OperationContext* opCtx,
@@ -199,7 +198,27 @@ BSONObj createAggregateCmdObj(
     }
 
     if (parsedInfo.hint) {
-        aggregate.setHint(parsedInfo.hint);
+        // Translate the user-facing timeseries index hint into the equivalent buckets index
+        // spec. All three conditions must hold:
+        // - timeseriesFields: the collection must be a timeseries collection so we have access
+        //   to TimeseriesOptions (timeField, metaField), which the translation needs to map
+        //   user-facing field names to bucket-internal ones (e.g. "ts" → "control.min.ts").
+        // - isHintIndexKey: the hint must be an index key pattern (e.g. {field: 1}). Named
+        //   index hints ({$hint: "name"}) and {$natural: 1} don't contain field names, so
+        //   they don't require translation.
+        // - isTimeseriesBucketsCollection: for viewful timeseries, the namespace has already
+        //   been rewritten to system.buckets.* before reaching this code, so the hint must
+        //   be translated here to match the buckets index spec. For viewless timeseries, the
+        //   namespace is the user-facing view namespace (not system.buckets.*), so this
+        //   check is false and hint translation is handled downstream on the shard.
+        if (timeseriesFields && timeseries::isHintIndexKey(*parsedInfo.hint) &&
+            nss.isTimeseriesBucketsCollection()) {
+            auto translated = timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                timeseriesFields->getTimeseriesOptions(), *parsedInfo.hint);
+            aggregate.setHint(translated.isOK() ? translated.getValue() : *parsedInfo.hint);
+        } else {
+            aggregate.setHint(parsedInfo.hint);
+        }
     }
 
     aggregate.setLet(parsedInfo.let);
@@ -417,14 +436,8 @@ public:
 
                     const auto& collectionUUID = cm.getUUID();
 
-                    const auto isShardedTimeseriesLogicalOperation = cm.isSharded() &&
-                        cm.getTimeseriesFields().has_value() && !isRawDataOperation(opCtx) &&
-                        (cm.isNewTimeseriesWithoutView() ||
-                         parsedInfoFromRequest.isTimeseriesNamespace);
-
-                    const auto& timeseriesFields = isShardedTimeseriesLogicalOperation
-                        ? cm.getTimeseriesFields()
-                        : boost::none;
+                    const auto timeseriesFields =
+                        getShardedTimeseriesFieldsIfLogicalOp(opCtx, cri, parsedInfoFromRequest);
 
                     const auto cmdObj =
                         createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, timeseriesFields);
@@ -504,14 +517,14 @@ public:
                         std::move(params));
 
                     if (parsedInfoFromRequest.sort) {
-                        root = std::make_unique<RouterStageRemoveMetadataFields>(
-                            opCtx, std::move(root), Document::allMetadataFieldNames);
+                        root = std::make_unique<RouterStageRemoveMetadataFields>(opCtx,
+                                                                                 std::move(root));
                     }
 
                     if (auto nextResponse = uassertStatusOK(root->next()); !nextResponse.isEOF()) {
                         res.setTargetDoc(nextResponse.getResult());
                         res.setShardId(
-                            boost::optional<mongo::StringData>(nextResponse.getShardId()));
+                            boost::optional<std::string_view>(nextResponse.getShardId()));
                     }
 
                     // If there are no targetable documents and {upsert: true}, create the document
@@ -563,12 +576,15 @@ public:
             const auto& nss = parsedInfoFromRequest.nss;
             sharding::router::CollectionRouter router(opCtx, nss);
             return router.routeWithRoutingContext(
-                "explain queryWithoutShardKey"_sd,
+                "explain queryWithoutShardKey"sv,
                 [&](OperationContext* opCtx, RoutingContext& routingCtx) {
                     const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
 
+                    const auto timeseriesFields =
+                        getShardedTimeseriesFieldsIfLogicalOp(opCtx, cri, parsedInfoFromRequest);
+
                     const auto cmdObj =
-                        createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, boost::none);
+                        createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, timeseriesFields);
                     const auto requests = buildVersionedRequests(
                         opCtx,
                         nss,

@@ -3,6 +3,7 @@
  *  [1970-01-01 00:00:00 UTC - 2038-01-29 03:13:07 UTC], when a collection scan is used.
  *
  * @tags: [
+ *     uses_explain,
  *     # Explain of a resolved view must be executed by mongos.
  *     directly_against_shardsvrs_incompatible,
  *     # This complicates aggregation extraction.
@@ -13,16 +14,20 @@
  *     # We need a timeseries collection.
  *     requires_timeseries,
  *     requires_getmore,
+ *     # The test performs explicit chunk split/move operations, which conflict with balancer activity.
+ *     assumes_balancer_off,
  * ]
  */
-import {getTimeseriesCollForRawOps, kRawOperationSpec} from "jstests/core/libs/raw_operation_utils.js";
+import {
+    getTimeseriesCollForRawOps,
+    kRawOperationSpec,
+} from "jstests/core/libs/raw_operation_utils.js";
 import {
     isShardedTimeseries,
-    numberOfShardsForTimeseriesCollection,
     runTimeseriesChunkCommand,
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
+import {getAllNodeExplains, getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
 
 const dbName = jsTestName();
 const testDB = db.getSiblingDB(dbName);
@@ -56,7 +61,9 @@ assert.commandWorked(testDB.createCollection(coll.getName(), {timeseries: {timeF
 // Create collection indexed on time
 const collIndexed = testDB.timeseries_internal_bounded_sort_extended_range_with_index;
 collIndexed.drop();
-assert.commandWorked(testDB.createCollection(collIndexed.getName(), {timeseries: {timeField: "t"}}));
+assert.commandWorked(
+    testDB.createCollection(collIndexed.getName(), {timeseries: {timeField: "t"}}),
+);
 assert.commandWorked(collIndexed.createIndex({"t": 1}));
 
 jsTestLog(collIndexed.getIndexes());
@@ -64,7 +71,11 @@ jsTestLog(getTimeseriesCollForRawOps(collIndexed).getIndexes(kRawOperationSpec))
 
 for (const collection of [coll, collIndexed]) {
     let shardList = getShards();
-    if (isShardedTimeseries(collection) && !TestData.hasRandomShardsAddedRemoved && shardList.length >= 2) {
+    if (
+        isShardedTimeseries(collection) &&
+        !TestData.hasRandomShardsAddedRemoved &&
+        shardList.length >= 2
+    ) {
         // Split and move data to create an interesting scenario: we have some data on each shard,
         // but all the extended-range data is on a non-primary shard. This means view resolution is
         // unaware of the extended-range data, because that happens on the primary shard.
@@ -115,7 +126,9 @@ function insertBucket(start) {
 
     const batchSize = 1000;
 
-    const batch = Array.from({length: batchSize}, (_, j) => ({t: new Date(start + j * intervalMillis)}));
+    const batch = Array.from({length: batchSize}, (_, j) => ({
+        t: new Date(start + j * intervalMillis),
+    }));
 
     assert.commandWorked(coll.insert(batch));
     assert.commandWorked(collIndexed.insert(batch));
@@ -157,16 +170,30 @@ function assertSorted(result, ascending) {
     let prev = ascending ? {t: -Infinity} : {t: Infinity};
     for (const doc of result) {
         if (ascending) {
-            assert.lt(+prev.t, +doc.t, "Found two docs not in ascending time order: " + tojson({prev, doc}));
+            assert.lt(
+                +prev.t,
+                +doc.t,
+                "Found two docs not in ascending time order: " + tojson({prev, doc}),
+            );
         } else {
-            assert.gt(+prev.t, +doc.t, "Found two docs not in descending time order: " + tojson({prev, doc}));
+            assert.gt(
+                +prev.t,
+                +doc.t,
+                "Found two docs not in descending time order: " + tojson({prev, doc}),
+            );
         }
 
         prev = doc;
     }
 }
 
-function checkAgainstReferenceBoundedSortUnexpected(collection, reference, pipeline, hint, sortOrder) {
+function checkAgainstReferenceBoundedSortUnexpected(
+    collection,
+    reference,
+    pipeline,
+    hint,
+    sortOrder,
+) {
     const options = hint ? {hint: hint} : {};
 
     const plan = collection.explain().aggregate(pipeline, options);
@@ -178,8 +205,7 @@ function checkAgainstReferenceBoundedSortUnexpected(collection, reference, pipel
         const bounded = getAggPlanStages(plan, "$_internalBoundedSort");
         const blocking = getAggPlanStages(plan, "$sort");
         assert.gt(blocking.length, 0, {bounded, blocking, plan});
-        if (!TestData.hasRandomShardsAddedRemoved)
-            assert.lt(bounded.length, numberOfShardsForTimeseriesCollection(coll), {bounded, blocking, plan});
+        assert.lt(bounded.length, getAllNodeExplains(plan).length, {bounded, blocking, plan});
     } else {
         const stages = getAggPlanStages(plan, "$_internalBoundedSort");
         assert.eq([], stages, plan);
@@ -194,7 +220,13 @@ function checkAgainstReferenceBoundedSortUnexpected(collection, reference, pipel
     }
 }
 
-function checkAgainstReferenceBoundedSortExpected(collection, reference, pipeline, hint, sortOrder) {
+function checkAgainstReferenceBoundedSortExpected(
+    collection,
+    reference,
+    pipeline,
+    hint,
+    sortOrder,
+) {
     const options = hint ? {hint: hint} : {};
 
     const plan = collection.explain().aggregate(pipeline, options);
@@ -220,7 +252,13 @@ function runTest(ascending) {
     assertSorted(reference, ascending);
 
     // Check plan using collection scan
-    checkAgainstReferenceBoundedSortUnexpected(coll, reference, [{$sort: {t: ascending ? 1 : -1}}], {}, ascending);
+    checkAgainstReferenceBoundedSortUnexpected(
+        coll,
+        reference,
+        [{$sort: {t: ascending ? 1 : -1}}],
+        {},
+        ascending,
+    );
 
     // Check plan using hinted collection scan
     checkAgainstReferenceBoundedSortUnexpected(

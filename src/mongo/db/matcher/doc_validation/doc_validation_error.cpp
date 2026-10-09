@@ -1,37 +1,11 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/doc_validation/doc_validation_error.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -82,6 +56,7 @@
 #include <set>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -92,6 +67,7 @@
 
 namespace mongo::doc_validation_error {
 namespace {
+using namespace std::literals::string_view_literals;
 MONGO_INIT_REGISTER_ERROR_EXTRA_INFO(DocumentValidationFailureInfo);
 
 using ErrorAnnotation = MatchExpression::ErrorAnnotation;
@@ -351,7 +327,9 @@ struct ValidationErrorContext {
                                     verifySizeAndAppend(details, kDetailsString, builder);
                                 },
                                 [&](const std::monostate& state) -> void { MONGO_UNREACHABLE },
-                                [&](const std::string& str) -> void { MONGO_UNREACHABLE }},
+                                [&](const std::string& str) -> void {
+                                    MONGO_UNREACHABLE
+                                }},
               latestCompleteError);
     }
     /**
@@ -372,7 +350,9 @@ struct ValidationErrorContext {
                           verifySizeAndAppend(elem, builder);
                       }
                   },
-                  [&](const std::monostate& state) -> void { MONGO_UNREACHABLE }},
+                  [&](const std::monostate& state) -> void {
+                      MONGO_UNREACHABLE
+                  }},
               latestCompleteError);
     }
 
@@ -792,9 +772,9 @@ public:
             try {
                 auto expressionResult = exec::matcher::evaluateExpression(expr, &document);
                 appendErrorReason(kNormalReason, kInvertedReason);
-                expressionResult.addToBsonObj(&bob, "expressionResult"_sd);
+                expressionResult.addToBsonObj(&bob, "expressionResult"sv);
             } catch (const DBException& e) {
-                bob.append("reason"_sd, "failed to evaluate aggregation expression");
+                bob.append("reason"sv, "failed to evaluate aggregation expression");
                 BSONObjBuilder exceptionDetailsBuilder = bob.subobjStart("details");
                 e.serialize(&exceptionDetailsBuilder);
                 exceptionDetailsBuilder.done();
@@ -1022,7 +1002,7 @@ public:
             // Append information about array element to the error.
             BSONElement arrayElement = valueAsArray[expr->arrayIndex()];
             BSONObjBuilder& bob = _context->getCurrentObjBuilder();
-            bob.append("itemIndex"_sd, expr->arrayIndex());
+            bob.append("itemIndex"sv, expr->arrayIndex());
 
             // Build a document corresponding to the array element for the child expression to
             // operate on.
@@ -1266,7 +1246,7 @@ private:
      * returns 'boost::none'. 'leafArrayBehavior' determines how the values are enumerated when the
      * leaf value of the path is an array.
      */
-    boost::optional<BSONArray> createValuesArray(const StringData fieldPath,
+    boost::optional<BSONArray> createValuesArray(const std::string_view fieldPath,
                                                  LeafArrayBehavior leafArrayBehavior) {
         // Empty path means that the match is against the root document.
         if (fieldPath.empty())
@@ -1438,7 +1418,7 @@ private:
     /**
      * Returns 'true' if a field exists at path 'fieldPath' in the current document.
      */
-    bool pathExists(StringData fieldPath) {
+    bool pathExists(std::string_view fieldPath) {
         ElementPath path(fieldPath,
                          LeafArrayBehavior::kTraverse);  // Use kTraverse to return at least one
                                                          // item if the field exists.
@@ -1851,8 +1831,11 @@ private:
                 "Must have at least one mismatched array element when generating an error for an "
                 "'InternalSchemaAllElemMatchFromIndexMatchExpression' expression",
                 failingElement);
-            _context->getCurrentObjBuilder().appendNumber(
-                "itemIndex"_sd, std::stoll(std::string{failingElement.fieldNameStringData()}));
+
+            int itemIndex;
+            uassertStatusOK(
+                NumberParser().base(10)(failingElement.fieldNameStringData(), &itemIndex));
+            _context->getCurrentObjBuilder().appendNumber("itemIndex"sv, itemIndex);
             _context->setChildInput(toObjectWithPlaceholder(failingElement),
                                     _context->getCurrentInversion());
         } else {
@@ -2366,7 +2349,7 @@ void assertHasErrorAnnotations(const MatchExpression& validatorExpr) {
 void appendDocumentId(const BSONObj& doc, BSONObjBuilder* builder) {
     BSONElement objectIdElement = doc["_id"];
     tassert(9740337, "Failing document must have a value for '_id'", objectIdElement);
-    builder->appendAs(objectIdElement, "failingDocumentId"_sd);
+    builder->appendAs(objectIdElement, "failingDocumentId"sv);
 }
 
 /**
@@ -2433,7 +2416,7 @@ BSONObj generateErrorHelper(const MatchExpression& validatorExpr,
     if (truncate)
         objBuilder.append("truncated", true);
     // Add errors from match expressions.
-    objBuilder.append("details"_sd, std::move(error));
+    objBuilder.append("details"sv, std::move(error));
 
     auto finalError = objBuilder.obj();
     // Verify that the generated error is of valid depth.

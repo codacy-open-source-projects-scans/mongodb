@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/clonable_ptr.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,6 +23,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -58,11 +32,12 @@
 #include <sys/types.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * The structure represents how data is laid out in an encrypted payload.
  */
-struct MONGO_MOD_NEEDS_REPLACEMENT FleBlobHeader {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] FleBlobHeader {
     int8_t fleBlobSubtype;
     int8_t keyUUID[16];
     int8_t originalBsonType;
@@ -72,7 +47,7 @@ template <class T>
 class TypeMatchExpressionBase : public LeafMatchExpression {
 public:
     explicit TypeMatchExpressionBase(MatchType matchType,
-                                     boost::optional<StringData> path,
+                                     boost::optional<std::string_view> path,
                                      ElementPath::LeafArrayBehavior leafArrBehavior,
                                      MatcherTypeSet typeSet,
                                      clonable_ptr<ErrorAnnotation> annotation = nullptr)
@@ -88,7 +63,7 @@ public:
     /**
      * Returns the name of this MatchExpression.
      */
-    virtual StringData name() const = 0;
+    virtual std::string_view name() const = 0;
 
     void debugString(StringBuilder& debug, int indentationLevel) const final {
         _debugAddSpace(debug, indentationLevel);
@@ -97,7 +72,7 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts = {},
+                                       const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const final {
         bob->appendArray(name(), _typeSet.toBSONArray());
     }
@@ -129,9 +104,9 @@ private:
 
 class TypeMatchExpression final : public TypeMatchExpressionBase<TypeMatchExpression> {
 public:
-    static constexpr StringData kName = "$type"_sd;
+    static constexpr std::string_view kName = "$type"sv;
 
-    TypeMatchExpression(boost::optional<StringData> path,
+    TypeMatchExpression(boost::optional<std::string_view> path,
                         MatcherTypeSet typeSet,
                         clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : TypeMatchExpressionBase(MatchExpression::TYPE_OPERATOR,
@@ -140,7 +115,7 @@ public:
                                   typeSet,
                                   std::move(annotation)) {}
 
-    StringData name() const final {
+    std::string_view name() const final {
         return kName;
     }
 
@@ -183,9 +158,9 @@ private:
 class InternalSchemaTypeExpression final
     : public TypeMatchExpressionBase<InternalSchemaTypeExpression> {
 public:
-    static constexpr StringData kName = "$_internalSchemaType"_sd;
+    static constexpr std::string_view kName = "$_internalSchemaType"sv;
 
-    InternalSchemaTypeExpression(boost::optional<StringData> path,
+    InternalSchemaTypeExpression(boost::optional<std::string_view> path,
                                  MatcherTypeSet typeSet,
                                  clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : TypeMatchExpressionBase(MatchExpression::INTERNAL_SCHEMA_TYPE,
@@ -194,7 +169,7 @@ public:
                                   typeSet,
                                   std::move(annotation)) {}
 
-    StringData name() const final {
+    std::string_view name() const final {
         return kName;
     }
 
@@ -218,9 +193,9 @@ public:
 
 class InternalSchemaBinDataSubTypeExpression final : public LeafMatchExpression {
 public:
-    static constexpr StringData kName = "$_internalSchemaBinDataSubType"_sd;
+    static constexpr std::string_view kName = "$_internalSchemaBinDataSubType"sv;
 
-    InternalSchemaBinDataSubTypeExpression(boost::optional<StringData> path,
+    InternalSchemaBinDataSubTypeExpression(boost::optional<std::string_view> path,
                                            BinDataType binDataSubType,
                                            clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : LeafMatchExpression(MatchExpression::INTERNAL_SCHEMA_BIN_DATA_SUBTYPE,
@@ -230,7 +205,7 @@ public:
                               std::move(annotation)),
           _binDataSubType(binDataSubType) {}
 
-    StringData name() const {
+    std::string_view name() const {
         return kName;
     }
 
@@ -250,7 +225,7 @@ public:
     }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts = {},
+                                       const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const final {
         if (opts.isKeepingLiteralsUnchanged()) {
             bob->append(name(), _binDataSubType);
@@ -302,9 +277,9 @@ private:
 class InternalSchemaBinDataEncryptedTypeExpression final
     : public TypeMatchExpressionBase<InternalSchemaBinDataEncryptedTypeExpression> {
 public:
-    static constexpr StringData kName = "$_internalSchemaBinDataEncryptedType"_sd;
+    static constexpr std::string_view kName = "$_internalSchemaBinDataEncryptedType"sv;
 
-    InternalSchemaBinDataEncryptedTypeExpression(boost::optional<StringData> path,
+    InternalSchemaBinDataEncryptedTypeExpression(boost::optional<std::string_view> path,
                                                  MatcherTypeSet typeSet,
                                                  clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : TypeMatchExpressionBase(MatchExpression::INTERNAL_SCHEMA_BIN_DATA_ENCRYPTED_TYPE,
@@ -313,7 +288,7 @@ public:
                                   typeSet,
                                   std::move(annotation)) {}
 
-    StringData name() const override {
+    std::string_view name() const override {
         return kName;
     }
 
@@ -347,10 +322,10 @@ public:
 class InternalSchemaBinDataFLE2EncryptedTypeExpression final
     : public TypeMatchExpressionBase<InternalSchemaBinDataFLE2EncryptedTypeExpression> {
 public:
-    static constexpr StringData kName = "$_internalSchemaBinDataFLE2EncryptedType"_sd;
+    static constexpr std::string_view kName = "$_internalSchemaBinDataFLE2EncryptedType"sv;
 
     InternalSchemaBinDataFLE2EncryptedTypeExpression(
-        boost::optional<StringData> path,
+        boost::optional<std::string_view> path,
         MatcherTypeSet typeSet,
         clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : TypeMatchExpressionBase(MatchExpression::INTERNAL_SCHEMA_BIN_DATA_FLE2_ENCRYPTED_TYPE,
@@ -359,7 +334,7 @@ public:
                                   std::move(typeSet),
                                   std::move(annotation)) {}
 
-    StringData name() const override {
+    std::string_view name() const override {
         return kName;
     }
 

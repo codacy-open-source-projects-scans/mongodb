@@ -1,41 +1,16 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/storage/checkpoint_schedule_policy.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -52,7 +27,7 @@ namespace rss {
  * expected behaviors, allowing consumers to act based on these flags, rather than needing to reason
  * about how a particular provider would behave in a given context.
  */
-class MONGO_MOD_OPEN PersistenceProvider {
+class [[MONGO_MOD_OPEN]] PersistenceProvider {
 public:
     virtual ~PersistenceProvider() = default;
 
@@ -89,6 +64,11 @@ public:
     virtual bool mustUsePrimaryDrivenIndexBuilds() const = 0;
 
     /**
+     * If true, the provider requires that table-level operations are replicated through the oplog.
+     */
+    virtual bool mustUseContainerWrites() const = 0;
+
+    /**
      * If true, the provider expects that all catalog identifiers will be replicated and identical
      * between nodes.
      */
@@ -101,6 +81,14 @@ public:
     virtual bool shouldUseReplicatedRecordIds() const = 0;
 
     /**
+     * If true, oplog application for clustered-on-_id collections may bypass the query system by
+     * deriving the RecordId directly from the _id field. The RecordId of a clustered-on-_id
+     * collection is deterministically derivable from _id, so this produces an identical result to
+     * the query path while avoiding the executor.
+     */
+    virtual bool shouldUseClusteredCollectionOplogFastPath() const = 0;
+
+    /**
      * If true, expired documents should be removed using replicated truncates.
      */
     virtual bool shouldUseReplicatedTruncates() const = 0;
@@ -109,6 +97,18 @@ public:
      * If true, fastcounts (collection size and count) will be managed with replicated writes.
      */
     virtual bool shouldUseReplicatedFastCount() const = 0;
+
+    /**
+     * If true, per-document validation hashes are stored on oplog entries and verified against the
+     * applied document during oplog application.
+     */
+    virtual bool shouldUseContinuousInternodeValidation() const = 0;
+
+    /**
+     * If true, applying replicated container operations (ci/cu/cd) tolerates state mismatches by
+     * converting between insert/update and ignoring deletes of missing keys.
+     */
+    virtual bool relaxContainerOplogConstraints() const = 0;
 
     /**
      * If true, writes to the oplog should be used as the unit of progress for flow control
@@ -133,14 +133,6 @@ public:
      * coordination by default.
      */
     virtual bool shouldAvoidDuplicateCheckpoints() const = 0;
-
-    /**
-     * If true, always do a full update of documents, instead of recording only the changes to
-     * represent an update.
-     *
-     * TODO SERVER-111602: remove this workaround.
-     */
-    virtual bool shouldForceUpdateWithFullDocument() const = 0;
 
     /**
      * If true, the storage provider supports the reuse of cursors in express path queries. Used to
@@ -172,6 +164,13 @@ public:
     virtual bool supportsTableLogging() const = 0;
 
     /**
+     * If true, the provider supports opening WiredTiger version cursors, which iterate the history
+     * of values for a given key. These are debug-only cursors, used to print record and index entry
+     * metadata when validation finds an inconsistency.
+     */
+    virtual bool supportsVersionCursor() const = 0;
+
+    /**
      * If true, the provider supports cross-shard transactions.
      */
     virtual bool supportsCrossShardTransactions() const = 0;
@@ -199,6 +198,12 @@ public:
      */
     virtual bool supportsOplogSampling() const = 0;
 
+    /**
+     * If true, the provider supports a full collection scan over the oplog collection when
+     * initializing truncation markers.
+     */
+    virtual bool supportsOplogScanning() const = 0;
+
     virtual bool supportsWriteConcernOptions(
         const WriteConcernOptions& writeConcernOptions) const = 0;
 
@@ -219,6 +224,12 @@ public:
      * The default memory_page_max value to set on WT for the oplog in string format.
      */
     virtual const char* getWTMemoryPageMaxForOplogStrValue() const = 0;
+
+    /**
+     * The smallest oplog size, in MB, that the provider accepts when the oplog is resized via
+     * replSetResizeOplog.
+     */
+    virtual double getMinOplogSizeMB() const = 0;
 
     /**
      * If true, the provider supports compaction.
@@ -287,9 +298,36 @@ public:
     virtual bool supportsColdCollections() const = 0;
 
     /**
-     * If true, the provider enforces read preference on getMore commands for change stream cursors.
+     * If true, the provider supports replSetTestEgress and replSetGetRBID commands.
      */
-    virtual bool enforcesChangeStreamReadPreferenceOnGetMore() const = 0;
+    virtual bool supportsLegacyReplSetCommands() const = 0;
+
+    /**
+     * If true, the provider supports external usage of dbHash.
+     */
+    virtual bool supportsDBHashExternalCall() const = 0;
+
+    /**
+     * Creates and returns a new policy that governs checkpoint scheduling for this provider.
+     */
+    virtual std::unique_ptr<CheckpointSchedulePolicy> makeCheckpointSchedulePolicy() const = 0;
+
+    /**
+     * If true, the provider supports the apply ops user-facing command.
+     */
+    virtual bool supportsApplyOpsCommand() const = 0;
+
+    /**
+     * If true, the provider supports external usage of the getDiagnosticData command.
+     */
+    virtual bool supportsGetDiagnosticDataExternalCall() const = 0;
+
+    /**
+     * Reports the current number of active layered data handles to any provider-specific metrics
+     * sink. Default is a no-op; only providers that expose a metric derived from this count
+     * override it.
+     */
+    virtual void reportLayeredDataHandleCount(int64_t count) const {}
 };
 
 }  // namespace rss

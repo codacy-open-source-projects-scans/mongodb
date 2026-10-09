@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_metrics.h"
 
@@ -36,8 +10,8 @@
 #include "mongo/db/s/resharding/resharding_metrics_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
@@ -45,6 +19,7 @@
 #include <algorithm>
 #include <initializer_list>
 #include <ratio>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -83,7 +58,7 @@ public:
                                                    ReshardingProvenanceEnum::kReshardCollection);
     }
 
-    StringData getRootSectionName() override {
+    std::string_view getRootSectionName() override {
         return kResharding;
     }
 
@@ -220,7 +195,7 @@ public:
     void createMetricsAndAssertIncrementsCumulativeMetricsField(
         const std::function<void(ReshardingMetrics*)>& mutate,
         Section section,
-        StringData fieldName) {
+        std::string_view fieldName) {
         auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kCoordinator);
         assertIncrementsCumulativeMetricsField(
             metrics.get(),
@@ -250,7 +225,7 @@ private:
               "enableEstimateBasedOnMovingAvg"_attr = enableEstimateBasedOnMovingAvg,
               "expectedEstimate"_attr = expectedEstimate);
 
-        const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+        const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
             "reshardingRemainingTimeEstimateBasedOnMovingAverage", enableEstimateBasedOnMovingAvg};
 
         ASSERT_EQ(metrics->getHighEstimateRemainingTimeMillis(
@@ -589,7 +564,7 @@ TEST_F(ReshardingMetricsTest, GetAndUpdateAverageTimeToFetchBasic) {
     metrics->registerDonors({shardId0, shardId1});
 
     auto smoothingFactor = 0.7;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     ASSERT_FALSE(metrics->getAverageTimeToFetchOplogEntries(shardId0));
@@ -650,7 +625,7 @@ TEST_F(ReshardingMetricsTest, GetAndUpdateAverageTimeToApplyBasic) {
     metrics->registerDonors({shardId0, shardId1});
 
     auto smoothingFactor = 0.8;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     ASSERT_FALSE(metrics->getAverageTimeToApplyOplogEntries(shardId0));
@@ -810,7 +785,7 @@ TEST_F(ReshardingMetricsTest,
 }
 
 TEST_F(ReshardingMetricsTest, RecipientReportsRemainingTimeIfDisableMovingAvgCloningToDone) {
-    const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+    const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
         "reshardingRemainingTimeEstimateBasedOnMovingAverage", false};
 
     auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
@@ -866,7 +841,7 @@ TEST_F(ReshardingMetricsTest, RecipientReportsRemainingTimeIfDisableOrEnableMovi
     const auto elapsedTimeInc = Milliseconds(1200);
 
     const auto smoothingFactor = 0.7;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
@@ -1112,7 +1087,7 @@ TEST_F(ReshardingMetricsTest, CurrentOpReportsCriticalSectionTime) {
 
 TEST_F(ReshardingMetricsTest, RecipientEstimatesNoneOnNewInstance) {
     for (bool enableEstimateBasedOnMovingAvg : {true, false}) {
-        const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+        const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
             "reshardingRemainingTimeEstimateBasedOnMovingAverage", enableEstimateBasedOnMovingAvg};
         auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
         ASSERT_EQ(metrics->getHighEstimateRemainingTimeMillis(), boost::none);
@@ -1122,7 +1097,7 @@ TEST_F(ReshardingMetricsTest, RecipientEstimatesNoneOnNewInstance) {
 TEST_F(ReshardingMetricsTest,
        RecipientEstimatesNoneBeforeExternalFieldsRestoredForRestoredInstance) {
     for (bool enableEstimateBasedOnMovingAvg : {true, false}) {
-        const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+        const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
             "reshardingRemainingTimeEstimateBasedOnMovingAverage", enableEstimateBasedOnMovingAvg};
         auto metrics = makeRecipientMetricsWithAmbiguousTimeRemaining();
         ASSERT_EQ(metrics->getHighEstimateRemainingTimeMillis(), boost::none);
@@ -1131,7 +1106,7 @@ TEST_F(ReshardingMetricsTest,
 
 TEST_F(ReshardingMetricsTest, RecipientEstimatesAfterExternalFieldsRestoredForRestoredInstance) {
     for (bool enableEstimateBasedOnMovingAvg : {true, false}) {
-        const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+        const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
             "reshardingRemainingTimeEstimateBasedOnMovingAverage", enableEstimateBasedOnMovingAvg};
         auto metrics = makeRecipientMetricsWithAmbiguousTimeRemaining();
         metrics->restoreExternallyTrackedRecipientFields(
@@ -1142,7 +1117,7 @@ TEST_F(ReshardingMetricsTest, RecipientEstimatesAfterExternalFieldsRestoredForRe
 
 TEST_F(ReshardingMetricsTest, CurrentOpDoesNotReportRecipientEstimateIfNotSet) {
     for (bool enableEstimateBasedOnMovingAvg : {true, false}) {
-        const RAIIServerParameterControllerForTest estimateBasedOnMovingAvgServerParameter{
+        const unittest::ServerParameterGuard estimateBasedOnMovingAvgServerParameter{
             "reshardingRemainingTimeEstimateBasedOnMovingAverage", enableEstimateBasedOnMovingAvg};
         auto metrics = createInstanceMetrics(getClockSource(), UUID::gen(), Role::kRecipient);
         auto report = metrics->reportForCurrentOp();
@@ -1808,6 +1783,27 @@ TEST_F(ReshardingMetricsTest, CoordinatorVerificationPreCommitTimeReported) {
     ASSERT_EQ(report.getIntField("verificationPreCommitTimeElapsedSecs"), 25);
 }
 
+TEST_F(ReshardingMetricsTest, CoordinatorDonorCloneCountFetchTimeReported) {
+    auto clock = getClockSource();
+    auto metrics = createInstanceMetrics(clock, UUID::gen(), Role::kCoordinator);
+
+    // Before start, elapsed should be the default (0).
+    auto report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("donorCloneCountFetchTimeElapsedSecs"), 0);
+
+    metrics->setStartFor(ReshardingMetrics::TimedPhase::kDonorCloneCountFetchDuration,
+                         clock->now());
+    clock->advance(Seconds(10));
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("donorCloneCountFetchTimeElapsedSecs"), 10);
+
+    // After end time is set, duration is fixed.
+    metrics->setEndFor(ReshardingMetrics::TimedPhase::kDonorCloneCountFetchDuration, clock->now());
+    clock->advance(Seconds(100));
+    report = metrics->reportForCurrentOp();
+    ASSERT_EQ(report.getIntField("donorCloneCountFetchTimeElapsedSecs"), 10);
+}
+
 TEST_F(ReshardingMetricsTest, CoordinatorDoesNotReportChangeStreamMonitorLagOrCrossPhase) {
     auto clock = getClockSource();
     auto metrics = createInstanceMetrics(clock, UUID::gen(), Role::kCoordinator);
@@ -1897,6 +1893,7 @@ TEST_F(ReshardingMetricsTest, CoordinatorDiagnosticMetricsAllDefaultsWhenNoData)
     auto metrics = createInstanceMetrics(clock, UUID::gen(), Role::kCoordinator);
 
     auto diag = metrics->getDiagnosticMetrics();
+    ASSERT_EQ(diag.getField("coordinatorDonorCloneCountFetchTimeElapsedMillis").Long(), -1);
     ASSERT_EQ(diag.getField("coordinatorVerificationPreApplyingTimeElapsedMillis").Long(), -1);
     ASSERT_EQ(diag.getField("coordinatorVerificationPreCommitTimeElapsedMillis").Long(), -1);
 }
@@ -1956,6 +1953,19 @@ TEST_F(ReshardingMetricsTest, RecipientDiagnosticMetricsCrossPhaseAndElapsed) {
     ASSERT_EQ(diag.getField("recipientChangeStreamMonitorTotalTimeElapsedMillis").Long(), 60000);
 }
 
+TEST_F(ReshardingMetricsTest, CoordinatorDiagnosticMetricsDonorCloneCountFetch) {
+    auto clock = getClockSource();
+    auto metrics = createInstanceMetrics(clock, UUID::gen(), Role::kCoordinator);
+
+    metrics->setStartFor(ReshardingMetrics::TimedPhase::kDonorCloneCountFetchDuration,
+                         clock->now());
+    clock->advance(Seconds(15));
+    metrics->setEndFor(ReshardingMetrics::TimedPhase::kDonorCloneCountFetchDuration, clock->now());
+
+    auto diag = metrics->getDiagnosticMetrics();
+    ASSERT_EQ(diag.getField("coordinatorDonorCloneCountFetchTimeElapsedMillis").Long(), 15000);
+}
+
 TEST_F(ReshardingMetricsTest, CoordinatorDiagnosticMetricsVerificationPhases) {
     auto clock = getClockSource();
     auto metrics = createInstanceMetrics(clock, UUID::gen(), Role::kCoordinator);
@@ -1998,6 +2008,13 @@ TEST_F(ReshardingMetricsTest, DiagnosticMetricDefaultsMatchRealFields) {
             ASSERT_EQ(elem.Long(), -1) << "Field " << elem.fieldName() << " should be -1";
         }
     }
+}
+
+TEST_F(ReshardingMetricsTest, OnSearchIndexAbortIncrementsCumulativeMetrics) {
+    createMetricsAndAssertIncrementsCumulativeMetricsField(
+        [](auto metrics) { metrics->onSearchIndexAbort(); },
+        Section::kRoot,
+        "countSearchIndexAborts");
 }
 
 }  // namespace

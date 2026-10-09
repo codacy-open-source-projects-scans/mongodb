@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/validated_tenancy_scope_factory.h"
 
@@ -50,18 +24,21 @@
 #include "mongo/util/base64.h"
 #include "mongo/util/net/socket_utils.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 namespace mongo::auth {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
 // Signed auth tokens are for internal testing only, and require the use of a preshared key.
 // These tokens will have fixed values for kid/iss/aud fields.
 // This usage will be replaced by full OIDC processing at a later time.
-constexpr auto kTestOnlyKeyId = "test-only-kid"_sd;
-constexpr auto kTestOnlyIssuer = "mongodb://test.kernel.localhost"_sd;
-constexpr auto kTestOnlyAudience = "mongod-testing"_sd;
+constexpr auto kTestOnlyKeyId = "test-only-kid"sv;
+constexpr auto kTestOnlyIssuer = "mongodb://test.kernel.localhost"sv;
+constexpr auto kTestOnlyAudience = "mongod-testing"sv;
 
 MONGO_INITIALIZER(SecurityTokenOptionValidate)(InitializerContext*) {
     if (gMultitenancySupport) {
@@ -117,14 +94,14 @@ ValidatedTenancyScope::TenantProtocol parseAndValidateTenantProtocol(Client* cli
 }
 
 struct ParsedTokenView {
-    StringData header;
-    StringData body;
-    StringData signature;
-    StringData payload;
+    std::string_view header;
+    std::string_view body;
+    std::string_view signature;
+    std::string_view payload;
 };
 
 // Split "header.body.signature" into {"header", "body", "signature", "header.body"}
-ParsedTokenView parseSignedToken(StringData token) {
+ParsedTokenView parseSignedToken(std::string_view token) {
     ParsedTokenView pt;
 
     auto split = token.find('.', 0);
@@ -144,15 +121,17 @@ ParsedTokenView parseSignedToken(StringData token) {
     return pt;
 }
 
-BSONObj decodeJSON(StringData b64) try { return fromjson(base64url::decode(b64)); } catch (...) {
+BSONObj decodeJSON(std::string_view b64) try {
+    return fromjson(base64url::decode(b64));
+} catch (...) {
     auto status = exceptionToStatus();
     uasserted(status.code(), fmt::format("Unable to parse security token: {}", status.reason()));
 }
 
 }  // namespace
 
-ValidatedTenancyScope ValidatedTenancyScopeFactory::parseUnsignedToken(Client* client,
-                                                                       StringData securityToken) {
+ValidatedTenancyScope ValidatedTenancyScopeFactory::parseUnsignedToken(
+    Client* client, std::string_view securityToken) {
     IDLParserContext ctxt("securityToken");
     const auto parsed = parseSignedToken(securityToken);
 
@@ -189,7 +168,7 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::parseUnsignedToken(Client* c
 }
 
 ValidatedTenancyScope ValidatedTenancyScopeFactory::parseToken(Client* client,
-                                                               StringData securityToken) {
+                                                               std::string_view securityToken) {
     IDLParserContext ctxt("securityToken");
     const auto parsed = parseSignedToken(securityToken);
 
@@ -203,11 +182,11 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::parseToken(Client* client,
             "provided",
             !gTestOnlyValidatedTenancyScopeKey.empty());
 
-    StringData secret(gTestOnlyValidatedTenancyScopeKey);
+    std::string_view secret(gTestOnlyValidatedTenancyScopeKey);
     auto header = crypto::JWSHeader::parse(decodeJSON(parsed.header), ctxt);
     uassert(ErrorCodes::BadValue,
             "Security token must be signed using 'HS256' algorithm",
-            header.getAlgorithm() == "HS256"_sd);
+            header.getAlgorithm() == "HS256"sv);
 
     auto computed =
         SHA256Block::computeHmac(reinterpret_cast<const std::uint8_t*>(secret.data()),
@@ -247,7 +226,7 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::parseToken(Client* client,
 }
 
 boost::optional<ValidatedTenancyScope> ValidatedTenancyScopeFactory::parse(
-    Client* client, StringData securityToken) {
+    Client* client, std::string_view securityToken) {
 
     if (!gMultitenancySupport) {
         return boost::none;
@@ -274,7 +253,7 @@ boost::optional<ValidatedTenancyScope> ValidatedTenancyScopeFactory::parse(
 
 ValidatedTenancyScope ValidatedTenancyScopeFactory::create(
     const UserName& userName,
-    StringData secret,
+    std::string_view secret,
     ValidatedTenancyScope::TenantProtocol protocol,
     TokenForTestingTag) {
 
@@ -282,8 +261,8 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::create(
     Date_t expiration = Date_t::now() + kDefaultExpiration;
 
     crypto::JWSHeader header;
-    header.setType("JWT"_sd);
-    header.setAlgorithm("HS256"_sd);
+    header.setType("JWT"sv);
+    header.setAlgorithm("HS256"sv);
     header.setKeyId(kTestOnlyKeyId);
 
     crypto::JWT body;
@@ -306,8 +285,8 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::create(
     const std::string originalToken =
         fmt::format("{}.{}",
                     payload,
-                    base64url::encode(StringData(reinterpret_cast<const char*>(computed.data()),
-                                                 computed.size())));
+                    base64url::encode(std::string_view(
+                        reinterpret_cast<const char*>(computed.data()), computed.size())));
 
     if (gTestOnlyValidatedTenancyScopeKey == secret) {
         return ValidatedTenancyScope(userName, originalToken, body.getExpiration(), protocol);
@@ -319,12 +298,12 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::create(
 ValidatedTenancyScope ValidatedTenancyScopeFactory::create(
     TenantId tenant, ValidatedTenancyScope::TenantProtocol protocol, TenantForTestingTag) {
     crypto::JWSHeader header;
-    header.setType("JWT"_sd);
-    header.setAlgorithm("none"_sd);
-    header.setKeyId("none"_sd);
+    header.setType("JWT"sv);
+    header.setAlgorithm("none"sv);
+    header.setKeyId("none"sv);
 
     crypto::JWT body;
-    body.setIssuer("mongodb://testing.localhost"_sd);
+    body.setIssuer("mongodb://testing.localhost"sv);
     body.setSubject(".");
     body.setAudience(std::string{"mongod-testing"});
     body.setTenantId(tenant);
@@ -344,9 +323,9 @@ ValidatedTenancyScope ValidatedTenancyScopeFactory::create(std::string token, In
 ValidatedTenancyScope ValidatedTenancyScopeFactory::create(TenantId tenant,
                                                            TrustedForInnerOpMsgRequestTag) {
     crypto::JWSHeader header;
-    header.setType("JWT"_sd);
-    header.setAlgorithm("none"_sd);
-    header.setKeyId("none"_sd);
+    header.setType("JWT"sv);
+    header.setAlgorithm("none"sv);
+    header.setKeyId("none"sv);
 
     crypto::JWT body;
     body.setIssuer(fmt::format("mongodb://{}", prettyHostNameAndPort(serverGlobalParams.port)));

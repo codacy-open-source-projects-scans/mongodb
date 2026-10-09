@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #pragma once
@@ -33,7 +7,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
@@ -56,6 +29,7 @@
 #include <mutex>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional.hpp>
@@ -97,7 +71,7 @@ public:
     };
 };
 
-class MONGO_MOD_PUB StorageInterfaceMock : public StorageInterface {
+class [[MONGO_MOD_PUBLIC]] StorageInterfaceMock : public StorageInterface {
     StorageInterfaceMock(const StorageInterfaceMock&) = delete;
     StorageInterfaceMock& operator=(const StorageInterfaceMock&) = delete;
 
@@ -127,7 +101,7 @@ public:
     using FindDocumentsFn =
         std::function<StatusWith<std::vector<BSONObj>>(OperationContext*,
                                                        const NamespaceString&,
-                                                       boost::optional<StringData>,
+                                                       boost::optional<std::string_view>,
                                                        ScanDirection,
                                                        const BSONObj&,
                                                        BoundInclusion,
@@ -135,7 +109,7 @@ public:
     using DeleteDocumentsFn =
         std::function<StatusWith<std::vector<BSONObj>>(OperationContext*,
                                                        const NamespaceString&,
-                                                       boost::optional<StringData>,
+                                                       boost::optional<std::string_view>,
                                                        ScanDirection,
                                                        const BSONObj&,
                                                        BoundInclusion,
@@ -150,6 +124,11 @@ public:
     StatusWith<int> getRollbackID(OperationContext* opCtx) override;
     StatusWith<int> initializeRollbackID(OperationContext* opCtx) override;
     StatusWith<int> incrementRollbackID(OperationContext* opCtx) override;
+
+    Status initializeCleanShutdownCollection(OperationContext* opCtx) override;
+    StatusWith<boost::optional<CleanShutdownDocument>> getLastCleanShutdownDocument(
+        OperationContext* opCtx) override;
+    Status recordCleanShutdown(OperationContext* opCtx, Timestamp lastCheckpointTs) override;
 
     StatusWith<std::unique_ptr<CollectionBulkLoader>> createCollectionForBulkLoading(
         const NamespaceString& nss,
@@ -236,7 +215,7 @@ public:
 
     StatusWith<std::vector<BSONObj>> findDocuments(OperationContext* opCtx,
                                                    const NamespaceString& nss,
-                                                   boost::optional<StringData> indexName,
+                                                   boost::optional<std::string_view> indexName,
                                                    ScanDirection scanDirection,
                                                    const BSONObj& startKey,
                                                    BoundInclusion boundInclusion,
@@ -247,7 +226,7 @@ public:
 
     StatusWith<std::vector<BSONObj>> deleteDocuments(OperationContext* opCtx,
                                                      const NamespaceString& nss,
-                                                     boost::optional<StringData> indexName,
+                                                     boost::optional<std::string_view> indexName,
                                                      ScanDirection scanDirection,
                                                      const BSONObj& startKey,
                                                      BoundInclusion boundInclusion,
@@ -399,7 +378,7 @@ public:
 
     boost::optional<Timestamp> getLastStableRecoveryTimestamp(
         ServiceContext* serviceCtx) const override {
-        return boost::none;
+        return lastStableRecoveryTimestamp;
     }
 
     Timestamp getPointInTimeReadTimestamp(OperationContext* opCtx) const override {
@@ -455,7 +434,7 @@ public:
     };
     FindDocumentsFn findDocumentsFn = [](OperationContext* opCtx,
                                          const NamespaceString& nss,
-                                         boost::optional<StringData> indexName,
+                                         boost::optional<std::string_view> indexName,
                                          ScanDirection scanDirection,
                                          const BSONObj& startKey,
                                          BoundInclusion boundInclusion,
@@ -464,7 +443,7 @@ public:
     };
     DeleteDocumentsFn deleteDocumentsFn = [](OperationContext* opCtx,
                                              const NamespaceString& nss,
-                                             boost::optional<StringData> indexName,
+                                             boost::optional<std::string_view> indexName,
                                              ScanDirection scanDirection,
                                              const BSONObj& startKey,
                                              BoundInclusion boundInclusion,
@@ -484,11 +463,14 @@ public:
     Timestamp allDurableTimestamp = Timestamp::min();
     Timestamp oldestOpenReadTimestamp = Timestamp::min();
     Timestamp earliestOplogTimestamp = Timestamp::min();
+    boost::optional<Timestamp> lastStableRecoveryTimestamp = boost::none;
 
 private:
     mutable std::mutex _mutex;
     int _rbid;
     bool _rbidInitialized = false;
+    boost::optional<CleanShutdownDocument> _lastCleanShutdownDoc;
+    bool _cleanShutdownCollectionInitialized = false;
     Timestamp _stableTimestamp = Timestamp::min();
     Timestamp _initialDataTimestamp = Timestamp::min();
     bool _schemaUpgraded;

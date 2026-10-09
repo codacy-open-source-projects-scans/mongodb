@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -39,9 +13,10 @@
 
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 namespace optionenvironment {
@@ -154,13 +129,13 @@ public:
      *  status if the value was found, or an error status if the value was not found.
      *  Leaves the Value unchanged on error.
      */
-    Status get(const Key& key, Value* value) const;
+    Status get(std::string_view key, Value* value) const;
 
     /** Same as the above get interface, but supports directly getting C++ types without the
      *  intermediate Value and has the added failure case of the value being the wrong type
      */
     template <typename T>
-    Status get(const Key& key, T* value_contents) const;
+    Status get(std::string_view key, T* value_contents) const;
 
     /** Runs all registered Constraints and returns the result.  If "setValid" is true and
      * validation succeeds, marks this as a valid Environment so that any modifications will
@@ -177,16 +152,14 @@ public:
      *  boost::program_options::variables_map during the transition period
      */
 
-    /**
-     *  @return 1 if the given Key has a Value set in this Environment and 0 if not
-     */
-    bool count(const Key& key) const;
+    /** Returns true if the given Key exists in this Environment. */
+    bool count(std::string_view key) const;
 
     /**
      *  @return the Value for the given Key in this Environment.  Returns an empty Value if
      *  Key is not set.
      */
-    Value operator[](const Key& key) const;
+    Value operator[](std::string_view key) const;
 
     /**
      * Gets the BSON representation of this Environment.  This will collapse dotted fields
@@ -231,13 +204,13 @@ public:
 protected:
     std::vector<Constraint*> constraints;
     std::vector<KeyConstraint*> keyConstraints;
-    std::map<Key, Value> values;
-    std::map<Key, Value> default_values;
+    std::map<Key, Value, std::less<>> values;
+    std::map<Key, Value, std::less<>> default_values;
     bool valid;
 };
 
 template <typename T>
-Status Environment::get(const Key& get_key, T* get_value) const {
+Status Environment::get(std::string_view get_key, T* get_value) const {
     Value value;
     Status ret = get(get_key, &value);
     if (!ret.isOK()) {

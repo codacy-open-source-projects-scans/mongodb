@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -44,6 +18,7 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/hash/hash.h>
@@ -52,7 +27,7 @@
 #include <openssl/hmac.h>
 #endif
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 struct BSONBinData;
 class BSONObjBuilder;
@@ -92,6 +67,23 @@ private:
     int useCount();
     bool _reuseKey = false;
     int use = 0;
+};
+
+/**
+ * For an OpenSSL optimization where a plain hash needs to be computed many times in
+ * succession, we can re-use the EVP_MD_CTX object across calls. This is a no-op on
+ * non-OpenSSL providers since those platforms allocate context inside computeHash anyway.
+ */
+class HashContext {
+public:
+#if defined(MONGO_CONFIG_SSL) && (MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL)
+    HashContext();
+    ~HashContext();
+    EVP_MD_CTX* get();
+
+private:
+    EVP_MD_CTX* _digestCtx;
+#endif
 };
 
 /**
@@ -168,7 +160,7 @@ public:
         return HashBlock(newHash);
     }
 
-    static StatusWith<HashBlock> fromHexStringNoThrow(StringData hex) {
+    static StatusWith<HashBlock> fromHexStringNoThrow(std::string_view hex) {
         if (!hexblob::validate(hex)) {
             return {ErrorCodes::BadValue, "Hash input is not a hex string"};
         }
@@ -178,7 +170,7 @@ public:
         return fromBuffer(reinterpret_cast<const uint8_t*>(buf.buf()), buf.len());
     }
 
-    static HashBlock fromHexString(StringData hex) {
+    static HashBlock fromHexString(std::string_view hex) {
         return uassertStatusOK(fromHexStringNoThrow(hex));
     }
 
@@ -200,6 +192,25 @@ public:
      */
     static HashBlock computeHash(const uint8_t* input, size_t inputLen) {
         return computeHash({ConstDataRange(input, inputLen)});
+    }
+
+    /**
+     * This function is an alternative to computeHash. It provides an optimization - when
+     * a single thread needs to compute a hash repeatedly on the OpenSSL platform, it can
+     * provide a ctx object of its own (which is an empty object on non-OpenSSL providers)
+     * that will be re-used by being re-initialized when computing a hash.
+     */
+    static void computeHashWithCtx(HashContext* ctx,
+                                   std::initializer_list<ConstDataRange> input,
+                                   HashBlock* const output) {
+        Traits::computeHashWithCtx(ctx, input, &(output->_hash));
+    }
+
+    static HashBlock computeHashWithCtx(HashContext* ctx,
+                                        std::initializer_list<ConstDataRange> input) {
+        HashBlock ret;
+        computeHashWithCtx(ctx, input, &ret);
+        return ret;
     }
 
     /**
@@ -306,7 +317,7 @@ public:
     /**
      * Append this to a builder using the given name as a BSON BinData type value.
      */
-    void appendAsBinData(BSONObjBuilder& builder, StringData fieldName) const {
+    void appendAsBinData(BSONObjBuilder& builder, std::string_view fieldName) const {
         builder.appendBinData(fieldName, _hash.size(), BinDataGeneral, _hash.data());
     }
 
@@ -325,7 +336,7 @@ public:
      */
     std::string toString() const {
         return base64::encode(
-            StringData(reinterpret_cast<const char*>(_hash.data()), _hash.size()));
+            std::string_view(reinterpret_cast<const char*>(_hash.data()), _hash.size()));
     }
 
     /**
@@ -393,4 +404,4 @@ std::ostream& operator<<(std::ostream& os, const HashBlock<Traits>& sha) {
     return os << sha.toString();
 }
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/container_size_helper.h"
@@ -47,6 +20,7 @@
 #include <iosfwd>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/container/small_vector.hpp>
@@ -103,7 +77,7 @@ struct CoreIndexInfo {
      * Has the same comparison and equality semantics as std::pair<string, string>.
      *
      */
-    struct MONGO_MOD_NEEDS_REPLACEMENT Identifier {
+    struct [[MONGO_MOD_NEEDS_REPLACEMENT]] Identifier {
         explicit Identifier(std::string aCatalogName) : catalogName(std::move(aCatalogName)) {}
 
         Identifier(std::string aCatalogName, std::string nameDisambiguator)
@@ -183,7 +157,7 @@ struct CoreIndexInfo {
  * compute (i.e. for wildcard indexes, this requires reading the index) and so may not always be
  * available.
  */
-struct MONGO_MOD_NEEDS_REPLACEMENT IndexEntry : CoreIndexInfo {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] IndexEntry : CoreIndexInfo {
     IndexEntry(const BSONObj& kp,
                IndexType type,
                IndexDescriptor::IndexVersion version,
@@ -230,7 +204,7 @@ struct MONGO_MOD_NEEDS_REPLACEMENT IndexEntry : CoreIndexInfo {
      * these cases we only have a single boolean to track whether any path in the index is multikey.
      * If this is the case we defensively return true for any path.
      */
-    bool pathHasMultikeyComponent(StringData indexedField) const;
+    bool pathHasMultikeyComponent(std::string_view indexedField) const;
 
     /**
      * It's not obvious which element is the wildcard element in a compound wildcard index key

@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
@@ -56,6 +29,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -83,7 +57,7 @@ class ListCollections;
  * every operation looks at one consistent view of each user for every auth check required over
  * the lifetime of the operation.
  */
-class MONGO_MOD_PUBLIC AuthorizationSession {
+class [[MONGO_MOD_PUBLIC]] AuthorizationSession {
     AuthorizationSession(const AuthorizationSession&) = delete;
     AuthorizationSession& operator=(const AuthorizationSession&) = delete;
 
@@ -122,7 +96,6 @@ public:
 
     // Should be called at the beginning of every new request.  This performs the checks
     // necessary to determine if localhost connections should be given full access.
-    // TODO: try to eliminate the need for this call.
     virtual void startRequest(OperationContext* opCtx) = 0;
 
     /**
@@ -175,12 +148,12 @@ public:
 
     // Removes any authenticated principals and revokes any privileges that were granted via those
     // principals. This function modifies state. Synchronizes with the Client lock.
-    virtual void logoutAllDatabases(StringData reason) = 0;
+    virtual void logoutAllDatabases(std::string_view reason) = 0;
 
     // Removes any authenticated principals whose authorization credentials came from the given
     // database, and revokes any privileges that were granted via that principal. This function
     // modifies state. Synchronizes with the Client lock.
-    virtual void logoutDatabase(const DatabaseName& dbname, StringData reason) = 0;
+    virtual void logoutDatabase(const DatabaseName& dbname, std::string_view reason) = 0;
 
     // How the active session is authenticated.
     enum class AuthenticationMode {
@@ -299,6 +272,10 @@ public:
     // resource.
     virtual bool mayBypassWriteBlockingMode() const = 0;
 
+    // Returns true if any user has the privilege to bypass replica set writes blocking for the
+    // cluster resource.
+    virtual bool mayBypassReplicaSetWritesBlocking() const = 0;
+
     // Returns true if the authorization session is expired. When this returns true,
     // isAuthenticated() is also expected to return false.
     virtual bool isExpired() const = 0;
@@ -315,7 +292,7 @@ public:
 // access a cursor in the specified `cursorSessionId` parameter.  Returns `Status::OK()`, when the
 // session is accessible.  Returns a `mongo::Status` with information regarding the nature of
 // session inaccessibility when the session is not accessible.
-MONGO_MOD_PUBLIC inline Status checkCursorSessionPrivilege(
+[[MONGO_MOD_PUBLIC]] inline Status checkCursorSessionPrivilege(
     OperationContext* const opCtx, const boost::optional<LogicalSessionId> cursorSessionId) {
     if (!AuthorizationSession::exists(opCtx->getClient())) {
         return Status::OK();

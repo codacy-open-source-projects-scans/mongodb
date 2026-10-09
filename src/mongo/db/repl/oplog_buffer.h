@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,6 +7,8 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/repl/oplog_batch.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/otel/metrics/metrics_service.h"
+#include "mongo/otel/metrics/metrics_updown_counter.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/modules.h"
@@ -49,13 +25,69 @@ class OperationContext;
 
 namespace repl {
 
+inline auto& applyBufferCountMetric =
+    otel::metrics::MetricsService::instance().createInt64UpDownCounter(
+        otel::metrics::MetricNames::kOplogApplyBufferCount,
+        "Number of oplog batches applied across all databases.",
+        otel::metrics::MetricUnit::kOperations,
+        {.serverStatusOptions =
+             otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.apply.count"})});
+
+inline auto& applyBufferSizeMetric =
+    otel::metrics::MetricsService::instance().createInt64UpDownCounter(
+        otel::metrics::MetricNames::kOplogApplyBufferSize,
+        "Current size of the oplog apply buffer in bytes",
+        otel::metrics::MetricUnit::kBytes,
+        {.serverStatusOptions =
+             otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.apply.sizeBytes"})});
+
+inline auto& applyBufferMaxSizeMetric = otel::metrics::MetricsService::instance().createInt64Gauge(
+    otel::metrics::MetricNames::kOplogApplyBufferMaxSize,
+    "Maximum size of the apply buffer. mongod sets this value using a constant, which is not "
+    "configurable.",
+    otel::metrics::MetricUnit::kBytes,
+    {.serverStatusOptions =
+         otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.apply.maxSizeBytes"})});
+
+inline auto& applyBufferMaxCountMetric = otel::metrics::MetricsService::instance().createInt64Gauge(
+    otel::metrics::MetricNames::kOplogApplyBufferMaxCount,
+    "Maximum number of operations in the oplog apply buffer. mongod sets this value using a "
+    "constant, which is not configurable.",
+    otel::metrics::MetricUnit::kOperations,
+    {.serverStatusOptions =
+         otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.apply.maxCount"})});
+
+inline auto& writeBufferCountMetric =
+    otel::metrics::MetricsService::instance().createInt64UpDownCounter(
+        otel::metrics::MetricNames::kOplogWriteBufferCount,
+        "Number of oplog batches applied across all databases.",
+        otel::metrics::MetricUnit::kOperations,
+        {.serverStatusOptions =
+             otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.write.count"})});
+
+inline auto& writeBufferSizeMetric =
+    otel::metrics::MetricsService::instance().createInt64UpDownCounter(
+        otel::metrics::MetricNames::kOplogWriteBufferSize,
+        "Current size of the oplog write buffer in bytes",
+        otel::metrics::MetricUnit::kBytes,
+        {.serverStatusOptions =
+             otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.write.sizeBytes"})});
+
+inline auto& writeBufferMaxSizeMetric = otel::metrics::MetricsService::instance().createInt64Gauge(
+    otel::metrics::MetricNames::kOplogWriteBufferMaxSize,
+    "Maximum size of the write buffer. mongod sets this value using a constant, which is not "
+    "configurable.",
+    otel::metrics::MetricUnit::kBytes,
+    {.serverStatusOptions =
+         otel::metrics::ServerStatusOptions({.dottedPath = "repl.buffer.write.maxSizeBytes"})});
+
 /**
  * Interface for temporary container of oplog entries (in BSON format) from sync source by
  * OplogFetcher that will be read by applier in the InitialSyncer.
  *
  * Implementations are only required to support one pusher and one popper.
  */
-class MONGO_MOD_OPEN OplogBuffer {
+class [[MONGO_MOD_OPEN]] OplogBuffer {
     OplogBuffer(const OplogBuffer&) = delete;
     OplogBuffer& operator=(const OplogBuffer&) = delete;
 
@@ -209,8 +241,18 @@ struct OplogBuffer::Cost {
     std::size_t count = 0;
 };
 
-class MONGO_MOD_PRIVATE OplogBuffer::Counters {
+class [[MONGO_MOD_PRIVATE]] OplogBuffer::Counters {
 public:
+    Counters() = delete;
+    Counters(otel::metrics::UpDownCounter<int64_t>& countMetric,
+             otel::metrics::UpDownCounter<int64_t>& sizeMetric,
+             otel::metrics::Gauge<int64_t>& maxSizeMetric,
+             boost::optional<otel::metrics::Gauge<int64_t>&> maxCountMetric)
+        : _countMetric(countMetric),
+          _sizeMetric(sizeMetric),
+          _maxSizeMetric(maxSizeMetric),
+          _maxCountMetric(maxCountMetric) {}
+
     // Number of operations in this OplogBuffer.
     Counter64 count;
 
@@ -229,6 +271,9 @@ public:
      */
     void setMaxCount(std::size_t newMaxCount) {
         maxCount.increment(newMaxCount - maxCount.get());
+        if (_maxCountMetric) {
+            _maxCountMetric->set(newMaxCount);
+        }
     }
 
     /**
@@ -236,6 +281,7 @@ public:
      * This function should only be called by a single thread.
      */
     void setMaxSize(std::size_t newMaxSize) {
+        _maxSizeMetric.set(newMaxSize);
         maxSize.increment(newMaxSize - maxSize.get());
     }
 
@@ -244,32 +290,39 @@ public:
      * This function should only be called by a single thread.
      */
     void clear() {
-        count.decrement(count.get());
-        size.decrement(size.get());
+        decrementN(count.get(), size.get());
     }
 
     void increment(const Value& value) {
-        count.increment(1);
-        size.increment(std::size_t(value.objsize()));
+        incrementN(1, static_cast<size_t>(value.objsize()));
     }
 
     void incrementN(std::size_t cnt, std::size_t sz) {
         count.increment(cnt);
+        _countMetric.add(static_cast<long>(cnt));
         size.increment(sz);
+        _sizeMetric.add(static_cast<long>(sz));
     }
 
     void decrement(const Value& value) {
-        count.decrement(1);
-        size.decrement(std::size_t(value.objsize()));
+        decrementN(1, static_cast<size_t>(value.objsize()));
     }
 
     void decrementN(std::size_t cnt, std::size_t sz) {
         count.decrement(cnt);
+        _countMetric.add(-static_cast<long>(cnt));
         size.decrement(sz);
+        _sizeMetric.add(-static_cast<long>(sz));
     }
+
+private:
+    otel::metrics::UpDownCounter<int64_t>& _countMetric;
+    otel::metrics::UpDownCounter<int64_t>& _sizeMetric;
+    otel::metrics::Gauge<int64_t>& _maxSizeMetric;
+    boost::optional<otel::metrics::Gauge<int64_t>&> _maxCountMetric;
 };
 
-class MONGO_MOD_PUB OplogBufferMetrics {
+class [[MONGO_MOD_PUBLIC]] OplogBufferMetrics {
 public:
     OplogBuffer::Counters* getWriteBufferCounter() {
         return &_writeBufferCounter;
@@ -305,8 +358,12 @@ public:
     }
 
 private:
-    OplogBuffer::Counters _writeBufferCounter;
-    OplogBuffer::Counters _applyBufferCounter;
+    OplogBuffer::Counters _writeBufferCounter{
+        writeBufferCountMetric, writeBufferSizeMetric, writeBufferMaxSizeMetric, boost::none};
+    OplogBuffer::Counters _applyBufferCounter{applyBufferCountMetric,
+                                              applyBufferSizeMetric,
+                                              applyBufferMaxSizeMetric,
+                                              applyBufferMaxCountMetric};
 };
 
 /**
@@ -317,7 +374,7 @@ private:
  * from the buffer.  It is up to the implementing subclass to ensure that such timestamps are
  * available to be read.
  */
-class MONGO_MOD_PRIVATE RandomAccessOplogBuffer : public OplogBuffer {
+class [[MONGO_MOD_PRIVATE]] RandomAccessOplogBuffer : public OplogBuffer {
 public:
     enum SeekStrategy {
         kInexact = 0,

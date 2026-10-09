@@ -1,38 +1,17 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/admission/rate_limiter.h"
 
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/admission/ticketing/admission_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_severity_suppressor.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
+
+#include <utility>
 
 #include <folly/TokenBucket.h>
 
@@ -55,7 +34,12 @@ double calculateBurstSize(double refreshRate, double burstCapacitySecs) {
 
 class RateLimiter::RateLimiterPrivate {
 public:
-    RateLimiterPrivate(double r, double b, int64_t m, TickSource* clock, std::string n)
+    RateLimiterPrivate(double r,
+                       double b,
+                       int64_t m,
+                       TickSource* clock,
+                       std::string n,
+                       MetricsRecorderType recorder)
         // Initialize the token bucket with one "burst" of tokens. The third parameter to
         // tokenBucket's constructor ("zeroTime") is interpreted as a number of seconds from the
         // epoch of the clock used by the token bucket. The clock is
@@ -66,9 +50,21 @@ public:
         : maxQueueDepth(m),
           queued(0),
           name(std::move(n)),
+          rejectedStatus(kRejectedErrorCode, fmt::format("Rate limiter '{}' rate exceeded", name)),
           _tickSource(clock),
-          _tokenBucket{r, b, nowInSeconds() - b / r} {}
-
+          _tokenBucket{r, b, nowInSeconds() - b / r} {
+        std::visit(
+            [this](auto& recorder) {
+                using T = std::decay_t<decltype(recorder)>;
+                if constexpr (std::is_same_v<T, std::unique_ptr<RateLimiterMetricsRecorder>>) {
+                    _ownedMetricsRecorder = std::move(recorder);
+                    _metricsRecorder = _ownedMetricsRecorder.get();
+                } else if constexpr (std::is_same_v<T, RateLimiterMetricsRecorder*>) {
+                    _metricsRecorder = recorder;
+                }
+            },
+            recorder);
+    }
     /*
      * Used to protect all calls into the token bucket that do not require modification of the
      * bucket instance.
@@ -97,6 +93,10 @@ public:
             return _tb.balance(now);
         }
 
+        double rate() {
+            return _tb.rate();
+        }
+
         void returnTokens(double tk) {
             _tb.returnTokens(tk);
         }
@@ -118,8 +118,14 @@ public:
         WriteScopedTokenBucket(folly::TokenBucket& tb, WriteRarelyRWMutex& m)
             : _l(m.writeLock()), _tb(tb) {}
 
-        void reset(double rt, double b) {
-            _tb.reset(rt, b);
+        void reset(double rt, double b, double now) {
+            _tb.reset(rt, b, now);
+        }
+
+        void resetPreservingBalance(double rt, double b, double now) {
+            const double balance = _tb.balance(now);
+            _tb.reset(rt, b, now);
+            _tb.setCapacity(balance, now);
         }
 
     private:
@@ -127,12 +133,14 @@ public:
         folly::TokenBucket& _tb;
     };
 
-    Stats stats;
-
     Atomic<int64_t> maxQueueDepth;
     Atomic<int64_t> queued;
 
     std::string name;
+
+    // Cached rejection Status so the hot rejection path returns it without a per-call ErrorInfo
+    // allocation while still preserving the limiter name in diagnostics.
+    const Status rejectedStatus;
 
     ReadScopedTokenBucket readScopedTokenBucket() {
         return {_tokenBucket, _rwMutex};
@@ -162,17 +170,163 @@ public:
             .count();
     }
 
+    Milliseconds nowInMillis() {
+        return _tickSource->ticksTo<Milliseconds>(_tickSource->getTicks());
+    }
+
+    // Clamped snapshot of available tokens. FTDC consumers may not handle infinity, so the value is
+    // capped at INT64_MAX.
+    double sampledAvailableTokens() {
+        return static_cast<double>(
+            std::min(static_cast<long double>(INT64_MAX),
+                     static_cast<long double>(readScopedTokenBucket().available(nowInSeconds()))));
+    }
+
+    RateLimiterMetricsRecorder* getMetricsRecorder() const {
+        return _metricsRecorder;
+    }
+
+    TickSource* tickSource() const {
+        return _tickSource;
+    }
+
 private:
     WriteRarelyRWMutex _rwMutex;
     TickSource* _tickSource;
     folly::TokenBucket _tokenBucket;
+
+    RateLimiterMetricsRecorder* _metricsRecorder;
+    // Set only if this rate limiter is configured to own the metrics recorder via Options, null
+    // otherwise.
+    std::unique_ptr<RateLimiterMetricsRecorder> _ownedMetricsRecorder;
 };
+
+RateLimiter::DeferredToken::DeferredToken(RateLimiterPrivate* impl,
+                                          AdmissionContext* admCtx,
+                                          double numTokens,
+                                          Milliseconds timeEnqueued,
+                                          Milliseconds napTime)
+    : _impl(impl),
+      _admCtx(admCtx),
+      _numTokens(numTokens),
+      _timeEnqueued(timeEnqueued),
+      _napTime(napTime) {}
+
+
+RateLimiter::DeferredToken::~DeferredToken() {
+    if (!_impl || isReady()) {
+        return;
+    }
+    // Unconsumed non-ready deferred token: return the borrowed token and release the queue slot.
+    _impl->readScopedTokenBucket().returnTokens(_numTokens);
+    _impl->queued.fetchAndSubtract(1);
+    _impl->getMetricsRecorder()->record(RemovedFromQueue{});
+}
+
+Status RateLimiter::DeferredToken::get(OperationContext* opCtx, AdmissionContext* admCtx) && {
+    invariant(_impl);
+    tassert(10550201,
+            "an admission context was bound to this token when its slot was reserved",
+            !admCtx || !_admCtx);
+    if (admCtx) {
+        _admCtx = admCtx;
+    }
+    return std::move(*this).get(opCtx, opCtx->getServiceContext()->getPreciseClockSource());
+}
+
+Status RateLimiter::DeferredToken::get(Interruptible* interruptible, ClockSource* clockSrc) && {
+    invariant(_impl);
+
+    if (isReady()) {
+        // Token was immediately available. No need to update stats, they were already recorded in
+        // acquireToken().
+        _impl = nullptr;
+        return Status::OK();
+    }
+
+    auto* impl = std::exchange(_impl, nullptr);
+    auto* tickSource = impl->tickSource();
+    boost::optional<WaitingForAdmissionGuard> admissionGuard;
+    if (_admCtx) {
+        admissionGuard.emplace(_admCtx, tickSource);
+    }
+
+    const auto queuedBefore = _admCtx ? _admCtx->totalTimeQueuedMicros() : Microseconds{0};
+    const auto startTicks = tickSource->getTicks();
+    ON_BLOCK_EXIT([&] {
+        impl->getMetricsRecorder()->record(RemovedFromQueue{});
+        impl->queued.fetchAndSubtract(1);
+
+        // Retiring the guard is what accumulates this wait onto the admission context, so it has
+        // to happen before the context can be read back.
+        admissionGuard.reset();
+        const auto queued = _admCtx
+            ? _admCtx->totalTimeQueuedMicros() - queuedBefore
+            : tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startTicks);
+        impl->getMetricsRecorder()->record(TimeQueuedMicros{durationCount<Microseconds>(queued)});
+    });
+
+    // The system can wait arbitrarily long between acquiring a deferred token and calling get() on
+    // it, so calculate an adjusted nap time before the actual sleep.
+    auto adjustedNapTime =
+        std::max(Milliseconds{0}, (_timeEnqueued + _napTime) - impl->nowInMillis());
+    if (adjustedNapTime == Milliseconds{0}) {
+        impl->getMetricsRecorder()->record(SuccessfulAdmission{_numTokens});
+        impl->getMetricsRecorder()->record(
+            AverageTimeQueuedMicros{static_cast<double>(durationCount<Microseconds>(_napTime))});
+        return Status::OK();
+    }
+
+    Date_t deadline = clockSrc->now() + adjustedNapTime;
+    try {
+        LOGV2_DEBUG(10550200,
+                    4,
+                    "Going to sleep waiting for token acquisition",
+                    "rateLimiterName"_attr = impl->name,
+                    "napTimeMillis"_attr = adjustedNapTime.toString());
+        interruptible->sleepUntil(deadline);
+    } catch (const DBException& e) {
+        impl->getMetricsRecorder()->record(InterruptedInQueue{});
+        LOGV2_DEBUG(10440800,
+                    4,
+                    "Interrupted while waiting in rate limiter queue",
+                    "rateLimiterName"_attr = impl->name,
+                    "exception"_attr = e.toString());
+        impl->readScopedTokenBucket().returnTokens(_numTokens);
+        return e.toStatus().withContext(fmt::format(
+            "Interrupted while waiting in rate limiter queue. rateLimiterName={}", impl->name));
+    }
+
+    impl->getMetricsRecorder()->record(SuccessfulAdmission{_numTokens});
+    impl->getMetricsRecorder()->record(
+        AverageTimeQueuedMicros{static_cast<double>(durationCount<Microseconds>(_napTime))});
+    return Status::OK();
+}
+
+void RateLimiter::DeferredToken::recordExemption() && {
+    invariant(_impl);
+    invariant(!isReady());  // Exemptions are only supported for queued requests.
+
+    // This method only records the exemption, token/queue cleanup is covered by the destructor.
+    _impl->getMetricsRecorder()->record(ExemptedAdmission{});
+}
 
 RateLimiter::RateLimiter(double refreshRatePerSec,
                          double burstCapacitySecs,
                          int64_t maxQueueDepth,
                          std::string name,
-                         TickSource* tickSource) {
+                         TickSource* tickSource)
+    : RateLimiter(refreshRatePerSec,
+                  burstCapacitySecs,
+                  maxQueueDepth,
+                  std::move(name),
+                  RateLimiter::Options{.tickSource = tickSource}) {}
+
+RateLimiter::RateLimiter(double refreshRatePerSec,
+                         double burstCapacitySecs,
+                         int64_t maxQueueDepth,
+                         std::string name,
+                         Options options) {
     uassert(ErrorCodes::InvalidOptions,
             fmt::format("burstCapacitySecs cannot be less than or equal to 0.0. "
                         "burstCapacitySecs={}; rateLimiterName={}",
@@ -180,20 +334,44 @@ RateLimiter::RateLimiter(double refreshRatePerSec,
                         name),
             burstCapacitySecs > 0.0);
     auto burstSize = calculateBurstSize(refreshRatePerSec, burstCapacitySecs);
-    _impl = std::make_unique<RateLimiterPrivate>(
-        refreshRatePerSec, burstSize, maxQueueDepth, tickSource, std::move(name));
+    _impl = std::make_unique<RateLimiterPrivate>(refreshRatePerSec,
+                                                 burstSize,
+                                                 maxQueueDepth,
+                                                 options.tickSource,
+                                                 std::move(name),
+                                                 std::move(options.metricsRecorder));
 }
+
 
 RateLimiter::~RateLimiter() = default;
 
-Status RateLimiter::acquireToken(OperationContext* opCtx, double numTokensToConsume) {
-    _impl->stats.attemptedAdmissions.incrementRelaxed();
+boost::optional<RateLimiter::DeferredToken> RateLimiter::acquireToken(AdmissionContext* admCtx,
+                                                                      double numTokensToConsume) {
+    // This failpoint is shared by every RateLimiter wrapper (ingress request, egress response,
+    // session establishment, etc). To keep a test that forces queueing on one limiter from parking
+    // every other limiter, callers MUST scope it by providing a limiter name when enabling the
+    // failpoint.
+    const bool hangInLimiter =
+        hangInRateLimiter.shouldFail([&name = _impl->name](const BSONObj& data) {
+            const auto el = data.getField("limiter");
+            return !el.eoo() && el.str() == name.c_str();
+        });
 
-    // The consumeWithBorrowNonBlocking API consumes a token (possibly leading to a negative
-    // bucket balance), and returns how long the consumer should nap until their token
-    // reservation becomes valid.
+    const auto maxQueueDepth = _impl->maxQueueDepth.loadRelaxed();
+    if (!hangInLimiter && (maxQueueDepth <= 0 || _impl->queued.load() >= maxQueueDepth)) {
+        // Queueing unavailable (disabled or currently full): use try-acquire semantics.
+        if (!tryAcquireToken(numTokensToConsume)) {
+            return boost::none;
+        }
+        _impl->getMetricsRecorder()->record(AverageTimeQueuedMicros{0});
+        return DeferredToken(
+            _impl.get(), admCtx, numTokensToConsume, Milliseconds{0}, Milliseconds{0});
+    }
+
+    _impl->getMetricsRecorder()->record(AttemptedAdmission{});
+
     double waitForTokenSecs;
-    if (MONGO_unlikely(hangInRateLimiter.shouldFail())) {
+    if (hangInLimiter) {
         waitForTokenSecs = 60 * 60;  // 1 hour
     } else {
         waitForTokenSecs =
@@ -202,66 +380,70 @@ Status RateLimiter::acquireToken(OperationContext* opCtx, double numTokensToCons
                 .value_or(0);
     }
 
-    if (auto napTime = doubleToMillis(waitForTokenSecs); napTime > Milliseconds{0}) {
-        // Calculate the deadline before incrementing the queued metric to ensure that unit tests
-        // don't advance the mock clock before the sleep deadline is calculated.
-        Date_t deadline = opCtx->getServiceContext()->getPreciseClockSource()->now() + napTime;
+    auto napTime = doubleToMillis(waitForTokenSecs);
+    if (napTime > Milliseconds{0}) {
+        // Token not immediately available: reserve a queue slot.
         if (auto status = _impl->enqueue(); !status.isOK()) {
             _impl->readScopedTokenBucket().returnTokens(numTokensToConsume);
-            _impl->stats.rejectedAdmissions.incrementRelaxed();
-            return status;
+            _impl->getMetricsRecorder()->record(RejectedAdmission{});
+            return boost::none;
         }
-        _impl->stats.addedToQueue.incrementRelaxed();
-        ON_BLOCK_EXIT([&] {
-            _impl->stats.removedFromQueue.incrementRelaxed();
-            _impl->queued.fetchAndSubtract(1);
-        });
-        try {
-            LOGV2_DEBUG(10550200,
-                        4,
-                        "Going to sleep waiting for token acquisition",
-                        "rateLimiterName"_attr = _impl->name,
-                        "napTimeMillis"_attr = napTime.toString());
-            opCtx->sleepUntil(deadline);
-        } catch (const DBException& e) {
-            _impl->stats.interruptedInQueue.incrementRelaxed();
-            LOGV2_DEBUG(10440800,
-                        4,
-                        "Interrupted while waiting in rate limiter queue",
-                        "rateLimiterName"_attr = _impl->name,
-                        "exception"_attr = e.toString());
-            _impl->readScopedTokenBucket().returnTokens(numTokensToConsume);
-            return e.toStatus().withContext(
-                fmt::format("Interrupted while waiting in rate limiter queue. rateLimiterName={}",
-                            _impl->name));
-        }
+        _impl->getMetricsRecorder()->record(AddedToQueue{});
+        return DeferredToken(
+            _impl.get(), admCtx, numTokensToConsume, _impl->nowInMillis(), napTime);
     }
 
-    _impl->stats.successfulAdmissions.incrementRelaxed();
-    _impl->stats.averageTimeQueuedMicros.addSample(waitForTokenSecs * 1'000'000);
-
-    return Status::OK();
+    // Token immediately available.
+    _impl->getMetricsRecorder()->record(SuccessfulAdmission{numTokensToConsume});
+    _impl->getMetricsRecorder()->record(AverageTimeQueuedMicros{0});
+    return DeferredToken(_impl.get(), admCtx, numTokensToConsume, Milliseconds{0}, Milliseconds{0});
 }
 
-Status RateLimiter::tryAcquireToken(double numTokensToConsume) {
-    _impl->stats.attemptedAdmissions.incrementRelaxed();
+Status RateLimiter::acquireToken(OperationContext* opCtx,
+                                 AdmissionContext* admCtx,
+                                 double numTokensToConsume) {
+    auto tokenResult = acquireToken(admCtx, numTokensToConsume);
+    if (!tokenResult) {
+        return _impl->rejectedStatus;
+    }
+    return std::move(*tokenResult).get(opCtx);
+}
+
+Status RateLimiter::acquireToken(OperationContext* opCtx, double numTokensToConsume) {
+    return acquireToken(opCtx, nullptr, numTokensToConsume);
+}
+
+bool RateLimiter::tryAcquireToken(double numTokensToConsume) {
+    _impl->getMetricsRecorder()->record(AttemptedAdmission{});
 
     if (!_impl->readScopedTokenBucket().consume(numTokensToConsume, _impl->nowInSeconds())) {
-        _impl->stats.rejectedAdmissions.incrementRelaxed();
-        return Status{kRejectedErrorCode,
-                      fmt::format("Rate limiter '{}' rate exceeded", _impl->name)};
+        _impl->getMetricsRecorder()->record(RejectedAdmission{});
+        return false;
     }
-
-    _impl->stats.successfulAdmissions.incrementRelaxed();
-    return Status::OK();
+    _impl->getMetricsRecorder()->record(SuccessfulAdmission{numTokensToConsume});
+    return true;
 }
 
 void RateLimiter::returnTokens(double numTokensToReturn) {
     _impl->readScopedTokenBucket().returnTokens(numTokensToReturn);
 }
 
+void RateLimiter::reconcileTokens(double numTokens) {
+    if (numTokens == 0.0) {
+        return;
+    }
+    if (numTokens < 0.0) {
+        _impl->readScopedTokenBucket().returnTokens(-numTokens);
+        return;
+    }
+    // Borrow-consume: drains the bucket immediately, allowing the balance to go negative. The
+    // returned wait time is intentionally discarded; the reconciliation's effect is felt by the
+    // next caller.
+    _impl->readScopedTokenBucket().consumeWithBorrowNonBlocking(numTokens, _impl->nowInSeconds());
+}
+
 void RateLimiter::recordExemption() {
-    _impl->stats.exemptedAdmissions.incrementRelaxed();
+    _impl->getMetricsRecorder()->record(ExemptedAdmission{});
 }
 
 void RateLimiter::updateRateParameters(double refreshRatePerSec, double burstCapacitySecs) {
@@ -272,38 +454,67 @@ void RateLimiter::updateRateParameters(double refreshRatePerSec, double burstCap
                         _impl->name),
             burstCapacitySecs > 0.0);
     auto burstSize = calculateBurstSize(refreshRatePerSec, burstCapacitySecs);
-    _impl->writeScopedTokenBucket().reset(refreshRatePerSec, burstSize);
+    _impl->writeScopedTokenBucket().reset(refreshRatePerSec, burstSize, _impl->nowInSeconds());
+}
+
+void RateLimiter::updateRateParametersPreservingBalance(double refreshRatePerSec,
+                                                        double burstCapacitySecs) {
+    uassert(ErrorCodes::InvalidOptions,
+            fmt::format("burstCapacitySecs cannot be less than or equal to 0.0. "
+                        "burstCapacitySecs={}; rateLimiterName={}",
+                        burstCapacitySecs,
+                        _impl->name),
+            burstCapacitySecs > 0.0);
+    auto burstSize = calculateBurstSize(refreshRatePerSec, burstCapacitySecs);
+    _impl->writeScopedTokenBucket().resetPreservingBalance(
+        refreshRatePerSec, burstSize, _impl->nowInSeconds());
 }
 
 void RateLimiter::setMaxQueueDepth(int64_t maxQueueDepth) {
     _impl->maxQueueDepth.storeRelaxed(maxQueueDepth);
 }
 
-const RateLimiter::Stats& RateLimiter::stats() const {
-    return _impl->stats;
+const RateLimiterMetricsRecorder& RateLimiter::stats() const {
+    return *_impl->getMetricsRecorder();
+}
+
+RateLimiterMetricsRecorder& RateLimiter::stats() {
+    return *_impl->getMetricsRecorder();
 }
 
 void RateLimiter::appendStats(BSONObjBuilder* bob) const {
     invariant(bob);
-    bob->append("addedToQueue", stats().addedToQueue.get());
-    bob->append("removedFromQueue", stats().removedFromQueue.get());
-    bob->append("interruptedInQueue", stats().interruptedInQueue.get());
-    bob->append("rejectedAdmissions", stats().rejectedAdmissions.get());
-    bob->append("exemptedAdmissions", stats().exemptedAdmissions.get());
-    bob->append("successfulAdmissions", stats().successfulAdmissions.get());
-    bob->append("attemptedAdmissions", stats().attemptedAdmissions.get());
-    if (const auto avg = stats().averageTimeQueuedMicros.get()) {
+    const auto& recorder = *_impl->getMetricsRecorder();
+    bob->append("addedToQueue", recorder.addedToQueue());
+    bob->append("removedFromQueue", recorder.removedFromQueue());
+    bob->append("interruptedInQueue", recorder.interruptedInQueue());
+    bob->append("rejectedAdmissions", recorder.rejectedAdmissions());
+    bob->append("exemptedAdmissions", recorder.exemptedAdmissions());
+    bob->append("successfulAdmissions", recorder.successfulAdmissions());
+    bob->append("attemptedAdmissions", recorder.attemptedAdmissions());
+    if (const auto avg = recorder.averageTimeQueuedMicros()) {
         bob->append("averageTimeQueuedMicros", *avg);
     }
+    bob->append("totalTimeQueuedMicros", recorder.totalTimeQueuedMicros());
 
-    // FTDC consumers may not handle infinity, and so we append INT64_MAX instead.
-    bob->append("totalAvailableTokens",
-                static_cast<double>(std::min(static_cast<long double>(INT64_MAX),
-                                             static_cast<long double>(tokensAvailable()))));
+    bob->append("tokensAcquired", recorder.tokensAcquired());
+    bob->append("currentQueueDepth", recorder.addedToQueue() - recorder.removedFromQueue());
+
+    const auto sampledAvailableTokens = _impl->sampledAvailableTokens();
+    _impl->getMetricsRecorder()->record(TokensAvailable{sampledAvailableTokens});
+    bob->append("totalAvailableTokens", sampledAvailableTokens);
+}
+
+double RateLimiter::refreshRate() const {
+    return _impl->readScopedTokenBucket().rate();
 }
 
 double RateLimiter::tokensAvailable() const {
     return _impl->readScopedTokenBucket().available(_impl->nowInSeconds());
+}
+
+double RateLimiter::sampledAvailableTokens() const {
+    return _impl->sampledAvailableTokens();
 }
 
 double RateLimiter::tokenBalance() const {
@@ -312,6 +523,10 @@ double RateLimiter::tokenBalance() const {
 
 int64_t RateLimiter::queued() const {
     return _impl->queued.load();
+}
+
+int64_t RateLimiter::maxQueueDepth() const {
+    return _impl->maxQueueDepth.loadRelaxed();
 }
 
 }  // namespace mongo::admission

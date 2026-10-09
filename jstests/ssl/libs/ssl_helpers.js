@@ -1,6 +1,12 @@
 import "jstests/multiVersion/libs/multi_rs.js";
 
-import {isDebian, isRHEL8, isUbuntu, isUbuntu2004} from "jstests/libs/os_helpers.js";
+import {
+    isDebian,
+    isRHEL8,
+    isUbuntu,
+    isUbuntu2004,
+    windowsSupportsTLS13,
+} from "jstests/libs/server_security/os_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {basicReplsetTest} from "jstests/replsets/libs/basic_replset_test.js";
 
@@ -17,6 +23,7 @@ export var TRUSTED_SERVER_CERT = getX509Path("trusted-server.pem");
 export var CA_CERT = getX509Path("ca.pem");
 export var TRUSTED_CA_CERT = getX509Path("trusted-ca.pem");
 export var CLIENT_CERT = getX509Path("client.pem");
+export var CLIENT_PASSWORD_PROTECTED_CERT = getX509Path("client_password_protected.pem");
 export var TRUSTED_CLIENT_CERT = getX509Path("trusted-client.pem");
 export var DH_PARAM = "jstests/libs/8k-prime.dhparam";
 export var CLUSTER_CERT = getX509Path("cluster_cert.pem");
@@ -83,7 +90,10 @@ export var replShouldFail = function (name, opt1, opt2) {
  */
 export function testShardedLookup(shardingTest) {
     let st = shardingTest;
-    assert(st.adminCommand({enableSharding: "lookupTest"}), "error enabling sharding for this configuration");
+    assert(
+        st.adminCommand({enableSharding: "lookupTest"}),
+        "error enabling sharding for this configuration",
+    );
     assert(
         st.adminCommand({shardCollection: "lookupTest.foo", key: {_id: "hashed"}}),
         "error sharding collection for this configuration",
@@ -184,7 +194,9 @@ export function mixedShardTest(options1, options2, shouldSucceed) {
         assert.commandWorked(st.splitFind("test.col", {_id: 0}));
 
         // Test shards talking to each other
-        r = st.getDB("test").adminCommand({moveChunk: "test.col", find: {_id: 0}, to: st.shard0.shardName});
+        r = st
+            .getDB("test")
+            .adminCommand({moveChunk: "test.col", find: {_id: 0}, to: st.shard0.shardName});
         assert(r.ok, "error moving chunks: " + tojson(r));
 
         db1.col.remove({});
@@ -205,8 +217,11 @@ export function mixedShardTest(options1, options2, shouldSucceed) {
         if (st) {
             if (st.s.fullOptions.clusterAuthMode === "x509") {
                 // Index consistency check during shutdown needs a privileged user to auth as.
-                const x509User = "CN=client,OU=KernelUser,O=MongoDB,L=New York City,ST=New York,C=US";
-                st.s.getDB("$external").createUser({user: x509User, roles: [{role: "__system", db: "admin"}]});
+                const x509User =
+                    "CN=client,OU=KernelUser,O=MongoDB,L=New York City,ST=New York,C=US";
+                st.s
+                    .getDB("$external")
+                    .createUser({user: x509User, roles: [{role: "__system", db: "admin"}]});
             }
 
             st.stop();
@@ -248,7 +263,10 @@ export function isMacOS(minVersion) {
         return true;
     }
 
-    assert(macOS.osProductVersion !== undefined, "Expected getBuildInfo() field 'macOS.osProductVersion' not present");
+    assert(
+        macOS.osProductVersion !== undefined,
+        "Expected getBuildInfo() field 'macOS.osProductVersion' not present",
+    );
     return parseVersion(minVersion) <= parseVersion(macOS.osProductVersion);
 }
 
@@ -404,9 +422,12 @@ export function clientSupportsTLS1_2() {
 }
 
 export function clientSupportsTLS1_3() {
-    // SERVER-98279: support tls 1.3 for windows & apple
-    if (determineSSLProvider() === "apple" || determineSSLProvider() === "windows") {
+    // SERVER-121261: support tls 1.3 for apple
+    if (determineSSLProvider() === "apple") {
         return false;
+    }
+    if (determineSSLProvider() === "windows") {
+        return windowsSupportsTLS13();
     }
     const opensslVersion = opensslVersionAsInt();
     return opensslVersion === undefined ? true : opensslVersion >= 0x1010100; // 1.1.1
@@ -417,8 +438,17 @@ export function runTLSModeTest(conn, mode, clientCert, clientCA, unixDomainSocke
     switch (mode) {
         case "disabled": {
             // Ingress TLS is forbidden on the TCP/IP socket.
-            let exitCode = runMongoProgram("mongo", tcpIpUri, "--eval", "assert.commandWorked(db.hello())");
-            assert.eq(exitCode, 0, `Was not able to connect to ${tcpIpUri} without TLS when TLSMode was ${mode}`);
+            let exitCode = runMongoProgram(
+                "mongo",
+                tcpIpUri,
+                "--eval",
+                "assert.commandWorked(db.hello())",
+            );
+            assert.eq(
+                exitCode,
+                0,
+                `Was not able to connect to ${tcpIpUri} without TLS when TLSMode was ${mode}`,
+            );
             exitCode = runMongoProgram(
                 "mongo",
                 tcpIpUri,
@@ -430,15 +460,28 @@ export function runTLSModeTest(conn, mode, clientCert, clientCA, unixDomainSocke
                 "--eval",
                 "assert.commandWorked(db.hello())",
             );
-            assert.neq(exitCode, 0, `Was able to connect to ${tcpIpUri} with TLS when TLSMode was ${mode}`);
+            assert.neq(
+                exitCode,
+                0,
+                `Was able to connect to ${tcpIpUri} with TLS when TLSMode was ${mode}`,
+            );
 
             break;
         }
         case "allowTLS":
         case "preferTLS": {
             // Both TLS and plaintext are permitted on the TCP/IP socket.
-            let exitCode = runMongoProgram("mongo", tcpIpUri, "--eval", "assert.commandWorked(db.hello())");
-            assert.eq(exitCode, 0, `Was not able to connect to ${tcpIpUri} without TLS when TLSMode was ${mode}`);
+            let exitCode = runMongoProgram(
+                "mongo",
+                tcpIpUri,
+                "--eval",
+                "assert.commandWorked(db.hello())",
+            );
+            assert.eq(
+                exitCode,
+                0,
+                `Was not able to connect to ${tcpIpUri} without TLS when TLSMode was ${mode}`,
+            );
             exitCode = runMongoProgram(
                 "mongo",
                 tcpIpUri,
@@ -450,13 +493,22 @@ export function runTLSModeTest(conn, mode, clientCert, clientCA, unixDomainSocke
                 "--eval",
                 "assert.commandWorked(db.hello())",
             );
-            assert.eq(exitCode, 0, `Could not connect to ${tcpIpUri} with TLS when TLSMode was ${mode}`);
+            assert.eq(
+                exitCode,
+                0,
+                `Could not connect to ${tcpIpUri} with TLS when TLSMode was ${mode}`,
+            );
 
             break;
         }
         case "requireTLS": {
             // Ingress plaintext is forbidden on the TCP/IP socket.
-            let exitCode = runMongoProgram("mongo", tcpIpUri, "--eval", "assert.commandWorked(db.hello())");
+            let exitCode = runMongoProgram(
+                "mongo",
+                tcpIpUri,
+                "--eval",
+                "assert.commandWorked(db.hello())",
+            );
             assert.neq(exitCode, 0, `Was able to connect without TLS when TLSMode was ${mode}`);
             exitCode = runMongoProgram(
                 "mongo",
@@ -483,8 +535,17 @@ export function runTLSModeTest(conn, mode, clientCert, clientCA, unixDomainSocke
     if (!_isWindows()) {
         const unixPort = `${unixDomainSocketPrefix}/mongodb-${conn.port}.sock`;
         const unixDomainUri = `mongodb://${encodeURIComponent(unixPort)}`;
-        let exitCode = runMongoProgram("mongo", unixDomainUri, "--eval", "assert.commandWorked(db.hello())");
-        assert.eq(exitCode, 0, `Was not able to connect to ${unixDomainUri} without TLS when TLSMode was ${mode}`);
+        let exitCode = runMongoProgram(
+            "mongo",
+            unixDomainUri,
+            "--eval",
+            "assert.commandWorked(db.hello())",
+        );
+        assert.eq(
+            exitCode,
+            0,
+            `Was not able to connect to ${unixDomainUri} without TLS when TLSMode was ${mode}`,
+        );
         exitCode = runMongoProgram(
             "mongo",
             unixDomainUri,

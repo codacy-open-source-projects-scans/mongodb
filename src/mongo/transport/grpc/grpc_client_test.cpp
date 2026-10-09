@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/logv2/log.h"
@@ -47,6 +21,7 @@
 #include "mongo/util/uuid.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
@@ -63,6 +38,7 @@ GRPCConnectionStats getClientStats(std::shared_ptr<GRPCClient> client) {
 class GRPCClientTest : public ServiceContextTest {
 public:
     void setUp() override {
+        ServiceContextTest::setUp();
         getServiceContext()->setPeriodicRunner(makePeriodicRunner(getServiceContext()));
         _reactor = std::make_shared<GRPCReactor>();
         _ioThread = stdx::thread([this] {
@@ -77,6 +53,7 @@ public:
     void tearDown() override {
         _reactor->stop();
         _ioThread.join();
+        ServiceContextTest::tearDown();
     }
 
     std::shared_ptr<GRPCClient> makeClient(
@@ -113,7 +90,7 @@ public:
                                       bool differentCAServerCertSucceeds,
                                       bool bothSucceeds) {
         struct CertificateValidationTestCase {
-            StringData description;
+            std::string_view description;
             Server::Options serverOptions;
             bool shouldSucceed;
         };
@@ -250,6 +227,65 @@ TEST_F(GRPCClientTest, GRPCClientConnectWithInvalidCertificate) {
                            .get();
         assertEchoSucceeds(*session);
         ASSERT_OK(session->finish());
+    };
+
+    CommandServiceTestFixtures::runWithServer(
+        CommandServiceTestFixtures::makeEchoHandler(), clientThreadBody, std::move(options));
+}
+
+TEST_F(GRPCClientTest, GRPCClientConnectWithEncryptedCertificate) {
+    auto options = CommandServiceTestFixtures::makeServerOptions();
+
+    auto clientThreadBody = [&](auto& server, auto& monitor) {
+        GRPCClient::Options options;
+        options.tlsCAFile = "jstests/libs/ca.pem";
+        options.tlsCertificateKeyFile = "jstests/libs/client_password_protected.pem";
+        options.tlsCertificatePassword = "qwerty";
+
+        auto client = makeClient(std::move(options));
+        client->start();
+
+        auto session = client
+                           ->connect(server.getListeningAddresses().at(0),
+                                     getReactor(),
+                                     CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                     {})
+                           .get();
+        assertEchoSucceeds(*session);
+        ASSERT_OK(session->finish());
+    };
+
+    CommandServiceTestFixtures::runWithServer(
+        CommandServiceTestFixtures::makeEchoHandler(), clientThreadBody, std::move(options));
+}
+
+TEST_F(GRPCClientTest, GRPCClientConnectWithIncorrectCertificatePasswordShouldFail) {
+    auto options = CommandServiceTestFixtures::makeServerOptions();
+
+    auto clientThreadBody = [&](auto& server, auto& monitor) {
+        GRPCClient::Options options;
+        options.tlsCAFile = "jstests/libs/ca.pem";
+        options.tlsCertificateKeyFile = "jstests/libs/client_password_protected.pem";
+        options.tlsCertificatePassword = "wrong!";
+
+        auto client = makeClient(std::move(options));
+        ASSERT_THROWS_CODE(client->start(), DBException, ErrorCodes::InvalidSSLConfiguration);
+    };
+
+    CommandServiceTestFixtures::runWithServer(
+        CommandServiceTestFixtures::makeEchoHandler(), clientThreadBody, std::move(options));
+}
+
+TEST_F(GRPCClientTest, GRPCClientConnectMissingCertificatePasswordShouldFail) {
+    auto options = CommandServiceTestFixtures::makeServerOptions();
+
+    auto clientThreadBody = [&](auto& server, auto& monitor) {
+        GRPCClient::Options options;
+        options.tlsCAFile = "jstests/libs/ca.pem";
+        options.tlsCertificateKeyFile = "jstests/libs/client_password_protected.pem";
+
+        auto client = makeClient(std::move(options));
+        ASSERT_THROWS_CODE(client->start(), DBException, ErrorCodes::InvalidSSLConfiguration);
     };
 
     CommandServiceTestFixtures::runWithServer(
@@ -558,7 +594,7 @@ TEST_F(GRPCClientTest, GRPCClientMetadata) {
 
 TEST_F(GRPCClientTest, GRPCClientShutdown) {
     const int kNumRpcs = 10;
-    AtomicWord<int> numRpcsRemaining(kNumRpcs);
+    Atomic<int> numRpcsRemaining(kNumRpcs);
     Notification<void> rpcsFinished;
 
     auto serverHandler = [&](std::shared_ptr<IngressSession> session) {

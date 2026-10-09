@@ -4,7 +4,8 @@
  * @tags: [
  *   # The test runs commands that are not allowed with security token: replSetGetStatus.
  *   not_allowed_with_signed_security_token,
- *   multiversion_sanity_check
+ *   multiversion_sanity_check,
+ *   future_git_tag_incompatible
  * ]
  */
 
@@ -19,13 +20,35 @@ if (testingReplication && TestData && TestData.mixedBinVersions) {
         const admin = conn.getDB("admin");
         const serverStatus = admin.serverStatus();
         const actualVersion = serverStatus["version"];
-        const expectedVersion =
-            TestData.mixedBinVersions[i] === "new"
+
+        const nodeAtLatestVersion = TestData.mixedBinVersions[i] === "new";
+
+        jsTest.log.info("Checking node binary version", {
+            actualVersion,
+            multiversionBinVersion: TestData.multiversionBinVersion,
+            mixedBinVersion: TestData.mixedBinVersions[i],
+        });
+
+        if (!nodeAtLatestVersion && TestData.multiversionBinVersion === "last-patch") {
+            // For last-patch we can't compute the exact version: the master branch isn't updated
+            // when a patch release is cut. So we only assert the node is not running the latest
+            // *build*: areBinVersionsTheSame() would conflate a last-patch binary built from a
+            // release candidate (e.g. the DSC release 9.1.0-rc1021) with mainline latest (9.1.0).
+            assert(
+                !MongoRunner.isSameBuild(actualVersion, latestBinVersion),
+                "last-patch node unexpectedly at latest version",
+                {actualVersion, latestBinVersion},
+            );
+        } else {
+            const expectedVersion = nodeAtLatestVersion
                 ? latestBinVersion
                 : MongoRunner.getBinVersionFor(TestData.multiversionBinVersion);
-        print(actualVersion, expectedVersion, MongoRunner.getBinVersionFor(TestData.multiversionBinVersion));
-        print(TestData.multiversionBinVersion);
-        assert(MongoRunner.areBinVersionsTheSame(actualVersion, expectedVersion));
+            assert(
+                MongoRunner.areBinVersionsTheSame(actualVersion, expectedVersion),
+                "node binary version does not match expected version",
+                {actualVersion, expectedVersion},
+            );
+        }
     }
 } else {
     jsTestLog(

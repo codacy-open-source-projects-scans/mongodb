@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -66,23 +39,23 @@ const BSONArray bsonArr2 =
 class SBEObjectArrayConversionTest : public EExpressionTestFixture {
 public:
     void runAndAssertNothing(const vm::CodeFragment* compiledExpr) {
-        auto [runTag, runVal] = runCompiledExpression(compiledExpr);
-        value::ValueGuard guard(runTag, runVal);
-        ASSERT_EQUALS(runTag, sbe::value::TypeTags::Nothing);
-        ASSERT_EQUALS(runVal, 0);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr));
+        ASSERT_EQUALS(result.tag(), sbe::value::TypeTags::Nothing);
+        ASSERT_EQUALS(result.value(), 0);
     }
 
     void runAndAssertExpression(const vm::CodeFragment* compiledExpr,
                                 value::TypeTags expTag,
                                 value::TypeTags equivalentExpTag,
                                 value::Value equivalentExpVal) {
-        auto [runTag, runVal] = runCompiledExpression(compiledExpr);
-        value::ValueGuard guard(runTag, runVal);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr));
 
-        ASSERT_EQ(expTag, runTag);
+        ASSERT_EQ(expTag, result.tag());
 
         auto [compareTag, compareVal] =
-            value::compareValue(equivalentExpTag, equivalentExpVal, runTag, runVal);
+            value::compareValue(equivalentExpTag, equivalentExpVal, result.tag(), result.value());
         ASSERT_EQ(compareTag, value::TypeTags::NumberInt32);
         ASSERT_EQ(value::bitcastTo<int32_t>(compareVal), 0);
     }
@@ -90,8 +63,8 @@ public:
     void runAndAssertErrorCode(const vm::CodeFragment* compiledExpr, int expErrCode) {
         Status status = [&]() {
             try {
-                auto [runTag, runVal] = runCompiledExpression(compiledExpr);
-                value::ValueGuard guard(runTag, runVal);
+                value::TagValueOwned result =
+                    value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr));
                 return Status::OK();
             } catch (AssertionException& ex) {
                 return ex.toStatus();
@@ -107,7 +80,7 @@ public:
 
         for (auto elem : obj) {
             auto [tag, val] = bson::convertToOwned(elem).releaseToRaw();
-            objView->push_back(elem.fieldNameStringData(), tag, val);
+            objView->push_back_raw(elem.fieldNameStringData(), tag, val);
         }
         return {objTag, objVal};
     }
@@ -118,7 +91,7 @@ public:
 
         for (auto elem : arr) {
             auto [tag, val] = bson::convertToOwned(elem).releaseToRaw();
-            arrView->push_back(tag, val);
+            arrView->push_back_raw(tag, val);
         }
         return {arrTag, arrVal};
     }
@@ -133,32 +106,30 @@ TEST_F(SBEObjectArrayConversionTest, ObjectToArrayExpression) {
     auto compiledObjectToArray = compileExpression(*objectToArrayExpr);
 
     // Test on Object input
-    auto [objTag, objVal] = convertFromBSONObj(bsonObj);
-
-    inputAccessor.reset(true, objTag, objVal);
+    auto obj = value::TagValueOwned::fromRaw(convertFromBSONObj(bsonObj));
+    inputAccessor.reset(std::move(obj));
     runAndAssertExpression(compiledObjectToArray.get(),
                            value::TypeTags::Array,
                            value::TypeTags::bsonArray,
                            value::bitcastFrom<const char*>(bsonArr1.objdata()));
 
     // Test similarly on a bsonObject input
-    inputAccessor.reset(
-        false, value::TypeTags::bsonObject, value::bitcastFrom<const char*>(bsonObj.objdata()));
+    inputAccessor.reset(value::TagValueView{value::TypeTags::bsonObject,
+                                            value::bitcastFrom<const char*>(bsonObj.objdata())});
     runAndAssertExpression(compiledObjectToArray.get(),
                            value::TypeTags::Array,
                            value::TypeTags::bsonArray,
                            value::bitcastFrom<const char*>(bsonArr1.objdata()));
 
     // Test with empty object
-    auto [emptyObjTag, emptyObjVal] = value::makeNewObject();
-    inputAccessor.reset(true, emptyObjTag, emptyObjVal);
-    auto [emptyArrTag, emptyArrVal] = value::makeNewArray();
-    value::ValueGuard guard(emptyArrTag, emptyArrVal);
+    auto emptyObj = value::TagValueOwned::fromRaw(value::makeNewObject());
+    inputAccessor.reset(std::move(emptyObj));
+    value::TagValueOwned emptyArr = value::TagValueOwned::fromRaw(value::makeNewArray());
     runAndAssertExpression(
-        compiledObjectToArray.get(), value::TypeTags::Array, emptyArrTag, emptyArrVal);
+        compiledObjectToArray.get(), value::TypeTags::Array, emptyArr.tag(), emptyArr.value());
 
     // Test when input is not object Type
-    inputAccessor.reset(false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(42));
+    inputAccessor.reset(value::TagValueView::numberInt64(42));
     runAndAssertNothing(compiledObjectToArray.get());
 }
 
@@ -171,47 +142,46 @@ TEST_F(SBEObjectArrayConversionTest, ArrayToObjectExpression) {
     auto compiledArrayToObject = compileExpression(*arrayToObjectExpr);
 
     // Test with Array on first variant
-    auto [arr1Tag, arr1Val] = convertFromBSONArray(bsonArr1);
-    inputAccessor.reset(true, arr1Tag, arr1Val);
+    auto arr1 = value::TagValueOwned::fromRaw(convertFromBSONArray(bsonArr1));
+    inputAccessor.reset(std::move(arr1));
     runAndAssertExpression(compiledArrayToObject.get(),
                            value::TypeTags::Object,
                            value::TypeTags::bsonObject,
                            value::bitcastFrom<const char*>(bsonObj.objdata()));
 
     // Test with bsonArray on first variant
-    inputAccessor.reset(
-        false, value::TypeTags::bsonArray, value::bitcastFrom<const char*>(bsonArr1.objdata()));
+    inputAccessor.reset(value::TagValueView{value::TypeTags::bsonArray,
+                                            value::bitcastFrom<const char*>(bsonArr1.objdata())});
     runAndAssertExpression(compiledArrayToObject.get(),
                            value::TypeTags::Object,
                            value::TypeTags::bsonObject,
                            value::bitcastFrom<const char*>(bsonObj.objdata()));
 
     // Test with Array on second variant
-    auto [arr2Tag, arr2Val] = convertFromBSONArray(bsonArr2);
-    inputAccessor.reset(true, arr2Tag, arr2Val);
+    auto arr2 = value::TagValueOwned::fromRaw(convertFromBSONArray(bsonArr2));
+    inputAccessor.reset(std::move(arr2));
     runAndAssertExpression(compiledArrayToObject.get(),
                            value::TypeTags::Object,
                            value::TypeTags::bsonObject,
                            value::bitcastFrom<const char*>(bsonObj.objdata()));
 
     // Test with bsonArray on second variant
-    inputAccessor.reset(
-        false, value::TypeTags::bsonArray, value::bitcastFrom<const char*>(bsonArr2.objdata()));
+    inputAccessor.reset(value::TagValueView{value::TypeTags::bsonArray,
+                                            value::bitcastFrom<const char*>(bsonArr2.objdata())});
     runAndAssertExpression(compiledArrayToObject.get(),
                            value::TypeTags::Object,
                            value::TypeTags::bsonObject,
                            value::bitcastFrom<const char*>(bsonObj.objdata()));
 
     // Test with empty array
-    auto [emptyArrTag, emptyArrVal] = value::makeNewArray();
-    inputAccessor.reset(true, emptyArrTag, emptyArrVal);
-    auto [emptyObjTag, emptyObjVal] = value::makeNewObject();
-    value::ValueGuard guard(emptyObjTag, emptyObjVal);
+    auto emptyArr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    inputAccessor.reset(std::move(emptyArr));
+    value::TagValueOwned emptyObj = value::TagValueOwned::fromRaw(value::makeNewObject());
     runAndAssertExpression(
-        compiledArrayToObject.get(), value::TypeTags::Object, emptyObjTag, emptyObjVal);
+        compiledArrayToObject.get(), value::TypeTags::Object, emptyObj.tag(), emptyObj.value());
 
     // Test when input is not array Type
-    inputAccessor.reset(false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(42));
+    inputAccessor.reset(value::TagValueView::numberInt64(42));
     runAndAssertNothing(compiledArrayToObject.get());
 
     // Test error conditions
@@ -258,9 +228,42 @@ TEST_F(SBEObjectArrayConversionTest, ArrayToObjectExpression) {
     auto errIn = errInputs.begin();
     auto errCode = errCodes.begin();
     for (; errIn != errInputs.end(); errIn++, errCode++) {
-        inputAccessor.reset(
-            false, value::TypeTags::bsonArray, value::bitcastFrom<const char*>(errIn->objdata()));
+        inputAccessor.reset(value::TagValueView{value::TypeTags::bsonArray,
+                                                value::bitcastFrom<const char*>(errIn->objdata())});
         runAndAssertErrorCode(compiledArrayToObject.get(), *errCode);
     }
+}
+
+TEST_F(SBEObjectArrayConversionTest, ArrayToObjectAcceptsReversedKV) {
+    value::OwnedValueAccessor inputAccessor;
+    auto inputSlot = bindAccessor(&inputAccessor);
+
+    auto arrayToObjectExpr =
+        sbe::makeE<sbe::EFunction>(EFn::kArrayToObject, sbe::makeEs(makeE<EVariable>(inputSlot)));
+    auto compiledArrayToObject = compileExpression(*arrayToObjectExpr);
+
+    // [{"v": 1, "k": "field1"}, {"v": {"innerField": 2}, "k": "field2"}]
+    const BSONArray reversedArr =
+        BSON_ARRAY(BSON("v" << 1 << "k" << "field1") << BSON("v" << BSON("innerField" << 2) << "k"
+                                                                 << "field2"));
+
+    inputAccessor.reset_raw(
+        false, value::TypeTags::bsonArray, value::bitcastFrom<const char*>(reversedArr.objdata()));
+    runAndAssertExpression(compiledArrayToObject.get(),
+                           value::TypeTags::Object,
+                           value::TypeTags::bsonObject,
+                           value::bitcastFrom<const char*>(bsonObj.objdata()));
+
+    // Mixed orderings within the same array.
+    const BSONArray mixedArr = BSON_ARRAY(BSON("k" << "field1"
+                                                   << "v" << 1)
+                                          << BSON("v" << BSON("innerField" << 2) << "k"
+                                                      << "field2"));
+    inputAccessor.reset_raw(
+        false, value::TypeTags::bsonArray, value::bitcastFrom<const char*>(mixedArr.objdata()));
+    runAndAssertExpression(compiledArrayToObject.get(),
+                           value::TypeTags::Object,
+                           value::TypeTags::bsonObject,
+                           value::bitcastFrom<const char*>(bsonObj.objdata()));
 }
 }  // namespace mongo::sbe

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Connect to a Mongo database as a database, from C++.
@@ -78,6 +52,7 @@
 #include <cmath>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -88,6 +63,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 // Tracks the number of times DbClientSession detects that the connection has been broken in
 // ensureConnection() and attempts to reconnect.
@@ -167,7 +143,7 @@ StatusWith<bool> completeSpeculativeAuth(DBClientSession* conn,
  */
 executor::RemoteCommandResponse initWireVersion(
     DBClientSession* conn,
-    StringData applicationName,
+    std::string_view applicationName,
     const MongoURI& uri,
     std::vector<std::string>* saslMechsForAuth,
     auth::SpeculativeAuthType* speculativeAuthType,
@@ -188,8 +164,8 @@ executor::RemoteCommandResponse initWireVersion(
     }
 
     *speculativeAuthType = auth::speculateAuth(&bob, uri, saslClientSession);
-    if (!uri.getUser().empty()) {
-        UserName user(uri.getUser(), uri.getAuthenticationDatabase());
+    if (auto& cred = uri.getCredential(); cred && cred->username) {
+        UserName user(*cred->username, uri.getAuthenticationDatabase());
         bob.append("saslSupportedMechs", user.getUnambiguousName());
     }
 
@@ -256,9 +232,19 @@ boost::optional<Milliseconds> clampTimeout(double timeoutInSec) {
 }  // namespace
 
 void DBClientSession::connect(const HostAndPort& serverAddress,
-                              StringData applicationName,
+                              std::string_view applicationName,
                               const boost::optional<TransientSSLParams>& transientSSLParams) {
-    connectNoHello(serverAddress, transientSSLParams);
+
+    // Internal connections must always carry an applicationName so that server-side policies
+    // (e.g. ingress rate limiting) can correctly identify and exempt them.
+    dassert(!WireSpec::getWireSpec(getGlobalServiceContext()).isInternalClient() ||
+                !applicationName.empty(),
+            "Internal connections must specify a non-empty applicationName");
+
+    // Store the applicationName before connecting so it is preserved even if connectNoHello()
+    // throws. This ensures that subsequent reconnect attempts via _reconnectSession() (which
+    // passes _applicationName back to connect()) carry the correct non-empty appName rather
+    // than the empty default.
 
     // NOTE: If the 'applicationName' parameter is a view of the '_applicationName' member, as
     // happens, for instance, in the call to DBClientSession::connect from
@@ -267,6 +253,7 @@ void DBClientSession::connect(const HostAndPort& serverAddress,
     // freed. Do not reference the 'applicationName' parameter after this line. If you need to
     // access the application name, do it through the _applicationName member.
     _applicationName = std::string{applicationName};
+    connectNoHello(serverAddress, transientSSLParams);
 
     auto speculativeAuthType = auth::SpeculativeAuthType::kNone;
     std::shared_ptr<SaslClientSession> saslClientSession;
@@ -275,7 +262,7 @@ void DBClientSession::connect(const HostAndPort& serverAddress,
     if (!swHelloReply.isOK()) {
         _markFailed(kSetFlag);
         swHelloReply.status.addContext(
-            "Connection handshake failed. Is your mongod/mongos 3.4 or older?"_sd);
+            "Connection handshake failed. Is your mongod/mongos 3.4 or older?"sv);
         uassertStatusOK(swHelloReply.status);
     }
 
@@ -467,7 +454,8 @@ uint64_t DBClientSession::getSockCreationMicroSec() const {
     }
 }
 
-Status DBClientSession::appendClientMetadata(StringData applicationName, BSONObjBuilder* bob) {
+Status DBClientSession::appendClientMetadata(std::string_view applicationName,
+                                             BSONObjBuilder* bob) {
     auto versionString = VersionInfoInterface::instance().version();
 
     return ClientMetadata::serialize(
@@ -478,8 +466,10 @@ DBClientSession::DBClientSession(bool autoReconnect,
                                  double soTimeout,
                                  MongoURI uri,
                                  const HandshakeValidationHook& hook,
-                                 const ClientAPIVersionParameters* apiParameters)
+                                 const ClientAPIVersionParameters* apiParameters,
+                                 ConnectionPurpose connectionPurpose)
     : DBClientBase(apiParameters),
+      _connectionPurpose(connectionPurpose),
       _socketTimeout(clampTimeout(soTimeout)),
       _autoReconnect(autoReconnect),
       _hook(hook),
@@ -518,6 +508,8 @@ Message DBClientSession::recv(int lastRequestId) {
     }
 
     killSessionOnError.dismiss();
+    globalNetworkCounter().hitLogicalIn(
+        NetworkCounter::ConnectionType::kEgress, m.dataSize(), getConnectionPurpose());
     return m;
 }
 
@@ -536,7 +528,7 @@ Message DBClientSession::_call(Message& toSend, string* actualServer) {
         OpMsg::appendChecksum(&toSend);
 #endif
     }
-    networkCounter.hitLogicalOut(NetworkCounter::ConnectionType::kEgress, toSend.size());
+    globalNetworkCounter().hitLogicalOut(NetworkCounter::ConnectionType::kEgress, toSend.size());
     auto swm = _compressorManager.compressMessage(toSend);
     uassertStatusOK(swm.getStatus());
 
@@ -568,7 +560,8 @@ Message DBClientSession::_call(Message& toSend, string* actualServer) {
     if (response.operation() == dbCompressed) {
         response = uassertStatusOK(_compressorManager.decompressMessage(response));
     }
-    networkCounter.hitLogicalIn(NetworkCounter::ConnectionType::kEgress, response.size());
+    globalNetworkCounter().hitLogicalIn(
+        NetworkCounter::ConnectionType::kEgress, response.size(), getConnectionPurpose());
 
     killSessionOnError.dismiss();
     return response;

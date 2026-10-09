@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,6 +7,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/db/pipeline/visitors/docs_needed_bounds_gen.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
@@ -46,6 +21,7 @@
 #include "mongo/util/uuid.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -61,14 +37,15 @@ using RemoteExplainVector = std::vector<BSONObj>;
 
 extern FailPoint searchReturnEofImmediately;
 namespace search_helpers {
+using namespace std::literals::string_view_literals;
 
-static constexpr StringData kViewFieldName = "view"_sd;
-static constexpr StringData kProtocolStoredFieldsName = "storedSource"_sd;
+static constexpr std::string_view kViewFieldName = "view"sv;
+static constexpr std::string_view kProtocolStoredFieldsName = "storedSource"sv;
 // The stage name of the extension's executable agg stage. IMPORTANT - if this changes in any of the
 // search extensions, we must change it here or else the metrics will not be reported correctly.
-static constexpr StringData kExtensionVectorSearchStageName = "$_extensionVectorSearch"_sd;
-static constexpr StringData kExtensionSearchStageName = "$_extensionSearch"_sd;
-static constexpr StringData kExtensionSearchMetaStageName = "$_extensionSearchMeta"_sd;
+static constexpr std::string_view kExtensionVectorSearchStageName = "$_extensionVectorSearch"sv;
+static constexpr std::string_view kExtensionSearchStageName = "$_extensionSearch"sv;
+static constexpr std::string_view kExtensionSearchMetaStageName = "$_extensionSearchMeta"sv;
 
 /**
  * Consult mongot to get planning information for sharded search queries, used to configure the
@@ -83,6 +60,25 @@ void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
  * variable.
  */
 bool hasReferenceToSearchMeta(const DocumentSource& ds);
+
+/**
+ * Opts the operation out of per-operation memory tracking, for $search queries that will expose a
+ * second, metadata cursor alongside the results cursor.
+ *
+ * This must be called before any subsequent stage in the pipeline is parsed, because some stages
+ * (e.g. $group) capture their memory tracker in the constructor and cannot be opted out
+ * retroactively.
+ */
+void excludeOperationMemoryTrackingForSecondaryMetadataCursor(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+// TODO: Move this into $_internalDocumentResultsAndMetadata once $search is removed.
+/**
+ * Returns true if the current stage can move past a search source stage to the shard side
+ * during pipeline splitting. Blocks stages that reference $$SEARCH_META or don't preserve
+ * order and metadata.
+ */
+bool canMovePastDuringSplit(const DocumentSource& ds);
 
 /**
  * Check if this is a $search pipeline, specifically that the front of the pipeline is
@@ -101,7 +97,7 @@ bool isSearchMetaPipeline(const Pipeline* pipeline);
  */
 void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
                              const LiteParsedPipeline& liteParsedPipeline,
-                             ResolvedView resolvedView,
+                             const ResolvedNamespace& resolvedView,
                              const NamespaceString& viewName);
 
 /**
@@ -115,7 +111,7 @@ bool isMongotPipeline(const Pipeline* pipeline);
  * stage that will rely on calls to mongot.
  *
  * TODO SERVER-115069 Remove this once search queries are desugared at LiteParsed time and handle
- * the view through a bindViewInfo() override.
+ * the view through a bindResolvedNamespace() override.
  */
 bool isMongotLiteParsedPipeline(const LiteParsedPipeline& lpp);
 
@@ -136,15 +132,17 @@ bool isMongotStage(DocumentSource* stage);
 
 /**
  * Check if this is a $vectorSearch-as-an-extension stage.
- * TODO SERVER-116021 Remove this function when the extension can do this through bindViewInfo().
+ * TODO SERVER-121094 Remove this function when the extension can do this through
+ * bindResolvedNamespace().
  */
-bool isExtensionVectorSearchStage(std::string stageName);
+bool isExtensionVectorSearchStage(std::string_view stageName);
 
 /**
  * Check if this is a $search or $searchMeta extension stage.
- * TODO SERVER-116021 Remove this function when the extension can do this through bindViewInfo().
+ * TODO SERVER-121094 Remove this function when the extension can do this through
+ * bindResolvedNamespace().
  */
-bool isExtensionSearchStage(std::string stageName);
+bool isExtensionSearchStage(std::string_view stageName);
 
 /**
  * Check if the pipeline contains any extension-implemented mongot stage ($vectorSearch,
@@ -160,7 +158,7 @@ bool isExtensionMongotPipeline(const Pipeline* pipeline);
 void throwIfrKickbackIfNecessary(bool kickbackCondition,
                                  const IncrementalRolloutFeatureFlag& flag,
                                  Counter64& metric,
-                                 StringData errorMsg);
+                                 std::string_view errorMsg);
 
 // TODO SERVER-40900 Can remove this when all meta validation is done in run_aggregate.
 bool shouldPreValidateMetaDependencies(const Pipeline* pipeline);
@@ -242,14 +240,21 @@ boost::optional<SearchQueryViewSpec> getViewFromExpCtx(
 
 boost::optional<SearchQueryViewSpec> getViewFromBSONObj(const BSONObj& spec);
 
-void validateViewNotSetByUser(boost::intrusive_ptr<ExpressionContext> expCtx, const BSONObj& spec);
+/**
+ * Asserts that a spec does not contain internal search routing fields (e.g. 'mergingPipeline')
+ * when the request comes from an external (non-internal) client. These fields are set exclusively
+ * by the router during sharded search planning and must never be accepted from user requests.
+ */
+void validateInternalSearchFieldsNotSetByUser(const OperationContext* opCtx, const BSONObj& spec);
 
 /**
- * Validates that search stages on views are only allowed when the respective feature flag
- * is enabled.
+ * Rejects a user-supplied $vectorSearch spec that contains any of the security-trusted,
+ * mongod-owned fields ('vectorSearch', 'collectionUUID', 'viewName'). mongod derives these from
+ * trusted sources (the target collection name, its UUID, and the authorized view name) when
+ * building the command sent to mongot. Letting a client inject one of them would bypass view
+ * authorization or redirect the query to another collection. See SERVER-129618.
  */
-void validateMongotIndexedViewsFF(boost::intrusive_ptr<ExpressionContext> expCtx,
-                                  const std::vector<BSONObj>& effectivePipeline);
+void validateUserSpecDoesNotOverrideTrustedFields(const BSONObj& spec);
 
 /**
  * This function promotes the fields in storedSource to root if applicable, otherwise adds an

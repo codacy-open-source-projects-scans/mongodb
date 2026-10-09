@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/expression_array.h"
 
@@ -33,8 +7,10 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/query/util/make_data_structure.h"
+
+#include <algorithm>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -64,7 +40,7 @@ bool ArrayMatchingMatchExpression::equivalent(const MatchExpression* other) cons
 // -------
 
 ElemMatchObjectMatchExpression::ElemMatchObjectMatchExpression(
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     std::unique_ptr<MatchExpression> sub,
     clonable_ptr<ErrorAnnotation> annotation)
     : ArrayMatchingMatchExpression(ELEM_MATCH_OBJECT, path, std::move(annotation)),
@@ -77,26 +53,24 @@ void ElemMatchObjectMatchExpression::debugString(StringBuilder& debug, int inden
     _sub->debugString(debug, indentationLevel + 1);
 }
 
-void ElemMatchObjectMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                                   const SerializationOptions& opts,
-                                                                   bool includePath) const {
+void ElemMatchObjectMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     BSONObjBuilder elemMatchBob = bob->subobjStart("$elemMatch");
-    SerializationOptions options = opts;
-    _sub->serialize(&elemMatchBob, options, true);
+    _sub->serialize(&elemMatchBob, opts, true);
     elemMatchBob.doneFast();
 }
 
 // -------
 
 ElemMatchValueMatchExpression::ElemMatchValueMatchExpression(
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     std::unique_ptr<MatchExpression> sub,
     clonable_ptr<ErrorAnnotation> annotation)
     : ArrayMatchingMatchExpression(ELEM_MATCH_VALUE, path, std::move(annotation)),
       _subs(makeVector(std::move(sub))) {}
 
 ElemMatchValueMatchExpression::ElemMatchValueMatchExpression(
-    boost::optional<StringData> path, clonable_ptr<ErrorAnnotation> annotation)
+    boost::optional<std::string_view> path, clonable_ptr<ErrorAnnotation> annotation)
     : ArrayMatchingMatchExpression(ELEM_MATCH_VALUE, path, std::move(annotation)) {}
 
 void ElemMatchValueMatchExpression::add(std::unique_ptr<MatchExpression> sub) {
@@ -114,20 +88,38 @@ void ElemMatchValueMatchExpression::debugString(StringBuilder& debug, int indent
     }
 }
 
-void ElemMatchValueMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                                  const SerializationOptions& opts,
-                                                                  bool includePath) const {
+void ElemMatchValueMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     BSONObjBuilder emBob = bob->subobjStart("$elemMatch");
-    SerializationOptions options = opts;
-    for (auto&& child : _subs) {
-        child->serialize(&emBob, options, false);
+    // A body that imposes no condition on the elements matches any element, i.e. it means "this
+    // field is a non-empty array".
+    const bool bodyIsAlwaysTrue = std::all_of(
+        _subs.begin(), _subs.end(), [](const auto& child) { return child->isTriviallyTrue(); });
+    if (bodyIsAlwaysTrue) {
+        // Encode the trivially-true body as {$elemMatch: {$nin: []}}, instead of {$elemMatch:
+        // {}}. {$elemMatch: {$nin: []}} is parsed into ElemMatchValue with exactly the same
+        // semantics, whereas {$elemMatch: {}} is parsed into ElemMatchObject with an empty $and,
+        // which requires each element to be either an object or an array.
+        //
+        // Two other encodings were considered but not used:
+        //   - {$elemMatch: {$alwaysTrue: 1}} is parsed into ElemMatchObject, not the value form.
+        //   - {$elemMatch: {$exists: true}} is parsed into ElemMatchValue, but no optimizer
+        //     rewrite folds the resulting empty-path Exists back into the empty $and body, so
+        //     the re-parsed and re-optimized tree is not structurally equivalent to the original
+        //     shape, even though both match the same documents.
+        BSONArrayBuilder arrBob;
+        opts.appendLiteral(&emBob, "$nin", arrBob.arr());
+    } else {
+        for (auto&& child : _subs) {
+            child->serialize(&emBob, opts, false);
+        }
     }
     emBob.doneFast();
 }
 
 // ---------
 
-SizeMatchExpression::SizeMatchExpression(boost::optional<StringData> path,
+SizeMatchExpression::SizeMatchExpression(boost::optional<std::string_view> path,
                                          int size,
                                          clonable_ptr<ErrorAnnotation> annotation)
     : ArrayMatchingMatchExpression(SIZE, path, std::move(annotation)), _size(size) {}
@@ -139,9 +131,8 @@ void SizeMatchExpression::debugString(StringBuilder& debug, int indentationLevel
     _debugStringAttachTagInfo(&debug);
 }
 
-void SizeMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                        const SerializationOptions& opts,
-                                                        bool includePath) const {
+void SizeMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     opts.appendLiteral(bob, "$size", _size);
 }
 

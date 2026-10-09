@@ -121,7 +121,9 @@ function getFieldPathErrorPipelines(nullStr) {
         {$in: ["foo", [nullStr]]},
     ];
 
-    pipelines = pipelines.concat(nullStrComparisons.map((expr) => [{$match: {$expr: {field: expr}}}]));
+    pipelines = pipelines.concat(
+        nullStrComparisons.map((expr) => [{$match: {$expr: {field: expr}}}]),
+    );
 
     // TODO SERVER-99206: Add testing for all expressions and modify the $listMqlEntities pipeline
     // below to confirm that every expression is covered.
@@ -209,7 +211,9 @@ function getErrorPipelines(nullStr) {
             codes: [16411, 16410],
         },
         {
-            pipeline: [{$geoNear: {near: {type: "Point", coordinates: [0, 0]}, distanceField: nullStr}}],
+            pipeline: [
+                {$geoNear: {near: {type: "Point", coordinates: [0, 0]}, distanceField: nullStr}},
+            ],
             codes: [16411, 16410],
         },
         {
@@ -352,7 +356,9 @@ function getErrorPipelines(nullStr) {
         {pipeline: [{$out: {db: nullStr, coll: "coll"}}], codes: [ErrorCodes.InvalidNamespace]},
         {pipeline: [{$out: {db: "db", coll: nullStr}}], codes: [ErrorCodes.InvalidNamespace]},
         {
-            pipeline: [{$project: {field: {$setField: {field: nullStr, input: {}, value: "newField"}}}}],
+            pipeline: [
+                {$project: {field: {$setField: {field: nullStr, input: {}, value: "newField"}}}},
+            ],
             codes: [9534700, 16411],
         },
         {
@@ -412,7 +418,9 @@ const skips = new Set([
     "$_internalComputeGeoNearDistance",
     "$_internalConvertBucketIndexStats",
     "$_internalDensify",
+    "$_internalDocumentResultsAndMetadata",
     "$_internalFindAndModifyImageLookup",
+    "$_internalHybridSearch",
     "$_internalInhibitOptimization",
     "$_internalListCollections",
     "$_internalJoinHint",
@@ -422,9 +430,12 @@ const skips = new Set([
     "$_internalSetWindowFields",
     "$_internalShardServerInfo",
     "$_internalShredDocuments",
+    "$_internalAssertDataAssumptions",
     "$_internalSplitPipeline",
     "$_internalStreamingGroup",
+    "$_internalStreamTerminator",
     "$_internalUnpackBucket", // Tested in timeseries_explicit_unpack_bucket.js.
+    "$_streamsVectorSearch", // Internal ASP stub; not a user-facing stage.
     "$_unpackBucket", // Tested in timeseries_explicit_unpack_bucket.js.
     "$backupCursor",
     "$backupCursorExtend",
@@ -443,12 +454,16 @@ const skips = new Set([
     "$listExtensions",
     "$listLocalSessions",
     "$listMqlEntities",
+    "$listQueryKnobs",
     "$listSampledQueries", // Tested in list_sampled_queries.js.
     "$listSearchIndexes",
     "$listSessions",
     "$mergeCursors",
     "$planCacheStats",
+    "$joinPlanCacheStats",
     "$querySettings",
+    "$_internalListQuerySettings",
+    "$_internalQuerySettingsDebugShape",
     "$queryStats",
     "$queue",
     "$rankFusion",
@@ -465,6 +480,7 @@ const skips = new Set([
     "$setVariableFromSubPipeline",
     "$shardedDataDistribution",
     "$skip",
+    "$throttle",
     "$tumblingWindow",
     "$validate",
     "$vectorSearch",
@@ -475,9 +491,14 @@ const allPipelines = [
     ...getFieldPathErrorPipelines(""),
     ...getErrorPipelines("").map((obj) => obj.pipeline),
 ];
-const testedStages = new Set(allPipelines.flatMap((pipeline) => pipeline.map((obj) => Object.keys(obj)[0])));
+const testedStages = new Set(
+    allPipelines.flatMap((pipeline) => pipeline.map((obj) => Object.keys(obj)[0])),
+);
 
 // Confirm that every aggregation stage is either tested or explicitly skipped.
 for (const aggStage of aggStages) {
-    assert(testedStages.has(aggStage) || skips.has(aggStage), aggStage + " has not been tested for null bytes.");
+    assert(
+        testedStages.has(aggStage) || skips.has(aggStage),
+        aggStage + " has not been tested for null bytes.",
+    );
 }

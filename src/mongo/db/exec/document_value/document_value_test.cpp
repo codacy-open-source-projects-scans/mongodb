@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -47,12 +20,12 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_util.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/unittest/log_capture.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
@@ -65,12 +38,14 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 Document::FieldPair getNthField(Document doc, size_t index) {
     FieldIterator it(doc);
@@ -122,7 +97,7 @@ TEST(DocumentConstruction, FromNonEmptyBson) {
 }
 
 TEST(DocumentConstruction, FromInitializerList) {
-    auto document = Document{{"a", 1}, {"b", "q"_sd}};
+    auto document = Document{{"a", 1}, {"b", "q"sv}};
     ASSERT_EQUALS(2ULL, document.computeSize());
     ASSERT_EQUALS("a", getNthField(document, 0).first);
     ASSERT_EQUALS(1, getNthField(document, 0).second.getInt());
@@ -147,7 +122,7 @@ TEST(DocumentConstruction, FromEmptyDocumentClone) {
 }
 
 TEST(DocumentConstruction, FromBsonReset) {
-    auto document = Document{{"a", 1}, {"b", "q"_sd}};
+    auto document = Document{{"a", 1}, {"b", "q"sv}};
     auto bson = toBson(document);
 
     MutableDocument md;
@@ -329,7 +304,7 @@ TEST(DocumentGetFieldNonCaching, NonArrayDottedPaths) {
                                                 << "foo"));
     Document document = fromBson(bson);
 
-    auto isFieldCached = [&](StringData field) {
+    auto isFieldCached = [&](std::string_view field) {
         const DocumentStorage* storage = static_cast<const DocumentStorage*>(document.getPtr());
         auto pos = storage->findFieldInCache(field);
         return pos.found();
@@ -495,6 +470,206 @@ TEST(DocumentSize, ApproximateSizeDuringBuildIsUpdated) {
     ASSERT_EQ(beforeFreezeSize, frozenSize);
 }
 
+/**
+ * Returns the comma-separated field names of 'document' in iteration order, without ever
+ * dereferencing a value. For a document whose cache starts out empty, this leaves it empty.
+ */
+std::string fieldNamesNoCaching(const Document& document) {
+    std::string out;
+    for (FieldIterator it(document); it.more(); it.advance()) {
+        if (!out.empty())
+            out += ',';
+        out += it.fieldName();
+    }
+    return out;
+}
+
+/**
+ * Returns the comma-separated field names of 'document' in iteration order, dereferencing every
+ * value and thereby pulling each field into the cache as iteration proceeds.
+ */
+std::string fieldNamesWithCaching(const Document& document) {
+    std::string out;
+    for (FieldIterator it(document); it.more();) {
+        auto field = it.next();
+        if (!out.empty())
+            out += ',';
+        out += field.first;
+    }
+    return out;
+}
+
+TEST(DocumentStorageModifiedFlag, CachingAFieldDoesNotMarkStorageModified) {
+    // 'DocumentStorage::computeSize()' and 'Document::empty()' both take a fast path when the
+    // storage is unmodified, relying on an unmodified storage's cache holding nothing but mirrors
+    // of fields that are still present in the backing BSON. Bringing a field into the cache must
+    // therefore leave the flag alone.
+    Document document = fromBson(BSON("a" << 1 << "sub" << BSON("b" << 2)));
+    ASSERT_FALSE(document.isModified());
+
+    ASSERT_EQUALS(1, document["a"].getInt());
+    ASSERT_FALSE(document.isModified());
+
+    ASSERT_EQUALS(2, document["sub"]["b"].getInt());
+    ASSERT_FALSE(document.isModified());
+
+    document.loadIntoCache();
+    ASSERT_FALSE(document.isModified());
+    ASSERT_EQUALS(2ULL, document.computeSize());
+}
+
+TEST(DocumentStorageModifiedFlag, AddingAFieldMarksStorageModified) {
+    // The other half of the invariant above: an inserted field must mark the storage modified, so
+    // that the fast paths do not miss it. 'appendField()' relies on returning through the non-const
+    // 'getField(Position)' overload to set the flag.
+    MutableDocument md;
+    md.addField("a", Value(1));
+    ASSERT_TRUE(md.peek().isModified());
+
+    MutableDocument fromExisting(fromBson(BSON("a" << 1)));
+    ASSERT_FALSE(fromExisting.peek().isModified());
+    fromExisting.addField("b", Value(2));
+    ASSERT_TRUE(fromExisting.peek().isModified());
+}
+
+TEST(DocumentFieldCount, UnmodifiedDocumentCountsBsonFields) {
+    Document document = fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3));
+    ASSERT_FALSE(document.isModified());
+    ASSERT_EQUALS(3ULL, document.computeSize());
+
+    // Caching a field must not change the count.
+    ASSERT_EQUALS(2, document["b"].getInt());
+    ASSERT_EQUALS(3ULL, document.computeSize());
+}
+
+TEST(DocumentFieldCount, UnmodifiedDocumentDoesNotCountMetadataFields) {
+    Document document = Document::fromBsonWithMetaData(
+        BSON("a" << 1 << Document::metaFieldTextScore << 10.0 << "b" << 2));
+    ASSERT_FALSE(document.isModified());
+    ASSERT_EQUALS(2ULL, document.computeSize());
+    ASSERT_EQUALS(10.0, document.metadata().getTextScore());
+}
+
+TEST(DocumentFieldCount, ModifiedDocumentCountsInsertedAndRemovedFields) {
+    MutableDocument md(fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3)));
+    md.addField("d", Value(4));
+    md.remove("b");
+    Document document = md.freeze();
+
+    ASSERT_TRUE(document.isModified());
+    ASSERT_EQUALS(3ULL, document.computeSize());
+    ASSERT_EQUALS("a,c,d", fieldNamesNoCaching(document));
+}
+
+TEST(DocumentFieldCount, ModifiedDocumentWithMetadataDoesNotCountMetadataFields) {
+    MutableDocument md(Document::fromBsonWithMetaData(
+        BSON("a" << 1 << Document::metaFieldTextScore << 10.0 << "b" << 2)));
+    md.addField("c", Value(3));
+    Document document = md.freeze();
+
+    ASSERT_TRUE(document.isModified());
+    ASSERT_EQUALS(3ULL, document.computeSize());
+    ASSERT_EQUALS("a,b,c", fieldNamesNoCaching(document));
+}
+
+TEST(DocumentIteration, EmptyCacheIterationVisitsAllBsonFields) {
+    Document document = fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3));
+    ASSERT_EQUALS("a,b,c", fieldNamesNoCaching(document));
+
+    // The names above came straight from the backing BSON, so nothing was brought into the cache.
+    ASSERT_FALSE(document.isModified());
+    ASSERT_EQUALS(3ULL, document.computeSize());
+}
+
+TEST(DocumentIteration, CachePopulatedMidIterationStillVisitsAllFields) {
+    Document document = fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3));
+
+    // Dereferencing each value pulls it into the cache, so the cache is empty when the first field
+    // is visited and non-empty for the rest. Iterating again sees a fully populated cache. All
+    // three combinations must agree.
+    ASSERT_EQUALS("a,b,c", fieldNamesWithCaching(document));
+    ASSERT_EQUALS("a,b,c", fieldNamesWithCaching(document));
+    ASSERT_EQUALS("a,b,c", fieldNamesNoCaching(document));
+}
+
+TEST(DocumentIteration, PartiallyPopulatedCacheVisitsAllFields) {
+    Document document = fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3));
+
+    // Cache exactly one field, so the cache is non-empty from the very start of iteration but most
+    // lookups still miss.
+    ASSERT_EQUALS(2, document["b"].getInt());
+    ASSERT_EQUALS("a,b,c", fieldNamesNoCaching(document));
+    ASSERT_EQUALS("a,b,c", fieldNamesWithCaching(document));
+}
+
+TEST(DocumentIteration, SkipsRemovedFields) {
+    MutableDocument md(fromBson(BSON("a" << 1 << "b" << 2 << "c" << 3)));
+    md.remove("b");
+    Document document = md.freeze();
+
+    ASSERT_EQUALS("a,c", fieldNamesNoCaching(document));
+    ASSERT_EQUALS("a,c", fieldNamesWithCaching(document));
+    ASSERT_EQUALS(2ULL, document.computeSize());
+}
+
+TEST(DocumentIteration, SkipsMetadataFields) {
+    Document document = Document::fromBsonWithMetaData(
+        BSON("a" << 1 << Document::metaFieldTextScore << 10.0 << "b" << 2));
+
+    ASSERT_EQUALS("a,b", fieldNamesNoCaching(document));
+    ASSERT_EQUALS("a,b", fieldNamesWithCaching(document));
+}
+
+TEST(DocumentIteration, VisitsInsertedFieldsAfterBsonFields) {
+    MutableDocument md(fromBson(BSON("a" << 1 << "b" << 2)));
+    md.addField("z", Value(3));
+    Document document = md.freeze();
+
+    ASSERT_EQUALS("a,b,z", fieldNamesNoCaching(document));
+    ASSERT_EQUALS("a,b,z", fieldNamesWithCaching(document));
+    ASSERT_EQUALS(3ULL, document.computeSize());
+}
+
+TEST(DocumentEmpty, DefaultConstructedIsEmpty) {
+    ASSERT_TRUE(Document().empty());
+}
+
+TEST(DocumentEmpty, EmptyMutableDocumentIsEmpty) {
+    ASSERT_TRUE(MutableDocument().freeze().empty());
+}
+
+TEST(DocumentEmpty, EmptyBsonIsEmpty) {
+    ASSERT_TRUE(fromBson(BSONObj()).empty());
+}
+
+TEST(DocumentEmpty, NonEmptyBsonIsNotEmpty) {
+    Document document = fromBson(BSON("a" << 1));
+    ASSERT_FALSE(document.empty());
+
+    // Caching the field must not change the answer.
+    ASSERT_EQUALS(1, document["a"].getInt());
+    ASSERT_FALSE(document.empty());
+}
+
+TEST(DocumentEmpty, MetadataOnlyBsonIsEmpty) {
+    // Metadata fields are hidden from iteration, so this document has no user-visible fields even
+    // though its backing BSON is not empty. This is why 'empty()' cannot consult the backing BSON
+    // when the BSON carries metadata.
+    Document document = Document::fromBsonWithMetaData(BSON(Document::metaFieldTextScore << 10.0));
+    ASSERT_TRUE(document.empty());
+    ASSERT_EQUALS(0ULL, document.computeSize());
+    ASSERT_EQUALS(10.0, document.metadata().getTextScore());
+}
+
+TEST(DocumentEmpty, DocumentWithAllFieldsRemovedIsEmpty) {
+    MutableDocument md(fromBson(BSON("a" << 1)));
+    md.remove("a");
+    Document document = md.freeze();
+
+    ASSERT_TRUE(document.empty());
+    ASSERT_EQUALS(0ULL, document.computeSize());
+}
+
 TEST(ShredDocument, OutputHasNoBackingBSON) {
     BSONObj bson =
         BSON("a" << 1 << "subObj" << BSON("a" << 1) << "subArray" << BSON_ARRAY(BSON("a" << 1)));
@@ -513,6 +688,20 @@ TEST(ShredDocument, OutputHasNoBackingBSON) {
     // Accessing a field shouldn't change the size since all fields are already cached.
     shredded["a"];
     ASSERT_EQ(shredded.getCurrentApproximateSize(), shreddedSize);
+
+    // shred() recurses through arrays, so an object reached through 'subArray' is cache-only too.
+    // Measure on the nested document rather than on 'shredded': Document::getApproximateSize()
+    // memoizes into '_snapshottedSize', so a delta taken on the outer document would not observe
+    // a nested cache being populated. getCurrentApproximateSize() recomputes.
+    Document nestedInArray = shredded["subArray"].getArray()[0].getDocument();
+    auto nestedInArraySize = nestedInArray.getCurrentApproximateSize();
+    nestedInArray["a"];
+    ASSERT_EQ(nestedInArray.getCurrentApproximateSize(), nestedInArraySize);
+
+    Document nestedInObject = shredded["subObj"].getDocument();
+    auto nestedInObjectSize = nestedInObject.getCurrentApproximateSize();
+    nestedInObject["a"];
+    ASSERT_EQ(nestedInObject.getCurrentApproximateSize(), nestedInObjectSize);
 }
 
 TEST(ShredDocument, HandlesModifiedDocuments) {
@@ -644,7 +833,7 @@ TEST(DocumentPeek, ValueFromPeekIsNotAffectedByMutableDocumentChanges) {
     // Create a MutableDocument with initial fields
     MutableDocument md;
     md.addField("a", Value(1));
-    md.addField("b", Value("test"_sd));
+    md.addField("b", Value("test"sv));
     md.addField("c", Value(3.14));
 
     // Save Value created from peek()
@@ -652,27 +841,27 @@ TEST(DocumentPeek, ValueFromPeekIsNotAffectedByMutableDocumentChanges) {
 
     // Verify the initial state
     ASSERT_VALUE_EQ(peekedValue.getDocument()["a"], Value(1));
-    ASSERT_VALUE_EQ(peekedValue.getDocument()["b"], Value("test"_sd));
+    ASSERT_VALUE_EQ(peekedValue.getDocument()["b"], Value("test"sv));
     ASSERT_VALUE_EQ(peekedValue.getDocument()["c"], Value(3.14));
     ASSERT_EQUALS(3ULL, peekedValue.getDocument().computeSize());
 
     // Modify the MutableDocument
     md.setField("a", Value(999));
-    md.setField("b", Value("modified"_sd));
-    md.addField("d", Value("new"_sd));
+    md.setField("b", Value("modified"sv));
+    md.addField("d", Value("new"sv));
     md.remove("c");
 
     // Verify the peeked Value is unchanged
     ASSERT_VALUE_EQ(peekedValue.getDocument()["a"], Value(1));
-    ASSERT_VALUE_EQ(peekedValue.getDocument()["b"], Value("test"_sd));
+    ASSERT_VALUE_EQ(peekedValue.getDocument()["b"], Value("test"sv));
     ASSERT_VALUE_EQ(peekedValue.getDocument()["c"], Value(3.14));
     ASSERT_EQUALS(3ULL, peekedValue.getDocument().computeSize());
     ASSERT(peekedValue.getDocument()["d"].missing());
 
     // Verify the MutableDocument itself has changed
     ASSERT_VALUE_EQ(md.peek()["a"], Value(999));
-    ASSERT_VALUE_EQ(md.peek()["b"], Value("modified"_sd));
-    ASSERT_VALUE_EQ(md.peek()["d"], Value("new"_sd));
+    ASSERT_VALUE_EQ(md.peek()["b"], Value("modified"sv));
+    ASSERT_VALUE_EQ(md.peek()["d"], Value("new"sv));
     ASSERT(md.peek()["c"].missing());
     ASSERT_EQUALS(3ULL, md.peek().computeSize());
 
@@ -727,7 +916,7 @@ public:
 
         // Set nested field to the document as an lvalue.
         FieldPath xxyyzz("xx.yy.zz");
-        Value v3("nested"_sd);
+        Value v3("nested"sv);
         md1.setNestedField(xxyyzz, v3);
         ASSERT_VALUE_EQ(md1.peek().getNestedField(xxyyzz), v3);
     }
@@ -763,13 +952,13 @@ public:
         MutableDocument md(original);
 
         // Set the first field.
-        md.setField("a", Value("foo"_sd));
+        md.setField("a", Value("foo"sv));
         ASSERT_EQUALS(3ULL, md.peek().computeSize());
         ASSERT_EQUALS("foo", md.peek()["a"].getString());
         ASSERT_EQUALS("foo", getNthField(md.peek(), 0).second.getString());
         assertRoundTrips(md.peek());
         // Set the second field.
-        md["b"] = Value("bar"_sd);
+        md["b"] = Value("bar"sv);
         ASSERT_EQUALS(3ULL, md.peek().computeSize());
         ASSERT_EQUALS("bar", md.peek()["b"].getString());
         ASSERT_EQUALS("bar", getNthField(md.peek(), 1).second.getString());
@@ -803,20 +992,20 @@ public:
         assertRoundTrips(md.peek());
 
         // Set a nested field using []
-        md["x"]["y"]["z"] = Value("nested"_sd);
-        ASSERT_VALUE_EQ(md.peek()["x"]["y"]["z"], Value("nested"_sd));
+        md["x"]["y"]["z"] = Value("nested"sv);
+        ASSERT_VALUE_EQ(md.peek()["x"]["y"]["z"], Value("nested"sv));
 
         // Set a nested field using setNestedField
         FieldPath xxyyzz("xx.yy.zz");
-        md.setNestedField(xxyyzz, Value("nested"_sd));
-        ASSERT_VALUE_EQ(md.peek().getNestedField(xxyyzz), Value("nested"_sd));
+        md.setNestedField(xxyyzz, Value("nested"sv));
+        ASSERT_VALUE_EQ(md.peek().getNestedField(xxyyzz), Value("nested"sv));
 
         // Set a nested fields through an existing empty document
         md["xxx"] = Value(Document());
         md["xxx"]["yyy"] = Value(Document());
         FieldPath xxxyyyzzz("xxx.yyy.zzz");
-        md.setNestedField(xxxyyyzzz, Value("nested"_sd));
-        ASSERT_VALUE_EQ(md.peek().getNestedField(xxxyyyzzz), Value("nested"_sd));
+        md.setNestedField(xxxyyyzzz, Value("nested"sv));
+        ASSERT_VALUE_EQ(md.peek().getNestedField(xxxyyyzzz), Value("nested"sv));
 
         // Make sure nothing moved
         ASSERT_EQUALS(apos, md.peek().positionOf("a"));
@@ -885,7 +1074,7 @@ public:
 
 
         // Change field in clone and ensure the original document's field is unchanged.
-        cloneOnDemand.setField(StringData("a"), Value(2));
+        cloneOnDemand.setField(std::string_view("a"), Value(2));
         ASSERT_VALUE_EQ(Value(1), document.getNestedField(FieldPath("a.b")));
 
 
@@ -967,8 +1156,8 @@ public:
         append("minkey", MINKEY);
         // EOO not valid in middle of BSONObj
         append("double", 1.0);
-        append("c++", "string\0after NUL"_sd);
-        append("StringData", "string\0after NUL"_sd);
+        append("c++", "string\0after NUL"sv);
+        append("std::string_view", "string\0after NUL"sv);
         append("emptyObj", BSONObj());
         append("filledObj", BSON("a" << 1));
         append("emptyArray", BSON("" << BSONArray()).firstElement());
@@ -987,9 +1176,9 @@ public:
         append("regexEmpty", BSONRegEx("", ""));
         append("dbref", BSONDBRef("foo", OID()));
         append("code", BSONCode("function() {}"));
-        append("codeNul", BSONCode("var nul = '\0'"_sd));
+        append("codeNul", BSONCode("var nul = '\0'"sv));
         append("symbol", BSONSymbol("foo"));
-        append("symbolNul", BSONSymbol("f\0o"_sd));
+        append("symbolNul", BSONSymbol("f\0o"sv));
         append("codeWScope", BSONCodeWScope("asdf", BSONObj()));
         append("codeWScopeWScope", BSONCodeWScope("asdf", BSON("one" << 1)));
         append("int", 1);
@@ -1062,6 +1251,32 @@ TEST(DocumentTest, ToBsonSizeTraits) {
 
 namespace MetaFields {
 using mongo::Document;
+
+TEST(IsMetadataFieldName, AllMetadataFieldsRecognised) {
+    for (auto&& field : Document::kAllMetadataFields) {
+        ASSERT_TRUE(Document::isMetadataFieldName(field)) << field;
+    }
+}
+
+TEST(IsMetadataFieldName, UserFieldsRejected) {
+    // Non-'$' fields must never be considered metadata.
+    for (auto field : {"a"sv, "foo"sv, "sortKey"sv, ""sv}) {
+        ASSERT_FALSE(Document::isMetadataFieldName(field)) << field;
+    }
+}
+
+TEST(IsMetadataFieldName, DollarMissesRejected) {
+    // '$'-prefixed fields that are not in the set must return false.
+    ASSERT_FALSE(Document::isMetadataFieldName("$notAMetadataField"sv));
+    ASSERT_FALSE(Document::isMetadataFieldName("$sortkey"sv));  // wrong case, same length
+    ASSERT_FALSE(Document::isMetadataFieldName("$"sv));         // just a dollar sign
+}
+
+TEST(IsMetadataFieldName, LongerThanLongestMetadataField) {
+    // A '$'-prefixed field longer than any metadata field must be rejected quickly.
+    ASSERT_FALSE(
+        Document::isMetadataFieldName("$thisFieldNameIsDefinitelyLongerThanAnyMetadataField"sv));
+}
 
 TEST(MetaFields, ChangeStreamControlDocument) {
     // Documents should not have the 'control event' flag set.
@@ -1171,7 +1386,7 @@ TEST(MetaFields, SearchHighlightsBasic) {
 
     // Setting the search highlights field should work as expected.
     MutableDocument docBuilder;
-    Value highlights = DOC_ARRAY("a"_sd << "b"_sd);
+    Value highlights = DOC_ARRAY("a"sv << "b"sv);
     docBuilder.metadata().setSearchHighlights(highlights);
     Document doc = docBuilder.freeze();
     ASSERT_TRUE(doc.metadata().hasSearchHighlights());
@@ -1179,8 +1394,8 @@ TEST(MetaFields, SearchHighlightsBasic) {
 
     // Setting the searchHighlights twice should keep the second value.
     MutableDocument docBuilder2;
-    Value otherHighlights = DOC_ARRAY("snippet1"_sd << "snippet2"_sd
-                                                    << "snippet3"_sd);
+    Value otherHighlights = DOC_ARRAY("snippet1"sv << "snippet2"sv
+                                                   << "snippet3"sv);
     docBuilder2.metadata().setSearchHighlights(highlights);
     docBuilder2.metadata().setSearchHighlights(otherHighlights);
     Document doc2 = docBuilder2.freeze();
@@ -1241,8 +1456,6 @@ TEST(MetaFields, FromBsonWithMetadataHandlesEmptyFieldName) {
 }
 
 TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
-    // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     Document source = Document::fromBsonWithMetaData(
         BSON("a" << 1 << "$textScore" << 9.9 << "b" << 1 << "$randVal" << 42.0 << "c" << 1
                  << "$sortKey" << BSON("x" << 1) << "d" << 1 << "$dis" << 3.2 << "e" << 1 << "$pt"
@@ -1263,7 +1476,7 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
     ASSERT_EQ(result.metadata().getGeoNearDistance(), 3.2);
     ASSERT_VALUE_EQ(result.metadata().getGeoNearPoint(), Value{BSON_ARRAY(1 << 2)});
     ASSERT_EQ(result.metadata().getSearchScore(), 5.4);
-    ASSERT_VALUE_EQ(result.metadata().getSearchHighlights(), Value{"foo"_sd});
+    ASSERT_VALUE_EQ(result.metadata().getSearchHighlights(), Value{"foo"sv});
     ASSERT_BSONOBJ_EQ(result.metadata().getIndexKey(), BSON("y" << 1));
     ASSERT_BSONOBJ_EQ(result.metadata().getSearchScoreDetails(), BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(result.metadata().getSearchSortValues(), BSON("a" << 1));
@@ -1274,7 +1487,7 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
 
 TEST(DocumentTest, ValidateToBsonWithMetadataOnlyAllFields) {
     MutableDocument mutableDocument;
-    mutableDocument.addField("field1", Value("value1"_sd));
+    mutableDocument.addField("field1", Value("value1"sv));
     mutableDocument.metadata().setTextScore(5.0);
     mutableDocument.metadata().setSearchScore(3.5);
     mutableDocument.metadata().setRandVal(0.42);
@@ -1292,7 +1505,7 @@ TEST(DocumentTest, ValidateToBsonWithMetadataOnlyAllFields) {
 
 TEST(DocumentTest, ValidateToBsonWithEmptyMetadataOnly) {
     MutableDocument mutableDocument;
-    mutableDocument.addField("field1", Value("value1"_sd));
+    mutableDocument.addField("field1", Value("value1"sv));
 
     Document document = mutableDocument.freeze();
     BSONObj metadataOnly = document.toBsonWithMetaDataOnly();
@@ -1302,7 +1515,7 @@ TEST(DocumentTest, ValidateToBsonWithEmptyMetadataOnly) {
 
 TEST(DocumentTest, ValidateToBsonWithMetadataOnlySerializationSucceeds) {
     MutableDocument mutableDocument;
-    mutableDocument.addField("name", Value("test"_sd));
+    mutableDocument.addField("name", Value("test"sv));
     mutableDocument.addField("count", Value(42));
     mutableDocument.metadata().setTextScore(2.5);
     mutableDocument.metadata().setSearchScore(1.8);
@@ -1336,8 +1549,8 @@ TEST(DocumentTest, ToBsonWithMetaDataStripsUserMetadataNamedFields) {
     // while real textScore metadata (double) should be preserved.
     MutableDocument md;
     md.addField("_id", Value(1));
-    md.addField("$textScore", Value("user_value"_sd));
-    md.addField("regular", Value("kept"_sd));
+    md.addField("$textScore", Value("user_value"sv));
+    md.addField("regular", Value("kept"sv));
     md.metadata().setTextScore(42.0);
 
     Document doc = md.freeze();
@@ -1365,8 +1578,8 @@ TEST(DocumentTest, ToBsonWithMetaDataStripsUserFieldWhenMetadataSetFirst) {
     MutableDocument md;
     md.addField("_id", Value(1));
     md.metadata().setTextScore(42.0);
-    md.addField("regular", Value("kept"_sd));
-    md.addField("$textScore", Value("user_value"_sd));
+    md.addField("regular", Value("kept"sv));
+    md.addField("$textScore", Value("user_value"sv));
 
     Document doc = md.freeze();
     BSONObj bsonWithMeta = doc.toBsonWithMetaData();
@@ -1389,23 +1602,23 @@ TEST(DocumentTest, ToBsonWithMetaDataStripsAllMetadataNamedUserFields) {
     // Verify that all 17 metadata field names are stripped when present as user fields.
     MutableDocument md;
     md.addField("_id", Value(1));
-    md.addField("$textScore", Value("a"_sd));
-    md.addField("$randVal", Value("b"_sd));
-    md.addField("$sortKey", Value("c"_sd));
-    md.addField("$dis", Value("d"_sd));
-    md.addField("$pt", Value("e"_sd));
-    md.addField("$searchScore", Value("f"_sd));
-    md.addField("$searchHighlights", Value("g"_sd));
-    md.addField("$searchSortValues", Value("h"_sd));
-    md.addField("$indexKey", Value("i"_sd));
-    md.addField("$searchScoreDetails", Value("j"_sd));
-    md.addField("$searchRootDocumentId", Value("k"_sd));
-    md.addField("$vectorSearchScore", Value("l"_sd));
-    md.addField("$searchSequenceToken", Value("m"_sd));
-    md.addField("$score", Value("n"_sd));
-    md.addField("$scoreDetails", Value("o"_sd));
-    md.addField("$stream", Value("p"_sd));
-    md.addField("$changeStreamControlEvent", Value("q"_sd));
+    md.addField("$textScore", Value("a"sv));
+    md.addField("$randVal", Value("b"sv));
+    md.addField("$sortKey", Value("c"sv));
+    md.addField("$dis", Value("d"sv));
+    md.addField("$pt", Value("e"sv));
+    md.addField("$searchScore", Value("f"sv));
+    md.addField("$searchHighlights", Value("g"sv));
+    md.addField("$searchSortValues", Value("h"sv));
+    md.addField("$indexKey", Value("i"sv));
+    md.addField("$searchScoreDetails", Value("j"sv));
+    md.addField("$searchRootDocumentId", Value("k"sv));
+    md.addField("$vectorSearchScore", Value("l"sv));
+    md.addField("$searchSequenceToken", Value("m"sv));
+    md.addField("$score", Value("n"sv));
+    md.addField("$scoreDetails", Value("o"sv));
+    md.addField("$stream", Value("p"sv));
+    md.addField("$changeStreamControlEvent", Value("q"sv));
 
     Document doc = md.freeze();
     BSONObj bsonWithMeta = doc.toBsonWithMetaData();
@@ -1422,7 +1635,7 @@ TEST(DocumentTest, ToBsonWithMetaDataLogsWarningWhenStrippingUserField) {
                                                        logv2::LogSeverity::Debug(2)};
     MutableDocument md;
     md.addField("_id", Value(1));
-    md.addField("$sortKey", Value("user_value"_sd));
+    md.addField("$sortKey", Value("user_value"sv));
 
     Document doc = md.freeze();
 
@@ -1439,7 +1652,7 @@ TEST(DocumentTest, ToBsonWithMetaDataRedactsFieldNameWhenRedactionEnabled) {
                                                        logv2::LogSeverity::Debug(2)};
     MutableDocument md;
     md.addField("_id", Value(1));
-    md.addField("$sortKey", Value("user_value"_sd));
+    md.addField("$sortKey", Value("user_value"sv));
 
     Document doc = md.freeze();
 
@@ -1458,7 +1671,7 @@ TEST(DocumentTest, ToBsonWithMetaDataRedactsFieldNameWhenRedactionEnabled) {
 TEST(DocumentTest, ToBsonWithMetaDataDoesNotLogWhenNothingStripped) {
     MutableDocument md;
     md.addField("_id", Value(1));
-    md.addField("regular", Value("kept"_sd));
+    md.addField("regular", Value("kept"sv));
     md.metadata().setTextScore(42.0);
 
     Document doc = md.freeze();
@@ -1566,7 +1779,7 @@ TEST_F(SerializationTest, MetaSerializationNoVals) {
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"sv << "def"sv));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setVectorSearchScore(40.0);
     docBuilder.metadata().setScore(60.0);
@@ -1579,7 +1792,7 @@ TEST_F(SerializationTest, MetaSerializationWithVals) {
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"sv << "def"sv));
     docBuilder.metadata().setIndexKey(BSON("key" << 42));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setVectorSearchScore(40.0);
@@ -1599,13 +1812,11 @@ TEST_F(SerializationTest, MetaSerializationSearchHighlightsNonArray) {
 }
 
 TEST(MetaFields, ToAndFromBson) {
-    // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     MutableDocument docBuilder;
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"sv << "def"sv));
     docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setSearchSortValues(BSON("a" << 42));
     docBuilder.metadata().setVectorSearchScore(40.0);
@@ -1617,7 +1828,7 @@ TEST(MetaFields, ToAndFromBson) {
     ASSERT_EQ(20, obj[Document::metaFieldRandVal].numberLong());
     ASSERT_EQ(30.0, obj[Document::metaFieldSearchScore].Double());
     ASSERT_BSONOBJ_EQ(obj[Document::metaFieldSearchHighlights].embeddedObject(),
-                      BSON_ARRAY("abc"_sd << "def"_sd));
+                      BSON_ARRAY("abc"sv << "def"sv));
     ASSERT_BSONOBJ_EQ(obj[Document::metaFieldSearchScoreDetails].Obj(),
                       BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(BSON("a" << 42), obj[Document::metaFieldSearchSortValues].Obj());
@@ -1637,7 +1848,7 @@ TEST(MetaFields, ToAndFromBson) {
 }
 
 TEST(MetaFields, ToAndFromBsonTrivialConvertibility) {
-    Value sortKey{Document{{"token"_sd, "SOMENCODEDATA"_sd}}};
+    Value sortKey{Document{{"token"sv, "SOMENCODEDATA"sv}}};
     // Create a document with a backing BSONObj and separate metadata.
     auto origObjNoMetadata = BSON("a" << 42);
     ASSERT_FALSE(origObjNoMetadata.hasField(Document::metaFieldSortKey));
@@ -1743,13 +1954,13 @@ TEST(MetaFields, TrivialConvertibilityMetadataModified) {
 
 TEST(MetaFields, MetaFieldsIncludedInDocumentApproximateSize) {
     MutableDocument docBuilder;
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"sv << "def"sv));
     const size_t smallMetadataDocSize = docBuilder.freeze().getApproximateSize();
 
     // The second document has a larger "search highlights" object.
     MutableDocument docBuilder2;
-    docBuilder2.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd
-                                                                  << "ghijklmnop"_sd));
+    docBuilder2.metadata().setSearchHighlights(DOC_ARRAY("abc"sv << "def"sv
+                                                                 << "ghijklmnop"sv));
     Document doc2 = docBuilder2.freeze();
     const size_t bigMetadataDocSize = doc2.getApproximateSize();
     ASSERT_GT(bigMetadataDocSize, smallMetadataDocSize);
@@ -1856,7 +2067,7 @@ public:
 class String {
 public:
     void run() {
-        Value value = Value("foo"_sd);
+        Value value = Value("foo"sv);
         ASSERT_EQUALS("foo", value.getString());
         ASSERT_EQUALS(BSONType::string, value.getType());
         assertRoundTrips(value);
@@ -1940,7 +2151,7 @@ public:
     void run() {
         mongo::MutableDocument md;
         md.addField("a", Value(5));
-        md.addField("apple", Value("rrr"_sd));
+        md.addField("apple", Value("rrr"sv));
         md.addField("banana", Value(-.3));
         mongo::Document document = md.freeze();
 
@@ -1988,7 +2199,7 @@ public:
     void run() {
         std::vector<Value> array;
         array.push_back(Value(5));
-        array.push_back(Value("lala"_sd));
+        array.push_back(Value("lala"sv));
         array.push_back(Value(3.14));
         Value value = Value(array);
         const std::vector<Value>& array2 = value.getArray();
@@ -2064,7 +2275,7 @@ public:
 class DBRef {
 public:
     void run() {
-        Value value(BSONDBRef("FOO"_sd, OID("abcdefabcdefabcdefabcdef")));
+        Value value(BSONDBRef("FOO"sv, OID("abcdefabcdefabcdefabcdef")));
         ASSERT_EQUALS("FOO", value.getDBRef().ns);
         ASSERT_EQUALS(OID("abcdefabcdefabcdefabcdef"), value.getDBRef().oid);
         ASSERT_EQUALS(BSONType::dbRef, value.getType());
@@ -2147,6 +2358,30 @@ public:
     }
 };
 
+// Integer limits.
+const int kIntMax = std::numeric_limits<int>::max();
+const int kIntMin = std::numeric_limits<int>::lowest();
+const long long kIntMaxAsLongLong = kIntMax;
+const long long kIntMinAsLongLong = kIntMin;
+const double kIntMaxAsDouble = kIntMax;
+const double kIntMinAsDouble = kIntMin;
+const Decimal128 kIntMaxAsDecimal = Decimal128(kIntMax);
+const Decimal128 kIntMinAsDecimal = Decimal128(kIntMin);
+
+// 64-bit integer limits.
+const long long kLongLongMax = std::numeric_limits<long long>::max();
+const long long kLongLongMin = std::numeric_limits<long long>::lowest();
+const double kLongLongMaxAsDouble = static_cast<double>(kLongLongMax);
+const double kLongLongMinAsDouble = static_cast<double>(kLongLongMin);
+const Decimal128 kLongLongMaxAsDecimal = Decimal128(static_cast<int64_t>(kLongLongMax));
+const Decimal128 kLongLongMinAsDecimal = Decimal128(static_cast<int64_t>(kLongLongMin));
+
+// Double limits.
+const double kDoubleMax = std::numeric_limits<double>::max();
+const double kDoubleMin = std::numeric_limits<double>::lowest();
+const Decimal128 kDoubleMaxAsDecimal = Decimal128(kDoubleMax);
+const Decimal128 kDoubleMinAsDecimal = Decimal128(kDoubleMin);
+
 namespace Coerce {
 
 class ToBoolBase {
@@ -2218,7 +2453,7 @@ class NonZeroDoubleToBool : public ToBoolTrue {
 /** Coerce "" to bool. */
 class StringToBool : public ToBoolTrue {
     Value value() override {
-        return Value(StringData());
+        return Value(std::string_view());
     }
 };
 
@@ -2309,12 +2544,42 @@ class IntToInt : public ToIntBase {
 };
 
 /** Coerce long to int. */
-class LongToInt : public ToIntBase {
+class LongToIntTooLarge : public ToIntBase {
     Value value() override {
         return Value(0xff00000007LL);
     }
     bool asserts() override {
         return true;
+    }
+};
+
+/** Coerce long to int. */
+class LongToIntMinLong : public ToIntBase {
+    Value value() override {
+        return Value(kLongLongMin);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce long to int. */
+class LongToIntMaxLong : public ToIntBase {
+    Value value() override {
+        return Value(kLongLongMax);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce long to int. */
+class LongToInt : public ToIntBase {
+    Value value() override {
+        return Value(-10LL);
+    }
+    int expected() override {
+        return -10;
     }
 };
 
@@ -2325,6 +2590,136 @@ class DoubleToInt : public ToIntBase {
     }
     int expected() override {
         return 9;
+    }
+};
+
+/** Coerce negative value to int. */
+class DoubleNegativeToInt : public ToIntBase {
+    Value value() override {
+        return Value(-35.992);
+    }
+    int expected() override {
+        return -35;
+    }
+};
+
+/** Coerce min int as double to int. */
+class DoubleMinIntToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMinAsDouble);
+    }
+    int expected() override {
+        return kIntMin;
+    }
+};
+
+/** Coerce max int as double to int. */
+class DoubleMaxIntToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMaxAsDouble);
+    }
+    int expected() override {
+        return kIntMax;
+    }
+};
+
+/** Coerce Decimal128 to int **/
+class Decimal128ToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128("952.1234"));
+    }
+    int expected() override {
+        return 952;
+    }
+};
+
+/** Coerce negative Decimal128 to int **/
+class Decimal128NegativeToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128("-35.992"));
+    }
+    int expected() override {
+        return -36;
+    }
+};
+
+/** Coerce Decimal128 int to int **/
+class Decimal128MinIntToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMinAsDecimal);
+    }
+    int expected() override {
+        return kIntMin;
+    }
+};
+
+/** Coerce Decimal128 int max to int **/
+class Decimal128MaxIntToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMaxAsDecimal);
+    }
+    int expected() override {
+        return kIntMax;
+    }
+};
+
+/** Coerce Decimal128 int min - 1 to int **/
+class Decimal128TooSmallToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMinAsDecimal.subtract(Decimal128(1)));
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 int max + 1 to int **/
+class Decimal128TooLargeToInt : public ToIntBase {
+    Value value() override {
+        return Value(kIntMaxAsDecimal.add(Decimal128(1)));
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 +Inf to int **/
+class Decimal128PositiveInfToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128::kPositiveInfinity);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 -Inf to int **/
+class Decimal128NegativeInfToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128::kNegativeInfinity);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 +NaN to int **/
+class Decimal128PositiveNaNToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128::kPositiveNaN);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 -NaN to int **/
+class Decimal128NegativeNaNToInt : public ToIntBase {
+    Value value() override {
+        return Value(Decimal128::kNegativeNaN);
+    }
+    bool asserts() override {
+        return true;
     }
 };
 
@@ -2352,7 +2747,7 @@ class UndefinedToInt : public ToIntBase {
 class StringToInt {
 public:
     void run() {
-        ASSERT_THROWS(Value(StringData()).coerceToInt(), AssertionException);
+        ASSERT_THROWS(Value(std::string_view()).coerceToInt(), AssertionException);
     }
 };
 
@@ -2446,6 +2841,77 @@ class DoubleToLong : public ToLongBase {
     }
 };
 
+/** Coerce negative value to long. */
+class DoubleNegativeToLong : public ToLongBase {
+    Value value() override {
+        return Value(-35.992);
+    }
+    long long expected() override {
+        return -35;
+    }
+};
+
+/** Coerce long min double to long. */
+class DoubleMinLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMinAsDouble);
+    }
+    long long expected() override {
+        return kLongLongMin;
+    }
+};
+
+/** Coerce smallest safe long as double to long. */
+class DoubleSmallestSafeLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(static_cast<double>(BSONElement::kSmallestSafeLongLongAsDouble));
+    }
+    long long expected() override {
+        return BSONElement::kSmallestSafeLongLongAsDouble;
+    }
+};
+
+/** Coerce largest safe long as double to long. */
+class DoubleLargestSafeLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(static_cast<double>(BSONElement::kLargestSafeLongLongAsDouble));
+    }
+    long long expected() override {
+        return BSONElement::kLargestSafeLongLongAsDouble;
+    }
+};
+
+/** Coerce large double value to long. */
+class DoubleLargeWithPrecisionLossToLong : public ToLongBase {
+    Value value() override {
+        // Large number that can be safely represented as a double.
+        return Value(9223372036854772736.0);
+    }
+    long long expected() override {
+        return 9223372036854772736LL;
+    }
+};
+
+/** Coerce largest long + 1 as double to long. */
+class DoubleLongMaxPlusOneToLong : public ToLongBase {
+    Value value() override {
+        return Value(BSONElement::kLongLongMaxPlusOneAsDouble);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce long max double to long. */
+class DoubleMaxLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMaxAsDouble);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
 /** Coerce infinity to long. */
 class InfToLong : public ToLongBase {
     Value value() override {
@@ -2497,6 +2963,106 @@ class TowardsInfinityToLong : public ToLongBase {
     }
 };
 
+/** Coerce Decimal128 to long **/
+class Decimal128ToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128("952.1234"));
+    }
+    long long expected() override {
+        return 952;
+    }
+};
+
+/** Coerce negative Decimal128 to long **/
+class Decimal128NegativeToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128("-35.992"));
+    }
+    long long expected() override {
+        return -36;
+    }
+};
+
+/** Coerce Decimal128 long min to long **/
+class Decimal128MinLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMinAsDecimal);
+    }
+    long long expected() override {
+        return kLongLongMin;
+    }
+};
+
+/** Coerce Decimal128 long max to long **/
+class Decimal128MaxLongToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMaxAsDecimal);
+    }
+    long long expected() override {
+        return kLongLongMax;
+    }
+};
+
+/** Coerce Decimal128 long min - 1 to long **/
+class Decimal128TooSmallToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMinAsDecimal.subtract(Decimal128(1)));
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 long long max + 1 to long **/
+class Decimal128TooLargeToLong : public ToLongBase {
+    Value value() override {
+        return Value(kLongLongMaxAsDecimal.add(Decimal128(1)));
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 +Inf to long **/
+class Decimal128PositiveInfToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128::kPositiveInfinity);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 -Inf to long **/
+class Decimal128NegativeInfToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128::kNegativeInfinity);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 +NaN to long **/
+class Decimal128PositiveNaNToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128::kPositiveNaN);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
+/** Coerce Decimal128 -NaN to long **/
+class Decimal128NegativeNaNToLong : public ToLongBase {
+    Value value() override {
+        return Value(Decimal128::kNegativeNaN);
+    }
+    bool asserts() override {
+        return true;
+    }
+};
+
 /** Coerce null to long. */
 class NullToLong : public ToLongBase {
     Value value() override {
@@ -2521,7 +3087,7 @@ class UndefinedToLong : public ToLongBase {
 class StringToLong {
 public:
     void run() {
-        ASSERT_THROWS(Value(StringData()).coerceToLong(), AssertionException);
+        ASSERT_THROWS(Value(std::string_view()).coerceToLong(), AssertionException);
     }
 };
 
@@ -2600,7 +3166,7 @@ class UndefinedToDouble : public ToDoubleBase {
 class StringToDouble {
 public:
     void run() {
-        ASSERT_THROWS(Value(StringData()).coerceToDouble(), AssertionException);
+        ASSERT_THROWS(Value(std::string_view()).coerceToDouble(), AssertionException);
     }
 };
 
@@ -2643,7 +3209,7 @@ class TimestampToDate : public ToDateBase {
 class StringToDate {
 public:
     void run() {
-        ASSERT_THROWS(Value(StringData()).coerceToDate(), AssertionException);
+        ASSERT_THROWS(Value(std::string_view()).coerceToDate(), AssertionException);
     }
 };
 
@@ -2694,7 +3260,7 @@ class LongToString : public ToStringBase {
 /** Coerce string to string. */
 class StringToString : public ToStringBase {
     Value value() override {
-        return Value("fO_o"_sd);
+        return Value("fO_o"sv);
     }
     std::string expected() override {
         return "fO_o";
@@ -2807,7 +3373,7 @@ public:
         BSONObjBuilder bob;
         Value(4.4).addToBsonObj(&bob, "a");
         Value(22).addToBsonObj(&bob, "b");
-        Value("astring"_sd).addToBsonObj(&bob, "c");
+        Value("astring"sv).addToBsonObj(&bob, "c");
         ASSERT_BSONOBJ_EQ(BSON("a" << 4.4 << "b" << 22 << "c"
                                    << "astring"),
                           bob.obj());
@@ -2821,7 +3387,7 @@ public:
         BSONArrayBuilder bab;
         Value(4.4).addToBsonArray(&bab);
         Value(22).addToBsonArray(&bab);
-        Value("astring"_sd).addToBsonArray(&bab);
+        Value("astring"sv).addToBsonArray(&bab);
         ASSERT_BSONOBJ_EQ(BSON_ARRAY(4.4 << 22 << "astring"), bab.arr());
     }
 };
@@ -2921,9 +3487,9 @@ public:
         assertComparison(-1, Value(BSONNULL), Value(1));
         assertComparison(0, Value(1), Value(1LL));
         assertComparison(0, Value(1), Value(1.0));
-        assertComparison(-1, Value(1), Value("string"_sd));
-        assertComparison(0, Value("string"_sd), Value(BSONSymbol("string")));
-        assertComparison(-1, Value("string"_sd), Value(mongo::Document()));
+        assertComparison(-1, Value(1), Value("string"sv));
+        assertComparison(0, Value("string"sv), Value(BSONSymbol("string")));
+        assertComparison(-1, Value("string"sv), Value(mongo::Document()));
         assertComparison(-1, Value(mongo::Document()), Value(std::vector<Value>()));
         assertComparison(-1, Value(std::vector<Value>()), Value(BSONBinData("", 0, MD5Type)));
         assertComparison(-1, Value(BSONBinData("", 0, MD5Type)), Value(mongo::OID()));
@@ -3045,30 +3611,6 @@ public:
     }
 };
 
-// Integer limits.
-const int kIntMax = std::numeric_limits<int>::max();
-const int kIntMin = std::numeric_limits<int>::lowest();
-const long long kIntMaxAsLongLong = kIntMax;
-const long long kIntMinAsLongLong = kIntMin;
-const double kIntMaxAsDouble = kIntMax;
-const double kIntMinAsDouble = kIntMin;
-const Decimal128 kIntMaxAsDecimal = Decimal128(kIntMax);
-const Decimal128 kIntMinAsDecimal = Decimal128(kIntMin);
-
-// 64-bit integer limits.
-const long long kLongLongMax = std::numeric_limits<long long>::max();
-const long long kLongLongMin = std::numeric_limits<long long>::lowest();
-const double kLongLongMaxAsDouble = static_cast<double>(kLongLongMax);
-const double kLongLongMinAsDouble = static_cast<double>(kLongLongMin);
-const Decimal128 kLongLongMaxAsDecimal = Decimal128(static_cast<int64_t>(kLongLongMax));
-const Decimal128 kLongLongMinAsDecimal = Decimal128(static_cast<int64_t>(kLongLongMin));
-
-// Double limits.
-const double kDoubleMax = std::numeric_limits<double>::max();
-const double kDoubleMin = std::numeric_limits<double>::lowest();
-const Decimal128 kDoubleMaxAsDecimal = Decimal128(kDoubleMin);
-const Decimal128 kDoubleMinAsDecimal = Decimal128(kDoubleMin);
-
 TEST(ValueIntegral, CorrectlyIdentifiesValidIntegralValues) {
     ASSERT_TRUE(Value(kIntMax).integral());
     ASSERT_TRUE(Value(kIntMin).integral());
@@ -3175,8 +3717,13 @@ public:
         add<Value::Coerce::NullToBool>();
         add<Value::Coerce::UndefinedToBool>();
         add<Value::Coerce::IntToInt>();
-        add<Value::Coerce::LongToInt>();
+        add<Value::Coerce::LongToIntTooLarge>();
+        add<Value::Coerce::LongToIntMinLong>();
+        add<Value::Coerce::LongToIntMaxLong>();
         add<Value::Coerce::DoubleToInt>();
+        add<Value::Coerce::DoubleNegativeToInt>();
+        add<Value::Coerce::DoubleMinIntToInt>();
+        add<Value::Coerce::DoubleMaxIntToInt>();
         add<Value::Coerce::NullToInt>();
         add<Value::Coerce::UndefinedToInt>();
         add<Value::Coerce::StringToInt>();
@@ -3187,6 +3734,23 @@ public:
         add<Value::Coerce::IntToLong>();
         add<Value::Coerce::LongToLong>();
         add<Value::Coerce::DoubleToLong>();
+        add<Value::Coerce::DoubleNegativeToLong>();
+        add<Value::Coerce::DoubleMinLongToLong>();
+        add<Value::Coerce::DoubleMaxLongToLong>();
+        add<Value::Coerce::DoubleSmallestSafeLongToLong>();
+        add<Value::Coerce::DoubleLargestSafeLongToLong>();
+        add<Value::Coerce::DoubleLargeWithPrecisionLossToLong>();
+        add<Value::Coerce::DoubleLongMaxPlusOneToLong>();
+        add<Value::Coerce::Decimal128ToInt>();
+        add<Value::Coerce::Decimal128NegativeToInt>();
+        add<Value::Coerce::Decimal128MinIntToInt>();
+        add<Value::Coerce::Decimal128MaxIntToInt>();
+        add<Value::Coerce::Decimal128TooSmallToInt>();
+        add<Value::Coerce::Decimal128TooLargeToInt>();
+        add<Value::Coerce::Decimal128PositiveInfToInt>();
+        add<Value::Coerce::Decimal128NegativeInfToInt>();
+        add<Value::Coerce::Decimal128PositiveNaNToInt>();
+        add<Value::Coerce::Decimal128NegativeNaNToInt>();
         add<Value::Coerce::NullToLong>();
         add<Value::Coerce::UndefinedToLong>();
         add<Value::Coerce::StringToLong>();
@@ -3195,6 +3759,16 @@ public:
         add<Value::Coerce::InvalidLargeToLong>();
         add<Value::Coerce::LowestDoubleToLong>();
         add<Value::Coerce::TowardsInfinityToLong>();
+        add<Value::Coerce::Decimal128ToLong>();
+        add<Value::Coerce::Decimal128NegativeToLong>();
+        add<Value::Coerce::Decimal128MinLongToLong>();
+        add<Value::Coerce::Decimal128MaxLongToLong>();
+        add<Value::Coerce::Decimal128TooSmallToLong>();
+        add<Value::Coerce::Decimal128TooLargeToLong>();
+        add<Value::Coerce::Decimal128PositiveInfToLong>();
+        add<Value::Coerce::Decimal128NegativeInfToLong>();
+        add<Value::Coerce::Decimal128PositiveNaNToLong>();
+        add<Value::Coerce::Decimal128NegativeNaNToLong>();
         add<Value::Coerce::IntToDouble>();
         add<Value::Coerce::LongToDouble>();
         add<Value::Coerce::DoubleToDouble>();

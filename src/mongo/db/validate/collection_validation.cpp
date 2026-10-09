@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/validate/collection_validation.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/read_preference.h"
@@ -44,7 +17,12 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
+#include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
@@ -61,9 +39,10 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/viewless_timeseries_collection_creation_helpers.h"
 #include "mongo/db/validate/validate_adaptor.h"
+#include "mongo/db/validate/validate_gen.h"
 #include "mongo/db/validate/validate_state.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
@@ -75,6 +54,7 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -96,13 +76,14 @@ using logv2::LogComponent;
 using std::string;
 
 MONGO_FAIL_POINT_DEFINE(pauseCollectionValidationWithLock);
+MONGO_FAIL_POINT_DEFINE(throwBeforeIndexValidation);
 
-namespace CollectionValidation {
+namespace collection_validation {
 
 namespace {
 
 // Indicates whether the failpoint turned on by testing has been reached.
-AtomicWord<bool> _validationIsPausedForTest{false};
+Atomic<bool> _validationIsPausedForTest{false};
 
 /**
  * Validates the internal structure of each index in the Index Catalog 'indexCatalog', ensuring that
@@ -111,11 +92,11 @@ AtomicWord<bool> _validationIsPausedForTest{false};
  * May close or invalidate open cursors.
  */
 void _validateIndexesInternalStructure(OperationContext* opCtx,
-                                       ValidateState* validateState,
-                                       ValidateResults* results) {
+                                       ValidateState& validateState,
+                                       ValidateResults& results) {
     // Need to use the IndexCatalog here because the 'validateState->indexes' object hasn't been
     // constructed yet. It must be initialized to ensure we're validating all indexes.
-    const IndexCatalog* indexCatalog = validateState->getCollection()->getIndexCatalog();
+    const IndexCatalog* indexCatalog = validateState.getCollection()->getIndexCatalog();
     const auto it = indexCatalog->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
 
     // Validate Indexes Internal Structure, checking if index files have been compromised or
@@ -131,12 +112,12 @@ void _validateIndexesInternalStructure(OperationContext* opCtx,
                                 {LogComponent::kIndex},
                                 "Validating internal structure",
                                 "index"_attr = descriptor->indexName(),
-                                logAttrs(validateState->nss()));
+                                logAttrs(validateState.nss()));
 
         auto indexResults =
-            iam->validate(opCtx, *shard_role_details::getRecoveryUnit(opCtx), *validateState);
+            iam->validate(opCtx, *shard_role_details::getRecoveryUnit(opCtx), validateState);
 
-        results->getIndexValidateResult(descriptor->indexName()) = std::move(indexResults);
+        results.getIndexValidateResult(descriptor->indexName()) = std::move(indexResults);
     }
 }
 
@@ -147,55 +128,38 @@ void _validateIndexesInternalStructure(OperationContext* opCtx,
  * count saved in 'numIndexKeysPerIndex'.
  */
 void _validateIndexes(OperationContext* opCtx,
-                      ValidateState* validateState,
-                      ValidateAdaptor* indexValidator,
-                      ValidateResults* results) {
+                      ValidateState& validateState,
+                      ValidateAdaptor& indexValidator,
+                      ValidateResults& results) {
     // Validate Indexes, checking for mismatch between index entries and collection records.
-    for (const auto& indexIdent : validateState->getIndexIdents()) {
+    for (const auto& indexIdent : validateState.getIndexIdents()) {
         opCtx->checkForInterrupt();
+
+        const auto* indexEntry =
+            validateState.getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
+        invariant(indexEntry, "getIndexIdents returned an ident that was not found");
 
         // Make a copy of the index name. The `traverseIndex()` function below will yield
         // periodically, so it's unsafe to hold a pointer to the index here.
-        const std::string indexName = validateState->getCollection()
-                                          ->getIndexCatalog()
-                                          ->findIndexByIdent(opCtx, indexIdent)
-                                          ->descriptor()
-                                          ->indexName();
-
-        const IndexType indexType = validateState->getCollection()
-                                        ->getIndexCatalog()
-                                        ->findIndexByIdent(opCtx, indexIdent)
-                                        ->descriptor()
-                                        ->getIndexType();
+        const std::string indexName = indexEntry->descriptor()->indexName();
+        const IndexType indexType = indexEntry->descriptor()->getIndexType();
 
         LOGV2_PROD_ONLY_OPTIONS(20296,
                                 {LogComponent::kIndex},
                                 "Validating index consistency",
                                 "indexName"_attr = indexName,
                                 "indexType"_attr = indexType,
-                                logAttrs(validateState->nss()));
+                                logAttrs(validateState.nss()));
 
-        int64_t numTraversedKeys;
-        indexValidator->traverseIndex(
-            opCtx,
-            validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent),
-            &numTraversedKeys,
-            results);
+        const int64_t numTraversedKeys = indexValidator.traverseIndex(opCtx, *indexEntry, results);
 
-        auto& curIndexResults = results->getIndexValidateResult(indexName);
+        auto& curIndexResults = results.getIndexValidateResult(indexName);
         curIndexResults.addKeysTraversed(numTraversedKeys);
 
-        BSONObj infoObj = validateState->getCollection()
-                              ->getIndexCatalog()
-                              ->findIndexByIdent(opCtx, indexIdent)
-                              ->descriptor()
-                              ->infoObj();
+        const BSONObj infoObj = indexEntry->descriptor()->infoObj();
         curIndexResults.setSpec(std::move(infoObj));
 
-        const bool isMultiKey = validateState->getCollection()
-                                    ->getIndexCatalog()
-                                    ->findIndexByIdent(opCtx, indexIdent)
-                                    ->isMultikey(opCtx, validateState->getCollection());
+        const bool isMultiKey = indexEntry->isMultikey(opCtx, validateState.getCollection());
         curIndexResults.setIsMultikey(isMultiKey);
     }
 }
@@ -205,11 +169,11 @@ void _validateIndexes(OperationContext* opCtx,
  * any index inconsistencies are found during the first phase of validation.
  */
 void _gatherIndexEntryErrors(OperationContext* opCtx,
-                             ValidateState* validateState,
-                             ValidateAdaptor* indexValidator,
-                             ValidateResults* result) {
-    indexValidator->setSecondPhase();
-    if (!indexValidator->limitMemoryUsageForSecondPhase(result)) {
+                             ValidateState& validateState,
+                             ValidateAdaptor& indexValidator,
+                             ValidateResults& results) {
+    indexValidator.setSecondPhase();
+    if (!indexValidator.limitMemoryUsageForSecondPhase(results)) {
         return;
     }
 
@@ -222,9 +186,9 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
         ValidateResults tempValidateResults;
         // Second phase doesn't report errors, but needs to know which indexes are structurally
         // sound enough to validate
-        tempValidateResults.getIndexResultsMap() = result->getIndexResultsMap();
-        indexValidator->traverseRecordStore(
-            opCtx, &tempValidateResults, validateState->validationVersion());
+        tempValidateResults.getIndexResultsMap() = results.getIndexResultsMap();
+        indexValidator.traverseRecordStore(
+            opCtx, tempValidateResults, validateState.validationVersion(), boost::none);
     }
 
     LOGV2_OPTIONS(
@@ -233,14 +197,15 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
 
     // Iterate through all the indexes in the collection and only record the index entry keys that
     // had inconsistencies during the first phase.
-    for (const auto& indexIdent : validateState->getIndexIdents()) {
+    for (const auto& indexIdent : validateState.getIndexIdents()) {
         opCtx->checkForInterrupt();
 
         const auto indexEntry =
-            validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
+            validateState.getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
+        invariant(indexEntry, "getIndexIdents returned an ident that was not found");
 
         const auto& indexValidateResult =
-            result->getIndexValidateResult(indexEntry->descriptor()->indexName());
+            results.getIndexValidateResult(indexEntry->descriptor()->indexName());
         if (!indexValidateResult.continueValidation()) {
             LOGV2(7697700,
                   "Skipping validation of index due to existing errors",
@@ -253,54 +218,54 @@ void _gatherIndexEntryErrors(OperationContext* opCtx,
                       "Traversing through the index entries",
                       "index"_attr = indexEntry->descriptor()->indexName());
 
-        indexValidator->traverseIndex(opCtx,
-                                      indexEntry,
-                                      /*numTraversedKeys=*/nullptr,
-                                      result);
+        indexValidator.traverseIndex(opCtx, *indexEntry, results);
     }
 
-    if (result->getNumRemovedExtraIndexEntries() > 0) {
-        result->addWarning(str::stream() << "Removed " << result->getNumRemovedExtraIndexEntries()
+    if (results.getNumRemovedExtraIndexEntries() > 0) {
+        results.addWarning(str::stream() << "Removed " << results.getNumRemovedExtraIndexEntries()
                                          << " extra index entries.");
     }
 
-    if (validateState->fixErrors()) {
-        indexValidator->repairIndexEntries(opCtx, result);
+    if (validateState.fixErrors()) {
+        indexValidator.repairIndexEntries(opCtx, results);
     }
 
     LOGV2_OPTIONS(20301, {LogComponent::kIndex}, "Finished traversing through all the indexes");
 
-    indexValidator->addIndexEntryErrors(opCtx, result);
+    indexValidator.addIndexEntryErrors(opCtx, results);
 }
 
 void _validateIndexKeyCount(OperationContext* opCtx,
-                            ValidateState* validateState,
-                            ValidateAdaptor* indexValidator,
-                            ValidateResultsMap* indexNsResultsMap) {
-    for (const auto& indexIdent : validateState->getIndexIdents()) {
-        const auto indexEntry =
-            validateState->getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
-        auto& curIndexResults = (*indexNsResultsMap)[indexEntry->descriptor()->indexName()];
+                            ValidateState& validateState,
+                            ValidateAdaptor& indexValidator,
+                            ValidateResultsMap& indexNsResultsMap) {
+    for (const auto& indexIdent : validateState.getIndexIdents()) {
+        const auto* indexEntry =
+            validateState.getCollection()->getIndexCatalog()->findIndexByIdent(opCtx, indexIdent);
+        invariant(indexEntry, "getIndexIdents returned an ident that was not found");
 
+        auto& curIndexResults = indexNsResultsMap[indexEntry->descriptor()->indexName()];
         if (curIndexResults.continueValidation()) {
-            indexValidator->validateIndexKeyCount(opCtx, indexEntry, curIndexResults);
+            indexValidator.validateIndexKeyCount(opCtx, *indexEntry, curIndexResults);
         }
     }
 }
 
-void _logInvalidIndices(OperationContext* opCtx,
-                        ValidateState* validateState,
-                        ValidateResults* results) {
-    if (validateState->isFullIndexValidation()) {
+void _logInvalidIndexes(OperationContext* opCtx,
+                        ValidateState& validateState,
+                        ValidateResults& results) {
+    if (validateState.isFullIndexValidation()) {
         invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
-            validateState->nss(), MODE_X));
+            validateState.nss(), MODE_X));
     }
-    for (auto& [indexName, ivr] : results->getIndexResultsMap()) {
+    for (auto& [indexName, ivr] : results.getIndexResultsMap()) {
         if (!ivr.isValid()) {
-            const auto entry = validateState->getCollection()->getIndexCatalog()->findIndexByName(
-                opCtx, indexName);
-            auto indexSpec = entry->descriptor()->infoObj();
-            LOGV2_ERROR(7463100, "Index failed validation", "spec"_attr = indexSpec);
+            const auto entry =
+                validateState.getCollection()->getIndexCatalog()->findIndexByName(opCtx, indexName);
+            if (entry) {
+                auto indexSpec = entry->descriptor()->infoObj();
+                LOGV2_ERROR(7463100, "Index failed validation", "spec"_attr = indexSpec);
+            }
         }
     }
 }
@@ -308,15 +273,15 @@ void _logInvalidIndices(OperationContext* opCtx,
 /**
  * Logs oplog entries related to corrupted records/indexes in validation results.
  */
-void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults* results) {
-    if (results->getRecordTimestamps().empty()) {
+void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults& results) {
+    if (results.getRecordTimestamps().empty()) {
         return;
     }
 
     LOGV2(
         7464200,
         "Validation failed: oplog timestamps referenced by corrupted collection and index entries",
-        "numTimestamps"_attr = results->getRecordTimestamps().size());
+        "numTimestamps"_attr = results.getRecordTimestamps().size());
 
     // Set up read on oplog collection.
     try {
@@ -324,8 +289,8 @@ void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults*
         const auto& oplogCollection = oplogRead.getCollection();
 
         if (!oplogCollection) {
-            for (auto it = results->getRecordTimestamps().rbegin();
-                 it != results->getRecordTimestamps().rend();
+            for (auto it = results.getRecordTimestamps().rbegin();
+                 it != results.getRecordTimestamps().rend();
                  it++) {
                 const auto& timestamp = *it;
                 LOGV2(8080900,
@@ -351,8 +316,8 @@ void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults*
                 "Validation failed: Unable to get cursor to oplog collection.",
                 cursor);
 
-        for (auto it = results->getRecordTimestamps().rbegin();
-             it != results->getRecordTimestamps().rend();
+        for (auto it = results.getRecordTimestamps().rbegin();
+             it != results.getRecordTimestamps().rend();
              it++) {
             const auto& timestamp = *it;
 
@@ -382,30 +347,30 @@ void _logOplogEntriesForInvalidResults(OperationContext* opCtx, ValidateResults*
 }
 
 void _reportInvalidResults(OperationContext* opCtx,
-                           ValidateState* validateState,
-                           ValidateResults* results) {
-    _logInvalidIndices(opCtx, validateState, results);
+                           ValidateState& validateState,
+                           ValidateResults& results) {
+    _logInvalidIndexes(opCtx, validateState, results);
     _logOplogEntriesForInvalidResults(opCtx, results);
     LOGV2_OPTIONS(20302,
                   {LogComponent::kIndex},
                   "Validation complete -- Corruption found",
-                  logAttrs(validateState->nss()),
-                  logAttrs(validateState->uuid()));
+                  logAttrs(validateState.nss()),
+                  logAttrs(validateState.uuid()));
 }
 
 template <typename T>
-void addErrorIfUnequal(T stored, T cached, StringData name, ValidateResults* results) {
+void addErrorIfUnequal(T stored, T cached, std::string_view name, ValidateResults& results) {
     if (stored != cached) {
-        results->addError(str::stream()
-                          << "stored value for " << name
-                          << " does not match cached value: " << stored << " != " << cached);
+        results.addError(str::stream()
+                         << "stored value for " << name
+                         << " does not match cached value: " << stored << " != " << cached);
     }
 }
 
 void addErrorIfUnequal(boost::optional<ValidationLevelEnum> stored,
                        boost::optional<ValidationLevelEnum> cached,
-                       StringData name,
-                       ValidateResults* results) {
+                       std::string_view name,
+                       ValidateResults& results) {
     addErrorIfUnequal(idl::serialize(validationLevelOrDefault(stored)),
                       idl::serialize(validationLevelOrDefault(cached)),
                       name,
@@ -414,8 +379,8 @@ void addErrorIfUnequal(boost::optional<ValidationLevelEnum> stored,
 
 void addErrorIfUnequal(boost::optional<ValidationActionEnum> stored,
                        boost::optional<ValidationActionEnum> cached,
-                       StringData name,
-                       ValidateResults* results) {
+                       std::string_view name,
+                       ValidateResults& results) {
     addErrorIfUnequal(idl::serialize(validationActionOrDefault(stored)),
                       idl::serialize(validationActionOrDefault(cached)),
                       name,
@@ -424,13 +389,13 @@ void addErrorIfUnequal(boost::optional<ValidationActionEnum> stored,
 
 void _validateCatalogEntry(OperationContext* opCtx,
                            ValidateState* validateState,
-                           ValidateResults* results) {
+                           ValidateResults& results) {
     const auto& collection = validateState->getCollection();
     const auto& options = collection->getCollectionOptions();
     if (options.uuid) {
         addErrorIfUnequal(*(options.uuid), validateState->uuid(), "UUID", results);
     } else {
-        results->addError("UUID missing on collection.");
+        results.addError("UUID missing on collection.");
     }
     const CollatorInterface* collation = collection->getDefaultCollator();
     addErrorIfUnequal(options.collation.isEmpty(), !collation, "simple collation", results);
@@ -444,10 +409,10 @@ void _validateCatalogEntry(OperationContext* opCtx,
     BSONObj validatorDoc = collection->getValidatorDoc();
     if (collection->isNewTimeseriesWithoutView()) {
         if (!options.validator.isEmpty()) {
-            results->addError(str::stream()
-                              << "Viewless time-series collection had a schema validator set in "
-                                 "its metadata for collection "
-                              << validateState->nss().toStringForErrorMsg());
+            results.addError(str::stream()
+                             << "Viewless time-series collection had a schema validator set in "
+                                "its metadata for collection "
+                             << validateState->nss().toStringForErrorMsg());
         }
         auto validator = timeseries::generateTimeseriesValidator(
             timeseries::kTimeseriesControlLatestVersion,
@@ -469,8 +434,25 @@ void _validateCatalogEntry(OperationContext* opCtx,
     addErrorIfUnequal(options.isView(), false, "is a view", results);
     auto status = options.validateForStorage();
     if (!status.isOK()) {
-        results->addError(str::stream()
-                          << "collection options are not valid for storage: " << options.toBSON());
+        results.addError(str::stream()
+                         << "collection options are not valid for storage: " << options.toBSON());
+    }
+
+    // A clustered collection's implicit index is not an IndexCatalog entry, so the loop over the
+    // index catalog below never sees it and cannot validate its name. Check the validity of its
+    // name here.
+    if (const auto& clusteredIndex = options.clusteredIndex) {
+        if (const auto& clusteredIndexName = clusteredIndex->getIndexSpec().getName()) {
+            Status nameStatus = index_key_validate::validateIndexName(*clusteredIndexName);
+            if (!nameStatus.isOK()) {
+                results.addError(
+                    fmt::format("The clustered index name is not valid: {}. To remediate, migrate "
+                                "the data and drop the collection since clustered indexes cannot "
+                                "be independently dropped.",
+                                nameStatus.reason()),
+                    /*stopValidation=*/false);
+            }
+        }
     }
 
     const auto& indexCatalog = collection->getIndexCatalog();
@@ -484,7 +466,7 @@ void _validateCatalogEntry(OperationContext* opCtx,
             index_key_validate::validateIndexSpec(opCtx, indexEntry->descriptor()->infoObj())
                 .getStatus();
         if (!status.isOK()) {
-            results->addWarning(
+            results.addWarning(
                 fmt::format("The index specification for index '{}' contains invalid fields. {}. "
                             "Run the 'collMod' command on the collection without any arguments "
                             "to fix the invalid index options",
@@ -506,7 +488,7 @@ void _validateCatalogEntry(OperationContext* opCtx,
         // paths. If any of the paths are multikey, then the entire index should also be marked
         // multikey.
         if (hasMultiKeyPaths && !isMultikey) {
-            results->addError(
+            results.addError(
                 fmt::format("The 'multikey' field for index {} was false with non-empty "
                             "'multikeyPaths': {}",
                             indexName,
@@ -519,7 +501,7 @@ boost::optional<std::string> getConfigOverrideOrThrow(const BSONElement& raw) {
     if (!raw) {
         return boost::none;
     }
-    StringData chosenConfig = raw.valueStringDataSafe();
+    std::string_view chosenConfig = raw.valueStringDataSafe();
     // Only a specific subset of valid configurations are allowlisted here. This is mostly to avoid
     // having complex logic to parse/sanitize the user-chosen configuration string.
     static const char* allowed[] = {
@@ -535,6 +517,123 @@ boost::optional<std::string> getConfigOverrideOrThrow(const BSONElement& raw) {
             str::stream() << "Unrecognized configuration string " << chosenConfig,
             std::find(allowed, allowedEnd, chosenConfig) != allowedEnd);
     return {raw.str()};
+}
+
+
+struct ExpectedCollectionHash {
+    ValidateResults::HashComparison comparison;
+    // Set only when 'comparison' is kComparable, i.e. a value was actually derived.
+    boost::optional<int64_t> hash;
+};
+
+/**
+ * Returns the collection validation hash the replicated size and count system implies for 'uuid'
+ * right now: the hash it last persisted, brought forward by replaying the oplog from the point
+ * that hash is valid as of. The returned status says why no value could be derived, so callers can
+ * tell a skipped comparison apart from a successful one.
+ */
+ExpectedCollectionHash _expectedCollectionHash(OperationContext* opCtx,
+                                               const NamespaceString& nss,
+                                               const UUID& uuid) {
+    if (!isReplicatedFastCountEnabled(opCtx) || !isReplicatedFastCountEligible(nss)) {
+        return {ValidateResults::HashComparison::kNotTracked, boost::none};
+    }
+
+    auto& manager =
+        replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext());
+
+    const auto entry = manager.findPersisted(opCtx, uuid);
+    if (!entry) {
+        return {ValidateResults::HashComparison::kNoPersistedEntry, boost::none};
+    }
+    if (!entry->first.hash) {
+        return {ValidateResults::HashComparison::kNoPersistedHash, boost::none};
+    }
+
+    // Seek from the store's global valid-as-of rather than the entry's own. Every persisted entry
+    // is valid as of that point.
+    const auto globalValidAsOf = manager.findPersistedTimestampStoreTs(opCtx);
+    const Timestamp seekAfterTimestamp = globalValidAsOf.value_or(entry->second);
+
+    // Oplog truncation is held back to the persisted valid-as-of, so the range the persisted hash
+    // does not cover is always still present.
+    const auto scanResult = [&]() -> replicated_fast_count::OplogScanResult {
+        AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+        const auto& oplogColl = oplogRead.getCollection();
+        massert(13397001, "oplog collection not found", oplogColl);
+
+        auto oplogCursor = oplogColl->getRecordStore()->getCursor(
+            opCtx, *shard_role_details::getRecoveryUnit(opCtx));
+        return replicated_fast_count::aggregateReplicatedMetadataDeltasInOplog(
+            *oplogCursor, seekAfterTimestamp, oplogColl->uuid(), /*isCheckpoint=*/false);
+    }();
+
+    // A collection with no entries in the replayed range contributes the XOR identity.
+    const auto it = scanResult.deltas.find(uuid);
+    const boost::optional<int64_t> delta =
+        it == scanResult.deltas.end() ? boost::make_optional(int64_t{0}) : it->second.metadata.hash;
+
+    const auto expected = combineValidationHashes(entry->first.hash, delta);
+    if (!expected) {
+        return {ValidateResults::HashComparison::kIncompleteDelta, boost::none};
+    }
+    return {ValidateResults::HashComparison::kComparable, expected};
+}
+
+/**
+ * Compares the collection hash this validation accumulated against the replicated metadata
+ * system's view of it, recording the outcome on 'results'.
+ */
+void _compareCollectionHash(OperationContext* opCtx,
+                            const ValidateState& validateState,
+                            ValidateResults& results) try {
+    auto [comparison, expected] =
+        _expectedCollectionHash(opCtx, validateState.nss(), validateState.uuid());
+    if (!expected) {
+        results.setHashComparison(comparison);
+        return;
+    }
+
+    const auto accumulated = results.getXxh3CollectionHash();
+    invariant(accumulated.has_value());
+    if (!results.recordHashComparison(*accumulated, *expected)) {
+        LOGV2_WARNING(13397000,
+                      "Collection hash does not match the replicated collection validation hash",
+                      logAttrs(validateState.nss()),
+                      logAttrs(validateState.uuid()),
+                      "expectedHash"_attr = *expected,
+                      "accumulatedHash"_attr = *accumulated,
+                      "hashDiff"_attr = static_cast<int64_t>(*accumulated) ^ *expected);
+    }
+} catch (const DBException& e) {
+    if (!opCtx->checkForInterruptNoAssert().isOK() || e.code() == ErrorCodes::Interrupted) {
+        throw;
+    }
+    LOGV2_WARNING(13397002,
+                  "Could not compare the collection hash against the replicated metadata hash",
+                  logAttrs(validateState.nss()),
+                  logAttrs(validateState.uuid()),
+                  "error"_attr = e.toString());
+    results.setHashComparison(ValidateResults::HashComparison::kComparisonFailed);
+}
+
+void _validateFastCountState(OperationContext* opCtx,
+                             ValidateState& validateState,
+                             FastCountType detectedType,
+                             ValidateResults& results) {
+    const FastCountType expectedType = validateState.getExpectedFastCountType(opCtx);
+    if (detectedType != expectedType) {
+        LOGV2_ERROR(ErrorCodes::InvalidOptions,
+                    "Detected fast count store type does not match expected type",
+                    "detectedType"_attr = toString(detectedType),
+                    "expected"_attr = toString(expectedType));
+        results.addError(
+            fmt::format("Detected fast count store type '{}' does not match expected type "
+                        "'{}'",
+                        toString(detectedType),
+                        toString(expectedType)),
+            /*stopValidation=*/false);
+    }
 }
 
 }  // namespace
@@ -584,10 +683,25 @@ void validateHashes(const std::vector<std::string>& hashPrefixes, bool equalLeng
     }
 }
 
+boost::optional<int64_t> getTargetRecordsPerRecordStoreSlice() {
+    if (!gFeatureFlagParallelCollectionValidation.isEnabled()) {
+        return boost::none;
+    }
+    return gValidateParallelTargetRecordsPerSlice.load();
+}
+
+int64_t getMaxRecordStoreSlices() {
+    if (!gFeatureFlagParallelCollectionValidation.isEnabled()) {
+        return 1;
+    }
+    return gValidateParallelMaxRecordStoreSlices.load();
+}
+
 ValidationOptions parseValidateOptions(OperationContext* opCtx,
                                        NamespaceString nss,
                                        const BSONObj& cmdObj,
-                                       bool skipAtClusterTime) {
+                                       bool skipAtClusterTime,
+                                       bool enableSizeStats) {
     const bool background = cmdObj["background"].trueValue();
     const bool logDiagnostics = cmdObj["logDiagnostics"].trueValue();
 
@@ -691,6 +805,12 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
     // collHash parameter.
     const bool collHash = cmdObj["collHash"].trueValue();
 
+    // Size stats accumulate and log a size summary during a collHash validation. This is
+    // enabled only by the offline startup '--validate' path (fleet validation), never by the
+    // 'validate' command, so customers never see the extra log lines. It is meaningful only for
+    // collHash validation, whose full scan drives the size-summary accumulation.
+    const bool sizeStats = enableSizeStats && collHash;
+
     // hashPrefixes parameter.
     const auto rawHashPrefixes = cmdObj["hashPrefixes"];
     boost::optional<std::vector<std::string>> hashPrefixes = boost::none;
@@ -699,7 +819,7 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
         for (const auto& e : rawHashPrefixes.Array()) {
             hashPrefixes->push_back(boost::algorithm::to_upper_copy(e.String()));
         }
-        CollectionValidation::validateHashes(*hashPrefixes, /*equalLength=*/true);
+        collection_validation::validateHashes(*hashPrefixes, /*equalLength=*/true);
         if (!hashPrefixes->size()) {
             hashPrefixes->push_back(std::string(""));
         }
@@ -748,7 +868,7 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
         for (const auto& e : rawRevealHashedIdsArr) {
             revealHashedIds->push_back(boost::algorithm::to_upper_copy(e.String()));
         }
-        CollectionValidation::validateHashes(*revealHashedIds, /*equalLength=*/false);
+        collection_validation::validateHashes(*revealHashedIds, /*equalLength=*/false);
     }
 
     boost::optional<Timestamp> timestamp = boost::none;
@@ -787,64 +907,64 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
     const bool enforceFastCountAndSize = enforceFastCount && enforceFastSize;
     const auto validateMode = [&] {
         if (metadata) {
-            return CollectionValidation::ValidateMode::kMetadata;
+            return collection_validation::ValidateMode::kMetadata;
         }
         if (hashPrefixes) {
-            return CollectionValidation::ValidateMode::kHashDrillDown;
+            return collection_validation::ValidateMode::kHashDrillDown;
         }
         if (collHash) {
-            return CollectionValidation::ValidateMode::kCollectionHash;
+            return collection_validation::ValidateMode::kCollectionHash;
         }
         if (background) {
-            return checkBSONConformance ? CollectionValidation::ValidateMode::kBackgroundCheckBSON
-                                        : CollectionValidation::ValidateMode::kBackground;
+            return checkBSONConformance ? collection_validation::ValidateMode::kBackgroundCheckBSON
+                                        : collection_validation::ValidateMode::kBackground;
         }
         if (enforceFastCountAndSize) {
-            return CollectionValidation::ValidateMode::kForegroundFullEnforceFastCountAndSize;
+            return collection_validation::ValidateMode::kForegroundFullEnforceFastCountAndSize;
         }
         if (enforceFastCount) {
-            return CollectionValidation::ValidateMode::kForegroundFullEnforceFastCount;
+            return collection_validation::ValidateMode::kForegroundFullEnforceFastCount;
         }
         if (enforceFastSize) {
-            return CollectionValidation::ValidateMode::kForegroundFullEnforceFastSize;
+            return collection_validation::ValidateMode::kForegroundFullEnforceFastSize;
         }
         if (fullValidate) {
             return checkBSONConformance
-                ? CollectionValidation::ValidateMode::kForegroundFullCheckBSON
-                : CollectionValidation::ValidateMode::kForegroundFull;
+                ? collection_validation::ValidateMode::kForegroundFullCheckBSON
+                : collection_validation::ValidateMode::kForegroundFull;
         }
         if (checkBSONConformance) {
-            return CollectionValidation::ValidateMode::kForegroundCheckBSON;
+            return collection_validation::ValidateMode::kForegroundCheckBSON;
         }
-        return CollectionValidation::ValidateMode::kForeground;
+        return collection_validation::ValidateMode::kForeground;
     }();
 
     const auto repairMode = [&] {
         if (opCtx->readOnly()) {
             // On read-only mode we can't make any adjustments.
-            return CollectionValidation::RepairMode::kNone;
+            return collection_validation::RepairMode::kNone;
         }
         switch (validateMode) {
-            case CollectionValidation::ValidateMode::kForeground:
-            case CollectionValidation::ValidateMode::kCollectionHash:
-            case CollectionValidation::ValidateMode::kHashDrillDown:
-            case CollectionValidation::ValidateMode::kForegroundCheckBSON:
-            case CollectionValidation::ValidateMode::kForegroundFull:
-            case CollectionValidation::ValidateMode::kForegroundFullIndexOnly:
+            case collection_validation::ValidateMode::kForeground:
+            case collection_validation::ValidateMode::kCollectionHash:
+            case collection_validation::ValidateMode::kHashDrillDown:
+            case collection_validation::ValidateMode::kForegroundCheckBSON:
+            case collection_validation::ValidateMode::kForegroundFull:
+            case collection_validation::ValidateMode::kForegroundFullIndexOnly:
                 // Foreground validation may not repair data while running as a replica set node
                 // because we do not have timestamps that are required to perform writes.
                 if (replCoord->getSettings().isReplSet()) {
-                    return CollectionValidation::RepairMode::kNone;
+                    return collection_validation::RepairMode::kNone;
                 }
                 if (repair) {
-                    return CollectionValidation::RepairMode::kFixErrors;
+                    return collection_validation::RepairMode::kFixErrors;
                 }
                 if (fixMultikey) {
-                    return CollectionValidation::RepairMode::kAdjustMultikey;
+                    return collection_validation::RepairMode::kAdjustMultikey;
                 }
-                return CollectionValidation::RepairMode::kNone;
+                return collection_validation::RepairMode::kNone;
             default:
-                return CollectionValidation::RepairMode::kNone;
+                return collection_validation::RepairMode::kNone;
         }
     }();
 
@@ -861,13 +981,15 @@ ValidationOptions parseValidateOptions(OperationContext* opCtx,
             getConfigOverrideOrThrow(rawConfigOverride),
             timestamp,
             hashPrefixes,
-            revealHashedIds};
+            revealHashedIds,
+            getTargetRecordsPerRecordStoreSlice(),
+            sizeStats};
 }
 
 Status validate(OperationContext* opCtx,
                 const NamespaceString& nss,
                 ValidationOptions options,
-                ValidateResults* results) {
+                ValidateResults& results) {
     invariant(!shard_role_details::getLocker(opCtx)->isLocked() || storageGlobalParams.repair ||
               storageGlobalParams.validate);
 
@@ -875,13 +997,51 @@ Status validate(OperationContext* opCtx,
     // Repair mode cannot use ignore-prepare because it needs to be able to do writes, and there is
     // no danger of deadlock for this mode anyway since it is only used at startup (or in standalone
     // mode where prepared transactions are prohibited.)
-    auto oldPrepareConflictBehavior =
-        shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior();
-    ON_BLOCK_EXIT([&] {
-        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
-        shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
-            oldPrepareConflictBehavior);
-    });
+    class SnapshotGuard {
+    public:
+        explicit SnapshotGuard(OperationContext* opCtx)
+            : _opCtx(opCtx),
+              _prepareConflictBehavior(
+                  shard_role_details::getRecoveryUnit(opCtx)->getPrepareConflictBehavior()) {
+            auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+            _readSource = ru.getTimestampReadSource();
+            _readTimestamp = _readSource == RecoveryUnit::ReadSource::kProvided
+                ? ru.getPointInTimeReadTimestamp()
+                : boost::none;
+        }
+        ~SnapshotGuard() {
+            auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
+            ru.abandonSnapshot();
+            if (ru.getTimestampReadSource() != _readSource) {
+                ru.setTimestampReadSource(_readSource, _readTimestamp);
+            }
+            ru.setPrepareConflictBehavior(_prepareConflictBehavior);
+        }
+
+        PrepareConflictBehavior getPrepareConflictBehavior() const {
+            return _prepareConflictBehavior;
+        }
+
+    private:
+        OperationContext* _opCtx;
+        PrepareConflictBehavior _prepareConflictBehavior;
+        RecoveryUnit::ReadSource _readSource;
+        boost::optional<Timestamp> _readTimestamp;
+    };
+
+    SnapshotGuard snapshotGuard(opCtx);
+
+    // Before acquiring locks in the ValidateState constructor, ensure this node has applied up to
+    // the requested read timestamp (e.g. atClusterTime). This mirrors the atClusterTime handling in
+    // applyReadConcern(). Without this wait, a secondary could open a read transaction at a
+    // timestamp greater than its appliedOpTime, potentially triggering an invariant.
+    if (auto readTimestamp = options.getReadTimestamp()) {
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        if (replCoord->getSettings().isReplSet()) {
+            uassertStatusOK(replCoord->waitUntilOpTimeForRead(
+                opCtx, repl::ReadConcernArgs::snapshot(*readTimestamp)));
+        }
+    }
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
     // constructor fail the cmd, as opposed to returning OK with valid:false.
@@ -897,11 +1057,11 @@ Status validate(OperationContext* opCtx,
             oldDataCorruptionMode);
     });
 
-    results->setRepairMode(validateState.getRepairMode());
+    results.setRepairMode(validateState.getRepairMode());
 
     if (validateState.fixErrors()) {
         // Note: cannot set PrepareConflictBehavior here, since the validate command with repair
-        // needs kIngnoreConflictsAllowWrites, but validate repair at startup cannot set that here
+        // needs kIgnoreConflictsAllowWrites, but validate repair at startup cannot set that here
         // due to an already active WriteUnitOfWork.  The prepare conflict behavior for validate
         // command with repair is set in the command code prior to this point.
         invariant(!validateState.isBackground());
@@ -912,7 +1072,7 @@ Status validate(OperationContext* opCtx,
             PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
     } else {
         // isBackground().
-        invariant(oldPrepareConflictBehavior == PrepareConflictBehavior::kEnforce);
+        invariant(snapshotGuard.getPrepareConflictBehavior() == PrepareConflictBehavior::kEnforce);
     }
 
     if (!opCtx->getServiceContext()->getStorageEngine()->isEphemeral()) {
@@ -928,14 +1088,22 @@ Status validate(OperationContext* opCtx,
     uassertStatusOK(replCoord->checkCanServeReadsFor(
         opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
-    results->setNamespaceString(validateState.nss());
-    results->setUUID(validateState.uuid());
-    results->setReadTimestamp(validateState.getReadTimestamp());
+    results.setNamespaceString(validateState.nss());
+    results.setUUID(validateState.uuid());
+    results.setReadTimestamp(validateState.getReadTimestamp());
 
     try {
         invariant(!validateState.isFullIndexValidation() ||
                   shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(
                       validateState.nss(), MODE_X));
+
+        // Report the interpreted options before starting validation.
+        LOGV2_OPTIONS(20303,
+                      {LogComponent::kIndex},
+                      "validating collection",
+                      logAttrs(validateState.nss()),
+                      logAttrs(validateState.uuid()),
+                      "options"_attr = validateState.toBSON());
 
         if (validateState.isHashDrillDown()) {
             validateState.initializeCursors(opCtx);
@@ -947,31 +1115,29 @@ Status validate(OperationContext* opCtx,
         // Record store validation code is executed before we open cursors because it may close
         // and/or invalidate all open cursors.
         validateState.getCollection()->getRecordStore()->validate(
-            *shard_role_details::getRecoveryUnit(opCtx), validateState, results);
+            *shard_role_details::getRecoveryUnit(opCtx), validateState, &results);
 
         // For full index validation, we validate the internal structure of each index and save
         // the number of keys in the index to compare against _validateIndexes()'s count results.
-        _validateIndexesInternalStructure(opCtx, &validateState, results);
+        _validateIndexesInternalStructure(opCtx, validateState, results);
 
-        if (!results->isValid()) {
-            _reportInvalidResults(opCtx, &validateState, results);
+        if (!results.isValid()) {
+            _reportInvalidResults(opCtx, validateState, results);
             return Status::OK();
         }
 
         const FastCountType fastCountType = validateState.getDetectedFastCountType(opCtx);
-        results->setFastCountType({fastCountType});
+        results.setFastCountType({fastCountType});
 
-        const bool shouldEnforceFastCountOrSize =
-            validateState.enforceFastCountRequested() || validateState.enforceFastSizeRequested();
-        if (shouldEnforceFastCountOrSize && fastCountType == FastCountType::neither) {
-            LOGV2_ERROR(ErrorCodes::InvalidOptions, "Neither FastCount table found");
-            results->addError("Neither FastCount table found", false);
+        if (validateState.shouldEnforceFastCount(opCtx, fastCountType) ||
+            validateState.shouldEnforceFastSize(opCtx, fastCountType)) {
+            _validateFastCountState(opCtx, validateState, fastCountType, results);
         }
 
         _validateCatalogEntry(opCtx, &validateState, results);
 
         if (validateState.isMetadataValidation()) {
-            if (results->isValid()) {
+            if (results.isValid()) {
                 LOGV2(5980500,
                       "Validation of metadata complete for collection. No problems detected",
                       logAttrs(validateState.nss()),
@@ -987,13 +1153,6 @@ Status validate(OperationContext* opCtx,
 
         validateState.initializeCursors(opCtx);
 
-        // Validate the record store.
-        LOGV2_OPTIONS(20303,
-                      {LogComponent::kIndex},
-                      "validating collection",
-                      logAttrs(validateState.nss()),
-                      logAttrs(validateState.uuid()));
-
         ValidateAdaptor indexValidator(opCtx, &validateState);
 
         // In traverseRecordStore(), the index validator keeps track the records in the record
@@ -1001,10 +1160,27 @@ Status validate(OperationContext* opCtx,
         // the collection. For clustered collections, the validator also verifies that the
         // record key (RecordId) matches the cluster key field in the record value (document's
         // cluster key).
-        indexValidator.traverseRecordStore(opCtx, results, validateState.validationVersion());
+
+        indexValidator.traverseRecordStore(opCtx,
+                                           results,
+                                           validateState.validationVersion(),
+                                           validateState.getTargetRecordsPerRecordStoreSlice());
 
         if (validateState.isCollHashValidation()) {
             indexValidator.computeMetadataHash(opCtx, validateState.getCollection(), results);
+        }
+
+        // Compare the accumulated hash against the replicated metadata system's view of the
+        // collection.
+        if (validateState.isCollHashValidation() &&
+            rss::ReplicatedStorageService::get(opCtx)
+                .getPersistenceProvider()
+                .shouldUseContinuousInternodeValidation()) {
+            if (validateState.getReadTimestamp()) {
+                results.setHashComparison(ValidateResults::HashComparison::kPinnedReadTimestamp);
+            } else {
+                _compareCollectionHash(opCtx, validateState, results);
+            }
         }
 
         // Pause collection validation while a lock is held and between collection and index data
@@ -1025,15 +1201,22 @@ Status validate(OperationContext* opCtx,
             _validationIsPausedForTest.store(false);
         }
 
+        // Throw specified test error before index validation checks for interrupt to test
+        // non-interruption errors thrown after a kill.
+        if (auto sfp = throwBeforeIndexValidation.scoped(); MONGO_unlikely(sfp.isActive())) {
+            uasserted(ErrorCodes::Error(sfp.getData()["errorCode"].safeNumberInt()),
+                      "Fail point 'throwBeforeIndexValidation' activated");
+        }
+
         // Continue validation checks are done in case previously reported errors need additional
         // metadata to be added by later calls
-        if (!results->isValid() && !results->continueValidation()) {
-            _reportInvalidResults(opCtx, &validateState, results);
+        if (!results.isValid() && !results.continueValidation()) {
+            _reportInvalidResults(opCtx, validateState, results);
             return Status::OK();
         }
 
         // Validate indexes and check for mismatches.
-        _validateIndexes(opCtx, &validateState, &indexValidator, results);
+        _validateIndexes(opCtx, validateState, indexValidator, results);
 
         if (indexValidator.haveEntryMismatch()) {
             LOGV2_OPTIONS(20305,
@@ -1041,21 +1224,20 @@ Status validate(OperationContext* opCtx,
                           "Index inconsistencies were detected. "
                           "Starting the second phase of index validation to gather concise errors",
                           logAttrs(validateState.nss()));
-            _gatherIndexEntryErrors(opCtx, &validateState, &indexValidator, results);
+            _gatherIndexEntryErrors(opCtx, validateState, indexValidator, results);
         }
 
-        if (!results->isValid() && !results->continueValidation()) {
-            _reportInvalidResults(opCtx, &validateState, results);
+        if (!results.isValid() && !results.continueValidation()) {
+            _reportInvalidResults(opCtx, validateState, results);
             return Status::OK();
         }
 
         // Validate index key count.
-        _validateIndexKeyCount(
-            opCtx, &validateState, &indexValidator, &results->getIndexResultsMap());
+        _validateIndexKeyCount(opCtx, validateState, indexValidator, results.getIndexResultsMap());
 
         // We don't want to check continueValidation as there are no more validation checks to do
-        if (!results->isValid()) {
-            _reportInvalidResults(opCtx, &validateState, results);
+        if (!results.isValid()) {
+            _reportInvalidResults(opCtx, validateState, results);
             return Status::OK();
         }
 
@@ -1066,16 +1248,18 @@ Status validate(OperationContext* opCtx,
                       logAttrs(validateState.nss()),
                       logAttrs(validateState.uuid()));
     } catch (const DBException& e) {
-        if (!opCtx->checkForInterruptNoAssert().isOK() || e.code() == ErrorCodes::Interrupted) {
+        auto interruptStatus = opCtx->checkForInterruptNoAssert();
+        if (!interruptStatus.isOK() || e.code() == ErrorCodes::Interrupted) {
             LOGV2_OPTIONS(5160301,
                           {LogComponent::kIndex},
                           "Validation interrupted",
-                          logAttrs(validateState.nss()));
-            return e.toStatus();
+                          logAttrs(validateState.nss()),
+                          "error"_attr = e.toString());
+            return interruptStatus.isOK() ? e.toStatus() : interruptStatus;
         }
 
         string err = str::stream() << "exception during collection validation: " << e.toString();
-        results->addWarning(err);
+        results.addWarning(err);
         LOGV2_OPTIONS(5160302,
                       {LogComponent::kIndex},
                       "Validation failed due to exception",
@@ -1090,5 +1274,5 @@ bool getIsValidationPausedForTest() {
     return _validationIsPausedForTest.load();
 }
 
-}  // namespace CollectionValidation
+}  // namespace collection_validation
 }  // namespace mongo

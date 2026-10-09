@@ -18,7 +18,12 @@
  * This workload implicitly assumes that its tid ranges are [0, $config.threadCount). This
  * isn't guaranteed to be true when they are run in parallel with other workloads. Therefore
  * it can't be run in concurrency simultaneous suites.
- * @tags: [requires_replication, uses_write_concern, incompatible_with_concurrency_simultaneous]
+ * @tags: [
+ *  assumes_against_mongod_not_mongos,
+ *  requires_replication,
+ *  uses_write_concern,
+ *  incompatible_with_concurrency_simultaneous
+ * ]
  */
 import {supportsCommittedReads} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {TxnUtil} from "jstests/libs/txns/txn_util.js";
@@ -48,7 +53,11 @@ export const $config = (function () {
         this.buildIndex(db, {x: 1});
 
         let bulk = db[this.collName].initializeOrderedBulkOp();
-        for (let i = this.nDocumentsInTotal; i < this.nDocumentsInTotal + this.nDocumentsToInsert; i++) {
+        for (
+            let i = this.nDocumentsInTotal;
+            i < this.nDocumentsInTotal + this.nDocumentsToInsert;
+            i++
+        ) {
             bulk.insert({_id: i, x: i});
         }
         let res = bulk.execute(writeConcern);

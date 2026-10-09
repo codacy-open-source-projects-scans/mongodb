@@ -40,7 +40,10 @@ const addNode = (id, {newlyAdded, force, shouldSucceed, failureCode} = {}) => {
     const newNode = rst.add({
         rsConfig: {priority: 0},
         setParameter: {
-            "failpoint.forceSyncSourceCandidate": tojson({mode: "alwaysOn", data: {"hostAndPort": primary.host}}),
+            "failpoint.forceSyncSourceCandidate": tojson({
+                mode: "alwaysOn",
+                data: {"hostAndPort": primary.host},
+            }),
             "failpoint.initialSyncHangBeforeFinish": tojson({mode: "alwaysOn"}),
             "numInitialSyncAttempts": 1,
         },
@@ -63,7 +66,10 @@ const addNode = (id, {newlyAdded, force, shouldSucceed, failureCode} = {}) => {
     if (!shouldSucceed) {
         jsTestLog("Running reconfig with bad config " + tojsononeline(config));
 
-        assert.commandFailedWithCode(primary.adminCommand({replSetReconfig: config, force: force}), failureCode);
+        assert.commandFailedWithCode(
+            primary.adminCommand({replSetReconfig: config, force: force}),
+            failureCode,
+        );
         rst.remove(newNode);
         return null;
     }
@@ -137,7 +143,9 @@ assertVoteCount(primary, {
     totalMembersCount: 3,
 });
 
-jsTestLog("Add a new node without 'newlyAdded' with force reconfig, squashing old 'newlyAdded' fields");
+jsTestLog(
+    "Add a new node without 'newlyAdded' with force reconfig, squashing old 'newlyAdded' fields",
+);
 const thirdNewNode = addNode(4, {newlyAdded: false, force: true, shouldSucceed: true});
 assert.eq(false, isMemberNewlyAdded(primary, 1, true /* force */));
 assert.eq(false, isMemberNewlyAdded(primary, 2, true /* force */));
@@ -150,9 +158,15 @@ assertVoteCount(primary, {
     totalMembersCount: 4,
 });
 
-assert.commandWorked(firstNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}));
-assert.commandWorked(secondNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}));
-assert.commandWorked(thirdNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}));
+assert.commandWorked(
+    firstNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}),
+);
+assert.commandWorked(
+    secondNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}),
+);
+assert.commandWorked(
+    thirdNewNode.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}),
+);
 
 rst.awaitSecondaryNodes(null, [firstNewNode]);
 rst.awaitSecondaryNodes(null, [secondNewNode]);
@@ -160,7 +174,9 @@ rst.awaitSecondaryNodes(null, [thirdNewNode]);
 
 jsTestLog("Making sure the set can accept writes with write concerns");
 assert.commandWorked(primaryColl.insert({"steady": "state"}, {writeConcern: {w: 4}}));
-assert.commandWorked(primaryColl.insert({"steady": "state_majority"}, {writeConcern: {w: "majority"}}));
+assert.commandWorked(
+    primaryColl.insert({"steady": "state_majority"}, {writeConcern: {w: "majority"}}),
+);
 
 assertVoteCount(primary, {
     votingMembersCount: 4,

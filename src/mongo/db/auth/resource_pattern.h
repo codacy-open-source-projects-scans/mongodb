@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/auth/action_type_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
@@ -40,6 +13,7 @@
 
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -48,6 +22,7 @@
 #include <fmt/format.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Representation of names of various kinds of resources targetable by the access control
@@ -59,7 +34,7 @@ namespace mongo {
  * part of the access control system.  See buildResourceSearchList() in
  * authorization_session.cpp for details.
  */
-class MONGO_MOD_PUBLIC ResourcePattern {
+class [[MONGO_MOD_PUBLIC]] ResourcePattern {
     friend class AuthorizationContract;
 
 public:
@@ -91,7 +66,7 @@ public:
      */
     static ResourcePattern forDatabaseName(const DatabaseName& dbName) {
         return ResourcePattern(MatchTypeEnum::kMatchDatabaseName,
-                               NamespaceStringUtil::deserialize(dbName, ""_sd));
+                               NamespaceStringUtil::deserialize(dbName, ""sv));
     }
 
     /**
@@ -99,7 +74,7 @@ public:
      * collectionName.
      */
     static ResourcePattern forCollectionName(const boost::optional<TenantId>& tenantId,
-                                             StringData collectionName) {
+                                             std::string_view collectionName) {
         // While the namespace we create for here is not valid for use in commands/storage layer
         // since it has an empty DB, it is valid for the ResourcePattern use-case.
         return ResourcePattern(MatchTypeEnum::kMatchCollectionName,
@@ -135,7 +110,7 @@ public:
      * in any database.
      */
     static ResourcePattern forAnySystemBucketsInAnyDatabase(
-        const boost::optional<TenantId>& tenantId, StringData collectionName) {
+        const boost::optional<TenantId>& tenantId, std::string_view collectionName) {
         return ResourcePattern(MatchTypeEnum::kMatchSystemBucketInAnyDBResource,
                                AuthNamespaceStringUtil::deserialize(tenantId, "", collectionName));
     }
@@ -260,7 +235,7 @@ public:
      * Behavior is undefined unless the pattern is of type matchCollectionName or
      * matchExactNamespace or matchExactSystemBucketResource
      */
-    StringData collectionToMatch() const {
+    std::string_view collectionToMatch() const {
         return _ns.coll();
     }
 
@@ -305,6 +280,7 @@ private:
     NamespaceString _ns;
 };
 
-MONGO_MOD_FILE_PRIVATE std::ostream& operator<<(std::ostream& os, const ResourcePattern& pattern);
+[[MONGO_MOD_FILE_PRIVATE]] std::ostream& operator<<(std::ostream& os,
+                                                    const ResourcePattern& pattern);
 
 }  // namespace mongo

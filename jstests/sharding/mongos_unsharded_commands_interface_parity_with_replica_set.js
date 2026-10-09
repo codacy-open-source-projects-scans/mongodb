@@ -63,6 +63,10 @@
  *
  * @tags: [
  *   requires_fcv_83,
+ *   # TODO (SERVER-132818/SERVER-48397): The collmod command does not return the same set of fields
+ *   # if the command is a noop versus a real change. This causes issues in sharded clusters where a
+ *   # retry can turn a command into a noop.
+ *   does_not_support_stepdowns,
  * ]
  */
 
@@ -85,7 +89,9 @@ function joinFilteringMetadataRefresh(db, collName, mongoConfig) {
         // finished before running our tests.
         assert.soon(() => {
             let shard = mongoConfig.getPrimaryShard(db.getName());
-            const shardVersion = assert.commandWorked(shard.rs.getPrimary().adminCommand({getShardVersion: fullName}));
+            const shardVersion = assert.commandWorked(
+                shard.rs.getPrimary().adminCommand({getShardVersion: fullName}),
+            );
             const filteringMetadataState = shardVersion.global;
             assert(filteringMetadataState !== undefined);
             return filteringMetadataState !== "UNKNOWN";
@@ -268,21 +274,27 @@ const tests = [
             {
                 shortDescription: "Runs createIndexes expecting an index option conflict error.",
                 testCaseSetup: function (db) {
-                    assert.commandWorked(db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}));
+                    assert.commandWorked(
+                        db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}),
+                    );
                 },
                 command: {createIndexes: "x", indexes: [{key: {a: 1}, name: "err"}]},
                 expectedError: ErrorCodes.IndexOptionsConflict,
             },
             {
-                shortDescription: "Runs createIndexes expecting 'createdCollectionAutomatically' : true.",
+                shortDescription:
+                    "Runs createIndexes expecting 'createdCollectionAutomatically' : true.",
                 command: {createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]},
                 testCaseDoesNotSupportWriteConcern: true,
             },
 
             {
-                shortDescription: "Runs createIndexes expecting 'note' : 'all indexes already exist'",
+                shortDescription:
+                    "Runs createIndexes expecting 'note' : 'all indexes already exist'",
                 testCaseSetup: function (db) {
-                    assert.commandWorked(db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}));
+                    assert.commandWorked(
+                        db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}),
+                    );
                 },
                 command: {createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]},
                 testCaseDoesNotSupportWriteConcern: true,
@@ -296,7 +308,8 @@ const tests = [
                 command: {createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]},
             },
             {
-                shortDescription: "Runs createIndexes on an existing collection with data (causing an index build).",
+                shortDescription:
+                    "Runs createIndexes on an existing collection with data (causing an index build).",
                 testCaseSetup: function (db) {
                     assert.commandWorked(db.x.insert({}));
                 },
@@ -321,7 +334,9 @@ const tests = [
             {
                 shortDescription: "Runs dropIndexes.",
                 testCaseSetup: function (db) {
-                    assert.commandWorked(db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}));
+                    assert.commandWorked(
+                        db.runCommand({createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]}),
+                    );
                 },
                 command: {dropIndexes: "x", index: ["a_1"]},
             },
@@ -502,9 +517,13 @@ function assertMongosAndReplicaSetInterfaceParity(test, testCase, forceWriteConc
         restartReplication: restartReplicationOnAllShards,
     };
 
-    const replSetResultKeys = Object.keys(runTestCase(test, testCase, forceWriteConcernError, replicaSetTestFixture));
+    const replSetResultKeys = Object.keys(
+        runTestCase(test, testCase, forceWriteConcernError, replicaSetTestFixture),
+    );
 
-    const shardResultKeys = Object.keys(runTestCase(test, testCase, forceWriteConcernError, mongosTestFixture));
+    const shardResultKeys = Object.keys(
+        runTestCase(test, testCase, forceWriteConcernError, mongosTestFixture),
+    );
 
     assert(
         isSubset(shardResultKeys, replSetResultKeys),
@@ -525,10 +544,19 @@ function runTestCases(st, rst, forceWriteConcernError) {
         }
 
         test.testCases.forEach((testCase) => {
-            if (forceWriteConcernError && (testCase.expectedError || testCase.testCaseDoesNotSupportWriteConcern)) {
+            if (
+                forceWriteConcernError &&
+                (testCase.expectedError || testCase.testCaseDoesNotSupportWriteConcern)
+            ) {
                 return;
             }
-            assertMongosAndReplicaSetInterfaceParity(test, testCase, forceWriteConcernError, st, rst);
+            assertMongosAndReplicaSetInterfaceParity(
+                test,
+                testCase,
+                forceWriteConcernError,
+                st,
+                rst,
+            );
         });
     });
 }

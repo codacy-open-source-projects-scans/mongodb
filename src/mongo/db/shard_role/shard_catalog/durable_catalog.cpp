@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
 
@@ -38,6 +12,7 @@
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/shard_role/shard_catalog/backwards_compatible_collection_options_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection_record_store_options.h"
 #include "mongo/db/shard_role/shard_catalog/durable_catalog_entry_metadata.h"
 #include "mongo/db/shard_role/transaction_resources.h"
@@ -53,6 +28,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
@@ -162,7 +138,7 @@ boost::optional<CatalogEntry> getParsedCatalogEntry(OperationContext* opCtx,
 
 void putMetaData(OperationContext* opCtx,
                  const RecordId& catalogId,
-                 durable_catalog::CatalogEntryMetaData& md,
+                 const durable_catalog::CatalogEntryMetaData& md,
                  MDBCatalog* mdbCatalog,
                  boost::optional<BSONObj> indexIdents) {
     auto cursor = mdbCatalog->getCursor(opCtx);
@@ -217,7 +193,7 @@ namespace {
  * it is empty on disk. Otherwise, ObjectAlreadyExists is propagated to the caller.
  */
 Status createStorage(OperationContext* opCtx,
-                     StringData ident,
+                     std::string_view ident,
                      function_ref<Status()> create,
                      function_ref<bool()> identExists,
                      function_ref<bool()> identEmpty) {
@@ -288,8 +264,12 @@ Status createStorage(OperationContext* opCtx,
         return status;
     }
 
-    ru.onRollback([ident = std::string(ident)](OperationContext* opCtx) {
-        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    ru.onRollback([ident = std::string(ident), storageEngine = storageEngine](OperationContext*) {
+        // Note: We cannot safely access the provided opCtx here because it may have been destroyed
+        // by the time the rollback handler is executed. This is especially true for rollback
+        // handlers that are executed during shutdown and as the shutdown thread calls into
+        // `abortUnitOfWork` while destroying instancess of `TxnResources`.
+        // TODO SERVER-125732: Avoid storing `opCtx` pointers inside instances of `RecoveryUnit`.
         storageEngine->addDropPendingIdent(StorageEngine::Immediate{},
                                            std::make_shared<Ident>(ident));
     });
@@ -312,6 +292,7 @@ StatusWith<std::unique_ptr<RecordStore>> createCollection(
     auto recordStoreOptions = getRecordStoreOptions(nss, collectionOptions, recordIdsReplicated);
     durable_catalog::CatalogEntryMetaData md =
         internal::createMetaDataForNewCollection(nss, collectionOptions, recordIdsReplicated);
+    sanitizeTimeseriesOptions(opCtx, md);
 
     auto engine = opCtx->getServiceContext()->getStorageEngine()->getEngine();
     auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
@@ -351,7 +332,7 @@ Status createIndex(OperationContext* opCtx,
                    const NamespaceString& nss,
                    const CollectionOptions& collectionOptions,
                    const IndexConfig& indexConfig,
-                   StringData ident) {
+                   std::string_view ident) {
     invariant(collectionOptions.uuid);
 
     auto mdbCatalog = MDBCatalog::get(opCtx);
@@ -470,7 +451,7 @@ Status dropAndRecreateIndexIdentForResume(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           const CollectionOptions& collectionOptions,
                                           const IndexConfig& indexConfig,
-                                          StringData ident) {
+                                          std::string_view ident) {
     auto engine = opCtx->getServiceContext()->getStorageEngine()->getEngine();
     auto status =
         engine->dropSortedDataInterface(*shard_role_details::getRecoveryUnit(opCtx), ident);
@@ -508,7 +489,7 @@ void getReadyIndexes(OperationContext* opCtx,
 
 bool isIndexPresent(OperationContext* opCtx,
                     const RecordId& catalogId,
-                    StringData indexName,
+                    std::string_view indexName,
                     const MDBCatalog* mdbCatalog) {
     auto catalogEntry = getParsedCatalogEntry(opCtx, catalogId, mdbCatalog);
     if (!catalogEntry)
@@ -532,6 +513,26 @@ boost::optional<CatalogEntry> parseCatalogEntry(const RecordId& catalogId, const
     BSONElement idxIdent = obj["idxIdent"];
     BSONObj idxIdentObj = idxIdent.eoo() ? BSONObj() : idxIdent.Obj().getOwned();
     return CatalogEntry{catalogId, obj["ident"].String(), idxIdentObj, parseMetaData(obj["md"])};
+}
+
+void sanitizeTimeseriesOptions(OperationContext* opCtx,
+                               durable_catalog::CatalogEntryMetaData& metadata) {
+    if (!metadata.options.timeseries) {
+        return;
+    }
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+
+    // If present, reuse the storageEngine options to work around the issue described in
+    // SERVER-91194.
+    metadata._durableTimeseriesBucketsMayHaveMixedSchemaData =
+        storageEngine->getFlagFromStorageOptions(
+            metadata.options.storageEngine,
+            backwards_compatible_collection_options::kTimeseriesBucketsMayHaveMixedSchemaData);
+    if (metadata._durableTimeseriesBucketsMayHaveMixedSchemaData.has_value()) {
+        metadata.timeseriesBucketsMayHaveMixedSchemaData =
+            metadata._durableTimeseriesBucketsMayHaveMixedSchemaData;
+    }
 }
 
 }  // namespace mongo::durable_catalog

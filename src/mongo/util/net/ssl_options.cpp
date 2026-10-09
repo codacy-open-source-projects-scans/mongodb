@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/net/ssl_options.h"
@@ -36,6 +10,8 @@
 #include "mongo/util/ctype.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/options_parser/startup_options.h"
+
+#include <string_view>
 
 #include <absl/strings/str_split.h>
 #include <boost/filesystem/operations.hpp>
@@ -51,7 +27,7 @@ using std::string;
 SSLParams sslGlobalParams;
 
 namespace {
-std::vector<uint8_t> hexToVector(StringData hex) {
+std::vector<uint8_t> hexToVector(std::string_view hex) {
     try {
         std::string data = hexblob::decode(hex);
         return std::vector<uint8_t>(data.begin(), data.end());
@@ -118,8 +94,8 @@ Status storeSSLDisabledProtocols(const std::string& disabledProtocols,
 }
 
 Status parseCertificateSelector(SSLParams::CertificateSelector* selector,
-                                StringData name,
-                                StringData value) {
+                                std::string_view name,
+                                std::string_view value) {
     selector->subject.clear();
     selector->thumbprint.clear();
 
@@ -152,7 +128,7 @@ Status parseCertificateSelector(SSLParams::CertificateSelector* selector,
     return Status::OK();
 }
 
-StatusWith<SSLParams::SSLModes> SSLParams::sslModeParse(StringData strMode) {
+StatusWith<SSLParams::SSLModes> SSLParams::sslModeParse(std::string_view strMode) {
     if (strMode == "disabled") {
         return SSLParams::SSLMode_disabled;
     } else if (strMode == "allowSSL") {
@@ -170,7 +146,7 @@ StatusWith<SSLParams::SSLModes> SSLParams::sslModeParse(StringData strMode) {
     }
 }
 
-StatusWith<SSLParams::SSLModes> SSLParams::tlsModeParse(StringData strMode) {
+StatusWith<SSLParams::SSLModes> SSLParams::tlsModeParse(std::string_view strMode) {
     if (strMode == "disabled") {
         return SSLParams::SSLMode_disabled;
     } else if (strMode == "allowTLS") {
@@ -200,7 +176,7 @@ std::string SSLParams::sslModeFormat(int mode) {
         case SSLParams::SSLMode_requireSSL:
             return "requireSSL";
         default:
-            // Default case because sslMode is an AtomicWord<int> and not bound by enum rules.
+            // Default case because sslMode is an Atomic<int> and not bound by enum rules.
             return "unknown";
     }
 }
@@ -216,7 +192,7 @@ std::string SSLParams::tlsModeFormat(int mode) {
         case SSLParams::SSLMode_requireSSL:
             return "requireTLS";
         default:
-            // Default case because sslMode is an AtomicWord<int> and not bound by enum rules.
+            // Default case because sslMode is an Atomic<int> and not bound by enum rules.
             return "unknown";
     }
 }

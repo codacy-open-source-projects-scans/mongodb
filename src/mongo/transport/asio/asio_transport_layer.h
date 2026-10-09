@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,6 +11,7 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
@@ -47,6 +22,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 
 #include <asio/basic_socket_acceptor.hpp>
@@ -58,6 +34,7 @@ class ServiceContext;
 class ServiceEntryPoint;
 
 namespace transport {
+using namespace std::literals::string_view_literals;
 
 // Simulates reads and writes that always return 1 byte and fail with EAGAIN
 extern FailPoint asioTransportLayerShortOpportunisticReadWrite;
@@ -80,7 +57,7 @@ class WrappedEndpoint;
 /**
  * A TransportLayer implementation based on ASIO networking primitives.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT AsioTransportLayer final : public TransportLayer {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] AsioTransportLayer final : public TransportLayer {
     AsioTransportLayer(const AsioTransportLayer&) = delete;
     AsioTransportLayer& operator=(const AsioTransportLayer&) = delete;
 
@@ -170,7 +147,7 @@ public:
         // State transitions: `kInitialized` --> `kStarted` --> `kStopped`
         //                          |_______________________________^
         enum class State { kInitialized, kStarted, kStopped };
-        AtomicWord<State> _state;
+        Atomic<State> _state;
 
         Spawn _spawn = [](std::function<void()> f) {
             return stdx::thread{std::move(f)};
@@ -211,8 +188,8 @@ public:
 
     void appendStatsForFTDC(BSONObjBuilder& bob) const override;
 
-    StringData getNameForLogging() const override {
-        return "asio"_sd;
+    std::string_view getNameForLogging() const override {
+        return "asio"sv;
     }
 
     TransportProtocol getTransportProtocol() const override {
@@ -253,6 +230,10 @@ public:
 
     std::vector<std::pair<SockAddr, int>> getListenerSocketBacklogQueueDepths() const;
 
+    ExecutorPtr tlsHandshakePool() const;
+
+    std::optional<std::vector<SessionStats>> collectReplicationSessionStats() override;
+    void registerReplicationSession(std::shared_ptr<Session>) override;
 #ifdef __linux__
     BatonHandle makeBaton(OperationContext* opCtx) const override;
 #endif
@@ -328,6 +309,7 @@ private:
     // it.
     std::shared_ptr<AsioReactor> _ingressReactor;
     std::shared_ptr<AsioReactor> _egressReactor;
+    std::shared_ptr<ThreadPool> _tlsHandshakePool;
 
 #ifdef MONGO_CONFIG_SSL
     synchronized_value<std::shared_ptr<const SSLConnectionContext>> _sslContext;
@@ -456,7 +438,11 @@ private:
     // Tracks the cumulative time the listener spends between accepting incoming connections to
     // handing them off to dedicated connection threads. We use an int64 since Microseconds is not
     // an arithmetic type for atomic operations.
-    AtomicWord<std::int64_t> _listenerProcessingTotalMicros;
+    Atomic<std::int64_t> _listenerProcessingTotalMicros;
+
+    // Tracks the number of connections that are initiated to itself, where the remote and local
+    // addresses are the same. This excludes connections over Unix Domain Sockets.
+    Counter64 _numNonUDSSelfConnections;
 
     // Tracks the number of connections that are dropped by the client before the server gets to
     // process them (e.g. perform TLS handshake).
@@ -472,6 +458,10 @@ private:
 
     // Statistics on dns resolution latency in milliseconds.
     RollingStats _dnsResolveStatsMillis;
+
+    // Guards vector of replication sessions
+    std::mutex _replicationSessionLock;
+    std::vector<std::weak_ptr<AsioSession>> _replicationSessions;
 };
 
 }  // namespace transport

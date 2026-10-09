@@ -17,23 +17,36 @@ import {getTotalMarkedNonDeprioritizableCount} from "jstests/noPassthrough/admis
  * Tests that key refresh on a triggering node causes the counter to increase on the target node.
  * Uses the maxKeyRefreshWaitTimeOverrideMS failpoint to accelerate the refresh cycle.
  */
-function testKeyRefreshWithFailpoint(triggerNode, counterNode, refreshIntervalMs, waitMs, description) {
+function testKeyRefreshWithFailpoint(triggerNode, counterNode, refreshIntervalMs, description) {
     const fastRefreshFp = configureFailPoint(triggerNode, "maxKeyRefreshWaitTimeOverrideMS", {
         overrideMS: refreshIntervalMs,
     });
 
     const beforeCount = getTotalMarkedNonDeprioritizableCount(counterNode);
-    sleep(waitMs);
-    const afterCount = getTotalMarkedNonDeprioritizableCount(counterNode);
+
+    let afterCount;
+    assert.soon(
+        function () {
+            afterCount = getTotalMarkedNonDeprioritizableCount(counterNode);
+            return afterCount > beforeCount;
+        },
+        description + " - counter should increase. Before: " + beforeCount,
+        30000,
+        refreshIntervalMs,
+    );
 
     fastRefreshFp.off();
 
     jsTestLog(description + ": beforeCount=" + beforeCount + ", afterCount=" + afterCount);
 
-    assert.gte(
+    assert.gt(
         afterCount,
         beforeCount,
-        description + " - counter should not decrease. Before: " + beforeCount + ", After: " + afterCount,
+        description +
+            " - counter should increase. Before: " +
+            beforeCount +
+            ", After: " +
+            afterCount,
     );
 
     return {beforeCount, afterCount};
@@ -41,60 +54,77 @@ function testKeyRefreshWithFailpoint(triggerNode, counterNode, refreshIntervalMs
 
 /**
  * Tests that key generation on the config server primary causes the counter to increase.
- * Forces key generation by deleting existing keys and triggering a stepdown/stepup cycle.
+ * Forces key generation by stepping down, then deleting keys on the new primary while
+ * generation is still disabled so leftover keys cannot be included in beforeCount.
  */
 function testKeyGenerationWithStepdown(st, configPrimary, keyPurpose, description) {
-    // Step 1: Pause key generation on all config server nodes
+    // Pause generation on every config node so stepup cannot insert keys
+    // before we snapshot the counter.
     for (let node of st.configRS.nodes) {
-        assert.commandWorked(node.adminCommand({configureFailPoint: "disableKeyGeneration", mode: "alwaysOn"}));
+        assert.commandWorked(
+            node.adminCommand({configureFailPoint: "disableKeyGeneration", mode: "alwaysOn"}),
+        );
     }
 
-    // Step 2: Delete existing keys to force regeneration
-    let adminDb = configPrimary.getDB("admin");
+    // Re-initialize the KeyGenerator on stepup. This fixture uses a 1-node config
+    // replica set, so the same node is re-elected.
+    assert.commandWorked(configPrimary.adminCommand({replSetStepDown: 5, force: true}));
+    st.configRS.awaitNodesAgreeOnPrimary();
+    configPrimary = st.configRS.getPrimary();
+    const adminDb = configPrimary.getDB("admin");
+
+    // Delete on the current primary while generation is still disabled.
     const keysBeforeDelete = adminDb.system.keys.find({purpose: keyPurpose}).toArray();
     jsTestLog(description + ": keys before deletion = " + keysBeforeDelete.length);
 
     const deleteResult = adminDb.system.keys.remove({purpose: keyPurpose});
     jsTestLog(description + ": deleted " + deleteResult.nRemoved + " " + keyPurpose + " keys");
 
-    // Step 3: Force a stepdown to re-initialize the KeyGenerator when primary comes back
-    assert.commandWorked(configPrimary.adminCommand({replSetStepDown: 5, force: true}));
-
-    // Wait for a new primary
-    st.configRS.awaitNodesAgreeOnPrimary();
-    configPrimary = st.configRS.getPrimary();
-    adminDb = configPrimary.getDB("admin");
-
-    // Step 4: Enable fast refresh on config primary BEFORE getting the counter
-    const fastRefreshFp = configureFailPoint(configPrimary, "maxKeyRefreshWaitTimeOverrideMS", {overrideMS: 100});
-
-    // Step 5: Get the counter before triggering key generation
-    // (key generation is still disabled at this point)
-    const beforeCount = getTotalMarkedNonDeprioritizableCount(configPrimary);
-
-    // Step 6: Re-enable key generation on all config server nodes
-    for (let node of st.configRS.nodes) {
-        assert.commandWorked(node.adminCommand({configureFailPoint: "disableKeyGeneration", mode: "off"}));
-    }
-
-    // Step 7: Wait for key generation to complete
     assert.soonNoExcept(
-        function () {
-            const keys = adminDb.system.keys.find({purpose: keyPurpose}).toArray();
-            return keys.length >= 2;
-        },
-        "Expected the config server primary to generate new " + keyPurpose + " keys",
-        30000, // timeout
-        100, // interval
+        () => adminDb.system.keys.find({purpose: keyPurpose}).itcount() === 0,
+        "Expected " + keyPurpose + " keys to be 0 on the config primary before generation",
+        30000,
+        100,
     );
 
-    // Give a little more time for any in-flight operations to complete
-    sleep(200);
+    const fastRefreshFp = configureFailPoint(configPrimary, "maxKeyRefreshWaitTimeOverrideMS", {
+        overrideMS: 100,
+    });
 
-    const afterCount = getTotalMarkedNonDeprioritizableCount(configPrimary);
+    const keysAtSnapshot = adminDb.system.keys.find({purpose: keyPurpose}).itcount();
+    const beforeCount = getTotalMarkedNonDeprioritizableCount(configPrimary);
+    jsTestLog(
+        description +
+            ": keys at beforeCount snapshot = " +
+            keysAtSnapshot +
+            ", beforeCount=" +
+            beforeCount,
+    );
+    assert.eq(keysAtSnapshot, 0, description + " - HMAC keys must be 0 when beforeCount is taken");
+
+    for (let node of st.configRS.nodes) {
+        assert.commandWorked(
+            node.adminCommand({configureFailPoint: "disableKeyGeneration", mode: "off"}),
+        );
+    }
+
+    let afterCount;
+    assert.soonNoExcept(
+        function () {
+            afterCount = getTotalMarkedNonDeprioritizableCount(configPrimary);
+            const keyCount = adminDb.system.keys.find({purpose: keyPurpose}).itcount();
+            return keyCount >= 2 && afterCount > beforeCount;
+        },
+        description +
+            " - expected new " +
+            keyPurpose +
+            " keys and a counter increase. Before: " +
+            beforeCount,
+        30000,
+        100,
+    );
     fastRefreshFp.off();
 
-    // Verify keys were actually generated
     const keysAfterGeneration = adminDb.system.keys.find({purpose: keyPurpose}).toArray();
 
     jsTestLog(
@@ -110,7 +140,11 @@ function testKeyGenerationWithStepdown(st, configPrimary, keyPurpose, descriptio
     assert.gt(
         afterCount,
         beforeCount,
-        description + " - counter should increase. Before: " + beforeCount + ", After: " + afterCount,
+        description +
+            " - counter should increase. Before: " +
+            beforeCount +
+            ", After: " +
+            afterCount,
     );
 
     return {
@@ -157,13 +191,23 @@ describe("Keys collection operations non-deprioritizable", function () {
     it("should mark config server's key refresh as non-deprioritizable (local)", function () {
         // The KeysCollectionManager on the config server performs local key refresh.
         // This is a local operation since admin.system.keys lives on the config server.
-        testKeyRefreshWithFailpoint(configPrimary, configPrimary, 100, 300, "Config server local key refresh");
+        testKeyRefreshWithFailpoint(
+            configPrimary,
+            configPrimary,
+            100,
+            "Config server local key refresh",
+        );
     });
 
     it("should mark mongos key refresh as non-deprioritizable on config server (remote)", function () {
         // When mongos's KeysCollectionManager refreshes keys, it queries the config server
         // as an internal client.
-        testKeyRefreshWithFailpoint(mongos, configPrimary, 50, 200, "Mongos key refresh (remote to config)");
+        testKeyRefreshWithFailpoint(
+            mongos,
+            configPrimary,
+            50,
+            "Mongos key refresh (remote to config)",
+        );
     });
 
     it("should mark shard primary key refresh as non-deprioritizable on config server (remote)", function () {
@@ -173,7 +217,6 @@ describe("Keys collection operations non-deprioritizable", function () {
             shardPrimary,
             configPrimary,
             50,
-            200,
             "Shard primary key refresh (remote to config)",
         );
     });
@@ -185,7 +228,6 @@ describe("Keys collection operations non-deprioritizable", function () {
             shardSecondary,
             configPrimary,
             50,
-            200,
             "Shard secondary key refresh (remote to config)",
         );
     });
@@ -193,7 +235,12 @@ describe("Keys collection operations non-deprioritizable", function () {
     it("should mark config server's key generation as non-deprioritizable (local write)", function () {
         // Key generation (writes to admin.system.keys) only happens on the config server
         // primary.
-        const result = testKeyGenerationWithStepdown(st, configPrimary, "HMAC", "Config server HMAC key generation");
+        const result = testKeyGenerationWithStepdown(
+            st,
+            configPrimary,
+            "HMAC",
+            "Config server HMAC key generation",
+        );
 
         // Update configPrimary reference since it may have changed after stepdown
         configPrimary = result.configPrimary;

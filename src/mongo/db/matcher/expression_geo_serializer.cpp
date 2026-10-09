@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/expression_geo_serializer.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -39,32 +12,33 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <vector>
 
 namespace mongo {
 namespace {
 void appendGeoNearLegacyArray(BSONObjBuilder& bob,
                               const BSONElement& e,
-                              const SerializationOptions& opts) {
+                              const query_shape::SerializationOptions& opts) {
     if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, e);
     } else {
         // Legacy $geoNear, $nearSphere, and $near require at minimum 2 coordinates to be
         // re-parseable, so the representative value is [1, 1].
-        StringData fieldName = e.fieldNameStringData();
+        std::string_view fieldName = e.fieldNameStringData();
         bob.appendArray(fieldName, BSON_ARRAY(1 << 1));
     }
 }
 
 void appendShapeOperator(BSONObjBuilder& bob,
                          const BSONElement& e,
-                         const SerializationOptions& opts) {
+                         const query_shape::SerializationOptions& opts) {
     if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, e);
         return;
     }
 
-    StringData fieldName = e.fieldNameStringData();
+    std::string_view fieldName = e.fieldNameStringData();
     if (fieldName == kCenterField || fieldName == kCenterSphereField) {
         // $center and $centerSphere requires a pair of coordinates and a radius to be
         // re-parseable, so the representative value is [[1, 1],1].
@@ -86,13 +60,13 @@ void appendShapeOperator(BSONObjBuilder& bob,
 void appendGeoJSONCoordinatesLiteral(BSONObjBuilder& bob,
                                      const BSONElement& coordinatesElem,
                                      const BSONElement& typeElem,
-                                     const SerializationOptions& opts) {
+                                     const query_shape::SerializationOptions& opts) {
     if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, coordinatesElem);
         return;
     }
 
-    StringData fieldName = coordinatesElem.fieldNameStringData();
+    std::string_view fieldName = coordinatesElem.fieldNameStringData();
 
     // When a $geoNear expression is parsed (see GeoNearExpression::parseNewQuery()), a $geometry
     // object defaults to being parsed as a point, without checking the type of the geometry object.
@@ -162,7 +136,7 @@ void appendGeoJSONCoordinatesLiteral(BSONObjBuilder& bob,
 
 void appendCRSObject(BSONObjBuilder& bob,
                      const BSONElement& crsObj,
-                     const SerializationOptions& opts) {
+                     const query_shape::SerializationOptions& opts) {
     // 'crs' is always an object.
     tassert(7559700, "Expected 'crs' to be an object", crsObj.type() == BSONType::object);
     // 'crs' is required to have a 'type' field with the value 'name'.
@@ -206,7 +180,7 @@ void appendCRSObject(BSONObjBuilder& bob,
 // obj, or implicitly as the RHS of a $geoNear.
 void appendGeoJSONObj(BSONObjBuilder& bob,
                       const BSONObj& geometryObj,
-                      const SerializationOptions& opts) {
+                      const query_shape::SerializationOptions& opts) {
     auto typeElem = geometryObj[kGeometryTypeField];
     if (typeElem) {
         bob.append(typeElem);
@@ -241,7 +215,7 @@ void appendGeoJSONObj(BSONObjBuilder& bob,
  */
 void appendGeometryOperator(BSONObjBuilder& bob,
                             const BSONElement& geometryElem,
-                            const SerializationOptions& opts) {
+                            const query_shape::SerializationOptions& opts) {
     if (geometryElem.type() == BSONType::array) {
         // This would be like {$geometry: [0, 0]} which must be a point.
         auto asArray = geometryElem.Array();
@@ -279,9 +253,9 @@ void appendGeometryOperator(BSONObjBuilder& bob,
  * coordinates: [1,2]}, $minDistance: 10}).
  */
 void appendGeoNearOperator(BSONObjBuilder& bob,
-                           StringData fieldName,
+                           std::string_view fieldName,
                            const BSONElement& geoNearElem,
-                           const SerializationOptions& opts) {
+                           const query_shape::SerializationOptions& opts) {
     if (geoNearElem.type() == BSONType::array) {
         appendGeoNearLegacyArray(bob, geoNearElem, opts);
     } else {
@@ -350,13 +324,13 @@ void appendGeoNearOperator(BSONObjBuilder& bob,
  */
 void geoNearExpressionCustomSerialization(BSONObjBuilder& bob,
                                           const BSONObj& obj,
-                                          const SerializationOptions& opts,
+                                          const query_shape::SerializationOptions& opts,
                                           bool includePath) {
     BSONObjIterator outer_it(obj);
     while (outer_it.more()) {
         auto elem = outer_it.next();
         if (elem.isABSONObj()) {
-            StringData fieldName = elem.fieldNameStringData();
+            std::string_view fieldName = elem.fieldNameStringData();
             if (fieldName == kNearField || fieldName == kGeoNearField ||
                 fieldName == kNearSphereField) {
                 appendGeoNearOperator(bob, fieldName, elem, opts);
@@ -374,7 +348,7 @@ void geoNearExpressionCustomSerialization(BSONObjBuilder& bob,
 
 void serializeGeoOperator(BSONObjBuilder& bob,
                           const BSONObj& obj,
-                          const SerializationOptions& opts) {
+                          const query_shape::SerializationOptions& opts) {
     BSONObjIterator it(obj);
     while (it.more()) {
         auto elem = it.next();
@@ -403,7 +377,7 @@ void serializeGeoOperator(BSONObjBuilder& bob,
  */
 void geoExpressionCustomSerialization(BSONObjBuilder& bob,
                                       const BSONObj& obj,
-                                      const SerializationOptions& opts,
+                                      const query_shape::SerializationOptions& opts,
                                       bool includePath) {
     BSONObjIterator outerIt(obj);
     BSONElement geoExprElem = outerIt.next();

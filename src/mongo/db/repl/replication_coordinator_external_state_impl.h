@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,6 +9,9 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/bgsync.h"
+#include "mongo/db/repl/clang_checked/checked_mutex.h"
+#include "mongo/db/repl/clang_checked/mutex.h"
+#include "mongo/db/repl/clang_checked/thread_safety_annotations.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_buffer.h"
@@ -72,7 +49,7 @@ class StorageInterface;
 
 class NoopWriter;
 
-class MONGO_MOD_PUB ReplicationCoordinatorExternalStateImpl final
+class [[MONGO_MOD_PUBLIC]] ReplicationCoordinatorExternalStateImpl final
     : public ReplicationCoordinatorExternalState,
       public JournalListener {
     ReplicationCoordinatorExternalStateImpl(const ReplicationCoordinatorExternalStateImpl&) =
@@ -81,7 +58,7 @@ class MONGO_MOD_PUB ReplicationCoordinatorExternalStateImpl final
         const ReplicationCoordinatorExternalStateImpl&) = delete;
 
 public:
-    class MONGO_MOD_PRIVATE ReplDurabilityToken : public JournalListener::Token {
+    class [[MONGO_MOD_PRIVATE]] ReplDurabilityToken : public JournalListener::Token {
     public:
         ReplDurabilityToken(OpTimeAndWallTime opTimeAndWallTime, bool isPrimary)
             : opTimeAndWallTime(opTimeAndWallTime), isPrimary(isPrimary) {}
@@ -161,10 +138,13 @@ public:
     bool isShardPartOfShardedCluster(OperationContext* opCtx) const final;
 
 private:
+    using ThreadMutex = clang_checked::CheckedMutex<std::mutex>;
+
     /**
      * Stops data replication and returns with 'lock' locked.
      */
-    void _stopDataReplication(OperationContext* opCtx, std::unique_lock<std::mutex>& lock);
+    void _stopDataReplication(OperationContext* opCtx,
+                              clang_checked::unique_lock<ThreadMutex>& lock);
 
     /**
      * Drops all temporary collections on all databases except "local".
@@ -196,10 +176,10 @@ private:
     ServiceContext* _service;
 
     // Guards starting threads and setting _startedThreads
-    std::mutex _threadMutex;
+    mutable ThreadMutex _threadMutex;
 
     // Flag for guarding against concurrent data replication stopping.
-    bool _stoppingDataReplication = false;
+    bool _stoppingDataReplication MONGO_LOCKING_GUARDED_BY(_threadMutex) = false;
     stdx::condition_variable _dataReplicationStopped;
 
     StorageInterface* _storageInterface;
@@ -207,10 +187,10 @@ private:
     ReplicationProcess* _replicationProcess;
 
     // True when the threads have been started
-    bool _startedThreads = false;
+    bool _startedThreads MONGO_LOCKING_GUARDED_BY(_threadMutex) = false;
 
     // Set to true when we are in the process of shutting down replication.
-    bool _inShutdown = false;
+    bool _inShutdown MONGO_LOCKING_GUARDED_BY(_threadMutex) = false;
 
     // The SyncSourceFeedback class is responsible for sending replSetUpdatePosition commands
     // for forwarding replication progress information upstream when there is chained
@@ -221,7 +201,7 @@ private:
     // replication, BackgroundSync adds operations to this buffer while OplogWriter's batcher
     // consumes these operations from this buffer in batches.
     // Note: Only initialized and used when featureFlagReduceMajorityWriteLatency is enabled.
-    std::unique_ptr<OplogBuffer> _oplogWriteBuffer;
+    std::unique_ptr<OplogBuffer> _oplogWriteBuffer MONGO_LOCKING_GUARDED_BY(_threadMutex);
 
     // When featureFlagReduceMajorityWriteLatency is enabled:
     // This buffer is used to hold operations written by the OplogWriter. During steady state
@@ -232,37 +212,48 @@ private:
     // This buffer is used to hold operations read from the sync source. During steady state
     // replication, BackgroundSync adds operations to this buffer while OplogApplier's batcher
     // consumes these operations from this buffer in batches.
-    std::unique_ptr<OplogBuffer> _oplogApplyBuffer;
+    std::unique_ptr<OplogBuffer> _oplogApplyBuffer MONGO_LOCKING_GUARDED_BY(_threadMutex);
 
     // The BackgroundSync class is responsible for pulling ops off the network from the sync source
     // and into a BlockingQueue.
     // We can't create it on construction because it needs a fully constructed
     // ReplicationCoordinator, but this ExternalState object is constructed prior to the
     // ReplicationCoordinator.
-    std::unique_ptr<BackgroundSync> _bgSync;
+    std::unique_ptr<BackgroundSync> _bgSync MONGO_LOCKING_GUARDED_BY(_threadMutex);
+
+    // Set by stopProducer() when _bgSync is null, so that startSteadyStateReplication() can stop
+    // the producer immediately after creating _bgSync. Guarded by _threadMutex to prevent race
+    // conditions.
+    bool _stopProducerRequested MONGO_LOCKING_GUARDED_BY(_threadMutex) = false;
 
     // Thread running SyncSourceFeedback::run().
-    std::unique_ptr<stdx::thread> _syncSourceFeedbackThread;
+    std::unique_ptr<stdx::thread> _syncSourceFeedbackThread MONGO_LOCKING_GUARDED_BY(_threadMutex);
 
     // Thread running oplog write.
     // Note: Only initialized and used when featureFlagReduceMajorityWriteLatency is enabled.
-    std::shared_ptr<executor::TaskExecutor> _oplogWriterTaskExecutor;
-    std::unique_ptr<OplogWriter> _oplogWriter;
-    Future<void> _oplogWriterShutdownFuture;
+    std::shared_ptr<executor::TaskExecutor> _oplogWriterTaskExecutor
+        MONGO_LOCKING_GUARDED_BY(_threadMutex);
+    std::unique_ptr<OplogWriter> _oplogWriter MONGO_LOCKING_GUARDED_BY(_threadMutex);
+    Future<void> _oplogWriterShutdownFuture MONGO_LOCKING_GUARDED_BY(_threadMutex);
 
     // Thread running oplog application.
-    std::shared_ptr<executor::TaskExecutor> _oplogApplierTaskExecutor;
-    std::unique_ptr<OplogApplier> _oplogApplier;
-    Future<void> _oplogApplierShutdownFuture;
+    std::shared_ptr<executor::TaskExecutor> _oplogApplierTaskExecutor
+        MONGO_LOCKING_GUARDED_BY(_threadMutex);
+    std::unique_ptr<OplogApplier> _oplogApplier MONGO_LOCKING_GUARDED_BY(_threadMutex);
+    Future<void> _oplogApplierShutdownFuture MONGO_LOCKING_GUARDED_BY(_threadMutex);
 
     // Task executor used to run replication tasks.
-    std::shared_ptr<executor::TaskExecutor> _taskExecutor;
+    // Constructed at init time, so the pointer is immutable and can be read without a lock.
+    // The executor's own internal synchronization handles startup()/shutdown()/join().
+    const std::shared_ptr<executor::TaskExecutor> _taskExecutor;
 
     // Used by OplogApplier::applyOplogBatch() to apply the sync source's operations in parallel.
     // Also used by database and collection cloners to perform storage operations.
     // Cloners and oplog application run in separate phases of initial sync so it is fine to share
     // this thread pool.
-    std::unique_ptr<ThreadPool> _workerPool;
+    // Constructed at init time, so the pointer is immutable and can be read without a lock.
+    // The pool's own internal synchronization handles shutdown()/join().
+    const std::unique_ptr<ThreadPool> _workerPool;
 
     // Writes a noop every 10 seconds.
     std::unique_ptr<NoopWriter> _noopWriter;

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/change_stream_event_transform.h"
 
@@ -59,6 +33,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 using namespace change_stream_test_helper;
 
 repl::MutableOplogEntry buildMovePrimaryOplogEntry(OperationContext* opCtx,
@@ -173,7 +148,40 @@ TEST(ChangeStreamEventTransformTest, TestCreateCollectionTransform) {
         {DocumentSourceChangeStream::kNamespaceField,
          Document{{"db", nss.db_forTest()}, {"coll", nss.coll()}}},
         {DocumentSourceChangeStream::kOperationDescriptionField, opDescription},
-        {DocumentSourceChangeStream::kNsTypeField, "collection"_sd}};
+        {DocumentSourceChangeStream::kNsTypeField, "collection"sv}};
+
+    ASSERT_DOCUMENT_EQ(applyTransformation(oplogEntry), expectedDoc);
+}
+
+TEST(ChangeStreamEventTransformTest, TestCreateCollectionTransformStripsRecordIdsReplicated) {
+    const NamespaceString nss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "testDB.coll.name");
+    // Namespace for the command, i.e. "testDB.$cmd".
+    const NamespaceString commandNss = NamespaceString::makeCommandNamespace(nss.dbName());
+    const auto opDescription = Value(fromjson("{idIndex: {v: 2, key: {_id: 1}, name: '_id_'}}"));
+    const auto idIndex = Value(fromjson("{v: 2, key: {_id: 1}, name: '_id_'}"));
+    auto oplogEntry = makeOplogEntry(
+        repl::OpTypeEnum::kCommand,  // op type
+        commandNss,                  // namespace
+        BSON("create" << nss.coll() << "idIndex" << idIndex << "recordIdsReplicated" << true),  // o
+        testUuid(),    // uuid
+        boost::none,   // fromMigrate
+        boost::none);  // o2
+
+    // 'recordIdsReplicated' is internal and must not show up in 'operationDescription'.
+    Document expectedDoc{
+        {DocumentSourceChangeStream::kIdField,
+         makeResumeToken(
+             kDefaultTs, testUuid(), opDescription, DocumentSourceChangeStream::kCreateOpType)},
+        {DocumentSourceChangeStream::kOperationTypeField,
+         DocumentSourceChangeStream::kCreateOpType},
+        {DocumentSourceChangeStream::kClusterTimeField, kDefaultTs},
+        {DocumentSourceChangeStream::kCollectionUuidField, testUuid()},
+        {DocumentSourceChangeStream::kWallTimeField, Date_t()},
+        {DocumentSourceChangeStream::kNamespaceField,
+         Document{{"db", nss.db_forTest()}, {"coll", nss.coll()}}},
+        {DocumentSourceChangeStream::kOperationDescriptionField, opDescription},
+        {DocumentSourceChangeStream::kNsTypeField, "collection"sv}};
 
     ASSERT_DOCUMENT_EQ(applyTransformation(oplogEntry), expectedDoc);
 }
@@ -217,7 +225,7 @@ TEST(ChangeStreamEventTransformTest, TestCreateViewTransform) {
         NamespaceString::createNamespaceString_forTest(boost::none, "viewDB.view.name");
     const auto viewPipeline =
         Value(fromjson("[{$match: {field: 'value'}}, {$project: {field: 1}}]"));
-    const auto opDescription = Document{{"viewOn", "baseColl"_sd}, {"pipeline", viewPipeline}};
+    const auto opDescription = Document{{"viewOn", "baseColl"sv}, {"pipeline", viewPipeline}};
     auto oplogEntry = makeOplogEntry(repl::OpTypeEnum::kInsert,  // op type
                                      systemViewNss,              // namespace
                                      BSON("_id" << viewNss.toString_forTest() << "viewOn"
@@ -238,7 +246,7 @@ TEST(ChangeStreamEventTransformTest, TestCreateViewTransform) {
         {DocumentSourceChangeStream::kNamespaceField,
          Document{{"db", viewNss.db_forTest()}, {"coll", viewNss.coll()}}},
         {DocumentSourceChangeStream::kOperationDescriptionField, opDescription},
-        {DocumentSourceChangeStream::kNsTypeField, "view"_sd}};
+        {DocumentSourceChangeStream::kNsTypeField, "view"sv}};
 
     ASSERT_DOCUMENT_EQ(
         applyTransformation(oplogEntry,
@@ -251,7 +259,7 @@ TEST(ChangeStreamEventTransformTest, TestCreateTimeseriesTransform) {
     const NamespaceString systemViewNss = NamespaceString::makeSystemDotViewsNamespace(
         DatabaseName::createDatabaseName_forTest(boost::none, "timeseriesDB"));
     const NamespaceString collNss =
-        NamespaceString::createNamespaceString_forTest("timeseriesDB"_sd, "timeseriesColl"_sd);
+        NamespaceString::createNamespaceString_forTest("timeseriesDB"sv, "timeseriesColl"sv);
     const NamespaceString viewNss = collNss.makeTimeseriesBucketsNamespace();
     const auto viewPipeline = Value(
         fromjson("[{_internalUnpackBucket: {timeField: 'time', bucketMaxSpanSeconds: 3600}}]"));
@@ -259,7 +267,7 @@ TEST(ChangeStreamEventTransformTest, TestCreateTimeseriesTransform) {
     auto oplogEntry = makeOplogEntry(
         repl::OpTypeEnum::kInsert,  // op type
         NamespaceString::makeSystemDotViewsNamespace(
-            DatabaseName::createDatabaseName_forTest(boost::none, "timeseriesDB"_sd)),  // namespace
+            DatabaseName::createDatabaseName_forTest(boost::none, "timeseriesDB"sv)),  // namespace
         BSON("_id" << collNss.toString_forTest() << "viewOn" << viewNss.coll() << "pipeline"
                    << viewPipeline),  // o
         testUuid(),                   // uuid
@@ -277,7 +285,7 @@ TEST(ChangeStreamEventTransformTest, TestCreateTimeseriesTransform) {
         {DocumentSourceChangeStream::kNamespaceField,
          Document{{"db", viewNss.db_forTest()}, {"coll", collNss.coll()}}},
         {DocumentSourceChangeStream::kOperationDescriptionField, opDescription},
-        {DocumentSourceChangeStream::kNsTypeField, "timeseries"_sd}};
+        {DocumentSourceChangeStream::kNsTypeField, "timeseries"sv}};
 
     ASSERT_DOCUMENT_EQ(applyTransformation(oplogEntry,
                                            NamespaceString::makeCollectionlessAggregateNSS(
@@ -308,7 +316,7 @@ TEST(
                        boost::none);  // o2
     Document resultDoc = applyTransformation(oplogEntry, nss);
 
-    ASSERT_EQ(resultDoc[DocumentSourceChangeStream::kNsTypeField].getStringData(), "timeseries"_sd);
+    ASSERT_EQ(resultDoc[DocumentSourceChangeStream::kNsTypeField].getStringData(), "timeseries"sv);
 }
 
 TEST(ChangeStreamEventTransformTest, TestCreateViewOnSingleCollection) {
@@ -354,8 +362,8 @@ TEST(ChangeStreamEventTransformTest, TransformNewShardDetected) {
     const NamespaceString nss =
         NamespaceString::createNamespaceString_forTest(boost::none, "testDB.coll.name");
     auto o2Field = Document{{"migrateChunkToNewShard", nss.toString_forTest()},
-                            {"fromShardId", "fromShard"_sd},
-                            {"toShardId", "toShard"_sd}};
+                            {"fromShardId", "fromShard"sv},
+                            {"toShardId", "toShard"sv}};
     auto oplogEntry = makeOplogEntry(repl::OpTypeEnum::kNoop,
                                      nss,
                                      BSONObj(),
@@ -363,8 +371,7 @@ TEST(ChangeStreamEventTransformTest, TransformNewShardDetected) {
                                      boost::none,  // fromMigrate
                                      o2Field.toBson());
 
-    const auto opDesc =
-        Value(Document{{"fromShardId", "fromShard"_sd}, {"toShardId", "toShard"_sd}});
+    const auto opDesc = Value(Document{{"fromShardId", "fromShard"sv}, {"toShardId", "toShard"sv}});
     Document expectedDoc{
         {DocumentSourceChangeStream::kIdField,
          makeResumeToken(
@@ -428,14 +435,14 @@ TEST(
     auto oplogEntry = buildMovePrimaryOplogEntry(
         opCtx.get(), nss.dbName(), ShardId("oldPrimary"), ShardId("newPrimary"));
     auto opDescription = Document{{
-        {"from"_sd, "oldPrimary"_sd},
-        {"to"_sd, "newPrimary"_sd},
+        {"from"sv, "oldPrimary"sv},
+        {"to"sv, "newPrimary"sv},
     }};
 
     Document expectedDoc{
         {DocumentSourceChangeStream::kIdField,
          makeResumeToken(kDefaultTs, Value(), opDescription, "movePrimary")},
-        {DocumentSourceChangeStream::kOperationTypeField, "movePrimary"_sd},
+        {DocumentSourceChangeStream::kOperationTypeField, "movePrimary"sv},
         {DocumentSourceChangeStream::kClusterTimeField, kDefaultTs},
         {DocumentSourceChangeStream::kWallTimeField, Date_t()},
         {DocumentSourceChangeStream::kNamespaceField, Document{{"db", nss.db_forTest()}}},
@@ -490,7 +497,7 @@ DEATH_TEST_REGEX(ChangeStreamEventTransformDeathTest,
     // Container insert ("ci") oplog type is not supported by the event transformer.
     auto oplogEntry =
         repl::makeContainerInsertOplogEntry(repl::OpTime(Timestamp(10, 10), 1 /* term */),
-                                            "containerIdent"_sd,
+                                            "containerIdent"sv,
                                             1LL,
                                             BSONBinData("V", 1, BinDataGeneral));
 
@@ -504,7 +511,7 @@ DEATH_TEST_REGEX(ChangeStreamEventTransformDeathTest,
     // Container update ("cu") oplog type is not supported by the event transformer.
     auto oplogEntry =
         repl::makeContainerUpdateOplogEntry(repl::OpTime(Timestamp(10, 10), 1 /* term */),
-                                            "containerIdent"_sd,
+                                            "containerIdent"sv,
                                             1LL,
                                             BSONBinData("V", 1, BinDataGeneral));
 
@@ -517,7 +524,7 @@ DEATH_TEST_REGEX(ChangeStreamEventTransformDeathTest,
                  "Tripwire assertion.*11888301") {
     // Container delete ("cd") oplog type is not supported by the event transformer.
     auto oplogEntry = repl::makeContainerDeleteOplogEntry(
-        repl::OpTime(Timestamp(10, 10), 1 /* term */), "containerIdent"_sd, 1LL);
+        repl::OpTime(Timestamp(10, 10), 1 /* term */), "containerIdent"sv, 1LL);
 
     // This will tassert in the event transformer, because it does not expect a 'cd' oplog entry.
     ASSERT_THROWS_CODE(applyTransformation(oplogEntry), AssertionException, 11888301);
@@ -545,7 +552,7 @@ DEATH_TEST_REGEX(ChangeStreamEventTransformDeathTest,
                  "Tripwire assertion.*11352603.*Unsupported oplog entry type") {
     // Need to create an invalid oplog 'document' here, as 'repl::OplogEntry' validates its invalid
     // and cannot be created with an invalid "op" type.
-    auto oplogDoc = Document{{"op", "unexpected"_sd}, {"ns", nss.toString_forTest()}};
+    auto oplogDoc = Document{{"op", "unexpected"sv}, {"ns", nss.toString_forTest()}};
 
     // Cannot simply call 'applyTransformation()' here, because it expects a 'repl::OplogEntry'
     // parameter. Thus create the transformer manually here in order to execute it with an invalid
@@ -566,7 +573,7 @@ DEATH_TEST_REGEX(ChangeStreamEventTransformDeathTest,
     // and cannot be created with an invalid "op" type.
     const NamespaceString viewNss = NamespaceString::makeSystemDotViewsNamespace(
         DatabaseName::createDatabaseName_forTest(boost::none, "test"));
-    auto oplogDoc = Document{{"op", "unexpected"_sd}, {"ns", viewNss.toString_forTest()}};
+    auto oplogDoc = Document{{"op", "unexpected"sv}, {"ns", viewNss.toString_forTest()}};
 
     // Cannot simply call 'applyTransformation()' here, because it expects a 'repl::OplogEntry'
     // parameter. Thus create the transformer manually here in order to execute it with an invalid
@@ -602,7 +609,7 @@ TEST(
          Document{{"db", collNss.db_forTest()}, {"coll", collNss.coll()}}},
         {DocumentSourceChangeStream::kIdField,
          makeResumeToken(kDefaultTs, testUuid(), opDescription, "rename")},
-        {DocumentSourceChangeStream::kOperationTypeField, "rename"_sd},
+        {DocumentSourceChangeStream::kOperationTypeField, "rename"sv},
         {DocumentSourceChangeStream::kClusterTimeField, kDefaultTs},
         {DocumentSourceChangeStream::kCollectionUuidField, testUuid()},
         {DocumentSourceChangeStream::kWallTimeField, Date_t()},
@@ -631,7 +638,7 @@ TEST(
          Document{{"db", bucketsNss.db_forTest()}, {"coll", bucketsNss.coll()}}},
         {DocumentSourceChangeStream::kIdField,
          makeResumeToken(kDefaultTs, testUuid(), opDescription, "rename")},
-        {DocumentSourceChangeStream::kOperationTypeField, "rename"_sd},
+        {DocumentSourceChangeStream::kOperationTypeField, "rename"sv},
         {DocumentSourceChangeStream::kClusterTimeField, kDefaultTs},
         {DocumentSourceChangeStream::kCollectionUuidField, testUuid()},
         {DocumentSourceChangeStream::kWallTimeField, Date_t()},
@@ -642,6 +649,64 @@ TEST(
              BSON("to" << BSON("db" << bucketsNss.db_forTest() << "coll" << bucketsNss.coll()))}},
     };
     ASSERT_DOCUMENT_EQ(applyTransformation(immutableEntry, collNss), expectedDoc);
+}
+
+// Applies the default transformation with a caller-provided spec, without forcing
+// 'showExpandedEvents' like the applyTransformation() helper above does.
+Document applyTransformationWithSpec(const repl::OplogEntry& oplogEntry,
+                                     DocumentSourceChangeStreamSpec spec) {
+    spec.setStartAtOperationTime(kDefaultTs);
+    ChangeStreamEventTransformer transformer(make_intrusive<ExpressionContextForTest>(nss), spec);
+    return transformer.applyTransformation(Document(oplogEntry.getEntry().toBSON()));
+}
+
+repl::OplogEntry makeUpdateOplogEntry() {
+    return makeOplogEntry(repl::OpTypeEnum::kUpdate,
+                          nss,
+                          BSON("$v" << 2 << "diff" << BSON("u" << BSON("y" << 2))),  // o
+                          testUuid(),
+                          boost::none,                  // fromMigrate
+                          BSON("x" << 1 << "y" << 1));  // o2
+}
+
+TEST(ChangeStreamEventTransformTest, MatchCollectionUUIDForUpdateLookupEmitsCollectionUUID) {
+    DocumentSourceChangeStreamSpec spec;
+    spec.setFullDocument(FullDocumentModeEnum::kUpdateLookup);
+    spec.setMatchCollectionUUIDForUpdateLookup(true);
+
+    auto event = applyTransformationWithSpec(makeUpdateOplogEntry(), spec);
+    ASSERT_VALUE_EQ(event[DocumentSourceChangeStream::kCollectionUuidField], Value(testUuid()));
+}
+
+TEST(ChangeStreamEventTransformTest, UpdateLookupWithoutMatchCollectionUUIDOmitsCollectionUUID) {
+    DocumentSourceChangeStreamSpec spec;
+    spec.setFullDocument(FullDocumentModeEnum::kUpdateLookup);
+
+    auto event = applyTransformationWithSpec(makeUpdateOplogEntry(), spec);
+    ASSERT_TRUE(event[DocumentSourceChangeStream::kCollectionUuidField].missing());
+}
+
+TEST(ChangeStreamEventTransformTest, MatchCollectionUUIDForUpdateLookupOmitsUUIDOnNonUpdateEvents) {
+    DocumentSourceChangeStreamSpec spec;
+    spec.setFullDocument(FullDocumentModeEnum::kUpdateLookup);
+    spec.setMatchCollectionUUIDForUpdateLookup(true);
+
+    auto insertEntry = makeOplogEntry(repl::OpTypeEnum::kInsert,
+                                      nss,
+                                      BSON("_id" << 1 << "x" << 2),  // o
+                                      testUuid(),
+                                      boost::none,        // fromMigrate
+                                      BSON("_id" << 1));  // o2
+    auto event = applyTransformationWithSpec(insertEntry, spec);
+    ASSERT_TRUE(event[DocumentSourceChangeStream::kCollectionUuidField].missing());
+}
+
+TEST(ChangeStreamEventTransformTest, ShowExpandedEventsEmitsCollectionUUIDWithoutMatchFlag) {
+    DocumentSourceChangeStreamSpec spec;
+    spec.setShowExpandedEvents(true);
+
+    auto event = applyTransformationWithSpec(makeUpdateOplogEntry(), spec);
+    ASSERT_VALUE_EQ(event[DocumentSourceChangeStream::kCollectionUuidField], Value(testUuid()));
 }
 
 }  // namespace

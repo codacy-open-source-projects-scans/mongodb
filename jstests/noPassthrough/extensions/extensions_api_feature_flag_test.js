@@ -3,25 +3,37 @@
  *
  * TODO SERVER-106932: Remove this test when 'featureFlagExtensionsAPI' is removed.
  */
-import {deleteExtensionConfigs, generateExtensionConfigs} from "jstests/noPassthrough/libs/extension_helpers.js";
+import {
+    deleteExtensionConfigs,
+    generateExtensionConfigs,
+    getExtensionConfDir,
+    isPlatformCompatibleWithExtensions,
+} from "jstests/noPassthrough/libs/extension_helpers.js";
+
+// mongod fasserts on extension load failure, raising SIGABRT signal.
+// This flag must remain true at test end so resmoke cleans up the dump in its post-test scan.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
 
 const extensions = generateExtensionConfigs("libfoo_mongo_extension.so");
 
 try {
     // The 'loadExtensions' startup parameter should fail when featureFlagExtensionsAPI is off.
-    {
+    // On non-Linux, extensions are unsupported entirely and mongod exits with badOptions before
+    // reaching the feature flag check; that behavior is covered by extensions_loading_error_cases.js.
+    if (isPlatformCompatibleWithExtensions()) {
         try {
             const conn = MongoRunner.runMongod({
                 setParameter: {featureFlagExtensionsAPI: false},
                 // Use a real extension name to ensure that the feature flag is causing the failure,
                 // not a missing extension.
                 loadExtensions: extensions[0],
+                extensionsConfigPath: getExtensionConfDir(),
             });
             // If we've reached this point, startup did not fail as expected.
             MongoRunner.stopMongod(conn);
             assert(false, "Expected startup to fail but it succeeded");
         } catch (e) {
-            assert.eq(e.returnCode, MongoRunner.EXIT_BADOPTIONS, e);
+            assert.eq(e.returnCode, MongoRunner.EXIT_ABORT, e);
         }
     }
 
@@ -32,7 +44,11 @@ try {
         const adminDB = conn.getDB("admin");
 
         // $listExtensions should fail when the feature flag is off.
-        const res = adminDB.runCommand({aggregate: 1, pipeline: [{$listExtensions: {}}], cursor: {}});
+        const res = adminDB.runCommand({
+            aggregate: 1,
+            pipeline: [{$listExtensions: {}}],
+            cursor: {},
+        });
         assert.commandFailedWithCode(res, ErrorCodes.QueryFeatureNotAllowed);
 
         MongoRunner.stopMongod(conn);

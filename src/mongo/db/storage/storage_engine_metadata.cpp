@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include <cerrno>
 #include <exception>
 #include <fstream>  // IWYU pragma: keep
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -45,7 +20,6 @@
 #endif
 
 #include "mongo/base/data_range.h"
-#include "mongo/base/data_type_validated.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -56,7 +30,7 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
+#include "mongo/rpc/object_check.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/file.h"
@@ -184,12 +158,12 @@ Status StorageEngineMetadata::read() {
     }
 
     ConstDataRange cdr(&buffer[0], buffer.size());
-    auto swObj = cdr.readNoThrow<Validated<BSONObj>>();
+    auto swObj = cdr.readNoThrow<rpc::ValidatedBSONObj>();
     if (!swObj.isOK()) {
         return swObj.getStatus();
     }
 
-    BSONObj obj = swObj.getValue();
+    BSONObj obj{swObj.getValue()};
 
     // Validate 'storage.engine' field.
     BSONElement storageEngineElement =
@@ -245,9 +219,9 @@ void flushMyDirectory(const boost::filesystem::path& file) {
     int fd = ::open(dir.string().c_str(), O_RDONLY);  // DO NOT THROW OR ASSERT BEFORE CLOSING
     if (fd < 0) {
         auto ec = lastPosixError();
-        msgasserted(13650,
-                    str::stream() << "Couldn't open directory '" << dir.string()
-                                  << "' for flushing: " << errorMessage(ec));
+        masserted(13650,
+                  str::stream() << "Couldn't open directory '" << dir.string()
+                                << "' for flushing: " << errorMessage(ec));
     }
     if (fsync(fd) != 0) {
         auto ec = lastPosixError();
@@ -263,9 +237,9 @@ void flushMyDirectory(const boost::filesystem::path& file) {
             }
         } else {
             close(fd);
-            msgasserted(13651,
-                        str::stream() << "Couldn't fsync directory '" << dir.string()
-                                      << "': " << errorMessage(ec));
+            masserted(13651,
+                      str::stream() << "Couldn't fsync directory '" << dir.string()
+                                    << "': " << errorMessage(ec));
         }
     }
     close(fd);
@@ -325,7 +299,7 @@ Status StorageEngineMetadata::write() const {
 
 template <>
 Status StorageEngineMetadata::validateStorageEngineOption<bool>(
-    StringData fieldName, bool expectedValue, boost::optional<bool> defaultValue) const {
+    std::string_view fieldName, bool expectedValue, boost::optional<bool> defaultValue) const {
     BSONElement element = _storageEngineOptions.getField(fieldName);
     if (element.eoo()) {
         if (defaultValue && *defaultValue != expectedValue) {

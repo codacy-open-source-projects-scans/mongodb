@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/index_builds/index_builds_manager.h"
@@ -35,8 +9,12 @@
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_builds/index_build_knobs_gen.h"
 #include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/index_builds/primary_driven/registry.h"
+#include "mongo/db/index_builds/primary_driven/util.h"
+#include "mongo/db/index_builds/primary_driven_index_build_knobs_gen.h"
 #include "mongo/db/index_repair.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -47,13 +25,14 @@
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/scopeguard.h"
@@ -135,6 +114,18 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
                                                options.protocol != IndexBuildProtocol::kSinglePhase
                                            ? ContainerWriteBehavior::kReplicate
                                            : ContainerWriteBehavior::kDoNotReplicate);
+    builder->setIsResumable(options.isResumable);
+
+    // Hint to the storage engine that this index build should not keep data that it reads in the
+    // cache.
+    shard_role_details::getRecoveryUnit(opCtx)->setReadOnce(
+        useReadOnceCursorsForIndexBuilds.load());
+
+    if (options.method == IndexBuildMethodEnum::kPrimaryDriven &&
+        !opCtx->getServiceContext()->getStorageEngine()->isEphemeral()) {
+        shard_role_details::getRecoveryUnit(opCtx)->setPrefetching(
+            index_builds::primary_driven::prefetching.load());
+    }
 
     try {
         writeConflictRetry(opCtx, "IndexBuildsManager::setUpIndexBuild", nss, [&]() {
@@ -146,6 +137,15 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
         });
     } catch (const DBException& ex) {
         return ex.toStatus();
+    }
+
+    if (options.protocol == IndexBuildProtocol::kPrimaryDriven) {
+        index_builds::primary_driven::registry(opCtx->getServiceContext())
+            .add(buildUUID,
+                 collection->ns().dbName(),
+                 collection->uuid(),
+                 indexes,
+                 ident::generateNewIndexBuildIdent(buildUUID));
     }
 
     return Status::OK();
@@ -396,8 +396,7 @@ bool IndexBuildsManager::abortIndexBuild(OperationContext* opCtx,
 
 bool IndexBuildsManager::abortIndexBuildWithoutCleanup(OperationContext* opCtx,
                                                        const CollectionPtr& collection,
-                                                       const UUID& buildUUID,
-                                                       bool isResumable) {
+                                                       const UUID& buildUUID) {
     auto builder = _getBuilder(buildUUID);
     if (!builder.isOK()) {
         return false;
@@ -413,9 +412,17 @@ bool IndexBuildsManager::abortIndexBuildWithoutCleanup(OperationContext* opCtx,
     }
     LOGV2(20347, "Index build: aborted without cleanup", attrs);
 
-    builder.getValue()->abortWithoutCleanup(opCtx, collection, isResumable);
+    builder.getValue()->abortWithoutCleanup(opCtx, collection);
 
     return true;
+}
+
+void IndexBuildsManager::setIsResumable(const UUID& buildUUID, bool isResumable) {
+    auto builder = _getBuilder(buildUUID);
+    if (!builder.isOK()) {
+        return;
+    }
+    builder.getValue()->setIsResumable(isResumable);
 }
 
 bool IndexBuildsManager::isBackgroundBuilding(const UUID& buildUUID) {
@@ -432,6 +439,29 @@ void IndexBuildsManager::appendBuildInfo(const UUID& buildUUID, BSONObjBuilder* 
     }
 
     builderIt->second->appendBuildInfo(builder);
+}
+
+boost::optional<IndexBuildPhaseEnum> IndexBuildsManager::getPhase(const UUID& buildUUID) const {
+    std::unique_lock<std::mutex> lk(_mutex);
+
+    auto builderIt = _builders.find(buildUUID);
+    if (builderIt == _builders.end()) {
+        return boost::none;
+    }
+
+    return builderIt->second->getPhase();
+}
+
+boost::optional<MultiIndexBlock::IndexBuildWriteStats>
+IndexBuildsManager::getNumKeysAndBytesWritten(const UUID& buildUUID) const {
+    std::unique_lock<std::mutex> lk(_mutex);
+
+    auto builderIt = _builders.find(buildUUID);
+    if (builderIt == _builders.end()) {
+        return boost::none;
+    }
+
+    return builderIt->second->getIndexTableWrites();
 }
 
 void IndexBuildsManager::verifyNoIndexBuilds_forTestOnly() {

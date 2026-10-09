@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/transaction_coordinator_service.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,8 +23,8 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -541,7 +514,7 @@ TEST_F(TransactionCoordinatorServiceTest,
     {
         // Set this server parameter so coordinateCommit returns the decision future instead of the
         // completion future.
-        RAIIServerParameterControllerForTest controller{
+        unittest::ServerParameterGuard controller{
             "coordinateCommitReturnImmediatelyAfterPersistingDecision", true};
         auto decisionFuture = *coordinatorService->coordinateCommit(
             operationContext(), _lsid, _txnNumberAndRetryCounter, kOneShardIdSet);
@@ -643,7 +616,7 @@ TEST_F(TransactionCoordinatorServiceTest,
 
         // Set this server parameter so coordinateCommit returns the decision future instead of the
         // completion future.
-        RAIIServerParameterControllerForTest controller{
+        unittest::ServerParameterGuard controller{
             "coordinateCommitReturnImmediatelyAfterPersistingDecision", true};
 
         auto oldTxnCommitDecisionFuture = *coordinatorService->coordinateCommit(
@@ -1030,7 +1003,9 @@ TEST_F(TransactionCoordinatorServiceTest,
 
     // Vote commit before the deadline
     onCommands({[&](const executor::RemoteCommandRequest&) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest&) { return kPrepareOk; }});
+                [&](const executor::RemoteCommandRequest&) {
+                    return kPrepareOk;
+                }});
 
     // Reach the deadline.
     network()->enterNetwork();
@@ -1075,7 +1050,9 @@ TEST_F(TransactionCoordinatorServiceTestSingleTxn,
 
     // Simulate a participant voting to abort.
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kNoSuchTransaction;
+                }});
 
     assertAbortSentAndRespondWithSuccess();
     assertAbortSentAndRespondWithSuccess();

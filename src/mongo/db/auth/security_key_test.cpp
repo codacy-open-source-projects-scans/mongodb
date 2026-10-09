@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/security_key.h"
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/auth/auth_name.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/cluster_auth_mode.h"
@@ -46,6 +19,7 @@
 #include <memory>
 #include <ostream>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -66,7 +40,8 @@ class TestFile {
     TestFile& operator=(TestFile&) = delete;
 
 public:
-    TestFile(StringData contents, bool fixPerms = true) : _path(boost::filesystem::unique_path()) {
+    TestFile(std::string_view contents, bool fixPerms = true)
+        : _path(boost::filesystem::unique_path()) {
         boost::filesystem::ofstream stream(_path, std::ios_base::out | std::ios_base::trunc);
         ASSERT_TRUE(stream.good());
 
@@ -93,7 +68,7 @@ private:
 struct TestCase {
     enum class FailureMode { Success, Permissions, Parsing, SecurityKeyConstraint };
 
-    TestCase(StringData contents_,
+    TestCase(std::string_view contents_,
              std::initializer_list<std::string> expected_,
              FailureMode mode_ = FailureMode::Success)
         : fileContents(std::string{contents_}), expected(expected_), mode(mode_) {}
@@ -103,13 +78,13 @@ struct TestCase {
     FailureMode mode = FailureMode::Success;
 };
 
-StringData longKeyMaker() {
+std::string_view longKeyMaker() {
     static const auto longKey = [] {
         std::array<char, 1026> ret;
         ret.fill('a');
         return ret;
     }();
-    return StringData(longKey.data(), longKey.size());
+    return std::string_view(longKey.data(), longKey.size());
 }
 
 std::initializer_list<TestCase> testCases = {

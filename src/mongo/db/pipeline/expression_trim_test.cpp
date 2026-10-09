@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,6 +20,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -56,6 +30,7 @@ namespace ExpressionTests {
 using std::string;
 
 namespace Trim {
+using namespace std::literals::string_view_literals;
 
 TEST(ExpressionTrimParsingTest, ThrowsIfSpecIsNotAnObject) {
     auto expCtx = ExpressionContextForTest{};
@@ -113,7 +88,7 @@ TEST(ExpressionTrimTest, DoesOptimizeToConstantWithNoChars) {
     auto optimized = trim->optimize();
     auto constant = dynamic_cast<ExpressionConstant*>(optimized.get());
     ASSERT_TRUE(constant);
-    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"_sd));
+    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"sv));
 
     // Test that it optimizes to a constant if the input also optimizes to a constant.
     trim = Expression::parseExpression(
@@ -123,7 +98,7 @@ TEST(ExpressionTrimTest, DoesOptimizeToConstantWithNoChars) {
     optimized = trim->optimize();
     constant = dynamic_cast<ExpressionConstant*>(optimized.get());
     ASSERT_TRUE(constant);
-    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"_sd));
+    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"sv));
 }
 
 TEST(ExpressionTrimTest, DoesOptimizeToConstantWithCustomChars) {
@@ -136,7 +111,7 @@ TEST(ExpressionTrimTest, DoesOptimizeToConstantWithCustomChars) {
     auto optimized = trim->optimize();
     auto constant = dynamic_cast<ExpressionConstant*>(optimized.get());
     ASSERT_TRUE(constant);
-    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"_sd));
+    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"sv));
 
     // Test that it optimizes to a constant if the chars argument optimizes to a constant.
     trim = Expression::parseExpression(
@@ -148,7 +123,7 @@ TEST(ExpressionTrimTest, DoesOptimizeToConstantWithCustomChars) {
     optimized = trim->optimize();
     constant = dynamic_cast<ExpressionConstant*>(optimized.get());
     ASSERT_TRUE(constant);
-    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"_sd));
+    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"sv));
 
     // Test that it optimizes to a constant if both arguments optimize to a constant.
     trim = Expression::parseExpression(
@@ -159,7 +134,7 @@ TEST(ExpressionTrimTest, DoesOptimizeToConstantWithCustomChars) {
     optimized = trim->optimize();
     constant = dynamic_cast<ExpressionConstant*>(optimized.get());
     ASSERT_TRUE(constant);
-    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"_sd));
+    ASSERT_VALUE_EQ(constant->getValue(), Value("abc"sv));
 }
 
 TEST(ExpressionTrimTest, DoesNotOptimizeToConstantWithFieldPaths) {
@@ -226,16 +201,16 @@ TEST(ExpressionTrimTest, DoesSerializeCorrectly) {
         &expCtx, BSON("$trim" << BSON("input" << " abc ")), expCtx.variablesParseState);
     ASSERT_VALUE_EQ(
         trim->serialize(),
-        trim->serialize(SerializationOptions{
+        trim->serialize(query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)}));
     ASSERT_VALUE_EQ(
         trim->serialize(),
-        Value(Document{{"$trim", Document{{"input", Document{{"$const", " abc "_sd}}}}}}));
+        Value(Document{{"$trim", Document{{"input", Document{{"$const", " abc "sv}}}}}}));
 
     // Make sure we can re-parse it and evaluate it.
     auto reparsedTrim = Expression::parseExpression(
         &expCtx, trim->serialize().getDocument().toBson(), expCtx.variablesParseState);
-    ASSERT_VALUE_EQ(reparsedTrim->evaluate({}, &expCtx.variables), Value("abc"_sd));
+    ASSERT_VALUE_EQ(reparsedTrim->evaluate({}, &expCtx.variables), Value("abc"sv));
 
     // Use $ltrim, and specify the 'chars' option.
     trim = Expression::parseExpression(&expCtx,
@@ -245,14 +220,14 @@ TEST(ExpressionTrimTest, DoesSerializeCorrectly) {
                                        expCtx.variablesParseState);
     ASSERT_VALUE_EQ(
         trim->serialize(),
-        Value(Document{{"$ltrim", Document{{"input", "$inputField"_sd}, {"chars", "$a"_sd}}}}));
+        Value(Document{{"$ltrim", Document{{"input", "$inputField"sv}, {"chars", "$a"sv}}}}));
 
     // Make sure we can re-parse it and evaluate it.
     reparsedTrim = Expression::parseExpression(
         &expCtx, trim->serialize().getDocument().toBson(), expCtx.variablesParseState);
-    ASSERT_VALUE_EQ(reparsedTrim->evaluate(Document{{"inputField", " , 4"_sd}, {"a", " ,"_sd}},
+    ASSERT_VALUE_EQ(reparsedTrim->evaluate(Document{{"inputField", " , 4"sv}, {"a", " ,"sv}},
                                            &expCtx.variables),
-                    Value("4"_sd));
+                    Value("4"sv));
 }
 }  // namespace Trim
 

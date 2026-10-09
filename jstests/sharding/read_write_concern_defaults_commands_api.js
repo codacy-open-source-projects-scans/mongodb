@@ -7,9 +7,6 @@
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// This test requires running commands directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
-
 function verifyFields(res, {expectRC, expectWC, isPersistedDocument}, isImplicitDefaultWCMajority) {
     // These fields are always set once a read or write concern has been set at least once.
     let expectedFields = ["updateOpTime", "updateWallClockTime", "localUpdateWallClockTime"];
@@ -48,7 +45,10 @@ function verifyFields(res, {expectRC, expectWC, isPersistedDocument}, isImplicit
 
     assert.hasFields(res, expectedFields);
     unexpectedFields.forEach((field) => {
-        assert(!res.hasOwnProperty(field), `response unexpectedly had field '${field}', res: ${tojson(res)}`);
+        assert(
+            !res.hasOwnProperty(field),
+            `response unexpectedly had field '${field}', res: ${tojson(res)}`,
+        );
     });
     if (!isPersistedDocument) {
         if (expectWC) {
@@ -105,10 +105,10 @@ function verifyDefaultRWCommandsInvalidInput(conn) {
     );
 
     // Non-existent level.
-    assert.commandFailedWithCode(conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "dummy"}}), [
-        ErrorCodes.FailedToParse,
-        ErrorCodes.BadValue,
-    ]);
+    assert.commandFailedWithCode(
+        conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "dummy"}}),
+        [ErrorCodes.FailedToParse, ErrorCodes.BadValue],
+    );
 
     // Unsupported level.
     assert.commandFailedWithCode(
@@ -147,7 +147,9 @@ function verifyDefaultRWCommandsInvalidInput(conn) {
 // Verifies the default responses for the default RWC commands and the default persisted state.
 function verifyDefaultState(conn, isImplicitDefaultWCMajority) {
     const res = assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1}));
-    const inMemoryRes = assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1, inMemory: true}));
+    const inMemoryRes = assert.commandWorked(
+        conn.adminCommand({getDefaultRWConcern: 1, inMemory: true}),
+    );
 
     // localUpdateWallClockTime is set when a node refreshes its defaults, even if none are found.
     const expectedFields = ["localUpdateWallClockTime"];
@@ -160,7 +162,10 @@ function verifyDefaultState(conn, isImplicitDefaultWCMajority) {
     expectedFields.push("defaultReadConcernSource");
 
     expectedFields.forEach((field) => {
-        assert(res.hasOwnProperty(field), `response did not have field '${field}', res: ${tojson(res)}`);
+        assert(
+            res.hasOwnProperty(field),
+            `response did not have field '${field}', res: ${tojson(res)}`,
+        );
         assert(
             inMemoryRes.hasOwnProperty(field),
             `inMemory=true response did not have field '${field}', res: ${tojson(inMemoryRes)}`,
@@ -178,7 +183,10 @@ function verifyDefaultState(conn, isImplicitDefaultWCMajority) {
     }
 
     unexpectedFields.forEach((field) => {
-        assert(!res.hasOwnProperty(field), `response unexpectedly had field '${field}', res: ${tojson(res)}`);
+        assert(
+            !res.hasOwnProperty(field),
+            `response unexpectedly had field '${field}', res: ${tojson(res)}`,
+        );
         assert(
             !inMemoryRes.hasOwnProperty(field),
             `inMemory=true response unexpectedly had field '${field}', res: ${tojson(inMemoryRes)}`,
@@ -203,7 +211,9 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn, isImplicitDefaultWCMaj
     assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1, inMemory: false}));
 
     // An inMemory response should contain inMemory=true.
-    const inMemoryRes = assert.commandWorked(conn.adminCommand({getDefaultRWConcern: 1, inMemory: true}));
+    const inMemoryRes = assert.commandWorked(
+        conn.adminCommand({getDefaultRWConcern: 1, inMemory: true}),
+    );
     assert.eq(inMemoryRes.inMemory, true, tojson(inMemoryRes));
 
     //
@@ -212,7 +222,9 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn, isImplicitDefaultWCMaj
 
     // Test setDefaultRWConcern when only read concern is set.
     verifyFields(
-        assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}})),
+        assert.commandWorked(
+            conn.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
+        ),
         {expectRC: true, expectWC: false},
         isImplicitDefaultWCMajority,
     );
@@ -264,11 +276,17 @@ function verifyDefaultRWCommandsValidInputOnSuccess(conn, isImplicitDefaultWCMaj
 
     // Test setRWConcern when only write concern is set.
     assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}}));
-    assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1, j: false}}));
-    assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: "majority"}}));
+    assert.commandWorked(
+        conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1, j: false}}),
+    );
+    assert.commandWorked(
+        conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: "majority"}}),
+    );
 
     verifyFields(
-        assert.commandWorked(conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}})),
+        assert.commandWorked(
+            conn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}}),
+        ),
         {expectRC: false, expectWC: true},
         isImplicitDefaultWCMajority,
     );
@@ -338,10 +356,15 @@ jsTestLog("Testing sharded cluster with implicit default write concern majority.
 
     // Shard node fails.
     verifyDefaultRWCommandsFailWithCode(st.rs1.getPrimary(), {failureCode: 51301});
-    assert.commandFailedWithCode(st.rs1.getSecondary().adminCommand({getDefaultRWConcern: 1}), 51301);
+    assert.commandFailedWithCode(
+        st.rs1.getSecondary().adminCommand({getDefaultRWConcern: 1}),
+        51301,
+    );
     // Secondaries fail setDefaultRWConcern before executing the command.
     assert.commandFailedWithCode(
-        st.rs1.getSecondary().adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
+        st.rs1
+            .getSecondary()
+            .adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
         ErrorCodes.NotWritablePrimary,
     );
 
@@ -349,13 +372,18 @@ jsTestLog("Testing sharded cluster with implicit default write concern majority.
     st = new ShardingTest({shards: 1, rs: {nodes: 2}});
     // Config server primary succeeds.
     verifyDefaultState(st.configRS.getPrimary(), true /* isImplicitDefaultWCMajority */);
-    verifyDefaultRWCommandsValidInputOnSuccess(st.configRS.getPrimary(), true /* isImplicitDefaultWCMajority */);
+    verifyDefaultRWCommandsValidInputOnSuccess(
+        st.configRS.getPrimary(),
+        true /* isImplicitDefaultWCMajority */,
+    );
     verifyDefaultRWCommandsInvalidInput(st.configRS.getPrimary());
 
     // Config server secondary can run getDefaultRWConcern, but not setDefaultRWConcern.
     assert.commandWorked(st.configRS.getSecondary().adminCommand({getDefaultRWConcern: 1}));
     assert.commandFailedWithCode(
-        st.configRS.getSecondary().adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
+        st.configRS
+            .getSecondary()
+            .adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
         ErrorCodes.NotWritablePrimary,
     );
 
@@ -393,7 +421,9 @@ jsTestLog("Testing standalone replica set with implicit default write concern ma
     // Secondary can run getDefaultRWConcern, but not setDefaultRWConcern.
     assert.commandWorked(rst.getSecondary().adminCommand({getDefaultRWConcern: 1}));
     assert.commandFailedWithCode(
-        rst.getSecondary().adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
+        rst
+            .getSecondary()
+            .adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
         ErrorCodes.NotWritablePrimary,
     );
 
@@ -416,7 +446,9 @@ jsTestLog("Testing standalone replica set with implicit default write concern {w
     // Secondary can run getDefaultRWConcern, but not setDefaultRWConcern.
     assert.commandWorked(rst.getSecondary().adminCommand({getDefaultRWConcern: 1}));
     assert.commandFailedWithCode(
-        rst.getSecondary().adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
+        rst
+            .getSecondary()
+            .adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: "local"}}),
         ErrorCodes.NotWritablePrimary,
     );
 

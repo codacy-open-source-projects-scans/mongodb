@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/database_name.h"
@@ -46,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
@@ -53,9 +27,10 @@
 #include <boost/optional.hpp>
 #include <fmt/format.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 class NamespaceString : private DatabaseName {
 public:
@@ -72,51 +47,63 @@ public:
     // Reserved system namespaces
 
     // Name for the system views collection
-    static constexpr StringData kSystemDotViewsCollectionName = "system.views"_sd;
+    static constexpr std::string_view kSystemDotViewsCollectionName{"system.views"};
 
     // Name for the system.js collection
-    static constexpr StringData kSystemDotJavascriptCollectionName = "system.js"_sd;
+    static constexpr std::string_view kSystemDotJavascriptCollectionName{"system.js"};
 
     // Prefix for the collection storing collection statistics.
-    static constexpr StringData kStatisticsCollectionPrefix = "system.statistics."_sd;
+    static constexpr std::string_view kStatisticsCollectionPrefix{"system.statistics."};
+
+    // Name for the collection storing persistent document samples.
+    static constexpr std::string_view kStatsSamplesCollectionName{"system.stats.samples"};
+
+    // Name for the collection storing persistent per-field statistics, e.g. NDV sketches.
+    static constexpr std::string_view kStatsFieldStatsCollectionName{"system.stats.field_stats"};
 
     // Name for the profile collection
-    static constexpr StringData kSystemDotProfileCollectionName = "system.profile"_sd;
-
-    // Name for fastcount - replicated collection size and count - collections.
-    static constexpr StringData kReplicatedFastCountStore = "fast_count_metadata_store"_sd;
-    static constexpr StringData kReplicatedFastCountStoreTimestamps =
-        "fast_count_metadata_store_timestamps"_sd;
+    static constexpr std::string_view kSystemDotProfileCollectionName{"system.profile"};
 
     // Names of privilege document collections
-    static constexpr StringData kSystemUsers = "system.users"_sd;
-    static constexpr StringData kSystemRoles = "system.roles"_sd;
+    static constexpr std::string_view kSystemUsers{"system.users"};
+    static constexpr std::string_view kSystemRoles{"system.roles"};
 
     // Prefix for orphan collections
-    static constexpr StringData kOrphanCollectionPrefix = "orphan."_sd;
+    static constexpr std::string_view kOrphanCollectionPrefix{"orphan."};
 
     // Prefix for collections that store the local resharding oplog buffer.
-    static constexpr StringData kReshardingLocalOplogBufferPrefix =
-        "localReshardingOplogBuffer."_sd;
+    static constexpr std::string_view kReshardingLocalOplogBufferPrefix{
+        "localReshardingOplogBuffer."};
 
     // Prefix for resharding conflict stash collections.
-    static constexpr StringData kReshardingConflictStashPrefix = "localReshardingConflictStash."_sd;
+    static constexpr std::string_view kReshardingConflictStashPrefix{
+        "localReshardingConflictStash."};
 
     // Prefix for temporary resharding collection.
-    static constexpr StringData kTemporaryReshardingCollectionPrefix = "system.resharding."_sd;
+    static constexpr std::string_view kTemporaryReshardingCollectionPrefix{"system.resharding."};
 
     // Prefix for temporary timeseries resharding collection.
-    static constexpr StringData kTemporaryTimeseriesReshardingCollectionPrefix =
-        "system.buckets.resharding."_sd;
+    static constexpr std::string_view kTemporaryTimeseriesReshardingCollectionPrefix{
+        "system.buckets.resharding."};
 
     // Prefix for time-series buckets collection.
-    static constexpr StringData kTimeseriesBucketsCollectionPrefix = "system.buckets."_sd;
+    static constexpr std::string_view kTimeseriesBucketsCollectionPrefix{"system.buckets."};
 
     // Collection name that is used for { aggregate: 1, ... } style aggregations.
-    static constexpr auto kCollectionlessAggregateCollection = "$cmd.aggregate"_sd;
+    static constexpr std::string_view kCollectionlessAggregateCollection{"$cmd.aggregate"};
 
     // Prefix for the temporary collection used by the $out stage.
-    static constexpr StringData kOutTmpCollectionPrefix = "tmp.agg_out."_sd;
+    static constexpr std::string_view kOutTmpCollectionPrefix{"tmp.agg_out."};
+
+    // Prefix of temporary collection names used by convertToCapped
+    // (tmp%%%%%.convertToCapped.<originalColl>).
+    static constexpr std::string_view kConvertToCappedTmpCollectionModelPrefix{
+        "tmp%%%%%.convertToCapped."};
+
+    // Temporary collection name model used by renameCollection
+    // (tmp%%%%%.renameCollection, including system.buckets.* for timeseries).
+    static constexpr std::string_view kRenameCollectionTmpCollectionModel{
+        "tmp%%%%%.renameCollection"};
 
     // Maintainers Note: The large set of `NamespaceString`-typed static data
     // members of the `NamespaceString` class representing system-reserved
@@ -166,44 +153,44 @@ public:
     /**
      * Constructs a NamespaceString in the global config db, "config.<collName>".
      */
-    static NamespaceString makeGlobalConfigCollection(StringData collName);
+    static NamespaceString makeGlobalConfigCollection(std::string_view collName);
 
     /**
      * Constructs a NamespaceString in the local db, "local.<collName>".
      */
-    static NamespaceString makeLocalCollection(StringData collName);
+    static NamespaceString makeLocalCollection(std::string_view collName);
 
     /**
      * These functions construct a NamespaceString without checking for presence of TenantId.
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(StringData ns) {
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(std::string_view ns) {
         return NamespaceString(boost::none, ns);
     }
 
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(
         const DatabaseName& dbName) {
         return NamespaceString(dbName);
     }
 
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(StringData db,
-                                                                          StringData coll) {
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(
+        std::string_view db, std::string_view coll) {
         return NamespaceString(boost::none, db, coll);
     }
 
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
-        const DatabaseName& dbName, StringData coll) {
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(
+        const DatabaseName& dbName, std::string_view coll) {
         return NamespaceString(dbName, coll);
     }
 
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
-        const boost::optional<TenantId>& tenantId, StringData ns) {
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(
+        const boost::optional<TenantId>& tenantId, std::string_view ns) {
         return NamespaceString(tenantId, ns);
     }
 
-    MONGO_MOD_PUBLIC static NamespaceString createNamespaceString_forTest(
-        const boost::optional<TenantId>& tenantId, StringData db, StringData coll) {
+    [[MONGO_MOD_PUBLIC]] static NamespaceString createNamespaceString_forTest(
+        const boost::optional<TenantId>& tenantId, std::string_view db, std::string_view coll) {
         return NamespaceString(tenantId, db, coll);
     }
 
@@ -305,14 +292,14 @@ public:
     /**
      * This function must only be used in sharding code (src/mongo/s and src/mongo/db/s).
      */
-    StringData db_forSharding() const MONGO_COMPILER_LIFETIME_BOUND {
+    std::string_view db_forSharding() const MONGO_COMPILER_LIFETIME_BOUND {
         return db_deprecated();
     }
 
     /**
      * This function must only be used in unit tests.
      */
-    MONGO_MOD_PUBLIC StringData db_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
+    [[MONGO_MOD_PUBLIC]] std::string_view db_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return db_deprecated();
     }
 
@@ -320,13 +307,13 @@ public:
         return *this;
     }
 
-    StringData coll() const MONGO_COMPILER_LIFETIME_BOUND {
+    std::string_view coll() const MONGO_COMPILER_LIFETIME_BOUND {
         const auto offset = kDataOffset + dbSize() + 1 + tenantIdSize();
         if (offset > _data.size()) {
             return {};
         }
 
-        return StringData{_data.data() + offset, _data.size() - offset};
+        return std::string_view{_data.data() + offset, _data.size() - offset};
     }
 
     ConstDataRange asDataRange() const MONGO_COMPILER_LIFETIME_BOUND {
@@ -334,7 +321,7 @@ public:
         return ConstDataRange(nss.data(), nss.size());
     }
 
-    MONGO_MOD_PUBLIC StringData ns_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
+    [[MONGO_MOD_PUBLIC]] std::string_view ns_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return ns();
     }
 
@@ -343,7 +330,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC std::string toString_forTest() const {
+    [[MONGO_MOD_PUBLIC]] std::string toString_forTest() const {
         return toString();
     }
 
@@ -365,7 +352,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC std::string toStringWithTenantId_forTest() const {
+    [[MONGO_MOD_PUBLIC]] std::string toStringWithTenantId_forTest() const {
         return toStringWithTenantId();
     }
 
@@ -439,7 +426,7 @@ public:
     bool isSystemDotViews() const {
         return coll() == kSystemDotViewsCollectionName;
     }
-    static bool resolvesToSystemDotViews(StringData ns) {
+    static bool resolvesToSystemDotViews(std::string_view ns) {
         auto nss = NamespaceString(boost::none, ns);
         return nss.isSystemDotViews();
     }
@@ -451,6 +438,12 @@ public:
     }
     bool isServerConfigurationCollection() const {
         return isAdminDB() && (coll() == "system.version");
+    }
+    bool isStatsSamplesCollection() const {
+        return coll() == kStatsSamplesCollectionName;
+    }
+    bool isFieldStatsCollection() const {
+        return coll() == kStatsFieldStatsCollectionName;
     }
     bool isPrivilegeCollection() const {
         if (!isAdminDB()) {
@@ -539,14 +532,22 @@ public:
     bool isConfigTransactionsCollection() const;
 
     /**
+     * Returns whether the specified namespace is an FLE2 ECOC collection:
+     * <database>.enxcol_.<.+>.ecoc .
+     */
+    bool isFLE2EcocCollection() const;
+
+    /**
      * Returns whether the specified namespace is <database>.enxcol_.<.+>.(esc|ecoc).
      */
     bool isFLE2StateCollection() const;
 
-    static bool isFLE2StateCollection(StringData coll);
+    static bool isFLE2StateCollection(std::string_view coll);
 
     /**
-     * Returns true if the namespace is a system.statistics collection, false otherwise.
+     * Returns true for the collections storing optimizer statistics: histograms
+     * (system.statistics.*) and per-field statistics (system.stats.field_stats).
+     * TODO SERVER-127371: collapse once the statistics namespaces are consolidated.
      */
     bool isSystemStatsCollection() const;
 
@@ -555,6 +556,18 @@ public:
      * ("tmp.agg_out") and legacy ("system.buckets.tmp.agg_out") timeseries namespaces.
      */
     bool isOutStageTmpCollection() const;
+
+    /**
+     * Returns true if the collection is a temporary convertToCapped collection
+     * (tmp%%%%%.convertToCapped.<originalColl>).
+     */
+    bool isConvertToCappedTmpCollection() const;
+
+    /**
+     * Returns true if the collection is a temporary renameCollection collection
+     * (tmp%%%%%.renameCollection, including system.buckets.tmp%%%%%.renameCollection).
+     */
+    bool isRenameCollectionTmpCollection() const;
 
     /**
      * Returns the time-series buckets namespace for this view.
@@ -594,7 +607,7 @@ public:
      * Returns true if the namespace string is for a "collectionless" cursor.
      */
     bool isCollectionlessCursorNamespace() const {
-        return coll().starts_with("$cmd."_sd);
+        return coll().starts_with("$cmd."sv);
     }
 
     /**
@@ -624,7 +637,7 @@ public:
         return DatabaseName::validDBName(db_deprecated(), behavior) && !coll().empty();
     }
 
-    static bool isValid(StringData ns,
+    static bool isValid(std::string_view ns,
                         DatabaseName::DollarInDbNameBehavior behavior =
                             DatabaseName::DollarInDbNameBehavior::Allow) {
         const auto nss = NamespaceString(boost::none, ns);
@@ -634,18 +647,18 @@ public:
     /**
      * NamespaceString("foo.bar").getSisterNS("blah") returns "foo.blah".
      */
-    std::string getSisterNS(StringData local) const;
+    std::string getSisterNS(std::string_view local) const;
 
     NamespaceString getCommandNS() const {
         return {dbName(), "$cmd"};
     }
 
-    void serializeCollectionName(BSONObjBuilder* builder, StringData fieldName) const;
+    void serializeCollectionName(BSONObjBuilder* builder, std::string_view fieldName) const;
 
     /**
      * @return true if the ns is an oplog one, otherwise false.
      */
-    static bool oplog(StringData ns) {
+    static bool oplog(std::string_view ns) {
         return ns.starts_with("local.oplog.");
     }
 
@@ -675,7 +688,7 @@ public:
      * @param coll - a collection name component of a namespace
      * @return if the input is a valid collection name
      */
-    static bool validCollectionName(StringData coll);
+    static bool validCollectionName(std::string_view coll);
 
     int compare(const NamespaceString& other) const {
         if (hasTenantId() && !other.hasTenantId()) {
@@ -686,8 +699,8 @@ public:
             return -1;
         }
 
-        return StringData{_data.data() + kDataOffset, _data.size() - kDataOffset}.compare(
-            StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
+        return std::string_view{_data.data() + kDataOffset, _data.size() - kDataOffset}.compare(
+            std::string_view{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
     }
 
     /**
@@ -698,8 +711,8 @@ public:
     }
 
     friend bool operator==(const NamespaceString& lhs, const NamespaceString& rhs) {
-        return StringData{lhs._data.data(), lhs._data.size()} ==
-            StringData{rhs._data.data(), rhs._data.size()};
+        return std::string_view{lhs._data.data(), lhs._data.size()} ==
+            std::string_view{rhs._data.data(), rhs._data.size()};
     }
 
     friend bool operator<(const NamespaceString& lhs, const NamespaceString& rhs) {
@@ -720,8 +733,7 @@ public:
 
     template <typename H>
     friend H AbslHashValue(H h, const NamespaceString& nss) {
-        return H::combine(std::move(h),
-                          toStdStringViewForInterop({nss._data.data(), nss._data.size()}));
+        return H::combine(std::move(h), std::string_view{nss._data.data(), nss._data.size()});
     }
 
     friend auto logAttrs(const NamespaceString& nss) {
@@ -731,7 +743,7 @@ public:
     /**
      * This function removes the tenant id and returns the namespace part of NamespaceString.
      */
-    friend StringData redactTenant(const NamespaceString& nss MONGO_COMPILER_LIFETIME_BOUND) {
+    friend std::string_view redactTenant(const NamespaceString& nss MONGO_COMPILER_LIFETIME_BOUND) {
         return nss.ns();
     }
 
@@ -749,14 +761,14 @@ private:
      * Constructs a NamespaceString from the fully qualified namespace named in "ns" and the
      * tenantId. "ns" is NOT expected to contain the tenantId.
      */
-    NamespaceString(boost::optional<TenantId> tenantId, StringData ns)
+    NamespaceString(boost::optional<TenantId> tenantId, std::string_view ns)
         : DatabaseName(Storage::make(tenantId, ns), TrustedInitTag{}) {}
 
     /**
      * Constructs a NamespaceString for the given database and collection names.
      * "dbName" must not contain a ".", and "collectionName" must not start with one.
      */
-    NamespaceString(DatabaseName dbName, StringData collectionName)
+    NamespaceString(DatabaseName dbName, std::string_view collectionName)
         : DatabaseName(Storage::make(dbName, collectionName), TrustedInitTag{}) {}
 
     /**
@@ -764,7 +776,9 @@ private:
      * "db" must not contain a ".", and "collectionName" must not start with one. "db" is
      * NOT expected to contain a tenantId.
      */
-    NamespaceString(boost::optional<TenantId> tenantId, StringData db, StringData collectionName)
+    NamespaceString(boost::optional<TenantId> tenantId,
+                    std::string_view db,
+                    std::string_view collectionName)
         : DatabaseName(Storage::make(tenantId, db, collectionName),
                        DatabaseName::TrustedInitTag{}) {}
 
@@ -772,9 +786,9 @@ private:
      * Please refer to NamespaceStringUtil::serialize method or use ns_forTest to satisfy any unit
      * test needing access to ns().
      */
-    StringData ns() const MONGO_COMPILER_LIFETIME_BOUND {
+    std::string_view ns() const MONGO_COMPILER_LIFETIME_BOUND {
         auto offset = kDataOffset + tenantIdSize();
-        return StringData{_data.data() + offset, _data.size() - offset};
+        return std::string_view{_data.data() + offset, _data.size() - offset};
     }
 
     std::string toString() const {
@@ -792,10 +806,10 @@ private:
     /**
      * This method is deprecated and will be removed as part of SERVER-65456. We strongly
      * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
-     * In case you would need to a StringData object instead we strongly recommend taking a look
-     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
+     * In case you would need to a std::string_view object instead we strongly recommend taking a
+     * look at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
      */
-    StringData db_deprecated() const MONGO_COMPILER_LIFETIME_BOUND {
+    std::string_view db_deprecated() const MONGO_COMPILER_LIFETIME_BOUND {
         return dbName().db(omitTenant);
     }
 
@@ -857,7 +871,7 @@ public:
      */
     friend std::string toStringForLogging(const NamespaceStringOrUUID& nssOrUUID);
 
-    void serialize(BSONObjBuilder* builder, StringData fieldName) const;
+    void serialize(BSONObjBuilder* builder, std::string_view fieldName) const;
 
     template <typename H>
     friend H AbslHashValue(H h, const NamespaceStringOrUUID& nssOrUUID) {
@@ -883,7 +897,7 @@ private:
 /**
  * "database.a.b.c" -> "database"
  */
-inline StringData nsToDatabaseSubstring(StringData ns) {
+inline std::string_view nsToDatabaseSubstring(std::string_view ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos) {
         massert(
@@ -897,16 +911,16 @@ inline StringData nsToDatabaseSubstring(StringData ns) {
 /**
  * "database.a.b.c" -> "database"
  *
- * TODO SERVER-123310: make this return a StringData
+ * TODO SERVER-123310: make this return a std::string_view
  */
-inline std::string nsToDatabase(StringData ns) {
+inline std::string nsToDatabase(std::string_view ns) {
     return std::string{nsToDatabaseSubstring(ns)};
 }
 
 /**
  * "database.a.b.c" -> "a.b.c"
  */
-inline StringData nsToCollectionSubstring(StringData ns MONGO_COMPILER_LIFETIME_BOUND) {
+inline std::string_view nsToCollectionSubstring(std::string_view ns MONGO_COMPILER_LIFETIME_BOUND) {
     size_t i = ns.find('.');
     massert(16886, "nsToCollectionSubstring: no .", i != std::string::npos);
     return ns.substr(i + 1);
@@ -917,7 +931,7 @@ inline StringData nsToCollectionSubstring(StringData ns MONGO_COMPILER_LIFETIME_
  * foo. = false
  * foo.a = true
  */
-inline bool nsIsFull(StringData ns) {
+inline bool nsIsFull(std::string_view ns) {
     size_t i = ns.find('.');
     if (i == std::string::npos)
         return false;
@@ -936,14 +950,15 @@ inline bool NamespaceString::validCollectionComponent(const NamespaceString& ns)
     return validCollectionName(nsStr.substr(idx + 1)) || oplog(nsStr);
 }
 
-inline bool NamespaceString::validCollectionName(StringData coll) {
+inline bool NamespaceString::validCollectionName(std::string_view coll) {
     if (coll.empty())
         return false;
 
     if (coll[0] == '.')
         return false;
 
-    for (StringData::const_iterator iter = coll.begin(), end = coll.end(); iter != end; ++iter) {
+    for (std::string_view::const_iterator iter = coll.begin(), end = coll.end(); iter != end;
+         ++iter) {
         switch (*iter) {
             case '\0':
             case '$':
@@ -956,7 +971,7 @@ inline bool NamespaceString::validCollectionName(StringData coll) {
     return true;
 }
 
-MONGO_MOD_PUBLIC inline std::string stringify_forTest(const NamespaceString& nss) {
+[[MONGO_MOD_PUBLIC]] inline std::string stringify_forTest(const NamespaceString& nss) {
     return toStringForLogging(nss);
 }
 
@@ -984,10 +999,11 @@ constexpr auto makeNsData(const char* db, const char* coll) {
     return result;
 }
 
-#define X(id, dbname, coll)           \
-    constexpr inline auto id##_data = \
-        makeNsData<dbname.size(), coll.size()>(dbname.db(OmitTenant{}).data(), coll.data());
-EXPAND_NSS_CONSTANT_TABLE(X)
+#define X(id, dbname, coll)                                                        \
+    constexpr inline auto id##_coll = coll ""sv;                                   \
+    constexpr inline auto id##_data = makeNsData<dbname.size(), id##_coll.size()>( \
+        dbname.db(OmitTenant{}).data(), id##_coll.data());
+EXPAND_NSS_CONSTANT_TABLE(X) /* NOLINT(bugprone-suspicious-stringview-data-usage) */
 #undef X
 }  // namespace namespace_string_data
 

@@ -8,33 +8,30 @@
  *   assumes_read_preference_unchanged,
  *   no_selinux,
  *   does_not_support_repeated_reads,
- *   # TODO(SERVER-124153): Remove.
- *   featureFlagReplicatedFastCount_incompatible,
+ *   # TODO SERVER-129949: Enable the test on gRPC
+ *   grpc_incompatible,
  * ]
  */
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 // The test sets a failpoint on a specific mongos and expects subsequent commands to hit that same mongos.
 // Certain tasks (such as "sharding_jscore...") may use test fixtures with multiple mongos.
 // pinToSingleMongos due to configureFailPoint command.
 TestData.pinToSingleMongos = true;
 
-const testDB = db.getSiblingDB("test_failcommand");
+const testDB = db.getSiblingDB(jsTestName());
 const adminDB = db.getSiblingDB("admin");
+
+// Ensure a clean namespace. This test may be run more than once against the same fixture (e.g.
+// burn_in repeats suites without restarting the fixture in between), and leftover documents from
+// a prior run would break passthroughs that assert on the emptiness of untouched namespaces.
+assert.commandWorked(testDB.dropDatabase());
 
 const getCurOpMetadata = function () {
     let myUri = adminDB.runCommand({whatsmyuri: 1}).you;
-    return adminDB.aggregate([{$currentOp: {localOps: true}}, {$match: {client: myUri}}]).toArray()[0];
+    return adminDB
+        .aggregate([{$currentOp: {localOps: true}}, {$match: {client: myUri}}])
+        .toArray()[0];
 };
 const getThreadName = function () {
     return getCurOpMetadata().desc;
@@ -142,6 +139,10 @@ assert.commandWorked(
 assert.commandWorked(testDB.runCommand({ping: 1}));
 assert.commandWorked(adminDB.runCommand({configureFailPoint: "failCommand", mode: "off"}));
 
+const isMultiversion =
+    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) ||
+    Boolean(TestData.multiversionBinVersion);
+
 if (!isMultiversion) {
     // Test failpoint with errorMsg
     assert.commandWorked(
@@ -178,9 +179,15 @@ assert.commandWorked(
         },
     }),
 );
-assert.commandFailedWithCode(testDB.runCommand({dropIndexes: "collection", index: "*"}), ErrorCodes.BadValue);
+assert.commandFailedWithCode(
+    testDB.runCommand({dropIndexes: "collection", index: "*"}),
+    ErrorCodes.BadValue,
+);
 assert.commandWorked(testDB.runCommand({buildInfo: 1}));
-assert.commandFailedWithCode(testDB.runCommand({deleteIndexes: "collection", index: "*"}), ErrorCodes.BadValue);
+assert.commandFailedWithCode(
+    testDB.runCommand({deleteIndexes: "collection", index: "*"}),
+    ErrorCodes.BadValue,
+);
 assert.commandWorked(testDB.runCommand({buildinfo: 1}));
 assert.commandWorked(adminDB.runCommand({configureFailPoint: "failCommand", mode: "off"}));
 
@@ -447,11 +454,6 @@ assert.commandWorked(testDB.runCommand({insert: "c", documents: [{}]})); // Work
 assert.commandWorked(adminDB.runCommand({configureFailPoint: "failCommand", mode: "off"}));
 
 // Test with natural failure and writeConcernError.
-
-// This document is removed before testing the following insert to prevent a DuplicateKeyError
-// if the failcommand_failpoint test is run multiple times on the same fixture.
-testDB.c.remove({_id: "dup"});
-
 assert.commandWorked(testDB.runCommand({insert: "c", documents: [{_id: "dup"}]}));
 assert.commandWorked(
     adminDB.runCommand({
@@ -532,11 +534,16 @@ assert.commandWorked(
 );
 
 // An insert to a different namespace should not trigger the failpoint.
-assert.commandWorked(testDB.runCommand({insert: "test", documents: [{x: "doc_for_namespace_no_wce"}]}));
+assert.commandWorked(
+    testDB.runCommand({insert: "test", documents: [{x: "doc_for_namespace_no_wce"}]}),
+);
 
 // An insert to the namespace given to the failpoint should trigger the failpoint.
 res = assert.commandWorkedIgnoringWriteConcernErrors(
-    testDB.runCommand({insert: "foo", documents: [{x: "doc_for_namespace_case_should_trigger_wce"}]}),
+    testDB.runCommand({
+        insert: "foo",
+        documents: [{x: "doc_for_namespace_case_should_trigger_wce"}],
+    }),
 );
 assert.eq(res.writeConcernError, {code: ErrorCodes.InternalError, errmsg: "foo"});
 
@@ -675,7 +682,11 @@ assert.commandWorked(
 );
 // This normally fails with RetryableWriteError label.
 res = assert.commandFailedWithCode(
-    testDB.runCommand({insert: "test", documents: [{x: "retryable_write"}], txnNumber: NumberLong(0)}),
+    testDB.runCommand({
+        insert: "test",
+        documents: [{x: "retryable_write"}],
+        txnNumber: NumberLong(0),
+    }),
     ErrorCodes.NotWritablePrimary,
 );
 // Test that failCommand overrides the error label to "Foo".
@@ -695,7 +706,11 @@ assert.commandWorked(
     }),
 );
 // This normally fails with RetryableWriteError label.
-res = testDB.runCommand({insert: "test", documents: [{x: "retryable_write"}], txnNumber: NumberLong(0)});
+res = testDB.runCommand({
+    insert: "test",
+    documents: [{x: "retryable_write"}],
+    txnNumber: NumberLong(0),
+});
 assert.eq(res.writeConcernError, {code: ErrorCodes.NotWritablePrimary, errmsg: "hello"});
 // Test that failCommand overrides the error label to "Foo".
 assert.eq(res.errorLabels, ["Foo"], res);
@@ -715,7 +730,11 @@ assert.commandWorked(
 );
 // This normally fails with RetryableWriteError label.
 res = assert.commandFailedWithCode(
-    testDB.runCommand({insert: "test", documents: [{x: "retryable_write"}], txnNumber: NumberLong(0)}),
+    testDB.runCommand({
+        insert: "test",
+        documents: [{x: "retryable_write"}],
+        txnNumber: NumberLong(0),
+    }),
     ErrorCodes.NotWritablePrimary,
 );
 // There should be no errorLabels field if no error labels provided in failCommand.
@@ -735,7 +754,72 @@ assert.commandWorked(
     }),
 );
 // This normally fails with RetryableWriteError label.
-res = testDB.runCommand({insert: "test", documents: [{x: "retryable_write"}], txnNumber: NumberLong(0)});
+res = testDB.runCommand({
+    insert: "test",
+    documents: [{x: "retryable_write"}],
+    txnNumber: NumberLong(0),
+});
 assert.eq(res.writeConcernError, {code: ErrorCodes.NotWritablePrimary, errmsg: "hello"});
 // There should be no errorLabels field if no error labels provided in failCommand.
 assert(!res.hasOwnProperty("errorLabels"), res);
+
+// Test failAllCommands with failCommandsExcept: every command fails except those allowlisted.
+assert.commandWorked(
+    adminDB.runCommand({
+        configureFailPoint: "failCommand",
+        mode: "alwaysOn",
+        data: {
+            errorCode: ErrorCodes.NotWritablePrimary,
+            failAllCommands: true,
+            failCommandsExcept: ["ping"],
+            threadName: threadName,
+        },
+    }),
+);
+// "ping" is allowlisted -> still works.
+assert.commandWorked(testDB.runCommand({ping: 1}));
+// Other commands hit the failpoint.
+assert.commandFailedWithCode(testDB.runCommand({find: "test"}), ErrorCodes.NotWritablePrimary);
+assert.commandFailedWithCode(
+    testDB.runCommand({insert: "test", documents: [{x: 1}]}),
+    ErrorCodes.NotWritablePrimary,
+);
+
+// Aliases registered on the same command are honored: listing "isMaster" also exempts its
+// alias "ismaster" (both belong to the CmdIsMaster command class). However "hello" and
+// "isMaster" are separate command classes (CmdHello vs CmdIsMaster) and do NOT alias each
+// other, so each must be listed explicitly to be exempt.
+assert.commandWorked(
+    adminDB.runCommand({
+        configureFailPoint: "failCommand",
+        mode: "alwaysOn",
+        data: {
+            errorCode: ErrorCodes.NotWritablePrimary,
+            failAllCommands: true,
+            failCommandsExcept: ["isMaster"],
+            threadName: threadName,
+        },
+    }),
+);
+assert.commandWorked(testDB.runCommand({isMaster: 1}));
+assert.commandWorked(testDB.runCommand({ismaster: 1}));
+assert.commandFailedWithCode(testDB.runCommand({hello: 1}), ErrorCodes.NotWritablePrimary);
+assert.commandFailedWithCode(testDB.runCommand({ping: 1}), ErrorCodes.NotWritablePrimary);
+
+// failCommandsExcept without failAllCommands has no effect (the allowlist only modifies
+// failAllCommands; failCommands denylist remains authoritative).
+assert.commandWorked(
+    adminDB.runCommand({
+        configureFailPoint: "failCommand",
+        mode: "alwaysOn",
+        data: {
+            errorCode: ErrorCodes.NotWritablePrimary,
+            failCommands: ["ping"],
+            failCommandsExcept: ["ping"],
+            threadName: threadName,
+        },
+    }),
+);
+assert.commandFailedWithCode(testDB.runCommand({ping: 1}), ErrorCodes.NotWritablePrimary);
+
+assert.commandWorked(adminDB.runCommand({configureFailPoint: "failCommand", mode: "off"}));

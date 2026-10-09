@@ -2,6 +2,7 @@
  * Tests that each of the update shell helpers correctly validates pipeline-style update operations.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_write_concern_unchanged,
  *   requires_multi_updates,
  *   requires_non_retryable_writes,
@@ -14,7 +15,11 @@
  */
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {getPlanStage, planHasStage} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStage,
+    getWinningPlanFromExplain,
+    planHasStage,
+} from "jstests/libs/query/analyze_plan.js";
 
 // Make sure that the test collection is empty before starting the test.
 const testColl = db[jsTestName()];
@@ -80,16 +85,22 @@ assert(arrayEq(observedResults, expectedResults));
 
 // Test that findAndModify and associated helpers correctly handle pipeline syntax.
 const expectedFindAndModifyPostImage = Object.merge(expectedResults[0], {findAndModify: true});
-const expectedFindOneAndUpdatePostImage = Object.merge(expectedFindAndModifyPostImage, {findOneAndUpdate: true});
+const expectedFindOneAndUpdatePostImage = Object.merge(expectedFindAndModifyPostImage, {
+    findOneAndUpdate: true,
+});
 const findAndModifyPostImage = testColl.findAndModify({
     query: {_id: 1},
     update: [{$set: {findAndModify: true}}],
     new: true,
 });
 assert.docEq(expectedFindAndModifyPostImage, findAndModifyPostImage);
-const findOneAndUpdatePostImage = testColl.findOneAndUpdate({_id: 1}, [{$set: {findOneAndUpdate: true}}], {
-    returnNewDocument: true,
-});
+const findOneAndUpdatePostImage = testColl.findOneAndUpdate(
+    {_id: 1},
+    [{$set: {findOneAndUpdate: true}}],
+    {
+        returnNewDocument: true,
+    },
+);
 assert.docEq(expectedFindOneAndUpdatePostImage, findOneAndUpdatePostImage);
 
 //
@@ -98,9 +109,9 @@ assert.docEq(expectedFindOneAndUpdatePostImage, findOneAndUpdatePostImage);
 {
     let explain = testColl.explain("queryPlanner").update({_id: 2}, [{$set: {y: 999}}]);
     // post 8.0, EXPRESS will handle update-by-id
-    if (!planHasStage(db, explain.queryPlanner.winningPlan, "EXPRESS_UPDATE")) {
-        assert(planHasStage(db, explain.queryPlanner.winningPlan, "IDHACK"));
-        assert(planHasStage(db, explain.queryPlanner.winningPlan, "UPDATE"));
+    if (!planHasStage(db, getWinningPlanFromExplain(explain), "EXPRESS_UPDATE")) {
+        assert(planHasStage(db, getWinningPlanFromExplain(explain), "IDHACK"));
+        assert(planHasStage(db, getWinningPlanFromExplain(explain), "UPDATE"));
     }
 
     // Run explain with execution-level verbosity.
@@ -123,10 +134,10 @@ assert.docEq(expectedFindOneAndUpdatePostImage, findOneAndUpdatePostImage);
 
 // We skip these tests under sharded fixtures, since sharded passthroughs require that FAM queries
 // contain the shard key.
-if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
+if (!FixtureHelpers.isMongos(db)) {
     let explain = testColl.explain("queryPlanner").update({a: 2}, [{$set: {y: 999}}]);
-    assert(planHasStage(db, explain.queryPlanner.winningPlan, "COLLSCAN"));
-    assert(planHasStage(db, explain.queryPlanner.winningPlan, "UPDATE"));
+    assert(planHasStage(db, getWinningPlanFromExplain(explain), "COLLSCAN"));
+    assert(planHasStage(db, getWinningPlanFromExplain(explain), "UPDATE"));
 
     // Run explain with execution-level verbosity.
     explain = testColl.explain("executionStats").update({a: 2}, [{$set: {y: 999}}]);
@@ -141,4 +152,6 @@ if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
 // Shell helpers for replacement updates should reject pipeline-style updates.
 assert.throws(() => testColl.replaceOne({_id: 1}, [{$replaceWith: {}}]));
 assert.throws(() => testColl.findOneAndReplace({_id: 1}, [{$replaceWith: {}}]));
-assert.throws(() => testColl.bulkWrite([{replaceOne: {filter: {_id: 1}, replacement: [{$replaceWith: {}}]}}]));
+assert.throws(() =>
+    testColl.bulkWrite([{replaceOne: {filter: {_id: 1}, replacement: [{$replaceWith: {}}]}}]),
+);

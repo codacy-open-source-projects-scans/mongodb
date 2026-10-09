@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,10 +11,10 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/cond_var_lock_grant_notification.h"
-#include "mongo/db/shard_role/lock_manager/fast_map_noalloc.h"
+#include "mongo/db/shard_role/lock_manager/fast_list_based_map.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/lock_manager/lock_stats.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/duration.h"
@@ -79,7 +53,7 @@ class LockOrderingsSet;
 // are required because of cyclic dependency between the service_context and write_unit_of_work
 // libraries, due to Locker being currently owned by the OperationContext. This will go away once
 // SERVER-77213 is done which will move locker entirely under TransactionResources (shard_role_api).
-class MONGO_MOD_USE_REPLACEMENT("Lock Acquisition RAII Classes") Locker {
+class [[MONGO_MOD_USE_REPLACEMENT("Lock Acquisition RAII Classes")]] Locker {
 public:
     Locker(ServiceContext* serviceContext);
     virtual ~Locker();
@@ -105,12 +79,25 @@ public:
     std::string getDebugInfo() const;
     void setDebugInfo(std::string info);
 
+    /*
+     * Maximum amount of lock requests expected to be held simultaneously inside the Locker in
+     * non-multi-document operations (which is 5, being Global lock, multi-doc transaction barrier,
+     * RSTL, Database lock and Collection lock) with a small buffer. We need this constant to avoid
+     * allocations on the heap and keep them inside the inline underlying storage of the
+     * RecylcingListBasedMap. For LockRequests for multi-document operations, the amount would be
+     * exceeding this one, however, in that case the RecyclingListBasedMap would use overflow
+     * storage, that can expand upon filling.
+     */
+    static constexpr size_t kInlineLockRequestsStorageSize = 8;
+    using LockRequestsMap =
+        RecyclingListBasedMap<ResourceId, LockRequest, kInlineLockRequestsStorageSize>;
+
     /**
      * Returns the cumulative lock stats accrued so far. The returned stats are not a snapshot but a
      * reference to AtomicLockStats, meaning that they can change at any time after they are
      * returned.
      */
-    using AtomicLockStats = LockStats<AtomicWord<long long>>;
+    using AtomicLockStats = LockStats<Atomic<long long>>;
     const AtomicLockStats& stats() const {
         return _stats;
     }
@@ -118,7 +105,26 @@ public:
     /**
      * State for reporting the number of active and queued reader and writer clients.
      */
-    enum ClientState { kInactive, kActiveReader, kActiveWriter, kQueuedReader, kQueuedWriter };
+    enum class ClientState : int {
+        kInactive = 0,
+        kActiveReader = 1,
+        kActiveWriter = 2,
+        kQueuedReader = 3,
+        kQueuedWriter = 4
+    };
+
+    /**
+     * Per-state counts maintained atomically as Locker instances transition states. Read by the
+     * globalLock serverStatus section without any locking.
+     */
+    struct ClientStateCounts {
+        int32_t inactive;
+        int32_t activeReader;
+        int32_t activeWriter;
+        int32_t queuedReader;
+        int32_t queuedWriter;
+    };
+    static ClientStateCounts getGlobalClientStateCounts();
 
     /**
      * Return whether client is holding any locks (active), or is queued on any locks or waiting
@@ -234,6 +240,28 @@ public:
                           const LockTimeoutCallback& onTimeout = nullptr);
 
     /**
+     * Enqueues a lock request for the specified resource in the specified mode without waiting
+     * for it to be granted. Returns LOCK_OK if the lock was immediately granted, or LOCK_WAITING
+     * if the request was queued.
+     *
+     * For each call that returns LOCK_WAITING, the caller must subsequently call either
+     * lockComplete() to wait for the grant, or unlock() to cancel the request.
+     */
+    LockResult lockBegin(OperationContext* opCtx, ResourceId resId, LockMode mode);
+
+    /**
+     * Waits for a previously enqueued lock request (via lockBegin) to be granted.
+     * Must only be called when lockBegin returned LOCK_WAITING.
+     *
+     * It may throw an exception if it is interrupted or the deadline expires.
+     */
+    void lockComplete(OperationContext* opCtx,
+                      ResourceId resId,
+                      LockMode mode,
+                      Date_t deadline,
+                      const LockTimeoutCallback& onTimeout = nullptr);
+
+    /**
      * Unlocks the RSTL when the transaction becomes prepared. This is used to bypass two-phase
      * locking and unlock the RSTL immediately, rather than at the end of the WUOW.
      *
@@ -322,7 +350,7 @@ public:
      * obtaining the necessary information and then discarded instead of reused.
      */
     struct LockerInfo {
-        // List of high-level locks held by this locker, sorted by ResourceId
+        // List of high-level locks held by this locker, sorted by acquisition order
         std::vector<OneLock> locks;
 
         // If isValid(), then what lock this particular locker is sleeping on
@@ -354,8 +382,7 @@ public:
         // The global lock is handled differently from all other locks.
         LockMode globalMode;
 
-        // The non-global locks held, sorted by granularity.  That is, locks[i] is
-        // coarser or as coarse as locks[i + 1].
+        // The non-global locks held, in their initial acquisition order
         std::vector<OneLock> locks;
     };
 
@@ -536,6 +563,17 @@ public:
      */
     std::vector<LockDebugInfo> getLockInfoFromResourceHolders(ResourceId resId) const;
 
+    /**
+     * Returns the LockerId of every granted lock request on 'resId' whose mode conflicts with
+     * the given 'mode'.
+     *
+     * Note: The underlying functionality limits the use after partitioned lock heads have been
+     * migrated for the given resource (e.g., after lockBegin with a non-intent mode), otherwise
+     * intent-mode holders on partitions will not be visible. For this reason, the mode is limited
+     * to non-intent types.
+     */
+    std::vector<LockerId> getConflictingLockerIds(ResourceId resId, LockMode mode) const;
+
     void dump() const;
 
     bool isLocked() const {
@@ -579,7 +617,7 @@ public:
         return _numResourcesToUnlockAtEndUnitOfWork;
     }
 
-    FastMapNoAlloc<ResourceId, LockRequest> getRequestsForTest() const {
+    LockRequestsMap getRequestsForTest() const {
         scoped_spinlock scopedLock(_lock);
         return _requests;
     }
@@ -596,8 +634,6 @@ public:
     }
 
 protected:
-    using LockRequestsMap = FastMapNoAlloc<ResourceId, LockRequest>;
-
     friend class UninterruptibleLockGuard;
     friend class InterruptibleLockGuard;
     friend class AllowLockAcquisitionOnTimestampedUnitOfWork;
@@ -665,9 +701,24 @@ protected:
     bool _unlockImpl(LockRequestsMap::Iterator* it);
 
     /**
+     * Releases a lock previously acquired through a lock call. It is an error to try to
+     * release lock which has not been previously acquired (invariant violation).
+     *
+     * @return true if the lock was actually released; false if only the reference count was
+     *              decremented, but the lock is still held.
+     */
+    bool _unlockAndAdvance(LockRequestsMap::Iterator* it);
+
+    /**
      * Releases the ticket for the Locker.
      */
     void _releaseTicket();
+
+    /**
+     * Atomically transitions _clientState and updates the global per-state counters so that
+     * the globalLock serverStatus section can read state counts without iterating clients.
+     */
+    void _setClientState(ClientState newState);
 
     /**
      * Called if a lock acquisition has blocked.
@@ -756,7 +807,7 @@ protected:
     LockMode _modeForTicket = MODE_NONE;
 
     // Indicates whether the client is active reader/writer or is queued.
-    AtomicWord<ClientState> _clientState{kInactive};
+    Atomic<ClientState> _clientState{ClientState::kInactive};
 
     // If true, shared locks will participate in two-phase locking.
     bool _sharedLocksShouldTwoPhaseLock = false;
@@ -778,7 +829,7 @@ protected:
     unsigned char _globalLockMode = (1 << MODE_NONE);
 
     // Tracks whether this operation should be killed on step down.
-    AtomicWord<bool> _wasGlobalLockTakenInModeConflictingWithWrites{false};
+    Atomic<bool> _wasGlobalLockTakenInModeConflictingWithWrites{false};
 
     // If isValid(), the ResourceId of the resource currently waiting for the lock. If not valid,
     // there is no resource currently waiting.
@@ -801,7 +852,7 @@ protected:
  * Lock with ResourceLock, SharedLock or ExclusiveLock. Uses same fairness as other LockManager
  * locks.
  */
-class MONGO_MOD_PUBLIC ResourceMutex {
+class [[MONGO_MOD_PUBLIC]] ResourceMutex {
 public:
     ResourceMutex(std::string resourceLabel);
 
@@ -829,7 +880,7 @@ private:
  * incredibly conservative in using this. The presence of this class implies that a deadlock may
  * occur in that part of the codebase.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT DisableLockerRuntimeOrderingChecks {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DisableLockerRuntimeOrderingChecks {
     // We only do things in debug builds, release builds are essentially no-ops
 #ifdef MONGO_CONFIG_DEBUG_BUILD
 public:
@@ -857,7 +908,7 @@ public:
  * Op 2: Holds the exclusive lock Op 1 is waiting for, while this operation is waiting for some
  *       operation beyond Timestamp(5) to become visible in the oplog.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT AllowLockAcquisitionOnTimestampedUnitOfWork {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] AllowLockAcquisitionOnTimestampedUnitOfWork {
 public:
     explicit AllowLockAcquisitionOnTimestampedUnitOfWork(Locker* locker)
         : _locker(locker), _originalValue(_locker->getAssertOnLockAttempt()) {

@@ -1,46 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <absl/container/flat_hash_set.h>
-#include <absl/container/node_hash_map.h>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <immer/detail/hamts/champ_iterator.hpp>
-#include <immer/detail/iterator_facade.hpp>
-#include <immer/detail/rbts/rrbtree_iterator.hpp>
-#include <immer/detail/util.hpp>
-#include <immer/map.hpp>
-#include <immer/map_transient.hpp>
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -55,7 +17,6 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/lock_manager/resource_catalog.h"
-#include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/collection_record_store_options.h"
 #include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
@@ -71,7 +32,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/views/util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/rwmutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -85,16 +46,32 @@
 #include <mutex>
 #include <shared_mutex>
 
+#include <absl/container/flat_hash_set.h>
+#include <absl/container/node_hash_map.h>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <immer/detail/hamts/champ_iterator.hpp>
+#include <immer/detail/iterator_facade.hpp>
+#include <immer/detail/rbts/rrbtree_iterator.hpp>
+#include <immer/detail/util.hpp>
+#include <immer/map.hpp>
+#include <immer/map_transient.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 static constexpr auto kIsSanitizerBuild = __has_feature(thread_sanitizer) ||
     __has_feature(address_sanitizer) || __has_feature(memory_sanitizer);
 
 // Failpoint which causes catalog updates to hang right before performing a durable commit of them.
 // This causes updates to have been precommitted.
 MONGO_FAIL_POINT_DEFINE(hangAfterPreCommittingCatalogUpdates);
-static constexpr auto kDelayEntireCommitFailpointField = "pauseEntireCommitMillis"_sd;
+static constexpr auto kDelayEntireCommitFailpointField = "pauseEntireCommitMillis"sv;
 
 // Failpoint which causes to hang after wuow commits, before publishing the catalog updates on a
 // given namespace.
@@ -113,26 +90,57 @@ MONGO_FAIL_POINT_DEFINE(failToCreatePITCollectionFromDropPendingIdent);
  * timestamped collection creation followed by untimestamped drop) that violates wiredtiger's
  * timestamp rules.
  */
-const SharedCollectionDecorations::Decoration<AtomicWord<bool>>
+const SharedCollectionDecorations::Decoration<Atomic<bool>>
     historicalIDTrackerAllowsMixedModeWrites =
-        SharedCollectionDecorations::declareDecoration<AtomicWord<bool>>();
+        SharedCollectionDecorations::declareDecoration<Atomic<bool>>();
 
 namespace catalog {
-void initializeCollectionCatalog(OperationContext* opCtx, StorageEngine* engine) {
-    initializeCollectionCatalog(opCtx, engine, engine->getEngine()->getRecoveryTimestamp());
+
+std::string toStringForLogging(const InitMode mode) {
+    switch (mode) {
+        case InitMode::kStartup:
+            return "Startup";
+        case InitMode::kRollback:
+            return "Rollback";
+        case InitMode::kStorageChange:
+            return "StorageChange";
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+void initializeCollectionCatalog(OperationContext* opCtx, StorageEngine* engine, InitMode mode) {
+    initializeCollectionCatalog(opCtx, engine, mode, engine->getEngine()->getRecoveryTimestamp());
 }
 
 void initializeCollectionCatalog(OperationContext* opCtx,
                                  StorageEngine* engine,
+                                 InitMode mode,
                                  boost::optional<Timestamp> stableTs) {
-    LOGV2(11503103, "Initializing collection catalog");
+    LOGV2(11503103,
+          "Initializing collection catalog",
+          "mode"_attr = mode,
+          "stableTs"_attr = stableTs);
     // Use the stable timestamp as minValid. We know for a fact that the collection exist at
     // this point and is in sync. If we use an earlier timestamp than replication rollback we
     // may be out-of-order for the collection catalog managing this namespace.
     const Timestamp minValidTs = stableTs ? *stableTs : Timestamp::min();
-    CollectionCatalog::write(opCtx, [&minValidTs](CollectionCatalog& catalog) {
-        // Let the CollectionCatalog know that we are maintaining timestamps from minValidTs
-        catalog.catalogIdTracker().rollback(minValidTs);
+    CollectionCatalog::write(opCtx, [&minValidTs, mode](CollectionCatalog& catalog) {
+        if (mode == InitMode::kStorageChange || mode == InitMode::kStartup) {
+            // At startup the tracker is already empty, but on storage change the tracker must be
+            // reset to avoid leaking state from a different storage. In both cases, we need to seed
+            // the oldest maintained timestamp with stableTs (or Timestamp::min). Without seeding
+            // this the tracker would forever cause unnecessary durable catalog scans for PIT
+            // lookups of non-existing namespaces.
+            catalog.resetCatalogIdTracker(minValidTs);
+        } else if (mode == InitMode::kRollback) {
+            // The HistoricalCatalogIdTracker can track the catalogId of collections across
+            // rollbacks as long as we prune the history of catalogIds that are no longer valid. Let
+            // the tracker know that we are maintaining timestamps from minValidTs.
+            catalog.catalogIdTracker().rollback(minValidTs);
+        } else {
+            MONGO_UNREACHABLE;
+        }
     });
 
     bool setMinVisibleToOldestFailpointSet = false;
@@ -231,12 +239,12 @@ std::vector<DatabaseName> listDatabases(boost::optional<TenantId> tenantId) {
 }  // namespace catalog
 
 namespace {
-constexpr auto kNumDurableCatalogScansDueToMissingMapping = "numScansDueToMissingMapping"_sd;
+constexpr auto kNumDurableCatalogScansDueToMissingMapping = "numScansDueToMissingMapping"sv;
 
 class LatestCollectionCatalog {
 public:
     LatestCollectionCatalog() {
-        ObservableMutexRegistry::get().add("Shard Local Catalog Mutexes", _writeMutex);
+        ObservableMutexRegistry::get().add("shardLocalCatalogMutexes", _writeMutex);
     }
 
     std::shared_ptr<CollectionCatalog> load() const {
@@ -355,7 +363,7 @@ bool isCSFLE1Validator(BSONObj doc) {
         if (iterator.more()) {
             BSONElement elem = iterator.next();
             if (elem.type() == BSONType::object) {
-                if (elem.fieldNameStringData() == "encrypt"_sd) {
+                if (elem.fieldNameStringData() == "encrypt"sv) {
                     return true;
                 }
 
@@ -392,7 +400,7 @@ public:
         return section.obj();
     }
 
-    AtomicWord<long long> numScansDueToMissingMapping;
+    Atomic<long long> numScansDueToMissingMapping;
 };
 
 auto& gCollectionCatalogSection =
@@ -430,12 +438,7 @@ public:
     static constexpr size_t kNumStaticActions = 2;
 
     static void setCollectionInCatalog(CollectionCatalog& catalog,
-                                       std::shared_ptr<Collection> collection,
-                                       boost::optional<Timestamp> commitTime) {
-        if (commitTime) {
-            collection->setMinimumValidSnapshot(*commitTime);
-        }
-
+                                       std::shared_ptr<Collection> collection) {
         catalog._collections = catalog._collections.set(collection->ns(), collection);
         catalog._catalog = catalog._catalog.set(collection->uuid(), collection);
         auto dbIdPair = std::make_pair(collection->ns().dbName(), collection->uuid());
@@ -454,8 +457,8 @@ public:
             return;
 
         shard_role_details::getRecoveryUnit(opCtx)->registerPreCommitHook(
-            [](OperationContext* opCtx, boost::optional<Timestamp> commitTs) {
-                PublishCatalogUpdates::preCommit(opCtx, commitTs);
+            [](OperationContext* preCommitOpCtx, boost::optional<Timestamp> commitTs) {
+                PublishCatalogUpdates::preCommit(preCommitOpCtx, commitTs);
             });
         shard_role_details::getRecoveryUnit(opCtx)->registerChangeForCatalogVisibility(
             std::make_unique<PublishCatalogUpdates>(uncommittedCatalogUpdates));
@@ -519,20 +522,82 @@ public:
                     continue;
                 }
 
+                // Set the minimum valid snapshot for the new collection instance before it is
+                // inserted as commit pending. Once registered, concurrent readers can see the new
+                // instance and reuse it if compatible with their snapshot. So anything that's
+                // registered must be in its final state. The fact that the commit might eventually
+                // fail is not relevant, as commit pending entries force readers to check the
+                // durable storage for compatibility.
+                if (commitTs && entry.collection) {
+                    entry.collection->setMinimumValidSnapshot(*commitTs);
+                }
+
                 PendingCommitEntry pendingEntry{entry.collection, commitTs};
 
                 catalog._pendingCommitNamespaces =
                     catalog._pendingCommitNamespaces.set(entry.nss, pendingEntry);
 
-                if (entry.collection) {
-                    // If we have a collection instance for this entry also mark the uuid as pending
+                if (const auto uuid = entry.uuid()) {
                     catalog._pendingCommitUUIDs =
-                        catalog._pendingCommitUUIDs.set(entry.collection->uuid(), pendingEntry);
-                } else if (entry.externalUUID) {
-                    // Drops do not have a collection instance but set their UUID in the entry. Mark
-                    // it as pending with no collection instance.
-                    catalog._pendingCommitUUIDs =
-                        catalog._pendingCommitUUIDs.set(*entry.externalUUID, pendingEntry);
+                        catalog._pendingCommitUUIDs.set(*uuid, pendingEntry);
+                }
+            }
+
+            if constexpr (kDebugBuild) {
+                // Verify that collection instances installed as commit pending by THIS operation
+                // reflect what THIS operation is committing to storage. Scoped to entries owned by
+                // the current opCtx because catalog._pendingCommitNamespaces also contains entries
+                // from concurrent operations that hold different locks and may legitimately have
+                // not yet synchronized their pending Collection clone with the durable catalog.
+
+                std::set<NamespaceString> affectedNamespaces;
+                for (auto&& entry : entries) {
+                    if (!UncommittedCatalogUpdates::isTwoPhaseCommitEntry(entry)) {
+                        continue;
+                    }
+
+                    affectedNamespaces.insert(entry.nss);
+                    if (!entry.renameTo.isEmpty()) {
+                        affectedNamespaces.insert(entry.renameTo);
+                    }
+                }
+
+                for (const auto& nss : affectedNamespaces) {
+                    auto pendingEntry = catalog._pendingCommitNamespaces.find(nss);
+                    invariant(pendingEntry);
+
+                    const auto collection = pendingEntry->collection;
+                    if (!collection) {
+                        const auto droppedColl =
+                            catalog._lookupCollectionByNamespaceNoFindInstantiated(nss);
+                        if (droppedColl->getCatalogId().isNull()) {
+                            // Virtual collections and collection mocks don't have catalogId.
+                            continue;
+                        }
+                        const auto catalogEntry = durable_catalog::getParsedCatalogEntry(
+                            opCtx, droppedColl->getCatalogId(), MDBCatalog::get(opCtx));
+                        // Either dropped or renamed.
+                        invariant(!catalogEntry ||
+                                  (catalogEntry->metadata->nss != nss &&
+                                   catalogEntry->metadata->options.uuid == droppedColl->uuid()));
+                        // Durable check for rename should happen in the other branch.
+                    } else {
+                        if (collection->getCatalogId().isNull()) {
+                            // Virtual collections and collection mocks don't have catalogId.
+                            continue;
+                        }
+
+                        const auto catalogEntry = durable_catalog::getParsedCatalogEntry(
+                            opCtx, collection->getCatalogId(), MDBCatalog::get(opCtx));
+                        invariant(catalogEntry);
+                        if (!collection->isMetadataEqual(catalogEntry->metadata->toBSON())) {
+                            LOGV2_FATAL(12539100,
+                                        "Pending-commit collection metadata must match durable "
+                                        "catalog at preCommit",
+                                        "cached"_attr = collection->getMetadata()->toBSON(),
+                                        "storage"_attr = catalogEntry->metadata->toBSON());
+                        }
+                    }
                 }
             }
 
@@ -593,10 +658,10 @@ public:
                 });
             switch (entry.action) {
                 case UncommittedCatalogUpdates::Entry::Action::kWritableCollection: {
-                    writeJobs.push_back([collection = std::move(entry.collection),
-                                         commitTime](CollectionCatalog& catalog) {
-                        setCollectionInCatalog(catalog, std::move(collection), commitTime);
-                    });
+                    writeJobs.push_back(
+                        [collection = std::move(entry.collection)](CollectionCatalog& catalog) {
+                            setCollectionInCatalog(catalog, std::move(collection));
+                        });
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRenamedCollection: {
@@ -628,10 +693,8 @@ public:
                     break;
                 }
                 case UncommittedCatalogUpdates::Entry::Action::kRecreatedCollection: {
-                    writeJobs.push_back([opCtx,
-                                         collection = entry.collection,
-                                         uuid = *entry.externalUUID,
-                                         commitTime](CollectionCatalog& catalog) {
+                    writeJobs.push_back([opCtx, collection = entry.collection, commitTime](
+                                            CollectionCatalog& catalog) {
                         // Override existing Collection on this namespace
                         catalog._registerCollection(opCtx,
                                                     std::move(collection),
@@ -711,12 +774,9 @@ public:
                 catalog._pendingCommitNamespaces =
                     catalog._pendingCommitNamespaces.erase(entry.nss);
 
-                // Entry without collection, nothing more to do
-                if (!entry.collection)
-                    continue;
-
-                catalog._pendingCommitUUIDs =
-                    catalog._pendingCommitUUIDs.erase(entry.collection->uuid());
+                if (const auto uuid = entry.uuid()) {
+                    catalog._pendingCommitUUIDs = catalog._pendingCommitUUIDs.erase(*uuid);
+                }
             }
         });
     }
@@ -1101,8 +1161,8 @@ const Collection* CollectionCatalog::_instantiateCollectionIfTesting(
     // same as the latest one and cause a false positive failure.
     shouldInstantiateCollection &=
         nssOrUUID.isNamespaceString() && !nssOrUUID.nss().isFLE2StateCollection();
-    // TODO SERVER-122142: The oplog is handled specially here since it seems we would constantly
-    // start oplog visibility threads.
+    // TODO SERVER-129611: Instantiating the oplog on each access makes some jstests time out so we
+    // need a mechanism for those tests to opt-out of it before we can enable it by default.
     shouldInstantiateCollection &= nssOrUUID.isNamespaceString() && !nssOrUUID.nss().isOplog();
     // Viewless timeseries upgrade/downgrade relies on a hack that for a brief window will make
     // the durable state not correspond with what's in memory but expect the in-memory version
@@ -2069,6 +2129,11 @@ const Collection* CollectionCatalog::lookupCollectionByNamespaceOrUUID(
     return lookupCollectionByNamespace(opCtx, nssOrUUID.nss());
 }
 
+std::shared_ptr<const Collection> CollectionCatalog::lookupOplogCollectionForFastPath_UNSAFE(
+    OperationContext* opCtx) const {
+    return _getCollectionByNamespace(opCtx, NamespaceString::kRsOplogNamespace);
+}
+
 std::shared_ptr<Collection> CollectionCatalog::_lookupCollectionByNamespaceNoFindInstantiated(
     const NamespaceString& nss) const {
     const std::shared_ptr<Collection>* coll = _collections.find(nss);
@@ -2158,12 +2223,18 @@ const Collection* CollectionCatalog::lookupCollectionByNamespace(OperationContex
 
 boost::optional<NamespaceString> CollectionCatalog::lookupNSSByUUID(OperationContext* opCtx,
                                                                     const UUID& uuid) const {
-    return _lookupNSSByUUID(opCtx, uuid, false);
+    return _lookupNSSByUUID(opCtx, uuid, CommitPendingMode::kIgnore);
 }
 
-boost::optional<NamespaceString> CollectionCatalog::_lookupNSSByUUID(OperationContext* opCtx,
-                                                                     const UUID& uuid,
-                                                                     bool withCommitPending) const {
+boost::optional<NamespaceString> CollectionCatalog::_lookupNSSByUUID(
+    OperationContext* opCtx, const UUID& uuid, CommitPendingMode commitPendingMode) const {
+    if (commitPendingMode == CommitPendingMode::kThrow) {
+        const auto pendingEntry = _pendingCommitUUIDs.find(uuid);
+        uassert(ErrorCodes::CommitPendingNamespaceOrUUID,
+                str::stream() << "UUID " << uuid.toString() << " is commit pending",
+                !pendingEntry);
+    }
+
     // Return any previously instantiated collection for this snapshot
     if (auto instantiatedColl = _findInstantiatedCollectionByUUID(opCtx, uuid)) {
         if (const auto collPtr = instantiatedColl->get()) {
@@ -2172,7 +2243,7 @@ boost::optional<NamespaceString> CollectionCatalog::_lookupNSSByUUID(OperationCo
         return boost::none;
     }
 
-    if (withCommitPending) {
+    if (commitPendingMode == CommitPendingMode::kInclude) {
         if (const auto entry = _pendingCommitUUIDs.find(uuid); entry && entry->collection &&
             !_hasPendingTimeseriesUpgradeDowngradeCommit({entry->collection->ns().dbName(), uuid},
                                                          entry->collection)) {
@@ -2333,7 +2404,7 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUID(
     }
 
     return _resolveNamespaceStringFromDBNameAndUUID(
-        opCtx, nsOrUUID.dbName(), nsOrUUID.uuid(), false);
+        opCtx, nsOrUUID.dbName(), nsOrUUID.uuid(), CommitPendingMode::kIgnore);
 }
 
 NamespaceString CollectionCatalog::resolveNamespaceStringOrUUIDWithCommitPendingEntries_UNSAFE(
@@ -2347,20 +2418,20 @@ NamespaceString CollectionCatalog::resolveNamespaceStringOrUUIDWithCommitPending
     }
 
     return _resolveNamespaceStringFromDBNameAndUUID(
-        opCtx, nsOrUUID.dbName(), nsOrUUID.uuid(), true);
+        opCtx, nsOrUUID.dbName(), nsOrUUID.uuid(), CommitPendingMode::kInclude);
 }
 
-NamespaceString CollectionCatalog::resolveNamespaceStringFromDBNameAndUUID(
+NamespaceString CollectionCatalog::resolveNamespaceStringFromDBNameAndUUIDThrowIfCommitPending(
     OperationContext* opCtx, const DatabaseName& dbName, const UUID& uuid) const {
-    return _resolveNamespaceStringFromDBNameAndUUID(opCtx, dbName, uuid, false);
+    return _resolveNamespaceStringFromDBNameAndUUID(opCtx, dbName, uuid, CommitPendingMode::kThrow);
 }
 
 NamespaceString CollectionCatalog::_resolveNamespaceStringFromDBNameAndUUID(
     OperationContext* opCtx,
     const DatabaseName& dbName,
     const UUID& uuid,
-    bool withCommitPending) const {
-    auto resolvedNss = _lookupNSSByUUID(opCtx, uuid, withCommitPending);
+    CommitPendingMode commitPendingMode) const {
+    auto resolvedNss = _lookupNSSByUUID(opCtx, uuid, commitPendingMode);
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Unable to resolve " << uuid.toString(),
             resolvedNss && resolvedNss->isValid());
@@ -2724,11 +2795,11 @@ void CollectionCatalog::Stats::adjustOnCollectionRegistration(const Collection& 
                 auto encryptedFieldConfig =
                     coll.getCollectionOptions().encryptedFieldConfig.value();
                 if (op == Stats::kRegister) {
-                    FLEStatusSection::get().updateIndexTypeStatsOnRegisterCollection(
-                        encryptedFieldConfig);
+                    FLEStatusSection::get().updateStatsOnRegisterCollection(nss,
+                                                                            encryptedFieldConfig);
                 } else {
-                    FLEStatusSection::get().updateIndexTypeStatsOnDeregisterCollection(
-                        encryptedFieldConfig);
+                    FLEStatusSection::get().updateStatsOnDeregisterCollection(nss,
+                                                                              encryptedFieldConfig);
                 }
             }
             if (isCSFLE1Validator(coll.getValidatorDoc())) {
@@ -2842,6 +2913,15 @@ bool CollectionCatalog::hasExclusiveAccessToCollection(OperationContext* opCtx,
          shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX));
 }
 
+bool CollectionCatalog::isWritableCollection(OperationContext* opCtx,
+                                             const Collection* collection) {
+    if (!collection) {
+        return false;
+    }
+    auto lookupResult = UncommittedCatalogUpdates::lookupCollection(opCtx, collection->uuid());
+    return lookupResult.found && lookupResult.collection.get() == collection;
+}
+
 const Collection* CollectionCatalog::_lookupSystemViews(OperationContext* opCtx,
                                                         const DatabaseName& dbName) const {
     return lookupCollectionByNamespace(opCtx, NamespaceString::makeSystemDotViewsNamespace(dbName));
@@ -2872,6 +2952,15 @@ const HistoricalCatalogIdTracker& CollectionCatalog::catalogIdTracker() const {
 }
 HistoricalCatalogIdTracker& CollectionCatalog::catalogIdTracker() {
     return _catalogIdTracker;
+}
+
+void CollectionCatalog::resetCatalogIdTracker(Timestamp oldest) {
+    _catalogIdTracker = HistoricalCatalogIdTracker(oldest);
+}
+
+bool CollectionCatalog::isNamespaceOrUUIDCommitPending_forTest(
+    const NamespaceStringOrUUID& nssOrUUID) const {
+    return _findPendingCommitEntry(nssOrUUID) != nullptr;
 }
 
 }  // namespace mongo

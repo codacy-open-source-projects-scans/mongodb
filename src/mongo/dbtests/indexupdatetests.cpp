@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -231,7 +204,7 @@ public:
             ASSERT_OK(indexer.insertAllDocumentsInCollection(_opCtx, _nss));
 
             auto status = indexer.checkConstraints(_opCtx, coll.get());
-            ASSERT_EQUALS(status.code(), ErrorCodes::DuplicateKey);
+            EXPECT_EQ(status.code(), ErrorCodes::DuplicateKey);
         }
     }
 };
@@ -264,7 +237,7 @@ public:
                                            << "a_1"
                                            << "v" << static_cast<int>(kIndexVersion));
             // The call is interrupted because mayInterrupt == true.
-            ASSERT_TRUE(buildIndexInterrupted(indexInfo));
+            EXPECT_TRUE(buildIndexInterrupted(indexInfo));
             // only want to interrupt the index build
             getGlobalServiceContext()->unsetKillAllOperations();
         }
@@ -313,7 +286,7 @@ public:
             BSONObj indexInfo =
                 BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName << "v"
                            << static_cast<int>(kIndexVersion));
-            ASSERT_TRUE(buildIndexInterrupted(indexInfo));
+            EXPECT_TRUE(buildIndexInterrupted(indexInfo));
             // only want to interrupt the index build
             getGlobalServiceContext()->unsetKillAllOperations();
         }
@@ -374,11 +347,11 @@ class SameSpecDifferentOption : public SimpleCompoundIndex {
 public:
     void run() {
         // Cannot have same key spec with an option different from the existing one.
-        ASSERT_EQUALS(ErrorCodes::IndexOptionsConflict,
-                      createIndex(BSON("name" << "x"
-                                              << "key" << BSON("x" << 1 << "y" << 1)
-                                              << "storageEngine" << BSON("wiredTiger" << BSONObj())
-                                              << "v" << static_cast<int>(kIndexVersion))));
+        EXPECT_EQ(ErrorCodes::IndexOptionsConflict,
+                  createIndex(BSON("name" << "x"
+                                          << "key" << BSON("x" << 1 << "y" << 1) << "storageEngine"
+                                          << BSON("wiredTiger" << BSONObj()) << "v"
+                                          << static_cast<int>(kIndexVersion))));
     }
 };
 
@@ -395,10 +368,10 @@ class DifferentSpecSameName : public SimpleCompoundIndex {
 public:
     void run() {
         // Cannot create a different index with the same name as the existing one.
-        ASSERT_EQUALS(ErrorCodes::IndexKeySpecsConflict,
-                      createIndex(BSON("name" << "x"
-                                              << "key" << BSON("y" << 1 << "x" << 1) << "v"
-                                              << static_cast<int>(kIndexVersion))));
+        EXPECT_EQ(ErrorCodes::IndexKeySpecsConflict,
+                  createIndex(BSON("name" << "x"
+                                          << "key" << BSON("y" << 1 << "x" << 1) << "v"
+                                          << static_cast<int>(kIndexVersion))));
     }
 };
 
@@ -421,11 +394,11 @@ public:
         // Exactly the same specs with the existing one, only specified in a different order than
         // the original. This will throw an IndexOptionsConflict as the index already exists under
         // another name.
-        ASSERT_EQUALS(ErrorCodes::IndexOptionsConflict,
-                      createIndex(BSON("name" << "super2"
-                                              << "expireAfterSeconds" << 3600 << "sparse" << true
-                                              << "unique" << 1 << "key" << BSON("superIdx" << "2d")
-                                              << "v" << static_cast<int>(kIndexVersion))));
+        EXPECT_EQ(ErrorCodes::IndexOptionsConflict,
+                  createIndex(BSON("name" << "super2"
+                                          << "expireAfterSeconds" << 3600 << "sparse" << true
+                                          << "unique" << 1 << "key" << BSON("superIdx" << "2d")
+                                          << "v" << static_cast<int>(kIndexVersion))));
     }
 };
 
@@ -467,7 +440,7 @@ public:
 class SameSpecDifferentTTL : public ComplexIndex {
 public:
     void run() {
-        ASSERT_EQUALS(
+        EXPECT_EQ(
             ErrorCodes::IndexOptionsConflict,
             createIndex(BSON("name" << "super4"
                                     << "unique" << 1 << "sparse" << true << "expireAfterSeconds"
@@ -547,8 +520,8 @@ public:
         client.createIndex(_nss, indexSpec);
 
         auto response = client.insertAcknowledged(_nss, {BSON("a" << BSONSymbol("mySymbol"))});
-        ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
-        ASSERT_EQUALS(client.count(_nss), 0U);
+        EXPECT_EQ(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
+        EXPECT_EQ(client.count(_nss), 0U);
     }
 };
 
@@ -564,8 +537,8 @@ public:
 
         auto response = client.insertAcknowledged(_nss, {BSON("a" << BSONSymbol("mySymbol"))});
         ASSERT_OK(getStatusFromWriteCommandReply(response));
-        ASSERT_EQUALS(response["n"].Int(), 1);
-        ASSERT_EQUALS(client.count(_nss), 1U);
+        EXPECT_EQ(response["n"].Int(), 1);
+        EXPECT_EQ(client.count(_nss), 1U);
     }
 };
 
@@ -581,8 +554,8 @@ public:
 
         auto response = client.insertAcknowledged(
             _nss, {BSON("a" << BSON("b" << 99 << "c" << BSONSymbol("mySymbol")))});
-        ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
-        ASSERT_EQUALS(client.count(_nss), 0U);
+        EXPECT_EQ(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
+        EXPECT_EQ(client.count(_nss), 0U);
     }
 };
 
@@ -598,8 +571,8 @@ public:
 
         auto response = client.insertAcknowledged(
             _nss, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
-        ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
-        ASSERT_EQUALS(client.count(_nss), 0U);
+        EXPECT_EQ(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
+        EXPECT_EQ(client.count(_nss), 0U);
     }
 };
 
@@ -610,7 +583,7 @@ public:
         DBDirectClient client(opCtx.get());
         client.dropCollection(_nss);
         client.insert(_nss, BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol"))));
-        ASSERT_EQUALS(client.count(_nss), 1U);
+        EXPECT_EQ(client.count(_nss), 1U);
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale" << "fr")));
         ASSERT_THROWS_CODE(client.createIndex(_nss, indexSpec),
@@ -626,7 +599,7 @@ public:
         DBDirectClient client(opCtx.get());
         client.dropCollection(_nss);
         BSONObj cmdResult;
-        ASSERT_TRUE(
+        EXPECT_TRUE(
             client.runCommand(DatabaseName::createDatabaseName_forTest(boost::none, "unittests"),
                               BSON("create" << "indexupdate"
                                             << "collation" << BSON("locale" << "fr")),
@@ -637,7 +610,7 @@ public:
 
         auto response = client.insertAcknowledged(
             _nss, {BSON("a" << BSON_ARRAY(99 << BSONSymbol("mySymbol")))});
-        ASSERT_EQUALS(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
+        EXPECT_EQ(getStatusFromWriteCommandReply(response), ErrorCodes::CannotBuildIndexKeys);
     }
 };
 

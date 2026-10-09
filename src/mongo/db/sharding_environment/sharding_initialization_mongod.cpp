@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -77,7 +50,9 @@
 #include "mongo/db/router_role/routing_cache/routing_information_cache.h"
 #include "mongo/db/router_role/routing_cache/shard_server_catalog_cache_loader.h"
 #include "mongo/db/router_role/routing_cache/shard_server_catalog_cache_loader_impl.h"
+#include "mongo/db/s/max_key_orphan_detection.h"
 #include "mongo/db/s/migration_util.h"
+#include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
@@ -550,6 +525,8 @@ ShardingInitializationMongoD* ShardingInitializationMongoD::get(ServiceContext* 
 }
 
 void ShardingInitializationMongoD::shutDown(OperationContext* opCtx) {
+    cancelMaxKeyOrphanDetection(opCtx->getServiceContext());
+
     auto const shardingState = ShardingState::get(opCtx);
     if (!shardingState->enabled())
         return;
@@ -681,14 +658,8 @@ void ShardingInitializationMongoD::onStepUpBegin(OperationContext* opCtx, long l
                 [&]() -> bool { return _isPrimary.load(); });
         });
     }
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
-        ShardingState::get(opCtx)->enabled()) {
-        // Register a recovery job with the RangeDeleterService if we will later call
-        // migrationutil::resumeMigrationCoordinationsOnStepUp() in onStepUpComplete().
-        // MigrationCoordinators may register range deletion tasks, and it's important that all
-        // tasks are recovered before any tasks are processed to avoid the issue seen in
-        // SERVER-110796.
-        RangeDeleterService::get(opCtx)->registerRecoveryJob(term);
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        migrationutil::registerMigrationRecoveryJobs(opCtx, term);
     }
 }
 
@@ -765,50 +736,34 @@ void ShardingInitializationMongoD::onStepUpComplete(OperationContext* opCtx, lon
             migrationutil::resumeMigrationRecipientsOnStepUp(opCtx);
 
             const bool scheduleAsyncRefresh = true;
-            resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+            resharding::clearCollectionMetadata(opCtx, scheduleAsyncRefresh);
 
             // Schedule a drop of the temporary collections used by aggregations ($out
             // specifically).
             dropAggTempCollections(opCtx);
+
+            // Kick off the one-shot MaxKey orphan detector for this term. Runs asynchronously
+            // and is cancelled on stepdown.
+            launchMaxKeyOrphanDetectionOnStepUp(opCtx, term);
+        } else {
+            // ShardingState isn't enabled yet, so none of the recovery work above can run
+            // meaningfully. Still resolve the legacy migration recovery job registered in
+            // onStepUpBegin, so it doesn't block RangeDeleterService recovery for the rest of the
+            // term.
+            RangeDeleterService::get(opCtx)->notifyRecoveryJobComplete(
+                term, RecoveryJob::kLegacyMigration);
         }
 
         // The code above will only be executed after a stepdown happens, however the code below
         // needs to be executed also on startup, and the enabled check might fail in shards during
-        // startup. Create uuid index on config.rangeDeletions if needed
-        const auto minKeyFieldName = std::string{RangeDeletionTask::kRangeFieldName} + "." +
-            std::string{ChunkRange::kMinFieldName};
-        const auto maxKeyFieldName = std::string{RangeDeletionTask::kRangeFieldName} + "." +
-            std::string{ChunkRange::kMaxFieldName};
-        Status indexStatus = createIndexOnConfigCollection(
-            opCtx,
-            NamespaceString::kRangeDeletionNamespace,
-            BSON(RangeDeletionTask::kCollectionUuidFieldName << 1 << minKeyFieldName << 1
-                                                             << maxKeyFieldName << 1),
-            false);
-        if (!indexStatus.isOK()) {
-            // If the node is shutting down or it lost quorum just as it was becoming primary,
-            // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
-            // methods is already idempotent, so the machinery will remain in the stepped down
-            // state.
-            if (ErrorCodes::isShutdownError(indexStatus.code()) ||
-                ErrorCodes::isNotPrimaryError(indexStatus.code())) {
+        // startup.
+        auto status = ensureShardServerIndexes(opCtx);
+        if (!status.isOK()) {
+            if (ErrorCodes::isShutdownError(status.code()) ||
+                ErrorCodes::isNotPrimaryError(status.code())) {
                 return;
             }
-            fassertFailedWithStatus(
-                64285,
-                indexStatus.withContext("Failed to create index on config.rangeDeletions on "
-                                        "shard's first transition to primary"));
-        }
-
-        // Create shard catalog collections and indexes if they do not yet exist.
-        auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-        if (fcvSnapshot.isVersionInitialized() &&
-            feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-                VersionContext::getDecoration(opCtx), fcvSnapshot)) {
-            auto status = ensureShardLocalCatalogIndexes(opCtx);
-            if (!status.isOK()) {
-                fassertFailedWithStatus(11961000, status);
-            }
+            fassertFailedWithStatus(13252509, status);
         }
     }
 
@@ -849,6 +804,10 @@ void ShardingInitializationMongoD::onStepUpComplete(OperationContext* opCtx, lon
 void ShardingInitializationMongoD::onStepDown() {
     // TODO (SERVER-113612): remove cc() usage.
     auto opCtx = cc().getOperationContext();
+
+    // Cancel any in-flight MaxKey orphan detector so the one-shot sweep restarts cleanly on the
+    // next stepup.
+    cancelMaxKeyOrphanDetection(opCtx->getServiceContext());
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         PeriodicShardedIndexConsistencyChecker::get(opCtx).onStepDown();
@@ -1093,23 +1052,54 @@ boost::optional<ShardIdentity> ShardingInitializationMongoD::getShardIdentityDoc
     }
 }
 
-Status ensureShardLocalCatalogIndexes(OperationContext* opCtx) {
-    /* Creating _id is a no-op but ensures the collection is created if it doesn't exist. */
-    Status result = sharding_util::createIndexOnCollection(
+Status ensureShardServerIndexes(OperationContext* opCtx) {
+    // Continue attempting every required index build so every missing index is reported.
+    Status returnStatus = Status::OK();
+    auto recordFailure = [&](const Status& result) {
+        if (returnStatus.isOK() && !result.isOK()) {
+            returnStatus = result;
+        }
+    };
+
+    // Create uuid index on config.rangeDeletions if needed
+    const auto minKeyFieldName = std::string{RangeDeletionTask::kRangeFieldName} + "." +
+        std::string{ChunkRange::kMinFieldName};
+    const auto maxKeyFieldName = std::string{RangeDeletionTask::kRangeFieldName} + "." +
+        std::string{ChunkRange::kMaxFieldName};
+    Status indexStatus = sharding_util::createIndexesOnCollectionAtStepUp(
         opCtx,
-        NamespaceString::kConfigShardCatalogCollectionsNamespace,
-        BSON("_id" << 1),
-        true /* unique */);
-    if (!result.isOK()) {
-        return result.withContext(
+        NamespaceString::kRangeDeletionNamespace,
+        {IndexSpec_ForCatalog{BSON(RangeDeletionTask::kCollectionUuidFieldName
+                                   << 1 << minKeyFieldName << 1 << maxKeyFieldName << 1),
+                              false}});
+    recordFailure(indexStatus.withContext(
+        "Failed to create index on config.rangeDeletions on shard's first transition to primary"));
+
+    // Create shard catalog collections and indexes if they do not yet exist.
+    auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (feature_flags::gAuthoritativeShardsDDL.isEnabled(VersionContext::getDecoration(opCtx),
+                                                         fcvSnapshot)) {
+        /* Creating _id is a no-op but ensures the collection is created if it doesn't exist. */
+        Status result = sharding_util::createIndexesOnCollectionAtStepUp(
+            opCtx,
+            NamespaceString::kConfigShardCatalogCollectionsNamespace,
+            {IndexSpec_ForCatalog{BSON("_id" << 1), true /* unique */}});
+        recordFailure(result.withContext(
             str::stream()
             << "couldn't create _id index on "
-            << NamespaceString::kConfigShardCatalogCollectionsNamespace.toStringForErrorMsg());
-    }
+            << NamespaceString::kConfigShardCatalogCollectionsNamespace.toStringForErrorMsg()));
 
-    /* The shard catalog chunks collection and its indexes. */
-    return ensureCollectionIndexes(
-        opCtx, NamespaceString::kConfigShardCatalogChunksNamespace, getChunkCollectionIndexSpecs());
+        result = sharding_util::createIndexesOnCollectionAtStepUp(
+            opCtx,
+            NamespaceString::kConfigShardCatalogChunksNamespace,
+            getChunkCollectionIndexSpecs());
+
+        recordFailure(result.withContext(
+            str::stream()
+            << "Failed to create indexes on "
+            << NamespaceString::kConfigShardCatalogChunksNamespace.toStringForErrorMsg()));
+    }
+    return returnStatus;
 }
 
 }  // namespace mongo

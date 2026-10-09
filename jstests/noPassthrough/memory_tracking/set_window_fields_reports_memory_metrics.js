@@ -16,7 +16,6 @@
  * ]
  */
 import {runMemoryStatsTest} from "jstests/libs/query/memory_tracking_utils.js";
-import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 
 const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to start up");
@@ -25,17 +24,11 @@ const db = conn.getDB("test");
 // The tests expect that memory metrics appear right after memory is used. Decrease the threshold
 // for rate-limiting writes to CurOp. Otherwise, we may report no memory usage if the memory used <
 // limit.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryMaxWriteToCurOpMemoryUsageBytes: 256}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryMaxWriteToCurOpMemoryUsageBytes: 256}),
+);
 
-// Since this test is run against all execution engine variants, we don't have to force both SBE and
-// classic in this test and save a bit of compute.
-let stageName;
-if (checkSbeFullyEnabled(db)) {
-    jsTest.log.info("SBE is fully enabled.");
-    stageName = "window";
-} else {
-    stageName = "$_internalSetWindowFields";
-}
+const stageName = "$_internalSetWindowFields";
 
 const collName = jsTestName();
 const coll = db[collName];
@@ -117,7 +110,12 @@ const pipeline = [
 }
 
 {
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 5000}));
+    assert.commandWorked(
+        db.adminCommand({
+            setParameter: 1,
+            internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 5000,
+        }),
+    );
 
     jsTest.log.info("Running pipeline " + tojson(pipeline));
 

@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -59,13 +32,14 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -75,7 +49,13 @@
 
 namespace mongo {
 
-class MONGO_MOD_PRIVATE CollectionImpl final : public Collection {
+class FailPoint;
+
+// Defined in collection_impl.cpp; lets tests simulate a validator that was well formed on the
+// version that wrote it but not on this one (SERVER-134863).
+extern FailPoint allowSettingMalformedCollectionValidators;
+
+class [[MONGO_MOD_PRIVATE]] CollectionImpl final : public Collection {
 public:
     // Uses the collator factory to convert the BSON representation of a collator to a
     // CollatorInterface. Returns null if the BSONObj is empty. We expect the stored collation to be
@@ -141,8 +121,12 @@ public:
         return _validator.validatorDoc.getOwned();
     }
 
-    std::pair<SchemaValidationResult, Status> checkValidation(OperationContext* opCtx,
-                                                              const BSONObj& document) const final;
+    StatusWith<std::shared_ptr<MatchExpression>> getValidatorFilter() const final {
+        return _validator.filter;
+    }
+
+    std::pair<DocumentValidationResult, Status> checkValidation(
+        OperationContext* opCtx, const BSONObj& document) const final;
 
     Status checkValidationAndParseResult(OperationContext* opCtx,
                                          const BSONObj& document) const final;
@@ -195,11 +179,12 @@ public:
      * used.
      * Requires an exclusive lock on the collection.
      */
-    Status setValidationOptions(OperationContext* opCtx,
-                                boost::optional<ValidationLevelEnum> newLevel,
-                                boost::optional<ValidationActionEnum> newAction,
-                                boost::optional<Validator> newValidator) final;
-
+    Status setValidationOptions(
+        OperationContext* opCtx,
+        boost::optional<ValidationLevelEnum> newLevel,
+        boost::optional<ValidationActionEnum> newAction,
+        boost::optional<Validator> newValidator,
+        boost::optional<bool> newPrepareConstraintValidationLevel = boost::none) final;
 
     boost::optional<ValidationLevelEnum> getValidationLevel() const final;
     boost::optional<ValidationActionEnum> getValidationAction() const final;
@@ -234,11 +219,6 @@ public:
     void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                     boost::optional<bool> setting) final;
 
-    boost::optional<bool> timeseriesBucketingParametersHaveChanged() const final;
-
-    void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
-                                                 boost::optional<bool> value) final;
-
     bool shouldRemoveLegacyTimeseriesBucketingParametersHaveChanged() const final;
     void removeLegacyTimeseriesBucketingParametersHaveChanged(OperationContext* opCtx) final;
 
@@ -247,8 +227,6 @@ public:
 
     bool getRequiresTimeseriesExtendedRangeSupport() const final;
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final;
-
-    bool areTimeseriesBucketsFixed() const final;
 
     /**
      * isClustered() relies on the object returned from getClusteredInfo(). If
@@ -343,15 +321,15 @@ public:
                                           const BSONObj& spec) const final;
 
     void updateTTLSetting(OperationContext* opCtx,
-                          StringData idxName,
+                          std::string_view idxName,
                           long long newExpireSeconds) final;
 
-    void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) final;
+    void updateHiddenSetting(OperationContext* opCtx, std::string_view idxName, bool hidden) final;
 
-    void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) final;
+    void updateUniqueSetting(OperationContext* opCtx, std::string_view idxName, bool unique) final;
 
     void updatePrepareUniqueSetting(OperationContext* opCtx,
-                                    StringData idxName,
+                                    std::string_view idxName,
                                     bool prepareUnique) final;
 
     std::vector<std::string> repairInvalidIndexOptions(OperationContext* opCtx,
@@ -359,24 +337,24 @@ public:
 
     void setIsTemp(OperationContext* opCtx, bool isTemp) final;
 
-    void removeIndex(OperationContext* opCtx, StringData indexName) final;
+    void removeIndex(OperationContext* opCtx, std::string_view indexName) final;
 
     Status prepareForIndexBuild(OperationContext* opCtx,
                                 const IndexDescriptor* spec,
-                                StringData indexIdent,
+                                std::string_view indexIdent,
                                 boost::optional<UUID> buildUUID) final;
 
-    boost::optional<UUID> getIndexBuildUUID(StringData indexName) const final;
+    boost::optional<UUID> getIndexBuildUUID(std::string_view indexName) const final;
 
     bool isIndexMultikey(OperationContext* opCtx,
-                         StringData indexName,
+                         std::string_view indexName,
                          MultikeyPaths* multikeyPaths,
                          int indexOffset) const final;
 
-    bool setIndexIsMultikey(OperationContext* opCtx,
-                            StringData indexName,
-                            const MultikeyPaths& multikeyPaths,
-                            int indexOffset) const final;
+    int64_t setIndexIsMultikey(OperationContext* opCtx,
+                               std::string_view indexName,
+                               const MultikeyPaths& multikeyPaths,
+                               int indexOffset) const final;
 
     void forceSetIndexIsMultikey(OperationContext* opCtx,
                                  const IndexDescriptor* desc,
@@ -387,20 +365,22 @@ public:
 
     int getCompletedIndexCount() const final;
 
-    BSONObj getIndexSpec(StringData indexName, bool expandSimpleCollation) const final;
+    BSONObj getIndexSpec(std::string_view indexName, bool expandSimpleCollation) const final;
 
     void getAllIndexes(std::vector<std::string>* names) const final;
 
     void getReadyIndexes(std::vector<std::string>* names) const final;
 
-    bool isIndexPresent(StringData indexName) const final;
+    bool isIndexPresent(std::string_view indexName) const final;
 
-    bool isIndexReady(StringData indexName) const final;
+    bool isIndexReady(std::string_view indexName) const final;
 
     void replaceMetadata(OperationContext* opCtx,
                          std::shared_ptr<durable_catalog::CatalogEntryMetaData> md) final;
 
     bool isMetadataEqual(const BSONObj& otherMetadata) const final;
+
+    std::shared_ptr<const durable_catalog::CatalogEntryMetaData> getMetadata() const final;
 
     bool needsCappedLock() const final;
 
@@ -413,6 +393,42 @@ private:
      */
     template <typename Func>
     void _writeMetadata(OperationContext* opCtx, Func func);
+
+    int _getIndexOffsetForMultikeyUpdate(std::string_view indexName, int indexOffset) const;
+
+    /**
+     * Updates multikey metadata for the index at 'offset' in 'metadata'.
+     *
+     * Returns the number of new multikey path components recorded. For indexes that do not track
+     * path-level multikey information, returns 1 if the index is becoming multikey for the first
+     * time and 0 if it was already multikey. That return value counts the metadata change even
+     * though no path components are tracked in the catalog for the index.
+     */
+    int64_t _setIndexIsMultikeyInMetadata(const durable_catalog::CatalogEntryMetaData& metadata,
+                                          int offset,
+                                          const MultikeyPaths& multikeyPaths) const;
+
+    /**
+     * Sets the index identified by 'indexName' to be multikey when the caller holds shared access
+     * to the collection (MODE_IX). This mutates the shared collection instance without going
+     * through the usual copy-on-write path for metadata updates, using a dedicated concurrency
+     * control mechanism for multikey metadata updates.
+     */
+    int64_t _setIndexIsMultikeyWithSharedAccess(OperationContext* opCtx,
+                                                std::string_view indexName,
+                                                const MultikeyPaths& multikeyPaths,
+                                                int indexOffset) const;
+
+    /**
+     * Sets the index identified by 'indexName' to be multikey when the caller exclusively owns
+     * this collection in the current WUOW (i.e. newly created in this WUOW or held under MODE_X).
+     * This bypasses the UncommittedMultikey decoration / onCommit deferral and persists the
+     * metadata atomically as part of the transaction.
+     */
+    int64_t _setIndexIsMultikeyWithExclusiveAccess(OperationContext* opCtx,
+                                                   std::string_view indexName,
+                                                   const MultikeyPaths& multikeyPaths,
+                                                   int indexOffset);
 
     /**
      * Creates a mutable copy of the current metadata, including uncommitted multikey changes if
@@ -480,7 +496,7 @@ private:
         // set it from a const method on the Collection. In order to do this, we need to make it
         // mutable. Given that the value may only transition from false to true, but never back
         // again, and that we store and retrieve it atomically, this should be safe.
-        mutable AtomicWord<bool> _requiresTimeseriesExtendedRangeSupport{false};
+        mutable Atomic<bool> _requiresTimeseriesExtendedRangeSupport{false};
     };
 
     NamespaceString _ns;
@@ -504,7 +520,7 @@ private:
     bool _initialized = false;
 };
 
-class MONGO_MOD_PUBLIC CollectionImplFactory : public Collection::Factory {
+class [[MONGO_MOD_PUBLIC]] CollectionImplFactory : public Collection::Factory {
 public:
     std::shared_ptr<Collection> make(
         OperationContext* opCtx,

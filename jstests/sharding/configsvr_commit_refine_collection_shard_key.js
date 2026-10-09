@@ -5,6 +5,7 @@
  *   does_not_support_stepdowns,
  * ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function runConfigsvrCommitRefineCollectionShardKey(st, ns, oldTimestamp, newTimestamp, newKey) {
@@ -19,6 +20,12 @@ function runConfigsvrCommitRefineCollectionShardKey(st, ns, oldTimestamp, newTim
 }
 
 const st = new ShardingTest({shards: 1});
+if (FeatureFlagUtil.isPresentAndEnabled(st.s, "AuthoritativeShardsCRUD")) {
+    // _configsvrCommitRefineCollectionShardKey only updates the global catalog, leaving the
+    // shard catalog and filtering metadata stale, which the consistency checks would flag.
+    TestData.skipCheckMetadataConsistency = true;
+    TestData.skipCheckShardFilteringMetadata = true;
+}
 
 const dbName = "test";
 const collName = "foo";
@@ -36,12 +43,20 @@ const initialCollectionMetadata = st.s.getCollection("config.collections").findO
 
 assert.eq(initialShardKey, initialCollectionMetadata.key);
 assert.commandWorked(
-    st.s.getDB(dbName).runCommand({createIndexes: collName, indexes: [{key: newShardKey, name: "index_2"}]}),
+    st.s
+        .getDB(dbName)
+        .runCommand({createIndexes: collName, indexes: [{key: newShardKey, name: "index_2"}]}),
 );
 
 // First run of the command, should succeed, check that the metadata changed.
 assert.commandWorked(
-    runConfigsvrCommitRefineCollectionShardKey(st, ns, initialCollectionMetadata.timestamp, Timestamp(), newShardKey),
+    runConfigsvrCommitRefineCollectionShardKey(
+        st,
+        ns,
+        initialCollectionMetadata.timestamp,
+        Timestamp(),
+        newShardKey,
+    ),
 );
 
 const finalCollectionMetadata = st.s.getCollection("config.collections").findOne({_id: ns});
@@ -73,7 +88,13 @@ assert.eq(noopCollectionMetadata.lastmodEpoch, finalCollectionMetadata.lastmodEp
 // This should fail, the newTimestamp must match with the first newTimestamp committed, just like
 // the oldTimestamp does.
 assert.commandFailedWithCode(
-    runConfigsvrCommitRefineCollectionShardKey(st, ns, initialCollectionMetadata.timestamp, Timestamp(), newShardKey),
+    runConfigsvrCommitRefineCollectionShardKey(
+        st,
+        ns,
+        initialCollectionMetadata.timestamp,
+        Timestamp(),
+        newShardKey,
+    ),
     7648608,
 );
 
@@ -83,6 +104,8 @@ assert.commandFailedWithCode(
     7648608,
 );
 
-assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+if (!FeatureFlagUtil.isPresentAndEnabled(st.s, "AuthoritativeShardsCRUD")) {
+    assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+}
 
 st.stop();

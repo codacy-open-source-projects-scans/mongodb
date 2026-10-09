@@ -8,6 +8,7 @@
 //   does_not_support_stepdowns,
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
+//   uses_map_reduce_internal_merge_pipeline
 // ]
 const coll = db.mr_scope;
 coll.drop();
@@ -38,7 +39,9 @@ const reduceFn = function (key, values) {
     return {count: total};
 };
 
-assert.commandWorked(coll.mapReduce(mapFn, reduceFn, {out: {merge: outputColl.getName()}, scope: {xx: {val: 1}}}));
+assert.commandWorked(
+    coll.mapReduce(mapFn, reduceFn, {out: {merge: outputColl.getName()}, scope: {xx: {val: 1}}}),
+);
 
 assert.eq(3, outputColl.find().itcount());
 assert.eq(1, outputColl.count({_id: "a", "value.count": 2}));
@@ -46,7 +49,9 @@ assert.eq(1, outputColl.count({_id: "b", "value.count": 3}));
 assert.eq(1, outputColl.count({_id: "c", "value.count": 3}));
 
 outputColl.drop();
-assert.commandWorked(coll.mapReduce(mapFn, reduceFn, {scope: {xx: {val: 2}}, out: {merge: outputColl.getName()}}));
+assert.commandWorked(
+    coll.mapReduce(mapFn, reduceFn, {scope: {xx: {val: 2}}, out: {merge: outputColl.getName()}}),
+);
 
 assert.eq(3, outputColl.find().itcount());
 assert.eq(1, outputColl.count({_id: "a", "value.count": 4}));

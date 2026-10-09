@@ -10,6 +10,7 @@
  *   used until it is made visible.
  *
  * @tags: [
+ *   uses_explain,
  *   # The test runs commands that are not allowed with security token: planCacheListFilters,
  *   # planCacheSetFilter.
  *   not_allowed_with_signed_security_token,
@@ -22,7 +23,11 @@
  * ]
  */
 
-import {getPlanStages, getWinningPlanFromExplain, isCollscan} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStages,
+    getWinningPlanFromExplain,
+    isCollscan,
+} from "jstests/libs/query/analyze_plan.js";
 
 const collName = "hidden_indexes_remain_visible_in_index_filters";
 db[collName].drop();

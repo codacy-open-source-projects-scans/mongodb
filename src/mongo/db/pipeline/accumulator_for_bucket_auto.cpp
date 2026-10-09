@@ -1,40 +1,15 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/accumulator_for_bucket_auto.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/memory_tracking/memory_usage_limit.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/expression.h"
+#include "mongo/db/query/query_knob_descriptors_execution.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
@@ -42,12 +17,14 @@
 
 #include <iterator>
 #include <map>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 using FirstLastSense = AccumulatorFirstLastN::Sense;
 using FactoryFnMap = StringMap<std::function<AccumulatorState::Factory(ExpressionContext* const)>>;
 
@@ -78,18 +55,18 @@ public:
 
     static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 
-    static constexpr StringData getName() {
+    static constexpr std::string_view getName() {
         if constexpr (single) {
             if constexpr (sense == Sense::kFirst) {
-                return "$first"_sd;
+                return "$first"sv;
             } else {
-                return "$last"_sd;
+                return "$last"sv;
             }
         } else {
             if constexpr (sense == Sense::kFirst) {
-                return "$firstN"_sd;
+                return "$firstN"sv;
             } else {
-                return "$lastN"_sd;
+                return "$lastN"sv;
             }
         }
     }
@@ -106,7 +83,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       const SerializationOptions& options = {}) const final;
+                       const query_shape::SerializationOptions& options = {}) const final;
 
     void reset() final;
 
@@ -142,7 +119,7 @@ private:
  */
 class AccumulatorMergeObjectsForBucketAuto : public AccumulatorState {
 public:
-    static constexpr auto kName = "$mergeObjects"_sd;
+    static constexpr auto kName = "$mergeObjects"sv;
 
     const char* getOpName() const final {
         return kName.data();
@@ -169,7 +146,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       const SerializationOptions& options) const final {
+                       const query_shape::SerializationOptions& options) const final {
         // Similar to 'AccumulatorFirstLastNForBucketAuto::serialize()', this accumulator
         // serializes itself as a user-facing '$mergeObjects' instead of the internal accumulator
         // created in 'replaceAccumulationStatementForBucketAuto()'.
@@ -195,7 +172,7 @@ public:
     using KeyOutPair = std::pair<long long, Value>;
 
     AccumulatorPushConcatArraysCommonForBucketAuto(ExpressionContext* expCtx,
-                                                   int maxMemoryUsageBytes)
+                                                   MemoryUsageLimit maxMemoryUsageBytes)
         : AccumulatorState(expCtx, maxMemoryUsageBytes) {}
 
     // Called by 'processInternal', it adds the incoming 'input' as is to
@@ -215,7 +192,7 @@ public:
 
     Document serialize(boost::intrusive_ptr<Expression> initializer,
                        boost::intrusive_ptr<Expression> argument,
-                       const SerializationOptions& options) const final {
+                       const query_shape::SerializationOptions& options) const final {
         // Similar to 'AccumulatorFirstLastNForBucketAuto::serialize()', this accumulator
         // serializes itself as a user-facing '$push' or $concatArrays instead of the internal
         // accumulator created in 'replaceAccumulationStatementForBucketAuto()'.
@@ -230,16 +207,16 @@ protected:
 
 class AccumulatorPushForBucketAuto : public AccumulatorPushConcatArraysCommonForBucketAuto {
 public:
-    static constexpr auto kName = "$push"_sd;
+    static constexpr auto kName = "$push"sv;
 
     const char* getOpName() const final {
         return kName.data();
     }
 
     AccumulatorPushForBucketAuto(ExpressionContext* expCtx,
-                                 boost::optional<int> maxMemoryUsageBytes)
+                                 boost::optional<MemoryUsageLimit> maxMemoryUsageBytes)
         : AccumulatorPushConcatArraysCommonForBucketAuto(
-              expCtx, maxMemoryUsageBytes.value_or(internalQueryMaxPushBytes.load())) {
+              expCtx, maxMemoryUsageBytes.value_or(MemoryUsageLimit{query_knobs::kMaxPushBytes})) {
         _memUsageTracker.set(sizeof(*this));
     }
 
@@ -258,16 +235,17 @@ public:
 
 class AccumulatorConcatArraysForBucketAuto : public AccumulatorPushConcatArraysCommonForBucketAuto {
 public:
-    static constexpr auto kName = "$concatArrays"_sd;
+    static constexpr auto kName = "$concatArrays"sv;
 
     const char* getOpName() const final {
         return kName.data();
     }
 
     AccumulatorConcatArraysForBucketAuto(ExpressionContext* expCtx,
-                                         boost::optional<int> maxMemoryUsageBytes)
+                                         boost::optional<MemoryUsageLimit> maxMemoryUsageBytes)
         : AccumulatorPushConcatArraysCommonForBucketAuto(
-              expCtx, maxMemoryUsageBytes.value_or(internalQueryMaxConcatArraysBytes.load())) {
+              expCtx,
+              maxMemoryUsageBytes.value_or(MemoryUsageLimit{query_knobs::kMaxConcatArraysBytes})) {
         _memUsageTracker.set(sizeof(*this));
     }
 
@@ -423,7 +401,7 @@ template <FirstLastSense sense, bool single>
 Document AccumulatorFirstLastNForBucketAuto<sense, single>::serialize(
     boost::intrusive_ptr<Expression> initializer,
     boost::intrusive_ptr<Expression> argument,
-    const SerializationOptions& options) const {
+    const query_shape::SerializationOptions& options) const {
     MutableDocument args;
     if constexpr (single) {
         // Uses the same serialize() method as $first/$last uses, requiring a null initializer
@@ -571,15 +549,15 @@ void AccumulatorConcatArraysForBucketAuto::addToMap(long long inputPosition, Val
 }
 
 
-bool isPositionalAccumulator(const char* opName) {
-    return factoryFnMap.find(opName) != factoryFnMap.cend();
+bool isPositionalAccumulator(std::string_view opName) {
+    return factoryFnMap.contains(opName);
 }
 
 AccumulationStatement replaceAccumulationStatementForBucketAuto(ExpressionContext* const expCtx,
                                                                 AccumulationStatement&& stmt) {
 
     auto accName = stmt.expr.name;
-    if (!isPositionalAccumulator(accName.data())) {
+    if (!isPositionalAccumulator(accName)) {
         return std::move(stmt);
     }
     if (!accName.ends_with("N")) {

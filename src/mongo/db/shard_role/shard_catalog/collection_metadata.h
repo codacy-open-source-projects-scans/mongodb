@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -67,7 +41,7 @@ namespace mongo {
  *
  * This class's chunk mapping is immutable once constructed.
  */
-class MONGO_MOD_PUBLIC CollectionMetadata {
+class [[MONGO_MOD_PUBLIC]] CollectionMetadata {
 public:
     /**
      * Instantiates a metadata object, which represents an unsharded collection. This 'isSharded'
@@ -84,6 +58,15 @@ public:
     CollectionMetadata(CurrentChunkManager cm, const ShardId& thisShardId);
 
     CollectionMetadata(PointInTimeChunkManager cm, const ShardId& thisShardId);
+
+    /**
+     * Returns a new CollectionMetadata with the given chunk changes applied to the current
+     * routing table. If those changes have already been applied, returns this metadata unchanged.
+     * This is determined by comparing the collection version against the highest chunk version
+     * among the changed chunks.
+     */
+    CollectionMetadata makeUpdated(const std::vector<ChunkType>& changedChunks,
+                                   bool forceAllowGaps = false) const;
 
     /**
      * Returns a CollectionMetadata object for an untracked collection.
@@ -108,6 +91,16 @@ public:
 
     bool hasRoutingTable() const {
         return _cm && getChunkManagerBase().hasRoutingTable();
+    }
+
+    /**
+     * Returns true if the routing table holds only this shard's owned chunks and may have gaps in
+     * the key range (an authoritative shard-catalog filtering table). A legacy full routing table
+     * that holds every chunk of the collection does not allow gaps. Returns false when there is no
+     * routing table.
+     */
+    bool allowGaps() const {
+        return hasRoutingTable() && getChunkManagerBase().allowGaps();
     }
 
     bool allowMigrations() const;

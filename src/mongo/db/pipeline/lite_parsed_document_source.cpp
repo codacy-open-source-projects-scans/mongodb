@@ -1,40 +1,16 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/string_map.h"
 
 #include <algorithm>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -42,13 +18,23 @@
 
 namespace mongo {
 
+std::shared_ptr<ResolvedNamespace> tryGetPreResolvedNamespace(
+    const NamespaceString& nss, const ResolvedNamespaceMap& resolvedNamespaces) {
+    auto it = resolvedNamespaces.find(nss);
+    if (it != resolvedNamespaces.end() && it->second.isInvolvedNamespaceAView() &&
+        it->second.getParsedPipeline()) {
+        auto view = std::make_shared<ResolvedNamespace>(it->second);
+        view->desugarViewPipeline();
+        return view;
+    }
+    return nullptr;
+}
+
+
 using Parser = LiteParsedDocumentSource::Parser;
 using ParserMap = LiteParsedDocumentSource::ParserMap;
 
 namespace {
-
-// Empty vector used by LiteParsedDocumentSources which do not have a sub pipeline.
-inline static std::vector<LiteParsedPipeline> kNoSubPipeline = {};
 
 ParserMap parserMap;
 
@@ -207,60 +193,17 @@ std::unique_ptr<LiteParsedDocumentSource> LiteParsedDocumentSource::parse(
     return lpds;
 }
 
-std::vector<LiteParsedPipeline>& LiteParsedDocumentSource::getMutableSubPipelines() {
-    return kNoSubPipeline;
-}
-
 const ParserMap& LiteParsedDocumentSource::getParserMap() {
     return parserMap;
 }
 
-bool LiteParsedDocumentSource::isRegisteredExtensionStage(StringData stageName) {
+bool LiteParsedDocumentSource::isRegisteredExtensionStage(std::string_view stageName) {
     const auto it = parserMap.find(stageName);
     if (it == parserMap.end()) {
         return false;
     }
 
     return it->second.getParserInfo().fromExtension;
-}
-
-ViewInfo::~ViewInfo() = default;
-ViewInfo::ViewInfo(ViewInfo&&) noexcept = default;
-ViewInfo& ViewInfo::operator=(ViewInfo&&) noexcept = default;
-
-ViewInfo::ViewInfo(NamespaceString viewName_,
-                   NamespaceString resolvedNss_,
-                   std::vector<BSONObj> viewPipeBson_,
-                   const LiteParserOptions& options_)
-    : _wrappedNamespace(
-          viewName_,
-          resolvedNss_,
-          std::move(viewPipeBson_),
-          BSONObj(),
-          ResolvedNamespaceViewOptions{.options = std::make_shared<LiteParserOptions>(options_),
-                                       .shouldParseLpp = true}) {}
-
-ViewInfo::ViewInfo(const ResolvedNamespace& resolvedNamespace)
-    : _wrappedNamespace(resolvedNamespace) {}
-
-std::vector<BSONObj> ViewInfo::getOriginalBson() const {
-    return _wrappedNamespace.getOriginalBson();
-}
-
-std::vector<BSONObj> ViewInfo::getSerializedViewPipeline() const {
-    return _wrappedNamespace.getSerializedViewPipeline();
-}
-
-LiteParsedPipeline ViewInfo::getViewPipeline() const {
-    return _wrappedNamespace.getViewPipeline();
-}
-
-void ViewInfo::desugarViewPipeline() {
-    _wrappedNamespace.desugarViewPipeline();
-}
-
-ViewInfo ViewInfo::clone() const {
-    return ViewInfo(_wrappedNamespace.clone());
 }
 
 }  // namespace mongo

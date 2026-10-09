@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/db/s/transaction_coordinator_futures_util.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/remote_command_targeter.h"
@@ -56,6 +29,7 @@
 #include "mongo/util/future_impl.h"
 
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 #include <boost/move/utility_core.hpp>
@@ -67,10 +41,15 @@
 namespace mongo {
 namespace txn {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(failRemoteTransactionCommand);
 MONGO_FAIL_POINT_DEFINE(hangWhileTargetingRemoteHost);
 MONGO_FAIL_POINT_DEFINE(hangWhileTargetingLocalHost);
+
+// Test-only. Pauses a scheduleRemoteCommand worker after targeting completes but before the command
+// handle is registered, letting a test drive that window deterministically.
+MONGO_FAIL_POINT_DEFINE(hangTransactionCoordinatorAsyncWorkSchedulerBeforeSchedulingRemoteCommand);
 
 using RemoteCommandCallbackArgs = executor::TaskExecutor::RemoteCommandCallbackArgs;
 using ResponseStatus = executor::TaskExecutor::ResponseStatus;
@@ -83,9 +62,9 @@ bool shouldActivateFailpoint(BSONObj commandObj, BSONObj data) {
     BSONElement twoPhaseCommitStage = data["twoPhaseCommitStage"];
     invariant(!twoPhaseCommitStage.eoo());
     invariant(twoPhaseCommitStage.type() == BSONType::string);
-    StringData twoPhaseCommitStageValue = twoPhaseCommitStage.valueStringData();
-    constexpr std::array<StringData, 3> fieldNames{
-        "prepareTransaction"_sd, "commitTransaction"_sd, "abortTransaction"_sd};
+    std::string_view twoPhaseCommitStageValue = twoPhaseCommitStage.valueStringData();
+    constexpr std::array<std::string_view, 3> fieldNames{
+        "prepareTransaction"sv, "commitTransaction"sv, "abortTransaction"sv};
     std::array<BSONElement, 3> fields;
     commandObj.getFields(fieldNames, &fields);
     const bool commandIsPrepare = !fields[0].eoo();
@@ -99,7 +78,19 @@ bool shouldActivateFailpoint(BSONObj commandObj, BSONObj data) {
     return false;
 }
 
+void hangBeforeSchedulingRemoteCommandForTest() {
+    if (MONGO_unlikely(hangTransactionCoordinatorAsyncWorkSchedulerBeforeSchedulingRemoteCommand
+                           .shouldFail())) {
+        LOGV2(10441401,
+              "Hit hangTransactionCoordinatorAsyncWorkSchedulerBeforeSchedulingRemoteCommand "
+              "failpoint");
+        hangTransactionCoordinatorAsyncWorkSchedulerBeforeSchedulingRemoteCommand.pauseWhileSet();
+    }
+}
+
 }  // namespace
+
+MONGO_FAIL_POINT_DEFINE(hangAfterShutdownCheckWhileHoldingSchedulerMutex);
 
 AsyncWorkScheduler::AsyncWorkScheduler(ServiceContext* serviceContext)
     : AsyncWorkScheduler(serviceContext, nullptr, WithLock::withoutLock() /* No parent */) {}
@@ -203,65 +194,96 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
         });
     }
 
-    return _targetHostAsync(shardId, readPref, operationContextFn, commandObj)
-        .then([this, shardId, commandObj = commandObj.getOwned(), readPref](
-                  HostAndShard hostAndShard) mutable {
-            executor::RemoteCommandRequest request(hostAndShard.hostTargeted,
-                                                   DatabaseName::kAdmin,
-                                                   commandObj,
-                                                   readPref.toContainingBSON(),
-                                                   nullptr);
+    // Do the targeting and the send within one scheduleWork so that a single handle stays
+    // registered for the whole operation. Otherwise the scheduler could look idle between targeting
+    // finishing and the command handle being registered, letting a concurrent join() destroy it
+    // while the continuation below (which holds a raw 'this') is still pending.
+    return scheduleWork([this,
+                         shardId,
+                         readPref,
+                         operationContextFn,
+                         exec = _executor,
+                         commandObj = commandObj.getOwned()](OperationContext* opCtx) mutable {
+        operationContextFn(opCtx);
+        const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+        auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
 
-            auto pf = makePromiseFuture<ResponseStatus>();
+        if (MONGO_unlikely(hangWhileTargetingRemoteHost.shouldFail(
+                [&](BSONObj data) { return shouldActivateFailpoint(commandObj, data); }))) {
+            LOGV2(22450, "Hit hangWhileTargetingRemoteHost failpoint", "shardId"_attr = shardId);
+            hangWhileTargetingRemoteHost.pauseWhileSet(opCtx);
+        }
 
-            std::unique_lock<std::mutex> ul(_mutex);
-            uassertStatusOK(_shutdownStatus);
-
-            auto scheduledCommandHandle = uassertStatusOK(_executor->scheduleRemoteCommand(
-                request,
-                [this,
-                 commandObj = std::move(commandObj),
-                 shardId = shardId,
-                 hostTargeted = std::move(hostAndShard.hostTargeted),
-                 shard = std::move(hostAndShard.shard),
-                 promise = std::make_shared<Promise<ResponseStatus>>(std::move(pf.promise))](
-                    const RemoteCommandCallbackArgs& args) mutable {
-                    auto status = args.response.status;
-                    shard->updateReplSetMonitor(hostTargeted, status);
-
-                    // Only consider actual failures to send the command as errors.
-                    if (status.isOK()) {
-                        auto commandStatus = getStatusFromCommandResult(args.response.data);
-                        shard->updateReplSetMonitor(hostTargeted, commandStatus);
-
-                        auto writeConcernStatus =
-                            getWriteConcernStatusFromCommandResult(args.response.data);
-                        shard->updateReplSetMonitor(hostTargeted, writeConcernStatus);
-
-                        promise->emplaceValue(args.response);
-                    } else {
-                        promise->setError([&] {
-                            if (status == ErrorCodes::CallbackCanceled) {
-                                std::unique_lock<std::mutex> ul(_mutex);
-                                return _shutdownStatus.isOK() ? status : _shutdownStatus;
-                            }
-                            return status;
-                        }());
-                    }
-                }));
-
-            auto it =
-                _activeHandles.emplace(_activeHandles.begin(), std::move(scheduledCommandHandle));
-
-            ul.unlock();
-
-            return std::move(pf.future).tapAll(
-                [this, it = std::move(it)](StatusWith<ResponseStatus> s) {
-                    std::lock_guard<std::mutex> lg(_mutex);
-                    _activeHandles.erase(it);
-                    _notifyAllTasksComplete(lg);
+        // Target the host and send the command, keeping everything on the executor via
+        // '.thenRunOn(exec)'. 'exec' is captured so the executor outlives these continuations.
+        // 'scheduleWork' requires the task to return a plain Future, so we bridge the
+        // ExecutorFuture back with an explicit promise + getAsync (which runs on the executor)
+        // rather than unsafeToInlineFuture, so no continuation runs in an unexpected place.
+        auto pf = makePromiseFuture<ResponseStatus>();
+        auto targeter = shard->getTargeter();
+        targeter->findHost(readPref, CancellationToken::uncancelable(), {})
+            .thenRunOn(exec)
+            .then([this,
+                   readPref,
+                   exec,
+                   commandObj = std::move(commandObj),
+                   shard = std::move(shard)](HostAndPort host) mutable {
+                hangBeforeSchedulingRemoteCommandForTest();
+                return _sendCommandToResolvedHost(
+                    std::move(host), std::move(shard), std::move(commandObj), readPref, exec);
+            })
+            .getAsync(
+                [promise = std::move(pf.promise)](StatusWith<ResponseStatus> swResponse) mutable {
+                    promise.setFrom(std::move(swResponse));
                 });
-        });
+        return std::move(pf.future);
+    });
+}
+
+Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::_sendCommandToResolvedHost(
+    HostAndPort host,
+    std::shared_ptr<Shard> shard,
+    BSONObj commandObj,
+    const ReadPreferenceSetting& readPref,
+    const std::shared_ptr<executor::TaskExecutor>& executor) {
+    executor::RemoteCommandRequest request(
+        host, DatabaseName::kAdmin, commandObj, readPref.toContainingBSON(), nullptr);
+
+    auto pf = makePromiseFuture<ResponseStatus>();
+
+    return _trackScheduledWork(std::move(pf.future), [&] {
+        return executor->scheduleRemoteCommand(
+            request,
+            [this,
+             executor,
+             hostTargeted = std::move(host),
+             shard = std::move(shard),
+             promise = std::make_shared<Promise<ResponseStatus>>(std::move(pf.promise))](
+                const RemoteCommandCallbackArgs& args) mutable {
+                auto status = args.response.status;
+                shard->updateReplSetMonitor(hostTargeted, status);
+
+                // Only consider actual failures to send the command as errors.
+                if (status.isOK()) {
+                    auto commandStatus = getStatusFromCommandResult(args.response.data);
+                    shard->updateReplSetMonitor(hostTargeted, commandStatus);
+
+                    auto writeConcernStatus =
+                        getWriteConcernStatusFromCommandResult(args.response.data);
+                    shard->updateReplSetMonitor(hostTargeted, writeConcernStatus);
+
+                    promise->emplaceValue(args.response);
+                } else {
+                    promise->setError([&] {
+                        if (status == ErrorCodes::CallbackCanceled) {
+                            std::lock_guard lk(_mutex);
+                            return _shutdownStatus.isOK() ? status : _shutdownStatus;
+                        }
+                        return status;
+                    }());
+                }
+            });
+    });
 }
 
 std::unique_ptr<AsyncWorkScheduler> AsyncWorkScheduler::makeChildScheduler() {
@@ -304,35 +326,6 @@ void AsyncWorkScheduler::join() {
     _allListsEmptyCV.wait(ul, [&] {
         return _activeOpContexts.empty() && _activeHandles.empty() && _childSchedulers.empty();
     });
-}
-
-Future<AsyncWorkScheduler::HostAndShard> AsyncWorkScheduler::_targetHostAsync(
-    const ShardId& shardId,
-    const ReadPreferenceSetting& readPref,
-    OperationContextFn operationContextFn,
-    BSONObj commandObj) {
-    return scheduleWork(
-        [this, shardId, readPref, operationContextFn, commandObj = commandObj.getOwned()](
-            OperationContext* opCtx) {
-            operationContextFn(opCtx);
-            const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-            auto shard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
-
-            if (MONGO_unlikely(hangWhileTargetingRemoteHost.shouldFail(
-                    [&](BSONObj data) { return shouldActivateFailpoint(commandObj, data); }))) {
-                LOGV2(
-                    22450, "Hit hangWhileTargetingRemoteHost failpoint", "shardId"_attr = shardId);
-                hangWhileTargetingRemoteHost.pauseWhileSet(opCtx);
-            }
-
-            auto targeter = shard->getTargeter();
-            return targeter->findHost(readPref, CancellationToken::uncancelable(), {})
-                .thenRunOn(_executor)
-                .unsafeToInlineFuture()
-                .then([shard = std::move(shard)](HostAndPort host) mutable -> HostAndShard {
-                    return {std::move(host), std::move(shard)};
-                });
-        });
 }
 
 bool AsyncWorkScheduler::_quiesced(WithLock) const {

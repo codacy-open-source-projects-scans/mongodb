@@ -1,46 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/balancer/balancer.h"
 
-#include <absl/container/node_hash_set.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/none_t.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -52,12 +17,17 @@
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/shard_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/global_catalog/type_tags.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -69,17 +39,23 @@
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
 #include "mongo/db/s/balancer/balancer_defragmentation_policy.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
+#include "mongo/db/s/max_key_zone_scan_state_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/balancer_configuration.h"
@@ -106,16 +82,27 @@
 #include <mutex>
 #include <ratio>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
 
+#include <absl/container/node_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using std::string;
 using std::vector;
@@ -126,15 +113,20 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(forceBalancerWarningChecks);
 
+// Pauses the MaxKey zone inventory scan just before it upserts the state document, so tests
+// can deterministically trigger stepdown while the scan is mid-flight.
+MONGO_FAIL_POINT_DEFINE(hangBeforePersistingMaxKeyZoneScanState);
+
 const Milliseconds kBalanceRoundDefaultInterval(10 * 1000);
 
 /**
  * Balancer status response
  */
-static constexpr StringData kBalancerPolicyStatusDraining = "draining"_sd;
-static constexpr StringData kBalancerPolicyStatusZoneViolation = "zoneViolation"_sd;
-static constexpr StringData kBalancerPolicyStatusChunksImbalance = "chunksImbalance"_sd;
-static constexpr StringData kBalancerPolicyStatusDefragmentingChunks = "defragmentingChunks"_sd;
+static constexpr std::string_view kBalancerPolicyStatusDraining = "draining"sv;
+static constexpr std::string_view kBalancerPolicyStatusZoneViolation = "zoneViolation"sv;
+static constexpr std::string_view kBalancerPolicyStatusChunksImbalance = "chunksImbalance"sv;
+static constexpr std::string_view kBalancerPolicyStatusDefragmentingChunks =
+    "defragmentingChunks"sv;
 
 /**
  * Utility class to generate timing and statistics for a single balancer round.
@@ -166,10 +158,19 @@ public:
         _errMsg = errMsg;
     }
 
+    void recordEnabledAtRoundStart(bool enabled) {
+        _enabledAtRoundStart = enabled;
+    }
+
     BSONObj toBSON() const {
         BSONObjBuilder builder;
         builder.append("executionTimeMillis", _executionTimer.millis());
         builder.append("errorOccurred", _errMsg.has_value());
+        if (_enabledAtRoundStart) {
+            builder.append("balancerEnabledAtRoundStart", *_enabledAtRoundStart);
+            // balancerEnabledAtRoundStart is ommitted from the config.actionlog
+            // entry if the balancer's enabled status was unobtainable
+        }
 
         if (_errMsg) {
             builder.append("errmsg", *_errMsg);
@@ -179,10 +180,10 @@ public:
             builder.append("candidateUnshardedCollections", _numCandidateUnshardedCollections);
             builder.append("unshardedCollectionsMoved", _numUnshardedCollectionsMoved);
             builder.append("imbalancedCachedCollections", _numImbalancedCachedCollections);
-            BSONObjBuilder timeInfo{builder.subobjStart("times"_sd)};
-            timeInfo.append("selectionTimeMillis"_sd, _selectionTime.count());
-            timeInfo.append("throttleTimeMillis"_sd, _throttleTime.count());
-            timeInfo.append("migrationTimeMillis"_sd, _migrationTime.count());
+            BSONObjBuilder timeInfo{builder.subobjStart("times"sv)};
+            timeInfo.append("selectionTimeMillis"sv, _selectionTime.count());
+            timeInfo.append("throttleTimeMillis"sv, _throttleTime.count());
+            timeInfo.append("migrationTimeMillis"sv, _migrationTime.count());
             timeInfo.done();
         }
         return builder.obj();
@@ -190,6 +191,7 @@ public:
 
 private:
     const Timer _executionTimer;
+    boost::optional<bool> _enabledAtRoundStart;
     Milliseconds _selectionTime;
     Milliseconds _throttleTime;
     Milliseconds _migrationTime;
@@ -288,6 +290,16 @@ Status processManualMigrationOutcome(OperationContext* opCtx,
         return outcome;
     }
 
+    // On the new coordinator path the coordinator's _recoveryFlow determines the commit outcome
+    // itself, so a failed _shardsvrMoveRange must be reported faithfully to trigger a retry that
+    // will join the in-flight recovery coordinator and return the correct result.
+    if (sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) !=
+        AuthoritativeMetadataAccessLevelEnum::kNone) {
+        return outcome;
+    }
+
     auto swCm = getPlacementInfoForShardedCollection(opCtx, nss);
     if (!swCm.isOK()) {
         return swCm.getStatus();
@@ -349,7 +361,7 @@ std::vector<std::string> getDrainingShardNames(OperationContext* opCtx) {
         uassertStatusOK(
             configShard->exhaustiveFindOnConfig(opCtx,
                                                 ReadPreferenceSetting{ReadPreference::Nearest},
-                                                repl::ReadConcernLevel::kMajorityReadConcern,
+                                                repl::ReadConcernArgs::kMajority,
                                                 NamespaceString::kConfigsvrShardsNamespace,
                                                 BSON(ShardType::draining << true),
                                                 BSONObj() /* No sorting */,
@@ -375,7 +387,7 @@ void enqueueCollectionMigrations(OperationContext* opCtx,
     auto requestMigration = [&](const MigrateInfo& migrateInfo) -> SemiFuture<void> {
         auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
         const auto dbEntry = catalogClient->getDatabase(
-            opCtx, migrateInfo.nss.dbName(), repl::ReadConcernLevel::kMajorityReadConcern);
+            opCtx, migrateInfo.nss.dbName(), repl::ReadConcernArgs::kMajority);
 
         return scheduler.requestMoveCollection(
             opCtx, migrateInfo.nss, migrateInfo.to, dbEntry.getPrimary(), dbEntry.getVersion());
@@ -399,7 +411,7 @@ void enqueueChunkMigrations(OperationContext* opCtx,
             }
 
             auto coll = catalogClient->getCollection(
-                opCtx, migrateInfo.nss, repl::ReadConcernLevel::kMajorityReadConcern);
+                opCtx, migrateInfo.nss, repl::ReadConcernArgs::kMajority);
             return coll.getMaxChunkSizeBytes().value_or(balancerConfig->getMaxChunkSizeBytes());
         }();
 
@@ -459,8 +471,8 @@ bool processRebalanceResponse(OperationContext* opCtx,
               logAttrs(migrateInfo.nss));
 
         auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-        const CollectionType collection = catalogClient->getCollection(
-            opCtx, migrateInfo.uuid, repl::ReadConcernLevel::kMajorityReadConcern);
+        const CollectionType collection =
+            catalogClient->getCollection(opCtx, migrateInfo.uuid, repl::ReadConcernArgs::kMajority);
 
         ShardingCatalogManager::get(opCtx)->splitOrMarkJumbo(
             opCtx, collection.getNss(), migrateInfo.minKey, migrateInfo.getMaxChunkSizeBytes());
@@ -593,7 +605,7 @@ private:
         auto collections =
             catalogClient->getShardedCollections(opCtx,
                                                  DatabaseName::kEmpty,
-                                                 repl::ReadConcernLevel::kMajorityReadConcern,
+                                                 repl::ReadConcernArgs::kMajority,
                                                  BSON(CollectionType::kNssFieldName << 1));
         if (collections.empty()) {
             return;
@@ -615,7 +627,7 @@ private:
         // warning is emitted.
         for (const auto& collType : collections) {
             if (!collType.getAllowBalance() || !collType.getAllowMigrations() ||
-                !collType.getPermitMigrations()) {
+                !collType.getPermitMigrations() || !collType.getAllowChunkOperations()) {
                 auto matchStage = BSON("$match" << BSON(ChunkType::collectionUUID()
                                                         << collType.getUuid() << ChunkType::shard()
                                                         << BSON("$in" << drainingShardNameArray)));
@@ -645,6 +657,15 @@ private:
 
     Date_t _lastDrainingShardsCheckTime{Date_t::fromMillisSinceEpoch(0)};
 };
+
+// Scan-fatal errors abandon the entire MaxKey zone inventory scan: they propagate out of
+// _runMaxKeyZoneScan to the balancer worker thread, which logs a WARNING and continues startup.
+// scanCompletedAt is left unpersisted, so the next primary stepup re-runs the scan.
+bool isScanFatalError(ErrorCodes::Error code) {
+    return ErrorCodes::isShutdownError(code) || ErrorCodes::isCancellationError(code) ||
+        ErrorCodes::isNotPrimaryError(code) || code == ErrorCodes::InterruptedDueToReplStateChange;
+}
+
 }  // namespace
 
 Balancer* Balancer::get(ServiceContext* serviceContext) {
@@ -750,8 +771,7 @@ void Balancer::moveRange(OperationContext* opCtx,
                          const ConfigsvrMoveRange& request,
                          bool issuedByRemoteUser) {
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto coll =
-        catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto coll = catalogClient->getCollection(opCtx, nss, repl::ReadConcernArgs::kMajority);
 
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "Can't execute moveRange on unsharded collection "
@@ -762,7 +782,7 @@ void Balancer::moveRange(OperationContext* opCtx,
 
     sharding::router::CollectionRouter router(opCtx, nss);
     router.routeWithRoutingContext(
-        "moveRange"_sd, [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
+        "moveRange"sv, [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
             unusedRoutingCtx.skipValidation();
 
             const auto cm = uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, nss));
@@ -1071,6 +1091,18 @@ void Balancer::_mainThread() {
 
     LOGV2(6036606, "Balancer worker thread initialised. Entering main loop.");
 
+    // Run the one-shot MaxKey zone inventory scan off the stepup critical path, before the first
+    // balancing round. It runs on every stepup regardless of whether balancing is enabled. Errors
+    // are swallowed inside the scan; this guard only protects the main loop from unexpected
+    // scan-harness exceptions.
+    try {
+        _runMaxKeyZoneScan(opCtx.get());
+    } catch (const DBException& ex) {
+        LOGV2_WARNING(12829506,
+                      "MaxKey zone inventory scan failed; balancer startup is unaffected",
+                      "error"_attr = redact(ex.toStatus()));
+    }
+
     // Main balancer loop
     auto lastMigrationTime = Date_t::fromMillisSinceEpoch(0);
     BalancerWarning balancerWarning;
@@ -1087,10 +1119,13 @@ void Balancer::_mainThread() {
                 continue;
             }
 
+            const bool balancerEnabled = balancerConfig->shouldBalance(opCtx.get());
+            roundDetails.recordEnabledAtRoundStart(balancerEnabled);
+
             // Warn before we skip the iteration due to balancing being disabled.
             balancerWarning.warnIfRequired(opCtx.get(), balancerConfig->getBalancerMode());
 
-            if (!balancerConfig->shouldBalance(opCtx.get()) || _terminationRequested()) {
+            if (!balancerEnabled || _terminationRequested()) {
                 _autoMergerPolicy->disable(opCtx.get());
 
                 LOGV2_DEBUG(21859, 1, "Skipping balancing round because balancing is disabled");
@@ -1381,6 +1416,217 @@ void Balancer::_onActionsStreamPolicyStateUpdate() {
     _actionStreamCondVar.notify_all();
 }
 
+bool Balancer::isBuggyMinKeyZoneFingerprint(const BSONObj& shardKeyPattern,
+                                            const BSONObj& upperBound) {
+    // Returns true when 'upperBound' is a non-empty run of leading MaxKey fields followed by a
+    // non-empty run of trailing MinKey fields, with nothing else. A field-count mismatch with the
+    // shard key pattern is treated as not-buggy.
+    if (shardKeyPattern.nFields() != upperBound.nFields()) {
+        return false;
+    }
+    int leadingMaxKeyRun = 0;
+    int trailingMinKeyRun = 0;
+    bool sawMinKey = false;
+    for (const auto& elem : upperBound) {
+        if (!sawMinKey && elem.type() == BSONType::maxKey) {
+            ++leadingMaxKeyRun;
+        } else if (elem.type() == BSONType::minKey) {
+            sawMinKey = true;
+            ++trailingMinKeyRun;
+        } else {
+            // A normal value, or a MaxKey appearing after a MinKey, breaks the buggy shape.
+            return false;
+        }
+    }
+    return leadingMaxKeyRun > 0 && trailingMinKeyRun > 0;
+}
+
+std::vector<BSONObj> Balancer::buildMaxKeyZoneScanPipeline() {
+    // Drive the scan off config.tags, joining each tag to its collection's shard key via an inner
+    // $lookup on config.collections. This keeps the work proportional to the number of zoned
+    // collections rather than reading every sharded collection. Tags whose collection is absent
+    // (dropped or never sharded) drop out of the $unwind. "coll" is a local alias for the joined
+    // config.collections document.
+    const std::string shardKeyField = "coll." + std::string{CollectionType::kKeyPatternFieldName};
+
+    std::vector<BSONObj> pipeline;
+    pipeline.push_back(
+        BSON("$lookup" << BSON("from" << NamespaceString::kConfigsvrCollectionsNamespace.coll()
+                                      << "localField" << TagsType::ns() << "foreignField"
+                                      << CollectionType::kNssFieldName << "as"
+                                      << "coll")));
+    pipeline.push_back(BSON("$unwind" << "$coll"));
+
+    // The buggy fingerprint is a leading MaxKey run followed by a trailing MinKey run, which
+    // requires a compound (>= 2 field) shard key.
+    pipeline.push_back(
+        BSON("$match" << BSON(
+                 "$expr" << BSON(
+                     "$gte" << BSON_ARRAY(
+                         BSON("$size" << BSON("$objectToArray" << ("$" + shardKeyField))) << 2)))));
+
+    // Project only the fields we need.
+    pipeline.push_back(
+        BSON("$project" << BSON(TagsType::ns() << 1 << TagsType::tag() << 1 << TagsType::max() << 1
+                                               << shardKeyField << 1)));
+    return pipeline;
+}
+
+void Balancer::_runMaxKeyZoneScan(OperationContext* opCtx) {
+    const auto term = repl::ReplicationCoordinator::get(opCtx)->getTerm();
+
+    if (!sharding_util::isMaxKeyDetectionEnabled()) {
+        LOGV2_DEBUG(12829511,
+                    2,
+                    "Skipping MaxKey zone inventory scan: MaxKey detection disabled",
+                    "term"_attr = term);
+        return;
+    }
+
+    if (!gMaxKeyZoneScanEnabled.load()) {
+        LOGV2(12829512,
+              "Skipping MaxKey zone inventory scan: disabled via maxKeyZoneScanEnabled server "
+              "parameter",
+              "term"_attr = term);
+        return;
+    }
+
+    LOGV2_DEBUG(12829500, 2, "Starting MaxKey zone inventory scan", "term"_attr = term);
+
+    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+
+    PersistentTaskStore<MaxKeyZoneScanState> store(
+        NamespaceString::kConfigMaxKeyZoneScanStateNamespace);
+
+    auto publishZoneScanStats = [&](bool complete, bool foundBuggyZone, bool alertEmitted) {
+        auto& stats = ShardingStatistics::get(opCtx);
+        stats.maxKeyZoneScanComplete.store(complete ? 1 : 0);
+        stats.maxKeyZoneScanFoundBuggyZone.store(foundBuggyZone ? 1 : 0);
+        stats.maxKeyZoneScanAlertEmitted.store(alertEmitted ? 1 : 0);
+    };
+
+    // Read the prior state doc with a local read on this primary (via DBDirectClient).
+    // priorAlertEmitted is captured so the final upsert below does not clobber a previously-emitted
+    // alert with 'false'.
+    boost::optional<MaxKeyZoneScanState> priorState;
+    try {
+        store.forEach(opCtx, BSON("_id" << "scanState"), [&](const MaxKeyZoneScanState& doc) {
+            priorState.emplace(doc);
+            return false;
+        });
+    } catch (const DBException& ex) {
+        if (isScanFatalError(ex.code())) {
+            throw;
+        }
+        LOGV2_DEBUG(12829501,
+                    2,
+                    "MaxKey zone inventory scan: failed to read prior state doc; treating as "
+                    "missing and re-running the scan",
+                    "term"_attr = term,
+                    "code"_attr = ex.code(),
+                    "errmsg"_attr = redact(ex.toStatus()));
+    }
+
+    if (priorState && priorState->getScanCompletedAt()) {
+        publishZoneScanStats(true, priorState->getFoundBuggyZone(), priorState->getAlertEmitted());
+        LOGV2(12829503,
+              "Skipping MaxKey zone inventory scan: prior scan already completed",
+              "term"_attr = term,
+              "priorScanCompletedAt"_attr = priorState->getScanCompletedAt(),
+              "priorFoundBuggyZone"_attr = priorState->getFoundBuggyZone());
+        return;
+    }
+
+    const bool priorAlertEmitted = priorState ? priorState->getAlertEmitted() : false;
+    const auto scanStartedAt = opCtx->fastClockSource().now();
+
+    bool foundBuggyZone = false;
+    bool loopCompleted = true;
+    int numTagsScanned = 0;
+
+    try {
+        AggregateCommandRequest aggRequest{TagsType::ConfigNS, buildMaxKeyZoneScanPipeline()};
+        const auto taggedZones = catalogClient->runCatalogAggregation(
+            opCtx,
+            aggRequest,
+            {repl::ReadConcernLevel::kMajorityReadConcern},
+            Milliseconds(defaultConfigCommandTimeoutMS.load()),
+            Shard::RetryPolicy::kIdempotentOrCursorInvalidated);
+
+        for (const auto& zone : taggedZones) {
+            opCtx->checkForInterrupt();
+            ++numTagsScanned;
+
+            const auto shardKey =
+                zone.getObjectField("coll").getObjectField(CollectionType::kKeyPatternFieldName);
+            const auto upperBound = zone.getObjectField(TagsType::max());
+            if (isBuggyMinKeyZoneFingerprint(shardKey, upperBound)) {
+                foundBuggyZone = true;
+                LOGV2_DEBUG(12829509,
+                            2,
+                            "MaxKey zone inventory scan: tag matches the buggy MinKey fingerprint",
+                            "tagName"_attr = zone.getStringField(TagsType::tag()),
+                            "namespace"_attr = zone.getStringField(TagsType::ns()),
+                            "shardKey"_attr = shardKey,
+                            "upperBound"_attr = upperBound);
+                break;
+            }
+        }
+    } catch (const DBException& ex) {
+        if (isScanFatalError(ex.code())) {
+            throw;
+        }
+        ShardingStatistics::get(opCtx).maxKeyZoneScanErrors.fetchAndAdd(1);
+        LOGV2_DEBUG(12829510,
+                    2,
+                    "MaxKey zone inventory scan: catalog read error, abandoning scan",
+                    "code"_attr = ex.code(),
+                    "errmsg"_attr = redact(ex.toStatus()));
+        loopCompleted = false;
+    }
+
+    const auto scanCompletedAt = opCtx->fastClockSource().now();
+
+    // Emit the alert log before persisting so a crash between the two cannot suppress the
+    // only signal.
+    const bool emitAlert = foundBuggyZone && !priorAlertEmitted;
+    if (emitAlert) {
+        LOGV2_WARNING(12829504,
+                      "MaxKey zone inventory scan detected at least one zone whose "
+                      "upper bound matches the buggy MinKey fingerprint on this config server",
+                      "shardId"_attr = ShardingState::get(opCtx)->shardId(),
+                      "term"_attr = term,
+                      "scanStartedAt"_attr = scanStartedAt,
+                      "scanCompletedAt"_attr = scanCompletedAt);
+    }
+
+    BSONObjBuilder setBob;
+    setBob.append(MaxKeyZoneScanState::kScanStartedAtFieldName, scanStartedAt);
+    if (loopCompleted) {
+        setBob.append(MaxKeyZoneScanState::kScanCompletedAtFieldName, scanCompletedAt);
+    }
+    setBob.append(MaxKeyZoneScanState::kFoundBuggyZoneFieldName, foundBuggyZone);
+    setBob.append(MaxKeyZoneScanState::kAlertEmittedFieldName, priorAlertEmitted || emitAlert);
+    setBob.append(MaxKeyZoneScanState::kBinaryVersionAtScanFieldName,
+                  VersionInfoInterface::instance().version());
+    setBob.append(MaxKeyZoneScanState::kFcvAtScanFieldName,
+                  multiversion::toString(
+                      serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion()));
+
+    hangBeforePersistingMaxKeyZoneScanState.pauseWhileSet(opCtx);
+
+    store.upsert(opCtx, BSON("_id" << "scanState"), BSON("$set" << setBob.obj()));
+
+    publishZoneScanStats(loopCompleted, foundBuggyZone, priorAlertEmitted || emitAlert);
+
+    LOGV2_INFO(12829505,
+               "Completed MaxKey zone inventory scan",
+               "term"_attr = term,
+               "numTagsScanned"_attr = numTagsScanned,
+               "foundBuggyZone"_attr = foundBuggyZone,
+               "completed"_attr = loopCompleted);
+}
+
 void Balancer::notifyPersistedBalancerSettingsChanged(OperationContext* opCtx) {
     if (!Grid::get(opCtx)->getBalancerConfiguration()->shouldBalanceForAutoMerge(opCtx)) {
         _autoMergerPolicy->disable(opCtx);
@@ -1411,12 +1657,13 @@ BalancerCollectionStatusResponse Balancer::getBalancerStatusForNs(OperationConte
     maxChunkSizeMB = std::ceil(maxChunkSizeMB * 100.0) / 100.0;
 
     BalancerCollectionStatusResponse response(maxChunkSizeMB, true /*balancerCompliant*/);
-    auto setViolationOnResponse =
-        [&response](StringData reason, const boost::optional<BSONObj>& details = boost::none) {
-            response.setBalancerCompliant(false);
-            response.setFirstComplianceViolation(reason);
-            response.setDetails(details);
-        };
+    auto setViolationOnResponse = [&response](std::string_view reason,
+                                              const boost::optional<BSONObj>& details =
+                                                  boost::none) {
+        response.setBalancerCompliant(false);
+        response.setFirstComplianceViolation(reason);
+        response.setDetails(details);
+    };
 
     bool isDefragmenting = coll.getDefragmentCollection();
     if (isDefragmenting) {

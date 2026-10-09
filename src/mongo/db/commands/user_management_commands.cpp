@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,6 +21,7 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/address_restriction.h"
+#include "mongo/db/auth/auth_mechanism.h"
 #include "mongo/db/auth/auth_name.h"
 #include "mongo/db/auth/auth_options_gen.h"
 #include "mongo/db/auth/authorization_backend_interface.h"
@@ -97,7 +71,7 @@
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
@@ -128,6 +102,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -186,8 +161,9 @@ public:
 using CmdUMCPassthrough = auth::AuthorizationBackendInterface::CmdUMCPassthrough;
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kOne = "1"_sd;
+constexpr auto kOne = "1"sv;
 
 Status useDefaultCode(const Status& status, ErrorCodes::Error defaultCode) {
     if (status.code() == ErrorCodes::UnknownError) {
@@ -581,7 +557,7 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
         return;
     }
 
-    auto haveAuthMechanism = [&](StringData mech) {
+    auto haveAuthMechanism = [&](std::string_view mech) {
         const auto& v = saslGlobalParams.authenticationMechanisms;
         return std::find(v.begin(), v.end(), mech) != v.end();
     };
@@ -589,9 +565,9 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
     bool buildSCRAMSHA1 = false, buildSCRAMSHA256 = false;
     if (auto mechanisms = cmd.getMechanisms(); mechanisms && !mechanisms->empty()) {
         for (const auto& mech : mechanisms.get()) {
-            if (mech == "SCRAM-SHA-1") {
+            if (mech == auth::kMechanismScramSha1) {
                 buildSCRAMSHA1 = true;
-            } else if (mech == "SCRAM-SHA-256") {
+            } else if (mech == auth::kMechanismScramSha256) {
                 buildSCRAMSHA256 = true;
             } else {
                 uasserted(ErrorCodes::BadValue,
@@ -604,8 +580,8 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
         }
 
     } else {
-        buildSCRAMSHA1 = haveAuthMechanism("SCRAM-SHA-1");
-        buildSCRAMSHA256 = haveAuthMechanism("SCRAM-SHA-256");
+        buildSCRAMSHA1 = haveAuthMechanism(auth::kMechanismScramSha1);
+        buildSCRAMSHA256 = haveAuthMechanism(auth::kMechanismScramSha256);
     }
 
     auto password = cmd.getPwd().get();
@@ -621,7 +597,7 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
         }
         auto sha1Cred = scram::Secrets<SHA1Block>::generateCredentials(
             hashedPwd, saslGlobalParams.scramSHA1IterationCount.load());
-        builder->append("SCRAM-SHA-1", sha1Cred);
+        builder->append(auth::kMechanismScramSha1, sha1Cred);
     }
 
     if (buildSCRAMSHA256) {
@@ -632,7 +608,7 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
         auto prepPwd = uassertStatusOK(icuSaslPrep(password));
         auto sha256Cred = scram::Secrets<SHA256Block>::generateCredentials(
             prepPwd, saslGlobalParams.scramSHA256IterationCount.load());
-        builder->append("SCRAM-SHA-256", sha256Cred);
+        builder->append(auth::kMechanismScramSha256, sha256Cred);
     }
 }
 
@@ -658,7 +634,7 @@ class UMCTransactionClient {
 public:
     UMCTransactionClient() = delete;
 
-    UMCTransactionClient(StringData cmdName) : _cmdName(cmdName) {}
+    UMCTransactionClient(std::string_view cmdName) : _cmdName(cmdName) {}
 
     virtual BatchedCommandResponse runCRUDOp(const BatchedCommandRequest& request,
                                              std::vector<StmtId> stmtIds) = 0;
@@ -671,7 +647,7 @@ class UMCTransaction {
 public:
     UMCTransaction() = delete;
 
-    UMCTransaction(StringData cmdName) : _cmdName(cmdName) {}
+    UMCTransaction(std::string_view cmdName) : _cmdName(cmdName) {}
 
     virtual void run(OperationContext* opCtx,
                      unique_function<Status(UMCTransactionClient&)> txnOpsCallback) = 0;
@@ -690,9 +666,9 @@ class UMCTransactionStandalone : public UMCTransaction {
 private:
     class UMCTransactionClientStandalone : public UMCTransactionClient {
     public:
-        static constexpr StringData kAdminDB = "admin"_sd;
+        static constexpr std::string_view kAdminDB = "admin"sv;
 
-        explicit UMCTransactionClientStandalone(OperationContext* opCtx, StringData cmdName)
+        explicit UMCTransactionClientStandalone(OperationContext* opCtx, std::string_view cmdName)
             : UMCTransactionClient(cmdName),
               _client(opCtx->getServiceContext()->getService()->makeClient(std::string{cmdName})),
               _writeConcern(opCtx->getWriteConcern().toBSON().removeField(
@@ -760,7 +736,7 @@ private:
     };
 
 public:
-    UMCTransactionStandalone(StringData cmdName) : UMCTransaction(cmdName) {}
+    UMCTransactionStandalone(std::string_view cmdName) : UMCTransaction(cmdName) {}
 
     void run(OperationContext* opCtx,
              unique_function<Status(UMCTransactionClient&)> txnOpsCallback) final {
@@ -811,7 +787,7 @@ class UMCTransactionReplSet : public UMCTransaction {
 private:
     class UMCTransactionClientReplSet : public UMCTransactionClient {
     public:
-        explicit UMCTransactionClientReplSet(StringData cmdName,
+        explicit UMCTransactionClientReplSet(std::string_view cmdName,
                                              const txn_api::TransactionClient& client)
             : UMCTransactionClient(cmdName), _txnClient(client) {}
         UMCTransactionClientReplSet(const txn_api::TransactionClient&&) = delete;
@@ -826,7 +802,7 @@ private:
     };
 
 public:
-    UMCTransactionReplSet(StringData cmdName) : UMCTransaction(cmdName) {}
+    UMCTransactionReplSet(std::string_view cmdName) : UMCTransaction(cmdName) {}
 
     void run(OperationContext* opCtx,
              unique_function<Status(UMCTransactionClient&)> txnOpsCallback) final {
@@ -884,9 +860,9 @@ void uassertNoUnrecognizedActions(const std::vector<std::string>& unrecognizedAc
     }
 
     // Dedupe
-    std::set<StringData> actions;
+    std::set<std::string_view> actions;
     for (const auto& action : unrecognizedActions) {
-        actions.insert(StringData{action});
+        actions.insert(std::string_view{action});
     }
 
     StringBuilder sb;
@@ -952,7 +928,7 @@ template <typename T>
 using HasGetCmdParamOp = std::remove_cv_t<decltype(std::declval<T>().getCommandParameter())>;
 template <typename T>
 constexpr bool hasGetCmdParamStringData =
-    stdx::is_detected_exact_v<StringData, HasGetCmdParamOp, T>;
+    stdx::is_detected_exact_v<std::string_view, HasGetCmdParamOp, T>;
 
 
 using ResolvedRoleData = auth::AuthorizationBackendInterface::ResolvedRoleData;
@@ -1100,7 +1076,7 @@ void trimCredentials(OperationContext* opCtx,
                      const UserName& userName,
                      BSONObjBuilder* queryBuilder,
                      BSONObjBuilder* unsetBuilder,
-                     const std::vector<StringData>& mechanisms) {
+                     const std::vector<std::string_view>& mechanisms) {
     BSONObj userObj;
     auto sharedAcquisitionStats = CurOp::get(opCtx)->getUserAcquisitionStats();
     auto userReq = std::make_unique<UserRequestGeneral>(userName, boost::none);
@@ -1121,9 +1097,9 @@ void trimCredentials(OperationContext* opCtx,
                 "mechanisms field must be a subset of previously set mechanisms",
                 creds.hasField(mech));
 
-        if (mech == "SCRAM-SHA-1") {
+        if (mech == auth::kMechanismScramSha1) {
             keepSCRAMSHA1 = true;
-        } else if (mech == "SCRAM-SHA-256") {
+        } else if (mech == auth::kMechanismScramSha256) {
             keepSCRAMSHA256 = true;
         }
     }
@@ -1142,9 +1118,9 @@ void trimCredentials(OperationContext* opCtx,
 
 class CmdCreateUser : public CmdUMCTyped<CreateUserCommand> {
 public:
-    static constexpr StringData kPwdField = "pwd"_sd;
+    static constexpr std::string_view kPwdField = "pwd"sv;
 
-    std::set<StringData> sensitiveFieldNames() const final {
+    std::set<std::string_view> sensitiveFieldNames() const final {
         return {kPwdField};
     }
 };
@@ -1261,9 +1237,9 @@ void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCt
 
 class CmdUpdateUser : public CmdUMCTyped<UpdateUserCommand> {
 public:
-    static constexpr StringData kPwdField = "pwd"_sd;
+    static constexpr std::string_view kPwdField = "pwd"sv;
 
-    std::set<StringData> sensitiveFieldNames() const final {
+    std::set<std::string_view> sensitiveFieldNames() const final {
         return {kPwdField};
     }
 };
@@ -1308,7 +1284,9 @@ void CmdUMCTyped<UpdateUserCommand>::Invocation::typedRun(OperationContext* opCt
         if (ar->empty()) {
             updateUnsetBuilder.append("authenticationRestrictions", "");
         } else {
-            updateSetBuilder.append("authenticationRestrictions", vectorToBSON(ar.get()));
+            auto arBSON = vectorToBSON(ar.get());
+            uassertStatusOK(parseAuthenticationRestriction(arBSON));
+            updateSetBuilder.append("authenticationRestrictions", arBSON);
         }
     }
 
@@ -1532,6 +1510,7 @@ void CmdUMCTyped<CreateRoleCommand>::Invocation::typedRun(OperationContext* opCt
     boost::optional<BSONArray> bsonAuthRestrictions;
     if (auto ar = cmd.getAuthenticationRestrictions(); ar && !ar->empty()) {
         bsonAuthRestrictions = vectorToBSON(ar.get());
+        uassertStatusOK(parseAuthenticationRestriction(bsonAuthRestrictions.get()));
         roleObjBuilder.append("authenticationRestrictions", bsonAuthRestrictions.get());
     }
 
@@ -1587,6 +1566,7 @@ void CmdUMCTyped<UpdateRoleCommand>::Invocation::typedRun(OperationContext* opCt
             updateUnsetBuilder.append("authenticationRestrictions", "");
         } else {
             authRest = vectorToBSON(ar.get());
+            uassertStatusOK(parseAuthenticationRestriction(authRest));
             updateSetBuilder.append("authenticationRestrictions", authRest);
         }
     }
@@ -1664,8 +1644,8 @@ void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationCo
     // Build up update modifier object to $set privileges.
     BSONObj updateBSON = [&] {
         BSONObjBuilder updateBuilder;
-        BSONObjBuilder updateSetBuilder(updateBuilder.subobjStart("$set"_sd));
-        BSONArrayBuilder privilegeBuilder(updateSetBuilder.subarrayStart("privileges"_sd));
+        BSONObjBuilder updateSetBuilder(updateBuilder.subobjStart("$set"sv));
+        BSONArrayBuilder privilegeBuilder(updateSetBuilder.subarrayStart("privileges"sv));
         Privilege::serializePrivilegeVector(privileges, &privilegeBuilder);
         privilegeBuilder.doneFast();
         updateSetBuilder.doneFast();
@@ -1723,8 +1703,8 @@ void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(Operatio
     // Build up update modifier object to $set privileges.
     BSONObj updateBSON = [&] {
         BSONObjBuilder updateBuilder;
-        BSONObjBuilder updateSetBuilder(updateBuilder.subobjStart("$set"_sd));
-        BSONArrayBuilder privilegeBuilder(updateSetBuilder.subarrayStart("privileges"_sd));
+        BSONObjBuilder updateSetBuilder(updateBuilder.subobjStart("$set"sv));
+        BSONArrayBuilder privilegeBuilder(updateSetBuilder.subarrayStart("privileges"sv));
         Privilege::serializePrivilegeVector(privileges, &privilegeBuilder);
         privilegeBuilder.doneFast();
         updateSetBuilder.doneFast();
@@ -2155,8 +2135,8 @@ void _auditCreateOrUpdateUser(const BSONObj& userObj, bool create) {
         authenticationRestrictions = r.getValue();
     }
 
-    const bool hasPwd = userObj["credentials"].Obj().hasField("SCRAM-SHA-1") ||
-        userObj["credentials"].Obj().hasField("SCRAM-SHA-256");
+    const bool hasPwd = userObj["credentials"].Obj().hasField(auth::kMechanismScramSha1) ||
+        userObj["credentials"].Obj().hasField(auth::kMechanismScramSha256);
     if (create) {
         audit::logCreateUser(Client::getCurrent(),
                              userName,
@@ -2183,7 +2163,7 @@ void _auditCreateOrUpdateUser(const BSONObj& userObj, bool create) {
  */
 void _addUser(OperationContext* opCtx,
               AuthorizationManager* authzManager,
-              StringData db,
+              std::string_view db,
               bool update,
               stdx::unordered_set<UserName>* usersToDrop,
               const BSONObj& userObj) {
@@ -2253,8 +2233,8 @@ Status queryAuthzDocument(OperationContext* opCtx,
  */
 void _processUsers(OperationContext* opCtx,
                    AuthorizationManager* authzManager,
-                   StringData usersCollName,
-                   StringData db,
+                   std::string_view usersCollName,
+                   std::string_view db,
                    const bool drop,
                    const boost::optional<TenantId>& tenantId) {
     // When the "drop" argument has been provided, we use this set to store the users
@@ -2343,7 +2323,7 @@ void _auditCreateOrUpdateRole(const BSONObj& roleObj, bool create) {
  */
 void _addRole(OperationContext* opCtx,
               AuthorizationManager* authzManager,
-              StringData db,
+              std::string_view db,
               bool update,
               stdx::unordered_set<RoleName>* rolesToDrop,
               const BSONObj roleObj) {
@@ -2382,8 +2362,8 @@ void _addRole(OperationContext* opCtx,
  */
 void _processRoles(OperationContext* opCtx,
                    AuthorizationManager* authzManager,
-                   StringData rolesCollName,
-                   StringData db,
+                   std::string_view rolesCollName,
+                   std::string_view db,
                    const bool drop,
                    const boost::optional<TenantId>& tenantId) {
     // When the "drop" argument has been provided, we use this set to store the roles

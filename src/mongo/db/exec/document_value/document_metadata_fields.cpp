@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 
@@ -33,10 +7,11 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
-#include "mongo/db/query/util/rank_fusion_util.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/string_map.h"
 
 #include <ostream>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -45,77 +20,77 @@ namespace mongo {
 using MetaType = DocumentMetadataFields::MetaType;
 
 namespace {
+using namespace std::literals::string_view_literals;
 Value missingToNull(Value maybeMissing) {
     return maybeMissing.missing() ? Value(BSONNULL) : maybeMissing;
 }
 
-static const std::string textScoreName = "textScore";
-static const std::string randValName = "randVal";
-static const std::string searchScoreName = "searchScore";
-static const std::string searchHighlightsName = "searchHighlights";
-static const std::string geoNearDistanceName = "geoNearDistance";
-static const std::string geoNearPointName = "geoNearPoint";
-static const std::string recordIdName = "recordId";
-static const std::string indexKeyName = "indexKey";
-static const std::string sortKeyName = "sortKey";
-static const std::string searchScoreDetailsName = "searchScoreDetails";
-static const std::string searchRootDocumentIdName = "searchRootDocumentId";
-static const std::string searchSequenceTokenName = "searchSequenceToken";
-static const std::string timeseriesBucketMinTimeName = "timeseriesBucketMinTime";
-static const std::string timeseriesBucketMaxTimeName = "timeseriesBucketMaxTime";
-static const std::string vectorSearchScoreName = "vectorSearchScore";
-static const std::string scoreName = "score";
-static const std::string scoreDetailsName = "scoreDetails";
+constexpr std::string_view kTextScoreName = "textScore"sv;
+constexpr std::string_view kRandValName = "randVal"sv;
+constexpr std::string_view kSearchScoreName = "searchScore"sv;
+constexpr std::string_view kSearchHighlightsName = "searchHighlights"sv;
+constexpr std::string_view kGeoNearDistanceName = "geoNearDistance"sv;
+constexpr std::string_view kGeoNearPointName = "geoNearPoint"sv;
+constexpr std::string_view kRecordIdName = "recordId"sv;
+constexpr std::string_view kIndexKeyName = "indexKey"sv;
+constexpr std::string_view kSortKeyName = "sortKey"sv;
+constexpr std::string_view kSearchScoreDetailsName = "searchScoreDetails"sv;
+constexpr std::string_view kSearchRootDocumentIdName = "searchRootDocumentId"sv;
+constexpr std::string_view kSearchSequenceTokenName = "searchSequenceToken"sv;
+constexpr std::string_view kTimeseriesBucketMinTimeName = "timeseriesBucketMinTime"sv;
+constexpr std::string_view kTimeseriesBucketMaxTimeName = "timeseriesBucketMaxTime"sv;
+constexpr std::string_view kVectorSearchScoreName = "vectorSearchScore"sv;
+constexpr std::string_view kScoreName = "score"sv;
+constexpr std::string_view kScoreDetailsName = "scoreDetails"sv;
 
 // This field ("value") is extracted from the 'scoreDetails' Document to set the 'score' field too.
-static const std::string scoreDetailsScoreField = "value";
-static const std::string streamName = "stream";
+constexpr std::string_view kScoreDetailsScoreField = "value"sv;
+constexpr std::string_view kStreamName = "stream"sv;
 
-static const std::string changeStreamControlEventName = "changeStreamControlEvent";
+constexpr std::string_view kChangeStreamControlEventName = "changeStreamControlEvent"sv;
 
-static const StringMap<MetaType> kMetaNameToMetaType = {
-    {scoreName, MetaType::kScore},
-    {vectorSearchScoreName, MetaType::kVectorSearchScore},
-    {geoNearDistanceName, MetaType::kGeoNearDist},
-    {geoNearPointName, MetaType::kGeoNearPoint},
-    {indexKeyName, MetaType::kIndexKey},
-    {randValName, MetaType::kRandVal},
-    {recordIdName, MetaType::kRecordId},
-    {searchHighlightsName, MetaType::kSearchHighlights},
-    {searchScoreName, MetaType::kSearchScore},
-    {searchScoreDetailsName, MetaType::kSearchScoreDetails},
-    {searchSequenceTokenName, MetaType::kSearchSequenceToken},
-    {sortKeyName, MetaType::kSortKey},
-    {textScoreName, MetaType::kTextScore},
-    {timeseriesBucketMinTimeName, MetaType::kTimeseriesBucketMinTime},
-    {timeseriesBucketMaxTimeName, MetaType::kTimeseriesBucketMaxTime},
-    {scoreDetailsName, MetaType::kScoreDetails},
-    {searchRootDocumentIdName, MetaType::kSearchRootDocumentId},
-    {streamName, MetaType::kStream},
-    {changeStreamControlEventName, MetaType::kChangeStreamControlEvent},
+static const StringDataMap<MetaType> kMetaNameToMetaType = {
+    {kScoreName, MetaType::kScore},
+    {kVectorSearchScoreName, MetaType::kVectorSearchScore},
+    {kGeoNearDistanceName, MetaType::kGeoNearDist},
+    {kGeoNearPointName, MetaType::kGeoNearPoint},
+    {kIndexKeyName, MetaType::kIndexKey},
+    {kRandValName, MetaType::kRandVal},
+    {kRecordIdName, MetaType::kRecordId},
+    {kSearchHighlightsName, MetaType::kSearchHighlights},
+    {kSearchScoreName, MetaType::kSearchScore},
+    {kSearchScoreDetailsName, MetaType::kSearchScoreDetails},
+    {kSearchSequenceTokenName, MetaType::kSearchSequenceToken},
+    {kSortKeyName, MetaType::kSortKey},
+    {kTextScoreName, MetaType::kTextScore},
+    {kTimeseriesBucketMinTimeName, MetaType::kTimeseriesBucketMinTime},
+    {kTimeseriesBucketMaxTimeName, MetaType::kTimeseriesBucketMaxTime},
+    {kScoreDetailsName, MetaType::kScoreDetails},
+    {kSearchRootDocumentIdName, MetaType::kSearchRootDocumentId},
+    {kStreamName, MetaType::kStream},
+    {kChangeStreamControlEventName, MetaType::kChangeStreamControlEvent},
 };
 
-// NOLINTNEXTLINE needs audit
-static const std::unordered_map<MetaType, StringData> kMetaTypeToMetaName = {
-    {MetaType::kScore, scoreName},
-    {MetaType::kVectorSearchScore, vectorSearchScoreName},
-    {MetaType::kGeoNearDist, geoNearDistanceName},
-    {MetaType::kGeoNearPoint, geoNearPointName},
-    {MetaType::kIndexKey, indexKeyName},
-    {MetaType::kRandVal, randValName},
-    {MetaType::kRecordId, recordIdName},
-    {MetaType::kSearchHighlights, searchHighlightsName},
-    {MetaType::kSearchScore, searchScoreName},
-    {MetaType::kSearchScoreDetails, searchScoreDetailsName},
-    {MetaType::kSearchSequenceToken, searchSequenceTokenName},
-    {MetaType::kSortKey, sortKeyName},
-    {MetaType::kTextScore, textScoreName},
-    {MetaType::kTimeseriesBucketMinTime, timeseriesBucketMinTimeName},
-    {MetaType::kTimeseriesBucketMaxTime, timeseriesBucketMaxTimeName},
-    {MetaType::kScoreDetails, scoreDetailsName},
-    {MetaType::kSearchRootDocumentId, searchRootDocumentIdName},
-    {MetaType::kStream, streamName},
-    {MetaType::kChangeStreamControlEvent, changeStreamControlEventName},
+static const stdx::unordered_map<MetaType, std::string_view> kMetaTypeToMetaName = {
+    {MetaType::kScore, kScoreName},
+    {MetaType::kVectorSearchScore, kVectorSearchScoreName},
+    {MetaType::kGeoNearDist, kGeoNearDistanceName},
+    {MetaType::kGeoNearPoint, kGeoNearPointName},
+    {MetaType::kIndexKey, kIndexKeyName},
+    {MetaType::kRandVal, kRandValName},
+    {MetaType::kRecordId, kRecordIdName},
+    {MetaType::kSearchHighlights, kSearchHighlightsName},
+    {MetaType::kSearchScore, kSearchScoreName},
+    {MetaType::kSearchScoreDetails, kSearchScoreDetailsName},
+    {MetaType::kSearchSequenceToken, kSearchSequenceTokenName},
+    {MetaType::kSortKey, kSortKeyName},
+    {MetaType::kTextScore, kTextScoreName},
+    {MetaType::kTimeseriesBucketMinTime, kTimeseriesBucketMinTimeName},
+    {MetaType::kTimeseriesBucketMaxTime, kTimeseriesBucketMaxTimeName},
+    {MetaType::kScoreDetails, kScoreDetailsName},
+    {MetaType::kSearchRootDocumentId, kSearchRootDocumentIdName},
+    {MetaType::kStream, kStreamName},
+    {MetaType::kChangeStreamControlEvent, kChangeStreamControlEventName},
 };
 
 static const std::set<DocumentMetadataFields::MetaType> kScoreMetadataFields = {
@@ -123,6 +98,11 @@ static const std::set<DocumentMetadataFields::MetaType> kScoreMetadataFields = {
     DocumentMetadataFields::MetaType::kSearchScore,
     DocumentMetadataFields::MetaType::kVectorSearchScore,
     DocumentMetadataFields::MetaType::kTextScore,
+};
+
+static const std::set<DocumentMetadataFields::MetaType> kScoreDetailsMetadataFields = {
+    DocumentMetadataFields::MetaType::kScoreDetails,
+    DocumentMetadataFields::MetaType::kSearchScoreDetails,
 };
 }  // namespace
 
@@ -146,14 +126,18 @@ DocumentMetadataFields& DocumentMetadataFields::operator=(DocumentMetadataFields
     return *this;
 }
 
-MetaType DocumentMetadataFields::parseMetaType(StringData name) {
+MetaType DocumentMetadataFields::parseMetaType(std::string_view name) {
     const auto iter = kMetaNameToMetaType.find(name);
     uassert(
         17308, fmt::format("Unsupported $meta field: {}", name), iter != kMetaNameToMetaType.end());
     return iter->second;
 }
 
-StringData DocumentMetadataFields::serializeMetaType(MetaType type) {
+bool DocumentMetadataFields::isValidMetaType(std::string_view name) {
+    return kMetaNameToMetaType.find(name) != kMetaNameToMetaType.end();
+}
+
+std::string_view DocumentMetadataFields::serializeMetaType(MetaType type) {
     const auto nameIter = kMetaTypeToMetaName.find(type);
     tassert(9733900,
             str::stream() << "No name found for meta type: " << type,
@@ -161,8 +145,12 @@ StringData DocumentMetadataFields::serializeMetaType(MetaType type) {
     return nameIter->second;
 }
 
-bool DocumentMetadataFields::isScoreProducingMetaType(StringData name) {
+bool DocumentMetadataFields::isScoreProducingMetaType(std::string_view name) {
     return kScoreMetadataFields.contains(DocumentMetadataFields::parseMetaType(name));
+}
+
+bool DocumentMetadataFields::isScoreDetailsProducingMetaType(std::string_view name) {
+    return kScoreDetailsMetadataFields.contains(DocumentMetadataFields::parseMetaType(name));
 }
 
 void DocumentMetadataFields::setMetaFieldFromValue(MetaType type, Value val) {
@@ -264,33 +252,26 @@ void DocumentMetadataFields::setMetaFieldFromValue(MetaType type, Value val) {
     }
 }
 
-void DocumentMetadataFields::setScore(double score, bool featureFlagAlreadyValidated) {
-    if (featureFlagAlreadyValidated || isRankFusionFullEnabled()) {
-        _setCommon(MetaType::kScore);
-        _holder->score = score;
-    }
+void DocumentMetadataFields::setScore(double score) {
+    _setCommon(MetaType::kScore);
+    _holder->score = score;
 }
 
-void DocumentMetadataFields::setScoreDetails(Value scoreDetails, bool featureFlagAlreadyValidated) {
-    if (featureFlagAlreadyValidated || isRankFusionFullEnabled()) {
-        _setCommon(MetaType::kScoreDetails);
-        _holder->scoreDetails = scoreDetails;
-    }
+void DocumentMetadataFields::setScoreDetails(Value scoreDetails) {
+    _setCommon(MetaType::kScoreDetails);
+    _holder->scoreDetails = scoreDetails;
 }
 
 void DocumentMetadataFields::setScoreAndScoreDetails(Value scoreDetails) {
-    if (isRankFusionFullEnabled()) {
-        auto score = scoreDetails.getDocument().getField(StringData{scoreDetailsScoreField});
-        tassert(9679300,
-                str::stream() << "scoreDetails must provide a numeric 'value' field with which to "
-                                 "set the score too, but got "
-                              << scoreDetails.toString(),
-                score.numeric());
+    auto score = scoreDetails.getDocument().getField(kScoreDetailsScoreField);
+    tassert(9679300,
+            str::stream() << "scoreDetails must provide a numeric 'value' field with which to "
+                             "set the score too, but got "
+                          << scoreDetails.toString(),
+            score.numeric());
 
-        const bool featureFlagAlreadyValidated = true;
-        setScore(score.getDouble(), featureFlagAlreadyValidated);
-        setScoreDetails(std::move(scoreDetails), featureFlagAlreadyValidated);
-    }
+    setScore(score.getDouble());
+    setScoreDetails(std::move(scoreDetails));
 }
 
 void DocumentMetadataFields::mergeWith(const DocumentMetadataFields& other) {

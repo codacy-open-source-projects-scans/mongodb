@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/fle/query_rewriter.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/json.h"
 #include "mongo/crypto/fle_crypto_types.h"
@@ -48,13 +21,14 @@
 #include "mongo/db/query/fle/query_rewriter_interface.h"
 #include "mongo/db/query/fle/server_rewrite_helper.h"
 #include "mongo/db/query/fle/text_search_predicate.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
 #include <memory>
 #include <set>
+#include <string_view>
 #include <typeindex>
 #include <vector>
 
@@ -62,6 +36,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /*
  *  The server rewrite itself is only responsible for traversing agg and MatchExpressions and
@@ -84,7 +59,7 @@ protected:
         if (!elt.isABSONObj()) {
             return false;
         }
-        return elt.Obj().hasField("encrypt"_sd);
+        return elt.Obj().hasField("encrypt"sv);
     }
     bool isPayload(const Value& v) const override {
         if (!v.isObject()) {
@@ -93,7 +68,7 @@ protected:
         return !v.getDocument().getField("encrypt").missing();
     }
 
-    std::vector<PrfBlock> generateTags(fle::BSONValue) const override {
+    std::vector<PrfBlock> generateTags(fle::BSONValue, std::string_view) const override {
         // In some cases, we may have an empty nss, which implies that the query rewriter was
         // instantiated for an unencrypted collection. This can only happen in an aggregate command
         // when FLE2 queries are using along with unencrypted collections in a $lookup.
@@ -116,7 +91,7 @@ protected:
         // We would like to closely simulate the calls that are made when rewriteToTagDisjunction is
         // called, which includes a call to generateTags(). Our mock always returns an empty tags
         // array.
-        auto tags = generateTags(eqMatch->getData());
+        auto tags = generateTags(eqMatch->getData(), eqMatch->path());
         ASSERT_TRUE(tags.empty());
         return std::make_unique<GTMatchExpression>(eqMatch->path(),
                                                    eqMatch->getData().Obj().firstElement());
@@ -180,7 +155,7 @@ protected:
         if (!elt.isABSONObj()) {
             return false;
         }
-        return elt.Obj().hasField("foo"_sd);
+        return elt.Obj().hasField("foo"sv);
     }
     bool isPayload(const Value& v) const override {
         if (!v.isObject()) {
@@ -189,7 +164,7 @@ protected:
         return !v.getDocument().getField("foo").missing();
     }
 
-    std::vector<PrfBlock> generateTags(fle::BSONValue payload) const override {
+    std::vector<PrfBlock> generateTags(fle::BSONValue payload, std::string_view) const override {
         return {};
     };
 
@@ -266,7 +241,7 @@ protected:
         return v.getString() == kPayloadText;
     }
 
-    std::vector<PrfBlock> generateTags(fle::BSONValue payload) const override {
+    std::vector<PrfBlock> generateTags(fle::BSONValue payload, std::string_view) const override {
         /**
          * If we are in _forceCollScanOnAggAsMatchRewrite, we want text predicates to artifically
          * trigger a failure to generate tags for our testing. Note, this only happens when
@@ -397,9 +372,9 @@ class MockQueryRewriter : public fle::QueryRewriter {
 public:
     MockQueryRewriter(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                       const NamespaceString& mockNss,
-                      const std::map<NamespaceString, NamespaceString>& escMap,
+                      const std::map<NamespaceString, EncryptedFieldConfig>& efcMap,
                       const bool forceCollectionScanOnAggAsMatchRewrite)
-        : fle::QueryRewriter(expCtx, mockNss, aggRewriteMap, matchRewriteMap, escMap),
+        : fle::QueryRewriter(expCtx, mockNss, aggRewriteMap, matchRewriteMap, efcMap),
           _forceCollectionScanOnAggAsMatchRewrite(forceCollectionScanOnAggAsMatchRewrite) {}
 
     BSONObj rewriteMatchExpressionForTest(const BSONObj& obj) {
@@ -419,11 +394,11 @@ public:
     static fle::QueryRewriter getQueryRewriterWithMockedMaps(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const NamespaceString& nss,
-        const std::map<NamespaceString, NamespaceString>& escMap,
+        const std::map<NamespaceString, EncryptedFieldConfig>& efcMap,
         bool forceCollectionScanOnAggAsMatchRewrite) {
         // Workaround for protected fle::QueryRewriter constructor. Slices the mocked object,
         // leaving us with the copied base class with mocked maps.
-        return MockQueryRewriter(expCtx, nss, escMap, forceCollectionScanOnAggAsMatchRewrite);
+        return MockQueryRewriter(expCtx, nss, efcMap, forceCollectionScanOnAggAsMatchRewrite);
     }
 
 private:
@@ -436,7 +411,7 @@ private:
     }
 
     fle::TagMap _tags;
-    std::set<StringData> _encryptedFields;
+    std::set<std::string_view> _encryptedFields;
     // _forceCollectionScanOnAggAsMatchRewrite indicates that the _textSearchPredicate we initialize
     // for this QueryRewriter will throw an exception for tag limit exceeded when generating tags.
     const bool _forceCollectionScanOnAggAsMatchRewrite;
@@ -448,16 +423,23 @@ public:
 
     void setUp() override {
         _mock = std::make_unique<MockQueryRewriter>(
-            _expCtx, _mockNss, _mockEscMap, false /*forceCollectionScanOnAggAsMatchRewrite*/);
+            _expCtx, _mockNss, _mockEfcMap, false /*forceCollectionScanOnAggAsMatchRewrite*/);
     }
 
     void tearDown() override {}
 
 protected:
+    static EncryptedFieldConfig makeMockEfc() {
+        EncryptedFieldConfig efc;
+        efc.setEscCollection("enxcol_.mock.esc"sv);
+        efc.setFields({});
+        return efc;
+    }
+
     std::unique_ptr<MockQueryRewriter> _mock;
     boost::intrusive_ptr<ExpressionContext> _expCtx{new ExpressionContextForTest()};
-    NamespaceString _mockNss = NamespaceString::createNamespaceString_forTest("test.mock"_sd);
-    std::map<NamespaceString, NamespaceString> _mockEscMap{{_mockNss, _mockNss}};
+    NamespaceString _mockNss = NamespaceString::createNamespaceString_forTest("test.mock"sv);
+    std::map<NamespaceString, EncryptedFieldConfig> _mockEfcMap{{_mockNss, makeMockEfc()}};
 };
 
 class FLEServerRewriteTestForceCollScanOnTextSearchPredicates : public FLEServerRewriteTest {
@@ -466,7 +448,7 @@ public:
 
     void setUp() override {
         _mock = std::make_unique<MockQueryRewriter>(
-            _expCtx, _mockNss, _mockEscMap, true /*forceCollectionScanOnAggAsMatchRewrite*/);
+            _expCtx, _mockNss, _mockEfcMap, true /*forceCollectionScanOnAggAsMatchRewrite*/);
     }
 
     void tearDown() override {}
@@ -477,7 +459,7 @@ public:
     FLEServerRewriteTestForceCollScan() : FLEServerRewriteTest() {}
 
     void setUp() override {
-        _mock = std::make_unique<MockQueryRewriter>(_expCtx, _mockNss, _mockEscMap, false);
+        _mock = std::make_unique<MockQueryRewriter>(_expCtx, _mockNss, _mockEfcMap, false);
         _mock->setForceEncryptedCollScanForTest();
     }
 
@@ -883,10 +865,15 @@ public:
 
     ~MockPipelineRewrite() override {};
 
+    // Test-only accessor for the namespace -> EFC map plumbed to sub-pipeline rewriters.
+    const std::map<NamespaceString, EncryptedFieldConfig>& efcMapForTest() const {
+        return _efcMap;
+    }
+
 protected:
     fle::QueryRewriter getQueryRewriterForEsc(FLETagQueryInterface* queryImpl) override {
         return MockQueryRewriter::getQueryRewriterWithMockedMaps(
-            expCtx, nssEsc, _escMap, /*forceTextSearchGenerateTagsAsMatchException*/ false);
+            expCtx, nssEsc, _efcMap, /*forceTextSearchGenerateTagsAsMatchException*/ false);
     }
 };
 
@@ -1119,7 +1106,7 @@ public:
 
     auto jsonToPipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                         const NamespaceString& nss,
-                        StringData jsonArray) {
+                        std::string_view jsonArray) {
         const auto inputBson = fromjson(fmt::format("{{pipeline: {}}}", jsonArray));
 
         ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::array);
@@ -1132,8 +1119,8 @@ public:
     void assertExpectedPipeline(const Pipeline& rewrittenPipeline,
                                 const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                 const NamespaceString& nss,
-                                StringData expectedPipelineJsonArray) {
-        SerializationOptions opts{.serializeForFLE2 = true};
+                                std::string_view expectedPipelineJsonArray) {
+        query_shape::SerializationOptions opts{.serializeForFLE2 = true};
         auto serializedRewrittenPipeline = rewrittenPipeline.serializeToBson(opts);
         auto serializedExpectedPipeline =
             jsonToPipeline(expCtx, nss, expectedPipelineJsonArray)->serializeToBson(opts);
@@ -1142,29 +1129,29 @@ public:
 
 protected:
     boost::intrusive_ptr<ExpressionContext> _expCtx{new ExpressionContextForTest()};
-    NamespaceString _primaryNss = NamespaceString::createNamespaceString_forTest("test.coll_a"_sd);
+    NamespaceString _primaryNss = NamespaceString::createNamespaceString_forTest("test.coll_a"sv);
 };
 
-#define TEST_FLE_REWRITE_PIPELINE(name,                                                       \
-                                  input,                                                      \
-                                  expected,                                                   \
-                                  additionalNamespaces,                                       \
-                                  encryptionInformation,                                      \
-                                  enableMultiSchemaFeatureFlag)                               \
-    TEST_F(FLEServerRewritePipelineTest, name##_PipelineRewrite) {                            \
-        RAIIServerParameterControllerForTest _scopedFeature{                                  \
-            "featureFlagLookupEncryptionSchemasFLE", enableMultiSchemaFeatureFlag};           \
-        setResolvedNamespacesForTest(additionalNamespaces);                                   \
-        auto pipeline = jsonToPipeline(_expCtx, _primaryNss, input);                          \
-        auto pipelineRewrite =                                                                \
-            MockPipelineRewrite(_primaryNss,                                                  \
-                                EncryptionInformation::parse(fromjson(encryptionInformation), \
-                                                             IDLParserContext("root")),       \
-                                std::move(pipeline));                                         \
-        pipelineRewrite.doRewrite(nullptr);                                                   \
-        auto rewrittenPipeline = pipelineRewrite.getPipeline();                               \
-        ASSERT(rewrittenPipeline);                                                            \
-        assertExpectedPipeline(*rewrittenPipeline, _expCtx, _primaryNss, expected);           \
+#define TEST_FLE_REWRITE_PIPELINE(name,                                                        \
+                                  input,                                                       \
+                                  expected,                                                    \
+                                  additionalNamespaces,                                        \
+                                  encryptionInformation,                                       \
+                                  enableMultiSchemaFeatureFlag)                                \
+    TEST_F(FLEServerRewritePipelineTest, name##_PipelineRewrite) {                             \
+        unittest::ServerParameterGuard _scopedFeature{"featureFlagLookupEncryptionSchemasFLE", \
+                                                      enableMultiSchemaFeatureFlag};           \
+        setResolvedNamespacesForTest(additionalNamespaces);                                    \
+        auto pipeline = jsonToPipeline(_expCtx, _primaryNss, input);                           \
+        auto pipelineRewrite =                                                                 \
+            MockPipelineRewrite(_primaryNss,                                                   \
+                                EncryptionInformation::parse(fromjson(encryptionInformation),  \
+                                                             IDLParserContext("root")),        \
+                                std::move(pipeline));                                          \
+        pipelineRewrite.doRewrite(nullptr);                                                    \
+        auto rewrittenPipeline = pipelineRewrite.getPipeline();                                \
+        ASSERT(rewrittenPipeline);                                                             \
+        assertExpectedPipeline(*rewrittenPipeline, _expCtx, _primaryNss, expected);            \
     }
 
 TEST_FLE_REWRITE_PIPELINE(Match,
@@ -1254,12 +1241,13 @@ TEST_FLE_REWRITE_PIPELINE(LookupSinglyNestedMatch,
                                     {$match:
                                         {$and: [{b_ssn: {$gt: 2}}, {b_age: {$gt: 4}}]}
                                     }]}}])",
-                          {NamespaceString::createNamespaceString_forTest("test.coll_b"_sd)},
+                          {NamespaceString::createNamespaceString_forTest("test.coll_b"sv)},
                           FLEServerRewritePipelineTest::kTwoEncryptionSchemaEncryptionInfo,
                           true);
 
-TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch,
-                          R"([{ $lookup: {
+TEST_FLE_REWRITE_PIPELINE(
+    LookupDoublyNestedMatch,
+    R"([{ $lookup: {
                                 from: "coll_b",
                                 localField: "foo",
                                 foreignField: "b_foo",
@@ -1280,7 +1268,7 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch,
                                     {$match:
                                         {$and: [{b_ssn: {encrypt: 2}}, {b_age: {encrypt: 4}}]}
                                     }]}}])",
-                          R"([{ $lookup: {
+    R"([{ $lookup: {
                                 from: "coll_b",
                                 localField: "foo",
                                 foreignField: "b_foo",
@@ -1301,11 +1289,10 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch,
                                     {$match:
                                         {$and: [{b_ssn: {$gt: 2}}, {b_age: {$gt: 4}}]}
                                     }]}}])",
-                          std::vector<NamespaceString>(
-                              {NamespaceString::createNamespaceString_forTest("test.coll_b"_sd),
-                               NamespaceString::createNamespaceString_forTest("test.coll_c"_sd)}),
-                          FLEServerRewritePipelineTest::kThreeEncryptionSchemaEncryptionInfo,
-                          true);
+    std::vector<NamespaceString>({NamespaceString::createNamespaceString_forTest("test.coll_b"sv),
+                                  NamespaceString::createNamespaceString_forTest("test.coll_c"sv)}),
+    FLEServerRewritePipelineTest::kThreeEncryptionSchemaEncryptionInfo,
+    true);
 
 // Test that no rewrites take place when feature flag is disabled.
 TEST_FLE_REWRITE_PIPELINE(LookupSinglyNestedMatch_FeatureFlagDisabled,
@@ -1329,12 +1316,13 @@ TEST_FLE_REWRITE_PIPELINE(LookupSinglyNestedMatch_FeatureFlagDisabled,
                                     {$match:
                                         {$and: [{b_ssn: {encrypt: 2}}, {b_age: {encrypt: 4}}]}
                                     }]}}])",
-                          {NamespaceString::createNamespaceString_forTest("test.coll_b"_sd)},
+                          {NamespaceString::createNamespaceString_forTest("test.coll_b"sv)},
                           FLEServerRewritePipelineTest::kTwoEncryptionSchemaEncryptionInfo,
                           false);
 
-TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch_FeatureFlagDisabled,
-                          R"([{ $lookup: {
+TEST_FLE_REWRITE_PIPELINE(
+    LookupDoublyNestedMatch_FeatureFlagDisabled,
+    R"([{ $lookup: {
                                 from: "coll_b",
                                 localField: "foo",
                                 foreignField: "b_foo",
@@ -1355,7 +1343,7 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch_FeatureFlagDisabled,
                                     {$match:
                                         {$and: [{b_ssn: {encrypt: 2}}, {b_age: {encrypt: 4}}]}
                                     }]}}])",
-                          R"([{ $lookup: {
+    R"([{ $lookup: {
                                 from: "coll_b",
                                 localField: "foo",
                                 foreignField: "b_foo",
@@ -1376,15 +1364,13 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatch_FeatureFlagDisabled,
                                     {$match:
                                         {$and: [{b_ssn: {encrypt: 2}}, {b_age: {encrypt: 4}}]}
                                     }]}}])",
-                          std::vector<NamespaceString>(
-                              {NamespaceString::createNamespaceString_forTest("test.coll_b"_sd),
-                               NamespaceString::createNamespaceString_forTest("test.coll_c"_sd)}),
-                          FLEServerRewritePipelineTest::kThreeEncryptionSchemaEncryptionInfo,
-                          false);
+    std::vector<NamespaceString>({NamespaceString::createNamespaceString_forTest("test.coll_b"sv),
+                                  NamespaceString::createNamespaceString_forTest("test.coll_c"sv)}),
+    FLEServerRewritePipelineTest::kThreeEncryptionSchemaEncryptionInfo,
+    false);
 
 TEST_F(FLEServerRewritePipelineTest, MissingEscPrimaryCollectionFails_PipelineRewrite) {
-    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagLookupEncryptionSchemasFLE",
-                                                        true};
+    unittest::ServerParameterGuard _scopedFeature{"featureFlagLookupEncryptionSchemasFLE", true};
     setResolvedNamespacesForTest({});
     auto pipeline = jsonToPipeline(
         _expCtx, _primaryNss, "[{$match: {$and: [{ssn: {encrypt: 2}}, {age: {encrypt: 4}}]}}]");
@@ -1396,11 +1382,28 @@ TEST_F(FLEServerRewritePipelineTest, MissingEscPrimaryCollectionFails_PipelineRe
     ASSERT_THROWS_CODE(pipelineRewrite.doRewrite(nullptr), AssertionException, 10026006);
 }
 
-TEST_F(FLEServerRewritePipelineTest, MissingEscForeignCollectionFails_PipelineRewrite) {
-    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagLookupEncryptionSchemasFLE",
-                                                        true};
+// PipelineRewrite should populate its namespace -> EFC map with every schema in the supplied
+// EncryptionInformation, so sub-pipeline rewriters (e.g. $lookup) can validate find payloads
+// against the foreign collection's EFC.
+TEST_F(FLEServerRewritePipelineTest, BuildsEfcMapForAllSchemas_PipelineRewrite) {
+    unittest::ServerParameterGuard _scopedFeature{"featureFlagLookupEncryptionSchemasFLE", true};
+    setResolvedNamespacesForTest({});
+    auto pipeline = jsonToPipeline(_expCtx, _primaryNss, "[]");
+    MockPipelineRewrite pipelineRewrite(
+        _primaryNss,
+        EncryptionInformation::parse(fromjson(kTwoEncryptionSchemaEncryptionInfo),
+                                     IDLParserContext("root")),
+        std::move(pipeline));
+    const auto& efcMap = pipelineRewrite.efcMapForTest();
+    ASSERT_EQ(efcMap.size(), 2u);
+    ASSERT_EQ(efcMap.count(_primaryNss), 1u);
+    ASSERT_EQ(efcMap.count(NamespaceString::createNamespaceString_forTest("test.coll_b"sv)), 1u);
+}
 
-    const auto foreignNss = NamespaceString::createNamespaceString_forTest("test.coll_d"_sd);
+TEST_F(FLEServerRewritePipelineTest, MissingEscForeignCollectionFails_PipelineRewrite) {
+    unittest::ServerParameterGuard _scopedFeature{"featureFlagLookupEncryptionSchemasFLE", true};
+
+    const auto foreignNss = NamespaceString::createNamespaceString_forTest("test.coll_d"sv);
     setResolvedNamespacesForTest({foreignNss});
     auto pipeline = jsonToPipeline(_expCtx, _primaryNss, R"([{ $lookup: {
                                                                             from: "coll_d",
@@ -1420,8 +1423,9 @@ TEST_F(FLEServerRewritePipelineTest, MissingEscForeignCollectionFails_PipelineRe
     ASSERT_THROWS_CODE(pipelineRewrite.doRewrite(nullptr), AssertionException, 10026006);
 }
 
-TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedForeignCollection,
-                          R"([{ $lookup: {
+TEST_FLE_REWRITE_PIPELINE(
+    LookupDoublyNestedMatchMissingUnencryptedForeignCollection,
+    R"([{ $lookup: {
                                 from: "coll_d",
                                 localField: "foo",
                                 foreignField: "d_foo",
@@ -1443,7 +1447,7 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedForeignCollec
                                     {$match:
                                         {$and: [{d_ssn: 2}, {d_age: 4}]}
                                     }]}}])",
-                          R"([{ $lookup: {
+    R"([{ $lookup: {
                                 from: "coll_d",
                                 localField: "foo",
                                 foreignField: "d_foo",
@@ -1464,14 +1468,14 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedForeignCollec
                                     {$match:
                                         {$and: [{d_ssn: 2}, {d_age: 4}]}
                                     }]}}])",
-                          std::vector<NamespaceString>(
-                              {NamespaceString::createNamespaceString_forTest("test.coll_b"_sd),
-                               NamespaceString::createNamespaceString_forTest("test.coll_d"_sd)}),
-                          FLEServerRewritePipelineTest::kTwoEncryptionSchemaEncryptionInfo,
-                          true);
+    std::vector<NamespaceString>({NamespaceString::createNamespaceString_forTest("test.coll_b"sv),
+                                  NamespaceString::createNamespaceString_forTest("test.coll_d"sv)}),
+    FLEServerRewritePipelineTest::kTwoEncryptionSchemaEncryptionInfo,
+    true);
 
-TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedPrimarySchema,
-                          R"([{ $lookup: {
+TEST_FLE_REWRITE_PIPELINE(
+    LookupDoublyNestedMatchMissingUnencryptedPrimarySchema,
+    R"([{ $lookup: {
                                 from: "coll_e",
                                 localField: "foo",
                                 foreignField: "e_foo",
@@ -1495,7 +1499,7 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedPrimarySchema
                             {$match:
                                 {$and: [{ssn: 2}, {age: 4}]}
                             }])",
-                          R"([{ $lookup: {
+    R"([{ $lookup: {
                                 from: "coll_e",
                                 localField: "foo",
                                 foreignField: "e_foo",
@@ -1519,11 +1523,10 @@ TEST_FLE_REWRITE_PIPELINE(LookupDoublyNestedMatchMissingUnencryptedPrimarySchema
                                     {$match:
                                         {$and: [{ssn: 2}, {age: 4}]}
                                     }])",
-                          std::vector<NamespaceString>(
-                              {NamespaceString::createNamespaceString_forTest("test.coll_d"_sd),
-                               NamespaceString::createNamespaceString_forTest("test.coll_e"_sd)}),
-                          FLEServerRewritePipelineTest::kSingleEncryptionSchemaEncryptionCollD,
-                          true);
+    std::vector<NamespaceString>({NamespaceString::createNamespaceString_forTest("test.coll_d"sv),
+                                  NamespaceString::createNamespaceString_forTest("test.coll_e"sv)}),
+    FLEServerRewritePipelineTest::kSingleEncryptionSchemaEncryptionCollD,
+    true);
 
 // Begin encrypted text search FLE and/or rewrite optimization testing.
 /**

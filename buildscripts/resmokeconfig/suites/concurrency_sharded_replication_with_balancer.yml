@@ -44,7 +44,6 @@ selector:
     - requires_standalone
     - assumes_against_mongod_not_mongos
     - assumes_balancer_off
-    - requires_replication
     # mongos has no system.profile collection.
     - requires_profiling
     - assumes_unsharded_collection
@@ -70,6 +69,7 @@ executor:
         TestData:
           runningWithBalancer: true
           implicitlyShardOnCreateCollectionOnly: true
+          shardCollectionProbability: 0.5
   hooks:
     # TODO SERVER-120162: Re-enable once all the false positive have been addressed and the test is stable.
     # - class: CheckIdleCursors

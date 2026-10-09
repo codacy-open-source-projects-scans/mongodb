@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/process_interface/mongos_process_interface.h"
 
@@ -83,6 +57,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 /**
@@ -320,7 +295,7 @@ BSONObj MongosProcessInterface::_reportCurrentOpForClient(
 
     OperationContext* clientOpCtx = client->getOperationContext();
 
-    if (clientOpCtx) {
+    if (clientOpCtx && !client->operationContextIsPendingDestruction()) {
         if (auto txnRouter = TransactionRouter::get(clientOpCtx)) {
             txnRouter.reportState(clientOpCtx, &builder, true /* sessionIsActive */);
         }
@@ -414,7 +389,7 @@ MongosProcessInterface::fieldsHaveSupportingUniqueIndex(
     // version is stale.
     sharding::router::CollectionRouter router(expCtx->getOperationContext(), nss);
     return router.routeWithRoutingContext(
-        "MongosProcessInterface::fieldsHaveSupportingUniqueIndex"_sd,
+        "MongosProcessInterface::fieldsHaveSupportingUniqueIndex"sv,
         [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             auto response =
                 loadIndexesFromAuthoritativeShard(expCtx->getOperationContext(), routingCtx, nss);
@@ -506,9 +481,19 @@ MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
 
         routingCtx = uassertStatusOK(getRoutingContext(expCtx->getOperationContext(), {outputNs}));
         const auto& cri = routingCtx->getCollectionRoutingInfo(outputNs);
+
         if (!cri.isSharded()) {
             return boost::none;
         }
+
+        // Without explicit fieldPaths, for sharded target collections, mongods use _id + shard key
+        // for uniqueness. The _id comparison uses the collection's default collation. Check the _id
+        // collation matches the query's collation. Shard keys must use the simple collation.
+        uassert(
+            11749300,
+            "$merge aggregation pipeline collation does not match destination collection collation",
+            CollatorInterface::collatorsMatch(expCtx->getCollator(),
+                                              cri.getChunkManager().getDefaultCollator()));
 
         return cri.getCollectionVersion().placementVersion();
     }();

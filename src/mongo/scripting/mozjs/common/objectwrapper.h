@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -52,6 +25,7 @@ struct JSRegEx;
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <string_view>
 
 #include <jsapi.h>
 
@@ -83,7 +57,7 @@ class ValueWriter;
  * This wraps a RootedObject, so should only be allocated on the stack and is
  * not movable or copyable
  */
-class MONGO_MOD_PUB ObjectWrapper {
+class [[MONGO_MOD_PUBLIC]] ObjectWrapper {
     friend class ValueWriter;
 
 public:
@@ -118,7 +92,7 @@ public:
         void define(JSContext* cx, JS::HandleObject o, JS::HandleValue value, unsigned attrs);
         void del(JSContext* cx, JS::HandleObject o);
         std::string toString(JSContext* cx);
-        StringData toStringData(JSContext* cx, JSStringWrapper* jsstr);
+        std::string_view toStringData(JSContext* cx, JSStringWrapper* jsstr);
 
         union {
             const char* _field;
@@ -147,7 +121,7 @@ public:
     JSRegEx getRegEx(Key key);
 
     void setNumber(Key key, double val);
-    void setString(Key key, StringData val);
+    void setString(Key key, std::string_view val);
     void setBoolean(Key key, bool val);
     void setBSONElement(Key key, const BSONElement& elem, const BSONObj& obj, bool readOnly);
     void setBSON(Key key, const BSONObj& obj, bool readOnly);
@@ -236,7 +210,7 @@ public:
         WriteFieldRecursionFrame(JSContext* cx,
                                  JSObject* obj,
                                  BSONObjBuilder* parent,
-                                 StringData sd);
+                                 std::string_view sd);
 
         BSONObjBuilder* subbob_or(BSONObjBuilder* option) {
             return subbob ? &subbob.get() : option;
@@ -252,7 +226,7 @@ public:
 
         boost::optional<BSONObjBuilder> subbob;
         BSONObj* originalBSON = nullptr;
-        bool altered;
+        bool altered = false;
     };
 
     /**

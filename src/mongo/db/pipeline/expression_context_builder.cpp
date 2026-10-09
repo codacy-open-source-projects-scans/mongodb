@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/pipeline/expression_context_builder.h"
 
 #include "mongo/db/curop.h"
@@ -132,8 +106,25 @@ ExpressionContextBuilder& ExpressionContextBuilder::forPerShardCursor(bool forPe
     return *this;
 }
 
+ExpressionContextBuilder& ExpressionContextBuilder::excludeOperationMemoryTracking(
+    bool excludeOperationMemoryTracking) {
+    params.excludeOperationMemoryTracking = excludeOperationMemoryTracking;
+    return *this;
+}
+
+ExpressionContextBuilder&
+ExpressionContextBuilder::excludeExpressionFallbackFromOperationMemoryTracking(bool exclude) {
+    params.excludeExpressionFallbackFromOperationMemoryTracking = exclude;
+    return *this;
+}
+
 ExpressionContextBuilder& ExpressionContextBuilder::allowDiskUse(bool allowDiskUse) {
     params.allowDiskUse = allowDiskUse;
+    return *this;
+}
+
+ExpressionContextBuilder& ExpressionContextBuilder::allowPartialResults(bool allowPartialResults) {
+    params.allowPartialResults = allowPartialResults;
     return *this;
 }
 
@@ -180,6 +171,12 @@ ExpressionContextBuilder& ExpressionContextBuilder::isParsingCollectionValidator
     return *this;
 }
 
+ExpressionContextBuilder& ExpressionContextBuilder::isReparsingRepresentativeQueryShape(
+    bool isReparsingRepresentativeQueryShape) {
+    params.isReparsingRepresentativeQueryShape = isReparsingRepresentativeQueryShape;
+    return *this;
+}
+
 ExpressionContextBuilder& ExpressionContextBuilder::isIdHackQuery(bool isIdHackQuery) {
     params.isIdHackQuery = isIdHackQuery;
     return *this;
@@ -187,11 +184,6 @@ ExpressionContextBuilder& ExpressionContextBuilder::isIdHackQuery(bool isIdHackQ
 
 ExpressionContextBuilder& ExpressionContextBuilder::isFleQuery(bool isFleQuery) {
     params.isFleQuery = isFleQuery;
-    return *this;
-}
-
-ExpressionContextBuilder& ExpressionContextBuilder::canBeRejected(bool canBeRejected) {
-    params.canBeRejected = canBeRejected;
     return *this;
 }
 
@@ -324,12 +316,6 @@ ExpressionContextBuilder& ExpressionContextBuilder::sbeGroupCompatibility(
     return *this;
 }
 
-ExpressionContextBuilder& ExpressionContextBuilder::sbeWindowCompatibility(
-    SbeCompatibility sbeWindowCompatibility) {
-    params.sbeWindowCompatibility = sbeWindowCompatibility;
-    return *this;
-}
-
 ExpressionContextBuilder& ExpressionContextBuilder::sbePipelineCompatibility(
     SbeCompatibility sbePipelineCompatibility) {
     params.sbePipelineCompatibility = sbePipelineCompatibility;
@@ -348,7 +334,7 @@ ExpressionContextBuilder& ExpressionContextBuilder::serverSideJsConfig(
     return *this;
 }
 
-ExpressionContextBuilder& ExpressionContextBuilder::view(boost::optional<ViewInfo> view) {
+ExpressionContextBuilder& ExpressionContextBuilder::view(boost::optional<ResolvedNamespace> view) {
     params.view = std::move(view);
     return *this;
 }
@@ -401,6 +387,12 @@ ExpressionContextBuilder& ExpressionContextBuilder::pathArraynessFrom(
     return *this;
 }
 
+ExpressionContextBuilder& ExpressionContextBuilder::nonArrayPathsForNssFrom(
+    const ExpressionContext& other) {
+    params.nonArrayPathsForNss = other._params.nonArrayPathsForNss;
+    return *this;
+}
+
 ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     OperationContext* operationContext,
     const FindCommandRequest& request,
@@ -436,10 +428,12 @@ ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     } else {
         if (collectionCollator) {
             collator(collectionCollator->clone());
+        } else {
+            // If there is no collection or request collator we call
+            // isIdHackEligibleQueryWithoutCollator() in order to evaluate if 'request' is an
+            // IDHACK query.
+            isIdHackQuery(isIdHackEligibleQueryWithoutCollator(request));
         }
-        // With no request collation the inherited collation always matches the collection's
-        // default, so IDHACK eligibility depends only on the query structure.
-        isIdHackQuery(isIdHackEligibleQueryWithoutCollator(request));
     }
 
     isFleQuery(request.getEncryptionInformation().has_value());
@@ -493,6 +487,7 @@ ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     }
     mergeType(type);
     allowDiskUse(request.getAllowDiskUse().value_or(useDisk));
+    allowPartialResults(request.getAllowPartialResults().value_or(false));
     bypassDocumentValidation(request.getBypassDocumentValidation().value_or(false));
     isMapReduceCommand(request.getIsMapReduceCommand());
     forPerShardCursor(request.getPassthroughToShard().has_value());
@@ -501,6 +496,12 @@ ExpressionContextBuilder& ExpressionContextBuilder::fromRequest(
     letParameters(request.getLet());
     serializationContext(request.getSerializationContext());
     isFleQuery(request.getEncryptionInformation().has_value());
+    // Propagate $_isHybridSearch so every expCtx built from a hybrid-search request reports
+    // isHybridSearch; otherwise a desugared mongot stage with an injected 'view' field trips the
+    // internal-client check on reparse (notably explain).
+    // TODO SERVER-121094: remove once the $_internalHybridSearch marker is the single
+    // hybrid-search signal.
+    isHybridSearch(request.getIsHybridSearch().value_or(false));
     return *this;
 }
 
@@ -566,7 +567,7 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
     NamespaceString ns,
     boost::optional<UUID> uuid,
     boost::optional<std::unique_ptr<CollatorInterface>> updatedCollator,
-    const boost::optional<ViewInfo>& view,
+    const boost::optional<ResolvedNamespace>& view,
     boost::optional<NamespaceString> userNs) {
     auto collator = [&]() {
         if (updatedCollator) {
@@ -578,7 +579,8 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
         }
     }();
 
-    boost::optional<ViewInfo> clonedView = view ? boost::make_optional(view->clone()) : boost::none;
+    boost::optional<ResolvedNamespace> clonedView =
+        view ? boost::make_optional(view->clone()) : boost::none;
 
     // Some of the properties of expression context are not cloned (e.g runtimeConstants,
     // letParameters, view). In case new fields need to be cloned, they will need to be added in the
@@ -599,7 +601,11 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
         .fromRouter(other->getFromRouter())
         .mergeType(other->mergeType())
         .forPerShardCursor(other->getForPerShardCursor())
+        .excludeOperationMemoryTracking(other->getExcludeOperationMemoryTracking())
+        .excludeExpressionFallbackFromOperationMemoryTracking(
+            other->getExcludeExpressionFallbackFromOperationMemoryTracking())
         .allowDiskUse(other->getAllowDiskUse())
+        .allowPartialResults(other->getAllowPartialResults())
         .bypassDocumentValidation(other->getBypassDocumentValidation())
         .collUUID(uuid)
         .explain(other->getExplain())
@@ -608,6 +614,7 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
         .serializationContext(other->getSerializationContext())
         .inLookup(other->getInLookup())
         .isParsingViewDefinition(other->getIsParsingViewDefinition())
+        .isReparsingRepresentativeQueryShape(other->getIsReparsingRepresentativeQueryShape())
         .exprUnstableForApiV1(other->getExprUnstableForApiV1())
         .exprDeprecatedForApiV1(other->getExprDeprecatedForApiV1())
         .jsHeapLimitMB(other->getJsHeapLimitMB())
@@ -624,7 +631,7 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
     // TODO: SERVER-111384: When removing feature flag, we can collapse the builder into one
     // chained call.
     if (feature_flags::gFeatureFlagPathArrayness.isEnabled()) {
-        builder.pathArraynessFrom(*other);
+        builder.pathArraynessFrom(*other).nonArrayPathsForNssFrom(*other);
     }
 
     auto expCtx = builder.build();
@@ -636,8 +643,6 @@ boost::intrusive_ptr<ExpressionContext> makeCopyFromExpressionContext(
     expCtx->variables = other->variables;
     expCtx->variablesParseState =
         other->variablesParseState.copyWith(expCtx->variables.useIdGenerator());
-
-    expCtx->setQuerySettings(other->getOptionalQuerySettings());
 
     if (other->isHybridSearch()) {
         expCtx->setIsHybridSearch();
@@ -669,6 +674,7 @@ boost::intrusive_ptr<ExpressionContext> makeCopyForSubPipelineFromExpressionCont
     auto newCopy = makeCopyFromExpressionContext(
         other, std::move(nss), uuid, boost::none, boost::none, userNs);
     newCopy->setSubPipelineDepth(newCopy->getSubPipelineDepth() + 1);
+    newCopy->setAllowPartialResults(false);
     // The original expCtx might have been attached to an aggregation pipeline running on the
     // shards. We must reset 'needsMerge' in order to get fully merged results for the
     // subpipeline.

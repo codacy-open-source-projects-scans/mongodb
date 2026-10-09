@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/db/storage/key_string/key_string.h"
@@ -56,6 +30,7 @@
 #include <limits>
 #include <memory>
 #include <random>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -63,6 +38,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::key_string_test {
+using namespace std::literals::string_view_literals;
 
 // This test is derived from a fuzzer suite and triggers interesting code paths and recursion
 // patterns, so including it here specifically.
@@ -89,7 +65,7 @@ TEST(InvalidKeyStringTest, FuzzedCodeWithScopeNesting) {
         "0200aaaa00aa00aafa00aa0200aa00aaaa00000000000000000000000000000000000000000000000000000000"
         "0000000000000000000000000000000000aaaa00aa00aafa00aa0200aa00aaaa00000000000000000000000000"
         "00000000000000000000000000000000000000000000000000aafa00aa0200aa00aaaa00000000000000000400"
-        "00000000000000000000000000000000"_sd,
+        "00000000000000000000000000000000"sv,
         &keyData);
     signed char typeBitsData[] = {0, 16, 0, 0, -127, 1};
     BufReader typeBitsReader(typeBitsData, sizeof(typeBitsData));
@@ -147,8 +123,8 @@ TEST(TypeBitsTest, AppendDecimalExponent) {
 
 TEST(TypeBitsTest, UninitializedTypeBits) {
     key_string::TypeBits typeBits(key_string::Version::V1);
-    ASSERT_EQ(typeBits.getSize(), 1u);
-    ASSERT_EQ(typeBits.getBuffer()[0], 0);
+    EXPECT_EQ(typeBits.getSize(), 1u);
+    EXPECT_EQ(typeBits.getBuffer()[0], 0);
     ASSERT(typeBits.isAllZeros());
 }
 
@@ -158,8 +134,8 @@ TEST(TypeBitsTest, AllZerosTypeBits) {
         BufReader reader(emptyBuffer.c_str(), 0);
         key_string::TypeBits typeBits =
             key_string::TypeBits::fromBuffer(key_string::Version::V1, &reader);
-        ASSERT_EQ(typeBits.getSize(), 1u);
-        ASSERT_EQ(typeBits.getBuffer()[0], 0);
+        EXPECT_EQ(typeBits.getSize(), 1u);
+        EXPECT_EQ(typeBits.getBuffer()[0], 0);
         ASSERT(typeBits.isAllZeros());
     }
 
@@ -168,8 +144,8 @@ TEST(TypeBitsTest, AllZerosTypeBits) {
         BufReader reader(allZerosBuffer, sizeof(allZerosBuffer));
         key_string::TypeBits typeBits =
             key_string::TypeBits::fromBuffer(key_string::Version::V1, &reader);
-        ASSERT_EQ(typeBits.getSize(), 1u);
-        ASSERT_EQ(typeBits.getBuffer()[0], 0);
+        EXPECT_EQ(typeBits.getSize(), 1u);
+        EXPECT_EQ(typeBits.getBuffer()[0], 0);
         ASSERT(typeBits.isAllZeros());
     }
 }
@@ -196,7 +172,7 @@ TEST_P(KeyStringBuilderTest, TooManyElementsInCompoundKey) {
     // No exceptions should be thrown.
     key_string::toBsonSafe({data, size}, ALL_ASCENDING, ks.getTypeBits());
     key_string::decodeDiscriminator(ks.getView(), ALL_ASCENDING, ks.getTypeBits());
-    ASSERT_EQ(size, key_string::getKeySize(ks.getView(), ALL_ASCENDING, ks.version));
+    EXPECT_EQ(size, key_string::getKeySize(ks.getView(), ALL_ASCENDING, ks.version));
 }
 
 TEST_P(KeyStringBuilderTest, MaxElementsInCompoundKey) {
@@ -211,7 +187,7 @@ TEST_P(KeyStringBuilderTest, MaxElementsInCompoundKey) {
     // No exceptions should be thrown.
     key_string::toBsonSafe({data, size}, ALL_ASCENDING, ks.getTypeBits());
     key_string::decodeDiscriminator(ks.getView(), ALL_ASCENDING, ks.getTypeBits());
-    ASSERT_EQ(size, key_string::getKeySize(ks.getView(), ALL_ASCENDING, ks.version));
+    EXPECT_EQ(size, key_string::getKeySize(ks.getView(), ALL_ASCENDING, ks.version));
 }
 
 TEST_P(KeyStringBuilderTest, SizeOfIncompleteKey) {
@@ -219,25 +195,25 @@ TEST_P(KeyStringBuilderTest, SizeOfIncompleteKey) {
     // zero
     const char* data = "oooo\x4";
     const size_t size = 5;
-    ASSERT_EQ(size, key_string::getKeySize({data, size}, ALL_ASCENDING, key_string::Version::V1));
-    ASSERT_EQ(0, key_string::getKeySize({data, size - 1}, ALL_ASCENDING, key_string::Version::V1));
+    EXPECT_EQ(size, key_string::getKeySize({data, size}, ALL_ASCENDING, key_string::Version::V1));
+    EXPECT_EQ(0, key_string::getKeySize({data, size - 1}, ALL_ASCENDING, key_string::Version::V1));
 }
 
 TEST_P(KeyStringBuilderTest, SizeWithTrailingDataInBuffer) {
     // Verify that we actually stop counting key bytes when we reach kEnd
     const char data[] = {'o', 'o', 4, 'a', 'b', 'c'};
-    ASSERT_EQ(3, key_string::getKeySize(data, ALL_ASCENDING, key_string::Version::V1));
+    EXPECT_EQ(3, key_string::getKeySize(data, ALL_ASCENDING, key_string::Version::V1));
 }
 
 TEST_P(KeyStringBuilderTest, EmbeddedkEnd) {
     // Construct a KeyString which contains kEnd inside a string key and verify that getKeySize()
     // does not report that the size ends at that spot
     key_string::Builder ks(version, ALL_ASCENDING);
-    ks.appendString("_\0_\4_"_sd);
-    ks.appendString("abc"_sd);
+    ks.appendString("_\0_\4_"sv);
+    ks.appendString("abc"sv);
     auto buffer = ks.finishAndGetBuffer();
-    ASSERT_EQ(buffer.size(), 14);
-    ASSERT_EQ(key_string::getKeySize(buffer, ALL_ASCENDING, version), buffer.size());
+    EXPECT_EQ(buffer.size(), 14);
+    EXPECT_EQ(key_string::getKeySize(buffer, ALL_ASCENDING, version), buffer.size());
 }
 
 TEST_P(KeyStringBuilderTest, EmbeddedNullString) {
@@ -248,7 +224,7 @@ TEST_P(KeyStringBuilderTest, EmbeddedNullString) {
 
     // No exceptions should be thrown.
     ASSERT_BSONOBJ_EQ(key_string::toBson(data, ALL_ASCENDING, typeBits),
-                      BSON("" << StringData("\x00", 1)));
+                      BSON("" << std::string_view("\x00", 1)));
 };
 
 TEST_P(KeyStringBuilderTest, ExceededBSONDepth) {
@@ -266,7 +242,7 @@ TEST_P(KeyStringBuilderTest, ExceededBSONDepth) {
     }
     // This BSON object should not be valid.
     auto validateStatus = validateBSON(nestedObj.objdata(), nestedObj.objsize());
-    ASSERT_EQ(ErrorCodes::Overflow, validateStatus.code());
+    EXPECT_EQ(ErrorCodes::Overflow, validateStatus.code());
 
     // Construct a KeyString from the invalid BSON, and confirm that it fails to convert back to
     // BSON.
@@ -283,8 +259,8 @@ TEST_P(KeyStringBuilderTest, Simple1) {
 
     ASSERT_BSONOBJ_LT(a, b);
 
-    ASSERT_LESS_THAN(key_string::Builder(version, a, ALL_ASCENDING, RecordId(1)),
-                     key_string::Builder(version, b, ALL_ASCENDING, RecordId(1)));
+    EXPECT_LT(key_string::Builder(version, a, ALL_ASCENDING, RecordId(1)),
+              key_string::Builder(version, b, ALL_ASCENDING, RecordId(1)));
 }
 
 TEST_P(KeyStringBuilderTest, DeprecatedBinData) {
@@ -325,9 +301,9 @@ TEST_P(KeyStringBuilderTest, ActualBytesDouble) {
           "ks_getSize"_attr = ks.getSize(),
           "toString"_attr = ks.toString());
 
-    ASSERT_EQUALS(10U, ks.getSize());
+    EXPECT_EQ(10U, ks.getSize());
 
-    StringData hex = version == key_string::Version::V0
+    std::string_view hex = version == key_string::Version::V0
         ? "2B"              // kNumericPositive1ByteInt
           "0B"              // (5 << 1) | 1
           "02000000000000"  // fractional bytes of double
@@ -337,11 +313,11 @@ TEST_P(KeyStringBuilderTest, ActualBytesDouble) {
           "80000000000000"  // fractional bytes
           "04";             // kEnd
 
-    ASSERT_EQUALS(hex, ks.toString());
+    EXPECT_EQ(hex, ks.toString());
 
     ks.resetToKey(a, Ordering::make(BSON("a" << -1)));
 
-    ASSERT_EQUALS(10U, ks.getSize());
+    EXPECT_EQ(10U, ks.getSize());
 
     // last byte (kEnd) doesn't get flipped
     std::string hexFlipped;
@@ -352,7 +328,7 @@ TEST_P(KeyStringBuilderTest, ActualBytesDouble) {
     }
     hexFlipped += hex.substr(hex.size() - 2);
 
-    ASSERT_EQUALS(hexFlipped, ks.toString());
+    EXPECT_EQ(hexFlipped, ks.toString());
 }
 
 TEST_P(KeyStringBuilderTest, AllTypesSimple) {
@@ -378,7 +354,7 @@ TEST_P(KeyStringBuilderTest, AllTypesSimple) {
 TEST_P(KeyStringBuilderTest, Array1) {
     BSONObj emptyArray = BSON("" << BSONArray());
 
-    ASSERT_EQUALS(BSONType::array, emptyArray.firstElement().type());
+    EXPECT_EQ(BSONType::array, emptyArray.firstElement().type());
 
     ROUNDTRIP(version, emptyArray);
     ROUNDTRIP(version, BSON("" << BSON_ARRAY(emptyArray.firstElement())));
@@ -389,13 +365,13 @@ TEST_P(KeyStringBuilderTest, Array1) {
     {
         key_string::Builder a(version, emptyArray, ALL_ASCENDING, RecordId::minLong());
         key_string::Builder b(version, emptyArray, ALL_ASCENDING, RecordId(5));
-        ASSERT_LESS_THAN(a, b);
+        EXPECT_LT(a, b);
     }
 
     {
         key_string::Builder a(version, emptyArray, ALL_ASCENDING, RecordId(0));
         key_string::Builder b(version, emptyArray, ALL_ASCENDING, RecordId(5));
-        ASSERT_LESS_THAN(a, b);
+        EXPECT_LT(a, b);
     }
 }
 
@@ -434,7 +410,7 @@ TEST_P(KeyStringBuilderTest, NumberLong0) {
     double d = (1ll << 52) - 1;
     long long ll = static_cast<long long>(d);
     double d2 = static_cast<double>(ll);
-    ASSERT_EQUALS(d, d2);
+    EXPECT_EQ(d, d2);
 }
 
 TEST_P(KeyStringBuilderTest, NumbersNearInt32Max) {
@@ -538,7 +514,7 @@ TEST_P(KeyStringBuilderTest, KeyStringValue) {
 
     // Test that Value is copyable.
     key_string::Value dataCopy = data2;
-    ASSERT_EQ(data2.compare(dataCopy), 0);
+    EXPECT_EQ(data2.compare(dataCopy), 0);
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringValueReleaseReusableTest) {
@@ -569,7 +545,7 @@ TEST_P(KeyStringBuilderTest, KeyStringGetValueCopyTest) {
     key_string::Value data2 = ks.release();
 
     // Assert that a copy was actually made and they don't share a buffer.
-    ASSERT_NOT_EQUALS(data1.getView().data(), data2.getView().data());
+    EXPECT_NE(data1.getView().data(), data2.getView().data());
 
     COMPARE_KS_BSON(data1, BSON("" << 1), ALL_ASCENDING);
     COMPARE_KS_BSON(data2, BSON("" << 1), ALL_ASCENDING);
@@ -621,10 +597,10 @@ TEST_P(KeyStringBuilderTest, KeyStringBuilderOrdering) {
     key_string::Value data1 = ks1.release();
     key_string::Value data2 = ks2.release();
 
-    ASSERT_EQUALS(data1.getSize(), data2.getSize());
+    EXPECT_EQ(data1.getSize(), data2.getSize());
     // Confirm that the buffers are different, indicating that the data is stored inverted in the
     // second.
-    ASSERT_FALSE(std::ranges::equal(data1.getView(), data2.getView()));
+    EXPECT_FALSE(std::ranges::equal(data1.getView(), data2.getView()));
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringBuilderExclusiveBeforeDiscriminator) {
@@ -636,7 +612,7 @@ TEST_P(KeyStringBuilderTest, KeyStringBuilderExclusiveBeforeDiscriminator) {
     ks.appendBSONElement(doc["fieldB"]);
     key_string::Value data = ks.release();
     uint8_t appendedDiscriminator = data.getView().back();
-    ASSERT_EQ(1, appendedDiscriminator);
+    EXPECT_EQ(1, appendedDiscriminator);
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringBuilderExclusiveAfterDiscriminator) {
@@ -648,7 +624,7 @@ TEST_P(KeyStringBuilderTest, KeyStringBuilderExclusiveAfterDiscriminator) {
     ks.appendBSONElement(doc["fieldB"]);
     key_string::Value data = ks.release();
     uint8_t appendedDiscriminator = data.getView().back();
-    ASSERT_EQ(254, appendedDiscriminator);
+    EXPECT_EQ(254, appendedDiscriminator);
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringBuilderInclusiveDiscriminator) {
@@ -660,7 +636,7 @@ TEST_P(KeyStringBuilderTest, KeyStringBuilderInclusiveDiscriminator) {
     ks.appendBSONElement(doc["fieldB"]);
     key_string::Value data = ks.release();
     uint8_t appendedDiscriminator = data.getView().back();
-    ASSERT_EQ(4, appendedDiscriminator);
+    EXPECT_EQ(4, appendedDiscriminator);
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator1) {
@@ -678,7 +654,7 @@ TEST_P(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator1) {
     ks2.appendBSONElement(doc["fieldB"]);
     key_string::Value data2 = ks2.release();
 
-    ASSERT_EQ(data1.compareWithoutDiscriminator(data2), 0);
+    EXPECT_EQ(data1.compareWithoutDiscriminator(data2), 0);
 }
 
 TEST_P(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator2) {
@@ -778,24 +754,24 @@ TEST_P(KeyStringBuilderTest, ReasonableSize) {
 
     // Test the dynamic memory usage reported to the sorter.
     key_string::Value value1 = stackBuilder.getValueCopy();
-    ASSERT_LTE(value1.memUsageForSorter(), 34);
+    EXPECT_LE(value1.memUsageForSorter(), 34);
 
     key_string::Value value2 = heapBuilder.getValueCopy();
-    ASSERT_LTE(value2.memUsageForSorter(), 34);
+    EXPECT_LE(value2.memUsageForSorter(), 34);
 
     key_string::Value value3 = heapBuilder.release();
-    ASSERT_LTE(value3.memUsageForSorter(), 64);
+    EXPECT_LE(value3.memUsageForSorter(), 64);
 
     key_string::Value value4 = pooledBuilder.getValueCopy();
     // This is safe because we are operating on a copy of the value and it is not shared elsewhere.
-    ASSERT_LTE(value4.memUsageForSorter(), 34);
+    EXPECT_LE(value4.memUsageForSorter(), 34);
     // We should still be using the initially-allocated size.
-    ASSERT_LTE(fragmentBuilder.memUsage(), 64);
+    EXPECT_LE(fragmentBuilder.memUsage(), 64);
 
     // For values created with the pooledBuilder, it is invalid to call memUsageForSorter(). Instead
     // we look at the mem usage of the builder itself.
     key_string::Value value5 = pooledBuilder.release();
-    ASSERT_LTE(fragmentBuilder.memUsage(), 64);
+    EXPECT_LE(fragmentBuilder.memUsage(), 64);
 }
 
 TEST_P(KeyStringBuilderTest, DiscardIfNotReleased) {
@@ -862,10 +838,10 @@ TEST_P(KeyStringBuilderTest, RecordIdOrder1) {
     key_string::Builder d(version, BSON("" << 6), ordering, RecordId(4));
     key_string::Builder e(version, BSON("" << 6), ordering, RecordId(1));
 
-    ASSERT_LESS_THAN(a, b);
-    ASSERT_LESS_THAN(b, c);
-    ASSERT_LESS_THAN(c, d);
-    ASSERT_LESS_THAN(e, d);
+    EXPECT_LT(a, b);
+    EXPECT_LT(b, c);
+    EXPECT_LT(c, d);
+    EXPECT_LT(e, d);
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdOrder2) {
@@ -876,12 +852,12 @@ TEST_P(KeyStringBuilderTest, RecordIdOrder2) {
     key_string::Builder c(version, BSON("" << 5 << "" << 5), ordering, RecordId(4));
     key_string::Builder d(version, BSON("" << 3 << "" << 4), ordering, RecordId(3));
 
-    ASSERT_LESS_THAN(a, b);
-    ASSERT_LESS_THAN(b, c);
-    ASSERT_LESS_THAN(c, d);
-    ASSERT_LESS_THAN(a, c);
-    ASSERT_LESS_THAN(a, d);
-    ASSERT_LESS_THAN(b, d);
+    EXPECT_LT(a, b);
+    EXPECT_LT(b, c);
+    EXPECT_LT(c, d);
+    EXPECT_LT(a, c);
+    EXPECT_LT(a, d);
+    EXPECT_LT(b, d);
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdOrder2Double) {
@@ -891,9 +867,9 @@ TEST_P(KeyStringBuilderTest, RecordIdOrder2Double) {
     key_string::Builder b(version, BSON("" << 5.0 << "" << 6.0), ordering, RecordId(5));
     key_string::Builder c(version, BSON("" << 3.0 << "" << 4.0), ordering, RecordId(3));
 
-    ASSERT_LESS_THAN(a, b);
-    ASSERT_LESS_THAN(b, c);
-    ASSERT_LESS_THAN(a, c);
+    EXPECT_LT(a, b);
+    EXPECT_LT(b, c);
+    EXPECT_LT(a, c);
 }
 
 TEST_P(KeyStringBuilderTest, Timestamp) {
@@ -972,9 +948,9 @@ TEST_P(KeyStringBuilderTest, SerializeDeserialize) {
         noRid.serialize(buf);
         BufReader reader(buf.buf(), buf.len());
         auto value = key_string::Value::deserialize(reader, version, boost::none);
-        ASSERT_EQ(noRid.compare(value), 0);
-        ASSERT_EQ(noRid.getRecordIdSize(), 0);
-        ASSERT_EQ(value.getRecordIdSize(), 0);
+        EXPECT_EQ(noRid.compare(value), 0);
+        EXPECT_EQ(noRid.getRecordIdSize(), 0);
+        EXPECT_EQ(value.getRecordIdSize(), 0);
     }
 
     {
@@ -983,9 +959,9 @@ TEST_P(KeyStringBuilderTest, SerializeDeserialize) {
         longRid.serialize(buf);
         BufReader reader(buf.buf(), buf.len());
         auto value = key_string::Value::deserialize(reader, version, KeyFormat::Long);
-        ASSERT_EQ(longRid.compare(value), 0);
-        ASSERT_GT(longRid.getRecordIdSize(), 1);
-        ASSERT_EQ(longRid.getRecordIdSize(), value.getRecordIdSize());
+        EXPECT_EQ(longRid.compare(value), 0);
+        EXPECT_GT(longRid.getRecordIdSize(), 1);
+        EXPECT_EQ(longRid.getRecordIdSize(), value.getRecordIdSize());
     }
 
     {
@@ -995,9 +971,9 @@ TEST_P(KeyStringBuilderTest, SerializeDeserialize) {
         strRid.serialize(buf);
         BufReader reader(buf.buf(), buf.len());
         auto value = key_string::Value::deserialize(reader, version, KeyFormat::String);
-        ASSERT_EQ(strRid.compare(value), 0);
-        ASSERT_GT(strRid.getRecordIdSize(), 5);
-        ASSERT_EQ(strRid.getRecordIdSize(), value.getRecordIdSize());
+        EXPECT_EQ(strRid.compare(value), 0);
+        EXPECT_GT(strRid.getRecordIdSize(), 5);
+        EXPECT_EQ(strRid.getRecordIdSize(), value.getRecordIdSize());
     }
 }
 
@@ -1014,27 +990,27 @@ TEST_P(KeyStringBuilderTest, RecordIdStr) {
             const key_string::Builder ks(version, rid);
             invariant(ks.getSize() == 14);
 
-            ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
-            ASSERT_EQ(key_string::decodeRecordIdAtEnd(ks.getView(), KeyFormat::String), rid);
+            EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+            EXPECT_EQ(key_string::decodeRecordIdAtEnd(ks.getView(), KeyFormat::String), rid);
 
             if (rid.isValid()) {
-                ASSERT_GT(ks, key_string::Builder(version, RecordId(1)));
-                ASSERT_GT(ks, key_string::Builder(version, ridFromOid(OID())));
-                ASSERT_LT(ks, key_string::Builder(version, ridFromOid(OID::max())));
+                EXPECT_GT(ks, key_string::Builder(version, RecordId(1)));
+                EXPECT_GT(ks, key_string::Builder(version, ridFromOid(OID())));
+                EXPECT_LT(ks, key_string::Builder(version, ridFromOid(OID::max())));
 
                 char bufLt[kSize];
                 memcpy(bufLt, buf, kSize);
                 bufLt[kSize - 1] -= 1;
                 auto ltRid = ridFromOid(OID::from(bufLt));
                 ASSERT(ltRid < rid);
-                ASSERT_GT(ks, key_string::Builder(version, ltRid));
+                EXPECT_GT(ks, key_string::Builder(version, ltRid));
 
                 char bufGt[kSize];
                 memcpy(bufGt, buf, kSize);
                 bufGt[kSize - 1] += 1;
                 auto gtRid = ridFromOid(OID::from(bufGt));
                 ASSERT(gtRid > rid);
-                ASSERT_LT(ks, key_string::Builder(version, gtRid));
+                EXPECT_LT(ks, key_string::Builder(version, gtRid));
             }
         }
 
@@ -1044,27 +1020,27 @@ TEST_P(KeyStringBuilderTest, RecordIdStr) {
             RecordId other = ridFromOid(OID::from(otherBuf));
 
             if (rid == other) {
-                ASSERT_EQ(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_EQ(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
             if (rid < other) {
-                ASSERT_LT(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_LT(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
             if (rid > other) {
-                ASSERT_GT(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_GT(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
         }
     }
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdStrBig1SizeSegment) {
-    const int pad = 3;  // kStringLike CType + StringData terminator + RecordId len
+    const int pad = 3;  // kStringLike CType + std::string_view terminator + RecordId len
     {
         const int size = 90;
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad);
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad);
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
     {
@@ -1073,22 +1049,22 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBig1SizeSegment) {
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad);
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad);
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdStrBig2SizeSegments) {
-    const int pad = 3;  // kStringLike CType + StringData terminator + RecordId len
+    const int pad = 3;  // kStringLike CType + std::string_view terminator + RecordId len
     {
         // Min 2-byte encoded string size is 128B: 1B CType + ridStr + string terminator
         const int size = 126;
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
     {
@@ -1096,8 +1072,8 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBig2SizeSegments) {
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
     {
@@ -1106,22 +1082,22 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBig2SizeSegments) {
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 1);  // 1 byte with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdStrBig3SizeSegments) {
-    const int pad = 3;  // kStringLike CType + StringData terminator + RecordId len
+    const int pad = 3;  // kStringLike CType + std::string_view terminator + RecordId len
     {
         // Min 3-byte encoded string size is 16384B: 1B CType + ridStr + string terminator
         const int size = 16382;
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 2);  // 2 bytes with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 2);  // 2 bytes with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
     {
@@ -1130,22 +1106,22 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBig3SizeSegments) {
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 2);  // 2 bytes with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 2);  // 2 bytes with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdStrBig4SizeSegments) {
-    const int pad = 3;  // kStringLike CType + StringData terminator + RecordId len
+    const int pad = 3;  // kStringLike CType + std::string_view terminator + RecordId len
     {
         // Min 4-byte encoded string size is 2097152B: 1B CType + ridStr + string terminator
         const int size = 2097150;
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 3);  // 3 bytes with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 3);  // 3 bytes with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
     {
@@ -1154,14 +1130,14 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBig4SizeSegments) {
         const auto ridStr = std::string(size, 'a');
         auto rid = ridFromStr(ridStr);
         const key_string::Builder ks(version, rid);
-        ASSERT_EQ(ks.getSize(), size + pad + 3);  // 3 bytes with continuation bit
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(ks.getSize(), size + pad + 3);  // 3 bytes with continuation bit
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
         ASSERT(key_string::withoutRecordIdStrAtEnd(ks.getView()).empty());
     }
 }
 
 TEST_P(KeyStringBuilderTest, RecordIdStrBigSizeWithoutRecordIdStr) {
-    const int pad = 3;  // kStringLike CType + StringData terminator + RecordId len
+    const int pad = 3;  // kStringLike CType + std::string_view terminator + RecordId len
     const char str[] = "keyval";
     const int padStr = 3;  // kStringLike CType + string terminator + discriminator
     {
@@ -1169,23 +1145,23 @@ TEST_P(KeyStringBuilderTest, RecordIdStrBigSizeWithoutRecordIdStr) {
         const auto ridStr = std::string(ridStrlen, 'a');
         auto rid = ridFromStr(ridStr);
         key_string::Builder ks(version);
-        ks.appendString(mongo::StringData(str, strlen(str)));
+        ks.appendString(std::string_view(str, strlen(str)));
         ks.appendRecordId(rid);
-        ASSERT_EQ(ks.getSize(), strlen(str) + padStr + ridStrlen + pad);
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
-        ASSERT_EQ(strlen(str) + padStr, key_string::withoutRecordIdStrAtEnd(ks.getView()).size());
+        EXPECT_EQ(ks.getSize(), strlen(str) + padStr + ridStrlen + pad);
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(strlen(str) + padStr, key_string::withoutRecordIdStrAtEnd(ks.getView()).size());
     }
     {
         const int ridStrlen = 260;
         const auto ridStr = std::string(ridStrlen, 'a');
         auto rid = ridFromStr(ridStr);
         key_string::Builder ks(version);
-        ks.appendString(mongo::StringData(str, strlen(str)));
+        ks.appendString(std::string_view(str, strlen(str)));
         ks.appendRecordId(rid);
-        ASSERT_EQ(ks.getSize(),
+        EXPECT_EQ(ks.getSize(),
                   strlen(str) + padStr + ridStrlen + pad + 1);  // 1 0x80 cont byte
-        ASSERT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
-        ASSERT_EQ(strlen(str) + padStr, key_string::withoutRecordIdStrAtEnd(ks.getView()).size());
+        EXPECT_EQ(key_string::decodeRecordIdStrAtEnd(ks.getView()), rid);
+        EXPECT_EQ(strlen(str) + padStr, key_string::withoutRecordIdStrAtEnd(ks.getView()).size());
     }
 }
 
@@ -1204,8 +1180,8 @@ TEST_P(KeyStringBuilderTest, NaNs) {
     const key_string::Builder ks2a(version, BSON("" << nan2), ONE_ASCENDING);
     const key_string::Builder ks2d(version, BSON("" << nan2), ONE_DESCENDING);
 
-    ASSERT_EQ(ks1a, ks2a);
-    ASSERT_EQ(ks1d, ks2d);
+    EXPECT_EQ(ks1a, ks2a);
+    EXPECT_EQ(ks1d, ks2d);
 
     ASSERT(std::isnan(toBson(ks1a, ONE_ASCENDING)[""].Double()));
     ASSERT(std::isnan(toBson(ks2a, ONE_ASCENDING)[""].Double()));
@@ -1225,8 +1201,8 @@ TEST_P(KeyStringBuilderTest, NaNs) {
     const key_string::Builder ks4a(version, BSON("" << nan4), ONE_ASCENDING);
     const key_string::Builder ks4d(version, BSON("" << nan4), ONE_DESCENDING);
 
-    ASSERT_EQ(ks1a, ks4a);
-    ASSERT_EQ(ks1d, ks4d);
+    EXPECT_EQ(ks1a, ks4a);
+    EXPECT_EQ(ks1d, ks4d);
 
     ASSERT(toBson(ks3a, ONE_ASCENDING)[""].Decimal().isNaN());
     ASSERT(toBson(ks4a, ONE_ASCENDING)[""].Decimal().isNaN());
@@ -1240,25 +1216,25 @@ TEST_P(KeyStringBuilderTest, RecordIds) {
 
         {  // Test encoding / decoding of single RecordIds
             const key_string::Builder ks(version, rid);
-            ASSERT_GTE(ks.getSize(), 2u);
-            ASSERT_LTE(ks.getSize(), 10u);
+            EXPECT_GE(ks.getSize(), 2u);
+            EXPECT_LE(ks.getSize(), 10u);
 
-            ASSERT_EQ(key_string::decodeRecordIdLongAtEnd(ks.getView()), rid);
-            ASSERT_EQ(key_string::decodeRecordIdAtEnd(ks.getView(), KeyFormat::Long), rid);
+            EXPECT_EQ(key_string::decodeRecordIdLongAtEnd(ks.getView()), rid);
+            EXPECT_EQ(key_string::decodeRecordIdAtEnd(ks.getView(), KeyFormat::Long), rid);
 
             {
                 BufReader reader(ks.getView().data(), ks.getSize());
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), rid);
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), rid);
                 ASSERT(reader.atEof());
             }
 
             if (rid.isValid()) {
-                ASSERT_GTE(ks, key_string::Builder(version, RecordId(1)));
-                ASSERT_GT(ks, key_string::Builder(version, RecordId::minLong()));
-                ASSERT_LT(ks, key_string::Builder(version, RecordId::maxLong()));
+                EXPECT_GE(ks, key_string::Builder(version, RecordId(1)));
+                EXPECT_GT(ks, key_string::Builder(version, RecordId::minLong()));
+                EXPECT_LT(ks, key_string::Builder(version, RecordId::maxLong()));
 
-                ASSERT_GT(ks, key_string::Builder(version, RecordId(rid.getLong() - 1)));
-                ASSERT_LT(ks, key_string::Builder(version, RecordId(rid.getLong() + 1)));
+                EXPECT_GT(ks, key_string::Builder(version, RecordId(rid.getLong() - 1)));
+                EXPECT_LT(ks, key_string::Builder(version, RecordId(rid.getLong() + 1)));
             }
         }
 
@@ -1266,13 +1242,13 @@ TEST_P(KeyStringBuilderTest, RecordIds) {
             RecordId other = RecordId(1ll << j);
 
             if (rid == other) {
-                ASSERT_EQ(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_EQ(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
             if (rid < other) {
-                ASSERT_LT(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_LT(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
             if (rid > other) {
-                ASSERT_GT(key_string::Builder(version, rid), key_string::Builder(version, other));
+                EXPECT_GT(key_string::Builder(version, rid), key_string::Builder(version, other));
             }
 
             {
@@ -1286,17 +1262,17 @@ TEST_P(KeyStringBuilderTest, RecordIds) {
                 ks.appendRecordId(rid);
                 ks.appendRecordId(other);
 
-                ASSERT_EQ(key_string::decodeRecordIdLongAtEnd(ks.getView()), other);
+                EXPECT_EQ(key_string::decodeRecordIdLongAtEnd(ks.getView()), other);
 
                 // forward scan
                 BufReader reader(ks.getView().data(), ks.getSize());
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), RecordId::maxLong());
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), rid);
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), RecordId(0xDEADBEEF));
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), rid);
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), RecordId(1));
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), rid);
-                ASSERT_EQ(key_string::decodeRecordIdLong(&reader), other);
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), RecordId::maxLong());
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), rid);
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), RecordId(0xDEADBEEF));
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), rid);
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), RecordId(1));
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), rid);
+                EXPECT_EQ(key_string::decodeRecordIdLong(&reader), other);
                 ASSERT(reader.atEof());
             }
         }

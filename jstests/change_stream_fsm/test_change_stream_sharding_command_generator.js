@@ -13,6 +13,7 @@
  * ]
  */
 import {Action} from "jstests/libs/util/change_stream/change_stream_action.js";
+import {PrefixReadTestCase} from "jstests/libs/util/change_stream/change_stream_verifier.js";
 import {CollectionTestModel} from "jstests/libs/util/change_stream/change_stream_collection_test_model.js";
 import {ShardingCommandGenerator} from "jstests/libs/util/change_stream/change_stream_sharding_command_generator.js";
 import {ShardingCommandGeneratorParams} from "jstests/libs/util/change_stream/change_stream_sharding_command_generator_params.js";
@@ -24,10 +25,20 @@ import {
     SingleChangeStreamMatcher,
     MultipleChangeStreamMatcher,
 } from "jstests/libs/util/change_stream/change_stream_matcher.js";
-import {ChangeStreamReader, ChangeStreamReadingMode} from "jstests/libs/util/change_stream/change_stream_reader.js";
+import {
+    ChangeStreamReader,
+    ChangeStreamReadingMode,
+} from "jstests/libs/util/change_stream/change_stream_reader.js";
 import {ChangeStreamWatchMode, getClusterTime} from "jstests/libs/query/change_stream_util.js";
-import {InsertDocCommand, DropCollectionCommand} from "jstests/libs/util/change_stream/change_stream_commands.js";
-import {TEST_DB, TEST_SEED, createShardingTest} from "jstests/libs/util/change_stream/change_stream_sharding_utils.js";
+import {
+    InsertDocCommand,
+    DropCollectionCommand,
+} from "jstests/libs/util/change_stream/change_stream_commands.js";
+import {
+    TEST_DB,
+    TEST_SEED,
+    createShardingTest,
+} from "jstests/libs/util/change_stream/change_stream_sharding_utils.js";
 import {after, afterEach, before, describe, it} from "jstests/libs/mochalite.js";
 
 jsTest.log.info(
@@ -74,10 +85,18 @@ describe("ShardingCommandGenerator", function () {
         const commands1 = gen1.generateCommands(model1, params1);
         const commands2 = gen2.generateCommands(model2, params2);
 
-        assert.eq(commands1.length, commands2.length, "Same seed should produce same number of commands");
+        assert.eq(
+            commands1.length,
+            commands2.length,
+            "Same seed should produce same number of commands",
+        );
 
         for (let i = 0; i < commands1.length; i++) {
-            assert.eq(commands1[i].toString(), commands2[i].toString(), `Command ${i}: type mismatch`);
+            assert.eq(
+                commands1[i].toString(),
+                commands2[i].toString(),
+                `Command ${i}: type mismatch`,
+            );
         }
     });
 
@@ -345,7 +364,10 @@ describe("ChangeStreamReader integration", function () {
      * @param {string} readingMode - Reading mode constant
      */
     function testCaptureInsertEvents(ctx, readingMode) {
-        const modeName = readingMode === ChangeStreamReadingMode.kContinuous ? "Continuous" : "FetchOneAndResume";
+        const modeName =
+            readingMode === ChangeStreamReadingMode.kContinuous
+                ? "Continuous"
+                : "FetchOneAndResume";
         const dbName = TEST_DB;
         const collName = `test_coll_${modeName.toLowerCase()}`;
         const writerInstanceName = "writer_test";
@@ -367,7 +389,13 @@ describe("ChangeStreamReader integration", function () {
         const numTotalInserts = numCommands * InsertDocCommand.numDocs;
         const insertCommands = [];
         for (let i = 0; i < numCommands; i++) {
-            insertCommands.push(new InsertDocCommand(dbName, collName, ctx.shards, {exists: true, nonEmpty: i > 0}));
+            insertCommands.push(
+                new InsertDocCommand({
+                    dbName,
+                    collName,
+                    collectionCtx: {exists: true},
+                }),
+            );
         }
         Writer.run(ctx.st.s, writerInstanceName, insertCommands, TEST_SEED);
 
@@ -429,12 +457,12 @@ describe("ChangeStreamReader integration", function () {
         const expectedEventTypes = ["insert", "insert", "insert", "drop", "invalidate"];
 
         // Build commands: 3 InsertDocCommands + drop.
-        const collectionCtx = {exists: true, nonEmpty: false};
+        const collectionCtx = {exists: true};
         const commands = [
-            new InsertDocCommand(dbName, collName, this.shards, collectionCtx),
-            new InsertDocCommand(dbName, collName, this.shards, {...collectionCtx, nonEmpty: true}),
-            new InsertDocCommand(dbName, collName, this.shards, {...collectionCtx, nonEmpty: true}),
-            new DropCollectionCommand(dbName, collName, this.shards, collectionCtx),
+            new InsertDocCommand({dbName, collName, collectionCtx}),
+            new InsertDocCommand({dbName, collName, collectionCtx}),
+            new InsertDocCommand({dbName, collName, collectionCtx}),
+            new DropCollectionCommand({dbName, collName, shardSet: this.shards}),
         ];
 
         /**
@@ -522,17 +550,19 @@ describe("ChangeStreamReader integration", function () {
         this.instanceNamesToCleanup.push(readerInstanceName);
         this.databasesToCleanup.add(dbName);
 
-        jsTest.log.debug(`\n========== ChangeStreamReader FetchOneAndResume + Invalidate ==========`);
+        jsTest.log.debug(
+            `\n========== ChangeStreamReader FetchOneAndResume + Invalidate ==========`,
+        );
 
         // Expected events: 2 InsertDocCommands (1 insert each) + drop + invalidate.
         const expectedEventTypes = ["insert", "insert", "drop", "invalidate"];
 
         // Build commands: 2 InsertDocCommands + drop.
-        const collectionCtx = {exists: true, nonEmpty: false};
+        const collectionCtx = {exists: true};
         const commands = [
-            new InsertDocCommand(dbName, collName, this.shards, collectionCtx),
-            new InsertDocCommand(dbName, collName, this.shards, {...collectionCtx, nonEmpty: true}),
-            new DropCollectionCommand(dbName, collName, this.shards, collectionCtx),
+            new InsertDocCommand({dbName, collName, collectionCtx}),
+            new InsertDocCommand({dbName, collName, collectionCtx}),
+            new DropCollectionCommand({dbName, collName, shardSet: this.shards}),
         ];
 
         const setupCollection = () => {
@@ -622,12 +652,12 @@ describe("ChangeStreamReader integration", function () {
         const expectedEventTypes = ["insert", "insert", "insert", "insert"];
 
         // Build commands: 2 InsertDocCommands into each collection (interleaved).
-        const collectionCtx = {exists: true, nonEmpty: false};
+        const collectionCtx = {exists: true};
         const commands = [
-            new InsertDocCommand(dbName, collName1, this.shards, collectionCtx),
-            new InsertDocCommand(dbName, collName2, this.shards, collectionCtx),
-            new InsertDocCommand(dbName, collName1, this.shards, {...collectionCtx, nonEmpty: true}),
-            new InsertDocCommand(dbName, collName2, this.shards, {...collectionCtx, nonEmpty: true}),
+            new InsertDocCommand({dbName, collName: collName1, collectionCtx}),
+            new InsertDocCommand({dbName, collName: collName2, collectionCtx}),
+            new InsertDocCommand({dbName, collName: collName1, collectionCtx}),
+            new InsertDocCommand({dbName, collName: collName2, collectionCtx}),
         ];
 
         // Setup: drop and recreate collections (drop to ensure clean state before test).
@@ -682,5 +712,111 @@ describe("ChangeStreamReader integration", function () {
         assert(collsWithEvents.has(collName2), `Should have events from ${collName2}`);
 
         jsTest.log.info(`✓ Database-level watch test passed`);
+    });
+});
+
+function makeEvent(t, i, opType = "insert") {
+    return {
+        changeEvent: {
+            operationType: opType,
+            clusterTime: new Timestamp(t, i),
+            _id: {_data: `token_${t}_${i}`},
+        },
+        cursorClosed: false,
+    };
+}
+
+describe("PrefixReadTestCase._buildWorkItems deduplication", function () {
+    it("produces one work item per unique event window", function () {
+        // Events at times (100,1), (100,5), (100,10)
+        const events = [makeEvent(100, 1), makeEvent(100, 5), makeEvent(100, 10)];
+
+        // Cluster times: many entries between events, plus one before each event.
+        // Times (100,2), (100,3), (100,4) all fall between events[0] and events[1],
+        // so they should produce the same work item (startIdx=1).
+        const clusterTimes = [
+            new Timestamp(100, 1), // -> startIdx=0
+            new Timestamp(100, 2), // -> startIdx=1 (between events[0] and events[1])
+            new Timestamp(100, 3), // -> startIdx=1  (redundant)
+            new Timestamp(100, 4), // -> startIdx=1  (redundant)
+            new Timestamp(100, 5), // -> startIdx=1
+            new Timestamp(100, 6), // -> startIdx=2 (between events[1] and events[2])
+            new Timestamp(100, 7), // -> startIdx=2  (redundant)
+            new Timestamp(100, 8), // -> startIdx=2  (redundant)
+            new Timestamp(100, 9), // -> startIdx=2  (redundant)
+            new Timestamp(100, 10), // -> startIdx=2
+        ];
+
+        // 10 cluster times → 3 unique startIdx values (0, 1, 2)
+        const testCase = new PrefixReadTestCase("dummy", 3);
+        const items = testCase._buildWorkItems(events, clusterTimes);
+
+        // Without deduplication we'd get 10 items; with dedup we get 3.
+        assert.eq(
+            items.length,
+            3,
+            "expected 3 deduplicated work items (one per unique event window), got: " +
+                items.length,
+        );
+        assert.eq(
+            bsonWoCompare(items[0].ts, new Timestamp(100, 1)),
+            0,
+            "first item should use earliest ts",
+        );
+        assert.eq(
+            bsonWoCompare(items[1].ts, new Timestamp(100, 2)),
+            0,
+            "second item: first ts after event[0]",
+        );
+        assert.eq(
+            bsonWoCompare(items[2].ts, new Timestamp(100, 6)),
+            0,
+            "third item: first ts after event[1]",
+        );
+    });
+
+    it("handles all-unique cluster times (no redundancy)", function () {
+        // Each cluster time maps to a unique startIdx — no deduplication needed.
+        const events = [makeEvent(1, 1), makeEvent(2, 1), makeEvent(3, 1), makeEvent(4, 1)];
+        const clusterTimes = [
+            new Timestamp(1, 1),
+            new Timestamp(2, 1),
+            new Timestamp(3, 1),
+            new Timestamp(4, 1),
+        ];
+        const testCase = new PrefixReadTestCase("dummy", 3);
+        const items = testCase._buildWorkItems(events, clusterTimes);
+        assert.eq(
+            items.length,
+            4,
+            "all cluster times are unique event windows; expected 4 items, got: " + items.length,
+        );
+    });
+
+    it("bounds work items to events.length even with many oplog entries", function () {
+        // Simulate BF-43981 scenario: 5 events but hundreds of oplog entries.
+        const numEvents = 5;
+        const events = [];
+        for (let i = 0; i < numEvents; i++) {
+            events.push(makeEvent(100, i * 100 + 1)); // (100,1),(100,101),...,(100,401)
+        }
+
+        // 401 oplog entries from (100,1) through (100,401) — same range as events.
+        const clusterTimes = [];
+        for (let i = 1; i <= 401; i++) {
+            clusterTimes.push(new Timestamp(100, i));
+        }
+
+        const testCase = new PrefixReadTestCase("dummy", 3);
+        const items = testCase._buildWorkItems(events, clusterTimes);
+
+        // With deduplication: at most numEvents work items (one per unique startIdx).
+        // Without: 401 work items (one per oplog entry).
+        assert.lte(
+            items.length,
+            numEvents,
+            `expected at most ${numEvents} work items, got ${items.length} — ` +
+                "redundant oplog entries are not being deduplicated",
+        );
     });
 });

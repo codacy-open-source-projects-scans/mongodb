@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/topology_coordinator.h"
 
@@ -43,7 +17,7 @@
 #include "mongo/db/repl/topology_coordinator_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -55,9 +29,13 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <limits>
 #include <ostream>
+#include <set>
 #include <string>
+#include <string_view>
+#include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -392,12 +370,17 @@ HostAndPort TopologyCoordinator::_chooseNearbySyncSource(Date_t now,
             // primary, we will choose the primary. Otherwise, we choose the closest node.
             const auto closerCandidate =
                 (syncSourceCandidatePing > closestPing) ? closestIndex : candidateIndex;
-            const auto isAnyCandidatePrimary = _memberData[closestIndex].getState().primary() ||
-                _memberData[candidateIndex].getState().primary();
+
+            // Only prefer the primary when it is one of the two candidates we are comparing, both
+            // of which we have already vetted with '_isEligibleSyncSource'. Otherwise we could
+            // select a node we never vetted -- in particular ourselves while we are the primary
+            // running catchup.
+            const auto isPrimaryOneOfTheCandidates = _currentPrimaryIndex == closestIndex ||
+                _currentPrimaryIndex == static_cast<int>(candidateIndex);
 
             // Nodes are within the same data center and one of them is the current primary.
             // Choose the primary.
-            if (isWithinPingThreshold && isAnyCandidatePrimary) {
+            if (isWithinPingThreshold && isPrimaryOneOfTheCandidates) {
                 LOGV2_INFO(9649500,
                            "Candidate sync source pings are within a threshold, indicating they "
                            "are in the same data center. Prefer to select primary as sync source",
@@ -491,10 +474,15 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
     const auto syncSourceCandidate = memberConfig.getHostAndPortPriority();
     const auto memberData = _memberData[candidateIndex];
 
-    // If limitLogFrequency is true, only log this message if it has not been logged in the last
-    // second, otherwise always log.
-    bool shouldLogIneligibleCandidate = (!limitLogFrequency) ||
-        ((_recentSyncSourceChanges.lastLoggedIneligibleSrc + Milliseconds(1000)) < now);
+    // Do not log ineligibility reason if node is an arbiter. If limitLogFrequency is true, only log
+    // this message if it has not been logged in the last second; otherwise, always log.
+    bool shouldLogIneligibleCandidate = true;
+    if (_selfConfig().isArbiter()) {
+        shouldLogIneligibleCandidate = false;
+    } else if (limitLogFrequency) {
+        shouldLogIneligibleCandidate =
+            (_recentSyncSourceChanges.lastLoggedIneligibleSrc + Milliseconds(1000)) < now;
+    }
 
 
     // Candidate must be up to be considered.
@@ -957,7 +945,7 @@ void TopologyCoordinator::prepareSyncFromResponse(const HostAndPort& target,
 StatusWith<bool> TopologyCoordinator::prepareHeartbeatResponseV1(
     Date_t now,
     const ReplSetHeartbeatArgsV1& args,
-    StringData ourSetName,
+    std::string_view ourSetName,
     ReplSetHeartbeatResponse* response) {
     // Verify that replica set names match
     const std::string rshb = args.getSetName();
@@ -1010,6 +998,9 @@ StatusWith<bool> TopologyCoordinator::prepareHeartbeatResponseV1(
     response->setAppliedOpTimeAndWallTime(lastOpApplied);
     response->setWrittenOpTimeAndWallTime(lastOpWritten);
     response->setDurableOpTimeAndWallTime(lastOpDurable);
+    if (_cachedLastStableRecoveryTimestamp) {
+        response->setLastStableRecoveryTimestamp(*_cachedLastStableRecoveryTimestamp);
+    }
 
     if (_currentPrimaryIndex != -1) {
         response->setPrimaryId(_rsConfig.getMemberAt(_currentPrimaryIndex).getId().getData());
@@ -1068,7 +1059,7 @@ int TopologyCoordinator::_getMemberIndex(int id) const {
 }
 
 std::pair<ReplSetHeartbeatArgsV1, Milliseconds> TopologyCoordinator::prepareHeartbeatRequestV1(
-    Date_t now, StringData ourSetName, const HostAndPort& target) {
+    Date_t now, std::string_view ourSetName, const HostAndPort& target) {
     PingStats& hbStats = _pings[target];
     Milliseconds alreadyElapsed(now.asInt64() - hbStats.getLastHeartbeatStartDate().asInt64());
     if ((!_rsConfig.isInitialized()) || !hbStats.trying() ||
@@ -1398,6 +1389,93 @@ bool TopologyCoordinator::haveTaggedNodesReachedOpTime(const OpTime& opTime,
                                                        bool durablyWritten) {
     auto pred = makeOpTimePredicate(opTime, durablyWritten);
     return haveTaggedNodesSatisfiedCondition(pred, tagPattern);
+}
+
+OpTime TopologyCoordinator::getMaxReachedOpTimeForNumNodes(int numNodes, bool durablyWritten) {
+    // haveNumNodesReachedOpTime() only ever considers targets in our current term (it invariants
+    // that target.term == getMyLastAppliedOpTime().term), so the answer is expressed in that term.
+    const long long currentTerm = getMyLastAppliedOpTime().getTerm();
+
+    // Self is a required participant (mirrors the self-recency gate in haveNumNodesReachedOpTime).
+    // If self has not written in the current term, nothing in that term can be satisfied.
+    const OpTime selfOpTime = _getMemberOpTimeForRecencyCheck(_selfMemberData(), durablyWritten);
+    if (selfOpTime.getTerm() != currentTerm) {
+        return OpTime();
+    }
+
+    // With no node-count requirement, only the self gate constrains the satisfiable point.
+    if (numNodes <= 0) {
+        return selfOpTime;
+    }
+
+    // Only members whose OpTime is in the current term count toward the write concern (the check in
+    // haveNumNodesReachedOpTime requires term equality). Arbiters never count.
+    std::vector<Timestamp> timestamps;
+    timestamps.reserve(_memberData.size());
+    for (auto&& memberData : _memberData) {
+        if (_rsConfig.getMemberAt(memberData.getConfigIndex()).isArbiter()) {
+            continue;
+        }
+        const OpTime memberOpTime = _getMemberOpTimeForRecencyCheck(memberData, durablyWritten);
+        if (memberOpTime.getTerm() == currentTerm) {
+            timestamps.push_back(memberOpTime.getTimestamp());
+        }
+    }
+
+    // Fewer than numNodes members have reached the current term, so no target is satisfiable.
+    if (timestamps.size() < static_cast<size_t>(numNodes)) {
+        return OpTime();
+    }
+
+    // The highest timestamp reached by at least numNodes members is the numNodes-th largest one.
+    std::nth_element(timestamps.begin(),
+                     timestamps.begin() + (numNodes - 1),
+                     timestamps.end(),
+                     std::greater<>());
+    const Timestamp nthLargest = timestamps[numNodes - 1];
+
+    // Self is required, so it also caps the satisfiable timestamp.
+    return OpTime(std::min(nthLargest, selfOpTime.getTimestamp()), currentTerm);
+}
+
+OpTime TopologyCoordinator::getMaxReachedOpTimeForTaggedNodes(const ReplSetTagPattern& tagPattern,
+                                                              bool durablyWritten) {
+    // As with haveNumNodesReachedOpTime, makeOpTimePredicate only counts members in our current
+    // term, so the answer is expressed in that term.
+    const long long currentTerm = getMyLastAppliedOpTime().getTerm();
+
+    // Collect (timestamp, config index) for members whose OpTime is in the current term; only those
+    // can satisfy the OpTime predicate's term check. Members not in the current term (including
+    // arbiters, whose OpTime is null) are ignored.
+    struct MemberTimestamp {
+        Timestamp ts;
+        int configIndex;
+    };
+
+    // Ordered highest-timestamp-first.
+    auto byDescendingTimestamp = [](const MemberTimestamp& a, const MemberTimestamp& b) {
+        return a.ts > b.ts;
+    };
+    std::multiset<MemberTimestamp, decltype(byDescendingTimestamp)> members(byDescendingTimestamp);
+    for (auto&& memberData : _memberData) {
+        const OpTime memberOpTime = _getMemberOpTimeForRecencyCheck(memberData, durablyWritten);
+        if (memberOpTime.getTerm() == currentTerm) {
+            members.insert({memberOpTime.getTimestamp(), memberData.getConfigIndex()});
+        }
+    }
+
+    // The first member that satisfies the tag pattern has the highest timestamp that does, since
+    // `members` is ordered on timestamp descending.
+    ReplSetTagMatch matcher(tagPattern);
+    for (const auto& member : members) {
+        const MemberConfig& memberConfig = _rsConfig.getMemberAt(member.configIndex);
+        for (auto&& it = memberConfig.tagsBegin(); it != memberConfig.tagsEnd(); ++it) {
+            if (matcher.update(*it)) {
+                return OpTime(member.ts, currentTerm);
+            }
+        }
+    }
+    return OpTime();
 }
 
 TopologyCoordinator::MemberPredicate TopologyCoordinator::makeOpTimePredicate(const OpTime& opTime,
@@ -2161,6 +2239,9 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
                 if (featureFlagMajorityWriteLatency) {
                     bb.appendDate("lastWrittenWallTime", it->getLastWrittenWallTime());
                 }
+                if (lastStableRecoveryTimestamp) {
+                    bb.append("lastStableRecoveryTimestamp", *lastStableRecoveryTimestamp);
+                }
             }
 
             if (!_syncSource.empty() && !_iAmPrimary()) {
@@ -2234,6 +2315,9 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
                 bb.appendDate("lastDurableWallTime", it->getLastDurableWallTime());
                 if (featureFlagMajorityWriteLatency) {
                     bb.appendDate("lastWrittenWallTime", it->getLastWrittenWallTime());
+                }
+                if (const auto ts = it->getLastStableRecoveryTimestamp()) {
+                    bb.append("lastStableRecoveryTimestamp", *ts);
                 }
             }
             bb.appendDate("lastHeartbeat", it->getLastHeartbeat());
@@ -2436,7 +2520,7 @@ void TopologyCoordinator::fillMemberData(BSONObjBuilder* result) {
 }
 
 void TopologyCoordinator::fillHelloForReplSet(std::shared_ptr<HelloResponse> response,
-                                              StringData horizonString) const {
+                                              std::string_view horizonString) const {
     invariant(_rsConfig.isInitialized());
     response->setTopologyVersion(getTopologyVersion());
     const MemberState myState = getMemberState();
@@ -2547,6 +2631,16 @@ long long TopologyCoordinator::getElectionIdTerm() const {
 
 int TopologyCoordinator::getCurrentPrimaryIndex() const {
     return _currentPrimaryIndex;
+}
+
+boost::optional<Date_t> TopologyCoordinator::getLastHeartbeatRecvFromPrimary() const {
+    if (_currentPrimaryIndex == -1 || _currentPrimaryIndex == _selfIndex) {
+        return boost::none;
+    }
+    // Unset until the primary sends us its first heartbeat request. Since the sentinel is the
+    // epoch, subtracting it from a wall clock 'now' yields a duration far larger than any election
+    // timeout.
+    return _memberData.at(_currentPrimaryIndex).getLastHeartbeatRecv();
 }
 
 Date_t TopologyCoordinator::getStepDownTime() const {

@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -41,11 +14,12 @@
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/expression/evaluate_test_helpers.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
@@ -55,12 +29,14 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 #define ASSERT_VALUE_CONTENTS_AND_TYPE(v, contents, type)  \
     do {                                                   \
@@ -82,6 +58,103 @@ static const Decimal128 kDoubleNegativeOverflow = Decimal128("-1e309");
 
 using EvaluateConvertTest = AggregationContextFixture;
 
+// Builds a packed-bit vector-subtype BinData (dtype byte 0x10, padding byte 0x00, then 2 data bytes
+// -> 16 boolean elements).
+Value makeVectorBinData() {
+    std::string vec(1, '\x10');  // dtype: packed-bit
+    vec.push_back('\x00');       // padding
+    vec.append(2, '\xff');       // 2 data bytes -> 16 boolean elements
+    return Value{BSONBinData(vec.data(), static_cast<int>(vec.size()), BinDataType::Vector)};
+}
+
+TEST_F(EvaluateConvertTest, TracksOutputMemoryAndReleasesAfterEvaluation) {
+    auto expCtx = getExpCtx();
+    auto spec = BSON("$convert" << BSON("input" << makeVectorBinData() << "to"
+                                                << "array"));
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{1024}};
+    EvaluationContext ctx{.tracker = &tracker};
+
+    auto result = convertExp->evaluate({}, &expCtx->variables, ctx);
+    ASSERT_EQ(result.getType(), BSONType::array);
+
+    // Transient output memory is released once evaluation completes.
+    ASSERT_EQ(tracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_GT(tracker.peakTrackedMemoryBytes(), 0);
+}
+
+TEST_F(EvaluateConvertTest, ThrowsExceededMemoryLimitWhenQueryLimitExceeded) {
+    auto expCtx = getExpCtx();
+    auto spec = BSON("$convert" << BSON("input" << makeVectorBinData() << "to"
+                                                << "array"));
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    // The operation-wide (root) tracker holds the small cap; the stage tracker reporting into it
+    // has a generous local limit, so the throw must come from the per-operation cap via the base
+    // chain rollup, not the local stage limit.
+    const int64_t limit = 4;
+    SimpleMemoryUsageTracker operationTracker{MemoryUsageLimit{limit}};
+    SimpleMemoryUsageTracker stageTracker{&operationTracker, MemoryUsageLimit{100 * 1024 * 1024}};
+    EvaluationContext ctx{.tracker = &stageTracker};
+
+    try {
+        convertExp->evaluate({}, &expCtx->variables, ctx);
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "$convert");
+    }
+    ASSERT_EQ(operationTracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_GT(operationTracker.peakTrackedMemoryBytes(), limit);
+}
+
+TEST_F(EvaluateConvertTest, FallbackTrackerWithinLimitDoesNotThrow) {
+    auto expCtx = getExpCtx();
+    auto spec = BSON("$convert" << BSON("input" << makeVectorBinData() << "to"
+                                                << "array"));
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    const int64_t limit = 10 * 1024 * 1024;
+    // Disable expression tracking so the fallback is standalone and enforces the per-expression cap
+    unittest::ServerParameterGuard exprFlag{"featureFlagExpressionMemoryTracking", false};
+    unittest::ServerParameterGuard limitGuard{"internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                              limit};
+
+    EvaluationContext ctx{};
+    ASSERT_DOES_NOT_THROW(convertExp->evaluate({}, &expCtx->variables, ctx));
+
+    // The fallback tracker recorded usage but stayed within the configured limit.
+    auto& tracker = expCtx->getExpressionFallbackTracker();
+    ASSERT_GT(tracker.peakTrackedMemoryBytes(), 0);
+    ASSERT_LT(tracker.peakTrackedMemoryBytes(), limit);
+    ASSERT_EQ(tracker.inUseTrackedMemoryBytes(), 0);
+}
+
+TEST_F(EvaluateConvertTest, FallbackTrackerEnforcesLimit) {
+    auto expCtx = getExpCtx();
+    auto spec = BSON("$convert" << BSON("input" << makeVectorBinData() << "to"
+                                                << "array"));
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    const int64_t limit = 4;
+    // Disable expression tracking so the fallback is standalone and enforces the per-expression cap
+    unittest::ServerParameterGuard exprFlag{"featureFlagExpressionMemoryTracking", false};
+    unittest::ServerParameterGuard limitGuard{"internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                              limit};
+
+    EvaluationContext ctx{};
+    try {
+        convertExp->evaluate({}, &expCtx->variables, ctx);
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "$convert");
+    }
+    ASSERT_EQ(expCtx->getExpressionFallbackTracker().inUseTrackedMemoryBytes(), 0);
+    ASSERT_GT(expCtx->getExpressionFallbackTracker().peakTrackedMemoryBytes(), limit);
+}
+
 TEST_F(EvaluateConvertTest, ConvertToBinDataWithNonNumericSubtypeFails) {
     auto expCtx = getExpCtx();
 
@@ -93,7 +166,7 @@ TEST_F(EvaluateConvertTest, ConvertToBinDataWithNonNumericSubtypeFails) {
                                                 << "format" << toStringData(BinDataFormat::kUuid)));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", "abc"_sd}};
+    Document input{{"path1", "abc"sv}};
     ASSERT_THROWS_WITH_CHECK(
         convertExp->evaluate(input, &expCtx->variables),
         AssertionException,
@@ -113,7 +186,7 @@ TEST_F(EvaluateConvertTest, ConvertToBinDataWithInvalidUtf8Fails) {
                                                 << "format" << toStringData(BinDataFormat::kUtf8)));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", "\xE2\x82"_sd}};
+    Document input{{"path1", "\xE2\x82"sv}};
     ASSERT_THROWS_WITH_CHECK(convertExp->evaluate(input, &expCtx->variables),
                              AssertionException,
                              [](const AssertionException& exception) {
@@ -158,7 +231,7 @@ TEST_F(EvaluateConvertTest, ConvertToBinDataWithOutOfBoundsSubtypeFails) {
         auto convertExp =
             Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-        Document input{{"path1", "abc"_sd}};
+        Document input{{"path1", "abc"sv}};
         ASSERT_THROWS_WITH_CHECK(convertExp->evaluate(input, &expCtx->variables),
                                  AssertionException,
                                  [](const AssertionException& exception) {
@@ -185,7 +258,7 @@ TEST_F(EvaluateConvertTest, ConvertToBinDataWithNumericNonIntegerSubtypeFails) {
                                         << "format" << toStringData(BinDataFormat::kBase64)));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", "abc"_sd}};
+    Document input{{"path1", "abc"sv}};
     ASSERT_THROWS_WITH_CHECK(convertExp->evaluate(input, &expCtx->variables),
                              AssertionException,
                              [](const AssertionException& exception) {
@@ -326,7 +399,7 @@ void assertUnsupportedConversionBehavior(
         auto convertExp = Expression::parseExpression(expCtx, spec, expCtx->variablesParseState);
 
         ASSERT_VALUE_CONTENTS_AND_TYPE(
-            convertExp->evaluate(input, &expCtx->variables), "X"_sd, BSONType::string);
+            convertExp->evaluate(input, &expCtx->variables), "X"sv, BSONType::string);
     }
 }
 
@@ -334,50 +407,50 @@ TEST_F(EvaluateConvertTest, UnsupportedConversionShouldThrowUnlessOnErrorProvide
     std::vector<std::pair<Value, Value>> unsupportedConversions{
         // Except for the ones listed below, $convert supports all conversions between the supported
         // types: double, string, int, long, decimal, objectId, bool, int, and date.
-        {Value(OID()), Value("double"_sd)},
-        {Value(OID()), Value("int"_sd)},
-        {Value(OID()), Value("long"_sd)},
-        {Value(OID()), Value("decimal"_sd)},
-        {Value(Date_t{}), Value("objectId"_sd)},
-        {Value(Date_t{}), Value("int"_sd)},
-        {Value(int{1}), Value("date"_sd)},
-        {Value(true), Value("date"_sd)},
+        {Value(OID()), Value("double"sv)},
+        {Value(OID()), Value("int"sv)},
+        {Value(OID()), Value("long"sv)},
+        {Value(OID()), Value("decimal"sv)},
+        {Value(Date_t{}), Value("objectId"sv)},
+        {Value(Date_t{}), Value("int"sv)},
+        {Value(int{1}), Value("date"sv)},
+        {Value(true), Value("date"sv)},
 
         // All conversions that involve any other type will fail, unless the target type is bool,
         // in which case the conversion results in a true value. Below is one conversion for each
         // of the unsupported types.
-        {Value(1.0), Value("minKey"_sd)},
-        {Value(1.0), Value("missing"_sd)},
-        {Value(1.0), Value("object"_sd)},
-        {Value(1.0), Value("array"_sd)},
-        {Value(1.0), Value("undefined"_sd)},
-        {Value(1.0), Value("null"_sd)},
-        {Value(1.0), Value("regex"_sd)},
-        {Value(1.0), Value("dbPointer"_sd)},
-        {Value(1.0), Value("javascript"_sd)},
-        {Value(1.0), Value("symbol"_sd)},
-        {Value(1.0), Value("javascriptWithScope"_sd)},
-        {Value(1.0), Value("timestamp"_sd)},
-        {Value(1.0), Value("maxKey"_sd)},
+        {Value(1.0), Value("minKey"sv)},
+        {Value(1.0), Value("missing"sv)},
+        {Value(1.0), Value("object"sv)},
+        {Value(1.0), Value("array"sv)},
+        {Value(1.0), Value("undefined"sv)},
+        {Value(1.0), Value("null"sv)},
+        {Value(1.0), Value("regex"sv)},
+        {Value(1.0), Value("dbPointer"sv)},
+        {Value(1.0), Value("javascript"sv)},
+        {Value(1.0), Value("symbol"sv)},
+        {Value(1.0), Value("javascriptWithScope"sv)},
+        {Value(1.0), Value("timestamp"sv)},
+        {Value(1.0), Value("maxKey"sv)},
     };
 
     assertUnsupportedConversionBehavior(getExpCtx().get(), std::move(unsupportedConversions));
 }
 
 TEST_F(EvaluateConvertTest, FeatureFlagGatedConversionShouldThrowUnlessOnErrorProvided) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagMqlJsEngineGap", false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagMqlJsEngineGap", false);
 
-    Value str{"string"_sd};
+    Value str{"string"sv};
     std::vector<std::pair<Value, Value>> unsupportedConversions{
         // Leaf types
         {Value(MINKEY), str},
         {Value(MAXKEY), str},
-        {Value(BSONRegEx("^ABC"_sd, "i"_sd)), str},
+        {Value(BSONRegEx("^ABC"sv, "i"sv)), str},
         {Value(Timestamp(Seconds{1}, 2)), str},
-        {Value(BSONDBRef("coll"_sd, OID::createFromString("0102030405060708090A0B0C"_sd))), str},
-        {Value(BSONCodeWScope{"function() {}"_sd, BSONObj()}), str},
-        {Value(BSONCode("function() {}"_sd)), str},
-        {Value(BSONSymbol("foo"_sd)), str},
+        {Value(BSONDBRef("coll"sv, OID::createFromString("0102030405060708090A0B0C"sv))), str},
+        {Value(BSONCodeWScope{"function() {}"sv, BSONObj()}), str},
+        {Value(BSONCode("function() {}"sv)), str},
+        {Value(BSONSymbol("foo"sv)), str},
         // Nested types
         {Value(Document{{"foo", BSONNULL}}), str},
         {Value(std::vector<Value>{Value(Document()), Value()}), str},
@@ -419,9 +492,9 @@ TEST_F(EvaluateConvertTest, ConvertNullishInputWithOnNull) {
     Document undefinedInput{{"path1", BSONUndefined}};
     Document missingInput{{"path1", Value()}};
 
-    ASSERT_VALUE_EQ(convertExp->evaluate(nullInput, &expCtx->variables), Value("B)"_sd));
-    ASSERT_VALUE_EQ(convertExp->evaluate(undefinedInput, &expCtx->variables), Value("B)"_sd));
-    ASSERT_VALUE_EQ(convertExp->evaluate(missingInput, &expCtx->variables), Value("B)"_sd));
+    ASSERT_VALUE_EQ(convertExp->evaluate(nullInput, &expCtx->variables), Value("B)"sv));
+    ASSERT_VALUE_EQ(convertExp->evaluate(undefinedInput, &expCtx->variables), Value("B)"sv));
+    ASSERT_VALUE_EQ(convertExp->evaluate(missingInput, &expCtx->variables), Value("B)"sv));
 }
 
 TEST_F(EvaluateConvertTest, NullishToReturnsNull) {
@@ -454,7 +527,7 @@ TEST_F(EvaluateConvertTest, NullInputOverridesNullTo) {
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(Document{}, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(Document{}, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, DoubleIdentityConversion) {
@@ -511,9 +584,9 @@ TEST_F(EvaluateConvertTest, StringIdentityConversion) {
                                                 << "string"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document stringInput{{"path1", "More cowbell"_sd}};
+    Document stringInput{{"path1", "More cowbell"sv}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(stringInput, &expCtx->variables), "More cowbell"_sd, BSONType::string);
+        convertExp->evaluate(stringInput, &expCtx->variables), "More cowbell"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ObjectIdIdentityConversion) {
@@ -779,7 +852,7 @@ TEST_F(EvaluateConvertTest, UUIDStringRoundTripConversion) {
         return convertExp->evaluate(inputDoc, &expCtx->variables);
     };
 
-    const Value stringValue{"867dee52-c331-484e-92d1-c56479b8e67e"_sd};
+    const Value stringValue{"867dee52-c331-484e-92d1-c56479b8e67e"sv};
 
     const auto binDataValue = evalWithValueOnPath(BSON("$toUUID" << "$path1"), stringValue);
 
@@ -918,11 +991,11 @@ TEST_F(EvaluateConvertTest, ConvertStringToBool) {
                                                 << "bool"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document stringInput{{"path1", "str"_sd}};
+    Document stringInput{{"path1", "str"sv}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(stringInput, &expCtx->variables), true, BSONType::boolean);
 
-    Document emptyStringInput{{"path1", ""_sd}};
+    Document emptyStringInput{{"path1", ""sv}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(emptyStringInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -967,7 +1040,7 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBool) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFailsWhenFeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", false};
+    unittest::ServerParameterGuard featureFlag{"featureFlagConvertObjectToBinData", false};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
@@ -985,7 +1058,6 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFailsWhenFeatureFlagDisabled) 
 }
 
 TEST_F(EvaluateConvertTest, ConvertEmptyObjectToBinData) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
@@ -1001,7 +1073,6 @@ TEST_F(EvaluateConvertTest, ConvertEmptyObjectToBinData) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectWithFieldsToBinData) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
@@ -1017,14 +1088,13 @@ TEST_F(EvaluateConvertTest, ConvertObjectWithFieldsToBinData) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFieldOrderMatters) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document inputAB{{"path1", Document{{"a", "a"_sd}, {"b", "b"_sd}}}};
-    Document inputBA{{"path1", Document{{"b", "b"_sd}, {"a", "a"_sd}}}};
+    Document inputAB{{"path1", Document{{"a", "a"sv}, {"b", "b"sv}}}};
+    Document inputBA{{"path1", Document{{"b", "b"sv}, {"a", "a"sv}}}};
 
     auto resultAB = convertExp->evaluate(inputAB, &expCtx->variables);
     auto resultBA = convertExp->evaluate(inputBA, &expCtx->variables);
@@ -1035,13 +1105,12 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFieldOrderMatters) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertNestedObjectToBinData) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document nested{{"path1", Document{{"a", "hello"_sd}, {"b", Document{{"x", 42}}}}}};
+    Document nested{{"path1", Document{{"a", "hello"sv}, {"b", Document{{"x", 42}}}}}};
     auto result = convertExp->evaluate(nested, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::binData);
 
@@ -1052,13 +1121,12 @@ TEST_F(EvaluateConvertTest, ConvertNestedObjectToBinData) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataWithCustomSubtype) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: {type: 'binData', subtype: 128}}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", Document{{"a", "a"_sd}}}};
+    Document input{{"path1", Document{{"a", "a"sv}}}};
     auto result = convertExp->evaluate(input, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::binData);
 
@@ -1069,8 +1137,20 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataWithCustomSubtype) {
                                       static_cast<BinDataType>(128))));
 }
 
+TEST_F(EvaluateConvertTest, ConvertObjectToFixedSizeBinDataSubtypeValidatesSize) {
+    auto expCtx = getExpCtx();
+
+    // MD5 (subtype 5) requires exactly 16 bytes; a small object's BSON is not 16 bytes, so the
+    // conversion must be rejected rather than producing an invalid fixed-size BinData.
+    auto spec = fromjson("{$convert: {input: '$path1', to: {type: 'binData', subtype: 5}}}");
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    Document input{{"path1", Document{{"a", "a"sv}}}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016802);
+}
+
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataNullInputReturnsNull) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
@@ -1086,7 +1166,6 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataNullInputReturnsNull) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataOnNullReturnsOnNullValue) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', onNull: 'was null'}}");
@@ -1094,11 +1173,10 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataOnNullReturnsOnNullValue) {
 
     Document nullInput{{"path1", BSONNULL}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nullInput, &expCtx->variables), "was null"_sd, BSONType::string);
+        convertExp->evaluate(nullInput, &expCtx->variables), "was null"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertNonObjectToBinDataWithOnError) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', onError: 'error!'}}");
@@ -1106,11 +1184,10 @@ TEST_F(EvaluateConvertTest, ConvertNonObjectToBinDataWithOnError) {
 
     Document boolInput{{"path1", true}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(boolInput, &expCtx->variables), "error!"_sd, BSONType::string);
+        convertExp->evaluate(boolInput, &expCtx->variables), "error!"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertNonObjectToBinDataWithoutOnErrorFails) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData'}}");
@@ -1128,13 +1205,12 @@ TEST_F(EvaluateConvertTest, ConvertNonObjectToBinDataWithoutOnErrorFails) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFormatIsIgnored) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', format: 'hex'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", Document{{"a", "a"_sd}}}};
+    Document input{{"path1", Document{{"a", "a"sv}}}};
     auto result = convertExp->evaluate(input, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::binData);
 
@@ -1144,13 +1220,12 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFormatIsIgnored) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataInvalidFormatStillFails) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'binData', format: 'bson'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", Document{{"a", "a"_sd}}}};
+    Document input{{"path1", Document{{"a", "a"sv}}}};
     ASSERT_THROWS_WITH_CHECK(convertExp->evaluate(input, &expCtx->variables),
                              AssertionException,
                              [](const AssertionException& exception) {
@@ -1162,13 +1237,12 @@ TEST_F(EvaluateConvertTest, ConvertObjectToBinDataInvalidFormatStillFails) {
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectToBinDataInvalidSubtypeFails) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagConvertObjectToBinData", true};
     auto expCtx = getExpCtx();
 
     auto spec = fromjson("{$convert: {input: '$path1', to: {type: 5, subtype: 50}}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document input{{"path1", Document{{"a", "a"_sd}}}};
+    Document input{{"path1", Document{{"a", "a"sv}}}};
     ASSERT_THROWS_WITH_CHECK(convertExp->evaluate(input, &expCtx->variables),
                              AssertionException,
                              [](const AssertionException& exception) {
@@ -1215,7 +1289,7 @@ TEST_F(EvaluateConvertTest, ConvertRegexToBool) {
                                                 << "bool"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document regexInput{{"path1", BSONRegEx("ab*a"_sd)}};
+    Document regexInput{{"path1", BSONRegEx("ab*a"sv)}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(regexInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -1228,7 +1302,7 @@ TEST_F(EvaluateConvertTest, ConvertDBRefToBool) {
                                                 << "bool"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document refInput{{"path1", BSONDBRef("db.coll"_sd, OID("aaaaaaaaaaaaaaaaaaaaaaaa"))}};
+    Document refInput{{"path1", BSONDBRef("db.coll"sv, OID("aaaaaaaaaaaaaaaaaaaaaaaa"))}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(refInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -1241,7 +1315,7 @@ TEST_F(EvaluateConvertTest, ConvertCodeToBool) {
                                                 << "bool"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document codeInput{{"path1", BSONCode("print('Hello world!');"_sd)}};
+    Document codeInput{{"path1", BSONCode("print('Hello world!');"sv)}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(codeInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -1254,7 +1328,7 @@ TEST_F(EvaluateConvertTest, ConvertSymbolToBool) {
                                                 << "bool"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    Document symbolInput{{"path1", BSONSymbol("print"_sd)}};
+    Document symbolInput{{"path1", BSONSymbol("print"sv)}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(symbolInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -1268,7 +1342,7 @@ TEST_F(EvaluateConvertTest, ConvertCodeWScopeToBool) {
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
     Document codeWScopeInput{
-        {"path1", BSONCodeWScope("print('Hello again, world!')"_sd, BSONObj())}};
+        {"path1", BSONCodeWScope("print('Hello again, world!')"sv, BSONObj())}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(codeWScopeInput, &expCtx->variables), true, BSONType::boolean);
 }
@@ -1307,17 +1381,17 @@ TEST_F(EvaluateConvertTest, ConvertAnyLeafValueToString) {
                                                 << "string"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    std::vector<std::pair<Value, StringData>> cases{
-        {Value(MINKEY), "MinKey"_sd},
-        {Value(MAXKEY), "MaxKey"_sd},
-        {Value(BSONRegEx("^ABC"_sd, "i"_sd)), "/^ABC/i"_sd},
-        {Value(Timestamp(Seconds{1}, 2)), "Timestamp(1, 2)"_sd},
-        {Value(BSONDBRef("coll"_sd, OID::createFromString("0102030405060708090A0B0C"_sd))),
-         "DBRef(\"coll\", 0102030405060708090a0b0c)"_sd},
-        {Value(BSONCodeWScope{"function() {}"_sd, BSONObj()}),
-         "CodeWScope(\"function() {}\", {})"_sd},
-        {Value(BSONCode("function() {}"_sd)), "function() {}"_sd},
-        {Value(BSONSymbol("foo"_sd)), "foo"_sd},
+    std::vector<std::pair<Value, std::string_view>> cases{
+        {Value(MINKEY), "MinKey"sv},
+        {Value(MAXKEY), "MaxKey"sv},
+        {Value(BSONRegEx("^ABC"sv, "i"sv)), "/^ABC/i"sv},
+        {Value(Timestamp(Seconds{1}, 2)), "Timestamp(1, 2)"sv},
+        {Value(BSONDBRef("coll"sv, OID::createFromString("0102030405060708090A0B0C"sv))),
+         "DBRef(\"coll\", 0102030405060708090a0b0c)"sv},
+        {Value(BSONCodeWScope{"function() {}"sv, BSONObj()}),
+         "CodeWScope(\"function() {}\", {})"sv},
+        {Value(BSONCode("function() {}"sv)), "function() {}"sv},
+        {Value(BSONSymbol("foo"sv)), "foo"sv},
     };
 
     for (auto&& [in, out] : cases) {
@@ -1346,16 +1420,16 @@ TEST_F(EvaluateConvertTest, ConvertAnyNestedValueToString) {
              Value(BSONUndefined),
              Value(MINKEY),
              Value(MAXKEY),
-             Value(BSONRegEx("^ABC"_sd, "i"_sd)),
+             Value(BSONRegEx("^ABC"sv, "i"sv)),
              Value(Timestamp(Seconds{1}, 2)),
-             Value(BSONDBRef("coll"_sd, OID::createFromString("0102030405060708090A0B0C"_sd))),
-             Value(BSONCodeWScope{"function() {}"_sd, BSONObj()}),
-             Value(BSONCode("function() {}"_sd)),
-             Value(BSONSymbol("foo"_sd)),
+             Value(BSONDBRef("coll"sv, OID::createFromString("0102030405060708090A0B0C"sv))),
+             Value(BSONCodeWScope{"function() {}"sv, BSONObj()}),
+             Value(BSONCode("function() {}"sv)),
+             Value(BSONSymbol("foo"sv)),
              Value(Document{{"obj", Value(1)}}),
              Value(std::vector<Value>{
                  Value(1),
-                 Value(std::vector<Value>{Value("foo"_sd)}),
+                 Value(std::vector<Value>{Value("foo"sv)}),
              }),
          }}};
 
@@ -1388,20 +1462,20 @@ TEST_F(EvaluateConvertTest, ConvertStringToObject) {
     auto spec = BSON("$convert" << BSON("input" << "$path1" << "to" << "object"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    std::vector<std::pair<StringData, BSONObj>> cases{
-        {"{}"_sd, BSONObj()},
-        {"{\"\": \"emptyKey\"}"_sd, BSON("" << "emptyKey")},
-        {"{\"foo\": \"bar\"}"_sd, BSON("foo" << "bar")},
-        {"{\"foo\": null}"_sd, BSON("foo" << BSONNULL)},
-        {"{\"foo\": false}"_sd, BSON("foo" << false)},
-        {"{\"foo\": true}"_sd, BSON("foo" << true)},
-        {"{\"foo\": 123}"_sd, BSON("foo" << 123)},
+    std::vector<std::pair<std::string_view, BSONObj>> cases{
+        {"{}"sv, BSONObj()},
+        {"{\"\": \"emptyKey\"}"sv, BSON("" << "emptyKey")},
+        {"{\"foo\": \"bar\"}"sv, BSON("foo" << "bar")},
+        {"{\"foo\": null}"sv, BSON("foo" << BSONNULL)},
+        {"{\"foo\": false}"sv, BSON("foo" << false)},
+        {"{\"foo\": true}"sv, BSON("foo" << true)},
+        {"{\"foo\": 123}"sv, BSON("foo" << 123)},
         // Embedded nulls are allowed in values
-        {"{\"name\": \"fo\\u0000o\"}"_sd, BSON("name" << "fo\u0000o"_sd)},
+        {"{\"name\": \"fo\\u0000o\"}"sv, BSON("name" << "fo\u0000o"sv)},
         // Duplicate field names are allowed, we keep the last value.
-        {"{\"a\": 1, \"b\": 2, \"a\": 3}"_sd, BSON("a" << 3 << "b" << 2)},
+        {"{\"a\": 1, \"b\": 2, \"a\": 3}"sv, BSON("a" << 3 << "b" << 2)},
         // Nested objects
-        {"{\"__proto__\": { \"foo\": null }}"_sd, BSON("__proto__" << BSON("foo" << BSONNULL))},
+        {"{\"__proto__\": { \"foo\": null }}"sv, BSON("__proto__" << BSON("foo" << BSONNULL))},
         {"{\"objectId\": \"507f1f77bcf86cd799439011\", \"uuid\": "
          "\"3b241101-e2bb-4255-8caf-4136c566a962\", \"date\": \"2018-03-27T16:58:51.538Z\", "
          "\"regex\": \"/^ABC/i\", \"js\": \"function (s) {return s + \\\"foo\\\";}\", "
@@ -1426,17 +1500,17 @@ TEST_F(EvaluateConvertTest, ConvertStringToArray) {
     auto spec = BSON("$convert" << BSON("input" << "$path1" << "to" << "array"));
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    std::vector<std::pair<StringData, BSONArray>> cases{
-        {"[]"_sd, BSONArray()},
-        {"[\"bar\"]"_sd, BSON_ARRAY("bar")},
-        {"[null]"_sd, BSON_ARRAY(BSONNULL)},
-        {"[false]"_sd, BSON_ARRAY(false)},
-        {"[true]"_sd, BSON_ARRAY(true)},
-        {"[123]"_sd, BSON_ARRAY(123)},
+    std::vector<std::pair<std::string_view, BSONArray>> cases{
+        {"[]"sv, BSONArray()},
+        {"[\"bar\"]"sv, BSON_ARRAY("bar")},
+        {"[null]"sv, BSON_ARRAY(BSONNULL)},
+        {"[false]"sv, BSON_ARRAY(false)},
+        {"[true]"sv, BSON_ARRAY(true)},
+        {"[123]"sv, BSON_ARRAY(123)},
         // Embedded nulls are allowed in values
-        {"[\"fo\\u0000o\"]"_sd, BSON_ARRAY("fo\u0000o"_sd)},
+        {"[\"fo\\u0000o\"]"sv, BSON_ARRAY("fo\u0000o"sv)},
         // Nested arrays
-        {"[[1,2],{\"__proto__\": { \"foo\": null }}]"_sd,
+        {"[[1,2],{\"__proto__\": { \"foo\": null }}]"sv,
          BSON_ARRAY(BSON_ARRAY(1 << 2) << BSON("__proto__" << BSON("foo" << BSONNULL)))},
         {"[1, {\"objectId\": \"507f1f77bcf86cd799439011\", \"uuid\": "
          "\"3b241101-e2bb-4255-8caf-4136c566a962\", \"date\": \"2018-03-27T16:58:51.538Z\", "
@@ -1471,7 +1545,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayNumberHandling) {
     auto toArrayExp =
         Expression::parseExpression(expCtx.get(), toArraySpec, expCtx->variablesParseState);
 
-    auto assertParsedNumberEquals = [&](StringData numStr,
+    auto assertParsedNumberEquals = [&](std::string_view numStr,
                                         Value expectedValue,
                                         BSONType expectedType) {
         // Test inside object.
@@ -1481,7 +1555,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayNumberHandling) {
             auto result = toObjectExp->evaluate(inputDoc, &expCtx->variables);
             ASSERT_EQ(result.getType(), BSONType::object);
             ASSERT_VALUE_CONTENTS_AND_TYPE(
-                result.getDocument().getField("f"_sd), expectedValue, expectedType);
+                result.getDocument().getField("f"sv), expectedValue, expectedType);
         }
         // Test inside array.
         {
@@ -1493,20 +1567,20 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayNumberHandling) {
         }
     };
 
-    assertParsedNumberEquals("\"NaN\""_sd, Value("NaN"_sd), BSONType::string);
-    assertParsedNumberEquals("123"_sd, Value(123), BSONType::numberInt);
-    assertParsedNumberEquals("-123"_sd, Value(-123), BSONType::numberInt);
-    assertParsedNumberEquals("4294967296"_sd, Value(4294967296LL), BSONType::numberLong);
-    assertParsedNumberEquals("-4294967296"_sd, Value(-4294967296LL), BSONType::numberLong);
-    assertParsedNumberEquals("1.123123"_sd, Value(1.123123), BSONType::numberDouble);
-    assertParsedNumberEquals("-1.123123"_sd, Value(-1.123123), BSONType::numberDouble);
-    assertParsedNumberEquals("1.2e+3"_sd, Value(1200.0), BSONType::numberDouble);
-    assertParsedNumberEquals("-1.2e+3"_sd, Value(-1200.0), BSONType::numberDouble);
+    assertParsedNumberEquals("\"NaN\""sv, Value("NaN"sv), BSONType::string);
+    assertParsedNumberEquals("123"sv, Value(123), BSONType::numberInt);
+    assertParsedNumberEquals("-123"sv, Value(-123), BSONType::numberInt);
+    assertParsedNumberEquals("4294967296"sv, Value(4294967296LL), BSONType::numberLong);
+    assertParsedNumberEquals("-4294967296"sv, Value(-4294967296LL), BSONType::numberLong);
+    assertParsedNumberEquals("1.123123"sv, Value(1.123123), BSONType::numberDouble);
+    assertParsedNumberEquals("-1.123123"sv, Value(-1.123123), BSONType::numberDouble);
+    assertParsedNumberEquals("1.2e+3"sv, Value(1200.0), BSONType::numberDouble);
+    assertParsedNumberEquals("-1.2e+3"sv, Value(-1200.0), BSONType::numberDouble);
     // This would fit in a 64-bit unsigned integer but BSON doesn't have that.
     assertParsedNumberEquals(
-        "18446744073709551615"_sd, Value(18446744073709551615.0), BSONType::numberDouble);
+        "18446744073709551615"sv, Value(18446744073709551615.0), BSONType::numberDouble);
     assertParsedNumberEquals(
-        "-18446744073709551615"_sd, Value(-18446744073709551615.0), BSONType::numberDouble);
+        "-18446744073709551615"sv, Value(-18446744073709551615.0), BSONType::numberDouble);
 }
 
 TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayInvalidConversions) {
@@ -1532,7 +1606,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayInvalidConversions) {
         BSON("$convert" << BSON("input" << "$path1" << "to" << "array" << "onError" << "error!")),
         expCtx->variablesParseState);
 
-    auto assertThrowsInvalidJson = [&](StringData input) {
+    auto assertThrowsInvalidJson = [&](std::string_view input) {
         Document inputDoc{{"path1", Value(input)}};
 
         // Test without 'onError'.
@@ -1543,14 +1617,14 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayInvalidConversions) {
                                          ASSERT_EQ(exception.code(), ErrorCodes::ConversionFailure);
                                          ASSERT_STRING_CONTAINS(
                                              exception.reason(),
-                                             "Input doesn't represent valid JSON"_sd);
+                                             "Input doesn't represent valid JSON"sv);
                                      });
         }
 
         // Test with 'onError'.
         for (const auto& exp : {toObjectWithOnErrorExp, toArrayWithOnErrorExp}) {
             ASSERT_VALUE_CONTENTS_AND_TYPE(
-                exp->evaluate(inputDoc, &expCtx->variables), "error!"_sd, BSONType::string);
+                exp->evaluate(inputDoc, &expCtx->variables), "error!"sv, BSONType::string);
         }
     };
 
@@ -1562,76 +1636,76 @@ TEST_F(EvaluateConvertTest, ConvertStringToObjectOrArrayInvalidConversions) {
     //
     // For more exhaustive testing we rely on libfuzz. Some specific security concerns like embedded
     // nulls are also tested below.
-    assertThrowsInvalidJson("}\"closingBraceFirst1\": 123{"_sd);
-    assertThrowsInvalidJson("}\"closingBraceFirst2\": 123}"_sd);
-    assertThrowsInvalidJson("]\"closingBracketFirst1\": 123["_sd);
-    assertThrowsInvalidJson("]\"closingBracketFirst2\": 123]"_sd);
-    assertThrowsInvalidJson("{\"missingClosingBrace\": 123"_sd);
-    assertThrowsInvalidJson("\"missingOpeningBrace\": 123}"_sd);
-    assertThrowsInvalidJson("[\"missingClosingBracket\": 123"_sd);
-    assertThrowsInvalidJson("\"missingOpeningBracket\": 123]"_sd);
-    assertThrowsInvalidJson("{\"missingClosingQuote: 123}"_sd);
-    assertThrowsInvalidJson("[\"bracketMismatch1\": 123}"_sd);
-    assertThrowsInvalidJson("{\"bracketMismatch2\": 123]"_sd);
-    assertThrowsInvalidJson("{\"bracketMismatch3\"]"_sd);
-    assertThrowsInvalidJson("[\"bracketMismatch4\"}"_sd);
-    assertThrowsInvalidJson("{\"extraClosingBrace\": 123}}"_sd);
-    assertThrowsInvalidJson("{{\"extraOpeningBrace\": 123}"_sd);
-    assertThrowsInvalidJson("[\"extraClosingBracket\"]]"_sd);
-    assertThrowsInvalidJson("[[\"extraOpeningBracket\"]"_sd);
-    assertThrowsInvalidJson("null: null}"_sd);
-    assertThrowsInvalidJson("{null: null}"_sd);
-    assertThrowsInvalidJson("{\"semicolon\"; null}"_sd);
-    assertThrowsInvalidJson("{\"oid\": ObjectId(\"6592008029c8c3e4dc76256c\")}"_sd);
-    assertThrowsInvalidJson("{\"multilinejson\": 1}\n{\"multilinejson\": 2}"_sd);
-    assertThrowsInvalidJson("[{\"multilinejson\": 1}\n{\"multilinejson\": 2}]"_sd);
-    assertThrowsInvalidJson("{\"trailingComma\": 123,}"_sd);
-    assertThrowsInvalidJson("[1, 2, 3, ]"_sd);
-    assertThrowsInvalidJson("[1, 2, , 3]"_sd);
-    assertThrowsInvalidJson("{\"missingColon\" 123}"_sd);
-    assertThrowsInvalidJson("{unquotedKey: 123}"_sd);
-    assertThrowsInvalidJson("{\"invalidLiteral\": nope}"_sd);
-    assertThrowsInvalidJson("{'singleQuotes': 'invalid'}"_sd);
-    assertThrowsInvalidJson("{\"extraToken\": 1} 123"_sd);
+    assertThrowsInvalidJson("}\"closingBraceFirst1\": 123{"sv);
+    assertThrowsInvalidJson("}\"closingBraceFirst2\": 123}"sv);
+    assertThrowsInvalidJson("]\"closingBracketFirst1\": 123["sv);
+    assertThrowsInvalidJson("]\"closingBracketFirst2\": 123]"sv);
+    assertThrowsInvalidJson("{\"missingClosingBrace\": 123"sv);
+    assertThrowsInvalidJson("\"missingOpeningBrace\": 123}"sv);
+    assertThrowsInvalidJson("[\"missingClosingBracket\": 123"sv);
+    assertThrowsInvalidJson("\"missingOpeningBracket\": 123]"sv);
+    assertThrowsInvalidJson("{\"missingClosingQuote: 123}"sv);
+    assertThrowsInvalidJson("[\"bracketMismatch1\": 123}"sv);
+    assertThrowsInvalidJson("{\"bracketMismatch2\": 123]"sv);
+    assertThrowsInvalidJson("{\"bracketMismatch3\"]"sv);
+    assertThrowsInvalidJson("[\"bracketMismatch4\"}"sv);
+    assertThrowsInvalidJson("{\"extraClosingBrace\": 123}}"sv);
+    assertThrowsInvalidJson("{{\"extraOpeningBrace\": 123}"sv);
+    assertThrowsInvalidJson("[\"extraClosingBracket\"]]"sv);
+    assertThrowsInvalidJson("[[\"extraOpeningBracket\"]"sv);
+    assertThrowsInvalidJson("null: null}"sv);
+    assertThrowsInvalidJson("{null: null}"sv);
+    assertThrowsInvalidJson("{\"semicolon\"; null}"sv);
+    assertThrowsInvalidJson("{\"oid\": ObjectId(\"6592008029c8c3e4dc76256c\")}"sv);
+    assertThrowsInvalidJson("{\"multilinejson\": 1}\n{\"multilinejson\": 2}"sv);
+    assertThrowsInvalidJson("[{\"multilinejson\": 1}\n{\"multilinejson\": 2}]"sv);
+    assertThrowsInvalidJson("{\"trailingComma\": 123,}"sv);
+    assertThrowsInvalidJson("[1, 2, 3, ]"sv);
+    assertThrowsInvalidJson("[1, 2, , 3]"sv);
+    assertThrowsInvalidJson("{\"missingColon\" 123}"sv);
+    assertThrowsInvalidJson("{unquotedKey: 123}"sv);
+    assertThrowsInvalidJson("{\"invalidLiteral\": nope}"sv);
+    assertThrowsInvalidJson("{'singleQuotes': 'invalid'}"sv);
+    assertThrowsInvalidJson("{\"extraToken\": 1} 123"sv);
     // Control character in string without escaping
-    assertThrowsInvalidJson("{\"foo\": \"bar\tbaz\"}"_sd);
+    assertThrowsInvalidJson("{\"foo\": \"bar\tbaz\"}"sv);
     // Backslash at end of string
-    assertThrowsInvalidJson("{\"foo\": \"bar\\\"}"_sd);
+    assertThrowsInvalidJson("{\"foo\": \"bar\\\"}"sv);
     // Invalid UTF-8
-    assertThrowsInvalidJson("{\"\xC3\x28\": 123}"_sd);
+    assertThrowsInvalidJson("{\"\xC3\x28\": 123}"sv);
     // Bad unicode
-    assertThrowsInvalidJson("{\"badUnicode\": \"\\uZZZZ\"}"_sd);
-    assertThrowsInvalidJson("{\"tooLargeCodepoint\": \"\\u{110000}\"}"_sd);
-    assertThrowsInvalidJson("{\"orphanSurrogate\": \"\\uD800\"}"_sd);
-    assertThrowsInvalidJson("{\"badSurrogates\": \"\\uDC00\\uD800\"}"_sd);
+    assertThrowsInvalidJson("{\"badUnicode\": \"\\uZZZZ\"}"sv);
+    assertThrowsInvalidJson("{\"tooLargeCodepoint\": \"\\u{110000}\"}"sv);
+    assertThrowsInvalidJson("{\"orphanSurrogate\": \"\\uD800\"}"sv);
+    assertThrowsInvalidJson("{\"badSurrogates\": \"\\uDC00\\uD800\"}"sv);
     // NaN or Infinity (valid in JS, invalid in JSON)
-    assertThrowsInvalidJson("{\"value\": NaN}"_sd);
-    assertThrowsInvalidJson("{\"value\": Infinity}"_sd);
+    assertThrowsInvalidJson("{\"value\": NaN}"sv);
+    assertThrowsInvalidJson("{\"value\": Infinity}"sv);
     // Leading + before a number
-    assertThrowsInvalidJson("{\"plusNumber\": +42}"_sd);
+    assertThrowsInvalidJson("{\"plusNumber\": +42}"sv);
     // Escaped null byte in field name
-    assertThrowsInvalidJson("{\"fo\\u0000o\": 123}"_sd);
+    assertThrowsInvalidJson("{\"fo\\u0000o\": 123}"sv);
     // Unescaped null byte in field name
-    assertThrowsInvalidJson("{\"fo\0o\": 123}"_sd);
+    assertThrowsInvalidJson("{\"fo\0o\": 123}"sv);
     // Unescaped null byte in value
-    assertThrowsInvalidJson("{\"foo\": \"fo\0o\"}"_sd);
+    assertThrowsInvalidJson("{\"foo\": \"fo\0o\"}"sv);
 
     // Type mismatch
     ASSERT_THROWS_WITH_CHECK(
-        toArrayExp->evaluate(Document{{"path1", Value("{\"foo\": 1}"_sd)}}, &expCtx->variables),
+        toArrayExp->evaluate(Document{{"path1", Value("{\"foo\": 1}"sv)}}, &expCtx->variables),
         AssertionException,
         [](const AssertionException& exception) {
             ASSERT_EQ(exception.code(), ErrorCodes::ConversionFailure);
             ASSERT_STRING_CONTAINS(exception.reason(),
-                                   "Input doesn't match expected type 'array'"_sd);
+                                   "Input doesn't match expected type 'array'"sv);
         });
     ASSERT_THROWS_WITH_CHECK(
-        toObjectExp->evaluate(Document{{"path1", Value("[{\"foo\": 1}]"_sd)}}, &expCtx->variables),
+        toObjectExp->evaluate(Document{{"path1", Value("[{\"foo\": 1}]"sv)}}, &expCtx->variables),
         AssertionException,
         [](const AssertionException& exception) {
             ASSERT_EQ(exception.code(), ErrorCodes::ConversionFailure);
             ASSERT_STRING_CONTAINS(exception.reason(),
-                                   "Input doesn't match expected type 'object'"_sd);
+                                   "Input doesn't match expected type 'object'"sv);
         });
 }
 
@@ -1756,11 +1830,11 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsDecimalToDoubleWithOnError) {
 
     Document overflowInput{{"path1", Decimal128("1e309")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document negativeOverflowInput{{"path1", Decimal128("-1e309")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertNumericToDecimal) {
@@ -1953,26 +2027,26 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsDoubleToIntWithOnError) {
         std::nextafter(static_cast<double>(maxInt), std::numeric_limits<double>::max());
     Document overflowInput{{"path1", overflowInt}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     int minInt = std::numeric_limits<int>::lowest();
     double negativeOverflowInt =
         std::nextafter(static_cast<double>(minInt), std::numeric_limits<double>::lowest());
     Document negativeOverflowInput{{"path1", negativeOverflowInt}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document nanInput{{"path1", std::numeric_limits<double>::quiet_NaN()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleInfinity{{"path1", std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleNegativeInfinity{{"path1", -std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertDoubleToLong) {
@@ -2092,26 +2166,26 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsDoubleToLongWithOnError) {
     double overflowLong = BSONElement::kLongLongMaxPlusOneAsDouble;
     Document overflowInput{{"path1", overflowLong}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     double minLong = static_cast<double>(std::numeric_limits<long long>::lowest());
     double negativeOverflowLong =
         std::nextafter(static_cast<double>(minLong), std::numeric_limits<double>::lowest());
     Document negativeOverflowInput{{"path1", negativeOverflowLong}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document nanInput{{"path1", std::numeric_limits<double>::quiet_NaN()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleInfinity{{"path1", std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleNegativeInfinity{{"path1", -std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertDecimalToInt) {
@@ -2234,30 +2308,28 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsDecimalToIntWithOnError) {
     int maxInt = std::numeric_limits<int>::max();
     Document overflowInput{{"path1", Decimal128(maxInt).add(Decimal128(1))}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     int minInt = std::numeric_limits<int>::lowest();
     Document negativeOverflowInput{{"path1", Decimal128(minInt).subtract(Decimal128(1))}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document nanInput{{"path1", Decimal128::kPositiveNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document negativeNaNInput{{"path1", Decimal128::kNegativeNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalInfinity{{"path1", Decimal128::kPositiveInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalNegativeInfinity{{"path1", Decimal128::kNegativeInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables),
-        "X"_sd,
-        BSONType::string);
+        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertDecimalToLong) {
@@ -2381,31 +2453,29 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsDecimalToLongWithOnError) {
     long long maxVal = std::numeric_limits<long long>::max();
     Document overflowInput{{"path1", Decimal128(std::int64_t{maxVal}).add(Decimal128(1))}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     long long minVal = std::numeric_limits<long long>::lowest();
     Document negativeOverflowInput{
         {"path1", Decimal128(std::int64_t{minVal}).subtract(Decimal128(1))}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document nanInput{{"path1", Decimal128::kPositiveNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document negativeNaNInput{{"path1", Decimal128::kNegativeNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalInfinity{{"path1", Decimal128::kPositiveInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalNegativeInfinity{{"path1", Decimal128::kNegativeInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables),
-        "X"_sd,
-        BSONType::string);
+        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertDateToLong) {
@@ -2509,12 +2579,12 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsLongToIntWithOnError) {
     long long maxInt = std::numeric_limits<int>::max();
     Document overflowInput{{"path1", maxInt + 1}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(overflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(overflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     long long minInt = std::numeric_limits<int>::min();
     Document negativeOverflowInput{{"path1", minInt - 1}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(negativeOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertBoolToInt) {
@@ -2710,57 +2780,55 @@ TEST_F(EvaluateConvertTest, ConvertOutOfBoundsNumberToDateWithOnError) {
     // Int is explicitly disallowed for date conversions. Clients must use 64-bit long instead.
     Document intInput{{"path1", int{0}}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(intInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(intInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleOverflowInput{{"path1", 1.0e100}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleNegativeOverflowInput{{"path1", -1.0e100}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(doubleNegativeOverflowInput, &expCtx->variables),
-        "X"_sd,
+        "X"sv,
         BSONType::string);
 
     Document doubleNaN{{"path1", std::numeric_limits<double>::quiet_NaN()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleNaN, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleNaN, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleInfinity{{"path1", std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document doubleNegativeInfinity{{"path1", -std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(doubleNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalOverflowInput{{"path1", Decimal128("1.0e100")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalOverflowInput, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalOverflowInput, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalNegativeOverflowInput{{"path1", Decimal128("1.0e100")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(decimalNegativeOverflowInput, &expCtx->variables),
-        "X"_sd,
+        "X"sv,
         BSONType::string);
 
     Document decimalNaN{{"path1", Decimal128::kPositiveNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalNaN, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalNaN, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalNegativeNaN{{"path1", Decimal128::kNegativeNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalNegativeNaN, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalNegativeNaN, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalInfinity{{"path1", Decimal128::kPositiveInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"_sd, BSONType::string);
+        convertExp->evaluate(decimalInfinity, &expCtx->variables), "X"sv, BSONType::string);
 
     Document decimalNegativeInfinity{{"path1", Decimal128::kNegativeInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables),
-        "X"_sd,
-        BSONType::string);
+        convertExp->evaluate(decimalNegativeInfinity, &expCtx->variables), "X"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertObjectIdToDate) {
@@ -2830,7 +2898,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToIntOverflow) {
 
 TEST_F(EvaluateConvertTest, ConvertStringToIntOverflowWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "><(((((>"_sd;
+    const auto onErrorValue = "><(((((>"sv;
 
     auto spec = fromjson("{$convert: {input: '" + std::to_string(kIntMax + 1) +
                          "', to: 'int', onError: '" + std::string(onErrorValue) + "'}}");
@@ -2913,7 +2981,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToLongFailsForFloats) {
 
 TEST_F(EvaluateConvertTest, ConvertStringToLongWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "><(((((>"_sd;
+    const auto onErrorValue = "><(((((>"sv;
     auto longMaxPlusOneAsString = std::to_string(BSONElement::kLongLongMaxPlusOneAsDouble);
     // Remove digits after the decimal to avoid parse failure.
     longMaxPlusOneAsString = longMaxPlusOneAsString.substr(0, longMaxPlusOneAsString.find('.'));
@@ -3179,7 +3247,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToDoubleUnderflow) {
 
 TEST_F(EvaluateConvertTest, ConvertStringToDoubleWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "><(((((>"_sd;
+    const auto onErrorValue = "><(((((>"sv;
 
     auto spec = fromjson("{$convert: {input: '" + kDoubleOverflow.toString() +
                          "', to: 'double', onError: '" + std::string(onErrorValue) + "'}}");
@@ -3433,7 +3501,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToDecimalWithPrecisionLoss) {
 
 TEST_F(EvaluateConvertTest, ConvertStringToDecimalWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "><(((((>"_sd;
+    const auto onErrorValue = "><(((((>"sv;
 
     auto spec = fromjson("{$convert: {input: '1E6145', to: 'decimal', onError: '" +
                          std::string(onErrorValue) + "'}}");
@@ -3556,7 +3624,7 @@ TEST_F(EvaluateConvertTest, ConvertStringToOIDFailsForInvalidHexStrings) {
 
 TEST_F(EvaluateConvertTest, ConvertStringToOIDWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "><(((((>"_sd;
+    const auto onErrorValue = "><(((((>"sv;
 
     auto spec =
         fromjson("{$convert: {input: 'InvalidHexButSizeCorrect', to: 'objectId', onError: '" +
@@ -3617,16 +3685,16 @@ TEST_F(EvaluateConvertTest, ConvertStringToDate) {
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
     auto result =
-        convertExp->evaluate({{"path1", Value("2017-07-06T12:35:37Z"_sd)}}, &expCtx->variables);
+        convertExp->evaluate({{"path1", Value("2017-07-06T12:35:37Z"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-06T12:35:37.000Z", result.toString());
 
     result =
-        convertExp->evaluate({{"path1", Value("2017-07-06T12:35:37.513Z"_sd)}}, &expCtx->variables);
+        convertExp->evaluate({{"path1", Value("2017-07-06T12:35:37.513Z"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-06T12:35:37.513Z", result.toString());
 
-    result = convertExp->evaluate({{"path1", Value("2017-07-06"_sd)}}, &expCtx->variables);
+    result = convertExp->evaluate({{"path1", Value("2017-07-06"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-06T00:00:00.000Z", result.toString());
 }
@@ -3637,13 +3705,13 @@ TEST_F(EvaluateConvertTest, ConvertStringWithTimezoneToDate) {
     auto spec = fromjson("{$convert: {input: '$path1', to: 'date'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    auto result = convertExp->evaluate({{"path1", Value("2017-07-14T12:02:44.771 GMT+02:00"_sd)}},
+    auto result = convertExp->evaluate({{"path1", Value("2017-07-14T12:02:44.771 GMT+02:00"sv)}},
                                        &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-14T10:02:44.771Z", result.toString());
 
-    result = convertExp->evaluate({{"path1", Value("2017-07-14T12:02:44.771 A"_sd)}},
-                                  &expCtx->variables);
+    result =
+        convertExp->evaluate({{"path1", Value("2017-07-14T12:02:44.771 A"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-14T11:02:44.771Z", result.toString());
 }
@@ -3654,41 +3722,41 @@ TEST_F(EvaluateConvertTest, ConvertVerbalStringToDate) {
     auto spec = fromjson("{$convert: {input: '$path1', to: 'date'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    auto result = convertExp->evaluate({{"path1", Value("July 4th, 2017"_sd)}}, &expCtx->variables);
+    auto result = convertExp->evaluate({{"path1", Value("July 4th, 2017"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-04T00:00:00.000Z", result.toString());
 
-    result = convertExp->evaluate({{"path1", Value("July 4th, 2017 12pm"_sd)}}, &expCtx->variables);
+    result = convertExp->evaluate({{"path1", Value("July 4th, 2017 12pm"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-04T12:00:00.000Z", result.toString());
 
-    result = convertExp->evaluate({{"path1", Value("2017-Jul-04 noon"_sd)}}, &expCtx->variables);
+    result = convertExp->evaluate({{"path1", Value("2017-Jul-04 noon"sv)}}, &expCtx->variables);
     ASSERT_EQ(result.getType(), BSONType::date);
     ASSERT_EQ("2017-07-04T12:00:00.000Z", result.toString());
 }
 
 TEST_F(EvaluateConvertTest, ConvertStringToDateWithOnError) {
     auto expCtx = getExpCtx();
-    const auto onErrorValue = "(-_-)"_sd;
+    const auto onErrorValue = "(-_-)"sv;
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'date', onError: '" +
                          std::string(onErrorValue) + "'}}");
     auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
 
-    auto result = convertExp->evaluate({{"path1", Value("Not a date"_sd)}}, &expCtx->variables);
+    auto result = convertExp->evaluate({{"path1", Value("Not a date"sv)}}, &expCtx->variables);
     ASSERT_VALUE_CONTENTS_AND_TYPE(result, onErrorValue, BSONType::string);
 
-    result = convertExp->evaluate({{"path1", Value("60.Monday1770/06:59"_sd)}}, &expCtx->variables);
+    result = convertExp->evaluate({{"path1", Value("60.Monday1770/06:59"sv)}}, &expCtx->variables);
     ASSERT_VALUE_CONTENTS_AND_TYPE(result, onErrorValue, BSONType::string);
 
-    result = convertExp->evaluate({{"path1", Value("2017-07-13T10:02:57 Europe/London"_sd)}},
+    result = convertExp->evaluate({{"path1", Value("2017-07-13T10:02:57 Europe/London"sv)}},
                                   &expCtx->variables);
     ASSERT_VALUE_CONTENTS_AND_TYPE(result, onErrorValue, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, ConvertStringToDateWithOnNull) {
     auto expCtx = getExpCtx();
-    const auto onNullValue = "(-_-)"_sd;
+    const auto onNullValue = "(-_-)"sv;
 
     auto spec = fromjson("{$convert: {input: '$path1', to: 'date', onNull: '" +
                          std::string(onNullValue) + "'}}");
@@ -3711,66 +3779,64 @@ TEST_F(EvaluateConvertTest, FormatDouble) {
 
     Document zeroInput{{"path1", 0.0}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(zeroInput, &expCtx->variables), "0"_sd, BSONType::string);
+        convertExp->evaluate(zeroInput, &expCtx->variables), "0"sv, BSONType::string);
 
     Document negativeZeroInput{{"path1", -0.0}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeZeroInput, &expCtx->variables), "-0"_sd, BSONType::string);
+        convertExp->evaluate(negativeZeroInput, &expCtx->variables), "-0"sv, BSONType::string);
 
     Document positiveIntegerInput{{"path1", 1337.0}};
-    ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveIntegerInput, &expCtx->variables),
-                                   "1337"_sd,
-                                   BSONType::string);
+    ASSERT_VALUE_CONTENTS_AND_TYPE(
+        convertExp->evaluate(positiveIntegerInput, &expCtx->variables), "1337"sv, BSONType::string);
 
     Document negativeIntegerInput{{"path1", -1337.0}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeIntegerInput, &expCtx->variables),
-                                   "-1337"_sd,
+                                   "-1337"sv,
                                    BSONType::string);
 
     Document positiveFractionalInput{{"path1", 0.1337}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(positiveFractionalInput, &expCtx->variables),
-        "0.1337"_sd,
+        "0.1337"sv,
         BSONType::string);
 
     Document negativeFractionalInput{{"path1", -0.1337}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(negativeFractionalInput, &expCtx->variables),
-        "-0.1337"_sd,
+        "-0.1337"sv,
         BSONType::string);
 
     Document positiveLargeInput{{"path1", 1.3e37}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveLargeInput, &expCtx->variables),
-                                   "1.3e+37"_sd,
+                                   "1.3e+37"sv,
                                    BSONType::string);
 
     Document negativeLargeInput{{"path1", -1.3e37}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeLargeInput, &expCtx->variables),
-                                   "-1.3e+37"_sd,
+                                   "-1.3e+37"sv,
                                    BSONType::string);
 
     Document positiveTinyInput{{"path1", 1.3e-37}};
-    ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveTinyInput, &expCtx->variables),
-                                   "1.3e-37"_sd,
-                                   BSONType::string);
+    ASSERT_VALUE_CONTENTS_AND_TYPE(
+        convertExp->evaluate(positiveTinyInput, &expCtx->variables), "1.3e-37"sv, BSONType::string);
 
     Document negativeTinyInput{{"path1", -1.3e-37}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeTinyInput, &expCtx->variables),
-                                   "-1.3e-37"_sd,
+                                   "-1.3e-37"sv,
                                    BSONType::string);
 
     Document infinityInput{{"path1", std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(infinityInput, &expCtx->variables), "Infinity"_sd, BSONType::string);
+        convertExp->evaluate(infinityInput, &expCtx->variables), "Infinity"sv, BSONType::string);
 
     Document negativeInfinityInput{{"path1", -std::numeric_limits<double>::infinity()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeInfinityInput, &expCtx->variables),
-                                   "-Infinity"_sd,
+                                   "-Infinity"sv,
                                    BSONType::string);
 
     Document nanInput{{"path1", std::numeric_limits<double>::quiet_NaN()}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "NaN"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "NaN"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, FormatObjectId) {
@@ -3783,12 +3849,12 @@ TEST_F(EvaluateConvertTest, FormatObjectId) {
 
     Document zeroInput{{"path1", OID("000000000000000000000000")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(zeroInput, &expCtx->variables),
-                                   "000000000000000000000000"_sd,
+                                   "000000000000000000000000"sv,
                                    BSONType::string);
 
     Document simpleInput{{"path1", OID("0123456789abcdef01234567")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(simpleInput, &expCtx->variables),
-                                   "0123456789abcdef01234567"_sd,
+                                   "0123456789abcdef01234567"sv,
                                    BSONType::string);
 }
 
@@ -3802,11 +3868,11 @@ TEST_F(EvaluateConvertTest, FormatBool) {
 
     Document trueInput{{"path1", true}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(trueInput, &expCtx->variables), "true"_sd, BSONType::string);
+        convertExp->evaluate(trueInput, &expCtx->variables), "true"sv, BSONType::string);
 
     Document falseInput{{"path1", false}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(falseInput, &expCtx->variables), "false"_sd, BSONType::string);
+        convertExp->evaluate(falseInput, &expCtx->variables), "false"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, FormatDate) {
@@ -3819,12 +3885,12 @@ TEST_F(EvaluateConvertTest, FormatDate) {
 
     Document epochInput{{"path1", Date_t::fromMillisSinceEpoch(0LL)}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(epochInput, &expCtx->variables),
-                                   "1970-01-01T00:00:00.000Z"_sd,
+                                   "1970-01-01T00:00:00.000Z"sv,
                                    BSONType::string);
 
     Document dateInput{{"path1", Date_t::fromMillisSinceEpoch(872835240000)}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(dateInput, &expCtx->variables),
-                                   "1997-08-29T06:14:00.000Z"_sd,
+                                   "1997-08-29T06:14:00.000Z"sv,
                                    BSONType::string);
 }
 
@@ -3838,15 +3904,15 @@ TEST_F(EvaluateConvertTest, FormatInt) {
 
     Document zeroInput{{"path1", int{0}}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(zeroInput, &expCtx->variables), "0"_sd, BSONType::string);
+        convertExp->evaluate(zeroInput, &expCtx->variables), "0"sv, BSONType::string);
 
     Document positiveInput{{"path1", int{1337}}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(positiveInput, &expCtx->variables), "1337"_sd, BSONType::string);
+        convertExp->evaluate(positiveInput, &expCtx->variables), "1337"sv, BSONType::string);
 
     Document negativeInput{{"path1", int{-1337}}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeInput, &expCtx->variables), "-1337"_sd, BSONType::string);
+        convertExp->evaluate(negativeInput, &expCtx->variables), "-1337"sv, BSONType::string);
 }
 
 TEST_F(EvaluateConvertTest, FormatLong) {
@@ -3859,16 +3925,16 @@ TEST_F(EvaluateConvertTest, FormatLong) {
 
     Document zeroInput{{"path1", 0LL}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(zeroInput, &expCtx->variables), "0"_sd, BSONType::string);
+        convertExp->evaluate(zeroInput, &expCtx->variables), "0"sv, BSONType::string);
 
     Document positiveInput{{"path1", 1337133713371337LL}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveInput, &expCtx->variables),
-                                   "1337133713371337"_sd,
+                                   "1337133713371337"sv,
                                    BSONType::string);
 
     Document negativeInput{{"path1", -1337133713371337LL}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeInput, &expCtx->variables),
-                                   "-1337133713371337"_sd,
+                                   "-1337133713371337"sv,
                                    BSONType::string);
 }
 
@@ -3882,102 +3948,100 @@ TEST_F(EvaluateConvertTest, FormatDecimal) {
 
     Document zeroInput{{"path1", Decimal128("0")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(zeroInput, &expCtx->variables), "0"_sd, BSONType::string);
+        convertExp->evaluate(zeroInput, &expCtx->variables), "0"sv, BSONType::string);
 
     Document negativeZeroInput{{"path1", Decimal128("-0")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeZeroInput, &expCtx->variables), "-0"_sd, BSONType::string);
+        convertExp->evaluate(negativeZeroInput, &expCtx->variables), "-0"sv, BSONType::string);
 
     Document preciseZeroInput{{"path1", Decimal128("0.0")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(preciseZeroInput, &expCtx->variables), "0.0"_sd, BSONType::string);
+        convertExp->evaluate(preciseZeroInput, &expCtx->variables), "0.0"sv, BSONType::string);
 
     Document negativePreciseZeroInput{{"path1", Decimal128("-0.0")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(negativePreciseZeroInput, &expCtx->variables),
-        "-0.0"_sd,
+        "-0.0"sv,
         BSONType::string);
 
     Document extraPreciseZeroInput{{"path1", Decimal128("0.0000")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(extraPreciseZeroInput, &expCtx->variables),
-                                   "0.0000"_sd,
+                                   "0.0000"sv,
                                    BSONType::string);
 
     Document positiveIntegerInput{{"path1", Decimal128("1337")}};
-    ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveIntegerInput, &expCtx->variables),
-                                   "1337"_sd,
-                                   BSONType::string);
+    ASSERT_VALUE_CONTENTS_AND_TYPE(
+        convertExp->evaluate(positiveIntegerInput, &expCtx->variables), "1337"sv, BSONType::string);
 
     Document largeIntegerInput{{"path1", Decimal128("13370000000000000000000000000000000")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(largeIntegerInput, &expCtx->variables),
-                                   "1.337000000000000000000000000000000E+34"_sd,
+                                   "1.337000000000000000000000000000000E+34"sv,
                                    BSONType::string);
 
     Document negativeIntegerInput{{"path1", Decimal128("-1337")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeIntegerInput, &expCtx->variables),
-                                   "-1337"_sd,
+                                   "-1337"sv,
                                    BSONType::string);
 
     Document positiveFractionalInput{{"path1", Decimal128("0.1337")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(positiveFractionalInput, &expCtx->variables),
-        "0.1337"_sd,
+        "0.1337"sv,
         BSONType::string);
 
     Document positivePreciseFractionalInput{{"path1", Decimal128("0.133700")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(positivePreciseFractionalInput, &expCtx->variables),
-        "0.133700"_sd,
+        "0.133700"sv,
         BSONType::string);
 
     Document negativeFractionalInput{{"path1", Decimal128("-0.1337")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(negativeFractionalInput, &expCtx->variables),
-        "-0.1337"_sd,
+        "-0.1337"sv,
         BSONType::string);
 
     Document negativePreciseFractionalInput{{"path1", Decimal128("-0.133700")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
         convertExp->evaluate(negativePreciseFractionalInput, &expCtx->variables),
-        "-0.133700"_sd,
+        "-0.133700"sv,
         BSONType::string);
 
     Document positiveLargeInput{{"path1", Decimal128("1.3e37")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveLargeInput, &expCtx->variables),
-                                   "1.3E+37"_sd,
+                                   "1.3E+37"sv,
                                    BSONType::string);
 
     Document negativeLargeInput{{"path1", Decimal128("-1.3e37")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeLargeInput, &expCtx->variables),
-                                   "-1.3E+37"_sd,
+                                   "-1.3E+37"sv,
                                    BSONType::string);
 
     Document positiveTinyInput{{"path1", Decimal128("1.3e-37")}};
-    ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(positiveTinyInput, &expCtx->variables),
-                                   "1.3E-37"_sd,
-                                   BSONType::string);
+    ASSERT_VALUE_CONTENTS_AND_TYPE(
+        convertExp->evaluate(positiveTinyInput, &expCtx->variables), "1.3E-37"sv, BSONType::string);
 
     Document negativeTinyInput{{"path1", Decimal128("-1.3e-37")}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeTinyInput, &expCtx->variables),
-                                   "-1.3E-37"_sd,
+                                   "-1.3E-37"sv,
                                    BSONType::string);
 
     Document infinityInput{{"path1", Decimal128::kPositiveInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(infinityInput, &expCtx->variables), "Infinity"_sd, BSONType::string);
+        convertExp->evaluate(infinityInput, &expCtx->variables), "Infinity"sv, BSONType::string);
 
     Document negativeInfinityInput{{"path1", Decimal128::kNegativeInfinity}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(convertExp->evaluate(negativeInfinityInput, &expCtx->variables),
-                                   "-Infinity"_sd,
+                                   "-Infinity"sv,
                                    BSONType::string);
 
     Document nanInput{{"path1", Decimal128::kPositiveNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(nanInput, &expCtx->variables), "NaN"_sd, BSONType::string);
+        convertExp->evaluate(nanInput, &expCtx->variables), "NaN"sv, BSONType::string);
 
     Document negativeNaNInput{{"path1", Decimal128::kNegativeNaN}};
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "NaN"_sd, BSONType::string);
+        convertExp->evaluate(negativeNaNInput, &expCtx->variables), "NaN"sv, BSONType::string);
 }
 
 Value runConvertBinDataToNumeric(boost::intrusive_ptr<ExpressionContextForTest> expCtx,
@@ -4403,6 +4467,200 @@ TEST_F(EvaluateConvertTest, ConvertDoubleToBinDataQuietNan) {
                         {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
 }
 
+TEST_F(EvaluateConvertTest, ConvertToBinDataByteArrayDeprecatedSubtypeBanned) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 2)
+                                        << "format" << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    Document input{{"path1", "AAAAAAAAAAAAAAAAAAAAAA=="sv}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016800);
+}
+
+TEST_F(EvaluateConvertTest, ConvertToBinDataEncryptSubtypeBanned) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 6)
+                                        << "format" << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    Document input{{"path1", "AAAAAAAAAAAAAAAAAAAAAA=="sv}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016801);
+}
+
+TEST_F(EvaluateConvertTest, ConvertToBinDataBdtUUIDWrongSizeFails) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 3)
+                                        << "format" << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    // "AAAAAA==" base64-decodes to 4 bytes, not the required 16.
+    Document input{{"path1", "AAAAAA=="sv}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertToBinDataMD5TypeWrongSizeFails) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 5)
+                                        << "format" << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    // "AAAAAA==" base64-decodes to 4 bytes, not the required 16.
+    Document input{{"path1", "AAAAAA=="sv}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertIntToBinDataBdtUUIDFailsSizeCheck) {
+    auto expCtx = getExpCtx();
+    auto convertExp =
+        Expression::parseExpression(expCtx.get(),
+                                    fromjson("{$convert: {input: '$path1', to: {type: 'binData', "
+                                             "subtype: 3}, byteOrder: 'little'}}"),
+                                    expCtx->variablesParseState);
+    // int32 is 4 bytes; bdtUUID requires exactly 16.
+    ASSERT_THROWS_CODE(convertExp->evaluate({{"path1", Value(42)}}, &expCtx->variables),
+                       AssertionException,
+                       13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertLongToBinDataMD5TypeFailsSizeCheck) {
+    auto expCtx = getExpCtx();
+    auto convertExp =
+        Expression::parseExpression(expCtx.get(),
+                                    fromjson("{$convert: {input: '$path1', to: {type: 'binData', "
+                                             "subtype: 5}, byteOrder: 'little'}}"),
+                                    expCtx->variablesParseState);
+    // int64 is 8 bytes; MD5Type requires exactly 16.
+    ASSERT_THROWS_CODE(convertExp->evaluate({{"path1", Value(42LL)}}, &expCtx->variables),
+                       AssertionException,
+                       13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertDoubleToBinDataBdtUUIDFailsSizeCheck) {
+    auto expCtx = getExpCtx();
+    auto convertExp =
+        Expression::parseExpression(expCtx.get(),
+                                    fromjson("{$convert: {input: '$path1', to: {type: 'binData', "
+                                             "subtype: 3}, byteOrder: 'little'}}"),
+                                    expCtx->variablesParseState);
+    // double is 8 bytes; bdtUUID requires exactly 16.
+    ASSERT_THROWS_CODE(convertExp->evaluate({{"path1", Value(1.5)}}, &expCtx->variables),
+                       AssertionException,
+                       13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertLongToBinDataNewUUIDFailsSizeCheck) {
+    auto expCtx = getExpCtx();
+    auto convertExp =
+        Expression::parseExpression(expCtx.get(),
+                                    fromjson("{$convert: {input: '$path1', to: {type: 'binData', "
+                                             "subtype: 4}, byteOrder: 'little'}}"),
+                                    expCtx->variablesParseState);
+    ASSERT_THROWS_CODE(convertExp->evaluate({{"path1", Value(42LL)}}, &expCtx->variables),
+                       AssertionException,
+                       13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertBinDataToBinDataWrongSizeUUIDIdentityRejected) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 4))),
+        expCtx->variablesParseState);
+    auto shortUuid = BSONBinData("AAAAAAAA", 8, BinDataType::newUUID);
+    Document input{{"path1", shortUuid}};
+    ASSERT_THROWS_CODE(
+        convertExp->evaluate(input, &expCtx->variables), AssertionException, 13016802);
+}
+
+TEST_F(EvaluateConvertTest, ConvertToBinDataSensitiveSubtypeAllowed) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 8)
+                                        << "format" << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    Document input{{"path1", "AAAAAAAAAAAAAAAAAAAAAA=="sv}};
+    auto result = convertExp->evaluate(input, &expCtx->variables);
+    ASSERT_EQ(result.getType(), BSONType::binData);
+    ASSERT_EQ(result.getBinData().type, BinDataType::Sensitive);
+}
+
+TEST_F(EvaluateConvertTest, ConvertBinDataToBinDataSensitiveIdentityAllowed) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 8))),
+        expCtx->variablesParseState);
+    auto sensitive = BSONBinData("gf1UcxdHTJ2HQ/EGQrO7mQ==", 16, BinDataType::Sensitive);
+    Document input{{"path1", sensitive}};
+    ASSERT_VALUE_EQ(convertExp->evaluate(input, &expCtx->variables), Value(sensitive));
+}
+
+TEST_F(EvaluateConvertTest, ConvertBinDataToBinDataFunctionIdentityAllowed) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << "$path1"
+                                        << "to" << BSON("type" << "binData" << "subtype" << 1))),
+        expCtx->variablesParseState);
+    auto function = BSONBinData("abc", 3, BinDataType::Function);
+    Document input{{"path1", function}};
+    ASSERT_VALUE_EQ(convertExp->evaluate(input, &expCtx->variables), Value(function));
+}
+
+TEST_F(EvaluateConvertTest, ConvertArrayToBinDataBannedSubtypeRejected) {
+    auto expCtx = getExpCtx();
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << BSON_ARRAY(1 << 5 << 10) << "to"
+                                        << BSON("type" << "binData" << "subtype" << 7) << "format"
+                                        << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    ASSERT_THROWS_CODE(convertExp->evaluate({}, &expCtx->variables), AssertionException, 12910300);
+}
+
+TEST_F(EvaluateConvertTest, ConvertArrayToBinDataAllowedNonVectorSubtypeProducesVector) {
+    auto expCtx = getExpCtx();
+    // Array conversion always yields a Vector. An allowed non-vector subtype is accepted and
+    // ignored.
+    auto convertExp = Expression::parseExpression(
+        expCtx.get(),
+        BSON("$convert" << BSON("input" << BSON_ARRAY(1 << 5 << 10) << "to"
+                                        << BSON("type" << "binData" << "subtype" << 8) << "format"
+                                        << toStringData(BinDataFormat::kBase64))),
+        expCtx->variablesParseState);
+    auto result = convertExp->evaluate({}, &expCtx->variables);
+    ASSERT_EQ(result.getType(), BSONType::binData);
+    ASSERT_EQ(result.getBinData().type, BinDataType::Vector);
+}
+
+TEST_F(EvaluateConvertTest, ConvertObjectToBinDataFunctionSubtypeAllowed) {
+    auto expCtx = getExpCtx();
+
+    auto spec = fromjson("{$convert: {input: '$path1', to: {type: 'binData', subtype: 1}}}");
+    auto convertExp = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
+
+    Document input{{"path1", Document{{"a", "a"sv}}}};
+    auto expectedBson = BSON("a" << "a");
+    ASSERT_VALUE_EQ(
+        convertExp->evaluate(input, &expCtx->variables),
+        Value(BSONBinData(expectedBson.objdata(), expectedBson.objsize(), BinDataType::Function)));
+}
 
 }  // namespace evaluate_convert_test
 
@@ -4532,7 +4790,7 @@ TEST_F(EvaluateConvertShortcutTest, ConvertsToDates) {
 TEST_F(EvaluateConvertShortcutTest, ConvertsToObjectIds) {
     auto expCtx = getExpCtx();
 
-    const auto hexString = "deadbeefdeadbeefdeadbeef"_sd;
+    const auto hexString = "deadbeefdeadbeefdeadbeef"sv;
     BSONObj spec = BSON("$toObjectId" << hexString);
     auto convert = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
     ASSERT_TRUE(dynamic_cast<ExpressionConvert*>(convert.get()));
@@ -4548,7 +4806,7 @@ TEST_F(EvaluateConvertShortcutTest, ConvertsToString) {
     auto convert = Expression::parseExpression(expCtx.get(), spec, expCtx->variablesParseState);
     ASSERT_TRUE(dynamic_cast<ExpressionConvert*>(convert.get()));
     ASSERT_VALUE_CONTENTS_AND_TYPE(
-        convert->evaluate({}, &expCtx->variables), Value("1"_sd), BSONType::string);
+        convert->evaluate({}, &expCtx->variables), Value("1"sv), BSONType::string);
 }
 
 TEST_F(EvaluateConvertShortcutTest, ConvertsToBool) {
@@ -4653,7 +4911,6 @@ TEST(ExpressionConvert, StringToDouble) {
  */
 
 TEST(ExpressionConvertTest, CanRoundTripBitArrays) {
-    RAIIServerParameterControllerForTest convertFlag{"featureFlagConvertBinDataVectors", true};
 
     auto expCtx = ExpressionContextForTest{};
 
@@ -4699,7 +4956,6 @@ TEST(ExpressionConvertTest, CanRoundTripBitArrays) {
 }
 
 TEST(ExpressionConvertTest, CanRoundTripIntArray) {
-    RAIIServerParameterControllerForTest convertFlag{"featureFlagConvertBinDataVectors", true};
 
     auto expCtx = ExpressionContextForTest{};
     auto originalArray = Value(BSON_ARRAY(1 << 5 << 10 << 24 << -30 << 79 << 83));
@@ -4723,7 +4979,6 @@ TEST(ExpressionConvertTest, CanRoundTripIntArray) {
 }
 
 TEST(ExpressionConvertTest, CanRoundTripIntArrayHexFormat) {
-    RAIIServerParameterControllerForTest convertFlag{"featureFlagConvertBinDataVectors", true};
 
     auto expCtx = ExpressionContextForTest{};
     auto originalArray = Value(BSON_ARRAY(1 << 5 << 10 << 24 << -30 << 79 << 83));
@@ -4766,7 +5021,6 @@ BSONArray createBsonArrayFromFloats(std::vector<double> arr) {
 }
 
 TEST(ExpressionConvertTest, CanRoundTripFloatArray) {
-    RAIIServerParameterControllerForTest convertFlag{"featureFlagConvertBinDataVectors", true};
 
     auto expCtx = ExpressionContextForTest{};
     auto bsonArray = createBsonArrayFromFloats({10.3, 5.87, 10.10294, 24.1, -30.2, 79, 83});
@@ -4791,7 +5045,6 @@ TEST(ExpressionConvertTest, CanRoundTripFloatArray) {
 }
 
 TEST(ExpressionConvertTest, CanRoundTripFloatArrayBigEndian) {
-    RAIIServerParameterControllerForTest convertFlag{"featureFlagConvertBinDataVectors", true};
     auto expCtx = ExpressionContextForTest{};
 
     auto bsonArray = createBsonArrayFromFloats({10.3, 5.87, 10.10294, 24.1, -30.2, 79, 83});

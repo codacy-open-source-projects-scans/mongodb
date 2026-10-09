@@ -2,6 +2,7 @@
  * Tests that SBE builds traverseF instructions in leading $match when the filter needs nothing check, even when path arrayness information is available.
  *
  * @tags: [
+ *    uses_explain,
  *    assumes_against_mongod_not_mongos,
  *    # Explain command does not support read concerns other than local.
  *    assumes_read_concern_local,
@@ -11,7 +12,7 @@
  *    does_not_support_stepdowns,
  *    # Explain for the aggregate command cannot run within a multi-document transaction
  *    does_not_support_transactions,
- *    featureFlagPathArrayness
+ *    requires_fcv_90
  * ]
  */
 
@@ -61,7 +62,12 @@ const queries = [
                                 {
                                     "a": {
                                         "$elemMatch": {
-                                            "$and": [{"m.m2": {"$in": [null]}, "a": {"$eq": NumberInt(0)}}],
+                                            "$and": [
+                                                {
+                                                    "m.m2": {"$in": [null]},
+                                                    "a": {"$eq": NumberInt(0)},
+                                                },
+                                            ],
                                             "a": {"$eq": NumberInt(0)},
                                         },
                                     },

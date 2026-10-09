@@ -65,9 +65,8 @@ export var ShardingOverrideCommon = (function () {
      * @returns nothing
      */
     function shardCollectionWithSpec({db, collName, shardKey, timeseriesSpec}) {
-        // Only attempt to shard if this operation is running on a mongos or a mongod with replica
-        // set endpoint enabled.
-        if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
+        // Only attempt to shard if this operation is running on a mongos.
+        if (!FixtureHelpers.isMongos(db)) {
             return;
         }
 
@@ -107,7 +106,10 @@ export var ShardingOverrideCommon = (function () {
                 // unsharded.
                 assert.commandFailedWithCode(res, ErrorCodes.ConflictingOperationInProgress);
                 jsTest.log(
-                    "Ignoring failure while " + opDescription + " due to a concurrent drop operation: " + tojson(res),
+                    "Ignoring failure while " +
+                        opDescription +
+                        " due to a concurrent drop operation: " +
+                        tojson(res),
                 );
             } else {
                 assert.commandWorked(res, opDescription + " failed");

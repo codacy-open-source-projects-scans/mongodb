@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/async_client.h"
 #include "mongo/db/server_options.h"
@@ -59,6 +33,7 @@
 #include "mongo/util/scopeguard.h"
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <fcntl.h>
@@ -70,10 +45,12 @@
 
 namespace mongo::transport::grpc {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class GRPCTransportLayerTest : public ServiceContextTest {
 public:
     void setUp() override {
+        ServiceContextTest::setUp();
         auto svcCtx = getServiceContext();
 
         // Default SEP behavior is to fail.
@@ -95,6 +72,7 @@ public:
 
     void tearDown() override {
         ServiceExecutor::shutdownAll(getServiceContext(), Seconds{10});
+        ServiceContextTest::tearDown();
     }
 
     virtual std::unique_ptr<PeriodicRunner> newPeriodicRunner() {
@@ -203,9 +181,9 @@ public:
      * message from the client to the server, which responds back to the client with the same
      * message.
      */
-    void runCommandThroughServiceEntryPoint(StringData message) {
-        constexpr auto kCommandName = "mockCommand"_sd;
-        constexpr auto kReplyField = "mockReply"_sd;
+    void runCommandThroughServiceEntryPoint(std::string_view message) {
+        constexpr auto kCommandName = "mockCommand"sv;
+        constexpr auto kReplyField = "mockReply"sv;
         serviceEntryPoint->handleRequestCb = [&](OperationContext*,
                                                  const Message& request) -> Future<DbResponse> {
             ASSERT_EQ(OpMsg::parse(request).body.firstElement().fieldName(), kCommandName);
@@ -278,6 +256,31 @@ TEST_F(GRPCTransportLayerTest, setupIngressWithoutTLSShouldFail) {
 
     auto tl = makeTL(makeNoopRPCHandler(), std::move(options));
     ASSERT_EQ(ErrorCodes::InvalidOptions, tl->setup());
+}
+
+TEST_F(GRPCTransportLayerTest, startupEgressWithClusterPassword) {
+    sslGlobalParams.sslClusterPassword = "qwerty";
+    sslGlobalParams.sslClusterFile = "jstests/libs/password_protected.pem";
+    createAndStartupTL(false, true);
+}
+
+TEST_F(GRPCTransportLayerTest, startupEgressWithPEMKeyPassword) {
+    sslGlobalParams.sslPEMKeyPassword = "qwerty";
+    sslGlobalParams.sslPEMKeyFile = "jstests/libs/password_protected.pem";
+    createAndStartupTL(false, true);
+}
+
+TEST_F(GRPCTransportLayerTest, startupEgressWithIncorrectSSLPasswordShouldFail) {
+    sslGlobalParams.sslPEMKeyPassword = "wrong!";
+    sslGlobalParams.sslPEMKeyFile = "jstests/libs/password_protected.pem";
+
+    auto options = CommandServiceTestFixtures::makeTLOptions();
+    options.enableIngress = false;
+    options.enableEgress = true;
+    auto tl = makeTL(makeNoopRPCHandler(), std::move(options));
+    ASSERT_OK(tl->setup());
+    ASSERT_EQ(ErrorCodes::InvalidSSLConfiguration, tl->start());
+    tl->shutdown();
 }
 
 using GRPCTransportLayerTestDeathTest = GRPCTransportLayerTest;
@@ -413,6 +416,7 @@ public:
 
     void tearDown() override {
         _tl.reset();
+        GRPCTransportLayerTest::tearDown();
     }
 
     GRPCTransportLayer& transportLayer() {
@@ -530,7 +534,7 @@ TEST_F(GRPCTransportLayerTest, ConcurrentAsyncConnectsSucceed) {
                     tl.asyncConnect(tl.getListeningAddresses().at(0),
                                     ConnectSSLMode::kGlobalSSLMode,
                                     tl.getReactor(TransportLayer::WhichReactor::kEgress),
-                                    CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                    CommandServiceTestFixtures::kConcurrentConnectTimeout,
                                     nullptr /** connectionMetrics */,
                                     nullptr /** transientSSLContext */));
             }
@@ -929,7 +933,9 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest,
             SSLConfiguration newConfig{};
             newConfig.serverCertificateExpirationDate =
                 Date_t::fromDurationSinceEpoch(Milliseconds(1234));
-            ASSERT_EQ(client->rotateCertificates(newConfig), ErrorCodes::InvalidSSLConfiguration);
+            ASSERT_EQ(client->rotateCertificates(newConfig,
+                                                 *(SSLManagerCoordinator::get()->getSSLManager())),
+                      ErrorCodes::InvalidSSLConfiguration);
 
             // Make sure we can still connect with the initial certs used before the bad
             // rotation.
@@ -999,7 +1005,8 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest, ClientUsesOldCertsUntilRotate) 
 
             SSLConfiguration newConfig{};
             newConfig.serverCertificateExpirationDate = Date_t::fromMillisSinceEpoch(1234);
-            ASSERT_OK(client->rotateCertificates(newConfig));
+            ASSERT_OK(client->rotateCertificates(newConfig,
+                                                 *(SSLManagerCoordinator::get()->getSSLManager())));
             auto swSession =
                 client
                     ->connect(addr, reactor, CommandServiceTestFixtures::kDefaultConnectTimeout, {})

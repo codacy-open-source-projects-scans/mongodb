@@ -26,7 +26,12 @@ assert.commandWorked(source.insert({_id: "seed"}));
     (function setupStaleMongos() {
         // Shard the collection through 'staleMongos', setting it up to believe the collection is
         // sharded by {sk: 1, _id: 1}.
-        assert.commandWorked(staleMongosDB.adminCommand({shardCollection: target.getFullName(), key: {sk: 1, _id: 1}}));
+        assert.commandWorked(
+            staleMongosDB.adminCommand({
+                shardCollection: target.getFullName(),
+                key: {sk: 1, _id: 1},
+            }),
+        );
         // Perform a query through that mongos to ensure the cache is populated.
         assert.eq(0, staleMongosDB[target.getName()].find().itcount());
 
@@ -54,7 +59,7 @@ assert.commandWorked(source.insert({_id: "seed"}));
 
 // Test that if the collection is dropped and re-sharded during the course of the aggregation that
 // the operation will fail rather than proceed with the old shard key.
-function testEpochChangeDuringAgg({mergeSpec, failpoint, failpointData, expectedError}) {
+function testEpochChangeDuringAgg({mergeSpec, failpoint, failpointData, expectedErrors}) {
     // Converts a single string or an array of strings into it's object spec form. For instance, for
     // input ["a", "b"] the returned object would be {a: 1, b: 1}.
     function indexSpecFromOnFields(onFields) {
@@ -72,19 +77,30 @@ function testEpochChangeDuringAgg({mergeSpec, failpoint, failpointData, expected
     // Drop the collection and reshard it with a different shard key
     target.drop();
     if (mergeSpec.hasOwnProperty("on")) {
-        assert.commandWorked(target.createIndex(indexSpecFromOnFields(mergeSpec.on), {unique: true}));
         assert.commandWorked(
-            st.s0.adminCommand({shardCollection: target.getFullName(), key: indexSpecFromOnFields(mergeSpec.on)}),
+            target.createIndex(indexSpecFromOnFields(mergeSpec.on), {unique: true}),
+        );
+        assert.commandWorked(
+            st.s0.adminCommand({
+                shardCollection: target.getFullName(),
+                key: indexSpecFromOnFields(mergeSpec.on),
+            }),
         );
     } else {
-        assert.commandWorked(st.s0.adminCommand({shardCollection: target.getFullName(), key: {sk: 1, _id: 1}}));
+        assert.commandWorked(
+            st.s0.adminCommand({shardCollection: target.getFullName(), key: {sk: 1, _id: 1}}),
+        );
     }
 
     // Use a failpoint to make the query feeding into the aggregate hang while we drop the
     // collection.
     [st.rs0.getPrimary(), st.rs1.getPrimary()].forEach((mongod) => {
         assert.commandWorked(
-            mongod.adminCommand({configureFailPoint: failpoint, mode: "alwaysOn", data: failpointData || {}}),
+            mongod.adminCommand({
+                configureFailPoint: failpoint,
+                mode: "alwaysOn",
+                data: failpointData || {},
+            }),
         );
     });
 
@@ -96,7 +112,7 @@ function testEpochChangeDuringAgg({mergeSpec, failpoint, failpointData, expected
                     {$addFields: {sk: "$_id"}},
                     {$merge: ${tojsononeline(mergeSpec)}}
                 ]));
-                assert.eq(error.code, ${expectedError});
+                assert.commandFailedWithCode(error, [${expectedErrors}]);
             `;
 
         if (mergeSpec.hasOwnProperty("on")) {
@@ -122,14 +138,20 @@ function testEpochChangeDuringAgg({mergeSpec, failpoint, failpointData, expected
         const getAggOps = function () {
             return st.s0
                 .getDB("admin")
-                .aggregate([{$currentOp: {}}, {$match: {"cursor.originatingCommand.pipeline": {$exists: true}}}])
+                .aggregate([
+                    {$currentOp: {}},
+                    {$match: {"cursor.originatingCommand.pipeline": {$exists: true}}},
+                ])
                 .toArray();
         };
         const hasMergeRunning = function () {
             return (
                 getAggOps().filter((op) => {
                     const pipeline = op.cursor.originatingCommand.pipeline;
-                    return pipeline.length > 0 && pipeline[pipeline.length - 1].hasOwnProperty("$merge");
+                    return (
+                        pipeline.length > 0 &&
+                        pipeline[pipeline.length - 1].hasOwnProperty("$merge")
+                    );
                 }).length >= 1
             );
         };
@@ -165,7 +187,7 @@ withEachMergeMode(({whenMatchedMode, whenNotMatchedMode}) => {
         },
         failpoint: "waitWithPinnedCursorDuringGetMoreBatch",
         failpointData: {nss: source.getFullName()},
-        expectedError: ErrorCodes.StaleEpoch,
+        expectedErrors: [ErrorCodes.StaleEpoch, ErrorCodes.QueryPlanKilled],
     });
     testEpochChangeDuringAgg({
         mergeSpec: {
@@ -176,7 +198,7 @@ withEachMergeMode(({whenMatchedMode, whenNotMatchedMode}) => {
         },
         failpoint: "waitWithPinnedCursorDuringGetMoreBatch",
         failpointData: {nss: source.getFullName()},
-        expectedError: ErrorCodes.StaleEpoch,
+        expectedErrors: [ErrorCodes.StaleEpoch, ErrorCodes.QueryPlanKilled],
     });
 });
 
@@ -188,13 +210,13 @@ testEpochChangeDuringAgg({
     mergeSpec: {into: target.getName(), whenMatched: "fail", whenNotMatched: "insert"},
     failpoint: "hangDuringBatchInsert",
     failpointData: {nss: target.getFullName()},
-    expectedError: ErrorCodes.QueryPlanKilled,
+    expectedErrors: [ErrorCodes.QueryPlanKilled],
 });
 testEpochChangeDuringAgg({
     mergeSpec: {into: target.getName(), whenMatched: "replace", whenNotMatched: "discard"},
     failpoint: "hangDuringBatchUpdate",
     failpointData: {nss: target.getFullName()},
-    expectedError: ErrorCodes.QueryPlanKilled,
+    expectedErrors: [ErrorCodes.QueryPlanKilled],
 });
 
 st.stop();

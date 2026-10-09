@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/host/load_extension.h"
 
-#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/extension/host/host_portal.h"
 #include "mongo/db/extension/host/load_stub_parsers.h"
 #include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
@@ -43,12 +16,27 @@
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/shared_library.h"
+#include "mongo/util/errno_util.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 
+#include <algorithm>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include <fcntl.h>
+#ifdef __linux__
+#include <unistd.h>
+#endif
+
+#include <fmt/format.h>
+#ifdef __linux__
+#include <sys/stat.h>
+#endif
 
 #ifdef MONGO_HOST_EXTENSIONS_COMPATIBLE
 #include "mongo/db/extension/host/signature_validator.h"
@@ -59,60 +47,72 @@
 namespace mongo::extension::host {
 namespace {
 
-const std::filesystem::path& getExtensionConfDir() {
-    // Use /tmp/mongo/extensions in test environments, otherwise use /etc/mongo/extensions.
-    static const std::filesystem::path kExtensionConfDir = getTestCommandsEnabled()
-        ? std::filesystem::temp_directory_path() / ExtensionLoader::kExtensionConfigPathSuffix
-        : ExtensionLoader::kExtensionConfigPath;
+void verifyConfigPathPermissions(const std::string& extensionName, const std::string& path) {
+#ifdef __linux__
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    uassert(13011803,
+            fmt::format("Loading extension '{}' failed: could not open config path '{}': {}",
+                        extensionName,
+                        path,
+                        errorMessage(lastSystemError())),
+            fd >= 0);
+    ScopeGuard closeFd = [&] {
+        ::close(fd);
+    };
 
-    return kExtensionConfDir;
-}
-
-void assertVersionCompatibility(const ::MongoExtensionAPIVersionVector* hostVersions,
-                                const ::MongoExtensionAPIVersion& extensionVersion) {
-    bool foundCompatibleMajor = false;
-    bool foundCompatibleMinor = false;
-
-    for (uint64_t i = 0; i < hostVersions->len; ++i) {
-        const auto& hostVersion = hostVersions->versions[i];
-        if (hostVersion.major == extensionVersion.major) {
-            foundCompatibleMajor = true;
-            if (hostVersion.minor >= extensionVersion.minor) {
-                foundCompatibleMinor = true;
-                break;
-            }
-        }
-    }
-
-    uassert(10615504,
-            mongo::str::stream() << "Failed to load extension: Invalid API major version; expected "
-                                 << extensionVersion.major
-                                 << " to match one of the host major versions",
-            foundCompatibleMajor);
-
-    uassert(10615505,
-            mongo::str::stream()
-                << "Failed to load extension: Incompatible API minor version; expected "
-                << extensionVersion.minor
-                << " to be no greater than the maximum minor version for major version "
-                << extensionVersion.major,
-            foundCompatibleMinor);
+    struct stat fileStat;
+    uassert(13011800,
+            fmt::format("Failed to verify extension config path '{}': fstat failed: {}",
+                        path,
+                        errorMessage(lastSystemError())),
+            ::fstat(fd, &fileStat) == 0);
+    uassert(13011801,
+            fmt::format("Failed to verify extension config path '{}': must be owned by root or "
+                        "the server's user",
+                        path),
+            fileStat.st_uid == 0 || fileStat.st_uid == ::geteuid());
+    uassert(13011802,
+            fmt::format("Failed to verify extension config path '{}': must not be writable by "
+                        "group or other users",
+                        path),
+            (fileStat.st_mode & (S_IWGRP | S_IWOTH)) == 0);
+#endif
 }
 
 host_connector::ExtensionHandle getMongoExtension(SharedLibrary& extensionLib,
                                                   const std::string& extensionPath) {
-    StatusWith<get_mongo_extension_t> swGetExtensionFunction =
-        extensionLib.getFunctionAs<get_mongo_extension_t>(GET_MONGODB_EXTENSION_SYMBOL);
+    StatusWith<get_mongodb_extension_versions_t> swGetVersionsFn =
+        extensionLib.getFunctionAs<get_mongodb_extension_versions_t>(
+            GET_MONGODB_EXTENSION_VERSIONS_SYMBOL);
     uassert(10615501,
             str::stream() << "Loading extension '" << extensionPath
-                          << "' failed: " << swGetExtensionFunction.getStatus().reason(),
-            swGetExtensionFunction.isOK());
+                          << "' failed: " << swGetVersionsFn.getStatus().reason(),
+            swGetVersionsFn.isOK());
 
+    StatusWith<get_mongo_extension_t> swGetExtensionFn =
+        extensionLib.getFunctionAs<get_mongo_extension_t>(GET_MONGODB_EXTENSION_SYMBOL);
+    uassert(12688600,
+            str::stream() << "Loading extension '" << extensionPath
+                          << "' failed: " << swGetExtensionFn.getStatus().reason(),
+            swGetExtensionFn.isOK());
+
+    // Phase 1: extension publishes the API versions it implements. The contract is noexcept;
+    // any thrown exception inside the extension is swallowed at its boundary and surfaces here
+    // as an empty version vector, which then fails the negotiation step below.
+    ::MongoExtensionAPIVersionVector extensionVersions{.len = 0, .versions = nullptr};
+    swGetVersionsFn.getValue()(&extensionVersions);
+
+    // Host-side version negotiation: pick the compatible version of the extension.
+    const ::MongoExtensionAPIVersion compatibleVersion =
+        selectCompatibleVersion(MONGO_EXTENSION_API_VERSIONS_SUPPORTED, extensionVersions);
+
+    // Phase 2: extension instantiates at the chosen version, receiving the matching
+    // HostServices. Currently, a single major version is supported, so HostServicesAdapter::get()
+    // is guaranteed to be the compatible API.
     const ::MongoExtension* extension = nullptr;
     invokeCAndConvertStatusToException([&]() {
-        return swGetExtensionFunction.getValue()(&MONGO_EXTENSION_API_VERSIONS_SUPPORTED,
-                                                 &host_connector::HostServicesAdapter::get(),
-                                                 &extension);
+        return swGetExtensionFn.getValue()(
+            compatibleVersion, &host_connector::HostServicesAdapter::get(), &extension);
     });
     uassert(10615503,
             str::stream() << "Failed to load extension '" << extensionPath
@@ -122,6 +122,51 @@ host_connector::ExtensionHandle getMongoExtension(SharedLibrary& extensionLib,
     return host_connector::ExtensionHandle{extension};
 }
 }  // namespace
+
+::MongoExtensionAPIVersion selectCompatibleVersion(
+    const ::MongoExtensionAPIVersionVector& hostVersions,
+    const ::MongoExtensionAPIVersionVector& extensionVersions) {
+    uassert(12688601,
+            "Failed to load extension: the extension published a null API version list",
+            extensionVersions.versions != nullptr);
+
+    uassert(12688602,
+            "Failed to load extension: the extension published an empty API version list",
+            extensionVersions.len > 0);
+
+    // Sort a copy of the extension's published versions in descending (major, minor) order so we
+    // can early-return on the first compatible match.
+    std::vector<::MongoExtensionAPIVersion> sortedExtensionVersions(
+        extensionVersions.versions, extensionVersions.versions + extensionVersions.len);
+    std::sort(sortedExtensionVersions.begin(),
+              sortedExtensionVersions.end(),
+              [](const ::MongoExtensionAPIVersion& a, const ::MongoExtensionAPIVersion& b) {
+                  return std::tie(a.major, a.minor) > std::tie(b.major, b.minor);
+              });
+
+    const auto hostVersionsSpan = std::span(hostVersions.versions, hostVersions.len);
+    bool sawMatchingMajor = false;
+    for (const auto& extVersion : sortedExtensionVersions) {
+        for (const auto& hostVersion : hostVersionsSpan) {
+            if (hostVersion.major == extVersion.major) {
+                sawMatchingMajor = true;
+                if (hostVersion.minor >= extVersion.minor) {
+                    return extVersion;
+                }
+            }
+        }
+    }
+
+    uassert(10615504,
+            mongo::str::stream() << "Failed to load extension: no API major version published by "
+                                    "the extension matches a host-supported major version",
+            sawMatchingMajor);
+
+    uasserted(10615505,
+              mongo::str::stream()
+                  << "Failed to load extension: extension's API minor version exceeds the host's "
+                     "maximum supported minor for every matching major");
+}
 
 stdx::unordered_map<std::string, LoadedExtension> ExtensionLoader::loadedExtensions;
 
@@ -170,13 +215,21 @@ ExtensionConfig ExtensionLoader::loadExtensionConfig(const std::string& extensio
             !extensionName.empty() && extensionName.find('/') == std::string::npos &&
                 extensionName.find('\\') == std::string::npos);
 
-    const auto confPath = getExtensionConfDir() / std::string(extensionName + ".conf");
+    uassert(12773200,
+            "No extensionsConfigPath was provided",
+            !serverGlobalParams.extensionsConfigPath.empty());
+    const auto confDir = std::filesystem::path(serverGlobalParams.extensionsConfigPath);
+    verifyConfigPathPermissions(extensionName, confDir.string());
+
+    const auto confPath = confDir / std::string(extensionName + ".conf");
 
     uassert(11042900,
             str::stream() << "Loading extension '" << extensionName
                           << "' failed: Expected configuration file not found at '"
                           << confPath.string() << "'",
             std::filesystem::exists(confPath));
+
+    verifyConfigPathPermissions(extensionName, confPath.string());
 
     const auto root = [&] {
         try {
@@ -229,13 +282,23 @@ void ExtensionLoader::load(const std::string& name,
             str::stream() << "Loading extension '" << name << "' failed, path:  " << extensionPath
                           << " does not exist.",
             std::filesystem::exists(extensionPath));
-    signatureValidator.validateExtensionSignature(name, extensionPath);
+    // "When signature validation is enabled, returned handle owns a descriptor pinned to the exact
+    // bytes that were verified and its path() is a "/proc/self/fd/N" string, to avoid a window
+    // between verification and dlopen where the bytes could be modified. When validation is off,
+    //  path() is just 'extensionPath'."
+    ValidatedExtension verifiedFile =
+        signatureValidator.validateExtensionSignature(name, extensionPath);
     StatusWith<std::unique_ptr<SharedLibrary>> swExtensionLib =
-        SharedLibrary::create(extensionPath);
+        SharedLibrary::create(verifiedFile.path());
     uassert(10615500,
             str::stream() << "Loading extension '" << name
                           << "' failed: " << swExtensionLib.getStatus().reason(),
             swExtensionLib.isOK());
+
+    // Leak the descriptor so its "/proc/self/fd/N" path stays valid - and its number is never
+    // recycled by the next extension's open() - for the lifetime of the loaded library, which is
+    // itself kept alive for the process lifetime.
+    verifiedFile.leakDescriptor();
 
     // Add the 'SharedLibrary' pointer to our loaded extensions map to keep it alive for the
     // lifetime of the server.
@@ -243,9 +306,6 @@ void ExtensionLoader::load(const std::string& name,
     auto& extensionLib = loadedExtensions[name].library;
 
     host_connector::ExtensionHandle extHandle = getMongoExtension(*extensionLib, extensionPath);
-    // Validate that the major and minor versions from the extension implementation are compatible
-    // with the host API version.
-    assertVersionCompatibility(&MONGO_EXTENSION_API_VERSIONS_SUPPORTED, extHandle->getVersion());
 
     // Get the max wire version of the server. During unit testing, return max wire version 0.
     const auto& maxWireVersion = TestingProctor::instance().isEnabled()

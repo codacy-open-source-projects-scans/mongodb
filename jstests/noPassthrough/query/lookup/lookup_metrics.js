@@ -8,6 +8,8 @@ const conn = MongoRunner.runMongod({setParameter: {allowDiskUseByDefault: true}}
 assert.neq(null, conn, "mongod was unable to start up");
 
 const db = conn.getDB(jsTestName());
+
+const initialLuCounters = db.serverStatus().metrics.query.lookupUnwind;
 assert.commandWorked(db.dropDatabase());
 
 // Set up the database.
@@ -44,7 +46,11 @@ const lookupStrategy = {
 };
 
 // Create an object with the correct lookup counter values after the specified type of query.
-function generateExpectedCounters(joinStrategy = lookupStrategy.nonSbe, spillToDisk = 0, spillToDiskBytes = 0) {
+function generateExpectedCounters(
+    joinStrategy = lookupStrategy.nonSbe,
+    spillToDisk = 0,
+    spillToDiskBytes = 0,
+) {
     let counters = db.serverStatus().metrics.query.lookup;
     assert(counters, "counters did not exist");
     let expected = Object.assign(counters);
@@ -100,13 +106,24 @@ function compareLookupCounters(expectedCounters) {
 let expectedCounters = generateExpectedCounters();
 assert.eq(
     db.people
-        .aggregate([{$lookup: {from: "firstYears", localField: "name", foreignField: "name", as: "matches"}}])
+        .aggregate([
+            {
+                $lookup: {
+                    from: "firstYears",
+                    localField: "name",
+                    foreignField: "name",
+                    as: "matches",
+                },
+            },
+        ])
         .itcount(),
     4 /* Matching results */,
 );
 compareLookupCounters(expectedCounters);
 
-const pipeline = [{$lookup: {from: "students", localField: "name", foreignField: "name", as: "matches"}}];
+const pipeline = [
+    {$lookup: {from: "students", localField: "name", foreignField: "name", as: "matches"}},
+];
 
 // Run a lookup pipeline with a hash lookup that gets pushed down to SBE.
 expectedCounters = generateExpectedCounters(lookupStrategy.hashLookup);
@@ -132,7 +149,12 @@ assert.eq(
         .aggregate(
             [
                 {
-                    $lookup: {from: "students", localField: "name", foreignField: "name", as: "matches"},
+                    $lookup: {
+                        from: "students",
+                        localField: "name",
+                        foreignField: "name",
+                        as: "matches",
+                    },
                 },
             ],
             {collation: {locale: "fr"}, allowDiskUse: false},
@@ -158,5 +180,9 @@ expectedCounters = generateExpectedCounters(
 );
 assert.eq(db.people.aggregate(pipeline).itcount(), 4 /* Matching results */);
 compareLookupCounters(expectedCounters);
+
+// Plain $lookup must not increment LU counters.
+const finalLuCounters = db.serverStatus().metrics.query.lookupUnwind;
+assert.docEq(initialLuCounters, finalLuCounters, "LU counters should not change for plain $lookup");
 
 MongoRunner.stopMongod(conn);

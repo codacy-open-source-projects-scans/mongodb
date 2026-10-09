@@ -43,7 +43,9 @@ assert.commandWorked(coll.insert({x: 0}));
 IndexBuildTest.pauseIndexBuilds(primary);
 
 // Start the index build and wait for it to start.
-const awaitIndex = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), indexSpec, {name: indexName});
+const awaitIndex = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), indexSpec, {
+    name: indexName,
+});
 IndexBuildTest.waitForIndexBuildToStart(db, collName, indexName);
 
 // Construct a ~16 MB string and perform a large write while the index build is in progress.
@@ -54,15 +56,20 @@ assert.commandWorked(coll.insertOne({x: 0, big: hugeString}));
 IndexBuildTest.resumeIndexBuilds(primary);
 awaitIndex();
 
-// Inspect the oplog.rs for applyOps generated from the concurrent write during index build.
+// Inspect the oplog.rs for applyOps generated from the concurrent write during index build. Filter
+// out the index build's periodic writes to the `internal-indexBuild-<UUID>` container, which are
+// unrelated to the concurrent write.
 const oplog = primary.getDB("local").getCollection("oplog.rs");
 const nss = coll.getFullName();
 const containerNss = "admin.$container";
 const applyOps = oplog
     .find({
         op: "c",
-        "o.applyOps": {$exists: true},
-        "o.applyOps.ns": {$in: [nss, containerNss]},
+        "o.applyOps": {
+            $elemMatch: {
+                $or: [{ns: nss}, {ns: containerNss, container: {$not: /^internal-indexBuild-/}}],
+            },
+        },
     })
     .sort({ts: 1})
     .toArray();

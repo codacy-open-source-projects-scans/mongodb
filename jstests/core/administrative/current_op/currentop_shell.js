@@ -20,8 +20,10 @@
  *   requires_scripting,
  *   # Tests currentOp behavior that is different between 8.1 and previous verions.
  *   requires_fcv_81,
- *   # TODO SERVER-116052: Add support for $function.
- *   mozjs_wasm_unsupported,
+ *   # The parallel shell runs a long-lived aggregate that is killed exactly once. The rerun_queries
+ *   # override would re-run the aggregate after the kill, causing the second run to hang because the
+ *   # main shell has already advanced past the killOp step and is blocked on awaitShell().
+ *   does_not_support_repeated_reads,
  * ]
  */
 
@@ -108,14 +110,24 @@ function awaitOperations(getOperationsFunction) {
 
             // Also explicitly check that each shard appears no more than once in the list of
             // operations.
-            const distinctShardNames = new Set(operations.map((op) => ("shard" in op ? op.shard : "")));
+            const distinctShardNames = new Set(
+                operations.map((op) => ("shard" in op ? op.shard : "")),
+            );
             assert.eq(operations.length, distinctShardNames.size, {operations, numShards});
 
             if (operations.length < numShards) {
-                print(`Found ${operations.length} operation(s); waiting until there are ${numShards} operation(s)`);
+                print(
+                    `Found ${operations.length} operation(s); waiting until there are ${numShards} operation(s)`,
+                );
                 return false;
-            } else if (operations.some((op) => op.op !== "getmore" && "cursor" in op && op.cursor.batchSize === 0)) {
-                print(`Found command with empty 'batchSize' value; waiting for getmore: ${tojson(operations)}`);
+            } else if (
+                operations.some(
+                    (op) => op.op !== "getmore" && "cursor" in op && op.cursor.batchSize === 0,
+                )
+            ) {
+                print(
+                    `Found command with empty 'batchSize' value; waiting for getmore: ${tojson(operations)}`,
+                );
                 return false;
             } else if (!operations.every(getCommandFromCurrentOpEntry)) {
                 print(`Waiting until all operations have a command: ${tojson(operations)}`);
@@ -125,7 +137,10 @@ function awaitOperations(getOperationsFunction) {
             return true;
         },
         function () {
-            return "Failed to find parallel shell operation in $currentOp output: " + tojson(db.currentOp());
+            return (
+                "Failed to find parallel shell operation in $currentOp output: " +
+                tojson(db.currentOp())
+            );
         },
     );
 
@@ -135,7 +150,11 @@ function awaitOperations(getOperationsFunction) {
 function getCommandFromCurrentOpEntry(entry) {
     if (entry.op === "command" && "command" in entry) {
         return entry.command;
-    } else if (entry.op === "getmore" && "cursor" in entry && "originatingCommand" in entry.cursor) {
+    } else if (
+        entry.op === "getmore" &&
+        "cursor" in entry &&
+        "originatingCommand" in entry.cursor
+    ) {
         return entry.cursor.originatingCommand;
     } else {
         return null;
@@ -143,15 +162,15 @@ function getCommandFromCurrentOpEntry(entry) {
 }
 
 const comment = "long_running_aggregation";
-const awaitShell = startParallelShell(funWithArgs(startLongRunningAggregation, coll.getName(), comment));
+const awaitShell = startParallelShell(
+    funWithArgs(startLongRunningAggregation, coll.getName(), comment),
+);
 
 const filter = {
     ns: coll.getFullName(),
     "command.comment": comment,
 
-    // On the replica set endpoint, currentOp reports both router and shard operations. So filter
-    // out one of them.
-    role: TestData.testingReplicaSetEndpoint ? "ClusterRole{router}" : {$exists: false},
+    role: {$exists: false},
 };
 
 // 1. The $currentOp aggregation stage should _not_ truncate the command.

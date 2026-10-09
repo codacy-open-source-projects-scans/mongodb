@@ -1,47 +1,7 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <algorithm>
-#include <climits>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <iterator>
-#include <limits>
-#include <numeric>
-#include <string>
-#include <tuple>
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/printf.h>  // IWYU pragma: keep
-// IWYU pragma: no_include "format.h"
+#include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -67,19 +27,38 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
-#include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/summation.h"
 
+#include <algorithm>
+#include <climits>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <numeric>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/printf.h>  // IWYU pragma: keep
+// IWYU pragma: no_include "format.h"
+
+using namespace std::literals::string_view_literals;
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
+using namespace std::literals::string_view_literals;
 namespace mongo {
 
 
@@ -118,15 +97,14 @@ protected:
                       return sbe::value::bitcastTo<int32_t>(compareVal) < 0;
                   });
 
-        auto [sortedResultsTag, sortedResultsVal] = sbe::value::makeNewArray();
-        sbe::value::ValueGuard sortedResultsGuard{sortedResultsTag, sortedResultsVal};
-        auto sortedResultsView = sbe::value::getArrayView(sortedResultsVal);
+        sbe::value::TagValueOwned sortedResultsOwned =
+            sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewArray());
+        auto sortedResultsView = sbe::value::getArrayView(sortedResultsOwned.value());
         for (auto [tag, val] : resultsContents) {
             auto [tagCopy, valCopy] = copyValue(tag, val);
-            sortedResultsView->push_back(tagCopy, valCopy);
+            sortedResultsView->push_back_raw(tagCopy, valCopy);
         }
-        sortedResultsGuard.reset();
-        return {sortedResultsTag, sortedResultsVal};
+        return sortedResultsOwned.releaseToRaw();
     }
 
     std::pair<std::unique_ptr<QuerySolution>, boost::intrusive_ptr<DocumentSourceGroup>>
@@ -169,26 +147,28 @@ protected:
         return getAllResults(stage.get(), &resultAccessors[0]);
     }
 
-    void runGroupAggregationTest(StringData groupSpec,
+    void runGroupAggregationTest(std::string_view groupSpec,
                                  std::vector<BSONArray> inputDocs,
                                  const mongo::BSONArray& expectedValue,
                                  std::unique_ptr<CollatorInterface> collator = nullptr) {
-        auto [resultsTag, resultsVal] =
-            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator));
-        sbe::value::ValueGuard resultGuard{resultsTag, resultsVal};
+        sbe::value::TagValueOwned resultOwned = sbe::value::TagValueOwned::fromRaw(
+            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator)));
 
-        auto [sortedResultsTag, sortedResultsVal] = sortResults(resultsTag, resultsVal);
-        sbe::value::ValueGuard sortedResultGuard{sortedResultsTag, sortedResultsVal};
+        sbe::value::TagValueOwned sortedResultOwned =
+            sbe::value::TagValueOwned::fromRaw(sortResults(resultOwned.tag(), resultOwned.value()));
 
-        auto [expectedTag, expectedVal] = stage_builder::makeValue(expectedValue);
-        sbe::value::ValueGuard expectedGuard{expectedTag, expectedVal};
+        sbe::value::TagValueOwned expectedOwned =
+            sbe::value::TagValueOwned::fromRaw(stage_builder::makeValue(expectedValue));
 
-        ASSERT_TRUE(valueEquals(sortedResultsTag, sortedResultsVal, expectedTag, expectedVal))
-            << "expected: " << std::make_pair(expectedTag, expectedVal)
-            << " but got: " << std::make_pair(sortedResultsTag, sortedResultsVal);
+        ASSERT_TRUE(valueEquals(sortedResultOwned.tag(),
+                                sortedResultOwned.value(),
+                                expectedOwned.tag(),
+                                expectedOwned.value()))
+            << "expected: " << std::make_pair(expectedOwned.tag(), expectedOwned.value())
+            << " but got: " << std::make_pair(sortedResultOwned.tag(), sortedResultOwned.value());
     }
 
-    void runGroupAggregationToFail(StringData groupSpec,
+    void runGroupAggregationToFail(std::string_view groupSpec,
                                    std::vector<BSONArray> inputDocs,
                                    ErrorCodes::Error expectedError,
                                    std::unique_ptr<CollatorInterface> collator = nullptr) {
@@ -210,27 +190,25 @@ protected:
      * Note: Currently, the order agnostic comparison only works for arraySets with
      * non-pointer-based accumulated values.
      */
-    void runArrayOutputAccumulatorTest(StringData groupSpec,
+    void runArrayOutputAccumulatorTest(std::string_view groupSpec,
                                        std::vector<BSONArray> inputDocs,
                                        const BSONArray& expectedResult,
                                        std::unique_ptr<CollatorInterface> collator = nullptr) {
         using namespace mongo::sbe::value;
 
         // Create ArraySet Value from the expectedResult.
-        auto [tmpTag, tmpVal] =
-            copyValue(TypeTags::bsonArray, bitcastFrom<const char*>(expectedResult.objdata()));
-        ValueGuard tmpGuard{tmpTag, tmpVal};
-        auto [expectedTag, expectedSet] = arrayToSet(tmpTag, tmpVal);
-        ValueGuard expectedValueGuard{expectedTag, expectedSet};
+        TagValueOwned tmpOwned = TagValueOwned::fromRaw(
+            copyValue(TypeTags::bsonArray, bitcastFrom<const char*>(expectedResult.objdata())));
+        TagValueOwned expectedSetOwned =
+            TagValueOwned::fromRaw(arrayToSet(tmpOwned.tag(), tmpOwned.value()));
 
         // Run the accumulator.
-        auto [resultsTag, resultsVal] =
-            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator));
-        ValueGuard resultGuard{resultsTag, resultsVal};
-        ASSERT_EQ(resultsTag, TypeTags::Array);
+        TagValueOwned resultOwned = TagValueOwned::fromRaw(
+            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator)));
+        ASSERT_EQ(resultOwned.tag(), TypeTags::Array);
 
         // Extract the accumulated ArraySet from the result and compare it to the expected.
-        auto arr = getArrayView(resultsVal);
+        auto arr = getArrayView(resultOwned.value());
         ASSERT_EQ(1, arr->size());
         auto [resObjTag, resObjVal] = arr->getAt(0);
         ASSERT_EQ(resObjTag, TypeTags::bsonObject)
@@ -241,19 +219,24 @@ protected:
                                  << std::make_pair(resObjTag, resObjVal);
 
         while (!objEnum.atEnd()) {
-            if (objEnum.getFieldName() == "x"_sd) {
+            if (objEnum.getFieldName() == "x"sv) {
                 auto [arrTag, arrVal] = objEnum.getViewOfValue();
                 ASSERT_EQ(arrTag, TypeTags::bsonArray)
                     << "Expected an array for field x but got: " << std::make_pair(arrTag, arrVal);
 
-                auto [tmpTag2, tmpVal2] = copyValue(TypeTags::bsonArray, arrVal);
-                ValueGuard tmpGuard2{tmpTag2, tmpVal2};
-                auto [actualTag, actualSet] = arrayToSet(tmpTag2, tmpVal2);
-                ValueGuard actualValueGuard{actualTag, actualSet};
+                TagValueOwned tmpOwned2 =
+                    TagValueOwned::fromRaw(copyValue(TypeTags::bsonArray, arrVal));
+                TagValueOwned actualSetOwned =
+                    TagValueOwned::fromRaw(arrayToSet(tmpOwned2.tag(), tmpOwned2.value()));
 
-                ASSERT(valueEquals(expectedTag, expectedSet, actualTag, actualSet))
-                    << "expected set: " << std::make_pair(expectedTag, expectedSet)
-                    << " but got set: " << std::make_pair(actualTag, actualSet);
+                ASSERT(valueEquals(expectedSetOwned.tag(),
+                                   expectedSetOwned.value(),
+                                   actualSetOwned.tag(),
+                                   actualSetOwned.value()))
+                    << "expected set: "
+                    << std::make_pair(expectedSetOwned.tag(), expectedSetOwned.value())
+                    << " but got set: "
+                    << std::make_pair(actualSetOwned.tag(), actualSetOwned.value());
                 return;
             }
 
@@ -266,7 +249,7 @@ protected:
 
     void runSbeIncompatibleGroupSpecTest(const BSONObj& groupSpec,
                                          boost::intrusive_ptr<ExpressionContext>& expCtx) {
-        expCtx->setSbeCompatibility(SbeCompatibility::noRequirements);
+        expCtx->overrideSbeCompatibility(SbeCompatibility::noRequirements);
         // When we parse and optimize the 'groupSpec' to build a DocumentSourceGroup, those
         // accumulation expressions or '_id' expression that are not supported by SBE will flip the
         // 'sbeCompatible()' flag in the 'groupStage' to false.
@@ -280,7 +263,7 @@ protected:
 
     void runSbeGroupCompatibleFlagTest(const std::vector<BSONObj>& groupSpecs,
                                        boost::intrusive_ptr<ExpressionContext>& expCtx) {
-        expCtx->setSbeCompatibility(SbeCompatibility::noRequirements);
+        expCtx->overrideSbeCompatibility(SbeCompatibility::noRequirements);
         for (const auto& groupSpec : groupSpecs) {
             // When we parse and optimize the groupSpec to build the DocumentSourceGroup, those
             // AccumulationExpressions or _id expression that are not supported by SBE will flip the
@@ -1228,7 +1211,7 @@ TEST_F(SbeStageBuilderGroupTest, AddToSetAccumulatorTranslationRepeatedValue) {
 TEST_F(SbeStageBuilderGroupTest, AddToSetAccumulatorTranslationMixedTypes) {
     const auto bsonArr = BSON_ARRAY(1 << 2 << 3);
     const auto bsonObj = BSON("c" << 1);
-    const auto strVal = "hello"_sd;
+    const auto strVal = "hello"sv;
     auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << 1 << "b" << 42)),
                                        BSON_ARRAY(BSON("a" << 2 << "b" << 4.2)),
                                        BSON_ARRAY(BSON("a" << 3 << "b" << true)),
@@ -1490,7 +1473,7 @@ TEST_F(SbeStageBuilderGroupTest, PushAccumulatorTranslationAllMissing) {
 TEST_F(SbeStageBuilderGroupTest, PushAccumulatorTranslationVariousTypes) {
     const auto bsonArr = BSON_ARRAY(1 << 2 << 3);
     const auto bsonObj = BSON("c" << 1);
-    const auto strVal = "hello"_sd;
+    const auto strVal = "hello"sv;
     auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << 1 << "b" << 42)),
                                        BSON_ARRAY(BSON("a" << 2 << "b" << 4.2)),
                                        BSON_ARRAY(BSON("a" << 3 << "b" << true)),
@@ -2214,7 +2197,7 @@ TEST_F(SbeStageBuilderGroupTest, MinMaxNAccumulatorDynamicN) {
 
 class AccumulatorSBEIncompatible final : public AccumulatorState {
 public:
-    static constexpr auto kName = "$incompatible"_sd;
+    static constexpr auto kName = "$incompatible"sv;
     const char* getOpName() const final {
         return kName.data();
     }
@@ -2289,10 +2272,11 @@ TEST_F(SbeStageBuilderGroupTest, SbeIncompatibleExpressionInGroup) {
     }
 }
 
+using namespace std::literals::string_view_literals;
 namespace {
 sbe::value::SlotId registerCollator(stage_builder::StageBuilderState& state,
                                     const CollatorInterface* collator) {
-    return state.env->registerSlot("collator"_sd,
+    return state.env->registerSlot("collator"sv,
                                    sbe::value::TypeTags::collator,
                                    sbe::value::bitcastFrom<const CollatorInterface*>(collator),
                                    false,
@@ -2327,7 +2311,7 @@ public:
                  false /* allowDiskUse */,
                  *_expCtx->getIfrContext()} {}
 
-    AccumulationStatement makeAccumulationStatement(StringData accumName) {
+    AccumulationStatement makeAccumulationStatement(std::string_view accumName) {
         return makeAccumulationStatement(BSON("unused" << BSON(accumName << "unused")));
     }
 
@@ -2394,8 +2378,10 @@ public:
         _inputAccessor.reset();
         _aggAccessor.reset();
 
-        sbe::value::ValueGuard inputGuard{inputTag, inputVal};
-        sbe::value::ValueGuard expectedGuard{expectedTag, expectedVal};
+        sbe::value::TagValueOwned inputOwned =
+            sbe::value::TagValueOwned::fromRaw(inputTag, inputVal);
+        sbe::value::TagValueOwned expectedOwned =
+            sbe::value::TagValueOwned::fromRaw(expectedTag, expectedVal);
 
         sbe::value::ArrayEnumerator inputEnumerator{inputTag, inputVal};
         sbe::value::ArrayEnumerator expectedEnumerator{expectedTag, expectedVal};
@@ -2410,20 +2396,22 @@ public:
             // Feed in the input value, treating "MISSING" as a special sentinel to indicate the
             // Nothing value.
             if (sbe::value::isString(nextInputTag) &&
-                sbe::value::getStringView(nextInputTag, nextInputVal) == "MISSING"_sd) {
+                sbe::value::getStringView(nextInputTag, nextInputVal) == "MISSING"sv) {
                 _inputAccessor.reset();
             } else {
-                auto [copyTag, copyVal] = sbe::value::copyValue(nextInputTag, nextInputVal);
-                _inputAccessor.reset(true, copyTag, copyVal);
+                auto copy = sbe::value::TagValueOwned::fromRaw(
+                    sbe::value::copyValue(nextInputTag, nextInputVal));
+                _inputAccessor.reset(std::move(copy));
             }
 
-            auto [outputTag, outputVal] = runCompiledExpression(code);
+            _aggAccessor.reset(sbe::value::TagValueOwned::fromRaw(runCompiledExpression(code)));
+            auto [outputTag, outputVal] = _aggAccessor.getViewOfValue();
 
             // Validate that the output value equals the expected value, and then put the output
             // value into the slot that holds the accumulation state.
             auto [expectedOutputTag, expectedOutputValue] = expectedEnumerator.getViewOfValue();
             if (sbe::value::isString(expectedOutputTag) &&
-                sbe::value::getStringView(expectedOutputTag, expectedOutputValue) == "MISSING"_sd) {
+                sbe::value::getStringView(expectedOutputTag, expectedOutputValue) == "MISSING"sv) {
                 expectedOutputTag = sbe::value::TypeTags::Nothing;
                 expectedOutputValue = 0;
             }
@@ -2448,8 +2436,6 @@ public:
                 FAIL("accumulator did not have expected value");
             }
 
-            _aggAccessor.reset(true, outputTag, outputVal);
-
             inputEnumerator.advance();
             expectedEnumerator.advance();
             ++index;
@@ -2463,9 +2449,9 @@ public:
     enum class Accumulator { kPush, kAddToSet };
     std::pair<sbe::value::TypeTags, sbe::value::Value> makeArrayAccumVal(BSONArray bsonArray,
                                                                          Accumulator accumType) {
-        auto [resultTag, resultVal] = sbe::value::makeNewArray();
-        sbe::value::ValueGuard resultGuard{resultTag, resultVal};
-        auto resultArr = sbe::value::getArrayView(resultVal);
+        sbe::value::TagValueOwned resultOwned =
+            sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewArray());
+        auto resultArr = sbe::value::getArrayView(resultOwned.value());
 
         for (auto&& elt : bsonArray) {
             ASSERT(elt.type() == BSONType::array);
@@ -2491,16 +2477,15 @@ public:
             auto [pushedValsTag, pushedValsVal] = accumType == Accumulator::kPush
                 ? sbe::makeArray(partialBsonArr)
                 : sbe::makeArraySet(partialBsonArr);
-            partialAggArr->push_back(pushedValsTag, pushedValsVal);
+            partialAggArr->push_back_raw(pushedValsTag, pushedValsVal);
 
-            partialAggArr->push_back(sbe::value::TypeTags::NumberInt64,
-                                     sbe::value::bitcastFrom<int64_t>(size));
+            partialAggArr->push_back_raw(sbe::value::TypeTags::NumberInt64,
+                                         sbe::value::bitcastFrom<int64_t>(size));
 
-            resultArr->push_back(partialAggTag, partialAggVal);
+            resultArr->push_back_raw(partialAggTag, partialAggVal);
         }
 
-        resultGuard.reset();
-        return {resultTag, resultVal};
+        return resultOwned.releaseToRaw();
     }
 
     std::pair<sbe::value::TypeTags, sbe::value::Value> bsonArrayToSbe(BSONArray arr) {
@@ -2509,7 +2494,7 @@ public:
 
         for (auto elem : arr) {
             auto [tag, val] = sbe::bson::convertToOwned(elem).releaseToRaw();
-            arrView->push_back(tag, val);
+            arrView->push_back_raw(tag, val);
         }
         return {arrTag, arrVal};
     }
@@ -2531,18 +2516,17 @@ public:
 
         // Find the first element by skipping the length.
         const char* bsonElt = valuesToAgg.objdata() + 4;
-        const char* bsonEnd = bsonElt + valuesToAgg.objsize();
+        const char* bsonEnd = valuesToAgg.objdata() + valuesToAgg.objsize();
         while (*bsonElt != 0) {
-            auto fieldName = sbe::bson::fieldNameAndLength(bsonElt);
+            auto fieldName = sbe::bson::fieldNameAndLength(bsonElt, bsonEnd);
 
             // Convert the BSON value to an SBE value and put it inside the input slot.
-            auto [tag, val] =
-                sbe::bson::convertToOwned(bsonElt, bsonEnd, fieldName.size()).releaseToRaw();
-            _inputAccessor.reset(true, tag, val);
+            auto input = sbe::bson::convertToOwned(bsonElt, bsonEnd, fieldName.size());
+            _inputAccessor.reset(std::move(input));
 
             // Run the agg function, and put the result in the slot holding the aggregate value.
-            auto [outputTag, outputVal] = runCompiledExpression(code.get());
-            _aggAccessor.reset(true, outputTag, outputVal);
+            auto output = sbe::value::TagValueOwned::fromRaw(runCompiledExpression(code.get()));
+            _aggAccessor.reset(std::move(output));
 
             bsonElt = sbe::bson::advance(bsonElt, fieldName.size());
         }
@@ -2565,20 +2549,19 @@ public:
      */
     std::pair<sbe::value::TypeTags, sbe::value::Value> makePartialAggArray(
         sbe::EFn aggFuncName, BSONArray arrayOfArrays) {
-        auto [arrTag, arrVal] = sbe::value::makeNewArray();
-        sbe::value::ValueGuard guard{arrTag, arrVal};
+        sbe::value::TagValueOwned arrOwned =
+            sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewArray());
 
-        auto arr = sbe::value::getArrayView(arrVal);
+        auto arr = sbe::value::getArrayView(arrOwned.value());
 
         for (auto&& element : arrayOfArrays) {
             ASSERT(element.type() == BSONType::array);
             auto [tag, val] =
                 makeOnePartialAggregate(aggFuncName, BSONArray{element.embeddedObject()});
-            arr->push_back(tag, val);
+            arr->push_back_raw(tag, val);
         }
 
-        guard.reset();
-        return {arrTag, arrVal};
+        return arrOwned.releaseToRaw();
     }
 
     std::pair<sbe::value::TypeTags, sbe::value::Value> convertFromBSONArray(BSONArray arr) {
@@ -2587,7 +2570,7 @@ public:
 
         for (auto elem : arr) {
             auto [tag, val] = sbe::bson::convertToOwned(elem).releaseToRaw();
-            arrView->push_back(tag, val);
+            arrView->push_back_raw(tag, val);
         }
         return {arrTag, arrVal};
     }
@@ -2622,15 +2605,15 @@ public:
         auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
         auto finalizeCompiledExpr = compileExpression(*finalizeExpr);
 
-        auto [mergeStateTag, mergeStateVal] = convertFromBSONArray(mergeState);
-        _aggAccessor.reset(true, mergeStateTag, mergeStateVal);
+        auto mergeStateOwned = sbe::value::TagValueOwned::fromRaw(convertFromBSONArray(mergeState));
+        _aggAccessor.reset(std::move(mergeStateOwned));
 
-        auto [inputStateTag, inputStateVal] = convertFromBSONArray(inputState);
-        _inputAccessor.reset(true, inputStateTag, inputStateVal);
+        auto inputStateOwned = sbe::value::TagValueOwned::fromRaw(convertFromBSONArray(inputState));
+        _inputAccessor.reset(std::move(inputStateOwned));
 
-        auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-        _aggAccessor.reset(true, resultTag, resultVal);
-        std::tie(resultTag, resultVal) = runCompiledExpression(finalizeCompiledExpr.get());
+        auto result = sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        _aggAccessor.reset(std::move(result));
+        auto [resultTag, resultVal] = runCompiledExpression(finalizeCompiledExpr.get());
 
         auto [compareTag, compareVal] =
             sbe::value::compareValue(resultTag,
@@ -2660,16 +2643,16 @@ public:
         auto finalExpr =
             sbe::makeFunction(aggFinalize, sbe::makeVariable(aggSlot), std::move(sortSpecConstant));
 
-        auto [mergeStateTag, mergeStateVal] = convertFromBSONArray(mergeState);
-        _aggAccessor.reset(true, mergeStateTag, mergeStateVal);
+        auto mergeStateOwned = sbe::value::TagValueOwned::fromRaw(convertFromBSONArray(mergeState));
+        _aggAccessor.reset(std::move(mergeStateOwned));
 
-        auto [inputStateTag, inputStateVal] = convertFromBSONArray(inputState);
-        _inputAccessor.reset(true, inputStateTag, inputStateVal);
+        auto inputStateOwned = sbe::value::TagValueOwned::fromRaw(convertFromBSONArray(inputState));
+        _inputAccessor.reset(std::move(inputStateOwned));
 
         auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
 
-        auto [newAccTag, newAccVal] = runCompiledExpression(compiledExpr.get());
-        _aggAccessor.reset(true, newAccTag, newAccVal);
+        auto newAcc = sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        _aggAccessor.reset(std::move(newAcc));
 
         auto compiledFinalExpr = compileExpression(*finalExpr);
 
@@ -2708,7 +2691,7 @@ private:
 };
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMin) {
-    auto accStatement = makeAccumulationStatement("$min"_sd);
+    auto accStatement = makeAccumulationStatement("$min"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto inputValues = BSON_ARRAY(8 << 7 << 9 << BSONNULL << 6);
@@ -2722,7 +2705,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMin) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMinWithCollation) {
-    auto accStatement = makeAccumulationStatement("$min"_sd);
+    auto accStatement = makeAccumulationStatement("$min"sv);
 
     CollatorInterfaceMock collator{CollatorInterfaceMock::MockType::kReverseString};
 
@@ -2743,7 +2726,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMinWithCollation) 
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMax) {
-    auto accStatement = makeAccumulationStatement("$max"_sd);
+    auto accStatement = makeAccumulationStatement("$max"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto inputValues = BSON_ARRAY(3 << 1 << 4 << BSONNULL << 8);
@@ -2757,7 +2740,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMax) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMaxWithCollation) {
-    auto accStatement = makeAccumulationStatement("$max"_sd);
+    auto accStatement = makeAccumulationStatement("$max"sv);
 
     CollatorInterfaceMock collator{CollatorInterfaceMock::MockType::kReverseString};
 
@@ -2778,7 +2761,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMaxWithCollation) 
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsFirst) {
-    auto accStatement = makeAccumulationStatement("$first"_sd);
+    auto accStatement = makeAccumulationStatement("$first"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto inputValues = BSON_ARRAY(3 << 1 << BSONNULL << "MISSING" << 8);
@@ -2792,7 +2775,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsFirst) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsLast) {
-    auto accStatement = makeAccumulationStatement("$last"_sd);
+    auto accStatement = makeAccumulationStatement("$last"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto inputValues = BSON_ARRAY(3 << 1 << BSONNULL << "MISSING" << 8);
@@ -2801,7 +2784,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsLast) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsPush) {
-    auto accStatement = makeAccumulationStatement("$push"_sd);
+    auto accStatement = makeAccumulationStatement("$push"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto [inputValuesTag, inputValuesVal] = makeArrayAccumVal(
@@ -2818,7 +2801,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsPush) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsPushThrowsWhenExceedingSizeLimit) {
-    auto accStatement = makeAccumulationStatement("$push"_sd);
+    auto accStatement = makeAccumulationStatement("$push"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     // If we inject a very large size, we expect the accumulator to throw. This cap prevents the
@@ -2839,7 +2822,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsPushThrowsWhenExce
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAddToSet) {
-    auto accStatement = makeAccumulationStatement("$addToSet"_sd);
+    auto accStatement = makeAccumulationStatement("$addToSet"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto [inputValuesTag, inputValuesVal] =
@@ -2861,7 +2844,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAddToSet) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAddToSetWithCollation) {
-    auto accStatement = makeAccumulationStatement("$addToSet"_sd);
+    auto accStatement = makeAccumulationStatement("$addToSet"sv);
 
     CollatorInterfaceMock collator{CollatorInterfaceMock::MockType::kToLowerString};
 
@@ -2894,9 +2877,9 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAddToSetWithCollat
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest,
        CombinePartialAggsAddToSetThrowsWhenExceedingSizeLimit) {
-    RAIIServerParameterControllerForTest queryKnobController("internalQueryMaxAddToSetBytes", 50);
+    unittest::ServerParameterGuard queryKnobController("internalQueryMaxAddToSetBytes", 50);
 
-    auto accStatement = makeAccumulationStatement("$addToSet"_sd);
+    auto accStatement = makeAccumulationStatement("$addToSet"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto input = makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(1 << 2) << 0)
@@ -2918,7 +2901,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest,
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSetUnion) {
-    auto accStatement = makeAccumulationStatement("$setUnion"_sd);
+    auto accStatement = makeAccumulationStatement("$setUnion"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto [inputValuesTag, inputValuesVal] =
@@ -2940,7 +2923,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSetUnion) {
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSetUnionWithCollation) {
-    auto accStatement = makeAccumulationStatement("$setUnion"_sd);
+    auto accStatement = makeAccumulationStatement("$setUnion"sv);
 
     CollatorInterfaceMock collator{CollatorInterfaceMock::MockType::kToLowerString};
 
@@ -2973,9 +2956,9 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSetUnionWithCollat
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest,
        CombinePartialAggsSetUnionThrowsWhenExceedingSizeLimit) {
-    RAIIServerParameterControllerForTest queryKnobController("internalQueryMaxSetUnionBytes", 50);
+    unittest::ServerParameterGuard queryKnobController("internalQueryMaxSetUnionBytes", 50);
 
-    auto accStatement = makeAccumulationStatement("$setUnion"_sd);
+    auto accStatement = makeAccumulationStatement("$setUnion"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto input = makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(1 << 2) << 0)
@@ -2997,7 +2980,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest,
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsConcatArrays) {
-    auto accStatement = makeAccumulationStatement("$concatArrays"_sd);
+    auto accStatement = makeAccumulationStatement("$concatArrays"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto [inputValuesTag, inputValuesVal] =
@@ -3017,10 +3000,9 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsConcatArrays) {
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest,
        CombinePartialAggsConcatArraysThrowsWhenExceedingSizeLimit) {
-    RAIIServerParameterControllerForTest queryKnobController("internalQueryMaxConcatArraysBytes",
-                                                             50);
+    unittest::ServerParameterGuard queryKnobController("internalQueryMaxConcatArraysBytes", 50);
 
-    auto accStatement = makeAccumulationStatement("$concatArrays"_sd);
+    auto accStatement = makeAccumulationStatement("$concatArrays"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto input = makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY(1 << 2) << 18)
@@ -3041,7 +3023,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest,
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMergeObjects) {
-    auto accStatement = makeAccumulationStatement("$mergeObjects"_sd);
+    auto accStatement = makeAccumulationStatement("$mergeObjects"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     auto inputValues = BSON_ARRAY(BSONNULL << BSONObj{} << BSON("a" << 1) << BSONNULL << "MISSING"
@@ -3145,7 +3127,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSumLar
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAvg) {
-    auto accStatement = makeAccumulationStatement("$avg"_sd);
+    auto accStatement = makeAccumulationStatement("$avg"sv);
 
     // We expect $avg to result in two separate agg expressions: one for computing the sum and the
     // other for computing the count. Both agg expressions read from the same input slot.
@@ -3188,7 +3170,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsStdDevPop) {
                    << BSON_ARRAY(5 << 10 << 6 << 8) << BSON_ARRAY(5 << 10 << 6 << 8)
                    << BSON_ARRAY(5 << 10 << 6 << 8 << 1 << 9 << 10)));
 
-    auto accStatement = makeAccumulationStatement("$stdDevPop"_sd);
+    auto accStatement = makeAccumulationStatement("$stdDevPop"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
 
@@ -3213,7 +3195,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsStdDevSamp) {
                    << BSON_ARRAY(5 << 10 << 6 << 8) << BSON_ARRAY(5 << 10 << 6 << 8)
                    << BSON_ARRAY(5 << 10 << 6 << 8 << 1 << 9 << 10)));
 
-    auto accStatement = makeAccumulationStatement("$stdDevSamp"_sd);
+    auto accStatement = makeAccumulationStatement("$stdDevSamp"sv);
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
 

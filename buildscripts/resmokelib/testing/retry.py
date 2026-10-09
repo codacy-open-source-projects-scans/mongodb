@@ -21,6 +21,8 @@ retryable_codes = [
     9001,  # SocketException
     262,  # ExceededTimeLimit
     202,  # NetworkInterfaceExceededTimeLimit
+    515,  # ConnectionClosedByPeer
+    516,  # ConnectionEstablishmentTimeout
 ]
 
 # The names for the error codes above.
@@ -39,10 +41,17 @@ retryable_code_names = [
     "SocketException",
     "ExceededTimeLimit",
     "NetworkInterfaceExceededTimeLimit",
+    "ConnectionClosedByPeer",
+    "ConnectionEstablishmentTimeout",
 ]
 
 
 def is_retryable_error(exc, retryable_error_codes):
+    # Guard against non-PyMongoError exceptions: has_error_label() only exists on
+    # PyMongoError, so calling it on e.g. AssertionError or ServerFailure would raise
+    # AttributeError. Return False immediately for anything that isn't a pymongo error.
+    if not isinstance(exc, PyMongoError):
+        return False
     if isinstance(exc, ConnectionFailure):
         return True
     if exc.has_error_label("RetryableWriteError"):
@@ -82,3 +91,35 @@ def with_naive_retry(func, timeout=100, extra_retryable_error_codes=None):
     raise ExecutionTimeout(
         f"Operation exceeded time limit after {timeout} seconds, last error: {last_exc}"
     )
+
+
+def with_predicate_retry(func, is_transient, timeout=30.0, sleep_secs=1.0, on_retry=None):
+    """
+    Retry execution of `func` while `is_transient(exc)` is True, up to `timeout` seconds.
+
+    Use for non-pymongo transients (e.g. gRPC subprocess errors, Docker compose unavailability)
+    where the caller decides which exceptions are retryable.
+
+    :param func: Zero-arg callable to invoke.
+    :param is_transient: Callable taking the raised exception, returning True iff retryable.
+    :param timeout: Maximum total wall time to retry, seconds.
+    :param sleep_secs: Sleep between attempts, seconds.
+    :param on_retry: Optional callback `(attempt: int, exc: Exception) -> None` invoked
+                    on each transient failure before sleeping. Use for visibility.
+    """
+    last_exc = None
+    attempt = 0
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        attempt += 1
+        try:
+            return func()
+        except Exception as exc:
+            last_exc = exc
+            if not is_transient(exc):
+                raise
+            if on_retry is not None:
+                on_retry(attempt, exc)
+        time.sleep(sleep_secs)
+
+    raise last_exc

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/session/kill_sessions_local.h"
@@ -39,6 +13,7 @@
 #include "mongo/db/session/kill_sessions_gen.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/logv2/log.h"
@@ -92,12 +67,12 @@ void killSessionsAction(
     const auto catalog = SessionCatalog::get(opCtx);
 
     std::vector<SessionCatalog::KillToken> sessionKillTokens;
-    catalog->scanSessions(matcher, [&](const ObservableSession& session) {
-        if (filterFn(session))
-            sessionKillTokens.emplace_back(session.kill(reason));
-    });
+    sessionKillTokens = catalog->killSessions(matcher, reason, filterFn);
 
     for (auto& sessionKillToken : sessionKillTokens) {
+        // Kept separately because the token is handed off to 'checkOutSessionForKill' below.
+        const auto lsidToKill = sessionKillToken.lsidToKill();
+
         Date_t checkoutStartTime = Date_t::now();
         try {
             auto session = catalog->checkOutSessionForKill(
@@ -128,12 +103,12 @@ void killSessionsAction(
             // then we crash the node and dump info on the session.
             LOGV2(11790801,
                   "Exceeded time limit while checking out session",
-                  "lsidToKill"_attr = sessionKillToken.lsidToKill,
+                  "lsidToKill"_attr = lsidToKill,
                   "duration"_attr = Date_t::now() - checkoutStartTime);
             if (reason == ErrorCodes::InterruptedDueToReplStateChange) {
                 LOGV2_FATAL(11790802,
                             "Failed to check out session for kill",
-                            "lsidToKill"_attr = sessionKillToken.lsidToKill);
+                            "lsidToKill"_attr = lsidToKill);
             }
             // Failed to check out the session for kill, continue with the next sessionKillToken.
             if (numTimeOuts)
@@ -163,6 +138,76 @@ void killSessionsAbortUnpreparedTransactions(OperationContext* opCtx,
             if (participant.transactionIsInProgress()) {
                 LOGV2(11101700,
                       "Aborting unprepared transaction",
+                      "session"_attr = session.getSessionId().toBSON(),
+                      "txnNumberAndRetryCounter"_attr =
+                          participant.getActiveTxnNumberAndRetryCounter().toBSON(),
+                      "reason"_attr = reason);
+                participant.abortTransaction(opCtx);
+            }
+        },
+        reason,
+        /*perSessionTimeout*/ nullptr,
+        /*numTimeouts*/ 0,
+        killSessionsDeadline);
+}
+
+void killSessionsAbortUnpreparedTransactionsForLockerIds(OperationContext* opCtx,
+                                                         const std::vector<LockerId>& lockerIds,
+                                                         ErrorCodes::Error reason,
+                                                         Date_t killSessionsDeadline) {
+    if (lockerIds.empty()) {
+        return;
+    }
+
+    // Build a set for O(1) lookup.
+    stdx::unordered_set<LockerId> lockerIdSet(lockerIds.begin(), lockerIds.end());
+    KillAllSessionsByPatternSet patterns;
+
+    // Scan the session catalog to find in-progress transactions whose locker IDs match.
+    // This covers both stashed transactions, where the Locker lives in TxnResources) and active
+    // checked-out transactions (where the Locker is on the OperationContext).
+    SessionKiller::Matcher matcherAllSessions(
+        KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
+    const auto catalog = SessionCatalog::get(opCtx);
+    catalog->scanSessions(matcherAllSessions, [&](const ObservableSession& session) {
+        auto participant = TransactionParticipant::get(session);
+        if (!participant.transactionIsInProgress()) {
+            return;
+        }
+
+        // Check the stashed locker.
+        auto stashedLockerId = participant.getStashedLockerId();
+        if (stashedLockerId && lockerIdSet.count(*stashedLockerId) > 0) {
+            patterns.emplace(makeKillAllSessionsByPattern(opCtx, session.getSessionId()));
+            return;
+        }
+
+        // Check the active locker on the currently checked-out OperationContext.
+        if (auto* checkedOutOpCtx = session.currentOperationContext()) {
+            auto lockerId = shard_role_details::getLocker(checkedOutOpCtx)->getId();
+            if (lockerIdSet.count(lockerId) > 0) {
+                patterns.emplace(makeKillAllSessionsByPattern(opCtx, session.getSessionId()));
+            }
+        }
+    });
+
+    if (patterns.empty()) {
+        return;
+    }
+
+    SessionKiller::Matcher matcher(std::move(patterns));
+    killSessionsAction(
+        opCtx,
+        matcher,
+        [](const ObservableSession& session) {
+            auto participant = TransactionParticipant::get(session);
+            return participant.transactionIsInProgress();
+        },
+        [reason](OperationContext* opCtx, const SessionToKill& session) {
+            auto participant = TransactionParticipant::get(session);
+            if (participant.transactionIsInProgress()) {
+                LOGV2(10698901,
+                      "Aborting unprepared transaction for conflicting locker",
                       "session"_attr = session.getSessionId().toBSON(),
                       "txnNumberAndRetryCounter"_attr =
                           participant.getActiveTxnNumberAndRetryCounter().toBSON(),

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file tests db/query/plan_ranker.cpp and db/query/multi_plan_runner.cpp.
@@ -33,14 +7,12 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/classic/multi_plan.h"
-#include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -55,14 +27,12 @@
 #include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_ranking_decision.h"
-#include "mongo/db/query/query_execution_knobs_gen.h"
-#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration_test_util.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner_test_lib.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <cstddef>
@@ -150,11 +120,11 @@ private:
     std::vector<std::unique_ptr<QuerySolution>> _bestCBRPlan;
 
     // Run all tests with hash-based intersection enabled.
-    RAIIServerParameterControllerForTest _enableHashIntersection{
-        "internalQueryPlannerEnableHashIntersection", true};
+    QueryKnobGuardForTest _enableHashIntersection{
+        &_opCtx, "internalQueryPlannerEnableHashIntersection", true};
 
     // Configure Sampling CE with a large sample
-    RAIIServerParameterControllerForTest _samplingMarginOfError{"samplingMarginOfError", 1.0};
+    unittest::ServerParameterGuard _samplingMarginOfError{"samplingMarginOfError", 1.0};
 
     DBDirectClient _client;
 };
@@ -243,8 +213,8 @@ public:
     }
 
 private:
-    RAIIServerParameterControllerForTest _internalQueryMaxBlockingSortMemoryUsageBytes;
-    RAIIServerParameterControllerForTest _internalQueryPlanEvaluationMaxResults;
+    unittest::ServerParameterGuard _internalQueryMaxBlockingSortMemoryUsageBytes;
+    unittest::ServerParameterGuard _internalQueryPlanEvaluationMaxResults;
 };
 
 /**
@@ -279,10 +249,10 @@ public:
         ASSERT(QueryPlannerTestLib::solutionMatches(expectedPlan, cbrSoln->root()).isOK());
 
         // Turn on the "force intersect" option.
-        RAIIServerParameterControllerForTest forceIntersectionPlans{
-            "internalQueryForceIntersectionPlans", true};
-        RAIIServerParameterControllerForTest enableSortIntersection{
-            "internalQueryPlannerEnableSortIndexIntersection", true};
+        QueryKnobGuardForTest forceIntersectionPlans{
+            opCtx(), "internalQueryForceIntersectionPlans", true};
+        QueryKnobGuardForTest enableSortIntersection{
+            opCtx(), "internalQueryPlannerEnableSortIndexIntersection", true};
 
         // And run the same query again.
         findCommand = std::make_unique<FindCommandRequest>(nss);
@@ -332,8 +302,8 @@ public:
 
         // Turn on the "force intersect" option.
         // This will be reverted by PlanRankingTestBase's destructor when the test completes.
-        RAIIServerParameterControllerForTest forceIntersectionPlans{
-            "internalQueryForceIntersectionPlans", true};
+        QueryKnobGuardForTest forceIntersectionPlans{
+            opCtx(), "internalQueryForceIntersectionPlans", true};
 
         const std::string expectedMPPlan(
             "{fetch: {node: {andHash: {nodes: ["
@@ -462,10 +432,11 @@ public:
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, soln->root()).isOK());
 
-        // TODO SERVER-97933: The two plans have the same cost since CE is 0, so CBR happens
-        // to pick the wrong one.
-        // auto cbrSoln = bestCBRPlan(cq.get(), N);
-        // ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
+        // Both plans see CE = 0 from the sampler. CardinalityEstimator::clampZeroEstimates
+        // floors approximate zeros to kMinCE and the CostEstimator's additive per-stage minimum
+        // breaks the resulting tie in favour of the structurally cheaper covered plan.
+        auto cbrSoln = bestCBRPlan(cq.get(), N);
+        ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
     }
 };
 
@@ -700,9 +671,8 @@ public:
         const std::string bestPlan("{fetch: {node: {ixscan: {pattern: {a: 1}}}}}");
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, soln->root()).isOK());
-        // TODO SERVER-100611: re-enable these tests.
-        // auto cbrSoln = bestCBRPlan(cq.get(), static_cast<size_t>(docCount));
-        // ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
+        auto cbrSoln = bestCBRPlan(cq.get(), static_cast<size_t>(docCount));
+        ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
     }
 };
 

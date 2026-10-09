@@ -17,8 +17,10 @@ const st = new ShardingTest({
     config: 1,
     other: {
         configOptions: {
+            oplogSize: 128,
             setParameter: {reshardingCriticalSectionTimeoutMillis: 24 * 60 * 60 * 1000 /* 1 day */},
         },
+        rsOptions: {oplogSize: 128},
     },
 });
 
@@ -46,7 +48,13 @@ for (let i = 0; i < nChunks; i++) {
 newChunks.push({min: {newKey: nChunks}, max: {newKey: MaxKey}, recipientShardId: shard1});
 
 jsTestLog("Resharding Collection");
-assert.commandWorked(mongos.adminCommand({reshardCollection: ns, key: {newKey: 1}, _presetReshardedChunks: newChunks}));
+assert.commandWorked(
+    mongos.adminCommand({
+        reshardCollection: ns,
+        key: {newKey: 1},
+        _presetReshardedChunks: newChunks,
+    }),
+);
 
 // Assert that the correct number of chunks documents exist after resharding 'db.foo'.
 // There should be two more chunks docs to cover the ranges
@@ -56,9 +64,6 @@ assert.eq(findChunksUtil.countChunksForNs(mongos.getDB("config"), ns), nChunks +
 // check_orphans_are_deleted.js is skipped because it takes 1 minute to run on an optimized build
 // and this test doesn't insert any data for there to be unowned documents anyway.
 TestData.skipCheckOrphans = true;
-// check_uuids_consistent_across_cluster.js is skipped because it takes nearly 1 minute to run on an
-// optimized build.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 // check_routing_table_consistency.js is skipped because its $group + $lookup aggregation over the
 // config.chunks documents exceeds 100MB and fails.
 TestData.skipCheckRoutingTableConsistency = true;

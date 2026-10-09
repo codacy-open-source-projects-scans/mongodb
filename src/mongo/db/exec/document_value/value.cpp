@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/document_value/value.h"
 
@@ -50,6 +24,7 @@
 #include <limits>
 #include <memory>
 #include <ostream>
+#include <string_view>
 #include <typeinfo>
 
 #include <absl/hash/hash.h>
@@ -68,7 +43,7 @@ using std::stringstream;
 using std::vector;
 using namespace std::string_literals;
 
-void ValueStorage::putString(StringData s) {
+void ValueStorage::putString(std::string_view s) {
     // Note: this also stores data portion of BinData
     const size_t sizeNoNUL = s.size();
     if (sizeNoNUL <= sizeof(shortStrStorage)) {
@@ -108,7 +83,7 @@ void ValueStorage::putRegEx(const BSONRegEx& re) {
     auto dest = buf.get();
     dest = str::copyAsCString(dest, re.pattern);
     re.flags.copy(dest, re.flags.size());  // NUL added automatically by putString()
-    putString(StringData(buf.get(), totalLen));
+    putString(std::string_view(buf.get(), totalLen));
 }
 
 Document ValueStorage::getDocument() const {
@@ -201,7 +176,7 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
             break;
 
         case BSONType::codeWScope: {
-            StringData code(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1);
+            std::string_view code(elem.codeWScopeCode(), elem.codeWScopeCodeLen() - 1);
             _storage.putCodeWScope(BSONCodeWScope(code, elem.codeWScopeObject()));
             break;
         }
@@ -222,25 +197,25 @@ Value::Value(const BSONElement& elem) : _storage(elem.type()) {
 Value::Value(const BSONArray& arr) : _storage(BSONType::array) {
     auto vec = make_intrusive<RCVector<Value>>();
     for (auto&& sub : arr) {
-        vec->vec.push_back(Value(sub));
+        vec->vec.emplace_back(sub);
     }
     _storage.putVector(std::move(vec));
 }
 
-Value::Value(const vector<BSONObj>& vec) : _storage(BSONType::array) {
+Value::Value(const std::vector<BSONObj>& vec) : _storage(BSONType::array) {
     auto storageVec = make_intrusive<RCVector<Value>>();
     storageVec->vec.reserve(vec.size());
     for (auto&& obj : vec) {
-        storageVec->vec.push_back(Value(obj));
+        storageVec->vec.emplace_back(obj);
     }
     _storage.putVector(std::move(storageVec));
 }
 
-Value::Value(const vector<Document>& vec) : _storage(BSONType::array) {
+Value::Value(const std::vector<Document>& vec) : _storage(BSONType::array) {
     auto storageVec = make_intrusive<RCVector<Value>>();
     storageVec->vec.reserve(vec.size());
     for (auto&& obj : vec) {
-        storageVec->vec.push_back(Value(obj));
+        storageVec->vec.emplace_back(obj);
     }
     _storage.putVector(std::move(storageVec));
 }
@@ -314,14 +289,14 @@ Value Value::operator[](size_t index) const {
     return getArray()[index];
 }
 
-Value Value::operator[](StringData name) const {
+Value Value::operator[](std::string_view name) const {
     if (getType() != BSONType::object)
         return Value();
 
     return _storage.getDocument()[name];
 }
 
-void Value::_appendToBson(BSONObjBuilder& builder, StringData fieldName) const {
+void Value::_appendToBson(BSONObjBuilder& builder, std::string_view fieldName) const {
     switch (getType()) {
         case BSONType::eoo:
             return;  // nothing appended
@@ -410,7 +385,7 @@ void Value::_appendToBson(BSONObjBuilder& builder, StringData fieldName) const {
 }
 
 void Value::addToBsonObj(BSONObjBuilder* builder,
-                         StringData fieldName,
+                         std::string_view fieldName,
                          size_t recursionLevel) const {
     uassert(ErrorCodes::Overflow,
             str::stream() << "cannot convert document to BSON because it exceeds the limit of "
@@ -498,17 +473,29 @@ bool Value::coerceToBool() const {
 
 namespace {
 
+constexpr int kIntValueOutOfRangeMsgId = 31108;
+
+MONGO_COMPILER_NORETURN void throwValueOutOfRangeInt(std::string_view msg) {
+    uasserted(kIntValueOutOfRangeMsgId, msg);
+}
+
 template <typename T>
 void assertValueInRangeInt(const T& val) {
-    uassert(31108,
+    uassert(kIntValueOutOfRangeMsgId,
             str::stream() << "Can't coerce out of range value " << val << " to int",
             val >= std::numeric_limits<int32_t>::min() &&
                 val <= std::numeric_limits<int32_t>::max());
 }
 
+constexpr int kLongValueOutOfRangeMsgId = 31109;
+
+MONGO_COMPILER_NORETURN void throwValueOutOfRangeLong(std::string_view msg) {
+    uasserted(kLongValueOutOfRangeMsgId, msg);
+}
+
 template <typename T>
 void assertValueInRangeLong(const T& val) {
-    uassert(31109,
+    uassert(kLongValueOutOfRangeMsgId,
             str::stream() << "Can't coerce out of range value " << val << " to long",
             val >= std::numeric_limits<long long>::min() &&
                 val < BSONElement::kLongLongMaxPlusOneAsDouble);
@@ -528,9 +515,22 @@ int Value::coerceToInt() const {
             assertValueInRangeInt(_storage.doubleValue);
             return static_cast<int>(_storage.doubleValue);
 
-        case BSONType::numberDecimal:
-            assertValueInRangeInt(_storage.getDecimal().toDouble());
-            return (_storage.getDecimal()).toInt();
+        case BSONType::numberDecimal: {
+            // Round fractional Decimal128 values using the default rounding mode, which is
+            // 'kRoundTiesToEven'. This is inconsistent with how double values are rounded in the
+            // case above, as they always round towards zero. However, intentionally keep the
+            // difference for downwards-compability.
+            std::uint32_t signalingFlags = Decimal128::SignalingFlag::kNoFlag;
+            std::int32_t intValue = _storage.getDecimal().toInt(&signalingFlags);
+
+            // Check if coerced number is safely representable as an int.
+            if (signalingFlags != Decimal128::SignalingFlag::kNoFlag) {
+                throwValueOutOfRangeInt(str::stream()
+                                        << "Can't coerce out of range decimal value "
+                                        << _storage.getDecimal().toString() << " to int");
+            }
+            return static_cast<int>(intValue);
+        }
 
         default:
             uassert(16003,
@@ -552,9 +552,22 @@ long long Value::coerceToLong() const {
             assertValueInRangeLong(_storage.doubleValue);
             return static_cast<long long>(_storage.doubleValue);
 
-        case BSONType::numberDecimal:
-            assertValueInRangeLong(_storage.doubleValue);
-            return (_storage.getDecimal()).toLong();
+        case BSONType::numberDecimal: {
+            // Round fractional Decimal128 values using the default rounding mode, which is
+            // 'kRoundTiesToEven'. This is inconsistent with how double values are rounded in the
+            // case above, as they always round towards zero. However, intentionally keep the
+            // difference for downwards-compability.
+            std::uint32_t signalingFlags = Decimal128::SignalingFlag::kNoFlag;
+            std::int64_t longValue = _storage.getDecimal().toLong(&signalingFlags);
+
+            // Check if coerced number is safely representable as a long.
+            if (signalingFlags != Decimal128::SignalingFlag::kNoFlag) {
+                throwValueOutOfRangeLong(str::stream()
+                                         << "Can't coerce out of range decimal value "
+                                         << _storage.getDecimal().toString() << " to long");
+            }
+            return static_cast<long long>(longValue);
+        }
 
         default:
             uassert(16004,
@@ -871,9 +884,10 @@ int Value::compare(const Value& rL, const Value& rR, const StringDataComparator*
 
 namespace {
 /**
- * Hashes the given 'StringData', combines the resulting hash with 'seed', and returns the result.
+ * Hashes the given 'std::string_view', combines the resulting hash with 'seed', and returns the
+ * result.
  */
-size_t hashStringData(StringData sd, size_t seed) {
+size_t hashStringData(std::string_view sd, size_t seed) {
     size_t strHash = absl::Hash<absl::string_view>{}(absl::string_view(sd.data(), sd.size()));
     boost::hash_combine(seed, strHash);
     return seed;
@@ -949,13 +963,13 @@ void Value::hash_combine(size_t& seed, const StringDataComparator* stringCompara
 
         case BSONType::code:
         case BSONType::symbol: {
-            StringData sd = getRawData();
+            std::string_view sd = getRawData();
             seed = hashStringData(sd, seed);
             break;
         }
 
         case BSONType::string: {
-            StringData sd = getStringData();
+            std::string_view sd = getStringData();
             if (stringComparator) {
                 stringComparator->hash_combine(seed, sd);
             } else {
@@ -982,14 +996,14 @@ void Value::hash_combine(size_t& seed, const StringDataComparator* stringCompara
 
 
         case BSONType::binData: {
-            StringData sd = getRawData();
+            std::string_view sd = getRawData();
             seed = hashStringData(sd, seed);
             boost::hash_combine(seed, _storage.binDataType());
             break;
         }
 
         case BSONType::regEx: {
-            StringData sd = getRawData();
+            std::string_view sd = getRawData();
             seed = hashStringData(sd, seed);
             break;
         }
@@ -1358,14 +1372,14 @@ void Value::serializeForSorter(BufBuilder& buf) const {
         case BSONType::string:
         case BSONType::symbol:
         case BSONType::code: {
-            StringData str = getRawData();
+            std::string_view str = getRawData();
             buf.appendNum(int(str.size()));
             buf.appendStrBytes(str);
             break;
         }
 
         case BSONType::binData: {
-            StringData str = getRawData();
+            std::string_view str = getRawData();
             buf.appendChar(_storage.binDataType());
             buf.appendNum(int(str.size()));
             buf.appendStrBytes(str);
@@ -1443,7 +1457,7 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
         case BSONType::code: {
             int size = buf.read<LittleEndian<int>>();
             const char* str = static_cast<const char*>(buf.skip(size));
-            return Value(ValueStorage(type, StringData(str, size)));
+            return Value(ValueStorage(type, std::string_view(str, size)));
         }
 
         case BSONType::binData: {
@@ -1454,8 +1468,8 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
         }
 
         case BSONType::regEx: {
-            StringData regex = buf.readCStr();
-            StringData flags = buf.readCStr();
+            std::string_view regex = buf.readCStr();
+            std::string_view flags = buf.readCStr();
             return Value(BSONRegEx(regex, flags));
         }
 
@@ -1465,7 +1479,7 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
 
         case BSONType::dbRef: {
             OID oid = OID::from(buf.skip(OID::kOIDSize));
-            StringData ns = buf.readCStr();
+            std::string_view ns = buf.readCStr();
             return Value(BSONDBRef(ns, oid));
         }
 
@@ -1473,7 +1487,7 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
             int size = buf.read<LittleEndian<int>>();
             const char* str = static_cast<const char*>(buf.skip(size));
             BSONObj bson = BSONObj::deserializeForSorter(buf, BSONObj::SorterDeserializeSettings());
-            return Value(BSONCodeWScope(StringData(str, size), bson));
+            return Value(BSONCodeWScope(std::string_view(str, size), bson));
         }
 
         case BSONType::array: {
@@ -1488,7 +1502,7 @@ Value Value::deserializeForSorter(BufReader& buf, const SorterDeserializeSetting
     MONGO_verify(false);
 }
 
-void Value::serializeForIDL(StringData fieldName, BSONObjBuilder* builder) const {
+void Value::serializeForIDL(std::string_view fieldName, BSONObjBuilder* builder) const {
     addToBsonObj(builder, fieldName);
 }
 
@@ -1500,7 +1514,7 @@ Value Value::deserializeForIDL(const BSONElement& element) {
     return Value(element);
 }
 
-BSONObj Value::wrap(StringData newName) const {
+BSONObj Value::wrap(std::string_view newName) const {
     BSONObjBuilder b(getApproximateSize() + 6 + newName.size());
     addToBsonObj(&b, newName);
     return b.obj();

@@ -41,6 +41,51 @@ describe("Execution control statistics and observability", function () {
         return coll.find().hint({$natural: 1}).comment(comment).batchSize(3).toArray();
     }
 
+    // Lower bounds (microseconds) for the per-queue wait-time histogram buckets, matching
+    // QueueWaitTimeHistogram::partitions() in execution_control_stats.h. The implicit leading 0
+    // bucket counts operations that did not wait.
+    const kQueueWaitTimeHistogramLowerBounds = [
+        0, 1, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000, 250000,
+        500000, 1000000, 2500000, 5000000, 10000000,
+    ];
+
+    function assertQueueWaitTimeHistogramSchema(queueStats, label) {
+        assert(
+            queueStats.hasOwnProperty("queueWaitTimeMicros"),
+            `Missing queueWaitTimeMicros in ${label}`,
+            {queueStats},
+        );
+        const histogram = queueStats.queueWaitTimeMicros;
+        assert(Array.isArray(histogram), `queueWaitTimeMicros should be an array in ${label}`, {
+            histogram,
+        });
+        assert.eq(
+            histogram.length,
+            kQueueWaitTimeHistogramLowerBounds.length,
+            `Unexpected number of histogram buckets in ${label}`,
+            {histogram},
+        );
+        histogram.forEach((bucket, i) => {
+            assert(
+                bucket.hasOwnProperty("lowerBound") && bucket.hasOwnProperty("count"),
+                `Bucket ${i} missing lowerBound/count in ${label}`,
+                {bucket},
+            );
+            assert.eq(
+                bucket.lowerBound,
+                kQueueWaitTimeHistogramLowerBounds[i],
+                `Unexpected lowerBound for bucket ${i} in ${label}`,
+                {bucket},
+            );
+        });
+    }
+
+    // Returns the total number of samples recorded across all buckets of a queue's wait-time
+    // histogram. Bucket counts are monotonically increasing, so this is safe to diff over time.
+    function sumQueueWaitTimeHistogram(queueStats) {
+        return queueStats.queueWaitTimeMicros.reduce((total, bucket) => total + bucket.count, 0);
+    }
+
     describe("Execution control algorithm and prioritization reporting in serverStatus", function () {
         let replTest, mongod, db;
         const kNumReadTickets = 5;
@@ -79,9 +124,20 @@ describe("Execution control statistics and observability", function () {
             assert.eq(expected.usesPrioritization, stats.usesPrioritization);
             assert.eq(expected.deprioritizationGate, stats.deprioritizationGate);
             assert.eq(expected.heuristicDeprioritization, stats.heuristicDeprioritization);
-            assert.eq(expected.backgroundTasksDeprioritization, stats.backgroundTasksDeprioritization);
-            verifyTicketAggregationStats(expected.ticketAssertFunc, stats.read, stats.read.normalPriority);
-            verifyTicketAggregationStats(expected.ticketAssertFunc, stats.write, stats.write.normalPriority);
+            assert.eq(
+                expected.backgroundTasksDeprioritization,
+                stats.backgroundTasksDeprioritization,
+            );
+            verifyTicketAggregationStats(
+                expected.ticketAssertFunc,
+                stats.read,
+                stats.read.normalPriority,
+            );
+            verifyTicketAggregationStats(
+                expected.ticketAssertFunc,
+                stats.write,
+                stats.write.normalPriority,
+            );
         }
 
         before(function () {
@@ -314,7 +370,10 @@ describe("Execution control statistics and observability", function () {
             assert.gte(afterLowStats.totalTickets, beforeStats.normalPriority.totalTickets);
 
             // Check the stats aggregate.
-            assert.gte(afterLowStats.out, afterLowStats.normalPriority.out + afterLowStats.lowPriority.out);
+            assert.gte(
+                afterLowStats.out,
+                afterLowStats.normalPriority.out + afterLowStats.lowPriority.out,
+            );
             assert.gte(
                 afterLowStats.available,
                 afterLowStats.normalPriority.available + afterLowStats.lowPriority.available,
@@ -322,6 +381,38 @@ describe("Execution control statistics and observability", function () {
             assert.gte(
                 afterLowStats.totalTickets,
                 afterLowStats.normalPriority.totalTickets + afterLowStats.lowPriority.totalTickets,
+            );
+        });
+
+        it("should record per-operation queue wait times into the per-queue histograms", function () {
+            // A non-deprioritized read acquires a normal-priority ticket and therefore contributes
+            // one sample to the normal-priority read queue histogram.
+            const beforeNormal = sumQueueWaitTimeHistogram(
+                getExecutionControlStats(mongod).read.normalPriority,
+            );
+            runNonDeprioritizedFind(coll);
+            const afterNormal = sumQueueWaitTimeHistogram(
+                getExecutionControlStats(mongod).read.normalPriority,
+            );
+            assert.gt(
+                afterNormal,
+                beforeNormal,
+                "Non-deprioritized read should add a sample to the normal-priority queue histogram",
+            );
+
+            // A deprioritized read is routed to the low-priority pool and therefore contributes at
+            // least one sample to the low-priority read queue histogram.
+            const beforeLow = sumQueueWaitTimeHistogram(
+                getExecutionControlStats(mongod).read.lowPriority,
+            );
+            runDeprioritizedFind(coll, findComment + "_histogram");
+            const afterLow = sumQueueWaitTimeHistogram(
+                getExecutionControlStats(mongod).read.lowPriority,
+            );
+            assert.gt(
+                afterLow,
+                beforeLow,
+                "Deprioritized read should add a sample to the low-priority queue histogram",
             );
         });
 
@@ -369,7 +460,10 @@ describe("Execution control statistics and observability", function () {
 
             const log = assert.commandWorked(db.adminCommand({getLog: "global"})).log;
             const logLine = findMatchingLogLine(log, {msg: "Slow query", comment: slowLogComment});
-            assert(logLine, `Could not find slow query log line for find with comment: ${slowLogComment}`);
+            assert(
+                logLine,
+                `Could not find slow query log line for find with comment: ${slowLogComment}`,
+            );
 
             const parsedLog = JSON.parse(logLine);
             assert.eq(
@@ -420,7 +514,8 @@ describe("Execution control statistics and observability", function () {
                         executionControlDeprioritizationGate: true,
                         executionControlHeuristicNumAdmissionsDeprioritizeThreshold: 1,
                         logComponentVerbosity: {command: 2},
-                        internalQueryStatsRateLimit: -1,
+                        internalQueryStatsSampleRate: 1,
+                        internalQueryStatsWriteCmdSampleRate: 0,
                     },
                     slowms: 0,
                 },
@@ -453,7 +548,10 @@ describe("Execution control statistics and observability", function () {
             const queryStats = getQueryStats(mongod, {collName: coll.getName()});
             assert(
                 queryStats.length === 1,
-                "Expected to find exactly one query stats entry for '" + coll.getName() + "' " + tojson(queryStats),
+                "Expected to find exactly one query stats entry for '" +
+                    coll.getName() +
+                    "' " +
+                    tojson(queryStats),
             );
             verifyQueryStatsMetrics(queryStats[0].metrics);
         });
@@ -485,7 +583,7 @@ describe("Execution control statistics and observability", function () {
                         delinquentAcquisitionIntervalMillis: delinquentIntervalMs,
                         overdueInterruptCheckIntervalMillis: delinquentIntervalMs * 100,
                         overdueInterruptCheckSamplingRate: 1.0,
-                        internalQueryStatsRateLimit: -1,
+                        internalQueryStatsSampleRate: 1,
                     },
                 },
             });
@@ -514,7 +612,10 @@ describe("Execution control statistics and observability", function () {
             failPoint.off();
 
             const afterStats = getExecutionControlStats(mongod).read.lowPriority;
-            assert.gt(afterStats.totalDelinquentAcquisitions, beforeStats.totalDelinquentAcquisitions);
+            assert.gt(
+                afterStats.totalDelinquentAcquisitions,
+                beforeStats.totalDelinquentAcquisitions,
+            );
         });
     });
 
@@ -556,13 +657,19 @@ describe("Execution control statistics and observability", function () {
 
         function assertPerAcquisitionStatsPresent(stats) {
             perAcquisitionKeys.forEach((key) => {
-                assert(stats.hasOwnProperty(key), `Missing ${key} in per-acquisition stats: ` + tojson(stats));
+                assert(
+                    stats.hasOwnProperty(key),
+                    `Missing ${key} in per-acquisition stats: ` + tojson(stats),
+                );
             });
         }
 
         function assertFinalizedStatsPresent(stats) {
             finalizedStatsKeys.forEach((key) => {
-                assert(stats.hasOwnProperty(key), `Missing ${key} in finalized stats: ` + tojson(stats));
+                assert(
+                    stats.hasOwnProperty(key),
+                    `Missing ${key} in finalized stats: ` + tojson(stats),
+                );
             });
         }
 
@@ -598,19 +705,34 @@ describe("Execution control statistics and observability", function () {
 
             // Verify that totalAdmissions equals the sum of per-priority counters.
             const verifyAndGetTotalAdmissions = (bucket, name) => {
-                const sumOfPriorities = bucket.totalNormalPriorityAdmissions + bucket.totalLowPriorityAdmissions;
+                const sumOfPriorities =
+                    bucket.totalNormalPriorityAdmissions + bucket.totalLowPriorityAdmissions;
                 assert.eq(
                     bucket.totalAdmissions,
                     sumOfPriorities,
-                    name + " totalAdmissions should equal sum of per-priority counters: " + tojson(bucket),
+                    name +
+                        " totalAdmissions should equal sum of per-priority counters: " +
+                        tojson(bucket),
                 );
                 return sumOfPriorities;
             };
 
-            verifyAndGetTotalAdmissions(executionStats.read.nonDeprioritizable, "read.nonDeprioritizable");
-            verifyAndGetTotalAdmissions(executionStats.read.deprioritizable, "read.deprioritizable");
-            verifyAndGetTotalAdmissions(executionStats.write.nonDeprioritizable, "write.nonDeprioritizable");
-            verifyAndGetTotalAdmissions(executionStats.write.deprioritizable, "write.deprioritizable");
+            verifyAndGetTotalAdmissions(
+                executionStats.read.nonDeprioritizable,
+                "read.nonDeprioritizable",
+            );
+            verifyAndGetTotalAdmissions(
+                executionStats.read.deprioritizable,
+                "read.deprioritizable",
+            );
+            verifyAndGetTotalAdmissions(
+                executionStats.write.nonDeprioritizable,
+                "write.nonDeprioritizable",
+            );
+            verifyAndGetTotalAdmissions(
+                executionStats.write.deprioritizable,
+                "write.deprioritizable",
+            );
 
             assert.gte(
                 executionStats.read.normalPriority.startedProcessing +
@@ -632,7 +754,8 @@ describe("Execution control statistics and observability", function () {
 
         function assertExecutionShedStatsCorrect(executionStats) {
             assert.gt(
-                executionStats.nonDeprioritizable.totalOpsLoadShed + executionStats.deprioritizable.totalOpsLoadShed,
+                executionStats.nonDeprioritizable.totalOpsLoadShed +
+                    executionStats.deprioritizable.totalOpsLoadShed,
                 0,
                 "totalOpsLoadShed mismatch: " + tojson(executionStats),
             );
@@ -791,8 +914,23 @@ describe("Execution control statistics and observability", function () {
                 "1025+",
             ];
             for (const bucket of expectedBuckets) {
-                assert(histogram.hasOwnProperty(bucket), `Missing histogram bucket ${bucket}: ` + tojson(histogram));
+                assert(
+                    histogram.hasOwnProperty(bucket),
+                    `Missing histogram bucket ${bucket}: ` + tojson(histogram),
+                );
             }
+        });
+
+        it("should report per-queue wait time histograms in serverStatus", function () {
+            const executionStats = db.serverStatus().queues.execution;
+            ["read", "write"].forEach((opType) => {
+                ["normalPriority", "lowPriority"].forEach((priority) => {
+                    assertQueueWaitTimeHistogramSchema(
+                        executionStats[opType][priority],
+                        `${opType}.${priority}`,
+                    );
+                });
+            });
         });
 
         function configureExecutionControlState(enableDeprioritization, shedding) {

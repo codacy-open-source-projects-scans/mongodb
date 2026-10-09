@@ -22,6 +22,7 @@ executor:
           enableOTELTracing: false
           implicitlyShardOnCreateCollectionOnly: true
           runningWithBalancer: false
+          shardCollectionProbability: 0.5
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
@@ -57,11 +58,11 @@ selector:
   exclude_files: null
   exclude_with_any_tags:
     - requires_standalone
-    - requires_replication
     - assumes_against_mongod_not_mongos
     - assumes_balancer_on
     - requires_profiling
     - assumes_unsharded_collection
+    - backport_required_multiversion
   roots:
     - jstests/concurrency/fsm_workloads/**/*.js
     - src/mongo/db/modules/*/jstests/concurrency/fsm_workloads/*.js

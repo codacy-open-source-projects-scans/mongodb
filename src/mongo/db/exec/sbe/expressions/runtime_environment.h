@@ -1,37 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/sbe/slots_provider.h"
 #include "mongo/db/exec/sbe/values/slot.h"
@@ -44,7 +15,11 @@
 #include <algorithm>
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <vector>
+
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo::sbe {
 /**
@@ -72,7 +47,7 @@ public:
     RuntimeEnvironment(RuntimeEnvironment&&) = delete;
     RuntimeEnvironment& operator=(const RuntimeEnvironment&) = delete;
     RuntimeEnvironment& operator=(const RuntimeEnvironment&&) = delete;
-    virtual ~RuntimeEnvironment();
+    virtual ~RuntimeEnvironment() = default;
 
     class Accessor final : public value::AssignableSlotAccessor {
     public:
@@ -81,33 +56,28 @@ public:
         Accessor(RuntimeEnvironment* env, size_t index) : _env{env}, _index{index} {}
 
         value::TagValueView getViewOfValue() const override {
-            auto [owned, tag, val] = _env->_state->values[_index];
-            return {tag, val};
+            return _env->_state->values[_index].view();
         }
 
         value::TagValueOwned copyOrMoveValue() override {
             // Always make a copy.
-            auto [owned, tag, val] = _env->_state->values[_index];
-            return copyValue(tag, val);
+            auto view = _env->_state->values[_index].view();
+            return value::TagValueOwned::fromRaw(value::copyValue(view.tag, view.value));
         }
 
-        void reset(bool owned, value::TypeTags tag, value::Value val) override {
-            release();
-            _env->_state->values[_index] = {owned, tag, val};
-        }
-
-    private:
-        void release() {
-            auto [owned, tag, val] = _env->_state->values[_index];
-            if (owned) {
-                releaseValue(tag, val);
-                _env->_state->values[_index] = {false, value::TypeTags::Nothing, 0};
-            }
+        void reset_raw(bool owned, value::TypeTags tag, value::Value val) override {
+            _env->_state->values[_index] = value::TagValueMaybeOwned(owned, tag, val);
         }
 
         RuntimeEnvironment* const _env;
         const size_t _index;
     };
+
+    /**
+     * Register the given SlotId 'slotId' as an unnamed slot. The value 'val' is then stored within
+     * the SlotAccessor.
+     */
+    void registerSlot(value::TypeTags tag, value::Value val, bool owned, value::SlotId slotId);
 
     /**
      * Registers and returns a SlotId for the given slot 'name'. The 'slotIdGenerator' is used
@@ -119,7 +89,7 @@ public:
      *
      * A user exception is raised if this slot 'name' has been already registered.
      */
-    value::SlotId registerSlot(StringData name,
+    value::SlotId registerSlot(std::string_view name,
                                value::TypeTags tag,
                                value::Value val,
                                bool owned,
@@ -137,13 +107,13 @@ public:
      * Returns a SlotId registered for the given slot 'name'. If the slot with the specified name
      * hasn't been registered, a user exception is raised.
      */
-    value::SlotId getSlot(StringData name) const final;
+    value::SlotId getSlot(std::string_view name) const final;
 
     /**
      * Returns a SlotId registered for the given slot 'name'. If the slot with the specified name
      * hasn't been registered, boost::none is returned.
      */
-    boost::optional<value::SlotId> getSlotIfExists(StringData name) const final;
+    boost::optional<value::SlotId> getSlotIfExists(std::string_view name) const final;
 
     /**
      * Store the given value in the specified slot within this runtime environment instance.
@@ -196,14 +166,14 @@ private:
         size_t pushSlot(value::SlotId slot) {
             auto index = values.size();
 
-            values.push_back({false, value::TypeTags::Nothing, 0});
+            values.emplace_back(false, value::TypeTags::Nothing, 0);
 
             auto [_, inserted] = slots.emplace(slot, index);
             uassert(4946302, str::stream() << "duplicate environment slot: " << slot, inserted);
             return index;
         }
 
-        void nameSlot(StringData name, value::SlotId slot) {
+        void nameSlot(std::string_view name, value::SlotId slot) {
             uassert(5645901, str::stream() << "undefined slot: " << slot, slots.count(slot));
             auto [_, inserted] = namedSlots.emplace(name, slot);
             uassert(5645902, str::stream() << "duplicate named slot: " << name, inserted);
@@ -214,13 +184,8 @@ private:
             state->namedSlots = namedSlots;
             state->slots = slots;
 
+            // resize() default-constructs each TagValueMaybeOwned to (false, Nothing, 0).
             state->values.resize(values.size());
-
-            // Populate slot values with default value.
-            std::fill(
-                state->values.begin(),
-                state->values.end(),
-                FastTuple<bool, value::TypeTags, value::Value>{false, value::TypeTags::Nothing, 0});
 
             return state;
         }
@@ -228,7 +193,7 @@ private:
         StringMap<value::SlotId> namedSlots;
         value::SlotMap<size_t> slots;
 
-        std::vector<FastTuple<bool, value::TypeTags, value::Value>> values;
+        std::vector<value::TagValueMaybeOwned> values;
     };
 
     void emplaceAccessor(value::SlotId slot, size_t index) {

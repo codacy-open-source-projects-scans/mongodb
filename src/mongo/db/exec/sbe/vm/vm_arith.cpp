@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
@@ -285,27 +259,27 @@ struct Tanh {
  * computation of the respective trigonometric function.
  */
 template <typename TrigFunction>
-value::TagValueMaybeOwned genericTrigonometricFun(value::TypeTags argTag, value::Value argValue) {
-    if (value::isNumber(argTag)) {
-        switch (argTag) {
+value::TagValueMaybeOwned genericTrigonometricFun(value::TagValueView arg) {
+    if (value::isNumber(arg.tag)) {
+        switch (arg.tag) {
             case value::TypeTags::NumberInt32: {
                 double result;
-                TrigFunction::computeFunction(numericCast<int32_t>(argTag, argValue), result);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                TrigFunction::computeFunction(numericCast<int32_t>(arg.tag, arg.value), result);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberInt64: {
                 double result;
-                TrigFunction::computeFunction(numericCast<int64_t>(argTag, argValue), result);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                TrigFunction::computeFunction(numericCast<int64_t>(arg.tag, arg.value), result);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDouble: {
                 double result;
-                TrigFunction::computeFunction(numericCast<double>(argTag, argValue), result);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                TrigFunction::computeFunction(numericCast<double>(arg.tag, arg.value), result);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
                 Decimal128 result;
-                TrigFunction::computeFunction(numericCast<Decimal128>(argTag, argValue), result);
+                TrigFunction::computeFunction(numericCast<Decimal128>(arg.tag, arg.value), result);
                 auto [resTag, resValue] = value::makeCopyDecimal(result);
                 return {true, resTag, resValue};
             }
@@ -313,7 +287,7 @@ value::TagValueMaybeOwned genericTrigonometricFun(value::TypeTags argTag, value:
                 MONGO_UNREACHABLE_TASSERT(11122926);
         }
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 }  // namespace
 
@@ -339,11 +313,9 @@ void setDecimalTotal(TypeTags nonDecimalTotalTag,
                      const Decimal128& decimalTotal,
                      Array* arr) {
     setNonDecimalTotal(nonDecimalTotalTag, nonDecimalTotal, arr);
-    // We don't need to use 'ValueGuard' for decimal because we've already allocated enough storage
-    // and Array::push_back() is guaranteed to not throw.
     auto [tag, val] = makeCopyDecimal(decimalTotal);
     if (arr->size() < AggSumValueElems::kMaxSizeOfArray) {
-        arr->push_back(tag, val);
+        arr->push_back_raw(tag, val);
     } else {
         arr->setAt(AggSumValueElems::kDecimalTotal, tag, val);
     }
@@ -563,8 +535,8 @@ value::TagValueMaybeOwned ByteCode::aggDoubleDoubleSumFinalizeImpl(value::Array*
 }
 
 
-void ByteCode::aggStdDevImpl(value::Array* arr, value::TypeTags rhsTag, value::Value rhsValue) {
-    if (!isNumber(rhsTag)) {
+void ByteCode::aggStdDevImpl(value::Array* arr, value::TagValueView rhs) {
+    if (!isNumber(rhs.tag)) {
         return;
     }
 
@@ -582,11 +554,11 @@ void ByteCode::aggStdDevImpl(value::Array* arr, value::TypeTags rhsTag, value::V
     // Within our query execution engine, $stdDevPop and $stdDevSamp do not maintain the precision
     // of decimal types and converts all values to double. We do this here by converting
     // NumberDecimal to Decimal128 and then extract a double value from it.
-    if (rhsTag == value::TypeTags::NumberDecimal) {
-        auto decimal = value::bitcastTo<Decimal128>(rhsValue);
+    if (rhs.tag == value::TypeTags::NumberDecimal) {
+        auto decimal = value::bitcastTo<Decimal128>(rhs.value);
         inputDouble = decimal.toDouble();
     } else {
-        inputDouble = numericCast<double>(rhsTag, rhsValue);
+        inputDouble = numericCast<double>(rhs.tag, rhs.value);
     }
     auto curVal = value::bitcastFrom<double>(inputDouble);
 
@@ -598,8 +570,7 @@ void ByteCode::aggStdDevImpl(value::Array* arr, value::TypeTags rhsTag, value::V
 
     auto delta = genericSub(
         value::TypeTags::NumberDouble, curVal, value::TypeTags::NumberDouble, mean.value);
-    auto deltaDivCount =
-        genericDiv(delta.tag(), delta.value(), value::TypeTags::NumberInt64, newCountVal);
+    auto deltaDivCount = genericDiv(delta.view(), value::TagValueView::numberInt64(count));
     auto newMean = genericAdd(mean.tag, mean.value, deltaDivCount.tag(), deltaDivCount.value());
     auto newDelta =
         genericSub(value::TypeTags::NumberDouble, curVal, newMean.tag(), newMean.value());
@@ -702,38 +673,35 @@ value::TagValueMaybeOwned ByteCode::aggStdDevFinalizeImpl(value::Value fieldValu
     return {true, value::TypeTags::NumberDouble, value::bitcastFrom<double>(stdDev)};
 }
 
-value::TagValueMaybeOwned ByteCode::genericDiv(value::TypeTags lhsTag,
-                                               value::Value lhsValue,
-                                               value::TypeTags rhsTag,
-                                               value::Value rhsValue) {
+value::TagValueMaybeOwned ByteCode::genericDiv(value::TagValueView lhs, value::TagValueView rhs) {
     auto assertNonZero = [](bool nonZero) {
         uassert(4848401, "can't $divide by zero", nonZero);
     };
 
-    if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
-        switch (getWidestNumericalType(lhsTag, rhsTag)) {
+    if (value::isNumber(lhs.tag) && value::isNumber(rhs.tag)) {
+        switch (getWidestNumericalType(lhs.tag, rhs.tag)) {
             case value::TypeTags::NumberInt32: {
-                assertNonZero(numericCast<double>(rhsTag, rhsValue) != 0);
-                auto result =
-                    numericCast<double>(lhsTag, lhsValue) / numericCast<double>(rhsTag, rhsValue);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                assertNonZero(numericCast<double>(rhs.tag, rhs.value) != 0);
+                auto result = numericCast<double>(lhs.tag, lhs.value) /
+                    numericCast<double>(rhs.tag, rhs.value);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberInt64: {
-                assertNonZero(numericCast<double>(rhsTag, rhsValue) != 0);
-                auto result =
-                    numericCast<double>(lhsTag, lhsValue) / numericCast<double>(rhsTag, rhsValue);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                assertNonZero(numericCast<double>(rhs.tag, rhs.value) != 0);
+                auto result = numericCast<double>(lhs.tag, lhs.value) /
+                    numericCast<double>(rhs.tag, rhs.value);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDouble: {
-                assertNonZero(numericCast<double>(rhsTag, rhsValue) != 0);
-                auto result =
-                    numericCast<double>(lhsTag, lhsValue) / numericCast<double>(rhsTag, rhsValue);
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                assertNonZero(numericCast<double>(rhs.tag, rhs.value) != 0);
+                auto result = numericCast<double>(lhs.tag, lhs.value) /
+                    numericCast<double>(rhs.tag, rhs.value);
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
-                assertNonZero(!numericCast<Decimal128>(rhsTag, rhsValue).isZero());
-                auto result = numericCast<Decimal128>(lhsTag, lhsValue)
-                                  .divide(numericCast<Decimal128>(rhsTag, rhsValue));
+                assertNonZero(!numericCast<Decimal128>(rhs.tag, rhs.value).isZero());
+                auto result = numericCast<Decimal128>(lhs.tag, lhs.value)
+                                  .divide(numericCast<Decimal128>(rhs.tag, rhs.value));
                 auto [tag, val] = value::makeCopyDecimal(result);
                 return {true, tag, val};
             }
@@ -742,95 +710,89 @@ value::TagValueMaybeOwned ByteCode::genericDiv(value::TypeTags lhsTag,
         }
     }
 
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericIDiv(value::TypeTags lhsTag,
-                                                value::Value lhsValue,
-                                                value::TypeTags rhsTag,
-                                                value::Value rhsValue) {
+value::TagValueMaybeOwned ByteCode::genericIDiv(value::TagValueView lhs, value::TagValueView rhs) {
     auto assertNonZero = [](bool nonZero) {
         uassert(4848402, "can't $divide by zero", nonZero);
     };
 
-    if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
-        switch (getWidestNumericalType(lhsTag, rhsTag)) {
+    if (value::isNumber(lhs.tag) && value::isNumber(rhs.tag)) {
+        switch (getWidestNumericalType(lhs.tag, rhs.tag)) {
             case value::TypeTags::NumberInt32: {
-                assertNonZero(numericCast<int32_t>(rhsTag, rhsValue) != 0);
-                auto result =
-                    numericCast<int32_t>(lhsTag, lhsValue) / numericCast<int32_t>(rhsTag, rhsValue);
-                return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(result)};
+                assertNonZero(numericCast<int32_t>(rhs.tag, rhs.value) != 0);
+                auto result = numericCast<int32_t>(lhs.tag, lhs.value) /
+                    numericCast<int32_t>(rhs.tag, rhs.value);
+                return value::TagValueMaybeOwned::numberInt32(result);
             }
             case value::TypeTags::NumberInt64: {
-                assertNonZero(numericCast<int64_t>(rhsTag, rhsValue) != 0);
-                auto result =
-                    numericCast<int64_t>(lhsTag, lhsValue) / numericCast<int64_t>(rhsTag, rhsValue);
-                return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
+                assertNonZero(numericCast<int64_t>(rhs.tag, rhs.value) != 0);
+                auto result = numericCast<int64_t>(lhs.tag, lhs.value) /
+                    numericCast<int64_t>(rhs.tag, rhs.value);
+                return value::TagValueMaybeOwned::numberInt64(result);
             }
             case value::TypeTags::NumberDouble: {
-                auto lhs = representAs<int64_t>(numericCast<double>(lhsTag, lhsValue));
-                auto rhs = representAs<int64_t>(numericCast<double>(rhsTag, rhsValue));
+                auto lhsInt = representAs<int64_t>(numericCast<double>(lhs.tag, lhs.value));
+                auto rhsInt = representAs<int64_t>(numericCast<double>(rhs.tag, rhs.value));
 
-                if (!lhs || !rhs) {
-                    return {false, value::TypeTags::Nothing, 0};
+                if (!lhsInt || !rhsInt) {
+                    return value::TagValueMaybeOwned::nothing();
                 }
-                assertNonZero(*rhs != 0);
-                auto result = *lhs / *rhs;
+                assertNonZero(*rhsInt != 0);
+                auto result = *lhsInt / *rhsInt;
 
-                return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
+                return value::TagValueMaybeOwned::numberInt64(result);
             }
             case value::TypeTags::NumberDecimal: {
-                auto lhs = representAs<int64_t>(numericCast<Decimal128>(lhsTag, lhsValue));
-                auto rhs = representAs<int64_t>(numericCast<Decimal128>(rhsTag, rhsValue));
+                auto lhsInt = representAs<int64_t>(numericCast<Decimal128>(lhs.tag, lhs.value));
+                auto rhsInt = representAs<int64_t>(numericCast<Decimal128>(rhs.tag, rhs.value));
 
-                if (!lhs || !rhs) {
-                    return {false, value::TypeTags::Nothing, 0};
+                if (!lhsInt || !rhsInt) {
+                    return value::TagValueMaybeOwned::nothing();
                 }
-                assertNonZero(*rhs != 0);
-                auto result = *lhs / *rhs;
+                assertNonZero(*rhsInt != 0);
+                auto result = *lhsInt / *rhsInt;
 
-                return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
+                return value::TagValueMaybeOwned::numberInt64(result);
             }
             default:
                 MONGO_UNREACHABLE_TASSERT(11122928);
         }
     }
 
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericMod(value::TypeTags lhsTag,
-                                               value::Value lhsValue,
-                                               value::TypeTags rhsTag,
-                                               value::Value rhsValue) {
+value::TagValueMaybeOwned ByteCode::genericMod(value::TagValueView lhs, value::TagValueView rhs) {
     auto assertNonZero = [](bool nonZero) {
         uassert(4848403, "can't $mod by zero", nonZero);
     };
 
-    if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
-        switch (getWidestNumericalType(lhsTag, rhsTag)) {
+    if (value::isNumber(lhs.tag) && value::isNumber(rhs.tag)) {
+        switch (getWidestNumericalType(lhs.tag, rhs.tag)) {
             case value::TypeTags::NumberInt32: {
-                assertNonZero(numericCast<int32_t>(rhsTag, rhsValue) != 0);
-                auto result = overflow::safeMod(numericCast<int32_t>(lhsTag, lhsValue),
-                                                numericCast<int32_t>(rhsTag, rhsValue));
-                return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(result)};
+                assertNonZero(numericCast<int32_t>(rhs.tag, rhs.value) != 0);
+                auto result = overflow::safeMod(numericCast<int32_t>(lhs.tag, lhs.value),
+                                                numericCast<int32_t>(rhs.tag, rhs.value));
+                return value::TagValueMaybeOwned::numberInt32(result);
             }
             case value::TypeTags::NumberInt64: {
-                assertNonZero(numericCast<int64_t>(rhsTag, rhsValue) != 0);
-                auto result = overflow::safeMod(numericCast<int64_t>(lhsTag, lhsValue),
-                                                numericCast<int64_t>(rhsTag, rhsValue));
-                return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
+                assertNonZero(numericCast<int64_t>(rhs.tag, rhs.value) != 0);
+                auto result = overflow::safeMod(numericCast<int64_t>(lhs.tag, lhs.value),
+                                                numericCast<int64_t>(rhs.tag, rhs.value));
+                return value::TagValueMaybeOwned::numberInt64(result);
             }
             case value::TypeTags::NumberDouble: {
-                assertNonZero(numericCast<double>(rhsTag, rhsValue) != 0);
-                auto result = fmod(numericCast<double>(lhsTag, lhsValue),
-                                   numericCast<double>(rhsTag, rhsValue));
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                assertNonZero(numericCast<double>(rhs.tag, rhs.value) != 0);
+                auto result = fmod(numericCast<double>(lhs.tag, lhs.value),
+                                   numericCast<double>(rhs.tag, rhs.value));
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
-                assertNonZero(!numericCast<Decimal128>(rhsTag, rhsValue).isZero());
-                auto result = numericCast<Decimal128>(lhsTag, lhsValue)
-                                  .modulo(numericCast<Decimal128>(rhsTag, rhsValue));
+                assertNonZero(!numericCast<Decimal128>(rhs.tag, rhs.value).isZero());
+                auto result = numericCast<Decimal128>(lhs.tag, lhs.value)
+                                  .modulo(numericCast<Decimal128>(rhs.tag, rhs.value));
                 auto [tag, val] = value::makeCopyDecimal(result);
                 return {true, tag, val};
             }
@@ -839,61 +801,51 @@ value::TagValueMaybeOwned ByteCode::genericMod(value::TypeTags lhsTag,
         }
     }
 
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericAbs(value::TypeTags operandTag,
-                                               value::Value operandValue) {
-    switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericAbs(value::TagValueView operand) {
+    switch (operand.tag) {
         case value::TypeTags::NumberInt32: {
-            auto operand = value::bitcastTo<int32_t>(operandValue);
-            if (operand == std::numeric_limits<int32_t>::min()) {
-                return {false,
-                        value::TypeTags::NumberInt64,
-                        value::bitcastFrom<int64_t>(-int64_t{operand})};
+            auto val = value::bitcastTo<int32_t>(operand.value);
+            if (val == std::numeric_limits<int32_t>::min()) {
+                return value::TagValueMaybeOwned::numberInt64(-int64_t{val});
             }
 
-            return {false,
-                    value::TypeTags::NumberInt32,
-                    value::bitcastFrom<int32_t>(std::abs(operand))};
+            return value::TagValueMaybeOwned::numberInt32(std::abs(val));
         }
         case value::TypeTags::NumberInt64: {
-            auto operand = value::bitcastTo<int64_t>(operandValue);
-            if (operand == std::numeric_limits<int64_t>::min()) {
+            auto val = value::bitcastTo<int64_t>(operand.value);
+            if (val == std::numeric_limits<int64_t>::min()) {
                 // Absolute value of the minimum int64_t value does not fit in any integer type.
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueMaybeOwned::nothing();
             }
-            return {false,
-                    value::TypeTags::NumberInt64,
-                    value::bitcastFrom<int64_t>(std::abs(operand))};
+            return value::TagValueMaybeOwned::numberInt64(std::abs(val));
         }
         case value::TypeTags::NumberDouble: {
-            auto operand = value::bitcastTo<double>(operandValue);
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::abs(operand))};
+            auto val = value::bitcastTo<double>(operand.value);
+            return value::TagValueMaybeOwned::numberDouble(std::abs(val));
         }
         case value::TypeTags::NumberDecimal: {
-            auto operand = value::bitcastTo<Decimal128>(operandValue);
-            auto [tag, value] = value::makeCopyDecimal(operand.toAbs());
+            auto asDecimal = value::bitcastTo<Decimal128>(operand.value);
+            auto [tag, value] = value::makeCopyDecimal(asDecimal.toAbs());
             return {true, tag, value};
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericCeil(value::TypeTags operandTag,
-                                                value::Value operandValue) {
-    if (isNumber(operandTag)) {
-        switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericCeil(value::TagValueView operand) {
+    if (isNumber(operand.tag)) {
+        switch (operand.tag) {
             case value::TypeTags::NumberDouble: {
-                auto result = std::ceil(value::bitcastTo<double>(operandValue));
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                auto result = std::ceil(value::bitcastTo<double>(operand.value));
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
                 auto result =
-                    value::bitcastTo<Decimal128>(operandValue)
+                    value::bitcastTo<Decimal128>(operand.value)
                         .quantize(Decimal128::kNormalizedZero, Decimal128::kRoundTowardPositive);
                 auto [tag, value] = value::makeCopyDecimal(result);
                 return {true, tag, value};
@@ -901,26 +853,25 @@ value::TagValueMaybeOwned ByteCode::genericCeil(value::TypeTags operandTag,
             case value::TypeTags::NumberInt32:
             case value::TypeTags::NumberInt64:
                 // Ceil on integer values is the identity function.
-                return {false, operandTag, operandValue};
+                return {false, operand.tag, operand.value};
             default:
                 MONGO_UNREACHABLE_TASSERT(11122930);
         }
     }
 
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericFloor(value::TypeTags operandTag,
-                                                 value::Value operandValue) {
-    if (isNumber(operandTag)) {
-        switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericFloor(value::TagValueView operand) {
+    if (isNumber(operand.tag)) {
+        switch (operand.tag) {
             case value::TypeTags::NumberDouble: {
-                auto result = std::floor(value::bitcastTo<double>(operandValue));
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                auto result = std::floor(value::bitcastTo<double>(operand.value));
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
                 auto result =
-                    value::bitcastTo<Decimal128>(operandValue)
+                    value::bitcastTo<Decimal128>(operand.value)
                         .quantize(Decimal128::kNormalizedZero, Decimal128::kRoundTowardNegative);
                 auto [tag, value] = value::makeCopyDecimal(result);
                 return {true, tag, value};
@@ -928,212 +879,190 @@ value::TagValueMaybeOwned ByteCode::genericFloor(value::TypeTags operandTag,
             case value::TypeTags::NumberInt32:
             case value::TypeTags::NumberInt64:
                 // Floor on integer values is the identity function.
-                return {false, operandTag, operandValue};
+                return {false, operand.tag, operand.value};
             default:
                 MONGO_UNREACHABLE_TASSERT(11122931);
         }
     }
 
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericExp(value::TypeTags operandTag,
-                                               value::Value operandValue) {
-    switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericExp(value::TagValueView operand) {
+    switch (operand.tag) {
         case value::TypeTags::NumberDouble: {
-            auto result = exp(value::bitcastTo<double>(operandValue));
-            return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+            auto result = exp(value::bitcastTo<double>(operand.value));
+            return value::TagValueMaybeOwned::numberDouble(result);
         }
         case value::TypeTags::NumberDecimal: {
-            auto result = value::bitcastTo<Decimal128>(operandValue).exp();
+            auto result = value::bitcastTo<Decimal128>(operand.value).exp();
             auto [tag, value] = value::makeCopyDecimal(result);
             return {true, tag, value};
         }
         case value::TypeTags::NumberInt32:
         case value::TypeTags::NumberInt64: {
-            auto operand = (operandTag == value::TypeTags::NumberInt32)
-                ? static_cast<double>(value::bitcastTo<int32_t>(operandValue))
-                : static_cast<double>(value::bitcastTo<int64_t>(operandValue));
-            return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(exp(operand))};
+            auto val = (operand.tag == value::TypeTags::NumberInt32)
+                ? static_cast<double>(value::bitcastTo<int32_t>(operand.value))
+                : static_cast<double>(value::bitcastTo<int64_t>(operand.value));
+            return value::TagValueMaybeOwned::numberDouble(exp(val));
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericLn(value::TypeTags operandTag,
-                                              value::Value operandValue) {
-    switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericLn(value::TagValueView operand) {
+    switch (operand.tag) {
         case value::TypeTags::NumberDouble: {
-            auto operand = value::bitcastTo<double>(operandValue);
-            if (operand <= 0 && !std::isnan(operand)) {
+            auto val = value::bitcastTo<double>(operand.value);
+            if (val <= 0 && !std::isnan(val)) {
                 // Logarithms are only defined on the domain of positive numbers and NaN. NaN is a
                 // legal input to ln(), returning NaN.
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueMaybeOwned::nothing();
             }
             // Note: NaN is a legal input to log(), returning NaN.
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::log(operand))};
+            return value::TagValueMaybeOwned::numberDouble(std::log(val));
         }
         case value::TypeTags::NumberDecimal: {
-            auto operand = value::bitcastTo<Decimal128>(operandValue);
-            if (!operand.isGreater(Decimal128::kNormalizedZero) && !operand.isNaN()) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto asDecimal = value::bitcastTo<Decimal128>(operand.value);
+            if (!asDecimal.isGreater(Decimal128::kNormalizedZero) && !asDecimal.isNaN()) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            auto operandLn = operand.log();
-
-            auto [tag, value] = value::makeCopyDecimal(operandLn);
+            auto [tag, value] = value::makeCopyDecimal(asDecimal.log());
             return {true, tag, value};
         }
         case value::TypeTags::NumberInt32:
         case value::TypeTags::NumberInt64: {
-            auto operand = (operandTag == value::TypeTags::NumberInt32)
-                ? static_cast<double>(value::bitcastTo<int32_t>(operandValue))
-                : static_cast<double>(value::bitcastTo<int64_t>(operandValue));
-            if (operand <= 0 && !std::isnan(operand)) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto val = (operand.tag == value::TypeTags::NumberInt32)
+                ? static_cast<double>(value::bitcastTo<int32_t>(operand.value))
+                : static_cast<double>(value::bitcastTo<int64_t>(operand.value));
+            if (val <= 0 && !std::isnan(val)) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::log(operand))};
+            return value::TagValueMaybeOwned::numberDouble(std::log(val));
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericLog10(value::TypeTags operandTag,
-                                                 value::Value operandValue) {
-    switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericLog10(value::TagValueView operand) {
+    switch (operand.tag) {
         case value::TypeTags::NumberDouble: {
-            auto operand = value::bitcastTo<double>(operandValue);
-            if (operand <= 0 && !std::isnan(operand)) {
+            auto val = value::bitcastTo<double>(operand.value);
+            if (val <= 0 && !std::isnan(val)) {
                 // Logarithms are only defined on the domain of positive numbers and NaN. NaN is a
                 // legal input to log10(), returning NaN.
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueMaybeOwned::nothing();
             }
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::log10(operand))};
+            return value::TagValueMaybeOwned::numberDouble(std::log10(val));
         }
         case value::TypeTags::NumberDecimal: {
-            auto operand = value::bitcastTo<Decimal128>(operandValue);
-            if (!operand.isGreater(Decimal128::kNormalizedZero) && !operand.isNaN()) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto asDecimal = value::bitcastTo<Decimal128>(operand.value);
+            if (!asDecimal.isGreater(Decimal128::kNormalizedZero) && !asDecimal.isNaN()) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            auto operandLog10 = operand.log10();
-
-            auto [tag, value] = value::makeCopyDecimal(operandLog10);
+            auto [tag, value] = value::makeCopyDecimal(asDecimal.log10());
             return {true, tag, value};
         }
         case value::TypeTags::NumberInt32:
         case value::TypeTags::NumberInt64: {
-            auto operand = (operandTag == value::TypeTags::NumberInt32)
-                ? static_cast<double>(value::bitcastTo<int32_t>(operandValue))
-                : static_cast<double>(value::bitcastTo<int64_t>(operandValue));
-            if (operand <= 0 && !std::isnan(operand)) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto val = (operand.tag == value::TypeTags::NumberInt32)
+                ? static_cast<double>(value::bitcastTo<int32_t>(operand.value))
+                : static_cast<double>(value::bitcastTo<int64_t>(operand.value));
+            if (val <= 0 && !std::isnan(val)) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::log10(operand))};
+            return value::TagValueMaybeOwned::numberDouble(std::log10(val));
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericSqrt(value::TypeTags operandTag,
-                                                value::Value operandValue) {
-    switch (operandTag) {
+value::TagValueMaybeOwned ByteCode::genericSqrt(value::TagValueView operand) {
+    switch (operand.tag) {
         case value::TypeTags::NumberDouble: {
-            auto operand = value::bitcastTo<double>(operandValue);
-            if (operand < 0 && !std::isnan(operand)) {
+            auto val = value::bitcastTo<double>(operand.value);
+            if (val < 0 && !std::isnan(val)) {
                 // Sqrt is only defined in the domain of non-negative numbers and NaN. NaN is a
                 // legal input to sqrt(), returning NaN.
-                return {false, value::TypeTags::Nothing, 0};
+                return value::TagValueMaybeOwned::nothing();
             }
             // Note: NaN is a legal input to sqrt(), returning NaN.
-            return {
-                false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(sqrt(operand))};
+            return value::TagValueMaybeOwned::numberDouble(sqrt(val));
         }
         case value::TypeTags::NumberDecimal: {
-            auto operand = value::bitcastTo<Decimal128>(operandValue);
-            if (operand.isLess(Decimal128::kNormalizedZero) && !operand.isNaN()) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto asDecimal = value::bitcastTo<Decimal128>(operand.value);
+            if (asDecimal.isLess(Decimal128::kNormalizedZero) && !asDecimal.isNaN()) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            auto [tag, value] = value::makeCopyDecimal(operand.sqrt());
+            auto [tag, value] = value::makeCopyDecimal(asDecimal.sqrt());
             return {true, tag, value};
         }
         case value::TypeTags::NumberInt32:
         case value::TypeTags::NumberInt64: {
-            auto operand = (operandTag == value::TypeTags::NumberInt32)
-                ? static_cast<double>(value::bitcastTo<int32_t>(operandValue))
-                : static_cast<double>(value::bitcastTo<int64_t>(operandValue));
-            if (operand < 0 && !std::isnan(operand)) {
-                return {false, value::TypeTags::Nothing, 0};
+            auto val = (operand.tag == value::TypeTags::NumberInt32)
+                ? static_cast<double>(value::bitcastTo<int32_t>(operand.value))
+                : static_cast<double>(value::bitcastTo<int64_t>(operand.value));
+            if (val < 0 && !std::isnan(val)) {
+                return value::TagValueMaybeOwned::nothing();
             }
-            return {
-                false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(sqrt(operand))};
+            return value::TagValueMaybeOwned::numberDouble(sqrt(val));
         }
         default:
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericPow(value::TypeTags baseTag,
-                                               value::Value baseValue,
-                                               value::TypeTags exponentTag,
-                                               value::Value exponentValue) {
+value::TagValueMaybeOwned ByteCode::genericPow(value::TagValueView base,
+                                               value::TagValueView exponent) {
 
     // pow supports only numeric values
-    if (!value::isNumber(baseTag) || !value::isNumber(exponentTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isNumber(base.tag) || !value::isNumber(exponent.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    if (baseTag == value::TypeTags::NumberDecimal ||
-        exponentTag == value::TypeTags::NumberDecimal) {
-        auto baseDecimal = numericCast<Decimal128>(baseTag, baseValue);
-        auto exponenetDecimal = numericCast<Decimal128>(exponentTag, exponentValue);
-        if (baseDecimal == Decimal128("0") && exponenetDecimal < Decimal128("0")) {
-            return {false, value::TypeTags::Nothing, 0};
+    if (base.tag == value::TypeTags::NumberDecimal ||
+        exponent.tag == value::TypeTags::NumberDecimal) {
+        auto baseDecimal = numericCast<Decimal128>(base);
+        auto exponentDecimal = numericCast<Decimal128>(exponent);
+        if (baseDecimal == Decimal128("0") && exponentDecimal < Decimal128("0")) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        auto result = baseDecimal.power(exponenetDecimal);
+        auto result = baseDecimal.power(exponentDecimal);
         auto [resTag, resValue] = value::makeCopyDecimal(result);
         return {true, resTag, resValue};
     }
 
     // If either argument is a double, return a double.
-    if (baseTag == value::TypeTags::NumberDouble || exponentTag == value::TypeTags::NumberDouble) {
-        auto baseDouble = numericCast<double>(baseTag, baseValue);
-        auto exponentDouble = numericCast<double>(exponentTag, exponentValue);
+    if (base.tag == value::TypeTags::NumberDouble ||
+        exponent.tag == value::TypeTags::NumberDouble) {
+        auto baseDouble = numericCast<double>(base);
+        auto exponentDouble = numericCast<double>(exponent);
         if (baseDouble == 0 && exponentDouble < 0) {
-            return {false, value::TypeTags::Nothing, 0};
+            return value::TagValueMaybeOwned::nothing();
         }
-        return {false,
-                value::TypeTags::NumberDouble,
-                value::bitcastFrom<double>(std::pow(baseDouble, exponentDouble))};
+        return value::TagValueMaybeOwned::numberDouble(std::pow(baseDouble, exponentDouble));
     }
 
-    auto baseLong = value::bitcastTo<int64_t>(baseValue);
-    auto exponentLong = value::bitcastTo<int64_t>(exponentValue);
+    auto baseLong = value::bitcastTo<int64_t>(base.value);
+    auto exponentLong = value::bitcastTo<int64_t>(exponent.value);
     if (baseLong == 0 && exponentLong < 0) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     // If both values are int and the res fits in int then return int, otherwise return long
-    const auto formatResult = [baseTag, exponentTag](int64_t longRes) {
-        value::TagValueMaybeOwned res = {
-            false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(longRes)};
+    const auto formatResult = [base, exponent](int64_t longRes) {
+        value::TagValueMaybeOwned res = value::TagValueMaybeOwned::numberInt64(longRes);
 
-        if (baseTag == value::TypeTags::NumberInt32 &&
-            exponentTag == value::TypeTags::NumberInt32) {
+        if (base.tag == value::TypeTags::NumberInt32 &&
+            exponent.tag == value::TypeTags::NumberInt32) {
 
             int32_t intRes = static_cast<int32_t>(longRes);
             if (intRes == longRes) {
                 // should be an int since all arguments were int and it fits
-                res = {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(intRes)};
+                res = value::TagValueMaybeOwned::numberInt32(intRes);
             }
         }
 
@@ -1162,17 +1091,13 @@ value::TagValueMaybeOwned ByteCode::genericPow(value::TypeTags baseTag,
     } else if (exponentLong > 63 || exponentLong < 0) {
         // If the base is not 0, 1, or -1 and the exponent is too large, or negative,
         // the result cannot be represented as a long.
-        return {false,
-                value::TypeTags::NumberDouble,
-                value::bitcastFrom<double>(std::pow(baseLong, exponentLong))};
+        return value::TagValueMaybeOwned::numberDouble(std::pow(baseLong, exponentLong));
     }
 
     // It's still possible that the result cannot be represented as a long. If that's the case,
     // return a double.
     if (!representableAsLong(baseLong, exponentLong)) {
-        return {false,
-                value::TypeTags::NumberDouble,
-                value::bitcastFrom<double>(std::pow(baseLong, exponentLong))};
+        return value::TagValueMaybeOwned::numberDouble(std::pow(baseLong, exponentLong));
     }
 
 
@@ -1205,52 +1130,51 @@ value::TagValueMaybeOwned ByteCode::genericPow(value::TypeTags baseTag,
 
 value::TagValueOwned ByteCode::genericNot(value::TypeTags tag, value::Value value) {
     if (tag == value::TypeTags::Boolean) {
-        return {tag, value::bitcastFrom<bool>(!value::bitcastTo<bool>(value))};
+        return value::TagValueOwned::fromRaw(
+            tag, value::bitcastFrom<bool>(!value::bitcastTo<bool>(value)));
     } else {
-        return {value::TypeTags::Nothing, 0};
+        return value::TagValueOwned::fromRaw(value::TypeTags::Nothing, 0);
     }
 }
 
-value::TagValueMaybeOwned ByteCode::genericAcos(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Acos>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAcos(value::TagValueView operand) {
+    return genericTrigonometricFun<Acos>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAcosh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Acosh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAcosh(value::TagValueView operand) {
+    return genericTrigonometricFun<Acosh>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAsin(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Asin>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAsin(value::TagValueView operand) {
+    return genericTrigonometricFun<Asin>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAsinh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Asinh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAsinh(value::TagValueView operand) {
+    return genericTrigonometricFun<Asinh>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAtan(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Atan>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAtan(value::TagValueView operand) {
+    return genericTrigonometricFun<Atan>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAtanh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Atanh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericAtanh(value::TagValueView operand) {
+    return genericTrigonometricFun<Atanh>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericAtan2(value::TypeTags argTag1,
-                                                 value::Value argValue1,
-                                                 value::TypeTags argTag2,
-                                                 value::Value argValue2) {
-    if (value::isNumber(argTag1) && value::isNumber(argTag2)) {
-        switch (getWidestNumericalType(argTag1, argTag2)) {
+value::TagValueMaybeOwned ByteCode::genericAtan2(value::TagValueView operand1,
+                                                 value::TagValueView operand2) {
+    if (value::isNumber(operand1.tag) && value::isNumber(operand2.tag)) {
+        switch (getWidestNumericalType(operand1.tag, operand2.tag)) {
             case value::TypeTags::NumberInt32:
             case value::TypeTags::NumberInt64:
             case value::TypeTags::NumberDouble: {
-                auto result = std::atan2(numericCast<double>(argTag1, argValue1),
-                                         numericCast<double>(argTag2, argValue2));
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                auto result =
+                    std::atan2(numericCast<double>(operand1), numericCast<double>(operand2));
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
-                auto result = numericCast<Decimal128>(argTag1, argValue1)
-                                  .atan2(numericCast<Decimal128>(argTag2, argValue2));
+                auto result =
+                    numericCast<Decimal128>(operand1).atan2(numericCast<Decimal128>(operand2));
                 auto [resTag, resValue] = value::makeCopyDecimal(result);
                 return {true, resTag, resValue};
             }
@@ -1258,30 +1182,28 @@ value::TagValueMaybeOwned ByteCode::genericAtan2(value::TypeTags argTag1,
                 MONGO_UNREACHABLE_TASSERT(11122933);
         }
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericCos(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Cos>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericCos(value::TagValueView operand) {
+    return genericTrigonometricFun<Cos>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericCosh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Cosh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericCosh(value::TagValueView operand) {
+    return genericTrigonometricFun<Cosh>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericDegreesToRadians(value::TypeTags argTag,
-                                                            value::Value argValue) {
-    if (value::isNumber(argTag)) {
-        switch (argTag) {
+value::TagValueMaybeOwned ByteCode::genericDegreesToRadians(value::TagValueView operand) {
+    if (value::isNumber(operand.tag)) {
+        switch (operand.tag) {
             case value::TypeTags::NumberInt32:
             case value::TypeTags::NumberInt64:
             case value::TypeTags::NumberDouble: {
-                auto result = numericCast<double>(argTag, argValue) * kDoublePiOver180;
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                auto result = numericCast<double>(operand) * kDoublePiOver180;
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
-                auto result =
-                    numericCast<Decimal128>(argTag, argValue).multiply(Decimal128::kPiOver180);
+                auto result = numericCast<Decimal128>(operand).multiply(Decimal128::kPiOver180);
                 auto [resTag, resValue] = value::makeCopyDecimal(result);
                 return {true, resTag, resValue};
             }
@@ -1289,22 +1211,20 @@ value::TagValueMaybeOwned ByteCode::genericDegreesToRadians(value::TypeTags argT
                 MONGO_UNREACHABLE_TASSERT(11122934);
         }
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericRadiansToDegrees(value::TypeTags argTag,
-                                                            value::Value argValue) {
-    if (value::isNumber(argTag)) {
-        switch (argTag) {
+value::TagValueMaybeOwned ByteCode::genericRadiansToDegrees(value::TagValueView operand) {
+    if (value::isNumber(operand.tag)) {
+        switch (operand.tag) {
             case value::TypeTags::NumberInt32:
             case value::TypeTags::NumberInt64:
             case value::TypeTags::NumberDouble: {
-                auto result = numericCast<double>(argTag, argValue) * kDouble180OverPi;
-                return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+                auto result = numericCast<double>(operand) * kDouble180OverPi;
+                return value::TagValueMaybeOwned::numberDouble(result);
             }
             case value::TypeTags::NumberDecimal: {
-                auto result =
-                    numericCast<Decimal128>(argTag, argValue).multiply(Decimal128::k180OverPi);
+                auto result = numericCast<Decimal128>(operand).multiply(Decimal128::k180OverPi);
                 auto [resTag, resValue] = value::makeCopyDecimal(result);
                 return {true, resTag, resValue};
             }
@@ -1312,23 +1232,23 @@ value::TagValueMaybeOwned ByteCode::genericRadiansToDegrees(value::TypeTags argT
                 MONGO_UNREACHABLE_TASSERT(11122935);
         }
     }
-    return {false, value::TypeTags::Nothing, 0};
+    return value::TagValueMaybeOwned::nothing();
 }
 
-value::TagValueMaybeOwned ByteCode::genericSin(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Sin>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericSin(value::TagValueView operand) {
+    return genericTrigonometricFun<Sin>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericSinh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Sinh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericSinh(value::TagValueView operand) {
+    return genericTrigonometricFun<Sinh>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericTan(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Tan>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericTan(value::TagValueView operand) {
+    return genericTrigonometricFun<Tan>(operand);
 }
 
-value::TagValueMaybeOwned ByteCode::genericTanh(value::TypeTags argTag, value::Value argValue) {
-    return genericTrigonometricFun<Tanh>(argTag, argValue);
+value::TagValueMaybeOwned ByteCode::genericTanh(value::TagValueView operand) {
+    return genericTrigonometricFun<Tanh>(operand);
 }
 
 }  // namespace vm

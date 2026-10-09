@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/collation/collation_index_key.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -41,8 +14,11 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
+
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace mongo;
 
@@ -50,7 +26,7 @@ void assertKeyStringCollatorOutput(const CollatorInterfaceMock& collator,
                                    const BSONObj& dataObj,
                                    const BSONObj& expected) {
     key_string::Builder ks(key_string::Version::kLatestVersion, key_string::ALL_ASCENDING);
-    ks.appendBSONElement(dataObj.firstElement(), [&](StringData stringData) {
+    ks.appendBSONElement(dataObj.firstElement(), [&](std::string_view stringData) {
         return collator.getComparisonString(stringData);
     });
 
@@ -62,7 +38,7 @@ void assertKeyStringCollatorOutput(const CollatorInterfaceMock& collator,
 void assertKeyStringCollatorThrows(const CollatorInterfaceMock& collator, const BSONObj& dataObj) {
     key_string::Builder ks(key_string::Version::kLatestVersion, key_string::ALL_ASCENDING);
     ASSERT_THROWS_CODE(ks.appendBSONElement(dataObj.firstElement(),
-                                            [&](StringData stringData) {
+                                            [&](std::string_view stringData) {
                                                 return collator.getComparisonString(stringData);
                                             }),
                        AssertionException,
@@ -113,11 +89,11 @@ TEST(CollationIndexKeyTest, KeyStringAppendReversesStringWithReverseMockCollator
 TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlySerializesEmptyComparisonKey) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     BSONObjBuilder builder;
-    builder.append("foo", StringData());
+    builder.append("foo", std::string_view());
     BSONObj dataObj = builder.obj();
 
     BSONObjBuilder expectedBuilder;
-    expectedBuilder.append("", StringData());
+    expectedBuilder.append("", std::string_view());
     BSONObj expectedObj = expectedBuilder.obj();
 
     BSONObjBuilder out;
@@ -128,21 +104,21 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlySerializesEmptyComparis
 TEST(CollationIndexKeyTest, KeyStringAppendCorrectlySerializesEmptyComparisonKey) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     BSONObjBuilder builder;
-    builder.append("foo", StringData());
+    builder.append("foo", std::string_view());
 
     BSONObjBuilder expectedBuilder;
-    expectedBuilder.append("", StringData());
+    expectedBuilder.append("", std::string_view());
     assertKeyStringCollatorOutput(collator, builder.obj(), expectedBuilder.obj());
 }
 
 TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlySerializesWithEmbeddedNullByte) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     BSONObjBuilder builder;
-    builder.append("foo", "a\0b"_sd);
+    builder.append("foo", "a\0b"sv);
     BSONObj dataObj = builder.obj();
 
     BSONObjBuilder expectedBuilder;
-    expectedBuilder.append("", "b\0a"_sd);
+    expectedBuilder.append("", "b\0a"sv);
     BSONObj expectedObj = expectedBuilder.obj();
 
     BSONObjBuilder out;
@@ -153,10 +129,10 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlySerializesWithEmbeddedN
 TEST(CollationIndexKeyTest, KeyStringAppendCorrectlySerializesWithEmbeddedNullByte) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     BSONObjBuilder builder;
-    builder.append("foo", "a\0b"_sd);
+    builder.append("foo", "a\0b"sv);
 
     BSONObjBuilder expectedBuilder;
-    expectedBuilder.append("", "b\0a"_sd);
+    expectedBuilder.append("", "b\0a"sv);
     assertKeyStringCollatorOutput(collator, builder.obj(), expectedBuilder.obj());
 }
 

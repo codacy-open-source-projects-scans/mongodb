@@ -139,7 +139,9 @@ export function makeFilterArb(timeFieldname, metaFieldname, opts = {}) {
         fc.constant(Filter.matchAll()),
         seedArb.map((s) => Filter.byId(s)),
         seedArb.map((s) => Filter.byMetaEq(s)),
-        fc.tuple(seedArb, expandFactorArb).map(([s, expandFactor]) => Filter.byTimeRange(s, {expandFactor})),
+        fc
+            .tuple(seedArb, expandFactorArb)
+            .map(([s, expandFactor]) => Filter.byTimeRange(s, {expandFactor})),
         // byFieldEqFromDoc:
         seedArb.chain((s) => {
             const excludeArb = fc.constant(defaultExclude);
@@ -168,8 +170,13 @@ export function makeFilterArb(timeFieldname, metaFieldname, opts = {}) {
         filter: fc.oneof(
             leafArb,
             fc
-                .tuple(fc.constantFrom("and", "or"), fc.array(tie("filter"), {minLength: 1, maxLength: maxChildren}))
-                .map(([op, children]) => (op === "and" ? Filter.and(children) : Filter.or(children))),
+                .tuple(
+                    fc.constantFrom("and", "or"),
+                    fc.array(tie("filter"), {minLength: 1, maxLength: maxChildren}),
+                )
+                .map(([op, children]) =>
+                    op === "and" ? Filter.and(children) : Filter.or(children),
+                ),
         ),
     })).filter;
 }
@@ -193,7 +200,10 @@ export function makeInsertOldBucketCommandArb(timeFieldname, metaFieldname) {
     const timeSeedArb = fc.integer({min: -0x7fffffff, max: 0x7fffffff});
     return fc
         .tuple(pickArb, timeSeedArb)
-        .map(([pick, timeSeed]) => new InsertOldBucketCommand(pick, timeSeed, timeFieldname, metaFieldname));
+        .map(
+            ([pick, timeSeed]) =>
+                new InsertOldBucketCommand(pick, timeSeed, timeFieldname, metaFieldname),
+        );
 }
 
 /**
@@ -245,7 +255,10 @@ export function makeUpdateByFilterCommandArb(timeFieldname, metaFieldname, filte
 
     return fc
         .tuple(makeFilterArb(timeFieldname, metaFieldname, filterOpts), seedArb)
-        .map(([filter, seed]) => new UpdateByFilterCommand(filter, seed, timeFieldname, metaFieldname));
+        .map(
+            ([filter, seed]) =>
+                new UpdateByFilterCommand(filter, seed, timeFieldname, metaFieldname),
+        );
 }
 
 /**
@@ -326,6 +339,11 @@ export function makeTimeseriesCommandArb(
  * @param {Object} [options.explicitArbitraries] Object mapping field names to specific arbitrary factories to inject into the test suite
  * @param {Array<string>} [options.types] // types of metrics to include, leave undefined/null for all
  * @param {{intRange?: Range, dateRange?: Range}} [options.ranges]
+ * @param {Array<string>} [options.commandTypes]
+ *   Which command kinds may appear in the sequence, as a subset of
+ *   ["insert", "batchInsert", "delete"].  Defaults to all three.  Restricting this is useful
+ *   when a batch is expensive to generate and the property only exercises one command kind:
+ *   with the full pool, a short sequence is likely to contain none of the kind under test.
  * @param {fc.Arbitrary<string>} [fieldNameArb=fc.string({minLength:1,maxLength:8})]
  *
  * @returns {fc.Arbitrary<Array<InsertCommand|BatchInsertCommand|DeleteByRandomIdCommand>>}
@@ -368,8 +386,36 @@ export function makeTimeseriesCommandSequenceArb(
 
     const deleteArb = makeDeleteByRandomIdCommandArb();
 
-    return fc.commands([insertArb, batchInsertArb, deleteArb], {
-        maxCommands,
-        replayPath,
-    });
+    const arbsByCommandType = {
+        insert: insertArb,
+        batchInsert: batchInsertArb,
+        delete: deleteArb,
+    };
+    const commandTypes = options.commandTypes ?? Object.keys(arbsByCommandType);
+    const unknown = commandTypes.filter((name) => !(name in arbsByCommandType));
+    if (unknown.length > 0) {
+        throw new Error(
+            `makeTimeseriesCommandSequenceArb: unknown commandTypes ${tojson(unknown)}; ` +
+                `expected a subset of ${tojson(Object.keys(arbsByCommandType))}`,
+        );
+    }
+    if (commandTypes.length === 0) {
+        throw new Error("makeTimeseriesCommandSequenceArb: commandTypes must not be empty");
+    }
+
+    const commandsArb = fc.commands(
+        commandTypes.map((name) => arbsByCommandType[name]),
+        {
+            maxCommands,
+            replayPath,
+        },
+    );
+
+    // fc.commands() has no minimum-length option: it happily generates empty sequences, which run
+    // no commands at all. Enforce `minCommands` ourselves so that properties which assert on
+    // coverage (e.g. "at least one batch rolled a bucket over") are not defeated by a run that
+    // drew an empty sequence.
+    return minCommands > 0
+        ? commandsArb.filter((cmds) => cmds.commands.length >= minCommands)
+        : commandsArb;
 }

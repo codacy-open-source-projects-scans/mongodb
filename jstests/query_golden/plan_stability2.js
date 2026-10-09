@@ -21,6 +21,8 @@
  * @tags: [
  * incompatible_aubsan,
  * tsan_incompatible,
+ * # The Join Opt variant requires sequential scans, unlike this test.
+ * incompatible_with_join_optimization
  * ]
  *
  */
@@ -56,7 +58,14 @@ jsTest.log.info("See README.plan_stability.md for more information.");
 
 const dg = new DataGenerator({db: db, module: "specs." + collName, seed: 1});
 try {
-    dg.execute({spec: collName, size: collSize, indexes: "indexes", analyze: true, drop: true, serial_inserts: true});
+    dg.execute({
+        spec: collName,
+        size: collSize,
+        indexes: "indexes",
+        analyze: true,
+        drop: true,
+        serial_inserts: true,
+    });
 
     checkPauseAfterPopulate();
 

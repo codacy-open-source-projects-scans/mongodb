@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/drop_collection.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
@@ -63,7 +36,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -72,6 +45,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -106,7 +80,7 @@ Status _checkReplState(OperationContext* opCtx,
 void checkForCollection(std::shared_ptr<const CollectionCatalog> collectionCatalog,
                         OperationContext* opCtx,
                         const NamespaceString& baseNss,
-                        boost::optional<StringData> collName,
+                        boost::optional<std::string_view> collName,
                         std::vector<std::string>* pLeaked) {
 
     if (collName.has_value()) {
@@ -143,11 +117,12 @@ void warnEncryptedCollectionsIfNeeded(OperationContext* opCtx, const CollectionP
 
 Status _dropView(OperationContext* opCtx,
                  Database* db,
-                 const NamespaceString& collectionName,
+                 const ViewAcquisition& viewAcquisition,
                  DropReply* reply) {
-    invariant(db);
+    const auto& collectionName = viewAcquisition.nss();
 
-    auto view = CollectionCatalog::get(opCtx)->lookupView(opCtx, collectionName);
+    const auto& view = viewAcquisition.getViewDefinition();
+    invariant(db);
 
     if (MONGO_unlikely(hangDuringDropCollection.shouldFail())) {
         LOGV2(20330,
@@ -173,7 +148,7 @@ Status _dropView(OperationContext* opCtx,
     WriteUnitOfWork wunit(opCtx);
 
     audit::logDropView(
-        opCtx->getClient(), collectionName, view->viewOn(), view->pipeline(), ErrorCodes::OK);
+        opCtx->getClient(), collectionName, view.viewOn(), view.pipeline(), ErrorCodes::OK);
 
     Status status = db->dropView(opCtx, collectionName);
     if (!status.isOK()) {
@@ -261,7 +236,8 @@ Status _dropCollectionForApplyOps(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   const repl::OpTime& dropOpTime,
                                   DropCollectionSystemCollectionMode systemCollectionMode,
-                                  DropReply* reply) {
+                                  DropReply* reply,
+                                  bool markFromMigrate = false) {
     Lock::CollectionLock collLock(opCtx, collectionName, MODE_X);
     boost::optional<UUID> uuid;
     AutoStatsTracker statsTracker(opCtx,
@@ -298,8 +274,8 @@ Status _dropCollectionForApplyOps(OperationContext* opCtx,
     IndexBuildsCoordinator::get(opCtx)->assertNoIndexBuildInProgForCollection(*uuid);
     Status status =
         systemCollectionMode == DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops
-        ? db->dropCollection(opCtx, collectionName, dropOpTime)
-        : db->dropCollectionEvenIfSystem(opCtx, collectionName, dropOpTime);
+        ? db->dropCollection(opCtx, collectionName, dropOpTime, markFromMigrate)
+        : db->dropCollectionEvenIfSystem(opCtx, collectionName, dropOpTime, markFromMigrate);
 
     if (!status.isOK()) {
         return status;
@@ -351,7 +327,7 @@ Status _dropCollection(OperationContext* opCtx,
             if (locks.target.isView()) {
                 // We need a MODE_X lock to drop a view. This is to prevent a concurrent create
                 // collection on the same namespace that will reserve an OpTime before this drop.
-                return _dropView(opCtx, db, nss, reply);
+                return _dropView(opCtx, db, locks.target.getView(), reply);
             }
 
             if (!locks.target.collectionExists()) {
@@ -381,7 +357,7 @@ Status _dropCollection(OperationContext* opCtx,
                 // a concurrent create collection on the same namespace that will
                 // reserve an OpTime before this drop.
                 if (locks.timeseriesView.has_value()) {
-                    auto status = _dropView(opCtx, db, locks.timeseriesView->nss(), reply);
+                    auto status = _dropView(opCtx, db, locks.timeseriesView.value(), reply);
                     if (!status.isOK()) {
                         return status;
                     }
@@ -509,7 +485,8 @@ Status dropCollectionIfUUIDNotMatching(OperationContext* opCtx,
 Status dropCollectionForApplyOps(OperationContext* opCtx,
                                  const NamespaceString& collectionName,
                                  const repl::OpTime& dropOpTime,
-                                 DropCollectionSystemCollectionMode systemCollectionMode) {
+                                 DropCollectionSystemCollectionMode systemCollectionMode,
+                                 bool markFromMigrate) {
     if (!serverGlobalParams.quiet.load()) {
         LOGV2(20332, "CMD: drop", logAttrs(collectionName));
     }
@@ -540,10 +517,15 @@ Status dropCollectionForApplyOps(OperationContext* opCtx,
                 opCtx,
                 {CollectionOrViewAcquisitionRequest::fromOpCtx(
                     opCtx, collectionName, AcquisitionPrerequisites::kWrite)});
-            return _dropView(opCtx, db, collectionName, &unusedReply);
+            return _dropView(opCtx, db, ddlAcq.at(collectionName).getView(), &unusedReply);
         } else {
-            return _dropCollectionForApplyOps(
-                opCtx, db, collectionName, dropOpTime, systemCollectionMode, &unusedReply);
+            return _dropCollectionForApplyOps(opCtx,
+                                              db,
+                                              collectionName,
+                                              dropOpTime,
+                                              systemCollectionMode,
+                                              &unusedReply,
+                                              markFromMigrate);
         }
     });
 }

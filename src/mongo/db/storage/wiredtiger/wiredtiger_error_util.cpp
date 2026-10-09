@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/storage_options.h"
@@ -33,42 +7,20 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 static constexpr auto kTransactionTooLargeForCache =
-    "transaction is too large and will not fit in the storage engine cache"_sd;
-/**
- * Configured WT cache is deemed insufficient for a transaction when its dirty bytes in cache
- * exceed a certain threshold on the proportion of total cache which is used by transaction.
- *
- * For instance, if the transaction uses 80% of WT cache and the threshold is set to 75%, the
- * transaction is considered too large.
- */
-bool cacheIsInsufficientForTransaction(WT_SESSION* session, double threshold) {
-    StatusWith<int64_t> txnDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
-        session, "statistics:session", "", WT_STAT_SESSION_TXN_BYTES_DIRTY);
-    if (!txnDirtyBytes.isOK()) {
-        tasserted(6190900,
-                  str::stream() << "unable to gather the WT session's txn dirty bytes: "
-                                << txnDirtyBytes.getStatus());
-    }
+    "transaction is too large and will not fit in the storage engine cache"sv;
 
-    StatusWith<int64_t> cacheDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
-        session, "statistics:", "", WT_STAT_CONN_CACHE_BYTES_DIRTY_LEAF);
-    if (!cacheDirtyBytes.isOK()) {
-        tasserted(6190901,
-                  str::stream() << "unable to gather the WT connection's cache dirty bytes: "
-                                << txnDirtyBytes.getStatus());
-    }
-
-    return txnExceededCacheThreshold(
-        txnDirtyBytes.getValue(), cacheDirtyBytes.getValue(), threshold);
-}
-
-str::stream generateContextStrStream(StringData prefix, StringData reason, int retCode) {
+str::stream generateContextStrStream(std::string_view prefix,
+                                     std::string_view reason,
+                                     int retCode) {
     str::stream contextStrStream;
     if (!prefix.empty())
         contextStrStream << prefix << " ";
@@ -93,13 +45,55 @@ bool txnExceededCacheThreshold(int64_t txnDirtyBytes, int64_t cacheDirtyBytes, d
 }
 
 bool rollbackReasonWasCachePressure(int sub_level_err) {
-    return sub_level_err == WT_CACHE_OVERFLOW || sub_level_err == WT_OLDEST_FOR_EVICTION;
+    return sub_level_err == WT_CACHE_OVERFLOW || sub_level_err == WT_OLDEST_FOR_EVICTION
+#ifdef WT_TXN_TOO_LARGE_FOR_CACHE
+        || sub_level_err == WT_TXN_TOO_LARGE_FOR_CACHE
+#endif
+        ;
+}
+
+/**
+ * Configured WT cache is deemed insufficient for a transaction when its dirty bytes in cache
+ * exceed a certain threshold on the proportion of total cache which is used by transaction.
+ *
+ * For instance, if the transaction uses 80% of WT cache and the threshold is set to 75%, the
+ * transaction is considered too large.
+ *
+ * WT_TXN_TOO_LARGE_FOR_CACHE means WT has already determined this transaction's own dirty content
+ * alone exceeds the cache, so the ratio heuristic below (used for the other cache-pressure
+ * reasons, where the rolled-back transaction isn't necessarily the cause) does not need to be
+ * consulted.
+ */
+bool cacheIsInsufficientForTransaction(WT_SESSION* session, double threshold, int sub_level_err) {
+#ifdef WT_TXN_TOO_LARGE_FOR_CACHE
+    if (sub_level_err == WT_TXN_TOO_LARGE_FOR_CACHE) {
+        return true;
+    }
+#endif
+    StatusWith<int64_t> txnDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
+        session, "statistics:session", "", WT_STAT_SESSION_TXN_BYTES_DIRTY);
+    if (!txnDirtyBytes.isOK()) {
+        tasserted(6190900,
+                  str::stream() << "unable to gather the WT session's txn dirty bytes: "
+                                << txnDirtyBytes.getStatus());
+    }
+
+    StatusWith<int64_t> cacheDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
+        session, "statistics:", "", WT_STAT_CONN_CACHE_BYTES_DIRTY_LEAF);
+    if (!cacheDirtyBytes.isOK()) {
+        tasserted(6190901,
+                  str::stream() << "unable to gather the WT connection's cache dirty bytes: "
+                                << txnDirtyBytes.getStatus());
+    }
+
+    return txnExceededCacheThreshold(
+        txnDirtyBytes.getValue(), cacheDirtyBytes.getValue(), threshold);
 }
 
 void throwCachePressureExceptionIfAppropriate(bool txnTooLargeEnabled,
                                               bool cacheIsInsufficientForTransaction,
                                               const char* reason,
-                                              StringData prefix,
+                                              std::string_view prefix,
                                               int retCode) {
     if (txnTooLargeEnabled && cacheIsInsufficientForTransaction) {
         throwTransactionTooLargeForCache(
@@ -112,7 +106,7 @@ void throwCachePressureExceptionIfAppropriate(bool txnTooLargeEnabled,
 void throwAppropriateException(bool txnTooLargeEnabled,
                                WT_SESSION* session,
                                double cacheThreshold,
-                               StringData prefix,
+                               std::string_view prefix,
                                int retCode) {
 
     // These values are initialized by WT_SESSION::get_last_error and should only be accessed if the
@@ -128,7 +122,7 @@ void throwAppropriateException(bool txnTooLargeEnabled,
     if (rollbackReasonWasCachePressure(sub_level_err)) {
         throwCachePressureExceptionIfAppropriate(
             txnTooLargeEnabled,
-            cacheIsInsufficientForTransaction(session, cacheThreshold),
+            cacheIsInsufficientForTransaction(session, cacheThreshold, sub_level_err),
             reason,
             prefix,
             retCode);
@@ -155,7 +149,7 @@ void dumpErrorLog(int retCode) {
     LOGV2_FATAL_CONTINUE(11131001, "WiredTiger dump error log failed", "ret"_attr = ret);
 }
 
-Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
+Status wtRCToStatus_slow(int retCode, WT_SESSION* session, std::string_view prefix) {
     if (retCode == 0)
         return Status::OK();
 
@@ -209,7 +203,7 @@ Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
     return Status(ErrorCodes::UnknownError, s);
 }
 
-Status wtRCToStatus_slow(int retCode, WiredTigerSession& session, StringData prefix) {
+Status wtRCToStatus_slow(int retCode, WiredTigerSession& session, std::string_view prefix) {
     return session.with(
         [retCode, prefix](WT_SESSION* s) { return wtRCToStatus_slow(retCode, s, prefix); });
 }

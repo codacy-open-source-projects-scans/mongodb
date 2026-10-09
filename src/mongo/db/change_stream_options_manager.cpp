@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/change_stream_options_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,6 +19,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -55,6 +29,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 const auto getChangeStreamOptionsManager =
     ServiceContext::declareDecoration<boost::optional<ChangeStreamOptionsManager>>();
@@ -98,11 +73,11 @@ const LogicalTime& ChangeStreamOptionsManager::getClusterParameterTime() const {
 
 void ChangeStreamOptionsParameter::append(OperationContext* opCtx,
                                           BSONObjBuilder* bob,
-                                          StringData name,
+                                          std::string_view name,
                                           const boost::optional<TenantId>&) {
     ChangeStreamOptionsManager& changeStreamOptionsManager =
         ChangeStreamOptionsManager::get(getGlobalServiceContext());
-    bob->append("_id"_sd, name);
+    bob->append("_id"sv, name);
     bob->appendElementsUnique(changeStreamOptionsManager.getOptions(opCtx).toBSON());
 }
 
@@ -132,21 +107,21 @@ Status ChangeStreamOptionsParameter::validate(const BSONElement& newValueElement
         // default- initialized to 'off'. This is useful for parameter initialization at startup but
         // causes the IDL parser to not enforce the presence of `expireAfterSeconds` in BSON
         // representations. We assert that and the existence of PreAndPostImages here.
-        IDLParserContext ctxt = IDLParserContext("changeStreamOptions"_sd);
-        if (auto preAndPostImagesObj = changeStreamOptionsObj["preAndPostImages"_sd];
+        IDLParserContext ctxt = IDLParserContext("changeStreamOptions"sv);
+        if (auto preAndPostImagesObj = changeStreamOptionsObj["preAndPostImages"sv];
             !preAndPostImagesObj.eoo()) {
-            if (preAndPostImagesObj["expireAfterSeconds"_sd].eoo()) {
-                ctxt.throwMissingField("expireAfterSeconds"_sd);
+            if (preAndPostImagesObj["expireAfterSeconds"sv].eoo()) {
+                ctxt.throwMissingField("expireAfterSeconds"sv);
             }
         } else {
-            ctxt.throwMissingField("preAndPostImages"_sd);
+            ctxt.throwMissingField("preAndPostImages"sv);
         }
 
         ChangeStreamOptions newOptions = ChangeStreamOptions::parse(changeStreamOptionsObj, ctxt);
         auto preAndPostImages = newOptions.getPreAndPostImages();
         visit(OverloadedVisitor{
                   [&](const std::string& expireAfterSeconds) {
-                      if (expireAfterSeconds != "off"_sd) {
+                      if (expireAfterSeconds != "off"sv) {
                           validateStatus = {
                               ErrorCodes::BadValue,
                               "Non-numeric value of 'expireAfterSeconds' should be 'off'"};

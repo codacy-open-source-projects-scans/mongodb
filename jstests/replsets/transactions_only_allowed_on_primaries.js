@@ -1,20 +1,9 @@
 /**
  * Test that transactions are only allowed on primaries, and prohibited from running on secondaries.
  *
- * @tags: [
- *   disables_test_commands,
- *   uses_transactions,
- * ]
+ * @tags: [ uses_transactions ]
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-
-// In 4.0, we allow read-only transactions on secondaries when test commands are enabled, so we
-// disable them in this test, to test that transactions on secondaries will be disallowed
-// for production users.
-
-TestData.enableTestCommands = false;
-TestData.roleGraphInvalidationIsFatal = false;
-TestData.authenticationDatabase = "local";
 
 const dbName = "test";
 const collName = "transactions_only_allowed_on_primaries";
@@ -35,7 +24,9 @@ secondary.setSecondaryOk();
 // Create a test collection that we can run commands against.
 const primaryDB = primary.getDB(dbName);
 assert.commandWorked(primary.getDB(dbName).createCollection(collName));
-assert.commandWorked(primaryDB.runCommand({createIndexes: collName, indexes: [{name: "geo_2d", key: {geo: "2d"}}]}));
+assert.commandWorked(
+    primaryDB.runCommand({createIndexes: collName, indexes: [{name: "geo_2d", key: {geo: "2d"}}]}),
+);
 replTest.awaitLastOpCommitted();
 
 /**
@@ -57,7 +48,10 @@ function testCommands(session, commands, expectedErrorCode, readPref) {
 
         // Call abort for good measure, even though the transaction should have already been
         // aborted on the server.
-        assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NotWritablePrimary);
+        assert.commandFailedWithCode(
+            session.abortTransaction_forTesting(),
+            ErrorCodes.NotWritablePrimary,
+        );
     }
 }
 
@@ -102,19 +96,27 @@ const primarySession = primary.getDB(dbName).getMongo().startSession(sessionOpti
 const primarySessionDb = primarySession.getDatabase(dbName);
 
 primarySession.startTransaction();
-assert.commandWorked(primarySessionDb.runCommand({find: collName, $readPreference: {mode: "primary"}}));
+assert.commandWorked(
+    primarySessionDb.runCommand({find: collName, $readPreference: {mode: "primary"}}),
+);
 assert.commandWorked(primarySession.commitTransaction_forTesting());
 
 primarySession.startTransaction();
-assert.commandWorked(primarySessionDb.runCommand({find: collName, $readPreference: {mode: "primaryPreferred"}}));
+assert.commandWorked(
+    primarySessionDb.runCommand({find: collName, $readPreference: {mode: "primaryPreferred"}}),
+);
 assert.commandWorked(primarySession.commitTransaction_forTesting());
 
 primarySession.startTransaction();
-assert.commandWorked(primarySessionDb.runCommand({find: collName, $readPreference: {mode: "secondaryPreferred"}}));
+assert.commandWorked(
+    primarySessionDb.runCommand({find: collName, $readPreference: {mode: "secondaryPreferred"}}),
+);
 assert.commandWorked(primarySession.commitTransaction_forTesting());
 
 primarySession.startTransaction();
-assert.commandWorked(primarySessionDb.runCommand({find: collName, $readPreference: {mode: "nearest"}}));
+assert.commandWorked(
+    primarySessionDb.runCommand({find: collName, $readPreference: {mode: "nearest"}}),
+);
 assert.commandWorked(primarySession.commitTransaction_forTesting());
 
 primarySession.endSession();

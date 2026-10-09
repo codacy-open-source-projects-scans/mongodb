@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/index_builds/index_builds_coordinator.h"
@@ -33,7 +7,10 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_builds/index_builds_common.h"
+#include "mongo/db/index_builds/primary_driven/util.h"
+#include "mongo/db/index_builds/resumable_index_builds_common.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
@@ -44,10 +21,20 @@
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/scopeguard.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace {
@@ -85,7 +72,7 @@ void IndexBuildsCoordinatorTest::createCollectionWithDuplicateDocs(OperationCont
         wuow.commit();
     }
 
-    ASSERT_EQ(collection.getCollectionPtr()->getIndexCatalog()->numIndexesTotal(), 1);
+    EXPECT_EQ(collection.getCollectionPtr()->getIndexCatalog()->numIndexesTotal(), 1);
 }
 
 // Helper to refetch the Collection from the catalog in order to see any changes made to it
@@ -114,7 +101,7 @@ TEST_F(IndexBuildsCoordinatorTest, ForegroundUniqueEnforce) {
                            opCtx, collection.uuid(), spec, indexConstraints, fromMigrate),
                        AssertionException,
                        ErrorCodes::DuplicateKey);
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 1);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 1);
 }
 
 TEST_F(IndexBuildsCoordinatorTest, ForegroundUniqueRelax) {
@@ -134,7 +121,7 @@ TEST_F(IndexBuildsCoordinatorTest, ForegroundUniqueRelax) {
     auto fromMigrate = false;
     ASSERT_DOES_NOT_THROW(indexBuildsCoord->createIndex(
         opCtx, collection.uuid(), spec, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 }
 
 TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexAlreadyExists) {
@@ -154,12 +141,12 @@ TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexAlreadyExists) {
     auto uuid = collection.uuid();
     ASSERT_DOES_NOT_THROW(
         indexBuildsCoord->createIndex(opCtx, uuid, spec, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 
     // Should silently return if the index already exists.
     ASSERT_DOES_NOT_THROW(
         indexBuildsCoord->createIndex(opCtx, uuid, spec, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 }
 
 TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexOptionsConflictEnforce) {
@@ -181,13 +168,13 @@ TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexOptionsConflictEnforce) {
     auto uuid = collection.uuid();
     ASSERT_DOES_NOT_THROW(
         indexBuildsCoord->createIndex(opCtx, uuid, spec1, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 
     ASSERT_THROWS_CODE(
         indexBuildsCoord->createIndex(opCtx, uuid, spec2, indexConstraints, fromMigrate),
         AssertionException,
         ErrorCodes::IndexOptionsConflict);
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 }
 
 TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexOptionsConflictRelax) {
@@ -209,12 +196,40 @@ TEST_F(IndexBuildsCoordinatorTest, ForegroundIndexOptionsConflictRelax) {
     auto uuid = collection.uuid();
     ASSERT_DOES_NOT_THROW(
         indexBuildsCoord->createIndex(opCtx, uuid, spec1, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
 
     // Should silently return in relax mode even if there are index option conflicts.
     ASSERT_DOES_NOT_THROW(
         indexBuildsCoord->createIndex(opCtx, uuid, spec2, indexConstraints, fromMigrate));
-    ASSERT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+    EXPECT_EQ(coll(opCtx, nss)->getIndexCatalog()->numIndexesTotal(), 2);
+}
+
+TEST_F(IndexBuildsCoordinatorTest, GetNumIndexesTotalReturnsCatalogCount) {
+    auto opCtx = operationContext();
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.GetNumIndexesTotalReturnsCatalogCount");
+    createCollectionWithDuplicateDocs(opCtx, nss);
+
+    {
+        auto collection = getCollectionExclusive(opCtx, nss);
+        EXPECT_EQ(1,
+                  IndexBuildsCoordinator::getNumIndexesTotal(opCtx, collection.getCollectionPtr()));
+    }
+
+    auto indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
+    auto spec = BSON("v" << int(IndexConfig::kLatestIndexVersion) << "key" << BSON("a" << 1)
+                         << "name" << "a_1");
+    {
+        auto collection = getCollectionExclusive(opCtx, nss);
+        ASSERT_DOES_NOT_THROW(indexBuildsCoord->createIndex(
+            opCtx, collection.uuid(), spec, IndexBuildsManager::IndexConstraints::kRelax, false));
+    }
+
+    {
+        auto collection = getCollectionExclusive(opCtx, nss);
+        EXPECT_EQ(2,
+                  IndexBuildsCoordinator::getNumIndexesTotal(opCtx, collection.getCollectionPtr()));
+    }
 }
 
 class OpObserverMock : public OpObserverNoop {
@@ -521,106 +536,800 @@ TEST_F(IndexBuildsCoordinatorTest, StartIndexBuildOnNonEmptyCollectionReplicates
         operationContext(), opObserver->startIndexBuildIdents[1]));
 }
 
-// Creates a single phase and  primary-driven index build and checks that
-// 'abortAllTwoPhaseIndexBuildsForStepUp' aborts the index build.
-TEST_F(IndexBuildsCoordinatorTest, StepUpPrimaryDrivenAbortsOnlyTwoPhaseBuilds) {
+TEST_F(IndexBuildsCoordinatorTest, CommitRemovesBuildFromPrimaryDrivenRegistry) {
     // TODO (SERVER-116165): Remove.
-    RAIIServerParameterControllerForTest ffContainerWrites("featureFlagContainerWrites", true);
-    RAIIServerParameterControllerForTest ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto opCtx = operationContext();
+
+    auto ns = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.CommitRemovesBuildFromPrimaryDrivenRegistry");
+    ASSERT_OK(storageInterface()->createCollection(opCtx, ns, CollectionOptions{}));
+    auto collUUID = [&] {
+        auto collection = getCollectionExclusive(opCtx, ns);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), BSON("_id" << 1)));
+        wuow.commit();
+        return collection.uuid();
+    }();
+
+    auto indexes = toIndexBuildInfoVec(
+        std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name" << "a_1")},
+        *opCtx->getServiceContext()->getStorageEngine(),
+        ns.dbName());
+    auto buildUUID = UUID::gen();
+
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
+    registry.add(buildUUID, ns.dbName(), collUUID, indexes, boost::none);
+
+    auto future = unittest::assertGet(IndexBuildsCoordinator::get(opCtx)->startIndexBuild(
+        opCtx,
+        ns.dbName(),
+        collUUID,
+        indexes,
+        buildUUID,
+        {.indexBuildMethod = IndexBuildMethodEnum::kPrimaryDriven,
+         .indexBuildProtocol = IndexBuildProtocol::kPrimaryDriven,
+         .commitQuorum = CommitQuorumOptions{CommitQuorumOptions::kPrimarySelfVote}}));
+    ASSERT_OK(future.getNoThrow());
+
+    EXPECT_TRUE(registry.all().empty());
+}
+
+TEST_F(IndexBuildsCoordinatorTest, RegisteredPrimaryDrivenIndexBuildCountsAsInProgress) {
+    auto opCtx = operationContext();
+    auto* indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
+
+    auto ns = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.registeredPrimaryDrivenBuild");
+    auto collectionUUID = UUID::gen();
+    auto buildUUID = UUID::gen();
+
+    ASSERT_TRUE(indexBuildsCoord->noIndexBuildInProgress());
+
+    registry.add(
+        buildUUID,
+        ns.dbName(),
+        collectionUUID,
+        toIndexBuildInfoVec(std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                                          << "a_1")},
+                            *opCtx->getServiceContext()->getStorageEngine(),
+                            ns.dbName()),
+        /*indexBuildIdent=*/boost::none);
+
+    EXPECT_FALSE(indexBuildsCoord->noIndexBuildInProgress());
+    EXPECT_TRUE(indexBuildsCoord->inProgForCollection(collectionUUID));
+    EXPECT_TRUE(indexBuildsCoord->inProgForDb(ns.dbName()));
+    EXPECT_EQ(indexBuildsCoord->numInProgForDb(ns.dbName()), 1);
+    ASSERT_THROWS_CODE(indexBuildsCoord->assertNoIndexBuildInProgForCollection(collectionUUID),
+                       AssertionException,
+                       ErrorCodes::BackgroundOperationInProgressForNamespace);
+    ASSERT_THROWS_CODE(indexBuildsCoord->assertNoBgOpInProgForDb(ns.dbName()),
+                       AssertionException,
+                       ErrorCodes::BackgroundOperationInProgressForDatabase);
+
+    // Every build in the registry is primary-driven, so narrowing by protocol filters it out.
+    EXPECT_TRUE(
+        indexBuildsCoord->inProgForCollection(collectionUUID, IndexBuildProtocol::kPrimaryDriven));
+    EXPECT_FALSE(
+        indexBuildsCoord->inProgForCollection(collectionUUID, IndexBuildProtocol::kTwoPhase));
+    ASSERT_THROWS_CODE(indexBuildsCoord->assertNoIndexBuildInProgress(),
+                       AssertionException,
+                       ErrorCodes::BackgroundOperationInProgressForDatabase);
+    // Waiting for the protocols this node runs does not wait for a registered build.
+    ASSERT_DOES_NOT_THROW(indexBuildsCoord->awaitNoBgOpInProgForDb(
+        opCtx, ns.dbName(), {IndexBuildProtocol::kSinglePhase}));
+
+    registry.remove(buildUUID);
+
+    EXPECT_TRUE(indexBuildsCoord->noIndexBuildInProgress());
+    EXPECT_FALSE(indexBuildsCoord->inProgForCollection(collectionUUID));
+    EXPECT_EQ(indexBuildsCoord->numInProgForDb(ns.dbName()), 0);
+    ASSERT_DOES_NOT_THROW(indexBuildsCoord->assertNoIndexBuildInProgForCollection(collectionUUID));
+    ASSERT_DOES_NOT_THROW(indexBuildsCoord->assertNoBgOpInProgForDb(ns.dbName()));
+}
+
+TEST_F(IndexBuildsCoordinatorTest, RunningPrimaryDrivenIndexBuildIsCountedOnce) {
+    // TODO (SERVER-116165): Remove.
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
 
     auto opCtx = operationContext();
     auto* indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
 
-    const auto twoPhaseNss = NamespaceString::createNamespaceString_forTest(
-        "IndexBuildsCoordinatorTest.StepUpPrimaryDrivenAbortsOnlyTwoPhaseBuilds.twoPhase");
-    ASSERT_OK(storageInterface()->createCollection(opCtx, twoPhaseNss, CollectionOptions()));
-    auto status = storageInterface()->createCollection(
-        opCtx, NamespaceString::kIndexBuildEntryNamespace, CollectionOptions());
-    if (status != ErrorCodes::NamespaceExists) {
-        ASSERT_OK(status);
-    }
+    auto ns = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.runningPrimaryDrivenBuild");
+    createCollectionWithDuplicateDocs(opCtx, ns);
+    auto collectionUUID = getCollectionExclusive(opCtx, ns).uuid();
 
-    const auto singlePhaseNss = NamespaceString::createNamespaceString_forTest(
-        "IndexBuildsCoordinatorTest.StepUpPrimaryDrivenAbortsOnlyTwoPhaseBuilds.singlePhase");
-    ASSERT_OK(storageInterface()->createCollection(opCtx, singlePhaseNss, CollectionOptions()));
-
-    // Avoid the empty collection index build optimization.
-    auto twoPhaseUUID = [&] {
-        auto collection = getCollectionExclusive(opCtx, twoPhaseNss);
-        WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), BSON("_id" << 1)));
-        wuow.commit();
-        return collection.uuid();
-    }();
-
-    auto singlePhaseUUID = [&] {
-        auto collection = getCollectionExclusive(opCtx, singlePhaseNss);
-        WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), BSON("_id" << 1)));
-        wuow.commit();
-        return collection.uuid();
-    }();
-
-    auto* storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    auto twoPhaseIndexes = toIndexBuildInfoVec(
+    auto indexes = toIndexBuildInfoVec(
         std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name" << "a_1")},
-        *storageEngine,
-        twoPhaseNss.dbName());
-    auto singlePhaseIndexes = toIndexBuildInfoVec(
-        std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("b" << 1) << "name" << "b_1")},
-        *storageEngine,
-        singlePhaseNss.dbName());
+        *opCtx->getServiceContext()->getStorageEngine(),
+        ns.dbName());
+    auto buildUUID = UUID::gen();
+    registry.add(buildUUID, ns.dbName(), collectionUUID, indexes, /*indexBuildIdent=*/boost::none);
 
-    // Create a window to enumerate the index builds while they are running.
+    // Hold the build in its builder thread so that it stays both registered and running.
     indexBuildsCoord->sleepIndexBuilds_forTestOnly(true);
+    auto future = unittest::assertGet(indexBuildsCoord->startIndexBuild(
+        opCtx,
+        ns.dbName(),
+        collectionUUID,
+        indexes,
+        buildUUID,
+        {.indexBuildMethod = IndexBuildMethodEnum::kPrimaryDriven,
+         .indexBuildProtocol = IndexBuildProtocol::kPrimaryDriven,
+         .commitQuorum = CommitQuorumOptions{CommitQuorumOptions::kPrimarySelfVote}}));
 
-    IndexBuildsCoordinator::IndexBuildOptions twoPhaseOptions;
-    twoPhaseOptions.indexBuildProtocol = IndexBuildProtocol::kPrimaryDriven;
-    twoPhaseOptions.commitQuorum = CommitQuorumOptions(1);
-    auto twoPhaseFuture = unittest::assertGet(indexBuildsCoord->startIndexBuild(
-        opCtx, twoPhaseNss.dbName(), twoPhaseUUID, twoPhaseIndexes, UUID::gen(), twoPhaseOptions));
-
-    IndexBuildsCoordinator::IndexBuildOptions singlePhaseOptions;
-    singlePhaseOptions.indexBuildProtocol = IndexBuildProtocol::kSinglePhase;
-    singlePhaseOptions.commitQuorum = CommitQuorumOptions(1);
-    auto singlePhaseFuture =
-        unittest::assertGet(indexBuildsCoord->startIndexBuild(opCtx,
-                                                              singlePhaseNss.dbName(),
-                                                              singlePhaseUUID,
-                                                              singlePhaseIndexes,
-                                                              UUID::gen(),
-                                                              singlePhaseOptions));
-
-    ASSERT_TRUE(
-        indexBuildsCoord->inProgForCollection(twoPhaseUUID, IndexBuildProtocol::kPrimaryDriven));
-    ASSERT_TRUE(
-        indexBuildsCoord->inProgForCollection(singlePhaseUUID, IndexBuildProtocol::kSinglePhase));
+    ASSERT_EQ(registry.all().size(), 1);
+    EXPECT_EQ(indexBuildsCoord->numInProgForDb(ns.dbName()), 1);
 
     indexBuildsCoord->sleepIndexBuilds_forTestOnly(false);
+    future.getNoThrow().getStatus().ignore();
+}
 
-    indexBuildsCoord->abortAllTwoPhaseIndexBuildsForStepUp(
+TEST_F(IndexBuildsCoordinatorTest, AwaitNoIndexBuildInProgressForCollectionWakesOnRegistryChange) {
+    static constexpr auto kTimeout = Seconds(10);
+
+    auto opCtx = operationContext();
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
+
+    auto ns = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.awaitOnRegistryChange");
+    auto collectionUUID = UUID::gen();
+    auto buildUUID = UUID::gen();
+    registry.add(
+        buildUUID,
+        ns.dbName(),
+        collectionUUID,
+        toIndexBuildInfoVec(std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                                          << "a_1")},
+                            *opCtx->getServiceContext()->getStorageEngine(),
+                            ns.dbName()),
+        /*indexBuildIdent=*/boost::none);
+
+    auto [finishedPromise, finishedFuture] = makePromiseFuture<void>();
+    auto waiterClient = getServiceContext()->getService()->makeClient("indexBuildWaiter");
+    auto waiterOpCtx = waiterClient->makeOperationContext();
+
+    stdx::thread waiter([&, promise = std::move(finishedPromise)]() mutable {
+        try {
+            IndexBuildsCoordinator::get(waiterOpCtx.get())
+                ->awaitNoIndexBuildInProgressForCollection(waiterOpCtx.get(), collectionUUID);
+        } catch (const DBException&) {
+            // Only reached through the interrupt on the way out of a failing assertion below.
+            return;
+        }
+        promise.emplaceValue();
+    });
+
+    // Every assertion below throws, and destroying a joinable thread while unwinding terminates the
+    // test process instead of reporting the failure. Interrupting a waiter that has already
+    // returned does nothing.
+    ScopeGuard interruptAndJoinWaiter{[&] {
+        {
+            std::lock_guard<Client> lk(*waiterOpCtx->getClient());
+            waiterOpCtx->markKilled(ErrorCodes::Interrupted);
+        }
+        waiter.join();
+    }};
+
+    // The waiter must not return while the build is still registered.
+    auto deadline = Date_t::now() + kTimeout;
+    while (!waiterOpCtx->isWaitingForConditionOrInterrupt() && Date_t::now() < deadline) {
+        sleepFor(Milliseconds(10));
+    }
+    ASSERT_TRUE(waiterOpCtx->isWaitingForConditionOrInterrupt())
+        << "the waiter did not block while an index build was registered";
+
+    registry.remove(buildUUID);
+
+    auto wakeDeadline = Date_t::now() + kTimeout;
+    while (!finishedFuture.isReady() && Date_t::now() < wakeDeadline) {
+        sleepFor(Milliseconds(10));
+    }
+    ASSERT_TRUE(finishedFuture.isReady()) << "removing the registry entry did not wake the waiter";
+}
+
+TEST_F(IndexBuildsCoordinatorTest, AbortRemovesBuildFromPrimaryDrivenRegistry) {
+    // TODO (SERVER-116165): Remove.
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto opCtx = operationContext();
+
+    auto ns = NamespaceString::createNamespaceString_forTest(
+        "IndexBuildsCoordinatorTest.AbortRemovesBuildFromPrimaryDrivenRegistry");
+    createCollectionWithDuplicateDocs(opCtx, ns);
+    auto collUUID = getCollectionExclusive(opCtx, ns).uuid();
+
+    auto indexes =
+        toIndexBuildInfoVec(std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                                          << "a_1" << "unique" << true)},
+                            *opCtx->getServiceContext()->getStorageEngine(),
+                            ns.dbName());
+    auto buildUUID = UUID::gen();
+
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
+    registry.add(buildUUID, ns.dbName(), collUUID, indexes, boost::none);
+
+    auto future = unittest::assertGet(IndexBuildsCoordinator::get(opCtx)->startIndexBuild(
         opCtx,
-        Status{ErrorCodes::InterruptedDueToReplStateChange, "aborting all two-phase index builds"});
+        ns.dbName(),
+        collUUID,
+        indexes,
+        buildUUID,
+        {.indexBuildMethod = IndexBuildMethodEnum::kPrimaryDriven,
+         .indexBuildProtocol = IndexBuildProtocol::kPrimaryDriven,
+         .commitQuorum = CommitQuorumOptions{CommitQuorumOptions::kPrimarySelfVote}}));
+    ASSERT_EQ(future.getNoThrow().getStatus(), ErrorCodes::DuplicateKey);
 
-    twoPhaseFuture.wait();
+    EXPECT_TRUE(registry.all().empty());
+}
 
-    ASSERT_THROWS_CODE(
-        twoPhaseFuture.get(), DBException, ErrorCodes::InterruptedDueToReplStateChange);
+// Persists a minimal kPrimaryDriven ResumeIndexInfo for `buildUUID` at the supplied phase,
+// wired to the side-writes/skipped/sorter idents that `index_builds::primary_driven::start`
+// already created via `indexes`. Lets resume-on-step-up tests stage the same setup without
+// duplicating the IndexStateInfo wiring.
+void persistPrimaryDrivenResumeState(OperationContext* opCtx,
+                                     const std::vector<IndexBuildInfo>& indexes,
+                                     const UUID& buildUUID,
+                                     const UUID& collectionUUID,
+                                     const std::string& resumeStateIdent,
+                                     IndexBuildPhaseEnum phase) {
+    auto resumeIndexInfo =
+        index_builds::synthesizeResumeIndexInfo(buildUUID, phase, collectionUUID, indexes);
 
-    singlePhaseFuture.wait();
-    auto catalogStats = singlePhaseFuture.get();
-    ASSERT_GTE(catalogStats.numIndexesAfter, catalogStats.numIndexesBefore);
+    IndexBuildMetadata metadata;
+    metadata.setBuildUUID(resumeIndexInfo.getBuildUUID());
+    metadata.setPhase(resumeIndexInfo.getPhase());
+    metadata.setCollectionUUID(resumeIndexInfo.getCollectionUUID());
+    auto metadataObj = metadata.toBSON();
 
-    // Both indexes should no longer exist after one completes and the other is aborted.
-    indexBuildsCoord->awaitNoIndexBuildInProgressForCollection(
-        opCtx, twoPhaseUUID, IndexBuildProtocol::kTwoPhase);
-    ASSERT_FALSE(
-        indexBuildsCoord->inProgForCollection(twoPhaseUUID, IndexBuildProtocol::kTwoPhase));
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    WriteUnitOfWork wuow(opCtx);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    auto rs =
+        storageEngine->getEngine()->getInternalRecordStore(ru, resumeStateIdent, KeyFormat::Long);
+    ASSERT_OK(rs->insertRecord(
+        opCtx, ru, RecordId(1), metadataObj.objdata(), metadataObj.objsize(), Timestamp()));
+    auto& indexStates = resumeIndexInfo.getIndexes();
+    for (size_t i = 0; i < indexStates.size(); ++i) {
+        auto idxObj = indexStates[i].toBSON();
+        ASSERT_OK(rs->insertRecord(opCtx,
+                                   ru,
+                                   RecordId(static_cast<int64_t>(i) + 2),
+                                   idxObj.objdata(),
+                                   idxObj.objsize(),
+                                   Timestamp()));
+    }
+    wuow.commit();
+}
 
-    indexBuildsCoord->awaitNoIndexBuildInProgressForCollection(
-        opCtx, singlePhaseUUID, IndexBuildProtocol::kSinglePhase);
-    ASSERT_FALSE(
-        indexBuildsCoord->inProgForCollection(singlePhaseUUID, IndexBuildProtocol::kSinglePhase));
+// Stages a two-index kPrimaryDriven build, persists resume state at `phase`, drives a
+// step-up, and asserts the build resumed.
+void runResumePrimaryDrivenOnStepUpTest(OperationContext* opCtx,
+                                        repl::StorageInterface* storageInterface,
+                                        std::string_view testName,
+                                        std::tuple<IndexBuildPhaseEnum, bool> param) {
+    auto [phase, hasPersistedResumeState] = param;
+    // TODO (SERVER-116165): Remove.
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+    // TODO(SERVER-124910): Remove.
+    unittest::ServerParameterGuard ffPDIBResume("featureFlagResumablePrimaryDrivenIndexBuilds",
+                                                true);
+
+    auto opObserver = OpObserverMock::install(opCtx);
+    auto* indexBuildsCoord = IndexBuildsCoordinator::get(opCtx);
+
+    const auto nss = NamespaceString::createNamespaceString_forTest(
+        std::string{"IndexBuildsCoordinatorTest."} + std::string{testName});
+    ASSERT_OK(storageInterface->createCollection(opCtx, nss, CollectionOptions()));
+
+    // Avoid the empty collection index build optimization.
+    auto collectionUUID = [&] {
+        auto collection = getCollectionExclusive(opCtx, nss);
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), BSON("_id" << 1)));
+        wuow.commit();
+        return collection.uuid();
+    }();
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    std::vector<IndexBuildInfo> indexes;
+    indexes.emplace_back(
+        BSON("v" << 2 << "key" << BSON("a" << 1) << "name" << "a_1"), "index-1", *storageEngine);
+    indexes.emplace_back(
+        BSON("v" << 2 << "key" << BSON("b" << 1) << "name" << "b_1"), "index-2", *storageEngine);
+
+    auto buildUUID = UUID::gen();
+    auto resumeStateIdent = ident::generateNewIndexBuildIdent(buildUUID);
+
+    ASSERT_OK(index_builds::primary_driven::start(
+        opCtx, nss.dbName(), collectionUUID, buildUUID, indexes, resumeStateIdent));
+
+    if (!hasPersistedResumeState) {
+        WriteUnitOfWork wuow(opCtx);
+        opCtx->getServiceContext()->getStorageEngine()->makeInternalRecordStore(
+            opCtx, resumeStateIdent, KeyFormat::Long);
+        wuow.commit();
+    } else {
+        persistPrimaryDrivenResumeState(
+            opCtx, indexes, buildUUID, collectionUUID, resumeStateIdent, phase);
+    }
+
+    indexBuildsCoord->onStepUp(opCtx);
+    indexBuildsCoord->awaitStepUpThread_forTestOnly();
+    indexBuildsCoord->awaitNoIndexBuildInProgressForCollection(opCtx, collectionUUID);
+
+    // The resume-state temp table must be dropped on commit. If options.isResumable was not set,
+    // MultiIndexBlock::commit() skips the drop and the ident lingers.
+    ASSERT_OK(storageEngine->immediatelyCompletePendingDrop(opCtx, resumeStateIdent));
+    {
+        auto& resumeRu = *shard_role_details::getRecoveryUnit(opCtx);
+        EXPECT_FALSE(storageEngine->getEngine()->hasIdent(resumeRu, resumeStateIdent));
+    }
+
+    std::vector<std::string> idents;
+    for (auto& indexBuildInfo : indexes) {
+        idents.push_back(indexBuildInfo.indexIdent);
+    }
+
+    auto collection = getCollectionExclusive(opCtx, nss);
+    ASSERT_EQ(opObserver->startIndexBuildIdents, idents);
+    ASSERT(collection.getCollectionPtr()->getIndexCatalog()->findIndexByIdent(
+        opCtx, opObserver->startIndexBuildIdents[0]));
+    ASSERT(collection.getCollectionPtr()->getIndexCatalog()->findIndexByIdent(
+        opCtx, opObserver->startIndexBuildIdents[1]));
+
+    // Any phase before load includes a collection scan, which indexes the one document in the
+    // collection as {a: null} → 1 key. Drain skips straight to draining side-writes → 0 keys.
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    const auto* indexEntry =
+        collection.getCollectionPtr()->getIndexCatalog()->findIndexByName(opCtx, "a_1");
+    ASSERT(indexEntry);
+    auto expectedKeys = [phase] {
+        switch (phase) {
+            case IndexBuildPhaseEnum::kInitialized:
+            case IndexBuildPhaseEnum::kCollectionScan:
+                return 1;
+            case IndexBuildPhaseEnum::kBulkLoad:
+            case IndexBuildPhaseEnum::kDrainWrites:
+                return 0;
+        }
+        MONGO_UNREACHABLE;
+    }();
+    EXPECT_EQ(expectedKeys, indexEntry->accessMethod()->numKeys(opCtx, ru));
+}
+
+class IndexBuildsCoordinatorResumeOnStepUpTest
+    : public IndexBuildsCoordinatorTest,
+      public testing::WithParamInterface<std::tuple<IndexBuildPhaseEnum, bool>> {};
+
+TEST_P(IndexBuildsCoordinatorResumeOnStepUpTest, StepUpResumesPrimaryDriven) {
+    runResumePrimaryDrivenOnStepUpTest(
+        operationContext(),
+        storageInterface(),
+        ::testing::UnitTest::GetInstance()->current_test_info()->name(),
+        GetParam());
+}
+
+TEST_F(IndexBuildsCoordinatorTest, StepUpSkipsPrimaryDrivenIndexBuildWhoseCollectionWasDropped) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto opCtx = operationContext();
+    auto& indexBuildsCoord = *IndexBuildsCoordinator::get(opCtx);
+    auto& registry = index_builds::primary_driven::registry(opCtx->getServiceContext());
+
+    // Two registry entries for collections that no longer exist.
+    auto dbName =
+        NamespaceString::createNamespaceString_forTest("IndexBuildsCoordinatorTest.test").dbName();
+    for (int i = 0; i < 2; ++i) {
+        registry.add(UUID::gen(),
+                     dbName,
+                     /*collectionUUID=*/UUID::gen(),
+                     toIndexBuildInfoVec(
+                         std::vector<BSONObj>{BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                                       << "a_1")},
+                         *opCtx->getServiceContext()->getStorageEngine(),
+                         dbName),
+                     /*indexBuildIdent=*/boost::none);
+    }
+    ASSERT_EQ(registry.all().size(), 2);
+
+    indexBuildsCoord.onStepUp(opCtx);
+    indexBuildsCoord.awaitStepUpThread_forTestOnly();
+
+    EXPECT_TRUE(registry.all().empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Phases,
+    IndexBuildsCoordinatorResumeOnStepUpTest,
+    testing::Values(std::tuple{IndexBuildPhaseEnum::kInitialized, false},
+                    std::tuple{IndexBuildPhaseEnum::kInitialized, true},
+                    std::tuple{IndexBuildPhaseEnum::kCollectionScan, true},
+                    std::tuple{IndexBuildPhaseEnum::kBulkLoad, true},
+                    std::tuple{IndexBuildPhaseEnum::kDrainWrites, true}),
+    [](const testing::TestParamInfo<std::tuple<IndexBuildPhaseEnum, bool>>& info) {
+        auto phase = std::get<0>(info.param);
+        auto hasPersistedResumeState = std::get<1>(info.param);
+        switch (phase) {
+            case IndexBuildPhaseEnum::kInitialized:
+                return hasPersistedResumeState ? "Initialized" : "MissingResumeState";
+            case IndexBuildPhaseEnum::kCollectionScan:
+                return "CollectionScan";
+            case IndexBuildPhaseEnum::kBulkLoad:
+                return "Load";
+            case IndexBuildPhaseEnum::kDrainWrites:
+                return "DrainWrites";
+        }
+        MONGO_UNREACHABLE;
+    });
+
+class UnresumedPrimaryDrivenAbortTest : public IndexBuildsCoordinatorTest {
+protected:
+    void setUp() override {
+        IndexBuildsCoordinatorTest::setUp();
+        _collectionUUID = createCollection(_nss);
+    }
+
+    UUID createCollection(const NamespaceString& nss) {
+        ASSERT_OK(storageInterface()->createCollection(operationContext(), nss, {}));
+        return getCollectionExclusive(operationContext(), nss).uuid();
+    }
+
+    std::vector<IndexBuildInfo> makeIndexes(const std::vector<std::string>& indexedFields,
+                                            const DatabaseName& dbName) {
+        std::vector<BSONObj> specs;
+        for (const auto& field : indexedFields) {
+            specs.push_back(
+                BSON("v" << 2 << "key" << BSON(field << 1) << "name" << (field + "_1")));
+        }
+        return toIndexBuildInfoVec(
+            specs, *operationContext()->getServiceContext()->getStorageEngine(), dbName);
+    }
+
+    /**
+     * Registers a primary-driven index build without handing it to the coordinator, so that it has
+     * durable state but no builder thread.
+     */
+    UUID startUnresumedBuild(const NamespaceString& nss,
+                             const UUID& collectionUUID,
+                             const std::vector<std::string>& indexedFields = {"a"},
+                             boost::optional<std::string> indexBuildIdent = boost::none) {
+        auto buildUUID = UUID::gen();
+        ASSERT_OK(index_builds::primary_driven::start(operationContext(),
+                                                      nss.dbName(),
+                                                      collectionUUID,
+                                                      buildUUID,
+                                                      makeIndexes(indexedFields, nss.dbName()),
+                                                      std::move(indexBuildIdent)));
+        ASSERT_TRUE(registry().contains(buildUUID));
+        return buildUUID;
+    }
+
+    UUID startUnresumedBuild(const std::vector<std::string>& indexedFields = {"a"},
+                             boost::optional<std::string> indexBuildIdent = boost::none) {
+        return startUnresumedBuild(
+            _nss, _collectionUUID, indexedFields, std::move(indexBuildIdent));
+    }
+
+    /**
+     * Starts a primary-driven index build and hands it to the coordinator. Returns the future for
+     * the build's completion.
+     */
+    SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats> startRunningBuild(
+        const std::vector<std::string>& indexedFields = {"a"}) {
+        auto opCtx = operationContext();
+        {
+            auto collection = getCollectionExclusive(opCtx, _nss);
+            WriteUnitOfWork wuow(opCtx);
+            ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), BSON("_id" << 1)));
+            wuow.commit();
+        }
+
+        auto indexes = makeIndexes(indexedFields, _nss.dbName());
+        auto buildUUID = UUID::gen();
+        registry().add(buildUUID, _nss.dbName(), _collectionUUID, indexes, boost::none);
+        return unittest::assertGet(IndexBuildsCoordinator::get(opCtx)->startIndexBuild(
+            opCtx,
+            _nss.dbName(),
+            _collectionUUID,
+            indexes,
+            buildUUID,
+            {.indexBuildMethod = IndexBuildMethodEnum::kPrimaryDriven,
+             .indexBuildProtocol = IndexBuildProtocol::kPrimaryDriven,
+             .commitQuorum = CommitQuorumOptions{CommitQuorumOptions::kPrimarySelfVote}}));
+    }
+
+    index_builds::primary_driven::Registry& registry() {
+        return index_builds::primary_driven::registry(getServiceContext());
+    }
+
+    int numIndexesInProgress(const NamespaceString& nss) {
+        return CollectionCatalog::get(operationContext())
+            ->establishConsistentCollection(operationContext(), nss, boost::none)
+            ->getIndexCatalog()
+            ->numIndexesInProgress();
+    }
+
+    int numIndexesInProgress() {
+        return numIndexesInProgress(_nss);
+    }
+
+    int numIndexesTotal(const NamespaceString& nss) {
+        return CollectionCatalog::get(operationContext())
+            ->establishConsistentCollection(operationContext(), nss, boost::none)
+            ->getIndexCatalog()
+            ->numIndexesTotal();
+    }
+
+    /**
+     * Prepares this operation for aborting an index build, which the replication machinery does
+     * outside of tests: the abort takes the collection X lock, which requires that no snapshot is
+     * open -- reading the catalog above opens one -- and writes in a timestamped write unit of
+     * work.
+     */
+    void abandonSnapshot() {
+        shard_role_details::getRecoveryUnit(operationContext())->abandonSnapshot();
+    }
+
+    auto prepareToAbort() {
+        auto& ru = *shard_role_details::getRecoveryUnit(operationContext());
+        ru.abandonSnapshot();
+        ru.setCommitTimestamp(Timestamp(100, 1));
+        return ScopeGuard([&ru] { ru.clearCommitTimestamp(); });
+    }
+
+    IndexBuildsCoordinator* coordinator() {
+        return IndexBuildsCoordinator::get(operationContext());
+    }
+
+    NamespaceString _nss = NamespaceString::createNamespaceString_forTest(
+        "UnresumedPrimaryDrivenAbortTest.collection");
+    UUID _collectionUUID = UUID::gen();
+};
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuilds) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild();
+    ASSERT_EQ(numIndexesInProgress(), 1);
+    // The build exists, but this node is not running it: there is no builder thread to signal.
+    ASSERT_FALSE(coordinator()->isIndexBuildRunning(buildUUID));
+
+    auto abortGuard = prepareToAbort();
+    auto abortedBuildUUIDs = coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "collection is being dropped");
+
+    // The build is reported as aborted, as a running build that was aborted would be.
+    EXPECT_EQ(abortedBuildUUIDs, std::vector<UUID>{buildUUID});
+    EXPECT_FALSE(registry().contains(buildUUID));
+    EXPECT_FALSE(coordinator()->inProgForCollection(_collectionUUID));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+    // Only the '_id_' index is left behind.
+    EXPECT_EQ(numIndexesTotal(_nss), 1);
+}
+
+// Oplog application aborts index builds that conflict with a command it is applying, on a node that
+// is not primary and with writes unreplicated.
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuildsWithWritesUnreplicated) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild();
+
+    auto abortGuard = prepareToAbort();
+    repl::UnreplicatedWritesBlock unreplicatedWrites{operationContext()};
+    coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "Aborting index builds during initial sync");
+
+    EXPECT_FALSE(registry().contains(buildUUID));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuildsAbortsEveryIndexOfABuild) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild({"a", "b", "c"});
+    ASSERT_EQ(numIndexesInProgress(), 3);
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "collection is being dropped");
+
+    EXPECT_FALSE(registry().contains(buildUUID));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+    EXPECT_EQ(numIndexesTotal(_nss), 1);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuildsDropsTheBuildsInternalTables) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    startUnresumedBuild({"a"}, ident::generateNewIndexBuildIdent(UUID::gen()));
+    auto numDropPendingIdentsBefore =
+        getServiceContext()->getStorageEngine()->getNumDropPendingIdents();
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "collection is being dropped");
+
+    EXPECT_TRUE(registry().all().empty());
+    EXPECT_EQ(getServiceContext()->getStorageEngine()->getNumDropPendingIdents(),
+              numDropPendingIdentsBefore + 5);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuildsLeavesOtherCollectionsAlone) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    const auto otherNss =
+        NamespaceString::createNamespaceString_forTest(_nss.dbName(), "otherCollection");
+    auto otherCollectionUUID = createCollection(otherNss);
+    startUnresumedBuild();
+    auto otherBuildUUID = startUnresumedBuild(otherNss, otherCollectionUUID);
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "collection is being dropped");
+
+    EXPECT_EQ(numIndexesInProgress(), 0);
+    // The build on the collection that is not being dropped is untouched.
+    EXPECT_TRUE(registry().contains(otherBuildUUID));
+    EXPECT_EQ(numIndexesInProgress(otherNss), 1);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortCollectionIndexBuildsAbortsRunningAndUnresumedBuilds) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    // Park the builder thread so that its build ('a_1') is still in progress when it is aborted.
+    FailPointEnableBlock hangAfterInitializingIndexBuild{"hangAfterInitializingIndexBuild"};
+    auto future = startRunningBuild({"a"});
+    auto unresumedBuildUUID = startUnresumedBuild({"b"});
+    ASSERT_EQ(registry().all().size(), 2);
+    ASSERT_EQ(numIndexesInProgress(), 2);
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortCollectionIndexBuilds(
+        operationContext(), _nss, _collectionUUID, "collection is being dropped");
+
+    // The running build's thread was signalled and joined, and the unresumed one was aborted
+    // through its durable state.
+    EXPECT_EQ(future.getNoThrow().getStatus(), ErrorCodes::IndexBuildAborted);
+    EXPECT_FALSE(registry().contains(unresumedBuildUUID));
+    EXPECT_TRUE(registry().all().empty());
+    EXPECT_FALSE(coordinator()->inProgForCollection(_collectionUUID));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortDatabaseIndexBuilds) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild();
+    ASSERT_FALSE(coordinator()->isIndexBuildRunning(buildUUID));
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortDatabaseIndexBuilds(
+        operationContext(), _nss.dbName(), "dropDatabase command");
+
+    EXPECT_FALSE(registry().contains(buildUUID));
+    EXPECT_FALSE(coordinator()->inProgForDb(_nss.dbName()));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest,
+       AbortDatabaseIndexBuildsAbortsEveryCollectionInTheDatabase) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    const auto otherNss =
+        NamespaceString::createNamespaceString_forTest(_nss.dbName(), "otherCollection");
+    auto otherCollectionUUID = createCollection(otherNss);
+    startUnresumedBuild();
+    startUnresumedBuild(otherNss, otherCollectionUUID);
+    ASSERT_EQ(registry().all().size(), 2);
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortDatabaseIndexBuilds(
+        operationContext(), _nss.dbName(), "dropDatabase command");
+
+    EXPECT_TRUE(registry().all().empty());
+    EXPECT_EQ(numIndexesInProgress(), 0);
+    EXPECT_EQ(numIndexesInProgress(otherNss), 0);
+    // Both collections and their '_id_' indexes are left behind.
+    EXPECT_EQ(numIndexesTotal(_nss), 1);
+    EXPECT_EQ(numIndexesTotal(otherNss), 1);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortDatabaseIndexBuildsLeavesOtherDatabasesAlone) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild();
+
+    auto abortGuard = prepareToAbort();
+    coordinator()->abortDatabaseIndexBuilds(
+        operationContext(),
+        DatabaseName::createDatabaseName_forTest(boost::none, "someOtherDatabase"),
+        "dropDatabase command");
+
+    EXPECT_TRUE(registry().contains(buildUUID));
+    EXPECT_EQ(numIndexesInProgress(), 1);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortIndexBuildByIndexNamesMatchesTheExactIndexNameSet) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    auto buildUUID = startUnresumedBuild({"a", "b"});
+    ASSERT_EQ(numIndexesInProgress(), 2);
+
+    auto abortGuard = prepareToAbort();
+    auto abortNames = [&](const std::vector<std::string>& indexNames) {
+        // Reading the catalog between aborts reopens the snapshot that taking the collection X lock
+        // requires not to be open.
+        abandonSnapshot();
+        return coordinator()->abortIndexBuildByIndexNames(
+            operationContext(), _collectionUUID, indexNames, "dropIndexes command");
+    };
+
+    // Only a build that is building exactly these indexes can be aborted, as for running builds: a
+    // subset, a superset, and an unrelated name all leave it alone.
+    EXPECT_FALSE(abortNames({"a_1"}).has_value());
+    EXPECT_FALSE(abortNames({"a_1", "b_1", "c_1"}).has_value());
+    EXPECT_FALSE(abortNames({"c_1"}).has_value());
+    EXPECT_TRUE(registry().contains(buildUUID));
+    EXPECT_EQ(numIndexesInProgress(), 2);
+
+    // A permutation of exactly the build's index names matches it, since the order the caller lists
+    // them in is not the order the build stores them in.
+    EXPECT_EQ(abortNames({"b_1", "a_1"}), buildUUID);
+    EXPECT_FALSE(registry().contains(buildUUID));
+    EXPECT_EQ(numIndexesInProgress(), 0);
+    EXPECT_EQ(numIndexesTotal(_nss), 1);
+}
+
+TEST_F(UnresumedPrimaryDrivenAbortTest, AbortIndexBuildByIndexNamesWhileAnotherBuildRuns) {
+    unittest::ServerParameterGuard ffContainerWrites("featureFlagContainerWrites", true);
+    unittest::ServerParameterGuard ffPDIB("featureFlagPrimaryDrivenIndexBuilds", true);
+
+    FailPointEnableBlock hangAfterInitializingIndexBuild{"hangAfterInitializingIndexBuild"};
+    auto future = startRunningBuild({"a"});
+    auto unresumedBuildUUID = startUnresumedBuild({"b"});
+    ASSERT_EQ(numIndexesInProgress(), 2);
+
+    auto abortGuard = prepareToAbort();
+
+    // The unresumed build is the one asked for; the running build is left alone rather than being
+    // aborted through its durable state from underneath its builder thread.
+    EXPECT_EQ(coordinator()->abortIndexBuildByIndexNames(
+                  operationContext(), _collectionUUID, {"b_1"}, "dropIndexes command"),
+              unresumedBuildUUID);
+    EXPECT_FALSE(registry().contains(unresumedBuildUUID));
+    EXPECT_FALSE(future.isReady());
+    EXPECT_TRUE(coordinator()->hasIndexBuilder(operationContext(), _collectionUUID, {"a_1"}));
+    EXPECT_EQ(numIndexesInProgress(), 1);
+
+    // Asking for the running build's indexes signals its builder thread and joins it.
+    abandonSnapshot();
+    EXPECT_TRUE(coordinator()
+                    ->abortIndexBuildByIndexNames(
+                        operationContext(), _collectionUUID, {"a_1"}, "dropIndexes command")
+                    .has_value());
+    EXPECT_EQ(future.getNoThrow().getStatus(), ErrorCodes::IndexBuildAborted);
+    EXPECT_TRUE(registry().all().empty());
+    EXPECT_EQ(numIndexesInProgress(), 0);
 }
 
 }  // namespace

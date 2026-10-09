@@ -1,5 +1,6 @@
 """FCV and Server binary version constants used for multiversion testing."""
 
+import functools
 import glob
 import http
 import os
@@ -8,6 +9,7 @@ from subprocess import DEVNULL, STDOUT, call, check_output
 
 import requests
 import structlog
+import yaml
 from retry import retry
 
 import buildscripts.resmokelib.config as _config
@@ -18,9 +20,6 @@ from buildscripts.resmokelib.multiversion.multiversion_service import (
 )
 from buildscripts.resmokelib.multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
 from buildscripts.util.expansions import get_expansion
-
-LAST_LTS = "last_lts"
-LAST_CONTINUOUS = "last_continuous"
 
 RELEASES_LOCAL_FILE = os.path.join(
     _config.RESMOKE_ROOT, "src", "mongo", "util", "version", "releases.yml"
@@ -160,22 +159,16 @@ multiversion_service = MultiversionService(
     mongo_releases=MongoReleases.from_yaml_file(_config.RELEASES_FILE),
 )
 
-version_constants = multiversion_service.calculate_version_constants()
-
-LAST_LTS_BIN_VERSION = version_constants.get_last_lts_fcv()
-LAST_CONTINUOUS_BIN_VERSION = version_constants.get_last_continuous_fcv()
+version_constants = multiversion_service.get_version_constants()
 
 LAST_LTS_FCV = version_constants.get_last_lts_fcv()
 LAST_CONTINUOUS_FCV = version_constants.get_last_continuous_fcv()
 LATEST_FCV = version_constants.get_latest_fcv()
 
-LAST_CONTINUOUS_MONGO_BINARY = version_constants.build_last_continuous_binary("mongo")
-LAST_CONTINUOUS_MONGOD_BINARY = version_constants.build_last_continuous_binary("mongod")
-LAST_CONTINUOUS_MONGOS_BINARY = version_constants.build_last_continuous_binary("mongos")
-
-LAST_LTS_MONGO_BINARY = version_constants.build_last_lts_binary("mongo")
-LAST_LTS_MONGOD_BINARY = version_constants.build_last_lts_binary("mongod")
-LAST_LTS_MONGOS_BINARY = version_constants.build_last_lts_binary("mongos")
+# Last patch release info (e.g. version '8.3.1', FCV '8.3') is derived from
+# git tag history. Resolution is on-demand and memoized: callers reach it via
+# multiversion_service.get_last_patch_version() / .get_last_patch_fcv() to
+# keep import-time free of git work.
 
 REQUIRES_FCV_TAG_LATEST = version_constants.get_latest_tag()
 
@@ -185,15 +178,39 @@ REQUIRES_FCV_TAG = version_constants.get_fcv_tag_list()
 
 REQUIRES_FCV_TAGS_LESS_THAN_LATEST = version_constants.get_fcv_tags_less_than_latest()
 
+EXPLICIT_MULTIVERSION_SUITE_FILE = os.path.join(
+    "buildscripts", "resmokeconfig", "suites", "multiversion.yml"
+)
+
+
+@functools.cache
+def get_explicit_multiversion_tests() -> frozenset[str]:
+    """Get the tests selected by the roots of the explicit multiversion suite.
+
+    These tests explicitly pick the binary versions they run against and set up their own
+    mixed-version topologies, unlike the implicit multiversion suites, where the fixture supplies
+    the old binaries and the tests also run in a single-version suite. Because they run in no
+    single-version suite, a `REQUIRES_FCV_TAG` tag on one of them excludes it from every suite. The
+    multiversion_auth and feature_flag_multiversion suites select from the same roots, so this
+    suite covers them too.
+    """
+    with open(os.path.join(_config.RESMOKE_ROOT, EXPLICIT_MULTIVERSION_SUITE_FILE)) as fh:
+        roots = yaml.safe_load(fh)["selector"]["roots"]
+    return frozenset(
+        test
+        for root in roots
+        for test in glob.glob(root, root_dir=_config.RESMOKE_ROOT, recursive=True)
+    )
+
+
+def is_explicit_multiversion_test(test: str) -> bool:
+    """Return True if the test only runs in an explicit multiversion suite."""
+    return test in get_explicit_multiversion_tests()
+
+
 # Generate evergreen project names for all FCVs less than latest.
 EVERGREEN_PROJECTS = ["mongodb-mongo-master"]
 EVERGREEN_PROJECTS.extend([evg_project_str(fcv) for fcv in version_constants.fcvs_less_than_latest])
-
-OLD_VERSIONS = (
-    [LAST_LTS]
-    if LAST_CONTINUOUS_FCV == LAST_LTS_FCV or LAST_CONTINUOUS_FCV in version_constants.get_eols()
-    else [LAST_LTS, LAST_CONTINUOUS]
-)
 
 
 def log_constants(exec_log):

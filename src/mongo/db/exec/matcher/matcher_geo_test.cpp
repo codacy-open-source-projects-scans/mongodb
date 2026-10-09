@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/matcher/matcher.h"
@@ -38,6 +12,8 @@
 #include "mongo/unittest/unittest.h"
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo::evaluate_matcher_geo_test {
 
@@ -263,6 +239,53 @@ TEST_F(InternalBucketGeoWithinExpression, BigBBoxContainsWithinRegion) {
     ASSERT_TRUE(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
+// Regression: GeoJSON->S2Point->S2LatLng round-trip can produce slightly different latitudes for
+// identical input latitudes at different longitudes, tripping S2LatLngRect's is_valid() DCHECK.
+// Values from a property-based test (PBT) failure.
+TEST_F(InternalBucketGeoWithinExpression, LatitudeRoundTripPrecision) {
+    auto expr = getDummyBucketGeoExpr();
+
+    auto obj =
+        createBucketObj(BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(-2.599 << 2.763)))
+                            .firstElement(),
+                        BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(2.500 << 2.763)))
+                            .firstElement());
+
+    ASSERT_TRUE(exec::matcher::matchesBSON(expr.get(), obj));
+}
+
+// Verifies same-longitude points produce ordered latitudes, so this exercises the normal path.
+TEST_F(InternalBucketGeoWithinExpression, SameLongitudeDifferentLatitude) {
+    auto expr = getDummyBucketGeoExpr();
+
+    auto obj =
+        createBucketObj(BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(2.763 << 1.0)))
+                            .firstElement(),
+                        BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(2.763 << 3.0)))
+                            .firstElement());
+
+    ASSERT_TRUE(exec::matcher::matchesBSON(expr.get(), obj));
+}
+
+// Verifies FromPointPair fix does not make the filter over-conservative for same-latitude buckets.
+TEST_F(InternalBucketGeoWithinExpression, SameLatitudeDisjointBucket) {
+    auto expr = getDummyBucketGeoExpr();
+
+    auto obj =
+        createBucketObj(BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(10.0 << 10.0)))
+                            .firstElement(),
+                        BSON("loc" << BSON("type" << "Point"
+                                                  << "coordinates" << BSON_ARRAY(20.0 << 10.0)))
+                            .firstElement());
+
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
+}
+
 TEST_F(InternalBucketGeoWithinExpression, BucketContainsNonPointType) {
     auto expr = getDummyBucketGeoExpr();
 
@@ -337,7 +360,7 @@ TEST(ExpressionGeoTest, Geo1) {
     std::unique_ptr<GeoExpression> gq(new GeoExpression);
     ASSERT_OK(parsers::matcher::parseGeoExpressionFromBSON(query["loc"].Obj(), *gq));
 
-    GeoMatchExpression ge("a"_sd, gq.release(), query);
+    GeoMatchExpression ge("a"sv, gq.release(), query);
 
     ASSERT(!exec::matcher::matchesBSON(&ge, fromjson("{a: [3,4]}")));
     ASSERT(exec::matcher::matchesBSON(&ge, fromjson("{a: [4,4]}")));
@@ -361,5 +384,48 @@ TEST(MatchExpressionParserGeo, WithinBox) {
     ASSERT(exec::matcher::matchesBSON(result.getValue().get(), fromjson("{a: {x: 5, y:5.1}}")));
 }
 
+// $geoIntersects and $geoWithin against a stored GeometryCollection containing a strict-winding
+// polygon must return false (not crash) on the non-index (collection-scan) path. getNativeCRS()
+// returns STRICT_SPHERE for such a collection, which triggers the "Never match big polygon" guard
+// in geoContains before any null s2Polygon is dereferenced.
+TEST(MatchExpressionParserGeo, StrictWindingPolygonInGeometryCollectionGeoIntersects) {
+    BSONObj query = fromjson(
+        "{geo: {$geoIntersects: {$geometry:"
+        "  {type: 'Polygon', coordinates: [[[0,0],[10,0],[10,10],[0,10],[0,0]]]}}}}");
+
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(
+        query, expCtx, ExtensionsCallbackNoop(), MatchExpressionParser::kAllowAllSpecialFeatures);
+    ASSERT_TRUE(result.isOK());
+
+    BSONObj doc = fromjson(
+        "{geo: {type: 'GeometryCollection', geometries: ["
+        "  {type: 'Polygon', coordinates: [[[0,0],[5,0],[5,5],[0,5],[0,0]]],"
+        "   crs: {type: 'name', properties:"
+        "         {name: 'urn:x-mongodb:crs:strictwinding:EPSG:4326'}}}"
+        "]}}");
+
+    ASSERT_FALSE(exec::matcher::matchesBSON(result.getValue().get(), doc));
+}
+
+TEST(MatchExpressionParserGeo, StrictWindingPolygonInGeometryCollectionGeoWithin) {
+    BSONObj query = fromjson(
+        "{geo: {$geoWithin: {$geometry:"
+        "  {type: 'Polygon', coordinates: [[[-10,-10],[10,-10],[10,10],[-10,10],[-10,-10]]]}}}}");
+
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(
+        query, expCtx, ExtensionsCallbackNoop(), MatchExpressionParser::kAllowAllSpecialFeatures);
+    ASSERT_TRUE(result.isOK());
+
+    BSONObj doc = fromjson(
+        "{geo: {type: 'GeometryCollection', geometries: ["
+        "  {type: 'Polygon', coordinates: [[[0,0],[5,0],[5,5],[0,5],[0,0]]],"
+        "   crs: {type: 'name', properties:"
+        "         {name: 'urn:x-mongodb:crs:strictwinding:EPSG:4326'}}}"
+        "]}}");
+
+    ASSERT_FALSE(exec::matcher::matchesBSON(result.getValue().get(), doc));
+}
 
 }  // namespace mongo::evaluate_matcher_geo_test

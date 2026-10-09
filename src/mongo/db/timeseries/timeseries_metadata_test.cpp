@@ -1,41 +1,18 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/timeseries/metadata.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/tracking/context.h"
 
-namespace mongo::timeseries::metadata {
+#include <string_view>
 
-constexpr StringData kMetaFieldName = "metadata"_sd;
-constexpr StringData kMetaFieldNameAlt = "meta"_sd;
+namespace mongo::timeseries::metadata {
+using namespace std::literals::string_view_literals;
+
+constexpr std::string_view kMetaFieldName = "metadata"sv;
+constexpr std::string_view kMetaFieldNameAlt = "meta"sv;
 
 BSONObj getNormalizedValue(const BSONElement& elem) {
     tracking::Context trackingContext;
@@ -45,8 +22,8 @@ BSONObj getNormalizedValue(const BSONElement& elem) {
     return builder.done().getOwned();
 }
 
-BSONArray createBSONArraysWithFieldNamesAndValues(std::vector<StringData> fieldNames,
-                                                  std::vector<StringData> values) {
+BSONArray createBSONArraysWithFieldNamesAndValues(std::vector<std::string_view> fieldNames,
+                                                  std::vector<std::string_view> values) {
     ASSERT_EQ(fieldNames.size(), values.size());
     BSONObjBuilder builder;
     {
@@ -60,7 +37,7 @@ BSONArray createBSONArraysWithFieldNamesAndValues(std::vector<StringData> fieldN
 }
 
 TEST(TimeseriesMetadataTest, AreMetadataEqualIgnoresFieldOrder) {
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>>
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>>
         simpleBSONElementTestCases = {
             std::make_tuple(BSON(kMetaFieldName << 1).getOwned(),
                             kMetaFieldName,
@@ -94,210 +71,228 @@ TEST(TimeseriesMetadataTest, AreMetadataEqualIgnoresFieldOrder) {
                             false),  // Different fieldNames and different types
         };
 
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>> BSONObjCases = {
-        std::make_tuple(BSON(kMetaFieldName << BSONObj()).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSONObj()).getOwned(),
-                        kMetaFieldName,
-                        true),  // Empty objects
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        true),  // Simple BSONObj equality
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("b" << 1)).getOwned(),
-                        kMetaFieldName,
-                        false),  // Simple BSONObj inequality on field name
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << 2)).getOwned(),
-                        kMetaFieldName,
-                        false),  // Simple BSONObj inequality on field value
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << "1")).getOwned(),
-                        kMetaFieldName,
-                        false),  // Simple BSONObj inequality on field type
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << 1 << "b" << 1)).getOwned(),
-                        kMetaFieldName,
-                        false),  // Simple BSONObj inequality, extra field
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 2))).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << BSON("c" << 2 << "b" << 1))).getOwned(),
-                        kMetaFieldName,
-                        true),  // Different field order, same values
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON("b" << 2 << "c" << 2))).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << BSON("c" << 3 << "a" << 1))).getOwned(),
-                        kMetaFieldName,
-                        false),  // Different field order, different fieldNames
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << 2 << "a" << 2))).getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("a" << BSON("a" << "thirty" << "b" << 1))).getOwned(),
-            kMetaFieldName,
-            false),  // Different field order, different types
-    };
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>>
+        BSONObjCases = {
+            std::make_tuple(BSON(kMetaFieldName << BSONObj()).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSONObj()).getOwned(),
+                            kMetaFieldName,
+                            true),  // Empty objects
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            true),  // Simple BSONObj equality
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("b" << 1)).getOwned(),
+                            kMetaFieldName,
+                            false),  // Simple BSONObj inequality on field name
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << 2)).getOwned(),
+                            kMetaFieldName,
+                            false),  // Simple BSONObj inequality on field value
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << "1")).getOwned(),
+                            kMetaFieldName,
+                            false),  // Simple BSONObj inequality on field type
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << 1)).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << 1 << "b" << 1)).getOwned(),
+                            kMetaFieldName,
+                            false),  // Simple BSONObj inequality, extra field
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 2))).getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("a" << BSON("c" << 2 << "b" << 1))).getOwned(),
+                kMetaFieldName,
+                true),  // Different field order, same values
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 2 << "c" << 2))).getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("a" << BSON("c" << 3 << "a" << 1))).getOwned(),
+                kMetaFieldName,
+                false),  // Different field order, different fieldNames
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 2 << "a" << 2))).getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("a" << BSON("a" << "thirty" << "b" << 1))).getOwned(),
+                kMetaFieldName,
+                false),  // Different field order, different types
+        };
 
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>> arrayCases = {
-        std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        true),  // Equal array fields
-        std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON_ARRAY("a")),
-                        kMetaFieldName,
-                        false),  // Missing value
-        std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON_ARRAY("a" << "b" << "c")),
-                        kMetaFieldName,
-                        false),  // Extra value
-        std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON_ARRAY("b" << "a")),
-                        kMetaFieldName,
-                        false),  // Different order
-        std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON_ARRAY("a" << "c")),
-                        kMetaFieldName,
-                        false),  // Different values
-    };
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>> arrayCases =
+        {
+            std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            true),  // Equal array fields
+            std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON_ARRAY("a")),
+                            kMetaFieldName,
+                            false),  // Missing value
+            std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON_ARRAY("a" << "b" << "c")),
+                            kMetaFieldName,
+                            false),  // Extra value
+            std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON_ARRAY("b" << "a")),
+                            kMetaFieldName,
+                            false),  // Different order
+            std::make_tuple(BSON(kMetaFieldName << BSON_ARRAY("a" << "b")),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON_ARRAY("a" << "c")),
+                            kMetaFieldName,
+                            false),  // Different values
+        };
 
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>> nestedObjects = {
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1))).getOwned(),
-            kMetaFieldName,
-            true),  // Different order
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1 << "e" << 1)))
-                .getOwned(),
-            kMetaFieldName,
-            false),  // Extra field
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1 << "e" << 1)) << "d" << 1)
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1))).getOwned(),
-            kMetaFieldName,
-            false),  // Missing field
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 2))).getOwned(),
-            kMetaFieldName,
-            false),  // Different values
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON("b" << "1" << "c" << 1) << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1))).getOwned(),
-            kMetaFieldName,
-            false),  // Different types
-    };
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>>
+        nestedObjects = {
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1)))
+                    .getOwned(),
+                kMetaFieldName,
+                true),  // Different order
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName
+                     << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1 << "e" << 1)))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Extra field
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1 << "e" << 1)) << "d"
+                                    << 1)
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1)))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Missing field
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << 1 << "c" << 1) << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 2)))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Different values
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON("b" << "1" << "c" << 1) << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON("c" << 1 << "b" << 1)))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Different types
+        };
 
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>> nestedArrays = {
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            true),  // Equal arrays.
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            false),  // Different order
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c" << "e") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            false),  // Extra field
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b") << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            false),  // Missing field
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "f") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            false),  // Different values
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << 1) << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            false),  // Different types
-    };
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>>
+        nestedArrays = {
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                true),  // Equal arrays.
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Different order
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c" << "e") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Extra field
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("c" << "b") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b") << "d" << 1)).getOwned(),
+                kMetaFieldName,
+                false),  // Missing field
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "f") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Different values
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << "c") << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON_ARRAY("a" << BSON_ARRAY("b" << 1) << "d" << 1))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Different types
+        };
 
-    std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>> mixedCases = {
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c") << "d" << 1)).getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON_ARRAY("b" << "c"))).getOwned(),
-            kMetaFieldName,
-            true),  // Nested equal arrays, different order field for object
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("c" << "b"))).getOwned(),
-                        kMetaFieldName,
-                        false),  // Nested array with different order
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "d"))).getOwned(),
-                        kMetaFieldName,
-                        false),  // Nested array with different values
-        std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
-                        kMetaFieldName,
-                        BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << 1))).getOwned(),
-                        kMetaFieldName,
-                        false),  // Nested array with different types
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("c" << 1 << "d" << 2))))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("d" << 2 << "c" << 1))))
-                .getOwned(),
-            kMetaFieldName,
-            true),  // Array with single nested object with equal values but different order
-        std::make_tuple(
-            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("c" << 1 << "d" << 2))))
-                .getOwned(),
-            kMetaFieldName,
-            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY(BSON("d" << 2 << "c" << 1) << "b")))
-                .getOwned(),
-            kMetaFieldName,
-            false),  // Array with multiple elements, different order
-    };
+    std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>> mixedCases =
+        {
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c") << "d" << 1)).getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("d" << 1 << "a" << BSON_ARRAY("b" << "c"))).getOwned(),
+                kMetaFieldName,
+                true),  // Nested equal arrays, different order field for object
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("c" << "b"))).getOwned(),
+                            kMetaFieldName,
+                            false),  // Nested array with different order
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "d"))).getOwned(),
+                            kMetaFieldName,
+                            false),  // Nested array with different values
+            std::make_tuple(BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << "c"))).getOwned(),
+                            kMetaFieldName,
+                            BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << 1))).getOwned(),
+                            kMetaFieldName,
+                            false),  // Nested array with different types
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("c" << 1 << "d" << 2))))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("d" << 2 << "c" << 1))))
+                    .getOwned(),
+                kMetaFieldName,
+                true),  // Array with single nested object with equal values but different order
+            std::make_tuple(
+                BSON(kMetaFieldName << BSON("a" << BSON_ARRAY("b" << BSON("c" << 1 << "d" << 2))))
+                    .getOwned(),
+                kMetaFieldName,
+                BSON(kMetaFieldName << BSON("a" << BSON_ARRAY(BSON("d" << 2 << "c" << 1) << "b")))
+                    .getOwned(),
+                kMetaFieldName,
+                false),  // Array with multiple elements, different order
+        };
 
 
-    using TestCases = std::vector<std::tuple<BSONObj, StringData, BSONObj, StringData, bool>>;
+    using TestCases =
+        std::vector<std::tuple<BSONObj, std::string_view, BSONObj, std::string_view, bool>>;
 
     std::vector<TestCases> allTests = {simpleBSONElementTestCases,
                                        BSONObjCases,
@@ -311,7 +306,7 @@ TEST(TimeseriesMetadataTest, AreMetadataEqualIgnoresFieldOrder) {
             auto lhsElement = lhs.getField(lhsMetaFieldName);
             auto rhsElement = rhs.getField(rhsMetaFieldName);
 
-            ASSERT_EQ(areMetadataEqual(lhsElement, rhsElement), expectedEqual);
+            EXPECT_EQ(areMetadataEqual(lhsElement, rhsElement), expectedEqual);
 
             auto lhsObjNormalized = getNormalizedValue(lhsElement);
             auto lhsElementNormalized = lhsObjNormalized.getField(lhsMetaFieldName);
@@ -324,50 +319,50 @@ TEST(TimeseriesMetadataTest, AreMetadataEqualIgnoresFieldOrder) {
 
             // Assert that normalizing either or both of the values behaves accordingly with
             // 'expectedEqual'.
-            ASSERT_EQ(areMetadataEqual(lhsElement, rhsElementNormalized), expectedEqual);
-            ASSERT_EQ(areMetadataEqual(lhsElementNormalized, rhsElement), expectedEqual);
-            ASSERT_EQ(areMetadataEqual(lhsElementNormalized, rhsElementNormalized), expectedEqual);
+            EXPECT_EQ(areMetadataEqual(lhsElement, rhsElementNormalized), expectedEqual);
+            EXPECT_EQ(areMetadataEqual(lhsElementNormalized, rhsElement), expectedEqual);
+            EXPECT_EQ(areMetadataEqual(lhsElementNormalized, rhsElementNormalized), expectedEqual);
         }
     }
 }
 
 TEST(TimeseriesMetadataTest, IncorrectFieldNamesForArraysGetIgnored) {
-    using TestCase = std::tuple<std::vector<StringData>,
-                                std::vector<StringData>,
-                                std::vector<StringData>,
-                                std::vector<StringData>,
+    using TestCase = std::tuple<std::vector<std::string_view>,
+                                std::vector<std::string_view>,
+                                std::vector<std::string_view>,
+                                std::vector<std::string_view>,
                                 bool>;
 
     std::vector<TestCase> testCases{
-        std::make_tuple(std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
+        std::make_tuple(std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
                         true),  // Simple equality
-        std::make_tuple(std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "d", "c"},
+        std::make_tuple(std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "d", "c"},
                         false),  // Simple inequality
-        std::make_tuple(std::vector<StringData>{"1", "0", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
+        std::make_tuple(std::vector<std::string_view>{"1", "0", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
                         true),  // Incorrect order for implicit field names, should ignore names
-        std::make_tuple(std::vector<StringData>{"2", "1", "0"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "b", "c"},
+        std::make_tuple(std::vector<std::string_view>{"2", "1", "0"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "b", "c"},
                         true),  // Reverse order for implicit field names, should ignore names
-        std::make_tuple(std::vector<StringData>{"2", "1", "0"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"a", "b", "d"},
-                        std::vector<StringData>{"a", "b", "c"},
+        std::make_tuple(std::vector<std::string_view>{"2", "1", "0"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"a", "b", "d"},
+                        std::vector<std::string_view>{"a", "b", "c"},
                         true),  // Non-numerical fieldNames
-        std::make_tuple(std::vector<StringData>{"2", "1", "0"},
-                        std::vector<StringData>{"a", "b", "c"},
-                        std::vector<StringData>{"0", "1", "2"},
-                        std::vector<StringData>{"a", "d", "c"},
+        std::make_tuple(std::vector<std::string_view>{"2", "1", "0"},
+                        std::vector<std::string_view>{"a", "b", "c"},
+                        std::vector<std::string_view>{"0", "1", "2"},
+                        std::vector<std::string_view>{"a", "d", "c"},
                         false),  // Incorrect order and different values
     };
     for (auto& [lhsFieldNames, lhsValues, rhsFieldNames, rhsValues, expectedEqual] : testCases) {
@@ -378,7 +373,7 @@ TEST(TimeseriesMetadataTest, IncorrectFieldNamesForArraysGetIgnored) {
 
         auto lhsElement = lhs.getField(kMetaFieldName);
         auto rhsElement = rhs.getField(kMetaFieldName);
-        ASSERT_EQ(areMetadataEqual(lhsElement, rhsElement), expectedEqual);
+        EXPECT_EQ(areMetadataEqual(lhsElement, rhsElement), expectedEqual);
 
         auto lhsObjNormalized = getNormalizedValue(lhsElement);
         auto lhsElementNormalized = lhsObjNormalized.getField(kMetaFieldName);
@@ -391,9 +386,9 @@ TEST(TimeseriesMetadataTest, IncorrectFieldNamesForArraysGetIgnored) {
 
         // Assert that normalizing either or both of the values behaves accordingly with
         // 'expectedEqual'.
-        ASSERT_EQ(areMetadataEqual(lhsElement, rhsElementNormalized), expectedEqual);
-        ASSERT_EQ(areMetadataEqual(lhsElementNormalized, rhsElement), expectedEqual);
-        ASSERT_EQ(areMetadataEqual(lhsElementNormalized, rhsElementNormalized), expectedEqual);
+        EXPECT_EQ(areMetadataEqual(lhsElement, rhsElementNormalized), expectedEqual);
+        EXPECT_EQ(areMetadataEqual(lhsElementNormalized, rhsElement), expectedEqual);
+        EXPECT_EQ(areMetadataEqual(lhsElementNormalized, rhsElementNormalized), expectedEqual);
     }
 }
 

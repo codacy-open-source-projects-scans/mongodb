@@ -1,60 +1,35 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
+
+#include "mongo/db/repl/initial_sync/collection_cloner.h"
 
 #include "mongo/base/status.h"
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/client.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/repl/initial_sync/collection_cloner.h"
 #include "mongo/db/repl/initial_sync/initial_sync_cloner_test_fixture.h"
 #include "mongo/db/repl/initial_sync/initial_syncer.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 
 #include <functional>
 #include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -1155,8 +1130,7 @@ public:
 
 protected:
     void setUp() final {
-        RAIIServerParameterControllerForTest multitenancySupportController("multitenancySupport",
-                                                                           true);
+        unittest::ServerParameterGuard multitenancySupportController("multitenancySupport", true);
         CollectionClonerTestResumable::setUp();
     }
 
@@ -1179,7 +1153,7 @@ protected:
 };
 
 TEST_F(CollectionClonerMultitenancyTest, CollectionClonerMultitenancy) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     auto cloner = makeCollectionCloner();
     cloner->setBatchSize_forTest(1);

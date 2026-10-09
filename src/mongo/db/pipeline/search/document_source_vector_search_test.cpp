@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/search/document_source_vector_search.h"
 
@@ -33,8 +7,10 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -42,8 +18,8 @@
 #include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/query/search/mongot_options.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/util/scopeguard.h"
 
 
@@ -72,6 +48,53 @@ TEST_F(DocumentSourceVectorSearchTest, NotAllowedInTransaction) {
     ASSERT_THROWS_CODE(Pipeline::create({vectorStage}, expCtx),
                        AssertionException,
                        ErrorCodes::OperationNotSupportedInTransaction);
+}
+
+TEST_F(DocumentSourceVectorSearchTest, NotAllowedInLookupWhenHybridSearchFlagDisabled) {
+    auto ifrCtx = IncrementalFeatureRolloutContext::forTest(std::vector<IFRFlagWireEntry>{
+        IFRFlagWireEntry{"featureFlagExtensionsInsideHybridSearch", false}});
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(getOpCtx())
+                      .ns(getExpCtx()->getNamespaceString())
+                      .ifrContext(ifrCtx)
+                      .build();
+
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10
+        }
+    })");
+
+    // featureFlagExtensionsInsideHybridSearch is explicitly disabled in the IFR context, so
+    // $vectorSearch is not allowed in a $lookup subpipeline.
+    auto vectorStage = DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
+    ASSERT_FALSE(
+        vectorStage->constraints(PipelineSplitState::kUnsplit).isAllowedInLookupPipeline());
+}
+
+TEST_F(DocumentSourceVectorSearchTest, AllowedInLookupWhenHybridSearchFlagEnabled) {
+    auto ifrCtx = IncrementalFeatureRolloutContext::forTest(std::vector<IFRFlagWireEntry>{
+        IFRFlagWireEntry{"featureFlagExtensionsInsideHybridSearch", true}});
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(getOpCtx())
+                      .ns(getExpCtx()->getNamespaceString())
+                      .ifrContext(ifrCtx)
+                      .build();
+
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10
+        }
+    })");
+
+    auto vectorStage = DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
+    ASSERT_TRUE(vectorStage->constraints(PipelineSplitState::kUnsplit).isAllowedInLookupPipeline());
 }
 
 TEST_F(DocumentSourceVectorSearchTest, NotAllowedInvalidFilter) {
@@ -169,6 +192,81 @@ TEST_F(DocumentSourceVectorSearchTest, UnexpectedArgumentIsSerialized) {
         !vec[0].getDocument().getField("$vectorSearch").getDocument().getField("extra").missing());
 }
 
+TEST_F(DocumentSourceVectorSearchTest, RejectsUserInjectedViewName) {
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10,
+            viewName: "someView"
+        }
+    })");
+
+    ASSERT_THROWS_CODE(DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       12961800);
+}
+
+TEST_F(DocumentSourceVectorSearchTest, RejectsUserInjectedCollectionUUID) {
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10,
+            collectionUUID: "deadbeef-dead-beef-dead-beefdeadbeef"
+        }
+    })");
+
+    ASSERT_THROWS_CODE(DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       12961800);
+}
+
+TEST_F(DocumentSourceVectorSearchTest, RejectsUserInjectedVectorSearchCommandName) {
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10,
+            vectorSearch: "someCollection"
+        }
+    })");
+
+    ASSERT_THROWS_CODE(DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       12961800);
+}
+
+TEST_F(DocumentSourceVectorSearchTest, CleanSpecWithoutTrustedFieldsParses) {
+    // Positive control: a spec without any injected trusted field parses successfully, including a
+    // field ('explain') that is mongod-owned but intentionally not rejected at parse time.
+    auto spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10
+        }
+    })");
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx()));
+
+    spec = fromjson(R"({
+        $vectorSearch: {
+            queryVector: [1.0, 2.0],
+            path: "x",
+            numCandidates: 100,
+            limit: 10,
+            explain: {verbosity: "queryPlanner"}
+        }
+    })");
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx()));
+}
+
 TEST_F(DocumentSourceVectorSearchTest, EOFWhenCollDoesNotExist) {
     auto expCtx = getExpCtx();
 
@@ -190,7 +288,7 @@ TEST_F(DocumentSourceVectorSearchTest, HasTheCorrectStagesWhenCreated) {
     // We want the mock to return true for isExpectedToExecuteQueries() since that will enable
     // insertion of the idLookup stage. That means we also need mongotHost to be configured to
     // avoid the uassert with SearchNotEnabled error.
-    RAIIServerParameterControllerForTest controller("mongotHost", "localhost:27017");
+    unittest::ServerParameterGuard controller("mongotHost", "localhost:27017");
     auto expCtx = getExpCtx();
     struct MockMongoInterface final : public StubMongoProcessInterface {
         bool inShardedEnvironment(OperationContext* opCtx) const override {
@@ -332,8 +430,8 @@ DEATH_TEST_F(DocumentSourceVectorSearchDeathTest,
 
     // Simulate router sending featureFlagVectorSearchExtension=true.
     auto& flag = feature_flags::gFeatureFlagVectorSearchExtension;
-    std::vector<BSONObj> flagValues{BSON("name" << flag.getName() << "value" << true)};
-    auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(flagValues);
+    std::vector<IFRFlagWireEntry> flagValues{IFRFlagWireEntry{flag.getName(), true}};
+    auto ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
 
     auto spec = fromjson(R"({
         $vectorSearch: {
@@ -353,13 +451,14 @@ DEATH_TEST_F(DocumentSourceVectorSearchDeathTest,
 TEST_F(DocumentSourceVectorSearchTest,
        IsExtensionMongotPipelineReturnsTrueForVectorSearchWithReturnStoredSource) {
     auto& flag = feature_flags::gFeatureFlagVectorSearchExtension;
-    std::vector<BSONObj> flagValues{BSON("name" << flag.getName() << "value" << true)};
-    auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(flagValues);
+    std::vector<IFRFlagWireEntry> flagValues{IFRFlagWireEntry{flag.getName(), true}};
+    auto ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
 
     // Simulate that the mongot extension is loaded.
     auto origExtensions = serverGlobalParams.extensions;
     ScopeGuard restoreExtensions([&] { serverGlobalParams.extensions = origExtensions; });
-    serverGlobalParams.extensions.push_back("mongot-extension");
+    serverGlobalParams.extensions.push_back(
+        std::string{search_helper_bson_obj::detail::kMongotExtensionName});
 
     auto pipeline = std::vector<BSONObj>{fromjson(R"({
         $vectorSearch: {
@@ -382,13 +481,14 @@ TEST_F(DocumentSourceVectorSearchTest,
 TEST_F(DocumentSourceVectorSearchTest,
        IsExtensionMongotPipelineReturnsTrueForVectorSearchWithoutReturnStoredSource) {
     auto& flag = feature_flags::gFeatureFlagVectorSearchExtension;
-    std::vector<BSONObj> flagValues{BSON("name" << flag.getName() << "value" << true)};
-    auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(flagValues);
+    std::vector<IFRFlagWireEntry> flagValues{IFRFlagWireEntry{flag.getName(), true}};
+    auto ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
 
     // Simulate that the mongot extension is loaded.
     auto origExtensions = serverGlobalParams.extensions;
     ScopeGuard restoreExtensions([&] { serverGlobalParams.extensions = origExtensions; });
-    serverGlobalParams.extensions.push_back("mongot-extension");
+    serverGlobalParams.extensions.push_back(
+        std::string{search_helper_bson_obj::detail::kMongotExtensionName});
 
     auto pipeline = std::vector<BSONObj>{fromjson(R"({
         $vectorSearch: {
@@ -408,13 +508,14 @@ TEST_F(DocumentSourceVectorSearchTest,
 TEST_F(DocumentSourceVectorSearchTest,
        IsExtensionMongotPipelineReturnsTrueForVectorSearchWithReturnStoredSourceFalse) {
     auto& flag = feature_flags::gFeatureFlagVectorSearchExtension;
-    std::vector<BSONObj> flagValues{BSON("name" << flag.getName() << "value" << true)};
-    auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(flagValues);
+    std::vector<IFRFlagWireEntry> flagValues{IFRFlagWireEntry{flag.getName(), true}};
+    auto ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
 
     // Simulate that the mongot extension is loaded.
     auto origExtensions = serverGlobalParams.extensions;
     ScopeGuard restoreExtensions([&] { serverGlobalParams.extensions = origExtensions; });
-    serverGlobalParams.extensions.push_back("mongot-extension");
+    serverGlobalParams.extensions.push_back(
+        std::string{search_helper_bson_obj::detail::kMongotExtensionName});
 
     auto pipeline = std::vector<BSONObj>{fromjson(R"({
         $vectorSearch: {

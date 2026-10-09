@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/primary_only_service.h"
@@ -55,11 +29,13 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+#include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
 #include <functional>
 #include <mutex>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -83,6 +59,7 @@ MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceSkipRebuildingInstances);
 MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceHangBeforeRebuildingInstances);
 MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceFailRebuildingInstances);
 MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceHangBeforeLaunchingStepUpLogic);
+MONGO_FAIL_POINT_DEFINE(PrimaryOnlyServiceHangBeforeRunningInstance);
 
 namespace {
 const auto _registryDecoration = ServiceContext::declareDecoration<PrimaryOnlyServiceRegistry>();
@@ -189,7 +166,7 @@ void PrimaryOnlyServiceRegistry::registerService(std::unique_ptr<PrimaryOnlyServ
         5123008, "Successfully registered PrimaryOnlyService", "service"_attr = name, logAttrs(ns));
 }
 
-PrimaryOnlyService* PrimaryOnlyServiceRegistry::lookupServiceByName(StringData serviceName) {
+PrimaryOnlyService* PrimaryOnlyServiceRegistry::lookupServiceByName(std::string_view serviceName) {
     auto it = _servicesByName.find(serviceName);
     invariant(it != _servicesByName.end());
     auto servicePtr = it->second.get();
@@ -350,21 +327,8 @@ std::shared_ptr<executor::TaskExecutor> PrimaryOnlyService::getInstanceCleanupEx
 }
 
 void PrimaryOnlyService::startup(OperationContext* opCtx) {
-    // Initialize the thread pool options with the service-specific limits on pool size.
-    ThreadPool::Options threadPoolOptions(getThreadPoolLimits());
-
-    // Now add the options that are fixed for all PrimaryOnlyServices.
-    threadPoolOptions.threadNamePrefix = std::string{getServiceName()} + "-";
-    threadPoolOptions.poolName = std::string{getServiceName()} + "ThreadPool";
-    threadPoolOptions.onCreateThread = [this](const std::string& threadName) {
-        Client::initThread(threadName, getGlobalServiceContext()->getService());
-        auto client = Client::getCurrent();
-        AuthorizationSession::get(*client)->grantInternalAuthorization();
-
-        // Associate this Client with this PrimaryOnlyService
-        primaryOnlyServiceStateForClient(client).primaryOnlyService = this;
-    };
-
+    auto serviceName = getServiceName();
+    auto limits = getThreadPoolLimits();
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(opCtx->getServiceContext()));
 
@@ -374,15 +338,81 @@ void PrimaryOnlyService::startup(OperationContext* opCtx) {
     }
 
     _executor = executor::ThreadPoolTaskExecutor::create(
-        std::make_unique<ThreadPool>(threadPoolOptions),
-        executor::makeNetworkInterface(
-            std::string{getServiceName()} + "Network", nullptr, std::move(hookList)));
+        ThreadPool::make({
+            .poolName = fmt::format("{}ThreadPool", serviceName),
+            .threadNamePrefix = fmt::format("{}-", serviceName),
+            .minThreads = limits.minThreads,
+            .maxThreads = limits.maxThreads,
+            .maxIdleThreadAge = limits.maxIdleThreadAge,
+            .onCreateThread =
+                [this](const std::string& threadName) {
+                    Client::initThread(threadName, getGlobalServiceContext()->getService());
+                    auto client = Client::getCurrent();
+                    AuthorizationSession::get(*client)->grantInternalAuthorization();
+                    // Associate this Client with this PrimaryOnlyService
+                    primaryOnlyServiceStateForClient(client).primaryOnlyService = this;
+                },
+        }),
+        executor::makeNetworkInterface(fmt::format("{}Network", serviceName),
+                                       {.metadataHook = std::move(hookList)}));
     _setHasExecutor(lk);
 
     _executor->startup();
 }
 
 void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
+    auto newTerm = stepUpOpTime.getTerm();
+    {
+        std::lock_guard lk(_mutex);
+        if (_state == State::kShutdown) {
+            return;
+        }
+        invariant(newTerm > _term,
+                  str::stream() << "term " << newTerm << " is not greater than " << _term);
+    }
+
+    _doStepUp(newTerm, stepUpOpTime);
+}
+
+void PrimaryOnlyService::onStepDown_forTest() {
+    tassert(12755410,
+            "onStepDown_forTest can only be used in tests",
+            TestingProctor::instance().isEnabled());
+    {
+        std::lock_guard lk(_mutex);
+        // If this is already set, a previous lightweight stepdown/stepup cycle for this service
+        // is still in progress. We reject it to minimize scenarios where the service is in
+        // constant stepdown/stepup cycles and never gets a chance to do work.
+        uassert(ErrorCodes::LightweightStepdownConflict,
+                str::stream() << getServiceName()
+                              << " is already in a lightweight stepdown/stepup test cycle",
+                !_isOnStepUpStepDownTestMode);
+        _isOnStepUpStepDownTestMode = true;
+    }
+    onStepDown();
+}
+
+void PrimaryOnlyService::onStepUp_forTest() {
+    tassert(12755400,
+            "stepUp_forTest can only be used in tests",
+            TestingProctor::instance().isEnabled());
+
+    // Use the last committed op time to prevent a scenario the majority wait for the optime takes
+    // longer than the stepdown interval, leading into a perpetual stepdown/stepup cycle without
+    // a chance for the service to do any work. This is alright because we didn't perform a real
+    // stepdown, so this is still the same primary.
+    auto opTime = repl::ReplicationCoordinator::get(_serviceContext)->getLastCommittedOpTime();
+    long long currentTerm = ([&] {
+        std::lock_guard lk(_mutex);
+        return _term;
+    })();
+
+    _doStepUp(currentTerm, opTime, true /* clearTestModeOnCompletion */);
+}
+
+void PrimaryOnlyService::_doStepUp(long long newTerm,
+                                   const OpTime& majorityWaitOpTime,
+                                   bool clearTestModeOnCompletion) {
     SimpleBSONObjUnorderedMap<ActiveInstance> savedInstances;
     invariant(_getHasExecutor());
     auto newThenOldScopedExecutor =
@@ -394,9 +424,6 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
         return;
     }
 
-    auto newTerm = stepUpOpTime.getTerm();
-    invariant(newTerm > _term,
-              str::stream() << "term " << newTerm << " is not greater than " << _term);
     _term = newTerm;
     _setState(State::kRebuilding, lk);
     _source = CancellationSource();
@@ -440,12 +467,12 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
                 2,
                 "Waiting on first write of the new term to be majority committed",
                 "service"_attr = getServiceName(),
-                "stepUpOpTime"_attr = stepUpOpTime);
+                "stepUpOpTime"_attr = majorityWaitOpTime);
     // Capture this term's token so the continuation doesn't re-read `_source` on the
     // executor thread; a subsequent `onStepUp` can reassign `_source` concurrently.
     auto sourceToken = _source.token();
     WaitForMajorityService::get(_serviceContext)
-        .waitUntilMajorityForWrite(stepUpOpTime, sourceToken)
+        .waitUntilMajorityForWrite(majorityWaitOpTime, sourceToken)
         .thenRunOn(**newScopedExecutor)
         .then([this, newScopedExecutor, newTerm, sourceToken] {
             // Note that checking both the state and the term are optimizations and are
@@ -498,7 +525,12 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
             _rebuildStatus = s;
             _setState(State::kRebuildFailed, lk);
         })
-        .getAsync([](auto&&) {});  // Ignore the result Future
+        .getAsync([this, clearTestModeOnCompletion](auto&&) {
+            if (clearTestModeOnCompletion) {
+                std::lock_guard lk(_mutex);
+                _isOnStepUpStepDownTestMode = false;
+            }
+        });  // Ignore the result Future
     lk.unlock();
 }
 
@@ -850,6 +882,7 @@ std::shared_ptr<PrimaryOnlyService::Instance> PrimaryOnlyService::_insertNewInst
                             "service"_attr = serviceName,
                             "instanceID"_attr = instanceID);
 
+                PrimaryOnlyServiceHangBeforeRunningInstance.pauseWhileSet();
                 return instance->run(std::move(scopedExecutor), token);
             })
             // TODO SERVER-61717 remove this error handler once instance are automatically released
@@ -870,7 +903,7 @@ std::shared_ptr<PrimaryOnlyService::Instance> PrimaryOnlyService::_insertNewInst
     return it->second.getInstance();
 }
 
-StringData PrimaryOnlyService::_getStateString(WithLock) const {
+std::string_view PrimaryOnlyService::_getStateString(WithLock) const {
     switch (_state) {
         case State::kRunning:
             return "running";
@@ -894,6 +927,19 @@ void PrimaryOnlyService::waitForStateNotRebuilding_forTest(OperationContext* opC
 
 void PrimaryOnlyService::_waitForStateNotRebuilding(OperationContext* opCtx,
                                                     BasicLockableAdapter m) {
+    // During a real stepdown, an opCtx that is not tied to this service's cancellation source
+    // gets interrupted via ReplicationCoordinator's killAllOperations path. When using
+    // onStepUp_forTest() and onStepDown_forTest(), the onStepUp handler can get into a cyclic
+    // dependency deadlock (so we make it fail early instead):
+    // 1. onStepUp_forTest() waits for previous instance to cleanup itself and finish.
+    // 2. The previous instance is waiting for a different thread.
+    // 3. That different thread is using an opCtx not tied to this service's cancellation source
+    //    and is calling _waitForStateNotRebuilding, waiting for the rebuilding state to be over.
+    if (_isOnStepUpStepDownTestMode && _state == State::kRebuilding &&
+        _opCtxs.find(opCtx) == _opCtxs.end()) {
+        uasserted(ErrorCodes::NotWritablePrimary,
+                  str::stream() << getServiceName() << " is rebuilding instances");
+    }
 
     opCtx->waitForConditionOrInterrupt(
         _stateChangeCV, m, [this]() { return _state != State::kRebuilding; });

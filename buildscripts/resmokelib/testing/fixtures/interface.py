@@ -1,6 +1,7 @@
 """Interface of the different fixtures for executing JSTests against."""
 
 import os.path
+import re
 import time
 from collections import namedtuple
 from enum import Enum
@@ -12,6 +13,18 @@ import pymongo
 import pymongo.errors
 
 from buildscripts.resmokelib.utils import registry
+
+# Appname used for administrative MongoDB client connections in resmoke.
+# Clients with this appname are exempted from ingress rate limiting, ensuring that fixture
+# setup/teardown is not affected by rate limiting fail points. This should not be used for user
+# operations.
+RESMOKE_ADMIN_APPNAME = "Resmoke-Admin"
+
+# Appname used for MongoDB client connections opened by resmoke hooks. Like RESMOKE_ADMIN_APPNAME,
+# clients with this appname are exempted from ingress rate limiting, but it is kept distinct from
+# the administrative appname so that hook traffic can be told apart from fixture setup/teardown for
+# diagnosability. This should not be used for user operations.
+RESMOKE_HOOK_APPNAME = "Resmoke-Hook"
 
 # TODO: (Ignore linting) if we ever fix the circular deps in resmoke we will be able to get rid of this
 if TYPE_CHECKING:
@@ -111,7 +124,11 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):
         self.logger = logger
         self.job_num = job_num
 
-        dbpath_prefix = self.fixturelib.default_if_none(self.config.DBPATH_PREFIX, dbpath_prefix)
+        # An explicit dbpath_prefix wins over the global one. Parent fixtures pass it to give
+        # each of their sub-clusters a distinct directory, and those paths are already rooted
+        # under config.DBPATH_PREFIX. Preferring the global value here would collapse every
+        # sub-cluster of a multi-cluster fixture onto a single dbpath.
+        dbpath_prefix = self.fixturelib.default_if_none(dbpath_prefix, self.config.DBPATH_PREFIX)
         dbpath_prefix = self.fixturelib.default_if_none(
             dbpath_prefix, self.config.DEFAULT_DBPATH_PREFIX
         )
@@ -165,6 +182,31 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):
     def get_node_info(self):
         """Return a list of NodeInfo objects."""
         return []
+
+    def _get_binary_version(self, executable):
+        """Parse the given binary to get its version string.
+
+        Runs `<executable> --version` and parses the reported version, e.g. "v7.0.0".
+        Returns the empty string "" if the version cannot be determined.
+        """
+        # Imported here to avoid a circular import at module load time.
+        from buildscripts.resmokelib.core.programs import get_binary_version_output
+
+        try:
+            output = get_binary_version_output(executable)
+        except Exception as err:
+            self.logger.warning("Failed to determine binary version: %s", err)
+            return ""
+
+        # The first line of `--version` looks like "db version v7.0.0" for mongod and
+        # "mongos version v7.0.0" for mongos.
+        for line in output.splitlines():
+            result = re.search(r"(?:db|mongos) version (v\S+)", line)
+            if result:
+                return result.group(1)
+
+        self.logger.warning("Could not parse binary version from: %s", output)
+        return ""
 
     def get_environment_variables(self):
         """
@@ -236,7 +278,7 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):
         """
 
         kwargs["connectTimeoutMS"] = timeout_millis
-        if pymongo.version_tuple[0] >= 3:
+        if pymongo.version_tuple >= (3,):
             kwargs["serverSelectionTimeoutMS"] = timeout_millis
             kwargs["connect"] = True
 
@@ -503,6 +545,10 @@ def create_fixture_table(fixture):
     # Filter out columns where no row has a value
     columns = {k: v for k, v in columns.items() if not all(x == "-" for x in v)}
 
+    # Only include the "version" column if nodes have differing versions
+    if "version" in columns and len(set(columns["version"])) <= 1:
+        del columns["version"]
+
     def horizontal_separator():
         row = ""
         for key in columns:
@@ -536,7 +582,7 @@ def create_fixture_table(fixture):
 
 
 def build_client(
-    node, auth_options=None, read_preference=pymongo.ReadPreference.PRIMARY, **kwargs
+    node, auth_options=None, read_preference=pymongo.ReadPreference.PRIMARY, appname=None, **kwargs
 ) -> pymongo.MongoClient:
     """Authenticate client for the 'authenticationDatabase' and return the client."""
     if auth_options is not None:
@@ -546,11 +592,39 @@ def build_client(
             authSource=auth_options["authenticationDatabase"],
             authMechanism=auth_options["authenticationMechanism"],
             read_preference=read_preference,
+            appname=appname,
             **kwargs,
         )
     else:
-        return node.mongo_client(read_preference=read_preference, **kwargs)
+        return node.mongo_client(read_preference=read_preference, appname=appname, **kwargs)
+
+
+def build_admin_client(
+    node, auth_options=None, read_preference=pymongo.ReadPreference.PRIMARY, **kwargs
+) -> pymongo.MongoClient:
+    """Return a client tagged with the administrative appName.
+
+    Use for fixture setup/teardown, never for user operations (hooks should use build_hook_client).
+    The administrative appName marks this traffic as resmoke-internal so the server can distinguish
+    it from test traffic (for example, to exempt it from ingress rate limiting).
+    """
+    return build_client(
+        node, auth_options, read_preference, appname=RESMOKE_ADMIN_APPNAME, **kwargs
+    )
+
+
+def build_hook_client(
+    node, auth_options=None, read_preference=pymongo.ReadPreference.PRIMARY, **kwargs
+) -> pymongo.MongoClient:
+    """Return a client tagged with the hook appName.
+
+    Use for connections opened by resmoke hooks. Like build_admin_client, the appName marks this
+    traffic as resmoke-internal so the server can distinguish it from test traffic (for example, to
+    exempt it from ingress rate limiting), but it is kept distinct from the administrative appName so
+    hook traffic can be told apart from fixture setup/teardown.
+    """
+    return build_client(node, auth_options, read_preference, appname=RESMOKE_HOOK_APPNAME, **kwargs)
 
 
 # Represents a row in a node info table.
-NodeInfo = namedtuple("NodeInfo", ["full_name", "name", "port", "pid"])
+NodeInfo = namedtuple("NodeInfo", ["full_name", "name", "port", "pid", "version"], defaults=[""])

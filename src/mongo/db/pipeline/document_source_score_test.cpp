@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/pipeline/document_source_score.h"
 
 #include "mongo/bson/bsonobj.h"
@@ -33,16 +7,19 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 namespace {
@@ -52,13 +29,7 @@ namespace {
  * OperationContext, etc.) and configure the common feature flags that we need.
  */
 class DocumentSourceScoreTest : service_context_test::WithSetupTransportLayer,
-                                public AggregationContextFixture {
-private:
-    RAIIServerParameterControllerForTest scoreFusionFlag{"featureFlagSearchHybridScoringFull",
-                                                         true};
-    // Feature flag needed to use 'score' meta field
-    RAIIServerParameterControllerForTest rankFusionFlag{"featureFlagRankFusionFull", true};
-};
+                                public AggregationContextFixture {};
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfNoScoreField) {
     auto spec = fromjson(R"({
@@ -213,7 +184,7 @@ TEST_F(DocumentSourceScoreTest, CheckLengthyDocScoreMetadataUpdated) {
           }
       })");
     Document inputDoc =
-        Document{{"field1", "hello"_sd}, {"field2", 10}, {"myScore", 5.3}, {"field3", true}};
+        Document{{"field1", "hello"sv}, {"field2", 10}, {"myScore", 5.3}, {"field3", true}};
 
     const auto desugaredList =
         DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
@@ -237,7 +208,7 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfScoreNotDouble) {
           }
       })");
     Document inputDoc =
-        Document{{"field1", "hello"_sd}, {"field2", 10}, {"myScore", "5.3"_sd}, {"field3", true}};
+        Document{{"field1", "hello"sv}, {"field2", 10}, {"myScore", "5.3"sv}, {"field3", true}};
 
     const auto desugaredList =
         DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
@@ -257,7 +228,7 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfExpressionFieldPathDoesNotExist) {
               normalization: "none"
           }
       })");
-    Document inputDoc = Document{{"field1", "hello"_sd}, {"field2", 10}, {"field3", true}};
+    Document inputDoc = Document{{"field1", "hello"sv}, {"field2", 10}, {"field3", true}};
 
     const auto desugaredList =
         DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
@@ -278,7 +249,7 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfScoreInvalidExpression) {
           }
       })");
     Document inputDoc =
-        Document{{"field1", "hello"_sd}, {"otherScore", 10}, {"myScore", 5.3}, {"field3", true}};
+        Document{{"field1", "hello"sv}, {"otherScore", 10}, {"myScore", 5.3}, {"field3", true}};
 
     // Assert cannot parse expression
     ASSERT_THROWS_CODE(DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx()),
@@ -294,7 +265,7 @@ TEST_F(DocumentSourceScoreTest, ChecksScoreMetadatUpdatedValidExpression) {
           }
       })");
     Document inputDoc =
-        Document{{"field1", "hello"_sd}, {"otherScore", 10}, {"myScore", 5.3}, {"field3", true}};
+        Document{{"field1", "hello"sv}, {"otherScore", 10}, {"myScore", 5.3}, {"field3", true}};
 
     const auto desugaredList =
         DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
@@ -902,7 +873,8 @@ TEST_F(DocumentSourceScoreTest, RepresentativeQueryShapeExpressionMinMaxScalerNo
 void runQueryShapeDebugStringTest(boost::intrusive_ptr<ExpressionContextForTest> expCtx,
                                   const BSONObj& querySpec,
                                   const std::vector<std::string>& expectedDesugarOutputs) {
-    SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
 
     const auto desugaredList =
         DocumentSourceScore::createFromBson(querySpec.firstElement(), expCtx);
@@ -1395,6 +1367,24 @@ TEST_F(DocumentSourceScoreTest, ScoreDetailsDesugaring) {
         })",
             asOneObj);
     }
+}
+
+TEST_F(DocumentSourceScoreTest, LiteParsedReportsScoreDetailsFromSpec) {
+    const auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    auto liteParse = [&](BSONObj spec) {
+        auto result = ScoreLiteParsed::parse(nss, spec.firstElement(), LiteParserOptions{});
+        result->makeOwned();
+        return result;
+    };
+
+    // scoreDetails present and true.
+    ASSERT_TRUE(liteParse(fromjson(R"({$score: {score: "$x", scoreDetails: true}})"))
+                    ->isScoreDetailsStage());
+    // scoreDetails present and false.
+    ASSERT_FALSE(liteParse(fromjson(R"({$score: {score: "$x", scoreDetails: false}})"))
+                     ->isScoreDetailsStage());
+    // scoreDetails absent defaults to false.
+    ASSERT_FALSE(liteParse(fromjson(R"({$score: {score: "$x"}})"))->isScoreDetailsStage());
 }
 
 }  // namespace

@@ -1,34 +1,6 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include "mongo/bson/json.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/document_value/document.h"
@@ -36,7 +8,6 @@
 #include "mongo/db/exec/expression/evaluate_test_helpers.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/summation.h"
 
@@ -44,8 +15,12 @@
 #include <cmath>
 #include <limits>
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+
 namespace mongo {
 namespace expression_evaluation_test {
+using namespace std::literals::string_view_literals;
 
 using boost::intrusive_ptr;
 
@@ -106,7 +81,7 @@ TEST(ExpressionAddTest, String) {
     /** String type unsupported. */
     auto expCtx = ExpressionContextForTest{};
     intrusive_ptr<ExpressionNary> expression = new ExpressionAdd(&expCtx);
-    expression->addOperand(ExpressionConstant::create(&expCtx, Value("a"_sd)));
+    expression->addOperand(ExpressionConstant::create(&expCtx, Value("a"sv)));
     ASSERT_THROWS(expression->evaluate({}, &expCtx.variables), AssertionException);
 }
 
@@ -410,7 +385,7 @@ TEST(ExpressionAddTest, Assertions) {
         16612);
 
     // Only numeric types are allowed in a $add.
-    ASSERT_THROWS_CODE(evaluateExpression("$add", {1, 2, "not numeric!"_sd, 3}),
+    ASSERT_THROWS_CODE(evaluateExpression("$add", {1, 2, "not numeric!"sv, 3}),
                        AssertionException,
                        ErrorCodes::TypeMismatch);
 }
@@ -560,11 +535,11 @@ TEST(ExpressionIsNumberTest, WithDoubleValue) {
 }
 
 TEST(ExpressionIsNumberTest, WithStringValue) {
-    assertExpectedResults("$isNumber", {{{Value("stringValue"_sd)}, Value(false)}});
+    assertExpectedResults("$isNumber", {{{Value("stringValue"sv)}, Value(false)}});
 }
 
 TEST(ExpressionIsNumberTest, WithNumericStringValue) {
-    assertExpectedResults("$isNumber", {{{Value("5"_sd)}, Value(false)}});
+    assertExpectedResults("$isNumber", {{{Value("5"sv)}, Value(false)}});
 }
 
 TEST(ExpressionIsNumberTest, WithObjectValue) {

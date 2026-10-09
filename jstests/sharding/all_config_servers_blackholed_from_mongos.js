@@ -8,7 +8,6 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckRoutingTableConsistency = true;
@@ -28,7 +27,9 @@ let st = new ShardingTest({
 let testDB = st.s.getDB("BlackHoleDB");
 
 assert.commandWorked(testDB.adminCommand({enableSharding: "BlackHoleDB"}));
-assert.commandWorked(testDB.adminCommand({shardCollection: testDB.ShardedColl.getFullName(), key: {_id: 1}}));
+assert.commandWorked(
+    testDB.adminCommand({shardCollection: testDB.ShardedColl.getFullName(), key: {_id: 1}}),
+);
 
 assert.commandWorked(testDB.ShardedColl.insert({a: 1}));
 

@@ -113,7 +113,11 @@ function assertData(coll, sourceCollName, expectedShard) {
     // Connect to 'expectedShard' directly and verify that it has the collection and the contents
     // that we expect it to.
     if (expectedShard) {
-        const shardData = expectedShard.getDB(kDbName)[coll.getName()].find({}).sort({_id: 1}).toArray();
+        const shardData = expectedShard
+            .getDB(kDbName)
+            [coll.getName()].find({})
+            .sort({_id: 1})
+            .toArray();
         assert.eq(data, shardData);
     }
 }
@@ -124,7 +128,11 @@ function testDocumentsTargeting(writeStageSpec, expectedShard) {
     const expectedData = getExpectedData("documents");
     const pipeline = [{$documents: expectedData}, writeStageSpec];
     const explain = db.aggregate(pipeline, {explain: true});
-    assert.eq(Object.getOwnPropertyNames(explain.shards), [expectedShard.shardName], tojson(explain));
+    assert.eq(
+        Object.getOwnPropertyNames(explain.shards),
+        [expectedShard.shardName],
+        tojson(explain),
+    );
 
     db.aggregate(pipeline);
     assertData(coll3, "documents", expectedShard);
@@ -144,6 +152,7 @@ function testDocumentsTargeting(writeStageSpec, expectedShard) {
  * - 'expectedDestShard' allows for optionally specifying the shard connection that we expect that
  *   our output collection will exist on. We will directly connect to the shard and see if the
  *   collection exists on it.
+ * - 'precedingStages' specifies any stages to run before the writing stage.
  */
 function testWritingAgg({
     writingAggSpec,
@@ -153,6 +162,7 @@ function testWritingAgg({
     expectedMergeShardId,
     expectedShards,
     expectedDestShard,
+    precedingStages = [],
 }) {
     const sourceColl = db[sourceCollName];
     resetData(sourceColl);
@@ -162,10 +172,14 @@ function testWritingAgg({
         resetData(destColl);
     }
 
-    const pipeline = [writingAggSpec];
+    const pipeline = [...precedingStages, writingAggSpec];
     const explain = sourceColl.explain().aggregate(pipeline);
     assert.eq(explain.mergeShardId, expectedMergeShardId, tojson(explain));
-    assert.eq(Object.getOwnPropertyNames(explain.shards).sort(), expectedShards.sort(), tojson(explain));
+    assert.eq(
+        Object.getOwnPropertyNames(explain.shards).sort(),
+        expectedShards.sort(),
+        tojson(explain),
+    );
 
     sourceColl.aggregate(pipeline);
     destColl = db[destCollName];
@@ -176,15 +190,23 @@ function testWritingAgg({
  * Utility to test the behavior of a writing aggregate stage which runs concurrently with a
  * 'moveCollection' command.
  */
-function testConcurrentWriteAgg({failpointName, writeAggSpec, nameOfCollToMove, expectedDestShard, mergeShard}) {
+function testConcurrentWriteAgg({
+    failpointName,
+    writeAggSpec,
+    nameOfCollToMove,
+    expectedDestShard,
+    mergeShard,
+}) {
     let failpoint = configureFailPoint(mergeShard.rs.getPrimary(), failpointName);
     let writingAgg = startParallelShell(
         funWithArgs(
             function (dbName, sourceCollName, writeAggSpec) {
                 assert.commandWorked(
-                    db
-                        .getSiblingDB(dbName)
-                        .runCommand({aggregate: sourceCollName, pipeline: [writeAggSpec], cursor: {}}),
+                    db.getSiblingDB(dbName).runCommand({
+                        aggregate: sourceCollName,
+                        pipeline: [writeAggSpec],
+                        cursor: {},
+                    }),
                 );
             },
             kDbName,
@@ -202,7 +224,14 @@ function testConcurrentWriteAgg({failpointName, writeAggSpec, nameOfCollToMove, 
     assertData(coll3, kUnsplittable1CollName, expectedDestShard);
 }
 
-function testOut({sourceCollName, destCollName, destExists, expectedMergeShardId, expectedShards, expectedDestShard}) {
+function testOut({
+    sourceCollName,
+    destCollName,
+    destExists,
+    expectedMergeShardId,
+    expectedShards,
+    expectedDestShard,
+}) {
     const outSpec = {$out: destCollName};
     testWritingAgg({
         writingAggSpec: outSpec,
@@ -215,7 +244,13 @@ function testOut({sourceCollName, destCollName, destExists, expectedMergeShardId
     });
 }
 
-function testMerge({sourceCollName, destCollName, expectedMergeShardId, expectedShards, expectedDestShard}) {
+function testMerge({
+    sourceCollName,
+    destCollName,
+    expectedMergeShardId,
+    expectedShards,
+    expectedDestShard,
+}) {
     const mergeSpec = {$merge: {into: destCollName, on: "_id", whenMatched: "replace"}};
     testWritingAgg({
         writingAggSpec: mergeSpec,
@@ -236,34 +271,35 @@ initCollectionPlacement();
 // $out tests
 
 // Input and output collection both exist, are both unsharded and both reside on the same
-// non-primary shard.
+// non-primary shard. $out preserves placement: dest stays on its current shard.
 testOut({
     sourceCollName: kUnsplittable1CollName,
     destCollName: kUnsplittable3CollName,
     destExists: true,
     expectedShards: [shard1],
-    expectedDestShard: dbPrimaryShard,
+    expectedDestShard: st.shard1,
 });
 
 // Input and output collection both exist and are unsharded but reside on different non-primary
-// shards.
+// shards. $out preserves placement: dest stays on its current shard.
 testOut({
     sourceCollName: kUnsplittable1CollName,
     destCollName: kUnsplittable2CollName,
     destExists: true,
     expectedMergeShardId: shard2,
     expectedShards: [shard1],
-    expectedDestShard: dbPrimaryShard,
+    expectedDestShard: st.shard2,
 });
 
 // Input collection is sharded. Output collection exists and resides on a non-primary shard.
+// $out preserves placement: dest stays on its current shard.
 testOut({
     sourceCollName: kShardedCollName,
     destCollName: kUnsplittable1CollName,
     destExists: true,
     expectedMergeShardId: shard1,
     expectedShards: [shard0, shard1, shard2],
-    expectedDestShard: dbPrimaryShard,
+    expectedDestShard: st.shard1,
 });
 
 // Output collection does not exist. Input collection is unsharded and resides on a non-primary
@@ -272,27 +308,55 @@ testOut({
     sourceCollName: kUnsplittable1CollName,
     destCollName: kCollDoesNotExistName,
     destExists: false,
-    expectedMergeShardId: undefined,
-    expectedShards: [dbPrimaryShardName],
+    expectedMergeShardId: dbPrimaryShardName,
+    expectedShards: [shard1],
     expectedDestShard: dbPrimaryShard,
+});
+
+// A preceding $lookup nominates shard2 as the merge shard, while the $out destination remains on
+// shard1. The lookup result is removed so this still verifies the normal $out output.
+testWritingAgg({
+    writingAggSpec: {$out: kUnsplittable3CollName},
+    sourceCollName: kUnsplittable1CollName,
+    destCollName: kUnsplittable3CollName,
+    destExists: true,
+    expectedMergeShardId: shard2,
+    expectedShards: [shard1],
+    expectedDestShard: st.shard1,
+    precedingStages: [
+        {
+            $lookup: {
+                from: kUnsplittable2CollName,
+                localField: "_id",
+                foreignField: "_id",
+                as: "joined",
+            },
+        },
+        {$unset: "joined"},
+    ],
 });
 
 // Input is not a collection, but $documents, so we should run on the shard that owns output
 // collection (if present)
-const destShard = dbPrimaryShard;
+const destShard = st.shard1;
 testDocumentsTargeting({$out: coll3.getName()}, destShard);
 
 resetData(coll1);
 resetData(coll3);
 
+//
 // Output collection exists and resides on a non-primary shard and moved during execution to
 // another shard.
 testConcurrentWriteAgg({
     failpointName: "hangWhileBuildingDocumentSourceOutBatch",
     writeAggSpec: {$out: kUnsplittable3CollName},
     nameOfCollToMove: coll3.getFullName(),
-    expectedDestShard: dbPrimaryShard,
-    mergeShard: dbPrimaryShard,
+    // TODO SERVER-132284: expectedDestShard omitted on purpose. $out decides the temp
+    // collection's shard in createTemporaryCollection() and does not re-check placement
+    // before rename. If moveCollection relocates the destination after that decision, $out can
+    // still finish on the pre-move shard. We currently accept this race. Revisit whether $out
+    // should fail, or keep freezing placement at temp creation.
+    mergeShard: st.shard1,
 });
 
 // $merge tests
@@ -336,7 +400,10 @@ testMerge({
 
 // Input is not a collection, but $documents, so we should run on the shard that owns output
 // collection (if present).
-testDocumentsTargeting({$merge: {into: coll3.getName(), on: "_id", whenMatched: "replace"}}, st.shard1);
+testDocumentsTargeting(
+    {$merge: {into: coll3.getName(), on: "_id", whenMatched: "replace"}},
+    st.shard1,
+);
 
 // Reset our collection placement.
 initCollectionPlacement();

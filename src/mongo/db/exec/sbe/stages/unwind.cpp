@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/unwind.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -39,10 +12,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <utility>
 
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 UnwindStage::UnwindStage(std::unique_ptr<PlanStage> input,
                          value::SlotId inField,
                          value::SlotId outField,
@@ -51,7 +26,7 @@ UnwindStage::UnwindStage(std::unique_ptr<PlanStage> input,
                          PlanNodeId planNodeId,
                          PlanYieldPolicySBE* yieldPolicy,
                          bool participateInTrialRunTracking)
-    : PlanStage("unwind"_sd, yieldPolicy, planNodeId, participateInTrialRunTracking),
+    : PlanStage("unwind"sv, yieldPolicy, planNodeId, participateInTrialRunTracking),
       _inField(inField),
       _outField(outField),
       _outIndex(outIndex),
@@ -104,7 +79,6 @@ void UnwindStage::open(bool reOpen) {
 
     _commonStats.opens++;
     _children[0]->open(reOpen);
-    _childOpened = true;
 
     _index = 0;
     _inArray = false;
@@ -148,10 +122,10 @@ PlanState UnwindStage::getNext() {
             if (_inArrayAccessor.atEnd()) {
                 _inArray = false;
                 if (_preserveNullAndEmptyArrays) {
-                    _outFieldOutputAccessor->reset(false, value::TypeTags::Nothing, 0);
+                    _outFieldOutputAccessor->reset(value::TagValueView::nothing());
                     // The array index is set to null if the unwind field is not an array or if the
                     // unwind field is the empty array.
-                    _outIndexOutputAccessor->reset(false, value::TypeTags::Null, 0);
+                    _outIndexOutputAccessor->reset(value::TagValueView::null());
                     return trackPlanState(PlanState::ADVANCED);
                 }
             }
@@ -159,10 +133,10 @@ PlanState UnwindStage::getNext() {
             bool nullOrNothing = tag == value::TypeTags::Null || tag == value::TypeTags::Nothing;
 
             if (!nullOrNothing || _preserveNullAndEmptyArrays) {
-                _outFieldOutputAccessor->reset(false, tag, val);
+                _outFieldOutputAccessor->reset(value::TagValueView{tag, val});
                 // The array index is set to null if the unwind field is not an array or if the
                 // unwind field is the empty array.
-                _outIndexOutputAccessor->reset(false, value::TypeTags::Null, 0);
+                _outIndexOutputAccessor->reset(value::TagValueView::null());
                 return trackPlanState(PlanState::ADVANCED);
             }
         }
@@ -171,9 +145,8 @@ PlanState UnwindStage::getNext() {
     // We are inside the array so pull out the current element and advance.
     auto [tagElem, valElem] = _inArrayAccessor.getViewOfValue();
 
-    _outFieldOutputAccessor->reset(false, tagElem, valElem);
-    _outIndexOutputAccessor->reset(
-        false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(_index));
+    _outFieldOutputAccessor->reset(value::TagValueView{tagElem, valElem});
+    _outIndexOutputAccessor->reset(value::TagValueView::numberInt64(_index));
 
     _inArrayAccessor.advance();
     ++_index;
@@ -189,10 +162,7 @@ void UnwindStage::close() {
     auto optTimer(getOptTimer(_opCtx));
 
     trackClose();
-    if (_childOpened) {
-        _children[0]->close();
-        _childOpened = false;
-    }
+    _children[0]->close();
     _index = 0;
     _inArray = false;
 }

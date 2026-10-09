@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/executor/split_timer.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/tick_source.h"
@@ -37,11 +10,13 @@
 
 #include <array>
 #include <string>
+#include <string_view>
 
 #include <fmt/format.h>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 namespace m = unittest::match;
 
@@ -70,14 +45,14 @@ enum class SomeIntervalId : size_t {
 
 struct IDef {
     SomeIntervalId iId;
-    StringData name;
+    std::string_view name;
     SomeTimeSplitId start;
     SomeTimeSplitId end;
 };
 
 static constexpr auto iDefs = std::array{
-    IDef{SomeIntervalId::ab, "abMillis"_sd, SomeTimeSplitId::a, SomeTimeSplitId::b},
-    IDef{SomeIntervalId::ac, "acMillis"_sd, SomeTimeSplitId::a, SomeTimeSplitId::c},
+    IDef{SomeIntervalId::ab, "abMillis"sv, SomeTimeSplitId::a, SomeTimeSplitId::b},
+    IDef{SomeIntervalId::ac, "acMillis"sv, SomeTimeSplitId::a, SomeTimeSplitId::c},
 };
 
 struct SomePolicy {
@@ -94,11 +69,11 @@ struct SomePolicy {
         return static_cast<size_t>(e);
     }
 
-    static constexpr StringData getName(TimeSplitIdType e) {
-        constexpr auto arr = std::array{"a"_sd, "b"_sd, "c"_sd};
+    static constexpr std::string_view getName(TimeSplitIdType e) {
+        constexpr auto arr = std::array{"a"sv, "b"sv, "c"sv};
         return arr[toIdx(e)];
     }
-    static constexpr StringData getName(IntervalIdType e) {
+    static constexpr std::string_view getName(IntervalIdType e) {
         return iDefs[toIdx(e)].name;
     }
 

@@ -35,7 +35,9 @@ export const $config = (function () {
             // 'queryPlanner', 'executionStats', and 'allPlansExecution'
             ["queryPlanner", "executionStats", "allPlansExecution"].forEach(
                 function (verbosity) {
-                    assert.commandWorked(db[collName].find({j: this.nInserted / 2}).explain(verbosity));
+                    assert.commandWorked(
+                        db[collName].find({j: this.nInserted / 2}).explain(verbosity),
+                    );
                 }.bind(this),
             );
         }
@@ -46,7 +48,7 @@ export const $config = (function () {
             assert.commandWorked(res);
             assert(res.queryPlanner, tojson(res));
             assert(res.queryPlanner.winningPlan, tojson(res));
-            if (isMongod(db) && !TestData.testingReplicaSetEndpoint) {
+            if (isMongod(db)) {
                 assert.eq(getWinningPlanFromExplain(res.queryPlanner).stage, "EOF", tojson(res));
             } else {
                 // In the sharding case, each shard has a winningPlan

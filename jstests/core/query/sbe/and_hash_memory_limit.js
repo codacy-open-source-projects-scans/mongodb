@@ -7,6 +7,7 @@
  * straightforward to trigger the memory limit.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_unsharded_collection,
  *   does_not_support_transactions,
  *   not_allowed_with_signed_security_token,
@@ -20,10 +21,11 @@
  */
 
 import {getWinningPlanFromExplain, planHasStage} from "jstests/libs/query/analyze_plan.js";
-import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+import {checkSbeFullyEnabled, isDeferredGetExecutorEnabled} from "jstests/libs/query/sbe_util.js";
 import {runWithParamsAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
-if (!checkSbeFullyEnabled(db)) {
+// Deferred get_executor path does not run AND_HASH plans in SBE.
+if (!checkSbeFullyEnabled(db) || isDeferredGetExecutorEnabled(db)) {
     jsTest.log.info("Skipping test: SBE AND_HASH memory limit requires SBE to be fully enabled.");
     quit();
 }
@@ -67,13 +69,17 @@ runWithParamsAllNonConfigNodes(
         assert.eq(runQuery().itcount(), kDocCount, () => runQuery().explain("executionStats"));
 
         // Set a 1-byte limit so the first document inserted into the hash table exceeds it.
-        runWithParamsAllNonConfigNodes(db, {internalSlotBasedExecutionAndHashStageMaxMemoryBytes: 1}, () => {
-            assert.throwsWithCode(
-                () => runQuery().itcount(),
-                12321801,
-                [] /*params*/,
-                () => runQuery().explain("executionStats"),
-            );
-        });
+        runWithParamsAllNonConfigNodes(
+            db,
+            {internalSlotBasedExecutionAndHashStageMaxMemoryBytes: 1},
+            () => {
+                assert.throwsWithCode(
+                    () => runQuery().itcount(),
+                    12321801,
+                    [] /*params*/,
+                    () => runQuery().explain("executionStats"),
+                );
+            },
+        );
     },
 );

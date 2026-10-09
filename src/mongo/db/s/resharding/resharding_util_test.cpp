@@ -1,69 +1,57 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_util.h"
 
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service_util.h"
 #include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/sharding_environment/config_server_test_fixture.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/version_context.h"
 #include "mongo/otel/telemetry_context_holder.h"
 #include "mongo/otel/traces/span/span.h"
 #include "mongo/otel/traces/telemetry_context_serialization.h"
+#include "mongo/otel/traces/traces_test_util.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
 
 #include <algorithm>
@@ -84,6 +72,7 @@
 namespace mongo {
 namespace resharding {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class ReshardingUtilTest : public ConfigServerTestFixture {
 protected:
@@ -148,6 +137,10 @@ protected:
         sourceIndexSpecs.push_back(sourceSpec);
         recipientSpecs.push_back(recipientSpec);
         validateIndexes(sourceIndexSpecs, recipientSpecs, code);
+    }
+
+    ShardId primaryShardId() const {
+        return ShardId{"a"};
     }
 
 private:
@@ -263,6 +256,114 @@ TEST_F(ReshardingUtilTest, FailWhenOverlappingZones) {
     ASSERT_THROWS_CODE(checkForOverlappingZones(zones), DBException, ErrorCodes::BadValue);
 }
 
+/**
+ * Covers selectZonesForParticipantShardsAndChunks, the branch (provenance, requested zones,
+ * forceRedistribution) -> zones used when calculating resharding participant shards and chunks.
+ */
+class ReshardingSelectZonesTest : public ConfigServerTestFixture {
+protected:
+    void setUp() override {
+        ConfigServerTestFixture::setUp();
+        ShardType shard;
+        shard.setName("a");
+        shard.setHost("a:1234");
+        shard.setTags({kZoneName});
+        setupShards({shard});
+    }
+
+    const std::string kZoneName = "zoneOnShardA";
+    const NamespaceString kSourceNss = NamespaceString::createNamespaceString_forTest("test.foo");
+    const ChunkRange kFullRange{BSON("x" << MINKEY), BSON("x" << MAXKEY)};
+};
+
+TEST_F(ReshardingSelectZonesTest, NoZonesAndNoForceRedistributionReturnsEmpty) {
+    auto zones = resharding::selectZonesForParticipantShardsAndChunks(
+        operationContext(),
+        ReshardingProvenanceEnum::kReshardCollection,
+        boost::none /* requestedZones */,
+        false /* forceRedistribution */,
+        kSourceNss);
+
+    ASSERT_TRUE(zones.empty());
+}
+
+TEST_F(ReshardingSelectZonesTest, RequestedZonesAreReturnedAndValidated) {
+    std::vector<ReshardingZoneType> requestedZones{
+        ReshardingZoneType(kZoneName, kFullRange.getMin(), kFullRange.getMax())};
+
+    auto zones = resharding::selectZonesForParticipantShardsAndChunks(
+        operationContext(),
+        ReshardingProvenanceEnum::kReshardCollection,
+        requestedZones,
+        false /* forceRedistribution */,
+        kSourceNss);
+
+    ASSERT_EQ(1u, zones.size());
+    ASSERT_EQ(kZoneName, zones[0].getZone());
+}
+
+TEST_F(ReshardingSelectZonesTest, ThrowsWhenRequestedZoneDoesNotExist) {
+    std::vector<ReshardingZoneType> requestedZones{
+        ReshardingZoneType("noSuchZone", kFullRange.getMin(), kFullRange.getMax())};
+
+    ASSERT_THROWS_CODE(resharding::selectZonesForParticipantShardsAndChunks(
+                           operationContext(),
+                           ReshardingProvenanceEnum::kReshardCollection,
+                           requestedZones,
+                           false /* forceRedistribution */,
+                           kSourceNss),
+                       DBException,
+                       ErrorCodes::ZoneNotFound);
+}
+
+TEST_F(ReshardingSelectZonesTest, ForceRedistributionWithoutRequestedZonesUsesExistingZones) {
+    TagsType existingTag(kSourceNss, kZoneName, kFullRange);
+    DBDirectClient client(operationContext());
+    client.insert(TagsType::ConfigNS, existingTag.toBSON());
+
+    auto zones = resharding::selectZonesForParticipantShardsAndChunks(
+        operationContext(),
+        ReshardingProvenanceEnum::kReshardCollection,
+        boost::none /* requestedZones */,
+        true /* forceRedistribution */,
+        kSourceNss);
+
+    ASSERT_EQ(1u, zones.size());
+    ASSERT_EQ(kZoneName, zones[0].getZone());
+}
+
+TEST_F(ReshardingSelectZonesTest, UnshardCollectionRejectsRequestedZones) {
+    std::vector<ReshardingZoneType> requestedZones{
+        ReshardingZoneType(kZoneName, kFullRange.getMin(), kFullRange.getMax())};
+
+    ASSERT_THROWS_CODE(resharding::selectZonesForParticipantShardsAndChunks(
+                           operationContext(),
+                           ReshardingProvenanceEnum::kUnshardCollection,
+                           requestedZones,
+                           false /* forceRedistribution */,
+                           kSourceNss),
+                       DBException,
+                       ErrorCodes::InvalidOptions);
+}
+
+TEST_F(ReshardingSelectZonesTest,
+       UnshardCollectionIgnoresForceRedistributionAndReturnsEmptyEvenWithExistingZones) {
+    // Regression guard: forceRedistribution must not cause existing collection zones to leak
+    // into an unshardCollection operation, whose resulting collection cannot have zones.
+    TagsType existingTag(kSourceNss, kZoneName, kFullRange);
+    DBDirectClient client(operationContext());
+    client.insert(TagsType::ConfigNS, existingTag.toBSON());
+
+    auto zones = resharding::selectZonesForParticipantShardsAndChunks(
+        operationContext(),
+        ReshardingProvenanceEnum::kUnshardCollection,
+        boost::none /* requestedZones */,
+        true /* forceRedistribution */,
+        kSourceNss);
+
+    ASSERT_TRUE(zones.empty());
+}
+
 TEST(SimpleReshardingUtilTest, AssertDonorOplogIdSerialization) {
     // It's a correctness requirement that `ReshardingDonorOplogId.toBSON` serializes as
     // `{clusterTime: <value>, ts: <value>}`, paying particular attention to the ordering of the
@@ -275,8 +376,8 @@ TEST(SimpleReshardingUtilTest, AssertDonorOplogIdSerialization) {
     ReshardingDonorOplogId oplogId(Timestamp::min(), Timestamp::min());
     BSONObj oplogIdObj = oplogId.toBSON();
     BSONObjIterator it(oplogIdObj);
-    ASSERT_EQ("clusterTime"_sd, it.next().fieldNameStringData()) << oplogIdObj;
-    ASSERT_EQ("ts"_sd, it.next().fieldNameStringData()) << oplogIdObj;
+    ASSERT_EQ("clusterTime"sv, it.next().fieldNameStringData()) << oplogIdObj;
+    ASSERT_EQ("ts"sv, it.next().fieldNameStringData()) << oplogIdObj;
     ASSERT_FALSE(it.more());
 }
 
@@ -338,7 +439,8 @@ TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
 
     validateIndexes(sourceSpecs, recipientSpecs, ErrorCodes::OK);
 
-    // 6. num(recipientSpecs) > num(recipientSpecs) works.
+    // 6. Extra recipient index (e.g. synthesized shard key) passes the content check since all
+    // source specs are still present in the recipient.
     std::vector<BSONObj> sourceSpecs2{BSON("key" << BSON("field2" << 1) << "name"
                                                  << "indexName_2"
                                                  << "v" << 3)};
@@ -355,8 +457,8 @@ TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
 }
 
 TEST_F(ReshardingUtilTest, SetNumSamplesPerChunkThroughConfigsvrReshardCollectionRequest) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagReshardingNumSamplesPerChunk", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagReshardingNumSamplesPerChunk",
+                                                         true);
 
     int numInitialChunks = 1;
     int numSamplesPerChunk = 10;
@@ -382,51 +484,206 @@ TEST_F(ReshardingUtilTest, SetNumSamplesPerChunkThroughConfigsvrReshardCollectio
 
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
     auto numSamplesPerChunkOptional = coordinatorDoc.getNumSamplesPerChunk();
     ASSERT_TRUE(numSamplesPerChunkOptional.has_value());
     ASSERT_EQ(*numSamplesPerChunkOptional, numSamplesPerChunk);
 }
 
-TEST_F(ReshardingUtilTest, CreateCoordinatorDocPerformVerification) {
-    for (auto performVerification : std::vector<boost::optional<bool>>{true, false, boost::none}) {
-        for (bool enableVerification : {true, false}) {
-            LOGV2(9849102,
-                  "Running case",
-                  "test"_attr = unittest::getTestName(),
-                  "performVerification"_attr = performVerification,
-                  "enableVerification"_attr = enableVerification);
-            RAIIServerParameterControllerForTest featureFlagController(
-                "featureFlagReshardingVerification", enableVerification);
+TEST_F(ReshardingUtilTest, ValidatePerformVerification) {
+    VersionContext::ScopedSetDecoration scopedVersionContext(
+        operationContext(),
+        VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+    const auto fom = ForwardableOperationMetadata{operationContext()};
 
+    // false is always a no-op.
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             false);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             false);
+        ASSERT_DOES_NOT_THROW(validatePerformVerification(fom, false));
+    }
 
-            const CollectionType collEntry(
-                nss(),
-                OID::gen(),
-                Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
-                Date_t::now(),
-                UUID::gen(),
-                keyPattern());
+    // true is valid only when both gates are on.
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             true);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             true);
+        ASSERT_DOES_NOT_THROW(validatePerformVerification(fom, true));
+    }
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             false);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             true);
+        ASSERT_THROWS_CODE(
+            validatePerformVerification(fom, true), DBException, ErrorCodes::InvalidOptions);
+    }
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             true);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             false);
+        ASSERT_THROWS_CODE(
+            validatePerformVerification(fom, true), DBException, ErrorCodes::InvalidOptions);
+    }
 
-            ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
-            configsvrReshardCollection.setDbName(nss().dbName());
-            configsvrReshardCollection.setPerformVerification(performVerification);
+    // The VersionContext overload (used by the refresh path) behaves the same as the FOM overload.
+    const auto& vCtx = VersionContext::getDecoration(operationContext());
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             true);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             true);
+        ASSERT_DOES_NOT_THROW(validatePerformVerification(vCtx, true));
+    }
+    {
+        unittest::ServerParameterGuard featureFlagController("featureFlagReshardingVerification",
+                                                             false);
+        unittest::ServerParameterGuard serverParamController("reshardingDocumentVerification",
+                                                             true);
+        ASSERT_THROWS_CODE(
+            validatePerformVerification(vCtx, true), DBException, ErrorCodes::InvalidOptions);
+    }
+}
 
-            ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-                operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+class ReshardingUtilPerformVerificationTest : public ReshardingUtilTest {
+protected:
+    CollectionType setupTestCollection() {
+        ChunkVersion version{{OID::gen(), Timestamp(1, 0)}, {1, 0}};
+        ChunkType chunk;
+        chunk.setCollectionUUID(UUID::gen());
+        chunk.setShard(ShardId("a"));
+        chunk.setVersion(version);
+        chunk.setRange({BSON("x" << MINKEY), BSON("x" << MAXKEY)});
+        chunk.setOnCurrentShardSince(Timestamp(1, 0));
+        chunk.setHistory({ChunkHistory(Timestamp(1, 0), ShardId("a"))});
 
-            auto actualPerformVerification = coordinatorDoc.getPerformVerification();
-            if (performVerification.has_value()) {
-                ASSERT(actualPerformVerification.has_value());
-                ASSERT_EQ(actualPerformVerification, *performVerification);
-            } else if (enableVerification) {
-                ASSERT(actualPerformVerification.has_value());
-                ASSERT_EQ(actualPerformVerification, true);
-            } else {
-                ASSERT_FALSE(actualPerformVerification.has_value());
-            }
+        return setupCollection(nss(), keyPattern(), {chunk});
+    }
+
+    ConfigsvrReshardCollection makeReshardCollectionRequest(
+        boost::optional<bool> performVerification = boost::none) {
+        ConfigsvrReshardCollection req(nss(), BSON(shardKey() << 1));
+        req.setDbName(nss().dbName());
+        if (performVerification.has_value()) {
+            req.setPerformVerification(*performVerification);
+        }
+        return req;
+    }
+
+    CollSizeEstimator makeEstimator(boost::optional<long long> size) {
+        return [size](OperationContext*, const NamespaceString&) {
+            return size;
+        };
+    }
+};
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationFalseWhenExplicitlyDisabled) {
+    auto collEntry = setupTestCollection();
+    for (bool ffOn : {true, false}) {
+        for (bool spOn : {true, false}) {
+            unittest::ServerParameterGuard ff("featureFlagReshardingVerification", ffOn);
+            unittest::ServerParameterGuard sp("reshardingDocumentVerification", spOn);
+            auto req = makeReshardCollectionRequest(false);
+
+            auto doc = createReshardingCoordinatorDoc(
+                operationContext(), req, collEntry, primaryShardId(), nss(), true);
+            ASSERT_TRUE(doc.getPerformVerification().has_value());
+            ASSERT_FALSE(doc.getPerformVerification());
         }
     }
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationUnsetWhenFeatureFlagDisabled) {
+    unittest::ServerParameterGuard ff("featureFlagReshardingVerification", false);
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest();
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true);
+    ASSERT_FALSE(doc.getPerformVerification().has_value());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationUnsetWhenServerParamDisabled) {
+    unittest::ServerParameterGuard sp("reshardingDocumentVerification", false);
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest();
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true);
+    ASSERT_FALSE(doc.getPerformVerification().has_value());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationDefaultsToTrueWhenGatesEnabled) {
+    unittest::ServerParameterGuard ff("featureFlagReshardingVerification", true);
+    unittest::ServerParameterGuard sp("reshardingDocumentVerification", true);
+
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest();
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true, makeEstimator(1000LL));
+    ASSERT_TRUE(doc.getPerformVerification());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationStaysEnabledWhenSizeBelowThreshold) {
+    unittest::ServerParameterGuard thresholdController(
+        "reshardingDocumentValidationMaxCollectionSizeBytes", 2000LL);
+
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest(true);
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true, makeEstimator(1000LL));
+    ASSERT_TRUE(doc.getPerformVerification());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationDisabledWhenSizeExceedsThreshold) {
+    unittest::ServerParameterGuard thresholdController(
+        "reshardingDocumentValidationMaxCollectionSizeBytes", 500LL);
+
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest(true);
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true, makeEstimator(1000LL));
+    ASSERT_TRUE(doc.getPerformVerification().has_value());
+    ASSERT_FALSE(doc.getPerformVerification());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, ThresholdNotCheckedWhenVerificationDisabled) {
+    unittest::ServerParameterGuard thresholdController(
+        "reshardingDocumentValidationMaxCollectionSizeBytes", 0LL);
+
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest(false);
+
+    auto doc = createReshardingCoordinatorDoc(
+        operationContext(), req, collEntry, primaryShardId(), nss(), true);
+    ASSERT_TRUE(doc.getPerformVerification().has_value());
+    ASSERT_FALSE(doc.getPerformVerification());
+}
+
+TEST_F(ReshardingUtilPerformVerificationTest, VerificationDisabledWhenCollStatsFails) {
+    unittest::ServerParameterGuard thresholdController(
+        "reshardingDocumentValidationMaxCollectionSizeBytes", 0LL);
+
+    auto collEntry = setupTestCollection();
+    auto req = makeReshardCollectionRequest(true);
+
+    // boost::none simulates a failed/unavailable collStats — verification should be skipped.
+    auto doc = createReshardingCoordinatorDoc(operationContext(),
+                                              req,
+                                              collEntry,
+                                              primaryShardId(),
+                                              nss(),
+                                              true,
+                                              makeEstimator(boost::none));
+    ASSERT_TRUE(doc.getPerformVerification().has_value());
+    ASSERT_FALSE(doc.getPerformVerification());
 }
 
 TEST_F(ReshardingUtilTest, CreateCoordinatorDocStoresForwardableOpMetadata) {
@@ -445,11 +702,48 @@ TEST_F(ReshardingUtilTest, CreateCoordinatorDocStoresForwardableOpMetadata) {
     ASSERT_FALSE(VersionContext::getDecoration(operationContext()).hasOperationFCV());
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
 
     ASSERT_TRUE(coordinatorDoc.getForwardableOpMetadata().has_value());
     ASSERT_TRUE(coordinatorDoc.getForwardableOpMetadata()->getVersionContext().has_value());
     ASSERT_TRUE(coordinatorDoc.getForwardableOpMetadata()->getVersionContext()->hasOperationFCV());
+}
+
+TEST_F(ReshardingUtilTest, CreateCoordinatorDocStoresStartingFCV) {
+    // (Generic FCV reference): used for testing, should exist across LTS binary versions.
+    using GenericFCV = multiversion::GenericFCV;
+
+    auto originalFCV = serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+    ScopeGuard restoreFCV([&] { serverGlobalParams.mutableFCV.setVersion(originalFCV); });
+
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+
+    // (Generic FCV reference): for testing.
+    for (auto fcv : {GenericFCV::kLatest, GenericFCV::kLastLTS, GenericFCV::kLastContinuous}) {
+        serverGlobalParams.mutableFCV.setVersion(fcv);
+
+        ReshardingCoordinatorDocument coordinatorDoc =
+            createReshardingCoordinatorDoc(operationContext(),
+                                           configsvrReshardCollection,
+                                           collEntry,
+                                           primaryShardId(),
+                                           nss(),
+                                           true);
+
+        auto startingFCV = coordinatorDoc.getCommonReshardingMetadata().getStartingFCV();
+        ASSERT_TRUE(startingFCV.has_value());
+        ASSERT_EQ(*startingFCV, fcv);
+        // The snapshotted FCV must be the one isFCVTheSame() later compares against.
+        ASSERT_TRUE(isFCVTheSame(coordinatorDoc.getCommonReshardingMetadata(), fcv));
+    }
 }
 
 TEST_F(ReshardingUtilTest, GetMajorityReplicationLag_Basic) {
@@ -482,6 +776,12 @@ TEST_F(ReshardingUtilTest, GetMajorityReplicationLag_LastAppliedEqualToLastCommi
 }
 
 TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocContainsTelemetryContextFromOpCtx) {
+    otel::traces::OtelTracesCapturer capturer;
+    if (!capturer.canReadSpans())
+        GTEST_SKIP() << "OTel not configured";
+
+    auto span = otel::traces::Span::start(operationContext(), otel::traces::span_names::kTest1);
+
     const CollectionType collEntry(nss(),
                                    OID::gen(),
                                    Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
@@ -492,19 +792,21 @@ TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocContainsTelemetryContextFromO
     ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
     configsvrReshardCollection.setDbName(nss().dbName());
 
-    auto telemetryCtx = otel::traces::Span::createTelemetryContext();
-    auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(operationContext());
-
-    telemetryCtxHolder.setTelemetryContext(telemetryCtx);
+    auto& telemetryCtx =
+        otel::TelemetryContextHolder::getDecoration(operationContext()).getTelemetryContext();
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
     ASSERT_TRUE(coordinatorDoc.getTelemetryContext().has_value());
     ASSERT_BSONOBJ_EQ(coordinatorDoc.getTelemetryContext().value(),
                       otel::traces::TelemetryContextSerializer::toBSON(telemetryCtx));
 }
 
-TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocDoesNotContainTelemetryContextWhenNotSet) {
+TEST_F(ReshardingUtilTest,
+       ReshardingCoordinatorDocDoesNotContainTelemetryContextWhenNoTraceActive) {
+    if (!otel::traces::OtelTracesCapturer::canReadSpans())
+        GTEST_SKIP() << "OTel not configured";
+
     const CollectionType collEntry(nss(),
                                    OID::gen(),
                                    Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
@@ -516,7 +818,7 @@ TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocDoesNotContainTelemetryContex
     configsvrReshardCollection.setDbName(nss().dbName());
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
     ASSERT_FALSE(coordinatorDoc.getTelemetryContext().has_value());
 }
 
@@ -555,7 +857,7 @@ TEST_F(ReshardingUtilTest, SetDemoModeThroughConfigsvrReshardCollectionRequest) 
     configsvrReshardCollection.setProvenance(provenance);
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
     auto demoModeOpt = coordinatorDoc.getDemoMode();
     ASSERT_TRUE(demoModeOpt.has_value() && demoModeOpt);
 
@@ -584,7 +886,7 @@ TEST_F(ReshardingUtilTest, EmptyDemoModeReshardCollectionRequest) {
     configsvrReshardCollection.setProvenance(provenance);
 
     ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
-        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+        operationContext(), configsvrReshardCollection, collEntry, primaryShardId(), nss(), true);
     auto demoModeOpt = coordinatorDoc.getDemoMode();
     ASSERT_FALSE(demoModeOpt.has_value());
 
@@ -915,12 +1217,257 @@ TEST_F(MakeReshardingOperationContextTest, PropagationIsPreservedByFactory) {
 
 TEST_F(MakeReshardingOperationContextTest,
        GetVersionContextFallsBackToDefaultWhenNoVersionContext) {
-    // A ForwardableOperationMetadata with no VersionContext set should fall back to default.
-    ForwardableOperationMetadata fom;
-    ASSERT_FALSE(fom.getVersionContext().has_value());
+    // TODO(SERVER-99655) Remove this test when lastLTS is 9.0 and ForwardableOperationMetadata
+    // should always have a VersionContext.
 
-    auto vCtx = getVersionContextOrDefault(boost::optional<ForwardableOperationMetadata>(fom));
-    ASSERT_FALSE(vCtx.hasOperationFCV());
+    // (Generic FCV reference): used for testing, should exist across LTS binary version
+    using GenericFCV = multiversion::GenericFCV;
+
+    // Save the original FCV to restore at the end.
+    auto originalFCV = serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+    ScopeGuard restoreFCV([&] { serverGlobalParams.mutableFCV.setVersion(originalFCV); });
+
+    // Test kLastLTS -> kLastLTS
+    {
+        SCOPED_TRACE("kLastLTS");
+        // (Generic FCV reference): used for testing, should exist across LTS binary versions.
+        serverGlobalParams.mutableFCV.setVersion(GenericFCV::kLastLTS);
+        ForwardableOperationMetadata emptyFom;
+        auto vCtx =
+            getVersionContextOrDefault(boost::optional<ForwardableOperationMetadata>(emptyFom));
+        ASSERT_EQ(vCtx, VersionContext{GenericFCV::kLastLTS});
+    }
+
+    // Test kLastContinuous -> kLastContinuous
+    {
+        SCOPED_TRACE("kLastContinuous");
+        // (Generic FCV reference): used for testing, should exist across LTS binary versions.
+        serverGlobalParams.mutableFCV.setVersion(GenericFCV::kLastContinuous);
+        ForwardableOperationMetadata emptyFom;
+        auto vCtx =
+            getVersionContextOrDefault(boost::optional<ForwardableOperationMetadata>(emptyFom));
+        ASSERT_EQ(vCtx, VersionContext{GenericFCV::kLastContinuous});
+    }
+
+    // Test kUpgradingFromLastLTSToLatest -> kLastLTS
+    {
+        SCOPED_TRACE("kUpgradingFromLastLTSToLatest");
+        // (Generic FCV reference): used for testing, should exist across LTS binary versions.
+        serverGlobalParams.mutableFCV.setVersion(GenericFCV::kUpgradingFromLastLTSToLatest);
+        ForwardableOperationMetadata emptyFom;
+        auto vCtx =
+            getVersionContextOrDefault(boost::optional<ForwardableOperationMetadata>(emptyFom));
+        ASSERT_EQ(vCtx, VersionContext{GenericFCV::kLastLTS});
+    }
+
+    // Test kUpgradingFromLastContinuousToLatest -> kLastContinuous
+    {
+        SCOPED_TRACE("kUpgradingFromLastContinuousToLatest");
+        // (Generic FCV reference): used for testing, should exist across LTS binary versions.
+        serverGlobalParams.mutableFCV.setVersion(GenericFCV::kUpgradingFromLastContinuousToLatest);
+        ForwardableOperationMetadata emptyFom;
+        auto vCtx =
+            getVersionContextOrDefault(boost::optional<ForwardableOperationMetadata>(emptyFom));
+        ASSERT_EQ(vCtx, VersionContext{GenericFCV::kLastContinuous});
+    }
+}
+
+class IsFCVTheSameTest : public unittest::Test {
+protected:
+    CommonReshardingMetadata makeMetadata(
+        boost::optional<multiversion::FeatureCompatibilityVersion> startingFCV) {
+        const NamespaceString sourceNss =
+            NamespaceString::createNamespaceString_forTest("test.foo");
+        const auto sourceUUID = UUID::gen();
+
+        CommonReshardingMetadata metadata{
+            UUID::gen(),
+            sourceNss,
+            sourceUUID,
+            resharding::constructTemporaryReshardingNss(sourceNss, sourceUUID),
+            BSON("newKey" << 1)};
+
+        if (startingFCV) {
+            metadata.setStartingFCV(*startingFCV);
+        }
+
+        return metadata;
+    }
+};
+
+TEST_F(IsFCVTheSameTest, GetStartingFCVString) {
+    // (Generic FCV reference): used for testing.
+    using GenericFCV = multiversion::GenericFCV;
+
+    ASSERT_EQ(getStartingFCVString(makeMetadata(boost::none)), "uninitialized");
+    for (auto fcv : {GenericFCV::kLatest, GenericFCV::kLastLTS, GenericFCV::kLastContinuous}) {
+        ASSERT_EQ(getStartingFCVString(makeMetadata(fcv)), multiversion::toString(fcv));
+    }
+}
+
+TEST_F(IsFCVTheSameTest, MatchesWhenStartingFCVIsSetAndEqual) {
+    // (Generic FCV reference): for testing.
+    using GenericFCV = multiversion::GenericFCV;
+
+    ASSERT_TRUE(isFCVTheSame(makeMetadata(GenericFCV::kLatest), GenericFCV::kLatest));
+    ASSERT_TRUE(isFCVTheSame(makeMetadata(GenericFCV::kLastLTS), GenericFCV::kLastLTS));
+    ASSERT_TRUE(
+        isFCVTheSame(makeMetadata(GenericFCV::kLastContinuous), GenericFCV::kLastContinuous));
+}
+
+TEST_F(IsFCVTheSameTest, DoesNotMatchWhenStartingFCVIsSetAndDifferent) {
+    // (Generic FCV reference): for testing.
+    using GenericFCV = multiversion::GenericFCV;
+
+    ASSERT_FALSE(isFCVTheSame(makeMetadata(GenericFCV::kLastLTS), GenericFCV::kLatest));
+    ASSERT_FALSE(isFCVTheSame(makeMetadata(GenericFCV::kLatest), GenericFCV::kLastLTS));
+    ASSERT_FALSE(isFCVTheSame(makeMetadata(GenericFCV::kLatest), GenericFCV::kLastContinuous));
+    ASSERT_FALSE(isFCVTheSame(makeMetadata(GenericFCV::kLastLTS),
+                              GenericFCV::kUpgradingFromLastLTSToLatest));
+}
+
+// TODO SERVER-132341: should assert on boost::none as it should be present post v9.0.
+TEST_F(IsFCVTheSameTest, UnsetStartingFCVMatchesLastLTSAndLastContinuous) {
+    // (Generic FCV reference): for testing.
+    // A coordinator doc without startingFCV was written by an older binary, so the only FCVs
+    // consistent with it are the pre-upgrade ones.
+    using GenericFCV = multiversion::GenericFCV;
+
+    ASSERT_TRUE(isFCVTheSame(makeMetadata(boost::none), GenericFCV::kLastLTS));
+    ASSERT_TRUE(isFCVTheSame(makeMetadata(boost::none), GenericFCV::kLastContinuous));
+}
+
+TEST_F(IsFCVTheSameTest, UnsetStartingFCVDoesNotMatchLatestOrUpgrading) {
+    // (Generic FCV reference): for testing.
+    using GenericFCV = multiversion::GenericFCV;
+
+    ASSERT_FALSE(isFCVTheSame(makeMetadata(boost::none), GenericFCV::kLatest));
+    ASSERT_FALSE(
+        isFCVTheSame(makeMetadata(boost::none), GenericFCV::kUpgradingFromLastLTSToLatest));
+    ASSERT_FALSE(
+        isFCVTheSame(makeMetadata(boost::none), GenericFCV::kUpgradingFromLastContinuousToLatest));
+    ASSERT_FALSE(
+        isFCVTheSame(makeMetadata(boost::none), GenericFCV::kDowngradingFromLatestToLastLTS));
+}
+
+class ReshardingDonorCloneCountUtilTest : public CatalogTestFixture {
+public:
+    void createIndex(const BSONObj& spec) {
+        WriteUnitOfWork wuow(opCtx());
+        CollectionWriter writer{opCtx(), *_coll};
+
+        auto* indexCatalog = writer.getWritableCollection(opCtx())->getIndexCatalog();
+        uassertStatusOK(indexCatalog->createIndexOnEmptyCollection(
+            opCtx(), writer.getWritableCollection(opCtx()), spec));
+        wuow.commit();
+    }
+
+    const NamespaceString& nss() const {
+        return _nss;
+    }
+
+    const CollectionPtr& coll() const {
+        return *_coll.get();
+    }
+
+    OperationContext* opCtx() {
+        return operationContext();
+    }
+
+protected:
+    const int kIndexVersion = 2;
+
+    void setUp() override {
+        CatalogTestFixture::setUp();
+        _coll.emplace(opCtx(), _nss, MODE_X);
+        ASSERT_OK(storageInterface()->createCollection(opCtx(), _nss, {}));
+    }
+
+    void tearDown() override {
+        _coll.reset();
+        CatalogTestFixture::tearDown();
+    }
+
+private:
+    const NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test.user");
+    boost::optional<AutoGetCollection> _coll;
+};
+
+TEST_F(ReshardingDonorCloneCountUtilTest, UnshardedSourceHintsId) {
+    auto hint = determineCloneCountHint(opCtx(), coll(), boost::none /* shardKeyPattern */);
+
+    ASSERT_TRUE(hint);
+    ASSERT_BSONOBJ_EQ(*hint, BSON("_id" << 1));
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedRangedKeyWithCompatibleIndexHintsThatIndex) {
+    createIndex(BSON("key" << BSON("x" << 1) << "name" << "x" << "v" << kIndexVersion));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << 1));
+
+    ASSERT_TRUE(hint);
+    ASSERT_BSONOBJ_EQ(*hint, BSON("x" << 1));
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedCompoundShardKeyPrefixedByCompoundIndex) {
+    createIndex(
+        BSON("key" << BSON("x" << 1 << "y" << 1) << "name" << "xy" << "v" << kIndexVersion));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << 1 << "y" << 1));
+
+    ASSERT_TRUE(hint);
+    ASSERT_BSONOBJ_EQ(*hint, BSON("x" << 1 << "y" << 1));
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedKeyPrefixOfCompoundIndexHintsThatIndex) {
+    // The shard key '{x: 1}' is a strict prefix of the compound index '{x: 1, y: 1}'. The index
+    // still contains the full shard key, so it covers the shard-filtered count and is chosen.
+    createIndex(
+        BSON("key" << BSON("x" << 1 << "y" << 1) << "name" << "xy" << "v" << kIndexVersion));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << 1));
+
+    ASSERT_TRUE(hint);
+    ASSERT_BSONOBJ_EQ(*hint, BSON("x" << 1 << "y" << 1));
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedMultiKeyOnlyCandidateReturnsNoHint) {
+    // Shard key '{x: 1}' is a prefix of '{x: 1, y: 1}', so that compound index would normally cover
+    // the count. But 'y' is not a shard-key field, so an array value for 'y' is a legal write that
+    // makes the index multikey. A multikey index emits multiple keys per document and would
+    // over-count, so it is rejected and no hint is returned. (The shard-key fields themselves can
+    // never be arrays, so the shard-key prefix is always single-key.)
+    createIndex(
+        BSON("key" << BSON("x" << 1 << "y" << 1) << "name" << "xy" << "v" << kIndexVersion));
+
+    DBDirectClient client(opCtx());
+    client.insert(nss(), BSON("x" << 1 << "y" << BSON_ARRAY(1 << 2)));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << 1));
+
+    ASSERT_FALSE(hint);
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedHashedKeyWithHashedIndexHintsHashedIndex) {
+    createIndex(BSON("key" << BSON("x" << 1) << "name" << "x" << "v" << kIndexVersion));
+    createIndex(
+        BSON("key" << BSON("x" << "hashed") << "name" << "xhashed" << "v" << kIndexVersion));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << "hashed"));
+
+    ASSERT_TRUE(hint);
+    ASSERT_BSONOBJ_EQ(*hint, BSON("x" << "hashed"));
+}
+
+TEST_F(ReshardingDonorCloneCountUtilTest, ShardedHashedKeyWithoutHashedIndexReturnsNoHint) {
+    // The hashed shard-key index was dropped; only a ranged '{x: 1}' index remains. Because the
+    // shard-key prefix test compares values, '{x: 1}' does not match a '{x: "hashed"}' shard key,
+    // so there is no covering index and no hint is returned.
+    createIndex(BSON("key" << BSON("x" << 1) << "name" << "x" << "v" << kIndexVersion));
+
+    auto hint = determineCloneCountHint(opCtx(), coll(), BSON("x" << "hashed"));
+
+    ASSERT_FALSE(hint);
 }
 
 }  // namespace

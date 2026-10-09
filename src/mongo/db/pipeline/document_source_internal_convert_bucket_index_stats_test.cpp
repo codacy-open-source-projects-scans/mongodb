@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_internal_convert_bucket_index_stats.h"
 
@@ -142,6 +116,48 @@ TEST_F(InternalConvertBucketIndexStatsTest, TestGetNextWithMetaField) {
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{spec: {name: 'threeFieldIndex', key: {m: 1, t: 1, "
                                          "metric: 1}}, key: {m: 1, t: 1, metric: 1}}")));
+}
+
+TEST_F(InternalConvertBucketIndexStatsTest, TestGetNextSkipsFailedConversionWithoutPausing) {
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    const auto timeseriesOptions = TimeseriesIndexConversionOptions{"t"};
+    auto convertIndexStatsStage = std::make_unique<exec::agg::InternalConvertBucketIndexStatsStage>(
+        DocumentSourceInternalConvertBucketIndexStats::kStageName, expCtx, timeseriesOptions);
+
+    // First document has a key that cannot be converted to time-series format (will produce an
+    // empty result from makeTimeseriesIndexStats). Second document is a valid index stats entry.
+    auto stage = exec::agg::MockStage::createForTest(
+        {"{spec: {name: 'unconvertibleIndex', key: {a: 1}}}",
+         "{spec: {name: 'validIndex', key: {'control.min.t': 1, 'control.max.t': 1, "
+         "'control.min.metric': 1, 'control.max.metric': 1}}}"},
+        expCtx);
+    exec::agg::MockStage::setSource_forTest(convertIndexStatsStage, stage.get());
+
+    // The unconvertible document should be silently skipped (not returned as PauseExecution).
+    auto next = convertIndexStatsStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    ASSERT_DOCUMENT_EQ(
+        next.getDocument(),
+        Document(fromjson(
+            "{spec: {name: 'validIndex', key: {t: 1, metric: 1}}, key: {t: 1, metric: 1}}")));
+
+    // Should be EOF now.
+    ASSERT_TRUE(convertIndexStatsStage->getNext().isEOF());
+}
+
+TEST_F(InternalConvertBucketIndexStatsTest, TestGetNextSkipsAllFailedConversions) {
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    const auto timeseriesOptions = TimeseriesIndexConversionOptions{"t"};
+    auto convertIndexStatsStage = std::make_unique<exec::agg::InternalConvertBucketIndexStatsStage>(
+        DocumentSourceInternalConvertBucketIndexStats::kStageName, expCtx, timeseriesOptions);
+
+    // All documents fail conversion.
+    auto stage = exec::agg::MockStage::createForTest(
+        {"{spec: {name: 'idx1', key: {a: 1}}}", "{spec: {name: 'idx2', key: {b: 1}}}"}, expCtx);
+    exec::agg::MockStage::setSource_forTest(convertIndexStatsStage, stage.get());
+
+    // Should skip both unconvertible documents and return EOF.
+    ASSERT_TRUE(convertIndexStatsStage->getNext().isEOF());
 }
 
 }  // namespace

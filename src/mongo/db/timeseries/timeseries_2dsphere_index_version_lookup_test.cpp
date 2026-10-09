@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/timeseries_2dsphere_index_version_lookup.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/index_names.h"
@@ -42,20 +15,22 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <optional>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /** Builds a minimal ready index spec for a 2dsphere_bucket index on 'bucketKeyPath' (e.g.
  * data.loc). */
-BSONObj make2dsphereBucketIndexSpec(StringData indexName,
-                                    StringData bucketKeyPath,
+BSONObj make2dsphereBucketIndexSpec(std::string_view indexName,
+                                    std::string_view bucketKeyPath,
                                     BSONObj extraFields = {}) {
     BSONObjBuilder bob;
     bob.append("v", 2);
@@ -134,7 +109,7 @@ protected:
     }
 
 private:
-    std::optional<RAIIServerParameterControllerForTest> _enableV4;
+    std::optional<unittest::ServerParameterGuard> _enableV4;
     std::optional<multiversion::FeatureCompatibilityVersion> _fcvBefore;
 };
 
@@ -145,7 +120,7 @@ TEST_F(Build2dsphereIndexVersionMapTest, EmptyCatalogReturnsEmptyMap) {
 
 TEST_F(Build2dsphereIndexVersionMapTest, MapsDataFieldToVersion) {
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "loc_2dsphere", "data.loc"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
+        "loc_2dsphere", "data.loc"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
 
     auto m = timeseries::build2dsphereIndexVersionMap(collection());
     ASSERT_EQ(m.size(), 1U);
@@ -156,7 +131,7 @@ TEST_F(Build2dsphereIndexVersionMapTest, MapsDataFieldToVersion) {
 
 TEST_F(Build2dsphereIndexVersionMapTest, StripsDataPrefixForNestedPath) {
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "geo_2dsphere", "data.geo.sub"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
+        "geo_2dsphere", "data.geo.sub"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
 
     auto m = timeseries::build2dsphereIndexVersionMap(collection());
     ASSERT_EQ(m.size(), 1U);
@@ -179,9 +154,9 @@ TEST_F(Build2dsphereIndexVersionMapTest, CompoundIndexMapsOnly2dsphereBucketFiel
 
 TEST_F(Build2dsphereIndexVersionMapTest, MultipleIndexesAccumulateDistinctFields) {
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "a_geo", "data.a"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
+        "a_geo", "data.a"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "b_geo", "data.b"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
+        "b_geo", "data.b"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
 
     auto m = timeseries::build2dsphereIndexVersionMap(collection());
     ASSERT_EQ(m.size(), 2U);
@@ -201,7 +176,7 @@ TEST_F(Build2dsphereIndexVersionMapTest, Non2dsphereBucketKeySkipped) {
 TEST_F(Build2dsphereIndexVersionMapTest, KeyNotUnderDataPrefixSkipped) {
     // Path must be "data.<userField>" for the map; a root-level geo field is ignored here.
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "root_geo", "loc"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
+        "root_geo", "loc"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 3)));
 
     auto m = timeseries::build2dsphereIndexVersionMap(collection());
     ASSERT(m.empty());
@@ -209,7 +184,7 @@ TEST_F(Build2dsphereIndexVersionMapTest, KeyNotUnderDataPrefixSkipped) {
 
 TEST_F(Build2dsphereIndexVersionMapV4Test, MapsDataFieldToVersion4) {
     createIndexAssertOk(make2dsphereBucketIndexSpec(
-        "loc_2dsphere_v4", "data.loc"_sd, BSON(IndexDescriptor::k2dsphereVersionFieldName << 4)));
+        "loc_2dsphere_v4", "data.loc"sv, BSON(IndexDescriptor::k2dsphereVersionFieldName << 4)));
 
     auto m = timeseries::build2dsphereIndexVersionMap(collection());
     ASSERT_EQ(m.size(), 1U);

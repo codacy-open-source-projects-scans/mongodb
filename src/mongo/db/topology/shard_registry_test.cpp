@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
@@ -589,6 +563,107 @@ TEST_F(ShardRegistryTest, RemovedShardIsDroppedFromRegistry) {
     auto data = getData();
     ASSERT(data->findShard(ShardId("shard0")));
     ASSERT(!data->findShard(ShardId("extraShard"))) << "Removed shard should not be in ID lookup";
+}
+
+TEST_F(ShardRegistryTest, UserShardInputResolutionSeparatesIdAndAlternateLookups) {
+    const ShardId shardId("shard0");
+    addShard(shardId, kAdvanceTopologyTime);
+
+    {
+        auto future = launchAsync([this] { getData(); });
+        expectCSRSLookup();
+        future.default_timed_get();
+    }
+
+    const auto shardType = shardIdToShardType(shardId);
+    const auto connString = uassertStatusOK(ConnectionString::parse(shardType.getHost()));
+    const auto hostAndPort = connString.getServers().front();
+    const ShardId connStringId(connString.toString());
+    const ShardId hostAndPortId(hostAndPort.toString());
+
+    auto data = getData();
+    ASSERT(data->findShard(shardId));
+    ASSERT(!data->findShard(connStringId));
+    ASSERT(!data->findShard(hostAndPortId));
+
+    ASSERT_EQ(shardId, data->findShard(shardId, true)->getId());
+    ASSERT_EQ(shardId, data->findShard(connStringId, true)->getId());
+    ASSERT_EQ(shardId, data->findShard(hostAndPortId, true)->getId());
+
+    auto* opCtx = operationContext();
+    ASSERT_EQ(shardId, unittest::assertGet(shardRegistry()->getShard(opCtx, shardId))->getId());
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->getShard(opCtx, shardId, true))->getId());
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->getShard(opCtx, connStringId, true))->getId());
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->getShard(opCtx, hostAndPortId, true))->getId());
+}
+
+TEST_F(ShardRegistryTest, GetShardIdAcceptsShardId) {
+    const ShardId shardId("shard0");
+    addShard(shardId, kAdvanceTopologyTime);
+    reloadAndWait();
+
+    auto* opCtx = operationContext();
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->resolveShardId(
+                  opCtx, shardId, false /* allowNonShardIdIdentifiers */)));
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->resolveShardId(
+                  opCtx, shardId, true /* allowNonShardIdIdentifiers */)));
+}
+
+TEST_F(ShardRegistryTest, GetShardIdRejectsUnknownIdentifier) {
+    const ShardId shardId("shard0");
+    addShard(shardId, kAdvanceTopologyTime);
+    reloadAndWait();
+
+    auto* opCtx = operationContext();
+    const ShardId unknownShard("unknown");
+
+    auto future = launchAsync([this, opCtx, unknownShard] {
+        ASSERT_EQ(ErrorCodes::ShardNotFound,
+                  shardRegistry()
+                      ->resolveShardId(opCtx, unknownShard, false /* allowNonShardIdIdentifiers */)
+                      .getStatus());
+    });
+    expectCSRSLookup();
+    future.default_timed_get();
+
+    future = launchAsync([this, opCtx, unknownShard] {
+        ASSERT_EQ(ErrorCodes::ShardNotFound,
+                  shardRegistry()
+                      ->resolveShardId(opCtx, unknownShard, true /* allowNonShardIdIdentifiers */)
+                      .getStatus());
+    });
+    expectCSRSLookup();
+    future.default_timed_get();
+}
+
+TEST_F(ShardRegistryTest, GetShardIdAllowsAlternateIdentifiers) {
+    const ShardId shardId("shard0");
+    addShard(shardId, kAdvanceTopologyTime);
+    reloadAndWait();
+
+    const auto shardType = shardIdToShardType(shardId);
+    const auto connString = uassertStatusOK(ConnectionString::parse(shardType.getHost()));
+    const auto hostAndPort = connString.getServers().front();
+    const ShardId hostAndPortId(hostAndPort.toString());
+
+    auto* opCtx = operationContext();
+    ASSERT_EQ(shardId,
+              unittest::assertGet(shardRegistry()->resolveShardId(
+                  opCtx, hostAndPortId, true /* allowNonShardIdIdentifiers */)));
+
+    auto future = launchAsync([this, opCtx, hostAndPortId] {
+        ASSERT_EQ(ErrorCodes::ShardNotFound,
+                  shardRegistry()
+                      ->resolveShardId(opCtx, hostAndPortId, false /* allowNonShardIdIdentifiers */)
+                      .getStatus());
+    });
+    expectCSRSLookup();
+    future.default_timed_get();
 }
 
 // When a shard is removed from config.shards, _tearDownRemovedShards should erase its RS from

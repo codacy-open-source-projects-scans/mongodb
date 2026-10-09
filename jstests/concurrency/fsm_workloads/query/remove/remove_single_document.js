@@ -3,13 +3,15 @@
  *
  * Repeatedly remove a document from the collection.
  *
- * @tags: [assumes_balancer_off]
+ * @tags: [assumes_balancer_off, requires_getmore]
  */
 export const $config = (function () {
     let states = {
         remove: function remove(db, collName) {
             // try removing a random document
-            let res = assert.commandWorked(this.doRemove(db, collName, {rand: {$gte: Random.rand()}}, {justOne: true}));
+            let res = assert.commandWorked(
+                this.doRemove(db, collName, {rand: {$gte: Random.rand()}}, {justOne: true}),
+            );
 
             assert.lte(res.nRemoved, 1, res);
             if (res.nRemoved === 0) {

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/basic_types_gen.h"
@@ -52,6 +25,7 @@
 
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -66,6 +40,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 long long adjustCappedMaxDocs(long long cappedMaxDocs) {
     if (cappedMaxDocs <= 0 || cappedMaxDocs == std::numeric_limits<long long>::max()) {
@@ -84,11 +59,11 @@ void setEncryptedDefaultEncryptedCollectionNames(const NamespaceString& ns,
     auto prefix = std::string("enxcol_.") + std::string{ns.coll()};
 
     if (!config->getEscCollection()) {
-        config->setEscCollection(StringData(prefix + ".esc"));
+        config->setEscCollection(std::string_view(prefix + ".esc"));
     }
 
     if (!config->getEcocCollection()) {
-        config->setEcocCollection(StringData(prefix + ".ecoc"));
+        config->setEcocCollection(std::string_view(prefix + ".ecoc"));
     }
 }
 
@@ -125,7 +100,7 @@ Status CollectionOptions::validateForStorage() const {
     return CollectionOptions::parse(toBSON(), ParseKind::parseForStorage).getStatus();
 }
 
-static constexpr auto kAutoIndexIdFieldName = "autoIndexId"_sd;
+static constexpr auto kAutoIndexIdFieldName = "autoIndexId"sv;
 
 StatusWith<CollectionOptions> CollectionOptions::parse(const BSONObj& options, ParseKind kind) {
     CollectionOptions collectionOptions;
@@ -146,7 +121,7 @@ StatusWith<CollectionOptions> CollectionOptions::parse(const BSONObj& options, P
 
     while (i.more()) {
         BSONElement e = i.next();
-        StringData fieldName = e.fieldName();
+        std::string_view fieldName = e.fieldName();
 
         if (fieldName == "uuid" && kind == parseForStorage) {
             auto res = UUID::parse(e);
@@ -252,6 +227,12 @@ StatusWith<CollectionOptions> CollectionOptions::parse(const BSONObj& options, P
             } catch (const DBException& exc) {
                 return exc.toStatus();
             }
+        } else if (fieldName == "prepareConstraintValidationLevel") {
+            if (e.type() != BSONType::boolean) {
+                return Status(ErrorCodes::BadValue,
+                              "'prepareConstraintValidationLevel' has to be a boolean.");
+            }
+            collectionOptions.prepareConstraintValidationLevel = e.boolean();
         } else if (fieldName == "collation") {
             if (e.type() != BSONType::object) {
                 return Status(ErrorCodes::BadValue, "'collation' has to be a document.");
@@ -422,6 +403,10 @@ CollectionOptions CollectionOptions::fromCreateCommand(OperationContext* opCtx,
                 "featureFlagCreateSupportsStorageTierOptions enabled",
                 gFeatureFlagCreateSupportsStorageTierOptions.isEnabled(
                     VersionContext::getDecoration(opCtx)));
+        uassert(ErrorCodes::InvalidOptions,
+                "Cold collections are not available in this deployment.",
+                storageTier->getCollection() != StorageTierLevelEnum::cold ||
+                    gFeatureFlagColdCollectionsRollout.isEnabled());
 
         // Only set `storage_tier` upon creation when the collection is cold (hot is the default)
         if (storageTier->getCollection() == StorageTierLevelEnum::cold) {
@@ -453,7 +438,7 @@ void CollectionOptions::appendBSON(BSONObjBuilder* builder,
         builder->appendElements(uuid->toBSON());
     }
 
-    auto shouldAppend = [&](StringData option) {
+    auto shouldAppend = [&](std::string_view option) {
         return includeFields.empty() || includeFields.contains(option);
     };
 
@@ -497,6 +482,10 @@ void CollectionOptions::appendBSON(BSONObjBuilder* builder,
     if (validationAction && shouldAppend(CreateCommand::kValidationActionFieldName)) {
         builder->append(CreateCommand::kValidationActionFieldName,
                         idl::serialize(*validationAction));
+    }
+
+    if (prepareConstraintValidationLevel && shouldAppend("prepareConstraintValidationLevel")) {
+        builder->appendBool("prepareConstraintValidationLevel", true);
     }
 
     if (!collation.isEmpty() && shouldAppend(CreateCommand::kCollationFieldName)) {
@@ -584,6 +573,10 @@ bool CollectionOptions::matchesStorageOptions(const CollectionOptions& other,
         return false;
     }
 
+    if (prepareConstraintValidationLevel != other.prepareConstraintValidationLevel) {
+        return false;
+    }
+
     // Note: the server can add more stuff on the collation options that were not specified in
     // the original user request. Use the collator to check for equivalence.
     auto myCollator =
@@ -632,7 +625,7 @@ bool CollectionOptions::matchesStorageOptions(const CollectionOptions& other,
 namespace {
 Status validateIsNotInDbs(const NamespaceString& ns,
                           const std::vector<DatabaseName>& disallowedDbs,
-                          StringData optionName) {
+                          std::string_view optionName) {
     if (std::find(disallowedDbs.begin(), disallowedDbs.end(), ns.dbName()) != disallowedDbs.end()) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << optionName << " collection option is not supported on the "

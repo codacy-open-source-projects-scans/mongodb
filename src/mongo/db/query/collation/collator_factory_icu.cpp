@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/collation/collator_factory_icu.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/basic_types_gen.h"
@@ -43,6 +16,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <unicode/coll.h>
@@ -56,8 +30,9 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr StringData kFallbackLocaleName = "root"_sd;
+constexpr std::string_view kFallbackLocaleName = "root"sv;
 
 // Helper methods for converting between ICU attributes and types used by Collation.
 
@@ -423,7 +398,7 @@ Status updateCollationSpecFromICUCollator(const BSONObj& spec,
     }
 
     if (!collation->getVersion()) {
-        collation->setVersion(StringData(U_ICU_VERSION));
+        collation->setVersion(std::string_view(U_ICU_VERSION));
     } else {
         if (U_ICU_VERSION != *collation->getVersion()) {
             return {ErrorCodes::IncompatibleCollationVersion,
@@ -437,7 +412,9 @@ Status updateCollationSpecFromICUCollator(const BSONObj& spec,
 }
 
 // Returns a non-OK status if any part of the locale ID is invalid or not recognized by ICU.
-Status validateLocaleID(const BSONObj& spec, StringData originalID, const icu::Collator& collator) {
+Status validateLocaleID(const BSONObj& spec,
+                        std::string_view originalID,
+                        const icu::Collator& collator) {
     UErrorCode status = U_ZERO_ERROR;
     icu::Locale collatorLocale = collator.getLocale(ULOC_VALID_LOCALE, status);
     if (U_FAILURE(status)) {
@@ -460,7 +437,7 @@ Status validateLocaleID(const BSONObj& spec, StringData originalID, const icu::C
     // resulting icu::Locale name will not match the requested locale. In this case we return an
     // error to the user. In the error message to the user, we report the locale that ICU *would
     // have* used, which the application can supply as an alternative.
-    auto collatorLocaleName = StringData(collatorLocale.getName());
+    auto collatorLocaleName = std::string_view(collatorLocale.getName());
     if (originalID != collatorLocaleName) {
         str::stream ss;
         ss << "Field '" << Collation::kLocaleFieldName << "' is invalid in: " << spec;

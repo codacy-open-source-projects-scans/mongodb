@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -66,11 +39,12 @@
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
 
 #include <initializer_list>
@@ -202,6 +176,11 @@ protected:
         auto commonMetadata = CommonReshardingMetadata(
             UUID::gen(), sourceNss, sourceUUID, tempReshardingNss, reshardingKey);
 
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        commonMetadata.setForwardableOpMetadata(std::move(fom));
+
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         return doc;
     }
@@ -219,6 +198,11 @@ protected:
         auto sourceUUID = UUID::gen();
         auto commonMetadata = CommonReshardingMetadata(
             UUID::gen(), sourceNss, sourceUUID, kTemporaryReshardingNss, kReshardingKeyPattern);
+
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        commonMetadata.setForwardableOpMetadata(std::move(fom));
 
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
 
@@ -345,7 +329,7 @@ protected:
             boost::none /* databaseVersion */};
 
         CollectionShardingRuntime::acquireExclusive(opCtx, sourceNss)
-            ->setFilteringMetadata_nonAuthoritative(opCtx, metadata);
+            ->setCollectionMetadata(opCtx, metadata);
     }
 
 private:
@@ -439,13 +423,10 @@ public:
     }
 
     void tearDown() override {
+        _primaryOnlyServiceRegistry->onStepDown();
         WaitForMajorityService::get(getServiceContext()).shutDown();
-
         shutdownExecutorPool();
-
         _primaryOnlyServiceRegistry->onShutdown();
-
-        Grid::get(operationContext())->clearForUnitTests();
 
         ShardServerTestFixtureWithCatalogCacheMock::tearDown();
     }
@@ -475,6 +456,18 @@ public:
         boost::optional<DonorFieldsValidator> fieldsValidator = boost::none) {
         ASSERT(!expectDonorStateMachine || fieldsValidator.has_value());
         OperationContext* opCtx = operationContext();
+
+        // (Generic FCV reference): This exercises the refresh path, which only occurs at
+        // FCV 8.0, 8.3, or while upgrading from those to latest. The refresh code paths call
+        // getVersionContextOrDefault(), which requires the global FCV to be kLastContinuous or
+        // kLastLTS (or upgrading from those) when there is no forwardable op metadata — as is the
+        // case for all refresh code paths.
+        //
+        // TODO (SERVER-99655): Remove once lastLTS is 9.0 and getVersionContextOrDefault() is
+        // updated to always expect a pinned FCV in the forwardable op metadata. One approach:
+        // remove the feature flag checks in the refresh path that call
+        // getVersionContextOrDefault(), since those flags will always be enabled.
+        serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastContinuous);
 
         auto temporaryCollMetadata =
             makeShardedMetadataForOriginalCollection(opCtx, shardThatChunkExistsOn, primaryShard);
@@ -518,6 +511,18 @@ public:
         ASSERT(!expectRecipientStateMachine || fieldsValidator.has_value());
         OperationContext* opCtx = operationContext();
 
+        // (Generic FCV reference): This exercises the refresh path, which only occurs at
+        // FCV 8.0, 8.3, or while upgrading from those to latest. The refresh code paths call
+        // getVersionContextOrDefault(), which requires the global FCV to be kLastContinuous or
+        // kLastLTS (or upgrading from those) when there is no forwardable op metadata — as is the
+        // case for all refresh code paths.
+        //
+        // TODO (SERVER-99655): Remove once lastLTS is 9.0 and getVersionContextOrDefault() is
+        // updated to always expect a pinned FCV in the forwardable op metadata. One approach:
+        // remove the feature flag checks in the refresh path that call
+        // getVersionContextOrDefault(), since those flags will always be enabled.
+        serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastContinuous);
+
         auto originalCollMetadata =
             makeShardedMetadataForOriginalCollection(opCtx, shardThatChunkExistsOn, primaryShard);
 
@@ -557,37 +562,30 @@ public:
             resharding::processReshardingFieldsForCollection(
                 opCtx, kTemporaryReshardingNss, temporaryCollMetadata, reshardingFields);
 
-            auto driveCloneNoRefresh =
-                resharding::gFeatureFlagReshardingCloneNoRefresh.isEnabledAndIgnoreFCVUnsafe();
-            if (driveCloneNoRefresh) {
+            bool noChunksToCopy = shardThatChunkExistsOn != kThisShard.getShardId();
+            while (true) {
                 auto recipientDoc = getPersistedRecipientDocument(opCtx, kReshardingUUID);
-                ASSERT(!recipientDoc.getCloneTimestamp());
-            } else {
-                bool noChunksToCopy = shardThatChunkExistsOn != kThisShard.getShardId();
-                while (true) {
-                    auto recipientDoc = getPersistedRecipientDocument(opCtx, kReshardingUUID);
-                    fieldsValidator->validate(recipientDoc);
-                    if (!recipientDoc.getCloneTimestamp()) {
-                        opCtx->sleepFor(Milliseconds{10});
-                        continue;
-                    }
-                    auto metrics = recipientDoc.getMetrics();
-                    ASSERT_EQ(*metrics->getApproxBytesToCopy(),
-                              noChunksToCopy ? 0 : _approxBytesToCopy);
-                    ASSERT_EQ(*metrics->getApproxDocumentsToCopy(),
-                              noChunksToCopy ? 0 : _approxDocumentsToCopy);
-                    break;
+                fieldsValidator->validate(recipientDoc);
+                if (!recipientDoc.getCloneTimestamp()) {
+                    opCtx->sleepFor(Milliseconds{10});
+                    continue;
                 }
-                // Schedule a dummy response to the find command against config.shards from the
-                // shard registry to avoid a hang.
-                onCommand([&](const executor::RemoteCommandRequest& request) {
-                    ASSERT_EQ(request.dbname, DatabaseName::kConfig);
-                    auto firstElement = request.cmdObj.firstElement();
-                    ASSERT_EQ(firstElement.fieldNameStringData(), "find");
-                    ASSERT_EQ(firstElement.str(), "shards");
-                    return BSONObj();
-                });
+                auto metrics = recipientDoc.getMetrics();
+                ASSERT_EQ(*metrics->getApproxBytesToCopy(),
+                          noChunksToCopy ? 0 : _approxBytesToCopy);
+                ASSERT_EQ(*metrics->getApproxDocumentsToCopy(),
+                          noChunksToCopy ? 0 : _approxDocumentsToCopy);
+                break;
             }
+            // Schedule a dummy response to the find command against config.shards from the
+            // shard registry to avoid a hang.
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                ASSERT_EQ(request.dbname, DatabaseName::kConfig);
+                auto firstElement = request.cmdObj.firstElement();
+                ASSERT_EQ(firstElement.fieldNameStringData(), "find");
+                ASSERT_EQ(firstElement.str(), "shards");
+                return BSONObj();
+            });
         } else {
             ASSERT(recipientStateMachine == boost::none);
         }
@@ -677,8 +675,10 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ConstructDonorDocumentFromRe
                   "performVerification"_attr = performVerification,
                   "enableVerification"_attr = enableVerification);
 
-            RAIIServerParameterControllerForTest verificationFeatureFlagController(
+            unittest::ServerParameterGuard verificationFeatureFlagController(
                 "featureFlagReshardingVerification", enableVerification);
+            unittest::ServerParameterGuard documentVerificationController(
+                "reshardingDocumentVerification", true);
 
             auto reshardingFields = createCommonReshardingFields(
                 kReshardingUUID, CoordinatorStateEnum::kPreparingToDonate);
@@ -721,8 +721,10 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest,
                   "performVerification"_attr = performVerification,
                   "enableVerification"_attr = enableVerification);
 
-            RAIIServerParameterControllerForTest verificationFeatureFlagController(
+            unittest::ServerParameterGuard verificationFeatureFlagController(
                 "featureFlagReshardingVerification", enableVerification);
+            unittest::ServerParameterGuard documentVerificationController(
+                "reshardingDocumentVerification", true);
 
             auto reshardingFields = createCommonReshardingFields(
                 kReshardingUUID, CoordinatorStateEnum::kPreparingToDonate);
@@ -771,8 +773,6 @@ TEST_F(ReshardingDonorRecipientCommonTest, CreateDonorServiceInstance) {
                                                  ReshardingDonorDocument>(opCtx, kReshardingUUID);
 
     ASSERT(donorStateMachine != boost::none);
-
-    donorStateMachine.value()->interrupt({ErrorCodes::InternalError, "Shut down for test"});
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest, CreateRecipientServiceInstance) {
@@ -798,8 +798,6 @@ TEST_F(ReshardingDonorRecipientCommonTest, CreateRecipientServiceInstance) {
                                                                               kReshardingUUID);
 
     ASSERT(recipientStateMachine != boost::none);
-
-    recipientStateMachine.value()->interrupt({ErrorCodes::InternalError, "Shut down for test"});
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest,
@@ -869,7 +867,7 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessDonorFieldsPerformVerificationUnspecified_FeatureFlagEnabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", true);
     auto performVerification = boost::none;
 
@@ -882,7 +880,7 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessDonorFieldsPerformVerificationUnspecified_FeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", false);
     auto performVerification = boost::none;
 
@@ -904,21 +902,8 @@ TEST_F(ReshardingDonorRecipientCommonTest, ProcessDonorFieldsNotPerformVerificat
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest,
-       ProcessDonorFieldsPerformVerification_FeatureFlagEnabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
-        "featureFlagReshardingVerification", true);
-    bool performVerification = true;
-
-    testProcessDonorFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
-                           kOtherShard.getShardId() /* primaryShard */,
-                           performVerification,
-                           true /* expectDonorStateMachine */,
-                           DonorFieldsValidator{.performVerification = performVerification});
-}
-
-TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessDonorFieldsPerformVerification_FeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", false);
     bool performVerification = true;
 
@@ -932,6 +917,8 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsWhenShardOwnsChunks_StoreOplogFetcherProgress) {
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
     // Not set featureFlagReshardingStoreOplogFetcherProgress to verify that it defaults to true.
 
     testProcessRecipientFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
@@ -943,7 +930,9 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsWhenShardOwnsChunks_NotStoreOplogFetcherProgress) {
-    RAIIServerParameterControllerForTest storeOplogFetcherProgressFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard storeOplogFetcherProgressFeatureFlagController(
         "featureFlagReshardingStoreOplogFetcherProgress", false);
 
     testProcessRecipientFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
@@ -963,23 +952,12 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(
     ReshardingDonorRecipientCommonTest,
-    ProcessRecipientFieldsWhenShardDoesNotOwnAnyChunks_PrimaryShard_SkipCloningAndApplyIfApplicable) {
-    RAIIServerParameterControllerForTest skipCloningFeatureFlagController(
-        "featureFlagReshardingSkipCloningIfApplicable", false);
-
-    testProcessRecipientFields(kOtherShard.getShardId() /* shardThatChunkExistsOn*/,
-                               kThisShard.getShardId() /* primaryShard */,
-                               boost::none /* performVerification */,
-                               true /* expectRecipientStateMachine */,
-                               RecipientFieldsValidator{.skipCloningAndApplying = true});
-}
-
-TEST_F(
-    ReshardingDonorRecipientCommonTest,
     ProcessRecipientFieldsWhenShardDoesNotOwnAnyChunks_PrimaryShard_NotSkipCloningAndApplyIfApplicable) {
-    RAIIServerParameterControllerForTest skipCloningAndApplyingFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard skipCloningAndApplyingFeatureFlagController(
         "featureFlagReshardingSkipCloningAndApplyingIfApplicable", false);
-    RAIIServerParameterControllerForTest skipCloningFeatureFlagController(
+    unittest::ServerParameterGuard skipCloningFeatureFlagController(
         "featureFlagReshardingSkipCloningIfApplicable", false);
 
     testProcessRecipientFields(kOtherShard.getShardId() /* shardThatChunkExistsOn*/,
@@ -991,9 +969,11 @@ TEST_F(
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsWhenShardDoesNotOwnAnyChunks_PrimaryShard_SkipCloningIfApplicable) {
-    RAIIServerParameterControllerForTest skipCloningAndApplyingFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard skipCloningAndApplyingFeatureFlagController(
         "featureFlagReshardingSkipCloningAndApplyingIfApplicable", false);
-    RAIIServerParameterControllerForTest skipCloningFeatureFlagController(
+    unittest::ServerParameterGuard skipCloningFeatureFlagController(
         "featureFlagReshardingSkipCloningIfApplicable", true);
 
     testProcessRecipientFields(kOtherShard.getShardId() /* shardThatChunkExistsOn*/,
@@ -1005,9 +985,11 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsWhenShardDoesNotOwnAnyChunks_PrimaryShard_NotSkipCloningIfApplicable) {
-    RAIIServerParameterControllerForTest skipCloningAndApplyingFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard skipCloningAndApplyingFeatureFlagController(
         "featureFlagReshardingSkipCloningAndApplyingIfApplicable", false);
-    RAIIServerParameterControllerForTest skipCloningFeatureFlagController(
+    unittest::ServerParameterGuard skipCloningFeatureFlagController(
         "featureFlagReshardingSkipCloningIfApplicable", false);
 
     testProcessRecipientFields(kOtherShard.getShardId() /* shardThatChunkExistsOn*/,
@@ -1019,7 +1001,9 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsPerformVerificationUnspecified_FeatureFlagEnabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", true);
     boost::optional<bool> performVerification = boost::none;
 
@@ -1032,7 +1016,9 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 
 TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsPerformVerificationUnspecified_FeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", false);
     auto performVerification = boost::none;
 
@@ -1044,6 +1030,8 @@ TEST_F(ReshardingDonorRecipientCommonTest,
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest, ProcessRecipientFieldsNotPerformVerification) {
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
+
     bool performVerification = false;
 
     testProcessRecipientFields(
@@ -1055,22 +1043,8 @@ TEST_F(ReshardingDonorRecipientCommonTest, ProcessRecipientFieldsNotPerformVerif
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest,
-       ProcessRecipientFieldsPerformVerification_FeatureFlagEnabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
-        "featureFlagReshardingVerification", true);
-    bool performVerification = true;
-
-    testProcessRecipientFields(
-        kThisShard.getShardId() /* shardThatChunkExistsOn*/,
-        kOtherShard.getShardId() /* primaryShard */,
-        performVerification,
-        true /* expectRecipientStateMachine */,
-        RecipientFieldsValidator{.performVerification = performVerification});
-}
-
-TEST_F(ReshardingDonorRecipientCommonTest,
        ProcessRecipientFieldsPerformVerification_FeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest verificationFeatureFlagController(
+    unittest::ServerParameterGuard verificationFeatureFlagController(
         "featureFlagReshardingVerification", false);
     bool performVerification = true;
 
@@ -1126,7 +1100,7 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ClearReshardingFilteringMeta
 
         // Prior to adding a resharding document, assert that attempting to clear filtering does
         // nothing.
-        resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+        resharding::clearCollectionMetadata(opCtx, scheduleAsyncRefresh);
 
         for (auto const& nss : {kOriginalNss, kTemporaryReshardingNss}) {
             const auto csr = CollectionShardingRuntime::acquireShared(opCtx, nss);
@@ -1144,7 +1118,7 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ClearReshardingFilteringMeta
     ReshardingDonorService::DonorStateMachine::insertStateDocument(opCtx, donorDoc);
 
     // Clear the filtering metadata (without scheduling a refresh) and assert the metadata is gone.
-    resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+    resharding::clearCollectionMetadata(opCtx, scheduleAsyncRefresh);
 
     for (auto const& nss : {kOriginalNss, kTemporaryReshardingNss}) {
         const auto csr = CollectionShardingRuntime::acquireShared(opCtx, nss);
@@ -1157,7 +1131,7 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ClearReshardingFilteringMeta
     ReshardingRecipientService::RecipientStateMachine::insertStateDocument(opCtx, recipDoc);
 
     // Clear the filtering metadata (without scheduling a refresh) and assert the metadata is gone.
-    resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
+    resharding::clearCollectionMetadata(opCtx, scheduleAsyncRefresh);
 
     for (auto const& nss : {kOriginalNss, kTemporaryReshardingNss}) {
         const auto csr = CollectionShardingRuntime::acquireShared(opCtx, nss);
@@ -1193,7 +1167,7 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ClearReshardingFilteringMeta
 
     // Clear the filtering metadata (without scheduling a refresh) for only on single operation
     // related namespaces
-    resharding::clearFilteringMetadata(opCtx, {sourceNss1, tempReshardingNss1}, false);
+    resharding::clearCollectionMetadata(opCtx, {sourceNss1, tempReshardingNss1}, false);
 
     for (auto const& nss : {sourceNss1, tempReshardingNss1}) {
         const auto csr = CollectionShardingRuntime::acquireShared(opCtx, nss);
@@ -1208,25 +1182,7 @@ TEST_F(ReshardingDonorRecipientCommonInternalsTest, ClearReshardingFilteringMeta
 }
 
 TEST_F(ReshardingDonorRecipientCommonTest, ProcessRecipientFieldsForCloningNoRefresh) {
-    testProcessRecipientFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
-                               kThisShard.getShardId() /* primaryShard */,
-                               boost::none /* performVerification */,
-                               true /* expectRecipientStateMachine */,
-                               RecipientFieldsValidator{});
-}
-
-TEST_F(ReshardingDonorRecipientCommonTest, ProcessDonorFieldsRefreshCreatesEvenWithInitNoRefresh) {
-    testProcessDonorFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
-                           kOtherShard.getShardId() /* primaryShard */,
-                           boost::none /* performVerification */,
-                           true /* expectDonorStateMachine */,
-                           DonorFieldsValidator{});
-}
-
-TEST_F(ReshardingDonorRecipientCommonTest,
-       ProcessRecipientFieldsRefreshCreatesEvenWithInitNoRefresh) {
-    RAIIServerParameterControllerForTest initNoRefreshController(
-        "featureFlagReshardingInitNoRefresh", true);
+    GTEST_SKIP() << "Test doesn't support FCV 9.1. Remove/review (TODO: SERVER-132935)";
 
     testProcessRecipientFields(kThisShard.getShardId() /* shardThatChunkExistsOn*/,
                                kThisShard.getShardId() /* primaryShard */,
@@ -1261,6 +1217,46 @@ TEST_F(ReshardingDonorRecipientCommonTest,
                                                   ReshardingRecipientService::RecipientStateMachine,
                                                   ReshardingRecipientDocument>(
             opCtx, recipDoc, false)));
+}
+
+TEST_F(ReshardingDonorRecipientCommonTest,
+       GetOrRecoverReshardingStateMachineReconstructsOrphanedStateDocument) {
+    // Prevent the PrimaryOnlyService stepUp rebuild from constructing an instance for the persisted
+    // document, leaving it orphaned (a document on disk with no in-memory state machine).
+    FailPointEnableBlock skipRebuild("PrimaryOnlyServiceSkipRebuildingInstances");
+
+    OperationContext* opCtx = operationContext();
+    ReshardingRecipientDocument recipientDoc = makeRecipientStateDoc();
+    const auto reshardingUUID = recipientDoc.getReshardingUUID();
+    ReshardingRecipientService::RecipientStateMachine::insertStateDocument(opCtx, recipientDoc);
+
+    auto inMemoryInstance =
+        resharding::tryGetReshardingStateMachine<ReshardingRecipientService,
+                                                 ReshardingRecipientService::RecipientStateMachine,
+                                                 ReshardingRecipientDocument>(opCtx,
+                                                                              reshardingUUID);
+    ASSERT(inMemoryInstance == boost::none);
+
+    auto recoveredStateMachine = resharding::getOrRecoverReshardingStateMachine<
+        ReshardingRecipientService,
+        ReshardingRecipientService::RecipientStateMachine,
+        ReshardingRecipientDocument>(
+        opCtx, NamespaceString::kRecipientReshardingOperationsNamespace, reshardingUUID);
+
+    ASSERT(recoveredStateMachine != boost::none);
+}
+
+TEST_F(ReshardingDonorRecipientCommonTest,
+       GetOrRecoverReshardingStateMachineReturnsNoneWhenNoStateDocument) {
+    OperationContext* opCtx = operationContext();
+
+    auto recipientStateMachine = resharding::getOrRecoverReshardingStateMachine<
+        ReshardingRecipientService,
+        ReshardingRecipientService::RecipientStateMachine,
+        ReshardingRecipientDocument>(
+        opCtx, NamespaceString::kRecipientReshardingOperationsNamespace, UUID::gen());
+
+    ASSERT(recipientStateMachine == boost::none);
 }
 
 }  // namespace

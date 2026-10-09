@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/init.h"
 #include "mongo/config.h"
+#include "mongo/crypto/crypto_parameters_openssl_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
@@ -44,7 +19,10 @@
 #include <openssl/ssl.h>
 
 #if OPENSSL_VERSION_NUMBER > 0x30000000L
+#include <openssl/core_names.h>
+#include <openssl/params.h>
 #include <openssl/provider.h>
+#include <openssl/rand.h>
 #endif
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
@@ -221,7 +199,39 @@ MONGO_INITIALIZER_GENERAL(SetupOpenSSL, ("default"), ("CryptographyInitialized")
 
     if (sslGlobalParams.sslFIPSMode) {
         setupFIPS();
+    } else {
+#if OPENSSL_VERSION_NUMBER > 0x30000000L
+        // When the OpenSSL 3 FIPS provider is disabled, OpenSSL uses a primary DRBG
+        // to seed per-thread DRBGs. The primary DRBG relies on the system entropy source for
+        // seeding and reseeding. In highly concurrent environments where many threads are
+        // being spawned at once, the primary DRBG will receive many generate requests to
+        // seed all the new threads. Both the reseed request and
+        // the time intervals can be tuned via startup server parameters in response to
+        // observed performance regressions.
+        EVP_RAND_CTX* primary = RAND_get0_primary(NULL /* default OSSL_LIB_CTX */);
+        if (primary == NULL) {
+            LOGV2_WARNING(12549200, "Unable to fetch primary DRBG to adjust reseed interval");
+        } else {
+            auto primaryReseedRequestsInterval =
+                static_cast<unsigned int>(crypto::opensslPrimaryDRBGReseedMaxRequests);
+            auto primaryReseedTimeInterval =
+                static_cast<time_t>(crypto::opensslPrimaryDRBGReseedMaxTime);
+            OSSL_PARAM params[3] = {
+                OSSL_PARAM_construct_uint(OSSL_DRBG_PARAM_RESEED_REQUESTS,
+                                          &primaryReseedRequestsInterval),
+                OSSL_PARAM_construct_time_t(OSSL_DRBG_PARAM_RESEED_TIME_INTERVAL,
+                                            &primaryReseedTimeInterval),
+                OSSL_PARAM_END};
+            if (!EVP_RAND_CTX_set_params(primary, params)) {
+                LOGV2_WARNING(12549201,
+                              "Unable to reset primary DRBG reseed interval",
+                              "error"_attr =
+                                  SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
+            }
+        }
+#endif
     }
+
 
     // Add all digests and ciphers to OpenSSL's internal table
     // so that encryption/decryption is backwards compatible

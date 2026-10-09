@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   # The test runs a lot of commands that are not allowed with security token: addShard,
 //   # addShardToZone, appendOplogNote, applyOps, and so on.
 //   not_allowed_with_signed_security_token,
@@ -73,6 +74,7 @@
  *      If true, do not run this command on a standalone mongod.
  */
 
+import {isServerSideJavaScriptEnabled} from "jstests/libs/js_engine_util.js";
 import {commandsRemovedFromMongodSinceLastLTS} from "jstests/sharding/libs/last_lts_mongod_commands.js";
 import {commandsRemovedFromMongosSinceLastLTS} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 
@@ -83,7 +85,6 @@ const isDeprecated = "deprecated command";
 
 let viewsCommandTests = {
     _addShard: {skip: isAnInternalCommand},
-    _internalClearCollectionShardingMetadata: {skip: isAnInternalCommand},
     _cloneCatalogData: {skip: isAnInternalCommand},
     _cloneCollectionOptionsFromPrimaryShard: {skip: isAnInternalCommand},
     _clusterQueryWithoutShardKey: {skip: isAnInternalCommand},
@@ -103,10 +104,14 @@ let viewsCommandTests = {
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
     _configsvrCommitChunkSplit: {skip: isAnInternalCommand},
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
+    _configsvrCommitMergeAllPrecomputedChunksOnShard: {skip: isAnInternalCommand},
+    _configsvrCommitMergeChunks: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary: {skip: isAnInternalCommand}, // Can be removed once 6.0 is last LTS
+    _configsvrCommitMoveRange: {skip: isAnInternalCommand},
     _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _configsvrCommitShardRemoval: {skip: isAnInternalCommand},
+    _configsvrCommitSplitChunk: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
@@ -114,14 +119,13 @@ let viewsCommandTests = {
     _configsvrMovePrimary: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRenameCollection: {skip: isAnInternalCommand},
-    _configsvrRemoveChunks: {skip: isAnInternalCommand},
     _configsvrRemoveShard: {skip: isAnInternalCommand},
     _configsvrRemoveShardFromZone: {skip: isAnInternalCommand},
     _configsvrRemoveTags: {skip: isAnInternalCommand},
-    _configsvrRepairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
     _configsvrResetPlacementHistory: {skip: isAnInternalCommand},
     _configsvrReshardCollection: {skip: isAnInternalCommand},
     _configsvrRunRestore: {skip: isAnInternalCommand},
+    _configsvrSetAllowChunkOperations: {skip: isAnInternalCommand},
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
@@ -159,6 +163,7 @@ let viewsCommandTests = {
     _shardsvrBeginMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
+    _shardsvrCheckMetadataConsistencySecondaryParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCloneAuthoritativeMetadata: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
@@ -174,6 +179,7 @@ let viewsCommandTests = {
     _shardsvrJoinDDLCoordinators: {skip: isAnInternalCommand},
     _shardsvrCommitCreateDatabaseMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitDropDatabaseMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitRenameCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
@@ -200,15 +206,21 @@ let viewsCommandTests = {
     _shardsvrRecreateRangeDeletionTasksParticipant: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
+    _shardsvrCommitCollModCollectionMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitChunkOperationsMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitDropCollectionMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitCreateCollectionMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitCreateCollectionChunklessMetadata: {skip: isAnInternalCommand},
     _shardsvrRenameCollection: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrRenameIndexMetadata: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorGetCloneCount: {skip: isAnInternalCommand},
     _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: isAnInternalCommand},
+    _shardsvrReshardingRecipientFetchFinalCollectionStats: {skip: isAnInternalCommand},
     _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: isAnInternalCommand},
+    _shardsvrReshardingStepDown: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrReshardDonorInitialize: {skip: isAnInternalCommand},
     _shardsvrReshardDonorCriticalSectionStarted: {skip: isAnInternalCommand},
@@ -216,11 +228,14 @@ let viewsCommandTests = {
     _shardsvrReshardRecipientInitialize: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientClone: {skip: isAnInternalCommand},
     _shardsvrReshardRecipientCriticalSectionStarted: {skip: isAnInternalCommand},
+    _shardsvrSetAllowChunkOperations: {skip: isAnInternalCommand},
+    _shardsvrReshardCleanupStaleChunks: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrResolveView: {skip: isAnInternalCommand},
     _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _shardsvrSplitChunk: {skip: isAnInternalCommand},
     _shardsvrUpgradeDowngradeViewlessTimeseries: {skip: isAnInternalCommand},
     _shardsvrTimeseriesUpgradeDowngradePrepare: {skip: isAnInternalCommand},
     _shardsvrTimeseriesUpgradeDowngradeCommit: {skip: isAnInternalCommand},
@@ -244,6 +259,9 @@ let viewsCommandTests = {
     streams_sendEvent: {skip: isAnInternalCommand},
     streams_writeCheckpoint: {skip: isAnInternalCommand},
     streams_updateConnection: {skip: isAnInternalCommand},
+    streams_previewStream: {skip: isAnInternalCommand},
+    streams_getMorePreview: {skip: isAnInternalCommand},
+    streams_stopPreview: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     abortMoveCollection: {skip: isUnrelated},
     abortRewriteCollection: {skip: isUnrelated},
@@ -299,6 +317,7 @@ let viewsCommandTests = {
         skip: "Tested in views/views_sharded.js",
     },
     cleanupStructuredEncryptionData: {skip: isUnrelated},
+    clearJoinPlanCache: {skip: isUnrelated},
     clearJumboFlag: {
         command: {clearJumboFlag: "test.view"},
         skipStandalone: true,
@@ -415,7 +434,9 @@ let viewsCommandTests = {
     dropRole: {
         command: {dropRole: "testrole"},
         setup: function (conn) {
-            assert.commandWorked(conn.runCommand({createRole: "testrole", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.runCommand({createRole: "testrole", privileges: [], roles: []}),
+            );
         },
         teardown: function (conn) {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
@@ -446,8 +467,10 @@ let viewsCommandTests = {
     getDatabaseVersion: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
     getDiagnosticData: {skip: isUnrelated},
+    getESECMKIdentifierListStatus: {skip: isUnrelated},
     getESERotateActiveKEKStatus: {skip: isUnrelated},
     getLog: {skip: isUnrelated},
+    getMetricsFilteringAllowlist: {skip: isUnrelated},
     getMore: {
         setup: function (conn) {
             assert.commandWorked(conn.collection.remove({}));
@@ -458,14 +481,22 @@ let viewsCommandTests = {
                 let res = conn.runCommand(cmd);
                 assert.commandWorked(res, tojson(cmd));
                 let cursor = res.cursor;
-                assert.eq(cursor.ns, "test.view", "expected view namespace in cursor: " + tojson(cursor));
+                assert.eq(
+                    cursor.ns,
+                    "test.view",
+                    "expected view namespace in cursor: " + tojson(cursor),
+                );
                 let expectedFirstBatch = [{_id: 1}, {_id: 2}];
                 assert.eq(cursor.firstBatch, expectedFirstBatch, "returned wrong firstBatch");
                 let getmoreCmd = {getMore: cursor.id, collection: "view"};
                 res = conn.runCommand(getmoreCmd);
 
                 assert.commandWorked(res, tojson(getmoreCmd));
-                assert.eq("test.view", res.cursor.ns, "expected view namespace in cursor: " + tojson(res));
+                assert.eq(
+                    "test.view",
+                    res.cursor.ns,
+                    "expected view namespace in cursor: " + tojson(res),
+                );
             }
             // find command.
             let findCmd = {find: "view", filter: {_id: {$gt: 0}}, batchSize: 2};
@@ -483,15 +514,7 @@ let viewsCommandTests = {
     getParameter: {skip: isUnrelated},
     getQueryableEncryptionCountInfo: {skip: isAnInternalCommand},
     getShardMap: {skip: isUnrelated},
-    getShardVersion: {
-        command: {getShardVersion: "test.view"},
-        // This command is only expected to fail with the errors below when it is run against
-        // a standalone replica set mongod.
-        expectFailure: !TestData.testingReplicaSetEndpoint,
-        expectedErrorCode: ErrorCodes.ShardingStateNotInitialized,
-        isAdminCommand: true,
-        skipSharded: true, // mongos is tested in views/views_sharded.js
-    },
+    getShardVersion: {skip: isUnrelated},
     getTrafficRecordingStatus: {skip: isUnrelated},
     getTransitionToDedicatedConfigServerStatus: {skip: isUnrelated},
     godinsert: {skip: isAnInternalCommand},
@@ -520,7 +543,11 @@ let viewsCommandTests = {
             let res = conn.runCommand(aggCmd);
             assert.commandWorked(res, tojson(aggCmd));
             let cursor = res.cursor;
-            assert.eq(cursor.ns, "test.view", "expected view namespace in cursor: " + tojson(cursor));
+            assert.eq(
+                cursor.ns,
+                "test.view",
+                "expected view namespace in cursor: " + tojson(cursor),
+            );
             let expectedFirstBatch = [{_id: 1}, {_id: 2}];
             assert.eq(cursor.firstBatch, expectedFirstBatch, "aggregate returned wrong firstBatch");
 
@@ -558,8 +585,16 @@ let viewsCommandTests = {
     logout: {skip: isUnrelated},
     makeSnapshot: {skip: isAnInternalCommand},
     mapReduce: {
-        command: {mapReduce: "view", map: function () {}, reduce: function (key, vals) {}, out: "out"},
+        command: {
+            mapReduce: "view",
+            map: function () {},
+            reduce: function (key, vals) {},
+            out: "out",
+        },
         expectFailure: true,
+        // Needs a server-side JS engine, which is absent on some builds (e.g. ppc64le links
+        // scripting_none). Skip just this command there.
+        skipNoScripting: true,
     },
     mergeAllChunksOnShard: {skip: isUnrelated},
     mergeChunks: {
@@ -626,7 +661,11 @@ let viewsCommandTests = {
             let res = conn.runCommand(aggCmd);
             assert.commandWorked(res, tojson(aggCmd));
             let cursor = res.cursor;
-            assert.eq(cursor.ns, "test.view", "expected view namespace in cursor: " + tojson(cursor));
+            assert.eq(
+                cursor.ns,
+                "test.view",
+                "expected view namespace in cursor: " + tojson(cursor),
+            );
             let expectedFirstBatch = [{_id: 1}, {_id: 2}];
             assert.eq(cursor.firstBatch, expectedFirstBatch, "aggregate returned wrong firstBatch");
 
@@ -663,13 +702,7 @@ let viewsCommandTests = {
             skipSharded: true,
         },
     ],
-    repairShardedCollectionChunksHistory: {
-        command: {repairShardedCollectionChunksHistory: "test.view"},
-        skipStandalone: true,
-        isAdminCommand: true,
-        expectFailure: true,
-        expectedErrorCode: ErrorCodes.ConflictingOperationInProgress,
-    },
+    repairReplicatedMetadata: {skip: isUnrelated},
     replicateSearchIndexCommand: {skip: isAnInternalCommand},
     replSetAbortPrimaryCatchUp: {skip: isUnrelated},
     replSetFreeze: {skip: isUnrelated},
@@ -709,7 +742,9 @@ let viewsCommandTests = {
             privileges: [{resource: {db: "test", collection: "view"}, actions: ["find"]}],
         },
         setup: function (conn) {
-            assert.commandWorked(conn.runCommand({createRole: "testrole", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.runCommand({createRole: "testrole", privileges: [], roles: []}),
+            );
         },
         teardown: function (conn) {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
@@ -762,19 +797,7 @@ let viewsCommandTests = {
         isAdminCommand: true,
     },
     splitChunk: {
-        command: {
-            splitChunk: "test.view",
-            from: "shard0000",
-            min: {x: MinKey},
-            max: {x: 0},
-            keyPattern: {x: 1},
-            splitKeys: [{x: -2}, {x: -1}],
-            shardVersion: {t: Timestamp(1, 2), e: ObjectId(), v: Timestamp(1, 1)},
-        },
-        skipSharded: true,
-        expectFailure: true,
-        expectedErrorCode: ErrorCodes.ShardingStateNotInitialized,
-        isAdminCommand: true,
+        skip: isDeprecated,
     },
     splitVector: {
         command: {
@@ -794,7 +817,7 @@ let viewsCommandTests = {
     startTransitionToDedicatedConfigServer: {skip: isUnrelated},
     stopTransitionToDedicatedConfigServer: {skip: isUnrelated},
     sysprofile: {skip: isAnInternalCommand},
-    testCommandFeatureFlaggedOnLatestFCV83: {skip: isAnInternalCommand},
+    testCommandFeatureFlaggedOnLatestFCV91: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},
@@ -802,7 +825,6 @@ let viewsCommandTests = {
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
-    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     upgradeDowngradeViewlessTimeseries: {skip: isAnInternalCommand},
     top: {skip: "tested in views/views_stats.js"},
     transitionFromDedicatedConfigServer: {skip: isUnrelated},
@@ -822,13 +844,17 @@ let viewsCommandTests = {
         isAdminCommand: true,
     },
     update: {command: {update: "view", updates: [{q: {x: 1}, u: {x: 2}}]}, expectFailure: true},
+    updateESECMKIdentifierList: {skip: isUnrelated},
+    updateMetricsFilteringAllowlist: {skip: isUnrelated},
     updateRole: {
         command: {
             updateRole: "testrole",
             privileges: [{resource: {db: "test", collection: "view"}, actions: ["find"]}],
         },
         setup: function (conn) {
-            assert.commandWorked(conn.runCommand({createRole: "testrole", privileges: [], roles: []}));
+            assert.commandWorked(
+                conn.runCommand({createRole: "testrole", privileges: [], roles: []}),
+            );
         },
         teardown: function (conn) {
             assert.commandWorked(conn.runCommand({dropAllRolesFromDatabase: 1}));
@@ -839,7 +865,9 @@ let viewsCommandTests = {
     updateZoneKeyRange: {skip: isUnrelated},
     usersInfo: {skip: isUnrelated},
     validate: {command: {validate: "view"}, expectFailure: true},
-    validateDBMetadata: {command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}}},
+    validateDBMetadata: {
+        command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}},
+    },
     voteAbortIndexBuild: {skip: isUnrelated},
     voteCommitImportCollection: {skip: isUnrelated},
     voteCommitIndexBuild: {skip: isUnrelated},
@@ -849,6 +877,7 @@ let viewsCommandTests = {
     getShardingReady: {skip: isAnInternalCommand},
     whatsmyuri: {skip: isUnrelated},
     whatsmysni: {skip: isUnrelated},
+    wiredTigerRepair: {skip: isAnInternalCommand},
 };
 
 commandsRemovedFromMongodSinceLastLTS.forEach(function (cmd) {
@@ -882,7 +911,10 @@ assert.commandWorked(res);
 let commands = Object.keys(res.commands);
 for (let command of commands) {
     let test = viewsCommandTests[command];
-    assert(test !== undefined, "Coverage failure: must explicitly define a views test for " + command);
+    assert(
+        test !== undefined,
+        "Coverage failure: must explicitly define a views test for " + command,
+    );
 
     if (!(test instanceof Array)) test = [test];
     let subtest_nr = 0;
@@ -908,6 +940,11 @@ for (let command of commands) {
             continue;
         }
 
+        if (subtest.skipNoScripting && !isServerSideJavaScriptEnabled(db)) {
+            print("Skipping " + command + ": server-side JS is unavailable on this build");
+            continue;
+        }
+
         // Perform test setup, and call any additional setup callbacks provided by the test.
         // All tests assume that there exists a view named 'view' that is backed by
         // 'collection'.
@@ -924,7 +961,8 @@ for (let command of commands) {
 
         if (subtest.expectFailure) {
             let expectedErrorCode = subtest.expectedErrorCode;
-            if (expectedErrorCode === undefined) expectedErrorCode = ErrorCodes.CommandNotSupportedOnView;
+            if (expectedErrorCode === undefined)
+                expectedErrorCode = ErrorCodes.CommandNotSupportedOnView;
 
             assertCommandOrWriteFailed(
                 commandHandle.runCommand(subtest.command),
@@ -932,7 +970,11 @@ for (let command of commands) {
                 tojson(subtest.command),
             );
         } else if (subtest.command instanceof Function) subtest.command(commandHandle);
-        else assert.commandWorked(commandHandle.runCommand(subtest.command), tojson(subtest.command));
+        else
+            assert.commandWorked(
+                commandHandle.runCommand(subtest.command),
+                tojson(subtest.command),
+            );
 
         if (subtest.teardown !== undefined) subtest.teardown(dbHandle);
     }

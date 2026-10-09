@@ -1,6 +1,7 @@
 // Tests for using $planCacheStats to list cached plans.
 //
 // @tags: [
+//   uses_explain,
 //   # If the balancer is on and chunks are moved, the plan cache can have entries with isActive:
 //   # false when the test assumes they are true because the query has already been run many times.
 //   assumes_balancer_off,
@@ -43,12 +44,9 @@ import {
     getPlanStage,
 } from "jstests/libs/query/analyze_plan.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
-import {sbePlanCacheEnabled} from "jstests/libs/query/sbe_util.js";
 
 let coll = db.jstests_plan_cache_list_plans;
 coll.drop();
-
-const isUsingSbePlanCache = sbePlanCacheEnabled(db);
 
 function dumpPlanCacheState() {
     return coll.aggregate([{$planCacheStats: {}}]).toArray();
@@ -63,7 +61,9 @@ function getPlansForCacheEntry(query = {}, sort = {}, projection = {}) {
         db: db,
     });
 
-    const res = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
+    const res = coll
+        .aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}])
+        .toArray();
     // We expect exactly one matching cache entry.
     assert.eq(1, res.length, dumpPlanCacheState());
     return res[0];
@@ -72,7 +72,9 @@ function getPlansForCacheEntry(query = {}, sort = {}, projection = {}) {
 function getPlansForCacheEntryFromPipeline(pipeline) {
     const keyHash = getPlanCacheKeyFromPipeline(pipeline, coll);
 
-    const res = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
+    const res = coll
+        .aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}])
+        .toArray();
     // We expect exactly one matching cache entry.
     assert.eq(1, res.length, dumpPlanCacheState());
     return res[0];
@@ -105,14 +107,20 @@ function checkTimeOfCreation(query, sort, projection, date) {
         db: db,
     });
 
-    const res = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
+    const res = coll
+        .aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}])
+        .toArray();
     // We expect exactly one matching cache entry.
     assert.eq(1, res.length, res);
     const cacheEntry = res[0];
 
     assert(cacheEntry.hasOwnProperty("timeOfCreation"), cacheEntry);
     let kMillisecondsPerHour = 1000 * 60 * 60;
-    assert.lte(Math.abs(date - cacheEntry.timeOfCreation.getTime()), kMillisecondsPerHour, cacheEntry);
+    assert.lte(
+        Math.abs(date - cacheEntry.timeOfCreation.getTime()),
+        kMillisecondsPerHour,
+        cacheEntry,
+    );
 }
 
 assert.commandWorked(coll.insert({a: 1, b: 1}));
@@ -128,7 +136,11 @@ assert.commandWorked(coll.createIndex({a: 1, b: 1}));
 assertNoCacheEntry({unknownfield: 1}, {}, {});
 
 // Create a cache entry.
-assert.eq(1, coll.find({a: 1, b: 1}, {_id: 0, a: 1}).sort({a: -1}).itcount(), "unexpected document count");
+assert.eq(
+    1,
+    coll.find({a: 1, b: 1}, {_id: 0, a: 1}).sort({a: -1}).itcount(),
+    "unexpected document count",
+);
 
 // Verify that the time of creation listed for the plan cache entry is reasonably close to 'now'.
 let now = new Date().getTime();
@@ -139,12 +151,10 @@ let entry = getPlansForCacheEntry({a: 1, b: 1}, {a: -1}, {_id: 0, a: 1});
 assert(entry.hasOwnProperty("works"), entry);
 assert.eq(entry.isActive, false);
 
-if (!isUsingSbePlanCache) {
-    // Note that SBE plan cache entry does not include "creationExecStats". We expect that there
-    // were two candidate plans evaluated when the cache entry was created.
-    assert(entry.hasOwnProperty("creationExecStats"), entry);
-    assert.eq(2, entry.creationExecStats.length, entry);
-}
+// Classic plan cache entries include "creationExecStats". We expect that there
+// were two candidate plans evaluated when the cache entry was created.
+assert(entry.hasOwnProperty("creationExecStats"), entry);
+assert.eq(2, entry.creationExecStats.length, entry);
 
 // Test the 'planCacheShapeHash' and planCacheKey property by comparing entries for two different
 // query shapes.
@@ -184,57 +194,15 @@ entry = getPlansForCacheEntry({a: 3, b: 3}, {a: -1}, {_id: 0, a: 1});
 assert(entry.hasOwnProperty("works"), entry);
 assert.eq(entry.isActive, true);
 
-if (!isUsingSbePlanCache) {
-    // Note that SBE plan cache entry does not include "creationExecStats". There should be the same
-    // number of candidate plan scores as candidate plans.
-    assert.eq(entry.creationExecStats.length, entry.candidatePlanScores.length, entry);
+// There should be the same number of candidate plan scores as candidate plans.
+assert.eq(entry.creationExecStats.length, entry.candidatePlanScores.length, entry);
 
-    // Scores should be greater than zero and sorted descending.
-    for (let i = 0; i < entry.candidatePlanScores.length; ++i) {
-        const scores = entry.candidatePlanScores;
-        assert.gt(scores[i], 0, entry);
-        if (i > 0) {
-            assert.lte(scores[i], scores[i - 1], entry);
-        }
-    }
-} else {
-    //
-    // Test that $planCacheStats against a particular collection does not list cached $lookup plans
-    // if the collection is the foreign collection (not the main collection).
-    //
-    const foreignColl = db.plan_cache_list_plans_foreign;
-    foreignColl.drop();
-    assert.commandWorked(foreignColl.insert({a: 1, b: 1}));
-    assert.commandWorked(foreignColl.createIndex({b: 1}));
-
-    const pipeline = [{$lookup: {from: foreignColl.getName(), localField: "a", foreignField: "b", as: "matched"}}];
-    // Have to run the pipeline to refresh foreign coll routing info, it is possible to have
-    // stale info indicate it is a non-local collection, which can cause us generate a different
-    // query plan as the one generated by the explain (inside getPlansForCacheEntryFromPipeline)
-    if (FixtureHelpers.isMongos(db)) {
-        coll.aggregate(pipeline).toArray();
-        foreignColl.getPlanCache().clear();
-    }
-    const results = coll.aggregate(pipeline).toArray();
-    assert.eq(4, results.length, results);
-
-    // Make sure we have one plan cache entry for main collection and the plan is indexed NLJ.
-    entry = getPlansForCacheEntryFromPipeline(pipeline);
-    assert.eq(entry.isActive, true);
-
-    const explain = coll.explain().aggregate(pipeline);
-    assert.commandWorked(explain);
-
-    if (!explain.splitPipeline) {
-        const lookupStage = getPlanStage(explain, "EQ_LOOKUP");
-        assert.neq(null, lookupStage, explain);
-        assert.eq(lookupStage.strategy, "IndexedLoopJoin", explain);
-        assert.eq(getLookupStageIndexStrategy(lookupStage).indexName, "b_1", explain);
-
-        // The '$planCacheStats' pipeline executed against the foreign collection shouldn't include
-        // cached $lookup plans.
-        const res = foreignColl.aggregate([{$planCacheStats: {}}]).toArray();
-        assert.eq(0, res.length, dumpPlanCacheState());
+// Scores should be greater than zero and sorted descending.
+for (let i = 0; i < entry.candidatePlanScores.length; ++i) {
+    const scores = entry.candidatePlanScores;
+    assert.gt(scores[i], 0, entry);
+    if (i > 0) {
+        assert.lte(scores[i], scores[i - 1], entry);
     }
 }
 
@@ -246,7 +214,10 @@ if (!FixtureHelpers.isStandalone(db)) {
     // Specify 'allowedIndexes' with more than one index, otherwise it will result in single
     // solution plan, that won't be cached in classic.
     const settings = {
-        indexHints: {ns: {db: db.getName(), coll: coll.getName()}, allowedIndexes: ["a_1_b_1", "b_1_a_1"]},
+        indexHints: {
+            ns: {db: db.getName(), coll: coll.getName()},
+            allowedIndexes: ["a_1_b_1", "b_1_a_1"],
+        },
     };
     assert.commandWorked(coll.createIndex({b: 1, a: 1}));
     const filter = {a: 1, b: 1};

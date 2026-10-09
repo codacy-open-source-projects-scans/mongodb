@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/move_primary_coordinator.h"
 
@@ -45,7 +19,6 @@
 #include "mongo/db/global_catalog/ddl/move_primary_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
-#include "mongo/db/global_catalog/ddl/shardsvr_commit_create_database_metadata_command.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/namespace_string_util.h"
@@ -61,16 +34,19 @@
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
+#include "mongo/db/shard_role/shard_catalog/commit_collection_metadata_locally.h"
+#include "mongo/db/shard_role/shard_catalog/commit_database_metadata_locally.h"
 #include "mongo/db/shard_role/shard_catalog/database_sharding_runtime.h"
 #include "mongo/db/shard_role/shard_catalog/drop_collection.h"
 #include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
-#include "mongo/db/topology/user_write_block/write_block_bypass.h"
+#include "mongo/db/topology/user_write_block/user_write_block_bypass.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log_attr.h"
@@ -79,6 +55,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
@@ -102,6 +79,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeCloningData);
 MONGO_FAIL_POINT_DEFINE(hangBeforeMovePrimaryCriticalSection);
 MONGO_FAIL_POINT_DEFINE(hangAfterMovePrimaryCriticalSection);
 MONGO_FAIL_POINT_DEFINE(movePrimaryFailIfNeedToCloneMovableCollections);
+MONGO_FAIL_POINT_DEFINE(hangBeforeMovePrimaryCommitDbMetadata);
 
 /**
  * Returns true if this unsharded collection can be moved by a moveCollection command.
@@ -185,7 +163,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
         .then([this, token, executor, anchor = shared_from_this()] {
             const auto opCtxHolder = makeOperationContext();
             auto* opCtx = opCtxHolder.get();
-
             const auto& toShardId = _doc.getToShardId();
 
             if (toShardId == ShardingState::get(opCtx)->shardId()) {
@@ -193,8 +170,8 @@ ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
                       "Database already on requested primary shard",
                       logAttrs(_dbName),
                       "to"_attr = toShardId);
-
-                return ExecutorFuture<void>(**executor);
+                uasserted(ErrorCodes::RequestAlreadyFulfilled,
+                          "Database already on requested primary shard");
             }
 
             const auto toShardEntry = [&] {
@@ -202,7 +179,7 @@ ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
                 const auto findResponse = uassertStatusOK(config->exhaustiveFindOnConfig(
                     opCtx,
                     ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                    repl::ReadConcernLevel::kMajorityReadConcern,
+                    repl::ReadConcernArgs::kMajority,
                     NamespaceString::kConfigsvrShardsNamespace,
                     BSON(ShardType::name() << toShardId),
                     BSONObj() /* No sorting */,
@@ -216,21 +193,15 @@ ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
                 return uassertStatusOK(ShardType::fromBSON(findResponse.docs.front()));
             }();
 
-            uassert(ErrorCodes::ShardNotFound,
-                    fmt::format("Requested primary shard {} is draining", toShardId.toString()),
-                    !toShardEntry.getDraining());
-
-            return runMovePrimaryWorkflow(executor, token);
-        });
-}
-
-ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
-    std::shared_ptr<executor::ScopedTaskExecutor> executor,
-    const CancellationToken& token) noexcept {
-    return ExecutorFuture<void>(**executor)
+            if (_doc.getPhase() < Phase::kCommit) {
+                uassert(ErrorCodes::ShardNotFound,
+                        fmt::format("Requested primary shard {} is draining", toShardId.toString()),
+                        !toShardEntry.getDraining());
+            }
+        })
         .then(_buildPhaseHandler(  //
             Phase::kClone,
-            [this, anchor = shared_from_this()](auto* opCtx) {
+            [this, token, executor, anchor = shared_from_this()](auto* opCtx) {
                 const auto& toShardId = _doc.getToShardId();
 
                 if (!_firstExecution) {
@@ -254,10 +225,9 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
 
                 logChange(opCtx, "start");
 
-                if (_doc.getAuthoritativeMetadataAccessLevel() ==
-                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
-                    cloneAuthoritativeDatabaseMetadata(opCtx);
-                }
+                // TODO (SERVER-98118): Remove once 9.0 is last-lts.
+                sharding_ddl_util::assertShardsAreNotInFCVTransitionsForMovePrimary(
+                    opCtx, _doc.getToShardId(), _doc.getAuthoritativeMetadataAccessLevel());
 
                 ScopeGuard unblockWritesLegacyOnExit([&] {
                     // TODO (SERVER-71444): Fix to be interruptible or document exception.
@@ -285,12 +255,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
         .then(_buildPhaseHandler(
             Phase::kEnterCriticalSection,
             [this, token, executor, anchor = shared_from_this()](auto* opCtx) {
-                if (!_firstExecution) {
-                    AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-                    performCausalityBarrier(opCtx, barrier);
-                }
-
-
                 if (MONGO_unlikely(hangBeforeMovePrimaryCriticalSection.shouldFail())) {
                     LOGV2(9031700, "Hit hangBeforeMovePrimaryCriticalSection");
                     hangBeforeMovePrimaryCriticalSection.pauseWhileSet(opCtx);
@@ -310,16 +274,29 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                 tassert(10644515,
                         "Expected databaseVersion to be set on the coordinator document",
                         _doc.getDatabaseVersion());
-                const auto& preCommitDbVersion = *_doc.getDatabaseVersion();
+                // Copy by value: getNewSession() below persists a new session and reassigns _doc,
+                // which would leave a reference into _doc dangling.
+                const auto preCommitDbVersion = *_doc.getDatabaseVersion();
+                const auto thisShardId = ShardingState::get(opCtx)->shardId();
 
-                commitMetadataToConfig(opCtx, preCommitDbVersion);
+                if (_doc.getAuthoritativeMetadataAccessLevel() ==
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed) {
+                    commitCollectionsMetadataToShards(opCtx, executor, token);
+                }
+
+                if (MONGO_unlikely(hangBeforeMovePrimaryCommitDbMetadata.shouldFail())) {
+                    LOGV2(12753300, "Hit hangBeforeMovePrimaryCommitDbMetadata");
+                    hangBeforeMovePrimaryCommitDbMetadata.pauseWhileSet(opCtx);
+                }
+
+                commitDbMetadataToConfig(opCtx, preCommitDbVersion);
 
                 auto dbMetadata = getPostCommitDatabaseMetadata(opCtx);
                 assertChangedMetadataOnConfig(opCtx, dbMetadata, preCommitDbVersion);
 
-                if (_doc.getAuthoritativeMetadataAccessLevel() >=
-                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
-                    commitMetadataToShards(opCtx, dbMetadata.getVersion(), executor, token);
+                if (_doc.getAuthoritativeMetadataAccessLevel() ==
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed) {
+                    commitDbMetadataToShards(opCtx, dbMetadata.getVersion(), executor, token);
                 }
 
                 notifyChangeStreamsOnMovePrimary(
@@ -336,12 +313,6 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
             [this, anchor = shared_from_this()](auto* opCtx) { dropStaleDataOnDonor(opCtx); }))
         .then(_buildPhaseHandler(Phase::kExitCriticalSection,
                                  [this, token, executor, anchor = shared_from_this()](auto* opCtx) {
-                                     if (!_firstExecution) {
-                                         AllShardsAndConfigCausalityBarrier barrier{**executor,
-                                                                                    token};
-                                         performCausalityBarrier(opCtx, barrier);
-                                     }
-
                                      unblockReadsAndWrites(opCtx);
                                      exitCriticalSectionOnRecipient(opCtx, executor, token);
 
@@ -353,11 +324,17 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
                                      logChange(opCtx, "end");
                                  }))
         .onError([this, anchor = shared_from_this()](const Status& status) {
+            if (status == ErrorCodes::RequestAlreadyFulfilled) {
+                return Status::OK();
+            }
+
             const auto opCtxHolder = makeOperationContext();
             auto* opCtx = opCtxHolder.get();
 
             const auto& failedPhase = _doc.getPhase();
-            if (failedPhase == Phase::kClone || status == ErrorCodes::ShardNotFound) {
+            if (failedPhase == Phase::kClone ||
+                (status == ErrorCodes::ShardNotFound && failedPhase > Phase::kUnset &&
+                 failedPhase < Phase::kCommit)) {
                 LOGV2_DEBUG(7392900,
                             1,
                             "Triggering movePrimary cleanup",
@@ -400,8 +377,11 @@ ExecutorFuture<void> MovePrimaryCoordinator::_cleanupOnAbort(
             AllShardsAndConfigCausalityBarrier barrier{**executor, token};
             performCausalityBarrier(opCtx, barrier);
 
-            const auto& failedPhase = _doc.getPhase();
-            const auto& toShardId = _doc.getToShardId();
+            const auto thisShardId = ShardingState::get(opCtx)->shardId();
+            // Copy by value: exitCriticalSectionOnRecipient() and getNewSession() below reassign
+            // _doc, which would leave a reference into _doc dangling.
+            const auto toShardId = _doc.getToShardId();
+            const auto failedPhase = _doc.getPhase();
 
             unblockReadsAndWrites(opCtx);
             try {
@@ -475,9 +455,9 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
     const auto collectionsToIgnore = [&] {
         auto catalogClient = Grid::get(opCtx)->catalogClient();
         auto colls = catalogClient->getShardedCollectionNamespacesForDb(
-            opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
+            opCtx, _dbName, repl::ReadConcernArgs::kMajority, {});
         auto unshardedTrackedColls = catalogClient->getUnsplittableCollectionNamespacesForDb(
-            opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
+            opCtx, _dbName, repl::ReadConcernArgs::kMajority, {});
 
         std::move(
             unshardedTrackedColls.begin(), unshardedTrackedColls.end(), std::back_inserter(colls));
@@ -577,7 +557,9 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(Operat
     // Enable write blocking bypass to allow cloning of catalog data even if writes are disallowed.
     WriteBlockBypass::get(opCtx).set(true);
 
-    const auto& toShardId = _doc.getToShardId();
+    // Copy by value: getNewSession() below (evaluated before clonedCollections() runs) reassigns
+    // _doc, which would leave a reference into _doc dangling.
+    const auto toShardId = _doc.getToShardId();
 
     const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
     const auto fromShard =
@@ -643,7 +625,7 @@ void MovePrimaryCoordinator::assertClonedData(
                            clonedCollections.cbegin()));
 }
 
-void MovePrimaryCoordinator::commitMetadataToConfig(
+void MovePrimaryCoordinator::commitDbMetadataToConfig(
     OperationContext* opCtx, const DatabaseVersion& preCommitDbVersion) const {
     const auto commitCommand = [&] {
         ConfigsvrCommitMovePrimary request(_dbName, preCommitDbVersion, _doc.getToShardId());
@@ -671,7 +653,7 @@ DatabaseType MovePrimaryCoordinator::getPostCommitDatabaseMetadata(OperationCont
     auto findResponse = uassertStatusOK(config->exhaustiveFindOnConfig(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        repl::ReadConcernLevel::kMajorityReadConcern,
+        repl::ReadConcernArgs::kMajority,
         NamespaceString::kConfigDatabasesNamespace,
         BSON(DatabaseType::kDbNameFieldName
              << DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault())),
@@ -699,7 +681,25 @@ void MovePrimaryCoordinator::assertChangedMetadataOnConfig(
             postCommitDbType.getPrimary() != ShardingState::get(opCtx)->shardId());
 }
 
-void MovePrimaryCoordinator::commitMetadataToShards(
+void MovePrimaryCoordinator::commitCollectionsMetadataToShards(
+    OperationContext* opCtx,
+    const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+    const CancellationToken& token) {
+    auto const catalogClient = Grid::get(opCtx)->catalogClient();
+    const auto trackedColls =
+        catalogClient->getCollections(opCtx, _dbName, repl::ReadConcernArgs::kMajority);
+    // Copy by value: getNewSession() below reassigns _doc, which would leave a reference into _doc
+    // dangling.
+    const auto toShardId = _doc.getToShardId();
+
+    for (auto& coll : trackedColls) {
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::commitCreateCollectionChunklessMetadataToShardCatalog(
+            opCtx, coll.getNss(), {toShardId}, session, executor, token);
+    }
+}
+
+void MovePrimaryCoordinator::commitDbMetadataToShards(
     OperationContext* opCtx,
     const DatabaseVersion& preCommitDbVersion,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
@@ -759,6 +759,9 @@ void MovePrimaryCoordinator::dropOrphanedDataOnRecipient(
         return;
     }
 
+    const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() ==
+        AuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed;
+
     // Make a copy of this container since `getNewSession` changes the coordinator document.
     const auto collectionsToClone = *_doc.getCollectionsToClone();
     for (const auto& nss : collectionsToClone) {
@@ -771,48 +774,9 @@ void MovePrimaryCoordinator::dropOrphanedDataOnRecipient(
             token,
             session,
             true /* fromMigrate */,
-            true /* dropSystemCollections */);
+            true /* dropSystemCollections */,
+            !isAuthoritative /* forceLegacyRefresh */);
     }
-}
-
-void MovePrimaryCoordinator::cloneAuthoritativeDatabaseMetadata(OperationContext* opCtx) const {
-    auto recoveryService = ShardingRecoveryService::get(opCtx);
-    recoveryService->acquireRecoverableCriticalSectionBlockWrites(
-        opCtx,
-        NamespaceString(_dbName),
-        _csReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-        false /* clearDbMetadata */);
-    recoveryService->promoteRecoverableCriticalSectionToBlockAlsoReads(
-        opCtx,
-        NamespaceString(_dbName),
-        _csReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
-
-    auto catalogClient = Grid::get(opCtx)->catalogClient();
-    auto dbMetadata =
-        catalogClient->getDatabase(opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern);
-
-    const auto thisShardId = ShardingState::get(opCtx)->shardId();
-
-    tassert(10162501,
-            fmt::format("Expecting to have fetched database metadata from a database which "
-                        "this shard owns. DatabaseName: {}. Database primary shard: {}. "
-                        "This shard: {}",
-                        _dbName.toStringForErrorMsg(),
-                        dbMetadata.getPrimary().toString(),
-                        thisShardId.toString()),
-            thisShardId == dbMetadata.getPrimary());
-
-    commitCreateDatabaseMetadataLocally(opCtx, dbMetadata);
-
-    recoveryService->releaseRecoverableCriticalSection(
-        opCtx,
-        NamespaceString(_dbName),
-        _csReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-        ShardingRecoveryService::NoCustomAction(),
-        false /* throwIfReasonDiffers */);
 }
 
 void MovePrimaryCoordinator::blockWritesLegacy(OperationContext* opCtx) const {
@@ -880,17 +844,17 @@ void MovePrimaryCoordinator::enterCriticalSectionOnRecipient(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
     if (_doc.getAuthoritativeMetadataAccessLevel() > AuthoritativeMetadataAccessLevelEnum::kNone) {
-        ShardsvrParticipantBlock request(
-            NamespaceString::makeCollectionlessShardsvrParticipantBlockNSS(_dbName));
-        request.setBlockType(mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
-        request.setReason(_csReason);
-        request.setClearDbInfo(false);
-
-        generic_argument_util::setMajorityWriteConcern(request);
-        generic_argument_util::setOperationSessionInfo(request, getNewSession(opCtx));
-        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-            **executor, token, request);
-        sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {_doc.getToShardId()});
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+            opCtx,
+            NamespaceString::makeCollectionlessShardsvrParticipantBlockNSS(_dbName),
+            {_doc.getToShardId()},
+            CriticalSectionBlockTypeEnum::kReadsAndWrites,
+            _csReason,
+            _doc.getAuthoritativeMetadataAccessLevel(),
+            session,
+            executor,
+            token);
     } else {
         const auto enterCriticalSectionCommand = [&] {
             ShardsvrMovePrimaryEnterCriticalSection request(_dbName);
@@ -930,19 +894,18 @@ void MovePrimaryCoordinator::exitCriticalSectionOnRecipient(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
     if (_doc.getAuthoritativeMetadataAccessLevel() > AuthoritativeMetadataAccessLevelEnum::kNone) {
-        ShardsvrParticipantBlock request(
-            NamespaceString::makeCollectionlessShardsvrParticipantBlockNSS(_dbName));
-        request.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-        request.setReason(_csReason);
-        request.setThrowIfReasonDiffers(false);
-        request.setClearDbInfo(false);
-
-        generic_argument_util::setMajorityWriteConcern(request);
-        generic_argument_util::setOperationSessionInfo(request, getNewSession(opCtx));
-
-        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-            **executor, token, request);
-        sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {_doc.getToShardId()});
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+            opCtx,
+            NamespaceString::makeCollectionlessShardsvrParticipantBlockNSS(_dbName),
+            {_doc.getToShardId()},
+            CriticalSectionBlockTypeEnum::kUnblock,
+            _csReason,
+            _doc.getAuthoritativeMetadataAccessLevel(),
+            session,
+            executor,
+            token,
+            false /* throwIfReasonDiffers */);
     } else {
         const auto exitCriticalSectionCommand = [&] {
             ShardsvrMovePrimaryExitCriticalSection request(_dbName);

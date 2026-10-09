@@ -74,7 +74,10 @@ function runTest({rst, readDB, writeDB}) {
     const primaryDriven = FeatureFlagUtil.isPresentAndEnabled(readDB, "PrimaryDrivenIndexBuilds");
     const failPointDB = primaryDriven ? writeDB : readDB;
     assert.commandWorked(
-        failPointDB.adminCommand({configureFailPoint: "hangAfterStartingIndexBuild", mode: "alwaysOn"}),
+        failPointDB.adminCommand({
+            configureFailPoint: "hangAfterStartingIndexBuild",
+            mode: "alwaysOn",
+        }),
     );
 
     // Build a "most selective" index in the background.
@@ -106,15 +109,46 @@ function runTest({rst, readDB, writeDB}) {
     // Confirm that there are no cached plans post index build start.
     assertDoesNotHaveCachedPlan(readColl, filter);
 
-    // Execute a find and confirm that a previously built index is the cached plan.
-    assert.eq(readColl.find(filter).itcount(), 1);
-    assert.eq("less_selective", getIndexNameForCachedPlan(readColl, filter));
+    // Execute a find and confirm that the cached plan uses the previously built index. The concurrent
+    // in-progress index build may still be finishing its setup on this node (its catalog change
+    // clears the plan cache again after 'waitForIndexBuildToStart' returns), so retry the find
+    // until the plan cache is stably populated.
+    let cachedIndexName;
+    assert.soon(
+        () => {
+            assert.eq(readColl.find(filter).itcount(), 1);
+            const plans = readColl
+                .getPlanCache()
+                .list([{$match: {"createdFromQuery.query": filter}}]);
+            if (plans.length !== 1 || !plans[0].hasOwnProperty("cachedPlan")) {
+                return false;
+            }
+            const cachedPlan = getCachedPlan(plans[0].cachedPlan);
+            assert(cachedPlan.hasOwnProperty("inputStage"), plans);
+            assert(cachedPlan.inputStage.hasOwnProperty("indexName"), plans);
+            cachedIndexName = cachedPlan.inputStage.indexName;
+            return true;
+        },
+        () =>
+            "Expected exactly one cached plan for query " +
+            tojson(filter) +
+            ", but found: " +
+            tojson(readColl.getPlanCache().list()),
+    );
+    assert.eq("less_selective", cachedIndexName);
 
     // Disable the hang and wait for the index build to complete.
-    assert.commandWorked(failPointDB.adminCommand({configureFailPoint: "hangAfterStartingIndexBuild", mode: "off"}));
+    assert.commandWorked(
+        failPointDB.adminCommand({configureFailPoint: "hangAfterStartingIndexBuild", mode: "off"}),
+    );
 
     if (primaryDriven) {
-        IndexBuildTest.assertIndexesSoon(readColl, 4, ["_id_", "less_selective", "least_selective", "most_selective"]);
+        IndexBuildTest.assertIndexesSoon(readColl, 4, [
+            "_id_",
+            "less_selective",
+            "least_selective",
+            "most_selective",
+        ]);
     } else {
         IndexBuildTest.waitForIndexBuildToStop(readDB, collName, "most_selective");
     }
@@ -131,7 +165,9 @@ function runTest({rst, readDB, writeDB}) {
     assert.eq("most_selective", getIndexNameForCachedPlan(readColl, filter));
 
     // Drop the newly created index and confirm that the plan cache has been cleared.
-    assert.commandWorked(writeDB.runCommand({dropIndexes: collName, index: {x: 1}, writeConcern: {w: "majority"}}));
+    assert.commandWorked(
+        writeDB.runCommand({dropIndexes: collName, index: {x: 1}, writeConcern: {w: "majority"}}),
+    );
 
     rst.awaitReplication();
 
@@ -164,7 +200,9 @@ function runTest({rst, readDB, writeDB}) {
     assert.eq("most_selective", getIndexNameForCachedPlan(readColl, filter));
 
     // Drop the newly created index and confirm that the plan cache has been cleared.
-    assert.commandWorked(writeDB.runCommand({dropIndexes: collName, index: {x: 1}, writeConcern: {w: "majority"}}));
+    assert.commandWorked(
+        writeDB.runCommand({dropIndexes: collName, index: {x: 1}, writeConcern: {w: "majority"}}),
+    );
 
     rst.awaitReplication();
 

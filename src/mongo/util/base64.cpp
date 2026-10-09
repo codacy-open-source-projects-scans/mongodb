@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/base64.h"
 
@@ -36,6 +10,7 @@
 #include <cstdint>
 #include <iterator>
 #include <limits>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -49,7 +24,7 @@ bool valid(unsigned char x) {
 }
 
 template <typename Mode, typename Writer>
-void encodeImpl(Writer&& write, StringData in) {
+void encodeImpl(Writer&& write, std::string_view in) {
     static_assert(Mode::kEncodeTable.size() == 64, "Invalid encoding table");
     const char* data = in.data();
     std::size_t size = in.size();
@@ -114,7 +89,7 @@ void encodeImpl(Writer&& write, StringData in) {
 }
 
 template <typename Mode, typename Writer>
-void decodeImpl(const Writer& write, StringData in) {
+void decodeImpl(const Writer& write, std::string_view in) {
     static_assert(Mode::kDecodeTable.size() == 256, "Invalid decode table");
     const char* data = in.data();
     std::size_t size = in.size();
@@ -189,7 +164,7 @@ void decodeImpl(const Writer& write, StringData in) {
 }  // namespace
 
 template <typename Mode>
-std::string Base64Impl<Mode>::encode(StringData in) {
+std::string Base64Impl<Mode>::encode(std::string_view in) {
     std::string r;
     r.reserve(encodedLength(in.size()));
     encodeImpl<Mode>([&](const char* s, std::size_t n) { r.append(s, s + n); }, in);
@@ -197,7 +172,7 @@ std::string Base64Impl<Mode>::encode(StringData in) {
 }
 
 template <typename Mode>
-std::string Base64Impl<Mode>::decode(StringData in) {
+std::string Base64Impl<Mode>::decode(std::string_view in) {
     std::string r;
     r.reserve(in.size() / 4 * 3);
     decodeImpl<Mode>([&](const char* s, std::size_t n) { r.append(s, s + n); }, in);
@@ -205,29 +180,29 @@ std::string Base64Impl<Mode>::decode(StringData in) {
 }
 
 template <typename Mode>
-void Base64Impl<Mode>::encode(std::stringstream& ss, StringData in) {
+void Base64Impl<Mode>::encode(std::stringstream& ss, std::string_view in) {
     encodeImpl<Mode>([&](const char* s, std::size_t n) { ss.write(s, n); }, in);
 }
 
 template <typename Mode>
-void Base64Impl<Mode>::decode(std::stringstream& ss, StringData in) {
+void Base64Impl<Mode>::decode(std::stringstream& ss, std::string_view in) {
     decodeImpl<Mode>([&](const char* s, std::size_t n) { ss.write(s, n); }, in);
 }
 
 template <typename Mode>
-void Base64Impl<Mode>::encode(fmt::memory_buffer& buffer, StringData in) {
+void Base64Impl<Mode>::encode(fmt::memory_buffer& buffer, std::string_view in) {
     buffer.reserve(buffer.size() + encodedLength(in.size()));
     encodeImpl<Mode>([&](const char* s, std::size_t n) { buffer.append(s, s + n); }, in);
 }
 
 template <typename Mode>
-void Base64Impl<Mode>::decode(fmt::memory_buffer& buffer, StringData in) {
+void Base64Impl<Mode>::decode(fmt::memory_buffer& buffer, std::string_view in) {
     buffer.reserve(buffer.size() + in.size() / 4 * 3);
     decodeImpl<Mode>([&](const char* s, std::size_t n) { buffer.append(s, s + n); }, in);
 }
 
 template <>
-bool Base64Impl<Standard>::validate(StringData s) {
+bool Base64Impl<Standard>::validate(std::string_view s) {
     if (s.size() % 4) {
         return false;
     }
@@ -244,7 +219,7 @@ bool Base64Impl<Standard>::validate(StringData s) {
 }
 
 template <>
-bool Base64Impl<URL>::validate(StringData s) {
+bool Base64Impl<URL>::validate(std::string_view s) {
     if (s.empty()) {
         return true;
     }

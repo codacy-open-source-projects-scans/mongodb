@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/parse_number.h"
 
@@ -43,6 +17,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 
 #include <absl/strings/charconv.h>
 #include <boost/cstdint.hpp>
@@ -50,6 +25,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Returns the value of the digit "c", with the same conversion behavior as strtol.
@@ -71,7 +47,7 @@ uint8_t _digitValue(char c) {
  * substring with any sign characters stripped away.  "*isNegative" is set to true if the
  * number is negative, and false otherwise.
  */
-inline StringData _extractSign(StringData stringValue, bool* isNegative) {
+inline std::string_view _extractSign(std::string_view stringValue, bool* isNegative) {
     if (stringValue.empty()) {
         *isNegative = false;
         return stringValue;
@@ -107,9 +83,9 @@ inline StringData _extractSign(StringData stringValue, bool* isNegative) {
  * Returns stringValue, unless it sets *outputBase to 16, in which case it will strip off the
  * "0x" or "0X" prefix, if present.
  */
-inline StringData _extractBase(StringData stringValue, int inputBase, int* outputBase) {
-    const auto hexPrefixLower = "0x"_sd;
-    const auto hexPrefixUpper = "0X"_sd;
+inline std::string_view _extractBase(std::string_view stringValue, int inputBase, int* outputBase) {
+    const auto hexPrefixLower = "0x"sv;
+    const auto hexPrefixUpper = "0X"sv;
     if (inputBase == 0) {
         if (stringValue.size() > 2 &&
             (stringValue.starts_with(hexPrefixLower) || stringValue.starts_with(hexPrefixUpper))) {
@@ -132,7 +108,7 @@ inline StringData _extractBase(StringData stringValue, int inputBase, int* outpu
     }
 }
 
-StatusWith<uint64_t> _parseMagnitude(StringData magnitudeStr,
+StatusWith<uint64_t> _parseMagnitude(std::string_view magnitudeStr,
                                      uint64_t base,
                                      const char** end,
                                      bool allowTrailingText) {
@@ -161,13 +137,13 @@ StatusWith<uint64_t> _parseMagnitude(StringData magnitudeStr,
     return n;
 }
 
-StringData removeLeadingWhitespace(StringData s) {
+std::string_view removeLeadingWhitespace(std::string_view s) {
     return s.substr(std::distance(
         s.begin(), std::find_if_not(s.begin(), s.end(), [](char c) { return ctype::isSpace(c); })));
 }
 
 template <std::integral NumberType>
-Status _parseNumber(StringData s,
+Status _parseNumber(std::string_view s,
                     NumberType* result,
                     const char** endptr,
                     const NumberParser& parser) {
@@ -222,7 +198,7 @@ Status _parseNumber(StringData s,
     return Status::OK();
 }
 
-Status _parseNumber(StringData stringValue,
+Status _parseNumber(std::string_view stringValue,
                     double* result,
                     const char** endptr,
                     const NumberParser& parser) {
@@ -268,7 +244,7 @@ Status _parseNumber(StringData stringValue,
     return Status::OK();
 }
 
-Status _parseNumber(StringData stringValue,
+Status _parseNumber(std::string_view stringValue,
                     Decimal128* result,
                     const char** endptr,
                     const NumberParser& parser) {
@@ -312,9 +288,9 @@ Status _parseNumber(StringData stringValue,
 }
 }  // namespace
 
-#define DEFINE_NUMBER_PARSER_OPERATOR(type)                                                      \
-    Status NumberParser::operator()(StringData stringValue, type* result, char** endPtr) const { \
-        return _parseNumber(stringValue, result, const_cast<const char**>(endPtr), *this);       \
+#define DEFINE_NUMBER_PARSER_OPERATOR(type)                                                  \
+    Status NumberParser::operator()(std::string_view s, type* out, const char** end) const { \
+        return _parseNumber(s, out, end, *this);                                             \
     }
 
 DEFINE_NUMBER_PARSER_OPERATOR(long)

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/move/utility_core.hpp>
-// IWYU pragma: no_include "cxxabi.h"
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/s/async_requests_sender.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -37,22 +10,40 @@
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/client/retry_strategy_server_parameters_gen.h"
+#include "mongo/db/commands/query_cmd/explain_gen.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
+#include "mongo/db/query/find_command_gen.h"
+#include "mongo/db/query/getmore_command_gen.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/sharding_environment/shard_shared_state_cache.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/executor/network_test_env.h"
-#include "mongo/s/async_requests_sender.h"
+#include "mongo/otel/traces/span/span.h"
+#include "mongo/otel/traces/span/span_names.h"
+#include "mongo/otel/traces/traces_test_util.h"
 #include "mongo/unittest/barrier.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 #include <system_error>
 
+#include <absl/container/flat_hash_map.h>
+#include <boost/move/utility_core.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+
 namespace mongo {
 
 namespace {
+using otel::traces::HasSpanName;
+using otel::traces::Parent;
+using ::testing::ElementsAre;
+
+using namespace std::literals::string_view_literals;
 
 const NamespaceString kTestNss = NamespaceString::createNamespaceString_forTest("testdb.testcoll");
 const HostAndPort kTestConfigShardHost = HostAndPort("FakeConfigHost", 12345);
@@ -297,7 +288,7 @@ TEST_F(AsyncRequestsSenderTest, DesignatedHostChosen) {
 
     auto shard1Secondary = kTestShardHosts[1][1];
     _targeters[1]->setConnectionStringReturnValue(
-        ConnectionString::forReplicaSet("shard1_rs"_sd, kTestShardHosts[1]));
+        ConnectionString::forReplicaSet("shard1_rs"sv, kTestShardHosts[1]));
     designatedHosts[kTestShardIds[1]] = shard1Secondary;
     auto ars = AsyncRequestsSender(operationContext(),
                                    executor(),
@@ -527,14 +518,15 @@ TEST_F(AsyncRequestsSenderTest, MultipleRetriesSystemOverloaded) {
     requests.emplace_back(kTestShardIds[1], BSON("find" << "bar"));
     requests.emplace_back(kTestShardIds[2], BSON("find" << "bar"));
 
-    constexpr int backoffMillis = 100;
-    FailPointEnableBlock fp{"setBackoffDelayForTesting", BSON("backoffDelayMs" << backoffMillis)};
+    constexpr Milliseconds baseBackoffMS{500};
+
+    FailPointEnableBlock fp{"returnMaxBackoffDelay"};
 
     auto shardState =
         ShardSharedStateCache::get(operationContext()).getShardState(kTestShardIds[2]);
 
     BSONObj resWithSystemOverloadedError =
-        createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded);
+        createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded, baseBackoffMS);
 
     auto ars = AsyncRequestsSender(operationContext(),
                                    executor(),
@@ -583,10 +575,234 @@ TEST_F(AsyncRequestsSenderTest, MultipleRetriesSystemOverloaded) {
         }
     }
 
+    constexpr auto kExpectedTotalBackoffWithBaseBackoffMS = Milliseconds{1000 + 2000 + 4000};
     ASSERT_EQ(shardState->stats.totalBackoffTimeMillis.load(),
-              backoffMillis * kDefaultClientMaxRetryAttemptsDefault);
+              kExpectedTotalBackoffWithBaseBackoffMS.count());
 
     future.default_timed_get();
 }
+
+TEST_F(AsyncRequestsSenderTest, DifferentTelemetryContextsSentPerShard) {
+    otel::traces::OtelTracesCapturer capturer;
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        return;
+    }
+
+    std::vector<otel::traces::SpanName> childSpanNames = {
+        otel::traces::span_names::kTest2,
+        otel::traces::span_names::kTest3,
+        otel::traces::span_names::kTest4,
+    };
+    // Maps each shard's target host to the telemetry context that was sent along with its
+    // request, so we can verify every shard got its own distinct context.
+    absl::flat_hash_map<HostAndPort, otel::TelemetryContext*> telemetryContextsByTarget;
+    {  // Start a real span on the opCtx so that RemoteData's cloneTelemetryContext has an active
+        // trace to clone; otherwise, no telemetry context would be created at all. We will end the
+        // span so that we can test span parenthood.
+        auto span = otel::traces::Span::start(operationContext(), otel::traces::span_names::kTest1);
+
+        std::vector<AsyncRequestsSender::Request> requests;
+        requests.emplace_back(kTestShardIds[0], BSON("find" << "bar"));
+        requests.emplace_back(kTestShardIds[1], BSON("find" << "bar"));
+        requests.emplace_back(kTestShardIds[2], BSON("find" << "bar"));
+
+        auto ars = AsyncRequestsSender(operationContext(),
+                                       executor(),
+                                       kTestNss.dbName(),
+                                       requests,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       Shard::RetryPolicy::kNoRetry,
+                                       nullptr /* no yielder */,
+                                       {} /* designatedHostsMap */);
+
+        auto future = launchAsync([&]() {
+            for (int i = 0; i < 3; ++i) {
+                auto response = ars.next();
+                ASSERT(response.swResponse.getStatus().isOK());
+            }
+        });
+
+        for (int i = 0; i < 3; ++i) {
+            onCommand([this, &telemetryContextsByTarget, &childSpanNames, i](const auto& request) {
+                ASSERT(request.cmdObj["find"]);
+                ASSERT_TRUE(static_cast<bool>(request.telemetryContext));
+                EXPECT_TRUE(request.telemetryContext->hasActiveTrace());
+                telemetryContextsByTarget[request.target] = request.telemetryContext.get();
+                // Start a span so we can verify the parent is correct.
+                auto span = otel::traces::Span::start(operationContext(), childSpanNames[i]);
+                return CursorResponse(kTestNss, 0LL, {BSON("x" << 1)})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
+        }
+
+        future.default_timed_get();
+    }
+
+    ASSERT_EQ(telemetryContextsByTarget.size(), 3);
+    EXPECT_NE(telemetryContextsByTarget[kTestShardHosts[0].front()],
+              telemetryContextsByTarget[kTestShardHosts[1].front()]);
+    EXPECT_NE(telemetryContextsByTarget[kTestShardHosts[1].front()],
+              telemetryContextsByTarget[kTestShardHosts[2].front()]);
+    EXPECT_NE(telemetryContextsByTarget[kTestShardHosts[0].front()],
+              telemetryContextsByTarget[kTestShardHosts[2].front()]);
+
+    EXPECT_THAT(capturer.getSpans(childSpanNames[0]),
+                ElementsAre(Parent(HasSpanName(otel::traces::span_names::kTest1))));
+    EXPECT_THAT(capturer.getSpans(childSpanNames[1]),
+                ElementsAre(Parent(HasSpanName(otel::traces::span_names::kTest1))));
+    EXPECT_THAT(capturer.getSpans(childSpanNames[2]),
+                ElementsAre(Parent(HasSpanName(otel::traces::span_names::kTest1))));
+}
+
+TEST_F(AsyncRequestsSenderTest, SameTelemetryContextAcrossRetriesForSameShard) {
+    otel::traces::OtelTracesCapturer capturer;
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        return;
+    }
+
+    auto span = otel::traces::Span::start(operationContext(), otel::traces::span_names::kTest1);
+
+    std::vector<AsyncRequestsSender::Request> requests;
+    requests.emplace_back(kTestShardIds[0], BSON("find" << "bar"));
+
+    auto ars = AsyncRequestsSender(operationContext(),
+                                   executor(),
+                                   kTestNss.dbName(),
+                                   requests,
+                                   ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                   Shard::RetryPolicy::kIdempotent,
+                                   nullptr /* no yielder */,
+                                   {} /* designatedHostsMap */);
+
+    std::shared_ptr<otel::TelemetryContext> firstAttemptCtx;
+    std::shared_ptr<otel::TelemetryContext> secondAttemptCtx;
+
+    auto future = launchAsync([&]() {
+        auto response = ars.next();
+        ASSERT(response.swResponse.getStatus().isOK());
+    });
+
+    // The first attempt fails with a retriable error; the retry should reuse the same telemetry
+    // context rather than creating a new one, since both attempts belong to the same RemoteData.
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_TRUE(static_cast<bool>(request.telemetryContext));
+        firstAttemptCtx = request.telemetryContext;
+        return Status(ErrorCodes::HostUnreachable, "mock network error");
+    });
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_TRUE(static_cast<bool>(request.telemetryContext));
+        secondAttemptCtx = request.telemetryContext;
+        return CursorResponse(kTestNss, 0LL, {BSON("x" << 1)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    future.default_timed_get();
+
+    EXPECT_TRUE(static_cast<bool>(firstAttemptCtx));
+    EXPECT_TRUE(static_cast<bool>(secondAttemptCtx));
+    EXPECT_EQ(firstAttemptCtx, secondAttemptCtx);
+}
+
+// Fixture for the SERVER-130922 tripwire, which asserts that a router forwarding a query settings
+// 'maxTimeMS' also reflects it in the command's own 'maxTimeMS'.
+class AsyncRequestsSenderQuerySettingsMaxTimeMSTest : public AsyncRequestsSenderTest {
+public:
+    void setUp() override {
+        AsyncRequestsSenderTest::setUp();
+
+        // The tripwire compares the forwarded 'maxTimeMS' against the router's own remaining
+        // budget, so the router needs a deadline of its own.
+        operationContext()->setDeadlineAfterNowBy(kRouterMaxTime, ErrorCodes::MaxTimeMSExpired);
+    }
+
+protected:
+    static constexpr Milliseconds kRouterMaxTime{5000};
+    static constexpr long long kQuerySettingsMaxTimeMS = 60'000;
+
+    static BSONObj makeCmdObj(std::string_view cmdName, long long cmdMaxTimeMS) {
+        return BSON(cmdName << "bar" << query_request_helper::cmdOptionMaxTimeMS << cmdMaxTimeMS
+                            << FindCommandRequest::kQuerySettingsFieldName
+                            << BSON(query_settings::QuerySettings::kMaxTimeMSFieldName
+                                    << kQuerySettingsMaxTimeMS));
+    }
+
+    // Asserts that 'cmdObj' passes the tripwire and reaches the shard.
+    void assertForwarded(BSONObj cmdObj) {
+        std::vector<AsyncRequestsSender::Request> requests;
+        requests.emplace_back(kTestShardIds[0], std::move(cmdObj));
+        auto ars = AsyncRequestsSender(operationContext(),
+                                       executor(),
+                                       kTestNss.dbName(),
+                                       requests,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       Shard::RetryPolicy::kNoRetry,
+                                       nullptr /* no yielder */,
+                                       {} /* designatedHostsMap */);
+
+        auto future = launchAsync([&]() { ASSERT_OK(ars.next().swResponse.getStatus()); });
+
+        onCommand([&](const auto&) {
+            return CursorResponse(kTestNss, 0LL, {BSON("x" << 1)})
+                .toBSON(CursorResponse::ResponseType::InitialResponse);
+        });
+
+        future.default_timed_get();
+    }
+
+    // Asserts that 'cmdObj' trips the tripwire, so it never reaches the network.
+    void assertTripwireFires(BSONObj cmdObj) {
+        std::vector<AsyncRequestsSender::Request> requests;
+        requests.emplace_back(kTestShardIds[0], std::move(cmdObj));
+        auto ars = AsyncRequestsSender(operationContext(),
+                                       executor(),
+                                       kTestNss.dbName(),
+                                       requests,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       Shard::RetryPolicy::kNoRetry,
+                                       nullptr /* no yielder */,
+                                       {} /* designatedHostsMap */);
+
+        // The tassert fires while the request is still being prepared, so the error is visible
+        // without pumping the network.
+        ASSERT_EQ(ars.next().swResponse.getStatus().code(), 13092200);
+
+        // The tripwire assertion was expected, so don't let it fail the test binary at exit.
+        assertionCount.tripwire.subtractAndFetch(1);
+    }
+};
+
+TEST_F(AsyncRequestsSenderQuerySettingsMaxTimeMSTest, StaleClientMaxTimeMSTripsAssertion) {
+    // A 'maxTimeMS' materially below the router's remaining budget is the stale client value the
+    // shard would otherwise prefer over the forwarded query settings one.
+    assertTripwireFires(makeCmdObj("find"sv, 100));
+}
+
+TEST_F(AsyncRequestsSenderQuerySettingsMaxTimeMSTest, ForwardingTheResolvedTotalIsAccepted) {
+    // The find/distinct convention: forward the resolved query settings value verbatim.
+    assertForwarded(makeCmdObj("find"sv, kQuerySettingsMaxTimeMS));
+}
+
+TEST_F(AsyncRequestsSenderQuerySettingsMaxTimeMSTest, ForwardingTheRemainingBudgetIsAccepted) {
+    // The aggregate targeted-dispatch convention: forward this router's remaining budget, read the
+    // same way 'sharded_agg_helpers.cpp' reads it. Because remaining time only decreases, the value
+    // captured here is always >= the one the tripwire re-reads, so this passes without needing any
+    // tolerance beyond fast-clock granularity.
+    auto remaining = durationCount<Milliseconds>(operationContext()->getRemainingMaxTimeMillis());
+    assertForwarded(makeCmdObj("aggregate"sv, remaining));
+}
+
+TEST_F(AsyncRequestsSenderQuerySettingsMaxTimeMSTest, GetMoreIsExempt) {
+    // On a getMore, 'maxTimeMS' is an await-time rather than a deadline.
+    assertForwarded(makeCmdObj(GetMoreCommandRequest::kCommandName, 100));
+}
+
+TEST_F(AsyncRequestsSenderQuerySettingsMaxTimeMSTest, ExplainIsExempt) {
+    // An explain deliberately does not enforce the query settings 'maxTimeMS'.
+    assertForwarded(makeCmdObj(ExplainCommandRequest::kCommandName, 100));
+}
+
 }  // namespace
 }  // namespace mongo

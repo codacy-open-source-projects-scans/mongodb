@@ -1,40 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/util/fail_point.h"
+#include "mongo/s/write_ops/batch_write_exec.h"
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -69,15 +39,14 @@
 #include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
-#include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
@@ -87,6 +56,10 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 namespace mongo {
 namespace {
@@ -412,8 +385,6 @@ TEST_F(BatchWriteExecTest, SingleOpUnordered) {
 }
 
 TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
-    // Enable query stats collection and configure rate limiting
-    RAIIServerParameterControllerForTest controller("featureFlagQueryStatsUpdateCommand", true);
     auto& limiter =
         query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
     limiter.configureWindowBased(-1);
@@ -499,7 +470,8 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
         for (auto&& u : actualBatchedUpdate.getUpdateRequest().getUpdates())
             ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
 
-        response.setQueryStatsMetrics({makeQueryStatsMetrics(0, 10, 5, 1)});
+        response.setQueryStatsMetrics({makeQueryStatsMetrics(
+            0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/)});
 
         return response.toBSON();
     });
@@ -4468,9 +4440,7 @@ TEST_F(BatchWriteExecTransactionTest, ErrorInBatchSets_TransientDispatchError) {
     future.default_timed_get();
 }
 
-TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromShardResponse) {
-    // Enable query stats collection and configure rate limiting
-    RAIIServerParameterControllerForTest controller("featureFlagQueryStatsUpdateCommand", true);
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromShardResponseForUpdates) {
     auto& limiter =
         query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
     limiter.configureWindowBased(-1);
@@ -4500,7 +4470,10 @@ TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromShardResponse) {
         batchedResponse.setN(2);
         batchedResponse.setNModified(2);
         batchedResponse.setQueryStatsMetrics(
-            {makeQueryStatsMetrics(0, 10, 5, 1), makeQueryStatsMetrics(1, 20, 15, 1)});
+            {makeQueryStatsMetrics(
+                 0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/),
+             makeQueryStatsMetrics(
+                 1 /*originalOpIndex*/, 20 /*keysExamined*/, 15 /*docsExamined*/, 1 /*nMatched*/)});
         return batchedResponse.toBSON();
     });
 
@@ -4524,9 +4497,7 @@ TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromShardResponse) {
     ASSERT_EQ(*metrics1.nModified, 1);
 }
 
-TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShards) {
-    // Enable query stats collection and configure rate limiting
-    RAIIServerParameterControllerForTest controller("featureFlagQueryStatsUpdateCommand", true);
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShardsForUpdates) {
     auto& limiter =
         query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
     limiter.configureWindowBased(-1);
@@ -4590,7 +4561,8 @@ TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShards) {
         batchedResponse.setStatus(Status::OK());
         batchedResponse.setN(1);
         batchedResponse.setNModified(1);
-        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(0, 10, 5, 1)});
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(
+            0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/)});
         return batchedResponse.toBSON();
     });
 
@@ -4601,7 +4573,8 @@ TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShards) {
         batchedResponse.setStatus(Status::OK());
         batchedResponse.setN(1);
         batchedResponse.setNModified(1);
-        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(0, 15, 8, 1)});
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(
+            0 /*originalOpIndex*/, 15 /*keysExamined*/, 8 /*docsExamined*/, 1 /*nMatched*/)});
         return batchedResponse.toBSON();
     });
 
@@ -4618,5 +4591,333 @@ TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShards) {
     ASSERT_EQ(*metrics0.nModified, 2);      // 1 + 1
 }
 
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromShardResponseForDelete) {
+    auto& limiter =
+        query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
+    limiter.configureWindowBased(-1);
+
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss);
+        deleteOp.setDeletes({write_ops::DeleteOpEntry(BSON("_id" << 0), false),
+                             write_ops::DeleteOpEntry(BSON("_id" << 1), false)});
+        return deleteOp;
+    }());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, deleteRequest, &response, &stats);
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(2);
+        batchedResponse.setQueryStatsMetrics(
+            {makeQueryStatsMetrics(
+                 0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/, 0),
+             makeQueryStatsMetrics(1 /*originalOpIndex*/,
+                                   20 /*keysExamined*/,
+                                   15 /*docsExamined*/,
+                                   1 /*nMatched*/,
+                                   0)});
+        return batchedResponse.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+    ASSERT_EQ(2, response.getN());
+
+    auto& opDebug = CurOp::get(operationContext())->debug();
+
+    ASSERT(opDebug.hasQueryStatsInfo(0));
+    const auto& metrics0 = opDebug.getAdditiveMetrics(0);
+    ASSERT_EQ(*metrics0.keysExamined, 10);
+    ASSERT_EQ(*metrics0.docsExamined, 5);
+
+    ASSERT(opDebug.hasQueryStatsInfo(1));
+    const auto& metrics1 = opDebug.getAdditiveMetrics(1);
+    ASSERT_EQ(*metrics1.keysExamined, 20);
+    ASSERT_EQ(*metrics1.docsExamined, 15);
+}
+
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShardsForDelete) {
+    auto& limiter =
+        query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
+    limiter.configureWindowBased(-1);
+
+    const static auto epoch = OID::gen();
+    const static Timestamp timestamp(2);
+
+    class MultiShardTargeter : public MockNSTargeter {
+    public:
+        using MockNSTargeter::MockNSTargeter;
+
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return std::vector{ShardEndpoint(kShardName1,
+                                             ShardVersionFactory::make(
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
+                                             boost::none),
+                               ShardEndpoint(kShardName2,
+                                             ShardVersionFactory::make(
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
+                                             boost::none)};
+        }
+    };
+
+    MultiShardTargeter multiShardNSTargeter(
+        nss,
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
+
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss);
+        deleteOp.setDeletes({write_ops::DeleteOpEntry(BSON("_id" << 0), false)});
+        return deleteOp;
+    }());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), multiShardNSTargeter, deleteRequest, &response, &stats);
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost1, request.target);
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(1);
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(
+            0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/)});
+        return batchedResponse.toBSON();
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(1);
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(
+            0 /*originalOpIndex*/, 15 /*keysExamined*/, 8 /*docsExamined*/, 1 /*nMatched*/)});
+        return batchedResponse.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+    ASSERT_EQ(2, response.getN());
+
+    auto& opDebug = CurOp::get(operationContext())->debug();
+    ASSERT(opDebug.hasQueryStatsInfo(0));
+    const auto& metrics0 = opDebug.getAdditiveMetrics(0);
+    ASSERT_EQ(*metrics0.keysExamined, 25);  // 10 + 15
+    ASSERT_EQ(*metrics0.docsExamined, 13);  // 5 + 8
+}
+
+// Verifies each outgoing delete op entry is stamped with includeQueryStatsMetricsForOpIndex,
+// instructing the shard to return per-op metrics.
+TEST_F(BatchWriteExecTest, QueryStatsMetricsFieldSetOnOutgoingDeleteRequest) {
+    auto& limiter =
+        query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
+    limiter.configureWindowBased(-1);
+
+    BatchedCommandRequest deleteRequest([&] {
+        write_ops::DeleteCommandRequest deleteOp(nss);
+        deleteOp.setDeletes({write_ops::DeleteOpEntry(BSON("_id" << 0), false),
+                             write_ops::DeleteOpEntry(BSON("_id" << 1), false)});
+        return deleteOp;
+    }());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, deleteRequest, &response, &stats);
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualDelete(BatchedCommandRequest::parseDelete(opMsgRequest));
+        const auto& deletes = actualDelete.getDeleteRequest().getDeletes();
+
+        ASSERT_EQ(*deletes[0].getIncludeQueryStatsMetricsForOpIndex(), 0);
+        ASSERT_EQ(*deletes[1].getIncludeQueryStatsMetricsForOpIndex(), 1);
+
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
+        response.setN(2);
+        response.setQueryStatsMetrics(
+            {makeQueryStatsMetrics(
+                 0 /*originalOpIndex*/, 10 /*keysExamined*/, 5 /*docsExamined*/, 1 /*nMatched*/),
+             makeQueryStatsMetrics(
+                 1 /*originalOpIndex*/, 20 /*keysExamined*/, 15 /*docsExamined*/, 1 /*nMatched*/)});
+        return response.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+
+    auto& opDebug = CurOp::get(operationContext())->debug();
+    ASSERT(opDebug.hasQueryStatsInfo(0));
+    ASSERT_EQ(*opDebug.getAdditiveMetrics(0).keysExamined, 10);
+    ASSERT(opDebug.hasQueryStatsInfo(1));
+    ASSERT_EQ(*opDebug.getAdditiveMetrics(1).keysExamined, 20);
+}
+
+// Tests that queryStatsMetrics from single shard response for insert commands are aggregated into
+// OpDebug.
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromSingleShardForInsert) {
+    auto& limiter =
+        query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
+    limiter.configureWindowBased(-1);
+
+    BatchedCommandRequest insertRequest([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setDocuments({BSON("x" << 1), BSON("x" << 2)});
+        return insertOp;
+    }());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), singleShardNSTargeter, insertRequest, &response, &stats);
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        // Verifies that the outgoing insert request has includeQueryStatsMetrics set.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
+        const auto& inserts = actualBatchedInsert.getInsertRequest();
+        ASSERT_TRUE(inserts.getIncludeQueryStatsMetrics());
+
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(2);
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(0 /*originalOpIndex*/,
+                                                                    0 /*keysExamined*/,
+                                                                    0 /*docsExamined*/,
+                                                                    0 /*nMatched*/,
+                                                                    2 /*nInserted*/)});
+        return batchedResponse.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+    ASSERT_EQ(2, response.getN());
+
+    auto& opDebug = CurOp::get(operationContext())->debug();
+    ASSERT(opDebug.hasQueryStatsInfo(0));
+    const auto& metrics = opDebug.getAdditiveMetrics(0);
+    ASSERT_EQ(*metrics.ninserted, 2);
+}
+
+// Tests that queryStatsMetrics from multiple shard responses for insert commands are aggregated
+// into OpDebug.
+TEST_F(BatchWriteExecTest, QueryStatsMetricsAggregatedFromMultipleShardsForInsert) {
+    auto& limiter =
+        query_stats::QueryStatsStoreManager::getWriteCmdRateLimiter(getServiceContext());
+    limiter.configureWindowBased(-1);
+
+    const static auto epoch = OID::gen();
+    const static Timestamp timestamp(2);
+
+    // Inserts always include the full document, so the shard key value is known and can be
+    // deterministically mapped to exactly one shard. Unlike updates and deletes, a single insert
+    // op cannot be broadcast to multiple shards, so no custom MultiShardTargeter is needed here to
+    // test aggregation across shards for a single op. Aggregation only needs to be tested across
+    // ops in a single batch.
+    MockNSTargeter multiShardNSTargeter(
+        nss,
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
+
+    BatchedCommandRequest insertRequest([&] {
+        write_ops::InsertCommandRequest insertOp(nss);
+        insertOp.setDocuments({BSON("x" << -1), BSON("x" << 1)});
+        return insertOp;
+    }());
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), multiShardNSTargeter, insertRequest, &response, &stats);
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost1, request.target);
+        // Verifies that the outgoing insert request has includeQueryStatsMetrics set.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
+        const auto& inserts = actualBatchedInsert.getInsertRequest();
+        ASSERT_TRUE(inserts.getIncludeQueryStatsMetrics());
+
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(1);
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(0 /*originalOpIndex*/,
+                                                                    0 /*keysExamined*/,
+                                                                    0 /*docsExamined*/,
+                                                                    0 /*nMatched*/,
+                                                                    1 /*nInserted*/)});
+        return batchedResponse.toBSON();
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
+        // Verifies that the outgoing insert request has includeQueryStatsMetrics set.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedInsert(BatchedCommandRequest::parseInsert(opMsgRequest));
+        const auto& inserts = actualBatchedInsert.getInsertRequest();
+        ASSERT_TRUE(inserts.getIncludeQueryStatsMetrics());
+
+        BatchedCommandResponse batchedResponse;
+        batchedResponse.setStatus(Status::OK());
+        batchedResponse.setN(1);
+        batchedResponse.setQueryStatsMetrics({makeQueryStatsMetrics(0 /*originalOpIndex*/,
+                                                                    0 /*keysExamined*/,
+                                                                    0 /*docsExamined*/,
+                                                                    0 /*nMatched*/,
+                                                                    1 /*nInserted*/)});
+        return batchedResponse.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+    ASSERT_EQ(2, response.getN());
+
+    auto& opDebug = CurOp::get(operationContext())->debug();
+    ASSERT(opDebug.hasQueryStatsInfo(0));
+    const auto& metrics = opDebug.getAdditiveMetrics(0);
+    ASSERT_EQ(*metrics.ninserted, 2);  // 1 + 1 from each shard.
+}
 }  // namespace
 }  // namespace mongo

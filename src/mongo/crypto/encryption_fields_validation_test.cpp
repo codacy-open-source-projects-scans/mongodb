@@ -1,44 +1,18 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/encryption_fields_validation.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/crypto/encryption_fields_gen.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/unittest/unittest.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 TEST(FLEValidationUtils, ValidateDoublePrecisionRange) {
     ASSERT(validateDoublePrecisionRange(3.000, 0));
@@ -113,7 +87,7 @@ Status validateRangeIndexTest(int trimFactor,
     indexConfig.setTrimFactor(trimFactor);
     indexConfig.setSparsity(1);
     try {
-        validateRangeIndex(fieldType, "rangeField"_sd, indexConfig);
+        validateRangeIndex(fieldType, "rangeField"sv, indexConfig);
         return Status::OK();
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -165,6 +139,31 @@ TEST(FLEValidationUtils, ValidateTrimFactorRange) {
 
     ASSERT_OK(validateRangeIndexTest(7, BSONType::numberDecimal, boost::none, boost::none));
     ASSERT_NOT_OK(validateRangeIndexTest(128, BSONType::numberDecimal, boost::none, boost::none));
+}
+
+TEST(FLEValidationUtils, GetNumberOfBitsInDomainFromConfig) {
+    auto makeConfig = [](const boost::optional<Value>& min,
+                         const boost::optional<Value>& max,
+                         const boost::optional<int32_t>& precision = boost::none) {
+        QueryTypeConfig config;
+        config.setMin(min);
+        config.setMax(max);
+        config.setPrecision(precision);
+        return config;
+    };
+
+    // Explicit bounds: 2^2 > 3 values needs 2 bits.
+    ASSERT_EQ(2u, getNumberOfBitsInDomain(BSONType::numberInt, makeConfig(Value(0), Value(2))));
+
+    // Unset bounds fall back to the type's full domain (32 bits for int).
+    ASSERT_EQ(32u,
+              getNumberOfBitsInDomain(BSONType::numberInt, makeConfig(boost::none, boost::none)));
+
+    // The config overload agrees with the explicit-defaults overload it wraps.
+    auto [defMin, defMax] = getRangeMinMaxDefaults(BSONType::numberLong);
+    ASSERT_EQ(
+        getNumberOfBitsInDomain(BSONType::numberLong, defMin, defMax, boost::optional<uint32_t>{}),
+        getNumberOfBitsInDomain(BSONType::numberLong, makeConfig(boost::none, boost::none)));
 }
 
 TEST(FLEValidationUtils, ValidateTrimFactorRangeInt32) {
@@ -352,23 +351,23 @@ TEST(FLEValidationUtils, parseQueryTypeConfig) {
 
     // Substring
     BSONObj tooLowStrMaxLengthSubstr =
-        BSON("queryType" << "substringPreview" << "strMaxLength" << -1 << "strMinQueryLength" << 2
-                         << "strMaxQueryLength" << 10 << "caseSensitive" << true
+        BSON("queryType" << "substring" << "strMaxLength" << -1 << "strMinQueryLength" << 2
+                         << "strMaxQueryLength" << 6 << "caseSensitive" << true
                          << "diacriticSensitive" << false);
     ASSERT_THROWS_CODE(QueryTypeConfig::parse(tooLowStrMaxLengthSubstr,
                                               IDLParserContext{"parseQueryTypeConfigTest"}),
                        DBException,
                        ErrorCodes::BadValue);
     BSONObj tooLowStrMinQueryLengthSubstr =
-        BSON("queryType" << "substringPreview" << "strMaxLength" << 250 << "strMinQueryLength" << -1
-                         << "strMaxQueryLength" << 10 << "caseSensitive" << true
+        BSON("queryType" << "substring" << "strMaxLength" << 250 << "strMinQueryLength" << -1
+                         << "strMaxQueryLength" << 6 << "caseSensitive" << true
                          << "diacriticSensitive" << false);
     ASSERT_THROWS_CODE(QueryTypeConfig::parse(tooLowStrMinQueryLengthSubstr,
                                               IDLParserContext{"parseQueryTypeConfigTest"}),
                        DBException,
                        ErrorCodes::BadValue);
     BSONObj tooLowStrMaxQueryLengthSubstr =
-        BSON("queryType" << "substringPreview" << "strMaxLength" << 250 << "strMinQueryLength" << 2
+        BSON("queryType" << "substring" << "strMaxLength" << 250 << "strMinQueryLength" << 2
                          << "strMaxQueryLength" << -1 << "caseSensitive" << true
                          << "diacriticSensitive" << false);
     ASSERT_THROWS_CODE(QueryTypeConfig::parse(tooLowStrMaxQueryLengthSubstr,
@@ -376,8 +375,8 @@ TEST(FLEValidationUtils, parseQueryTypeConfig) {
                        DBException,
                        ErrorCodes::BadValue);
     BSONObj validSubstringConfig =
-        BSON("queryType" << "substringPreview" << "strMaxLength" << 250 << "strMinQueryLength" << 2
-                         << "strMaxQueryLength" << 10 << "caseSensitive" << true
+        BSON("queryType" << "substring" << "strMaxLength" << 250 << "strMinQueryLength" << 2
+                         << "strMaxQueryLength" << 6 << "caseSensitive" << true
                          << "diacriticSensitive" << false);
     ASSERT_DOES_NOT_THROW(
         QueryTypeConfig::parse(validSubstringConfig, IDLParserContext{"parseQueryTypeConfigTest"}));
@@ -424,8 +423,15 @@ TEST(FLEValidationUtils, parseQueryTypeConfig) {
     ASSERT_DOES_NOT_THROW(
         QueryTypeConfig::parse(validSuffixConfig, IDLParserContext{"parseQueryTypeConfigTest"}));
 
-    // Deprecated "suffixPreview" and "prefixPreview" strings should still parse for backwards
-    // compatibility with existing collections.
+    // Deprecated "substringPreview", "suffixPreview" and "prefixPreview" strings should still parse
+    // for backwards compatibility with existing collections.
+    BSONObj deprecatedSubstringConfig =
+        BSON("queryType" << "substringPreview" << "strMinQueryLength" << 2 << "strMaxQueryLength"
+                         << 10 << "caseSensitive" << true << "diacriticSensitive" << false);
+    auto parsedSubstring = QueryTypeConfig::parse(deprecatedSubstringConfig,
+                                                  IDLParserContext{"parseQueryTypeConfigTest"});
+    ASSERT_EQ(parsedSubstring.getQueryType(), QueryTypeEnum::SubstringPreviewDeprecated);
+
     BSONObj deprecatedSuffixConfig =
         BSON("queryType" << "suffixPreview" << "strMinQueryLength" << 2 << "strMaxQueryLength" << 10
                          << "caseSensitive" << true << "diacriticSensitive" << false);
@@ -442,7 +448,7 @@ TEST(FLEValidationUtils, parseQueryTypeConfig) {
 }
 
 QueryTypeConfig validateTextSearchIndexCommonTests(QueryTypeEnum qtype) {
-    constexpr StringData field = "foo"_sd;
+    constexpr std::string_view field = "foo"sv;
     constexpr int32_t kMin = 2, kMax = 8;
     QueryTypeConfig qtc;
     qtc.setQueryType(qtype);
@@ -537,26 +543,26 @@ QueryTypeConfig validateTextSearchIndexCommonTests(QueryTypeEnum qtype) {
 }
 
 TEST(FLEValidationUtils, ValidateTextSearchIndexSubstring) {
-    QueryTypeConfig qtc = validateTextSearchIndexCommonTests(QueryTypeEnum::SubstringPreview);
+    QueryTypeConfig qtc = validateTextSearchIndexCommonTests(QueryTypeEnum::Substring);
 
     // Missing max length
     qtc.setStrMaxLength(boost::none);
     ASSERT_THROWS_CODE(validateTextSearchIndex(
-                           BSONType::string, "foo"_sd, qtc, boost::none, boost::none, boost::none),
+                           BSONType::string, "foo"sv, qtc, boost::none, boost::none, boost::none),
                        AssertionException,
                        9783407);
     // max query length > max length
     qtc.setStrMaxLength(5);
-    qtc.setStrMaxQueryLength(10);
+    qtc.setStrMaxQueryLength(6);
     qtc.setStrMinQueryLength(2);
     ASSERT_THROWS_CODE(validateTextSearchIndex(
-                           BSONType::string, "foo"_sd, qtc, boost::none, boost::none, boost::none),
+                           BSONType::string, "foo"sv, qtc, boost::none, boost::none, boost::none),
                        AssertionException,
                        9783408);
     // Make sure valid configuration passes.
     qtc.setStrMaxLength(400);
     qtc.setStrMinQueryLength(2);
-    qtc.setStrMaxQueryLength(10);
+    qtc.setStrMaxQueryLength(6);
     ASSERT_DOES_NOT_THROW(validateTextSearchIndex(
         BSONType::string, "foo", qtc, boost::none, boost::none, boost::none));
 }
@@ -600,7 +606,7 @@ TEST(FLEValidationUtils, ValidateTextSearchIndexBadQueryType) {
         qtc.setQueryType(qtype);
         ASSERT_THROWS_CODE(
             validateTextSearchIndex(
-                BSONType::string, "foo"_sd, qtc, boost::none, boost::none, boost::none),
+                BSONType::string, "foo"sv, qtc, boost::none, boost::none, boost::none),
             AssertionException,
             9783401);
     }

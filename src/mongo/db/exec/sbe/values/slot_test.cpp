@@ -1,41 +1,18 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
-static StringData longString = {"long_string_1"_sd};
+static std::string_view longString = {"long_string_1"sv};
 
 template <typename SlotType>
 class SlotTestBase {
@@ -95,7 +72,7 @@ public:
         };
 
         SlotType slot;
-        setValue(slot, true, value::makeNewString("other_long_string"_sd));
+        setValue(slot, true, value::makeNewString("other_long_string"sv));
 
         slot = mkSlot();
         verifyLargeString(slot);
@@ -105,7 +82,7 @@ public:
         SlotType slot;
 
         auto expected = value::makeNewString(longString);
-        value::ValueGuard expectedGuard(expected);
+        value::TagValueOwned expectedOwned = value::TagValueOwned::fromRaw(expected);
 
         setValue(slot, true, value::makeNewString(longString));
 
@@ -139,11 +116,11 @@ private:
     }
 
     void setValue(SlotType& slot, bool owned, TypedValue p) {
-        slot.reset(owned, p.first, p.second);
+        slot.reset(value::TagValueMaybeOwned{owned, p.first, p.second});
     }
 
     void verifyValue(SlotType& slot, TypedValue p) {
-        value::ValueGuard guard(p);
+        value::TagValueOwned pOwned = value::TagValueOwned::fromRaw(p);
         ASSERT_THAT(slot.getViewOfValue(), ValueEq(p));
     }
 
@@ -195,8 +172,8 @@ public:
         // Test getOwnedBSONObj on unowned bsonObject
         {
             value::BSONObjValueAccessor slot;
-            slot.reset(
-                false, value::TypeTags::bsonObject, value::bitcastFrom<const char*>(obj.objdata()));
+            slot.reset(value::TagValueView{value::TypeTags::bsonObject,
+                                           value::bitcastFrom<const char*>(obj.objdata())});
             auto [tag, val] = slot.getViewOfValue();
             auto slotData = value::bitcastTo<const char*>(val);
 
@@ -213,8 +190,8 @@ public:
         // Test getOwnedBSONObj on owned bsonObject
         {
             value::BSONObjValueAccessor slot;
-            slot.reset(
-                false, value::TypeTags::bsonObject, value::bitcastFrom<const char*>(obj.objdata()));
+            slot.reset(value::TagValueView{value::TypeTags::bsonObject,
+                                           value::bitcastFrom<const char*>(obj.objdata())});
             slot.makeOwned();
             auto [tag, val] = slot.getViewOfValue();
             auto slotData = value::bitcastTo<const char*>(val);

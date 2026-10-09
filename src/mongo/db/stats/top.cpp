@@ -1,69 +1,82 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/stats/top.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/namespace_string_util.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/operation_latency_histogram.h"
+#include "mongo/otel/metrics/metric_names.h"
+#include "mongo/otel/metrics/metrics_attributes.h"
+#include "mongo/otel/metrics/metrics_histogram.h"
+#include "mongo/otel/metrics/metrics_service.h"
+#include "mongo/util/duration.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace mongo {
 namespace {
 
+using namespace std::literals::string_view_literals;
+
 const auto getTop = ServiceContext::declareDecoration<Top>();
 const auto getServiceLatencyTracker = Service::declareDecoration<ServiceLatencyTracker>();
+
+// OTel histogram mirroring opLatencies.reads/.writes/.commands in serverStatus.
+// Records elapsedTimeExcludingPauses() in microseconds, broken down by op_type.
+// Bucket boundaries are derived from OperationLatencyHistogram's lower bounds (same edges),
+// so bucket populations are closely comparable. Note a minor semantic difference: OTel uses
+// inclusive upper bounds (e.g. (-inf, 2]), while OperationLatencyHistogram uses exclusive
+// upper bounds (e.g. [0, 2)), so a value exactly equal to a boundary (e.g. 2 µs) lands in
+// different buckets in the two histograms. For monitoring purposes this is negligible.
+const otel::metrics::AttributeDefinition<std::string_view> kOpTypeAttrDef{
+    .name = "op_type", .values = {"read"sv, "write"sv, "command"sv}};
+
+otel::metrics::Histogram<int64_t, std::string_view>& operationLatencyHistogram =
+    otel::metrics::MetricsService::instance().createInt64Histogram<std::string_view>(
+        otel::metrics::MetricNames::kOperationLatency,
+        "Wall-clock time of completed user operations excluding storage-engine yield time, "
+        "broken down by operation type (read/write/command).",
+        otel::metrics::MetricUnit::kMicroseconds,
+        kOpTypeAttrDef,
+        {.explicitBucketBoundaries =
+             operation_latency_histogram_details::makeOperationLatencyBucketBoundaries()});
+
+// Returns the op_type attribute string for OTel recording, or nullopt for op types excluded from
+// this histogram. kTransaction is tracked separately via incrementForTransaction and is
+// intentionally excluded here; if it should appear in future, add it in incrementForTransaction.
+std::optional<std::string_view> opTypeString(Command::ReadWriteType rwType) {
+    switch (rwType) {
+        case Command::ReadWriteType::kRead:
+            return "read"sv;
+        case Command::ReadWriteType::kWrite:
+            return "write"sv;
+        case Command::ReadWriteType::kCommand:
+            return "command"sv;
+        case Command::ReadWriteType::kTransaction:
+            return std::nullopt;
+        default:
+            MONGO_UNREACHABLE_TASSERT(12445300);
+    }
+}
 
 template <typename HistogramType>
 void incrementHistogram(OperationContext* opCtx,
                         long long latency,
                         HistogramType& histogram,
                         Command::ReadWriteType readWriteType) {
-    const auto isQueryableEncryptionOperation = [&] {
-        auto curOp = CurOp::get(opCtx);
-        while (curOp) {
-            if (curOp->getShouldOmitDiagnosticInformation()) {
-                return true;
-            }
-            curOp = curOp->parent();
-        }
-        return false;
-    }();
-    histogram.increment(latency, readWriteType, isQueryableEncryptionOperation);
+    histogram.increment(latency,
+                        readWriteType,
+                        CurOp::shouldCurOpStackOmitDiagnosticInformation(CurOp::get(opCtx)));
 }
 
 template <typename HistogramType>
@@ -71,22 +84,25 @@ void incrementHistogramForUser(OperationContext* opCtx,
                                long long latency,
                                HistogramType& histogram,
                                Command::ReadWriteType readWriteType) {
-    if (auto c = opCtx->getClient(); !c->isFromUserConnection() || c->isInDirectClient()) {
-        // Only update histogram if operation came from a user.
+    if (!opCtx->getClient()->isExternalUserConnection())
         return;
-    }
     incrementHistogram(opCtx, latency, histogram, readWriteType);
 }
 
-void updateCollectionData(WithLock,
-                          OperationContext* opCtx,
+void updateCollectionData(OperationContext* opCtx,
                           Top::CollectionData& c,
                           LogicalOp logicalOp,
                           Top::LockType lockType,
                           long long micros,
                           Command::ReadWriteType readWriteType) {
-    if (c.isStatsRecordingAllowed) {
-        c.isStatsRecordingAllowed = !CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
+    // isStatsRecordingAllowed is sticky-false: once any op observes
+    // shouldOmitDiagnosticInformation, it stays false. Concurrent writers all converge to false
+    // idempotently — there is no false→true transition, so a relaxed CAS-style
+    // read-then-conditional-store is safe.
+    if (c.isStatsRecordingAllowed.loadRelaxed()) {
+        if (CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()) {
+            c.isStatsRecordingAllowed.storeRelaxed(false);
+        }
     }
 
     incrementHistogramForUser(opCtx, micros, c.opLatencyHistogram, readWriteType);
@@ -133,6 +149,10 @@ void updateCollectionData(WithLock,
 ServiceLatencyTracker::ServiceLatencyTracker()
     : _totalTime({.includeEmptyBuckets = true, .logBucketScalingFactor = 3}) {}
 
+bool shouldRecordLatencyStats(OperationContext* opCtx) {
+    return opCtx->shouldIncrementLatencyStats() && opCtx->getClient()->isExternalUserConnection();
+}
+
 ServiceLatencyTracker& ServiceLatencyTracker::getDecoration(Service* service) {
     return getServiceLatencyTracker(service);
 }
@@ -141,13 +161,21 @@ void ServiceLatencyTracker::increment(OperationContext* opCtx,
                                       Microseconds latency,
                                       Microseconds workingTime,
                                       Command::ReadWriteType readWriteType) {
-    if (!opCtx->shouldIncrementLatencyStats())
+    if (!shouldRecordLatencyStats(opCtx))
         return;
 
+    const bool isQE = CurOp::shouldCurOpStackOmitDiagnosticInformation(CurOp::get(opCtx));
     auto latencyCount = durationCount<Microseconds>(latency);
     auto workingTimeCount = durationCount<Microseconds>(workingTime);
-    incrementHistogramForUser(opCtx, latencyCount, _totalTime, readWriteType);
-    incrementHistogramForUser(opCtx, workingTimeCount, _workingTime, readWriteType);
+    _totalTime.increment(latencyCount, readWriteType, isQE);
+    _workingTime.increment(workingTimeCount, readWriteType, isQE);
+    // OTel histogram records non-QE user ops only. QE ops are intentionally excluded:
+    // their latency is tracked via opLatencies.*.queryableEncryptionLatencyMicros instead.
+    if (!isQE) {
+        if (auto opType = opTypeString(readWriteType)) {
+            operationLatencyHistogram.record(latencyCount, {*opType});
+        }
+    }
 }
 
 void ServiceLatencyTracker::appendTotalTimeStats(bool includeHistograms,
@@ -185,9 +213,9 @@ void Top::record(OperationContext* opCtx,
 
     auto hashedNs = UsageMap::hasher().hashed_key(nssStr);
     auto microsCount = durationCount<Microseconds>(micros);
-    std::lock_guard lk(_lockUsage);
-    CollectionData& coll = _usage[hashedNs];
-    updateCollectionData(lk, opCtx, coll, logicalOp, lockType, microsCount, readWriteType);
+    _withCollectionData(hashedNs, [&](CollectionData& coll) {
+        updateCollectionData(opCtx, coll, logicalOp, lockType, microsCount, readWriteType);
+    });
 }
 
 void Top::record(OperationContext* opCtx,
@@ -208,10 +236,33 @@ void Top::record(OperationContext* opCtx,
     }
 
     auto microsCount = durationCount<Microseconds>(micros);
-    std::lock_guard lk(_lockUsage);
-    for (const auto& hashedNs : hashedSet) {
-        CollectionData& coll = _usage[hashedNs];
-        updateCollectionData(lk, opCtx, coll, logicalOp, lockType, microsCount, readWriteType);
+
+    // Open-coded version of _withCollectionData so the shared lock is acquired once for
+    // the whole batch instead of per-namespace. Don't replace with per-key calls to the
+    // helper without re-benchmarking — N shared-lock acquires cost more than this loop.
+    std::vector<size_t> missing;
+    {
+        std::shared_lock lk(_lockUsage);  // NOLINT
+        for (size_t i = 0; i < hashedSet.size(); ++i) {
+            auto it = _usage.find(hashedSet[i]);
+            if (it != _usage.end()) {
+                updateCollectionData(
+                    opCtx, *it->second, logicalOp, lockType, microsCount, readWriteType);
+            } else {
+                missing.push_back(i);
+            }
+        }
+    }
+
+    if (!missing.empty()) {
+        std::lock_guard lk(_lockUsage);
+        for (auto idx : missing) {
+            auto& entry = _usage[hashedSet[idx]];
+            if (!entry) {
+                entry = std::make_unique<CollectionData>();
+            }
+            updateCollectionData(opCtx, *entry, logicalOp, lockType, microsCount, readWriteType);
+        }
     }
 }
 
@@ -221,10 +272,10 @@ void Top::collectionDropped(const NamespaceString& nss) {
     _usage.erase(nssStr);
 }
 
-void Top::appendStatsEntry(BSONObjBuilder& b, StringData name, const UsageData& data) {
+void Top::appendStatsEntry(BSONObjBuilder& b, std::string_view name, const UsageData& data) {
     BSONObjBuilder bb(b.subobjStart(name));
-    bb.appendNumber("time", data.time);
-    bb.appendNumber("count", data.count);
+    bb.appendNumber("time", data.time.loadRelaxed());
+    bb.appendNumber("count", data.count.loadRelaxed());
     bb.done();
 }
 
@@ -243,7 +294,7 @@ void Top::appendUsageStatsForCollection(BSONObjBuilder& result, const Collection
 }
 
 void Top::append(BSONObjBuilder& topStatsBuilder) {
-    std::lock_guard lk(_lockUsage);
+    std::shared_lock lk(_lockUsage);  // NOLINT
 
     // Pull all the names into a vector so we can sort them for the user.
     std::vector<std::string> names;
@@ -256,9 +307,9 @@ void Top::append(BSONObjBuilder& topStatsBuilder) {
     for (size_t i = 0; i < names.size(); i++) {
         BSONObjBuilder bb(topStatsBuilder.subobjStart(names[i]));
 
-        const CollectionData& coll = _usage.find(names[i])->second;
+        const CollectionData& coll = *_usage.find(names[i])->second;
         auto pos = names[i].find('.');
-        if (coll.isStatsRecordingAllowed &&
+        if (coll.isStatsRecordingAllowed.loadRelaxed() &&
             !NamespaceString::isFLE2StateCollection(names[i].substr(pos + 1))) {
             appendUsageStatsForCollection(topStatsBuilder, coll);
         }
@@ -271,29 +322,26 @@ void Top::appendLatencyStats(const NamespaceString& nss,
                              BSONObjBuilder* builder) {
     const auto nssStr = NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
     auto hashedNs = UsageMap::hasher().hashed_key(nssStr);
-    std::lock_guard lk(_lockUsage);
-    BSONObjBuilder latencyStatsBuilder;
-    _usage[hashedNs].opLatencyHistogram.append(includeHistograms, false, &latencyStatsBuilder);
-    builder->append("ns", nssStr);
-    builder->append("latencyStats", latencyStatsBuilder.obj());
+    _withCollectionData(hashedNs, [&](const CollectionData& coll) {
+        BSONObjBuilder latencyStatsBuilder;
+        coll.opLatencyHistogram.append(includeHistograms, false, &latencyStatsBuilder);
+        builder->append("ns", nssStr);
+        builder->append("latencyStats", latencyStatsBuilder.obj());
+    });
 }
 
 void Top::appendOperationStats(const NamespaceString& nss, BSONObjBuilder* builder) {
     const auto nssStr = NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
     auto hashedNs = UsageMap::hasher().hashed_key(nssStr);
-    std::lock_guard lk(_lockUsage);
-    BSONObjBuilder opStatsBuilder;
-
-    // Appends usage statistics to operationStats object.
-    const CollectionData& coll = _usage[hashedNs];
-    auto pos = nssStr.find('.');
-    if (coll.isStatsRecordingAllowed &&
-        !NamespaceString::isFLE2StateCollection(nssStr.substr(pos + 1))) {
-        appendUsageStatsForCollection(opStatsBuilder, coll);
-    }
-
-    // Appends operationStats BSONbuilder object to return output.
-    builder->append("ns", nssStr);
-    builder->append("operationStats", opStatsBuilder.obj());
+    _withCollectionData(hashedNs, [&](const CollectionData& coll) {
+        BSONObjBuilder opStatsBuilder;
+        auto pos = nssStr.find('.');
+        if (coll.isStatsRecordingAllowed.loadRelaxed() &&
+            !NamespaceString::isFLE2StateCollection(nssStr.substr(pos + 1))) {
+            appendUsageStatsForCollection(opStatsBuilder, coll);
+        }
+        builder->append("ns", nssStr);
+        builder->append("operationStats", opStatsBuilder.obj());
+    });
 }
 }  // namespace mongo

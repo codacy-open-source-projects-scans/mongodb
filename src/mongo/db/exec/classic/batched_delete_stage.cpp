@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/exec/classic/batched_delete_stage.h"
@@ -73,6 +47,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(throwWriteConflictExceptionInBatchedDeleteStage);
 MONGO_FAIL_POINT_DEFINE(batchedDeleteStageSleepAfterNDocuments);
@@ -91,7 +66,7 @@ static size_t kApplyOpsNonArrayEntryPaddingBytes = 256;
 // Size of an applyOps entry, excluding its array.
 static size_t kApplyOpsArrayEntryPaddingBytes = 256;
 
-void incrementSSSMetricNoOverflow(AtomicWord<long long>& metric, long long value) {
+void incrementSSSMetricNoOverflow(Atomic<long long>& metric, long long value) {
     const int64_t MAX = 1ULL << 60;
 
     if (metric.loadRelaxed() > MAX) {
@@ -123,11 +98,11 @@ struct BatchedDeletesSSS : ServerStatusSection {
         return bob.obj();
     }
 
-    AtomicWord<long long> batches{0};
-    AtomicWord<long long> docs{0};
-    AtomicWord<long long> stagedSizeBytes{0};
-    AtomicWord<long long> timeInBatchMillis{0};
-    AtomicWord<long long> refetchesDueToYield{0};
+    Atomic<long long> batches{0};
+    Atomic<long long> docs{0};
+    Atomic<long long> stagedSizeBytes{0};
+    Atomic<long long> timeInBatchMillis{0};
+    Atomic<long long> refetchesDueToYield{0};
 };
 auto& batchedDeletesSSS =
     *ServerStatusSectionBuilder<BatchedDeletesSSS>("batchedDeletes").forShard();
@@ -139,7 +114,7 @@ BatchedDeleteStage::BatchedDeleteStage(
     WorkingSet* ws,
     CollectionAcquisition collection,
     PlanStage* child)
-    : DeleteStage::DeleteStage(kStageType.data(), expCtx, std::move(params), ws, collection, child),
+    : DeleteStage::DeleteStage(kStageType, expCtx, std::move(params), ws, collection, child),
       _batchedDeleteParams(std::move(batchedDeleteParams)),
       _stagedDeletesBuffer(ws),
       _stagedDeletesWatermarkBytes(0),
@@ -336,8 +311,8 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
     // Start a WUOW with 'groupOplogEntries' which groups a delete batch into a single timestamp
     // and oplog entry.
     WriteUnitOfWork wuow(opCtx(),
-                         _stagedDeletesBuffer.size() > 1U ? WriteUnitOfWork::kGroupForTransaction
-                                                          : WriteUnitOfWork::kDontGroup);
+                         _stagedDeletesBuffer.size() > 1U ? WriteUnitOfWork::atomicGroup
+                                                          : WriteUnitOfWork::noGroup);
     // We iterate pending deletes in reverse order of staging to work around duplicate deletions
     // that can result when the same document gets staged twice. When the batch of documents to
     // delete comes from an index scan, it can contain duplicates in the rare case that a yield
@@ -378,7 +353,7 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
                 // Determine whether the document being deleted is owned by this shard, and the
                 // action to undertake if it isn't.
                 return _preWriteFilter.computeActionAndLogSpecialCases(
-                    member->doc.value(), "batched delete"_sd, collectionPtr()->ns());
+                    member->doc.value(), "batched delete"sv, collectionPtr()->ns());
             }();
 
             // Skip the document, as it either no longer exists, or has been filtered by the
@@ -438,7 +413,7 @@ long long BatchedDeleteStage::_commitBatch(WorkingSetID* out,
                 // committed + the number of documents deleted in the current unit of work.
 
                 // Assume nDocs is positive.
-                const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
+                const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"sv);
                 return data.hasField("sleepMs") && !fpNss.isEmpty() &&
                     collectionPtr()->ns() == fpNss && data.hasField("nDocs") &&
                     _specificStats.docsDeleted + *docsDeleted >=

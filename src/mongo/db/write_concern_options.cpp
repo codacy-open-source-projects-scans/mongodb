@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/write_concern_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -44,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -51,6 +25,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Controls how much a client cares about writes and serves as initializer for the pre-defined
@@ -60,13 +35,13 @@ namespace {
  */
 enum WriteConcern { W_NONE = 0, W_NORMAL = 1 };
 
-constexpr StringData kJFieldName = "j"_sd;
-constexpr StringData kFSyncFieldName = "fsync"_sd;
-constexpr StringData kWFieldName = "w"_sd;
-constexpr StringData kWTimeoutFieldName = "wtimeout"_sd;
-constexpr StringData kGetLastErrorFieldName = "getLastError"_sd;
-constexpr StringData kWOpTimeFieldName = "wOpTime"_sd;
-constexpr StringData kWElectionIdFieldName = "wElectionId"_sd;
+constexpr std::string_view kJFieldName = "j"sv;
+constexpr std::string_view kFSyncFieldName = "fsync"sv;
+constexpr std::string_view kWFieldName = "w"sv;
+constexpr std::string_view kWTimeoutFieldName = "wtimeout"sv;
+constexpr std::string_view kGetLastErrorFieldName = "getLastError"sv;
+constexpr std::string_view kWOpTimeFieldName = "wOpTime"sv;
+constexpr std::string_view kWElectionIdFieldName = "wElectionId"sv;
 
 }  // namespace
 
@@ -78,7 +53,7 @@ constexpr WriteConcernOptions::Timeout WriteConcernOptions::kNoTimeout(
 constexpr WriteConcernOptions::Timeout WriteConcernOptions::kNoWaiting(
     WriteConcernOptions::Timeout::kNoWaitingVal);
 
-constexpr StringData WriteConcernOptions::kWriteConcernField;
+constexpr std::string_view WriteConcernOptions::kWriteConcernField;
 const char WriteConcernOptions::kMajority[] = "majority";
 
 const BSONObj WriteConcernOptions::Default = BSONObj();

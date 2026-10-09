@@ -8,6 +8,8 @@
  *   requires_sharding,
  *   uses_change_streams,
  *   featureFlagChangeStreamPreciseShardTargeting,
+ *   featureFlagChangeStreamReaderV2,
+ *   requires_fcv_90,
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -36,7 +38,7 @@ import {removeShard} from "jstests/sharding/libs/remove_shard_util.js";
  * The command auto-generates a unique _id and knows which change events it produces.
  */
 function makeInsertCmd(dbName, collName) {
-    return new InsertDocCommand(dbName, collName, /* shardSet */ null, /* collectionCtx */ {exists: true});
+    return new InsertDocCommand({dbName, collName, collectionCtx: {exists: true}});
 }
 
 /**
@@ -121,7 +123,9 @@ describe("change stream v2", function () {
             // Drop the local database on shard1 before re-adding. addShard rejects shards that
             // have a database already present elsewhere.
             assert.commandWorked(st.rs1.getPrimary().getDB(dbName).dropDatabase());
-            assert.commandWorked(st.s.adminCommand({addShard: st.rs1.getURL(), name: st.shard1.shardName}));
+            assert.commandWorked(
+                st.s.adminCommand({addShard: st.rs1.getURL(), name: st.shard1.shardName}),
+            );
         }
 
         assert.commandWorked(st.s.getDB(dbName).dropDatabase());
@@ -138,11 +142,15 @@ describe("change stream v2", function () {
         const db = st.s.getDB(dbName);
 
         // Enable sharding on the test database with shard0 as primary.
-        assert.commandWorked(db.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+        assert.commandWorked(
+            db.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+        );
 
         assertCreateCollection(db, collName);
 
-        assert.commandWorked(db.adminCommand({shardCollection: `${dbName}.${collName}`, key: {_id: 1}}));
+        assert.commandWorked(
+            db.adminCommand({shardCollection: `${dbName}.${collName}`, key: {_id: 1}}),
+        );
 
         db[collName].insertMany([{_id: -1}, {_id: 1}]);
         ensureShardDistribution(db, db[collName], {
@@ -176,11 +184,12 @@ describe("change stream v2", function () {
         });
     }
 
-    const version = "v2";
-
     describe("FCV downgrade", function () {
         describe("DbPresent state", function () {
-            for (const watchMode of [ChangeStreamWatchMode.kCollection, ChangeStreamWatchMode.kDb]) {
+            for (const watchMode of [
+                ChangeStreamWatchMode.kCollection,
+                ChangeStreamWatchMode.kDb,
+            ]) {
                 const scope = watchModeToString(watchMode);
 
                 it(`${scope}-scope: stream transparently falls back to v1 on FCV downgrade`, function () {
@@ -191,10 +200,14 @@ describe("change stream v2", function () {
                     cst = new ChangeStreamTest(db);
 
                     // Opening the stream at latestFCV initializes placement in strict mode.
-                    const cursor = openChangeStream(cst, {watchMode, version, comment});
-                    awaitLogMessageCodes(conn, [V2TargeterLogCodes.kCollOrDbShardTargeterInitStrictMode], () => {
-                        cst.assertNoChange(cursor);
-                    });
+                    const cursor = openChangeStream(cst, {watchMode, comment});
+                    awaitLogMessageCodes(
+                        conn,
+                        [V2TargeterLogCodes.kCollOrDbShardTargeterInitStrictMode],
+                        () => {
+                            cst.assertNoChange(cursor);
+                        },
+                    );
                     const v2CursorId = cursor.id;
 
                     // v2 targets only data-bearing shards (shard0 + shard1).
@@ -222,20 +235,38 @@ describe("change stream v2", function () {
                     );
 
                     // The next getMore detects Downgrading and throws RetryChangeStream, which reopens the cursor as v1.
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // The stream was reopened as v1 after RetryChangeStream, so the cursor ID must differ.
                     const v1CursorId = cursor.id;
-                    assert.neq(v1CursorId, v2CursorId, "cursor should have been reopened after FCV downgrade");
+                    assert.neq(
+                        v1CursorId,
+                        v2CursorId,
+                        "cursor should have been reopened after FCV downgrade",
+                    );
 
                     // After FCV downgrade, v1 broadcasts to all shards including the config server.
-                    assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                    assertOpenCursors(
+                        st,
+                        allShardNames,
+                        /* expectedConfigCursor */ true,
+                        cursorCommentFilter(comment),
+                    );
                 });
             }
         });
 
         describe("DbAbsent state", function () {
-            for (const watchMode of [ChangeStreamWatchMode.kCollection, ChangeStreamWatchMode.kDb]) {
+            for (const watchMode of [
+                ChangeStreamWatchMode.kCollection,
+                ChangeStreamWatchMode.kDb,
+            ]) {
                 const scope = watchModeToString(watchMode);
 
                 it(`${scope}-scope: stream transparently falls back to v1 on FCV downgrade`, function () {
@@ -244,14 +275,23 @@ describe("change stream v2", function () {
                     cst = new ChangeStreamTest(db);
 
                     // Opening the stream at latestFCV initializes placement in strict mode.
-                    const cursor = openChangeStream(cst, {watchMode, version, comment});
-                    awaitLogMessageCodes(conn, [V2TargeterLogCodes.kCollOrDbShardTargeterInitStrictMode], () => {
-                        cst.assertNoChange(cursor);
-                    });
+                    const cursor = openChangeStream(cst, {watchMode, comment});
+                    awaitLogMessageCodes(
+                        conn,
+                        [V2TargeterLogCodes.kCollOrDbShardTargeterInitStrictMode],
+                        () => {
+                            cst.assertNoChange(cursor);
+                        },
+                    );
                     const v2CursorId = cursor.id;
 
                     // v2 targets only configsvr as database does not exist.
-                    assertOpenCursors(st, [], /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                    assertOpenCursors(
+                        st,
+                        [],
+                        /* expectedConfigCursor */ true,
+                        cursorCommentFilter(comment),
+                    );
 
                     // FCV downgrade.
                     new FCVDowngradeCommand().execute(conn);
@@ -270,14 +310,29 @@ describe("change stream v2", function () {
                     );
 
                     // The next getMore detects Downgrading and throws RetryChangeStream, which reopens the cursor as v1.
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // The stream was reopened as v1 after RetryChangeStream, so the cursor ID must differ.
                     const v1CursorId = cursor.id;
-                    assert.neq(v1CursorId, v2CursorId, "cursor should have been reopened after FCV downgrade");
+                    assert.neq(
+                        v1CursorId,
+                        v2CursorId,
+                        "cursor should have been reopened after FCV downgrade",
+                    );
 
                     // After downgrade, v1 broadcasts to all shards including the config server.
-                    assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                    assertOpenCursors(
+                        st,
+                        allShardNames,
+                        /* expectedConfigCursor */ true,
+                        cursorCommentFilter(comment),
+                    );
                 });
             }
         });
@@ -292,14 +347,23 @@ describe("change stream v2", function () {
             cst = new ChangeStreamTest(adminDB);
 
             // Opening the stream at latestFCV initializes placement in strict mode.
-            const cursor = openChangeStream(cst, {watchMode, version, comment});
-            awaitLogMessageCodes(conn, [V2TargeterLogCodes.kClusterShardTargeterInitStrictMode], () => {
-                cst.assertNoChange(cursor);
-            });
+            const cursor = openChangeStream(cst, {watchMode, comment});
+            awaitLogMessageCodes(
+                conn,
+                [V2TargeterLogCodes.kClusterShardTargeterInitStrictMode],
+                () => {
+                    cst.assertNoChange(cursor);
+                },
+            );
             const v2CursorId = cursor.id;
 
             // Cluster-scope v2 targets only data-bearing shards + configsvr.
-            assertOpenCursors(st, dataShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+            assertOpenCursors(
+                st,
+                dataShardNames,
+                /* expectedConfigCursor */ true,
+                cursorCommentFilter(comment),
+            );
 
             // FCV downgrade.
             new FCVDowngradeCommand().execute(conn);
@@ -318,14 +382,29 @@ describe("change stream v2", function () {
             );
 
             // The next getMore detects Downgrading and throws RetryChangeStream, which reopens the cursor as v1.
-            executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+            executeAndAssertEvents({
+                cst,
+                cursor,
+                conn,
+                watchMode,
+                cmds: [makeInsertCmd(dbName, collName)],
+            });
 
             // The stream was reopened as v1 after RetryChangeStream, so the cursor ID must differ.
             const v1CursorId = cursor.id;
-            assert.neq(v1CursorId, v2CursorId, "cursor should have been reopened after FCV downgrade");
+            assert.neq(
+                v1CursorId,
+                v2CursorId,
+                "cursor should have been reopened after FCV downgrade",
+            );
 
             // After FCV downgrade, v1 broadcasts to all shards including the config server.
-            assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+            assertOpenCursors(
+                st,
+                allShardNames,
+                /* expectedConfigCursor */ true,
+                cursorCommentFilter(comment),
+            );
 
             cst.assertNoChange(cursor);
         });
@@ -349,9 +428,15 @@ describe("change stream v2", function () {
                 // Open v2 stream and generate an event to capture a resume token.
                 let resumeToken;
                 {
-                    const cursor = openChangeStream(cst, {watchMode, version, comment});
+                    const cursor = openChangeStream(cst, {watchMode, comment});
 
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // v2 targets data-bearing shards; cluster scope also opens a config cursor.
                     assertOpenCursors(
@@ -376,7 +461,13 @@ describe("change stream v2", function () {
                         comment: resumedComment,
                     });
 
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // Resumed stream runs as v1 - broadcasts to all shards including the config server.
                     assertOpenCursors(
@@ -413,7 +504,6 @@ describe("change stream v2", function () {
                         : V2TargeterLogCodes.kCollOrDbShardTargeterStartChangeStreamSegment;
                     const cursor = openChangeStream(cst, {
                         watchMode,
-                        version,
                         ignoreRemovedShards: true,
                         startAtOperationTime,
                         comment,
@@ -458,10 +548,19 @@ describe("change stream v2", function () {
 
                     // The stream was reopened as v1 after RetryChangeStream, so the cursor ID must differ.
                     const v1CursorId = cursor.id;
-                    assert.neq(v1CursorId, v2CursorId, "cursor should have been reopened after FCV downgrade");
+                    assert.neq(
+                        v1CursorId,
+                        v2CursorId,
+                        "cursor should have been reopened after FCV downgrade",
+                    );
 
                     // v1 broadcasts to all shards + config.
-                    assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                    assertOpenCursors(
+                        st,
+                        allShardNames,
+                        /* expectedConfigCursor */ true,
+                        cursorCommentFilter(comment),
+                    );
                 });
 
                 it(`${scope}-scope: IRS stream in degraded mode reacts to FCV downgrade`, function () {
@@ -490,7 +589,9 @@ describe("change stream v2", function () {
                     const presentShardNames = [st.shard0.shardName, st.shard2.shardName];
 
                     // Flush the router cache to ensure insert succedes without retry.
-                    assert.commandWorked(conn.adminCommand({flushRouterConfig: `${dbName}.${collName}`}));
+                    assert.commandWorked(
+                        conn.adminCommand({flushRouterConfig: `${dbName}.${collName}`}),
+                    );
 
                     // Insert after shard removal (data now on shard0).
                     const preDowngradeInsert = makeInsertCmd(dbName, collName);
@@ -502,7 +603,6 @@ describe("change stream v2", function () {
                     cst = new ChangeStreamTest(db);
                     const cursor = openChangeStream(cst, {
                         watchMode,
-                        version,
                         ignoreRemovedShards: true,
                         startAtOperationTime,
                         comment,
@@ -549,7 +649,11 @@ describe("change stream v2", function () {
 
                     // The stream was reopened as v1 after RetryChangeStream, so the cursor ID must differ.
                     const v1CursorId = cursor.id;
-                    assert.neq(v1CursorId, v2CursorId, "cursor should have been reopened after FCV downgrade");
+                    assert.neq(
+                        v1CursorId,
+                        v2CursorId,
+                        "cursor should have been reopened after FCV downgrade",
+                    );
 
                     // v1 broadcasts to all present shards + config.
                     assertOpenCursors(
@@ -572,7 +676,7 @@ describe("change stream v2", function () {
             const scope = watchModeToString(watchMode);
             const isCluster = watchMode === ChangeStreamWatchMode.kCluster;
 
-            it(`${scope}-scope: existing v1 stream stays v1 after FCV upgrade even when opened with version: v2`, function () {
+            it(`${scope}-scope: existing v1 stream stays v1 after FCV upgrade`, function () {
                 setupShardedCollection();
 
                 // Downgrade FCV first.
@@ -582,21 +686,28 @@ describe("change stream v2", function () {
                 // have a higher gossipped cluster time. If that time is ahead of the config server's configTime,
                 // getAllocationToShardsStatus returns kFutureClusterTime instead of kNotAvailable, causing the stream
                 // to open as v2 instead of v1.
-                const startAtOperationTime = getClusterTime(st.configRS.getPrimary().getDB("admin"));
+                const startAtOperationTime = getClusterTime(
+                    st.configRS.getPrimary().getDB("admin"),
+                );
 
                 const db = isCluster ? conn.getDB("admin") : conn.getDB(dbName);
                 const comment = `upgrade_v1_stays_v1_${scope}`;
                 cst = new ChangeStreamTest(db);
 
-                // Open stream at downgraded FCV. It will be v1 even with version: "v2".
-                const cursor = openChangeStream(cst, {watchMode, version, comment, startAtOperationTime});
+                // Open stream at downgraded FCV. It will be v1 (flag is disabled at downgraded FCV).
+                const cursor = openChangeStream(cst, {watchMode, comment, startAtOperationTime});
                 const preUpgradeCursorId = cursor.id;
 
                 // Confirm the stream is alive and idle before checking cursor topology.
                 cst.assertNoChange(cursor);
 
                 // v1 broadcasts to all shards including the config server.
-                assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                assertOpenCursors(
+                    st,
+                    allShardNames,
+                    /* expectedConfigCursor */ true,
+                    cursorCommentFilter(comment),
+                );
 
                 // FCV upgrade produces no user-visible events; the v1 stream is unaffected and delivers the insert normally.
                 executeAndAssertEvents({
@@ -609,10 +720,19 @@ describe("change stream v2", function () {
                 const postUpgradeCursorId = cursor.id;
 
                 // v1 broadcasts to all shards including the config server.
-                assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                assertOpenCursors(
+                    st,
+                    allShardNames,
+                    /* expectedConfigCursor */ true,
+                    cursorCommentFilter(comment),
+                );
 
                 // The v1 stream is unaffected by FCV upgrade, no RetryChangeStream, no cursor reopen. The cursor ID must remain the same.
-                assert.eq(preUpgradeCursorId, postUpgradeCursorId, "cursor should remain the same after FCV upgrade");
+                assert.eq(
+                    preUpgradeCursorId,
+                    postUpgradeCursorId,
+                    "cursor should remain the same after FCV upgrade",
+                );
             });
 
             it(`${scope}-scope: stream opened as v2 at downgraded FCV naturally falls back to v1 and stays v1 after upgrade`, function () {
@@ -629,7 +749,7 @@ describe("change stream v2", function () {
                 // config server, so getAllocationToShardsStatus returns kFutureClusterTime and the stream opens as v2.
                 // On the first getMore the v2 state machine detects placement is unavailable and throws
                 // RetryChangeStream, reopening the stream as v1.
-                const cursor = openChangeStream(cst, {watchMode, version, comment});
+                const cursor = openChangeStream(cst, {watchMode, comment});
 
                 // Insert + consume to let the natural v2->v1 fallback happen.
                 executeAndAssertEvents({
@@ -641,7 +761,12 @@ describe("change stream v2", function () {
                 });
 
                 // After fallback, v1 broadcasts to all shards + config.
-                assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                assertOpenCursors(
+                    st,
+                    allShardNames,
+                    /* expectedConfigCursor */ true,
+                    cursorCommentFilter(comment),
+                );
 
                 // FCV upgrade, the v1 stream should be unaffected.
                 executeAndAssertEvents({
@@ -652,7 +777,12 @@ describe("change stream v2", function () {
                     cmds: [new FCVUpgradeCommand(), makeInsertCmd(dbName, collName)],
                 });
 
-                assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                assertOpenCursors(
+                    st,
+                    allShardNames,
+                    /* expectedConfigCursor */ true,
+                    cursorCommentFilter(comment),
+                );
             });
 
             it(`${scope}-scope: v2 stream opened at pre-upgrade timestamp readjusts targeting after NamespacePlacementChanged`, function () {
@@ -677,7 +807,7 @@ describe("change stream v2", function () {
                 // FCV upgrade, it learns that placement history is now being tracked and narrows the set of open cursors.
                 const comment = `resume_before_fcv_upgrade_${scope}`;
                 cst = new ChangeStreamTest(db);
-                const cursor = openChangeStream(cst, {watchMode, version, startAtOperationTime, comment});
+                const cursor = openChangeStream(cst, {watchMode, startAtOperationTime, comment});
                 const v2CursorId = cursor.id;
 
                 const initCode = isCluster
@@ -735,12 +865,23 @@ describe("change stream v2", function () {
                 // Open v1 stream and generate an event to capture a resume token.
                 let resumeToken;
                 {
-                    const cursor = openChangeStream(cst, {watchMode, version, comment});
+                    const cursor = openChangeStream(cst, {watchMode, comment});
 
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // At downgraded FCV, v1 broadcasts to all shards including the config server.
-                    assertOpenCursors(st, allShardNames, /* expectedConfigCursor */ true, cursorCommentFilter(comment));
+                    assertOpenCursors(
+                        st,
+                        allShardNames,
+                        /* expectedConfigCursor */ true,
+                        cursorCommentFilter(comment),
+                    );
 
                     resumeToken = cst.getResumeToken(cursor);
                 }
@@ -753,12 +894,17 @@ describe("change stream v2", function () {
                     const resumedComment = comment + "_resumed";
                     const cursor = openChangeStream(cst, {
                         watchMode,
-                        version,
                         resumeAfter: resumeToken,
                         comment: resumedComment,
                     });
 
-                    executeAndAssertEvents({cst, cursor, conn, watchMode, cmds: [makeInsertCmd(dbName, collName)]});
+                    executeAndAssertEvents({
+                        cst,
+                        cursor,
+                        conn,
+                        watchMode,
+                        cmds: [makeInsertCmd(dbName, collName)],
+                    });
 
                     // Resumed stream runs as v2, i.e. targets only data-bearing shards. Cluster scope also opens a config cursor.
                     assertOpenCursors(

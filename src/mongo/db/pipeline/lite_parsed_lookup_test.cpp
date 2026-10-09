@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_lookup.h"
 
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace {
@@ -40,13 +16,15 @@ class LiteParsedLookUpTest : public AggregationContextFixture {
 protected:
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.local");
 
-    std::unique_ptr<LiteParsedLookUp> parse(StringData json,
+    std::unique_ptr<LiteParsedLookUp> parse(std::string_view json,
                                             LiteParserOptions options = LiteParserOptions{}) {
         auto spec = fromjson(json);
-        return LiteParsedLookUp::parse(nss, spec.firstElement(), options);
+        auto result = LiteParsedLookUp::parse(nss, spec.firstElement(), options);
+        result->makeOwned();
+        return result;
     }
 
-    LookUpStageParams* parseAndGetParams(StringData json,
+    LookUpStageParams* parseAndGetParams(std::string_view json,
                                          LiteParserOptions options = LiteParserOptions{}) {
         _lastParsed = parse(json, options);
         _lastParams = _lastParsed->getStageParams();
@@ -99,10 +77,23 @@ TEST_F(LiteParsedLookUpTest, RejectsCollectionlessWithoutDocuments) {
                        ErrorCodes::FailedToParse);
 }
 
+TEST_F(LiteParsedLookUpTest, RejectsMissingPipelineAndLocalForeignFields) {
+    ASSERT_THROWS_CODE(parse(R"({$lookup: {from: "foreign", as: "a"}})"),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
+    ASSERT_THROWS_CODE(parse(R"({$lookup: {from: "foreign", as: "a", localField: "x"}})"),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
+    ASSERT_THROWS_CODE(parse(R"({$lookup: {from: "foreign", as: "a", foreignField: "y"}})"),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
+}
+
 TEST_F(LiteParsedLookUpTest, StageParamsCarriesDesugaredPipelineWhenPresent) {
     auto* typed =
         parseAndGetParams(R"({$lookup: {from: "foreign", as: "a", pipeline: [{$match: {}}]}})");
-    ASSERT_TRUE(typed->liteParsedPipeline.has_value());
+    ASSERT_TRUE(typed->subpipelineStageParams.has_value());
+    ASSERT_EQ(typed->subpipelineStageParams->size(), 1U);
     ASSERT_EQ(typed->pipeline.size(), 1u);
     ASSERT_EQ(typed->as, "a");
     ASSERT_FALSE(typed->localField.has_value());
@@ -113,7 +104,7 @@ TEST_F(LiteParsedLookUpTest, StageParamsCarriesDesugaredPipelineWhenPresent) {
 TEST_F(LiteParsedLookUpTest, StageParamsOmitsLppForLocalForeignFieldForm) {
     auto* typed = parseAndGetParams(
         R"({$lookup: {from: "foreign", as: "a", localField: "x", foreignField: "y"}})");
-    ASSERT_FALSE(typed->liteParsedPipeline.has_value());
+    ASSERT_FALSE(typed->subpipelineStageParams.has_value());
     ASSERT_TRUE(typed->localField.has_value());
     ASSERT_EQ(*typed->localField, "x");
     ASSERT_TRUE(typed->foreignField.has_value());
@@ -125,6 +116,18 @@ TEST_F(LiteParsedLookUpTest, StageParamsForwardsIsHybridSearchFlag) {
         $lookup: {from: "foreign", as: "a", pipeline: [{$match: {}}], $_internalIsHybridSearch: true}
     })");
     ASSERT_TRUE(typed->isHybridSearch);
+}
+
+TEST_F(LiteParsedLookUpTest, StageParamsForwardsSubpipelineViewPolicy) {
+    // An ordinary subpipeline first stage defaults to kDefaultPrepend.
+    auto* typed =
+        parseAndGetParams(R"({$lookup: {from: "foreign", as: "a", pipeline: [{$match: {}}]}})");
+    ASSERT(typed->subpipelineViewPolicy == FirstStageViewApplicationPolicy::kDefaultPrepend);
+
+    // A first stage that applies the view itself forwards kDoNothing.
+    typed = parseAndGetParams(
+        R"({$lookup: {from: "foreign", as: "a", pipeline: [{$_internalSearchIdLookup: {}}]}})");
+    ASSERT(typed->subpipelineViewPolicy == FirstStageViewApplicationPolicy::kDoNothing);
 }
 
 TEST_F(LiteParsedLookUpTest, StageParamsCarriesLetVarsAndUnwindSpec) {
@@ -144,6 +147,32 @@ TEST_F(LiteParsedLookUpTest, RequiredPrivilegesIncludesForeignFind) {
     auto lp = parse(R"({$lookup: {from: "foreign", as: "a", pipeline: []}})");
     auto privs = lp->requiredPrivileges(false /*isMongos*/, false /*bypass*/);
     ASSERT_EQ(privs.size(), 1u);
+}
+
+TEST_F(LiteParsedLookUpTest, ValidatePassesForSameDatabaseLookup) {
+    auto lp = parse(R"({$lookup: {from: "foreign", as: "a", pipeline: [{$match: {x: 1}}]}})");
+    ASSERT_DOES_NOT_THROW(lp->validate(nullptr));
+}
+
+TEST_F(LiteParsedLookUpTest, ParseRejectsCrossDbByDefault) {
+    ASSERT_THROWS_CODE(
+        parse(R"({$lookup: {from: {db: "other", coll: "c"}, as: "a", pipeline: []}})"),
+        AssertionException,
+        ErrorCodes::FailedToParse);
+}
+
+TEST_F(LiteParsedLookUpTest, ParseAllowsCrossDbToConfigCacheChunks) {
+    // config.cache.chunks.* is explicitly allowed.
+    auto lp = parse(
+        R"({$lookup: {from: {db: "config", coll: "cache.chunks.test.foo"}, as: "a", pipeline: []}})");
+    ASSERT_DOES_NOT_THROW(lp->validate(nullptr));
+}
+
+TEST_F(LiteParsedLookUpTest, ParseAllowsCrossDbWhenAllowGenericForeignDbLookupSet) {
+    LiteParserOptions opts;
+    opts.allowGenericForeignDbLookup = true;
+    auto lp = parse(R"({$lookup: {from: {db: "other", coll: "c"}, as: "a", pipeline: []}})", opts);
+    ASSERT_DOES_NOT_THROW(lp->validate(nullptr));
 }
 
 }  // namespace

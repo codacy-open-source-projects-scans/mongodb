@@ -1,56 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/fle_crypto.h"
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/cstdint.hpp>
-#include <boost/exception/exception.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
-#include <boost/multiprecision/cpp_int/bitwise.hpp>
-#include <boost/multiprecision/cpp_int/comparison.hpp>
-#include <boost/multiprecision/cpp_int/divide.hpp>
-#include <boost/multiprecision/cpp_int/limits.hpp>
-#include <boost/multiprecision/cpp_int/literals.hpp>
-#include <boost/multiprecision/cpp_int/multiply.hpp>
-#include <boost/optional.hpp>
-// IWYU pragma: no_include "boost/multiprecision/detail/default_ops.hpp"
-// IWYU pragma: no_include "boost/multiprecision/detail/integer_ops.hpp"
-// IWYU pragma: no_include "boost/multiprecision/detail/no_et_ops.hpp"
-// IWYU pragma: no_include "boost/multiprecision/detail/number_base.hpp"
-// IWYU pragma: no_include "boost/multiprecision/detail/number_compare.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/multiprecision/number.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -61,14 +13,33 @@
 #include <memory>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <variant>
 #include <vector>
 
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/exception/exception.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/multiprecision/cpp_int/bitwise.hpp>
+#include <boost/multiprecision/cpp_int/comparison.hpp>
+#include <boost/multiprecision/cpp_int/divide.hpp>
+#include <boost/multiprecision/cpp_int/limits.hpp>
+#include <boost/multiprecision/cpp_int/literals.hpp>
+#include <boost/multiprecision/cpp_int/multiply.hpp>
+#include <boost/multiprecision/number.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
 extern "C" {
 #include <mc-fle2-payload-iev-private-v2.h>
 #include <mongocrypt-buffer-private.h>
+#include <mongocrypt-private.h>
 #include <mongocrypt.h>
 }
 
@@ -98,6 +69,7 @@ extern "C" {
 #include "mongo/crypto/fle_fields_util.h"
 #include "mongo/crypto/fle_numeric.h"
 #include "mongo/crypto/fle_options_gen.h"
+#include "mongo/crypto/fle_payload_validation.h"
 #include "mongo/crypto/fle_tokens_gen.h"
 #include "mongo/crypto/fle_util.h"
 #include "mongo/crypto/mongocryptbuffer.h"
@@ -119,6 +91,12 @@ extern "C" {
 #include "mongo/util/debug_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+// IWYU pragma: no_include "boost/multiprecision/detail/default_ops.hpp"
+// IWYU pragma: no_include "boost/multiprecision/detail/integer_ops.hpp"
+// IWYU pragma: no_include "boost/multiprecision/detail/no_et_ops.hpp"
+// IWYU pragma: no_include "boost/multiprecision/detail/number_base.hpp"
+// IWYU pragma: no_include "boost/multiprecision/detail/number_compare.hpp"
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -136,6 +114,7 @@ static_assert(kDebugBuild == 1, "Only use in debug builds");
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -279,21 +258,21 @@ ConstDataRange binDataToCDR(const Value& value) {
 }
 
 template <typename T>
-void toBinData(StringData field, T t, BSONObjBuilder* builder) {
+void toBinData(std::string_view field, T t, BSONObjBuilder* builder) {
     BSONObj obj = t.toBSON();
 
     builder->appendBinData(field, obj.objsize(), BinDataType::BinDataGeneral, obj.objdata());
 }
 
-void toBinData(StringData field, PrfBlock block, BSONObjBuilder* builder) {
+void toBinData(std::string_view field, PrfBlock block, BSONObjBuilder* builder) {
     builder->appendBinData(field, block.size(), BinDataType::BinDataGeneral, block.data());
 }
 
-void toBinData(StringData field, ConstDataRange block, BSONObjBuilder* builder) {
+void toBinData(std::string_view field, ConstDataRange block, BSONObjBuilder* builder) {
     builder->appendBinData(field, block.length(), BinDataType::BinDataGeneral, block.data());
 }
 
-void toBinData(StringData field, std::vector<uint8_t>& block, BSONObjBuilder* builder) {
+void toBinData(std::string_view field, std::vector<uint8_t>& block, BSONObjBuilder* builder) {
     builder->appendBinData(field, block.size(), BinDataType::BinDataGeneral, block.data());
 }
 
@@ -314,13 +293,16 @@ std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, T t) {
 }
 
 template <typename T>
-void toEncryptedBinData(StringData field, EncryptedBinDataType dt, T t, BSONObjBuilder* builder) {
+void toEncryptedBinData(std::string_view field,
+                        EncryptedBinDataType dt,
+                        T t,
+                        BSONObjBuilder* builder) {
     auto buf = toEncryptedVector(dt, t);
 
     builder->appendBinData(field, buf.size(), BinDataType::Encrypt, buf.data());
 }
 
-void toEncryptedBinData(StringData field,
+void toEncryptedBinData(std::string_view field,
                         EncryptedBinDataType dt,
                         ConstDataRange cdr,
                         BSONObjBuilder* builder) {
@@ -332,7 +314,7 @@ void toEncryptedBinData(StringData field,
     builder->appendBinData(field, buf.size(), BinDataType::Encrypt, buf.data());
 }
 
-void toEncryptedBinDataPretyped(StringData field,
+void toEncryptedBinDataPretyped(std::string_view field,
                                 EncryptedBinDataType dt,
                                 ConstDataRange cdr,
                                 BSONObjBuilder* builder) {
@@ -807,15 +789,15 @@ class SinglyLinkedFieldPath {
 public:
     SinglyLinkedFieldPath() : _predecessor(nullptr) {}
 
-    SinglyLinkedFieldPath(StringData fieldName, const SinglyLinkedFieldPath* predecessor)
+    SinglyLinkedFieldPath(std::string_view fieldName, const SinglyLinkedFieldPath* predecessor)
         : _currentField(fieldName), _predecessor(predecessor) {}
 
 
-    std::string getFieldPath(StringData fieldName) const;
+    std::string getFieldPath(std::string_view fieldName) const;
 
 private:
     // Name of the current field that is being parsed.
-    const StringData _currentField;
+    const std::string_view _currentField;
 
     // Pointer to a parent parser context.
     // This provides a singly linked list of parent pointers, and use to produce a full path to a
@@ -824,7 +806,7 @@ private:
 };
 
 
-std::string SinglyLinkedFieldPath::getFieldPath(StringData fieldName) const {
+std::string SinglyLinkedFieldPath::getFieldPath(std::string_view fieldName) const {
     dassert(!fieldName.empty());
     if (_predecessor == nullptr) {
         str::stream builder;
@@ -837,7 +819,7 @@ std::string SinglyLinkedFieldPath::getFieldPath(StringData fieldName) const {
 
         return builder;
     } else {
-        std::stack<StringData> pieces;
+        std::stack<std::string_view> pieces;
 
         pieces.push(fieldName);
 
@@ -878,7 +860,7 @@ std::string SinglyLinkedFieldPath::getFieldPath(StringData fieldName) const {
  */
 BSONObj transformBSON(
     const BSONObj& object,
-    const std::function<void(ConstDataRange, BSONObjBuilder*, StringData)>& doTransform) {
+    const std::function<void(ConstDataRange, BSONObjBuilder*, std::string_view)>& doTransform) {
     struct IteratorState {
         BSONObjIterator iter;
         BSONObjBuilder builder;
@@ -972,7 +954,7 @@ void visitEncryptedBSON(const BSONObj& object,
 }
 
 void parseAndVerifyInsertUpdatePayload(std::vector<EDCServerPayloadInfo>* pFields,
-                                       StringData fieldPath,
+                                       std::string_view fieldPath,
                                        EncryptedBinDataType type,
                                        ConstDataRange subCdr) {
     EDCServerPayloadInfo payloadInfo;
@@ -998,11 +980,21 @@ void parseAndVerifyInsertUpdatePayload(std::vector<EDCServerPayloadInfo>* pField
                               << "' is not a valid type for Queryable Encryption Range",
                 isValidBSONType(payloadInfo.payload.getType()) &&
                     isFLE2RangeIndexedSupportedType(bsonType));
+        uassert(
+            12785600,
+            "Queryable Encryption insert/update payload contains too many range edge token sets",
+            payloadInfo.payload.getEdgeTokenSet()->size() <=
+                EncryptionInformationHelpers::kFLE2RangeFieldMaxTags);
     } else if (payloadInfo.isTextSearchPayload()) {
         uassert(9783802,
                 str::stream() << "Type '" << typeName(bsonType)
                               << "' is not a valid type for Queryable Encryption Text Search",
                 isValidBSONType(payloadInfo.payload.getType()) && bsonType == BSONType::string);
+        uassert(
+            12785601,
+            "Queryable Encryption insert/update payload contains too many string search token sets",
+            payloadInfo.getTotalTextSearchTokenSetCount() <=
+                EncryptionInformationHelpers::kFLE2PerFieldTagLimit);
     } else {
         uassert(6373504,
                 str::stream() << "Type '" << typeName(bsonType)
@@ -1016,9 +1008,7 @@ void parseAndVerifyInsertUpdatePayload(std::vector<EDCServerPayloadInfo>* pField
 
 void collectEDCServerInfo(std::vector<EDCServerPayloadInfo>* pFields,
                           ConstDataRange cdr,
-                          StringData fieldPath) {
-
-    // TODO - validate field is actually indexed in the schema?
+                          std::string_view fieldPath) {
 
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     auto encryptedType = encryptedTypeBinding;
@@ -1064,7 +1054,7 @@ void convertServerPayload(ConstDataRange cdr,
                           std::vector<TagInfo>* pTags,
                           ConstVectorIteratorPair<EDCServerPayloadInfo>& it,
                           BSONObjBuilder* builder,
-                          StringData fieldPath) {
+                          std::string_view fieldPath) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     if (encryptedTypeBinding == EncryptedBinDataType::kFLE2FindEqualityPayloadV2 ||
         encryptedTypeBinding == EncryptedBinDataType::kFLE2FindRangePayloadV2) {
@@ -1130,7 +1120,7 @@ void convertServerPayload(ConstDataRange cdr,
 
 void collectIndexedFields(std::vector<EDCIndexedFields>* pFields,
                           ConstDataRange cdr,
-                          StringData fieldPath) {
+                          std::string_view fieldPath) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
 
     if (encryptedTypeBinding == EncryptedBinDataType::kFLE2EqualityIndexedValueV2 ||
@@ -1142,7 +1132,7 @@ void collectIndexedFields(std::vector<EDCIndexedFields>* pFields,
 
 void collectFieldValidationInfo(stdx::unordered_map<std::string, ConstDataRange>* pFields,
                                 ConstDataRange cdr,
-                                StringData fieldPath) {
+                                std::string_view fieldPath) {
     pFields->insert({std::string{fieldPath}, cdr});
 }
 
@@ -1283,24 +1273,24 @@ UniqueMongoCrypt createMongoCrypt() {
 BSONObj runStateMachineForEncryption(mongocrypt_ctx_t* ctx,
                                      FLEKeyVault* keyVault,
                                      const BSONObj& cryptdResult,
-                                     StringData dbName) {
+                                     std::string_view dbName) {
     bool done = false;
     BSONObj result;
-    StringData errorContext = "encryptionStateMachine"_sd;
+    std::string_view errorContext = "encryptionStateMachine"sv;
 
     while (!done) {
         switch (mongocrypt_ctx_state(ctx)) {
             case MONGOCRYPT_CTX_NEED_MONGO_MARKINGS: {
                 MongoCryptBinary opbin = MongoCryptBinary::create();
                 if (!mongocrypt_ctx_mongo_op(ctx, opbin)) {
-                    errorContext = "mongocrypt_ctx_mongo_op failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_op failed"sv;
                     break;
                 }
 
                 BSONObj opobj = opbin.toBSON();
 
                 bool feedOk = false;
-                StringData opCmdName(opobj.firstElementFieldName());
+                std::string_view opCmdName(opobj.firstElementFieldName());
                 uassert(7132300,
                         "Invalid command obtained from mongocrypt_ctx_mongo_op",
                         !opCmdName.empty());
@@ -1319,9 +1309,9 @@ BSONObj runStateMachineForEncryption(mongocrypt_ctx_t* ctx,
                 }
 
                 if (!feedOk) {
-                    errorContext = "mongocrypt_ctx_mongo_feed failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_feed failed"sv;
                 } else if (!mongocrypt_ctx_mongo_done(ctx)) {
-                    errorContext = "mongocrypt_ctx_mongo_done failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_done failed"sv;
                 }
                 break;
             }
@@ -1332,7 +1322,7 @@ BSONObj runStateMachineForEncryption(mongocrypt_ctx_t* ctx,
             case MONGOCRYPT_CTX_READY: {
                 MongoCryptBinary output = MongoCryptBinary::create();
                 if (!mongocrypt_ctx_finalize(ctx, output)) {
-                    errorContext = "mongocrypt_ctx_finalize failed"_sd;
+                    errorContext = "mongocrypt_ctx_finalize failed"sv;
                     break;
                 }
                 result = output.toBSON().getOwned();
@@ -1363,7 +1353,7 @@ BSONObj runStateMachineForEncryption(mongocrypt_ctx_t* ctx,
                 // mongocrypt_setopt_encrypted_field_config_map().
                 MongoCryptBinary opbin = MongoCryptBinary::create();
                 if (!mongocrypt_ctx_mongo_op(ctx, opbin)) {
-                    errorContext = "mongocrypt_ctx_mongo_op failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_op failed"sv;
                     break;
                 }
 
@@ -1380,9 +1370,9 @@ BSONObj runStateMachineForEncryption(mongocrypt_ctx_t* ctx,
                 auto feed = MongoCryptBinary::createFromBSONObj(listCollectionReply.done());
                 auto feedOk = mongocrypt_ctx_mongo_feed(ctx, feed);
                 if (!feedOk) {
-                    errorContext = "mongocrypt_ctx_mongo_feed failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_feed failed"sv;
                 } else if (!mongocrypt_ctx_mongo_done(ctx)) {
-                    errorContext = "mongocrypt_ctx_mongo_done failed"_sd;
+                    errorContext = "mongocrypt_ctx_mongo_done failed"sv;
                 }
                 break;
             }
@@ -1824,7 +1814,7 @@ StateCollectionTokensV2::Encrypted StateCollectionTokensV2::encrypt(const ECOCTo
     MONGO_UNREACHABLE;
 }
 
-BSONObj StateCollectionTokensV2::Encrypted::generateDocument(StringData fieldName) const {
+BSONObj StateCollectionTokensV2::Encrypted::generateDocument(std::string_view fieldName) const {
     assertLength(_encryptedTokens.size());
     BSONObjBuilder builder;
     builder.append(kId, OID::gen());
@@ -1841,7 +1831,7 @@ BSONObj FLEClientCrypto::transformPlaceholders(const BSONObj& originalCmd,
                                                const BSONObj& cryptdResult,
                                                const BSONObj& encryptedFieldConfigMap,
                                                FLEKeyVault* keyVault,
-                                               StringData dbName) {
+                                               std::string_view dbName) {
     auto crypt = createMongoCrypt();
     LOGV2_DEBUG(7132304,
                 1,
@@ -1849,13 +1839,14 @@ BSONObj FLEClientCrypto::transformPlaceholders(const BSONObj& originalCmd,
                 "originalCmd"_attr = originalCmd,
                 "cryptdResult"_attr = cryptdResult);
 
-    auto uassertMongoCryptStatusOK = [](mongocrypt_t* crypt, bool result, StringData context) {
-        if (!result) {
-            MongoCryptStatus status;
-            mongocrypt_status(crypt, status);
-            uassertStatusOK(status.toStatus().withContext(context));
-        }
-    };
+    auto uassertMongoCryptStatusOK =
+        [](mongocrypt_t* crypt, bool result, std::string_view context) {
+            if (!result) {
+                MongoCryptStatus status;
+                mongocrypt_status(crypt, status);
+                uassertStatusOK(status.toStatus().withContext(context));
+            }
+        };
 
     {
         SymmetricKey& key = keyVault->getKMSLocalKey();
@@ -2610,32 +2601,41 @@ Status FLE2TagAndEncryptedMetadataBlock::encryptAndSerialize(
         uassertStatusOK(packAndEncrypt(std::tie(count, contentionFactor), countEncryptionToken));
     dassert(ecount.size() == sizeof(EncryptedCountersBlob));
 
-    if (!_mongocrypt_buffer_copy_from_data_and_size(
-            &_block->encryptedCount, ecount.data(), ecount.size())) {
-        return Status(ErrorCodes::LibmongocryptError,
-                      "Unable to copy encrypted counts into buffer");
-    }
-
-    if (!_mongocrypt_buffer_copy_from_data_and_size(&_block->tag, tag.data(), sizeof(tag))) {
-        mc_FLE2TagAndEncryptedMetadataBlock_cleanup(_block);
-        return Status(ErrorCodes::LibmongocryptError, "Unable to copy PRF tag into buffer");
-    }
-
     auto ezeros =
         uassertStatusOK(FLEUtil::encryptData(zerosEncryptionToken.toCDR(), ConstDataRange(kZeros)));
     dassert(ezeros.size() == sizeof(EncryptedZerosBlob));
 
-    if (!_mongocrypt_buffer_copy_from_data_and_size(
-            &_block->encryptedZeros, ezeros.data(), ezeros.size())) {
-        mc_FLE2TagAndEncryptedMetadataBlock_cleanup(_block);
-        return Status(ErrorCodes::LibmongocryptError, "Unable to copy encrypted zeros into buffer");
+    SerializedBlob raw{};
+    auto it = raw.begin();
+
+    it = std::copy(ecount.begin(), ecount.end(), it);
+    it = std::copy(tag.begin(), tag.end(), it);
+    it = std::copy(ezeros.begin(), ezeros.end(), it);
+
+    dassert(it == raw.end());
+
+    MongoCryptStatus status;
+    auto rawBuf = MongoCryptBuffer::borrow(ConstDataRange(raw.data(), raw.size()));
+    if (!mc_FLE2TagAndEncryptedMetadataBlock_parse(_block, rawBuf.get(), status)) {
+        return status.toStatus();
     }
+
     return Status::OK();
 }
 
 ConstFLE2TagAndEncryptedMetadataBlock::ConstFLE2TagAndEncryptedMetadataBlock(
     _mc_FLE2TagAndEncryptedMetadataBlock_t* mblock)
-    : _block(mblock) {}
+    : _block(mblock) {
+    static_assert(sizeof(FLE2TagAndEncryptedMetadataBlock::EncryptedZerosBlob) == kFieldLen,
+                  "EncryptedZerosBlob must be 32 bytes to correctly format the "
+                  "FLE2TagAndEncryptedMetadataBlock");
+    static_assert(sizeof(FLE2TagAndEncryptedMetadataBlock::EncryptedCountersBlob) == kFieldLen,
+                  "EncryptedCountersBlob must be 32 bytes to correctly format the "
+                  "FLE2TagAndEncryptedMetadataBlock");
+    static_assert(sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob) == kMetadataLen,
+                  "SerializedBlob must be 96 bytes to correctly format the "
+                  "FLE2TagAndEncryptedMetadataBlock");
+}
 
 ConstFLE2TagAndEncryptedMetadataBlock::View ConstFLE2TagAndEncryptedMetadataBlock::getView() const {
     View result;
@@ -2832,10 +2832,6 @@ FLE2IndexedRangeEncryptedValueV2 FLE2IndexedRangeEncryptedValueV2::fromUnencrypt
     const std::vector<PrfBlock>& tags,
     const std::vector<uint64_t>& counters) {
 
-    // Range-indexed fields can only have at most 129 tags (128 edges for decimal128 + 1 root)
-    // per OST.
-    static constexpr size_t kFLE2RangeFieldMaxTags = 129;
-
     uassert(9588700,
             "Non-range search InsertUpdatePayload supplied for FLE2IndexedRangeEncryptedValueV2",
             payload.getEdgeTokenSet().has_value());
@@ -2854,7 +2850,7 @@ FLE2IndexedRangeEncryptedValueV2 FLE2IndexedRangeEncryptedValueV2::fromUnencrypt
     // Ensure the total tags will not overflow the per-field tag limit.
     uassert(9588702,
             "InsertUpdatePayload for range-indexed field has an edge token set that is too large",
-            ets.size() <= kFLE2RangeFieldMaxTags);
+            ets.size() <= EncryptionInformationHelpers::kFLE2RangeFieldMaxTags);
     uassert(9588703,
             "FLE2IndexedRangeEncryptedValueV2 tags length must equal the total number of edges",
             tags.size() == ets.size());
@@ -2952,8 +2948,24 @@ FLE2IndexedRangeEncryptedValueV2::getMetadataBlocks() const {
 FLE2IndexedTextEncryptedValue::FLE2IndexedTextEncryptedValue()
     : _value(mc_FLE2IndexedEncryptedValueV2_new()) {}
 
+void FLE2IndexedTextEncryptedValue::verifyTotalTagCountIsWithinLimit(ConstDataRange toParse) {
+    constexpr size_t kCountsOffset = 1 + 16 + 1;  // fle_blob_subtype + key_uuid + bson_type
+    constexpr size_t kMinHeaderSize = kCountsOffset + 3 * sizeof(uint32_t);
+    uassert(12773700,
+            "Encountered a buffer with invalid length for a FLE2IndexedTextEncryptedValue",
+            toParse.length() >= kMinHeaderSize);
+
+    ConstDataRangeCursor cursor(toParse);
+    cursor.advance(kCountsOffset);
+    auto edgeCount = cursor.readAndAdvance<LittleEndian<uint32_t>>();
+    uassert(12773701,
+            "FLE2IndexedTextEncryptedValue contains tags that exceed the tag limit",
+            edgeCount <= EncryptionInformationHelpers::kFLE2PerFieldTagLimit);
+}
+
 FLE2IndexedTextEncryptedValue::FLE2IndexedTextEncryptedValue(ConstDataRange toParse)
     : _value(mc_FLE2IndexedEncryptedValueV2_new()) {
+    verifyTotalTagCountIsWithinLimit(toParse);
     auto buf = MongoCryptBuffer::borrow(toParse);
     MongoCryptStatus status;
     mc_FLE2IndexedEncryptedValueV2_parse(_value.get(), buf.get(), status);
@@ -2963,6 +2975,11 @@ FLE2IndexedTextEncryptedValue::FLE2IndexedTextEncryptedValue(ConstDataRange toPa
                         fmt::underlying(kFLE2IEVTypeText),
                         fmt::underlying(_value->type)),
             _value->type == kFLE2IEVTypeText);
+    uint64_t otherTagCount = (uint64_t)getSubstringTagCount() + (uint64_t)getSuffixTagCount() + 1;
+    uassert(12736500,
+            "FLE2IndexedTextEncryptedValue: edge_count must be at least "
+            "substr_tag_count + suffix_tag_count + 1",
+            (uint64_t)getTagCount() >= otherTagCount);
 }
 
 FLE2IndexedTextEncryptedValue FLE2IndexedTextEncryptedValue::fromUnencrypted(
@@ -3115,9 +3132,10 @@ uint32_t FLE2IndexedTextEncryptedValue::getSuffixTagCount() const {
 }
 
 uint32_t FLE2IndexedTextEncryptedValue::getPrefixTagCount() const {
-    auto otherTagCount = getSubstringTagCount() + getSuffixTagCount() + 1;
-    dassert(getTagCount() >= otherTagCount);
-    return getTagCount() - otherTagCount;
+    uint64_t otherTagCount = (uint64_t)getSubstringTagCount() + (uint64_t)getSuffixTagCount() + 1;
+    fassert(12736501, (uint64_t)getTagCount() >= otherTagCount);
+    // Safe cast: getTagCount() returns a uint32_t so otherTagCount must fit into 32 bits
+    return getTagCount() - static_cast<uint32_t>(otherTagCount);
 }
 
 ConstFLE2TagAndEncryptedMetadataBlock FLE2IndexedTextEncryptedValue::getExactStringMetadataBlock()
@@ -3179,7 +3197,7 @@ void EDCServerCollection::validateEncryptedFieldInfo(BSONObj& obj,
         }
     }
 
-    visitEncryptedBSON(obj, [&indexedFields](ConstDataRange cdr, StringData fieldPath) {
+    visitEncryptedBSON(obj, [&indexedFields](ConstDataRange cdr, std::string_view fieldPath) {
         auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
 
         if (encryptedTypeBinding == EncryptedBinDataType::kFLE2InsertUpdatePayloadV2) {
@@ -3197,7 +3215,7 @@ void EDCServerCollection::validateEncryptedFieldInfo(BSONObj& obj,
 }
 
 void EDCServerCollection::validateModifiedDocumentCompatibility(BSONObj& obj) {
-    visitEncryptedBSON(obj, [](ConstDataRange cdr, StringData fieldPath) {
+    visitEncryptedBSON(obj, [](ConstDataRange cdr, std::string_view fieldPath) {
         auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
         switch (encryptedTypeBinding) {
             case EncryptedBinDataType::kFLE2EqualityIndexedValue:
@@ -3216,7 +3234,7 @@ void EDCServerCollection::validateModifiedDocumentCompatibility(BSONObj& obj) {
 
 std::vector<EDCServerPayloadInfo> EDCServerCollection::getEncryptedFieldInfo(BSONObj& obj) {
     std::vector<EDCServerPayloadInfo> fields;
-    visitEncryptedBSON(obj, [&fields](ConstDataRange cdr, StringData fieldPath) {
+    visitEncryptedBSON(obj, [&fields](ConstDataRange cdr, std::string_view fieldPath) {
         collectEDCServerInfo(&fields, cdr, fieldPath);
     });
 
@@ -3344,7 +3362,7 @@ BSONObj EDCServerCollection::finalizeForInsert(
 
     // First: transform all the markings
     auto obj = transformBSON(
-        doc, [&tags, &it](ConstDataRange cdr, BSONObjBuilder* builder, StringData fieldPath) {
+        doc, [&tags, &it](ConstDataRange cdr, BSONObjBuilder* builder, std::string_view fieldPath) {
             convertServerPayload(cdr, &tags, it, builder, fieldPath);
         });
 
@@ -3396,7 +3414,7 @@ BSONObj EDCServerCollection::finalizeForUpdate(
 
     // First: transform all the markings
     auto obj = transformBSON(
-        doc, [&tags, &it](ConstDataRange cdr, BSONObjBuilder* builder, StringData fieldPath) {
+        doc, [&tags, &it](ConstDataRange cdr, BSONObjBuilder* builder, std::string_view fieldPath) {
             convertServerPayload(cdr, &tags, it, builder, fieldPath);
         });
 
@@ -3534,7 +3552,7 @@ std::vector<PrfBlock> EDCServerCollection::getRemovedTags(
 std::vector<EDCIndexedFields> EDCServerCollection::getEncryptedIndexedFields(BSONObj& obj) {
     std::vector<EDCIndexedFields> fields;
 
-    visitEncryptedBSON(obj, [&fields](ConstDataRange cdr, StringData fieldPath) {
+    visitEncryptedBSON(obj, [&fields](ConstDataRange cdr, std::string_view fieldPath) {
         collectIndexedFields(&fields, cdr, fieldPath);
     });
 
@@ -3597,14 +3615,22 @@ EncryptedFieldConfig EncryptionInformationHelpers::getAndValidateSchema(
                 "recreate the collection with the 'suffix' query type.",
                 !hasQueryType(efc, QueryTypeEnum::SuffixPreviewDeprecated));
     }
+    if (gFeatureFlagQESubstringSearch.isEnabledUseLastLTSFCVWhenUninitialized(
+            kVersionContextIgnored_UNSAFE,
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        uassert(12915801,
+                "Collection contains the 'substringPreview' query type which is deprecated. Please "
+                "recreate the collection with the 'substring' query type.",
+                !hasQueryType(efc, QueryTypeEnum::SubstringPreviewDeprecated));
+    }
     return efc;
 }
 
 void EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(
     const EncryptedFieldConfig& ef) {
 
-    auto calculateMaxTags = [](const boost::optional<StringData>& type,
-                               StringData path,
+    auto calculateMaxTags = [](const boost::optional<std::string_view>& type,
+                               std::string_view path,
                                const QueryTypeConfig& qtc) -> uint64_t {
         auto qtype = qtc.getQueryType();
         if (qtype == QueryTypeEnum::Equality) {
@@ -3617,7 +3643,8 @@ void EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(
         } else if (isFLE2TextQueryType(qtype)) {
             int32_t ub = qtc.getStrMaxQueryLength().get();
             int32_t lb = qtc.getStrMinQueryLength().get();
-            if (qtype == QueryTypeEnum::SubstringPreview) {
+            if (qtype == QueryTypeEnum::Substring ||
+                qtype == QueryTypeEnum::SubstringPreviewDeprecated) {
                 return maxTagsForSubstring(
                     lb, ub, static_cast<uint32_t>(qtc.getStrMaxLength().get()));
             }
@@ -3677,12 +3704,71 @@ void EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(
         shouldOverrideTotalTagOverheadLimit || totalTagStorage <= BSONObjMaxUserSize);
 }
 
+void EncryptionInformationHelpers::checkMaxContentionFactorNotExceeded(int64_t contention) {
+    uassert(ErrorCodes::BadValue,
+            fmt::format("contention factor ({}) must be >= 0", contention),
+            contention >= 0);
+    uassert(ErrorCodes::BadValue,
+            fmt::format("contention factor ({}) exceeds the maximum allowed value ({})",
+                        contention,
+                        kFLEMaxContentionFactor),
+            contention <= kFLEMaxContentionFactor);
+}
+
+void EncryptionInformationHelpers::checkMaxContentionFactorNotExceeded(
+    const EncryptedFieldConfig& ef) {
+    visitQueryTypeConfigs(ef, [](const EncryptedField&, const QueryTypeConfig& qtc) {
+        EncryptionInformationHelpers::checkMaxContentionFactorNotExceeded(qtc.getContention());
+        return false;
+    });
+}
+
+void EncryptionInformationHelpers::checkSubstringParameterLimitsNotExceeded(
+    const EncryptedFieldConfig& ef) {
+    static_assert(kSubstringLowerBoundMin <= kSubstringUpperBoundMax);
+    static_assert(kSubstringUpperBoundMax <= kSubstringMaxLengthMax);
+
+    auto checkOneQueryType = [](const EncryptedField& field, const QueryTypeConfig& qtc) {
+        if (qtc.getQueryType() != QueryTypeEnum::Substring) {
+            return false;
+        }
+        int32_t ub = qtc.getStrMaxQueryLength().get();
+        int32_t lb = qtc.getStrMinQueryLength().get();
+        int32_t max = qtc.getStrMaxLength().get();
+        auto path = field.getPath();
+        uassert(12860001,
+                fmt::format("strMinQueryLength ({}) must be >= {} for substring query "
+                            "type of field {}.",
+                            lb,
+                            kSubstringLowerBoundMin,
+                            path),
+                lb >= kSubstringLowerBoundMin);
+        uassert(12860002,
+                fmt::format("strMaxQueryLength ({}) must be <= {} for substring query "
+                            "type of field {}.",
+                            ub,
+                            kSubstringUpperBoundMax,
+                            path),
+                ub <= kSubstringUpperBoundMax);
+        uassert(12860003,
+                fmt::format("strMaxLength ({}) must be <= {} for substring query "
+                            "type of field {}.",
+                            max,
+                            kSubstringMaxLengthMax,
+                            path),
+                max <= kSubstringMaxLengthMax);
+        return false;
+    };
+
+    visitQueryTypeConfigs(ef, checkOneQueryType);
+}
+
 void EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceeded(
     const EncryptedFieldConfig& ef) {
     static_assert(kSubstringPreviewLowerBoundMin <= kSubstringPreviewUpperBoundMax);
     static_assert(kSubstringPreviewUpperBoundMax <= kSubstringPreviewMaxLengthMax);
 
-    static constexpr StringData bypassMsg =
+    static constexpr std::string_view bypassMsg =
         "Consider setting the fleDisableSubstringPreviewParameterLimits cluster parameter to true "
         "to bypass this limit.";
     if (ServerParameterSet::getClusterParameterSet()
@@ -3694,7 +3780,7 @@ void EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceed
     }
 
     auto checkOneQueryType = [](const EncryptedField& field, const QueryTypeConfig& qtc) {
-        if (qtc.getQueryType() != QueryTypeEnum::SubstringPreview) {
+        if (qtc.getQueryType() != QueryTypeEnum::SubstringPreviewDeprecated) {
             return false;
         }
         int32_t ub = qtc.getStrMaxQueryLength().get();
@@ -3710,7 +3796,7 @@ void EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceed
                             bypassMsg),
                 lb >= kSubstringPreviewLowerBoundMin);
         uassert(10453201,
-                fmt::format("strMaxQueryLength ({}) must be >= {} for substringPreview query "
+                fmt::format("strMaxQueryLength ({}) must be <= {} for substringPreview query "
                             "type of field {}. {}",
                             ub,
                             kSubstringPreviewUpperBoundMax,
@@ -3718,7 +3804,7 @@ void EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceed
                             bypassMsg),
                 ub <= kSubstringPreviewUpperBoundMax);
         uassert(10453202,
-                fmt::format("strMaxLength ({}) must be >= {} for substringPreview query "
+                fmt::format("strMaxLength ({}) must be <= {} for substringPreview query "
                             "type of field {}. {}",
                             max,
                             kSubstringPreviewMaxLengthMax,
@@ -3740,13 +3826,31 @@ std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedConstDataRange(Cons
     return {subType, cdrc};
 }
 
-ParsedFindEqualityPayload::ParsedFindEqualityPayload(BSONElement fleFindPayload)
-    : ParsedFindEqualityPayload(binDataToCDR(fleFindPayload)) {};
+namespace {
+const EncryptedField& findFieldByPath(const EncryptedFieldConfig& efc, std::string_view path) {
+    for (const auto& f : efc.getFields()) {
+        if (f.getPath() == path) {
+            return f;
+        }
+    }
+    uasserted(9188709, str::stream() << "EncryptedField does not exist for path " << path);
+}
+}  // namespace
 
-ParsedFindEqualityPayload::ParsedFindEqualityPayload(const Value& fleFindPayload)
-    : ParsedFindEqualityPayload(binDataToCDR(fleFindPayload)) {};
+ParsedFindEqualityPayload::ParsedFindEqualityPayload(
+    BSONElement fleFindPayload,
+    std::string_view path,
+    boost::optional<const EncryptedFieldConfig&> efc)
+    : ParsedFindEqualityPayload(binDataToCDR(fleFindPayload), path, efc) {}
 
-ParsedFindEqualityPayload::ParsedFindEqualityPayload(ConstDataRange cdr) {
+ParsedFindEqualityPayload::ParsedFindEqualityPayload(
+    const Value& fleFindPayload,
+    std::string_view path,
+    boost::optional<const EncryptedFieldConfig&> efc)
+    : ParsedFindEqualityPayload(binDataToCDR(fleFindPayload), path, efc) {}
+
+ParsedFindEqualityPayload::ParsedFindEqualityPayload(
+    ConstDataRange cdr, std::string_view path, boost::optional<const EncryptedFieldConfig&> efc) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     auto encryptedType = encryptedTypeBinding;
 
@@ -3762,15 +3866,26 @@ ParsedFindEqualityPayload::ParsedFindEqualityPayload(ConstDataRange cdr) {
     serverDataDerivedToken = payload.getServerDerivedFromDataToken();
 
     maxCounter = payload.getMaxCounter();
+
+    if (efc) {
+        validatePayloadAgainstQueryTypeConfig(
+            path, findFieldByPath(*efc, path), FLE2PayloadParams(*this));
+    }
 }
 
-ParsedFindRangePayload::ParsedFindRangePayload(BSONElement fleFindPayload)
-    : ParsedFindRangePayload(binDataToCDR(fleFindPayload)) {};
+ParsedFindRangePayload::ParsedFindRangePayload(BSONElement fleFindPayload,
+                                               std::string_view path,
+                                               boost::optional<const EncryptedFieldConfig&> efc)
+    : ParsedFindRangePayload(binDataToCDR(fleFindPayload), path, efc) {}
 
-ParsedFindRangePayload::ParsedFindRangePayload(const Value& fleFindPayload)
-    : ParsedFindRangePayload(binDataToCDR(fleFindPayload)) {};
+ParsedFindRangePayload::ParsedFindRangePayload(const Value& fleFindPayload,
+                                               std::string_view path,
+                                               boost::optional<const EncryptedFieldConfig&> efc)
+    : ParsedFindRangePayload(binDataToCDR(fleFindPayload), path, efc) {}
 
-ParsedFindRangePayload::ParsedFindRangePayload(ConstDataRange cdr) {
+ParsedFindRangePayload::ParsedFindRangePayload(ConstDataRange cdr,
+                                               std::string_view path,
+                                               boost::optional<const EncryptedFieldConfig&> efc) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     auto encryptedType = encryptedTypeBinding;
 
@@ -3789,32 +3904,42 @@ ParsedFindRangePayload::ParsedFindRangePayload(ConstDataRange cdr) {
     indexMin = payload.getIndexMin();
     indexMax = payload.getIndexMax();
 
-    if (!payload.getPayload()) {
-        return;
+    if (payload.getPayload()) {
+        edges = std::vector<FLEFindEdgeTokenSet>();
+        auto& edgesRef = edges.value();
+        auto& info = payload.getPayload().value();
+
+        for (auto const& edge : info.getEdges()) {
+            edgesRef.push_back({edge.getEdcDerivedToken(),
+                                edge.getEscDerivedToken(),
+                                edge.getServerDerivedFromDataToken()});
+        }
+
+        maxCounter = info.getMaxCounter();
     }
 
-    edges = std::vector<FLEFindEdgeTokenSet>();
-    auto& edgesRef = edges.value();
-    auto& info = payload.getPayload().value();
-
-    for (auto const& edge : info.getEdges()) {
-        edgesRef.push_back({edge.getEdcDerivedToken(),
-                            edge.getEscDerivedToken(),
-                            edge.getServerDerivedFromDataToken()});
+    if (efc) {
+        validatePayloadAgainstQueryTypeConfig(
+            path, findFieldByPath(*efc, path), FLE2PayloadParams(*this));
     }
-
-    maxCounter = info.getMaxCounter();
 }
 
-ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(BSONElement fleFindPayload) {
+ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(
+    BSONElement fleFindPayload,
+    std::string_view path,
+    boost::optional<const EncryptedFieldConfig&> efc) {
     // We should never parse a BSONElement payload since we don't support match expressions.
     MONGO_UNREACHABLE_TASSERT(10112804);
 };
 
-ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(const Value& fleFindPayload)
-    : ParsedFindTextSearchPayload(binDataToCDR(fleFindPayload)) {};
+ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(
+    const Value& fleFindPayload,
+    std::string_view path,
+    boost::optional<const EncryptedFieldConfig&> efc)
+    : ParsedFindTextSearchPayload(binDataToCDR(fleFindPayload), path, efc) {}
 
-ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(ConstDataRange cdr) {
+ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(
+    ConstDataRange cdr, std::string_view path, boost::optional<const EncryptedFieldConfig&> efc) {
     auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
     auto encryptedType = encryptedTypeBinding;
     uassert(10112800,
@@ -3836,14 +3961,27 @@ ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(ConstDataRange cdr) {
         edc = EDCDerivedFromDataToken{prefixTokens->getEdcDerivedToken().asPrfBlock()};
         esc = ESCDerivedFromDataToken{prefixTokens->getEscDerivedToken().asPrfBlock()};
         server = ServerDerivedFromDataToken{prefixTokens->getServerDerivedToken().asPrfBlock()};
+        if (const auto& spec = payload.getPrefixSpec(); spec) {
+            minQueryLength = spec->getMinQueryLength();
+            maxQueryLength = spec->getMaxQueryLength();
+        }
     } else if (suffixTokens) {
         edc = EDCDerivedFromDataToken{suffixTokens->getEdcDerivedToken().asPrfBlock()};
         esc = ESCDerivedFromDataToken{suffixTokens->getEscDerivedToken().asPrfBlock()};
         server = ServerDerivedFromDataToken{suffixTokens->getServerDerivedToken().asPrfBlock()};
+        if (const auto& spec = payload.getSuffixSpec(); spec) {
+            minQueryLength = spec->getMinQueryLength();
+            maxQueryLength = spec->getMaxQueryLength();
+        }
     } else if (substringTokens) {
         edc = EDCDerivedFromDataToken{substringTokens->getEdcDerivedToken().asPrfBlock()};
         esc = ESCDerivedFromDataToken{substringTokens->getEscDerivedToken().asPrfBlock()};
         server = ServerDerivedFromDataToken{substringTokens->getServerDerivedToken().asPrfBlock()};
+        if (const auto& spec = payload.getSubstringSpec(); spec) {
+            minQueryLength = spec->getMinQueryLength();
+            maxQueryLength = spec->getMaxQueryLength();
+            maxLength = spec->getMaxLength();
+        }
     } else {
         edc = EDCDerivedFromDataToken{exactTokens->getEdcDerivedToken().asPrfBlock()};
         esc = ESCDerivedFromDataToken{exactTokens->getEscDerivedToken().asPrfBlock()};
@@ -3851,6 +3989,11 @@ ParsedFindTextSearchPayload::ParsedFindTextSearchPayload(ConstDataRange cdr) {
     }
 
     maxCounter = payload.getMaxCounter();
+
+    if (efc) {
+        validatePayloadAgainstQueryTypeConfig(
+            path, findFieldByPath(*efc, path), FLE2PayloadParams(*this));
+    }
 }
 
 
@@ -3886,13 +4029,13 @@ std::vector<CompactionToken> CompactionHelpers::parseCompactionTokens(BSONObj co
 
 void CompactionHelpers::validateCompactionOrCleanupTokens(const EncryptedFieldConfig& efc,
                                                           BSONObj compactionTokens,
-                                                          StringData tokenType) {
+                                                          std::string_view tokenType) {
     _validateTokens(efc, compactionTokens, tokenType);
 }
 
 void CompactionHelpers::_validateTokens(const EncryptedFieldConfig& efc,
                                         BSONObj tokens,
-                                        StringData cmd) {
+                                        std::string_view cmd) {
     for (const auto& field : efc.getFields()) {
         const auto& tokenElement = tokens.getField(field.getPath());
         uassert(7294900,
@@ -3922,6 +4065,32 @@ bool hasQueryTypeMatching(const EncryptedFieldConfig& config, const QueryTypeMat
                                  [&matcher](const EncryptedField&, const QueryTypeConfig& qtc) {
                                      return matcher(qtc.getQueryType());
                                  });
+}
+
+boost::optional<QueryTypeConfig> getQueryTypeMatching(const EncryptedField& field,
+                                                      const QueryTypeMatchFn& matcher) {
+    boost::optional<QueryTypeConfig> result;
+    visitQueryTypeConfigs(field, [&](const EncryptedField&, const QueryTypeConfig& qtc) {
+        if (matcher(qtc.getQueryType())) {
+            result = qtc;
+            return true;
+        }
+        return false;
+    });
+    return result;
+}
+
+boost::optional<QueryTypeConfig> getQueryTypeMatching(const EncryptedFieldConfig& config,
+                                                      const QueryTypeMatchFn& matcher) {
+    boost::optional<QueryTypeConfig> result;
+    visitQueryTypeConfigs(config, [&](const EncryptedField&, const QueryTypeConfig& qtc) {
+        if (matcher(qtc.getQueryType())) {
+            result = qtc;
+            return true;
+        }
+        return false;
+    });
+    return result;
 }
 
 bool hasQueryType(const EncryptedField& field, QueryTypeEnum queryType) {
@@ -4021,10 +4190,10 @@ Edges::Edges(std::string leaf, int sparsity, const boost::optional<int>& optTrim
             _trimFactor >= 0 && (_trimFactor == 0 || (size_t)_trimFactor < _leaf.length()));
 }
 
-std::vector<StringData> Edges::get() {
-    static const StringData kRoot = "root"_sd;
-    StringData leaf = _leaf;
-    std::vector<StringData> result;
+std::vector<std::string_view> Edges::get() {
+    static const std::string_view kRoot = "root"sv;
+    std::string_view leaf = _leaf;
+    std::vector<std::string_view> result;
     if (_trimFactor == 0) {
         result.push_back(kRoot);
     }
@@ -4112,7 +4281,9 @@ std::unique_ptr<Edges> getEdgesDecimal128(Decimal128 value,
     return getEdgesT(aost.value, aost.min, aost.max, sparsity, trimFactor);
 }
 
-std::uint64_t getEdgesLength(BSONType fieldType, StringData fieldPath, QueryTypeConfig config) {
+std::uint64_t getEdgesLength(BSONType fieldType,
+                             std::string_view fieldPath,
+                             QueryTypeConfig config) {
     // validates fieldType & config and sets defaults
     setRangeDefaults(fieldType, fieldPath, &config);
 
@@ -4384,8 +4555,9 @@ int32_t calculatePaddedLengthForString(int32_t strLen) {
                 strLen),
             strLen <= std::numeric_limits<int32_t>::max() - kBSONStringOverheadBytes - 15);
 
-    // round strLen + overhead to the nearest 16-byte boundary
-    int32_t padLen = ((strLen + kBSONStringOverheadBytes + 15) / 16) * 16;
+    // round strLen + overhead to the next 16-byte boundary which is *strictly greater than*
+    // strLen + overhead (i.e., 15 rounds to 16; 16 rounds to 32).
+    int32_t padLen = ((strLen + kBSONStringOverheadBytes + 16) / 16) * 16;
 
     // readjust for BSON overhead
     padLen -= kBSONStringOverheadBytes;

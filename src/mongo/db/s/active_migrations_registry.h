@@ -1,42 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
@@ -44,12 +16,13 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/future.h"
 #include "mongo/util/modules.h"
 
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -64,19 +37,53 @@ class ScopedDonateChunk;
 class ScopedReceiveChunk;
 class ScopedSplitMergeChunk;
 
+namespace migrationutil {
+void resumeMigrationRecipientsOnStepUp(OperationContext* opCtx);
+}  // namespace migrationutil
+
 /**
  * This class is used to synchronise all the active routing info operations for chunks owned by this
  * shard. There is only one instance of it per ServiceContext.
  *
- * It implements a non-fair lock manager, which provides the following guarantees:
+ * It tracks three kinds of chunk operations running on this shard:
+ *   - Donate (move): this shard is the source of a chunk migration.
+ *   - Receive: this shard is the destination of a chunk migration.
+ *   - Split/Merge: this shard is splitting or merging chunks it owns.
  *
- *   - Move || Move (same chunk): The second move will join the first
- *   - Move || Move (different chunks or collections): The second move will result in a
- *                                                     ConflictingOperationInProgress error
- *   - Move || Split/Merge (same collection): The second operation will block behind the first
- *   - Move/Split/Merge || Split/Merge (for different collections): Can proceed concurrently
+ * Donate and Receive are mutually exclusive shard-wide: a shard performs at most one migration at a
+ * time, as either donor or recipient, regardless of namespace. Split/Merge is tracked per
+ * namespace and coordinates with the other operations only on the same namespace, so unrelated
+ * collections can split/merge concurrently with each other and with a migration.
+ *
+ * When a new operation arrives while another is already running, the outcome is:
+ *
+ *   Legend:
+ *     JOIN       - attaches to the running operation and shares its outcome
+ *     CONFLICT   - fails immediately with ConflictingOperationInProgress
+ *     WAIT       - blocks until the running operation finishes, then proceeds
+ *     CONCURRENT - proceeds immediately; both run at the same time
+ *     WAIT/CONFL - WAIT when registerReceiveChunk() is called with
+ *                  waitForCompletionOfMigrationOps == true (e.g. the step-up recovery path);
+ *                  CONFLICT otherwise.
+ *
+ *   Rows = incoming operation, Columns = operation already running on this shard.
+ *
+ *   incoming \ running | Donate (move)          | Receive               | Split/Merge
+ *   -------------------+------------------------+-----------------------+----------------------
+ *    Donate (move)     | same request: JOIN     | CONFLICT              | same nss:  WAIT
+ *                      | otherwise:    CONFLICT |                       | other nss: CONCURRENT
+ *   -------------------+------------------------+-----------------------+----------------------
+ *    Receive           | WAIT/CONFL             | WAIT/CONFL            | same nss:  WAIT
+ *                      |                        |                       | other nss: CONCURRENT
+ *   -------------------+------------------------+-----------------------+----------------------
+ *    Split/Merge       | same nss:  WAIT        | same nss:  WAIT       | same nss:  WAIT
+ *                      | other nss: CONCURRENT  | other nss: CONCURRENT | other nss: CONCURRENT
+ *
+ * Migrations and Split/Merge of the same namespace wait for each other (whichever starts second
+ * blocks until the first finishes), so the two never hold the collection critical section at the
+ * same time.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT ActiveMigrationsRegistry {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ActiveMigrationsRegistry {
     ActiveMigrationsRegistry(const ActiveMigrationsRegistry&) = delete;
     ActiveMigrationsRegistry& operator=(const ActiveMigrationsRegistry&) = delete;
 
@@ -88,13 +95,66 @@ public:
     static ActiveMigrationsRegistry& get(OperationContext* opCtx);
 
     /**
-     * These methods can be used to block migrations temporarily. The lock() method will block if
-     * there is a migration operation in progress and will return once it is completed. Any
-     * subsequent migration operations will return ConflictingOperationInProgress until the unlock()
-     * method is called.
+     * Interface injected to let the registry wait for the sharding coordinator service recovery
+     * to complete before acquiring any of its locks. Any code path that acquires the
+     * ActiveMigrationsRegistry must first await completion of the sharding coordinator's recovery,
+     * so that recovered coordinators obtain their ActiveMigrationsRegistry before newly-submitted
+     * operations.
      */
-    void lock(OperationContext* opCtx, StringData reason);
-    void unlock(StringData reason);
+    class [[MONGO_MOD_OPEN]] Recoverable {
+    public:
+        virtual ~Recoverable() = default;
+
+        virtual void waitForRecovery(OperationContext* opCtx) const = 0;
+    };
+
+    // Injects the Recoverable instance the registry will block on before acquiring any of its
+    // locks. Expected to be called once per ServiceContext at shard-server startup.
+    void setRecoverable(Recoverable* recoverable);
+
+    /**
+     * PassKey token that authorises a registry-lock acquisition to skip the waitForRecovery()
+     * step. The friend list below is the complete set of sites that can construct one, each for
+     * the same underlying reason — they run inside the recovery sequence and would otherwise
+     * deadlock or fail by waiting on it:
+     *
+     *   - ChunkOperationShardingCoordinator<StateDoc> (the base template for chunk-operation
+     *     coordinators), when a coordinator reacquires the registry from inside its own recovery /
+     *     lock-acquisition phase. Waiting on the coordinator service's recovery from that context
+     *     would deadlock, since the caller is itself part of what's holding recovery open. The
+     *     template is the friend (rather than each concrete coordinator) so that the bypass token
+     *     can only be obtained via the protected static helper
+     *     `ChunkOperationShardingCoordinator::makeRegistryRecoveryBypass()`, which is the single
+     *     sanctioned construction site for the token within the coordinator hierarchy.
+     *   - migrationutil::resumeMigrationRecipientsOnStepUp, which executes synchronously on the
+     *     OplogApplier thread during step-up — before ShardingCoordinatorService has transitioned
+     *     out of kPaused. Without the bypass, waitForRecovery would uassert NotWritablePrimary and
+     *     crash the node.
+     *   - ActiveMigrationsRegistryTestAccessor, which exists only in the unit test to exercise
+     *     recovery-bypassed registration behavior.
+     *
+     * Because the default constructor is private and the friend list above is the only way to
+     * reach it, code outside these surfaces cannot bypass the recovery wait.
+     */
+    class BypassRecoveryWait {
+    private:
+        template <typename StateDoc>
+        friend class ChunkOperationShardingCoordinator;
+        friend class ActiveMigrationsRegistryTestAccessor;
+        friend void migrationutil::resumeMigrationRecipientsOnStepUp(OperationContext*);
+        BypassRecoveryWait() = default;
+    };
+
+    /**
+     * These methods can be used to block all chunk operations (migrations as well as split/merge
+     * operations) temporarily. The lock() method will block while there is any chunk operation in
+     * progress and will return once they have all completed. Any subsequent chunk operation will
+     * return ConflictingOperationInProgress until the unlock() method is called.
+     */
+    void lock(OperationContext* opCtx,
+              std::string_view reason,
+              boost::optional<BypassRecoveryWait> bypass = boost::none);
+    void unlock(std::string_view reason);
 
     /**
      * If there are no migrations or split/merges running on this shard, registers an active
@@ -107,35 +167,44 @@ public:
      *
      * Otherwise returns a ConflictingOperationInProgress error.
      */
-    StatusWith<ScopedDonateChunk> registerDonateChunk(OperationContext* opCtx,
-                                                      const ShardsvrMoveRange& args);
+    StatusWith<ScopedDonateChunk> registerDonateChunk(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ShardsvrMoveRangeRequest& request,
+        boost::optional<BypassRecoveryWait> bypass = boost::none);
 
     /**
      * Registers an active receive chunk operation with the specified session id and returns a
      * ScopedReceiveChunk. The returned ScopedReceiveChunk object will unregister the migration when
      * it goes out of scope.
      *
-     * In case registerReceiveChunk() is called while other operations (a second migration or a
-     * registry lock()) are already holding resources of the ActiveMigrationsRegistry, the function
-     * will either
+     * A receive always waits for any split/merge of the same namespace to finish before
+     * registering, since both would take the collection critical section.
+     *
+     * For a conflicting migration (a second receive or an active donate) or an explicit registry
+     * lock(), the function will either
      * - wait for such operations to complete and then perform the registration
      * - return a ConflictingOperationInProgress error
-     * based on the value of the waitForCompletionOfConflictingOps parameter
+     * based on the value of the waitForCompletionOfMigrationOps parameter.
      */
-    StatusWith<ScopedReceiveChunk> registerReceiveChunk(OperationContext* opCtx,
-                                                        const NamespaceString& nss,
-                                                        const ChunkRange& chunkRange,
-                                                        const ShardId& fromShardId,
-                                                        bool waitForCompletionOfConflictingOps);
+    StatusWith<ScopedReceiveChunk> registerReceiveChunk(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ChunkRange& chunkRange,
+        const ShardId& fromShardId,
+        bool waitForCompletionOfMigrationOps,
+        boost::optional<BypassRecoveryWait> bypass = boost::none);
 
     /**
      * If there are no migrations running on this shard, registers an active split or merge
      * operation for the specified namespace and returns a scoped object which will in turn disallow
      * other migrations or splits/merges for the same namespace (but not for other namespaces).
      */
-    StatusWith<ScopedSplitMergeChunk> registerSplitOrMergeChunk(OperationContext* opCtx,
-                                                                const NamespaceString& nss,
-                                                                const ChunkRange& chunkRange);
+    StatusWith<ScopedSplitMergeChunk> registerSplitOrMergeChunk(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ChunkRange& chunkRange,
+        boost::optional<BypassRecoveryWait> bypass = boost::none);
 
     /**
      * If a migration has been previously registered through a call to registerDonateChunk, returns
@@ -158,19 +227,24 @@ private:
 
     // Describes the state of a currently active moveChunk operation
     struct ActiveMoveChunkState {
-        ActiveMoveChunkState(ShardsvrMoveRange inArgs)
-            : args(std::move(inArgs)), notification(std::make_shared<Notification<Status>>()) {}
+        ActiveMoveChunkState(NamespaceString inNss, ShardsvrMoveRangeRequest inRequest)
+            : nss(std::move(inNss)),
+              request(std::move(inRequest)),
+              promise(std::make_shared<SharedPromise<void>>()) {}
 
         /**
          * Constructs an error status to return in the case of conflicting operations.
          */
         Status constructErrorStatus() const;
 
-        // Exact arguments of the currently active operation
-        ShardsvrMoveRange args;
+        // Namespace of the currently active operation
+        NamespaceString nss;
 
-        // Notification event that will be signaled when the currently active operation completes
-        std::shared_ptr<Notification<Status>> notification;
+        // Move-range request fields of the currently active operation.
+        ShardsvrMoveRangeRequest request;
+
+        // Promise that will be resolved when the currently active operation completes.
+        std::shared_ptr<SharedPromise<void>> promise;
     };
 
     // Describes the state of a currently active receive chunk operation
@@ -224,6 +298,11 @@ private:
      */
     void _clearSplitMergeChunk(const NamespaceString& nss);
 
+    // Recoverable on which waitForRecovery() is invoked before acquiring any registry lock. Set
+    // once at shard-server startup and never cleared; nullptr on non-shard-server contexts and
+    // in unit tests that don't wire one up. Not owned.
+    Recoverable* _recoverable{nullptr};
+
     // Protects the state below
     std::mutex _mutex;
 
@@ -246,7 +325,14 @@ private:
     stdx::unordered_map<NamespaceString, ActiveSplitMergeChunkState> _activeSplitMergeChunkStates;
 };
 
-class MigrationBlockingGuard {
+/**
+ * RAII guard that quiesces chunk operations on this shard for as long as it is in scope. On
+ * construction it acquires the ActiveMigrationsRegistry lock, which drains every in-progress chunk
+ * operation (migrations as well as split/merge operations) and blocks until they complete; while
+ * held, any newly submitted chunk operation fails with ConflictingOperationInProgress. The
+ * destructor releases the lock and lets chunk operations resume.
+ */
+class [[MONGO_MOD_PUBLIC]] MigrationBlockingGuard {
 public:
     MigrationBlockingGuard(OperationContext* opCtx, std::string reason)
         : _registry(ActiveMigrationsRegistry::get(opCtx)), _reason(std::move(reason)) {
@@ -279,7 +365,7 @@ class ScopedDonateChunk {
 public:
     ScopedDonateChunk(ActiveMigrationsRegistry* registry,
                       bool shouldExecute,
-                      std::shared_ptr<Notification<Status>> completionNotification);
+                      std::shared_ptr<SharedPromise<void>> promise);
     ~ScopedDonateChunk();
 
     ScopedDonateChunk(ScopedDonateChunk&&);
@@ -318,12 +404,7 @@ private:
      */
     bool _shouldExecute;
 
-    // This is the future, which will be set at the end of a migration.
-    std::shared_ptr<Notification<Status>> _completionNotification;
-
-    // This is the outcome of the migration execution, stored when signalComplete() is called and
-    // set on the future of the executing ScopedDonateChunk object when this gets destroyed.
-    boost::optional<Status> _completionOutcome;
+    std::shared_ptr<SharedPromise<void>> _promise;
 };
 
 /**
@@ -350,7 +431,7 @@ private:
  * Object of this class is returned from the registerSplitOrMergeChunk call of the active migrations
  * registry.
  */
-class MONGO_MOD_PUBLIC ScopedSplitMergeChunk {
+class [[MONGO_MOD_PUBLIC]] ScopedSplitMergeChunk {
 public:
     ScopedSplitMergeChunk(ActiveMigrationsRegistry* registry, const NamespaceString& nss);
     ~ScopedSplitMergeChunk();

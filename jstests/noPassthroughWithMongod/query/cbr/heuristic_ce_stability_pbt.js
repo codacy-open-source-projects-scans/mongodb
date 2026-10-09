@@ -3,6 +3,7 @@
  * heuristic-based plan ranking.
  *
  * @tags: [
+ *    requires_fcv_90,
  *    query_intensive_pbt,
  *    # Runs queries that may return many results, requiring getmores.
  *    requires_getmore,
@@ -33,7 +34,12 @@ const numQueriesPerRun = 30;
 
 const experimentColl = db[jsTestName()];
 assert.commandWorked(
-    db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "heuristicCE"}),
+    db.adminCommand({
+        setParameter: 1,
+        featureFlagCostBasedRanker: true,
+        internalQueryPlanRanker: "costBased",
+        internalQueryCBRCEMode: "heuristicCE",
+    }),
 );
 testProperty(
     createPlanStabilityProperty(experimentColl, true /* assertCeExists */),

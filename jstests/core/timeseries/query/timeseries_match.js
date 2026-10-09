@@ -1,6 +1,7 @@
 /**
  * Tests $match usage of block processing for time series.
  * @tags: [
+ *   uses_explain,
  *   requires_timeseries,
  *   does_not_support_stepdowns,
  *   directly_against_shardsvrs_incompatible,
@@ -170,7 +171,9 @@ TimeseriesTest.run((insert) => {
         {
             pred: {
                 "time": {
-                    $not: {$in: [[new Date("2019-09-27T21:14:45.654Z"), new Date(datePrefix + 300)]]},
+                    $not: {
+                        $in: [[new Date("2019-09-27T21:14:45.654Z"), new Date(datePrefix + 300)]],
+                    },
                 },
             },
             ids: [0, 1, 2, 3, 4],
@@ -199,7 +202,10 @@ TimeseriesTest.run((insert) => {
                 $nor: [
                     {"time": {$ne: ["arr1", "arr2"]}},
                     {
-                        $and: [{"time": {$gte: ["arr3", "arr4"]}}, {"time": {$gt: new Date(datePrefix + 300)}}],
+                        $and: [
+                            {"time": {$gte: ["arr3", "arr4"]}},
+                            {"time": {$gt: new Date(datePrefix + 300)}},
+                        ],
                     },
                     {"time": {$eq: new Date(datePrefix + 300)}},
                 ],
@@ -303,7 +309,11 @@ TimeseriesTest.run((insert) => {
                 "$expr": {
                     "$eq": [
                         {
-                            "$dateSubtract": {"startDate": "$time", "unit": "millisecond", amount: 100},
+                            "$dateSubtract": {
+                                "startDate": "$time",
+                                "unit": "millisecond",
+                                amount: 100,
+                            },
                         },
                         new Date(datePrefix),
                     ],
@@ -378,7 +388,8 @@ TimeseriesTest.run((insert) => {
 
     // $match pushdown requires sbe to be fully enabled and featureFlagTimeSeriesInSbe to be set.
     const sbeEnabled =
-        checkSbeFullyEnabled(db) && FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "TimeSeriesInSbe");
+        checkSbeFullyEnabled(db) &&
+        FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "TimeSeriesInSbe");
     for (let testCase of kTestCases) {
         const pipe = [{$match: testCase.pred}, {$project: {_id: 1}}];
 
@@ -446,9 +457,27 @@ TimeseriesTest.run((insert) => {
         }),
     );
 
-    insert(coll, {_id: 0, [timeFieldName]: new Date(datePrefix + 100), [metaFieldName]: "cpu", a: 1, b: 1});
-    insert(coll, {_id: 0, [timeFieldName]: new Date(datePrefix + 200), [metaFieldName]: "cpu", a: 2, b: 0});
-    insert(coll, {_id: 0, [timeFieldName]: new Date(datePrefix + 300), [metaFieldName]: "cpu", a: 1, b: 3});
+    insert(coll, {
+        _id: 0,
+        [timeFieldName]: new Date(datePrefix + 100),
+        [metaFieldName]: "cpu",
+        a: 1,
+        b: 1,
+    });
+    insert(coll, {
+        _id: 0,
+        [timeFieldName]: new Date(datePrefix + 200),
+        [metaFieldName]: "cpu",
+        a: 2,
+        b: 0,
+    });
+    insert(coll, {
+        _id: 0,
+        [timeFieldName]: new Date(datePrefix + 300),
+        [metaFieldName]: "cpu",
+        a: 1,
+        b: 3,
+    });
 
     {
         const pipeline = [

@@ -13,11 +13,16 @@ export var fsm = (function () {
     function forceRunningOutsideTransaction(data) {
         if (data[kIsRunningInsideTransaction]) {
             const err = new Error(
-                "Intentionally thrown to stop state function from running inside of a" + " multi-statement transaction",
+                "Intentionally thrown to stop state function from running inside of a" +
+                    " multi-statement transaction",
             );
             err.isNotSupported = true;
             throw err;
         }
+    }
+
+    function isInvocationRunningInsideTransaction(data) {
+        return data[kIsRunningInsideTransaction] === true;
     }
 
     // args.data = 'this' object of the state functions
@@ -58,7 +63,9 @@ export var fsm = (function () {
 
             // Config shard conn strings do not use gRPC.
             const kNonGrpcConnStr = (connStr) =>
-                jsTestOptions().shellGRPC ? `mongodb://${connStr}/?grpc=false` : `mongodb://${connStr}`;
+                jsTestOptions().shellGRPC
+                    ? `mongodb://${connStr}/?grpc=false`
+                    : `mongodb://${connStr}`;
 
             connCache = {mongos: [], config: [], rsConns: {config: undefined}};
             connCache.mongos = args.cluster.mongos.map(makeNewConnWithCurrentSession);
@@ -148,8 +155,14 @@ export var fsm = (function () {
                 fn.call(args.data, args.db, args.collName, connCache);
             }
 
-            assert(args.transitions.hasOwnProperty(currentState), `No transitions defined for state: ${currentState}`);
-            const nextState = getWeightedRandomChoice(args.transitions[currentState], Random.rand());
+            assert(
+                args.transitions.hasOwnProperty(currentState),
+                `No transitions defined for state: ${currentState}`,
+            );
+            const nextState = getWeightedRandomChoice(
+                args.transitions[currentState],
+                Random.rand(),
+            );
             currentState = nextState;
         }
 
@@ -199,6 +212,7 @@ export var fsm = (function () {
 
     return {
         forceRunningOutsideTransaction,
+        isInvocationRunningInsideTransaction,
         run: runFSM,
         _getWeightedRandomChoice: getWeightedRandomChoice,
     };

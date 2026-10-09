@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -40,9 +13,9 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/fts_access_method.h"
+#include "mongo/db/index/geo/s2_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/index/s2_common.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
 #include "mongo/db/index_builds/index_build_test_helpers.h"
 #include "mongo/db/index_builds/index_builds_common.h"
@@ -100,7 +73,7 @@ namespace mongo {
 namespace ValidateTests {
 namespace {
 
-using CollectionValidation::ValidationOptions;
+using collection_validation::ValidationOptions;
 
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 const bool kLogDiagnostics = true;
@@ -236,16 +209,16 @@ protected:
 
         auto mode = [&] {
             if (_background)
-                return CollectionValidation::ValidateMode::kBackground;
-            return _full ? CollectionValidation::ValidateMode::kForegroundFull
-                         : CollectionValidation::ValidateMode::kForeground;
+                return collection_validation::ValidateMode::kBackground;
+            return _full ? collection_validation::ValidateMode::kForegroundFull
+                         : collection_validation::ValidateMode::kForeground;
         }();
-        auto repairMode = CollectionValidation::RepairMode::kNone;
+        auto repairMode = collection_validation::RepairMode::kNone;
         ValidateResults results;
 
         forceCheckpoint(_background);
-        ASSERT_OK(CollectionValidation::validate(
-            &_opCtx, _nss, ValidationOptions{mode, repairMode, kLogDiagnostics}, &results));
+        ASSERT_OK(collection_validation::validate(
+            &_opCtx, _nss, ValidationOptions{mode, repairMode, kLogDiagnostics}, results));
 
         //  Check if errors are reported if and only if valid is set to false.
         ASSERT_EQ(results.isValid(), totalErrors(results) == 0);
@@ -1267,13 +1240,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1376,13 +1349,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1451,13 +1424,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1550,13 +1523,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1580,13 +1553,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1617,13 +1590,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1732,13 +1705,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1764,13 +1737,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1794,13 +1767,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1875,13 +1848,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1908,13 +1881,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -1937,13 +1910,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2090,13 +2063,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2121,13 +2094,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2186,13 +2159,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2354,13 +2327,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2388,13 +2361,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2456,13 +2429,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2724,13 +2697,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2755,13 +2728,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2823,13 +2796,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2953,13 +2926,13 @@ public:
         // Confirm missing multikey document found on non-multikey index error detected by validate.
         {
             ValidateResults results;
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -2985,13 +2958,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3018,13 +2991,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3393,8 +3366,7 @@ public:
         }
 
         // Encode an invalid BSON Object with an invalid type, x90 and insert record
-        const char* buffer = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00";
-        BSONObj obj(buffer);
+        auto bufferStr = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00"sv;
         lockDb(MODE_X);
         RecordStore* rs = coll()->getRecordStore();
         RecordId rid;
@@ -3402,8 +3374,8 @@ public:
             beginTransaction();
             auto swRecordId = rs->insertRecord(&_opCtx,
                                                *shard_role_details::getRecoveryUnit(&_opCtx),
-                                               obj.objdata(),
-                                               obj.objsize(),
+                                               bufferStr.data(),
+                                               bufferStr.size(),
                                                timestampToUse);
             ASSERT_OK(swRecordId);
             rid = swRecordId.getValue();
@@ -3412,8 +3384,8 @@ public:
         releaseDb();
 
         {
-            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
-                                    : CollectionValidation::ValidateMode::kForeground;
+            auto mode = _background ? collection_validation::ValidateMode::kBackground
+                                    : collection_validation::ValidateMode::kForeground;
 
             ValidateResults results;
 
@@ -3428,11 +3400,11 @@ public:
                     originalReadSource);
             });
             forceCheckpoint(_background);
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{mode, CollectionValidation::RepairMode::kNone, kLogDiagnostics},
-                &results));
+                ValidationOptions{mode, collection_validation::RepairMode::kNone, kLogDiagnostics},
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3470,30 +3442,27 @@ public:
 
         // Encode BSON Objects with invalid type x90, size less than 5 bytes, and BSON length and
         // object size mismatch, respectively. Insert invalid BSON objects into record store.
-        const char* buf1 = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00";
-        const char* buf2 = "\x04\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00";
-        const char* buf3 = "\x0f\x00\x00\x00\x00\x41\x00\x10\x00\x00\x00\x00";
-        BSONObj obj1(buf1);
-        BSONObj obj2(buf2);
-        BSONObj obj3(buf3);
+        auto buf1 = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00"sv;
+        auto buf2 = "\x04\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00"sv;
+        auto buf3 = "\x0f\x00\x00\x00\x00\x41\x00\x10\x00\x00\x00\x00"sv;
         lockDb(MODE_X);
         RecordStore* rs = coll()->getRecordStore();
         {
             beginTransaction();
             ASSERT_OK(rs->insertRecord(&_opCtx,
                                        *shard_role_details::getRecoveryUnit(&_opCtx),
-                                       obj1.objdata(),
-                                       12ULL,
+                                       buf1.data(),
+                                       buf1.size(),
                                        timestampToUse));
             ASSERT_OK(rs->insertRecord(&_opCtx,
                                        *shard_role_details::getRecoveryUnit(&_opCtx),
-                                       obj2.objdata(),
-                                       12ULL,
+                                       buf2.data(),
+                                       buf2.size(),
                                        timestampToUse));
             ASSERT_OK(rs->insertRecord(&_opCtx,
                                        *shard_role_details::getRecoveryUnit(&_opCtx),
-                                       obj3.objdata(),
-                                       12ULL,
+                                       buf3.data(),
+                                       buf3.size(),
                                        timestampToUse));
             commitTransaction();
         }
@@ -3504,13 +3473,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3519,7 +3488,10 @@ public:
 
             ASSERT_EQ(false, results.isValid());
             ASSERT_EQ(false, results.getRepaired());
-            ASSERT_EQ(static_cast<size_t>(1), totalErrors(results));
+            // Each of the three records fails a different BSON check, and since SERVER-128900 the
+            // specific failing check is named in the error message, so the errors no longer
+            // collapse into one entry in the results' error set.
+            ASSERT_EQ(static_cast<size_t>(3), totalErrors(results));
             ASSERT_EQ(static_cast<size_t>(0), totalNonTransientWarnings(results));
             ASSERT_EQ(static_cast<size_t>(0), results.getExtraIndexEntries().size());
             ASSERT_EQ(static_cast<size_t>(0), results.getMissingIndexEntries().size());
@@ -3536,13 +3508,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3572,13 +3544,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3601,13 +3573,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3777,13 +3749,13 @@ public:
         // Confirm multikey document found on non-multikey index error detected by validate.
         {
             ValidateResults results;
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3807,13 +3779,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3838,13 +3810,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -3998,13 +3970,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4028,13 +4000,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kFixErrors,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kFixErrors,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4055,13 +4027,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4161,13 +4133,13 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kAdjustMultikey,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kAdjustMultikey,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4198,13 +4170,13 @@ public:
             // sanitizer/test-only forceful collection instantiation.
             shard_role_details::getRecoveryUnit(&_opCtx)->abandonSnapshot();
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kAdjustMultikey,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kAdjustMultikey,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4308,13 +4280,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4437,13 +4409,13 @@ public:
         releaseDb();
 
         ValidateResults results;
-        ASSERT_OK(CollectionValidation::validate(
+        ASSERT_OK(collection_validation::validate(
             &_opCtx,
             _nss,
-            ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                              CollectionValidation::RepairMode::kNone,
+            ValidationOptions{collection_validation::ValidateMode::kForeground,
+                              collection_validation::RepairMode::kNone,
                               kLogDiagnostics},
-            &results));
+            results));
 
         EXPECT_FALSE(results.isValid());
 
@@ -4564,13 +4536,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForeground,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4611,6 +4583,253 @@ public:
     }
 };
 
+// Test that a textIndexVersion 3 index whose fields contain no embedded dots is not falsely
+// reported as needing a rebuild due to SERVER-76875 when it has a genuine missing index entry.
+// Legacy and current key generation only diverge for fields with embedded dots, so for an index
+// without them the missing-entry alternative check must never attribute the discrepancy to legacy
+// behavior.
+class ValidateTextIndexNoDottedFieldsNoFalseRebuild : public ValidateBase {
+public:
+    ValidateTextIndexNoDottedFieldsNoFalseRebuild()
+        : ValidateBase(/*full=*/false, /*background=*/false) {}
+
+    void run() {
+        SharedBufferFragmentBuilder pooledBuilder(
+            key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
+
+        // Create a new collection.
+        lockDb(MODE_X);
+
+        {
+            beginTransaction();
+            ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
+            _db->createCollection(&_opCtx, _nss);
+            commitTransaction();
+        }
+
+        // A document whose text field has multiple terms, indexed by a text index with no fields
+        // containing embedded dots. Legacy and current key generation produce identical keys here.
+        BSONObj doc = BSON("_id" << 1 << "prefix" << 5 << "text" << "alpha bravo charlie");
+        {
+            beginTransaction();
+            insertDocument(doc);
+            commitTransaction();
+        }
+
+        const auto indexName = "text_index";
+        auto status = createIndexFromSpec(BSON(
+            "name" << indexName << "key" << BSON("prefix" << 1 << "_fts" << "text" << "_ftsx" << 1)
+                   << "weights" << BSON("text" << 1) << "v" << static_cast<int>(kIndexVersion)));
+        ASSERT_OK(status);
+
+        // Create a genuine missing index entry by removing exactly one of the document's keys,
+        // leaving its other keys in place. This discrepancy has nothing to do with embedded-dot
+        // legacy behavior.
+        {
+            const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            ASSERT(entry);
+            auto iam = entry->accessMethod()->asSortedData();
+            ASSERT(iam);
+
+            beginTransaction();
+            auto rs = coll()->getRecordStore();
+            auto cursor = rs->getCursor(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx));
+            auto record = cursor->next();
+            ASSERT(record);
+            auto recordDoc = record->data.toBson();
+
+            KeyStringSet keys;
+            iam->getKeys(
+                &_opCtx,
+                coll(),
+                entry,
+                pooledBuilder,
+                recordDoc,
+                InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
+                SortedDataIndexAccessMethod::GetKeysContext::kRemovingKeys,
+                &keys,
+                nullptr,
+                nullptr,
+                record->id);
+            ASSERT_GT(keys.size(), 1U);
+
+            KeyStringSet oneKey;
+            oneKey.insert(*keys.begin());
+
+            InsertDeleteOptions options;
+            options.dupsAllowed = true;
+            int64_t numDeleted = 0;
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                coll(),
+                                                entry,
+                                                oneKey,
+                                                options,
+                                                &numDeleted);
+            ASSERT_OK(removeStatus);
+            ASSERT_EQUALS(numDeleted, 1);
+            commitTransaction();
+        }
+
+        releaseDb();
+
+        {
+            ValidateResults results;
+
+            ASSERT_OK(collection_validation::validate(
+                &_opCtx,
+                _nss,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
+                                  kLogDiagnostics},
+                results));
+
+            ScopeGuard dumpOnErrorGuard([&] {
+                StorageDebugUtil::printValidateResults(results);
+                StorageDebugUtil::printCollectionAndIndexTableEntries(&_opCtx, coll()->ns());
+            });
+
+            // The index legitimately has a missing entry, so validation fails...
+            ASSERT_FALSE(results.isValid());
+
+            // ...but the discrepancy must not be misattributed to SERVER-76875 legacy embedded-dot
+            // behavior, since this index has no fields with embedded dots.
+            auto indexResultsIt = results.getIndexResultsMap().find(indexName);
+            ASSERT(indexResultsIt != results.getIndexResultsMap().end());
+            const auto& indexResults = indexResultsIt->second;
+
+            for (const auto& error : indexResults.getErrors()) {
+                ASSERT_EQ(std::string::npos,
+                          error.find("legacy version of text index key generation"))
+                    << "Unexpected legacy-rebuild error on non-dotted text index: " << error;
+            }
+            for (const auto& warning : results.getWarnings()) {
+                ASSERT_EQ(std::string::npos, warning.find("SERVER-76875"))
+                    << "Unexpected SERVER-76875 warning on non-dotted text index: " << warning;
+            }
+
+            dumpOnErrorGuard.dismiss();
+        }
+    }
+};
+
+class ValidateTextIndexAttributionKeyGenThrowIsHandled : public ValidateBase {
+public:
+    ValidateTextIndexAttributionKeyGenThrowIsHandled()
+        : ValidateBase(/*full=*/false, /*background=*/false) {}
+
+    void run() {
+        SharedBufferFragmentBuilder pooledBuilder(
+            key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
+
+        // Create a new collection.
+        lockDb(MODE_X);
+
+        {
+            beginTransaction();
+            ASSERT_OK(_db->dropCollection(&_opCtx, _nss));
+            _db->createCollection(&_opCtx, _nss);
+            commitTransaction();
+        }
+
+        BSONObj doc = BSON("_id" << 1 << "a.b" << BSON_ARRAY(1 << 2 << 3) << "text"
+                                 << "hello world");
+        {
+            beginTransaction();
+            insertDocument(doc);
+            commitTransaction();
+        }
+
+        const auto indexName = "text_index";
+        auto status = createIndexFromSpec(BSON(
+            "name" << indexName << "key" << BSON("a.b" << 1 << "_fts" << "text" << "_ftsx" << 1)
+                   << "weights" << BSON("text" << 1) << "v" << static_cast<int>(kIndexVersion)));
+        ASSERT_OK(status);
+
+        // Create a genuine missing index entry by removing one of the document's keys.
+        {
+            const IndexCatalog* indexCatalog = coll()->getIndexCatalog();
+            auto entry = indexCatalog->findIndexByName(&_opCtx, indexName);
+            ASSERT(entry);
+            auto iam = entry->accessMethod()->asSortedData();
+            ASSERT(iam);
+
+            beginTransaction();
+            auto rs = coll()->getRecordStore();
+            auto cursor = rs->getCursor(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx));
+            auto record = cursor->next();
+            ASSERT(record);
+            auto recordDoc = record->data.toBson();
+
+            KeyStringSet keys;
+            iam->getKeys(
+                &_opCtx,
+                coll(),
+                entry,
+                pooledBuilder,
+                recordDoc,
+                InsertDeleteOptions::ConstraintEnforcementMode::kRelaxConstraintsUnfiltered,
+                SortedDataIndexAccessMethod::GetKeysContext::kRemovingKeys,
+                &keys,
+                nullptr,
+                nullptr,
+                record->id);
+            ASSERT_GT(keys.size(), 1U);
+
+            KeyStringSet oneKey;
+            oneKey.insert(*keys.begin());
+
+            InsertDeleteOptions options;
+            options.dupsAllowed = true;
+            int64_t numDeleted = 0;
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                coll(),
+                                                entry,
+                                                oneKey,
+                                                options,
+                                                &numDeleted);
+            ASSERT_OK(removeStatus);
+            ASSERT_EQUALS(numDeleted, 1);
+            commitTransaction();
+        }
+
+        releaseDb();
+
+        {
+            ValidateResults results;
+
+            ASSERT_OK(collection_validation::validate(
+                &_opCtx,
+                _nss,
+                ValidationOptions{collection_validation::ValidateMode::kForeground,
+                                  collection_validation::RepairMode::kNone,
+                                  kLogDiagnostics},
+                results));
+
+            ScopeGuard dumpOnErrorGuard([&] {
+                StorageDebugUtil::printValidateResults(results);
+                StorageDebugUtil::printCollectionAndIndexTableEntries(&_opCtx, coll()->ns());
+            });
+
+            // Validation should fail due to the genuine missing entry...
+            ASSERT_FALSE(results.isValid());
+
+            // ...the attribution check must not abort validation with an uncaught exception...
+            for (const auto& warning : results.getWarnings()) {
+                ASSERT_EQ(std::string::npos, warning.find("exception during collection validation"))
+                    << "Validation aborted by an uncaught exception: " << warning;
+            }
+
+            // ...and the genuine missing entry must still be reported rather than swallowed.
+            ASSERT_GTE(results.getMissingIndexEntries().size(), static_cast<size_t>(1));
+
+            dumpOnErrorGuard.dismiss();
+        }
+    }
+};
+
 class ValidateInvalidBSONOnClusteredCollection : public ValidateBase {
 public:
     explicit ValidateInvalidBSONOnClusteredCollection(bool background)
@@ -4621,8 +4840,7 @@ public:
         ASSERT(coll());
 
         // Encode an invalid BSON Object with an invalid type, x90 and insert record
-        const char* buffer = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00";
-        BSONObj obj(buffer);
+        auto bufferStr = "\x0c\x00\x00\x00\x90\x41\x00\x10\x00\x00\x00\x00"sv;
 
         RecordStore* rs = coll()->getRecordStore();
         RecordId rid({OID::gen().view().view(), OID::kOIDSize});
@@ -4631,16 +4849,16 @@ public:
             ASSERT_OK(rs->insertRecord(&_opCtx,
                                        *shard_role_details::getRecoveryUnit(&_opCtx),
                                        rid,
-                                       obj.objdata(),
-                                       obj.objsize(),
+                                       bufferStr.data(),
+                                       bufferStr.size(),
                                        timestampToUse));
             commitTransaction();
         }
         releaseDb();
 
         {
-            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
-                                    : CollectionValidation::ValidateMode::kForeground;
+            auto mode = _background ? collection_validation::ValidateMode::kBackground
+                                    : collection_validation::ValidateMode::kForeground;
 
             ValidateResults results;
 
@@ -4655,11 +4873,11 @@ public:
                     originalReadSource);
             });
             forceCheckpoint(_background);
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{mode, CollectionValidation::RepairMode::kNone, kLogDiagnostics},
-                &results));
+                ValidationOptions{mode, collection_validation::RepairMode::kNone, kLogDiagnostics},
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -4730,8 +4948,8 @@ public:
         releaseDb();
 
         {
-            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
-                                    : CollectionValidation::ValidateMode::kForeground;
+            auto mode = _background ? collection_validation::ValidateMode::kBackground
+                                    : collection_validation::ValidateMode::kForeground;
 
             ValidateResults results;
 
@@ -4746,11 +4964,11 @@ public:
                     originalReadSource);
             });
             forceCheckpoint(_background);
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{mode, CollectionValidation::RepairMode::kNone, kLogDiagnostics},
-                &results));
+                ValidationOptions{mode, collection_validation::RepairMode::kNone, kLogDiagnostics},
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -5010,8 +5228,8 @@ public:
         releaseDb();
 
         {
-            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
-                                    : CollectionValidation::ValidateMode::kForeground;
+            auto mode = _background ? collection_validation::ValidateMode::kBackground
+                                    : collection_validation::ValidateMode::kForeground;
 
             ValidateResults results;
 
@@ -5026,11 +5244,11 @@ public:
                     originalReadSource);
             });
             forceCheckpoint(_background);
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{mode, CollectionValidation::RepairMode::kNone, kLogDiagnostics},
-                &results));
+                ValidationOptions{mode, collection_validation::RepairMode::kNone, kLogDiagnostics},
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -5049,8 +5267,8 @@ public:
         // Run validate with repair, expect that extra index entries are removed and missing index
         // entries are inserted.
         {
-            auto mode = _background ? CollectionValidation::ValidateMode::kBackground
-                                    : CollectionValidation::ValidateMode::kForeground;
+            auto mode = _background ? collection_validation::ValidateMode::kBackground
+                                    : collection_validation::ValidateMode::kForeground;
 
             ValidateResults results;
 
@@ -5068,12 +5286,12 @@ public:
             // Validate in repair mode can only be used in standalone mode, so ignore timestamp
             // assertions.
             shard_role_details::getRecoveryUnit(&_opCtx)->allowAllUntimestampedWrites();
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
                 ValidationOptions{
-                    mode, CollectionValidation::RepairMode::kFixErrors, kLogDiagnostics},
-                &results));
+                    mode, collection_validation::RepairMode::kFixErrors, kLogDiagnostics},
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -5172,13 +5390,13 @@ public:
         {
             ValidateResults results;
 
-            ASSERT_OK(CollectionValidation::validate(
+            ASSERT_OK(collection_validation::validate(
                 &_opCtx,
                 _nss,
-                ValidationOptions{CollectionValidation::ValidateMode::kForegroundFull,
-                                  CollectionValidation::RepairMode::kNone,
+                ValidationOptions{collection_validation::ValidateMode::kForegroundFull,
+                                  collection_validation::RepairMode::kNone,
                                   kLogDiagnostics},
-                &results));
+                results));
 
             ScopeGuard dumpOnErrorGuard([&] {
                 StorageDebugUtil::printValidateResults(results);
@@ -5277,6 +5495,8 @@ public:
 
         // Test that validates text index legacy key generation detection.
         add<ValidateTextIndexLegacyNeedsRebuild>();
+        add<ValidateTextIndexNoDottedFieldsNoFalseRebuild>();
+        add<ValidateTextIndexAttributionKeyGenThrowIsHandled>();
 
         // Tests that validation works on clustered collections.
         add<ValidateInvalidBSONOnClusteredCollection>(false);

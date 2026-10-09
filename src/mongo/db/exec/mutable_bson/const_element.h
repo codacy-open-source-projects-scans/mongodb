@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/mutable_bson/api.h"
 #include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace mutablebson {
@@ -63,9 +39,9 @@ public:
     inline ConstElement parent() const;
     inline ConstElement findNthChild(size_t n) const;
     inline ConstElement operator[](size_t n) const;
-    inline ConstElement findFirstChildNamed(StringData name) const;
-    inline ConstElement operator[](StringData n) const;
-    inline ConstElement findElementNamed(StringData name) const;
+    inline ConstElement findFirstChildNamed(std::string_view name) const;
+    inline ConstElement operator[](std::string_view n) const;
+    inline ConstElement findElementNamed(std::string_view name) const;
 
     inline size_t countSiblingsLeft() const;
     inline size_t countSiblingsRight() const;
@@ -75,7 +51,7 @@ public:
     inline BSONElement getValue() const;
 
     inline double getValueDouble() const;
-    inline StringData getValueString() const;
+    inline std::string_view getValueString() const;
     inline BSONObj getValueObject() const;
     inline BSONArray getValueArray() const;
     inline bool isValueUndefined() const;
@@ -83,7 +59,7 @@ public:
     inline bool getValueBool() const;
     inline Date_t getValueDate() const;
     inline bool isValueNull() const;
-    inline StringData getValueSymbol() const;
+    inline std::string_view getValueSymbol() const;
     inline int32_t getValueInt() const;
     inline Timestamp getValueTimestamp() const;
     inline int64_t getValueLong() const;
@@ -111,7 +87,7 @@ public:
     inline const Document& getDocument() const;
     inline BSONType getType() const;
     inline bool isType(BSONType type) const;
-    inline StringData getFieldName() const;
+    inline std::string_view getFieldName() const;
     inline Element::RepIdx getIdx() const;
 
     inline std::string toString() const;
@@ -122,7 +98,7 @@ private:
     friend class Document;
 
     template <typename Builder>
-    inline void writeElement(Builder* builder, const StringData* fieldName = nullptr) const;
+    inline void writeElement(Builder* builder, const std::string_view* fieldName = nullptr) const;
 
     Element _basis;
 };
@@ -171,15 +147,15 @@ inline ConstElement ConstElement::operator[](size_t n) const {
     return _basis[n];
 }
 
-inline ConstElement ConstElement::findFirstChildNamed(StringData name) const {
+inline ConstElement ConstElement::findFirstChildNamed(std::string_view name) const {
     return _basis.findFirstChildNamed(name);
 }
 
-inline ConstElement ConstElement::operator[](StringData name) const {
+inline ConstElement ConstElement::operator[](std::string_view name) const {
     return _basis[name];
 }
 
-inline ConstElement ConstElement::findElementNamed(StringData name) const {
+inline ConstElement ConstElement::findElementNamed(std::string_view name) const {
     return _basis.findElementNamed(name);
 }
 
@@ -207,7 +183,7 @@ inline double ConstElement::getValueDouble() const {
     return _basis.getValueDouble();
 }
 
-inline StringData ConstElement::getValueString() const {
+inline std::string_view ConstElement::getValueString() const {
     return _basis.getValueString();
 }
 
@@ -239,7 +215,7 @@ inline bool ConstElement::isValueNull() const {
     return _basis.isValueNull();
 }
 
-inline StringData ConstElement::getValueSymbol() const {
+inline std::string_view ConstElement::getValueSymbol() const {
     return _basis.getValueSymbol();
 }
 
@@ -313,7 +289,7 @@ inline bool ConstElement::isType(BSONType type) const {
     return _basis.isType(type);
 }
 
-inline StringData ConstElement::getFieldName() const {
+inline std::string_view ConstElement::getFieldName() const {
     return _basis.getFieldName();
 }
 

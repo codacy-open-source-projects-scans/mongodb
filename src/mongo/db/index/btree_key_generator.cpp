@@ -1,41 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/index/btree_key_generator.h"
 
-#include <boost/container/flat_set.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/dynamic_bitset/dynamic_bitset.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/dotted_path/dotted_path_support.h"
@@ -48,7 +16,14 @@
 #include <algorithm>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <utility>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/dynamic_bitset/dynamic_bitset.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo {
 
@@ -57,6 +32,7 @@ using IndexVersion = IndexDescriptor::IndexVersion;
 namespace dps = ::mongo::bson;
 
 namespace {
+using namespace std::literals::string_view_literals;
 const BSONObj nullObj = BSON("" << BSONNULL);
 const BSONElement nullElt = nullObj.firstElement();
 const BSONObj undefinedObj = BSON("" << BSONUndefined);
@@ -73,14 +49,15 @@ const BSONElement undefinedElt = undefinedObj.firstElement();
  * This function must only be used when there is no an array element along the 'path'. Otherwise,
  * an exception will be thrown if encounters any array.
  */
-std::pair<BSONElement, bool> extractNonArrayElementAtPath(const BSONObj& obj, StringData path) {
+std::pair<BSONElement, bool> extractNonArrayElementAtPath(const BSONObj& obj,
+                                                          std::string_view path) {
     static const auto kEmptyElt = BSONElement{};
 
-    auto&& [elt, tail] = [&]() -> std::pair<BSONElement, StringData> {
-        if (auto dotOffset = path.find("."); dotOffset != std::string::npos) {
+    auto&& [elt, tail] = [&]() -> std::pair<BSONElement, std::string_view> {
+        if (auto dotOffset = path.find('.'); dotOffset != std::string::npos) {
             return {obj.getField(path.substr(0, dotOffset)), path.substr(dotOffset + 1)};
         }
-        return {obj.getField(path), ""_sd};
+        return {obj.getField(path), ""sv};
     }();
     uassert(7246301,
             str::stream() << "field " << path << " cannot be indexed as an array (multikey)",
@@ -133,7 +110,7 @@ BSONElement BtreeKeyGenerator::_extractNextElement(const BSONObj& obj,
                                                    const PositionalPathInfo& positionalInfo,
                                                    const char** field,
                                                    bool* arrayNestedArray) const {
-    StringData firstField = str::before(*field, '.');
+    std::string_view firstField = str::before(*field, '.');
     bool haveObjField = !obj.getField(firstField).eoo();
     BSONElement arrField = positionalInfo.positionallyIndexedElt;
 
@@ -233,7 +210,7 @@ void BtreeKeyGenerator::getKeys(SharedBufferFragmentBuilder& pooledBufferBuilder
             key_string::PooledBuilder keyString(pooledBufferBuilder, _keyStringVersion, _ordering);
 
             if (collator) {
-                keyString.appendBSONElement(e, [&](StringData stringData) {
+                keyString.appendBSONElement(e, [&](std::string_view stringData) {
                     return collator->getComparisonString(stringData);
                 });
             } else {
@@ -337,7 +314,7 @@ void BtreeKeyGenerator::_getKeysWithoutArray(SharedBufferFragmentBuilder& pooled
         }
 
         if (collator) {
-            keyString.appendBSONElement(elem, [&](StringData stringData) {
+            keyString.appendBSONElement(elem, [&](std::string_view stringData) {
                 return collator->getComparisonString(stringData);
             });
         } else {
@@ -448,7 +425,7 @@ void BtreeKeyGenerator::_getKeysWithArray(std::vector<const char*>* fieldNames,
         key_string::PooledBuilder keyString(pooledBufferBuilder, _keyStringVersion, _ordering);
         for (const auto& elem : *fixed) {
             if (collator) {
-                keyString.appendBSONElement(elem, [&](StringData stringData) {
+                keyString.appendBSONElement(elem, [&](std::string_view stringData) {
                     return collator->getComparisonString(stringData);
                 });
             } else {
@@ -523,7 +500,7 @@ void BtreeKeyGenerator::_getKeysWithArray(std::vector<const char*>* fieldNames,
             // we must have traversed through 'arrElt'.
             invariant(fieldIsArray);
 
-            StringData part = (*fieldNames)[i];
+            std::string_view part = (*fieldNames)[i];
             part = part.substr(0, part.find('.'));
             subPositionalInfo[i].positionallyIndexedElt = arrObj[part];
             if (subPositionalInfo[i].positionallyIndexedElt.eoo()) {

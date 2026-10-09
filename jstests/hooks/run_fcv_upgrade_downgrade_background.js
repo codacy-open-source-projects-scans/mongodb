@@ -7,9 +7,13 @@
 
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
 import {assertTimeseriesConsistentWithViewlessFlag} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {RetryableWritesUtil} from "jstests/libs/retryable_writes_util.js";
+import {assertShardUuidMetadataConsistency} from "jstests/libs/sharded_cluster_topology/shard_uuid_helpers.js";
 
 if (typeof db === "undefined") {
-    throw new Error("Expected mongo shell to be connected a server, but global 'db' object isn't defined");
+    throw new Error(
+        "Expected mongo shell to be connected a server, but global 'db' object isn't defined",
+    );
 }
 
 // Disable implicit sessions so FSM workloads that kill random sessions won't interrupt the
@@ -64,7 +68,11 @@ const sendFCVUpDown = function (ver) {
         }
         throw e;
     }
-    assertTimeseriesConsistentWithViewlessFlag(db);
+
+    RetryableWritesUtil.retryOnRetryableCode(() => {
+        assertTimeseriesConsistentWithViewlessFlag(db);
+        assertShardUuidMetadataConsistency(db);
+    }, "Retrying post-setFCV consistency checks interrupted by a retryable error");
 };
 
 Random.setRandomSeed();

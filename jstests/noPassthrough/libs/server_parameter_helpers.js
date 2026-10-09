@@ -9,11 +9,22 @@ import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
  * connection to retrieve the current setting of that server parameter.
  */
 export function getParameter(conn, field) {
+    return getParameters(conn, [field])[field];
+}
+
+/**
+ * Retrieves the current setting of every server parameter named in 'fields' with a single
+ * getParameter call, and returns them keyed by parameter name. The result can be passed straight
+ * back to setParameters to restore the originals.
+ */
+export function getParameters(conn, fields) {
     let q = {getParameter: 1};
-    q[field] = 1;
+    for (const field of fields) {
+        q[field] = 1;
+    }
 
     let ret = assert.commandWorked(conn.getDB("admin").runCommand(q));
-    return ret[field];
+    return Object.fromEntries(fields.map((field) => [field, ret[field]]));
 }
 
 /**
@@ -100,29 +111,51 @@ export function testNumericServerParameter(
     hasUpperBound,
     upperOutOfBounds,
 ) {
-    jsTest.log("Checking that '" + parameterName + "' defaults to '" + defaultValue + "' on startup");
+    jsTest.log(
+        "Checking that '" + parameterName + "' defaults to '" + defaultValue + "' on startup",
+    );
     let conn1 = MongoRunner.runMongod({});
     assert(conn1);
     assert.eq(getParameter(conn1, parameterName), defaultValue);
 
     if (isRuntimeParameter) {
-        jsTest.log("Checking that '" + parameterName + "' can be set at runtime to '" + nonDefaultValidValue + "'");
+        jsTest.log(
+            "Checking that '" +
+                parameterName +
+                "' can be set at runtime to '" +
+                nonDefaultValidValue +
+                "'",
+        );
         assert.commandWorked(setParameter(conn1, parameterName, nonDefaultValidValue));
         assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
 
         if (hasLowerBound) {
             jsTest.log(
-                "Checking that '" + parameterName + "' cannot be set below bounds to '" + lowerOutOfBounds + "'",
+                "Checking that '" +
+                    parameterName +
+                    "' cannot be set below bounds to '" +
+                    lowerOutOfBounds +
+                    "'",
             );
-            assert.commandFailedWithCode(setParameter(conn1, parameterName, lowerOutOfBounds), ErrorCodes.BadValue);
+            assert.commandFailedWithCode(
+                setParameter(conn1, parameterName, lowerOutOfBounds),
+                ErrorCodes.BadValue,
+            );
             assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
         }
 
         if (hasUpperBound) {
             jsTest.log(
-                "Checking that '" + parameterName + "' cannot be set above bounds to '" + upperOutOfBounds + "'",
+                "Checking that '" +
+                    parameterName +
+                    "' cannot be set above bounds to '" +
+                    upperOutOfBounds +
+                    "'",
             );
-            assert.commandFailedWithCode(setParameter(conn1, parameterName, upperOutOfBounds), ErrorCodes.BadValue);
+            assert.commandFailedWithCode(
+                setParameter(conn1, parameterName, upperOutOfBounds),
+                ErrorCodes.BadValue,
+            );
             assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
         }
     }
@@ -130,8 +163,16 @@ export function testNumericServerParameter(
     MongoRunner.stopMongod(conn1);
 
     if (isStartupParameter) {
-        jsTest.log("Checking that '" + parameterName + "' can be set to '" + nonDefaultValidValue + "' on startup");
-        let conn2 = MongoRunner.runMongod({setParameter: parameterName + "=" + nonDefaultValidValue});
+        jsTest.log(
+            "Checking that '" +
+                parameterName +
+                "' can be set to '" +
+                nonDefaultValidValue +
+                "' on startup",
+        );
+        let conn2 = MongoRunner.runMongod({
+            setParameter: parameterName + "=" + nonDefaultValidValue,
+        });
         assert(conn2);
         assert.eq(getParameter(conn2, parameterName), nonDefaultValidValue);
         MongoRunner.stopMongod(conn2);
@@ -164,7 +205,9 @@ export function testNumericServerParameter(
                     upperOutOfBounds +
                     "' on startup",
             );
-            let conn4 = MongoRunner.runMongod({setParameter: parameterName + "=" + upperOutOfBounds});
+            let conn4 = MongoRunner.runMongod({
+                setParameter: parameterName + "=" + upperOutOfBounds,
+            });
             assert.eq(
                 null,
                 conn4,

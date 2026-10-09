@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/fts/fts_element_iterator.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -43,8 +16,6 @@
 namespace mongo {
 
 namespace fts {
-
-using std::string;
 
 extern const double DEFAULT_WEIGHT;
 extern const double MAX_WEIGHT;
@@ -64,7 +35,7 @@ FTSElementIterator::FTSElementIterator(const FTSSpec& spec, const BSONObj& obj)
 
 namespace {
 /**  Check for exact match or path prefix match.  */
-inline bool _matchPrefix(const string& dottedName, const string& weight) {
+inline bool _matchPrefix(const std::string& dottedName, const std::string& weight) {
     if (weight == dottedName) {
         return true;
     }
@@ -108,7 +79,7 @@ bool FTSElementIterator::moreFrames() {
 FTSIteratorValue FTSElementIterator::advance() {
     while (moreFrames()) {
         BSONElement elem = _frame._it.next();
-        string fieldName = elem.fieldName();
+        std::string fieldName = elem.fieldName();
 
         // Skip "language" specifier fields if wildcard.
         if (_spec.wildcard() && _spec.languageOverrideField() == fieldName) {
@@ -116,7 +87,7 @@ FTSIteratorValue FTSElementIterator::advance() {
         }
 
         // SERVER-78238: fields whose name contains a dot or starts with a '$' are not indexable.
-        if (fieldName.find_first_of('.') != string::npos || fieldName.starts_with('$')) {
+        if (fieldName.find_first_of('.') != std::string::npos || fieldName.starts_with('$')) {
             continue;
         }
 
@@ -124,8 +95,8 @@ FTSIteratorValue FTSElementIterator::advance() {
         // 1. parent path empty (top level): use the current field name
         // 2. parent path non-empty and obj is an array: use the parent path
         // 3. parent path non-empty and obj is a sub-doc: append field name to parent path
-        string dottedName = (_frame._parentPath.empty() ? fieldName
-                                 : _frame._isArray      ? _frame._parentPath
+        std::string dottedName = (_frame._parentPath.empty() ? fieldName
+                                      : _frame._isArray      ? _frame._parentPath
                                                         : _frame._parentPath + '.' + fieldName);
 
         // Find lower bound of dottedName in _weights.  lower_bound leaves us at the first
@@ -159,8 +130,9 @@ FTSIteratorValue FTSElementIterator::advance() {
             case BSONType::string:
                 // Only index strings on exact match or wildcard.
                 if (exactMatch || _spec.wildcard()) {
-                    return FTSIteratorValue(
-                        elem.valueStringData().data(), _frame._language, weight);
+                    auto text = elem.valueStringData();
+                    text = text.substr(0, text.find('\0'));  // NUL-truncate
+                    return FTSIteratorValue(text, _frame._language, weight);
                 }
                 break;
 

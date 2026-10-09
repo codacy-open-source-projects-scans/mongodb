@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/cleanup_structured_encryption_data_coordinator.h"
 
@@ -66,6 +40,7 @@
 #include "mongo/util/uuid.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -78,6 +53,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(fleCleanupHangBeforeECOCCreate);
 MONGO_FAIL_POINT_DEFINE(fleCleanupHangBeforeCleanupESCNonAnchors);
@@ -209,7 +185,7 @@ void checkRequiredOperation(const CleanupStructuredEncryptionDataState& state,
 void doAnchorCleanupWithUpdatedCollectionState(OperationContext* opCtx,
                                                const NamespaceString& escNss,
                                                FLECleanupESCDeleteQueue& pq,
-                                               StringData description,
+                                               std::string_view description,
                                                ECStats* escStats) {
     auto tagsPerDelete =
         ServerParameterSet::getClusterParameterSet()
@@ -226,7 +202,7 @@ void doAnchorCleanupWithUpdatedCollectionState(OperationContext* opCtx,
                               << " is expected to be unsharded, but is sharded",
                 !innerCri.isSharded());
 
-        uassertStatusOK(FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+        uassertStatusOK(FilteringMetadataCache::get(opCtx)->onShardVersionMismatch(
             opCtx, escNss, ChunkVersion::UNTRACKED()));
         ScopedSetShardRole escShardRole(
             opCtx, escNss, ShardVersion::UNTRACKED(), innerCri.getDbVersion());
@@ -363,7 +339,7 @@ void doAnchorRemovalOperation(OperationContext* opCtx,
         opCtx,
         escNss,
         pq,
-        "anchor deletes phase of queryable encryption cleanup coordinator"_sd,
+        "anchor deletes phase of queryable encryption cleanup coordinator"sv,
         escStats);
 
     if (MONGO_unlikely(fleCleanupHangAfterCleanupESCAnchors.shouldFail())) {
@@ -425,9 +401,6 @@ boost::optional<BSONObj> CleanupStructuredEncryptionDataCoordinator::reportForCu
 
 void CleanupStructuredEncryptionDataCoordinator::updateCleanupStats(const ECOCStats& phaseEcocStats,
                                                                     const ECStats& phaseEscStats) {
-    // update stats in server status
-    FLEStatusSection::get().updateCleanupStats(CleanupStats(phaseEcocStats, phaseEscStats));
-
     // update stats in state document
     std::lock_guard lg(_docMutex);
     auto docEscStats = _doc.getEscStats().value_or(ECStats{});

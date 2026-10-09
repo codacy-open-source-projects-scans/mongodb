@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/bson/bson_validate.h"
@@ -34,7 +8,6 @@
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -48,11 +21,11 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/matcher/expression_type.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
@@ -64,14 +37,17 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
     // like a BSONObj string, but without a NUL terminator.
@@ -90,19 +66,6 @@ void appendObjectNameAndSize(const char* fieldName, BufBuilder* bb, int objectSi
     bb->appendChar(stdx::to_underlying(BSONType::object));
     bb->appendCStr(fieldName);
     bb->appendNum(objectSize);
-}
-
-BSONObj createColumnObj(std::vector<BSONElement> elems) {
-    BSONColumnBuilder cb;
-    for (auto&& elem : elems) {
-        cb.append(elem);
-    }
-
-    const BSONBinData columnData = cb.finalize();
-
-    BSONObjBuilder bucket;
-    bucket.append("a", columnData);
-    return bucket.obj();
 }
 
 TEST(BSONValidate, Basic) {
@@ -236,13 +199,12 @@ TEST(BSONValidate, Fuzz) {
                 }
             }
         }
-        BSONObj fuzzed(buffer.data());
 
         // There is no assert here because there is no other BSON validator oracle
         // to compare outputs against (BSONObj::valid() is a wrapper for validateBSON()).
         // Thus, the reason for this test is to ensure that validateBSON() doesn't trip
         // any ASAN or UBSAN check when fed fuzzed input.
-        validateBSON(fuzzed).isOK();
+        validateBSON(buffer.data(), buffer.size()).isOK();
     }
 }
 
@@ -304,14 +266,14 @@ private:
             });
     }
 
-    static BSONObj mkO(std::vector<std::pair<StringData, AnyValue>> fields) {
+    static BSONObj mkO(std::vector<std::pair<std::string_view, AnyValue>> fields) {
         BSONObjBuilder bob;
         for (auto&& [k, v] : fields)
             visit([&](auto&& alt) { bob.append(k, alt); }, v);
         return bob.obj();
     }
 
-    static BSONArray mkA(std::vector<std::pair<StringData, AnyValue>> arr) {
+    static BSONArray mkA(std::vector<std::pair<std::string_view, AnyValue>> arr) {
         return BSONArray{mkO(std::move(arr))};
     }
 
@@ -699,6 +661,19 @@ TEST(BSONValidateFast, UnterminatedStringErrorInNestedObjectWithId) {
                   "in object with _id: 1");
 }
 
+TEST(BSONValidateFast, UnterminatedStringErrorInCodeWScope) {
+    BufBuilder bb;
+    BSONObjBuilder ob(bb);
+    appendInvalidStringElement("invalid", &bb);
+    const BSONObj scope = ob.done();
+    const BSONObj x = BSON("_id" << 1 << "cws" << BSONCodeWScope("code", scope));
+    const Status status = validateBSON(x);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(status.reason(),
+                  "Not null terminated string in element with field name 'cws.invalid' "
+                  "in object with _id: 1");
+}
+
 TEST(BSONValidateFast, UnterminatedStringErrorInNestedObjectWithoutId) {
     BufBuilder bb;
     BSONObjBuilder ob(bb);
@@ -724,8 +699,8 @@ TEST(BSONValidateFast, InvalidObjectWithInvalidSizeInNestedObjectWithId) {
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
-                  "Nested BSON object has to be at least 5 bytes (decoded length: 4) in element "
-                  "with field name 'nested.2..invalid' in object with _id: 1");
+                  "Nested BSON object has to be at least 5 bytes: decoded length 4 in element "
+                  "with field name 'nested.2.invalid' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, InvalidObjectWithZeroSizeInNestedObjectWithId) {
@@ -738,8 +713,8 @@ TEST(BSONValidateFast, InvalidObjectWithZeroSizeInNestedObjectWithId) {
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
-                  "Nested BSON object has to be at least 5 bytes (decoded length: 0) in element "
-                  "with field name 'nested.2..invalid' in object with _id: 1");
+                  "Nested BSON object has to be at least 5 bytes: decoded length 0 in element "
+                  "with field name 'nested.2.invalid' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithId) {
@@ -752,8 +727,8 @@ TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithId) {
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
-                  "Nested BSON object has to be at least 5 bytes (decoded length: -999) in element "
-                  "with field name 'nested.2..invalid' in object with _id: 1");
+                  "Nested BSON object has to be at least 5 bytes: decoded length -999 in element "
+                  "with field name 'nested.2.invalid' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithIdWithoutArray) {
@@ -766,8 +741,8 @@ TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithIdWithoutA
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
-                  "Nested BSON object has to be at least 5 bytes (decoded length: -888) in element "
-                  "with field name 'nested..invalid' in object with _id: 1");
+                  "Nested BSON object has to be at least 5 bytes: decoded length -888 in element "
+                  "with field name 'nested.invalid' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithIdTopLevelField) {
@@ -779,8 +754,8 @@ TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithIdTopLevel
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
-                  "Nested BSON object has to be at least 5 bytes (decoded length: -777) in element "
-                  "with field name '.invalid' in object with _id: 1");
+                  "Nested BSON object has to be at least 5 bytes: decoded length -777 in element "
+                  "with field name 'invalid' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, StringHasSomething) {
@@ -842,6 +817,16 @@ TEST(BSONValidateFast, InvalidType) {
 
     // Make sure the binary buffer above indeed has the invalid type.
     ASSERT_THROWS_CODE(obj.woCompare(BSON("A" << 1)), DBException, 10320);
+}
+
+TEST(BSONValidateFast, PreciseValidationCorrectFieldNameSize) {
+    auto scope = BSON("nested" << BSON("x" << 1) << "arr" << BSON_ARRAY(1));
+    ASSERT_EQ(scope["nested"].fieldNameSize(), 7);
+    ASSERT_EQ(scope["arr"].Obj()["0"].fieldNameSize(), 2);
+
+    auto doc = BSON("a" << BSONCodeWScope("code", scope));
+    ASSERT_OK(validateBSON(doc));
+    ASSERT_EQ(doc["a"].fieldNameSize(), 2);
 }
 
 TEST(BSONValidateFast, ValidCodeWScope) {
@@ -1386,6 +1371,79 @@ TEST(BSONValidateColumn, BSONColumnInterleavedNestedInterleaved) {
     ASSERT_EQ(validateBSONColumn(buffer.buf(), buffer.len()), ErrorCodes::InvalidBSONColumn);
 }
 
+// Returns the raw bytes of a BSONColumn binary whose sole element is a nested binData/Column
+// literal. Both nested-column tests use this payload; one validates it directly, the other
+// wraps it inside a BSON document.
+std::vector<char> makeNestedColumnBinary() {
+    const char innerColumn[] = {'\0'};
+    BufBuilder buf;
+    buf.appendChar(stdx::to_underlying(BSONType::binData));
+    buf.appendChar('\0');
+    buf.appendNum(static_cast<int32_t>(sizeof(innerColumn)));
+    buf.appendChar(static_cast<char>(BinDataType::Column));
+    buf.appendBuf(innerColumn, sizeof(innerColumn));
+    buf.appendChar('\0');
+    return {buf.buf(), buf.buf() + buf.len()};
+}
+
+TEST(BSONValidateColumn, BSONColumnNestedColumnLiteralRejected) {
+    // Manually construct a BSONColumn binary containing a binData/Column literal.
+    // The builder already rejects this; here we test that the validator also catches it in
+    // all validation modes when the binary is crafted directly.
+    auto binary = makeNestedColumnBinary();
+    ASSERT_EQ(validateBSONColumn(binary.data(), binary.size()).code(),
+              ErrorCodes::InvalidBSONColumn);
+}
+
+TEST(BSONValidateColumn, BSONColumnNestedInBSONDocRejectedAllModes) {
+    // Wrap a BSONColumn binary (that itself contains a nested Column literal) inside a regular
+    // BSON document. All validation modes should reject it via _validateSpecial, which wraps the
+    // inner InvalidBSONColumn as NonConformantBSON in the outer BSON document context.
+    auto innerBuf = makeNestedColumnBinary();
+
+    BSONObjBuilder outerBuilder;
+    outerBuilder.appendBinData("col"sv, innerBuf.size(), BinDataType::Column, innerBuf.data());
+    BSONObj outerObj = outerBuilder.obj();
+
+    for (auto mode : {BSONValidateModeEnum::kDefault,
+                      BSONValidateModeEnum::kExtended,
+                      BSONValidateModeEnum::kFull}) {
+        auto status = validateBSON(outerObj, mode, mongo::V2_Column);
+        ASSERT_EQ(status.code(), ErrorCodes::NonConformantBSON)
+            << "Expected rejection in mode " << static_cast<int>(mode);
+    }
+}
+
+// Returns raw BSONColumn bytes: an interleaved start with the given reference object, then EOO.
+std::vector<char> makeInterleavedColumnWithRef(BSONObj ref) {
+    BufBuilder buf;
+    buf.appendChar(bsoncolumn::kInterleavedStartControlByteLegacy);
+    buf.appendBuf(ref.objdata(), ref.objsize());
+    buf.appendChar('\0');
+    return {buf.buf(), buf.buf() + buf.len()};
+}
+
+TEST(BSONValidateColumn, BSONColumnNestedColumnInInterleavedRefRejected) {
+    // An interleaved reference object with a top-level binData/Column field must be rejected.
+    const char innerCol[] = {'\0'};
+    BSONObjBuilder refBuilder;
+    refBuilder.appendBinData("a", sizeof(innerCol), BinDataType::Column, innerCol);
+    auto binary = makeInterleavedColumnWithRef(refBuilder.obj());
+    ASSERT_EQ(validateBSONColumn(binary.data(), binary.size()).code(),
+              ErrorCodes::InvalidBSONColumn);
+}
+
+TEST(BSONValidateColumn, BSONColumnNestedColumnInInterleavedRefNestedRejected) {
+    // A binData/Column field buried inside a sub-object of the reference must also be rejected.
+    const char innerCol[] = {'\0'};
+    BSONObjBuilder innerBuilder;
+    innerBuilder.appendBinData("a", sizeof(innerCol), BinDataType::Column, innerCol);
+    BSONObj ref = BSON("x" << innerBuilder.obj());
+    auto binary = makeInterleavedColumnWithRef(ref);
+    ASSERT_EQ(validateBSONColumn(binary.data(), binary.size()).code(),
+              ErrorCodes::InvalidBSONColumn);
+}
+
 TEST(BSONValidateColumn, BSONColumnNoOverflowBlocksShort) {
     BSONColumnBuilder cb;
     for (int i = 0; i < 100; ++i)
@@ -1413,8 +1471,7 @@ TEST(BSONValidateColumn, BSONColumnBadExtendedSelector) {
         + 7                    /* original selector */
         + ((block >> 8) << 8); /* original blocks */
     DataView((char*)columnData.data + 31).write<LittleEndian<uint64_t>>(block);
-    ASSERT_EQ(validateBSONColumn((char*)columnData.data, columnData.length).code(),
-              ErrorCodes::InvalidBSONColumn);
+    ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 }
 
 TEST(BSONValidateColumn, BSONColumnInterestingFuzzerInputs) {
@@ -1491,103 +1548,98 @@ TEST(BSONValidateColumn, BSONColumnWithObjectNestedCodeWScope) {
               ErrorCodes::InvalidBSONColumn);
 }
 
-TEST(BSONValidateColumn, BSONColumnMemLimitSingleElem) {
-    const long long memLimit = 256 * 1024;  // 256KB
-    RAIIServerParameterControllerForTest memLimitParam("bsonMaxExpandedMemUsage", memLimit);
-
-    // Use empty field name to mimic how elements are stored in a BSONColumn. The element is stored
-    // twice, in the column binary and as first uncompressed element. Use a size below half of
-    // memory limit.
-    BSONObj obj = BSON("" << std::string(1024 * 100, 'x'));
-    BSONElement elem = obj.firstElement();
-
-    BSONObj column = createColumnObj({elem});
-    ASSERT_LT(column.objsize() + elem.size(), memLimit);
-    ASSERT_OK(validateBSON(column));
-
-    // Test with single large element above limit
-    obj = BSON("" << std::string(1024 * 150, 'x'));
-    elem = obj.firstElement();
-
-    column = createColumnObj({254, elem});
-    ASSERT_GTE(column.objsize() + elem.size(), memLimit);
-    ASSERT_EQ(validateBSON(column).code(), ErrorCodes::ExceededMemoryLimit);
+/**
+ * Returns an object nested 'depth' levels deep, where a flat object is depth 1.
+ */
+BSONObj makeNestedObject(int depth) {
+    // Empty subdocuments don't count towards the depth level count so the innermost value is "1".
+    BSONObj obj = BSON("a" << 1);
+    for (int i = 1; i < depth; ++i) {
+        obj = BSON("a" << obj);
+    }
+    return obj;
 }
 
-TEST(BSONValidateColumn, BSONColumnMemLimitManyRepeated) {
-    const long long memLimit = 256 * 1024;  // 256KB
-    RAIIServerParameterControllerForTest memLimitParam("bsonMaxExpandedMemUsage", memLimit);
-
-    // Use empty field name to mimic how elements are stored in a BSONColumn.
-    BSONObj obj = BSON("" << std::string(1024, 'x'));
-    BSONElement elem = obj.firstElement();
-
-    BSONObj column = createColumnObj({253, elem});
-    ASSERT_LT(column.objsize() + elem.size() * 253, memLimit);
-    ASSERT_OK(validateBSON(column));
-
-    column = createColumnObj({254, elem});
-    ASSERT_GTE(column.objsize() + elem.size() * 254, memLimit);
-    ASSERT_EQ(validateBSON(column).code(), ErrorCodes::ExceededMemoryLimit);
+TEST(BSONValidateDepthForUserStorage, AcceptsShallowObject) {
+    ASSERT_OK(validateBSONDepthForUserStorage(BSON("a" << BSON("b" << 1))));
 }
 
-TEST(BSONValidateColumn, BSONColumnMemLimitAllSkip) {
-    const long long memLimit = 1024 * 15;  // 15KB
-    RAIIServerParameterControllerForTest memLimitParam("bsonMaxExpandedMemUsage", memLimit);
-
-    BSONElement elem;
-    size_t elemSize = sizeof(boost::optional<BSONElement>);
-
-    BSONObj column = createColumnObj({500, elem});
-    ASSERT_LT(column.objsize() + elemSize * 500, memLimit);
-    ASSERT_OK(validateBSON(column));
-
-    column = createColumnObj({10000, elem});
-    ASSERT_GTE(column.objsize() + elemSize * 10000, memLimit);
-    ASSERT_EQ(validateBSON(column).code(), ErrorCodes::ExceededMemoryLimit);
+TEST(BSONValidateDepthForUserStorage, AcceptsObjectAtTheLimit) {
+    ASSERT_OK(
+        validateBSONDepthForUserStorage(makeNestedObject(BSONDepth::getMaxDepthForUserStorage())));
 }
 
-TEST(BSONValidateColumn, BSONColumnMemLimitInterleaved) {
-    const long long memLimit = 256 * 1024;  // 256KB
-    RAIIServerParameterControllerForTest memLimitParam("bsonMaxExpandedMemUsage", memLimit);
+TEST(BSONValidateDepthForUserStorage, RejectsObjectOneLevelPastTheLimit) {
+    const auto tooDeep = makeNestedObject(BSONDepth::getMaxDepthForUserStorage() + 1);
 
-    // Use empty field name to mimic how elements are stored in a BSONColumn.
-    BSONObj obj = BSON("" << BSON("a" << std::string(1024, 'x') << "b" << 1.0));
-    BSONElement elem = obj.firstElement();
-
-    BSONObj column = createColumnObj({245, elem});
-    ASSERT_LT(column.objsize() + elem.size() * 245, memLimit);
-    ASSERT_OK(validateBSON(column));
-
-    column = createColumnObj({250, elem});
-    ASSERT_GTE(column.objsize() + elem.size() * 250, memLimit);
-    ASSERT_EQ(validateBSON(column).code(), ErrorCodes::ExceededMemoryLimit);
+    // This validation function only checks against the getMaxAllowableDepth() limit (ex: 200) which
+    // is greater than the getMaxDepthForUserStorage() (ex: 180) limit.
+    ASSERT_OK(validateBSON(tooDeep));
+    // This validation function checks against the getMaxDepthForUserStorage() limit (1 depth level
+    // less than what nested object created in this test is).
+    ASSERT_EQ(validateBSONDepthForUserStorage(tooDeep).code(), ErrorCodes::Overflow);
 }
 
-TEST(BSONValidateColumn, BSONColumnMemLimitInterleavedRestart) {
-    const long long memLimit = 256 * 1024;  // 256KB
-    RAIIServerParameterControllerForTest memLimitParam("bsonMaxExpandedMemUsage", memLimit);
+TEST(BSONValidateDepthForUserStorage, EmptySubobjectDoesNotCountTowardDepth) {
+    BSONObj obj = BSON("a" << BSONObj());
+    for (std::uint32_t i = 1; i < BSONDepth::getMaxDepthForUserStorage(); ++i) {
+        obj = BSON("a" << obj);
+    }
+    ASSERT_OK(validateBSONDepthForUserStorage(obj));
+}
 
-    // Use empty field name to mimic how elements are stored in a BSONColumn.
-    BSONObj obj = BSON("" << BSON("a" << std::string(1024, 'x') << "b" << 1.0));
-    BSONElement elem = obj.firstElement();
-    // Swap order of elements to trigger restart of interleaved mode
-    BSONObj obj2 = BSON("" << BSON("b" << std::string(1024, 'x') << "a" << 1.0));
-    BSONElement elem2 = obj.firstElement();
+TEST(BSONValidateDepthForUserStorage, VisitorInvokedForTopLevelElements) {
+    auto obj = BSON("a" << 1 << "b" << BSON("c" << 2) << "d" << BSON_ARRAY(3 << 4));
+    std::vector<std::string> visited;
+    auto status = validateBSONDepthForUserStorage(
+        obj, [&](const BSONElement& e) { visited.emplace_back(e.fieldNameStringData()); });
+    ASSERT_OK(status);
+    ASSERT_THAT(visited, testing::ElementsAre("a", "b", "d"));
+}
 
-    std::vector<BSONElement> elems(123, elem);
-    elems.insert(elems.end(), 122, elem2);
+TEST(BSONValidateDepthForUserStorage, VisitorNotInvokedForNestedElements) {
+    auto obj = BSON("a" << BSON("b" << BSON("c" << 1)));
+    size_t count = 0;
+    auto status = validateBSONDepthForUserStorage(obj, [&](const BSONElement& e) {
+        ++count;
+        ASSERT_EQ(e.fieldNameStringData(), "a");
+    });
+    ASSERT_OK(status);
+    ASSERT_EQ(count, 1U);
+}
 
-    BSONObj column = createColumnObj(elems);
-    ASSERT_LT(column.objsize() + elem.size() * 123 + elem2.size() * 122, memLimit);
-    ASSERT_OK(validateBSON(column));
+TEST(BSONValidateDepthForUserStorage, VisitorNotInvokedForEmptyNestedObject) {
+    auto obj = BSON("a" << BSONObj());
+    size_t count = 0;
+    auto status = validateBSONDepthForUserStorage(obj, [&](const BSONElement& e) {
+        ++count;
+        ASSERT_EQ(e.fieldNameStringData(), "a");
+    });
+    ASSERT_OK(status);
+    ASSERT_EQ(count, 1U);
+}
 
-    elems.clear();
-    elems.insert(elems.end(), 100, elem);
-    elems.insert(elems.end(), 200, elem2);
-    column = createColumnObj(elems);
-    ASSERT_GTE(column.objsize() + elem.size() * 100 + elem2.size() * 200, memLimit);
-    ASSERT_EQ(validateBSON(column).code(), ErrorCodes::ExceededMemoryLimit);
+TEST(BSONValidateDepthForUserStorage, VisitorErrorIsReturned) {
+    auto obj = BSON("a" << 1 << "b" << 2);
+    auto status = validateBSONDepthForUserStorage(obj, [&](const BSONElement& e) {
+        if (e.fieldNameStringData() == "b") {
+            uasserted(ErrorCodes::BadValue, "bad b");
+        }
+    });
+    namespace m = unittest::match;
+    ASSERT_THAT(status, m::StatusIs(ErrorCodes::BadValue, "bad b"));
+}
+
+TEST(BSONValidateDepthForUserStorage, DepthValidationStillEnforcedWithVisitor) {
+    const auto tooDeep = makeNestedObject(BSONDepth::getMaxDepthForUserStorage() + 1);
+    bool visited = false;
+    auto status = validateBSONDepthForUserStorage(tooDeep, [&](const BSONElement& e) {
+        visited = true;
+        ASSERT_EQ(e.fieldNameStringData(), "a");
+    });
+    namespace m = unittest::match;
+    ASSERT_THAT(status, m::StatusIs(ErrorCodes::Overflow, testing::_));
+    ASSERT(visited);
 }
 
 }  // namespace

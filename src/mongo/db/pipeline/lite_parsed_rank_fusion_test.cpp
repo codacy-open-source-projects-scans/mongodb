@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_rank_fusion.h"
 
@@ -37,7 +11,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -55,10 +29,8 @@ protected:
     }
 
 private:
-    RAIIServerParameterControllerForTest featureFlagController1{"featureFlagRankFusionBasic", true};
-    RAIIServerParameterControllerForTest featureFlagController2{"featureFlagRankFusionFull", true};
-    RAIIServerParameterControllerForTest _ifrFlagController{
-        "featureFlagExtensionsInsideHybridSearch", true};
+    unittest::ServerParameterGuard _ifrFlagController{"featureFlagExtensionsInsideHybridSearch",
+                                                      true};
 };
 
 TEST_F(LiteParsedRankFusionTest, ErrorsIfNoInputsField) {
@@ -121,7 +93,8 @@ TEST_F(LiteParsedRankFusionTest, ErrorsIfPipelineNameEmpty) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 15998);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 15998);
 }
 
 TEST_F(LiteParsedRankFusionTest, ErrorsIfPipelineNameStartsWithDollar) {
@@ -140,7 +113,8 @@ TEST_F(LiteParsedRankFusionTest, ErrorsIfPipelineNameStartsWithDollar) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 16410);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 16410);
 }
 
 TEST_F(LiteParsedRankFusionTest, ErrorsIfPipelineNameContainsDot) {
@@ -159,7 +133,8 @@ TEST_F(LiteParsedRankFusionTest, ErrorsIfPipelineNameContainsDot) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 16412);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 16412);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnDuplicatePipelineNames) {
@@ -172,7 +147,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnDuplicatePipelineNames) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108714);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108714);
 }
 
 TEST_F(LiteParsedRankFusionTest, ErrorsIfRankFusionNotFirstStage) {
@@ -192,27 +168,6 @@ TEST_F(LiteParsedRankFusionTest, ErrorsIfRankFusionNotFirstStage) {
 
     LiteParsedPipeline lpp(nss, pipeline);
     ASSERT_THROWS_CODE(lpp.validate(nullptr, false), AssertionException, 10170100);
-}
-
-TEST_F(LiteParsedRankFusionTest, ErrorsIfScoreDetailsWithoutRankFusionFullFF) {
-    RAIIServerParameterControllerForTest rankFusionFullController{"featureFlagRankFusionFull",
-                                                                  false};
-    std::vector<BSONObj> pipeline = {fromjson(R"({
-        $rankFusion: {
-            input: {
-                pipelines: {
-                    agatha: [
-                        { $match: { author: "Agatha Christie" } },
-                        { $sort: { author: 1 } }
-                    ]
-                }
-            },
-            scoreDetails: true
-        }
-    })")};
-
-    ASSERT_THROWS_CODE(
-        makePipelineFromStages(pipeline), AssertionException, ErrorCodes::QueryFeatureNotAllowed);
 }
 
 TEST_F(LiteParsedRankFusionTest, SucceedsWithValidRankedSelectionPipeline) {
@@ -251,7 +206,7 @@ TEST_F(LiteParsedRankFusionTest, ValidateSucceedsWithValidRankedPipeline) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    liteParsed->validate();  // Should not throw.
+    liteParsed->validate(getExpCtx()->getOperationContext());  // Should not throw.
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnEmptySubpipeline) {
@@ -259,7 +214,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnEmptySubpipeline) {
     auto spec =
         BSON("$rankFusion" << BSON("input" << BSON("pipelines" << BSON("p1" << BSONArray()))));
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108700);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108700);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNonRankedPipeline) {
@@ -275,7 +231,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNonRankedPipeline) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108702);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108702);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNonSelectionStage) {
@@ -291,7 +248,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNonSelectionStage) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108704);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108704);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNestedHybridSearch) {
@@ -307,7 +265,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnNestedHybridSearch) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108701);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108701);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnScoreStageInPipeline) {
@@ -323,7 +282,8 @@ TEST_F(LiteParsedRankFusionTest, ValidateThrowsOnScoreStageInPipeline) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    ASSERT_THROWS_CODE(liteParsed->validate(), AssertionException, 12108703);
+    ASSERT_THROWS_CODE(
+        liteParsed->validate(getExpCtx()->getOperationContext()), AssertionException, 12108703);
 }
 
 TEST_F(LiteParsedRankFusionTest, ValidateSucceedsWithMultipleValidPipelines) {
@@ -340,7 +300,7 @@ TEST_F(LiteParsedRankFusionTest, ValidateSucceedsWithMultipleValidPipelines) {
 
     auto nss = getExpCtx()->getNamespaceString();
     auto liteParsed = LiteParsedRankFusion::parse(nss, spec.firstElement(), {});
-    liteParsed->validate();  // Should not throw.
+    liteParsed->validate(getExpCtx()->getOperationContext());  // Should not throw.
 }
 
 }  // namespace

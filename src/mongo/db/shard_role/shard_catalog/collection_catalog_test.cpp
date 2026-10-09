@@ -1,55 +1,23 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/index_spec.h"
 #include "mongo/db/client.h"
+#include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_builds/index_build_block.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
@@ -61,29 +29,31 @@
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/collection_yield_restore.h"
 #include "mongo/db/shard_role/shard_catalog/create_collection.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
-#include "mongo/db/shard_role/shard_catalog/durable_catalog_entry_metadata.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/shard_role/shard_catalog/uncommitted_catalog_updates.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
-#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/upgrade_downgrade_viewless_timeseries.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/scopeguard.h"
 
 #include <algorithm>
 #include <map>
-#include <mutex>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -650,7 +620,7 @@ TEST_F(CollectionCatalogTest, GetAllDbNamesForTenantMultitenancyFalse) {
 }
 
 TEST_F(CollectionCatalogTest, GetAllDbNamesForTenant) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
     TenantId tid1 = TenantId(OID::gen());
     TenantId tid2 = TenantId(OID::gen());
     NamespaceString dbA = NamespaceString::createNamespaceString_forTest(tid1, "dbA.collA");
@@ -694,7 +664,7 @@ TEST_F(CollectionCatalogTest, GetAllTenantsMultitenancyFalse) {
 }
 
 TEST_F(CollectionCatalogTest, GetAllTenants) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
     TenantId tid1 = TenantId(OID::gen());
     TenantId tid2 = TenantId(OID::gen());
     std::vector<NamespaceString> nsss = {
@@ -870,8 +840,13 @@ TEST_F(ForEachCollectionFromDbTest, ModifyAllCollectionsMatchingHandlesConcurren
             if (collection->ns() == originalNss) {
                 ASSERT_OK(storageInterface()->createCollection(opCtx, cloneNss, tempCollOptions));
             }
+            auto acq =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest::fromOpCtx(
+                                      opCtx, collection->ns(), AcquisitionPrerequisites::kWrite),
+                                  MODE_X);
             WriteUnitOfWork wuow(opCtx);
-            CollectionWriter writer(opCtx, collection->ns());
+            CollectionWriter writer(opCtx, &acq);
             writer.getWritableCollection(opCtx)->setIsTemp(opCtx, false);
             wuow.commit();
             numModified++;
@@ -1093,6 +1068,44 @@ public:
         _dropCollection(opCtx, nss, timestamp);
     }
 
+    void writableCollectionAndLeaveUncommitted(OperationContext* opCtx,
+                                               const NamespaceString& nss,
+                                               Timestamp timestamp,
+                                               boost::optional<WriteUnitOfWork>& wuow) {
+        _setupDDLOperation(opCtx, timestamp);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        wuow.emplace(opCtx);
+        CollectionWriter collection(opCtx, &acq);
+        ASSERT(collection.getWritableCollection(opCtx));
+    }
+
+    void renameCollectionAndLeaveUncommitted(OperationContext* opCtx,
+                                             const NamespaceString& from,
+                                             const NamespaceString& to,
+                                             Timestamp timestamp,
+                                             boost::optional<WriteUnitOfWork>& wuow) {
+        _setupDDLOperation(opCtx, timestamp);
+        wuow.emplace(opCtx);
+        _renameCollection(opCtx, from, to, timestamp);
+    }
+
+    void recreateCollectionWithUUIDInCurrentWUOW(OperationContext* opCtx,
+                                                 const NamespaceString& nss,
+                                                 UUID uuid) {
+        _createCollection(opCtx, nss, uuid, false);
+    }
+
+    void rollbackAfterCatalogPrecommit(boost::optional<WriteUnitOfWork>& wuow) {
+        shard_role_details::getRecoveryUnit(opCtx.get())
+            ->registerPreCommitHook([](OperationContext*, boost::optional<Timestamp>) {
+                throwWriteConflictException("Force rollback after catalog precommit");
+            });
+        ASSERT_THROWS(wuow->commit(), WriteConflictException);
+    }
+
     void renameCollection(OperationContext* opCtx,
                           const NamespaceString& from,
                           const NamespaceString& to,
@@ -1123,6 +1136,27 @@ public:
         wuow.commit();
     }
 
+    void insertDocsWithArray(OperationContext* opCtx,
+                             const NamespaceString& nss,
+                             const std::vector<BSONObj>& docs,
+                             Timestamp timestamp) {
+        _setupDDLOperation(opCtx, timestamp);
+
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+        ASSERT(coll);
+        CollectionPtr collPtr = CollectionPtr::CollectionPtr_UNSAFE(coll);
+
+        WriteUnitOfWork wuow(opCtx);
+        for (const auto& doc : docs) {
+            ASSERT_OK(Helpers::insert(opCtx, collPtr, doc));
+        }
+        wuow.commit();
+    }
+
     /**
      * Starts an index build, but leaves the build in progress rather than ready. Returns the
      * IndexBuildBlock performing the build, necessary to finish the build later via
@@ -1134,9 +1168,12 @@ public:
                                                                       Timestamp createTimestamp) {
         _setupDDLOperation(opCtx, createTimestamp);
 
-        AutoGetCollection autoColl(opCtx, nss, MODE_X);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(opCtx);
-        CollectionWriter collection(opCtx, nss);
+        CollectionWriter collection(opCtx, &acq);
 
         auto writableColl = collection.getWritableCollection(opCtx);
         auto storageEngine = getServiceContext()->getStorageEngine();
@@ -1172,9 +1209,12 @@ public:
                           Timestamp readyTimestamp) {
         _setupDDLOperation(opCtx, readyTimestamp);
 
-        AutoGetCollection autoColl(opCtx, nss, MODE_X);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         WriteUnitOfWork wuow(opCtx);
-        CollectionWriter collection(opCtx, nss);
+        CollectionWriter collection(opCtx, &acq);
         indexBuildBlock->success(opCtx, collection.getWritableCollection(opCtx));
         wuow.commit();
     }
@@ -1216,6 +1256,21 @@ public:
             opCtx,
             timestamp,
             [this, &nss, &uuid](OperationContext* opCtx) { _createCollection(opCtx, nss, uuid); },
+            catalogOperations);
+    }
+
+    void concurrentCreateIndexAndRunCatalogOperations(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        BSONObj indexSpec,
+        Timestamp timestamp,
+        std::function<void(OperationContext* opCtx)> catalogOperations) {
+        _concurrentDDLOperationAndCatalogQueries(
+            opCtx,
+            timestamp,
+            [this, &nss, &indexSpec](OperationContext* opCtx) {
+                _createIndex(opCtx, nss, indexSpec);
+            },
             catalogOperations);
     }
 
@@ -1349,6 +1404,92 @@ public:
             expectedNumIndexes);
     }
 
+    void _concurrentMultikeyIndexBuildAndEstablishConsistentCollection(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const NamespaceStringOrUUID& lookupNssOrUUID,
+        BSONObj arrayDoc,
+        BSONObj indexSpec,
+        Timestamp insertDocsTs,
+        Timestamp initBuildTs,
+        Timestamp commitBuildTs,
+        boost::optional<Timestamp> lookupTs,
+        bool openSnapshotBeforeCommit,
+        bool expectedExistence,
+        int expectedNumIndexes) {
+        insertDocsWithArray(opCtx, nss, {arrayDoc}, insertDocsTs);
+
+        _setupDDLOperation(opCtx, initBuildTs);
+
+        MultiIndexBlock multiIndexBlock;
+        bool committed = false;
+        ScopeGuard abortOnExit([&] {
+            if (committed) {
+                return;
+            }
+            auto acq = acquireCollection(opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             opCtx, nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_X);
+            CollectionWriter collection(opCtx, &acq);
+            multiIndexBlock.abortIndexBuild(opCtx, collection, MultiIndexBlock::kNoopOnCleanUpFn);
+        });
+
+        {
+            auto acq = acquireCollection(opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             opCtx, nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_X);
+            CollectionWriter collection(opCtx, &acq);
+            auto storageEngine = getServiceContext()->getStorageEngine();
+            auto specs =
+                multiIndexBlock.init(opCtx,
+                                     collection,
+                                     {IndexBuildInfo(indexSpec, *storageEngine, nss.dbName())},
+                                     MultiIndexBlock::kNoopOnInitFn,
+                                     MultiIndexBlock::InitMode::SteadyState,
+                                     boost::none);
+            uassertStatusOK(specs.getStatus());
+        }
+
+        ASSERT_OK(multiIndexBlock.insertAllDocumentsInCollection(opCtx, nss));
+        {
+            auto acq = acquireCollection(opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             opCtx, nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_X);
+            ASSERT_OK(multiIndexBlock.drainBackgroundWrites(
+                opCtx,
+                RecoveryUnit::ReadSource::kNoTimestamp,
+                IndexBuildInterceptor::DrainYieldPolicy::kNoYield));
+        }
+
+        _concurrentDDLOperationAndEstablishConsistentCollection(
+            opCtx,
+            lookupNssOrUUID,
+            commitBuildTs,
+            [&multiIndexBlock, &nss, &committed](OperationContext* threadOpCtx) {
+                auto acq =
+                    acquireCollection(threadOpCtx,
+                                      CollectionAcquisitionRequest::fromOpCtx(
+                                          threadOpCtx, nss, AcquisitionPrerequisites::kWrite),
+                                      MODE_X);
+                CollectionWriter collection(threadOpCtx, &acq);
+                uassertStatusOK(
+                    multiIndexBlock.commit(threadOpCtx,
+                                           collection.getWritableCollection(threadOpCtx),
+                                           MultiIndexBlock::kNoopOnCreateEachFn,
+                                           MultiIndexBlock::kNoopOnCommitFn));
+                committed = true;
+            },
+            openSnapshotBeforeCommit,
+            lookupTs,
+            expectedExistence,
+            expectedNumIndexes);
+
+        abortOnExit.dismiss();
+    }
+
 protected:
     ServiceContext::UniqueOperationContext opCtx;
 
@@ -1441,11 +1582,12 @@ private:
                            const NamespaceString& nss,
                            boost::optional<UUID> uuid = boost::none,
                            bool allowMixedModeWrites = false) {
-        AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
-        auto db = databaseWriteGuard.ensureDbExists(opCtx);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        auto db = DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName());
         ASSERT(db);
-
-        Lock::CollectionLock lk(opCtx, nss, MODE_IX);
 
         CollectionOptions options;
         if (uuid) {
@@ -1479,9 +1621,11 @@ private:
     }
 
     void _dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
-        Lock::DBLock dbLk(opCtx, nss.dbName(), MODE_IX);
-        Lock::CollectionLock collLk(opCtx, nss, MODE_X);
-        CollectionWriter collection(opCtx, nss);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        CollectionWriter collection(opCtx, &acq);
 
         Collection* writableCollection = collection.getWritableCollection(opCtx);
 
@@ -1517,8 +1661,10 @@ private:
                            Timestamp timestamp) {
         invariant(from != to);
 
-        Lock::DBLock dbLk(opCtx, from.dbName(), MODE_IX);
-        Lock::CollectionLock fromLk(opCtx, from, MODE_X);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, from, AcquisitionPrerequisites::kWrite),
+            MODE_X);
         Lock::CollectionLock toLk(opCtx, to, MODE_X);
 
         // Drop the collection if it exists. This triggers the same behavior as renaming with
@@ -1527,7 +1673,7 @@ private:
             _dropCollection(opCtx, to, timestamp);
         }
 
-        CollectionWriter collection(opCtx, from);
+        CollectionWriter collection(opCtx, &acq);
 
         ASSERT_OK(collection.getWritableCollection(opCtx)->rename(opCtx, to, false));
         CollectionCatalog::get(opCtx)->onCollectionRename(
@@ -1535,8 +1681,11 @@ private:
     }
 
     void _createIndex(OperationContext* opCtx, const NamespaceString& nss, BSONObj indexSpec) {
-        AutoGetCollection autoColl(opCtx, nss, MODE_X);
-        CollectionWriter collection(opCtx, nss);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        CollectionWriter collection(opCtx, &acq);
         IndexBuildsCoordinator::createIndexesOnEmptyCollection(
             opCtx, collection, {indexSpec}, /*fromMigrate=*/false);
     }
@@ -1544,9 +1693,12 @@ private:
     void _dropIndex(OperationContext* opCtx,
                     const NamespaceString& nss,
                     const std::string& indexName) {
-        AutoGetCollection autoColl(opCtx, nss, MODE_X);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
 
-        CollectionWriter collection(opCtx, nss);
+        CollectionWriter collection(opCtx, &acq);
 
         Collection* writableCollection = collection.getWritableCollection(opCtx);
 
@@ -1704,6 +1856,55 @@ TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshot) {
     coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss);
     ASSERT(coll);
     ASSERT_EQ(coll->getMinimumValidSnapshot(), dropIndexTs);
+}
+
+TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshotSetForCommitPendingCreate) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const Timestamp createCollectionTs = Timestamp(20, 20);
+
+    concurrentCreateAndRunCatalogOperations(
+        opCtx.get(), nss, boost::none, createCollectionTs, [&](OperationContext* readOpCtx) {
+            OneOffRead oor(readOpCtx, Timestamp());
+            Lock::GlobalLock globalLock(readOpCtx, MODE_IS);
+
+            auto coll = CollectionCatalog::get(readOpCtx)->establishConsistentCollection(
+                readOpCtx, nss, boost::none);
+            ASSERT(coll);
+
+            auto minValid = coll->getMinimumValidSnapshot();
+            ASSERT(minValid) << "A commit pending collection must have its minimum valid snapshot.";
+            ASSERT_EQ(*minValid, createCollectionTs);
+        });
+}
+
+TEST_F(CollectionCatalogTimestampTest, MinimumValidSnapshotBumpedForCommitPendingClone) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp createIndexTs = Timestamp(20, 20);
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+
+    concurrentCreateIndexAndRunCatalogOperations(
+        opCtx.get(),
+        nss,
+        BSON("v" << 2 << "name"
+                 << "x_1"
+                 << "key" << BSON("x" << 1)),
+        createIndexTs,
+        [&](OperationContext* readOpCtx) {
+            OneOffRead oor(readOpCtx, Timestamp());
+            Lock::GlobalLock globalLock(readOpCtx, MODE_IS);
+
+            auto coll = CollectionCatalog::get(readOpCtx)->establishConsistentCollection(
+                readOpCtx, nss, boost::none);
+            ASSERT(coll);
+
+            auto minValid = coll->getMinimumValidSnapshot();
+            ASSERT(minValid) << "Pending collection must have a minimum valid snapshot.";
+            ASSERT_EQ(*minValid, createIndexTs)
+                << "Pending clone's minimum valid snapshot must equal the current DDL commit "
+                   "timestamp, not the previous DDL timestamp inherited from the source.";
+        });
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenCollectionBeforeCreateTimestamp) {
@@ -2428,7 +2629,7 @@ public:
 
         // Create viewful timeseries (for upgrade) or viewless timeseries (for downgrade).
         {
-            RAIIServerParameterControllerForTest featureFlagController(
+            unittest::ServerParameterGuard featureFlagController(
                 "featureFlagCreateViewlessTimeseriesCollections", !isUpgrade);
             CreateCommand cmd = CreateCommand(mainNs);
             cmd.getCreateCollectionRequest().setTimeseries(TimeseriesOptions("t"));
@@ -2466,7 +2667,7 @@ public:
         {
             ConcurrentDDL ddl(
                 getServiceContext(), upgradeDowngradeTs, [&](OperationContext* opCtx) {
-                    RAIIServerParameterControllerForTest featureFlagController(
+                    unittest::ServerParameterGuard featureFlagController(
                         "featureFlagCreateViewlessTimeseriesCollections", isUpgrade);
                     if (isUpgrade) {
                         timeseries::upgradeToViewlessTimeseries(opCtx, mainNs);
@@ -2514,7 +2715,7 @@ TEST_F(CollectionCatalogTimeseriesUpgradeDowngradeTest,
 
     // Create a viewless timeseries collection.
     {
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "featureFlagCreateViewlessTimeseriesCollections", true);
         CreateCommand cmd = CreateCommand(mainNs);
         cmd.getCreateCollectionRequest().setTimeseries(TimeseriesOptions("t"));
@@ -2535,7 +2736,7 @@ TEST_F(CollectionCatalogTimeseriesUpgradeDowngradeTest,
     // Downgrade to viewful format at downgradeTs.
     {
         ConcurrentDDL ddl(getServiceContext(), downgradeTs, [&](OperationContext* opCtx) {
-            RAIIServerParameterControllerForTest featureFlagController(
+            unittest::ServerParameterGuard featureFlagController(
                 "featureFlagCreateViewlessTimeseriesCollections", false);
             timeseries::downgradeFromViewlessTimeseries(opCtx, mainNs);
         });
@@ -2680,6 +2881,10 @@ TEST_F(CollectionCatalogTimestampTest, UUIDLookupWhileCommitPendingCreate) {
             auto catalog = CollectionCatalog::get(opCtx);
             ASSERT_THROWS(catalog->resolveNamespaceStringOrUUID(opCtx, {nss.dbName(), uuid}),
                           ExceptionFor<ErrorCodes::NamespaceNotFound>);
+            ASSERT_THROWS_CODE(catalog->resolveNamespaceStringFromDBNameAndUUIDThrowIfCommitPending(
+                                   opCtx, nss.dbName(), uuid),
+                               DBException,
+                               ErrorCodes::CommitPendingNamespaceOrUUID);
             ASSERT_EQ(catalog->resolveNamespaceStringOrUUIDWithCommitPendingEntries_UNSAFE(
                           opCtx, {nss.dbName(), uuid}),
                       nss);
@@ -2762,6 +2967,116 @@ TEST_F(CollectionCatalogTimestampTest, UUIDLookupWhileCommitPendingDrop) {
                           opCtx, {nss.dbName(), uuid}),
                       nss);
         });
+}
+
+TEST_F(CollectionCatalogTimestampTest, NamespaceAndUUIDPendingEntriesRemovedAfterDropRollback) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const UUID uuid = createCollection(opCtx.get(), nss, Timestamp(10, 10));
+    const auto* original =
+        CollectionCatalog::latest(opCtx.get())->lookupCollectionByUUID(opCtx.get(), uuid);
+
+    {
+        boost::optional<WriteUnitOfWork> wuow;
+        dropCollectionAndLeaveUncommitted(opCtx.get(), nss, Timestamp(20, 20), wuow);
+
+        rollbackAfterCatalogPrecommit(wuow);
+    }
+
+    auto catalog = CollectionCatalog::latest(opCtx.get());
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss)));
+    ASSERT_FALSE(
+        catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss.dbName(), uuid)));
+    ASSERT_EQ(catalog->lookupCollectionByUUID(opCtx.get(), uuid), original);
+}
+
+TEST_F(CollectionCatalogTimestampTest, CreatedCollectionPendingEntriesRemovedAfterRollback) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const UUID uuid = UUID::gen();
+
+    {
+        boost::optional<WriteUnitOfWork> wuow;
+        createCollectionWithUUIDAndLeaveUncommitted(
+            opCtx.get(), nss, Timestamp(10, 10), uuid, wuow);
+        rollbackAfterCatalogPrecommit(wuow);
+    }
+
+    auto catalog = CollectionCatalog::latest(opCtx.get());
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss)));
+    ASSERT_FALSE(
+        catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss.dbName(), uuid)));
+    ASSERT_FALSE(catalog->lookupCollectionByNamespace(opCtx.get(), nss));
+    ASSERT_FALSE(catalog->lookupCollectionByUUID(opCtx.get(), uuid));
+}
+
+TEST_F(CollectionCatalogTimestampTest, WritableCollectionPendingEntriesRemovedAfterRollback) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const UUID uuid = createCollection(opCtx.get(), nss, Timestamp(10, 10));
+    const auto* original =
+        CollectionCatalog::latest(opCtx.get())->lookupCollectionByUUID(opCtx.get(), uuid);
+
+    {
+        boost::optional<WriteUnitOfWork> wuow;
+        writableCollectionAndLeaveUncommitted(opCtx.get(), nss, Timestamp(20, 20), wuow);
+        rollbackAfterCatalogPrecommit(wuow);
+    }
+
+    auto catalog = CollectionCatalog::latest(opCtx.get());
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss)));
+    ASSERT_FALSE(
+        catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss.dbName(), uuid)));
+    ASSERT_EQ(catalog->lookupCollectionByNamespace(opCtx.get(), nss), original);
+    ASSERT_EQ(catalog->lookupCollectionByUUID(opCtx.get(), uuid), original);
+}
+
+TEST_F(CollectionCatalogTimestampTest, RenamedCollectionPendingEntriesRemovedAfterRollback) {
+    const NamespaceString originalNss = NamespaceString::createNamespaceString_forTest("a.b");
+    const NamespaceString renamedNss = NamespaceString::createNamespaceString_forTest("a.c");
+    const UUID uuid = createCollection(opCtx.get(), originalNss, Timestamp(10, 10));
+    const auto* original =
+        CollectionCatalog::latest(opCtx.get())->lookupCollectionByUUID(opCtx.get(), uuid);
+
+    {
+        boost::optional<WriteUnitOfWork> wuow;
+        renameCollectionAndLeaveUncommitted(
+            opCtx.get(), originalNss, renamedNss, Timestamp(20, 20), wuow);
+        rollbackAfterCatalogPrecommit(wuow);
+    }
+
+    auto catalog = CollectionCatalog::latest(opCtx.get());
+    ASSERT_FALSE(
+        catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(originalNss)));
+    ASSERT_FALSE(
+        catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(renamedNss)));
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(
+        NamespaceStringOrUUID(originalNss.dbName(), uuid)));
+    ASSERT_EQ(catalog->lookupCollectionByNamespace(opCtx.get(), originalNss), original);
+    ASSERT_FALSE(catalog->lookupCollectionByNamespace(opCtx.get(), renamedNss));
+    ASSERT_EQ(catalog->lookupCollectionByUUID(opCtx.get(), uuid), original);
+}
+
+TEST_F(CollectionCatalogTimestampTest, RecreatedCollectionPendingEntriesRemovedAfterRollback) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const UUID oldUuid = createCollection(opCtx.get(), nss, Timestamp(10, 10));
+    const UUID newUuid = UUID::gen();
+    const auto* original =
+        CollectionCatalog::latest(opCtx.get())->lookupCollectionByUUID(opCtx.get(), oldUuid);
+
+    {
+        boost::optional<WriteUnitOfWork> wuow;
+        dropCollectionAndLeaveUncommitted(opCtx.get(), nss, Timestamp(20, 20), wuow);
+        recreateCollectionWithUUIDInCurrentWUOW(opCtx.get(), nss, newUuid);
+        rollbackAfterCatalogPrecommit(wuow);
+    }
+
+    auto catalog = CollectionCatalog::latest(opCtx.get());
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(NamespaceStringOrUUID(nss)));
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(
+        NamespaceStringOrUUID(nss.dbName(), oldUuid)));
+    ASSERT_FALSE(catalog->isNamespaceOrUUIDCommitPending_forTest(
+        NamespaceStringOrUUID(nss.dbName(), newUuid)));
+    ASSERT_EQ(catalog->lookupCollectionByNamespace(opCtx.get(), nss), original);
+    ASSERT_EQ(catalog->lookupCollectionByUUID(opCtx.get(), oldUuid), original);
+    ASSERT_FALSE(catalog->lookupCollectionByUUID(opCtx.get(), newUuid));
 }
 
 TEST_F(CollectionCatalogTimestampTest,
@@ -3208,41 +3523,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionBef
                                                           1);
 }
 
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentCreateIndexAndOpenCollectionBeforeCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createXIndexTs = Timestamp(20, 20);
-    const Timestamp createYIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createXIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    // When the snapshot is opened right before the second index create is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentCreateIndexAndEstablishConsistentCollection(opCtx.get(),
-                                                          nss,
-                                                          nss,
-                                                          BSON("v" << 2 << "name"
-                                                                   << "y_1"
-                                                                   << "key" << BSON("y" << 1)),
-                                                          createYIndexTs,
-                                                          true,
-                                                          true,
-                                                          1,
-                                                          makeIndexMultikey);
-}
-
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionAfterCommit) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3272,11 +3552,12 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionAft
 }
 
 TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentCreateIndexAndOpenCollectionAfterCommitWithUnrelatedMultikey) {
+       ConcurrentCreateIndexAndOpenCollectionAfterCommitAfterDdlTimestamp) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
     const Timestamp createXIndexTs = Timestamp(20, 20);
     const Timestamp createYIndexTs = Timestamp(30, 30);
+    const Timestamp readTs = Timestamp(30, 31);
 
     createCollection(opCtx.get(), nss, createCollectionTs);
     createIndex(opCtx.get(),
@@ -3286,24 +3567,74 @@ TEST_F(CollectionCatalogTimestampTest,
                          << "key" << BSON("x" << 1)),
                 createXIndexTs);
 
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
+    // Must see both indexes post-commit. Must NOT throw SnapshotUnavailable.
+    concurrentCreateIndexAndEstablishConsistentCollection(
+        opCtx.get(),
+        nss,
+        nss,
+        BSON("v" << 2 << "name"
+                 << "y_1"
+                 << "key" << BSON("y" << 1)),
+        createYIndexTs,
+        /*openSnapshotBeforeCommit=*/false,
+        /*expectedExistence=*/true,
+        /*expectedNumIndexes=*/2,
+        /*extraOpHook=*/{},
+        /*lookupTimestamp=*/boost::make_optional(readTs));
+}
 
-    // When the snapshot is opened right after the second index create is committed to the durable
-    // catalog, the collection instance should have both indexes.
-    concurrentCreateIndexAndEstablishConsistentCollection(opCtx.get(),
-                                                          nss,
-                                                          nss,
-                                                          BSON("v" << 2 << "name"
-                                                                   << "y_1"
-                                                                   << "key" << BSON("y" << 1)),
-                                                          createYIndexTs,
-                                                          false,
-                                                          true,
-                                                          2,
-                                                          makeIndexMultikey);
+TEST_F(CollectionCatalogTimestampTest, ConcurrentMultikeyIndexBuildAndOpenCollectionBeforeCommit) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp insertDocsTs = Timestamp(20, 20);
+    const Timestamp initIndexBuildTs = Timestamp(25, 25);
+    const Timestamp commitIndexBuildTs = Timestamp(30, 30);
+    const BSONObj indexSpec = BSON("v" << 2 << "name"
+                                       << "m_1"
+                                       << "key" << BSON("m" << 1));
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    _concurrentMultikeyIndexBuildAndEstablishConsistentCollection(
+        opCtx.get(),
+        nss,
+        NamespaceStringOrUUID(nss),
+        BSON("_id" << 0 << "m" << BSON_ARRAY(1 << 2 << 3)),
+        indexSpec,
+        insertDocsTs,
+        initIndexBuildTs,
+        commitIndexBuildTs,
+        boost::none,
+        /*openSnapshotBeforeCommit=*/true,
+        /*expectedExistence=*/true,
+        /*expectedNumIndexes=*/1);
+}
+
+TEST_F(CollectionCatalogTimestampTest,
+       ConcurrentMultikeyIndexBuildAndOpenCollectionAfterCommitAfterDdlTimestamp) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    const Timestamp createCollectionTs = Timestamp(10, 10);
+    const Timestamp insertDocsTs = Timestamp(20, 20);
+    const Timestamp initIndexBuildTs = Timestamp(25, 25);
+    const Timestamp commitIndexBuildTs = Timestamp(30, 30);
+    const Timestamp readTs = Timestamp(30, 31);
+    const BSONObj indexSpec = BSON("v" << 2 << "name"
+                                       << "m_1"
+                                       << "key" << BSON("m" << 1));
+
+    createCollection(opCtx.get(), nss, createCollectionTs);
+    _concurrentMultikeyIndexBuildAndEstablishConsistentCollection(
+        opCtx.get(),
+        nss,
+        NamespaceStringOrUUID(nss),
+        BSON("_id" << 0 << "m" << BSON_ARRAY(1 << 2 << 3)),
+        indexSpec,
+        insertDocsTs,
+        initIndexBuildTs,
+        commitIndexBuildTs,
+        boost::make_optional(readTs),
+        /*openSnapshotBeforeCommit=*/false,
+        /*expectedExistence=*/true,
+        /*expectedNumIndexes=*/1);
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByUUIDBeforeCommit) {
@@ -3337,45 +3668,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByU
                                                           1);
 }
 
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentCreateIndexAndOpenCollectionByUUIDBeforeCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createXIndexTs = Timestamp(20, 20);
-    const Timestamp createYIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createXIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    UUID uuid =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss)->uuid();
-    NamespaceStringOrUUID uuidWithDbName(nss.dbName(), uuid);
-
-    // When the snapshot is opened right before the second index create is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentCreateIndexAndEstablishConsistentCollection(opCtx.get(),
-                                                          nss,
-                                                          uuidWithDbName,
-                                                          BSON("v" << 2 << "name"
-                                                                   << "y_1"
-                                                                   << "key" << BSON("y" << 1)),
-                                                          createYIndexTs,
-                                                          true,
-                                                          true,
-                                                          1,
-                                                          makeIndexMultikey);
-}
-
 TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByUUIDAfterCommit) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3407,45 +3699,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentCreateIndexAndOpenCollectionByU
                                                           2);
 }
 
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentCreateIndexAndOpenCollectionByUUIDAfterCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createXIndexTs = Timestamp(20, 20);
-    const Timestamp createYIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createXIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    UUID uuid =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss)->uuid();
-    NamespaceStringOrUUID uuidWithDbName(nss.dbName(), uuid);
-
-    // When the snapshot is opened right after the second index create is committed to the durable
-    // catalog, the collection instance should have both indexes.
-    concurrentCreateIndexAndEstablishConsistentCollection(opCtx.get(),
-                                                          nss,
-                                                          uuidWithDbName,
-                                                          BSON("v" << 2 << "name"
-                                                                   << "y_1"
-                                                                   << "key" << BSON("y" << 1)),
-                                                          createYIndexTs,
-                                                          false,
-                                                          true,
-                                                          2,
-                                                          makeIndexMultikey);
-}
-
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionBeforeCommit) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3472,38 +3725,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionBefor
         opCtx.get(), nss, nss, "y_1", dropIndexTs, true, true, 2);
 }
 
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentDropIndexAndOpenCollectionBeforeCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createIndexTs = Timestamp(20, 20);
-    const Timestamp dropIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createIndexTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "y_1"
-                         << "key" << BSON("y" << 1)),
-                createIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    // When the snapshot is opened right before the index drop is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentDropIndexAndEstablishConsistentCollection(
-        opCtx.get(), nss, nss, "y_1", dropIndexTs, true, true, 2, makeIndexMultikey);
-}
-
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionAfterCommit) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3528,38 +3749,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionAfter
     // catalog, the collection instance should not have the second index.
     concurrentDropIndexAndEstablishConsistentCollection(
         opCtx.get(), nss, nss, "y_1", dropIndexTs, false, true, 1);
-}
-
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentDropIndexAndOpenCollectionAfterCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createIndexTs = Timestamp(20, 20);
-    const Timestamp dropIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createIndexTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "y_1"
-                         << "key" << BSON("y" << 1)),
-                createIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    // When the snapshot is opened right after the index drop is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentDropIndexAndEstablishConsistentCollection(
-        opCtx.get(), nss, nss, "y_1", dropIndexTs, false, true, 1, makeIndexMultikey);
 }
 
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUIDBeforeCommit) {
@@ -3591,42 +3780,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUI
         opCtx.get(), nss, uuidWithDbName, "y_1", dropIndexTs, true, true, 2);
 }
 
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentDropIndexAndOpenCollectionByUUIDBeforeCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createIndexTs = Timestamp(20, 20);
-    const Timestamp dropIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createIndexTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "y_1"
-                         << "key" << BSON("y" << 1)),
-                createIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    UUID uuid =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss)->uuid();
-    NamespaceStringOrUUID uuidWithDbName(nss.dbName(), uuid);
-
-    // When the snapshot is opened right before the index drop is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentDropIndexAndEstablishConsistentCollection(
-        opCtx.get(), nss, uuidWithDbName, "y_1", dropIndexTs, true, true, 2, makeIndexMultikey);
-}
-
 TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUIDAfterCommit) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     const Timestamp createCollectionTs = Timestamp(10, 10);
@@ -3654,42 +3807,6 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentDropIndexAndOpenCollectionByUUI
     // catalog, the collection instance should not have the second index.
     concurrentDropIndexAndEstablishConsistentCollection(
         opCtx.get(), nss, uuidWithDbName, "y_1", dropIndexTs, false, true, 1);
-}
-
-TEST_F(CollectionCatalogTimestampTest,
-       ConcurrentDropIndexAndOpenCollectionByUUIDAfterCommitWithUnrelatedMultikey) {
-    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
-    const Timestamp createCollectionTs = Timestamp(10, 10);
-    const Timestamp createIndexTs = Timestamp(20, 20);
-    const Timestamp dropIndexTs = Timestamp(30, 30);
-
-    createCollection(opCtx.get(), nss, createCollectionTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "x_1"
-                         << "key" << BSON("x" << 1)),
-                createIndexTs);
-    createIndex(opCtx.get(),
-                nss,
-                BSON("v" << 2 << "name"
-                         << "y_1"
-                         << "key" << BSON("y" << 1)),
-                createIndexTs);
-
-    auto makeIndexMultikey = [nss](OperationContext* opCtx) {
-        auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        coll->setIndexIsMultikey(opCtx, "x_1", {{0U}});
-    };
-
-    UUID uuid =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss)->uuid();
-    NamespaceStringOrUUID uuidWithDbName(nss.dbName(), uuid);
-
-    // When the snapshot is opened right after the index drop is committed to the durable
-    // catalog, the collection instance should not have the second index.
-    concurrentDropIndexAndEstablishConsistentCollection(
-        opCtx.get(), nss, uuidWithDbName, "y_1", dropIndexTs, false, true, 1, makeIndexMultikey);
 }
 
 TEST_F(CollectionCatalogTimestampTest, OpenCollectionBetweenIndexBuildInProgressAndReady) {
@@ -3792,9 +3909,12 @@ TEST_F(CollectionCatalogTimestampTest, IndexCatalogEntryCopying) {
         IndexSpec spec;
         spec.version(1).name("x_1").addKeys(BSON("x" << 1));
         auto desc = IndexDescriptor(IndexNames::BTREE, spec.toBSON());
-        AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         WriteUnitOfWork wuow(opCtx.get());
-        CollectionWriter writer{opCtx.get(), autoColl};
+        CollectionWriter writer{opCtx.get(), &acq};
         auto writableColl = writer.getWritableCollection(opCtx.get());
         ASSERT_OK(
             writableColl->prepareForIndexBuild(opCtx.get(), &desc, "index-ident", boost::none));
@@ -3817,9 +3937,12 @@ TEST_F(CollectionCatalogTimestampTest, IndexCatalogEntryCopying) {
 
     {
         // Now finish the index build on the original client.
-        AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+        auto acq = acquireCollection(opCtx.get(),
+                                     CollectionAcquisitionRequest::fromOpCtx(
+                                         opCtx.get(), nss, AcquisitionPrerequisites::kWrite),
+                                     MODE_X);
         WriteUnitOfWork wuow(opCtx.get());
-        CollectionWriter writer{opCtx.get(), autoColl};
+        CollectionWriter writer{opCtx.get(), &acq};
         auto writableColl = writer.getWritableCollection(opCtx.get());
         auto writableEntry = writableColl->getIndexCatalog()->getWritableEntryByName(
             opCtx.get(), "x_1", IndexCatalog::InclusionPolicy::kUnfinished);
@@ -3957,12 +4080,39 @@ TEST(GetConfigDebugDumpTest, ConfigDatabase) {
     ASSERT_TRUE(*resultListed);
 };
 
+TEST(GetConfigDebugDumpTest, AuthoritativeShardCatalogCollections) {
+    // The authoritative shard-local catalog collections (config.shard.catalog.*) hold authoritative
+    // metadata that must be captured in a debug dump.
+    for (const auto& coll :
+         {"shard.catalog.databases", "shard.catalog.collections", "shard.catalog.chunks"}) {
+        const auto result = catalog::getConfigDebugDump(
+            kNoVersionContext, NamespaceString::createNamespaceString_forTest("config", coll));
+        ASSERT_TRUE(result) << "Unexpected boost::none for config." << coll;
+        ASSERT_TRUE(*result) << "Expected config." << coll << " to be included in the debug dump";
+    }
+
+    // The non-authoritative shard caches are rebuilt and must never be included in a debug dump.
+    for (const auto& coll : {"cache.collections", "cache.databases"}) {
+        const auto result = catalog::getConfigDebugDump(
+            kNoVersionContext, NamespaceString::createNamespaceString_forTest("config", coll));
+        ASSERT_TRUE(result) << "Unexpected boost::none for config." << coll;
+        ASSERT_FALSE(*result) << "Expected config." << coll
+                              << " to be excluded from the debug dump";
+    }
+
+    // config.placementHistory is derived/reconstructable and is deliberately excluded.
+    const auto placementHistory = catalog::getConfigDebugDump(
+        kNoVersionContext,
+        NamespaceString::createNamespaceString_forTest("config", "placementHistory"));
+    ASSERT_TRUE(placementHistory);
+    ASSERT_FALSE(*placementHistory);
+};
+
 // TODO (SERVER-95599): remove once 9.0 becomes last LTS.
 TEST(GetConfigDebugDumpTest, FeatureFlagDisabled) {
     // With the feature flag disabled, it should always return boost::none.
 
-    RAIIServerParameterControllerForTest featureFlagScope("featureFlagConfigDebugDumpSupported",
-                                                          false);
+    unittest::ServerParameterGuard featureFlagScope("featureFlagConfigDebugDumpSupported", false);
 
     const auto resultNonConfig = catalog::getConfigDebugDump(
         kNoVersionContext, NamespaceString::createNamespaceString_forTest("nonConfig", "dummy"));
@@ -4432,9 +4582,11 @@ TEST_F(CollectionCatalogTimestampTest, ConcurrentRecreateWithReapedIdentDoesNotC
     // "reaped", establishConsistentCollection must throw SnapshotUnavailable.
     {
         ConcurrentDDL ddl(getServiceContext(), recreateTs, [&nss](OperationContext* opCtx) {
-            AutoGetDb databaseWriteGuard(opCtx, nss.dbName(), MODE_IX);
-            databaseWriteGuard.ensureDbExists(opCtx);
-            Lock::CollectionLock lk(opCtx, nss, MODE_IX);
+            auto acq = acquireCollection(opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             opCtx, nss, AcquisitionPrerequisites::kWrite),
+                                         MODE_IX);
+            DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName());
 
             CollectionOptions options;
             options.uuid.emplace(UUID::gen());

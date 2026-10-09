@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file contains a unittest framework for testing sbe::PlanStages.
@@ -33,25 +7,25 @@
 
 #pragma once
 
-#include <concepts>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <utility>
-#include <vector>
-
-// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
-
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/util/modules.h"
+
+#include <concepts>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string_view>
+#include <utility>
+#include <vector>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
 namespace mongo::sbe {
 
@@ -65,7 +39,7 @@ inline auto makeBoolConstant(bool boolVal) {
     return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean, val);
 }
 
-inline auto makeStringConstant(StringData value) {
+inline auto makeStringConstant(std::string_view value) {
     auto [tag, val] = value::makeNewString(value);
     return sbe::makeE<sbe::EConstant>(tag, val);
 }
@@ -95,6 +69,10 @@ inline std::unique_ptr<sbe::EExpression> makeVariable(sbe::FrameId frameId,
 template <typename T>
 using MakeStageFn = std::function<std::pair<T, std::unique_ptr<PlanStage>>(
     T scanSlots, std::unique_ptr<PlanStage> scanStage)>;
+
+template <typename T>
+using MakeStageWithEnvFn = std::function<std::pair<T, std::unique_ptr<PlanStage>>(
+    T scanSlots, std::unique_ptr<PlanStage> scanStage, stage_builder::Environment& env)>;
 
 using AssertStageStatsFn = std::function<void(const SpecificStats*)>;
 
@@ -193,14 +171,6 @@ public:
     }
 
     /**
-     * Asserts the two values are equal. Will write a log message and abort() if they are not.
-     */
-    static void assertValuesEqual(value::TypeTags lhsTag,
-                                  value::Value lhsVal,
-                                  value::TypeTags rhsTag,
-                                  value::Value rhsVal);
-
-    /**
      * This method takes an SBE array and returns an output slot and a unwind/project/limit/coscan
      * subtree that streams out the elements of the array one at a time via the output slot over a
      * series of calls to getNext(), mimicking the output of a collection scan or an index scan.
@@ -208,10 +178,7 @@ public:
      * Note that this method assumes ownership of the SBE Array being passed in.
      */
     std::pair<value::SlotId, std::unique_ptr<PlanStage>> generateVirtualScan(
-        value::TypeTags arrTag,
-        value::Value arrVal,
-        PlanNodeId planNodeId = kEmptyPlanNodeId,
-        bool owned = true);
+        value::TagValueMaybeOwned arr, PlanNodeId planNodeId = kEmptyPlanNodeId);
 
     /**
      * This method is similar to generateVirtualScan(), except that the subtree returned outputs to
@@ -226,6 +193,9 @@ public:
      */
     std::pair<value::SlotVector, std::unique_ptr<PlanStage>> generateVirtualScanMulti(
         int32_t numSlots, value::TypeTags arrTag, value::Value arrVal);
+
+    std::pair<value::SlotVector, std::unique_ptr<PlanStage>> generateVirtualScanMulti(
+        int32_t numSlots, value::TagValueOwned arr);
 
     /**
      * Make a mock scan from an BSON array. This method does NOT assume ownership of the BSONArray
@@ -242,8 +212,9 @@ public:
         int32_t numSlots, const BSONArray& array);
 
     /**
-     * Sets the MultipleCollectionAccessor to use when calling prepareTree(). prepareTree() will
-     * call attachCollectionAcquisition() on the stage tree before opening it.
+     * Sets the MultipleCollectionAccessor to use when calling prepareTree(). prepareTree() routes
+     * it through CompileCtx::mca so leaf stages can resolve their CollectionAcquisition during
+     * prepare().
      */
     void attachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
         _mca = &mca;
@@ -308,17 +279,28 @@ public:
                  value::Value expectedVal,
                  const MakeStageFn<value::SlotId>& makeStage);
 
+    void runTest(value::TagValueOwned input,
+                 value::TagValueOwned expected,
+                 const MakeStageFn<value::SlotId>& makeStage);
+
     // Same method as above, but requires providing your own expression context.
     std::pair<value::TypeTags, value::Value> runTest(CompileCtx* ctx,
                                                      value::TypeTags inputTag,
                                                      value::Value inputVal,
                                                      const MakeStageFn<value::SlotId>& makeStage);
 
+    // Like the `MakeStageFn` overload above, but passes the RuntimeEnvironment to makeStage so the
+    // stage can register slots in it (e.g. when using stage_builder::StageBuilderState).
+    std::pair<value::TypeTags, value::Value> runTest(
+        value::TypeTags inputTag,
+        value::Value inputVal,
+        const MakeStageWithEnvFn<value::SlotId>& makeStage);
+
     void runFast(value::TypeTags inputTag, value::Value inputVal, auto makeStage) {
         auto cctx = makeCompileCtx();
         auto ctx = cctx.get();
-        auto [scanSlot, scanStage] =
-            generateVirtualScan(inputTag, inputVal, kEmptyPlanNodeId, false /*owned*/);
+        auto [scanSlot, scanStage] = generateVirtualScan(
+            value::TagValueMaybeOwned::fromRaw(false, inputTag, inputVal), kEmptyPlanNodeId);
         auto [outputSlot, stage] = makeStage(
             scanSlot, std::move(scanStage), [&]() { return _slotIdGenerator->generate(); });
         auto resultAccessor = prepareTree(ctx, stage.get(), outputSlot);

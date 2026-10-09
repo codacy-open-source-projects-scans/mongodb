@@ -1,5 +1,6 @@
 /**
  * Sharding tests that cover a variety of different possible distributed execution scenarios.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite (e2e/sharding_no_passthrough/search_different_merging_locations.js). The non-search-view failure case is covered by e2e/search/search_meta_var.js.
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {
@@ -29,7 +30,9 @@ const st = stWithMock.st;
 
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 
 function setupCollection(localName) {
     const testColl = testDB.getCollection(localName);
@@ -343,7 +346,14 @@ testMergeAtLocationSearchMeta(owningShardMerge, testColl, false);
 
 // Create a view that does not use $search. Verify that we can detect an invalid use of
 // $$SEARCH_META.
-assert.commandWorked(testDB.createView(collName + "viewColl", testColl.getName(), [{$match: {_id: {$gt: -1000}}}], {}));
+assert.commandWorked(
+    testDB.createView(
+        collName + "viewColl",
+        testColl.getName(),
+        [{$match: {_id: {$gt: -1000}}}],
+        {},
+    ),
+);
 let viewColl = testDB.getCollection(collName + "viewColl");
 testSearchMetaFailure(routerMergeType, viewColl, true);
 testSearchMetaFailure("anyShard", viewColl, true);
@@ -352,7 +362,9 @@ testSearchMetaFailure("localOnly", viewColl, true);
 
 assert(viewColl.drop());
 
-assert.commandWorked(testDB.createView(collName + "viewColl", testColl.getName(), [{$searchMeta: mongotQuery}], {}));
+assert.commandWorked(
+    testDB.createView(collName + "viewColl", testColl.getName(), [{$searchMeta: mongotQuery}], {}),
+);
 viewColl = testDB.getCollection(collName + "viewColl");
 testMergeAtLocationSearchMeta(routerMergeType, testColl, false);
 testMergeAtLocationSearchMeta("anyShard", viewColl, true);

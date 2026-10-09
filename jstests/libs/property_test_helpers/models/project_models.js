@@ -1,14 +1,23 @@
 /*
  * Fast-check models for $project.
  */
-import {assignableFieldArb, dollarFieldArb, fieldArb} from "jstests/libs/property_test_helpers/models/basic_models.js";
+import {
+    getAssignableFieldArb,
+    dollarFieldArb,
+    nonEmptyFieldArb,
+} from "jstests/libs/property_test_helpers/models/basic_models.js";
 import {oneof} from "jstests/libs/property_test_helpers/models/model_utils.js";
 import {fc} from "jstests/third_party/fast_check/fc-3.1.0.js";
 
 // Inclusion/Exclusion projections. {$project: {_id: 1, a: 0}}
 export function getSingleFieldProjectArb(isInclusion, {simpleFieldsOnly = false} = {}) {
-    const projectedFieldArb = simpleFieldsOnly ? assignableFieldArb : fieldArb;
-    return fc.record({field: projectedFieldArb, includeId: fc.boolean()}).map(function ({field, includeId}) {
+    const projectedFieldArb = simpleFieldsOnly
+        ? getAssignableFieldArb(false /*allowEmpty*/)
+        : nonEmptyFieldArb;
+    return fc.record({field: projectedFieldArb, includeId: fc.boolean()}).map(function ({
+        field,
+        includeId,
+    }) {
         const includeIdVal = includeId ? 1 : 0;
         const includeFieldVal = isInclusion ? 1 : 0;
         return {$project: {_id: includeIdVal, [field]: includeFieldVal}};
@@ -22,7 +31,9 @@ export const simpleProjectArb = oneof(
 export function getMultipleFieldProjectArb(isInclusion = true, {simpleFieldsOnly = false} = {}) {
     // Choosing only from assignable fields to avoid projecting both m and m.1.
     const fieldVal = isInclusion ? 1 : 0;
-    const projectedFieldArb = simpleFieldsOnly ? assignableFieldArb : fieldArb;
+    const projectedFieldArb = simpleFieldsOnly
+        ? getAssignableFieldArb(false /*allowEmpty*/)
+        : nonEmptyFieldArb;
     // We cannot have both a field and its subfield in the same $project.
     function hasPathCollision(fields) {
         return fields.some((f) => fields.some((g) => g !== f && g.startsWith(f + ".")));
@@ -30,7 +41,10 @@ export function getMultipleFieldProjectArb(isInclusion = true, {simpleFieldsOnly
     const arbArray = fc
         .uniqueArray(projectedFieldArb, {minLength: 2, maxLength: simpleFieldsOnly ? 4 : 6})
         .filter((fields) => !hasPathCollision(fields));
-    return fc.record({fields: arbArray, includeId: fc.boolean()}).map(function ({fields, includeId}) {
+    return fc.record({fields: arbArray, includeId: fc.boolean()}).map(function ({
+        fields,
+        includeId,
+    }) {
         const projectSpec = {_id: includeId ? 1 : 0};
         for (const field of fields) {
             projectSpec[field] = fieldVal;
@@ -51,4 +65,4 @@ export function getComputedProjectArb(destFieldArb, srcFieldArb) {
         return {$project: {[destField]: srcField}};
     });
 }
-export const computedProjectArb = getComputedProjectArb(fieldArb, dollarFieldArb);
+export const computedProjectArb = getComputedProjectArb(nonEmptyFieldArb, dollarFieldArb);

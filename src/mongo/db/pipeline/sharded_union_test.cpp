@@ -1,39 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -64,6 +34,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -73,7 +44,6 @@
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/db/versioning_protocol/stale_exception.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/s/query/exec/sharded_agg_test_fixture.h"
@@ -88,12 +58,18 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
 
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "cxxabi.h"
+
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 // Use this new name to register these tests under their own unit test suite.
 using ShardedUnionTest = ShardedAggTestFixture;
@@ -116,7 +92,7 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnNetworkError) {
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
+    auto expectedResult = Document{{"_id"sv, "unionResult"sv}};
 
     auto future = launchAsync([&] {
         auto next = unionWith->getNext();
@@ -155,7 +131,7 @@ TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
+    auto expectedResult = Document{{"_id"sv, BSONNULL}, {"count"sv, 1}};
 
     expCtx()->getOperationContext()->setDeadlineAfterNowBy(Seconds(15),
                                                            ErrorCodes::MaxTimeMSExpired);
@@ -206,7 +182,7 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
+    auto expectedResult = Document{{"_id"sv, "unionResult"sv}};
 
     auto future = launchAsync([&] {
         auto next = unionWith->getNext();
@@ -290,7 +266,7 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
+    auto expectedResult = Document{{"_id"sv, BSONNULL}, {"count"sv, 1}};
 
     auto future = launchAsync([&] {
         auto next = unionWith->getNext();
@@ -389,7 +365,7 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
+    auto expectedResult = Document{{"_id"sv, BSONNULL}, {"count"sv, 1}};
 
     auto future = launchAsync([&] {
         auto next = unionWith->getNext();
@@ -469,8 +445,8 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
     exec::agg::MockStage::setSource_forTest(unionWithStage, queue.get());
 
     NamespaceString expectedBackingNs(kTestAggregateNss);
-    auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
-    auto expectToBeFiltered = Document{{"_id"_sd, "notTheUnionResult"_sd}};
+    auto expectedResult = Document{{"_id"sv, "unionResult"sv}};
+    auto expectToBeFiltered = Document{{"_id"sv, "notTheUnionResult"sv}};
 
     auto future = launchAsync([&] {
         auto next = unionWithStage->getNext();
@@ -515,11 +491,13 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
                                          fromjson("{$match: {_id: 'unionResult'}}")};
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return createErrorCursorResponse(
-            Status{ResolvedView{expectedBackingNs, viewPipeline, BSONObj()}, "It was a view!"_sd});
+            Status{ResolvedNamespace{expectedBackingNs, expectedBackingNs, viewPipeline, BSONObj()},
+                   "It was a view!"sv});
     });
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return createErrorCursorResponse(
-            Status{ResolvedView{expectedBackingNs, viewPipeline, BSONObj()}, "It was a view!"_sd});
+            Status{ResolvedNamespace{expectedBackingNs, expectedBackingNs, viewPipeline, BSONObj()},
+                   "It was a view!"sv});
     });
 
     // That error should be incorporated, then we should target both shards. The results should be
@@ -565,7 +543,7 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
     auto queue = makeQueueStage(expCtx());
     exec::agg::MockStage::setSource_forTest(unionWith, queue.get());
 
-    auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 2}};
+    auto expectedResult = Document{{"_id"sv, BSONNULL}, {"count"sv, 2}};
 
     auto readConcernArgs = repl::ReadConcernArgs{repl::ReadConcernLevel::kMajorityReadConcern};
     {

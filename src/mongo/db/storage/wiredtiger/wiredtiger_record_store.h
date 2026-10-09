@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -51,7 +24,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/db/validate/validate_results.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
@@ -61,6 +34,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -113,9 +87,12 @@ public:
         // Setting this larger than 10m can hurt latencies and throughput degradation if this
         // is the oplog. See SERVER-16247.
         std::string memoryPageMax{"10M"};
-        // Any additional configuration parameters for WT_SESSION::create() in the configuration
-        // string format.
-        std::string extraCreateOptions;
+        // Config string for server-wide table configuration parameters.
+        std::string serverParameterOptions;
+        // Config string for per-operation table configuration parameters supplied by the user.
+        std::string customOptions;
+        // Config string for configuration parameters set by the persistence provider.
+        std::string persistenceProviderSettings;
     };
 
     struct Params {
@@ -154,7 +131,7 @@ public:
      * extra settings when 'isOplog' is true.
      */
     static std::string generateCreateString(
-        StringData tableName,
+        std::string_view tableName,
         const WiredTigerRecordStore::WiredTigerTableConfig& wtTableConfig,
         bool isOplog = false);
 
@@ -179,8 +156,8 @@ public:
 
     bool isColdCollection() const override;
 
-    StringData getURI() const {
-        return std::visit([](const auto& v) -> StringData { return v.uri(); }, _container);
+    const std::string& getURI() const {
+        return std::visit([](const auto& v) -> const std::string& { return v.uri(); }, _container);
     }
 
     uint64_t tableId() const {
@@ -198,6 +175,8 @@ public:
                         int infoLevel = 0) const override;
 
     int64_t freeStorageSize(RecoveryUnit& ru) const override;
+
+    boost::optional<int64_t> approxNumLeafPages(RecoveryUnit& ru) const override;
 
     bool updateWithDamagesSupported() const override;
 
@@ -217,7 +196,7 @@ public:
     }
 
     void validate(RecoveryUnit& ru,
-                  const CollectionValidation::ValidationOptions& options,
+                  const collection_validation::ValidationOptions& options,
                   ValidateResults* results) override;
 
     void appendNumericCustomStats(RecoveryUnit& ru,
@@ -256,6 +235,11 @@ public:
      * Sets the new number of records and data size, and flushes the size storer.
      */
     void setSize(long long numRecords, long long dataSize) override;
+
+    int64_t accurateNumRecords() const override;
+    int64_t accurateDataSize() const override;
+    void setAccurateSizeCount(int64_t size, int64_t count) override;
+    void adjustAccurateSizeCount(int64_t sizeDelta, int64_t countDelta) override;
 
     RecordStore::RecordStoreContainer getContainer() override;
 
@@ -398,12 +382,18 @@ protected:
 
     // Protects initialization of the _nextIdNum.
     mutable std::mutex _initNextIdMutex;
-    AtomicWord<long long> _nextIdNum{0};
+    Atomic<long long> _nextIdNum{0};
 
     WiredTigerSizeStorer* _sizeStorer;  // not owned, can be NULL
     std::shared_ptr<WiredTigerSizeStorer::SizeInfo> _sizeInfo;
     bool _tracksSizeAdjustments;
     WiredTigerKVEngineBase* _kvEngine;  // not owned.
+
+    // Accurate size and count, maintained separately from the legacy SizeInfo-based counters.
+    // These counters are populated in ReplicatedFastCountManager::initializeMetadata() during
+    // startup and updated on each WriteUnitOfWork commit.
+    Atomic<int64_t> _accurateDataSize{0};
+    Atomic<int64_t> _accurateNumRecords{0};
 
 private:
     std::variant<WiredTigerIntegerKeyedContainer, WiredTigerStringKeyedContainer> _makeContainer(
@@ -450,14 +440,12 @@ public:
 
     Oplog(WiredTigerKVEngine*, WiredTigerRecoveryUnit&, Params);
 
-    ~Oplog() override;
-
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext*,
                                                     RecoveryUnit&,
                                                     bool forward = true) const override;
 
     void validate(RecoveryUnit&,
-                  const CollectionValidation::ValidationOptions&,
+                  const collection_validation::ValidationOptions&,
                   ValidateResults*) override;
 
     RecordStore::Capped* capped() override;
@@ -476,15 +464,33 @@ public:
 
     StatusWith<Timestamp> getEarliestTimestamp(RecoveryUnit&) override;
 
+    Timestamp getCachedEarliestTimestamp() const override;
+
 private:
     Status _insertRecords(OperationContext*,
                           RecoveryUnit&,
                           std::vector<Record>*,
                           const std::vector<Timestamp>&) override;
 
+    Status _rangeTruncate(OperationContext*,
+                          RecoveryUnit&,
+                          const RecordId& minRecordId = RecordId(),
+                          const RecordId& maxRecordId = RecordId(),
+                          int64_t hintDataSizeIncrement = 0,
+                          int64_t hintNumRecordsIncrement = 0) override;
+
     void _handleTruncateAfter(WiredTigerRecoveryUnit&, const RecordId& lastKeptId) override;
 
-    AtomicWord<int64_t> _maxSize;
+    // A non-null 'after' bounds the search, so the cursor descends to the leaf holding 'after'
+    // instead of stepping over every page an earlier truncate deleted but has not yet reclaimed.
+    StatusWith<Timestamp> _readEarliestTimestamp(RecoveryUnit&, const RecordId& after);
+
+    // The earliest record only ever moves forward within a process lifetime, so a value read
+    // through an older snapshot must not replace a newer cached one.
+    void _advanceCachedEarliestTimestamp(Timestamp ts);
+
+    Atomic<int64_t> _maxSize;
+    Atomic<uint64_t> _cachedEarliestTimestamp{0};
 };
 
 class WiredTigerRecordStoreCursorBase : public SeekableRecordCursor {
@@ -698,4 +704,9 @@ private:
 // WT failpoint to throw write conflict exceptions randomly
 extern FailPoint WTWriteConflictException;
 extern FailPoint WTWriteConflictExceptionForReads;
+
+/**
+ * Registers the fail points above as the write conflict fail points for 'engineName'.
+ */
+void registerWiredTigerWriteConflictFailPoints(std::string_view engineName);
 }  // namespace mongo

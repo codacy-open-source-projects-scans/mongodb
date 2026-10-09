@@ -3,11 +3,14 @@
  * monotonic on time and documents are sorted on time.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   does_not_support_stepdowns,
  *   requires_fcv_63,
  *   requires_timeseries,
+ *   # The test assumes that the collection will remain on a single shard.
+ *   assumes_balancer_off,
  * ]
  */
 import {getAggPlanStage} from "jstests/libs/query/analyze_plan.js";
@@ -18,7 +21,9 @@ ts.drop();
 const coll = db[jsTestName() + "_regular_collection"];
 coll.drop();
 
-assert.commandWorked(db.createCollection(ts.getName(), {timeseries: {timeField: "time", metaField: "m"}}));
+assert.commandWorked(
+    db.createCollection(ts.getName(), {timeseries: {timeField: "time", metaField: "m"}}),
+);
 
 const numTimes = 100;
 const numSymbols = 10;
@@ -87,7 +92,9 @@ assert.commandFailedWithCode(
 assert.commandFailedWithCode(
     db.runCommand({
         aggregate: jsTestName() + "_regular_collection",
-        pipeline: [{$_internalStreamingGroup: {_id: null, count: {$sum: 1}, $monotonicIdFields: ["_id"]}}],
+        pipeline: [
+            {$_internalStreamingGroup: {_id: null, count: {$sum: 1}, $monotonicIdFields: ["_id"]}},
+        ],
         cursor: {},
     }),
     7026708,
@@ -97,7 +104,10 @@ const runTest = function (pipeline, expectedMonotonicIdFields) {
     const explain = assert.commandWorked(ts.explain().aggregate(pipeline));
     const streamingGroupStage = getAggPlanStage(explain, "$_internalStreamingGroup");
     assert.neq(streamingGroupStage, null);
-    assert.eq(streamingGroupStage.$_internalStreamingGroup.$monotonicIdFields, expectedMonotonicIdFields);
+    assert.eq(
+        streamingGroupStage.$_internalStreamingGroup.$monotonicIdFields,
+        expectedMonotonicIdFields,
+    );
 
     const found = ts.aggregate(pipeline).toArray();
     const expected = coll.aggregate(pipeline).toArray();

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,7 +8,7 @@
 
 namespace mongo {
 
-namespace MONGO_MOD_PUB sorter {
+namespace [[MONGO_MOD_PUBLIC]] sorter {
 static constexpr SorterChecksumVersion kLatestChecksumVersion = SorterChecksumVersion::v2;
 }
 
@@ -43,9 +17,26 @@ static constexpr SorterChecksumVersion kLatestChecksumVersion = SorterChecksumVe
  */
 class SorterChecksumCalculator {
 public:
-    SorterChecksumCalculator(SorterChecksumVersion version) : _version(version) {}
+    SorterChecksumCalculator(SorterChecksumVersion version, size_t seed = 0)
+        : _version(version), _checksum(seed), _uncommittedChecksum(seed) {}
 
     void addData(const char* data, size_t size);
+
+    /**
+     * Advances the uncommitted checksum. checksum() does not reflect these bytes until commit().
+     */
+    void addUncommittedData(const char* data, size_t size);
+
+    /**
+     * Promotes the uncommitted checksum to the committed checksum. No-op if nothing is pending.
+     */
+    void commit();
+
+    /**
+     * Discards the uncommitted checksum, reverting to the committed checksum. No-op if nothing is
+     * pending.
+     */
+    void abort();
 
     size_t checksum() const {
         return _checksum;
@@ -56,8 +47,11 @@ public:
     }
 
 private:
+    size_t _advanceChecksum(size_t seed, const char* data, size_t size) const;
+
     const SorterChecksumVersion _version;
     size_t _checksum = 0;
+    size_t _uncommittedChecksum = 0;
 };
 
 }  // namespace mongo

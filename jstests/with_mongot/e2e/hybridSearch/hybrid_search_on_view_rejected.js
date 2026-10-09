@@ -3,7 +3,7 @@
  * $rankFusion/$scoreFusion query has mongot input pipelines. A corresponding test for timeseries
  * collections is in jstests/core/timeseries/query/timeseries_rank_fusion_disallowed.js.
  *
- * @tags: [featureFlagSearchHybridScoringFull, requires_fcv_82]
+ * @tags: [requires_fcv_82]
  */
 
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
@@ -49,11 +49,19 @@ const matchExprViewPipeline = {
 assert.commandWorked(db.createView(matchExprViewName, coll.getName(), [matchExprViewPipeline]));
 const matchExprView = db[matchExprViewName];
 assert.throwsWithCode(
-    () => createSearchIndex(matchExprView, {name: searchIndexName, definition: {"mappings": {"dynamic": true}}}),
+    () =>
+        createSearchIndex(matchExprView, {
+            name: searchIndexName,
+            definition: {"mappings": {"dynamic": true}},
+        }),
     ErrorCodes.BadValue,
 );
 assert.throwsWithCode(
-    () => createSearchIndex(matchExprView, {name: vectorSearchIndexName, definition: {"mappings": {"dynamic": true}}}),
+    () =>
+        createSearchIndex(matchExprView, {
+            name: vectorSearchIndexName,
+            definition: {"mappings": {"dynamic": true}},
+        }),
     ErrorCodes.BadValue,
 );
 

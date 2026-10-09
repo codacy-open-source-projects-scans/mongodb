@@ -1,55 +1,32 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/query/util/deferred.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/modules.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
+using namespace std::literals::string_view_literals;
 
 class Client;
 class OperationContext;
 
-constexpr auto kMetadataDocumentName = "client"_sd;
+constexpr auto kMetadataDocumentName = "client"sv;
+constexpr auto kMetadataUpdateDocumentName = "clientUpdate"sv;
 
 /**
  * The ClientMetadata class is responsible for parsing the client metadata document that is received
@@ -183,7 +160,9 @@ public:
      *     }
      * }
      */
-    static void serialize(StringData driverName, StringData driverVersion, BSONObjBuilder* builder);
+    static void serialize(std::string_view driverName,
+                          std::string_view driverVersion,
+                          BSONObjBuilder* builder);
 
     /**
      * Create a new client metadata document with os information from the ProcessInfo class.
@@ -213,9 +192,9 @@ public:
      *     }
      * }
      */
-    static Status serialize(StringData driverName,
-                            StringData driverVersion,
-                            StringData appName,
+    static Status serialize(std::string_view driverName,
+                            std::string_view driverVersion,
+                            std::string_view appName,
                             BSONObjBuilder* builder);
 
     /**
@@ -275,7 +254,9 @@ public:
      *     "version" : "string"
      * }
      */
-    void setMongoSMetadata(StringData hostAndPort, StringData mongosClient, StringData version);
+    void setMongoSMetadata(std::string_view hostAndPort,
+                           std::string_view mongosClient,
+                           std::string_view version);
 
     /**
      * Get the Application Name for the client metadata document.
@@ -283,14 +264,14 @@ public:
      * Used to log Application Name in slow operation reports, and into system.profile.
      * Return: May be empty.
      */
-    StringData getApplicationName() const;
+    std::string_view getApplicationName() const;
 
     /**
      * Get the Driver Name for the client metadata document.
      *
      * Return: May be empty.
      */
-    StringData getDriverName() const;
+    std::string_view getDriverName() const;
 
     /**
      * Get the BSON Document of the client metadata document. In the example above in the class
@@ -320,10 +301,20 @@ public:
      */
     void logClientMetadata(Client* client) const;
 
+    static void logClientMetadataUpdate(Client* client, const BSONObj& updateDoc);
+
+    static Status validateClientMetadataUpdate(const BSONObj& doc);
+
+    /**
+     * Injects a mock clock into the global clientUpdate log suppressor.
+     * Pass nullptr to restore the system clock. For test use only.
+     */
+    static void setUpdateLogSuppressorClockSource_forTest(ClockSource* cs);
+
     /**
      * Field name for requests that contains client metadata.
      */
-    static StringData fieldName();
+    static std::string_view fieldName();
 
 public:
     /**
@@ -341,13 +332,13 @@ public:
      *
      * Exposed for Unit Test purposes
      */
-    static Status serializePrivate(StringData driverName,
-                                   StringData driverVersion,
-                                   StringData osType,
-                                   StringData osName,
-                                   StringData osArchitecture,
-                                   StringData osVersion,
-                                   StringData appName,
+    static Status serializePrivate(std::string_view driverName,
+                                   std::string_view driverVersion,
+                                   std::string_view osType,
+                                   std::string_view osName,
+                                   std::string_view osArchitecture,
+                                   std::string_view osVersion,
+                                   std::string_view appName,
                                    BSONObjBuilder* builder);
 
 private:
@@ -370,10 +361,12 @@ private:
 
     // See documentWithoutMongosInfo().
     Deferred<BSONObj (*)(const BSONObj&)> _documentWithoutMongosInfo{
-        [](const BSONObj& fullDocument) { return fullDocument.removeField("mongos"); }};
+        [](const BSONObj& fullDocument) {
+            return fullDocument.removeField("mongos");
+        }};
 
     // See hashWithoutMongosInfo().
     Deferred<size_t (*)(const BSONObj&)> _hashWithoutMongos{simpleHash};
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

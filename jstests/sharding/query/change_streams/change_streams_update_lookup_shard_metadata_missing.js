@@ -10,10 +10,6 @@ import "jstests/multiVersion/libs/multi_cluster.js";
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// The UUID consistency check can hit NotPrimaryNoSecondaryOk when it attempts to obtain a list of
-// collections from the shard Primaries through mongoS at the end of this test.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 // Start a new sharded cluster with 2 nodes and obtain references to the test DB and collection.
 const st = new ShardingTest({
     shards: 2,
@@ -25,7 +21,9 @@ let mongosDB = st.s.getDB(jsTestName());
 let shard0 = st.rs0;
 
 // Ensure that the primary for the test database is shard0.
-assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: shard0.getURL()}));
+assert.commandWorked(
+    mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: shard0.getURL()}),
+);
 
 let mongosColl = mongosDB.test;
 
@@ -56,7 +54,9 @@ mongosColl = st.s.getDB(mongosDB.getName())[mongosColl.getName()];
 // Do a {multi:true} update. This will scatter to all shards and update the document on shard0.
 // Because no metadata is loaded, the shard will return a StaleShardVersion and fetch it, and
 // the operation will be retried until it completes successfully.
-assert.soonNoExcept(() => assert.commandWorked(mongosColl.update({_id: 0}, {$set: {updated: true}}, false, true)));
+assert.soonNoExcept(() =>
+    assert.commandWorked(mongosColl.update({_id: 0}, {$set: {updated: true}}, false, true)),
+);
 
 // Resume the change stream with {fullDocument: 'updateLookup'}. Update lookup can successfully
 // identify the document based on its _id alone so long as the _id is unique in the collection, so

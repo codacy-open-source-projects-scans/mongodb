@@ -1,6 +1,6 @@
 /**
  * Tests that commands that accept write concern correctly return write concern errors when run
- * through mongos on timeseries views.
+ * through mongos on timeseries collections.
  *
  * @tags: [
  * assumes_balancer_off,
@@ -13,7 +13,6 @@
  * ]
  */
 
-import {skipTestIfViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     checkWriteConcernBehaviorAdditionalCRUDOps,
@@ -22,7 +21,10 @@ import {
 
 const overrideInternalWriteConcernTimeout = {
     setParameter: {
-        "failpoint.overrideInternalWriteConcernTimeout": tojson({mode: "alwaysOn", data: {wtimeoutMillis: 5000}}),
+        "failpoint.overrideInternalWriteConcernTimeout": tojson({
+            mode: "alwaysOn",
+            data: {wtimeoutMillis: 5000},
+        }),
     },
 };
 const stOtherOptions = {
@@ -33,10 +35,10 @@ const stOtherOptions = {
 };
 
 const st = new ShardingTest({mongos: 1, shards: 2, rs: {nodes: 3}, other: stOtherOptions});
-// TODO SERVER-110187 enable this test for viewless timeseries collection
-skipTestIfViewlessTimeseriesEnabled(st.s.getDB("admin"), () => st.stop());
 
-assert.commandWorked(st.s.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {"level": "local"}}));
+assert.commandWorked(
+    st.s.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {"level": "local"}}),
+);
 
 const precmdShardKeyTimeseriesSubFieldX = function (conn, cluster, dbName, collName) {
     let db = conn.getDB(dbName);
@@ -45,7 +47,11 @@ const precmdShardKeyTimeseriesSubFieldX = function (conn, cluster, dbName, collN
     const shardKey = {"meta.x": 1};
     assert.commandWorked(db.adminCommand({enableSharding: dbName}));
     assert.commandWorked(
-        db.adminCommand({shardCollection: nss, key: shardKey, timeseries: {timeField: "time", metaField: "meta"}}),
+        db.adminCommand({
+            shardCollection: nss,
+            key: shardKey,
+            timeseries: {timeField: "time", metaField: "meta"},
+        }),
     );
 };
 
@@ -56,13 +62,19 @@ const precmdShardKeyTimeseriesSubFieldZ = function (conn, cluster, dbName, collN
     const shardKey = {"meta.z": 1};
     assert.commandWorked(db.adminCommand({enableSharding: dbName}));
     assert.commandWorked(
-        db.adminCommand({shardCollection: nss, key: shardKey, timeseries: {timeField: "time", metaField: "meta"}}),
+        db.adminCommand({
+            shardCollection: nss,
+            key: shardKey,
+            timeseries: {timeField: "time", metaField: "meta"},
+        }),
     );
 };
 
 const precmdUnshardedTimeseries = function (conn, cluster, dbName, collName) {
     let db = conn.getDB(dbName);
-    assert.commandWorked(db.runCommand({create: collName, timeseries: {timeField: "time", metaField: "meta"}}));
+    assert.commandWorked(
+        db.runCommand({create: collName, timeseries: {timeField: "time", metaField: "meta"}}),
+    );
 };
 
 jsTest.log("Testing all commands on a sharded timeseries collection with meta.x shard key.");
@@ -72,7 +84,7 @@ checkWriteConcernBehaviorForAllCommands(
     "sharded" /* clusterType */,
     precmdShardKeyTimeseriesSubFieldX,
     true /* shardedCollection */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 jsTest.log("Testing all commands on a sharded timeseries collection with meta.z shard key.");
@@ -82,7 +94,7 @@ checkWriteConcernBehaviorForAllCommands(
     "sharded" /* clusterType */,
     precmdShardKeyTimeseriesSubFieldZ,
     true /* shardedCollection */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 jsTest.log("Testing all commands on an unsharded timeseries collection.");
@@ -92,7 +104,7 @@ checkWriteConcernBehaviorForAllCommands(
     "sharded" /* clusterType */,
     precmdUnshardedTimeseries,
     false /* shardedCollection */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 jsTest.log(
@@ -106,7 +118,7 @@ checkWriteConcernBehaviorAdditionalCRUDOps(
     precmdShardKeyTimeseriesSubFieldZ,
     true /* shardedCollection */,
     true /* writeWithoutSk */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 jsTest.log(
@@ -120,7 +132,7 @@ checkWriteConcernBehaviorAdditionalCRUDOps(
     precmdShardKeyTimeseriesSubFieldX,
     true /* shardedCollection */,
     false /* writeWithoutSk */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 jsTest.log("Testing additional CRUD commands on an unsharded timeseries collection.");
@@ -132,7 +144,7 @@ checkWriteConcernBehaviorAdditionalCRUDOps(
     precmdUnshardedTimeseries,
     false /* shardedCollection */,
     true /* writeWithoutSk */,
-    true /* limitToTimeseriesViews */,
+    true /* limitToTimeseries */,
 );
 
 st.stop();

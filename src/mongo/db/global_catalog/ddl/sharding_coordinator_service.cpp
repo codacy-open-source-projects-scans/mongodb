@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_service.h"
@@ -49,17 +23,24 @@
 #include "mongo/db/global_catalog/ddl/drop_database_coordinator.h"
 #include "mongo/db/global_catalog/ddl/drop_indexes_coordinator.h"
 #include "mongo/db/global_catalog/ddl/initialize_placement_history_coordinator.h"
+#include "mongo/db/global_catalog/ddl/merge_all_chunks_coordinator.h"
 #include "mongo/db/global_catalog/ddl/merge_chunks_coordinator.h"
 #include "mongo/db/global_catalog/ddl/migration_blocking_operation_coordinator.h"
+#include "mongo/db/global_catalog/ddl/migration_blocking_operation_coordinator_v2.h"
 #include "mongo/db/global_catalog/ddl/move_primary_coordinator.h"
 #include "mongo/db/global_catalog/ddl/refine_collection_shard_key_coordinator.h"
 #include "mongo/db/global_catalog/ddl/rename_collection_coordinator.h"
 #include "mongo/db/global_catalog/ddl/set_allow_migrations_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/global_catalog/ddl/split_chunk_coordinator.h"
 #include "mongo/db/global_catalog/ddl/timeseries_upgrade_downgrade_coordinator.h"
 #include "mongo/db/global_catalog/ddl/untrack_unsplittable_collection_coordinator.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
+#include "mongo/db/s/move_range_coordinator.h"
+#include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/resharding/reshard_collection_coordinator.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
@@ -86,6 +67,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(pauseShardingCoordinatorServiceOnRecovery);
 
@@ -119,6 +101,8 @@ constexpr std::pair<CoordinatorTypeEnum,
          typedInstance<CleanupStructuredEncryptionDataCoordinator>},
         {CoordinatorTypeEnum::kMigrationBlockingOperation,
          typedInstance<MigrationBlockingOperationCoordinator>},
+        {CoordinatorTypeEnum::kMigrationBlockingOperationV2,
+         typedInstance<MigrationBlockingOperationCoordinatorV2>},
         {CoordinatorTypeEnum::kConvertToCapped, typedInstance<ConvertToCappedCoordinator>},
         {CoordinatorTypeEnum::kUntrackUnsplittableCollection,
          typedInstance<UntrackUnsplittableCollectionCoordinator>},
@@ -133,6 +117,9 @@ constexpr std::pair<CoordinatorTypeEnum,
         {CoordinatorTypeEnum::kTimeseriesUpgradeDowngrade,
          typedInstance<TimeseriesUpgradeDowngradeCoordinator>},
         {CoordinatorTypeEnum::kMergeChunks, typedInstance<MergeChunksCoordinator>},
+        {CoordinatorTypeEnum::kMergeAllChunks, typedInstance<MergeAllChunksCoordinator>},
+        {CoordinatorTypeEnum::kSplitChunk, typedInstance<SplitChunkCoordinator>},
+        {CoordinatorTypeEnum::kMoveRange, typedInstance<MoveRangeCoordinator>},
         {CoordinatorTypeEnum::kTestCoordinator, noInstance},
     };
 
@@ -177,11 +164,13 @@ std::shared_ptr<ShardingCoordinator> constructShardingCoordinatorInstance(
 }
 
 
-size_t countCoordinatorDocs(OperationContext* opCtx, const NamespaceString& nss) {
-    constexpr auto kNumCoordLabel = "numCoordinators"_sd;
+size_t countCoordinatorDocs(OperationContext* opCtx,
+                            const NamespaceString& nss,
+                            BSONObj filter = {}) {
+    constexpr auto kNumCoordLabel = "numCoordinators"sv;
     static const auto countStage = BSON("$count" << kNumCoordLabel);
 
-    AggregateCommandRequest aggRequest{nss, {countStage}};
+    AggregateCommandRequest aggRequest{nss, {BSON("$match" << filter), countStage}};
 
     DBDirectClient client(opCtx);
     auto cursor = uassertStatusOKWithContext(
@@ -372,11 +361,16 @@ bool ShardingCoordinatorService::areAllCoordinatorsOfTypeFinished(
 
 ExecutorFuture<void> ShardingCoordinatorService::_rebuildService(
     std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token) {
+    const auto term = repl::ReplicationCoordinator::get(cc().getServiceContext())->getTerm();
     return ExecutorFuture<void>(**executor)
-        .then([this, stateDocNss = getStateDocumentsNS()] {
+        .then([this, stateDocNss = getStateDocumentsNS(), token, term] {
             AllowOpCtxWhenServiceRebuildingBlock allowOpCtxBlock(Client::getCurrent());
             auto opCtx = cc().makeOperationContext();
             const auto numCoordinators = countCoordinatorDocs(opCtx.get(), stateDocNss);
+            const auto numMoveRangeCoordinators = countCoordinatorDocs(
+                opCtx.get(),
+                stateDocNss,
+                BSON("_id.operationType" << idl::serialize(CoordinatorTypeEnum::kMoveRange)));
             if (numCoordinators > 0) {
                 LOGV2(5622500,
                       "Found Sharding Coordinators to rebuild",
@@ -399,6 +393,11 @@ ExecutorFuture<void> ShardingCoordinatorService::_rebuildService(
                         _transitionToRecovered(lg, opCtx.get());
                     }
                 }
+            }
+
+            if (numMoveRangeCoordinators == 0 && !token.isCanceled()) {
+                RangeDeleterService::get(opCtx.get())
+                    ->notifyRecoveryJobComplete(term, RecoveryJob::kMoveRangeCoordinator);
             }
         })
         .onError([this](const Status& status) {
@@ -430,6 +429,9 @@ ShardingCoordinatorService::getOrCreateInstance(OperationContext* opCtx,
     coorMetadata.setDatabaseVersion(
         OperationShardingState::get(opCtx).getDbVersion(coorMetadata.getId().getNss().dbName()));
     coorMetadata.setForwardableOpMetadata(forwardableOpMetadata);
+    coorMetadata.setAuthoritativeMetadataAccessLevel(
+        sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
+            VersionContext::getDecoration(opCtx), fcvRegion->acquireFCVSnapshot()));
     const auto patchedCoorDoc = coorDoc.addFields(coorMetadata.toBSON());
 
     auto [coordinator, created] = [&] {

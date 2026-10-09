@@ -1,35 +1,11 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+
+#include <string_view>
 
 #include <benchmark/benchmark.h>
 
@@ -55,8 +31,8 @@ public:
 
         size_t i = 0;
         for (auto _ : state) {
-            StringData fieldName = PresencePolicy::template selectField<FieldNamePolicy>(i++);
-            benchmark::DoNotOptimize(byteCode.getField_test(type, val, fieldName));
+            std::string_view fieldName = PresencePolicy::template selectField<FieldNamePolicy>(i++);
+            benchmark::DoNotOptimize(byteCode.getField_test({type, val}, fieldName));
         }
     }
 };
@@ -89,17 +65,17 @@ template <int N, char HitChar, char MissChar, char MissCommonPrefixFill>
 struct FieldNamePolicy {
     static_assert(HitChar != MissChar, "miss must differ in first character");
 
-    static StringData hit() {
+    static std::string_view hit() {
         static const std::string s(N, HitChar);
-        return StringData(s);
+        return std::string_view(s);
     }
 
-    static StringData miss() {
+    static std::string_view miss() {
         static const std::string s(N, MissChar);
-        return StringData(s);
+        return std::string_view(s);
     }
 
-    static StringData missCommonPrefix() {
+    static std::string_view missCommonPrefix() {
         // Same first character as hit(), rest differs.
         // For N == 1, a common-prefix miss is impossible (the single character must differ
         // to guarantee a miss), so we fall back to the regular miss.
@@ -112,7 +88,7 @@ struct FieldNamePolicy {
                 return r;
             }
         }();
-        return StringData(s);
+        return std::string_view(s);
     }
 
     static std::string pad(int i) {
@@ -168,13 +144,13 @@ using Fields100TargetFirst = FieldsShape<100, true>;
  */
 
 struct Int32Small {
-    static void append(BSONObjBuilder& bob, StringData fieldName) {
+    static void append(BSONObjBuilder& bob, std::string_view fieldName) {
         bob.append(fieldName, 42);
     }
 };
 
 struct String1KB {
-    static void append(BSONObjBuilder& bob, StringData fieldName) {
+    static void append(BSONObjBuilder& bob, std::string_view fieldName) {
         static const std::string kBuf(1024, 'x');  // 1 KB
         bob.append(fieldName, kBuf);
     }
@@ -186,21 +162,21 @@ struct String1KB {
 
 struct AlwaysHit {
     template <class FieldNamePolicy>
-    static StringData selectField(size_t /*i*/) {
+    static std::string_view selectField(size_t /*i*/) {
         return FieldNamePolicy::hit();
     }
 };
 
 struct AlwaysMiss {
     template <class FieldNamePolicy>
-    static StringData selectField(size_t /*i*/) {
+    static std::string_view selectField(size_t /*i*/) {
         return FieldNamePolicy::miss();
     }
 };
 
 struct Hit90Miss10 {
     template <class FieldNamePolicy>
-    static StringData selectField(size_t i) {
+    static std::string_view selectField(size_t i) {
         // Every 10th lookup is a miss.
         return (i % 10 == 0) ? FieldNamePolicy::miss() : FieldNamePolicy::hit();
     }
@@ -209,14 +185,14 @@ struct Hit90Miss10 {
 // Miss with a common first character — bypasses the first-char skip optimization.
 struct AlwaysMissCommonPrefix {
     template <class FieldNamePolicy>
-    static StringData selectField(size_t /*i*/) {
+    static std::string_view selectField(size_t /*i*/) {
         return FieldNamePolicy::missCommonPrefix();
     }
 };
 
 struct Hit90MissCommonPrefix10 {
     template <class FieldNamePolicy>
-    static StringData selectField(size_t i) {
+    static std::string_view selectField(size_t i) {
         // Every 10th lookup is a common-prefix miss.
         return (i % 10 == 0) ? FieldNamePolicy::missCommonPrefix() : FieldNamePolicy::hit();
     }

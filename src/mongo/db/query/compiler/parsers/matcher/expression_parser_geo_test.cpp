@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/matcher/expression.h"
@@ -42,10 +15,12 @@
 #include "mongo/util/intrusive_counter.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 TEST(MatchExpressionParserGeoNear, ParseNear) {
     BSONObj query = fromjson(
@@ -371,7 +346,7 @@ TEST(ExpressionGeoTest, GeoNear1) {
     std::unique_ptr<GeoNearExpression> nq(new GeoNearExpression);
     ASSERT_OK(parsers::matcher::parseGeoNearExpressionFromBSON(query["loc"].Obj(), *nq));
 
-    GeoNearMatchExpression gne("a"_sd, nq.release(), query);
+    GeoNearMatchExpression gne("a"sv, nq.release(), query);
 
     // We can't match the data but we can make sure it was parsed OK.
     ASSERT_EQUALS(gne.getData().centroid->crs, SPHERE);
@@ -384,7 +359,7 @@ std::unique_ptr<GeoMatchExpression> makeGeoMatchExpression(const BSONObj& locQue
     ASSERT_OK(parsers::matcher::parseGeoExpressionFromBSON(locQuery, *gq));
 
     std::unique_ptr<GeoMatchExpression> ge =
-        std::make_unique<GeoMatchExpression>("a"_sd, gq.release(), locQuery);
+        std::make_unique<GeoMatchExpression>("a"sv, gq.release(), locQuery);
 
     return ge;
 }
@@ -394,7 +369,7 @@ std::unique_ptr<GeoNearMatchExpression> makeGeoNearMatchExpression(const BSONObj
     ASSERT_OK(parsers::matcher::parseGeoNearExpressionFromBSON(locQuery, *nq));
 
     std::unique_ptr<GeoNearMatchExpression> gne =
-        std::make_unique<GeoNearMatchExpression>("a"_sd, nq.release(), locQuery);
+        std::make_unique<GeoNearMatchExpression>("a"sv, nq.release(), locQuery);
 
     return gne;
 }
@@ -518,9 +493,9 @@ TEST(ExpressionGeoTest, SerializeGeoNearUnchanged) {
 
 
 TEST(ExpressionGeoTest, SerializeGeoExpressions) {
-    SerializationOptions opts = {};
+    query_shape::SerializationOptions opts = {};
     opts.transformIdentifiers = true;
-    opts.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+    opts.literalPolicy = query_shape::LiteralSerializationPolicy::kToDebugTypeString;
     {
         BSONObj query = fromjson("{$within: {$box: [{x: 4, y: 4}, [6, 6]]}}");
         std::unique_ptr<GeoMatchExpression> ge(makeGeoMatchExpression(query));
@@ -706,7 +681,8 @@ TEST(ExpressionGeoTest, SerializeWithCRSIFSpecifiedWithChangedOptions) {
         "properties: { name: 'urn:x-mongodb:crs:strictwinding:EPSG:4326' }"
         "}}}}");
     std::unique_ptr<GeoMatchExpression> ge1(makeGeoMatchExpression(query1));
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     auto serialized = ge1->getSerializedRightHandSide(opts);
     ASSERT_BSONOBJ_EQ_AUTO(
         R"({
@@ -785,7 +761,8 @@ template <typename CreateFn>
 void assertRepresentativeShapeIsStable(BSONObj inputExpr,
                                        BSONObj expectedRepresentativeExpr,
                                        CreateFn createFn) {
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     auto ge(createFn(inputExpr));
 
     auto serializedExpr = ge->getSerializedRightHandSide(opts);
@@ -992,7 +969,8 @@ TEST(ExpressionGeoTest, RoundTripSerializeGeoExpressions) {
 
 void assertRepresentativeInternalBucketGeoWithinShapeIsStable(BSONObj inputExpr,
                                                               BSONObj expectedRepresentativeExpr) {
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
 
     auto result = MatchExpressionParser::parse(inputExpr, expCtx);
@@ -1185,7 +1163,8 @@ TEST(ExpressionGeoTest, ParseInternalBucketGeoWithin2dsphereIndexVersionTypeMism
 }
 
 TEST(ExpressionGeoTest, RoundTripSerializeInternalBucketGeoWithinWith2dsphereIndexVersion) {
-    auto opts = SerializationOptions{LiteralSerializationPolicy::kToRepresentativeParseableValue};
+    auto opts = query_shape::SerializationOptions{
+        query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue};
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
 
     // Use BSON() because JSON does not allow field names starting with a digit
@@ -1222,6 +1201,24 @@ TEST(ExpressionGeoTest, RoundTripSerializeInternalBucketGeoWithinWith2dsphereInd
         static_cast<InternalBucketGeoWithinMatchExpression*>(roundTripped.getValue().get());
     ASSERT_TRUE(ibgw->getIndexVersion());
     ASSERT_EQUALS(static_cast<int>(*ibgw->getIndexVersion()), 4);
+}
+
+TEST(ExpressionGeoTest, StrictWindingPolygonInQueryGeometryCollectionRejected) {
+    // A GeometryCollection containing a strict-winding polygon is not a valid query geometry.
+    // supportsProject(SPHERE) must return false for such a collection so that
+    // parseGeoExpressionFromBSON returns BadValue instead of crashing in projectInto().
+    auto assertRejected = [](const char* predicate) {
+        std::string query = std::string("{") + predicate +
+            ": {$geometry: {type: 'GeometryCollection', geometries: ["
+            "{type: 'Polygon', coordinates: [[[0,0],[5,0],[5,5],[0,5],[0,0]]],"
+            " crs: {type: 'name', properties: {name: 'urn:x-mongodb:crs:strictwinding:EPSG:4326'}}}"
+            "]}}}";
+        std::unique_ptr<GeoExpression> gq(new GeoExpression);
+        ASSERT_EQUALS(ErrorCodes::BadValue,
+                      parsers::matcher::parseGeoExpressionFromBSON(fromjson(query), *gq));
+    };
+    assertRejected("$within");
+    assertRejected("$geoIntersects");
 }
 
 }  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/out_stage.h"
 
@@ -49,7 +23,7 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceOutToStageFn(
     tassert(10561501, "expected 'DocumentSourceOut' type", ds);
 
     return make_intrusive<exec::agg::OutStage>(
-        ds->kStageName, ds->getExpCtx(), ds->getOutputNs(), ds->_timeseries, ds->getMergeShardId());
+        ds->kStageName, ds->getExpCtx(), ds->getOutputNs(), ds->_timeseries);
 }
 
 namespace exec {
@@ -80,6 +54,9 @@ void OutStage::doDispose() {
     // Create a new operation context so that any interrupts on the current operation
     // will not affect the dropCollection operation below.
     auto cleanupOpCtx = cc().makeOperationContext();
+    // TODO(SERVER-130397): This cleanup opCtx does not share the query's QueryLifespan, so
+    // decorated state (e.g. resolved query settings) set during $out's main execution is not
+    // visible here.
     DocumentSourceWriteBlock writeBlock(cleanupOpCtx.get());
     auto dropCollectionCmd = [&](NamespaceString dropNs) {
         try {
@@ -171,15 +148,23 @@ void OutStage::retrieveOriginalOutCollInfo() {
         }
 
         if (!originalOptions.isEmpty()) {
-            // When rawData operations are not supported (FCV < 8.2), getIndexSpecs cannot
-            // resolve timeseries indexes through the user-facing namespace, so we must
-            // explicitly target the underlying system.buckets collection.
-            auto outputNsForFetchingIndexes = originalOptions.hasField("timeseries") &&
-                    !gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
-                        VersionContext::getDecoration(pExpCtx->getOperationContext()),
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())
-                ? _outputNs.makeTimeseriesBucketsNamespace()
-                : _outputNs;
+            boost::optional<ScopedRawDataOperation> rawDataGuard;
+
+            auto outputNsForFetchingIndexes = _outputNs;
+            if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+                    VersionContext::getDecoration(pExpCtx->getOperationContext()),
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                // Set isRawDataOperation to ensure getIndexSpecs always propagates rawData:true
+                // even though we are targeting the main namespace.
+                // TODO(SERVER-111600): Remove once AllBinariesSupportRawDataOperations is last LTS
+                rawDataGuard.emplace(pExpCtx->getOperationContext(), true);
+            } else if (originalOptions.hasField("timeseries")) {
+                // When rawData operations are not supported (FCV < 8.2), getIndexSpecs cannot
+                // resolve timeseries indexes through the user-facing namespace, so we must
+                // explicitly target the underlying system.buckets collection.
+                outputNsForFetchingIndexes = _outputNs.makeTimeseriesBucketsNamespace();
+            }
+
             auto originalIndexes =
                 pExpCtx->getMongoProcessInterface()->getIndexSpecs(pExpCtx->getOperationContext(),
                                                                    outputNsForFetchingIndexes,
@@ -206,13 +191,27 @@ void OutStage::createTemporaryCollection() {
     auto createCommandOptions = [&] {
         BSONObjBuilder builder;
         if (_timeseries) {
-            // Append the original collection options without the 'validator' and 'clusteredIndex'
-            // fields since these fields are invalid with the 'timeseries' field and will be
-            // recreated when the timeseries collection is created.
-            !_originalOutCollInfo
-                ? builder << DocumentSourceOutSpec::kTimeseriesFieldName << _timeseries->toBSON()
-                : builder.appendElementsUnique(_originalOutCollInfo->options.removeFields(
-                      StringDataSet{"clusteredIndex", "validator"}));
+            if (!_originalOutCollInfo) {
+                builder << DocumentSourceOutSpec::kTimeseriesFieldName << _timeseries->toBSON();
+            } else {
+                // Append the original collection options without the 'validator' and
+                // 'clusteredIndex' fields since these fields are invalid with the 'timeseries'
+                // field and will be recreated when the timeseries collection is created.
+                auto opts = _originalOutCollInfo->options.removeFields(
+                    StringDataSet{"clusteredIndex", "validator"});
+                // Strip 'fixedBucketing' so it is not passed to the temp collection creation:
+                // an explicit value would be rejected if an FCV transition makes the creation
+                // happen on a legacy timeseries path.
+                // NOTE: Omitting 'fixedBucketing' on creation means that a viewless temporary
+                // collection gets the default ('fixedBucketing: true') applied at creation time.
+                // TODO(SERVER-128579): Revisit whether to preserve the target's fixedBucketing
+                // value once 9.0 becomes last LTS and viewful timeseries no longer exist.
+                auto tsElem = opts["timeseries"];
+                BSONObjBuilder b;
+                b.appendElementsUnique(opts.removeField("timeseries"));
+                b.append("timeseries", tsElem.Obj().removeField("fixedBucketing"));
+                builder.appendElementsUnique(b.obj());
+            }
         } else if (_originalOutCollInfo) {
             builder.appendElementsUnique(_originalOutCollInfo->options);
         }
@@ -226,8 +225,9 @@ void OutStage::createTemporaryCollection() {
             return ShardId(fpTarget.getData()["shardId"].String());
         } else {
             // If the output collection exists, we should create the temp collection on the shard
-            // that owns the output collection.
-            return _mergeShardId;
+            // that owns the output collection. Otherwise, it's created on the DB primary shard.
+            return pExpCtx->getMongoProcessInterface()->determineSpecificMergeShard(
+                pExpCtx->getOperationContext(), _outputNs);
         }
     }();
 
@@ -330,6 +330,7 @@ void OutStage::createTemporaryCollection() {
     // Copy the indexes of the output collection to the temp collection.
     try {
         auto targetNsForCreateIndex = _tempNs;
+        boost::optional<ScopedRawDataOperation> rawDataGuard;
         if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
                 VersionContext::getDecoration(pExpCtx->getOperationContext()),
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -337,7 +338,7 @@ void OutStage::createTemporaryCollection() {
             // the fields of the bucket documents, we need to perform the recreation of those
             // indexes on the temp collection as a rawData operation to avoid erroneously
             // translating the indexes a second time.
-            isRawDataOperation(pExpCtx->getOperationContext()) = true;
+            rawDataGuard.emplace(pExpCtx->getOperationContext(), true);
 
             if (_outIsLegacyTimeseries) {
                 // If we can use rawData then we always use the main timeseries namespace, never the
@@ -348,9 +349,6 @@ void OutStage::createTemporaryCollection() {
 
         pExpCtx->getMongoProcessInterface()->createIndexesOnEmptyCollection(
             pExpCtx->getOperationContext(), targetNsForCreateIndex, _originalOutCollInfo->indexes);
-
-        // Reset rawData to false for the rest of the operation
-        isRawDataOperation(pExpCtx->getOperationContext()) = false;
     } catch (DBException& ex) {
         ex.addContext("Copying indexes for $out failed");
         throw;
@@ -434,18 +432,11 @@ void OutStage::initialize() {
                         _commonStats.stageTypeStr),
             !_originalOutCollInfo || _originalOutCollInfo->options["capped"].eoo());
 
-    uassert(7406100,
-            "$out to time-series collections is only supported on FCV greater than or equal to 7.1",
-            feature_flags::gFeatureFlagAggOutTimeseries.isEnabled() || !_timeseries);
-
     createTemporaryCollection();
 }
 
 void OutStage::finalize() {
     DocumentSourceWriteBlock writeBlock(pExpCtx->getOperationContext());
-    uassert(7406101,
-            "$out to time-series collections is only supported on FCV greater than or equal to 7.1",
-            feature_flags::gFeatureFlagAggOutTimeseries.isEnabled() || !_timeseries);
 
     // Rename the temporary collection to the namespace the user requested, and drop the target
     // collection if $out is writing to a collection that exists.
@@ -669,8 +660,19 @@ std::shared_ptr<TimeseriesOptions> OutStage::validateTimeseries() {
             "Cannot create a time-series collection from a non time-series collection or view.",
             targetTSOpts || !_originalOutCollInfo);
 
+    // 'fixedBucketing' is not allowed in the $out spec.
+    uassert(ErrorCodes::InvalidOptions,
+            "the 'fixedBucketing' option is not allowed in $out",
+            !_timeseries->getFixedBucketing().has_value());
+
     // If the user did specify 'timeseries' options and the target namespace is a time-series
     // collection, then the time-series options should match.
+    // 'fixedBucketing' value in the target collection must be excluded from the check: the $out
+    // spec cannot specify it (rejected above) and the replacement collection does not have to
+    // preserve the target's value (it takes the creation-time default).
+    if (targetTSOpts) {
+        targetTSOpts->setFixedBucketing(OptionalBool{});
+    }
     uassert(7406103,
             str::stream() << "Time-series options inputted must match the existing time-series "
                              "collection. Received: "

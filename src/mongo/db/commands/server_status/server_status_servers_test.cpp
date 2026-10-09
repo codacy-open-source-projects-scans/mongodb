@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/commands/db_command_test_fixture.h"
@@ -39,14 +13,39 @@
 #include "mongo/otel/metrics/metrics_service.h"
 #include "mongo/otel/metrics/metrics_test_util.h"
 #include "mongo/s/service_entry_point_router_role.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/unittest.h"
 
 #include <cstdint>
+#include <string>
+#include <string_view>
 
 #include <fmt/format.h>
 
 namespace mongo {
 namespace {
+
+using otel::metrics::MetricName;
+using otel::metrics::MetricNames;
+
+/**
+ * Verifies that the provided values have not been used in this test file. Since this test is
+ * testing static objects, reusing values will result in cross-test contamination. Resetting those
+ * static objects is non-trivial as other parts of the test fixtures may rely on them being static
+ * to work correctly.
+ *
+ * TODO SERVER-125804: Remove these and make these tests simpler.
+ */
+MetricName verifyNotUsedInTest(MetricName name) {
+    static stdx::unordered_set<std::string_view> usedNames;
+    invariant(usedNames.insert(name.getName()).second);
+    return name;
+}
+std::string verifyPathNotUsedInTest(std::string path) {
+    static stdx::unordered_set<std::string> usedPaths;
+    invariant(usedPaths.insert(path).second);
+    return path;
+}
 
 class ServerStatusServersTest : public DBCommandTestFixture {
 public:
@@ -55,23 +54,14 @@ public:
     // serverStatus command, which includes a SpillWiredTigerServerStatusSection that requires
     // the spill engine to be initialized.
     ServerStatusServersTest() : DBCommandTestFixture(Options{}.enableSpillEngine()) {}
-
-    void setUp() override {
-        DBCommandTestFixture::setUp();
-    }
-
-    void tearDown() override {
-        otel::metrics::MetricsService::instance().clearForTests();
-        DBCommandTestFixture::tearDown();
-    }
 };
 
 TEST_F(ServerStatusServersTest, IncludeUnderMetricsSection) {
     auto& metricsService = otel::metrics::MetricsService::instance();
     otel::metrics::CounterOptions options{
-        .serverStatusOptions = otel::metrics::ServerStatusOptions{.dottedPath = "test.metric1",
-                                                                  .role = ClusterRole::None}};
-    auto& counter = metricsService.createInt64Counter(otel::metrics::MetricNames::kTest1,
+        .serverStatusOptions = otel::metrics::ServerStatusOptions{
+            .dottedPath = verifyPathNotUsedInTest("test.metric1"), .role = ClusterRole::None}};
+    auto& counter = metricsService.createInt64Counter(verifyNotUsedInTest(MetricNames::kTest1),
                                                       "description",
                                                       otel::metrics::MetricUnit::kSeconds,
                                                       options);
@@ -88,7 +78,7 @@ TEST_F(ServerStatusServersTest, ExcludeWhenServerStatusOptionsNotSet) {
     otel::metrics::CounterOptions options{};
     ASSERT_FALSE(options.serverStatusOptions.has_value());
 
-    auto& counter = metricsService.createInt64Counter(otel::metrics::MetricNames::kTest1,
+    auto& counter = metricsService.createInt64Counter(verifyNotUsedInTest(MetricNames::kTest2),
                                                       "description",
                                                       otel::metrics::MetricUnit::kSeconds,
                                                       options);
@@ -109,16 +99,13 @@ public:
         ReadWriteConcernDefaults::create(getService(), _lookupMock.getFetchDefaultsFn());
     }
 
-    void tearDown() override {
-        otel::metrics::MetricsService::instance().clearForTests();
-        ServiceContextTest::tearDown();
-    }
-
 protected:
     otel::metrics::Counter<int64_t>& createCounter(otel::metrics::MetricsService& metricsService,
                                                    otel::metrics::MetricName metricName,
                                                    std::string dottedPath,
                                                    ClusterRole role) {
+        verifyNotUsedInTest(metricName);
+        verifyPathNotUsedInTest(dottedPath);
         return metricsService.createInt64Counter(metricName,
                                                  "description",
                                                  otel::metrics::MetricUnit::kSeconds,
@@ -131,7 +118,7 @@ protected:
                                                  });
     }
 
-    BSONObj getMetricsSection(StringData pathPrefix) {
+    BSONObj getMetricsSection(std::string_view pathPrefix) {
         Service* const service = getServiceContext()->getService();
         ServiceContext::UniqueClient client =
             service->makeClient("ServerStatusServersRoleTestFixture");
@@ -174,26 +161,24 @@ class ServerStatusServersRoleShardTest : public virtual service_context_test::Sh
 
 TEST_F(ServerStatusServersRoleShardTest, MergesNoneAndShardMetricTreesExcludesRouter) {
     auto& metricsService = otel::metrics::MetricsService::instance();
-    createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestShardMergeNone,
-                  "test.noneMetric",
-                  ClusterRole::None)
+    createCounter(
+        metricsService, MetricNames::kTestShardMergeNone, "test.noneMetricShard", ClusterRole::None)
         .add(11);
     createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestShardMergeShard,
-                  "test.shardMetric",
+                  MetricNames::kTestShardMergeShard,
+                  "test.shardMetricShard",
                   ClusterRole::ShardServer)
         .add(22);
     createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestShardMergeRouter,
-                  "test.routerMetric",
+                  MetricNames::kTestShardMergeRouter,
+                  "test.routerMetricShard",
                   ClusterRole::RouterServer)
         .add(33);
 
     BSONObj section = getMetricsSection("test");
-    EXPECT_EQ(section.getIntField("noneMetric"), 11);
-    EXPECT_EQ(section.getIntField("shardMetric"), 22);
-    ASSERT_FALSE(section.hasField("routerMetric")) << section.toString();
+    EXPECT_EQ(section.getIntField("noneMetricShard"), 11);
+    EXPECT_EQ(section.getIntField("shardMetricShard"), 22);
+    ASSERT_FALSE(section.hasField("routerMetricShard")) << section.toString();
 }
 
 class ServerStatusServersRoleRouterTest : public virtual service_context_test::RouterRoleOverride,
@@ -208,25 +193,25 @@ class ServerStatusServersRoleRouterTest : public virtual service_context_test::R
 TEST_F(ServerStatusServersRoleRouterTest, MergesNoneAndRouterMetricTreesExcludesShard) {
     auto& metricsService = otel::metrics::MetricsService::instance();
     createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestRouterMergeNone,
-                  "test.noneMetric",
+                  MetricNames::kTestRouterMergeNone,
+                  "test.noneMetricRouter",
                   ClusterRole::None)
         .add(11);
     createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestRouterMergeShard,
-                  "test.shardMetric",
+                  MetricNames::kTestRouterMergeShard,
+                  "test.shardMetricRouter",
                   ClusterRole::ShardServer)
         .add(22);
     createCounter(metricsService,
-                  otel::metrics::MetricNames::kTestRouterMergeRouter,
-                  "test.routerMetric",
+                  MetricNames::kTestRouterMergeRouter,
+                  "test.routerMetricRouter",
                   ClusterRole::RouterServer)
         .add(33);
 
     BSONObj section = getMetricsSection("test");
-    EXPECT_EQ(section.getIntField("noneMetric"), 11);
-    ASSERT_FALSE(section.hasField("shardMetric")) << section.toString();
-    EXPECT_EQ(section.getIntField("routerMetric"), 33);
+    EXPECT_EQ(section.getIntField("noneMetricRouter"), 11);
+    ASSERT_FALSE(section.hasField("shardMetricRouter")) << section.toString();
+    EXPECT_EQ(section.getIntField("routerMetricRouter"), 33);
 }
 
 }  // namespace

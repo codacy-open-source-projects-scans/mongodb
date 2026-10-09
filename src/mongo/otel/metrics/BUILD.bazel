@@ -1,4 +1,5 @@
 load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library", "mongo_cc_unit_test")
+load("//src/mongo/otel:otel_rules.bzl", "OTEL_TARGET_COMPATIBLE_WITH")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -7,11 +8,6 @@ exports_files(
         "*.h",
     ]),
 )
-
-OTEL_TARGET_COMPATIBLE_WITH = select({
-    "//bazel/config:build_otel_enabled": [],
-    "//conditions:default": ["@platforms//:incompatible"],
-})
 
 idl_generator(
     name = "metrics_settings_gen",
@@ -22,11 +18,13 @@ mongo_cc_library(
     name = "metrics_initialization",
     srcs = [
         "metrics_initialization.cpp",
+        "metrics_settings.cpp",
         "metrics_settings_gen",
     ],
     deps = [
         ":otel_metrics_service",
         "//src/mongo/db:server_base",
+        "//src/mongo/otel/utils:bson_to_http_headers",
     ] + select(
         {
             "@//bazel/config:build_otel_enabled": [
@@ -65,6 +63,17 @@ mongo_cc_unit_test(
         ":in_memory_metrics_exporter",
         ":metrics_initialization",
         ":metrics_test_util",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "metrics_settings_test",
+    srcs = [
+        "metrics_settings_test.cpp",
+    ],
+    tags = ["mongo_unittest_first_group"],
+    deps = [
+        ":metrics_initialization",
     ],
 )
 
@@ -124,7 +133,10 @@ mongo_cc_unit_test(
 mongo_cc_library(
     name = "otel_metric_name_validation",
     srcs = ["otel_metric_name_validation.cpp"],
-    deps = ["//src/mongo:base"],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/util:pcre_wrapper",
+    ],
 )
 
 mongo_cc_library(
@@ -378,5 +390,7 @@ test_suite(
         ":otel_metric_name_validation_test",
         ":otel_metric_server_status_adapter_test",
         ":server_status_metric_name_validation_test",
+        "//src/mongo/otel/metrics/instrumentation:disk_metrics_test",
+        "//src/mongo/otel/metrics/instrumentation:system_mount_metrics_test",
     ],
 )

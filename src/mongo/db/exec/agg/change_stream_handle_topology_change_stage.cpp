@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/change_stream_handle_topology_change_stage.h"
 
@@ -39,6 +13,8 @@
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/s/query/exec/establish_cursors.h"
 #include "mongo/s/query/exec/shard_tag.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -85,13 +61,15 @@ bool isShardConfigEvent(const Document& eventDoc) {
         return true;
     }
 
+    using namespace std::literals::string_view_literals;
     // Check whether this event occurred on the config.shards collection.
     auto nsObj = eventDoc[DocumentSourceChangeStream::kNamespaceField];
-    const bool isConfigDotShardsEvent = nsObj["db"_sd].getType() == BSONType::string &&
-        nsObj["db"_sd].getStringData() ==
-            NamespaceString::kConfigsvrShardsNamespace.db(omitTenant) &&
-        nsObj["coll"_sd].getType() == BSONType::string &&
-        nsObj["coll"_sd].getStringData() == NamespaceString::kConfigsvrShardsNamespace.coll();
+    auto nsDB = nsObj["db"sv];
+    auto nsColl = nsObj["coll"sv];
+    const bool isConfigDotShardsEvent = nsDB.getType() == BSONType::string &&
+        nsDB.getStringData() == NamespaceString::kConfigsvrShardsNamespace.db(omitTenant) &&
+        nsColl.getType() == BSONType::string &&
+        nsColl.getStringData() == NamespaceString::kConfigsvrShardsNamespace.coll();
 
     // If it isn't from config.shards, treat it as a normal user event.
     if (!isConfigDotShardsEvent) {
@@ -101,12 +79,12 @@ bool isShardConfigEvent(const Document& eventDoc) {
     // We need to validate that this event hasn't been faked by a user projection in a way that
     // would cause us to tassert. Check the clusterTime field, which is needed to determine the
     // point from which the new shard should start reporting change events.
-    if (eventDoc["clusterTime"].getType() != BSONType::timestamp) {
+    if (eventDoc[DocumentSourceChangeStream::kClusterTimeField].getType() != BSONType::timestamp) {
         return false;
     }
     // Check the fullDocument field, which should contain details of the new shard's name and hosts.
     auto fullDocument = eventDoc[DocumentSourceChangeStream::kFullDocumentField];
-    if (opType.getStringData() == "insert"_sd && fullDocument.getType() != BSONType::object) {
+    if (opType.getStringData() == "insert"sv && fullDocument.getType() != BSONType::object) {
         return false;
     }
 
@@ -117,7 +95,7 @@ bool isShardConfigEvent(const Document& eventDoc) {
 }  // namespace
 
 ChangeStreamHandleTopologyChangeStage::ChangeStreamHandleTopologyChangeStage(
-    StringData stageName, const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
+    std::string_view stageName, const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
     : Stage(stageName, pExpCtx) {}
 
 GetNextResult ChangeStreamHandleTopologyChangeStage::doGetNext() {

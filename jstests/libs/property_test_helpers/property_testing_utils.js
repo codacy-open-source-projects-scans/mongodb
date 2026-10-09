@@ -1,7 +1,10 @@
 /*
  * Utility functions to help run a property-based test in a jstest.
  */
-import {LeafParameter, leafParametersPerFamily} from "jstests/libs/property_test_helpers/models/basic_models.js";
+import {
+    LeafParameter,
+    leafParametersPerFamily,
+} from "jstests/libs/property_test_helpers/models/basic_models.js";
 import {fc} from "jstests/third_party/fast_check/fc-3.1.0.js";
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 
@@ -34,8 +37,14 @@ export function concreteQueryFromFamily(queryShape, leafId) {
     return queryShape;
 }
 
-function createColl(db, coll, isTS = false) {
-    const args = isTS ? {timeseries: {timeField: "t", metaField: "m"}} : {};
+function createColl(db, coll, isClustered, isTS, metaField) {
+    assert(!(isTS && isClustered), "isTS and isClustered cannot both be true", {isTS, isClustered});
+    const args = {};
+    if (isTS) {
+        args.timeseries = {timeField: "t", metaField};
+    } else if (isClustered) {
+        args.clusteredIndex = {key: {_id: 1}, unique: true};
+    }
     assert.commandWorked(db.createCollection(coll.getName(), args));
 }
 
@@ -95,16 +104,21 @@ export function createIndexesForPBT(collection, indexSpecs) {
  *      getQuery(0, 0)
  *      getQuery(0, 1)
  *      ...
- * TODO SERVER-98132 redesign getQuery to be more opaque about how many query shapes and constants
- * there are.
  */
 function runProperty(propertyFn, namespaces, workload, sortArrays) {
     let {collSpec, foreignCollSpec, queries, extraParams} = workload;
     const {controlColl, experimentColl, foreignControlColl, foreignExperimentColl} = namespaces;
 
-    function setUpCollection({collection, docs, isTS = false, indexes = []}) {
+    function setUpCollection({
+        collection,
+        docs,
+        isClustered = false,
+        isTS = false,
+        metaField = "m",
+        indexes = [],
+    }) {
         assertDropCollection(collection.getDB(), collection.getName());
-        createColl(collection.getDB(), collection, isTS);
+        createColl(collection.getDB(), collection, isClustered, isTS, metaField);
         assert.commandWorked(collection.insert(docs));
         createIndexesForPBT(collection, indexes);
     }
@@ -114,7 +128,9 @@ function runProperty(propertyFn, namespaces, workload, sortArrays) {
     setUpCollection({
         collection: experimentColl,
         docs: collSpec.docs,
+        isClustered: TestData.pbtClusteredExperimentColl,
         isTS: collSpec.isTS,
+        metaField: collSpec.metaField,
         indexes: collSpec.indexes,
     });
 
@@ -130,7 +146,9 @@ function runProperty(propertyFn, namespaces, workload, sortArrays) {
         setUpCollection({
             collection: foreignExperimentColl,
             docs: foreignCollSpec.docs,
+            isClustered: TestData.pbtClusteredExperimentColl,
             isTS: foreignCollSpec.isTS,
+            metaField: foreignCollSpec.metaField,
             indexes: foreignCollSpec.indexes,
         });
     }
@@ -147,6 +165,8 @@ function runProperty(propertyFn, namespaces, workload, sortArrays) {
         comp: _resultSetsEqualUnordered,
         // Comparator that sorts arrays within documents before comparing results.
         compSortArrays: _resultSetsEqualUnorderedWithUnorderedArrays,
+        // Comparator that also normalizes numeric values and sorts arrays.
+        compNormalized: _resultSetsEqualNormalized,
         numQueryShapes: queries.length,
         leafParametersPerFamily,
     };
@@ -189,9 +209,23 @@ function reporter(propertyFn, namespaces) {
  * failure, `runProperty` is called again in the reporter, and prints out more details about the
  * failed property.
  */
-export function testProperty(propertyFn, namespaces, workloadModel, numRuns, examples) {
+export function testProperty(
+    propertyFn,
+    namespaces,
+    workloadModel,
+    numRuns,
+    examples,
+    counterexamplePath,
+) {
     assert.eq(typeof propertyFn, "function");
     assert.eq(typeof numRuns, "number");
+
+    if (counterexamplePath) {
+        jsTest.log.warning(
+            "PBT is not running fully — replaying a single counterexample path. " +
+                "Remove the counterexamplePath argument to run the full property test.",
+        );
+    }
 
     const isValidNamespaceKey = (collName) => {
         switch (collName) {
@@ -207,7 +241,14 @@ export function testProperty(propertyFn, namespaces, workloadModel, numRuns, exa
     assert(Object.keys(namespaces).every(isValidNamespaceKey));
 
     const seed = 4;
-    jsTest.log.info("Running property `" + propertyFn.name + "` from test file `" + jsTestName() + "`, seed = " + seed);
+    jsTest.log.info(
+        "Running property `" +
+            propertyFn.name +
+            "` from test file `" +
+            jsTestName() +
+            "`, seed = " +
+            seed,
+    );
     // PBTs can throw (and then catch) exceptions for a few reasons. For example it's hard to model
     // indexes exactly, so we end up trying to create some invalid indexes which throw exceptions.
     // These exceptions make the logs hard to read and can be ignored, so we turn off
@@ -232,7 +273,9 @@ export function testProperty(propertyFn, namespaces, workloadModel, numRuns, exa
             // If it failed for the first time, print that out so we have the first failure available
             // in case shrinking fails.
             if (!passed && alwaysPassed) {
-                jsTest.log.info("The property " + propertyFn.name + " from " + jsTestName() + " failed");
+                jsTest.log.info(
+                    "The property " + propertyFn.name + " from " + jsTestName() + " failed",
+                );
                 jsTest.log.info("Initial inputs **before minimization**");
                 jsTest.log.info(workload);
                 jsTest.log.info("Initial failure details **before minimization**");
@@ -251,7 +294,13 @@ export function testProperty(propertyFn, namespaces, workloadModel, numRuns, exa
             // `runProperty` is called again and more details are exposed.
             return result.passed;
         }),
-        {seed, numRuns, reporter: reporter(propertyFn, namespaces), examples},
+        {
+            seed,
+            numRuns,
+            reporter: reporter(propertyFn, namespaces),
+            examples,
+            ...(counterexamplePath && {path: counterexamplePath}),
+        },
     );
 }
 
@@ -276,6 +325,7 @@ function unoptimize(q) {
  * - execution framework set to classic engine
  * - plan cache disabled
  * - pipeline optimizations disabled
+ * - boolean expressions simplifier disabled
  * Returns a map from the position of the query in the list to the result documents.
  */
 export function runDeoptimized(controlColl, queries) {
@@ -289,21 +339,24 @@ export function runDeoptimized(controlColl, queries) {
             getParameter: 1,
             internalQueryFrameworkControl: 1,
             internalQueryDisablePlanCache: 1,
+            internalQueryEnableBooleanExpressionsSimplifier: 1,
         }),
     );
-
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
             internalQueryFrameworkControl: "forceClassicEngine",
             internalQueryDisablePlanCache: true,
+            internalQueryEnableBooleanExpressionsSimplifier: false,
         }),
     );
-
     try {
         return queries.map((query) => {
             assert(Array.isArray(query.pipeline) && typeof query.options === "object");
-            return controlColl.aggregate(unoptimize(query.pipeline), query.options).toArray();
+            // Strip any hint: the control collection has no indexes, so a hint referencing an
+            // experiment-only index would cause "hint does not correspond to an existing index".
+            const {hint: _hint, ...controlOptions} = query.options;
+            return controlColl.aggregate(unoptimize(query.pipeline), controlOptions).toArray();
         });
     } finally {
         assert.commandWorked(
@@ -311,6 +364,8 @@ export function runDeoptimized(controlColl, queries) {
                 setParameter: 1,
                 internalQueryFrameworkControl: priorSettings.internalQueryFrameworkControl,
                 internalQueryDisablePlanCache: priorSettings.internalQueryDisablePlanCache,
+                internalQueryEnableBooleanExpressionsSimplifier:
+                    priorSettings.internalQueryEnableBooleanExpressionsSimplifier,
             }),
         );
     }

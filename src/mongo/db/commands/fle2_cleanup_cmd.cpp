@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/crypto/encryption_fields_gen.h"
@@ -47,6 +20,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/fle_compact_cleanup_mutex.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -69,6 +43,8 @@
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_bypass.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
@@ -76,6 +52,7 @@
 
 #include <memory>
 #include <set>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -88,6 +65,54 @@
 namespace mongo {
 
 namespace {
+
+auto acquireAndValidateCollections(OperationContext* opCtx,
+                                   CollectionAcquisitionRequests requests) {
+    CollectionOrViewAcquisitionRequests acquisitionRequests;
+    for (auto& request : requests) {
+        if (request.nssOrUUID.isNamespaceString()) {
+            acquisitionRequests.emplace_back(request.nssOrUUID.nss(),
+                                             request.expectedUUID,
+                                             request.placementConcern,
+                                             request.readConcern,
+                                             request.operationType,
+                                             AcquisitionPrerequisites::ViewMode::kCanBeView,
+                                             request.lockAcquisitionDeadline);
+        } else {
+            acquisitionRequests.emplace_back(std::move(request.nssOrUUID),
+                                             request.placementConcern,
+                                             request.readConcern,
+                                             request.operationType,
+                                             AcquisitionPrerequisites::ViewMode::kCanBeView,
+                                             request.lockAcquisitionDeadline);
+        }
+    }
+
+    auto acquisitions =
+        makeAcquisitionMap(acquireCollectionsOrViews(opCtx, acquisitionRequests, MODE_IS));
+    for (const auto& [nss, acq] : acquisitions) {
+        uassert(ErrorCodes::CommandNotSupportedOnView,
+                "Cannot cleanup structured encryption data on a view",
+                !acq.isView());
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Collection '" << nss.toStringForErrorMsg() << "' does not exist",
+                acq.collectionExists());
+    }
+    return acquisitions;
+}
+
+EncryptedStateCollectionsNamespaces validateCleanupRequestAndGetNamespaces(
+    OperationContext* opCtx, const CleanupStructuredEncryptionData& request) {
+    const auto& edcNss = request.getNamespace();
+    auto collections = acquireAndValidateCollections(
+        opCtx,
+        {CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, edcNss, AcquisitionPrerequisites::OperationType::kRead)});
+    const auto& edcCollection = collections.at(edcNss);
+    validateCleanupRequest(request, *edcCollection.getCollectionPtr().get());
+    return uassertStatusOK(EncryptedStateCollectionsNamespaces::createFromDataCollection(
+        *edcCollection.getCollectionPtr().get()));
+}
 
 void createQEClusteredStateCollection(OperationContext* opCtx, const NamespaceString& nss) {
     // Create QE state collection locally. This local collection creation is safe here because we
@@ -158,6 +183,15 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
                           << " must be run through mongos in a sharded cluster",
             !ShardingState::get(opCtx)->enabled());
 
+    // Like storage-level compact, QE cleanup reclaims disk space and is gated behind
+    // allowDeletions. If the block is active with allowDeletions:true, bypass the general write
+    // block so that internal ESC inserts/updates are not rejected by the op observer.
+    auto* writeBlockState = ReplicaSetWriteBlockState::get(opCtx);
+    uassertStatusOK(writeBlockState->checkIfCompactAllowedToStart(opCtx));
+    if (writeBlockState->isReplicaSetWriteBlockingEnabled()) {
+        ReplicaSetWriteBlockBypass::get(opCtx).set(true);
+    }
+
     // Since this command holds an IX lock on the DB and the global lock throughout
     // the lifetime of this operation, setFCV should not be allowed to abort the transaction
     // performing the cleanup. Otherwise, on retry, the transaction may attempt to
@@ -167,35 +201,12 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
 
     const auto& edcNss = request.getNamespace();
 
-    AutoGetDb autoDb(opCtx, edcNss.dbName(), MODE_IX);
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Database '" << edcNss.dbName().toStringForErrorMsg()
-                          << "' does not exist",
-            autoDb.getDb());
-    Lock::CollectionLock edcLock(opCtx, edcNss, MODE_IS);
+    auto [namespaces, scopedCompactCleanupMutex] =
+        acquireFLECompactCleanupMutexWithStableNamespaces(
+            opCtx, [&] { return validateCleanupRequestAndGetNamespaces(opCtx, request); });
 
-    // Validate the request and acquire the relevant namespaces
-    EncryptedStateCollectionsNamespaces namespaces;
-    {
-        auto catalog = CollectionCatalog::get(opCtx);
-
-        // Check the data collection exists and is not a view
-        auto edc = catalog->lookupCollectionByNamespace(opCtx, edcNss);
-        if (!edc) {
-            uassert(ErrorCodes::CommandNotSupportedOnView,
-                    "Cannot cleanup structured encryption data on a view",
-                    !catalog->lookupView(opCtx, edcNss));
-            uasserted(ErrorCodes::NamespaceNotFound,
-                      str::stream()
-                          << "Collection '" << edcNss.toStringForErrorMsg() << "' does not exist");
-        }
-
-        validateCleanupRequest(request, *edc);
-
-        namespaces =
-            uassertStatusOK(EncryptedStateCollectionsNamespaces::createFromDataCollection(*edc));
-    }
-
+    // Register the DDL with the replica set tracker so any local QE state collection DDL remains
+    // visible to metadata synchronization, without taking the replica set DDL locks here.
     ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
         opCtx,
         std::vector<NamespaceString>{namespaces.edcNss,
@@ -204,9 +215,6 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
                                      namespaces.ecocRenameNss,
                                      namespaces.ecocLockNss});
 
-    // Acquire exclusive lock on the associated 'ecoc.lock' namespace to serialize calls
-    // to cleanup and compact on the same EDC namespace.
-    Lock::CollectionLock compactionLock(opCtx, namespaces.ecocLockNss, MODE_X);
 
     LOGV2(7618805, "Cleaning up the encrypted compaction collection", logAttrs(edcNss));
 
@@ -279,14 +287,18 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
         createQEClusteredStateCollection(opCtx, namespaces.ecocNss);
     }
 
+    FLECleanupESCDeleteQueue pq;
     {
-        AutoGetCollection ecocCompact(opCtx, namespaces.ecocRenameNss, MODE_IS);
+        auto collections = acquireAndValidateCollections(
+            opCtx,
+            {CollectionAcquisitionRequest::fromOpCtx(
+                 opCtx, namespaces.ecocRenameNss, AcquisitionPrerequisites::OperationType::kRead),
+             CollectionAcquisitionRequest::fromOpCtx(
+                 opCtx, namespaces.edcNss, AcquisitionPrerequisites::OperationType::kRead)});
 
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "Renamed encrypted compaction collection "
-                              << namespaces.ecocRenameNss.toStringForErrorMsg()
-                              << " no longer exists prior to cleanup",
-                *ecocCompact);
+        // Ensure the EDC collection is still valid
+        validateCleanupRequest(request,
+                               *collections.at(namespaces.edcNss).getCollectionPtr().get());
 
         auto pqMemLimit =
             ServerParameterSet::getClusterParameterSet()
@@ -295,21 +307,30 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
                 .getMaxAnchorCompactionSize();
 
         // Clean up entries for each encrypted field in compactionTokens
-        auto pq = processFLECleanup(opCtx,
-                                    request,
-                                    &getTransactionWithRetriesForMongoD,
-                                    namespaces,
-                                    pqMemLimit,
-                                    &stats.getEsc(),
-                                    &stats.getEcoc());
-
-        // Delete the entries in 'C' from the ESC
-        cleanupESCNonAnchors(
-            opCtx, namespaces.escNss, escDeleteSet, tagsPerDelete, &stats.getEsc());
-
-        // Delete the entries in the priority queue of ESC anchors from the ESC
-        cleanupESCAnchors(opCtx, namespaces.escNss, pq, tagsPerDelete, &stats.getEsc());
+        // Stash any resource before starting the internal transaction and restore them after the
+        // transaction commits
+        StashTransactionResourcesForMultiDocumentTransaction stasher(opCtx);
+        pq = processFLECleanup(opCtx,
+                               request,
+                               &getTransactionWithRetriesForMongoD,
+                               namespaces,
+                               pqMemLimit,
+                               &stats.getEsc(),
+                               &stats.getEcoc());
+        stasher.restoreOnCommit();
+        validateCleanupRequest(request,
+                               *collections.at(namespaces.edcNss).getCollectionPtr().get());
     }
+
+    // processFLECleanup() has fully consumed 'ecoc.compact' and materialized the ESC cleanup work
+    // into 'escDeleteSet' and 'pq'. The remaining cleanup writes only to the ESC, so it does not
+    // need to keep the read acquisition on 'ecoc.compact'.
+
+    // Delete the entries in 'C' from the ESC
+    cleanupESCNonAnchors(opCtx, namespaces.escNss, escDeleteSet, tagsPerDelete, &stats.getEsc());
+
+    // Delete the entries in the priority queue of ESC anchors from the ESC
+    cleanupESCAnchors(opCtx, namespaces.escNss, pq, tagsPerDelete, &stats.getEsc());
 
     // Drop the 'ecoc.compact' collection
     dropQEStateCollection(opCtx, namespaces.ecocRenameNss);
@@ -318,7 +339,6 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
           "Done cleaning up the encrypted compaction collection",
           logAttrs(request.getNamespace()));
 
-    FLEStatusSection::get().updateCleanupStats(stats);
     return stats;
 }
 
@@ -348,7 +368,7 @@ public:
             uassert(ErrorCodes::Unauthorized,
                     "Not authorized to cleanup structured encryption data",
                     as->isAuthorizedForActionsOnResource(
-                        ResourcePattern::forExactNamespace(request().getNamespace()),
+                        ResourcePattern::forDatabaseName(request().getDbName()),
                         ActionType::cleanupStructuredEncryptionData));
         }
 
@@ -365,8 +385,12 @@ public:
         return false;
     }
 
-    std::set<StringData> sensitiveFieldNames() const final {
+    std::set<std::string_view> sensitiveFieldNames() const final {
         return {CleanupStructuredEncryptionData::kCleanupTokensFieldName};
+    }
+
+    bool includeInCommandStats() const final {
+        return false;
     }
 };
 MONGO_REGISTER_COMMAND(CleanupStructuredEncryptionDataCmd).forShard();

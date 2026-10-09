@@ -7,11 +7,13 @@ import "jstests/multiVersion/libs/verify_versions.js";
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// Checking UUID consistency involves talking to a shard node, which in this test is shutdown
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 let options = {
-    shards: [{binVersion: "last-lts"}, {binVersion: "last-lts"}, {binVersion: "latest"}, {binVersion: "latest"}],
+    shards: [
+        {binVersion: "last-lts"},
+        {binVersion: "last-lts"},
+        {binVersion: "latest"},
+        {binVersion: "latest"},
+    ],
     mongos: 1,
     other: {mongosOptions: {binVersion: "last-lts"}},
 };
@@ -70,8 +72,12 @@ assert.eq(2, barColl.count());
  *      shard3 (latest)      -> bar chunk -> shard1 (last-lts)
  */
 
-assert.commandWorked(admin.runCommand({moveChunk: fooNS, find: {a: 10}, to: shards[2]._id, _waitForDelete: true}));
-assert.commandWorked(admin.runCommand({moveChunk: barNS, find: {a: 10}, to: shards[1]._id, _waitForDelete: true}));
+assert.commandWorked(
+    admin.runCommand({moveChunk: fooNS, find: {a: 10}, to: shards[2]._id, _waitForDelete: true}),
+);
+assert.commandWorked(
+    admin.runCommand({moveChunk: barNS, find: {a: 10}, to: shards[1]._id, _waitForDelete: true}),
+);
 assert.eq(
     1,
     fooRecipientColl.count(),
@@ -85,7 +91,8 @@ assert.eq(
 assert.eq(
     2,
     fooColl.count(),
-    "Incorrect number of documents in foo collection. " + "Last-lts -> latest mongod version migration failure.",
+    "Incorrect number of documents in foo collection. " +
+        "Last-lts -> latest mongod version migration failure.",
 );
 assert.eq(
     1,
@@ -100,7 +107,8 @@ assert.eq(
 assert.eq(
     2,
     barColl.count(),
-    "Incorrect number of documents in bar collection. " + "Latest -> last-lts mongod version migration failure.",
+    "Incorrect number of documents in bar collection. " +
+        "Latest -> last-lts mongod version migration failure.",
 );
 
 st.stop();

@@ -33,11 +33,6 @@ export const ShardTransitionUtil = (function () {
                     // ShardNotFound.
                     return true;
                 }
-                if (!res.ok && res.code === ErrorCodes.RemoveShardDrainingInProgress) {
-                    // If orphanCleanupDelaySecs hasn't elapsed yet, the command will fail with
-                    // RemoveShardDrainingInProgress. Keep retrying until the delay elapses.
-                    return false;
-                }
                 assert.commandWorked(res);
                 return res.state == "completed";
             },
@@ -65,7 +60,9 @@ export const ShardTransitionUtil = (function () {
                 return;
             } catch (e) {
                 if (e.code === ErrorCodes.ShardNotFound) {
-                    jsTest.log.info("Ignoring error with transitioning shard, retrying", {error: e});
+                    jsTest.log.info("Ignoring error with transitioning shard, retrying", {
+                        error: e,
+                    });
                     continue;
                 }
 

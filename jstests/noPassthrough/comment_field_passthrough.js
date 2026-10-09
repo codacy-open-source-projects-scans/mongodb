@@ -50,7 +50,10 @@ const impls = {
             );
             // In a sharded environment, the failpoint must be set on mongos and mongod.
             if (conn.s0) {
-                mongosDisableSearchFailpoint = configureFailPoint(conn.s0, "searchReturnEofImmediately");
+                mongosDisableSearchFailpoint = configureFailPoint(
+                    conn.s0,
+                    "searchReturnEofImmediately",
+                );
             }
         }
         const testCase = testObj.testcases[0];
@@ -65,10 +68,19 @@ const impls = {
         }
 
         const command =
-            typeof testObj.command === "function" ? testObj.command(state, testCase.commandArgs) : testObj.command;
+            typeof testObj.command === "function"
+                ? testObj.command(state, testCase.commandArgs)
+                : testObj.command;
         command["comment"] = {comment: true};
         const res = cmdDb.runCommand(command);
-        assert(res.ok == 1 || testCase.expectFail || res.code == ErrorCodes.CommandNotSupported, tojson(res));
+        const expectFail =
+            testCase.expectFail ||
+            (testCase.expectFailWithErrorCodes &&
+                testCase.expectFailWithErrorCodes.includes(res.code));
+        assert(
+            res.ok == 1 || expectFail || res.code == ErrorCodes.CommandNotSupported,
+            tojson(res),
+        );
 
         if (testObj.teardown) {
             testObj.teardown(cmdDb, res);

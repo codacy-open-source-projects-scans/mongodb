@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 
@@ -37,10 +11,12 @@
 #include "mongo/util/str.h"
 
 #include <string>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo::update_oplog_entry {
+using namespace std::literals::string_view_literals;
 BSONObj makeDeltaOplogEntry(const doc_diff::Diff& diff) {
     BSONObjBuilder builder;
     builder.append("$v", static_cast<int>(UpdateOplogEntryVersion::kDeltaV2));
@@ -48,20 +24,39 @@ BSONObj makeDeltaOplogEntry(const doc_diff::Diff& diff) {
     return builder.obj();
 }
 
-boost::optional<BSONObj> extractDiffFromOplogEntry(const BSONObj& opLog) {
-    auto version = opLog["$v"];
-    if (version.ok() &&
-        version.numberInt() == static_cast<int>(UpdateOplogEntryVersion::kDeltaV2)) {
-        auto diff = opLog[kDiffObjectFieldName];
-        if (diff.type() == BSONType::object) {
-            return diff.embeddedObject();
-        }
+BSONObj makeReplacementOplogEntry(const BSONObj& replacement) {
+    // The on-disk representation of an inserted/replaced document always has _id as the first
+    // field (see fixDocumentForInsert()). Mirror that ordering in the oplog entry so that
+    // downstream consumers (e.g. change streams' fullDocument) see the same field order as the
+    // stored document.
+    BSONObjIterator it(replacement);
+    if (!it.more()) {
+        return replacement;
     }
-    return {};
+    BSONElement first = it.next();
+    if (first.fieldNameStringData() == "_id"sv) {
+        return replacement;
+    }
+    BSONElement idElem = replacement["_id"];
+    if (!idElem) {
+        return replacement;
+    }
+
+    BSONObjBuilder builder(replacement.objsize());
+    builder.append(idElem);
+    builder.append(first);
+    while (it.more()) {
+        BSONElement next = it.next();
+        if (next.fieldNameStringData() == "_id"sv) {
+            continue;
+        }
+        builder.append(next);
+    }
+    return builder.obj();
 }
 
 namespace {
-BSONElement extractNewValueForFieldFromV2Entry(const BSONObj& oField, StringData fieldName) {
+BSONElement extractNewValueForFieldFromV2Entry(const BSONObj& oField, std::string_view fieldName) {
     auto diffField = oField[kDiffObjectFieldName];
 
     // Every $v:2 oplog entry should have a 'diff' field that is an object.
@@ -79,14 +74,14 @@ BSONElement extractNewValueForFieldFromV2Entry(const BSONObj& oField, StringData
     return BSONElement();
 }
 
-FieldRemovedStatus isFieldRemovedByV2Update(const BSONObj& oField, StringData fieldName) {
+FieldRemovedStatus isFieldRemovedByV2Update(const BSONObj& oField, std::string_view fieldName) {
     auto diffField = oField[kDiffObjectFieldName];
 
     // Every $v:2 oplog entry should have a 'diff' field that is an object.
     invariant(diffField.type() == BSONType::object);
     doc_diff::DocumentDiffReader reader(diffField.embeddedObject());
 
-    boost::optional<StringData> nextDelete;
+    boost::optional<std::string_view> nextDelete;
     while ((nextDelete = reader.nextDelete())) {
         if (*nextDelete == fieldName) {
             return FieldRemovedStatus::kFieldRemoved;
@@ -114,7 +109,7 @@ UpdateType extractUpdateType(const BSONObj& updateDocument) {
     tasserted(6448500, str::stream() << "Unsupported or missing oplog version, " << vElt);
 }
 
-BSONElement extractNewValueForField(const BSONObj& oField, StringData fieldName) {
+BSONElement extractNewValueForField(const BSONObj& oField, std::string_view fieldName) {
     invariant(fieldName.find('.') == std::string::npos, "field name cannot contain dots");
 
     auto type = extractUpdateType(oField);
@@ -129,7 +124,7 @@ BSONElement extractNewValueForField(const BSONObj& oField, StringData fieldName)
     MONGO_UNREACHABLE;
 }
 
-FieldRemovedStatus isFieldRemovedByUpdate(const BSONObj& oField, StringData fieldName) {
+FieldRemovedStatus isFieldRemovedByUpdate(const BSONObj& oField, std::string_view fieldName) {
     invariant(fieldName.find('.') == std::string::npos, "field name cannot contain dots");
 
     auto type = extractUpdateType(oField);

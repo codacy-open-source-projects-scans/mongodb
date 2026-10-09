@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/vm/vm.h"
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -46,6 +19,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -54,6 +28,7 @@
 
 namespace mongo::sbe {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using TagValue = std::pair<value::TypeTags, value::Value>;
 
@@ -85,7 +60,7 @@ public:
         auto inputAccessor = _env->getAccessor(_inputSlotId);
         for (auto keepRunning : state) {
             for (auto [inputTag, inputVal] : inputs) {
-                inputAccessor->reset(false, inputTag, inputVal);
+                inputAccessor->reset(value::TagValueView{inputTag, inputVal});
                 auto value = vm.run(&code);
             }
             benchmark::ClobberMemory();
@@ -121,15 +96,15 @@ public:
     }
 
     value::SlotId setCollator(const CollatorInterface* collator) {
-        auto collatorSlot = _env->getSlotIfExists("collator"_sd);
+        auto collatorSlot = _env->getSlotIfExists("collator"sv);
         if (collatorSlot) {
             _env->getAccessor(*collatorSlot)
-                ->reset(false,
-                        value::TypeTags::collator,
-                        value::bitcastFrom<const CollatorInterface*>(collator));
+                ->reset(
+                    value::TagValueView{value::TypeTags::collator,
+                                        value::bitcastFrom<const CollatorInterface*>(collator)});
             return *collatorSlot;
         }
-        return _env->registerSlot("collator"_sd,
+        return _env->registerSlot("collator"sv,
                                   value::TypeTags::collator,
                                   value::bitcastFrom<const CollatorInterface*>(collator),
                                   false,
@@ -153,13 +128,13 @@ public:
 private:
     SbeVmBenchmark(std::unique_ptr<RuntimeEnvironment> env)
         : _env(env.get()), _compileCtx(std::move(env)), _random(kSeed) {
-        _env->registerSlot("timeZoneDB"_sd,
+        _env->registerSlot("timeZoneDB"sv,
                            value::TypeTags::timeZoneDB,
                            value::bitcastFrom<TimeZoneDatabase*>(&_timeZoneDB),
                            false,
                            &_slotIdGenerator);
         _inputSlotId =
-            _env->registerSlot("input"_sd, value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
+            _env->registerSlot("input"sv, value::TypeTags::Nothing, 0, false, &_slotIdGenerator);
     }
 
     RuntimeEnvironment* _env;
@@ -184,7 +159,8 @@ BENCHMARK_DEFINE_F(SbeVmBenchmark, BM_IsMember_ArraySet_NoCollator)(benchmark::S
     auto expr = makeE<EFunction>(
         sbe::EFn::kIsMember, makeEs(makeE<EVariable>(inputSlotId()), std::move(arraySetConstant)));
     TagValue searchValue = generateRandomString(state.range(1) /*size*/);
-    value::ValueGuard guard{searchValue.first, searchValue.second};
+    value::TagValueOwned searchValueOwned =
+        value::TagValueOwned::fromRaw(searchValue.first, searchValue.second);
     benchmarkExpression(std::move(expr), {searchValue}, state);
 }
 
@@ -199,7 +175,8 @@ BENCHMARK_DEFINE_F(SbeVmBenchmark, BM_IsMember_ArraySet_Collator)(benchmark::Sta
     auto expr = makeE<EFunction>(
         sbe::EFn::kIsMember, makeEs(makeE<EVariable>(inputSlotId()), std::move(arraySetConstant)));
     TagValue searchValue = generateRandomString(state.range(1) /*size*/);
-    value::ValueGuard guard{searchValue.first, searchValue.second};
+    value::TagValueOwned searchValueOwned =
+        value::TagValueOwned::fromRaw(searchValue.first, searchValue.second);
     benchmarkExpression(std::move(expr), {searchValue}, state);
 }
 

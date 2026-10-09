@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,7 +7,6 @@
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/platform/bits.h"
@@ -57,6 +30,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -74,26 +48,26 @@ namespace mongo {
    exhaustive for example need to check for size too big after
      update $push (append) operation
 */
-MONGO_MOD_PUBLIC const int BSONObjMaxUserSize = 16 * 1024 * 1024;
+[[MONGO_MOD_PUBLIC]] const int BSONObjMaxUserSize = 16 * 1024 * 1024;
 
 /*
    Sometimes we need objects slightly larger - an object in the replication local.oplog
    is slightly larger than a user object for example.
 */
-MONGO_MOD_PUBLIC const int BSONObjMaxInternalSize = BSONObjMaxUserSize + (16 * 1024);
+[[MONGO_MOD_PUBLIC]] const int BSONObjMaxInternalSize = BSONObjMaxUserSize + (16 * 1024);
 
 /**
  * Maximum size of a builder buffer and for BSONObj with BsonLargeSizeTrait. Limiting it to 27 bits
  * because SharedBuffer::Holder might bit pack information. Setting it to 125 MB to have some
  * wiggle room before size crosses 27 bits.
  */
-MONGO_MOD_PUBLIC const int BufferMaxSize = 125 * 1024 * 1024;
+[[MONGO_MOD_PUBLIC]] const int BufferMaxSize = 125 * 1024 * 1024;
 static_assert(BufferMaxSize < (1 << 27));
 
 /**
  * This is the maximum size of a buffer needed for storing a BSON object in a response message.
  */
-MONGO_MOD_PUBLIC const int kOpMsgReplyBSONBufferMaxSize = BSONObjMaxUserSize * 2 + 64 * 1024;
+[[MONGO_MOD_PUBLIC]] const int kOpMsgReplyBSONBufferMaxSize = BSONObjMaxUserSize * 2 + 64 * 1024;
 
 namespace allocator_aware {
 template <class Allocator = std::allocator<void>>
@@ -105,6 +79,11 @@ public:
     SharedBufferAllocator() = default;
     explicit SharedBufferAllocator(const Allocator& allocator) : _buf(allocator) {}
     SharedBufferAllocator(size_t sz, const Allocator& allocator = {}) : _buf(allocator) {
+        massert(13061200,
+                fmt::format("BufBuilder initially requesting {} bytes, past the {}MB limit.",
+                            sz,
+                            BufferMaxSize / (1024 * 1024)),
+                sz <= BufferMaxSize);
         if (sz > 0)
             malloc(sz);
     }
@@ -321,7 +300,7 @@ private:
 };
 
 template <class BufferAllocator>
-class MONGO_MOD_PUBLIC BasicBufBuilder {
+class [[MONGO_MOD_PUBLIC]] BasicBufBuilder {
 public:
     template <typename... AllocatorArgs>
     BasicBufBuilder(AllocatorArgs&&... args)
@@ -430,7 +409,7 @@ public:
     /**
      * Appends the raw bytes of str with no NUL terminator.
      */
-    void appendStrBytes(StringData str) {
+    void appendStrBytes(std::string_view str) {
         str.copy(grow(str.size()), str.size());
     }
 
@@ -442,7 +421,7 @@ public:
      * trick a parser into thinking the string has ended. Use appendCStr() instead for that use
      * case.
      */
-    void appendStrBytesAndNul(StringData str) {
+    void appendStrBytesAndNul(std::string_view str) {
         auto dest = grow(str.size() + 1);
         dest += str.copy(dest, str.size());
         *dest = '\0';
@@ -454,7 +433,7 @@ public:
      *
      * This method is intended to pair with BufReader::readCStr() on the parse side.
      */
-    void appendCStr(StringData str) {
+    void appendCStr(std::string_view str) {
         str::uassertNoEmbeddedNulBytes(str);
         appendStrBytesAndNul(str);
     }
@@ -616,7 +595,7 @@ protected:
 // the extern template declaration.
 extern template class BasicBufBuilder<SharedBufferAllocator>;
 
-class MONGO_MOD_PUBLIC BufBuilder : public BasicBufBuilder<SharedBufferAllocator> {
+class [[MONGO_MOD_PUBLIC]] BufBuilder : public BasicBufBuilder<SharedBufferAllocator> {
 public:
     static constexpr size_t kDefaultInitSizeBytes = 512;
     BufBuilder(size_t initsize = kDefaultInitSizeBytes) : BasicBufBuilder(initsize) {}
@@ -651,7 +630,7 @@ extern template class BasicBufBuilder<
 
 namespace allocator_aware {
 template <class Allocator = std::allocator<void>>
-class MONGO_MOD_PUBLIC BufBuilder : public BasicBufBuilder<SharedBufferAllocator<Allocator>> {
+class [[MONGO_MOD_PUBLIC]] BufBuilder : public BasicBufBuilder<SharedBufferAllocator<Allocator>> {
 public:
     static constexpr size_t kDefaultInitSizeBytes = mongo::BufBuilder::kDefaultInitSizeBytes;
     BufBuilder(size_t size = kDefaultInitSizeBytes, const Allocator& allocator = {})
@@ -678,7 +657,7 @@ public:
 // advantages of the extern template declaration.
 extern template class BasicBufBuilder<SharedBufferFragmentAllocator>;
 
-class MONGO_MOD_PUBLIC PooledFragmentBuilder
+class [[MONGO_MOD_PUBLIC]] PooledFragmentBuilder
     : public BasicBufBuilder<SharedBufferFragmentAllocator> {
 public:
     PooledFragmentBuilder(SharedBufferFragmentBuilder& fragmentBuilder)
@@ -697,7 +676,7 @@ MONGO_STATIC_ASSERT(std::is_move_constructible_v<BufBuilder>);
 // advantages of the extern template declaration.
 extern template class BasicBufBuilder<UniqueBufferAllocator>;
 
-class MONGO_MOD_PUBLIC UniqueBufBuilder : public BasicBufBuilder<UniqueBufferAllocator> {
+class [[MONGO_MOD_PUBLIC]] UniqueBufBuilder : public BasicBufBuilder<UniqueBufferAllocator> {
 public:
     static constexpr size_t kDefaultInitSizeBytes = 512;
     UniqueBufBuilder(size_t initsize = kDefaultInitSizeBytes) : BasicBufBuilder(initsize) {}
@@ -719,7 +698,7 @@ public:
       embedded in some other object.
 */
 template <size_t SZ>
-class MONGO_MOD_PUBLIC StackBufBuilderBase : public BasicBufBuilder<StackAllocator<SZ>> {
+class [[MONGO_MOD_PUBLIC]] StackBufBuilderBase : public BasicBufBuilder<StackAllocator<SZ>> {
 public:
     StackBufBuilderBase() : BasicBufBuilder<StackAllocator<SZ>>() {}
     StackBufBuilderBase(const StackBufBuilderBase&) = delete;
@@ -737,7 +716,7 @@ extern template class StackBufBuilderBase<StackSizeDefault>;
 
 /** std::stringstream deals with locale so this is a lot faster than std::stringstream for UTF8 */
 template <typename Builder>
-class MONGO_MOD_PUBLIC StringBuilderImpl {
+class [[MONGO_MOD_PUBLIC]] StringBuilderImpl {
 public:
     // Sizes are determined based on the number of characters in 64-bit + the trailing '\0'
     static const size_t MONGO_DBL_SIZE = 3 + DBL_MANT_DIG - DBL_MIN_EXP + 1;
@@ -781,9 +760,9 @@ public:
         return *this;
     }
     StringBuilderImpl& operator<<(const char* str) {
-        return *this << StringData(str);
+        return *this << std::string_view(str);
     }
-    StringBuilderImpl& operator<<(StringData str) {
+    StringBuilderImpl& operator<<(std::string_view str) {
         append(str);
         return *this;
     }
@@ -810,10 +789,11 @@ public:
     StringBuilderImpl& operator<<(R (*val)(Args...)) = delete;
 
     void appendDoubleNice(double x) {
+        using namespace std::literals::string_view_literals;
         const int prev = _buf.len();
         const int maxSize = 32;
         char* start = _buf.grow(maxSize);
-        int z = std::isnan(x) ? "nan\0"_sd.copy(start, maxSize) - 1
+        int z = std::isnan(x) ? "nan\0"sv.copy(start, maxSize) - 1
                               : snprintf(start, maxSize, "%.16g", x);
         MONGO_verify(z >= 0);
         MONGO_verify(z < maxSize);
@@ -827,7 +807,7 @@ public:
         memcpy(_buf.grow(len), buf, len);
     }
 
-    void append(StringData str) {
+    void append(std::string_view str) {
         _buf.appendStrBytes(str);
     }
 
@@ -844,8 +824,8 @@ public:
      *
      * WARNING: The view is invalidated when this StringBuilder is modified or destroyed.
      */
-    StringData stringData() const {
-        return StringData(_buf.buf(), _buf.len());
+    std::string_view stringData() const {
+        return std::string_view(_buf.buf(), _buf.len());
     }
 
     /** size of current std::string */
@@ -867,9 +847,9 @@ private:
 
         if (val < T(0)) {
             *this << '-';
-            append(StringData(ItoA(-uint64_t(val))));  // Send the magnitude to ItoA.
+            append(std::string_view(ItoA(-uint64_t(val))));  // Send the magnitude to ItoA.
         } else {
-            append(StringData(ItoA(uint64_t(val))));
+            append(std::string_view(ItoA(uint64_t(val))));
         }
 
         return *this;

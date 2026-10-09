@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/base/status.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/ddl/placement_history_cleaner.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_facet.h"
@@ -49,9 +24,11 @@
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/logv2/log.h"
+#include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/pcre_util.h"
 
 #include <algorithm>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -61,6 +38,7 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(initializePlacementHistoryHangAfterSettingSnapshotReadConcern);
 
 // Index hint that is used for timestamp-based queries. This is necessary because the placement
@@ -291,10 +269,14 @@ AggregateCommandRequest findAllShardsAggRequest(OperationContext* opCtx) {
                                    findAllPipeline->serializeToBson());
 }
 
-void setInitializationTimeOnPlacementHistory(
-    OperationContext* opCtx,
-    Timestamp initializationTime,
-    std::vector<ShardId> placementResponseForPreInitQueries) {
+/*
+ * Persists new initialization metadata within config.placementHistory through two 'internal'
+ * documents identified by 'kConfigsvrPlacementHistoryNamespace' (removing the existing one, if
+ * any).
+ */
+void setInitializationMetadataOnPlacementHistory(OperationContext* opCtx,
+                                                 Timestamp initializationTime,
+                                                 std::vector<ShardId> clusterTopologyAtInitTime) {
     auto transactionChain = [&](const txn_api::TransactionClient& txnClient,
                                 ExecutorPtr txnExec) -> SemiFuture<void> {
         write_ops::DeleteCommandRequest deleteOldMetadata(
@@ -312,7 +294,7 @@ void setInitializationTimeOnPlacementHistory(
 
         write_ops::InsertCommandRequest insertNewMetadata =
             ShardingCatalogManager::buildInsertReqForPlacementHistoryOperationalBoundaries(
-                initializationTime, placementResponseForPreInitQueries);
+                initializationTime, clusterTopologyAtInitTime);
 
         auto insertResponse = txnClient.runCRUDOpSync(insertNewMetadata, {});
         uassertStatusOK(insertResponse.toStatus());
@@ -338,6 +320,67 @@ void setInitializationTimeOnPlacementHistory(
           "Initialization metadata of placement.history have been updated",
           "initializationTime"_attr = initializationTime);
 }
+
+/*
+ * Applies newInitializationTime on the 'timestamp' field of the initialization marker document of
+ * config.placementHistory, definining a new lower operational boundary for the information
+ * contained in such a collection.
+ */
+void bumpInitializationTimeOnPlacementHistory(OperationContext* opCtx,
+                                              Timestamp newInitializationTime) {
+    auto transactionChain = [&](const txn_api::TransactionClient& txnClient,
+                                ExecutorPtr txnExec) -> SemiFuture<void> {
+        // Find & update the initialization doc (identified by the 'marker' namespace and an empty
+        // set of 'shards').
+        auto updateRequest = BatchedCommandRequest::buildUpdateOp(
+            NamespaceString::kConfigsvrPlacementHistoryNamespace,
+            BSON(NamespacePlacementType::kNssFieldName
+                 << NamespaceStringUtil::serialize(
+                        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+                        SerializationContext::stateDefault())
+                 << NamespacePlacementType::kShardsFieldName << BSONArray()),
+            BSON("$set" << BSON(NamespacePlacementType::kTimestampFieldName
+                                << newInitializationTime)),
+            false /* upsert */,
+            true /* multi */);
+
+        auto updateResponse = txnClient.runCRUDOpSync(updateRequest, {});
+        uassertStatusOK(updateResponse.toStatus());
+        // Raise an error in case the operation matched no document (the reset was triggered while
+        // the collection was not yet initialized).
+        if (updateResponse.getN() != 1) {
+            LOGV2_WARNING(
+                10988501,
+                "Unexpected amount of initialization metadata documents found while attempting to "
+                "clean up config.placementHistory",
+                "numInitMetadataDocs"_attr = updateResponse.getN());
+            uasserted(ErrorCodes::IllegalOperation,
+                      "Cannot clean up config.placementHistory when it does not contain the "
+                      "expected initialization metadata");
+        }
+
+        return SemiFuture<void>::makeReady();
+    };
+
+    WriteConcernOptions originalWC = opCtx->getWriteConcern();
+    opCtx->setWriteConcern(WriteConcernOptions{WriteConcernOptions::kMajority,
+                                               WriteConcernOptions::SyncMode::UNSET,
+                                               WriteConcernOptions::kNoTimeout});
+
+    ScopeGuard resetWriteConcernGuard([opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
+
+    auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
+    auto& executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+
+    txn_api::SyncTransactionWithRetries txn(
+        opCtx, executor, nullptr /* resourceYielder */, inlineExecutor);
+    txn.run(opCtx, transactionChain);
+
+    LOGV2(10678201,
+          "Initialization time of placement.history has been bumped",
+          "newInitializationTime"_attr = newInitializationTime);
+}
+
 
 /**
  * Helper class used to do the heavy-lifting for 'ShardingCatalogManager::getHistoricalPlacement()'.
@@ -566,16 +609,16 @@ public:
         //   placementAtInitTime: <arrayofShardIds or null>,
         // }
         const auto isComputedPlacementAccurate =
-            result.getBoolField("isComputedPlacementAccurate"_sd);
+            result.getBoolField("isComputedPlacementAccurate"sv);
 
         // No placement data may be returned if no response may be computed 'atClusterTime' and no
         // approximate data is available from the initialization doc.
-        if (!isComputedPlacementAccurate && result.getField("placementAtInitTime"_sd).isNull()) {
+        if (!isComputedPlacementAccurate && result.getField("placementAtInitTime"sv).isNull()) {
             return HistoricalPlacement{{}, HistoricalPlacementStatus::NotAvailable};
         }
 
-        const StringData sourceField =
-            isComputedPlacementAccurate ? "computedPlacement"_sd : "placementAtInitTime"_sd;
+        const std::string_view sourceField =
+            isComputedPlacementAccurate ? "computedPlacement"sv : "placementAtInitTime"sv;
 
         std::vector<ShardId> shardIds = [&]() {
             // Extract all shard ids from the 'fieldName' field of 'result'. The 'sourceField' field
@@ -823,7 +866,7 @@ private:
 
         auto aggResult = _runLocalCatalogSnapshotQuery(*pipeline, kIndexHintForTimestampQuery);
         if (!aggResult.empty()) {
-            return aggResult.front().getField("timestamp"_sd).timestamp();
+            return aggResult.front().getField("timestamp"sv).timestamp();
         }
         return boost::none;
     }
@@ -840,7 +883,7 @@ private:
         auto sortStage = DocumentSourceSort::create(_expCtx, BSON("timestamp" << -1));
         auto limitStage = DocumentSourceLimit::create(_expCtx, 1);
 
-        constexpr auto kConsistentMetadataAvailable = "consistentMetadataAvailable"_sd;
+        constexpr auto kConsistentMetadataAvailable = "consistentMetadataAvailable"sv;
 
         // b. Reformat the content of the initialization document:
         //  - the 'kConsistentMetadataAvailable' field gives an indication on whether the
@@ -975,8 +1018,8 @@ private:
         std::unique_ptr<Pipeline> initializationDocumentSubPipeline,
         std::unique_ptr<Pipeline> retrievePlacementSubPipeline) const {
 
-        constexpr auto kInitMetadataRetrievalSubPipelineName = "metadataFromInitDoc"_sd;
-        constexpr auto kPlacementRetrievalSubPipelineName = "computedPlacement"_sd;
+        constexpr auto kInitMetadataRetrievalSubPipelineName = "metadataFromInitDoc"sv;
+        constexpr auto kPlacementRetrievalSubPipelineName = "computedPlacement"sv;
 
         // Compose the main aggregation; first, combine the two sub pipelines within a $facets
         // stage...
@@ -1076,7 +1119,7 @@ private:
         tassert(11314301,
                 "expecting placement history initialization point to be present",
                 aggResult.size() == 1);
-        return aggResult.front().getField("timestamp"_sd).timestamp();
+        return aggResult.front().getField("timestamp"sv).timestamp();
     }
 
     // OperationContext used for executing operations. Managed externally, but guaranteed to remain
@@ -1098,33 +1141,6 @@ private:
 };
 
 }  // namespace
-
-Status ShardingCatalogManager::createIndexesForConfigPlacementHistory(OperationContext* opCtx) {
-    // Create a combined index on 'nss' (sorted ascending) and 'timestamp' (sorted descending).
-    // This is an idempotent operation and it won't fail if the index already exists.
-    Status status = createIndexOnConfigCollection(
-        opCtx,
-        NamespaceString::kConfigsvrPlacementHistoryNamespace,
-        BSON(NamespacePlacementType::kNssFieldName
-             << 1 << NamespacePlacementType::kTimestampFieldName << -1),
-        true /*unique*/);
-    if (status.isOK()) {
-        // Create another index with 'timestamp' first (sorted descending), then 'nss' (sorted
-        // ascending). This is necessary to cover queries to the placement history that are querying
-        // by time range. Note that this index does not need to be unique, as the uniqueness of
-        // every {timestamp, nss} combination is already ensured by the first index.
-        // If the creation of the second index fails, we leave the first index in place, as it is
-        // required for uniqueness and thus correctness of the placement history. The index creation
-        // failure will still be reported to the caller, who can retry index creation.
-        status =
-            createIndexOnConfigCollection(opCtx,
-                                          NamespaceString::kConfigsvrPlacementHistoryNamespace,
-                                          BSON(NamespacePlacementType::kTimestampFieldName
-                                               << -1 << NamespacePlacementType::kNssFieldName << 1),
-                                          false /*unique*/);
-    }
-    return status;
-}
 
 write_ops::InsertCommandRequest
 ShardingCatalogManager::buildInsertReqForPlacementHistoryOperationalBoundaries(
@@ -1319,7 +1335,7 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx,
                                               consumeBatchResponse,
                                               resetOnRetriableFailure));
 
-        setInitializationTimeOnPlacementHistory(
+        setInitializationMetadataOnPlacementHistory(
             opCtx, initializationTime, std::move(shardsAtInitializationTime));
     }
 }
@@ -1328,25 +1344,14 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
                                                      const Timestamp& earliestClusterTime) {
     LOGV2(
         7068803, "Cleaning up placement history", "earliestClusterTime"_attr = earliestClusterTime);
+
     /*
      * The method implements the following optimistic approach for data cleanup:
      * 1. Set earliestOpTime as the new initialization time of config.placementHistory;
      * this will have the effect of hiding older(deletable) documents when the collection is queried
      * by the ShardingCatalogClient.
-     * TODO SERVER-108231 validate the code against an empty set of shards and future values for
-     * earliestClusterTime; add tassertions accordingly.
      */
-    auto allShardIds = [&] {
-        const auto clusterPlacementAtEarliestClusterTime =
-            getHistoricalPlacement(opCtx,
-                                   boost::none /*namespace*/,
-                                   earliestClusterTime,
-                                   true /* checkIfPointInTimeIsInFuture */,
-                                   false /* ignoreRemovedShards */);
-        return clusterPlacementAtEarliestClusterTime.getShards();
-    }();
-
-    setInitializationTimeOnPlacementHistory(opCtx, earliestClusterTime, std::move(allShardIds));
+    bumpInitializationTimeOnPlacementHistory(opCtx, earliestClusterTime);
 
     /*
      * 2. Build up and execute the delete request to remove the disposable documents. This
@@ -1435,14 +1440,22 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
     write_ops::DeleteCommandRequest deleteRequest(
         NamespaceString::kConfigsvrPlacementHistoryNamespace);
     deleteRequest.setDeletes(std::move(deleteStatements));
-    uassertStatusOK(
+
+    const auto swResponse =
         _localConfigShard->runCommand(opCtx,
                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                       NamespaceString::kConfigsvrPlacementHistoryNamespace.dbName(),
                                       deleteRequest.toBSON(),
-                                      Shard::RetryPolicy::kIdempotent));
+                                      Shard::RetryPolicy::kIdempotent);
 
-    LOGV2_DEBUG(7068808, 2, "Cleaning up placement history - done deleting entries");
+    BatchedCommandResponse batchedResponse;
+    uassertStatusOK(
+        Shard::CommandResponse::processBatchWriteResponse(swResponse, &batchedResponse));
+
+    LOGV2_DEBUG(7068808,
+                2,
+                "Cleaning up placement history - done deleting entries",
+                "numEntriesDeleted"_attr = batchedResponse.getN());
 }
 
 }  // namespace mongo

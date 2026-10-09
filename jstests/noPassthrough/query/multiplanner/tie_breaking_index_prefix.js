@@ -4,15 +4,16 @@
 
 "use strict";
 
-import {getPlanStages, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
-import {getPlanRankerMode, isPlanCosted} from "jstests/libs/query/cbr_utils.js";
-import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
 
 // Test initialization.
 
-const options = {};
-const conn = MongoRunner.runMongod();
-assert.neq(null, conn, "mongod was unable to start up with options: " + tojson(options));
+// Pin to multiPlanning: this test verifies multiplanner tie-breaking heuristics
+// (internalQueryPlanTieBreakingWithIndexHeuristics), which are irrelevant under CBR.
+// Without the explicit override the server default (kMixed) would invoke CBR sampling
+// for the zero-result query in preferShortestIndexWithComparisonsInFilter.
+const conn = MongoRunner.runMongod({setParameter: {internalQueryPlanRanker: "multiPlanning"}});
+assert.neq(null, conn, "mongod was unable to start up");
 const db = conn.getDB("tie_breaking_index_prefix");
 
 const coll = db.index_prefix;
@@ -79,7 +80,12 @@ function setParamsAndRunCommand(isTieBreakingHeuristicEnabled, filter) {
     return explain;
 }
 
-function assertIndexScan(isTieBreakingHeuristicEnabled, filter, expectedIndexKeyPatterns, explain = null) {
+function assertIndexScan(
+    isTieBreakingHeuristicEnabled,
+    filter,
+    expectedIndexKeyPatterns,
+    explain = null,
+) {
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
@@ -96,11 +102,16 @@ function assertIndexScan(isTieBreakingHeuristicEnabled, filter, expectedIndexKey
     assert.eq(expectedIndexKeyPatterns.length, indexScans.length);
 
     for (let i = 0; i < expectedIndexKeyPatterns.length; ++i) {
-        assert.eq(indexScans[i]["keyPattern"], expectedIndexKeyPatterns[i], tojson(explain));
+        assert.eq(expectedIndexKeyPatterns[i], indexScans[i]["keyPattern"], tojson(explain));
     }
 }
 
-function assertIndexScanWithSort(isTieBreakingHeuristicEnabled, filter, sorting, expectedIndexKeyPatterns) {
+function assertIndexScanWithSort(
+    isTieBreakingHeuristicEnabled,
+    filter,
+    sorting,
+    expectedIndexKeyPatterns,
+) {
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
@@ -194,23 +205,16 @@ function preferShortestIndexWithComparisonsInFilter(indexPruningActive) {
     const filter = {a: {$gt: 1}, b: "hello"};
     assert.commandWorked(coll.createIndexes(indexes));
 
-    // Index pruning would have removed the a/b/c index for us already, so a/b would win.
     if (indexPruningActive) {
+        // Index pruning removes the a/b/c index, so a/b wins regardless of heuristic.
         assertIndexScan(false, filter, [{a: 1, b: 1}]);
+        assertIndexScan(true, filter, [{a: 1, b: 1}]);
     } else {
-        const explain = setParamsAndRunCommand(false, filter);
-
-        // If we fall back to CBR, we will choose the smaller index regardless of whether index pruning is used or not.
-
-        // TODO SERVER-100611: re-enable these tests.
-        // const winningPlan = getWinningPlanFromExplain(explain);
-        // if (isPlanCosted(winningPlan) && !checkSbeFullyEnabled(db)) {
-        //     assertIndexScan(false, filter, [{a: 1, b: 1}], explain);
-        // } else {
-        assertIndexScan(false, filter, [{a: 1, b: 1, c: 1}], explain);
-        // }
+        // Without the tie-breaking heuristic, the multiplanner selects the longer index.
+        // With the heuristic enabled, it prefers the shorter index prefix.
+        assertIndexScan(false, filter, [{a: 1, b: 1, c: 1}]);
+        assertIndexScan(true, filter, [{a: 1, b: 1}]);
     }
-    assertIndexScan(true, filter, [{a: 1, b: 1}]);
 
     for (const index of indexes) {
         assert.commandWorked(coll.dropIndex(index));
@@ -323,7 +327,10 @@ function preferLongestPrefixWithIndexesOfSameLength() {
 // Running tests, with index pruning disabled and then enabled.
 function testWithPruningSetting(indexPruningActive) {
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryPlannerEnableIndexPruning: indexPruningActive}),
+        db.adminCommand({
+            setParameter: 1,
+            internalQueryPlannerEnableIndexPruning: indexPruningActive,
+        }),
     );
 
     preferLongestIndexPrefix();

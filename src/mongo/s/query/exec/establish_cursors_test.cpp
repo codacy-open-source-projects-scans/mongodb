@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/query/exec/establish_cursors.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -43,6 +16,7 @@
 #include "mongo/db/shard_role/resource_yielders.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/unittest.h"
@@ -54,15 +28,19 @@
 #include "mongo/util/uuid.h"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 using executor::RemoteCommandRequest;
 
@@ -273,7 +251,7 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithInvalidMessage) {
     AsyncRequestsSender::ShardHostMap designatedHosts;
     auto shard0Secondary = HostAndPort("SecondaryHostShard0", 12345);
     _targeters[0]->setConnectionStringReturnValue(
-        ConnectionString::forReplicaSet("shard0_rs"_sd, {kTestShardHosts[0], shard0Secondary}));
+        ConnectionString::forReplicaSet("shard0_rs"sv, {kTestShardHosts[0], shard0Secondary}));
     designatedHosts[kTestShardIds[0]] = shard0Secondary;
 
     // Intentionally throw an exception during validation.
@@ -305,7 +283,7 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithInvalidMessage) {
     future.default_timed_get();
 
     // This ensures the fail point has been hit exactly once.
-    failPoint->waitForTimesEntered(failPoint.initialTimesEntered() + 1);
+    failPoint.waitForOneNewEntry();
 }
 
 TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithSuccessWithRoutingContext) {
@@ -352,7 +330,7 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithDesignatedHost) {
     AsyncRequestsSender::ShardHostMap designatedHosts;
     auto shard0Secondary = HostAndPort("SecondaryHostShard0", 12345);
     _targeters[0]->setConnectionStringReturnValue(
-        ConnectionString::forReplicaSet("shard0_rs"_sd, {kTestShardHosts[0], shard0Secondary}));
+        ConnectionString::forReplicaSet("shard0_rs"sv, {kTestShardHosts[0], shard0Secondary}));
     designatedHosts[kTestShardIds[0]] = shard0Secondary;
     auto future = launchAsync([&] {
         auto cursors = establishCursors(operationContext(),
@@ -564,6 +542,82 @@ TEST_F(EstablishCursorsTest, SingleRemoteMaxesOutRetriableErrors) {
     expectKillOperations(1);
 
     future.default_timed_get();
+}
+
+// Verify that the CleanupPool decoration on ServiceContext handles sequential cleanup requests
+// correctly: the first call lazily starts the thread pool, and the second call reuses it without
+// attempting a second startup.
+TEST_F(EstablishCursorsTest, CleanupPoolHandlesSequentialRequests) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj}};
+
+    for (int iteration = 0; iteration < 2; ++iteration) {
+        auto future = launchAsync([&] {
+            ASSERT_THROWS(establishCursors(operationContext(),
+                                           executor(),
+                                           _nss,
+                                           ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                           remotes,
+                                           false),  // allowPartialResults
+                          ExceptionFor<ErrorCodes::HostUnreachable>);
+        });
+
+        for (int i = 0; i < kMaxRetries + 1; ++i) {
+            onCommand([this](const RemoteCommandRequest& request) {
+                ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+                return Status(ErrorCodes::HostUnreachable, "host unreachable");
+            });
+        }
+
+        expectKillOperations(1);
+        future.default_timed_get();
+    }
+}
+
+// Verify that concurrent callers racing to lazily start the CleanupPool decoration only start the
+// underlying thread pool once, and that every scheduled task still runs to completion.
+TEST_F(EstablishCursorsTest, CleanupPoolHandlesConcurrentStartupRace) {
+    constexpr int kNumThreads = 8;
+
+    auto fp = globalFailPointRegistry().find("hangBeforeCleanupPoolStartup");
+    invariant(fp);
+    auto timesEntered = fp->setMode(FailPoint::alwaysOn);
+
+    // Tasks count themselves in on completion. A blocking primitive (e.g. a Barrier) cannot be used
+    // here because the CleanupPool has a single worker thread: a task that blocked waiting for its
+    // peers would stall the only thread, and the remaining tasks would never run.
+    std::mutex mutex;
+    std::condition_variable cv;
+    int completed = 0;
+
+    std::vector<stdx::thread> threads;
+    for (int i = 0; i < kNumThreads; ++i) {
+        threads.emplace_back([&] {
+            scheduleOnCursorCleanupPool_forTest(getServiceContext(), [&](Status) {
+                std::lock_guard lk(mutex);
+                if (++completed == kNumThreads) {
+                    cv.notify_one();
+                }
+            });
+        });
+    }
+
+    // The failpoint hangs each thread after the lock-free running check but before the startup
+    // lock, so waiting for all threads to enter it guarantees they genuinely race on the
+    // check-and-startup logic (rather than running serially) once the failpoint is cleared.
+    fp->waitForTimesEntered(timesEntered + kNumThreads);
+    fp->setMode(FailPoint::off);
+
+    // Wait for every scheduled task to actually run, proving the pool started successfully exactly
+    // once despite the concurrent callers.
+    {
+        std::unique_lock lk(mutex);
+        cv.wait(lk, [&] { return completed == kNumThreads; });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
 }
 
 TEST_F(EstablishCursorsTest, SingleRemoteMaxesOutRetriableErrorsAllowPartialResults) {
@@ -1249,7 +1303,7 @@ TEST_F(EstablishCursorsTest, FailedUnyieldAfterErrorResponse) {
     };
     struct MockResourceYielderFactory : public ResourceYielderFactory {
         std::unique_ptr<ResourceYielder> make(OperationContext* opCtx,
-                                              StringData cmdName) const override {
+                                              std::string_view cmdName) const override {
             return std::make_unique<MockResourceYielder>();
         }
     };
@@ -1439,6 +1493,143 @@ TEST_F(EstablishCursorsTest, CallbackCanceledDoesNotClobberNonRetargetingError) 
     onCommand([this](const RemoteCommandRequest& request) {
         ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
         return createErrorCursorResponse(Status(ErrorCodes::FailedToParse, "failed to parse"));
+    });
+
+    // Both remotes returned errors without establishing a cursor, so no killOperations are needed.
+
+    future.default_timed_get();
+}
+
+TEST_F(EstablishCursorsTest, CallbackCanceledDoesNotClobberRetargetingError) {
+    // Force a non-zero backoff delay so the system-overload retry enters waitUntil(). Without a
+    // non-zero delay the retry happens immediately (no waitUntil) and CallbackCanceled is never
+    // generated by stopRetrying().
+    FailPointEnableBlock setBackoffDelay("setBackoffDelayForTesting", BSON("backoffDelayMs" << 1));
+
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj},
+                                                      {kTestShardIds[1], cmdObj}};
+
+    auto future = launchAsync([&] {
+        // The recoverable retargeting error must be thrown, not the CallbackCanceled produced by
+        // stopRetrying() cancelling the first shard's pending backoff. Otherwise the StaleConfig
+        // refresh-and-retry path is lost and the operation fails with a non-retriable error.
+        ASSERT_THROWS(establishCursors(operationContext(),
+                                       executor(),
+                                       _nss,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       remotes,
+                                       false),  // allowPartialResults
+                      ExceptionFor<ErrorCodes::StaleConfig>);
+    });
+
+    // First remote responds with a system-overload error, registering a waitUntil() retry backoff
+    // on the baton with the cancellation token (see the non-retargeting test for details).
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+        return createErrorSystemOverloaded(ErrorCodes::HostUnreachable);
+    });
+
+    // Second remote responds with StaleConfig (a retargeting error). _handleFailure() stores it as
+    // _maybeFailure (isInterruption=false, from cursor response parsing) and calls stopRetrying(),
+    // which cancels the first remote's pending waitUntil() with CallbackCanceled. That
+    // CallbackCanceled is processed with isInterruption=true; _prioritizeFailures() must keep the
+    // StaleConfig.
+    onCommandThrowStaleConfig(kTestShardIds[1]);
+
+    // Both remotes returned errors without establishing a cursor, so no killOperations are needed.
+
+    future.default_timed_get();
+}
+
+TEST_F(EstablishCursorsTest, RetriableSystemOverloadedDoesNotClobberRetargetingError) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj},
+                                                      {kTestShardIds[1], cmdObj}};
+
+    // Hang in ARS::next once a single remote is left to reply. This guarantees the first remote's
+    // StaleConfig has been fully processed -- so _handleFailure() has already called stopRetrying()
+    // -- before the second remote's overload response is evaluated for retry. Without this barrier
+    // the overload could be retried before stopRetrying() fires, which is the separate
+    // backoff-cancellation path exercised by CallbackCanceledDoesNotClobberRetargetingError.
+    auto fpNext = globalFailPointRegistry().find("hangBeforePollResponse");
+    invariant(fpNext);
+    auto timesHitNext = fpNext->setMode(FailPoint::alwaysOn, 0, BSON("remotesLeft" << 1));
+
+    auto future = launchAsync([&] {
+        // The recoverable StaleConfig must be thrown, not the transient overload error.
+        ASSERT_THROWS(establishCursors(operationContext(),
+                                       executor(),
+                                       _nss,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       remotes,
+                                       false),  // allowPartialResults
+                      ExceptionFor<ErrorCodes::StaleConfig>);
+    });
+
+    // First remote responds with a non-retriable StaleConfig. _handleFailure() stores it as
+    // _maybeFailure and calls stopRetrying().
+    onCommandThrowStaleConfig(kTestShardIds[0]);
+
+    // Wait until ARS::next hangs with one remote left, proving the StaleConfig response (and thus
+    // stopRetrying()) has been processed before the second remote replies.
+    fpNext->waitForTimesEntered(timesHitNext + 1);
+    fpNext->setMode(FailPoint::off);
+
+    // Second remote responds with a retriable system-overload error. It is retryable, but
+    // stopRetrying() has already fired, so the ARS does not retry it; it is surfaced and flows into
+    // _prioritizeFailures() (isInterruption=false, via cursor-response parsing), which must keep
+    // the StaleConfig rather than clobbering it with the overload error.
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+        return createErrorCursorResponse(
+            Status(ErrorCodes::IngressRequestRateLimitExceeded, "rate limited"));
+    });
+
+    // Both remotes returned errors without establishing a cursor, so no killOperations are needed.
+
+    future.default_timed_get();
+}
+
+TEST_F(EstablishCursorsTest, NonRetriableSystemOverloadedDoesClobberRetargetingError) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj},
+                                                      {kTestShardIds[1], cmdObj}};
+
+    // Hang in ARS::next once a single remote is left to reply, guaranteeing the first remote's
+    // StaleConfig has been processed (and stopRetrying() called) before the second remote's
+    // non-retriable error is evaluated for retry. See
+    // RetriableSystemOverloadedDoesNotClobberRetargetingError.
+    auto fpNext = globalFailPointRegistry().find("hangBeforePollResponse");
+    invariant(fpNext);
+    auto timesHitNext = fpNext->setMode(FailPoint::alwaysOn, 0, BSON("remotesLeft" << 1));
+
+    auto future = launchAsync([&] {
+        // The non-retriable system overload error should be returned over the retargeting error.
+        ASSERT_THROWS(establishCursors(operationContext(),
+                                       executor(),
+                                       _nss,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       remotes,
+                                       false),  // allowPartialResults
+                      ExceptionFor<ErrorCodes::RateLimitExceeded>);
+    });
+
+    // First remote responds with StaleConfig. _handleFailure() stores it and calls stopRetrying().
+    onCommandThrowStaleConfig(kTestShardIds[0]);
+
+    // Wait until ARS::next hangs with one remote left, proving stopRetrying() has fired before the
+    // second remote replies.
+    fpNext->waitForTimesEntered(timesHitNext + 1);
+    fpNext->setMode(FailPoint::off);
+
+    // Second remote responds with a non-retriable, overload error. stopRetrying() has already
+    // fired, so the ARS does not retry it; it flows into _prioritizeFailures()
+    // (isInterruption=false), which will prioritize the overload error.
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+        return createErrorCursorResponse(
+            Status(ErrorCodes::RateLimitExceeded, "rate limit exceeded"));
     });
 
     // Both remotes returned errors without establishing a cursor, so no killOperations are needed.

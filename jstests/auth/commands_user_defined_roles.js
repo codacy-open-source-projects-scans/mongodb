@@ -9,7 +9,12 @@ in jstests/auth/lib/commands_lib.js.
 
 */
 
-import {adminDbName, authCommandsLib, authErrCode, commandNotSupportedCode} from "jstests/auth/lib/commands_lib.js";
+import {
+    adminDbName,
+    authCommandsLib,
+    authErrCode,
+    commandNotSupportedCode,
+} from "jstests/auth/lib/commands_lib.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {MongotMock} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -60,7 +65,12 @@ function testProperAuthorization(conn, t, testcase, privileges) {
     const res = cmdDb.runCommand(command);
 
     let out = "";
-    if (!testcase.expectFail && res.ok != 1 && res.code != commandNotSupportedCode) {
+    if (
+        !testcase.expectFail &&
+        !testcase.expectFailWithErrorCodes &&
+        res.ok != 1 &&
+        res.code != commandNotSupportedCode
+    ) {
         // don't error if the test failed with code commandNotSupported since
         // some storage engines don't support some commands.
         out =
@@ -70,6 +80,18 @@ function testProperAuthorization(conn, t, testcase, privileges) {
             testcase.runOnDb +
             " with privileges " +
             tojson(privileges);
+    } else if (res.ok != 1 && testcase.expectFailWithErrorCodes) {
+        if (!testcase.expectFailWithErrorCodes.includes(res.code)) {
+            out =
+                "expected failure with code(s) " +
+                tojson(testcase.expectFailWithErrorCodes) +
+                " but got " +
+                tojson(res) +
+                " on db " +
+                testcase.runOnDb +
+                " with privileges " +
+                tojson(privileges);
+        }
     } else if (testcase.expectFail && res.code == authErrCode) {
         out =
             "expected authorization success" +
@@ -250,7 +272,11 @@ function createUsers(conn) {
 
     assert.commandWorked(adminDb.runCommand({createRole: testRole, privileges: [], roles: []}));
     assert.commandWorked(
-        adminDb.runCommand({createUser: testUser, pwd: "password", roles: [{role: testRole, db: adminDbName}]}),
+        adminDb.runCommand({
+            createUser: testUser,
+            pwd: "password",
+            roles: [{role: testRole, db: adminDbName}],
+        }),
     );
 
     adminDb.logout();

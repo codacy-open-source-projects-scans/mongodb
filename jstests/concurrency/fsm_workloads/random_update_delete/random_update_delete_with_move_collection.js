@@ -20,6 +20,7 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {ShardingTopologyHelpers} from "jstests/concurrency/fsm_workload_helpers/catalog_and_routing/sharding_topology_helpers.js";
 import {randomUpdateDelete} from "jstests/concurrency/fsm_workload_modifiers/random_update_delete.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const $baseConfig = {
     threadCount: 5,
@@ -43,7 +44,21 @@ const $baseConfig = {
 
         // The runner will implicitly shard the collection if we are in a sharded cluster, so
         // unshard it.
-        assert.commandWorked(db.adminCommand({unshardCollection: `${db}.${collName}`}));
+        const ns = `${db}.${collName}`;
+        const result = db.adminCommand({unshardCollection: ns});
+        if (!result.ok) {
+            // When implicit sharding is skipped, the collection may not have been sharded,
+            // so the database may not be registered in the cluster catalog. In that case the
+            // collection is already effectively unsharded and no action is needed.
+            const collectionWasAlreadyUntracked =
+                result.code === ErrorCodes.NamespaceNotFound &&
+                FixtureHelpers.maySkipImplicitSharding() &&
+                FixtureHelpers.isUntracked(db.getCollection(collName));
+            // Ignore the error if the collection was already untracked. Otherwise, force the test to fail.
+            if (!collectionWasAlreadyUntracked) {
+                assert.commandWorked(result);
+            }
+        }
         const bulk = db[collName].initializeUnorderedBulkOp();
         for (let i = 0; i < this.threadCount * 200; ++i) {
             bulk.insert({_id: i});
@@ -56,7 +71,8 @@ const $baseConfig = {
                 const res = assert.commandWorked(
                     db.adminCommand({
                         setParameter: 1,
-                        reshardingMinimumOperationDurationMillis: this.originalReshardingMinimumOperationDurationMillis,
+                        reshardingMinimumOperationDurationMillis:
+                            this.originalReshardingMinimumOperationDurationMillis,
                     }),
                 );
             });
@@ -101,7 +117,9 @@ export const $config = extendWorkload($partialConfig, function ($config, $super)
 
         if (!result.ok) {
             if (result.code === ErrorCodes.NamespaceNotFound) {
-                jsTestLog(`Move collection result for ${namespace} to shard ${toShard}: ${tojson(result)}`);
+                jsTestLog(
+                    `Move collection result for ${namespace} to shard ${toShard}: ${tojson(result)}`,
+                );
                 return;
             }
         }
@@ -111,12 +129,19 @@ export const $config = extendWorkload($partialConfig, function ($config, $super)
         this.moveCollectionsPerformed++;
     };
 
-    $config.states.untrackUnshardedCollection = function untrackUnshardedCollection(db, collName, connCache) {
+    $config.states.untrackUnshardedCollection = function untrackUnshardedCollection(
+        db,
+        collName,
+        connCache,
+    ) {
         const namespace = `${db}.${collName}`;
         jsTestLog(`Attempting to untrack collection ${namespace}`);
         const res = db.adminCommand({untrackUnshardedCollection: namespace});
         if (!res.ok) {
-            if (res.code === ErrorCodes.OperationFailed || res.code === ErrorCodes.InvalidNamespace) {
+            if (
+                res.code === ErrorCodes.OperationFailed ||
+                res.code === ErrorCodes.InvalidNamespace
+            ) {
                 jsTestLog(`Untrack collection result for ${namespace}: ${tojson(res)}`);
                 return;
             }

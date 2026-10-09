@@ -8,7 +8,12 @@
  * is between 0-99, and the value of x is always 1.
  *
  * @tags: [
+ *   # Relies on a snapshot find that spans a getMore.
+ *   assumes_no_implicit_cursor_exhaustion,
  *   does_not_support_causal_consistency,
+ *   # Stepdown suites force defaultReadConcernLevel=majority for network-error retryability, which
+ *   # conflicts with this test's explicit snapshot readConcern.
+ *   does_not_support_stepdowns,
  *   requires_majority_read_concern,
  *   requires_replication,
  *   does_not_support_transactions,
@@ -34,22 +39,38 @@ export const $config = (function () {
 
         snapshotScan: function snapshotScan(db, collName) {
             if (!this.cursorId || this.cursorId == 0) {
-                doSnapshotFindAtClusterTime(db, collName, this, [ErrorCodes.ShutdownInProgress], {_id: 1}, (res) => {
-                    let expectedDocs = [...Array(this.batchSize).keys()].map((i) => ({_id: i, x: 1}));
-                    assert.eq(res.cursor.firstBatch, expectedDocs, () => tojson(res));
-                    this.numDocScanned = this.batchSize;
-                });
+                doSnapshotFindAtClusterTime(
+                    db,
+                    collName,
+                    this,
+                    [ErrorCodes.ShutdownInProgress],
+                    {_id: 1},
+                    (res) => {
+                        let expectedDocs = [...Array(this.batchSize).keys()].map((i) => ({
+                            _id: i,
+                            x: 1,
+                        }));
+                        assert.eq(res.cursor.firstBatch, expectedDocs, () => tojson(res));
+                        this.numDocScanned = this.batchSize;
+                    },
+                );
             } else {
                 // The killOp() function below may cause Interrupted or CursorNotFound here, or the
                 // end of the test may cause ShutdownInProgress.
-                doSnapshotGetMoreAtClusterTime(db, collName, this, interruptedQueryErrors, (res) => {
-                    let expectedDocs = [...Array(this.batchSize).keys()].map((i) => ({
-                        _id: i + this.numDocScanned,
-                        x: 1,
-                    }));
-                    assert.eq(res.cursor.nextBatch, expectedDocs, () => tojson(res));
-                    this.numDocScanned = this.numDocScanned + this.batchSize;
-                });
+                doSnapshotGetMoreAtClusterTime(
+                    db,
+                    collName,
+                    this,
+                    interruptedQueryErrors,
+                    (res) => {
+                        let expectedDocs = [...Array(this.batchSize).keys()].map((i) => ({
+                            _id: i + this.numDocScanned,
+                            x: 1,
+                        }));
+                        assert.eq(res.cursor.nextBatch, expectedDocs, () => tojson(res));
+                        this.numDocScanned = this.numDocScanned + this.batchSize;
+                    },
+                );
             }
         },
 
@@ -82,7 +103,11 @@ export const $config = (function () {
             // Find the object ID of the getMore in the snapshot read, if it is running, and attempt
             // to kill the operation.
             const res = assert.commandWorkedOrFailedWithCode(
-                db.adminCommand({currentOp: 1, ns: {$regex: db.getName() + "\." + collName}, op: "getmore"}),
+                db.adminCommand({
+                    currentOp: 1,
+                    ns: {$regex: db.getName() + "\." + collName},
+                    op: "getmore",
+                }),
                 [ErrorCodes.Interrupted],
             );
             if (res.hasOwnProperty("inprog") && res.inprog.length) {
@@ -101,7 +126,13 @@ export const $config = (function () {
             deleteDocs: 0.2,
             readDocs: 0.2,
         },
-        snapshotScan: {insertDocs: 0.2, updateDocs: 0.2, deleteDocs: 0.2, readDocs: 0.2, killOp: 0.2},
+        snapshotScan: {
+            insertDocs: 0.2,
+            updateDocs: 0.2,
+            deleteDocs: 0.2,
+            readDocs: 0.2,
+            killOp: 0.2,
+        },
         insertDocs: {snapshotScan: 1.0},
         updateDocs: {snapshotScan: 1.0},
         readDocs: {snapshotScan: 1.0},
@@ -123,12 +154,16 @@ export const $config = (function () {
         // sharded clusters.
         if (cluster.isSharded()) {
             cluster.executeOnConfigNodes((db) => {
-                assert.commandWorked(db.adminCommand({setParameter: 1, minSnapshotHistoryWindowInSeconds: 3600}));
+                assert.commandWorked(
+                    db.adminCommand({setParameter: 1, minSnapshotHistoryWindowInSeconds: 3600}),
+                );
             });
         }
         assert.commandWorked(db.runCommand({create: collName}));
         const docs = [...Array(this.numIds).keys()].map((i) => ({_id: i, x: 1}));
-        this.clusterTime = assert.commandWorked(db.runCommand({insert: collName, documents: docs})).operationTime;
+        this.clusterTime = assert.commandWorked(
+            db.runCommand({insert: collName, documents: docs}),
+        ).operationTime;
     }
 
     function teardown(db, collName, cluster) {

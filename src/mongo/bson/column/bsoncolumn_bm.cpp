@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumn.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,6 +20,7 @@
 #include <cstdint>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <benchmark/benchmark.h>
@@ -54,6 +28,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 enum DecompressMode { kIterator, kBlockBSON, kBlockSBE };
 
@@ -155,7 +130,7 @@ std::vector<BSONObj> generateIntegers(int num, int skipPercentage) {
         } else {
             BSONObjBuilder builder;
             int32_t value = std::lround(d(gen));
-            builder.append(""_sd, value);
+            builder.append(""sv, value);
             ints.push_back(builder.obj());
         }
     }
@@ -182,7 +157,7 @@ std::vector<BSONObj> generateTableTargets(int num, int tableBits) {
         if (neg(gen) == 1)
             diff *= -1;
         lastValue += diff;
-        builder.append(""_sd, lastValue);
+        builder.append(""sv, lastValue);
         ints.push_back(builder.obj());
     }
 
@@ -206,7 +181,7 @@ std::vector<BSONObj> generateDoubles(int num, int skipPercentage, int decimals) 
 
 
             double generated = std::llround(d(gen) * factors[decimals]) / factors[decimals];
-            builder.append(""_sd, generated);
+            builder.append(""sv, generated);
             doubles.push_back(builder.obj());
         }
     }
@@ -228,7 +203,7 @@ std::vector<BSONObj> generateTimestamps(int num, int skipPercentage, double mean
             timestamps.push_back(BSONObj());
         } else {
             BSONObjBuilder builder;
-            builder.append(""_sd, Timestamp(std::llround(now + d(gen))));
+            builder.append(""sv, Timestamp(std::llround(now + d(gen))));
             timestamps.push_back(builder.obj());
         }
     }
@@ -247,7 +222,7 @@ std::vector<BSONObj> generateObjectIds(int num, int skipPercentage) {
             timestamps.push_back(BSONObj());
         } else {
             BSONObjBuilder builder;
-            builder.append(""_sd, OID::gen());
+            builder.append(""sv, OID::gen());
             timestamps.push_back(builder.obj());
         }
     }
@@ -288,12 +263,12 @@ std::vector<BSONObj> generateBinary(
                     buf[i] = std::lround(strDist(gen));
                 }
                 buf[size] = 0;
-                builder.append(""_sd, buf, size + 1);  // string requires room for null character
+                builder.append(""sv, buf, size + 1);  // string requires room for null character
             } else {
                 for (int i = 0; i < size; ++i) {
                     buf[i] = std::lround(byteDist(gen));
                 }
-                builder.appendBinData(""_sd, size, BinDataType::BinDataGeneral, buf);
+                builder.appendBinData(""sv, size, BinDataType::BinDataGeneral, buf);
             }
 
             last = builder.obj();
@@ -321,7 +296,7 @@ std::vector<BSONObj> generateUUIDs(int num, int skipPercentage, int size = 16) {
             for (int i = 0; i < size; ++i) {
                 buf[i] = std::lround(byteDist(gen));
             }
-            builder.appendBinData(""_sd, size, BinDataType::newUUID, buf);
+            builder.appendBinData(""sv, size, BinDataType::newUUID, buf);
             uuids.push_back(builder.obj());
         }
     }
@@ -340,7 +315,7 @@ BSONObj buildCompressed(const std::vector<BSONObj>& elems) {
     }
     auto binData = col.finalize();
     BSONObjBuilder objBuilder;
-    objBuilder.append(""_sd, binData);
+    objBuilder.append(""sv, binData);
     return objBuilder.obj();
 }
 
@@ -355,7 +330,7 @@ BSONObj buildCompressedWithObjs(const std::vector<BSONObj>& elems) {
     }
     auto binData = col.finalize();
     BSONObjBuilder objBuilder;
-    objBuilder.append(""_sd, binData);
+    objBuilder.append(""sv, binData);
     return objBuilder.obj();
 }
 
@@ -490,6 +465,25 @@ void benchmarkDense(benchmark::State& state, const BSONElement& compressedElemen
     for (auto _ : state) {
         benchmark::ClobberMemory();
         benchmark::DoNotOptimize(bsoncolumn::dense(bin));
+        totalBytes += size;
+        ++totalCalls;
+    }
+    state.SetItemsProcessed(totalCalls);
+    state.SetBytesProcessed(totalBytes);
+}
+
+void benchmarkMin(benchmark::State& state, const BSONElement& compressedElement) {
+    int size = 0;
+    const char* binary = compressedElement.binData(size);
+    BSONBinData bin(binary, size, Column);
+
+    uint64_t totalBytes = 0;
+    uint64_t totalCalls = 0;
+    for (auto _ : state) {
+        benchmark::ClobberMemory();
+        boost::intrusive_ptr allocator{new BSONElementStorage()};
+        benchmark::DoNotOptimize(
+            bsoncolumn::min<bsoncolumn::BSONElementMaterializer>(bin, allocator));
         totalBytes += size;
         ++totalCalls;
     }
@@ -743,6 +737,11 @@ void BM_denseInterleaved(benchmark::State& state, int numObjects, int numElement
     BSONObj compressed =
         buildCompressedWithObjs(generateObjectsWithSkip(numObjects, numElements, skipAt));
     benchmarkDense(state, compressed.firstElement());
+}
+
+void BM_minIntegers(benchmark::State& state, int skipPercentage) {
+    BSONObj compressed = buildCompressed(generateIntegers(10000, skipPercentage));
+    benchmarkMin(state, compressed.firstElement());
 }
 
 void BM_reopenIntegers(benchmark::State& state, int skipPercentage, int num) {
@@ -1033,6 +1032,10 @@ BENCHMARK_CAPTURE(BM_denseInterleaved, Interleaved Dense, 10000, 10, -1);
 BENCHMARK_CAPTURE(BM_denseInterleaved, Interleaved Skip at 1 %, 10000, 10, 100);
 BENCHMARK_CAPTURE(BM_denseInterleaved, Interleaved Skip at 50 %, 10000, 10, 5000);
 BENCHMARK_CAPTURE(BM_denseInterleaved, Interleaved Skip at 99 %, 10000, 10, 9900);
+
+BENCHMARK_CAPTURE(BM_minIntegers, Min Integers Skip = 0 %, 0);
+BENCHMARK_CAPTURE(BM_minIntegers, Min Integers Skip = 50 %, 50);
+BENCHMARK_CAPTURE(BM_minIntegers, Min Integers Skip = 99 %, 99);
 
 }  // namespace
 }  // namespace mongo

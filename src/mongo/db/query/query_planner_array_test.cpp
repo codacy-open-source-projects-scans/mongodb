@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -312,11 +285,31 @@ TEST_F(QueryPlannerTest, ElemMatchEmbeddedRegexAnd2) {
         "{ixscan: {filter: null, pattern: {'a.b': 1}}}}}");
 }
 
-// $not can appear as a value operator inside of an elemMatch (value).  We shouldn't crash if we
-// see it.
+// $not can appear as a value operator inside of an elemMatch (value).
 TEST_F(QueryPlannerTest, ElemMatchWithNotInside) {
     addIndex(BSON("a" << 1));
     runQuery(fromjson("{a: {$elemMatch: {$not: {$gte: 6}}}}"));
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    // Filter omitted because test can't equality match on this exact predicate due to an invisible
+    // $and wrapper :(
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {filter: null, pattern: {'a': 1}, bounds: {'a': [['MinKey', 6, "
+        "true, false], [Infinity, 'MaxKey', false, true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ElemMatchWithNotInside2) {
+    addIndex(BSON("a.b" << 1 << "a.c" << 1));
+    runQuery(fromjson("{d: 1, a: {$elemMatch: {c: {$ne: 3}, b: 4}}}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {filter: {d: 1, a: {$elemMatch: {c: {$ne: 3}, b: 4}}}, node:"
+        "{ixscan: {filter: null, pattern: {'a.b': 1, 'a.c': 1}, bounds:"
+        "{'a.b': [[4,4,true,true]],"
+        " 'a.c': [['MinKey',3,true,false],"
+        "[3,'MaxKey',false,true]]}}}}}");
 }
 
 // SERVER-13789
@@ -373,6 +366,83 @@ TEST_F(QueryPlannerTest, ElemMatchIndexedNestedOrMultikey) {
 TEST_F(QueryPlannerTest, ElemMatchIndexedNestedNor) {
     addIndex(BSON("bar.baz" << 1));
     runQuery(fromjson("{foo: 1, $and: [{bar: {$elemMatch: {$nor: [{baz: 2}, {baz: 3}]}}}]}"));
+
+    assertNumSolutions(1U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+}
+
+// SERVER-13789
+TEST_F(QueryPlannerTest, ElemMatchIndexedNestedNE) {
+    addIndex(BSON("bar.baz" << 1));
+    runQuery(fromjson("{foo: 1, $and: [{bar: {$elemMatch: {baz: {$ne: 2}}}}]}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {filter: {$and: [{foo:1},"
+        "{bar:{$elemMatch:{baz:{$ne:2}}}}]}, "
+        "node: {ixscan: {pattern: {'bar.baz': 1}, "
+        "bounds: {'bar.baz': [['MinKey',2,true,false], "
+        "[2,'MaxKey',false,true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ElemMatchObjectNestedElemMatchObjectWithNe) {
+    addIndex(BSON("a.b.c" << 1), true);
+    runQuery(fromjson("{a: {$elemMatch: {b: {$elemMatch: {c: {$ne: 1}}}}}}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'a.b.c': 1}, bounds: "
+        "{'a.b.c': [['MinKey',1,true,false],"
+        "[1,'MaxKey',false,true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ElemMatchObjectWithNeAndNestedElemMatchObject) {
+    addIndex(BSON("a.b" << 1), true);
+    addIndex(BSON("a.c.d" << 1), true);
+    runQuery(fromjson("{a: {$elemMatch: {b: {$ne: 1}, c: {$elemMatch: {d: {$ne: 2}}}}}}"));
+
+    assertNumSolutions(3U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'a.b': 1}, bounds: "
+        "{'a.b': [['MinKey',1,true,false],"
+        "[1,'MaxKey',false,true]]}}}}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'a.c.d': 1}, bounds: "
+        "{'a.c.d': [['MinKey',2,true,false],"
+        "[2,'MaxKey',false,true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ElemMatchObjectWithMultipleNe) {
+    addIndex(BSON("a.b" << 1 << "a.c" << 1), true);
+    runQuery(fromjson("{a: {$elemMatch: {b: {$ne: 1}, c: {$ne: 2}}}}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds:"
+        "{'a.b': [['MinKey',1,true,false],[1,'MaxKey',false,true]],"
+        " 'a.c': [['MinKey',2,true,false],[2,'MaxKey',false,true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ElemMatchObjectWithNorSingleChild) {
+    addIndex(BSON("a.b" << 1), true);
+    runQuery(fromjson("{a: {$elemMatch: {$nor: [{b: 1}]}}}"));
+
+    // Basically the same as $ne: 1.
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'a.b': 1}, bounds: "
+        "{'a.b': [['MinKey',1,true,false],"
+        "[1,'MaxKey',false,true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, NorWithElemMatchObjectChildIsCollscan) {
+    addIndex(BSON("a.b" << 1), true);
+    runQuery(fromjson("{$nor: [{a: {$elemMatch: {b: 1}}}]}"));
 
     assertNumSolutions(1U);
     assertSolutionExists("{cscan: {dir: 1}}");
@@ -2030,6 +2100,189 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundTrailingOutsi
     assertSolutionExists("{cscan: {dir: 1}}");
 }
 
+TEST_F(QueryPlannerTest, CannotHoistNegatedPredFromElemMatchIntoSiblingOr) {
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1 << "c" << 1 << "d" << 1));
+
+    auto queryStr =
+        "{arr: {$elemMatch: {a: {$ne:1}, $or: [{b:2}, {b:3}]}}, $or: [{c:4, d:5}, {c:6, d:7}]}";
+    runQuery(fromjson(queryStr));
+
+    assertNumSolutions(2U);
+
+    // Solution 1: no pushdowns; {'arr.a': {$ne: 1}} is indexed directly, without any other fields.
+    assertSolutionExists(
+        "{fetch: {filter: "
+        "  {arr: {$elemMatch: {a: {$ne:1}, b: {$in: [2, 3]}}}, $or: [{c:4, d:5}, "
+        "  {c:6, d:7}]},"
+        "node: {ixscan: {pattern: {'arr.a': 1, 'arr.b': 1, c: 1, d: 1},"
+        "bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[2, 2, true, true], [3, 3, true, true]],"
+        " c: [['MinKey', 'MaxKey', true, true]],"
+        " d: [['MinKey', 'MaxKey', true, true]]}}}}}");
+
+    // Solution 2: COLLSCAN.
+    assertSolutionExists("{cscan: {dir: 1}}");
+}
+
+TEST_F(QueryPlannerTest, CannotHoistNegatedPredFromElemMatchIntoSiblingOrWithMultikeyPaths) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}, {}, {}};
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1 << "c" << 1 << "d" << 1), multikeyPaths);
+
+    auto queryStr =
+        "{arr: {$elemMatch: {a: {$ne:1}, $or: [{b:2}, {b:3}]}}, $or: [{c:4, d:5}, {c:6, d:7}]}";
+    runQuery(fromjson(queryStr));
+
+    assertNumSolutions(2U);
+
+    // Solution 1: no pushdowns; {'arr.a': {$ne: 1}} is indexed directly, without any other fields.
+    assertSolutionExists(
+        "{fetch: {filter:"
+        "  {arr: {$elemMatch: {a: {$ne:1}, b: {$in: [2, 3]}}}, $or: [{c:4, d:5}, {c:6, d:7}]},"
+        "  node: {ixscan: {pattern: {'arr.a': 1, 'arr.b': 1, c: 1, d: 1},"
+        "bounds: "
+        "  {'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        "   'arr.b': [[2, 2, true, true], [3, 3, true, true]],"
+        "    c: [['MinKey', 'MaxKey', true, true]],"
+        "    d: [['MinKey', 'MaxKey', true, true]]}}}}}");
+
+    // Solution 2: COLLSCAN.
+    assertSolutionExists("{cscan: {dir: 1}}");
+}
+
+// The negation and the $or share the same $elemMatch context. Both predicates are
+// evaluated against the same array element, so the index bounds may be compounded.
+TEST_F(QueryPlannerTest, OrOfRangesUnderElemMatchWithNegation) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}};
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1), multikeyPaths);
+    runQuery(fromjson("{arr: {$elemMatch: {a: {$ne: 1}, $or: [{b: {$lt: 2}}, {b: {$gt: 3}}]}}}"));
+
+    assertNumSolutions(3U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+
+    // {'arr.a': {$ne: 1}} is pushed into both branches, so each can be compounded with 'arr.b'.
+    assertSolutionExists(
+        "{fetch: {node: {or: {nodes: ["
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[-Infinity, 2, true, false]]}}},"
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[3, Infinity, false, true]]}}}]}}}}");
+
+    // No pushdown; {'arr.a': {$ne: 1}} is indexed directly and 'arr.b' is unconstrained.
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [['MinKey', 'MaxKey', true, true]]}}}}}");
+}
+
+// As above, but without the $elemMatch. The predicates no longer share an $elemMatch context, so
+// they can be satisfied by different array elements, hence, the negation is not pushed into the
+// $or.
+TEST_F(QueryPlannerTest, NegationOrPushdownBlockedWithoutElemMatch) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}};
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1), multikeyPaths);
+    runQuery(fromjson("{'arr.a': {$ne: 1}, $or: [{'arr.b': {$lt: 2}}, {'arr.b': {$gt: 3}}]}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [['MinKey', 'MaxKey', true, true]]}}}}}");
+
+    assertSolutionDoesntExist(
+        "{fetch: {node: {or: {nodes: ["
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}}},"
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}}}]}}}}");
+}
+
+// TODO SERVER-133013: Enable $or-pushdown of negation when the parent $elemMatch is not a root
+// Similar to 'OrOfRangesUnderElemMatchWithNegation', but the $elemMatch is in conjunction with a
+// sibling predicate. The negation and the $or still share the same $elemMatch context, so the
+// pushdown would be correct here as well, but it is currently not implemented.
+TEST_F(QueryPlannerTest, OrOfRangesUnderElemMatchWithNegationAndSiblingPredicate) {
+    MultikeyPaths multikeyPaths{{0U}, {0U}};
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1), multikeyPaths);
+    runQuery(fromjson(
+        "{extra: 5, arr: {$elemMatch: {a: {$ne: 1}, $or: [{b: {$lt: 2}}, {b: {$gt: 3}}]}}}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+
+    // No pushdown; {'arr.a': {$ne: 1}} is indexed directly and 'arr.b' is unconstrained.
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [['MinKey', 'MaxKey', true, true]]}}}}}");
+
+    assertSolutionDoesntExist(
+        "{fetch: {node: {or: {nodes: ["
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}}},"
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}}}]}}}}");
+}
+
+// As 'OrOfRangesUnderElemMatchWithNegation', but the negated predicate is on a path which contains
+// a second array level ('arr.a' is multikey as well). The $elemMatch context is still shared, so
+// the pushdown is performed. The index bounds over-approximate the matching documents and the
+// $elemMatch kept as a residual filter in the FETCH stage rejects the false positives.
+TEST_F(QueryPlannerTest, OrOfRangesUnderElemMatchWithNegationOnNestedArray) {
+    MultikeyPaths multikeyPaths{{0U, 1U}, {0U}};
+    addIndex(BSON("arr.a.c" << 1 << "arr.b" << 1), multikeyPaths);
+    runQuery(
+        fromjson("{arr: {$elemMatch: {'a.c': {$ne: 1}, $or: [{b: {$lt: 2}}, {b: {$gt: 3}}]}}}"));
+
+    assertNumSolutions(3U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+
+    // {'arr.a.c': {$ne: 1}} is pushed into both branches, so each can be compounded with 'arr.b'.
+    assertSolutionExists(
+        "{fetch: {node: {or: {nodes: ["
+        "{ixscan: {pattern: {'arr.a.c': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a.c': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[-Infinity, 2, true, false]]}}},"
+        "{ixscan: {pattern: {'arr.a.c': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a.c': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[3, Infinity, false, true]]}}}]}}}}");
+
+    // No pushdown; {'arr.a.c': {$ne: 1}} is indexed directly and 'arr.b' is unconstrained.
+    assertSolutionExists(
+        "{fetch: {node: {ixscan: {pattern: {'arr.a.c': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a.c': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [['MinKey', 'MaxKey', true, true]]}}}}}");
+}
+
+TEST_F(QueryPlannerTest, MultipleNegatedElemMatchPredOrPushdownsDoNotSelfIntersect) {
+    params.mainCollectionInfo.options |= QueryPlannerParams::INDEX_INTERSECTION;
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1));
+    addIndex(BSON("arr.a" << 1 << "c" << 1));
+
+    auto queryStr = "{arr: {$elemMatch: {a: {$ne:1}, $or: [{b:2}, {b:3}]}}, $or: [{c:4}, {c:6}]}";
+    runQuery(fromjson(queryStr));
+
+    assertNumSolutions(3U);
+
+    // Solution 1: no pushdowns; {'arr.a': {$ne: 1}} is indexed directly by {arr.a: 1, arr.b: 1}.
+    assertSolutionExists(
+        "{fetch: {node: "
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, "
+        "bounds: {"
+        "'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]], "
+        "'arr.b': [[2, 2, true, true], [3, 3, true, true]]}}}}}");
+
+    // Solution 2: no pushdowns; {'arr.a': {$ne: 1}} is indexed directly by {arr.a: 1, c: 1}.
+    assertSolutionExists(
+        "{fetch: "
+        "  {node: "
+        "    {ixscan: {pattern: {'arr.a': 1, c: 1}, "
+        "             bounds: {'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]], "
+        "                      c: [[4, 4, true, true], [6, 6, true, true]]}}}}}");
+
+    // Solution 3: COLLSCAN.
+    assertSolutionExists("{cscan: {dir: 1}}");
+}
+
 TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughElemMatchObj) {
     addIndex(BSON("a" << 1 << "b.c" << 1));
 
@@ -2320,7 +2573,6 @@ TEST_F(QueryPlannerTest, ElemMatchValueNENull) {
     addIndex(BSON("a" << 1));
     runQuery(fromjson("{a: {$elemMatch: {$ne: null}}}"));
 
-    // We can't use the index because we would exclude {a: []} which should match.
     assertNumSolutions(2U);
     assertSolutionExists("{cscan: {dir: 1}}");
     assertSolutionExists(
@@ -2350,6 +2602,19 @@ TEST_F(QueryPlannerTest, ElemMatchValueNotGteOrNotLteNull) {
     assertNumSolutions(2U);
     assertSolutionExists(collScanSol);
     assertSolutionExists(ixScanSol);
+}
+
+TEST_F(QueryPlannerTest, ElemMatchObjectNENull) {
+    addIndex(BSON("a.b" << 1));
+    runQuery(fromjson("{a: {$elemMatch: {b: {$ne: null}}}}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$elemMatch: {b: {$ne: null}}}}, node: {"
+        "  ixscan: {pattern: {'a.b':1}, bounds: {"
+        "    'a.b': [['MinKey',null,true,false], [null,'MaxKey',false,true]]"
+        "}}}}}");
 }
 
 TEST_F(QueryPlannerTest, NENullOnMultikeyIndex) {
@@ -2397,6 +2662,21 @@ TEST_F(QueryPlannerTest, ElemMatchObjectNENullWithSuffixOfElemMatchMultiKey) {
     assertSolutionExists("{cscan: {dir: 1}}");
 }
 
+TEST_F(QueryPlannerTest, ElemMatchObjectNENullWithPrefixOfElemMatchMultiKey) {
+    MultikeyPaths multikeyPaths{{0U}};
+    addIndex(BSON("a.b" << 1), multikeyPaths);
+    runQuery(fromjson("{a: {$elemMatch: {b: {$ne: null}}}}"));
+
+    // We should be able to use the index since only 'a' is multikey.
+    assertNumSolutions(2U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+    assertSolutionExists(
+        "{fetch: {filter: {a: {$elemMatch: {b: {$ne: null}}}}, node: {"
+        "  ixscan: {pattern: {'a.b': 1}, bounds: {"
+        "    'a.b': [['MinKey',null,true,false], [null,'MaxKey',false,true]]"
+        "}}}}}");
+}
+
 TEST_F(QueryPlannerTest, CompoundIndexBoundsDottedNotEqualsNullWithProjectionMultiKeyOnOtherPath) {
     MultikeyPaths multikeyPaths{{0U}, {}};
     addIndex(BSON("a" << 1 << "c.d" << 1), multikeyPaths);
@@ -2412,6 +2692,25 @@ TEST_F(QueryPlannerTest, CompoundIndexBoundsDottedNotEqualsNullWithProjectionMul
         "    'a': [['foo',{},false,false]], "
         "    'c.d':[['MinKey',null,true,false],[null,'MaxKey',false,true]]"
         "}}}}}");
+}
+
+TEST_F(QueryPlannerTest,
+       CompoundIndexBoundsElemMatchObjectEqualsNullWithProjectionMultiKeyOnOtherPath) {
+    MultikeyPaths multikeyPaths{{0U}, {}};
+    addIndex(BSON("a" << 1 << "c.d" << 1), multikeyPaths);
+    runQuerySortProj(fromjson("{'a': {$gt: 'foo'}, c: {$elemMatch: {d: {$ne: null}}}}"),
+                     BSONObj(),
+                     fromjson("{_id: 0, 'c.d': 1}"));
+
+    assertNumSolutions(2U);
+    assertSolutionExists("{proj: {spec: {_id: 0, 'c.d': 1}, node: {cscan: {dir: 1}}}}");
+    assertSolutionExists(
+        "{proj: {spec: {_id: 0, 'c.d': 1}, node: {"
+        "  fetch: {filter: {c: {$elemMatch: {d: {$ne: null}}}}, node: {"
+        "    ixscan: {filter: null, pattern: {'a': 1, 'c.d': 1}, bounds: {"
+        "      a: [['foo',{},false,false]], "
+        "      'c.d':[['MinKey',null,true,false],[null,'MaxKey',false,true]]"
+        "}}}}}}}");
 }
 
 // Test for older versions of indexes where it is possible to have empty MultikeyPaths,

@@ -1,37 +1,14 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/otel/telemetry_context.h"
+#include "mongo/platform/random.h"
 #include "mongo/util/modules.h"
+
+#include <mutex>
+#include <string_view>
 
 #include <opentelemetry/context/propagation/text_map_propagator.h>
 #include <opentelemetry/trace/context.h>
@@ -42,60 +19,70 @@ namespace traces {
 
 using OtelContext = opentelemetry::context::Context;
 using ScopedSpan = opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>;
-using OtelStringView = opentelemetry::nostd::string_view;
 using TextMapPropagator = opentelemetry::context::propagation::TextMapPropagator;
 using TextMapCarrier = opentelemetry::context::propagation::TextMapCarrier;
 
-constexpr OtelStringView keepSpanKey = "keepSpan";
-constexpr OtelStringView trueValue = "true";
-constexpr OtelStringView falseValue = "false";
-
 /**
  * SpanTelemetryContextImpl is an implementation of TelemetryContext that wraps OpenTelemetry's
- * Context to allow for propagation of span state across OpenTelemetry functionality.
+ * Context to allow for propagation of span state across OpenTelemetry functionality. Thread-safe.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT SpanTelemetryContextImpl : public TelemetryContext {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] SpanTelemetryContextImpl : public TelemetryContext {
 public:
-    explicit SpanTelemetryContextImpl(OtelContext ctx);
-    SpanTelemetryContextImpl() : _ctx() {}
+    explicit SpanTelemetryContextImpl(OtelContext ctx, PseudoRandom* prng = nullptr);
+    SpanTelemetryContextImpl();
 
     /**
-     * Sets whether spans created with this context should be kept (exported) or not.
+     * Returns this telemetry context's sampling roll: a value in [0, 1) used to make sampling
+     * decisions. The value is drawn once from the constructor-supplied PRNG and reused for the
+     * lifetime of the context, so every span created on this context observes the same value.
+     *
+     * Drawing a single value per telemetry context (rather than rolling independently per span) is
+     * what keeps the overall trace rate constant when sampling-eligible spans overlap within one
+     * operation -- e.g. when a request traverses both the sharded and DSC paths.
      */
-    void keepSpan(bool keepSpan);
+    double getSamplingValue() const {
+        return _samplingRoll;
+    }
 
-    /**
-     * Returns whether spans created with this context should be kept (exported) or not.
-     */
-    bool shouldKeepSpan() const;
+    bool hasActiveTrace() const override {
+        return getSpan()->GetContext().IsValid();
+    }
 
-    /**
-     * Sets the provided span as the current span on this context.
-     */
+    /** Sets the provided span as the current span on this context. */
     void setSpan(ScopedSpan span) {
+        std::lock_guard lk(_mutex);
         _ctx = opentelemetry::trace::SetSpan(_ctx, span);
     }
 
-    /**
-     * Returns the current span on this context.
-     */
-    ScopedSpan getSpan() {
-        return opentelemetry::trace::GetSpan(_ctx);
+    /** Returns the current span on this context. */
+    ScopedSpan getSpan() const {
+        return opentelemetry::trace::GetSpan(_getContext());
     }
 
-    StringData type() const override {
+    std::string_view type() const override {
         return "SpanTelemetryContextImpl";
     }
 
     void propagate(TextMapPropagator& propagator, TextMapCarrier& carrier) const;
 
-    std::shared_ptr<TelemetryContext> clone() const override {
-        return std::make_shared<SpanTelemetryContextImpl>(*this);
-    }
+    std::shared_ptr<TelemetryContext> clone() const override;
 
 private:
+    // Used by clone() to copy ctx and sampling roll without drawing a new roll.
+    SpanTelemetryContextImpl(OtelContext ctx, double samplingRoll);
+
+    OtelContext _getContext() const {
+        std::lock_guard lk(_mutex);
+        return _ctx;
+    }
+
+    // Guards _ctx only.
+    mutable std::mutex _mutex;
     OtelContext _ctx;
-    bool _keepSpan{false};
+
+    // The sampling roll for this telemetry context: a value in [0, 1) drawn in the constructor
+    // and reused for the lifetime of the context. See getSamplingValue().
+    double _samplingRoll;
 };
 
 }  // namespace traces

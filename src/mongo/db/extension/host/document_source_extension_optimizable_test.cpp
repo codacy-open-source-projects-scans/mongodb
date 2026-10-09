@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 
@@ -38,6 +12,7 @@
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/extension/host/aggregation_stage/parse_node.h"
 #include "mongo/db/extension/host/extension_search_server_status.h"
+#include "mongo/db/extension/host/extension_vector_search_server_status.h"
 #include "mongo/db/extension/host/host_portal.h"
 #include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
@@ -50,19 +25,61 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_documents.h"
+#include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo::extension {
+#include <string_view>
 
-auto nss = NamespaceString::createNamespaceString_forTest("document_source_extension_test"_sd);
+namespace mongo::extension {
+using namespace std::literals::string_view_literals;
+
+auto nss = NamespaceString::createNamespaceString_forTest("document_source_extension_test"sv);
+
+/**
+ * A parse node that expands into one CustomProperties AST node per BSON in `propertiesList`,
+ * giving tests precise control over the static properties of each individual expanded stage.
+ */
+class MultiCustomPropertiesParseNode : public sdk::AggStageParseNode {
+public:
+    static inline const std::string kStageName = "$multiCustomProperties";
+
+    explicit MultiCustomPropertiesParseNode(std::vector<BSONObj> propertiesList)
+        : sdk::AggStageParseNode(kStageName), _propertiesList(std::move(propertiesList)) {}
+
+    size_t getExpandedSize() const override {
+        return _propertiesList.size();
+    }
+
+    std::vector<VariantNodeHandle> expand() const override {
+        std::vector<VariantNodeHandle> out;
+        out.reserve(_propertiesList.size());
+        for (const auto& properties : _propertiesList) {
+            out.emplace_back(new sdk::ExtensionAggStageAstNodeAdapter(
+                std::make_unique<sdk::shared_test_stages::CustomPropertiesAstNode>(properties)));
+        }
+        return out;
+    }
+
+    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
+        return BSONObj();
+    }
+
+    std::unique_ptr<sdk::AggStageParseNode> clone() const override {
+        return std::make_unique<MultiCustomPropertiesParseNode>(_propertiesList);
+    }
+
+private:
+    std::vector<BSONObj> _propertiesList;
+};
 
 class DocumentSourceExtensionOptimizableTest : public AggregationContextFixture {
 public:
@@ -101,12 +118,33 @@ public:
             std::move(stageName), std::move(handle), _nss);
     }
 
+    /**
+     * Builds a LiteParsedExpandable whose expansion is a list of CustomProperties AST nodes, one
+     * per entry in `propertiesList`. This lets a test control the per-stage static properties
+     * (providedMetadataFields, isSelectionStage) of every expanded stage independently, so the
+     * pipeline-level reductions in LiteParsedExpandable (isRankedStage/isScoredStage/
+     * isSelectionStage) can be exercised over multi-stage expansions.
+     */
+    host::DocumentSourceExtensionOptimizable::LiteParsedExpandable
+    makeLiteParsedExpandableFromPropertiesList(std::vector<BSONObj> propertiesList) {
+        auto parseNode = new sdk::ExtensionAggStageParseNodeAdapter(
+            std::make_unique<MultiCustomPropertiesParseNode>(std::move(propertiesList)));
+        AggStageParseNodeHandle handle{parseNode};
+        BSONObj stageBson =
+            createDummySpecFromStageName(MultiCustomPropertiesParseNode::kStageName);
+        return host::DocumentSourceExtensionOptimizable::LiteParsedExpandable(
+            stageBson.firstElement(), std::move(handle), _nss, LiteParserOptions{});
+    }
+
 protected:
     NamespaceString _nss = NamespaceString::createNamespaceString_forTest(
         boost::none, "document_source_extension_test");
 
     sdk::ExtensionAggStageDescriptorAdapter _transformStaticDescriptor{
         sdk::shared_test_stages::TransformAggStageDescriptor::make()};
+
+    sdk::ExtensionAggStageDescriptorAdapter _internalTransformStaticDescriptor{
+        sdk::shared_test_stages::InternalTransformAggStageDescriptor::make()};
 
     static inline BSONObj kValidSpec = BSON(
         sdk::shared_test_stages::TransformAggStageDescriptor::kStageName << BSON("foo" << true));
@@ -134,13 +172,31 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ParseTransformSuccess) {
     ASSERT_TRUE(stagePtr != nullptr);
     ASSERT_EQUALS(std::string(stagePtr->getSourceName()),
                   sdk::shared_test_stages::TransformAggStageDescriptor::kStageName);
-    auto serializedPipeline =
-        parsedPipeline->serializeToBson(SerializationOptions::kDebugQueryShapeSerializeOptions);
+    auto serializedPipeline = parsedPipeline->serializeToBson(
+        query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions);
     ASSERT_EQUALS(serializedPipeline.size(), 1u);
     // The extension is in the form of DocumentSourceExtensionForQueryShape at this point, which
     // serializes to its query shape. The transform extension's query shape is just its stage
     // definition.
     ASSERT_BSONOBJ_EQ(serializedPipeline[0], kValidSpec);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, RegisterInternalStageRestrictsClientType) {
+    std::unique_ptr<host::HostPortal> hostPortal = std::make_unique<host::HostPortal>();
+    host_connector::HostPortalAdapter portal{
+        MONGODB_EXTENSION_API_VERSION, 1, "", std::move(hostPortal)};
+    portal.getImpl().registerStageDescriptor(&_internalTransformStaticDescriptor);
+
+    BSONObj internalSpec =
+        BSON(sdk::shared_test_stages::InternalTransformAggStageDescriptor::kStageName << BSONObj());
+    auto lpds = LiteParsedDocumentSource::parse(_nss, internalSpec, LiteParserOptions{});
+    ASSERT_EQUALS(lpds->getClientType(), AllowedWithClientType::kInternal);
+
+    // clone() must preserve the metadata: the router copies the LiteParsedPipeline (cloning every
+    // stage spec) before validating, so a clone that dropped kInternal would escape client-type
+    // validation on mongos.
+    auto cloned = lpds->clone();
+    ASSERT_EQUALS(cloned->getClientType(), AllowedWithClientType::kInternal);
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, ExpandToExtAst) {
@@ -373,7 +429,7 @@ class DepthLeafAstNode : public sdk::AggStageAstNode {
 public:
     DepthLeafAstNode() : sdk::AggStageAstNode(kDepthLeafName) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -558,9 +614,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ExpandToMaxDepthSucceeds) {
 }
 
 using DocumentSourceExtensionOptimizableTestDeathTest = DocumentSourceExtensionOptimizableTest;
-DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
-             ExpandExceedsMaxDepthFails,
-             "10955800") {
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest, ExpandExceedsMaxDepthFails, "519") {
     auto depth =
         host::DocumentSourceExtensionOptimizable::LiteParsedExpandable::kMaxExpansionDepth + 1;
     auto* rootParseNode =
@@ -574,7 +628,7 @@ DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
 
 DEATH_TEST_REGEX_F(DocumentSourceExtensionOptimizableTestDeathTest,
                    ExpandAdjacentCycleFails,
-                   "10955801.*Cycle detected during stage expansion for "
+                   "519.*Cycle detected during stage expansion for "
                    "stage.*\\$adjacentCycle.*\\$adjacentCycle -> \\$adjacentCycle") {
     auto* rootParseNode =
         new sdk::ExtensionAggStageParseNodeAdapter(std::make_unique<AdjacentCycleParseNode>());
@@ -587,7 +641,7 @@ DEATH_TEST_REGEX_F(DocumentSourceExtensionOptimizableTestDeathTest,
 
 DEATH_TEST_REGEX_F(DocumentSourceExtensionOptimizableTestDeathTest,
                    ExpandNonAdjacentCycleFails,
-                   "10955801.*Cycle detected during stage expansion for "
+                   "519.*Cycle detected during stage expansion for "
                    "stage.*\\$nodeB.*\\$nodeB -> \\$nodeA -> \\$nodeB") {
     auto* rootParseNode =
         new sdk::ExtensionAggStageParseNodeAdapter(std::make_unique<NodeAParseNode>());
@@ -738,7 +792,7 @@ public:
                                           << "actions" << BSON_ARRAY(BSON("action" << "find")))));
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -766,7 +820,7 @@ public:
                                                         << BSON("action" << "planCacheRead")))));
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -795,7 +849,7 @@ public:
                                                   << BSON_ARRAY(BSON("action" << "indexStats")))));
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -865,7 +919,7 @@ public:
                                                          << "actions" << BSONArray())));
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -889,7 +943,7 @@ public:
         return BSON("requiredPrivileges" << BSONArray());
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>();
     }
@@ -1090,6 +1144,34 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandedIsScoreDetailsStageWithScoreDetailsInProvidedMetadataFields) {
+    auto lp = makeLiteParsedExpandedFromProperties(
+        BSON("providedMetadataFields" << BSON_ARRAY("scoreDetails")), "$scoreDetailsStage");
+    ASSERT_TRUE(lp.isScoreDetailsStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandedIsScoreDetailsStageWithSearchScoreDetailsInProvidedMetadataFields) {
+    auto lp = makeLiteParsedExpandedFromProperties(
+        BSON("providedMetadataFields" << BSON_ARRAY("searchScoreDetails")),
+        "$searchScoreDetailsStage");
+    ASSERT_TRUE(lp.isScoreDetailsStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandedIsNotScoreDetailsStageWithSearchScoreInProvidedMetadataFields) {
+    auto lp = makeLiteParsedExpandedFromProperties(
+        BSON("providedMetadataFields" << BSON_ARRAY("searchScore")), "$nonScoreDetailsStage");
+    ASSERT_FALSE(lp.isScoreDetailsStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandedIsNotScoreDetailsStageWithOmittedProvidedMetadataFields) {
+    auto lp = makeLiteParsedExpandedFromProperties(BSONObj(), "$omittedStage");
+    ASSERT_FALSE(lp.isScoreDetailsStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
        LiteParsedExpandedIsSelectionStageWhenIsSelectionStageTrue) {
     auto lp =
         makeLiteParsedExpandedFromProperties(BSON("isSelectionStage" << true), "$selectionStage");
@@ -1101,6 +1183,65 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     auto lp = makeLiteParsedExpandedFromProperties(BSON("isSelectionStage" << false),
                                                    "$nonSelectionStage");
     ASSERT_FALSE(lp.isSelectionStage());
+}
+
+// LiteParsedExpandable's pipeline-level checks must reflect every expanded stage, not just the
+// first; that is what classifies $search/$vectorSearch ([<producer>, idLookup]) correctly.
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandableIsSelectionStageOnlyWhenAllExpandedStagesAreSelection) {
+    const BSONObj selection = BSON("isSelectionStage" << true);
+    const BSONObj nonSelection = BSON("isSelectionStage" << false);
+
+    // All expanded stages are selection -> the expandable is a selection stage.
+    ASSERT_TRUE(
+        makeLiteParsedExpandableFromPropertiesList({selection, selection}).isSelectionStage());
+
+    // A non-selection stage anywhere in the expansion disqualifies it, even when the first
+    // expanded stage is selection.
+    ASSERT_FALSE(
+        makeLiteParsedExpandableFromPropertiesList({selection, nonSelection}).isSelectionStage());
+    ASSERT_FALSE(
+        makeLiteParsedExpandableFromPropertiesList({nonSelection, selection}).isSelectionStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandableIsRankedStageWhenAnyExpandedStageIsRanked) {
+    const BSONObj ranked = BSON("providedMetadataFields" << BSON_ARRAY("sortKey"));
+    const BSONObj nonRanked = BSON("providedMetadataFields" << BSON_ARRAY("searchScore"));
+
+    ASSERT_FALSE(
+        makeLiteParsedExpandableFromPropertiesList({nonRanked, nonRanked}).isRankedStage());
+    // Ranked even when only a non-front expanded stage produces the sort key -- mirrors an
+    // extension that desugars to [<transform>, <$sort-like producer>].
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({nonRanked, ranked}).isRankedStage());
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({ranked, nonRanked}).isRankedStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandableIsScoredStageWhenAnyExpandedStageIsScored) {
+    const BSONObj scored = BSON("providedMetadataFields" << BSON_ARRAY("searchScore"));
+    const BSONObj nonScored = BSON("providedMetadataFields" << BSON_ARRAY("sortKey"));
+
+    ASSERT_FALSE(
+        makeLiteParsedExpandableFromPropertiesList({nonScored, nonScored}).isScoredStage());
+    // Scored even when only a non-front expanded stage produces the score metadata.
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({nonScored, scored}).isScoredStage());
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({scored, nonScored}).isScoredStage());
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       LiteParsedExpandableIsScoreDetailsStageWhenAnyExpandedStageIsScoreDetails) {
+    const BSONObj scoreDetails = BSON("providedMetadataFields" << BSON_ARRAY("scoreDetails"));
+    const BSONObj nonScoreDetails = BSON("providedMetadataFields" << BSON_ARRAY("searchScore"));
+
+    ASSERT_FALSE(makeLiteParsedExpandableFromPropertiesList({nonScoreDetails, nonScoreDetails})
+                     .isScoreDetailsStage());
+    // scoreDetails even when only a non-front expanded stage produces the scoreDetails metadata.
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({nonScoreDetails, scoreDetails})
+                    .isScoreDetailsStage());
+    ASSERT_TRUE(makeLiteParsedExpandableFromPropertiesList({scoreDetails, nonScoreDetails})
+                    .isScoreDetailsStage());
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
@@ -1291,7 +1432,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 
 DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
              EmptyActionsArrayRequiredPrivilegesAggStageAstNodeFails,
-             "11350600") {
+             "519") {
     auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
         EmptyActionsArrayRequiredPrivilegesAggStageAstNode::make());
     auto handle = AggStageAstNodeHandle{astNode};
@@ -2017,27 +2158,14 @@ TEST_F(DocumentSourceExtensionOptimizableTest, StageCanSerializeForQueryExecutio
 
     // Test that an extension can provide its own implementation of serialize, that might change
     // the raw spec provided.
-    ASSERT_BSONOBJ_EQ(optimizable->serialize(SerializationOptions()).getDocument().toBson(),
-                      BSON(TransformAggStageDescriptor::kStageName << arguments));
-}
-
-DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
-             SerializeWithWrongOptsFails,
-             "11217800") {
-    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
-        sdk::shared_test_stages::TransformAggStageAstNode::make());
-    auto astHandle = AggStageAstNodeHandle(astNode);
-
-    auto optimizable =
-        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(astHandle));
-
-    [[maybe_unused]] auto serialized =
-        optimizable->serialize(SerializationOptions::kDebugQueryShapeSerializeOptions);
+    ASSERT_BSONOBJ_EQ(
+        optimizable->serialize(query_shape::SerializationOptions()).getDocument().toBson(),
+        BSON(TransformAggStageDescriptor::kStageName << arguments));
 }
 
 DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
              CreateFromParseNodeHandleWithMultipleNodesFails,
-             "11623000") {
+             "519") {
     // Create a parse node that expands to multiple nodes.
     auto parseNode = new sdk::ExtensionAggStageParseNodeAdapter(
         std::make_unique<sdk::shared_test_stages::MidAParseNode>());
@@ -2049,7 +2177,7 @@ DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
 
 DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
              CreateFromParseNodeHandleWithHostParseNodeFails,
-             "11623001") {
+             "519") {
     // Create a parse node that expands to a host parse node.
     auto parseNode = new sdk::ExtensionAggStageParseNodeAdapter(
         std::make_unique<sdk::shared_test_stages::ExpandToHostParseParseNode>());
@@ -2061,7 +2189,7 @@ DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
 
 DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
              CreateFromParseNodeHandleWithExtensionParseNodeFails,
-             "11623002") {
+             "519") {
     // Create a parse node that expands to an extension parse node handle.
     auto parseNode = new sdk::ExtensionAggStageParseNodeAdapter(
         std::make_unique<sdk::shared_test_stages::ExpandToExtParseParseNode>());
@@ -2089,10 +2217,10 @@ TEST_F(DocumentSourceExtensionOptimizableTest, StageWithDefaultStaticProperties)
     ASSERT_FALSE(staticProperties.getRequiredMetadataFields().has_value());
     ASSERT_FALSE(staticProperties.getProvidedMetadataFields().has_value());
     ASSERT_TRUE(staticProperties.getAllowedInUnionWith());
-    // MongoExtensionStaticProperties has these as 'default: true' in the IDL even though we're
-    // disabling them by default in constraints(). This is because we don't want to be making
-    // changes to the API regarding enabling/disabling these subpipeline stages, rather we handle it
-    // on the host side.
+    // MongoExtensionStaticProperties has allowedInLookup/allowedInFacet as 'default: true' in the
+    // IDL. The host controls actual lookup/facet allowance: lookup is gated by
+    // featureFlagExtensionsInsideHybridSearch (now default-on), facet remains disabled pending
+    // SERVER-117260.
     ASSERT_TRUE(staticProperties.getAllowedInLookup());
     ASSERT_TRUE(staticProperties.getAllowedInFacet());
 
@@ -2104,7 +2232,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, StageWithDefaultStaticProperties)
     ASSERT_TRUE(constraints.requiresInputDocSource);
     ASSERT_TRUE(constraints.consumesLogicalCollectionData);
     ASSERT_EQ(constraints.unionRequirement, StageConstraints::UnionRequirement::kAllowed);
-    ASSERT_EQ(constraints.lookupRequirement, StageConstraints::LookupRequirement::kNotAllowed);
+    ASSERT_EQ(constraints.lookupRequirement, StageConstraints::LookupRequirement::kAllowed);
     ASSERT_EQ(constraints.facetRequirement, StageConstraints::FacetRequirement::kNotAllowed);
 }
 
@@ -2119,14 +2247,15 @@ TEST_F(DocumentSourceExtensionOptimizableTest, SearchLikeStageWithSourceStageSta
     const auto& staticProperties = optimizable->getStaticProperties();
     ASSERT_FALSE(staticProperties.getRequiresInputDocSource());
     ASSERT_EQ(staticProperties.getPosition(), MongoExtensionPositionRequirementEnum::kFirst);
-    ASSERT_EQ(staticProperties.getHostType(), MongoExtensionHostTypeRequirementEnum::kAnyShard);
+    ASSERT_EQ(staticProperties.getHostType(),
+              MongoExtensionHostTypeRequirementEnum::kTargetedShards);
     ASSERT_TRUE(staticProperties.getProvidedMetadataFields().has_value());
     ASSERT_TRUE(staticProperties.getRequiredMetadataFields().has_value());
 
     auto constraints = optimizable->constraints(PipelineSplitState::kUnsplit);
 
     ASSERT_EQ(constraints.requiredPosition, StageConstraints::PositionRequirement::kFirst);
-    ASSERT_EQ(constraints.hostRequirement, StageConstraints::HostTypeRequirement::kAnyShard);
+    ASSERT_EQ(constraints.hostRequirement, StageConstraints::HostTypeRequirement::kTargetedShards);
     ASSERT_FALSE(constraints.requiresInputDocSource);
     ASSERT_FALSE(constraints.consumesLogicalCollectionData);
 }
@@ -2204,7 +2333,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     DepsTracker deps(QueryMetadataBitSet{});
     deps.setMetadataAvailable(DocumentMetadataFields::kSearchScore);
 
-    ASSERT_THROWS_CODE(optimizable->getDependencies(&deps), AssertionException, 17308);
+    ASSERT_THROWS_CODE(optimizable->getDependencies(&deps), AssertionException, 12489100);
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
@@ -2219,7 +2348,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     DepsTracker deps(QueryMetadataBitSet{});
     deps.setMetadataAvailable(DocumentMetadataFields::kSearchScore);
 
-    ASSERT_THROWS_CODE(optimizable->getDependencies(&deps), AssertionException, 17308);
+    ASSERT_THROWS_CODE(optimizable->getDependencies(&deps), AssertionException, 12489100);
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, StageWithNonDefaultSubPipelineStaticProperties) {
@@ -2297,8 +2426,9 @@ public:
 };
 }  // namespace
 
-TEST_F(DocumentSourceExtensionOptimizableTest,
-       DistributedPlanLogicReturnsErrorWhenGivenMismatchedLogicalStage) {
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
+             DistributedPlanLogicReturnsErrorWhenGivenMismatchedLogicalStage,
+             "519") {
     auto logicalStage = new sdk::ExtensionLogicalAggStageAdapter(
         std::make_unique<InvalidDPLLogicalStageWithMismatch>());
     auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
@@ -2306,11 +2436,18 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     auto optimizable = host::DocumentSourceExtensionOptimizable::create(
         getExpCtx(), std::move(logicalStageHandle), MongoExtensionStaticProperties{});
 
-    ASSERT_THROWS_CODE(optimizable->distributedPlanLogic(nullptr), AssertionException, 11513800);
+    optimizable->distributedPlanLogic(nullptr);
 }
 
-TEST_F(DocumentSourceExtensionOptimizableTest,
-       DistributedPlanLogicReturnsErrorWhenGivenDPLWithHostAllocatedExtension) {
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
+             DistributedPlanLogicReturnsErrorWhenGivenDPLWithHostAllocatedExtension,
+             "519") {
+    // Register "$transformStage" as an extension stage.
+    std::unique_ptr<host::HostPortal> hostPortal = std::make_unique<host::HostPortal>();
+    host_connector::HostPortalAdapter portal{
+        MONGODB_EXTENSION_API_VERSION, 1, "", std::move(hostPortal)};
+    portal.getImpl().registerStageDescriptor(&_transformStaticDescriptor);
+
     auto logicalStage = new sdk::ExtensionLogicalAggStageAdapter(
         std::make_unique<InvalidDPLLogicalStageWithHostAllocatedExtension>());
     auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
@@ -2318,7 +2455,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
     auto optimizable = host::DocumentSourceExtensionOptimizable::create(
         getExpCtx(), std::move(logicalStageHandle), MongoExtensionStaticProperties{});
 
-    ASSERT_THROWS_CODE(optimizable->distributedPlanLogic(nullptr), AssertionException, 11882000);
+    optimizable->distributedPlanLogic(nullptr);
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, DistributedPlanLogicWithMergeOnlyStage) {
@@ -2510,7 +2647,7 @@ public:
     ConfigurableViewPolicyTestAstNode(MongoExtensionFirstStageViewApplicationPolicy viewPolicy)
         : sdk::AggStageAstNode("$configurableViewPolicyAndBindingTest"), _viewPolicy(viewPolicy) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         MONGO_UNIMPLEMENTED;
     }
@@ -2524,8 +2661,8 @@ public:
         return _viewPolicy;
     }
 
-    void bindViewInfo(const sdk::ViewInfo& viewInfo) override {
-        _boundViewName = std::string(viewInfo.viewName());
+    void bindResolvedNamespace(const sdk::ResolvedNamespace& resolvedNamespace) override {
+        _boundViewName = std::string(resolvedNamespace.viewName());
     }
 
     std::string getBoundViewName() const {
@@ -2555,13 +2692,13 @@ void testViewPolicyHelper(const NamespaceString& nss,
     host::DocumentSourceExtensionOptimizable::LiteParsedExpanded liteParsed(
         ConfigurableViewPolicyTestAstNode::kStageName, std::move(handle), nss, ifrContext);
 
-    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
-    const auto resolvedNss = NamespaceString::createNamespaceString_forTest("test.collection"_sd);
+    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"sv);
+    const auto resolvedNss = NamespaceString::createNamespaceString_forTest("test.collection"sv);
     std::vector<BSONObj> viewPipeline = {BSON("$match" << BSON("x" << 1))};
-    ViewInfo viewInfo(viewNss, resolvedNss, std::move(viewPipeline));
+    auto view = ResolvedNamespace::makeForView(viewNss, resolvedNss, std::move(viewPipeline));
 
     ASSERT_EQ(liteParsed.getFirstStageViewApplicationPolicy(), expectedPolicy);
-    liteParsed.bindViewInfo(viewInfo, {});
+    liteParsed.bindResolvedNamespace(view, {});
     ASSERT_EQ(astNodeImplPtr->getBoundViewName(), expectedViewName);
 }
 
@@ -2573,7 +2710,7 @@ public:
 
     ViewPipelineValidatorTestAstNode() : sdk::AggStageAstNode(kStageName) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         MONGO_UNIMPLEMENTED;
     }
@@ -2582,12 +2719,12 @@ public:
         return std::make_unique<ViewPipelineValidatorTestAstNode>();
     }
 
-    void bindViewInfo(const sdk::ViewInfo& viewInfo) override {
-        for (const auto& stage : viewInfo.viewPipeline()) {
+    void bindResolvedNamespace(const sdk::ResolvedNamespace& resolvedNamespace) override {
+        for (const auto& stage : resolvedNamespace.viewPipeline()) {
             if (stage.isEmpty()) {
                 continue;
             }
-            StringData stageName = stage.firstElement().fieldNameStringData();
+            std::string_view stageName = stage.firstElement().fieldNameStringData();
             if (stageName != "$match" && stageName != "$addFields" && stageName != "$set") {
                 uasserted(
                     ErrorCodes::BadValue,
@@ -2608,20 +2745,19 @@ void runViewPipelineValidatorCallback(const std::vector<BSONObj>& viewPipeline) 
     host::DocumentSourceExtensionOptimizable::LiteParsedExpanded liteParsed(
         ViewPipelineValidatorTestAstNode::kStageName, std::move(handle), nss, ifrContext);
 
-    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
-    const auto resolvedNss = NamespaceString::createNamespaceString_forTest("test.coll"_sd);
+    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"sv);
+    const auto resolvedNss = NamespaceString::createNamespaceString_forTest("test.coll"sv);
     std::vector<BSONObj> pipelineCopy = viewPipeline;
-    ViewInfo viewInfo(viewNss, resolvedNss, std::move(pipelineCopy));
+    auto view = ResolvedNamespace::makeForView(viewNss, resolvedNss, std::move(pipelineCopy));
 
-    liteParsed.bindViewInfo(viewInfo, {});
+    liteParsed.bindResolvedNamespace(view, {});
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
        LiteParsedExpandedGetViewPolicyWithDefaultPrependAndCallback) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsInsideHybridSearch",
-                                                     true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsInsideHybridSearch", true};
 
-    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
+    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"sv);
     testViewPolicyHelper(_nss,
                          MongoExtensionFirstStageViewApplicationPolicy::kDefaultPrepend,
                          FirstStageViewApplicationPolicy::kDefaultPrepend,
@@ -2630,10 +2766,9 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
        LiteParsedExpandedGetViewPolicyWithDoNothingAndCallback) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsInsideHybridSearch",
-                                                     true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsInsideHybridSearch", true};
 
-    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"_sd);
+    const auto viewNss = NamespaceString::createNamespaceString_forTest("test.view"sv);
     testViewPolicyHelper(_nss,
                          MongoExtensionFirstStageViewApplicationPolicy::kDoNothing,
                          FirstStageViewApplicationPolicy::kDoNothing,
@@ -2642,8 +2777,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 
 TEST_F(DocumentSourceExtensionOptimizableTest,
        ViewPipelineValidatorAcceptsOnlyMatchAddFieldsSetStages) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsInsideHybridSearch",
-                                                     true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsInsideHybridSearch", true};
 
     // Valid: $match and $addFields (and $set) are allowed.
     runViewPipelineValidatorCallback({BSON("$match" << BSON("x" << 1))});
@@ -2657,8 +2791,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest,
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, ViewPipelineValidatorRejectsDisallowedStages) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsInsideHybridSearch",
-                                                     true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsInsideHybridSearch", true};
 
     ASSERT_THROWS(runViewPipelineValidatorCallback({BSON("$project" << BSON("x" << 1))}),
                   AssertionException);
@@ -2687,11 +2820,361 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsRet
     ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
 }
 
+// DocsNeededBounds callback tests for effects.
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsBlockingAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "blocking")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::NeedAll>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::NeedAll>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsBlockingOverridesLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "blocking")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::NeedAll>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::NeedAll>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsNoEffectWithLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "noEffect")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 10);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 10);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsNoEffectAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "noEffect")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsPossibleDecreaseWithLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "possibleDecrease")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 10);
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsPossibleDecreaseAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "possibleDecrease")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsPossibleIncreaseWithLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "possibleIncrease")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 10);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsPossibleIncreaseAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "possibleIncrease")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsExplicitUnknownWithLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "unknown")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsExplicitUnknownAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "unknown")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+// DocsNeededBounds callback tests for concrete limit/skip bounds.
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "limit" << "value" << 10)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 10);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 10);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsLimitWithSmallerDownstreamLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "limit" << "value" << 10)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 5);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 5);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 5);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsLimitWithLargerDownstreamLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "limit" << "value" << 5)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    // Pipeline: [ext_limit(5), $limit(10)]. Reverse walk: apply $limit(10) → min=10,max=10,
+    // then apply ext_limit(5) → min=5,max=5 (smaller limit wins).
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 5);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 5);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsSkipWithLimit) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "skip" << "value" << 5)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    // Pipeline: [ext_skip(5), $limit(10)]. Reverse walk: apply $limit(10) → min=10,max=10,
+    // then apply ext_skip(5) → min=15,max=15.
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 15);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 15);
+}
+
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsSkipAlone) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "skip" << "value" << 5)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    // Skip on Unknown bounds stays Unknown.
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+// Test that a null callback return (empty BSONObj) defaults to Unknown, even with downstream limit.
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       ExtensionStageDocsNeededBoundsNullCallbackDefaultsToUnknown) {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(BSONObj(), BSONObj()));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto limitStage = DocumentSourceLimit::create(getExpCtx(), 10);
+    auto pipeline = Pipeline::create({extensionStage, limitStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMinBounds()));
+    ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds.getMaxBounds()));
+}
+
+// Two consecutive extension stages with concrete DocsNeededBounds compose correctly.
+TEST_F(DocumentSourceExtensionOptimizableTest, ExtensionStageDocsNeededBoundsConsecutiveExtStages) {
+    auto skipAstNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "skip" << "value" << 3)));
+    AggStageAstNodeHandle skipHandle{skipAstNode};
+    auto skipExtensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(skipHandle));
+
+    auto limitAstNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "limit" << "value" << 7)));
+    AggStageAstNodeHandle limitHandle{limitAstNode};
+    auto limitExtensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(limitHandle));
+
+    // Pipeline: [ext_skip(3), ext_limit(7)]. Reverse walk: ext_limit(7) -> (7, 7),
+    // then ext_skip(3) -> (10, 10).
+    auto pipeline = Pipeline::create({skipExtensionStage, limitExtensionStage}, getExpCtx());
+    auto bounds = extractDocsNeededBounds(*pipeline);
+
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMinBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMinBounds()), 10);
+    ASSERT_TRUE(std::holds_alternative<long long>(bounds.getMaxBounds()));
+    ASSERT_EQUALS(std::get<long long>(bounds.getMaxBounds()), 10);
+}
+
+// The IDL validator rejects a limit/skip effect that is missing the 'value' field.
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
+             ExtensionStageDocsNeededBoundsLimitMissingValue,
+             "519") {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(BSONObj(),
+                                                                       BSON("effect" << "limit")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    extractDocsNeededBounds(*pipeline);
+}
+
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
+             ExtensionStageDocsNeededBoundsSkipMissingValue,
+             "519") {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(BSONObj(),
+                                                                       BSON("effect" << "skip")));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    extractDocsNeededBounds(*pipeline);
+}
+
+// The IDL validator rejects an effect that erroneously specifies a 'value' field.
+DEATH_TEST_F(DocumentSourceExtensionOptimizableTestDeathTest,
+             ExtensionStageDocsNeededBoundsUnknownWithValue,
+             "519") {
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::CustomBoundsAstNode>(
+            BSONObj(), BSON("effect" << "unknown" << "value" << 5)));
+    AggStageAstNodeHandle handle{astNode};
+    auto extensionStage =
+        host::DocumentSourceExtensionOptimizable::create(getExpCtx(), std::move(handle));
+
+    auto pipeline = Pipeline::create({extensionStage}, getExpCtx());
+    extractDocsNeededBounds(*pipeline);
+}
+
 // Tests for registerStageRules / _extensionRuleRegistry.
 
 class StageRulesTest : public DocumentSourceExtensionOptimizableTest {
 public:
-    static constexpr StringData kStageName = "$testRulesStage"_sd;
+    static constexpr std::string_view kStageName = "$testRulesStage"sv;
 
     inline static const PipelineRewriteRule kReorderRule{"reorderRule",
                                                          kPipelineRewriteRuleTagReordering};
@@ -2856,7 +3339,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ExplainPropagatesDeadlineToLogica
     const auto beforeMs = Date_t::now().toMillisSinceEpoch();
     getOpCtx()->setDeadlineAfterNowBy(maxTimeMs, ErrorCodes::MaxTimeMSExpired);
 
-    SerializationOptions opts;
+    query_shape::SerializationOptions opts;
     opts.verbosity = ExplainOptions::Verbosity::kQueryPlanner;
     const auto result = optimizable->serialize(opts);
     const auto afterMs = Date_t::now().toMillisSinceEpoch();
@@ -2877,7 +3360,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ExplainPropagatesDeadlineToLogica
 TEST_F(DocumentSourceExtensionOptimizableTest, ExplainWithNoDeadlineReportsMaxDeadline) {
     auto optimizable = makeExplainContextOptimizable(getExpCtx());
 
-    SerializationOptions opts;
+    query_shape::SerializationOptions opts;
     opts.verbosity = ExplainOptions::Verbosity::kQueryPlanner;
     const auto result = optimizable->serialize(opts);
 
@@ -2896,7 +3379,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, ExplainDetectsInterrupt) {
 
     getOpCtx()->markKilled(ErrorCodes::Interrupted);
 
-    SerializationOptions opts;
+    query_shape::SerializationOptions opts;
     opts.verbosity = ExplainOptions::Verbosity::kQueryPlanner;
     ASSERT_THROWS_CODE(optimizable->serialize(opts), DBException, ErrorCodes::Interrupted);
 }
@@ -2917,7 +3400,7 @@ const BSONObj LogicalStageWithFilter::kFilter = BSON("x" << 1);
 }  // namespace
 
 TEST_F(DocumentSourceExtensionOptimizableTest, GetQuery_SourceStageNoFilter) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsOptimizations", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsOptimizations", true};
     auto logicalStage = new sdk::ExtensionLogicalAggStageAdapter(
         std::make_unique<sdk::shared_test_stages::TransformLogicalAggStage>());
     auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
@@ -2931,7 +3414,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, GetQuery_SourceStageNoFilter) {
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, GetQuery_SourceStageWithFilter) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsOptimizations", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsOptimizations", true};
     auto logicalStage =
         new sdk::ExtensionLogicalAggStageAdapter(std::make_unique<LogicalStageWithFilter>());
     auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
@@ -2945,7 +3428,7 @@ TEST_F(DocumentSourceExtensionOptimizableTest, GetQuery_SourceStageWithFilter) {
 }
 
 TEST_F(DocumentSourceExtensionOptimizableTest, GetFilter_TransformStageWithFilter) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtensionsOptimizations", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagExtensionsOptimizations", true};
     auto logicalStage =
         new sdk::ExtensionLogicalAggStageAdapter(std::make_unique<LogicalStageWithFilter>());
     auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
@@ -2970,6 +3453,20 @@ public:
     static const BSONObj kSortPattern;
 };
 const BSONObj LogicalStageWithSortPattern::kSortPattern = BSON("score" << -1);
+
+/**
+ * A transform logical stage whose distributed plan logic returns a non-empty merge sort pattern,
+ * but does not declare sortKey in providedMetadataFields.
+ */
+class LogicalStageWithMergeSortPatternDPL
+    : public sdk::shared_test_stages::TransformLogicalAggStage {
+public:
+    boost::optional<sdk::DistributedPlanLogic> getDistributedPlanLogic() const override {
+        sdk::DistributedPlanLogic dpl;
+        dpl.sortPattern = BSON("a" << 1);
+        return dpl;
+    }
+};
 }  // namespace
 
 TEST_F(DocumentSourceExtensionOptimizableTest, GetSortPattern_ExtensionSortPatternPropagated) {
@@ -2993,6 +3490,19 @@ TEST_F(DocumentSourceExtensionOptimizableTest, GetSortPattern_EmptyWhenNotOverri
     ASSERT_TRUE(optimizable->getSortPattern().empty());
 }
 
+TEST_F(DocumentSourceExtensionOptimizableTest,
+       DistributedPlanLogicWithMergeSortPatternButNoSortKeyMetadataThrows) {
+    // A stage whose DPL returns a non-empty merge sort pattern must declare that it provides
+    // sortKey metadata. This stage does not, so distributedPlanLogic() should throw.
+    auto logicalStage = new sdk::ExtensionLogicalAggStageAdapter(
+        std::make_unique<LogicalStageWithMergeSortPatternDPL>());
+    auto logicalStageHandle = LogicalAggStageHandle(logicalStage);
+    auto optimizable = host::DocumentSourceExtensionOptimizable::create(
+        getExpCtx(), std::move(logicalStageHandle), MongoExtensionStaticProperties{});
+
+    ASSERT_THROWS_CODE(optimizable->distributedPlanLogic(nullptr), AssertionException, 12489101);
+}
+
 // ============================================================================
 // In-$lookup IFR kickback for extension $search/$searchMeta stages.
 // ============================================================================
@@ -3001,8 +3511,8 @@ class DocumentSourceExtensionOptimizableInLookupKickbackTest
     : public DocumentSourceExtensionOptimizableTest {
 protected:
     void runKickbackCase(bool hybridFlagEnabled, std::string_view stageName, bool expectKickback) {
-        RAIIServerParameterControllerForTest hybridFlag{"featureFlagExtensionsInsideHybridSearch",
-                                                        hybridFlagEnabled};
+        unittest::ServerParameterGuard hybridFlag{"featureFlagExtensionsInsideHybridSearch",
+                                                  hybridFlagEnabled};
         auto expCtx = getExpCtx();
         expCtx->setInLookup(true);
 
@@ -3024,6 +3534,23 @@ protected:
         }
     }
 };
+
+TEST_F(DocumentSourceExtensionOptimizableInLookupKickbackTest, FiresForExtensionVectorSearch) {
+    unittest::ServerParameterGuard hybridFlag{"featureFlagExtensionsInsideHybridSearch", false};
+    auto expCtx = getExpCtx();
+    expCtx->setInLookup(true);
+
+    auto initialCount = vector_search_metrics::inLookupKickbackRetryCount.get();
+    auto astNode = new sdk::ExtensionAggStageAstNodeAdapter(
+        std::make_unique<sdk::shared_test_stages::TransformAggStageAstNode>(
+            search_helpers::kExtensionVectorSearchStageName, BSONObj()));
+
+    ASSERT_THROWS_CODE(
+        host::DocumentSourceExtensionOptimizable::create(expCtx, AggStageAstNodeHandle{astNode}),
+        DBException,
+        ErrorCodes::IFRFlagRetry);
+    ASSERT_EQ(vector_search_metrics::inLookupKickbackRetryCount.get(), initialCount + 1);
+}
 
 TEST_F(DocumentSourceExtensionOptimizableInLookupKickbackTest, FiresForExtensionSearch) {
     runKickbackCase(/*hybridFlagEnabled=*/false,

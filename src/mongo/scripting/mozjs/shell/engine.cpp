@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/scripting/mozjs/shell/engine.h"
 
@@ -66,28 +40,6 @@ namespace mongo {
 namespace {
 auto operationMozJSShellRuntimeInterfaceDecoration =
     OperationContext::declareDecoration<mozjs::MozJSImplScope*>();
-
-/**
- * A stable proxy that delegates kill-op notifications to whatever the current global script engine
- * is. This avoids dangling pointer issues when the global engine is swapped (e.g., from MozJS to
- * ExternalJS) since registerKillOpListener has no corresponding unregister and the listener pointer
- * must remain valid for the lifetime of the ServiceContext.
- */
-class ScriptEngineKillOpProxy : public KillOpListenerInterface {
-public:
-    void interrupt(ClientLock& lk, OperationContext* opCtx) override {
-        if (auto engine = getGlobalScriptEngine()) {
-            engine->interrupt(lk, opCtx);
-        }
-    }
-    void interruptAll(ServiceContextLock& svcCtxLock) override {
-        if (auto engine = getGlobalScriptEngine()) {
-            engine->interruptAll(svcCtxLock);
-        }
-    }
-};
-
-static ScriptEngineKillOpProxy killOpProxy;
 }  // namespace
 
 void ScriptEngine::setup(ExecutionEnvironment environment) {
@@ -104,10 +56,6 @@ void ScriptEngine::setup(ExecutionEnvironment environment) {
     if (hasGlobalServiceContext()) {
         registerScriptEngineKillOpProxy(getGlobalServiceContext());
     }
-}
-
-void registerScriptEngineKillOpProxy(ServiceContext* svcCtx) {
-    svcCtx->registerKillOpListener(&killOpProxy);
 }
 
 namespace mozjs {
@@ -167,6 +115,14 @@ int MozJSScriptEngine::getJSHeapLimitMB() const {
 
 void MozJSScriptEngine::setJSHeapLimitMB(int limit) {
     gJSHeapLimitMB.store(limit);
+}
+
+bool MozJSScriptEngine::getJSAbortOnOutOfMemory() const {
+    return _abortOnOutOfMemory.load();
+}
+
+void MozJSScriptEngine::setJSAbortOnOutOfMemory(bool value) {
+    _abortOnOutOfMemory.store(value);
 }
 
 bool MozJSScriptEngine::getJSUseLegacyMemoryTracking() const {

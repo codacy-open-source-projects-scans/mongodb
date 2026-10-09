@@ -6,7 +6,7 @@
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
-import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_file_export_helpers.js";
+import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_metrics_file_export_helpers.js";
 import {waitForIndexStatusMetrics} from "jstests/noPassthrough/index_builds/libs/index_build_otel_utils.js";
 
 const {metricsDir, otelParams} = otelFileExportParams(jsTestName());
@@ -50,14 +50,22 @@ const baselineMetrics = waitForIndexStatusMetrics(
 jsTest.log("Starting an index build on each collection and freezing them.");
 IndexBuildTest.pauseIndexBuilds(testDB.getMongo());
 
-const awaitFirstIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), firstColl.getFullName(), {b: 1}, {}, [
-    ErrorCodes.IndexBuildAborted,
-]);
+const awaitFirstIndexBuild = IndexBuildTest.startIndexBuild(
+    testDB.getMongo(),
+    firstColl.getFullName(),
+    {b: 1},
+    {},
+    [ErrorCodes.IndexBuildAborted],
+);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, firstCollName, "b_1");
 
-const awaitSecondIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), secondColl.getFullName(), {b: 1}, {}, [
-    ErrorCodes.IndexBuildAborted,
-]);
+const awaitSecondIndexBuild = IndexBuildTest.startIndexBuild(
+    testDB.getMongo(),
+    secondColl.getFullName(),
+    {b: 1},
+    {},
+    [ErrorCodes.IndexBuildAborted],
+);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, secondCollName, "b_1");
 
 jsTest.log("Dropping database " + dbName + " with in-progress index builds on its collections.");

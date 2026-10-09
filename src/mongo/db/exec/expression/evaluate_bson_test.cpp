@@ -1,34 +1,10 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
@@ -39,11 +15,34 @@
 
 namespace mongo {
 namespace expression_evaluation_test {
+using namespace std::literals::string_view_literals;
+
+TEST(ExpressionBsonSize, WorksOnDocumentLargerThan16MB) {
+    auto expCtx = ExpressionContextForTest{};
+    VariablesParseState vps = expCtx.variablesParseState;
+    const BSONObj obj = BSON("$bsonSize" << "$$ROOT");
+    auto expression = Expression::parseExpression(&expCtx, obj, vps);
+
+    // Four 9MB strings make a document exceeding the 16MiB BSON size limit.
+    constexpr size_t longStringLength = 9 * 1024 * 1024;
+    static_assert(4 * longStringLength > BSONObjMaxUserSize);
+    MutableDocument md;
+    md.addField("a", Value(std::string(longStringLength, 'A')));
+    md.addField("b", Value(std::string(longStringLength, 'B')));
+    md.addField("c", Value(std::string(longStringLength, 'C')));
+    md.addField("d", Value(std::string(longStringLength, 'D')));
+    Document largeDoc = md.freeze();
+
+    // Must not throw BSONObjectTooLarge for intermediate documents larger than 16MiB.
+    Value result = expression->evaluate(largeDoc, &expCtx.variables);
+    ASSERT_EQ(result.getType(), BSONType::numberInt);
+    ASSERT_GT(result.getInt(), static_cast<int>(BSONObjMaxUserSize));
+}
 
 TEST(ExpressionInternalFindAllValuesAtPath, PreservesSimpleArray) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a"_sd));
+    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a"sv));
     auto expression = Expression::parseExpression(&expCtx, obj, vps);
     auto result =
         expression->evaluate(Document{{"a", Value({Value(1), Value(2)})}}, &expCtx.variables);
@@ -53,7 +52,7 @@ TEST(ExpressionInternalFindAllValuesAtPath, PreservesSimpleArray) {
 TEST(ExpressionInternalFindAllValuesAtPath, PreservesSimpleNestedArray) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"_sd));
+    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"sv));
     auto expression = Expression::parseExpression(&expCtx, obj, vps);
     auto doc = Document{{"a", Value(Document{{"b", Value({Value(1), Value(2)})}})}};
     auto result = expression->evaluate(doc, &expCtx.variables);
@@ -63,7 +62,7 @@ TEST(ExpressionInternalFindAllValuesAtPath, PreservesSimpleNestedArray) {
 TEST(ExpressionInternalFindAllValuesAtPath, DescendsThroughSingleArrayAndObject) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"_sd));
+    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"sv));
     auto expression = Expression::parseExpression(&expCtx, obj, vps);
     Document doc = Document{
         {"a",
@@ -75,7 +74,7 @@ TEST(ExpressionInternalFindAllValuesAtPath, DescendsThroughSingleArrayAndObject)
 TEST(ExpressionInternalFindAllValuesAtPath, DescendsThroughMultipleObjectArrayPairs) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"_sd));
+    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"sv));
     auto expression = Expression::parseExpression(&expCtx, obj, vps);
     Document doc = Document{{"a",
                              Value({Document{{"b", Value({Value(1), Value(2)})}},
@@ -88,7 +87,7 @@ TEST(ExpressionInternalFindAllValuesAtPath, DescendsThroughMultipleObjectArrayPa
 TEST(ExpressionInternalFindAllValuesAtPath, DoesNotDescendThroughDoubleArray) {
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
-    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"_sd));
+    const BSONObj obj = BSON("$_internalFindAllValuesAtPath" << Value("a.b"sv));
     auto expression = Expression::parseExpression(&expCtx, obj, vps);
     Document seenDoc1 = Document{{"b", Value({Value(5), Value(6)})}};
     Document seenDoc2 = Document{{"b", Value({Value(3), Value(4)})}};

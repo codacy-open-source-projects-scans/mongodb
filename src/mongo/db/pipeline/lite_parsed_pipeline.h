@@ -1,36 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
@@ -38,6 +10,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/stage_params.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/util/deferred.h"
 #include "mongo/db/read_concern_support_result.h"
@@ -48,11 +21,14 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <string_view>
 #include <vector>
+
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo {
 
-// TODO SERVER-123689 Remove these or write investigation comment.
 class CollectionRoutingInfo;
 class CollectionOrViewAcquisition;
 
@@ -62,7 +38,7 @@ using StageSpecs = std::vector<std::unique_ptr<LiteParsedDocumentSource>>;
  * A semi-parsed version of a Pipeline, parsed just enough to determine information like what
  * foreign collections are involved.
  */
-class MONGO_MOD_PUBLIC LiteParsedPipeline {
+class [[MONGO_MOD_PUBLIC]] LiteParsedPipeline {
 public:
     /**
      * Constructs a LiteParsedPipeline from the raw BSON stages given in 'request'.
@@ -80,10 +56,11 @@ public:
     /**
      * Constructs a LiteParsedPipeline from the raw BSON stages in 'pipelineStages'.
      *
-     * IMPORTANT: Each stage will store the BSONElement view into the original BSONObj, so the
-     * caller is responsible for ensuring the lifetime of the original BSONObj exceeds that of this
-     * LiteParsedPipeline. If the original BSON's lifetime cannot be guaranteed, the BSON can be
-     * owned by the LiteParsedPipeline by calling makeOwned() after construction.
+     * IMPORTANT: Each stage will store BSONElement views into the original BSONObjs, so the
+     * caller is responsible for ensuring their lifetimes exceed that of this LiteParsedPipeline.
+     * For top-level pipelines where BSON lifetime cannot be guaranteed, call makeOwned() after
+     * construction. For subpipelines inside a parent stage's lite parser, use
+     * OwnedLiteParsedPipeline instead, which co-locates the owned BSON with the parsed pipeline.
      */
     LiteParsedPipeline(const NamespaceString& nss,
                        const std::vector<BSONObj>& pipelineStages,
@@ -93,15 +70,22 @@ public:
           _isRunningAgainstView_ForHybridSearch(isRunningAgainstView_ForHybridSearch) {
         _stageSpecs.reserve(pipelineStages.size());
         for (auto&& rawStage : pipelineStages) {
-            auto stageCopy = rawStage;
-            if (options.makeSubpipelineOwned) {
-                stageCopy.makeOwned();
-            }
-            _stageSpecs.push_back(LiteParsedDocumentSource::parse(nss, stageCopy, options));
-            if (options.makeSubpipelineOwned) {
-                _stageSpecs.back()->setOwnedBson(stageCopy);
-            }
+            _stageSpecs.push_back(LiteParsedDocumentSource::parse(nss, rawStage, options));
         }
+    }
+
+    /**
+     * Constructs a LiteParsedPipeline from already-parsed StageSpecs without re-parsing. Useful
+     * when a desugarer assembles a subpipeline from existing LiteParsedDocumentSources.
+     */
+    LiteParsedPipeline(NamespaceString nss,
+                       StageSpecs stages,
+                       bool isRunningAgainstView_ForHybridSearch = false)
+        : _stageSpecs(std::move(stages)),
+          _originalParseNss(std::move(nss)),
+          _isRunningAgainstView_ForHybridSearch(isRunningAgainstView_ForHybridSearch) {
+        // _hasChangeStream and _involvedNamespaces are intentionally left at their in-class
+        // defaults; they are Deferred and will be computed on demand from _stageSpecs.
     }
 
     /**
@@ -111,6 +95,7 @@ public:
     LiteParsedPipeline(const LiteParsedPipeline& other)
         : _originalParseNss(other._originalParseNss),
           _isRunningAgainstView_ForHybridSearch(other._isRunningAgainstView_ForHybridSearch),
+          _numPrependedViewStages(other._numPrependedViewStages),
           _hasChangeStream(&computeHasChangeStream),
           _involvedNamespaces(&computeInvolvedNamespaces) {
 
@@ -127,6 +112,7 @@ public:
         std::swap(_originalParseNss, other._originalParseNss);
         std::swap(_isRunningAgainstView_ForHybridSearch,
                   other._isRunningAgainstView_ForHybridSearch);
+        std::swap(_numPrependedViewStages, other._numPrependedViewStages);
         // _hasChangeStream and _involvedNamespaces are Deferred and will be recomputed on demand,
         // so we just reset them to point to our _stageSpecs.
         _hasChangeStream = Deferred<bool (*)(const StageSpecs&)>(&computeHasChangeStream);
@@ -137,6 +123,11 @@ public:
 
     LiteParsedPipeline clone() const {
         return LiteParsedPipeline(*this);
+    }
+
+    void appendStage(std::unique_ptr<LiteParsedDocumentSource> stage) {
+        _stageSpecs.push_back(std::move(stage));
+        resetDeferredCaches();
     }
 
     /**
@@ -178,6 +169,15 @@ public:
             spec->getForeignExecutionNamespaces(nssSet);
         }
         return {nssSet.begin(), nssSet.end()};
+    }
+
+    /**
+     * Returns true if this is the merging half of a split sharded aggregation, i.e. it begins with
+     * a $mergeCursors stage (injected by mongos when dispatching the merge). Such a pipeline is
+     * issued by a router even though it carries no shard/database version.
+     */
+    bool isMergePipeline() const {
+        return !_stageSpecs.empty() && _stageSpecs.front()->getParseTimeName() == "$mergeCursors"sv;
     }
 
     /**
@@ -270,6 +270,21 @@ public:
     }
 
     /**
+     * Returns true if the pipeline has a stage backed by mongot.
+     */
+    bool hasMongotStage() const {
+        return hasSearchStage() || hasHybridSearchStage() || hasExtensionSearchStage() ||
+            hasExtensionVectorSearchStage();
+    }
+
+    /**
+     * Returns true if the pipeline starts with a $currentOp stage.
+     */
+    bool startsWithCurrentOpStage() const {
+        return !_stageSpecs.empty() && _stageSpecs.front()->isCurrentOpStage();
+    }
+
+    /**
      * Returns true if any stage in the pipeline is a ranked stage (produces $sortKey metadata) or
      * if the pipeline contains an explicit $sort.
      */
@@ -289,6 +304,16 @@ public:
     }
 
     /**
+     * Returns true if any stage in the pipeline is a scoreDetails stage (produces scoreDetails
+     * metadata).
+     */
+    bool isScoreDetailsPipeline() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return spec->isScoreDetailsStage();
+        });
+    }
+
+    /**
      * Returns true if all stages in the pipeline are selection stages (they do not modify or
      * transform documents, only retrieve, limit, or order them).
      */
@@ -303,7 +328,7 @@ public:
      * offending stage and `parentStageName` (e.g. "$rankFusion"). Used by hybrid search stages
      * to validate input pipelines.
      */
-    void validateAllStagesAreSelection(int errorCode, StringData parentStageName) const {
+    void validateAllStagesAreSelection(int errorCode, std::string_view parentStageName) const {
         for (const auto& stage : _stageSpecs) {
             uassert(errorCode,
                     str::stream()
@@ -411,6 +436,15 @@ public:
     void validate(const OperationContext* opCtx, bool performApiVersionChecks = true) const;
 
     /**
+     * If 'request' has 'allowPartialResults: true', throws InvalidOptions when the pipeline
+     * contains a stage for which returning partial results does not make sense (write, change
+     * stream, or search stages). This is a no-op when 'allowPartialResults' is unset or false.
+     *
+     * This is only meaningful on a router.
+     */
+    void validateAllowPartialResults(const AggregateCommandRequest& request) const;
+
+    /**
      * Validates the pipeline against collection metadata. Checks stage constraints (e.g.
      * canRunOnTimeseries) using the provided collection routing info or acquisition.
      * Mirrors Pipeline::validateWithCollectionMetadata.
@@ -424,7 +458,7 @@ public:
      */
     void checkStagesAllowedInViewDefinition() const;
 
-    // TODO SERVER-121091 This can be removed once hybrid search desugars into the internal hybrid
+    // TODO SERVER-121094 This can be removed once hybrid search desugars into the internal hybrid
     // search stage.
     bool isRunningAgainstView_ForHybridSearch() const {
         return _isRunningAgainstView_ForHybridSearch;
@@ -432,6 +466,40 @@ public:
 
     const StageSpecs& getStages() const {
         return _stageSpecs;
+    }
+
+    /**
+     * Rejection applies to the command as a whole, so a single bypassing stage exempts the
+     * entire pipeline. See LiteParsedDocumentSource::shouldBypassQuerySettingsRejection().
+     */
+    bool shouldBypassQuerySettingsRejection() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](const auto& stage) {
+            return stage->shouldBypassQuerySettingsRejection();
+        });
+    }
+
+    /**
+     * The number of stages at the front of this pipeline that came from a prepended view definition
+     * rather than from the user's request. See '_numPrependedViewStages'.
+     *
+     * Since getStageParams() emits exactly one StageParams per lite-parsed stage, this is a valid
+     * index into the pipeline it returns. It is NOT a valid index into a serialized DocumentSource
+     * pipeline, because alias stages ($sortByCount, $bucket, ...) expand only at parse time.
+     */
+    size_t getNumPrependedViewStages() const {
+        return _numPrependedViewStages;
+    }
+
+    /**
+     * Returns the StageParams for each stage in this pipeline.
+     */
+    StageParamsPipeline getStageParams() const {
+        StageParamsPipeline params;
+        params.reserve(_stageSpecs.size());
+        for (const auto& stage : _stageSpecs) {
+            params.push_back(stage->getStageParams());
+        }
+        return params;
     }
 
     /**
@@ -475,25 +543,56 @@ public:
     /**
      * Applies view semantics to this pipeline.
      *
-     * Each stage is given a chance to validate the view or modify itself via its bindViewInfo()
-     * override. Whether the view pipeline is automatically prepended is determined solely by the
-     * first stage's FirstStageViewApplicationPolicy: if it is kDefaultPrepend (or the
-     * pipeline is empty), the desugared view pipeline is cloned and prepended; otherwise it is not.
+     * Each stage is given a chance to validate the view or modify itself via its
+     * bindResolvedNamespace() override. Whether the view pipeline is automatically prepended is
+     * determined solely by the first stage's FirstStageViewApplicationPolicy: if it is
+     * kDefaultPrepend (or the pipeline is empty), the desugared view pipeline is cloned and
+     * prepended; otherwise it is not.
      *
-     * The provided ViewInfo is not mutated. The resolvedNamespaces map is passed to each stage's
-     * bindViewInfo() to provide access to all resolved namespaces in the aggregation. This
-     * will be used for view resolution in secondary namespaces (e.g. `from` field in $unionWith or
-     * $lookup).
+     * The provided view ResolvedNamespace is not mutated. The resolvedNamespaces map is passed to
+     * each stage's bindResolvedNamespace() to provide access to all resolved namespaces in the
+     * aggregation. This will be used for view resolution in secondary namespaces (e.g. `from` field
+     * in $unionWith or $lookup).
      */
-    void handleView(const ViewInfo& viewInfo, const ResolvedNamespaceMap& resolvedNamespaces);
+    void handleView(const ResolvedNamespace& view, const ResolvedNamespaceMap& resolvedNamespaces);
+
+    /**
+     * Calls bindResolvedNamespace() on each stage in the pipeline.
+     */
+    void bindResolvedNamespaceToStages(const ResolvedNamespace& view,
+                                       const ResolvedNamespaceMap& resolvedNamespaces,
+                                       size_t start,
+                                       size_t end);
+
+    /**
+     * Returns the FirstStageViewApplicationPolicy of the first stage the *user* wrote, skipping
+     * over any view-definition stages that handleView() prepended onto this pipeline. Returns
+     * kDefaultPrepend if there are no user stages.
+     *
+     * Never use a prepended view stage's policy to decide whether a view prefix can be discarded;
+     * the view would be silently dropped from the query.
+     *
+     * TODO SERVER-120477 Remove this when legacy mongot is removed.
+     */
+    FirstStageViewApplicationPolicy getUserFirstStageViewApplicationPolicy() const;
 
 private:
-    friend struct ViewInfo;
-
     /**
      * Checks that no stage in the pipeline has canRunOnTimeseries == false.
      */
     void validateTimeseries() const;
+
+    /**
+     * Returns true if this pipeline has at least one stage that the user wrote, i.e. one that
+     * handleView() did not prepend.
+     */
+    bool _hasUserStages() const;
+
+    /**
+     * Returns the first stage the user wrote, skipping any stages handleView() prepended. Requires
+     * _hasUserStages().
+     */
+    const LiteParsedDocumentSource* _getFirstUserStage() const;
 
     // This is logically const - any changes to _stageSpecs will invalidate cached copies of
     // "_hasChangeStream" and "_involvedNamespaces" below.
@@ -503,9 +602,16 @@ private:
 
     // This variable specifies whether the pipeline is running on a view's namespace. This is
     // currently needed for $rankFusion/$scoreFusion positional validation.
-    // TODO SERVER-121974 This can be removed once hybrid search views are validated in
+    // TODO SERVER-121094 This can be removed once hybrid search views are validated in
     // LiteParsed using the LiteParsedConstraints.
     bool _isRunningAgainstView_ForHybridSearch = false;
+
+    // Number of stages at the front of '_stageSpecs' that came from a view definition prepended by
+    // handleView(), rather than from the pipeline the user wrote. Maintained by _stitchFront() and
+    // adjusted by replaceStageWith() when one of those prepended stages is desugared in place. Used
+    // by getUserFirstStageViewApplicationPolicy() and getNumPrependedViewStages().
+    // TODO SERVER-120477 Remove this when legacy mongot is removed.
+    size_t _numPrependedViewStages = 0;
 
     /**
      * Prepend 'prefix' stages in front of this pipeline, taking ownership of prefix.

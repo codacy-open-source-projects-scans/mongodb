@@ -1,39 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "cxxabi.h"
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonelement.h"
@@ -44,7 +13,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
@@ -76,6 +44,14 @@
 #include <cstddef>
 #include <memory>
 #include <tuple>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "cxxabi.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -171,7 +147,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseInvalidName) {
     ASSERT_THROWS_CODE(
         catalogClient()->getDatabase(operationContext(),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "b.c"),
-                                     repl::ReadConcernLevel::kMajorityReadConcern),
+                                     repl::ReadConcernArgs::kMajority),
         DBException,
         ErrorCodes::InvalidNamespace);
 }
@@ -186,9 +162,8 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseExisting) {
     const OpTime newOpTime(Timestamp(7, 6), 5);
 
     auto future = launchAsync([this, &expectedDb] {
-        return catalogClient()->getDatabase(operationContext(),
-                                            expectedDb.getDbName(),
-                                            repl::ReadConcernLevel::kMajorityReadConcern);
+        return catalogClient()->getDatabase(
+            operationContext(), expectedDb.getDbName(), repl::ReadConcernArgs::kMajority);
     });
 
     onFindWithMetadataCommand([this, &expectedDb, newOpTime](const RemoteCommandRequest& request) {
@@ -238,7 +213,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseStaleSecondaryRetrySuccess) {
             operationContext(),
             DatabaseName::createDatabaseName_forTest(boost::none,
                                                      expectedDb.getDbName().toString_forTest()),
-            repl::ReadConcernLevel::kMajorityReadConcern);
+            repl::ReadConcernArgs::kMajority);
     });
 
     // Return empty result set as if the database wasn't found
@@ -266,7 +241,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseStaleSecondaryRetryNoPrimary) {
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "NonExistent"),
-                               repl::ReadConcernLevel::kMajorityReadConcern),
+                               repl::ReadConcernArgs::kMajority),
                            DBException,
                            ErrorCodes::NotWritablePrimary);
     });
@@ -290,7 +265,7 @@ TEST_F(ShardingCatalogClientTest, GetDatabaseNotExisting) {
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "NonExistent"),
-                               repl::ReadConcernLevel::kMajorityReadConcern),
+                               repl::ReadConcernArgs::kMajority),
                            DBException,
                            ErrorCodes::NamespaceNotFound);
     });
@@ -321,8 +296,8 @@ TEST_F(ShardingCatalogClientTest, GetAllShardsValid) {
     const vector<ShardType> expectedShardsList = {s1, s2, s3};
 
     auto future = launchAsync([this] {
-        auto shards = catalogClient()->getAllShards(operationContext(),
-                                                    repl::ReadConcernLevel::kMajorityReadConcern);
+        auto shards =
+            catalogClient()->getAllShards(operationContext(), repl::ReadConcernArgs::kMajority);
         return shards.value;
     });
 
@@ -354,10 +329,10 @@ TEST_F(ShardingCatalogClientTest, GetAllShardsWithInvalidShard) {
     configTargeter()->setFindHostReturnValue(HostAndPort("TestHost1"));
 
     auto future = launchAsync([this] {
-        ASSERT_THROWS_CODE(catalogClient()->getAllShards(
-                               operationContext(), repl::ReadConcernLevel::kMajorityReadConcern),
-                           DBException,
-                           ErrorCodes::NoSuchKey);
+        ASSERT_THROWS_CODE(
+            catalogClient()->getAllShards(operationContext(), repl::ReadConcernArgs::kMajority),
+            DBException,
+            ErrorCodes::NoSuchKey);
     });
 
     onFindCommand([](const RemoteCommandRequest& request) {
@@ -381,7 +356,7 @@ TEST_F(ShardingCatalogClientTest, GetAllShardsWithDrainingShard) {
     auto future = launchAsync([this]() {
         const auto shards =
             catalogClient()->getAllShards(operationContext(),
-                                          repl::ReadConcernLevel::kMajorityReadConcern,
+                                          repl::ReadConcernArgs::kMajority,
                                           BSON(ShardType::draining.ne(true)) /* excludeDraining */);
         return shards.value;
     });
@@ -438,15 +413,14 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
     auto future = launchAsync([this, &chunksQuery, newOpTime, &collEpoch, &collTimestamp] {
         OpTime opTime;
 
-        auto chunks =
-            assertGet(catalogClient()->getChunks(operationContext(),
-                                                 chunksQuery,
-                                                 BSON(ChunkType::lastmod() << -1),
-                                                 1,
-                                                 &opTime,
-                                                 collEpoch,
-                                                 collTimestamp,
-                                                 repl::ReadConcernLevel::kMajorityReadConcern));
+        auto chunks = assertGet(catalogClient()->getChunks(operationContext(),
+                                                           chunksQuery,
+                                                           BSON(ChunkType::lastmod() << -1),
+                                                           1,
+                                                           &opTime,
+                                                           collEpoch,
+                                                           collTimestamp,
+                                                           repl::ReadConcernArgs::kMajority));
         ASSERT_EQ(2U, chunks.size());
         ASSERT_EQ(newOpTime, opTime);
 
@@ -502,15 +476,14 @@ TEST_F(ShardingCatalogClientTest, GetChunksForUUIDNoSortNoLimit) {
              << BSON("$gte" << static_cast<long long>(queryChunkVersion.toLong()))));
 
     auto future = launchAsync([this, &chunksQuery, &collEpoch, &collTimestamp] {
-        auto chunks =
-            assertGet(catalogClient()->getChunks(operationContext(),
-                                                 chunksQuery,
-                                                 BSONObj(),
-                                                 boost::none,
-                                                 nullptr,
-                                                 collEpoch,
-                                                 collTimestamp,
-                                                 repl::ReadConcernLevel::kMajorityReadConcern));
+        auto chunks = assertGet(catalogClient()->getChunks(operationContext(),
+                                                           chunksQuery,
+                                                           BSONObj(),
+                                                           boost::none,
+                                                           nullptr,
+                                                           collEpoch,
+                                                           collTimestamp,
+                                                           repl::ReadConcernArgs::kMajority));
         ASSERT_EQ(0U, chunks.size());
 
         return chunks;
@@ -547,15 +520,14 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSInvalidChunk) {
              << BSON("$gte" << static_cast<long long>(queryChunkVersion.toLong()))));
 
     auto future = launchAsync([this, &chunksQuery, &queryChunkVersion] {
-        const auto swChunks =
-            catalogClient()->getChunks(operationContext(),
-                                       chunksQuery,
-                                       BSONObj(),
-                                       boost::none,
-                                       nullptr,
-                                       queryChunkVersion.epoch(),
-                                       queryChunkVersion.getTimestamp(),
-                                       repl::ReadConcernLevel::kMajorityReadConcern);
+        const auto swChunks = catalogClient()->getChunks(operationContext(),
+                                                         chunksQuery,
+                                                         BSONObj(),
+                                                         boost::none,
+                                                         nullptr,
+                                                         queryChunkVersion.epoch(),
+                                                         queryChunkVersion.getTimestamp(),
+                                                         repl::ReadConcernArgs::kMajority);
 
         ASSERT_EQUALS(ErrorCodes::NoSuchKey, swChunks.getStatus());
     });
@@ -1201,7 +1173,7 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandNetworkErrorFailsAtMaxRetry)
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
-                               repl::ReadConcernLevel::kMajorityReadConcern),
+                               repl::ReadConcernArgs::kMajority),
                            DBException,
                            ErrorCodes::HostUnreachable);
     });
@@ -1222,7 +1194,7 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandSystemOverloadedAtMaxRetry) 
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
-                               repl::ReadConcernLevel::kMajorityReadConcern),
+                               repl::ReadConcernArgs::kMajority),
                            DBException,
                            kSystemOverloadedErrorCode);
     });
@@ -1250,7 +1222,7 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandSystemOverloadedWithDeadline
         ASSERT_THROWS_CODE(catalogClient()->getDatabase(
                                operationContext(),
                                DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
-                               repl::ReadConcernLevel::kMajorityReadConcern),
+                               repl::ReadConcernArgs::kMajority),
                            DBException,
                            ErrorCodes::ExceededTimeLimit);
     });
@@ -1309,7 +1281,7 @@ TEST_F(ShardingCatalogClientTest, RetryOnFindCommandNetworkErrorSucceedsAtMaxRet
         catalogClient()->getDatabase(
             operationContext(),
             DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"),
-            repl::ReadConcernLevel::kMajorityReadConcern);
+            repl::ReadConcernArgs::kMajority);
     });
 
     for (int i = 0; i < kMaxCommandExecutions - 1; ++i) {
@@ -1334,11 +1306,10 @@ TEST_F(ShardingCatalogClientTest, GetNewKeys) {
 
     std::string purpose("none");
     LogicalTime currentTime(Timestamp(1234, 5678));
-    repl::ReadConcernLevel readConcernLevel(repl::ReadConcernLevel::kMajorityReadConcern);
 
-    auto future = launchAsync([this, purpose, currentTime, readConcernLevel] {
+    auto future = launchAsync([this, purpose, currentTime] {
         auto swKeys = catalogClient()->getNewInternalKeys(
-            operationContext(), purpose, currentTime, readConcernLevel);
+            operationContext(), purpose, currentTime, repl::ReadConcernArgs::kMajority);
         ASSERT_OK(swKeys.getStatus());
         return swKeys.getValue();
     });
@@ -1398,11 +1369,10 @@ TEST_F(ShardingCatalogClientTest, GetNewKeysWithEmptyCollection) {
 
     std::string purpose("none");
     LogicalTime currentTime(Timestamp(1234, 5678));
-    repl::ReadConcernLevel readConcernLevel(repl::ReadConcernLevel::kMajorityReadConcern);
 
-    auto future = launchAsync([this, purpose, currentTime, readConcernLevel] {
+    auto future = launchAsync([this, purpose, currentTime] {
         auto swKeys = catalogClient()->getNewInternalKeys(
-            operationContext(), purpose, currentTime, readConcernLevel);
+            operationContext(), purpose, currentTime, repl::ReadConcernArgs::kMajority);
         ASSERT_OK(swKeys.getStatus());
         return swKeys.getValue();
     });

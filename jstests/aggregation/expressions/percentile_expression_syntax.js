@@ -28,7 +28,10 @@ function assertValidSyntax({pSpec, letSpec, msg}) {
 /**
  * Test missing or unexpected fields in $percentile spec.
  */
-assertInvalidSyntax({pSpec: {$percentile: 0.5}, msg: "Should fail if $percentile is not an object"});
+assertInvalidSyntax({
+    pSpec: {$percentile: 0.5},
+    msg: "Should fail if $percentile is not an object",
+});
 
 assertInvalidSyntax({
     pSpec: {$percentile: {input: ["$k1", "$k2"], method: "approximate"}},
@@ -71,6 +74,26 @@ assertInvalidSyntax({
 assertInvalidSyntax({
     pSpec: {$percentile: {p: [0.5, 10], input: ["$k1", "$k2"], method: "approximate"}},
     msg: "Should fail if 'p' field in $percentile is an array with any value outside of [0, 1] range",
+});
+
+// A NaN percentile must be rejected. IEEE-754 ordered comparisons against NaN are all false, so a
+// range check of the form `p < 0 || p > 1` would accept NaN, which is not a valid percentile.
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [NaN], input: ["$k1", "$k2"], method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains NaN",
+});
+
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [Infinity], input: ["$k1", "$k2"], method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains +Infinity",
+});
+
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [-Infinity], input: ["$k1", "$k2"], method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains -Infinity",
 });
 
 /**
@@ -205,7 +228,11 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "AccuratePercentiles")) {
  */
 assertValidSyntax({
     pSpec: {
-        $percentile: {p: [0.0, 0.0001, 0.5, 0.995, 1.0], input: ["$k1", "$k2"], method: "approximate"},
+        $percentile: {
+            p: [0.0, 0.0001, 0.5, 0.995, 1.0],
+            input: ["$k1", "$k2"],
+            method: "approximate",
+        },
     },
     msg: "Should be able to specify an array of percentiles",
 });

@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -66,6 +39,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -77,6 +51,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using logv2::LogComponent;
 using logv2::LogSeverity;
@@ -215,7 +190,7 @@ GetParameterOptions parseGetParameterOptions(BSONElement elem) {
     if (elem.type() == BSONType::object) {
         return GetParameterOptions::parse(elem.Obj(), IDLParserContext{"getParameter"});
     }
-    if ((elem.type() == BSONType::string) && (elem.valueStringDataSafe() == "*"_sd)) {
+    if ((elem.type() == BSONType::string) && (elem.valueStringDataSafe() == "*"sv)) {
         GetParameterOptions ret;
         ret.setAllParameters(true);
         return ret;
@@ -356,6 +331,32 @@ public:
         appendParameterNames(&h);
         return h;
     }
+
+    /**
+     * Masks sensitive values in the command body before the document reaches any
+     * log file.  By default, this function in class Command removes the field
+     * returned by sensitiveFieldName, but for the 'set parameter' command, it
+     * needs to remove all fields flagged with 'isRedact'.  It also redacts
+     * unrecognized parameters in case the user made a typo like
+     * "ldapQueryPasssword".
+     */
+    void snipForLogging(mutablebson::Document* cmdObj) const override {
+        BasicCommand::snipForLogging(cmdObj);
+        const ServerParameter::Map& parameterMap =
+            ServerParameterSet::getNodeParameterSet()->getMap();
+
+        for (auto elem = cmdObj->root().leftChild(); elem.ok(); elem = elem.rightSibling()) {
+            const auto name = elem.getFieldName();
+            if (name == "setParameter" || isGenericArgument(name))
+                continue;
+            auto it = parameterMap.find(name);
+            if ((it != parameterMap.end() && it->second->isRedact()) ||
+                (it == parameterMap.end())) {
+                uassertStatusOK(elem.setValueString("###"));
+            }
+        }
+    }
+
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
@@ -405,13 +406,15 @@ public:
                     foundParameter->second->allowedToChangeAtRuntime());
 
             // Make sure we are only setting this parameter once
-            uassert(ErrorCodes::InvalidOptions,
-                    str::stream() << "attempted to set parameter [" << parameterName
-                                  << "] twice in the same setParameter command, "
-                                  << "once to value: ["
-                                  << parametersToSet[parameterName].toString(false)
-                                  << "], and once to value: [" << parameter.toString(false) << "]",
-                    parametersToSet.count(parameterName) == 0);
+            const bool forceRedact = foundParameter->second->isRedact();
+            uassert(
+                ErrorCodes::InvalidOptions,
+                str::stream() << "attempted to set parameter [" << parameterName
+                              << "] twice in the same setParameter command, once to value: ["
+                              << redact(parametersToSet[parameterName].toString(false), forceRedact)
+                              << "], and once to value: ["
+                              << redact(parameter.toString(false), forceRedact) << "]",
+                parametersToSet.count(parameterName) == 0);
 
             parametersToSet[parameterName] = parameter;
         }
@@ -429,7 +432,7 @@ public:
 
             uassert(ErrorCodes::InvalidOptions,
                     str::stream() << "Parameter: " << parameterName << " that was "
-                                  << "avaliable during our first lookup in the registered "
+                                  << "available during our first lookup in the registered "
                                   << "parameters map is no longer available.",
                     foundParameter != parameterMap.end());
 
@@ -456,14 +459,18 @@ public:
 
             foundParameter->second->warnIfDeprecated("setParameter");
 
+            // Set 'forceRedact' to redact the string when a specific parameter,
+            // such as the LDAP bind password (ldapQueryPassword), should be redacted.
+            const bool forceRedact = foundParameter->second->isRedact();
+
             try {
                 uassertStatusOK(foundParameter->second->set(parameter, boost::none));
             } catch (const DBException& ex) {
                 LOGV2(20496,
                       "Error setting parameter to new value",
                       "parameterName"_attr = parameterName,
-                      "newValue"_attr = redact(parameter.toString(false)),
-                      "error"_attr = redact(ex));
+                      "newValue"_attr = redact(parameter.toString(false), forceRedact),
+                      "error"_attr = redact(ex, forceRedact));
                 throw;
             }
 
@@ -480,13 +487,13 @@ public:
                 LOGV2(23435,
                       "Successfully set parameter to new value",
                       "parameterName"_attr = parameterName,
-                      "newValue"_attr = redact(parameter.toString(false)),
-                      "oldValue"_attr = redact(oldValue.toString(false)));
+                      "newValue"_attr = redact(parameter.toString(false), forceRedact),
+                      "oldValue"_attr = redact(oldValue.toString(false), forceRedact));
             } else {
                 LOGV2(23436,
                       "Successfully set parameter to new value",
                       "parameterName"_attr = parameterName,
-                      "newValue"_attr = redact(parameter.toString(false)));
+                      "newValue"_attr = redact(parameter.toString(false), forceRedact));
             }
 
             numSet++;
@@ -503,7 +510,7 @@ MONGO_REGISTER_COMMAND(CmdSet).forRouter().forShard();
 
 void LogLevelServerParameter::append(OperationContext*,
                                      BSONObjBuilder* builder,
-                                     StringData name,
+                                     std::string_view name,
                                      const boost::optional<TenantId>&) {
     builder->append(name,
                     logv2::LogManager::global()
@@ -527,7 +534,7 @@ Status LogLevelServerParameter::set(const BSONElement& newValueElement,
     return Status::OK();
 }
 
-Status LogLevelServerParameter::setFromString(StringData strLevel,
+Status LogLevelServerParameter::setFromString(std::string_view strLevel,
                                               const boost::optional<TenantId>&) {
     int newValue;
     Status status = NumberParser{}(strLevel, &newValue);
@@ -545,7 +552,7 @@ Status LogLevelServerParameter::setFromString(StringData strLevel,
 
 void LogComponentVerbosityServerParameter::append(OperationContext*,
                                                   BSONObjBuilder* builder,
-                                                  StringData name,
+                                                  std::string_view name,
                                                   const boost::optional<TenantId>&) {
     BSONObj currentSettings;
     getLogComponentVerbosity(&currentSettings);
@@ -562,7 +569,7 @@ Status LogComponentVerbosityServerParameter::set(const BSONElement& newValueElem
     return setLogComponentVerbosity(newValueElement.Obj());
 }
 
-Status LogComponentVerbosityServerParameter::setFromString(StringData str,
+Status LogComponentVerbosityServerParameter::setFromString(std::string_view str,
                                                            const boost::optional<TenantId>&) try {
     return setLogComponentVerbosity(fromjson(str));
 } catch (const DBException& ex) {
@@ -571,7 +578,7 @@ Status LogComponentVerbosityServerParameter::setFromString(StringData str,
 
 void AutomationServiceDescriptorServerParameter::append(OperationContext*,
                                                         BSONObjBuilder* builder,
-                                                        StringData name,
+                                                        std::string_view name,
                                                         const boost::optional<TenantId>&) {
     const std::lock_guard<std::mutex> lock(autoServiceDescriptorMutex);
     if (!autoServiceDescriptorValue.empty()) {
@@ -588,7 +595,7 @@ Status AutomationServiceDescriptorServerParameter::set(const BSONElement& newVal
     return setFromString(newValueElement.String(), boost::none);
 }
 
-Status AutomationServiceDescriptorServerParameter::setFromString(StringData str,
+Status AutomationServiceDescriptorServerParameter::setFromString(std::string_view str,
                                                                  const boost::optional<TenantId>&) {
     auto kMaxSize = 64U;
     if (str.size() > kMaxSize)

@@ -1,38 +1,17 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/index_builds/primary_driven/util.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/collection_crud/container_write.h"
+#include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_builds/resumable_index_builds_common.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
-#include "mongo/db/repl/timestamp_block.h"
+#include "mongo/db/query/collection_index_usage_tracker_decoration.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
@@ -40,11 +19,14 @@
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/storage/container.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/lazy_record_store.h"
+#include "mongo/db/storage/record_store_write_conflict_fail_points.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::index_builds::primary_driven {
@@ -104,6 +86,9 @@ public:
                             const std::vector<boost::optional<BSONObj>>& multikey,
                             bool fromMigrate,
                             bool isTimeseries) override {
+        if (throwOnCommit) {
+            uasserted(ErrorCodes::InterruptedDueToReplStateChange, "simulated stepdown");
+        }
         lastCommitArgs = CommitArgs{.ns = ns,
                                     .collUUID = collUUID,
                                     .buildUUID = buildUUID,
@@ -121,6 +106,9 @@ public:
                            const Status& cause,
                            bool fromMigrate,
                            bool isTimeseries) override {
+        if (throwOnAbort) {
+            uasserted(ErrorCodes::InterruptedDueToReplStateChange, "simulated stepdown");
+        }
         lastAbortArgs = AbortArgs{.ns = ns,
                                   .collUUID = collUUID,
                                   .buildUUID = buildUUID,
@@ -129,6 +117,9 @@ public:
                                   .fromMigrate = fromMigrate,
                                   .isTimeseries = isTimeseries};
     }
+
+    bool throwOnAbort = false;
+    bool throwOnCommit = false;
 
     boost::optional<StartArgs> lastStartArgs;
     boost::optional<CommitArgs> lastCommitArgs;
@@ -149,7 +140,7 @@ protected:
     }
 
     std::vector<IndexBuildInfo> makeIndexes(const std::vector<std::string>& keys) {
-        ASSERT_FALSE(keys.empty());
+        EXPECT_FALSE(keys.empty());
         std::vector<IndexBuildInfo> indexes;
         indexes.reserve(keys.size());
         for (size_t i = 0; i < keys.size(); ++i) {
@@ -167,12 +158,31 @@ protected:
         return indexes;
     }
 
+    std::unique_ptr<RecordStore> makeIndexBuildResumeTable(
+        const std::string& ident, boost::optional<BSONObj> resumeStateData) {
+        std::unique_ptr<RecordStore> ret;
+        auto opCtx = operationContext();
+        Lock::GlobalLock lk(opCtx, MODE_IX);
+        WriteUnitOfWork wuow(opCtx);
+        ret = opCtx->getServiceContext()->getStorageEngine()->makeInternalRecordStore(
+            opCtx, ident, KeyFormat::Long);
+        if (resumeStateData) {
+            ASSERT_OK(ret->insertRecord(operationContext(),
+                                        *shard_role_details::getRecoveryUnit(opCtx),
+                                        resumeStateData->objdata(),
+                                        resumeStateData->objsize(),
+                                        Timestamp()));
+        }
+        wuow.commit();
+        return ret;
+    }
+
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("test.primary_driven");
     UUID collUUID = UUID::gen();
 
 private:
     // TODO (SERVER-116165): Remove.
-    RAIIServerParameterControllerForTest _featureFlag{"featureFlagPrimaryDrivenIndexBuilds", true};
+    unittest::ServerParameterGuard _featureFlag{"featureFlagPrimaryDrivenIndexBuilds", true};
 };
 
 TEST_F(UtilTest, Start) {
@@ -210,7 +220,7 @@ TEST_F(UtilTest, Start) {
     EXPECT_EQ(args.ns, ns);
     EXPECT_EQ(args.collUUID, collUUID);
     EXPECT_EQ(args.buildUUID, buildUUID);
-    EXPECT_EQ(args.indexes.size(), indexes.size());
+    ASSERT_EQ(args.indexes.size(), indexes.size());
     for (size_t i = 0; i < indexes.size(); ++i) {
         ASSERT_BSONOBJ_EQ(args.indexes[i].spec, indexes[i].spec);
         EXPECT_EQ(args.indexes[i].indexIdent, indexes[i].indexIdent);
@@ -235,23 +245,21 @@ TEST_F(UtilTest, Commit) {
     const auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
     ASSERT_OK(
         start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+    const Timestamp commitTs(1, 0);
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(commitTs);
     ASSERT_OK(commit(
         operationContext(), ns.dbName(), collUUID, buildUUID, indexes, multikey, indexBuildIdent));
 
+    const Timestamp dropTs(commitTs.getSecs() + 1, 0);
     for (auto&& index : indexes) {
         auto& engine = *operationContext()->getServiceContext()->getStorageEngine();
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(), index.indexIdent));
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(), *index.sorterIdent));
-        ASSERT_OK(
-            engine.immediatelyCompletePendingDrop(operationContext(), *index.sideWritesIdent));
-        ASSERT_OK(
-            engine.immediatelyCompletePendingDrop(operationContext(), *index.skippedRecordsIdent));
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(),
-                                                        *index.constraintViolationsIdent));
+        engine.dropIdentTimestamped(operationContext(), *index.sorterIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.sideWritesIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.skippedRecordsIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.constraintViolationsIdent, dropTs);
     }
-    ASSERT_OK(
-        operationContext()->getServiceContext()->getStorageEngine()->immediatelyCompletePendingDrop(
-            operationContext(), indexBuildIdent));
+    operationContext()->getServiceContext()->getStorageEngine()->dropIdentTimestamped(
+        operationContext(), indexBuildIdent, dropTs);
 
     auto coll = acquireCollectionMaybeLockFree(
         operationContext(),
@@ -280,16 +288,23 @@ TEST_F(UtilTest, Commit) {
     }
     EXPECT_FALSE(engine.hasIdent(ru, indexBuildIdent));
 
+    // Verify indexes are present in the tracker after commit.
+    const auto usageStats =
+        CollectionIndexUsageTrackerDecoration::getUsageStats(coll.getCollectionPtr().get());
+    for (auto&& index : indexes) {
+        EXPECT_TRUE(usageStats.count(index.getIndexName()));
+    }
+
     ASSERT_TRUE(opObserver().lastCommitArgs);
     auto& args = *opObserver().lastCommitArgs;
     EXPECT_EQ(args.ns, ns);
     EXPECT_EQ(args.collUUID, collUUID);
     EXPECT_EQ(args.buildUUID, buildUUID);
-    EXPECT_EQ(args.indexes.size(), 2);
+    ASSERT_EQ(args.indexes.size(), 2);
     ASSERT_BSONOBJ_EQ(args.indexes[0].spec, indexes[0].spec);
     ASSERT_BSONOBJ_EQ(args.indexes[1].spec, indexes[1].spec);
-    ASSERT_FALSE(args.multikey[0]);
-    ASSERT_TRUE(args.multikey[1]);
+    EXPECT_FALSE(args.multikey[0]);
+    EXPECT_TRUE(args.multikey[1]);
     EXPECT_FALSE(args.fromMigrate);
     EXPECT_FALSE(args.isTimeseries);
 }
@@ -307,23 +322,22 @@ TEST_F(UtilTest, Abort) {
     const auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
     ASSERT_OK(
         start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+    const Timestamp commitTs(1, 0);
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(commitTs);
     ASSERT_OK(abort(
         operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
 
+    const Timestamp dropTs(commitTs.getSecs() + 1, 0);
     for (auto&& index : indexes) {
         auto& engine = *operationContext()->getServiceContext()->getStorageEngine();
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(), index.indexIdent));
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(), *index.sorterIdent));
-        ASSERT_OK(
-            engine.immediatelyCompletePendingDrop(operationContext(), *index.sideWritesIdent));
-        ASSERT_OK(
-            engine.immediatelyCompletePendingDrop(operationContext(), *index.skippedRecordsIdent));
-        ASSERT_OK(engine.immediatelyCompletePendingDrop(operationContext(),
-                                                        *index.constraintViolationsIdent));
+        engine.dropIdentTimestamped(operationContext(), index.indexIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.sorterIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.sideWritesIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.skippedRecordsIdent, dropTs);
+        engine.dropIdentTimestamped(operationContext(), *index.constraintViolationsIdent, dropTs);
     }
-    ASSERT_OK(
-        operationContext()->getServiceContext()->getStorageEngine()->immediatelyCompletePendingDrop(
-            operationContext(), indexBuildIdent));
+    operationContext()->getServiceContext()->getStorageEngine()->dropIdentTimestamped(
+        operationContext(), indexBuildIdent, dropTs);
 
     auto coll = acquireCollectionMaybeLockFree(
         operationContext(),
@@ -334,7 +348,7 @@ TEST_F(UtilTest, Abort) {
     auto& engine = *operationContext()->getServiceContext()->getStorageEngine()->getEngine();
     auto& ru = *shard_role_details::getRecoveryUnit(operationContext());
     for (size_t i = 0; i < indexes.size(); ++i) {
-        ASSERT_FALSE(coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
+        EXPECT_FALSE(coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
             operationContext(), indexes[i].getIndexName(), IndexCatalog::InclusionPolicy::kReady));
 
         EXPECT_FALSE(engine.hasIdent(ru, indexes[i].indexIdent));
@@ -350,12 +364,84 @@ TEST_F(UtilTest, Abort) {
     EXPECT_EQ(args.ns, ns);
     EXPECT_EQ(args.collUUID, collUUID);
     EXPECT_EQ(args.buildUUID, buildUUID);
-    EXPECT_EQ(args.indexes.size(), 2);
+    ASSERT_EQ(args.indexes.size(), 2);
     ASSERT_BSONOBJ_EQ(args.indexes[0].spec, indexes[0].spec);
     ASSERT_BSONOBJ_EQ(args.indexes[1].spec, indexes[1].spec);
-    ASSERT_EQ(args.cause, cause);
+    EXPECT_EQ(args.cause, cause);
     EXPECT_FALSE(args.fromMigrate);
     EXPECT_FALSE(args.isTimeseries);
+}
+
+TEST_F(UtilTest, AbortSkipsAlreadyAbortedBuild) {
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a", "b"});
+    Status cause{ErrorCodes::IndexBuildAborted, "abort"};
+    auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+
+    ASSERT_OK(
+        start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(Timestamp(1, 0));
+    ASSERT_OK(abort(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
+
+    // The build is gone, so the second abort has nothing of its own to drop.
+    {
+        auto coll =
+            acquireCollectionMaybeLockFree(operationContext(),
+                                           CollectionAcquisitionRequest::fromOpCtx(
+                                               operationContext(),
+                                               {ns.dbName(), collUUID},
+                                               AcquisitionPrerequisites::OperationType::kRead));
+        for (auto&& index : indexes) {
+            EXPECT_FALSE(coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
+                operationContext(), index.getIndexName(), IndexCatalog::InclusionPolicy::kAll));
+        }
+    }
+
+    ASSERT_OK(abort(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
+}
+
+TEST_F(UtilTest, AbortDropsRemainingIndexesWhenOneWasAlreadyDropped) {
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a", "b"});
+    Status cause{ErrorCodes::IndexBuildAborted, "abort"};
+    const auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+
+    ASSERT_OK(
+        start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(Timestamp(1, 0));
+
+    // Drop the first index's catalog entry only.
+    {
+        auto opCtx = operationContext();
+        auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx, {ns.dbName(), collUUID}, AcquisitionPrerequisites::OperationType::kWrite),
+            LockMode::MODE_X);
+        CollectionWriter writer{opCtx, &coll};
+        WriteUnitOfWork wuow{opCtx};
+        auto* writableColl = writer.getWritableCollection(opCtx);
+        auto* entry = writableColl->getIndexCatalog()->getWritableEntryByName(
+            opCtx, indexes[0].getIndexName(), IndexCatalog::InclusionPolicy::kUnfinished);
+        ASSERT_TRUE(entry);
+        ASSERT_OK(writableColl->getIndexCatalog()->dropIndexEntry(opCtx, writableColl, entry));
+        wuow.commit();
+    }
+
+    ASSERT_OK(abort(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
+
+    auto coll = acquireCollectionMaybeLockFree(
+        operationContext(),
+        CollectionAcquisitionRequest::fromOpCtx(operationContext(),
+                                                {ns.dbName(), collUUID},
+                                                AcquisitionPrerequisites::OperationType::kRead));
+    for (auto&& index : indexes) {
+        EXPECT_FALSE(coll.getCollectionPtr()->getIndexCatalog()->findIndexByName(
+            operationContext(), index.getIndexName(), IndexCatalog::InclusionPolicy::kAll));
+    }
 }
 
 TEST_F(UtilTest, CommitUsesCommitTimestampForTemporaryTableDrops) {
@@ -368,16 +454,9 @@ TEST_F(UtilTest, CommitUsesCommitTimestampForTemporaryTableDrops) {
         start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
 
     const Timestamp commitTs(200, 0);
-    {
-        TimestampBlock tsBlock(operationContext(), commitTs);
-        ASSERT_OK(commit(operationContext(),
-                         ns.dbName(),
-                         collUUID,
-                         buildUUID,
-                         indexes,
-                         multikey,
-                         indexBuildIdent));
-    }
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(commitTs);
+    ASSERT_OK(commit(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, multikey, indexBuildIdent));
 
     auto storageEngine = operationContext()->getServiceContext()->getStorageEngine();
     for (auto&& index : indexes) {
@@ -403,11 +482,9 @@ TEST_F(UtilTest, AbortUsesCommitTimestampForTemporaryTableDrops) {
         start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
 
     const Timestamp commitTs(300, 0);
-    {
-        TimestampBlock tsBlock(operationContext(), commitTs);
-        ASSERT_OK(abort(
-            operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
-    }
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(commitTs);
+    ASSERT_OK(abort(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
 
     auto storageEngine = operationContext()->getServiceContext()->getStorageEngine();
     for (auto&& index : indexes) {
@@ -421,24 +498,543 @@ TEST_F(UtilTest, AbortUsesCommitTimestampForTemporaryTableDrops) {
     }
 }
 
-TEST_F(UtilTest, AbortWithNoCommitTimestampDropsImmediately) {
+
+TEST_F(UtilTest, AbortWUOWRollbackAllowsRetry) {
     auto buildUUID = UUID::gen();
     auto indexes = makeIndexes({"a"});
     auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
-    Status cause{ErrorCodes::Error{11130403}, "abort"};
+    const Status cause{ErrorCodes::Error{11130404}, "abort"};
 
     ASSERT_OK(
         start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+
+    // Throw from the OpObserver to roll back the WUoW after dropIdentsAndDeregisterOnCommit
+    // has registered its onCommit handler but before wuow.commit().
+    opObserver().throwOnAbort = true;
+    ASSERT_THROWS_CODE(
+        abort(
+            operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause),
+        DBException,
+        ErrorCodes::InterruptedDueToReplStateChange);
+    opObserver().throwOnAbort = false;
+
+    ASSERT_FALSE(registry(getServiceContext()).all().empty());
+    EXPECT_EQ(getServiceContext()->getStorageEngine()->getNumDropPendingIdents(), 0U);
+    // No mangled state.
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(Timestamp(1, 0));
     ASSERT_OK(abort(
         operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent, cause));
+}
 
-    auto& engine = *operationContext()->getServiceContext()->getStorageEngine();
-    for (auto&& index : indexes) {
-        // Without a commit timestamp, the drop is registered as Immediate.
-        ASSERT_OK(
-            engine.immediatelyCompletePendingDrop(operationContext(), *index.sideWritesIdent));
+TEST_F(UtilTest, CommitWUOWRollbackAllowsRetry) {
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a"});
+    auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+    std::vector<boost::optional<MultikeyPaths>> multikey(indexes.size());
+
+    ASSERT_OK(
+        start(operationContext(), ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+
+    // Throw from the OpObserver to roll back the WUoW after dropIdentsAndDeregisterOnCommit
+    // has registered its onCommit handler but before wuow.commit().
+    opObserver().throwOnCommit = true;
+    ASSERT_THROWS_CODE(commit(operationContext(),
+                              ns.dbName(),
+                              collUUID,
+                              buildUUID,
+                              indexes,
+                              multikey,
+                              indexBuildIdent),
+                       DBException,
+                       ErrorCodes::InterruptedDueToReplStateChange);
+    opObserver().throwOnCommit = false;
+
+    ASSERT_FALSE(registry(getServiceContext()).all().empty());
+    EXPECT_EQ(getServiceContext()->getStorageEngine()->getNumDropPendingIdents(), 0U);
+    // No mangled state.
+    shard_role_details::getRecoveryUnit(operationContext())->setCommitTimestamp(Timestamp(1, 0));
+    ASSERT_OK(commit(
+        operationContext(), ns.dbName(), collUUID, buildUUID, indexes, multikey, indexBuildIdent));
+}
+
+TEST_F(UtilTest, ResumeInfoRequiresValidIdent) {
+    auto buildUUID = UUID::gen();
+    std::vector<IndexBuildInfo> indexes;
+    std::vector<std::string> invalidIdents = {
+        std::string(""),
+        fmt::format("some-invalid-{}", buildUUID.toString()),
+        ident::generateNewInternalIdent(kResumableIndexIdentStem)};
+    for (auto&& testIdent : invalidIdents) {
+        ASSERT_THROWS_CODE(resumeInfo(operationContext(), collUUID, buildUUID, indexes, testIdent),
+                           DBException,
+                           ErrorCodes::InvalidOptions);
     }
 }
+
+TEST_F(UtilTest, ResumeInfoFailsOnMissingIdent) {
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a"});
+    auto validResumableIndexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+
+    ASSERT_THROWS_CODE(
+        resumeInfo(operationContext(), collUUID, buildUUID, indexes, validResumableIndexBuildIdent),
+        DBException,
+        ErrorCodes::FailedToParse);
+}
+
+TEST_F(UtilTest, ResumeInfoFailsOnParseError) {
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a"});
+    auto validResumableIndexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+
+    auto invalidResumeState = BSONObjBuilder{}.append("foo", BSON("bar" << "baz")).obj();
+    makeIndexBuildResumeTable(validResumableIndexBuildIdent, invalidResumeState);
+
+    ASSERT_THROWS_CODE(
+        resumeInfo(operationContext(), collUUID, buildUUID, indexes, validResumableIndexBuildIdent),
+        DBException,
+        ErrorCodes::FailedToParse);
+}
+
+TEST_F(UtilTest, ResumeInfoSynthesizesMissingRecord) {
+    auto buildUUID = UUID::gen();
+    auto validResumableIndexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+    auto indexes = makeIndexes({"a", "b", "c"});
+    makeIndexBuildResumeTable(validResumableIndexBuildIdent, boost::none);
+
+    auto resumeState =
+        resumeInfo(operationContext(), collUUID, buildUUID, indexes, validResumableIndexBuildIdent);
+    EXPECT_EQ(buildUUID, resumeState.getBuildUUID());
+    EXPECT_EQ(IndexBuildPhaseEnum::kInitialized, resumeState.getPhase());
+    EXPECT_EQ(collUUID, resumeState.getCollectionUUID());
+    for (size_t i = 0; i < indexes.size(); ++i) {
+        EXPECT_EQ(*indexes[i].sideWritesIdent, resumeState.getIndexes()[i].getSideWritesTable());
+        EXPECT_EQ(*indexes[i].constraintViolationsIdent,
+                  *resumeState.getIndexes()[i].getDuplicateKeyTrackerTable());
+        EXPECT_EQ(*indexes[i].skippedRecordsIdent,
+                  *resumeState.getIndexes()[i].getSkippedRecordTrackerTable());
+        EXPECT_EQ(*indexes[i].sorterIdent, *resumeState.getIndexes()[i].getStorageIdentifier());
+    }
+}
+
+TEST_F(UtilTest, ResumeInfoParsesSuccessfully) {
+    auto buildUUID = UUID::gen();
+    auto validResumableIndexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+    auto indexes = makeIndexes({"a", "b", "c"});
+
+    auto resumeStateBSONObj =
+        index_builds::synthesizeResumeIndexInfo(
+            buildUUID, IndexBuildPhaseEnum::kCollectionScan, collUUID, indexes)
+            .toBSON();
+    makeIndexBuildResumeTable(validResumableIndexBuildIdent, resumeStateBSONObj);
+
+    auto resumeState =
+        resumeInfo(operationContext(), collUUID, buildUUID, indexes, validResumableIndexBuildIdent);
+    EXPECT_EQ(buildUUID, resumeState.getBuildUUID());
+    EXPECT_EQ(IndexBuildPhaseEnum::kCollectionScan, resumeState.getPhase());
+    EXPECT_EQ(collUUID, resumeState.getCollectionUUID());
+    for (size_t i = 0; i < indexes.size(); ++i) {
+        EXPECT_EQ(*indexes[i].sideWritesIdent, resumeState.getIndexes()[i].getSideWritesTable());
+        EXPECT_EQ(*indexes[i].constraintViolationsIdent,
+                  *resumeState.getIndexes()[i].getDuplicateKeyTrackerTable());
+        EXPECT_EQ(*indexes[i].skippedRecordsIdent,
+                  *resumeState.getIndexes()[i].getSkippedRecordTrackerTable());
+        EXPECT_EQ(*indexes[i].sorterIdent, *resumeState.getIndexes()[i].getStorageIdentifier());
+    }
+}
+
+std::vector<int64_t> getSorterKeys(OperationContext* opCtx, IntegerKeyedContainer& container) {
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    auto cursor = container.getCursor(ru);
+    std::vector<int64_t> keys;
+    while (auto entry = cursor->next()) {
+        keys.push_back(entry->first);
+    }
+    return keys;
+}
+
+void insertSorterEntries(OperationContext* opCtx,
+                         IntegerKeyedContainer& container,
+                         int64_t startKey,
+                         int64_t endKey) {
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    Lock::GlobalLock lk(opCtx, MODE_IX);
+    WriteUnitOfWork wuow{opCtx};
+    const char dummyValue[] = "value";
+    for (int64_t key = startKey; key < endKey; ++key) {
+        ASSERT_OK(container_write::insert(opCtx,
+                                          ru,
+                                          container,
+                                          key,
+                                          std::span<const char>(dummyValue, sizeof(dummyValue)),
+                                          boost::none,
+                                          container_write::NonexistentKeyGuarantee{}));
+    }
+    wuow.commit();
+}
+
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesDeletesOutOfRangeKeys) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-delete-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    insertSorterEntries(opCtx, container, 1, 11);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    SorterRange range;
+    range.setStart(3);
+    range.setEnd(8);
+    range.setChecksum(0);
+    indexInfo.setRanges(std::vector<SorterRange>{range});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_EQ(remainingKeys.size(), 5u);
+    for (int64_t expected = 3; expected < 8; ++expected) {
+        EXPECT_TRUE(std::find(remainingKeys.begin(), remainingKeys.end(), expected) !=
+                    remainingKeys.end());
+    }
+}
+
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesDeletesAllWhenRangesUnset) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-unset-ranges-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    insertSorterEntries(opCtx, container, 1, 6);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    // Ranges are left unset, so all entries are orphaned.
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_TRUE(remainingKeys.empty());
+}
+
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesDeletesAllWhenRangesEmpty) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-empty-ranges-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    insertSorterEntries(opCtx, container, 1, 6);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    // Ranges are present but empty, so all entries are orphaned.
+    indexInfo.setRanges(std::vector<SorterRange>{});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_TRUE(remainingKeys.empty());
+}
+
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesNoOpWhenAllWithinRange) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-within-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    insertSorterEntries(opCtx, container, 1, 6);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    SorterRange range;
+    range.setStart(1);
+    range.setEnd(6);
+    range.setChecksum(0);
+    indexInfo.setRanges(std::vector<SorterRange>{range});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_EQ(remainingKeys.size(), 5u);
+}
+
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesDeletesAcrossBatches) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    // Set a small batch size to force multiple delete batches.
+    unittest::ServerParameterGuard batchSize{"primaryDrivenIndexBuildSorterInsertionBatchSize", 3};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-batch-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    insertSorterEntries(opCtx, container, 1, 16);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    SorterRange range;
+    range.setStart(1);
+    range.setEnd(6);
+    range.setChecksum(0);
+    indexInfo.setRanges(std::vector<SorterRange>{range});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_EQ(remainingKeys.size(), 5u);
+    for (int64_t expected = 1; expected < 6; ++expected) {
+        EXPECT_TRUE(std::find(remainingKeys.begin(), remainingKeys.end(), expected) !=
+                    remainingKeys.end());
+    }
+}
+
+// Fires a deterministic WCE while removing keys < firstStart.
+TEST_F(UtilTest, DeleteSorterEntriesOutsideRangesSurvivesWCEWhenDeletingKeysLessThanFirstStart) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    unittest::ServerParameterGuard batchSize{"primaryDrivenIndexBuildSorterInsertionBatchSize", 5};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-wce-pre-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    // We will be deleting keys < 6 and >= 11.
+    insertSorterEntries(opCtx, container, 1, 6);
+    insertSorterEntries(opCtx, container, 6, 11);
+    insertSorterEntries(opCtx, container, 11, 16);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    SorterRange range;
+    range.setStart(6);
+    range.setEnd(11);
+    range.setChecksum(0);
+    indexInfo.setRanges(std::vector<SorterRange>{range});
+
+    auto failPoint = enableWriteConflictForWrites(
+        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    // Exactly one WCE must have fired when removing keys < 6.
+    EXPECT_EQ(1, failPoint->waitForOneNewEntry());
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_EQ(remainingKeys.size(), 5u);
+    for (int64_t expected = 6; expected < 11; ++expected) {
+        EXPECT_TRUE(std::find(remainingKeys.begin(), remainingKeys.end(), expected) !=
+                    remainingKeys.end());
+    }
+}
+
+// Fires a deterministic WCE while removing keys >= LastEnd.
+TEST_F(UtilTest,
+       DeleteSorterEntriesOutsideRangesSurvivesWCEWhenDeletingKeysGreaterThanOrEqualToLastEnd) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    unittest::ServerParameterGuard batchSize{"primaryDrivenIndexBuildSorterInsertionBatchSize", 4};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    std::string sorterIdent = "internal-sorter-wce-post-test";
+    LazyRecordStore sorterTable(opCtx, sorterIdent, LazyRecordStore::CreateMode::immediate);
+    auto& container = std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                          sorterTable.getTableOrThrow().getContainer())
+                          .get();
+
+    // We will be deleting keys >= 11.
+    insertSorterEntries(opCtx, container, 6, 11);
+    insertSorterEntries(opCtx, container, 11, 17);
+
+    IndexStateInfo indexInfo;
+    indexInfo.setSpec(BSON("key" << BSON("a" << 1) << "name"
+                                 << "a_1"
+                                 << "v" << IndexConfig::kLatestIndexVersion));
+    indexInfo.setIsMultikey(false);
+    indexInfo.setMultikeyPaths({});
+    indexInfo.setStorageIdentifier(sorterIdent);
+    SorterRange range;
+    range.setStart(6);
+    range.setEnd(11);
+    range.setChecksum(0);
+    indexInfo.setRanges(std::vector<SorterRange>{range});
+
+    auto failPoint = enableWriteConflictForWrites(
+        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+
+    deleteSorterEntriesOutsideRanges(opCtx, {indexInfo});
+
+    // Exactly one WCE must have fired when removing keys >= 11.
+    EXPECT_EQ(1, failPoint->waitForOneNewEntry());
+
+    auto remainingKeys = getSorterKeys(opCtx, container);
+    EXPECT_EQ(remainingKeys.size(), 5u);
+    for (int64_t expected = 6; expected < 11; ++expected) {
+        EXPECT_TRUE(std::find(remainingKeys.begin(), remainingKeys.end(), expected) !=
+                    remainingKeys.end());
+    }
+}
+
+StringKeyedContainer& indexContainer(OperationContext* opCtx,
+                                     const CollectionPtr& coll,
+                                     const std::string& indexIdent) {
+    auto* entry = coll->getIndexCatalog()->findIndexByIdent(
+        opCtx, indexIdent, IndexCatalog::InclusionPolicy::kUnfinished);
+    ASSERT_TRUE(entry);
+    return entry->accessMethod()->asSortedData()->getSortedDataInterface()->getContainer();
+}
+
+std::vector<std::string> getIndexKeys(OperationContext* opCtx,
+                                      DatabaseName dbName,
+                                      const UUID& collUUID,
+                                      const std::string& indexIdent) {
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, {std::move(dbName), collUUID}, AcquisitionPrerequisites::OperationType::kWrite),
+        MODE_IX);
+
+    auto cursor = indexContainer(opCtx, coll.getCollectionPtr(), indexIdent)
+                      .getCursor(*shard_role_details::getRecoveryUnit(opCtx));
+    std::vector<std::string> keys;
+    while (auto entry = cursor->next()) {
+        keys.emplace_back(entry->first.data(), entry->first.size());
+    }
+    return keys;
+}
+
+void insertIndexEntries(OperationContext* opCtx,
+                        DatabaseName dbName,
+                        const UUID& collUUID,
+                        const std::string& indexIdent,
+                        int count) {
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, {std::move(dbName), collUUID}, AcquisitionPrerequisites::OperationType::kWrite),
+        MODE_IX);
+
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    auto& container = indexContainer(opCtx, coll.getCollectionPtr(), indexIdent);
+
+    WriteUnitOfWork wuow{opCtx};
+    std::string value(8, 'v');
+    for (int i = 0; i < count; ++i) {
+        auto key = fmt::format("key-{:08d}", i);
+        ASSERT_OK(container_write::insert(opCtx,
+                                          ru,
+                                          container,
+                                          std::span<const char>(key.data(), key.size()),
+                                          std::span<const char>(value.data(), value.size())));
+    }
+    wuow.commit();
+}
+
+class DeleteAllIndexEntriesTest : public UtilTest, public testing::WithParamInterface<long long> {};
+
+TEST_P(DeleteAllIndexEntriesTest, DeletesEverything) {
+    unittest::ServerParameterGuard containerWritesEnabled{"featureFlagContainerWrites", true};
+    unittest::ServerParameterGuard batchBytes{"primaryDrivenIndexBuildIndexTableCleanupBatchBytes",
+                                              GetParam()};
+    static_cast<repl::ReplicationCoordinatorMock*>(
+        repl::ReplicationCoordinator::get(getServiceContext()))
+        ->alwaysAllowWrites(true);
+
+    auto opCtx = operationContext();
+    auto buildUUID = UUID::gen();
+    auto indexes = makeIndexes({"a", "b", "c"});
+    auto indexBuildIdent = ident::generateNewIndexBuildIdent(buildUUID);
+    ASSERT_OK(start(opCtx, ns.dbName(), collUUID, buildUUID, indexes, indexBuildIdent));
+
+    insertIndexEntries(opCtx, ns.dbName(), collUUID, indexes[0].indexIdent, 25);
+    insertIndexEntries(
+        opCtx, ns.dbName(), collUUID, indexes[2].indexIdent, 10);  // indexes[1] empty.
+    EXPECT_EQ(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[0].indexIdent).size(), 25);
+    EXPECT_EQ(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[1].indexIdent).size(), 0);
+    EXPECT_EQ(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[2].indexIdent).size(), 10);
+
+    auto failPoint = enableWriteConflictForWrites(
+        FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+    deleteAllIndexEntries(opCtx, ns.dbName(), collUUID, indexes);
+
+    EXPECT_TRUE(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[0].indexIdent).empty());
+    EXPECT_TRUE(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[1].indexIdent).empty());
+    EXPECT_TRUE(getIndexKeys(opCtx, ns.dbName(), collUUID, indexes[2].indexIdent).empty());
+}
+
+INSTANTIATE_TEST_SUITE_P(All,
+                         DeleteAllIndexEntriesTest,
+                         testing::Values(1, 64, 4 * 1024 * 1024),
+                         testing::PrintToStringParamName{});
 
 }  // namespace
 }  // namespace mongo::index_builds::primary_driven

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -41,7 +15,7 @@
 #include <string>
 #include <thread>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * A configurable thread pool, for general use.
@@ -51,18 +25,6 @@ namespace MONGO_MOD_PUB mongo {
 class ThreadPool final : public ThreadPoolInterface {
 public:
     /**
-     * Contains a subset of the fields from Options related to limiting the number of concurrent
-     * threads in the pool. Used in places where we want a way to specify limits to the size of a
-     * ThreadPool without overriding the other behaviors of the pool such thread names or onCreate
-     * behaviors. Each field of Limits maps directly to the same-named field in Options.
-     */
-    struct Limits {
-        size_t minThreads = 1;
-        size_t maxThreads = 8;
-        Milliseconds maxIdleThreadAge = Seconds{30};
-    };
-
-    /**
      * Structure used to configure an instance of ThreadPool.
      */
     struct Options {
@@ -70,13 +32,6 @@ public:
         // Note: the value used here is high enough that it will never be reached, but low enough
         // that it won't cause overflows if mixed with signed ints or math.
         static constexpr size_t kUnlimited = 1'000'000'000;
-
-        Options() = default;
-
-        explicit Options(const Limits& limits)
-            : minThreads(limits.minThreads),
-              maxThreads(limits.maxThreads),
-              maxIdleThreadAge(limits.maxIdleThreadAge) {}
 
         // Name of the thread pool. If this string is empty, the pool will be assigned a
         // name unique to the current process.
@@ -128,6 +83,10 @@ public:
         // The last time that no threads in the pool were idle.
         Date_t lastFullUtilizationDate;
     };
+
+    static std::unique_ptr<ThreadPool> make(Options options) {
+        return std::make_unique<ThreadPool>(std::move(options));
+    }
 
     /**
      * Constructs a thread pool, configured with the given "options".
@@ -185,9 +144,11 @@ public:
 
     uint64_t joinedThreadsCount_forTest() const;
 
+    bool hasUnjoinedRetiredThreads_forTest() const;
+
 private:
     class Impl;
     std::unique_ptr<Impl> _impl;
 };
 
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

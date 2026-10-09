@@ -4,9 +4,6 @@
  * @tags: [requires_persistence]
  */
 
-// Checking UUID consistency involves talking to a shard node, which in this test is shutdown
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 import {reconfig} from "jstests/replsets/rslib.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
@@ -21,7 +18,11 @@ let st = new ShardingTest({
 
 // Note: Adding new replica set member by hand because of SERVER-24011.
 
-let newNode = MongoRunner.runMongod({configsvr: "", replSet: st.configRS.name, storageEngine: "wiredTiger"});
+let newNode = MongoRunner.runMongod({
+    configsvr: "",
+    replSet: st.configRS.name,
+    storageEngine: "wiredTiger",
+});
 
 let replConfig = st.configRS.getReplSetConfigFromNode();
 replConfig.version += 1;

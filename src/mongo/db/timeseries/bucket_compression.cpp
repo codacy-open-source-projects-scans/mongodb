@@ -1,39 +1,9 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/timeseries/bucket_compression.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -55,8 +25,14 @@
 #include <cstring>
 #include <iterator>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -66,10 +42,11 @@ namespace mongo {
 namespace timeseries {
 
 namespace {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(simulateBsonColumnCompressionDataLoss);
 
 CompressionResult _compressBucket(const BSONObj& bucketDoc,
-                                  StringData timeFieldName,
+                                  std::string_view timeFieldName,
                                   const NamespaceString& nss,
                                   bool validateDecompression) try {
     CompressionResult result;
@@ -82,7 +59,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     std::vector<write_ops_utils::details::Measurement>
         measurements;                       // Extracted measurements from uncompressed bucket
     boost::optional<BSONObjIterator> time;  // Iterator to read time fields from uncompressed bucket
-    std::vector<std::pair<StringData, BSONObjIterator>>
+    std::vector<std::pair<std::string_view, BSONObjIterator>>
         columns;  // Iterators to read data fields from uncompressed bucket
 
     BSONElement bucketId;
@@ -92,7 +69,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     // Read everything from the uncompressed bucket
     for (auto& elem : bucketDoc) {
         // Record bucketId
-        if (elem.fieldNameStringData() == "_id"_sd) {
+        if (elem.fieldNameStringData() == "_id"sv) {
             bucketId = elem;
             continue;
         }
@@ -193,14 +170,19 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     {
         BSONObjBuilder control(builder.subobjStart(kBucketControlFieldName));
 
-        // Set the version to indicate that the bucket was compressed. Leave other control fields
-        // unchanged.
+        // Make 2 changes to control block:
+        // 1) Set the version to indicate that the bucket was compressed and sorted above.
+        // 2) Throw out an existing count if it was written by a user directly.
         bool versionSet = false;
         for (const auto& controlField : controlElement.Obj()) {
             if (controlField.fieldNameStringData() == kBucketControlVersionFieldName) {
                 control.append(kBucketControlVersionFieldName,
                                kTimeseriesControlCompressedSortedVersion);
                 versionSet = true;
+            } else if (MONGO_unlikely(controlField.fieldNameStringData() ==
+                                      kBucketControlCountFieldName)) {
+                // Ignore an invalid control.count that shouldn't exist on a v1 bucket.
+                // Write a correct value further down in this function.
             } else {
                 control.append(controlField);
             }
@@ -224,7 +206,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     // Last, compress elements and build compressed bucket
     {
         // Helper to validate compressed data by binary comparing decompressed with original.
-        auto validate = [&](BSONBinData binary, StringData fieldName, auto getField) {
+        auto validate = [&](BSONBinData binary, std::string_view fieldName, auto getField) {
             if (!validateDecompression)
                 return true;
 
@@ -351,7 +333,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
 }  // namespace
 
 CompressionResult compressBucket(const BSONObj& bucketDoc,
-                                 StringData timeFieldName,
+                                 std::string_view timeFieldName,
                                  const NamespaceString& ns,
                                  bool validateDecompression) try {
     // Compressing already compressed buckets is a no-op.
@@ -403,14 +385,14 @@ boost::optional<BSONObj> decompressBucket(const BSONObj& bucketDoc) try {
                         // This bucket isn't compressed.
                         return boost::none;
                     }
-                    builder.append(kBucketControlVersionFieldName,
-                                   kTimeseriesControlUncompressedVersion);
+                    controlBuilder.append(kBucketControlVersionFieldName,
+                                          kTimeseriesControlUncompressedVersion);
                 } else if (e.fieldNameStringData() == kBucketControlCountFieldName) {
                     // Omit the count field when decompressing.
                     continue;
                 } else {
                     // Just copy all the other fields.
-                    builder.append(e);
+                    controlBuilder.append(e);
                 }
             }
         } else if (topLevel.fieldNameStringData() == kBucketDataFieldName) {
@@ -429,7 +411,7 @@ boost::optional<BSONObj> decompressBucket(const BSONObj& bucketDoc) try {
                 DecimalCounter<uint32_t> count{0};
                 for (auto&& measurement : column) {
                     if (!measurement.eoo()) {
-                        builder.appendAs(measurement, count);
+                        dataBuilder.appendAs(measurement, count);
                     }
                     ++count;
                 }

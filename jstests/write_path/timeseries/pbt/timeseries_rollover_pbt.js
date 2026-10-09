@@ -21,8 +21,14 @@ import {fc} from "jstests/third_party/fast_check/fc-4.6.0.js";
 
 import {makeEmptyModel} from "jstests/write_path/timeseries/pbt/lib/command_grammar.js";
 import {makeTimeseriesCommandSequenceArb} from "jstests/write_path/timeseries/pbt/lib/command_arbitraries.js";
-import {assertCollectionValid, assertCollectionsMatch} from "jstests/write_path/timeseries/pbt/lib/assertions.js";
-import {getFcParams, getFcAssertArgs} from "jstests/write_path/timeseries/pbt/lib/fast_check_params.js";
+import {
+    assertCollectionValid,
+    assertCollectionsMatch,
+} from "jstests/write_path/timeseries/pbt/lib/assertions.js";
+import {
+    getFcParams,
+    getFcAssertArgs,
+} from "jstests/write_path/timeseries/pbt/lib/fast_check_params.js";
 import {getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {kSizeRolloverFieldName} from "jstests/write_path/timeseries/pbt/lib/measurement_arbitraries.js";
 
@@ -361,11 +367,24 @@ describe("Comparative PBT for timeseries bucket rollover conditions", () => {
                 3, // maxFields
                 0, // minDocs (overridden to 1001 by countRollover)
                 50, // maxDocs (overridden to 1010 by countRollover)
-                {rolloverConditions: {countRollover: true}},
+                {
+                    rolloverConditions: {countRollover: true},
+                    // Pin the command kind.  With the full command pool a short sequence
+                    // usually draws a single-doc insert or a delete, and the run exercises no
+                    // count rollover at all.
+                    commandTypes: ["batchInsert"],
+                },
                 undefined,
                 fcParams.replayPath,
             ),
             countAssertArgs,
+        );
+
+        assert.gt(
+            stats.rollover.countRolloverBatches,
+            0,
+            "kCount case ran without ever inserting a batch large enough to roll a bucket over",
+            {stats},
         );
     });
 

@@ -28,7 +28,9 @@ const testData = [
     {_id: 1, ans: 42},
     {_id: 2, ans: 42},
 ];
-testData.forEach((doc) => assert.commandWorked(node.getDB(dbName).getCollection(collName).insert([doc])));
+testData.forEach((doc) =>
+    assert.commandWorked(node.getDB(dbName).getCollection(collName).insert([doc])),
+);
 
 const localDb = node.getDB("local");
 const kNullTS = new Timestamp(0, 0);
@@ -139,7 +141,9 @@ jsTestLog("Running initial tailable query on the oplog");
     const cursorId = res.cursor.id;
 
     jsTest.log("Ensure that postBatchResumeToken attribute is returned for getMore command");
-    const resGetMore1 = assert.commandWorked(localDb.runCommand({getMore: cursorId, collection: "oplog.rs"}));
+    const resGetMore1 = assert.commandWorked(
+        localDb.runCommand({getMore: cursorId, collection: "oplog.rs"}),
+    );
 
     assert.eq(resGetMore1.cursor.nextBatch.length, 2, resGetMore1);
     assert.eq(resGetMore1.cursor.nextBatch[0].o._id, 1, resGetMore1);
@@ -149,7 +153,9 @@ jsTestLog("Running initial tailable query on the oplog");
     const resumeToken2 = assertExpectedResumeTokenFormat(resGetMore1);
     assert.eq(timestampCmp(resumeToken2.ts, resumeToken1.ts), 1, resGetMore1);
 
-    jsTest.log("Ensure that postBatchResumeToken attribute is returned for getMore command with no results");
+    jsTest.log(
+        "Ensure that postBatchResumeToken attribute is returned for getMore command with no results",
+    );
     const resGetMore2 = assert.commandWorked(
         localDb.runCommand({getMore: cursorId, collection: "oplog.rs", maxTimeMS: 100}),
     );
@@ -158,9 +164,18 @@ jsTestLog("Running initial tailable query on the oplog");
     assert.eq(resGetMore2.cursor.nextBatch.length, 0, resGetMore2);
     assert.eq(resGetMore2.cursor.id, cursorId, resGetMore2);
 
-    // Resume token should be the same as the first getMore.
+    // The oplog resume token reflects the latest oplog entry scanned rather than the latest one
+    // matching the filter, so unrelated background writes (e.g. HMAC key generation) landing
+    // while this getMore was waiting can advance it past resumeToken2. Bound it from below by
+    // resumeToken2 and from above by the actual oplog tip, read immediately after the getMore
+    // returns, so the assertion stays precise instead of merely dropping the check.
     const resumeToken3 = assertExpectedResumeTokenFormat(resGetMore2);
-    assert.eq(timestampCmp(resumeToken3.ts, resumeToken2.ts), 0);
+    const latestOplogEntry = rst.findOplog(node, {}, 1).toArray()[0];
+    assert.gte(timestampCmp(resumeToken3.ts, resumeToken2.ts), 0, {resumeToken3, resumeToken2});
+    assert.lte(timestampCmp(resumeToken3.ts, latestOplogEntry.ts), 0, {
+        resumeToken3,
+        latestOplogEntry,
+    });
 
     // Kill the tailable cursor.
     assert.commandWorked(localDb.runCommand({killCursors: "oplog.rs", cursors: [cursorId]}));
@@ -316,7 +331,9 @@ jsTestLog("Running query on the oplog with an empty batch");
     const cursorId = res.cursor.id;
 
     jsTest.log("Run a getMore that should return data");
-    const resGetMore1 = assert.commandWorked(localDb.runCommand({getMore: cursorId, collection: "oplog.rs"}));
+    const resGetMore1 = assert.commandWorked(
+        localDb.runCommand({getMore: cursorId, collection: "oplog.rs"}),
+    );
 
     assert.eq(resGetMore1.cursor.nextBatch.length, 3, resGetMore1);
     assert.eq(resGetMore1.cursor.nextBatch[0].o._id, 0, resGetMore1);

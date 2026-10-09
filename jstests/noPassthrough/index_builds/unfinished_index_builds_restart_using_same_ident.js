@@ -6,8 +6,9 @@
  *     requires_persistence,
  *     requires_replication,
  *     requires_wiredtiger,
- *     # Primary driven index builds are aborted when a new primary steps up.
- *     primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
+ *     # Primary-driven index builds always resume on step up without dropping/recreating any
+ *     # tables, so the premise of this test does not apply.
+ *     primary_driven_index_builds_incompatible,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -31,9 +32,13 @@ assert.commandWorked(primaryColl.insert({x: 2}));
 assert.commandWorked(primaryColl.insert({x: 3}));
 
 const failPoint = configureFailPoint(primaryDB, "hangIndexBuildBeforeCommit");
-const indexBuild = IndexBuildTest.startIndexBuild(primaryDB.getMongo(), primaryColl.getFullName(), {x: 1}, {}, [
-    ErrorCodes.InterruptedAtShutdown,
-]);
+const indexBuild = IndexBuildTest.startIndexBuild(
+    primaryDB.getMongo(),
+    primaryColl.getFullName(),
+    {x: 1},
+    {},
+    [ErrorCodes.InterruptedAtShutdown],
+);
 failPoint.wait();
 
 // Get the index ident.
@@ -55,7 +60,11 @@ primaryDB = primary.getDB(dbName);
 primaryColl = primaryDB[collName];
 
 // Resetting unfinished index.
-checkLog.containsJson(primary, 6987700, {namespace: primaryColl.getFullName(), index: "x_1", ident: ident});
+checkLog.containsJson(primary, 6987700, {
+    namespace: primaryColl.getFullName(),
+    index: "x_1",
+    ident: ident,
+});
 
 // WT drop.
 checkLog.containsJson(primary, 22338, {uri: "table:" + ident});

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/ce/histogram/histogram_estimation_impl.h"
 
@@ -61,9 +35,9 @@ EstimationResult estimateCardinality(const ScalarHistogram& h,
         size_t len = h.getBuckets().size();
         while (len > 0) {
             const size_t half = len >> 1;
-            const auto [boundTag, boundVal] = h.getBounds().getAt(bucketIndex + half);
+            const auto boundTagVal = h.getBounds().getAt(bucketIndex + half);
 
-            if (compareValues(boundTag, boundVal, tag, val) < 0) {
+            if (compareValues(boundTagVal.tag, boundTagVal.value, tag, val) < 0) {
                 bucketIndex += half + 1;
                 len -= half + 1;
             } else {
@@ -87,8 +61,8 @@ EstimationResult estimateCardinality(const ScalarHistogram& h,
     }
 
     const Bucket& bucket = h.getBuckets().at(bucketIndex);
-    const auto [boundTag, boundVal] = h.getBounds().getAt(bucketIndex);
-    const bool isEndpoint = compareValues(boundTag, boundVal, tag, val) == 0;
+    const auto boundTagVal = h.getBounds().getAt(bucketIndex);
+    const bool isEndpoint = compareValues(boundTagVal.tag, boundTagVal.value, tag, val) == 0;
 
     if (isEndpoint) {
         switch (type) {
@@ -160,7 +134,7 @@ EstimationResult interpolateEstimateInBucket(const ScalarHistogram& h,
                                              size_t bucketIndex) {
 
     const Bucket& bucket = h.getBuckets().at(bucketIndex);
-    const auto [boundTag, boundVal] = h.getBounds().getAt(bucketIndex);
+    const auto boundTagVal = h.getBounds().getAt(bucketIndex);
 
     double resultCard = bucket._cumulativeFreq - bucket._equalFreq - bucket._rangeFreq;
     double resultNDV = bucket._cumulativeNDV - bucket._ndv - 1.0;
@@ -171,7 +145,7 @@ EstimationResult interpolateEstimateInBucket(const ScalarHistogram& h,
     //
     // For example, let bound 1 = 1000, bound 2 = "abc". The value 100000000 falls in bucket 2 the
     // first bucket for strings, but should not get cardinality/ ndv fraction from it.
-    if (!sameTypeBracket(tag, boundTag)) {
+    if (!sameTypeBracket(tag, boundTagVal.tag)) {
         if (type == EstimationType::kEqual) {
             return {0.0, 0.0};
         } else {
@@ -198,11 +172,11 @@ EstimationResult interpolateEstimateInBucket(const ScalarHistogram& h,
     // the bucket estimates otherwise.
     double ratio = 0.5;
     if (bucketIndex > 0) {
-        const auto [lowBoundTag, lowBoundVal] = h.getBounds().getAt(bucketIndex - 1);
-        if (sameTypeBracket(lowBoundTag, boundTag) &&
-            !mongo::sbe::value::isInfinity(lowBoundTag, lowBoundVal)) {
-            double doubleLowBound = valueToDouble(lowBoundTag, lowBoundVal);
-            double doubleUpperBound = valueToDouble(boundTag, boundVal);
+        const auto lowBoundTagVal = h.getBounds().getAt(bucketIndex - 1);
+        if (sameTypeBracket(lowBoundTagVal.tag, boundTagVal.tag) &&
+            !mongo::sbe::value::isInfinity(lowBoundTagVal.tag, lowBoundTagVal.value)) {
+            double doubleLowBound = valueToDouble(lowBoundTagVal.tag, lowBoundTagVal.value);
+            double doubleUpperBound = valueToDouble(boundTagVal.tag, boundTagVal.value);
             double doubleVal = valueToDouble(tag, val);
             ratio = (doubleVal - doubleLowBound) / (doubleUpperBound - doubleLowBound);
         }

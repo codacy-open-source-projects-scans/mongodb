@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/commands/query_cmd/cluster_explain.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
@@ -51,10 +24,12 @@
 #include "mongo/util/str.h"
 
 #include <memory>
+#include <string_view>
 
 #include <fmt/format.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using std::vector;
 
@@ -71,7 +46,7 @@ namespace {
 // maximum user size for a BSON object will be exceeded.
 //
 
-bool appendIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend, StringData fieldName) {
+bool appendIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend, std::string_view fieldName) {
     if ((bob->len() + toAppend.objsize()) < BSONObjMaxUserSize) {
         bob->append(fieldName, toAppend);
         return true;
@@ -149,14 +124,14 @@ BSONObj ClusterExplain::wrapAsExplain(const BSONObj& cmdObj,
         const auto& fieldName = elem.fieldNameStringData();
         // Skip 'querySettings' from the original command as we're going to append it separately
         // to avoid duplicate fields.
-        if (fieldName == "querySettings"_sd) {
+        if (fieldName == "querySettings"sv) {
             continue;
         }
         if (!isGenericArgument(fieldName) || fieldName == kRawDataFieldName) {
             explainBuilder.append(elem);
-        } else if (fieldName == "comment"_sd) {
+        } else if (fieldName == "comment"sv) {
             commentField = elem;
-        } else if (fieldName == "readConcern"_sd) {
+        } else if (fieldName == "readConcern"sv) {
             readConcernField = elem;
         }
     }
@@ -355,69 +330,67 @@ void ClusterExplain::buildExecStats(const vector<AsyncRequestsSender::Response>&
     executionStatsBob.appendNumber("totalDocsExamined", docsExamined);
 
     // Fill in the tree of stages.
-    BSONObjBuilder executionStagesBob(executionStatsBob.subobjStart("executionStages"));
+    {
+        BSONObjBuilder executionStagesBob(executionStatsBob.subobjStart("executionStages"));
 
-    // Info for the root mongos stage.
-    executionStagesBob.append("stage", mongosStageName);
-    executionStatsBob.appendNumber("nReturned", finalNReturned);
-    if (appendNCounted) {
-        executionStatsBob.appendNumber("nCounted", totalNCounted);
-    }
-    if (multipleShards) {
-        if (limit) {
-            executionStatsBob.appendNumber("limitAmount", static_cast<long long>(*limit));
+        // Info for the root mongos stage.
+        executionStagesBob.append("stage", mongosStageName);
+        executionStagesBob.appendNumber("nReturned", finalNReturned);
+        if (appendNCounted) {
+            executionStagesBob.appendNumber("nCounted", totalNCounted);
         }
-        if (skip) {
-            executionStatsBob.appendNumber("skipAmount", static_cast<long long>(*skip));
+        if (multipleShards) {
+            if (limit) {
+                executionStagesBob.appendNumber("limitAmount", static_cast<long long>(*limit));
+            }
+            if (skip) {
+                executionStagesBob.appendNumber("skipAmount", static_cast<long long>(*skip));
+            }
+        }
+        executionStagesBob.appendNumber("executionTimeMillis", millisElapsed);
+        executionStagesBob.appendNumber("totalKeysExamined", keysExamined);
+        executionStagesBob.appendNumber("totalDocsExamined", docsExamined);
+        executionStagesBob.append("totalChildMillis", totalChildMillis);
+
+        {
+            BSONArrayBuilder execShardsBuilder(executionStagesBob.subarrayStart("shards"));
+            for (size_t i = 0; i < shardResponses.size(); i++) {
+                auto responseData = shardResponses[i].swResponse.getValue().data;
+
+                BSONObjBuilder singleShardBob(execShardsBuilder.subobjStart());
+                BSONObj execStats = responseData["executionStats"].Obj();
+
+                singleShardBob.append("shardName", shardResponses[i].shardId.toString());
+                appendElementsIfRoom(&singleShardBob, execStats);
+                singleShardBob.doneFast();
+            }
+
+            if (!firstShardResponseData["executionStats"].Obj().hasField("allPlansExecution")) {
+                // The shards don't have execution stats for all plans, so we're done.
+                return;
+            }
         }
     }
-    executionStatsBob.appendNumber("executionTimeMillis", millisElapsed);
-    executionStatsBob.appendNumber("totalKeysExamined", keysExamined);
-    executionStatsBob.appendNumber("totalDocsExamined", docsExamined);
-    executionStagesBob.append("totalChildMillis", totalChildMillis);
 
-    BSONArrayBuilder execShardsBuilder(executionStagesBob.subarrayStart("shards"));
-    for (size_t i = 0; i < shardResponses.size(); i++) {
-        auto responseData = shardResponses[i].swResponse.getValue().data;
+    {
+        // Add the allPlans stats from each shard.
+        BSONArrayBuilder allPlansExecBob(executionStatsBob.subarrayStart("allPlansExecution"));
+        for (size_t i = 0; i < shardResponses.size(); i++) {
+            auto responseData = shardResponses[i].swResponse.getValue().data;
 
-        BSONObjBuilder singleShardBob(execShardsBuilder.subobjStart());
-        BSONObj execStats = responseData["executionStats"].Obj();
+            BSONObjBuilder singleShardBob(allPlansExecBob.subobjStart());
+            singleShardBob.append("shardName", shardResponses[i].shardId.toString());
 
-        singleShardBob.append("shardName", shardResponses[i].shardId.toString());
-        appendElementsIfRoom(&singleShardBob, execStats);
-        singleShardBob.doneFast();
-    }
+            BSONObj execStats = responseData["executionStats"].Obj();
+            vector<BSONElement> allPlans = execStats["allPlansExecution"].Array();
 
-    execShardsBuilder.doneFast();
-    executionStagesBob.doneFast();
-    if (!firstShardResponseData["executionStats"].Obj().hasField("allPlansExecution")) {
-        // The shards don't have execution stats for all plans, so we're done.
-        executionStatsBob.doneFast();
-        return;
-    }
-
-    // Add the allPlans stats from each shard.
-    BSONArrayBuilder allPlansExecBob(executionStatsBob.subarrayStart("allPlansExecution"));
-    for (size_t i = 0; i < shardResponses.size(); i++) {
-        auto responseData = shardResponses[i].swResponse.getValue().data;
-
-        BSONObjBuilder singleShardBob(allPlansExecBob.subobjStart());
-        singleShardBob.append("shardName", shardResponses[i].shardId.toString());
-
-        BSONObj execStats = responseData["executionStats"].Obj();
-        vector<BSONElement> allPlans = execStats["allPlansExecution"].Array();
-
-        BSONArrayBuilder innerArrayBob(singleShardBob.subarrayStart("allPlans"));
-        for (size_t j = 0; j < allPlans.size(); j++) {
-            appendToArrayIfRoom(&innerArrayBob, allPlans[j]);
+            BSONArrayBuilder innerArrayBob(singleShardBob.subarrayStart("allPlans"));
+            for (size_t j = 0; j < allPlans.size(); j++) {
+                appendToArrayIfRoom(&innerArrayBob, allPlans[j]);
+            }
+            innerArrayBob.done();
         }
-        innerArrayBob.done();
-
-        singleShardBob.doneFast();
     }
-
-    allPlansExecBob.doneFast();
-    executionStatsBob.doneFast();
 }
 
 // static
@@ -448,6 +421,7 @@ void ClusterExplain::buildEOFExplainResult(OperationContext* opCtx,
     explain_common::generateQueryShapeHash(opCtx, out);
     explain_common::generateServerInfo(out);
     explain_common::generateServerParameters(cq->getExpCtx(), out);
+    explain_common::generateQueryKnobs(cq->getExpCtx(), out);
     appendIfRoom(out, command, "command");
 }
 
@@ -473,6 +447,7 @@ Status ClusterExplain::buildExplainResult(
     explain_common::generateQueryShapeHash(expCtx->getOperationContext(), out);
     explain_common::generateServerInfo(out);
     explain_common::generateServerParameters(expCtx, out);
+    explain_common::generateQueryKnobs(expCtx, out);
     appendIfRoom(out, command, "command");
 
     return Status::OK();

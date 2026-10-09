@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,6 +9,7 @@
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/modules.h"
 
+#include <string_view>
 #include <type_traits>
 
 #include <boost/intrusive_ptr.hpp>
@@ -115,8 +90,8 @@ public:
         return align(plusBytes(sizeof(ValueElement) + nameLen));
     }
 
-    StringData nameSD() const {
-        return StringData(_name, nameLen);
+    std::string_view nameSD() const {
+        return std::string_view(_name, nameLen);
     }
 
 
@@ -192,7 +167,7 @@ public:
      * Get the field name that the iterator currently points to without bringing anything into
      * cache.
      */
-    StringData fieldName() {
+    std::string_view fieldName() {
         if (_it) {
             return _it->nameSD();
         }
@@ -296,14 +271,14 @@ class HashedFieldName {
 public:
     using SizeType = uint32_t;
 
-    explicit HashedFieldName(StringData sd, SizeType hash)
+    explicit HashedFieldName(std::string_view sd, SizeType hash)
         : _str(sd.data()), _sz(sd.size()), _hash(hash) {
         uassert(1065170, "Field name too large", sd.size() < std::numeric_limits<uint32_t>::max());
     }
-    explicit HashedFieldName(std::pair<StringData, SizeType> pair)
+    explicit HashedFieldName(std::pair<std::string_view, SizeType> pair)
         : HashedFieldName(pair.first, pair.second) {}
 
-    StringData key() const {
+    std::string_view key() const {
         return {_str, _sz};
     }
 
@@ -331,11 +306,11 @@ private:
     SizeType _hash;
 };
 
-inline bool operator==(HashedFieldName lhs, StringData rhs) {
+inline bool operator==(HashedFieldName lhs, std::string_view rhs) {
     return lhs.key() == rhs;
 }
 
-inline bool operator==(StringData lhs, HashedFieldName rhs) {
+inline bool operator==(std::string_view lhs, HashedFieldName rhs) {
     return lhs == rhs.key();
 }
 
@@ -344,30 +319,30 @@ inline bool operator==(HashedFieldName lhs, HashedFieldName rhs) {
 }
 
 /**
- * Hasher to support heterogeneous lookup for StringData and string-like elements.
+ * Hasher to support heterogeneous lookup for std::string_view and string-like elements.
  */
 struct FieldNameHasher {
     // This using directive activates heterogeneous lookup in the hash table
     using is_transparent = void;
 
-    HashedFieldName::SizeType operator()(StringData sd) const {
+    HashedFieldName::SizeType operator()(std::string_view sd) const {
         // Use the default absl string hasher.
         return absl::Hash<absl::string_view>{}(absl::string_view(sd.data(), sd.size()));
     }
 
     HashedFieldName::SizeType operator()(const std::string& s) const {
-        return operator()(StringData(s));
+        return operator()(std::string_view(s));
     }
 
     HashedFieldName::SizeType operator()(const char* s) const {
-        return operator()(StringData(s));
+        return operator()(std::string_view(s));
     }
 
     HashedFieldName::SizeType operator()(HashedFieldName key) const {
         return key.hash();
     }
 
-    HashedFieldName hashedFieldName(StringData sd) {
+    HashedFieldName hashedFieldName(std::string_view sd) {
         return HashedFieldName(sd, operator()(sd));
     }
 };
@@ -415,13 +390,7 @@ public:
     }
 
     // The function adds up all iterator counts. Exp. runtime is O(N).
-    size_t computeSize() const {
-        // can't use _numFields because it includes removed Fields
-        size_t count = 0;
-        for (DocumentStorageIterator it = iterator(); !it.atEnd(); it.advance())
-            count++;
-        return count;
-    }
+    size_t computeSize() const;
 
     /// Returns the position of the next field to be inserted
     Position getNextPosition() const {
@@ -442,7 +411,7 @@ public:
         return *(_firstElement->plusBytes(pos.index));
     }
 
-    Value getField(StringData name) const {
+    Value getField(std::string_view name) const {
         Position pos = findField(name);
         if (!pos.found())
             return Value();
@@ -463,7 +432,7 @@ public:
         return *(_firstElement->plusBytes(pos.index));
     }
 
-    Value& getFieldOrCreate(StringData name) {
+    Value& getFieldOrCreate(std::string_view name) {
         _modified = true;
         Position pos = findField(name);
         if (!pos.found())
@@ -471,7 +440,7 @@ public:
         return getField(pos).val;
     }
 
-    Value& getFieldCacheOnlyOrCreate(StringData name) {
+    Value& getFieldCacheOnlyOrCreate(std::string_view name) {
         _modified = true;
         Position pos = findFieldInCache(name);
         if (!pos.found())
@@ -482,7 +451,7 @@ public:
     /**
      * Retrieves the given field from the cache. Returns a boost::none if the field does not exist.
      */
-    boost::optional<Value> getFieldCacheOnly(StringData name) const {
+    boost::optional<Value> getFieldCacheOnly(std::string_view name) const {
         Position pos = findFieldInCache(name);
         if (pos.found()) {
             return getField(pos).val;
@@ -493,7 +462,7 @@ public:
     /**
      * Retrieves the given field from the backing BSON. Returns an EOO if the field does not exist.
      */
-    BSONElement getFieldBsonOnly(StringData name) const {
+    BSONElement getFieldBsonOnly(std::string_view name) const {
         for (auto&& bsonElement : _bson) {
             if (name == bsonElement.fieldNameStringData()) {
                 return bsonElement;
@@ -532,6 +501,10 @@ public:
         return _bson.objsize();
     }
 
+    bool bsonObjIsEmpty() const {
+        return _bson.isEmpty();
+    }
+
     /**
      * Returns the size of backing BSON object minus the size of BSON fields that are already
      * brought into the cache.
@@ -551,7 +524,7 @@ public:
     bool isOwned() const {
         // An empty BSON can be a special case, it can be treated 'owned'. We save on memory
         // allocation when constructing an empty Document.
-        return _bson.isEmptyPrototype() || _bson.isOwned();
+        return _bson.isOwned() || _bson.isEmptyPrototype();
     }
 
     void makeOwned() {

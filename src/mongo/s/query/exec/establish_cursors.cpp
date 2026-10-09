@@ -1,48 +1,21 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/query/exec/establish_cursors.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
-#include "mongo/db/client.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/kill_cursors_gen.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -53,17 +26,22 @@
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
+#include <atomic>
+#include <mutex>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -74,10 +52,59 @@
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(throwDuringCursorResponseValidation);
+MONGO_FAIL_POINT_DEFINE(hangBeforeCleanupPoolStartup);
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr StringData kOperationKeyField = "clientOperationKey"_sd;
+constexpr std::string_view kOperationKeyField = "clientOperationKey"sv;
+
+class CleanupPool {
+public:
+    CleanupPool() {
+        ThreadPool::Options opts;
+        opts.poolName = "CursorCleanup";
+        opts.maxThreads = 1;
+        _pool = std::make_unique<ThreadPool>(opts);
+    }
+
+    void schedule(auto&& task) {
+        if (MONGO_unlikely(!_running.load())) {
+            // Allows tests to force multiple threads to race on the check-and-startup below.
+            hangBeforeCleanupPoolStartup.pauseWhileSet();
+            std::lock_guard lk(_mutex);
+            if (!_running.swap(true)) {
+                _pool->startup();
+            }
+        }
+        _pool->schedule(std::forward<decltype(task)>(task));
+    }
+
+    // Shuts down and joins the underlying thread pool, if it was ever started. Must be called
+    // before the owning ServiceContext is torn down so that the pool's worker thread does not
+    // outlive the services it may depend on.
+    void shutdown() {
+        std::lock_guard lk(_mutex);
+        if (_running.load()) {
+            _pool->shutdown();
+            _pool->join();
+        }
+    }
+
+private:
+    std::mutex _mutex;
+    Atomic<bool> _running{false};
+    std::unique_ptr<ThreadPool> _pool;
+};
+
+const auto getCleanupPool = ServiceContext::declareDecoration<CleanupPool>();
+
+const ServiceContext::ConstructorActionRegisterer cleanupPoolShutdownRegisterer{
+    "CursorCleanupPoolShutdown",
+    [](ServiceContext*) {},
+    [](ServiceContext* svcCtx) {
+        getCleanupPool(svcCtx).shutdown();
+    }};
 
 /**
  * This class wraps logic for establishing cursors using a MultiStatementTransactionRequestsSender.
@@ -129,8 +156,7 @@ public:
         return std::exchange(_remoteCursors, {});
     }
 
-    static void killOpOnShards(ServiceContext* srvCtx,
-                               std::shared_ptr<executor::TaskExecutor> executor,
+    static void killOpOnShards(std::shared_ptr<executor::TaskExecutor> executor,
                                std::vector<OperationKey> opKeys,
                                std::set<HostAndPort> remotes) noexcept;
 
@@ -148,7 +174,7 @@ private:
 
     /**
      * Favors interruption/unyield failures > UUID mismatch error with actual ns > UUID mismatch
-     * error > other errors > retargeting errors
+     * error > other errors > retargeting errors > retriable system-overload errors.
      */
     void _prioritizeFailures(Status newError, bool isInterruption);
 
@@ -328,25 +354,24 @@ void CursorEstablisher::_waitForResponse() {
 
 // Schedule killOperations against all cursors that were established. Make sure to
 // capture arguments by value since the cleanup work may get scheduled after
-// returning from this function.
-StatusWith<executor::TaskExecutor::CallbackHandle> scheduleCursorCleanup(
-    std::shared_ptr<executor::TaskExecutor> executor,
-    ServiceContext* svcCtx,
-    std::vector<OperationKey> opKeys,
-    std::set<HostAndPort>&& remotesToClean) {
-    return executor->scheduleWork([svcCtx = svcCtx,
-                                   executor = executor,
-                                   opKeys = std::move(opKeys),
-                                   remotesToClean = std::move(remotesToClean)](
-                                      const executor::TaskExecutor::CallbackArgs& args) mutable {
-        if (!args.status.isOK()) {
-            LOGV2_WARNING(
-                7355702, "Failed to schedule remote cursor cleanup", "error"_attr = args.status);
-            return;
-        }
-        CursorEstablisher::killOpOnShards(
-            svcCtx, std::move(executor), std::move(opKeys), std::move(remotesToClean));
-    });
+// returning from this function. Uses a dedicated single-thread pool to avoid
+// competing with normal query traffic on the sharding task executor.
+void scheduleCursorCleanup(std::shared_ptr<executor::TaskExecutor> executor,
+                           ServiceContext* svcCtx,
+                           std::vector<OperationKey> opKeys,
+                           std::set<HostAndPort>&& remotesToClean) {
+    getCleanupPool(svcCtx).schedule(
+        [executor = std::move(executor),
+         opKeys = std::move(opKeys),
+         remotesToClean = std::move(remotesToClean)](Status status) mutable {
+            if (!status.isOK()) {
+                LOGV2_WARNING(
+                    7355702, "Failed to schedule remote cursor cleanup", "error"_attr = status);
+                return;
+            }
+            CursorEstablisher::killOpOnShards(
+                std::move(executor), std::move(opKeys), std::move(remotesToClean));
+        });
 }
 
 void CursorEstablisher::checkForFailedRequests() {
@@ -376,11 +401,11 @@ void CursorEstablisher::checkForFailedRequests() {
         // Filter out duplicate hosts.
         auto remotes = std::set<HostAndPort>(_remotesToClean.begin(), _remotesToClean.end());
 
-        uassertStatusOK(scheduleCursorCleanup(
-            _executor,
-            _opCtx->getServiceContext(),
-            _providedOpKeys.size() ? _providedOpKeys : std::vector<OperationKey>{_defaultOpKey},
-            std::move(remotes)));
+        scheduleCursorCleanup(_executor,
+                              _opCtx->getServiceContext(),
+                              _providedOpKeys.size() ? _providedOpKeys
+                                                     : std::vector<OperationKey>{_defaultOpKey},
+                              std::move(remotes));
     }
 
     // Throw our failure.
@@ -405,7 +430,7 @@ void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption
         return;
     }
     if (isInterruption) {
-        if (newError.code() == ErrorCodes::CallbackCanceled && !_currentErrorIsRetargetingError()) {
+        if (newError.code() == ErrorCodes::CallbackCanceled) {
             // Do not clobber an already existing error with a 'CallbackCanceled' error.
             return;
         }
@@ -414,9 +439,15 @@ void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption
         return;
     }
 
-    // Prefer other non-retargeting related errors that could be operation-fatal.
+    // Prefer other non-retargeting related errors that could be operation-fatal, except for
+    // retriable system-overload errors. Those may not be retried by the ARS if it receives a
+    // retargeting error in the same batch, so keep the retargeting error and let the router refresh
+    // and retry the command rather than failing with an error that nothing upstream retries.
     if (_currentErrorIsRetargetingError()) {
-        _maybeFailure = std::move(newError);
+        if (!(newError.isA<ErrorCategory::SystemOverloadedError>() &&
+              newError.isA<ErrorCategory::RetriableError>())) {
+            _maybeFailure = std::move(newError);
+        }
         return;
     }
 
@@ -494,24 +525,22 @@ bool CursorEstablisher::_canSkipForPartialResults(const AsyncRequestsSender::Res
     return false;
 }
 
-void CursorEstablisher::killOpOnShards(ServiceContext* srvCtx,
-                                       std::shared_ptr<executor::TaskExecutor> executor,
+void CursorEstablisher::killOpOnShards(std::shared_ptr<executor::TaskExecutor> executor,
                                        std::vector<OperationKey> opKeys,
                                        std::set<HostAndPort> remotes) noexcept try {
-    ThreadClient tc("establishCursors cleanup", srvCtx->getService());
-    auto opCtx = tc->makeOperationContext();
-
     for (auto&& host : remotes) {
         BSONArrayBuilder opKeyArrayBuilder;
         for (auto&& opKey : opKeys) {
             opKey.appendToArrayBuilder(&opKeyArrayBuilder);
         }
 
+        // This is a fire-and-forget cleanup command; no opCtx needed since we don't want to
+        // propagate deadlines or API parameters from any prior operation.
         executor::RemoteCommandRequest request(
             host,
             DatabaseName::kAdmin,
             BSON("_killOperations" << 1 << "operationKeys" << opKeyArrayBuilder.arr()),
-            opCtx.get(),
+            nullptr /* opCtx */,
             executor::RemoteCommandRequest::kNoTimeout,
             true /* fireAndForget */);
 
@@ -549,6 +578,11 @@ BSONObj appendReadPreferenceNearest(BSONObj cmdObj) {
 // instead of relying on real sleeps.
 void setCursorEstablisherSuppressorClockSource_forTest(ClockSource* cs) {
     gLogSeveritySuppressor.resetWithClockSource_forTest(cs);
+}
+
+void scheduleOnCursorCleanupPool_forTest(ServiceContext* svcCtx,
+                                         unique_function<void(Status)> task) {
+    getCleanupPool(svcCtx).schedule(std::move(task));
 }
 
 // Attach our OperationKey to a request. This will allow us to kill any outstanding
@@ -717,8 +751,8 @@ std::vector<RemoteCursor> establishCursorsOnAllHosts(
               "nRemotes"_attr = remoteCursors.size());
 
         if (!remotesToClean.empty()) {
-            uassertStatusOK(scheduleCursorCleanup(
-                executor, opCtx->getServiceContext(), {opKey}, std::move(remotesToClean)));
+            scheduleCursorCleanup(
+                executor, opCtx->getServiceContext(), {opKey}, std::move(remotesToClean));
         }
 
         uassertStatusOK(failure.value());

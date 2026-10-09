@@ -3,16 +3,21 @@
  * with fixed buckets.
  *
  * @tags: [
+ *     uses_explain,
  *     # We need a timeseries collection.
  *     requires_timeseries,
- *     requires_fcv_71,
+ *     requires_fcv_91,
  *     # Explain of a resolved view must be executed by mongos.
  *     directly_against_shardsvrs_incompatible,
  *     # Refusing to run a test that issues an aggregation command with explain because it may
  *     # return incomplete results if interrupted by a stepdown.
  *     does_not_support_stepdowns,
- *     featureFlagTSBucketingParametersUnchanged,
  *     requires_getmore,
+ *     # checkExplain() asserts there is exactly one $_internalUnpackBucket stage, but
+ *     # getAggPlanStages() returns one match per shard for a sharded explain. If the balancer
+ *     # moves this collection's chunks across shards mid-test, the assertion can see more than
+ *     # one stage even though each shard's plan is individually correct.
+ *     assumes_balancer_off,
  * ]
  */
 
@@ -169,7 +174,10 @@ function testDeterministicInput(roundingParam, startingTime) {
         expectedDocs: [docs[0]],
         eventFilter: {[timeField]: {$eq: times[0]}},
         wholeBucketFilter: {
-            $and: [{[`control.min.${timeField}`]: {$eq: times[0]}}, {[`control.max.${timeField}`]: {$eq: times[0]}}],
+            $and: [
+                {[`control.min.${timeField}`]: {$eq: times[0]}},
+                {[`control.max.${timeField}`]: {$eq: times[0]}},
+            ],
         },
     });
 
@@ -201,7 +209,10 @@ function testDeterministicInput(roundingParam, startingTime) {
     // Test multiple $match expressions, with all the predicates on the 'timeField' that align with
     // the bucket boundaries.
     checkResults({
-        pipeline: [{$match: {[timeField]: {$lt: startingTime}}}, {$match: {[timeField]: {$gte: times[0]}}}],
+        pipeline: [
+            {$match: {[timeField]: {$lt: startingTime}}},
+            {$match: {[timeField]: {$gte: times[0]}}},
+        ],
         expectedDocs: [docs[0], docs[1], docs[2]],
     });
 
@@ -213,7 +224,11 @@ function testDeterministicInput(roundingParam, startingTime) {
         pipeline: [
             {$match: {[timeField]: {$lt: startingTime}}},
             {
-                $group: {_id: `$${metaField}`, accmin: {$min: "$accValue"}, accmax: {$max: "$accValue"}},
+                $group: {
+                    _id: `$${metaField}`,
+                    accmin: {$min: "$accValue"},
+                    accmax: {$max: "$accValue"},
+                },
             },
         ],
         expectedDocs: [{"_id": {"id": 1234, "location": "nyc"}, "accmin": 0, "accmax": 4}],
@@ -243,7 +258,11 @@ function testDeterministicInput(roundingParam, startingTime) {
         ],
         expectedDocs: [docs[5], docs[6], docs[1], docs[0]],
         eventFilter: {
-            $or: [{[timeField]: {$gte: times[5]}}, {[timeField]: {$lt: times[2]}}, {[timeField]: {$lte: times[0]}}],
+            $or: [
+                {[timeField]: {$gte: times[5]}},
+                {[timeField]: {$lt: times[2]}},
+                {[timeField]: {$lte: times[0]}},
+            ],
         },
         wholeBucketFilter: {
             $or: [
@@ -275,7 +294,10 @@ function testDeterministicInput(roundingParam, startingTime) {
     // Test multiple $match expressions, where one predicate is on the 'timeField' and aligns with
     // the bucket boundaries, and the other predicate is on a different field.
     checkResults({
-        pipeline: [{$match: {[timeField]: {$lt: startingTime}}}, {$match: {otherTime: {$gte: times[0]}}}],
+        pipeline: [
+            {$match: {[timeField]: {$lt: startingTime}}},
+            {$match: {otherTime: {$gte: times[0]}}},
+        ],
         expectedDocs: [docs[0], docs[1], docs[2]],
         eventFilter: {$and: [{[timeField]: {$lt: startingTime}}, {otherTime: {$gte: times[0]}}]},
     });
@@ -313,9 +335,18 @@ function testDeterministicInput(roundingParam, startingTime) {
 }
 
 // Run the test with different rounding parameters.
-testDeterministicInput(3600 /* roundingParam */, ISODate("2022-09-30T15:00:00.000Z") /* startingTime */); // 1 hour
-testDeterministicInput(86400 /* roundingParam */, ISODate("2022-09-30T00:00:00.000Z") /* startingTime */); // 1 day
-testDeterministicInput(60 /* roundingParam */, ISODate("2022-09-30T15:10:00.000Z") /* startingTime */); // 1 minute
+testDeterministicInput(
+    3600 /* roundingParam */,
+    ISODate("2022-09-30T15:00:00.000Z") /* startingTime */,
+); // 1 hour
+testDeterministicInput(
+    86400 /* roundingParam */,
+    ISODate("2022-09-30T00:00:00.000Z") /* startingTime */,
+); // 1 day
+testDeterministicInput(
+    60 /* roundingParam */,
+    ISODate("2022-09-30T15:10:00.000Z") /* startingTime */,
+); // 1 minute
 
 function checkRandomTestResult(pipeline, shouldCheckExplain = true) {
     if (shouldCheckExplain) {
@@ -328,14 +359,18 @@ function checkRandomTestResult(pipeline, shouldCheckExplain = true) {
         );
     }
     const results = coll.aggregate(pipeline).toArray();
-    const noOptResults = coll.aggregate([{$_internalInhibitOptimization: {}}, pipeline[0]]).toArray();
+    const noOptResults = coll
+        .aggregate([{$_internalInhibitOptimization: {}}, pipeline[0]])
+        .toArray();
     assert.sameMembers(results, noOptResults, "Results differ with and without the optimization.");
 }
 
 function generateRandomTimestamp() {
     const startTime = ISODate("2012-01-01T00:01:00.000Z");
     const maxTime = ISODate("2015-12-31T23:59:59.000Z");
-    return new Date(Math.floor(Random.rand() * (maxTime.getTime() - startTime.getTime()) + startTime.getTime()));
+    return new Date(
+        Math.floor(Random.rand() * (maxTime.getTime() - startTime.getTime()) + startTime.getTime()),
+    );
 }
 
 (function testRandomizedInput() {
@@ -367,6 +402,55 @@ function generateRandomTimestamp() {
 
     // Validate the same results are returned with a completely random timestamp. We will not check
     // the explain output, since we cannot guarantee the time will align with the bucket boundaries.
-    checkRandomTestResult([{$match: {[timeField]: {$lt: generateRandomTimestamp()}}}], false /* shouldCheckExplain */);
-    checkRandomTestResult([{$match: {[timeField]: {$gte: generateRandomTimestamp()}}}], false /* shouldCheckExplain */);
+    checkRandomTestResult(
+        [{$match: {[timeField]: {$lt: generateRandomTimestamp()}}}],
+        false /* shouldCheckExplain */,
+    );
+    checkRandomTestResult(
+        [{$match: {[timeField]: {$gte: generateRandomTimestamp()}}}],
+        false /* shouldCheckExplain */,
+    );
+})();
+
+// Verify event filter is absent for an aligned $lt predicate on a fixed-bucket collection.
+// This exercises the shard-side prune pass: after the router processes the pipeline with
+// fixedBuckets=false (setting an eventFilter), the shard sets fixedBuckets=true and should
+// prune the now-redundant eventFilter.
+(function testAlignedLtPredicateRemovesEventFilter() {
+    coll.drop();
+    // Set bucketMaxSpanSeconds == bucketRoundingSeconds to satisfy canUseFixedBucketOptimizations.
+    assert.commandWorked(
+        db.createCollection(coll.getName(), {
+            timeseries: {
+                timeField,
+                metaField,
+                bucketMaxSpanSeconds: 3600,
+                bucketRoundingSeconds: 3600,
+            },
+        }),
+    );
+
+    // Insert documents spanning two bucket boundaries (each bucket is 1 hour).
+    assert.commandWorked(
+        coll.insertMany([
+            {[timeField]: ISODate("2024-01-01T08:00:00Z"), [metaField]: "a", x: 1},
+            {[timeField]: ISODate("2024-01-01T08:30:00Z"), [metaField]: "a", x: 2},
+            {[timeField]: ISODate("2024-01-01T09:00:00Z"), [metaField]: "a", x: 3},
+            {[timeField]: ISODate("2024-01-01T09:30:00Z"), [metaField]: "a", x: 4},
+        ]),
+    );
+
+    // Predicate aligned to the hour boundary: $lt 09:00 covers the [08:00, 09:00) bucket exactly.
+    const pipeline = [{$match: {[timeField]: {$lt: ISODate("2024-01-01T09:00:00Z")}}}];
+
+    // Verify no eventFilter or wholeBucketFilter in the explain (null = absent).
+    checkExplain(pipeline, null, null, true, true);
+
+    // Verify correct results: only x:1 and x:2 are before 09:00.
+    const results = coll.aggregate(pipeline).toArray();
+    assert.sameMembers(
+        results.map((d) => d.x),
+        [1, 2],
+        {results},
+    );
 })();

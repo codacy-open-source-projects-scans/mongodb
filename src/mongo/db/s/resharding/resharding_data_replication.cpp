@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/basic_types_gen.h"
@@ -64,6 +37,7 @@
 
 #include <initializer_list>
 #include <string>
+#include <string_view>
 #include <tuple>
 
 #include <boost/move/utility_core.hpp>
@@ -75,6 +49,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 /**
@@ -122,7 +97,8 @@ std::unique_ptr<ReshardingCollectionCloner> ReshardingDataReplication::_makeColl
         cloneTimestamp,
         metadata.getTempReshardingNss(),
         storeProgress,
-        relaxed);
+        relaxed,
+        metadata.getForwardableOpMetadata());
 }
 
 std::vector<std::unique_ptr<ReshardingTxnCloner>> ReshardingDataReplication::_makeTxnCloners(
@@ -176,7 +152,8 @@ std::vector<std::unique_ptr<ReshardingOplogFetcher>> ReshardingDataReplication::
             donor.getShardId(),
             myShardId,
             std::move(oplogBufferNss),
-            storeOplogFetcherProgress));
+            storeOplogFetcherProgress,
+            metadata.getForwardableOpMetadata()));
     }
 
     return oplogFetchers;
@@ -184,17 +161,14 @@ std::vector<std::unique_ptr<ReshardingOplogFetcher>> ReshardingDataReplication::
 
 std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeOplogFetcherExecutor(
     size_t numDonors) {
-    ThreadPool::Limits threadPoolLimits;
-    threadPoolLimits.maxThreads = numDonors;
-    ThreadPool::Options threadPoolOptions(std::move(threadPoolLimits));
-
-    auto prefix = "ReshardingOplogFetcher"_sd;
-    threadPoolOptions.threadNamePrefix = std::string{prefix} + "-";
-    threadPoolOptions.poolName = std::string{prefix} + "ThreadPool";
-
+    static constexpr std::string_view prefix = "ReshardingOplogFetcher";
     auto executor = executor::ThreadPoolTaskExecutor::create(
-        std::make_unique<ThreadPool>(std::move(threadPoolOptions)),
-        executor::makeNetworkInterface(std::string{prefix} + "Network"));
+        ThreadPool::make({
+            .poolName = fmt::format("{}ThreadPool", prefix),
+            .threadNamePrefix = fmt::format("{}-", prefix),
+            .maxThreads = numDonors,
+        }),
+        executor::makeNetworkInterface(fmt::format("{}Network", prefix)));
 
     executor->startup();
     return executor;
@@ -202,26 +176,24 @@ std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeOplogFet
 
 std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeCollectionClonerExecutor(
     size_t numDonors) {
-    ThreadPool::Limits threadPoolLimits;
-    // We may transiently use 2 threads per reader while passing things around within the task
-    // executor.  Each writer uses a dedicated thread, plus 1 thread for waiting on the rest.
-    threadPoolLimits.maxThreads =
-        2 * numDonors + resharding::gReshardingCollectionClonerWriteThreadCount.load() + 1;
-    ThreadPool::Options threadPoolOptions(std::move(threadPoolLimits));
-
-    auto prefix = "ReshardingCollectionCloner"_sd;
-    threadPoolOptions.threadNamePrefix = std::string{prefix} + "-";
-    threadPoolOptions.poolName = std::string{prefix} + "ThreadPool";
-    threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName, getGlobalServiceContext()->getService());
-        auto* client = Client::getCurrent();
-        AuthorizationSession::get(*client)->grantInternalAuthorization();
-    };
-
+    static constexpr std::string_view prefix = "ReshardingCollectionCloner";
     auto executor = executor::ThreadPoolTaskExecutor::create(
-        std::make_unique<ThreadPool>(std::move(threadPoolOptions)),
-        executor::makeNetworkInterface(std::string{prefix} + "Network"));
-
+        ThreadPool::make({
+            .poolName = fmt::format("{}ThreadPool", prefix),
+            .threadNamePrefix = fmt::format("{}-", prefix),
+            // We may transiently use 2 threads per reader while passing things around within the
+            // task executor.  Each writer uses a dedicated thread, plus 1 thread for waiting on the
+            // rest.
+            .maxThreads =
+                2 * numDonors + resharding::gReshardingCollectionClonerWriteThreadCount.load() + 1,
+            .onCreateThread =
+                [](const std::string& threadName) {
+                    Client::initThread(threadName, getGlobalServiceContext()->getService());
+                    auto* client = Client::getCurrent();
+                    AuthorizationSession::get(*client)->grantInternalAuthorization();
+                },
+        }),
+        executor::makeNetworkInterface(fmt::format("{}Network", prefix)));
     executor->startup();
     return executor;
 }
@@ -268,7 +240,8 @@ std::vector<std::unique_ptr<ReshardingOplogApplier>> ReshardingDataReplication::
                     oplogBufferNss, std::make_unique<MongoProcessInterfaceFactoryImpl>()),
                 std::move(idToResumeFrom),
                 oplogFetchers[i].get()),
-            resharding::data_copy::isCollectionCapped(opCtx, metadata.getTempReshardingNss())));
+            resharding::data_copy::isCollectionCapped(opCtx, metadata.getTempReshardingNss()),
+            metadata.getForwardableOpMetadata()));
     }
 
     return oplogAppliers;
@@ -350,6 +323,12 @@ void ReshardingDataReplication::startOplogApplication() {
 void ReshardingDataReplication::prepareForCriticalSection() {
     for (auto& fetcher : _oplogFetchers) {
         fetcher->prepareForCriticalSection();
+    }
+    // The donor has blocked writes to the source collection, so the remaining oplog delta is
+    // bounded and must be drained to reach strict consistency. Bypass blockReplicaSetWrites on
+    // the recipient so a per-shard write block cannot prevent the final catch-up from completing.
+    for (auto& applier : _oplogAppliers) {
+        applier->setReplicaSetWriteBlockBypass();
     }
 }
 

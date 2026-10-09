@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #pragma once
@@ -33,14 +7,13 @@
 
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/geo/shapes.h"
-#include "mongo/db/index/s2_common.h"
+#include "mongo/db/index/geo/s2_common.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
@@ -51,6 +24,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include <s2cellid.h>
 
@@ -104,11 +78,11 @@ private:
 class GeoMatchExpression : public LeafMatchExpression {
 
 public:
-    GeoMatchExpression(boost::optional<StringData> path,
+    GeoMatchExpression(boost::optional<std::string_view> path,
                        const GeoExpression* query,
                        const BSONObj& rawObj,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr);
-    GeoMatchExpression(boost::optional<StringData> path,
+    GeoMatchExpression(boost::optional<std::string_view> path,
                        std::shared_ptr<const GeoExpression> query,
                        const BSONObj& rawObj,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr);
@@ -118,7 +92,7 @@ public:
     void debugString(StringBuilder& debug, int indentationLevel = 0) const override;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts = {},
+                                       const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const final;
 
     bool equivalent(const MatchExpression* other) const override;
@@ -206,10 +180,10 @@ public:
 
 class GeoNearMatchExpression : public LeafMatchExpression {
 public:
-    GeoNearMatchExpression(boost::optional<StringData> path,
+    GeoNearMatchExpression(boost::optional<std::string_view> path,
                            const GeoNearExpression* query,
                            const BSONObj& rawObj);
-    GeoNearMatchExpression(boost::optional<StringData> path,
+    GeoNearMatchExpression(boost::optional<std::string_view> path,
                            std::shared_ptr<const GeoNearExpression> query,
                            const BSONObj& rawObj);
 
@@ -218,7 +192,7 @@ public:
     void debugString(StringBuilder& debug, int indentationLevel = 0) const override;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts = {},
+                                       const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const final;
 
     bool equivalent(const MatchExpression* other) const override;
@@ -256,11 +230,11 @@ private:
  */
 class TwoDPtInAnnulusExpression : public LeafMatchExpression {
 public:
-    TwoDPtInAnnulusExpression(const R2Annulus& annulus, boost::optional<StringData> twoDPath)
+    TwoDPtInAnnulusExpression(const R2Annulus& annulus, boost::optional<std::string_view> twoDPath)
         : LeafMatchExpression(INTERNAL_2D_POINT_IN_ANNULUS, twoDPath), _annulus(annulus) {}
 
     void serialize(BSONObjBuilder* out,
-                   const SerializationOptions& opts = {},
+                   const query_shape::SerializationOptions& opts = {},
                    bool includePath = true) const final {
         out->append("$TwoDPtInAnnulusExpression", true);
     }
@@ -270,7 +244,7 @@ public:
     //
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                       const SerializationOptions& opts = {},
+                                       const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const final {
         MONGO_UNREACHABLE_TASSERT(9911958);
     }

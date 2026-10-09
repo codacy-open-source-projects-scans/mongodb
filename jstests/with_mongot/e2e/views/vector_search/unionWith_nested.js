@@ -3,7 +3,7 @@
  * purpose is to verify that the nested unions and searches return the correct results across all
  * views.
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_81 ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {
     actionMoviesViewPipeline,
@@ -55,9 +55,20 @@ const pipeline = [
     },
 ];
 
-validateSearchExplain(moviesWithEnrichedTitle, pipeline, false, enrichedTitleViewPipeline, (explain) => {
-    assertUnionWithSearchSubPipelineAppliedViews(explain, moviesColl, actionMovies.getName(), actionMoviesViewPipeline);
-});
+validateSearchExplain(
+    moviesWithEnrichedTitle,
+    pipeline,
+    false,
+    enrichedTitleViewPipeline,
+    (explain) => {
+        assertUnionWithSearchSubPipelineAppliedViews(
+            explain,
+            moviesColl,
+            actionMovies.getName(),
+            actionMoviesViewPipeline,
+        );
+    },
+);
 
 // Gather the expected results for all parts of the pipeline.
 const topLevelExpected = buildExpectedResults([0, 1, 2, 3], datasets.MOVIES_WITH_ENRICHED_TITLE);

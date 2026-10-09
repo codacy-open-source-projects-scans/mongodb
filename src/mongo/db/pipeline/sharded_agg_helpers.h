@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -42,6 +16,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
 #include "mongo/db/pipeline/split_pipeline.h"
+#include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/router_role/router_role.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
@@ -73,7 +48,7 @@ struct ShardedExchangePolicy {
     std::vector<ShardId> consumerShards;
 };
 
-struct MONGO_MOD_PUBLIC DispatchShardPipelineResults {
+struct [[MONGO_MOD_PUBLIC]] DispatchShardPipelineResults {
     // Contains a value when the second half of the pipeline was requested to run on a specific
     // shard.
     boost::optional<ShardId> mergeShardId;
@@ -110,10 +85,18 @@ boost::optional<ShardedExchangePolicy> checkIfEligibleForExchange(OperationConte
                                                                   const Pipeline* mergePipeline);
 
 /**
+ * Returns true if 'pipeline' contains a $setVariableFromSubPipeline stage whose sub-pipeline has
+ * not been given an initial cursor source, i.e. the SEARCH_META metadata cursors have not been
+ * injected via injectMetaCursor(). A merge pipeline in this state cannot be executed, so this is
+ * used to assert that the metadata-cursor invariant holds.
+ */
+bool hasUnsourcedSetVariableStage(const Pipeline& pipeline);
+
+/**
  * Used to indicate if a pipeline contains any data source requiring extra handling for targeting
  * shards.
  */
-enum class MONGO_MOD_PUBLIC PipelineDataSource {
+enum class [[MONGO_MOD_PUBLIC]] PipelineDataSource {
     kNormal,
     kChangeStream,          // Indicates a pipeline has a $changeStream stage.
     kGeneratesOwnDataOnce,  // Indicates the shards part needs to be executed on a single node.
@@ -142,20 +125,20 @@ enum class MONGO_MOD_PUBLIC PipelineDataSource {
  * The caller of this function must handle any stale shard version error error thrown by
  * `dispatchShardPipeline`.
  */
-MONGO_MOD_PUBLIC DispatchShardPipelineResults
-dispatchShardPipeline(RoutingContext& routingCtx,
-                      Document serializedCommand,
-                      PipelineDataSource pipelineDataSource,
-                      bool eligibleForSampling,
-                      std::unique_ptr<Pipeline> pipeline,
-                      boost::optional<ExplainOptions::Verbosity> explain,
-                      const NamespaceString& targetedNss,
-                      bool requestQueryStatsFromRemotes = false,
-                      ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
-                      boost::optional<BSONObj> readConcern = boost::none,
-                      AsyncRequestsSender::ShardHostMap designatedHostsMap = {},
-                      stdx::unordered_map<ShardId, BSONObj> resumeTokenMap = {},
-                      std::set<ShardId> shardsToSkip = {});
+[[MONGO_MOD_PUBLIC]] DispatchShardPipelineResults dispatchShardPipeline(
+    RoutingContext& routingCtx,
+    Document serializedCommand,
+    PipelineDataSource pipelineDataSource,
+    bool eligibleForSampling,
+    std::unique_ptr<Pipeline> pipeline,
+    boost::optional<ExplainOptions::Verbosity> explain,
+    const NamespaceString& targetedNss,
+    IncludeMetrics remoteMetricsToInclude = IncludeMetrics{},
+    ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+    boost::optional<BSONObj> readConcern = boost::none,
+    AsyncRequestsSender::ShardHostMap designatedHostsMap = {},
+    stdx::unordered_map<ShardId, BSONObj> resumeTokenMap = {},
+    std::set<ShardId> shardsToSkip = {});
 
 BSONObj createPassthroughCommandForShard(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -164,7 +147,7 @@ BSONObj createPassthroughCommandForShard(
     Pipeline* pipeline,
     boost::optional<BSONObj> readConcern,
     boost::optional<int> overrideBatchSize,
-    bool requestQueryStatsFromRemotes);
+    IncludeMetrics remoteMetricsToInclude);
 
 BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        Document serializedCommand,
@@ -173,7 +156,7 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
                                        bool needsMerge,
                                        boost::optional<ExplainOptions::Verbosity> explain,
                                        boost::optional<BSONObj> readConcern = boost::none,
-                                       bool requestQueryStatsFromRemotes = false);
+                                       IncludeMetrics remoteMetricsToInclude = IncludeMetrics{});
 
 /**
  * Convenience method for callers that want to do 'partitionCursors', 'injectMetaCursors', and
@@ -182,7 +165,7 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
 void partitionAndAddMergeCursorsSource(Pipeline* pipeline,
                                        std::vector<OwnedRemoteCursor> cursors,
                                        boost::optional<BSONObj> shardCursorsSortSpec,
-                                       bool requestQueryStatsFromRemotes);
+                                       IncludeMetrics remoteMetricsToInclude);
 
 /**
  * Targets the shards with an aggregation command built from `pipeline` and explain set to true.
@@ -295,11 +278,11 @@ std::unique_ptr<Pipeline> targetShardsAndAddMergeCursors(
  *
  * Note that the specified AggregateCommandRequest must not be for an explain command.
  */
-MONGO_MOD_PUBLIC std::unique_ptr<Pipeline> runPipelineDirectlyOnSingleShard(
+[[MONGO_MOD_PUBLIC]] std::unique_ptr<Pipeline> runPipelineDirectlyOnSingleShard(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     AggregateCommandRequest request,
     ShardId shardId,
-    bool requestQueryStatsFromRemotes);
+    IncludeMetrics remoteMetricsToInclude);
 
 /**
  * Opens a $changeStream cursor on the 'config.shards' collection to watch for new shards if:

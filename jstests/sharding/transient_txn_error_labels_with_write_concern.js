@@ -13,9 +13,6 @@ import {
     stopServerReplication,
 } from "jstests/libs/write_concern_util.js";
 
-// This test requires running transactions directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
-
 const dbName = "test";
 const collName = "transient_txn_error_labels_with_write_concern";
 
@@ -122,7 +119,10 @@ function runNoSuchTransactionTests(cmd, cmdName) {
 
 runNoSuchTransactionTests({commitTransaction: 1}, "commitTransaction");
 
-runNoSuchTransactionTests({coordinateCommitTransaction: 1, participants: []}, "coordinateCommitTransaction");
+runNoSuchTransactionTests(
+    {coordinateCommitTransaction: 1, participants: []},
+    "coordinateCommitTransaction",
+);
 
 session.endSession();
 

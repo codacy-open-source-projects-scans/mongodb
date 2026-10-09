@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -44,10 +17,11 @@
 #include <new>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  *  Representation of a tenant identifier.
@@ -60,11 +34,10 @@ public:
     }
 
     /**
-     * Parse a tenantId from a StringData. This method asserts if the tenantId is empty or not in an
-     * OID format.
-     * Returns a TenantId object from the parsed string.
+     * Parse a tenantId from a std::string_view. This method asserts if the tenantId is empty or not
+     * in an OID format. Returns a TenantId object from the parsed string.
      */
-    static TenantId parseFromString(StringData tenantId);
+    static TenantId parseFromString(std::string_view tenantId);
 
     explicit TenantId(const OID& oid) : _oid(oid) {}
 
@@ -122,10 +95,12 @@ public:
     /**
      * Serialize tenant id to BSON. These functions are used by IDL parsers.
      */
-    void serializeToBSON(StringData fieldName, BSONObjBuilder* builder) const;
+    void serializeToBSON(std::string_view fieldName, BSONObjBuilder* builder) const;
     void serializeToBSON(BSONArrayBuilder* builder) const;
 
-    friend void appendToBson(BSONObjBuilder& bob, StringData fieldName, const TenantId& value) {
+    friend void appendToBson(BSONObjBuilder& bob,
+                             std::string_view fieldName,
+                             const TenantId& value) {
         value.serializeToBSON(fieldName, &bob);
     }
 
@@ -133,7 +108,7 @@ private:
     friend class NamespaceString;
     friend class DatabaseName;
 
-    MONGO_MOD_NEEDS_REPLACEMENT OID _oid;
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] OID _oid;
 };
 
 inline bool operator==(const TenantId& lhs, const TenantId& rhs) {
@@ -170,4 +145,4 @@ StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& stream,
     return stream << tenantId.toString();
 }
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,9 +1,15 @@
 /**
  * Tests for $lookup with localField/foreignField syntax using hash join algorithm.
  *
- * @tags: [featureFlagSbeFull]
+ * @tags: [
+ *   featureFlagSbeFull,
+ *   requires_fcv_91,
+ * ]
  */
-import {JoinAlgorithm, runTests} from "jstests/aggregation/sources/lookup/lookup_equijoin_semantics_lib.js";
+import {
+    JoinAlgorithm,
+    runTests,
+} from "jstests/aggregation/sources/lookup/lookup_equijoin_semantics_lib.js";
 
 runTests({
     localColl: db.lookup_arrays_semantics_local_hj,

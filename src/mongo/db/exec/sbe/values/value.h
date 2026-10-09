@@ -1,45 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-#include <boost/predef/hardware/simd.h>
-// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
-// IWYU pragma: no_include "boost/predef/hardware/simd/x86.h"
-// IWYU pragma: no_include "boost/predef/hardware/simd/x86/versions.h"
-// IWYU pragma: no_include "ext/alloc_traits.h"
-// IWYU pragma: no_include "emmintrin.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -76,11 +41,21 @@
 #include <ostream>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-// TODO(SERVER-114140): Remove all MONGO_MOD_NEEDS_REPLACEMENT annotations
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+#include <boost/predef/hardware/simd.h>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+// IWYU pragma: no_include "boost/predef/hardware/simd/x86.h"
+// IWYU pragma: no_include "boost/predef/hardware/simd/x86/versions.h"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "emmintrin.h"
+
+// TODO(SERVER-114140): Remove all [[MONGO_MOD_NEEDS_REPLACEMENT]] annotations
 
 namespace mongo {
 /**
@@ -141,7 +116,7 @@ static constexpr size_t kNewUUIDLength = 16;
  * SBE type 'tag', if 'value::tagToType(tag) != EOO' is true then 'tag' must be a native type.
  * Likewise, if 'tag' is an extended type then 'value::tagToType(tag) == EOO' must be true.
  */
-enum class MONGO_MOD_NEEDS_REPLACEMENT TypeTags : uint8_t {
+enum class [[MONGO_MOD_NEEDS_REPLACEMENT]] TypeTags : uint8_t {
     // The value does not exist, aka Nothing in the Maybe monad.
     Nothing = 0,
 
@@ -447,7 +422,7 @@ std::string printTagAndVal(const std::pair<TypeTags, Value>& value);  // debuggi
  * guarantees that the result will be exactlty -1, 0, or 1, which is important, because not all
  * comparison functions make that guarantee.
  *
- * The StringData::compare(basic_string_view s) function, for example, only promises that it
+ * The std::string_view::compare(basic_string_view s) function, for example, only promises that it
  * will return a value less than 0 in the case that 'this' is less than 's,' whereas we want to
  * return exactly -1.
  */
@@ -476,7 +451,7 @@ inline std::pair<TypeTags, Value> compare3way(TypeTags lhsTag,
     return compareValue(lhsTag, lhsValue, rhsTag, rhsValue, comparator);
 }
 
-MONGO_MOD_NEEDS_REPLACEMENT bool isNaN(TypeTags tag, Value val) noexcept;
+[[MONGO_MOD_NEEDS_REPLACEMENT]] bool isNaN(TypeTags tag, Value val) noexcept;
 
 bool isInfinity(TypeTags tag, Value val) noexcept;
 
@@ -492,42 +467,7 @@ inline std::size_t hashCombine(std::size_t state, std::size_t val) noexcept {
     return state;
 }
 
-/**
- * RAII guard.
- */
-class ValueGuard {
-public:
-    MONGO_COMPILER_ALWAYS_INLINE ValueGuard(const std::pair<TypeTags, Value> typedValue)
-        : ValueGuard(typedValue.first, typedValue.second) {}
-    MONGO_COMPILER_ALWAYS_INLINE ValueGuard(TypeTags tag, Value val) : _tag(tag), _value(val) {}
-    MONGO_COMPILER_ALWAYS_INLINE ValueGuard(bool owned, TypeTags tag, Value val)
-        : ValueGuard(owned ? tag : TypeTags::Nothing, owned ? val : 0) {}
-    MONGO_COMPILER_ALWAYS_INLINE ValueGuard(
-        const FastTuple<bool, value::TypeTags, value::Value>& tuple)
-        : ValueGuard(tuple.a, tuple.b, tuple.c) {}
-    ValueGuard() = delete;
-    ValueGuard(const ValueGuard&) = delete;
-    ValueGuard(ValueGuard&& other) = delete;
-    MONGO_COMPILER_ALWAYS_INLINE ~ValueGuard() {
-        releaseValue(_tag, _value);
-    }
-
-    ValueGuard& operator=(const ValueGuard&) = delete;
-    ValueGuard& operator=(ValueGuard&& other) = delete;
-
-    void reset() {
-        _tag = TypeTags::Nothing;
-        _value = 0;
-    }
-
-private:
-    TypeTags _tag;
-    Value _value;
-};
-
-/**
- * A view of a tag & value, not owned here.
- */
+// Forward-declared here because TagValueView::copy() references it.
 class TagValueOwned;
 
 /**
@@ -542,6 +482,9 @@ inline bool tagIn(TypeTags t, Tags... tags) {
     return ((t == tags) || ...);
 }
 
+/**
+ * A view of a tag & value, not owned here.
+ */
 struct TagValueView {
     TypeTags tag = TypeTags::Nothing;
     Value value = 0;
@@ -556,6 +499,15 @@ struct TagValueView {
     }
 
     TagValueOwned copy() const;
+
+    static TagValueView nothing() noexcept;
+    static TagValueView null() noexcept;
+    static TagValueView boolean(bool b) noexcept;
+    static TagValueView numberInt32(int32_t v) noexcept;
+    static TagValueView numberInt64(int64_t v) noexcept;
+    static TagValueView numberDouble(double v) noexcept;
+    static TagValueView date(int64_t v) noexcept;
+    static TagValueView timestamp(uint64_t v) noexcept;
 };
 
 inline TagValueView rawToView(std::pair<TypeTags, Value> tv) {
@@ -574,31 +526,35 @@ static_assert(sizeof(TagValueView) <= 16);
 class TagValueOwned {
 public:
     static TagValueOwned fromRaw(std::pair<TypeTags, Value> tv) {
-        auto [t, v] = tv;
-        return TagValueOwned(t, v);
+        return TagValueOwned(tv.first, tv.second);
     }
 
     static TagValueOwned fromRaw(TypeTags t, Value v) {
         return TagValueOwned(t, v);
     }
 
-    TagValueOwned() : _tag(TypeTags::Nothing), _value(0) {}
+    static TagValueOwned nothing() noexcept;
+    static TagValueOwned null() noexcept;
+    static TagValueOwned boolean(bool b) noexcept;
+    static TagValueOwned numberInt32(int32_t v) noexcept;
+    static TagValueOwned numberInt64(int64_t v) noexcept;
+    static TagValueOwned numberDouble(double v) noexcept;
+    static TagValueOwned date(int64_t v) noexcept;
+    static TagValueOwned timestamp(uint64_t v) noexcept;
 
-    TagValueOwned(TypeTags tag, Value value) : _tag(tag), _value(value) {}
+    TagValueOwned() = delete;
 
-    TagValueOwned(std::pair<TypeTags, Value> tv) : TagValueOwned(tv.first, tv.second) {}
-
-    TagValueOwned(TagValueOwned&& o) {
+    MONGO_COMPILER_ALWAYS_INLINE TagValueOwned(TagValueOwned&& o) {
         _tag = o._tag;
         _value = o._value;
         o.disown();
     }
 
-    ~TagValueOwned() {
+    MONGO_COMPILER_ALWAYS_INLINE ~TagValueOwned() {
         release();
     }
 
-    TagValueOwned& operator=(TagValueOwned&& o) {
+    MONGO_COMPILER_ALWAYS_INLINE TagValueOwned& operator=(TagValueOwned&& o) {
         if (&o != this) {
             release();
             _tag = o._tag;
@@ -650,12 +606,19 @@ public:
         _value = 0;
     }
 
+    void reset() {
+        disown();
+    }
+
     void swap(TagValueOwned& o) noexcept {
         std::swap(_tag, o._tag);
         std::swap(_value, o._value);
     }
 
 private:
+    MONGO_COMPILER_ALWAYS_INLINE TagValueOwned(TypeTags tag, Value value)
+        : _tag(tag), _value(value) {}
+
     void release() {
         releaseValue(_tag, _value);
     }
@@ -663,6 +626,8 @@ private:
     TypeTags _tag;
     Value _value;
 };
+
+static_assert(sizeof(TagValueOwned) <= 16ULL, "TagValueOwned should not be larger than 16 bytes");
 
 inline void swap(TagValueOwned& a, TagValueOwned& b) noexcept {
     a.swap(b);
@@ -683,6 +648,15 @@ public:
         return TagValueMaybeOwned(owned, t, v);
     }
 
+    static TagValueMaybeOwned nothing() noexcept;
+    static TagValueMaybeOwned null() noexcept;
+    static TagValueMaybeOwned boolean(bool b) noexcept;
+    static TagValueMaybeOwned numberInt32(int32_t v) noexcept;
+    static TagValueMaybeOwned numberInt64(int64_t v) noexcept;
+    static TagValueMaybeOwned numberDouble(double v) noexcept;
+    static TagValueMaybeOwned date(int64_t v) noexcept;
+    static TagValueMaybeOwned timestamp(uint64_t v) noexcept;
+
     TagValueMaybeOwned() : _owned(false), _tag(TypeTags::Nothing), _value(0) {}
 
     TagValueMaybeOwned(bool owned, TypeTags t, Value v) : _owned(owned), _tag(t), _value(v) {}
@@ -694,7 +668,7 @@ public:
         _tag = o._tag;
         _value = o._value;
         _owned = o._owned;
-        o.disownAndClear();
+        o.disown();
     }
 
     TagValueMaybeOwned(TagValueOwned&& o) {
@@ -714,7 +688,7 @@ public:
             _tag = o._tag;
             _value = o._value;
             _owned = o._owned;
-            o.disownAndClear();
+            o.disown();
         }
         return *this;
     }
@@ -729,14 +703,14 @@ public:
 
     FastTuple<bool, TypeTags, Value> releaseToRaw() {
         FastTuple<bool, TypeTags, Value> ret{_owned, _tag, _value};
-        disownAndClear();
+        disown();
         return ret;
     }
 
     std::pair<TypeTags, Value> releaseToOwnedRaw() {
         makeOwned();
         std::pair<TypeTags, Value> ret{_tag, _value};
-        disownAndClear();
+        disown();
         return ret;
     }
 
@@ -761,7 +735,7 @@ public:
     TagValueOwned moveToOwned() {
         makeOwned();
         TagValueOwned ret = TagValueOwned::fromRaw(_tag, _value);
-        disownAndClear();
+        disown();
         return ret;
     }
 
@@ -772,7 +746,7 @@ public:
     /**
      * Relinquishes ownership and sets the stored tag/value to Nothing.
      */
-    void disownAndClear() {
+    void disown() {
         _tag = TypeTags::Nothing;
         _value = 0;
         _owned = false;
@@ -845,7 +819,7 @@ private:
     std::vector<Value>& _values;
 };
 
-MONGO_MOD_NEEDS_REPLACEMENT inline char* getRawPointerView(Value val) noexcept {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] inline char* getRawPointerView(Value val) noexcept {
     return reinterpret_cast<char*>(val);
 }
 
@@ -896,9 +870,84 @@ Value bitcastFrom(
     return val;
 }
 
+inline TagValueView TagValueView::nothing() noexcept {
+    return {TypeTags::Nothing, 0};
+}
+inline TagValueView TagValueView::null() noexcept {
+    return {TypeTags::Null, 0};
+}
+inline TagValueView TagValueView::boolean(bool b) noexcept {
+    return {TypeTags::Boolean, bitcastFrom<bool>(b)};
+}
+inline TagValueView TagValueView::numberInt32(int32_t v) noexcept {
+    return {TypeTags::NumberInt32, bitcastFrom<int32_t>(v)};
+}
+inline TagValueView TagValueView::numberInt64(int64_t v) noexcept {
+    return {TypeTags::NumberInt64, bitcastFrom<int64_t>(v)};
+}
+inline TagValueView TagValueView::numberDouble(double v) noexcept {
+    return {TypeTags::NumberDouble, bitcastFrom<double>(v)};
+}
+inline TagValueView TagValueView::date(int64_t v) noexcept {
+    return {TypeTags::Date, bitcastFrom<int64_t>(v)};
+}
+inline TagValueView TagValueView::timestamp(uint64_t v) noexcept {
+    return {TypeTags::Timestamp, bitcastFrom<uint64_t>(v)};
+}
+
+inline TagValueOwned TagValueOwned::nothing() noexcept {
+    return TagValueOwned(TypeTags::Nothing, 0);
+}
+inline TagValueOwned TagValueOwned::null() noexcept {
+    return TagValueOwned(TypeTags::Null, 0);
+}
+inline TagValueOwned TagValueOwned::boolean(bool b) noexcept {
+    return TagValueOwned(TypeTags::Boolean, bitcastFrom<bool>(b));
+}
+inline TagValueOwned TagValueOwned::numberInt32(int32_t v) noexcept {
+    return TagValueOwned(TypeTags::NumberInt32, bitcastFrom<int32_t>(v));
+}
+inline TagValueOwned TagValueOwned::numberInt64(int64_t v) noexcept {
+    return TagValueOwned(TypeTags::NumberInt64, bitcastFrom<int64_t>(v));
+}
+inline TagValueOwned TagValueOwned::numberDouble(double v) noexcept {
+    return TagValueOwned(TypeTags::NumberDouble, bitcastFrom<double>(v));
+}
+inline TagValueOwned TagValueOwned::date(int64_t v) noexcept {
+    return TagValueOwned(TypeTags::Date, bitcastFrom<int64_t>(v));
+}
+inline TagValueOwned TagValueOwned::timestamp(uint64_t v) noexcept {
+    return TagValueOwned(TypeTags::Timestamp, bitcastFrom<uint64_t>(v));
+}
+
+inline TagValueMaybeOwned TagValueMaybeOwned::nothing() noexcept {
+    return TagValueMaybeOwned(false, TypeTags::Nothing, 0);
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::null() noexcept {
+    return TagValueMaybeOwned(false, TypeTags::Null, 0);
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::boolean(bool b) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::Boolean, bitcastFrom<bool>(b));
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::numberInt32(int32_t v) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::NumberInt32, bitcastFrom<int32_t>(v));
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::numberInt64(int64_t v) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::NumberInt64, bitcastFrom<int64_t>(v));
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::numberDouble(double v) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::NumberDouble, bitcastFrom<double>(v));
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::date(int64_t v) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::Date, bitcastFrom<int64_t>(v));
+}
+inline TagValueMaybeOwned TagValueMaybeOwned::timestamp(uint64_t v) noexcept {
+    return TagValueMaybeOwned(false, TypeTags::Timestamp, bitcastFrom<uint64_t>(v));
+}
+
 template <typename T>
-MONGO_MOD_NEEDS_REPLACEMENT T
-bitcastTo(const Value in) noexcept {  // NOLINT(readability-avoid-const-params-in-decls)
+[[MONGO_MOD_NEEDS_REPLACEMENT]] T bitcastTo(
+    const Value in) noexcept {  // NOLINT(readability-avoid-const-params-in-decls)
     static_assert(std::is_pointer_v<T> || std::is_integral_v<T> || std::is_floating_point_v<T> ||
                   std::is_same_v<Decimal128, T>);
 
@@ -1258,9 +1307,9 @@ public:
         }
     }
 
-    void push_back(StringData name, TypeTags tag, Value val) {
+    void push_back_raw(std::string_view name, TypeTags tag, Value val) {
         if (tag != TypeTags::Nothing) {
-            ValueGuard guard{tag, val};
+            auto owned = TagValueOwned::fromRaw(tag, val);
             // Reserve space in all vectors, they are the same size. We arbitrarily picked _typeTags
             // to determine the size.
             if (_typeTags.capacity() == _typeTags.size()) {
@@ -1275,11 +1324,25 @@ public:
             _typeTags.push_back(tag);
             _values.push_back(val);
 
-            guard.reset();
+            owned.reset();
         }
     }
 
-    TagValueView getField(StringData field) {
+    void push_back_raw(std::string_view name, std::pair<TypeTags, Value> val) {
+        push_back_raw(name, val.first, val.second);
+    }
+
+    /**
+     * Appends 'value' under the field name 'name', taking ownership of it. 'name' is copied. A
+     * 'Nothing' value is not appended. Prefer this over 'push_back_raw()', as it encodes the
+     * transfer of ownership in the type system.
+     */
+    void push_back(std::string_view name, TagValueOwned value) {
+        auto [tag, val] = value.releaseToRaw();
+        push_back_raw(name, tag, val);
+    }
+
+    TagValueView getField(std::string_view field) {
         for (size_t idx = 0; idx < _typeTags.size(); ++idx) {
             if (_names[idx] == field) {
                 return {_typeTags[idx], _values[idx]};
@@ -1288,7 +1351,7 @@ public:
         return {TypeTags::Nothing, 0};
     }
 
-    bool contains(StringData field) const {
+    bool contains(std::string_view field) const {
         return std::find(_names.begin(), _names.end(), field) != _names.end();
     }
 
@@ -1353,27 +1416,27 @@ public:
         }
     }
 
-    void push_back(TypeTags tag, Value val) {
+    void push_back_raw(TypeTags tag, Value val) {
         if (tag != TypeTags::Nothing) {
-            ValueGuard guard{tag, val};
+            auto owned = TagValueOwned::fromRaw(tag, val);
             MONGO_COMPILER_DIAGNOSTIC_PUSH
             MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wstringop-overflow")
             _vals.push_back({tag, val});
             MONGO_COMPILER_DIAGNOSTIC_POP
-            guard.reset();
+            owned.reset();
         }
     }
 
-    void push_back(std::pair<TypeTags, Value> val) {
+    void push_back_raw(std::pair<TypeTags, Value> val) {
         MONGO_COMPILER_DIAGNOSTIC_PUSH
         MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wstringop-overflow")
-        push_back(val.first, val.second);
+        push_back_raw(val.first, val.second);
         MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
     void push_back(TagValueOwned value) {
         auto [tag, val] = value.releaseToRaw();
-        push_back(tag, val);
+        push_back_raw(tag, val);
     }
 
     void pop_back() {
@@ -1397,13 +1460,13 @@ public:
 
     TagValueOwned swapAt(std::size_t idx, TypeTags tag, Value val) {
         if (idx >= _vals.size() || tag == TypeTags::Nothing) {
-            return {TypeTags::Nothing, 0};
+            return TagValueOwned::nothing();
         }
 
         auto ret = _vals[idx];
         _vals[idx].first = tag;
         _vals[idx].second = val;
-        return ret;
+        return TagValueOwned::fromRaw(ret);
     }
 
     TagValueOwned swapAt(std::size_t idx, TagValueOwned value) {
@@ -1470,9 +1533,9 @@ public:
         reserve(other._values.size());
         for (const auto& p : other._values) {
             const auto copy = copyValue(p.first, p.second);
-            ValueGuard guard{copy.first, copy.second};
+            auto owned = TagValueOwned::fromRaw(copy.first, copy.second);
             _values.insert(copy);
-            guard.reset();
+            owned.reset();
         }
     }
 
@@ -1491,19 +1554,28 @@ public:
      * Returns true if the value was newly inserted, otherwise returns false to indicate that an
      * equal value was already present in the set.
      */
-    bool push_back(TypeTags tag, Value val);
+    bool push_back_raw(TypeTags tag, Value val);
 
-    bool push_back(std::pair<TypeTags, Value> val) {
-        return push_back(val.first, val.second);
+    bool push_back_raw(std::pair<TypeTags, Value> val) {
+        return push_back_raw(val.first, val.second);
     }
 
     /**
-     * If the value cannot be found in the set, insert a copy.
+     * If the value cannot be found in the set, insert a copy. Nothing values are ignored.
      *
      * Returns true if the value was newly inserted, otherwise returns false to indicate that
      * an equal value was already present in the set.
      */
     bool push_back_clone(TypeTags tag, Value val);
+
+    /**
+     * If the value cannot be found in the set, transfer ownership of `value` into the set.
+     * Otherwise, the value is destructed. Nothing values are ignored.
+     *
+     * Returns true if the value was newly inserted, otherwise returns false to indicate that
+     * an equal value was already present in the set.
+     */
+    bool push_back(TagValueOwned value);
 
     auto& values() const noexcept {
         return _values;
@@ -1548,9 +1620,9 @@ public:
     ArrayMultiSet(const ArrayMultiSet& other) : _values(ValueCompare<true>(other.getCollator())) {
         for (const auto& p : other._values) {
             const auto copy = copyValue(p.first, p.second);
-            ValueGuard guard{copy.first, copy.second};
+            auto owned = TagValueOwned::fromRaw(copy.first, copy.second);
             _values.insert(copy);
-            guard.reset();
+            owned.reset();
         }
     }
     ArrayMultiSet(ArrayMultiSet&&) = default;
@@ -1564,16 +1636,16 @@ public:
     /**
      * Adds the given SBE value to the multiset. Assumes ownership of the given value.
      */
-    void push_back(TypeTags tag, Value val) {
+    void push_back_raw(TypeTags tag, Value val) {
         if (tag != TypeTags::Nothing) {
-            ValueGuard guard{tag, val};
+            auto owned = TagValueOwned::fromRaw(tag, val);
             _values.insert({tag, val});
-            guard.reset();
+            owned.reset();
         }
     }
 
-    void push_back(std::pair<TypeTags, Value> val) {
-        push_back(val.first, val.second);
+    void push_back_raw(std::pair<TypeTags, Value> val) {
+        push_back_raw(val.first, val.second);
     }
 
     /**
@@ -1653,11 +1725,11 @@ public:
         for (const auto& [key, value] : other._values) {
             const auto copyKey = copyValue(key.first, key.second);
             const auto copyVal = copyValue(value.first, value.second);
-            ValueGuard keyGuard{copyKey.first, copyKey.second};
-            ValueGuard valueGuard{copyVal.first, copyVal.second};
+            auto keyOwned = TagValueOwned::fromRaw(copyKey.first, copyKey.second);
+            auto valOwned = TagValueOwned::fromRaw(copyVal.first, copyVal.second);
             _values.insert({copyKey, copyVal});
-            keyGuard.reset();
-            valueGuard.reset();
+            keyOwned.reset();
+            valOwned.reset();
         }
     }
 
@@ -1672,12 +1744,12 @@ public:
     }
 
     void insert(std::pair<TypeTags, Value> key, std::pair<TypeTags, Value> value) {
-        ValueGuard keyGuard{key};
-        ValueGuard valueGuard{value};
+        auto keyOwned = TagValueOwned::fromRaw(key);
+        auto valOwned = TagValueOwned::fromRaw(value);
         if (key.first != TypeTags::Nothing && value.first != TypeTags::Nothing) {
             _values.insert({key, value});
-            keyGuard.reset();
-            valueGuard.reset();
+            keyOwned.reset();
+            valOwned.reset();
         }
     }
 
@@ -1731,7 +1803,7 @@ bool operator==(const MultiMap& lhs, const MultiMap& rhs);
 bool operator!=(const MultiMap& lhs, const MultiMap& rhs);
 
 constexpr size_t kSmallStringMaxLength = 7;
-using ObjectIdType MONGO_MOD_NEEDS_REPLACEMENT = std::array<uint8_t, 12>;
+using ObjectIdType [[MONGO_MOD_NEEDS_REPLACEMENT]] = std::array<uint8_t, 12>;
 static_assert(sizeof(ObjectIdType) == 12);
 
 /**
@@ -1823,36 +1895,20 @@ inline size_t getStringOrSymbolLength(TypeTags tag, const Value& val) noexcept {
     return getStringLength(tag, val);
 }
 
-/*
- * Using MONGO_COMPILER_ALWAYS_INLINE on a free function does not always play well between
- * compilers because some require the 'inline' keyword be used while others prohibit it. To get
- * around this, we wrap the custom strlen() function in a struct.
- */
-struct TinyStrHelpers {
-    // Often calling the shared library strlen() function is more expensive than a small loop
-    // for small strings.
-    MONGO_COMPILER_ALWAYS_INLINE static size_t strlen(const char* s) {
-        const char* begin = s;
-        while (*s++)
-            ;
-        return s - begin - 1;
-    }
-};
-
 /**
  * getStringView() should be preferred over getRawStringView() where possible.
  */
-MONGO_MOD_NEEDS_REPLACEMENT inline StringData getStringView(TypeTags tag,
-                                                            const Value& val) noexcept {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] inline std::string_view getStringView(TypeTags tag,
+                                                                      const Value& val) noexcept {
     return {getRawStringView(tag, val), getStringLength(tag, val)};
 }
 
-inline StringData getStringOrSymbolView(TypeTags tag, const Value& val) noexcept {
+inline std::string_view getStringOrSymbolView(TypeTags tag, const Value& val) noexcept {
     tag = (tag == TypeTags::bsonSymbol) ? TypeTags::StringBig : tag;
     return {getRawStringView(tag, val), getStringLength(tag, val)};
 }
 
-MONGO_MOD_NEEDS_REPLACEMENT inline size_t getBSONBinDataSize(TypeTags tag, Value val) {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] inline size_t getBSONBinDataSize(TypeTags tag, Value val) {
     invariant(tag == TypeTags::bsonBinData);
     return static_cast<size_t>(
         ConstDataView(getRawPointerView(val)).read<LittleEndian<uint32_t>>());
@@ -1927,7 +1983,7 @@ inline CellBlock* getCellBlock(Value v) {
     return reinterpret_cast<CellBlock*>(v);
 }
 
-inline bool canUseSmallString(StringData input) {
+inline bool canUseSmallString(std::string_view input) {
     auto length = input.size();
     auto ptr = input.data();
     auto end = ptr + length;
@@ -1938,7 +1994,7 @@ inline bool canUseSmallString(StringData input) {
  * Callers must check that canUseSmallString() returns true before calling this function.
  * makeNewString() should be preferred over makeSmallString() where possible.
  */
-inline std::pair<TypeTags, Value> makeSmallString(StringData input) {
+inline std::pair<TypeTags, Value> makeSmallString(std::string_view input) {
     dassert(canUseSmallString(input));
 
     Value smallString{0};
@@ -1948,7 +2004,7 @@ inline std::pair<TypeTags, Value> makeSmallString(StringData input) {
     return {TypeTags::StringSmall, smallString};
 }
 
-inline std::pair<TypeTags, Value> makeBigString(StringData input) {
+inline std::pair<TypeTags, Value> makeBigString(std::string_view input) {
     auto len = input.size();
     auto ptr = input.data();
 
@@ -1962,7 +2018,7 @@ inline std::pair<TypeTags, Value> makeBigString(StringData input) {
     return {TypeTags::StringBig, reinterpret_cast<Value>(buf)};
 }
 
-inline std::pair<TypeTags, Value> makeNewString(StringData input) {
+inline std::pair<TypeTags, Value> makeNewString(std::string_view input) {
     if (canUseSmallString(input)) {
         return makeSmallString(input);
     } else {
@@ -1970,7 +2026,7 @@ inline std::pair<TypeTags, Value> makeNewString(StringData input) {
     }
 }
 
-inline std::pair<TypeTags, Value> makeNewBsonSymbol(StringData input) {
+inline std::pair<TypeTags, Value> makeNewBsonSymbol(std::string_view input) {
     auto [_, strVal] = makeBigString(input);
     return {TypeTags::bsonSymbol, strVal};
 }
@@ -2150,7 +2206,7 @@ inline TimeZone* getTimeZoneView(Value val) noexcept {
  *
  *   <pattern> <NULL> <flags> <NULL>
  */
-struct MONGO_MOD_NEEDS_REPLACEMENT BsonRegex {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] BsonRegex {
     explicit BsonRegex(const char* rawValue) {
         pattern = rawValue;
         // Add one to account for the NULL byte after 'pattern'.
@@ -2162,25 +2218,25 @@ struct MONGO_MOD_NEEDS_REPLACEMENT BsonRegex {
         return pattern.size() + sizeof(char) + flags.size() + sizeof(char);
     }
 
-    StringData pattern;
-    StringData flags;
+    std::string_view pattern;
+    std::string_view flags;
 };
 
 inline BsonRegex getBsonRegexView(Value val) noexcept {
     return BsonRegex(getRawPointerView(val));
 }
 
-std::pair<TypeTags, Value> makeNewBsonRegex(StringData pattern, StringData flags);
+std::pair<TypeTags, Value> makeNewBsonRegex(std::string_view pattern, std::string_view flags);
 
 inline std::pair<TypeTags, Value> makeCopyBsonRegex(const BsonRegex& regex) {
     return makeNewBsonRegex(regex.pattern, regex.flags);
 }
 
-MONGO_MOD_NEEDS_REPLACEMENT inline StringData getBsonJavascriptView(Value val) noexcept {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] inline std::string_view getBsonJavascriptView(Value val) noexcept {
     return getStringView(TypeTags::StringBig, val);
 }
 
-std::pair<TypeTags, Value> makeCopyBsonJavascript(StringData code);
+std::pair<TypeTags, Value> makeCopyBsonJavascript(std::string_view code);
 
 /**
  * The BsonDBPointer class is used to represent the DBRef BSON type. DBRefs consist of a namespace
@@ -2190,7 +2246,7 @@ std::pair<TypeTags, Value> makeCopyBsonJavascript(StringData code);
  *
  * In BSON, a DBRef is encoded as a bsonString ('ns') followed by an ObjectId ('id').
  */
-struct MONGO_MOD_NEEDS_REPLACEMENT BsonDBPointer {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] BsonDBPointer {
     explicit BsonDBPointer(const char* rawValue) {
         uint32_t lenWithNull = ConstDataView(rawValue).read<LittleEndian<uint32_t>>();
         ns = {rawValue + sizeof(uint32_t), lenWithNull - sizeof(char)};
@@ -2202,7 +2258,7 @@ struct MONGO_MOD_NEEDS_REPLACEMENT BsonDBPointer {
         return sizeof(uint32_t) + ns.size() + sizeof(char) + sizeof(value::ObjectIdType);
     }
 
-    StringData ns;
+    std::string_view ns;
     const uint8_t* id{nullptr};
 };
 
@@ -2210,7 +2266,7 @@ inline BsonDBPointer getBsonDBPointerView(Value val) noexcept {
     return BsonDBPointer(getRawPointerView(val));
 }
 
-std::pair<TypeTags, Value> makeNewBsonDBPointer(StringData ns, const uint8_t* id);
+std::pair<TypeTags, Value> makeNewBsonDBPointer(std::string_view ns, const uint8_t* id);
 
 inline std::pair<TypeTags, Value> makeCopyBsonDBPointer(const BsonDBPointer& dbptr) {
     return makeNewBsonDBPointer(dbptr.ns, dbptr.id);
@@ -2239,7 +2295,7 @@ struct BsonCodeWScope {
     }
 
     uint32_t numBytes{0};
-    StringData code;
+    std::string_view code;
     const char* scope{nullptr};
 };
 
@@ -2247,7 +2303,7 @@ inline BsonCodeWScope getBsonCodeWScopeView(Value val) noexcept {
     return BsonCodeWScope(getRawPointerView(val));
 }
 
-std::pair<TypeTags, Value> makeNewBsonCodeWScope(StringData code, const char* scope);
+std::pair<TypeTags, Value> makeNewBsonCodeWScope(std::string_view code, const char* scope);
 
 inline std::pair<TypeTags, Value> makeCopyBsonCodeWScope(const BsonCodeWScope& cws) {
     return makeNewBsonCodeWScope(cws.code, cws.scope);
@@ -2464,6 +2520,11 @@ inline T numericCast(TypeTags tag, Value val) noexcept {
     }
 }
 
+template <typename T>
+inline T numericCast(TagValueView v) noexcept {
+    return numericCast<T>(v.tag, v.value);
+}
+
 /**
  * Performs a lossless numeric conversion from a value to a destination type denoted by the target
  * TypeTag. In the case that a conversion is lossy, we return Nothing.
@@ -2539,7 +2600,7 @@ public:
         }
     }
     TagValueView getViewOfValue() const;
-    StringData getFieldName() const;
+    std::string_view getFieldName() const;
 
     bool atEnd() const {
         if (_object) {

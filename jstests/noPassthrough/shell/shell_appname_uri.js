@@ -10,9 +10,10 @@ function assertProfileOnlyContainsAppName(db, appname) {
     assert(res.length > 0, "system.profile does not contain any docs");
     if (res.length > 1 || res.indexOf(appname) === -1) {
         // Dump collection.
-        print("dumping db.system.profile");
-        db.system.profile.find().forEach((doc) => printjsononeline(doc));
-        doassert(`system.profile expected to only have appName=${appname}` + ` but found ${tojson(res)}`);
+        jsTest.log.info("dumping db.system.profile", {profile: db.system.profile.find().toArray()});
+        doassert(
+            `system.profile expected to only have appName=${appname}` + ` but found ${tojson(res)}`,
+        );
     }
 }
 

@@ -1,5 +1,16 @@
+/**
+ * Tests the idempotency of the _configsvrSetAllowMigrations command.
+ *
+ * TODO (SERVER-98118): Remove this test once 9.0 becomes last LTS.
+ * _configsvrSetAllowMigrations belongs to the legacy (non-authoritative) protocol: it bumps the
+ * collection placement version and relies on tellShardsToRefresh (i.e. the deprecated
+ * _flushRoutingTableCacheUpdates(WithWriteConcern) commands) to propagate the change to shards.
+ * Once shards are authoritative for collection metadata, that command is no longer served, so this
+ * test no longer applies.
+ */
 import {RetryableWritesUtil} from "jstests/libs/retryable_writes_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {skipTestIfAuthoritativeShardsEnabled} from "jstests/sharding/libs/sharding_util.js";
 
 function runConfigsvrSetAllowMigrationsWithRetries(st, ns, lsid, txnNumber, allowMigrations) {
     let res;
@@ -16,7 +27,8 @@ function runConfigsvrSetAllowMigrationsWithRetries(st, ns, lsid, txnNumber, allo
         if (
             RetryableWritesUtil.isRetryableCode(res.code) ||
             RetryableWritesUtil.errmsgContainsRetryableCodeName(res.errmsg) ||
-            (res.writeConcernError && RetryableWritesUtil.isRetryableCode(res.writeConcernError.code))
+            (res.writeConcernError &&
+                RetryableWritesUtil.isRetryableCode(res.writeConcernError.code))
         ) {
             return false; // Retry
         }
@@ -29,6 +41,8 @@ function runConfigsvrSetAllowMigrationsWithRetries(st, ns, lsid, txnNumber, allo
 
 const st = new ShardingTest({shards: 1});
 
+skipTestIfAuthoritativeShardsEnabled(st.s, () => st.stop());
+
 const dbName = "test";
 const collName = "foo";
 const ns = dbName + "." + collName;
@@ -37,7 +51,10 @@ st.s.adminCommand({shardCollection: ns, key: {x: 1}});
 
 let lsid = assert.commandWorked(st.s.getDB("admin").runCommand({startSession: 1})).id;
 
-assert.eq(false, st.s.getCollection("config.collections").findOne({_id: ns}).hasOwnProperty("allowMigrations"));
+assert.eq(
+    false,
+    st.s.getCollection("config.collections").findOne({_id: ns}).hasOwnProperty("allowMigrations"),
+);
 
 assert.commandWorked(runConfigsvrSetAllowMigrationsWithRetries(st, ns, lsid, NumberLong(1), false));
 

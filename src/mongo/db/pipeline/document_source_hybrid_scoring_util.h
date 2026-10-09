@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,9 +7,12 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/util/modules.h"
 
-namespace mongo::hybrid_scoring_util {
+#include <string_view>
 
-static constexpr StringData kIsHybridSearchFlagFieldName = "$_internalIsHybridSearch"_sd;
+namespace mongo::hybrid_scoring_util {
+using namespace std::literals::string_view_literals;
+
+static constexpr std::string_view kIsHybridSearchFlagFieldName = "$_internalIsHybridSearch"sv;
 
 /**
  * Checks if this stage is a $score stage, where it has been desugared to $setMetadata with the meta
@@ -60,7 +37,7 @@ double getPipelineWeight(const StringMap<double>& weights, const std::string& pi
 StringMap<double> validateWeights(
     const mongo::BSONObj& inputWeights,
     const std::map<std::string, std::unique_ptr<Pipeline>>& inputPipelines,
-    StringData stageName);
+    std::string_view stageName);
 
 /**
  * This function will fail the query in the case where nonexistent pipelines were referenced in the
@@ -77,7 +54,17 @@ void failWeightsValidationWithPipelineSuggestions(
     const std::map<std::string, std::unique_ptr<Pipeline>>& allPipelines,
     const stdx::unordered_set<std::string>& matchedPipelines,
     const std::vector<std::string>& invalidWeights,
-    StringData stageName);
+    std::string_view stageName);
+
+/**
+ * Overload taking the unmatched pipeline names directly, for callers (such as the lite-parsed
+ * desugarer) that operate on pipeline names rather than parsed Pipelines. Both overloads throw the
+ * same error so the full-parse and lite-parse paths fail identically.
+ */
+void failWeightsValidationWithPipelineSuggestions(
+    const std::vector<std::string>& unmatchedPipelines,
+    const std::vector<std::string>& invalidWeights,
+    std::string_view stageName);
 
 /**
  * Returns no error if the BSON pipeline is a selection pipeline. A selection pipeline only
@@ -117,14 +104,15 @@ bool isHybridSearchPipeline(const std::vector<BSONObj>& bsonPipeline);
 
 /**
  * Validates that the provided spec does not have the internal-use-only $_internalIsHybridSearch
- * flag set.
+ * flag set. Asserts with error 5491300 if a non-internal client supplied it.
  *
- * TODO SERVER-108117 This is currently not called because the validation is broken when running an
- * explain on a view in a sharded collection. In that scenario, the router desugars the subpipeline,
- * adds $_internalIsHybridSearch to the serialized BSON, and sends it to the shards. The shards
- * respond with an error that the view must be executed on the router, and then the router tries
- * executing the fully-desugared pipeline. However, on this retry, the internal client flag is not
- * set, and the router fails the explain due to this assertion.
+ * Note the explain-on-a-view interaction: the router desugars the subpipeline and, when dispatching
+ * to shards, serializes $_internalIsHybridSearch into the BSON. For a view the shards respond that
+ * the view must be executed on the router, and the router retries with the fully-desugared pipeline
+ * -- where the client is not internal. To keep this retry from tripping the assertion, $lookup and
+ * $unionWith omit $_internalIsHybridSearch from their explain serialization. Query shapes are also
+ * re-parsed by a non-internal client when read from $queryStats, so the flag is omitted when
+ * shapifying as well.
  */
 void validateIsHybridSearchNotSetByUser(boost::intrusive_ptr<ExpressionContext> expCtx,
                                         const BSONObj& spec);
@@ -132,8 +120,17 @@ void validateIsHybridSearchNotSetByUser(boost::intrusive_ptr<ExpressionContext> 
 /**
  * Validates that a given collection/view namespace is not a timeseries collection for hybrid
  * search.
+ * TODO SERVER-121094 Remove function once 9.0 becomes last LTS and the validation is done inside
+ * '$_internalHybridSearch' lite parsed document source.
  */
 void assertForeignCollectionIsNotTimeseries(const NamespaceString& nss,
+                                            const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+/**
+ * Throws if 'nss' is a search view (its definition begins with a mongot
+ * $search/$searchMeta/$vectorSearch stage) defined over a timeseries collection.
+ */
+void assertForeignSearchViewIsNotTimeseries(const NamespaceString& nss,
                                             const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 // -----------------------------Helper String Manipulation Functions-----------------------------
@@ -141,7 +138,7 @@ void assertForeignCollectionIsNotTimeseries(const NamespaceString& nss,
 /**
  * Returns either the name of the score field or the scorePath if includeDollarSign is true.
  */
-inline std::string getScoreFieldFromPipelineName(StringData pipelineName,
+inline std::string getScoreFieldFromPipelineName(std::string_view pipelineName,
                                                  bool includeDollarSign = false) {
     return includeDollarSign ? fmt::format("${}_score", pipelineName)
                              : fmt::format("{}_score", pipelineName);
@@ -151,8 +148,8 @@ inline std::string getScoreFieldFromPipelineName(StringData pipelineName,
  * Returns the name of the given value with the given internalFieldsName prefix concatenated to it.
  * Ex: <INTERNAL_FIELDS_NAME>.<value> // "_internal_rankFusion_internal_fields.inputPipelineRank"
  */
-inline std::string applyInternalFieldPrefixToFieldName(StringData internalFieldsName,
-                                                       StringData value) {
+inline std::string applyInternalFieldPrefixToFieldName(std::string_view internalFieldsName,
+                                                       std::string_view value) {
     return fmt::format("{}.{}", internalFieldsName, value);
 }
 

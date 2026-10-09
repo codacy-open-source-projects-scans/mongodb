@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_path_support.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/util/builder.h"
@@ -44,12 +17,14 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
 namespace document_path_support {
 
 namespace {
+using namespace std::literals::string_view_literals;
 using std::vector;
 
 const ValueComparator kDefaultValueComparator{};
@@ -186,10 +161,10 @@ TEST(VisitAllValuesAtPathTest, TreatsNegativeIndexAsFieldName) {
     auto callback = [&values](const Value& val) {
         values.insert(val);
     };
-    Document doc{{"a", {0, 1, Document{{"-1", "target"_sd}}, Document{{"b", 3}}}}};
+    Document doc{{"a", {0, 1, Document{{"-1", "target"sv}}, Document{{"b", 3}}}}};
     visitAllValuesAtPath(doc, FieldPath("a.-1"), callback);
     ASSERT_EQ(values.size(), 1UL);
-    ASSERT_EQ(values.count(Value("target"_sd)), 1UL);
+    ASSERT_EQ(values.count(Value("target"sv)), 1UL);
 }
 
 TEST(VisitAllValuesAtPathTest, ExtractsNoValuesFromOutOfBoundsIndex) {
@@ -266,7 +241,7 @@ TEST(VisitAllValuesAtPathTest, DoesExpandMultiplePositionalPathSpecifications) {
     Document doc(fromjson("{a: [[{b: '(0, 0)'}, {b: '(0, 1)'}], [{b: '(1, 0)'}, {b: '(1, 1)'}]]}"));
     visitAllValuesAtPath(doc, FieldPath("a.1.0.b"), callback);
     ASSERT_EQ(values.size(), 1UL);
-    ASSERT_EQ(values.count(Value("(1, 0)"_sd)), 1UL);
+    ASSERT_EQ(values.count(Value("(1, 0)"sv)), 1UL);
 }
 
 TEST(VisitAllValuesAtPathTest, DoesAcceptNumericInitialField) {
@@ -288,8 +263,8 @@ TEST(VisitAllValuesAtPathTest, DoesExpandArrayFoundAfterPositionalSpecification)
     Document doc(fromjson("{a: [[{b: '(0, 0)'}, {b: '(0, 1)'}], [{b: '(1, 0)'}, {b: '(1, 1)'}]]}"));
     visitAllValuesAtPath(doc, FieldPath("a.1.b"), callback);
     ASSERT_EQ(values.size(), 2UL);
-    ASSERT_EQ(values.count(Value("(1, 0)"_sd)), 1UL);
-    ASSERT_EQ(values.count(Value("(1, 1)"_sd)), 1UL);
+    ASSERT_EQ(values.count(Value("(1, 0)"sv)), 1UL);
+    ASSERT_EQ(values.count(Value("(1, 1)"sv)), 1UL);
 }
 
 TEST(VisitAllValuesAtPathTest, DoesNotAddMissingValueToResults) {
@@ -385,7 +360,7 @@ TEST(DocumentToBsonWithPathsTest, ShouldExtractEntireArrayFromPrefixOfDottedFiel
     ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"a.b"}));
 }
 
-TEST(DocumentToBsonWithPathsTest, SizeTraits) {
+TEST(DocumentToBsonWithPathsTest, ShouldThrowWhenResultExceedsMaxUserSize) {
     constexpr size_t longStringLength = 9 * 1024 * 1024;
     static_assert(longStringLength <= BSONObjMaxInternalSize &&
                   2 * longStringLength > BSONObjMaxInternalSize &&
@@ -398,12 +373,6 @@ TEST(DocumentToBsonWithPathsTest, SizeTraits) {
     ASSERT_THROWS_CODE(document_path_support::documentToBsonWithPaths(md.peek(), {"a", "b"}),
                        DBException,
                        ErrorCodes::BSONObjectTooLarge);
-    ASSERT_THROWS_CODE(document_path_support::documentToBsonWithPaths<BSONObj::DefaultSizeTrait>(
-                           md.peek(), {"a", "b"}),
-                       DBException,
-                       ErrorCodes::BSONObjectTooLarge);
-    ASSERT_DOES_NOT_THROW(document_path_support::documentToBsonWithPaths<BSONObj::LargeSizeTrait>(
-        md.peek(), {"a", "b"}));
 }
 }  // namespace
 }  // namespace document_path_support

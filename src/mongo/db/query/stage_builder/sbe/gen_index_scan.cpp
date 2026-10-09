@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/stage_builder/sbe/gen_index_scan.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
@@ -57,7 +30,7 @@
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
@@ -68,6 +41,7 @@
 #include <deque>
 #include <iterator>
 #include <map>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -76,6 +50,7 @@
 
 
 namespace mongo::stage_builder {
+using namespace std::literals::string_view_literals;
 namespace {
 
 
@@ -341,8 +316,10 @@ PlanStageSlots setFieldAndSortKeySlots(PlanStageSlots outputs,
  *     right
  *       ixseek lowKeySlot highKeySlot keyStringSlot snapshotIdSlot recordIdSlot [] @coll @index
  *
- * In case when the 'intervals' are not specified, 'boundsSlot' will be registered in the runtime
- * environment and returned as a third element of the tuple.
+ * In case when the 'intervals' are not specified, 'boundsSlot' will be allocated and returned as a
+ * third element of the tuple. The caller of this function is responsible to make sure that at
+ * runtime the slot contains the key to be searched, either in the runtime environment or as the
+ * output of another stage.
  */
 std::tuple<SbStage, PlanStageSlots, boost::optional<SbSlot>>
 generateOptimizedMultiIntervalIndexScan(StageBuilderState& state,
@@ -363,8 +340,7 @@ generateOptimizedMultiIntervalIndexScan(StageBuilderState& state,
             return SbSlot{
                 state.env->registerSlot(boundsTag, boundsVal, true, state.slotIdGenerator)};
         } else {
-            return SbSlot{state.env->registerSlot(
-                sbe::value::TypeTags::Nothing, 0, true, state.slotIdGenerator)};
+            return SbSlot{state.slotIdGenerator->generate()};
         }
     }();
 
@@ -378,8 +354,8 @@ generateOptimizedMultiIntervalIndexScan(StageBuilderState& state,
     // bind the keys to the 'lowKeySlot' and 'highKeySlot'.
     auto [project, outSlots] =
         b.makeProject(std::move(unwind),
-                      b.makeFunction(sbe::EFn::kGetField, unwindSlot, b.makeStrConstant("l"_sd)),
-                      b.makeFunction(sbe::EFn::kGetField, unwindSlot, b.makeStrConstant("h"_sd)));
+                      b.makeFunction(sbe::EFn::kGetField, unwindSlot, b.makeStrConstant("l"sv)),
+                      b.makeFunction(sbe::EFn::kGetField, unwindSlot, b.makeStrConstant("h"sv)));
 
     auto lowKeySlot = outSlots[0];
     auto highKeySlot = outSlots[1];
@@ -417,14 +393,13 @@ generateOptimizedMultiIntervalIndexScan(StageBuilderState& state,
 /**
  * Builds a generic multi-interval index scan for the cases when index bounds cannot be represented
  * as valid low/high keys. A 'GenericIndexScanStage' plan will be generated, and it will use either
- * a constant IndexBounds* or a parameterized IndexBounds* from a runtime environment slot.
- * The parameterized IndexBounds* obtained from environment slot can be rebound to a new value upon
- * plan cache recovery.
+ * a constant IndexBounds* or a parameterized IndexBounds* from a runtime slot.
+ * The caller of this function is responsible to make sure that at runtime this slot contains a
+ * valid IndexBounds, either in the runtime environment (that can be can be rebound to a new value
+ * upon plan cache recovery) or as the output of another stage.
  *
  * Returns a tuple composed of: (1) a 'GenericIndexScanStage' plan stage; (2) a set of output slots;
- * and (3) boost::none or a runtime environment slot id for index bounds. In case when the 'bounds'
- * are not specified, 'indexBounds' will be registered in the runtime environment and returned in
- * the third element of the tuple.
+ * and (3) boost::none or a slot id for the above described index bounds.
  */
 std::tuple<SbStage, PlanStageSlots, boost::optional<SbSlot>> generateGenericMultiIntervalIndexScan(
     StageBuilderState& state,
@@ -444,8 +419,7 @@ std::tuple<SbStage, PlanStageSlots, boost::optional<SbSlot>> generateGenericMult
     SbExpr boundsExpr;
 
     if (hasDynamicIndexBounds) {
-        boundsSlot = SbSlot{state.env->registerSlot(
-            sbe::value::TypeTags::Nothing, 0, true /* owned */, state.slotIdGenerator)};
+        boundsSlot = SbSlot{state.slotIdGenerator->generate()};
         boundsExpr = boundsSlot;
     } else {
         // 'b.makeConstant()' will take the ownership of the 'IndexBounds' pointer.
@@ -613,18 +587,15 @@ generateSingleIntervalIndexScanAndSlotsImpl(StageBuilderState& state,
                                             bool isPointInterval) {
     SbBuilder b(state, nodeId);
 
-    auto slotIdGenerator = state.slotIdGenerator;
     tassert(6584701,
             "Either both lowKey and highKey are specified or none of them are",
             (lowKey && highKey) || (!lowKey && !highKey));
     const bool shouldRegisterLowHighKeyInRuntimeEnv = !lowKey;
 
-    auto lowKeySlot = !lowKey ? boost::make_optional(SbSlot{state.env->registerSlot(
-                                    sbe::value::TypeTags::Nothing, 0, true, slotIdGenerator)})
-                              : boost::none;
-    auto highKeySlot = !highKey ? boost::make_optional(SbSlot{state.env->registerSlot(
-                                      sbe::value::TypeTags::Nothing, 0, true, slotIdGenerator)})
-                                : boost::none;
+    auto lowKeySlot =
+        !lowKey ? boost::make_optional(SbSlot{state.slotIdGenerator->generate()}) : boost::none;
+    auto highKeySlot =
+        !highKey ? boost::make_optional(SbSlot{state.slotIdGenerator->generate()}) : boost::none;
 
     auto lowKeyExpr = !lowKey
         ? SbExpr{*lowKeySlot}
@@ -645,11 +616,10 @@ generateSingleIntervalIndexScanAndSlotsImpl(StageBuilderState& state,
                                                                 nodeId,
                                                                 forward);
 
-    // If low and high keys are provided in the runtime environment, then we need to create
-    // a cfilter stage on top of project in order to be sure that the single interval
-    // exists (the interval may be empty), in which case the index scan plan should simply
-    // return EOF. This does not apply when the interval is a point interval, since the interval
-    // should always exist in that case.
+    // If low and high keys are provided at runtime, then we need to create a cfilter stage on top
+    // of project in order to be sure that the single interval exists (the interval may be empty),
+    // in which case the index scan plan should simply return EOF. This does not apply when the
+    // interval is a point interval, since the interval should always exist in that case.
     if (shouldRegisterLowHighKeyInRuntimeEnv && !isPointInterval) {
         stage = b.makeConstFilter(
             std::move(stage),
@@ -705,7 +675,7 @@ PlanStageReqs computeReqsForIndexScan(const PlanStageReqs& reqs,
             dependency_analysis::addDependencies(filter, &deps);
             for (auto&& elt : keyPattern) {
                 if (deps.fields.count(elt.fieldName())) {
-                    StringData name = elt.fieldNameStringData();
+                    std::string_view name = elt.fieldNameStringData();
                     ixScanReqs.set(std::pair(PlanStageSlots::kField, name));
                 }
             }
@@ -729,7 +699,7 @@ PlanStageReqs computeReqsForIndexScan(const PlanStageReqs& reqs,
     // If 'reqAllKeyPatternParts' is true, then we need to get all parts of the index key pattern.
     if (reqAllKeyPatternParts) {
         for (const auto& elt : keyPattern) {
-            StringData name = elt.fieldNameStringData();
+            std::string_view name = elt.fieldNameStringData();
             ixScanReqs.set(std::pair(PlanStageSlots::kField, name));
         }
     }
@@ -756,7 +726,7 @@ std::pair<SbStage, PlanStageSlots> setResultAndAdditionalFieldSlots(SbStage stag
     if (reqs.hasResult() || !additionalFields.empty()) {
         SbSlotVector indexKeySlots;
         for (auto&& elem : keyPattern) {
-            StringData name = elem.fieldNameStringData();
+            std::string_view name = elem.fieldNameStringData();
             indexKeySlots.emplace_back(outputs.get(std::pair(PlanStageSlots::kField, name)));
         }
 
@@ -788,7 +758,7 @@ std::pair<SbStage, PlanStageSlots> setResultAndAdditionalFieldSlots(SbStage stag
     if (reqs.has(PlanStageSlots::kReturnKey)) {
         SbExpr::Vector args;
         for (auto&& elem : keyPattern) {
-            StringData name = elem.fieldNameStringData();
+            std::string_view name = elem.fieldNameStringData();
             args.emplace_back(b.makeStrConstant(name));
             args.emplace_back(outputs.get(std::pair(PlanStageSlots::kField, name)));
         }
@@ -1000,26 +970,24 @@ IndexIntervals makeIntervalsFromIndexBounds(const IndexBounds& bounds,
 
 std::pair<sbe::value::TypeTags, sbe::value::Value> packIndexIntervalsInSbeArray(
     IndexIntervals intervals) {
-    auto [boundsTag, boundsVal] = sbe::value::makeNewArray();
-    auto arr = sbe::value::getArrayView(boundsVal);
-    sbe::value::ValueGuard boundsGuard{boundsTag, boundsVal};
+    sbe::value::TagValueOwned bounds =
+        sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewArray());
+    auto arr = sbe::value::getArrayView(bounds.value());
     arr->reserve(intervals.size());
     for (auto&& [lowKey, highKey] : intervals) {
-        auto [tag, val] = sbe::value::makeNewObject();
-        auto obj = sbe::value::getObjectView(val);
-        sbe::value::ValueGuard guard{tag, val};
+        sbe::value::TagValueOwned interval =
+            sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewObject());
+        auto obj = sbe::value::getObjectView(interval.value());
         obj->reserve(2);
-        obj->push_back("l"_sd,
-                       sbe::value::TypeTags::keyString,
-                       sbe::value::makeKeyString(std::move(lowKey)).second);
-        obj->push_back("h"_sd,
-                       sbe::value::TypeTags::keyString,
-                       sbe::value::makeKeyString(std::move(highKey)).second);
-        guard.reset();
-        arr->push_back(tag, val);
+        obj->push_back_raw("l"sv,
+                           sbe::value::TypeTags::keyString,
+                           sbe::value::makeKeyString(std::move(lowKey)).second);
+        obj->push_back_raw("h"sv,
+                           sbe::value::TypeTags::keyString,
+                           sbe::value::makeKeyString(std::move(highKey)).second);
+        arr->push_back_raw(interval.releaseToRaw());
     }
-    boundsGuard.reset();
-    return {boundsTag, boundsVal};
+    return bounds.releaseToRaw();
 }
 
 std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
@@ -1064,9 +1032,7 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
                 reqs,
                 ixn->nodeId(),
                 intervalsRequired == IntervalsRequired::EqualityInterval /* isPointInterval */);
-        tassert(6484702,
-                "lowKey and highKey runtime environment slots must be present",
-                indexScanBoundsSlots);
+        tassert(6484702, "lowKey and highKey runtime slots must be present", indexScanBoundsSlots);
         parameterizedScanSlots = {ParameterizedIndexScanSlots::SingleIntervalPlan{
             indexScanBoundsSlots->first.getId(), indexScanBoundsSlots->second.getId()}};
     } else {
@@ -1099,8 +1065,7 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
 
         // Generate a branch stage that will either execute an optimized or a generic index scan
         // based on the condition in the slot 'isGenericScanSlot'.
-        auto isGenericScanSlot = SbSlot{state.env->registerSlot(
-            sbe::value::TypeTags::Nothing, 0, true /* owned */, state.slotIdGenerator)};
+        auto isGenericScanSlot = SbSlot{state.slotIdGenerator->generate()};
 
         std::vector<std::pair<SbStage, PlanStageSlots>> stagesAndSlots;
         stagesAndSlots.emplace_back(std::move(genericStage), std::move(genericOutputs));

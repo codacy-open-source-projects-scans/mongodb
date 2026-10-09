@@ -10,6 +10,7 @@
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {TTLUtil} from "jstests/libs/ttl/ttl_util.js";
+import {skipTestIfSizeBasedOplogTruncationDisabled} from "jstests/libs/oplog_truncation_util.js";
 
 function samplingIsIncomplete(primary) {
     const status = primary.getDB("local").serverStatus();
@@ -33,6 +34,10 @@ const rst = new ReplSetTest({
 });
 rst.startSet();
 rst.initiate();
+
+// This test relies on marker-based oplog truncation, which may be disabled in disagg.
+// TODO(SERVER-125068) remove this once this feature flag is deleted
+skipTestIfSizeBasedOplogTruncationDisabled(rst.getPrimary(), () => rst.stopSet());
 
 // Insert initial documents
 jsTest.log.info("Inserting initial set of documents into the collection.");
@@ -73,10 +78,14 @@ assert(samplingIsIncomplete(secondary));
 // Check sampling does not block TTL
 {
     assert.commandWorked(primaryDb.createCollection("cows"));
-    assert.commandWorked(primaryDb.cows.createIndex({"lastModifiedDate": 1}, {expireAfterSeconds: 0}));
+    assert.commandWorked(
+        primaryDb.cows.createIndex({"lastModifiedDate": 1}, {expireAfterSeconds: 0}),
+    );
 
     for (let i = 0; i < 5; i++) {
-        assert.commandWorked(primaryDb.getCollection("cows").insert({"lastModifiedDate": new Date()}));
+        assert.commandWorked(
+            primaryDb.getCollection("cows").insert({"lastModifiedDate": new Date()}),
+        );
     }
 
     // TTL Monitor should now perform passes every second. A timeout here would mean we fail the

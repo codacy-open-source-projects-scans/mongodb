@@ -1,18 +1,26 @@
-/* Check the cardinality estimation of very simple predicates using histograms by running
-   the predicate itself and comparing the number of documents matched to the estimate.
-
-   In this test, we use distributions that allow for "perfect" histograms, that is,
-   histograms where, even with the information loss, perfect estimates can be made.
-
-   Simularily, the predicates used are those that can be estimated perfectly
-   (except for the occasional off-by-one errors)
-*/
+/**
+ * Check the cardinality estimation of very simple predicates using histograms by running
+ * the predicate itself and comparing the number of documents matched to the estimate.
+ *
+ * In this test, we use distributions that allow for "perfect" histograms, that is,
+ * histograms where, even with the information loss, perfect estimates can be made.
+ *
+ * Simularily, the predicates used are those that can be estimated perfectly
+ * (except for the occasional off-by-one errors)
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
+ */
 
 import {getAllPlans} from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 import {ArrayDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/array.js";
 import {BooleanDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/boolean.js";
-import {DateDataset, TimestampDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/date_time.js";
+import {
+    DateDataset,
+    TimestampDataset,
+} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/date_time.js";
 import {
     OneHoleDataset,
     OnePeakDataset,
@@ -40,7 +48,12 @@ const coll = db[collName];
 function runOneTest({dataset, indexes, analyze, numberBuckets = 1000}) {
     try {
         assert.commandWorked(
-            db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+            db.adminCommand({
+                setParameter: 1,
+                featureFlagCostBasedRanker: true,
+                internalQueryPlanRanker: "costBased",
+                internalQueryCBRCEMode: "histogramCE",
+            }),
         );
 
         coll.drop();
@@ -75,11 +88,13 @@ function runOneTest({dataset, indexes, analyze, numberBuckets = 1000}) {
                     predicate,
                 );
 
-                printjsononeline(predicate);
-                print(`actualDocuments: ${actualDocuments}; cardinalityEstimate: ${cardinalityEstimate}`);
+                jsTest.log.info({predicate});
+                print(
+                    `actualDocuments: ${actualDocuments}; cardinalityEstimate: ${cardinalityEstimate}`,
+                );
 
                 if (Math.abs(actualDocuments - cardinalityEstimate) > 1) {
-                    printjsononeline(plan);
+                    jsTest.log.info({plan});
                     assert(
                         false,
                         `Got cardinalityEstimate = ${cardinalityEstimate} but actualDocuments = ${
@@ -129,7 +144,6 @@ for (const indexes of [[], [{a: 1}]]) {
 
 // Multi-field predicates
 
-// TODO SERVER-100611: re-enable these tests.
-for (const indexes of [/*[{a: 1, b: 1}], */ [{a: 1}, {b: 1}]]) {
+for (const indexes of [[{a: 1, b: 1}], [{a: 1}, {b: 1}]]) {
     runOneTest({dataset: new TwoFieldDataset(), indexes: indexes, analyze: ["a", "b"]});
 }

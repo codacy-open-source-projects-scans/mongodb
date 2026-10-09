@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/shell/encrypted_dbclient_base.h"
 
 #include "mongo/base/data_range_cursor.h"
-#include "mongo/base/data_type_validated.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -56,7 +29,7 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
+#include "mongo/rpc/object_check.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/reply_interface.h"
@@ -90,6 +63,7 @@
 #include <list>
 #include <new>
 #include <stack>
+#include <string_view>
 
 #include <jsapi.h>
 
@@ -108,11 +82,12 @@
 #include <js/ValueArray.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 constexpr Duration kCacheInvalidationTime = Minutes(1);
-constexpr StringData compactCmdName = "compact"_sd;
-constexpr StringData cleanupCmdName = "cleanup"_sd;
+constexpr std::string_view compactCmdName = "compact"sv;
+constexpr std::string_view cleanupCmdName = "cleanup"sv;
 
 ImplicitEncryptedDBClientCallback* implicitEncryptedDBClientCallback{nullptr};
 
@@ -220,13 +195,13 @@ BSONObj EncryptedDBClientBase::encryptDecryptCommand(const BSONObj& object,
 
 void EncryptedDBClientBase::encryptMarking(const BSONObj& elem,
                                            BSONObjBuilder* builder,
-                                           StringData elemName) {
+                                           std::string_view elemName) {
     MONGO_UNREACHABLE;
 }
 
 void EncryptedDBClientBase::decryptPayload(ConstDataRange data,
                                            BSONObjBuilder* builder,
-                                           StringData elemName) {
+                                           std::string_view elemName) {
     invariant(builder);
     uassert(ErrorCodes::BadValue, "Invalid decryption blob", data.length() > kAssociatedDataLength);
 
@@ -284,8 +259,9 @@ EncryptedDBClientBase::RunCommandReturn EncryptedDBClientBase::handleEncryptionR
     auto commandName = std::string{request.getCommandName()};
     const DatabaseName dbName = request.parseDbName();
 
-    if (std::find(kEncryptedCommands.begin(), kEncryptedCommands.end(), StringData(commandName)) ==
-        std::end(kEncryptedCommands)) {
+    if (std::find(kEncryptedCommands.begin(),
+                  kEncryptedCommands.end(),
+                  std::string_view(commandName)) == std::end(kEncryptedCommands)) {
         return doRunCommand(std::move(params));
     }
 
@@ -319,12 +295,10 @@ EncryptedDBClientBase::runCommandWithTarget(OpMsgRequest request,
 BSONObj EncryptedDBClientBase::validateBSONElement(ConstDataRange out, uint8_t bsonType) {
     if (bsonType == stdx::to_underlying(BSONType::object)) {
         ConstDataRangeCursor cdc = ConstDataRangeCursor(out);
-        BSONObj valueObj;
-
-        valueObj = cdc.readAndAdvance<Validated<BSONObj>>();
+        BSONObj valueObj{cdc.readAndAdvance<rpc::ValidatedBSONObj>()};
         return valueObj.getOwned();
     } else {
-        auto valueString = "value"_sd;
+        auto valueString = "value"sv;
 
         // The size here is to construct a new BSON document and validate the
         // total size of the object. The first four bytes is for the size of an
@@ -348,7 +322,7 @@ BSONObj EncryptedDBClientBase::validateBSONElement(ConstDataRange out, uint8_t b
 
         ConstDataRangeCursor cdc =
             ConstDataRangeCursor(ConstDataRange(builder.buf(), builder.len()));
-        BSONObj elemWrapped = cdc.readAndAdvance<Validated<BSONObj>>();
+        BSONObj elemWrapped{cdc.readAndAdvance<rpc::ValidatedBSONObj>()};
         return elemWrapped.getOwned();
     }
 }
@@ -429,9 +403,9 @@ void EncryptedDBClientBase::encrypt(mozjs::MozJSImplScope* scope,
     auto algorithmStr = mozjs::ValueWriter(cx, args.get(2)).toString();
     FleAlgorithmInt algorithm;
 
-    if (StringData(algorithmStr) == idl::serialize(FleAlgorithmEnum::kRandom)) {
+    if (std::string_view(algorithmStr) == idl::serialize(FleAlgorithmEnum::kRandom)) {
         algorithm = FleAlgorithmInt::kRandom;
-    } else if (StringData(algorithmStr) == idl::serialize(FleAlgorithmEnum::kDeterministic)) {
+    } else if (std::string_view(algorithmStr) == idl::serialize(FleAlgorithmEnum::kDeterministic)) {
         algorithm = FleAlgorithmInt::kDeterministic;
     } else {
         uasserted(ErrorCodes::BadValue, "Third parameter must be the FLE Algorithm type");
@@ -493,12 +467,12 @@ void EncryptedDBClientBase::encrypt(mozjs::MozJSImplScope* scope,
             // that information from the object by building it and pulling out the first
             // element, which is the object we are trying to get.
             mozjs::ObjectWrapper::WriteFieldRecursionFrames frames;
-            frames.emplace(cx, rootedObj.get(), nullptr, StringData{});
+            frames.emplace(cx, rootedObj.get(), nullptr, std::string_view{});
             BSONObjBuilder builder;
-            mozjs::ValueWriter(cx, args.get(1)).writeThis(&builder, "value"_sd, &frames);
+            mozjs::ValueWriter(cx, args.get(1)).writeThis(&builder, "value"sv, &frames);
 
             BSONObj object = builder.obj();
-            auto elem = object.getField("value"_sd);
+            auto elem = object.getField("value"sv);
 
             plaintextBuilder.appendBuf(elem.value(), elem.valuesize());
             bsonType = elem.type();
@@ -546,7 +520,7 @@ void EncryptedDBClientBase::encrypt(mozjs::MozJSImplScope* scope,
     // Prepare the return value
     ConstDataRange ciphertextBlob(encryptionFrame.get());
     std::string blobStr =
-        base64::encode(StringData(ciphertextBlob.data(), ciphertextBlob.length()));
+        base64::encode(std::string_view(ciphertextBlob.data(), ciphertextBlob.length()));
     JS::RootedValueArray<2> arr(cx);
 
     arr[0].setInt32(BinDataType::Encrypt);
@@ -612,7 +586,7 @@ boost::optional<EncryptedFieldConfig> EncryptedDBClientBase::getEncryptedFieldCo
 
 std::tuple<NamespaceString, BSONObj> validateStructuredEncryptionParams(JSContext* cx,
                                                                         JS::CallArgs args,
-                                                                        StringData cmdName) {
+                                                                        std::string_view cmdName) {
     if ((args.length() < 1) || (args.length() > 2)) {
         uasserted(ErrorCodes::BadValue, str::stream() << cmdName << " requires 1 or 2 args");
     }
@@ -645,18 +619,18 @@ void EncryptedDBClientBase::compact(JSContext* cx, JS::CallArgs args) {
 
     builder.append("compactStructuredEncryptionData", nss.coll());
 
-    if (extra["compactionTokens"_sd].eoo()) {
+    if (extra["compactionTokens"sv].eoo()) {
         builder.append("compactionTokens",
                        efc ? FLEClientCrypto::generateCompactionTokens(*efc, this) : BSONObj());
     }
 
-    if (efc && extra["encryptionInformation"_sd].eoo() &&
+    if (efc && extra["encryptionInformation"sv].eoo() &&
         hasQueryTypeMatching(*efc, [](QueryTypeEnum type) {
             return type == QueryTypeEnum::Range || isFLE2TextQueryType(type);
         })) {
         EncryptionInformation ei;
         ei.setSchema(BSON(nss.serializeWithoutTenantPrefix_UNSAFE() << efc->toBSON()));
-        builder.append("encryptionInformation"_sd, ei.toBSON());
+        builder.append("encryptionInformation"sv, ei.toBSON());
     }
 
     for (const auto& [fieldName, _] : extra) {
@@ -682,7 +656,7 @@ void EncryptedDBClientBase::cleanup(JSContext* cx, JS::CallArgs args) {
 
     builder.append("cleanupStructuredEncryptionData", nss.coll());
 
-    if (extra["cleanupTokens"_sd].eoo()) {
+    if (extra["cleanupTokens"sv].eoo()) {
         builder.append("cleanupTokens",
                        efc ? FLEClientCrypto::generateCompactionTokens(*efc, this) : BSONObj());
     }
@@ -894,7 +868,7 @@ BSONObj EncryptedDBClientBase::getEncryptedKey(const UUID& uuid) {
 
     auto keyStoreRecord = KeyStoreRecord::parse(dataKeyObj, IDLParserContext("root"));
 
-    BSONElement elem = dataKeyObj.getField("keyMaterial"_sd);
+    BSONElement elem = dataKeyObj.getField("keyMaterial"sv);
     uassert(ErrorCodes::BadValue,
             fmt::format("Key ID {} is not a generic BinData type", uuid.toString()),
             elem.isBinData(BinDataType::BinDataGeneral));
@@ -969,7 +943,7 @@ namespace {
  */
 void createCollectionObject(JSContext* cx,
                             JS::HandleValue client,
-                            StringData nsString,
+                            std::string_view nsString,
                             JS::MutableHandleValue collection) {
     invariant(!client.isNull() && !client.isUndefined());
 

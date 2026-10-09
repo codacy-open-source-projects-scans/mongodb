@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -43,6 +17,7 @@
 #include <functional>
 #include <memory>
 #include <queue>
+#include <string_view>
 
 #include <boost/filesystem.hpp>
 
@@ -78,11 +53,13 @@ private:
 
 using unittest::JoinThread;
 
-struct MONGO_MOD_NEEDS_REPLACEMENT SessionThread {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] SessionThread {
     struct StopException {};
 
     explicit SessionThread(std::shared_ptr<transport::Session> s)
-        : _session{std::move(s)}, _thread{[this] { _run(); }} {}
+        : _session{std::move(s)}, _thread{[this] {
+              _run();
+          }} {}
 
     ~SessionThread() {
         if (!_thread.joinable())
@@ -116,7 +93,7 @@ private:
     JoinThread _thread;  // Appears after the members _run uses.
 };
 
-class MONGO_MOD_NEEDS_REPLACEMENT InlineReactor : public Reactor {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] InlineReactor : public Reactor {
 public:
     void run() override {}
     void stop() override {}
@@ -180,7 +157,7 @@ private:
     ReactorHandle _mockReactor = std::make_unique<NoopReactor>();
 };
 
-class MONGO_MOD_NEEDS_REPLACEMENT MockSessionManager : public SessionManager {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] MockSessionManager : public SessionManager {
 public:
     MockSessionManager() = default;
     explicit MockSessionManager(std::function<void(SessionThread&)> onStartSession)
@@ -225,6 +202,8 @@ public:
         _onStartSession = std::move(cb);
     }
 
+    void onLoadBalancerPeerSet(bool) override {}
+
 private:
     void _join() {
         LOGV2(6109513, "Joining all session threads");
@@ -258,15 +237,15 @@ public:
         _filePathClientPEM = boost::filesystem::path(directoryPath / "client.pem").string();
     }
 
-    StringData getCAFile() const {
+    std::string_view getCAFile() const {
         return _filePathCA;
     }
 
-    StringData getPEMKeyFile() const {
+    std::string_view getPEMKeyFile() const {
         return _filePathPEM;
     }
 
-    StringData getClientPEMKeyFile() const {
+    std::string_view getClientPEMKeyFile() const {
         return _filePathClientPEM;
     }
 
@@ -297,7 +276,7 @@ inline std::unique_ptr<TempCertificatesDir> copyCertsToTempDir(std::string caFil
 };
 
 /**
- * RAII type that caches the sslGlobalParams sslCAFile, sslPEMKeyFile, and sslMode on construction,
+ * RAII type that caches the included sslGlobalParams on construction,
  * and restores them to the cached values on destruction.
  */
 class SSLGlobalParamsGuard {
@@ -305,18 +284,27 @@ public:
     SSLGlobalParamsGuard() {
         _sslCAFile = sslGlobalParams.sslCAFile;
         _sslPEMKeyFile = sslGlobalParams.sslPEMKeyFile;
+        _sslPEMKeyPassword = sslGlobalParams.sslPEMKeyPassword;
+        _sslClusterFile = sslGlobalParams.sslClusterFile;
+        _sslClusterPassword = sslGlobalParams.sslClusterPassword;
         _sslMode = sslGlobalParams.sslMode.load();
     }
 
     ~SSLGlobalParamsGuard() {
         sslGlobalParams.sslCAFile = _sslCAFile;
         sslGlobalParams.sslPEMKeyFile = _sslPEMKeyFile;
+        sslGlobalParams.sslPEMKeyPassword = _sslPEMKeyPassword;
+        sslGlobalParams.sslClusterFile = _sslClusterFile;
+        sslGlobalParams.sslClusterPassword = _sslClusterPassword;
         sslGlobalParams.sslMode.store(_sslMode);
     }
 
 private:
     std::string _sslCAFile;
     std::string _sslPEMKeyFile;
+    std::string _sslPEMKeyPassword;
+    std::string _sslClusterFile;
+    std::string _sslClusterPassword;
     int _sslMode;
 };
 
@@ -329,7 +317,7 @@ struct NetworkConnectionStats {
 
     static NetworkConnectionStats get(NetworkCounter::ConnectionType type) {
         BSONObjBuilder bob;
-        networkCounter.append(bob);
+        globalNetworkCounter().append(bob);
         BSONObj metrics = bob.obj();
         if (type == NetworkCounter::ConnectionType::kEgress) {
             metrics = metrics.getField("egress").Obj().getOwned();

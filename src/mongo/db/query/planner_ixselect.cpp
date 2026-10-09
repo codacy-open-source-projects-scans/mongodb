@@ -1,39 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/planner_ixselect.h"
 
-#include <s2cellid.h>
-
-
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
@@ -41,8 +11,8 @@
 #include "mongo/db/geo/geometry_container.h"
 #include "mongo/db/geo/hash.h"
 #include "mongo/db/geo/shapes.h"
+#include "mongo/db/index/geo/s2_common.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/index/s2_common.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_expr.h"
@@ -61,13 +31,18 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <s2cellid.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -88,7 +63,7 @@ bool isComparisonWithArrayPred(const MatchExpression* me) {
     return false;
 }
 
-std::size_t numPathComponents(StringData path) {
+std::size_t numPathComponents(std::string_view path) {
     return FieldRef{path}.numParts();
 }
 
@@ -288,7 +263,7 @@ std::vector<IndexEntry> QueryPlannerIXSelect::findIndexesByHint(
     const BSONObj& hintedIndex, const std::vector<IndexEntry>& allIndices) {
     std::vector<IndexEntry> out;
     BSONElement firstHintElt = hintedIndex.firstElement();
-    if (firstHintElt.fieldNameStringData() == "$hint"_sd &&
+    if (firstHintElt.fieldNameStringData() == "$hint"sv &&
         firstHintElt.type() == BSONType::string) {
         auto hintName = firstHintElt.valueStringData();
         for (auto&& entry : allIndices) {
@@ -377,7 +352,7 @@ bool QueryPlannerIXSelect::_compatible(const BSONElement& keyPatternElt,
                                        const IndexEntry& index,
                                        std::size_t keyPatternIdx,
                                        MatchExpression* node,
-                                       StringData fullPathToNode,
+                                       std::string_view fullPathToNode,
                                        const QueryContext& queryContext,
                                        bool nodeIsNotChild) {
     if ((boundsGeneratingNodeContainsComparisonToType(node, BSONType::string) ||
@@ -731,21 +706,14 @@ bool QueryPlannerIXSelect::nodeIsSupportedBySparseIndex(const MatchExpression* q
         // Equality to null inside an $elemMatch implies a match on literal 'null'.
         return isInElemMatch || !queryExprIn->hasNull();
     } else if (queryExpr->matchType() == MatchExpression::NOT) {
-        const auto* child = queryExpr->getChild(0);
-        const MatchExpression::MatchType childtype = child->matchType();
-        const bool isNotEqualsNull =
-            (childtype == MatchExpression::EQ &&
-             static_cast<const ComparisonMatchExpression*>(child)->getData().type() ==
-                 BSONType::null);
-
         // Prevent negated predicates from using sparse indices. Doing so would cause us to
         // miss documents which do not contain the indexed fields. The only case where we may
-        // use a sparse index for a negation is when the query is {$ne: null}. This is due to
-        // the behavior of {$eq: null} matching documents where the field does not exist OR the
-        // field is equal to literal null. The negation of {$eq: null} therefore matches
+        // use a sparse index for a negation is when the query is {$ne: null} (or equivalent). This
+        // is due to the behavior of {$eq: null} matching documents where the field does not exist
+        // OR the field is equal to literal null. The negation of {$eq: null} therefore matches
         // documents where the field does exist AND the field is not equal to literal
         // null. Since the field must exist, it is safe to use a sparse index.
-        if (!isNotEqualsNull) {
+        if (!isQueryNegatingEqualToNull(queryExpr)) {
             return false;
         }
     }
@@ -835,8 +803,8 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
         // Note we skip empty path components since they are not allowed in index key patterns.
         const auto newPath = prefix + std::string{node->path()};
         ElemMatchContext newEMContext;
-        // Note this StringData is unowned and references the string declared on the stack here.
-        // This should be fine since we are only ever reading from this in recursive calls as
+        // Note this std::string_view is unowned and references the string declared on the stack
+        // here. This should be fine since we are only ever reading from this in recursive calls as
         // context to help make planning decisions.
         newEMContext.fullPathToParentElemMatch = newPath;
         newEMContext.innermostParentElemMatch = static_cast<ElemMatchObjectMatchExpression*>(node);
@@ -1095,21 +1063,24 @@ bool isConjunctiveNode(MatchExpression* node) {
 }
 
 void stripInvalidCompoundWildcardIndexAssignmentImpl(MatchExpression* node,
-                                                     StringData wildcardField,
+                                                     std::string_view wildcardField,
                                                      size_t idx);
 /**
  * This function traverses and collects AND-related predicates. The following expressions are
  * eligible for collecting:
  *
  * - Sargable predicates: These predicates can utilize an index on their own fields. This includes
- *   leaf comparision nodes (e.g., $lt, $in) and $elemMatch (value), while excluding $not nodes.
+ *   leaf comparison nodes (e.g., $lt, $in) and $elemMatch (value). {$ne: null} ($not wrapping
+ *   $eq null) is also treated as sargable: because the negation of "null or missing" implies the
+ *   field exists, a CWI index entry is guaranteed to be present, mirroring the same exception in
+ *   nodeIsSupportedBySparseIndex, whereas other $not nodes are excluded.
  * - Conjunctive nodes: This includes $and and $elemMatch (object).
  *
  * If 'node' is a sargable predicate or a conjunctive node, it stores 'node' in the returned vector
  * if 'idx' is assigned. Then, it continues traversing the children of the 'node' and concatenates
  * their AND-related predicates.
  *
- * If 'node' is neither a leaf node nor conjunctive, it stops the predicate propogation. Instead, it
+ * If 'node' is neither sargable nor conjunctive, it stops the predicate propagation. Instead, it
  * calls stripInvalidCompoundWildcardIndexAssignmentImpl and returns an empty vector of predicates.
  *
  * The returned pair consists of:
@@ -1118,8 +1089,9 @@ void stripInvalidCompoundWildcardIndexAssignmentImpl(MatchExpression* node,
  *   identified during the traversal.
  */
 std::pair<bool, std::vector<MatchExpression*>> traverseAndPropagateANDRelatedPredicates(
-    MatchExpression* node, StringData wildcardField, size_t idx) {
-    if (!Indexability::nodeCanUseIndexOnOwnField(node) && !isConjunctiveNode(node)) {
+    MatchExpression* node, std::string_view wildcardField, size_t idx) {
+    if (!Indexability::nodeCanUseIndexOnOwnField(node) && !isConjunctiveNode(node) &&
+        !isQueryNegatingEqualToNull(node)) {
         stripInvalidCompoundWildcardIndexAssignmentImpl(node, wildcardField, idx);
         return {false, {}};
     }
@@ -1135,7 +1107,6 @@ std::pair<bool, std::vector<MatchExpression*>> traverseAndPropagateANDRelatedPre
         }
     }
 
-    // Traverse non-leaf nodes.
     for (size_t i = 0; i < node->numChildren(); ++i) {
         auto [childAssigned, childPreds] =
             traverseAndPropagateANDRelatedPredicates(node->getChild(i), wildcardField, idx);
@@ -1144,7 +1115,7 @@ std::pair<bool, std::vector<MatchExpression*>> traverseAndPropagateANDRelatedPre
         }
         indexedPreds.insert(indexedPreds.end(), childPreds.begin(), childPreds.end());
     }
-    return {wildcardFieldAssigned, indexedPreds};
+    return {wildcardFieldAssigned, std::move(indexedPreds)};
 }
 
 /**
@@ -1187,7 +1158,7 @@ std::pair<bool, std::vector<MatchExpression*>> traverseAndPropagateANDRelatedPre
  *   assignment from all the assigned predicates.
  */
 void stripInvalidCompoundWildcardIndexAssignmentImpl(MatchExpression* node,
-                                                     StringData wildcardField,
+                                                     std::string_view wildcardField,
                                                      size_t idx) {
     // If 'node' is conjunctive such as $and and $elemMatch, traverse and collect assigned
     // predicates before determining to strip assignments.

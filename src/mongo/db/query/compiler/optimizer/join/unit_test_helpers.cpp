@@ -1,38 +1,16 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/join/unit_test_helpers.h"
 
+#include "mongo/bson/json.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator_impl.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/cbr_test_utils.h"
 #include "mongo/db/query/compiler/optimizer/join/catalog_stats.h"
+
+#include <string_view>
 
 namespace mongo::join_ordering {
 
@@ -96,22 +74,26 @@ MultipleCollectionAccessor multipleCollectionAccessor(OperationContext* opCtx,
 }
 
 std::unique_ptr<CanonicalQuery> JoinOrderingTestFixture::makeCanonicalQuery(NamespaceString nss,
-                                                                            BSONObj filter) {
+                                                                            BSONObj filter,
+                                                                            BSONObj projection) {
     auto expCtx = ExpressionContextBuilder{}.opCtx(operationContext()).build();
+    auto findCmd = std::make_unique<FindCommandRequest>(nss);
     if (!filter.isEmpty()) {
+        findCmd->setFilter(filter);
+        findCmd->setProjection(projection.getOwned());
         auto swFindCmd = ParsedFindCommand::withExistingFilter(
             expCtx,
             nullptr,
             std::move(MatchExpressionParser::parse(filter, expCtx).getValue()),
-            std::make_unique<FindCommandRequest>(nss),
+            std::move(findCmd),
             ProjectionPolicies::aggregateProjectionPolicies());
         ASSERT_OK(swFindCmd.getStatus());
         return std::make_unique<CanonicalQuery>(
             CanonicalQueryParams{.expCtx = expCtx, .parsedFind = std::move(swFindCmd.getValue())});
     }
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
+    findCmd->setProjection(projection.getOwned());
     return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
-        .expCtx = expCtx, .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        .expCtx = expCtx, .parsedFind = ParsedFindCommandParams{std::move(findCmd)}});
 }
 
 std::unique_ptr<QuerySolution> JoinOrderingTestFixture::makeCollScanPlan(
@@ -152,12 +134,13 @@ std::unique_ptr<ce::SamplingEstimator> JoinOrderingTestFixture::samplingEstimato
         sampleSize,
         SamplingCEMethodEnum::kRandom,
         boost::none,
-        CardinalityEstimate{CardinalityType{static_cast<double>(size)}, EstimationSource::Code});
+        CardinalityEstimate{CardinalityType{static_cast<double>(size)}, EstimationSource::Code},
+        nullptr /*customerQueryExpCtx*/);
     samplingEstimator->generateSample(ce::NoProjection{});
     return samplingEstimator;
 }
 
-NamespaceString makeNSS(StringData collName) {
+NamespaceString makeNSS(std::string_view collName) {
     return NamespaceString::makeLocalCollection(collName);
 }
 
@@ -187,4 +170,45 @@ void JoinOrderingTestFixture::initGraph(size_t numNodes, bool withIndexes) {
         resolvedPaths.emplace_back(ResolvedPath{(NodeId)i, FieldPath(fieldName)});
     }
 }
+
+namespace {
+std::vector<BSONObj> pipelineFromJsonArray(std::string_view jsonArray) {
+    auto inputBson = fromjson("{pipeline: " + std::string(jsonArray) + "}");
+    ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::array);
+    std::vector<BSONObj> rawPipeline;
+    for (auto&& stageElem : inputBson["pipeline"].Array()) {
+        ASSERT_EQUALS(stageElem.type(), BSONType::object);
+        rawPipeline.push_back(stageElem.embeddedObject().getOwned());
+    }
+    return rawPipeline;
+}
+}  // namespace
+
+std::unique_ptr<Pipeline> makePipelineForTest(
+    std::vector<BSONObj> bsonStages,
+    std::vector<std::string_view> collNames,
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx) {
+    stdx::unordered_set<NamespaceString> secondaryNamespaces;
+    for (auto&& collName : collNames) {
+        secondaryNamespaces.insert(
+            NamespaceString::createNamespaceString_forTest("test", collName));
+    }
+    expCtx->addResolvedNamespaces(secondaryNamespaces);
+    auto pipeline =
+        pipeline_factory::makePipeline(bsonStages,
+                                       expCtx,
+                                       pipeline_factory::MakePipelineOptions{
+                                           .alreadyOptimized = false, .attachCursorSource = false});
+
+    return pipeline;
+}
+
+std::unique_ptr<Pipeline> makePipelineForTest(
+    std::string_view query,
+    std::vector<std::string_view> collNames,
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx) {
+    const auto bsonStages = pipelineFromJsonArray(query);
+    return makePipelineForTest(std::move(bsonStages), std::move(collNames), expCtx);
+}
+
 }  // namespace mongo::join_ordering

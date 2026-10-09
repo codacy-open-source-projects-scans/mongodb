@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -53,14 +26,16 @@
 #include "mongo/util/uuid.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 class BSONElement;
 
 /** A variant type that can hold any type of data representable in BSON
@@ -125,8 +100,9 @@ public:
     explicit Value(const Decimal128& value) : _storage(BSONType::numberDecimal, value) {}
     explicit Value(const Timestamp& value) : _storage(BSONType::timestamp, value) {}
     explicit Value(const OID& value) : _storage(BSONType::oid, value) {}
-    explicit Value(StringData value) : _storage(BSONType::string, value) {}
-    explicit Value(const std::string& value) : _storage(BSONType::string, StringData(value)) {}
+    explicit Value(std::string_view value) : _storage(BSONType::string, value) {}
+    explicit Value(const std::string& value)
+        : _storage(BSONType::string, std::string_view(value)) {}
     explicit Value(const Document& doc);
     explicit Value(Document&& doc);
     explicit Value(const BSONObj& obj);
@@ -151,7 +127,7 @@ public:
                    BSONBinData(uuid.toCDR().data(), uuid.toCDR().length(), BinDataType::newUUID)) {}
 
     /**
-     *  Force the use of StringData to prevent accidental NUL-termination.
+     *  Force the use of std::string_view to prevent accidental NUL-termination.
      */
     explicit Value(const char*) = delete;
 
@@ -258,9 +234,9 @@ public:
     Decimal128 getDecimal() const;
     double getDouble() const;
     std::string getString() const;
-    // May contain embedded NUL bytes, the returned StringData is just a view into the string still
-    // owned by this Value.
-    StringData getStringData() const;
+    // May contain embedded NUL bytes, the returned std::string_view is just a view into the string
+    // still owned by this Value.
+    std::string_view getStringData() const;
     Document getDocument() const;
     OID getOid() const;
     bool getBool() const;
@@ -286,7 +262,7 @@ public:
     Value operator[](size_t index) const;
 
     /// Access a field of a subdocument. Returns Value() if missing or getType() != Object
-    Value operator[](StringData name) const;
+    Value operator[](std::string_view name) const;
 
     /**
      * Recursively serializes this value as a field in the object in 'builder' with the field name
@@ -294,7 +270,7 @@ public:
      * BSON depth limit.
      */
     void addToBsonObj(BSONObjBuilder* builder,
-                      StringData fieldName,
+                      std::string_view fieldName,
                       size_t recursionLevel = 1) const;
 
     /**
@@ -347,7 +323,9 @@ public:
                        const StringDataComparator* stringComparator);
 
     // Support BSONObjBuilder and BSONArrayBuilder "stream" API
-    friend void appendToBson(BSONObjBuilder& builder, StringData fieldName, const Value& val) {
+    friend void appendToBson(BSONObjBuilder& builder,
+                             std::string_view fieldName,
+                             const Value& val) {
         val._appendToBson(builder, fieldName);
     }
 
@@ -433,20 +411,20 @@ public:
     void makeOwned() {}
 
     /// Members to support parsing/deserialization from IDL generated code.
-    void serializeForIDL(StringData fieldName, BSONObjBuilder* builder) const;
+    void serializeForIDL(std::string_view fieldName, BSONObjBuilder* builder) const;
     void serializeForIDL(BSONArrayBuilder* builder) const;
     static Value deserializeForIDL(const BSONElement& element);
 
     // Wrap a value in a BSONObj.
-    BSONObj wrap(StringData newName) const;
+    BSONObj wrap(std::string_view newName) const;
 
 private:
     explicit Value(const ValueStorage& storage) : _storage(storage) {}
 
     // May contain embedded NUL bytes, does not check the type.
-    StringData getRawData() const;
+    std::string_view getRawData() const;
 
-    void _appendToBson(BSONObjBuilder& builder, StringData fieldName) const;
+    void _appendToBson(BSONObjBuilder& builder, std::string_view fieldName) const;
 
     ValueStorage _storage;
     friend class MutableValue;  // gets and sets _storage.genericRCPtr
@@ -504,7 +482,7 @@ public:
         return values;
     }
 };
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo
 
 /* ======================= INLINED IMPLEMENTATIONS ========================== */
 
@@ -515,12 +493,12 @@ inline size_t Value::getArrayLength() const {
     return getArray().size();
 }
 
-inline StringData Value::getStringData() const {
+inline std::string_view Value::getStringData() const {
     MONGO_verify(getType() == BSONType::string);
     return getRawData();
 }
 
-inline StringData Value::getRawData() const {
+inline std::string_view Value::getRawData() const {
     return _storage.getString();
 }
 

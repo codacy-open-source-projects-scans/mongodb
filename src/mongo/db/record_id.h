@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -55,6 +28,7 @@
 #include <ostream>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -62,8 +36,8 @@
 #include <boost/optional.hpp>
 #include <fmt/format.h>
 
-namespace MONGO_MOD_PUBLIC mongo {
-namespace MONGO_MOD_FILE_PRIVATE record_id_details {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
+namespace [[MONGO_MOD_FILE_PRIVATE]] record_id_details {
 class RecordIdChecks;
 }
 
@@ -243,7 +217,7 @@ public:
      * Returns the raw value to be used as a key in a RecordStore. Requires that this RecordId was
      * constructed with a binary string value, and invariants otherwise.
      */
-    StringData getStr() const {
+    std::string_view getStr() const {
         dassert(isStr(),
                 fmt::format("expected RecordID string format, got: {}", _formatToString(_format)));
         if (_format == Format::kSmallStr) {
@@ -332,10 +306,11 @@ public:
 
     size_t hash() const {
         size_t hash = 0;
-        withFormat(
-            [](Null n) {},
-            [&](int64_t rid) { boost::hash_combine(hash, rid); },
-            [&](const char* str, int size) { boost::hash_combine(hash, StringData(str, size)); });
+        withFormat([](Null n) {},
+                   [&](int64_t rid) { boost::hash_combine(hash, rid); },
+                   [&](const char* str, int size) {
+                       boost::hash_combine(hash, std::string_view(str, size));
+                   });
         return hash;
     }
 
@@ -362,12 +337,12 @@ public:
             case Format::kLong:
                 return std::to_string(_getLongNoCheck());
             case Format::kSmallStr: {
-                StringData str = _getSmallStrNoCheck();
+                std::string_view str = _getSmallStrNoCheck();
                 return "kSmallStr size: " + std::to_string(str.size()) + " string: '" +
                     std::string(str.data(), str.size()) + "'";
             }
             case Format::kBigStr: {
-                StringData str = _getBigStrNoCheck();
+                std::string_view str = _getBigStrNoCheck();
                 return "kBigStr size: " + std::to_string(str.size()) + " string: '" +
                     std::string(str.data(), str.size()) + "'";
             }
@@ -401,7 +376,7 @@ public:
      * deserialized with deserializeToken().
      * Note: This is not to be used as a key to a RecordStore.
      */
-    void serializeToken(StringData fieldName, BSONObjBuilder* builder) const {
+    void serializeToken(std::string_view fieldName, BSONObjBuilder* builder) const {
         // Preserve the underlying format by using a different BSON type for each format.
         withFormat([&](Null n) { builder->appendNull(fieldName); },
                    [&](int64_t rid) { builder->append(fieldName, rid); },
@@ -529,13 +504,14 @@ private:
         return LongId::getIdFrom(_data);
     }
 
-    StringData _getSmallStrNoCheck() const {
-        return StringData(InlineStr::getArrayFrom(_data).data(), InlineStr::getSizeFrom(_data));
+    std::string_view _getSmallStrNoCheck() const {
+        return std::string_view(InlineStr::getArrayFrom(_data).data(),
+                                InlineStr::getSizeFrom(_data));
     }
 
-    StringData _getBigStrNoCheck() const {
+    std::string_view _getBigStrNoCheck() const {
         const auto& buffer = HeapStr::getBufferFrom(_data);
-        return StringData(buffer.get(), buffer.capacity());
+        return std::string_view(buffer.get(), buffer.capacity());
     }
 
     static constexpr auto kTargetSizeInBytes = 32;
@@ -617,4 +593,4 @@ inline std::ostream& operator<<(std::ostream& stream, const RecordId& id) {
     return stream << "RecordId(" << id.toString() << ')';
 }
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

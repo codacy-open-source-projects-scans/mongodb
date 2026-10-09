@@ -1,32 +1,7 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
+#include "mongo/db/exec/convert_utils.h"
 #include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/make_js_function.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
@@ -38,7 +13,10 @@ namespace mongo {
 
 namespace exec::expression {
 
-Value evaluate(const ExpressionFunction& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionFunction& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto jsExec = expr.getExpressionContext()->getJsExecWithScope(expr.getAssignFirstArgToThis());
     auto scope = jsExec->getScope();
 
@@ -47,8 +25,11 @@ Value evaluate(const ExpressionFunction& expr, const Document& root, Variables* 
     ScriptingFunction func = jsExec->getScope()->createFunction(expr.getFuncSource().c_str());
     uassert(31265, "The body function did not evaluate", func);
 
-    auto argValue = expr.getPassedArgs()->evaluate(root, variables);
+    auto argValue = expr.getPassedArgs()->evaluate(root, variables, ctx);
     uassert(31266, "The args field must be of type array", argValue.getType() == BSONType::array);
+
+    // Invalidate any unowned BSON wrappers retained by JS globals from prior invocations.
+    scope->advanceGeneration();
 
     // This logic exists to desugar $where into $expr + $function. In this case set the global obj
     // to this, to handle cases where the $where function references the current document through
@@ -57,10 +38,8 @@ Value evaluate(const ExpressionFunction& expr, const Document& root, Variables* 
     if (expr.getAssignFirstArgToThis()) {
         // For defense-in-depth, The $where case will pass a field path expr carrying $$CURRENT as
         // the only element of the array.
-        auto args = argValue.getArray();
-        uassert(31422,
-                "field path $$CURRENT must be the only element in args",
-                argValue.getArrayLength() == 1);
+        const auto& args = argValue.getArray();
+        uassert(31422, "field path $$CURRENT must be the only element in args", args.size() == 1);
 
         BSONObj thisBSON = args[0].getDocument().toBson();
         scope->setObject("obj", thisBSON);
@@ -90,8 +69,32 @@ struct EmitState {
     }
 
     std::vector<Value> emittedObjects;
-    int byteLimit;
-    int bytesUsed;
+    int byteLimit = 0;
+    int bytesUsed = 0;
+};
+
+// RAII guard that owns the EmitState and its lifetime during one $_internalJsEmit evaluation.
+struct EmitStateGuard {
+    explicit EmitStateGuard(int byteLimit) : state{{}, byteLimit, 0} {
+        tassert(9712401, "EmitStateGuard does not support nested use within a thread", !_active);
+        _active = &state;
+    }
+
+    ~EmitStateGuard() {
+        _active = nullptr;
+    }
+
+    EmitStateGuard(const EmitStateGuard&) = delete;
+    EmitStateGuard& operator=(const EmitStateGuard&) = delete;
+
+    static EmitState* get() {
+        uassert(9712400, "Misplaced call to 'emit'", _active);
+        return _active;
+    }
+
+private:
+    EmitState state;
+    inline static thread_local EmitState* _active = nullptr;
 };
 
 /**
@@ -126,28 +129,30 @@ void extract2Args(const BSONObj& args, BSONElement* elts) {
 BSONObj emitFromJS(const BSONObj& args, void* data) {
     BSONElement elts[2];
     extract2Args(args, elts);
-
-    auto emitState = static_cast<EmitState*>(data);
-    uassert(9712400, "Misplaced call to 'emit'", emitState);
+    convert_utils::uassertValidUserConstructedBinData(elts[0]);
+    convert_utils::uassertValidUserConstructedBinData(elts[1]);
+    EmitState* emitState = EmitStateGuard::get();
+    MutableDocument md;
     if (elts[0].type() == BSONType::undefined) {
-        MutableDocument md;
         // Note: Using MutableDocument::addField() is considerably faster than using
         // MutableDocument::setField() or building a document by hand with the DOC() macros.
         md.addField("k", Value(BSONNULL));
         md.addField("v", Value(elts[1]));
-        emitState->emit(md.freeze());
     } else {
-        MutableDocument md;
         md.addField("k", Value(elts[0]));
         md.addField("v", Value(elts[1]));
-        emitState->emit(md.freeze());
     }
+
+    emitState->emit(md.freeze());
     return BSONObj();
 }
 }  // namespace
 
-Value evaluate(const ExpressionInternalJsEmit& expr, const Document& root, Variables* variables) {
-    Value thisVal = expr.getThisRef()->evaluate(root, variables);
+Value evaluate(const ExpressionInternalJsEmit& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value thisVal = expr.getThisRef()->evaluate(root, variables, ctx);
     uassert(31225, "'this' must be an object.", thisVal.getType() == BSONType::object);
 
     // If the scope does not exist and is created by the following call, then make sure to
@@ -157,8 +162,13 @@ Value evaluate(const ExpressionInternalJsEmit& expr, const Document& root, Varia
     auto jsExec = expCtx->getJsExecWithScope();
 
     // Inject the native "emit" function to be called from the user-defined map function.
-    EmitState emitState{{}, internalQueryMaxJsEmitBytes.load(), 0};
-    jsExec->injectEmit(emitFromJS, &emitState);
+    // EmitStateGuard sets thread-localEmitState on construction and clears it on destruction,
+    // so cleanup is guaranteed even if an exception is thrown.
+    EmitStateGuard guardedEmitState{internalQueryMaxJsEmitBytes.load()};
+    // emitFromJS reads emitted values via EmitStateGuard::get() (thread-local), not via the
+    // data pointer, so nullptr is correct here. injectNative is called exactly once per
+    // evaluate() call — there is no second "invalidation" call as in the old pattern.
+    jsExec->getScope()->injectNative("emit", emitFromJS, nullptr);
 
     // Although inefficient to "create" a new function every time we evaluate, this will usually end
     // up being a simple cache lookup. This is needed because the JS Scope may have been recreated
@@ -168,10 +178,7 @@ Value evaluate(const ExpressionInternalJsEmit& expr, const Document& root, Varia
     BSONObj thisBSON = thisVal.getDocument().toBson();
     BSONObj params;
     jsExec->callFunctionWithoutReturn(func, params, thisBSON);
-    // Invalidate the pointer to the local emitState variable.
-    jsExec->injectEmit(emitFromJS, nullptr);
-
-    return Value(std::move(emitState.emittedObjects));
+    return Value(std::move(EmitStateGuard::get()->emittedObjects));
 }
 
 }  // namespace exec::expression

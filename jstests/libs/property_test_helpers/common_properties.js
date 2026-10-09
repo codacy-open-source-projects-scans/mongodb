@@ -2,7 +2,10 @@
  * Common properties our property-based tests may use. Intended to be paired with the `testProperty`
  * interface in property_testing_utils.js.
  */
-import {getPlanCache, runDeoptimized} from "jstests/libs/property_test_helpers/property_testing_utils.js";
+import {
+    getPlanCache,
+    runDeoptimized,
+} from "jstests/libs/property_test_helpers/property_testing_utils.js";
 import {
     getAllPlans,
     getAllPlanStages,
@@ -10,8 +13,8 @@ import {
     getRejectedPlans,
     getWinningPlanFromExplain,
 } from "jstests/libs/query/analyze_plan.js";
+import {runWithKnobs} from "jstests/libs/query/knob_utils.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 // Returns different query shapes using the first parameters plugged in.
 export function getDifferentlyShapedQueries(getQuery, testHelpers) {
@@ -43,9 +46,15 @@ function getAllVariationsOfQueryShape(shapeIx, getQuery, testHelpers) {
 export function createCorrectnessProperty(
     controlColl,
     experimentColl,
-    {statsCollectorFn, jsTestLogExplain, modifyExperimentQueryFn, sortArraysComparator} = {},
+    {
+        statsCollectorFn,
+        jsTestLogExplain,
+        modifyExperimentQueryFn,
+        sortArraysComparator,
+        preconditionFn,
+    } = {},
 ) {
-    return function queryHasSameResultsAsControlCollScan(getQuery, testHelpers) {
+    return function queryHasSameResultsAsControlCollScan(getQuery, testHelpers, extraParams) {
         const queries = getDifferentlyShapedQueries(getQuery, testHelpers);
 
         // Compute the control results all at once.
@@ -56,22 +65,27 @@ export function createCorrectnessProperty(
             assert.eq(typeof query, "object");
             const controlResults = resultMap[i];
 
-            const {pipeline, options} = modifyExperimentQueryFn ? modifyExperimentQueryFn(query) : query;
+            const {pipeline, options} = modifyExperimentQueryFn
+                ? modifyExperimentQueryFn(query)
+                : query;
             const experimentResults = experimentColl.aggregate(pipeline, options).toArray();
-            if (jsTestLogExplain) {
-                jsTest.log.info(experimentColl.explain().aggregate(pipeline, options));
-            }
-            if (statsCollectorFn) {
-                statsCollectorFn(experimentColl.explain().aggregate(pipeline, options));
-            }
+
+            const needsExplain = preconditionFn || jsTestLogExplain || statsCollectorFn;
+            const explain = needsExplain
+                ? experimentColl.explain().aggregate(pipeline, options)
+                : null;
+            if (preconditionFn) preconditionFn(explain, extraParams);
+            if (jsTestLogExplain) jsTest.log.info(explain);
+            if (statsCollectorFn) statsCollectorFn(explain);
 
             const cmpFn = sortArraysComparator ? testHelpers.compSortArrays : testHelpers.comp;
             if (!cmpFn(controlResults, experimentResults)) {
                 return {
                     passed: false,
-                    message: "Query results from experiment collection did not match plain collection using collscan.",
+                    message:
+                        "Query results from experiment collection did not match plain collection using collscan.",
                     query: {pipeline, options},
-                    explain: experimentColl.explain().aggregate(pipeline, options),
+                    explain: explain ?? experimentColl.explain().aggregate(pipeline, options),
                     controlResults,
                     experimentResults,
                 };
@@ -115,7 +129,9 @@ export function createCacheCorrectnessProperty(controlColl, experimentColl, stat
         for (let i = 0; i < remainingQueries.length; i++) {
             const query = remainingQueries[i];
             const controlResults = resultMap[i];
-            const experimentResults = experimentColl.aggregate(query.pipeline, query.options).toArray();
+            const experimentResults = experimentColl
+                .aggregate(query.pipeline, query.options)
+                .toArray();
 
             if (statsCollectorFn) {
                 statsCollectorFn(experimentColl.explain().aggregate(query.pipeline, query.options));
@@ -140,6 +156,79 @@ export function createCacheCorrectnessProperty(controlColl, experimentColl, stat
 }
 
 /*
+ * Caches a plan for each query shape, replaces all documents in the control and experiment
+ * collections with a second set of documents, enables the `planCacheAlwaysReplanClassic` and
+ * `planCacheAlwaysReplanSBE` failpoints, then reruns each cached query shape once and compares
+ * the results to a collection scan. This targets the replanning path where the
+ * cached plan was chosen for one dataset but now has to run against a different one, with a
+ * potentially different winning plan.
+ */
+export function createReplanningCacheCorrectnessProperty(controlColl, experimentColl) {
+    return function replannedQueriesHaveSameResultsAsControl(getQuery, testHelpers, {extraDocs}) {
+        // The query shapes we'll use to populate the plan cache.
+        const cachingQueries = [];
+        // A different variation (different constants) of each shape that we'll rerun after
+        // replacing the documents.
+        const replanQueries = [];
+        for (let shapeIx = 0; shapeIx < testHelpers.numQueryShapes; shapeIx++) {
+            cachingQueries.push(getQuery(shapeIx, 0 /* paramIx */));
+            replanQueries.push(getQuery(shapeIx, 1 /* paramIx */));
+        }
+
+        // Run each query shape three times against the initial docs to populate the plan cache.
+        cachingQueries.forEach((query) => {
+            for (let i = 0; i < 3; i++) {
+                experimentColl.aggregate(query.pipeline, query.options).toArray();
+            }
+        });
+
+        // Replace all documents in both collections with the second set. Writes do not invalidate
+        // existing plan cache entries, so the cached plans from the previous phase remain.
+        assert.commandWorked(controlColl.deleteMany({}));
+        assert.commandWorked(experimentColl.deleteMany({}));
+        assert.commandWorked(controlColl.insert(extraDocs));
+        assert.commandWorked(experimentColl.insert(extraDocs));
+
+        function runReplannedQueries() {
+            const resultMap = runDeoptimized(controlColl, replanQueries);
+
+            for (let i = 0; i < replanQueries.length; i++) {
+                const query = replanQueries[i];
+                const controlResults = resultMap[i];
+                const experimentResults = experimentColl
+                    .aggregate(query.pipeline, query.options)
+                    .toArray();
+
+                if (!testHelpers.comp(controlResults, experimentResults)) {
+                    return {
+                        passed: false,
+                        message:
+                            "A cached query that was forced to replan returned incorrect results.",
+                        query,
+                        explain: experimentColl.explain().aggregate(query.pipeline, query.options),
+                        controlResults,
+                        experimentResults,
+                    };
+                }
+            }
+            return {passed: true};
+        }
+
+        // Force every execution of a cached plan to trigger replanning.
+        return runWithKnobs(
+            experimentColl.getDB(),
+            runReplannedQueries,
+            // No knobs need to be set here, just failpoints.
+            {} /* knobToVal */,
+            {
+                planCacheAlwaysReplanClassic: "alwaysOn",
+                planCacheAlwaysReplanSBE: "alwaysOn",
+            },
+        );
+    };
+}
+
+/*
  * Asserts that `costEstimate` and `cardinalityEstimate` are defined in every stage of every plan
  * in the explain.
  */
@@ -156,7 +245,10 @@ function assertCeIsDefined(explain) {
 
     for (const plan of plans) {
         for (const stage of getAllPlanStages(plan)) {
-            assert(stage.costEstimate !== undefined && stage.cardinalityEstimate !== undefined, {explain, stage});
+            assert(stage.costEstimate !== undefined && stage.cardinalityEstimate !== undefined, {
+                explain,
+                stage,
+            });
         }
     }
 }
@@ -186,13 +278,17 @@ export function createPlanStabilityProperty(experimentColl, assertCeExists = fal
         for (const query of queries) {
             // Run explain on the query once to get the initial winning plan. Then we run explain
             // ten more times to assert that the winning plan is the same each time.
-            const initialExplain = experimentColl.explain().aggregate(query.pipeline, query.options);
+            const initialExplain = experimentColl
+                .explain()
+                .aggregate(query.pipeline, query.options);
             if (assertCeExists) {
                 assertCeIsDefined(initialExplain);
             }
 
             for (let i = 0; i < 10; i++) {
-                const newExplain = experimentColl.explain().aggregate(query.pipeline, query.options);
+                const newExplain = experimentColl
+                    .explain()
+                    .aggregate(query.pipeline, query.options);
                 if (!sameWinningAndRejectedPlans(initialExplain, newExplain)) {
                     return {
                         passed: false,
@@ -208,63 +304,33 @@ export function createPlanStabilityProperty(experimentColl, assertCeExists = fal
     };
 }
 
-function runSetParamCommand(db, cmd) {
-    FixtureHelpers.runCommandOnAllShards({db: db.getSiblingDB("admin"), cmdObj: cmd});
-}
-
-/*
- * Runs the given function with the query knobs set, then sets the query knobs back to their
- * original state.
- * It's important that each run of the property is independent from one another, so we'll always
- * reset the knobs to their original state even if the function throws an exception.
- */
-function runWithKnobs(db, knobToVal, fn) {
-    const knobNames = Object.keys(knobToVal);
-    // If there are no knobs to change, return the result of the function since there's no other
-    // work to do.
-    if (knobNames.length === 0) {
-        return fn();
-    }
-
-    // Get the previous knob settings, so we can undo our changes after setting the knobs from
-    // `knobToVal`.
-    const getParamObj = {getParameter: 1};
-    for (const key of knobNames) {
-        getParamObj[key] = 1;
-    }
-    const getParamResult = assert.commandWorked(db.adminCommand(getParamObj));
-    // Copy only the knob key/vals into the new object.
-    const priorSettings = {};
-    for (const key of knobNames) {
-        priorSettings[key] = getParamResult[key];
-    }
-
-    // Set the requested knobs.
-    runSetParamCommand(db, {setParameter: 1, ...knobToVal});
-
-    // With the finally block, we'll always revert the parameters back to their original settings,
-    // even if an exception is thrown.
-    try {
-        return fn();
-    } finally {
-        // Reset to the original settings.
-        runSetParamCommand(db, {setParameter: 1, ...priorSettings});
-    }
-}
-
-export function createQueriesWithKnobsSetAreSameAsControlCollScanProperty(controlColl, experimentColl) {
-    return function queriesWithKnobsSetAreSameAsControlCollScan(getQuery, testHelpers, {knobToVal}) {
+export function createQueriesWithKnobsSetAreSameAsControlCollScanProperty(
+    controlColl,
+    experimentColl,
+    {normalizeResults = false} = {},
+) {
+    return function queriesWithKnobsSetAreSameAsControlCollScan(
+        getQuery,
+        testHelpers,
+        {knobToVal},
+    ) {
         const queries = getDifferentlyShapedQueries(getQuery, testHelpers);
 
         // Compute the control results all at once.
         const resultMap = runDeoptimized(controlColl, queries);
 
-        return runWithKnobs(experimentColl.getDB(), knobToVal, () => {
+        function compareResults() {
             for (let i = 0; i < queries.length; i++) {
                 const query = queries[i];
                 const controlResults = resultMap[i];
-                const experimentResults = experimentColl.aggregate(query.pipeline, query.options).toArray();
-                if (!testHelpers.comp(controlResults, experimentResults)) {
+                const experimentResults = experimentColl
+                    .aggregate(query.pipeline, query.options)
+                    .toArray();
+
+                // We may need to use a comparator that normalizes numerics and orders arrays
+                // depending on what the caller requested.
+                const cmpFn = normalizeResults ? testHelpers.compNormalized : testHelpers.comp;
+                if (!cmpFn(controlResults, experimentResults)) {
                     return {
                         passed: false,
                         message:
@@ -278,7 +344,9 @@ export function createQueriesWithKnobsSetAreSameAsControlCollScanProperty(contro
                 }
             }
             return {passed: true};
-        });
+        }
+
+        return runWithKnobs(experimentColl.getDB(), compareResults, knobToVal);
     };
 }
 

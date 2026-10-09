@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -37,6 +11,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/client.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
@@ -45,8 +20,7 @@
 #include "mongo/db/keypattern.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
-#include "mongo/db/router_role/routing_cache/catalog_cache.h"
-#include "mongo/db/router_role/routing_cache/catalog_cache_loader_mock.h"
+#include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader_mock.h"
 #include "mongo/db/router_role/routing_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -54,7 +28,6 @@
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -85,7 +58,7 @@ protected:
         configTargeter()->setFindHostReturnValue(kConfigHostAndPort);
 
         // Setup catalogCache with mock loader
-        _catalogCacheLoader = std::make_shared<CatalogCacheLoaderMock>();
+        _catalogCacheLoader = std::make_shared<ConfigServerCatalogCacheLoaderMock>();
         _catalogCache = std::make_unique<CatalogCache>(getServiceContext(), _catalogCacheLoader);
 
         // Populate the shardRegistry with the shards from kShards vector
@@ -99,8 +72,9 @@ protected:
 
     class ScopedCollectionProvider {
     public:
-        ScopedCollectionProvider(std::shared_ptr<CatalogCacheLoaderMock> catalogCacheLoader,
-                                 const StatusWith<CollectionType>& swCollection)
+        ScopedCollectionProvider(
+            std::shared_ptr<ConfigServerCatalogCacheLoaderMock> catalogCacheLoader,
+            const StatusWith<CollectionType>& swCollection)
             : _catalogCacheLoader(catalogCacheLoader) {
             _catalogCacheLoader->setCollectionRefreshReturnValue(swCollection);
         }
@@ -109,7 +83,7 @@ protected:
         }
 
     private:
-        std::shared_ptr<CatalogCacheLoaderMock> _catalogCacheLoader;
+        std::shared_ptr<ConfigServerCatalogCacheLoaderMock> _catalogCacheLoader;
     };
 
     ScopedCollectionProvider scopedCollectionProvider(
@@ -119,7 +93,7 @@ protected:
 
     class ScopedChunksProvider {
     public:
-        ScopedChunksProvider(std::shared_ptr<CatalogCacheLoaderMock> catalogCacheLoader,
+        ScopedChunksProvider(std::shared_ptr<ConfigServerCatalogCacheLoaderMock> catalogCacheLoader,
                              const StatusWith<std::vector<ChunkType>>& swChunks)
             : _catalogCacheLoader(catalogCacheLoader) {
             _catalogCacheLoader->setChunkRefreshReturnValue(swChunks);
@@ -129,7 +103,7 @@ protected:
         }
 
     private:
-        std::shared_ptr<CatalogCacheLoaderMock> _catalogCacheLoader;
+        std::shared_ptr<ConfigServerCatalogCacheLoaderMock> _catalogCacheLoader;
     };
 
     ScopedChunksProvider scopedChunksProvider(const StatusWith<std::vector<ChunkType>>& swChunks) {
@@ -138,8 +112,9 @@ protected:
 
     class ScopedDatabaseProvider {
     public:
-        ScopedDatabaseProvider(std::shared_ptr<CatalogCacheLoaderMock> catalogCacheLoader,
-                               const StatusWith<DatabaseType>& swDatabase)
+        ScopedDatabaseProvider(
+            std::shared_ptr<ConfigServerCatalogCacheLoaderMock> catalogCacheLoader,
+            const StatusWith<DatabaseType>& swDatabase)
             : _catalogCacheLoader(catalogCacheLoader) {
             _catalogCacheLoader->setDatabaseRefreshReturnValue(swDatabase);
         }
@@ -148,7 +123,7 @@ protected:
         }
 
     private:
-        std::shared_ptr<CatalogCacheLoaderMock> _catalogCacheLoader;
+        std::shared_ptr<ConfigServerCatalogCacheLoaderMock> _catalogCacheLoader;
     };
 
     ScopedDatabaseProvider scopedDatabaseProvider(const StatusWith<DatabaseType>& swDatabase) {
@@ -210,7 +185,7 @@ protected:
     const HostAndPort kConfigHostAndPort{"DummyConfig", kDummyPort};
     const std::vector<ShardId> kShards{{"0"}, {"1"}};
 
-    std::shared_ptr<CatalogCacheLoaderMock> _catalogCacheLoader;
+    std::shared_ptr<ConfigServerCatalogCacheLoaderMock> _catalogCacheLoader;
     std::unique_ptr<CatalogCache> _catalogCache;
 };
 
@@ -567,5 +542,123 @@ TEST_F(CatalogCacheTest, AdvanceCollectionTimeInStore) {
                   .getCollectionVersion());
 }
 
+TEST_F(CatalogCacheTest,
+       LookupDatabaseCalledOnceOnSeveralGetDatabaseWithStaleDatabaseVersionException) {
+    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
+    loadDatabases({DatabaseType(kNss.dbName(), kShards[0], dbVersion)});
+
+    // Receiving StaleDbVersion on catalog cache
+    _catalogCache->onStaleDatabaseVersion(kNss.dbName(), boost::none);
+
+    _catalogCacheLoader->setDatabaseRefreshReturnValue(
+        DatabaseType(kNss.dbName(), kShards[0], dbVersion));
+
+    // Capture baseline for stats (loadDatabases should have increased them already)
+    BSONObjBuilder baselineBuilder;
+    _catalogCache->report(&baselineBuilder);
+    const auto countBefore = baselineBuilder.obj()["catalogCache"]
+                                 .Obj()["countDatabaseFullRefreshesStarted"]
+                                 .numberLong();
+
+    // Spawn 10 threads each of which is trying to get database (leading to refresh)
+    constexpr size_t kNumThreads = 10;
+    std::vector<StatusWith<CachedDatabaseInfo>> results(
+        kNumThreads, Status(ErrorCodes::InternalError, "Unknown"));
+    std::vector<stdx::thread> threads;
+    threads.reserve(kNumThreads);
+
+    {
+        FailPointEnableBlock failPoint("blockDatabaseCacheLookup");
+
+        for (size_t i = 0; i < kNumThreads; ++i) {
+            threads.emplace_back([this, &results, i] {
+                ThreadClient tc("getDatabase-" + std::to_string(i),
+                                getGlobalServiceContext()->getService());
+                auto opCtx = tc->makeOperationContext();
+                results[i] = _catalogCache->getDatabase(opCtx.get(), kNss.dbName());
+            });
+        }
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // All 10 getDatabase calls must have succeeded with the correct database info
+    for (size_t i = 0; i < kNumThreads; ++i) {
+        ASSERT_OK(results[i].getStatus());
+        ASSERT_EQ(results[i].getValue()->getPrimary(), kShards[0]);
+        ASSERT_EQ(results[i].getValue()->getVersion().getUuid(), dbVersion.getUuid());
+        ASSERT_EQ(results[i].getValue()->getVersion().getLastMod(), dbVersion.getLastMod());
+    }
+
+    // Despite 10 concurrent callers all seeing a stale cache, only one full refresh
+    // was made to the config server
+    BSONObjBuilder builder;
+    _catalogCache->report(&builder);
+    const auto report = builder.obj();
+    const auto stats = report["catalogCache"].Obj();
+    ASSERT_EQ(1, stats["countDatabaseFullRefreshesStarted"].numberLong() - countBefore);
+}
+
+TEST_F(CatalogCacheTest,
+       LookupCollectionCalledOnceOnSeveralGetCollectionWithStaleDatabaseVersionException) {
+    const auto dbVersion = DatabaseVersion(UUID::gen(), Timestamp(1, 1));
+    const auto gen = CollectionGeneration(OID::gen(), Timestamp(1, 1));
+    const auto collVersion = ShardVersionFactory::make(ChunkVersion(gen, {1, 0}));
+    loadDatabases({DatabaseType(kNss.dbName(), kShards[0], dbVersion)});
+    loadCollection(collVersion);
+
+    // Receiving StaleCollectionVersion on catalog cache
+    _catalogCache->onStaleCollectionVersion(kNss, boost::none);
+
+    _catalogCacheLoader->setCollectionRefreshReturnValue(makeCollectionType(collVersion));
+    _catalogCacheLoader->setChunkRefreshReturnValue(makeChunks(collVersion.placementVersion()));
+
+    // Capture baseline for stats (loadCollection should have increased them already)
+    BSONObjBuilder baselineBuilder;
+    _catalogCache->report(&baselineBuilder);
+    const auto countBefore = baselineBuilder.obj()["catalogCache"]
+                                 .Obj()["countIncrementalRefreshesStarted"]
+                                 .numberLong();
+
+    // Spawn 10 threads each of which is trying to get collection routing info (leading to refresh)
+    constexpr size_t kNumThreads = 10;
+    std::vector<StatusWith<CollectionRoutingInfo>> results(
+        kNumThreads, Status(ErrorCodes::InternalError, "Unknown"));
+    std::vector<stdx::thread> threads;
+    threads.reserve(kNumThreads);
+
+    {
+        FailPointEnableBlock failPoint("blockCollectionCacheLookup");
+
+        for (size_t i = 0; i < kNumThreads; ++i) {
+            threads.emplace_back([this, &results, i] {
+                ThreadClient tc("getCollection-" + std::to_string(i),
+                                getGlobalServiceContext()->getService());
+                auto opCtx = tc->makeOperationContext();
+                results[i] = _catalogCache->getCollectionRoutingInfo(opCtx.get(), kNss);
+            });
+        }
+    }
+
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    // All 10 getCollectionRoutingInfo calls must have succeeded with the correct collection info
+    for (size_t i = 0; i < kNumThreads; ++i) {
+        ASSERT_OK(results[i].getStatus());
+        ASSERT_EQ(results[i].getValue().getCollectionVersion(), collVersion);
+    }
+
+    // Despite 10 concurrent callers all seeing a stale cache, only one full refresh
+    // was made to the config server
+    BSONObjBuilder builder;
+    _catalogCache->report(&builder);
+    const auto report = builder.obj();
+    const auto stats = report["catalogCache"].Obj();
+    ASSERT_EQ(1, stats["countIncrementalRefreshesStarted"].numberLong() - countBefore);
+}
 }  // namespace
 }  // namespace mongo

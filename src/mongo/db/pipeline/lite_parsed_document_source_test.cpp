@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 
@@ -35,18 +9,21 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/stage_params.h"
 #include "mongo/db/pipeline/test_lite_parsed.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/framework.h"
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 const NamespaceString kTestNss =
-    NamespaceString::createNamespaceString_forTest("test.liteParsedDocSource"_sd);
+    NamespaceString::createNamespaceString_forTest("test.liteParsedDocSource"sv);
 
 DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(Mock);
 ALLOCATE_STAGE_PARAMS_ID(mock, MockStageParams::id);
@@ -90,9 +67,9 @@ protected:
         registration.setPrimaryParser(std::move(primaryParser));
         LiteParserOptions options;
         if (ifrFlagValue) {
-            std::vector<BSONObj> flagValues{
-                BSON("name" << mockFlag.getName() << "value" << *ifrFlagValue)};
-            options.ifrContext = std::make_shared<IncrementalFeatureRolloutContext>(flagValues);
+            std::vector<IFRFlagWireEntry> flagValues{
+                IFRFlagWireEntry{mockFlag.getName(), *ifrFlagValue}};
+            options.ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
         }
         return {std::move(registration), std::move(options)};
     }
@@ -112,7 +89,7 @@ TEST_F(LiteParserRegistrationTest, SetFallbackParser) {
     LiteParsedDocumentSource::LiteParserRegistration registration;
 
     // Create a mock IncrementalRolloutFeatureFlag.
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registration.setFallbackParser(std::move(fallbackParser), &mockFlag);
 
     // Verify primary is still not set.
@@ -133,7 +110,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithoutFeatureFlag) {
 TEST_F(LiteParserRegistrationTest, GetParserWithFeatureFlagEnabled) {
     LiteParsedDocumentSource::LiteParserRegistration registration;
 
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, true);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, true);
     registration.setFallbackParser(std::move(fallbackParser), &mockFlag);
     registration.setPrimaryParser(std::move(primaryParser));
 
@@ -145,7 +122,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithFeatureFlagEnabled) {
 TEST_F(LiteParserRegistrationTest, GetParserWithFeatureFlagDisabled) {
     LiteParsedDocumentSource::LiteParserRegistration registration;
 
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registration.setFallbackParser(std::move(fallbackParser), &mockFlag);
     registration.setPrimaryParser(std::move(primaryParser));
 
@@ -157,7 +134,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithFeatureFlagDisabled) {
 TEST_F(LiteParserRegistrationTest, GetParserWithChangingFeatureFlag) {
     LiteParsedDocumentSource::LiteParserRegistration registration;
 
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registration.setFallbackParser(std::move(fallbackParser), &mockFlag);
     registration.setPrimaryParser(std::move(primaryParser));
 
@@ -175,7 +152,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithChangingFeatureFlag) {
 
 TEST_F(LiteParserRegistrationTest, GetParserWithIfrContextFlagEnabled) {
     static IncrementalRolloutFeatureFlag mockFlag(
-        "testFlag1"_sd, RolloutPhase::inDevelopment, false);
+        "testFlag1"sv, RolloutPhase::inDevelopment, false);
     const auto& [registration, options] = makeRegistrationWithOptions(mockFlag, true);
 
     // Should return primary parser because ifrContext overrides to enabled.
@@ -184,8 +161,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithIfrContextFlagEnabled) {
 }
 
 TEST_F(LiteParserRegistrationTest, GetParserWithIfrContextFlagDisabled) {
-    static IncrementalRolloutFeatureFlag mockFlag(
-        "testFlag2"_sd, RolloutPhase::inDevelopment, true);
+    static IncrementalRolloutFeatureFlag mockFlag("testFlag2"sv, RolloutPhase::inDevelopment, true);
     const auto& [registration, options] = makeRegistrationWithOptions(mockFlag, false);
 
     // Should return fallback parser because ifrContext overrides to disabled.
@@ -194,8 +170,7 @@ TEST_F(LiteParserRegistrationTest, GetParserWithIfrContextFlagDisabled) {
 }
 
 TEST_F(LiteParserRegistrationTest, GetParserWithEmptyIfrContextFlag) {
-    static IncrementalRolloutFeatureFlag mockFlag(
-        "testFlag3"_sd, RolloutPhase::inDevelopment, true);
+    static IncrementalRolloutFeatureFlag mockFlag("testFlag3"sv, RolloutPhase::inDevelopment, true);
     const auto& [registration, options] = makeRegistrationWithOptions(mockFlag);
 
     // Should use checkEnabled() and return fallback parser.
@@ -238,7 +213,7 @@ protected:
 TEST_F(LiteParsedDocumentSourceParseTest, CanRegisterBothPrimaryAndFallback) {
     _stageName = "$canRegisterBothPrimaryAndFallback";
 
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registerFallbackParser(&mockFlag);
     registerPrimaryParser();
 }
@@ -248,7 +223,7 @@ using LiteParsedDocumentSourceParseDeathTest = LiteParsedDocumentSourceParseTest
 DEATH_TEST_F(LiteParsedDocumentSourceParseDeathTest, MustRegisterPrimaryAfterFallback, "11395100") {
     _stageName = "$mustRegisterPrimaryAfterFallback";
 
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registerPrimaryParser();
     registerFallbackParser(&mockFlag);
 }
@@ -267,7 +242,7 @@ TEST_F(LiteParsedDocumentSourceParseTest, FirstFallbackParserTakesPrecedence) {
     _stageName = "$firstFallbackParserTakesPrecedence";
 
     // Disable the feature flag such that the parser returns the fallback parser.
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registerFallbackParser(&mockFlag);
     registerPrimaryParser();
 
@@ -289,7 +264,7 @@ TEST_F(LiteParsedDocumentSourceParseTest, FirstFallbackParserTakesPrecedenceWith
     _stageName = "$firstFallbackParserTakesPrecedenceWithNoPrimary";
 
     // Disable the feature flag such that the parser returns the fallback parser.
-    IncrementalRolloutFeatureFlag mockFlag("testFlag"_sd, RolloutPhase::inDevelopment, false);
+    IncrementalRolloutFeatureFlag mockFlag("testFlag"sv, RolloutPhase::inDevelopment, false);
     registerFallbackParser(&mockFlag);
 
     // Try creating another fallback parser.
@@ -417,8 +392,12 @@ TEST(LiteParsedPipelineClone, CloneClonesSubpipelinesForNestedStages) {
     ASSERT_NE(original.getStages()[0].get(), cloned.getStages()[0].get());
 
     // Verify both stages have subpipelines.
-    const auto& originalSubPipelines = original.getStages()[0]->getSubPipelines();
-    const auto& clonedSubPipelines = cloned.getStages()[0]->getSubPipelines();
+    auto* originalSubPipelinesPtr = original.getStages()[0]->getSubPipelines();
+    auto* clonedSubPipelinesPtr = cloned.getStages()[0]->getSubPipelines();
+    ASSERT_NE(originalSubPipelinesPtr, nullptr);
+    ASSERT_NE(clonedSubPipelinesPtr, nullptr);
+    const auto& originalSubPipelines = *originalSubPipelinesPtr;
+    const auto& clonedSubPipelines = *clonedSubPipelinesPtr;
 
     ASSERT_EQ(originalSubPipelines.size(), 1);
     ASSERT_EQ(clonedSubPipelines.size(), 1);
@@ -427,10 +406,300 @@ TEST(LiteParsedPipelineClone, CloneClonesSubpipelinesForNestedStages) {
     ASSERT_NE(&originalSubPipelines[0], &clonedSubPipelines[0]);
 
     // Verify the subpipeline stages are also cloned (different pointers).
-    ASSERT_EQ(originalSubPipelines[0].getStages().size(), 1);
-    ASSERT_EQ(clonedSubPipelines[0].getStages().size(), 1);
-    ASSERT_NE(originalSubPipelines[0].getStages()[0].get(),
-              clonedSubPipelines[0].getStages()[0].get());
+    ASSERT_EQ(originalSubPipelines[0]->getStages().size(), 1);
+    ASSERT_EQ(clonedSubPipelines[0]->getStages().size(), 1);
+    ASSERT_NE(originalSubPipelines[0]->getStages()[0].get(),
+              clonedSubPipelines[0]->getStages()[0].get());
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     BindsViewWhenSubpipelineTargetIsAView) {
+    // $lookup with a subpipeline that targets "viewColl".
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "viewColl");
+    const NamespaceString kBackingNss =
+        NamespaceString::createNamespaceString_forTest("test", "backingColl");
+
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$lookup" << BSON("from" << "viewColl"
+                                      << "let" << BSONObj() << "pipeline"
+                                      << BSON_ARRAY(BSON("$match" << BSON("a" << 1))) << "as"
+                                      << "joined")),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages);
+    auto& stage = lpp.getStages()[0];
+
+    // Map says viewColl is a view backed by backingColl.
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kForeignNss,
+                ResolvedNamespace(kForeignNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("v" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    // bindResolvedNamespace with an empty sentinel should still upgrade the resolved backing
+    // namespace from the map.
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    auto backingNss = stage->getResolvedBackingNss();
+    ASSERT_TRUE(backingNss.isInvolvedNamespaceAView());
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     DoesNotBindWhenSubpipelineTargetIsNotAView) {
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$lookup" << BSON("from" << "regularColl"
+                                      << "let" << BSONObj() << "pipeline"
+                                      << BSON_ARRAY(BSON("$match" << BSON("a" << 1))) << "as"
+                                      << "joined")),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages);
+    auto& stage = lpp.getStages()[0];
+
+    // Empty map → subpipeline target isn't a view, so the resolved backing namespace stays at its
+    // identity default (not a view).
+    ResolvedNamespaceMap map;
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    ASSERT_FALSE(stage->getResolvedBackingNss().isInvolvedNamespaceAView());
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     UnionWithShorthandBindsViewAndMaterializesPipeline) {
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "viewColl");
+    const NamespaceString kBackingNss =
+        NamespaceString::createNamespaceString_forTest("test", "backingColl");
+
+    // Shorthand: {$unionWith: "viewColl"} (no pipeline field).
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$unionWith" << "viewColl"),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages);
+    auto& stage = lpp.getStages()[0];
+
+    // Before bind: _pipelines must be empty so needsViewSubpipelineMaterialized() returns true.
+    ASSERT_TRUE(stage->getMutableSubPipelines() != nullptr);
+    ASSERT_TRUE(stage->getMutableSubPipelines()->empty());
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kForeignNss,
+                ResolvedNamespace(kForeignNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("v" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    // _resolvedBackingNss must be set to the view entry.
+    auto backingNss = stage->getResolvedBackingNss();
+    ASSERT_TRUE(backingNss.isInvolvedNamespaceAView());
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+
+    // The view pipeline must have been materialized into _pipelines.
+    auto* subPipelines = stage->getMutableSubPipelines();
+    ASSERT_NE(subPipelines, nullptr);
+    ASSERT_FALSE(subPipelines->empty());
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     GraphLookupShorthandBindsViewAndMaterializesPipeline) {
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "viewColl");
+    const NamespaceString kBackingNss =
+        NamespaceString::createNamespaceString_forTest("test", "backingColl");
+
+    // Minimal valid $graphLookup — no internal pipeline field, so _pipelines starts empty.
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$graphLookup" << BSON("from" << "viewColl"
+                                           << "startWith"
+                                           << "$x"
+                                           << "connectFromField"
+                                           << "x"
+                                           << "connectToField"
+                                           << "y"
+                                           << "as"
+                                           << "result")),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages);
+    auto& stage = lpp.getStages()[0];
+
+    // Before bind: no pipeline slot yet.
+    ASSERT_TRUE(stage->getMutableSubPipelines() != nullptr);
+    ASSERT_TRUE(stage->getMutableSubPipelines()->empty());
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kForeignNss,
+                ResolvedNamespace(kForeignNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("v" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    auto backingNss = stage->getResolvedBackingNss();
+    ASSERT_TRUE(backingNss.isInvolvedNamespaceAView());
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+
+    auto* subPipelines = stage->getMutableSubPipelines();
+    ASSERT_NE(subPipelines, nullptr);
+    ASSERT_FALSE(subPipelines->empty());
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     LookupShorthandBindsViewAndMaterializesPipeline) {
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "viewColl");
+    const NamespaceString kBackingNss =
+        NamespaceString::createNamespaceString_forTest("test", "backingColl");
+
+    // Build an ifrContext with featureFlagExtensionsInsideHybridSearch = true so that
+    // LiteParsedLookUp::parse sets _noUserPipeline=true and leaves _pipelines empty.
+    std::vector<IFRFlagWireEntry> flagValues{
+        IFRFlagWireEntry{feature_flags::gFeatureFlagExtensionsInsideHybridSearch.getName(), true}};
+    LiteParserOptions options;
+    options.ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
+
+    // No `pipeline:` field — _pipelines stays empty and the view is materialized on bind.
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$lookup" << BSON("from" << "viewColl"
+                                      << "localField"
+                                      << "a"
+                                      << "foreignField"
+                                      << "b"
+                                      << "as"
+                                      << "result")),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages, false, options);
+    auto& stage = lpp.getStages()[0];
+
+    // Before bind: _pipelines must be empty so needsViewSubpipelineMaterialized() returns true.
+    auto* subPipelinesBefore = stage->getMutableSubPipelines();
+    ASSERT_NE(subPipelinesBefore, nullptr);
+    ASSERT_TRUE(subPipelinesBefore->empty());
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kForeignNss,
+                ResolvedNamespace(kForeignNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("v" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    // _resolvedBackingNss must now reflect the view.
+    auto backingNss = stage->getResolvedBackingNss();
+    ASSERT_TRUE(backingNss.isInvolvedNamespaceAView());
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+
+    // The view pipeline must have been materialized into _pipelines.
+    auto* subPipelines = stage->getMutableSubPipelines();
+    ASSERT_NE(subPipelines, nullptr);
+    ASSERT_EQ(subPipelines->size(), 1u);
+    ASSERT_FALSE((*subPipelines)[0]->getStages().empty());
+}
+
+// bindResolvedNamespace() can run more than once against the same logical stage:
+// AggCatalogState::maybeProactivelyResolveInvolvedNamespaces copies the resolved-namespace map
+// (which owns the parsed view pipelines) and re-binds the copy. The copy carries the
+// already-materialized subpipeline, so a naive re-bind would call materializeViewSubpipeline() with
+// a non-empty _pipelines and trip the empty-list invariant. Cloning the stage after the first bind
+// mimics that map copy; the second bind must be a no-op.
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     LookupShorthandRebindOfMaterializedCopyIsIdempotent) {
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "viewColl");
+    const NamespaceString kBackingNss =
+        NamespaceString::createNamespaceString_forTest("test", "backingColl");
+
+    std::vector<IFRFlagWireEntry> flagValues{
+        IFRFlagWireEntry{feature_flags::gFeatureFlagExtensionsInsideHybridSearch.getName(), true}};
+    LiteParserOptions options;
+    options.ifrContext = IncrementalFeatureRolloutContext::forTest(flagValues);
+
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$lookup" << BSON("from" << "viewColl"
+                                      << "localField"
+                                      << "a"
+                                      << "foreignField"
+                                      << "b"
+                                      << "as"
+                                      << "result")),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages, false, options);
+    auto& stage = lpp.getStages()[0];
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kForeignNss,
+                ResolvedNamespace(kForeignNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("v" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    // First bind materializes the view pipeline.
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+    ASSERT_EQ(stage->getMutableSubPipelines()->size(), 1u);
+
+    // Clone the stage the way copying the resolved-namespace map does. The clone carries the
+    // already-materialized subpipeline.
+    auto clonedStage = stage->clone();
+    ASSERT_EQ(clonedStage->getMutableSubPipelines()->size(), 1u);
+
+    // Re-binding the clone must not re-materialize (and must not trip tassert 12792401).
+    clonedStage->bindResolvedNamespace(ResolvedNamespace{}, map);
+    ASSERT_EQ(clonedStage->getMutableSubPipelines()->size(), 1u);
+    auto backingNss = clonedStage->getResolvedBackingNss();
+    ASSERT_TRUE(backingNss.isInvolvedNamespaceAView());
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+}
+
+TEST(LiteParsedDocumentSourceNestedPipelinesBindResolvedNamespace,
+     UnionWithShorthandAgainstPlainCollectionDoesNotMaterialize) {
+    const NamespaceString kForeignNss =
+        NamespaceString::createNamespaceString_forTest("test", "regularColl");
+
+    std::vector<BSONObj> pipelineStages = {
+        BSON("$unionWith" << "regularColl"),
+    };
+    LiteParsedPipeline lpp(kTestNss, pipelineStages);
+    auto& stage = lpp.getStages()[0];
+
+    // Empty map — the foreign namespace is not a view.
+    ResolvedNamespaceMap map;
+    stage->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    // Not a view: involvedNamespaceIsAView must be false.
+    auto backingNss = stage->getResolvedBackingNss();
+    ASSERT_FALSE(backingNss.isInvolvedNamespaceAView());
+
+    // Identity default: namespace should equal the foreign nss.
+    ASSERT_EQ(backingNss.getNamespace(), kForeignNss);
+
+    // Nothing was materialized: _pipelines must remain empty.
+    auto* subPipelines = stage->getMutableSubPipelines();
+    ASSERT_NE(subPipelines, nullptr);
+    ASSERT_TRUE(subPipelines->empty());
 }
 
 TEST(LiteParsedPipelineClone, DeferredCachesAreResetInClonedPipeline) {
@@ -510,9 +779,11 @@ TEST(LiteParsedPipelineClone, CloneRemainsValidAfterOriginalIsDestroyed) {
     ASSERT_EQ(cloned->getStages().size(), 1);
 
     // Verify the stage data is still accessible.
-    const auto& clonedSubPipelines = cloned->getStages()[0]->getSubPipelines();
+    auto* clonedSubPipelinesPtr = cloned->getStages()[0]->getSubPipelines();
+    ASSERT_NE(clonedSubPipelinesPtr, nullptr);
+    const auto& clonedSubPipelines = *clonedSubPipelinesPtr;
     ASSERT_EQ(clonedSubPipelines.size(), 1);
-    ASSERT_EQ(clonedSubPipelines[0].getStages().size(), 1);
+    ASSERT_EQ(clonedSubPipelines[0]->getStages().size(), 1);
 
     // Verify we can access computed properties (exercises the deferred caches).
     const auto& involvedNamespaces = cloned->getInvolvedNamespaces();
@@ -543,9 +814,11 @@ TEST(LiteParsedPipelineClone, OriginalRemainsValidAfterCloneIsDestroyed) {
     ASSERT_EQ(original.getStages().size(), 1);
 
     // Verify the stage data is still accessible.
-    const auto& originalSubPipelines = original.getStages()[0]->getSubPipelines();
+    auto* originalSubPipelinesPtr = original.getStages()[0]->getSubPipelines();
+    ASSERT_NE(originalSubPipelinesPtr, nullptr);
+    const auto& originalSubPipelines = *originalSubPipelinesPtr;
     ASSERT_EQ(originalSubPipelines.size(), 1);
-    ASSERT_EQ(originalSubPipelines[0].getStages().size(), 1);
+    ASSERT_EQ(originalSubPipelines[0]->getStages().size(), 1);
 
     // Verify we can access computed properties (exercises the deferred caches).
     const auto& involvedNamespaces = original.getInvolvedNamespaces();
@@ -759,7 +1032,7 @@ protected:
 };
 
 TEST_F(IsRegisteredExtensionStageTest, ReturnsFalseForUnregisteredStage) {
-    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$unregisteredStage"_sd));
+    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$unregisteredStage"sv));
 }
 
 TEST_F(IsRegisteredExtensionStageTest, ReturnsFalseForNonExtensionStage) {
@@ -784,9 +1057,9 @@ TEST_F(IsRegisteredExtensionStageTest,
 }
 
 TEST_F(IsRegisteredExtensionStageTest, ReturnsFalseForBuiltInStages) {
-    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$match"_sd));
-    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$project"_sd));
-    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$limit"_sd));
+    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$match"sv));
+    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$project"sv));
+    ASSERT_FALSE(LiteParsedDocumentSource::isRegisteredExtensionStage("$limit"sv));
 }
 
 }  // namespace mongo

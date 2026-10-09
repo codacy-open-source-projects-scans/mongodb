@@ -1,14 +1,26 @@
 load("//bazel/install_rules:install_rules.bzl", "extensions_with_config")
-load("@poetry//:dependencies.bzl", "dependency")
+load("//bazel/uv:defs.bzl", "dependency")
 load("//bazel/config:render_template.bzl", "render_template")
 load("//bazel:signing.bzl", "signed_mongo_cc_extension_shared_library")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files(
-    glob([
-        "*.h",
-    ]),
+    glob(
+        [
+            "*.h",
+        ],
+        allow_empty = True,
+    ),
+)
+
+filegroup(
+    name = "resmoke_data",
+    srcs = [
+        "aggregation_stage_fallback_parsers.json",
+        "configurations.yml",
+        "//src/mongo/db/extension/test_examples/test_extensions_signing_keys:test_extensions_signing_public_key.asc",
+    ],
 )
 
 # This sets up the valid extension targets to use in the top level `dist-test`
@@ -48,7 +60,9 @@ extensions_with_config(
         ":idle_threads_mongo_extension_signed_lib",
         ":interrupt_mongo_extension_signed_lib",
         ":match_topN_mongo_extension_signed_lib",
+        ":match_top_n_with_metrics_mongo_extension_signed_lib",
         ":native_vector_search_mongo_extension_signed_lib",
+        ":selection_optimization_mongo_extension_signed_lib",
         ":metrics_mongo_extension_signed_lib",
         ":other_metrics_mongo_extension_signed_lib",
         ":sleep_mongo_extension_signed_lib",
@@ -60,6 +74,8 @@ extensions_with_config(
         ":modify_for_log_mongo_extension_signed_lib",
         ":shard_id_mongo_extension_signed_lib",
         ":track_deps_mongo_extension_signed_lib",
+        ":multi_stream_mongo_extension_signed_lib",
+        ":internal_stage_mongo_extension_signed_lib",
 
         #################### EXTENSIONS FOR NO-PASSTHROUGH TESTS ####################
         # Any extension that is just loaded in a no-passthrough test MUST NOT have the
@@ -96,7 +112,7 @@ extensions_with_config(
         ":match_topN_mongo_extension_signed_lib",
         ":minor_version_too_high_bad_extension_signed_lib",
         ":native_vector_search_mongo_extension_signed_lib",
-        ":no_compatible_version_bad_extension_signed_lib",
+        ":no_get_extension_symbol_bad_extension_signed_lib",
         ":no_symbol_bad_extension_signed_lib",
         ":null_initialize_function_bad_extension_signed_lib",
         ":null_mongo_extension_bad_extension_signed_lib",
@@ -134,6 +150,8 @@ pkg_name = "//" + package_name() + "/"
         "view_pipeline_validator",
         "shard_id",
         "track_deps",
+        "multi_stream",
+        "internal_stage",
     ]
 ]
 
@@ -146,7 +164,9 @@ pkg_name = "//" + package_name() + "/"
     for extension_name in [
         "limit",
         "match_topN",
+        "match_top_n_with_metrics",
         "native_vector_search",
+        "selection_optimization",
         "vector_search_optimization",
         "add_fields_match",
     ]
@@ -262,6 +282,7 @@ filegroup(
     )
     for extension_name in [
         "no_symbol",
+        "no_get_extension_symbol",
         "null_mongo_extension",
         "major_version_too_high",
         "major_version_too_low",
@@ -273,7 +294,6 @@ filegroup(
         "initialize_version_fails",
         "null_stage_descriptor",
         "duplicate_version",
-        "no_compatible_version",
     ]
 ]
 

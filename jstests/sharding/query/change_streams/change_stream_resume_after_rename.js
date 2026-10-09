@@ -2,20 +2,37 @@
  * Tests that a change stream can resume correctly after rename invalidation.
  *
  * @tags: [
- *   requires_sharding,
- *   uses_change_streams,
+ *   # Asserts that renaming the watched collection invalidates the stream (collection-scope-only),
+ *   # and on the exact set of open shard/config cursors, which differs for a cluster-wide stream.
+ *   do_not_run_in_whole_db_passthrough,
+ *   do_not_run_in_whole_cluster_passthrough,
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
+ *   featureFlagChangeStreamPreciseShardTargeting,
+ *   featureFlagChangeStreamReaderV2,
+ *   requires_fcv_90,
+ *   requires_sharding,
+ *   uses_change_streams,
  * ]
  */
 import {describe, it, before, afterEach, after} from "jstests/libs/mochalite.js";
-import {ChangeStreamWatchMode} from "jstests/libs/query/change_stream_util.js";
-import {ChangeStreamReader, ChangeStreamReadingMode} from "jstests/libs/util/change_stream/change_stream_reader.js";
+import {
+    assertOpenCursors,
+    ChangeStreamTest,
+    ChangeStreamWatchMode,
+    cursorCommentFilter,
+    waitForClusterTime,
+} from "jstests/libs/query/change_stream_util.js";
+import {
+    ChangeStreamReader,
+    ChangeStreamReadingMode,
+} from "jstests/libs/util/change_stream/change_stream_reader.js";
 import {Writer} from "jstests/libs/util/change_stream/change_stream_writer.js";
 import {Connector} from "jstests/libs/util/change_stream/change_stream_connector.js";
 import {
     CreateDatabaseCommand,
     CreateUnsplittableCollectionCommand,
+    DropCollectionCommand,
     InsertDocCommand,
     RenameToNonExistentSameDbCommand,
 } from "jstests/libs/util/change_stream/change_stream_commands.js";
@@ -23,7 +40,6 @@ import {
     buildExpectedEvents,
     createMatcher,
     createShardingTest,
-    getCurrentClusterTime,
     runTeardownSteps,
 } from "jstests/libs/util/change_stream/change_stream_sharding_utils.js";
 import {
@@ -64,14 +80,61 @@ describe("$changeStream", function () {
         //  - Original name recreated by insert (lands on shard0)
         //
         // Expected events: [create, rename, invalidate, create, insert]
+        // Pre-create the database (with primary on shard0) outside the writer so that the
+        // target-collection stream below can open with deterministic placement (cursor on the
+        // DB primary). enableSharding is not visible to change streams.
+        new CreateDatabaseCommand({dbName: testDb, primaryShard: shards[0]._id}).execute(st.s);
+
         const commands = [
-            new CreateDatabaseCommand(testDb, testColl, [shards[0]], null),
-            new CreateUnsplittableCollectionCommand(testDb, testColl, [shards[1]], {exists: false, isSharded: false}),
-            new RenameToNonExistentSameDbCommand(testDb, testColl, shards, {exists: true, isSharded: false}),
-            new InsertDocCommand(testDb, testColl, shards, {exists: false, isSharded: false}),
+            new CreateUnsplittableCollectionCommand({
+                dbName: testDb,
+                collName: testColl,
+                shardSet: [shards[1]],
+                collectionCtx: {exists: false, isSharded: false},
+            }),
+            new RenameToNonExistentSameDbCommand({
+                dbName: testDb,
+                collName: testColl,
+                shardSet: shards,
+                collectionCtx: {exists: true, isSharded: false},
+                // Keep testColl_renamed alive after the rename so a follow-up watch
+                // can observe the v2 targeter placing its cursor on shard1. The
+                // invalidate is triggered by the rename itself (rename-to-watched-
+                // namespace), not by the manual drop done in afterEach cleanup.
+                dropAfterRename: false,
+            }),
+            new InsertDocCommand({
+                dbName: testDb,
+                collName: testColl,
+                collectionCtx: {exists: false, isSharded: false},
+            }),
         ];
         const expectedEvents = buildExpectedEvents(commands, ChangeStreamWatchMode.kCollection);
-        const startTime = getCurrentClusterTime(st.s);
+        // Wait for cluster time on the config server to advance to a point so that a change
+        // stream opened with startAtOperationTime = startTime is not considered a future
+        // cluster time.
+        const startTime = waitForClusterTime(st.s.getDB("admin"), st);
+
+        // Open a change stream on the rename target collection BEFORE running the writer to
+        // observe v2 targeter retargeting from the DB primary to the non-primary shard.
+        const targetColl = `${testColl}_renamed`; // matches RenameToNonExistentSameDbCommand
+        const comment = "rename_target_retargeting";
+        const csTest = new ChangeStreamTest(st.s.getDB(testDb));
+        const targetCursor = csTest.startWatchingChanges({
+            pipeline: [{$changeStream: {version: "v2", startAtOperationTime: startTime}}],
+            collection: targetColl,
+            aggregateOptions: {comment, cursor: {batchSize: 1}},
+        });
+
+        // Initial placement: the target collection does not yet exist, but the DB is present
+        // with primary on shard0. The v2 targeter falls back to the DB primary, so a single
+        // cursor is opened on shard0 and no config-server placement watcher is needed.
+        assertOpenCursors(
+            st,
+            [shards[0]._id],
+            /*expectedConfigCursor=*/ false,
+            cursorCommentFilter(comment),
+        );
 
         // Execute commands via Writer.
         const writerName = "writer_rename_resume";
@@ -83,7 +146,7 @@ describe("$changeStream", function () {
             dbName: testDb,
             collName: testColl,
             watchMode: ChangeStreamWatchMode.kCollection,
-            readingMode: ChangeStreamReadingMode.kContinuous,
+            readingMode: ChangeStreamReadingMode.kFetchOneAndResume,
             startAtClusterTime: startTime,
             numberOfEventsToRead: expectedEvents.length,
             instanceName: readerName,
@@ -91,7 +154,61 @@ describe("$changeStream", function () {
         ChangeStreamReader.run(st.s, readerConfig);
 
         // Build VerifierContext and run SingleReaderVerificationTestCase.
-        const ctx = new VerifierContext({[readerName]: readerConfig}, {[readerName]: createMatcher(expectedEvents)});
+        const ctx = new VerifierContext(
+            {[readerName]: readerConfig},
+            {[readerName]: createMatcher(expectedEvents)},
+        );
         new SingleReaderVerificationTestCase(readerName).run(st.s, ctx);
+
+        // Wait for the writer so all events (including the trailing drop) have flushed.
+        Connector.waitForDone(st.s, writerName);
+        Writer.joinAll();
+
+        // Sanity check: with dropAfterRename: false, the rename target should still exist
+        // on shard1 after the writer finishes. If this fails, an unexpected drop happened.
+        const collsOnTargetDb = st.s.getDB(testDb).getCollectionNames();
+        assert(
+            collsOnTargetDb.includes(targetColl),
+            `Expected ${targetColl} to still exist after writer; found collections: ${tojsononeline(collsOnTargetDb)}`,
+        );
+
+        // A rename TO the watched namespace invalidates a collection-level change stream:
+        // the cursor delivers the rename event and then an immediate `invalidate`.
+        // See https://www.mongodb.com/docs/manual/reference/method/db.collection.renameCollection/
+        // Receiving the rename here also implicitly proves the targeter retargeted from
+        // shard0 to shard1.
+        csTest.assertNextChangesEqual({
+            cursor: targetCursor,
+            expectedChanges: [
+                {
+                    operationType: "rename",
+                    ns: {db: testDb, coll: testColl},
+                    to: {db: testDb, coll: targetColl},
+                },
+                {operationType: "invalidate"},
+            ],
+            expectInvalidate: true,
+        });
+
+        // Verify the v2 targeter opens a cursor on shard1 only for testColl_renamed.
+        // waitForClusterTime ensures initialization completes on the first getMore without
+        // entering the Waiting state, so no log-based assertion is needed.
+        const verifyTime = waitForClusterTime(st.s.getDB("admin"), st);
+        const verifyCursor = csTest.startWatchingChanges({
+            pipeline: [{$changeStream: {version: "v2", startAtOperationTime: verifyTime}}],
+            collection: targetColl,
+            aggregateOptions: {cursor: {batchSize: 0}},
+        });
+        csTest.assertNoChange(verifyCursor);
+        // Confirm the cursor landed on shard1 only.
+        assertOpenCursors(st, [shards[1]._id], /*expectedConfigCursor=*/ false, {
+            ns: `${testDb}.${targetColl}`,
+        });
+
+        // Clean up the lingering testColl_renamed so afterEach's dropDatabase doesn't trip
+        // on a surprise collection (the rename command no longer drops it for us).
+        new DropCollectionCommand({dbName: testDb, collName: targetColl}).execute(st.s);
+
+        csTest.cleanUp();
     });
 });

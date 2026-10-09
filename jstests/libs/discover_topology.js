@@ -1,3 +1,5 @@
+import {injectHookAppName} from "jstests/libs/hook_appname.js";
+
 // The tojson() function that is commonly used to build up assertion messages doesn't support the
 // Symbol type, so we just use unique string values instead.
 export var Topology = {
@@ -8,7 +10,8 @@ export var Topology = {
 };
 
 export var DiscoverTopology = (function () {
-    const kDefaultConnectFn = (host) => new Mongo(host, undefined, {gRPC: false});
+    const kDefaultConnectFn = (host) =>
+        new Mongo(injectHookAppName(host), undefined, {gRPC: false});
     // Nodes discovered via isMaster have a MongoRPC port and must not use gRPC.
     const kDisableGRPCConnString = (hostConn) =>
         jsTestOptions().shellGRPC ? `mongodb://${hostConn}/?grpc=false` : hostConn;
@@ -38,7 +41,8 @@ export var DiscoverTopology = (function () {
 
             if (!shardMap.hasOwnProperty("map")) {
                 throw new Error(
-                    'Expected "getShardMap" command to return an object with a "map" field: ' + tojson(shardMap),
+                    'Expected "getShardMap" command to return an object with a "map" field: ' +
+                        tojson(shardMap),
                 );
             }
 
@@ -53,7 +57,9 @@ export var DiscoverTopology = (function () {
             return shardMap.map.config;
         }
 
-        const connectFn = options.hasOwnProperty("connectFn") ? options.connectFn : kDefaultConnectFn;
+        const connectFn = options.hasOwnProperty("connectFn")
+            ? options.connectFn
+            : kDefaultConnectFn;
 
         const configsvrConn = connectFn(getConfigServerConnectionString());
         const configsvrHosts = getDataMemberConnectionStrings(configsvrConn);

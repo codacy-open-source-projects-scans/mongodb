@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/expression_context.h"
 
@@ -33,21 +7,23 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/logical_time.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
-#include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/collation/collator_factory_mock.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
+#include "mongo/transport/mock_session.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/time_support.h"
 
@@ -56,8 +32,40 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using ExpressionContextTest = ServiceContextTest;
+
+TEST_F(ExpressionContextTest, AdoptsOpCtxInstalledIFRContext) {
+    // When no IFRContext is threaded in and the opCtx already has one installed, the
+    // ExpressionContext must adopt that same instance (by identity), so a flag disabled on the
+    // operation's context is observed here and by the egress metadata hook.
+    auto opCtx = makeOperationContext();
+    auto installed = IncrementalFeatureRolloutContext::forTest({});
+    IncrementalFeatureRolloutContext::set(opCtx.get(), installed);
+
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
+                      .build();
+
+    ASSERT_EQ(expCtx->getIfrContext().get(), installed.get());
+}
+
+TEST_F(ExpressionContextTest, BindsToOpCtxPerOperationIFRContext) {
+    // When none is threaded in, the ctor sources the context from get(opCtx), binding this
+    // ExpressionContext to the single per-operation IFRContext. A flag disabled on that context
+    // (e.g. by an IFR retry) is therefore observed here and by the egress metadata hook.
+    auto opCtx = makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
+                      .build();
+
+    ASSERT(expCtx->getIfrContext());
+    ASSERT_EQ(expCtx->getIfrContext().get(),
+              IncrementalFeatureRolloutContext::get(opCtx.get()).get());
+}
 
 TEST_F(ExpressionContextTest, ExpressionContextSummonsMissingTimeValues) {
     auto opCtx = makeOperationContext();
@@ -68,7 +76,7 @@ TEST_F(ExpressionContextTest, ExpressionContextSummonsMissingTimeValues) {
         const auto expCtx =
             ExpressionContextBuilder{}
                 .opCtx(opCtx.get())
-                .ns(NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd))
+                .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
                 .runtimeConstants(LegacyRuntimeConstants{Date_t::now(), {}})
                 .build();
         // LegacyRuntimeConstants is passed to the constructor of ExpressionContext and should make
@@ -81,7 +89,7 @@ TEST_F(ExpressionContextTest, ExpressionContextSummonsMissingTimeValues) {
         auto expCtx =
             ExpressionContextBuilder{}
                 .opCtx(opCtx.get())
-                .ns(NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd))
+                .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
                 .runtimeConstants(LegacyRuntimeConstants{{}, Timestamp(1, 0)})
                 .build();
         // LegacyRuntimeConstants is passed to the constructor of ExpressionContext and should
@@ -98,7 +106,7 @@ TEST_F(ExpressionContextTest, ParametersCanContainExpressionsWhichAreFolded) {
     const auto expCtx =
         ExpressionContextBuilder{}
             .opCtx(opCtx.get())
-            .ns(NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd))
+            .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
             .letParameters(BSON("atan2" << BSON("$atan2" << BSON_ARRAY(0 << 1))))
             .build();
     ASSERT_EQUALS(
@@ -111,7 +119,7 @@ TEST_F(ExpressionContextTest, ParametersCanReferToAlreadyDefinedParameters) {
     const auto expCtx =
         mongo::ExpressionContextBuilder{}
             .opCtx(opCtx.get())
-            .ns(mongo::NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd))
+            .ns(mongo::NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
             .letParameters(BSON("a" << 12 << "b"
                                     << "$$a"
                                     << "c"
@@ -137,12 +145,12 @@ TEST_F(ExpressionContextTest, ParametersCanOverwriteInLeftToRightOrder) {
 TEST_F(ExpressionContextTest, ParametersCauseGracefulFailuresIfNonConstant) {
     auto opCtx = makeOperationContext();
     ASSERT_THROWS_CODE(
-        static_cast<void>(mongo::ExpressionContextBuilder{}
-                              .opCtx(opCtx.get())
-                              .ns(mongo::NamespaceString::createNamespaceString_forTest(
-                                  "test"_sd, "namespace"_sd))
-                              .letParameters(BSON("a" << "$b"))
-                              .build()),
+        static_cast<void>(
+            mongo::ExpressionContextBuilder{}
+                .opCtx(opCtx.get())
+                .ns(mongo::NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
+                .letParameters(BSON("a" << "$b"))
+                .build()),
         mongo::DBException,
         4890500);
 }
@@ -150,12 +158,12 @@ TEST_F(ExpressionContextTest, ParametersCauseGracefulFailuresIfNonConstant) {
 TEST_F(ExpressionContextTest, ParametersCauseGracefulFailuresIfUppercase) {
     auto opCtx = makeOperationContext();
     ASSERT_THROWS_CODE(
-        static_cast<void>(mongo::ExpressionContextBuilder{}
-                              .opCtx(opCtx.get())
-                              .ns(mongo::NamespaceString::createNamespaceString_forTest(
-                                  "test"_sd, "namespace"_sd))
-                              .letParameters(BSON("A" << 12))
-                              .build()),
+        static_cast<void>(
+            mongo::ExpressionContextBuilder{}
+                .opCtx(opCtx.get())
+                .ns(mongo::NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
+                .letParameters(BSON("A" << 12))
+                .build()),
         mongo::DBException,
         ErrorCodes::FailedToParse);
 }
@@ -194,7 +202,7 @@ TEST_F(ExpressionContextTest, CanBuildWithoutView) {
     auto expCtxWithoutView =
         mongo::ExpressionContextBuilder{}
             .opCtx(opCtx.get())
-            .ns(NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd))
+            .ns(NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv))
             .build();
 
     ASSERT_FALSE(expCtxWithoutView->getView().has_value());
@@ -203,11 +211,12 @@ TEST_F(ExpressionContextTest, CanBuildWithoutView) {
 TEST_F(ExpressionContextTest, CanBuildWithView) {
     auto opCtx = makeOperationContext();
 
-    auto viewNss = NamespaceString::createNamespaceString_forTest("test"_sd, "view"_sd);
-    auto collNss = NamespaceString::createNamespaceString_forTest("test"_sd, "coll"_sd);
+    auto viewNss = NamespaceString::createNamespaceString_forTest("test"sv, "view"sv);
+    auto collNss = NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv);
     std::vector<BSONObj> viewPipeline = {BSON("$project" << BSON("_id" << 0))};
 
-    auto view = boost::make_optional(ViewInfo{viewNss, collNss, viewPipeline});
+    auto view =
+        boost::make_optional(ResolvedNamespace::makeForView(viewNss, collNss, viewPipeline));
     auto expCtxWithView = mongo::ExpressionContextBuilder{}
                               .opCtx(opCtx.get())
                               .ns(collNss)
@@ -216,10 +225,10 @@ TEST_F(ExpressionContextTest, CanBuildWithView) {
 
     // expCtx namespace isn't affected by the view namespace.
     ASSERT_EQUALS(expCtxWithView->getNamespaceString(),
-                  NamespaceString::createNamespaceString_forTest("test"_sd, "coll"_sd));
+                  NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv));
 
     ASSERT_TRUE(expCtxWithView->getView().has_value());
-    ASSERT_EQUALS(expCtxWithView->getView()->getViewName(), viewNss);
+    ASSERT_EQUALS(expCtxWithView->getView()->getNamespace(), viewNss);
 
     auto expCtxViewPipe = expCtxWithView->getView()->getViewPipeline();
     const auto& expCtxViewPipeStages = expCtxViewPipe.getStages();
@@ -231,18 +240,19 @@ TEST_F(ExpressionContextTest, CanBuildWithView) {
 TEST_F(ExpressionContextTest, CopyWithDoesNotInitializeViewByDefault) {
     auto opCtx = makeOperationContext();
 
-    auto viewNss = NamespaceString::createNamespaceString_forTest("test"_sd, "view"_sd);
-    auto coll1Nss = NamespaceString::createNamespaceString_forTest("test"_sd, "coll1"_sd);
+    auto viewNss = NamespaceString::createNamespaceString_forTest("test"sv, "view"sv);
+    auto coll1Nss = NamespaceString::createNamespaceString_forTest("test"sv, "coll1"sv);
     std::vector<BSONObj> viewPipeline = {BSON("$project" << BSON("_id" << 0))};
 
-    auto view = boost::make_optional(ViewInfo{viewNss, coll1Nss, viewPipeline});
+    auto view =
+        boost::make_optional(ResolvedNamespace::makeForView(viewNss, coll1Nss, viewPipeline));
     auto expCtxOriginal = mongo::ExpressionContextBuilder{}
                               .opCtx(opCtx.get())
                               .ns(coll1Nss)
                               .view(std::move(view))
                               .build();
 
-    auto namespaceCopy = NamespaceString::createNamespaceString_forTest("test"_sd, "coll2"_sd);
+    auto namespaceCopy = NamespaceString::createNamespaceString_forTest("test"sv, "coll2"sv);
     auto expCtxCopy = makeCopyFromExpressionContext(expCtxOriginal, namespaceCopy);
 
     // expCtxCopy doesn't have a view initialized.
@@ -250,7 +260,7 @@ TEST_F(ExpressionContextTest, CopyWithDoesNotInitializeViewByDefault) {
 
     // expCtxOriginal isn't affected by the copy.
     ASSERT_TRUE(expCtxOriginal->getView().has_value());
-    ASSERT_EQUALS(expCtxOriginal->getView()->getViewName(), viewNss);
+    ASSERT_EQUALS(expCtxOriginal->getView()->getNamespace(), viewNss);
 
     auto expCtxOriginalViewPipe = expCtxOriginal->getView()->getViewPipeline();
     const auto& expCtxOriginalViewPipeStages = expCtxOriginalViewPipe.getStages();
@@ -262,25 +272,27 @@ TEST_F(ExpressionContextTest, CopyWithDoesNotInitializeViewByDefault) {
 TEST_F(ExpressionContextTest, CopyWithInitializesViewWhenSpecified) {
     auto opCtx = makeOperationContext();
 
-    auto viewNss = NamespaceString::createNamespaceString_forTest("test"_sd, "view"_sd);
-    auto coll1Nss = NamespaceString::createNamespaceString_forTest("test"_sd, "coll1"_sd);
+    auto viewNss = NamespaceString::createNamespaceString_forTest("test"sv, "view"sv);
+    auto coll1Nss = NamespaceString::createNamespaceString_forTest("test"sv, "coll1"sv);
     std::vector<BSONObj> viewPipeline = {BSON("$project" << BSON("_id" << 0))};
 
-    auto view = boost::make_optional(ViewInfo{viewNss, coll1Nss, viewPipeline});
+    auto view =
+        boost::make_optional(ResolvedNamespace::makeForView(viewNss, coll1Nss, viewPipeline));
     auto expCtxOriginal = mongo::ExpressionContextBuilder{}
                               .opCtx(opCtx.get())
                               .ns(coll1Nss)
                               .view(std::move(view))
                               .build();
 
-    auto namespaceCopy = NamespaceString::createNamespaceString_forTest("test"_sd, "coll2"_sd);
-    auto viewInfo = boost::make_optional(ViewInfo(viewNss, coll1Nss, viewPipeline));
+    auto namespaceCopy = NamespaceString::createNamespaceString_forTest("test"sv, "coll2"sv);
+    auto viewForCopy =
+        boost::make_optional(ResolvedNamespace::makeForView(viewNss, coll1Nss, viewPipeline));
     auto expCtxCopy = makeCopyFromExpressionContext(
-        expCtxOriginal, namespaceCopy, boost::none, boost::none, std::move(viewInfo));
+        expCtxOriginal, namespaceCopy, boost::none, boost::none, std::move(viewForCopy));
 
     // expCtxCopy has a view.
     ASSERT_TRUE(expCtxCopy->getView().has_value());
-    ASSERT_EQUALS(expCtxCopy->getView()->getViewName(), viewNss);
+    ASSERT_EQUALS(expCtxCopy->getView()->getNamespace(), viewNss);
 
     auto expCtxCopyViewPipe = expCtxCopy->getView()->getViewPipeline();
     const auto& expCtxCopyViewPipeStages = expCtxCopyViewPipe.getStages();
@@ -368,125 +380,315 @@ TEST_F(ExpressionContextTest, IfrContextIsSharedWithSubPipeline) {
     auto ifrContext = std::make_shared<IncrementalFeatureRolloutContext>();
     auto expCtx = ExpressionContextBuilder{}
                       .opCtx(opCtx.get())
-                      .ns(NamespaceString::createNamespaceString_forTest("test"_sd, "coll"_sd))
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
                       .ifrContext(ifrContext)
                       .build();
 
     ASSERT_EQ(ifrContext.get(), expCtx->getIfrContext().get());
 
     auto subExpCtx = makeCopyForSubPipelineFromExpressionContext(
-        expCtx, NamespaceString::createNamespaceString_forTest("test"_sd, "subColl"_sd));
+        expCtx, NamespaceString::createNamespaceString_forTest("test"sv, "subColl"sv));
 
     // Verify that 'expCtx' and 'subExpCtx' share the same IFRContext.
     ASSERT_EQ(ifrContext.get(), subExpCtx->getIfrContext().get());
     ASSERT_EQ(expCtx->getIfrContext().get(), subExpCtx->getIfrContext().get());
 }
 
-// Tests for ExpressionContextBuilder::fromRequest(FindCommandRequest) IDHACK eligibility.
-// The key behavior: when there is no explicit request collation, isIdHackQuery is set based
-// purely on query structure, regardless of whether the collection has a default collator.
-// Before SERVER-123100 this was only done when the collection had no collator, which was a bug
-// because an inherited (no-request) collation always matches the collection's default.
-
-TEST_F(ExpressionContextTest, FindOnIdWithNoCollationSetsIsIdHackQuery) {
+TEST_F(ExpressionContextTest, AllowPartialResultsIsNotInheritedBySubPipeline) {
     auto opCtx = makeOperationContext();
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .allowPartialResults(true)
+                      .build();
 
-    auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, nullptr).build();
-    ASSERT_TRUE(expCtx->isIdHackQuery());
+    auto subExpCtx = makeCopyForSubPipelineFromExpressionContext(
+        expCtx, NamespaceString::createNamespaceString_forTest("test"sv, "subColl"sv));
+
+    ASSERT_TRUE(expCtx->getAllowPartialResults());
+    ASSERT_FALSE(subExpCtx->getAllowPartialResults());
 }
 
-TEST_F(ExpressionContextTest, FindOnIdWithCollectionCollatorSetsIsIdHackQuery) {
-    // Regression test for SERVER-123100: before this fix, a find on _id against a collection with
-    // a custom collator (but no explicit request collation) would not set isIdHackQuery=true,
-    // causing the IDHACK/express fast path to be skipped.
-    auto opCtx = makeOperationContext();
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
+// The expression fallback tracker rolls up into the per-query OperationMemoryUsageTracker (so the
+// per-query limit is enforced) only when both memory-tracking feature flags are enabled.
+TEST_F(ExpressionContextTest,
+       ExpressionFallbackTrackerRollsUpOnlyWhenBothMemoryTrackingFlagsEnabled) {
+    struct Case {
+        bool queryTracking;
+        bool expressionTracking;
+        bool expectPerQueryLimitEnforced;
+    };
+    const Case cases[] = {
+        {true, true, true},    // Both on: fallback is a child of the operation tracker.
+        {true, false, false},  // Guarded specifically by the expression-tracking flag check.
+        {false, true, false},
+        {false, false, false},
+    };
 
-    CollatorInterfaceMock collectionCollator(CollatorInterfaceMock::MockType::kReverseString);
-    auto expCtx =
-        ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, &collectionCollator).build();
-    ASSERT_TRUE(expCtx->isIdHackQuery());
+    for (const auto& c : cases) {
+        unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking",
+                                                        c.queryTracking};
+        unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking",
+                                                       c.expressionTracking};
+        // Generous per-expression cap, tiny per-query limit: only a rolled-up fallback can exceed
+        // the per-query limit, since it is checked via the operation-tracker base chain.
+        unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                               10 * 1024 * 1024};
+        unittest::ServerParameterGuard perQueryLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                     4};
+
+        auto opCtx = makeOperationContext();
+        auto expCtx = ExpressionContextBuilder{}
+                          .opCtx(opCtx.get())
+                          .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                          .build();
+
+        auto& tracker = expCtx->getExpressionFallbackTracker();
+        tracker.add(100);  // Exceeds the per-query limit but stays under the per-expression cap.
+        ASSERT_EQ(!tracker.withinMemoryLimit(opCtx.get()), c.expectPerQueryLimitEnforced)
+            << "queryTracking=" << c.queryTracking
+            << " expressionTracking=" << c.expressionTracking;
+        tracker.add(-100);  // Release so the tracker is left balanced.
+    }
 }
 
-TEST_F(ExpressionContextTest, FindOnNonIdFieldDoesNotSetIsIdHackQuery) {
-    auto opCtx = makeOperationContext();
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{a: 1}"));
+// When both memory-tracking flags are enabled and an OperationContext is available, the fallback
+// tracker is bounded solely by the per-query limit.
+TEST_F(ExpressionContextTest, ExpressionFallbackTrackerIgnoresPerExpressionCapWhenRolledUp) {
+    unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking", true};
+    unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking", true};
+    // Tiny per-expression cap, generous per-query limit: if the cap were still enforced on the
+    // rolled-up path the tracker would report over-limit; it must not.
+    unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes", 4};
+    unittest::ServerParameterGuard perQueryLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                 10 * 1024 * 1024};
 
-    CollatorInterfaceMock collectionCollator(CollatorInterfaceMock::MockType::kReverseString);
-    auto expCtx =
-        ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, &collectionCollator).build();
-    ASSERT_FALSE(expCtx->isIdHackQuery());
+    auto opCtx = makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .build();
+
+    auto& tracker = expCtx->getExpressionFallbackTracker();
+    tracker.add(100);  // Far exceeds the per-expression cap but stays under the per-query limit.
+    ASSERT_TRUE(tracker.withinMemoryLimit(opCtx.get()));
+    tracker.add(-100);  // Release so the tracker is left balanced.
 }
 
-TEST_F(ExpressionContextTest, FindOnIdWithMismatchedCollationDoesNotSetIsIdHackQuery) {
-    // When the request carries an explicit collation that does not match the collection's default
-    // collator, the collatorsMatch() check returns false and isIdHackQuery must remain false.
-    // This exercises the 'else if (haveMatchingCollators)' branch in fromRequest.
+// Changing the OperationContext must drop the cached fallback tracker, so it never retains a base
+// pointer into a previous operation's (possibly destroyed) tracker.
+TEST_F(ExpressionContextTest, ExpressionFallbackTrackerRebuiltWhenOperationContextChanges) {
+    unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking", true};
+    unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking", true};
+    unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes", 4};
+    unittest::ServerParameterGuard perQueryLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                 10 * 1024 * 1024};
+
     auto opCtx = makeOperationContext();
-    CollatorFactoryInterface::set(opCtx->getServiceContext(),
-                                  std::make_unique<CollatorFactoryMock>());
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .build();
 
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
-    // Any non-simple spec; CollatorFactoryMock always parses non-simple specs as kReverseString.
-    request.setCollation(BSON("locale" << "mock_always_equal"));
+    // With an OperationContext, the fallback rolls up to the operation tracker and is bounded by
+    // the generous per-query limit, so it ignores the tiny per-expression cap.
+    {
+        auto& tracker = expCtx->getExpressionFallbackTracker();
+        tracker.add(100);
+        ASSERT_TRUE(tracker.withinMemoryLimit(opCtx.get()));
+        tracker.add(-100);  // Release so the operation tracker is left balanced.
+    }
 
-    // Collection collator is kAlwaysEqual — its spec differs from kReverseString, so
-    // collatorsMatch returns false and isIdHackQuery must not be set.
-    CollatorInterfaceMock collectionCollator(CollatorInterfaceMock::MockType::kAlwaysEqual);
-    auto expCtx =
-        ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, &collectionCollator).build();
-    ASSERT_FALSE(expCtx->isIdHackQuery());
+    // Detaching the OperationContext drops the cached fallback; it is rebuilt as a standalone
+    // tracker bounded by the per-expression cap. If the stale cached tracker were returned instead,
+    // it would still be bounded by the generous per-query limit and stay within limit.
+    expCtx->setOperationContext(nullptr);
+
+    auto& rebuilt = expCtx->getExpressionFallbackTracker();
+    rebuilt.add(100);
+    ASSERT_FALSE(rebuilt.withinMemoryLimit(opCtx.get()));  // 100 > per-expression cap of 4.
+    rebuilt.add(-100);
 }
 
-TEST_F(ExpressionContextTest, FindOnIdWithMatchingExplicitCollationSetsIsIdHackQuery) {
-    // When the request carries an explicit collation that matches the collection's default
-    // collator, haveMatchingCollators is true and isIdHackQuery must be set based on the filter.
-    // CollatorFactoryMock always parses any non-simple spec as kReverseString, so both the
-    // request collator and the collection collator are kReverseString and their specs match.
-    auto opCtx = makeOperationContext();
-    CollatorFactoryInterface::set(opCtx->getServiceContext(),
-                                  std::make_unique<CollatorFactoryMock>());
+// A context that opts out of operation-wide memory tracking gets a standalone fallback tracker
+// even when an OperationContext is available and both memory-tracking flags are enabled: the
+// per-expression cap is still enforced, but nothing counts toward the per-operation limit.
+TEST_F(ExpressionContextTest,
+       ExpressionFallbackTrackerIsStandaloneWhenOperationMemoryTrackingExcluded) {
+    unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking", true};
+    unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking", true};
 
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
-    request.setCollation(BSON("locale" << "mock_reverse"));
+    // Tiny per-operation limit, generous per-expression cap: an opted-out fallback must not
+    // enforce the per-operation limit.
+    {
+        unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                               10 * 1024 * 1024};
+        unittest::ServerParameterGuard perOpLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                  4};
 
-    CollatorInterfaceMock collectionCollator(CollatorInterfaceMock::MockType::kReverseString);
-    auto expCtx =
-        ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, &collectionCollator).build();
-    ASSERT_TRUE(expCtx->isIdHackQuery());
+        auto opCtx = makeOperationContext();
+        auto expCtx = ExpressionContextBuilder{}
+                          .opCtx(opCtx.get())
+                          .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                          .excludeOperationMemoryTracking(true)
+                          .build();
+
+        auto& tracker = expCtx->getExpressionFallbackTracker();
+        tracker.add(100);  // Exceeds the per-operation limit; a rolled-up tracker would fail.
+        ASSERT_TRUE(tracker.withinMemoryLimit(opCtx.get()));
+        tracker.add(-100);
+    }
+
+    // Tiny per-expression cap, generous per-operation limit: the standalone per-expression cap
+    // must still be enforced.
+    {
+        unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                               4};
+        unittest::ServerParameterGuard perOpLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                  10 * 1024 * 1024};
+
+        auto opCtx = makeOperationContext();
+        auto expCtx = ExpressionContextBuilder{}
+                          .opCtx(opCtx.get())
+                          .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                          .excludeOperationMemoryTracking(true)
+                          .build();
+
+        auto& tracker = expCtx->getExpressionFallbackTracker();
+        tracker.add(100);  // 100 > per-expression cap of 4.
+        ASSERT_FALSE(tracker.withinMemoryLimit(opCtx.get()));
+        tracker.add(-100);
+    }
 }
 
-TEST_F(ExpressionContextTest, FindOnIdWithHintDoesNotSetIsIdHackQuery) {
-    // A hint disqualifies IDHACK: isIdHackEligibleQueryWithoutCollator() returns false whenever
-    // the hint is non-empty, regardless of the filter shape.
+TEST_F(ExpressionContextTest, ExcludeOperationMemoryTrackingIsPropagatedToCopies) {
     auto opCtx = makeOperationContext();
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
-    request.setHint(fromjson("{_id: 1}"));
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .excludeOperationMemoryTracking(true)
+                      .build();
 
-    auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, nullptr).build();
-    ASSERT_FALSE(expCtx->isIdHackQuery());
+    auto copy = makeCopyFromExpressionContext(
+        expCtx, NamespaceString::createNamespaceString_forTest("test"sv, "other"sv));
+    ASSERT_TRUE(copy->getExcludeOperationMemoryTracking());
 }
 
-TEST_F(ExpressionContextTest, SetIsIdHackQueryIsIdempotent) {
-    // setIsIdHackQuery(true) on an already-true flag must be a no-op, not a tassert failure.
-    // This exercises the monotone-upgrade invariant: false→true is allowed, true→true is
-    // also allowed, and true→false would fire the tassert.
+TEST_F(ExpressionContextTest, isReparsingRepresentativeQueryShapeIsPropagatedToCopies) {
+    // Sub-pipeline contexts for $lookup, $unionWith and $graphLookup are all built from
+    // makeCopyFromExpressionContext, so without this the flag would be lost at the first
+    // sub-pipeline boundary of a re-parsed query shape.
     auto opCtx = makeOperationContext();
-    auto request = FindCommandRequest(NamespaceString::createNamespaceString_forTest("test.coll"));
-    request.setFilter(fromjson("{_id: 1}"));
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .isReparsingRepresentativeQueryShape(true)
+                      .build();
 
-    auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), request, nullptr).build();
-    ASSERT_TRUE(expCtx->isIdHackQuery());
-    // Calling setIsIdHackQuery(true) again must not throw or tassert.
-    expCtx->setIsIdHackQuery(true);
-    ASSERT_TRUE(expCtx->isIdHackQuery());
+    auto copy = makeCopyFromExpressionContext(
+        expCtx, NamespaceString::createNamespaceString_forTest("test"sv, "other"sv));
+    ASSERT_TRUE(copy->getIsReparsingRepresentativeQueryShape());
+}
+
+TEST_F(ExpressionContextTest, isReparsingRepresentativeQueryShapeDefaultsToFalse) {
+    auto opCtx = makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .build();
+    ASSERT_FALSE(expCtx->getIsReparsingRepresentativeQueryShape());
+}
+
+// An internal-only expression must still be rejected when an external client sends it, but must
+// parse when the server re-parses a stored query shape that contains it. Otherwise reading
+// $queryStats as an external client fails on any entry recorded for an internal client. See
+// SERVER-130571.
+class InternalOnlyExpressionParseTest : public ExpressionContextTest {
+protected:
+    static constexpr auto kInternalOnlyExpression =
+        "{$_internalIndexKey: {doc: '$foo', spec: {key: {a: 1}, name: 'bar'}}}";
+
+    // A client with a transport session and no internal tag is an external (user) client. Note that
+    // the default unittest client has no session at all, which counts as internal.
+    ServiceContext::UniqueClient makeExternalClient() {
+        return getServiceContext()->getService()->makeClient(
+            "external", transport::MockSession::create(/*transportLayer=*/nullptr));
+    }
+};
+
+TEST_F(InternalOnlyExpressionParseTest, RejectedForExternalClient) {
+    auto client = makeExternalClient();
+    auto opCtx = client->makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .build();
+
+    ASSERT_THROWS_CODE(Expression::parseExpression(expCtx.get(),
+                                                   fromjson(kInternalOnlyExpression),
+                                                   expCtx->variablesParseState),
+                       AssertionException,
+                       5491300);
+}
+
+TEST_F(InternalOnlyExpressionParseTest, AllowedForExternalClientWhenParsingQueryShape) {
+    auto client = makeExternalClient();
+    auto opCtx = client->makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .isReparsingRepresentativeQueryShape(true)
+                      .build();
+
+    ASSERT(Expression::parseExpression(
+        expCtx.get(), fromjson(kInternalOnlyExpression), expCtx->variablesParseState));
+}
+
+TEST_F(
+    ExpressionContextTest,
+    ExpressionFallbackTrackerStandaloneWhenExpressionFallbackExcludedFromOperationMemoryTracking) {
+    unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking", true};
+    unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking", true};
+    // Tiny per-expression cap, generous per-query limit. If the fallback rolled up to the operation
+    // tracker it would be bounded by the generous per-query limit and stay within limit; a
+    // standalone fallback is bounded by the tiny per-expression cap and exceeds it.
+    unittest::ServerParameterGuard exprCap{"internalQueryMaxSingleExpressionMemoryUsageBytes", 4};
+    unittest::ServerParameterGuard perQueryLimit{"internalQueryMaxMemoryUsageBytesPerOperation",
+                                                 10 * 1024 * 1024};
+
+    auto opCtx = makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .excludeExpressionFallbackFromOperationMemoryTracking(true)
+                      .build();
+
+    auto& tracker = expCtx->getExpressionFallbackTracker();
+    tracker.add(100);  // Exceeds the per-expression cap; only a rolled-up tracker would be within.
+    ASSERT_FALSE(tracker.withinMemoryLimit(opCtx.get()));
+    tracker.add(-100);
+}
+
+TEST_F(ExpressionContextTest, StageMemoryTrackerUnaffectedByExpressionFallbackExclusion) {
+    unittest::ServerParameterGuard queryMemTracking{"featureFlagQueryMemoryTracking", true};
+    unittest::ServerParameterGuard exprMemTracking{"featureFlagExpressionMemoryTracking", true};
+    // Tiny per-query limit; the stage tracker's own cap is left at its generous default. If the
+    // stage tracker rolls up (as it must), it is bounded by the tiny per-query limit and exceeds
+    // it.
+    unittest::ServerParameterGuard perQueryLimit{"internalQueryMaxMemoryUsageBytesPerOperation", 4};
+
+    auto opCtx = makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(NamespaceString::createNamespaceString_forTest("test"sv, "coll"sv))
+                      .excludeExpressionFallbackFromOperationMemoryTracking(true)
+                      .build();
+
+    auto stageTracker =
+        OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForStage(*expCtx);
+    stageTracker.add(100);  // Exceeds the per-query limit via the operation-tracker base chain.
+    ASSERT_FALSE(stageTracker.withinMemoryLimit(opCtx.get()));
+    stageTracker.add(-100);
 }
 
 }  // namespace

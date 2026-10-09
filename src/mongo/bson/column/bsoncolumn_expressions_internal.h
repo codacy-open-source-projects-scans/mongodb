@@ -1,37 +1,14 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
+
 
 namespace mongo::bsoncolumn::internal {
 
@@ -58,87 +35,97 @@ public:
 
     // Append functions, we know our type and can expensive 3way generic comparisons.
     void append(bool val) {
+        const size_t idx = _counter++;
         if (Compare{}(val, CMaterializer::template get<bool>(_working))) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(int32_t val) {
+        const size_t idx = _counter++;
         if (Compare{}(val, CMaterializer::template get<int32_t>(_working))) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(int64_t val) {
+        const size_t idx = _counter++;
         if (Compare{}(val, CMaterializer::template get<int64_t>(_working))) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(Decimal128 val) {
+        const size_t idx = _counter++;
         // TODO SERVER-90961: Do not use 3way compare
         if (Compare{}(compareDecimals(val, CMaterializer::template get<Decimal128>(_working)), 0)) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(double val) {
+        const size_t idx = _counter++;
         // TODO SERVER-90961: Do not use 3way compare
         if (Compare{}(compareDoubles(val, CMaterializer::template get<double>(_working)), 0)) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(Timestamp val) {
+        const size_t idx = _counter++;
         if (Compare{}(val, CMaterializer::template get<Timestamp>(_working))) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(Date_t val) {
+        const size_t idx = _counter++;
         if (Compare{}(val, CMaterializer::template get<Date_t>(_working))) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(OID val) {
+        const size_t idx = _counter++;
         if (Compare{}(memcmp(val.view().view(),
                              CMaterializer::template get<OID>(_working).view().view(),
                              OID::kOIDSize),
                       0)) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
-    void append(StringData val) {
+    void append(std::string_view val) {
+        const size_t idx = _counter++;
         if (_comparator) {
-            if (Compare{}(
-                    _comparator->compare(val, CMaterializer::template get<StringData>(_working)),
-                    0)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+            if (Compare{}(_comparator->compare(
+                              val, CMaterializer::template get<std::string_view>(_working)),
+                          0)) {
+                _setCandidate(val, idx);
             }
         } else {
             // TODO SERVER-90961: Do not use 3way compare
             if (Compare{}(_compareElementStringValues(
-                              val, CMaterializer::template get<StringData>(_working)),
+                              val, CMaterializer::template get<std::string_view>(_working)),
                           0)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+                _setCandidate(val, idx);
             }
         }
     }
 
     void append(const BSONBinData& val) {
+        const size_t idx = _counter++;
         BSONBinData min = CMaterializer::template get<BSONBinData>(_working);
         if (val.length != min.length) {
             if (Compare{}(val.length, min.length)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+                _setCandidate(val, idx);
             }
             return;
         }
 
         if (val.type != min.type) {
             if (Compare{}(val.type, min.type)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+                _setCandidate(val, idx);
             }
             return;
         }
@@ -146,23 +133,24 @@ public:
         // Include type byte in comparison
         if (Compare{}(memcmp((const std::byte*)val.data, (const std::byte*)min.data, val.length),
                       0)) {
-            _working = CMaterializer::materialize(*_allocator, val);
+            _setCandidate(val, idx);
         }
     }
 
     void append(const BSONCode& val) {
+        const size_t idx = _counter++;
         if (_comparator) {
             if (Compare{}(_comparator->compare(
                               val.code, CMaterializer::template get<BSONCode>(_working).code),
                           0)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+                _setCandidate(val, idx);
             }
         } else {
             // TODO SERVER-90961: Do not use 3way compare
             if (Compare{}(_compareElementStringValues(
                               val.code, CMaterializer::template get<BSONCode>(_working).code),
                           0)) {
-                _working = CMaterializer::materialize(*_allocator, val);
+                _setCandidate(val, idx);
             }
         }
     }
@@ -171,13 +159,16 @@ public:
     // a type change.
     template <typename T>
     void append(const BSONElement& val) {
+        // An uncompressed literal is a real (non-missing) value, so record that the last value is
+        // not missing. This governs whether following simple8b blocks are treated as skips.
+        _lastMissing = false;
         // This if-else block handles when there were no type change.
         if constexpr (std::is_same_v<T, double>) {
             if (_type == BSONType::numberDouble) {
                 append(BSONElementValue(val.value()).Double());
                 return;
             }
-        } else if constexpr (std::is_same_v<T, StringData>) {
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
             if (_type == BSONType::string) {
                 append(BSONElementValue(val.value()).String());
                 return;
@@ -261,23 +252,38 @@ public:
 
         _storeValue();
         _working = CMaterializer::template materialize<T>(*_allocator, val);
+        _workingIndex = _counter++;
         _type = val.type();
     }
 
     void appendPreallocated(const BSONElement& val) {
         _storeValue();
         _working = CMaterializer::materializePreallocated(val);
+        _workingIndex = _counter++;
         _type = val.type();
+        _lastMissing = false;
     }
 
-    // We do not need to keep track of missing or last as that will not affect comparison
-    void appendMissing() {}
-    void appendLast() {}
+    // Missing and repeat-last values do not affect comparison, but they count
+    // toward the logical row index for correct index() reporting.
+    //
+    // We must still track whether the last value is missing (mirroring the materializing
+    // collector's isLastMissing()) so that decompressAllLiteral() takes the same branch and applies
+    // the same validation. appendMissing() intentionally does not update _lastMissing, matching the
+    // materializing collector where it does not update _last.
+    void appendMissing() {
+        ++_counter;
+    }
+    void appendLast() {
+        ++_counter;
+    }
     bool isLastMissing() {
-        return false;
+        return _lastMissing;
     }
     template <typename T>
-    void setLast(const BSONElement& val) {}
+    void setLast(const BSONElement& val) {
+        _lastMissing = val.eoo();
+    }
 
     // Position info is not supported
     void appendPositionInfo(int32_t n) {}
@@ -290,13 +296,24 @@ public:
         return _value;
     }
 
+    size_t index() const {
+        return _index;
+    }
+
 private:
+    template <typename V>
+    void _setCandidate(const V& val, size_t idx) {
+        _working = CMaterializer::materialize(*_allocator, val);
+        _workingIndex = idx;
+    }
+
     void _storeValue() {
         if (CMaterializer::isMissing(_working))
             return;
 
         if (CMaterializer::isMissing(_value)) {
             _value = _working;
+            _index = _workingIndex;
             return;
         }
 
@@ -304,13 +321,15 @@ private:
         int minCanonical = CMaterializer::canonicalType(_value);
         if (Compare{}(appendedCanonical, minCanonical)) {
             _value = _working;
+            _index = _workingIndex;
         } else if (appendedCanonical == minCanonical &&
                    Compare{}(CMaterializer::compare(_working, _value, _comparator), 0)) {
             _value = _working;
+            _index = _workingIndex;
         }
     }
 
-    int _compareElementStringValues(StringData lhs, StringData rhs) {
+    int _compareElementStringValues(std::string_view lhs, std::string_view rhs) {
         // we use memcmp as we allow zeros in UTF8 strings
         int common = std::min(lhs.size(), rhs.size());
         int res = memcmp(lhs.data(), rhs.data(), common);
@@ -325,6 +344,12 @@ private:
     Element _working = _value;
     BSONType _type = BSONType::eoo;
     const StringDataComparator* _comparator;
+    size_t _counter{0};
+    size_t _workingIndex{0};
+    size_t _index{0};
+    // Tracks whether the last appended value was missing, mirroring the materializing collector's
+    // _last. Initialized to true since no value has been appended yet.
+    bool _lastMissing = true;
 };
 
 /*
@@ -436,28 +461,32 @@ public:
         }
     }
 
-    void append(StringData val) {
+    void append(std::string_view val) {
         if (_comparator) {
             if (MinCompare<int>{}(
-                    _comparator->compare(val, CMaterializer::template get<StringData>(_minForType)),
+                    _comparator->compare(
+                        val, CMaterializer::template get<std::string_view>(_minForType)),
                     0)) {
                 _minForType = CMaterializer::materialize(*_allocator, val);
             }
             if (MaxCompare<int>{}(
-                    _comparator->compare(val, CMaterializer::template get<StringData>(_maxForType)),
+                    _comparator->compare(
+                        val, CMaterializer::template get<std::string_view>(_maxForType)),
                     0)) {
                 _maxForType = CMaterializer::materialize(*_allocator, val);
             }
         } else {
             // TODO SERVER-90961: Do not use 3way compare
-            if (MinCompare<int>{}(_compareElementStringValues(
-                                      val, CMaterializer::template get<StringData>(_minForType)),
-                                  0)) {
+            if (MinCompare<int>{}(
+                    _compareElementStringValues(
+                        val, CMaterializer::template get<std::string_view>(_minForType)),
+                    0)) {
                 _minForType = CMaterializer::materialize(*_allocator, val);
             }
-            if (MaxCompare<int>{}(_compareElementStringValues(
-                                      val, CMaterializer::template get<StringData>(_maxForType)),
-                                  0)) {
+            if (MaxCompare<int>{}(
+                    _compareElementStringValues(
+                        val, CMaterializer::template get<std::string_view>(_maxForType)),
+                    0)) {
                 _maxForType = CMaterializer::materialize(*_allocator, val);
             }
         }
@@ -545,12 +574,15 @@ public:
 
     template <typename T>
     void append(const BSONElement& val) {
+        // An uncompressed literal is a real (non-missing) value, so record that the last value is
+        // not missing. This governs whether following simple8b blocks are treated as skips.
+        _lastMissing = false;
         if constexpr (std::is_same_v<T, double>) {
             if (_type == BSONType::numberDouble) {
                 append(BSONElementValue(val.value()).Double());
                 return;
             }
-        } else if constexpr (std::is_same_v<T, StringData>) {
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
             if (_type == BSONType::string) {
                 append(BSONElementValue(val.value()).String());
                 return;
@@ -684,6 +716,7 @@ public:
         _minForType = CMaterializer::materializePreallocated(val);
         _maxForType = _minForType;
         _type = val.type();
+        _lastMissing = false;
     }
 
     // Does not update _last, should not be repeated by appendLast()
@@ -692,15 +725,20 @@ public:
     // Appends last value that was not Missing
     void appendLast() {}
 
+    // We must track whether the last value is missing (mirroring the materializing collector's
+    // isLastMissing()) so that decompressAllLiteral() takes the same branch and applies the same
+    // validation. appendMissing() intentionally does not update _lastMissing.
     bool isLastMissing() {
-        return false;
+        return _lastMissing;
     }
 
     // Sets the last value without appending anything. This should be called to update _last to be
     // the element in the reference object, and for missing top-level objects. Otherwise the append
     // methods will take care of updating _last as needed.
     template <typename T>
-    void setLast(const BSONElement& val) {}
+    void setLast(const BSONElement& val) {
+        _lastMissing = val.eoo();
+    }
 
     void appendPositionInfo(int32_t n) {}
 
@@ -713,7 +751,7 @@ public:
     }
 
 private:
-    int _compareElementStringValues(StringData lhs, StringData rhs) {
+    int _compareElementStringValues(std::string_view lhs, std::string_view rhs) {
         // we use memcmp as we allow zeros in UTF8 strings
         int common = std::min(lhs.size(), rhs.size());
         int res = memcmp(lhs.data(), rhs.data(), common);
@@ -730,6 +768,9 @@ private:
     Element _maxForType = _min;
     BSONType _type = BSONType::eoo;
     const StringDataComparator* _comparator;
+    // Tracks whether the last appended value was missing, mirroring the materializing collector's
+    // _last. Initialized to true since no value has been appended yet.
+    bool _lastMissing = true;
 };
 
 template <class CMaterializer>
@@ -904,7 +945,7 @@ typename CMaterializer::Element last(const char* buffer,
                             auto string = Simple8bTypeUtil::decodeString(last);
                             return CMaterializer{}.materialize(
                                 *allocator,
-                                StringData((const char*)string.str.data(), string.size));
+                                std::string_view((const char*)string.str.data(), string.size));
                         }
                     }
                 } break;
@@ -953,7 +994,8 @@ typename CMaterializer::Element last(const char* buffer,
                             auto string = Simple8bTypeUtil::decodeString(last);
                             return CMaterializer{}.materialize(
                                 *allocator,
-                                BSONCode(StringData((const char*)string.str.data(), string.size)));
+                                BSONCode(
+                                    std::string_view((const char*)string.str.data(), string.size)));
                         }
                     }
                 } break;
@@ -1015,25 +1057,27 @@ typename CMaterializer::Element last(const char* buffer,
 
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element min(const char* buffer,
-                                    size_t size,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator) {
+std::pair<typename CMaterializer::Element, size_t> min(
+    const char* buffer,
+    size_t size,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator) {
 
     CompareCollector<CMaterializer, std::less<>> collector(allocator, comparator);
     BSONColumnBlockBased(buffer, size).decompress(collector);
-    return collector.value();
+    return {collector.value(), collector.index()};
 }
 
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element max(const char* buffer,
-                                    size_t size,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator) {
+std::pair<typename CMaterializer::Element, size_t> max(
+    const char* buffer,
+    size_t size,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator) {
     CompareCollector<CMaterializer, std::greater<>> collector(allocator, comparator);
     BSONColumnBlockBased(buffer, size).decompress(collector);
-    return collector.value();
+    return {collector.value(), collector.index()};
 }
 
 template <class CMaterializer>

@@ -8,7 +8,7 @@
  */
 import {validateShowRecordIdReplicatesAcrossNodes} from "jstests/libs/collection_write_path/replicated_record_ids_utils.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {stopReplicationOnSecondaries} from "jstests/libs/write_concern_util.js";
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 function checkRecordIdsResult(arr) {
     for (let i in arr) {
@@ -46,12 +46,15 @@ let primDB = primary.getDB(dbName);
 primDB.runCommand({create: replRidCollName});
 
 jsTestLog("Blocking replication to secondary.");
-stopReplicationOnSecondaries(rst);
+// Pause the secondary's oplog applier so that it stops applying while the writes below are made.
+configureFailPoint(secondary, "pauseOplogApplication");
 
 // Inserting the documents
 jsTestLog("Inserting documents into primary.");
 for (let i = 0; i < numDocs; i++) {
-    assert.commandWorked(primDB.runCommand({insert: replRidCollName, documents: [{"_id": i}], writeConcern: {w: 1}}));
+    assert.commandWorked(
+        primDB.runCommand({insert: replRidCollName, documents: [{"_id": i}], writeConcern: {w: 1}}),
+    );
 }
 
 jsTestLog("Checking records IDs on primary.");
@@ -93,13 +96,22 @@ jsTestLog("Re-inserting documents on primary node");
 // documents.
 for (let i = 0; i < numDocs; i++) {
     assert.commandWorked(
-        primDB.runCommand({insert: replRidCollName, documents: [{"_id": idOffset + i}], writeConcern: {w: 1}}),
+        primDB.runCommand({
+            insert: replRidCollName,
+            documents: [{"_id": idOffset + i}],
+            writeConcern: {w: 1},
+        }),
     );
 }
 assert.eq(primDB[replRidCollName].count(), numDocs);
 
 jsTestLog("Verifying the recordIds have been reused");
 checkRecordIdsResult(primDB[replRidCollName].find().showRecordId().toArray());
+
+// Resume application now that every write is on the primary, so the secondary applies the
+// inserts, deletes and re-inserts together.
+jsTestLog("Resuming oplog application on secondary.");
+configureFailPoint(secondary, "pauseOplogApplication", {}, "off");
 
 jsTestLog("Restarting secondary node.");
 rst.stop(secondary, undefined, undefined, {forRestart: true});

@@ -15,6 +15,7 @@
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/sharded_partitioned/crud_base_partitioned.js";
+import {isUweEnabled} from "jstests/libs/query/uwe_utils.js";
 
 export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.threadCount = 10;
@@ -24,7 +25,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.data.secondaryDocField = "y";
     $config.data.idField = "_id";
     $config.data.tertiaryDocField = "tertiaryField";
-    $config.data.runningWithStepdowns = TestData.runningWithConfigStepdowns || TestData.runningWithShardStepdowns;
+    $config.data.runningWithStepdowns =
+        TestData.runningWithConfigStepdowns || TestData.runningWithShardStepdowns;
 
     /**
      * Returns a random integer between min (inclusive) and max (inclusive).
@@ -78,11 +80,17 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         const queryType = this.generateRandomInt(0, 3);
         if (queryType === 0 /* Range query on shard key field. */) {
             return {
-                [this.defaultShardKeyField]: {$gte: this.partition.lower, $lte: this.partition.upper - 1},
+                [this.defaultShardKeyField]: {
+                    $gte: this.partition.lower,
+                    $lte: this.partition.upper - 1,
+                },
             };
         } else if (queryType === 1 /* Range query on non shard key field. */) {
             return {
-                [this.secondaryDocField]: {$gte: this.partition.lower, $lte: this.partition.upper - 1},
+                [this.secondaryDocField]: {
+                    $gte: this.partition.lower,
+                    $lte: this.partition.upper - 1,
+                },
             };
         } else if (queryType === 2 /* Equality query on a field that does not exist */) {
             return {[this.tertiaryDocField]: {$eq: this.generateRandomInt(0, 500)}, tid: this.tid};
@@ -96,7 +104,12 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
      * Sorts documents by sortVal and returns an array of the _id fields of documents that are first
      * in the sort order.
      */
-    $config.data.returnDocsThatSortFirst = function returnDocsThatSortFirst(db, collName, query, options) {
+    $config.data.returnDocsThatSortFirst = function returnDocsThatSortFirst(
+        db,
+        collName,
+        query,
+        options,
+    ) {
         // If sorting, ensure that the correct document is modified. Save the _id values of the
         // documents that come first in the sort order, and validate that a document that comes
         // first in the sort order is correctly applied the update.
@@ -152,7 +165,10 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
      * Randomly generates and runs an update operator document update, replacement update,
      * or an aggregation pipeline update.
      */
-    $config.data.generateAndRunRandomUpdateOp = function generateAndRunRandomUpdateOp(db, collName) {
+    $config.data.generateAndRunRandomUpdateOp = function generateAndRunRandomUpdateOp(
+        db,
+        collName,
+    ) {
         const query = this.generateRandomQuery();
         const newValue = this.generateRandomInt(this.partition.lower, this.partition.upper - 1);
         const updateType = this.generateRandomInt(0, 2);
@@ -161,6 +177,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
 
         // Used for validation after running the write operation.
         const containsMatchedDocs = db[collName].findOne(query) != null;
+        // TODO SERVER-54019 Avoid over-counting 'n' and 'nModified' values when retrying updates by _id
+        // or deletes by _id after chunk migration.
+        const uweEnabled = this.uweEnabled;
 
         // Only test sort when there are matching documents in the collection. We do not test sort
         // for replacement updates as replaceOne does not support a sort parameter.
@@ -201,7 +220,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         try {
             if (updateType === 0 /* Update operator document */) {
                 update = {
-                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]: newValue,
+                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]:
+                        newValue,
                 };
                 res = db[collName].updateOne(query, {$set: update}, options);
             } else if (updateType === 1 /* Replacement Update */) {
@@ -219,7 +239,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             } else {
                 /* Aggregation pipeline update */
                 update = {
-                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]: newValue,
+                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]:
+                        newValue,
                 };
 
                 // The $unset will result in a no-op since 'z' is not a field populated in any of
@@ -236,7 +257,7 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         assert.commandWorked(res);
 
         if (containsMatchedDocs) {
-            assert.eq(res.matchedCount, 1, query);
+            assert.contains(res.matchedCount, uweEnabled ? [1, 2] : [1], query);
         } else {
             assert.eq(res.matchedCount, 0, res);
 
@@ -249,7 +270,7 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             }
         }
 
-        assert.contains(res.modifiedCount, [0, 1], res);
+        assert.contains(res.modifiedCount, uweEnabled ? [0, 1, 2] : [0, 1], res);
 
         // In case the modification results in no change to the document, matched may be higher
         // than modified.
@@ -264,7 +285,10 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
      * Randomly generates and runs an update operator document update without shard key with ID,
      * replacement update, or an aggregation pipeline update.
      */
-    $config.data.generateAndRunRandomUpdateOpWithId = function generateAndRunRandomUpdateOpWithId(db, collName) {
+    $config.data.generateAndRunRandomUpdateOpWithId = function generateAndRunRandomUpdateOpWithId(
+        db,
+        collName,
+    ) {
         const query = {
             _id: {
                 $eq: this.generateRandomInt(
@@ -279,6 +303,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
 
         // Used for validation after running the write operation.
         const containsMatchedDocs = db[collName].findOne(query) != null;
+        // TODO SERVER-54019 Avoid over-counting 'n' and 'nModified' values when retrying updates by _id
+        // or deletes by _id after chunk migration.
+        const uweEnabled = this.uweEnabled;
 
         jsTestLog(
             "updateOneWithId state running with the following parameters: \n" +
@@ -306,30 +333,34 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             collection = db[collName];
         }
 
-        let res;
-        if (updateType === 0 /* Update operator document */) {
-            const update = {[this.secondaryDocField]: newValue};
-            res = collection.updateOne(query, {$set: update});
-        } else {
-            /* Aggregation pipeline update */
-            const update = {[this.secondaryDocField]: newValue};
-            res = collection.updateOne(query, [{$set: update}]);
-        }
-        assert.commandWorked(res);
+        try {
+            let res;
+            if (updateType === 0 /* Update operator document */) {
+                const update = {[this.secondaryDocField]: newValue};
+                res = collection.updateOne(query, {$set: update});
+            } else {
+                /* Aggregation pipeline update */
+                const update = {[this.secondaryDocField]: newValue};
+                res = collection.updateOne(query, [{$set: update}]);
+            }
+            assert.commandWorked(res);
 
-        if (containsMatchedDocs) {
-            assert.eq(res.matchedCount, 1, query);
-        } else {
-            assert.eq(res.matchedCount, 0, res);
-        }
+            if (containsMatchedDocs) {
+                assert.contains(res.matchedCount, uweEnabled ? [1, 2] : [1], query);
+            } else {
+                assert.eq(res.matchedCount, 0, res);
+            }
 
-        assert.contains(res.modifiedCount, [0, 1], res);
+            assert.contains(res.modifiedCount, uweEnabled ? [0, 1, 2] : [0, 1], res);
 
-        // In case the modification results in no change to the document, matched may be higher
-        // than modified.
-        assert.gte(res.matchedCount, res.modifiedCount, res);
-        if (session) {
-            session.endSession();
+            // In case the modification results in no change to the document, matched may be higher
+            // than modified.
+            assert.gte(res.matchedCount, res.modifiedCount, res);
+        } finally {
+            // Always end the session, even if the write throws an error.
+            if (session) {
+                session.endSession();
+            }
         }
     };
 
@@ -337,7 +368,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
      * Checks the response of a write. If we have a write error, return true if we should skip write
      * response validation for an acceptable error, false otherwise.
      */
-    $config.data.shouldSkipWriteResponseValidation = function shouldSkipWriteResponseValidation(res) {
+    $config.data.shouldSkipWriteResponseValidation = function shouldSkipWriteResponseValidation(
+        res,
+    ) {
         let acceptableErrors = [
             ErrorCodes.DuplicateKey,
             ErrorCodes.IllegalOperation,
@@ -363,9 +396,11 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         }
 
         const duplicateKeyInChangeShardKeyMsg = "Failed to update document's shard key field";
-        const wouldChangeOwningShardMsg = "Must run update to shard key field in a multi-statement transaction";
+        const wouldChangeOwningShardMsg =
+            "Must run update to shard key field in a multi-statement transaction";
         const otherErrorsInChangeShardKeyMsg = "was converted into a distributed transaction";
-        const failureInRetryableWriteToTxnConversionMsg = "Cannot retry a retryable write that has been converted";
+        const failureInRetryableWriteToTxnConversionMsg =
+            "Cannot retry a retryable write that has been converted";
 
         if (res.code && res.code !== ErrorCodes.OK) {
             if (acceptableErrors.includes(res.code)) {
@@ -431,7 +466,10 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     /**
      * Randomly generates and runs either a findAndModify update or a findAndModify remove.
      */
-    $config.data.generateAndRunRandomFindAndModifyOp = function generateAndRunRandomFindAndModifyOp(db, collName) {
+    $config.data.generateAndRunRandomFindAndModifyOp = function generateAndRunRandomFindAndModifyOp(
+        db,
+        collName,
+    ) {
         const query = this.generateRandomQuery();
 
         // Used for validation after running the write operation.
@@ -488,7 +526,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
 
             if (updateType === 0 /* Update operator document */) {
                 const update = {
-                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]: newValue,
+                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]:
+                        newValue,
                 };
                 cmdObj.update = {$set: update};
                 res = db.runCommand(cmdObj);
@@ -504,7 +543,8 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             } else {
                 /* Aggregation pipeline update */
                 const update = {
-                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]: newValue,
+                    [doShardKeyUpdate ? this.defaultShardKeyField : this.secondaryDocField]:
+                        newValue,
                 };
 
                 // The $unset will result in a no-op since 'z' is not a field populated in any
@@ -581,6 +621,7 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
 
     $config.states.init = function init(db, collName, connCache) {
         $super.states.init.apply(this, arguments);
+        this.uweEnabled = isUweEnabled(db);
     };
 
     $config.states.updateOne = function updateOne(db, collName, connCache) {
@@ -656,36 +697,58 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             collection = db[collName];
         }
 
-        // Used for validation after running the write operation.
-        const containsMatchedDocs = collection.findOne(query) != null;
-        const numMatchedDocsBefore = collection.countDocuments(query);
+        try {
+            // Only the retryable-writes path above categorizes the delete as
+            // WriteType::WithoutShardKeyWithId. In the transaction branch the write is
+            // WriteType::Ordinary, so it is never broadcast and cannot be over-counted.
+            const usedRetryableSession = !!session;
 
-        jsTestLog(
-            "deleteOneWithId state running with query: " +
-                tojson(query) +
-                "\n" +
-                "containsMatchedDocs: " +
-                containsMatchedDocs +
-                "\n" +
-                "numMatchedDocsBefore: " +
-                numMatchedDocsBefore,
-        );
+            // Used for validation after running the write operation.
+            const containsMatchedDocs = collection.findOne(query) != null;
+            const numMatchedDocsBefore = collection.countDocuments(query);
+            const uweEnabled = this.uweEnabled;
 
-        let res = assert.commandWorked(collection.deleteOne(query));
+            jsTestLog(
+                "deleteOneWithId state running with query: " +
+                    tojson(query) +
+                    "\n" +
+                    "containsMatchedDocs: " +
+                    containsMatchedDocs +
+                    "\n" +
+                    "numMatchedDocsBefore: " +
+                    numMatchedDocsBefore,
+            );
 
-        const numMatchedDocsAfter = collection.countDocuments(query);
+            let res = assert.commandWorked(collection.deleteOne(query));
 
-        if (containsMatchedDocs) {
-            assert.eq(res.deletedCount, 1, res);
-            assert.eq(numMatchedDocsAfter, numMatchedDocsBefore - 1);
-        } else {
-            assert.eq(res.deletedCount, 0, res);
+            const numMatchedDocsAfter = collection.countDocuments(query);
 
-            // The count should both be 0.
-            assert.eq(numMatchedDocsAfter, numMatchedDocsBefore);
-        }
-        if (session) {
-            session.endSession();
+            if (containsMatchedDocs) {
+                // The unified write executor broadcasts a retryable delete by _id to every shard in
+                // scope and sums the per-shard replies without the dedup that BatchWriteExec
+                // performs. Once a concurrent migration has copied the session history to the
+                // recipient, the retried statement is counted on both shards and reported as
+                // 'deletedCount: 2'. Only the reported count is inflated -- the document is still
+                // removed exactly once, which the assertion below continues to enforce strictly.
+                // TODO SERVER-54019 Avoid over-counting 'n' and 'nModified' values when retrying
+                // updates by _id or deletes by _id after chunk migration.
+                assert.contains(
+                    res.deletedCount,
+                    uweEnabled && usedRetryableSession ? [1, 2] : [1],
+                    res,
+                );
+                assert.eq(numMatchedDocsAfter, numMatchedDocsBefore - 1);
+            } else {
+                assert.eq(res.deletedCount, 0, res);
+
+                // The count should both be 0.
+                assert.eq(numMatchedDocsAfter, numMatchedDocsBefore);
+            }
+        } finally {
+            // Always end the session, even if the write throws an error.
+            if (session) {
+                session.endSession();
+            }
         }
         jsTestLog("Finished deleteOneWithId state");
     };

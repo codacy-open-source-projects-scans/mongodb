@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/bson/bsontypes.h"
@@ -35,6 +9,8 @@
 #include "mongo/db/query/random_utils.h"
 #include "mongo/util/str_escape.h"
 #include "mongo/util/text.h"
+
+#include <cmath>
 
 #include <fmt/compile.h>
 #include <fmt/format.h>
@@ -236,11 +212,14 @@ StatusWith<Value> evaluateAdd(Value lhs, Value rhs) {
     return state.getValue();
 }
 
-Value evaluate(const ExpressionAdd& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionAdd& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     AddState state;
     for (auto&& child : children) {
-        Value val = child->evaluate(root, variables);
+        Value val = child->evaluate(root, variables, ctx);
         if (val.nullish()) {
             return Value(BSONNULL);
         }
@@ -417,11 +396,14 @@ StatusWith<Value> evaluateMultiply(Value lhs, Value rhs) {
     return state.getValue();
 }
 
-Value evaluate(const ExpressionMultiply& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionMultiply& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     MultiplyState state;
     for (auto&& child : children) {
-        Value val = child->evaluate(root, variables);
+        Value val = child->evaluate(root, variables, ctx);
         if (val.nullish()) {
             return Value(BSONNULL);
         }
@@ -431,10 +413,13 @@ Value evaluate(const ExpressionMultiply& expr, const Document& root, Variables* 
     return state.getValue();
 }
 
-Value evaluate(const ExpressionLog& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionLog& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value argVal = children[0]->evaluate(root, variables);
-    Value baseVal = children[1]->evaluate(root, variables);
+    Value argVal = children[0]->evaluate(root, variables, ctx);
+    Value baseVal = children[1]->evaluate(root, variables, ctx);
     if (argVal.nullish() || baseVal.nullish()) {
         return Value(BSONNULL);
     }
@@ -472,7 +457,10 @@ Value evaluate(const ExpressionLog& expr, const Document& root, Variables* varia
     return Value(std::log(argDouble) / std::log(baseDouble));
 }
 
-Value evaluate(const ExpressionRandom& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionRandom& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     static constexpr double kMinValue = 0.0;
     static constexpr double kMaxValue = 1.0;
 
@@ -480,10 +468,13 @@ Value evaluate(const ExpressionRandom& expr, const Document& root, Variables* va
                  (kMaxValue - kMinValue) * random_utils::getRNG().nextCanonicalDouble());
 }
 
-Value evaluate(const ExpressionRange& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionRange& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value startVal(children[0]->evaluate(root, variables));
-    Value endVal(children[1]->evaluate(root, variables));
+    Value startVal(children[0]->evaluate(root, variables, ctx));
+    Value endVal(children[1]->evaluate(root, variables, ctx));
 
     uassert(34443,
             str::stream() << "$range requires a numeric starting value, found value of type: "
@@ -511,7 +502,7 @@ Value evaluate(const ExpressionRange& expr, const Document& root, Variables* var
     int64_t step = 1;
     if (children.size() == 3) {
         // A step was specified by the user.
-        Value stepVal(children[2]->evaluate(root, variables));
+        Value stepVal(children[2]->evaluate(root, variables, ctx));
 
         uassert(34447,
                 str::stream() << "$range requires a numeric step value, found value of type:"
@@ -641,10 +632,11 @@ Value evaluateRoundOrTrunc(const Document& root,
                            const std::string& opName,
                            Decimal128::RoundingMode roundingMode,
                            double (*doubleOp)(double),
-                           Variables* variables) {
+                           Variables* variables,
+                           const EvaluationContext& ctx) {
     constexpr auto maxPrecision = 100LL;
     constexpr auto minPrecision = -20LL;
-    auto numericArg = Value(children[0]->evaluate(root, variables));
+    auto numericArg = Value(children[0]->evaluate(root, variables, ctx));
     if (numericArg.nullish()) {
         return Value(BSONNULL);
     }
@@ -655,7 +647,7 @@ Value evaluateRoundOrTrunc(const Document& root,
 
     long long precisionValue = 0;
     if (children.size() > 1) {
-        auto precisionArg = Value(children[1]->evaluate(root, variables));
+        auto precisionArg = Value(children[1]->evaluate(root, variables, ctx));
         if (precisionArg.nullish()) {
             return Value(BSONNULL);
         }
@@ -680,7 +672,18 @@ Value evaluateRoundOrTrunc(const Document& root,
             return Value(out);
         }
         case BSONType::numberDouble: {
-            auto dec = Decimal128(numericArg.getDouble(), Decimal128::kRoundTo34Digits);
+            const double doubleArg = numericArg.getDouble();
+            // Fast path: rounding/truncating to an integer (precision 0) can be done with native
+            // floating-point rounding, avoiding an expensive double->Decimal128->quantize->double
+            // round-trip. For integer precision this is numerically identical to the Decimal128
+            // path (the nearest integer / truncated value of a finite double is unambiguous, and
+            // exact half-integers are representable and rounded ties-to-even by both paths).
+            // Non-zero precision still needs Decimal128 to match decimal rounding semantics
+            // (see SERVER-71557 / DOCSP-27333).
+            if (precisionValue == 0 && std::isfinite(doubleArg)) {
+                return Value(doubleOp(doubleArg));
+            }
+            auto dec = Decimal128(doubleArg, Decimal128::kRoundTo34Digits);
             if (dec.isInfinite()) {
                 return numericArg;
             }
@@ -712,16 +715,35 @@ Value evaluateRoundOrTrunc(const Document& root,
 
 }  // namespace
 
-Value evaluate(const ExpressionRound& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionRound& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    return evaluateRoundOrTrunc(
-        root, children, expr.getOpName(), Decimal128::kRoundTiesToEven, &std::round, variables);
+    // Use nearbyint (not round) for the native double fast path: $round rounds ties to even
+    // (kRoundTiesToEven), which nearbyint honors under the default FE_TONEAREST rounding mode,
+    // whereas std::round rounds half away from zero and would be incorrect for ties.
+    return evaluateRoundOrTrunc(root,
+                                children,
+                                expr.getOpName(),
+                                Decimal128::kRoundTiesToEven,
+                                &std::nearbyint,
+                                variables,
+                                ctx);
 }
 
-Value evaluate(const ExpressionTrunc& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionTrunc& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    return evaluateRoundOrTrunc(
-        root, children, expr.getOpName(), Decimal128::kRoundTowardZero, &std::trunc, variables);
+    return evaluateRoundOrTrunc(root,
+                                children,
+                                expr.getOpName(),
+                                Decimal128::kRoundTowardZero,
+                                &std::trunc,
+                                variables,
+                                ctx);
 }
 
 namespace {
@@ -730,8 +752,9 @@ template <typename T, typename valueFuncFn>
 Value evaluateSingleNumericArg(const T& expr,
                                const Document& root,
                                Variables* variables,
+                               const EvaluationContext& ctx,
                                valueFuncFn valueFunc) {
-    Value arg = expr.getChildren()[0]->evaluate(root, variables);
+    Value arg = expr.getChildren()[0]->evaluate(root, variables, ctx);
     if (arg.nullish()) {
         return Value(BSONNULL);
     }
@@ -746,8 +769,11 @@ Value evaluateSingleNumericArg(const T& expr,
 
 }  // namespace
 
-Value evaluate(const ExpressionAbs& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionAbs& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         BSONType type = numericArg.getType();
         if (type == BSONType::numberDouble) {
             return Value(std::abs(numericArg.getDouble()));
@@ -764,8 +790,11 @@ Value evaluate(const ExpressionAbs& expr, const Document& root, Variables* varia
     });
 }
 
-Value evaluate(const ExpressionCeil& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionCeil& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         // There's no point in taking the ceiling of integers or longs, it will have no effect.
         switch (numericArg.getType()) {
             case BSONType::numberDouble:
@@ -780,8 +809,11 @@ Value evaluate(const ExpressionCeil& expr, const Document& root, Variables* vari
     });
 }
 
-Value evaluate(const ExpressionExp& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionExp& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         // $exp always returns either a double or a decimal number, as e is irrational.
         if (numericArg.getType() == BSONType::numberDecimal) {
             return Value(numericArg.coerceToDecimal().exp());
@@ -887,10 +919,13 @@ bool representableAsLong(long long base, long long exp) {
 
 }  // namespace
 
-Value evaluate(const ExpressionPow& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionPow& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value baseVal = children[0]->evaluate(root, variables);
-    Value expVal = children[1]->evaluate(root, variables);
+    Value baseVal = children[0]->evaluate(root, variables, ctx);
+    Value expVal = children[1]->evaluate(root, variables, ctx);
     if (baseVal.nullish() || expVal.nullish()) {
         return Value(BSONNULL);
     }
@@ -1002,8 +1037,11 @@ Value evaluate(const ExpressionPow& expr, const Document& root, Variables* varia
     return formatResult(computeWithRepeatedMultiplication(baseLong, expLong));
 }
 
-Value evaluate(const ExpressionFloor& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionFloor& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         // There's no point in taking the floor of integers or longs, it will have no effect.
         switch (numericArg.getType()) {
             case BSONType::numberDouble:
@@ -1018,8 +1056,11 @@ Value evaluate(const ExpressionFloor& expr, const Document& root, Variables* var
     });
 }
 
-Value evaluate(const ExpressionLn& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionLn& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         if (numericArg.getType() == BSONType::numberDecimal) {
             Decimal128 argDecimal = numericArg.getDecimal();
             if (argDecimal.isGreater(Decimal128::kNormalizedZero))
@@ -1034,8 +1075,11 @@ Value evaluate(const ExpressionLn& expr, const Document& root, Variables* variab
     });
 }
 
-Value evaluate(const ExpressionLog10& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionLog10& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         if (numericArg.getType() == BSONType::numberDecimal) {
             Decimal128 argDecimal = numericArg.getDecimal();
             if (argDecimal.isGreater(Decimal128::kNormalizedZero))
@@ -1052,8 +1096,11 @@ Value evaluate(const ExpressionLog10& expr, const Document& root, Variables* var
     });
 }
 
-Value evaluate(const ExpressionSqrt& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionSqrt& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         auto checkArg = [](bool nonNegative) {
             uassert(28714, "$sqrt's argument must be greater than or equal to 0", nonNegative);
         };
@@ -1069,8 +1116,11 @@ Value evaluate(const ExpressionSqrt& expr, const Document& root, Variables* vari
     });
 }
 
-Value evaluate(const ExpressionBitNot& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [&expr](const Value& numericArg) {
+Value evaluate(const ExpressionBitNot& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [&expr](const Value& numericArg) {
         BSONType type = numericArg.getType();
 
         if (type == BSONType::numberInt) {
@@ -1104,20 +1154,29 @@ Value doDegreeRadiansConversion(const Value& numericArg,
 
 }  // namespace
 
-Value evaluate(const ExpressionDegreesToRadians& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionDegreesToRadians& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         return doDegreeRadiansConversion(numericArg, Decimal128::kPiOver180, kDoublePiOver180);
     });
 }
 
-Value evaluate(const ExpressionRadiansToDegrees& expr, const Document& root, Variables* variables) {
-    return evaluateSingleNumericArg(expr, root, variables, [](const Value& numericArg) {
+Value evaluate(const ExpressionRadiansToDegrees& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSingleNumericArg(expr, root, variables, ctx, [](const Value& numericArg) {
         return doDegreeRadiansConversion(numericArg, Decimal128::k180OverPi, kDouble180OverPi);
     });
 }
 
-Value evaluate(const ExpressionArcTangent2& expr, const Document& root, Variables* variables) {
-    Value arg1 = expr.getChildren()[0]->evaluate(root, variables);
+Value evaluate(const ExpressionArcTangent2& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value arg1 = expr.getChildren()[0]->evaluate(root, variables, ctx);
     if (arg1.nullish()) {
         return Value(BSONNULL);
     }
@@ -1126,7 +1185,7 @@ Value evaluate(const ExpressionArcTangent2& expr, const Document& root, Variable
                           << typeName(arg1.getType()),
             arg1.numeric());
 
-    Value arg2 = expr.getChildren()[1]->evaluate(root, variables);
+    Value arg2 = expr.getChildren()[1]->evaluate(root, variables, ctx);
     if (arg2.nullish()) {
         return Value(BSONNULL);
     }
@@ -1167,10 +1226,11 @@ template <typename T, typename doubleFuncFn, typename decimalFuncFn>
 Value evaluateBoundedTrigonometric(const T& expr,
                                    const Document& root,
                                    Variables* variables,
+                                   const EvaluationContext& ctx,
                                    doubleFuncFn doubleFunc,
                                    decimalFuncFn decimalFunc) {
     return evaluateSingleNumericArg(
-        expr, root, variables, [&expr, doubleFunc, decimalFunc](const Value& numericArg) {
+        expr, root, variables, ctx, [&expr, doubleFunc, decimalFunc](const Value& numericArg) {
             switch (numericArg.getType()) {
                 case BSONType::numberDouble: {
                     auto input = numericArg.getDouble();
@@ -1204,10 +1264,11 @@ template <typename T, typename doubleFuncFn, typename decimalFuncFn>
 Value evaluateUnboundedTrigonometric(const T& expr,
                                      const Document& root,
                                      Variables* variables,
+                                     const EvaluationContext& ctx,
                                      doubleFuncFn doubleFunc,
                                      decimalFuncFn decimalFunc) {
     return evaluateSingleNumericArg(
-        expr, root, variables, [doubleFunc, decimalFunc](const Value& numericArg) {
+        expr, root, variables, ctx, [doubleFunc, decimalFunc](const Value& numericArg) {
             switch (numericArg.getType()) {
                 case BSONType::numberDouble:
                     return Value(doubleFunc(numericArg.getDouble()));
@@ -1223,118 +1284,158 @@ Value evaluateUnboundedTrigonometric(const T& expr,
 
 }  // namespace
 
-Value evaluate(const ExpressionCosine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionCosine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::cos(arg); },
         [](const Decimal128& arg) { return arg.cos(); });
 }
 
-Value evaluate(const ExpressionSine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::sin(arg); },
         [](const Decimal128& arg) { return arg.sin(); });
 }
 
-Value evaluate(const ExpressionTangent& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionTangent& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::tan(arg); },
         [](const Decimal128& arg) { return arg.tan(); });
 }
 
-Value evaluate(const ExpressionArcCosine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArcCosine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::acos(arg); },
         [](const Decimal128& arg) { return arg.acos(); });
 }
 
-Value evaluate(const ExpressionArcSine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArcSine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::asin(arg); },
         [](const Decimal128& arg) { return arg.asin(); });
 }
 
 Value evaluate(const ExpressionHyperbolicArcTangent& expr,
                const Document& root,
-               Variables* variables) {
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::atanh(arg); },
         [](const Decimal128& arg) { return arg.atanh(); });
 }
 
 Value evaluate(const ExpressionHyperbolicArcCosine& expr,
                const Document& root,
-               Variables* variables) {
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateBoundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::acosh(arg); },
         [](const Decimal128& arg) { return arg.acosh(); });
 }
 
-Value evaluate(const ExpressionArcTangent& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArcTangent& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateUnboundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::atan(arg); },
         [](const Decimal128& arg) { return arg.atan(); });
 }
 
 Value evaluate(const ExpressionHyperbolicArcSine& expr,
                const Document& root,
-               Variables* variables) {
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateUnboundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::asinh(arg); },
         [](const Decimal128& arg) { return arg.asinh(); });
 }
 
-Value evaluate(const ExpressionHyperbolicCosine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionHyperbolicCosine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateUnboundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::cosh(arg); },
         [](const Decimal128& arg) { return arg.cosh(); });
 }
 
-Value evaluate(const ExpressionHyperbolicSine& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionHyperbolicSine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateUnboundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::sinh(arg); },
         [](const Decimal128& arg) { return arg.sinh(); });
 }
 
 Value evaluate(const ExpressionHyperbolicTangent& expr,
                const Document& root,
-               Variables* variables) {
+               Variables* variables,
+               const EvaluationContext& ctx) {
     return evaluateUnboundedTrigonometric(
         expr,
         root,
         variables,
+        ctx,
         [](double arg) { return std::tanh(arg); },
         [](const Decimal128& arg) { return arg.tanh(); });
 }

@@ -27,7 +27,8 @@ class CollInfos {
      */
     constructor(conn, connName, dbName) {
         // Special listCollections filter to prevent reloading the view catalog, also skips timeseries collections.
-        const listCollectionsSkipTimeseriesAndViewsFilter = filterGetAllCollectionsExcludingViewsAndTimeseries();
+        const listCollectionsSkipTimeseriesAndViewsFilter =
+            filterGetAllCollectionsExcludingViewsAndTimeseries();
         // filter to skip views, also prevents reloading the view catalog
         const listCollectionsFilterSkipViews = filterGetAllCollectionsExcludingViews();
         this.conn = conn;
@@ -37,19 +38,25 @@ class CollInfos {
         // If it fails, fall back to the old filter that doesn't include timeseries collections
         // This is okay because viewless timeseries are disabled in older binaries
         try {
-            this.collInfosRes = conn.getDB(dbName).getCollectionInfos(listCollectionsFilterSkipViews);
+            this.collInfosRes = conn
+                .getDB(dbName)
+                .getCollectionInfos(listCollectionsFilterSkipViews);
             // TODO(SERVER-118882): Remove this once 9.0 becomes last LTS.
             // Filter out system.buckets. collections
             // listCollectionsFilterSkipViews also returns the type "timeseries"
             // we will send commands directly the main namespace instead of targeting system.buckets
-            this.collInfosRes = this.collInfosRes.filter((c) => !c.name.startsWith("system.buckets."));
+            this.collInfosRes = this.collInfosRes.filter(
+                (c) => !c.name.startsWith("system.buckets."),
+            );
         } catch (e) {
             // If the filter fails with InvalidViewDefinition (e.g., in multiversion environments),
             // fall back to the old filter. It's okay if it's excluding timeseries because viewless timeseries
             // are not disabled in older versions, so we will test legacy timeseries through
             // their system.buckets namespace
             if (e.code === ErrorCodes.InvalidViewDefinition) {
-                this.collInfosRes = conn.getDB(dbName).getCollectionInfos(listCollectionsSkipTimeseriesAndViewsFilter);
+                this.collInfosRes = conn
+                    .getDB(dbName)
+                    .getCollectionInfos(listCollectionsSkipTimeseriesAndViewsFilter);
             } else {
                 throw e;
             }
@@ -67,7 +74,9 @@ class CollInfos {
      * Do additional filtering to narrow down collections that have names in collNames.
      */
     filter(desiredCollNames) {
-        this.collInfosRes = this.collInfosRes.filter((info) => desiredCollNames.includes(info.name));
+        this.collInfosRes = this.collInfosRes.filter((info) =>
+            desiredCollNames.includes(info.name),
+        );
     }
 
     hostAndNS(collName) {
@@ -96,7 +105,10 @@ class CollInfos {
         const infoPrefix = `${this.connName}(${this.conn.host}) info for ${ns} : `;
         if (collInfo !== null) {
             if (alreadyPrinted) {
-                print(`${this.connName} info for ${ns} already printed. Search for ` + `'${infoPrefix}'`);
+                print(
+                    `${this.connName} info for ${ns} already printed. Search for ` +
+                        `'${infoPrefix}'`,
+                );
             } else {
                 print(infoPrefix + tojsononeline(collInfo));
             }
@@ -108,7 +120,10 @@ class CollInfos {
         const statsPrefix = `${this.connName}(${this.conn.host}) collStats for ${ns}: `;
         if (collStats.ok === 1) {
             if (alreadyPrinted) {
-                print(`${this.connName} collStats for ${ns} already printed. Search for ` + `'${statsPrefix}'`);
+                print(
+                    `${this.connName} collStats for ${ns} already printed. Search for ` +
+                        `'${statsPrefix}'`,
+                );
             } else {
                 print(statsPrefix + tojsononeline(collStats));
             }
@@ -197,7 +212,11 @@ class DataConsistencyChecker {
                 continue;
             }
 
-            const ordering = this.bsonCompareFunction({_: doc1._id}, {_: doc2._id}, false /* checkType */);
+            const ordering = this.bsonCompareFunction(
+                {_: doc1._id},
+                {_: doc2._id},
+                false /* checkType */,
+            );
             if (ordering === 0) {
                 // The documents have the same _id but have different contents.
                 docsWithDifferentContents.push({first: doc1, second: doc2});
@@ -250,7 +269,11 @@ class DataConsistencyChecker {
             if (!map1.hasOwnProperty(spec.name)) {
                 indexesMissingOnFirst.push(spec);
             } else {
-                const ordering = this.bsonCompareFunction(map1[spec.name], spec, false /* checkType */);
+                const ordering = this.bsonCompareFunction(
+                    map1[spec.name],
+                    spec,
+                    false /* checkType */,
+                );
                 if (ordering != 0) {
                     indexesWithDifferentSpecs.push({first: map1[spec.name], second: spec});
                 }
@@ -287,7 +310,13 @@ class DataConsistencyChecker {
         };
     }
 
-    static getCollectionDiffUsingSessions(sourceSession, syncingSession, dbName, collNameOrUUID, readAtClusterTime) {
+    static getCollectionDiffUsingSessions(
+        sourceSession,
+        syncingSession,
+        dbName,
+        collNameOrUUID,
+        readAtClusterTime,
+    ) {
         const sourceDB = sourceSession.getDatabase(dbName);
         const syncingDB = syncingSession.getDatabase(dbName);
 
@@ -347,9 +376,15 @@ class DataConsistencyChecker {
             if (!sourceDoc || !syncingDoc) {
                 return false;
             }
-            const hasInvalidated = sourceDoc.hasOwnProperty("invalidated") && syncingDoc.hasOwnProperty("invalidated");
-            if (!hasInvalidated || sourceDoc["invalidated"] === syncingDoc["invalidated"]) {
-                // We only ever expect cases where the 'invalidated' fields are mismatched.
+            if (
+                sourceDoc["txnNumber"] === syncingDoc["txnNumber"] &&
+                sourceDoc["ts"] === syncingDoc["ts"]
+            ) {
+                // If the two entries have different `txnNumber` or `ts` values, then our
+                // retryable write logic will detect the inconsistency and handle it:
+                // https://github.com/mongodb/mongo/blob/7bc650ec9d11896a85a83b8eba66deb1f74636e7/src/mongo/db/query/write_ops/write_ops_retryability.cpp?plain=1#L237-L255
+                // If this is the case, we should return `true`. Otherwise, we should return
+                // `false`, because this data inconsistency is not one we can ignore.
                 return false;
             }
         }
@@ -360,7 +395,13 @@ class DataConsistencyChecker {
         return true;
     }
 
-    static dumpCollectionDiff(collectionPrinted, sourceCollInfos, syncingCollInfos, collName, indexDiffs) {
+    static dumpCollectionDiff(
+        collectionPrinted,
+        sourceCollInfos,
+        syncingCollInfos,
+        collName,
+        indexDiffs,
+    ) {
         print("Dumping collection: " + sourceCollInfos.ns(collName));
 
         const sourceExists = sourceCollInfos.print(collectionPrinted, collName);
@@ -387,7 +428,10 @@ class DataConsistencyChecker {
             collName,
         );
 
-        for (let {sourceNode: sourceDoc, syncingNode: syncingDoc} of diff.docsWithDifferentContents) {
+        for (let {
+            sourceNode: sourceDoc,
+            syncingNode: syncingDoc,
+        } of diff.docsWithDifferentContents) {
             print(
                 `Mismatching documents between the source node ${sourceNode.host}` +
                     ` and the syncing node ${syncingNode.host}:`,
@@ -412,7 +456,10 @@ class DataConsistencyChecker {
     }
 
     static dumpIndexDiffs(sourceNode, syncingNode, diff) {
-        for (let {sourceNode: sourceSpec, syncingNode: syncingSpec} of diff.indexesWithDifferentSpecs) {
+        for (let {
+            sourceNode: sourceSpec,
+            syncingNode: syncingSpec,
+        } of diff.indexesWithDifferentSpecs) {
             print(
                 `Mismatching indexes between the source node ${sourceNode.host}` +
                     ` and the syncing node ${syncingNode.host}:`,
@@ -432,6 +479,17 @@ class DataConsistencyChecker {
         }
     }
 
+    /**
+     * Compares the source and syncing nodes and returns whether they were found to agree.
+     *
+     * If a command needed to collect the comparison data failed, no conclusion could be reached
+     * about whether the nodes agree, so this throws with its own message rather than folding the
+     * failure into the returned value, where callers would report it as a hash mismatch.
+     *
+     * An inconsistency detected by this same call takes precedence: in that case this returns false
+     * as usual and the command failure is only logged, so callers cannot assume that every command
+     * failure is raised.
+     */
     static checkDBHash(
         sourceDBHash,
         sourceCollInfos,
@@ -444,6 +502,32 @@ class DataConsistencyChecker {
         shouldCheckDifferencesInPreImagesCollection,
     ) {
         let success = true;
+        const commandFailures = [];
+
+        // A genuine inconsistency found by this call takes precedence over a command failure, so
+        // that a command failure cannot hide one.
+        //
+        // Note that 'success' only covers the single (database, node) pair this call compares. A
+        // mismatch that a previous call already found is tracked by the caller and is not visible
+        // here, so throwing below can report a command failure even though a real inconsistency was
+        // found elsewhere in the run. Both are printed above and the run fails either way, so the
+        // consequence is limited to which one the failure message names. Closing that gap requires
+        // the caller to hold the command failures and pick the final error only after it has an
+        // accumulated verdict.
+        const finish = () => {
+            if (success && commandFailures.length > 0) {
+                assert(
+                    false,
+                    "data consistency check command failure: could not collect the data needed to" +
+                        " compare the nodes, so no conclusion was reached about whether their data" +
+                        " matches. The check stopped here, so any remaining databases and nodes" +
+                        " were not compared and a data inconsistency elsewhere would not have been" +
+                        " detected.",
+                    {commandFailures},
+                );
+            }
+            return success;
+        };
 
         const sourceDBName = sourceCollInfos.dbName;
         const syncingDBName = syncingCollInfos.dbName;
@@ -462,6 +546,10 @@ class DataConsistencyChecker {
             print(`${msgPrefix}, ${outputMsg}`);
         };
 
+        const isMultiversion =
+            Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) ||
+            Boolean(TestData.multiversionBinVersion);
+
         const arraySymmetricDifference = (a, b) => {
             const inAOnly = a.filter(function (elem) {
                 return b.indexOf(elem) < 0;
@@ -476,8 +564,16 @@ class DataConsistencyChecker {
 
         if (sourceCollections.length !== syncingCollections.length) {
             prettyPrint(`the two nodes have a different number of collections: ${dbHashesMsg}`);
-            for (const diffColl of arraySymmetricDifference(sourceCollections, syncingCollections)) {
-                this.dumpCollectionDiff(collectionPrinted, sourceCollInfos, syncingCollInfos, diffColl);
+            for (const diffColl of arraySymmetricDifference(
+                sourceCollections,
+                syncingCollections,
+            )) {
+                this.dumpCollectionDiff(
+                    collectionPrinted,
+                    sourceCollInfos,
+                    syncingCollInfos,
+                    diffColl,
+                );
             }
             success = false;
         }
@@ -495,7 +591,12 @@ class DataConsistencyChecker {
                 // 'config.system.preimages' can potentially be inconsistent via hashes, there's a
                 // special process that verifies them with ReplSetTest.checkPreImageCollection so it
                 // is safe to ignore failures here.
-                this.dumpCollectionDiff(collectionPrinted, sourceCollInfos, syncingCollInfos, coll.name);
+                this.dumpCollectionDiff(
+                    collectionPrinted,
+                    sourceCollInfos,
+                    syncingCollInfos,
+                    coll.name,
+                );
                 const shouldIgnoreFailure = this.canIgnoreCollectionDiff(
                     sourceCollInfos,
                     syncingCollInfos,
@@ -536,6 +637,14 @@ class DataConsistencyChecker {
                         delete syncingInfo.idIndex.ns;
                     }
 
+                    // TODO(SERVER-95599): Remove this workaround once 9.0 becomes last LTS.
+                    // Binaries before 9.0 don't populate 'configDebugDump' the same way, so under
+                    // mixed binary versions this field can legitimately differ between nodes.
+                    if (isMultiversion) {
+                        delete sourceInfo.info?.configDebugDump;
+                        delete syncingInfo.info?.configDebugDump;
+                    }
+
                     // If the servers are using encryption and they specify an encryption option
                     // in versions <7.2 this is stored on the primary but not the secondary.
                     // This is not an actual failure since the data is correct on all nodes. We
@@ -544,12 +653,18 @@ class DataConsistencyChecker {
 
                     if (sourceInfo.options?.storageEngine?.wiredTiger?.configString) {
                         sourceInfo.options.storageEngine.wiredTiger.configString =
-                            sourceInfo.options.storageEngine.wiredTiger.configString.replace(encryptionRegex, "");
+                            sourceInfo.options.storageEngine.wiredTiger.configString.replace(
+                                encryptionRegex,
+                                "",
+                            );
                     }
 
                     if (syncingInfo.options?.storageEngine?.wiredTiger?.configString) {
                         syncingInfo.options.storageEngine.wiredTiger.configString =
-                            syncingInfo.options.storageEngine.wiredTiger.configString.replace(encryptionRegex, "");
+                            syncingInfo.options.storageEngine.wiredTiger.configString.replace(
+                                encryptionRegex,
+                                "",
+                            );
                     }
 
                     if (!this.bsonCompareFunction(syncingInfo, sourceInfo)) {
@@ -558,7 +673,12 @@ class DataConsistencyChecker {
                                 dbName
                             }.${syncingInfo.name}`,
                         );
-                        this.dumpCollectionDiff(collectionPrinted, sourceCollInfos, syncingCollInfos, syncingInfo.name);
+                        this.dumpCollectionDiff(
+                            collectionPrinted,
+                            sourceCollInfos,
+                            syncingCollInfos,
+                            syncingInfo.name,
+                        );
                         success = false;
                     }
                 }
@@ -603,7 +723,12 @@ class DataConsistencyChecker {
         // collections due to SERVER-90862. In this situation, listIndexes targets different
         // namespaces before and after 8.2. So, skip comparing across 8.2.
         // TODO(SERVER-101594): Remove this workaround once only viewless timeseries exist.
-        const skipIndexesCheck = function (sourceCollInfos, syncingCollInfos, sourceCollections, collName) {
+        const skipIndexesCheck = function (
+            sourceCollInfos,
+            syncingCollInfos,
+            sourceCollections,
+            collName,
+        ) {
             const sourceVersion = sourceCollInfos.binVersion;
             const syncingVersion = syncingCollInfos.binVersion;
 
@@ -645,7 +770,34 @@ class DataConsistencyChecker {
             if (sourceCollStats.ok !== 1 || syncingCollStats.ok !== 1) {
                 sourceCollInfos.print(collectionPrinted, collName);
                 syncingCollInfos.print(collectionPrinted, collName);
-                success = false;
+
+                // Failing to run collStats means we could not gather the state to compare, so we
+                // have no evidence either way about whether the nodes agree. Record it as a command
+                // failure rather than as a data inconsistency, deferring the report until the end
+                // so that a genuine inconsistency found elsewhere still takes precedence.
+                for (const [collInfos, res] of [
+                    [sourceCollInfos, sourceCollStats],
+                    [syncingCollInfos, syncingCollStats],
+                ]) {
+                    if (res.ok === 1) {
+                        continue;
+                    }
+                    const failure = {
+                        command: "collStats",
+                        role: collInfos.connName,
+                        host: collInfos.conn.host,
+                        ns: collInfos.ns(collName),
+                        code: res.code,
+                        codeName: res.codeName,
+                        errmsg: res.errmsg,
+                    };
+                    prettyPrint(
+                        `failed to run ${failure.command} on ${failure.role}(${failure.host}) ` +
+                            `for ${failure.ns}, so the two nodes could not be compared: ` +
+                            `${tojsononeline(failure)}`,
+                    );
+                    commandFailures.push(failure);
+                }
                 return;
             }
 
@@ -686,7 +838,10 @@ class DataConsistencyChecker {
                 reasons.push("indexes");
             }
 
-            const indexBuildsMatch = compareSets(sourceCollStats.indexBuilds, syncingCollStats.indexBuilds);
+            const indexBuildsMatch = compareSets(
+                sourceCollStats.indexBuilds,
+                syncingCollStats.indexBuilds,
+            );
             if (syncingHasIndexes && !indexBuildsMatch) {
                 reasons.push("indexBuilds");
             }
@@ -698,13 +853,21 @@ class DataConsistencyChecker {
             prettyPrint(
                 `the two nodes have different states for the collection ${dbName}.${collName}: ${reasons.join(", ")}`,
             );
-            this.dumpCollectionDiff(collectionPrinted, sourceCollInfos, syncingCollInfos, collName, indexDiffs);
+            this.dumpCollectionDiff(
+                collectionPrinted,
+                sourceCollInfos,
+                syncingCollInfos,
+                collName,
+                indexDiffs,
+            );
             success = false;
         });
 
         // The hashes for the whole database should match.
         if (sourceDBHash.md5 !== syncingDBHash.md5) {
-            prettyPrint(`the two nodes have a different hash for the ${dbName} database: ${dbHashesMsg}`);
+            prettyPrint(
+                `the two nodes have a different hash for the ${dbName} database: ${dbHashesMsg}`,
+            );
             if (didIgnoreFailure) {
                 // We only expect database hash mismatches on the config db, where
                 // config.image_collection and config.system.preimages are expected to have
@@ -714,12 +877,12 @@ class DataConsistencyChecker {
                         `inconsistencies in 'config.image_collection' or ` +
                         `'config.system.preimages' can be expected`,
                 );
-                return success;
+                return finish();
             }
             success = false;
         }
 
-        return success;
+        return finish();
     }
 }
 

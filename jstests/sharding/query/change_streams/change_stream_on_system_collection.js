@@ -4,6 +4,9 @@
  * observation of a newly created system.* collection.
  *
  * @tags: [
+ *   # The test already exercises native whole-db and whole-cluster streams directly.
+ *   do_not_run_in_whole_db_passthrough,
+ *   do_not_run_in_whole_cluster_passthrough,
  *   assumes_read_preference_unchanged,
  *   requires_majority_read_concern,
  *   uses_change_streams,
@@ -12,10 +15,6 @@
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {assertChangeStreamEventEq} from "jstests/libs/query/change_stream_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
-
-// This test involves opening change stream on the internal collection, which is not allowed through
-// a router.
-TestData.replicaSetEndpointIncompatible = true;
 
 // Asserts that the next event in a change stream connected to via cursor 'changeStreamCursor' is
 // equal to 'eventDocument'.
@@ -51,7 +50,9 @@ const wholeClusterCursor = db.getMongo().watch();
 
 // Create a new sharded collection that we will start watching later.
 assert.commandWorked(db.createCollection("system.resharding.someUUID"));
-assert.commandWorked(db.adminCommand({shardCollection: db.getName() + ".system.resharding.someUUID", key: {_id: 1}}));
+assert.commandWorked(
+    db.adminCommand({shardCollection: db.getName() + ".system.resharding.someUUID", key: {_id: 1}}),
+);
 
 // Insert a document to capture the cluster time at which our tests begin.
 assert.commandWorked(db.t1.insert({_id: 0, a: 1}));
@@ -59,8 +60,16 @@ assert.soon(() => wholeDBCursor.hasNext());
 const documentInsertedEvent = wholeDBCursor.next();
 
 // Verify that the event is a document insertion event.
-assert.eq("insert", documentInsertedEvent.operationType, "Unexpected change event: " + tojson(documentInsertedEvent));
-assert.eq("t1", documentInsertedEvent.ns.coll, "Unexpected change event: " + tojson(documentInsertedEvent));
+assert.eq(
+    "insert",
+    documentInsertedEvent.operationType,
+    "Unexpected change event: " + tojson(documentInsertedEvent),
+);
+assert.eq(
+    "t1",
+    documentInsertedEvent.ns.coll,
+    "Unexpected change event: " + tojson(documentInsertedEvent),
+);
 const clusterTimeAtInsert = documentInsertedEvent.clusterTime;
 
 const systemCollection = db["system.resharding.someUUID"];

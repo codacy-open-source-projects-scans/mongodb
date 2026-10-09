@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG BASE_IMAGE=quay.io/mongodb/bazel-remote-execution:ubuntu24-2025_09_05-17_18_29
+ARG BASE_IMAGE=quay.io/mongodb/bazel-remote-execution:ubuntu24-2026_03_26-16_42_59
 FROM $BASE_IMAGE
 ARG BASE_IMAGE
 
@@ -10,21 +10,22 @@ ARG USER_GID=$USER_UID
 # Create the user
 RUN groupadd $USERNAME && useradd -s /bin/bash --gid $USER_GID -m $USERNAME
 
-RUN apt-get update && apt-get install -y \
-    sudo \
-    curl \
-    ca-certificates \
-    xdg-utils \
-    wget \
-    less \
-    jq \
-    vim-tiny \
-    procps \
-    lsof \
-    zip \
-    unzip \
-    openssh-client \
-    git \
+RUN apt-get update \
+    && apt-get install -y \
+        sudo \
+        curl \
+        ca-certificates \
+        xdg-utils \
+        wget \
+        less \
+        jq \
+        vim-tiny \
+        procps \
+        lsof \
+        zip \
+        unzip \
+        openssh-client \
+        git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install xdg-open wrapper for browser integration
@@ -140,7 +141,11 @@ RUN /opt/mongodbtoolchain/v5/bin/python3.13 -m venv /tmp/pipx-venv && \
 # Install db-contrib-tool using pipx
 RUN /home/${USERNAME}/.local/bin/pipx install db-contrib-tool
 
-# Install poetry with pinned dependencies
-COPY --chown=${USERNAME}:${USERNAME} poetry_requirements.txt /tmp/poetry_requirements.txt
-RUN /home/${USERNAME}/.local/bin/pipx install poetry --pip-args="-r /tmp/poetry_requirements.txt" && \
-  rm /tmp/poetry_requirements.txt
+# Install uv (pinned). uv is the dependency manager for the top-level
+# Python deps; version comes from buildscripts/uv_version.txt so all
+# uv installers in the repo (venv_setup.sh, uv_sync.sh, this Dockerfile,
+# antithesis workload Dockerfile, powercycle bootstrap) resolve to the
+# same pin. `--mount=type=bind` reads the version file at build time
+# without leaving it in the final image layer.
+RUN --mount=type=bind,source=buildscripts/uv_version.txt,target=/tmp/uv_version.txt \
+    /home/${USERNAME}/.local/bin/pipx install "uv==$(cat /tmp/uv_version.txt)"

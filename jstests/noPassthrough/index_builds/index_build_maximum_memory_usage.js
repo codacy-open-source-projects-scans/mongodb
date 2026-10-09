@@ -4,6 +4,9 @@
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
+// Index builds allow lower memory limits when testing diagnostics are enabled.
+TestData.testingDiagnosticsEnabled = false;
+
 const replSet = new ReplSetTest({
     nodes: 1,
 });
@@ -37,7 +40,13 @@ while (d < docs) {
 function roughlyEqual(expected, actual, digits) {
     let expectedNormalized = Math.trunc(expected / Math.pow(10, digits));
     let actualNormalized = Math.trunc(actual / Math.pow(10, digits));
-    jsTestLog("expected: [" + expectedNormalized.toString() + "] == [" + actualNormalized.toString() + "]");
+    jsTestLog(
+        "expected: [" +
+            expectedNormalized.toString() +
+            "] == [" +
+            actualNormalized.toString() +
+            "]",
+    );
     return expectedNormalized == actualNormalized;
 }
 
@@ -49,19 +58,31 @@ function assertLogIdExists(logId) {
     );
 }
 
-function runTest(indexSpec, indexBuildMemoryLimit, expectedComputedLimit, expectedLogId, isSuccess) {
+function runTest(
+    indexSpec,
+    indexBuildMemoryLimit,
+    expectedComputedLimit,
+    expectedLogId,
+    isSuccess,
+) {
     clearRawMongoProgramOutput();
 
     if (indexBuildMemoryLimit != "default") {
         if (!isSuccess) {
             assert.commandFailedWithCode(
-                primary.adminCommand({setParameter: 1, maxIndexBuildMemoryUsageMegabytes: indexBuildMemoryLimit}),
+                primary.adminCommand({
+                    setParameter: 1,
+                    maxIndexBuildMemoryUsageMegabytes: indexBuildMemoryLimit,
+                }),
                 ErrorCodes.BadValue,
             );
             return;
         } else {
             assert.commandWorked(
-                primary.adminCommand({setParameter: 1, maxIndexBuildMemoryUsageMegabytes: indexBuildMemoryLimit}),
+                primary.adminCommand({
+                    setParameter: 1,
+                    maxIndexBuildMemoryUsageMegabytes: indexBuildMemoryLimit,
+                }),
             );
         }
     }
@@ -102,7 +123,13 @@ function runPercentLimitTest(
             isSuccess +
             ")",
     );
-    runTest(indexSpec, indexBuildMemoryPercentLimit, expectedComputedLimit, expectedLogId, isSuccess);
+    runTest(
+        indexSpec,
+        indexBuildMemoryPercentLimit,
+        expectedComputedLimit,
+        expectedLogId,
+        isSuccess,
+    );
 }
 
 function runByteLimitTest(
@@ -125,7 +152,13 @@ function runByteLimitTest(
             isSuccess +
             ")",
     );
-    runTest(indexSpec, indexBuildMemoryByteLimitMB, expectedComputedLimitBytes, expectedLogId, isSuccess);
+    runTest(
+        indexSpec,
+        indexBuildMemoryByteLimitMB,
+        expectedComputedLimitBytes,
+        expectedLogId,
+        isSuccess,
+    );
 }
 
 //

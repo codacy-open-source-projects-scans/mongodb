@@ -13,8 +13,6 @@
  *    eventually completes on the new primary.
  *
  * @tags: [
- *   # Primary driven index builds are aborted when a new primary steps up.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   uses_prepare_transaction,
  *   uses_transactions,
  * ]
@@ -45,7 +43,9 @@ assert.commandWorked(primaryColl.insert({_id: 1, a: 1}));
 
 // Enable fail point which makes index build hang in an interruptible state.
 const failPoint = "hangAfterIndexBuildDumpsInsertsFromBulk";
-let res = assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
+let res = assert.commandWorked(
+    primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}),
+);
 let timesEntered = res.count;
 
 const indexName = "a_1";
@@ -70,7 +70,7 @@ const session = primary.startSession();
 const sessionDB = session.getDatabase(dbName);
 const sessionColl = sessionDB.getCollection(collName);
 session.startTransaction();
-assert.commandWorked(sessionColl.insert({x: 1}, {$set: {y: 1}}));
+assert.commandWorked(sessionColl.insert({x: 1}));
 
 jsTestLog("Prepare txn");
 PrepareHelpers.prepareTransaction(session);

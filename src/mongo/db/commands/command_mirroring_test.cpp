@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,14 +12,15 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/versioning_protocol/shard_version_gen.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <algorithm>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -56,6 +30,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class CommandMirroringTest : public unittest::Test {
 public:
@@ -63,7 +38,7 @@ public:
 
     void setUp() override {
         setGlobalServiceContext(ServiceContext::make());
-        Client::initThread("CommandMirroringTest"_sd, getGlobalServiceContext()->getService());
+        Client::initThread("CommandMirroringTest"sv, getGlobalServiceContext()->getService());
     }
 
     void tearDown() override {
@@ -99,7 +74,7 @@ public:
         return (a == b).type == BSONObj::DeferredComparison::Type::kEQ;
     }
 
-    static constexpr auto kDB = "testDB"_sd;
+    static constexpr auto kDB = "testDB"sv;
     const ShardVersionBase kShardVersion = []() {
         ShardVersionBase sv;
         sv.setEpoch(OID());
@@ -143,7 +118,24 @@ protected:
     const std::string kNss = std::string(kDB) + "." + kCollection;
 };
 
-class UpdateCommandTest : public CommandMirroringTest {
+enum class UpdateMessageFormat {
+    DocumentSequence,
+    Inline,
+};
+
+std::string updateMessageFormatToString(UpdateMessageFormat format) {
+    switch (format) {
+        case UpdateMessageFormat::DocumentSequence:
+            return "DocumentSequence";
+        case UpdateMessageFormat::Inline:
+            return "Inline";
+    }
+    MONGO_UNREACHABLE;
+}
+
+// Parameterized test for update commands with different message formats
+class UpdateCommandTest : public CommandMirroringTest,
+                          public ::testing::WithParamInterface<UpdateMessageFormat> {
 public:
     void setUp() override {
         CommandMirroringTest::setUp();
@@ -170,18 +162,44 @@ public:
             args.push_back(rawData.value());
         }
 
-        auto request = CommandMirroringTest::makeCommand(coll, args);
+        switch (GetParam()) {
+            case UpdateMessageFormat::DocumentSequence: {
+                auto request = CommandMirroringTest::makeCommand(coll, args);
 
-        // Directly add `updates` to `OpMsg::sequences` to emulate `OpMsg::parse()` behavior.
-        OpMsg::DocumentSequence seq;
-        seq.name = "updates";
+                // Directly add `updates` to `OpMsg::sequences` to emulate `OpMsg::parse()`
+                // behavior.
+                OpMsg::DocumentSequence seq;
+                seq.name = "updates";
 
-        for (auto update : updates) {
-            seq.objs.emplace_back(std::move(update));
+                for (auto update : updates) {
+                    seq.objs.emplace_back(std::move(update));
+                }
+                request.sequences.emplace_back(std::move(seq));
+
+                return request;
+            }
+            case UpdateMessageFormat::Inline: {
+                BSONObjBuilder bob;
+                bob << "update" << coll;
+                bob << "lsid" << makeLogicalSessionIdForTest().toBSON();
+
+                for (const auto& arg : args) {
+                    bob << arg.firstElement();
+                }
+
+                BSONArrayBuilder updateArrayBuilder(bob.subarrayStart("updates"));
+                for (const auto& update : updates) {
+                    updateArrayBuilder.append(update);
+                }
+                updateArrayBuilder.doneFast();
+
+                return OpMsgRequestBuilder::create(
+                    auth::ValidatedTenancyScope::kNotRequired,
+                    DatabaseName::createDatabaseName_forTest(boost::none, kDB),
+                    bob.obj());
+            }
         }
-        request.sequences.emplace_back(std::move(seq));
-
-        return request;
+        MONGO_UNREACHABLE;
     }
 
     boost::optional<BSONObj> shardVersion;
@@ -190,7 +208,7 @@ public:
     boost::optional<BSONObj> rawData;
 };
 
-TEST_F(UpdateCommandTest, NoQuery) {
+TEST_P(UpdateCommandTest, NoQuery) {
     auto update = BSON("q" << BSONObj() << "u" << BSON("$set" << BSON("_id" << 1)));
     auto mirroredObj = createCommandAndGetMirrored(kCollection, {update});
 
@@ -201,7 +219,7 @@ TEST_F(UpdateCommandTest, NoQuery) {
     ASSERT_EQ(mirroredObj["batchSize"].Int(), 1);
 }
 
-TEST_F(UpdateCommandTest, SingleQuery) {
+TEST_P(UpdateCommandTest, SingleQuery) {
     auto update =
         BSON("q" << BSON("qty" << BSON("$lt" << 50.0)) << "u" << BSON("$inc" << BSON("qty" << 1)));
     auto mirroredObj = createCommandAndGetMirrored(kCollection, {update});
@@ -213,7 +231,7 @@ TEST_F(UpdateCommandTest, SingleQuery) {
     ASSERT_EQ(mirroredObj["batchSize"].Int(), 1);
 }
 
-TEST_F(UpdateCommandTest, SingleQueryWithHintAndCollation) {
+TEST_P(UpdateCommandTest, SingleQueryWithHintAndCollation) {
     auto update = BSON("q" << BSON("price" << BSON("$gt" << 100)) << "hint" << BSON("price" << 1)
                            << "collation" << BSON("locale" << "fr") << "u"
                            << BSON("$inc" << BSON("price" << 10)));
@@ -228,7 +246,7 @@ TEST_F(UpdateCommandTest, SingleQueryWithHintAndCollation) {
     ASSERT_EQ(mirroredObj["batchSize"].Int(), 1);
 }
 
-TEST_F(UpdateCommandTest, MultipleQueries) {
+TEST_P(UpdateCommandTest, MultipleQueries) {
     constexpr int kUpdatesQ = 10;
     std::vector<BSONObj> updates;
     for (auto i = 0; i < kUpdatesQ; i++) {
@@ -244,7 +262,7 @@ TEST_F(UpdateCommandTest, MultipleQueries) {
     ASSERT_EQ(mirroredObj["batchSize"].Int(), 1);
 }
 
-TEST_F(UpdateCommandTest, ValidateShardVersionAndDatabaseVersion) {
+TEST_P(UpdateCommandTest, ValidateShardVersionAndDatabaseVersion) {
     auto update = BSON("q" << BSONObj() << "u" << BSON("$set" << BSON("_id" << 1)));
     {
         auto mirroredObj = createCommandAndGetMirrored(kCollection, {update});
@@ -265,7 +283,7 @@ TEST_F(UpdateCommandTest, ValidateShardVersionAndDatabaseVersion) {
     }
 }
 
-TEST_F(UpdateCommandTest, ValidateEncryptionInformation) {
+TEST_P(UpdateCommandTest, ValidateEncryptionInformation) {
     auto update = BSON("q" << BSONObj() << "u" << BSON("$set" << BSON("_id" << 1)));
     {
         auto mirroredObj = createCommandAndGetMirrored(kCollection, {update});
@@ -282,7 +300,7 @@ TEST_F(UpdateCommandTest, ValidateEncryptionInformation) {
     }
 }
 
-TEST_F(UpdateCommandTest, ValidateRawData) {
+TEST_P(UpdateCommandTest, ValidateRawData) {
     auto update =
         BSON("q" << BSON("control.count" << 2) << "u" << BSON("$set" << BSON("meta" << 3)));
 
@@ -299,6 +317,14 @@ TEST_F(UpdateCommandTest, ValidateRawData) {
     }
 }
 
+INSTANTIATE_TEST_SUITE_P(UpdateCommandMessageFormats,
+                         UpdateCommandTest,
+                         ::testing::Values(UpdateMessageFormat::DocumentSequence,
+                                           UpdateMessageFormat::Inline),
+                         [](const ::testing::TestParamInfo<UpdateMessageFormat>& info) {
+                             return updateMessageFormatToString(info.param);
+                         });
+
 class BulkWriteTest : public CommandMirroringTest {
 public:
     std::string commandName() override {
@@ -306,7 +332,7 @@ public:
     }
 
 private:
-    RAIIServerParameterControllerForTest controller{"featureFlagBulkWriteCommand", true};
+    unittest::ServerParameterGuard controller{"featureFlagBulkWriteCommand", true};
 };
 
 TEST_F(BulkWriteTest, NoUpdateOp) {

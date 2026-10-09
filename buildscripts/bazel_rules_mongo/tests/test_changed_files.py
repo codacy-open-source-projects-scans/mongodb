@@ -69,6 +69,9 @@ class TestChangedFiles(unittest.TestCase):
             shutil.copy(file, new_dest)
 
         cls.repo = Repo(cls.tmp_dir)
+        cls.repo.git.execute(["git", "config", "user.email", "test@example.com"])
+        cls.repo.git.execute(["git", "config", "user.name", "Test User"])
+        cls.repo.git.execute(["git", "config", "commit.gpgsign", "false"])
         # add a testing file to this original commit so we can treat it as a preexisting file that
         # is going to be modified
         write_file(cls.repo, changed_file_name)
@@ -167,3 +170,10 @@ class TestChangedFiles(unittest.TestCase):
     def test_remote_picker(self):
         remote = evergreen_git.get_mongodb_remote(self.repo)
         self.assertIn("10gen/mongo", remote.url, msg="The wrong remote was found.")
+
+    def test_default_origin_branch(self):
+        remote = evergreen_git.get_mongodb_remote(self.repo)
+        self.assertEqual(
+            evergreen_git.get_default_origin_branch(self.repo),
+            f"{remote.name}/{evergreen_git.DEFAULT_ORIGIN_BRANCH}",
+        )

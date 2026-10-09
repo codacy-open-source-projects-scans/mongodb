@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/admission/execution_control/execution_control_stats.h"
 
@@ -34,8 +8,11 @@
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::admission::execution_control {
 namespace {
+using namespace std::literals::string_view_literals;
 
 TEST(AdmissionsHistogramTest, RecordIgnoresNonPositiveAdmissions) {
     AdmissionsHistogram histogram;
@@ -57,16 +34,16 @@ TEST(AdmissionsHistogramTest, RecordIgnoresNonPositiveAdmissions) {
 TEST(AdmissionsHistogramTest, RecordBucketBoundaries) {
     struct TestCase {
         int32_t admissions;
-        StringData expectedBucket;
+        std::string_view expectedBucket;
     };
 
     std::vector<TestCase> testCases = {
-        {1, "1-2"_sd},       {2, "1-2"_sd},       {3, "3-4"_sd},        {4, "3-4"_sd},
-        {5, "5-8"_sd},       {8, "5-8"_sd},       {9, "9-16"_sd},       {16, "9-16"_sd},
-        {17, "17-32"_sd},    {32, "17-32"_sd},    {33, "33-64"_sd},     {64, "33-64"_sd},
-        {65, "65-128"_sd},   {128, "65-128"_sd},  {129, "129-256"_sd},  {256, "129-256"_sd},
-        {257, "257-512"_sd}, {512, "257-512"_sd}, {513, "513-1024"_sd}, {1024, "513-1024"_sd},
-        {1025, "1025+"_sd},  {10000, "1025+"_sd},
+        {1, "1-2"sv},       {2, "1-2"sv},       {3, "3-4"sv},        {4, "3-4"sv},
+        {5, "5-8"sv},       {8, "5-8"sv},       {9, "9-16"sv},       {16, "9-16"sv},
+        {17, "17-32"sv},    {32, "17-32"sv},    {33, "33-64"sv},     {64, "33-64"sv},
+        {65, "65-128"sv},   {128, "65-128"sv},  {129, "129-256"sv},  {256, "129-256"sv},
+        {257, "257-512"sv}, {512, "257-512"sv}, {513, "513-1024"sv}, {1024, "513-1024"sv},
+        {1025, "1025+"sv},  {10000, "1025+"sv},
     };
 
     for (const auto& tc : testCases) {
@@ -102,7 +79,7 @@ TEST(AdmissionsHistogramTest, RecordAccumulatesInBucket) {
     histogram.appendStats(b);
     BSONObj stats = b.obj();
 
-    ASSERT_EQ(stats["1-2"_sd].Long(), 3);
+    ASSERT_EQ(stats["1-2"sv].Long(), 3);
 }
 
 TEST(AdmissionsHistogramTest, AppendStatsOutputsAllBuckets) {
@@ -115,6 +92,47 @@ TEST(AdmissionsHistogramTest, AppendStatsOutputsAllBuckets) {
     ASSERT_EQ(static_cast<size_t>(stats.nFields()), AdmissionsHistogram::kNumBuckets);
     for (size_t i = 0; i < AdmissionsHistogram::kNumBuckets; ++i) {
         ASSERT_TRUE(stats.hasField(AdmissionsHistogram::kBucketNames[i]));
+    }
+}
+
+TEST(QueueWaitTimeHistogramTest, ClampsNonPositiveWaitToDidNotWaitBucket) {
+    QueueWaitTimeHistogram histogram;
+
+    histogram.record(Microseconds{0});
+    histogram.record(Microseconds{-5});
+
+    BSONArrayBuilder arrBuilder;
+    histogram.appendStats(arrBuilder);
+    BSONArray arr = arrBuilder.arr();
+
+    for (auto&& el : arr) {
+        BSONObj bucket = el.Obj();
+        const int64_t lowerBound = bucket["lowerBound"].Long();
+        const int64_t count = bucket["count"].Long();
+        const int64_t expected = lowerBound == 0 ? 2 : 0;
+        ASSERT_EQ(count, expected) << "unexpected count in bucket " << lowerBound;
+    }
+}
+
+TEST(QueueWaitTimeHistogramTest, AppendStatsOutputsAllBuckets) {
+    QueueWaitTimeHistogram histogram;
+
+    BSONArrayBuilder arrBuilder;
+    histogram.appendStats(arrBuilder);
+    BSONArray arr = arrBuilder.arr();
+
+    // One bucket per partition, plus the implicit "did not wait" bucket below the first partition.
+    std::vector<int64_t> expectedLowerBounds = {0};
+    for (int64_t p : QueueWaitTimeHistogram::partitions()) {
+        expectedLowerBounds.push_back(p);
+    }
+
+    ASSERT_EQ(static_cast<size_t>(arr.nFields()), expectedLowerBounds.size());
+
+    size_t i = 0;
+    for (auto&& el : arr) {
+        ASSERT_EQ(el.Obj()["lowerBound"].Long(), expectedLowerBounds[i]) << "bucket index " << i;
+        ++i;
     }
 }
 

@@ -12,9 +12,11 @@
 //   uses_map_reduce_with_temp_collections,
 //   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
 //   run_getLatestProfilerEntry,
+//   # Uses mapReduce which requires server-side JavaScript.
+//   requires_scripting,
 // ]
 
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 const testDB = db.getSiblingDB("profile_mapreduce");
@@ -26,12 +28,16 @@ const coll = testDB.getCollection(collName);
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
 assert.commandWorked(
-    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+    testDB.setProfilingLevel(1, {
+        filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}},
+    }),
 );
 
 // Increase this deadline in order to prevent flakiness in this test.
 assert.commandWorked(
-    testDB.getSiblingDB("admin").runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
+    testDB
+        .getSiblingDB("admin")
+        .runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
 );
 
 const mapFunction = function () {
@@ -50,7 +56,11 @@ for (let i = 0; i < 3; i++) {
 }
 assert.commandWorked(coll.createIndex({a: 1}));
 
-coll.mapReduce(mapFunction, reduceFunction, {query: {a: {$gte: 0}}, out: {inline: 1}, collation: {locale: "fr"}});
+coll.mapReduce(mapFunction, reduceFunction, {
+    query: {a: {$gte: 0}},
+    out: {inline: 1},
+    collation: {locale: "fr"},
+});
 
 let profileObj = getLatestProfilerEntry(testDB);
 

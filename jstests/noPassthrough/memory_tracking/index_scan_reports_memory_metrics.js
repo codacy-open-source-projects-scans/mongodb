@@ -28,8 +28,12 @@ const collName = jsTestName();
 const coll = db[collName];
 db[collName].drop();
 
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}));
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}),
+);
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryMaxWriteToServerStatusMemoryUsageBytes: 1}),
+);
 
 for (let i = 0; i < 10; ++i) {
     //'a' is an array to create a multikey index.
@@ -55,6 +59,8 @@ runMemoryStatsTest({
     // This stage does not release memory on EOF.
     checkInUseTrackedMemBytesResets: false,
     skipServerStatusStageCheck: false,
+    // 10 docs each appear once in the a=5 index entry.
+    expectedServerStatusRecords: 10,
 });
 
 // Clean up.

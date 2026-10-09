@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
@@ -65,6 +39,7 @@
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
+#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
@@ -80,10 +55,10 @@
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -95,6 +70,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 
 #include <absl/container/node_hash_map.h>
 #include <boost/cstdint.hpp>
@@ -256,7 +232,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason) {
+        std::string_view reason) {
         _maybeThrowErrorForFunction(opCtx, ExternalFunction::kGetCollectionOptions);
         if (nss == _sourceNss) {
             return {sourceCollectionOptions, uuid};
@@ -274,7 +250,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         const ShardId& fromShardId) {
         _maybeThrowErrorForFunction(opCtx, ExternalFunction::kGetCollectionOptions);
         return getCollectionOptions(opCtx, nss, uuid, afterClusterTime, reason);
@@ -285,7 +261,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         Timestamp afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         bool expandSimpleCollation) {
         invariant(nss == _sourceNss);
         _maybeThrowErrorForFunction(opCtx, ExternalFunction::kGetCollectionIndexes);
@@ -299,7 +275,7 @@ public:
     void route(
         OperationContext* opCtx,
         const NamespaceString& nss,
-        StringData reason,
+        std::string_view reason,
         unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)> callback) {
         callback(opCtx, getTrackedCollectionRoutingInfo(opCtx, nss));
     }
@@ -316,8 +292,12 @@ public:
         Helpers::update(opCtx, coll, query, update);
     }
 
-    void clearFilteringMetadataOnTempReshardingCollection(
-        OperationContext* opCtx, const NamespaceString& tempReshardingNss) {}
+    void clearCollectionMetadataOnTempReshardingCollection(
+        OperationContext* opCtx, const NamespaceString& tempReshardingNss) {
+        stdx::unordered_set<NamespaceString> namespacesToRefresh{tempReshardingNss};
+        resharding::clearCollectionMetadata(
+            opCtx, namespacesToRefresh, true /* scheduleAsyncRefresh */);
+    }
 
     void ensureReshardingStashCollectionsEmpty(
         OperationContext* opCtx,
@@ -388,7 +368,7 @@ private:
         bool dataReplicationRunning = false;
     };
 
-    const StringData _currentShardKey = "oldKey";
+    const std::string_view _currentShardKey = "oldKey";
 
     const NamespaceString _sourceNss =
         NamespaceString::createNamespaceString_forTest("sourcedb", "sourcecollection");
@@ -442,7 +422,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason) override {
+        std::string_view reason) override {
         return _impl->getCollectionOptions(opCtx, nss, uuid, afterClusterTime, reason);
     }
 
@@ -451,7 +431,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         const ShardId& fromShardId) override {
         return _impl->getCollectionOptions(opCtx, nss, uuid, afterClusterTime, reason, fromShardId);
     }
@@ -461,7 +441,7 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         Timestamp afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         bool expandSimpleCollation) override {
         return _impl->getCollectionIndexes(
             opCtx, nss, uuid, afterClusterTime, reason, expandSimpleCollation);
@@ -469,7 +449,7 @@ public:
 
     void route(OperationContext* opCtx,
                const NamespaceString& nss,
-               StringData reason,
+               std::string_view reason,
                unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)>
                    callback) override {
         _impl->route(opCtx, nss, reason, std::move(callback));
@@ -481,7 +461,7 @@ public:
         _impl->updateCoordinatorDocument(opCtx, query, update);
     }
 
-    void clearFilteringMetadataOnTempReshardingCollection(
+    void clearCollectionMetadataOnTempReshardingCollection(
         OperationContext* opCtx, const NamespaceString& tempReshardingNss) override {}
 
     void ensureReshardingStashCollectionsEmpty(
@@ -680,7 +660,7 @@ BSONObj makeTestDocumentUpdateStatement() {
 void runRandomizedLocking(OperationContext* opCtx,
                           Locker& locker,
                           const ResourceId& resId,
-                          AtomicWord<bool>& keepRunning) {
+                          Atomic<bool>& keepRunning) {
     PseudoRandom random = PseudoRandom(123456);
 
     while (keepRunning.load()) {
@@ -845,6 +825,11 @@ public:
             newShardKeyPattern());
         commonMetadata.setStartTime(getServiceContext()->getFastClockSource()->now());
 
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        commonMetadata.setForwardableOpMetadata(std::move(fom));
+
         doc.setCommonReshardingMetadata(std::move(commonMetadata));
         doc.setSkipCloningAndApplying(testOptions.skipCloningAndApplying);
         doc.setSkipCloning(testOptions.skipCloning);
@@ -892,16 +877,19 @@ public:
             opCtx, recipientDoc.getTempReshardingNss(), options);
     }
 
-    SemiFuture<void> notifyToStartCloningUsingCmd(RecipientStateMachine& recipient,
-                                                  const ReshardingRecipientDocument& recipientDoc) {
+    SharedSemiFuture<void> notifyToStartCloningUsingCmd(
+        RecipientStateMachine& recipient, const ReshardingRecipientDocument& recipientDoc) {
         while (true) {
             try {
                 auto recipientFields = _makeRecipientFields(recipientDoc);
-                return recipient.fulfillAllDonorsPreparedToDonate(
-                    {recipientFields.getCloneTimestamp().get(),
-                     recipientFields.getApproxDocumentsToCopy().get(),
-                     recipientFields.getApproxBytesToCopy().get(),
-                     recipientFields.getDonorShards()});
+                recipient.onCoordinatorStateAdvanced(
+                    CoordinatorStateEnum::kCloning,
+                    RecipientStateMachine::CloneDetails{
+                        recipientFields.getCloneTimestamp().get(),
+                        recipientFields.getApproxDocumentsToCopy().get(),
+                        recipientFields.getApproxBytesToCopy().get(),
+                        recipientFields.getDonorShards()});
+                return recipient.awaitInCreatingCollection();
             } catch (const ExceptionFor<ErrorCodes::PrimaryOnlyServiceInitializing>&) {
                 sleepmillis(100);
             }
@@ -929,7 +917,7 @@ public:
             // A recipient only explicitly waits for the critical section to start before
             // transitioning to "strict-consistency" when it skips cloning and applying.
             ASSERT_OK(recipient.awaitInApplyingOrError().getNoThrow());
-            recipient.onCriticalSectionStarted();
+            recipient.onCoordinatorStateAdvanced(CoordinatorStateEnum::kBlockingWrites);
         }
     }
 
@@ -959,9 +947,13 @@ public:
     void awaitChangeStreamsMonitorCompleted(OperationContext* opCtx,
                                             RecipientStateMachine& recipient,
                                             const ReshardingRecipientDocument& recipientDoc) {
-        auto swDocumentsDelta =
-            recipient.awaitChangeStreamsMonitorCompletedForTest().getNoThrow(opCtx);
-        if (recipientDoc.getPerformVerification() && !recipientDoc.getSkipCloningAndApplying()) {
+        auto swDocumentsDelta = recipient.awaitChangeStreamsMonitorCompleted().getNoThrow(opCtx);
+        if (recipientDoc.getPerformVerification()) {
+            if (recipientDoc.getSkipCloningAndApplying()) {
+                // Skip-cloning recipients have no change streams monitor; they report a delta of 0.
+                ASSERT_EQ(swDocumentsDelta.getValue(), 0);
+                return;
+            }
             ASSERT_OK(swDocumentsDelta.getStatus());
 
             // Verify the delta.
@@ -1231,19 +1223,23 @@ protected:
         if (testOptions.performVerification &&
             (state == RecipientStateEnum::kApplying ||
              state == RecipientStateEnum::kStrictConsistency)) {
-            ASSERT_EQ(*mutableState.getTotalNumDocuments(), expectedDocsCopied);
+            ASSERT_EQ(*mutableState.getNumDocumentsCloned(), expectedDocsCopied);
             ASSERT_EQ(*mutableState.getTotalDocumentSize(), expectedBytesCopied);
         } else if (state == RecipientStateEnum::kDone) {
+            // Upon transitioning to the "done" state, 'totalDocumentSize' and 'totalNumDocuments'
+            // are set to the fast count size. This test deliberately leaves the temporary
+            // collection empty when testing verification so this is expected to be equal to the
+            // delta.
             ASSERT_EQ(*mutableState.getTotalNumDocuments(),
-                      expectedDocsCopied + getExpectedDocumentsDelta());
-            // Upon transitioning to the "done" state, 'totalDocumentSize' is set to the fast count
-            // size. This test deliberately leaves the temporary collection empty when testing
-            // verification so this is expected to be equal to the delta.
+                      testOptions.performVerification
+                          ? getExpectedDocumentsDelta()
+                          : expectedDocsCopied + getExpectedDocumentsDelta());
             ASSERT_EQ(*mutableState.getTotalDocumentSize(),
                       testOptions.performVerification
                           ? getExpectedDocumentsDeltaBytes()
                           : expectedBytesCopied + getExpectedDocumentsDeltaBytes());
         } else {
+            ASSERT_FALSE(mutableState.getNumDocumentsCloned());
             ASSERT_FALSE(mutableState.getTotalNumDocuments());
             ASSERT_FALSE(mutableState.getTotalDocumentSize());
         }
@@ -1323,20 +1319,32 @@ protected:
                 // to the "strict-consistency" state. If verification is disabled, they are
                 // populated upon transitioning to the "strict-consistency" state.
                 if (testOptions.performVerification && state == RecipientStateEnum::kApplying) {
-                    ASSERT_EQ(*mutableState.getTotalNumDocuments(), expectedDocsCopied);
+                    ASSERT_EQ(*mutableState.getNumDocumentsCloned(), expectedDocsCopied);
                     ASSERT_EQ(*mutableState.getTotalDocumentSize(), expectedBytesCopied);
                 } else if (state >= RecipientStateEnum::kStrictConsistency) {
+                    if (testOptions.performVerification) {
+                        // numDocumentsCloned is only populated when verification is enabled
+                        // (set during _transitionToApplying). The delta from change streams is
+                        // not included; that is tracked in documentsFinal on the coordinator.
+                        ASSERT_EQ(*mutableState.getNumDocumentsCloned(), expectedDocsCopied);
+                    } else {
+                        ASSERT_FALSE(mutableState.getNumDocumentsCloned());
+                    }
+
+                    // 'totalNumDocuments' and 'totalDocumentSize' are fast counts set by
+                    // _updateContextMetrics. This test deliberately leaves the temp collection
+                    // empty when testing verification (resume-data path), so the value equals the
+                    // delta bytes contributed by the in-test writes.
                     ASSERT_EQ(*mutableState.getTotalNumDocuments(),
-                              expectedDocsCopied + getExpectedDocumentsDelta());
-                    // Upon transitioning to the "strict-consistency" state, 'totalDocumentSize' is
-                    // set to the fast count size. This test deliberately leaves the temporary
-                    // collection empty when testing verification so this is expected to be equal to
-                    // the delta.
+                              testOptions.performVerification
+                                  ? getExpectedDocumentsDelta()
+                                  : expectedDocsCopied + getExpectedDocumentsDelta());
                     ASSERT_EQ(*mutableState.getTotalDocumentSize(),
                               testOptions.performVerification
                                   ? getExpectedDocumentsDeltaBytes()
                                   : expectedBytesCopied + getExpectedDocumentsDeltaBytes());
                 } else {
+                    ASSERT_FALSE(mutableState.getNumDocumentsCloned());
                     ASSERT_FALSE(mutableState.getTotalNumDocuments());
                     ASSERT_FALSE(mutableState.getTotalDocumentSize());
                 }
@@ -1517,11 +1525,11 @@ private:
     const int64_t _numDeletes = 2;
 
     // Set the batch size 1 to test multi-batch processing in unit tests with multiple events.
-    RAIIServerParameterControllerForTest _batchSize{
+    unittest::ServerParameterGuard _batchSize{
         "reshardingVerificationChangeStreamsEventsBatchSizeLimit", 1};
 
     // Feature flag controller for test options
-    boost::optional<RAIIServerParameterControllerForTest> _cloneNoRefreshController;
+    boost::optional<unittest::ServerParameterGuard> _cloneNoRefreshController;
 };
 
 TEST_F(ReshardingRecipientServiceTest, CanTransitionThroughEachStateToCompletion) {
@@ -1759,13 +1767,6 @@ TEST_F(ReshardingRecipientServiceTest, ReportForCurrentOpAfterCompletion) {
         ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
                   ErrorCodes::InterruptedDueToReplStateChange);
 
-        // TODO (SERVER-115139): Remove this failpoint after making the recipient able to reliably
-        // handle the case where abort request comes in before the cancellation source is
-        // initialized.
-        auto initCancelStateFp =
-            globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
-        auto initCancelStateFpTimesEntered = initCancelStateFp->setMode(FailPoint::alwaysOn);
-
         // Now call step up. The old recipient object has not yet been destroyed because we
         // still hold a shared pointer to it ('recipient') - this can happen in production after
         // a failover if a state machine is slow to clean up.
@@ -1785,9 +1786,6 @@ TEST_F(ReshardingRecipientServiceTest, ReportForCurrentOpAfterCompletion) {
         ASSERT_FALSE(isPausedOrShutdown);
         auto newRecipient = *maybeRecipient;
         ASSERT_NE(recipient, newRecipient);
-
-        initCancelStateFp->waitForTimesEntered(initCancelStateFpTimesEntered + 1);
-        initCancelStateFp->setMode(FailPoint::off);
 
         // No need to finish the resharding op, so we just cancel the op.
         newRecipient->abort(false);
@@ -1985,13 +1983,6 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
         ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
                   ErrorCodes::InterruptedDueToReplStateChange);
 
-        // TODO (SERVER-115139): Remove this failpoint after making the recipient able to reliably
-        // handle the case where abort request comes in before the cancellation source is
-        // initialized.
-        auto initCancelStateFp =
-            globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
-        auto initCancelStateFpTimesEntered = initCancelStateFp->setMode(FailPoint::alwaysOn);
-
         recipient.reset();
         stepUp(opCtx.get());
 
@@ -2000,10 +1991,6 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
         ASSERT_TRUE(maybeRecipient);
         ASSERT_FALSE(isPausedOrShutdown);
         recipient = *maybeRecipient;
-
-        initCancelStateFp->waitForTimesEntered(initCancelStateFpTimesEntered + 1);
-        initCancelStateFp->setMode(FailPoint::off);
-
         recipient->abort(false);
 
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
@@ -2035,94 +2022,6 @@ TEST_F(ReshardingRecipientServiceTest, DropsTemporaryReshardingCollectionOnAbort
                                   MODE_IS);
             ASSERT_FALSE(coll.exists());
         }
-    }
-}
-
-TEST_F(ReshardingRecipientServiceTest, AbortRacesWithInitCancelStateOnStepUp) {
-    auto fpBeforeInit =
-        globalFailPointRegistry().find("reshardingPauseRecipientBeforeInitCancelState");
-    auto fpAfterInit =
-        globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
-    auto fpInAbort =
-        globalFailPointRegistry().find("reshardingPauseRecipientInAbortBeforePromiseSet");
-
-    for (const auto& testOptions : makeBasicTestOptions()) {
-        setupFeatureFlags(testOptions);
-
-        LOGV2(11513901,
-              "Running case",
-              "test"_attr = unittest::getTestName(),
-              "testOptions"_attr = testOptions);
-
-        // Drive instance 1 to kCreatingCollection and pause there before stepDown(),
-        // matching the synchronization pattern from StepDownStepUpEachTransition. Calling
-        // stepDown() directly after getOrCreate races with run() scheduling and the
-        // completion future does not resolve.
-        PauseDuringStateTransitions creatingCollectionGuard{
-            controller(), RecipientStateEnum::kCreatingCollection};
-        auto doc = makeRecipientDocument(testOptions);
-        auto instanceId =
-            BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
-
-        auto opCtx = makeOperationContext();
-        if (testOptions.isAlsoDonor) {
-            createSourceCollection(opCtx.get(), doc);
-        }
-
-        RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
-        auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
-
-        notifyToStartCloning(opCtx.get(), *recipient, doc);
-        creatingCollectionGuard.wait(RecipientStateEnum::kCreatingCollection);
-        stepDown();
-        creatingCollectionGuard.unset(RecipientStateEnum::kCreatingCollection);
-        ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
-                  ErrorCodes::InterruptedDueToReplStateChange);
-        recipient.reset();
-
-        // Arm failpoints before stepUp so instance 2's run() pauses at the start of
-        // _initCancelState the moment it is scheduled.
-        auto fpBeforeBaseline = fpBeforeInit->setMode(FailPoint::alwaysOn);
-        auto fpAfterBaseline = fpAfterInit->setMode(FailPoint::alwaysOn);
-        auto fpAbortBaseline = fpInAbort->setMode(FailPoint::alwaysOn);
-
-        stepUp(opCtx.get());
-
-        auto [maybeRecipient, isPausedOrShutdown] =
-            RecipientStateMachine::lookup(opCtx.get(), _service, instanceId);
-        ASSERT_TRUE(maybeRecipient);
-        ASSERT_FALSE(isPausedOrShutdown);
-        recipient = *maybeRecipient;
-
-        // Instance 2's run() paused at the start of _initCancelState; _cancelState is null.
-        fpBeforeInit->waitForTimesEntered(fpBeforeBaseline + 1);
-
-        // abort() will observe _cancelState == nullptr, skip the fast-path cancel, and
-        // pause before setting the coordinator promises.
-        stdx::thread abortThread([&] { recipient->abort(false); });
-        ON_BLOCK_EXIT([&] {
-            if (abortThread.joinable()) {
-                abortThread.join();
-            }
-        });
-        fpInAbort->waitForTimesEntered(fpAbortBaseline + 1);
-
-        // Let _initCancelState publish _cancelState. Its isReady() safety-net check sees
-        // the promise is not yet set (abort is paused), so it skips the safety-net cancel.
-        fpBeforeInit->setMode(FailPoint::off);
-        fpAfterInit->waitForTimesEntered(fpAfterBaseline + 1);
-
-        // Release abort() and let it finish its late cancel.
-        fpInAbort->setMode(FailPoint::off);
-        abortThread.join();
-
-        fpAfterInit->setMode(FailPoint::off);
-
-        // The recipient must complete the abort path even though abort() and
-        // _initCancelState raced; a regression would leave _cancelState uncanceled and
-        // hang here.
-        ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
-        checkRecipientDocumentRemoved(opCtx.get());
     }
 }
 
@@ -2312,6 +2211,9 @@ TEST_F(ReshardingRecipientServiceTest, SkipsDuplicateOplogEntryOnRecoveryInStric
     TestOptions testOptions{.isAlsoDonor = false, .performVerification = true};
     setupFeatureFlags(testOptions);
 
+    PauseDuringStateTransitions stateTransitionsGuard{controller(),
+                                                      RecipientStateEnum::kStrictConsistency};
+
     auto doc = makeRecipientDocument(testOptions);
     auto instanceId =
         BSON(ReshardingRecipientDocument::kReshardingUUIDFieldName << doc.getReshardingUUID());
@@ -2324,6 +2226,10 @@ TEST_F(ReshardingRecipientServiceTest, SkipsDuplicateOplogEntryOnRecoveryInStric
     notifyToStartCloning(rawOpCtx, *recipient, doc);
     awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
     notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+    // Wait for state transition to ensure writeToCollection documents are written
+    stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
+    stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
 
     // Wait for the change streams monitor to complete — this proves the oplog entry was written
     // on the normal path.
@@ -2863,7 +2769,7 @@ TEST_F(ReshardingRecipientServiceTest, RestoreMetricsAfterStepUpWithMissingProgr
 
         auto mutableState = doc.getMutableState();
         mutableState.setState(RecipientStateEnum::kApplying);
-        mutableState.setTotalNumDocuments(0);  // Needed for performVerification.
+        mutableState.setNumDocumentsCloned(0);  // Needed for performVerification.
         doc.setMutableState(mutableState);
         doc.setCloneTimestamp(Timestamp{10, 0});
         doc.setStartConfigTxnCloneTime(Date_t::now());
@@ -2924,9 +2830,87 @@ TEST_F(ReshardingRecipientServiceTest, AbortWhileChangeStreamsMonitorInProgress)
 
     recipient->abort(false);
 
-    auto status = recipient->awaitChangeStreamsMonitorCompletedForTest().getNoThrow();
+    auto status = recipient->awaitChangeStreamsMonitorCompleted().getNoThrow();
     ASSERT((status == ErrorCodes::CallbackCanceled) || (status == ErrorCodes::Interrupted))
         << "Expected CSM to be interrupted by abort, got: " << status;
+    ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+}
+
+TEST_F(ReshardingRecipientServiceTest, RetryableErrorDuringChangeStreamsMonitorTriggersRecreation) {
+    TestOptions testOptions{.isAlsoDonor = false, .performVerification = true};
+    LOGV2(10903207,
+          "Running case",
+          "test"_attr = unittest::getTestName(),
+          "testOptions"_attr = testOptions);
+
+    // Guard on kStrictConsistency transition so that reshardDoneCatchUp oplog does not race with
+    // writeToCollection, which can cause the recreated monitor to report the wrong delta.
+    PauseDuringStateTransitions stateTransitionsGuard{controller(),
+                                                      RecipientStateEnum::kStrictConsistency};
+
+    // Fire the failpoint once with a retryable error. The monitor should clean up, recreate
+    // itself from the last persisted resume token, and complete normally.
+    auto fp = globalFailPointRegistry().find(
+        "reshardingRecipientFailsUpdatingChangeStreamsMonitorProgress");
+    fp->setMode(FailPoint::nTimes, 1, BSON("errorCode" << ErrorCodes::HostUnreachable));
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    notifyToStartCloning(opCtx.get(), *recipient, doc);
+    awaitChangeStreamsMonitorStarted(opCtx.get(), *recipient, doc);
+    notifyCriticalSectionStarted(opCtx.get(), *recipient, doc);
+
+    stateTransitionsGuard.wait(RecipientStateEnum::kStrictConsistency);
+    stateTransitionsGuard.unset(RecipientStateEnum::kStrictConsistency);
+
+    awaitChangeStreamsMonitorCompleted(opCtx.get(), *recipient, doc);
+    notifyReshardingCommitting(opCtx.get(), *recipient, doc);
+
+    ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+    checkRecipientDocumentRemoved(opCtx.get());
+}
+
+TEST_F(ReshardingRecipientServiceTest,
+       AwaitChangeStreamsMonitorCompletedReturnsZeroWhenSkipCloningAndApplying) {
+    // A recipient that won't own any chunks skips cloning and applying, and intentionally does
+    // not start its change streams monitor. The coordinator's recipient fetch command still
+    // queries every recipient via awaitChangeStreamsMonitorCompleted(); for skip-cloning
+    // recipients it must return a delta of 0 so verification can complete (rather than blocking
+    // forever on a promise that will never be fulfilled).
+    TestOptions testOptions{.isAlsoDonor = false,
+                            .skipCloningAndApplying = true,
+                            .noChunksToCopy = true,
+                            .performVerification = true};
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    auto swDocumentsDelta = recipient->awaitChangeStreamsMonitorCompleted().getNoThrow(opCtx.get());
+    ASSERT_OK(swDocumentsDelta.getStatus());
+    ASSERT_EQ(swDocumentsDelta.getValue(), 0);
+
+    recipient->abort(false /* isUserCancelled */);
+    ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
+}
+
+TEST_F(ReshardingRecipientServiceTest,
+       AwaitChangeStreamsMonitorCompletedReturnsIllegalOperationWhenVerificationDisabled) {
+    TestOptions testOptions{.isAlsoDonor = false, .performVerification = false};
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    auto swDocumentsDelta = recipient->awaitChangeStreamsMonitorCompleted().getNoThrow(opCtx.get());
+    ASSERT_EQ(swDocumentsDelta.getStatus(), ErrorCodes::IllegalOperation);
+
+    recipient->abort(false /* isUserCancelled */);
     ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
 }
 
@@ -2973,13 +2957,10 @@ TEST_F(ReshardingRecipientServiceTest, AbortWhileWaitingForCriticalSectionStarte
             recipient->abort(testOptions.abortOptions->isUserCancelled);
 
             auto changeStreamsMonitorCompletedStatus =
-                recipient->awaitChangeStreamsMonitorCompletedForTest().getNoThrow();
+                recipient->awaitChangeStreamsMonitorCompleted().getNoThrow();
             ASSERT_EQ(changeStreamsMonitorCompletedStatus, ErrorCodes::IllegalOperation);
-            // TODO (SERVER-114077): Make sure that there can never be dangling
-            // _shardsvrRecipientCriticalSectionStarted threads when resharding gets aborted both
-            // implicitly and explicitly.
-            // ASSERT_EQ(recipient->awaitInStrictConsistencyOrError().getNoThrow(),
-            //           ErrorCodes::ReshardCollectionAborted);
+            ASSERT_EQ(recipient->awaitInStrictConsistencyOrError().getNoThrow(),
+                      ErrorCodes::ReshardCollectionAborted);
             ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
             checkRecipientDocumentRemoved(opCtx.get());
         }
@@ -3008,19 +2989,8 @@ TEST_F(ReshardingRecipientServiceTest, AbortAfterStepUpWithAbortReasonFromCoordi
             createSourceCollection(opCtx.get(), doc);
         }
 
-        // TODO (SERVER-115139): Remove this failpoint after making the recipient able to reliably
-        // handle the case where abort request comes in before the cancellation source is
-        // initialized.
-        auto initCancelStateFp =
-            globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
-        auto initCancelStateFpTimesEntered = initCancelStateFp->setMode(FailPoint::alwaysOn);
-
         RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
         auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
-
-        initCancelStateFp->waitForTimesEntered(initCancelStateFpTimesEntered + 1);
-        initCancelStateFp->setMode(FailPoint::off);
-
         recipient->abort(false);
         removeRecipientDocFailpoint->waitForTimesEntered(timesEnteredFailPoint + 1);
 
@@ -3088,13 +3058,6 @@ TEST_F(ReshardingRecipientServiceTest, FailoverDuringErrorState) {
                   ErrorCodes::InterruptedDueToReplStateChange);
         recipient.reset();
 
-        // TODO (SERVER-115139): Remove this failpoint after making the recipient able to reliably
-        // handle the case where abort request comes in before the cancellation source is
-        // initialized.
-        auto initCancelStateFp =
-            globalFailPointRegistry().find("reshardingPauseRecipientAfterInitCancelState");
-        auto initCancelStateFpTimesEntered = initCancelStateFp->setMode(FailPoint::alwaysOn);
-
         stepUp(opCtx.get());
 
         auto [maybeRecipient, isPausedOrShutdown] =
@@ -3111,10 +3074,6 @@ TEST_F(ReshardingRecipientServiceTest, FailoverDuringErrorState) {
         }
 
         recipient->abort(false);
-
-        initCancelStateFp->waitForTimesEntered(initCancelStateFpTimesEntered + 1);
-        initCancelStateFp->setMode(FailPoint::off);
-
         ASSERT_OK(recipient->getCompletionFuture().getNoThrow());
     }
 }
@@ -3192,12 +3151,12 @@ TEST_F(ReshardingRecipientServiceTest, TestVerifyIndexSpecsThrowsExceptionOnMism
 
 TEST_F(ReshardingRecipientServiceTest,
        TestVerifyIndexSpecsDoesNotPerformVerificationIfFeatureFlagIsNotSet) {
-    RAIIServerParameterControllerForTest indexVerificationServerParameter(
-        "reshardingIndexVerification", false);
+    unittest::ServerParameterGuard indexVerificationServerParameter("reshardingIndexVerification",
+                                                                    false);
     // Enable the resharding verification feature flag to verify that it does not override the index
     // validation parameter.
-    RAIIServerParameterControllerForTest countVerificationFeatureFlag(
-        "featureFlagReshardingVerification", true);
+    unittest::ServerParameterGuard countVerificationFeatureFlag("featureFlagReshardingVerification",
+                                                                true);
 
     // Set sourceCollectionIndexSpecs to create mismatched index specs.
     sourceCollectionIndexSpecs = {BSON("key" << BSON("a" << 1) << "name"
@@ -3309,7 +3268,7 @@ TEST_F(ReshardingRecipientServiceTest,
 // If the feature was turned on we would catch the mismatched options and throw an exception.
 TEST_F(ReshardingRecipientServiceTest,
        TestVerifyCollectionOptionsDoesNotPerformVerificationIfFeatureFlagIsNotSet) {
-    RAIIServerParameterControllerForTest collectionOptionsVerificationServerParameter(
+    unittest::ServerParameterGuard collectionOptionsVerificationServerParameter(
         "reshardingCollectionOptionsVerification", false);
 
     // Set tempReshardingCollectionOptions to create mismatched collection options.
@@ -3317,8 +3276,8 @@ TEST_F(ReshardingRecipientServiceTest,
 
     // Enable the resharding verification feature flag to verify that it does not override the
     // collection options validation parameter.
-    RAIIServerParameterControllerForTest countVerificationFeatureFlag(
-        "featureFlagReshardingVerification", true);
+    unittest::ServerParameterGuard countVerificationFeatureFlag("featureFlagReshardingVerification",
+                                                                true);
     for (const auto& testOptions : makeBasicTestOptions()) {
         setupFeatureFlags(testOptions);
 
@@ -3376,7 +3335,7 @@ TEST_F(ReshardingRecipientServiceTest, VerifyRecipientRetriesOnLockTimeoutError)
         // Start a thread to create randomized lock/unlock contention.
         const ResourceId resId(RESOURCE_COLLECTION, doc.getTempReshardingNss());
         Locker locker(opCtx->getServiceContext());
-        AtomicWord<bool> keepRunning{true};
+        Atomic<bool> keepRunning{true};
         stdx::thread lockThread(
             [&] { runRandomizedLocking(opCtx.get(), locker, resId, keepRunning); });
 
@@ -3449,6 +3408,56 @@ TEST_F(ReshardingRecipientServiceTest, UnrecoverableErrorDuringApplying) {
         runUnrecoverableErrorTest(
             testOptions, RecipientStateEnum::kApplying, kEnsureReshardingStashCollectionsEmpty);
     }
+}
+
+
+TEST_F(ReshardingRecipientServiceTest, StepDownBeforeRunFulfillsCompletionPromise) {
+    auto testOptions = makeBasicTestOptions().front();
+    setupFeatureFlags(testOptions);
+
+    auto& fp = repl::PrimaryOnlyServiceHangBeforeRunningInstance;
+    auto timesEntered = fp.setMode(FailPoint::alwaysOn);
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto opCtx = makeOperationContext();
+    RecipientStateMachine::insertStateDocument(opCtx.get(), doc);
+    auto recipient = RecipientStateMachine::getOrCreate(opCtx.get(), _service, doc.toBSON());
+
+    fp.waitForTimesEntered(timesEntered + 1);
+    stepDown();
+
+    ASSERT_EQ(recipient->getCompletionFuture().getNoThrow(),
+              ErrorCodes::InterruptedDueToReplStateChange);
+
+    fp.setMode(FailPoint::off);
+}
+
+TEST_F(ReshardingRecipientServiceTest, OnReshardingFieldsChangesTassertsInAuthoritativePath) {
+    auto testOptions = makeBasicTestOptions().front();
+
+    auto doc = makeRecipientDocument(testOptions);
+    auto commonMetadata = doc.getCommonReshardingMetadata();
+    commonMetadata.setAuthoritativeMetadataAccessLevel(
+        ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAllowed);
+    doc.setCommonReshardingMetadata(std::move(commonMetadata));
+
+    RecipientStateMachine recipient{checked_cast<ReshardingRecipientService*>(_service),
+                                    doc,
+                                    std::make_unique<ExternalStateForTest>(),
+                                    getServiceContext()};
+
+    auto opCtx = makeOperationContext();
+    auto reshardingFields = TypeCollectionReshardingFields{doc.getReshardingUUID()};
+    reshardingFields.setState(CoordinatorStateEnum::kApplying);
+
+    // onReshardingFieldsChanges throws when called in the authoritative path.
+    ASSERT_THROWS_WITH_CHECK(recipient.onReshardingFieldsChanges(
+                                 opCtx.get(), reshardingFields, false /* noChunksToCopy */),
+                             DBException,
+                             [](const DBException& ex) {
+                                 EXPECT_EQ(ex.code(), 12862901);
+                                 assertionCount.tripwire.subtractAndFetch(1);
+                             });
 }
 
 }  // namespace

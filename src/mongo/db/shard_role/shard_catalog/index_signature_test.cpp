@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,14 +23,15 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/uuid.h"
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -66,26 +40,26 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class IndexSignatureTest : public CatalogTestFixture {
 public:
     IndexSignatureTest() : CatalogTestFixture() {}
 
     StatusWith<const IndexCatalogEntry*> createIndex(BSONObj spec) {
-        // Build the specified index on the collection.
-        WriteUnitOfWork wuow(opCtx());
-        CollectionWriter writer{opCtx(), _coll.get()};
-
-        // Get the index catalog associated with the test collection.
-        auto* indexCatalog = writer.getWritableCollection(opCtx())->getIndexCatalog();
-        auto status = indexCatalog->createIndexOnEmptyCollection(
-            opCtx(), writer.getWritableCollection(opCtx()), spec);
-        if (!status.isOK()) {
-            return status.getStatus();
+        CollectionWriter writer{opCtx(), &_coll.value()};
+        {
+            WriteUnitOfWork wuow(opCtx());
+            auto* indexCatalog = writer.getWritableCollection(opCtx())->getIndexCatalog();
+            auto status = indexCatalog->createIndexOnEmptyCollection(
+                opCtx(), writer.getWritableCollection(opCtx()), spec);
+            if (!status.isOK()) {
+                return status.getStatus();
+            }
+            wuow.commit();
         }
-        wuow.commit();
         // Find the index entry and return it.
-        return indexCatalog->findIndexByName(
+        return writer.get()->getIndexCatalog()->findIndexByName(
             opCtx(), spec.getStringField(IndexDescriptor::kIndexNameFieldName));
     }
 
@@ -103,7 +77,7 @@ public:
     }
 
     const CollectionPtr& coll() const {
-        return *_coll.get();
+        return _coll->getCollectionPtr();
     }
 
     OperationContext* opCtx() {
@@ -114,7 +88,10 @@ protected:
     void setUp() override {
         CatalogTestFixture::setUp();
         ASSERT_OK(storageInterface()->createCollection(opCtx(), _nss, {}));
-        _coll.emplace(opCtx(), _nss, MODE_X);
+        _coll = acquireCollection(opCtx(),
+                                  CollectionAcquisitionRequest::fromOpCtx(
+                                      opCtx(), _nss, AcquisitionPrerequisites::kWrite),
+                                  MODE_X);
     }
 
     void tearDown() override {
@@ -123,7 +100,7 @@ protected:
     }
 
 private:
-    boost::optional<AutoGetCollection> _coll;
+    boost::optional<CollectionAcquisition> _coll;
     NamespaceString _nss = NamespaceString::createNamespaceString_forTest("fooDB.barColl");
 };
 
@@ -238,7 +215,7 @@ TEST_F(IndexSignatureTest, CannotCreateMultipleIndexesOnSameKeyPatternIfNonSigna
     auto* basicIndex = unittest::assertGet(createIndex(indexSpec));
 
     std::vector<BSONObj> nonSigOptions = {
-        BSON(IndexDescriptor::kStorageEngineFieldName << BSON("wiredTiger"_sd << BSONObj())),
+        BSON(IndexDescriptor::kStorageEngineFieldName << BSON("wiredTiger"sv << BSONObj())),
         BSON(IndexDescriptor::kExpireAfterSecondsFieldName << 10)};
 
     // Verify that changing each of the non-signature fields does not distinguish this index from

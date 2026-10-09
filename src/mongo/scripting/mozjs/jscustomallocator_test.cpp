@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/scripting/engine.h"
 #include "mongo/unittest/unittest.h"
@@ -36,6 +9,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <jscustomallocator.h>
 
@@ -149,7 +123,7 @@ TEST_F(JSCustomAllocatorTest, SingleAlloc) {
             const view = new Uint8Array(buf);
             for (let i = 0; i < 128; i++) view[i] = i;
         )";
-    StringData code(codeStr);
+    std::string_view code(codeStr);
 
     ASSERT_DOES_NOT_THROW(scope->exec(code,
                                       "root_module",
@@ -193,7 +167,7 @@ TEST_F(JSCustomAllocatorTest, ResizeMany) {
                 }
             }
         )";
-    StringData code(codeStr);
+    std::string_view code(codeStr);
 
     ASSERT_DOES_NOT_THROW(scope->exec(code,
                                       "root_module",
@@ -237,6 +211,94 @@ TEST_F(JSCustomAllocatorTest, OOMDuringScopeInitDoesNotCrash) {
     }
 }
 #endif  // MONGO_CONFIG_DEBUG_BUILD
+
+// With tracking disabled, record_mmap_alloc should be a no-op.
+TEST_F(JSCustomAllocatorTest, MmapTrackingDisabledByDefault) {
+    mongo::sm::reset(0, false);
+    mongo::sm::record_mmap_alloc(1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(), 0);
+}
+
+// Basic alloc/free round-trip with mmap tracking enabled.
+TEST_F(JSCustomAllocatorTest, MmapAllocAndFree) {
+    // A non-zero limit is required; record_mmap_alloc no-ops when max_bytes == 0.
+    mongo::sm::reset(10 * 1024 * 1024, true);
+    mongo::sm::record_mmap_alloc(1024 * 1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 1024 * 1024);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(), 1024 * 1024);
+
+    mongo::sm::record_mmap_free(1024 * 1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(), 0);
+}
+
+// mmap bytes count towards the shared total and can trigger OOM (signal_oom is
+// a safe no-op in unit-test context where no JSContext is running).
+TEST_F(JSCustomAllocatorTest, MmapCountedTowardsLimit) {
+    constexpr size_t kLimit = 2 * 1024 * 1024;  // 2 MB
+    mongo::sm::reset(kLimit, true);
+
+    // A malloc allocation of 0.5 MB should succeed and register in the total.
+    void* ptr = js_malloc(512 * 1024);
+    ASSERT_NOT_EQUALS(ptr, nullptr);
+
+    // First mmap alloc (1 MB): total is now ~1.5 MB, still under the 2 MB limit.
+    mongo::sm::record_mmap_alloc(1024 * 1024);
+    ASSERT_GREATER_THAN_OR_EQUALS(mongo::sm::get_total_bytes(), (1024 * 1024) + (512 * 1024));
+
+    // Second mmap alloc (1 MB): pushes total over 2 MB limit.  signal_oom() is
+    // called internally but is a safe no-op here; the counter still increments.
+    mongo::sm::record_mmap_alloc(1024 * 1024);
+    ASSERT_GREATER_THAN(mongo::sm::get_total_bytes(), kLimit);
+
+    // Clean up.
+    mongo::sm::record_mmap_free(2 * 1024 * 1024);
+    js_free(ptr);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(), 0);
+}
+
+// malloc_bytes and mmap_bytes are tracked independently; get_total_bytes() is
+// their sum.
+TEST_F(JSCustomAllocatorTest, MmapAndMallocIndependent) {
+    mongo::sm::reset(10 * 1024 * 1024, true);
+
+    void* ptr = js_malloc(64 * 1024);
+    ASSERT_NOT_EQUALS(ptr, nullptr);
+    ASSERT_GREATER_THAN(mongo::sm::get_malloc_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+
+    mongo::sm::record_mmap_alloc(128 * 1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 128 * 1024);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(),
+                  mongo::sm::get_malloc_bytes() + mongo::sm::get_mmap_bytes());
+
+    mongo::sm::record_mmap_free(128 * 1024);
+    js_free(ptr);
+    ASSERT_EQUALS(mongo::sm::get_malloc_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+    ASSERT_EQUALS(mongo::sm::get_total_bytes(), 0);
+}
+
+// Toggling mmap tracking off via reset() suppresses subsequent record_mmap_alloc calls.
+TEST_F(JSCustomAllocatorTest, MmapTrackingToggle) {
+    // Enable tracking with a non-zero limit so record_mmap_alloc actually counts.
+    mongo::sm::reset(10 * 1024 * 1024, true);
+    mongo::sm::record_mmap_alloc(1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 1024);
+
+    // Free before reset — reset() asserts mmap_bytes == 0 as a production invariant
+    // (it is only called when a new JS runtime is created, at which point all prior
+    // allocations must already have been freed by the shutdown GC).
+    mongo::sm::record_mmap_free(1024);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+
+    // Toggle tracking off; subsequent alloc calls should be ignored.
+    mongo::sm::reset(0, false);
+    mongo::sm::record_mmap_alloc(2048);
+    ASSERT_EQUALS(mongo::sm::get_mmap_bytes(), 0);
+}
 
 }  // namespace mozjs
 }  // namespace mongo

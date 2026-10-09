@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/coll_mod.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
@@ -48,8 +21,10 @@
 #include "mongo/db/shard_role/shard_catalog/backwards_compatible_collection_options_util.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_collmod.h"
@@ -57,7 +32,7 @@
 #include "mongo/db/timeseries/timeseries_test_util.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -178,96 +153,88 @@ CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const Namespac
         MODE_IS);
 }
 
-TEST_F(CollModTest, CollModTimeseriesWithFixedBucket) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTSBucketingParametersUnchanged", true);
+// When collMod changes bucketing parameters, fixedBucketing must be automatically set to false.
+TEST_F(CollModTest, CollModDisablesFixedBucketingOnBucketingParameterChange) {
+    unittest::ServerParameterGuard fixedBucketingFlagController("featureFlagFixedBucketingCatalog",
+                                                                true);
+    unittest::ServerParameterGuard viewlessFlagController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
 
     NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-
     auto opCtx = makeOpCtx();
-    auto tsOptions = TimeseriesOptions("t");
-    tsOptions.setBucketRoundingSeconds(100);
-    tsOptions.setBucketMaxSpanSeconds(100);
-    CreateCommand cmd = CreateCommand(curNss);
-    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
-    uassertStatusOK(createCollection(opCtx.get(), cmd));
-    auto tsNss = timeseries::test_util::resolveTimeseriesNss(curNss);
 
-    // Run collMod without changing the bucket span and validate that the
-    // timeseriesBucketingParametersHaveChanged() returns false.
-    CollMod collModCmd(curNss);
-    CollModRequest collModRequest;
-    std::variant<std::string, std::int64_t> expireAfterSeconds = 100;
-    collModRequest.setExpireAfterSeconds(expireAfterSeconds);
-    collModCmd.setCollModRequest(collModRequest);
-    BSONObjBuilder result;
-    uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
-        opCtx.get(), curNss, collModCmd, true, &result));
+    // Create a viewless timeseries collection with fixedBucketing: true.
+    TimeseriesOptions tsOptions("t");
+    tsOptions.setBucketMaxSpanSeconds(100);
+    tsOptions.setBucketRoundingSeconds(100);
+    tsOptions.setFixedBucketing(true);
+    CreateCommand createCmd(curNss);
+    createCmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), createCmd));
+
+    // Verify fixedBucketing was persisted as true.
+    auto tsNss = timeseries::test_util::resolveTimeseriesNss(curNss);
     {
-        const auto tsCollForRead = acquireCollForRead(opCtx.get(), tsNss);
-        // TODO(SERVER-101611): Set *timeseriesBucketingParametersHaveChanged to false on create
-        ASSERT_FALSE(tsCollForRead.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
+        const auto coll = acquireCollForRead(opCtx.get(), tsNss);
+        ASSERT_TRUE(
+            coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing().has_value());
+        ASSERT_TRUE(coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing());
     }
 
-    // Run collMod which changes the bucket span and validate that the
-    // timeseriesBucketingParametersHaveChanged() returns true.
+    // Run collMod that changes the bucketing parameters.
+    CollMod collModCmd(curNss);
     CollModTimeseries collModTs;
     collModTs.setBucketMaxSpanSeconds(200);
     collModTs.setBucketRoundingSeconds(200);
-    collModRequest.setTimeseries(std::move(collModTs));
-    collModCmd.setCollModRequest(std::move(collModRequest));
+    collModCmd.setTimeseries(std::move(collModTs));
+    BSONObjBuilder result;
     uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
         opCtx.get(), curNss, collModCmd, true, &result));
-    {
-        const auto tsCollForRead = acquireCollForRead(opCtx.get(), tsNss);
-        ASSERT_TRUE(tsCollForRead.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
-        ASSERT_TRUE(*tsCollForRead.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
-    }
 
-    // Test that the backwards compatible option has been properly set
-    auto coll =
-        CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), tsNss);
-    auto catalogEntry = durable_catalog::getParsedCatalogEntry(
-        opCtx.get(), coll->getCatalogId(), MDBCatalog::get(opCtx.get()));
-    auto metadata = catalogEntry->metadata;
-    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    boost::optional<bool> optBackwardsCompatibleFlag = storageEngine->getFlagFromStorageOptions(
-        metadata->options.storageEngine,
-        backwards_compatible_collection_options::kTimeseriesBucketingParametersHaveChanged);
-    ASSERT_TRUE(optBackwardsCompatibleFlag);
-    ASSERT_TRUE(*optBackwardsCompatibleFlag);
+    // fixedBucketing must have been set to false because bucketing params changed.
+    {
+        const auto coll = acquireCollForRead(opCtx.get(), tsNss);
+        ASSERT_TRUE(
+            coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing().has_value());
+        ASSERT_FALSE(coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing());
+    }
 }
 
-TEST_F(CollModTest, TimeseriesBucketingParameterChanged) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTSBucketingParametersUnchanged", true);
+// When collMod specifies the same bucketing parameter values as the current ones, fixedBucketing
+// must remain unchanged (no spurious disable).
+TEST_F(CollModTest, CollModFixedBucketingNoOpWhenBucketingParamsUnchanged) {
+    unittest::ServerParameterGuard fixedBucketingFlagController("featureFlagFixedBucketingCatalog",
+                                                                true);
+    unittest::ServerParameterGuard viewlessFlagController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
 
     NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-
     auto opCtx = makeOpCtx();
-    auto tsOptions = TimeseriesOptions("t");
-    tsOptions.setBucketRoundingSeconds(100);
+
+    // Create a viewless timeseries collection with fixedBucketing: true.
+    TimeseriesOptions tsOptions("t");
     tsOptions.setBucketMaxSpanSeconds(100);
-    CreateCommand cmd = CreateCommand(curNss);
-    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
-    uassertStatusOK(createCollection(opCtx.get(), cmd));
+    tsOptions.setBucketRoundingSeconds(100);
+    tsOptions.setFixedBucketing(true);
+    CreateCommand createCmd(curNss);
+    createCmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), createCmd));
+
+    // Run collMod with the same bucketing parameter values.
+    CollMod collModCmd(curNss);
+    CollModTimeseries collModTs;
+    collModTs.setBucketMaxSpanSeconds(100);
+    collModTs.setBucketRoundingSeconds(100);
+    collModCmd.setTimeseries(std::move(collModTs));
+    BSONObjBuilder result;
+    uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
+        opCtx.get(), curNss, collModCmd, true, &result));
+
+    // No parameter actually changed: fixedBucketing must remain true.
     auto tsNss = timeseries::test_util::resolveTimeseriesNss(curNss);
-
-    uassertStatusOK(
-        writeConflictRetry(opCtx.get(), "unitTestTimeseriesBucketingParameterChanged", tsNss, [&] {
-            WriteUnitOfWork wunit(opCtx.get());
-
-            AutoGetCollection collection(opCtx.get(), tsNss, MODE_X);
-            CollectionWriter writer{opCtx.get(), collection};
-            auto writableColl = writer.getWritableCollection(opCtx.get());
-            writableColl->setTimeseriesBucketingParametersChanged(opCtx.get(), boost::none);
-
-            wunit.commit();
-            return Status::OK();
-        }));
-
-    const auto tsCollForRead = acquireCollForRead(opCtx.get(), tsNss);
-    ASSERT_FALSE(tsCollForRead.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
+    const auto coll = acquireCollForRead(opCtx.get(), tsNss);
+    ASSERT_TRUE(coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing().has_value());
+    ASSERT_TRUE(coll.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing());
 }
 
 TEST_F(CollModTest, TimeseriesLegacyBucketingParameterChangedRemoval) {
@@ -357,12 +324,9 @@ public:
     CollModTimestampedTest() : CollModTest(Options{}.forceDisableTableLogging()) {}
 };
 
-// Regression test for SERVER-104640. Test that the MixedSchema and BucketingParametersHaveChanged
-// timeseries flags can be read at a point-in-time from the collection catalog.
+// Regression test for SERVER-104640. Test that the MixedSchema timeseries flag can be read at a
+// point-in-time from the collection catalog.
 TEST_F(CollModTimestampedTest, CollModTimeseriesMixedSchemaFlagPointInTimeLookup) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTSBucketingParametersUnchanged", true);
-
     NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.curColl");
 
     auto opCtx = makeOpCtx();
@@ -394,7 +358,6 @@ TEST_F(CollModTimestampedTest, CollModTimeseriesMixedSchemaFlagPointInTimeLookup
                         .mustConsiderMixedSchemaBucketsInReads());
         ASSERT_TRUE(
             collAfter->getTimeseriesMixedSchemaBucketsState().canStoreMixedSchemaBucketsSafely());
-        ASSERT_EQ(true, collAfter->timeseriesBucketingParametersHaveChanged());
     }
 
     // Check the collection at a timestamp before the collMod
@@ -406,7 +369,6 @@ TEST_F(CollModTimestampedTest, CollModTimeseriesMixedSchemaFlagPointInTimeLookup
                          .mustConsiderMixedSchemaBucketsInReads());
         ASSERT_FALSE(
             collBefore->getTimeseriesMixedSchemaBucketsState().canStoreMixedSchemaBucketsSafely());
-        ASSERT_NE(true, collBefore->timeseriesBucketingParametersHaveChanged());
     }
 }
 
@@ -431,7 +393,7 @@ TEST_F(CollModTest, CollModSetting_ReplicatedRecordIds_ToFalse_Succeeds) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.collModColl");
 
     // Enabling the Replicated RecordId flag
-    RAIIServerParameterControllerForTest featureFlagRecordIdsReplicatedController(
+    unittest::ServerParameterGuard featureFlagRecordIdsReplicatedController(
         "featureFlagRecordIdsReplicated", true);
 
     // Creating the collection, it will have replicated record Ids since the feature flag is on.
@@ -505,8 +467,8 @@ public:
         return true;
     }
 
-    bool shouldForceUpdateWithFullDocument() const override {
-        return true;
+    std::string getMainWiredTigerTableSettings() const override {
+        return "";
     }
 
     bool supportsAsyncOplogMarkerGeneration() const override {
@@ -517,8 +479,16 @@ public:
         return false;
     }
 
+    bool supportsOplogScanning() const override {
+        return true;
+    }
+
     bool supportsPersistentOplogCapMaintainerThread() const override {
         return true;
+    }
+
+    bool shouldUseReplicatedFastCount() const override {
+        return false;
     }
 };
 
@@ -531,7 +501,7 @@ TEST_F(CollModTest, CollModSetting_ReplicatedRecordIds_ToFalse_WhenProviderRequi
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.collModColl");
 
     // Enabling the Replicated RecordId flag
-    RAIIServerParameterControllerForTest featureFlagRecordIdsReplicatedController(
+    unittest::ServerParameterGuard featureFlagRecordIdsReplicatedController(
         "featureFlagRecordIdsReplicated", true);
 
     // Creating the collection, it will have replicated record Ids since the feature flag is on.
@@ -551,6 +521,33 @@ TEST_F(CollModTest, CollModSetting_ReplicatedRecordIds_ToFalse_WhenProviderRequi
 
     // Confirm it still have replicated record Ids
     ASSERT_TRUE(areRecordIdsReplicated(opCtx.get(), nss));
+}
+
+// Regression test for SERVER-124967: collMod must not allow cappedSize/cappedMax on a view.
+TEST_F(CollModTest, CollModCappedSizeOnViewReturnsInvalidOptions) {
+    auto opCtx = makeOpCtx();
+    NamespaceString backingNss = NamespaceString::createNamespaceString_forTest("test.backingColl");
+    NamespaceString viewNss = NamespaceString::createNamespaceString_forTest("test.myView");
+
+    // Create a backing collection and a view on top of it.
+    uassertStatusOK(createCollection(opCtx.get(), CreateCommand(backingNss)));
+    CollectionOptions viewOptions;
+    viewOptions.viewOn = std::string{backingNss.coll()};
+    uassertStatusOK(createCollection(opCtx.get(), viewNss, viewOptions, boost::none));
+
+    BSONObjBuilder result;
+
+    // collMod with cappedSize on a view must fail gracefully.
+    CollMod cappedSizeCmd(viewNss);
+    cappedSizeCmd.setCappedSize(1024LL);
+    ASSERT_EQ(ErrorCodes::InvalidOptions,
+              processCollModCommand(opCtx.get(), viewNss, cappedSizeCmd, nullptr, &result).code());
+
+    // Same for cappedMax.
+    CollMod cappedMaxCmd(viewNss);
+    cappedMaxCmd.setCappedMax(100LL);
+    ASSERT_EQ(ErrorCodes::InvalidOptions,
+              processCollModCommand(opCtx.get(), viewNss, cappedMaxCmd, nullptr, &result).code());
 }
 
 }  // namespace

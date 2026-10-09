@@ -12,11 +12,6 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// This test restarts a shard replica set, potentially changing the primary node, while
-// ShardingTest._connections remains stale with the old primary/secondaries information. The UUIDs
-// check does a primary only command against the shards using _connections and can fail.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 let st = new ShardingTest({shards: {rs0: {nodes: 2}}});
 
 // Verify after startup there is a new key in admin.system.keys.
@@ -45,7 +40,10 @@ jsTestLog("Verify manual key rotation.");
 
 // Pause key generation on the config server primary.
 for (let i = 0; i < st.configRS.nodes.length; i++) {
-    st.configRS.nodes[i].adminCommand({configureFailPoint: "disableKeyGeneration", mode: "alwaysOn"});
+    st.configRS.nodes[i].adminCommand({
+        configureFailPoint: "disableKeyGeneration",
+        mode: "alwaysOn",
+    });
 }
 
 // Delete all existing keys.
@@ -55,7 +53,10 @@ assert(st.s.getDB("admin").system.keys.find().count() == 0);
 
 // Restart the config servers, so they will create new keys once the failpoint is disabled.
 st.configRS.stopSet(null /* signal */, true /* forRestart */);
-st.configRS.startSet({restart: true, setParameter: {"failpoint.disableKeyGeneration": "{'mode':'alwaysOn'}"}});
+st.configRS.startSet({
+    restart: true,
+    setParameter: {"failpoint.disableKeyGeneration": "{'mode':'alwaysOn'}"},
+});
 
 // Limit the max time between refreshes on the config server, so new keys are created quickly.
 st.configRS.getPrimary().adminCommand({

@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -76,6 +49,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -84,6 +58,8 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
+
+using namespace std::literals::string_view_literals;
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -116,7 +92,7 @@ std::unique_ptr<DBClientBase> getIntegrationTestConnection() {
 
 // Returns the connection name by filtering on the appName of a $currentOp command. If no result is
 // found, return an empty string.
-std::string getThreadNameByAppName(DBClientBase* conn, StringData appName) {
+std::string getThreadNameByAppName(DBClientBase* conn, std::string_view appName) {
     auto curOpCmd =
         BSON("aggregate" << 1 << "cursor" << BSONObj() << "pipeline"
                          << BSON_ARRAY(BSON("$currentOp" << BSON("localOps" << true))
@@ -139,7 +115,9 @@ TEST(OpMsg, UnknownRequiredFlagClosesConnection) {
     OpMsg::setFlag(&request, 1u << 15);  // This should be the last required flag to be assigned.
 
     Message reply;
-    ASSERT_THROWS_CODE(conn->call(request), DBException, ErrorCodes::HostUnreachable);
+    // The server closes the connection on an unknown required flag; the client observes the
+    // graceful peer close (eof) as ConnectionClosedByPeer on all platforms.
+    ASSERT_THROWS_CODE(conn->call(request), DBException, ErrorCodes::ConnectionClosedByPeer);
 }
 
 TEST(OpMsg, UnknownOptionalFlagIsIgnored) {
@@ -218,7 +196,7 @@ TEST(OpMsg, DocumentSequenceMaxWriteBatchWorks) {
         $db: "test"
     })");
 
-    constexpr StringData kSequenceName = "documents"_sd;
+    constexpr std::string_view kSequenceName = "documents"sv;
     size_t targetSize = MaxMessageSizeBytes - body.objsize() - 4 - kSequenceName.size();
     size_t documentSize = targetSize / write_ops::kMaxWriteBatchSize;
     OpMsgBuilder::DocSequenceBuilder sequenceBuilder = msgBuilder.beginDocSequence(kSequenceName);
@@ -1387,7 +1365,7 @@ protected:
     }
 
     void appendDocSequence(BufBuilder& buf,
-                           StringData name,
+                           std::string_view name,
                            boost::optional<BSONObj> doc = boost::none) {
         static constexpr uint8_t kDocSequence = 1;
         buf.appendChar(kDocSequence);
@@ -1609,7 +1587,7 @@ private:
     void _configureFailPoint(DBClientBase* conn, bool isRouter) const {
         const auto threadName = getThreadNameByAppName(conn, _appName);
         // failpoint has a different name on the router
-        StringData failPointName =
+        std::string_view failPointName =
             isRouter ? "routerAppendHelloOkToHelloResponse" : "appendHelloOkToHelloResponse";
         const auto failPointObj =
             BSON("configureFailPoint" << failPointName << "mode"

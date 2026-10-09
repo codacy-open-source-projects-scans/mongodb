@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -43,6 +18,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <string>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -59,9 +35,16 @@ struct QueryStatsPartitioner {
     }
 };
 
+/**
+ * Computes the budgeted size of a store entry. Note that a QueryStatsEntry only holds the
+ * 'recentErrors' LRU cache as a member, so 'sizeof()' does not account for the error entries it
+ * heap-allocates as codes are recorded. The worst-case cost of a full cache is reserved up front
+ * in 'value.reservedErrorBudgetBytes'.
+ */
 struct QueryStatsStoreEntryBudgetor {
     size_t operator()(const std::size_t hash, const QueryStatsEntry& value) {
-        return sizeof(decltype(value)) + sizeof(decltype(hash)) + value.key->size();
+        return sizeof(decltype(value)) + sizeof(decltype(hash)) + value.key->size() +
+            value.reservedErrorBudgetBytes;
     }
 };
 
@@ -142,8 +125,13 @@ private:
      * Max size of the queryStats store. Tracked here to avoid having to recompute after it's
      * divided up into partitions.
      */
-    AtomicWord<size_t> _maxSize;
+    Atomic<size_t> _maxSize;
 };
+
+/**
+ * Computes the user-visible SHA256 'keyHash' for 'key'.
+ */
+std::string computeKeyHashString(OperationContext* opCtx, const Key& key);
 
 /**
  * Acquire a reference to the global queryStats store.
@@ -152,8 +140,8 @@ QueryStatsStore& getQueryStatsStore(OperationContext* opCtx);
 
 /**
  * Registers a request for query stats collection. The function may decide not to collect anything,
- * so this should be called for all requests. The decision is made based on the feature flag and
- * query stats rate limiting.
+ * so this should be called for all requests. The decision is made based on query stats rate
+ * limiting.
  *
  * The originating command/query does not persist through the end of query execution due to
  * optimizations made to the original query and the expiration of OpCtx across getMores. In order
@@ -185,9 +173,13 @@ QueryStatsStore& getQueryStatsStore(OperationContext* opCtx);
  */
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     const std::function<std::unique_ptr<Key>(void)>& makeKey,
-                     bool willNeverExhaust = false);
+                     const std::function<std::unique_ptr<Key>(void)>& makeKey);
 
+/**
+ * Returns a non-OK status if 'keyBson' is too large or too deeply nested to embed in the
+ * $queryStats reply.
+ */
+Status validateQueryStatsKeyBson(const BSONObj& keyBson);
 
 /**
  * Register a write request. After performing write-relevant checks, it registers a write request
@@ -261,6 +253,7 @@ struct QueryStatsSnapshot {
     int64_t planningTimeMicros;
     CardinalityEstimationMethods cardinalityEstimationMethods;
     uint64_t nDocsSampled;
+    plan_shape_counters::PlanShapeCounts planShapeCounts;
 
     uint64_t nMatched;
     uint64_t nUpserted;
@@ -268,6 +261,9 @@ struct QueryStatsSnapshot {
     uint64_t nDeleted;
     uint64_t nInserted;
     uint64_t nUpdateOps;
+    uint64_t nDeleteOps;
+    uint64_t keysInserted;
+    uint64_t keysDeleted;
 
     int64_t totalTimeQueuedMicros;
     uint64_t totalAdmissions;
@@ -277,6 +273,12 @@ struct QueryStatsSnapshot {
 
     uint64_t peakTrackedMemBytes;
     uint64_t clusterPeakTrackedMemBytes;
+
+    ErrorCodes::Error errorCode = ErrorCodes::OK;
+
+    bool isErrored() const {
+        return errorCode != ErrorCodes::OK;
+    }
 };
 
 /**
@@ -301,17 +303,19 @@ void writeQueryStats(OperationContext* opCtx,
                      std::unique_ptr<Key> key,
                      const QueryStatsSnapshot& snapshot,
                      std::vector<std::unique_ptr<SupplementalStatsEntry>> supplementalMetrics = {},
-                     bool willNeverExhaust = false);
+                     bool isChangeStreamQuery = false);
 
 /**
  * Called from ClientCursor::dispose/ClusterClientCursorImpl::kill to set up and writeQueryStats()
  * at the end of life of a cursor.
  */
-void writeQueryStatsOnCursorDisposeOrKill(OperationContext* opCtx,
-                                          boost::optional<size_t> queryStatsKeyHash,
-                                          std::unique_ptr<Key> key,
-                                          bool willNeverExhaust,
-                                          boost::optional<Microseconds> firstResponseExecutionTime,
-                                          OpDebug::AdditiveMetrics metrics);
+void writeQueryStatsOnCursorDisposeOrKill(
+    OperationContext* opCtx,
+    boost::optional<size_t> queryStatsKeyHash,
+    std::unique_ptr<Key> key,
+    bool isChangeStreamQuery,
+    boost::optional<Microseconds> firstResponseExecutionTime,
+    OpDebug::AdditiveMetrics metrics,
+    std::vector<std::unique_ptr<SupplementalStatsEntry>> supplementalMetrics = {});
 
 }  // namespace mongo::query_stats

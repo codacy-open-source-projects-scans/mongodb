@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 
@@ -36,8 +10,8 @@
 #include "mongo/db/rss/stub_persistence_provider.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/ensure_fcv.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mock_periodic_runner.h"
 
@@ -85,7 +59,7 @@ public:
     }
 
     void setReplicatedTruncatesFeatureFlag(bool useReplicatedTruncates) {
-        _featureFlag = std::make_unique<RAIIServerParameterControllerForTest>(
+        _featureFlag = std::make_unique<unittest::ServerParameterGuard>(
             "featureFlagUseReplicatedTruncatesForDeletions", useReplicatedTruncates);
     }
 
@@ -99,7 +73,7 @@ protected:
     ServiceContext::UniqueOperationContext _opCtx;
     std::unique_ptr<ChangeStreamExpiredPreImagesRemoverService> _preImagesRemover;
 
-    std::unique_ptr<RAIIServerParameterControllerForTest> _featureFlag;
+    std::unique_ptr<unittest::ServerParameterGuard> _featureFlag;
 };
 
 TEST_F(ChangeStreamExpiredPreImageRemoverTest, ReplicatedTruncatesNotPopulatedInitially) {
@@ -132,6 +106,31 @@ TEST_F(ChangeStreamExpiredPreImageRemoverTest,
     setReplicatedTruncatesFeatureFlag(true);
 
     _preImagesRemover->onStepUpComplete(_opCtx.get(), 1 /* term */);
+    ASSERT_EQ((PreImagesRemovalJobContext{.id = 1, .usesReplicatedTruncates = true}),
+              _preImagesRemover->getJobContext_forTest());
+}
+
+TEST_F(
+    ChangeStreamExpiredPreImageRemoverTest,
+    ExpectReplicatedTruncatesToRemainOnFCVChangeWhenUsingReplicatedTruncatesViaPersistenceProvider) {
+    // When the persistence provider mandates replicated truncates
+    // (e.g. disaggregated storage), an FCV change must not flip the running job to local truncates,
+    // even when the FCV-gated feature flag is disabled. Otherwise the job restarts in a mode the
+    // per-pass guard rejects, so it perpetually self-skips and never removes pre-images.
+    setPersistenceProviderWithFlag(true);
+    setReplicatedTruncatesFeatureFlag(false);
+
+    // Start the job as the primary. It must use replicated truncates.
+    _preImagesRemover->onStepUpComplete(_opCtx.get(), 42 /*term*/);
+    ASSERT_EQ((PreImagesRemovalJobContext{.id = 1, .usesReplicatedTruncates = true}),
+              _preImagesRemover->getJobContext_forTest());
+
+    // An FCV change must be a no-op here: the persistence provider still mandates replicated
+    // truncates regardless of the feature flag, so the same job keeps running unchanged.
+    // (Generic FCV reference): feature flag test
+    ServerGlobalParams::FCVSnapshot newFcvSnapshot(multiversion::GenericFCV::kLatest);
+    _preImagesRemover->onFCVChange(_opCtx.get(), newFcvSnapshot);
+
     ASSERT_EQ((PreImagesRemovalJobContext{.id = 1, .usesReplicatedTruncates = true}),
               _preImagesRemover->getJobContext_forTest());
 }

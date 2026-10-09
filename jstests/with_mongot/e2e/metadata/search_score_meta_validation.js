@@ -1,6 +1,6 @@
 /**
  * Tests the validation of using "searchScore" and "vectorSearchScore" metadata fields.
- * @tags: [featureFlagRankFusionFull, requires_fcv_81]
+ * @tags: [requires_fcv_81]
  */
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
 import {
@@ -20,11 +20,25 @@ createSearchIndex(coll, getMovieVectorSearchIndexSpec());
 
 function testInvalidDereference(metaType) {
     assert.throwsWithCode(
-        () => coll.aggregate([{$setWindowFields: {sortBy: {score: {$meta: metaType}}, output: {rank: {$rank: {}}}}}]),
+        () =>
+            coll.aggregate([
+                {
+                    $setWindowFields: {
+                        sortBy: {score: {$meta: metaType}},
+                        output: {rank: {$rank: {}}},
+                    },
+                },
+            ]),
         kUnavailableMetadataErrCode,
     );
-    assert.throwsWithCode(() => coll.aggregate([{$sort: {score: {$meta: metaType}}}]), kUnavailableMetadataErrCode);
-    assert.throwsWithCode(() => coll.aggregate([{$set: {score: {$meta: metaType}}}]), kUnavailableMetadataErrCode);
+    assert.throwsWithCode(
+        () => coll.aggregate([{$sort: {score: {$meta: metaType}}}]),
+        kUnavailableMetadataErrCode,
+    );
+    assert.throwsWithCode(
+        () => coll.aggregate([{$set: {score: {$meta: metaType}}}]),
+        kUnavailableMetadataErrCode,
+    );
 }
 
 testInvalidDereference("searchScore");

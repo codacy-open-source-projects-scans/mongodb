@@ -6,14 +6,23 @@
  *  - Opening a change stream in the future, waiting for the start time to be reached before returning events
  *
  * @tags: [
+ *   # Asserts that dropping the watched collection invalidates the stream; collection-scope-only.
+ *   do_not_run_in_whole_db_passthrough,
+ *   do_not_run_in_whole_cluster_passthrough,
+ *   does_not_support_stepdowns,
  *   featureFlagChangeStreamPreciseShardTargeting,
+ *   featureFlagChangeStreamReaderV2,
+ *   requires_fcv_90,
  *   requires_sharding,
  *   uses_change_streams,
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {describe, it, before, afterEach, after, beforeEach} from "jstests/libs/mochalite.js";
-import {assertCreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertCreateCollection,
+    assertDropCollection,
+} from "jstests/libs/collection_drop_recreate.js";
 import {
     ChangeStreamTest,
     assertCollDataDistribution,
@@ -41,7 +50,9 @@ describe("$changeStream v2", function () {
         coll = db.test;
 
         //Enable sharding on the the test database and ensure that the primary is shard0.
-        assert.commandWorked(db.adminCommand({enableSharding: db.getName(), primaryShard: st.shard0.shardName}));
+        assert.commandWorked(
+            db.adminCommand({enableSharding: db.getName(), primaryShard: st.shard0.shardName}),
+        );
     });
 
     afterEach(function () {
@@ -76,7 +87,10 @@ describe("$changeStream v2", function () {
 
         // Open a change stream.
         csTest = new ChangeStreamTest(db);
-        const csCursor = csTest.startWatchingChanges({pipeline: [{$changeStream: {version: "v2"}}], collection: coll});
+        const csCursor = csTest.startWatchingChanges({
+            pipeline: [{$changeStream: {version: "v2"}}],
+            collection: coll,
+        });
 
         // Insert documents into the collection and ensure data distribution.
         coll.insertMany([
@@ -91,7 +105,11 @@ describe("$changeStream v2", function () {
 
         // Reshard collection and allocate to shards {shard1, shard2}.
         assert.commandWorked(
-            st.s.adminCommand({reshardCollection: coll.getFullName(), key: {a: 1}, numInitialChunks: 1}),
+            st.s.adminCommand({
+                reshardCollection: coll.getFullName(),
+                key: {a: 1},
+                numInitialChunks: 1,
+            }),
         );
         ensureShardDistribution(db, coll, {
             middle: {a: 2},
@@ -168,7 +186,9 @@ describe("$changeStream v2", function () {
         });
 
         // Create an unsplittable collection.
-        assert.commandWorked(db.runCommand({createUnsplittableCollection: "test", dataShard: st.shard1.shardName}));
+        assert.commandWorked(
+            db.runCommand({createUnsplittableCollection: "test", dataShard: st.shard1.shardName}),
+        );
 
         // Insert some documents.
         coll.insertMany([

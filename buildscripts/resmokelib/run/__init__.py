@@ -3,6 +3,7 @@
 import argparse
 import collections
 import json
+import math
 import os
 import os.path
 import platform
@@ -46,6 +47,11 @@ from buildscripts.resmokelib.testing.suite import Suite
 from buildscripts.resmokelib.utils import runtime_recorder
 from buildscripts.resmokelib.utils.dictionary import get_dict_value
 from buildscripts.util.download_utils import get_s3_client
+from buildscripts.util.golden_test_config import (
+    GOLDEN_TEST_CONFIG_PATH_ENV,
+    GOLDEN_TEST_OUTPUT_ROOT_PATTERN_ENV,
+    GoldenTestConfig,
+)
 from buildscripts.util.teststats import HistoricTaskData
 
 _INTERNAL_OPTIONS_TITLE = "Internal Options"
@@ -89,6 +95,46 @@ class TestRunner(Subcommand):
                 "Failed to flush all logs within a reasonable amount of time, "
                 "treating logs as incomplete"
             )
+
+    def _setup_golden_test(self):
+        """Pre-calculate the golden test output root pattern so that all golden tests
+        end up in the same directory.
+
+        Each jstest is executed in its own mongo shell subprocess. The C++
+        golden test framework reads ``outputRootPattern`` from the YAML config
+        pointed to by ``GOLDEN_TEST_CONFIG_PATH`` and replaces each ``%`` in
+        the basename with a random hex digit. Because that substitution happens
+        once per process, each test would otherwise produce its own
+        UUID-suffixed output directory.
+        """
+        if GOLDEN_TEST_OUTPUT_ROOT_PATTERN_ENV in os.environ:
+            return
+
+        golden_test_cfg_path = os.environ.get(GOLDEN_TEST_CONFIG_PATH_ENV)
+        if not golden_test_cfg_path:
+            return
+
+        golden_test_cfg = GoldenTestConfig.from_yaml_file(golden_test_cfg_path)
+        if not golden_test_cfg.outputRootPattern or "%" not in golden_test_cfg.outputRootPattern:
+            return
+
+        # Substitute `%` placeholders only in the file name, mirroring `fs::unique_path(filename)`
+        # on the C++ side.
+        parent_dir, file_name = os.path.split(golden_test_cfg.outputRootPattern)
+        file_name_uuid = "".join(
+            random.choice("0123456789abcdef") if c == "%" else c for c in file_name
+        )
+        output_root = os.path.join(parent_dir, file_name_uuid)
+
+        # Store the calculated value in the `GOLDEN_TEST_OUTPUT_ROOT_PATTERN` variable so
+        # that the C++ code can reference it.
+        os.environ[GOLDEN_TEST_OUTPUT_ROOT_PATTERN_ENV] = output_root
+
+        # Create the resolved UUID directory eagerly so that
+        # `buildscripts/golden_test.py latest/diff/accept` can find this run even
+        # when every golden test passes.
+        os.makedirs(os.path.join(output_root, "actual"), exist_ok=True)
+        os.makedirs(os.path.join(output_root, "expected"), exist_ok=True)
 
     def execute(self):
         """Execute the 'run' subcommand."""
@@ -203,6 +249,8 @@ class TestRunner(Subcommand):
 
     def run_tests(self):
         """Run the suite and tests specified."""
+        self._setup_golden_test()
+
         # This code path should only execute when resmoke is running from a workload container.
         if config.REQUIRES_WORKLOAD_CONTAINER_SETUP:
             self._setup_workload_container()
@@ -241,6 +289,7 @@ class TestRunner(Subcommand):
 
             for suite in suites:
                 self._interrupted = self._run_suite(suite)
+                self._fail_on_test_selection_error(suite)
                 if self._interrupted or (suite.options.fail_fast and suite.return_code != 0):
                     self._log_resmoke_summary(suites)
                     self.exit(suite.return_code)
@@ -623,13 +672,16 @@ class TestRunner(Subcommand):
             local_resmoke_invocation_with_params,
         )
 
+        if task is None:
+            self._resmoke_logger.warning(
+                "Skipping local-resmoke-invocation.txt because no evergreen task definition could"
+                " be found for %s.",
+                suite_name,
+            )
+            return
+
         try:
             lines = []
-
-            if task is None:
-                raise RuntimeError(
-                    f"Error: Could not find evergreen task definition for {suite_name}"
-                )
 
             is_multiversion = "multiversion" in task.tags
             generate_func = task.find_func_command("generate resmoke tasks")
@@ -821,6 +873,20 @@ class TestRunner(Subcommand):
         )
 
     @TRACER.start_as_current_span("run.__init__._execute_suite")
+    def _fail_on_test_selection_error(self, suite: Suite):
+        """Fail the run if the suite's test selection file was unusable.
+
+        The tests have already run by this point -- a broken selection step costs coverage
+        nothing, because the suite falls back to running everything -- but it must not pass
+        quietly, or selection could stay broken indefinitely while builds look green.
+        """
+        if not suite.tss_selection_error:
+            return
+        self._resmoke_logger.error(
+            "Failing %s: %s", suite.get_display_name(), suite.tss_selection_error
+        )
+        suite.return_code = max(suite.return_code or 0, 2)
+
     def _execute_suite(self, suite: Suite) -> bool:
         """Execute a suite and return True if interrupted, False otherwise."""
         execute_suite_span = trace.get_current_span()
@@ -941,6 +1007,19 @@ class TestRunner(Subcommand):
         in buildscripts/tests/resmokelib/run/test_shuffle_tests.py
         """
 
+        # How strongly a long running test is pulled towards the front of the run. The weight of
+        # a test is this factor times sqrt(number of tests) times its standard deviations above
+        # the mean runtime. Scaling this way keeps the ordering from collapsing to a
+        # near-deterministic longest-first sort in large suites, while still placing the longest
+        # tests within the first percent or so of the run. The weight is never scaled by more
+        # than len(tests), so small suites are unchanged.
+        STIFFNESS_FACTOR = 4.0
+
+        # Runtime distributions are long tailed, so a single test can be dozens of standard
+        # deviations above the mean and swamp every other weight. Clamping keeps the handful of
+        # long tests competing with each other for the front of the run.
+        MAX_STDEVS_ABOVE_MEAN = 6.0
+
         def __init__(self, historic_task_data: HistoricTaskData):
             self.runtimes_historic = {}
             for result in historic_task_data.historic_test_results:
@@ -956,12 +1035,15 @@ class TestRunner(Subcommand):
             if not total:
                 # Zero tests had historic runtime information
                 return TestRunner.RandomShuffle().shuffle(tests)
+            scale = min(len(tests), self.STIFFNESS_FACTOR * math.sqrt(len(tests)))
             arr = []
             for test in tests:
                 if test in self.runtimes_historic:
-                    stdevs_above_mean = (self.runtimes_historic[test] - mean) / stdev
+                    stdevs_above_mean = min(
+                        (self.runtimes_historic[test] - mean) / stdev, self.MAX_STDEVS_ABOVE_MEAN
+                    )
                     weight = max(
-                        stdevs_above_mean * len(tests), 1
+                        stdevs_above_mean * scale, 1
                     )  # max(_, 1) ensures positive, non-zero weight.
                 else:
                     weight = 1
@@ -983,6 +1065,10 @@ class TestRunner(Subcommand):
                 return None, None, None
             mean = statistics.mean(runtimes)
             stdev = statistics.stdev(runtimes)
+            if not stdev:
+                # Every test with historic data ran for the same amount of time, so there is no
+                # long test to prioritize and no meaningful scale to weight tests against.
+                return None, None, None
             return total, mean, stdev
 
         def weighted_shuffle(self, arr):
@@ -1287,6 +1373,18 @@ class RunPlugin(PluginInterface):
             dest="no_hooks",
             action="store_true",
             help=("Disables all test executor hooks. This is useful for debugging purposes."),
+        )
+
+        parser.add_argument(
+            "--messageFilterPlugin",
+            dest="message_filter_plugin",
+            action="store_true",
+            help=(
+                "Loads the MFP plugin into every mongod/mongos process started by resmoke. "
+                "Requires the plugin .so to be present in dist-test/lib/, "
+                "bazel-bin/install-dist-test/lib/, or "
+                "bazel-bin/src/mongo/db/modules/enterprise/src/mfp/plugin/."
+            ),
         )
 
         parser.add_argument(
@@ -1875,13 +1973,6 @@ class RunPlugin(PluginInterface):
         )
 
         parser.add_argument(
-            "--enableEvergreenApiTestSelection",
-            dest="enable_evergreen_api_test_selection",
-            action="store_true",
-            help="Enable test selection using the Evergreen API",
-        )
-
-        parser.add_argument(
             "--evergreenTestSelectionStrategy",
             dest="test_selection_strategies_array",
             action="append",
@@ -1932,6 +2023,15 @@ class RunPlugin(PluginInterface):
             "--historicTestRuntimes",
             dest="historic_test_runtimes",
             help='JSON containing historic test runtime, like [{"test_name": test.js, "avg_duration_pass": 1.4}]',
+        )
+        parser.add_argument(
+            "--tssTestList",
+            dest="tss_test_list",
+            help=(
+                "YAML file holding the tests Evergreen's test selection service chose for this"
+                " suite, produced at build time. When the file records a successful selection,"
+                " it is used instead of calling the selection endpoint from here."
+            ),
         )
         parser.add_argument(
             "--mongoVersionFile",
@@ -2282,6 +2382,13 @@ class RunPlugin(PluginInterface):
         )
 
         def fast_check_params_parser(params: str | None) -> dict | None:
+            if params:
+                # Tools such as burn_in_tests.py read resmoke_args straight out of the Evergreen
+                # project config, where expansions have not been substituted yet. Treat an
+                # unexpanded expansion (e.g. "${fastCheckParameters|}") the same as an empty value.
+                params = params.strip().strip("'\"")
+                if params.startswith("${") and params.endswith("}"):
+                    params = ""
             if not params:
                 return None
             try:
@@ -2425,6 +2532,17 @@ class RunPlugin(PluginInterface):
         )
 
         evergreen_options.add_argument(
+            "--displayTaskName",
+            dest="display_task_name",
+            metavar="DISPLAY_TASK_NAME",
+            help=(
+                "Sets the name of the Evergreen display task that the task running the tests"
+                " rolls up to, as reported to test selection. When omitted, the task name is"
+                " reported instead."
+            ),
+        )
+
+        evergreen_options.add_argument(
             "--taskId",
             dest="task_id",
             metavar="TASK_ID",
@@ -2463,6 +2581,16 @@ class RunPlugin(PluginInterface):
             "--projectConfigPath",
             dest="evg_project_config_path",
             help="Sets the path to evergreen project configuration yaml.",
+        )
+
+        evergreen_options.add_argument(
+            "--enableEvergreenApiTestSelection",
+            dest="enable_evergreen_api_test_selection",
+            type=lambda v: v.lower() == "true",
+            metavar="{true,false}",
+            default=None,
+            help="Enable (true) or disable (false) test selection using the Evergreen CLI,"
+            " overriding the Evergreen project configuration.",
         )
 
         benchmark_options = parser.add_argument_group(

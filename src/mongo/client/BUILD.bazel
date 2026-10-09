@@ -13,12 +13,27 @@ exports_files(
 # call connect() and return a DBClientBase* back. For that you need to link
 # against the 'clientdriver_network' library.
 mongo_cc_library(
+    name = "credential",
+    srcs = [
+        "credential.cpp",
+    ],
+    hdrs = [
+        "credential.h",
+    ],
+    deps = [
+        "//src/mongo/bson/util:bson_extract",
+        "//src/mongo/db/auth:auth_mechanism",
+    ],
+)
+
+mongo_cc_library(
     name = "connection_string",
     srcs = [
         "connection_string.cpp",
         "mongo_uri.cpp",
     ],
     deps = [
+        ":credential",
         "//src/mongo/util:dns_query",
         "//src/mongo/util/net:network",
         "//src/mongo/util/options_parser",
@@ -106,6 +121,7 @@ mongo_cc_library(
         "//src/mongo/executor:remote_command",
         "//src/mongo/rpc:command_status",
         "//src/mongo/rpc:metadata",
+        "//src/mongo/rpc:object_check",
         "//src/mongo/shell:program_runner",
         "//src/mongo/util:icu",
         "//src/mongo/util:md5",
@@ -127,6 +143,7 @@ mongo_cc_library(
     ],
     deps = [
         ":connection_string",
+        ":credential",
         ":internal_auth",
         ":native_sasl_client",
         "//src/mongo/bson/util:bson_extract",
@@ -150,6 +167,8 @@ mongo_cc_library(
         "//src/mongo/db/commands:test_commands_enabled",
         "//src/mongo/db/stats:counters",
         "//src/mongo/executor:egress_connection_closer_manager",
+        "//src/mongo/otel/traces:telemetry_context_serialization",
+        "//src/mongo/otel/traces/span",
         "//src/mongo/rpc",
         "//src/mongo/rpc:command_status",
         "//src/mongo/transport:message_compressor",
@@ -212,6 +231,10 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:aggregation_request_helper",
         "//src/mongo/db/query:command_request_response",
         "//src/mongo/db/query:query_request",
+        "//src/mongo/otel:otel_base",
+        "//src/mongo/otel/traces:telemetry_context_serialization",
+        "//src/mongo/otel/traces:tracing_enablement",
+        "//src/mongo/otel/traces/span",
         "//src/mongo/rpc",
         "//src/mongo/rpc:command_status",
         "//src/mongo/util/net:ssl_manager",
@@ -277,6 +300,7 @@ mongo_cc_library(
         "//src/mongo/transport:transport_layer_manager",
         "//src/mongo/util:background_job",
         "//src/mongo/util:md5",
+        "//src/mongo/util/net:connection_purpose",
         "//src/mongo/util/net:network",
         "//src/mongo/util/net:ssl_manager",
     ] + select({
@@ -354,6 +378,7 @@ mongo_cc_library(
         "sasl_aws_common",
         "//src/mongo/bson:bson_validate",
         "//src/mongo/db:server_base",
+        "//src/mongo/rpc:object_check",
         "//src/third_party/libmongocrypt:mongocrypt",
     ],
 )
@@ -492,6 +517,7 @@ mongo_cc_unit_test(
         "authenticate_test.cpp",
         "backoff_with_jitter_test.cpp",
         "connection_string_test.cpp",
+        "credential_test.cpp",
         "dbclient_cursor_test.cpp",
         "fetcher_test.cpp",
         "index_spec_test.cpp",
@@ -505,6 +531,7 @@ mongo_cc_unit_test(
         "server_ping_monitor_test.cpp",
         "streamable_replica_set_monitor_discovery_time_processor_test.cpp",
         "streamable_replica_set_monitor_error_handler_test.cpp",
+        "streamable_replica_set_monitor_heartbeat_test.cpp",
     ],
     data = [
         "//src/mongo/client/mongo_uri_tests:test_data",
@@ -598,6 +625,43 @@ mongo_cc_unit_test(
     ],
 )
 
+mongo_cc_unit_test(
+    name = "dbclient_base_test",
+    srcs = [
+        "dbclient_base_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_first_group",
+        "tracing_test",
+    ],
+    deps = [
+        ":clientdriver_minimal",
+        "//src/mongo/otel/traces:traces_test_util",
+        "//src/mongo/otel/traces:tracing",
+        "//src/mongo/otel/traces:tracing_initialization",
+        "//src/mongo/unittest:server_parameter_guard",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "async_client_test",
+    srcs = [
+        "async_client_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_third_group",
+        "tracing_test",
+    ],
+    deps = [
+        ":async_client",
+        "//src/mongo/executor:remote_command",
+        "//src/mongo/otel/traces:traces_test_util",
+        "//src/mongo/otel/traces:tracing",
+        "//src/mongo/otel/traces:tracing_initialization",
+        "//src/mongo/unittest:server_parameter_guard",
+    ],
+)
+
 # TODO(SERVER-96852): Remove cycle created by moving //src/mongo/client:connection_string.h to //src/mongo/client:connection_string
 filegroup(
     name = "connection_string_hdrs",
@@ -668,5 +732,29 @@ mongo_cc_library(
     ],
     deps = [
         ":backoff_with_jitter",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "sasl_client_authenticate_impl_test",
+    srcs = [
+        "sasl_client_authenticate_impl_test.cpp",
+    ],
+    tags = ["mongo_unittest_fourth_group"],
+    deps = [
+        ":native_sasl_client",
+        "//src/mongo/db:server_base",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "rpc_local_timing_test",
+    srcs = [
+        "rpc_local_timing_test.cpp",
+    ],
+    tags = ["mongo_unittest_fourth_group"],
+    deps = [
+        ":async_client",
+        "//src/mongo/unittest",
     ],
 )

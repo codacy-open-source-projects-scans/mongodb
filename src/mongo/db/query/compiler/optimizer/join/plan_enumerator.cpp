@@ -1,40 +1,15 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/join/plan_enumerator.h"
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
 #include "mongo/db/query/compiler/optimizer/join/join_plan.h"
 #include "mongo/db/query/compiler/optimizer/join/plan_enumerator_helpers.h"
 #include "mongo/logv2/log.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQueryJoin
 
 namespace mongo::join_ordering {
 namespace {
@@ -82,8 +57,8 @@ bool PlanEnumeratorContext::canPlanBeEnumerated(JoinMethod method,
     bool eligibleToPrune = _strategy.enableHJOrderPruning && method == JoinMethod::HJ &&
         (_strategy.planShape == PlanTreeShape::ZIG_ZAG || bothBaseColls);
     if (eligibleToPrune &&
-        _estimator->getOrEstimateSubsetCardinality(left.subset) >
-            _estimator->getOrEstimateSubsetCardinality(right.subset)) {
+        approxGt(_estimator->getOrEstimateSubsetCardinality(left.subset),
+                 _estimator->getOrEstimateSubsetCardinality(right.subset))) {
         return false;
     }
 
@@ -106,8 +81,8 @@ void PlanEnumeratorContext::addPlanToSubset(JoinMethod method,
     LOGV2_DEBUG(11336912,
                 5,
                 "Enumerating plan for join subset",
-                "plan"_attr =
-                    _registry.joinPlanNodeToBSON(subset.plans.back(), _ctx.joinGraph.numNodes()),
+                "plan"_attr = _registry.joinPlanNodeToBSON(
+                    subset.plans.back(), _ctx.joinGraph, false /* brief */),
                 "isBestPlan"_attr = isBestPlan);
 }
 
@@ -129,6 +104,7 @@ void PlanEnumeratorContext::enumerateINLJPlan(EdgeId edge,
     bool isBestPlan = isBestPlanSoFar(subset, inljCost);
     if (_mode.mode() == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
         // Only build this plan if it is better than what we already have.
+        _joinNodesRejected++;
         return;
     }
 
@@ -154,6 +130,7 @@ void PlanEnumeratorContext::enumerateJoinPlan(JoinMethod method,
     bool isBestPlan = isBestPlanSoFar(subset, joinCost);
     if (_mode.mode() == PlanEnumerationMode::CHEAPEST && !isBestPlan) {
         // Only build this plan if it is better than what we already have.
+        _joinNodesRejected++;
         return;
     }
 
@@ -222,6 +199,8 @@ void PlanEnumeratorContext::addJoinPlan(JoinMethod method,
                     5,
                     "Applying hint for subset",
                     "subset"_attr = subset.toString(_ctx.joinGraph.numNodes()),
+                    "subsetCollectionNames"_attr =
+                        subsetCollectionNames(subset.subset, _ctx.joinGraph),
                     "hint"_attr = _mode.hint().toBSON());
     }
 
@@ -375,12 +354,37 @@ void PlanEnumeratorContext::enumerateJoinSubsets() {
             }
         }
     }
+
+    // Log each subset separately to avoid logging too much in one line.
+    if (logv2::shouldLog(logv2::LogComponent::kQuery, logv2::LogSeverity::Debug(5))) {
+        for (size_t level = 0; level < _joinSubsets.size(); level++) {
+            for (auto&& subset : _joinSubsets[level]) {
+                LOGV2_DEBUG(13200900,
+                            5,
+                            "Dump of enumerated join subset",
+                            "level"_attr = level,
+                            "subset"_attr = subsetToBSON(subset));
+            }
+        }
+
+        // Log entire winning plan & its cost.
+        LOGV2_DEBUG(13200901,
+                    5,
+                    "Winning join-optimized plan",
+                    "plan"_attr = _registry.joinPlanNodeToBSON(
+                        getBestFinalPlan(), _ctx.joinGraph, false /* brief */));
+    }
 }
 
 std::string PlanEnumeratorContext::toString() const {
     const auto numNodes = _ctx.joinGraph.numNodes();
     std::stringstream ss;
     ss << "HJ order pruning enabled: " << _strategy.enableHJOrderPruning << "\n";
+    ss << "numHashJoins: " << getNumHashJoins() << "\n";
+    ss << "numNestedLoopJoins: " << getNumNestedLoopJoins() << "\n";
+    ss << "numIndexedNestedLoopJoins: " << getNumIndexedNestedLoopJoins() << "\n";
+    ss << "numRejectedNodes: " << getNumJoinNodesRejectedByCost() << "\n";
+    ss << "numNodes: " << getNumNodes() << "\n";
     for (size_t level = 0; level < _joinSubsets.size(); level++) {
         ss << "Level " << level << ":\n";
         const auto n = _joinSubsets[level].size();
@@ -403,6 +407,60 @@ std::string PlanEnumeratorContext::toString() const {
         }
     }
     return ss.str();
+}
+
+BSONObj PlanEnumeratorContext::subsetToBSON(const JoinSubset& subset) const {
+    const auto numNodes = _ctx.joinGraph.numNodes();
+    BSONObjBuilder subsetBob;
+    subsetBob << "nodeSet" << nodeSetToString(subset.subset, numNodes);
+    {
+        BSONArrayBuilder namesBob(subsetBob.subarrayStart("collectionNames"));
+        for (const auto& name : subsetCollectionNames(subset.subset, _ctx.joinGraph)) {
+            namesBob << name;
+        }
+    }
+
+    const bool isBaseCollectionAccess = subset.isBaseCollectionAccess();
+    if (isBaseCollectionAccess) {
+        const auto node = subset.getNodeId();
+        subsetBob << "collCardinality" << _ctx.singleTableAccess.collCardinalities[node].toBSON();
+        subsetBob << "filterCardinality"
+                  << _ctx.singleTableAccess.nodeCardinalitiesOriginalFilter[node].toBSON();
+    } else if (_estimator) {
+        subsetBob << "cardinality"
+                  << _estimator->getOrEstimateSubsetCardinality(subset.subset).toBSON();
+    }
+
+    if (!isBaseCollectionAccess) {
+        BSONArrayBuilder joinPredBob(subsetBob.subarrayStart("joinPredicates"));
+        auto edgeIds = _ctx.joinGraph.getEdgesForSubgraph(subset.subset);
+        for (auto&& edgeId : edgeIds) {
+            const auto& edge = _ctx.joinGraph.getEdge(edgeId);
+            for (auto&& pred : edge.predicates) {
+                // Summarize each join predicate as an equality between two paths formatted as
+                // <nodeId>.<baseCollFieldPath>.
+                joinPredBob << (str::stream()
+                                << edge.left << "."
+                                << _ctx.resolvedPaths[pred.left].underlyingFieldPath.fullPath()
+                                << (pred.isEquality() ? " = " : " $= ") << edge.right << "."
+                                << _ctx.resolvedPaths[pred.right].underlyingFieldPath.fullPath());
+            }
+        }
+    }
+
+    {
+        BSONArrayBuilder plansBob(subsetBob.subarrayStart("plans"));
+        for (const auto planId : subset.plans) {
+            BSONObjBuilder planBob(plansBob.subobjStart());
+            _registry.joinPlanNodeToBSON(planBob, planId, _ctx.joinGraph, true /* brief */);
+            planBob.doneFast();
+        }
+    }
+    if (subset.hasPlans()) {
+        subsetBob << "bestPlanIndex" << static_cast<int>(subset.bestPlanIndex);
+        subsetBob << "bestPlanCost" << _registry.getCost(subset.bestPlan()).getTotalCost().toBSON();
+    }
+    return subsetBob.obj();
 }
 
 std::vector<JoinPlanNodeId> PlanEnumeratorContext::getRejectedFinalPlans() const {

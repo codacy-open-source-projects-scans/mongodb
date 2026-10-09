@@ -8,8 +8,6 @@
 //   # Primary-driven index builds must have batched writes enabled which config.image_collection
 //   # does not support.
 //   primary_driven_index_builds_incompatible_with_retryable_writes,
-//   # TODO SERVER-116054: Add support for $where.
-//   mozjs_wasm_unsupported,
 // ]
 
 // Ensures that find and modify will not apply an update to a document which, due to a concurrent
@@ -23,11 +21,16 @@ for (let i = 0; i < 3; i++) {
     assert.commandWorked(t.createIndex({b: 1}));
     assert.commandWorked(t.insert({_id: 1, a: 1, b: 1}));
 
-    const join = startParallelShell("db.find_and_modify_concurrent.update({a: 1, b: 1}, {$inc: {a: 1}});");
+    const join = startParallelShell(
+        "db.find_and_modify_concurrent.update({a: 1, b: 1}, {$inc: {a: 1}});",
+    );
 
     // Due to the sleep, we expect this find and modify to yield before updating the
     // document.
-    const res = t.findAndModify({query: {a: 1, b: 1, $where: "sleep(100); return true;"}, update: {$inc: {a: 1}}});
+    const res = t.findAndModify({
+        query: {a: 1, b: 1, $where: "sleep(100); return true;"},
+        update: {$inc: {a: 1}},
+    });
 
     join();
     const docs = t.find().toArray();

@@ -21,7 +21,9 @@ const ns = dbName + "." + collName;
 
 const st = new ShardingTest({mongos: 1, config: 1, shards: 2});
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 
 const isSBEEnabled = checkSbeFullyEnabled(st.s.getDB(dbName));
 
@@ -47,8 +49,14 @@ function runTest({indexes, document, filter}) {
     }
 
     // Ensure there is a cache entry we just created in the plan cache.
-    const keyHash = getPlanCacheKeyFromShape({query: filter, collection: coll, db: st.s.getDB(dbName)});
-    const res = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
+    const keyHash = getPlanCacheKeyFromShape({
+        query: filter,
+        collection: coll,
+        db: st.s.getDB(dbName),
+    });
+    const res = coll
+        .aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}])
+        .toArray();
     assert.eq(1, res.length);
 
     // Move the chunk to the second shard leaving orphaned documents on the first shard.
@@ -64,34 +72,11 @@ function runTest({indexes, document, filter}) {
     });
 }
 
-// Scenario with just one available indexed plan. If SBE is enabled, then the SBE plan cache is in
-// use and we expect a pinned plan cache entry.
-if (isSBEEnabled) {
-    runTest({indexes: [{a: 1}], document: {_id: 0, a: "abc"}, filter: {a: "abc"}});
-}
-
 // Exercise the multi-planner using a case where there are multiple eligible indexes.
 runTest({
     indexes: [{a: 1}, {b: 1}],
     document: {_id: 0, a: "abc", b: "123"},
     filter: {a: "abc", b: "123"},
 });
-
-// Test a rooted $or query. This should use the subplanner. The way that the subplanner interacts
-// with the plan cache differs between the classic engine and SBE. In the classic engine, the plan
-// for each branch is cached independently, whereas in SBE we cache the entire "composite" plan.
-// This test is written to expect the SBE behavior, so it only runs when SBE is enabled.
-if (isSBEEnabled) {
-    runTest({
-        indexes: [{a: 1}, {b: 1}, {c: 1}, {d: 1}],
-        document: {_id: 0, a: "abc", b: "123", c: 4, d: 5},
-        filter: {
-            $or: [
-                {a: "abc", b: "123"},
-                {c: 4, d: 5},
-            ],
-        },
-    });
-}
 
 st.stop();

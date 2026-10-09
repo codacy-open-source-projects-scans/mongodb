@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -41,10 +15,13 @@
 #include "mongo/util/modules.h"
 #include "mongo/util/overloaded_visitor.h"
 
-namespace mongo::fle {
+#include <string_view>
 
-using TagMap = std::map<std::pair<StringData, int>, std::vector<PrfBlock>>;
-using StrTagMap = std::map<std::pair<StringData, StringData>, std::vector<PrfBlock>>;
+namespace mongo::fle {
+using namespace std::literals::string_view_literals;
+
+using TagMap = std::map<std::pair<std::string_view, int>, std::vector<PrfBlock>>;
+using StrTagMap = std::map<std::pair<std::string_view, std::string_view>, std::vector<PrfBlock>>;
 
 /*
  * The MockServerRewrite allows unit testing individual predicate rewrites without going through the
@@ -76,7 +53,7 @@ public:
 private:
     boost::intrusive_ptr<ExpressionContextForTest> _expCtx;
     EncryptedCollScanMode _mode{EncryptedCollScanMode::kUseIfNeeded};
-    NamespaceString _mockNss = NamespaceString::createNamespaceString_forTest("mock"_sd);
+    NamespaceString _mockNss = NamespaceString::createNamespaceString_forTest("mock"sv);
     boost::optional<NamespaceString> _mockOptionalNss;
 };
 
@@ -85,7 +62,7 @@ public:
     EncryptedPredicateRewriteTest();
     ~EncryptedPredicateRewriteTest() override;
 
-    static std::unique_ptr<MatchExpression> makeInExpr(StringData fieldname,
+    static std::unique_ptr<MatchExpression> makeInExpr(std::string_view fieldname,
                                                        BSONArray disjunctions) {
         auto inExpr = std::make_unique<InMatchExpression>(fieldname);
         uassertStatusOK(inExpr->setEqualitiesArray(std::move(disjunctions)));
@@ -93,7 +70,7 @@ public:
         return inExpr;
     }
 
-    static std::unique_ptr<MatchExpression> makeElemMatchWithIn(StringData fieldname,
+    static std::unique_ptr<MatchExpression> makeElemMatchWithIn(std::string_view fieldname,
                                                                 BSONArray disjunctions) {
         auto elemMatchExpr = std::make_unique<ElemMatchValueMatchExpression>(fieldname);
         elemMatchExpr->add(makeInExpr(fieldname, disjunctions));
@@ -116,7 +93,7 @@ public:
     void assertRewriteForOp(const EncryptedPredicate& pred,
                             BSONElement rhs,
                             std::vector<PrfBlock> allTags) {
-        auto inputExpr = T("age"_sd, rhs);
+        auto inputExpr = T("age"sv, rhs);
         assertRewriteToTags(pred, &inputExpr, toBSONArray(std::move(allTags)));
     }
 
@@ -139,28 +116,35 @@ std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, T t) {
 }
 
 template <typename T>
-void toEncryptedBinData(StringData field, EncryptedBinDataType dt, T t, BSONObjBuilder* builder) {
+void toEncryptedBinData(std::string_view field,
+                        EncryptedBinDataType dt,
+                        T t,
+                        BSONObjBuilder* builder) {
     auto buf = toEncryptedVector(dt, t);
 
     builder->appendBinData(field, buf.size(), BinDataType::Encrypt, buf.data());
 }
 
 // Sample encryption keys for creating mock encrypted payloads.
-constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
-constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
+constexpr std::string_view kIndexKeyId{"12345678-1234-9876-1234-123456789012"};
+constexpr std::string_view kUserKeyId{"ABCDEFAB-1234-9876-1234-123456789012"};
 static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId));
 static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
 
 inline const FLEIndexKey& getIndexKey() {
     static std::string indexVec = hexblob::decode(
-        "7dbfebc619aa68a659f64b8e23ccd21644ac326cb74a26840c3d2420176c40ae088294d00ad6cae9684237b21b754cf503f085c25cd320bf035c3417416e1e6fe3d9219f79586582112740b2add88e1030d91926ae8afc13ee575cfb8bb965b7"_sd);
+        "7dbfebc619aa68a659f64b8e23ccd21644ac326cb74a26840c3d2420176c40ae088294d00ad6cae9684237b21b"
+        "754cf503f085c25cd320bf035c3417416e1e6fe3d9219f79586582112740b2add88e1030d91926ae8afc13ee57"
+        "5cfb8bb965b7");
     static FLEIndexKey indexKey(KeyMaterial(indexVec.begin(), indexVec.end()));
     return indexKey;
 }
 
 inline const FLEUserKey& getUserKey() {
     static std::string userVec = hexblob::decode(
-        "a7ddbc4c8be00d51f68d9d8e485f351c8edc8d2206b24d8e0e1816d005fbe520e489125047d647b0d8684bfbdbf09c304085ed086aba6c2b2b1677ccc91ced8847a733bf5e5682c84b3ee7969e4a5fe0e0c21e5e3ee190595a55f83147d8de2a"_sd);
+        "a7ddbc4c8be00d51f68d9d8e485f351c8edc8d2206b24d8e0e1816d005fbe520e489125047d647b0d8684bfbdb"
+        "f09c304085ed086aba6c2b2b1677ccc91ced8847a733bf5e5682c84b3ee7969e4a5fe0e0c21e5e3ee190595a55"
+        "f83147d8de2a");
     static FLEUserKey userKey(KeyMaterial(userVec.begin(), userVec.end()));
     return userKey;
 }

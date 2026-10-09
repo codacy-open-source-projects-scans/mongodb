@@ -1,10 +1,8 @@
 /**
  * Test that $queryStats properly tokenizes find commands, on mongod and mongos.
  */
-import {getQueryStatsFindCmd} from "jstests/libs/query/query_stats_utils.js";
+import {getQueryStatsFindCmd, kHashedFieldName} from "jstests/libs/query/query_stats_utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
-
-const kHashedFieldName = "lU7Z0mLRPRUL+RfAD5jhYPRRpXBsZBxS/20EzDwfOG4=";
 
 function runTest(conn) {
     const db = conn.getDB("test");
@@ -28,14 +26,19 @@ function runTest(conn) {
     // Cursor isn't exhausted, so there shouldn't be another entry yet.
     assert.eq(1, queryStats.length);
 
-    assert.commandWorked(db.runCommand({getMore: cursor.getId(), collection: db.test.getName(), batchSize: 2}));
+    assert.commandWorked(
+        db.runCommand({getMore: cursor.getId(), collection: db.test.getName(), batchSize: 2}),
+    );
 
     queryStats = getQueryStatsFindCmd(admin, {transformIdentifiers: true});
     assert.eq(2, queryStats.length);
     assert.eq("find", queryStats[1].key.queryShape.command);
     assert.eq(
         {
-            "$and": [{[kHashedFieldName]: {"$gt": "?number"}}, {[kHashedFieldName]: {"$lt": "?number"}}],
+            "$and": [
+                {[kHashedFieldName]: {"$gt": "?number"}},
+                {[kHashedFieldName]: {"$lt": "?number"}},
+            ],
         },
         queryStats[1].key.queryShape.filter,
     );
@@ -43,7 +46,12 @@ function runTest(conn) {
 
 let conn = MongoRunner.runMongod({
     setParameter: {
-        internalQueryStatsRateLimit: -1,
+        internalQueryStatsSampleRate: 1,
+        // In replica set suites, cluster-time key generation runs a find on admin.system.keys
+        // shortly after startup, which is recorded in the queryStats store (it is attributed to
+        // the shell's application name, so it is not filtered out) and perturbs the exact entry
+        // count asserted below.
+        "failpoint.disableKeyGeneration": "{'mode':'alwaysOn'}",
     },
 });
 runTest(conn);
@@ -56,7 +64,7 @@ let st = new ShardingTest({
     rs: {nodes: 1},
     mongosOptions: {
         setParameter: {
-            internalQueryStatsRateLimit: -1,
+            internalQueryStatsSampleRate: 1,
             "failpoint.skipClusterParameterRefresh": "{'mode':'alwaysOn'}",
         },
     },

@@ -34,6 +34,38 @@ const kSizeRolloverFieldBytes = 130_000;
 // Pre-built once at module load; reused across every injected document.
 const kSizeRolloverLargeValue = "x".repeat(kSizeRolloverFieldBytes);
 
+// Upper bound on how many times a single stream may extend its schema mid-stream.
+//
+// Schema extensions are drawn per-document (see newFieldFrequency), so without a cap their
+// count grows with the stream length, and each one adds a field to every remaining document.
+// That makes both generation and document assembly quadratic in the stream length, which is
+// what pushed the kCount case past its task timeout in BF-46043.  Capping the count keeps the
+// cost linear while still exercising mid-stream schema extension.
+//
+// Note the cap binds for every current caller, not just long streams.  The per-document draw
+// uses fc.double({min: 0, max: 1}), which is uniform over *representable doubles* rather than
+// over the real interval, so the vast majority of draws land very close to zero: a
+// newFieldFrequency of 0.05 fires for ~86% of documents in practice, not 5%.  A 50-document
+// stream therefore attempts ~44 extensions and a 1001-document stream ~860.  That bias is a
+// separate defect worth fixing on its own; this cap bounds the cost either way.
+const kMaxNewFieldEvents = 10;
+
+/**
+ * Pick at most `maxCount` entries from `items`, spread evenly across the array so the
+ * selection keeps its distribution over the stream rather than clustering at the front.
+ */
+function subsampleEvenly(items, maxCount) {
+    if (items.length <= maxCount) {
+        return items;
+    }
+    const stride = items.length / maxCount;
+    const picked = [];
+    for (let k = 0; k < maxCount; ++k) {
+        picked.push(items[Math.floor(k * stride)]);
+    }
+    return picked;
+}
+
 /**
  * Build a time stream where some inter-document gaps are forced to exceed
  * `bucketSpanSeconds`, triggering a kTimeForward bucket rollover.
@@ -50,7 +82,14 @@ const kSizeRolloverLargeValue = "x".repeat(kSizeRolloverFieldBytes);
  * @param {number} chance - probability per gap of injecting a forward jump [0, 1]
  * @returns {fc.Arbitrary<Date[]>}
  */
-function makeTimeForwardStreamArb(docCount, dateMin, dateMax, bucketSpanSeconds, timeBucketing, chance) {
+function makeTimeForwardStreamArb(
+    docCount,
+    dateMin,
+    dateMax,
+    bucketSpanSeconds,
+    timeBucketing,
+    chance,
+) {
     const bucketSpanMs = bucketSpanSeconds * 1_000;
     const baseArb = makeSensorDateMetricStreamArb(
         docCount,
@@ -104,13 +143,22 @@ function makeTimeForwardStreamArb(docCount, dateMin, dateMax, bucketSpanSeconds,
  * @param {Date} dateMin
  * @returns {fc.Arbitrary<Object[]>}
  */
-function applyRolloverInjections(docs, timeFieldname, timeBackwardChance, sizeRolloverChance, dateMin) {
+function applyRolloverInjections(
+    docs,
+    timeFieldname,
+    timeBackwardChance,
+    sizeRolloverChance,
+    dateMin,
+) {
     if (docs.length === 0 || (timeBackwardChance <= 0 && sizeRolloverChance <= 0)) {
         return fc.constant(docs);
     }
 
     const n = docs.length;
-    const minTimestampMs = docs.reduce((min, d) => Math.min(min, d[timeFieldname].getTime()), Infinity);
+    const minTimestampMs = docs.reduce(
+        (min, d) => Math.min(min, d[timeFieldname].getTime()),
+        Infinity,
+    );
 
     // Backward-timestamp decisions + offset magnitudes.
     const backDecisionsArb =
@@ -119,7 +167,10 @@ function applyRolloverInjections(docs, timeFieldname, timeBackwardChance, sizeRo
             : fc.constant(new Array(n).fill(1.0));
     const backOffsetArb =
         timeBackwardChance > 0
-            ? fc.array(fc.integer({min: 3_600_000, max: 86_400_000 * 7}), {minLength: n, maxLength: n})
+            ? fc.array(fc.integer({min: 3_600_000, max: 86_400_000 * 7}), {
+                  minLength: n,
+                  maxLength: n,
+              })
             : fc.constant(new Array(n).fill(0));
 
     // Size-field decisions.
@@ -224,7 +275,10 @@ export function makeMeasurementDocArb(
 
     // Field names for extra fields must not collide with reserved ones
     const baseFieldNameArb = fieldNameArb.filter(
-        (name) => !["_id", timeFieldname, metaFieldname, ...Object.keys(explicitArbitraries)].includes(name),
+        (name) =>
+            !["_id", timeFieldname, metaFieldname, ...Object.keys(explicitArbitraries)].includes(
+                name,
+            ),
     );
 
     const fieldNamesArb = fc.array(baseFieldNameArb, {
@@ -320,7 +374,9 @@ export function makeMeasurementDocStreamArb(timeFieldname, metaFieldname, metaVa
 
     const mixedSchemaChance = options.mixedSchemaChance ?? 0.0;
     if (typeof mixedSchemaChance !== "number" || mixedSchemaChance < 0 || mixedSchemaChance > 1) {
-        throw new Error("makeMeasurementDocStreamArb: mixedSchemaChance must be a number in [0, 1]");
+        throw new Error(
+            "makeMeasurementDocStreamArb: mixedSchemaChance must be a number in [0, 1]",
+        );
     }
 
     const rolloverConditions = options.rolloverConditions ?? {};
@@ -336,7 +392,9 @@ export function makeMeasurementDocStreamArb(timeFieldname, metaFieldname, metaVa
         ["sizeRolloverChance", sizeRolloverChance],
     ]) {
         if (typeof val !== "number" || val < 0 || val > 1) {
-            throw new Error(`makeMeasurementDocStreamArb: rolloverConditions.${key} must be a number in [0, 1]`);
+            throw new Error(
+                `makeMeasurementDocStreamArb: rolloverConditions.${key} must be a number in [0, 1]`,
+            );
         }
     }
 
@@ -402,122 +460,160 @@ export function makeMeasurementDocStreamArb(timeFieldname, metaFieldname, metaVa
     const rf = Math.max(0, Math.min(1, Number(runFrequency)));
     const useRunnyMetricsArb = fc.double({min: 0, max: 1}).map((d) => d < rf);
 
-    return fc.tuple(fieldNamesArb, docCountArb, metaValueArb).chain(([fieldNames, docCount, chosenMetaValue]) => {
-        if (docCount === 0) {
-            return fc.constant([]);
-        }
+    return fc
+        .tuple(fieldNamesArb, docCountArb, metaValueArb)
+        .chain(([fieldNames, docCount, chosenMetaValue]) => {
+            if (docCount === 0) {
+                return fc.constant([]);
+            }
 
-        // Time stream: use forward-jump injection when timeForwardChance > 0,
-        // otherwise fall back to the standard sensor-like stream.
-        const timeStreamArb =
-            timeForwardChance > 0
-                ? makeTimeForwardStreamArb(
-                      docCount,
-                      dateMin,
-                      dateMax,
-                      bucketSpanSeconds,
-                      timeBucketing,
-                      timeForwardChance,
-                  )
-                : makeSensorDateMetricStreamArb(
-                      docCount,
-                      docCount,
-                      {dateRange: {min: dateMin, max: dateMax}},
-                      timeBucketing,
-                  );
+            // Time stream: use forward-jump injection when timeForwardChance > 0,
+            // otherwise fall back to the standard sensor-like stream.
+            const timeStreamArb =
+                timeForwardChance > 0
+                    ? makeTimeForwardStreamArb(
+                          docCount,
+                          dateMin,
+                          dateMax,
+                          bucketSpanSeconds,
+                          timeBucketing,
+                          timeForwardChance,
+                      )
+                    : makeSensorDateMetricStreamArb(
+                          docCount,
+                          docCount,
+                          {dateRange: {min: dateMin, max: dateMax}},
+                          timeBucketing,
+                      );
 
-        const metaStreamArb = fc.array(fc.constant(chosenMetaValue), {minLength: docCount, maxLength: docCount});
+            const metaStreamArb = fc.array(fc.constant(chosenMetaValue), {
+                minLength: docCount,
+                maxLength: docCount,
+            });
 
-        // Extra fields: each gets a metric stream built via makeMetricStreamArb or makeRunnyMetricStreamArb. We set both minLength and maxLength
-        // with minLength = maxLength = docCount, so every stream[i] is defined.
-        let extraFieldStreamArbs = {};
-        const extraFieldRanges = {
-            intRange,
-            doubleRange,
-            longRange,
-            decimalRange,
-            dateRange: {min: dateMin, max: dateMax},
-        };
-        const extraFieldOptions = {
-            ranges: extraFieldRanges,
-            types: options.types,
-            streamFactories: undefined,
-            extendControlFrequency: extendControlFrequency,
-        };
+            // Extra fields: each gets a metric stream built via makeMetricStreamArb or makeRunnyMetricStreamArb. We set both minLength and maxLength
+            // with minLength = maxLength = docCount, so every stream[i] is defined.
+            let extraFieldStreamArbs = {};
+            const extraFieldRanges = {
+                intRange,
+                doubleRange,
+                longRange,
+                decimalRange,
+                dateRange: {min: dateMin, max: dateMax},
+            };
+            const extraFieldOptions = {
+                ranges: extraFieldRanges,
+                types: options.types,
+                streamFactories: undefined,
+                extendControlFrequency: extendControlFrequency,
+            };
 
-        // Runny overrides mixed type, this should be fine for our use cases
-        for (const fieldName of fieldNames) {
-            const plainArb = fc
-                .double({min: 0, max: 1, noNaN: true})
-                .chain((selector) =>
-                    selector < mixedSchemaChance
-                        ? makeMixedTypeMetricStreamArb(docCount, docCount, extraFieldOptions)
-                        : makeMetricStreamArb(docCount, docCount, extraFieldOptions),
+            // Runny overrides mixed type, this should be fine for our use cases
+            for (const fieldName of fieldNames) {
+                const plainArb = fc
+                    .double({min: 0, max: 1, noNaN: true})
+                    .chain((selector) =>
+                        selector < mixedSchemaChance
+                            ? makeMixedTypeMetricStreamArb(docCount, docCount, extraFieldOptions)
+                            : makeMetricStreamArb(docCount, docCount, extraFieldOptions),
+                    );
+                const runnyArb = makeRunnyMetricStreamArb(parentMetricArb, {
+                    minLength: docCount,
+                    maxLength: docCount,
+                });
+                extraFieldStreamArbs[fieldName] = useRunnyMetricsArb.chain((useRunny) =>
+                    useRunny ? runnyArb : plainArb,
                 );
-            const runnyArb = makeRunnyMetricStreamArb(parentMetricArb, {minLength: docCount, maxLength: docCount});
-            extraFieldStreamArbs[fieldName] = useRunnyMetricsArb.chain((useRunny) => (useRunny ? runnyArb : plainArb));
-        }
+            }
 
-        for (const [fieldName, factory] of Object.entries(explicitArbitraries)) {
-            extraFieldStreamArbs[fieldName] = fc.array(factory(), {minLength: docCount, maxLength: docCount});
-        }
+            for (const [fieldName, factory] of Object.entries(explicitArbitraries)) {
+                extraFieldStreamArbs[fieldName] = fc.array(factory(), {
+                    minLength: docCount,
+                    maxLength: docCount,
+                });
+            }
 
-        // Per-doc decisions: each doc has a newFieldFrequency chance of introducing a new field
-        // to the schema for all subsequent docs (including itself).
-        const newFieldDecisionsArb = fc.array(fc.double({min: 0, max: 1, noNaN: true}), {
-            minLength: docCount,
-            maxLength: docCount,
-        });
+            // Per-doc decisions: each doc has a newFieldFrequency chance of introducing a new field
+            // to the schema for all subsequent docs (including itself).
+            const newFieldDecisionsArb = fc.array(fc.double({min: 0, max: 1, noNaN: true}), {
+                minLength: docCount,
+                maxLength: docCount,
+            });
 
-        return newFieldDecisionsArb.chain((decisions) => {
-            const insertionIndices = decisions.reduce((acc, d, i) => {
-                if (d < newFieldFrequency) acc.push(i);
-                return acc;
-            }, []);
+            return newFieldDecisionsArb.chain((decisions) => {
+                const allInsertionIndices = decisions.reduce((acc, d, i) => {
+                    if (d < newFieldFrequency) acc.push(i);
+                    return acc;
+                }, []);
+                // See kMaxNewFieldEvents: uncapped, this count scales with docCount and makes
+                // the whole stream quadratic to generate.
+                const insertionIndices = subsampleEvenly(allInsertionIndices, kMaxNewFieldEvents);
 
-            const newFieldNameArb = baseFieldNameArb.filter((name) => !fieldNames.includes(name));
-            const newFieldEventArbs = insertionIndices.map((insertionIdx) =>
-                fc
-                    .tuple(
-                        newFieldNameArb,
-                        makeMetricStreamArb(docCount, docCount, extraFieldRanges, undefined, extendControlFrequency),
-                    )
-                    .map(([fieldName, stream]) => ({fieldName, insertionIdx, stream})),
-            );
-            const newFieldEventsArb = newFieldEventArbs.length > 0 ? fc.tuple(...newFieldEventArbs) : fc.constant([]);
+                const newFieldNameArb = baseFieldNameArb.filter(
+                    (name) => !fieldNames.includes(name),
+                );
+                const newFieldEventArbs = insertionIndices.map((insertionIdx) => {
+                    // The field only exists from insertionIdx onward, so generate just that
+                    // tail rather than a full-length stream whose head is discarded.
+                    const streamLength = docCount - insertionIdx;
+                    return fc
+                        .tuple(
+                            newFieldNameArb,
+                            makeMetricStreamArb(
+                                streamLength,
+                                streamLength,
+                                extraFieldRanges,
+                                undefined,
+                                extendControlFrequency,
+                            ),
+                        )
+                        .map(([fieldName, stream]) => ({fieldName, insertionIdx, stream}));
+                });
+                const newFieldEventsArb =
+                    newFieldEventArbs.length > 0 ? fc.tuple(...newFieldEventArbs) : fc.constant([]);
 
-            return newFieldEventsArb.chain((newFieldEvents) =>
-                fc
-                    .tuple(timeStreamArb, metaStreamArb, ...Object.values(extraFieldStreamArbs))
-                    .map(([timeStream, metaStream, ...extraFieldStream]) => {
-                        const docs = [];
+                return newFieldEventsArb.chain((newFieldEvents) =>
+                    fc
+                        .tuple(timeStreamArb, metaStreamArb, ...Object.values(extraFieldStreamArbs))
+                        .map(([timeStream, metaStream, ...extraFieldStream]) => {
+                            const docs = [];
 
-                        for (let i = 0; i < docCount; ++i) {
-                            const doc = {[timeFieldname]: timeStream[i], [metaFieldname]: metaStream[i]};
+                            for (let i = 0; i < docCount; ++i) {
+                                const doc = {
+                                    [timeFieldname]: timeStream[i],
+                                    [metaFieldname]: metaStream[i],
+                                };
 
-                            Object.keys(extraFieldStreamArbs).forEach((name, idx) => {
-                                doc[name] = extraFieldStream[idx][i];
-                            });
+                                Object.keys(extraFieldStreamArbs).forEach((name, idx) => {
+                                    doc[name] = extraFieldStream[idx][i];
+                                });
 
-                            for (const {fieldName, insertionIdx, stream} of newFieldEvents) {
-                                if (i >= insertionIdx) {
-                                    doc[fieldName] = stream[i];
+                                for (const {fieldName, insertionIdx, stream} of newFieldEvents) {
+                                    if (i >= insertionIdx) {
+                                        // stream is the tail starting at insertionIdx.
+                                        doc[fieldName] = stream[i - insertionIdx];
+                                    }
                                 }
+
+                                docs.push(doc);
                             }
 
-                            docs.push(doc);
-                        }
-
-                        return docs;
-                    })
-                    // Apply time-backward and size-rollover injections as a chain so that
-                    // the random decisions participate in fast-check's shrinking.
-                    .chain((docs) =>
-                        applyRolloverInjections(docs, timeFieldname, timeBackwardChance, sizeRolloverChance, dateMin),
-                    ),
-            );
+                            return docs;
+                        })
+                        // Apply time-backward and size-rollover injections as a chain so that
+                        // the random decisions participate in fast-check's shrinking.
+                        .chain((docs) =>
+                            applyRolloverInjections(
+                                docs,
+                                timeFieldname,
+                                timeBackwardChance,
+                                sizeRolloverChance,
+                                dateMin,
+                            ),
+                        ),
+                );
+            });
         });
-    });
 }
 
 /**

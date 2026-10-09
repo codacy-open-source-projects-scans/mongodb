@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -50,6 +23,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -58,6 +32,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Match);
 class MatchLiteParsed final : public LiteParsedDocumentSourceDefault<MatchLiteParsed> {
@@ -85,7 +60,10 @@ public:
     // $match with $text is not allowed on timeseries collections.
     Constraints constraints() const override {
         if (_isTextQuery) {
-            return {.canRunOnTimeseries = false, .timeseriesUnsupportedStageName = "$text"_sd};
+            return {
+                .canRunOnTimeseries = false,
+                .timeseriesUnsupportedStageName = std::string_view{"$text"},
+            };
         }
         return {};
     }
@@ -99,7 +77,7 @@ private:
     bool _isTextQuery;
 };
 
-class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceMatch : public DocumentSource {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DocumentSourceMatch : public DocumentSource {
 public:
     static bool containsTextOperator(const MatchExpression& expr);
 
@@ -108,7 +86,7 @@ public:
 
     ~DocumentSourceMatch() override = default;
 
-    static constexpr StringData kStageName = "$match"_sd;
+    static constexpr std::string_view kStageName = "$match"sv;
     /**
      * Convenience method for creating a $match stage.
      */
@@ -125,13 +103,13 @@ public:
      * Returns a new DocumentSourceMatch with a MatchExpression that, if executed on the
      * sub-document at 'path', is equivalent to 'expression'.
      *
-     * For example, if the original expression is {$and: [{'a.b': {$gt: 0}}, {'a.d': {$eq: 3}}]},
-     * the new $match will have the expression {$and: [{b: {$gt: 0}}, {d: {$eq: 3}}]} after
-     * descending on the path 'a'.
+     * For example, if the original expression is {$and: [{'a.b': {$gt: 0}}, {'a.d': {$eq:
+     * 3}}]}, the new $match will have the expression {$and: [{b: {$gt: 0}}, {d: {$eq: 3}}]}
+     * after descending on the path 'a'.
      *
-     * Should be called _only_ on a MatchExpression that is a predicate on 'path', or subfields of
-     * 'path'. It is also invalid to call this method on an expression including a $elemMatch on
-     * 'path', for example: {'path': {$elemMatch: {'subfield': 3}}}
+     * Should be called _only_ on a MatchExpression that is a predicate on 'path', or subfields
+     * of 'path'. It is also invalid to call this method on an expression including a $elemMatch
+     * on 'path', for example: {'path': {$elemMatch: {'subfield': 3}}}
      */
     static boost::intrusive_ptr<DocumentSourceMatch> descendMatchOnPath(
         const MatchExpression* matchExpr,
@@ -139,9 +117,9 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
-     * Returns a pair of pointers to $match stages, either of which can be null. The first entry in
-     * the pair is a $match stage that can be moved before this stage, the second is a $match stage
-     * that must remain after this stage.
+     * Returns a pair of pointers to $match stages, either of which can be null. The first entry
+     * in the pair is a $match stage that can be moved before this stage, the second is a $match
+     * stage that must remain after this stage.
      */
     static std::pair<boost::intrusive_ptr<DocumentSourceMatch>,
                      boost::intrusive_ptr<DocumentSourceMatch>>
@@ -156,7 +134,7 @@ public:
 
     boost::intrusive_ptr<DocumentSource> optimize();
 
-    const char* getSourceName() const override;
+    std::string_view getSourceName() const override;
 
     static const Id& id;
 
@@ -178,7 +156,8 @@ public:
         return constraints;
     }
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const override;
 
     /**
      * Attempts to combine with any subsequent $match stages, joining the query objects with a
@@ -210,9 +189,9 @@ public:
 
     /**
      * Combines the filter in this $match with the filter of 'other' using a specified join
-     * predicate, updating this match in place. This uses the stages' 'MatchExpression's, as those
-     * are kept up to date during any optimizations. Currently, the join predicate can only be
-     * either 'MatchExpression::MatchType::AND' or 'MatchExpression::MatchType::OR'.
+     * predicate, updating this match in place. This uses the stages' 'MatchExpression's, as
+     * those are kept up to date during any optimizations. Currently, the join predicate can
+     * only be either 'MatchExpression::MatchType::AND' or 'MatchExpression::MatchType::OR'.
      */
     void joinMatchWith(boost::intrusive_ptr<DocumentSourceMatch> other,
                        MatchExpression::MatchType joinPred);
@@ -316,12 +295,13 @@ public:
     /**
      * Must override the serialize method, since internal change stream stages are serialized
      * differently than match stages. This function mirrors
-     * DocumentSourceInternalChangeStreamStage::serialize and was added because this class cannot
-     * inherit from both DocumentSourceInternalChangeStreamStage and DocumentSourceMatch.
+     * DocumentSourceInternalChangeStreamStage::serialize and was added because this class
+     * cannot inherit from both DocumentSourceInternalChangeStreamStage and DocumentSourceMatch.
      */
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
 
-    virtual Value doSerialize(const SerializationOptions& opts) const {
+    virtual Value doSerialize(const query_shape::SerializationOptions& opts) const {
         return DocumentSourceMatch::serialize(opts);
     }
 

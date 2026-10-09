@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -51,6 +24,7 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/query/write_ops/delete.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -215,7 +189,7 @@ void insertOplogBatch(OperationContext* opCtx,
                       const ShardId& donorShard,
                       const std::vector<InsertStatement>& oplogBatch,
                       bool storeProgress) {
-    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
 
     uassertStatusOK(collection_internal::insertDocuments(
         opCtx, oplogBufferColl, oplogBatch.begin(), oplogBatch.end(), nullptr));
@@ -265,14 +239,16 @@ Milliseconds calculateTimeToFetch(OperationContext* opCtx,
 const ReshardingDonorOplogId ReshardingOplogFetcher::kFinalOpAlreadyFetched{Timestamp::max(),
                                                                             Timestamp::max()};
 
-ReshardingOplogFetcher::ReshardingOplogFetcher(std::unique_ptr<Env> env,
-                                               UUID reshardingUUID,
-                                               UUID collUUID,
-                                               ReshardingDonorOplogId startAt,
-                                               ShardId donorShard,
-                                               ShardId recipientShard,
-                                               NamespaceString oplogBufferNss,
-                                               bool storeProgress)
+ReshardingOplogFetcher::ReshardingOplogFetcher(
+    std::unique_ptr<Env> env,
+    UUID reshardingUUID,
+    UUID collUUID,
+    ReshardingDonorOplogId startAt,
+    ShardId donorShard,
+    ShardId recipientShard,
+    NamespaceString oplogBufferNss,
+    bool storeProgress,
+    boost::optional<ForwardableOperationMetadata> forwardableOpMetadata)
     : _env(std::move(env)),
       _reshardingUUID(reshardingUUID),
       _collUUID(collUUID),
@@ -280,6 +256,7 @@ ReshardingOplogFetcher::ReshardingOplogFetcher(std::unique_ptr<Env> env,
       _recipientShard(recipientShard),
       _oplogBufferNss(oplogBufferNss),
       _storeProgress(storeProgress),
+      _forwardableOpMetadata(std::move(forwardableOpMetadata)),
       _startAt(startAt) {
     auto [p, f] = makePromiseFuture<void>();
     std::lock_guard lk(_mutex);
@@ -536,9 +513,9 @@ bool ReshardingOplogFetcher::_needToEstimateRemainingTimeBasedOnMovingAverage(
         // Only check the feature flag once since the setFCV command aborts any in-progress
         // resharding operation so no resharding operations can span multiple FCV versions.
         _supportEstimatingRemainingTimeBasedOnMovingAverage =
-            resharding::gFeatureFlagReshardingRemainingTimeEstimateBasedOnMovingAverage.isEnabled(
-                VersionContext::getDecoration(opCtx),
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+            resharding::isEnabledWithPinnedVersion(
+                _forwardableOpMetadata,
+                resharding::gFeatureFlagReshardingRemainingTimeEstimateBasedOnMovingAverage);
     }
 
     return *_supportEstimatingRemainingTimeBasedOnMovingAverage &&
@@ -640,13 +617,20 @@ bool ReshardingOplogFetcher::consume(
     auto tickSource = opCtxRaii->getServiceContext()->getTickSource();
     Timer batchTimer(tickSource);
 
+    const auto [originalStartAt,
+                originalTotalNumBatchesProcessed,
+                originalLastUpdatedProgressMarkAt] = [&] {
+        std::lock_guard lk(_mutex);
+        return std::make_tuple(_startAt, _totalNumBatchesProcessed, _lastUpdatedProgressMarkAt);
+    }();
+    const auto originalNumOplogEntriesCopied = _numOplogEntriesCopied;
+
     // Note that the oplog entries are *not* being copied with a tailable cursor.
     // Shard::runAggregation() will instead return upon hitting the end of the donor's oplog.
-    // TODO(SERVER-113504): Consider using kIdempotent and properly implement onRetry.
     uassertStatusOK(shard->runAggregation(
         opCtxRaii.get(),
         aggRequest,
-        Shard::RetryPolicy::kNoRetry,
+        Shard::RetryPolicy::kIdempotent,
         [this, &currentNumBatchesProcessed, &moreToCome, &opCtxRaii, &batchTimer, factory](
             const std::vector<BSONObj>& aggregateBatch,
             const boost::optional<BSONObj>& postBatchResumeToken) {
@@ -785,8 +769,68 @@ bool ReshardingOplogFetcher::consume(
 
             return true;
         },
-        [](const Status&) {
-            // Do nothing on retry since we don't allow retries.
+        [this,
+         &currentNumBatchesProcessed,
+         &moreToCome,
+         &opCtxRaii,
+         &originalStartAt,
+         &originalNumOplogEntriesCopied,
+         &originalTotalNumBatchesProcessed,
+         &originalLastUpdatedProgressMarkAt,
+         factory](const Status&) {
+            auto opCtx = opCtxRaii.get();
+
+            // Acquire all collections before any writes. config.* is replicated, so deleteObjects
+            // below will write to the local oplog and set assertOnLockAttempt=true on the opCtx.
+            // Any lock acquisition after that point will fatal.
+            auto oplogBufferColl =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(
+                                      _oplogBufferNss,
+                                      PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                      repl::ReadConcernArgs::get(opCtx),
+                                      AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
+            boost::optional<CollectionAcquisition> oplogFetcherProgressColl;
+            if (_storeProgress) {
+                oplogFetcherProgressColl =
+                    acquireCollection(opCtx,
+                                      CollectionAcquisitionRequest(
+                                          NamespaceString::kReshardingFetcherProgressNamespace,
+                                          PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                          repl::ReadConcernArgs::get(opCtx),
+                                          AcquisitionPrerequisites::kWrite),
+                                      MODE_IX);
+            }
+
+            WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::atomicGroup);
+            // deleteObjects returns the number of deleted docs, which matches the progress doc
+            // increment exactly (including progress-mark noops counted by insertOplogBatch).
+            const long long numDeleted =
+                deleteObjects(opCtx,
+                              oplogBufferColl,
+                              BSON("_id" << BSON("$gt" << originalStartAt.toBSON())),
+                              false /* justOne */);
+
+            if (oplogFetcherProgressColl && numDeleted > 0) {
+                auto filter = BSON(ReshardingOplogApplierProgress::kOplogSourceIdFieldName
+                                   << (ReshardingSourceId{_reshardingUUID, _donorShard}).toBSON());
+                auto updateMod =
+                    BSON("$inc" << BSON(ReshardingOplogFetcherProgress::kNumEntriesFetchedFieldName
+                                        << -numDeleted));
+                Helpers::upsert(opCtx, *oplogFetcherProgressColl, filter, updateMod, false);
+            }
+            wuow.commit();
+
+            {
+                std::lock_guard lk(_mutex);
+                _startAt = originalStartAt;
+                _totalNumBatchesProcessed = originalTotalNumBatchesProcessed;
+                _lastUpdatedProgressMarkAt = originalLastUpdatedProgressMarkAt;
+            }
+            _numOplogEntriesCopied = originalNumOplogEntriesCopied;
+            currentNumBatchesProcessed = 0;
+            moreToCome = true;
         }));
 
     return moreToCome;

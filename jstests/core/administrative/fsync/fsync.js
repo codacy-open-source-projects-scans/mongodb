@@ -12,7 +12,7 @@
  *   requires_fastcount,
  *   requires_fsync,
  *   uses_parallel_shell,
- *   # TODO (SERVER-123573): See if this test can be re-enabled.
+ *   # TODO (SERVER-133083): Re-enabled this test with fastcount.
  *   featureFlagReplicatedFastCount_incompatible,
  * ]
  */
@@ -116,7 +116,9 @@ let currentOp = db.getSiblingDB("admin").runCommand({currentOp: 1});
 assert.commandWorked(currentOp);
 assert(currentOp.fsyncLock, "Value in currentOp result incorrect for fsyncLocked server");
 
-let shellHandle1 = startParallelShell("db.getSiblingDB('fsyncLockTestDB').multipleLock.insert({x:1});");
+let shellHandle1 = startParallelShell(
+    "db.getSiblingDB('fsyncLockTestDB').multipleLock.insert({x:1});",
+);
 
 fsyncLockRes = db.fsyncLock();
 assert.commandWorked(fsyncLockRes);
@@ -125,7 +127,9 @@ currentOp = db.getSiblingDB("admin").runCommand({currentOp: 1});
 assert.commandWorked(currentOp);
 assert(currentOp.fsyncLock, "Value in currentOp result incorrect for fsyncLocked server");
 
-let shellHandle2 = startParallelShell("db.getSiblingDB('fsyncLockTestDB').multipleLock.insert({x:1});");
+let shellHandle2 = startParallelShell(
+    "db.getSiblingDB('fsyncLockTestDB').multipleLock.insert({x:1});",
+);
 waitUntilOpCountIs({op: "insert", ns: "fsyncLockTestDB.multipleLock", waitingForLock: true}, 2);
 
 assert.eq(0, fsyncLockDB.multipleLock.find({}).itcount());

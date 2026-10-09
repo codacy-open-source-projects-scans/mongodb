@@ -5,6 +5,7 @@
 // MatchExpression semantics compared to agg, so the expression will not be rewritten or be able to
 // use indexes when they are present in the inList.
 // @tags: [
+//   uses_explain,
 //   assumes_read_concern_local,
 //   requires_fcv_81,
 //   requires_getmore,
@@ -70,7 +71,10 @@ assert.commandWorked(coll.createIndexes([{category: 1}, {"category.a": 1}]));
  *                      'null' if a collection scan is expected.
  */
 function confirmExpectedExprExecution(expr, metricsToCheck) {
-    assert(metricsToCheck.hasOwnProperty("expectedRes"), "metricsToCheck must contain an expectedRes field");
+    assert(
+        metricsToCheck.hasOwnProperty("expectedRes"),
+        "metricsToCheck must contain an expectedRes field",
+    );
 
     // Verify that $expr returns the expected results when run inside the $match stage of an
     // aggregate. Note that assert.sameMembers is used instead of eq because there is no guarantee
@@ -102,7 +106,11 @@ function confirmExpectedExprExecution(expr, metricsToCheck) {
     const isSharded = explain.hasOwnProperty("shards");
 
     if (isSharded) {
-        const stages = getAggPlanStages(explain, "COLLSCAN", getEngine(explain) === "sbe" /* useQueryPlannerSection */);
+        const stages = getAggPlanStages(
+            explain,
+            "COLLSCAN",
+            getEngine(explain) === "sbe" /* useQueryPlannerSection */,
+        );
         const numShards = Object.keys(explain.shards).length;
         assert.eq(
             stages.length,
@@ -111,7 +119,11 @@ function confirmExpectedExprExecution(expr, metricsToCheck) {
         );
     } else {
         assert(
-            getAggPlanStage(explain, "COLLSCAN", getEngine(explain) === "sbe" /* useQueryPlannerSection */),
+            getAggPlanStage(
+                explain,
+                "COLLSCAN",
+                getEngine(explain) === "sbe" /* useQueryPlannerSection */,
+            ),
             explain,
         );
     }

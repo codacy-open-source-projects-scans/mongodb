@@ -4,8 +4,6 @@
  * @tags: [
  *   uses_multi_shard_transaction,
  *   uses_transactions,
- *   # TODO(SERVER-124153): Remove.
- *   featureFlagReplicatedFastCount_incompatible,
  * ]
  */
 
@@ -28,18 +26,11 @@ import {
     shardCollectionMoveChunks,
 } from "jstests/sharding/libs/update_shard_key_helpers.js";
 
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-const failpointSetParameter = isMultiversion
-    ? {}
-    : {"failpoint.useInMemoryReplicatedSizeCount": tojson({mode: "alwaysOn"})};
-
 const st = new ShardingTest({
     mongos: 1,
     shards: {rs0: {nodes: 3}, rs1: {nodes: 3}},
     rsOptions: {
-        setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS, ...failpointSetParameter},
+        setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS},
     },
 });
 
@@ -100,7 +91,18 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     false,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, false, false, {"x": 300}, {"$unset": {"x": 1}}, false);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    false,
+);
 
 // upsert : true
 assertCanUpdatePrimitiveShardKey(
@@ -142,10 +144,31 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     true,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, false, false, {"x": 300}, {"$unset": {"x": 1}}, true);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    true,
+);
 
 // failing cases
-assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, false, false, {"_id": 300}, {"$set": {"_id": 600}});
+assertCannotUpdate_id(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"_id": 300},
+    {"$set": {"_id": 600}},
+);
 assertCannotUpdate_idDottedPath(
     st,
     kDbName,
@@ -159,8 +182,27 @@ assertCannotUpdate_idDottedPath(
         "$set": {"_id": {"a": 600}},
     },
 );
-assertCannotUpdateWithMultiTrue(st, kDbName, ns, session, sessionDB, false, {"x": 300}, {"$set": {"x": 600}});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, false, false, {"x": 300}, {"$set": {"x": [300]}});
+assertCannotUpdateWithMultiTrue(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    {"x": 300},
+    {"$set": {"x": 600}},
+);
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"x": 300},
+    {"$set": {"x": [300]}},
+);
 
 // Replacement updates
 
@@ -303,10 +345,40 @@ assertCanDoReplacementUpdateWhereShardKeyMissingFields(
 );
 
 // failing cases
-assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, false, false, {"_id": 300}, {"_id": 600});
-assertCannotUpdate_idDottedPath(st, kDbName, ns, session, sessionDB, false, false, {"_id.a": 300}, {"_id": {"a": 600}});
+assertCannotUpdate_id(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"_id": 300},
+    {"_id": 600},
+);
+assertCannotUpdate_idDottedPath(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"_id.a": 300},
+    {"_id": {"a": 600}},
+);
 assertCannotUpdateWithMultiTrue(st, kDbName, ns, session, sessionDB, false, {"x": 300}, {"x": 600});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, false, false, {"x": 300}, {"x": [300]});
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    false,
+    {"x": 300},
+    {"x": [300]},
+);
 
 // Modify style findAndModify
 
@@ -350,7 +422,18 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     false,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, false, true, {"x": 300}, {"$unset": {"x": 1}}, false);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    false,
+);
 
 // upsert : true
 assertCanUpdatePrimitiveShardKey(
@@ -392,10 +475,31 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     true,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, false, true, {"x": 300}, {"$unset": {"x": 1}}, true);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    true,
+);
 
 // failing cases
-assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, false, true, {"_id": 300}, {"$set": {"_id": 600}});
+assertCannotUpdate_id(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"_id": 300},
+    {"$set": {"_id": 600}},
+);
 assertCannotUpdate_idDottedPath(
     st,
     kDbName,
@@ -409,7 +513,17 @@ assertCannotUpdate_idDottedPath(
         "$set": {"_id": {"a": 600}},
     },
 );
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, false, true, {"x": 300}, {"$set": {"x": [300]}});
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"x": 300},
+    {"$set": {"x": [300]}},
+);
 
 // Replacement style findAndModify
 
@@ -553,8 +667,28 @@ assertCanDoReplacementUpdateWhereShardKeyMissingFields(
 
 // failing cases
 assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, false, true, {"_id": 300}, {"_id": 600});
-assertCannotUpdate_idDottedPath(st, kDbName, ns, session, sessionDB, false, true, {"_id.a": 300}, {"_id": {"a": 600}});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, false, true, {"x": 300}, {"x": [300]});
+assertCannotUpdate_idDottedPath(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"_id.a": 300},
+    {"_id": {"a": 600}},
+);
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    false,
+    true,
+    {"x": 300},
+    {"x": [300]},
+);
 
 // Bulk writes retryable writes
 assertCanUpdateInBulkOpWhenDocsRemainOnSameShard(st, kDbName, ns, session, sessionDB, false, false);
@@ -615,7 +749,18 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     false,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, true, false, {"x": 300}, {"$unset": {"x": 1}}, false);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    false,
+);
 
 // upsert : true
 assertCanUpdatePrimitiveShardKey(
@@ -657,10 +802,31 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     true,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, true, false, {"x": 300}, {"$unset": {"x": 1}}, true);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    true,
+);
 
 // failing cases
-assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, true, false, {"_id": 300}, {"$set": {"_id": 600}});
+assertCannotUpdate_id(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"_id": 300},
+    {"$set": {"_id": 600}},
+);
 assertCannotUpdate_idDottedPath(
     st,
     kDbName,
@@ -674,8 +840,27 @@ assertCannotUpdate_idDottedPath(
         "$set": {"_id": {"a": 600}},
     },
 );
-assertCannotUpdateWithMultiTrue(st, kDbName, ns, session, sessionDB, true, {"x": 300}, {"$set": {"x": 600}});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, true, false, {"x": 300}, {"$set": {"x": [300]}});
+assertCannotUpdateWithMultiTrue(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    {"x": 300},
+    {"$set": {"x": 600}},
+);
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"x": 300},
+    {"$set": {"x": [300]}},
+);
 
 // Replacement updates
 
@@ -819,9 +1004,29 @@ assertCanDoReplacementUpdateWhereShardKeyMissingFields(
 
 // failing cases
 assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, true, false, {"_id": 300}, {"_id": 600});
-assertCannotUpdate_idDottedPath(st, kDbName, ns, session, sessionDB, true, false, {"_id.a": 300}, {"_id": {"a": 600}});
+assertCannotUpdate_idDottedPath(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"_id.a": 300},
+    {"_id": {"a": 600}},
+);
 assertCannotUpdateWithMultiTrue(st, kDbName, ns, session, sessionDB, true, {"x": 300}, {"x": 600});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, true, false, {"x": 300}, {"x": [300]});
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    false,
+    {"x": 300},
+    {"x": [300]},
+);
 
 // Modify style findAndModify
 
@@ -865,7 +1070,18 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     false,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, true, true, {"x": 300}, {"$unset": {"x": 1}}, false);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    false,
+);
 
 // upsert : true
 assertCanUpdatePrimitiveShardKey(
@@ -907,10 +1123,31 @@ assertCanUpdatePartialShardKey(
     [{"$set": {"x": 600}}, {"$set": {"x": 30}}],
     true,
 );
-assertCanUnsetSKField(st, kDbName, ns, session, sessionDB, true, true, {"x": 300}, {"$unset": {"x": 1}}, true);
+assertCanUnsetSKField(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"x": 300},
+    {"$unset": {"x": 1}},
+    true,
+);
 
 // failing cases
-assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, true, true, {"_id": 300}, {"$set": {"_id": 600}});
+assertCannotUpdate_id(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"_id": 300},
+    {"$set": {"_id": 600}},
+);
 assertCannotUpdate_idDottedPath(
     st,
     kDbName,
@@ -922,7 +1159,17 @@ assertCannotUpdate_idDottedPath(
     {"_id.a": 300},
     {"$set": {"_id": {"a": 600}}},
 );
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, true, true, {"x": 300}, {"$set": {"x": [300]}});
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"x": 300},
+    {"$set": {"x": [300]}},
+);
 
 // Replacement style findAndModify
 
@@ -1066,8 +1313,28 @@ assertCanDoReplacementUpdateWhereShardKeyMissingFields(
 
 // failing cases
 assertCannotUpdate_id(st, kDbName, ns, session, sessionDB, true, true, {"_id": 300}, {"_id": 600});
-assertCannotUpdate_idDottedPath(st, kDbName, ns, session, sessionDB, true, true, {"_id.a": 300}, {"_id": {"a": 600}});
-assertCannotUpdateSKToArray(st, kDbName, ns, session, sessionDB, true, true, {"x": 300}, {"x": [300]});
+assertCannotUpdate_idDottedPath(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"_id.a": 300},
+    {"_id": {"a": 600}},
+);
+assertCannotUpdateSKToArray(
+    st,
+    kDbName,
+    ns,
+    session,
+    sessionDB,
+    true,
+    true,
+    {"x": 300},
+    {"x": [300]},
+);
 
 // ----Assert correct behavior when collection is hash sharded----
 

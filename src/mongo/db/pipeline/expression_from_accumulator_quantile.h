@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,7 +9,6 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_visitor.h"
-#include "mongo/db/pipeline/percentile_algo.h"
 #include "mongo/db/pipeline/percentile_algo_continuous.h"
 #include "mongo/db/pipeline/percentile_algo_discrete.h"
 #include "mongo/db/pipeline/variables.h"
@@ -60,20 +33,22 @@ public:
                                                boost::intrusive_ptr<Expression> input,
                                                PercentileMethodEnum method)
         : Expression(expCtx, {input}), _ps(ps), _input(input), _method(method) {
-        expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+        expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
     }
 
     const char* getOpName() const {
         return TAccumulator::kName.data();
     }
 
-    Value serialize(const SerializationOptions& options = {}) const final {
+    Value serialize(const query_shape::SerializationOptions& options = {}) const final {
         MutableDocument md;
         TAccumulator::serializeHelper(_input, options, _ps, _method, md);
         return Value(DOC(getOpName() << md.freeze()));
     }
 
-    Value evaluate(const Document& root, Variables* variables) const final;
+    Value evaluate(const Document& root,
+                   Variables* variables,
+                   const EvaluationContext& ctx) const final;
 
     void acceptVisitor(ExpressionMutableVisitor* visitor) final {
         return visitor->visit(this);
@@ -95,9 +70,9 @@ public:
         return _method;
     }
 
-    boost::intrusive_ptr<Expression> clone() const final {
+    boost::intrusive_ptr<Expression> clone(ExpressionContext& expCtx) const final {
         return make_intrusive<ExpressionFromAccumulatorQuantile<TAccumulator>>(
-            getExpressionContext(), _ps, cloneChild(0), _method);
+            &expCtx, _ps, cloneChild(0, expCtx), _method);
     }
 
 private:

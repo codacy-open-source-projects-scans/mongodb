@@ -494,9 +494,7 @@ mongo_cc_library(
     srcs_select = [{
         "@platforms//os:{}".format(os): ["processinfo_{}.cpp".format(os)]
         for os in [
-            "freebsd",
             "linux",
-            "openbsd",
             "osx",
             "windows",
         ]
@@ -564,7 +562,7 @@ mongo_cc_library(
 mongo_cc_library(
     name = "signal_handlers",
     srcs = [
-        "signal_handlers_mongod.cpp",
+        "log_rotation_signal_handler.cpp",
     ],
     deps = [
         "signal_handlers_base",
@@ -692,6 +690,18 @@ generate_config_header(
     logfile = "version_constants_gen.log",
     output = "version_impl.cpp",
     template = "version_impl.tpl.cpp",
+)
+
+py_library(
+    name = "version_constants_gen_lib",
+    srcs = ["version_constants_gen.py"],
+    imports = ["."],
+)
+
+py_test(
+    name = "version_constants_gen_test",
+    srcs = ["version_constants_gen_test.py"],
+    deps = [":version_constants_gen_lib"],
 )
 
 generate_config_header(
@@ -885,6 +895,7 @@ mongo_cc_unit_test(
         "future_test_shared_future.cpp",
         "future_test_valid.cpp",
         "future_util_test.cpp",
+        "hex_test.cpp",
         "histogram_test.cpp",
         "icu_test.cpp",
         "inline_memory_test.cpp",

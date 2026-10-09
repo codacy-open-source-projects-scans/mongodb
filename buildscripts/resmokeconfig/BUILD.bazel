@@ -3,6 +3,11 @@ load("//bazel:mongo_js_rules.bzl", "mongo_js_library")
 
 package(default_visibility = ["//visibility:public"])
 
+exports_files([
+    "fully_disabled_feature_flags.yml",
+    "resmoke_modules.yml",
+])
+
 filegroup(
     name = "all_files",
     srcs = glob(["**"]),
@@ -40,67 +45,22 @@ mongo_js_library(
         "//jstests/concurrency/fsm_utils:all_subpackage_javascript_files",
         "//jstests/concurrency/fsm_workload_helpers",
         "//jstests/concurrency/fsm_workload_modifiers:all_subpackage_javascript_files",
+        "//jstests/concurrency/fsm_workloads:all_subpackage_javascript_files",
         "//jstests/core/libs:all_subpackage_javascript_files",
+        "//jstests/disk/libs:all_subpackage_javascript_files",
+        "//jstests/fle2/libs:all_subpackage_javascript_files",
         "//jstests/multiVersion/libs:all_subpackage_javascript_files",
         "//jstests/noPassthrough/libs:all_subpackage_javascript_files",
+        "//jstests/ocsp/lib:all_subpackage_javascript_files",
         "//jstests/sharding/analyze_shard_key/libs:all_subpackage_javascript_files",
         "//jstests/sharding/libs:all_subpackage_javascript_files",
         "//jstests/ssl/libs",
         "//jstests/with_mongot/e2e_lib",
         "//jstests/with_mongot/mongotmock/lib",
-    ],
-)
-
-# This is an experimental test target for running the jstestfuzz
-# suite as a bazel test. It runs in an experimental Evergreen task on an
-# infrequent build variant. Cleanup with SERVER-103537.
-resmoke_suite_test(
-    name = "jstestfuzz",
-    srcs = [
-        "//:jstestfuzz_generated_tests",
-    ],
-    config = ":suites/jstestfuzz.yml",
-    tags = [
-        "manual",  # exclude from expansion of target pattern wildcards (..., :*, :all, etc.)
-    ],
-    deps = [
-        "//src/mongo/db:mongod",
-        "//src/mongo/shell:mongo",
-    ],
-)
-
-# This is an experimental test target for running the multiversion_sanity_check
-# suite as a bazel test. It runs in an experimental Evergreen task on an
-# infrequent build variant. Cleanup with SERVER-103537.
-resmoke_suite_test(
-    name = "multiversion_sanity_check_last_continuous_new_new_old",
-    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/multiversion_sanity_check_last_continuous_new_new_old.yml",
-    multiversion_deps = [
-        "//bazel/resmoke/multiversion:last-continuous",
-    ],
-    tags = [
-        "experimental-resmoke-bazel",
-    ],
-    deps = [
-        "//src/mongo/db:mongod",
-        "//src/mongo/shell:mongo",
-    ],
-)
-
-# This is an experimental test target for running the multiversion_sanity_check
-# suite as a bazel test. It runs in an experimental Evergreen task on an
-# infrequent build variant. Cleanup with SERVER-103537.
-resmoke_suite_test(
-    name = "multiversion_sanity_check_last_lts_new_new_old",
-    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/multiversion_sanity_check_last_lts_new_new_old.yml",
-    multiversion_deps = [
-        "//bazel/resmoke/multiversion:last-lts",
-    ],
-    tags = [
-        "experimental-resmoke-bazel",
-    ],
-    deps = [
-        "//src/mongo/db:mongod",
-        "//src/mongo/shell:mongo",
+        "//jstests/with_mongot/search_mocked/ssl/lib:all_subpackage_javascript_files",
+        "//src/mongo/db/modules/enterprise/jstests/encryptdb/libs:all_subpackage_javascript_files",
+        "//src/mongo/db/modules/enterprise/jstests/fle/lib:all_subpackage_javascript_files",
+        "//src/mongo/db/modules/enterprise/jstests/hot_backups/libs:all_subpackage_javascript_files",
+        "//src/mongo/db/modules/enterprise/jstests/libs:all_subpackage_javascript_files",
     ],
 )

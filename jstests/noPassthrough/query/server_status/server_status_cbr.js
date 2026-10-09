@@ -3,7 +3,7 @@
  *
  * Verifies all query.cbr.* metrics under samplingCE mode.
  *
- * @tags: [requires_fcv_83]
+ * @tags: [requires_fcv_90]
  */
 
 // TODO (SERVER-121763): Move all server status tests to noPassthroughWithMongod
@@ -11,11 +11,13 @@
 import {verifyGetDiagnosticData} from "jstests/libs/ftdc.js";
 
 function sumHistogramBucketCounts(histogram) {
+    assert(
+        Array.isArray(histogram) && histogram.length > 0,
+        `histogram should have buckets. Got: ${tojson(histogram)}`,
+    );
     let sum = 0;
-    for (const [_, bucket] of Object.entries(histogram)) {
-        if (bucket.hasOwnProperty("count")) {
-            sum += bucket.count;
-        }
+    for (const bucket of histogram) {
+        sum += bucket.count;
     }
     return sum;
 }
@@ -29,18 +31,21 @@ const db = conn.getDB(dbName);
 let coll = db.getCollection(collName);
 coll.drop();
 
-// Enable CBR with samplingCE mode.
+// Enable CBR with samplingCE mode. Set planRanker to "costBased" so CBRCEMode is used directly.
 assert.commandWorked(
     db.adminCommand({
         setParameter: 1,
         featureFlagCostBasedRanker: true,
+        internalQueryPlanRanker: "costBased",
         internalQueryCBRCEMode: "samplingCE",
         internalQuerySamplingBySequentialScan: true,
     }),
 );
 
 // Force the classic engine so CBR applies.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}),
+);
 
 // Insert enough documents for sampling to work.
 const kNumDocs = 1000;
@@ -69,8 +74,8 @@ function assertCBRCounterMetrics(cbrMetrics, expectedCount) {
         assert.gt(cbrMetrics.samplingMicros, 0, "cbr.samplingMicros should be > 0:\n${cbrMetrics}");
         assert.gte(
             cbrMetrics.numPlans,
-            expectedCount * 2,
-            "cbr.numPlans should be >= 2 per invocation:\n${cbrMetrics}",
+            expectedCount,
+            "cbr.numPlans should be >= 1 per invocation:\n${cbrMetrics}",
         );
     } else {
         assert.eq(
@@ -138,6 +143,7 @@ function assertMultiPlannerMetricsUnchanged(before, after) {
 // ======================
 
 const nonProductiveFilterWithMultipleSolutions = {nonexistentField: {$exists: true}, a: 1, b: 1};
+const nonProductiveFilterWithSingleSolution = {nonexistentField: {$exists: true}};
 
 // Verify all CBR metrics start at zero.
 {
@@ -260,6 +266,35 @@ const nonProductiveFilterWithMultipleSolutions = {nonexistentField: {$exists: tr
     assertMultiPlannerMetricsUnchanged(mpAfterSecond, getMultiPlannerMetrics());
 }
 
+// Test: numPlansTiedCostEstimation increments when two plans tie in cost.
+{
+    coll.getPlanCache().clear();
+
+    // Check that numPlansTiedCostEstimation is not incremented when there were no ties.
+    let cbrBefore = getCBRMetrics();
+    assert.commandWorked(coll.find(nonProductiveFilterWithSingleSolution).explain());
+    let cbrAfter = getCBRMetrics();
+
+    assert.eq(
+        cbrAfter.numPlansTiedCostEstimation,
+        cbrBefore.numPlansTiedCostEstimation,
+        `cbr.numPlansTiedCostEstimation should not be incremented when no plans tied for cost. Expected value: ${cbrBefore.numPlansTiedCostEstimation}, Current value: ${cbrAfter.numPlansTiedCostEstimation}`,
+    );
+
+    // Check that numPlansTiedCostEstimation is incremented when there is a tie.
+    cbrBefore = getCBRMetrics();
+    // A filter on fields with identical values in the collection will yield the same estimate for each plan with sequential sampling.
+    const tiedFilter = {a: 1, b: 1};
+    assert.commandWorked(coll.find(tiedFilter).explain());
+
+    cbrAfter = getCBRMetrics();
+    assert.eq(
+        cbrAfter.numPlansTiedCostEstimation,
+        cbrBefore.numPlansTiedCostEstimation + 1,
+        `cbr.numPlansTiedCostEstimation should increment by 1 when plans tie. Previous value: ${cbrBefore.numPlansTiedCostEstimation} Current value: ${cbrAfter.numPlansTiedCostEstimation}`,
+    );
+}
+
 // Test: CBR metrics are available in FTDC
 {
     const expectedCount = Number(getCBRMetrics().count);
@@ -267,7 +302,8 @@ const nonProductiveFilterWithMultipleSolutions = {nonexistentField: {$exists: tr
     assert.soon(
         () => {
             // Verify FTDC includes CBR metrics.
-            const cbrMetricsFtdc = verifyGetDiagnosticData(conn.getDB("admin")).serverStatus.metrics.query.cbr;
+            const cbrMetricsFtdc = verifyGetDiagnosticData(conn.getDB("admin")).serverStatus.metrics
+                .query.cbr;
 
             if (cbrMetricsFtdc.count != expectedCount) {
                 // This is an indication we haven't retrieved the expected serverStatus metrics yet.

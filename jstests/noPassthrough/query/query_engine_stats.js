@@ -1,6 +1,10 @@
 /**
  * Tests that the query engine used is recorded correctly in the logs, system.profile, and
  * serverStatus.
+ *
+ * @tags: [
+ *   requires_profiling,
+ * ]
  */
 
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
@@ -112,7 +116,9 @@ const coll = initializeTestCollection();
 const coll2 = initializeSecondaryTestCollection();
 
 // Start with SBE off.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "forceClassicEngine"}),
+);
 
 // Run a find command.
 let expectedCounters = generateExpectedCounters(framework.find.classic);
@@ -136,7 +142,11 @@ queryComment = "docSourceSbeOff";
 assert.eq(
     coll
         .aggregate(
-            [{$_internalInhibitOptimization: {}}, {$group: {_id: "$a", acc: {$sum: "$b"}}}, {$match: {acc: 42}}],
+            [
+                {$_internalInhibitOptimization: {}},
+                {$group: {_id: "$a", acc: {$sum: "$b"}}},
+                {$match: {acc: 42}},
+            ],
             {comment: queryComment},
         )
         .itcount(),
@@ -166,7 +176,9 @@ cursor.next(); // getMore performed
 verifyProfiler(queryComment, framework.find.classic);
 
 // Turn SBE on.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}),
+);
 
 // Run a find command.
 expectedCounters = generateExpectedCounters(framework.find.sbe);
@@ -190,7 +202,11 @@ queryComment = "docSourceSbeOn";
 assert.eq(
     coll
         .aggregate(
-            [{$_internalInhibitOptimization: {}}, {$group: {_id: "$a", acc: {$sum: "$b"}}}, {$match: {acc: 42}}],
+            [
+                {$_internalInhibitOptimization: {}},
+                {$group: {_id: "$a", acc: {$sum: "$b"}}},
+                {$match: {acc: 42}},
+            ],
             {comment: queryComment},
         )
         .itcount(),
@@ -214,7 +230,11 @@ verifyProfiler(queryComment, framework.find.sbe);
 // SBE aggregation with getMore.
 queryComment = "aggSBEGetMore";
 cursor = coll.aggregate(
-    [{$_internalInhibitOptimization: {}}, {$group: {_id: "$a", acc: {$sum: "$b"}}}, {$match: {acc: {$gt: 0}}}],
+    [
+        {$_internalInhibitOptimization: {}},
+        {$group: {_id: "$a", acc: {$sum: "$b"}}},
+        {$match: {acc: {$gt: 0}}},
+    ],
     {comment: queryComment, batchSize: 1},
 );
 cursor.next(); // initial query

@@ -1,47 +1,24 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
+#include "mongo/db/stats/opcounters.h"
 #include "mongo/db/topology/cluster_role.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/otel/metrics/metrics_counter.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/aligned.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/net/connection_purpose.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
@@ -50,6 +27,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -57,158 +35,30 @@
 #include <absl/meta/type_traits.h>
 #include <fmt/format.h>
 
-namespace MONGO_MOD_PUBLIC mongo {
-
-/**
- * for storing operation counters
- * note: not thread safe.  ok with that for speed
- */
-class OpCounters {
-public:
-    OpCounters() = default;
-
-    void gotInserts(int n) {
-        _insert->fetchAndAddRelaxed(n);
-    }
-    void gotInsert() {
-        _insert->fetchAndAddRelaxed(1);
-    }
-    void gotQuery() {
-        _query->fetchAndAddRelaxed(1);
-    }
-    void gotUpdates(int n) {
-        _update->fetchAndAddRelaxed(n);
-    }
-    void gotUpdate() {
-        _update->fetchAndAddRelaxed(1);
-    }
-    void gotDeletes(int n) {
-        _delete->fetchAndAddRelaxed(n);
-    }
-    void gotDelete() {
-        _delete->fetchAndAddRelaxed(1);
-    }
-    void gotGetMore() {
-        _getmore->fetchAndAddRelaxed(1);
-    }
-    void gotCommand() {
-        _command->fetchAndAddRelaxed(1);
-    }
-
-    void gotQueryDeprecated() {
-        _queryDeprecated->fetchAndAddRelaxed(1);
-    }
-
-    void gotNestedAggregate() {
-        _nestedAggregate->fetchAndAddRelaxed(1);
-    }
-
-    BSONObj getObj() const;
-
-    // These opcounters record operations that would fail if we were fully enforcing our consistency
-    // constraints in steady-state oplog application mode.
-    void gotInsertOnExistingDoc() {
-        _insertOnExistingDoc->fetchAndAddRelaxed(1);
-    }
-    void gotUpdateOnMissingDoc() {
-        _updateOnMissingDoc->fetchAndAddRelaxed(1);
-    }
-    void gotDeleteWasEmpty() {
-        _deleteWasEmpty->fetchAndAddRelaxed(1);
-    }
-    void gotDeleteFromMissingNamespace() {
-        _deleteFromMissingNamespace->fetchAndAddRelaxed(1);
-    }
-    void gotAcceptableErrorInCommand() {
-        _acceptableErrorInCommand->fetchAndAddRelaxed(1);
-    }
-    void gotRecordIdsReplicatedDocIdMismatch() {
-        _recordIdsReplicatedDocIdMismatch->fetchAndAddRelaxed(1);
-    }
-
-    // thse are used by metrics things, do not remove
-    const AtomicWord<long long>* getInsert() const {
-        return &*_insert;
-    }
-    const AtomicWord<long long>* getQuery() const {
-        return &*_query;
-    }
-    const AtomicWord<long long>* getUpdate() const {
-        return &*_update;
-    }
-    const AtomicWord<long long>* getDelete() const {
-        return &*_delete;
-    }
-    const AtomicWord<long long>* getGetMore() const {
-        return &*_getmore;
-    }
-    const AtomicWord<long long>* getCommand() const {
-        return &*_command;
-    }
-    const AtomicWord<long long>* getNestedAggregate() const {
-        return &*_nestedAggregate;
-    }
-    const AtomicWord<long long>* getInsertOnExistingDoc() const {
-        return &*_insertOnExistingDoc;
-    }
-    const AtomicWord<long long>* getUpdateOnMissingDoc() const {
-        return &*_updateOnMissingDoc;
-    }
-    const AtomicWord<long long>* getDeleteWasEmpty() const {
-        return &*_deleteWasEmpty;
-    }
-    const AtomicWord<long long>* getDeleteFromMissingNamespace() const {
-        return &*_deleteFromMissingNamespace;
-    }
-    const AtomicWord<long long>* getAcceptableErrorInCommand() const {
-        return &*_acceptableErrorInCommand;
-    }
-    const AtomicWord<long long>* getRecordIdsReplicatedDocIdMismatch() const {
-        return &*_recordIdsReplicatedDocIdMismatch;
-    }
-
-private:
-    CacheExclusive<AtomicWord<long long>> _insert;
-    CacheExclusive<AtomicWord<long long>> _query;
-    CacheExclusive<AtomicWord<long long>> _update;
-    CacheExclusive<AtomicWord<long long>> _delete;
-    CacheExclusive<AtomicWord<long long>> _getmore;
-    CacheExclusive<AtomicWord<long long>> _command;
-    CacheExclusive<AtomicWord<long long>> _nestedAggregate;
-
-    CacheExclusive<AtomicWord<long long>> _insertOnExistingDoc;
-    CacheExclusive<AtomicWord<long long>> _updateOnMissingDoc;
-    CacheExclusive<AtomicWord<long long>> _deleteWasEmpty;
-    CacheExclusive<AtomicWord<long long>> _deleteFromMissingNamespace;
-    CacheExclusive<AtomicWord<long long>> _acceptableErrorInCommand;
-    CacheExclusive<AtomicWord<long long>> _recordIdsReplicatedDocIdMismatch;
-
-    // Counter for the deprecated OP_QUERY opcode.
-    CacheExclusive<AtomicWord<long long>> _queryDeprecated;
-};
-
-/**
- * Process-global op counters. Exposed via a function in case we need to change initialization or
- * anything later without impacting call sites.
- */
-OpCounters& globalOpCounters();
-
-/**
- * A separate process-global OpCounters instance for tracking replication related ops. Exposed via a
- * function in case we need to change initialization or anything later without impacting call sites.
- */
-OpCounters& replOpCounters();
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class NetworkCounter {
 public:
     enum class ConnectionType { kIngress = 1, kEgress = 2 };
+
+    NetworkCounter();
+
+    NetworkCounter(const NetworkCounter&) = delete;
+    NetworkCounter& operator=(const NetworkCounter&) = delete;
+
     // Increment the counters for the number of bytes read directly off the wire
-    void hitPhysicalIn(ConnectionType connectionType, long long bytes);
+    // connectionPurpose is used for purpose-specific metrics such as replication
+    void hitPhysicalIn(ConnectionType connectionType,
+                       long long bytes,
+                       ConnectionPurpose connectionPurpose = ConnectionPurpose::kDefault);
     void hitPhysicalOut(ConnectionType connectionType, long long bytes);
 
     // Increment the counters for the number of bytes passed out of the TransportLayer to the
     // server
-    void hitLogicalIn(ConnectionType connectionType, long long bytes);
+    // connectionPurpose is used for purpose-specific metrics such as replication
+    void hitLogicalIn(ConnectionType connectionType,
+                      long long bytes,
+                      ConnectionPurpose connectionPurpose = ConnectionPurpose::kDefault);
     void hitLogicalOut(ConnectionType connectionType, long long bytes);
 
     // Increment the counter for the number of slow dns resolution operations.
@@ -235,34 +85,32 @@ public:
     void append(BSONObjBuilder& b);
 
 private:
-    CacheExclusive<AtomicWord<long long>> _ingressPhysicalBytesIn{0};
-    CacheExclusive<AtomicWord<long long>> _ingressPhysicalBytesOut{0};
+    // Physical byte counters — not OTel-exported.
+    // TODO SERVER-127423: Replace these with OTel-exported counters.
+    CacheExclusive<Atomic<long long>> _ingressPhysicalBytesIn{0};
+    CacheExclusive<Atomic<long long>> _ingressPhysicalBytesOut{0};
+    CacheExclusive<Atomic<long long>> _egressPhysicalBytesIn{0};
+    CacheExclusive<Atomic<long long>> _egressPhysicalBytesOut{0};
 
-    CacheExclusive<AtomicWord<long long>> _egressPhysicalBytesIn{0};
-    CacheExclusive<AtomicWord<long long>> _egressPhysicalBytesOut{0};
+    // Physical byte counter for replication connections
+    otel::metrics::Counter<int64_t>& _replicationSecondaryPhysicalBytesIn;
+    // Logical ingress counters.
+    otel::metrics::Counter<int64_t>& _ingressLogicalBytesIn;
+    otel::metrics::Counter<int64_t>& _ingressNumRequests;
+    otel::metrics::Counter<int64_t>& _ingressLogicalBytesOut;
 
-    // These two counters are always incremented at the same time, so
-    // we place them on the same cache line. We use
-    // CacheCombinedExclusive to ensure that they are combined within
-    // the scope of a constructive interference region, and protected
-    // from false sharing by padding out to destructive interference
-    // size.
-    struct Together {
-        AtomicWord<long long> logicalBytesIn{0};
-        AtomicWord<long long> requests{0};
-    };
+    // Logical egress counters.
+    otel::metrics::Counter<int64_t>& _egressLogicalBytesIn;
+    otel::metrics::Counter<int64_t>& _replicationSecondaryLogicalBytesIn;
+    otel::metrics::Counter<int64_t>& _egressNumRequests;
+    otel::metrics::Counter<int64_t>& _egressLogicalBytesOut;
 
-    CacheCombinedExclusive<Together> _ingressTogether{};
-    CacheExclusive<AtomicWord<long long>> _ingressLogicalBytesOut{0};
-
-    CacheCombinedExclusive<Together> _egressTogether{};
-    CacheExclusive<AtomicWord<long long>> _egressLogicalBytesOut{0};
-
-    CacheExclusive<AtomicWord<long long>> _numSlowDNSOperations{0};
-    CacheExclusive<AtomicWord<long long>> _numSlowSSLOperations{0};
+    otel::metrics::Counter<int64_t>& _numSlowDNSOperations;
+    otel::metrics::Counter<int64_t>& _numSlowSSLOperations;
 
     // Counter of inbound connections at runtime.
-    CacheExclusive<AtomicWord<std::int64_t>> _tfoAccepted{0};
+    // TODO SERVER-127423: Replace this with an OTel-exported counter.
+    CacheExclusive<Atomic<std::int64_t>> _tfoAccepted{0};
 
     // TFO info determined at startup.
     std::int64_t _tfoKernelSetting{0};
@@ -270,7 +118,8 @@ private:
     bool _tfoKernelSupportClient{false};
 };
 
-extern NetworkCounter networkCounter;
+/** Returns the process-global NetworkCounter. */
+NetworkCounter& globalNetworkCounter();
 
 class AuthCounter {
     struct MechanismData;
@@ -310,8 +159,8 @@ public:
         MechanismData* _data;
     };
 
-    IngressMechanismCounterHandle getIngressMechanismCounter(StringData mechanism);
-    EgressMechanismCounterHandle getEgressMechanismCounter(StringData mechanism);
+    IngressMechanismCounterHandle getIngressMechanismCounter(std::string_view mechanism);
+    EgressMechanismCounterHandle getEgressMechanismCounter(std::string_view mechanism);
 
     void incSaslSupportedMechanismsReceived();
 
@@ -325,9 +174,9 @@ public:
 
 private:
     struct SuccessCounter {
-        AtomicWord<long long> total;
-        AtomicWord<long long> successful;
-        void appendAsSubobj(BSONObjBuilder& bob, StringData fieldName) const;
+        Atomic<long long> total;
+        Atomic<long long> successful;
+        void appendAsSubobj(BSONObjBuilder& bob, std::string_view fieldName) const;
     };
     struct MechanismData {
         struct {
@@ -341,11 +190,11 @@ private:
         } egress;
         bool ingressAllowed = false;
     };
-    using MechanismMap = std::map<std::string, MechanismData>;
+    using MechanismMap = std::map<std::string, MechanismData, std::less<>>;
 
-    AtomicWord<long long> _saslSupportedMechanismsReceived;
-    AtomicWord<long long> _ingressAuthenticationCumulativeMicros;
-    AtomicWord<long long> _egressAuthenticationCumulativeMicros;
+    Atomic<long long> _saslSupportedMechanismsReceived;
+    Atomic<long long> _ingressAuthenticationCumulativeMicros;
+    Atomic<long long> _egressAuthenticationCumulativeMicros;
     // Mechanism maps are initialized at startup to contain all possible mechanisms. Mechanisms not
     // present in the authenticationMechanisms setParam are marked as egress only; this is
     // because this parameter only restricts which mechanisms can be used for ingress.  After
@@ -364,7 +213,7 @@ public:
     }
 
     /** requires `name` be a metric previously added with `addMetric`. */
-    void increment(StringData name, long long n = 1) {
+    void increment(std::string_view name, long long n = 1) {
         _stages.find(name)->second->incrementRelaxed(n);
     }
 
@@ -398,7 +247,7 @@ extern DotsAndDollarsFieldsCounters dotsAndDollarsFieldsCounters;
 
 class QueryFrameworkCounters {
 public:
-    QueryFrameworkCounters() = default;
+    QueryFrameworkCounters();
     QueryFrameworkCounters(QueryFrameworkCounters&) = delete;
     QueryFrameworkCounters& operator=(const QueryFrameworkCounters&) = delete;
 
@@ -410,10 +259,10 @@ public:
         if (cmdName == "find") {
             switch (debug.queryFramework) {
                 case PlanExecutor::QueryFramework::kClassicOnly:
-                    classicFindQueryCounter.incrementRelaxed();
+                    incrementFindClassicCounter();
                     break;
                 case PlanExecutor::QueryFramework::kSBEOnly:
-                    sbeFindQueryCounter.incrementRelaxed();
+                    incrementFindSbeCounter();
                     break;
                 default:
                     break;
@@ -421,16 +270,16 @@ public:
         } else if (cmdName == "aggregate") {
             switch (debug.queryFramework) {
                 case PlanExecutor::QueryFramework::kClassicOnly:
-                    classicOnlyAggregationCounter.incrementRelaxed();
+                    incrementAggregateClassicOnlyCounter();
                     break;
                 case PlanExecutor::QueryFramework::kClassicHybrid:
-                    classicHybridAggregationCounter.incrementRelaxed();
+                    incrementAggregateClassicHybridCounter();
                     break;
                 case PlanExecutor::QueryFramework::kSBEOnly:
-                    sbeOnlyAggregationCounter.incrementRelaxed();
+                    incrementAggregateSbeOnlyCounter();
                     break;
                 case PlanExecutor::QueryFramework::kSBEHybrid:
-                    sbeHybridAggregationCounter.incrementRelaxed();
+                    incrementAggregateSbeHybridCounter();
                     break;
                 case PlanExecutor::QueryFramework::kUnknown:
                     break;
@@ -438,41 +287,61 @@ public:
         }
     }
 
+    void incrementFindSbeCounter() {
+        sbeFindQueryCounter.add(1);
+    }
+    void incrementFindClassicCounter() {
+        classicFindQueryCounter.add(1);
+    }
+    void incrementAggregateSbeOnlyCounter() {
+        sbeOnlyAggregationCounter.add(1);
+    }
+    void incrementAggregateClassicOnlyCounter() {
+        classicOnlyAggregationCounter.add(1);
+    }
+    void incrementAggregateSbeHybridCounter() {
+        sbeHybridAggregationCounter.add(1);
+    }
+    void incrementAggregateClassicHybridCounter() {
+        classicHybridAggregationCounter.add(1);
+    }
+
+private:
     // Query counters that record whether a find query was fully or partially executed in SBE, or
     // fully executed using the classic engine. One of these will always be incremented during a
     // query.
-    Counter64& sbeFindQueryCounter = *MetricBuilder<Counter64>{"query.queryFramework.find.sbe"};
-    Counter64& classicFindQueryCounter =
-        *MetricBuilder<Counter64>{"query.queryFramework.find.classic"};
+    otel::metrics::Counter<int64_t>& sbeFindQueryCounter;
+    otel::metrics::Counter<int64_t>& classicFindQueryCounter;
 
     // Aggregation query counters that record whether an aggregation was fully or partially executed
     // in DocumentSource (an sbe/classic hybrid plan), or fully pushed down to the sbe/classic
     // layer. These are only incremented during aggregations.
-    Counter64& sbeOnlyAggregationCounter =
-        *MetricBuilder<Counter64>{"query.queryFramework.aggregate.sbeOnly"};
-    Counter64& classicOnlyAggregationCounter =
-        *MetricBuilder<Counter64>{"query.queryFramework.aggregate.classicOnly"};
-    Counter64& sbeHybridAggregationCounter =
-        *MetricBuilder<Counter64>{"query.queryFramework.aggregate.sbeHybrid"};
-    Counter64& classicHybridAggregationCounter =
-        *MetricBuilder<Counter64>{"query.queryFramework.aggregate.classicHybrid"};
+    otel::metrics::Counter<int64_t>& sbeOnlyAggregationCounter;
+    otel::metrics::Counter<int64_t>& classicOnlyAggregationCounter;
+    otel::metrics::Counter<int64_t>& sbeHybridAggregationCounter;
+    otel::metrics::Counter<int64_t>& classicHybridAggregationCounter;
 };
 extern QueryFrameworkCounters queryFrameworkCounters;
 
 class FastPathQueryCounters {
 public:
+    FastPathQueryCounters();
+    FastPathQueryCounters(FastPathQueryCounters&) = delete;
+    FastPathQueryCounters& operator=(const FastPathQueryCounters&) = delete;
+
     void incrementIdHackQueryCounter() {
-        idHackQueryCounter.increment();
+        idHackQueryCounter.add(1);
     }
 
     void incrementExpressQueryCounter() {
-        expressQueryCounter.increment();
+        expressQueryCounter.add(1);
     }
 
+private:
     // Counter for the number of queries planned using idHack fast planning.
-    Counter64& idHackQueryCounter = *MetricBuilder<Counter64>{"query.planning.fastPath.idHack"};
+    otel::metrics::Counter<int64_t>& idHackQueryCounter;
     // Counter for the number of queries planned using express fast planning.
-    Counter64& expressQueryCounter = *MetricBuilder<Counter64>{"query.planning.fastPath.express"};
+    otel::metrics::Counter<int64_t>& expressQueryCounter;
 };
 extern FastPathQueryCounters fastPathQueryCounters;
 
@@ -481,14 +350,17 @@ public:
     enum SuffixStyle { kDotSuffix, kUpperCaseSuffix };
 
     SpillingCounters(std::string stageName, SuffixStyle suffixStyle = kDotSuffix)
-        : spills(
-              *MetricBuilder<Counter64>{"query." + stageName + _getSuffix(suffixStyle, "spills")}),
+        : spills(*MetricBuilder<Counter64>{"query." + stageName + _getSuffix(suffixStyle, "spills")}
+                      .setRole(ClusterRole::ShardServer)),
           spilledBytes(*MetricBuilder<Counter64>{"query." + stageName +
-                                                 _getSuffix(suffixStyle, "spilledBytes")}),
+                                                 _getSuffix(suffixStyle, "spilledBytes")}
+                            .setRole(ClusterRole::ShardServer)),
           spilledRecords(*MetricBuilder<Counter64>{"query." + stageName +
-                                                   _getSuffix(suffixStyle, "spilledRecords")}),
+                                                   _getSuffix(suffixStyle, "spilledRecords")}
+                              .setRole(ClusterRole::ShardServer)),
           spilledDataStorageSize(*MetricBuilder<Counter64>{
-              "query." + stageName + _getSuffix(suffixStyle, "spilledDataStorageSize")}) {}
+              "query." + stageName + _getSuffix(suffixStyle, "spilledDataStorageSize")}
+                                      .setRole(ClusterRole::ShardServer)) {}
 
     SpillingCounters(SpillingCounters&) = delete;
     SpillingCounters& operator=(const SpillingCounters&) = delete;
@@ -557,21 +429,143 @@ public:
     }
 
     // Counters for lookup join strategies.
-    Counter64& nestedLoopJoinCounter = *MetricBuilder<Counter64>{"query.lookup.nestedLoopJoin"};
-    Counter64& indexedLoopJoinCounter = *MetricBuilder<Counter64>{"query.lookup.indexedLoopJoin"};
-    Counter64& hashLookupCounter = *MetricBuilder<Counter64>{"query.lookup.hashLookup"};
+    Counter64& nestedLoopJoinCounter =
+        *MetricBuilder<Counter64>{"query.lookup.nestedLoopJoin"}.setRole(ClusterRole::ShardServer);
+    Counter64& indexedLoopJoinCounter =
+        *MetricBuilder<Counter64>{"query.lookup.indexedLoopJoin"}.setRole(ClusterRole::ShardServer);
+    Counter64& hashLookupCounter =
+        *MetricBuilder<Counter64>{"query.lookup.hashLookup"}.setRole(ClusterRole::ShardServer);
     Counter64& dynamicIndexedLoopJoinCounter =
-        *MetricBuilder<Counter64>{"query.lookup.dynamicIndexedLoopJoin"};
+        *MetricBuilder<Counter64>{"query.lookup.dynamicIndexedLoopJoin"}.setRole(
+            ClusterRole::ShardServer);
 
     // Duplicate spilling counters, not deleted to maintain backward compatibility.
     // Counter tracking hashLookup spills in lookup stages that get pushed down.
     Counter64& hashLookupSpillToDisk =
-        *MetricBuilder<Counter64>{"query.lookup.hashLookupSpillToDisk"};
+        *MetricBuilder<Counter64>{"query.lookup.hashLookupSpillToDisk"}.setRole(
+            ClusterRole::ShardServer);
     // Counter tracking hashLookup spilled bytes in lookup stages that get pushed down.
     Counter64& hashLookupSpillToDiskBytes =
-        *MetricBuilder<Counter64>{"query.lookup.hashLookupSpillToDiskBytes"};
+        *MetricBuilder<Counter64>{"query.lookup.hashLookupSpillToDiskBytes"}.setRole(
+            ClusterRole::ShardServer);
 };
 extern LookupPushdownCounters lookupPushdownCounters;
+
+/**
+ * Counters tracking $lookup+$unwind (LU) IFR flag metrics: join strategy and local-side plan shape.
+ * TODO SERVER-128934: Add spill counters once LU and plain $lookup spill paths are separated.
+ */
+class LookupUnwindPushdownCounters {
+public:
+    LookupUnwindPushdownCounters() = default;
+    LookupUnwindPushdownCounters(LookupUnwindPushdownCounters&) = delete;
+    LookupUnwindPushdownCounters& operator=(const LookupUnwindPushdownCounters&) = delete;
+
+    void incrementLookupUnwindCountersPerQuery(int luIndexedLoopJoin,
+                                               int luNestedLoopJoin,
+                                               int luHashLookup,
+                                               int luDynamicIndexedLoopJoin,
+                                               int luLocalCollscan,
+                                               int luLocalIxscanFetch,
+                                               int luLocalComplex) {
+        inljCounter.incrementRelaxed(luIndexedLoopJoin);
+        nljCounter.incrementRelaxed(luNestedLoopJoin);
+        hjCounter.incrementRelaxed(luHashLookup);
+        dinljCounter.incrementRelaxed(luDynamicIndexedLoopJoin);
+        localCollscanCounter.incrementRelaxed(luLocalCollscan);
+        localIxscanFetchCounter.incrementRelaxed(luLocalIxscanFetch);
+        localComplexCounter.incrementRelaxed(luLocalComplex);
+    }
+
+    Counter64& inljCounter =
+        *MetricBuilder<Counter64>{"query.lookupUnwind.indexedLoopJoin"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& nljCounter = *MetricBuilder<Counter64>{"query.lookupUnwind.nestedLoopJoin"}.setRole(
+        ClusterRole::ShardServer);
+    Counter64& hjCounter = *MetricBuilder<Counter64>{"query.lookupUnwind.hashLookup"}.setRole(
+        ClusterRole::ShardServer);
+    Counter64& dinljCounter =
+        *MetricBuilder<Counter64>{"query.lookupUnwind.dynamicIndexedLoopJoin"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& localCollscanCounter =
+        *MetricBuilder<Counter64>{"query.lookupUnwind.localCollscan"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& localIxscanFetchCounter =
+        *MetricBuilder<Counter64>{"query.lookupUnwind.localIxscanFetch"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& localComplexCounter =
+        *MetricBuilder<Counter64>{"query.lookupUnwind.localComplex"}.setRole(
+            ClusterRole::ShardServer);
+};
+extern LookupUnwindPushdownCounters lookupUnwindPushdownCounters;
+
+/**
+ * Counters tracking non-leading pushdown operators.
+ */
+class NonLeadingPushdownCounters {
+public:
+    NonLeadingPushdownCounters() = default;
+    NonLeadingPushdownCounters(const NonLeadingPushdownCounters&) = delete;
+    NonLeadingPushdownCounters& operator=(const NonLeadingPushdownCounters&) = delete;
+
+    void incrementCounters(bool nlpMatch, bool nlpProject, bool nlpAddFields, bool nlpReplaceRoot) {
+        if (nlpMatch)
+            matchCounter.incrementRelaxed(1);
+        if (nlpProject)
+            projectCounter.incrementRelaxed(1);
+        if (nlpAddFields)
+            addFieldsCounter.incrementRelaxed(1);
+        if (nlpReplaceRoot)
+            replaceRootCounter.incrementRelaxed(1);
+    }
+
+    Counter64& matchCounter = *MetricBuilder<Counter64>{"query.nonLeadingPushdown.match"}.setRole(
+        ClusterRole::ShardServer);
+    Counter64& projectCounter =
+        *MetricBuilder<Counter64>{"query.nonLeadingPushdown.project"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& addFieldsCounter =
+        *MetricBuilder<Counter64>{"query.nonLeadingPushdown.addFields"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& replaceRootCounter =
+        *MetricBuilder<Counter64>{"query.nonLeadingPushdown.replaceRoot"}.setRole(
+            ClusterRole::ShardServer);
+};
+extern NonLeadingPushdownCounters nonLeadingPushdownCounters;
+
+/**
+ * Counters tracking pathArrayness usage and behavior.
+ *
+ * TODO(SERVER-131708): add remaining metrics related to pathArrayness usage.
+ */
+class PathArraynessCounters {
+public:
+    PathArraynessCounters() = default;
+    PathArraynessCounters(const PathArraynessCounters&) = delete;
+    PathArraynessCounters& operator=(const PathArraynessCounters&) = delete;
+
+    void incrementPerQuery(bool leadingFilter, bool leadingFilterSimplified) {
+        if (leadingFilter)
+            leadingFilterCounter.incrementRelaxed(1);
+        if (leadingFilterSimplified)
+            leadingFilterSimplifiedCounter.incrementRelaxed(1);
+    }
+
+    void incrementInvalidation() {
+        queriesFailedDueToInvalidationCounter.incrementRelaxed(1);
+    }
+
+    Counter64& leadingFilterCounter =
+        *MetricBuilder<Counter64>{"query.pathArrayness.leadingFilter"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& leadingFilterSimplifiedCounter =
+        *MetricBuilder<Counter64>{"query.pathArrayness.leadingFilterSimplified"}.setRole(
+            ClusterRole::ShardServer);
+    Counter64& queriesFailedDueToInvalidationCounter =
+        *MetricBuilder<Counter64>{"query.pathArrayness.queriesFailedDueToInvalidation"}.setRole(
+            ClusterRole::ShardServer);
+};
+extern PathArraynessCounters pathArraynessCounters;
 
 /** Counters tracking group stats across all execution engines. */
 class GroupCounters : public SpillingCounters {
@@ -675,76 +669,90 @@ public:
 };
 extern UniqueRoaringCounters uniqueRoaringCounters;
 
+class CountScanCounters : public RecordIdDeduplicationCounters {
+public:
+    CountScanCounters() : RecordIdDeduplicationCounters("COUNT_SCAN") {}
+};
+extern CountScanCounters countScanCounters;
+
+class NearCounters : public RecordIdDeduplicationCounters {
+public:
+    NearCounters() : RecordIdDeduplicationCounters("NEAR") {}
+};
+extern NearCounters nearCounters;
+
+class UpdateCounters : public RecordIdDeduplicationCounters {
+public:
+    UpdateCounters() : RecordIdDeduplicationCounters("UPDATE") {}
+};
+extern UpdateCounters updateCounters;
+
 /**
  * A common class which holds various counters related to Classic and SBE plan caches.
  */
 class PlanCacheCounters {
 public:
-    PlanCacheCounters() = default;
+    PlanCacheCounters();
     PlanCacheCounters(PlanCacheCounters&) = delete;
     PlanCacheCounters& operator=(const PlanCacheCounters&) = delete;
 
     void incrementClassicHitsCounter() {
-        classicHits.incrementRelaxed();
+        classicHits.add(1);
     }
 
     void incrementClassicMissesCounter() {
-        classicMisses.incrementRelaxed();
+        classicMisses.add(1);
     }
 
     void incrementClassicSkippedCounter() {
-        classicSkipped.incrementRelaxed();
+        classicSkipped.add(1);
     }
 
     void incrementClassicReplannedCounter() {
-        classicReplanned.incrementRelaxed();
+        classicReplanned.add(1);
     }
 
     void incrementClassicReplannedPlanIsCachedPlanCounter() {
-        classicReplannedPlanIsCachedPlan.incrementRelaxed();
+        classicReplannedPlanIsCachedPlan.add(1);
     }
 
     void incrementClassicCachedPlansEvictedCounter(size_t increment) {
-        classicCachedPlansEvicted.incrementRelaxed(increment);
+        classicCachedPlansEvicted.add(static_cast<int64_t>(increment));
     }
 
     void incrementClassicInactiveCachedPlansReplacedCounter() {
-        classicInactiveCachedPlansReplaced.incrementRelaxed();
+        classicInactiveCachedPlansReplaced.add(1);
     }
 
     void incrementSbeHitsCounter() {
-        sbeHits.incrementRelaxed();
+        sbeHits.add(1);
     }
 
     void incrementSbeMissesCounter() {
-        sbeMisses.incrementRelaxed();
+        sbeMisses.add(1);
     }
 
     void incrementSbeSkippedCounter() {
-        sbeSkipped.incrementRelaxed();
+        sbeSkipped.add(1);
     }
 
     void incrementSbeReplannedCounter() {
-        sbeReplanned.incrementRelaxed();
+        sbeReplanned.add(1);
     }
 
     void incrementSbeReplannedPlanIsCachedPlanCounter() {
-        sbeReplannedPlanIsCachedPlan.incrementRelaxed();
+        sbeReplannedPlanIsCachedPlan.add(1);
     }
 
     void incrementSbeCachedPlansEvictedCounter(size_t increment) {
-        sbeCachedPlansEvicted.incrementRelaxed(increment);
+        sbeCachedPlansEvicted.add(static_cast<int64_t>(increment));
     }
 
     void incrementSbeInactiveCachedPlansReplacedCounter() {
-        sbeInactiveCachedPlansReplaced.incrementRelaxed();
+        sbeInactiveCachedPlansReplaced.add(1);
     }
 
 private:
-    static Counter64& _makeMetric(std::string name) {
-        return *MetricBuilder<Counter64>("query.planCache." + std::move(name));
-    }
-
     // Counters that track the number of times a query plan is:
     // a) found in the cache (hits),
     // b) not found in cache (misses), or
@@ -752,22 +760,20 @@ private:
     // d) failed to finish trial run within budget, so we decided to replan it (replanned);
     // e) replanned only to produce the same plan as what's in the plan cache.
     // Split into classic and SBE, depending on which execution engine is used.
-    Counter64& classicHits = _makeMetric("classic.hits");
-    Counter64& classicMisses = _makeMetric("classic.misses");
-    Counter64& classicSkipped = _makeMetric("classic.skipped");
-    Counter64& classicReplanned = _makeMetric("classic.replanned");
-    Counter64& classicReplannedPlanIsCachedPlan =
-        _makeMetric("classic.replanned_plan_is_cached_plan");
-    Counter64& classicCachedPlansEvicted = _makeMetric("classic.cached_plans_evicted");
-    Counter64& classicInactiveCachedPlansReplaced =
-        _makeMetric("classic.inactive_cached_plans_replaced");
-    Counter64& sbeHits = _makeMetric("sbe.hits");
-    Counter64& sbeMisses = _makeMetric("sbe.misses");
-    Counter64& sbeSkipped = _makeMetric("sbe.skipped");
-    Counter64& sbeReplanned = _makeMetric("sbe.replanned");
-    Counter64& sbeReplannedPlanIsCachedPlan = _makeMetric("sbe.replanned_plan_is_cached_plan");
-    Counter64& sbeCachedPlansEvicted = _makeMetric("sbe.cached_plans_evicted");
-    Counter64& sbeInactiveCachedPlansReplaced = _makeMetric("sbe.inactive_cached_plans_replaced");
+    otel::metrics::Counter<int64_t>& classicHits;
+    otel::metrics::Counter<int64_t>& classicMisses;
+    otel::metrics::Counter<int64_t>& classicSkipped;
+    otel::metrics::Counter<int64_t>& classicReplanned;
+    otel::metrics::Counter<int64_t>& classicReplannedPlanIsCachedPlan;
+    otel::metrics::Counter<int64_t>& classicCachedPlansEvicted;
+    otel::metrics::Counter<int64_t>& classicInactiveCachedPlansReplaced;
+    otel::metrics::Counter<int64_t>& sbeHits;
+    otel::metrics::Counter<int64_t>& sbeMisses;
+    otel::metrics::Counter<int64_t>& sbeSkipped;
+    otel::metrics::Counter<int64_t>& sbeReplanned;
+    otel::metrics::Counter<int64_t>& sbeReplannedPlanIsCachedPlan;
+    otel::metrics::Counter<int64_t>& sbeCachedPlansEvicted;
+    otel::metrics::Counter<int64_t>& sbeInactiveCachedPlansReplaced;
 };
 extern PlanCacheCounters planCacheCounters;
 
@@ -852,7 +858,7 @@ public:
         _validatorCounterMap["collMod"] = std::make_unique<ValidatorCounter>("collMod");
     }
 
-    void incrementCounters(const StringData cmdName,
+    void incrementCounters(const std::string_view cmdName,
                            const BSONObj& validator,
                            bool parsingSucceeded) {
         if (!validator.isEmpty()) {
@@ -874,7 +880,7 @@ public:
 
 private:
     struct ValidatorCounter {
-        explicit ValidatorCounter(StringData name)
+        explicit ValidatorCounter(std::string_view name)
             : totalCounter{makeMetric(name, "total")},
               failedCounter{makeMetric(name, "failed")},
               jsonSchemaCounter{makeMetric(name, "jsonSchema")} {}
@@ -882,7 +888,7 @@ private:
         ValidatorCounter& operator=(const ValidatorCounter&) = delete;
         ValidatorCounter(const ValidatorCounter&) = delete;
 
-        static Counter64& makeMetric(StringData name, StringData leaf) {
+        static Counter64& makeMetric(std::string_view name, std::string_view leaf) {
             return *MetricBuilder<Counter64>{fmt::format("commands.{}.validator.{}", name, leaf)};
         }
 
@@ -896,6 +902,68 @@ private:
 
 extern ValidatorCounters validatorCounters;
 
+class ValidationLevelCounters {
+public:
+    ValidationLevelCounters() {
+        _validationLevelCounterMap["create"] = std::make_unique<ValidationLevelCounter>("create");
+        _validationLevelCounterMap["collMod"] = std::make_unique<ValidationLevelCounter>("collMod");
+    }
+
+    // Passing boost::none counts as "default" (validator present, no explicit level).
+    void increment(std::string_view cmdName, boost::optional<ValidationLevelEnum> level) {
+        auto it = _validationLevelCounterMap.find(cmdName);
+        tassert(12371400,
+                str::stream() << "Validation level counters not supported for command: " << cmdName,
+                it != _validationLevelCounterMap.end());
+        if (!level) {
+            it->second->defaultLevel.incrementRelaxed();
+            return;
+        }
+        switch (*level) {
+            case ValidationLevelEnum::off:
+                it->second->off.incrementRelaxed();
+                break;
+            case ValidationLevelEnum::moderate:
+                it->second->moderate.incrementRelaxed();
+                break;
+            case ValidationLevelEnum::strict:
+                it->second->strict.incrementRelaxed();
+                break;
+            case ValidationLevelEnum::constraint:
+                it->second->constraint.incrementRelaxed();
+                break;
+        }
+    }
+
+private:
+    struct ValidationLevelCounter {
+        explicit ValidationLevelCounter(std::string_view name)
+            : defaultLevel{makeMetric(name, "default")},
+              off{makeMetric(name, "off")},
+              moderate{makeMetric(name, "moderate")},
+              strict{makeMetric(name, "strict")},
+              constraint{makeMetric(name, "constraint")} {}
+
+        ValidationLevelCounter& operator=(const ValidationLevelCounter&) = delete;
+        ValidationLevelCounter(const ValidationLevelCounter&) = delete;
+
+        static Counter64& makeMetric(std::string_view name, std::string_view level) {
+            return *MetricBuilder<Counter64>{
+                fmt::format("commands.{}.validationLevel.{}", name, level)};
+        }
+
+        Counter64& defaultLevel;
+        Counter64& off;
+        Counter64& moderate;
+        Counter64& strict;
+        Counter64& constraint;
+    };
+
+    StringMap<std::unique_ptr<ValidationLevelCounter>> _validationLevelCounterMap;
+};
+
+extern ValidationLevelCounters validationLevelCounters;
+
 // Global counters for expressions inside aggregation pipelines.
 extern OperatorCounters operatorCountersAggExpressions;
 // Global counters for match expressions.
@@ -907,7 +975,7 @@ extern OperatorCounters operatorCountersWindowAccumulatorExpressions;
 
 struct QueryCounters {
 private:
-    static Counter64& _makeCounter(StringData name, ClusterRole role) {
+    static Counter64& _makeCounter(std::string_view name, ClusterRole role) {
         return *MetricBuilder<Counter64>{fmt::format("query.{}", name)}.setRole(role);
     }
 
@@ -1001,7 +1069,7 @@ struct ServerStatusMetricPolicySelection<DurationCounter64<D>> {
             return _v;
         }
 
-        void appendTo(BSONObjBuilder& b, StringData leafName) const {
+        void appendTo(BSONObjBuilder& b, std::string_view leafName) const {
             b.append(leafName, static_cast<long long>(_v.get().count()));
         }
 
@@ -1012,4 +1080,4 @@ struct ServerStatusMetricPolicySelection<DurationCounter64<D>> {
     using type = Policy;
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

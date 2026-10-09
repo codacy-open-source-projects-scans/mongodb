@@ -10,10 +10,14 @@
  *   uses_transactions,
  *   # TODO: SERVER-114500 Investigate snapshot_read* FSM tests leaking cursors.
  *   can_leak_idle_cursors,
+ *   requires_getmore,
  * ]
  */
 
-import {doSnapshotFind, doSnapshotGetMore} from "jstests/concurrency/fsm_workload_helpers/snapshot_read_utils.js";
+import {
+    doSnapshotFind,
+    doSnapshotGetMore,
+} from "jstests/concurrency/fsm_workload_helpers/snapshot_read_utils.js";
 import {TxnUtil} from "jstests/libs/txns/txn_util.js";
 
 export const $config = (function () {

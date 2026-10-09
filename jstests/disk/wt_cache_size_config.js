@@ -6,7 +6,7 @@
  *
  */
 
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 if (!isLinux()) {
@@ -54,13 +54,15 @@ function runTest(expectedCacheSizeBytes, serverConfig, fuzzyGBCheck = false) {
     rst.startSet(serverConfig);
     rst.initiate();
     let primary = rst.getPrimary();
-    let actualCacheSizeBytes = assert.commandWorked(primary.adminCommand({serverStatus: 1})).wiredTiger.cache[
-        "maximum bytes configured"
-    ];
+    let actualCacheSizeBytes = assert.commandWorked(primary.adminCommand({serverStatus: 1}))
+        .wiredTiger.cache["maximum bytes configured"];
 
     // Verify storage engine cache size in effect
     if (fuzzyGBCheck) {
-        assert.eq(Math.round(expectedCacheSizeBytes / bytesPerGB), Math.round(actualCacheSizeBytes / bytesPerGB));
+        assert.eq(
+            Math.round(expectedCacheSizeBytes / bytesPerGB),
+            Math.round(actualCacheSizeBytes / bytesPerGB),
+        );
     } else {
         assert.eq(expectedCacheSizeBytes, actualCacheSizeBytes);
     }

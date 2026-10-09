@@ -1,41 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/plan_enumerator/plan_enumerator.h"
 
-#include <boost/container/flat_set.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/none.hpp>
-
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/field_ref.h"
@@ -54,6 +22,12 @@
 
 #include <algorithm>
 #include <set>
+#include <string_view>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/none.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -200,7 +174,7 @@ bool canAssignPredToIndex(const RelevantTag* rt,
     // any changes we make to 'used' as we go.
     for (const auto multikeyComponent : multikeyComponents) {
         // 'pathPrefix' is a prefix of a queried path that causes the index to be multikey.
-        StringData pathPrefix = path.dottedSubstring(0, multikeyComponent + 1);
+        std::string_view pathPrefix = path.dottedSubstring(0, multikeyComponent + 1);
 
         auto search = used->find(pathPrefix);
         if (search == used->end()) {
@@ -277,6 +251,26 @@ void tagForSort(MatchExpression* tree) {
     }
 }
 
+// 'currentElemMatchExpr' is the $elemMatch context of the $and being enumerated. A negation may
+// still be pushed into a sibling $or under that same $elemMatch, as both see the same array
+// element.
+bool isNodeEligibleForContainedOrPushdown(MatchExpression* node,
+                                          const MatchExpression* currentElemMatchExpr) {
+    auto* rt = indexTagCast<RelevantTag>(node->getTag());
+    if (rt->elemMatchExpr && rt->notExpr && rt->elemMatchExpr != currentElemMatchExpr) {
+        // Do not extract an index predicate which is a negation inside the $elemMatch. For example,
+        // do not extract {a.b: {$ne: 2}} from {a: {$elemMatch: {b: {$ne: 2}}}. Due to the potential
+        // presence of arrays at "a", the negation predicate itself is an "under-approximation" of
+        // the elemMatch predicate (it may admit less documents than the $elemMatch). For example,
+        // {a: [{b: 1}, {b: 2}]} matches {a: {$elemMatch: {b: {$ne: 2}}}} but does not match
+        // {a.b: {$ne: 2}}. Predicates extracted from the $elemMatch should be "over-approximations"
+        // (admit more documents). For example, {a.b: $eq: 2} would be an over-approximation to
+        // {a: {$elemMatch: {b: {$eq: 2}}}}.
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 
@@ -293,7 +287,8 @@ PlanEnumerator::PlanEnumerator(const PlanEnumeratorParams& params)
       _projection(params.projection),
       _shardKey(params.shardKey),
       _distinct(params.distinct),
-      _shouldPruneDistinct(params.shouldPruneDistinct) {
+      _shouldPruneDistinct(params.shouldPruneDistinct),
+      _enableIndexPruning(params.enableIndexPruning) {
     if (params.sort && *params.sort) {
         _sortPatFields = stdx::unordered_set<std::string>();
         for (size_t i = 0; i < (*params.sort)->size(); i++) {
@@ -309,7 +304,7 @@ Status PlanEnumerator::init() {
     // Fill out our memo structure from the tagged _root.
     _done = !prepMemo(_root, PrepMemoContext());
     // TODO SERVER-94155: Enable index pruning for distinct-like queries when feature flag is on.
-    if (internalQueryPlannerEnableIndexPruning.load() && (!_distinct || _shouldPruneDistinct)) {
+    if (_enableIndexPruning && (!_distinct || _shouldPruneDistinct)) {
         bool prunedAnyIndexes = pruneMemoOfDupIndexes(
             _memo, QueryPruningInfo{_projection, _sortPatFields, _shardKey, _indices});
         _explainInfo.prunedAnyIndexes = prunedAnyIndexes;
@@ -379,6 +374,7 @@ std::pair<MemoID, NodeAssignment*> PlanEnumerator::allocateAssignment(MatchExpre
 bool PlanEnumerator::prepMemo(MatchExpression* node, const PrepMemoContext& context) {
     PrepMemoContext childContext;
     childContext.elemMatchExpr = context.elemMatchExpr;
+    childContext.notExpr = context.notExpr;
     childContext.outsidePreds = context.outsidePreds;
 
     if (MatchExpression::OR == node->matchType()) {
@@ -446,6 +442,8 @@ bool PlanEnumerator::prepMemo(MatchExpression* node, const PrepMemoContext& cont
 
         if (MatchExpression::ELEM_MATCH_OBJECT == node->matchType()) {
             childContext.elemMatchExpr = node;
+            // Reset the $not as we're recursing into an $elemMatch.
+            childContext.notExpr = nullptr;
             markTraversedThroughElemMatchObj(&childContext);
         }
 
@@ -490,13 +488,18 @@ bool PlanEnumerator::prepMemo(MatchExpression* node, const PrepMemoContext& cont
         // preds to 'indexedPreds'. Adding the mandatory preds directly to 'indexedPreds' would lead
         // to problems such as pulling a predicate beneath an OR into a set joined by an AND.
         getIndexedPreds(node, childContext, &indexedPreds);
+
         // Pass in the indexed predicates as outside predicates when prepping the subnodes. But if
         // match expression optimization is disabled, skip this part: we don't want to do
-        // OR-pushdown because it relies on the expression being canonicalized.
+        // OR-pushdown because it relies on the expression being canonicalized. We may also skip
+        // nodes that make for invalid outside predicates.
         auto childContextCopy = childContext;
         if (MONGO_likely(!_disableOrPushdown)) {
             auto& hashIdx = getOutsidePredHashedIdx(childContextCopy.outsidePreds);
             for (auto pred : indexedPreds) {
+                if (!isNodeEligibleForContainedOrPushdown(pred, context.elemMatchExpr)) {
+                    continue;
+                }
                 auto [it, inserted] = hashIdx.insert({pred, OutsidePredRoute{}});
                 if (!inserted) {
                     hashIdx.modify(it,
@@ -1115,7 +1118,7 @@ void PlanEnumerator::enumerateAndIntersect(const IndexToPredMap& idxToFirst,
         IndexToPredMap::const_iterator secondIt = firstIt;
         secondIt++;
         for (; secondIt != idxToFirst.end(); secondIt++) {
-            const IndexEntry& firstIndex = (*_indices)[secondIt->first];
+            const IndexEntry& firstIndex = (*_indices)[firstIt->first];
             const IndexEntry& secondIndex = (*_indices)[secondIt->first];
 
             // Limit n^2.
@@ -1287,6 +1290,9 @@ void PlanEnumerator::getIndexedPreds(MatchExpression* node,
         RelevantTag* rt = indexTagCast<RelevantTag>(node->getTag());
         tassert(9074700, "RelevantTag is not assigned to the match expression node", rt != nullptr);
 
+        // Store the $not context on the tag.
+        rt->notExpr = context.notExpr;
+
         if (context.elemMatchExpr) {
             // If we're in an $elemMatch context, store the
             // innermost parent $elemMatch, as well as the
@@ -1302,20 +1308,16 @@ void PlanEnumerator::getIndexedPreds(MatchExpression* node,
         // Output this as a pred that can use the index.
         indexedPreds->push_back(node);
     } else if (Indexability::isBoundsGeneratingNot(node)) {
-        if (!context.elemMatchExpr) {
-            // Do not extract an index predicate which is a negation inside the $elemMatch. For
-            // example, do not extract {a.b: $ne: 2} from {a: {$elemMatch: {b: $ne: 2}}}. Due to
-            // potential presence of arrays at "b", the negation predicate itself is an
-            // "under-approximation" of the elemMatch predicate (it may admit less documents than
-            // the elemMatch). Predicates extracted from the elemMatch should be
-            // "over-approximations" (admit more documents). For example {a.b: $eq: 2} would be an
-            // over-approximation to {a: {$elemMatch: {b: {$eq: 2}}}}.
+        PrepMemoContext childContext;
+        childContext.elemMatchExpr = context.elemMatchExpr;
+        childContext.notExpr = node;
+        getIndexedPreds(node->getChild(0), childContext, indexedPreds);
 
-            getIndexedPreds(node->getChild(0), context, indexedPreds);
-        }
     } else if (Indexability::isBoundsGeneratingElemMatchObject(node)) {
         PrepMemoContext childContext;
         childContext.elemMatchExpr = node;
+        // Reset the $not when we recurse down into an $elemMatch.
+        childContext.notExpr = nullptr;
         for (size_t i = 0; i < node->numChildren(); ++i) {
             getIndexedPreds(node->getChild(i), childContext, indexedPreds);
         }
@@ -1359,6 +1361,8 @@ bool PlanEnumerator::prepSubNodes(MatchExpression* node,
         } else if (Indexability::isBoundsGeneratingElemMatchObject(child)) {
             PrepMemoContext childContext;
             childContext.elemMatchExpr = child;
+            // Reset the $not context when recursing into an $elemMatch.
+            childContext.notExpr = nullptr;
             childContext.outsidePreds = context.outsidePreds;
             markTraversedThroughElemMatchObj(&childContext);
             if (!prepSubNodes(child, childContext, subnodesOut, mandatorySubnodes)) {

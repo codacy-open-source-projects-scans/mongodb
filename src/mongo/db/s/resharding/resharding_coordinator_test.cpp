@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -38,7 +11,6 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_collection.h"
@@ -69,6 +41,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -80,6 +53,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -94,6 +68,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace resharding;
 using unittest::assertGet;
@@ -136,7 +111,7 @@ PhaseTransitionFn createPreparingToDonateDaoUpdate(
 class ReshardingCoordinatorPersistenceTest : public ConfigServerTestFixture {
 protected:
     void setUp() override {
-        ConfigServerTestFixture::setUp();
+        ConfigServerTestFixture::setUpAndInitializeConfigDb();
 
         ShardType shard0;
         shard0.setName("shard0000");
@@ -157,7 +132,6 @@ protected:
                              {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
         client.createCollection(NamespaceString::kConfigReshardingOperationsNamespace);
         client.createCollection(NamespaceString::kConfigsvrCollectionsNamespace);
-        client.createIndex(TagsType::ConfigNS, BSON("ns" << 1 << "min" << 1));
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
             ->initializeIfNeeded(operationContext(), /* term */ 1);
@@ -181,7 +155,7 @@ protected:
         ShardedClusterCardinalityParam cardinality;
         ClusterServerParameter baseCSP;
         baseCSP.setClusterParameterTime(LogicalTime(Timestamp(Date_t::now())));
-        baseCSP.set_id("shardedClusterCardinalityForDirectConns"_sd);
+        baseCSP.set_id("shardedClusterCardinalityForDirectConns"sv);
         cardinality.setClusterServerParameter(baseCSP);
         cardinality.setHasTwoOrMoreShards(true);
         auto param = ServerParameterSet::getClusterParameterSet()->get(
@@ -195,6 +169,14 @@ protected:
         boost::optional<Timestamp> fetchTimestamp = boost::none) {
         CommonReshardingMetadata meta(
             _reshardingUUID, _originalNss, UUID::gen(), _tempNss, _newShardKey.toBSON());
+
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        meta.setStartingFCV(fcvSnapshot.getVersion());
+
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(VersionContext{fcvSnapshot});
+        meta.setForwardableOpMetadata(std::move(fom));
+
         if (useUserUUID) {
             meta.setUserReshardingUUID(_reshardingUUID);
         }
@@ -480,7 +462,7 @@ protected:
     }
 
     // Reads the temporary collection's catalog entry from disk and validates that the
-    // reshardingFields and allowMigration matches the expected.
+    // reshardingFields and allowChunkOperations matches the expected.
     void assertTemporaryCollectionCatalogEntryMatchesExpected(
         OperationContext* opCtx, boost::optional<CollectionType> expectedCollType) {
         DBDirectClient client(opCtx);
@@ -583,8 +565,8 @@ protected:
         OID collectionEpoch) {
         readReshardingCoordinatorDocAndAssertMatchesExpected(opCtx, expectedCoordinatorDoc);
 
-        // Check the resharding fields and allowMigrations in the config.collections entry for the
-        // original collection
+        // Check the resharding fields and allowChunkOperations in the config.collections entry for
+        // the original collection
         TypeCollectionReshardingFields expectedReshardingFields(
             expectedCoordinatorDoc.getReshardingUUID());
         expectedReshardingFields.setState(expectedCoordinatorDoc.getState());
@@ -607,8 +589,8 @@ protected:
         assertOriginalCollectionCatalogEntryMatchesExpected(
             opCtx, expectedOriginalCollType, expectedCoordinatorDoc);
 
-        // Check the resharding fields and allowMigrations in the config.collections entry for the
-        // temp collection. If the expected state is >= kCommitting, the entry for the temp
+        // Check the resharding fields and allowChunkOperations in the config.collections entry for
+        // the temp collection. If the expected state is >= kCommitting, the entry for the temp
         // collection should have been removed.
         boost::optional<CollectionType> expectedTempCollType = boost::none;
         if (expectedCoordinatorDoc.getState() < CoordinatorStateEnum::kCommitting) {
@@ -680,15 +662,6 @@ protected:
             opCtx->getServiceContext()->getPreciseClockSource()->now());
         client.insert(NamespaceString::kConfigsvrCollectionsNamespace,
                       originalNssCatalogEntry.toBSON());
-
-        client.createCollection(NamespaceString::kConfigsvrChunksNamespace);
-        client.createCollection(TagsType::ConfigNS);
-
-        ASSERT_OK(createIndexOnConfigCollection(
-            opCtx,
-            NamespaceString::kConfigsvrChunksNamespace,
-            BSON(ChunkType::collectionUUID() << 1 << ChunkType::lastmod() << 1),
-            true));
     }
 
     void writeInitialStateAndCatalogUpdatesExpectSuccess(
@@ -888,6 +861,15 @@ protected:
     ShardKeyPattern _newShardKey = ShardKeyPattern(BSON("newSK" << 1));
 
     std::unique_ptr<ReshardingMetrics> _metrics;
+
+    // The assertions in this fixture exercise the legacy contract where the coordinator
+    // writes 'reshardingFields' to both config.collections entries. Both flags are now
+    // default-on, so forcing them off is required to keep these tests covering the legacy
+    // path; the gated-off code paths are covered by ReshardingCoordinatorNoRefreshPersistenceTest
+    // below and by resharding_coordinator_service_util_test.
+    unittest::ServerParameterGuard _initNoRefreshFlag{"featureFlagReshardingInitNoRefresh", false};
+    unittest::ServerParameterGuard _noRefreshApplyingAndBlockingWritesFlag{
+        "featureFlagReshardingNoRefreshApplyingAndBlockingWrites", false};
 
     const std::vector<ChunkRange> _oldChunkRanges = {
         ChunkRange(_oldShardKey.getKeyPattern().globalMin(), BSON("oldSK" << 12345)),
@@ -1230,6 +1212,422 @@ TEST_F(ReshardingCoordinatorPersistenceTest, SourceCleanupBetweenTransitionsSucc
 
     cleanupSourceCollectionExpectSuccess(
         operationContext(), expectedCoordinatorDoc, updatedChunks, updatedZones);
+}
+
+/**
+ * Covers which InitialSplitPolicy calculateParticipantShardsAndChunks picks for a given shard
+ * key shape, zones, and shardDistribution. Uses shardDistribution's with-min/max form.
+ */
+class ReshardingSplitPolicySelectionTest : public ReshardingCoordinatorPersistenceTest {
+protected:
+    // shard0000 is tagged kZone1 and shard0001 is tagged kZone2 by the base fixture's setUp().
+    static inline const std::string kShardOnZone1 = "shard0000";
+    static inline const std::string kShardOnZone2 = "shard0001";
+
+    ReshardingZoneType makeFullRangeZone(const ShardKeyPattern& shardKey,
+                                         const std::string& zoneName) {
+        return ReshardingZoneType(
+            zoneName, shardKey.getKeyPattern().globalMin(), shardKey.getKeyPattern().globalMax());
+    }
+
+    ReshardingCoordinatorDocument makeCoordinatorDocWithShardKey(const BSONObj& shardKeyBSON) {
+        CommonReshardingMetadata meta(
+            _reshardingUUID, _originalNss, UUID::gen(), _tempNss, shardKeyBSON);
+
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        meta.setStartingFCV(fcvSnapshot.getVersion());
+
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(VersionContext{fcvSnapshot});
+        meta.setForwardableOpMetadata(std::move(fom));
+
+        ReshardingCoordinatorDocument doc(CoordinatorStateEnum::kInitializing,
+                                          {DonorShardEntry(ShardId("shard0000"), {})},
+                                          {RecipientShardEntry(ShardId("shard0001"), {})});
+        doc.setCommonReshardingMetadata(meta);
+        return doc;
+    }
+
+    resharding::ParticipantShardsAndChunks runSplitPolicySelection(
+        const ShardKeyPattern& newShardKey,
+        std::vector<ReshardingZoneType> zones,
+        boost::optional<std::vector<ShardKeyRange>> shardDistribution) {
+        auto coordinatorDoc = makeCoordinatorDocWithShardKey(newShardKey.toBSON());
+        // One chunk suffices since zones/shardDistribution below cover the full domain.
+        coordinatorDoc.setNumInitialChunks(1);
+
+        if (!zones.empty()) {
+            coordinatorDoc.setZones(zones);
+        }
+        if (shardDistribution) {
+            coordinatorDoc.setShardDistribution(*shardDistribution);
+        }
+
+        makeAndInsertChunksForDonorShard(
+            _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+        setupSourceCollection(operationContext(), coordinatorDoc);
+        insertCoordDocAndChangeOrigCollEntry(operationContext(), _metrics.get(), coordinatorDoc);
+
+        auto externalState = ReshardingCoordinatorExternalStateImpl();
+        return externalState.calculateParticipantShardsAndChunks(
+            operationContext(), coordinatorDoc, zones);
+    }
+
+    std::set<ShardId> recipientShardIds(const resharding::ParticipantShardsAndChunks& result) {
+        std::set<ShardId> shardIds;
+        for (const auto& chunk : result.initialChunks) {
+            shardIds.insert(chunk.getShard());
+        }
+        return shardIds;
+    }
+};
+
+TEST_F(ReshardingSplitPolicySelectionTest,
+       HashedPrefixKeyWithoutPlacementRequestUsesHashedPresplitAcrossAllShards) {
+    // No placement requested: the hashed presplit fast path spreads one chunk per shard.
+    ShardKeyPattern hashedPrefixKey(BSON("newSK" << "hashed"));
+
+    auto result = runSplitPolicySelection(
+        hashedPrefixKey, {} /* zones */, boost::none /* shardDistribution */);
+
+    ASSERT_EQUALS(recipientShardIds(result),
+                  (std::set<ShardId>{ShardId(kShardOnZone1), ShardId(kShardOnZone2)}));
+}
+
+TEST_F(ReshardingSplitPolicySelectionTest,
+       HashedPrefixKeyWithShardDistributionMustNotUseHashedPresplitFastPath) {
+    ShardKeyPattern hashedPrefixKey(BSON("newSK" << "hashed"));
+    ShardKeyRange restrictToZone1Shard{ShardId(kShardOnZone1)};
+    restrictToZone1Shard.setMin(hashedPrefixKey.getKeyPattern().globalMin());
+    restrictToZone1Shard.setMax(hashedPrefixKey.getKeyPattern().globalMax());
+    std::vector<ShardKeyRange> shardDistribution{restrictToZone1Shard};
+
+    auto result = runSplitPolicySelection(hashedPrefixKey, {} /* zones */, shardDistribution);
+
+    ASSERT_EQUALS(recipientShardIds(result), (std::set<ShardId>{ShardId(kShardOnZone1)}));
+}
+
+TEST_F(ReshardingSplitPolicySelectionTest,
+       HashedPrefixKeyWithZonesAndShardDistributionMustNotUseHashedPresplitFastPath) {
+    // Same as above, but with 'zones' also supplied and agreeing with shardDistribution: confirms
+    // non-empty zones doesn't itself divert to a different branch.
+    ShardKeyPattern hashedPrefixKey(BSON("newSK" << "hashed"));
+    std::vector<ReshardingZoneType> zones{makeFullRangeZone(hashedPrefixKey, kZone1)};
+    ShardKeyRange restrictToZone1Shard{ShardId(kShardOnZone1)};
+    restrictToZone1Shard.setMin(hashedPrefixKey.getKeyPattern().globalMin());
+    restrictToZone1Shard.setMax(hashedPrefixKey.getKeyPattern().globalMax());
+    std::vector<ShardKeyRange> shardDistribution{restrictToZone1Shard};
+
+    auto result = runSplitPolicySelection(hashedPrefixKey, zones, shardDistribution);
+
+    ASSERT_EQUALS(recipientShardIds(result), (std::set<ShardId>{ShardId(kShardOnZone1)}));
+}
+
+TEST_F(ReshardingSplitPolicySelectionTest, NonHashedPrefixKeyWithShardDistributionHonorsIt) {
+    // Baseline: a range key was never affected by SERVER-133282, so placement should be honored
+    // here too.
+    ShardKeyPattern rangeKey(BSON("newSK" << 1));
+    ShardKeyRange restrictToZone1Shard{ShardId(kShardOnZone1)};
+    restrictToZone1Shard.setMin(rangeKey.getKeyPattern().globalMin());
+    restrictToZone1Shard.setMax(rangeKey.getKeyPattern().globalMax());
+    std::vector<ShardKeyRange> shardDistribution{restrictToZone1Shard};
+
+    auto result = runSplitPolicySelection(rangeKey, {} /* zones */, shardDistribution);
+
+    ASSERT_EQUALS(recipientShardIds(result), (std::set<ShardId>{ShardId(kShardOnZone1)}));
+}
+
+/**
+ * Mirror of ReshardingCoordinatorPersistenceTest, but with the coordinator's reshardingFields
+ * writes gated off via featureFlagReshardingInitNoRefresh and
+ * featureFlagReshardingNoRefreshApplyingAndBlockingWrites. Verifies that the persistence helpers
+ * leave the on-disk config.collections entries free of reshardingFields across pre-commit
+ * transitions, complementing the BSON-shape coverage in resharding_coordinator_service_util_test.
+ */
+class ReshardingCoordinatorNoRefreshPersistenceTest : public ReshardingCoordinatorPersistenceTest {
+protected:
+    ReshardingCoordinatorNoRefreshPersistenceTest()
+        : _initNoRefreshOn{"featureFlagReshardingInitNoRefresh", true},
+          _noRefreshApplyingAndBlockingWritesOn{
+              "featureFlagReshardingNoRefreshApplyingAndBlockingWrites", true} {}
+
+    BSONObj findOriginalCollectionEntry(OperationContext* opCtx) {
+        DBDirectClient client(opCtx);
+        return client.findOne(NamespaceString::kConfigsvrCollectionsNamespace,
+                              BSON("_id" << _originalNss.ns_forTest()));
+    }
+
+    BSONObj findTempCollectionEntry(OperationContext* opCtx) {
+        DBDirectClient client(opCtx);
+        return client.findOne(NamespaceString::kConfigsvrCollectionsNamespace,
+                              BSON("_id" << _tempNss.ns_forTest()));
+    }
+
+private:
+    // Re-flip the parent's controllers back on for the test body. Destruction unwinds in
+    // reverse so the parent's off-state is restored cleanly.
+    unittest::ServerParameterGuard _initNoRefreshOn;
+    unittest::ServerParameterGuard _noRefreshApplyingAndBlockingWritesOn;
+};
+
+TEST_F(ReshardingCoordinatorNoRefreshPersistenceTest,
+       TempCollectionEntryHasNoReshardingFieldsAfterInitialInsert) {
+    // Setting up the catalog at kPreparingToDonate inserts the temp collection entry via the
+    // production helper createTempReshardingCollectionType. With InitNoRefresh on, that entry
+    // should have no 'reshardingFields' subdocument.
+    insertStateAndCatalogEntries(CoordinatorStateEnum::kPreparingToDonate, _originalEpoch);
+
+    auto tempEntryBSON = findTempCollectionEntry(operationContext());
+    ASSERT(!tempEntryBSON.isEmpty());
+    ASSERT_FALSE(tempEntryBSON.hasField(CollectionType::kReshardingFieldsFieldName))
+        << tempEntryBSON;
+}
+
+TEST_F(ReshardingCoordinatorNoRefreshPersistenceTest,
+       TempCollectionEntryUntouchedDuringTransientStateTransition) {
+    // Pre-populate at kCloning. Under InitNoRefresh, this seeds an entry without
+    // reshardingFields.
+    auto coordinatorDoc =
+        insertStateAndCatalogEntries(CoordinatorStateEnum::kCloning, _originalEpoch);
+
+    auto initialTempEntry = findTempCollectionEntry(operationContext());
+    ASSERT(!initialTempEntry.isEmpty());
+    ASSERT_FALSE(initialTempEntry.hasField(CollectionType::kReshardingFieldsFieldName))
+        << initialTempEntry;
+
+    // Ensure chunks exist for both namespaces so the placement-version bump in the helper
+    // succeeds.
+    makeAndInsertChunksForDonorShard(
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+    makeAndInsertChunksForRecipientShard(
+        _reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+
+    // Drive a transient transition (kCloning -> kBlockingWrites). Both flags are on, so the
+    // legacy reshardingFields write produced by createLegacyTempCollectionReshardingFieldsRequest
+    // must be skipped (per skipReshardingFieldsWritesForCoordinator) and no partial
+    // reshardingFields subtree may appear on the temp entry.
+    auto expectedCoordinatorDoc = coordinatorDoc;
+    expectedCoordinatorDoc.setState(CoordinatorStateEnum::kBlockingWrites);
+
+    writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), expectedCoordinatorDoc, boost::none);
+
+    auto finalTempEntry = findTempCollectionEntry(operationContext());
+    ASSERT(!finalTempEntry.isEmpty());
+    ASSERT_FALSE(finalTempEntry.hasField(CollectionType::kReshardingFieldsFieldName))
+        << finalTempEntry;
+}
+
+TEST_F(ReshardingCoordinatorNoRefreshPersistenceTest,
+       OriginalCollectionEntryReshardingFieldsAreNotReWrittenDuringTransientStateTransition) {
+    // Pre-populate at kCloning. The fixture's setup inserts an originalNss entry with
+    // reshardingFields hand-built; the gating only affects writes done by the coordinator's
+    // production helpers (updateConfigCollectionsForOriginalNss returns BSONObj() here).
+    auto coordinatorDoc =
+        insertStateAndCatalogEntries(CoordinatorStateEnum::kCloning, _originalEpoch);
+
+    auto initialOriginalEntry = findOriginalCollectionEntry(operationContext());
+    ASSERT(!initialOriginalEntry.isEmpty());
+    auto initialReshardingFields =
+        initialOriginalEntry.getObjectField(CollectionType::kReshardingFieldsFieldName);
+    auto initialState = initialReshardingFields.getStringField("state");
+
+    makeAndInsertChunksForDonorShard(
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+    makeAndInsertChunksForRecipientShard(
+        _reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+
+    auto expectedCoordinatorDoc = coordinatorDoc;
+    expectedCoordinatorDoc.setState(CoordinatorStateEnum::kBlockingWrites);
+
+    writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), expectedCoordinatorDoc, boost::none);
+
+    // The reshardingFields.state on the original entry must be unchanged: with the no-refresh
+    // flag on, the coordinator no longer rewrites reshardingFields during transient transitions.
+    auto finalOriginalEntry = findOriginalCollectionEntry(operationContext());
+    ASSERT(!finalOriginalEntry.isEmpty());
+    auto finalReshardingFields =
+        finalOriginalEntry.getObjectField(CollectionType::kReshardingFieldsFieldName);
+    ASSERT_EQ(finalReshardingFields.getStringField("state"), initialState)
+        << "expected reshardingFields.state to be unchanged across transient transition; "
+        << "before=" << initialOriginalEntry << " after=" << finalOriginalEntry;
+}
+
+TEST_F(ReshardingCoordinatorNoRefreshPersistenceTest,
+       TempCollectionEntryStaysFreeOfReshardingFieldsAcrossFullPreCommitLifecycle) {
+    // Walk the coordinator through the full pre-commit lifecycle
+    // (kPreparingToDonate -> kCloning -> kBlockingWrites) and assert at every step that the
+    // temp config.collections entry never grows a 'reshardingFields' subtree. This exercises
+    // both the initial insert path (createTempCollectionLifecycleRequest +
+    // createTempReshardingCollectionType) and the transient update path
+    // (createLegacyTempCollectionReshardingFieldsRequest), gated through
+    // writeToConfigCollectionsForTempNss when the no-refresh flag is on.
+    auto coordinatorDoc =
+        insertStateAndCatalogEntries(CoordinatorStateEnum::kPreparingToDonate, _originalEpoch);
+
+    auto assertTempEntryHasNoReshardingFields = [&](std::string_view phase) {
+        auto entry = findTempCollectionEntry(operationContext());
+        ASSERT(!entry.isEmpty()) << "phase=" << phase;
+        ASSERT_FALSE(entry.hasField(CollectionType::kReshardingFieldsFieldName))
+            << "phase=" << phase << " entry=" << entry;
+    };
+
+    assertTempEntryHasNoReshardingFields("after kPreparingToDonate insert");
+
+    makeAndInsertChunksForDonorShard(
+        _originalUUID, _originalEpoch, _oldShardKey, std::vector{OID::gen(), OID::gen()});
+    makeAndInsertChunksForRecipientShard(
+        _reshardingUUID, _tempEpoch, _newShardKey, std::vector{OID::gen(), OID::gen()});
+
+    // kPreparingToDonate -> kCloning. kCloning is the path that historically wrote a
+    // partial $set against 'reshardingFields.recipientFields.*'; the gate must skip it.
+    auto cloningDoc = coordinatorDoc;
+    cloningDoc.setState(CoordinatorStateEnum::kCloning);
+    emplaceCloneTimestampIfExists(cloningDoc, Timestamp(1, 1));
+    emplaceApproxBytesToCopyIfExists(cloningDoc, [] {
+        ReshardingApproxCopySize approxCopySize;
+        approxCopySize.setApproxBytesToCopy(0);
+        approxCopySize.setApproxDocumentsToCopy(0);
+        return approxCopySize;
+    }());
+    writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), cloningDoc, boost::none);
+
+    assertTempEntryHasNoReshardingFields("after kCloning transition");
+
+    // kCloning -> kBlockingWrites. This goes through the 'default' branch of
+    // createLegacyTempCollectionReshardingFieldsRequest, which is upsert: true and would
+    // otherwise create a malformed parent doc; the gate must skip it.
+    auto blockingDoc = cloningDoc;
+    blockingDoc.setState(CoordinatorStateEnum::kBlockingWrites);
+    writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), blockingDoc, boost::none);
+
+    assertTempEntryHasNoReshardingFields("after kBlockingWrites transition");
+}
+
+/**
+ * Verifies that writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions skips the
+ * placement-version bump when the coordinator doc has an authoritative metadata access level.
+ */
+class ReshardingCoordinatorAuthoritativePersistenceTest
+    : public ReshardingCoordinatorNoRefreshPersistenceTest {
+public:
+    ReshardingCoordinatorAuthoritativePersistenceTest()
+        : _authDDLOn{"featureFlagAuthoritativeShardsDDL", true},
+          _authCRUDOn{"featureFlagAuthoritativeShardsCRUD", true} {}
+
+protected:
+    ReshardingCoordinatorDocument makeAuthoritativeCoordinatorDoc(CoordinatorStateEnum state) {
+        auto doc = makeCoordinatorDoc(state, false, boost::none);
+        doc.setAuthoritativeMetadataAccessLevel(
+            ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAllowed);
+        return doc;
+    }
+
+    ReshardingCoordinatorDocument insertAuthoritativeStateAndCatalogEntries(
+        CoordinatorStateEnum state) {
+        auto opCtx = operationContext();
+        DBDirectClient client(opCtx);
+
+        auto coordinatorDoc = makeAuthoritativeCoordinatorDoc(state);
+        client.insert(NamespaceString::kConfigReshardingOperationsNamespace,
+                      coordinatorDoc.toBSON());
+        return coordinatorDoc;
+    }
+
+    // Inserts a bare config.collections entry for the source nss without reshardingFields
+    // (authoritative path).
+    void insertSourceCollectionEntry(const ReshardingCoordinatorDocument& coordinatorDoc) {
+        auto opCtx = operationContext();
+        DBDirectClient client(opCtx);
+        auto entry = makeOriginalCollectionCatalogEntry(
+            coordinatorDoc,
+            boost::none /* reshardingFields */,
+            _originalEpoch,
+            opCtx->getServiceContext()->getPreciseClockSource()->now());
+        client.insert(NamespaceString::kConfigsvrCollectionsNamespace, entry.toBSON());
+    }
+
+private:
+    unittest::ServerParameterGuard _authDDLOn;
+    unittest::ServerParameterGuard _authCRUDOn;
+};
+
+TEST_F(ReshardingCoordinatorAuthoritativePersistenceTest,
+       InsertCoordDocSkipsPlacementVersionBumpWhenAuthoritative) {
+    auto coordinatorDoc = makeAuthoritativeCoordinatorDoc(CoordinatorStateEnum::kInitializing);
+    insertSourceCollectionEntry(coordinatorDoc);
+
+    // A bump attempt would fail because there are no chunks in config.chunks.
+    ASSERT_DOES_NOT_THROW(
+        insertCoordDocAndChangeOrigCollEntry(operationContext(), _metrics.get(), coordinatorDoc));
+}
+
+TEST_F(ReshardingCoordinatorAuthoritativePersistenceTest,
+       WriteParticipantShardsSkipsPlacementVersionBumpWhenAuthoritative) {
+    auto coordinatorDoc =
+        insertAuthoritativeStateAndCatalogEntries(CoordinatorStateEnum::kPreparingToDonate);
+
+    auto initialChunks =
+        makeChunks(_reshardingUUID, _tempEpoch, _newShardKey, {OID::gen(), OID::gen()});
+
+    auto phaseTransitionFn = [&](OperationContext* opCtx, TxnNumber txnNumber) {
+        auto updatedDoc = coordinatorDoc;
+        updatedDoc.setState(CoordinatorStateEnum::kCloning);
+        writeToCoordinatorStateNss(opCtx, _metrics.get(), updatedDoc, txnNumber);
+        return updatedDoc;
+    };
+
+    // A bump attempt would fail because there are no chunks in config.chunks.
+    ASSERT_DOES_NOT_THROW(writeParticipantShardsAndTempCollInfo(operationContext(),
+                                                                _metrics.get(),
+                                                                coordinatorDoc,
+                                                                std::move(phaseTransitionFn),
+                                                                std::move(initialChunks),
+                                                                {} /* zones */,
+                                                                boost::none));
+}
+
+TEST_F(ReshardingCoordinatorAuthoritativePersistenceTest,
+       StateTransitionSkipsPlacementVersionBumpWhenAuthoritative) {
+    auto coordinatorDoc =
+        insertAuthoritativeStateAndCatalogEntries(CoordinatorStateEnum::kApplying);
+
+    auto nextDoc = coordinatorDoc;
+    nextDoc.setState(CoordinatorStateEnum::kBlockingWrites);
+
+    // A bump attempt would fail because there are no chunks in config.chunks.
+    ASSERT_DOES_NOT_THROW(writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), nextDoc, boost::none));
+}
+
+TEST_F(ReshardingCoordinatorAuthoritativePersistenceTest,
+       AbortTransitionSkipsPlacementVersionBumpWhenAuthoritative) {
+    auto coordinatorDoc = insertAuthoritativeStateAndCatalogEntries(CoordinatorStateEnum::kCloning);
+
+    auto abortDoc = coordinatorDoc;
+    abortDoc.setState(CoordinatorStateEnum::kAborting);
+    emplaceTruncatedAbortReasonIfExists(abortDoc,
+                                        Status(ErrorCodes::ReshardCollectionAborted, "test abort"));
+
+    // A bump attempt would fail because there are no chunks in config.chunks.
+    ASSERT_DOES_NOT_THROW(writeStateTransitionAndCatalogUpdatesThenBumpCollectionPlacementVersions(
+        operationContext(), _metrics.get(), abortDoc, boost::none));
+}
+
+TEST_F(ReshardingCoordinatorAuthoritativePersistenceTest,
+       RemoveCoordinatorDocSkipsPlacementVersionBumpWhenAuthoritative) {
+    auto coordinatorDoc =
+        insertAuthoritativeStateAndCatalogEntries(CoordinatorStateEnum::kCommitting);
+
+    // A bump attempt would fail because there are no chunks in config.chunks.
+    ASSERT_DOES_NOT_THROW(removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(
+        operationContext(),
+        _metrics.get(),
+        coordinatorDoc,
+        Status(ErrorCodes::ReshardCollectionAborted, "test abort")));
 }
 
 }  // namespace

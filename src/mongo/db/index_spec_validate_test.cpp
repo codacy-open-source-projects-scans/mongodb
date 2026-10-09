@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -73,16 +46,16 @@ class IndexSpecValidateTest : public ServiceContextMongoDTest {};
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfKeyPatternIsNotAnObject) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << 1 << "name"
                                            << "indexName")));
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << "not an object"
                                            << "name"
                                            << "indexName")));
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSONArray() << "name"
                                            << "indexName")));
@@ -91,11 +64,11 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfKeyPatternIsNotAnObject) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfFieldRepeatedInKeyPattern) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1 << "field" << 1) << "name"
                                            << "indexName")));
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1 << "otherField" << -1 << "field"
                                                            << "2dsphere")
@@ -106,21 +79,21 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfFieldRepeatedInKeyPattern) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfKeyPatternIsNotPresent) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::FailedToParse,
+    EXPECT_EQ(ErrorCodes::FailedToParse,
               validateIndexSpec(opCtx.get(), BSON("name" << "indexName")));
 }
 
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfNameIsNotAString) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(), BSON("key" << BSON("field" << 1) << "name" << 1)));
 }
 
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfNameIsNotPresent) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::FailedToParse,
+    EXPECT_EQ(ErrorCodes::FailedToParse,
               validateIndexSpec(opCtx.get(), BSON("key" << BSON("field" << 1))));
 }
 
@@ -143,13 +116,13 @@ TEST_F(IndexSpecValidateTest, ReturnsIndexSpecUnchangedIfVersionIsPresent) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsNotANumber) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "v"
                                            << "not a number")));
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -159,22 +132,22 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsNotANumber) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsNotRepresentableAsInt) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "v" << 2.2)));
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "v" << std::nan("1"))));
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "v" << std::numeric_limits<double>::infinity())));
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -184,7 +157,7 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsNotRepresentableAsInt) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsV0) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
+    EXPECT_EQ(ErrorCodes::CannotCreateIndex,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -194,13 +167,13 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsV0) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfVersionIsUnsupported) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
+    EXPECT_EQ(ErrorCodes::CannotCreateIndex,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "v" << 3 << "collation" << BSON("locale" << "en"))));
 
-    ASSERT_EQ(ErrorCodes::CannotCreateIndex,
+    EXPECT_EQ(ErrorCodes::CannotCreateIndex,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -272,18 +245,18 @@ TEST_F(IndexSpecValidateTest, AcceptsIndexVersionV1) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfCollationIsNotAnObject) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "collation" << 1)));
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
                                            << "collation"
                                            << "not an object")));
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
+    EXPECT_EQ(ErrorCodes::TypeMismatch,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -293,7 +266,7 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfCollationIsNotAnObject) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfCollationIsEmpty) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIndexSpec(opCtx.get(),
                                 BSON("key" << BSON("field" << 1) << "name"
                                            << "indexName"
@@ -303,7 +276,7 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfCollationIsEmpty) {
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfCollationIsPresentAndVersionIsLessThanV2) {
     auto opCtx = makeOperationContext();
 
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::CannotCreateIndex,
         validateIndexSpec(opCtx.get(),
                           BSON("key" << BSON("field" << 1) << "name"
@@ -366,7 +339,7 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfUnknownFieldIsPresentInSpecV2) {
                                     BSON("key" << BSON("field" << 1) << "name"
                                                << "indexName"
                                                << "v" << 2 << "unknownField" << 1));
-    ASSERT_EQ(ErrorCodes::InvalidIndexSpecificationOption, result);
+    EXPECT_EQ(ErrorCodes::InvalidIndexSpecificationOption, result);
 }
 
 TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfUnknownFieldIsPresentInSpecV1) {
@@ -376,7 +349,7 @@ TEST_F(IndexSpecValidateTest, ReturnsAnErrorIfUnknownFieldIsPresentInSpecV1) {
                                     BSON("key" << BSON("field" << 1) << "name"
                                                << "indexName"
                                                << "v" << 1 << "unknownField" << 1));
-    ASSERT_EQ(ErrorCodes::InvalidIndexSpecificationOption, result);
+    EXPECT_EQ(ErrorCodes::InvalidIndexSpecificationOption, result);
 }
 
 TEST_F(IndexSpecValidateTest, DisallowSpecifyingBothUniqueAndPrepareUnique) {
@@ -386,7 +359,7 @@ TEST_F(IndexSpecValidateTest, DisallowSpecifyingBothUniqueAndPrepareUnique) {
                                     BSON("key" << BSON("a" << 1) << "name"
                                                << "indexName"
                                                << "unique" << true << "prepareUnique" << true));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::CannotCreateIndex);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::CannotCreateIndex);
 }
 
 }  // namespace index_spec_validate_test
@@ -396,10 +369,10 @@ namespace id_index_spec_validate_test {
 class IdIndexSpecValidateTest : public ServiceContextMongoDTest {};
 
 TEST_F(IdIndexSpecValidateTest, ReturnsAnErrorIfKeyPatternIsIncorrectForIdIndex) {
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIdIndexSpec(BSON("key" << BSON("_id" << -1) << "name"
                                              << IndexConstants::kIdIndexName << "v" << 2)));
-    ASSERT_EQ(ErrorCodes::BadValue,
+    EXPECT_EQ(ErrorCodes::BadValue,
               validateIdIndexSpec(BSON("key" << BSON("a" << 1) << "name"
                                              << IndexConstants::kIdIndexName << "v" << 2)));
 }
@@ -411,27 +384,27 @@ TEST_F(IdIndexSpecValidateTest, ReturnsOKStatusIfKeyPatternCorrectForIdIndex) {
 }
 
 TEST_F(IdIndexSpecValidateTest, ReturnsAnErrorIfFieldNotAllowedForIdIndex) {
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::InvalidIndexSpecificationOption,
         validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                        << "v" << 2 << "background" << false)));
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::InvalidIndexSpecificationOption,
         validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                        << "v" << 2 << "unique" << true)));
-    ASSERT_EQ(ErrorCodes::InvalidIndexSpecificationOption,
+    EXPECT_EQ(ErrorCodes::InvalidIndexSpecificationOption,
               validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name"
                                              << IndexConstants::kIdIndexName << "v" << 2
                                              << "partialFilterExpression" << BSON("a" << 5))));
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::InvalidIndexSpecificationOption,
         validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                        << "v" << 2 << "sparse" << false)));
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::InvalidIndexSpecificationOption,
         validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                        << "v" << 2 << "expireAfterSeconds" << 3600)));
-    ASSERT_EQ(
+    EXPECT_EQ(
         ErrorCodes::InvalidIndexSpecificationOption,
         validateIdIndexSpec(BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                        << "v" << 2 << "storageEngine" << BSONObj())));
@@ -548,7 +521,7 @@ TEST_F(IndexSpecPartialFilterTest, FailsIfPartialFilterIsNotAnObject) {
                                     BSON("key" << BSON("field" << 1) << "name"
                                                << "indexName"
                                                << "partialFilterExpression" << 1));
-    ASSERT_EQ(result.getStatus(), ErrorCodes::TypeMismatch);
+    EXPECT_EQ(result.getStatus(), ErrorCodes::TypeMismatch);
 }
 
 TEST_F(IndexSpecPartialFilterTest, FailsIfPartialFilterContainsBannedFeature) {
@@ -559,7 +532,7 @@ TEST_F(IndexSpecPartialFilterTest, FailsIfPartialFilterContainsBannedFeature) {
                                                << "indexName"
                                                << "partialFilterExpression"
                                                << BSON("$jsonSchema" << BSONObj())));
-    ASSERT_EQ(result.getStatus(), ErrorCodes::QueryFeatureNotAllowed);
+    EXPECT_EQ(result.getStatus(), ErrorCodes::QueryFeatureNotAllowed);
 }
 
 TEST_F(IndexSpecPartialFilterTest, AcceptsValidPartialFilterExpression) {
@@ -630,7 +603,7 @@ TEST_F(IndexSpecWildcardTest, FailsWithInclusionExcludingIdSubfield) {
                                                << "indexName"
                                                << "wildcardProjection"
                                                << BSON("_id.field" << 0 << "a" << 1 << "b" << 1)));
-    ASSERT_EQ(result.getStatus().code(), 31253);
+    EXPECT_EQ(result.getStatus().code(), 31253);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWithExclusionIncludingIdSubfield) {
@@ -641,7 +614,7 @@ TEST_F(IndexSpecWildcardTest, FailsWithExclusionIncludingIdSubfield) {
                                                << "indexName"
                                                << "wildcardProjection"
                                                << BSON("_id.field" << 1 << "a" << 0 << "b" << 0)));
-    ASSERT_EQ(result.getStatus().code(), 31254);
+    EXPECT_EQ(result.getStatus().code(), 31254);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWithMixedProjection) {
@@ -652,7 +625,7 @@ TEST_F(IndexSpecWildcardTest, FailsWithMixedProjection) {
                           BSON("key" << BSON("$**" << 1) << "name"
                                      << "indexName"
                                      << "wildcardProjection" << BSON("a" << 1 << "b" << 0)));
-    ASSERT_EQ(result.getStatus().code(), 31254);
+    EXPECT_EQ(result.getStatus().code(), 31254);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWithComputedFieldsInProjection) {
@@ -664,7 +637,7 @@ TEST_F(IndexSpecWildcardTest, FailsWithComputedFieldsInProjection) {
                                                << "wildcardProjection"
                                                << BSON("a" << 1 << "b"
                                                            << "string")));
-    ASSERT_EQ(result.getStatus().code(), 51271);
+    EXPECT_EQ(result.getStatus().code(), 51271);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWhenProjectionPluginNotWildcard) {
@@ -674,7 +647,7 @@ TEST_F(IndexSpecWildcardTest, FailsWhenProjectionPluginNotWildcard) {
                                     BSON("key" << BSON("a" << 1) << "name"
                                                << "indexName"
                                                << "wildcardProjection" << BSON("a" << 1)));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::BadValue);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::BadValue);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWhenProjectionIsNotAnObject) {
@@ -684,7 +657,7 @@ TEST_F(IndexSpecWildcardTest, FailsWhenProjectionIsNotAnObject) {
                                     BSON("key" << BSON("$**" << 1) << "name"
                                                << "indexName"
                                                << "wildcardProjection" << 4));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::TypeMismatch);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::TypeMismatch);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWithEmptyProjection) {
@@ -694,7 +667,7 @@ TEST_F(IndexSpecWildcardTest, FailsWithEmptyProjection) {
                                     BSON("key" << BSON("$**" << 1) << "name"
                                                << "indexName"
                                                << "wildcardProjection" << BSONObj()));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWhenInclusionWithSubpath) {
@@ -704,7 +677,7 @@ TEST_F(IndexSpecWildcardTest, FailsWhenInclusionWithSubpath) {
                                     BSON("key" << BSON("a.$**" << 1) << "name"
                                                << "indexName"
                                                << "wildcardProjection" << BSON("a" << 1)));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
 
 TEST_F(IndexSpecWildcardTest, FailsWhenExclusionWithSubpath) {
@@ -714,7 +687,7 @@ TEST_F(IndexSpecWildcardTest, FailsWhenExclusionWithSubpath) {
                                     BSON("key" << BSON("a.$**" << 1) << "name"
                                                << "indexName"
                                                << "wildcardProjection" << BSON("b" << 0)));
-    ASSERT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
+    EXPECT_EQ(result.getStatus().code(), ErrorCodes::FailedToParse);
 }
 
 }  // namespace index_spec_wildcard_test
@@ -769,7 +742,7 @@ TEST_F(IndexSpecFieldValidateTest, ValidateAfterSecondsAcceptsFloatingPointNumbe
         opCtx.get(), fromjson("{key: {a: 1}, name: 'index', expireAfterSeconds: 123.456}")));
 
     // TTLMonitor extracts 'expireAfterSeconds' using BSONElement::safeNumberLong().
-    ASSERT_EQUALS(spec["expireAfterSeconds"].safeNumberLong(), 123LL);
+    EXPECT_EQ(spec["expireAfterSeconds"].safeNumberLong(), 123LL);
 }
 
 // TODO (SERVER-120350): Remove this test case.
@@ -789,7 +762,7 @@ TEST_F(IndexSpecFieldValidateTest, UpgradeRepairRejectsNonIntegerExpireAfterSeco
                                     index_key_validate::kAllowedFieldNames,
                                     /*isUpgradeRepair=*/true)
                       .getStatus();
-    ASSERT_EQ(status.code(), ErrorCodes::TypeMismatch);
+    EXPECT_EQ(status.code(), ErrorCodes::TypeMismatch);
 }
 
 TEST_F(IndexSpecFieldValidateTest, GeoIndexSpecs) {

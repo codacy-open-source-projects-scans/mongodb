@@ -18,6 +18,9 @@
  */
 #define WT_BLOCK_INVALID_OFFSET 0
 
+/* Address cookies omit object ID 0; unpack defaults a missing id to 0. */
+#define WT_TIERED_OBJECTID_NONE 0
+
 /*
  * The max corrupt block size that we'll attempt to detect bitflips for. Essentially default
  * leaf_page_max with a buffer.
@@ -140,7 +143,7 @@ typedef struct {
  */
 #define WT_EXT_FOREACH_FROM_OFFSET_INCL(skip, el, start)                        \
     for ((skip) = __wt_block_off_srch_inclusive((el), (start)); (skip) != NULL; \
-         (skip) = (skip)->next[0])
+      (skip) = (skip)->next[0])
 
 /*
  * Checkpoint cookie: carries a version number as I don't want to rev the schema
@@ -191,8 +194,9 @@ struct __wt_block_ckpt {
     WT_EXTLIST ckpt_discard; /* Checkpoint archive */
 };
 
-#define WT_BLOCK_INVALID_PAGE_ID 0 /* Invalid page ID, e.g., if it's not allocated. */
-#define WT_BLOCK_MIN_PAGE_ID 100   /* Minimum page ID that can be used for user data. */
+#define WT_BLOCK_INVALID_PAGE_ID 0              /* Invalid page ID, e.g., if it's not allocated. */
+#define WT_BLOCK_INVALID_PAGE_ID_MAX UINT64_MAX /* Sentinel value, not a valid page ID. */
+#define WT_BLOCK_MIN_PAGE_ID 100 /* Minimum page ID that can be used for user data. */
 
 /*
  * WT_BM --
@@ -202,7 +206,9 @@ struct __wt_bm {
     /* Methods */
     int (*addr_invalid)(WT_BM *, WT_SESSION_IMPL *, const uint8_t *, size_t);
     int (*addr_string)(WT_BM *, WT_SESSION_IMPL *, WT_ITEM *, const uint8_t *, size_t);
-    u_int (*block_header)(WT_BM *);
+    void (*block_header_init)(WT_BM *, WT_SESSION_IMPL *, void *);
+    u_int (*block_header_read_size)(WT_BM *, WT_SESSION_IMPL *, const void *);
+    u_int (*block_header_write_size)(WT_BM *, WT_SESSION_IMPL *);
     bool (*can_truncate)(WT_BM *, WT_SESSION_IMPL *);
     int (*checkpoint)(WT_BM *, WT_SESSION_IMPL *, WT_ITEM *, WT_PAGE_BLOCK_META *, WT_CKPT *, bool);
     int (*checkpoint_last)(WT_BM *, WT_SESSION_IMPL *, char **, char **, WT_ITEM *);
@@ -219,7 +225,7 @@ struct __wt_bm {
     void (*compact_progress)(WT_BM *, WT_SESSION_IMPL *);
     int (*compact_start)(WT_BM *, WT_SESSION_IMPL *);
     int (*corrupt)(WT_BM *, WT_SESSION_IMPL *, const uint8_t *, size_t);
-    size_t (*encrypt_skip)(WT_BM *, WT_SESSION_IMPL *);
+    size_t (*encrypt_skip)(WT_BM *, WT_SESSION_IMPL *, const void *);
     int (*free)(WT_BM *, WT_SESSION_IMPL *, const uint8_t *, size_t, bool);
     int (*get_page_ids)(WT_BM *, WT_SESSION_IMPL *, WT_ITEM *, size_t *, uint64_t);
     bool (*is_mapped)(WT_BM *, WT_SESSION_IMPL *);
@@ -234,8 +240,6 @@ struct __wt_bm {
     int (*salvage_valid)(WT_BM *, WT_SESSION_IMPL *, uint8_t *, size_t, bool);
     int (*size)(WT_BM *, WT_SESSION_IMPL *, wt_off_t *);
     int (*stat)(WT_BM *, WT_SESSION_IMPL *, WT_DSRC_STATS *stats);
-    int (*switch_object)(WT_BM *, WT_SESSION_IMPL *, uint32_t);
-    int (*switch_object_end)(WT_BM *, WT_SESSION_IMPL *, uint32_t);
     int (*sync)(WT_BM *, WT_SESSION_IMPL *, bool);
     int (*verify_addr)(WT_BM *, WT_SESSION_IMPL *, const uint8_t *, size_t);
     int (*verify_end)(WT_BM *, WT_SESSION_IMPL *, bool verify_success);
@@ -244,27 +248,12 @@ struct __wt_bm {
       size_t *, bool, bool);
     int (*write_size)(WT_BM *, WT_SESSION_IMPL *, size_t *);
 
-    WT_BLOCK *block; /* Underlying file. For a multi-handle tree this will be the writable file. */
-    WT_BLOCK *next_block; /* If doing a tier switch, this is going to be the new file. */
-    WT_BLOCK *prev_block; /* If a tier switch was done, this was the old file. */
+    WT_BLOCK *block; /* Underlying file. */
 
     void *map; /* Mapped region */
     size_t maplen;
     void *mapped_cookie;
     bool is_remote; /* Whether the storage is located on a remote host. */
-
-    /*
-     * For trees, such as tiered tables, that are allowed to have more than one backing file or
-     * object, we maintain an array of the block handles used by the tree. We use a reader-writer
-     * mutex to protect the array. We lock it for reading when looking for a handle in the array and
-     * lock it for writing when adding or removing handles in the array.
-     */
-    bool is_multi_handle;
-    WT_BLOCK **handle_array;       /* Array of block handles */
-    size_t handle_array_allocated; /* Size of handle array */
-    WT_RWLOCK handle_array_lock;   /* Lock for block handle array */
-    u_int handle_array_next;       /* Next open slot */
-    uint32_t max_flushed_objectid; /* Local objects at or below this id should be closed */
 
     /*
      * There's only a single block manager handle that can be written, all others are checkpoints.
@@ -277,12 +266,23 @@ struct __wt_bm {
  *	Block manager file handle.
  */
 struct __wt_block {
+    /*
+     * The fields up to and including hashq must match the layout of WT_BLOCK_DISAGG exactly. The
+     * shared-prefix invariant is enforced by static_asserts in verify_build.h.
+     *
+     * Ideally we would split this into a public/private structure, similar to session handles, and
+     * customize file and disagg handles as necessary. That's invasive so save the grunt work for
+     * now.
+     */
+
+    /* ===== Begin shared prefix with WT_BLOCK_DISAGG ===== */
     const char *name;  /* Name */
     uint32_t objectid; /* Object id */
     uint32_t ref;      /* References */
 
     TAILQ_ENTRY(__wt_block) q;     /* Linked list of handles */
     TAILQ_ENTRY(__wt_block) hashq; /* Hashed list of handles */
+    /* ===== End shared prefix with WT_BLOCK_DISAGG ===== */
 
     WT_FH *fh;            /* Backing file handle */
     wt_off_t size;        /* Storage size */
@@ -458,21 +458,34 @@ struct __wt_block_header {
  */
 struct __wt_block_disagg {
     /*
-     * The structure needs to exactly match the WT_BLOCK structure, since it can be treated as one
-     * for connection caching and a few other things. For custom fields, see below. Ideally we would
-     * split this into a public/private structure, similar to session handles, and customize file
-     * and disagg handles as necessary. That's invasive so save the grunt work for now.
+     * The fields up to and including hashq must match the layout of WT_BLOCK exactly. The
+     * shared-prefix invariant is enforced by static_asserts in verify_build.h.
+     *
+     * Ideally we would split this into a public/private structure, similar to session handles, and
+     * customize file and disagg handles as necessary. That's invasive so save the grunt work for
+     * now.
      */
+
+    /* ===== Begin shared prefix with WT_BLOCK ===== */
     const char *name;  /* Name */
     uint32_t objectid; /* Object id */
     uint32_t ref;      /* References */
 
     TAILQ_ENTRY(__wt_block) q;     /* Linked list of handles */
     TAILQ_ENTRY(__wt_block) hashq; /* Hashed list of handles */
+    /* ===== End shared prefix with WT_BLOCK ===== */
 
     /* Custom disaggregated fields. */
     uint64_t tableid;
     WT_PAGE_LOG_HANDLE *plhandle;
+
+    /* Total bytes across all pages. */
+    wt_shared uint64_t size;
+
+    /* Root page size tracking for checkpoint size accounting. */
+    uint64_t current_root_size;  /* Size of current root page */
+    uint64_t previous_root_size; /* Size of previous root page */
+    uint64_t root_size_gen;      /* Checkpoint generation of the last root size update */
 
 /* AUTOMATIC FLAG VALUE GENERATION START 0 */
 #define WT_BLOCK_DISAGG_HS 0x1u
@@ -499,7 +512,11 @@ struct __wt_block_disagg_header {
 #define WT_BLOCK_DISAGG_COMPATIBLE_VERSION 0x1u
     uint8_t compatible_version; /* 02: minimum version of reader */
 
-    uint8_t header_size; /* 03: size of unencrypted, uncompressed header */
+    /*
+     * This covers the page header as well as this one: the first release wrote it that way and the
+     * field is on disk, so readers subtract WT_PAGE_HEADER_SIZE to recover this header's own size.
+     */
+    uint8_t combined_header_size; /* 03: unencrypted, uncompressed page plus block header */
 
     /*
      * Page checksums are stored in two places. Similarly to the default block header, except that
@@ -508,6 +525,13 @@ struct __wt_block_disagg_header {
      * or base page is stored in this block header, that must in turn match the checksum found in
      * the block header for the previous one. This is how we can verify that we have every expected
      * delta and that each delta is not corrupted.
+     *
+     * If the page was modified "offline" (see WT_BLOCK_DISAGG_MODIFIED), we use the
+     * previous_checksum field to store the checksum of the original page. We currently require all
+     * offline modified pages to be full page images without any deltas, so the field is not needed
+     * to store the checksum of the previous page in the delta chain.
+     *
+     * FIXME-WT-18666: We should store the checksum of the original page in a dedicated field.
      */
     uint32_t checksum;          /* 04-07: checksum */
     uint32_t previous_checksum; /* 08-11: checksum for previous delta or page */
@@ -522,18 +546,42 @@ struct __wt_block_disagg_header {
     uint8_t flags;                      /* 12: flags */
 
     /*
-     * End the structure with 3 bytes of padding: it wastes space, but it leaves the structure
-     * 32-bit aligned and having an extra couple bytes to play with in the future can't hurt.
+     * Add 3 bytes of padding: it wastes space, but it leaves the rest of the structure 32-bit
+     * aligned.
      */
     uint8_t unused[3]; /* 13-15: unused padding */
 };
 
 /*
- * WT_BLOCK_DISAGG_HEADER_SIZE is the number of bytes we allocate for a base page and delta
- * structures: if the compiler inserts padding it will break the world.
+ * WT_BLOCK_DISAGG_HEADER_WRITE_SIZE is the number of bytes we allocate for a base page and delta
+ * structures. WT_BLOCK_DISAGG_HEADER_MIN_SIZE is the minimum number of bytes that we expect for the
+ * header.
  */
-#define WT_BLOCK_DISAGG_HEADER_SIZE 16
-#define WT_BLOCK_DISAGG_HEADER_BYTE_SIZE (WT_PAGE_HEADER_SIZE + WT_BLOCK_DISAGG_HEADER_SIZE)
+#define WT_BLOCK_DISAGG_HEADER_MIN_SIZE 16
+#define WT_BLOCK_DISAGG_HEADER_WRITE_SIZE 16
+#define WT_BLOCK_DISAGG_HEADER_MIN_COMBINED_SIZE \
+    (WT_PAGE_HEADER_SIZE + WT_BLOCK_DISAGG_HEADER_MIN_SIZE)
+#define WT_BLOCK_DISAGG_HEADER_WRITE_COMBINED_SIZE \
+    (WT_PAGE_HEADER_SIZE + WT_BLOCK_DISAGG_HEADER_WRITE_SIZE)
+
+/* Check that the compiler did not add any padding to the header; doing so will break the world. */
+static_assert(sizeof(WT_BLOCK_DISAGG_HEADER) == WT_BLOCK_DISAGG_HEADER_WRITE_SIZE,
+  "WT_BLOCK_DISAGG_HEADER size mismatch");
+
+/*
+ * A later release may append fields to the header. Readers locate the data with the header's own
+ * combined_header_size rather than their own, so a larger header from a newer writer stays
+ * readable. The headers have to fit in the bytes compression copies verbatim, otherwise a
+ * compressed block's header would itself be compressed and no reader could find its way in.
+ */
+#define WT_BLOCK_DISAGG_HEADER_MAX_COMBINED_SIZE WT_BLOCK_COMPRESS_SKIP
+
+/*
+ * The number of bytes debug_mode.disagg_block_header_upgrade appends to the header to stand in for
+ * a future writer. Keep the padded header within WT_BLOCK_COMPRESS_SKIP so it stays covered by the
+ * block checksum even when the data itself is not.
+ */
+#define WT_BLOCK_DISAGG_HEADER_DEBUG_EXTRA_SIZE 8
 #define WT_BLOCK_DISAGG_CHECKPOINT_BUFFER (1024)
 
 /*

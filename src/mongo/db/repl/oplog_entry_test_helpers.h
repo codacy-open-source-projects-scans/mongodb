@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -42,12 +16,13 @@
 #include "mongo/util/uuid.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 struct IndexBuildInfo;
 namespace repl {
@@ -86,28 +61,32 @@ OplogEntry makeUpdateDocumentOplogEntry(OpTime opTime,
                                         const BSONObj& updatedDocument);
 
 OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          int64_t key,
                                          BSONBinData value);
 
 OplogEntry makeContainerInsertOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          BSONBinData key,
                                          BSONBinData value);
 
 OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          int64_t key,
                                          BSONBinData value);
 
 OplogEntry makeContainerUpdateOplogEntry(OpTime opTime,
-                                         StringData containerIdent,
+                                         std::string_view containerIdent,
                                          BSONBinData key,
                                          BSONBinData value);
 
-OplogEntry makeContainerDeleteOplogEntry(OpTime opTime, StringData containerIdent, int64_t key);
+OplogEntry makeContainerDeleteOplogEntry(OpTime opTime,
+                                         std::string_view containerIdent,
+                                         int64_t key);
 
-OplogEntry makeContainerDeleteOplogEntry(OpTime opTime, StringData containerIdent, BSONBinData key);
+OplogEntry makeContainerDeleteOplogEntry(OpTime opTime,
+                                         std::string_view containerIdent,
+                                         BSONBinData key);
 
 /**
  * Creates an index creation entry with given optime and namespace.
@@ -127,7 +106,7 @@ OplogEntry makeStartIndexBuildOplogEntry(OpTime opTime,
                                          const UUID& uuid,
                                          const UUID& indexBuildUUID,
                                          const IndexBuildInfo& indexBuildInfo,
-                                         StringData indexIdent);
+                                         std::string_view indexIdent);
 
 /**
  * Creates a two-phase index build commit oplog entry with a given optime, namespace, and index
@@ -294,6 +273,36 @@ OplogEntry makeDeleteOplogEntryWithRecordId(OpTime opTime,
                                             const RecordId& rid);
 
 /**
+ * Creates an insert oplog entry with the given recordId and document hash.
+ */
+OplogEntry makeInsertOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const UUID& uuid,
+                                                   const BSONObj& docToInsert,
+                                                   const RecordId& rid,
+                                                   int64_t hash);
+
+/**
+ * Creates a delete oplog entry with the given recordId and document hash.
+ */
+OplogEntry makeDeleteOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const UUID& uuid,
+                                                   const BSONObj& docToDelete,
+                                                   const RecordId& rid,
+                                                   int64_t hash);
+
+/**
+ * Creates an update oplog entry with the given recordId and document hash.
+ */
+OplogEntry makeUpdateOplogEntryWithRecordIdAndHash(OpTime opTime,
+                                                   const NamespaceString& nss,
+                                                   const BSONObj& documentToUpdate,
+                                                   const BSONObj& updatedDocument,
+                                                   const RecordId& rid,
+                                                   int64_t hash);
+
+/**
  * Creates an update oplog entry with the given recordId and size metadata (m.sz).
  */
 OplogEntry makeUpdateOplogEntryWithRecordIdAndSizeMetadata(OpTime opTime,
@@ -312,6 +321,18 @@ OplogEntry makeDeleteOplogEntryWithRecordIdAndSizeMetadata(OpTime opTime,
                                                            const BSONObj& docToDelete,
                                                            const RecordId& rid,
                                                            int sizeDelta);
+
+OplogEntry makeUpdateOplogEntryWithRecordIdWithoutSz(OpTime opTime,
+                                                     const NamespaceString& nss,
+                                                     const BSONObj& documentToUpdate,
+                                                     const BSONObj& updatedDocument,
+                                                     const RecordId& rid);
+
+OplogEntry makeDeleteOplogEntryWithRecordIdWithoutSz(OpTime opTime,
+                                                     const NamespaceString& nss,
+                                                     const UUID& uuid,
+                                                     const BSONObj& docToDelete,
+                                                     const RecordId& rid);
 
 /*
  * Returns a collection UUID.
@@ -359,4 +380,4 @@ private:
     bool _constraintsEnabled;
 };
 }  // namespace repl
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

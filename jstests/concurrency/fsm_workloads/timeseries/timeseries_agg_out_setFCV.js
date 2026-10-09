@@ -25,6 +25,7 @@
  */
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 export const $config = (function () {
     const prefix = jsTestName();
@@ -68,10 +69,18 @@ export const $config = (function () {
                     .find({}, {value: 1, [metaFieldName]: 1, _id: 0})
                     .sort({value: 1})
                     .toArray();
-                assert.eq(docs.length, numDocs, `Expected ${numDocs} documents in ${outName}, got ${docs.length}`);
+                assert.eq(
+                    docs.length,
+                    numDocs,
+                    `Expected ${numDocs} documents in ${outName}, got ${docs.length}`,
+                );
                 for (let i = 0; i < numDocs; i++) {
                     assert.eq(docs[i].value, i, `Unexpected value at index ${i} in ${outName}`);
-                    assert.eq(docs[i][metaFieldName], i, `Unexpected tag at index ${i} in ${outName}`);
+                    assert.eq(
+                        docs[i][metaFieldName],
+                        i,
+                        `Unexpected tag at index ${i} in ${outName}`,
+                    );
                 }
                 return true;
             } catch (e) {
@@ -105,7 +114,11 @@ export const $config = (function () {
         assert.soon(() => {
             try {
                 const infos = db.getCollectionInfos({name: outName});
-                assert.eq(infos.length, 1, `Expected 1 collection info for ${outName}, got ${tojson(infos)}`);
+                assert.eq(
+                    infos.length,
+                    1,
+                    `Expected 1 collection info for ${outName}, got ${tojson(infos)}`,
+                );
                 const info = infos[0];
                 if (timeseriesOut) {
                     assert.eq(
@@ -183,7 +196,8 @@ export const $config = (function () {
         } else {
             // TODO(SERVER-123600): Remove the recordIdsReplicated workaround.
             if (
-                (res.code === ErrorCodes.CommandNotSupported || res.code === ErrorCodes.CommandFailed) &&
+                (res.code === ErrorCodes.CommandNotSupported ||
+                    res.code === ErrorCodes.CommandFailed) &&
                 (res.errmsg || "").includes("recordIdsReplicated")
             ) {
                 jsTestLog(`Ignoring expected $out error during FCV transition: ${tojson(res)}`);
@@ -261,21 +275,7 @@ export const $config = (function () {
 
     const teardown = function (db, collName, cluster) {
         // TODO(SERVER-114573): Remove once v9.0 is last LTS and viewless timeseries upgrade/downgrade doesn't happen.
-        // A downgrade may have been interrupted due to an index build (SERVER-119738), we must complete it before upgrading to latest.
-        assert.commandWorkedOrFailedWithCode(
-            db.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
-            // "10778001: Cannot downgrade featureCompatibilityVersion if a previous FCV upgrade stopped in the middle ..."
-            // This error indicates that setFCV was interrupted during an upgrade rather than downgrade.
-            // The next setFCV command will complete that upgrade and set the FCV to 'latest' for tests that run afterwards.
-            10778001,
-        );
-
-        assert.commandWorked(
-            db.adminCommand({
-                setFeatureCompatibilityVersion: latestFCV,
-                confirm: true,
-            }),
-        );
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
     };
 
     return {

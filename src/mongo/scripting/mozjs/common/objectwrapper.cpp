@@ -1,39 +1,15 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/scripting/mozjs/common/objectwrapper.h"
 
 #include "mongo/base/error_codes.h"
+#include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/js_regex.h"
+#include "mongo/scripting/mozjs/common/exception.h"
 #include "mongo/scripting/mozjs/common/idwrapper.h"
 #include "mongo/scripting/mozjs/common/runtime.h"
 #include "mongo/scripting/mozjs/common/types/bson.h"
@@ -45,6 +21,7 @@
 #include "mongo/util/str.h"
 
 #include <new>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -337,7 +314,7 @@ std::string ObjectWrapper::Key::toString(JSContext* cx) {
     return std::string{toStringData(cx, &jsstr)};
 }
 
-StringData ObjectWrapper::Key::toStringData(JSContext* cx, JSStringWrapper* jsstr) {
+std::string_view ObjectWrapper::Key::toStringData(JSContext* cx, JSStringWrapper* jsstr) {
     if (_type == Type::Field) {
         return _field;
     }
@@ -463,7 +440,7 @@ void ObjectWrapper::setNumber(Key key, double val) {
     setValue(key, jsValue);
 }
 
-void ObjectWrapper::setString(Key key, StringData val) {
+void ObjectWrapper::setString(Key key, std::string_view val) {
     JS::RootedValue jsValue(_context);
     ValueReader(_context, &jsValue).fromStringData(val);
 
@@ -641,7 +618,7 @@ BSONObj ObjectWrapper::toBSON() {
         // exeption), then the frame dtors would write to freed
         // memory.
         WriteFieldRecursionFrames frames;
-        frames.emplace(_context, _object, nullptr, StringData{});
+        frames.emplace(_context, _object, nullptr, std::string_view{});
 
         // We special case the _id field in top-level objects and move it to the front.
         // This matches other drivers behavior and makes finding the _id field quicker in BSON.
@@ -673,8 +650,6 @@ BSONObj ObjectWrapper::toBSON() {
             if (frames.size() == 1) {
                 IdWrapper idw(_context, id);
 
-                // TODO: check if it's cheaper to just compare with an interned
-                // string of "_id" rather than with ascii
                 if (idw.isString() && idw.equalsAscii("_id")) {
                     continue;
                 }
@@ -687,19 +662,22 @@ BSONObj ObjectWrapper::toBSON() {
     }
 
     const int sizeWithEOO = b.len() + 1 /*EOO*/ - 4 /*BSONObj::Holder ref count*/;
-    uassert(17260,
-            str::stream() << "Converting from JavaScript to BSON failed: "
-                          << "Object size " << sizeWithEOO << " exceeds limit of "
-                          << BSONObjMaxInternalSize << " bytes.",
-            sizeWithEOO <= BSONObjMaxInternalSize);
+    if (sizeWithEOO > BSONObjMaxInternalSize) {
+        std::string msg = str::stream() << "Converting from JavaScript to BSON failed: "
+                                        << "Object size " << sizeWithEOO << " exceeds limit of "
+                                        << BSONObjMaxInternalSize << " bytes.";
+        uasserted(17260, msg);
+    }
 
-    return b.obj();
+    const BSONObj obj = b.obj();
+    uassertValidBSONFromJavaScript(obj, "Invalid BSON generated from JavaScript");
+    return obj;
 }
 
 ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
                                                                   JSObject* obj,
                                                                   BSONObjBuilder* parent,
-                                                                  StringData sd)
+                                                                  std::string_view sd)
     : thisv(cx, obj), ids(cx, JS::IdVector(cx)) {
     bool isArray = false;
     if (parent) {

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/admission/ticketing/ticket_semaphore.h"
 
@@ -42,6 +16,7 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/packaged_task.h"
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -59,6 +34,11 @@ Date_t getDeadline() {
     return Date_t::now() + kWaitTimeout;
 }
 
+// Mirrors UnorderedTicketSemaphore::acquire() poll-deadline selection.
+Date_t pollDeadline(Date_t until, Date_t now, Milliseconds pollInterval) {
+    return std::min(until, now + pollInterval);
+}
+
 /**
  * Parameterized test fixture for TicketSemaphore implementations.
  */
@@ -70,8 +50,7 @@ public:
         _client = getServiceContext()->getService()->makeClient("test");
         _opCtx = _client->makeOperationContext();
 
-        ThreadPool::Options opts;
-        _pool = std::make_unique<ThreadPool>(opts);
+        _pool = ThreadPool::make({});
         _pool->startup();
     }
 
@@ -626,8 +605,8 @@ TEST_P(TicketSemaphoreTest, ConcurrentAcquireDoesNotOverbookOrLeak) {
     auto* rawSem = sem.get();
 
     // Track maximum concurrent permit holders to verify no overbooking.
-    AtomicWord<int> concurrentHolders{0};
-    AtomicWord<int> maxConcurrentHolders{0};
+    Atomic<int> concurrentHolders{0};
+    Atomic<int> maxConcurrentHolders{0};
 
     std::vector<stdx::thread> threads;
     for (int i = 0; i < numThreads; ++i) {
@@ -788,6 +767,36 @@ TEST_P(TicketSemaphoreTest, ResizePositiveButRemainsNegativeKeepsWaitersBlocked)
         ASSERT_TRUE(result);
     }
     ASSERT_EQ(rawSem->available(), 0);
+}
+
+TEST(UnorderedTicketSemaphorePollDeadlineTest, BetweenPollWindows) {
+    // A deadline between poll intervals should be selected on the second wait.
+    constexpr auto kMinPoll = Milliseconds{400};
+    constexpr auto kMaxPoll = Milliseconds{600};
+    constexpr auto kBasePoll = Milliseconds{500};
+
+    const auto now = Date_t::fromMillisSinceEpoch(1'000'000);
+    const auto until = now + Milliseconds{650};
+
+    for (auto firstPoll : {kMinPoll, kBasePoll, kMaxPoll}) {
+        const auto firstDeadline = pollDeadline(until, now, firstPoll);
+        ASSERT_EQ(firstDeadline, now + firstPoll);
+        ASSERT_LT(firstDeadline, until);
+
+        for (auto secondPoll : {kMinPoll, kBasePoll, kMaxPoll}) {
+            ASSERT_EQ(pollDeadline(until, firstDeadline, secondPoll), until);
+        }
+    }
+}
+
+TEST(UnorderedTicketSemaphorePollDeadlineTest, ShortDeadline) {
+    // A deadline shorter than the poll interval should be selected on the first wait.
+    const auto now = Date_t::fromMillisSinceEpoch(1'000'000);
+    const auto until = now + Milliseconds{50};
+
+    for (auto poll : {Milliseconds{400}, Milliseconds{500}, Milliseconds{600}}) {
+        ASSERT_EQ(pollDeadline(until, now, poll), until);
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(UnorderedTicketSemaphore,

@@ -1,6 +1,10 @@
 // Test commands that are not allowed in multi-document transactions.
 //
 // @tags: [
+//   # The control step runs mapReduce with JS map/reduce functions outside a transaction, which
+//   # requires server-side scripting (absent on PPC).
+//   requires_scripting,
+//   uses_explain,
 //   # The test runs commands that are not allowed with security token: applyOps, endSession,
 //   # mapReduce.
 //   not_allowed_with_signed_security_token,
@@ -25,7 +29,7 @@ const sessionOptions = {
 const session = db.getMongo().startSession(sessionOptions);
 const sessionDb = session.getDatabase(dbName);
 
-const runningOnMongos = session.getClient().isMongos() || TestData.testingReplicaSetEndpoint;
+const runningOnMongos = session.getClient().isMongos();
 
 assert.commandWorked(testDB.createCollection(testColl.getName(), {writeConcern: {w: "majority"}}));
 assert.commandWorked(
@@ -40,7 +44,9 @@ function setup() {
     testColl.dropIndex({a: 1});
     testDB.runCommand({drop: "create_collection", writeConcern: {w: "majority"}});
     testDB.runCommand({drop: "drop_collection", writeConcern: {w: "majority"}});
-    assert.commandWorked(testDB.createCollection("drop_collection", {writeConcern: {w: "majority"}}));
+    assert.commandWorked(
+        testDB.createCollection("drop_collection", {writeConcern: {w: "majority"}}),
+    );
 }
 
 function testCommand(command) {
@@ -105,7 +111,11 @@ function testCommand(command) {
 
     res = assert.commandFailedWithCode(
         sessionDb.runCommand(
-            Object.assign({}, command, {txnNumber: NumberLong(txnNumber), stmtId: NumberInt(1), autocommit: false}),
+            Object.assign({}, command, {
+                txnNumber: NumberLong(txnNumber),
+                stmtId: NumberInt(1),
+                autocommit: false,
+            }),
         ),
         ErrorCodes.OperationNotSupportedInTransaction,
     );

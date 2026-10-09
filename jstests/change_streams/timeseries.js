@@ -13,10 +13,17 @@
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-import {ChangeStreamTest, getClusterTime, getNextClusterTime} from "jstests/libs/query/change_stream_util.js";
+import {
+    ChangeStreamTest,
+    getClusterTime,
+    getNextClusterTime,
+} from "jstests/libs/query/change_stream_util.js";
 import {describe, before, it} from "jstests/libs/mochalite.js";
 import {getRawOperationSpec, isRawOperationSupported} from "jstests/libs/raw_operation_utils.js";
-import {assertCreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertCreateCollection,
+    assertDropCollection,
+} from "jstests/libs/collection_drop_recreate.js";
 
 describe("$changeStream", function () {
     const dbName = "db";
@@ -134,7 +141,10 @@ describe("$changeStream", function () {
                     },
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                 },
-                "data": {"ts": BinData(7, "CQDoAwAAAAAAAAA="), "_id": BinData(7, "AQAAAAAAAADwPwA=")},
+                "data": {
+                    "ts": BinData(7, "CQDoAwAAAAAAAAA="),
+                    "_id": BinData(7, "AQAAAAAAAADwPwA="),
+                },
                 "meta": {"a": 1},
             },
             "ns": bucketsCollNs,
@@ -160,19 +170,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 10,
-                        "ts": ISODate("2024-05-01T00:00:00Z"),
+                        "ts": ISODate("2124-05-01T00:00:00Z"),
                         value: 3,
                     },
                     "max": {
                         "_id": 10,
-                        "ts": ISODate("2024-05-01T00:00:00Z"),
+                        "ts": ISODate("2124-05-01T00:00:00Z"),
                         value: 3,
                     },
                     "count": 1,
                 },
                 "meta": "0",
                 "data": {
-                    "ts": BinData(7, "CQAAcHMxjwEAAAA="),
+                    "ts": BinData(7, "CQAAQEHubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAkQAA="),
                     "value": BinData(7, "AQAAAAAAAAAIQAA="),
                 },
@@ -186,19 +196,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 11,
-                        "ts": ISODate("2024-05-01T00:01:00Z"),
+                        "ts": ISODate("2124-05-01T00:01:00Z"),
                         value: 4,
                     },
                     "max": {
                         "_id": 11,
-                        "ts": ISODate("2024-05-01T00:01:00Z"),
+                        "ts": ISODate("2124-05-01T00:01:00Z"),
                         value: 4,
                     },
                     "count": 1,
                 },
                 "meta": "1",
                 "data": {
-                    "ts": BinData(7, "CQBgWnQxjwEAAAA="),
+                    "ts": BinData(7, "CQBgKkLubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAmQAA="),
                     "value": BinData(7, "AQAAAAAAAAAQQAA="),
                 },
@@ -212,19 +222,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 12,
-                        "ts": ISODate("2024-05-01T00:02:00Z"),
+                        "ts": ISODate("2124-05-01T00:02:00Z"),
                         value: 5,
                     },
                     "max": {
                         "_id": 12,
-                        "ts": ISODate("2024-05-01T00:02:00Z"),
+                        "ts": ISODate("2124-05-01T00:02:00Z"),
                         value: 5,
                     },
                     "count": 1,
                 },
                 "meta": "2",
                 "data": {
-                    "ts": BinData(7, "CQDARHUxjwEAAAA="),
+                    "ts": BinData(7, "CQDAFEPubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAoQAA="),
                     "value": BinData(7, "AQAAAAAAAAAUQAA="),
                 },
@@ -414,7 +424,10 @@ describe("$changeStream", function () {
                     },
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                 },
-                "data": {"ts": BinData(7, "CQDoAwAAAAAAAAA="), "_id": BinData(7, "AQAAAAAAAADwPwA=")},
+                "data": {
+                    "ts": BinData(7, "CQDoAwAAAAAAAAA="),
+                    "_id": BinData(7, "AQAAAAAAAADwPwA="),
+                },
                 "meta": {"a": 1},
             },
             "ns": timeseriesCollNs,
@@ -440,19 +453,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 10,
-                        "ts": ISODate("2024-05-01T00:00:00Z"),
+                        "ts": ISODate("2124-05-01T00:00:00Z"),
                         value: 3,
                     },
                     "max": {
                         "_id": 10,
-                        "ts": ISODate("2024-05-01T00:00:00Z"),
+                        "ts": ISODate("2124-05-01T00:00:00Z"),
                         value: 3,
                     },
                     "count": 1,
                 },
                 "meta": "0",
                 "data": {
-                    "ts": BinData(7, "CQAAcHMxjwEAAAA="),
+                    "ts": BinData(7, "CQAAQEHubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAkQAA="),
                     "value": BinData(7, "AQAAAAAAAAAIQAA="),
                 },
@@ -466,19 +479,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 11,
-                        "ts": ISODate("2024-05-01T00:01:00Z"),
+                        "ts": ISODate("2124-05-01T00:01:00Z"),
                         value: 4,
                     },
                     "max": {
                         "_id": 11,
-                        "ts": ISODate("2024-05-01T00:01:00Z"),
+                        "ts": ISODate("2124-05-01T00:01:00Z"),
                         value: 4,
                     },
                     "count": 1,
                 },
                 "meta": "1",
                 "data": {
-                    "ts": BinData(7, "CQBgWnQxjwEAAAA="),
+                    "ts": BinData(7, "CQBgKkLubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAmQAA="),
                     "value": BinData(7, "AQAAAAAAAAAQQAA="),
                 },
@@ -492,19 +505,19 @@ describe("$changeStream", function () {
                     "version": TimeseriesTest.BucketVersion.kCompressedSorted,
                     "min": {
                         "_id": 12,
-                        "ts": ISODate("2024-05-01T00:02:00Z"),
+                        "ts": ISODate("2124-05-01T00:02:00Z"),
                         value: 5,
                     },
                     "max": {
                         "_id": 12,
-                        "ts": ISODate("2024-05-01T00:02:00Z"),
+                        "ts": ISODate("2124-05-01T00:02:00Z"),
                         value: 5,
                     },
                     "count": 1,
                 },
                 "meta": "2",
                 "data": {
-                    "ts": BinData(7, "CQDARHUxjwEAAAA="),
+                    "ts": BinData(7, "CQDAFEPubQQAAAA="),
                     "_id": BinData(7, "AQAAAAAAAAAoQAA="),
                     "value": BinData(7, "AQAAAAAAAAAUQAA="),
                 },
@@ -566,7 +579,9 @@ describe("$changeStream", function () {
     function generateEvents(db) {
         const clusterTimeBeforeGeneratingEvents = getNextClusterTime(getClusterTime(db));
 
-        const coll = assertCreateCollection(db, collName, {timeseries: {timeField: "ts", metaField: "meta"}});
+        const coll = assertCreateCollection(db, collName, {
+            timeseries: {timeField: "ts", metaField: "meta"},
+        });
         coll.createIndex({ts: 1, "meta.b": 1}, {name: "dropMe"});
 
         coll.insertOne({_id: 1, ts: new Date(1000), meta: {a: 1}});
@@ -576,7 +591,7 @@ describe("$changeStream", function () {
         const nMeasurements = 3;
         const docsToInsert = Array.from({length: nMeasurements}, (_, i) => ({
             _id: i + 10,
-            ts: ISODate(`2024-05-01T00:0${i}:00Z`),
+            ts: ISODate(`2124-05-01T00:0${i}:00Z`),
             meta: i.toString(),
             value: i + nMeasurements,
         }));
@@ -584,7 +599,9 @@ describe("$changeStream", function () {
 
         coll.remove({"meta.a": 1});
 
-        assert.commandWorked(db.runCommand({collMod: collName, timeseries: {granularity: "hours"}}));
+        assert.commandWorked(
+            db.runCommand({collMod: collName, timeseries: {granularity: "hours"}}),
+        );
 
         assert.commandWorked(db.runCommand({collMod: collName, expireAfterSeconds: 1}));
         coll.dropIndex("dropMe");
@@ -606,6 +623,18 @@ describe("$changeStream", function () {
 
             // NOTE: the set of events observed on viewless timeseries collections is the same regardless of the 'showSystemEvents' value.
             const eventMap = viewlessTimeseriesEventMap;
+
+            // When fixedBucketing is enabled, we have the following behavior:
+            // * A new viewless collection is created with fixedBucketing: true by default.
+            // * If bucketing is changed (e.g., with a granularity change via collMod), fixedBucketing is set to false.
+            if (FeatureFlagUtil.isPresentAndEnabled(db, "FixedBucketingCatalog")) {
+                eventMap.collectionCreationEvent.operationDescription.timeseries.fixedBucketing = true;
+                // Granularity not yet modified, fixedBucketing should still be true.
+                eventMap.collectionHourGranularityModificationEvent.stateBeforeChange.collectionOptions.timeseries.fixedBucketing = true;
+                // Granularity now modified (by previous modification event), fixedBucketing should now be false.
+                eventMap.collectionExpirationModificationEvent.stateBeforeChange.collectionOptions.timeseries.fixedBucketing = false;
+            }
+
             return [
                 eventMap.collectionCreationEvent,
                 eventMap.metaIndexCreationEvent,
@@ -664,28 +693,51 @@ describe("$changeStream", function () {
     describe("when not specifying rawData", function () {
         it("should not allow change streams on time-series collections", function () {
             const db = this.testDB.getSiblingDB("reservedDB");
-            const testColl = assertCreateCollection(db, collName, {timeseries: {timeField: "ts", metaField: "meta"}});
+            const testColl = assertCreateCollection(db, collName, {
+                timeseries: {timeField: "ts", metaField: "meta"},
+            });
             testColl.insertOne({_id: 1, ts: new Date(), meta: {a: 1}});
 
             // Ensure that change streams are not allowed on time-series collections.
             // In v1 it fails immediately, while in v2 it fails when the cursor to the shard is opened.
-            let response = db.runCommand({aggregate: collName, pipeline: [{$changeStream: {}}], cursor: {}});
+            let response = db.runCommand({
+                aggregate: collName,
+                pipeline: [{$changeStream: {}}],
+                cursor: {},
+            });
             if (response.ok) {
                 // In case we are running change streams version 2, the cursor may not be opened on the shard.
                 // To ensure the failure indeed occurs, we issue a getMore command to ensure that the cursor
                 // will be attempted to be opened on the shard and will fail.
-                assert.eq(response._changeStreamVersion, "v2", "Change stream of version v1 should fail immediately");
-                response = db.runCommand({getMore: response.cursor.id, collection: collName});
+                assert.eq(
+                    response._changeStreamVersion,
+                    "v2",
+                    "Change stream of version v1 should fail immediately",
+                );
+
+                // In a v2 change stream, the first getMore operation may return a future cluster time.
+                // Retry the getMore until the expected error is returned.
+                assert.soonNoExcept(() => {
+                    response = db.runCommand({getMore: response.cursor.id, collection: collName});
+                    assert.commandFailedWithCode(response, [
+                        ErrorCodes.CommandNotSupportedOnView,
+                        ErrorCodes.CommandNotSupported,
+                    ]);
+                    return true;
+                });
+            } else {
+                assert.commandFailedWithCode(response, [
+                    ErrorCodes.CommandNotSupportedOnView,
+                    ErrorCodes.CommandNotSupported,
+                ]);
             }
-            assert.commandFailedWithCode(response, [
-                ErrorCodes.CommandNotSupportedOnView,
-                ErrorCodes.CommandNotSupported,
-            ]);
             assertDropCollection(db, collName);
         });
 
         for (const showSystemEvents of [true, false]) {
-            const message = showSystemEvents ? "DDL events (and DML if not running in viewless ts)" : "DDL events";
+            const message = showSystemEvents
+                ? "DDL events (and DML if not running in viewless ts)"
+                : "DDL events";
             it(`should allow change stream on the database and should emit timeseries return ${message} with: showSystemEvents=${showSystemEvents}`, function () {
                 const cst = new ChangeStreamTest(this.testDB);
                 const cursor = cst.startWatchingChanges({
@@ -708,7 +760,11 @@ describe("$changeStream", function () {
                     collection: 1,
                 });
 
-                const expectedChanges = getExpectedChangeEvents(db, showSystemEvents, false /* rawData */);
+                const expectedChanges = getExpectedChangeEvents(
+                    db,
+                    showSystemEvents,
+                    false /* rawData */,
+                );
                 cst.assertNextChangesEqual({cursor: cursor, expectedChanges});
                 cst.assertNoChange(cursor);
             });
@@ -739,7 +795,11 @@ describe("$changeStream", function () {
                     collection: 1,
                 });
 
-                const expectedChanges = getExpectedChangeEvents(db, showSystemEvents, false /* rawData */);
+                const expectedChanges = getExpectedChangeEvents(
+                    db,
+                    showSystemEvents,
+                    false /* rawData */,
+                );
                 cst.assertNextChangesEqual({cursor: cursor, expectedChanges});
                 cst.assertNoChange(cursor);
             });
@@ -757,12 +817,16 @@ describe("$changeStream", function () {
 
         // NOTE: if ffs are not set, then the change stream will not deliver any events for timeseries collections.
         if (!(isRawOperationSupported(db) && allTimeseriesFlagsEnabled)) {
-            jsTest.log.info("Can not run change stream timeseries tests as rawData flag is not supported");
+            jsTest.log.info(
+                "Can not run change stream timeseries tests as rawData flag is not supported",
+            );
             return;
         }
 
         for (const showSystemEvents of [true, false]) {
-            const message = showSystemEvents ? "DDL events (and DML if not running in viewless ts)" : "DDL events";
+            const message = showSystemEvents
+                ? "DDL events (and DML if not running in viewless ts)"
+                : "DDL events";
             it(`should allow change stream on the collection and should emit timeseries return ${message} with: showSystemEvents=${showSystemEvents}`, function () {
                 const cst = new ChangeStreamTest(this.testDB);
                 const cursor = cst.startWatchingChanges({
@@ -786,7 +850,11 @@ describe("$changeStream", function () {
                     aggregateOptions: getRawOperationSpec(this.testDB),
                 });
 
-                const expectedChanges = getExpectedChangeEvents(db, showSystemEvents, true /* rawData */);
+                const expectedChanges = getExpectedChangeEvents(
+                    db,
+                    showSystemEvents,
+                    true /* rawData */,
+                );
                 const invalidateEvent = {"operationType": "invalidate"};
                 expectedChanges.push(invalidateEvent);
                 cst.assertNextChangesEqual({cursor: cursor, expectedChanges});
@@ -816,7 +884,11 @@ describe("$changeStream", function () {
                     aggregateOptions: getRawOperationSpec(this.testDB),
                 });
 
-                const expectedChanges = getExpectedChangeEvents(db, showSystemEvents, true /* rawData */);
+                const expectedChanges = getExpectedChangeEvents(
+                    db,
+                    showSystemEvents,
+                    true /* rawData */,
+                );
                 cst.assertNextChangesEqual({cursor: cursor, expectedChanges});
                 cst.assertNoChange(cursor);
             });
@@ -848,7 +920,11 @@ describe("$changeStream", function () {
                     aggregateOptions: getRawOperationSpec(this.testDB),
                 });
 
-                const expectedChanges = getExpectedChangeEvents(db, showSystemEvents, true /* rawData */);
+                const expectedChanges = getExpectedChangeEvents(
+                    db,
+                    showSystemEvents,
+                    true /* rawData */,
+                );
                 cst.assertNextChangesEqual({cursor: cursor, expectedChanges});
                 cst.assertNoChange(cursor);
             });

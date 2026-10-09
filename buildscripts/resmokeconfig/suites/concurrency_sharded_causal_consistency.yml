@@ -28,7 +28,6 @@ selector:
     - assumes_balancer_on
     # This suite uses secondary read preference, which isn't currently compatible with transactions.
     - uses_transactions
-    - requires_replication
     # Tests which use $currentOp. Running an aggregation with $currentOp and read preference
     # secondary doesn't make much sense, since there's no guarantee *which* secondary you get results
     # from.
@@ -54,6 +53,7 @@ executor:
           runningWithCausalConsistency: true
           runningWithBalancer: false
           implicitlyShardOnCreateCollectionOnly: true
+          shardCollectionProbability: 0.5
   hooks:
     # TODO SERVER-120162: Re-enable once all the false positive have been addressed and the test is stable.
     # - class: CheckIdleCursors

@@ -1,8 +1,8 @@
 /**
  * @tags: [
+ *   # Uses $where with server-side JS, which requires server-side scripting.
+ *   requires_scripting,
  *   requires_fcv_63,
- *   # TODO SERVER-116054: Add support for $where.
- *   mozjs_wasm_unsupported,
  * ]
  *
  * Tests that metrics related to connection acquisition timeout are reported correctly
@@ -43,7 +43,8 @@ function testConnectionTimeoutMetric(fpName, expectedNumOps, errorCode, networkT
         if (networkTimeoutLog) {
             checkLog.containsJson(st.s, networkTimeoutLogID);
         }
-        const opMetrics = assert.commandWorked(st.s.getDB("admin").serverStatus()).metrics.operation;
+        const opMetrics = assert.commandWorked(st.s.getDB("admin").serverStatus()).metrics
+            .operation;
         let curTime = opMetrics.totalTimeWaitingBeforeConnectionTimeoutMillis;
         assert.gte(curTime, prevTime);
         prevTime = curTime;

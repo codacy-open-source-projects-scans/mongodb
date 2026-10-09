@@ -37,15 +37,24 @@ function binVersionToFCV(binVersion) {
  * <required>, targetVersion: <optional>, previousVersion: <optional>}. The getParameter result is
  * of the form {featureCompatibilityVersion: {version: <required>, targetVersion: <optional>,
  * previousVersion: <optional>}, ok: 1}.
+ *
+ * The optional `previousVersion` argument specifies the expected value for the previousVersion
+ * field. When omitted:
+ *   - Downgrading (version == targetVersion == lastLTSFCV or lastContinuousFCV):
+ *       expectedPreviousVersion = latestFCV
+ *   - All other states: expectedPreviousVersion = undefined
+ *
+ * Callers that invoke checkFCV during an in-progress upgrade (where previousVersion is set to the
+ * from-version) must pass `previousVersion` explicitly.
  */
-function checkFCV(adminDB, version, targetVersion, isCleaningServerMetadata) {
-    // When both version and targetVersion are equal to lastContinuousFCV or lastLTSFCV, downgrade
-    // is in progress. This tests that previousVersion is always equal to latestFCV in downgrading
-    // states or undefined otherwise.
+function checkFCV(adminDB, version, targetVersion, isCleaningServerMetadata, previousVersion) {
+    // Downgrade: version == targetVersion == lastLTSFCV or lastContinuousFCV.
     const isDowngrading =
         (version === lastLTSFCV && targetVersion === lastLTSFCV) ||
         (version === lastContinuousFCV && targetVersion === lastContinuousFCV);
 
+    // Determine the expected value of previousVersion, preferring an explicit argument.
+    const expectedPreviousVersion = previousVersion ?? (isDowngrading ? latestFCV : undefined);
     const isMongod = !adminDB.getMongo().isMongos();
     if (isMongod) {
         let res = adminDB.runCommand({getParameter: 1, featureCompatibilityVersion: 1});
@@ -60,40 +69,32 @@ function checkFCV(adminDB, version, targetVersion, isCleaningServerMetadata) {
             targetVersion,
             "FCV server parameter 'targetVersion' field does not match: " + tojson(res),
         );
-        if (isDowngrading) {
-            assert.eq(
-                res.featureCompatibilityVersion.previousVersion,
-                latestFCV,
-                "FCV server parameter 'previousVersion' field does not match: " + tojson(res),
-            );
-        } else {
-            assert.eq(
-                res.featureCompatibilityVersion.previousVersion,
-                undefined,
-                "FCV server parameter 'previousVersion' field does not match: " + tojson(res),
-            );
-        }
+        assert.eq(
+            res.featureCompatibilityVersion.previousVersion,
+            expectedPreviousVersion,
+            "FCV server parameter 'previousVersion' field does not match: " + tojson(res),
+        );
     }
 
     // This query specifies an explicit readConcern because some FCV tests pass a connection that
     // has manually run isMaster with internalClient, and mongod expects internalClients (ie. other
     // cluster members) to include read/write concern (on commands that accept read/write concern).
-    let doc = adminDB.system.version.find({_id: "featureCompatibilityVersion"}).limit(1).readConcern("local").next();
+    let doc = adminDB.system.version
+        .find({_id: "featureCompatibilityVersion"})
+        .limit(1)
+        .readConcern("local")
+        .next();
     assert.eq(doc.version, version, "FCV document 'version' field does not match: " + tojson(doc));
-    assert.eq(doc.targetVersion, targetVersion, "FCV document 'targetVersion' field does not match: " + tojson(doc));
-    if (isDowngrading) {
-        assert.eq(
-            doc.previousVersion,
-            latestFCV,
-            "FCV document 'previousVersion' field does not match: " + tojson(doc),
-        );
-    } else {
-        assert.eq(
-            doc.previousVersion,
-            undefined,
-            "FCV document 'previousVersion' field does not match: " + tojson(doc),
-        );
-    }
+    assert.eq(
+        doc.targetVersion,
+        targetVersion,
+        "FCV document 'targetVersion' field does not match: " + tojson(doc),
+    );
+    assert.eq(
+        doc.previousVersion,
+        expectedPreviousVersion,
+        "FCV document 'previousVersion' field does not match: " + tojson(doc),
+    );
     if (isCleaningServerMetadata) {
         assert.eq(
             doc.isCleaningServerMetadata,
@@ -104,7 +105,8 @@ function checkFCV(adminDB, version, targetVersion, isCleaningServerMetadata) {
         assert.eq(
             doc.isCleaningServerMetadata,
             undefined,
-            "FCV document 'isCleaningServerMetadata' field should not exist, but did: " + tojson(doc),
+            "FCV document 'isCleaningServerMetadata' field should not exist, but did: " +
+                tojson(doc),
         );
     }
 }
@@ -133,7 +135,12 @@ function removeFCVDocument(adminDB) {
 
     // Create new collection with no FCV document, and then delete the
     // original collection.
-    let createNewAdminSystemVersionCollection = {op: "c", ns: "admin.$cmd", ui: newUUID, o: {create: "system.version"}};
+    let createNewAdminSystemVersionCollection = {
+        op: "c",
+        ns: "admin.$cmd",
+        ui: newUUID,
+        o: {create: "system.version"},
+    };
     let dropOriginalAdminSystemVersionCollection = {
         op: "c",
         ns: "admin.$cmd",
@@ -142,7 +149,10 @@ function removeFCVDocument(adminDB) {
     };
     assert.commandWorked(
         adminDB.runCommand({
-            applyOps: [createNewAdminSystemVersionCollection, dropOriginalAdminSystemVersionCollection],
+            applyOps: [
+                createNewAdminSystemVersionCollection,
+                dropOriginalAdminSystemVersionCollection,
+            ],
         }),
     );
 

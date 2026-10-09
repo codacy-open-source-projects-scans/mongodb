@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/scripting/engine.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/dbclient_cursor.h"
@@ -55,10 +28,12 @@
 #include "mongo/util/text.h"  // IWYU pragma: keep
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <string_view>
 #include <thread>
 
 #include <boost/filesystem/directory.hpp>
@@ -79,7 +54,7 @@ using std::shared_ptr;
 using std::string;
 using std::unique_ptr;
 
-AtomicWord<long long> Scope::_lastVersion(1);
+Atomic<long long> Scope::_lastVersion(1);
 
 
 namespace {
@@ -88,9 +63,23 @@ MONGO_FAIL_POINT_DEFINE(mr_killop_test_fp);
 // 2 GB is the largest support Javascript file size.
 const fileofs kMaxJsFileLength = fileofs(2) * 1024 * 1024 * 1024;
 
-const ServiceContext::Decoration<std::unique_ptr<ScriptEngine>> forService =
-    ServiceContext::declareDecoration<std::unique_ptr<ScriptEngine>>();
-static std::unique_ptr<ScriptEngine> globalScriptEngine;
+const ServiceContext::Decoration<std::shared_ptr<ScriptEngine>> forService =
+    ServiceContext::declareDecoration<std::shared_ptr<ScriptEngine>>();
+static std::shared_ptr<ScriptEngine> globalScriptEngine;
+
+// Tracks whether the kill-op proxy has already been registered on a given ServiceContext.
+// registerKillOpListener has no unregister and does not dedup, so this guards against registering
+// the proxy more than once if setup() is re-entered after the global engine is cleared.
+const ServiceContext::Decoration<std::atomic<bool>> killOpProxyRegistered =
+    ServiceContext::declareDecoration<std::atomic<bool>>();
+
+// Guards access to the global ScriptEngine pointer above. setGlobalScriptEngine() may replace (and
+// destroy) the previously installed engine, e.g. when streams swap MozJS/Wasmtime for ExternalJS at
+// runtime. The pointer is stored as a shared_ptr so the kill-op proxy can snapshot a refcounted
+// handle under this mutex and then release it before delegating; this keeps the engine alive across
+// the delegated call without holding the mutex across it (which would invert lock order with the
+// Client lock).
+std::mutex globalScriptEngineMutex;
 
 // Cache the parsed MONGO_PATH to avoid re-parsing the environment variable on every load() call
 const std::vector<std::string> cachedMongoPath = parseMongoPath();
@@ -178,6 +167,15 @@ int Scope::invoke(const char* code, const BSONObj* args, const BSONObj* recv, in
     return invoke(func, args, recv, timeoutMs);
 }
 
+bool Scope::execPredicate(ScriptingFunction func, const BSONObj& doc, int timeoutMs) {
+    setObject("obj", doc);
+    setBoolean("fullObject", true);
+    int err = invoke(func, nullptr, &doc, timeoutMs, false);
+    uassert(5038802, "error on invocation of $where function:\n" + getError(), err != -3);
+    uassert(5038803, "unknown error in invocation of $where function", err == 0);
+    return getBoolean("__returnValue");
+}
+
 bool Scope::execFile(const string& filename, bool printResult, bool reportError, int timeoutMs) {
 #ifdef _WIN32
     boost::filesystem::path p(toWideString(filename.c_str()));
@@ -251,7 +249,7 @@ bool Scope::execFile(const string& filename, bool printResult, bool reportError,
         offset = newline - data.get();
     }
 
-    StringData code(data.get() + offset, len - offset);
+    std::string_view code(data.get() + offset, len - offset);
     return exec(code, filename, printResult, reportError, false, timeoutMs);
 }
 
@@ -306,7 +304,7 @@ void Scope::loadStored(OperationContext* opCtx, bool ignoreNotConnected) {
         }
 
         try {
-            setElement(n.valueStringDataSafe().data(), v, o);
+            setElement(n.str().c_str(), v, o);
             thisTime.insert(n.str());
             _storedNames.insert(n.str());
         } catch (const DBException& setElemEx) {
@@ -324,9 +322,9 @@ void Scope::loadStored(OperationContext* opCtx, bool ignoreNotConnected) {
     // remove things from scope that were removed from the system.js collection
     for (set<string>::iterator i = _storedNames.begin(); i != _storedNames.end();) {
         if (thisTime.count(*i) == 0) {
-            string toDelete = str::stream() << "delete " << *i;
+            string name = *i;
             _storedNames.erase(i++);
-            execSetup(toDelete, "clean up scope");
+            deleteGlobal(name);
         } else {
             ++i;
         }
@@ -433,6 +431,13 @@ class ScopeCache {
 public:
     using PoolName = std::tuple<DatabaseName, string>;
     void release(const PoolName& poolName, const std::shared_ptr<Scope>& scope) {
+        // The scope may still be registered to the releasing operation if it is being released
+        // on an exception path (e.g. getPooledScope() interrupted in loadStored() before the
+        // caller could arm its own unregisterOperation() guard). A scope must never sit in the
+        // pool -- or be destroyed from it -- while registered: the OperationContext it points to
+        // belongs to a request that may complete and be freed at any time.
+        scope->unregisterOperation();
+
         std::lock_guard<std::mutex> lk(_mutex);
 
         if (scope->hasOutOfMemoryException()) {
@@ -557,6 +562,9 @@ public:
     bool isKillPending() const override {
         return _real->isKillPending();
     }
+    bool execPredicate(ScriptingFunction func, const BSONObj& doc, int timeoutMs) override {
+        return _real->execPredicate(func, doc, timeoutMs);
+    }
     int type(const char* field) override {
         return _real->type(field);
     }
@@ -609,7 +617,7 @@ public:
     void setNumber(const char* field, double val) override {
         _real->setNumber(field, val);
     }
-    void setString(const char* field, StringData val) override {
+    void setString(const char* field, std::string_view val) override {
         _real->setString(field, val);
     }
     void setElement(const char* field, const BSONElement& val, const BSONObj& parent) override {
@@ -628,6 +636,9 @@ public:
     void setFunction(const char* field, const char* code) override {
         _real->setFunction(field, code);
     }
+    void deleteGlobal(std::string_view name) override {
+        _real->deleteGlobal(name);
+    }
     ScriptingFunction createFunction(const char* code) override {
         return _real->createFunction(code);
     }
@@ -640,7 +651,7 @@ public:
                bool readOnlyRecv) override {
         return _real->invoke(func, args, recv, timeoutMs, ignoreReturn, readOnlyArgs, readOnlyRecv);
     }
-    bool exec(StringData code,
+    bool exec(std::string_view code,
               const string& name,
               bool printResult,
               bool reportError,
@@ -676,9 +687,18 @@ unique_ptr<Scope> ScriptEngine::getPooledScope(OperationContext* opCtx,
                                                const DatabaseName& db,
                                                const string& scopeType) {
     const auto fullPoolName = std::make_tuple(db, scopeType);
+
+    // Fail before registering the operation on a scope: an already-interrupted operation (e.g.
+    // maxTimeMS expired) would only throw part-way through the setup below, leaving a scope
+    // registered to a soon-to-be-destroyed OperationContext.
+    if (opCtx) {
+        opCtx->checkForInterrupt();
+    }
+
     std::shared_ptr<Scope> s = scopeCache.tryAcquire(opCtx, fullPoolName);
     if (!s) {
         s.reset(newScope());
+        tassert(13286900, "must have an operation context", opCtx);
         s->registerOperation(opCtx);
     }
 
@@ -689,9 +709,10 @@ unique_ptr<Scope> ScriptEngine::getPooledScope(OperationContext* opCtx,
     return p;
 }
 
-void (*ScriptEngine::_connectCallback)(DBClientBase&, StringData) = nullptr;
+void (*ScriptEngine::_connectCallback)(DBClientBase&, std::string_view) = nullptr;
 
 ScriptEngine* getGlobalScriptEngine() {
+    std::lock_guard<std::mutex> lk(globalScriptEngineMutex);
     if (hasGlobalServiceContext())
         return forService(getGlobalServiceContext()).get();
     else
@@ -699,10 +720,65 @@ ScriptEngine* getGlobalScriptEngine() {
 }
 
 void setGlobalScriptEngine(ScriptEngine* impl) {
+    // Swap the new engine in under the mutex, then let any previously installed engine be destroyed
+    // after the lock is released. Destroying it outside the mutex avoids running the engine's
+    // destructor (which may take Client locks) while holding globalScriptEngineMutex.
+    std::shared_ptr<ScriptEngine> previous;
+    {
+        std::lock_guard<std::mutex> lk(globalScriptEngineMutex);
+        auto& slot =
+            hasGlobalServiceContext() ? forService(getGlobalServiceContext()) : globalScriptEngine;
+        previous = std::move(slot);
+        slot = std::shared_ptr<ScriptEngine>(impl);
+    }
+}
+
+namespace {
+// Returns a refcounted handle to the current global ScriptEngine. Holding the returned shared_ptr
+// keeps the engine alive even if setGlobalScriptEngine() concurrently swaps (and would otherwise
+// destroy) it, without keeping globalScriptEngineMutex held past this call.
+std::shared_ptr<ScriptEngine> getGlobalScriptEngineShared() {
+    std::lock_guard<std::mutex> lk(globalScriptEngineMutex);
     if (hasGlobalServiceContext())
-        forService(getGlobalServiceContext()).reset(impl);
+        return forService(getGlobalServiceContext());
     else
-        globalScriptEngine.reset(impl);
+        return globalScriptEngine;
+}
+
+/**
+ * A stable proxy that delegates kill-op notifications to whatever the current global script engine
+ * is. This avoids dangling pointer issues when the global engine is swapped (e.g., from MozJS to
+ * ExternalJS) since registerKillOpListener has no corresponding unregister and the listener pointer
+ * must remain valid for the lifetime of the ServiceContext.
+ */
+class ScriptEngineKillOpProxy : public KillOpListenerInterface {
+public:
+    // Snapshot a refcounted handle to the engine and release globalScriptEngineMutex before
+    // delegating. The engine takes Client locks internally and killOperation already holds a Client
+    // lock when it calls interrupt(), so holding globalScriptEngineMutex across the delegated call
+    // would invert lock order with the Client lock (potential deadlock). The shared_ptr keeps the
+    // engine alive for the duration of the call even if it is swapped out concurrently.
+    void interrupt(ClientLock& lk, OperationContext* opCtx) override {
+        if (auto engine = getGlobalScriptEngineShared()) {
+            engine->interrupt(lk, opCtx);
+        }
+    }
+    void interruptAll(ServiceContextLock& svcCtxLock) override {
+        if (auto engine = getGlobalScriptEngineShared()) {
+            engine->interruptAll(svcCtxLock);
+        }
+    }
+};
+
+ScriptEngineKillOpProxy killOpProxy;
+}  // namespace
+
+void registerScriptEngineKillOpProxy(ServiceContext* svcCtx) {
+    // Register at most once per ServiceContext. setup() guards on engine presence, not proxy
+    // registration, so a clear-then-re-setup would otherwise push the same proxy twice.
+    if (!killOpProxyRegistered(svcCtx).exchange(true)) {
+        svcCtx->registerKillOpListener(&killOpProxy);
+    }
 }
 
 bool hasJSReturn(const string& code) {

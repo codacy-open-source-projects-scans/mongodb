@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/db/namespace_string.h"
@@ -34,16 +8,20 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/query/util/deferred.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/db/shard_role/shard_catalog/external_data_source_scope_guard.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
 #include "mongo/util/modules.h"
+
+#include <deque>
+#include <functional>
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
@@ -182,6 +160,19 @@ public:
     }
 
     /**
+     * Foreign views resolved against the database primary shard before any storage snapshot was
+     * acquired. A shard that does not hold the view catalog (i.e. not the database primary) makes
+     * remote resolveView requests to the primary shard to resolve any views, rather than leaving
+     * the entry empty in the resolvedNamespaces closure kickback-ed to mongos.
+     */
+    void setPreResolvedForeignViews(ResolvedNamespaceMap views) {
+        _preResolvedForeignViews = std::move(views);
+    }
+    const ResolvedNamespaceMap& getPreResolvedForeignViews() const {
+        return _preResolvedForeignViews;
+    }
+
+    /**
      * Setter functions
      */
 
@@ -267,7 +258,7 @@ public:
         return false;
     }
 
-    virtual const ResolvedView& getResolvedView() const {
+    virtual const ResolvedNamespace& getResolvedNamespace() const {
         MONGO_UNREACHABLE;
     }
 
@@ -349,6 +340,10 @@ private:
     // an external reference. Also, its cheap to copy this object because it is small.
     NamespaceString _executionNss;
 
+    // Foreign views resolved against the database primary shard before snapshot acquisition. Empty
+    // unless this shard had to consult the primary to resolve a foreign view it lacks locally.
+    ResolvedNamespaceMap _preResolvedForeignViews;
+
     // 'privileges' contains the privileges that were required to run this aggregation, to be used
     // later for re-checking privileges for getMore commands.
     const PrivilegeVector& _privileges;
@@ -386,10 +381,10 @@ public:
     }
 
     /**
-     * Returns the resolved view attached to the class.
+     * Returns the resolved namespace attached to the class.
      */
-    const ResolvedView& getResolvedView() const override {
-        return _resolvedView;
+    const ResolvedNamespace& getResolvedNamespace() const override {
+        return _resolvedNamespace;
     }
 
     ScopedSetShardRole setShardRole(const CollectionRoutingInfo& cri);
@@ -405,7 +400,6 @@ public:
         return _originalAggReqDerivatives->liteParsedPipeline;
     }
 
-
     boost::optional<NamespaceString> getViewNss() const override {
         return boost::make_optional(getOriginalNss());
     }
@@ -418,7 +412,7 @@ private:
     // request. This variable will never be reassigned after construction.
     const std::unique_ptr<AggregateRequestDerivatives> _originalAggReqDerivatives;
 
-    ResolvedView _resolvedView;
+    ResolvedNamespace _resolvedNamespace;
 
     // After construction of the ResolvedViewAggExState, we return to the start of runAggregate()
     // Both of these fields below will now be the underlying resolved _aggReqDerivatives for
@@ -468,6 +462,10 @@ public:
      */
     virtual const CollectionOrViewAcquisition& getMainCollectionOrView() const = 0;
 
+    virtual bool isCollectionlessAggregation() const {
+        return false;
+    }
+
     /**
      * Collectionless pipelines may need an 'AutoStatsTracker' to track stats. This method will
      * emplace one if so, and is a no-op otherwise.
@@ -491,15 +489,53 @@ public:
     virtual std::shared_ptr<const CollectionCatalog> getCatalog() const = 0;
 
     /**
-     * Use the acquired catalog to resolve the involved namespaces.
+     * Use the acquired catalog to resolve the involved namespaces. Prefer
+     * 'getResolvedInvolvedNamespaces()' at call sites that may run multiple times within a single
+     * '_runAggregate()' invocation, as it memoizes the result of this call.
      */
     virtual StatusWith<ResolvedNamespaceMap> resolveInvolvedNamespaces(
         OperationContext* opCtx) const = 0;
 
     /**
+     * Resolves all referenced namespaces (potentially from views) from the initial `namespaces` set
+     * into `resolvedNamespaces`.
+     */
+    virtual Status extendResolvedNamespaces(OperationContext* opCtx,
+                                            std::deque<NamespaceString> namespaces,
+                                            ResolvedNamespaceMap& resolvedNamespaces) const = 0;
+
+    /**
+     * Memoized wrapper over 'resolveInvolvedNamespaces()'. Resolves on first call; subsequent calls
+     * return the cached result. Throws via uassert if resolution fails.
+     */
+    const ResolvedNamespaceMap& getResolvedInvolvedNamespaces(OperationContext* opCtx) const {
+        return _resolvedInvolvedNamespaces.get(this, opCtx);
+    }
+
+    /**
+     * True iff the main namespace is a view that should be expanded into its underlying pipeline
+     * during '_runAggregate()'. A view is not expanded when the request starts with '$collStats'
+     * (which is supported directly on views) except on timeseries views, where the user-facing
+     * view is abstracted over a buckets collection that must be resolved.
+     */
+    bool shouldExpandMainView() const;
+
+    /**
+     * Proactively resolve the transitive closure of sub-pipeline namespaces. If any resolve to a
+     * view, throw a 'ResolvedView' so mongos can reparse with view expansions inlined and
+     * re-dispatch. If 'shouldExpandMainView()' is also true, fold its resolution into the same
+     * kickback so a single round-trip suffices. On non-view involved namespaces this is a no-op
+     * beyond populating the cache used by 'createExpressionContext()'.
+     *
+     * Must be called exactly once from '_runAggregate()' immediately after constructing the
+     * AggCatalogState, so any ResolvedView thrown propagates up to the mongos view-handling path.
+     */
+    void maybeProactivelyResolveInvolvedNamespaces(AggExState& aggExState);
+
+    /**
      * Use the acquired catalog to resolve the view.
      */
-    virtual StatusWith<ResolvedView> resolveView(
+    virtual StatusWith<ResolvedNamespace> resolveView(
         OperationContext* opCtx,
         const NamespaceString& nss,
         boost::optional<BSONObj> timeSeriesCollator) const = 0;
@@ -539,6 +575,10 @@ public:
 
     BSONObj getShardKey() const;
 
+    std::shared_ptr<IncrementalFeatureRolloutContext> getIfrContext() const {
+        return _aggExState.getIfrContext();
+    }
+
     virtual ~AggCatalogState() {}
 
 protected:
@@ -554,6 +594,16 @@ protected:
     // _runAggregate(). Since AggCatalogState is always allocated from within _runAggregate(),
     // '_aggExState' will always live long enough.
     const AggExState& _aggExState;
+
+private:
+    // Lazy cache backing 'getResolvedInvolvedNamespaces()'. The initializer is a stateless lambda
+    // that dispatches into the virtual 'resolveInvolvedNamespaces()'; 'this' is passed through
+    // 'Deferred::get()' rather than captured so the cache does not hold a self-pointer (safe here
+    // regardless since AggCatalogState is non-copyable and non-movable).
+    Deferred<std::function<ResolvedNamespaceMap(const AggCatalogState*, OperationContext*)>>
+        _resolvedInvolvedNamespaces{[](const AggCatalogState* self, OperationContext* opCtx) {
+            return uassertStatusOK(self->resolveInvolvedNamespaces(opCtx));
+        }};
 };
 
 /**

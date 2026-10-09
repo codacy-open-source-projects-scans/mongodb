@@ -35,7 +35,13 @@ function runTest(testDB, {queryStatsEnabled, isMongos, customSetupFn = () => {}}
     customSetupFn(source);
 
     const problematicMergePipeline = [
-        {$merge: {into: target.getName(), whenMatched: [{$addFields: 2}], whenNotMatched: "insert"}},
+        {
+            $merge: {
+                into: target.getName(),
+                whenMatched: [{$addFields: 2}],
+                whenNotMatched: "insert",
+            },
+        },
     ];
     const addFieldsErrorCode = 40272;
 
@@ -92,7 +98,9 @@ function runSetFieldNullCharsMergeTest(testDB, {queryStatsEnabled}) {
             ];
         }
 
-        const expectedCodes = queryStatsEnabled ? [...codes, ErrorCodes.QueryStatsFailedToRecord] : codes;
+        const expectedCodes = queryStatsEnabled
+            ? [...codes, ErrorCodes.QueryStatsFailedToRecord]
+            : codes;
 
         assertErrorCode(coll, useWithinMergePipeline(setFieldExpression), expectedCodes);
         assertErrorCode(coll, useWithinMergePipeline(unsetFieldExpression), expectedCodes);
@@ -106,7 +114,10 @@ function runSetFieldNullCharsMergeTest(testDB, {queryStatsEnabled}) {
 }
 
 const optionsToEnableQueryStats = {
-    setParameter: {internalQueryStatsRateLimit: -1, internalQueryStatsErrorsAreCommandFatal: true},
+    setParameter: {
+        internalQueryStatsSampleRate: 1,
+        internalQueryStatsErrorsAreCommandFatal: true,
+    },
 };
 //
 // Standalone tests.
@@ -116,7 +127,7 @@ describe("merge_pipeline_validation", function testMergePipelineValidation() {
     describe("Standalone", function testStandalone() {
         it("should work without query stats", function testStandaloneWithoutQueryStats() {
             const conn = MongoRunner.runMongod({
-                setParameter: {internalQueryStatsRateLimit: 0},
+                setParameter: {internalQueryStatsSampleRate: 0},
             });
             const testDB = conn.getDB("test");
 
@@ -139,7 +150,12 @@ describe("merge_pipeline_validation", function testMergePipelineValidation() {
 
     describe("Sharded Cluster", function testShardedCluster() {
         it("should work without query stats (unsharded and sharded collection)", function testShardedWithoutQueryStats() {
-            const st = new ShardingTest({shards: 2});
+            const noQueryStatsOptions = {setParameter: {internalQueryStatsSampleRate: 0}};
+            const st = new ShardingTest({
+                shards: 2,
+                mongosOptions: noQueryStatsOptions,
+                rsOptions: noQueryStatsOptions,
+            });
             const testDB = st.s.getDB("test");
 
             runTest(testDB, {queryStatsEnabled: false, isMongos: true});

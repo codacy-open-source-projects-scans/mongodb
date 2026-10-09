@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/classic/update_stage.h"
 
@@ -34,6 +8,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor.h"
@@ -43,6 +18,7 @@
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
 #include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/logv2/log.h"
@@ -63,6 +39,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeUpdaterEnsureDocStillMatchesAndYield);
 }  // namespace
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -113,7 +90,7 @@ UpdateStage::UpdateStage(ExpressionContext* expCtx,
                          const UpdateStageParams& params,
                          WorkingSet* ws,
                          CollectionAcquisition collection)
-    : RequiresWritableCollectionStage(kStageType.data(), expCtx, collection),
+    : RequiresWritableCollectionStage(kStageType, expCtx, collection),
       _params(params),
       _ws(ws),
       _doc(params.driver->getDocument()),
@@ -123,6 +100,18 @@ UpdateStage::UpdateStage(ExpressionContext* expCtx,
                                                   : nullptr),
       _memoryTracker(OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForStage(
           *expCtx, loadMemoryLimit(StageMemoryLimit::UpdateStageMaxMemoryBytes))),
+      _dedupReporter(OperationMemoryUsageTracker::createDeduplicatorReporter(
+          // Explain queries should not increment the global deduplication counters since no
+          // documents are actually written. Use a no-op callback so memory is still tracked
+          // locally (for peakTrackedMemBytes) without polluting server-wide metrics.
+          params.request->getIsExplain()
+              ? std::function<void(int64_t, int64_t)>([](int64_t, int64_t) {})
+              : std::function<void(int64_t, int64_t)>(
+                    [](int64_t deduplicatedBytes, int64_t deduplicatedRecords) {
+                        updateCounters.incrementPerDeduplication(deduplicatedBytes,
+                                                                 deduplicatedRecords);
+                    }),
+          internalQueryMaxWriteToServerStatusMemoryUsageBytes.loadRelaxed())),
       _preWriteFilter(opCtx(), collection.nss()) {
 
     // Should the modifiers validate their embedded docs via storage_validation::scanDocument()?
@@ -254,7 +243,7 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
         if (!_params.request->explain() && _isUserInitiatedWrite) {
             auto [immediateReturnStageState, fromMigrate] = _preWriteFilter.checkIfNotWritable(
                 member->doc.value(),
-                "update"_sd,
+                "update"sv,
                 collectionPtr()->ns(),
                 [&](const ExceptionFor<ErrorCodes::StaleConfig>& ex) {
                     planExecutorShardingState(opCtx()).criticalSectionFuture =
@@ -337,12 +326,15 @@ PlanStage::StageState UpdateStage::doWork(WorkingSetID* out) {
             }
 
             if (_updatedRecordIds) {
-                _memoryTracker.add(static_cast<int64_t>(_updatedRecordIds->getApproximateSize()) -
-                                   static_cast<int64_t>(dedupBytesBefore));
+                const int64_t dedupBytesAdditional =
+                    static_cast<int64_t>(_updatedRecordIds->getApproximateSize()) -
+                    static_cast<int64_t>(dedupBytesBefore);
+                _memoryTracker.add(dedupBytesAdditional);
+                _dedupReporter.add(dedupBytesAdditional);
                 _specificStats.peakTrackedMemBytes = _memoryTracker.peakTrackedMemoryBytes();
                 uassert(12227902,
                         "UpdateStage exceeded memory limit",
-                        _memoryTracker.withinMemoryLimit());
+                        _memoryTracker.withinMemoryLimit(opCtx()));
             }
         } catch (const ExceptionFor<ErrorCodes::StaleConfig>& ex) {
             if (ShardVersion::isPlacementVersionIgnored(ex->getVersionReceived()) &&

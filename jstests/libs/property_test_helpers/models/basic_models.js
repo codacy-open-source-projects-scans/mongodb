@@ -22,7 +22,17 @@ export const intArb = oneof(
 
 // Include null byte as a special case because it can indicate the end of a string in some
 // implementations.
-const nullByteArb = fc.constantFrom("\0", "\x00", "\x01", "\x02", "\x03", "\x08", "\x18", "\x28", "\xff");
+const nullByteArb = fc.constantFrom(
+    "\0",
+    "\x00",
+    "\x01",
+    "\x02",
+    "\x03",
+    "\x08",
+    "\x18",
+    "\x28",
+    "\xff",
+);
 
 function getStringArb({allowUnicode = true, allowNullBytes = true} = {}) {
     // Stratify with regular characters, unicode, ascii, and null bytes, depending on what options
@@ -56,19 +66,53 @@ export const dateArb = oneof(
 // .oneof() arguments are ordered from least complex to most, since fast-check uses this ordering to
 // shrink.
 export function getScalarArb({allowUnicode, allowNullBytes} = {}) {
-    return oneof(intArb, fc.boolean(), getStringArb({allowUnicode, allowNullBytes}), dateArb, fc.constant(null));
+    return oneof(
+        intArb,
+        fc.boolean(),
+        getStringArb({allowUnicode, allowNullBytes}),
+        dateArb,
+        fc.constant(null),
+    );
 }
 
-export const fieldArb = fc.constantFrom("a", "b", "t", "m", "_id", "m.m1", "m.m2", "array");
-export const dollarFieldArb = fieldArb.map((f) => "$" + f);
-export const assignableFieldArb = fc.constantFrom("a", "b", "t", "m");
+// FieldPath (used by aggregation operators, indexes, etc.) does not support empty strings.
+// Use getFieldArb(false) wherever the field is used as a FieldPath expression.
+export function getFieldArb(allowEmpty) {
+    const arb = fc.constantFrom("a", "b", "t", "m", "_id", "m.m1", "m.m2", "array", "");
+    return allowEmpty ? arb : arb.filter((f) => f !== "");
+}
+export const fieldArb = getFieldArb(true);
+export const nonEmptyFieldArb = getFieldArb(false);
+export const dollarFieldArb = nonEmptyFieldArb.map((f) => "$" + f);
+export function getAssignableFieldArb(allowEmpty) {
+    const arb = fc.constantFrom("a", "b", "t", "m", "");
+    return allowEmpty ? arb : arb.filter((f) => f !== "");
+}
 
 // Dotted field paths up to depth 2 built from assignable base fields.
 export const dottedFieldArb = fc.oneof(
     fieldArb,
-    fc.tuple(assignableFieldArb, assignableFieldArb).map(([a, b]) => `${a}.${b}`),
+    fc
+        .tuple(
+            getAssignableFieldArb(true /*allowEmpty*/),
+            getAssignableFieldArb(true /*allowEmpty*/),
+        )
+        .map(([a, b]) => `${a}.${b}`),
 );
 export const dottedDollarFieldArb = dottedFieldArb.map((f) => "$" + f);
+
+// Dotted field paths without empty string components. Use these wherever the field is used as a
+// FieldPath expression and empty strings are not allowed.
+export const nonEmptyDottedFieldArb = fc.oneof(
+    nonEmptyFieldArb,
+    fc
+        .tuple(
+            getAssignableFieldArb(false /*allowEmpty*/),
+            getAssignableFieldArb(false /*allowEmpty*/),
+        )
+        .map(([a, b]) => `${a}.${b}`),
+);
+export const nonEmptyDottedDollarFieldArb = nonEmptyDottedFieldArb.map((f) => "$" + f);
 
 export const leafParametersPerFamily = 10;
 export class LeafParameter {

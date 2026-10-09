@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_stats/distinct_key.h"
 
@@ -39,6 +13,7 @@
 #include "mongo/unittest/unittest.h"
 
 #include <memory>
+#include <string_view>
 
 #include <absl/hash/hash.h>
 
@@ -76,8 +51,8 @@ public:
 
 TEST_F(DistinctKeyTest, ExtractKeyFromDistinctRequiredFields) {
     boost::intrusive_ptr<ExpressionContext> expCtx = make_intrusive<ExpressionContextForTest>();
-    SerializationOptions opts =
-        SerializationOptions(SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    query_shape::SerializationOptions opts = query_shape::SerializationOptions(
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
 
     auto expectedKey = fromjson(
         R"({
@@ -104,8 +79,8 @@ TEST_F(DistinctKeyTest, ExtractKeyFromDistinctRequiredFields) {
 
 TEST_F(DistinctKeyTest, ExtractKeyFromDistinctQuery) {
     boost::intrusive_ptr<ExpressionContext> expCtx = make_intrusive<ExpressionContextForTest>();
-    SerializationOptions opts =
-        SerializationOptions(SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    query_shape::SerializationOptions opts = query_shape::SerializationOptions(
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
 
     auto expectedKey = fromjson(
         R"({
@@ -134,8 +109,8 @@ TEST_F(DistinctKeyTest, ExtractKeyFromDistinctQuery) {
 
 TEST_F(DistinctKeyTest, ExtractKeyFromDistinctComplex) {
     boost::intrusive_ptr<ExpressionContext> expCtx = make_intrusive<ExpressionContextForTest>();
-    SerializationOptions opts =
-        SerializationOptions(SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    query_shape::SerializationOptions opts = query_shape::SerializationOptions(
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
 
     auto expectedKey = fromjson(
         R"({
@@ -174,9 +149,9 @@ TEST_F(DistinctKeyTest, ExtractKeyFromDistinctComplex) {
 
 TEST_F(DistinctKeyTest, ExtractKeyFromDistinctQueryDebugString) {
     boost::intrusive_ptr<ExpressionContext> expCtx = make_intrusive<ExpressionContextForTest>();
-    SerializationOptions opts =
-        SerializationOptions(SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
-    opts.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
+    query_shape::SerializationOptions opts = query_shape::SerializationOptions(
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    opts.literalPolicy = query_shape::LiteralSerializationPolicy::kToDebugTypeString;
 
     auto expectedKey = fromjson(
         R"({
@@ -205,8 +180,8 @@ TEST_F(DistinctKeyTest, ExtractKeyFromDistinctQueryDebugString) {
 
 TEST_F(DistinctKeyTest, OriginalQueryShapeHashAppearsInKey) {
     boost::intrusive_ptr<ExpressionContext> expCtx = make_intrusive<ExpressionContextForTest>();
-    SerializationOptions opts =
-        SerializationOptions(SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    query_shape::SerializationOptions opts = query_shape::SerializationOptions(
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
     const auto hash = query_shape::QueryShapeHash::fromHexString(
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
@@ -225,7 +200,7 @@ TEST_F(DistinctKeyTest, OriginalQueryShapeHashAppearsInKey) {
 }
 
 TEST_F(DistinctKeyTest, DifferentOriginalQueryShapeHashesProduceDifferentKeys) {
-    auto makeKeyWithHash = [](StringData hexHash) {
+    auto makeKeyWithHash = [](std::string_view hexHash) {
         auto expCtx = make_intrusive<ExpressionContextForTest>();
         auto dcr = std::make_unique<DistinctCommandRequest>(kDefaultTestNss);
         dcr->setKey("name");

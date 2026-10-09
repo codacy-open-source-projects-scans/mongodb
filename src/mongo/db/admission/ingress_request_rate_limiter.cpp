@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/admission/ingress_request_rate_limiter.h"
 
@@ -33,39 +7,71 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/admission/app_name_exemption_matcher.h"
+#include "mongo/db/admission/ingress_request_admission_context.h"
 #include "mongo/db/admission/ingress_request_rate_limiter_gen.h"
+#include "mongo/db/admission/rate_limiter_otel_metrics_recorder.h"
+#include "mongo/db/admission/ticketing/admission_context.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/service_context.h"
+#include "mongo/otel/metrics/metric_names.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/transport/cidr_range_list_parameter.h"
 #include "mongo/util/decorable.h"
+
+#include <memory>
+#include <string_view>
 
 #include <boost/optional.hpp>
 
 
 namespace mongo {
+namespace admission {
 
 namespace {
 
+const Status kIngressRequestRateLimitExceededError{
+    ErrorCodes::IngressRequestRateLimitExceeded,
+    "Request rejected: ingress request rate limit exceeded"};
+
+MONGO_FAIL_POINT_DEFINE(failIngressRequestRateLimiting);
 MONGO_FAIL_POINT_DEFINE(ingressRequestRateLimiterFractionalRateOverride);
 
 VersionedValue<CIDRList> ingressRequestRateLimiterIPExemptions;
 VersionedValue<std::vector<std::string>> ingressRequestRateLimiterAppExemptions;
 
 const auto getIngressRequestRateLimiter =
-    ServiceContext::declareDecoration<boost::optional<IngressRequestRateLimiter>>();
+    ServiceContext::declareDecoration<boost::optional<admission::IngressRequestRateLimiter>>();
+const auto getDeferredAdmissionToken =
+    Client::declareDecoration<boost::optional<admission::RateLimiter::DeferredToken>>();
 
 const ConstructorActionRegistererType<ServiceContext> onServiceContextCreate{
-    "InitIngressRequestRateLimiter",
-    [](ServiceContext* ctx) { getIngressRequestRateLimiter(ctx).emplace(); }};
+    "InitIngressRequestRateLimiter", [](ServiceContext* ctx) {
+        getIngressRequestRateLimiter(ctx).emplace();
+    }};
+
+// The OTel instrument names and serverStatus path used by the ingress request rate limiter's
+// metrics recorder.
+RateLimiterOtelMetricsRecorder::MetricsSpec ingressRequestRateLimiterSpec() {
+    using otel::metrics::MetricNames;
+    return RateLimiterOtelMetricsRecorder::MetricsSpec{
+        .attemptedAdmissions = MetricNames::kIngressRequestRateLimiterAttemptedAdmissions,
+        .successfulAdmissions = MetricNames::kIngressRequestRateLimiterSuccessfulAdmissions,
+        .rejectedAdmissions = MetricNames::kIngressRequestRateLimiterRejectedAdmissions,
+        .exemptedAdmissions = MetricNames::kIngressRequestRateLimiterExemptedAdmissions,
+        .addedToQueue = MetricNames::kIngressRequestRateLimiterAddedToQueue,
+        .removedFromQueue = MetricNames::kIngressRequestRateLimiterRemovedFromQueue,
+        .interruptedInQueue = MetricNames::kIngressRequestRateLimiterInterruptedInQueue,
+        .tokensAcquired = MetricNames::kIngressRequestRateLimiterTokensAcquired,
+        .currentQueueDepth = MetricNames::kIngressRequestRateLimiterCurrentQueueDepth,
+        .totalAvailableTokens = MetricNames::kIngressRequestRateLimiterTotalAvailableTokens,
+        .averageTimeQueuedMicros = MetricNames::kIngressRequestRateLimiterAverageTimeQueuedMicros,
+        .timeQueuedMicros = MetricNames::kIngressRequestRateLimiterTimeQueuedMicros,
+    };
+}
 
 class ClientAdmissionControlState {
 public:
     static bool isExempted(Client*);
-
-    // TODO(SERVER-114130): Remove this function once failpoint routes through regular rate limiter
-    // pathway.
-    static bool appNameIsExempted_forTest(Client* client);
 
 private:
     template <typename T>
@@ -121,17 +127,13 @@ bool ClientAdmissionControlState::isExempted(Client* client) {
     return getAdmissionControlState(client)._isExempted(client);
 }
 
-bool ClientAdmissionControlState::appNameIsExempted_forTest(Client* client) {
-    return getAdmissionControlState(client)._isApplicationExempt(client);
-}
-
 }  // namespace
 
 
 // TODO: SERVER-106468 Define CIDRRangeListParameter and remove this glue code
 void IngressRequestRateLimiterIPExemptions::append(OperationContext*,
                                                    BSONObjBuilder* bob,
-                                                   StringData name,
+                                                   std::string_view name,
                                                    const boost::optional<TenantId>&) {
     transport::appendCIDRRangeListParameter(ingressRequestRateLimiterIPExemptions, bob, name);
 }
@@ -141,7 +143,7 @@ Status IngressRequestRateLimiterIPExemptions::set(const BSONElement& value,
     return transport::setCIDRRangeListParameter(ingressRequestRateLimiterIPExemptions, value.Obj());
 }
 
-Status IngressRequestRateLimiterIPExemptions::setFromString(StringData str,
+Status IngressRequestRateLimiterIPExemptions::setFromString(std::string_view str,
                                                             const boost::optional<TenantId>&) {
     return transport::setCIDRRangeListParameter(ingressRequestRateLimiterIPExemptions,
                                                 fromjson(str));
@@ -149,7 +151,7 @@ Status IngressRequestRateLimiterIPExemptions::setFromString(StringData str,
 
 void IngressRequestRateLimiterAppExemptions::append(OperationContext*,
                                                     BSONObjBuilder* bob,
-                                                    StringData name,
+                                                    std::string_view name,
                                                     const boost::optional<TenantId>&) {
     admission::appendAppNameExemptionList(
         ingressRequestRateLimiterAppExemptions.makeSnapshot(), bob, name);
@@ -162,7 +164,7 @@ Status IngressRequestRateLimiterAppExemptions::set(const BSONElement& value,
     return Status::OK();
 }
 
-Status IngressRequestRateLimiterAppExemptions::setFromString(StringData str,
+Status IngressRequestRateLimiterAppExemptions::setFromString(std::string_view str,
                                                              const boost::optional<TenantId>&) {
     ingressRequestRateLimiterAppExemptions.update(
         admission::parseAppNameExemptionList(fromjson(str)));
@@ -170,10 +172,13 @@ Status IngressRequestRateLimiterAppExemptions::setFromString(StringData str,
 }
 
 IngressRequestRateLimiter::IngressRequestRateLimiter()
-    : _rateLimiter{static_cast<double>(gIngressRequestRateLimiterRatePerSec.load()),
-                   gIngressRequestRateLimiterBurstCapacitySecs.load(),
-                   0,
-                   "ingressRequestRateLimiter"} {
+    : _rateLimiter{
+          static_cast<double>(gIngressRequestRateLimiterRatePerSec.load()),
+          gIngressRequestRateLimiterBurstCapacitySecs.load(),
+          gIngressRequestAdmissionMaxQueueDepth.load(),
+          std::string(kRateLimiterName),
+          RateLimiter::Options{.metricsRecorder = std::make_unique<RateLimiterOtelMetricsRecorder>(
+                                   ingressRequestRateLimiterSpec())}} {
     if (const auto scopedFp = ingressRequestRateLimiterFractionalRateOverride.scoped();
         MONGO_unlikely(scopedFp.isActive())) {
         const auto rate = scopedFp.getData().getField("rate").numberDouble();
@@ -181,33 +186,85 @@ IngressRequestRateLimiter::IngressRequestRateLimiter()
     }
 }
 
-
 IngressRequestRateLimiter& IngressRequestRateLimiter::get(ServiceContext* service) {
     return *getIngressRequestRateLimiter(service);
 }
 
-Status IngressRequestRateLimiter::admitRequest(Client* client) {
+void IngressRequestRateLimiter::installOtelMetrics(ServiceContext* svcCtx) {
+    _metricsSamplingJob =
+        static_cast<RateLimiterOtelMetricsRecorder&>(_rateLimiter.stats())
+            .installOtelMetrics(svcCtx->getPeriodicRunner(), Seconds{1}, kRateLimiterName, [this] {
+                return _rateLimiter.sampledAvailableTokens();
+            });
+}
+
+const Status& IngressRequestRateLimiter::rejectionStatus() {
+    return kIngressRequestRateLimitExceededError;
+}
+
+bool IngressRequestRateLimiter::admitRequest(Client* client) {
     if (ClientAdmissionControlState::isExempted(client)) {
         _rateLimiter.recordExemption();
+        return true;
+    }
+
+    if (MONGO_unlikely(failIngressRequestRateLimiting.shouldFail())) {
+        return false;
+    }
+
+    auto tokenResult = _rateLimiter.acquireToken();
+    if (MONGO_likely(tokenResult)) {
+        if (!tokenResult->isReady()) {
+            // The rate limiter issued a non-ready DeferredToken, store it on the client to resolve
+            // later in the request pipeline.
+            dassert(!getDeferredAdmissionToken(client).has_value(),
+                    "Client already has a deferred admission token");
+            getDeferredAdmissionToken(client).emplace(std::move(*tokenResult));
+        }
+
+        // The rate limiter's DeferredToken is ready now, the token was already consumed and stats
+        // were recorded. Dropping the DeferredToken here is intentional, the destructor is a no-op
+        // for ready DeferredTokens.
+        return true;
+    }
+
+    return false;
+}
+
+Status IngressRequestRateLimiter::waitForAdmission(OperationContext* opCtx) {
+    auto deferredToken = std::exchange(getDeferredAdmissionToken(opCtx->getClient()), boost::none);
+    if (!deferredToken) {
         return Status::OK();
     }
 
-    auto rateLimitResult = _rateLimiter.tryAcquireToken();
-    if (MONGO_unlikely(rateLimitResult == admission::RateLimiter::kRejectedErrorCode)) {
-        return Status{ErrorCodes::IngressRequestRateLimitExceeded,
-                      "Request rejected: ingress request rate limit exceeded"};
+    if (!gIngressRequestRateLimiterEnabled.load()) {
+        std::move(*deferredToken).recordExemption();
+        return Status::OK();
     }
 
-    return rateLimitResult;
+    auto& admCtx = IngressRequestAdmissionContext::get(opCtx);
+    const Status status = std::move(*deferredToken).get(opCtx, &admCtx);
+
+    if (status.isOK()) {
+        admCtx.recordAdmission();
+    }
+
+    return status;
 }
 
-// This function is only for testing, but the _forTest name append makes the module linter
-// complain.
-//
-// TODO(SERVER-114130): Remove this function once failpoint routes through regular rate limiter
-// pathway.
-bool IngressRequestRateLimiter::isAppNameExempted(Client* client) {
-    return ClientAdmissionControlState::appNameIsExempted_forTest(client);
+void IngressRequestRateLimiter::clearDeferredAdmissionToken(Client* client) {
+    getDeferredAdmissionToken(client) = boost::none;
+}
+
+void IngressRequestRateLimiter::setDeferredAdmissionToken_forTest(
+    Client* client, RateLimiter::DeferredToken deferredToken) {
+    invariant(!getDeferredAdmissionToken(client).has_value(),
+              "Client already has a deferred admission token");
+    getDeferredAdmissionToken(client).emplace(std::move(deferredToken));
+}
+
+bool IngressRequestRateLimiter::hasDeferredAdmissionToken_forTest(Client* client) {
+    return getDeferredAdmissionToken(client).has_value();
 }
 
 void IngressRequestRateLimiter::updateRateParameters(double refreshRatePerSec,
@@ -240,18 +297,22 @@ Status IngressRequestRateLimiter::onUpdateAdmissionBurstCapacitySecs(double burs
     return Status::OK();
 }
 
-void IngressRequestRateLimiter::appendStats(BSONObjBuilder* bob) const {
-    // First we get the stats in a separate object in order to not mutate bob
-    auto rateLimiterBob = BSONObjBuilder{};
-    _rateLimiter.appendStats(&rateLimiterBob);
-    auto const rateLimiterStats = rateLimiterBob.obj();
-
-    // Then we copy elements one by one to avoid coping queueing stats
-    bob->append(rateLimiterStats.getField("rejectedAdmissions"));
-    bob->append(rateLimiterStats.getField("successfulAdmissions"));
-    bob->append(rateLimiterStats.getField("exemptedAdmissions"));
-    bob->append(rateLimiterStats.getField("attemptedAdmissions"));
-    bob->append(rateLimiterStats.getField("totalAvailableTokens"));
+void IngressRequestRateLimiter::updateMaxQueueDepth(std::int64_t maxQueueDepth) {
+    _rateLimiter.setMaxQueueDepth(maxQueueDepth);
 }
 
+Status IngressRequestRateLimiter::onUpdateAdmissionMaxQueueDepth(std::int64_t maxQueueDepth) {
+    if (auto client = Client::getCurrent()) {
+        getIngressRequestRateLimiter(client->getServiceContext())
+            ->updateMaxQueueDepth(maxQueueDepth);
+    }
+
+    return Status::OK();
+}
+
+void IngressRequestRateLimiter::appendStats(BSONObjBuilder* bob) const {
+    _rateLimiter.appendStats(bob);
+}
+
+}  // namespace admission
 }  // namespace mongo

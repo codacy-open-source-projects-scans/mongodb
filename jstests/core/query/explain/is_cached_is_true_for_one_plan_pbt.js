@@ -3,6 +3,7 @@
  * plan per query.
  *
  * @tags: [
+ *   uses_explain,
  *   query_intensive_pbt,
  *   assumes_standalone_mongod,
  *   # Plan cache state is node-local and will not get migrated alongside user data
@@ -15,7 +16,10 @@
 import {getCollectionModel} from "jstests/libs/property_test_helpers/models/collection_models.js";
 import {getQueryAndOptionsModel} from "jstests/libs/property_test_helpers/models/query_models.js";
 import {makeWorkloadModel} from "jstests/libs/property_test_helpers/models/workload_models.js";
-import {getPlanCache, testProperty} from "jstests/libs/property_test_helpers/property_testing_utils.js";
+import {
+    getPlanCache,
+    testProperty,
+} from "jstests/libs/property_test_helpers/property_testing_utils.js";
 import {getRejectedPlans, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
 
 const experimentColl = db[jsTestName()];

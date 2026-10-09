@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/db/repl/replication_coordinator_impl.h"
@@ -47,12 +21,16 @@
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state_mock.h"
+#include "mongo/db/repl/replication_coordinator_impl_gen.h"
 #include "mongo/db/repl/replication_coordinator_test_fixture.h"
 #include "mongo/db/repl/replication_metrics.h"
+#include "mongo/db/repl/replication_process.h"
+#include "mongo/db/repl/replication_recovery_mock.h"
 #include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
@@ -76,6 +54,7 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/ensure_fcv.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -292,6 +271,96 @@ TEST_F(ReplCoordTest, NodeEntersStartupStateWhenStartingUpWithNoLocalConfig) {
     logs.stop();
     ASSERT_EQUALS(3, logs.countTextContaining("Did not find local "));
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
+}
+
+TEST_F(ReplCoordTest, RecordsACleanShutdownDocumentWhenStartingUpAfterACleanShutdown) {
+    init();
+    const auto opCtx = makeOperationContext();
+    getReplCoord()->startup(opCtx.get(), StorageEngine::LastShutdownState::kClean);
+
+    // The first recorded shutdown starts the id sequence at 0, one past the sentinel.
+    auto doc =
+        unittest::assertGet(getStorageInterface()->getLastCleanShutdownDocument(opCtx.get()));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(0LL, doc->getId());
+}
+
+TEST_F(ReplCoordTest, ContinuesTheCleanShutdownIdSequenceFromWhatIsAlreadyRecorded) {
+    init();
+    const auto opCtx = makeOperationContext();
+
+    // This node has already recorded three clean shutdowns, the most recent with _id 2.
+    ASSERT_OK(getStorageInterface()->initializeCleanShutdownCollection(opCtx.get()));
+    ASSERT_OK(getStorageInterface()->recordCleanShutdown(opCtx.get(), Timestamp(1, 1)));
+    ASSERT_OK(getStorageInterface()->recordCleanShutdown(opCtx.get(), Timestamp(2, 1)));
+    ASSERT_OK(getStorageInterface()->recordCleanShutdown(opCtx.get(), Timestamp(3, 1)));
+
+    getReplCoord()->startup(opCtx.get(), StorageEngine::LastShutdownState::kClean);
+
+    // The fourth shutdown continues the sequence from the most recent recorded id rather than
+    // restarting it, so ids never repeat or move backwards.
+    auto doc =
+        unittest::assertGet(getStorageInterface()->getLastCleanShutdownDocument(opCtx.get()));
+    ASSERT_TRUE(doc);
+    ASSERT_EQUALS(3LL, doc->getId());
+}
+
+TEST_F(ReplCoordTest, DoesNotRecordACleanShutdownDocumentAfterAnUncleanShutdown) {
+    init();
+    const auto opCtx = makeOperationContext();
+    getReplCoord()->startup(opCtx.get(), StorageEngine::LastShutdownState::kUnclean);
+
+    // Only clean shutdowns are recorded, so the collection holds nothing but the sentinel here.
+    ASSERT_FALSE(
+        unittest::assertGet(getStorageInterface()->getLastCleanShutdownDocument(opCtx.get())));
+}
+
+TEST_F(ReplCoordTest, CreatesTheCleanShutdownCollectionEvenAfterAnUncleanShutdown) {
+    init();
+    const auto opCtx = makeOperationContext();
+    getReplCoord()->startup(opCtx.get(), StorageEngine::LastShutdownState::kUnclean);
+
+    // The collection is created on every startup, not just clean ones, so recording a shutdown
+    // afterwards must succeed rather than report a missing collection.
+    ASSERT_OK(getStorageInterface()->recordCleanShutdown(opCtx.get(), Timestamp(1, 1)));
+}
+
+TEST_F(ReplCoordTest, RSNodeHandlesInterruptedAtShutdownDuringStartupRecovery) {
+    // Simulate InterruptedAtShutdown thrown during oplog recovery.
+    init();
+    dynamic_cast<ReplicationRecoveryMock*>(
+        ReplicationProcess::get(getServiceContext())->getReplicationRecovery())
+        ->recoverFromOplogFn = [&](OperationContext*, boost::optional<Timestamp>) {
+        uasserted(ErrorCodes::InterruptedAtShutdown, "Simulated shutdown during oplog recovery");
+    };
+    unittest::LogCaptureGuard logs;
+    start(BSON("_id" << "mySet"
+                     << "version" << 2 << "members"
+                     << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                              << "node1:12345"))),
+          HostAndPort("node1", 12345));
+    logs.stop();
+    ASSERT_EQUALS(1, logs.countTextContaining("Interrupted loading local replica set config"));
+    ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
+}
+
+TEST_F(ReplCoordTest, StandaloneNodeHandlesInterruptedAtShutdownDuringStartupRecovery) {
+    // Create standalone node.
+    init(ReplSettings());
+    // Enable standalone oplog recovery.
+    unittest::ServerParameterGuard standaloneModeGuard("recoverFromOplogAsStandalone", true);
+    // Simulate InterruptedAtShutdown thrown during oplog recovery.
+    dynamic_cast<ReplicationRecoveryMock*>(
+        ReplicationProcess::get(getServiceContext())->getReplicationRecovery())
+        ->recoverFromOplogFn = [&](OperationContext*, boost::optional<Timestamp>) {
+        uasserted(ErrorCodes::InterruptedAtShutdown, "Simulated shutdown during oplog recovery");
+    };
+    unittest::LogCaptureGuard logs;
+    const auto opCtx = makeOperationContext();
+    getReplCoord()->startup(opCtx.get(), StorageEngine::LastShutdownState::kClean);
+    logs.stop();
+    ASSERT_EQUALS(
+        1, logs.countTextContaining("Interrupted standalone oplog recovery due to shutdown"));
 }
 
 const auto defaultConfigOneNode = BSON("_id" << "mySet"
@@ -1387,6 +1456,94 @@ TEST_F(ReplCoordTest, SupportTaggedWriteConcern) {
     awaiter.reset();
 }
 
+/**
+ * Brings up a 3-node set with this node primary, and exposes
+ * _resolveWriteConcernFulfillment() through the coordinator's test accessor. All three tests
+ * below need the same set, so the fixture owns the setup.
+ */
+class ReplCoordResolveWriteConcernTest : public ReplCoordTest {
+public:
+    void setUpThreeNodeSetWithSelfPrimary() {
+        assertStartSuccess(BSON("_id"
+                                << "mySet"
+                                << "version" << 2 << "members"
+                                << BSON_ARRAY(BSON("host" << "node1:12345" << "_id" << 0)
+                                              << BSON("host" << "node2:12345" << "_id" << 1)
+                                              << BSON("host" << "node3:12345" << "_id" << 2))),
+                           HostAndPort("node1", 12345));
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+        replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(selfOpTime(), Date_t() + Seconds(100));
+        simulateSuccessfulV1Election();
+    }
+
+    OpTime selfOpTime() const {
+        return OpTimeWithTermOne(100, 2);
+    }
+    OpTime peerOpTime() const {
+        return OpTimeWithTermOne(100, 1);
+    }
+
+    /** Reports `opTime` for the given member on every opTime the recency checks consider. */
+    void peerReached(long long memberId, const OpTime& opTime) {
+        ASSERT_OK(getReplCoord()->setLastWrittenOptime_forTest(2, memberId, opTime));
+        ASSERT_OK(getReplCoord()->setLastAppliedOptime_forTest(2, memberId, opTime));
+        ASSERT_OK(getReplCoord()->setLastDurableOptime_forTest(2, memberId, opTime));
+    }
+
+    WriteConcernOptions writeConcern(WriteConcernW w) {
+        WriteConcernOptions wc;
+        wc.w = std::move(w);
+        // An unset syncMode trips an invariant in the resolver; these tests are all about the
+        // non-durable path.
+        wc.syncMode = WriteConcernOptions::SyncMode::NONE;
+        wc.wTimeout = WriteConcernOptions::kNoTimeout;
+        return wc;
+    }
+
+    auto resolve(WriteConcernW w) {
+        return getReplCoord()->resolveWriteConcernFulfillment_forTest(writeConcern(std::move(w)));
+    }
+};
+
+TEST_F(ReplCoordResolveWriteConcernTest, NumericWriteConcernResolvesToTheNthLargestOpTime) {
+    setUpThreeNodeSetWithSelfPrimary();
+    // Self is ahead of node2; node3 has not reported, so it is not in the current term at all.
+    peerReached(1, peerOpTime());
+
+    // Self alone satisfies w:1, and self caps the answer even though nothing is ahead of it.
+    ASSERT_EQ(selfOpTime(), std::get<OpTime>(resolve(1)));
+    // Self plus node2 satisfy w:2, but only up to node2's opTime.
+    ASSERT_EQ(peerOpTime(), std::get<OpTime>(resolve(2)));
+    // Only two members have reached the current term, so w:3 is not satisfiable by any opTime.
+    ASSERT_TRUE(std::get<OpTime>(resolve(3)).isNull());
+
+    // The resolved opTimes agree with the per-opTime predicate the resolver replaced.
+    ASSERT_TRUE(getTopoCoord().haveNumNodesReachedOpTime(peerOpTime(), 2, false));
+    ASSERT_FALSE(getTopoCoord().haveNumNodesReachedOpTime(selfOpTime(), 2, false));
+}
+
+TEST_F(ReplCoordResolveWriteConcernTest, UnknownWriteModeResolvesToAnError) {
+    setUpThreeNodeSetWithSelfPrimary();
+
+    // Resolving the write mode throws; the resolver reports it as this write concern's outcome so
+    // that its waiters are failed rather than left waiting forever.
+    auto fulfillment = resolve(std::string{"thisModeDoesNotExist"});
+    ASSERT_TRUE(std::holds_alternative<Status>(fulfillment));
+    ASSERT_EQ(ErrorCodes::UnknownReplWriteConcern, std::get<Status>(fulfillment).code());
+}
+
+TEST_F(ReplCoordResolveWriteConcernTest, MajorityIsUnsatisfiableWithoutACommittedSnapshot) {
+    setUpThreeNodeSetWithSelfPrimary();
+    peerReached(1, selfOpTime());
+
+    // Snapshots are enabled and no committed snapshot has been established, so majority write
+    // concern cannot be satisfied at any opTime yet -- even though a majority of nodes have in fact
+    // reached selfOpTime().
+    ASSERT_TRUE(getExternalState()->snapshotsEnabled());
+    ASSERT_TRUE(std::get<OpTime>(resolve(std::string{WriteConcernOptions::kMajority})).isNull());
+}
+
+
 TEST_F(ReplCoordTest, NodeReturnsNotPrimaryWhenSteppingDownBeforeSatisfyingAWriteConcern) {
     // Test that a thread blocked in awaitReplication will be woken up and return PrimarySteppedDown
     // (a NotPrimaryError) if the node steps down while it is waiting.
@@ -1998,7 +2155,14 @@ TEST_F(StepDownTest, StepDownFailureRestoresDrainState) {
 }
 
 using StepDownTestDeathTest = StepDownTest;
-DEATH_TEST_REGEX_F(StepDownTestDeathTest, StepDownHangsCantGetRSTL, "5675600.*lockRep") {
+DEATH_TEST_REGEX_F(StepDownTestDeathTest, StepDownHangsCantGetRSTL, "5675600.*lockRep|10147500") {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        // With the intent registry RSTL is not used for step-down, so this crash no longer
+        // occurs. Satisfy the death-test harness with a matching fatal log until this test is
+        // removed along with featureFlagIntentRegistration.
+        // TODO SERVER-106669: Delete when featureFlagIntentRegistration is removed.
+        LOGV2_FATAL(10147500, "lockRep: scenario N/A with featureFlagIntentRegistration");
+    }
     startSignalProcessingThread();
 
     const auto repl = getReplCoord();
@@ -2168,6 +2332,11 @@ TEST_F(StepDownTest, NodeReturnsNotWritablePrimaryWhenAskedToStepDownAsANonPrima
 
 TEST_F(StepDownTest,
        NodeReturnsExceededTimeLimitWhenStepDownFailsToObtainTheGlobalLockWithinTheAllottedTime) {
+    // Disable this test because it relies on grabbing the RSTL in MODE_X, which is a no-op when
+    // Intent Registry is active.
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     OpTimeWithTermOne optime1(100, 1);
 
     // Set up this test so that all nodes are caught up. This is necessary to exclude the false
@@ -2355,13 +2524,14 @@ TEST_F(
 TEST_F(ReplCoordTest, SingleNodeReplSetStepDownTimeoutAndElectionTimeoutExpiresAtTheSameTime) {
     init();
 
-    assertStartSuccess(BSON("_id" << "mySet"
-                                  << "version" << 1 << "members"
-                                  << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                           << "test1:1234"))
-                                  << "protocolVersion" << 1 << "settings"
-                                  << BSON("electionTimeoutMillis" << 1000)),
-                       HostAndPort("test1", 1234));
+    assertStartSuccess(
+        BSON("_id" << "mySet"
+                   << "version" << 1 << "members"
+                   << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                            << "test1:1234"))
+                   << "protocolVersion" << 1 << "settings"
+                   << BSON("electionTimeoutMillis" << 1000 << "heartbeatIntervalMillis" << 500)),
+        HostAndPort("test1", 1234));
     auto opCtx = makeOperationContext();
     getExternalState()->setElectionTimeoutOffsetLimitFraction(0);
     runSingleNodeElection(opCtx.get());
@@ -2389,15 +2559,16 @@ TEST_F(ReplCoordTest, SingleNodeReplSetStepDownTimeoutAndElectionTimeoutExpiresA
 TEST_F(ReplCoordTest, CancelElectionTimeoutIfSyncSourceKnowsThePrimary) {
     init();
 
-    assertStartSuccess(BSON("_id" << "mySet"
-                                  << "version" << 1 << "members"
-                                  << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                           << "test1:1234")
-                                                << BSON("_id" << 1 << "host"
-                                                              << "test2:1234"))
-                                  << "protocolVersion" << 1 << "settings"
-                                  << BSON("electionTimeoutMillis" << 1000)),
-                       HostAndPort("test1", 1234));
+    assertStartSuccess(
+        BSON("_id" << "mySet"
+                   << "version" << 1 << "members"
+                   << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                            << "test1:1234")
+                                 << BSON("_id" << 1 << "host"
+                                               << "test2:1234"))
+                   << "protocolVersion" << 1 << "settings"
+                   << BSON("electionTimeoutMillis" << 1000 << "heartbeatIntervalMillis" << 500)),
+        HostAndPort("test1", 1234));
     auto opCtx = makeOperationContext();
     getExternalState()->setElectionTimeoutOffsetLimitFraction(0);
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -2448,7 +2619,13 @@ TEST_F(ReplCoordTest, ShouldChangeSyncSource) {
     assertStartSuccess(configObj, HostAndPort("node1", 12345));
     ReplSetConfig config = assertMakeRSConfig(configObj);
 
-    getTopoCoord().updateConfig(config, 1, getNet()->now());
+    // Updates should happen in the executor thread to avoid data races with heartbeats.
+    auto handle = getReplExec()->scheduleWork(
+        [this, &config](const executor::TaskExecutor::CallbackArgs& cb) {
+            getTopoCoord().updateConfig(config, 1, getNet()->now());
+        });
+    ASSERT_OK(handle.getStatus());
+    getReplExec()->wait(handle.getValue());
 
     OplogQueryMetadata opMetaData(OpTimeAndWallTime(),
                                   OpTime(Timestamp(1, 1), 1),
@@ -3587,7 +3764,7 @@ TEST_F(ReplCoordTest, HelloReturnsErrorOnEnteringQuiesceModeAfterWaitingTimesOut
     auto maxAwaitTime = Milliseconds(5000);
     auto deadline = getNet()->now() + maxAwaitTime;
 
-    AtomicWord<bool> helloReturned{false};
+    Atomic<bool> helloReturned{false};
     stdx::thread getHelloThread([&] {
         ASSERT_THROWS_CODE(
             awaitHelloWithNewOpCtx(getReplCoord(), currentTopologyVersion, {}, deadline),
@@ -3644,7 +3821,7 @@ TEST_F(ReplCoordTest, AlwaysDecrementNumAwaitingTopologyChangesOnErrorMongoD) {
     auto deadline = getNet()->now() + Milliseconds(5000);
     auto currentTopologyVersion = getTopoCoord().getTopologyVersion();
 
-    AtomicWord<bool> helloReturned{false};
+    Atomic<bool> helloReturned{false};
     stdx::thread getHelloThread([&] {
         ASSERT_THROWS_CODE(
             awaitHelloWithNewOpCtx(getReplCoord(), currentTopologyVersion, {}, deadline),
@@ -4174,7 +4351,7 @@ TEST_F(ReplCoordTest, AwaitableHelloOnNodeWithUninitializedConfig) {
     auto halfwayToDeadline = getNet()->now() + maxAwaitTime / 2;
     auto deadline = getNet()->now() + maxAwaitTime;
 
-    AtomicWord<bool> isHelloReturned{false};
+    Atomic<bool> isHelloReturned{false};
     stdx::thread awaitHelloTimeout([&] {
         const auto expectedTopologyVersion = getTopoCoord().getTopologyVersion();
         const auto response =
@@ -4657,7 +4834,7 @@ TEST_F(ReplCoordTest, HelloOnRemovedNode) {
     ASSERT_EQUALS(responseTopologyVersion->getCounter(), currentTopologyVersion.getCounter());
     ASSERT_FALSE(response->isWritablePrimary());
 
-    AtomicWord<bool> helloReturned{false};
+    Atomic<bool> helloReturned{false};
     // A request with an equal TopologyVersion should wait and timeout once the deadline is reached.
     const auto halfwayToDeadline = getNet()->now() + maxAwaitTime / 2;
     stdx::thread getHelloThread([&, deadline] {
@@ -6219,6 +6396,104 @@ TEST_F(StableOpTimeTest, AdvanceCommitPointSetsStableOpTimeForStorage) {
     ASSERT_EQUALS(Timestamp(3, 2), stableTimestamp);
 }
 
+class LastStableRecoveryTimestampTest : public ReplCoordTest {
+public:
+    void setUp() override {
+        ReplCoordTest::setUp();
+        init("mySet/test1:1234,test2:1234,test3:1234");
+        assertStartSuccess(BSON("_id" << "mySet"
+                                      << "protocolVersion" << 1 << "version" << 1 << "members"
+                                      << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                               << "test1:1234")
+                                                    << BSON("_id" << 1 << "host"
+                                                                  << "test2:1234")
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "test3:1234"))),
+                           HostAndPort("test2", 1234));
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+        replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(OpTimeWithTermOne(1, 1),
+                                                            Date_t() + Seconds(100));
+        simulateSuccessfulV1Election();
+        getStorageInterface()->allDurableTimestamp = Timestamp(10, 1);
+        replCoordSetMyLastWrittenOpTime(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100));
+        replCoordSetMyLastAppliedOpTime(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100));
+    }
+};
+
+TEST_F(LastStableRecoveryTimestampTest, CachesRealTimestamp) {
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp(100, 1);
+
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100), false);
+
+    ASSERT_TRUE(getTopoCoord().hasCachedLastStableRecoveryTimestamp());
+    ASSERT_EQUALS(Timestamp(100, 1), *getTopoCoord().getCachedLastStableRecoveryTimestamp());
+}
+
+TEST_F(LastStableRecoveryTimestampTest, DoesNotCacheMinTimestamp) {
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp::min();
+
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100), false);
+
+    ASSERT_FALSE(getTopoCoord().hasCachedLastStableRecoveryTimestamp());
+}
+
+TEST_F(LastStableRecoveryTimestampTest, DoesNotCacheAbsentTimestamp) {
+    getStorageInterface()->lastStableRecoveryTimestamp = boost::none;
+
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100), false);
+
+    ASSERT_FALSE(getTopoCoord().hasCachedLastStableRecoveryTimestamp());
+}
+
+TEST_F(LastStableRecoveryTimestampTest, ThrottlesCacheRefreshAfterValueEstablished) {
+    const double origSyncDelay = storageGlobalParams.syncdelay.load();
+    // --syncdelay=1 second means the throttle window is 2 seconds.
+    storageGlobalParams.syncdelay.store(1.0);
+    ON_BLOCK_EXIT([origSyncDelay] { storageGlobalParams.syncdelay.store(origSyncDelay); });
+
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp(100, 1);
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100), false);
+    ASSERT_EQUALS(Timestamp(100, 1), *getTopoCoord().getCachedLastStableRecoveryTimestamp());
+
+    // A second call within the throttle window should not update the cached value.
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp(100, 2);
+    replCoordSetMyLastWrittenOpTime(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100));
+    replCoordSetMyLastAppliedOpTime(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100));
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100), false);
+    ASSERT_EQUALS(Timestamp(100, 1), *getTopoCoord().getCachedLastStableRecoveryTimestamp());
+
+    // After the throttle window expires, the next call should update the cached value.
+    enterNetwork();
+    getNet()->runUntil(getNet()->now() + Seconds(3));
+    exitNetwork();
+    replCoordSetMyLastWrittenOpTime(OpTimeWithTermOne(4, 1), Date_t() + Seconds(100));
+    replCoordSetMyLastAppliedOpTime(OpTimeWithTermOne(4, 1), Date_t() + Seconds(100));
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(4, 1), Date_t() + Seconds(100), false);
+    ASSERT_EQUALS(Timestamp(100, 2), *getTopoCoord().getCachedLastStableRecoveryTimestamp());
+}
+
+TEST_F(LastStableRecoveryTimestampTest, AggressivelyRefreshesUntilValueEstablished) {
+    // Use a throttle window long enough that it cannot expire during the test. Any refreshing of
+    // the cached value will be driven by the cached value being unset, not by the timer.
+    const double origSyncDelay = storageGlobalParams.syncdelay.load();
+    storageGlobalParams.syncdelay.store(3600.0);
+    ON_BLOCK_EXIT([origSyncDelay] { storageGlobalParams.syncdelay.store(origSyncDelay); });
+
+    // The first call returns Timestamp::min() and means no value should be cached.
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp::min();
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(2, 1), Date_t() + Seconds(100), false);
+    ASSERT_FALSE(getTopoCoord().hasCachedLastStableRecoveryTimestamp());
+
+    // Even within the throttle window, the next call should still update the cached value because
+    // it was unset.
+    getStorageInterface()->lastStableRecoveryTimestamp = Timestamp(100, 1);
+    replCoordSetMyLastWrittenOpTime(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100));
+    replCoordSetMyLastAppliedOpTime(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100));
+    replCoordAdvanceCommitPoint(OpTimeWithTermOne(3, 1), Date_t() + Seconds(100), false);
+    ASSERT_TRUE(getTopoCoord().hasCachedLastStableRecoveryTimestamp());
+    ASSERT_EQUALS(Timestamp(100, 1), *getTopoCoord().getCachedLastStableRecoveryTimestamp());
+}
+
 TEST_F(ReplCoordTest, NodeReturnsShutdownInProgressWhenWaitingUntilAnOpTimeDuringShutdown) {
     assertStartSuccess(BSON("_id" << "mySet"
                                   << "version" << 2 << "members"
@@ -7055,6 +7330,200 @@ TEST_F(ReplCoordTest,
                                replCoord->getElectionTimeout_forTest());
 }
 
+/**
+ * Fixture for the 'enableStrictPrimaryLivenessCheck' tests. Sets up a two-node set in which node1
+ * (self) is SECONDARY and node2 is PRIMARY, and provides helpers to feed heartbeat requests from
+ * and heartbeat responses to the primary.
+ */
+class StrictPrimaryLivenessCheckTest : public ReplCoordTest {
+public:
+    static constexpr int kConfigVersion = 2;
+
+    void setUp() override {
+        ReplCoordTest::setUp();
+        assertStartSuccess(BSON("_id" << "mySet" << "protocolVersion" << 1 << "version"
+                                      << kConfigVersion << "members"
+                                      << BSON_ARRAY(BSON("host" << "node1:12345" << "_id" << 0)
+                                                    << BSON("host" << "node2:12345" << "_id" << 1))
+                                      << "settings"
+                                      << BSON("electionTimeoutMillis"
+                                              << 10000 << "heartbeatIntervalMillis" << 2000)),
+                           HostAndPort("node1", 12345));
+        ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    }
+
+    /**
+     * Simulates node2, the primary, initiating a heartbeat to us. This is the signal the strict
+     * check requires.
+     */
+    void receiveHeartbeatRequestFromPrimary() {
+        ReplSetHeartbeatArgsV1 hbArgs;
+        hbArgs.setSetName("mySet");
+        hbArgs.setConfigVersion(kConfigVersion);
+        hbArgs.setConfigTerm(getReplCoord()->getConfig().getConfigTerm());
+        hbArgs.setSenderId(1);
+        hbArgs.setSenderHost(HostAndPort("node2", 12345));
+        hbArgs.setTerm(getReplCoord()->getTerm());
+        ReplSetHeartbeatResponse hbResp;
+        auto opCtx = makeOperationContext();
+        ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
+    }
+
+    /**
+     * Replies to our next outstanding heartbeat request at 'when' as if node2 were a healthy
+     * primary in our term, and runs the network up to that point.
+     */
+    void deliverHeartbeatResponseFromPrimaryAt(Date_t when) {
+        auto net = getNet();
+        net->enterNetwork();
+        // The next heartbeat request may not have been sent yet; let the network run up to 'when'
+        // until it is.
+        while (!net->hasReadyRequests() && net->now() < when) {
+            net->runUntil(when);
+        }
+        ASSERT_TRUE(net->hasReadyRequests());
+        auto noi = net->getNextReadyRequest();
+        ASSERT_EQUALS(HostAndPort("node2", 12345), noi->getRequest().target);
+        ASSERT_EQUALS("replSetHeartbeat",
+                      noi->getRequest().cmdObj.firstElement().fieldNameStringData());
+
+        ReplSetHeartbeatResponse hbResp;
+        hbResp.setSetName("mySet");
+        hbResp.setState(MemberState::RS_PRIMARY);
+        hbResp.setTerm(getReplCoord()->getTerm());
+        hbResp.setConfigVersion(kConfigVersion);
+        hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+        hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+        hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+
+        net->scheduleResponse(noi, when, makeResponseStatus(hbResp.toBSON()));
+        net->runUntil(when);
+        ASSERT_EQUALS(when, net->now());
+        net->runReadyNetworkOperations();
+        net->exitNetwork();
+    }
+};
+
+TEST_F(StrictPrimaryLivenessCheckTest, RescheduleElectionTimeoutWhenPrimaryKeepsSendingHeartbeats) {
+    enableStrictPrimaryLivenessCheck.store(true);
+
+    auto replCoord = getReplCoord();
+    const auto electionTimeoutPeriod = replCoord->getConfig().getElectionTimeoutPeriod();
+    const auto startDate = getNet()->now();
+
+    receiveHeartbeatRequestFromPrimary();
+
+    const auto firstResponseAt = startDate + Seconds(4);
+    deliverHeartbeatResponseFromPrimaryAt(firstResponseAt);
+    const auto postponedTimeout = replCoord->getElectionTimeout_forTest();
+    ASSERT_LESS_THAN_OR_EQUALS(firstResponseAt + electionTimeoutPeriod, postponedTimeout);
+
+    // A healthy primary keeps initiating heartbeats, so the response still postpones the election
+    // timeout even though the first request has gone stale.
+    receiveHeartbeatRequestFromPrimary();
+    const auto secondResponseAt = startDate + electionTimeoutPeriod + Seconds(1);
+    deliverHeartbeatResponseFromPrimaryAt(secondResponseAt);
+    ASSERT_LESS_THAN_OR_EQUALS(secondResponseAt + electionTimeoutPeriod,
+                               replCoord->getElectionTimeout_forTest());
+}
+
+TEST_F(StrictPrimaryLivenessCheckTest,
+       DoNotRescheduleElectionTimeoutWhenPrimaryHasNotSentAHeartbeatRecently) {
+    enableStrictPrimaryLivenessCheck.store(true);
+
+    auto replCoord = getReplCoord();
+    const auto electionTimeoutPeriod = replCoord->getConfig().getElectionTimeoutPeriod();
+    const auto startDate = getNet()->now();
+
+    // The primary initiates a heartbeat to us, then goes silent.
+    receiveHeartbeatRequestFromPrimary();
+
+    // While that request is still fresh, a heartbeat response from the primary postpones the
+    // election timeout.
+    const auto firstResponseAt = startDate + Seconds(4);
+    deliverHeartbeatResponseFromPrimaryAt(firstResponseAt);
+    const auto postponedTimeout = replCoord->getElectionTimeout_forTest();
+    ASSERT_LESS_THAN_OR_EQUALS(firstResponseAt + electionTimeoutPeriod, postponedTimeout);
+
+    // Once more than an election timeout period has passed since that request, a heartbeat response
+    // from the primary is no longer enough to postpone the election timeout.
+    const auto secondResponseAt = startDate + electionTimeoutPeriod + Seconds(1);
+    deliverHeartbeatResponseFromPrimaryAt(secondResponseAt);
+    ASSERT_EQUALS(postponedTimeout, replCoord->getElectionTimeout_forTest());
+}
+
+TEST_F(StrictPrimaryLivenessCheckTest,
+       RescheduleElectionTimeoutOnStaleHeartbeatWhenStrictCheckIsDisabled) {
+    enableStrictPrimaryLivenessCheck.store(false);
+    ON_BLOCK_EXIT([&] { enableStrictPrimaryLivenessCheck.store(true); });
+
+    auto replCoord = getReplCoord();
+    const auto electionTimeoutPeriod = replCoord->getConfig().getElectionTimeoutPeriod();
+    const auto startDate = getNet()->now();
+
+    receiveHeartbeatRequestFromPrimary();
+
+    const auto firstResponseAt = startDate + Seconds(4);
+    deliverHeartbeatResponseFromPrimaryAt(firstResponseAt);
+    ASSERT_LESS_THAN_OR_EQUALS(firstResponseAt + electionTimeoutPeriod,
+                               replCoord->getElectionTimeout_forTest());
+
+    // With the strict check disabled, the stale request from the primary is irrelevant: the
+    // response alone postpones the election timeout.
+    const auto secondResponseAt = startDate + electionTimeoutPeriod + Seconds(1);
+    deliverHeartbeatResponseFromPrimaryAt(secondResponseAt);
+    ASSERT_LESS_THAN_OR_EQUALS(secondResponseAt + electionTimeoutPeriod,
+                               replCoord->getElectionTimeout_forTest());
+}
+
+TEST_F(StrictPrimaryLivenessCheckTest,
+       StopReschedulingElectionTimeoutWhenNoHeartbeatFromPrimaryHasEverBeenReceived) {
+    enableStrictPrimaryLivenessCheck.store(true);
+
+    auto replCoord = getReplCoord();
+    const auto electionTimeoutPeriod = replCoord->getConfig().getElectionTimeoutPeriod();
+    const auto startDate = getNet()->now();
+    const auto initialTimeout = replCoord->getElectionTimeout_forTest();
+
+    // We have never received a heartbeat request from the primary, e.g. because we just discovered
+    // it. The response that reveals the primary arrives before we have identified it, so it
+    // postpones the election timeout.
+    const auto firstResponseAt = startDate + Seconds(4);
+    deliverHeartbeatResponseFromPrimaryAt(firstResponseAt);
+    const auto postponedTimeout = replCoord->getElectionTimeout_forTest();
+    ASSERT_GREATER_THAN(postponedTimeout, initialTimeout);
+    ASSERT_LESS_THAN_OR_EQUALS(firstResponseAt + electionTimeoutPeriod, postponedTimeout);
+
+    // Now that we know who the primary is, further responses from a primary that has still never
+    // initiated a heartbeat towards us no longer postpone the election timeout, so the grace
+    // period this node gets on discovery is bounded.
+    const auto secondResponseAt = startDate + electionTimeoutPeriod + Seconds(1);
+    deliverHeartbeatResponseFromPrimaryAt(secondResponseAt);
+    ASSERT_EQUALS(postponedTimeout, replCoord->getElectionTimeout_forTest());
+}
+
+TEST_F(StrictPrimaryLivenessCheckTest,
+       RescheduleElectionTimeoutWhenNoHeartbeatFromPrimaryHasEverBeenReceivedAndCheckIsDisabled) {
+    enableStrictPrimaryLivenessCheck.store(false);
+    ON_BLOCK_EXIT([&] { enableStrictPrimaryLivenessCheck.store(true); });
+
+    auto replCoord = getReplCoord();
+    const auto electionTimeoutPeriod = replCoord->getConfig().getElectionTimeoutPeriod();
+    const auto startDate = getNet()->now();
+
+    // The primary has never initiated a heartbeat towards us. With the strict check disabled that
+    // is irrelevant, so every response postpones the election timeout indefinitely.
+    const auto firstResponseAt = startDate + Seconds(4);
+    deliverHeartbeatResponseFromPrimaryAt(firstResponseAt);
+    ASSERT_LESS_THAN_OR_EQUALS(firstResponseAt + electionTimeoutPeriod,
+                               replCoord->getElectionTimeout_forTest());
+
+    const auto secondResponseAt = startDate + electionTimeoutPeriod + Seconds(1);
+    deliverHeartbeatResponseFromPrimaryAt(secondResponseAt);
+    ASSERT_LESS_THAN_OR_EQUALS(secondResponseAt + electionTimeoutPeriod,
+                               replCoord->getElectionTimeout_forTest());
+}
+
 TEST_F(ReplCoordTest,
        DontRescheduleElectionTimeoutWhenProcessingHeartbeatResponseFromPrimaryInDiffertTerm) {
     assertStartSuccess(BSON("_id" << "mySet"
@@ -7257,6 +7726,44 @@ TEST_F(ReplCoordTest, ZeroCommittedSnapshotAfterClearingCommittedSnapshot) {
     ASSERT_EQUALS(OpTime(), getReplCoord()->getCurrentCommittedSnapshotOpTime());
 }
 
+// Test that when leaving STARTUP2 state, we update the committed snapshot opTime which was skipped
+// during initial sync.
+TEST_F(ReplCoordTest, AdvanceCommittedSnapshotWhenLeavingStartup2WithACommitPointAlreadyAtTip) {
+    init("mySet");
+
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                           << "node1:12345")
+                                                << BSON("_id" << 1 << "host"
+                                                              << "node2:12345"))),
+                       HostAndPort("node1", 12345));
+    ASSERT_EQUALS(MemberState::RS_STARTUP2, getReplCoord()->getMemberState().s);
+
+    // Set state as if initial sync has applied up to the tip of the sync source's oplog.
+    const auto oplogTip = OpTime(Timestamp(100, 100), 100);
+    const auto wallTime = Date_t() + Seconds(100);
+    replCoordSetMyLastWrittenOpTime(oplogTip, wallTime);
+    replCoordSetMyLastAppliedOpTime(oplogTip, wallTime);
+    replCoordSetMyLastDurableOpTime(oplogTip, wallTime);
+    getStorageInterface()->allDurableTimestamp = oplogTip.getTimestamp();
+
+    // Simulate advancing the commit point while in STARTUP2 state.
+    getReplCoord()->advanceCommitPoint({oplogTip, wallTime}, true /* fromSyncSource */);
+    ASSERT_EQUALS(oplogTip, getReplCoord()->getLastCommittedOpTime());
+    ASSERT_EQUALS(OpTime(), getReplCoord()->getCurrentCommittedSnapshotOpTime())
+        << "the committed snapshot is expected to be skipped while in STARTUP2";
+
+    // Initial sync completes and the node leaves STARTUP2 with its commit point already at the tip.
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_RECOVERING));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+
+    // We should update the committed snapshot time that we skipped during initial sync.
+    ASSERT_EQUALS(oplogTip, getReplCoord()->getCurrentCommittedSnapshotOpTime())
+        << "leaving STARTUP2 must install the committed snapshot that was skipped while in "
+           "STARTUP2";
+}
+
 TEST_F(ReplCoordTest, DoNotAdvanceCommittedSnapshotWhenAppliedOpTimeChanges) {
     init("mySet");
 
@@ -7409,7 +7916,7 @@ TEST_F(ReplCoordTest, OnlyForwardSyncProgressForOtherNodesWhenTheNodesAreBelieve
                                  << BSON("_id" << 2 << "host"
                                                << "test3:1234"))
                    << "protocolVersion" << 1 << "settings"
-                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000)),
+                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 1000)),
         HostAndPort("test1", 1234));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
 
@@ -7442,6 +7949,7 @@ TEST_F(ReplCoordTest, OnlyForwardSyncProgressForOtherNodesWhenTheNodesAreBelieve
     getNet()->enterNetwork();
     while (getNet()->now() < endDate) {
         getNet()->runUntil(endDate);
+        // Discard any heartbeats or other network requests that might have arrived in the middle.
         if (getNet()->now() < endDate) {
             getNet()->blackHole(getNet()->getNextReadyRequest());
         }
@@ -7480,7 +7988,7 @@ TEST_F(ReplCoordTest, UpdatePositionCmdHasMetadata) {
                                  << BSON("_id" << 2 << "host"
                                                << "test3:1234"))
                    << "protocolVersion" << 1 << "settings"
-                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000
+                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 1000
                                                    << "replicaSetId" << replicaSetId)),
         HostAndPort("test1", 1234));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -7528,7 +8036,7 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                                  << BSON("host" << "node5:12345"
                                                 << "_id" << 4))
                    << "protocolVersion" << 1 << "settings"
-                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 40000)),
+                   << BSON("electionTimeoutMillis" << 2000 << "heartbeatIntervalMillis" << 1000)),
         HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     OpTime startingOpTime = OpTime(Timestamp(100, 1), 0);
@@ -7618,13 +8126,33 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                        << UpdatePositionArgs::kDurableWallTimeFieldName
                        << Date_t() + Seconds(startingOpTime.getSecs()))))));
     const Date_t startDate = getNet()->now();
+    const Date_t endDate = startDate + Milliseconds(100);
     getNet()->enterNetwork();
-    getNet()->runUntil(startDate + Milliseconds(100));
+
+    // Drop any heartbeats that occur in the next 100 ms.
+    while (getNet()->now() < endDate) {
+        getNet()->runUntil(endDate);
+        if (getNet()->now() < endDate) {
+            getNet()->blackHole(getNet()->getNextReadyRequest());
+        }
+    }
+    getNet()->exitNetwork();
+
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args1));
 
     // Confirm that the node remains PRIMARY after the other two nodes are marked DOWN.
-    getNet()->runUntil(startDate + Milliseconds(2080));
+    const Date_t endDate1 = startDate + Milliseconds(2080);
+    getNet()->enterNetwork();
+
+    // Drop any heartbeats that occur in the next 2080 ms.
+    while (getNet()->now() < endDate1) {
+        getNet()->runUntil(endDate1);
+        if (getNet()->now() < endDate1) {
+            getNet()->blackHole(getNet()->getNextReadyRequest());
+        }
+    }
     getNet()->exitNetwork();
+
     ASSERT_EQUALS(MemberState::RS_PRIMARY, getReplCoord()->getMemberState().s);
 
     // Keep the same two nodes alive via v1 heartbeat.
@@ -7635,17 +8163,17 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(makeOperationContext().get(), hbArgs, &hbResp));
     hbArgs.setSenderId(2);
     hbArgs.setSenderHost(HostAndPort("node3", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(makeOperationContext().get(), hbArgs, &hbResp));
 
     // Confirm that the node remains PRIMARY after the timeout from the UpdatePosition expires.
     getNet()->enterNetwork();
-    const Date_t endDate = startDate + Milliseconds(2200);
-    while (getNet()->now() < endDate) {
-        getNet()->runUntil(endDate);
-        if (getNet()->now() < endDate) {
+    const Date_t endDate2 = startDate + Milliseconds(2200);
+    while (getNet()->now() < endDate2) {
+        getNet()->runUntil(endDate2);
+        if (getNet()->now() < endDate2) {
             getNet()->blackHole(getNet()->getNextReadyRequest());
         }
     }
@@ -7675,15 +8203,15 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
     hbArgs.setSenderId(1);
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(makeOperationContext().get(), hbArgs, &hbResp));
 
     // Confirm that the node relinquishes PRIMARY after only one node is left UP.
-    const Date_t startDate1 = getNet()->now();
-    const Date_t endDate1 = startDate1 + Milliseconds(1980);
+    const Date_t startDateNew = getNet()->now();
+    const Date_t endDate3 = startDateNew + Milliseconds(1980);
     getNet()->enterNetwork();
-    while (getNet()->now() < endDate1) {
-        getNet()->runUntil(endDate1);
-        if (getNet()->now() < endDate1) {
+    while (getNet()->now() < endDate3) {
+        getNet()->runUntil(endDate3);
+        if (getNet()->now() < endDate3) {
             getNet()->blackHole(getNet()->getNextReadyRequest());
         }
     }

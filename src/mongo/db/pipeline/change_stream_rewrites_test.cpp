@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/json.h"
@@ -4370,6 +4343,184 @@ TEST_F(ChangeStreamRewriteTest,
         expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"updateDescription"});
 
     ASSERT(rewrittenMatchExpression == nullptr);
+}
+
+//
+// 'wallTime' rewrites
+//
+TEST_F(ChangeStreamRewriteTest, CanRewriteEqPredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto dateVal = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    auto expr = BSON("wallTime" << BSON("$eq" << dateVal));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, BSON("wall" << BSON("$eq" << dateVal)));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteNePredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto dateVal = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    auto expr = BSON("wallTime" << BSON("$ne" << dateVal));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    // {$ne: ...} is rewritten to {$not: {$eq: ...}}.
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, BSON("wall" << BSON("$not" << BSON("$eq" << dateVal))));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteInPredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto dateVal1 = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    const auto dateVal2 = Date_t::fromMillisSinceEpoch(1672531200000LL);
+    auto expr = BSON("wallTime" << BSON("$in" << BSON_ARRAY(dateVal1 << dateVal2)));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate,
+                      BSON("wall" << BSON("$in" << BSON_ARRAY(dateVal1 << dateVal2))));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteGtPredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto dateVal = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    auto expr = BSON("wallTime" << BSON("$gt" << dateVal));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, BSON("wall" << BSON("$gt" << dateVal)));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteRangePredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto lower = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    const auto upper = Date_t::fromMillisSinceEpoch(1672531200000LL);
+    auto expr = BSON("wallTime" << BSON("$gte" << lower << "$lt" << upper));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate,
+                      BSON("$and" << BSON_ARRAY(BSON("wall" << BSON("$gte" << lower))
+                                                << BSON("wall" << BSON("$lt" << upper)))));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteTypePredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    // BSON date type has numeric code 9.
+    auto expr = fromjson("{wallTime: {$type: [9]}}");
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{wall: {$type: [9]}}"));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewritePositiveExistsPredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    auto expr = fromjson("{wallTime: {$exists: true}}");
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{wall: {$exists: true}}"));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteNegativeExistsPredicateOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    auto expr = fromjson("{wallTime: {$exists: false}}");
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    // {$exists: false} is rewritten to {$not: {$exists: true}}.
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{wall: {$not: {$exists: true}}}"));
+}
+
+TEST_F(ChangeStreamRewriteTest, CanRewriteExprOnWallTimeField) {
+    auto expCtx = getExpCtx();
+    const auto dateVal = Date_t::fromMillisSinceEpoch(1672531200000LL);
+    auto expr = BSON("$expr" << BSON("$lt" << BSON_ARRAY("$wallTime" << dateVal)));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(expr, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"wallTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(
+        rewrittenPredicate,
+        BSON("$expr" << BSON("$lt" << BSON_ARRAY("$wall" << BSON("$const" << dateVal)))));
+}
+
+TEST_F(ChangeStreamRewriteTest, DoesNotRewriteWallTimeWhenNotRequested) {
+    auto expCtx = getExpCtx();
+    const auto dateVal = Date_t::fromMillisSinceEpoch(1640995200000LL);
+    // Combine wallTime with clusterTime so that the AND result is non-null; clusterTime
+    // is rewritable, wallTime is not requested, so only the clusterTime child is kept.
+    auto expr = fromjson("{clusterTime: {$type: [17]}}");
+    auto wallTimeExpr = BSON("wallTime" << BSON("$gt" << dateVal));
+
+    // Build a combined AND of wallTime + clusterTime.
+    auto combined = BSON("$and" << BSON_ARRAY(expr << wallTimeExpr));
+    auto statusWithMatchExpression = MatchExpressionParser::parse(combined, expCtx);
+    ASSERT_OK(statusWithMatchExpression.getStatus());
+
+    auto bsonObjsArray = std::vector<BSONObj>{};
+    // Request only 'clusterTime', not 'wallTime'.
+    auto rewrittenMatchExpression = change_stream_rewrite::rewriteFilterForFields(
+        expCtx, statusWithMatchExpression.getValue().get(), bsonObjsArray, {"clusterTime"});
+    ASSERT(rewrittenMatchExpression);
+
+    // The rewrite keeps clusterTime (renamed to ts) and drops the unrequested wallTime.
+    auto rewrittenPredicate = rewrittenMatchExpression->serialize();
+    ASSERT_BSONOBJ_EQ(rewrittenPredicate, fromjson("{$and: [{ts: {$type: [17]}}]}"));
 }
 
 }  // namespace

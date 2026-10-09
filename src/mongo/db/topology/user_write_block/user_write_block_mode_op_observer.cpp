@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/user_write_block/user_write_block_mode_op_observer.h"
 
@@ -36,7 +10,7 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/topology/user_write_block/global_user_write_block_state.h"
 #include "mongo/db/topology/user_write_block/user_writes_critical_section_document_gen.h"
-#include "mongo/db/topology/user_write_block/user_writes_recoverable_critical_section_service.h"
+#include "mongo/db/topology/user_write_block/writes_recoverable_critical_section_service.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 
@@ -50,12 +24,12 @@ void UserWriteBlockModeOpObserver::onInserts(OperationContext* opCtx,
                                              std::vector<InsertStatement>::const_iterator first,
                                              std::vector<InsertStatement>::const_iterator last,
                                              const std::vector<RecordId>& recordIds,
-                                             std::vector<bool> fromMigrate,
+                                             const std::vector<bool>& fromMigrate,
                                              bool defaultFromMigrate,
                                              OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
 
-    if (!defaultFromMigrate) {
+    if (!defaultFromMigrate && nss != NamespaceString::kReplicaSetWritesCriticalSectionsNamespace) {
         _checkWriteAllowed(opCtx, nss);
     }
 
@@ -91,7 +65,8 @@ void UserWriteBlockModeOpObserver::onUpdate(OperationContext* opCtx,
                                             OpStateAccumulator* opAccumulator) {
     const auto& nss = args.coll->ns();
 
-    if (args.updateArgs->source != OperationSource::kFromMigrate) {
+    if (args.updateArgs->source != OperationSource::kFromMigrate &&
+        nss != NamespaceString::kReplicaSetWritesCriticalSectionsNamespace) {
         _checkWriteAllowed(opCtx, nss);
     }
 
@@ -131,7 +106,7 @@ void UserWriteBlockModeOpObserver::onDelete(OperationContext* opCtx,
                                             const OplogDeleteEntryArgs& args,
                                             OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
-    if (!args.fromMigrate) {
+    if (!args.fromMigrate && nss != NamespaceString::kReplicaSetWritesCriticalSectionsNamespace) {
         _checkWriteAllowed(opCtx, nss);
     }
 
@@ -155,7 +130,7 @@ void UserWriteBlockModeOpObserver::onReplicationRollback(OperationContext* opCtx
                                                          const RollbackObserverInfo& rbInfo) {
     if (rbInfo.rollbackNamespaces.find(NamespaceString::kUserWritesCriticalSectionsNamespace) !=
         rbInfo.rollbackNamespaces.end()) {
-        UserWritesRecoverableCriticalSectionService::get(opCtx)->recoverRecoverableCriticalSections(
+        UserWritesRecoverableCriticalSectionService::get(opCtx)->recoverUserWritesCriticalSection(
             opCtx);
     }
 }

@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/expression_const_eval.h"
 
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/query/algebra/operator.h"
 #include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
 #include "mongo/util/assert_util.h"
@@ -63,7 +38,6 @@ void ExpressionConstEval::optimize(abt::ABT& n) {
         algebra::transport<true>(n, *this);
     }
 
-    // TODO SERVER-95539: should we be clearing here?
     _singleRef.clear();
 
     _staleDefs.clear();
@@ -517,6 +491,13 @@ void ExpressionConstEval::transport(abt::ABT& n,
                 }
             }
             break;
+        case sbe::EFn::kMqlComparisonRank:
+            // We can simplify mqlComparisonRank(constant).
+            if (args.size() == 1 && args[0].is<abt::Constant>()) {
+                auto [tag, val] = args[0].cast<abt::Constant>()->get();
+                swapAndUpdate(n, abt::Constant::int32(sbe::vm::ByteCode::mqlComparisonRank(tag)));
+            }
+            break;
         case sbe::EFn::kTypeMatch:
             // We can simplify typeMatch(constant, constantMask).
             if (args.size() == 2 && args[0].is<abt::Constant>() && args[1].is<abt::Constant>()) {
@@ -568,7 +549,7 @@ void ExpressionConstEval::transport(abt::ABT& n,
                     auto [tag, val] = arg.cast<abt::Constant>()->get();
                     // Copy the value before inserting into the array.
                     auto [tagCopy, valCopy] = sbe::value::copyValue(tag, val);
-                    array.push_back(tagCopy, valCopy);
+                    array.push_back_raw(tagCopy, valCopy);
                 }
                 auto [tag, val] = sbe::value::makeCopyArray(array);
                 swapAndUpdate(n, abt::make<abt::Constant>(tag, val));

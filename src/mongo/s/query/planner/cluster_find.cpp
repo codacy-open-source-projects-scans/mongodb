@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/query/planner/cluster_find.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,6 +19,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/basic_types.h"
+#include "mongo/db/change_stream_metrics_util.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
@@ -134,6 +108,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -160,7 +135,7 @@ const char kFindCmdName[] = "find";
 BSONObj makeFindCommandForShards(OperationContext* opCtx,
                                  const std::set<ShardId>& shardIds,
                                  const CanonicalQuery& query,
-                                 bool requestQueryStatsFromRemotes,
+                                 IncludeMetrics remoteMetricsToInclude,
                                  const UUID& opKey) {
     auto findCommand = [&]() -> FindCommandRequest {
         if (shardIds.size() > 1) {
@@ -180,12 +155,6 @@ BSONObj makeFindCommandForShards(OperationContext* opCtx,
     findCommand.setMaxTimeMS(args.getMaxTimeMS());
     findCommand.setReadConcern(std::move(args.getReadConcern()));
 
-    auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    if (readConcernArgs.wasAtClusterTimeSelected()) {
-        // If mongos selected atClusterTime or received it from client, transmit it to shard.
-        findCommand.setReadConcern(readConcernArgs);
-    }
-
     query.getExpCtx()->initializeReferencedSystemVariables();
 
     // Replace the 'letParams' expressions with their values.
@@ -195,11 +164,10 @@ BSONObj makeFindCommandForShards(OperationContext* opCtx,
         findCommand.setLet(vars.toBSON(vps, *letParams));
     }
 
-    // ExpressionContext may contain previously looked up query settings. Propagate it to the
-    // shards.
-    if (!query_settings::isDefault(query.getExpCtx()->getQuerySettings())) {
-        findCommand.setQuerySettings(query.getExpCtx()->getQuerySettings());
-    }
+    // ExpressionContext may contain previously looked up query settings. Propagate them, and the
+    // 'maxTimeMS' resolved from them, to the shards.
+    query_settings::applyToShardRequest(
+        findCommand, query.getExpCtx()->getQuerySettings(), static_cast<bool>(query.getExplain()));
 
     // Pass the queryShapeHash to the shards. We must validate that all participating shards can
     // understand 'originalQueryShapeHash' and therefore check the feature flag. We use the last LTS
@@ -217,10 +185,12 @@ BSONObj makeFindCommandForShards(OperationContext* opCtx,
 
     // Request metrics if necessary.
     {
-        // We'll set includeQueryStatsMetrics if our configuration (e.g., feature flag, sample
-        // rate) dictates we should gather metrics, or the user sent the flag to us.
-        auto origValue = query.getFindCommandRequest().getIncludeQueryStatsMetrics();
-        if (origValue.value_or(false) || requestQueryStatsFromRemotes) {
+        // Request query stats metrics if our configuration (e.g., feature flag, sample rate)
+        // dictates we should gather metrics, or the user sent the flag to us.
+        const auto& origFindReq = query.getFindCommandRequest();
+        const bool origIncludeQueryStats =
+            origFindReq.getIncludeQueryStatsMetrics().value_or(false);
+        if (origIncludeQueryStats || remoteMetricsToInclude.getQueryStats()) {
             findCommand.setIncludeQueryStatsMetrics(true);
         }
     }
@@ -268,8 +238,9 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
     // Get the set of shards on which we will run the query.
     auto shardIds = getTargetedShardsForCanonicalQuery(query, cri);
 
-    bool requestQueryStatsFromRemotes =
-        query_stats::shouldRequestRemoteMetrics(CurOp::get(opCtx)->debug());
+    IncludeMetrics remoteMetricsToInclude;
+    remoteMetricsToInclude.setQueryStats(
+        query_stats::shouldRequestRemoteMetrics(CurOp::get(opCtx)->debug()));
 
     // Construct the query and parameters. Defer setting skip and limit here until
     // we determine if the query is targeting multi-shards or a single shard below.
@@ -291,7 +262,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
     params.isAllowPartialResults = findCommand.getAllowPartialResults();
     params.originatingPrivileges = {
         Privilege(ResourcePattern::forExactNamespace(origNss), ActionType::find)};
-    params.requestQueryStatsFromRemotes = requestQueryStatsFromRemotes;
+    params.remoteMetricsToInclude = remoteMetricsToInclude;
 
     // This is the batchSize passed to each subsequent getMore command issued by the cursor. We
     // usually use the batchSize associated with the initial find, but as it is illegal to send a
@@ -355,7 +326,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         // OperationKey as well so establishCursors won't copy each request.
         std::vector<OperationKey> opKeys{UUID::gen()};
         const auto findCommandToForward = makeFindCommandForShards(
-            opCtx, shardIds, query, requestQueryStatsFromRemotes, opKeys.front());
+            opCtx, shardIds, query, remoteMetricsToInclude, opKeys.front());
         auto requests = buildVersionedRequests(
             opCtx, query.nss(), cri, shardIds, findCommandToForward, /*eligibleForSampling=*/true);
 
@@ -376,11 +347,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
                                  std::move(opKeys));
         });
     } catch (const DBException& ex) {
-        if (ex.code() == ErrorCodes::CollectionUUIDMismatch &&
-            !ex.extraInfo<CollectionUUIDMismatchInfo>()->actualCollection() &&
-            !shardIds.count(cri.getDbPrimaryShardId())) {
-            // We received CollectionUUIDMismatch but it does not contain the actual namespace, and
-            // we did not attempt to establish a cursor on the primary shard.
+        if (ex.code() == ErrorCodes::CollectionUUIDMismatch) {
             uassertStatusOK(populateCollectionUUIDMismatch(opCtx, ex.toStatus()));
             MONGO_UNREACHABLE_TASSERT(11052364);
         }
@@ -548,6 +515,13 @@ Status setUpOperationContextStateForGetMore(OperationContext* opCtx,
     // Restore rawData onto the opCtx.
     isRawDataOperation(opCtx) = cursor->getRawData();
 
+    // Restore the IFR context that this cursor's plan was built under. The feature-flag values
+    // stamped onto outbound shard requests come from this opCtx decoration (see
+    // ClientMetadataPropagationEgressHook::writeRequestMetadata), not from the pipeline's
+    // ExpressionContext. The GetMore should retain IFR flag values as dictated by the router's
+    // outbound request.
+    IncrementalFeatureRolloutContext::set(opCtx, cursor->cloneIfrContext());
+
     auto apiParamsFromClient = APIParameters::get(opCtx);
     uassert(
         ErrorCodes::APIMismatchError,
@@ -627,7 +601,7 @@ StatusWith<ClusterCursorManager::PinnedCursor> checkOutCursorWithRetries(
     OperationContext* opCtx,
     CursorId cursorId,
     AuthorizationSession* authzSession,
-    StringData commandName) {
+    std::string_view commandName) {
     auto cursorManager = Grid::get(opCtx)->getCursorManager();
     AuthzCheckFn authChecker = [&authzSession](AuthzCheckFnInputType userName) -> Status {
         return authzSession->isCoauthorizedWith(userName)
@@ -670,6 +644,25 @@ StatusWith<ClusterCursorManager::PinnedCursor> checkOutCursorWithRetries(
     MONGO_UNREACHABLE_TASSERT(10546600);
 }
 
+/**
+ * IFR kill switch for change stream v2 precise shard targeting. If this cursor was opened on the v2
+ * path but an operator has since disabled the IFR flag, retire it with a resumable error so the
+ * stream reopens on the v1 path. This is a no-op for v1 and non-change-stream cursors.
+ */
+void ensureChangeStreamShardTargetingStillEnabled(
+    ClusterCursorManager::PinnedCursor& pinnedCursor) {
+    // NOTE: we deliberately read the live flag value via checkEnabled() here, NOT the saved value
+    // from the operation's IFR context. The IFR context records the value seen when the cursor was
+    // opened, which for a v2 cursor is always 'true', reading it would defeat the kill switch.
+    if (pinnedCursor->usesChangeStreamV2ShardTargeting() &&
+        !feature_flags::gFeatureFlagChangeStreamReaderV2.checkEnabled()) {
+        // Throw a resumable error and leave 'pinnedCursor' unreturned, so its destructor kills the
+        // cursor instead of returning it to the manager as still-open.
+        uasserted(ErrorCodes::RetryChangeStream,
+                  "Change stream v2 shard targeting was disabled; resuming on the v1 path");
+    }
+}
+
 }  // namespace
 
 
@@ -691,15 +684,13 @@ std::unique_ptr<CanonicalQuery> ClusterFind::generateAndValidateCanonicalQuery(
     query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, expCtx);
     }};
-    auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-        return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, origNss);
-    });
+    auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
+        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape); });
 
-    // Perform the query settings lookup and attach it to 'expCtx'.
+    // Resolve the query settings for this operation.
     auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
-    auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
-        expCtx, queryShapeHash, origNss, parsedFind->findCommandRequest->getQuerySettings());
-    expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+    querySettingsService.initializeSettingsForQuery(
+        expCtx, queryShapeHash, parsedFind->findCommandRequest->getQuerySettings());
 
     if (mustRegisterRequestToQueryStats) {
         query_stats::registerRequest(
@@ -882,7 +873,7 @@ void ClusterFind::runQuery(OperationContext* opCtx,
                     uassertStatusOK(ClusterAggregate::retryOnViewOrIFRKickbackError(
                         opCtx,
                         aggRequestOnView,
-                        *ex.extraInfo<ResolvedView>(),
+                        *ex.extraInfo<ResolvedNamespace>(),
                         origNss,
                         {Privilege(ResourcePattern::forExactNamespace(origNss), ActionType::find)},
                         boost::none,
@@ -1073,6 +1064,11 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
     {
         CurOp::get(opCtx)->debug().nShards = pinnedCursor.getValue()->getNumRemotes();
         CurOp::get(opCtx)->debug().cursorid = cursorId;
+        CurOp::get(opCtx)->debug().isChangeStreamQuery =
+            pinnedCursor.getValue()->isChangeStreamCursor();
+        if (pinnedCursor.getValue()->isChangeStreamCursor()) {
+            change_stream::recordCursorOptionMetrics(cmd.getBatchSize(), cmd.getMaxTimeMS());
+        }
         std::lock_guard<Client> lk(*opCtx->getClient());
         CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(
             lk, pinnedCursor.getValue()->shouldOmitDiagnosticInformation());
@@ -1080,6 +1076,8 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
                                                  pinnedCursor.getValue()->getOriginatingCommand());
         CurOp::get(opCtx)->setGenericCursor(lk, pinnedCursor.getValue().toGenericCursor());
     }
+
+    ensureChangeStreamShardTargetingStillEnabled(pinnedCursor.getValue());
 
     // If the 'failGetMoreAfterCursorCheckout' failpoint is enabled, throw an exception with the
     // specified 'errorCode' value, or ErrorCodes::InternalError if 'errorCode' is omitted.
@@ -1215,6 +1213,13 @@ StatusWith<CursorResponse> ClusterFind::runGetMore(OperationContext* opCtx,
     opDebug.cursorExhausted = (idToReturn == 0);
     opDebug.getAdditiveMetrics().nBatches = 1;
     CurOp::get(opCtx)->setEndOfOpMetrics(batch.size());
+    if (opDebug.isChangeStreamQuery) {
+        tassert(12552801,
+                "expected a post batch resume token for change stream query on the sharded cluster",
+                !postBatchResumeToken.isEmpty());
+        opDebug.changeStreamMetrics.setOptime(
+            ResumeToken::extractClusterTime(postBatchResumeToken));
+    }
 
     const bool partialResultsReturned = pinnedCursor.getValue()->partialResultsReturned();
     pinnedCursor.getValue()->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/clonable_ptr.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,12 +20,14 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Match expression that matches documents whose properties meet certain requirements based on field
@@ -108,10 +83,10 @@ public:
      * string pattern, which is used for comparisons and serialization.
      */
     struct Pattern {
-        explicit Pattern(StringData pattern)
+        explicit Pattern(std::string_view pattern)
             : rawRegex(pattern), regex(std::make_unique<pcre::Regex>(std::string{rawRegex})) {}
 
-        StringData rawRegex;
+        std::string_view rawRegex;
         std::unique_ptr<pcre::Regex> regex;
     };
 
@@ -121,11 +96,11 @@ public:
      */
     using PatternSchema = std::pair<Pattern, std::unique_ptr<ExpressionWithPlaceholder>>;
 
-    static constexpr StringData kName = "$_internalSchemaAllowedProperties"_sd;
+    static constexpr std::string_view kName = "$_internalSchemaAllowedProperties"sv;
 
     explicit InternalSchemaAllowedPropertiesMatchExpression(
         StringDataSet properties,
-        StringData namePlaceholder,
+        std::string_view namePlaceholder,
         std::vector<PatternSchema> patternProperties,
         std::unique_ptr<ExpressionWithPlaceholder> otherwise,
         clonable_ptr<ErrorAnnotation> annotation = nullptr);
@@ -139,7 +114,7 @@ public:
     }
 
     void serialize(BSONObjBuilder* builder,
-                   const SerializationOptions& opts = {},
+                   const query_shape::SerializationOptions& opts = {},
                    bool includePath = true) const final;
 
     std::unique_ptr<MatchExpression> clone() const final;
@@ -198,7 +173,7 @@ public:
         return _patternProperties;
     }
 
-    StringData getNamePlaceholder() const {
+    std::string_view getNamePlaceholder() const {
         return _namePlaceholder;
     }
 
@@ -208,11 +183,11 @@ public:
 
 private:
     // The names of the properties are owned by the BSONObj used to create this match expression.
-    // Since that BSONObj must outlive this object, we can safely store StringData.
+    // Since that BSONObj must outlive this object, we can safely store std::string_view.
     StringDataSet _properties;
 
     // The placeholder used in both '_patternProperties' and '_otherwise'.
-    StringData _namePlaceholder;
+    std::string_view _namePlaceholder;
 
     std::vector<PatternSchema> _patternProperties;
 

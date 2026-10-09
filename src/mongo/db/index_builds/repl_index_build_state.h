@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -53,11 +28,12 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 // Indicates which protocol an index build is using.
 enum class IndexBuildProtocol {
@@ -162,9 +138,9 @@ inline bool mustAbortAtShutdown(IndexBuildProtocol protocol) {
 /**
  * Returns a string representation of IndexBuildProtocol.
  */
-StringData indexBuildProtocolToString(IndexBuildProtocol protocol);
+std::string_view indexBuildProtocolToString(IndexBuildProtocol protocol);
 
-IndexBuildProtocol parseIndexBuildProtocol(StringData);
+IndexBuildProtocol parseIndexBuildProtocol(std::string_view);
 
 // Indicates the type of abort or commit signal that will be received by primary and secondaries.
 enum class IndexBuildAction {
@@ -395,6 +371,8 @@ struct IndexBuildMetrics {
     Date_t voteCommitTime = Date_t::min();
     // The time at which we received a 'commitIndexBuild' oplog entry.
     Date_t commitIndexOplogEntryTime = Date_t::min();
+    // The phase from which the index build has been started or resumed.
+    IndexBuildPhaseEnum startPhase = IndexBuildPhaseEnum::kInitialized;
 };
 
 /**
@@ -651,6 +629,11 @@ public:
      */
     void setReceivedCommitIndexBuildEntryTime(const Date_t& time);
 
+    /**
+     * Stores the phase from which the index build is started or resumed.
+     */
+    void setIndexBuildStartPhase(IndexBuildPhaseEnum phase);
+
     // Uniquely identifies this index build across replica set members.
     const UUID buildUUID;
 
@@ -689,9 +672,17 @@ public:
     // Used only by the thread pool task for the index build. No synchronization necessary.
     IndexCatalogStats stats;
 
-    // Communicates the final outcome of the index build to any callers waiting upon the associated
-    // SharedSemiFuture(s).
-    SharedPromise<IndexCatalogStats> sharedPromise;
+    /**
+     * Returns a future that callers can use to wait for the final outcome of the index build.
+     */
+    SharedSemiFuture<IndexCatalogStats> getOutcomeFuture() const;
+
+    /**
+     * Clears the worker thread's long-running index build marker and fulfills the outcome promise
+     * so createIndexes callers are notified. Must be used for every path that exposes the build
+     * outcome to its caller while the worker OperationContext may still be winding down.
+     */
+    void fulfillOutcome(OperationContext* opCtx, StatusWith<IndexCatalogStats> result);
 
 private:
     /*
@@ -729,6 +720,10 @@ private:
     // Primary and secondaries gets their commit or abort signal via this promise future pair.
     std::unique_ptr<SharedPromise<IndexBuildAction>> _waitForNextAction;
 
+    // Communicates the final outcome of the index build to any callers waiting upon the associated
+    // SharedSemiFuture(s).
+    SharedPromise<IndexCatalogStats> _outcomePromise;
+
     // Maintains the state of the index build.
     index_build_internal::IndexBuildState _indexBuildState;
 
@@ -754,4 +749,4 @@ private:
     IndexBuildMetrics _metrics;
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

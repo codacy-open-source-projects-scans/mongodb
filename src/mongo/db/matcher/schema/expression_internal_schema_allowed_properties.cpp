@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
 
@@ -38,16 +12,17 @@
 #include "mongo/util/str.h"
 
 #include <algorithm>
+#include <string_view>
 #include <type_traits>
 
 #include <absl/container/node_hash_map.h>
 
 namespace mongo {
-constexpr StringData InternalSchemaAllowedPropertiesMatchExpression::kName;
+constexpr std::string_view InternalSchemaAllowedPropertiesMatchExpression::kName;
 
 InternalSchemaAllowedPropertiesMatchExpression::InternalSchemaAllowedPropertiesMatchExpression(
     StringDataSet properties,
-    StringData namePlaceholder,
+    std::string_view namePlaceholder,
     std::vector<PatternSchema> patternProperties,
     std::unique_ptr<ExpressionWithPlaceholder> otherwise,
     clonable_ptr<ErrorAnnotation> annotation)
@@ -93,13 +68,14 @@ bool InternalSchemaAllowedPropertiesMatchExpression::equivalent(const MatchExpre
                             });
 }
 
-void InternalSchemaAllowedPropertiesMatchExpression::serialize(BSONObjBuilder* builder,
-                                                               const SerializationOptions& opts,
-                                                               bool includePath) const {
+void InternalSchemaAllowedPropertiesMatchExpression::serialize(
+    BSONObjBuilder* builder,
+    const query_shape::SerializationOptions& opts,
+    bool includePath) const {
     BSONObjBuilder expressionBuilder(
         builder->subobjStart(InternalSchemaAllowedPropertiesMatchExpression::kName));
 
-    std::vector<StringData> sortedProperties(_properties.begin(), _properties.end());
+    std::vector<std::string_view> sortedProperties(_properties.begin(), _properties.end());
     std::sort(sortedProperties.begin(), sortedProperties.end());
     opts.appendLiteral(&expressionBuilder, "properties", sortedProperties);
     // This will be serialized to "i", which is the parser chosen namePlaceholder. Using this

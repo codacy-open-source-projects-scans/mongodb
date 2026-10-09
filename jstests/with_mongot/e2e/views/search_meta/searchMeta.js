@@ -4,10 +4,13 @@
  * themselves. On an implementation level, $searchMeta doesn't desugar to $_internalSearchIdLookup
  * (which performs view transforms for other mongot operators).
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_81 ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
-import {assertLookupInExplain, assertViewNotApplied} from "jstests/with_mongot/e2e_lib/explain_utils.js";
+import {
+    assertLookupInExplain,
+    assertViewNotApplied,
+} from "jstests/with_mongot/e2e_lib/explain_utils.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 const coll = testDb.hotelAccounting;
@@ -41,7 +44,11 @@ const facetQuery = [
             index: "totalPriceIndex",
             facet: {
                 facets: {
-                    "priceRanges": {"type": "number", "path": "totalPrice", "boundaries": [300, 400, 500, 600]},
+                    "priceRanges": {
+                        "type": "number",
+                        "path": "totalPrice",
+                        "boundaries": [300, 400, 500, 600],
+                    },
                 },
             },
         },
@@ -121,7 +128,9 @@ expectedResults = [
     },
 ];
 
-results = collBase.aggregate([{$lookup: {from: "totalPrice", pipeline: facetQuery, as: "meta_facet"}}]).toArray();
+results = collBase
+    .aggregate([{$lookup: {from: "totalPrice", pipeline: facetQuery, as: "meta_facet"}}])
+    .toArray();
 assert.eq(expectedResults, results);
 
 dropSearchIndex(totalPriceView, {name: "totalPriceIndex"});

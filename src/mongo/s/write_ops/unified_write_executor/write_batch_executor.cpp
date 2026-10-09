@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/write_ops/unified_write_executor/write_batch_executor.h"
 
@@ -379,6 +353,12 @@ BatchedCommandRequest WriteBatchExecutor::buildBatchWriteRequest(
 
             write_ops::InsertCommandRequest insertRequest(targetedNss);
             insertRequest.setDocuments(std::move(insertDocs));
+
+            // Request shard-side metrics if the router registered an insert query stats key.
+            // All documents in a single insert command share one query stats entry (opIndex 0).
+            query_stats::WriteCmdQueryStatsRegistrar registrar;
+            registrar.setIncludeQueryStatsMetricsIfRequested(opCtx, insertRequest);
+
             return std::move(insertRequest);
         } else if (batchType == BatchedCommandRequest::BatchType_Update) {
             // Copy the UpdateOpEntry from the original command, and then update the "sampleId"
@@ -387,8 +367,9 @@ BatchedCommandRequest WriteBatchExecutor::buildBatchWriteRequest(
             query_stats::WriteCmdQueryStatsRegistrar registrar;
             for (auto& op : ops) {
                 auto updateOpEntry = write_op_helpers::getOrMakeUpdateOpEntry(op.getUpdateOp());
-                registrar.setIncludeQueryStatsMetricsIfRequested(
-                    opCtx, op.getIndex(), updateOpEntry);
+                registrar
+                    .setIncludeQueryStatsMetricsForOpIndexIfRequested<write_ops::UpdateOpEntry>(
+                        opCtx, op.getIndex(), updateOpEntry);
 
                 auto sampleIdIt = sampleIds.find(getWriteOpId(op));
                 updateOpEntry.setSampleId(sampleIdIt != sampleIds.end()
@@ -412,8 +393,13 @@ BatchedCommandRequest WriteBatchExecutor::buildBatchWriteRequest(
             // Copy the DeleteOpEntry from the original command, and then update the "sampleId"
             // field appropriately.
             std::vector<write_ops::DeleteOpEntry> deleteOps;
+            query_stats::WriteCmdQueryStatsRegistrar registrar;
             for (auto& op : ops) {
                 auto deleteOpEntry = write_op_helpers::getOrMakeDeleteOpEntry(op.getDeleteOp());
+
+                registrar
+                    .setIncludeQueryStatsMetricsForOpIndexIfRequested<write_ops::DeleteOpEntry>(
+                        opCtx, op.getIndex(), deleteOpEntry);
 
                 auto sampleIdIt = sampleIds.find(getWriteOpId(op));
                 deleteOpEntry.setSampleId(sampleIdIt != sampleIds.end()
@@ -709,7 +695,7 @@ BSONObj WriteBatchExecutor::buildFindAndModifyRequestObj(
     auto cmdObj = request.toBSON();
 
     if (shouldAppendReadWriteConcern) {
-        cmdObj = applyReadWriteConcern(opCtx, /*appendRC*/ true, /*appendWC*/ true, cmdObj);
+        cmdObj = applyReadWriteConcern(opCtx, /*setRC*/ true, /*setWC*/ true, cmdObj);
     }
 
     BSONObjBuilder builder(cmdObj);

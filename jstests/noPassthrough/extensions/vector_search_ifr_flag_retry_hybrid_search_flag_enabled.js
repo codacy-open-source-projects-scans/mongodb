@@ -7,9 +7,12 @@
  * legacy vector search via the IFR kickback retry mechanism when
  * featureFlagExtensionsInsideHybridSearch is disabled.
  *
- * @tags: [ featureFlagExtensionsAPI, featureFlagExtensionsInsideHybridSearch ]
+ * @tags: [ featureFlagExtensionsAPI, requires_fcv_90 ]
  */
-import {getParameter, setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {
+    getParameter,
+    setParameterOnAllNonConfigNodes,
+} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 import {
     checkPlatformCompatibleWithExtensions,
     withExtensionsAndMongot,
@@ -27,6 +30,7 @@ import {
     kTestViewName,
     kTestViewPipeline,
     runHybridSearchTests,
+    runHybridSearchTestsWithExtensionsEnabled,
     runQueriesAndVerifyMetrics,
     setUpMongotMockForVectorSearch,
     setupMockVectorSearchResponsesForView,
@@ -47,7 +51,11 @@ checkPlatformCompatibleWithExtensions();
 function runViewVectorSearchTests(conn, mongotMock, featureFlagValue, shardingTest = null) {
     setParameterOnAllNonConfigNodes(conn, "featureFlagVectorSearchExtension", featureFlagValue);
     const view = createTestViewAndIndex(conn, mongotMock, shardingTest);
-    const {vectorSearchStage, testDb} = setupMockVectorSearchResponsesForView(conn, mongotMock, shardingTest);
+    const {vectorSearchStage, testDb} = setupMockVectorSearchResponsesForView(
+        conn,
+        mongotMock,
+        shardingTest,
+    );
 
     const numNodes = shardingTest ? kNumShards : 1;
 
@@ -76,7 +84,11 @@ function runViewVectorSearchTests(conn, mongotMock, featureFlagValue, shardingTe
             },
             () => {
                 assert.commandWorked(
-                    testDb.runCommand({aggregate: view.getName(), pipeline: [vectorSearchStage], cursor: {}}),
+                    testDb.runCommand({
+                        aggregate: view.getName(),
+                        pipeline: [vectorSearchStage],
+                        cursor: {},
+                    }),
                 );
             },
         ],
@@ -152,7 +164,12 @@ function runUnionWithVectorSearchTests(conn, mongotMock, featureFlagValue, shard
  * @param {boolean} featureFlagValue - The value to set for the feature flag.
  * @param {ShardingTest|null} shardingTest - The ShardingTest instance if available, null otherwise.
  */
-function runUnionWithOnViewVectorSearchTests(conn, mongotMock, featureFlagValue, shardingTest = null) {
+function runUnionWithOnViewVectorSearchTests(
+    conn,
+    mongotMock,
+    featureFlagValue,
+    shardingTest = null,
+) {
     setParameterOnAllNonConfigNodes(conn, "featureFlagVectorSearchExtension", featureFlagValue);
     createTestViewAndIndex(conn, mongotMock, shardingTest);
 
@@ -231,11 +248,21 @@ function runTests(conn, mongotMock, shardingTest = null) {
     runHybridSearchTests(conn, mongotMock, true, shardingTest);
     runHybridSearchTests(conn, mongotMock, false, shardingTest);
     setParameterOnAllNonConfigNodes(conn, "featureFlagExtensionsInsideHybridSearch", true);
+
+    // With featureFlagExtensionsInsideHybridSearch ON the LP desugarer runs before validate(),
+    // so no kickback fires — with either extension or mongot $vectorSearch.
+    runHybridSearchTestsWithExtensionsEnabled(conn, mongotMock, true, shardingTest);
+    runHybridSearchTestsWithExtensionsEnabled(conn, mongotMock, false, shardingTest);
 }
 
 // featureFlagExtensionsInsideHybridSearch is enabled by default (required by the test tag).
 // Hybrid search tests dynamically disable it in runTests() since $rankFusion/$scoreFusion
 // kickback retries only fire when the flag is off.
-withExtensionsAndMongot({"libvector_search_extension.so": {}}, runTests, ["standalone", "sharded"], {
-    shards: kNumShards,
-});
+withExtensionsAndMongot(
+    {"libvector_search_extension.so": {}},
+    runTests,
+    ["standalone", "sharded"],
+    {
+        shards: kNumShards,
+    },
+);

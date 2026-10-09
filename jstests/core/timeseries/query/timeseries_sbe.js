@@ -2,6 +2,7 @@
  * Tests that we do lower queries over time-series to SBE when the corresponding flags are enabled.
  *
  * @tags: [
+ *   uses_explain,
  *   requires_timeseries,
  *   # Aggregation with explain may return incomplete results if interrupted by a stepdown.
  *   does_not_support_stepdowns,
@@ -17,7 +18,11 @@
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getAggPlanStages, getEngine} from "jstests/libs/query/analyze_plan.js";
-import {checkSbeStatus, kFeatureFlagSbeFullEnabled, kSbeDisabled} from "jstests/libs/query/sbe_util.js";
+import {
+    checkSbeStatus,
+    kFeatureFlagSbeFullEnabled,
+    kSbeDisabled,
+} from "jstests/libs/query/sbe_util.js";
 
 // We pushdown unpack when checkSbeRestrictedOrFullyEnabled is true and when
 // featureFlagTimeSeriesInSbe is set.
@@ -26,16 +31,23 @@ const sbeStatus = checkSbeStatus(db);
 const sbeFullyEnabled = sbeStatus == kFeatureFlagSbeFullEnabled;
 const sbeUnpackPushdownEnabled =
     // SBE can't be disabled altogether.
-    sbeStatus != kSbeDisabled && FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "TimeSeriesInSbe");
+    sbeStatus != kSbeDisabled &&
+    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "TimeSeriesInSbe");
 
 // const sbeUnpackPushdownEnabled = checkSbeRestrictedOrFullyEnabled(db) &&
 //     FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), 'TimeSeriesInSbe');
 
 const coll = db[jsTestName()];
 coll.drop();
-assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}));
+assert.commandWorked(
+    db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}),
+);
 // The dataset doesn't matter, as we only care about the choice of the plan to execute the query.
 assert.commandWorked(coll.insert({t: new Date(), m: 1, a: 42, b: 17}));
+
+const foreignColl = db[jsTestName() + "_foreign"];
+assert(foreignColl.drop());
+assert.commandWorked(foreignColl.insert({m: 1, x: 42}));
 
 function runTest({pipeline, shouldUseSbe, aggStages}) {
     jsTestLog("Running pipeline " + tojson(pipeline));
@@ -54,7 +66,8 @@ function runTest({pipeline, shouldUseSbe, aggStages}) {
             assert.neq(
                 0,
                 foundStages.length,
-                () => "Expected to find " + stage + " in classic agg plan but ran " + tojson(explain),
+                () =>
+                    "Expected to find " + stage + " in classic agg plan but ran " + tojson(explain),
             );
         }
     }
@@ -67,12 +80,14 @@ runTest({
 });
 
 // $project by itself is not lowered except in SBE full.
-jsTestLog("ian: SBE full " + sbeFullyEnabled);
 runTest({pipeline: [{$project: {a: 1, b: 1}}], shouldUseSbe: sbeFullyEnabled});
 
 // $addFields, $project lowered only in SBE full.
 runTest({
-    pipeline: [{$addFields: {computedField: {$add: ["$a", 1]}}}, {$project: {computedField: 1, b: 1}}],
+    pipeline: [
+        {$addFields: {computedField: {$add: ["$a", 1]}}},
+        {$project: {computedField: 1, b: 1}},
+    ],
     shouldUseSbe: sbeFullyEnabled,
 });
 
@@ -108,14 +123,22 @@ runTest({
 
 // $match-$group, followed by a stage like $unwind. The $unwind will remain in classic.
 runTest({
-    pipeline: [{$match: {t: {$gt: new Date()}}}, {$group: {_id: "$m", sum: {$sum: "$a"}}}, {$unwind: "$x"}],
+    pipeline: [
+        {$match: {t: {$gt: new Date()}}},
+        {$group: {_id: "$m", sum: {$sum: "$a"}}},
+        {$unwind: "$x"},
+    ],
     shouldUseSbe: sbeUnpackPushdownEnabled,
     aggStages: ["$unwind"],
 });
 
 // $match-$group, followed by a stage like $unwind. The $unwind will remain in classic.
 runTest({
-    pipeline: [{$match: {t: {$gt: new Date()}}}, {$group: {_id: "$m", sum: {$sum: "$a"}}}, {$group: {_id: "$sum"}}],
+    pipeline: [
+        {$match: {t: {$gt: new Date()}}},
+        {$group: {_id: "$m", sum: {$sum: "$a"}}},
+        {$group: {_id: "$sum"}},
+    ],
     shouldUseSbe: sbeUnpackPushdownEnabled,
     aggStages: sbeFullyEnabled ? [] : ["$group"],
 });
@@ -154,7 +177,11 @@ runTest({
 
 // A stack of $project stages is permitted only in SBE full.
 runTest({
-    pipeline: [{"$project": {"_id": 0, "m": 1}}, {"$project": {"_id": 0, "t": "$t"}}, {"$project": {"_id": 1, "t": 1}}],
+    pipeline: [
+        {"$project": {"_id": 0, "m": 1}},
+        {"$project": {"_id": 0, "t": "$t"}},
+        {"$project": {"_id": 1, "t": 1}},
+    ],
     shouldUseSbe: sbeFullyEnabled,
 });
 
@@ -221,5 +248,46 @@ runTest({
     shouldUseSbe: sbeUnpackPushdownEnabled,
 
     // Everything should get pushed into SBE except setWindowFields.
-    aggStages: sbeFullyEnabled ? [] : ["$_internalSetWindowFields"],
+    aggStages: ["$_internalSetWindowFields"],
+});
+
+// $lookup-$unwind is not lowered to SBE for time-series collections in default settings.
+// With SBE fully enabled, it may be lowered under certain conditions.
+const lookupUnwind = [
+    {$lookup: {from: foreignColl.getName(), localField: "m", foreignField: "m", as: "joined"}},
+    {$unwind: "$joined"},
+];
+
+// LU alone should never use SBE on TS collections, because the set of fields
+// used for the query is not known.
+runTest({
+    pipeline: lookupUnwind,
+    shouldUseSbe: false,
+    aggStages: ["$lookup"],
+});
+
+// LU with an inclusion projection after indicates the fields the pipeline needs
+// during dependency analysis, enabling SBE (for SBE full).
+runTest({
+    pipeline: [...lookupUnwind, {$project: {joined: 1}}],
+    shouldUseSbe: sbeFullyEnabled,
+    aggStages: sbeFullyEnabled ? [] : ["$lookup", "$project"],
+});
+
+runTest({
+    pipeline: [{$group: {_id: "$m", sum: {$sum: "$a"}}}, ...lookupUnwind],
+    shouldUseSbe: sbeUnpackPushdownEnabled,
+    aggStages: sbeFullyEnabled ? [] : ["$lookup"],
+});
+
+runTest({
+    pipeline: [{$match: {a: {$gt: 0}}}, {$group: {_id: "$m", sum: {$sum: "$a"}}}, ...lookupUnwind],
+    shouldUseSbe: sbeUnpackPushdownEnabled,
+    aggStages: sbeFullyEnabled ? [] : ["$lookup"],
+});
+
+runTest({
+    pipeline: [...lookupUnwind, {$group: {_id: "$joined.x", sum: {$sum: "$a"}}}],
+    shouldUseSbe: sbeFullyEnabled,
+    aggStages: sbeFullyEnabled ? [] : ["$lookup", "$group"],
 });

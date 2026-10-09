@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/namespace_string_util.h"
 
@@ -41,6 +15,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -51,8 +26,8 @@
 namespace mongo {
 
 NamespaceString AuthNamespaceStringUtil::deserialize(const boost::optional<TenantId>& tenantId,
-                                                     StringData db,
-                                                     StringData coll) {
+                                                     std::string_view db,
+                                                     std::string_view coll) {
     uassert(ErrorCodes::InternalError,
             "A tenant ID is only accepted when multitenancySupport is on",
             !tenantId || gMultitenancySupport);
@@ -82,7 +57,7 @@ std::string NamespaceStringUtil::serialize(const NamespaceString& ns,
 }
 
 std::string NamespaceStringUtil::serialize(const NamespaceString& ns,
-                                           const SerializationOptions& options,
+                                           const query_shape::SerializationOptions& options,
                                            const SerializationContext& context) {
     return options.serializeIdentifier(serialize(ns, context));
 }
@@ -117,33 +92,34 @@ std::string NamespaceStringUtil::serializeForCommands(const NamespaceString& ns,
 }
 
 NamespaceString NamespaceStringUtil::deserialize(boost::optional<TenantId> tenantId,
-                                                 StringData ns,
+                                                 std::string_view ns,
                                                  const SerializationContext& context) {
     auto dotIndex = ns.find('.');
     if (dotIndex != std::string::npos) {
         return deserialize(
             std::move(tenantId), ns.substr(0, dotIndex), ns.substr(dotIndex + 1), context);
     }
-    return deserialize(std::move(tenantId), ns, StringData{}, context);
+    return deserialize(std::move(tenantId), ns, std::string_view{}, context);
 }
 
 NamespaceString NamespaceStringUtil::deserializeForCatalog(
-    const boost::optional<TenantId>& tenantId, StringData ns) {
+    const boost::optional<TenantId>& tenantId, std::string_view ns) {
     auto dotIndex = ns.find('.');
     if (dotIndex != std::string::npos) {
         return deserializeForStorage(
             std::move(tenantId), ns.substr(0, dotIndex), ns.substr(dotIndex + 1));
     }
-    return deserializeForStorage(std::move(tenantId), ns, StringData{});
+    return deserializeForStorage(std::move(tenantId), ns, std::string_view{});
 }
 
-NamespaceString NamespaceStringUtil::deserialize(const DatabaseName& dbName, StringData coll) {
+NamespaceString NamespaceStringUtil::deserialize(const DatabaseName& dbName,
+                                                 std::string_view coll) {
     return NamespaceString{dbName, coll};
 }
 
 NamespaceString NamespaceStringUtil::deserializeForStorage(boost::optional<TenantId> tenantId,
-                                                           StringData db,
-                                                           StringData coll) {
+                                                           std::string_view db,
+                                                           std::string_view coll) {
     // TODO SERVER-84275: Change to use isEnabled again.
     // We need to use isEnabledUseLastLTSFCVWhenUninitialized instead of isEnabled because
     // this could run during startup while the FCV is still uninitialized.
@@ -174,8 +150,8 @@ NamespaceString NamespaceStringUtil::deserializeForStorage(boost::optional<Tenan
 }
 
 NamespaceString NamespaceStringUtil::deserializeForCommands(boost::optional<TenantId> tenantId,
-                                                            StringData db,
-                                                            StringData coll,
+                                                            std::string_view db,
+                                                            std::string_view coll,
                                                             const SerializationContext& context) {
     // we only get here if we are processing a Command Request.  We disregard the feature flag
     // in this case, essentially letting the request dictate the state of the feature.
@@ -219,8 +195,8 @@ NamespaceString NamespaceStringUtil::deserializeForCommands(boost::optional<Tena
 }
 
 NamespaceString NamespaceStringUtil::deserialize(const boost::optional<TenantId>& tenantId,
-                                                 StringData db,
-                                                 StringData coll,
+                                                 std::string_view db,
+                                                 std::string_view coll,
                                                  const SerializationContext& context) {
     if (!gMultitenancySupport) {
         massert(6972102,
@@ -252,17 +228,17 @@ NamespaceString NamespaceStringUtil::deserialize(const boost::optional<TenantId>
 }
 
 NamespaceString NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(
-    StringData ns) {
+    std::string_view ns) {
     auto dotIndex = ns.find('.');
     if (dotIndex != std::string::npos) {
         return parseFromStringExpectTenantIdInMultitenancyMode(ns.substr(0, dotIndex),
                                                                ns.substr(dotIndex + 1));
     }
-    return parseFromStringExpectTenantIdInMultitenancyMode(ns, StringData{});
+    return parseFromStringExpectTenantIdInMultitenancyMode(ns, std::string_view{});
 }
 
 NamespaceString NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(
-    StringData db, StringData coll) {
+    std::string_view db, std::string_view coll) {
 
     if (!gMultitenancySupport) {
         return NamespaceString(boost::none, db, coll);
@@ -286,13 +262,13 @@ NamespaceString NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancy
 }
 
 NamespaceString NamespaceStringUtil::parseFailPointData(const BSONObj& data,
-                                                        StringData nsFieldName,
+                                                        std::string_view nsFieldName,
                                                         const boost::optional<TenantId>& tenantId) {
     const auto ns = data.getStringField(nsFieldName);
     return NamespaceStringUtil::deserialize(tenantId, ns, SerializationContext::stateDefault());
 }
 
-NamespaceString NamespaceStringUtil::deserializeForErrorMsg(StringData nsInErrMsg) {
+NamespaceString NamespaceStringUtil::deserializeForErrorMsg(std::string_view nsInErrMsg) {
     // TenantId always prefix in the error message. This method returns either (tenantId,
     // nonPrefixedDb) or (none, prefixedDb) depending on gMultitenancySupport flag.
     return NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(nsInErrMsg);

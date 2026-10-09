@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumn.h"
 
@@ -48,6 +22,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -73,7 +48,7 @@ constexpr int kElementValueOffset = 2;
 
 // Write a BSON sub-object header into the allocator: type byte + field name + null + 4-byte size
 // placeholder. Returns the offset of the size field for later fill-in.
-int writeSubObjHeader(BSONElementStorage& allocator, StringData fieldName, BSONType type) {
+int writeSubObjHeader(BSONElementStorage& allocator, std::string_view fieldName, BSONType type) {
     auto fieldNameSize = fieldName.size();
     char* objdata = allocator.allocate(6 + fieldNameSize);
     objdata[0] = stdx::to_underlying(type);
@@ -90,7 +65,7 @@ int writeSubObjHeader(BSONElementStorage& allocator, StringData fieldName, BSONT
 // Finalize a sub-object: write EOO + fill in size, or deallocate if empty and not allowed.
 void writeSubObjFooter(BSONElementStorage& allocator,
                        int sizeOffset,
-                       StringData fieldName,
+                       std::string_view fieldName,
                        bool allowEmpty) {
     // No scalars were written — empty subobject not present in this element.
     if (!allowEmpty && allocator.position() == allocator.contiguous() + sizeOffset + 4) {
@@ -151,6 +126,7 @@ char* BSONElementStorage::allocate(int bytes) {
         // Keep track of current block if it exists.
         if (_block) {
             _blocks.push_back(std::move(_block));
+            _totalBlocksCapacity += _capacity;
         }
 
         // If contiguous mode is enabled we need to copy data from the previous block
@@ -198,7 +174,7 @@ int BSONElementStorage::_endContiguous() {
 }
 
 BSONElementStorage::Element BSONElementStorage::allocate(BSONType type,
-                                                         StringData fieldName,
+                                                         std::string_view fieldName,
                                                          int valueSize) {
     // Size needed for this BSONElement
     auto fieldNameSize = fieldName.size();
@@ -236,7 +212,7 @@ void BSONColumn::Iterator::_initializeInterleaving() {
     BSONObjTraversal t(
         interleaved.arrays,
         interleaved.rootType,
-        [](StringData fieldName, const BSONObj& obj, BSONType type) { return true; },
+        [](std::string_view fieldName, const BSONObj& obj, BSONType type) { return true; },
         [&interleaved](const BSONElement& elem) {
             interleaved.states.emplace_back();
             interleaved.states.back().loadUncompressed(elem);
@@ -260,7 +236,9 @@ BSONColumn::Iterator& BSONColumn::Iterator::operator++() {
     ++_index;
 
     visit(OverloadedVisitor{[&](Regular& regular) { _incrementRegular(regular); },
-                            [&](Interleaved& interleaved) { _incrementInterleaved(interleaved); }},
+                            [&](Interleaved& interleaved) {
+                                _incrementInterleaved(interleaved);
+                            }},
           _mode);
 
     return *this;
@@ -361,7 +339,7 @@ void BSONColumn::Iterator::_incrementInterleaved(Interleaved& interleaved) {
     _decompressed = obj;
 }
 
-bool BSONColumn::Iterator::_processScalar(DecodingState& state, StringData fieldName) {
+bool BSONColumn::Iterator::_processScalar(DecodingState& state, std::string_view fieldName) {
     auto allocatorPosition = _allocator->position();
     BSONElement elem;
 
@@ -622,7 +600,7 @@ BSONElement BSONColumn::Iterator::DecodingState::loadDelta(BSONElementStorage& a
 }
 
 BSONElement BSONColumn::Iterator::DecodingState::Decoder64::materialize(
-    BSONElementStorage& allocator, BSONElement last, StringData fieldName) const {
+    BSONElementStorage& allocator, BSONElement last, std::string_view fieldName) const {
     // Decoder state is now setup, materialize new value. We allocate a new BSONElement that fits
     // same value size as previous
     BSONType type = last.type();
@@ -632,6 +610,8 @@ BSONElement BSONColumn::Iterator::DecodingState::Decoder64::materialize(
     int64_t valueToWrite = deltaOfDelta ? lastEncodedValueForDeltaOfDelta : lastEncodedValue;
     switch (type) {
         case BSONType::numberDouble:
+            invariant(scaleIndex != bsoncolumn::kInvalidScaleIndex,
+                      "materializing a double before a control byte set the scale index");
             DataView(elem.value())
                 .write<LittleEndian<double>>(
                     Simple8bTypeUtil::decodeDouble(valueToWrite, scaleIndex));
@@ -669,7 +649,7 @@ BSONElement BSONColumn::Iterator::DecodingState::Decoder64::materialize(
 }
 
 BSONElement BSONColumn::Iterator::DecodingState::Decoder128::materialize(
-    BSONElementStorage& allocator, BSONElement last, StringData fieldName) const {
+    BSONElementStorage& allocator, BSONElement last, std::string_view fieldName) const {
     // Decoder state is now setup, write value depending on type
     return [&]() -> BSONElementStorage::Element {
         BSONType type = last.type();
@@ -905,7 +885,7 @@ BSONElement BSONElementMaterializer::materialize(BSONElementStorage& allocator,
  */
 BSONElement BSONElementMaterializer::writeStringData(BSONElementStorage& allocator,
                                                      BSONType bsonType,
-                                                     StringData val) {
+                                                     std::string_view val) {
     // Add 5 bytes to size, strings begin with a 4 byte count and ends with a null terminator
     BSONElementStorage::Element elem = allocator.allocate(bsonType, "", val.size() + 5);
     // Write count, size includes null terminator
@@ -917,7 +897,8 @@ BSONElement BSONElementMaterializer::writeStringData(BSONElementStorage& allocat
     return elem.element();
 }
 
-BSONElement BSONElementMaterializer::materialize(BSONElementStorage& allocator, StringData val) {
+BSONElement BSONElementMaterializer::materialize(BSONElementStorage& allocator,
+                                                 std::string_view val) {
     return writeStringData(allocator, BSONType::string, val);
 }
 

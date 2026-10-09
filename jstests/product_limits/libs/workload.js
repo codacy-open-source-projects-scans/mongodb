@@ -10,11 +10,10 @@ export class Workload {
     }
 
     check(dataset, actualResult) {
-        actualResult.sort();
-        let expectedResult = this.result(dataset);
-        expectedResult.sort();
+        const expectedResult = this.result(dataset);
         print("Comparison start ...");
-        assert.eq(expectedResult, actualResult);
+        // Order-insensitive comparison
+        assert.sameMembers(expectedResult, actualResult);
         print("Comparison complete.");
     }
 
@@ -27,20 +26,21 @@ export class PipelineWorkload extends Workload {
     runWorkload(dataset, _, db) {
         const coll = db.getCollection(this.collection());
         const pipeline = this.pipeline(dataset);
-        printjsononeline(pipeline);
 
         if (!pipeline[0].hasOwnProperty("$documents")) {
             try {
                 coll.explain("allPlansExecution").aggregate(pipeline);
             } catch (error) {
                 /// Large explains() can not legitimately fit in a BSONObject
-                printjsononeline(error.codeName);
+                jsTest.log.info({codeName: error.codeName});
                 assert(error.code === ErrorCodes.BSONObjectTooLarge, error);
             }
         }
 
         const startTime = Date.now();
-        const cursor = pipeline[0].hasOwnProperty("$documents") ? db.aggregate(pipeline) : coll.aggregate(pipeline);
+        const cursor = pipeline[0].hasOwnProperty("$documents")
+            ? db.aggregate(pipeline)
+            : coll.aggregate(pipeline);
         const actualResult = cursor.toArray();
         const duration = Date.now() - startTime;
         print(`${dataset.constructor.name}.${this.constructor.name} took ${duration} ms.`);

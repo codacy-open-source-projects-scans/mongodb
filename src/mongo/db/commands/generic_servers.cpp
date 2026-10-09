@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -44,6 +17,8 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/log_process_details.h"
+#include "mongo/db/metrics_filtering_util.h"
+#include "mongo/db/metrics_policy_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
@@ -65,6 +40,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -79,6 +55,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 struct AdminOnlyNoTenant {
     static constexpr bool kAdminOnly = true;
@@ -222,6 +199,18 @@ HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext* opCtx) {
     p.appendSystemDetails(extra);
     reply.setExtra(extra.obj());
 
+    auto& metricsPolicyManager = MetricsPolicyManager::get(opCtx);
+    bool requireFiltering = metricsPolicyManager.requiresFiltering(
+        opCtx, MetricsCategoryEnum::kHostInfo, /*forceFiltered=*/false);
+
+    if (requireFiltering) {
+        const auto& matcher =
+            metricsPolicyManager.getAllowlistMatcher(MetricsCategoryEnum::kHostInfo);
+        BSONObjBuilder bob;
+        metrics_filtering_util::appendPaths(bob, reply.toBSON(), matcher);
+        reply = HostInfoReply::parseOwned(bob.obj());
+    }
+
     return reply;
 }
 MONGO_REGISTER_COMMAND(HostInfoCmd).forRouter().forShard();
@@ -246,6 +235,19 @@ GetCmdLineOptsReply GetCmdLineOptsCmd::Invocation::typedRun(OperationContext* op
     GetCmdLineOptsReply reply;
     reply.setArgv(serverGlobalParams.argvArray);
     reply.setParsed(serverGlobalParams.parsedOpts);
+
+    auto& metricsPolicyManager = MetricsPolicyManager::get(opCtx);
+    bool requireFiltering = metricsPolicyManager.requiresFiltering(
+        opCtx, MetricsCategoryEnum::kGetCmdLineOpts, /*forceFiltered=*/false);
+
+    if (requireFiltering) {
+        const auto& matcher =
+            metricsPolicyManager.getAllowlistMatcher(MetricsCategoryEnum::kGetCmdLineOpts);
+        BSONObjBuilder bob;
+        metrics_filtering_util::appendPaths(bob, reply.toBSON(), matcher);
+        reply = GetCmdLineOptsReply::parseOwned(bob.obj());
+    }
+
     return reply;
 }
 MONGO_REGISTER_COMMAND(GetCmdLineOptsCmd).forRouter().forShard();
@@ -264,7 +266,7 @@ void LogRotateCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) con
 template <>
 OkReply LogRotateCmd::Invocation::typedRun(OperationContext* opCtx) {
     auto arg = request().getCommandParameter();
-    boost::optional<StringData> logType = boost::none;
+    boost::optional<std::string_view> logType = boost::none;
     if (holds_alternative<std::string>(arg)) {
         logType = std::get<std::string>(arg);
     }
@@ -276,7 +278,7 @@ OkReply LogRotateCmd::Invocation::typedRun(OperationContext* opCtx) {
 
     // Mask the detailed error message so file paths & host info are not
     // revealed to the client, but keep the real status code as a hint.
-    constexpr auto rotateErrmsg = "Log rotation failed due to one or more errors"_sd;
+    constexpr auto rotateErrmsg = "Log rotation failed due to one or more errors"sv;
     uassert(status.code(), rotateErrmsg, status.isOK());
 
     logProcessDetailsForLogRotate(opCtx->getServiceContext());
@@ -342,17 +344,16 @@ public:
         auto request = GetLogCommand::parse(cmdObj, IDLParserContext{"getLog"});
         auto logName = request.getCommandParameter();
         if (logName == "*") {
-            std::vector<std::string> names;
-            logv2::RamLog::getNames(names);
+            auto names = logv2::RamLog::getNames();
 
-            BSONArrayBuilder arr(result.subarrayStart("names"_sd));
+            BSONArrayBuilder arr(result.subarrayStart("names"sv));
             for (const auto& name : names) {
                 arr.append(name);
             }
             arr.doneFast();
 
         } else {
-            logv2::RamLog* ramlog = logv2::RamLog::getIfExists(std::string{logName});
+            logv2::RamLog* ramlog = logv2::RamLog::getIfExists(logName);
             uassert(ErrorCodes::OperationFailed,
                     str::stream() << "No log named '" << logName << "'",
                     ramlog != nullptr);

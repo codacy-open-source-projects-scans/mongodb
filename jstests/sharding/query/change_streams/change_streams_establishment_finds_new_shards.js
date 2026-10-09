@@ -1,6 +1,10 @@
 // Tests that change streams is able to find and return results from new shards which are added
-// during cursor establishment.
+// during cursor establishment. Pinned to the v1 reader because it drives establishment via the
+// 'shardedAggregateHangBeforeEstablishingShardCursors' failpoint, which sits on the v1
+// 'sharded_agg_helpers::establishCursors' code path. The v2 reader opens shard cursors through a
+// different mechanism (placement-change control events) that the failpoint cannot intercept.
 // @tags: [
+//   assumes_change_streams_v1,
 //   requires_majority_read_concern,
 //   uses_change_streams,
 // ]
@@ -12,7 +16,12 @@ const rsNodeOptions = {
     // Use a higher frequency for periodic noops to speed up the test.
     setParameter: {periodicNoopIntervalSecs: 1, writePeriodicNoops: true},
 };
-const st = new ShardingTest({shards: 1, mongos: 1, rs: {nodes: 1}, other: {rsOptions: rsNodeOptions}});
+const st = new ShardingTest({
+    shards: 1,
+    mongos: 1,
+    rs: {nodes: 1},
+    other: {rsOptions: rsNodeOptions},
+});
 
 jsTest.log.info("Starting new shard (but not adding to shard set yet)");
 const newShard = new ReplSetTest({name: "newShard", nodes: 1, nodeOptions: rsNodeOptions});
@@ -27,14 +36,19 @@ const mongosDB = mongos.getDB("test");
 assert.commandWorked(mongos.adminCommand({enableSharding: mongosDB.getName()}));
 
 // Shard the collection.
-assert.commandWorked(mongos.adminCommand({shardCollection: mongosColl.getFullName(), key: {_id: 1}}));
+assert.commandWorked(
+    mongos.adminCommand({shardCollection: mongosColl.getFullName(), key: {_id: 1}}),
+);
 
 // Split the collection into two chunks: [MinKey, 10) and [10, MaxKey].
 assert.commandWorked(mongos.adminCommand({split: mongosColl.getFullName(), middle: {_id: 10}}));
 
 // Enable the failpoint.
 assert.commandWorked(
-    mongos.adminCommand({configureFailPoint: "shardedAggregateHangBeforeEstablishingShardCursors", mode: "alwaysOn"}),
+    mongos.adminCommand({
+        configureFailPoint: "shardedAggregateHangBeforeEstablishingShardCursors",
+        mode: "alwaysOn",
+    }),
 );
 
 // While opening the cursor, wait for the failpoint and add the new shard.
@@ -42,7 +56,9 @@ function addShardAndMigrate(mongosHost, newShardURL, newShardName, collFullName)
     const mongos = new Mongo(mongosHost);
     const db = mongos.getDB("admin");
 
-    jsTest.log.info("Looking for failpoint shardedAggregateHangBeforeEstablishingShardCursors in the logs");
+    jsTest.log.info(
+        "Looking for failpoint shardedAggregateHangBeforeEstablishingShardCursors in the logs",
+    );
     checkLog.contains(db, "shardedAggregateHangBeforeEstablishingShardCursors fail point enabled");
 
     jsTest.log.info(`Adding new shard ${newShardURL}`);

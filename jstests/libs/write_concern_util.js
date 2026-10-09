@@ -5,13 +5,62 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
+// Extension point for fixtures with a non-standard stall mechanism. If a handler is registered
+// here, it's called first; return true to skip the default dispatch. Mirrors the override-slot
+// pattern used by `kOverrideConstructor` in `replsettest.js`.
+export const kReplicationStallOverride = Symbol("replicationStallOverrideHandler");
+export const replicationStallExtensionPoint = {};
+
+function _toggleReplicationStall(conn, enabled) {
+    if (Array.isArray(conn) && conn.length === 0) {
+        return;
+    }
+
+    // The override receives a single representative node (not the full array) and is expected to
+    // act fixture-wide on its own; return true to skip the default per-conn dispatch entirely.
+    const override = replicationStallExtensionPoint[kReplicationStallOverride];
+    if (override) {
+        const node = Array.isArray(conn) ? conn[0] : conn;
+        if (override(node, enabled)) {
+            return;
+        }
+    }
+
+    if (Array.isArray(conn)) {
+        conn.forEach((n) => _toggleReplicationStall(n, enabled));
+        return;
+    }
+
+    if (!enabled) {
+        configureFailPoint(conn, "stopReplProducer", {}, "off");
+        return;
+    }
+    const stopReplProducerFailPoint = configureFailPoint(conn, "stopReplProducer");
+
+    // Wait until the fail point is actually hit. Don't wait if the node is the primary, because
+    // the fail point won't be hit until the node transitions from being the primary.
+    if (
+        assert.commandWorked(conn.adminCommand("replSetGetStatus")).myState !=
+        ReplSetTest.State.PRIMARY
+    ) {
+        stopReplProducerFailPoint.wait();
+    }
+}
+
 // Shards a collection with 'numDocs' documents and creates 2 chunks, one on each of two shards.
 export function shardCollectionWithChunks(st, coll, numDocs) {
     let _db = coll.getDB();
     let numberDoc = numDocs || 20;
     coll.createIndex({x: 1}, {unique: true});
 
-    st.shardColl(coll.getName(), {x: 1}, {x: numberDoc / 2}, {x: numberDoc / 2}, _db.toString(), true);
+    st.shardColl(
+        coll.getName(),
+        {x: 1},
+        {x: numberDoc / 2},
+        {x: numberDoc / 2},
+        _db.toString(),
+        true,
+    );
 
     for (let i = 0; i < numberDoc; i++) {
         coll.insert({x: i});
@@ -21,19 +70,7 @@ export function shardCollectionWithChunks(st, coll, numDocs) {
 
 // Stops replication on the given server(s).
 export function stopServerReplication(conn) {
-    if (conn.length) {
-        conn.forEach(function (n) {
-            stopServerReplication(n);
-        });
-        return;
-    }
-    const stopReplProducerFailPoint = configureFailPoint(conn, "stopReplProducer");
-
-    // Wait until the fail point is actually hit. Don't wait if the node is the primary, because
-    // the fail point won't be hit until the node transitions from being the primary.
-    if (assert.commandWorked(conn.adminCommand("replSetGetStatus")).myState != ReplSetTest.State.PRIMARY) {
-        stopReplProducerFailPoint.wait();
-    }
+    _toggleReplicationStall(conn, true);
 }
 
 // Stops replication at all replicaset secondaries. However, it might wait for replication before
@@ -42,9 +79,11 @@ export function stopReplicationOnSecondaries(rs, changeReplicaSetDefaultWCToLoca
     if (changeReplicaSetDefaultWCToLocal == true) {
         // The default WC is majority and this test can't satisfy majority writes.
         assert.commandWorked(
-            rs
-                .getPrimary()
-                .adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+            rs.getPrimary().adminCommand({
+                setDefaultRWConcern: 1,
+                defaultWriteConcern: {w: 1},
+                writeConcern: {w: "majority"},
+            }),
         );
         rs.awaitReplication();
     }
@@ -55,21 +94,18 @@ export function stopReplicationOnSecondaries(rs, changeReplicaSetDefaultWCToLoca
 export function stopReplicationOnSecondariesOfAllShards(st) {
     // The default WC is majority and this test can't satisfy majority writes.
     assert.commandWorked(
-        st.s.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+        st.s.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultWriteConcern: {w: 1},
+            writeConcern: {w: "majority"},
+        }),
     );
     st._rsObjects.forEach((rs) => stopReplicationOnSecondaries(rs, false));
 }
 
 // Restarts replication on the given server(s).
 export function restartServerReplication(conn) {
-    if (conn.length) {
-        conn.forEach(function (n) {
-            restartServerReplication(n);
-        });
-        return;
-    }
-
-    configureFailPoint(conn, "stopReplProducer", {}, "off");
+    _toggleReplicationStall(conn, false);
 }
 
 // Restarts replication at all nodes in a replicaset.
@@ -124,7 +160,11 @@ export function runWriteConcernRetryabilityTest(priConn, secConn, cmd, kNodes, d
     // The default WC is majority and stopServerReplication will prevent the replica set from
     // fulfilling any majority writes
     assert.commandWorked(
-        priConn.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+        priConn.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultWriteConcern: {w: 1},
+            writeConcern: {w: "majority"},
+        }),
     );
 
     // Send a dummy write to this connection so it will have the Client object initialized.

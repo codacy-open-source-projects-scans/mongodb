@@ -68,7 +68,14 @@ try {
     // create a msg for later if there is a failure.
     let msg = "";
     profileItems.forEach(function (d) {
-        msg += "profile doc: " + d.ns + " " + d.op + " " + tojson(d.query ? d.query : d.command) + "\n";
+        msg +=
+            "profile doc: " +
+            d.ns +
+            " " +
+            d.op +
+            " " +
+            tojson(d.query ? d.query : d.command) +
+            "\n";
     });
     msg += tojson(testDb.system.profile.stats());
 
@@ -88,6 +95,7 @@ try {
     testDb.getCollection("system.profile").drop();
     assert.eq(0, testDb.runCommand({profile: -1}).was, "F");
 
+    // Uncapped collections fail to set profile settings.
     testDb.createCollection("system.profile");
     assert.eq(0, testDb.runCommand({profile: 2}).ok);
     assert.eq(0, testDb.runCommand({profile: -1}).was, "G");

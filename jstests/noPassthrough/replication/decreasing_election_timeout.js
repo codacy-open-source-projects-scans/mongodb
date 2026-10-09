@@ -28,22 +28,31 @@ const rst = new ReplSetTest({
 });
 
 rst.startSet();
-rst.initiate();
+
+const initialConfig = rst.getReplSetConfig();
+initialConfig.settings = {heartbeatIntervalMillis: 500};
+rst.initiate(initialConfig);
 
 const primary = rst.getPrimary();
 const secondary = rst.getSecondary();
 
 // Log the initial election timeout (set to default high value).
-const initialConfig = rst.getReplSetConfigFromNode();
-const initialElectionTimeout = initialConfig.settings.electionTimeoutMillis;
-jsTestLog("Initial electionTimeoutMillis is set to default high value: " + initialElectionTimeout + "ms");
+const initiatedConfig = rst.getReplSetConfigFromNode();
+const initialElectionTimeout = initiatedConfig.settings.electionTimeoutMillis;
+jsTestLog(
+    "Initial electionTimeoutMillis is set to default high value: " + initialElectionTimeout + "ms",
+);
 
 jsTestLog("Waiting for 'Scheduled election timeout callback' log on secondary");
 checkLog.containsWithCount(secondary, "Scheduled election timeout callback", 1);
 jsTestLog("Saw 'Scheduled election timeout callback' log");
 
 // Reconfig to decrease electionTimeoutMillis to 1 second
-jsTestLog("Reconfiguring to set electionTimeoutMillis to 1000ms (down from " + initialElectionTimeout + "ms)");
+jsTestLog(
+    "Reconfiguring to set electionTimeoutMillis to 1000ms (down from " +
+        initialElectionTimeout +
+        "ms)",
+);
 let config = rst.getReplSetConfigFromNode();
 config.version++;
 config.settings = config.settings || {};

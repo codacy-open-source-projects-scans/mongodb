@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_cursor.h"
 
@@ -34,9 +8,12 @@
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/explain_policy.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/serialization_context.h"
+
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -49,14 +26,14 @@ ALLOCATE_DOCUMENT_SOURCE_ID(cursor, DocumentSourceCursor::id);
 using boost::intrusive_ptr;
 using std::string;
 
-const char* DocumentSourceCursor::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceCursor::getSourceName() const {
+    return kStageName;
 }
 
-Value DocumentSourceCursor::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceCursor::serialize(const query_shape::SerializationOptions& opts) const {
     // We never parse a DocumentSourceCursor, so we only serialize for explain. Since it's never
     // part of user input, there's no need to compute its query shape.
-    if (!opts.isSerializingForExplain() || opts.isSerializingForQueryStats()) {
+    if (!opts.isSerializingForExplain() || opts.isShapifying()) {
         return Value();
     }
 
@@ -88,7 +65,7 @@ Value DocumentSourceCursor::serialize(const SerializationOptions& opts) const {
     tassert(11294806, "Missing queryPlanner field in explain stats", explainStats["queryPlanner"]);
     out["queryPlanner"] = Value(explainStats["queryPlanner"]);
 
-    if (opts.verbosity.value() >= ExplainOptions::Verbosity::kExecStats) {
+    if (explainPolicyFor(opts.verbosity.value()).hasExecStats()) {
         tassert(11294805,
                 "Missing executionStats field in explain stats",
                 explainStats["executionStats"]);

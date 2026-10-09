@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -45,6 +18,7 @@
 #include "mongo/db/pipeline/pipeline_split_state.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
+#include "mongo/db/pipeline/stage_params.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
@@ -65,6 +39,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <vector>
 
 #include <boost/intrusive_ptr.hpp>
@@ -83,7 +58,7 @@ using PipelineValidatorCallback = std::function<void(const Pipeline&)>;
  * A Pipeline object represents a list of DocumentSources and is responsible for optimizing the
  * pipeline.
  */
-class MONGO_MOD_PUBLIC Pipeline {
+class [[MONGO_MOD_PUBLIC]] Pipeline {
 public:
     /**
      * The list of default supported match expression features.
@@ -116,6 +91,21 @@ public:
         PipelineValidatorCallback validator = nullptr,
         bool isFacetPipeline = false,
         bool useStubInterface = false);
+
+    /**
+     * Creates a Pipeline from pre-computed StageParams, dispatching each via the
+     * StageParams→DocumentSource registry. Peer to parseFromLiteParsed(); use this when StageParams
+     * have already been collected from a LiteParsedPipeline's stages so that the getStageParams()
+     * call is not repeated at DocumentSource build time.
+     *
+     * 'validator' is an optional callback run after pipeline construction, same as in
+     * parseFromLiteParsed(). isFacetPipeline and useStubInterface are not supported —
+     * subpipelines for $lookup/$unionWith never need them.
+     */
+    static std::unique_ptr<Pipeline> parseFromStageParams(
+        StageParamsPipeline stageParams,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        PipelineValidatorCallback validator = nullptr);
 
     /**
      * Creates a Pipeline from an existing DocumentSourceContainer.
@@ -228,7 +218,7 @@ public:
      * Checks whether the pipeline can run on the specified collection using catalog data. It is the
      * caller's responsibility to ensure the catalog data is accurate.
      *
-     * TODO SERVER-117803 Delete these functions once they're fully replaced by their LPP
+     * TODO SERVER-121094 Delete these functions once they're fully replaced by their LPP
      * counterparts.
      */
     void validateWithCollectionMetadata(const CollectionOrViewAcquisition& collOrView) const;
@@ -254,18 +244,18 @@ public:
      * helpers, which handle redaction.
      */
     std::vector<Value> serialize(
-        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
+        const boost::optional<const query_shape::SerializationOptions&>& opts = boost::none) const;
     std::vector<BSONObj> serializeToBson(
-        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
+        const boost::optional<const query_shape::SerializationOptions&>& opts = boost::none) const;
     static std::vector<Value> serializeContainer(
         const DocumentSourceContainer& container,
-        const boost::optional<const SerializationOptions&>& opts = boost::none);
+        const boost::optional<const query_shape::SerializationOptions&>& opts = boost::none);
 
     std::vector<BSONObj> serializeForLogging(
-        const boost::optional<const SerializationOptions&>& opts = boost::none) const;
+        const boost::optional<const query_shape::SerializationOptions&>& opts = boost::none) const;
     static std::vector<BSONObj> serializeContainerForLogging(
         const DocumentSourceContainer& container,
-        const boost::optional<const SerializationOptions&>& opts = boost::none);
+        const boost::optional<const query_shape::SerializationOptions&>& opts = boost::none);
     static std::vector<BSONObj> serializePipelineForLogging(const std::vector<BSONObj>& pipeline);
 
     // The initial source is special since it varies between mongos and mongod.
@@ -280,7 +270,7 @@ public:
      * specified by 'verbosity'.
      */
     std::vector<Value> writeExplainOps(
-        const SerializationOptions& opts = SerializationOptions{}) const;
+        const query_shape::SerializationOptions& opts = query_shape::SerializationOptions{}) const;
 
     /**
      * Returns the dependencies needed by this pipeline. 'availableMetadata' should reflect what
@@ -365,7 +355,7 @@ public:
      * Removes and returns the first stage of the pipeline if its name is 'targetStageName'.
      * Returns nullptr if there is no first stage with that name.
      */
-    boost::intrusive_ptr<DocumentSource> popFrontWithName(StringData targetStageName);
+    boost::intrusive_ptr<DocumentSource> popFrontWithName(std::string_view targetStageName);
 
     /**
      * Removes and returns the last stage of the pipeline. Returns nullptr if the pipeline is empty.
@@ -474,5 +464,5 @@ private:
     bool _translatedForViewlessTimeseries{false};
 };
 
-using PipelinePtr MONGO_MOD_PUBLIC = std::unique_ptr<Pipeline>;
+using PipelinePtr [[MONGO_MOD_PUBLIC]] = std::unique_ptr<Pipeline>;
 }  // namespace mongo

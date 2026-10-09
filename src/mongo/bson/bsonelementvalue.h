@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
@@ -43,6 +16,7 @@
 
 #include <cstdint>
 #include <cstring>  // strlen
+#include <string_view>
 
 namespace mongo {
 class BSONObj;
@@ -55,7 +29,7 @@ struct BSONArray;
  * No type checking is performed on the access methods and it is the callers responsibility to
  * interpret the value as the correct type.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT BSONElementValue {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] BSONElementValue {
 public:
     BSONElementValue() = default;
     explicit BSONElementValue(const char* value) : _value(value) {}
@@ -84,9 +58,9 @@ public:
     /**
      * String (0x02)
      */
-    StringData String() const {
+    std::string_view String() const {
         // String count includes null terminator.
-        return StringData(
+        return std::string_view(
             _CString(), ConstDataView(value()).read<LittleEndian<int>>() - kStringTerminatorBytes);
     }
 
@@ -133,8 +107,8 @@ public:
     BSONRegEx Regex() const {
         const char* pattern = RegexPattern();
         const char* flags = RegexFlags();
-        return BSONRegEx(StringData(pattern, flags - pattern - kStringTerminatorBytes),
-                         StringData(flags));
+        return BSONRegEx(std::string_view(pattern, flags - pattern - kStringTerminatorBytes),
+                         std::string_view(flags));
     }
     const char* RegexPattern() const {
         return value();
@@ -148,7 +122,7 @@ public:
      * DBRef (0x0C)
      */
     BSONDBRef DBRef() const {
-        StringData ns = String();
+        std::string_view ns = String();
         return BSONDBRef(ns, mongo::OID::from(ns.data() + ns.size() + kStringTerminatorBytes));
     }
     const char* DBRefNS() const {
@@ -178,7 +152,7 @@ public:
      * CodeWScope (0x0F)
      */
     BSONCodeWScope CodeWScope() const {
-        StringData code = CodeWScopeCode();
+        std::string_view code = CodeWScopeCode();
         return BSONCodeWScope(code, _codeWScopeObj(code.size() + kStringTerminatorBytes));
     }
     const char* CodeWScopeCode() const {

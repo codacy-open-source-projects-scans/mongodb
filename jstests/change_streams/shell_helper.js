@@ -6,9 +6,15 @@
 // the oplog entry. When operations get bundled into a transaction, their operationTime is instead
 // based on the commit oplog entry, which would cause this test to fail.
 // @tags: [change_stream_does_not_expect_txns]
-import {assertDropAndRecreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertDropAndRecreateCollection,
+    assertDropCollection,
+} from "jstests/libs/collection_drop_recreate.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {assertChangeStreamEventEq, assertInvalidateOp} from "jstests/libs/query/change_stream_util.js";
+import {
+    assertChangeStreamEventEq,
+    assertInvalidateOp,
+} from "jstests/libs/query/change_stream_util.js";
 
 const coll = assertDropAndRecreateCollection(db, "change_stream_shell_helper");
 
@@ -84,22 +90,31 @@ const resumeTime = assert.commandWorked(
 jsTestLog("Insert of document with _id 1 got operationTime " + tojson(resumeTime));
 
 const changeForInsert = checkNextChange(changeStreamCursor, {docId: 1});
-jsTestLog("Change stream event for document with _id 1 reports clusterTime " + tojson(changeForInsert.clusterTime));
+jsTestLog(
+    "Change stream event for document with _id 1 reports clusterTime " +
+        tojson(changeForInsert.clusterTime),
+);
 
 // We expect the clusterTime returned by the change stream event and the operationTime returned
 // by the insert to be the same.
 assert.eq(changeForInsert.clusterTime, resumeTime);
 
 jsTestLog("Testing watch() with pipeline and resumeAfter");
-changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {resumeAfter: resumeToken});
+changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {
+    resumeAfter: resumeToken,
+});
 checkNextChange(changeStreamCursor, {docId: 1});
 
 jsTestLog("Testing watch() with pipeline and startAfter");
-changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {startAfter: resumeToken});
+changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {
+    startAfter: resumeToken,
+});
 checkNextChange(changeStreamCursor, {docId: 1});
 
 jsTestLog("Testing watch() with pipeline and startAtOperationTime");
-changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {startAtOperationTime: resumeTime});
+changeStreamCursor = coll.watch([{$project: {docId: "$documentKey._id"}}], {
+    startAtOperationTime: resumeTime,
+});
 checkNextChange(changeStreamCursor, {docId: 1});
 
 jsTestLog("Testing watch() with updateLookup");
@@ -118,7 +133,7 @@ checkNextChange(changeStreamCursor, expected);
 jsTestLog("Testing watch() with batchSize");
 // Only test mongod because mongos uses batch size 0 for aggregate commands internally to
 // establish cursors quickly. GetMore on mongos doesn't respect batch size due to SERVER-31992.
-if (!FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
+if (!FixtureHelpers.isMongos(db)) {
     // Increase a field by 5 times and verify the batch size is respected.
     for (let i = 0; i < 5; i++) {
         assert.commandWorked(coll.update({_id: 1}, {$inc: {x: 1}}));
@@ -130,10 +145,6 @@ if (!FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
         {resumeAfter: resumeToken, batchSize: 2},
     );
 
-    if (TestData.testingReplicaSetEndpoint) {
-        // GetMore on mongos doesn't respect batch size due to SERVER-31992.
-        assert.soon(() => changeStreamCursor.hasNext());
-    }
     // Check the first batch.
     assert.eq(changeStreamCursor.objsLeftInBatch(), 2);
     // Consume the first batch.
@@ -160,7 +171,11 @@ changeStreamCursor = coll.watch([], {maxAwaitTimeMS: 500});
 testCommandIsCalled(
     () => assert(!changeStreamCursor.hasNext()),
     (cmdObj) => {
-        assert.eq("getMore", Object.keys(cmdObj)[0], "expected getMore command, but was: " + tojson(cmdObj));
+        assert.eq(
+            "getMore",
+            Object.keys(cmdObj)[0],
+            "expected getMore command, but was: " + tojson(cmdObj),
+        );
         assert(cmdObj.hasOwnProperty("maxTimeMS"), "unexpected getMore command: " + tojson(cmdObj));
         assert.eq(500, cmdObj.maxTimeMS, "unexpected getMore command: " + tojson(cmdObj));
     },
@@ -195,7 +210,10 @@ const invalidateDoc = assertInvalidateOp({cursor: changeStreamCursor, opType: "d
 if (invalidateDoc) {
     jsTestLog("Testing using the 'startAfter' option from the invalidate entry");
     assert.commandWorked(coll.insert({_id: "After drop"}));
-    let resumedFromInvalidate = coll.watch([], {startAfter: invalidateDoc._id, collation: {locale: "simple"}});
+    let resumedFromInvalidate = coll.watch([], {
+        startAfter: invalidateDoc._id,
+        collation: {locale: "simple"},
+    });
 
     // We should see the new insert after starting over. However, in sharded cluster
     // passthroughs we may see more drop and invalidate notifications before we see the insert.
@@ -207,7 +225,10 @@ if (invalidateDoc) {
         const next = resumedFromInvalidate.next();
         if (next.operationType == "invalidate") {
             // Start again!
-            resumedFromInvalidate = coll.watch([], {startAfter: next._id, collation: {locale: "simple"}});
+            resumedFromInvalidate = coll.watch([], {
+                startAfter: next._id,
+                collation: {locale: "simple"},
+            });
             return false;
         }
         if (next.operationType == "drop") {

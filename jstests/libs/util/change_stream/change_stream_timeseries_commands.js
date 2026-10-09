@@ -7,7 +7,7 @@ import {ChangeStreamWatchMode} from "jstests/libs/query/change_stream_util.js";
  */
 export class CreateTimeseriesCollectionCommand extends Command {
     constructor({dbName, collName, timeField, metaField}) {
-        super(dbName, collName, /* shardSet */ null, /* collectionCtx */ {});
+        super({dbName, collName});
         this.timeField = timeField;
         this.metaField = metaField;
     }
@@ -42,7 +42,11 @@ export class CreateTimeseriesCollectionCommand extends Command {
             return [createEvent];
         }
 
-        if (watchMode === ChangeStreamWatchMode.kDb && watchedNss && watchedNss.db === this.dbName) {
+        if (
+            watchMode === ChangeStreamWatchMode.kDb &&
+            watchedNss &&
+            watchedNss.db === this.dbName
+        ) {
             return [createEvent];
         }
 
@@ -81,7 +85,7 @@ export class TimeseriesInsertCommand extends Command {
      *     If true, this event is only visible when ctx.rawData === true.
      */
     constructor({insertNss, eventNss, insertDoc, expectedFullDocument, requiresRawData = false}) {
-        super(insertNss.db, insertNss.coll, /* shardSet */ null, /* collectionCtx */ {});
+        super({dbName: insertNss.db, collName: insertNss.coll});
         this.insertNss = insertNss;
         this.eventNss = eventNss;
         this.insertDoc = insertDoc;
@@ -102,7 +106,8 @@ export class TimeseriesInsertCommand extends Command {
             return [];
         }
 
-        const isSystemBuckets = this.eventNss.coll && this.eventNss.coll.startsWith("system.buckets.");
+        const isSystemBuckets =
+            this.eventNss.coll && this.eventNss.coll.startsWith("system.buckets.");
         if (isSystemBuckets && !showSystemEvents) {
             return [];
         }
@@ -139,13 +144,15 @@ export class TimeseriesInsertCommand extends Command {
 
 export class FCVUpgradeCommand extends Command {
     constructor({timeseriesCollections} = {}) {
-        super(/* dbName */ null, /* collName */ null, /* shardSet */ null, /* collectionCtx */ {});
+        super();
         this.timeseriesCollections = timeseriesCollections;
     }
 
     execute(conn) {
         const adminDB = conn.getDB("admin");
-        assert.commandWorked(adminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        assert.commandWorked(
+            adminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}),
+        );
     }
 
     getChangeEvents(ctx) {
@@ -161,7 +168,11 @@ export class FCVUpgradeCommand extends Command {
 
             if (watchMode === ChangeStreamWatchMode.kCollection) {
                 // Only streams watching the *source* collection (buckets) see rename+invalidate.
-                if (watchedNss && watchedNss.db === bucketsNss.db && watchedNss.coll === bucketsNss.coll) {
+                if (
+                    watchedNss &&
+                    watchedNss.db === bucketsNss.db &&
+                    watchedNss.coll === bucketsNss.coll
+                ) {
                     events.push(renameEvent);
                     events.push({operationType: "invalidate"});
                     break;
@@ -185,14 +196,16 @@ export class FCVUpgradeCommand extends Command {
 
 export class FCVDowngradeCommand extends Command {
     constructor({timeseriesCollections, targetFCV} = {}) {
-        super(/* dbName */ null, /* collName */ null, /* shardSet */ null, /* collectionCtx */ {});
+        super();
         this.timeseriesCollections = timeseriesCollections;
         this.targetFCV = targetFCV;
     }
 
     execute(conn) {
         const adminDB = conn.getDB("admin");
-        assert.commandWorked(adminDB.runCommand({setFeatureCompatibilityVersion: this.targetFCV, confirm: true}));
+        assert.commandWorked(
+            adminDB.runCommand({setFeatureCompatibilityVersion: this.targetFCV, confirm: true}),
+        );
     }
 
     getChangeEvents(ctx) {
@@ -208,7 +221,11 @@ export class FCVDowngradeCommand extends Command {
 
             if (watchMode === ChangeStreamWatchMode.kCollection) {
                 // Only streams watching the *source* collection (regular/viewless) see rename+invalidate.
-                if (watchedNss && watchedNss.db === regularNss.db && watchedNss.coll === regularNss.coll) {
+                if (
+                    watchedNss &&
+                    watchedNss.db === regularNss.db &&
+                    watchedNss.coll === regularNss.coll
+                ) {
                     events.push(renameEvent);
                     events.push({operationType: "invalidate"});
                     break;

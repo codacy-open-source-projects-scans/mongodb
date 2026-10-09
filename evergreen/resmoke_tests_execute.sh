@@ -78,7 +78,9 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
 
     extra_args="$extra_args --jobs=${resmoke_jobs}"
 
-    if [ ${should_shuffle} = true ]; then
+    if [ -n "${shuffle_mode}" ]; then
+        extra_args="$extra_args --shuffleMode=${shuffle_mode}"
+    elif [ ${should_shuffle} = true ]; then
         extra_args="$extra_args --shuffleMode=longest-first"
     elif [ ${should_shuffle} = false ]; then
         extra_args="$extra_args --shuffleMode=off"
@@ -94,9 +96,9 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     # definition or build variant's definition. The configuration of cache size is duplicated in
     # bazel/resmoke/resmoke_shim.py, please update both.
     set +o errexit
-    echo "${resmoke_args} ${test_flags}" | grep -q storageEngineCacheSizeGB
+    echo "${resmoke_args} ${test_flags} ${extra_test_flags}" | grep -q storageEngineCacheSizeGB
     if [ $? -eq 1 ]; then
-        echo "${resmoke_args} ${test_flags}" | grep -q "\-\-storageEngine=inMemory"
+        echo "${resmoke_args} ${test_flags} ${extra_test_flags}" | grep -q "\-\-storageEngine=inMemory"
         if [ $? -eq 0 ]; then
             # We use a default of 4GB for the InMemory storage engine.
             extra_args="$extra_args --storageEngineCacheSizeGB=4"
@@ -126,8 +128,11 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     fi
 
     # Add test selection flag based on patch parameter
-    if [ "${enable_evergreen_api_test_selection}" = "true" ]; then
-        extra_args="$extra_args --enableEvergreenApiTestSelection"
+    if [ -n "${enable_evergreen_api_test_selection}" ]; then
+        extra_args="$extra_args --enableEvergreenApiTestSelection=${enable_evergreen_api_test_selection}"
+    # If no parameter present, check the project setting
+    elif [ "${is_test_selection_enabled}" == true ]; then
+        extra_args="$extra_args --enableEvergreenApiTestSelection=${is_test_selection_enabled}"
     fi
 
     # Split comma separated list of strategies
@@ -162,6 +167,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
         ${resmoke_args} \
         $extra_args \
         ${test_flags} \
+        ${extra_test_flags} \
         --suites=${suite_name} \
         --log=${resmoke_logger} \
         --staggerJobs=on \
@@ -174,6 +180,7 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
         --revisionOrderId=${revision_order_id} \
         --taskId=${task_id} \
         --taskName=${task_name} \
+        --displayTaskName="${display_task_name}" \
         --variantName=${build_variant} \
         --versionId=${version_id} \
         --requester=${requester} \

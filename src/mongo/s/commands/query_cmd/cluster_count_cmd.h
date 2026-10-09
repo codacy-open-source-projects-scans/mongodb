@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -42,6 +16,7 @@
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/query/count_command_gen.h"
 #include "mongo/db/query/query_shape/count_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape_hash.h"
@@ -56,7 +31,6 @@
 #include "mongo/db/router_role/router_role.h"
 #include "mongo/db/version_context.h"
 #include "mongo/db/views/pipeline_resolver.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/commands/query_cmd/cluster_explain.h"
@@ -73,10 +47,8 @@
 namespace mongo {
 
 inline BSONObj prepareCountForPassthrough(const OperationContext* opCtx,
-                                          const BSONObj& cmdObj,
+                                          CountCommandRequest& countRequest,
                                           bool requestQueryStats) {
-    BSONObjBuilder bob(cmdObj);
-
     // Pass the queryShapeHash to the shards. We must validate that all participating shards can
     // understand 'originalQueryShapeHash' and therefore check the feature flag. We use the last
     // LTS when the FCV is uninitialized, since count commands can run during initial sync. This is
@@ -87,15 +59,16 @@ inline BSONObj prepareCountForPassthrough(const OperationContext* opCtx,
             VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         if (auto&& queryShapeHash = CurOp::get(opCtx)->debug().getQueryShapeHash()) {
-            bob.append(CountCommandRequest::kOriginalQueryShapeHashFieldName,
-                       queryShapeHash->toHexString());
+            countRequest.setOriginalQueryShapeHash(queryShapeHash);
         }
     }
+    // Set rather than append so a client-supplied includeQueryStatsMetrics is overwritten instead
+    // of duplicated in the shard OP_MSG.
     if (requestQueryStats) {
-        bob.append(CountCommandRequest::kIncludeQueryStatsMetricsFieldName, true);
+        countRequest.setIncludeQueryStatsMetrics(true);
     }
 
-    return CommandHelpers::filterCommandRequestForPassthrough(bob.done());
+    return CommandHelpers::filterCommandRequestForPassthrough(countRequest.toBSON());
 }
 
 inline bool convertAndRunAggregateIfViewlessTimeseries(
@@ -138,24 +111,23 @@ inline void createShapeAndRegisterQueryStats(const boost::intrusive_ptr<Expressi
 
     // Compute QueryShapeHash and record it in CurOp.
     OperationContext* opCtx = expCtx->getOperationContext();
+    const bool rawDataForShape = countRequest.getRawData().value_or(false);
     const query_shape::DeferredQueryShape deferredShape{[&]() {
         return shape_helpers::tryMakeShape<query_shape::CountCmdShape>(
-            *parsedFind, countRequest.getLimit().has_value(), countRequest.getSkip().has_value());
+            *parsedFind,
+            countRequest.getLimit().has_value(),
+            countRequest.getSkip().has_value(),
+            rawDataForShape);
     }};
     boost::optional<query_shape::QueryShapeHash> queryShapeHash =
-        CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-            return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss);
-        });
+        CurOp::get(opCtx)->debug().ensureQueryShapeHash(
+            opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape); });
 
-    if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabledUseLastLTSFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        query_stats::registerRequest(opCtx, nss, [&]() {
-            uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
-            return std::make_unique<query_stats::CountKey>(
-                expCtx, countRequest, std::move(deferredShape->getValue()));
-        });
-    }
+    query_stats::registerRequest(opCtx, nss, [&]() {
+        uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
+        return std::make_unique<query_stats::CountKey>(
+            expCtx, countRequest, std::move(deferredShape->getValue()));
+    });
 }
 
 /**
@@ -215,6 +187,7 @@ public:
         Reply typedRun(OperationContext* opCtx) {
             Impl::checkCanRunHere(opCtx);
             constexpr auto cmdName = Request::kCommandName;
+            setReadWriteConcern(opCtx, request(), true /* setRC */, false /* setWC */);
             const auto originalCountRequest = request();
 
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
@@ -325,8 +298,9 @@ public:
                         countRequestForShard.setSkip(boost::none);
 
                         // The includeQueryStatsMetrics field is not supported on mongos for the
-                        // count command, so we do not need to check the value on the original
-                        // request when updating requestQueryStats here.
+                        // count command (it is not returned in the client reply). When this op is
+                        // sampled, prepareCountForPassthrough overwrites the field to true so
+                        // shards return metrics for the query stats store.
                         bool requestQueryStats =
                             query_stats::shouldRequestRemoteMetrics(CurOp::get(opCtx)->debug());
 
@@ -336,11 +310,8 @@ public:
                                 expCtx,
                                 routingCtx,
                                 nss,
-                                applyReadWriteConcern(
-                                    opCtx,
-                                    this,
-                                    prepareCountForPassthrough(
-                                        opCtx, countRequestForShard.toBSON(), requestQueryStats)),
+                                prepareCountForPassthrough(
+                                    opCtx, countRequestForShard, requestQueryStats),
                                 ReadPreferenceSetting::get(opCtx),
                                 Shard::RetryPolicy::kIdempotent,
                                 countRequestForShard.getQuery(),
@@ -354,7 +325,7 @@ public:
                                 query_request_conversion::asAggregateCommandRequest(
                                     originalCountRequest);
 
-                            const ResolvedView& resolvedView = *ex.extraInfo<ResolvedView>();
+                            const auto& resolvedView = *ex.extraInfo<ResolvedNamespace>();
                             auto resolvedAggRequest =
                                 PipelineResolver::buildRequestWithResolvedPipeline(
                                     expCtx->getIfrContext(), resolvedView, aggRequestOnView);
@@ -466,7 +437,7 @@ public:
 
             sharding::router::CollectionRouter router(opCtx, originalNss);
             auto status = router.routeWithRoutingContext(
-                "explain count"_sd,
+                std::string_view{"explain count"},
                 [&](OperationContext* opCtx, RoutingContext& originalRoutingCtx) {
                     // Clear the bodyBuilder since this lambda function may be retried if the router
                     // cache is stale.
@@ -529,11 +500,12 @@ public:
                         return shape_helpers::tryMakeShape<query_shape::CountCmdShape>(
                             *parsedFind,
                             countRequestForShard.getLimit().has_value(),
-                            countRequestForShard.getSkip().has_value());
+                            countRequestForShard.getSkip().has_value(),
+                            countRequestForShard.getRawData().value_or(false));
                     }};
 
                     CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-                        return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss);
+                        return shape_helpers::computeQueryShapeHash(expCtx, deferredShape);
                     });
 
                     auto numShards =
@@ -581,7 +553,7 @@ public:
                         return ClusterAggregate::retryOnViewOrIFRKickbackError(
                             opCtx,
                             aggRequestOnView,
-                            *ex.extraInfo<ResolvedView>(),
+                            *ex.extraInfo<ResolvedNamespace>(),
                             nss,
                             PrivilegeVector(),
                             verbosity,

@@ -49,6 +49,9 @@ filters:
     approvers:
       - 10gen/query-integration-features
       - 10gen/query-execution-classic
+  - "accumulator_internal_construct_ndv_sketch*":
+    approvers:
+      - 10gen/query-optimization
   - "accumulator_internal_construct_stats.cpp":
     approvers:
       - 10gen/query-optimization
@@ -67,7 +70,7 @@ filters:
   - "*change_stream*":
     approvers:
       - 10gen/query-execution-change-streams
-  - "catalog_resource_handle.h":
+  - "catalog_resource_handle.*":
     approvers:
       - 10gen/query-execution-classic
   - "common_sort_key_optimization_test.cpp":
@@ -138,7 +141,7 @@ filters:
       - 10gen/query-execution-query-settings
   - "document_source_sequential_document_cache*":
     approvers:
-      - 10gen/query-execution-classic
+      - 10gen/query-optimization
   - "document_source_set_variable_from_subpipeline*":
     approvers:
       - 10gen/query-integration-search
@@ -212,6 +215,9 @@ filters:
     approvers:
       - 10gen/query-integration-search
   - "lite_parsed_score_fusion*":
+    approvers:
+      - 10gen/query-integration-search
+  - "lite_parsed_hybrid_search*":
     approvers:
       - 10gen/query-integration-search
   - "hybrid_search_pipeline_builder*":
@@ -330,6 +336,12 @@ filters:
   - "document_source_list_catalog*":
     approvers:
       - 10gen/server-catalog-and-routing-shard-catalog
+  - "*internal_document_results_and_metadata*":
+    approvers:
+      - 10gen/query-integration-extensions-api
   - "document_source_list_extensions*":
+    approvers:
+      - 10gen/query-integration-extensions-api
+  - "wrapped_extension_source_hooks*":
     approvers:
       - 10gen/query-integration-extensions-api

@@ -16,7 +16,8 @@ assert.commandWorked(rst.getPrimary().getDB("test").coll.insert({x: 1}));
 
 // Restart with failpoint that blocks signalInitAndListenComplete.
 const restartNode = rst.restart(0, {
-    setParameter: "failpoint.hangBeforeNotifyStorageStartupRecoveryComplete=" + tojson({mode: "alwaysOn"}),
+    setParameter:
+        "failpoint.hangBeforeNotifyStorageStartupRecoveryComplete=" + tojson({mode: "alwaysOn"}),
 });
 
 // Wait for node to reach the failpoint (transport layer ready, but signal blocked)
@@ -38,7 +39,10 @@ jsTestLog("Verified: STARTUP2 blocked while failpoint active");
 
 // Disable failpoint to allow signal, which will unblock the wait
 assert.commandWorked(
-    restartNode.adminCommand({configureFailPoint: "hangBeforeNotifyStorageStartupRecoveryComplete", mode: "off"}),
+    restartNode.adminCommand({
+        configureFailPoint: "hangBeforeNotifyStorageStartupRecoveryComplete",
+        mode: "off",
+    }),
 );
 
 // Verify node transitions to STARTUP2 after signal is sent
@@ -47,6 +51,7 @@ assert.soon(
     "Node should transition to STARTUP2 after signal is sent",
 );
 
-rst.waitForState(restartNode, [ReplSetTest.State.PRIMARY, ReplSetTest.State.SECONDARY]);
+// This is a single-node set, so the restarted node can only come back as the primary.
+rst.waitForState(restartNode, ReplSetTest.State.PRIMARY);
 
 rst.stopSet();

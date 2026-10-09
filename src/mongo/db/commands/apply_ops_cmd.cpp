@@ -1,41 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/util/bson_check.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_session.h"  // IWYU pragma: keep
 #include "mongo/db/commands.h"
@@ -45,6 +17,7 @@
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
@@ -55,6 +28,7 @@
 #include <cstddef>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -64,13 +38,14 @@
 
 namespace mongo {
 namespace repl {
+using namespace std::literals::string_view_literals;
 
-bool checkCOperationType(const BSONObj& opObj, const StringData opName) {
+bool checkCOperationType(const BSONObj& opObj, const std::string_view opName) {
     BSONElement opTypeElem = opObj["op"];
     checkBSONType(BSONType::string, opTypeElem);
-    const StringData opType = opTypeElem.checkAndGetStringData();
+    const std::string_view opType = opTypeElem.checkAndGetStringData();
 
-    if (opType == "c"_sd) {
+    if (opType == "c"sv) {
         BSONElement oElem = opObj["o"];
         checkBSONType(BSONType::object, oElem);
         BSONObj o = oElem.Obj();
@@ -80,7 +55,7 @@ bool checkCOperationType(const BSONObj& opObj, const StringData opName) {
         }
     }
     return false;
-};
+}
 
 /**
  * Returns kNeedsSuperuser, if the provided applyOps command contains an empty applyOps command or
@@ -95,7 +70,15 @@ bool checkCOperationType(const BSONObj& opObj, const StringData opName) {
  *
  * May throw exceptions if the input is malformed.
  */
-OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
+OplogApplicationValidity validateApplyOpsCommand(OperationContext* opCtx, const BSONObj& cmdObj) {
+
+    const auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+    uassert(ErrorCodes::CommandNotSupported,
+            str::stream() << "applyOps command is not supported in this storage mode: "
+                          << provider.name(),
+            provider.supportsApplyOpsCommand() || getTestCommandsEnabled());
+
+
     const size_t maxApplyOpsDepth = 10;
     std::stack<std::pair<size_t, BSONObj>> toCheck;
 
@@ -115,9 +98,9 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
 
         BSONElement opTypeElem = opObj["op"];
         checkBSONType(BSONType::string, opTypeElem);
-        const StringData opType = opTypeElem.checkAndGetStringData();
+        const std::string_view opType = opTypeElem.checkAndGetStringData();
 
-        if (opType == "c"_sd) {
+        if (opType == "c"sv) {
             BSONElement oElem = opObj["o"];
             checkBSONType(BSONType::object, oElem);
             BSONObj o = oElem.Obj();
@@ -159,8 +142,8 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
             for (const BSONElement& e : applyOpsObj.firstElement().Array()) {
                 checkBSONType(BSONType::object, e);
                 auto oplogEntry = e.Obj();
-                if (checkCOperationType(oplogEntry, "create"_sd) ||
-                    checkCOperationType(oplogEntry, "renameCollection"_sd)) {
+                if (checkCOperationType(oplogEntry, "create"sv) ||
+                    checkCOperationType(oplogEntry, "renameCollection"sv)) {
                     demandAuthorization(OplogApplicationValidity::kNeedsSuperuser);
                 }
             }
@@ -185,13 +168,13 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
             if (opHasUUIDs) {
                 demandAuthorization(OplogApplicationValidity::kNeedsUseUUID);
             }
-            if (opHasUUIDs && checkCOperationType(opObj, "create"_sd)) {
+            if (opHasUUIDs && checkCOperationType(opObj, "create"sv)) {
                 // If the op is 'c' and forces the server to ingest a collection
                 // with a specific, user defined UUID.
                 demandAuthorization(OplogApplicationValidity::kNeedsForceAndUseUUID);
             }
 
-            if (checkCOperationType(opObj, "dropDatabase"_sd)) {
+            if (checkCOperationType(opObj, "dropDatabase"sv)) {
                 // dropDatabase is not allowed to run inside a nested applyOps command.
                 // Typically applyOps takes the global write lock, but dropDatabase requires the
                 // lock not to be taken. We allow it on a top-level applyOps as a special case,
@@ -201,7 +184,7 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
             }
 
             // If the op contains a nested applyOps...
-            if (checkCOperationType(opObj, "applyOps"_sd)) {
+            if (checkCOperationType(opObj, "applyOps"sv)) {
                 // And we've recursed too far, then bail out.
                 uassert(ErrorCodes::FailedToParse,
                         "Too many nested applyOps",
@@ -236,12 +219,12 @@ void _removeRidFieldFromOps(const BSONObj& applyOpsObj, BSONObjBuilder& builder)
             BSONObj opObj = element.Obj();
 
             // If the op contains a nested applyOps, filter it recursively
-            if (checkCOperationType(opObj, "applyOps"_sd)) {
+            if (checkCOperationType(opObj, "applyOps"sv)) {
                 BSONObjBuilder opBuilder(arr.subobjStart());
                 // Copy all non-'o', non-'rid' elements
                 for (auto&& elem : opObj) {
-                    if (elem.fieldNameStringData() != "o"_sd &&
-                        elem.fieldNameStringData() != "rid"_sd) {
+                    if (elem.fieldNameStringData() != "o"sv &&
+                        elem.fieldNameStringData() != "rid"sv) {
                         opBuilder.append(elem);
                     }
                 }
@@ -256,7 +239,7 @@ void _removeRidFieldFromOps(const BSONObj& applyOpsObj, BSONObjBuilder& builder)
                 // Strip 'rid' from all ops unconditionally
                 BSONObjBuilder opBuilder(arr.subobjStart());
                 for (auto&& elem : opObj) {
-                    if (elem.fieldNameStringData() != "rid"_sd) {
+                    if (elem.fieldNameStringData() != "rid"sv) {
                         opBuilder.append(elem);
                     }
                 }
@@ -268,7 +251,7 @@ void _removeRidFieldFromOps(const BSONObj& applyOpsObj, BSONObjBuilder& builder)
     // These are unknown to this function but must be preserved so the command
     // remains structurally equivalent after filtering.
     for (auto&& elem : applyOpsObj) {
-        if (elem.fieldNameStringData() != "applyOps"_sd) {
+        if (elem.fieldNameStringData() != "applyOps"sv) {
             builder.append(elem);
         }
     }
@@ -305,7 +288,7 @@ public:
     Status checkAuthForOperation(OperationContext* opCtx,
                                  const DatabaseName& dbName,
                                  const BSONObj& cmdObj) const override {
-        OplogApplicationValidity validity = validateApplyOpsCommand(cmdObj);
+        OplogApplicationValidity validity = validateApplyOpsCommand(opCtx, cmdObj);
         return OplogApplicationChecks::checkAuthForOperation(opCtx, dbName, cmdObj, validity);
     }
 
@@ -317,7 +300,7 @@ public:
         ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
             opCtx, std::vector<NamespaceString>{});
 
-        validateApplyOpsCommand(cmdObj);
+        validateApplyOpsCommand(opCtx, cmdObj);
 
         boost::optional<DisableDocumentValidationForInternalOp> maybeDisableValidation;
         if (shouldBypassDocumentValidationForCommand(cmdObj))

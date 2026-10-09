@@ -24,6 +24,16 @@ filegroup(
 )
 
 mongo_cc_library(
+    name = "connection_purpose",
+    srcs = [
+        "connection_purpose.cpp",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
     name = "ssl_options",
     srcs = [
         "ssl_options.cpp",
@@ -84,6 +94,7 @@ mongo_cc_library(
     deps = [
         ":ssl_options",
         "//src/mongo:base",
+        "//src/mongo/crypto:crypto_parameters_openssl",
         "//src/mongo/crypto:symmetric_crypto",
     ],
 )
@@ -164,6 +175,10 @@ mongo_cc_library(
     srcs = [
         "sock.cpp",
     ],
+    linkopts = select({
+        "//bazel/config:ssl_provider_windows": ["ncrypt.lib"],
+        "//conditions:default": [],
+    }),
     srcs_select = [
         {
             "//bazel/config:ssl_enabled": [

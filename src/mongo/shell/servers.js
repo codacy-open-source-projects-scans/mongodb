@@ -58,6 +58,10 @@ MongoRunner.getMongoShellPath = function () {
 };
 
 MongoRunner.getExtensionPath = function (shared_library_name) {
+    const testSrcDir = _getEnv("TEST_SRCDIR");
+    if (testSrcDir) {
+        return pathJoin(testSrcDir, "_main", "install-extensions", "lib", shared_library_name);
+    }
     return MongoRunner.getInstallPath("..", "lib", shared_library_name);
 };
 
@@ -135,12 +139,25 @@ MongoRunner.VersionSub = function (pattern, version) {
         print(`Running hang analyzer for pids [${pids}]`);
 
         const scriptPath = pathJoin(".", "buildscripts", "resmoke.py");
-        // We are using a raw "python" rather than selecting the approperate python here
-        // This is because as part of SERVER-79663 we noticed that servers.js is included in the legacy
-        // shell
+        // Prefer the interpreter resmoke itself is running under, exported as RESMOKE_PYTHON. When
+        // RESMOKE_PYTHON is unset we fall back to a raw "python": as part of SERVER-79663 we noticed
+        // that servers.js is included in the legacy shell.
         // See hang-analyzer argument options here:
         // https://github.com/10gen/mongo/blob/8636ede10bd70b32ff4b6cd115132ab0f22b89c7/buildscripts/resmokelib/hang_analyzer/hang_analyzer.py#L245
-        const args = ["python", scriptPath, "hang-analyzer", "-c", "-k", "-o", "file", "-o", "stdout", "-d", pids];
+        const python = _getEnv("RESMOKE_PYTHON") || "python";
+        const args = [
+            python,
+            scriptPath,
+            "hang-analyzer",
+            "-c",
+            "-k",
+            "-o",
+            "file",
+            "-o",
+            "stdout",
+            "-d",
+            pids,
+        ];
 
         if (jsTest.options().evergreenTaskId) {
             args.push("-t", jsTest.options().evergreenTaskId);
@@ -205,6 +222,7 @@ MongoRunner.binVersionSubs = [
     new MongoRunner.VersionSub("latest", shellVersion()),
     new MongoRunner.VersionSub("last-continuous", fcvConstants.lastContinuous),
     new MongoRunner.VersionSub("last-lts", fcvConstants.lastLTS),
+    new MongoRunner.VersionSub("last-patch", fcvConstants.latest),
 ];
 
 MongoRunner.getBinVersionFor = function (version) {
@@ -229,11 +247,21 @@ MongoRunner.getBinVersionFor = function (version) {
 };
 
 /**
- * Returns true if two version strings could represent the same version. This is true
- * if, after passing the versions through getBinVersionFor, the versions have the
- * same value for each version component up through the length of the shorter version.
+ * Returns true if two version strings could represent the same *version*. This is true
+ * if, after passing the versions through getBinVersionFor, the versions share the same
+ * value for every component (major, minor, and patch) up through the length of the
+ * shorter version.
  *
- * That is, 3.2.4 compares equal to 3.2, but 3.2.4 does not compare equal to 3.2.3.
+ * That is, 3.2 compares equal to 3.2.4 (the patch component of the longer version is
+ * not examined), but 3.2.3 does not compare equal to 3.2.4.
+ *
+ * Pre-release tags and git hashes are ignored where they trail the shorter version, so
+ * 9.1.0 and 9.1.0-rc1021 are the same version -- different *builds* of it. Use
+ * getBuildVersion() and isSameBuild() when builds must be told apart (e.g. a
+ * release-candidate last-patch binary vs the mainline build).
+ *
+ * Two versions whose pre-release or build metadata differ (e.g. 9.0.0-rc1 vs 9.0.0-rc2,
+ * or two git hashes) are reported as not the same.
  */
 MongoRunner.areBinVersionsTheSame = function (versionA, versionB) {
     // Check for invalid version strings first.
@@ -242,9 +270,35 @@ MongoRunner.areBinVersionsTheSame = function (versionA, versionB) {
     try {
         return 0 === MongoRunner.compareBinVersions(versionA, versionB);
     } catch (err) {
-        // compareBinVersions() throws an error if two versions differ only by the git hash.
+        // compareBinVersions() throws an error if two versions differ only by a
+        // non-numeric component such as a pre-release tag or git hash.
         return false;
     }
+};
+
+/**
+ * Returns the *build version* for a version string or alias (e.g. "latest",
+ * "last-patch"): the exact version string identifying a binary *build*, with aliases
+ * resolved. Two binaries are the same build if and only if their build versions are
+ * equal.
+ *
+ * Contrast with the *version* (see areBinVersionsTheSame()), which abstracts away
+ * pre-release tags and git hashes: 9.1.0 and 9.1.0-rc1021 are different builds of the
+ * same version.
+ */
+MongoRunner.getBuildVersion = function (version) {
+    return MongoRunner.getBinVersionFor(version);
+};
+
+/**
+ * Returns true if two version strings refer to the same *build*: their build versions
+ * (see getBuildVersion()) are exactly equal, pre-release tags and git hashes included.
+ *
+ * Same build implies same version (areBinVersionsTheSame()); the converse does not
+ * hold.
+ */
+MongoRunner.isSameBuild = function (versionA, versionB) {
+    return MongoRunner.getBuildVersion(versionA) === MongoRunner.getBuildVersion(versionB);
 };
 
 /**
@@ -253,9 +307,13 @@ MongoRunner.areBinVersionsTheSame = function (versionA, versionB) {
  *      0, if they are equal
  *     -1, if the first is older
  *
- * Note that this function only compares up to the length of the shorter version.
- * Because of this, minor versions will compare equal to the major versions they stem
- * from, but major-major and minor-minor version pairs will undergo strict comparison.
+ * Only the components present in both versions are compared, i.e. up to the length of
+ * the shorter version. The versions are compared component-by-component (major, then
+ * minor, then patch), so a shorter version compares equal to any longer version sharing
+ * its prefix -- e.g. 3.2 equals 3.2.4, but 3.2.3 does not equal 3.2.4.
+ *
+ * Comparing two versions whose pre-release or build metadata differ (e.g. 9.0.0-rc1 vs
+ * 9.0.0-rc2, or two git hashes) throws rather than returning an ordering.
  */
 MongoRunner.compareBinVersions = function (versionA, versionB) {
     let stringA = versionA;
@@ -281,7 +339,10 @@ MongoRunner.compareBinVersions = function (versionA, versionB) {
         let numA = parseInt(elementA);
         let numB = parseInt(elementB);
 
-        assert(!isNaN(numA) && !isNaN(numB), `Cannot compare non-equal non-numeric versions. ${elementA}, ${elementB}`);
+        assert(
+            !isNaN(numA) && !isNaN(numB),
+            `Cannot compare non-equal non-numeric versions. ${elementA}, ${elementB}`,
+        );
 
         if (numA > numB) {
             return 1;
@@ -444,7 +505,12 @@ MongoRunner.arrOptions = function (binaryName, args) {
 
         for (let k in o) {
             // Make sure our logical option should be added to the array of options
-            if (!o.hasOwnProperty(k) || k in MongoRunner.logicalOptions || !isValidOptionForBinary(k, o[k])) continue;
+            if (
+                !o.hasOwnProperty(k) ||
+                k in MongoRunner.logicalOptions ||
+                !isValidOptionForBinary(k, o[k])
+            )
+                continue;
 
             if ((k == "v" || k == "verbose") && isNumber(o[k])) {
                 let n = o[k];
@@ -562,7 +628,8 @@ MongoRunner.mongoOptions = function (opts) {
     }
 
     // Default for waitForConnect is true
-    opts.waitForConnect = waitForConnect == undefined || waitForConnect == null ? true : waitForConnect;
+    opts.waitForConnect =
+        waitForConnect == undefined || waitForConnect == null ? true : waitForConnect;
 
     opts.port ||= allocatePort();
 
@@ -580,15 +647,21 @@ MongoRunner.mongoOptions = function (opts) {
     }
 
     const setParameters = jsTestOptions().setParameters || {};
-    const tlsEnabled = (opts.tlsMode && opts.tlsMode != "disabled") || (opts.sslMode && opts.sslMode != "disabled");
+    const tlsEnabled =
+        (opts.tlsMode && opts.tlsMode != "disabled") ||
+        (opts.sslMode && opts.sslMode != "disabled");
     if (setParameters.featureFlagGRPC && tlsEnabled) {
         opts.grpcPort ||= allocatePort();
         grpcToMongoRpcPortMap[opts.grpcPort] = opts.port;
     }
 
-    opts.pathOpts = Object.merge(opts.pathOpts || {}, {port: "" + opts.port, runId: "" + opts.runId});
+    opts.pathOpts = Object.merge(opts.pathOpts || {}, {
+        port: "" + opts.port,
+        runId: "" + opts.runId,
+    });
 
-    let shouldRemember = (!opts.restart && !opts.noRemember) || (opts.restart && opts.appendOptions);
+    let shouldRemember =
+        (!opts.restart && !opts.noRemember) || (opts.restart && opts.appendOptions);
     if (shouldRemember) {
         MongoRunner.savedOptions[opts.runId] = Object.merge(opts, {});
         // We don't want to persist 'waitForConnect' across node restarts.
@@ -641,7 +714,12 @@ let _isMongodVersionEqualOrAfter = function (version1, version2) {
 
 // Removes a setParameter parameter from mongods or mongoses running a version that won't recognize
 // them.
-let _removeSetParameterIfBeforeVersion = function (opts, parameterName, requiredVersion, isMongos = false) {
+let _removeSetParameterIfBeforeVersion = function (
+    opts,
+    parameterName,
+    requiredVersion,
+    isMongos = false,
+) {
     let processString = isMongos ? "mongos" : "mongod";
     let versionCompatible =
         opts.binVersion === "" ||
@@ -679,7 +757,12 @@ MongoRunner.mongodOptions = function (opts = {}) {
     opts = MongoRunner.mongoOptions(opts);
 
     if (jsTestOptions().alwaysUseLogFiles) {
-        if (opts.cleanData || opts.startClean || opts.noCleanData === false || opts.useLogFiles === false) {
+        if (
+            opts.cleanData ||
+            opts.startClean ||
+            opts.noCleanData === false ||
+            opts.useLogFiles === false
+        ) {
             throw new Error("Always using log files, but received conflicting option.");
         }
 
@@ -703,14 +786,27 @@ MongoRunner.mongodOptions = function (opts = {}) {
     _removeSetParameterIfBeforeVersion(opts, "numInitialSyncConnectAttempts", "3.3.12");
     _removeSetParameterIfBeforeVersion(opts, "migrationLockAcquisitionMaxWaitMS", "4.1.7");
     _removeSetParameterIfBeforeVersion(opts, "shutdownTimeoutMillisForSignaledShutdown", "4.5.0");
-    _removeSetParameterIfBeforeVersion(opts, "failpoint.PrimaryOnlyServiceSkipRebuildingInstances", "4.8.0");
-    _removeSetParameterIfBeforeVersion(opts, "enableDefaultWriteConcernUpdatesForInitiate", "5.0.0");
+    _removeSetParameterIfBeforeVersion(
+        opts,
+        "failpoint.PrimaryOnlyServiceSkipRebuildingInstances",
+        "4.8.0",
+    );
+    _removeSetParameterIfBeforeVersion(
+        opts,
+        "enableDefaultWriteConcernUpdatesForInitiate",
+        "5.0.0",
+    );
     _removeSetParameterIfBeforeVersion(opts, "enableReconfigRollbackCommittedWritesCheck", "5.0.0");
     _removeSetParameterIfBeforeVersion(opts, "allowMultipleArbiters", "5.3.0");
-    _removeSetParameterIfBeforeVersion(opts, "internalQueryDisableExclusionProjectionFastPath", "6.2.0");
+    _removeSetParameterIfBeforeVersion(
+        opts,
+        "internalQueryDisableExclusionProjectionFastPath",
+        "6.2.0",
+    );
     _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0");
     _removeSetParameterIfBeforeVersion(opts, "enableAutoCompaction", "7.3.0");
     _removeSetParameterIfBeforeVersion(opts, "opentelemetryTraceDirectory", "8.3.0");
+    _removeSetParameterIfBeforeVersion(opts, "reshardingDocumentVerification", "9.0.0");
 
     if (!opts.logFile && opts.useLogFiles) {
         opts.logFile = opts.dbpath + "/mongod.log";
@@ -729,11 +825,15 @@ MongoRunner.mongodOptions = function (opts = {}) {
     if (opts.hasOwnProperty("enableEncryption")) {
         // opts.enableEncryption, if set, must be an empty string
         if (opts.enableEncryption !== "") {
-            throw new Error("The enableEncryption option must be an empty string if it is " + "specified");
+            throw new Error(
+                "The enableEncryption option must be an empty string if it is " + "specified",
+            );
         }
     } else if (jsTestOptions().enableEncryption !== undefined) {
         if (jsTestOptions().enableEncryption !== "") {
-            throw new Error("The enableEncryption option must be an empty string if it is " + "specified");
+            throw new Error(
+                "The enableEncryption option must be an empty string if it is " + "specified",
+            );
         }
         opts.enableEncryption = "";
     }
@@ -854,8 +954,18 @@ MongoRunner.mongosOptions = function (opts) {
         opts.auditPath = MongoRunner.toRealPath(opts.auditPath, opts);
     }
 
-    _removeSetParameterIfBeforeVersion(opts, "mongosShutdownTimeoutMillisForSignaledShutdown", "4.5.0", true);
-    _removeSetParameterIfBeforeVersion(opts, "failpoint.skipClusterParameterRefresh", "7.1.0", true);
+    _removeSetParameterIfBeforeVersion(
+        opts,
+        "mongosShutdownTimeoutMillisForSignaledShutdown",
+        "4.5.0",
+        true,
+    );
+    _removeSetParameterIfBeforeVersion(
+        opts,
+        "failpoint.skipClusterParameterRefresh",
+        "7.1.0",
+        true,
+    );
     _removeSetParameterIfBeforeVersion(opts, "defaultConfigCommandTimeoutMS", "7.3.0", true);
     _removeSetParameterIfBeforeVersion(opts, "opentelemetryTraceDirectory", "8.3.0", true);
 
@@ -918,7 +1028,12 @@ MongoRunner.runMongod = function (opts) {
         let backupOnRestartDir = jsTest.options()["backupOnRestartDir"] || false;
 
         if (opts.forceLock) removeFile(opts.dbpath + "/mongod.lock");
-        if (opts.cleanData || opts.startClean || (!opts.restart && !opts.noCleanData) || !pathExists(opts.dbpath)) {
+        if (
+            opts.cleanData ||
+            opts.startClean ||
+            (!opts.restart && !opts.noCleanData) ||
+            !pathExists(opts.dbpath)
+        ) {
             print("Resetting db path '" + opts.dbpath + "'");
             resetDbpath(opts.dbpath);
         } else {
@@ -929,7 +1044,12 @@ MongoRunner.runMongod = function (opts) {
                 // `MongoRunner.dataPath`. In this case, preserve the user input as is.
                 backupDir = backupDir.substring(MongoRunner.dataPath.length);
 
-                print("Backing up data files. DBPath: " + opts.dbpath + " Backing up under: " + backupDir);
+                print(
+                    "Backing up data files. DBPath: " +
+                        opts.dbpath +
+                        " Backing up under: " +
+                        backupDir,
+                );
                 copyDbpath(opts.dbpath, backupDir);
             }
         }
@@ -943,7 +1063,9 @@ MongoRunner.runMongod = function (opts) {
     }
 
     mongod.commandLine = MongoRunner.arrToOpts(opts);
-    let connectPort = jsTestOptions().shellGRPC ? mongod.commandLine.grpcPort : mongod.commandLine.port;
+    let connectPort = jsTestOptions().shellGRPC
+        ? mongod.commandLine.grpcPort
+        : mongod.commandLine.port;
     mongod.hostNoPort = useHostName ? getHostName() : "localhost";
     mongod.name = mongod.hostNoPort + ":" + mongod.commandLine.port;
     mongod.host = mongod.hostNoPort + ":" + connectPort;
@@ -992,7 +1114,9 @@ MongoRunner.runMongos = function (opts) {
     }
 
     mongos.commandLine = MongoRunner.arrToOpts(opts);
-    let connectPort = jsTestOptions().shellGRPC ? mongos.commandLine.grpcPort : mongos.commandLine.port;
+    let connectPort = jsTestOptions().shellGRPC
+        ? mongos.commandLine.grpcPort
+        : mongos.commandLine.port;
     mongos.name = MongoRunner.getMongosName(mongos.commandLine.port, useHostName);
     mongos.host = MongoRunner.getMongosName(connectPort, useHostName);
     mongos.port = parseInt(connectPort);
@@ -1079,7 +1203,8 @@ MongoRunner.validateCollectionsCallback = function (port, options) {};
 let stopMongoProgram = function (conn, signal, opts, waitpid) {
     if (!conn.pid) {
         throw new Error(
-            "first arg must have a `pid` property; " + "it is usually the object returned from MongoRunner.runMongod/s",
+            "first arg must have a `pid` property; " +
+                "it is usually the object returned from MongoRunner.runMongod/s",
         );
     }
 
@@ -1141,7 +1266,10 @@ let stopMongoProgram = function (conn, signal, opts, waitpid) {
     if (allowedExitCode !== returnCode && !opts.skipValidatingExitCode) {
         throw new MongoRunner.StopError(returnCode);
     } else if (returnCode !== MongoRunner.EXIT_CLEAN) {
-        print("MongoDB process on port " + port + " intentionally exited with error code ", returnCode);
+        print(
+            "MongoDB process on port " + port + " intentionally exited with error code ",
+            returnCode,
+        );
     }
 
     return returnCode;
@@ -1191,7 +1319,9 @@ function appendSetParameterArgs(argArray) {
     // Setting programMajorMinorVersion to the maximum value for the latest binary version
     // simplifies version checks below.
     const lastestMajorMinorVersion = Number.MAX_SAFE_INTEGER;
-    const lastContinuousVersion = convertVersionStringToInteger(MongoRunner.getBinVersionFor("last-continuous"));
+    const lastContinuousVersion = convertVersionStringToInteger(
+        MongoRunner.getBinVersionFor("last-continuous"),
+    );
     const lastLTSVersion = convertVersionStringToInteger(MongoRunner.getBinVersionFor("last-lts"));
     let programMajorMinorVersion = lastestMajorMinorVersion;
 
@@ -1212,7 +1342,12 @@ function appendSetParameterArgs(argArray) {
 
         if (jsTest.options().authMechanism && jsTest.options().authMechanism != "SCRAM-SHA-256") {
             if (!argArrayContainsSetParameterValue("authenticationMechanisms=")) {
-                argArray.push(...["--setParameter", "authenticationMechanisms=" + jsTest.options().authMechanism]);
+                argArray.push(
+                    ...[
+                        "--setParameter",
+                        "authenticationMechanisms=" + jsTest.options().authMechanism,
+                    ],
+                );
             }
         }
         if (jsTest.options().auth) {
@@ -1276,7 +1411,8 @@ function appendSetParameterArgs(argArray) {
             // The 'logComponentVerbosity' parameter must be passed in on the last continuous
             // version and last LTS version as well.
             if (
-                (programMajorMinorVersion === lastContinuousVersion || programMajorMinorVersion === lastLTSVersion) &&
+                (programMajorMinorVersion === lastContinuousVersion ||
+                    programMajorMinorVersion === lastLTSVersion) &&
                 isSetParameterMentioned(jsTest.options().setParameters, "logComponentVerbosity") &&
                 !argArrayContainsSetParameterValue("logComponentVerbosity=")
             ) {
@@ -1287,14 +1423,18 @@ function appendSetParameterArgs(argArray) {
                 argArray.push(...["--setParameter", "logComponentVerbosity=" + logVerbosityParam]);
             }
 
-            if (programMajorMinorVersion >= 530 && !argArrayContainsSetParameterValue("backtraceLogFile=")) {
+            if (
+                programMajorMinorVersion >= 530 &&
+                !argArrayContainsSetParameterValue("backtraceLogFile=")
+            ) {
                 let randomName = "";
                 let randomStrLen = 20;
                 const chars = "qwertyuiopasdfghjklzxcvbnm1234567890";
                 for (let i = 0; i <= randomStrLen; i++) {
                     randomName += chars[(Math.random() * 1000) % chars.length ^ 0];
                 }
-                const backtraceLogFilePath = MongoRunner.dataDir + "/" + randomName + Date.now() + ".stacktrace";
+                const backtraceLogFilePath =
+                    MongoRunner.dataDir + "/" + randomName + Date.now() + ".stacktrace";
                 argArray.push(...["--setParameter", "backtraceLogFile=" + backtraceLogFilePath]);
             }
 
@@ -1313,7 +1453,8 @@ function appendSetParameterArgs(argArray) {
                 };
 
                 Object.entries(reshardingDefaults).forEach(([key, value]) => {
-                    const keyIsNotParameter = parameters === undefined || parameters[key] === undefined;
+                    const keyIsNotParameter =
+                        parameters === undefined || parameters[key] === undefined;
                     const keyIsNotArgument = !argArrayContainsSetParameterValue(`${key}=`);
 
                     if (keyIsNotParameter && keyIsNotArgument) {
@@ -1331,7 +1472,8 @@ function appendSetParameterArgs(argArray) {
                 };
 
                 Object.entries(reshardingDefaults).forEach(([key, value]) => {
-                    const keyIsNotParameter = parameters === undefined || parameters[key] === undefined;
+                    const keyIsNotParameter =
+                        parameters === undefined || parameters[key] === undefined;
                     const keyIsNotArgument = !argArrayContainsSetParameterValue(`${key}=`);
 
                     if (keyIsNotParameter && keyIsNotArgument) {
@@ -1347,11 +1489,17 @@ function appendSetParameterArgs(argArray) {
 
                 if (
                     (parameters === undefined ||
-                        parameters["coordinateCommitReturnImmediatelyAfterPersistingDecision"] === undefined) &&
-                    !argArrayContainsSetParameterValue("coordinateCommitReturnImmediatelyAfterPersistingDecision=")
+                        parameters["coordinateCommitReturnImmediatelyAfterPersistingDecision"] ===
+                            undefined) &&
+                    !argArrayContainsSetParameterValue(
+                        "coordinateCommitReturnImmediatelyAfterPersistingDecision=",
+                    )
                 ) {
                     argArray.push(
-                        ...["--setParameter", "coordinateCommitReturnImmediatelyAfterPersistingDecision=false"],
+                        ...[
+                            "--setParameter",
+                            "coordinateCommitReturnImmediatelyAfterPersistingDecision=false",
+                        ],
                     );
                 }
             }
@@ -1379,11 +1527,19 @@ function appendSetParameterArgs(argArray) {
                 // Allow the parameter to be overridden if set explicitly via TestData.
                 if (
                     (jsTest.options().setParameters === undefined ||
-                        jsTest.options().setParameters["oplogApplicationEnforcesSteadyStateConstraints"] ===
-                            undefined) &&
-                    !argArrayContainsSetParameterValue("oplogApplicationEnforcesSteadyStateConstraints=")
+                        jsTest.options().setParameters[
+                            "oplogApplicationEnforcesSteadyStateConstraints"
+                        ] === undefined) &&
+                    !argArrayContainsSetParameterValue(
+                        "oplogApplicationEnforcesSteadyStateConstraints=",
+                    )
                 ) {
-                    argArray.push(...["--setParameter", "oplogApplicationEnforcesSteadyStateConstraints=true"]);
+                    argArray.push(
+                        ...[
+                            "--setParameter",
+                            "oplogApplicationEnforcesSteadyStateConstraints=true",
+                        ],
+                    );
                 }
             }
 
@@ -1394,7 +1550,8 @@ function appendSetParameterArgs(argArray) {
                         argArray.push(
                             ...[
                                 "--setParameter",
-                                "transactionLifetimeLimitSeconds=" + jsTest.options().transactionLifetimeLimitSeconds,
+                                "transactionLifetimeLimitSeconds=" +
+                                    jsTest.options().transactionLifetimeLimitSeconds,
                             ],
                         );
                     }
@@ -1411,27 +1568,56 @@ function appendSetParameterArgs(argArray) {
             // Increase the default value for `receiveChunkWaitForRangeDeleterTimeoutMS` to 90
             // seconds to prevent failures due to occasional slow range deletions
             if (programMajorMinorVersion >= 440) {
-                if (!argArrayContainsSetParameterValue("receiveChunkWaitForRangeDeleterTimeoutMS=")) {
-                    argArray.push(...["--setParameter", "receiveChunkWaitForRangeDeleterTimeoutMS=90000"]);
+                if (
+                    !argArrayContainsSetParameterValue("receiveChunkWaitForRangeDeleterTimeoutMS=")
+                ) {
+                    argArray.push(
+                        ...["--setParameter", "receiveChunkWaitForRangeDeleterTimeoutMS=90000"],
+                    );
                 }
             }
 
             // Since options may not be backward compatible, mongod options are not
             // set on older versions, e.g., mongod-3.0.
-            if (baseProgramName === "mongod" && programMajorMinorVersion == lastestMajorMinorVersion) {
-                if (jsTest.options().storageEngine === "wiredTiger" || !jsTest.options().storageEngine) {
-                    if (jsTest.options().storageEngineCacheSizeGB && !argArrayContains("--wiredTigerCacheSizeGB")) {
-                        argArray.push(...["--wiredTigerCacheSizeGB", jsTest.options().storageEngineCacheSizeGB]);
+            if (
+                baseProgramName === "mongod" &&
+                programMajorMinorVersion == lastestMajorMinorVersion
+            ) {
+                if (
+                    jsTest.options().storageEngine === "wiredTiger" ||
+                    !jsTest.options().storageEngine
+                ) {
+                    if (
+                        jsTest.options().storageEngineCacheSizeGB &&
+                        !argArrayContains("--wiredTigerCacheSizeGB")
+                    ) {
+                        argArray.push(
+                            ...[
+                                "--wiredTigerCacheSizeGB",
+                                jsTest.options().storageEngineCacheSizeGB,
+                            ],
+                        );
                     }
-                    if (jsTest.options().storageEngineCacheSizePct && !argArrayContains("--wiredTigerCacheSizePct")) {
-                        argArray.push(...["--wiredTigerCacheSizePct", jsTest.options().storageEngineCacheSizePct]);
+                    if (
+                        jsTest.options().storageEngineCacheSizePct &&
+                        !argArrayContains("--wiredTigerCacheSizePct")
+                    ) {
+                        argArray.push(
+                            ...[
+                                "--wiredTigerCacheSizePct",
+                                jsTest.options().storageEngineCacheSizePct,
+                            ],
+                        );
                     }
                     if (
                         jsTest.options().wiredTigerEngineConfigString &&
                         !argArrayContains("--wiredTigerEngineConfigString")
                     ) {
                         argArray.push(
-                            ...["--wiredTigerEngineConfigString", jsTest.options().wiredTigerEngineConfigString],
+                            ...[
+                                "--wiredTigerEngineConfigString",
+                                jsTest.options().wiredTigerEngineConfigString,
+                            ],
                         );
                     }
                     if (
@@ -1450,12 +1636,20 @@ function appendSetParameterArgs(argArray) {
                         !argArrayContains("--wiredTigerIndexConfigString")
                     ) {
                         argArray.push(
-                            ...["--wiredTigerIndexConfigString", jsTest.options().wiredTigerIndexConfigString],
+                            ...[
+                                "--wiredTigerIndexConfigString",
+                                jsTest.options().wiredTigerIndexConfigString,
+                            ],
                         );
                     }
                 } else if (jsTest.options().storageEngine === "inMemory") {
-                    if (jsTest.options().storageEngineCacheSizeGB && !argArrayContains("--inMemorySizeGB")) {
-                        argArray.push(...["--inMemorySizeGB", jsTest.options().storageEngineCacheSizeGB]);
+                    if (
+                        jsTest.options().storageEngineCacheSizeGB &&
+                        !argArrayContains("--inMemorySizeGB")
+                    ) {
+                        argArray.push(
+                            ...["--inMemorySizeGB", jsTest.options().storageEngineCacheSizeGB],
+                        );
                     }
                 }
                 // apply setParameters for mongod. The 'setParameters' field should be given as
@@ -1519,12 +1713,36 @@ MongoRunner.awaitConnection = function (
             try {
                 conn = new Mongo("127.0.0.1:" + port);
                 conn.pid = pid;
+                // Verify we connected to the process we actually started, not a stale
+                // process that already occupied the port (e.g. from a previous test that
+                // didn't shut down cleanly). If the new process failed to bind it exits
+                // with EXIT_NET_ERROR (48) and the stale process accepts our connection
+                // instead, making the try succeed while the real process is already dead.
+                const status = conn.adminCommand({serverStatus: 1});
+                const serverPid = status.pid;
+                if (status.ok === 1 && +serverPid !== +pid) {
+                    const res = checkProgram(pid);
+                    const exitCode = res.alive ? "(still running)" : res.exitCode;
+                    print(
+                        `Connected to stale process on port ${port}: ` +
+                            `expected pid ${pid} (exit code ${exitCode}), got pid ${serverPid}. ` +
+                            `A previous test may not have shut down cleanly.`,
+                    );
+                    serverExitCodeMap[port] = MongoRunner.EXIT_NET_ERROR;
+                    throw new MongoRunner.StopError(MongoRunner.EXIT_NET_ERROR);
+                }
                 return true;
             } catch (e) {
+                if (e instanceof MongoRunner.StopError) {
+                    throw e;
+                }
                 let res = checkProgram(pid);
                 if (!res.alive) {
                     print(
-                        "mongo program was not running at " + port + ", process ended with exit code: " + res.exitCode,
+                        "mongo program was not running at " +
+                            port +
+                            ", process ended with exit code: " +
+                            res.exitCode,
                     );
                     serverExitCodeMap[port] = res.exitCode;
                     if (res.exitCode !== MongoRunner.EXIT_CLEAN) {
@@ -1616,7 +1834,10 @@ function startMongoProgram(...args) {
                 let res = checkProgram(pid);
                 if (!res.alive) {
                     print(
-                        "Could not start mongo program at " + port + ", process ended with exit code: " + res.exitCode,
+                        "Could not start mongo program at " +
+                            port +
+                            ", process ended with exit code: " +
+                            res.exitCode,
                     );
                     // Break out
                     m = null;
@@ -1658,7 +1879,10 @@ function _getMongoProgramArguments(args) {
             newArgs.push("--tls");
             newArgs.push("--tlsAllowInvalidHostnames");
         }
-        if (jsTestOptions().shellTlsCertificateKeyFile && !args.includes("--tlsCertificateKeyFile")) {
+        if (
+            jsTestOptions().shellTlsCertificateKeyFile &&
+            !args.includes("--tlsCertificateKeyFile")
+        ) {
             newArgs.push("--tlsCertificateKeyFile", jsTestOptions().shellTlsCertificateKeyFile);
         }
         if (jsTestOptions().shellGRPC && !args.includes("--gRPC")) {
@@ -1675,9 +1899,15 @@ function _getMongoProgramArguments(args) {
 
         if (!args.includes("--tlsCertificateKeyFile")) {
             if (baseProgramName == "mongod" && jsTestOptions().mongodTlsCertificateKeyFile) {
-                newArgs.push("--tlsCertificateKeyFile", jsTestOptions().mongodTlsCertificateKeyFile);
+                newArgs.push(
+                    "--tlsCertificateKeyFile",
+                    jsTestOptions().mongodTlsCertificateKeyFile,
+                );
             } else if (baseProgramName == "mongos" && jsTestOptions().mongosTlsCertificateKeyFile) {
-                newArgs.push("--tlsCertificateKeyFile", jsTestOptions().mongosTlsCertificateKeyFile);
+                newArgs.push(
+                    "--tlsCertificateKeyFile",
+                    jsTestOptions().mongosTlsCertificateKeyFile,
+                );
             }
         }
     }

@@ -2,13 +2,16 @@ version: 1.0.0
 filters:
   - "*":
     approvers:
-      - 10gen/mongo-default-approvers
+      - 10gen/devprod-test-infrastructure
   - "README.md":
     approvers:
       - 10gen/devprod-test-infrastructure
   - "aggregation*":
     approvers:
       - 10gen/query
+  - "aggregation_dependency_graph_validation_passthrough.yml":
+    approvers:
+      - 10gen/query-optimization
   - "aggregation_disabled_optimization.yml":
     approvers:
       - 10gen/query-optimization
@@ -22,6 +25,9 @@ filters:
     approvers:
       - 10gen/query-execution-classic
   - "*join_optimization*":
+    approvers:
+      - 10gen/query-optimization
+  - "*join_plan_cache*":
     approvers:
       - 10gen/query-optimization
   - "aggregation_sharded_collections_causally_consistent_passthrough.yml":
@@ -45,6 +51,9 @@ filters:
   - "benchmarks_query.yml":
     approvers:
       - 10gen/query
+  - "benchmarks_sorter.yml":
+    approvers:
+      - 10gen/server-external-sorter
   - "buildscripts_test.yml":
     approvers:
       - 10gen/devprod-test-infrastructure
@@ -57,6 +66,9 @@ filters:
   - "clustered_collection_passthrough.yml":
     approvers:
       - 10gen/query-execution
+  - "pbt_clustered_experiment_coll.yml":
+    approvers:
+      - 10gen/query-property-based-testing
   - "concurrency_compute_mode.yml":
     approvers:
       - 10gen/query-integration-features
@@ -114,6 +126,9 @@ filters:
   - "no_passthrough_network*":
     approvers:
       - 10gen/server-networking-and-observability
+  - "integration_tests_replset_tls.yml":
+    approvers:
+      - 10gen/server-networking-and-observability
   - "cwrwc*":
     approvers:
       - 10gen/server-rw-concerns
@@ -135,6 +150,9 @@ filters:
   - "mongot*":
     approvers:
       - 10gen/query-integration-search
+  - "concurrency_with_mongot_extension*":
+    approvers:
+      - 10gen/query-integration-extensions-api
   - "multiversion*":
     approvers:
       - 10gen/server-jstest-infra
@@ -183,9 +201,6 @@ filters:
   - "replica_sets_transition_to_csrs_jscore_passthrough.yml":
     approvers:
       - 10gen/server-catalog-and-routing-routing-and-topology
-  - "streams*":
-    approvers:
-      - 10gen/streams-engine
   - "*cbr*":
     approvers:
       - 10gen/query-optimization
@@ -219,9 +234,6 @@ filters:
   - "*change_streams*":
     approvers:
       - 10gen/query-execution-change-streams
-  - "*rate_limited.yml":
-    approvers:
-      - 10gen/server-workload-resilience
   - "*rseq_kernel_check*":
     approvers:
       - 10gen/server-workload-resilience
@@ -270,3 +282,12 @@ filters:
   - "session_jscore_passthrough.yml":
     approvers:
       - 10gen/server-transactions
+  - "product_limits.yml":
+    approvers:
+      - 10gen/query-optimization-correctness
+  - "concurrency_resharding_with_lightweight_stepdowns.yml":
+    approvers:
+      - 10gen/server-cluster-scalability
+  - "core_explain_v3_passthrough.yml":
+    approvers:
+      - 10gen/query-optimization

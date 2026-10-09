@@ -43,10 +43,14 @@ function runSharding() {
     checkFCV(shard1PrimaryAdminDB, latestFCV);
 
     // Set the failDowngrading failpoint so that the downgrading will fail.
-    assert.commandWorked(configPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
+    assert.commandWorked(
+        configPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}),
+    );
 
     // Start downgrading. It will fail.
-    assert.commandFailed(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
+    assert.commandFailed(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+    );
 
     st.rs0.awaitReplication();
     st.rs1.awaitReplication();
@@ -69,10 +73,15 @@ function runSharding() {
     st.restartConfigServer(0);
     jsTestLog("Restarting the mongos:");
     st.restartMongos(0);
+    // This test uses the default 10-second election timeout (see initiateWithDefaultElectionTimeout).
+    // The internal client host-selection timeout is 15 seconds in test builds
+    // (defaultFindReplicaSetHostTimeoutMS). With only two voting nodes per shard, a split vote can
+    // delay electing a primary beyond that timeout and cause the following requests to fail, so
+    // wait explicitly for each shard to elect a primary after restarting.
     jsTestLog("Restarting shard0:");
-    st.restartShardRS(0);
+    st.restartShardRS(0, true /* waitForPrimary */);
     jsTestLog("Restarting shard1:");
-    st.restartShardRS(1);
+    st.restartShardRS(1, true /* waitForPrimary */);
 
     st.waitForShardingInitialized();
 
@@ -95,7 +104,9 @@ function runSharding() {
 
     // Upgrade the sharded cluster to upgraded (latestFCV).
     mongosAdminDB = st.s.getDB("admin");
-    assert.commandWorked(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    assert.commandWorked(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}),
+    );
 
     st.rs0.awaitReplication();
     st.rs1.awaitReplication();

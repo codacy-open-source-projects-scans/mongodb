@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/type_checker.h"
 
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/algebra/polyvalue.h"
 #include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
@@ -37,6 +10,7 @@
 #include "mongo/util/assert_util.h"
 
 #include <vector>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo::stage_builder {
 
@@ -575,6 +549,30 @@ TypeSignature TypeChecker::operator()(abt::ABT& n, abt::FunctionCall& op, bool s
                 return evaluateTypeTest(
                     n, argTypes[0], getTypeSignature(sbe::value::TypeTags::Null));
             break;
+        case sbe::EFn::kIsNullish: {
+            // isNullish returns true for Nothing, Null, and bsonUndefined — it never returns
+            // Nothing itself, so the result type is always boolean.
+            if (arity == 1) {
+                if (argTypes[0].isSubset(TypeSignature::kNullishType)) {
+                    // If the argument is only one (or more) of the types to check, evaluate to
+                    // True.
+                    swapAndUpdate(n, abt::Constant::boolean(true));
+                    return TypeSignature::kBooleanType;
+                } else if (!argTypes[0].containsAny(TypeSignature::kNullishType)) {
+                    // If the argument doesn't include any of the types to check, evaluate to False.
+                    swapAndUpdate(n, abt::Constant::boolean(false));
+                    return TypeSignature::kBooleanType;
+                } else if (saveInference && op.nodes()[0].is<abt::Variable>()) {
+                    // If this operation is testing a variable and is part of an And, add a mask
+                    // narrowing the type information of the variable with the tested types.
+                    auto& varName = op.nodes()[0].cast<abt::Variable>()->name();
+                    auto varType = getInferredType(varName).value_or(TypeSignature::kAnyScalarType);
+                    bind(varName, varType.intersect(TypeSignature::kNullishType));
+                }
+                return TypeSignature::kBooleanType;
+            }
+            break;
+        }
         case sbe::EFn::kIsNumber:
             if (arity == 1)
                 return evaluateTypeTest(n, argTypes[0], TypeSignature::kNumericType);
@@ -591,6 +589,11 @@ TypeSignature TypeChecker::operator()(abt::ABT& n, abt::FunctionCall& op, bool s
             if (arity == 1)
                 return evaluateTypeTest(
                     n, argTypes[0], getTypeSignature(sbe::value::TypeTags::Timestamp));
+            break;
+        case sbe::EFn::kMqlComparisonRank:
+            // Always returns an integer rank (0, 1 or 2); never Nothing, even for a Nothing input.
+            if (arity == 1)
+                return getTypeSignature(sbe::value::TypeTags::NumberInt32);
             break;
         case sbe::EFn::kDateTrunc:
             // Always mark Nothing as a possible return type, as it can be reported due to invalid

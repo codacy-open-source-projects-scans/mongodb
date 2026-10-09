@@ -2,8 +2,6 @@
  * @tags: [
  *   # Uses $where operator
  *   requires_scripting,
- *   # TODO SERVER-116054: Add support for $where.
- *   mozjs_wasm_unsupported,
  * ]
  */
 
@@ -24,7 +22,9 @@ let collection = db.getCollection(baseName);
 assert.commandWorked(collection.insert({}));
 
 // set timeout for js function execution to 100 ms to speed up the test.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryJavaScriptFnTimeoutMillis: 100}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQueryJavaScriptFnTimeoutMillis: 100}),
+);
 
 let awaitShell = startParallelShell(
     "db." + baseName + ".count( { $where: function() { while( 1 ) { ; } } } )",
@@ -46,7 +46,12 @@ assert.eq(0, exitCode, "got unexpected exitCode");
 exitCode = awaitShell({checkExitSuccess: false});
 assert.neq(0, exitCode, "expected shell to exit abnormally due to mongod being terminated");
 
-mongod = MongoRunner.runMongod({port: mongod.port, restart: true, cleanData: false, dbpath: mongod.dbpath});
+mongod = MongoRunner.runMongod({
+    port: mongod.port,
+    restart: true,
+    cleanData: false,
+    dbpath: mongod.dbpath,
+});
 db = mongod.getDB("test");
 collection = db.getCollection(baseName);
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/sasl_mechanism_registry.h"
 
@@ -48,6 +22,8 @@
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -55,6 +31,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 TEST(SecurityProperty, emptyHasEmptyProperties) {
     SecurityPropertySet set(SecurityPropertySet{});
@@ -95,7 +72,7 @@ public:
 
 protected:
     StatusWith<std::tuple<bool, std::string>> stepImpl(OperationContext* opCtx,
-                                                       StringData input) final {
+                                                       std::string_view input) final {
         return std::make_tuple(true, std::string());
     }
 };
@@ -112,8 +89,8 @@ public:
 
 // Policy for a hypothetical "FOO" SASL mechanism.
 struct FooPolicy {
-    static constexpr StringData getName() {
-        return "FOO"_sd;
+    static constexpr std::string_view getName() {
+        return "FOO"sv;
     }
 
     static constexpr int securityLevel() {
@@ -143,8 +120,8 @@ public:
 
 // Policy for a hypothetical "BAR" SASL mechanism.
 struct BarPolicy {
-    static constexpr StringData getName() {
-        return "BAR"_sd;
+    static constexpr std::string_view getName() {
+        return "BAR"sv;
     }
 
     static constexpr int securityLevel() {
@@ -173,8 +150,8 @@ public:
 
 // Policy for a hypothetical "InternalAuth" SASL mechanism.
 struct InternalAuthPolicy {
-    static constexpr StringData getName() {
-        return "InternalAuth"_sd;
+    static constexpr std::string_view getName() {
+        return "InternalAuth"sv;
     }
 
     static constexpr int securityLevel() {
@@ -251,7 +228,7 @@ public:
             BSONObj()));
 
         std::unique_ptr<UserRequest> systemLocal =
-            std::make_unique<UserRequestGeneral>(UserName("__system"_sd, "local"_sd), boost::none);
+            std::make_unique<UserRequestGeneral>(UserName("__system"sv, "local"sv), boost::none);
         internalSecurity.setUser(std::make_shared<UserHandle>(User(std::move(systemLocal))));
     }
 
@@ -266,8 +243,8 @@ public:
 
     SASLServerMechanismRegistry registry;
 
-    const UserName internalSajack = {"sajack"_sd, "test"_sd};
-    const UserName externalSajack = {"sajack"_sd, DatabaseName::kExternal.db(omitTenant)};
+    const UserName internalSajack = {"sajack"sv, "test"sv};
+    const UserName externalSajack = {"sajack"sv, DatabaseName::kExternal.db(omitTenant)};
 };
 
 TEST_F(MechanismRegistryTest, acquireInternalMechanism) {
@@ -307,7 +284,11 @@ TEST_F(MechanismRegistryTest, invalidUserCantAdvertiseMechs) {
     registry.registerFactory<FooMechanismFactory<true>>(
         SASLServerMechanismRegistry::kNoValidateGlobalMechanisms);
 
-    ASSERT_BSONOBJ_EQ(BSONObj(), getMechsFor(UserName("noSuchUser"_sd, "test"_sd)));
+    // Unknown users now return the server's enabled mechanisms so the client can select one
+    // that the server will accept. FOO lacks kNoPlainText so it is filtered out for internal
+    // DBs, producing an empty saslSupportedMechs array (field present, contents empty).
+    ASSERT_BSONOBJ_EQ(BSON("saslSupportedMechs" << BSONArray()),
+                      getMechsFor(UserName("noSuchUser"sv, "test"sv)));
 }
 
 TEST_F(MechanismRegistryTest, strongMechCanAdvertise) {
@@ -349,6 +330,20 @@ TEST_F(MechanismRegistryTest, internalAuth) {
     registry.setEnabledMechanisms({"BAR", "InternalAuth"});
     ASSERT_BSONOBJ_EQ(BSON("saslSupportedMechs" << BSON_ARRAY("InternalAuth" << "BAR")),
                       getMechsFor(internalSajack));
+}
+
+TEST_F(MechanismRegistryTest, internalAuthMechRegisteredEvenWhenExcludedFromConfig) {
+    registry.setEnabledMechanisms({"BAR"});
+
+    registry.registerFactory<InternalAuthMechanismFactory>(
+        SASLServerMechanismRegistry::kValidateGlobalMechanisms);
+
+    ASSERT_OK(registry.getServerMechanism(InternalAuthPolicy::getName(), "test").getStatus());
+
+    registry.registerFactory<FooMechanismFactory<true>>(
+        SASLServerMechanismRegistry::kValidateGlobalMechanisms);
+    ASSERT_EQ(ErrorCodes::MechanismUnavailable,
+              registry.getServerMechanism(FooPolicy::getName(), "test").getStatus().code());
 }
 
 }  // namespace

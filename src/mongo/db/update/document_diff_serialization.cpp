@@ -1,52 +1,28 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/container/flat_map.hpp>
-#include <boost/container/static_vector.hpp>
-#include <boost/container/vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
+#include "mongo/db/update/document_diff_serialization.h"
+
 #include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
 #include <functional>
 #include <limits>
 #include <stack>
+#include <string_view>
 #include <type_traits>
 
+#include <boost/container/flat_map.hpp>
+#include <boost/container/static_vector.hpp>
+#include <boost/container/vector.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
 
 namespace mongo {
 namespace diff_tree {
@@ -89,7 +65,7 @@ void InternalNode::ApproxBSONSizeTracker::addEntry(size_t fieldSize, const Node*
     }
 }
 
-Node* DocumentSubDiffNode::addChild(StringData fieldName, std::unique_ptr<Node> node) {
+Node* DocumentSubDiffNode::addChild(std::string_view fieldName, std::unique_ptr<Node> node) {
     auto* nodePtr = node.get();
 
     // Add size of field name and the child element.
@@ -99,7 +75,7 @@ Node* DocumentSubDiffNode::addChild(StringData fieldName, std::unique_ptr<Node> 
     uassert(7693400,
             str::stream() << "Document already has a field named '" << fieldName << "'",
             result.second);
-    StringData storedFieldName = result.first->first;
+    std::string_view storedFieldName = result.first->first;
     switch (nodePtr->type()) {
         case (NodeType::kArray):
         case (NodeType::kDocumentSubDiff): {
@@ -143,7 +119,7 @@ Node* DocumentSubDiffNode::addChild(StringData fieldName, std::unique_ptr<Node> 
 
 namespace {
 void appendElementToBuilder(std::variant<mutablebson::Element, BSONElement> elem,
-                            StringData fieldName,
+                            std::string_view fieldName,
                             BSONObjBuilder* builder) {
     visit(OverloadedVisitor{[&](const mutablebson::Element& element) {
                                 if (element.hasValue()) {
@@ -157,7 +133,9 @@ void appendElementToBuilder(std::variant<mutablebson::Element, BSONElement> elem
                                     element.writeArrayTo(&subBuilder);
                                 }
                             },
-                            [&](BSONElement element) { builder->appendAs(element, fieldName); }},
+                            [&](BSONElement element) {
+                                builder->appendAs(element, fieldName);
+                            }},
           elem);
 }
 
@@ -186,7 +164,7 @@ UniqueFrame makeSubNodeFrameHelper(InternalNode* node, BSONObjBuilder builder);
 // Given a 'node' stored in the 'inserts' section of an InternalNode, will either append that
 // node's value to the given builder, or return a new stack frame which will build the object to be
 // inserted. 'node' must be an InsertionNode or a DocumentInsertNode.
-UniqueFrame handleInsertHelper(StringData fieldName, Node* node, BSONObjBuilder* bob);
+UniqueFrame handleInsertHelper(std::string_view fieldName, Node* node, BSONObjBuilder* bob);
 
 // Stack frame used to maintain state while serializing DocumentInsertionNodes.
 class DocumentInsertFrame final : public Frame {
@@ -330,7 +308,7 @@ public:
 
         auto formatFieldName = [&](char pre, size_t idx) {
             const char* fieldNameStorageEnd = fmt::format_to(fieldNameStorage, "{}{}", pre, idx);
-            return StringData(fieldNameStorage, fieldNameStorageEnd - fieldNameStorage);
+            return std::string_view(fieldNameStorage, fieldNameStorageEnd - fieldNameStorage);
         };
 
         // Make sure that 'doc_diff::kUpdateSectionFieldName' is a single character.
@@ -435,7 +413,7 @@ UniqueFrame makeSubNodeFrameHelper(InternalNode* node, BSONObjBuilder builder) {
     }
 }
 
-UniqueFrame handleInsertHelper(StringData fieldName, Node* node, BSONObjBuilder* bob) {
+UniqueFrame handleInsertHelper(std::string_view fieldName, Node* node, BSONObjBuilder* bob) {
     if (node->type() == NodeType::kInsert) {
         appendElementToBuilder(checked_cast<InsertNode*>(node)->elt, fieldName, bob);
         return nullptr;
@@ -485,7 +463,7 @@ void checkSection(BSONElement element, char sectionName, BSONType expectedType) 
 }
 
 // Converts a (decimal) string to number. Will throw if the string is not a valid unsigned int.
-size_t extractArrayIndex(StringData fieldName) {
+size_t extractArrayIndex(std::string_view fieldName) {
     auto idx = str::parseUnsignedBase10Integer(fieldName);
     uassert(4770512, str::stream() << "Expected integer but got " << fieldName, idx);
     return *idx;
@@ -537,9 +515,10 @@ boost::optional<std::pair<size_t, ArrayDiffReader::ArrayModification>> ArrayDiff
                 str::stream() << "expected sub diff at index " << idx << " but got " << next,
                 next.type() == BSONType::object);
 
-        auto modification = visit(
-            OverloadedVisitor{[](const auto& reader) -> ArrayModification { return {reader}; }},
-            getReader(next.embeddedObject()));
+        auto modification = visit(OverloadedVisitor{[](const auto& reader) -> ArrayModification {
+                                      return {reader};
+                                  }},
+                                  getReader(next.embeddedObject()));
         return {{idx, modification}};
     } else {
         uasserted(4770502,
@@ -609,7 +588,7 @@ DocumentDiffReader::DocumentDiffReader(const Diff& diff) : _diff(diff) {
             hasSubDiffSections || !it.more());
 }
 
-boost::optional<StringData> DocumentDiffReader::nextDelete() {
+boost::optional<std::string_view> DocumentDiffReader::nextDelete() {
     if (!_deletes || !_deletes->more()) {
         return {};
     }
@@ -638,7 +617,7 @@ boost::optional<BSONElement> DocumentDiffReader::nextBinary() {
     return _binaries->next();
 }
 
-boost::optional<std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>
+boost::optional<std::pair<std::string_view, std::variant<DocumentDiffReader, ArrayDiffReader>>>
 DocumentDiffReader::nextSubDiff() {
     if (!_subDiffs || !_subDiffs->more()) {
         return {};
@@ -660,7 +639,7 @@ DocumentDiffReader::nextSubDiff() {
 
 boost::optional<DocumentDiffReader::Modification> DocumentDiffReader::next() {
     // Exhaust nextDelete.
-    if (boost::optional<StringData> del = nextDelete(); del.has_value()) {
+    if (boost::optional<std::string_view> del = nextDelete(); del.has_value()) {
         return boost::make_optional(DocumentDiffReader::Modification{*del});
     }
 
@@ -680,8 +659,9 @@ boost::optional<DocumentDiffReader::Modification> DocumentDiffReader::next() {
     }
 
     // Exhaust nextSubDiff.
-    if (boost::optional<std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>
-            subDiff = nextSubDiff();
+    if (boost::optional<std::pair<std::string_view,
+                                  std::variant<DocumentDiffReader, ArrayDiffReader>>> subDiff =
+            nextSubDiff();
         subDiff.has_value()) {
         return boost::make_optional(DocumentDiffReader::Modification{*subDiff});
     }

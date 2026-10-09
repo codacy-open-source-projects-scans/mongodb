@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -42,6 +15,9 @@
 #include "mongo/util/time_support.h"
 
 #include <string>
+#include <string_view>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -54,7 +30,7 @@ namespace repl {
 /**
  * Response structure for the replSetHeartbeat command.
  */
-class MONGO_MOD_PARENT_PRIVATE ReplSetHeartbeatResponse {
+class [[MONGO_MOD_PARENT_PRIVATE]] ReplSetHeartbeatResponse {
 public:
     /**
      * Initializes this ReplSetHeartbeatResponse from the contents of "doc".
@@ -131,11 +107,17 @@ public:
         return _electableSet;
     }
     bool isElectable() const;
+    bool hasLastStableRecoveryTimestamp() const {
+        return _lastStableRecoveryTimestamp.has_value();
+    }
+    Timestamp getLastStableRecoveryTimestamp() const {
+        return *_lastStableRecoveryTimestamp;
+    }
 
     /**
      * Sets _setName to "name".
      */
-    void setSetName(StringData name) {
+    void setSetName(std::string_view name) {
         _setName = std::string{name};
     }
 
@@ -215,6 +197,9 @@ public:
         _electableSet = true;
         _electable = electable;
     }
+    void setLastStableRecoveryTimestamp(Timestamp ts) {
+        _lastStableRecoveryTimestamp = ts;
+    }
 
 private:
     bool _electionTimeSet = false;
@@ -249,6 +234,8 @@ private:
 
     bool _electableSet = false;
     bool _electable = false;
+
+    boost::optional<Timestamp> _lastStableRecoveryTimestamp;
 };
 
 }  // namespace repl

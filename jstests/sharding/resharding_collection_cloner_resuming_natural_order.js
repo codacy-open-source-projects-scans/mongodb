@@ -8,6 +8,7 @@
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
@@ -36,10 +37,15 @@ CreateShardedCollectionUtil.shardCollectionWithChunks(inputCollection, {oldKey: 
     {min: {oldKey: 10000}, max: {oldKey: MaxKey}, shard: st.shard3.shardName},
 ]);
 
-const inputCollectionUUID = getUUIDFromListCollections(inputCollection.getDB(), inputCollection.getName());
+const inputCollectionUUID = getUUIDFromListCollections(
+    inputCollection.getDB(),
+    inputCollection.getName(),
+);
 const inputCollectionUUIDString = extractUUIDFromObject(inputCollectionUUID);
 
-const temporaryReshardingCollection = st.s.getCollection(`reshardingDb.system.resharding.${inputCollectionUUIDString}`);
+const temporaryReshardingCollection = st.s.getCollection(
+    `reshardingDb.system.resharding.${inputCollectionUUIDString}`,
+);
 
 CreateShardedCollectionUtil.shardCollectionWithChunks(temporaryReshardingCollection, {newKey: 1}, [
     {min: {newKey: MinKey}, max: {newKey: -9}, shard: st.shard0.shardName},
@@ -52,12 +58,14 @@ CreateShardedCollectionUtil.shardCollectionWithChunks(temporaryReshardingCollect
 // on the primary shard for the database. We manually run the _flushRoutingTableCacheUpdates command
 // to guarantee they have been written and are visible with the atClusterTime used by the
 // testReshardCloneCollection command.
-for (const shard of [st.shard0, st.shard1]) {
-    assert.commandWorked(
-        shard.rs
-            .getPrimary()
-            .adminCommand({_flushRoutingTableCacheUpdates: temporaryReshardingCollection.getFullName()}),
-    );
+if (!FeatureFlagUtil.isPresentAndEnabled(st.s, "AuthoritativeShardsCRUD")) {
+    for (const shard of [st.shard0, st.shard1]) {
+        assert.commandWorked(
+            shard.rs.getPrimary().adminCommand({
+                _flushRoutingTableCacheUpdates: temporaryReshardingCollection.getFullName(),
+            }),
+        );
+    }
 }
 
 // Shard 3 intentionally starts with no data.
@@ -85,7 +93,12 @@ const originalInsertsTs = inputCollection.getDB().getSession().getOperationTime(
 
 // This is the destination shard we'll be forcing to restart.
 const shard0Primary = st.shard0.rs.getPrimary();
-assert.commandWorked(shard0Primary.adminCommand({"setParameter": 1, logComponentVerbosity: {sharding: {reshard: 3}}}));
+assert.commandWorked(
+    shard0Primary.adminCommand({
+        "setParameter": 1,
+        logComponentVerbosity: {sharding: {reshard: 3}},
+    }),
+);
 
 // Allow several reads to go through before aborting.
 assert.commandWorked(
@@ -96,7 +109,12 @@ assert.commandWorked(
     }),
 );
 
-const attemptFp = configureFailPoint(shard0Primary, "reshardingCollectionClonerPauseBeforeAttempt", {}, {"skip": 1});
+const attemptFp = configureFailPoint(
+    shard0Primary,
+    "reshardingCollectionClonerPauseBeforeAttempt",
+    {},
+    {"skip": 1},
+);
 
 shard0Primary
     .getDB(inputCollection.getDB().getName())
@@ -106,7 +124,13 @@ shard0Primary
 jsTestLog("About to start resharding, first attempt");
 const reshardShell = startParallelShell(
     funWithArgs(
-        (inputCollectionFullName, inputCollectionUUID, shardName, atClusterTime, tempCollectionFullName) => {
+        (
+            inputCollectionFullName,
+            inputCollectionUUID,
+            shardName,
+            atClusterTime,
+            tempCollectionFullName,
+        ) => {
             assert.commandWorked(
                 db.adminCommand({
                     testReshardCloneCollection: inputCollectionFullName,

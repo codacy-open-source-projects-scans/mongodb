@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/json.h"
 #include "mongo/db/extension/host/document_source_extension_for_query_shape.h"
@@ -40,10 +14,11 @@
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <filesystem>
+#include <string_view>
 
 namespace mongo::extension::host {
 
@@ -57,10 +32,7 @@ protected:
     static inline const std::string kMetricsStageName = "$vectorSearchMetrics";
 
     static void SetUpTestSuite() {
-        RAIIServerParameterControllerForTest extensionsAPIController{"featureFlagExtensionsAPI",
-                                                                     true};
-        RAIIServerParameterControllerForTest vecSimilarityExprController{
-            "featureFlagVectorSimilarityExpressions", true};
+        unittest::ServerParameterGuard extensionsAPIController{"featureFlagExtensionsAPI", true};
         ExtensionLoader::load(
             "nativeVectorSearch",
             test_util::makeEmptyExtensionConfig(kNativeVectorSearchLibExtensionPath));
@@ -117,7 +89,7 @@ protected:
 
     static void expectLiteParsedNames(const NamespaceString& nss,
                                       const BSONObj& stageSpec,
-                                      std::initializer_list<const StringData> names) {
+                                      std::initializer_list<const std::string_view> names) {
         auto liteParsed = LiteParsedDocumentSource::parse(nss, stageSpec);
         auto* lpExpanded = dynamic_cast<DocumentSourceExtensionOptimizable::LiteParsedExpandable*>(
             liteParsed.get());
@@ -145,10 +117,8 @@ protected:
         boost::none, "load_native_vector_search_extension_test");
 
 private:
-    RAIIServerParameterControllerForTest _extensionsAPIController{"featureFlagExtensionsAPI", true};
-    RAIIServerParameterControllerForTest _vecSimilarityExprController{
-        "featureFlagVectorSimilarityExpressions", true};
-    RAIIServerParameterControllerForTest _signatureValidationController{
+    unittest::ServerParameterGuard _extensionsAPIController{"featureFlagExtensionsAPI", true};
+    unittest::ServerParameterGuard _signatureValidationController{
         "featureFlagExtensionsApiSignatureValidation", true};
 };
 
@@ -200,6 +170,26 @@ TEST_F(LoadNativeVectorSearchTest, LiteParsedExpandsWithoutFilter) {
                               DocumentSourceSort::kStageName,
                               DocumentSourceLimit::kStageName,
                           });
+}
+
+// An expanded extension stage (LiteParsedExpanded) must report the timeseries ban,
+// matching its LiteParsedExpandable sibling and the full-parsed DocumentSourceExtensionOptimizable.
+// Otherwise the ban is silently skipped when the stage is validated in its desugared form.
+TEST_F(LoadNativeVectorSearchTest, ExpandedExtensionStageCannotRunOnTimeseries) {
+    auto spec = makeNativeVectorSearchSpec(/*filter*/ false);
+    auto liteParsed = LiteParsedDocumentSource::parse(nss, spec);
+    auto* lpExpandable =
+        dynamic_cast<DocumentSourceExtensionOptimizable::LiteParsedExpandable*>(liteParsed.get());
+    ASSERT_TRUE(lpExpandable);
+
+    // The first expanded stage ($vectorSearchMetrics) is the extension AST-node stage, represented
+    // by a LiteParsedExpanded.
+    const auto& expanded = lpExpandable->getExpandedPipeline();
+    ASSERT_FALSE(expanded.empty());
+    auto* lpExpanded = dynamic_cast<DocumentSourceExtensionOptimizable::LiteParsedExpanded*>(
+        expanded.front().get());
+    ASSERT_TRUE(lpExpanded);
+    ASSERT_FALSE(lpExpanded->constraints().canRunOnTimeseries);
 }
 
 TEST_F(LoadNativeVectorSearchTest, FullParseExpandsWithFilter) {

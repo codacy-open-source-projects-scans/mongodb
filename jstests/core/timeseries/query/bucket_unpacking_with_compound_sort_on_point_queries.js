@@ -15,6 +15,9 @@
  *     # TODO (SERVER-104171) the timeseries setup runs a migration. Remove the upgrade-downgrade
  *     # incompatible tag once migrations  work during downgrade.
  *     cannot_run_during_upgrade_downgrade,
+ *     # The balancer may issue moveCollection/resharding requests that conflict with the index
+ *     # builds this test starts.
+ *     assumes_balancer_off,
  *     requires_getmore,
  * ]
  */
@@ -52,7 +55,15 @@ for (const ixA of [-1, +1]) {
                         // the index key. The index and sort are compatible iff they agree on
                         // whether or not these two fields are in the same direction.
                         if (ixB * ixT === sortB * sortT) {
-                            runRewritesTest(sort, ix, ix, null, metaCollSubFields, ixT === sortT, predicate);
+                            runRewritesTest(
+                                sort,
+                                ix,
+                                ix,
+                                null,
+                                metaCollSubFields,
+                                ixT === sortT,
+                                predicate,
+                            );
                             runRewritesTest(
                                 sort,
                                 ix,
@@ -93,7 +104,15 @@ for (const ixA of [-1, +1]) {
                         // in the same direction.
                         const predicate = [{$match: {"m.a": {$gte: -999, $lte: 999}, "m.b": 7}}];
                         if (ixA * ixT === sortA * sortT) {
-                            runRewritesTest(sort, ix, ix, null, metaCollSubFields, ixT === sortT, predicate);
+                            runRewritesTest(
+                                sort,
+                                ix,
+                                ix,
+                                null,
+                                metaCollSubFields,
+                                ixT === sortT,
+                                predicate,
+                            );
                             runRewritesTest(
                                 sort,
                                 ix,

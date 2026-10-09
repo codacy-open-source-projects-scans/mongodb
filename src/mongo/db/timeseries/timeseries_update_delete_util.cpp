@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 
@@ -46,8 +20,10 @@
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_options.h"
 
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -66,15 +42,15 @@ namespace {
  */
 static const std::unique_ptr<MatchExpression> closedBucketFilter =
     std::make_unique<NotMatchExpression>(std::make_unique<EqualityMatchExpression>(
-        StringData(std::string{timeseries::kBucketControlFieldName} + "." +
-                   std::string{timeseries::kBucketControlClosedFieldName}),
+        std::string_view(std::string{timeseries::kBucketControlFieldName} + "." +
+                         std::string{timeseries::kBucketControlClosedFieldName}),
         Value(true)));
 
 /**
  * Returns whether the given metaField is the first element of the dotted path in the given
  * field.
  */
-bool isFieldFirstElementOfDottedPathField(StringData field, StringData metaField) {
+bool isFieldFirstElementOfDottedPathField(std::string_view field, std::string_view metaField) {
     return field.substr(0, field.find('.')) == metaField;
 }
 
@@ -82,14 +58,14 @@ bool isFieldFirstElementOfDottedPathField(StringData field, StringData metaField
  * Returns a string where the substring leading up to "." in the given field is replaced with
  * "meta". If there is no "." in the given field, returns "meta".
  */
-std::string getRenamedField(StringData field) {
+std::string getRenamedField(std::string_view field) {
     size_t dotIndex = field.find('.');
     return dotIndex != std::string::npos
         ? "meta" + std::string{field.substr(dotIndex, field.size() - dotIndex)}
         : "meta";
 }
 
-void assertQueryFieldIsMetaField(bool isMetaField, StringData metaField) {
+void assertQueryFieldIsMetaField(bool isMetaField, std::string_view metaField) {
     uassert(ErrorCodes::InvalidOptions,
             fmt::format("Cannot perform an update or delete on a time-series collection "
                         "when querying on a field that is not the metaField '{}'",
@@ -97,7 +73,7 @@ void assertQueryFieldIsMetaField(bool isMetaField, StringData metaField) {
             isMetaField);
 }
 
-Status checkUpdateFieldIsMetaField(bool isMetaField, StringData metaField) {
+Status checkUpdateFieldIsMetaField(bool isMetaField, std::string_view metaField) {
     return isMetaField
         ? Status::OK()
         : Status(ErrorCodes::InvalidOptions,
@@ -113,7 +89,7 @@ Status checkUpdateFieldIsMetaField(bool isMetaField, StringData metaField) {
  * parent.
  */
 void replaceQueryMetaFieldName(mutablebson::Element elem,
-                               StringData metaField,
+                               std::string_view metaField,
                                bool isTopLevelField = true,
                                bool parentIsArray = false) {
     auto fieldName = elem.getFieldName();
@@ -129,6 +105,13 @@ void replaceQueryMetaFieldName(mutablebson::Element elem,
     // Replace any occurences of the metaField in the top-level required fields of the JSON Schema
     // object with "meta".
     if (fieldName == "$jsonSchema") {
+        // Mirror the error thrown by the $jsonSchema match expression parser for a non-object
+        // argument. Without this check, the calls to findFirstChildNamed() below would trip an
+        // invariant for non-object (e.g. array) values.
+        uassert(ErrorCodes::TypeMismatch,
+                "$jsonSchema must be an object",
+                elem.isType(BSONType::object));
+
         mutablebson::Element requiredElem = elem.findFirstChildNamed("required");
         if (requiredElem.ok()) {
             for (auto subElem = requiredElem.leftChild(); subElem.ok();
@@ -167,9 +150,7 @@ void replaceQueryMetaFieldName(mutablebson::Element elem,
 }
 }  // namespace
 
-BSONObj translateQuery(const BSONObj& query, StringData metaField) {
-    invariant(!metaField.empty());
-
+BSONObj translateQuery(const BSONObj& query, std::string_view metaField) {
     mutablebson::Document queryDoc(query);
     for (auto queryElem = queryDoc.root().leftChild(); queryElem.ok();
          queryElem = queryElem.rightSibling()) {
@@ -180,7 +161,7 @@ BSONObj translateQuery(const BSONObj& query, StringData metaField) {
 }
 
 StatusWith<write_ops::UpdateModification> translateUpdate(
-    const write_ops::UpdateModification& updateMod, boost::optional<StringData> metaField) {
+    const write_ops::UpdateModification& updateMod, boost::optional<std::string_view> metaField) {
     invariant(updateMod.type() != write_ops::UpdateModification::Type::kDelta);
 
     if (updateMod.type() == write_ops::UpdateModification::Type::kPipeline) {
@@ -249,7 +230,7 @@ StatusWith<write_ops::UpdateModification> translateUpdate(
     return write_ops::UpdateModification::parseFromClassicUpdate(updateDoc.getObject());
 }
 
-std::function<size_t(const BSONObj&)> numMeasurementsForBucketCounter(StringData timeField) {
+std::function<size_t(const BSONObj&)> numMeasurementsForBucketCounter(std::string_view timeField) {
     return [timeField = std::string{timeField}](const BSONObj& bucket) {
         return BucketUnpacker::computeMeasurementCount(bucket, timeField);
     };
@@ -319,13 +300,17 @@ BSONObj getBucketLevelPredicateForRouting(const BSONObj& originalQuery,
         : std::unique_ptr<MatchExpression>{};
 
     // Translate the time field predicate into a predicate on the bucket-level time field.
+    // The router has no visibility into shard-local bucket data, so we must conservatively
+    // assume extended-range data may be present to avoid an unsafe optimization.
+    BucketSpec routingBucketSpec{
+        std::string{tsOptions.getTimeField()},
+        metaField.map([](std::string_view s) { return std::string{s}; }),
+    };
+    routingBucketSpec.setUsesExtendedRange(true);
     std::unique_ptr<MatchExpression> timeBucketPred = timeOnlyPred
         ? BucketSpec::createPredicatesOnBucketLevelField(
               timeOnlyPred.get(),
-              BucketSpec{
-                  std::string{tsOptions.getTimeField()},
-                  metaField.map([](StringData s) { return std::string{s}; }),
-              },
+              routingBucketSpec,
               *tsOptions.getBucketMaxSpanSeconds(),
               expCtx,
               false /*haveComputedMetaField*/,
@@ -353,8 +338,9 @@ BSONObj getBucketLevelPredicateForRouting(const BSONObj& originalQuery,
 TimeseriesWritesQueryExprs getMatchExprsForWrites(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const TimeseriesOptions& tsOptions,
-    const BSONObj& writeQuery,
-    bool fixedBuckets) {
+    const BSONObj& writeQuery) {
+    const bool fixedBuckets = canUseFixedBucketOptimizations(
+        tsOptions, expCtx->getRequiresTimeseriesExtendedRangeSupport());
     auto [metaOnlyExpr, bucketMetricExpr, residualExpr] =
         BucketSpec::getPushdownPredicates(expCtx,
                                           tsOptions,

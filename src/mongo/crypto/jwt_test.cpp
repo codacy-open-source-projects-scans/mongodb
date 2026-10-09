@@ -1,45 +1,21 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/crypto/jwk_manager_test_framework.h"
 #include "mongo/crypto/unix_epoch.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
+
 namespace mongo::crypto::test {
 namespace {
+using namespace std::literals::string_view_literals;
 
 BSONObj getCompleteTestJWKSet() {
     BSONObjBuilder set;
-    BSONArrayBuilder keys(set.subarrayStart("keys"_sd));
+    BSONArrayBuilder keys(set.subarrayStart("keys"sv));
 
     {
         BSONObjBuilder key(keys.subobjStart());
@@ -94,7 +70,7 @@ BSONObj getCompleteTestJWKSet() {
 
 BSONObj getPartialTestJWKSet() {
     BSONObjBuilder set;
-    BSONArrayBuilder keys(set.subarrayStart("keys"_sd));
+    BSONArrayBuilder keys(set.subarrayStart("keys"sv));
     {
         BSONObjBuilder key(keys.subobjStart());
         key.append("kty", "RSA");
@@ -117,7 +93,7 @@ BSONObj getPartialTestJWKSet() {
 // Try to load keys for a supported algorithm (EC) but unsupported curve (P-521)
 BSONObj getUnsupportedCurveJWKSet() {
     BSONObjBuilder set;
-    BSONArrayBuilder keys(set.subarrayStart("keys"_sd));
+    BSONArrayBuilder keys(set.subarrayStart("keys"sv));
     {
         BSONObjBuilder key(keys.subobjStart());
         key.append("kty", "EC");
@@ -139,7 +115,7 @@ BSONObj getUnsupportedCurveJWKSet() {
 // Try to load keys for an unsupported protocol HS256
 BSONObj getUnsupportedProtocolJWKSet() {
     BSONObjBuilder set;
-    BSONArrayBuilder keys(set.subarrayStart("keys"_sd));
+    BSONArrayBuilder keys(set.subarrayStart("keys"sv));
     {
         BSONObjBuilder key(keys.subobjStart());
         key.append("kty", "EC");
@@ -163,20 +139,20 @@ BSONObj getUnsupportedProtocolJWKSet() {
 
 void assertCorrectKeys(JWKManager* manager, BSONObj data) {
     const auto& currentKeys = manager->getKeys();
-    for (const auto& key : data["keys"_sd].Obj()) {
-        auto currentKey = currentKeys.find(key["kid"_sd].str());
+    for (const auto& key : data["keys"sv].Obj()) {
+        auto currentKey = currentKeys.find(key["kid"sv].str());
         ASSERT(currentKey != currentKeys.end());
         ASSERT_BSONOBJ_EQ(key.Obj(), currentKey->second);
     }
 
-    for (const auto& key : data["keys"_sd].Obj()) {
-        auto validator = uassertStatusOK(manager->getValidator(key["kid"_sd].str()));
+    for (const auto& key : data["keys"sv].Obj()) {
+        auto validator = uassertStatusOK(manager->getValidator(key["kid"sv].str()));
         ASSERT(validator);
     }
 }
 
 TEST_F(JWKManagerTest, parseJWKSetBasicFromSource) {
-    RAIIServerParameterControllerForTest quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
+    unittest::ServerParameterGuard quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
 
     auto data = getCompleteTestJWKSet();
     jwksFetcher()->setKeys(getCompleteTestJWKSet());
@@ -212,7 +188,7 @@ TEST_F(JWKManagerTest, parseJWKSetBasicFromSource) {
 }
 
 TEST_F(JWKManagerTest, JWKSFetcherQuiesce) {
-    RAIIServerParameterControllerForTest quiesceController("JWKSMinimumQuiescePeriodSecs", 5);
+    unittest::ServerParameterGuard quiesceController("JWKSMinimumQuiescePeriodSecs", 5);
 
     // Initially the fetcher will contain no keys.
     ASSERT_EQ(jwkManager()->size(), 0);
@@ -221,27 +197,27 @@ TEST_F(JWKManagerTest, JWKSFetcherQuiesce) {
     // load.
     jwksFetcher()->setKeys(getPartialTestJWKSet());
     getClock()->advance(Seconds{3});
-    ASSERT_OK(jwkManager()->getValidator("custom-key-1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"_sd));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"sv));
     ASSERT_EQ(jwkManager()->size(), 1);
 
     // Add remaining keys at time < quiesce period. Fetcher should not update.
     jwksFetcher()->setKeys(getCompleteTestJWKSet());
     getClock()->advance(Seconds{3});
-    ASSERT_OK(jwkManager()->getValidator("custom-key-1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"_sd));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"sv));
     ASSERT_EQ(jwkManager()->size(), 1);
 
     // Advance clock further, but imagine that the JWKS endpoint goes down, Fetcher should
     // attempt a JIT and fail for all of the new keys.
     getClock()->advance(Seconds{3});
     jwksFetcher()->setShouldFail(true /* shouldFail */);
-    ASSERT_OK(jwkManager()->getValidator("custom-key-1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"_sd));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"sv));
     ASSERT_EQ(jwkManager()->size(), 1);
 
     // Advance clock for less than the quiesce period. The JWKS endpoint is back up now,
@@ -249,19 +225,19 @@ TEST_F(JWKManagerTest, JWKSFetcherQuiesce) {
     // in effect from the last, failed, JIT refresh.
     getClock()->advance(Seconds{3});
     jwksFetcher()->setShouldFail(false /* shouldFail */);
-    ASSERT_OK(jwkManager()->getValidator("custom-key-1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"_sd));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("custom-key-2"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-prime256v1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp384r1"sv));
     ASSERT_EQ(jwkManager()->size(), 1);
 
     // Advance clock past the quiesce period. The JWKS endpoint is still up, so
     // the JIT should finally succeed and all validators should be available.
     getClock()->advance(Seconds{3});
-    ASSERT_OK(jwkManager()->getValidator("custom-key-1"_sd));
-    ASSERT_OK(jwkManager()->getValidator("custom-key-2"_sd));
-    ASSERT_OK(jwkManager()->getValidator("ec-prime256v1"_sd));
-    ASSERT_OK(jwkManager()->getValidator("ec-secp384r1"_sd));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-1"sv));
+    ASSERT_OK(jwkManager()->getValidator("custom-key-2"sv));
+    ASSERT_OK(jwkManager()->getValidator("ec-prime256v1"sv));
+    ASSERT_OK(jwkManager()->getValidator("ec-secp384r1"sv));
     ASSERT_EQ(jwkManager()->size(), 4);
 }
 
@@ -271,7 +247,7 @@ TEST_F(JWKManagerTest, parseJWKSetUnsupportedCurve) {
     Status st = jwkManager()->loadKeys();
     ASSERT_NOT_OK(st);
     ASSERT_EQ(st.code(), 10858402);
-    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp521r1"_sd));
+    ASSERT_NOT_OK(jwkManager()->getValidator("ec-secp521r1"sv));
 }
 
 TEST_F(JWKManagerTest, parseJWKSetUnsupportedProtocol) {
@@ -280,8 +256,8 @@ TEST_F(JWKManagerTest, parseJWKSetUnsupportedProtocol) {
     Status st = jwkManager()->loadKeys();
     // Unsupported protocol should be skipped
     ASSERT_OK(st);
-    ASSERT_OK(jwkManager()->getValidator("ec-prime256v1"_sd));
-    ASSERT_NOT_OK(jwkManager()->getValidator("hs256"_sd));
+    ASSERT_OK(jwkManager()->getValidator("ec-prime256v1"sv));
+    ASSERT_NOT_OK(jwkManager()->getValidator("hs256"sv));
 }
 
 TEST(UnixEpochTest, UnixEpochParse) {

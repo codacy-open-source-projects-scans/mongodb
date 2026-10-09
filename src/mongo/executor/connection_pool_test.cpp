@@ -1,37 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/executor/connection_pool.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/executor/connection_pool_controllers.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/connection_pool_test_fixture.h"
+#include "mongo/otel/metrics/metric_names.h"
+#include "mongo/otel/metrics/metrics_test_util.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
@@ -49,6 +26,7 @@
 #include <ratio>
 #include <set>
 #include <stack>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 
@@ -59,6 +37,27 @@
 namespace mongo {
 namespace executor {
 namespace connection_pool_test_details {
+using namespace std::literals::string_view_literals;
+
+struct ReadEgressConnectionsCounterOptions {
+    std::string_view purpose = kNormalConnectionPurpose;
+    std::string_view poolAttribute = kOtherConnectionPoolAttribute;
+};
+
+int64_t readEgressConnectionsCreatedCounterOrZero(
+    otel::metrics::OtelMetricsCapturer& capturer,
+    const ReadEgressConnectionsCounterOptions& options = {}) {
+    try {
+        return capturer.readInt64Counter(
+            otel::metrics::MetricNames::kNetworkEgressConnectionsCreated,
+            std::tuple{options.purpose, options.poolAttribute});
+    } catch (const DBException& ex) {
+        if (ex.code() == ErrorCodes::KeyNotFound) {
+            return 0;
+        }
+        throw;
+    }
+}
 
 class ConnectionPoolTest : public unittest::Test {
 public:
@@ -114,6 +113,22 @@ protected:
     void doneWithError(ConnectionPool::ConnectionHandle& conn, Status error) {
         dynamic_cast<ConnectionImpl*>(conn.get())->indicateFailure(error);
 
+        ExecutorFuture(_executor).getAsync([conn = std::move(conn)](auto) {});
+    }
+
+    /** Cleans up a connection future by ensuring it is properly destroyed (returned). */
+    void cleanupConnectionFuture(SemiFuture<ConnectionPool::ConnectionHandle> connFuture) {
+        ASSERT_TRUE(connFuture.isReady());
+        auto conn = std::move(connFuture).get();
+        doneWith(conn);
+    }
+
+    /**
+     * Destroys a connection handle without indicating success or failure by scheduling its
+     * destruction onto the executor. Use this instead of destroying the handle directly to avoid
+     * deadlocking with the inline test executor.
+     */
+    void dropHandle(ConnectionPool::ConnectionHandle& conn) {
         ExecutorFuture(_executor).getAsync([conn = std::move(conn)](auto) {});
     }
 
@@ -270,7 +285,121 @@ private:
         logv2::LogComponent::kConnectionPool, logv2::LogSeverity::Debug(5)};
 };
 
-TEST_F(ConnectionPoolTest, CheckRejectedConnectionRequest) {
+// Fixtures are listed in execution-flow order. Tests within each fixture run in definition order.
+class ConnectionPoolCheckoutTest : public ConnectionPoolTest {};
+class ConnectionPoolQueuingTest : public ConnectionPoolTest {};
+class ConnectionPoolSpawningTest : public ConnectionPoolTest {};
+class ConnectionPoolSetupTest : public ConnectionPoolTest {};
+class ConnectionPoolReturnAndRefreshTest : public ConnectionPoolTest {};
+class ConnectionPoolLeasingTest : public ConnectionPoolTest {};
+class ConnectionPoolFailureTest : public ConnectionPoolTest {};
+class ConnectionPoolExpiryTest : public ConnectionPoolTest {};
+class ConnectionPoolDropTest : public ConnectionPoolTest {};
+class ConnectionPoolCancellationTest : public ConnectionPoolTest {};
+class ConnectionPoolShutdownTest : public ConnectionPoolTest {};
+class ConnectionPoolMetricsTest : public ConnectionPoolTest {};
+
+// This fixture is for testing the DynamicLimitController, which is a controller that adjusts
+// the max connections and pending connections limits based on user-provided functions. Since the
+// controller doesn't have complex interactions with the pool, we can test it in a
+// separate fixture with more focused tests that don't require the full range of pool
+// operations to be tested.
+class DynamicLimitControllerTest : public ConnectionPoolTest {
+protected:
+    using ControllerPtr = std::shared_ptr<DynamicLimitController>;
+
+    std::tuple<std::shared_ptr<ConnectionPool>, ControllerPtr> makeDynamicController(
+        size_t min = 1,
+        size_t max = 10,
+        ConnectionPool::Options opts = {},
+        std::string_view name = "dynamic limit controller") {
+        return makeDynamicController(
+            [min] { return min; }, [max] { return max; }, std::move(opts), std::move(name));
+    }
+
+    std::tuple<std::shared_ptr<ConnectionPool>, ControllerPtr> makeDynamicController(
+        std::function<size_t()> minLoader,
+        std::function<size_t()> maxLoader,
+        ConnectionPool::Options opts = {},
+        std::string_view name = "dynamic limit controller") {
+        auto controller = std::make_shared<DynamicLimitController>(
+            std::move(minLoader), std::move(maxLoader), std::move(name));
+        auto pool = makePool(opts);
+        controller->init(pool.get());
+        return {std::move(pool), std::move(controller)};
+    }
+
+    ConnectionPool::ConnectionControls addHostAndUpdate(
+        const ControllerPtr& controller,
+        ConnectionPool::PoolId id,
+        const HostAndPort& host,
+        const ConnectionPool::PoolMetrics& metrics) {
+        controller->addHost(id, host);
+        controller->updateHost(id, metrics);
+        return controller->getControls(id);
+    }
+
+    ConnectionPool::ConnectionControls updateHostAndGetControls(
+        const ControllerPtr& controller,
+        ConnectionPool::PoolId id,
+        const ConnectionPool::PoolMetrics& metrics) {
+        controller->updateHost(id, metrics);
+        return controller->getControls(id);
+    }
+};
+
+template <typename Traits>
+class ConnectionPoolLimitControllerTest : public ConnectionPoolTest {
+protected:
+    using ControllerPtr = std::shared_ptr<ConnectionPool::ControllerInterface>;
+
+    std::tuple<std::shared_ptr<ConnectionPool>, ControllerPtr> setupLimitController(
+        ConnectionPool::Options opts = {}) {
+        static_assert(std::is_convertible_v<decltype(Traits::makeLimitController(
+                                                std::declval<const ConnectionPool::Options&>())),
+                                            ControllerPtr>,
+                      "Traits::makeLimitController(const ConnectionPool::Options&) must return a "
+                      "shared_ptr<ConnectionPool::ControllerInterface>");
+
+        auto controller = Traits::makeLimitController(opts);
+        opts.controllerFactory = [controller]() {
+            return controller;
+        };
+        auto pool = makePool(opts);
+        return std::make_tuple(std::move(pool), std::move(controller));
+    }
+};
+
+// The following traits and test suite are for testing the behavior of the ConnectionPool when using
+// different types of controllers. The tests themselves are defined in the
+// ConnectionPoolLimitControllerTest fixture, and the traits are used to instantiate the test suite
+// with different controller types. This allows us to run the same set of tests against both the
+// default LimitController and the DynamicLimitController without having to duplicate the test code.
+
+struct LimitControllerTrait {
+    static std::shared_ptr<ConnectionPool::ControllerInterface> makeLimitController(
+        const ConnectionPool::Options&) {
+        return ConnectionPool::makeLimitController();
+    }
+};
+
+struct DynamicLimitControllerTrait {
+    static std::shared_ptr<ConnectionPool::ControllerInterface> makeLimitController(
+        const ConnectionPool::Options& opts) {
+        return std::make_shared<DynamicLimitController>([min = opts.minConnections] { return min; },
+                                                        [max = opts.maxConnections] { return max; },
+                                                        "dynamic limit controller");
+    }
+};
+
+using ConnectionPoolLimitControllerTestTypes =
+    ::testing::Types<LimitControllerTrait, DynamicLimitControllerTrait>;
+TYPED_TEST_SUITE(ConnectionPoolLimitControllerTest, ConnectionPoolLimitControllerTestTypes);
+
+/**
+ * Verify that a request is rejected immediately when the pending request queue is at capacity.
+ */
+TEST_F(ConnectionPoolQueuingTest, RequestRejectedWhenQueueDepthExceeded) {
     ConnectionPool::Options opts;
     opts.connectionRequestsMaxQueueDepth = 1;
     auto pool = makePool(opts);
@@ -286,10 +415,10 @@ TEST_F(ConnectionPoolTest, CheckRejectedConnectionRequest) {
 }
 
 /**
- * Verify that the limit on the size of connection requests queue
- * is enforced properly.
+ * Verify that a request is rejected immediately before it enters the queue, without needing the
+ * queue to be at capacity.
  */
-TEST_F(ConnectionPoolTest, CheckRejectedConnectionRequestBasic) {
+TEST_F(ConnectionPoolQueuingTest, RequestRejectedBeforeQueuing) {
     auto pool = makePool();
     FailPointEnableBlock fpb("connectionPoolRejectsConnectionRequests");
     auto fut = getFromPool(HostAndPort(), transport::kGlobalSSLMode, Seconds(1));
@@ -298,7 +427,11 @@ TEST_F(ConnectionPoolTest, CheckRejectedConnectionRequestBasic) {
         std::move(fut).get(), DBException, ErrorCodes::PooledConnectionAcquisitionRejected);
 }
 
-TEST_F(ConnectionPoolTest, StatsTest) {
+/**
+ * Verify that connection stats (totalCreated, per-host created) are accumulated correctly across
+ * pool drops and reconnections, and that dropping connections does not reset the created count.
+ */
+TEST_F(ConnectionPoolMetricsTest, ConnectionStatsAreReportedCorrectly) {
     constexpr auto numConnections = 3;
     auto hosts = std::vector<HostAndPort>(
         {HostAndPort("host1:123"), HostAndPort("host2:456"), HostAndPort("host3:789")});
@@ -347,7 +480,7 @@ TEST_F(ConnectionPoolTest, StatsTest) {
  * Verify that we get the same connection if we grab one, return it and grab
  * another.
  */
-TEST_F(ConnectionPoolTest, SameConn) {
+TEST_F(ConnectionPoolCheckoutTest, ReturnedConnectionIsReusedOnNextCheckout) {
     auto pool = makePool();
 
     // Grab and stash an id for the first request
@@ -376,10 +509,275 @@ TEST_F(ConnectionPoolTest, SameConn) {
     ASSERT_EQ(conn1Id, conn2Id);
 }
 
+TEST_F(ConnectionPoolCheckoutTest, EgressConnectionsCreatedMetricOnlyCountsNewConnections) {
+    otel::metrics::OtelMetricsCapturer capturer;
+    if (!capturer.canReadMetrics()) {
+        return;
+    }
+
+    auto readCounter = [&](std::string_view purpose) {
+        return readEgressConnectionsCreatedCounterOrZero(capturer, {.purpose = purpose});
+    };
+    auto pool = makePool();
+    auto getConnection = [&](ConnectionAcquisitionPurpose purpose) {
+        return getFromPool(HostAndPort(),
+                           transport::kGlobalSSLMode,
+                           Seconds(1),
+                           CancellationToken::uncancelable(),
+                           purpose);
+    };
+
+    ConnectionImpl::pushSetup(Status::OK());
+    auto ordinaryConnection = std::move(getConnection(ConnectionAcquisitionPurpose::kNormal)).get();
+    doneWith(ordinaryConnection);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 0);
+
+    auto killOperationReuse =
+        std::move(getConnection(ConnectionAcquisitionPurpose::kKillOperation)).get();
+    doneWith(killOperationReuse);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 0);
+
+    pool->dropConnections(HostAndPort());
+    ConnectionImpl::pushSetup(Status::OK());
+    auto newConnection =
+        std::move(getConnection(ConnectionAcquisitionPurpose::kKillOperation)).get();
+    doneWith(newConnection);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+
+    auto reusedConnection =
+        std::move(getConnection(ConnectionAcquisitionPurpose::kKillOperation)).get();
+    doneWith(reusedConnection);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+}
+
+TEST_F(ConnectionPoolCheckoutTest, EgressConnectionsCreatedMetricCountsQueuedNewConnections) {
+    otel::metrics::OtelMetricsCapturer capturer;
+    if (!capturer.canReadMetrics()) {
+        return;
+    }
+
+    auto readCounter = [&](std::string_view purpose) {
+        return readEgressConnectionsCreatedCounterOrZero(capturer, {.purpose = purpose});
+    };
+    auto pool = makePool();
+
+    auto ordinaryFuture = getFromPool(HostAndPort(),
+                                      transport::kGlobalSSLMode,
+                                      Seconds(1),
+                                      CancellationToken::uncancelable(),
+                                      ConnectionAcquisitionPurpose::kNormal);
+    ASSERT_FALSE(ordinaryFuture.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 0);
+    ConnectionImpl::pushSetup(Status::OK());
+    ASSERT_TRUE(ordinaryFuture.isReady());
+    auto ordinaryConnection = std::move(ordinaryFuture).get();
+
+    auto killOperationFuture = getFromPool(HostAndPort(),
+                                           transport::kGlobalSSLMode,
+                                           Seconds(1),
+                                           CancellationToken::uncancelable(),
+                                           ConnectionAcquisitionPurpose::kKillOperation);
+    ASSERT_FALSE(killOperationFuture.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+    ConnectionImpl::pushSetup(Status::OK());
+    cleanupConnectionFuture(std::move(killOperationFuture));
+
+    auto reusedConnection = std::move(getFromPool(HostAndPort(),
+                                                  transport::kGlobalSSLMode,
+                                                  Seconds(1),
+                                                  CancellationToken::uncancelable(),
+                                                  ConnectionAcquisitionPurpose::kKillOperation))
+                                .get();
+    doneWith(reusedConnection);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+
+    doneWith(ordinaryConnection);
+}
+
+TEST_F(ConnectionPoolSpawningTest, EgressConnectionsCreatedMetricAttributesProactiveConnections) {
+    otel::metrics::OtelMetricsCapturer capturer;
+    if (!capturer.canReadMetrics()) {
+        return;
+    }
+
+    auto readCounter = [&](std::string_view purpose) {
+        return readEgressConnectionsCreatedCounterOrZero(capturer, {.purpose = purpose});
+    };
+
+    ConnectionPool::Options options;
+    options.minConnections = 2;
+    auto pool = makePool(options);
+
+    auto killOperationFuture = getFromPool(HostAndPort(),
+                                           transport::kGlobalSSLMode,
+                                           Seconds(1),
+                                           CancellationToken::uncancelable(),
+                                           ConnectionAcquisitionPurpose::kKillOperation);
+    ASSERT_FALSE(killOperationFuture.isReady());
+    // Since min connections is 2, when we get the first connection for a kill operation, we also
+    // create a normal connection.
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+
+    ConnectionImpl::pushSetup(Status::OK());
+    cleanupConnectionFuture(std::move(killOperationFuture));
+
+    ConnectionImpl::pushSetup(Status::OK());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+}
+
+// This test shows that connection creation purposes are preserved when requests are queued and
+// are fulfilled in a different order than they were requested.
+TEST_F(ConnectionPoolSpawningTest, EgressConnectionsCreatedMetricAttributesQueuedRequests) {
+    otel::metrics::OtelMetricsCapturer capturer;
+    if (!capturer.canReadMetrics()) {
+        return;
+    }
+
+    auto readCounter = [&](std::string_view purpose) {
+        return readEgressConnectionsCreatedCounterOrZero(capturer, {.purpose = purpose});
+    };
+
+    ConnectionPool::Options options;
+    options.minConnections = 0;
+    options.maxConnecting = 1;
+    auto pool = makePool(options);
+    // The futures will and purposes will be the order of timeouts (normal(1s), kill(2s), kill(3s),
+    // normal(4s)). Running on _executor guarantees all four requests are sent to the pool before
+    // connections are spawned.
+    auto [future2sKill, future1sNormal, future4sNormal, future3sKill] =
+        ExecutorFuture(_executor)
+            .then([pool] {
+                return std::make_tuple(pool->get(HostAndPort(),
+                                                 transport::kGlobalSSLMode,
+                                                 Seconds(2),
+                                                 CancellationToken::uncancelable(),
+                                                 ConnectionAcquisitionPurpose::kKillOperation),
+                                       pool->get(HostAndPort(),
+                                                 transport::kGlobalSSLMode,
+                                                 Seconds(1),
+                                                 CancellationToken::uncancelable(),
+                                                 ConnectionAcquisitionPurpose::kNormal),
+                                       pool->get(HostAndPort(),
+                                                 transport::kGlobalSSLMode,
+                                                 Seconds(4),
+                                                 CancellationToken::uncancelable(),
+                                                 ConnectionAcquisitionPurpose::kNormal),
+                                       pool->get(HostAndPort(),
+                                                 transport::kGlobalSSLMode,
+                                                 Seconds(3),
+                                                 CancellationToken::uncancelable(),
+                                                 ConnectionAcquisitionPurpose::kKillOperation));
+            })
+            .get();
+
+    ASSERT_EQ(ConnectionImpl::setupQueueDepth(), 1);
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 0);
+
+    ConnectionImpl::pushSetup(Status::OK());
+    EXPECT_TRUE(future1sNormal.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 1);
+
+    ConnectionImpl::pushSetup(Status::OK());
+    EXPECT_TRUE(future2sKill.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 1);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 2);
+
+    ConnectionImpl::pushSetup(Status::OK());
+    EXPECT_TRUE(future3sKill.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 2);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 2);
+
+    ConnectionImpl::pushSetup(Status::OK());
+    EXPECT_TRUE(future4sNormal.isReady());
+    EXPECT_EQ(readCounter(kNormalConnectionPurpose), 2);
+    EXPECT_EQ(readCounter(kKillOperationConnectionPurpose), 2);
+
+    cleanupConnectionFuture(std::move(future1sNormal));
+    cleanupConnectionFuture(std::move(future2sKill));
+    cleanupConnectionFuture(std::move(future3sKill));
+    cleanupConnectionFuture(std::move(future4sNormal));
+}
+
+TEST_F(ConnectionPoolCheckoutTest, EgressConnectionsCreatedMetricConnectionPoolAttribute) {
+    if (!otel::metrics::OtelMetricsCapturer::canReadMetrics()) {
+        return;
+    }
+
+    // Helper that acquires one connection from the pool, returns it to the pool, and shuts the pool
+    // down. Returns the counter values keyed by pool attribute.
+    auto acquireAndReturnConnection = [this](ConnectionPool& pool,
+                                             otel::metrics::OtelMetricsCapturer& capturer) {
+        ConnectionImpl::pushSetup(Status::OK());
+        unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+            pool.get_forTest(HostAndPort(),
+                             Seconds(1),
+                             [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                                 monitor.exec([&]() {
+                                     ASSERT_OK(swConn.getStatus());
+                                     doneWith(swConn.getValue());
+                                 });
+                             });
+        });
+
+        auto read = [&](std::string_view poolAttribute) {
+            return readEgressConnectionsCreatedCounterOrZero(
+                capturer, {.purpose = kNormalConnectionPurpose, .poolAttribute = poolAttribute});
+        };
+        pool.shutdown();
+        return std::make_tuple(read(kTaskExecutorPoolConnectionPoolAttribute),
+                               read(kShardingFixedConnectionPoolAttribute),
+                               read(kOtherConnectionPoolAttribute));
+    };
+
+    // A pool whose name contains "TaskExecutorPool" is attributed to "TaskExecutorPool".
+    {
+        otel::metrics::OtelMetricsCapturer capturer;
+        auto pool = std::make_shared<ConnectionPool>(std::make_shared<PoolImpl>(_executor),
+                                                     "NetworkInterfaceTL-TaskExecutorPool-0");
+        auto [taskExecutorPool, shardingFixed, other] = acquireAndReturnConnection(*pool, capturer);
+        EXPECT_EQ(taskExecutorPool, 1);
+        EXPECT_EQ(shardingFixed, 0);
+        EXPECT_EQ(other, 0);
+    }
+
+    // A pool whose name contains "Sharding-Fixed" is attributed to "Sharding-Fixed".
+    {
+        auto pool = std::make_shared<ConnectionPool>(std::make_shared<PoolImpl>(_executor),
+                                                     "NetworkInterfaceTL-Sharding-Fixed");
+        otel::metrics::OtelMetricsCapturer capturer;
+        auto [taskExecutorPool, shardingFixed, other] = acquireAndReturnConnection(*pool, capturer);
+        EXPECT_EQ(taskExecutorPool, 0);
+        EXPECT_EQ(shardingFixed, 1);
+        EXPECT_EQ(other, 0);
+    }
+
+    // Any other pool name is attributed to "other".
+    {
+        auto pool =
+            std::make_shared<ConnectionPool>(std::make_shared<PoolImpl>(_executor), "test pool");
+        otel::metrics::OtelMetricsCapturer capturer;
+        auto [taskExecutorPool, shardingFixed, other] = acquireAndReturnConnection(*pool, capturer);
+        EXPECT_EQ(taskExecutorPool, 0);
+        EXPECT_EQ(shardingFixed, 0);
+        EXPECT_EQ(other, 1);
+    }
+}
+
 /**
  * Verify that connections are obtained in MRU order.
  */
-TEST_F(ConnectionPoolTest, ConnectionsAreAcquiredInMRUOrder) {
+TEST_F(ConnectionPoolCheckoutTest, ConnectionsAreAcquiredInMRUOrder) {
     auto pool = makePool();
     std::random_device rd;
     std::mt19937 rng(rd());
@@ -479,9 +877,9 @@ TEST_F(ConnectionPoolTest, ConnectionsAreAcquiredInMRUOrder) {
 }
 
 /**
- * Verify that recently used connections are not purged.
+ * Verify that recently used connections are not purged, while connections not used recently are.
  */
-TEST_F(ConnectionPoolTest, ConnectionsNotUsedRecentlyArePurged) {
+TEST_F(ConnectionPoolReturnAndRefreshTest, ConnectionsNotUsedRecentlyArePurged) {
     ConnectionPool::Options options;
     options.minConnections = 0;
     options.refreshRequirement = Milliseconds(1000);
@@ -598,9 +996,9 @@ TEST_F(ConnectionPoolTest, ConnectionsNotUsedRecentlyArePurged) {
 }
 
 /**
- * Verify that a failed connection isn't returned to the pool
+ * Verify that a failed connection isn't returned to the pool.
  */
-TEST_F(ConnectionPoolTest, FailedConnDifferentConn) {
+TEST_F(ConnectionPoolFailureTest, ConnectionMarkedFailedIsDroppedOnReturn) {
     auto pool = makePool();
 
     // Grab the first connection and indicate that it failed
@@ -630,10 +1028,10 @@ TEST_F(ConnectionPoolTest, FailedConnDifferentConn) {
 }
 
 /**
- * Verify that a connection returned with an error indicating the remote
- * is unavailable drops current generation connections to that remote.
+ * Verify that a connection returned with an error indicating the host is unavailable drops
+ * all connections to that host.
  */
-TEST_F(ConnectionPoolTest, FailedHostDropsConns) {
+TEST_F(ConnectionPoolFailureTest, FailedHostErrorsDropConnections) {
     auto pool = makePool();
 
     ASSERT_EQ(pool->getNumConnectionsPerHost(HostAndPort()), 0U);
@@ -701,10 +1099,10 @@ TEST_F(ConnectionPoolTest, FailedHostDropsConns) {
 }
 
 /**
- * Verify that a connection returned with an error that does _not_ indicate
- * the remote is unavailable does _not_ drop current generation connections to that remote.
+ * Verify that a connection returned with an error that does not indicate the host is
+ * unavailable does not drop other connections to that host.
  */
-TEST_F(ConnectionPoolTest, OtherErrorsDontDropConns) {
+TEST_F(ConnectionPoolFailureTest, NonFailedHostErrorsDontDropConnections) {
     auto pool = makePool();
 
     ASSERT_EQ(pool->getNumConnectionsPerHost(HostAndPort()), 0U);
@@ -781,10 +1179,9 @@ TEST_F(ConnectionPoolTest, OtherErrorsDontDropConns) {
 }
 
 /**
- * Verify that providing different host and ports gives you different
- * connections.
+ * Verify that requests for different hosts get different connections.
  */
-TEST_F(ConnectionPoolTest, DifferentHostDifferentConn) {
+TEST_F(ConnectionPoolCheckoutTest, DifferentHostsDifferentConnections) {
     auto pool = makePool();
 
     // Conn 1 from port 30000
@@ -814,9 +1211,9 @@ TEST_F(ConnectionPoolTest, DifferentHostDifferentConn) {
 }
 
 /**
- * Verify that not returning handle's to the pool spins up new connections.
+ * Verify that a checked-out connection is not reused for a new request for the same host.
  */
-TEST_F(ConnectionPoolTest, DifferentConnWithoutReturn) {
+TEST_F(ConnectionPoolCheckoutTest, CheckedOutConnectionIsNotReusedForNewRequest) {
     auto pool = makePool();
 
     // Get the first connection, move it out rather than letting it return
@@ -856,29 +1253,103 @@ TEST_F(ConnectionPoolTest, DifferentConnWithoutReturn) {
 }
 
 /**
- * When the timeout duration comes from the parameter, the connection timeout status should
- * always be `PooledConnectionAcquisitionExceededTimeLimit`.
+ * Verify that a reused connection has its status reset to a clean state before being
+ * handed to the next caller.
  */
-TEST_F(ConnectionPoolTest, TimeoutOnAquisitionTimeout) {
+TEST_F(ConnectionPoolCheckoutTest, CheckedOutConnectionStatusIsResetToUnknown) {
+    auto pool = makePool();
+
+    // Check out a connection and indicate success so it returns to the ready pool with a
+    // non-unknown status.
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          doneWith(swConn.getValue());
+                      });
+
+    // Check out the same connection again and drop it without indicating success or failure.
+    // If the status reset on checkout is working, the pool treats this as a non-network error
+    // and drops the connection rather than recycling it.
+    ConnectionPool::ConnectionHandle conn;
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn = std::move(swConn.getValue());
+                      });
+    dropHandle(conn);
+
+    // The connection is discarded rather than recycled, so the ready pool is empty and a new setup
+    // spawns.
+    ASSERT_EQ(0, getStats(pool).totalAvailable);
+    ASSERT_EQ(static_cast<int>(ConnectionPoolState::kHealthy),
+              static_cast<int>(getStats(pool).statsByHost.at(HostAndPort()).poolState));
+    ASSERT_EQ(1, ConnectionImpl::setupQueueDepth());
+}
+
+/**
+ * Verify that an unhealthy connection in the ready pool is dropped at checkout and a fresh
+ * connection is established instead.
+ */
+TEST_F(ConnectionPoolCheckoutTest, UnhealthyReadyConnectionIsDroppedOnCheckout) {
+    auto pool = makePool();
+
+    size_t conn1Id = 0;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn1Id = getId(swConn.getValue());
+                          dynamic_cast<ConnectionImpl*>(swConn.getValue().get())->setUnhealthy();
+                          doneWith(swConn.getValue());
+                      });
+
+    size_t conn2Id = 0;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn2Id = getId(swConn.getValue());
+                          doneWith(swConn.getValue());
+                      });
+
+    ASSERT(conn1Id);
+    ASSERT(conn2Id);
+    ASSERT_NE(conn1Id, conn2Id);
+}
+
+/**
+ * Verify that when the caller's acquisition timeout fires first, the error returned is
+ * PooledConnectionAcquisitionExceededTimeLimit.
+ */
+TEST_F(ConnectionPoolQueuingTest,
+       AcquisitionTimeoutBeforePendingTimeoutReturnsExceededTimeLimitError) {
     assertTimeoutHelper(
         /* timeout duration */ Milliseconds{100},
         /* expected timeout codes */ ErrorCodes::PooledConnectionAcquisitionExceededTimeLimit);
 }
 
 /**
- * When the timeout duration comes from controller refresh, the connection timeout status should
- * always be `HostUnreachable`.
+ * Verify that when the pool's pending connection timeout fires first, the error returned is
+ * ConnectionEstablishmentTimeout (the connection-establishment timeout now has a
+ * dedicated error code rather than the generic HostUnreachable).
  */
-TEST_F(ConnectionPoolTest, TimeoutOnControllerRefresh) {
+TEST_F(ConnectionPoolQueuingTest,
+       PendingTimeoutBeforeAcquisitionTimeoutReturnsConnectionEstablishmentTimeoutError) {
     assertTimeoutHelper(
         /* timeout duration */ Milliseconds{500},
-        /* expected timeout codes */ ErrorCodes::HostUnreachable);
+        /* expected timeout codes */ ErrorCodes::ConnectionEstablishmentTimeout);
 }
 
 /**
- * Verify that refresh callbacks happen at the appropriate moments.
+ * Verify that an idle connection is refreshed after the refresh requirement timeout elapses.
  */
-TEST_F(ConnectionPoolTest, refreshHappens) {
+TEST_F(ConnectionPoolReturnAndRefreshTest,
+       IdleConnectionIsRefreshedAfterRefreshRequirementTimeout) {
     bool refreshedA = false;
     bool refreshedB = false;
     ConnectionImpl::pushRefresh([&]() {
@@ -930,9 +1401,9 @@ TEST_F(ConnectionPoolTest, refreshHappens) {
 }
 
 /**
- * Verify that refresh can timeout.
+ * Verify that refresh can time out.
  */
-TEST_F(ConnectionPoolTest, refreshTimeoutHappens) {
+TEST_F(ConnectionPoolReturnAndRefreshTest, RefreshTimesOut) {
     ConnectionPool::Options options;
     options.refreshRequirement = Milliseconds(1000);
     options.refreshTimeout = Milliseconds(2000);
@@ -1017,9 +1488,9 @@ TEST_F(ConnectionPoolTest, refreshTimeoutHappens) {
 }
 
 /**
- * Verify that requests are served in expiration order, not insertion order
+ * Verify that requests are served in expiration order, not insertion order.
  */
-TEST_F(ConnectionPoolTest, requestsServedByUrgency) {
+TEST_F(ConnectionPoolQueuingTest, RequestsAreServedInExpirationOrder) {
     auto pool = makePool();
 
     bool reachedA = false;
@@ -1068,9 +1539,9 @@ TEST_F(ConnectionPoolTest, requestsServedByUrgency) {
 }
 
 /**
- * Verify that we respect maxConnections
+ * Verify that the pool does not create more connections than the configured maximum.
  */
-TEST_F(ConnectionPoolTest, maxPoolRespected) {
+TEST_F(ConnectionPoolSpawningTest, MaxConnections) {
     ConnectionPool::Options options;
     options.minConnections = 1;
     options.maxConnections = 2;
@@ -1140,9 +1611,9 @@ TEST_F(ConnectionPoolTest, maxPoolRespected) {
 }
 
 /**
- * Verify that we respect maxConnecting
+ * Verify that new setups are blocked when the concurrent setup limit is reached.
  */
-TEST_F(ConnectionPoolTest, maxConnectingRespected) {
+TEST_F(ConnectionPoolSpawningTest, MaxConnectingLimitCapsNewSetups) {
     ConnectionPool::Options options;
     options.minConnections = 1;
     options.maxConnecting = 2;
@@ -1213,10 +1684,9 @@ TEST_F(ConnectionPoolTest, maxConnectingRespected) {
 }
 
 /**
- * Verify that refresh callbacks block new connections, then trigger new connection spawns after
- * they return
+ * Verify that in-progress refreshes count toward the concurrent setup limit and block new setups.
  */
-TEST_F(ConnectionPoolTest, maxConnectingWithRefresh) {
+TEST_F(ConnectionPoolSpawningTest, MaxConnectingLimitRefreshBlocksNewSetup) {
     ConnectionPool::Options options;
     options.maxConnecting = 1;
     options.refreshRequirement = Milliseconds(1000);
@@ -1270,9 +1740,9 @@ TEST_F(ConnectionPoolTest, maxConnectingWithRefresh) {
 }
 
 /**
- * Verify that refreshes block new connects, but don't themselves respect maxConnecting
+ * Verify that in-progress refreshes are not themselves subject to the concurrent setup limit.
  */
-TEST_F(ConnectionPoolTest, maxConnectingWithMultipleRefresh) {
+TEST_F(ConnectionPoolSpawningTest, MaxConnectingLimitDoesNotApplyToRefreshes) {
     ConnectionPool::Options options;
     options.maxConnecting = 2;
     options.minConnections = 3;
@@ -1374,9 +1844,9 @@ TEST_F(ConnectionPoolTest, maxConnectingWithMultipleRefresh) {
 }
 
 /**
- * Verify that minConnections is respected
+ * Verify that the pool maintains at least the configured minimum number of connections.
  */
-TEST_F(ConnectionPoolTest, minPoolRespected) {
+TEST_F(ConnectionPoolSpawningTest, MinConnections) {
     ConnectionPool::Options options;
     options.minConnections = 2;
     options.maxConnections = 3;
@@ -1491,10 +1961,9 @@ TEST_F(ConnectionPoolTest, minPoolRespected) {
 
 
 /**
- * Verify that the hostTimeout is respected. This implies that an idle
- * hostAndPort drops it's connections.
+ * Verify that an idle pool's connections are dropped after the host timeout elapses.
  */
-TEST_F(ConnectionPoolTest, hostTimeoutHappens) {
+TEST_F(ConnectionPoolExpiryTest, IdlePoolExpiresAfterHostTimeout) {
     ConnectionPool::Options options;
     options.refreshRequirement = Milliseconds(5000);
     options.refreshTimeout = Milliseconds(5000);
@@ -1546,10 +2015,9 @@ TEST_F(ConnectionPoolTest, hostTimeoutHappens) {
 
 
 /**
- * Verify that the hostTimeout happens, but that continued gets delay
- * activation.
+ * Verify that the host timeout is delayed as long as there are pending checkout requests.
  */
-TEST_F(ConnectionPoolTest, hostTimeoutHappensMoreGetsDelay) {
+TEST_F(ConnectionPoolExpiryTest, IdlePoolExpiryIsDelayedByOutstandingRequests) {
     ConnectionPool::Options options;
     options.refreshRequirement = Milliseconds(5000);
     options.refreshTimeout = Milliseconds(5000);
@@ -1636,10 +2104,9 @@ TEST_F(ConnectionPoolTest, hostTimeoutHappensMoreGetsDelay) {
 
 
 /**
- * Verify that the hostTimeout happens and that having a connection checked out
- * delays things
+ * Verify that the host timeout is delayed while connections are checked out.
  */
-TEST_F(ConnectionPoolTest, hostTimeoutHappensCheckoutDelays) {
+TEST_F(ConnectionPoolExpiryTest, IdlePoolExpiryIsDelayedByCheckedOutConnections) {
     ConnectionPool::Options options;
     options.refreshRequirement = Milliseconds(5000);
     options.refreshTimeout = Milliseconds(5000);
@@ -1727,9 +2194,121 @@ TEST_F(ConnectionPoolTest, hostTimeoutHappensCheckoutDelays) {
 }
 
 /**
- * Verify that drop connections works
+ * Verify that pool expiry is delayed while a leased connection is outstanding.
  */
-TEST_F(ConnectionPoolTest, dropConnections) {
+TEST_F(ConnectionPoolExpiryTest, IdlePoolExpiryIsDelayedByLeasedConnections) {
+    ConnectionPool::Options options;
+    options.refreshRequirement = Milliseconds(5000);
+    options.refreshTimeout = Milliseconds(5000);
+    options.hostTimeout = Milliseconds(1000);
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    ConnectionPool::ConnectionHandle leasedConn;
+    size_t leasedConnId = 0;
+
+    // Lease a connection.
+    ConnectionImpl::pushSetup(Status::OK());
+    unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+        pool->lease_forTest(HostAndPort(),
+                            Milliseconds(5000),
+                            [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                                monitor.exec([&]() {
+                                    leasedConnId = verifyAndGetId(swConn);
+                                    leasedConn = std::move(swConn.getValue());
+                                });
+                            });
+    });
+    ASSERT(leasedConnId);
+
+    // Advance past hostTimeout: pool must NOT expire while the lease is outstanding.
+    PoolImpl::setNow(now + Milliseconds(1000));
+    ASSERT_EQ(1u, getStats(pool).totalLeased);
+
+    // Release the lease and advance another hostTimeout so the pool expires.
+    doneWith(leasedConn);
+    PoolImpl::setNow(now + Milliseconds(2000));
+
+    // A new checkout must spawn a fresh connection, confirming the old pool expired.
+    size_t newConnId = 0;
+    ConnectionImpl::pushSetup(Status::OK());
+    unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+        pool->get_forTest(HostAndPort(),
+                          Milliseconds(5000),
+                          [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                              monitor.exec([&]() {
+                                  newConnId = verifyAndGetId(swConn);
+                                  ASSERT_NE(leasedConnId, newConnId);
+                                  doneWith(swConn.getValue());
+                              });
+                          });
+    });
+    ASSERT(newConnId);
+}
+
+/**
+ * Verify that a pool is not destroyed while a connection handle is outstanding.
+ */
+TEST_F(ConnectionPoolExpiryTest, PoolIsDestroyedAfterAllHandlesAreReleased) {
+    ConnectionPool::Options options;
+    options.refreshRequirement = Milliseconds(5000);
+    options.refreshTimeout = Milliseconds(5000);
+    options.hostTimeout = Milliseconds(1000);
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    ConnectionPool::ConnectionHandle conn;
+    size_t connId = 0;
+
+    // Check out a connection.
+    ConnectionImpl::pushSetup(Status::OK());
+    unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+        pool->get_forTest(HostAndPort(),
+                          Milliseconds(5000),
+                          [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                              monitor.exec([&]() {
+                                  connId = verifyAndGetId(swConn);
+                                  conn = std::move(swConn.getValue());
+                              });
+                          });
+    });
+    ASSERT(connId);
+
+    // The pool must not expire while the connection is checked out.
+    PoolImpl::setNow(now + Milliseconds(1000));
+    ASSERT_EQ(1u, getStats(pool).totalInUse);
+
+    // Return the connection and advance past another hostTimeout so the pool expires.
+    doneWith(conn);
+    PoolImpl::setNow(now + Milliseconds(2000));
+
+    // A subsequent checkout spawns a fresh connection, confirming the pool expired.
+    size_t newConnId = 0;
+    ConnectionImpl::pushSetup(Status::OK());
+    unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+        pool->get_forTest(HostAndPort(),
+                          Milliseconds(5000),
+                          [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                              monitor.exec([&]() {
+                                  newConnId = verifyAndGetId(swConn);
+                                  ASSERT_NE(connId, newConnId);
+                                  doneWith(swConn.getValue());
+                              });
+                          });
+    });
+    ASSERT(newConnId);
+}
+
+/**
+ * Verify that dropping connections for a specific host fails pending requests, causes returned
+ * checked-out connections to be discarded, and does not block subsequent checkouts on a stale
+ * in-flight refresh.
+ */
+TEST_F(ConnectionPoolDropTest, DropConnectionsForHost) {
     ConnectionPool::Options options;
 
     // ensure that only 1 connection is floating around
@@ -1837,7 +2416,10 @@ TEST_F(ConnectionPoolTest, dropConnections) {
     ASSERT(reachedB);
 }
 
-TEST_F(ConnectionPoolTest, DropAllConnectionsWithKeepOpen) {
+/**
+ * Verify that a global dropConnections() skips pools marked keepOpen.
+ */
+TEST_F(ConnectionPoolDropTest, DropConnectionsForAllSkipsKeepOpenPools) {
     ConnectionPool::Options options;
 
     options.maxConnections = 2;
@@ -1910,7 +2492,7 @@ TEST_F(ConnectionPoolTest, DropAllConnectionsWithKeepOpen) {
  * out host as Unknown. Therefore, pending connections may be dropped in this layer as
  * a reaction to setup timeout.
  */
-TEST_F(ConnectionPoolTest, SetupTimeoutsFailOtherPendingRequestsWhenPoolIsEmpty) {
+TEST_F(ConnectionPoolSetupTest, SetupTimeoutsFailOtherPendingRequestsWhenPoolIsEmpty) {
     ConnectionPool::Options options;
 
     options.maxConnections = 1;
@@ -1945,14 +2527,18 @@ TEST_F(ConnectionPoolTest, SetupTimeoutsFailOtherPendingRequestsWhenPoolIsEmpty)
 
     ASSERT(conn1);
     ASSERT(!conn1->isOK());
-    ASSERT_EQ(conn1->getStatus(), ErrorCodes::HostUnreachable);
+    ASSERT_EQ(conn1->getStatus(), ErrorCodes::ConnectionEstablishmentTimeout);
     ASSERT(conn2);
     ASSERT(!conn2->isOK());
     // Pending connection fails with the same timeout status.
-    ASSERT_EQ(conn2->getStatus(), ErrorCodes::HostUnreachable);
+    ASSERT_EQ(conn2->getStatus(), ErrorCodes::ConnectionEstablishmentTimeout);
 }
 
-TEST_F(ConnectionPoolTest, SetupTimeoutsDontFailOtherPendingRequestsWhenPoolIsNotEmpty) {
+/**
+ * Verify that a setup timeout does not fail other pending requests when established connections
+ * exist. Those requests wait until their own acquisition timeout expires instead.
+ */
+TEST_F(ConnectionPoolSetupTest, SetupTimeoutsDontFailOtherPendingRequestsWhenPoolIsNotEmpty) {
     auto refreshTimeout = Seconds{2};
     auto acquisitionTimeout = Seconds{20};
 
@@ -2009,10 +2595,11 @@ TEST_F(ConnectionPoolTest, SetupTimeoutsDontFailOtherPendingRequestsWhenPoolIsNo
     ASSERT_EQ(conn1->getStatus(), ErrorCodes::PooledConnectionAcquisitionExceededTimeLimit);
 }
 
+
 /**
- * Verify that timeouts during refresh time out other pending requests.
+ * Verify that a refresh timeout fails all pending requests for the same host.
  */
-TEST_F(ConnectionPoolTest, RefreshTimeoutsFailPendingRequests) {
+TEST_F(ConnectionPoolReturnAndRefreshTest, RefreshTimeoutFailsPendingRequests) {
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> connToTriggerSetup;
 
     auto [pool, inUseConnections] = setupConnectionPool(
@@ -2079,7 +2666,10 @@ TEST_F(ConnectionPoolTest, RefreshTimeoutsFailPendingRequests) {
     ASSERT_EQ(conn1->getStatus(), ErrorCodes::HostUnreachable);
 }
 
-TEST_F(ConnectionPoolTest, RefreshTimeoutsDropAvailableConnections) {
+/**
+ * Verify that a refresh timeout drops available connections for the same host.
+ */
+TEST_F(ConnectionPoolReturnAndRefreshTest, RefreshTimeoutDropsAvailableConnections) {
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> connToTriggerSetup;
 
     const auto refreshTimeout = Seconds{2};
@@ -2146,6 +2736,162 @@ TEST_F(ConnectionPoolTest, RefreshTimeoutsDropAvailableConnections) {
     }
 }
 
+/**
+ * Verify that dropping a handle without indicating success or failure drops only that single
+ * connection, leaves the pool healthy, and spawns a replacement.
+ */
+TEST_F(ConnectionPoolReturnAndRefreshTest,
+       DroppingHandleWithoutIndicatingDropsSingleConnectionOnly) {
+    ConnectionPool::Options options;
+    options.minConnections = 2;
+    options.maxConnections = 2;
+    auto pool = makePool(options);
+
+    // Check out both connections.
+    ConnectionPool::ConnectionHandle conn1;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn1 = std::move(swConn.getValue());
+                      });
+
+    ConnectionPool::ConnectionHandle conn2;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn2 = std::move(swConn.getValue());
+                      });
+
+    // Drop conn1 without indicating success or failure.
+    dropHandle(conn1);
+
+    auto connStats = getStats(pool);
+    ASSERT_EQ(0, connStats.totalAvailable);
+    ASSERT_EQ(1, connStats.totalInUse);
+    auto hostStats = connStats.statsByHost.at(HostAndPort());
+    ASSERT_EQ(static_cast<int>(hostStats.poolState),
+              static_cast<int>(ConnectionPoolState::kHealthy));
+    ASSERT_EQ(1, ConnectionImpl::setupQueueDepth());
+
+    doneWith(conn2);
+}
+
+
+/**
+ * Verify that a ConnectionError during refresh drops only that single connection and leaves
+ * the pool healthy, unlike other errors that fail the entire pool.
+ */
+TEST_F(ConnectionPoolReturnAndRefreshTest,
+       RefreshFailureWithConnectionErrorDropsSingleConnectionOnly) {
+    ConnectionPool::Options options;
+    options.minConnections = 0;
+    options.refreshRequirement = Milliseconds(1000);
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Check out one connection, keeping it checked out so no ready-pool timer is armed.
+    ConnectionPool::ConnectionHandle conn;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn = std::move(swConn.getValue());
+                      });
+
+    // Advance past the refresh requirement while the connection is checked out.
+    PoolImpl::setNow(now + Milliseconds(1000));
+
+    // Return the stale connection so it is queued for refresh.
+    doneWith(conn);
+
+    // Fail the refresh with a ConnectionError.
+    ConnectionImpl::pushRefresh(Status(ErrorCodes::ConnectionError, "connection error"));
+
+    // With minConnections=0, no replacement is spawned after the drop.
+    auto connStats = getStats(pool);
+    ASSERT_EQ(0, connStats.totalAvailable);
+    ASSERT_EQ(0, connStats.totalRefreshing);
+    ASSERT_EQ(1, connStats.totalCreated);
+    auto hostStats = connStats.statsByHost.at(HostAndPort());
+    ASSERT_EQ(static_cast<int>(hostStats.poolState),
+              static_cast<int>(ConnectionPoolState::kHealthy));
+}
+
+/**
+ * Verify that a connection that completes refresh after a failure event is discarded rather than
+ * added to the pool.
+ */
+TEST_F(ConnectionPoolReturnAndRefreshTest, InFlightRefreshCompletedAfterProcessFailureIsDiscarded) {
+    ConnectionPool::Options options;
+    options.minConnections = 2;
+    options.maxConnections = 2;
+    options.maxConnecting = 2;
+    options.refreshRequirement = Milliseconds(1000);
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Establish both connections (both start checked out).
+    ConnectionPool::ConnectionHandle conn1;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn1 = std::move(swConn.getValue());
+                      });
+
+    ConnectionPool::ConnectionHandle conn2;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          conn2 = std::move(swConn.getValue());
+                      });
+
+    // Advance past the refresh requirement while both connections are checked out.
+    PoolImpl::setNow(now + Milliseconds(1000));
+
+    // Return both stale connections so they are queued for refresh.
+    doneWith(conn1);
+    doneWith(conn2);
+
+    {
+        auto connStats = getStats(pool);
+        ASSERT_EQ(0, connStats.totalAvailable);
+        ASSERT_EQ(2, connStats.totalRefreshing);
+    }
+
+    // Fail conn1's refresh with HostUnreachable, putting the pool in a failed state.
+    ConnectionImpl::pushRefresh(Status(ErrorCodes::HostUnreachable, "host unreachable"));
+
+    {
+        auto stats = getStats(pool);
+        auto hostStats = stats.statsByHost.at(HostAndPort());
+        ASSERT_EQ(static_cast<int>(hostStats.poolState),
+                  static_cast<int>(ConnectionPoolState::kFailed));
+    }
+
+    // Fire conn2's refresh successfully. It is discarded because the pool has already failed.
+    ConnectionImpl::pushRefresh(Status::OK());
+
+    auto connStats = getStats(pool);
+    ASSERT_EQ(0, connStats.totalAvailable);
+    ASSERT_EQ(0, connStats.totalRefreshing);
+    auto hostStats = connStats.statsByHost.at(HostAndPort());
+    ASSERT_EQ(static_cast<int>(hostStats.poolState),
+              static_cast<int>(ConnectionPoolState::kFailed));
+}
+
 template <typename Ptr>
 void ConnectionPoolTest::dropConnectionsTest(std::shared_ptr<ConnectionPool> const& pool, Ptr t) {
     auto now = Date_t::now();
@@ -2208,7 +2954,11 @@ void ConnectionPoolTest::dropConnectionsTest(std::shared_ptr<ConnectionPool> con
     ASSERT_EQ(1ul, pool->getNumConnectionsPerHost(hap4));
 }
 
-TEST_F(ConnectionPoolTest, DropConnections) {
+/**
+ * Verify that a global dropConnections() removes connections across all host pools, respecting
+ * the keepOpen flag to protect individual pools from the drop.
+ */
+TEST_F(ConnectionPoolDropTest, DropConnectionsViaPool) {
     ConnectionPool::Options options;
     options.minConnections = 0;
     auto pool = makePool(options);
@@ -2216,7 +2966,11 @@ TEST_F(ConnectionPoolTest, DropConnections) {
     dropConnectionsTest(pool, pool);
 }
 
-TEST_F(ConnectionPoolTest, DropConnectionsInMultipleViaManager) {
+/**
+ * Verify that dropping connections via EgressConnectionCloserManager produces the same behavior
+ * as calling dropConnections() directly on the pool.
+ */
+TEST_F(ConnectionPoolDropTest, DropConnectionsViaManager) {
     EgressConnectionCloserManager manager;
     ConnectionPool::Options options;
     options.minConnections = 0;
@@ -2226,7 +2980,88 @@ TEST_F(ConnectionPoolTest, DropConnectionsInMultipleViaManager) {
     dropConnectionsTest(pool, &manager);
 }
 
-TEST_F(ConnectionPoolTest, AsyncGet) {
+/**
+ * Verify that dropping connections fails all pending requests in the queue with
+ * PooledConnectionsDropped.
+ */
+TEST_F(ConnectionPoolDropTest, DropConnectionsFailsPendingRequests) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Check out the only allowed connection so subsequent requests must queue.
+    ConnectionPool::ConnectionHandle handle;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          handle = std::move(swConn.getValue());
+                      });
+    ASSERT(handle);
+
+    // Queue two more requests that cannot be served while the connection is checked out.
+    boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn1, conn2;
+    pool->get_forTest(
+        HostAndPort(),
+        Milliseconds(5000),
+        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn1 = std::move(swConn); });
+    pool->get_forTest(
+        HostAndPort(),
+        Milliseconds(5000),
+        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { conn2 = std::move(swConn); });
+    ASSERT(!conn1);
+    ASSERT(!conn2);
+
+    // Dropping connections fails both queued requests.
+    pool->dropConnections(HostAndPort());
+
+    ASSERT(conn1);
+    ASSERT(!conn1->isOK());
+    ASSERT_EQ(conn1->getStatus().code(), ErrorCodes::PooledConnectionsDropped);
+    ASSERT(conn2);
+    ASSERT(!conn2->isOK());
+    ASSERT_EQ(conn2->getStatus().code(), ErrorCodes::PooledConnectionsDropped);
+
+    doneWith(handle);
+}
+
+/**
+ * Verify that a checked-out connection returned after a drop is discarded rather than recycled
+ * into the pool.
+ */
+TEST_F(ConnectionPoolDropTest, CheckedOutConnectionReturnedAfterDropIsDiscarded) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Check out a connection and hold it.
+    ConnectionPool::ConnectionHandle handle;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT(swConn.isOK());
+                          handle = std::move(swConn.getValue());
+                      });
+    ASSERT(handle);
+
+    // Drop connections for the host.
+    pool->dropConnections(HostAndPort());
+
+    // Return the now-stale handle; it should be discarded, not recycled.
+    doneWith(handle);
+
+    // The stale connection must not end up in the ready pool.
+    ASSERT_EQ(0u, getStats(pool).totalAvailable);
+    ASSERT_EQ(1u, getStats(pool).totalCreated);
+}
+
+/**
+ * Verify that a request queued while the pool is at capacity is fulfilled once the checked-out
+ * connection is returned.
+ */
+TEST_F(ConnectionPoolQueuingTest, QueuedRequestIsServedWhenConnectionBecomesAvailable) {
     ConnectionPool::Options options;
     options.maxConnections = 1;
     auto pool = makePool(options);
@@ -2305,7 +3140,11 @@ TEST_F(ConnectionPoolTest, AsyncGet) {
     }
 }
 
-TEST_F(ConnectionPoolTest, NegativeTimeout) {
+/**
+ * Verify that a pending request whose timeout has already elapsed is rejected cleanly even
+ * when the remaining time is negative.
+ */
+TEST_F(ConnectionPoolQueuingTest, RequestWithNegativeTimeoutIsRejectedImmediately) {
     ConnectionPool::Options options;
     options.maxConnections = 1;
     auto pool = makePool(options);
@@ -2328,19 +3167,152 @@ TEST_F(ConnectionPoolTest, NegativeTimeout) {
     });
 }
 
-TEST_F(ConnectionPoolTest, ReturnAfterShutdown) {
+TEST_F(ConnectionPoolShutdownTest, ReturnAfterShutdownIsSafe) {
     auto pool = makePool();
 
     // Grab a connection and hold it to end of scope
     auto connFuture = getFromPool(HostAndPort(), transport::kGlobalSSLMode, Seconds(1));
     ConnectionImpl::pushSetup(Status::OK());
     auto conn = std::move(connFuture).get();
-    doneWith(conn);
 
     pool->shutdown();
+    doneWith(conn);
 }
 
-TEST_F(ConnectionPoolTest, TotalConnUseTimeIncreasedForCheckedOutConnection) {
+TEST_F(ConnectionPoolShutdownTest, GetAfterShutdownReturnsShutdownError) {
+    auto pool = makePool();
+
+    // Establish a ready connection so the pool is in a healthy state before shutdown.
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        HostAndPort(),
+        Milliseconds(5000),
+        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { doneWith(swConn.getValue()); });
+
+    pool->shutdown();
+
+    // get() after shutdown resolves immediately with ShutdownInProgress; no setup is spawned.
+    Status gotStatus = Status::OK();
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          gotStatus = swConn.getStatus();
+                      });
+    EXPECT_EQ(gotStatus.code(), ErrorCodes::ShutdownInProgress);
+    EXPECT_EQ(ConnectionImpl::setupQueueDepth(), 0u);
+}
+
+TEST_F(ConnectionPoolShutdownTest,
+       LeaseAfterShutdownReturnsShutdownErrorWithoutSpawningConnection) {
+    auto pool = makePool();
+
+    // Establish a ready connection so the pool is in a healthy state before shutdown.
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        HostAndPort(),
+        Milliseconds(5000),
+        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) { doneWith(swConn.getValue()); });
+
+    pool->shutdown();
+
+    Status gotStatus = Status::OK();
+    pool->lease_forTest(HostAndPort(),
+                        Milliseconds(5000),
+                        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            gotStatus = swConn.getStatus();
+                        });
+    EXPECT_EQ(gotStatus.code(), ErrorCodes::ShutdownInProgress);
+    EXPECT_EQ(ConnectionImpl::setupQueueDepth(), 0u);
+}
+
+TEST_F(ConnectionPoolShutdownTest, ShutdownFailsPendingConnectionRequests) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Check out the only allowed connection so the pool is at capacity.
+    ConnectionPool::ConnectionHandle conn;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT_OK(swConn.getStatus());
+                          conn = std::move(swConn.getValue());
+                      });
+    ASSERT(conn);
+
+    // Issue a second get(). The pool is at maxConnections so no new setup is spawned. The request
+    // stays queued in _requests waiting for capacity.
+    Status gotStatus = Status::OK();
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          gotStatus = swConn.getStatus();
+                      });
+    ASSERT_EQ(ConnectionImpl::setupQueueDepth(), 0u);
+
+    // shutdown() fails all pending (capacity-blocked) requests with ShutdownInProgress.
+    pool->shutdown();
+
+    ASSERT_EQ(gotStatus.code(), ErrorCodes::ShutdownInProgress);
+}
+
+TEST_F(ConnectionPoolShutdownTest, ShutdownDiscardsInFlightSetupAndFailsPendingRequests) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Start a get() — a setup is spawned but not yet completed.
+    Status gotStatus = Status::OK();
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          gotStatus = swConn.getStatus();
+                      });
+    ASSERT_EQ(ConnectionImpl::setupQueueDepth(), 1u);
+
+    pool->shutdown();
+    EXPECT_EQ(gotStatus.code(), ErrorCodes::ShutdownInProgress);
+    auto stats = getStats(pool);
+    EXPECT_EQ(0u, stats.totalAvailable);
+    EXPECT_EQ(0u, stats.totalRefreshing);
+}
+
+TEST_F(ConnectionPoolShutdownTest, ShutdownDiscardsInFlightRefresh) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    options.refreshRequirement = Milliseconds(1000);
+    options.refreshTimeout = Milliseconds(5000);
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Establish a connection and check it out.
+    ConnectionPool::ConnectionHandle conn;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          conn = std::move(swConn.getValue());
+                      });
+    ASSERT(conn);
+
+    // Advance past refreshRequirement while the connection is checked out so it is stale on
+    // return (advancing time here does not fire any refresh timers since the pool is empty).
+    PoolImpl::setNow(now + Milliseconds(1500));
+
+    // Return the stale connection — it enters refresh.
+    doneWith(conn);
+    ASSERT_EQ(1u, getStats(pool).totalRefreshing);
+
+    pool->shutdown();
+    auto stats = getStats(pool);
+    EXPECT_EQ(0u, stats.totalAvailable);
+    EXPECT_EQ(0u, stats.totalRefreshing);
+}
+
+TEST_F(ConnectionPoolMetricsTest, SingleCheckoutContributesToTotalUsageTime) {
     constexpr Milliseconds checkOutLength = Milliseconds(10);
     auto pool = makePool();
 
@@ -2366,7 +3338,7 @@ TEST_F(ConnectionPoolTest, TotalConnUseTimeIncreasedForCheckedOutConnection) {
     ASSERT_GREATER_THAN_OR_EQUALS(totalTimeUsageDelta, checkOutLength);
 }
 
-TEST_F(ConnectionPoolTest, OverlappingCheckoutsAdditivelyContributeToTotalUsageTime) {
+TEST_F(ConnectionPoolMetricsTest, OverlappingCheckoutsAdditivelyContributeToTotalUsageTime) {
     constexpr Milliseconds checkOutLength = Milliseconds(10);
     auto pool = makePool();
 
@@ -2428,7 +3400,10 @@ TEST_F(ConnectionPoolTest, OverlappingCheckoutsAdditivelyContributeToTotalUsageT
     ASSERT_GREATER_THAN_OR_EQUALS(totalTimeUsageDelta, checkOutLength * numConnections);
 }
 
-TEST_F(ConnectionPoolTest, LeasedConnectionsDontCountTowardsUsageTime) {
+/**
+ * Verify that a concurrent lease does not count toward the pool's total connection usage time.
+ */
+TEST_F(ConnectionPoolLeasingTest, LeasedConnectionsDontCountTowardsConnectionUsageTime) {
     constexpr Milliseconds checkOutLength = Milliseconds(10);
     auto pool = makePool();
 
@@ -2443,6 +3418,7 @@ TEST_F(ConnectionPoolTest, LeasedConnectionsDontCountTowardsUsageTime) {
     pool->lease_forTest(HostAndPort(),
                         Milliseconds(5000),
                         [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            ASSERT_OK(swConn.getStatus());
                             PoolImpl::setNow(endTimePoint);
                             doneWith(swConn.getValue());
                         });
@@ -2454,7 +3430,12 @@ TEST_F(ConnectionPoolTest, LeasedConnectionsDontCountTowardsUsageTime) {
     ASSERT_EQ(totalTimeUsageDelta, Milliseconds(0));
 }
 
-TEST_F(ConnectionPoolTest, LeasedConnectionsDontInterfereWithOrdinaryCheckoutUsageTime) {
+/**
+ * Verify that a concurrent lease does not inflate the connection usage time when there is a
+ * concurrent checkout.
+ */
+TEST_F(ConnectionPoolLeasingTest,
+       LeasedConnectionsWithConcurrentCheckoutDontInflateConnectionUsageTime) {
     constexpr Milliseconds checkOutLength = Milliseconds(10);
     auto pool = makePool();
 
@@ -2466,20 +3447,27 @@ TEST_F(ConnectionPoolTest, LeasedConnectionsDontInterfereWithOrdinaryCheckoutUsa
     PoolImpl::setNow(startTimePoint);
 
     ConnectionImpl::pushSetup(Status::OK());
+    ConnectionImpl::pushSetup(Status::OK());
 
-    // Checkout one connection and lease one connection.
+    // Check out one connection and lease one connection.
     ConnectionPool::ConnectionHandle normal;
     ConnectionPool::ConnectionHandle leased;
     pool->get_forTest(HostAndPort(),
                       Milliseconds(5000),
                       [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT_OK(swConn.getStatus());
                           normal = std::move(swConn.getValue());
                       });
     pool->lease_forTest(HostAndPort(),
                         Milliseconds(5000),
                         [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            ASSERT_OK(swConn.getStatus());
                             leased = std::move(swConn.getValue());
                         });
+
+    // Verify both handles were acquired before testing time behavior.
+    ASSERT(normal);
+    ASSERT(leased);
 
     // Advance the time and return the connections.
     PoolImpl::setNow(endTimePoint);
@@ -2495,7 +3483,119 @@ TEST_F(ConnectionPoolTest, LeasedConnectionsDontInterfereWithOrdinaryCheckoutUsa
     ASSERT_LESS_THAN(totalTimeUsageDelta, checkOutLength * 2);
 }
 
-TEST_F(ConnectionPoolTest, CancelGetBeforeCallDoesntPullConnection) {
+/**
+ * Verify that a returned leased connection is available for reuse via get() without spawning a
+ * new setup.
+ */
+TEST_F(ConnectionPoolLeasingTest, ReturnedLeasedConnectionIsAvailableForReuse) {
+    auto pool = makePool();
+
+    // Lease one connection.
+    ConnectionPool::ConnectionHandle leased;
+    size_t leasedId = 0;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->lease_forTest(HostAndPort(),
+                        Milliseconds(5000),
+                        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            leasedId = verifyAndGetId(swConn);
+                            leased = std::move(swConn.getValue());
+                        });
+    ASSERT(leased);
+
+    // Return the connection. It should go back to the ready pool.
+    doneWith(leased);
+    ASSERT_EQ(1u, getStats(pool).totalAvailable);
+
+    // Get the connection. No new setup should be needed.
+    size_t reusedId = 0;
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          reusedId = verifyAndGetId(swConn);
+                          doneWith(swConn.getValue());
+                      });
+    ASSERT_EQ(0u, ConnectionImpl::setupQueueDepth());
+    ASSERT_EQ(leasedId, reusedId);
+    ASSERT_EQ(1u, getStats(pool).totalCreated);
+}
+
+/**
+ * Verify that a pending lease() request is fulfilled when a connection becomes available.
+ */
+TEST_F(ConnectionPoolLeasingTest, PendingLeaseIsFulfilledWhenConnectionBecomesAvailable) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Check out the only connection so the pool is at capacity.
+    ConnectionPool::ConnectionHandle normal;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT_OK(swConn.getStatus());
+                          normal = std::move(swConn.getValue());
+                      });
+    ASSERT(normal);
+
+    // Enqueue a lease(). The pool is at maxConnections so no new setup is spawned.
+    ConnectionPool::ConnectionHandle leased;
+    pool->lease_forTest(HostAndPort(),
+                        Milliseconds(5000),
+                        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            ASSERT_OK(swConn.getStatus());
+                            leased = std::move(swConn.getValue());
+                        });
+    ASSERT_FALSE(leased);
+
+    // Return the checked-out connection. It should be routed to the pending lease request.
+    doneWith(normal);
+    ASSERT_TRUE(leased);
+    ASSERT_EQ(0u, ConnectionImpl::setupQueueDepth());
+    ASSERT_EQ(0u, getStats(pool).totalAvailable);
+    ASSERT_EQ(1u, getStats(pool).totalLeased);
+
+    doneWith(leased);
+}
+
+/**
+ * Verify that a leased connection counts toward the connection limit.
+ */
+TEST_F(ConnectionPoolLeasingTest, LeasedConnectionCountsTowardsMaxConnections) {
+    ConnectionPool::Options options;
+    options.maxConnections = 1;
+    auto pool = makePool(options);
+
+    // Lease one connection. It counts against the connection limit.
+    ConnectionPool::ConnectionHandle leased;
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->lease_forTest(HostAndPort(),
+                        Milliseconds(5000),
+                        [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                            ASSERT_OK(swConn.getStatus());
+                            leased = std::move(swConn.getValue());
+                        });
+    ASSERT_TRUE(leased);
+
+    // A get() request cannot be served while the pool is at its connection limit.
+    bool gotConn = false;
+    ConnectionPool::ConnectionHandle conn;
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          ASSERT_OK(swConn.getStatus());
+                          gotConn = true;
+                          conn = std::move(swConn.getValue());
+                      });
+    ASSERT_FALSE(gotConn);
+
+    // Returning the leased connection frees capacity and unblocks the pending get().
+    doneWith(leased);
+    ASSERT_TRUE(gotConn);
+    doneWith(conn);
+}
+
+TEST_F(ConnectionPoolCancellationTest, CancelGetPreCancelledRejectsRequest) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2506,7 +3606,7 @@ TEST_F(ConnectionPoolTest, CancelGetBeforeCallDoesntPullConnection) {
     ASSERT_THROWS_CODE(connFuture.get(), DBException, ErrorCodes::CallbackCanceled);
 }
 
-TEST_F(ConnectionPoolTest, CancelGetEarlyDoesntPullConnection) {
+TEST_F(ConnectionPoolCancellationTest, CancelGetWhilePendingRejectsRequest) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2519,7 +3619,7 @@ TEST_F(ConnectionPoolTest, CancelGetEarlyDoesntPullConnection) {
     ASSERT_THROWS_CODE(connFuture.get(), DBException, ErrorCodes::CallbackCanceled);
 }
 
-TEST_F(ConnectionPoolTest, CancelGetEarlyWithReadyConnectionDoesntPullConnection) {
+TEST_F(ConnectionPoolCancellationTest, CancelGetEarlySkipsReadyConnection) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2542,7 +3642,7 @@ TEST_F(ConnectionPoolTest, CancelGetEarlyWithReadyConnectionDoesntPullConnection
     }
 }
 
-TEST_F(ConnectionPoolTest, CancelGetLatePullsConnection) {
+TEST_F(ConnectionPoolCancellationTest, CancelGetLateGetsConnection) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2557,7 +3657,11 @@ TEST_F(ConnectionPoolTest, CancelGetLatePullsConnection) {
     doneWith(connFuture.get());
 }
 
-TEST_F(ConnectionPoolTest, CancelGetAfterDestruction) {
+/**
+ * Verify that cancelling a token after the pool has been destroyed is safe and does not
+ * crash or access freed memory.
+ */
+TEST_F(ConnectionPoolCancellationTest, CancelGetAfterDestruction) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2576,7 +3680,8 @@ TEST_F(ConnectionPoolTest, CancelGetAfterDestruction) {
     source.cancel();
 }
 
-TEST_F(ConnectionPoolTest, DismissBeforeCancelGet) {
+TEST_F(ConnectionPoolCancellationTest,
+       CancellationSourceDestroyedWithoutCancelDoesNotAffectRequest) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -2592,7 +3697,7 @@ TEST_F(ConnectionPoolTest, DismissBeforeCancelGet) {
     doneWith(connFuture.get());
 }
 
-TEST_F(ConnectionPoolTest, EnsureReasonIsLogged) {
+TEST_F(ConnectionPoolMetricsTest, ConnectionFailureReasonIsLogged) {
     ConnectionPool::Options options;
     options.minConnections = 0;
     auto pool = makePool(options);
@@ -2623,16 +3728,73 @@ TEST_F(ConnectionPoolTest, EnsureReasonIsLogged) {
     ASSERT_EQ(1ul, msgCounter);
 }
 
-TEST_F(ConnectionPoolTest, SetupFailuresShouldNotDropOpenConnections) {
-    // None of these errors should drop available connections. The pool spawns replacement
-    // connections for each failure.
-    std::vector<ErrorCodes::Error> setupFailures = {
-        ErrorCodes::HostUnreachable, ErrorCodes::SocketException, ErrorCodes::NetworkTimeout};
+TEST_F(ConnectionPoolMetricsTest, ConnectionAcquisitionWaitTimeIsTrackedPerHost) {
+    auto pool = makePool();
 
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Issue a get() without completing setup so the request waits in the queue.
+    bool gotConn = false;
+    ConnectionPool::ConnectionHandle conn;
+    pool->get_forTest(HostAndPort(),
+                      Milliseconds(5000),
+                      [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                          if (!swConn.isOK())
+                              return;
+                          gotConn = true;
+                          conn = std::move(swConn.getValue());
+                      });
+
+    // Advance the virtual clock before completing setup so that wait time is non-zero.
+    PoolImpl::setNow(now + Milliseconds(10));
+
+    // Setup completes and the elapsed wait time is recorded in pool stats.
+    ConnectionImpl::pushSetup(Status::OK());
+    ASSERT_TRUE(gotConn);
+
+    doneWith(conn);
+
+    auto stats = getStats(pool);
+    ASSERT_GTE(stats.totalConnectionAcquisitionWaitTime, Milliseconds(10));
+    auto hostStats = stats.statsByHost.at(HostAndPort());
+    ASSERT_GTE(hostStats.connectionAcquisitionWaitTime, Milliseconds(10));
+}
+
+TEST_F(ConnectionPoolMetricsTest, ConnectionStatsCoverAllHosts) {
+    const HostAndPort host1("host1:27017");
+    const HostAndPort host2("host2:27017");
+    auto pool = makePool();
+
+    // Establish and return one connection to each host.
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        host1, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            doneWith(swConn.getValue());
+        });
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        host2, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            doneWith(swConn.getValue());
+        });
+
+    auto stats = getStats(pool);
+    EXPECT_EQ(2u, stats.totalCreated);
+    EXPECT_EQ(2u, stats.totalAvailable);
+    EXPECT_EQ(2u, stats.statsByHost.size());
+    EXPECT_EQ(1u, stats.statsByHost.at(host1).created);
+    EXPECT_EQ(1u, stats.statsByHost.at(host1).available);
+    EXPECT_EQ(1u, stats.statsByHost.at(host2).created);
+    EXPECT_EQ(1u, stats.statsByHost.at(host2).available);
+}
+
+// SERVER-68329: a ConnectionError setup failure (e.g. asio::error::in_progress
+// race in the transport layer) drops only the failing connection without flushing the pool.
+TEST_F(ConnectionPoolTest, SetupFailureWithConnectionErrorDoesNotDropOpenConnections) {
     auto [pool, inUseConnections] = setupConnectionPool(
         1,
         1,
-        setupFailures.size(),
+        1,
         [&](ConnectionPool::Options& options) { options.refreshTimeout = Seconds(100); },
         [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {});
 
@@ -2642,21 +3804,18 @@ TEST_F(ConnectionPoolTest, SetupFailuresShouldNotDropOpenConnections) {
         }
     });
 
+    ConnectionImpl::pushSetup(Status(ErrorCodes::ConnectionError, "rate-limited"));
 
-    for (auto ec : setupFailures) {
-        ConnectionImpl::pushSetup(Status(ec, ""));
-    }
-
-    // Verify that there is still one available connection and the pool maintains the target
-    // number of refreshing connections.
+    // The failing pending connection is dropped, but the in-use and available connections survive
+    // and the pool spawns a replacement pending connection.
     {
         const auto connStats = getStats(pool);
         ASSERT_EQ(1, connStats.totalInUse);
         ASSERT_EQ(1, connStats.totalAvailable);
-        ASSERT_EQ(setupFailures.size(), connStats.totalRefreshing);
+        ASSERT_EQ(1, connStats.totalRefreshing);
     }
 
-    // Return the in-use connection, which should not be refreshed.
+    // Return the in-use connection; it should not be refreshed away.
     {
         auto conn = std::move(inUseConnections.back());
         inUseConnections.pop_back();
@@ -2664,12 +3823,12 @@ TEST_F(ConnectionPoolTest, SetupFailuresShouldNotDropOpenConnections) {
 
         const auto connStats = getStats(pool);
         ASSERT_EQ(0, connStats.totalInUse);
-        ASSERT_EQ(setupFailures.size(), connStats.totalRefreshing);
         ASSERT_EQ(2, connStats.totalAvailable);
+        ASSERT_EQ(1, connStats.totalRefreshing);
     }
 
-    // Contrarily, when a setup connection fails with another error, the available connection gets
-    // dropped.
+    // Contrarily, when a setup connection fails with a non-ConnectionError, the available
+    // connections get dropped via processFailure.
     ConnectionImpl::pushSetup(Status(ErrorCodes::NetworkInterfaceExceededTimeLimit, ""));
     {
         const auto connStats = getStats(pool);
@@ -2679,7 +3838,156 @@ TEST_F(ConnectionPoolTest, SetupFailuresShouldNotDropOpenConnections) {
     }
 }
 
-TEST_F(ConnectionPoolTest, WhenARefreshFailsNewConnectionsAreSpawnedAfterHostTimeout) {
+// Any setup failure that is not ConnectionError and is not one of the transient
+// rate-limiter signals (ConnectionClosedByPeer / ConnectionEstablishmentTimeout) must drop open
+// connections via processFailure, even when the pool already has established connections. This
+// covers plain HostUnreachable (e.g. a failed or refused connect, or an otherwise-unhealthy host)
+// and unrelated network errors. Note on timeouts: a timeout during
+// connect or the initial hello is reported as ConnectionEstablishmentTimeout and single-drops (so
+// it is not in this flush list); a timeout during the later authentication step is reported as
+// HostUnreachable, which flushes -- so HostUnreachable is exercised here.
+TEST_F(ConnectionPoolTest, SetupFailureWithNonConnectionErrorDropsOpenConnections) {
+    const std::vector<ErrorCodes::Error> nonConnectionErrorFailures = {
+        ErrorCodes::HostUnreachable,
+        ErrorCodes::SocketException,
+        ErrorCodes::NetworkTimeout,
+        ErrorCodes::AuthenticationFailed,
+        ErrorCodes::HostNotFound,
+        ErrorCodes::SSLHandshakeFailed,
+    };
+
+    for (auto ec : nonConnectionErrorFailures) {
+        auto [pool, inUseConnections] = setupConnectionPool(
+            1,
+            3,
+            1,
+            [&](ConnectionPool::Options& options) { options.refreshTimeout = Seconds(100); },
+            [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {});
+
+        ON_BLOCK_EXIT([&]() {
+            for (auto& conn : inUseConnections) {
+                doneWith(conn);
+            }
+        });
+
+        // Sanity check: pool starts with one in-use, three available, one refreshing.
+        {
+            const auto connStats = getStats(pool);
+            ASSERT_EQ(1, connStats.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(3, connStats.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(1, connStats.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+
+        // Inject the non-ConnectionError setup failure. The pool must process it as a real failure:
+        // the available pool and any in-flight refreshes are cleared and the pool transitions to
+        // kFailed. Currently checked-out (in-use) connections survive processFailure -- they are
+        // owned by the caller and only become stale via the generation bump.
+        ConnectionImpl::pushSetup(Status(ec, "non-ConnectionError setup failure"));
+
+        const auto connStats = getStats(pool);
+        ASSERT_EQ(1, connStats.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+        ASSERT_EQ(0, connStats.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+        ASSERT_EQ(0, connStats.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+
+        const auto hostStats = connStats.statsByHost.at(HostAndPort());
+        ASSERT_EQ(static_cast<int>(hostStats.poolState),
+                  static_cast<int>(ConnectionPoolState::kFailed))
+            << "ec=" << ErrorCodes::errorString(ec);
+    }
+}
+
+// A transient rate-limiter signal during setup -- ConnectionClosedByPeer (the peer closed the
+// socket: asio::error::eof for non-TLS, asio::ssl::error::stream_truncated for TLS) or
+// ConnectionEstablishmentTimeout (setup timed out) -- must single-drop the failing attempt, not
+// flush the pool, when the pool already has established connections. finishRefresh keys on the code
+// (not the reason string), so we inject the code directly.
+TEST_F(ConnectionPoolTest, RateLimiterRejectionsDoNotClearPool) {
+    for (auto ec :
+         {ErrorCodes::ConnectionClosedByPeer, ErrorCodes::ConnectionEstablishmentTimeout}) {
+        auto [pool, inUseConnections] = setupConnectionPool(
+            1,
+            3,
+            1,
+            [&](ConnectionPool::Options& options) { options.refreshTimeout = Seconds(100); },
+            [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {});
+
+        ON_BLOCK_EXIT([&]() {
+            for (auto& conn : inUseConnections) {
+                doneWith(conn);
+            }
+        });
+
+        // Sanity: pool starts with one in-use, three available, one refreshing.
+        {
+            const auto s = getStats(pool);
+            ASSERT_EQ(1, s.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(3, s.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(1, s.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+
+        // The failing pending connection is single-dropped; the in-use and the three available
+        // connections must survive and a replacement is spawned.
+        ConnectionImpl::pushSetup(Status(ec, "transient single-drop signal"));
+        {
+            const auto s = getStats(pool);
+            ASSERT_EQ(1, s.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(3, s.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(1, s.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+
+        // Returning the in-use connection keeps the pool healthy.
+        {
+            auto conn = std::move(inUseConnections.back());
+            inUseConnections.pop_back();
+            doneWithAsync(conn).get();
+
+            const auto s = getStats(pool);
+            ASSERT_EQ(0, s.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(4, s.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(1, s.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+
+        // Drain the replacement pending connection before the next iteration / teardown.
+        ConnectionImpl::pushSetup(Status::OK());
+    }
+}
+
+// Negative case: the same signals with no established connections have nothing to protect, so they
+// fall through to processFailure and clear the pool.
+TEST_F(ConnectionPoolTest, RateLimiterRejectionsClearPoolWhenNoEstablishedConnections) {
+    for (auto ec :
+         {ErrorCodes::ConnectionClosedByPeer, ErrorCodes::ConnectionEstablishmentTimeout}) {
+        auto [pool, inUseConnections] = setupConnectionPool(
+            0,
+            0,
+            1,
+            [&](ConnectionPool::Options& options) { options.refreshTimeout = Seconds(100); },
+            [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {});
+
+        // No established connections -- pool is entirely in the "refreshing" (setup) state.
+        {
+            const auto s = getStats(pool);
+            ASSERT_EQ(0, s.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(0, s.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(1, s.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+
+        // The failure triggers processFailure and clears the pool.
+        ConnectionImpl::pushSetup(Status(ec, "transient single-drop signal"));
+        {
+            const auto s = getStats(pool);
+            ASSERT_EQ(0, s.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(0, s.totalAvailable) << "ec=" << ErrorCodes::errorString(ec);
+            ASSERT_EQ(0, s.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
+        }
+    }
+}
+
+/**
+ * Verify that after a refresh failure, the pool spawns a replacement connection once
+ * kHostRetryTimeout has elapsed.
+ */
+TEST_F(ConnectionPoolFailureTest, RefreshFailureSpawnsNewConnectionsAfterRetryTimeout) {
 
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> connToTriggerSetup;
 
@@ -2754,7 +4062,11 @@ TEST_F(ConnectionPoolTest, WhenARefreshFailsNewConnectionsAreSpawnedAfterHostTim
     }
 }
 
-TEST_F(ConnectionPoolTest, WhenARefreshFailsNewConnectionsAreSpawnedOnNewConnectionRequest) {
+/**
+ * Verify that after a refresh failure, the pool spawns a replacement connection when the next
+ * checkout request arrives, even before kHostRetryTimeout has elapsed.
+ */
+TEST_F(ConnectionPoolFailureTest, RefreshFailureSpawnsNewConnectionOnNextCheckout) {
 
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> connToTriggerSetup;
 
@@ -2842,7 +4154,10 @@ TEST_F(ConnectionPoolTest, WhenARefreshFailsNewConnectionsAreSpawnedOnNewConnect
     doneWith(conn1->getValue());
 }
 
-TEST_F(ConnectionPoolTest, HealthyPoolReportsHealthyState) {
+/**
+ * Verify that a pool with no failures reports a healthy state.
+ */
+TEST_F(ConnectionPoolFailureTest, HealthyPoolReportsHealthyState) {
     auto pool = makePool();
 
     ConnectionImpl::pushSetup(Status::OK());
@@ -2857,7 +4172,11 @@ TEST_F(ConnectionPoolTest, HealthyPoolReportsHealthyState) {
               static_cast<int>(ConnectionPoolState::kHealthy));
 }
 
-TEST_F(ConnectionPoolTest, FailedPoolReportsFailedState) {
+/**
+ * Verify that a pool that received a network error from a returned connection reports a failed
+ * state.
+ */
+TEST_F(ConnectionPoolFailureTest, FailedPoolReportsFailedState) {
     auto pool = makePool();
 
     auto now = Date_t::now();
@@ -2876,7 +4195,10 @@ TEST_F(ConnectionPoolTest, FailedPoolReportsFailedState) {
               static_cast<int>(ConnectionPoolState::kFailed));
 }
 
-TEST_F(ConnectionPoolTest, SetupFailureWithNoEstablishedConnectionsCausesPoolFailure) {
+/**
+ * Verify that a setup failure with no established connections causes pool failure.
+ */
+TEST_F(ConnectionPoolSetupTest, SetupFailureWithNoEstablishedConnectionsCausesPoolFailure) {
     auto pool = makePool();
 
     auto now = Date_t::now();
@@ -2900,7 +4222,12 @@ TEST_F(ConnectionPoolTest, SetupFailureWithNoEstablishedConnectionsCausesPoolFai
               static_cast<int>(ConnectionPoolState::kFailed));
 }
 
-TEST_F(ConnectionPoolTest, SetupFailureWithMultiplePendingAndNoEstablishedCausesPoolFailure) {
+/**
+ * Verify that a setup failure with multiple in-flight setups and no established connections causes
+ * pool failure.
+ */
+TEST_F(ConnectionPoolSetupTest,
+       SetupFailureWithMultipleInFlightSetupsAndNoEstablishedCausesPoolFailure) {
     ConnectionPool::Options options;
     options.minConnections = 3;
     options.maxConnections = 3;
@@ -2936,7 +4263,11 @@ TEST_F(ConnectionPoolTest, SetupFailureWithMultiplePendingAndNoEstablishedCauses
               static_cast<int>(ConnectionPoolState::kFailed));
 }
 
-TEST_F(ConnectionPoolTest, MultipleConsecutiveSetupFailuresDoNotBlockNewConnections) {
+/**
+ * Verify that consecutive setup failures do not block new connection attempts. The pool
+ * continues to spawn replacements after each failure.
+ */
+TEST_F(ConnectionPoolSetupTest, MultipleConsecutiveSetupFailuresDoNotBlockNewConnections) {
     boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> connToTriggerSetup;
 
     auto [pool, inUseConnections] = setupConnectionPool(
@@ -2965,27 +4296,16 @@ TEST_F(ConnectionPoolTest, MultipleConsecutiveSetupFailuresDoNotBlockNewConnecti
         ASSERT_EQ(3, connStats.totalRefreshing);
     }
 
-    // Push multiple HostUnreachable failures in sequence. The pool immediately spawns a
-    // replacement for each failed connection.
-    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, ""));
-    {
+    // Push a single-drop failure of each code in sequence (establishedConnections > 0, so all three
+    // take the single-drop path). The pool immediately spawns a replacement for each, so
+    // consecutive failures never block it.
+    for (auto ec : {ErrorCodes::ConnectionError,
+                    ErrorCodes::ConnectionClosedByPeer,
+                    ErrorCodes::ConnectionEstablishmentTimeout}) {
+        ConnectionImpl::pushSetup(Status(ec, ""));
         const auto connStats = getStats(pool);
-        ASSERT_EQ(1, connStats.totalInUse);
-        ASSERT_EQ(3, connStats.totalRefreshing);
-    }
-
-    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, ""));
-    {
-        const auto connStats = getStats(pool);
-        ASSERT_EQ(1, connStats.totalInUse);
-        ASSERT_EQ(3, connStats.totalRefreshing);
-    }
-
-    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, ""));
-    {
-        const auto connStats = getStats(pool);
-        ASSERT_EQ(1, connStats.totalInUse);
-        ASSERT_EQ(3, connStats.totalRefreshing);
+        ASSERT_EQ(1, connStats.totalInUse) << "ec=" << ErrorCodes::errorString(ec);
+        ASSERT_EQ(3, connStats.totalRefreshing) << "ec=" << ErrorCodes::errorString(ec);
     }
 
     // Verify the pool is still healthy (not in failed state) because there's an established
@@ -2994,6 +4314,59 @@ TEST_F(ConnectionPoolTest, MultipleConsecutiveSetupFailuresDoNotBlockNewConnecti
     auto hostStats = stats.statsByHost.at(HostAndPort());
     ASSERT_EQ(static_cast<int>(hostStats.poolState),
               static_cast<int>(ConnectionPoolState::kHealthy));
+}
+
+
+/**
+ * Verify that a connection that completes setup after a failure event is discarded rather than
+ * added to the pool.
+ */
+TEST_F(ConnectionPoolSetupTest, InFlightSetupCompletedAfterProcessFailureIsDiscarded) {
+    ConnectionPool::Options options;
+    options.minConnections = 3;
+    options.maxConnecting = 3;
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn1;
+    pool->get_forTest(
+        HostAndPort(), Seconds(10), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            conn1 = std::move(swConn);
+        });
+
+    {
+        auto connStats = getStats(pool);
+        ASSERT_EQ(0, connStats.totalAvailable);
+        ASSERT_EQ(0, connStats.totalInUse);
+        ASSERT_EQ(3, connStats.totalRefreshing);
+    }
+
+    // One setup failure puts the pool in a failed state with two remaining in-flight setups.
+    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, "host unreachable"));
+
+    ASSERT(conn1);
+    ASSERT(!conn1->isOK());
+
+    {
+        auto stats = getStats(pool);
+        auto hostStats = stats.statsByHost.at(HostAndPort());
+        ASSERT_EQ(static_cast<int>(hostStats.poolState),
+                  static_cast<int>(ConnectionPoolState::kFailed));
+    }
+
+    // The two remaining in-flight setups complete successfully but are discarded because the
+    // pool has already failed.
+    ConnectionImpl::pushSetup(Status::OK());
+    ConnectionImpl::pushSetup(Status::OK());
+
+    auto connStats = getStats(pool);
+    ASSERT_EQ(0, connStats.totalAvailable);
+    ASSERT_EQ(0, connStats.totalRefreshing);
+    auto hostStats = connStats.statsByHost.at(HostAndPort());
+    ASSERT_EQ(static_cast<int>(hostStats.poolState),
+              static_cast<int>(ConnectionPoolState::kFailed));
 }
 
 /**
@@ -3048,8 +4421,8 @@ public:
     size_t maxConnections() const override {
         return getPoolOptions().maxConnections;
     }
-    StringData name() const override {
-        return "NeverShutdownLimitController"_sd;
+    std::string_view name() const override {
+        return "NeverShutdownLimitController"sv;
     }
     void updateConnectionPoolStats(ConnectionPoolStats*) const override {}
 
@@ -3062,14 +4435,13 @@ private:
     stdx::unordered_map<PoolId, PoolData> _poolData;
 };
 
-// Reproduces a bug where a SpecificPool whose host has timed out bypasses the kHostRetryTimeout
-// backoff after a connection failure. The sequence is:
-//   1. processFailure() sets _state = kFailed
-//   2. updateHealth() sees the pool is idle past hostTimeout and overwrites kFailed with kExpired
-//   3. The controller returns canShutdown = false (other RS members are healthy)
-//   4. spawnConnections() does not check for kExpired, so it spawns a new connection immediately
-//   5. That connection fails → repeat from (1), creating a tight retry loop
-TEST_F(ConnectionPoolTest, FailedExpiredPoolDoesNotRetryWithoutBackoff) {
+/**
+ * Verify that a pool that expires while in a failed state does not immediately retry connections
+ * without waiting for kHostRetryTimeout. Regression test for a bug where expiring an
+ * already-failed pool caused the kHostRetryTimeout backoff to be bypassed, creating a tight
+ * retry loop.
+ */
+TEST_F(ConnectionPoolFailureTest, FailedPoolExpiredDoesNotRetryWithoutBackoff) {
     ConnectionPool::Options options;
     options.hostTimeout = Milliseconds(1);
     options.refreshRequirement = Milliseconds(5);
@@ -3120,6 +4492,49 @@ TEST_F(ConnectionPoolTest, FailedExpiredPoolDoesNotRetryWithoutBackoff) {
     ASSERT_EQ(1u, ConnectionImpl::setupQueueDepth());
 }
 
+/**
+ * Verify that the kHostRetryTimeout backoff is re-enforced on each subsequent failure, not just
+ * the first. After a second failure the pool must again wait a full kHostRetryTimeout before
+ * spawning new connections.
+ */
+TEST_F(ConnectionPoolFailureTest, FailedPoolEnforcesBackoffOnEachSubsequentFailureCycle) {
+    auto pool = makePool();
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Request a connection to trigger a setup.
+    boost::optional<StatusWith<ConnectionPool::ConnectionHandle>> conn;
+    pool->get_forTest(
+        HostAndPort(), Seconds(60), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            conn = std::move(swConn);
+        });
+
+    // First setup fails, putting the pool in a failed state.
+    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, "host unreachable"));
+    ASSERT(conn);
+    ASSERT(!conn->isOK());
+
+    // No new setup before the first kHostRetryTimeout.
+    PoolImpl::setNow(now + ConnectionPool::kHostRetryTimeout - Milliseconds{1});
+    ASSERT_EQ(0u, ConnectionImpl::setupQueueDepth());
+
+    // At kHostRetryTimeout the pool recovers and spawns a new setup.
+    PoolImpl::setNow(now + ConnectionPool::kHostRetryTimeout);
+    ASSERT_EQ(1u, ConnectionImpl::setupQueueDepth());
+
+    // Second setup fails, putting the pool in a failed state again.
+    ConnectionImpl::pushSetup(Status(ErrorCodes::HostUnreachable, "host unreachable"));
+
+    // No new setup before the second kHostRetryTimeout (measured from the second failure).
+    PoolImpl::setNow(now + ConnectionPool::kHostRetryTimeout * 2 - Milliseconds{1});
+    ASSERT_EQ(0u, ConnectionImpl::setupQueueDepth());
+
+    // At the second kHostRetryTimeout another new setup is spawned.
+    PoolImpl::setNow(now + ConnectionPool::kHostRetryTimeout * 2);
+    ASSERT_EQ(1u, ConnectionImpl::setupQueueDepth());
+}
+
 // Reproduces a use-after-free where the cancellation callback registered in
 // SpecificPool::getConnection captures a raw `this` pointer without a shared_from_this() anchor.
 // The sequence is:
@@ -3133,7 +4548,7 @@ TEST_F(ConnectionPoolTest, FailedExpiredPoolDoesNotRetryWithoutBackoff) {
 // scheduled tasks are queued. By cancelling the token and shutting down the pool inside one
 // executor task, we guarantee the onCancel callback is deferred until after the SpecificPool
 // is destroyed.
-TEST_F(ConnectionPoolTest, CancellationCallbackSurvivesPoolDestruction) {
+TEST_F(ConnectionPoolCancellationTest, CancellationCallbackSurvivesPoolDestruction) {
     CancellationSource source;
     auto pool = makePool();
 
@@ -3174,6 +4589,367 @@ TEST_F(ConnectionPoolTest, CancellationCallbackSurvivesPoolDestruction) {
     // connFuture was resolved (by processFailure during shutdown or by the cancel callback).
     ASSERT_TRUE(connFuture.isReady());
     ASSERT_NOT_OK(std::move(connFuture).getNoThrow());
+}
+
+// Controller that groups two hosts into the same HostGroupState and returns
+// canShutdown = stats.isExpired, mirroring the default LimitController's policy but
+// spanning two hosts.
+class HostGroupLimitController final : public ConnectionPool::ControllerInterface {
+public:
+    HostGroupLimitController(HostAndPort primary, HostAndPort secondary)
+        : _primary(std::move(primary)), _secondary(std::move(secondary)) {}
+
+    void addHost(PoolId id, const HostAndPort& host) override {
+        std::lock_guard lk(_mutex);
+        _poolData[id] = {host, 0};
+    }
+
+    HostGroupState updateHost(PoolId id, const PoolMetrics& stats) override {
+        std::lock_guard lk(_mutex);
+        auto& data = _poolData[id];
+        auto opts = getPoolOptions();
+
+        data.target = stats.requests + stats.active + stats.leased;
+        if (data.target < opts.minConnections) {
+            data.target = opts.minConnections;
+        } else if (data.target > opts.maxConnections) {
+            data.target = opts.maxConnections;
+        }
+
+        return {{_primary, _secondary}, stats.isExpired};
+    }
+
+    void removeHost(PoolId id) override {
+        std::lock_guard lk(_mutex);
+        if (auto it = _poolData.find(id); it != _poolData.end()) {
+            _removedHosts.insert(it->second.host);
+            _poolData.erase(it);
+        }
+    }
+
+    bool wasRemoved(const HostAndPort& host) const {
+        std::lock_guard lk(_mutex);
+        return _removedHosts.count(host) > 0;
+    }
+
+    ConnectionControls getControls(PoolId id) override {
+        std::lock_guard lk(_mutex);
+        return {getPoolOptions().maxConnecting, _poolData[id].target};
+    }
+
+    Milliseconds hostTimeout() const override {
+        return getPoolOptions().hostTimeout;
+    }
+    Milliseconds pendingTimeout() const override {
+        return getPoolOptions().refreshTimeout;
+    }
+    Milliseconds toRefreshTimeout() const override {
+        return getPoolOptions().refreshRequirement;
+    }
+    size_t connectionRequestsMaxQueueDepth() const override {
+        return getPoolOptions().connectionRequestsMaxQueueDepth;
+    }
+    size_t maxConnections() const override {
+        return getPoolOptions().maxConnections;
+    }
+    std::string_view name() const override {
+        return "HostGroupLimitController"sv;
+    }
+    void updateConnectionPoolStats(ConnectionPoolStats*) const override {}
+
+private:
+    struct PoolData {
+        HostAndPort host;
+        size_t target = 0;
+    };
+    HostAndPort _primary;
+    HostAndPort _secondary;
+    mutable std::mutex _mutex;
+    stdx::unordered_map<PoolId, PoolData> _poolData;
+    std::set<HostAndPort> _removedHosts;
+};
+
+/**
+ * Verify that a network failure on one host in a host group does not affect the other host's pool.
+ */
+TEST_F(ConnectionPoolFailureTest, HostGroupFailureOnOneHostDoesNotAffectOtherHosts) {
+    const HostAndPort primary("primary:27017");
+    const HostAndPort secondary("secondary:27017");
+
+    auto controller = std::make_shared<HostGroupLimitController>(primary, secondary);
+    ConnectionPool::Options options;
+    options.controllerFactory =
+        [controller]() -> std::shared_ptr<ConnectionPool::ControllerInterface> {
+        return controller;
+    };
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // Establish and return a connection to each host.
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        primary, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            doneWith(swConn.getValue());
+        });
+
+    ConnectionImpl::pushSetup(Status::OK());
+    pool->get_forTest(
+        secondary, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            doneWith(swConn.getValue());
+        });
+
+    // Return a primary connection with a network error, triggering pool failure.
+    pool->get_forTest(
+        primary, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            doneWithError(swConn.getValue(), {ErrorCodes::HostUnreachable, "error"});
+        });
+
+    auto stats = getStats(pool);
+    ASSERT_EQ(static_cast<int>(stats.statsByHost.at(primary).poolState),
+              static_cast<int>(ConnectionPoolState::kFailed));
+
+    // The secondary pool should remain healthy with its connection available.
+    ASSERT_EQ(static_cast<int>(stats.statsByHost.at(secondary).poolState),
+              static_cast<int>(ConnectionPoolState::kHealthy));
+    ASSERT_EQ(1u, stats.statsByHost.at(secondary).available);
+
+    // A request to the secondary is served from the ready pool without a new setup.
+    pool->get_forTest(
+        secondary, Milliseconds(5000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+            ASSERT_OK(swConn.getStatus());
+            doneWith(swConn.getValue());
+        });
+    ASSERT_EQ(0u, ConnectionImpl::setupQueueDepth());
+}
+
+// Idle pools have no incoming requests or returning connections to trigger a state update.
+// Instead, a repeating timer fires periodically, and that timer is the only mechanism by which
+// an idle pool can detect that it has expired and shut itself down.
+//
+// Verify that the timer respects the configured host timeout.
+TEST_F(ConnectionPoolExpiryTest, HostGroupPoolExpiresAfterHostTimeout) {
+    const HostAndPort primary("primary:27017");
+    const HostAndPort secondary("secondary:27017");
+
+    // hostTimeout is set to 2s (two timer periods) so the idle timer fires exactly twice:
+    // once at 1s before hostTimeout has elapsed, and once at 2s when hostTimeout has elapsed
+    // and the pool should expire.
+    auto controller = std::make_shared<HostGroupLimitController>(primary, secondary);
+    ConnectionPool::Options options;
+    options.hostTimeout = Milliseconds(2000);
+    options.controllerFactory =
+        [controller]() -> std::shared_ptr<ConnectionPool::ControllerInterface> {
+        return controller;
+    };
+    auto pool = makePool(options);
+
+    auto now = Date_t::now();
+    PoolImpl::setNow(now);
+
+    // A get() to the primary causes the controller to create the secondary pool as well.
+    // The secondary's idle timer is set to fire at now+kHostRetryTimeout.
+    ConnectionImpl::pushSetup(Status::OK());
+    unittest::threadAssertionMonitoredTest([&](auto& monitor) {
+        pool->get_forTest(
+            primary, Milliseconds(60000), [&](StatusWith<ConnectionPool::ConnectionHandle> swConn) {
+                monitor.exec([&]() {
+                    ASSERT_OK(swConn.getStatus());
+                    doneWith(swConn.getValue());
+                });
+            });
+    });
+
+    // Advance past kHostRetryTimeout so the idle timer fires for the first time.
+    // hostTimeout has not yet elapsed so the pool should survive.
+    PoolImpl::setNow(now + Milliseconds(1001));
+    ASSERT(!controller->wasRemoved(primary))
+        << "Primary pool must not be destroyed before hostTimeout elapses";
+    ASSERT(!controller->wasRemoved(secondary))
+        << "Secondary pool must not be destroyed before hostTimeout elapses";
+
+    // Advance past hostTimeout (2*kHostRetryTimeout) so the idle timer fires a second time.
+    // hostTimeout has elapsed so the pool should be removed.
+    PoolImpl::setNow(now + Milliseconds(2001));
+    ASSERT(controller->wasRemoved(primary)) << "Primary pool should have expired after hostTimeout";
+    ASSERT(controller->wasRemoved(secondary))
+        << "Secondary pool should have expired after hostTimeout";
+}
+
+TYPED_TEST(ConnectionPoolLimitControllerTest, LimitControllerTargetConnectionsCalculation) {
+    ConnectionPool::Options opts;
+    opts.minConnections = 5;
+    opts.maxConnections = 20;
+    auto [pool, controller] = this->setupLimitController(opts);
+    ConnectionPool::PoolMetrics metrics;
+
+    controller->addHost(0, HostAndPort());
+
+    // Verify connection target is set to minConnections when the host is idle.
+    controller->updateHost(0, metrics);
+    auto controls = controller->getControls(0);
+    ASSERT_EQ(controls.targetConnections, opts.minConnections);
+
+    // Verify connection target is set to the sum of requests + active + leased when that sum
+    // is within the bounds of [minConnections, maxConnections].
+    metrics.leased = 1;
+    metrics.active = 2;
+    metrics.pending = 3;
+    metrics.ready = 4;
+    metrics.requests = 5;
+
+    controller->updateHost(0, metrics);
+    controls = controller->getControls(0);
+    ASSERT_EQ(controls.targetConnections, metrics.requests + metrics.active + metrics.leased);
+
+    // Verify connection target does not exceed maxConnections, even when demand exceeds this value.
+    metrics.requests = 100;
+
+    controller->updateHost(0, metrics);
+    controls = controller->getControls(0);
+    ASSERT_EQ(controls.targetConnections, opts.maxConnections);
+}
+
+TYPED_TEST(ConnectionPoolLimitControllerTest, LimitControllerCanShutdownFollowsExpiry) {
+    auto [pool, controller] = this->setupLimitController();
+    ConnectionPool::PoolMetrics metrics;
+
+    controller->addHost(0, HostAndPort());
+
+    auto state = controller->updateHost(0, metrics);
+    ASSERT_EQ(state.canShutdown, false);
+
+    metrics.isExpired = true;
+    state = controller->updateHost(0, metrics);
+    ASSERT_EQ(state.canShutdown, true);
+}
+
+// Test that verifies the host target connection calculation is updated when the controller's
+// dynamic loader functions return different values. This ensures that the controller is properly
+// calling the dynamic loader functions on each update and using their return values in the
+// target connection calculation.
+TEST_F(DynamicLimitControllerTest, DynamicLoaderValuesAreReflectedInTargetConnections) {
+    size_t minValue = 1;
+    size_t maxValue = 10;
+
+    auto [pool, controller] =
+        makeDynamicController([&] { return minValue; }, [&] { return maxValue; });
+
+    ConnectionPool::PoolMetrics metrics;
+    metrics.requests = 0;
+    metrics.active = 0;
+    metrics.leased = 0;
+
+    addHostAndUpdate(controller, 0, HostAndPort("localhost:27017"), metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections, minValue);
+
+    minValue = 5;
+    maxValue = 20;
+    updateHostAndGetControls(controller, 0, metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections, minValue);
+}
+
+// Verify that adding and removing a host from the controller does not cause any crashes.
+// This is a basic sanity test to ensure that the controller can handle dynamic changes
+// to the host list without issues.
+TEST_F(DynamicLimitControllerTest, AddAndRemoveHostTrackingDoesNotCrash) {
+    auto [pool, controller] = makeDynamicController(1, 2);
+    controller->addHost(0, HostAndPort("localhost:27017"));
+    controller->removeHost(0);
+
+    SUCCEED();
+}
+
+// Verify that the controller properly clamps the target connections to the min and max values
+// returned by the dynamic loader functions. This ensures that even if the dynamic loader
+// functions return values that would normally be outside the allowed range, the controller
+// still enforces the configured limits.
+TEST_F(DynamicLimitControllerTest, UpdateHostClampsDemandToMinAndMax) {
+    size_t minValue = 5;
+    size_t maxValue = 10;
+    auto [pool, controller] =
+        makeDynamicController([&] { return minValue; }, [&] { return maxValue; });
+
+    ConnectionPool::PoolMetrics metrics;
+    metrics.requests = 0;
+    metrics.active = 0;
+    metrics.leased = 0;
+    addHostAndUpdate(controller, 0, HostAndPort("localhost:27017"), metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections, minValue);
+
+    metrics.requests = 100;
+    updateHostAndGetControls(controller, 0, metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections, maxValue);
+}
+
+// Verify that the controller re-evaluates the dynamic loader functions on each updateHost() call,
+// and that changes to the values returned by those functions are reflected in the target connection
+// calculation. This ensures that the controller is not caching the results of the dynamic loader
+// functions and is properly using their return values on each update.
+TEST_F(DynamicLimitControllerTest, UpdateHostRechecksDynamicBoundsOnEachCall) {
+    size_t minValue = 5;
+    size_t maxValue = 10;
+    auto [pool, controller] =
+        makeDynamicController([&] { return minValue; }, [&] { return maxValue; });
+
+    ConnectionPool::PoolMetrics metrics;
+    metrics.requests = 100;
+    metrics.active = 0;
+    metrics.leased = 0;
+
+    addHostAndUpdate(controller, 0, HostAndPort("localhost:27017"), metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections, maxValue);
+
+    maxValue = 50;
+    metrics.requests = 20;
+    updateHostAndGetControls(controller, 0, metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections,
+              metrics.requests + metrics.active + metrics.leased);
+}
+
+// Verify that removing and re-adding a host causes the controller to reset any cached state for
+// that host, allowing it to properly re-calculate the target connections based on the current
+// metrics and dynamic loader values. This ensures that the controller can handle hosts being
+// removed and re-added without retaining stale state that would affect its calculations.
+TEST_F(DynamicLimitControllerTest, RemoveAndReAddHostAllowsFreshTargetCalculation) {
+    size_t minValue = 1;
+    size_t maxValue = 10;
+    auto [pool, controller] =
+        makeDynamicController([&] { return minValue; }, [&] { return maxValue; });
+
+    ConnectionPool::PoolMetrics metrics;
+    metrics.requests = 2;
+    metrics.active = 1;
+    metrics.leased = 0;
+
+    addHostAndUpdate(controller, 0, HostAndPort("localhost:27017"), metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections,
+              metrics.requests + metrics.active + metrics.leased);
+
+    controller->removeHost(0);
+    controller->addHost(0, HostAndPort("localhost:27017"));
+    updateHostAndGetControls(controller, 0, metrics);
+    ASSERT_EQ(controller->getControls(0).targetConnections,
+              metrics.requests + metrics.active + metrics.leased);
+}
+
+// Sanity test that verifies the controller's name() method returns the expected string.
+TEST_F(DynamicLimitControllerTest, NameReturnsConfiguredControllerName) {
+    auto [pool, controller] = makeDynamicController(1, 2);
+    ASSERT_EQ(controller->name(), "dynamic limit controller");
+}
+
+// Verify that the controller's getControls() method returns the maxConnecting value from the pool
+// options, rather than a hardcoded value. This ensures that the controller is properly using the
+// pool's configuration when determining the controls to return.
+TEST_F(DynamicLimitControllerTest, UsesPoolMaxConnectingInGetControls) {
+    ConnectionPool::Options opts;
+    opts.maxConnecting = 17;
+    auto [pool, controller] = makeDynamicController(1, 2, opts);
+    controller->addHost(0, HostAndPort("localhost:27017"));
+
+    ASSERT_EQ(controller->getControls(0).maxPendingConnections, opts.maxConnecting);
 }
 
 }  // namespace connection_pool_test_details

@@ -5,11 +5,8 @@
  * @tags: [uses_transactions, uses_multi_shard_transaction]
  */
 
-// The UUID consistency check uses connections to shards cached on the ShardingTest object, but this
-// test causes failovers on a shard, so the cached connection is not usable.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {stopServerReplication, restartReplSetReplication} from "jstests/libs/write_concern_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -46,25 +43,37 @@ const setUp = function () {
     // shard0: [-inf, 0)
     // shard1: [0, 10)
     // shard2: [10, +inf)
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: participant0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: participant0.shardName}),
+    );
     // The default WC is majority and stopServerReplication will prevent satisfying any majority
     // writes.
     assert.commandWorked(
-        st.s.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+        st.s.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultWriteConcern: {w: 1},
+            writeConcern: {w: "majority"},
+        }),
     );
 
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 0}}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 10}}));
-    assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: participant1.shardName}));
-    assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: participant2.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: participant1.shardName}),
+    );
+    assert.commandWorked(
+        st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: participant2.shardName}),
+    );
 
     // These forced refreshes are not strictly necessary; they just prevent extra TXN log lines
     // from the shards starting, aborting, and restarting the transaction due to needing to
     // refresh after the transaction has started.
-    assert.commandWorked(participant0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-    assert.commandWorked(participant1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-    assert.commandWorked(participant2.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+    if (!FeatureFlagUtil.isPresentAndEnabled(participant0, "AuthoritativeShardsCRUD")) {
+        assert.commandWorked(participant0.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+        assert.commandWorked(participant1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+        assert.commandWorked(participant2.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+    }
     st.refreshCatalogCacheForNs(st.s, ns);
 
     // Start a new transaction by inserting a document onto each shard.
@@ -87,7 +96,12 @@ let coordSecondary = coordinatorReplSetTest.getSecondary();
 
 // Make the commit coordination hang before writing the decision, and send commitTransaction.
 let failPoint = configureFailPoint(coordPrimary, "hangBeforeWritingDecision");
-let commitThread = runCommitThroughMongosInParallelThread(lsid, txnNumber, st.s.host, ErrorCodes.MaxTimeMSExpired);
+let commitThread = runCommitThroughMongosInParallelThread(
+    lsid,
+    txnNumber,
+    st.s.host,
+    ErrorCodes.MaxTimeMSExpired,
+);
 commitThread.start();
 failPoint.wait();
 
@@ -96,7 +110,9 @@ failPoint.wait();
 stopServerReplication([coordPrimary, coordSecondary]);
 
 // Induce the coordinator primary to step down, but allow it to immediately step back up.
-assert.commandWorked(coordPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}));
+assert.commandWorked(
+    coordPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
+);
 assert.commandWorked(coordPrimary.adminCommand({replSetFreeze: 0}));
 
 failPoint.off();

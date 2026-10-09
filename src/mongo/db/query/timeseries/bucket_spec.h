@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document_internal.h"
-#include "mongo/db/index/s2_common.h"
+#include "mongo/db/index/geo/s2_common.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
@@ -41,6 +14,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -53,7 +27,7 @@ namespace mongo::timeseries {
 // Optional callback to look up 2dsphere index version for a field.
 // When nullptr or not called, the most up to date version (currently v4) is used.
 using Get2dsphereIndexVersionFn = std::function<boost::optional<S2IndexVersion>(
-    OperationContext*, const NamespaceString&, StringData)>;
+    OperationContext*, const NamespaceString&, std::string_view)>;
 
 /**
  * Carries parameters for unpacking a bucket. The order of operations applied to determine which
@@ -67,7 +41,7 @@ using Get2dsphereIndexVersionFn = std::function<boost::optional<S2IndexVersion>(
  *   2. Add fields from _computedMetaProjFields.
  *   3. Remove any fields in _fieldSet, since we are in exclude mode.
  */
-class MONGO_MOD_PUBLIC BucketSpec {
+class [[MONGO_MOD_PUBLIC]] BucketSpec {
 public:
     // When unpacking buckets with kInclude we must produce measurements that contain the
     // set of fields. Otherwise, if the kExclude option is used, the measurements will include the
@@ -104,7 +78,7 @@ public:
         _fieldSet = std::move(fieldSet);
     }
 
-    void addIncludeExcludeField(StringData field) {
+    void addIncludeExcludeField(std::string_view field) {
         _fieldSet.emplace(field);
     }
 
@@ -124,7 +98,7 @@ public:
         return _behavior;
     }
 
-    void addComputedMetaProjFields(StringData field) {
+    void addComputedMetaProjFields(std::string_view field) {
         _computedMetaProjFields.emplace(field);
     }
 
@@ -151,7 +125,7 @@ public:
     }
 
     // Returns whether 'field' depends on a pushed down $addFields or computed $project.
-    bool fieldIsComputed(StringData field) const;
+    bool fieldIsComputed(std::string_view field) const;
 
     // Says what to do when an event-level predicate cannot be mapped to a bucket-level predicate.
     enum class IneligiblePredicatePolicy {
@@ -181,7 +155,7 @@ public:
 
     static BucketPredicate handleIneligible(IneligiblePredicatePolicy policy,
                                             const MatchExpression* matchExpr,
-                                            StringData message);
+                                            std::string_view message);
 
     /**
      * Takes a predicate after $_internalUnpackBucket as an argument and attempts to rewrite it as
@@ -318,7 +292,7 @@ public:
      */
     static std::pair<std::unique_ptr<MatchExpression>, std::unique_ptr<MatchExpression>>
     splitOutMetaOnlyPredicate(std::unique_ptr<MatchExpression> expr,
-                              boost::optional<StringData> metaField);
+                              boost::optional<std::string_view> metaField);
 
     // Used as the return value of getPushdownPredicates().
     struct SplitPredicates {
@@ -363,13 +337,21 @@ private:
 
     boost::optional<std::string> _metaField = boost::none;
     boost::optional<HashedFieldName> _metaFieldHashed = boost::none;
+
+    // If any bucket contains dates outside the range of 1970-2038, we are unable to rely on the _id
+    // index, as _id is truncated to 32 bits. Note that this is a per-shard attribute (some shards
+    // of a collection may have extended range data while others do not), so when mongos sends a
+    // pipeline containing an unpack stage to mongod, it will omit this value, as it may be
+    // different from the DB primary shard. This is the single source of truth for the flag; the
+    // owning DocumentSourceInternalUnpackBucket and BucketUnpacker expose it via delegating
+    // accessors.
     bool _usesExtendedRange = false;
 };
 
 /**
  * Determines if an arbitrary field should be included in the materialized measurements.
  */
-inline bool determineIncludeField(StringData fieldName,
+inline bool determineIncludeField(std::string_view fieldName,
                                   BucketSpec::Behavior unpackerBehavior,
                                   const std::set<std::string>& unpackFieldsToIncludeExclude) {
     const bool isInclude = unpackerBehavior == BucketSpec::Behavior::kInclude;

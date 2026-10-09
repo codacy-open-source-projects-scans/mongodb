@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/stacktrace.h"
@@ -41,6 +15,7 @@
 #include <algorithm>
 #include <iterator>
 #include <sstream>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -56,17 +31,18 @@
 
 namespace mongo {
 namespace stacktrace_details {
+using namespace std::literals::string_view_literals;
 namespace {
 
 template <size_t base>
-StringData kDigits;
+std::string_view kDigits;
 template <>
-constexpr StringData kDigits<16> = "0123456789ABCDEF"_sd;
+constexpr std::string_view kDigits<16> = "0123456789ABCDEF"sv;
 template <>
-constexpr StringData kDigits<10> = "0123456789"_sd;
+constexpr std::string_view kDigits<10> = "0123456789"sv;
 
 template <size_t base, typename Buf>
-StringData toNumericBase(uint64_t x, Buf& buf, bool showBase) {
+std::string_view toNumericBase(uint64_t x, Buf& buf, bool showBase) {
     auto it = buf.rbegin();
     if (!x) {
         *it++ = '0';
@@ -77,26 +53,26 @@ StringData toNumericBase(uint64_t x, Buf& buf, bool showBase) {
         }
         // base is prepended only when x is nonzero (matching printf)
         if (base == 16 && showBase) {
-            static const auto kPrefix = "0x"_sd;
+            static const auto kPrefix = "0x"sv;
             it = std::reverse_copy(kPrefix.begin(), kPrefix.end(), it);
         }
     }
     size_t n = std::distance(it.base(), buf.end());
     const char* p = buf.data() + buf.size() - n;
-    return StringData(p, n);
+    return std::string_view(p, n);
 }
 
 }  // namespace
 
-StringData Dec::toDec(uint64_t x, Buf& buf) {
+std::string_view Dec::toDec(uint64_t x, Buf& buf) {
     return toNumericBase<10>(x, buf, false);
 }
 
-StringData Hex::toHex(uint64_t x, Buf& buf, bool showBase) {
+std::string_view Hex::toHex(uint64_t x, Buf& buf, bool showBase) {
     return toNumericBase<16>(x, buf, showBase);
 }
 
-uint64_t Hex::fromHex(StringData s) {
+uint64_t Hex::fromHex(std::string_view s) {
     uint64_t x = 0;
     for (char c : s) {
         char uc = ctype::toUpper(c);
@@ -130,7 +106,7 @@ void printCppTrace(StackTraceSink* sink) {
             .symbols(cpptrace::formatter::symbol_mode::pretty)
             .transform([](cpptrace::stacktrace_frame f) {
                 // Strip off bazel prefix to make filenames clickable.
-                constexpr auto prefix = toStdStringViewForInterop("./"_sd);
+                constexpr auto prefix = "./"sv;
                 if (f.filename.starts_with(prefix)) {
                     f.filename.erase(0, prefix.size());
                 }
@@ -208,7 +184,7 @@ void StackTrace::sink(StackTraceSink* sink, bool withHumanReadable) const {
 
 #ifdef MONGO_CONFIG_DEV_STACKTRACE
 namespace {
-AtomicWord<bool> gDevStackTraceEnabled{true};
+Atomic<bool> gDevStackTraceEnabled{true};
 }
 void enableDevStackTrace() {
     gDevStackTraceEnabled.store(true);

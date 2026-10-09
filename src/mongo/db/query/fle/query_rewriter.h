@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,6 +8,7 @@
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/fle/encrypted_predicate.h"
@@ -42,7 +17,7 @@
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/modules.h"
 
@@ -72,14 +47,14 @@ public:
     QueryRewriter(boost::intrusive_ptr<ExpressionContext> expCtx,
                   FLETagQueryInterface* tagQueryInterface,
                   const NamespaceString& nssEsc,
-                  const std::map<NamespaceString, NamespaceString>& escMap,
+                  const std::map<NamespaceString, EncryptedFieldConfig>& efcMap,
                   EncryptedCollScanModeAllowed mode = EncryptedCollScanModeAllowed::kAllow)
         : QueryRewriter(std::move(expCtx),
                         tagQueryInterface,
                         nssEsc,
                         aggPredicateRewriteMap,
                         matchPredicateRewriteMap,
-                        escMap,
+                        efcMap,
                         [&]() {
                             EncryptedCollScanMode modeResult{EncryptedCollScanMode::kUseIfNeeded};
 
@@ -121,6 +96,19 @@ public:
         _mode = EncryptedCollScanMode::kForceAlways;
     }
 
+    // Enables find-payload validation. Caller owns `efc`.
+    void setEncryptedFieldConfigForValidation(const EncryptedFieldConfig* efc) {
+        _efc = efc;
+    }
+
+    boost::optional<const EncryptedFieldConfig&> getEncryptedFieldConfigForValidation()
+        const override {
+        if (_efc) {
+            return *_efc;
+        }
+        return boost::none;
+    }
+
     EncryptedCollScanMode getEncryptedCollScanMode() const override {
         return _mode;
     }
@@ -151,32 +139,36 @@ public:
                 feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled());
 
         tassert(9775506, "Invalid subpipeline expression context", subpipelineExpCtx);
-        const auto iter = _escMap.find(collectionNss);
-        if (iter == _escMap.end()) {
+        const auto iter = _efcMap.find(collectionNss);
+        auto buildSub = [&](const NamespaceString& subEsc) {
+            QueryRewriter sub(std::move(subpipelineExpCtx),
+                              _tagQueryInterface,
+                              subEsc,
+                              _exprRewrites,
+                              _matchRewrites,
+                              _efcMap,
+                              _mode);
+            if (iter != _efcMap.end()) {
+                sub.setEncryptedFieldConfigForValidation(&iter->second);
+            }
+            return sub;
+        };
+        if (iter == _efcMap.end()) {
             /**
-             * If we couldn't find an entry in the _escMap, we ass pipeline which involves both QE
-             * collections and unencrypted collections. In this case, we provide an empty namespace
-             * string, which will lead to an error if we try to request for the esc collection for
-             * the sub-pipeline when rewriting to the tag disjunction. In the unlikely event that we
-             * try to rewrite to a runtime comparison, there will be no error, but the query
-             * expression in question won't be rewritten, which is the intended behavior.
+             * If we couldn't find an entry in the _efcMap, we are rewriting a pipeline which
+             * involves both QE collections and unencrypted collections. In this case, we provide an
+             * empty namespace string, which will lead to an error if we try to request for the esc
+             * collection for the sub-pipeline when rewriting to the tag disjunction. In the
+             * unlikely event that we try to rewrite to a runtime comparison, there will be no
+             * error, but the query expression in question won't be rewritten, which is the intended
+             * behavior.
              */
-            return QueryRewriter(std::move(subpipelineExpCtx),
-                                 _tagQueryInterface,
-                                 NamespaceString(),
-                                 _exprRewrites,
-                                 _matchRewrites,
-                                 _escMap,
-                                 _mode);
+            return buildSub(NamespaceString());
         }
-        uassert(10026007, "Unexpected empty nssEsc for QE schema", !iter->second.isEmpty());
-        return QueryRewriter(std::move(subpipelineExpCtx),
-                             _tagQueryInterface,
-                             iter->second,
-                             _exprRewrites,
-                             _matchRewrites,
-                             _escMap,
-                             _mode);
+        auto subEsc = NamespaceStringUtil::deserialize(
+            collectionNss.dbName(), std::string{*iter->second.getEscCollection()});
+        uassert(10026007, "Unexpected empty nssEsc for QE schema", !subEsc.isEmpty());
+        return buildSub(subEsc);
     }
 
 protected:
@@ -188,7 +180,7 @@ protected:
                   const NamespaceString& nssEsc,
                   const ExpressionToRewriteMap& exprRewrites,
                   const MatchTypeToRewriteMap& matchRewrites,
-                  const std::map<NamespaceString, NamespaceString>& escMap,
+                  const std::map<NamespaceString, EncryptedFieldConfig>& efcMap,
                   EncryptedCollScanMode mode)
         : _expCtx(std::move(expCtx)),
           _mode(mode),
@@ -196,7 +188,7 @@ protected:
           _matchRewrites(matchRewrites),
           _nssEsc(nssEsc),
           _tagQueryInterface(tagQueryInterface),
-          _escMap(escMap) {
+          _efcMap(efcMap) {
 
         // This isn't the "real" query so we don't want to increment Expression
         // counters here.
@@ -208,13 +200,13 @@ protected:
                   const NamespaceString& nssEsc,
                   const ExpressionToRewriteMap& exprRewrites,
                   const MatchTypeToRewriteMap& matchRewrites,
-                  const std::map<NamespaceString, NamespaceString>& escMap)
+                  const std::map<NamespaceString, EncryptedFieldConfig>& efcMap)
         : _expCtx(std::move(expCtx)),
           _exprRewrites(exprRewrites),
           _matchRewrites(matchRewrites),
           _nssEsc(nssEsc),
           _tagQueryInterface(nullptr),
-          _escMap(escMap) {}
+          _efcMap(efcMap) {}
 
 private:
     /**
@@ -269,9 +261,10 @@ private:
     const MatchTypeToRewriteMap& _matchRewrites;
     const NamespaceString _nssEsc;
     FLETagQueryInterface* _tagQueryInterface;
-    // Map of collection Ns to ESC metadata collection name.
+    // Map of collection Ns to its EncryptedFieldConfig.
     // Owned by caller. Lifetime must always exceed QueryRewriter.
-    const std::map<NamespaceString, NamespaceString>& _escMap;
+    const std::map<NamespaceString, EncryptedFieldConfig>& _efcMap;
     std::unique_ptr<TextSearchPredicate> _textSearchPredicate;
+    const EncryptedFieldConfig* _efc = nullptr;
 };
 }  // namespace mongo::fle

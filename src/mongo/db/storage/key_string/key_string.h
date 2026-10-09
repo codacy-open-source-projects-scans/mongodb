@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonmisc.h"
@@ -59,6 +32,7 @@
 #include <iosfwd>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -66,9 +40,9 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 namespace key_string {
-class MONGO_MOD_OPEN BuilderInterface {
+class [[MONGO_MOD_OPEN]] BuilderInterface {
 public:
     virtual ~BuilderInterface() = default;
 
@@ -81,7 +55,7 @@ public:
     virtual void append(const Timestamp& in) = 0;
     virtual void append(const OID& in) = 0;
     virtual void append(const std::string& in) = 0;
-    virtual void append(StringData in) = 0;
+    virtual void append(std::string_view in) = 0;
     virtual void append(const BSONSymbol& in) = 0;
     virtual void append(const BSONCode& in) = 0;
     virtual void append(const BSONCodeWScope& in) = 0;
@@ -105,7 +79,7 @@ public:
 
 enum class Version : uint8_t { V0 = 0, V1 = 1, kLatestVersion = V1 };
 
-inline StringData keyStringVersionToString(Version version) {
+inline std::string_view keyStringVersionToString(Version version) {
     return version == Version::V0 ? "V0" : "V1";
 }
 
@@ -437,7 +411,7 @@ private:
 /**
  * A compact type which fits a keystring version and a record id size into four bytes.
  */
-class MONGO_MOD_FILE_PRIVATE VersionAndSize {
+class [[MONGO_MOD_FILE_PRIVATE]] VersionAndSize {
 public:
     constexpr VersionAndSize() = default;
     constexpr VersionAndSize(Version version, int32_t size) : _value(_encode(version, size)) {}
@@ -789,7 +763,7 @@ enum class Discriminator {
     kExclusiveAfter,
 };
 
-enum class MONGO_MOD_FILE_PRIVATE BuildState {
+enum class [[MONGO_MOD_FILE_PRIVATE]] BuildState {
     kEmpty,                  // Buffer is empty.
     kAppendingBSONElements,  // In the process of appending BSON Elements
     kEndAdded,               // Finished appedning BSON Elements.
@@ -801,14 +775,14 @@ enum class MONGO_MOD_FILE_PRIVATE BuildState {
 /**
  * Encodes the kind of NumberDecimal that is stored.
  */
-enum MONGO_MOD_FILE_PRIVATE DecimalContinuationMarker {
+enum [[MONGO_MOD_FILE_PRIVATE]] DecimalContinuationMarker {
     kDCMEqualToDouble = 0x0,
     kDCMHasContinuationLessThanDoubleRoundedUpTo15Digits = 0x1,
     kDCMEqualToDoubleRoundedUpTo15Digits = 0x2,
     kDCMHasContinuationLargerThanDoubleRoundedUpTo15Digits = 0x3
 };
 
-using StringTransformFn = std::function<std::string(StringData)>;
+using StringTransformFn = std::function<std::string(std::string_view)>;
 
 template <class BuilderT>
 class BuilderBase {
@@ -908,8 +882,8 @@ public:
     void appendBSONElement(const BSONElement& elem, const StringTransformFn& f = nullptr);
 
     void appendBool(bool val);
-    void appendString(StringData val, const StringTransformFn& f = nullptr);
-    void appendSymbol(StringData val);
+    void appendString(std::string_view val, const StringTransformFn& f = nullptr);
+    void appendSymbol(std::string_view val);
     void appendNumberDouble(double num);
     void appendNumberLong(long long num);
     void appendNumberInt(int num);
@@ -927,7 +901,7 @@ public:
     void appendDBRef(const BSONDBRef& val);
     void appendObject(const BSONObj& val, const StringTransformFn& f = nullptr);
     void appendArray(const BSONArray& val, const StringTransformFn& f = nullptr);
-    void appendCode(StringData val);
+    void appendCode(std::string_view val);
 
     /**
      * Appends a Discriminator byte or kEnd byte to a key string.
@@ -1020,9 +994,9 @@ protected:
     void _appendDate(Date_t val, bool invert);
     void _appendTimestamp(Timestamp val, bool invert);
     void _appendOID(OID val, bool invert);
-    void _appendString(StringData val, bool invert, const StringTransformFn& f);
-    void _appendSymbol(StringData val, bool invert);
-    void _appendCode(StringData val, bool invert);
+    void _appendString(std::string_view val, bool invert, const StringTransformFn& f);
+    void _appendSymbol(std::string_view val, bool invert);
+    void _appendCode(std::string_view val, bool invert);
     void _appendCodeWString(const BSONCodeWScope& val, bool invert);
     void _appendBinData(const BSONBinData& val, bool invert);
     void _appendRegex(const BSONRegEx& val, bool invert);
@@ -1045,10 +1019,10 @@ protected:
      */
     void _appendBsonValue(const BSONElement& elem,
                           bool invert,
-                          const StringData* name,
+                          const std::string_view* name,
                           const StringTransformFn& f);
 
-    void _appendStringLike(StringData str, bool invert);
+    void _appendStringLike(std::string_view str, bool invert);
     void _appendBson(const BSONObj& obj, bool invert, const StringTransformFn& f);
     void _appendSmallDouble(double value, DecimalContinuationMarker dcm, bool invert);
     void _appendLargeDouble(double value, DecimalContinuationMarker dcm, bool invert);
@@ -1154,7 +1128,7 @@ protected:
 // Helper class to hold a buffer builder. This class needs to be before BuilderBase when inheriting
 // to ensure the buffer is constructed first
 template <typename BufferBuilderT>
-class MONGO_MOD_FILE_PRIVATE BufferHolder {
+class [[MONGO_MOD_FILE_PRIVATE]] BufferHolder {
 protected:
     template <typename... Args>
     BufferHolder(Args&&... args) : _bufferBuilder(std::forward<Args>(args)...) {}
@@ -1258,7 +1232,7 @@ public:
  * on are KeyStrings.
  */
 template <class T>
-struct MONGO_MOD_FILE_PRIVATE isKeyString : public std::false_type {};
+struct [[MONGO_MOD_FILE_PRIVATE]] isKeyString : public std::false_type {};
 
 template <>
 struct isKeyString<Builder> : public std::true_type {};
@@ -1415,7 +1389,7 @@ bool readValue(BufReader* reader,
  */
 void appendSingleFieldToBSONAs(const char* buf,
                                int len,
-                               StringData fieldName,
+                               std::string_view fieldName,
                                BSONObjBuilder* builder,
                                Version version = key_string::Version::kLatestVersion);
 
@@ -1480,4 +1454,4 @@ std::string explain(std::span<const char> buffer,
 
 using KeyStringSet = boost::container::flat_set<key_string::Value>;
 
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,15 +19,17 @@
 #include <iosfwd>
 #include <limits>
 #include <string>
+#include <string_view>
 
 #include <absl/hash/hash.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * The most-significant component of the shard versioning protocol (collection epoch/timestamp).
  */
-class MONGO_MOD_NEEDS_REPLACEMENT CollectionGeneration {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] CollectionGeneration {
 public:
     CollectionGeneration(OID epoch, Timestamp timestamp) : _epoch(epoch), _timestamp(timestamp) {}
 
@@ -100,7 +75,7 @@ protected:
  * its own without the Generation component above, that's why most of its methods are protected and
  * are exposed as semantic checks in ChunkVersion below.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT CollectionPlacement {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] CollectionPlacement {
 public:
     CollectionPlacement(uint32_t major, uint32_t minor)
         : _combined(static_cast<uint64_t>(minor) | (static_cast<uint64_t>(major) << 32)) {}
@@ -138,14 +113,14 @@ protected:
  * 3. (n, 0), n > 0 - invalid configuration.
  * 4. (n, m), n > 0, m > 0 - normal sharded collection placement version.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT ChunkVersion : public CollectionGeneration,
-                                                 public CollectionPlacement {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ChunkVersion : public CollectionGeneration,
+                                                     public CollectionPlacement {
 public:
     /**
      * The name for the chunk version information field, which ddl operations use to send only
      * the placement information. String is shardVersion for compatibility with previous versions.
      */
-    static constexpr StringData kChunkVersionField = "shardVersion"_sd;
+    static constexpr std::string_view kChunkVersionField = "shardVersion"sv;
 
     ChunkVersion(CollectionGeneration geneneration, CollectionPlacement placement)
         : CollectionGeneration(geneneration), CollectionPlacement(placement) {}
@@ -258,7 +233,7 @@ public:
     }
 
     static ChunkVersion parse(const BSONElement& element);
-    void serialize(StringData field, BSONObjBuilder* builder) const;
+    void serialize(std::string_view field, BSONObjBuilder* builder) const;
 
     std::string toString() const;
 

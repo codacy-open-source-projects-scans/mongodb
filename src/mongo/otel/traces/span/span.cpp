@@ -1,43 +1,19 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
-
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/otel/traces/span/span.h"
+#ifdef MONGO_CONFIG_OTEL
 
 #include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
 #include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/traces/sampler/sampler.h"
 #include "mongo/otel/traces/span/span_telemetry_context_impl.h"
 #include "mongo/otel/traces/tracer_provider_service.h"
+#include "mongo/otel/traces/tracing_feature_flags_gen.h"
 #include "mongo/otel/traces/tracing_utils.h"
 #include "mongo/util/assert_util.h"
 
 #include <memory>
+#include <string_view>
 
 #include <opentelemetry/trace/provider.h>
 #include <opentelemetry/trace/span.h>
@@ -48,48 +24,33 @@ namespace mongo {
 namespace otel {
 namespace traces {
 
+using OtelStringView = std::string_view;
+
 static constexpr OtelStringView errorCodeKey = "errorCode";
 static constexpr OtelStringView errorCodeStringKey = "errorCodeString";
-static constexpr OtelStringView dropSpanAttributeName = "DROP_SPAN";
 
-using ScopedSpan = opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>;
+using ScopedSpan = std::shared_ptr<opentelemetry::trace::Span>;
 
 class Span::SpanImpl {
 public:
-    SpanImpl(ScopedSpan span,
-             ScopedSpan parent,
-             std::shared_ptr<SpanTelemetryContextImpl> spanCtx,
-             bool keepSpanParent,
-             bool keepSpan)
-        : _span(std::move(span)),
-          _parent(std::move(parent)),
-          _spanCtx(std::move(spanCtx)),
-          _keepSpanParent(keepSpanParent),
-          _keepSpan(keepSpan) {
+    SpanImpl(ScopedSpan span, ScopedSpan parent, std::shared_ptr<SpanTelemetryContextImpl> spanCtx)
+        : _span(std::move(span)), _parent(std::move(parent)), _spanCtx(std::move(spanCtx)) {
         _spanCtx->setSpan(_span);
-        _spanCtx->keepSpan(keepSpan || keepSpanParent);
-        _span->SetAttribute(dropSpanAttributeName, !(_keepSpan || _keepSpanParent));
     }
 
     ~SpanImpl() {
-
         _spanCtx->setSpan(std::move(_parent));
-        _spanCtx->keepSpan(_keepSpanParent);
-
-        if (!std::uncaught_exceptions() && !_error) {
-            _span->SetStatus(opentelemetry::trace::StatusCode::kOk);
-            _span->End();
-        } else {
-            _span->SetStatus(opentelemetry::trace::StatusCode::kError);
-            _span->End();
-        }
+        const bool ok = !std::uncaught_exceptions() && !_error;
+        _span->SetStatus(ok ? opentelemetry::trace::StatusCode::kOk
+                            : opentelemetry::trace::StatusCode::kError);
+        _span->End();
     }
 
-    void setAttribute(StringData key, int value) {
+    void setAttribute(std::string_view key, int value) {
         _span->SetAttribute(std::string{key}, value);
     }
 
-    void setAttribute(StringData key, StringData value) {
+    void setAttribute(std::string_view key, std::string_view value) {
         _span->SetAttribute(std::string{key}, std::string{value});
     }
 
@@ -103,31 +64,26 @@ private:
     ScopedSpan _span;
     ScopedSpan _parent;
     std::shared_ptr<SpanTelemetryContextImpl> _spanCtx;
-    bool _keepSpanParent;
-    bool _keepSpan;
     bool _error = false;
 };
 
-Span::Span() {}
+Span::Span() = default;
 
 Span::Span(std::unique_ptr<Span::SpanImpl> impl) : _impl(std::move(impl)) {}
 
-Span::~Span() {}
+Span::~Span() = default;
 
-Span& Span::operator=(Span&& other) {
-    _impl = std::move(other._impl);
-    return *this;
-}
+Span& Span::operator=(Span&&) noexcept = default;
 
-Span::Span(Span&& other) : _impl(std::move(other._impl)) {}
+Span::Span(Span&&) noexcept = default;
 
-void Span::setAttribute(StringData key, int value) {
+void Span::setAttribute(std::string_view key, int value) {
     if (_impl) {
         _impl->setAttribute(key, value);
     }
 }
 
-void Span::setAttribute(StringData key, StringData value) {
+void Span::setAttribute(std::string_view key, std::string_view value) {
     if (_impl) {
         _impl->setAttribute(key, value);
     }
@@ -139,7 +95,102 @@ void Span::setStatus(const Status& status) {
     }
 }
 
-Span Span::start(OperationContext* opCtx, const std::string& name, bool keepSpan) {
+static opentelemetry::trace::SpanKind toOtelSpanKind(SpanKind kind) {
+    switch (kind) {
+        case SpanKind::kServer:
+            return opentelemetry::trace::SpanKind::kServer;
+        case SpanKind::kClient:
+            return opentelemetry::trace::SpanKind::kClient;
+        case SpanKind::kProducer:
+            return opentelemetry::trace::SpanKind::kProducer;
+        case SpanKind::kConsumer:
+            return opentelemetry::trace::SpanKind::kConsumer;
+        case SpanKind::kInternal:
+            return opentelemetry::trace::SpanKind::kInternal;
+    }
+    MONGO_UNREACHABLE;
+}
+
+Span Span::_start(std::shared_ptr<TelemetryContext>& telemetryCtx,
+                  SpanName name,
+                  StartSpanConfig config) {
+    TracerProviderService* tracerProviderService = getGlobalTracerProviderService();
+    if (!tracerProviderService) {
+        return Span{};
+    }
+
+    auto* provider = tracerProviderService->getTracerProvider();
+    if (!provider) {
+        return Span{};
+    }
+
+    auto tracer = provider->GetTracer("mongodb");
+    if (!tracer) {
+        return Span{};
+    }
+
+    ScopedSpan parentSpan = nullptr;
+    bool hasParent = false;
+    std::shared_ptr<SpanTelemetryContextImpl> spanCtx = nullptr;
+    if (telemetryCtx != nullptr) {
+        spanCtx = std::dynamic_pointer_cast<SpanTelemetryContextImpl>(telemetryCtx);
+        if (!spanCtx) {
+            LOGV2(10011700,
+                  "TelemetryContext is not of type SpanTelemetryContextImpl",
+                  "context_type"_attr = telemetryCtx->type());
+            return Span{};
+        }
+        parentSpan = spanCtx->getSpan();
+        hasParent = parentSpan->GetContext().IsValid();
+    }
+
+    const auto hasRemoteParent = hasParent && parentSpan->GetContext().IsRemote();
+
+    // If the parent span is remote, we generally want to bypass the internal sampling mechanism
+    // to respect the sampling decision made by the remote system.
+    if (!hasParent || hasRemoteParent) {
+        // Drop if either feature flag is disabled or the sampler rejects it.
+        // (Ignore FCV check) — no VersionContext is available in this path.
+        if (!feature_flags::gFeatureFlagTracing.isEnabledAndIgnoreFCVUnsafe() ||
+            !feature_flags::gFeatureFlagOtelTraceSampling.isEnabledAndIgnoreFCVUnsafe()) {
+            return Span{};
+        }
+
+        if (config.preventSampling) {
+            return Span{};
+        }
+
+        // We need a telemetryCtx for sampling, but it is slightly expensive to create, so do so
+        // only if needed.
+        if (!telemetryCtx) {
+            spanCtx = std::make_shared<SpanTelemetryContextImpl>();
+            telemetryCtx = spanCtx;
+            parentSpan = spanCtx->getSpan();
+        }
+
+        if (!config.bypassSampling &&
+            !TracingSampler::get().shouldSample(name.getName(), spanCtx->getSamplingValue())) {
+            return Span{};
+        }
+    }
+
+    opentelemetry::trace::StartSpanOptions opts;
+    opts.parent = parentSpan->GetContext();
+    opts.kind = toOtelSpanKind(config.opts.kind);
+
+    return Span(
+        std::make_unique<Span::SpanImpl>(tracer->StartSpan(std::string{name.getName()}, opts),
+                                         std::move(parentSpan),
+                                         std::move(spanCtx)));
+}
+
+Span Span::start(std::shared_ptr<TelemetryContext>& telemetryCtx,
+                 SpanName name,
+                 SpanOptions options) {
+    return _start(telemetryCtx, name, {.opts = std::move(options)});
+}
+
+Span Span::_start(OperationContext* opCtx, SpanName name, StartSpanConfig config) {
     if (opCtx == nullptr) {
         return Span{};
     }
@@ -147,79 +198,37 @@ Span Span::start(OperationContext* opCtx, const std::string& name, bool keepSpan
     auto& telemetryCtxHolder = TelemetryContextHolder::getDecoration(opCtx);
     auto telemetryCtx = telemetryCtxHolder.getTelemetryContext();
 
-    if (!telemetryCtx) {
-        telemetryCtx = std::make_shared<SpanTelemetryContextImpl>();
+    bool hadTelemetryCtx = telemetryCtx != nullptr;
+
+    Span span = _start(telemetryCtx, name, config);
+
+    // Start created a new TelemetryContext, so we need to store it for future use.
+    if (!hadTelemetryCtx && telemetryCtx != nullptr) {
         telemetryCtxHolder.setTelemetryContext(telemetryCtx);
     }
-
-    return start(telemetryCtx, name, keepSpan);
+    return span;
 }
 
-Span Span::startIfExistingTraceParent(OperationContext* opCtx,
-                                      const std::string& name,
-                                      bool keepSpan) {
-    if (opCtx == nullptr) {
-        return Span{};
-    }
-
-    auto telemetryCtx = TelemetryContextHolder::getDecoration(opCtx).getTelemetryContext();
-
-    if (!telemetryCtx) {
-        return Span{};
-    }
-
-    return start(telemetryCtx, name, keepSpan);
+Span Span::start(OperationContext* opCtx, SpanName name, SpanOptions options) {
+    return _start(opCtx, name, {.opts = std::move(options)});
 }
 
-Span Span::start(std::shared_ptr<TelemetryContext>& telemetryCtx,
-                 const std::string& name,
-                 bool keepSpan) {
-    // Get ServiceContext from global context
-    ServiceContext* serviceContext = getGlobalServiceContext();
-    if (!serviceContext) {
-        return Span{};
-    }
+Span Span::startIngressSpan(std::shared_ptr<TelemetryContext>& telemetryCtx,
+                            SpanName name,
+                            SpanOptions options) {
+    auto bypassSampling = telemetryCtx && TracingSampler::get().shouldAcceptExternalTrace();
+    return _start(
+        telemetryCtx, name, {.opts = std::move(options), .bypassSampling = bypassSampling});
+}
 
-    // Get the TracerProviderService from ServiceContext decoration
-    auto tracerProviderService = TracerProviderService::get(serviceContext);
-    if (!tracerProviderService || !tracerProviderService->isEnabled()) {
-        return Span{};
-    }
+Span Span::startEgressSpan(std::shared_ptr<TelemetryContext>& telemetryCtx,
+                           SpanName name,
+                           SpanOptions options) {
+    return _start(telemetryCtx, name, {.opts = std::move(options), .preventSampling = true});
+}
 
-    auto tracerProvider = tracerProviderService->getTracerProvider();
-    if (!tracerProvider) {
-        return Span{};
-    }
-
-    auto tracer = tracerProvider->GetTracer("mongodb");
-    if (!tracer) {
-        return Span{};
-    }
-
-    if (!telemetryCtx) {
-        telemetryCtx = std::make_shared<SpanTelemetryContextImpl>();
-    }
-
-    auto spanCtx = std::dynamic_pointer_cast<SpanTelemetryContextImpl>(telemetryCtx);
-    if (!spanCtx) {
-        LOGV2(10011700,
-              "TelemetryContext is not of type SpanTelemetryContextImpl",
-              "context_type"_attr = telemetryCtx->type());
-        return Span{};
-    }
-
-    ScopedSpan parentSpan = spanCtx->getSpan();
-
-    opentelemetry::trace::StartSpanOptions opts;
-    opts.parent = parentSpan->GetContext();
-
-    auto keepSpanParent = spanCtx->shouldKeepSpan();
-
-    return Span(std::make_unique<Span::SpanImpl>(tracer->StartSpan(name, opts),
-                                                 std::move(parentSpan),
-                                                 std::move(spanCtx),
-                                                 keepSpanParent,
-                                                 keepSpan));
+Span Span::startEgressSpan(OperationContext* opCtx, SpanName name, SpanOptions options) {
+    return _start(opCtx, name, {.opts = std::move(options), .preventSampling = true});
 }
 
 std::shared_ptr<TelemetryContext> Span::createTelemetryContext() {
@@ -229,3 +238,4 @@ std::shared_ptr<TelemetryContext> Span::createTelemetryContext() {
 }  // namespace traces
 }  // namespace otel
 }  // namespace mongo
+#endif

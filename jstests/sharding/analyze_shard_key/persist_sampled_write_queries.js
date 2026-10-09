@@ -8,9 +8,6 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_sampling_util.js";
 
-// This test requires running commands directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
-
 const supportedTestCases = [
     {collectionExists: true, markForSampling: true, expectSampling: true},
     {collectionExists: true, markForSampling: false, expectSampling: false},
@@ -42,11 +39,18 @@ function testWriteCmd(rst, cmdOpts, testCase) {
         testCase.expectSampling,
     );
 
-    jsTest.log(`Testing test case ${tojson(testCase)} with ${tojson({dbName, collName, originalCmdObj})}`);
+    jsTest.log(
+        `Testing test case ${tojson(testCase)} with ${tojson({dbName, collName, originalCmdObj})}`,
+    );
     assert.commandWorked(primaryDB.runCommand(originalCmdObj));
 
     if (testCase.expectSampling) {
-        QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+        QuerySamplingUtil.assertSoonSampledQueryDocuments(
+            primary,
+            ns,
+            collectionUuid,
+            expectedSampledQueryDocs,
+        );
     } else {
         // To verify that no writes occurred, wait for one interval before asserting.
         sleep(queryAnalysisWriterIntervalSecs * 1000);

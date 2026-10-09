@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/column/bsoncolumn.h"
@@ -48,6 +21,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional.hpp>
@@ -104,12 +78,12 @@ inline int computeElementCountFromTimestampObjSize(int targetTimestampObjSize) {
  * BucketUnpacker will unpack bucket fields for metadata and the provided fields. Marked public
  * because computeMeasurementCount() is called from timeseries module.
  */
-class MONGO_MOD_PUBLIC BucketUnpacker {
+class [[MONGO_MOD_PUBLIC]] BucketUnpacker {
 public:
     /**
      * Returns the number of measurements in the bucket in O(1) time.
      */
-    static int computeMeasurementCount(const BSONObj& bucket, StringData timeField) {
+    static int computeMeasurementCount(const BSONObj& bucket, std::string_view timeField) {
         auto&& controlField = bucket[kBucketControlFieldName];
         uassert(5857904,
                 "The $_internalUnpackBucket stage requires 'control' object to be present",
@@ -148,7 +122,7 @@ public:
     }
 
     // Set of field names reserved for time-series buckets.
-    static const std::set<StringData> reservedBucketFieldNames;
+    static const std::set<std::string_view> reservedBucketFieldNames;
 
     BucketUnpacker();
     explicit BucketUnpacker(BucketSpec spec);
@@ -243,11 +217,11 @@ public:
         return _spec.metaField();
     }
 
-    std::string getMinField(StringData field) const {
+    std::string getMinField(std::string_view field) const {
         return std::string{kControlMinFieldNamePrefix} + std::string{field};
     }
 
-    std::string getMaxField(StringData field) const {
+    std::string getMaxField(std::string_view field) const {
         return std::string{kControlMaxFieldNamePrefix} + std::string{field};
     }
 
@@ -255,11 +229,15 @@ public:
         return _spec.usesExtendedRange();
     }
 
+    void setUsesExtendedRange(bool usesExtendedRange) {
+        _spec.setUsesExtendedRange(usesExtendedRange);
+    }
+
     bool isClosedBucket() const {
         return _closedBucket;
     }
 
-    bool providesField(StringData field) const {
+    bool providesField(std::string_view field) const {
         auto& metaField = getMetaField();
         if (metaField && *metaField == field) {
             return _includeMetaField;
@@ -270,7 +248,7 @@ public:
         return _spec.doesBucketSpecProvideField(static_cast<std::string>(field));
     }
 
-    bool providesFieldWithoutModification(StringData field) const {
+    bool providesFieldWithoutModification(std::string_view field) const {
         return providesField(field) && !_spec.fieldIsComputed(field);
     }
 
@@ -291,7 +269,7 @@ public:
     void setIncludeMaxTimeAsMetadata();
 
     // Add computed meta projection names to the bucket specification.
-    void addComputedMetaProjFields(const std::vector<StringData>& computedFieldNames);
+    void addComputedMetaProjFields(const std::vector<std::string_view>& computedFieldNames);
 
     // Fill _spec.unpackFieldsToIncludeExclude with final list of fields to include/exclude during
     // unpacking. Only calculates the list the first time it is called.

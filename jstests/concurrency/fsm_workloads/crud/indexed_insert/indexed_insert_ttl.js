@@ -28,16 +28,19 @@ export const $config = (function () {
     let transitions = {init: {insert: 1}, insert: {insert: 1}};
 
     function setup(db, collName, cluster) {
-        let res = db[collName].createIndex({indexed_insert_ttl: 1}, {expireAfterSeconds: this.ttlSeconds});
+        let res = db[collName].createIndex(
+            {indexed_insert_ttl: 1},
+            {expireAfterSeconds: this.ttlSeconds},
+        );
         assert.commandWorked(res);
     }
 
     function teardown(db, collName, cluster) {
         if (TestData.runningWithBalancer) {
-            // Disallow balancing 'ns' so that it does not cause the TTLMonitor to fail rounds due
-            // to ongoing migration critical sections. TTLMonitor will retry on the next round, but
-            // it might not converge in time for the following assertion to pass.
-            BalancerHelper.disableBalancerForCollection(db, db[collName].getFullName());
+            // Stop the balancer so that it does not cause the TTLMonitor to fail rounds due to
+            // ongoing migration critical sections. TTLMonitor will retry on the next round, but it
+            // might not converge in time for the following assertion to pass.
+            assert.commandWorked(db.adminCommand({balancerStop: 1, maxTimeMS: 600000}));
             BalancerHelper.joinBalancerRound(db);
         }
 
@@ -48,7 +51,8 @@ export const $config = (function () {
         // right after the TTL thread has started to sleep, which requires us to wait at least ~60
         // seconds for it to wake up and delete the expired documents. We wait at least another
         // minute just to avoid race-prone tests on overloaded test hosts.
-        let timeoutMS = (TestData.inEvergreen ? 10 : 2) * Math.max(defaultTTLSecs, this.ttlSeconds) * 1000;
+        let timeoutMS =
+            (TestData.inEvergreen ? 10 : 2) * Math.max(defaultTTLSecs, this.ttlSeconds) * 1000;
 
         assert.soon(
             function checkTTLCount() {
@@ -61,7 +65,7 @@ export const $config = (function () {
         );
 
         if (TestData.runningWithBalancer) {
-            BalancerHelper.enableBalancerForCollection(db, db[collName].getFullName());
+            assert.commandWorked(db.adminCommand({balancerStart: 1, maxTimeMS: 600000}));
         }
     }
 

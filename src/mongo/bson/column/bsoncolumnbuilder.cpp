@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/column/bsoncolumnbuilder.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/column/binary_reopen.h"
 #include "mongo/bson/column/bsoncolumn.h"
@@ -48,6 +21,7 @@
 #include <cstring>
 #include <iterator>
 #include <memory>
+#include <string_view>
 #include <tuple>
 
 #include <absl/numeric/int128.h>
@@ -57,6 +31,7 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 using namespace bsoncolumn;
 
 namespace {
@@ -163,6 +138,18 @@ bool _containsScalars(const BSONObj& reference) {
     return false;
 }
 
+// Throws if elem is, or contains, a binData element with Column subtype.
+void _validateNoNestedBSONColumn(const BSONElement& elem) {
+    uassert(12506300,
+            "Timeseries collections cannot store BSONColumn data",
+            !elem.isBinData(BinDataType::Column));
+    if (elem.type() == BSONType::object || elem.type() == BSONType::array) {
+        for (const auto& sub : elem.Obj()) {
+            _validateNoNestedBSONColumn(sub);
+        }
+    }
+}
+
 // Internal recursion function for traverseLockStep(). See documentation for traverseLockStep.
 template <typename ElementFunc>
 std::pair<BSONObj::iterator, bool> _traverseLockStep(const BSONObj& reference,
@@ -249,7 +236,7 @@ bool _mergeObj(allocator_aware::BSONObjBuilder<Allocator>* builder,
 
     // Iterate until we reach end of any of the two objects.
     while (refIt != refEnd && it != end) {
-        StringData name = refIt->fieldNameStringData();
+        std::string_view name = refIt->fieldNameStringData();
         if (name == it->fieldNameStringData()) {
             bool refIsObjOrArray =
                 refIt->type() == BSONType::object || refIt->type() == BSONType::array;
@@ -751,7 +738,7 @@ void BSONColumnBuilder<Allocator>::BinaryReopen::_reopen64BitTypes(
             return lastUncompressed;
         }
 
-        return d64.materialize(*allocator, lastUncompressed, ""_sd);
+        return d64.materialize(*allocator, lastUncompressed, ""sv);
     }());
     // 6. Store the previous encoded state, this is typically a copy from the decoder. We cannot use
     // Encoder64::initialize() as it overwrites more members already set by this reopen procedure.
@@ -847,7 +834,7 @@ void BSONColumnBuilder<Allocator>::BinaryReopen::_reopen128BitTypes(
             !(lastLiteralUnencodable && lastUncompressedEncoded128 != 0)) {
             return lastUncompressed;
         }
-        return d128.materialize(*allocator, lastUncompressed, ""_sd);
+        return d128.materialize(*allocator, lastUncompressed, ""sv);
     }());
     // 6. Initialize our encoder with the previous value.
     encoder.initialize(regular._previous());
@@ -1036,6 +1023,8 @@ BSONColumnBuilder<Allocator>& BSONColumnBuilder<Allocator>::append(BSONElement e
         return skip();
     }
 
+    _validateNoNestedBSONColumn(elem);
+
     if ((type != BSONType::object && type != BSONType::array) || elem.Obj().isEmpty()) {
         // Flush previous sub-object compression when non-object is appended
         if (std::holds_alternative<typename InternalState::Interleaved>(_is.state)) {
@@ -1051,11 +1040,17 @@ BSONColumnBuilder<Allocator>& BSONColumnBuilder<Allocator>::append(BSONElement e
 
 template <class Allocator>
 BSONColumnBuilder<Allocator>& BSONColumnBuilder<Allocator>::append(const BSONObj& obj) {
+    for (const auto& elem : obj) {
+        _validateNoNestedBSONColumn(elem);
+    }
     return _appendObj({obj, BSONType::object});
 }
 
 template <class Allocator>
 BSONColumnBuilder<Allocator>& BSONColumnBuilder<Allocator>::append(const BSONArray& arr) {
+    for (const auto& elem : arr) {
+        _validateNoNestedBSONColumn(elem);
+    }
     return _appendObj({arr, BSONType::array});
 }
 
@@ -1196,11 +1191,12 @@ typename BSONColumnBuilder<Allocator>::BinaryDiff BSONColumnBuilder<Allocator>::
     // Save some state related to last control byte so we can see how it changes after finalize() is
     // called.
     ptrdiff_t controlOffset =
-        visit(OverloadedVisitor{
-                  [](const typename InternalState::Regular& regular) {
-                      return regular._controlByteOffset;
-                  },
-                  [](const typename InternalState::Interleaved&) { return kNoSimple8bControl; }},
+        visit(OverloadedVisitor{[](const typename InternalState::Regular& regular) {
+                                    return regular._controlByteOffset;
+                                },
+                                [](const typename InternalState::Interleaved&) {
+                                    return kNoSimple8bControl;
+                                }},
               _is.state);
     uint8_t lastControlByte =
         controlOffset != kNoSimple8bControl ? *(_bufBuilder.buf() + controlOffset) : 0;
@@ -1347,7 +1343,9 @@ BSONElement BSONColumnBuilder<Allocator>::last() const {
                              *regular._prev.data() == stdx::to_underlying(BSONType::eoo) ? 0 : 1,
                              BSONElement::TrustedInitTag{}};
                      },
-                     [](const typename InternalState::Interleaved&) { return BSONElement{}; }},
+                     [](const typename InternalState::Interleaved&) {
+                         return BSONElement{};
+                     }},
                  _is.state);
 }
 

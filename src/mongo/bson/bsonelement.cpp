@@ -1,38 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/bson/bsonelement.h"
-
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/data_cursor.h"
@@ -53,10 +23,16 @@
 #include "mongo/util/str.h"
 
 #include <cmath>
+#include <string_view>
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using std::string;
 
@@ -188,7 +164,7 @@ BSONObj BSONElement::_jsonStringGenerator(const Generator& g,
             ConstDataCursor reader(value());
             const int len = reader.readAndAdvance<LittleEndian<int>>();
             BinDataType type = static_cast<BinDataType>(reader.readAndAdvance<uint8_t>());
-            g.writeBinData(buffer, StringData(reader.view(), len), type);
+            g.writeBinData(buffer, std::string_view(reader.view(), len), type);
         }
 
         break;
@@ -196,8 +172,8 @@ BSONObj BSONElement::_jsonStringGenerator(const Generator& g,
             g.writeDate(buffer, date());
             break;
         case BSONType::regEx: {
-            StringData pattern(regex());
-            g.writeRegex(buffer, pattern, StringData(pattern.data() + pattern.size() + 1));
+            std::string_view pattern(regex());
+            g.writeRegex(buffer, pattern, std::string_view(pattern.data() + pattern.size() + 1));
         } break;
         case BSONType::codeWScope: {
             BSONObj scope = codeWScopeObject();
@@ -229,8 +205,8 @@ BSONObj BSONElement::_jsonStringGenerator(const Generator& g,
 
         BSONObjBuilder builder;
         BSONObjBuilder truncationInfo = builder.subobjStart(fieldNameStringData());
-        truncationInfo.append("type"_sd, typeName(type()));
-        truncationInfo.append("size"_sd, valuesize());
+        truncationInfo.append("type"sv, typeName(type()));
+        truncationInfo.append("size"sv, valuesize());
         truncationInfo.done();
         return builder.obj();
     }
@@ -418,8 +394,8 @@ int BSONElement::compareElements(const BSONElement& l,
             return strcmp(l.regexFlags(), r.regexFlags());
         }
         case BSONType::codeWScope: {
-            int cmp = StringData(l.codeWScopeCode(), l.codeWScopeCodeLen() - 1)
-                          .compare(StringData(r.codeWScopeCode(), r.codeWScopeCodeLen() - 1));
+            int cmp = std::string_view(l.codeWScopeCode(), l.codeWScopeCodeLen() - 1)
+                          .compare(std::string_view(r.codeWScopeCode(), r.codeWScopeCodeLen() - 1));
             if (cmp)
                 return cmp;
 
@@ -446,7 +422,7 @@ std::vector<BSONElement> BSONElement::Array() const {
         uassert(ErrorCodes::BadValue,
                 fmt::format("Invalid array index field name: \"{}\", expected \"{}\"",
                             fieldName,
-                            static_cast<StringData>(counter)),
+                            static_cast<std::string_view>(counter)),
                 fieldName == counter);
         ++counter;
         v.push_back(element);
@@ -614,7 +590,7 @@ BSONObj BSONElement::wrap() const {
     return b.obj();
 }
 
-BSONObj BSONElement::wrap(StringData newName) const {
+BSONObj BSONElement::wrap(std::string_view newName) const {
     BSONObjBuilder b(size() + 6 + newName.size());
     b.appendAs(*this, newName);
     return b.obj();
@@ -628,7 +604,7 @@ BSONObj BSONElement::Obj() const {
     return embeddedObjectUserCheck();
 }
 
-BSONElement BSONElement::operator[](StringData field) const {
+BSONElement BSONElement::operator[](std::string_view field) const {
     BSONObj o = Obj();
     return o[field];
 }
@@ -766,7 +742,7 @@ void BSONElement::toString(
             const char* data = binDataClean(len);
             // If the BinData is a correctly sized newUUID, display it as such.
             if (binDataType() == newUUID && len == 16) {
-                StringData sd(data, len);
+                std::string_view sd(data, len);
                 // 4 Octets - 2 Octets - 2 Octets - 2 Octets - 6 Octets
                 s << fmt::format("UUID(\"{}-{}-{}-{}-{}\")",
                                  hexblob::encodeLower(sd.substr(0, 4)),

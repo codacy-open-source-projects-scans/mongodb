@@ -1,45 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/oplog_fetcher.h"
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/counter.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -58,6 +24,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/optime_with.h"
+#include "mongo/db/repl/repl_network_traffic_stats.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_auth.h"
 #include "mongo/db/repl/replication_process.h"
@@ -67,7 +34,7 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -83,6 +50,15 @@
 
 #include <algorithm>
 #include <mutex>
+#include <string_view>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -130,8 +106,6 @@ BSONObj OplogBatchStats::getReport() const {
 auto& oplogBatchStats = *MetricBuilder<OplogBatchStats>("repl.network.getmores");
 // The oplog entries read via the oplog reader
 auto& opsReadStats = *MetricBuilder<Counter64>{"repl.network.ops"};
-// The bytes read via the oplog reader
-auto& networkByteStats = *MetricBuilder<Counter64>{"repl.network.bytes"};
 
 auto& readersCreatedStats = *MetricBuilder<Counter64>{"repl.network.readersCreated"};
 
@@ -173,11 +147,9 @@ StatusWith<OplogFetcher::DocumentsInfo> OplogFetcher::validateDocuments(
                                     << lastTS.toString());
     }
     DocumentsInfo info;
-    // The count of the bytes of the documents read off the network.
-    info.networkDocumentBytes = 0;
-    info.networkDocumentCount = 0;
+    const bool checkForOplogVersionChange = feature_flags::gReduceMajorityWriteLatency.isEnabled();
     for (auto&& doc : documents) {
-        if (feature_flags::gReduceMajorityWriteLatency.isEnabled()) {
+        if (checkForOplogVersionChange) {
             // Check for oplog version change.
             auto version = doc[OplogEntry::kVersionFieldName].numberLong();
             if (version != OplogEntry::kOplogVersion) {
@@ -244,8 +216,10 @@ OplogFetcher::OplogFetcher(executor::TaskExecutor* executor,
       _oplogFetcherRestartDecision(std::move(oplogFetcherRestartDecision)),
       _onShutdownCallbackFn(onShutdownCallbackFn),
       _lastFetched(config.initialLastFetched),
-      _createClientFn(
-          [] { return std::make_unique<DBClientConnection>(true /* autoReconnect */); }),
+      _createClientFn([] {
+          return std::make_unique<DBClientConnection>(DBClientConnectionOptions{
+              .autoReconnect = true, .connectionPurpose = ConnectionPurpose::kReplication});
+      }),
       _dataReplicatorExternalState(dataReplicatorExternalState),
       _enqueueDocumentsFn(enqueueDocumentsFn),
       _awaitDataTimeout(calculateAwaitDataTimeout(config.replSetConfig)),
@@ -254,7 +228,7 @@ OplogFetcher::OplogFetcher(executor::TaskExecutor* executor,
     invariant(!_lastFetched.isNull());
     invariant(onShutdownCallbackFn);
     invariant(enqueueDocumentsFn);
-    ObservableMutexRegistry::get().add("OplogFetcher::_mutex", _mutex);
+    ObservableMutexRegistry::get().add("oplogFetcherMutex", _mutex);
 }
 
 OplogFetcher::~OplogFetcher() {
@@ -562,7 +536,7 @@ void OplogFetcher::_setMetadataWriterAndReader() {
     });
 
     _conn->setReplyMetadataReader(
-        [this](OperationContext* opCtx, const BSONObj& metadataObj, StringData source) {
+        [this](OperationContext* opCtx, const BSONObj& metadataObj, std::string_view source) {
             _metadataObj = metadataObj.getOwned();
 
             // Run VectorClockMetadataHook on reply metadata so this matches the behavior of the
@@ -704,6 +678,8 @@ StatusWith<OplogFetcher::Documents> OplogFetcher::_getNextBatch() {
             }
             _cursor->more();
         }
+
+        batch.reserve(_cursor->objsLeftInBatch());
         while (_cursor->moreInCurrentBatch()) {
             batch.emplace_back(_cursor->nextSafe());
         }
@@ -782,7 +758,8 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
                         if (exec::matcher::matches(&m, obj)) {
                             LOGV2(9918500,
                                   "stopReplProducerOnDocument matched a document.",
-                                  "doc"_attr = doc,
+                                  "opTime"_attr = OpTime::parse(doc),
+                                  "doc"_attr = redact(doc),
                                   "batchSize"_attr = documents.size(),
                                   "firstTimestamp"_attr = documents.front()["ts"],
                                   "lastTimestamp"_attr = documents.back()["ts"]);
@@ -913,7 +890,7 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
 
     // Increment stats. We read all of the docs in the query.
     opsReadStats.increment(info.networkDocumentCount);
-    networkByteStats.increment(info.networkDocumentBytes);
+    recordOplogBytesReceived(static_cast<int64_t>(info.networkDocumentBytes));
 
     oplogBatchStats.recordMillis(_lastBatchElapsedMS, documents.empty());
 
@@ -962,7 +939,7 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
 }
 
 Status OplogFetcher::_checkRemoteOplogStart(const OplogFetcher::Documents& documents,
-                                            OpTime remoteLastOpApplied) {
+                                            OpTime remoteLastOpApplied) const {
     // Sometimes our remoteLastOpApplied may be stale; if we received a document with an
     // opTime later than remoteLastApplied, we can assume the remote is at least up to that
     // opTime.
@@ -1042,7 +1019,7 @@ Status OplogFetcher::_checkRemoteOplogStart(const OplogFetcher::Documents& docum
 }
 
 Status OplogFetcher::_checkTooStaleToSyncFromSource(const OpTime lastFetched,
-                                                    const OpTime firstOpTimeInBatch) {
+                                                    const OpTime firstOpTimeInBatch) const {
     // Check to see if the sync source's first oplog entry is later than 'lastFetched'. If it is, we
     // are too stale to sync from this node. If it isn't, we should go into rollback instead.
     BSONObj remoteFirstOplogEntry;

@@ -3,14 +3,16 @@
  * and count deltas were persisted.
  *
  * @tags: [
- *   featureFlagReplicatedFastCount,
  *   requires_replication,
  *   requires_persistence,
+ *   requires_fsync,
  * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {PersistenceProviderUtil} from "jstests/libs/server-rss/persistence_provider_util.js";
 
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
@@ -19,6 +21,18 @@ rst.initiate();
 const primary = rst.getPrimary();
 const db = primary.getDB(jsTestName());
 const coll = db.getCollection(jsTestName());
+
+if (
+    PersistenceProviderUtil.allNodesHavePropertyWithValue(
+        db,
+        "shouldUseReplicatedFastCount",
+        false,
+    ) &&
+    !FeatureFlagUtil.isEnabled(db, "ReplicatedFastCount")
+) {
+    rst.stopSet();
+    quit();
+}
 
 const kNumBaselineDocs = 10;
 const sampleDocSize = Object.bsonsize({_id: new ObjectId(), x: 1});
@@ -47,7 +61,11 @@ for (let i = 0; i < kNumBaselineDocs; i++) {
 }
 
 assert.eq(kNumBaselineDocs, coll.find().itcount(), "Actual count should be correct after flush");
-assert.eq(kNumBaselineDocs * sampleDocSize, getActualSize(coll), "Actual size should be correct after flush");
+assert.eq(
+    kNumBaselineDocs * sampleDocSize,
+    getActualSize(coll),
+    "Actual size should be correct after flush",
+);
 
 assert.eq(coll.count(), coll.find().itcount(), "Fast count should match actual count");
 assert.eq(getFastSize(db, coll), getActualSize(coll), "Fast size should match actual size");
@@ -66,7 +84,12 @@ assert.commandWorked(db.adminCommand({fsync: 1}));
 // Wait until the replicated fast count thread is hanging before flushing new size deltas.
 hangFp.wait();
 
-rst.stop(primary, 9, {allowedExitCode: MongoRunner.EXIT_SIGKILL}, {forRestart: true, waitpid: true});
+rst.stop(
+    primary,
+    9,
+    {allowedExitCode: MongoRunner.EXIT_SIGKILL},
+    {forRestart: true, waitpid: true},
+);
 
 rst.start(primary, undefined, /*restart=*/ true);
 rst.awaitNodesAgreeOnPrimary();
@@ -75,7 +98,11 @@ const primaryAfterRestart = rst.getPrimary();
 const dbAfterRestart = primaryAfterRestart.getDB(jsTestName());
 const collAfterRestart = dbAfterRestart.getCollection(jsTestName());
 
-assert.eq(kNumTotalDocs, collAfterRestart.find().itcount(), "Actual count should be correct after unclean shutdown");
+assert.eq(
+    kNumTotalDocs,
+    collAfterRestart.find().itcount(),
+    "Actual count should be correct after unclean shutdown",
+);
 assert.eq(
     kNumTotalDocs * sampleDocSize,
     getActualSize(collAfterRestart),

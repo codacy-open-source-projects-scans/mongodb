@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
 
@@ -43,6 +17,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
@@ -254,11 +229,6 @@ void abortTransaction(OperationContext* opCtx,
     }
 }
 
-Status createIndexesForConfigChunks(OperationContext* opCtx) {
-    return ensureCollectionIndexes(
-        opCtx, NamespaceString::kConfigsvrChunksNamespace, getChunkCollectionIndexSpecs());
-}
-
 // creates a vector of a vector of BSONObj (one for each batch) from the docs vector
 // each batch can only be as big as the maximum BSON Object size and be below the maximum
 // document count
@@ -423,7 +393,7 @@ void ShardingCatalogManager::discardCachedConfigDatabaseInitializationState() {
 
 Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
     auto versionStatus =
-        _localCatalogClient->getConfigVersion(opCtx, repl::ReadConcernLevel::kLocalReadConcern);
+        _localCatalogClient->getConfigVersion(opCtx, repl::ReadConcernArgs::kLocal);
     if (versionStatus.isOK() || versionStatus != ErrorCodes::NoMatchingDocument) {
         return versionStatus.getStatus();
     }
@@ -439,51 +409,63 @@ Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
 Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
     const bool unique = true;
 
-    Status result = createIndexesForConfigChunks(opCtx);
-    if (result != Status::OK()) {
-        return result;
-    }
+    // Continue attempting every required index build so every missing index is reported.
+    Status returnStatus = Status::OK();
+    auto recordFailure = [&](const Status& result) {
+        if (returnStatus.isOK() && !result.isOK()) {
+            returnStatus = result;
+        }
+    };
 
-    result = createIndexOnConfigCollection(
-        opCtx, NamespaceString::kConfigDatabasesNamespace, BSON("_id" << 1), unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create _id_ index on config db");
-    }
+    Status result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx, NamespaceString::kConfigsvrChunksNamespace, getChunkCollectionIndexSpecs());
+    recordFailure(result);
 
-    result = createIndexOnConfigCollection(
-        opCtx, NamespaceString::kConfigsvrShardsNamespace, BSON(ShardType::host() << 1), unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create host_1 index on config db");
-    }
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx,
+        NamespaceString::kConfigDatabasesNamespace,
+        {IndexSpec_ForCatalog{BSON("_id" << 1), unique}});
+    recordFailure(result.withContext("couldn't create _id_ index on config db"));
 
-    result = createIndexOnConfigCollection(
-        opCtx, TagsType::ConfigNS, BSON(TagsType::ns() << 1 << TagsType::min() << 1), unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create ns_1_min_1 index on config db");
-    }
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx,
+        NamespaceString::kConfigsvrShardsNamespace,
+        {IndexSpec_ForCatalog{BSON(ShardType::host() << 1), unique}});
+    recordFailure(result.withContext("couldn't create host_1 index on config db"));
 
-    result = createIndexOnConfigCollection(
-        opCtx, TagsType::ConfigNS, BSON(TagsType::ns() << 1 << TagsType::tag() << 1), !unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create ns_1_tag_1 index on config db");
-    }
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx,
+        TagsType::ConfigNS,
+        {IndexSpec_ForCatalog{BSON(TagsType::ns() << 1 << TagsType::min() << 1), unique}});
+    recordFailure(result.withContext("couldn't create ns_1_min_1 index on config db"));
 
-    result = createIndexOnConfigCollection(
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx,
+        TagsType::ConfigNS,
+        {IndexSpec_ForCatalog{BSON(TagsType::ns() << 1 << TagsType::tag() << 1), !unique}});
+    recordFailure(result.withContext("couldn't create ns_1_tag_1 index on config db"));
+
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
         opCtx,
         NamespaceString::kConfigQueryAnalyzersNamespace,
-        BSON(analyze_shard_key::QueryAnalyzerDocument::kCollectionUuidFieldName << 1),
-        unique);
-    if (!result.isOK()) {
-        return result.withContext("couldn't create collUuid_1 index on config.queryAnalyzers");
-    }
+        {IndexSpec_ForCatalog{
+            BSON(analyze_shard_key::QueryAnalyzerDocument::kCollectionUuidFieldName << 1),
+            unique}});
+    recordFailure(result.withContext("couldn't create collUuid_1 index on config.queryAnalyzers"));
 
-    result = createIndexesForConfigPlacementHistory(opCtx);
+    result = sharding_util::createIndexesOnCollectionAtStepUp(
+        opCtx,
+        NamespaceString::kConfigsvrPlacementHistoryNamespace,
+        getPlacementHistoryCollectionIndexSpecs());
 
-    if (!result.isOK()) {
-        return result.withContext("couldn't create required indexes on config.placementHistory");
-    }
+    recordFailure(
+        result.withContext("couldn't create required indexes on config.placementHistory"));
 
-    return Status::OK();
+    result = createIndexOnUuidForConfigShards(opCtx);
+
+    recordFailure(result.withContext("couldn't create required indexes on config.shards"));
+
+    return returnStatus;
 }
 
 /**
@@ -551,7 +533,7 @@ Status ShardingCatalogManager::setFeatureCompatibilityVersionOnShards(OperationC
     // but don't go through the ShardRegistry to prevent it from caching data that may be rolled
     // back.
     const auto opTimeWithShards =
-        _localCatalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kLocalReadConcern);
+        _localCatalogClient->getAllShards(opCtx, repl::ReadConcernArgs::kLocal);
 
     for (const auto& shardType : opTimeWithShards.value) {
         const auto shardStatus =
@@ -594,7 +576,7 @@ StatusWith<bool> ShardingCatalogManager::_isShardRequiredByZoneStillInUse(
     auto findShardStatus =
         _localConfigShard->exhaustiveFindOnConfig(opCtx,
                                                   readPref,
-                                                  repl::ReadConcernLevel::kLocalReadConcern,
+                                                  repl::ReadConcernArgs::kLocal,
                                                   NamespaceString::kConfigsvrShardsNamespace,
                                                   BSON(ShardType::tags() << zoneName),
                                                   BSONObj(),
@@ -626,7 +608,7 @@ StatusWith<bool> ShardingCatalogManager::_isShardRequiredByZoneStillInUse(
         auto findChunkRangeStatus =
             _localConfigShard->exhaustiveFindOnConfig(opCtx,
                                                       readPref,
-                                                      repl::ReadConcernLevel::kLocalReadConcern,
+                                                      repl::ReadConcernArgs::kLocal,
                                                       TagsType::ConfigNS,
                                                       BSON(TagsType::tag() << zoneName),
                                                       BSONObj(),

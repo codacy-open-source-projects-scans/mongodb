@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/agg/exec_pipeline.h"
@@ -44,6 +17,7 @@
 #include "mongo/db/pipeline/plan_explainer_pipeline.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/explain_policy.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -56,6 +30,7 @@
 
 #include <memory>
 #include <queue>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -145,6 +120,10 @@ public:
         _execPipeline->dispose();
     }
 
+    Pipeline* getPipeline() const override {
+        return _pipeline.get();
+    }
+
     void forceSpill(PlanYieldPolicy* yieldPolicy) override {
         tassert(10450600,
                 "Pipelines acquire locks internally, so yieldPolicy must be nullptr",
@@ -189,16 +168,16 @@ public:
 
     /**
      * Writes the explain information about the underlying pipeline to a std::vector<Value>,
-     * providing the level of detail specified by 'verbosity'.
+     * providing the level of detail and format specified by 'verbosity'.
      */
     std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const {
-        auto opts = SerializationOptions{.verbosity = verbosity};
-        return (verbosity >= ExplainOptions::Verbosity::kExecStats)
+        auto opts = query_shape::SerializationOptions{.verbosity = verbosity};
+        return explainPolicyFor(verbosity).hasExecStats()
             ? mergeExplains(*_pipeline, *_execPipeline, opts)
             : _pipeline->writeExplainOps(opts);
     }
 
-    boost::optional<StringData> getExecutorType() const override {
+    boost::optional<std::string_view> getExecutorType() const override {
         tassert(6253504, "Can't get type string without pipeline", _pipeline);
         return _pipeline->getTypeString();
     }
@@ -286,6 +265,16 @@ private:
     // timestamp seen while scanning the oplog, as well as the most recent PBRT.
     Timestamp _latestOplogTimestamp;
     BSONObj _postBatchResumeToken;
+
+    // For change streams only: the timestamp actually captured in '_postBatchResumeToken', kept
+    // separate from '_latestOplogTimestamp' (which tracks the raw upstream scan position and can
+    // run ahead of it when a stage buffers events ahead of emitting them, e.g.
+    // BatchedEnrichmentStage batching > 1). Used only to detect whether the oplog has genuinely
+    // advanced since '_postBatchResumeToken' was last set.
+    //
+    // 'boost::none' means the cached value is stale and must be recomputed by decoding
+    // '_postBatchResumeToken' before use.
+    boost::optional<Timestamp> _postBatchResumeTokenTimestamp;
 };
 
 }  // namespace mongo

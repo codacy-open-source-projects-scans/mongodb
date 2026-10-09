@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -46,6 +19,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <new>
+#include <string_view>
 
 #include <boost/intrusive_ptr.hpp>
 
@@ -59,24 +33,24 @@ class Value;
 /** An immutable reference-counted string of inline data. */
 class RCString final : public RefCountable {
 public:
-    static boost::intrusive_ptr<const RCString> create(StringData s) {
+    static boost::intrusive_ptr<const RCString> create(std::string_view s) {
         static constexpr size_t sizeLimit = BSONObjMaxUserSize;
         uassert(ErrorCodes::BSONObjectTooLarge,
-                fmt::format("RCString too large. Requires size={} < limit={}", s.size(), sizeLimit),
-                s.size() < sizeLimit);
+                fmt::format("RCString too large. Size {} exceeds maximum {}", s.size(), sizeLimit),
+                s.size() <= sizeLimit);
         return boost::intrusive_ptr{new (s) RCString{s}};
     }
 
-    explicit operator StringData() const noexcept {
-        return StringData{_data(), _size};
+    explicit operator std::string_view() const noexcept {
+        return std::string_view{_data(), _size};
     }
 
-    void* operator new(size_t, StringData s) {
+    void* operator new(size_t, std::string_view s) {
         return ::operator new(_allocSize(s.size()));
     }
 
-    /** Used if constructor fails after placement `new (StringData)`. */
-    void operator delete(void* ptr, StringData s) {
+    /** Used if constructor fails after placement `new (std::string_view)`. */
+    void operator delete(void* ptr, std::string_view s) {
         ::operator delete(ptr, _allocSize(s.size()));
     }
 
@@ -99,7 +73,7 @@ private:
     }
 
     /** Use static `create()` instead. */
-    explicit RCString(StringData s) : _size{s.size()} {
+    explicit RCString(std::string_view s) : _size{s.size()} {
         if (_size)
             memcpy(_data(), s.data(), _size);
         _data()[_size] = '\0';
@@ -202,7 +176,7 @@ public:
         type = stdx::to_underlying(t);
         putVector(std::move(a));
     }
-    ValueStorage(BSONType t, StringData s) {
+    ValueStorage(BSONType t, std::string_view s) {
         zero();
         type = stdx::to_underlying(t);
         putString(s);
@@ -299,13 +273,14 @@ public:
     }
 
     /// These are only to be called during Value construction on an empty Value
-    void putString(StringData s);
+    void putString(std::string_view s);
     void putVector(boost::intrusive_ptr<RCVector<Value>>&& v);
     void putDocument(const Document& d);
     void putDocument(Document&& d);
     void putRegEx(const BSONRegEx& re);
     void putBinData(const BSONBinData& bd) {
-        putRefCountable(RCString::create(StringData(static_cast<const char*>(bd.data), bd.length)));
+        putRefCountable(
+            RCString::create(std::string_view(static_cast<const char*>(bd.data), bd.length)));
         binSubType = bd.type;
     }
 
@@ -331,13 +306,13 @@ public:
             verifyRefCountingIfShould();
     }
 
-    StringData getString() const {
+    std::string_view getString() const {
         if (shortStr) {
-            return StringData(shortStrStorage, shortStrSize);
+            return std::string_view(shortStrStorage, shortStrSize);
         } else {
             dassert(typeid(*genericRCPtr) == typeid(const RCString));
             const RCString* stringPtr = static_cast<const RCString*>(genericRCPtr);
-            return StringData{*stringPtr};
+            return std::string_view{*stringPtr};
         }
     }
 

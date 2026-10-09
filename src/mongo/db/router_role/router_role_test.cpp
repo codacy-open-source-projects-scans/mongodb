@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/router_role/router_role.h"
 
@@ -35,17 +9,19 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/stale_config_retry_attempt.h"
 #include "mongo/db/versioning_protocol/shard_version_factory.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_participant_failed_unyield_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * This sub-class does not initialize a session, so the OperationContext will not contain
@@ -107,7 +83,7 @@ public:
 
     void expectCreateDatabase(const DatabaseName& dbName,
                               const DatabaseVersion& dbVersionToReturn) {
-        static constexpr auto kCmdName = "_configsvrCreateDatabase"_sd;
+        static constexpr auto kCmdName = "_configsvrCreateDatabase"sv;
         onCommand([&](const executor::RemoteCommandRequest& request) {
             ASSERT_EQ(kConfigHostAndPort, request.target);
             ASSERT_TRUE(request.cmdObj.hasField(kCmdName))
@@ -342,7 +318,7 @@ TEST_F(RouterRoleTest, DBPrimaryRouterExceedsMaxRetryAttempts) {
     int maxTestRetries = 10;
 
     // Sets the number of retries, but values less than 10 are rejected due to parameter validation.
-    RAIIServerParameterControllerForTest controller("maxNumStaleVersionRetries", maxTestRetries);
+    unittest::ServerParameterGuard controller("maxNumStaleVersionRetries", maxTestRetries);
 
     // The DBPrimaryRouter should retry until it reaches the maximum available retries.
     int tries = 0;
@@ -433,11 +409,11 @@ TEST_F(RouterRoleTest, DBPrimaryRouterDoesntImplicitlyCreateDbByDefault) {
 
     // 3. Expect a NamespaceNotFound error since the database doesn't exist and the implicit db
     // creation is disabled.
-    ASSERT_THROWS_CODE_AND_WHAT(future.default_timed_get(),
-                                DBException,
-                                ErrorCodes::NamespaceNotFound,
-                                str::stream() << "database " << _nss.dbName().toStringForErrorMsg()
-                                              << " not found");
+    ASSERT_THROWS_CODE_AND_WHAT(
+        future.default_timed_get(),
+        DBException,
+        ErrorCodes::NamespaceNotFound,
+        fmt::format("database {} not found", _nss.dbName().toStringForErrorMsg()));
     ASSERT_EQ(tries, 1);
 }
 
@@ -517,6 +493,11 @@ TEST_F(RouterRoleTest, CollectionRouterRetryOnStaleConfigWithoutTxn) {
     auto future = launchAsync([&] {
         router.route("test", [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
             ASSERT_TRUE(cri.hasRoutingTable());
+
+            const auto& attempt = staleConfigRetryAttempt(opCtx);
+            ASSERT_TRUE(attempt.has_value());
+            ASSERT_EQ(*attempt, tries);
+
             tries++;
             if (tries == 1) {
                 uasserted(StaleConfigInfo(
@@ -532,6 +513,7 @@ TEST_F(RouterRoleTest, CollectionRouterRetryOnStaleConfigWithoutTxn) {
     future.default_timed_get();
 
     ASSERT_EQ(tries, 2);
+    ASSERT_EQ(*staleConfigRetryAttempt(operationContext()), 1);
 }
 
 TEST_F(RouterRoleTest, CollectionRouterRetryOnStaleDbVersionWithoutTxn) {
@@ -1079,7 +1061,7 @@ TEST_F(RouterRoleTest, CollectionRouterExceedsMaxRetryAttempts) {
 
     // Sets the number of retries, but values less than 10 are rejected due to parameter
     // validation.
-    RAIIServerParameterControllerForTest controller("maxNumStaleVersionRetries", maxTestRetries);
+    unittest::ServerParameterGuard controller("maxNumStaleVersionRetries", maxTestRetries);
 
     // The CollectionRouter should retry until it reaches the maximum available retries.
     int tries = 0;
@@ -1364,11 +1346,11 @@ TEST_F(RouterRoleTest, CollectionRouterDoesntImplicitlyCreateDbByDefault) {
 
     // 3. Expect a NamespaceNotFound error since the database doesn't exist and the implicit db
     // creation is disabled.
-    ASSERT_THROWS_CODE_AND_WHAT(future.default_timed_get(),
-                                DBException,
-                                ErrorCodes::NamespaceNotFound,
-                                str::stream() << "database " << _nss.dbName().toStringForErrorMsg()
-                                              << " not found");
+    ASSERT_THROWS_CODE_AND_WHAT(
+        future.default_timed_get(),
+        DBException,
+        ErrorCodes::NamespaceNotFound,
+        fmt::format("database {} not found", _nss.dbName().toStringForErrorMsg()));
     ASSERT_EQ(tries, 1);
 }
 

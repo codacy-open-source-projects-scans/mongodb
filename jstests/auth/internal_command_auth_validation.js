@@ -62,12 +62,6 @@ const internalCommandsMap = {
             },
         },
     },
-    _internalClearCollectionShardingMetadata: {
-        testname: "_internalClearCollectionShardingMetadata",
-        command: {
-            _internalClearCollectionShardingMetadata: "test.x",
-        },
-    },
     _clusterWriteWithoutShardKey: {
         testname: "_clusterWriteWithoutShardKey",
         command: {_clusterWriteWithoutShardKey: 1, writeCmd: {}, shardId: "", targetDocId: {}},
@@ -128,7 +122,12 @@ const internalCommandsMap = {
     },
     _configsvrClearJumboFlag: {
         testname: "_configsvrClearJumboFlag",
-        command: {_configsvrClearJumboFlag: "x.y", epoch: ObjectId(), minKey: {x: 0}, maxKey: {x: 10}},
+        command: {
+            _configsvrClearJumboFlag: "x.y",
+            epoch: ObjectId(),
+            minKey: {x: 0},
+            maxKey: {x: 10},
+        },
     },
     _configsvrCommitChunksMerge: {
         testname: "_configsvrCommitChunksMerge",
@@ -139,9 +138,36 @@ const internalCommandsMap = {
             chunkRange: {min: {a: 1}, max: {a: 10}},
         },
     },
+    _configsvrCommitMergeChunks: {
+        testname: "_configsvrCommitMergeChunks",
+        command: {
+            _configsvrCommitMergeChunks: "x.y",
+            shard: shard0name,
+            chunkRange: {min: {a: 1}, max: {a: 10}},
+            shardVersionPreMerge: {
+                e: new ObjectId("62b052ac7f5653479a67a54f"),
+                t: new Timestamp(1655722668, 22),
+                v: new Timestamp(1, 0),
+            },
+        },
+    },
     _configsvrCommitChunkSplit: {
         testname: "_configsvrCommitChunkSplit",
         command: {_configsvrCommitChunkSplit: "x.y"},
+    },
+    _configsvrCommitSplitChunk: {
+        testname: "_configsvrCommitSplitChunk",
+        command: {
+            _configsvrCommitSplitChunk: "x.y",
+            shard: shard0name,
+            range: {min: {a: 1}, max: {a: 10}},
+            splitPoints: [{a: 5}],
+            shardVersionPreSplit: {
+                e: new ObjectId("62b052ac7f5653479a67a54f"),
+                t: new Timestamp(1655722668, 22),
+                v: new Timestamp(1, 0),
+            },
+        },
     },
     _configsvrCommitRefineCollectionShardKey: {
         testname: "_configsvrCommitRefineCollectionShardKey",
@@ -156,6 +182,14 @@ const internalCommandsMap = {
     _configsvrCommitMergeAllChunksOnShard: {
         testname: "_configsvrCommitMergeAllChunksOnShard",
         command: {_configsvrCommitMergeAllChunksOnShard: "test.x", shard: shard0name},
+    },
+    _configsvrCommitMergeAllPrecomputedChunksOnShard: {
+        testname: "_configsvrCommitMergeAllPrecomputedChunksOnShard",
+        command: {
+            _configsvrCommitMergeAllPrecomputedChunksOnShard: "test.x",
+            shard: shard0name,
+            newChunks: [],
+        },
     },
     _configsvrCommitReshardCollection: {
         testname: "_configsvrCommitReshardCollection",
@@ -189,6 +223,28 @@ const internalCommandsMap = {
         command: {
             _configsvrCollMod: "x.y",
             collModRequest: {},
+        },
+    },
+    _configsvrCommitMoveRange: {
+        testname: "_configsvrCommitMoveRange",
+        command: {
+            _configsvrCommitMoveRange: "db.fooHashed",
+            fromShard: "move_chunk_basic-rs0",
+            toShard: "move_chunk_basic-rs1",
+            migratedChunk: {
+                lastmod: {
+                    e: new ObjectId("62b052ac7f5653479a67a54f"),
+                    t: new Timestamp(1655722668, 22),
+                    v: new Timestamp(1, 0),
+                },
+                min: {_id: MinKey},
+                max: {_id: 611686018427387902},
+            },
+            donorShardVersionPreMigration: {
+                e: new ObjectId("62b052ac7f5653479a67a54f"),
+                t: new Timestamp(1655722668, 22),
+                v: new Timestamp(1, 3),
+            },
         },
     },
     _configsvrCommitMovePrimary: {
@@ -233,13 +289,6 @@ const internalCommandsMap = {
             toShard: shard0name,
         },
     },
-    _configsvrRemoveChunks: {
-        testname: "_configsvrRemoveChunks",
-        command: {
-            _configsvrRemoveChunks: 1,
-            collectionUUID: UUID(),
-        },
-    },
     _configsvrRemoveShard: {
         testname: "_configsvrRemoveShard",
         command: {_configsvrRemoveShard: 1, removeShard: shard0name},
@@ -252,10 +301,6 @@ const internalCommandsMap = {
         testname: "_configsvrRemoveTags",
         command: {_configsvrRemoveTags: "test"},
     },
-    _configsvrRepairShardedCollectionChunksHistory: {
-        testname: "_configsvrRepairShardedCollectionChunksHistory",
-        command: {_configsvrRepairShardedCollectionChunksHistory: ns},
-    },
     _configsvrResetPlacementHistory: {
         testname: "_configsvrResetPlacementHistory",
         command: {_configsvrResetPlacementHistory: ns},
@@ -267,6 +312,11 @@ const internalCommandsMap = {
     _configsvrRunRestore: {
         testname: "_configsvrRunRestore",
         command: {_configsvrRunRestore: 1},
+    },
+    _configsvrSetAllowChunkOperations: {
+        testname: "_configsvrSetAllowChunkOperations",
+        command: {_configsvrSetAllowChunkOperations: ns, allowChunkOperations: true},
+        writeConcern: {w: "majority"},
     },
     _configsvrSetAllowMigrations: {
         testname: "_configsvrSetAllowMigrations",
@@ -340,12 +390,18 @@ const internalCommandsMap = {
         },
     },
     _flushRoutingTableCacheUpdates: {
+        skip: true, // This command isn't valid when the shards are authoritative for collection metadata.
+        // Also, it can not be used during the FCV upgrade. The command will be removed
+        // in the future.
         testname: "_flushRoutingTableCacheUpdates",
         command: {
             _flushRoutingTableCacheUpdates: ns,
         },
     },
     _flushRoutingTableCacheUpdatesWithWriteConcern: {
+        skip: true, // This command isn't valid when the shards are authoritative for collection metadata.
+        // Also, it can not be used during the FCV upgrade. The command will be removed
+        // in the future.
         testname: "_flushRoutingTableCacheUpdatesWithWriteConcern",
         command: {_flushRoutingTableCacheUpdatesWithWriteConcern: ns, writeConcern: {w: 2}},
     },
@@ -415,7 +471,11 @@ const internalCommandsMap = {
     },
     _refreshQueryAnalyzerConfiguration: {
         testname: "_refreshQueryAnalyzerConfiguration",
-        command: {_refreshQueryAnalyzerConfiguration: 1, name: "test", numQueriesExecutedPerSecond: 1},
+        command: {
+            _refreshQueryAnalyzerConfiguration: 1,
+            name: "test",
+            numQueriesExecutedPerSecond: 1,
+        },
     },
     internalRenameIfOptionsAndIndexesMatch: {
         testname: "internalRenameIfOptionsAndIndexesMatch",
@@ -446,7 +506,10 @@ const internalCommandsMap = {
         command: {_shardsvrBeginMigrationBlockingOperation: ns, operationId: migrationOperationId},
         postcommand: (db) => {
             assert.commandWorked(
-                db.runCommand({_shardsvrEndMigrationBlockingOperation: ns, operationId: migrationOperationId}),
+                db.runCommand({
+                    _shardsvrEndMigrationBlockingOperation: ns,
+                    operationId: migrationOperationId,
+                }),
             );
         },
     },
@@ -464,7 +527,11 @@ const internalCommandsMap = {
     },
     _shardsvrFetchCollMetadata: {
         testname: "_shardsvrFetchCollMetadata",
-        command: {_shardsvrFetchCollMetadata: "test", from: [], writeConcern: {w: "majority"}},
+        command: {
+            _shardsvrFetchCollMetadata: "test",
+            primaryShardId: shard0name,
+            writeConcern: {w: "majority"},
+        },
     },
     _shardsvrCompactStructuredEncryptionData: {
         testname: "_shardsvrCompactStructuredEncryptionData",
@@ -648,7 +715,11 @@ const internalCommandsMap = {
     },
     _shardsvrNotifyShardingEvent: {
         testname: "_shardsvrNotifyShardingEvent",
-        command: {_shardsvrNotifyShardingEvent: "test", eventType: "collectionResharded", details: {}},
+        command: {
+            _shardsvrNotifyShardingEvent: "test",
+            eventType: "collectionResharded",
+            details: {},
+        },
     },
     _shardsvrRecreateRangeDeletionTasks: {
         testname: "_shardsvrRecreateRangeDeletionTasks",
@@ -656,7 +727,11 @@ const internalCommandsMap = {
     },
     _shardsvrRecreateRangeDeletionTasksParticipant: {
         testname: "_shardsvrRecreateRangeDeletionTasksParticipant",
-        command: {_shardsvrRecreateRangeDeletionTasksParticipant: "collection", skipEmptyRanges: true, uuid: UUID()},
+        command: {
+            _shardsvrRecreateRangeDeletionTasksParticipant: "collection",
+            skipEmptyRanges: true,
+            uuid: UUID(),
+        },
     },
     _shardsvrRenameCollection: {
         testname: "_shardsvrRenameCollection",
@@ -706,10 +781,25 @@ const internalCommandsMap = {
             key: {},
         },
     },
+    _shardsvrReshardingDonorGetCloneCount: {
+        testname: "_shardsvrReshardingDonorGetCloneCount",
+        command: {
+            _shardsvrReshardingDonorGetCloneCount: "test.x",
+            reshardingUUID: UUID(),
+            cloneTimestamp: Timestamp(1, 1),
+        },
+    },
     _shardsvrReshardingDonorFetchFinalCollectionStats: {
         testname: "_shardsvrReshardingDonorFetchFinalCollectionStats",
         command: {
             _shardsvrReshardingDonorFetchFinalCollectionStats: "test.x",
+            reshardingUUID: UUID(),
+        },
+    },
+    _shardsvrReshardingRecipientFetchFinalCollectionStats: {
+        testname: "_shardsvrReshardingRecipientFetchFinalCollectionStats",
+        command: {
+            _shardsvrReshardingRecipientFetchFinalCollectionStats: "test.x",
             reshardingUUID: UUID(),
         },
     },
@@ -720,6 +810,10 @@ const internalCommandsMap = {
             reshardingUUID: UUID(),
             cloneTimestamp: Timestamp(),
         },
+    },
+    _shardsvrReshardingStepDown: {
+        testname: "_shardsvrReshardingStepDown",
+        command: {_shardsvrReshardingStepDown: 1},
     },
     _shardsvrReshardingOperationTime: {
         testname: "_shardsvrReshardingOperationTime",
@@ -791,6 +885,13 @@ const internalCommandsMap = {
             _shardsvrReshardRecipientCriticalSectionStarted: UUID(),
         },
     },
+    _shardsvrReshardCleanupStaleChunks: {
+        testname: "_shardsvrReshardCleanupStaleChunks",
+        command: {
+            _shardsvrReshardCleanupStaleChunks: "test.x",
+            oldUUID: UUID(),
+        },
+    },
     _shardsvrRefineCollectionShardKey: {
         testname: "_shardsvrRefineCollectionShardKey",
         command: {_shardsvrRefineCollectionShardKey: "test.x", newShardKey: {}},
@@ -799,6 +900,21 @@ const internalCommandsMap = {
         testname: "_shardsvrCommitRefineCollectionShardKey",
         command: {
             _shardsvrCommitRefineCollectionShardKey: "test.x",
+            primaryShardId: "",
+        },
+    },
+    _shardsvrCommitCollModCollectionMetadata: {
+        testname: "_shardsvrCommitCollModCollectionMetadata",
+        command: {
+            _shardsvrCommitCollModCollectionMetadata: "test.x",
+            primaryShardId: "",
+        },
+    },
+    _shardsvrCommitChunkOperationsMetadata: {
+        testname: "_shardsvrCommitChunkOperationsMetadata",
+        command: {
+            _shardsvrCommitChunkOperationsMetadata: "test.x",
+            newChunks: [],
         },
     },
     _shardsvrCommitDropCollectionMetadata: {
@@ -809,6 +925,30 @@ const internalCommandsMap = {
         testname: "_shardsvrCommitCreateCollectionMetadata",
         command: {
             _shardsvrCommitCreateCollectionMetadata: "test.x",
+            primaryShardId: "",
+        },
+    },
+    _shardsvrCommitCreateCollectionChunklessMetadata: {
+        testname: "_shardsvrCommitCreateCollectionChunklessMetadata",
+        command: {
+            _shardsvrCommitCreateCollectionChunklessMetadata: "test.x",
+        },
+    },
+    _shardsvrCommitRenameCollectionMetadata: {
+        testname: "_shardsvrCommitRenameCollectionMetadata",
+        command: {
+            _shardsvrCommitRenameCollectionMetadata: "",
+            fromNss: "test.x",
+            toNss: "test.y",
+            primaryShardId: "",
+        },
+    },
+    _shardsvrSetAllowChunkOperations: {
+        testname: "_shardsvrSetAllowChunkOperations",
+        command: {
+            _shardsvrSetAllowChunkOperations: "db.collection",
+            allowChunkOperations: true,
+            primaryShardId: "",
         },
     },
     _shardsvrSetAllowMigrations: {
@@ -825,6 +965,18 @@ const internalCommandsMap = {
             _shardsvrSetUserWriteBlockMode: 1,
             global: true,
             phase: "complete",
+        },
+    },
+    _shardsvrSplitChunk: {
+        testname: "_shardsvrSplitChunk",
+        command: {
+            _shardsvrSplitChunk: "test.x",
+            keyPattern: {x: 1},
+            min: {x: MinKey},
+            max: {x: MaxKey},
+            splitKeys: [{x: 0}],
+            from: "shard0000",
+            epoch: ObjectId(),
         },
     },
     _shardsvrValidateShardKeyCandidate: {
@@ -883,6 +1035,14 @@ const internalCommandsMap = {
             primaryShardId: shard0name,
         },
     },
+    _shardsvrCheckMetadataConsistencySecondaryParticipant: {
+        skip: true, // This command doesn't accept to be run in the 'admin' database.
+        testname: "_shardsvrCheckMetadataConsistencySecondaryParticipant",
+        command: {
+            _shardsvrCheckMetadataConsistencySecondaryParticipant: 1,
+            primaryShardId: shard0name,
+        },
+    },
     _transferMods: {
         testname: "_transferMods",
         command: {
@@ -936,7 +1096,10 @@ function runOneCommandAuthorizationTest(testObject, commandName, db, secondDb, c
     assert(db.auth(noroleUser.user, noroleUser.pwd));
     result.noRoleRes = db.runCommand(testObject.command);
     db.logout();
-    if (result.noRoleRes.ok === cmdOK.commandWorked || result.noRoleRes.code !== ErrorCodes.Unauthorized) {
+    if (
+        result.noRoleRes.ok === cmdOK.commandWorked ||
+        result.noRoleRes.code !== ErrorCodes.Unauthorized
+    ) {
         result.pass = false;
         return result;
     }
@@ -946,7 +1109,8 @@ function runOneCommandAuthorizationTest(testObject, commandName, db, secondDb, c
         testObject.postcommand(db);
     }
     db.logout();
-    const sysRolePass = result.sysRes.ok === cmdOK.commandWorked || result.sysRes.code !== ErrorCodes.Unauthorized;
+    const sysRolePass =
+        result.sysRes.ok === cmdOK.commandWorked || result.sysRes.code !== ErrorCodes.Unauthorized;
 
     assert(sysRolePass);
     return result;
@@ -981,14 +1145,18 @@ function skipCommand(testObjectForCommand, commandName) {
 function runAuthorizationTestsOnAllInternalCommands(conn, firstDb, secondDb, coll) {
     let results = {};
     let fails = [];
-    const availableCommandsList = AllCommandsTest.checkCommandCoverage(conn, internalCommandsMap, function (cmdName) {
-        // TODO(SERVER-104891): Remove this once this command is _renameIfOptionsAndIndexesMatch
-        if (cmdName == "internalRenameIfOptionsAndIndexesMatch") {
-            return false;
-        }
+    const availableCommandsList = AllCommandsTest.checkCommandCoverage(
+        conn,
+        internalCommandsMap,
+        function (cmdName) {
+            // TODO(SERVER-104891): Remove this once this command is _renameIfOptionsAndIndexesMatch
+            if (cmdName == "internalRenameIfOptionsAndIndexesMatch") {
+                return false;
+            }
 
-        return !cmdName.startsWith("_") || testOnlyCommandsSet.hasOwnProperty(cmdName);
-    });
+            return !cmdName.startsWith("_") || testOnlyCommandsSet.hasOwnProperty(cmdName);
+        },
+    );
     for (const commandName of availableCommandsList) {
         const test = internalCommandsMap[commandName];
 
@@ -996,7 +1164,13 @@ function runAuthorizationTestsOnAllInternalCommands(conn, firstDb, secondDb, col
         if (skipCommand(test, commandName)) {
             continue;
         }
-        results[commandName] = runOneCommandAuthorizationTest(test, commandName, firstDb, secondDb, coll);
+        results[commandName] = runOneCommandAuthorizationTest(
+            test,
+            commandName,
+            firstDb,
+            secondDb,
+            coll,
+        );
     }
     return results;
 }
@@ -1064,7 +1238,9 @@ function runMongosTest(opts) {
             rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
-            mongosOptions: {setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"}},
+            mongosOptions: {
+                setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"},
+            },
         },
     });
     const mongos = shardingTest.s0;
@@ -1089,7 +1265,9 @@ function runShardedServerTest(opts) {
             rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
-            mongosOptions: {setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"}},
+            mongosOptions: {
+                setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"},
+            },
         },
     });
     const shardPrimary = shardingTest.rs0.getPrimary();
@@ -1101,7 +1279,12 @@ function runShardedServerTest(opts) {
         shardAdminDB.createUser({user: "admin", pwd: "password", roles: ["__system"]});
     }
     createUser(shardAdminDB, noroleUser.user, noroleUser.roles);
-    const results = runAuthorizationTestsOnAllInternalCommands(shardPrimary, shardAdminDB, mongosDB, coll);
+    const results = runAuthorizationTestsOnAllInternalCommands(
+        shardPrimary,
+        shardAdminDB,
+        mongosDB,
+        coll,
+    );
     shardingTest.stop();
     return results;
 }
@@ -1118,7 +1301,9 @@ function runConfigServer(opts) {
             rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
-            mongosOptions: {setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"}},
+            mongosOptions: {
+                setParameter: {trafficRecordingDirectory: dbPath, mongotHost: "localhost:27017"},
+            },
         },
     });
 
@@ -1154,7 +1339,11 @@ function singleCommandCheckResult(commandName, resultmap) {
         singleCommandCombinedResult.absent = false;
         if (!resultsForSetup[commandName].pass) {
             jsTestLog(
-                "Test Failure at setup:" + setupName + " command:" + commandName + tojson(resultsForSetup[commandName]),
+                "Test Failure at setup:" +
+                    setupName +
+                    " command:" +
+                    commandName +
+                    tojson(resultsForSetup[commandName]),
             );
         }
     }

@@ -5,6 +5,20 @@
 export const BulkWriteUtils = (function () {
     const commandsToBulkWriteOverride = new Set(["insert", "update", "delete"]);
 
+    // Optional writeError fields forwarded from a bulkWrite reply item when present, including
+    // structured ErrorExtraInfo such as doc validation (errInfo) and geo key extraction.
+    const optionalWriteErrorFields = [
+        "errInfo",
+        "db",
+        "collectionUUID",
+        "expectedCollection",
+        "actualCollection",
+        "failingPath",
+        "underlyingCode",
+        "underlyingReason",
+        "failingElement",
+    ];
+
     let numOpsPerResponse = [];
     let nsInfos = [];
     let bufferedOps = [];
@@ -228,7 +242,11 @@ export const BulkWriteUtils = (function () {
             while (cursorIdx < bulkWriteResponse.cursor.firstBatch.length) {
                 let current = bulkWriteResponse.cursor.firstBatch[cursorIdx];
                 // For errorsOnly every cursor element must be an error.
-                assert.eq(0, current.ok, "command: " + tojson(cmd) + " : response: " + tojson(bulkWriteResponse));
+                assert.eq(
+                    0,
+                    current.ok,
+                    "command: " + tojson(cmd) + " : response: " + tojson(bulkWriteResponse),
+                );
 
                 if (!response.hasOwnProperty("writeErrors")) {
                     response["writeErrors"] = [];
@@ -236,7 +254,7 @@ export const BulkWriteUtils = (function () {
                 let writeError = {index: current.idx, code: current.code, errmsg: current.errmsg};
 
                 // Include optional error fields if they exist.
-                ["errInfo", "db", "collectionUUID", "expectedCollection", "actualCollection"].forEach((property) => {
+                optionalWriteErrorFields.forEach((property) => {
                     if (current.hasOwnProperty(property)) {
                         writeError[property] = current[property];
                     }
@@ -302,13 +320,11 @@ export const BulkWriteUtils = (function () {
                         let writeError = {index: num, code: current.code, errmsg: current.errmsg};
 
                         // Include optional error fields if they exist.
-                        ["errInfo", "db", "collectionUUID", "expectedCollection", "actualCollection"].forEach(
-                            (property) => {
-                                if (current.hasOwnProperty(property)) {
-                                    writeError[property] = current[property];
-                                }
-                            },
-                        );
+                        optionalWriteErrorFields.forEach((property) => {
+                            if (current.hasOwnProperty(property)) {
+                                writeError[property] = current[property];
+                            }
+                        });
 
                         resp["writeErrors"].push(writeError);
                     } else {
@@ -351,7 +367,12 @@ export const BulkWriteUtils = (function () {
         return responses;
     }
 
-    function getNsInfoIdx(nsInfoEntry, collectionUUID, encryptionInformation, isTimeseriesNamespace) {
+    function getNsInfoIdx(
+        nsInfoEntry,
+        collectionUUID,
+        encryptionInformation,
+        isTimeseriesNamespace,
+    ) {
         let idx = nsInfos.findIndex((element) => element.ns == nsInfoEntry);
         if (idx == -1) {
             idx = nsInfos.length;
@@ -383,11 +404,13 @@ export const BulkWriteUtils = (function () {
             "upsert": update.upsert ? update.upsert : false,
         };
 
-        ["arrayFilters", "collation", "hint", "sampleId", "sort", "upsertSupplied"].forEach((property) => {
-            if (update.hasOwnProperty(property)) {
-                op[property] = update[property];
-            }
-        });
+        ["arrayFilters", "collation", "hint", "sampleId", "sort", "upsertSupplied"].forEach(
+            (property) => {
+                if (update.hasOwnProperty(property)) {
+                    op[property] = update[property];
+                }
+            },
+        );
 
         if (update.hasOwnProperty("c")) {
             op["constants"] = update.c;

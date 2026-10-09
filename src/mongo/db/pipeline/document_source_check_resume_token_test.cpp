@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -76,6 +49,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -86,8 +60,9 @@ using boost::intrusive_ptr;
 
 namespace mongo {
 namespace {
-static constexpr StringData kOtherNs = "test.other.ns"_sd;
-static constexpr StringData kTestNs = "test.ns"_sd;
+using namespace std::literals::string_view_literals;
+static constexpr std::string_view kOtherNs = "test.other.ns"sv;
+static constexpr std::string_view kTestNs = "test.ns"sv;
 
 class ChangeStreamOplogCursorMock : public SeekableRecordCursor {
 public:
@@ -168,7 +143,7 @@ public:
         invariant(ValueComparator().compare(Value(lastTs), doc["ts"]) <= 0);
         // Fill out remaining required fields in the oplog entry.
         MutableDocument mutableDoc{doc};
-        mutableDoc.setField("op", Value("n"_sd));
+        mutableDoc.setField("op", Value("n"sv));
         mutableDoc.setField("o", Value(Document{}));
         mutableDoc.setField("wall",
                             Value(Date_t::fromMillisSinceEpoch(doc["ts"].getTimestamp().asLL())));
@@ -224,7 +199,7 @@ public:
     // The collection holder is guaranteed to be valid for the lifetime of the test. The
     // CollectionPtr initialization is safe.
     ChangeStreamMockStage(const boost::intrusive_ptr<ExpressionContextForTest>& expCtx)
-        : exec::agg::MockStage("$changeStreamMock"_sd, expCtx, {}),
+        : exec::agg::MockStage("$changeStreamMock"sv, expCtx, {}),
           _collectionAcq(shard_role_mock::acquireCollectionMocked(
               pExpCtx->getOperationContext(),
               _collection.ns(),
@@ -437,7 +412,7 @@ protected:
      * namespace.
      */
     intrusive_ptr<exec::agg::ChangeStreamEnsureResumeTokenPresentStage>
-    createEnsureResumeTokenPresentStage(Timestamp ts, StringData id, UUID uuid = testUuid()) {
+    createEnsureResumeTokenPresentStage(Timestamp ts, std::string_view id, UUID uuid = testUuid()) {
         return createEnsureResumeTokenPresentStage(ts, 0, 0, Document{{"_id", id}}, uuid);
     }
 
@@ -455,8 +430,7 @@ protected:
         _mock->setResumeToken(std::move(tokenData));
 
         // Create a project stage that excludes the "_id" field
-        auto projectDS =
-            DocumentSourceProject::create(BSON("_id" << 0), getExpCtx(), "$project"_sd);
+        auto projectDS = DocumentSourceProject::create(BSON("_id" << 0), getExpCtx(), "$project"sv);
         _projectStage = exec::agg::buildStage(projectDS);
         exec::agg::MockStage::setSource_forTest(_projectStage, _mock.get());
 
@@ -473,7 +447,9 @@ protected:
      * before sending to the EnsureResumeTokenPresentStage.
      */
     intrusive_ptr<exec::agg::ChangeStreamEnsureResumeTokenPresentStage>
-    createEnsureResumeTokenPresentStageNoId(Timestamp ts, StringData id, UUID uuid = testUuid()) {
+    createEnsureResumeTokenPresentStageNoId(Timestamp ts,
+                                            std::string_view id,
+                                            UUID uuid = testUuid()) {
         return createEnsureResumeTokenPresentStageNoID(
             {ts, 0, 0, uuid, Value(Document{{"_id", id}})});
     }
@@ -656,10 +632,10 @@ TEST_F(CheckResumeTokenTest, UnshardedTokenFailsForShardedResumeOnMongosIfIdDoes
     getExpCtx()->setInRouter(true);
 
     auto checkResumeToken =
-        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"_sd, 1}});
+        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"sv, 1}});
 
-    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"_sd, 0}, {"_id"_sd, 0}});
-    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"_sd, 0}, {"_id"_sd, 2}});
+    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"sv, 0}, {"_id"sv, 0}});
+    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"sv, 0}, {"_id"sv, 2}});
 
     ASSERT_THROWS_CODE(
         checkResumeToken->getNext(), AssertionException, ErrorCodes::ChangeStreamFatalError);
@@ -674,10 +650,10 @@ TEST_F(CheckResumeTokenTest, ShardedResumeFailsOnMongosIfTokenHasSubsetOfDocumen
     getExpCtx()->setInRouter(true);
 
     auto checkResumeToken =
-        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"x"_sd, 0}, {"_id"_sd, 1}});
+        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"x"sv, 0}, {"_id"sv, 1}});
 
-    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"_sd, 0}, {"y"_sd, -1}, {"_id"_sd, 1}});
-    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"_sd, 0}, {"y"_sd, -1}, {"_id"_sd, 2}});
+    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"sv, 0}, {"y"sv, -1}, {"_id"sv, 1}});
+    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"sv, 0}, {"y"sv, -1}, {"_id"sv, 2}});
 
     ASSERT_THROWS_CODE(
         checkResumeToken->getNext(), AssertionException, ErrorCodes::ChangeStreamFatalError);
@@ -692,8 +668,8 @@ TEST_F(CheckResumeTokenTest, ShardedResumeFailsOnMongosIfDocumentKeyIsNonObject)
 
     auto checkResumeToken = createEnsureResumeTokenPresentStage(resumeTimestamp, boost::none);
 
-    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"_sd, 0}, {"_id"_sd, 1}});
-    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"_sd, 0}, {"_id"_sd, 2}});
+    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"sv, 0}, {"_id"sv, 1}});
+    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"sv, 0}, {"_id"sv, 2}});
 
     ASSERT_THROWS_CODE(
         checkResumeToken->getNext(), AssertionException, ErrorCodes::ChangeStreamFatalError);
@@ -707,11 +683,11 @@ TEST_F(CheckResumeTokenTest, ShardedResumeFailsOnMongosIfDocumentKeyOmitsId) {
     getExpCtx()->setInRouter(true);
 
     auto checkResumeToken =
-        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"x"_sd, 0}});
+        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"x"sv, 0}});
 
-    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"_sd, 0}, {"y"_sd, -1}, {"_id", 1}});
-    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"_sd, 0}, {"y"_sd, -1}});
-    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"_sd, 0}, {"y"_sd, -1}});
+    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"sv, 0}, {"y"sv, -1}, {"_id", 1}});
+    addOplogEntryOnTestNS(Timestamp(100, 1), {{"x"sv, 0}, {"y"sv, -1}});
+    addOplogEntryOnTestNS(Timestamp(100, 2), {{"x"sv, 0}, {"y"sv, -1}});
 
     ASSERT_THROWS_CODE(
         checkResumeToken->getNext(), AssertionException, ErrorCodes::ChangeStreamFatalError);
@@ -736,19 +712,19 @@ TEST_F(CheckResumeTokenTest,
 
     // Create the resume token using the higher-sorting UUID.
     auto checkResumeToken =
-        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"_sd, 1}}, uuids[1]);
+        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"sv, 1}}, uuids[1]);
 
     // Add two documents which have the same clusterTime but a lower UUID. One of the documents has
     // a lower docKey than the resume token, the other has a higher docKey; this demonstrates that
     // the UUID is the discriminating factor.
-    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"_sd, 0}}, uuids[0]);
-    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"_sd, 2}}, uuids[0]);
+    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"sv, 0}}, uuids[0]);
+    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"sv, 2}}, uuids[0]);
 
     // Add a third document that matches the resume token.
-    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"_sd, 1}}, uuids[1]);
+    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"sv, 1}}, uuids[1]);
 
     // Add a fourth document with the same timestamp and UUID whose docKey sorts after the token.
-    auto expectedDocKey = Document{{"_id"_sd, 3}};
+    auto expectedDocKey = Document{{"_id"sv, 3}};
     addOplogEntryOnTestNS(resumeTimestamp, expectedDocKey, uuids[1]);
 
     // We should skip the first two docs, swallow the resume token, and return the fourth doc.
@@ -774,13 +750,13 @@ TEST_F(CheckResumeTokenTest,
 
     // Create the resume token using the lower-sorting UUID.
     auto checkResumeToken =
-        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"_sd, 1}}, uuids[0]);
+        createEnsureResumeTokenPresentStage(resumeTimestamp, Document{{"_id"sv, 1}}, uuids[0]);
 
     // Add a document which has the same clusterTime and a lower docKey but a higher UUID, followed
     // by a document which matches the resume token. This is not possible in practice, but it serves
     // to demonstrate that the resume attempt fails even when the resume token is present.
-    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"_sd, 0}}, uuids[1]);
-    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"_sd, 1}}, uuids[0]);
+    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"sv, 0}}, uuids[1]);
+    addOplogEntryOnTestNS(resumeTimestamp, {{"_id"sv, 1}}, uuids[0]);
 
     ASSERT_THROWS_CODE(
         checkResumeToken->getNext(), AssertionException, ErrorCodes::ChangeStreamFatalError);
@@ -800,7 +776,7 @@ TEST_F(CheckResumeTokenTest, ShouldSwallowInvalidateFromEachShardForStartAfterIn
     // Create a resume token representing an 'invalidate' event, and use it to seed the stage. A
     // resume token with {fromInvalidate:true} can only be used with startAfter, to start a new
     // stream after the old stream is invalidated.
-    auto eventIdentifier = Value{Document{{"operationType", "drop"_sd}}};
+    auto eventIdentifier = Value{Document{{"operationType", "drop"sv}}};
     ResumeTokenData invalidateToken{resumeTimestamp,
                                     ResumeTokenData::kDefaultTokenVersion,
                                     /* txnOpIndex */ 0,
@@ -817,7 +793,7 @@ TEST_F(CheckResumeTokenTest, ShouldSwallowInvalidateFromEachShardForStartAfterIn
     addOplogEntryOnTestNS(invalidateToken);
 
     // Add a document representing an insert which recreated the collection after it was dropped.
-    auto expectedDocKey = Document{{"_id"_sd, 1}};
+    auto expectedDocKey = Document{{"_id"sv, 1}};
     addOplogEntryOnTestNS(Timestamp{100, 2}, expectedDocKey, uuids[1]);
 
     // DSEnsureResumeTokenPresent should confirm that the invalidate event is present, swallow it
@@ -843,7 +819,7 @@ TEST_F(CheckResumeTokenTest, ShouldNotSwallowUnrelatedInvalidateForStartAfterInv
     // Create a resume token representing an 'invalidate' event, and use it to seed the stage. A
     // resume token with {fromInvalidate:true} can only be used with startAfter, to start a new
     // stream after the old stream is invalidated.
-    auto eventIdentifier = Value{Document{{"operationType", "drop"_sd}}};
+    auto eventIdentifier = Value{Document{{"operationType", "drop"sv}}};
     ResumeTokenData invalidateToken{resumeTimestamp,
                                     ResumeTokenData::kDefaultTokenVersion,
                                     /* txnOpIndex */ 0,
@@ -884,20 +860,20 @@ TEST_F(CheckResumeTokenTest, ShouldSkipResumeTokensWithEarlierTxnOpIndex) {
     std::sort(uuids.begin(), uuids.end());
 
     auto checkResumeToken = createEnsureResumeTokenPresentStage(
-        resumeTimestamp, 0, 2, Document{{"_id"_sd, 1}}, uuids[1]);
+        resumeTimestamp, 0, 2, Document{{"_id"sv, 1}}, uuids[1]);
 
     // Add two documents which have the same clusterTime and version but a lower applyOps index. One
     // of the documents has a lower uuid than the resume token, the other has a higher uuid; this
     // demonstrates that the applyOps index is the discriminating factor.
-    addOplogEntryOnTestNS(resumeTimestamp, 0, 0, {{"_id"_sd, 0}}, uuids[0]);
-    addOplogEntryOnTestNS(resumeTimestamp, 0, 1, {{"_id"_sd, 2}}, uuids[2]);
+    addOplogEntryOnTestNS(resumeTimestamp, 0, 0, {{"_id"sv, 0}}, uuids[0]);
+    addOplogEntryOnTestNS(resumeTimestamp, 0, 1, {{"_id"sv, 2}}, uuids[2]);
 
     // Add a third document that matches the resume token.
-    addOplogEntryOnTestNS(resumeTimestamp, 0, 2, {{"_id"_sd, 1}}, uuids[1]);
+    addOplogEntryOnTestNS(resumeTimestamp, 0, 2, {{"_id"sv, 1}}, uuids[1]);
 
     // Add a fourth document with the same timestamp and version whose applyOps sorts after the
     // resume token.
-    auto expectedDocKey = Document{{"_id"_sd, 3}};
+    auto expectedDocKey = Document{{"_id"sv, 3}};
     addOplogEntryOnTestNS(resumeTimestamp, 0, 3, expectedDocKey, uuids[1]);
 
     // We should skip the first two docs, swallow the resume token, and return the fourth doc.
@@ -1118,7 +1094,7 @@ TEST_F(CheckResumabilityTest, ShouldSwallowAllEventsAtSameClusterTimeUpToResumeT
     Timestamp resumeTimestamp(100, 2);
 
     // Set up the DSCSCheckResumability to check for an exact event ResumeToken.
-    ResumeTokenData token(resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"_sd, "3"_sd}}));
+    ResumeTokenData token(resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"sv, "3"sv}}));
     auto checkResumabilityStage = createCheckResumabilityStage(token);
 
     // Add 2 events at the same clusterTime as the resume token but whose docKey sort before it.
@@ -1137,7 +1113,7 @@ TEST_F(CheckResumabilityTest, ShouldSwallowAllEventsAtSameClusterTimeUpToResumeT
     result = checkResumabilityStage->getNext();
     ASSERT_TRUE(result.isAdvanced());
     auto postResumeTokenDoc =
-        ResumeToken({resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"_sd, "4"_sd}})})
+        ResumeToken({resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"sv, "4"sv}})})
             .toDocument();
     ASSERT_DOCUMENT_EQ(result.getDocument()["_id"].getDocument(), postResumeTokenDoc);
     ASSERT_TRUE(checkResumabilityStage->getNext().isEOF());
@@ -1147,7 +1123,7 @@ TEST_F(CheckResumabilityTest, ShouldSwallowAllEventsAtSameClusterTimePriorToResu
     Timestamp resumeTimestamp(100, 2);
 
     // Set up the DSCSCheckResumability to check for an exact event ResumeToken.
-    ResumeTokenData token(resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"_sd, "3"_sd}}));
+    ResumeTokenData token(resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"sv, "3"sv}}));
     auto checkResumabilityStage = createCheckResumabilityStage(token);
 
     // Add 2 events at the same clusterTime as the resume token but whose docKey sort before it.
@@ -1160,7 +1136,7 @@ TEST_F(CheckResumabilityTest, ShouldSwallowAllEventsAtSameClusterTimePriorToResu
     auto result = checkResumabilityStage->getNext();
     ASSERT_TRUE(result.isAdvanced());
     auto postResumeTokenDoc =
-        ResumeToken({resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"_sd, "4"_sd}})})
+        ResumeToken({resumeTimestamp, 0, 0, testUuid(), Value(Document{{"_id"sv, "4"sv}})})
             .toDocument();
     ASSERT_DOCUMENT_EQ(result.getDocument()["_id"].getDocument(), postResumeTokenDoc);
     ASSERT_TRUE(checkResumabilityStage->getNext().isEOF());

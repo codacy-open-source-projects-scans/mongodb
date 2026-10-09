@@ -15,8 +15,6 @@
  *   # Currently all DDL are not compatible with transactions, it does not make sense to run this
  *   # test in transaction suites.
  *   does_not_support_transactions,
- *   # TODO (SERVER-104789): config shards cause setFCV to hang because resharding is not aborted.
- *   config_shard_incompatible,
  *   runs_set_fcv,
  * ]
  */
@@ -24,6 +22,8 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/ddl/random_ddl/random_ddl_setFCV_operations.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 export const $config = extendWorkload($baseConfig, function ($config, $super) {
     // Counts the number of time the setFeatureCompatibility command succeeds.
@@ -83,7 +83,7 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         10778001,
         // Cannot downgrade FCV that requires a collMod command when index builds are concurrently
         // taking place.
-        12587,
+        ErrorCodes.BackgroundOperationInProgressForNamespace,
     ];
 
     // You might end up hitting a shard where the db might've moved.
@@ -148,11 +148,12 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
             const targetFCV = fcvValues[Random.randInt(3)];
             // Ensure we're in the latest version.
             jsTestLog("STATE:setFCV setting FCV to " + targetFCV);
-            assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
-            db.getSiblingDB($config.data.succesfullSetFCVDbName)[$config.data.succesfullSetFCVCollName].update(
-                {},
-                {$inc: {count: 1}},
+            assert.commandWorked(
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
             );
+            db.getSiblingDB($config.data.succesfullSetFCVDbName)[
+                $config.data.succesfullSetFCVCollName
+            ].update({}, {$inc: {count: 1}});
         } catch (e) {
             if (!$config.data.kAcceptedSetFCVErrors.includes(e.code)) {
                 throw e;
@@ -203,18 +204,22 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.transitions = uniformDistTransitions($config.states);
 
     $config.setup = function (db, collName, cluster) {
-        db.getSiblingDB($config.data.succesfullSetFCVDbName)[$config.data.succesfullSetFCVCollName].insert({count: 0});
+        db.getSiblingDB($config.data.succesfullSetFCVDbName)[
+            $config.data.succesfullSetFCVCollName
+        ].insert({count: 0});
     };
 
     $config.teardown = function (db, collName, cluster) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
 
         const fcvExecutions = db
             .getSiblingDB($config.data.succesfullSetFCVDbName)
             [$config.data.succesfullSetFCVCollName].findOne({}).count;
         assert(
             fcvExecutions >= $config.data.expectedSetFCVExecutions,
-            "Expected setFeatureCompatibility to run at least 2 times, but it ran " + fcvExecutions + " times",
+            "Expected setFeatureCompatibility to run at least 2 times, but it ran " +
+                fcvExecutions +
+                " times",
         );
     };
 

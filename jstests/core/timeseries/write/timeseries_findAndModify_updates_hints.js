@@ -1,6 +1,7 @@
 /**
  * Tests passing a hint to the findAndModify command on a time-series collection for updates.
  * @tags: [
+ *   uses_explain,
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
@@ -10,7 +11,7 @@
  * ]
  */
 
-import {getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
+import {getSingleChildStage, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
 
 const timeFieldName = "time";
 const metaFieldName = "tag";
@@ -33,18 +34,30 @@ const testUpdateHint = ({
     const coll = testDB.getCollection(collName);
 
     assert.commandWorked(
-        testDB.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+        testDB.createCollection(coll.getName(), {
+            timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+        }),
     );
 
     assert.commandWorked(coll.createIndexes(indexes));
 
     assert.commandWorked(coll.insert(initialDocList));
 
-    const findAndModifyCmd = {findAndModify: coll.getName(), query: query, update: update, hint: hint};
+    const findAndModifyCmd = {
+        findAndModify: coll.getName(),
+        query: query,
+        update: update,
+        hint: hint,
+    };
 
     if (expectedError != undefined) {
         assert.commandFailedWithCode(
-            testDB.runCommand({findAndModify: coll.getName(), query: query, update: update, hint: hint}),
+            testDB.runCommand({
+                findAndModify: coll.getName(),
+                query: query,
+                update: update,
+                hint: hint,
+            }),
             expectedError,
         );
 
@@ -52,7 +65,12 @@ const testUpdateHint = ({
 
         resultDocList.forEach((resultDoc) => {
             const actualDoc = coll.findOne(resultDoc);
-            assert(actualDoc, "Document " + tojson(resultDoc) + " is not found in the result collection as expected ");
+            assert(
+                actualDoc,
+                "Document " +
+                    tojson(resultDoc) +
+                    " is not found in the result collection as expected ",
+            );
             assert.docEq(resultDoc, actualDoc);
         });
     } else {
@@ -62,20 +80,30 @@ const testUpdateHint = ({
 
         resultDocList.forEach((resultDoc) => {
             const actualDoc = coll.findOne(resultDoc);
-            assert(actualDoc, "Document " + tojson(resultDoc) + " is not found in the result collection as expected ");
+            assert(
+                actualDoc,
+                "Document " +
+                    tojson(resultDoc) +
+                    " is not found in the result collection as expected ",
+            );
             assert.docEq(resultDoc, actualDoc);
         });
 
         const winningPlan = getWinningPlanFromExplain(
-            assert.commandWorked(testDB.runCommand({explain: findAndModifyCmd, verbosity: "executionStats"})),
+            assert.commandWorked(
+                testDB.runCommand({explain: findAndModifyCmd, verbosity: "executionStats"}),
+            ),
         );
 
         // Verify that the query plan uses the expected index.
+        // The write stage's child is the COLLSCAN, or the FETCH above the IXSCAN.
+        const childStage = getSingleChildStage(winningPlan);
         if (expectedPlan.stage == "COLLSCAN") {
-            assert.eq(expectedPlan.stage, winningPlan.inputStage.stage);
+            assert.eq(expectedPlan.stage, childStage.stage);
         } else {
-            assert.eq(expectedPlan.stage, winningPlan.inputStage.inputStage.stage);
-            assert.eq(bsonWoCompare(expectedPlan.keyPattern, winningPlan.inputStage.inputStage.keyPattern), 0);
+            const ixscan = getSingleChildStage(childStage);
+            assert.eq(expectedPlan.stage, ixscan.stage);
+            assert.eq(bsonWoCompare(expectedPlan.keyPattern, ixscan.keyPattern), 0);
         }
     }
 
@@ -165,7 +193,10 @@ testUpdateHint({
         hintDoc3,
     ],
     nModifiedBuckets: 1,
-    expectedPlan: {stage: "IXSCAN", keyPattern: {"meta": 1, "control.min.time": 1, "control.max.time": 1}},
+    expectedPlan: {
+        stage: "IXSCAN",
+        keyPattern: {"meta": 1, "control.min.time": 1, "control.max.time": 1},
+    },
 });
 
 testUpdateHint({
@@ -180,7 +211,10 @@ testUpdateHint({
         hintDoc3,
     ],
     nModifiedBuckets: 1,
-    expectedPlan: {stage: "IXSCAN", keyPattern: {"meta": -1, "control.min.time": 1, "control.max.time": 1}},
+    expectedPlan: {
+        stage: "IXSCAN",
+        keyPattern: {"meta": -1, "control.min.time": 1, "control.max.time": 1},
+    },
 });
 
 // Query on and update a measurement using a compound index on the metaField and timeField as a
@@ -197,7 +231,10 @@ testUpdateHint({
         hintDoc3,
     ],
     nModifiedBuckets: 1,
-    expectedPlan: {stage: "IXSCAN", keyPattern: {"meta": 1, "control.min.time": 1, "control.max.time": 1}},
+    expectedPlan: {
+        stage: "IXSCAN",
+        keyPattern: {"meta": 1, "control.min.time": 1, "control.max.time": 1},
+    },
 });
 
 // Query on and update a measurement using a compound index on the timeField and an embedded field
@@ -214,7 +251,10 @@ testUpdateHint({
         hintDoc3,
     ],
     nModifiedBuckets: 1,
-    expectedPlan: {stage: "IXSCAN", keyPattern: {"meta.a": -1, "control.min.time": 1, "control.max.time": 1}},
+    expectedPlan: {
+        stage: "IXSCAN",
+        keyPattern: {"meta.a": -1, "control.min.time": 1, "control.max.time": 1},
+    },
 });
 
 /************ Tests passing a hint to an update on a collection with multiple indexes. ************/

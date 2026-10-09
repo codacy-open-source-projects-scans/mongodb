@@ -4,15 +4,24 @@
 //   requires_majority_read_concern,
 //   uses_change_streams,
 // ]
-import {ChangeStreamTest} from "jstests/libs/query/change_stream_util.js";
+import {
+    ChangeStreamTest,
+    validateChangeStreamHistoryLostException,
+} from "jstests/libs/query/change_stream_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {getFirstOplogEntry, getLatestOp} from "jstests/replsets/rslib.js";
+import {skipTestIfSizeBasedOplogTruncationDisabled} from "jstests/libs/oplog_truncation_util.js";
 
 const oplogSize = 1; // size in MB
 const rst = new ReplSetTest({nodes: 1, oplogSize: oplogSize});
 
-rst.startSet();
+// Set max oplog size to 1MB, disable time-based retention
+rst.startSet({oplogSize: 1, oplogMinRetentionHours: 0.000001});
 rst.initiate();
+
+// This test relies on marker-based oplog truncation, which may be disabled in disagg.
+// TODO(SERVER-125068) remove this once this feature flag is deleted
+skipTestIfSizeBasedOplogTruncationDisabled(rst.getPrimary(), () => rst.stopSet());
 
 const testDB = rst.getPrimary().getDB(jsTestName());
 const testColl = testDB[jsTestName()];
@@ -25,7 +34,6 @@ assert.commandWorked(testColl.insert({_id: 1}, {writeConcern: {w: "majority"}}))
 let changeStream = cst.startWatchingChanges({
     pipeline: [{$changeStream: {}}],
     collection: testColl.getName(),
-    includeToken: true,
 });
 
 // We awaited the replication of the insert, so the change stream shouldn't return them.
@@ -68,7 +76,8 @@ for (let nextExpectedId of [4, 5]) {
 // the first entry in the oplog is the replica set initialization message.
 const firstOplogEntry = getFirstOplogEntry(rst.getPrimary());
 assert(
-    firstOplogEntry.o.msg === "initiating set" || (firstOplogEntry.o.msg === "new primary" && firstOplogEntry.t == 1),
+    firstOplogEntry.o.msg === "initiating set" ||
+        (firstOplogEntry.o.msg === "new primary" && firstOplogEntry.t == 1),
 );
 assert.eq(firstOplogEntry.op, "n");
 
@@ -91,26 +100,43 @@ const mostRecentOplogEntry = getLatestOp(primaryNode);
 assert.neq(mostRecentOplogEntry, null);
 const largeStr = "abcdefghi".repeat(4 * 1024 * oplogSize);
 
-function oplogIsRolledOver() {
-    // The oplog has rolled over if the op that used to be newest is now older than the
-    // oplog's current oldest entry. Said another way, the oplog is rolled over when
-    // everything in the oplog is newer than what used to be the newest entry.
-    return bsonWoCompare(mostRecentOplogEntry.ts, getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts) < 0;
-}
+assert.soon(() => {
+    // The oplog has rolled over when everything in it is newer than what used to be the newest entry.
+    if (
+        bsonWoCompare(
+            mostRecentOplogEntry.ts,
+            getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts,
+        ) < 0
+    )
+        return true;
 
-while (!oplogIsRolledOver()) {
     assert.commandWorked(testColl.insert({long_str: largeStr}, {writeConcern: {w: "majority"}}));
-}
+    return false;
+}, "Timeout waiting for oplog to roll over on primary");
 
 // Confirm that attempting to continue reading an existing change stream throws CappedPositionLost.
-assert.throwsWithCode(() => cst.getNextBatch(startAtDawnOfTimeStream), ErrorCodes.CappedPositionLost);
+assert.throwsWithCode(
+    () => cst.getNextBatch(startAtDawnOfTimeStream),
+    ErrorCodes.CappedPositionLost,
+);
 
-// Now confirm that attempting to resumeAfter or startAtOperationTime fails.
+function getHistoryLostCounter() {
+    return rst.getPrimary().getDB("admin").adminCommand({serverStatus: 1}).metrics.changeStreams
+        .error.nonRetriable.changeStreamHistoryLost;
+}
+
+// Now confirm that attempting to resumeAfter or startAtOperationTime fails, and that each failure
+// increments the nonRetriable.changeStreamHistoryLost serverStatus counter.
+const counterBefore = getHistoryLostCounter();
+
 ChangeStreamTest.assertChangeStreamThrowsCode({
     db: testDB,
     collName: testColl.getName(),
     pipeline: [{$changeStream: {resumeAfter: resumeTokenFromFirstUpdate}}],
     expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+    validateExceptionDetails: validateChangeStreamHistoryLostException(
+        decodeResumeToken(resumeTokenFromFirstUpdate).clusterTime,
+    ),
 });
 
 ChangeStreamTest.assertChangeStreamThrowsCode({
@@ -118,6 +144,7 @@ ChangeStreamTest.assertChangeStreamThrowsCode({
     collName: testColl.getName(),
     pipeline: [{$changeStream: {startAtOperationTime: resumeTimeFirstUpdate}}],
     expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+    validateExceptionDetails: validateChangeStreamHistoryLostException(resumeTimeFirstUpdate),
 });
 
 // We also can't start a stream from the "dawn of time" any more, since the first entry in the
@@ -127,7 +154,14 @@ ChangeStreamTest.assertChangeStreamThrowsCode({
     collName: testColl.getName(),
     pipeline: [{$changeStream: {startAtOperationTime: Timestamp(1, 1)}}],
     expectedCode: ErrorCodes.ChangeStreamHistoryLost,
+    validateExceptionDetails: validateChangeStreamHistoryLostException(Timestamp(1, 1)),
 });
+
+assert.gte(
+    getHistoryLostCounter(),
+    counterBefore + 3,
+    "expected nonRetriable.changeStreamHistoryLost to increment for each failed resume",
+);
 
 cst.cleanUp();
 rst.stopSet();

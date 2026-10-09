@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -94,6 +67,8 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_op_observer.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
 #include "mongo/db/topology/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -102,7 +77,6 @@
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
@@ -123,6 +97,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -250,23 +225,24 @@ public:
         // The ReshardingOplogBatchApplier expects there to already be a Client associated with the
         // thread from the thread pool. We set up the ThreadPoolTaskExecutor identically to how the
         // recipient's primary-only service is set up.
-        ThreadPool::Options threadPoolOptions;
-        threadPoolOptions.maxThreads = 1;
-        threadPoolOptions.threadNamePrefix = "TestReshardOplogBatchApplier-";
-        threadPoolOptions.poolName = "TestReshardOplogBatchApplierThreadPool";
-        threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName, getGlobalServiceContext()->getService());
-            auto* client = Client::getCurrent();
-            AuthorizationSession::get(*client)->grantInternalAuthorization();
-        };
 
         auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
         hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(getServiceContext()));
 
         auto executor = executor::ThreadPoolTaskExecutor::create(
-            std::make_unique<ThreadPool>(std::move(threadPoolOptions)),
-            executor::makeNetworkInterface(
-                "TestReshardOplogBatchApplierNetwork", nullptr, std::move(hookList)));
+            ThreadPool::make({
+                .poolName = "TestReshardOplogBatchApplierThreadPool",
+                .threadNamePrefix = "TestReshardOplogBatchApplier-",
+                .maxThreads = 1,
+                .onCreateThread =
+                    [](const std::string& threadName) {
+                        Client::initThread(threadName, getGlobalServiceContext()->getService());
+                        auto* client = Client::getCurrent();
+                        AuthorizationSession::get(*client)->grantInternalAuthorization();
+                    },
+            }),
+            executor::makeNetworkInterface("TestReshardOplogBatchApplierNetwork",
+                                           {.metadataHook = std::move(hookList)}));
 
         executor->startup();
         return executor;
@@ -532,7 +508,7 @@ private:
             ComparableChunkVersion::makeComparableChunkVersion(version));
     }
 
-    const StringData _currentShardKey = "sk";
+    const std::string_view _currentShardKey = "sk";
 
     const NamespaceString _sourceNss =
         NamespaceString::createNamespaceString_forTest("test_crud", "collection_being_resharded");
@@ -652,6 +628,37 @@ TEST_F(ReshardingOplogBatchApplierTest,
     auto future = applier()->applyBatch<false>(
         {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
     future.get();
+}
+
+TEST_F(ReshardingOplogBatchApplierTest, RetriesWhileReplicaSetWritesAreBlocked) {
+    // Register the op observer that enforces the replica set write block so that the applier's
+    // writes to the (non-internal) temporary resharding collection are rejected with
+    // ReplicaSetWritesBlocked while the block is enabled.
+    auto opObserverRegistry =
+        dynamic_cast<OpObserverRegistry*>(getServiceContext()->getOpObserver());
+    invariant(opObserverRegistry);
+    opObserverRegistry->addObserver(std::make_unique<ReplicaSetWriteBlockOpObserver>());
+
+    auto* writeBlockState = ReplicaSetWriteBlockState::get(getServiceContext());
+    writeBlockState->enableReplicaSetWriteBlocking(
+        ReplicaSetWritesBlockReasonEnum::kInsufficientDiskSpace);
+
+    auto oplogEntry = makeInsertOplogEntry();
+
+    auto executor = makeTaskExecutorForApplier();
+    auto factory = makeCancelableOpCtxForApplier(CancellationToken::uncancelable());
+    auto future = applier()->applyBatch<false>(
+        {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
+
+    // While the block is active the batch is repeatedly rejected, so the applier holds and retries
+    // in place rather than completing or failing the operation.
+    ASSERT_OK(
+        executor->sleepFor(Milliseconds{200}, CancellationToken::uncancelable()).getNoThrow());
+    ASSERT_FALSE(future.isReady());
+
+    // Once the block is lifted, the batch is applied successfully.
+    writeBlockState->disableReplicaSetWriteBlocking();
+    ASSERT_OK(future.getNoThrow());
 }
 
 using ReshardingOplogBatchApplierTestDeathTest = ReshardingOplogBatchApplierTest;

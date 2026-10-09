@@ -11,6 +11,9 @@
  *   does_not_support_stepdowns,
  *   # moveCollection can't run during FCV transitions
  *   cannot_run_during_upgrade_downgrade,
+ *   # The target shard may start draining between getRandomShardName and moveCollection
+ *   # in suites that dynamically add/remove shards.
+ *   assumes_stable_shard_list,
  * ]
  */
 import {getRandomShardName} from "jstests/libs/cluster_helpers/sharded_cluster_fixture_helpers.js";
@@ -21,10 +24,15 @@ const coll = db[jsTestName()];
 coll.drop();
 
 // Create a timeseries collection and validate we have the default {m: 1, t: 1} index
-assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}));
+assert.commandWorked(
+    db.createCollection(coll.getName(), {timeseries: {timeField: "t", metaField: "m"}}),
+);
 {
     // TODO (SERVER-122417) Remove this workaround once v9.0 branches out.
-    const index = IndexCatalogHelpers.addSimpleCollationToIndexIfMissing(db, coll.getIndexByKey({m: 1, t: 1}));
+    const index = IndexCatalogHelpers.addSimpleCollationToIndexIfMissing(
+        db,
+        coll.getIndexByKey({m: 1, t: 1}),
+    );
     assert(index && index.collation && index.collation.locale === "simple", tojson(index));
 }
 

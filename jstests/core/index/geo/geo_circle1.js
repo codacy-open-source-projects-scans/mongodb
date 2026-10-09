@@ -1,5 +1,6 @@
 /**
  * @tags: [
+ *   uses_explain,
  *   assumes_balancer_off,
  *   # explain does not support majority read concern
  *   assumes_read_concern_local,
@@ -54,6 +55,9 @@ for (let i = 0; i < searches.length; i++) {
     assert.gt(
         num,
         explain.executionStats.totalKeysExamined,
-        "nscanned : " + tojson(searches[i] + "; query : " + tojson(q, "", true) + "; explain : " + tojson(explain)),
+        "nscanned : " +
+            tojson(
+                searches[i] + "; query : " + tojson(q, "", true) + "; explain : " + tojson(explain),
+            ),
     );
 }

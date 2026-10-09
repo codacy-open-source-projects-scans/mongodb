@@ -1,42 +1,16 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/database_name.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
 #include <string>
+#include <string_view>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * Every collection / index persisted by the server has a corresponding table in the storage engine.
@@ -46,7 +20,7 @@ namespace MONGO_MOD_PUBLIC mongo {
  */
 class Ident {
 public:
-    explicit Ident(StringData ident) : _ident(std::string{ident}) {}
+    explicit Ident(std::string_view ident) : _ident(std::string{ident}) {}
 
     const std::string& getIdent() const {
         return _ident;
@@ -57,19 +31,20 @@ private:
 };
 
 namespace ident {
+using namespace std::literals::string_view_literals;
 // Hardcoded idents should follow a "internal-camelCase" format. kSizeStore and kMdbCatalog
 // predate this convention so they don't follow it, but future additions should.
 
 // The size storer and catalog have hardcoded idents as we need to be able to open them before we
 // can look up idents in the catalog.
-constexpr inline StringData kSizeStorer = "sizeStorer"_sd;
-constexpr inline StringData kMdbCatalog = "_mdb_catalog"_sd;
+constexpr inline std::string_view kSizeStorer = "sizeStorer"sv;
+constexpr inline std::string_view kMdbCatalog = "_mdb_catalog"sv;
 
 // Replicated fast count use hardcoded idents to avoid consulting the catalog when checking for
 // existence on stepup.
-constexpr inline StringData kFastCountMetadataStore = "internal-fastCountMetadataStore"_sd;
-constexpr inline StringData kFastCountMetadataStoreTimestamps =
-    "internal-fastCountMetadataStoreTimestamps"_sd;
+constexpr inline std::string_view kFastCountMetadataStore = "internal-fastCountMetadataStore"sv;
+constexpr inline std::string_view kFastCountMetadataStoreTimestamps =
+    "internal-fastCountMetadataStoreTimestamps"sv;
 
 /**
  * By default, a storage engine table is uniquely identified by an 'ident' that comes in 1 of 4
@@ -91,13 +66,13 @@ std::string generateNewCollectionIdent(
     const DatabaseName& dbName,
     bool directoryPerDB,
     bool directoryForIndexes,
-    const boost::optional<StringData>& optIdentUniqueTag = boost::none);
+    const boost::optional<std::string_view>& optIdentUniqueTag = boost::none);
 
 std::string generateNewIndexIdent(
     const DatabaseName& dbName,
     bool directoryPerDB,
     bool directoryForIndexes,
-    const boost::optional<StringData>& optIdentUniqueTag = boost::none);
+    const boost::optional<std::string_view>& optIdentUniqueTag = boost::none);
 
 /**
  * Marking an ident as internal implies the underlying data is subject to different handling by the
@@ -106,13 +81,14 @@ std::string generateNewIndexIdent(
  * Generates a unique ident tagged with an 'internal-' prefix. Returns an ident in the form of
  * 'internal-<identStem><unique identifier>'.
  */
-std::string generateNewInternalIdent(StringData identStem = ""_sd);
+std::string generateNewInternalIdent(std::string_view identStem = ""sv);
 
 /**
  * Returns an ident in the form of 'internal-<identStem>-<indexUniqueTag>' or
  * '<db>/internal-<identStem>-<indexUniqueTag>' when 'indexIdent' contains a db component.
  */
-std::string generateNewInternalIndexBuildIdent(StringData identStem, StringData indexIdent);
+std::string generateNewInternalIndexBuildIdent(std::string_view identStem,
+                                               std::string_view indexIdent);
 
 /**
  * Returns the ident for the tracking table of a resumable primary-driven index build.
@@ -124,42 +100,44 @@ std::string generateNewIndexBuildIdent(const UUID& buildUUID);
  * Assumes 'ident' is a well-formed ident for a collection, returns the unique identifier component
  * of the ident.
  */
-StringData getCollectionIdentUniqueTag(StringData ident,
-                                       const DatabaseName& dbName,
-                                       bool directoryPerDB,
-                                       bool directoryForIndexes);
+std::string_view getCollectionIdentUniqueTag(std::string_view ident,
+                                             const DatabaseName& dbName,
+                                             bool directoryPerDB,
+                                             bool directoryForIndexes);
 
 /**
  * Assumes 'ident' is a well-formed ident for an index, returns the unique identifier component
  * of the ident.
  */
-StringData getIndexIdentUniqueTag(StringData ident,
-                                  const DatabaseName& dbName,
-                                  bool directoryPerDB,
-                                  bool directoryForIndexes);
+std::string_view getIndexIdentUniqueTag(std::string_view ident,
+                                        const DatabaseName& dbName,
+                                        bool directoryPerDB,
+                                        bool directoryForIndexes);
 
 /**
  * Returns true if the ident specifies a basic "collection" or "index" table type.
  */
-bool isCollectionOrIndexIdent(StringData ident);
+bool isCollectionOrIndexIdent(std::string_view ident);
 
 /**
  * True if the ident contains the 'internal-<identStem>' prefix.
  */
-bool isInternalIdent(StringData ident, StringData identStem = ""_sd);
+bool isInternalIdent(std::string_view ident, std::string_view identStem = ""sv);
 
 /**
  * Returns true if the ident is for one of the replicated fastcount containers.
  */
-bool isReplicatedFastCountIdent(StringData ident);
+bool isReplicatedFastCountIdent(std::string_view ident);
 
-bool isCollectionIdent(StringData ident);
+bool isCollectionIdent(std::string_view ident);
+
+bool isIndexIdent(std::string_view ident);
 
 /**
  * Validates that the tag does not contain any characters which would be special when interpreted as
  * a path.
  */
-bool validateTag(StringData uniqueTag);
+bool validateTag(std::string_view uniqueTag);
 
 /**
  * Returns false if the string is definitely not a well-formed ident or would be unsafe to interpret
@@ -167,14 +145,14 @@ bool validateTag(StringData uniqueTag);
  * Creating an ident which this returns true for may still fail due to the filesystem imposing
  * additional restrictions (e.g. on Windows) or the maximum path length being exceeded.
  */
-bool isValidIdent(StringData ident);
+bool isValidIdent(std::string_view ident);
 
 /**
  * Returns the directory component of the ident, which is the prefix before the last '/'.
  * Returns an empty string when the ident has no directory component.
  * Supplying an ill-formed ident will trigger a uassert.
  */
-StringData getDirectory(StringData ident);
+std::string_view getDirectory(std::string_view ident);
 
 /**
  * When idents are generated with 'directoryPerDB', the name of the database is encoded within the
@@ -188,4 +166,4 @@ std::string createDBNamePathComponent(const DatabaseName& dbName);
 
 }  // namespace ident
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

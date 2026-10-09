@@ -8,8 +8,6 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
 
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 const dbName = "test";
 const collName = "foo";
 const ns = dbName + "." + collName;
@@ -34,7 +32,9 @@ const refinedShardKeyValueInChunk = {
 
 function setUp(st) {
     // Create a sharded collection with two chunk on shard0, split at key {x: -1}.
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+    );
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: originalShardKey}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: -1}}));
     // Insert documents into the collection, which contains two chunks. Insert documents only
@@ -80,12 +80,19 @@ function test(st, description, testBody) {
             " shard after a successful migration",
         () => {
             // Enable failpoint which will cause range deletion to hang indefinitely.
-            let suspendRangeDeletionFailpoint = configureFailPoint(st.rs0.getPrimary(), "suspendRangeDeletion");
+            let suspendRangeDeletionFailpoint = configureFailPoint(
+                st.rs0.getPrimary(),
+                "suspendRangeDeletion",
+            );
 
             // Note that _waitForDelete has to be absent/false since we're suspending range
             // deletion.
             assert.commandWorked(
-                st.s.adminCommand({moveChunk: ns, find: shardKeyValueInChunk, to: st.shard1.shardName}),
+                st.s.adminCommand({
+                    moveChunk: ns,
+                    find: shardKeyValueInChunk,
+                    to: st.shard1.shardName,
+                }),
             );
 
             jsTestLog("Waiting for the suspendRangeDeletion failpoint to be hit");
@@ -98,7 +105,9 @@ function test(st, description, testBody) {
             assert.commandWorked(st.s.getCollection(ns).createIndex(refinedShardKey));
 
             // Refine the shard key from just the field 'x' to 'x' and 'y'.
-            assert.commandWorked(st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}));
+            assert.commandWorked(
+                st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}),
+            );
 
             // The index on the original shard key shouldn't be required anymore.
             assert.commandWorked(st.s.getCollection(ns).dropIndex(originalShardKey));
@@ -121,12 +130,19 @@ function test(st, description, testBody) {
             "an orphaned range created with the prior shard key",
         () => {
             // Enable failpoint which will cause range deletion to hang indefinitely.
-            let suspendRangeDeletionFailpoint = configureFailPoint(st.rs0.getPrimary(), "suspendRangeDeletion");
+            let suspendRangeDeletionFailpoint = configureFailPoint(
+                st.rs0.getPrimary(),
+                "suspendRangeDeletion",
+            );
 
             // Note that _waitForDelete has to be absent/false since we're suspending range
             // deletion.
             assert.commandWorked(
-                st.s.adminCommand({moveChunk: ns, find: shardKeyValueInChunk, to: st.shard1.shardName}),
+                st.s.adminCommand({
+                    moveChunk: ns,
+                    find: shardKeyValueInChunk,
+                    to: st.shard1.shardName,
+                }),
             );
 
             jsTestLog("Waiting for the suspendRangeDeletion failpoint to be hit");
@@ -139,16 +155,17 @@ function test(st, description, testBody) {
             assert.commandWorked(st.s.getCollection(ns).createIndex(refinedShardKey));
 
             // Refine the shard key from just the field 'x' to 'x' and 'y'.
-            assert.commandWorked(st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}));
+            assert.commandWorked(
+                st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}),
+            );
 
             // The index on the original shard key shouldn't be required anymore.
             assert.commandWorked(st.s.getCollection(ns).dropIndex(originalShardKey));
 
-            // We will use this to wait until the following migration has completed. Waiting for
-            // this failpoint technically just waits for the recipient side of the migration to
-            // complete, but it's expected that if the migration can get to that point, then it
-            // should be able to succeed overall.
-            let hangDonorAtEndOfMigration = configureFailPoint(st.rs1.getPrimary(), "moveChunkHangAtStep6");
+            // Hang after waiting for orphan cleanup so that in the test we can check for orphans
+            // on disk before documents begin migrating. This recipient-side point is independent
+            // of whether the donor uses the legacy moveChunk path or the MoveRangeCoordinator path.
+            let hangRecipient = configureFailPoint(st.rs0.getPrimary(), "migrateThreadHangAtStep1");
 
             // Attempt to move the chunk back to shard 0. Synchronize with the parallel shell to
             // make sure that the moveChunk started.
@@ -157,7 +174,9 @@ function test(st, description, testBody) {
                 funWithArgs(
                     function (ns, toShardName, middle) {
                         jsTestLog("Attempting to move the chunk back to shard 0");
-                        assert.commandWorked(db.adminCommand({moveChunk: ns, find: middle, to: toShardName}));
+                        assert.commandWorked(
+                            db.adminCommand({moveChunk: ns, find: middle, to: toShardName}),
+                        );
                     },
                     ns,
                     st.shard0.shardName,
@@ -169,10 +188,6 @@ function test(st, description, testBody) {
             hangOnStep1.wait();
             hangOnStep1.off();
 
-            // Hang after waiting for orphan cleanup so that in the test we can check for orphans
-            // on disk before documents begin migrating.
-            let hangRecipient = configureFailPoint(st.rs0.getPrimary(), "migrateThreadHangAtStep1");
-
             // Allow range deletion to continue.
             suspendRangeDeletionFailpoint.off();
 
@@ -183,11 +198,9 @@ function test(st, description, testBody) {
                 return st.rs0.getPrimary().getCollection(ns).find().itcount() == 0;
             });
 
+            hangRecipient.wait();
             hangRecipient.off();
 
-            // Wait for the previous migration to complete before continuing.
-            hangDonorAtEndOfMigration.wait();
-            hangDonorAtEndOfMigration.off();
             awaitResult();
         },
     );
@@ -200,12 +213,19 @@ function test(st, description, testBody) {
             "conflict with non-overlapping ranges once the shard key is refined",
         () => {
             // Enable failpoint which will cause range deletion to hang indefinitely.
-            let suspendRangeDeletionFailpoint = configureFailPoint(st.rs0.getPrimary(), "suspendRangeDeletion");
+            let suspendRangeDeletionFailpoint = configureFailPoint(
+                st.rs0.getPrimary(),
+                "suspendRangeDeletion",
+            );
 
             // Note that _waitForDelete has to be absent/false since we're suspending range
             // deletion.
             assert.commandWorked(
-                st.s.adminCommand({moveChunk: ns, find: shardKeyValueInChunk, to: st.shard1.shardName}),
+                st.s.adminCommand({
+                    moveChunk: ns,
+                    find: shardKeyValueInChunk,
+                    to: st.shard1.shardName,
+                }),
             );
 
             jsTestLog("Waiting for the suspendRangeDeletion failpoint to be hit");
@@ -218,14 +238,18 @@ function test(st, description, testBody) {
             assert.commandWorked(st.s.getCollection(ns).createIndex(refinedShardKey));
 
             // Refine the shard key from just the field 'x' to 'x' and 'y'.
-            assert.commandWorked(st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}));
+            assert.commandWorked(
+                st.s.adminCommand({refineCollectionShardKey: ns, key: refinedShardKey}),
+            );
 
             // The index on the original shard key shouldn't be required anymore.
             assert.commandWorked(st.s.getCollection(ns).dropIndex(originalShardKey));
 
             // Step down current primary.
             assert.commandWorked(
-                st.rs0.getPrimary().adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: 1}),
+                st.rs0
+                    .getPrimary()
+                    .adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: 1}),
             );
 
             // Allow range deletion to continue on old node. This isn't required for this test to

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include <cstdint>
 #include <cstdio>
@@ -44,7 +18,6 @@
 #include <boost/iterator/iterator_facade.hpp>
 #include <boost/move/utility_core.hpp>
 #include <fmt/format.h>
-// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -52,7 +25,6 @@
 
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -76,15 +48,12 @@
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
 namespace mongo {
-
-using std::ifstream;
-using std::string;
-using std::stringstream;
 
 /**
  * These utilities are thread safe but do not provide mutually exclusive access to resources
@@ -102,11 +71,11 @@ BSONObj listFiles(const BSONObj& _args, void* data) {
 
     BSONArrayBuilder lst;
 
-    string rootname = args.firstElement().str();
+    std::string rootname = args.firstElement().str();
     boost::filesystem::path root(rootname);
-    stringstream ss;
+    std::stringstream ss;
     ss << "listFiles: no such directory: " << rootname;
-    string msg = ss.str();
+    std::string msg = ss.str();
     uassert(12581,
             msg.c_str(),
             boost::filesystem::exists(root) && boost::filesystem::is_directory(root));
@@ -188,7 +157,7 @@ BSONObj cat(const BSONObj& args, void* data) {
             mode |= std::ios::binary;
     }
 
-    ifstream f(filePath.valueStringDataSafe().data(), mode);
+    std::ifstream f(filePath.str(), mode);
     uassert(CANT_OPEN_FILE, fmt::format("couldn't open file {}", filePath.str()), f.is_open());
     std::streamsize fileSize = 0;
     // will throw on filesystem error
@@ -270,8 +239,8 @@ BSONObj copyFileRange(const BSONObj& args, void* data) {
 
 BSONObj md5sumFile(const BSONObj& args, void* data) {
     BSONElement e = singleArg(args);
-    stringstream ss;
-    FILE* f = fopen(e.valueStringDataSafe().data(), "rb");
+    std::stringstream ss;
+    FILE* f = fopen(e.str().c_str(), "rb");
     uassert(CANT_OPEN_FILE, str::stream() << "couldn't open file " << e.str(), f);
     ON_BLOCK_EXIT([&] { fclose(f); });
 
@@ -499,8 +468,8 @@ BSONObj getFileMode(const BSONObj& a, void* data) {
     uassert(50975,
             "getFileMode() takes one argument, the absolute path to a file",
             a.nFields() == 1 && a.firstElementType() == BSONType::string);
-    auto pathStr = a.firstElement().checkAndGetStringData();
-    boost::filesystem::path path(pathStr.data());
+    std::string pathStr = a.firstElement().str();
+    boost::filesystem::path path(pathStr);
     boost::system::error_code ec;
     auto fileStatus = boost::filesystem::status(path, ec);
     if (ec) {
@@ -728,9 +697,9 @@ BSONObj readDumpFile(const BSONObj& a, void*) {
         // Record the amount of valid data ahead of us before
         // advancing the cursor so we can use it as an argument to
         // validate below. It would be nice and proper to use
-        // Validated<BSONObj> for all of this instead, but
-        // unfortunately the BSONObj specialization of Validated
-        // depends on a server parameter, so we do it manually.
+        // rpc::checkBSONObj for all of this instead, but
+        // unfortunately that depends on a server parameter, so we
+        // do it manually.
         const auto expectedValidBytes = cursor.length();
 
         const auto swObj = cursor.readAndAdvanceNoThrow<BSONObj>();
@@ -834,9 +803,9 @@ BSONObj getObjInDumpFile(const BSONObj& a, void*) {
     // Record the amount of valid data ahead of us before
     // advancing the cursor so we can use it as an argument to
     // validate below. It would be nice and proper to use
-    // Validated<BSONObj> for all of this instead, but
-    // unfortunately the BSONObj specialization of Validated
-    // depends on a server parameter, so we do it manually.
+    // rpc::checkBSONObj for all of this instead, but
+    // unfortunately that depends on a server parameter, so
+    // we do it manually.
     const auto expectedValidBytes = cursor.length();
     BSONObj obj;
     cursor.readAndAdvance<BSONObj>(&obj);
@@ -854,7 +823,7 @@ BSONObj ls(const BSONObj& args, void* data) {
     if (!o.isEmpty()) {
         for (auto&& elem : o.firstElement().Obj()) {
             BSONObj f = elem.Obj();
-            string name = f["name"].String();
+            std::string name = f["name"].String();
             if (f["isDirectory"].trueValue()) {
                 name += '/';
             }

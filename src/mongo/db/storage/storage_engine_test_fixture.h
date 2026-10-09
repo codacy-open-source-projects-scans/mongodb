@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -48,13 +22,15 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/modules.h"
 
+#include <string_view>
+
 #include <boost/iterator/transform_iterator.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
 
-class MONGO_MOD_OPEN StorageEngineTest : public ServiceContextMongoDTest {
+class [[MONGO_MOD_OPEN]] StorageEngineTest : public ServiceContextMongoDTest {
 public:
     // Storage engine tests cover spill table creation and management, requiring the spill
     // WiredTiger instance.
@@ -139,7 +115,9 @@ public:
         return rs;
     }
 
-    Status dropIndexTable(OperationContext* opCtx, NamespaceString nss, StringData indexName) {
+    Status dropIndexTable(OperationContext* opCtx,
+                          NamespaceString nss,
+                          std::string_view indexName) {
         RecordId catalogId =
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)->getCatalogId();
         std::string indexIdent =
@@ -147,7 +125,7 @@ public:
         return dropIdent(*shard_role_details::getRecoveryUnit(opCtx), indexIdent, false);
     }
 
-    Status dropIdent(RecoveryUnit& ru, StringData ident, bool identHasSizeInfo) {
+    Status dropIdent(RecoveryUnit& ru, std::string_view ident, bool identHasSizeInfo) {
         return _storageEngine->getEngine()->dropIdent(ru, ident, identHasSizeInfo);
     }
 
@@ -189,12 +167,12 @@ public:
         });
     }
 
-    bool identExists(OperationContext* opCtx, StringData ident) {
+    bool identExists(OperationContext* opCtx, std::string_view ident) {
         auto idents = getAllKVEngineIdents(opCtx);
         return std::find(idents.begin(), idents.end(), ident) != idents.end();
     }
 
-    bool spillIdentExists(OperationContext* opCtx, StringData ident) {
+    bool spillIdentExists(OperationContext* opCtx, std::string_view ident) {
         auto idents = getAllSpillKVEngineIdents(opCtx);
         return std::find(idents.begin(), idents.end(), ident) != idents.end();
     }
@@ -202,7 +180,7 @@ public:
     /**
      * Create an index with a key of `{<key>: 1}` and a `name` of <key>.
      */
-    Status createIndex(OperationContext* opCtx, NamespaceString collNs, StringData key) {
+    Status createIndex(OperationContext* opCtx, NamespaceString collNs, std::string_view key) {
         auto buildUUID = UUID::gen();
         auto ret = startIndexBuild(opCtx, collNs, key, buildUUID);
         if (!ret.isOK()) {
@@ -215,7 +193,7 @@ public:
 
     Status startIndexBuild(OperationContext* opCtx,
                            NamespaceString collNs,
-                           StringData key,
+                           std::string_view key,
                            boost::optional<UUID> buildUUID) {
         BSONObjBuilder builder;
         BSONObj spec = BSON("v" << 2 << "key" << BSON(key << 1) << "name" << key);
@@ -227,7 +205,7 @@ public:
             opCtx, &descriptor, _storageEngine->generateNewIndexIdent(collNs.dbName()), buildUUID);
     }
 
-    void indexBuildSuccess(OperationContext* opCtx, NamespaceString collNs, StringData key) {
+    void indexBuildSuccess(OperationContext* opCtx, NamespaceString collNs, std::string_view key) {
         CollectionWriter writer{opCtx, collNs};
         Collection* collection = writer.getWritableCollection(opCtx);
         auto writableEntry = collection->getIndexCatalog()->getWritableEntryByName(
@@ -238,7 +216,7 @@ public:
         collection->indexBuildSuccess(opCtx, writableEntry);
     }
 
-    Status removeEntry(OperationContext* opCtx, StringData collNs, MDBCatalog* catalog) {
+    Status removeEntry(OperationContext* opCtx, std::string_view collNs, MDBCatalog* catalog) {
         const Collection* collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
             opCtx, NamespaceString::createNamespaceString_forTest(collNs));
         return catalog->removeEntry(opCtx, collection->getCatalogId());
@@ -247,7 +225,7 @@ public:
     StorageEngine* _storageEngine;
 };
 
-class MONGO_MOD_OPEN StorageEngineRepairTest : public StorageEngineTest {
+class [[MONGO_MOD_OPEN]] StorageEngineRepairTest : public StorageEngineTest {
 public:
     StorageEngineRepairTest() : StorageEngineTest(Options{}.enableRepair().inMemory(false)) {
         repl::StorageInterface::set(getServiceContext(),
@@ -270,7 +248,7 @@ public:
     }
 };
 
-class MONGO_MOD_OPEN StorageEngineTestNotEphemeral : public StorageEngineTest {
+class [[MONGO_MOD_OPEN]] StorageEngineTestNotEphemeral : public StorageEngineTest {
 public:
     StorageEngineTestNotEphemeral() : StorageEngineTest(Options{}.inMemory(false)) {}
 };

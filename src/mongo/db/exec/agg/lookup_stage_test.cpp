@@ -1,32 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
-
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/lookup_stage.h"
 
@@ -39,13 +12,17 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source_lookup_test_util.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/topology/sharding_state.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 
 #include <deque>
+#include <limits>
 #include <list>
+#include <string_view>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -54,6 +31,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace test;
 
@@ -68,12 +46,9 @@ protected:
                 std::deque<DocumentSource::GetNextResult>{}));
     }
 };
-const long long kDefaultMaxCacheSize =
-    loadMemoryLimit(StageMemoryLimit::DocumentSourceLookupCacheSizeBytes);
 
-const auto kExplain = SerializationOptions{
+const auto kExplain = query_shape::SerializationOptions{
     .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
-
 
 TEST_F(LookupStageTest, ShouldPropagatePauses) {
     auto expCtx = getExpCtx();
@@ -98,9 +73,9 @@ TEST_F(LookupStageTest, ShouldPropagatePauses) {
     // Set up the $lookup stage.
     auto lookupSpec = Document{{"$lookup",
                                 Document{{"from", fromNs.coll()},
-                                         {"localField", "foreignId"_sd},
-                                         {"foreignField", "_id"_sd},
-                                         {"as", "foreignDocs"_sd}}}}
+                                         {"localField", "foreignId"sv},
+                                         {"foreignField", "_id"sv},
+                                         {"as", "foreignDocs"sv}}}}
                           .toBson();
     auto lookup = makeLookUpFromBson(lookupSpec.firstElement(), expCtx);
     auto lookupStage = exec::agg::buildStageAndStitch(lookup, mockLocalStage);
@@ -146,9 +121,9 @@ TEST_F(LookupStageTest, ShouldPropagatePausesWhileUnwinding) {
     // Set up the $lookup stage.
     auto lookupSpec = Document{{"$lookup",
                                 Document{{"from", fromNs.coll()},
-                                         {"localField", "foreignId"_sd},
-                                         {"foreignField", "_id"_sd},
-                                         {"as", "foreignDoc"_sd}}}}
+                                         {"localField", "foreignId"sv},
+                                         {"foreignField", "_id"sv},
+                                         {"as", "foreignDoc"sv}}}}
                           .toBson();
     auto lookup = makeLookUpFromBson(lookupSpec.firstElement(), expCtx);
 
@@ -176,7 +151,6 @@ TEST_F(LookupStageTest, ShouldPropagatePausesWhileUnwinding) {
     ASSERT_TRUE(lookupStage->getNext().isEOF());
     ASSERT_TRUE(lookupStage->getNext().isEOF());
 }
-
 
 TEST_F(LookupStageTest, ShouldReplaceNonCorrelatedPrefixWithCacheAfterFirstSubPipelineIteration) {
     auto expCtx = getExpCtx();
@@ -209,7 +183,7 @@ TEST_F(LookupStageTest, ShouldReplaceNonCorrelatedPrefixWithCacheAfterFirstSubPi
 
     auto expectedPipe = fromjson(
         str::stream() << "[{$mock: {}}, {$match: {x: {$gte: 0}}}, {$sort: {sortKey: {x: 1}}}, "
-                      << sequentialCacheStageObj("kBuilding")
+                      << sequentialCacheStageObj(getExpCtx()->getOperationContext(), "kBuilding")
                       << ", {$addFields: {varField: {$sum: ['$x', {$const: 0}]}}}]");
 
     ASSERT_VALUE_EQ(Value(subPipeline->writeExplainOps(kExplain)), Value(BSONArray(expectedPipe)));
@@ -228,9 +202,10 @@ TEST_F(LookupStageTest, ShouldReplaceNonCorrelatedPrefixWithCacheAfterFirstSubPi
     subPipeline = lookupStage->buildPipeline(lookupDS->getSubpipelineExpCtx(), DOC("_id" << 1));
     ASSERT(subPipeline);
 
-    expectedPipe =
-        fromjson(str::stream() << "[" << sequentialCacheStageObj("kServing")
-                               << ", {$addFields: {varField: {$sum: ['$x', {$const: 1}]}}}]");
+    expectedPipe = fromjson(
+        str::stream() << "["
+                      << sequentialCacheStageObj(getExpCtx()->getOperationContext(), "kServing")
+                      << ", {$addFields: {varField: {$sum: ['$x', {$const: 1}]}}}]");
 
     ASSERT_VALUE_EQ(Value(subPipeline->writeExplainOps(kExplain)), Value(BSONArray(expectedPipe)));
 
@@ -285,7 +260,8 @@ TEST_F(LookupStageTest, ShouldAbandonCacheIfMaxSizeIsExceededAfterFirstSubPipeli
 
     auto expectedPipe = fromjson(
         str::stream() << "[{$mock: {}}, {$match: {x: {$gte: 0}}}, {$sort: {sortKey: {x: 1}}}, "
-                      << sequentialCacheStageObj("kBuilding", 0ll)
+                      << sequentialCacheStageObj(
+                             getExpCtx()->getOperationContext(), "kBuilding", 0ll)
                       << ", {$addFields: {varField: {$sum: ['$x', {$const: 0}]}}}]");
 
     ASSERT_VALUE_EQ(Value(subPipeline->writeExplainOps(kExplain)), Value(BSONArray(expectedPipe)));
@@ -318,7 +294,7 @@ TEST_F(LookupStageTest, ShouldAbandonCacheIfMaxSizeIsExceededAfterFirstSubPipeli
 
 TEST_F(LookupStageTest, AddingCacheStageWorksWithDisablePipelineRewrites) {
     // Disable pipeline rewrites.
-    RAIIServerParameterControllerForTest controller("internalQueryMaxPipelineRewrites", 0);
+    unittest::ServerParameterGuard controller("internalQueryMaxPipelineRewrites", 0);
 
     auto expCtx = getExpCtx();
     NamespaceString fromNs =
@@ -364,6 +340,150 @@ TEST_F(LookupStageTest, AddingCacheStageWorksWithDisablePipelineRewrites) {
     auto subPipeline =
         lookupStage->buildPipeline(lookupDS->getSubpipelineExpCtx(), DOC("_id" << 1));
     ASSERT(subPipeline);
+}
+
+// Test-only expression, registered as $_testMemoryTrackerObserver, used as a $lookup 'let' value.
+class MemoryTrackerObservingExpression final : public Expression {
+public:
+    static inline int gEvaluations = 0;
+    static inline int gEvaluationsWithTracker = 0;
+    static inline int64_t gLastTrackerMaxBytes = -1;
+    static inline std::string_view gLastStageName;
+    static void resetObservations() {
+        gEvaluations = 0;
+        gEvaluationsWithTracker = 0;
+        gLastTrackerMaxBytes = -1;
+        gLastStageName = std::string_view{};
+    }
+
+    explicit MemoryTrackerObservingExpression(ExpressionContext* expCtx) : Expression(expCtx) {}
+
+    static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
+                                                  BSONElement expr,
+                                                  const VariablesParseState&) {
+        return make_intrusive<MemoryTrackerObservingExpression>(expCtx);
+    }
+
+    Value evaluate(const Document& root,
+                   Variables* variables,
+                   const EvaluationContext& ctx) const final {
+        ++gEvaluations;
+        if (ctx.tracker != nullptr) {
+            ++gEvaluationsWithTracker;
+            gLastTrackerMaxBytes = ctx.tracker->maxAllowedMemoryUsageBytes(
+                getExpressionContext()->getOperationContext());
+        }
+        gLastStageName = ctx.stageName;
+        return Value(1);
+    }
+
+    Value serialize(const query_shape::SerializationOptions& options = {}) const final {
+        return Value(Document{});
+    }
+    boost::intrusive_ptr<Expression> clone(ExpressionContext& expCtx) const final {
+        return make_intrusive<MemoryTrackerObservingExpression>(&expCtx);
+    }
+    void acceptVisitor(ExpressionMutableVisitor*) final {
+        MONGO_UNREACHABLE;
+    }
+    void acceptVisitor(ExpressionConstVisitor*) const final {
+        MONGO_UNREACHABLE;
+    }
+};
+
+REGISTER_TEST_EXPRESSION(_testMemoryTrackerObserver,
+                         MemoryTrackerObservingExpression::parse,
+                         AllowedWithApiStrict::kAlways,
+                         AllowedWithClientType::kAny,
+                         nullptr /* featureFlag */);
+
+struct LookupTestResult {
+    boost::intrusive_ptr<exec::agg::Stage> stage;
+    boost::intrusive_ptr<exec::agg::MockStage> source;  // must outlive stage
+};
+
+// Runs a $lookup over a single local document whose 'let' variable is the tracker-observing
+// expression, resetting the observation counters first.
+LookupTestResult runLookupWithObservingLetVariable(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    MemoryTrackerObservingExpression::resetObservations();
+
+    NamespaceString fromNs =
+        NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
+    expCtx->setResolvedNamespaces(ResolvedNamespaceMap{{fromNs, {fromNs, std::vector<BSONObj>()}}});
+    expCtx->setMongoProcessInterface(std::make_shared<DocumentSourceLookupMockMongoInterface>(
+        std::deque<DocumentSource::GetNextResult>{Document{{"x", 0}}}));
+
+    auto lookupDS = makeLookUpFromJson(
+        "{$lookup: {let: {var1: {$_testMemoryTrackerObserver: {}}}, pipeline: [{$match: {x: {$gte: "
+        "0}}}], from: 'coll', as: 'as'}}",
+        expCtx);
+    auto mockLocalStage = exec::agg::MockStage::createForTest({Document{{"_id", 0}}}, expCtx);
+    auto lookupStage = buildLookUpStage(lookupDS);
+    exec::agg::MockStage::setSource_forTest(lookupStage, mockLocalStage.get());
+    while (lookupStage->getNext().isAdvanced()) {
+    }
+    return {lookupStage, mockLocalStage};
+}
+
+TEST_F(LookupStageTest, ThreadsMemoryTrackerWhenEvaluatingLetVariables) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    runLookupWithObservingLetVariable(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluations, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 1);
+}
+
+TEST_F(LookupStageTest, DoesNotThreadMemoryTrackerWhenExpressionMemoryTrackingDisabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", false);
+
+    runLookupWithObservingLetVariable(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluations, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 0);
+}
+
+TEST_F(LookupStageTest, MemoryTrackerHasNoPerStageLimit) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    runLookupWithObservingLetVariable(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gEvaluationsWithTracker, 1);
+    ASSERT_EQ(MemoryTrackerObservingExpression::gLastTrackerMaxBytes,
+              std::numeric_limits<int64_t>::max());
+}
+
+TEST_F(LookupStageTest, StageNameIsSetInEvaluationContext) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    auto [stage, source] = runLookupWithObservingLetVariable(getExpCtx());
+
+    ASSERT_EQ(MemoryTrackerObservingExpression::gLastStageName, "$lookup");
+}
+
+TEST_F(LookupStageTest, ExplainOutputIncludesExpressionEvaluationPeakMemoryBytesWhenEnabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", true);
+
+    auto [stage, source] = runLookupWithObservingLetVariable(getExpCtx());
+
+    auto explain = stage->getExplainOutput();
+    ASSERT(!explain.getNestedField("expressionEvaluationPeakMemoryBytes").missing());
+}
+
+TEST_F(LookupStageTest, ExplainOutputOmitsExpressionEvaluationPeakMemoryBytesWhenDisabled) {
+    unittest::ServerParameterGuard queryMemTracking("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprMemTracking("featureFlagExpressionMemoryTracking", false);
+
+    auto [stage, source] = runLookupWithObservingLetVariable(getExpCtx());
+
+    auto explain = stage->getExplainOutput();
+    ASSERT(explain.getNestedField("expressionEvaluationPeakMemoryBytes").missing());
 }
 }  // namespace
 }  // namespace mongo

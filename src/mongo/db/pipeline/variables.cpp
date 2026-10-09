@@ -1,63 +1,32 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/variables.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/auth/auth_name.h"
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/auth/role_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/variable_validation.h"
-#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/rpc/metadata/audit_user_attrs.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -70,7 +39,7 @@ namespace {
 // "$notAFieldName"}, not simply "$notAFieldName", since the latter will be treated as a field name
 // by mongods.
 Value serializeValue(Value val) {
-    return val.missing() ? Value("$$REMOVE"_sd) : Value(DOC("$literal" << val));
+    return val.missing() ? Value("$$REMOVE"sv) : Value(DOC("$literal" << val));
 }
 }  // namespace
 
@@ -99,41 +68,42 @@ const std::map<Variables::Id, std::string> Variables::kIdToBuiltinVarName = {
     {kSearchMetaId, kSearchMetaName.data()},
     {kUserRolesId, kUserRolesName.data()}};
 
-const std::map<StringData, std::function<void(const Value&)>> Variables::kSystemVarValidators = {
-    {kNowName,
-     [](const auto& value) {
-         uassert(ErrorCodes::TypeMismatch,
-                 str::stream() << "$$NOW must have a date value, found "
-                               << typeName(value.getType()),
-                 value.getType() == BSONType::date);
-     }},
-    {kClusterTimeName,
-     [](const auto& value) {
-         uassert(ErrorCodes::TypeMismatch,
-                 str::stream() << "$$CLUSTER_TIME must have a timestamp value, found "
-                               << typeName(value.getType()),
-                 value.getType() == BSONType::timestamp);
-     }},
-    {kJsScopeName,
-     [](const auto& value) {
-         uassert(ErrorCodes::TypeMismatch,
-                 str::stream() << "$$JS_SCOPE must have an object value, found "
-                               << typeName(value.getType()),
-                 value.getType() == BSONType::object);
-     }},
-    {kIsMapReduceName,
-     [](const auto& value) {
-         uassert(ErrorCodes::TypeMismatch,
-                 str::stream() << "$$IS_MR must have a bool value, found "
-                               << typeName(value.getType()),
-                 value.getType() == BSONType::boolean);
-     }},
-    {kUserRolesName, [](const auto& value) {
-         uassert(ErrorCodes::TypeMismatch,
-                 str::stream() << "$$USER_ROLES must have an array value, found "
-                               << typeName(value.getType()),
-                 value.getType() == BSONType::array);
-     }}};
+const std::map<std::string_view, std::function<void(const Value&)>>
+    Variables::kSystemVarValidators = {
+        {kNowName,
+         [](const auto& value) {
+             uassert(ErrorCodes::TypeMismatch,
+                     str::stream()
+                         << "$$NOW must have a date value, found " << typeName(value.getType()),
+                     value.getType() == BSONType::date);
+         }},
+        {kClusterTimeName,
+         [](const auto& value) {
+             uassert(ErrorCodes::TypeMismatch,
+                     str::stream() << "$$CLUSTER_TIME must have a timestamp value, found "
+                                   << typeName(value.getType()),
+                     value.getType() == BSONType::timestamp);
+         }},
+        {kJsScopeName,
+         [](const auto& value) {
+             uassert(ErrorCodes::TypeMismatch,
+                     str::stream() << "$$JS_SCOPE must have an object value, found "
+                                   << typeName(value.getType()),
+                     value.getType() == BSONType::object);
+         }},
+        {kIsMapReduceName,
+         [](const auto& value) {
+             uassert(ErrorCodes::TypeMismatch,
+                     str::stream()
+                         << "$$IS_MR must have a bool value, found " << typeName(value.getType()),
+                     value.getType() == BSONType::boolean);
+         }},
+        {kUserRolesName, [](const auto& value) {
+             uassert(ErrorCodes::TypeMismatch,
+                     str::stream() << "$$USER_ROLES must have an array value, found "
+                                   << typeName(value.getType()),
+                     value.getType() == BSONType::array);
+         }}};
 
 void Variables::setValue(Id id, const Value& value, bool isConstant) {
     uassert(17199, "can't use Variables::setValue to set a reserved builtin variable", id >= 0);
@@ -254,6 +224,19 @@ void Variables::setDefaultRuntimeConstants(OperationContext* opCtx) {
     setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
 }
 
+void Variables::validateRuntimeConstantsArePermitted(
+    OperationContext* opCtx, const boost::optional<LegacyRuntimeConstants>& runtimeConstants) {
+    if (!runtimeConstants || !runtimeConstants->getUserRoles()) {
+        return;
+    }
+
+    auto* client = opCtx->getClient();
+    const bool isTrustedSource =
+        !client->session() || client->isInternalClient() || client->isInDirectClient();
+    uassert(
+        12843300, "Manually setting 'runtimeConstants.userRoles' is not allowed.", isTrustedSource);
+}
+
 void Variables::appendSystemVariables(BSONObjBuilder& bob) const {
     for (auto&& [name, id] : kBuiltinVarNameToId) {
         if (hasValue(id)) {
@@ -275,7 +258,7 @@ namespace {
  * variables.
  */
 boost::optional<std::function<void(const Value&)>> validateVariable(OperationContext* opCtx,
-                                                                    StringData varName) {
+                                                                    std::string_view varName) {
     auto validateStatus = variableValidation::isValidNameForUserWrite(varName);
     if (validateStatus.isOK()) {
         return boost::none;
@@ -309,7 +292,10 @@ void Variables::seedVariablesWithLetParameters(
                 "Command let Expression tried to access a field, but this is not allowed because"
                 "Command let Expressions run before the query examines any documents.",
                 exprRequirementsValidator(expr.get()));
-        Value value = expr->evaluate(Document{}, &expCtx->variables);
+        // Let parameters are evaluated at ExpressionContext construction, before query settings
+        // are applied, when the operation-wide limit may not be read yet; the seeded value lives
+        // on for the whole operation, so its footprint stays charged.
+        Value value = expr->foldConstant();
 
         if (maybeSystemVarValidator) {
             (*maybeSystemVarValidator)(value);
@@ -335,7 +321,7 @@ void Variables::seedVariablesWithLetParameters(
 BSONObj Variables::toBSON(const VariablesParseState& vps, const BSONObj& varsToSerialize) const {
     BSONObjBuilder result;
     for (BSONElement elem : varsToSerialize) {
-        StringData name = elem.fieldNameStringData();
+        std::string_view name = elem.fieldNameStringData();
         result << name << serializeValue(getUserDefinedValue(vps.getVariable(name)));
     }
     return result.obj();
@@ -408,13 +394,20 @@ LegacyRuntimeConstants Variables::transitionalExtractRuntimeConstants() const {
                     break;
                 }
                 case kUserRolesId: {
-                    invariant(value.getType() == BSONType::array);
-                    BSONArrayBuilder bab;
+                    tassert(ErrorCodes::TypeMismatch,
+                            str::stream() << "$$USER_ROLES must be an array, found "
+                                          << typeName(value.getType()),
+                            value.getType() == BSONType::array);
+                    std::vector<BSONObj> userRolesVec;
                     for (const auto& val : value.getArray()) {
-                        invariant(val.getType() == BSONType::object);
-                        bab.append(val.getDocument().toBson());
+                        tassert(ErrorCodes::TypeMismatch,
+                                str::stream()
+                                    << "Each element of $$USER_ROLES must be an object, found "
+                                    << typeName(val.getType()),
+                                val.getType() == BSONType::object);
+                        userRolesVec.push_back(val.getDocument().toBson());
                     }
-                    extracted.setUserRoles(bab.arr());
+                    extracted.setUserRoles(std::move(userRolesVec));
                     break;
                 }
                 default:
@@ -432,9 +425,9 @@ void Variables::defineUserRoles(OperationContext* opCtx) {
         // {_id: ..., db: ..., role: ...} objects for the $$USER_ROLES variable.
         for (const auto& roleName : auditUserAttrs->getRoles()) {
             BSONObjBuilder bob(builder.subobjStart());
-            bob.append("_id"_sd, roleName.getUnambiguousName());
-            bob.append("role"_sd, roleName.getRole());
-            bob.append("db"_sd, roleName.getDB());
+            bob.append("_id"sv, roleName.getUnambiguousName());
+            bob.append("role"sv, roleName.getRole());
+            bob.append("db"sv, roleName.getDB());
             bob.doneFast();
         }
     }
@@ -458,7 +451,7 @@ LetVariable::LetVariable(std::string attributeName,
                          Variables::Id varId)
     : name(std::move(attributeName)), expression(std::move(attributeExpression)), id(varId) {}
 
-Variables::Id VariablesParseState::defineVariable(StringData name) {
+Variables::Id VariablesParseState::defineVariable(std::string_view name) {
     // Caller should have validated before hand by using
     // variableValidation::validateNameForUserWrite.
     massert(17275,
@@ -472,7 +465,7 @@ Variables::Id VariablesParseState::defineVariable(StringData name) {
     return id;
 }
 
-Variables::Id VariablesParseState::getVariable(StringData name) const {
+Variables::Id VariablesParseState::getVariable(std::string_view name) const {
     auto it = _variables.find(name);
     if (it != _variables.end()) {
         // Found a user-defined variable.
@@ -525,8 +518,8 @@ std::pair<LegacyRuntimeConstants, BSONObj> VariablesParseState::transitionalComp
     return {vars.transitionalExtractRuntimeConstants(), bob.obj()};
 }
 
-LetVariable LetVariable::cloneUsingNewExpCtx(ExpressionContext* newExpCtx) const {
-    auto clonedExpr = expression ? expression->cloneUsingNewExpCtx(newExpCtx) : nullptr;
+LetVariable LetVariable::clone(ExpressionContext& expCtx) const {
+    auto clonedExpr = expression ? expression->clone(expCtx) : nullptr;
     return {name, std::move(clonedExpr), id};
 }
 }  // namespace mongo

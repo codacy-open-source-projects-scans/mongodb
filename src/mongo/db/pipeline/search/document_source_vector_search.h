@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,17 +7,21 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/search/lite_parsed_search.h"
+#include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
 #include "mongo/util/modules.h"
 
+#include <functional>
 #include <memory>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(VectorSearch);
 class VectorSearchLiteParsed final : public LiteParsedSearchStage<VectorSearchLiteParsed> {
@@ -59,6 +37,22 @@ public:
 
     std::unique_ptr<StageParams> getStageParams() const final {
         return std::make_unique<VectorSearchStageParams>(_originalBson);
+    }
+
+    // Override the base LiteParsedSearchStage::validate to check only the 'view' field.
+    // $vectorSearch's user spec has fields (e.g. 'limit') that share names with internal
+    // InternalSearchMongotRemoteSpec fields used by $search/$searchMeta but are user-facing on
+    // this stage. Applying the full internal-field list here would reject legitimate queries.
+    void validate(const OperationContext* opCtx) const final {
+        uassert(ErrorCodes::FailedToParse,
+                str::stream() << this->getParseTimeName() << " value must be an object. Found: "
+                              << typeName(this->_originalBson.type()),
+                this->_originalBson.type() == BSONType::object);
+        const auto spec = this->_originalBson.embeddedObject();
+        if (spec.hasField(search_helpers::kViewFieldName)) {
+            assertAllowedInternalIfRequired(
+                opCtx, search_helpers::kViewFieldName, AllowedWithClientType::kInternal);
+        }
     }
 
     // $vectorSearch produces $sortKey metadata.
@@ -117,13 +111,13 @@ private:
 class DocumentSourceVectorSearch : public DocumentSource {
 public:
     const BSONObj kSortSpec = BSON("$vectorSearchScore" << -1);
-    static constexpr StringData kStageName = "$vectorSearch"_sd;
-    static constexpr StringData kLimitFieldName = "limit"_sd;
-    static constexpr StringData kFilterFieldName = "filter"_sd;
-    static constexpr StringData kIndexFieldName = "index"_sd;
-    static constexpr StringData kNumCandidatesFieldName = "numCandidates"_sd;
-    static constexpr StringData kViewFieldName = "view"_sd;
-    static constexpr StringData kReturnStoredSourceFieldName = "returnStoredSource"_sd;
+    static constexpr std::string_view kStageName = "$vectorSearch"sv;
+    static constexpr std::string_view kLimitFieldName = "limit"sv;
+    static constexpr std::string_view kFilterFieldName = "filter"sv;
+    static constexpr std::string_view kIndexFieldName = "index"sv;
+    static constexpr std::string_view kNumCandidatesFieldName = "numCandidates"sv;
+    static constexpr std::string_view kViewFieldName = "view"sv;
+    static constexpr std::string_view kReturnStoredSourceFieldName = "returnStoredSource"sv;
 
     DocumentSourceVectorSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                std::shared_ptr<executor::TaskExecutor> taskExecutor,
@@ -134,9 +128,24 @@ public:
 
     std::list<boost::intrusive_ptr<DocumentSource>> desugar();
 
-    const char* getSourceName() const override {
-        return kStageName.data();
+    std::string_view getSourceName() const override {
+        return kStageName;
     }
+
+    /**
+     * This method is used exclusively by query analysis to replace the filter predicate in the
+     * original spec with the filter rewritten with encryption placeholders. This method returns
+     * true if the stage's filter is replaced, otherwise it returns false.
+     *
+     * Callers of this method provide a functor which accepts a MatchExpression, and returns the
+     * rewritten expression with encryption placeholders as serialized BSON. If no rewrites took
+     * place, the functor returns an empty BSONObj.
+     *
+     * Note, the filter specification in the _stageSpec BSON is also replaced to reflect the updated
+     * filter. This is necessary because we must not operate on the unencrypted plain-text secure
+     * payloads.
+     */
+    bool rebuildWithNewFilterForFLE(std::function<BSONObj(const MatchExpression&)> fn);
 
     bool isStoredSource() const {
         // If the user specifies storedSource: true and the knob is off, we will not error and
@@ -148,7 +157,7 @@ public:
                 ->getValue(getExpCtx()->getNamespaceString().tenantId())
                 .getEnabled();
         return isVectorSearchStoredSourceEnabled
-            ? _originalSpec.getBoolField(kReturnStoredSourceFieldName)
+            ? _stageSpec.getBoolField(kReturnStoredSourceFieldName)
             : false;
     }
 
@@ -158,12 +167,8 @@ public:
         return id;
     }
 
-    SortPattern getSortPattern() const override {
-        SortPattern::SortPatternPart part;
-        part.isAscending = false;
-        part.expression = make_intrusive<ExpressionMeta>(
-            getExpCtx().get(), DocumentMetadataFields::MetaType::kVectorSearchScore);
-        return SortPattern({std::move(part)});
+    bool providesSortKeyMetadata() const override {
+        return true;
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic(
@@ -193,31 +198,16 @@ public:
     boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const override {
         auto expCtx = newExpCtx ? newExpCtx : getExpCtx();
-        return make_intrusive<DocumentSourceVectorSearch>(
-            expCtx, _taskExecutor, _originalSpec.copy());
+        return make_intrusive<DocumentSourceVectorSearch>(expCtx, _taskExecutor, _stageSpec.copy());
     }
 
-    StageConstraints constraints(PipelineSplitState pipeState) const final {
-        StageConstraints constraints(StreamType::kStreaming,
-                                     PositionRequirement::kFirst,
-                                     HostTypeRequirement::kAnyShard,
-                                     DiskUseRequirement::kNoDiskUse,
-                                     FacetRequirement::kNotAllowed,
-                                     TransactionRequirement::kNotAllowed,
-                                     LookupRequirement::kNotAllowed,
-                                     UnionRequirement::kAllowed,
-                                     ChangeStreamRequirement::kDenylist);
-        constraints.setConstraintsForNoInputSources();
-        // All search stages are unsupported on timeseries collections.
-        constraints.canRunOnTimeseries = false;
-        return constraints;
-    }
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     DocumentSourceContainer::iterator optimizeAt(DocumentSourceContainer::iterator itr,
                                                  DocumentSourceContainer* container);
 
 protected:
-    Value serialize(const SerializationOptions& opts) const override;
+    Value serialize(const query_shape::SerializationOptions& opts) const override;
 
 private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceVectorSearchToStageFn(
@@ -233,8 +223,6 @@ private:
      *
      * Also, this optimization only applies to cases where the $sort comes directly after this
      * stage.
-     * TODO SERVER-96068 generalize this optimization to cases where any number of stages that
-     * preserve sort order come between this stage and the sort.
      *
      * Returns a pair of the iterator to return to the optimizer, and a bool of whether or not the
      * optimization was successful. If optimization was successful, the container will be modified
@@ -259,8 +247,8 @@ private:
     // The limit that we send to mongot is received and stored on the '_request' object above.
     boost::optional<long long> _limit;
 
-    // Keep track of the original request BSONObj's extra fields in case there were fields mongod
+    // Keep track of the request BSONObj's extra fields in case there were fields mongod
     // doesn't know about that mongot will need later.
-    BSONObj _originalSpec;
+    BSONObj _stageSpec;
 };
 }  // namespace mongo

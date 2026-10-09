@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/document_value/document.h"
 
@@ -40,6 +14,8 @@
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 #include <boost/functional/hash.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -52,6 +28,14 @@ using std::string;
 using std::vector;
 
 namespace {
+
+template <const auto& Fields>
+bool isAnyOf(std::string_view s) {
+    return [&]<size_t... Is>(std::index_sequence<Is...>) {
+        return (... || (s == Fields[Is]));
+    }(std::make_index_sequence<Fields.size()>{});
+}
+
 /**
  * Assert that a given field path does not exceed the length limit.
  */
@@ -93,23 +77,10 @@ boost::optional<BSONElement> getNestedFieldHelperBSON(BSONElement elt,
 
 const DocumentStorage DocumentStorage::kEmptyDoc{ConstructorTag::InitApproximateSize};
 
-const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore,
-                                                    Document::metaFieldRandVal,
-                                                    Document::metaFieldSortKey,
-                                                    Document::metaFieldGeoNearDistance,
-                                                    Document::metaFieldGeoNearPoint,
-                                                    Document::metaFieldSearchScore,
-                                                    Document::metaFieldSearchHighlights,
-                                                    Document::metaFieldSearchSortValues,
-                                                    Document::metaFieldIndexKey,
-                                                    Document::metaFieldSearchScoreDetails,
-                                                    Document::metaFieldSearchRootDocumentId,
-                                                    Document::metaFieldVectorSearchScore,
-                                                    Document::metaFieldSearchSequenceToken,
-                                                    Document::metaFieldScore,
-                                                    Document::metaFieldScoreDetails,
-                                                    Document::metaFieldStream,
-                                                    Document::metaFieldChangeStreamControlEvent};
+
+bool Document::isMetadataFieldName_cold(std::string_view s) {
+    return isAnyOf<kAllMetadataFields>(s);
+}
 
 DocumentStorageIterator::DocumentStorageIterator(DocumentStorage* storage, BSONObjIterator bsonIt)
     : _bsonIt(std::move(bsonIt)),
@@ -153,6 +124,17 @@ bool DocumentStorageIterator::shouldSkipDeleted() {
         if (_storage->bsonHasMetadata() && Document::isMetadataFieldName(fieldName)) {
             return true;
         }
+
+        // '_first == _end' means the cache holds no fields at all (both are null when nothing has
+        // been allocated yet). There is then no point in hashing the field name just to look it up
+        // and miss. Note that this has to be re-checked for every field rather than hoisted out of
+        // the iteration, because 'get()' can populate the cache part-way through.
+        if (_first == _end) {
+            // See the comment in the 'else' branch below for why this is set to nullptr.
+            _it = nullptr;
+            return false;
+        }
+
         // Check if the field is in the cache and if so then check if it has been deleted (i.e. the
         // val.missing() is true).
         if (auto pos = _storage->findFieldInCache(fieldName); pos.found()) {
@@ -210,13 +192,13 @@ Position DocumentStorage::findFieldInCache(T requested) const {
     // if we got here, there's no such field
     return Position();
 }
-template Position DocumentStorage::findFieldInCache<StringData>(StringData field) const;
+template Position DocumentStorage::findFieldInCache<std::string_view>(std::string_view field) const;
 template Position DocumentStorage::findFieldInCache<HashedFieldName>(HashedFieldName field) const;
 
 template <typename T>
 Position DocumentStorage::findField(T field) const {
     // Hide metadata-named fields so they are only accessible through the metadata API.
-    if (_bsonHasMetadata && Document::isMetadataFieldName(field)) {
+    if (MONGO_unlikely(_bsonHasMetadata && Document::isMetadataFieldName(field))) {
         return Position();
     }
 
@@ -233,7 +215,7 @@ Position DocumentStorage::findField(T field) const {
     // if we got here, there's no such field
     return Position();
 }
-template Position DocumentStorage::findField<StringData>(StringData field) const;
+template Position DocumentStorage::findField<std::string_view>(std::string_view field) const;
 template Position DocumentStorage::findField<HashedFieldName>(HashedFieldName field) const;
 
 Position DocumentStorage::constructInCache(const BSONElement& elem) {
@@ -293,7 +275,8 @@ Value& DocumentStorage::appendField(T field, ValueElement::Kind kind) {
 
     return getField(pos).val;
 }
-template Value& DocumentStorage::appendField<StringData>(StringData, ValueElement::Kind);
+template Value& DocumentStorage::appendField<std::string_view>(std::string_view,
+                                                               ValueElement::Kind);
 template Value& DocumentStorage::appendField<HashedFieldName>(HashedFieldName, ValueElement::Kind);
 
 // Call after adding field to _fields and increasing _numFields
@@ -405,6 +388,31 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
     out->_snapshottedSize = _snapshottedSize;
 
     return out;
+}
+
+size_t DocumentStorage::computeSize() const {
+    size_t count = 0;
+
+    // When the storage is unmodified, every cache entry is a 'kCached' mirror of a field that is
+    // still present in '_bson': nothing has been inserted and nothing has been logically removed.
+    // (Fields are only ever inserted through 'appendField()', which marks the storage modified via
+    // the non-const 'getField(Position)' overload it returns through. 'constructInCache()' is the
+    // sole caller that deliberately saves and restores the flag around that.) The field count is
+    // therefore just the number of non-metadata fields in the backing BSON, which we can count
+    // without consulting the cache at all.
+    if (!_modified) {
+        for (auto&& elem : _bson) {
+            if (_bsonHasMetadata && Document::isMetadataFieldName(elem.fieldNameStringData())) {
+                continue;
+            }
+            ++count;
+        }
+    } else {
+        // can't use _numFields because it includes removed fields.
+        for (DocumentStorageIterator it = iterator(); !it.atEnd(); it.advance())
+            count++;
+    }
+    return count;
 }
 
 size_t DocumentStorage::getMetadataApproximateSize() const {
@@ -558,7 +566,8 @@ Document::Document(const BSONObj& bson) {
     *this = md.freeze();
 }
 
-Document::Document(std::initializer_list<std::pair<StringData, ImplicitValue>> initializerList) {
+Document::Document(
+    std::initializer_list<std::pair<std::string_view, ImplicitValue>> initializerList) {
     MutableDocument mutableDoc(initializerList.size());
 
     for (auto&& pair : initializerList) {
@@ -568,7 +577,7 @@ Document::Document(std::initializer_list<std::pair<StringData, ImplicitValue>> i
     *this = mutableDoc.freeze();
 }
 
-Document::Document(const std::vector<std::pair<StringData, Value>>& fields) {
+Document::Document(const std::vector<std::pair<std::string_view, Value>>& fields) {
     MutableDocument mutableDoc(fields.size());
     for (auto&& pair : fields)
         mutableDoc.addField(pair.first, pair.second);
@@ -597,25 +606,25 @@ boost::optional<BSONObj> Document::toBsonIfTriviallyConvertible() const {
     return boost::none;
 }
 
-constexpr StringData Document::metaFieldTextScore;
-constexpr StringData Document::metaFieldRandVal;
-constexpr StringData Document::metaFieldSortKey;
-constexpr StringData Document::metaFieldGeoNearDistance;
-constexpr StringData Document::metaFieldGeoNearPoint;
-constexpr StringData Document::metaFieldSearchScore;
-constexpr StringData Document::metaFieldSearchHighlights;
-constexpr StringData Document::metaFieldSearchScoreDetails;
-constexpr StringData Document::metaFieldSearchRootDocumentId;
-constexpr StringData Document::metaFieldSearchSortValues;
-constexpr StringData Document::metaFieldVectorSearchScore;
-constexpr StringData Document::metaFieldScore;
-constexpr StringData Document::metaFieldStream;
-constexpr StringData Document::metaFieldChangeStreamControlEvent;
+constexpr std::string_view Document::metaFieldTextScore;
+constexpr std::string_view Document::metaFieldRandVal;
+constexpr std::string_view Document::metaFieldSortKey;
+constexpr std::string_view Document::metaFieldGeoNearDistance;
+constexpr std::string_view Document::metaFieldGeoNearPoint;
+constexpr std::string_view Document::metaFieldSearchScore;
+constexpr std::string_view Document::metaFieldSearchHighlights;
+constexpr std::string_view Document::metaFieldSearchScoreDetails;
+constexpr std::string_view Document::metaFieldSearchRootDocumentId;
+constexpr std::string_view Document::metaFieldSearchSortValues;
+constexpr std::string_view Document::metaFieldVectorSearchScore;
+constexpr std::string_view Document::metaFieldScore;
+constexpr std::string_view Document::metaFieldStream;
+constexpr std::string_view Document::metaFieldChangeStreamControlEvent;
 
 void Document::toBsonStrippingMetadata(BSONObjBuilder* builder) const {
     // Only strips metadata-named fields at the top level, not in nested sub-objects.
     constexpr size_t recursionLevel = 1;
-    auto warnStripped = [](StringData fieldName) {
+    auto warnStripped = [](std::string_view fieldName) {
         static StaticImmortal<logv2::SeveritySuppressor> logSeverity{
             Seconds{1}, logv2::LogSeverity::Warning(), logv2::LogSeverity::Debug(2)};
         LOGV2_DEBUG(12363300,
@@ -628,18 +637,19 @@ void Document::toBsonStrippingMetadata(BSONObjBuilder* builder) const {
     };
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
         if (auto cached = it.cachedValue()) {
-            if (isMetadataFieldName(cached->nameSD())) {
+            if (MONGO_unlikely(isMetadataFieldName(cached->nameSD()))) {
                 warnStripped(cached->nameSD());
                 continue;
             }
             cached->val.addToBsonObj(builder, cached->nameSD(), recursionLevel);
         } else {
-            auto fieldName = (*it.bsonIter()).fieldNameStringData();
-            if (isMetadataFieldName(fieldName)) {
+            auto&& bsonIt = *it.bsonIter();
+            auto fieldName = bsonIt.fieldNameStringData();
+            if (MONGO_unlikely(isMetadataFieldName(fieldName))) {
                 warnStripped(fieldName);
                 continue;
             }
-            builder->append(*it.bsonIter());
+            builder->append(bsonIt);
         }
     }
 }
@@ -777,7 +787,7 @@ boost::optional<Value> Document::getNestedScalarFieldNonCachingHelper(const Fiel
         return Value();
     }
 
-    StringData fieldName = dottedField.getFieldName(level);
+    std::string_view fieldName = dottedField.getFieldName(level);
 
     // In many cases, the cache is empty and we can skip straight to reading from the backing BSON.
     if (isModified()) {
@@ -870,7 +880,7 @@ size_t Document::memUsageForSorter() const {
 
 void Document::hash_combine(size_t& seed, const StringDataComparator* stringComparator) const {
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
-        StringData name = it->nameSD();
+        std::string_view name = it->nameSD();
         boost::hash_range(seed, name.data(), name.data() + name.size());
         it->val.hash_combine(seed, stringComparator);
     }
@@ -972,7 +982,7 @@ Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeS
     const int numElems = buf.read<LittleEndian<int>>();
     MutableDocument doc(numElems);
     for (int i = 0; i < numElems; i++) {
-        StringData name = buf.readCStr();
+        std::string_view name = buf.readCStr();
         doc.addField(name, Value::deserializeForSorter(buf, Value::SorterDeserializeSettings()));
     }
 

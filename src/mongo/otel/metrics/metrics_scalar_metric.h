@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -43,6 +17,7 @@
 #include <array>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #ifdef MONGO_CONFIG_OTEL
 #include <opentelemetry/metrics/meter.h>
@@ -54,9 +29,8 @@ namespace mongo::otel::metrics {
  * Observable base for all scalar metrics (Counter, Gauge, UpDownCounter), parameterized only on
  * the value type T and not on attribute types. This allows MetricsService to store instances in the
  * OwnedMetric variant without knowing the attribute types. Provides values() for OTEL callbacks and
- * BSON serialization via Metric. MetricsService uses the three tag subclasses (ObservableCounter,
- * ObservableGauge, ObservableUpDownCounter) as the stored variant type so the visitor can create
- * the right OTEL instrument.
+ * BSON serialization via Metric. MetricsService uses the tag subclasses as the stored variant type
+ * so the visitor can create the right OTEL instrument.
  */
 template <typename T>
 class ObservableScalarMetric : public Metric {
@@ -66,7 +40,8 @@ public:
     /**
      * For each combination of attributes for which the metric has been written, returns the
      * set of attributes and the value associated with it. Result is valid only while this metric
-     * is alive.
+     * is alive. Intended only for OTel reporting. The values may be transiently inaccurate under
+     * concurrent writes.
      */
     virtual AttributesAndValues<T> values() const = 0;
 };
@@ -92,34 +67,58 @@ public:
     ~ObservableUpDownCounter() override = default;
 };
 
+/** Tag base stored in MetricsService's OwnedMetric for min-gauge instruments. */
+template <typename T>
+class ObservableMinGauge : public virtual ObservableScalarMetric<T> {
+public:
+    ~ObservableMinGauge() override = default;
+};
+
+/** Tag base stored in MetricsService's OwnedMetric for max-gauge instruments. */
+template <typename T>
+class ObservableMaxGauge : public virtual ObservableScalarMetric<T> {
+public:
+    ~ObservableMaxGauge() override = default;
+};
+
 /**
- * Single lock-free implementation for Counter, Gauge, and UpDownCounter with attribute support.
- * All three share the same per-attribute-combination storage. The difference in semantics is
- * enforced by the interfaces:
+ * Single lock-free implementation for Counter, Gauge, UpDownCounter, MinGauge, and MaxGauge with
+ * attribute support. All share the same per-attribute-combination storage. The difference in
+ * semantics is enforced by the interfaces:
  *   - Counter: add() validates nonnegative (via the Counter non-virtual wrapper → doAdd).
  *   - UpDownCounter: add() accepts any delta (virtual dispatch directly to this impl).
  *   - Gauge: set() stores the value (storeRelaxed instead of fetchAndAdd).
+ *   - MinGauge: setIfLess() check-and-set-loops to store the minimum observed value.
+ *   - MaxGauge: setIfGreater() check-and-set-loops to store the maximum observed value.
  *
- * MetricsService stores this as ObservableCounter<T>, ObservableGauge<T>, or
- * ObservableUpDownCounter<T> depending on which instrument type was requested. The shared virtual
- * base ObservableScalarMetric<T> provides values() and is inherited once.
+ * MetricsService stores this as ObservableCounter<T>, ObservableGauge<T>,
+ * ObservableUpDownCounter<T>, ObservableMinGauge<T>, or ObservableMaxGauge<T> depending on which
+ * instrument type was requested. The shared virtual base ObservableScalarMetric<T> provides
+ * values() and is inherited once.
  *
- * Callers should always hold a typed interface reference (Counter<T>&, Gauge<T>&, or
- * UpDownCounter<T>&) rather than a ScalarMetricImpl reference directly, both for semantic clarity
- * and to avoid name-lookup ambiguity between the inherited add() overloads.
+ * Callers should always hold a typed interface reference (Counter<T>&, Gauge<T>&,
+ * UpDownCounter<T>&, MinGauge<T>&, or MaxGauge<T>&) rather than a ScalarMetricImpl reference
+ * directly, both for semantic clarity and to avoid name-lookup ambiguity between the inherited
+ * add() overloads.
  */
 template <typename T, typename... AttributeTs>
 class ScalarMetricImpl : public Counter<T, AttributeTs...>,
-                         public Gauge<T, AttributeTs...>,
+                         public MinGauge<T, AttributeTs...>,
+                         public MaxGauge<T, AttributeTs...>,
                          public UpDownCounter<T, AttributeTs...>,
                          public ObservableCounter<T>,
                          public ObservableGauge<T>,
-                         public ObservableUpDownCounter<T> {
+                         public ObservableUpDownCounter<T>,
+                         public ObservableMinGauge<T>,
+                         public ObservableMaxGauge<T> {
 public:
     using Attributes = typename Counter<T, AttributeTs...>::Attributes;
 
     explicit ScalarMetricImpl(const AttributeDefinition<AttributeTs>&... defs);
     explicit ScalarMetricImpl(ReportingPolicy globalReportingPolicy,
+                              const AttributeDefinition<AttributeTs>&... defs);
+    explicit ScalarMetricImpl(T initialValue,
+                              ReportingPolicy globalReportingPolicy,
                               const AttributeDefinition<AttributeTs>&... defs);
     ~ScalarMetricImpl() override = default;
 
@@ -128,6 +127,7 @@ public:
 #endif  // MONGO_CONFIG_OTEL
 
     AttributesAndValues<T> values() const override;
+    T valueForLegacyUse() const override;
     BSONObj serializeToBson(const std::string& key) const override;
 
     void setReportingPolicy(const Attributes& attributes, ReportingPolicy reportingPolicy) override;
@@ -142,14 +142,22 @@ protected:
     // Satisfies UpDownCounter<T, AttributeTs...>::add(). No validation.
     void add(T value, const Attributes& attributes) override;
 
+    // Satisfies MinGauge<T, AttributeTs...>::setIfLess(). check-and-set-loops to store minimum.
+    void setIfLess(T value, const Attributes& attributes) override;
+
+    // Satisfies MaxGauge<T, AttributeTs...>::setIfGreater(). check-and-set-loops to store maximum.
+    void setIfGreater(T value, const Attributes& attributes) override;
+
 private:
     struct MetricData {
-        explicit MetricData(ReportingPolicy policy) : reportingPolicy{policy} {}
-        Atomic<T> value{0};
+        explicit MetricData(T initialValue, ReportingPolicy policy)
+            : value{initialValue}, reportingPolicy{policy} {}
+        Atomic<T> value;
         Atomic<ReportingPolicy> reportingPolicy;
         Atomic<bool> everNonZero{false};
     };
 
+    const T _initialValue;
     std::array<std::string, sizeof...(AttributeTs)> _attributeNames;
     OwnedAttributeValueLists<AttributeTs...> _ownedValueLists;
     AttributesMap<Attributes, std::unique_ptr<MetricData>> _metrics;
@@ -162,19 +170,33 @@ private:
 template <typename T, typename... AttributeTs>
 ScalarMetricImpl<T, AttributeTs...>::ScalarMetricImpl(
     const AttributeDefinition<AttributeTs>&... defs)
-    : ScalarMetricImpl(sizeof...(AttributeTs) == 0 ? ReportingPolicy::kUnconditionally
+    : ScalarMetricImpl(/*initialValue=*/0,
+                       sizeof...(AttributeTs) == 0 ? ReportingPolicy::kUnconditionally
                                                    : ReportingPolicy::kIfCurrentlyNonZero,
                        defs...) {}
 
 template <typename T, typename... AttributeTs>
 ScalarMetricImpl<T, AttributeTs...>::ScalarMetricImpl(
     ReportingPolicy globalReportingPolicy, const AttributeDefinition<AttributeTs>&... defs)
-    : _attributeNames{defs.name...}, _ownedValueLists(makeOwnedAttributeValueLists(defs...)) {
-    // The Attributes tuples produced by safeMakeAttributeTuples contain view values (StringData,
-    // span) that point into _ownedValueLists, so the keys inserted into _metrics remain valid.
-    for (Attributes t : safeMakeAttributeTuples(_ownedValueLists))
-        _metrics[t] = std::make_unique<MetricData>(globalReportingPolicy);
+    : ScalarMetricImpl(/*initialValue=*/0, globalReportingPolicy, defs...) {}
 
+template <typename T, typename... AttributeTs>
+ScalarMetricImpl<T, AttributeTs...>::ScalarMetricImpl(
+    T initialValue,
+    ReportingPolicy globalReportingPolicy,
+    const AttributeDefinition<AttributeTs>&... defs)
+    : _initialValue(initialValue),
+      _attributeNames{defs.name...},
+      _ownedValueLists(makeOwnedAttributeValueLists(defs...)) {
+    // The Attributes tuples produced by safeMakeAttributeTuples contain view values
+    // (std::string_view, span) that point into _ownedValueLists, so the keys inserted into _metrics
+    // remain valid.
+    for (Attributes t : safeMakeAttributeTuples(_ownedValueLists))
+        _metrics[t] = std::make_unique<MetricData>(initialValue, globalReportingPolicy);
+
+    massert(ErrorCodes::BadValue,
+            "Attribute values list cannot be empty",
+            ((!defs.values.empty()) && ...));
     massert(ErrorCodes::BadValue,
             "Attribute names are duplicated",
             !containsDuplicates(_attributeNames));
@@ -215,6 +237,30 @@ void ScalarMetricImpl<T, AttributeTs...>::set(T value, const Attributes& attribu
             "Called set using undeclared set of attributes",
             it != _metrics.end());
     it->second->value.storeRelaxed(value);
+    if (value != 0)
+        it->second->everNonZero.storeRelaxed(true);
+}
+
+template <typename T, typename... AttributeTs>
+void ScalarMetricImpl<T, AttributeTs...>::setIfLess(T value, const Attributes& attributes) {
+    auto it = _metrics.find(attributes);
+    massert(ErrorCodes::BadValue,
+            "Called setIfLess using undeclared set of attributes",
+            it != _metrics.end());
+    T old = it->second->value.load();
+    while (value < old && !it->second->value.compareAndSwap(&old, value)) {
+    }
+}
+
+template <typename T, typename... AttributeTs>
+void ScalarMetricImpl<T, AttributeTs...>::setIfGreater(T value, const Attributes& attributes) {
+    auto it = _metrics.find(attributes);
+    massert(ErrorCodes::BadValue,
+            "Called setIfGreater using undeclared set of attributes",
+            it != _metrics.end());
+    T old = it->second->value.load();
+    while (value > old && !it->second->value.compareAndSwap(&old, value)) {
+    }
 }
 
 template <typename T, typename... AttributeTs>
@@ -231,12 +277,16 @@ template <typename T, typename... AttributeTs>
 void ScalarMetricImpl<T, AttributeTs...>::reset(opentelemetry::metrics::Meter* meter) {
     invariant(!meter);
     for (const auto& [attributes, data] : _metrics) {
-        data->value.storeRelaxed(0);
+        data->value.storeRelaxed(_initialValue);
         data->everNonZero.storeRelaxed(false);
     }
 }
 #endif  // MONGO_CONFIG_OTEL
 
+// Uses relaxed atomics so a concurrent write may not be fully visible. For example, everNonZero
+// may be seen as true while value still reads as 0, causing a metric to be reported with value 0
+// when it should be non-zero. This self-corrects once the write becomes visible to the calling
+// thread.
 template <typename T, typename... AttributeTs>
 AttributesAndValues<T> ScalarMetricImpl<T, AttributeTs...>::values() const {
     AttributesAndValues<T> attributesAndValues;
@@ -265,5 +315,14 @@ AttributesAndValues<T> ScalarMetricImpl<T, AttributeTs...>::values() const {
             {.attributes = AttributesKeyValueIterable(std::move(attrList)), .value = value});
     }
     return attributesAndValues;
+}
+
+template <typename T, typename... AttributeTs>
+T ScalarMetricImpl<T, AttributeTs...>::valueForLegacyUse() const {
+    if constexpr (sizeof...(AttributeTs) == 0) {
+        return _metrics.begin()->second->value.loadRelaxed();
+    } else {
+        MONGO_UNIMPLEMENTED_TASSERT(12398201);
+    }
 }
 }  // namespace mongo::otel::metrics

@@ -3,13 +3,18 @@
  *
  * @tags: [
  *   featureFlagChangeStreamPreciseShardTargeting,
+ *   requires_fcv_90,
  * ]
  */
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function comparePlacementChangeDocuments(docBefore, docAfter) {
-    assert.neq(docBefore._id, docAfter._id, "Placement change documents should have different _id values");
+    assert.neq(
+        docBefore._id,
+        docAfter._id,
+        "Placement change documents should have different _id values",
+    );
     let strippedDocBefore = Object.assign({}, docBefore);
     delete strippedDocBefore._id;
     let strippedDocAfter = Object.assign({}, docAfter);
@@ -40,13 +45,17 @@ assert.eq(
     1,
     "Only one placement change doc should be present",
 );
-const collPlacementChangeDocBeforeTargetingRequest = configDB.placementHistory.findOne({nss: testNss});
+const collPlacementChangeDocBeforeTargetingRequest = configDB.placementHistory.findOne({
+    nss: testNss,
+});
 assert.eq(
     configDB.placementHistory.countDocuments({nss: testDBName}),
     1,
     "Only one placement change doc should be present",
 );
-const dbPlacementChangeDocBeforeTargetingRequest = configDB.placementHistory.findOne({nss: testDBName});
+const dbPlacementChangeDocBeforeTargetingRequest = configDB.placementHistory.findOne({
+    nss: testDBName,
+});
 assert.eq(
     configDB.placementHistory.countDocuments({identifier: initializationMetadataIdentifier}),
     0,
@@ -101,13 +110,17 @@ assert.eq(
     1,
     "Only one placement change doc should be present",
 );
-const collPlacementChangeDocAfterTargetingRequest = configDB.placementHistory.findOne({nss: testNss});
+const collPlacementChangeDocAfterTargetingRequest = configDB.placementHistory.findOne({
+    nss: testNss,
+});
 assert.eq(
     configDB.placementHistory.countDocuments({nss: testDBName}),
     1,
     "Only one placement change doc should be present",
 );
-const dbPlacementChangeDocAfterTargetingRequest = configDB.placementHistory.findOne({nss: testDBName});
+const dbPlacementChangeDocAfterTargetingRequest = configDB.placementHistory.findOne({
+    nss: testDBName,
+});
 assert.eq(
     configDB.placementHistory.countDocuments({identifier: initializationMetadataIdentifier}),
     0,
@@ -118,7 +131,10 @@ comparePlacementChangeDocuments(
     collPlacementChangeDocBeforeTargetingRequest,
     collPlacementChangeDocAfterTargetingRequest,
 );
-comparePlacementChangeDocuments(dbPlacementChangeDocBeforeTargetingRequest, dbPlacementChangeDocAfterTargetingRequest);
+comparePlacementChangeDocuments(
+    dbPlacementChangeDocBeforeTargetingRequest,
+    dbPlacementChangeDocAfterTargetingRequest,
+);
 
 // A second targeting request should not trigger a new metadata initialization.
 const laterAtTargetingRequestTime = configDB.hello().$clusterTime.clusterTime;

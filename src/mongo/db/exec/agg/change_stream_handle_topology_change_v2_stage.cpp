@@ -1,38 +1,14 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/change_stream_handle_topology_change_v2_stage.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
+#include "mongo/db/exec/agg/change_stream_handle_topology_change_v2_metrics.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/change_stream_pipeline_helpers.h"
 #include "mongo/db/pipeline/change_stream_read_mode.h"
@@ -45,6 +21,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/find_common.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/service_context.h"
@@ -62,6 +39,7 @@
 
 #include <algorithm>
 #include <string>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -100,6 +78,13 @@ public:
 
         _mergeCursors->recognizeControlEvents();
 
+        // In ignore-removed-shards mode, promises made by a shard can be withdrawn when that shard
+        // is removed. Do not let the AsyncResultsMerger advance its high water mark from those
+        // promises; doing so would allow the client-visible post-batch resume token to regress.
+        if (_changeStream.getReadMode() == ChangeStreamReadMode::kIgnoreRemovedShards) {
+            _mergeCursors->disablePromisedSortKeyHighWaterMarkAdvancement();
+        }
+
         _initializationResumeToken = ResumeToken(resumeTokenData);
         LOGV2_DEBUG(12163604,
                     5,
@@ -107,7 +92,7 @@ public:
                     "changeStream"_attr = _changeStream.toString(),
                     "resumeToken"_attr = _initializationResumeToken,
                     "resumeTokenClusterTime"_attr = resumeTokenData.clusterTime);
-        setHighWaterMark(_initializationResumeToken.getClusterTime());
+        _mergeCursors->setHighWaterMark(_initializationResumeToken.toBSON());
 
         _originalAggregateCommand = expCtx->getOriginalAggregateCommand().getOwned();
     }
@@ -208,6 +193,8 @@ public:
                     VersionContext::getDecoration(opCtx), aggReq, true);
                 aggReq.setNeedsMerge(true);
 
+                aggregation_request_helper::addQuerySettingsToRequest(aggReq, expCtx);
+
                 SimpleCursorOptions cursor;
                 cursor.setBatchSize(0);
                 aggReq.setCursor(cursor);
@@ -277,11 +264,19 @@ public:
                                             .toBson());
     }
 
+    void setPromisedSortKeyHighWaterMarkAdvancement(bool enabled) override {
+        if (enabled) {
+            _mergeCursors->enablePromisedSortKeyHighWaterMarkAdvancement();
+        } else {
+            _mergeCursors->disablePromisedSortKeyHighWaterMarkAdvancement();
+        }
+    }
+
     Timestamp getTimestampFromCurrentHighWaterMark() const override {
         // The high water mark returned by the 'AsyncResultsMerger' has the format
         // {"_data":"..."}, so we can parse it directly.
         BSONObj highWaterMark = _mergeCursors->getHighWaterMark();
-        return ResumeToken::parse(highWaterMark).getData().clusterTime;
+        return ResumeToken::extractClusterTime(highWaterMark);
     }
 
 private:
@@ -723,7 +718,7 @@ private:
         std::string stringifyForLogging() const {
             auto appendShardset = [&](const auto& shardSet) {
                 str::stream result;
-                StringData sep;
+                std::string_view sep;
                 result << "{";
                 for (const auto& shardId : shardSet) {
                     result << std::exchange(sep, ", ") << shardId.toString();
@@ -820,11 +815,17 @@ REGISTER_AGG_STAGE_MAPPING(_internalChangeStreamHandleTopologyChangeV2,
 
 ChangeStreamHandleTopologyChangeV2Stage::ChangeStreamHandleTopologyChangeV2Stage(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    std::shared_ptr<ChangeStreamHandleTopologyChangeV2Stage::Parameters> params)
+    std::shared_ptr<ChangeStreamHandleTopologyChangeV2Stage::Parameters> params,
+    ChangeStreamTopologyChangeV2MetricsRecorder metrics)
     : Stage(DocumentSourceChangeStreamHandleTopologyChangeV2::kStageName, expCtx),
-      _params(std::move(params)) {}
+      _params(std::move(params)),
+      _metrics(metrics) {}
 
-StringData ChangeStreamHandleTopologyChangeV2Stage::stateToString(
+ChangeStreamHandleTopologyChangeV2Stage::~ChangeStreamHandleTopologyChangeV2Stage() {
+    _decrementDegradedIfCounted();
+}
+
+std::string_view ChangeStreamHandleTopologyChangeV2Stage::stateToString(
     ChangeStreamHandleTopologyChangeV2Stage::State state) {
     switch (state) {
         case State::kUninitialized:
@@ -876,7 +877,7 @@ Timestamp ChangeStreamHandleTopologyChangeV2Stage::extractTimestampFromDocument(
     const Document& input) {
     // Extract cluster time from the current event via the sortkey metadata field. This does not
     // rely on the "_id" field being present in the event.
-    return ResumeToken::parse(input.metadata().getSortKey().getDocument()).getData().clusterTime;
+    return ResumeToken::extractClusterTime(input.metadata().getSortKey().getDocument());
 }
 
 DocumentSource::GetNextResult ChangeStreamHandleTopologyChangeV2Stage::doGetNext() {
@@ -1009,19 +1010,83 @@ void ChangeStreamHandleTopologyChangeV2Stage::_setState(
                 "changeStream"_attr = _params->changeStream,
                 "resumeTokenClusterTime"_attr = _params->resumeToken.clusterTime);
 
+    // Count the entry into the new state. Only reached for transitions that passed the validation
+    // above, so 'kUninitialized' (forbidden as a transition target) is never recorded.
+    _recordStateEntry(newState);
+
+    // Maintain the currently-degraded gauge: +1 when this stream enters degraded mode, -1 when it
+    // leaves. The validation above guarantees '_state != newState', so exactly one of the branches
+    // below can fire. '_degradedCounted' makes the adjustment idempotent across 'doDispose()' and
+    // any post-dispose transition.
+    if (newState == State::kFetchingDegradedGettingChangeEvent && !_degradedCounted) {
+        _metrics.incrementDegraded();
+        _degradedCounted = true;
+    } else if (_state == State::kFetchingDegradedGettingChangeEvent && _degradedCounted) {
+        _metrics.decrementDegraded();
+        _degradedCounted = false;
+    }
+
     _state = newState;
+}
+
+void ChangeStreamHandleTopologyChangeV2Stage::_recordStateEntry(State newState) const {
+    switch (newState) {
+        case State::kWaiting:
+            _metrics.waiting.add(1);
+            return;
+        case State::kFetchingInitialization:
+            _metrics.fetchingInitialization.add(1);
+            return;
+        case State::kFetchingGettingChangeEvent:
+            _metrics.fetchingGettingChangeEvent.add(1);
+            return;
+        case State::kFetchingStartingChangeStreamSegment:
+            _metrics.fetchingStartingChangeStreamSegment.add(1);
+            return;
+        case State::kFetchingNormalGettingChangeEvent:
+            _metrics.fetchingNormalGettingChangeEvent.add(1);
+            return;
+        case State::kFetchingDegradedGettingChangeEvent:
+            _metrics.fetchingDegradedGettingChangeEvent.add(1);
+            return;
+        case State::kDowngrading:
+            _metrics.downgrading.add(1);
+            return;
+        case State::kFinal:
+            _metrics.final.add(1);
+            return;
+        case State::kUninitialized:
+            // Transitions back to 'kUninitialized' are forbidden (tassert in _setState()).
+            break;
+    }
+    MONGO_UNREACHABLE_TASSERT(13565600);
+}
+
+void ChangeStreamHandleTopologyChangeV2Stage::doDispose() {
+    // A stage torn down while in degraded mode never leaves it via a state transition, so
+    // decrement the gauge here. '_decrementDegradedIfCounted()' guards against
+    // double-decrementing if a transition out of degraded mode already ran, or against disposing
+    // a non-degraded stage.
+    _decrementDegradedIfCounted();
+}
+
+void ChangeStreamHandleTopologyChangeV2Stage::_decrementDegradedIfCounted() {
+    if (_degradedCounted) {
+        _metrics.decrementDegraded();
+        _degradedCounted = false;
+    }
 }
 
 void ChangeStreamHandleTopologyChangeV2Stage::_assertState(
     ChangeStreamHandleTopologyChangeV2Stage::State expectedState,
     boost::optional<ChangeStreamReadMode> expectedMode,
-    StringData context) const {
+    std::string_view context) const {
     tassert(10657508,
             str::stream() << "unexpected state in " << context << "(), expecting: "
                           << stateToString(expectedState) << ", actual: " << stateToString(_state),
             _state == expectedState);
 
-    auto modeToString = [](ChangeStreamReadMode mode) -> StringData {
+    auto modeToString = [](ChangeStreamReadMode mode) -> std::string_view {
         if (mode == ChangeStreamReadMode::kStrict) {
             return "strict";
         }
@@ -1046,7 +1111,7 @@ void ChangeStreamHandleTopologyChangeV2Stage::_ensureShardTargeter() {
 }
 
 void ChangeStreamHandleTopologyChangeV2Stage::_logShardTargeterDecision(
-    StringData context, ShardTargeterDecision targeterDecision) const {
+    std::string_view context, ShardTargeterDecision targeterDecision) const {
     LOGV2_DEBUG(10657549,
                 3,
                 STAGE_LOG_PREFIX "Shard targeter decision",
@@ -1058,7 +1123,7 @@ void ChangeStreamHandleTopologyChangeV2Stage::_logShardTargeterDecision(
 }
 
 void ChangeStreamHandleTopologyChangeV2Stage::_logShardTargeterDecision(
-    StringData context, ShardTargeterDecision targeterDecision, const Document& event) const {
+    std::string_view context, ShardTargeterDecision targeterDecision, const Document& event) const {
     LOGV2_DEBUG(10657557,
                 3,
                 STAGE_LOG_PREFIX "Shard targeter decision",
@@ -1071,7 +1136,7 @@ void ChangeStreamHandleTopologyChangeV2Stage::_logShardTargeterDecision(
 }
 
 void ChangeStreamHandleTopologyChangeV2Stage::_logShardTargeterDecision(
-    StringData context,
+    std::string_view context,
     ShardTargeterDecision targeterDecision,
     Timestamp segmentStart,
     Timestamp segmentEnd) const {
@@ -1148,18 +1213,26 @@ ChangeStreamHandleTopologyChangeV2Stage::_handleStateWaiting() {
     Seconds secondsSinceLastPoll = duration_cast<Seconds>(now - _lastAllocationToShardsRequestTime);
 
     if (secondsSinceLastPoll < Seconds(_params->minAllocationToShardsPollPeriodSecs)) {
-        // Wait until the next poll time.
-        Date_t nextPollTime = _lastAllocationToShardsRequestTime +
+        // Next planned time to poll again.
+        const Date_t nextPollTime = _lastAllocationToShardsRequestTime +
             Seconds(_params->minAllocationToShardsPollPeriodSecs);
+
+        // For awaitData getMores the caller's deadline lives in 'awaitDataState', not on opCtx.
+        // Cap the wait time to not be larger than the maxAwaitTimeMS.
+        const auto& awaitState = awaitDataState(opCtx);
+        const Date_t waitUntilDate = awaitState.shouldWaitForInserts
+            ? std::min(nextPollTime, awaitState.waitForInsertsDeadline)
+            : nextPollTime;
+
         try {
-            // The following call throws if the operation got interrupted or killed, or if the
-            // OperationContext's own deadline (maxAwaitTimeMS) has been exceeded. Does not throw if
-            // waiting reached 'nextPollTime', but the OperationContext's deadline has not yet
-            // expired.
-            _params->deadlineWaiter->waitUntil(opCtx, nextPollTime);
+            // Returns normally when 'waitUntilDate' is reached. Throws ExceededTimeLimit when
+            // the opCtx deadline expires (only set when the aggregate was issued with explicit
+            // 'maxTimeMS', as mongos does not set it for awaitData getMores) caught below.
+            _params->deadlineWaiter->waitUntil(opCtx, waitUntilDate);
         } catch (const ExceptionFor<ErrorCategory::ExceededTimeLimitError>& ex) {
-            // OperationContext deadline exceeded. Return EOF so the client gets an intermediate
-            // result back.
+            // OperationContext deadline reached. Reachable only on an initial aggregate where the
+            // user passed 'maxTimeMS'. Surface a clean EOF so the aggregate returns the cursor with
+            // an empty firstBatch.
             LOGV2_DEBUG(10657544,
                         3,
                         STAGE_LOG_PREFIX "Deadline time limit exceeded",
@@ -1173,8 +1246,14 @@ ChangeStreamHandleTopologyChangeV2Stage::_handleStateWaiting() {
             return GetNextResult::makeEOF();
         }
 
-        // No state change here, so we enter the state machine in the next turn with kWaiting
-        // again.
+        // The wait may have ended because the awaitData deadline. Timeout is reached. Return EOF.
+        if (awaitState.shouldWaitForInserts &&
+            awaitState.waitForInsertsDeadline <=
+                opCtx->getServiceContext()->getPreciseClockSource()->now()) {
+            return GetNextResult::makeEOF();
+        }
+
+        // We only waited up to 'nextPollTime'. Stay in kWaiting.
         return boost::none;
     }
 
@@ -1186,9 +1265,13 @@ ChangeStreamHandleTopologyChangeV2Stage::_handleStateWaiting() {
             uasserted(ErrorCodes::RetryChangeStream,
                       "Could not retrieve placement information for the specified cluster time");
         case AllocationToShardsStatus::kFutureClusterTime:
-            // Cluster time is still in the future. Return EOF to the client because
-            // maxAwaitTimeMS has expired.
-            return GetNextResult::makeEOF();
+            // No awaitData deadline means there's nothing to time-bound a loop against (e.g. the
+            // initial aggregate). Surface an empty batch so the client gets the cursor back and
+            // can issue getMore, which will carry the awaitData deadline.
+            if (!awaitDataState(opCtx).shouldWaitForInserts) {
+                return GetNextResult::makeEOF();
+            }
+            return boost::none;
         case AllocationToShardsStatus::kOk:
             // Transition to kFetchingInitialization state.
             _setState(State::kFetchingInitialization);
@@ -1376,8 +1459,17 @@ ChangeStreamHandleTopologyChangeV2Stage::_handleStateFetchingStartingChangeStrea
                         "expecting no config server cursor to be open",
                         !_params->cursorManager->isCursorOnConfigServerOpen());
 
+                // This is a bounded segment: a shard promise may point beyond the segment end, so
+                // do not let it advance the client-visible high water mark.
+                _params->cursorManager->setPromisedSortKeyHighWaterMarkAdvancement(false);
+
                 _setState(State::kFetchingDegradedGettingChangeEvent);
             } else {
+                // Unbounded segment: promises from the current shard set are valid, so allow them
+                // to advance the client-visible high water mark again. This keeps the post-batch
+                // resume token moving forward while shards are idle.
+                _params->cursorManager->setPromisedSortKeyHighWaterMarkAdvancement(true);
+
                 _setState(State::kFetchingNormalGettingChangeEvent);
             }
             return boost::none;
@@ -1455,6 +1547,10 @@ ChangeStreamHandleTopologyChangeV2Stage::_handleStateFetchingNormalGettingChange
                 } else {
                     // Adjust end timestamp of the current segment and transition to degraded mode.
                     _segmentEndTimestamp = extractTimestampFromDocument(input.getDocument()) + 1;
+
+                    // This segment is now bounded, so shard promises may point beyond its end. Do
+                    // not let them advance the client-visible high water mark.
+                    _params->cursorManager->setPromisedSortKeyHighWaterMarkAdvancement(false);
 
                     LOGV2_DEBUG(10657543,
                                 3,

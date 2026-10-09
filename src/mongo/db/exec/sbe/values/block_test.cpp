@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/column/bsoncolumn.h"
@@ -44,7 +18,10 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 using TypeTags = value::TypeTags;
 using Value = value::Value;
@@ -55,11 +32,10 @@ using ColumnOpType = value::ColumnOpType;
 TEST(SbeBlockTest, SbeValueBlockTypeIsCopyable) {
     value::MonoBlock block(1, TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
 
-    auto [cpyTag, cpyValue] =
-        value::copyValue(TypeTags::valueBlock, value::bitcastFrom<value::MonoBlock*>(&block));
-    value::ValueGuard cpyGuard(cpyTag, cpyValue);
-    ASSERT_EQ(cpyTag, TypeTags::valueBlock);
-    auto cpy = value::getValueBlock(cpyValue);
+    value::TagValueOwned cpyOwned = value::TagValueOwned::fromRaw(
+        value::copyValue(TypeTags::valueBlock, value::bitcastFrom<value::MonoBlock*>(&block)));
+    ASSERT_EQ(cpyOwned.tag(), TypeTags::valueBlock);
+    auto cpy = value::getValueBlock(cpyOwned.value());
 
     auto extracted = cpy->extract();
     ASSERT_EQ(extracted.count(), 1);
@@ -70,11 +46,10 @@ TEST(SbeBlockTest, SbeValueBlockTypeIsCopyable) {
 TEST(SbeBlockTest, SbeCellBlockTypeIsCopyable) {
     value::ScalarMonoCellBlock block(1, TypeTags::NumberInt32, value::bitcastFrom<int32_t>(123));
 
-    auto [cpyTag, cpyValue] = value::copyValue(
-        TypeTags::cellBlock, value::bitcastFrom<value::ScalarMonoCellBlock*>(&block));
-    value::ValueGuard cpyGuard(cpyTag, cpyValue);
-    ASSERT_EQ(cpyTag, TypeTags::cellBlock);
-    auto cpy = value::getCellBlock(cpyValue);
+    value::TagValueOwned cpyOwned = value::TagValueOwned::fromRaw(value::copyValue(
+        TypeTags::cellBlock, value::bitcastFrom<value::ScalarMonoCellBlock*>(&block)));
+    ASSERT_EQ(cpyOwned.tag(), TypeTags::cellBlock);
+    auto cpy = value::getCellBlock(cpyOwned.value());
 
     auto& vals = cpy->getValueBlock();
     auto extracted = vals.extract();
@@ -133,7 +108,7 @@ public:
         using mongo::BSONColumn;
         std::vector<BSONObj> objs;
 
-        std::vector<StringData> fieldNames;
+        std::vector<std::string_view> fieldNames;
         std::vector<BSONColumn> columns;
         for (BSONElement elem : bsonColumns) {
             fieldNames.push_back(elem.fieldNameStringData());
@@ -762,13 +737,13 @@ TEST_F(BsonBlockDecodingTest, PathBasedLegacyInterleaved) {
     // Legacy interleaved encoding is used, meaning we will get an error if we try to use path-based
     // decompression to decompress the scalar 10s. We can use path-based decompression for the 20s
     // though.
-    StringData b64Col = "8BsAAAAEYQAMAAAAEDAACgAAAAAQYgAUAAAAAIALAAAAAAAAAIALAAAAAAAAAAAA"_sd;
+    std::string_view b64Col = "8BsAAAAEYQAMAAAAEDAACgAAAAAQYgAUAAAAAIALAAAAAAAAAIALAAAAAAAAAAAA"sv;
 
     std::string compressedCol = base64::decode(b64Col);
     BSONBinData bd{
         compressedCol.data(), static_cast<int>(compressedCol.size()), BinDataType::Column};
     BSONObjBuilder builder;
-    builder.append("fld"_sd, bd);
+    builder.append("fld"sv, bd);
     BSONObj bucketData = builder.obj();
 
     std::vector<PathTestCase> tests{
@@ -1047,6 +1022,147 @@ TEST_F(ValueBlockTest, TestBlockMapFast) {
     ASSERT_EQ(block->mapMonotonicFastPath(testOp5), nullptr);
 }
 
+// A monotonic "less than 50" comparison, mirroring the block operation generated for a
+// {$lt: 50} predicate on a measurement field.
+static const auto testOpLtFifty =
+    value::makeColumnOp<ColumnOpType::kMonotonic>([](TypeTags tag, Value val) {
+        return value::genericLt(tag, val, TypeTags::NumberDouble, value::bitcastFrom<double>(50.0));
+    });
+
+// NaN sorts as a block's lower bound but compares false against everything, so the monotonic map
+// fast path must not fire when a bound is NaN. Otherwise a matching value in the block (e.g. one
+// less than the target that sorts above NaN) would be incorrectly dropped.
+TEST_F(ValueBlockTest, TestBlockMapFastNaNBound) {
+    auto block = std::make_unique<TestBlock>();
+
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(1.0));
+    block->push_back(TypeTags::NumberDouble,
+                     value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN()));
+    block->push_back(TypeTags::NumberDouble, value::bitcastFrom<double>(100.0));
+
+    // The block reports NaN as its lower bound (NaN sorts smallest) and 100 as its upper bound.
+    block->setMin(TypeTags::NumberDouble,
+                  value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN()));
+    block->setMax(TypeTags::NumberDouble, value::bitcastFrom<double>(100.0));
+
+    // The fast path must bail out because a bound is NaN, leaving the actual per-value comparison
+    // to the general map path.
+    ASSERT_EQ(block->mapMonotonicFastPath(testOpLtFifty), nullptr);
+
+    // The full map correctly matches only the value that is less than 50.
+    auto outBlock = block->map(testOpLtFifty);
+    auto output = blockToBsonArr(*outBlock);
+    ASSERT_BSONOBJ_EQ(output, fromjson("{result: [true, false, false]}"));
+}
+
+// Tests for getApproximateSize() on ValueBlock and CellBlock implementations.
+// Each test asserts the result is in [lower, upper] where lower is the raw payload
+// size and upper is a generous multiple that accounts for per-element and struct overhead.
+
+TEST(SbeBlockTest, GetApproximateSize_HeterogeneousBlock_ShallowType) {
+    constexpr int kCount = 100;
+    auto block = std::make_unique<value::HeterogeneousBlock>();
+    for (int i = 0; i < kCount; ++i) {
+        block->push_back(TypeTags::NumberInt64, value::bitcastFrom<int64_t>(i));
+    }
+    int size = block->getApproximateSize();
+    // Lower: kCount * sizeof(int64_t); upper: 3x to allow for tag/value and struct overhead.
+    ASSERT_GTE(size, kCount * static_cast<int>(sizeof(int64_t)));
+    ASSERT_LTE(size, 3 * kCount * static_cast<int>(sizeof(int64_t)));
+}
+
+TEST(SbeBlockTest, GetApproximateSize_HomogeneousBlock_ShallowType) {
+    constexpr int kCount = 100;
+    auto block = std::make_unique<value::Int64Block>();
+    for (int i = 0; i < kCount; ++i) {
+        block->push_back(static_cast<int64_t>(i));
+    }
+    int size = block->getApproximateSize();
+    ASSERT_GTE(size, kCount * static_cast<int>(sizeof(int64_t)));
+    ASSERT_LTE(size, 3 * kCount * static_cast<int>(sizeof(int64_t)));
+}
+
+TEST(SbeBlockTest, GetApproximateSize_HomogeneousBlock_WithNothings) {
+    constexpr int kCount = 128;
+    auto block = std::make_unique<value::Int64Block>();
+    for (int i = 0; i < kCount; ++i) {
+        if (i % 2 == 0) {
+            block->push_back(static_cast<int64_t>(i));
+        } else {
+            block->pushNothing();
+        }
+    }
+    int size = block->getApproximateSize();
+    // Must account for val buffer (kCount/2 present values) + bitset heap storage (2 blocks * 8B).
+    const int bitsetBytes = static_cast<int>(2 * sizeof(value::HomogeneousBlockBitset::block_type));
+    ASSERT_GTE(size, (kCount / 2) * static_cast<int>(sizeof(int64_t)) + bitsetBytes);
+    ASSERT_LTE(size, 3 * kCount * static_cast<int>(sizeof(int64_t)));
+}
+
+TEST(SbeBlockTest, GetApproximateSize_MonoBlock_ShallowType) {
+    // MonoBlock stores a single value regardless of count, so approximate size reflects one value.
+    auto block = std::make_unique<value::MonoBlock>(
+        100, TypeTags::NumberInt64, value::bitcastFrom<int64_t>(42));
+    int size = block->getApproximateSize();
+    ASSERT_GTE(size, static_cast<int>(sizeof(int64_t)));
+    ASSERT_LTE(size, 64);
+}
+
+TEST(SbeBlockTest, GetApproximateSize_HeterogeneousBlock_DeepType_BigString) {
+    constexpr int kCount = 100;
+    constexpr int kStrLen = 100;
+    const std::string str(kStrLen, 'x');
+    auto block = std::make_unique<value::HeterogeneousBlock>();
+    for (int i = 0; i < kCount; ++i) {
+        auto [tag, val] = value::makeNewString(str);
+        block->push_back(tag, val);
+    }
+    int size = block->getApproximateSize();
+    ASSERT_GTE(size, kCount * kStrLen);
+    ASSERT_LTE(size, 3 * kCount * kStrLen);
+}
+
+TEST(SbeBlockTest, GetApproximateSize_HeterogeneousBlock_DeepType_Array) {
+    constexpr int kCount = 100;
+    constexpr int kArrayLen = 10;
+    auto block = std::make_unique<value::HeterogeneousBlock>();
+    for (int i = 0; i < kCount; ++i) {
+        auto [arrTag, arrVal] = value::makeNewArray();
+        auto* arr = value::getArrayView(arrVal);
+        for (int j = 0; j < kArrayLen; ++j) {
+            arr->push_back_raw(TypeTags::NumberInt64, value::bitcastFrom<int64_t>(j));
+        }
+        block->push_back(arrTag, arrVal);
+    }
+    int size = block->getApproximateSize();
+    const int rawDataSize = kCount * kArrayLen * static_cast<int>(sizeof(int64_t));
+    ASSERT_GTE(size, rawDataSize);
+    ASSERT_LTE(size, 5 * rawDataSize);
+}
+
+TEST(SbeBlockTest, GetApproximateSize_ScalarMonoCellBlock_ShallowType) {
+    value::ScalarMonoCellBlock cellBlock(1, TypeTags::NumberInt64, value::bitcastFrom<int64_t>(42));
+    int size = cellBlock.getApproximateSize();
+    ASSERT_GTE(size, static_cast<int>(sizeof(int64_t)));
+    ASSERT_LTE(size, 512);
+}
+
+TEST(SbeBlockTest, GetApproximateSize_MaterializedCellBlock_DeepType) {
+    constexpr int kCount = 100;
+    constexpr int kStrLen = 100;
+    const std::string str(kStrLen, 'x');
+    auto innerBlock = std::make_unique<value::HeterogeneousBlock>();
+    for (int i = 0; i < kCount; ++i) {
+        auto [tag, val] = value::makeNewString(str);
+        innerBlock->push_back(tag, val);
+    }
+    value::MaterializedCellBlock cellBlock;
+    cellBlock._deblocked = std::move(innerBlock);
+    int size = cellBlock.getApproximateSize();
+    ASSERT_GTE(size, kCount * kStrLen);
+    ASSERT_LTE(size, 3 * kCount * kStrLen);
+}
+
 TEST_F(ValueBlockTest, EmptyBlockMapTest) {
     auto emptyTestBlock = std::make_unique<TestBlock>();
     auto emptyHeterogeneousBlock = std::make_unique<value::HeterogeneousBlock>(
@@ -1069,19 +1185,19 @@ TEST_F(ValueBlockTest, EmptyBlockMapTest) {
 TEST_F(ValueBlockTest, TestTokenize) {
     auto block = std::make_unique<TestBlock>();
 
-    auto [tag1, val1] = value::makeNewString("foofoofoo"_sd);
+    auto [tag1, val1] = value::makeNewString("foofoofoo"sv);
     block->push_back(tag1, val1);
-    auto [tag2, val2] = value::makeNewString("bar"_sd);  // StringSmall
+    auto [tag2, val2] = value::makeNewString("bar"sv);  // StringSmall
     block->push_back(tag2, val2);
-    auto [tag3, val3] = value::makeNewString("bazbazbaz"_sd);
+    auto [tag3, val3] = value::makeNewString("bazbazbaz"sv);
     block->push_back(tag3, val3);
-    auto [tag4, val4] = value::makeNewString("bar"_sd);  // StringSmall
+    auto [tag4, val4] = value::makeNewString("bar"sv);  // StringSmall
     block->push_back(tag4, val4);
-    auto [tag5, val5] = value::makeNewString("bar"_sd);  // StringSmall
+    auto [tag5, val5] = value::makeNewString("bar"sv);  // StringSmall
     block->push_back(tag5, val5);
     block->push_back(TypeTags::NumberInt32, value::bitcastFrom<int32_t>(999));
     block->push_back(TypeTags::Nothing, Value{0u});
-    auto [tag6, val6] = value::makeNewString("foofoofoo"_sd);
+    auto [tag6, val6] = value::makeNewString("foofoofoo"sv);
     block->push_back(tag6, val6);
     block->push_back(TypeTags::Nothing, Value{0u});
 
@@ -1099,7 +1215,7 @@ TEST_F(ValueBlockTest, TestTokenize) {
 // Test MonoBlock::tokenize().
 TEST_F(ValueBlockTest, MonoBlockTokenize) {
     {
-        auto [strTag, strVal] = value::makeNewString("not a small string"_sd);
+        auto [strTag, strVal] = value::makeNewString("not a small string"sv);
         auto block = std::make_unique<value::MonoBlock>(4, strTag, strVal);
 
         auto [outTokens, outIdxs] = block->tokenize();

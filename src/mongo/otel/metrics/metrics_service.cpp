@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/metrics_service.h"
 
@@ -152,35 +126,39 @@ void MetricsService::OwnedMetricVisitor::operator()(
     newObservableInstruments.push_back(observable);
 }
 
-void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MinGauge<int64_t>>& gauge) {
+void MetricsService::OwnedMetricVisitor::operator()(
+    std::unique_ptr<ObservableMinGauge<int64_t>>& gauge) {
     gauge->reset();
-    auto observable =
-        makeObservableInstrument<ObservableGauge<int64_t>>(provider, name, id.description, id.unit);
-    observable->AddCallback(observableCallback<MinGauge, int64_t>, gauge.get());
+    auto observable = makeObservableInstrument<ObservableMinGauge<int64_t>>(
+        provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<ObservableMinGauge, int64_t>, gauge.get());
     newObservableInstruments.push_back(observable);
 }
 
-void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MinGauge<double>>& gauge) {
+void MetricsService::OwnedMetricVisitor::operator()(
+    std::unique_ptr<ObservableMinGauge<double>>& gauge) {
     gauge->reset();
-    auto observable =
-        makeObservableInstrument<ObservableGauge<double>>(provider, name, id.description, id.unit);
-    observable->AddCallback(observableCallback<MinGauge, double>, gauge.get());
+    auto observable = makeObservableInstrument<ObservableMinGauge<double>>(
+        provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<ObservableMinGauge, double>, gauge.get());
     newObservableInstruments.push_back(observable);
 }
 
-void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MaxGauge<int64_t>>& gauge) {
+void MetricsService::OwnedMetricVisitor::operator()(
+    std::unique_ptr<ObservableMaxGauge<int64_t>>& gauge) {
     gauge->reset();
-    auto observable =
-        makeObservableInstrument<ObservableGauge<int64_t>>(provider, name, id.description, id.unit);
-    observable->AddCallback(observableCallback<MaxGauge, int64_t>, gauge.get());
+    auto observable = makeObservableInstrument<ObservableMaxGauge<int64_t>>(
+        provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<ObservableMaxGauge, int64_t>, gauge.get());
     newObservableInstruments.push_back(observable);
 }
 
-void MetricsService::OwnedMetricVisitor::operator()(std::unique_ptr<MaxGauge<double>>& gauge) {
+void MetricsService::OwnedMetricVisitor::operator()(
+    std::unique_ptr<ObservableMaxGauge<double>>& gauge) {
     gauge->reset();
-    auto observable =
-        makeObservableInstrument<ObservableGauge<double>>(provider, name, id.description, id.unit);
-    observable->AddCallback(observableCallback<MaxGauge, double>, gauge.get());
+    auto observable = makeObservableInstrument<ObservableMaxGauge<double>>(
+        provider, name, id.description, id.unit);
+    observable->AddCallback(observableCallback<ObservableMaxGauge, double>, gauge.get());
     newObservableInstruments.push_back(observable);
 }
 
@@ -246,135 +224,18 @@ void MetricsService::_registerHistogramView(
 }
 #endif  // MONGO_CONFIG_OTEL
 
+MetricsService::MetricsService(MetricTreeSet& metricTreeSet) : _metricTreeSet(metricTreeSet) {}
+
 void MetricsService::_registerServerStatusTree(
     WithLock, Metric* metricPtr, const boost::optional<ServerStatusOptions>& serverStatusOptions) {
     if (!serverStatusOptions.has_value()) {
         return;
     }
-    globalMetricTreeSet()[serverStatusOptions->role].add(
+    _metricTreeSet[serverStatusOptions->role].add(
         serverStatusOptions->dottedPath,
         std::make_unique<OtelMetricServerStatusAdapter>(metricPtr));
 }
 
-UpDownCounter<int64_t>& MetricsService::createInt64UpDownCounter(
-    MetricName name,
-    std::string description,
-    MetricUnit unit,
-    const UpDownCounterOptions& options) {
-    return _createScalarMetric<ObservableUpDownCounter, int64_t>(
-        name, std::move(description), unit, options);
-}
-
-UpDownCounter<double>& MetricsService::createDoubleUpDownCounter(
-    MetricName name,
-    std::string description,
-    MetricUnit unit,
-    const UpDownCounterOptions& options) {
-    return _createScalarMetric<ObservableUpDownCounter, double>(
-        name, std::move(description), unit, options);
-}
-
-template <template <typename> class GaugeTpl, typename T>
-GaugeTpl<T>& MetricsService::createGaugeBase(MetricName name,
-                                             std::string description,
-                                             MetricUnit unit,
-                                             const GaugeOptions& options,
-                                             T initialValue) {
-    MetricIdentifier identifier{.description = description,
-                                .unit = unit,
-                                .serverStatusOptions = options.serverStatusOptions,
-                                .histogramBucketBoundaries = boost::none};
-    return _createMetric<GaugeTpl<T>, GaugeTpl<T>, GaugeOptions>(
-        name,
-        options,
-        std::move(identifier),
-        /* makeInstrument= */
-        [initialValue](WithLock, const std::string&) -> std::unique_ptr<GaugeTpl<T>> {
-            return std::make_unique<GaugeImpl<T>>(initialValue);
-        },
-#ifdef MONGO_CONFIG_OTEL
-        /* addObservable= */
-        [this, description, unit](
-            WithLock lock, const std::string& nameStr, GaugeTpl<T>* gauge_ptr) {
-            (void)lock;
-            auto provider = opentelemetry::metrics::Provider::GetMeterProvider();
-            auto observableGauge =
-                metrics_service_detail::makeObservableInstrument<ObservableGauge<T>>(
-                    *provider, nameStr, description, unit);
-            tassert(ErrorCodes::InternalError,
-                    fmt::format("Could not create observable gauge for metric: {}", nameStr),
-                    observableGauge != nullptr);
-            observableGauge->AddCallback(metrics_service_detail::observableCallback<GaugeTpl, T>,
-                                         gauge_ptr);
-            _observableInstruments.push_back(std::move(observableGauge));
-        }
-#else
-        [](WithLock, const std::string&, GaugeTpl<T>*) {}
-#endif
-    );
-}
-
-Gauge<int64_t>& MetricsService::createInt64Gauge(MetricName name,
-                                                 std::string description,
-                                                 MetricUnit unit,
-                                                 const GaugeOptions& options) {
-    return _createScalarMetric<ObservableGauge, int64_t>(
-        name, std::move(description), unit, options);
-}
-
-Gauge<double>& MetricsService::createDoubleGauge(MetricName name,
-                                                 std::string description,
-                                                 MetricUnit unit,
-                                                 const GaugeOptions& options) {
-    return _createScalarMetric<ObservableGauge, double>(
-        name, std::move(description), unit, options);
-}
-
-template <typename T>
-MinGauge<T>& MetricsService::createMinGauge(MetricName name,
-                                            std::string description,
-                                            MetricUnit unit,
-                                            const GaugeOptions& options) {
-    return createGaugeBase<MinGauge, T>(
-        name, description, unit, options, std::numeric_limits<T>::max());
-}
-
-MinGauge<int64_t>& MetricsService::createInt64MinGauge(MetricName name,
-                                                       std::string description,
-                                                       MetricUnit unit,
-                                                       const GaugeOptions& options) {
-    return createMinGauge<int64_t>(name, description, unit, options);
-}
-
-MinGauge<double>& MetricsService::createDoubleMinGauge(MetricName name,
-                                                       std::string description,
-                                                       MetricUnit unit,
-                                                       const GaugeOptions& options) {
-    return createMinGauge<double>(name, description, unit, options);
-}
-
-template <typename T>
-MaxGauge<T>& MetricsService::createMaxGauge(MetricName name,
-                                            std::string description,
-                                            MetricUnit unit,
-                                            const GaugeOptions& options) {
-    return createGaugeBase<MaxGauge, T>(
-        name, description, unit, options, std::numeric_limits<T>::lowest());
-}
-
-MaxGauge<int64_t>& MetricsService::createInt64MaxGauge(MetricName name,
-                                                       std::string description,
-                                                       MetricUnit unit,
-                                                       const GaugeOptions& options) {
-    return createMaxGauge<int64_t>(name, description, unit, options);
-}
-
-MaxGauge<double>& MetricsService::createDoubleMaxGauge(MetricName name,
-                                                       std::string description,
-                                                       MetricUnit unit,
-                                                       const GaugeOptions& options) {
-    return createMaxGauge<double>(name, description, unit, options);
-}
 
 std::vector<std::string> MetricsService::getAttributeNamesForTests(MetricName name) const {
     std::lock_guard lock(_mutex);
@@ -390,17 +251,4 @@ std::vector<std::string> MetricsService::getAttributeNamesForTests(MetricName na
     return names;
 }
 
-void MetricsService::clearForTests() {
-    std::lock_guard lock(_mutex);
-#ifdef MONGO_CONFIG_OTEL
-    _observableInstruments.clear();
-#endif
-    for (auto& [name, identAndMetric] : _metrics) {
-        auto& opts = identAndMetric.identifier.serverStatusOptions;
-        if (opts.has_value()) {
-            globalMetricTreeSet()[opts->role].removeForTests(opts->dottedPath);
-        }
-    }
-    _metrics.clear();
-}
 }  // namespace mongo::otel::metrics

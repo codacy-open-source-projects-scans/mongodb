@@ -91,8 +91,10 @@ function checkContainsOnceJson(connOrFile, ids, attrsDict, severity = null) {
         try {
             obj = JSON.parse(logMsg);
         } catch (ex) {
-            print("checkLog.checkContainsOnce: JsonJSON.parse() failed: " + tojson(ex) + ": " + logMsg);
-            throw ex;
+            // The server log can contain non-JSON content interleaved with structured log lines
+            // (for instance a stack trace). We still want to be able to search through the rest of
+            // the logs, so simply swallow the error and continue searching.
+            continue;
         }
 
         if (
@@ -129,7 +131,14 @@ function checkContainsWithCountJson(
     },
     context = null,
 ) {
-    const messages = getFilteredLogMessages(connOrFile, id, attrsDict, severity, isRelaxed, context);
+    const messages = getFilteredLogMessages(
+        connOrFile,
+        id,
+        attrsDict,
+        severity,
+        isRelaxed,
+        context,
+    );
 
     const count = messages.length;
 
@@ -189,7 +198,14 @@ function checkContainsOnceJsonStringMatch(connOrFile, id, attrName, msg) {
 /*
  * See checkContainsWithCountJson comment.
  */
-function getFilteredLogMessages(connOrFile, id, attrsDict, severity = null, isRelaxed = false, context = null) {
+function getFilteredLogMessages(
+    connOrFile,
+    id,
+    attrsDict,
+    severity = null,
+    isRelaxed = false,
+    context = null,
+) {
     const logMessages = getGlobalLog(connOrFile);
     if (logMessages === null) {
         return false;
@@ -202,8 +218,10 @@ function getFilteredLogMessages(connOrFile, id, attrsDict, severity = null, isRe
         try {
             obj = JSON.parse(logMsg);
         } catch (ex) {
-            print("checkLog.checkContainsOnce: JsonJSON.parse() failed: " + tojson(ex) + ": " + logMsg);
-            throw ex;
+            // The server log can contain non-JSON content interleaved with structured log lines
+            // (for instance a stack trace). We still want to be able to search through the rest of
+            // the logs, so simply swallow the error and continue searching.
+            continue;
         }
 
         if (compareLogs(obj, id, severity, context, attrsDict, isRelaxed)) {
@@ -262,7 +280,10 @@ function containsJson(connOrFile, ids, attrsDict, timeoutMillis = 5 * 60 * 1000)
         function () {
             return checkContainsOnceJson(connOrFile, ids, attrsDict);
         },
-        "Could not find log entries containing the following ids: " + ids + " and attrs: " + tojson(attrsDict),
+        "Could not find log entries containing the following ids: " +
+            ids +
+            " and attrs: " +
+            tojson(attrsDict),
         timeoutMillis,
         300,
         {runHangAnalyzer: false},
@@ -301,7 +322,10 @@ function containsRelaxedJson(
                 context,
             );
         },
-        "Could not find log entries containing the following id: " + id + ", and attrs: " + tojson(attrsDict),
+        "Could not find log entries containing the following id: " +
+            id +
+            ", and attrs: " +
+            tojson(attrsDict),
         timeoutMillis,
         300,
         {runHangAnalyzer: false},
@@ -315,7 +339,13 @@ function containsRelaxedJson(
  * equal to 'expectedCount'. Otherwise, checks whether the count is at least equal to
  * 'expectedCount'. Early returns when at least 'expectedCount' entries are found.
  */
-function containsWithCount(connOrFile, msg, expectedCount, timeoutMillis = 5 * 60 * 1000, exact = true) {
+function containsWithCount(
+    connOrFile,
+    msg,
+    expectedCount,
+    timeoutMillis = 5 * 60 * 1000,
+    exact = true,
+) {
     let expectedStr = exact ? "exactly " : "at least ";
     assert.soon(
         function () {
@@ -347,7 +377,12 @@ function containsWithCount(connOrFile, msg, expectedCount, timeoutMillis = 5 * 6
 
             return exact ? expectedCount === count : expectedCount <= count;
         },
-        "Did not find " + expectedStr + expectedCount + " log entries containing the " + "following message: " + msg,
+        "Did not find " +
+            expectedStr +
+            expectedCount +
+            " log entries containing the " +
+            "following message: " +
+            msg,
         timeoutMillis,
         300,
     );

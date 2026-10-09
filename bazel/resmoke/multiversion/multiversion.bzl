@@ -30,6 +30,7 @@ the multiversion directory, which is preserved in bazel-testlogs after each test
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo", "string_flag")
+load("@internal_platforms_do_not_use//host:constraints.bzl", "HOST_CONSTRAINTS")
 
 def _multiversion_setup_impl(ctx):
     output_dir = ctx.actions.declare_directory(ctx.label.name)
@@ -47,9 +48,10 @@ def _multiversion_setup_impl(ctx):
     args.add(output_dir.path + "/multiversion-downloads.json")
     args.add(ctx.executable._resmoke)
     args.add(ctx.file._mongo_version)
+    args.add(ctx.file._releases_file)
 
     ctx.actions.run(
-        inputs = [ctx.file._mongo_version],
+        inputs = [ctx.file._mongo_version, ctx.file._releases_file],
         outputs = [output_dir],
         executable = ctx.executable._wrapper,
         tools = [ctx.executable._db_contrib_tool, ctx.executable._resmoke],
@@ -95,11 +97,15 @@ _multiversion_setup_rule = rule(
         "_resmoke": attr.label(
             executable = True,
             cfg = "exec",
-            default = "//buildscripts:resmoke",
+            default = "//buildscripts:resmoke_local_host_tool",
         ),
         "_mongo_version": attr.label(
             allow_single_file = True,
             default = "//bazel/resmoke:resmoke_mongo_version",
+        ),
+        "_releases_file": attr.label(
+            allow_single_file = True,
+            default = "//src/mongo/util/version:releases.yml",
         ),
         "_wrapper": attr.label(
             executable = True,
@@ -128,7 +134,7 @@ _log=$(mktemp)
 trap 'rm -f "$_log"' EXIT
 if ! (
     set -e
-    export GIT_DIR=$(dirname "$(readlink -f WORKSPACE.bazel)")/.git
+    export GIT_DIR=$(dirname "$(readlink -f MODULE.bazel)")/.git
     {resmoke} \
         --mongoVersionFile {version_file} \
         generate-multiversion-exclude-tags \
@@ -169,7 +175,7 @@ _multiversion_exclude_tags = rule(
     attrs = {
         "old_bin_version": attr.string(
             mandatory = True,
-            values = ["last_lts", "last_continuous"],
+            values = ["last_lts", "last_continuous", "last_patch"],
         ),
         "multiversion_setup": attr.label(
             mandatory = True,
@@ -177,7 +183,7 @@ _multiversion_exclude_tags = rule(
         "_resmoke": attr.label(
             executable = True,
             cfg = "exec",
-            default = "//buildscripts:resmoke",
+            default = "//buildscripts:resmoke_local_host_tool",
         ),
         "_mongo_version": attr.label(
             allow_single_file = True,
@@ -193,9 +199,10 @@ _multiversion_exclude_tags = rule(
 _VERSION_TO_OLD_BIN_VERSION = {
     "last-continuous": "last_continuous",
     "last-lts": "last_lts",
+    "last-patch": "last_patch",
 }
 
-def multiversion_setup(name, version, **kwargs):
+def multiversion_setup(name, version, exec_compatible_with = HOST_CONSTRAINTS, **kwargs):
     """Downloads old MongoDB binaries and generates companion exclude-tags targets.
 
     Also creates a per-target string_flag <name>-pin that can be set on
@@ -205,10 +212,11 @@ def multiversion_setup(name, version, **kwargs):
         bazel test //my:suite \\
             --//bazel/resmoke/multiversion:last-continuous-pin=<evg-version-id>
 
-    For last-continuous and last-lts, a <name>_exclude_tags companion is created
-    by running 'resmoke.py generate-multiversion-exclude-tags'.  For other versions
-    an empty no-op tag file is produced.  These are passed into resmoke_suite_test
-    via --tagFile when the multiversion_setup target appears in multiversion_deps.
+    For last-continuous, last-lts and last-patch, a <name>_exclude_tags companion
+    is created by running 'resmoke.py generate-multiversion-exclude-tags'.  For
+    other versions an empty no-op tag file is produced.  These are passed into
+    resmoke_suite_test via --tagFile when the multiversion_setup target appears in
+    multiversion_deps.
     """
 
     string_flag(
@@ -226,6 +234,7 @@ def multiversion_setup(name, version, **kwargs):
         version = version,
         edition = edition,
         evg_version_flag = ":" + name + "-pin",
+        exec_compatible_with = exec_compatible_with,
         **kwargs
     )
 
@@ -235,6 +244,7 @@ def multiversion_setup(name, version, **kwargs):
             name = name + "_exclude_tags",
             multiversion_setup = ":" + name,
             old_bin_version = old_bin_version,
+            exec_compatible_with = exec_compatible_with,
         )
     else:
         native.genrule(

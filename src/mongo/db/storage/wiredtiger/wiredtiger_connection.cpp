@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 
@@ -75,12 +49,23 @@ WiredTigerConnection::~WiredTigerConnection() {
 }
 
 void WiredTigerConnection::shuttingDown(ShutdownReason reason) {
-    // Try to atomically set _shuttingDown flag, but just return if another thread was first.
-    if (_shuttingDown.fetchAndBitOr(kShuttingDownMask) & kShuttingDownMask)
-        return;
+    const auto shutdownMask =
+        kShuttingDownMask | (reason == ShutdownReason::kCleanShutdown ? kCleanShutdownMask : 0);
+
+    // Atomically transition into shutdown and publish the shutdown reason only if this thread
+    // wins the transition, while preserving any existing blocker bits.
+    for (auto current = _shuttingDown.load();;) {
+        if (current & kShuttingDownMask) {
+            return;
+        }
+        const auto newValue = current | shutdownMask;
+        if (_shuttingDown.compareAndSwap(&current, newValue)) {
+            break;
+        }
+    }
 
     // Spin as long as there are threads blocking shutdown.
-    while (_shuttingDown.load() != kShuttingDownMask) {
+    while ((_shuttingDown.load() & ~kCleanShutdownMask) != kShuttingDownMask) {
         sleepmillis(1);
     }
 
@@ -88,11 +73,16 @@ void WiredTigerConnection::shuttingDown(ShutdownReason reason) {
 }
 
 void WiredTigerConnection::restart() {
-    _shuttingDown.fetchAndBitAnd(~kShuttingDownMask);
+    _shuttingDown.fetchAndBitAnd(~(kShuttingDownMask | kCleanShutdownMask));
 }
 
 bool WiredTigerConnection::isShuttingDown() {
     return _shuttingDown.load() & kShuttingDownMask;
+}
+
+bool WiredTigerConnection::isCleanShuttingDown() {
+    constexpr uint32_t both = kShuttingDownMask | kCleanShutdownMask;
+    return (_shuttingDown.load() & both) == both;
 }
 
 void WiredTigerConnection::waitUntilPreparedUnitOfWorkCommitsOrAborts(Interruptible& interruptible,
@@ -199,8 +189,9 @@ WiredTigerManagedSession WiredTigerConnection::getSession(OperationContext& opCt
 WiredTigerManagedSession WiredTigerConnection::getUninterruptibleSession(const char* config,
                                                                          const bool isInternal) {
     // We should never be able to get here after _shuttingDown is set, because no new
-    // operations should be allowed to start.
-    invariant(!(_shuttingDown.load() & kShuttingDownMask));
+    // operations should be allowed to start. This invariant looks specifically for the mask to
+    // match as it also indicates that no outstanding operations are blocking shutdown.
+    invariant(_shuttingDown.load() != kShuttingDownMask);
 
     {
         std::lock_guard<std::mutex> lock(_cacheLock);
@@ -228,10 +219,14 @@ void WiredTigerConnection::_releaseSession(std::unique_ptr<WiredTigerSession> se
     invariant(session);
 
     BlockShutdown blockShutdown(this);
+    // Ensure session destructs before the blockShutdown is released.
+    // This is necessary to prevent shutdown racing with the wrapped session's destruction, as the
+    // blockShutdown guard will clean up earlier than the passed-in session otherwise.
+    ON_BLOCK_EXIT([&session] { session.reset(); });
+
     uint64_t currentEngineEpoch = _engineEpoch.load();
     uint64_t currentRtsEpoch = _rtsEpoch.load();
-    if (isShuttingDown() || session->_getEngineEpoch() != currentEngineEpoch ||
-        session->_getRtsEpoch() != currentRtsEpoch) {
+    if (isCleanShuttingDown() || session->_getEngineEpoch() != currentEngineEpoch) {
         invariant(session->_getEngineEpoch() <= currentEngineEpoch);
         // There is a race condition with clean shutdown, where the storage engine is ripped
         // from underneath OperationContexts, which are not "active" (i.e., do not have any
@@ -242,9 +237,10 @@ void WiredTigerConnection::_releaseSession(std::unique_ptr<WiredTigerSession> se
         return;
     }
 
-    if (session->_getRtsEpoch() != currentRtsEpoch) {
-        // When the session is stale due to rollback to stable, we skip caching and return early.
-        // The session and cursor will be closed by the session wrapper.
+    if (isShuttingDown() || session->_getRtsEpoch() != currentRtsEpoch) {
+        // The session is stale due to a rollback to stable, which leaves the WT_CONNECTION intact.
+        // Skip caching and return early: the session and its cursors must still be closed, which
+        // the session wrapper does, or WiredTiger keeps holding the data handles of their tables.
         invariant(session->_getRtsEpoch() <= currentRtsEpoch);
         return;
     }

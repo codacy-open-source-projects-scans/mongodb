@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -98,8 +71,8 @@ namespace mongo {
  * data should be moved out of ShardingCatalogClient and into this class.
  */
 // TODO (SERVER-105531): Untag inner symbol declarations exceptionally tagged as
-// MONGO_MOD_UNFORTUNATELY_OPEN.
-class MONGO_MOD_NEEDS_REPLACEMENT ShardingCatalogManager {
+// [[MONGO_MOD_UNFORTUNATELY_OPEN]].
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ShardingCatalogManager {
     ShardingCatalogManager(const ShardingCatalogManager&) = delete;
     ShardingCatalogManager& operator=(const ShardingCatalogManager&) = delete;
 
@@ -302,6 +275,23 @@ public:
         const std::string& shardName);
 
     /**
+     * Commits a chunk split to the global catalog (config server).
+     *
+     * Returns the chunk documents changed by the commit (the new sub-chunks). Participants use this
+     * list to update their shard catalog.
+     *
+     * 'shardVersionPreSplit' is the requesting shard's shard version captured before the split. It
+     * provides the collection generation (epoch/timestamp) used to validate the commit and, on
+     * idempotent retries, bounds the read that reconstructs the list of changed chunks.
+     */
+    StatusWith<std::vector<ChunkType>> commitSplit(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   const ChunkVersion& shardVersionPreSplit,
+                                                   const ChunkRange& range,
+                                                   const std::vector<BSONObj>& splitPoints,
+                                                   const std::string& shardName);
+
+    /**
      * Updates metadata in the config.chunks collection so the chunks within the specified key range
      * are seen merged into a single larger chunk.
      *
@@ -320,6 +310,22 @@ public:
         const ShardId& shardId);
 
     /**
+     * Commits a chunk merge to the global catalog (config server).
+     *
+     * Returns the chunk documents changed by the commit (the single merged chunk). Participants use
+     * this list to update their shard catalog.
+     *
+     * 'shardVersionPreMerge' is the requesting shard's shard version captured before the merge. It
+     * provides the collection generation (epoch/timestamp) used to validate the commit and, on
+     * idempotent retries, the collection generation used to reconstruct the changed chunk.
+     */
+    StatusWith<std::vector<ChunkType>> commitMerge(OperationContext* opCtx,
+                                                   const NamespaceString& nss,
+                                                   const ChunkVersion& shardVersionPreMerge,
+                                                   const ChunkRange& chunkRange,
+                                                   const ShardId& shardId);
+
+    /**
      * Updates metadata in the config.chunks collection so that all mergeable chunks belonging to
      * the specified shard for the given collection are merged within one transaction.
      *
@@ -332,6 +338,28 @@ public:
                                 const ShardId& shardId,
                                 int maxNumberOfChunksToMerge = INT_MAX,
                                 int maxTimeProcessingChunksMS = INT_MAX);
+
+    /**
+     * Commits a precomputed list of merged chunks for `nss`/`shardId`.
+     *
+     * The caller supplies the post-merge chunk ranges (computed on the authoritative shard outside
+     * the critical section). Chunk versions in `newChunks` are ignored/recomputed under the
+     * chunk-op lock against the current collection placement version.
+     *
+     * Idempotency is detected by range: because the whole list is committed in a single
+     * transaction, if the first precomputed range already exists as a single chunk on the shard the
+     * merge ran on, the commit is skipped. This makes the command safe to re-run under any session
+     * (e.g. after a failover), so the caller need not persist the returned chunks.
+     *
+     * Returns the new placement version and the chunk documents changed by the commit -- read back
+     * from the durable catalog by their precomputed ranges, so the result is identical on a fresh
+     * commit and on a retry. Participants use the changed chunks to update their shard catalog.
+     */
+    StatusWith<std::pair<ShardAndCollectionPlacementVersions, std::vector<ChunkType>>>
+    commitMergeAllPrecomputedChunksOnShard(OperationContext* opCtx,
+                                           const NamespaceString& nss,
+                                           const ShardId& shardId,
+                                           std::vector<ChunkType> newChunks);
 
     /**
      * Updates metadata in config.chunks collection to show the given chunk in its new shard.
@@ -347,6 +375,24 @@ public:
         const ChunkType& migratedChunk,
         const OID& collectionEpoch,
         const Timestamp& collectionTimestamp,
+        const ShardId& fromShard,
+        const ShardId& toShard);
+
+    /**
+     * Commits a chunk migration to the global catalog (config server).
+     *
+     * Returns the chunk documents changed by the commit. Participants use this list to update their
+     * shard catalog.
+     *
+     * 'donorShardVersionPreMigration' is the donor's shard version captured before the migration.
+     * It provides the collection generation (epoch/timestamp) used to validate the commit and, on
+     * idempotent retries, bounds the read that reconstructs the list of changed chunks.
+     */
+    StatusWith<std::vector<ChunkType>> commitMoveRange(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ChunkType& migratedChunk,
+        const ChunkVersion& donorShardVersionPreMigration,
         const ShardId& fromShard,
         const ShardId& toShard);
 
@@ -412,11 +458,20 @@ public:
     /**
      * In a transaction, sets the 'allowMigrations' to the requested state and bumps the collection
      * version.
+     * TODO (SERVER-98118): Remove this function.
      */
     void setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
                                            const NamespaceString& nss,
                                            const boost::optional<UUID>& collectionUUID,
                                            bool allowMigrations);
+
+    /**
+     * Sets the 'allowChunkOperations' field to the requested state.
+     */
+    void setAllowChunkOperations(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 const boost::optional<UUID>& collectionUUID,
+                                 bool allowChunkOperations);
 
     /**
      * Bump the minor version of the newest chunk on each shard
@@ -662,18 +717,6 @@ public:
      */
     static void clearForTests(ServiceContext* serviceContext);
 
-    //
-    // Upgrade/downgrade
-    //
-
-    /**
-     * Upgrade the chunk metadata to include the history field.
-     */
-    void upgradeChunksHistory(OperationContext* opCtx,
-                              const NamespaceString& nss,
-                              bool force,
-                              const Timestamp& validAfter);
-
     /**
      * Returns a catalog client that will always run commands locally. Can only be used on a
      * config server node.
@@ -687,10 +730,12 @@ public:
     const std::shared_ptr<Shard>& localConfigShard();
 
     /**
-     * Creates the indexes on config.placementHistory supporting the getHistoricalPlacement()
-     * method.
+     * Creates a secondary index on the uuid field of config.shards.
+     * When checkFCVState is true, the method additionally verifies if the
+     * gFeatureFlagAssignUUIDToShard is enabled (and skips the request if not).
+     * Returns OK when the operation succeeds or is skipped, and an error status otherwise.
      */
-    Status createIndexesForConfigPlacementHistory(OperationContext* opCtx);
+    Status createIndexOnUuidForConfigShards(OperationContext* opCtx);
 
     /**
      * (Re)builds the content config.placementHistory based on a snapshot read of the global catalog
@@ -708,6 +753,11 @@ public:
      * Returns the oldest timestamp that is supported for history preservation.
      */
     static Timestamp getOldestTimestampSupportedForSnapshotHistory(OperationContext* opCtx);
+
+    /**
+     * Returns the history window duration in seconds.
+     */
+    static std::uint32_t getHistoryWindowInSeconds();
 
     /**
      * Removes from config.placementHistory any document that is no longer needed to describe
@@ -766,7 +816,7 @@ private:
     /**
      * Drops the sessions collection on the specified host.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN Status _dropSessionsCollection(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] Status _dropSessionsCollection(
         OperationContext* opCtx, std::shared_ptr<RemoteCommandTargeter> targeter);
 
     /**
@@ -774,7 +824,7 @@ private:
      * it returns excluding those named local, config and admin, since they serve administrative
      * purposes.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<std::vector<DatabaseName>> _getDBNamesListFromShard(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] StatusWith<std::vector<DatabaseName>> _getDBNamesListFromShard(
         OperationContext* opCtx, std::shared_ptr<RemoteCommandTargeter> targeter);
 
 
@@ -782,7 +832,7 @@ private:
      * Runs a command against a "shard" that is not yet in the cluster and thus not present in the
      * ShardRegistry.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<Shard::CommandResponse> _runCommandForAddShard(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] StatusWith<Shard::CommandResponse> _runCommandForAddShard(
         OperationContext* opCtx,
         RemoteCommandTargeter* targeter,
         const DatabaseName& dbName,
@@ -806,7 +856,7 @@ private:
      * Returns true if the zone with the given name has chunk ranges associated with it and the
      * shard with the given name is the only shard that it belongs to.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN StatusWith<bool> _isShardRequiredByZoneStillInUse(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] StatusWith<bool> _isShardRequiredByZoneStillInUse(
         OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
         const std::string& shardName,
@@ -817,7 +867,7 @@ private:
      * converting from a replica set to a sharded cluster) or set the cluster parameters stored on
      * the config server in the newly added shard.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN void _standardizeClusterParameters(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] void _standardizeClusterParameters(
         OperationContext* opCtx, RemoteCommandTargeter& targeter);
 
     /**
@@ -829,6 +879,119 @@ private:
                                             const std::vector<ChunkType>& splitChunks,
                                             const boost::optional<ChunkType>& controlChunk,
                                             const ShardId& donorShardId);
+
+    /**
+     * Result of a shared chunk-operation commit core (migration, split or merge). It carries both
+     * forms of the result; each caller reads the one it needs. On a fresh commit the requested
+     * form is populated; on an idempotent retry only the requested form is reconstructed and the
+     * other is left default-constructed.
+     */
+    struct ChunkOpCommitOutcome {
+        // The chunk documents changed by the commit -- or, on an idempotent retry, the same set
+        // reconstructed from the durable catalog.
+        std::vector<ChunkType> changedChunks;
+
+        // Shard and collection placement versions produced by the commit.
+        ShardAndCollectionPlacementVersions placementVersions;
+    };
+
+    /**
+     * Shared core of a chunk-migration commit. Acquires the chunk-operation lock, validates the
+     * request against the durable catalog, and either detects that the migration was already
+     * committed (idempotent retry) or generates the new migrated/split/control chunk documents and
+     * commits them durably in a single transaction.
+     *
+     * All catalog reads, including those that rebuild the idempotent response, happen while the
+     * chunk-operation lock is held. On the idempotent path, when
+     * 'donorShardVersionPreMigrationForRebuild' is set the changed chunks are rebuilt (see
+     * _rebuildChangedChunksAfterMigration); when unset, the donor's shard placement version is read
+     * instead. See ChunkOpCommitOutcome.
+     *
+     * TODO (SERVER-127253): Make donorShardVersionPreMigrationForRebuild non-optional.
+     */
+    StatusWith<ChunkOpCommitOutcome> _commitChunkMigrationImpl(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const ChunkType& migratedChunk,
+        const OID& collectionEpoch,
+        const Timestamp& collectionTimestamp,
+        const ShardId& fromShard,
+        const ShardId& toShard,
+        const boost::optional<ChunkVersion>& donorShardVersionPreMigrationForRebuild);
+
+    /**
+     * Reconstructs the chunks an already-committed operation changed on a single shard by reading
+     * the durable catalog: the chunks on 'shard' whose version is greater than 'shardVersionPreOp'.
+     *
+     * Because chunk commits are serialized under the chunk-operation lock, the shard's highest
+     * version before the operation is exactly 'shardVersionPreOp', so these are precisely the
+     * chunks the operation changed on that shard: the split sub-chunks, the merged chunk, or (for a
+     * moveRange) the siblings left behind and the bumped control chunk. Returned sorted by version
+     * ascending. This identifies changes on the requesting shard for split, merge and the donor of
+     * a migration.
+     */
+    StatusWith<std::vector<ChunkType>> _rebuildChangedChunksOnShard(
+        OperationContext* opCtx,
+        const CollectionType& coll,
+        const ShardId& shard,
+        const ChunkVersion& shardVersionPreOp);
+
+    /**
+     * Shared core of a chunk-split commit. Acquires the chunk-operation lock, validates the request
+     * against the durable catalog, and either detects that the split was already committed
+     * (idempotent retry) or splits the chunk into the requested sub-chunks and commits them durably
+     * in a single transaction.
+     *
+     * On a fresh commit the new sub-chunks are returned as the changed chunks. On an idempotent
+     * retry, when 'shardVersionPreSplitForRebuild' is set the changed chunks are rebuilt from the
+     * durable catalog (see _rebuildChangedChunksOnShard); when unset only the placement versions
+     * are returned. See ChunkOpCommitOutcome.
+     */
+    StatusWith<ChunkOpCommitOutcome> _commitChunkSplitImpl(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const OID& requestEpoch,
+        const boost::optional<Timestamp>& requestTimestamp,
+        const ChunkRange& range,
+        const std::vector<BSONObj>& splitPoints,
+        const std::string& shardName,
+        const boost::optional<ChunkVersion>& shardVersionPreSplitForRebuild);
+
+    /**
+     * Shared core of a chunk-merge commit. Acquires the chunk-operation lock, validates the request
+     * against the durable catalog, and either detects that the merge was already committed
+     * (idempotent retry) or merges the chunks within the range into a single chunk and commits it
+     * durably in a single transaction.
+     *
+     * On a fresh commit the merged chunk is returned as the changed chunks (when requested). On an
+     * idempotent retry, when 'shardVersionPreMergeForRebuild' is set the merged chunk is returned
+     * as the changed chunks; when unset only the placement versions are returned. See
+     * ChunkOpCommitOutcome.
+     */
+    StatusWith<ChunkOpCommitOutcome> _commitChunksMergeImpl(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const boost::optional<OID>& epoch,
+        const boost::optional<Timestamp>& timestamp,
+        const boost::optional<UUID>& requestCollectionUUID,
+        const ChunkRange& chunkRange,
+        const ShardId& shardId,
+        const boost::optional<ChunkVersion>& shardVersionPreMergeForRebuild);
+
+    /**
+     * Reconstructs the list of chunks changed by an already-committed migration. Combines the
+     * chunks changed on the donor (see _rebuildChangedChunksOnShard) with, when ownership changed
+     * ('toShard' != 'fromShard'), the single chunk now owned by 'toShard' matching 'migratedRange'
+     * exactly. The recipient chunk is found by bounds rather than by version because the
+     * recipient's pre-migration version is not known here.
+     */
+    StatusWith<std::vector<ChunkType>> _rebuildChangedChunksAfterMigration(
+        OperationContext* opCtx,
+        const CollectionType& coll,
+        const ChunkRange& migratedRange,
+        const ChunkVersion& donorShardVersionPreMigration,
+        const ShardId& fromShard,
+        const ShardId& toShard);
 
     /**
      * Execute the merge chunk updates using the internal transaction API.
@@ -856,7 +1019,8 @@ private:
                                                            const std::string& shardName,
                                                            const ChunkType& origChunk,
                                                            const ChunkVersion& collPlacementVersion,
-                                                           const std::vector<BSONObj>& splitPoints);
+                                                           const std::vector<BSONObj>& splitPoints,
+                                                           const CollectionType& coll);
 
     /**
      * Updates the "hasTwoOrMoreShard" cluster cardinality parameter after an add or remove shard
@@ -864,7 +1028,7 @@ private:
      * _kClusterCardinalityParameterLock lock in exclusive mode to avoid interleaving with other
      * add/remove shard operation and its set cluster cardinality parameter operation.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN Status _updateClusterCardinalityParameterAfterAddShardIfNeeded(
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] Status _updateClusterCardinalityParameterAfterAddShardIfNeeded(
         const Lock::ExclusiveLock&, OperationContext* opCtx);
 
     // The owning service context
@@ -873,11 +1037,13 @@ private:
     // Executor specifically used for sending commands to servers that are in the process of being
     // added as shards. Does not have any connection hook set on it, thus it can be used to talk to
     // servers that are not yet in the ShardRegistry.
-    MONGO_MOD_UNFORTUNATELY_OPEN const std::shared_ptr<executor::TaskExecutor> _executorForAddShard;
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] const std::shared_ptr<executor::TaskExecutor>
+        _executorForAddShard;
 
     // A ShardLocal and ShardingCatalogClient with a ShardLocal used for local connections.
-    MONGO_MOD_UNFORTUNATELY_OPEN const std::shared_ptr<Shard> _localConfigShard;
-    MONGO_MOD_UNFORTUNATELY_OPEN const std::unique_ptr<ShardingCatalogClient> _localCatalogClient;
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] const std::shared_ptr<Shard> _localConfigShard;
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] const std::unique_ptr<ShardingCatalogClient>
+        _localCatalogClient;
 
     //
     // All member variables are labeled with one of the following codes indicating the
@@ -903,12 +1069,12 @@ private:
     /**
      * Lock that is held in exclusive mode during the commit phase of an add/remove shard operation.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN ResourceMutex _kShardMembershipLock;
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] ResourceMutex _kShardMembershipLock;
 
     /**
      * Lock that guards changes to the cluster cardinality parameter.
      */
-    MONGO_MOD_UNFORTUNATELY_OPEN ResourceMutex _kClusterCardinalityParameterLock;
+    [[MONGO_MOD_UNFORTUNATELY_OPEN]] ResourceMutex _kClusterCardinalityParameterLock;
 
     /**
      * Lock for chunk split/merge/move operations. This should be acquired when doing split/merge/

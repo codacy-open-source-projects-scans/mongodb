@@ -1,5 +1,5 @@
 load("//bazel/platforms:remote_execution_containers.bzl", "REMOTE_EXECUTION_CONTAINERS")
-load("//bazel/platforms:normalize.bzl", "ARCH_TO_PLATFORM_MAP", "OS_TO_PLATFORM_MAP")
+load("//bazel/platforms:normalize.bzl", "ARCH_NORMALIZE_MAP", "ARCH_TO_PLATFORM_MAP", "OS_TO_PLATFORM_MAP")
 load("//bazel/toolchains/cc/mongo_linux:mongo_toolchain_version.bzl", "TOOLCHAIN_MAP")
 load("//bazel:utils.bzl", "get_host_distro_major_version")
 
@@ -18,17 +18,27 @@ def _setup_local_config_platform(ctx):
     else:
         os = "linux"
 
-    arch = ctx.os.arch
+    raw_arch = ctx.os.arch
+    toolchain_arch = ARCH_NORMALIZE_MAP[raw_arch]
 
     os_constraint = OS_TO_PLATFORM_MAP[os]
-    arch_constraint = ARCH_TO_PLATFORM_MAP[arch]
+    arch_constraint = ARCH_TO_PLATFORM_MAP[toolchain_arch]
 
     constraints = [os_constraint, arch_constraint]
+    if os == "macos":
+        constraints.append("@//bazel/platforms:use_mongo_native_apple_toolchain")
 
     # So Starlark doesn't throw an indentation error when this gets injected.
     constraints_str = ",\n        ".join(['"%s"' % c for c in constraints])
 
-    distro = get_host_distro_major_version(ctx)
+    # Keep the execution platform in sync with the image used by the wrapper. These
+    # values are declared in the repository rule's environ list below so changing an
+    # override also regenerates the platform and its action identity.
+    distro = (
+        ctx.os.environ.get("MONGO_HERMETIC_CONTAINER_DISTRO") or
+        get_host_distro_major_version(ctx)
+    )
+    arch = toolchain_arch
     if arch == "x86_64":
         arch = "amd64"
     elif arch == "aarch64":
@@ -37,7 +47,8 @@ def _setup_local_config_platform(ctx):
     # EngFlow's "default" pool is ARM64
     remote_execution_pool = "x86_64" if arch == "amd64" else "default"
     result = None
-    toolchain_key = "{distro}_{arch}".format(distro = distro, arch = arch)
+    platform_key = "{distro}_{arch}".format(distro = distro, arch = arch)
+    toolchain_key = "{distro}_{arch}".format(distro = distro, arch = toolchain_arch)
     print("Trying to find toolchain for {}".format(toolchain_key))
     toolchain_exists = False
     for version in TOOLCHAIN_MAP:
@@ -45,14 +56,18 @@ def _setup_local_config_platform(ctx):
             toolchain_exists = True
             break
 
-    cache_silo = '"cache-silo-key": "' + toolchain_key + '",' if ctx.os.environ.get("evergreen_remote_exec") == "off" else ""
-    if ctx.os.environ.get("USE_NATIVE_TOOLCHAIN"):
+    cache_silo = '"cache-silo-key": "' + platform_key + '",' if ctx.os.environ.get("evergreen_remote_exec") == "off" else ""
+    if ctx.os.environ.get("USE_NATIVE_TOOLCHAIN") == "1":
+        constraints_str += ',\n        "@//bazel/platforms:use_native_toolchain"'
         exec_props = ""
         result = {"USE_NATIVE_TOOLCHAIN": "1"}
     elif distro != None and distro in REMOTE_EXECUTION_CONTAINERS:
         constraints_str += ',\n        "@//bazel/platforms:use_mongo_toolchain"'
         constraints_str += ',\n        "@//bazel/platforms:%s"' % (distro)
-        container_url = REMOTE_EXECUTION_CONTAINERS[distro]["container-url"]
+        container_url = (
+            ctx.os.environ.get("MONGO_HERMETIC_CONTAINER_IMAGE") or
+            REMOTE_EXECUTION_CONTAINERS[distro]["container-url"]
+        )
         web_url = REMOTE_EXECUTION_CONTAINERS[distro]["web-url"]
         dockerfile = REMOTE_EXECUTION_CONTAINERS[distro]["dockerfile"]
         print("Local host platform is configured to use this container if doing remote execution: {} built from {}".format(web_url, dockerfile))
@@ -122,5 +137,9 @@ setup_local_config_platform = repository_rule(
             doc = "Template modeling the builtin local config platform constraints file.",
         ),
     },
-    environ = ["USE_NATIVE_TOOLCHAIN"],
+    environ = [
+        "MONGO_HERMETIC_CONTAINER_DISTRO",
+        "MONGO_HERMETIC_CONTAINER_IMAGE",
+        "USE_NATIVE_TOOLCHAIN",
+    ],
 )

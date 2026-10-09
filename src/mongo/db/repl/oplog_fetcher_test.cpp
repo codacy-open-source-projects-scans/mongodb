@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog_fetcher.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -61,8 +34,7 @@
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
@@ -70,6 +42,7 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/task_executor_proxy.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -78,6 +51,7 @@
 #include "mongo/util/uuid.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -204,7 +178,7 @@ void validateFindCommand(Message m,
                                           << "afterClusterTime" << Timestamp(0, 1))),
                          bool requestResumeToken = false) {
     auto msg = mongo::OpMsg::parse(m);
-    ASSERT_EQ(mongo::StringData(msg.body.firstElement().fieldName()), "find");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "find");
     ASSERT_TRUE(msg.body.getBoolField("tailable"));
     ASSERT_TRUE(msg.body.getBoolField("awaitData"));
     ASSERT_EQUALS(findTimeout, msg.body.getIntField("maxTimeMS"));
@@ -235,7 +209,7 @@ void validateGetMoreCommand(Message m,
                             OpTimeWithTerm lastCommittedWithCurrentTerm,
                             bool exhaustSupported = true) {
     auto msg = mongo::OpMsg::parse(m);
-    ASSERT_EQ(mongo::StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     ASSERT_EQ(cursorId, msg.body.getIntField("getMore"));
     ASSERT_EQUALS(timeout, msg.body.getIntField("maxTimeMS"));
 
@@ -779,7 +753,7 @@ TEST_F(OplogFetcherTest,
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, shutdownState.getStatus());
 }
 
-AtomicWord<bool> sharedCallbackStateDestroyed{false};
+Atomic<bool> sharedCallbackStateDestroyed{false};
 bool sharedCallbackStateDestroyedSoon() {
     // Wait up to 10 seconds.
     for (auto i = 0; i < 100; i++) {
@@ -913,7 +887,7 @@ TEST_F(
         conn, makeSubsequentBatch(0LL, {secondEntry}, metadataObj, false /* moreToCome */), false);
 
     auto msg = mongo::OpMsg::parse(m);
-    ASSERT_EQ(mongo::StringData(msg.body.firstElement().fieldName()), "getMore");
+    ASSERT_EQ(std::string_view(msg.body.firstElement().fieldName()), "getMore");
     // Test that the getMore query does not contain the term or the lastKnownCommittedOpTime field.
     ASSERT_FALSE(msg.body.hasField("term"));
     ASSERT_FALSE(msg.body.hasField("lastKnownCommittedOpTime"));
@@ -2097,8 +2071,8 @@ TEST_F(OplogFetcherTest, FailedSyncSourceCheckReturnsStopSyncingAndDropBatch) {
 }
 
 TEST_F(OplogFetcherTest, ValidateDocumentsReturnsBadValueIfAnyOplogEntryHasWrongVersion) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagReduceMajorityWriteLatency", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagReduceMajorityWriteLatency",
+                                                         true);
     auto firstEntry = makeNoopOplogEntry(Seconds(123));
     auto secondEntry = makeNoopOplogEntry(Seconds(456),
                                           firstEntry.getIntField(OplogEntry::kVersionFieldName) -
@@ -2111,8 +2085,8 @@ TEST_F(OplogFetcherTest, ValidateDocumentsReturnsBadValueIfAnyOplogEntryHasWrong
 }
 
 TEST_F(OplogFetcherTest, ValidateDocumentsReturnsBadValueIfAnyOplogEntryHasMissingVersion) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagReduceMajorityWriteLatency", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagReduceMajorityWriteLatency",
+                                                         true);
     auto firstEntry = makeNoopOplogEntry(Seconds(123));
     auto secondEntry = makeNoopOplogEntry(Seconds(456)).removeField(OplogEntry::kVersionFieldName);
 
@@ -2497,7 +2471,7 @@ TEST_F(OplogFetcherTest, DisconnectsOnErrorsDuringExhaustStream) {
     // Temporarily override the metatdata reader to introduce failure after successfully receiving a
     // batch from the first getMore. And the exhaust stream is now established.
     conn->setReplyMetadataReader(
-        [&](OperationContext* opCtx, const BSONObj& metadataObj, StringData target) {
+        [&](OperationContext* opCtx, const BSONObj& metadataObj, std::string_view target) {
             return Status(ErrorCodes::FailedToParse, "Fake error");
         });
     processSingleRequestResponse(

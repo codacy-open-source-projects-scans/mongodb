@@ -2,7 +2,9 @@
 // plan. For instance, there are helpers for checking whether a plan is a collection
 // scan or whether the plan is covered (index only).
 
-import {documentEq} from "jstests/aggregation/extras/utils.js";
+import {assertArrayEq, documentEq} from "jstests/aggregation/extras/utils.js";
+import {runWithParamsAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {isPlanCosted} from "jstests/libs/query/cbr_utils.js";
 
 /**
  * Returns query planner part of explain for every node in the explain report.
@@ -47,7 +49,10 @@ export function getQueryPlanner(explain) {
  * non-sharded plans.
  */
 export function getShardsFromExplain(explain) {
-    if (explain.hasOwnProperty("queryPlanner") && explain.queryPlanner.hasOwnProperty("winningPlan")) {
+    if (
+        explain.hasOwnProperty("queryPlanner") &&
+        explain.queryPlanner.hasOwnProperty("winningPlan")
+    ) {
         return explain.queryPlanner.winningPlan.shards;
     }
 
@@ -104,6 +109,38 @@ export function getSingleNodeExplain(explain) {
 }
 
 /**
+ * Returns true if this 'queryPlanner' section is in the V3 explain shape, where every candidate
+ * plan lives in a unified "plans" array (winner first) instead of the legacy
+ * winningPlan/rejectedPlans pair.
+ */
+export function isV3QueryPlanner(queryPlanner) {
+    return queryPlanner.hasOwnProperty("plans") && !queryPlanner.hasOwnProperty("winningPlan");
+}
+
+/**
+ * Presents one V3 "plans" array entry in the legacy plan shape this library's accessors consume:
+ * the plan's stage tree, with the plan-level fields (isCached, multiPlanEstimateStats, ...) kept
+ * on the root - the place the legacy winningPlan/rejectedPlans entries carry them.
+ *
+ * When the winner carries "executedPlanStages" (a pipeline pushed down to SBE after ranking), that
+ * tree is used instead of the ranked "planStages".
+ */
+function v3PlanToLegacyShape(planEntry) {
+    const {planStages, executedPlanStages, ...planLevelFields} = planEntry;
+    return Object.assign(planLevelFields, executedPlanStages ?? planStages);
+}
+
+/**
+ * Returns the rejected plans of one 'queryPlanner' section (not the whole explain; use
+ * getRejectedPlans() for that), handling both the legacy and the V3 section shape.
+ */
+function getRejectedPlansFromQueryPlanner(queryPlanner) {
+    return isV3QueryPlanner(queryPlanner)
+        ? queryPlanner.plans.slice(1).map(v3PlanToLegacyShape)
+        : queryPlanner.rejectedPlans;
+}
+
+/**
  * Returns the winning plan from the corresponding sub-node of classic/SBE explain output. Takes
  * into account that the plan may or may not have agg stages.
  * For sharded collections, this may return the top-level "winningPlan" which contains the shards.
@@ -111,15 +148,23 @@ export function getSingleNodeExplain(explain) {
  * for that shard i.e, explain.queryPlanner.winningPlan.shards[shardNames[0]].
  */
 export function getWinningPlanFromExplain(explain, isSBEPlan = false) {
-    let getWinningSBEPlan = (queryPlanner) => queryPlanner.winningPlan.slotBasedPlan;
+    let getWinningSBEPlan = (queryPlanner) =>
+        isV3QueryPlanner(queryPlanner)
+            ? queryPlanner.plans[0].slotBasedPlan
+            : queryPlanner.winningPlan.slotBasedPlan;
 
-    // The 'queryPlan' format is used when the SBE engine is turned on. If this field is present,
+    // In the V3 shape the winner is the first entry of the unified "plans" array. Otherwise, the
+    // 'queryPlan' format is used when the SBE engine is turned on. If this field is present,
     // it will hold a serialized winning plan, otherwise it will be stored in the 'winningPlan'
     // field itself.
-    let getWinningPlan = (queryPlanner) =>
-        queryPlanner.winningPlan.hasOwnProperty("queryPlan")
+    let getWinningPlan = (queryPlanner) => {
+        if (isV3QueryPlanner(queryPlanner)) {
+            return v3PlanToLegacyShape(queryPlanner.plans[0]);
+        }
+        return queryPlanner.winningPlan.hasOwnProperty("queryPlan")
             ? queryPlanner.winningPlan.queryPlan
             : queryPlanner.winningPlan;
+    };
 
     if ("shards" in explain) {
         for (const shardName in explain.shards) {
@@ -145,6 +190,247 @@ export function getWinningPlanFromExplain(explain, isSBEPlan = false) {
         queryPlanner = getQueryPlanner(explain);
     }
     return isSBEPlan ? getWinningSBEPlan(queryPlanner) : getWinningPlan(queryPlanner);
+}
+
+/**
+ * The ranker that produced the winning plan.
+ *   kCostBased     - the cost-based ranker (CBR) ranked the plan (it carries a cost estimate).
+ *   kMultiPlanning - the multi-planner (MP) ranked the plan (no cost estimate). This includes the
+ *                    case where CBR was engaged but could not cost the plans and fell back to MP.
+ *   kSinglePlan    - no ranking was needed because there was a single candidate plan.
+ *   kCachedPlan    - no ranking was needed because the plan came from the plan cache.
+ */
+export const ChosenRanker = {
+    kMultiPlanning: "multiPlanning",
+    kCostBased: "costBased",
+    kSinglePlan: "singlePlan",
+    kCachedPlan: "cachedPlan",
+};
+
+/**
+ * The reason a particular ranker was chosen for a query, as reported by the V3 explain
+ * queryPlanner.rankerChoice.reason field. These values mirror the C++ PlanRankerReason enum
+ * (src/mongo/db/query/plan_ranking/plan_ranker_reason.h) byte for byte. Not all reasons apply to
+ * every plan ranker or CE strategy.
+ * TODO SERVER-115714: add enum value kSmallCollection: "smallCollection"
+ */
+export const PlanRankerReason = {
+    kSinglePlan: "singlePlan",
+    kCBRFeatureFlagDisabled: "cbrFeatureFlagDisabled",
+    kQueryPlanRankerKnob: "queryPlanRankerKnob",
+    kCBRInestimableNode: "cbrInestimableNode",
+    kHistogramCEInternalColl: "histogramCEInternalColl",
+    kMpEarlyExit: "mpEarlyExit",
+    kMpFoundResult: "mpFoundResult",
+    kNoMultiplanningResults: "noMultiplanningResults",
+    kInestimableMP: "inestimableMP",
+    kMpCheaperThanCbr: "mpCheaperThanCbr",
+    kCbrCheaperThanMp: "cbrCheaperThanMp",
+};
+
+export function getRankerChoice(explain) {
+    const queryPlanner = getQueryPlanner(explain);
+    const rankerChoice = queryPlanner.rankerChoice;
+    assert(rankerChoice, "missing queryPlanner.rankerChoice", {explain});
+    return rankerChoice;
+}
+
+/**
+ * Asserts that the winning plan in 'explain' was produced by 'chosenRanker'.
+ *
+ * Optionally takes 'reason', which is validated against 'PlanRankerReason' and, for V3 explain
+ * output, asserted against queryPlanner.rankerChoice.reason. Legacy explain output does not
+ * surface the reason, so there it is validated only.
+ */
+export function assertChosenRanker(explain, chosenRanker, reason = undefined) {
+    assert(Object.values(ChosenRanker).includes(chosenRanker), "Unknown chosenRanker", {
+        chosenRanker,
+    });
+    if (reason !== undefined) {
+        assert(Object.values(PlanRankerReason).includes(reason), "Unknown reason", {reason});
+    }
+
+    const queryPlanner = getQueryPlanner(explain);
+    if (isV3QueryPlanner(queryPlanner)) {
+        assert(queryPlanner.hasOwnProperty("rankerChoice"), "Expected rankerChoice in V3 explain", {
+            queryPlanner,
+        });
+
+        const rankerChoice = queryPlanner.rankerChoice;
+        assert(
+            rankerChoice.hasOwnProperty("chosenRanker"),
+            "Expected chosenRanker in rankerChoice",
+            {rankerChoice},
+        );
+        assert(
+            rankerChoice.chosenRanker === chosenRanker,
+            'Unexpected chosenRanker in rankerChoice, expected: "' +
+                chosenRanker +
+                '", got: "' +
+                rankerChoice.chosenRanker +
+                '"',
+            {rankerChoice},
+        );
+
+        if (reason !== undefined) {
+            assert(rankerChoice.hasOwnProperty("reason"), "Expected reason in rankerChoice", {
+                rankerChoice,
+            });
+            assert(
+                rankerChoice.reason === reason,
+                'Unexpected reason in rankerChoice, expected: "' +
+                    reason +
+                    '", got: "' +
+                    rankerChoice.reason +
+                    '"',
+                {rankerChoice},
+            );
+        }
+        return;
+    }
+
+    const winningPlan = getWinningPlanFromExplain(explain);
+    const isCosted = isPlanCosted(winningPlan);
+    switch (chosenRanker) {
+        case ChosenRanker.kCostBased:
+            assert(isCosted, "Expected CBR to have costed the winning plan", {
+                chosenRanker,
+                reason,
+                winningPlan,
+            });
+            break;
+        case ChosenRanker.kMultiPlanning:
+            assert(!isCosted, "Expected the winning plan to not be costed", {
+                chosenRanker,
+                reason,
+                winningPlan,
+            });
+            break;
+        case ChosenRanker.kSinglePlan:
+        case ChosenRanker.kCachedPlan:
+            assert(getRejectedPlans(explain).length === 0, "Expected no rejected plans", {explain});
+            break;
+    }
+}
+
+/**
+ * Returns the V3 per-plan array of 'explain', asserting it is present. The winning (or sole) plan is
+ * always the first entry; the rest follow in the deciding ranker's order.
+ */
+export function getV3Plans(explain) {
+    const queryPlanner = getQueryPlanner(explain);
+    const plans = queryPlanner.plans;
+    assert(Array.isArray(plans), "missing queryPlanner.plans", {explain});
+    assert.gte(plans.length, 1, "plans must hold at least the winning plan", {explain});
+    return plans;
+}
+
+/**
+ * The values that legitimately differ between two explain invocations of the same query on the same
+ * data: planning and trial timing, and yield bookkeeping. Everything else is expected to be
+ * reproducible, so keeping this list short and named is what gives a deep explain comparison its
+ * teeth - resist adding to it.
+ *
+ */
+const kRunVaryingExplainFields = new Set([
+    "optimizationTimeMillis",
+    "optimizationTimeMicros",
+    "executionTimeMillisEstimate",
+    "executionTimeMicros",
+    "executionTimeNanos",
+    "saveState",
+    "restoreState",
+    "needYield",
+]);
+
+/**
+ * Returns a deep copy of 'value' with every run-varying field (see 'kRunVaryingExplainFields')
+ * replaced by the placeholder string "<normalized>", so that two explain outputs for the same query
+ * can be compared for deep equality.
+ *
+ * Field *presence* is never normalized: a normalized field is still present, so a field appearing or
+ * disappearing between the two outputs still fails the comparison. Recurses through both objects and
+ * arrays; scalars pass through unchanged.
+ */
+export function normalizeRunVarying(value) {
+    if (Array.isArray(value)) {
+        return value.map(normalizeRunVarying);
+    }
+    if (typeof value === "object" && value !== null) {
+        const out = {};
+        for (const key of Object.keys(value)) {
+            out[key] = kRunVaryingExplainFields.has(key)
+                ? "<normalized>"
+                : normalizeRunVarying(value[key]);
+        }
+        return out;
+    }
+    return value;
+}
+
+/**
+ * How a candidate plan's multi-planner trial period ended.
+ *   kEof             - the plan exhausted its results before any trial bound could stop it.
+ *   kFullBatch       - the plan buffered the trial's target number of results, without hitting EOF.
+ *   kExhaustedBudget - the plan met no early-exit condition and used up the per-plan work budget.
+ *   kTrialEndedEarly - the plan met no early-exit condition, but another plan did and ended the
+ *                      trial period for everyone, so this plan was stopped short with budget left.
+ *   kFailed          - the plan's trial ended by failing recoverably (e.g. a blocking sort over its
+ *                      memory limit with disk use disallowed). Such a plan is ranked out but still
+ *                      appears among the rejected plans, with partial counters and no score.
+ */
+export const MultiPlannerStopCondition = {
+    kEof: "EOF",
+    kFullBatch: "fullBatch",
+    kExhaustedBudget: "exhaustedBudget",
+    kTrialEndedEarly: "trialEndedEarly",
+    kFailed: "failed",
+};
+
+/**
+ * Asserts that 'plan', one entry of a V3 explain's queryPlanner.plans[], ran a multi-planning trial
+ * that ended with the 'expected' condition, one of 'MultiPlannerStopCondition'. A plan that ran a
+ * trial carries at least one of the plan-level subobjects 'multiPlanEstimateStats' /
+ * 'multiPlanFinalizeStats'. A plan that never ran a trial fails here: under strict cost-based
+ * ranking (the queryPlanRanker knob) no plan runs one, and neither does a single plan. In the
+ * mixed modes every candidate runs at least the capped trial, so every candidate passes.
+ *
+ * 'phase' names the subobject whose stopCondition to check:
+ * - "multiPlanEstimateStats": how the capped trial phase of the mixed rankers ended. A later
+ *   trial may have ended differently; this is the capped phase's own value.
+ * - "multiPlanFinalizeStats": how the trial that this subobject reports ended. It reports one of
+ *   three trials, whichever the plan ran:
+ *   (1) the capped trial resumed with the remaining budget, after the cost-based ranker could
+ *       not decide (e.g. an inestimable plan): every surviving plan carries both subobjects;
+ *   (2) pure multiplanning's single uncapped trial: no capped phase ran, so this is the plan's
+ *       only subobject;
+ *   (3) the finishing-up trial of the plan the cost-based ranker chose, which collects the works
+ *       the plan cache needs: only the winner carries this subobject, next to its estimate one.
+ * - "final": the stop condition of the last phase the plan ran, i.e. of the last subobject
+ *   present. Use it when the caller does not care which phases the plan ran.
+ */
+export function assertStopCondition(plan, expected, phase) {
+    assert(Object.values(MultiPlannerStopCondition).includes(expected), "Unknown stop condition", {
+        expected,
+    });
+    const presentGroups = ["multiPlanEstimateStats", "multiPlanFinalizeStats"].filter((name) =>
+        plan.hasOwnProperty(name),
+    );
+    assert.gte(presentGroups.length, 1, "expected a plan that ran a multi-planning trial", {plan});
+    if (phase === "final") {
+        phase = presentGroups[presentGroups.length - 1];
+    } else {
+        assert(
+            ["multiPlanEstimateStats", "multiPlanFinalizeStats"].includes(phase),
+            "Unknown trial phase subobject",
+            {phase},
+        );
+        assert(plan.hasOwnProperty(phase), "expected the plan to have run the phase", {
+            plan,
+            phase,
+        });
+    }
+    assert.eq(plan[phase].stopCondition, expected, {plan, phase});
 }
 
 /**
@@ -195,6 +481,8 @@ export function normalizePlan(plan, flatten = true) {
     }
 
     // Expand this array if you find new fields which are inconsistent across different test runs.
+    // The last three are the V3 explain shape's per-node statistics grouping and plan-level
+    // fields, which carry the same run-varying content as the legacy estimate fields above.
     const ignoreFields = [
         "isCached",
         "indexVersion",
@@ -202,6 +490,10 @@ export function normalizePlan(plan, flatten = true) {
         "cardinalityEstimate",
         "costEstimate",
         "estimatesMetadata",
+        "statistics",
+        "multiPlanEstimateStats",
+        "multiPlanFinalizeStats",
+        "solutionHashUnstable",
     ];
 
     // Iterates over the plan while ignoring the `ignoreFields`, to create flattened stages whenever
@@ -241,7 +533,10 @@ export function normalizePlan(plan, flatten = true) {
  */
 export function formatQueryPlanner(queryPlanner, shouldFlatten = true) {
     let winningPlan = normalizePlan(getWinningPlanFromExplain(queryPlanner), shouldFlatten);
-    let rejectedPlans = queryPlanner.rejectedPlans?.map((plan) => normalizePlan(plan, shouldFlatten)) ?? [];
+    let rejectedPlans =
+        getRejectedPlansFromQueryPlanner(queryPlanner)?.map((plan) =>
+            normalizePlan(plan, shouldFlatten),
+        ) ?? [];
     return {winningPlan, rejectedPlans};
 }
 
@@ -307,7 +602,9 @@ function invertShards(queryPlanner, shouldFlatten = true) {
     delete topStage.shards;
 
     const res = {mergerPart: normalizePlan(topStage, shouldFlatten), shardsPart: {}};
-    shards.forEach((shard) => (res.shardsPart[shard.shardName] = formatQueryPlanner(shard, shouldFlatten)));
+    shards.forEach(
+        (shard) => (res.shardsPart[shard.shardName] = formatQueryPlanner(shard, shouldFlatten)),
+    );
 
     return res;
 }
@@ -357,7 +654,11 @@ export function formatExplainRoot(explain, shouldFlatten = true, fieldsToExclude
                     ? formatQueryPlanner(shardExplain.queryPlanner, shouldFlatten)
                     : formatExplainPipeline(shardExplain.stages);
         }
-    } else if ("queryPlanner" in explain && "shards" in explain.queryPlanner.winningPlan) {
+    } else if (
+        "queryPlanner" in explain &&
+        "winningPlan" in explain.queryPlanner &&
+        "shards" in explain.queryPlanner.winningPlan
+    ) {
         res = {...res, ...invertShards(explain.queryPlanner, shouldFlatten)};
     } else if ("queryPlanner" in explain) {
         res = {...res, ...formatQueryPlanner(explain.queryPlanner, shouldFlatten)};
@@ -407,7 +708,9 @@ export function getPlanStages(root, stage) {
     }
 
     if ("queryPlanner" in root) {
-        results = results.concat(getPlanStages(getWinningPlanFromExplain(root.queryPlanner), stage));
+        results = results.concat(
+            getPlanStages(getWinningPlanFromExplain(root.queryPlanner), stage),
+        );
     }
 
     if ("thenStage" in root) {
@@ -458,7 +761,10 @@ export function getPlanStages(root, stage) {
             );
         } else {
             const shards = Object.keys(root.shards);
-            results = shards.reduce((res, shard) => res.concat(getPlanStages(root.shards[shard], stage)), results);
+            results = shards.reduce(
+                (res, shard) => res.concat(getPlanStages(root.shards[shard], stage)),
+                results,
+            );
         }
     }
 
@@ -478,6 +784,33 @@ export function getAllPlanStages(root) {
 }
 
 /**
+ * Given a stage of explain's JSON representation of a query plan, returns its immediate child
+ * stages, in order.
+ *
+ * Use this instead of reading '.inputStage' directly: the legacy node shape nests a single child as
+ * the 'inputStage' subdocument and multiple children as the 'inputStages' array, while the V3 node
+ * shape always uses the array. Reading '.inputStage' therefore silently yields undefined on a V3
+ * plan (queryPlanner.plans[]), even though the V3 executionStats section keeps the legacy nesting.
+ */
+export function getChildStages(node) {
+    if (node.hasOwnProperty("inputStages")) {
+        return node.inputStages;
+    }
+    return node.hasOwnProperty("inputStage") ? [node.inputStage] : [];
+}
+
+/**
+ * Given a stage of explain's JSON representation of a query plan, returns its only child stage,
+ * asserting that it has exactly one. The node-shape-independent form of reading '.inputStage'; see
+ * getChildStages().
+ */
+export function getSingleChildStage(node) {
+    const children = getChildStages(node);
+    assert.eq(children.length, 1, "expected a stage with exactly one child", {node});
+    return children[0];
+}
+
+/**
  * Given the root stage of explain's JSON representation of a query plan ('root'), returns the
  * subdocument with its stage as 'stage'. Returns null if the plan does not have such a stage.
  * Asserts that no more than one stage is a match.
@@ -491,7 +824,8 @@ export function getPlanStage(root, stage) {
     } else {
         assert(
             planStageList.length === 1,
-            "getPlanStage expects to find 0 or 1 matching stages. planStageList: " + tojson(planStageList),
+            "getPlanStage expects to find 0 or 1 matching stages. planStageList: " +
+                tojson(planStageList),
         );
         return planStageList[0];
     }
@@ -502,6 +836,9 @@ export function getPlanStage(root, stage) {
  */
 export function getRejectedPlans(root) {
     if (root.hasOwnProperty("queryPlanner")) {
+        if (isV3QueryPlanner(root.queryPlanner)) {
+            return getRejectedPlansFromQueryPlanner(root.queryPlanner);
+        }
         if (root.queryPlanner.winningPlan.hasOwnProperty("shards")) {
             const rejectedPlans = [];
             for (let shard of root.queryPlanner.winningPlan.shards) {
@@ -517,7 +854,10 @@ export function getRejectedPlans(root) {
             return getRejectedPlans(root.shards[shardName]);
         }
     } else {
-        return root.stages[0]["$cursor"].queryPlanner.rejectedPlans;
+        const firstStage = root.stages[0];
+        const cursorStage = firstStage && (firstStage.$cursor || firstStage.$geoNearCursor);
+        assert(cursorStage, "expected a leading cursor stage", {root});
+        return getRejectedPlans(cursorStage);
     }
 }
 
@@ -527,6 +867,10 @@ export function getRejectedPlans(root) {
  */
 export function hasRejectedPlans(root) {
     function sectionHasRejectedPlans(explainSection) {
+        if (isV3QueryPlanner(explainSection)) {
+            // The V3 "plans" array holds the winner first, then the rejected plans.
+            return explainSection.plans.length > 1;
+        }
         assert(explainSection.hasOwnProperty("rejectedPlans"), tojson(explainSection));
         return explainSection.rejectedPlans.length !== 0;
     }
@@ -548,10 +892,16 @@ export function hasRejectedPlans(root) {
     } else if (root.hasOwnProperty("stages")) {
         // This is an agg explain.
         const cursorStages = getAggPlanStages(root, "$cursor");
-        return cursorStages.find((cursorStage) => cursorStageHasRejectedPlans(cursorStage)) !== undefined;
+        return (
+            cursorStages.find((cursorStage) => cursorStageHasRejectedPlans(cursorStage)) !==
+            undefined
+        );
     } else {
         // This is some sort of query explain.
         assert(root.hasOwnProperty("queryPlanner"), tojson(root));
+        if (isV3QueryPlanner(root.queryPlanner)) {
+            return sectionHasRejectedPlans(root.queryPlanner);
+        }
         assert(root.queryPlanner.hasOwnProperty("winningPlan"), tojson(root));
         if (!root.queryPlanner.winningPlan.hasOwnProperty("shards")) {
             // This is an unsharded explain.
@@ -560,7 +910,10 @@ export function hasRejectedPlans(root) {
 
         // This is a sharded explain. Each entry in the shards array contains a 'winningPlan' and
         // 'rejectedPlans'.
-        return root.queryPlanner.winningPlan.shards.find((shard) => sectionHasRejectedPlans(shard)) !== undefined;
+        return (
+            root.queryPlanner.winningPlan.shards.find((shard) => sectionHasRejectedPlans(shard)) !==
+            undefined
+        );
     }
 }
 
@@ -568,7 +921,10 @@ export function hasRejectedPlans(root) {
  * Returns an array of execution stages from the given replset or sharded explain output.
  */
 export function getExecutionStages(root) {
-    if (root.hasOwnProperty("executionStats") && root.executionStats.executionStages.hasOwnProperty("shards")) {
+    if (
+        root.hasOwnProperty("executionStats") &&
+        root.executionStats.executionStages.hasOwnProperty("shards")
+    ) {
         const executionStages = [];
         for (let shard of root.executionStats.executionStages.shards) {
             executionStages.push(
@@ -596,6 +952,15 @@ export function getExecutionStages(root) {
 export function getExecutionStats(root) {
     if (root.hasOwnProperty("shards")) {
         return Object.values(root.shards).map((shardExplain) => shardExplain.executionStats);
+    }
+    // If the root does not have executionStats but has stages, it is likely a classic pipeline
+    // with a leading cursor stage.
+    if (!root.hasOwnProperty("executionStats") && Array.isArray(root.stages)) {
+        const firstStage = root.stages[0];
+        const cursorStage = firstStage && (firstStage.$cursor || firstStage.$geoNearCursor);
+        assert(cursorStage, root);
+        assert(cursorStage.hasOwnProperty("executionStats"), root);
+        return [cursorStage.executionStats];
     }
     assert(root.hasOwnProperty("executionStats"), root);
     if (
@@ -653,7 +1018,9 @@ export function getStableExecutionStats(explain) {
     const stableFields = extractStableExecutionFieldsSummary(topLevel);
 
     if (topLevel.shards) {
-        const sortedShards = [...topLevel.shards].sort((a, b) => a.shardName.localeCompare(b.shardName));
+        const sortedShards = [...topLevel.shards].sort((a, b) =>
+            a.shardName.localeCompare(b.shardName),
+        );
 
         stableFields.shards = sortedShards.map((shard) => ({
             nReturned: shard.nReturned,
@@ -754,16 +1121,25 @@ export function getAggPlanStages(root, stage, useQueryPlannerSection = false) {
     function getStagesFromQueryLayerOutput(queryLayerOutput) {
         let results = [];
 
-        assert(queryLayerOutput.hasOwnProperty("queryPlanner"));
-        assert(queryLayerOutput.queryPlanner.hasOwnProperty("winningPlan"));
+        assert(queryLayerOutput.hasOwnProperty("queryPlanner"), "missing queryPlanner section", {
+            queryLayerOutput,
+        });
+        const queryPlanner = queryLayerOutput.queryPlanner;
+        assert(
+            isV3QueryPlanner(queryPlanner) || queryPlanner.hasOwnProperty("winningPlan"),
+            "missing plans or winningPlan",
+            {queryLayerOutput},
+        );
 
         // If execution stats are available, then use the execution stats tree. Otherwise use the
         // plan info from the "queryPlanner" section.
         if (queryLayerOutput.hasOwnProperty("executionStats") && !useQueryPlannerSection) {
             assert(queryLayerOutput.executionStats.hasOwnProperty("executionStages"));
-            results = results.concat(getPlanStages(queryLayerOutput.executionStats.executionStages, stage));
+            results = results.concat(
+                getPlanStages(queryLayerOutput.executionStats.executionStages, stage),
+            );
         } else {
-            results = results.concat(getPlanStages(getWinningPlanFromExplain(queryLayerOutput.queryPlanner), stage));
+            results = results.concat(getPlanStages(getWinningPlanFromExplain(queryPlanner), stage));
         }
 
         return results;
@@ -838,7 +1214,8 @@ export function getAggPlanStage(root, stage, useQueryPlannerSection = false) {
         assert.eq(
             1,
             planStageList.length,
-            "getAggPlanStage expects to find 0 or 1 matching stages. planStageList: " + tojson(planStageList),
+            "getAggPlanStage expects to find 0 or 1 matching stages. planStageList: " +
+                tojson(planStageList),
         );
         return planStageList[0];
     }
@@ -863,7 +1240,10 @@ export function getStageFromSplitPipeline(root, stage) {
 
     if (root.splitPipeline != null) {
         // If there is only one shard, the whole pipeline will run on that shard.
-        let subAggPipe = root.splitPipeline === null ? root.shards["shard-rs0"].stages : root.splitPipeline.mergerPart;
+        let subAggPipe =
+            root.splitPipeline === null
+                ? root.shards["shard-rs0"].stages
+                : root.splitPipeline.mergerPart;
 
         // Check if the requested stage exists in the merger part.
         const stageInMergerPart = checkForStageInSubAggPipe(subAggPipe, stage);
@@ -901,12 +1281,31 @@ export function getSplitPipelineStages(root, stage) {
         return getAggPlanStages(root, stage);
     }
     const collect = (part) =>
-        (root.splitPipeline[part] || []).filter((s) => s.hasOwnProperty(stage)).map((s) => ({part, stage: s}));
+        (root.splitPipeline[part] || [])
+            .filter((s) => s.hasOwnProperty(stage))
+            .map((s) => ({part, stage: s}));
     return [...collect("mergerPart"), ...collect("shardsPart")];
 }
 
 export function countSplitPipelineStages(root, stage) {
     return getSplitPipelineStages(root, stage).length;
+}
+
+/**
+ * Returns every occurrence of `stage` as a flat array of raw stage subdocuments, regardless of
+ * whether the explain is a single pipeline or a sharded split (mergerPart + shardsPart) pipeline.
+ * Unlike getSplitPipelineStages, which tags split results with their `part`, this always yields the
+ * bare stage objects so callers that only care about the stage spec get a uniform shape.
+ *
+ * @param {object} explain Explain output.
+ * @param {string} stage Stage name including '$' (e.g. "$sort").
+ * @returns {Array<object>} The matching stage subdocuments.
+ */
+export function getAggStagesAcrossSplitPipeline(explain, stage) {
+    if (explain.splitPipeline != null) {
+        return getSplitPipelineStages(explain, stage).map(({stage}) => stage);
+    }
+    return getAggPlanStages(explain, stage);
 }
 
 /**
@@ -993,7 +1392,8 @@ export function isEofPlan(db, root) {
  * otherwise.
  */
 export function isAlwaysFalsePlan(root) {
-    const hasAlwaysFalseFilter = (stage) => stage && stage.filter && stage.filter["$alwaysFalse"] === 1;
+    const hasAlwaysFalseFilter = (stage) =>
+        stage && stage.filter && stage.filter["$alwaysFalse"] === 1;
     return getPlanStages(root, "FETCH").every(hasAlwaysFalseFilter);
 }
 
@@ -1061,7 +1461,12 @@ export function isClusteredIxscan(db, root) {
 export function isAggregationPlan(root) {
     if (root.hasOwnProperty("shards")) {
         const shards = Object.keys(root.shards);
-        return shards.reduce((res, shard) => (res + root.shards[shard].hasOwnProperty("stages") ? 1 : 0), 0) > 0;
+        return (
+            shards.reduce(
+                (res, shard) => (res + root.shards[shard].hasOwnProperty("stages") ? 1 : 0),
+                0,
+            ) > 0
+        );
     }
     return root.hasOwnProperty("stages");
 }
@@ -1073,7 +1478,12 @@ export function isAggregationPlan(root) {
 export function isQueryPlan(root) {
     if (root.hasOwnProperty("shards")) {
         const shards = Object.keys(root.shards);
-        return shards.reduce((res, shard) => (res + root.shards[shard].hasOwnProperty("queryPlanner") ? 1 : 0), 0) > 0;
+        return (
+            shards.reduce(
+                (res, shard) => (res + root.shards[shard].hasOwnProperty("queryPlanner") ? 1 : 0),
+                0,
+            ) > 0
+        );
     }
     return root.hasOwnProperty("queryPlanner");
 }
@@ -1093,7 +1503,10 @@ export function everyWinningPlan(explain, predicate) {
  * shard filter.
  */
 export function getChunkSkipsFromShard(shardPlan, shardExecutionStages) {
-    const shardFilterPlanStage = getPlanStage(getWinningPlanFromExplain(shardPlan), "SHARDING_FILTER");
+    const shardFilterPlanStage = getPlanStage(
+        getWinningPlanFromExplain(shardPlan),
+        "SHARDING_FILTER",
+    );
     if (!shardFilterPlanStage) {
         return 0;
     }
@@ -1107,7 +1520,10 @@ export function getChunkSkipsFromShard(shardPlan, shardExecutionStages) {
         const filters = getPlanStages(shardExecutionStages.executionStages, "filter").filter(
             (stage) => stage.planNodeId === shardFilterNodeId,
         );
-        return filters.reduce((numSkips, stage) => numSkips + (stage.numTested - stage.nReturned), 0);
+        return filters.reduce(
+            (numSkips, stage) => numSkips + (stage.numTested - stage.nReturned),
+            0,
+        );
     } else {
         // Otherwise, we assume that execution used a "classic" SHARDING_FILTER stage, which
         // explicitly reports a "chunkSkips" value.
@@ -1215,6 +1631,35 @@ export function assertStagesForExplainOfCommand({coll, cmdObj, expectedStages, s
 }
 
 /**
+ * Runs an explain command, retrying on transient NamespaceNotSharded errors that can
+ * surface during explain for timeseries collections due to a known server bug. Non-transient errors fail immediately.
+ *
+ * @param {Object} dbOrColl - A DB or collection object with a runCommand method.
+ * @param {Object} explainCmd - The full explain command object,
+ *     e.g. {explain: {delete: collName, deletes: [...]}, verbosity: "queryPlanner"}.
+ * @returns {Object} The successful explain result.
+ */
+export function runExplainWithRoutingRetry(dbOrColl, explainCmd) {
+    let result;
+    assert.soon(
+        () => {
+            result = dbOrColl.runCommand(explainCmd);
+            if (result.ok === 1) {
+                return true;
+            }
+            // TODO SERVER-114324: NamespaceNotSharded on explain for timeseries is a known
+            // server bug. Remove this retry once SERVER-114324 is fixed.
+            if (result.code === ErrorCodes.NamespaceNotSharded) {
+                return false;
+            }
+            assert(false, "Explain failed with unexpected error", {result});
+        },
+        () => `Explain command failed after retries: ${tojson(result)}`,
+    );
+    return result;
+}
+
+/**
  * Get the 'planCacheKey' from 'explain'.
  */
 export function getPlanCacheKeyFromExplain(explain) {
@@ -1252,7 +1697,14 @@ export function getPlanCacheShapeHashFromExplain(explain) {
  * Helper to run a explain on the given query shape and get the "planCacheKey" from the explain
  * result.
  */
-export function getPlanCacheKeyFromShape({query = {}, projection = {}, sort = {}, collation = {}, collection, db}) {
+export function getPlanCacheKeyFromShape({
+    query = {},
+    projection = {},
+    sort = {},
+    collation = {},
+    collection,
+    db,
+}) {
     const explainRes = assert.commandWorked(
         collection.explain().find(query, projection).collation(collation).sort(sort).finish(),
     );
@@ -1303,7 +1755,10 @@ export function assertFetchFilter({coll, predicate, expectedFilter, nReturned}) 
     const plan = getWinningPlanFromExplain(exp.queryPlanner);
     const fetch = getPlanStage(plan, "FETCH");
     assert(fetch !== null, "Missing FETCH stage " + plan);
-    assert(fetch.hasOwnProperty("filter"), "Expected filter in the fetch stage, got " + tojson(fetch));
+    assert(
+        fetch.hasOwnProperty("filter"),
+        "Expected filter in the fetch stage, got " + tojson(fetch),
+    );
     assert.eq(
         expectedFilter,
         fetch.filter,
@@ -1355,7 +1810,9 @@ export function getEngine(explain) {
 }
 
 export function getWarnings(explain) {
-    return getQueryPlanners(explain).flatMap((queryPlanner) => getNestedProperties(queryPlanner, "warning"));
+    return getQueryPlanners(explain).flatMap((queryPlanner) =>
+        getNestedProperties(queryPlanner, "warning"),
+    );
 }
 
 /**
@@ -1378,7 +1835,10 @@ export function getNumberOfIndexScans(explain) {
  * Returns the number of column scans in a query plan.
  */
 export function getNumberOfColumnScans(explain) {
-    const columnIndexScans = getPlanStages(getWinningPlanFromExplain(explain.queryPlanner), "COLUMN_SCAN");
+    const columnIndexScans = getPlanStages(
+        getWinningPlanFromExplain(explain.queryPlanner),
+        "COLUMN_SCAN",
+    );
     return columnIndexScans.length;
 }
 
@@ -1427,6 +1887,11 @@ export function canonicalizePlan(p) {
     delete p.cardinalityEstimate;
     delete p.costEstimate;
     delete p.estimatesMetadata;
+    // The V3 explain shape's per-node statistics grouping and plan-level fields.
+    delete p.statistics;
+    delete p.multiPlanEstimateStats;
+    delete p.multiPlanFinalizeStats;
+    delete p.solutionHashUnstable;
     if (p.hasOwnProperty("inputStage")) {
         canonicalizePlan(p.inputStage);
     } else if (p.hasOwnProperty("inputStages")) {
@@ -1493,7 +1958,12 @@ export function getCachedPlanForQuery(db, coll, filter) {
  *
  * Also verifies that the 'planCacheShapeHash' matches the provided 'expectedPlanCacheShapeHash'.
  */
-export function assertPlanHasIxScanStage(isSbePlanCacheEnabled, entry, indexName, expectedPlanCacheShapeHash) {
+export function assertPlanHasIxScanStage(
+    isSbePlanCacheEnabled,
+    entry,
+    indexName,
+    expectedPlanCacheShapeHash,
+) {
     assert.eq(entry.planCacheShapeHash, expectedPlanCacheShapeHash, entry);
 
     const cachedPlan = getCachedPlan(entry.cachedPlan);
@@ -1520,4 +1990,60 @@ export function assertPlanHasIxScanStage(isSbePlanCacheEnabled, entry, indexName
 export function isSubplannerCompositePlan(explain) {
     const subplan = getPlanStage(explain, "SUBPLAN");
     return subplan != null && !hasRejectedPlans(explain);
+}
+
+/**
+ * Asserts that the query's optimised plan returns the same results as a collection scan.
+ */
+export function assertResultsSameAsCollscan(coll, query) {
+    const expected = coll.find(query).hint({$natural: 1}).toArray();
+    assertArrayEq({actual: coll.find(query).toArray(), expected});
+}
+
+/**
+ * Forces each candidate plan to completion via forcedPlanSolutionHash and asserts every plan
+ * returns the same results as a collection scan. Silently passes when not supported (subplanning).
+ */
+export function assertResultsSameAllPlans(coll, query) {
+    const db = coll.getDB();
+    if (!db.adminCommand({getParameter: 1, internalQueryAllowForcedPlanByHash: 1}).ok) {
+        return;
+    }
+    const expected = coll.find(query).hint({$natural: 1}).toArray();
+    runWithParamsAllNonConfigNodes(db, {internalQueryAllowForcedPlanByHash: true}, () => {
+        const plannerExplain = assert.commandWorked(
+            db.runCommand({
+                explain: {find: coll.getName(), filter: query},
+                verbosity: "queryPlanner",
+            }),
+        );
+        for (const plan of getAllPlans(plannerExplain)) {
+            if (!plan.hasOwnProperty("solutionHashUnstable")) {
+                continue;
+            }
+            const res = db.runCommand({
+                find: coll.getName(),
+                filter: query,
+                forcedPlanSolutionHash: plan.solutionHashUnstable,
+            });
+            if (
+                !res.ok &&
+                [ErrorCodes.IllegalOperation, ErrorCodes.NoQueryExecutionPlans].includes(res.code)
+            ) {
+                return;
+            }
+            assert.commandWorked(res);
+            assertArrayEq({actual: new DBCommandCursor(db, res).toArray(), expected});
+        }
+    });
+}
+
+/**
+ * Asserts that a query returns the expected results, that the optimised plan matches a collscan,
+ * and that every candidate plan results are correct.
+ */
+export function assertQueryResults(coll, query, expected, opts = {}) {
+    assertArrayEq({actual: coll.find(query).toArray(), expected, ...opts});
+    assertResultsSameAsCollscan(coll, query);
+    assertResultsSameAllPlans(coll, query);
 }

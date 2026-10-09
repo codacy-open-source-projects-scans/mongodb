@@ -15,8 +15,10 @@
  */
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {enableLocalReadLogs, getLocalReadCount} from "jstests/libs/local_reads.js";
 import {profilerHasNumMatchingEntriesOrThrow} from "jstests/libs/profiler.js";
+import {getProactiveResolutionTotal} from "jstests/libs/query/proactive_view_resolution_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const st = new ShardingTest({shards: 2, mongos: 1});
@@ -26,7 +28,11 @@ const testName = "sharded_graph_lookup";
 const mongosDB = st.s0.getDB(testName);
 const shardList = [st.shard0.getDB(testName), st.shard1.getDB(testName)];
 
-assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.shard0.shardName}),
+);
+
+const proactiveViewResolution = FeatureFlagUtil.isEnabled(mongosDB, "ExtensionsInsideHybridSearch");
 
 // Turn on the profiler for both shards.
 assert.commandWorked(st.shard0.getDB(testName).setProfilingLevel(2));
@@ -43,6 +49,12 @@ function getNode(i) {
 }
 
 function assertGraphLookupExecution(pipeline, opts, expectedResults, executionList) {
+    // Clear the primary shard's profile before each test so profiled entries can be attributed to
+    // this test case.
+    assert.commandWorked(st.shard0.getDB(testName).setProfilingLevel(0));
+    st.shard0.getDB(testName).system.profile.drop();
+    assert.commandWorked(st.shard0.getDB(testName).setProfilingLevel(2));
+
     assert.commandWorked(
         travelersColl.insert([
             {"_id": 1, "firstName": "Alice", "nearestAirport": "LHR"},
@@ -68,7 +80,27 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
         ]),
     );
 
-    assert(arrayEq(expectedResults, travelersColl.aggregate(pipeline, opts).toArray()));
+    const {failpointShard, failpointName, failpointData, ...aggOpts} = opts;
+
+    if (failpointShard) {
+        assert.commandWorked(
+            failpointShard.adminCommand({
+                configureFailPoint: failpointName,
+                mode: {times: 1},
+                data: failpointData || {},
+            }),
+        );
+    }
+
+    const proactiveBefore = getProactiveResolutionTotal([st.shard0, st.shard1]);
+    assert(arrayEq(expectedResults, travelersColl.aggregate(pipeline, aggOpts).toArray()));
+    const proactiveDelta = getProactiveResolutionTotal([st.shard0, st.shard1]) - proactiveBefore;
+
+    if (failpointShard) {
+        assert.commandWorked(
+            failpointShard.adminCommand({configureFailPoint: failpointName, mode: "off"}),
+        );
+    }
 
     for (let exec of executionList) {
         const collName = exec.collName ? exec.collName : travelersColl.getName();
@@ -94,10 +126,53 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
             assert.eq(totalGraphLookupExecution, 1);
         }
 
+        // If 'toplevelExecTotal' is set, the isSentinelPrimary kickback causes a non-deterministic
+        // extra retry that may land on either shard (depending on which is primary at the time of
+        // the kickback, which varies across suites due to config stepdowns). In that case we only
+        // verify the aggregate count across all shards rather than the per-shard breakdown.
+        if (exec.hasOwnProperty("toplevelExecTotal")) {
+            const toplevelFilter = {
+                "command.aggregate": collName,
+                "command.comment": opts.comment,
+                "command.pipeline.$graphLookup": {$exists: !isLookup},
+                "command.pipeline.$lookup": {$exists: isLookup},
+                "errName": {$nin: ["StaleConfig", "CommandOnShardedViewNotSupportedOnMongod"]},
+            };
+            const totalToplevelExec = shardList.reduce(
+                (n, shard) => n + shard.system.profile.find(toplevelFilter).itcount(),
+                0,
+            );
+            assert.eq(
+                totalToplevelExec,
+                exec.toplevelExecTotal,
+                "Expected total toplevelExec across all shards to be " +
+                    exec.toplevelExecTotal +
+                    " but got " +
+                    totalToplevelExec,
+            );
+        }
+
+        // If 'shardsvrResolveViewTotal' is set, verify how many foreign views were proactively
+        // resolved (via _shardsvrResolveView) by non-primary shards.
+        if (exec.hasOwnProperty("shardsvrResolveViewTotal") && proactiveViewResolution) {
+            assert.eq(
+                proactiveDelta,
+                exec.shardsvrResolveViewTotal,
+                "Expected " +
+                    exec.shardsvrResolveViewTotal +
+                    " proactive foreign-view resolutions but got " +
+                    proactiveDelta,
+            );
+        }
+
         for (let shard = 0; shard < shardList.length; shard++) {
             // Confirm that top-level execution is as expected. In the nested cases, the top level
             // is a $lookup, so we check either for $lookup or $graphLookup as appropriate.
-            if (!exec.randomlyDelegatedMerger) {
+            if (
+                !exec.randomlyDelegatedMerger &&
+                !exec.hasOwnProperty("toplevelExecTotal") &&
+                exec.hasOwnProperty("toplevelExec")
+            ) {
                 profilerHasNumMatchingEntriesOrThrow({
                     profileDB: shardList[shard],
                     filter: {
@@ -105,7 +180,9 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
                         "command.comment": opts.comment,
                         "command.pipeline.$graphLookup": {$exists: !isLookup},
                         "command.pipeline.$lookup": {$exists: isLookup},
-                        "errName": {$ne: "StaleConfig"},
+                        "errName": {
+                            $nin: ["StaleConfig", "CommandOnShardedViewNotSupportedOnMongod"],
+                        },
                     },
                     numExpectedMatches: exec.toplevelExec[shard],
                 });
@@ -114,7 +191,15 @@ function assertGraphLookupExecution(pipeline, opts, expectedResults, executionLi
             // Confirm that the $graphLookup recursive $match execution is as expected. In the
             // nested cases, we need to check the $lookup subpipeline execution instead. In either
             // case, the command is either dispatched as aggregate or is a local read.
-            const totalExecs = isLookup ? exec.subpipelineExec[shard] : exec.recursiveMatchExec[shard];
+            const hasExecCount = isLookup
+                ? exec.hasOwnProperty("subpipelineExec")
+                : exec.hasOwnProperty("recursiveMatchExec");
+            if (!hasExecCount) {
+                continue;
+            }
+            const totalExecs = isLookup
+                ? exec.subpipelineExec[shard]
+                : exec.recursiveMatchExec[shard];
             const localReadCount = getLocalReadCount(
                 getNode(shard),
                 mongosDB[fromCollName].getFullName(),
@@ -211,7 +296,13 @@ assertGraphLookupExecution(pipeline, {comment: "unsharded_to_sharded_scatter"}, 
 
 // Test sharded local collection and sharded foreign collection, with a targeted $graphLookup.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_targeted"}, expectedRes, [
     {
         // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
@@ -227,7 +318,13 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_targeted"}, e
 
 // Test sharded local collection and sharded foreign collection, with an untargeted $graphLookup.
 st.shardColl(airportsColl, {_id: 1}, {_id: 3}, {_id: 3}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_untargeted"}, expectedRes, [
     {
         // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
@@ -243,7 +340,13 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_untargeted"},
 // Test sharded local collection and sharded foreign collection, with a targeted $graphLookup
 // including a 'restrictSearchWithMatch' field.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 pipeline = [
     {
         $graphLookup: {
@@ -277,22 +380,33 @@ expectedRes = [
         destinations: [{airport: "JFK"}],
     },
 ];
-assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_targeted_restricted"}, expectedRes, [
-    {
-        // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
-        // on every shard that contains the local collection.
-        toplevelExec: [1, 1],
-        // As in the sharded_to_sharded_targeted case, each node targets the shard(s) that holds the
-        // relevant data. As expected, there are queries from both parallel $graphLookup executions
-        // for the LHR airport, and these are filtered out by the 'restrictSearchWithMatch' filter.
-        recursiveMatchExec: [1, 4],
-    },
-]);
+assertGraphLookupExecution(
+    pipeline,
+    {comment: "sharded_to_sharded_targeted_restricted"},
+    expectedRes,
+    [
+        {
+            // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
+            // on every shard that contains the local collection.
+            toplevelExec: [1, 1],
+            // As in the sharded_to_sharded_targeted case, each node targets the shard(s) that holds the
+            // relevant data. As expected, there are queries from both parallel $graphLookup executions
+            // for the LHR airport, and these are filtered out by the 'restrictSearchWithMatch' filter.
+            recursiveMatchExec: [1, 4],
+        },
+    ],
+);
 
 // Test sharded local collection and sharded foreign collection with a targeted top-level $lookup
 // and a nested $graphLookup on an unsharded foreign collection.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 pipeline = [
     {
         $lookup: {
@@ -347,14 +461,6 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_unsharded"
     {
         collName: airportsColl.getName(),
         fromCollName: airfieldsColl.getName(),
-        // TODO SERVER-77915 remove this comment:
-
-        // When executing the subpipeline, the nested $graphLookup stage will stay on the merging
-        // half of the pipeline and execute on the merging node, sending requests to execute the
-        // nested $matches on the primary shard (where the unsharded 'airfields' collection is).
-        // Only the $graphLookup on the non-primary shard needs to send requests over the network;
-        // the rest can be done via a local read. The $graphLookups cannot share a cache because
-        // they run indepedently.
         toplevelExec: [0, 0],
         recursiveMatchExec: [6, 0],
     },
@@ -363,61 +469,101 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_unsharded"
 // Test sharded local collection and sharded foreign collection with a targeted top-level $lookup
 // and a nested targeted $graphLookup on a sharded foreign collection.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
-st.shardColl(airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
-assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_sharded_targeted"}, expectedRes, [
-    {
-        // The 'travelers' collection is sharded, so the $lookup stage is executed in parallel
-        // on every shard that contains the local collection.
-        toplevelExec: [1, 1],
-        // Each node executing the $lookup will, for every document that flows through the
-        // $lookup stage, target the shard that holds the relevant data for the sharded foreign
-        // collection.
-        subpipelineExec: [0, 3],
-    },
-    {
-        collName: airportsColl.getName(),
-        fromCollName: airfieldsColl.getName(),
-        // When executing the subpipeline, the nested $graphLookup stage will stay on the
-        // merging half of the pipeline and execute on the merging node, targeting shards to
-        // execute the nested $matches.
-        toplevelExec: [0, 0],
-        recursiveMatchExec: [1, 5],
-    },
-]);
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
+st.shardColl(
+    airfieldsColl,
+    {airfield: 1},
+    {airfield: "LHR"},
+    {airfield: "LHR"},
+    mongosDB.getName(),
+);
+assertGraphLookupExecution(
+    pipeline,
+    {comment: "sharded_to_sharded_to_sharded_targeted"},
+    expectedRes,
+    [
+        {
+            // The 'travelers' collection is sharded, so the $lookup stage is executed in parallel
+            // on every shard that contains the local collection.
+            toplevelExec: [1, 1],
+            // Each node executing the $lookup will, for every document that flows through the
+            // $lookup stage, target the shard that holds the relevant data for the sharded foreign
+            // collection.
+            subpipelineExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the nested $graphLookup stage will stay on the
+            // merging half of the pipeline and execute on the merging node, targeting shards to
+            // execute the nested $matches.
+            toplevelExec: [0, 0],
+            recursiveMatchExec: [1, 5],
+        },
+    ],
+);
 
 // Test sharded local collection and sharded foreign collection with a targeted top-level $lookup
 // and a nested untargeted $graphLookup on a sharded foreign collection.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 st.shardColl(airfieldsColl, {_id: 1}, {_id: 1}, {_id: 1}, mongosDB.getName());
-assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_to_sharded_scatter"}, expectedRes, [
-    {
-        // The 'travelers' collection is sharded, so the $lookup stage is executed in parallel
-        // on every shard that contains the local collection.
-        toplevelExec: [1, 1],
-        // Each node executing the $lookup will, for every document that flows through the
-        // $lookup stage, target the shard that holds the relevant data for the sharded foreign
-        // collection.
-        subpipelineExec: [0, 3],
-    },
-    {
-        collName: airportsColl.getName(),
-        fromCollName: airfieldsColl.getName(),
-        // When executing the subpipeline, the nested $graphLookup stage will stay on the
-        // merging half of the pipeline and execute on the merging node, performing a
-        // scatter-gather query to execute the nested $matches.
-        toplevelExec: [0, 0],
-        recursiveMatchExec: [6, 6],
-    },
-]);
+assertGraphLookupExecution(
+    pipeline,
+    {comment: "sharded_to_sharded_to_sharded_scatter"},
+    expectedRes,
+    [
+        {
+            // The 'travelers' collection is sharded, so the $lookup stage is executed in parallel
+            // on every shard that contains the local collection.
+            toplevelExec: [1, 1],
+            // Each node executing the $lookup will, for every document that flows through the
+            // $lookup stage, target the shard that holds the relevant data for the sharded foreign
+            // collection.
+            subpipelineExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the nested $graphLookup stage will stay on the
+            // merging half of the pipeline and execute on the merging node, performing a
+            // scatter-gather query to execute the nested $matches.
+            toplevelExec: [0, 0],
+            recursiveMatchExec: [6, 6],
+        },
+    ],
+);
 
 // Test sharded local collection where the foreign namespace is a sharded view with another
 // $graphLookup against a sharded collection. Note that the $graphLookup in the view should be
 // treated as a "nested" $graphLookup and should execute on the merging node.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
-st.shardColl(airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
+st.shardColl(
+    airfieldsColl,
+    {airfield: 1},
+    {airfield: "LHR"},
+    {airfield: "LHR"},
+    mongosDB.getName(),
+);
 
 assert.commandWorked(
     mongosDB.createView("airportsView", airportsColl.getName(), [
@@ -445,14 +591,20 @@ pipeline = [
         },
     },
     {$unwind: "$destinations"},
-    {$project: {firstName: 1, "destinations.airport": 1, "destinations.nearbyAirfields.airfield": 1}},
+    {
+        $project: {
+            firstName: 1,
+            "destinations.airport": 1,
+            "destinations.nearbyAirfields.airfield": 1,
+        },
+    },
 ];
 
 assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_view_to_sharded"}, expectedRes, [
     {
         // The 'travelers' collection is sharded, so the $graphLookup stage is executed in parallel
         // on every shard that contains the local collection.
-        toplevelExec: [1, 1],
+        toplevelExecTotal: 2,
         // Each node executing the $graphLookup will, for every document that flows through the
         // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
         recursiveMatchExec: [0, 3],
@@ -467,14 +619,82 @@ assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_view_to_shard
         recursiveMatchExec: [1, 5],
     },
 ]);
+
+// Tests non deterministic scenarios.
+if (proactiveViewResolution) {
+    const travNs = `${testName}.${travelersColl.getName()}`;
+
+    // Case A: the local collection is unsharded, so only the primary shard executes the pipeline.
+    // The primary holds the view catalog, so it resolves the foreign 'airportsView' locally and
+    // kicks back to mongos; no non-primary shard makes a _shardsvrResolveView call → 0 proactive
+    // resolutions. (travelers is left unsharded: assertGraphLookupExecution's insert recreates it
+    // on the primary.)
+    assertGraphLookupExecution(
+        pipeline,
+        {comment: "sharded_to_sharded_view_to_sharded_case_a"},
+        expectedRes,
+        [{shardsvrResolveViewTotal: 0}],
+    );
+
+    // Case B: the local collection is sharded across both shards, so a non-primary shard (which
+    // lacks the view catalog) participates in execution and resolves the foreign 'airportsView'
+    // remotely via _shardsvrResolveView → 1 proactive resolution. The failpoint pauses the primary
+    // after its (local) resolveForeignViewsOnPrimary so the non-primary shard's remote resolution
+    // is the one that drives the kickback.
+    st.shardColl(
+        airportsColl,
+        {airport: 1},
+        {airport: "JFK"},
+        {airport: "JFK"},
+        mongosDB.getName(),
+    );
+    st.shardColl(
+        travelersColl,
+        {firstName: 1},
+        {firstName: "Bob"},
+        {firstName: "Bob"},
+        mongosDB.getName(),
+    );
+    st.shardColl(
+        airfieldsColl,
+        {airfield: 1},
+        {airfield: "LHR"},
+        {airfield: "LHR"},
+        mongosDB.getName(),
+    );
+    assertGraphLookupExecution(
+        pipeline,
+        {
+            comment: "sharded_to_sharded_view_to_sharded_case_b",
+            failpointShard: st.shard0,
+            failpointName: "hangAfterResolvingForeignViews",
+            failpointData: {ns: travNs},
+        },
+        expectedRes,
+        [{shardsvrResolveViewTotal: 1}],
+    );
+}
+
 mongosDB.airportsView.drop();
 
 // Test top-level $lookup on a sharded local collection where the foreign namespace is a sharded
 // view with a $graphLookup against a sharded collection. Note that the $graphLookup in the view
 // should be treated as a "nested" $graphLookup and should execute on the merging node.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
-st.shardColl(airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
+st.shardColl(
+    airfieldsColl,
+    {airfield: 1},
+    {airfield: "LHR"},
+    {airfield: "LHR"},
+    mongosDB.getName(),
+);
 
 assert.commandWorked(
     mongosDB.createView("airportsView", airportsColl.getName(), [
@@ -500,37 +720,60 @@ pipeline = [
         },
     },
     {$unwind: "$destinations"},
-    {$project: {firstName: 1, "destinations.airport": 1, "destinations.nearbyAirfields.airfield": 1}},
+    {
+        $project: {
+            firstName: 1,
+            "destinations.airport": 1,
+            "destinations.nearbyAirfields.airfield": 1,
+        },
+    },
 ];
 
-assertGraphLookupExecution(pipeline, {comment: "sharded_lookup_to_sharded_view_to_sharded"}, expectedRes, [
-    {
-        // The 'travelers' collection is sharded, but mongos does not know that the foreign
-        // namespace is a view on a sharded collection. It is instead treated as an unsharded
-        // collection, and the top-level $lookup is only on the primary.
-        toplevelExec: [1, 0],
-        // Each node executing the $lookup will, for every document that flows through the stage
-        // target the shard(s) that holds the relevant data for the sharded foreign view.
-        subpipelineExec: [0, 3],
-    },
-    {
-        collName: airportsColl.getName(),
-        fromCollName: airfieldsColl.getName(),
-        // When executing the subpipeline, the "nested" $graphLookup stage contained in the view
-        // pipeline will stay on the merging half of the pipeline and execute on the merging
-        // node, targeting shards to execute the nested $matches.
-        toplevelExec: [0, 0],
-        recursiveMatchExec: [1, 5],
-    },
-]);
+assertGraphLookupExecution(
+    pipeline,
+    {comment: "sharded_lookup_to_sharded_view_to_sharded"},
+    expectedRes,
+    [
+        {
+            // The 'travelers' collection is sharded, but mongos does not know that the foreign
+            // namespace is a view on a sharded collection. It is instead treated as an unsharded
+            // collection, and the top-level $lookup is only on the primary.
+            toplevelExec: [1, 0],
+            // Each node executing the $lookup will, for every document that flows through the stage
+            // target the shard(s) that holds the relevant data for the sharded foreign view.
+            subpipelineExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the "nested" $graphLookup stage contained in the view
+            // pipeline will stay on the merging half of the pipeline and execute on the merging
+            // node, targeting shards to execute the nested $matches.
+            toplevelExec: [0, 0],
+            recursiveMatchExec: [1, 5],
+        },
+    ],
+);
 mongosDB.airportsView.drop();
 
 // Test sharded local collection where the foreign namespace is a sharded view with a $lookup
 // against a sharded collection. Note that the $lookup in the view should be treated as a "nested"
 // $lookup and should execute on the merging node.
 st.shardColl(airportsColl, {airport: 1}, {airport: "JFK"}, {airport: "JFK"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
-st.shardColl(airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
+st.shardColl(
+    airfieldsColl,
+    {airfield: 1},
+    {airfield: "LHR"},
+    {airfield: "LHR"},
+    mongosDB.getName(),
+);
 
 assert.commandWorked(
     mongosDB.createView("airportsView", airportsColl.getName(), [
@@ -556,7 +799,13 @@ pipeline = [
         },
     },
     {$unwind: "$destinations"},
-    {$project: {firstName: 1, "destinations.airport": 1, "destinations.nearbyAirfields.airfield": 1}},
+    {
+        $project: {
+            firstName: 1,
+            "destinations.airport": 1,
+            "destinations.nearbyAirfields.airfield": 1,
+        },
+    },
 ];
 expectedRes = [
     {
@@ -576,30 +825,41 @@ expectedRes = [
     },
 ];
 
-assertGraphLookupExecution(pipeline, {comment: "sharded_to_sharded_lookup_view_to_sharded"}, expectedRes, [
-    {
-        // The 'travelers' collection is sharded, so the $graphLookup stage is executed in
-        // parallel on every shard that contains the local collection.
-        toplevelExec: [1, 1],
-        // Each node executing the $graphLookup will, for every document that flows through the
-        // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
-        recursiveMatchExec: [0, 3],
-    },
-    {
-        collName: airportsColl.getName(),
-        fromCollName: airfieldsColl.getName(),
-        // When executing the subpipeline, the "nested" $lookup stage contained in the view
-        // pipeline will be pushed down to the shards and will recursively target shards
-        // to execute the nested subpipelines.
-        toplevelExec: [0, 0],
-        subpipelineExec: [1, 2],
-    },
-]);
+assertGraphLookupExecution(
+    pipeline,
+    {comment: "sharded_to_sharded_lookup_view_to_sharded"},
+    expectedRes,
+    [
+        {
+            // The 'travelers' collection is sharded, so the $graphLookup stage is executed in
+            // parallel on every shard that contains the local collection.
+            toplevelExecTotal: 2,
+            // Each node executing the $graphLookup will, for every document that flows through the
+            // stage, target the shard(s) that holds the relevant data for the sharded foreign view.
+            recursiveMatchExec: [0, 3],
+        },
+        {
+            collName: airportsColl.getName(),
+            fromCollName: airfieldsColl.getName(),
+            // When executing the subpipeline, the "nested" $lookup stage contained in the view
+            // pipeline will be pushed down to the shards and will recursively target shards
+            // to execute the nested subpipelines.
+            toplevelExec: [0, 0],
+            subpipelineExec: [1, 2],
+        },
+    ],
+);
 mongosDB.airportsView.drop();
 
 // Test that a targeted $graphLookup on a sharded collection can execute correctly on mongos.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 pipeline = [
     {
         $group: {
@@ -657,7 +917,13 @@ assertGraphLookupExecution(
 
 // Test that an untargeted $graphLookup on a sharded collection can execute correctly on mongos.
 st.shardColl(airportsColl, {_id: 1}, {_id: 1}, {_id: 1}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 assertGraphLookupExecution(
     pipeline,
     {comment: "sharded_to_sharded_on_mongos_untargeted", allowDiskUse: false},
@@ -679,7 +945,13 @@ assertGraphLookupExecution(
 // Test that a targeted $graphLookup on a sharded collection can execute correctly when mongos
 // delegates to a merging shard.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 assertGraphLookupExecution(
     pipeline,
     {comment: "sharded_to_sharded_on_merging_shard_targeted", allowDiskUse: true},
@@ -699,7 +971,13 @@ assertGraphLookupExecution(
 // Test that an untargeted $graphLookup on a sharded collection can execute correctly when mongos
 // delegates to a merging shard.
 st.shardColl(airportsColl, {_id: 1}, {_id: 1}, {_id: 1}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
 assertGraphLookupExecution(
     pipeline,
     {comment: "sharded_to_sharded_on_merging_shard_untargeted", allowDiskUse: true},
@@ -719,8 +997,20 @@ assertGraphLookupExecution(
 
 // Test that multiple top-level $graphLookup stages are able to be run in parallel.
 st.shardColl(airportsColl, {airport: 1}, {airport: "LHR"}, {airport: "LHR"}, mongosDB.getName());
-st.shardColl(travelersColl, {firstName: 1}, {firstName: "Bob"}, {firstName: "Bob"}, mongosDB.getName());
-st.shardColl(airfieldsColl, {airfield: 1}, {airfield: "LHR"}, {airfield: "LHR"}, mongosDB.getName());
+st.shardColl(
+    travelersColl,
+    {firstName: 1},
+    {firstName: "Bob"},
+    {firstName: "Bob"},
+    mongosDB.getName(),
+);
+st.shardColl(
+    airfieldsColl,
+    {airfield: 1},
+    {airfield: "LHR"},
+    {airfield: "LHR"},
+    mongosDB.getName(),
+);
 pipeline = [
     {
         $graphLookup: {

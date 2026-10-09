@@ -6,6 +6,7 @@
  *   requires_profiling,
  * ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {PersistenceProviderUtil} from "jstests/libs/server-rss/persistence_provider_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
@@ -31,10 +32,15 @@ CreateShardedCollectionUtil.shardCollectionWithChunks(inputCollection, {oldKey: 
     {min: {oldKey: 0}, max: {oldKey: MaxKey}, shard: st.shard1.shardName},
 ]);
 
-const inputCollectionUUID = getUUIDFromListCollections(inputCollection.getDB(), inputCollection.getName());
+const inputCollectionUUID = getUUIDFromListCollections(
+    inputCollection.getDB(),
+    inputCollection.getName(),
+);
 const inputCollectionUUIDString = extractUUIDFromObject(inputCollectionUUID);
 
-const temporaryReshardingCollection = st.s.getCollection(`reshardingDb.system.resharding.${inputCollectionUUIDString}`);
+const temporaryReshardingCollection = st.s.getCollection(
+    `reshardingDb.system.resharding.${inputCollectionUUIDString}`,
+);
 
 CreateShardedCollectionUtil.shardCollectionWithChunks(temporaryReshardingCollection, {newKey: 1}, [
     {min: {newKey: MinKey}, max: {newKey: 0}, shard: st.shard0.shardName},
@@ -45,12 +51,14 @@ CreateShardedCollectionUtil.shardCollectionWithChunks(temporaryReshardingCollect
 // on the primary shard for the database. We manually run the _flushRoutingTableCacheUpdates command
 // to guarantee they have been written and are visible with the atClusterTime used by the
 // testReshardCloneCollection command.
-for (const shard of [st.shard0, st.shard1]) {
-    assert.commandWorked(
-        shard.rs
-            .getPrimary()
-            .adminCommand({_flushRoutingTableCacheUpdates: temporaryReshardingCollection.getFullName()}),
-    );
+if (!FeatureFlagUtil.isPresentAndEnabled(st.s, "AuthoritativeShardsCRUD")) {
+    for (const shard of [st.shard0, st.shard1]) {
+        assert.commandWorked(
+            shard.rs.getPrimary().adminCommand({
+                _flushRoutingTableCacheUpdates: temporaryReshardingCollection.getFullName(),
+            }),
+        );
+    }
 }
 
 assert.commandWorked(
@@ -95,17 +103,33 @@ if (!isMultiversion) {
     const shard0Primary = st.rs0.getPrimary();
     const shard1Primary = st.rs1.getPrimary();
 
-    assert.commandWorked(shard0Primary.adminCommand({setParameter: 1, reshardingCollectionClonerMaxStalenessSeconds}));
-    assert.commandWorked(shard1Primary.adminCommand({setParameter: 1, reshardingCollectionClonerMaxStalenessSeconds}));
+    assert.commandWorked(
+        shard0Primary.adminCommand({
+            setParameter: 1,
+            reshardingCollectionClonerMaxStalenessSeconds,
+        }),
+    );
+    assert.commandWorked(
+        shard1Primary.adminCommand({
+            setParameter: 1,
+            reshardingCollectionClonerMaxStalenessSeconds,
+        }),
+    );
 
     // Verify that setting the ReshardingCollectionCloner's maxStalenessSeconds to 0 or lower
     // than the minimum is disallowed.
     assert.commandFailedWithCode(
-        shard0Primary.adminCommand({setParameter: 1, reshardingCollectionClonerMaxStalenessSeconds: 0}),
+        shard0Primary.adminCommand({
+            setParameter: 1,
+            reshardingCollectionClonerMaxStalenessSeconds: 0,
+        }),
         ErrorCodes.BadValue,
     );
     assert.commandFailedWithCode(
-        shard0Primary.adminCommand({setParameter: 1, reshardingCollectionClonerMaxStalenessSeconds: 1}),
+        shard0Primary.adminCommand({
+            setParameter: 1,
+            reshardingCollectionClonerMaxStalenessSeconds: 1,
+        }),
         ErrorCodes.MaxStalenessOutOfRange,
     );
 }
@@ -155,7 +179,9 @@ function testReshardCloneCollection(shard, expectedDocs) {
     // session ID to prevent idle cursors from being timed out by the CursorManager.
     for (const donorShard of [st.shard0, st.shard1]) {
         // Check profiler on the same nodes where we enabled profiling.
-        const nodesToCheck = supportsLocalCollections ? donorShard.rs.nodes : [donorShard.rs.getPrimary()];
+        const nodesToCheck = supportsLocalCollections
+            ? donorShard.rs.nodes
+            : [donorShard.rs.getPrimary()];
         const profilerEntries = nodesToCheck
             .map((node) =>
                 node.getDB(dbName).system.profile.findOne({
@@ -191,7 +217,11 @@ function testReshardCloneCollection(shard, expectedDocs) {
                 );
                 const readPreference = entry.command["$queryOptions"]["$readPreference"];
                 assert.eq(readPreference.mode, "nearest", entry);
-                assert.eq(readPreference.maxStalenessSeconds, reshardingCollectionClonerMaxStalenessSeconds, entry);
+                assert.eq(
+                    readPreference.maxStalenessSeconds,
+                    reshardingCollectionClonerMaxStalenessSeconds,
+                    entry,
+                );
             }
         }
     }

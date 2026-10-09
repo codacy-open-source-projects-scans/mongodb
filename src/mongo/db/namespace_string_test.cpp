@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/namespace_string.h"
 
@@ -33,12 +7,13 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -51,7 +26,7 @@ namespace mongo {
 
 class NamespaceStringTest : public unittest::Test {
 protected:
-    NamespaceString makeNamespaceString(boost::optional<TenantId> tenantId, StringData ns) {
+    NamespaceString makeNamespaceString(boost::optional<TenantId> tenantId, std::string_view ns) {
         return NamespaceString(tenantId, ns);
     }
 
@@ -59,22 +34,23 @@ protected:
         return NamespaceString(dbName);
     }
 
-    NamespaceString makeNamespaceString(const DatabaseName& dbName, StringData coll) {
+    NamespaceString makeNamespaceString(const DatabaseName& dbName, std::string_view coll) {
         return NamespaceString(dbName, coll);
     }
 
-    NamespaceString makeNamespaceString(StringData dbName, StringData coll) {
+    NamespaceString makeNamespaceString(std::string_view dbName, std::string_view coll) {
         return NamespaceString(boost::none, dbName, coll);
     }
 
     NamespaceString makeNamespaceString(boost::optional<TenantId> tenantId,
-                                        StringData db,
-                                        StringData coll) {
+                                        std::string_view db,
+                                        std::string_view coll) {
         return NamespaceString(tenantId, db, coll);
     }
 };
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 
 TEST_F(NamespaceStringTest, createNamespaceString_forTest) {
@@ -219,7 +195,7 @@ TEST_F(NamespaceStringTest, CollectionValidNames) {
     ASSERT(!NamespaceString::validCollectionName("$a"));
     ASSERT(!NamespaceString::validCollectionName("a$b"));
     ASSERT(!NamespaceString::validCollectionName(""));
-    ASSERT(!NamespaceString::validCollectionName("a\0b"_sd));
+    ASSERT(!NamespaceString::validCollectionName("a\0b"sv));
 }
 
 TEST_F(NamespaceStringTest, DbForSharding) {
@@ -279,18 +255,18 @@ TEST_F(NamespaceStringTest, makeListCollectionsNSIsCorrect) {
 TEST_F(NamespaceStringTest, EmptyNSStringReturnsEmptyColl) {
     NamespaceString nss{};
     ASSERT_TRUE(nss.isEmpty());
-    ASSERT_EQ(nss.coll(), StringData{});
+    ASSERT_EQ(nss.coll(), std::string_view{});
 }
 
 TEST_F(NamespaceStringTest, EmptyNSStringReturnsEmptyDb) {
     NamespaceString nss{};
     ASSERT_TRUE(nss.isEmpty());
-    ASSERT_EQ(nss.db_forTest(), StringData{});
+    ASSERT_EQ(nss.db_forTest(), std::string_view{});
 }
 
 TEST_F(NamespaceStringTest, EmptyDbWithColl) {
     NamespaceString nss = makeNamespaceString(boost::none, "", "coll");
-    ASSERT_EQ(nss.db_forTest(), StringData{});
+    ASSERT_EQ(nss.db_forTest(), std::string_view{});
     ASSERT_EQ(nss.coll(), "coll");
     ASSERT_EQ(nss.dbName(), DatabaseName::kEmpty);
     ASSERT_EQ(nss.dbName().compare(DatabaseName::kEmpty), 0);
@@ -557,9 +533,9 @@ TEST_F(NamespaceStringTest, ConstRefAssignmentOperator) {
 // Verify we can create a new NamespaceString with a DatabaseName created by ns.dbName(). We must
 // ensure we discard the collection from `ns` and we don't end up with `db.collection.collection`.
 TEST_F(NamespaceStringTest, NamespaceToDatabaseRoundtrip) {
-    auto dbName = "test"_sd;
-    auto collName = "foo"_sd;
-    auto otherCollName = "othername"_sd;
+    auto dbName = "test"sv;
+    auto collName = "foo"sv;
+    auto otherCollName = "othername"sv;
 
     NamespaceString ns = makeNamespaceString(boost::none, dbName, collName);
     NamespaceString nsDbOnly =
@@ -648,7 +624,7 @@ TEST_F(NamespaceStringTest, isDbOnly) {
 }
 
 TEST_F(NamespaceStringTest, CheckFormatNamespaceEmptyColl) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", false);
     TenantId tenantId(OID::gen());
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTest");
     auto nssInclColl = makeNamespaceString(dbName, "coll");
@@ -660,7 +636,7 @@ TEST_F(NamespaceStringTest, CheckFormatNamespaceEmptyColl) {
 
 
 TEST_F(NamespaceStringTest, CheckFormatNamespaceEmptyCollMultitenancy) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
     TenantId tenantId(OID::gen());
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTest");
     auto nssInclColl = makeNamespaceString(dbName, "coll");
@@ -668,6 +644,53 @@ TEST_F(NamespaceStringTest, CheckFormatNamespaceEmptyCollMultitenancy) {
 
     auto nssEmptyColl = makeNamespaceString(dbName, "");
     ASSERT_EQ(nssEmptyColl.toString_forTest(), "dbTest");
+}
+
+TEST_F(NamespaceStringTest, IsConvertToCappedTmpCollection) {
+    ASSERT_TRUE(NamespaceString::createNamespaceString_forTest(
+                    "test", "tmpAdY1h.convertToCapped.convert_to_capped_collection_3")
+                    .isConvertToCappedTmpCollection());
+    ASSERT_FALSE(
+        NamespaceString::createNamespaceString_forTest("test", "convert_to_capped_collection_3")
+            .isConvertToCappedTmpCollection());
+    ASSERT_FALSE(NamespaceString::createNamespaceString_forTest("test", "tmp.agg_out.xyz")
+                     .isConvertToCappedTmpCollection());
+    ASSERT_FALSE(NamespaceString::createNamespaceString_forTest(
+                     "test", "tmpX.convertToCapped.coll")  // fewer than 5 random chars
+                     .isConvertToCappedTmpCollection());
+    ASSERT_FALSE(NamespaceString::createNamespaceString_forTest(
+                     "test", "tmpAdY1h.convertToCapped.")  // missing <originalColl>
+                     .isConvertToCappedTmpCollection());
+}
+
+TEST_F(NamespaceStringTest, IsRenameCollectionTmpCollection) {
+    ASSERT_TRUE(NamespaceString::createNamespaceString_forTest("test", "tmpQcm2o.renameCollection")
+                    .isRenameCollectionTmpCollection());
+    ASSERT_TRUE(NamespaceString::createNamespaceString_forTest(
+                    "test", "system.buckets.tmpQcm2o.renameCollection")
+                    .isRenameCollectionTmpCollection());
+    ASSERT_FALSE(NamespaceString::createNamespaceString_forTest("test", "user.renameCollection")
+                     .isRenameCollectionTmpCollection());
+    ASSERT_FALSE(NamespaceString::createNamespaceString_forTest("test", "tmpX.renameCollection")
+                     .isRenameCollectionTmpCollection());
+    ASSERT_FALSE(
+        NamespaceString::createNamespaceString_forTest("test", "tmpQcm2o.renameCollection.extra")
+            .isRenameCollectionTmpCollection());
+}
+
+TEST_F(NamespaceStringTest, FieldStatsCollection) {
+    const auto fieldStatsNss = NamespaceString::createNamespaceString_forTest(
+        boost::none, "test", "system.stats.field_stats");
+    ASSERT_TRUE(fieldStatsNss.isFieldStatsCollection());
+    ASSERT_TRUE(fieldStatsNss.isSystemStatsCollection());
+    ASSERT_TRUE(fieldStatsNss.isLegalClientSystemNS());
+
+    // Only the exact name qualifies.
+    for (auto&& coll : {"system.stats.field_stats2", "system.stats.field_stat", "field_stats"}) {
+        const auto nss = NamespaceString::createNamespaceString_forTest(boost::none, "test", coll);
+        ASSERT_FALSE(nss.isFieldStatsCollection()) << coll;
+        ASSERT_FALSE(nss.isLegalClientSystemNS()) << coll;
+    }
 }
 
 }  // namespace

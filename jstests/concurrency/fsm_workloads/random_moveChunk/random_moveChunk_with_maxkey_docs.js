@@ -21,7 +21,7 @@
  */
 import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
 import {ShardingTopologyHelpers} from "jstests/concurrency/fsm_workload_helpers/catalog_and_routing/sharding_topology_helpers.js";
-import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/chunks.js";
+import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/cluster_scalability/chunks.js";
 import {isMoveChunkErrorAcceptableWithConcurrent} from "jstests/concurrency/fsm_workload_helpers/cluster_scalability/move_chunk_errors.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
@@ -76,7 +76,9 @@ export const $config = (function () {
             otherKey: doc.otherKey,
             counter: 0,
         });
-        assert.commandWorked(db[collName + kCounterCollSuffix].update({_id: "maxKeyCount"}, {$inc: {count: 1}}));
+        assert.commandWorked(
+            db[collName + kCounterCollSuffix].update({_id: "maxKeyCount"}, {$inc: {count: 1}}),
+        );
     };
 
     states.updateMaxKeyDoc = function updateMaxKeyDoc(db, collName, connCache) {
@@ -85,7 +87,11 @@ export const $config = (function () {
         }
         const idx = Random.randInt(this.trackedDocs.length);
         const tracked = this.trackedDocs[idx];
-        const res = db[collName].update({_id: tracked._id}, {$inc: {counter: 1}});
+
+        const res = db[collName].update(
+            {_id: tracked._id, skey: tracked.skey, otherKey: tracked.otherKey},
+            {$inc: {counter: 1}},
+        );
         if (res.nModified === 1) {
             tracked.counter++;
         }
@@ -140,26 +146,67 @@ export const $config = (function () {
                     " was lost during migration. Expected: " +
                     tojson(tracked),
             );
-            assert.eq(tojson(doc.skey), tojson(tracked.skey), "skey mismatch for doc " + tojson(doc));
-            assert.eq(tojson(doc.otherKey), tojson(tracked.otherKey), "otherKey mismatch for doc " + tojson(doc));
+            assert.eq(
+                tojson(doc.skey),
+                tojson(tracked.skey),
+                "skey mismatch for doc " + tojson(doc),
+            );
+            assert.eq(
+                tojson(doc.otherKey),
+                tojson(tracked.otherKey),
+                "otherKey mismatch for doc " + tojson(doc),
+            );
             assert.eq(
                 doc.counter,
                 tracked.counter,
-                "counter mismatch for doc " + tojson(doc) + ", expected counter: " + tracked.counter,
+                "counter mismatch for doc " +
+                    tojson(doc) +
+                    ", expected counter: " +
+                    tracked.counter,
             );
         }
     };
 
     const transitions = {
         init: {insertMaxKeyDoc: 0.3, updateMaxKeyDoc: 0.15, moveChunk: 0.2, verifyMaxKeyDocs: 0.35},
-        insertMaxKeyDoc: {insertMaxKeyDoc: 0.15, updateMaxKeyDoc: 0.2, moveChunk: 0.25, verifyMaxKeyDocs: 0.4},
-        updateMaxKeyDoc: {insertMaxKeyDoc: 0.15, updateMaxKeyDoc: 0.15, moveChunk: 0.25, verifyMaxKeyDocs: 0.45},
-        moveChunk: {insertMaxKeyDoc: 0.2, updateMaxKeyDoc: 0.15, moveChunk: 0.15, verifyMaxKeyDocs: 0.5},
-        verifyMaxKeyDocs: {insertMaxKeyDoc: 0.2, updateMaxKeyDoc: 0.2, moveChunk: 0.35, verifyMaxKeyDocs: 0.25},
+        insertMaxKeyDoc: {
+            insertMaxKeyDoc: 0.15,
+            updateMaxKeyDoc: 0.2,
+            moveChunk: 0.25,
+            verifyMaxKeyDocs: 0.4,
+        },
+        updateMaxKeyDoc: {
+            insertMaxKeyDoc: 0.15,
+            updateMaxKeyDoc: 0.15,
+            moveChunk: 0.25,
+            verifyMaxKeyDocs: 0.45,
+        },
+        moveChunk: {
+            insertMaxKeyDoc: 0.2,
+            updateMaxKeyDoc: 0.15,
+            moveChunk: 0.15,
+            verifyMaxKeyDocs: 0.5,
+        },
+        verifyMaxKeyDocs: {
+            insertMaxKeyDoc: 0.2,
+            updateMaxKeyDoc: 0.2,
+            moveChunk: 0.35,
+            verifyMaxKeyDocs: 0.25,
+        },
     };
 
     function setup(db, collName, cluster) {
         const ns = db[collName].getFullName();
+
+        // This test verifies the SERVER-121533 migration fix: MaxKey-prefixed documents are cloned during
+        // migration and their orphans are cleaned up by the range deleter. Disable the delete-guard
+        // which when enabled would instead preserve those orphans.
+        cluster.executeOnMongodNodes((adminDb) => {
+            assert.commandWorkedOrFailedWithCode(
+                adminDb.adminCommand({setParameter: 1, skipRangeDeletionForMaxKeyChunks: false}),
+                ErrorCodes.InvalidOptions,
+            );
+        });
 
         const bulk = db[collName].initializeUnorderedBulkOp();
         for (let i = 0; i < kNumInitialRegularDocs; i++) {
@@ -193,12 +240,17 @@ export const $config = (function () {
         }
 
         assert.commandWorked(
-            db[collName + kCounterCollSuffix].insert({_id: "maxKeyCount", count: kNumInitialMaxKeyDocs}),
+            db[collName + kCounterCollSuffix].insert({
+                _id: "maxKeyCount",
+                count: kNumInitialMaxKeyDocs,
+            }),
         );
 
         const splitPoints = [25, 50, 75];
         for (const point of splitPoints) {
-            assert.commandWorked(db.adminCommand({split: ns, middle: {skey: point, otherKey: MinKey()}}));
+            assert.commandWorked(
+                db.adminCommand({split: ns, middle: {skey: point, otherKey: MinKey()}}),
+            );
         }
 
         const shardNames = Object.keys(cluster.getSerializedCluster().shards);
@@ -222,11 +274,21 @@ export const $config = (function () {
     }
 
     function teardown(db, collName, cluster) {
+        // Restore the guard's default before finishing (see setup).
+        cluster.executeOnMongodNodes((adminDb) => {
+            assert.commandWorkedOrFailedWithCode(
+                adminDb.adminCommand({setParameter: 1, skipRangeDeletionForMaxKeyChunks: true}),
+                ErrorCodes.InvalidOptions,
+            );
+        });
+
         const counterDoc = db[collName + kCounterCollSuffix].findOne({_id: "maxKeyCount"});
         assert.neq(counterDoc, null, "MaxKey counter document not found");
         const expectedCount = counterDoc.count;
 
-        const actualCount = db[collName].find({$or: [{skey: MaxKey()}, {otherKey: MaxKey()}]}).itcount();
+        const actualCount = db[collName]
+            .find({$or: [{skey: MaxKey()}, {otherKey: MaxKey()}]})
+            .itcount();
 
         assert.eq(
             expectedCount,

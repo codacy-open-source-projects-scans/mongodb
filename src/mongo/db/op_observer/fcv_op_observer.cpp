@@ -1,40 +1,13 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/op_observer/fcv_op_observer.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/feature_compatibility_version_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -47,20 +20,20 @@
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/db/shard_role/shard_catalog/shard_catalog_recoverer_tracker.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 
-#include <string>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
@@ -70,11 +43,12 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(pauseBeforeCloseCxns);
 MONGO_FAIL_POINT_DEFINE(finishedDropConnections);
 
 void FcvOpObserver::_setVersion(OperationContext* opCtx,
-                                multiversion::FeatureCompatibilityVersion newVersion,
+                                const FeatureCompatibilityVersionDocument& fcvDoc,
                                 bool onRollback,
                                 bool withinRecoveryUnit,
                                 boost::optional<Timestamp> commitTs) {
@@ -88,10 +62,13 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
     if (prevFcvSnapshot.isVersionInitialized()) {
         prevVersion = prevFcvSnapshot.getVersion();
     }
-    serverGlobalParams.mutableFCV.setVersion(newVersion);
+    serverGlobalParams.mutableFCV.setVersionFromFCVDocument(fcvDoc);
 
     const auto newFcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    newFcvSnapshot.logFCVWithContext("setFCV"_sd);
+    // The effective (possibly transitional) FCV that was just stored; used below for wire-version
+    // and connection-handling decisions.
+    const auto newVersion = newFcvSnapshot.getVersion();
+    newFcvSnapshot.logFCVWithContext("setFCV"sv);
     FeatureCompatibilityVersion::updateMinWireVersion(opCtx);
 
     // (Generic FCV reference): This FCV check should exist across LTS binary versions.
@@ -129,6 +106,15 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
                 KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
             killSessionsAbortUnpreparedTransactions(
                 opCtx, matcherAllSessions, ErrorCodes::InterruptedDueToFCVChange);
+        }
+
+        auto role = ShardingState::get(opCtx)->pollClusterRole();
+        if (role && role->has(ClusterRole::ShardServer)) {
+            ShardCatalogRecovererTracker::get(opCtx)->interruptIncompatibleRecoveries(opCtx);
+            if (prevVersion) {
+                FilteringMetadataCache::get(opCtx)->fixPotentiallyStaleShardingStatesAfterUpgrade(
+                    opCtx, *prevVersion, newFcvSnapshot.getVersion());
+            }
         }
     } catch (const DBException&) {
         // Swallow the error when running within a recovery unit to avoid process termination.
@@ -195,6 +181,7 @@ void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& do
         return;
     }
     auto newVersion = uassertStatusOK(FeatureCompatibilityVersionParser::parse(doc));
+    auto fcvDoc = FeatureCompatibilityVersionDocument::parse(doc);
 
     // To avoid extra log messages when the targetVersion is set/unset, only log when the
     // version changes.
@@ -213,8 +200,8 @@ void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& do
     }
 
     shard_role_details::getRecoveryUnit(opCtx)->onCommit(
-        [newVersion](OperationContext* opCtx, boost::optional<Timestamp> ts) {
-            _setVersion(opCtx, newVersion, false /*onRollback*/, true /*withinRecoveryUnit*/, ts);
+        [fcvDoc](OperationContext* opCtx, boost::optional<Timestamp> ts) {
+            _setVersion(opCtx, fcvDoc, false /*onRollback*/, true /*withinRecoveryUnit*/, ts);
         });
 }
 
@@ -223,7 +210,7 @@ void FcvOpObserver::onInserts(OperationContext* opCtx,
                               std::vector<InsertStatement>::const_iterator first,
                               std::vector<InsertStatement>::const_iterator last,
                               const std::vector<RecordId>& recordIds,
-                              std::vector<bool> fromMigrate,
+                              const std::vector<bool>& fromMigrate,
                               bool defaultFromMigrate,
                               OpStateAccumulator* opAccumulator) {
     if (coll->ns().isServerConfigurationCollection()) {
@@ -272,11 +259,13 @@ void FcvOpObserver::onReplicationRollback(OperationContext* opCtx,
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
         if (swVersion.isOK() && (swVersion.getValue() != memoryFcv)) {
             auto diskFcv = swVersion.getValue();
+            auto fcvDoc = FeatureCompatibilityVersionDocument::parse(featureCompatibilityVersion);
             LOGV2(4675801,
                   "Setting featureCompatibilityVersion as part of rollback",
                   "newVersion"_attr = multiversion::toString(diskFcv),
                   "oldVersion"_attr = multiversion::toString(memoryFcv));
-            _setVersion(opCtx, diskFcv, true /*onRollback*/, false /*withinRecoveryUnit*/);
+            _setVersion(
+                opCtx, fcvDoc, true /*onRollback*/, false /*withinRecoveryUnit*/, boost::none);
             // The rollback FCV is already in the stable snapshot.
             FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp();
         }

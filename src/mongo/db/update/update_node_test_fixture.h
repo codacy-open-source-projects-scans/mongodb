@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/update/document_diff_calculator.h"
@@ -37,6 +12,8 @@
 #include "mongo/db/update/v2_log_builder.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -48,7 +25,7 @@ protected:
     // Creates a RuntimeUpdatePath from a string, assuming that all numeric path components are
     // array indexes. Tests which use numeric field names in objects must manually create a
     // RuntimeUpdatePath.
-    static RuntimeUpdatePath makeRuntimeUpdatePathForTest(StringData path) {
+    static RuntimeUpdatePath makeRuntimeUpdatePathForTest(std::string_view path) {
         FieldRef fr(path);
         std::vector<RuntimeUpdatePath::ComponentType> types;
 
@@ -62,6 +39,7 @@ protected:
     }
 
     void setUp() override {
+        ServiceContextTest::setUp();
         resetApplyParams();
     }
 
@@ -70,7 +48,7 @@ protected:
         _immutablePaths.clear();
         _pathToCreate = std::make_shared<FieldRef>();
         _pathTaken = std::make_shared<RuntimeUpdatePath>();
-        _matchedField = StringData();
+        _matchedField = std::string_view();
         _insert = false;
         _fromOplogApplication = false;
         _validateForStorage = true;
@@ -95,14 +73,14 @@ protected:
         if (!_indexData) {
             return false;
         }
-        auto diff = update_oplog_entry::extractDiffFromOplogEntry(logEntry);
-        if (!diff) {
+        auto diffElem = logEntry[update_oplog_entry::kDiffObjectFieldName];
+        if (diffElem.type() != BSONType::object) {
             return false;
         }
 
         mongo::doc_diff::IndexUpdateIdentifier updateIdentifier{1 /*numIndexes*/};
         updateIdentifier.addIndex(0 /*indexCounter*/, *_indexData);
-        return updateIdentifier.determineAffectedIndexes(*diff).any();
+        return updateIdentifier.determineAffectedIndexes(diffElem.embeddedObject()).any();
     }
 
     bool getIndexAffectedFromLogEntry() {
@@ -120,13 +98,13 @@ protected:
         return applyParams;
     }
 
-    void addImmutablePath(StringData path) {
+    void addImmutablePath(std::string_view path) {
         auto fieldRef = std::make_unique<FieldRef>(path);
         _immutablePathsVector.push_back(std::move(fieldRef));
         _immutablePaths.insert(_immutablePathsVector.back().get());
     }
 
-    void setPathToCreate(StringData path) {
+    void setPathToCreate(std::string_view path) {
         _pathToCreate->clear();
         _pathToCreate->parse(path);
     }
@@ -135,7 +113,7 @@ protected:
         *_pathTaken = pathTaken;
     }
 
-    void setMatchedField(StringData matchedField) {
+    void setMatchedField(std::string_view matchedField) {
         _matchedField = matchedField;
     }
 
@@ -151,7 +129,7 @@ protected:
         _validateForStorage = validateForStorage;
     }
 
-    void addIndexedPath(StringData path) {
+    void addIndexedPath(std::string_view path) {
         if (!_indexData) {
             _indexData = std::make_unique<UpdateIndexData>();
         }
@@ -187,7 +165,7 @@ private:
     FieldRefSet _immutablePaths;
     std::shared_ptr<FieldRef> _pathToCreate;
     std::shared_ptr<RuntimeUpdatePath> _pathTaken;
-    StringData _matchedField;
+    std::string_view _matchedField;
     bool _insert;
     bool _fromOplogApplication;
     bool _validateForStorage;

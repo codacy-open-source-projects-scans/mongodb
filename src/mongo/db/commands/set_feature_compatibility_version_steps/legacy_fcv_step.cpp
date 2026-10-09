@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_crypto.h"
@@ -35,14 +9,15 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/global_catalog/ddl/cluster_ddl.h"
-#include "mongo/db/global_catalog/ddl/drop_collection_coordinator.h"
 #include "mongo/db/global_catalog/ddl/placement_history_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_service.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/ddl/shardsvr_join_ddl_coordinators_request_gen.h"
+#include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -57,23 +32,29 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/shard_role/ddl/create_indexes_gen.h"
 #include "mongo/db/shard_role/ddl/ddl_lock_manager.h"
 #include "mongo/db/shard_role/ddl/list_collections_gen.h"
 #include "mongo/db/shard_role/shard_catalog/coll_mod.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options_gen.h"
 #include "mongo/db/shard_role/shard_catalog/drop_collection.h"
+#include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/upgrade_downgrade_viewless_timeseries.h"
 #include "mongo/db/timeseries/upgrade_downgrade_viewless_timeseries_sharded_cluster.h"
 #include "mongo/db/topology/sharding_state.h"
-#include "mongo/db/topology/user_write_block/write_block_bypass.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
+#include "mongo/db/topology/user_write_block/user_write_block_bypass.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/migration_blocking_operation/migration_blocking_operation_feature_flags_gen.h"
 #include "mongo/util/fail_point.h"
 
@@ -113,12 +94,10 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
         };
         request.setReadConcern(repl::ReadConcernArgs::kMajority);
 
-        // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only
-        // aggregation processes to be restarted.
         uassertStatusOK(configShard->runAggregation(
             opCtx,
             request,
-            Shard::RetryPolicy::kStrictlyNotIdempotent,
+            Shard::RetryPolicy::kIdempotent,
             [&](const std::vector<BSONObj>& batch, const boost::optional<BSONObj>&) {
                 invariant(batch.size() == 1);
                 const auto bsonVersion = batch[0][DatabaseType::kVersionFieldName];
@@ -161,8 +140,8 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
 
     // The list of shards is stable during the execution of this function, since it is called during
     // FCV upgrade.
-    const auto opTimeWithShards = Grid::get(opCtx)->catalogClient()->getAllShards(
-        opCtx, repl::ReadConcernLevel::kSnapshotReadConcern);
+    const auto opTimeWithShards =
+        Grid::get(opCtx)->catalogClient()->getAllShards(opCtx, repl::ReadConcernArgs::kSnapshot);
     for (const auto& shardType : opTimeWithShards.value) {
         const auto shardStatus =
             Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardType.getName());
@@ -211,19 +190,22 @@ void handleDropPendingDBsGarbage(OperationContext* parentOpCtx) {
     }()));
 }
 
-void dropAuthoritativeDatabaseCollectionOnShards(OperationContext* opCtx) {
+void dropAuthoritativeShardCatalogCollectionsOnShards(OperationContext* opCtx) {
     // No shards should be added until we have forwarded the command to all shards. We use the DDL
     // lock here to serialize with all of add shard and to avoid deadlocks with the DDL blocking
     // used by add/remove shard.
     DDLLockManager::ScopedCollectionDDLLock ddlLock(opCtx,
                                                     NamespaceString::kConfigsvrShardsNamespace,
-                                                    "DropAuthoritativeDatabaseMetadata",
+                                                    "DropAuthoritativeShardCatalogMetadata",
                                                     LockMode::MODE_S);
 
-    const auto opTimeWithShards = Grid::get(opCtx)->catalogClient()->getAllShards(
-        opCtx, repl::ReadConcernLevel::kSnapshotReadConcern);
+    const auto opTimeWithShards =
+        Grid::get(opCtx)->catalogClient()->getAllShards(opCtx, repl::ReadConcernArgs::kSnapshot);
 
-    const auto& nss = NamespaceString::kConfigShardCatalogDatabasesNamespace;
+    const auto collNames =
+        BSON_ARRAY(NamespaceString::kConfigShardCatalogDatabasesNamespace.coll()
+                   << NamespaceString::kConfigShardCatalogCollectionsNamespace.coll()
+                   << NamespaceString::kConfigShardCatalogChunksNamespace.coll());
 
     for (const auto& shardType : opTimeWithShards.value) {
         const auto shardStatus =
@@ -233,57 +215,161 @@ void dropAuthoritativeDatabaseCollectionOnShards(OperationContext* opCtx) {
         }
         const auto shard = uassertStatusOK(shardStatus);
 
-        // Build the listCollections command to find the collection's UUID.
+        // Find the UUIDs of the shard catalog collections that exist on this shard.
         ListCollections listCollectionsCmd;
         listCollectionsCmd.setDbName(DatabaseName::kConfig);
-        listCollectionsCmd.setFilter(BSON("name" << nss.coll()));
+        listCollectionsCmd.setFilter(BSON("name" << BSON("$in" << collNames)));
 
         const auto listCollRes = uassertStatusOK(
             shard->runExhaustiveCursorCommand(opCtx,
                                               ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                              nss.dbName(),
+                                              DatabaseName::kConfig,
                                               listCollectionsCmd.toBSON(),
                                               Milliseconds(-1)));
 
-        // If the collection doesn't exist, we're done.
+        // If the collections don't exist, we're done.
         if (listCollRes.docs.empty()) {
             continue;
         }
 
         // Make noop write to be sure that we are the primary before sending the dropCollection.
+        // This is necessary for correctness in order to avoid the following split-brain scenario:
+        // - A new primary steps up and makes a LOT of progress, installing the sharding metadata on
+        //   the shard.
+        // - The old primary fetches the current set of collections to drop.
+        // - The old primary now drops the collection and we end up without any sharding metadata.
+        // Having this no-op write serves as a barrier since it prevents a shard targeting the new
+        // collections created as a result of setFCV.
         sharding_ddl_util::performNoopMajorityWriteLocally(opCtx);
 
-        auto parsedResponse = ListCollectionsReplyItem::parse(listCollRes.docs[0]);
+        for (const auto& doc : listCollRes.docs) {
+            const auto item = ListCollectionsReplyItem::parse(doc);
 
-        // Build and run the drop command using the uuid found as replay protection.
-        const auto uuid = parsedResponse.getInfo()->getUuid();
-        tassert(10289900,
-                "Expected uuid to be set for config.shard.catalog.databases collection",
-                uuid.has_value());
-        const auto dropCmd = BSON("drop" << nss.coll() << "collectionUUID" << *uuid
-                                         << "writeConcern" << BSON("w" << "majority"));
+            // Build and run the drop command using the uuid found as replay protection.
+            const auto uuid = item.getInfo()->getUuid();
+            tassert(
+                10289900, "Expected uuid to be set for shard catalog collection", uuid.has_value());
 
-        auto dropResponse =
-            shard->runCommand(opCtx,
-                              ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                              NamespaceString::kConfigShardCatalogDatabasesNamespace.dbName(),
-                              dropCmd,
-                              Shard::RetryPolicy::kIdempotent);
+            Drop dropCmd{NamespaceString::makeGlobalConfigCollection(item.getName())};
+            dropCmd.setCollectionUUID(uuid);
+            dropCmd.setWriteConcern(defaultMajorityWriteConcern());
 
-        auto status = Shard::CommandResponse::getEffectiveStatus(dropResponse);
+            auto dropResponse =
+                shard->runCommand(opCtx,
+                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                  DatabaseName::kConfig,
+                                  dropCmd.toBSON(),
+                                  Shard::RetryPolicy::kIdempotent);
 
-        if (status == ErrorCodes::CollectionUUIDMismatch) {
-            // Dropping a collection by UUID isn't idempotent. An old primary may have already
-            // dropped it, so re-running the drop can trigger a CollectionUUIDMismatch. This can be
-            // safely ignored since the collection is already gone.
-            //
-            // Another edge case: the collection might have been dropped and re-created with the
-            // same name but a different UUID (e.g., during a split-brain scenario). We also ignore
-            // this to avoid deleting valid metadata.
+            auto status = Shard::CommandResponse::getEffectiveStatus(dropResponse);
+
+            if (status == ErrorCodes::CollectionUUIDMismatch) {
+                // Dropping a collection by UUID isn't idempotent. An old primary may have already
+                // dropped it, so re-running the drop can trigger a CollectionUUIDMismatch. This can
+                // be safely ignored since the collection is already gone.
+                //
+                // Another edge case: the collection might have been dropped and re-created with the
+                // same name but a different UUID (e.g., during a split-brain scenario). We also
+                // ignore this to avoid deleting valid metadata.
+                continue;
+            }
+
+            uassertStatusOK(status);
+        }
+    }
+
+    // The config server is also the primary shard for the config database, and thus maintains its
+    // own local shard catalog collections for it, even when it is not itself registered as a shard
+    // in config.shards. Drop them locally, since the loop above only reaches registered shards.
+    DBDirectClient client(opCtx);
+    for (const auto& nss : {NamespaceString::kConfigShardCatalogDatabasesNamespace,
+                            NamespaceString::kConfigShardCatalogCollectionsNamespace,
+                            NamespaceString::kConfigShardCatalogChunksNamespace}) {
+        BSONObj result;
+        if (!client.dropCollection(nss, defaultMajorityWriteConcern(), &result)) {
+            const auto status = getStatusFromCommandResult(result);
+            if (status != ErrorCodes::NamespaceNotFound) {
+                uassertStatusOK(status);
+            }
+        }
+    }
+}
+
+void createAuthoritativeShardCatalogChunksOnShards(OperationContext* opCtx) {
+    // No shards should be added until we have forwarded the command to all shards. We use the DDL
+    // lock here to serialize with all of add shard and to avoid deadlocks with the DDL blocking
+    // used by add/remove shard.
+    DDLLockManager::ScopedCollectionDDLLock ddlLock(opCtx,
+                                                    NamespaceString::kConfigsvrShardsNamespace,
+                                                    "IndexAuthoritativeShardCatalogMetadata",
+                                                    LockMode::MODE_S);
+
+    const auto opTimeWithShards =
+        Grid::get(opCtx)->catalogClient()->getAllShards(opCtx, repl::ReadConcernArgs::kSnapshot);
+
+    const auto chunksIndexes = getChunkCollectionIndexSpecs();
+    std::vector<BSONObj> indexSpecs;
+    for (const auto& index : chunksIndexes) {
+        IndexSpec spec;
+        spec.addKeys(index.keys);
+        spec.unique(index.unique);
+        indexSpecs.emplace_back(spec.toBSON());
+    }
+
+    for (const auto& shardType : opTimeWithShards.value) {
+        const auto shardStatus =
+            Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardType.getName());
+        if (shardStatus == ErrorCodes::ShardNotFound) {
             continue;
         }
+        const auto shard = uassertStatusOK(shardStatus);
 
+        CreateIndexesCommand cmd{NamespaceString::kConfigShardCatalogChunksNamespace};
+        cmd.setIndexes(indexSpecs);
+        cmd.setWriteConcern(defaultMajorityWriteConcern());
+
+        auto response = shard->runCommand(opCtx,
+                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                          DatabaseName::kConfig,
+                                          cmd.toBSON(),
+                                          Shard::RetryPolicy::kIdempotent);
+        auto status = Shard::CommandResponse::getEffectiveStatus(response);
         uassertStatusOK(status);
+    }
+
+    DBDirectClient client(opCtx);
+    client.createIndexes(NamespaceString::kConfigShardCatalogChunksNamespace,
+                         indexSpecs,
+                         defaultMajorityWriteConcern().toBSON());
+}
+
+// TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+// Drops this shard's legacy non-authoritative cache collections (config.cache.databases,
+// config.cache.collections and config.cache.chunks.*).
+void dropLegacyShardCacheCollections(OperationContext* opCtx) {
+    // Wait for the SSCCL to finish any already-queued flush tasks before dropping the collections.
+    FilteringMetadataCache::get(opCtx)->waitForAllLoaderFlushes(opCtx);
+
+    DBDirectClient client(opCtx);
+
+    const auto dropCacheCollection = [&](const NamespaceString& nss) {
+        BSONObj result;
+        if (!client.dropCollection(nss, defaultMajorityWriteConcern(), &result)) {
+            const auto status = getStatusFromCommandResult(result);
+            if (status != ErrorCodes::NamespaceNotFound) {
+                uassertStatusOK(status);
+            }
+        }
+    };
+
+    // Drop 'cache.databases', 'cache.collections' + all 'config.cache.chunks.*' collections.
+    dropCacheCollection(NamespaceString::kConfigCacheDatabasesNamespace);
+    dropCacheCollection(NamespaceString::kShardConfigCollectionsNamespace);
+    for (const auto& collInfo : client.getCollectionInfos(DatabaseName::kConfig)) {
+        const auto name = collInfo["name"].str();
+        if (name.starts_with("cache.chunks.")) {
+            dropCacheCollection(NamespaceStringUtil::deserialize(DatabaseName::kConfig, name));
+        }
     }
 }
 
@@ -323,6 +409,21 @@ public:
     }
 
 private:
+    // setFCV and the replica set write block are mutually exclusive. Refuse an FCV upgrade or
+    // downgrade while replica set write blocking is enabled, regardless of the direction and of
+    // whether the target FCV still supports the feature.
+    static void _uassertReplicaSetWritesNotBlocked(OperationContext* opCtx, bool isUpgrade) {
+        uassert(ErrorCodes::ReplicaSetWritesBlocked,
+                isUpgrade
+                    ? "Cannot upgrade while replica set writes are blocked. Replica set writes "
+                      "must be unblocked before upgrading. You probably reached disk full on some "
+                      "of your nodes. Please contact support."
+                    : "Cannot downgrade while replica set writes are blocked. Replica set writes "
+                      "must be unblocked before downgrading. You probably reached disk full on "
+                      "some of your nodes. Please contact support.",
+                !ReplicaSetWriteBlockState::get(opCtx)->isReplicaSetWriteBlockingEnabled());
+    }
+
     void prepareToUpgradeActionsBeforeGlobalLock(OperationContext* opCtx,
                                                  FCV originalVersion,
                                                  FCV requestedVersion) final {
@@ -341,7 +442,10 @@ private:
 
     void userCollectionsUassertsForUpgrade(OperationContext* opCtx,
                                            FCV originalVersion,
-                                           FCV requestedVersion) final {}
+                                           FCV requestedVersion) final {
+        // This also runs in the dry run (including the dry run forwarded to shards).
+        _uassertReplicaSetWritesNotBlocked(opCtx, true /* isUpgrade */);
+    }
 
     void userCollectionsWorkForUpgrade(OperationContext* opCtx,
                                        FCV originalVersion,
@@ -388,7 +492,8 @@ private:
         // thread when upgrading to an FCV that enables the feature. This handles the case where a
         // shard starts at lastLTS FCV and is upgraded by the config server during addShard.
         if (gFeatureFlagReplicatedFastCount.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
-                requestedVersion, originalVersion)) {
+                requestedVersion, originalVersion) &&
+            repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
             setUpReplicatedFastCount(opCtx);
         }
     }
@@ -437,6 +542,12 @@ private:
         ON_BLOCK_EXIT([&] { WriteBlockBypass::get(opCtx).set(originalValue); });
         WriteBlockBypass::get(opCtx).set(true);
 
+        // A no-op collMod logs no oplog entry, and the sweep below also covers unreplicated
+        // collections, so these catalog writes commit without a timestamp. The sweep issues one
+        // WriteUnitOfWork per collection, hence the recovery-unit-wide variant; it stays in effect
+        // for the rest of the setFeatureCompatibilityVersion command.
+        shard_role_details::allowAllUntimestampedWrites(opCtx);
+
         catalog::forEachCollectionFromAllDbs(opCtx, MODE_X, [&](const Collection* collection) {
             // Issue a no-op collMod command to each collection to trigger removal of
             // deprecated catalog metadata and to correct any invalid value types previously
@@ -465,13 +576,6 @@ private:
             }
         }
 
-        // TODO (SERVER-100309): Remove once 9.0 becomes last lts.
-        if (isConfigsvr &&
-            feature_flags::gSessionsCollectionCoordinatorOnConfigServer.isEnabledOnVersion(
-                requestedVersion)) {
-            _createConfigSessionsCollectionLocally(opCtx);
-        }
-
         // The content of config.placementHistory needs to be recomputed after ensuring that all
         // shards (including a possible embedded config server) reached the kComplete FCV phase, so
         // that the routine has to be invoked here (rather than embedding it within
@@ -497,38 +601,17 @@ private:
                 LockMode::MODE_IX);
         }
 
-        // TODO SERVER-94927: Remove once 9.0 becomes last lts.
-        const bool isReplSet = !role.has_value();
-        if ((isReplSet || isConfigsvr) &&
-            feature_flags::gFeatureFlagPQSBackfill.isEnabledOnVersion(requestedVersion)) {
-            auto& service = query_settings::QuerySettingsService::get(opCtx);
-            service.createQueryShapeRepresentativeQueriesCollection(opCtx);
-            service
-                .migrateRepresentativeQueriesFromQuerySettingsClusterParameterToDedicatedCollection(
-                    opCtx);
-        }
-    }
-
-    void _createConfigSessionsCollectionLocally(OperationContext* opCtx) {
-        ShardsvrCreateCollection shardsvrCollRequest(NamespaceString::kLogicalSessionsNamespace);
-        ShardsvrCreateCollectionRequest requestParamsObj;
-        requestParamsObj.setShardKey(BSON("_id" << 1));
-        shardsvrCollRequest.setShardsvrCreateCollectionRequest(std::move(requestParamsObj));
-        shardsvrCollRequest.setDbName(NamespaceString::kLogicalSessionsNamespace.dbName());
-
-        try {
-            cluster::createCollection(opCtx, std::move(shardsvrCollRequest));
-        } catch (const ExceptionFor<ErrorCodes::IllegalOperation>& ex) {
-            LOGV2(8694900,
-                  "Failed to create config.system.sessions on upgrade",
-                  "error"_attr = redact(ex));
+        // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gAuthoritativeShardsCRUD.isEnabledOnVersion(requestedVersion)) {
+            // CRUD operations now read the authoritative shard catalog (config.shard.catalog.*)
+            // and the legacy cache collections are no longer read from, so they can be dropped.
+            dropLegacyShardCacheCollections(opCtx);
         }
     }
 
     // TODO (SERVER-98118): Remove once v9.0 become last-lts.
     void _resetPlacementHistory(OperationContext* opCtx, const FCV requestedVersion) {
-        // TODO (SERVER-108188): Avoid resetting config.placementHistory if its initialization
-        // metadata already bring the expected version.
         if (!feature_flags::gFeatureFlagChangeStreamPreciseShardTargeting.isEnabledOnVersion(
                 requestedVersion)) {
             return;
@@ -611,8 +694,16 @@ private:
         auto role = ShardingState::get(opCtx)->pollClusterRole();
 
         if (role && role->has(ClusterRole::ConfigServer)) {
+            const auto upgradeOrDowngrade =
+                requestedVersion > originalVersion ? "upgrade" : "downgrade";
+
             // Waiting for recovery here to avoid waiting for recovery while holding the
             // fcvChangeRegion
+            LOGV2(12365900,
+                  "setFeatureCompatibilityVersion waiting for ShardingCoordinatorService "
+                  "recovery before FCV transition",
+                  "upgradeOrDowngrade"_attr = upgradeOrDowngrade,
+                  "toVersion"_attr = requestedVersion);
             ShardingCoordinatorService::getService(opCtx)->waitForRecovery(opCtx);
 
             if (requestedVersion <= originalVersion) {
@@ -620,6 +711,10 @@ private:
                 // cluster parameters (a condition that may cause this command to fail with
                 // a CannotDowngrade error in the checks performed under the
                 // fcvChangeRegion); perform a best-effort drain to avoid the scenario.
+                LOGV2(12365901,
+                      "setFeatureCompatibilityVersion draining InitializePlacementHistory "
+                      "coordinators before FCV downgrade",
+                      "toVersion"_attr = requestedVersion);
                 ShardingCoordinatorService::getService(opCtx)->waitForOngoingCoordinatorsToFinish(
                     opCtx, [](const ShardingCoordinator& instance) -> bool {
                         return instance.operationType() ==
@@ -634,20 +729,58 @@ private:
 
         // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
         if (role && role->has(ClusterRole::ConfigServer) &&
-            feature_flags::gShardAuthoritativeDbMetadataDDL
-                .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion, originalVersion) &&
+            feature_flags::gAuthoritativeShardsDDL.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
+                requestedVersion, originalVersion) &&
             !serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
                  .isUpgradingOrDowngrading()) {
-            // Drop the authoritative database collection before transitioning to kUpgrading
-            // to ensure we don't start from a state containing leftovers from a previous
-            // upgrade.
-            dropAuthoritativeDatabaseCollectionOnShards(opCtx);
+            // Drop the authoritative shard catalog collections and recreate the required indexes on
+            // config.shard.catalog.chunks before transitioning to kUpgrading to ensure we don't
+            // start from a state containing leftovers from a previous upgrade.
+            dropAuthoritativeShardCatalogCollectionsOnShards(opCtx);
+            createAuthoritativeShardCatalogChunksOnShards(opCtx);
+        }
+
+        // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+        // This is gated by based on the --shardsvr command line (`serverGlobalParams.clusterRole`)
+        // rather than the shard identity (`role`), consistently with the creation of the shard
+        // local catalog on stepup by `ShardingInitializationMongoD`. This is so a shard running
+        // setFCV from addShard (before installing the shard identity) creates the collections.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
+            feature_flags::gAuthoritativeShardsDDL.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            // Create the shard catalog collections and their indexes before transitioning to
+            // kUpgrading, since authoritative metadata writes can begin as soon as this shard
+            // enters kUpgrading and those writes do not create the required indexes themselves.
+            uassertStatusOK(sharding_util::createIndexesOnCollectionForWritablePrimary(
+                opCtx,
+                NamespaceString::kConfigShardCatalogCollectionsNamespace,
+                {IndexSpec_ForCatalog{BSON("_id" << 1), true}}));
+            uassertStatusOK(sharding_util::createIndexesOnCollectionForWritablePrimary(
+                opCtx,
+                NamespaceString::kConfigShardCatalogChunksNamespace,
+                getChunkCollectionIndexSpecs()));
+        }
+
+        // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gAuthoritativeShardsCRUD.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion) &&
+            !serverGlobalParams.featureCompatibility.acquireFCVSnapshot()
+                 .isUpgradingOrDowngrading()) {
+            // As a precaution, clean any leftover data in nonauthoritative cache collections before
+            // entering kDowngrading. This is safe, since on the upgraded FCV, the nonauthoritative
+            // caches aren't read/writen from (refreshes still use the authoritative shard catalog).
+            // Once we enter kDowngrading, the ShardServerCatalogCacheLoader uses them again.
+            dropLegacyShardCacheCollections(opCtx);
         }
     }
 
     void beforeStartWithFCVLock(OperationContext* opCtx,
                                 FCV originalVersion,
                                 FCV requestedVersion) final {
+        // Check if the replica set write block is enabled before starting the FCV transition.
+        _uassertReplicaSetWritesNotBlocked(opCtx, requestedVersion > originalVersion);
+
         auto role = ShardingState::get(opCtx)->pollClusterRole();
 
         // TODO (SERVER-103458): Remove once 9.0 becomes last lts.
@@ -692,6 +825,11 @@ private:
         // TODO SERVER-103838 Remove this code block once 9.0 becomes LTS.
         if (feature_flags::gPersistRecipientPlacementInfoInMigrationRecoveryDoc
                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            LOGV2(12365909,
+                  "setFeatureCompatibilityVersion draining in-progress migrations on FCV "
+                  "downgrade",
+                  "originalVersion"_attr = originalVersion,
+                  "toVersion"_attr = requestedVersion);
             migrationutil::drainMigrationsOnFcvDowngrade(opCtx);
         }
     }
@@ -715,6 +853,8 @@ private:
     void userCollectionsUassertsForDowngrade(OperationContext* opCtx,
                                              FCV originalVersion,
                                              FCV requestedVersion) final {
+        // This also runs in the dry run (including the dry run forwarded to shards).
+        _uassertReplicaSetWritesNotBlocked(opCtx, false /* isUpgrade */);
 
         bool errorAndLogValidationDisabled =
             (gFeatureFlagErrorAndLogValidationAction.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
@@ -753,6 +893,17 @@ private:
                                     collection->uuid().toString()),
                                 collection->getValidationLevel() !=
                                     ValidationLevelEnum::constraint);
+                        uassert(
+                            ErrorCodes::CannotDowngrade,
+                            fmt::format(
+                                "Cannot downgrade the cluster when there are collections with "
+                                "prepareConstraintValidationLevel set. Please unset the option or "
+                                "drop the collection(s) before downgrading. First detected "
+                                "collection with prepareConstraintValidationLevel set: {} "
+                                "(UUID: {}).",
+                                collection->ns().toStringForErrorMsg(),
+                                collection->uuid().toString()),
+                            !collection->getCollectionOptions().prepareConstraintValidationLevel);
                     }
 
                     if (storageTierDisabled) {
@@ -817,6 +968,29 @@ private:
                 return true;
             };
             catalog::forEachCollectionFromAllDbs(opCtx, MODE_IS, checkForPrefixSuffixQueryType);
+        }
+
+        if (gFeatureFlagQESubstringSearch.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            auto checkForSubstringQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields &&
+                    (hasQueryTypeMatching(encryptedFields.get(), [](QueryTypeEnum qt) {
+                        return qt == QueryTypeEnum::Substring;
+                    }))) {
+                    uasserted(ErrorCodes::CannotDowngrade,
+                              fmt::format(
+                                  "Collection {} (UUID: {}) has an encrypted field with query type "
+                                  "substring, which "
+                                  "is not compatible with the target FCV. Please drop this "
+                                  "collection before trying to downgrade FCV.",
+                                  collection->ns().toStringForErrorMsg(),
+                                  collection->uuid().toString()));
+                }
+                return true;
+            };
+            catalog::forEachCollectionFromAllDbs(opCtx, MODE_IS, checkForSubstringQueryType);
         }
 
         if (feature_flags::gFeatureFlagEnableReplicasetTransitionToCSRS
@@ -902,28 +1076,6 @@ private:
                                            FCV requestedVersion) final {
         auto role = ShardingState::get(opCtx)->pollClusterRole();
         if (!role || role->has(ClusterRole::None) || role->has(ClusterRole::ShardServer)) {
-            if (feature_flags::gTSBucketingParametersUnchanged
-                    .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
-                                                                  originalVersion)) {
-                catalog::modifyAllCollectionsMatching(
-                    opCtx,
-                    [&](const Collection* collection) {
-                        // To remove timeseries bucketing parameters from persistent
-                        // storage, issue the "collMod" command with none of the parameters
-                        // set.
-                        BSONObjBuilder responseBuilder;
-                        uassertStatusOK(processCollModCommandWithNestedCurOp(
-                            opCtx, collection->ns(), CollMod{collection->ns()}, &responseBuilder));
-                    },
-                    [&](const Collection* collection) {
-                        // Only remove the catalog entry flag if it exists. It could've been
-                        // removed if the downgrade process was interrupted and is being run
-                        // again. The downgrade process cannot be aborted at this point.
-                        return collection->getTimeseriesOptions() != boost::none &&
-                            collection->timeseriesBucketingParametersHaveChanged();
-                    });
-            }
-
             maybeModifyDataOnDowngradeForTest(opCtx, requestedVersion, originalVersion);
         }
 
@@ -936,34 +1088,17 @@ private:
             }
         }
 
-        // Stop the background metadata checkpoint thread and drop the metadata store collections
-        // when downgrading to an FCV that disables the replicated size and count feature.
+        // Stop the background metadata checkpoint thread when downgrading to an FCV that disables
+        // the replicated size and count feature.
         if (gFeatureFlagReplicatedFastCount.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
-                requestedVersion, originalVersion)) {
+                requestedVersion, originalVersion) &&
+            repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
             replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
                 .shutdown(opCtx);
-            DropReply unused;
-            uassertStatusOK(
-                dropCollection(opCtx,
-                               NamespaceString::makeGlobalConfigCollection(
-                                   NamespaceString::kReplicatedFastCountStore),
-                               &unused,
-                               DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
-            uassertStatusOK(
-                dropCollection(opCtx,
-                               NamespaceString::makeGlobalConfigCollection(
-                                   NamespaceString::kReplicatedFastCountStoreTimestamps),
-                               &unused,
-                               DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops));
         }
 
         _cleanUpClusterParameters(opCtx, originalVersion, requestedVersion);
         _createAuthzSchemaVersionDocIfNeeded(opCtx);
-        // Note the config server is also considered a shard, so the ConfigServer and ShardServer
-        // roles aren't mutually exclusive.
-        if (role && role->has(ClusterRole::ConfigServer)) {
-            _dropSessionsCollectionLocally(opCtx, requestedVersion, originalVersion);
-        }
 
         if (role && role->has(ClusterRole::ShardServer)) {
             abortAllMultiUpdateCoordinators(opCtx, requestedVersion, originalVersion);
@@ -1082,32 +1217,6 @@ private:
         }
     }
 
-    void _dropSessionsCollectionLocally(OperationContext* opCtx,
-                                        const FCV requestedVersion,
-                                        const FCV originalVersion) {
-        if (feature_flags::gSessionsCollectionCoordinatorOnConfigServer
-                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
-            // Only drop the collection locally if the config server is not acting as a shard. Since
-            // addShard (transitionFromDedicated) cannot run on transitional FCV, we cannot drop
-            // this when we shouldn't. If we transition to dedicated after this check, then
-            // transition to dedicated will drop the collection.
-            const auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-            bool amIAConfigShard =
-                std::find(allShardIds.begin(),
-                          allShardIds.end(),
-                          ShardingState::get(opCtx)->shardId()) != allShardIds.end();
-            if (!amIAConfigShard) {
-                DropCollectionCoordinator::dropCollectionLocally(
-                    opCtx,
-                    NamespaceString::kLogicalSessionsNamespace,
-                    true /* fromMigrate */,
-                    true /* dropSystemCollections */,
-                    boost::none,
-                    false /* requireCollectionEmpty */);
-            }
-        }
-    }
-
     void abortAllMultiUpdateCoordinators(OperationContext* opCtx,
                                          const FCV requestedVersion,
                                          const FCV originalVersion) {
@@ -1129,22 +1238,16 @@ private:
         const bool isConfigsvr = role && role->has(ClusterRole::ConfigServer);
         // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
         if (isConfigsvr &&
-            !feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabledOnVersion(requestedVersion)) {
-            // Dropping the authoritative collections (config.shard.catalog.databases) as the final
-            // step of the downgrade ensures that no leftover data remains. This guarantees a clean
-            // downgrade and makes it safe to upgrade again.
-            dropAuthoritativeDatabaseCollectionOnShards(opCtx);
+            !feature_flags::gAuthoritativeShardsDDL.isEnabledOnVersion(requestedVersion)) {
+            // Dropping the authoritative shard catalog collections as the final step of the
+            // downgrade ensures that no leftover data remains.
+            dropAuthoritativeShardCatalogCollectionsOnShards(opCtx);
         }
 
-        // TODO SERVER-94927: Remove once 9.0 becomes last lts.
         const bool isReplSet = !role.has_value();
-        if ((isReplSet || isConfigsvr) &&
-            !feature_flags::gFeatureFlagPQSBackfill.isEnabledOnVersion(requestedVersion)) {
-            auto& service = query_settings::QuerySettingsService::get(opCtx);
-            service
-                .migrateRepresentativeQueriesFromDedicatedCollectionToQuerySettingsClusterParameter(
-                    opCtx);
-            service.dropQueryShapeRepresentativeQueriesCollection(opCtx);
+        if (isReplSet || isConfigsvr) {
+            query_settings::QuerySettingsService::get(opCtx).downgradeQuerySettings(
+                opCtx, requestedVersion);
         }
     }
 };

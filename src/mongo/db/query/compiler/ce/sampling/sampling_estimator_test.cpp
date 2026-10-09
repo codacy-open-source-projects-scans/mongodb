@@ -1,40 +1,17 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/hasher.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
+#include "mongo/db/query/compiler/ce/sampling/persistent_sample_loader.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator_impl.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_test_utils.h"
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/cbr_test_utils.h"
@@ -42,12 +19,53 @@
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration_test_util.h"
+#include "mongo/db/query/query_settings/query_settings_context_test_util.h"
 #include "mongo/db/query/random_utils.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::ce {
+using namespace std::literals::string_view_literals;
+
+namespace {
+
+/**
+ * Returns true if 'doc' has an '_id' field and shardHash(_id) % modulus == 0.
+ * Mirrors the hash-mod filter used by stride sampling in SamplingEstimatorImpl.
+ */
+bool idPassesHashModFilter(const BSONObj& doc, int64_t modulus) {
+    const auto idElem = doc.getField("_id");
+    if (idElem.eoo()) {
+        return false;
+    }
+    const auto hashVal = BSONElementHasher::hash64(idElem, BSONElementHasher::DEFAULT_HASH_SEED);
+    return (hashVal % modulus) == 0;
+}
+
+/**
+ * Returns the '_id' values (0 .. collCard-1) that stride sampling would select when
+ * scanning in natural order: documents satisfying shardHash(_id) % modulus == 0, where
+ * modulus = max(1, collCard / sampleSize), stopping after 'sampleSize' matches.
+ */
+std::set<int> expectedHashModSampleIds(size_t collCard, size_t sampleSize) {
+    const int64_t modulus = std::max(int64_t{1}, static_cast<int64_t>(collCard / sampleSize));
+    std::set<int> expectedIds;
+    for (size_t i = 0; i < collCard && expectedIds.size() < sampleSize; ++i) {
+        BSONObj doc = BSON("_id" << static_cast<int>(i) << "a" << static_cast<int>(i));
+        if (idPassesHashModFilter(doc, modulus)) {
+            expectedIds.insert(static_cast<int>(i));
+        }
+    }
+    return expectedIds;
+}
+
+}  // namespace
 
 using namespace mongo::cost_based_ranker;
 
@@ -78,11 +96,112 @@ TEST_F(SamplingEstimatorTest, RandomSamplingProcess) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto sample = samplingEstimator.getSample();
     ASSERT_EQUALS(sample.size(), kSampleSize);
+}
+
+TEST_F(SamplingEstimatorTest, HashModStrideSampling) {
+    const size_t collCard = 10;
+    const size_t sampleSize = 5;
+    insertDocuments(kTestNss, createDocuments(collCard));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    unittest::ServerParameterGuard stridesKnob("internalQuerySamplingByStrides", true);
+
+    SamplingEstimatorForTesting samplingEstimator(operationContext(),
+                                                  colls,
+                                                  kTestNss,
+                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                  sampleSize,
+                                                  SamplingCEMethodEnum::kRandom,
+                                                  numChunks,
+                                                  makeCardinalityEstimate(collCard),
+                                                  nullptr /*customerQueryExpCtx*/);
+    samplingEstimator.generateSample(ce::NoProjection{});
+
+    const auto expectedIds = expectedHashModSampleIds(collCard, sampleSize);
+    const auto sample = samplingEstimator.getSample();
+    ASSERT_LTE(sample.size(), sampleSize);
+    ASSERT_EQUALS(sample.size(), std::min(sampleSize, expectedIds.size()));
+
+    std::set<int> actualIds;
+    for (const auto& doc : sample) {
+        ASSERT(idPassesHashModFilter(
+            doc, std::max(int64_t{1}, static_cast<int64_t>(collCard / sampleSize))));
+        actualIds.insert(doc.getField("_id").numberInt());
+    }
+    ASSERT_EQUALS(actualIds, expectedIds);
+}
+
+TEST_F(SamplingEstimatorTest, HashModStrideSamplingSmallCollection) {
+    const size_t collCard = 10;
+    const size_t sampleSize = 20;
+    insertDocuments(kTestNss, createDocuments(collCard));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    unittest::ServerParameterGuard stridesKnob("internalQuerySamplingByStrides", true);
+
+    SamplingEstimatorForTesting samplingEstimator(operationContext(),
+                                                  colls,
+                                                  kTestNss,
+                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                  sampleSize,
+                                                  SamplingCEMethodEnum::kRandom,
+                                                  numChunks,
+                                                  makeCardinalityEstimate(collCard),
+                                                  nullptr /*customerQueryExpCtx*/);
+    samplingEstimator.generateSample(ce::NoProjection{});
+
+    ASSERT_EQUALS(samplingEstimator.getSample().size(), collCard);
+}
+
+TEST_F(SamplingEstimatorTest, HashModStrideSamplingWithProjection) {
+    const size_t collCard = 10;
+    const size_t sampleSize = 5;
+    insertDocuments(kTestNss, createDocuments(collCard));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    unittest::ServerParameterGuard stridesKnob("internalQuerySamplingByStrides", true);
+
+    SamplingEstimatorForTesting samplingEstimator(operationContext(),
+                                                  colls,
+                                                  kTestNss,
+                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                  sampleSize,
+                                                  SamplingCEMethodEnum::kRandom,
+                                                  numChunks,
+                                                  makeCardinalityEstimate(collCard),
+                                                  nullptr /*customerQueryExpCtx*/);
+    samplingEstimator.generateSample(includedSampleFields);
+
+    const auto expectedIds = expectedHashModSampleIds(collCard, sampleSize);
+    const auto sample = samplingEstimator.getSample();
+    ASSERT_LTE(sample.size(), sampleSize);
+    ASSERT_EQUALS(sample.size(), std::min(sampleSize, expectedIds.size()));
+
+    std::set<int> actualIds;
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getFieldNames<std::set<std::string>>(),
+                      std::set(includedSampleFields.begin(), includedSampleFields.end()));
+        ASSERT_TRUE(doc.getObjectField("obj").hasField("nil"));
+        ASSERT(idPassesHashModFilter(
+            doc, std::max(int64_t{1}, static_cast<int64_t>(collCard / sampleSize))));
+        actualIds.insert(doc.getField("_id").numberInt());
+    }
+    ASSERT_EQUALS(actualIds, expectedIds);
 }
 
 TEST_F(SamplingEstimatorTest, RandomSamplingProcessWithProjection) {
@@ -99,7 +218,8 @@ TEST_F(SamplingEstimatorTest, RandomSamplingProcessWithProjection) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(includedSampleFields);
 
     auto sample = samplingEstimator.getSample();
@@ -130,7 +250,8 @@ TEST_F(SamplingEstimatorTest, ChunkSamplingProcess) {
                                                       sampleSize,
                                                       SamplingCEMethodEnum::kChunk,
                                                       chunkNum,
-                                                      makeCardinalityEstimate(2000));
+                                                      makeCardinalityEstimate(2000),
+                                                      nullptr /*customerQueryExpCtx*/);
         samplingEstimator.generateSample(ce::NoProjection{});
 
         auto sample = samplingEstimator.getSample();
@@ -184,7 +305,8 @@ TEST_F(SamplingEstimatorTest, ChunkSamplingProcessWithProjection) {
                                                       sampleSize,
                                                       SamplingCEMethodEnum::kChunk,
                                                       chunkNum,
-                                                      makeCardinalityEstimate(2000));
+                                                      makeCardinalityEstimate(2000),
+                                                      nullptr /*customerQueryExpCtx*/);
         samplingEstimator.generateSample(includedSampleFields);
 
         auto sample = samplingEstimator.getSample();
@@ -244,7 +366,8 @@ TEST_F(SamplingEstimatorTest, FullCollScanSamplingProcess) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   boost::none, /* numChunks */
-                                                  makeCardinalityEstimate(collectionSize));
+                                                  makeCardinalityEstimate(collectionSize),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto sample = samplingEstimator.getSample();
@@ -270,7 +393,8 @@ TEST_F(SamplingEstimatorTest, FullCollScanSamplingProcessWithProjection) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   boost::none, /* numChunks */
-                                                  makeCardinalityEstimate(collectionSize));
+                                                  makeCardinalityEstimate(collectionSize),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(includedSampleFields);
 
     auto sample = samplingEstimator.getSample();
@@ -301,7 +425,8 @@ TEST_F(SamplingEstimatorTest, ProjectAllFieldsRandomSampling) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(topLevelSampleFieldNames);
 
     auto sample = samplingEstimator.getSample();
@@ -332,7 +457,8 @@ TEST_F(SamplingEstimatorTest, ProjectOneFieldRandomSampling) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(topLevelSampleFieldNames);
 
     auto sample = samplingEstimator.getSample();
@@ -359,7 +485,8 @@ TEST_F(SamplingEstimatorTest, NoProjectionRandomSampling) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto sample = samplingEstimator.getSample();
@@ -389,7 +516,8 @@ TEST_F(SamplingEstimatorTest, ProjectNonExistentFieldRandomSampling) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(topLevelSampleFieldNames);
 
     auto sample = samplingEstimator.getSample();
@@ -416,20 +544,29 @@ TEST_F(SamplingEstimatorTest, DrawANewSample) {
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto sample = samplingEstimator.getSample();
     ASSERT_EQUALS(sample.size(), kSampleSize);
 
-    // Specifing a new sample size and re-sample. The old sample should be replaced by the new
-    // sample of a different sample size.
-    samplingEstimator.generateRandomSample(3);
-    auto newSample = samplingEstimator.getSample();
+    // A separate estimator with a different sample size draws a sample of that size.
+    SamplingEstimatorForTesting smallerEstimator(operationContext(),
+                                                 colls,
+                                                 kTestNss,
+                                                 PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                 3 /* sampleSize */,
+                                                 SamplingCEMethodEnum::kRandom,
+                                                 numChunks,
+                                                 makeCardinalityEstimate(10),
+                                                 nullptr /*customerQueryExpCtx*/);
+    smallerEstimator.generateSample(ce::NoProjection{});
+    auto newSample = smallerEstimator.getSample();
     ASSERT_EQUALS(newSample.size(), 3);
 }
 
-TEST_F(SamplingEstimatorTest, SampleSize) {
+TEST_F(SamplingEstimatorTest, CalculateSampleSize) {
     std::map<std::pair<SamplingConfidenceIntervalEnum, double>, size_t> sampleSizes = {
         {std::make_pair(SamplingConfidenceIntervalEnum::k90, 2), 1691},
         {std::make_pair(SamplingConfidenceIntervalEnum::k95, 2), 2401},
@@ -439,10 +576,100 @@ TEST_F(SamplingEstimatorTest, SampleSize) {
         {std::make_pair(SamplingConfidenceIntervalEnum::k99, 5), 664},
     };
     for (auto& el : sampleSizes) {
-        auto size =
-            SamplingEstimatorForTesting::calculateSampleSize(el.first.first, el.first.second);
-        ASSERT_EQUALS(size, el.second);
+        ASSERT_EQUALS(sampleSizeForKnobs(el.first.first, el.first.second), el.second);
     }
+}
+
+TEST_F(SamplingEstimatorTest, CalculateSampleSizeOverrideKnobTakesPrecedence) {
+    // The override wins over the confidence interval and margin of error knobs.
+    ASSERT_EQUALS(sampleSizeForKnobs(SamplingConfidenceIntervalEnum::k95, 5.0, 42), 42);
+    ASSERT_EQUALS(sampleSizeForKnobs(SamplingConfidenceIntervalEnum::k90, 1.0, 42), 42);
+
+    // Without the override, the size is derived from those two knobs again.
+    ASSERT_EQUALS(sampleSizeForKnobs(SamplingConfidenceIntervalEnum::k95, 5.0), 384);
+}
+
+TEST_F(SamplingEstimatorTest, CalculateSampleSizeRespectsQuerySettingsKnobOverrides) {
+    const size_t card = 500;
+    insertDocuments(kTestNss, createDocuments(card));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+
+    // Persistent query settings takes effect even though the global knob value is unchanged.
+    query_settings::QuerySettingsGuardForTest settingsGuard{
+        operationContext(), fromjson(R"({queryKnobs: {samplingMarginOfError: 2.0}})")};
+
+    auto cq =
+        createCanonicalQueryFromMatchExpression(*this, std::make_unique<AndMatchExpression>());
+    auto estimator = SamplingEstimatorImpl::makeDefaultSamplingEstimator(
+        *cq,
+        SamplingEstimatorTest::makeCardinalityEstimate(card),
+        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+        colls);
+    // The size reflects k95 with the 2% margin of error from the query settings.
+    ASSERT_EQUALS(estimator->getSampleSize(),
+                  sampleSizeForKnobs(SamplingConfidenceIntervalEnum::k95, 2.0));
+}
+
+TEST_F(SamplingEstimatorTest, CalculateSampleSizeRespectsQuerySettingsSampleSizeOverride) {
+    const size_t card = 500;
+    insertDocuments(kTestNss, createDocuments(card));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    query_settings::QuerySettingsGuardForTest settingsGuard{
+        operationContext(), fromjson(R"({queryKnobs: {samplingSizeOverride: 77}})")};
+
+    auto cq =
+        createCanonicalQueryFromMatchExpression(*this, std::make_unique<AndMatchExpression>());
+    auto estimator = SamplingEstimatorImpl::makeDefaultSamplingEstimator(
+        *cq,
+        SamplingEstimatorTest::makeCardinalityEstimate(card),
+        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+        colls);
+    ASSERT_EQUALS(estimator->getSampleSize(), 77);
+}
+
+TEST_F(SamplingEstimatorTest, SampleSizeRespectsSampleSizeParamState) {
+    const size_t card = 500;
+    insertDocuments(kTestNss, createDocuments(card));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    // When 'internalSamplingSizeOverride' is not set and no query settings are applied, the sample
+    // size is derived from default confidence interval and margin of error values
+    // (k95, 5.0 -> 384).
+    const size_t defaultSampleSize = SamplingEstimatorImpl::calculateSampleSize(
+        QueryKnobConfiguration{query_settings::QuerySettings{}});
+
+    auto cq =
+        createCanonicalQueryFromMatchExpression(*this, std::make_unique<AndMatchExpression>());
+    auto estimatorDefault = SamplingEstimatorImpl::makeDefaultSamplingEstimator(
+        *cq,
+        SamplingEstimatorTest::makeCardinalityEstimate(card),
+        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+        colls);
+    ASSERT_EQUALS(estimatorDefault->getSampleSize(), defaultSampleSize);
+
+    const int overrideSize = 100;
+    QueryKnobGuardForTest samplingSizeOverrideGuard{
+        operationContext(), "internalSamplingSizeOverride", overrideSize};
+
+    auto cqOverride =
+        createCanonicalQueryFromMatchExpression(*this, std::make_unique<AndMatchExpression>());
+    auto estimatorOverride = SamplingEstimatorImpl::makeDefaultSamplingEstimator(
+        *cqOverride,
+        SamplingEstimatorTest::makeCardinalityEstimate(card),
+        PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+        colls);
+    ASSERT_EQUALS(estimatorOverride->getSampleSize(), static_cast<size_t>(overrideSize));
 }
 
 TEST_F(SamplingEstimatorTest, EstimateCardinality) {
@@ -461,22 +688,22 @@ TEST_F(SamplingEstimatorTest, EstimateCardinality) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     {  // All documents in the collection satisfy the predicate.
         auto operand = BSON("$lt" << 100);
-        LTMatchExpression lt("a"_sd, operand["$lt"]);
+        LTMatchExpression lt("a"sv, operand["$lt"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&lt);
 
-        CardinalityEstimate expectedEstimate =
-            makeCardinalityEstimate(samplingEstimator.getCollCard());
+        CardinalityEstimate expectedEstimate = samplingEstimator.getCollCard();
         ASSERT_TRUE(cardinalityEstimate == expectedEstimate);
     }
 
     {  // Predicate with 50% selectivity.
         auto operand = BSON("$lt" << 50);
-        LTMatchExpression lt("a"_sd, operand["$lt"]);
+        LTMatchExpression lt("a"sv, operand["$lt"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&lt);
 
         samplingEstimator.assertEstimateInConfidenceInterval(cardinalityEstimate, 0.5 * card);
@@ -484,7 +711,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinality) {
 
     {  // Predicate with 20% selectivity.
         auto operand = BSON("$gte" << 80);
-        GTEMatchExpression gte("a"_sd, operand["$gte"]);
+        GTEMatchExpression gte("a"sv, operand["$gte"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&gte);
 
         samplingEstimator.assertEstimateInConfidenceInterval(cardinalityEstimate, 0.2 * card);
@@ -492,7 +719,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinality) {
 
     {  // Equality predicate with 10% selectivity.
         auto operand = BSON("$eq" << 5);
-        EqualityMatchExpression eq("b"_sd, operand["$eq"]);
+        EqualityMatchExpression eq("b"sv, operand["$eq"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&eq);
 
         samplingEstimator.assertEstimateInConfidenceInterval(cardinalityEstimate, 0.1 * card);
@@ -515,7 +742,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     SamplingEstimatorForTesting samplingEstimatorWithProjection(
@@ -526,25 +754,25 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
         sampleSize,
         SamplingCEMethodEnum::kRandom,
         numChunks,
-        makeCardinalityEstimate(card));
+        makeCardinalityEstimate(card),
+        nullptr /*customerQueryExpCtx*/);
     samplingEstimatorWithProjection.generateSample(StringSet{"a", "b"});
 
     {  // All documents in the collection satisfy the predicate.
         auto operand = BSON("$lt" << 100);
-        LTMatchExpression lt("a"_sd, operand["$lt"]);
+        LTMatchExpression lt("a"sv, operand["$lt"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&lt);
         auto cardinalityEstimateWithProjection =
             samplingEstimatorWithProjection.estimateCardinality(&lt);
 
-        CardinalityEstimate expectedEstimate =
-            makeCardinalityEstimate(samplingEstimator.getCollCard());
+        CardinalityEstimate expectedEstimate = samplingEstimator.getCollCard();
         ASSERT_TRUE(cardinalityEstimate == expectedEstimate);
         ASSERT_TRUE(cardinalityEstimate == cardinalityEstimateWithProjection);
     }
 
     {  // Predicate with 50% selectivity.
         auto operand = BSON("$lt" << 50);
-        LTMatchExpression lt("a"_sd, operand["$lt"]);
+        LTMatchExpression lt("a"sv, operand["$lt"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&lt);
         auto cardinalityEstimateWithProjection =
             samplingEstimatorWithProjection.estimateCardinality(&lt);
@@ -556,7 +784,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
 
     {  // Predicate with 20% selectivity.
         auto operand = BSON("$gte" << 80);
-        GTEMatchExpression gte("a"_sd, operand["$gte"]);
+        GTEMatchExpression gte("a"sv, operand["$gte"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&gte);
         auto cardinalityEstimateWithProjection =
             samplingEstimatorWithProjection.estimateCardinality(&gte);
@@ -568,7 +796,7 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityWithProjection) {
 
     {  // Equality predicate with 10% selectivity.
         auto operand = BSON("$eq" << 5);
-        EqualityMatchExpression eq("b"_sd, operand["$eq"]);
+        EqualityMatchExpression eq("b"sv, operand["$eq"]);
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&eq);
         auto cardinalityEstimateWithProjection =
             samplingEstimatorWithProjection.estimateCardinality(&eq);
@@ -595,15 +823,16 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     {  // Range predicate on "a" with 20% selectivity: a > 40 && a < 60.
         auto operand1 = BSON("$gte" << 40);
         auto operand2 = BSON("$lt" << 60);
 
-        auto pred1 = std::make_unique<GTEMatchExpression>("a"_sd, operand1["$gte"]);
-        auto pred2 = std::make_unique<LTMatchExpression>("a"_sd, operand2["$lt"]);
+        auto pred1 = std::make_unique<GTEMatchExpression>("a"sv, operand1["$gte"]);
+        auto pred2 = std::make_unique<LTMatchExpression>("a"sv, operand2["$lt"]);
 
         auto andExpr = AndMatchExpression{};
         andExpr.add(std::move(pred1));
@@ -617,8 +846,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
         auto operand1 = BSON("$lt" << 40);
         auto operand2 = BSON("$eq" << 5);
 
-        auto pred1 = std::make_unique<LTMatchExpression>("a"_sd, operand1["$lt"]);
-        auto pred2 = std::make_unique<EqualityMatchExpression>("b"_sd, operand2["$eq"]);
+        auto pred1 = std::make_unique<LTMatchExpression>("a"sv, operand1["$lt"]);
+        auto pred2 = std::make_unique<EqualityMatchExpression>("b"sv, operand2["$eq"]);
 
         auto andExpr = AndMatchExpression{};
         andExpr.add(std::move(pred1));
@@ -632,8 +861,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
         auto operand1 = BSON("$lt" << 20);
         auto operand2 = BSON("$eq" << 5);
 
-        auto pred1 = std::make_unique<LTMatchExpression>("a"_sd, operand1["$lt"]);
-        auto pred2 = std::make_unique<EqualityMatchExpression>("b"_sd, operand2["$eq"]);
+        auto pred1 = std::make_unique<LTMatchExpression>("a"sv, operand1["$lt"]);
+        auto pred2 = std::make_unique<EqualityMatchExpression>("b"sv, operand2["$eq"]);
 
         auto orExpr = OrMatchExpression{};
         orExpr.add(std::move(pred1));
@@ -647,8 +876,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
         auto operand1 = BSON("$eq" << 3);
         auto operand2 = BSON("$eq" << 5);
 
-        auto pred1 = std::make_unique<EqualityMatchExpression>("b"_sd, operand1["$eq"]);
-        auto pred2 = std::make_unique<EqualityMatchExpression>("b"_sd, operand2["$eq"]);
+        auto pred1 = std::make_unique<EqualityMatchExpression>("b"sv, operand1["$eq"]);
+        auto pred2 = std::make_unique<EqualityMatchExpression>("b"sv, operand2["$eq"]);
 
         auto orExpr = OrMatchExpression{};
         orExpr.add(std::move(pred1));
@@ -656,52 +885,6 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityLogicalExpressions) {
 
         auto cardinalityEstimate = samplingEstimator.estimateCardinality(&orExpr);
         samplingEstimator.assertEstimateInConfidenceInterval(cardinalityEstimate, 0.20 * card);
-    }
-}
-
-TEST_F(SamplingEstimatorTest, EstimateCardinalityMultipleExpressions) {
-    const size_t card = 4000;
-    insertDocuments(kTestNss, createDocuments(card));
-    const size_t sampleSize = 400;
-
-    auto coll = acquireCollection(operationContext(), kTestNss);
-    auto colls = MultipleCollectionAccessor(
-        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
-
-    SamplingEstimatorForTesting samplingEstimator(operationContext(),
-                                                  colls,
-                                                  kTestNss,
-                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                  sampleSize,
-                                                  SamplingCEMethodEnum::kRandom,
-                                                  numChunks,
-                                                  makeCardinalityEstimate(card));
-    samplingEstimator.generateSample(ce::NoProjection{});
-
-    auto operand1 = BSON("$lt" << 30);
-    LTMatchExpression lt("a"_sd, operand1["$lt"]);
-    auto operand2 = BSON("$gt" << 8);
-    GTMatchExpression gt("b"_sd, operand2["$gt"]);
-
-    auto operand3 = BSON("$lte" << 12);
-    auto operand4 = BSON("$eq" << 99);
-    auto pred1 = std::make_unique<LTEMatchExpression>("a"_sd, operand3["$lte"]);
-    auto pred2 = std::make_unique<EqualityMatchExpression>("a"_sd, operand4["$eq"]);
-    auto orExpr = OrMatchExpression{};
-    orExpr.add(std::move(pred1));
-    orExpr.add(std::move(pred2));
-
-    std::vector<const MatchExpression*> expressions;
-    expressions.push_back(&lt);
-    expressions.push_back(&gt);
-    expressions.push_back(&orExpr);
-
-    std::vector<double> expectedSel = {0.3, 0.1, 0.14};
-
-    auto estimates = samplingEstimator.estimateCardinality(expressions);
-
-    for (size_t i = 0; i < estimates.size(); i++) {
-        samplingEstimator.assertEstimateInConfidenceInterval(estimates[i], expectedSel[i] * card);
     }
 }
 
@@ -726,7 +909,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityExistsWithProjection) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
     SamplingEstimatorForTesting samplingEstimatorWithProjection(
         operationContext(),
@@ -736,13 +920,14 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityExistsWithProjection) {
         sampleSize,
         SamplingCEMethodEnum::kRandom,
         numChunks,
-        makeCardinalityEstimate(card));
+        makeCardinalityEstimate(card),
+        nullptr /*customerQueryExpCtx*/);
     samplingEstimatorWithProjection.generateSample(StringSet{"nil"});
 
     // 1 doc that does not have field "nil".
-    auto expectedEstimate = makeCardinalityEstimate(samplingEstimator.getCollCard() - 1);
+    auto expectedEstimate = samplingEstimator.getCollCard() - cost_based_ranker::oneCE;
 
-    ExistsMatchExpression exists("nil"_sd);
+    ExistsMatchExpression exists("nil"sv);
 
     ASSERT_TRUE(samplingEstimator.estimateCardinality(&exists) == expectedEstimate);
     ASSERT_TRUE(samplingEstimatorWithProjection.estimateCardinality(&exists) == expectedEstimate);
@@ -765,7 +950,8 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityByIndexBounds) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     // Test IndexBounds with single field.
@@ -853,7 +1039,8 @@ TEST_F(SamplingEstimatorTest, EstimateIndexKeysScanned) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
     // Test IndexBounds with single field.
     OrderedIntervalList list("arr");
@@ -978,11 +1165,12 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityByIndexBoundsAndMatchExpression
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto operand1 = BSON("$lt" << 20);
-    LTMatchExpression lt("a"_sd, operand1["$lt"]);
+    LTMatchExpression lt("a"sv, operand1["$lt"]);
 
     OrderedIntervalList list("b");
     list.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
@@ -1047,8 +1235,8 @@ TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionDottedPath
     // Expect only top level fields, a and b to be included.
     std::set<std::string> expectedFields{"a", "b"};
 
-    ASSERT_EQUALS(topLevelFields.size(), expectedFields.size());
-    for (const auto& topLevelField : topLevelFields) {
+    ASSERT_EQUALS(topLevelFields.fieldNames().size(), expectedFields.size());
+    for (const auto& topLevelField : topLevelFields.fieldNames()) {
         ASSERT_TRUE(expectedFields.contains(topLevelField));
     }
 }
@@ -1060,8 +1248,8 @@ TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionRootedOr) 
 
     std::set<std::string> expectedFields{"a", "b", "c"};
 
-    ASSERT_EQUALS(topLevelFields.size(), expectedFields.size());
-    for (const auto& topLevelField : topLevelFields) {
+    ASSERT_EQUALS(topLevelFields.fieldNames().size(), expectedFields.size());
+    for (const auto& topLevelField : topLevelFields.fieldNames()) {
         ASSERT_TRUE(expectedFields.contains(topLevelField));
     }
 }
@@ -1072,8 +1260,8 @@ TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionDuplicateF
     auto topLevelFields = ce::extractTopLevelFieldsFromMatchExpression(expr.get());
 
     // Duplicate field names should not be included.
-    ASSERT_EQUALS(topLevelFields.size(), 1);
-    ASSERT_EQUALS(*topLevelFields.begin(), "a"_sd);
+    ASSERT_EQUALS(topLevelFields.fieldNames().size(), 1);
+    ASSERT_EQUALS(*topLevelFields.fieldNames().begin(), "a"sv);
 }
 
 TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionNestedAndOr) {
@@ -1082,10 +1270,60 @@ TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionNestedAndO
     auto topLevelFields = ce::extractTopLevelFieldsFromMatchExpression(expr.get());
     std::set<std::string> expectedFields{"a", "b", "c", "d"};
 
-    ASSERT_EQUALS(topLevelFields.size(), expectedFields.size());
-    for (const auto& topLevelField : topLevelFields) {
+    ASSERT_EQUALS(topLevelFields.fieldNames().size(), expectedFields.size());
+    for (const auto& topLevelField : topLevelFields.fieldNames()) {
         ASSERT_TRUE(expectedFields.contains(topLevelField));
     }
+}
+
+TEST_F(SamplingEstimatorTest, ExtractTopLevelFieldsFromMatchExpressionWholeDocument) {
+    auto filter = fromjson("{a: 1, $expr: {$eq: [{$type: '$$ROOT'}, 'object']}}");
+    auto expr = parse(filter);
+    ASSERT_TRUE(ce::extractTopLevelFieldsFromMatchExpression(expr.get()).needsAllFields());
+}
+
+TEST(TopLevelSampleFieldsTest, FieldNamesAreKeptUnlessAllFieldsAreNeeded) {
+    ce::TopLevelSampleFields fields{StringSet{"a", "b"}};
+    ASSERT_FALSE(fields.needsAllFields());
+    ASSERT_EQ(fields.fieldNames(), (StringSet{"a", "b"}));
+
+    ASSERT_TRUE(ce::TopLevelSampleFields::allFields().needsAllFields());
+}
+
+TEST(TopLevelSampleFieldsTest, MergeUnionsFieldNames) {
+    ce::TopLevelSampleFields fields{StringSet{"a", "b"}};
+    fields.merge(ce::TopLevelSampleFields{StringSet{"b", "c"}});
+    ASSERT_EQ(fields.fieldNames(), (StringSet{"a", "b", "c"}));
+}
+
+TEST(TopLevelSampleFieldsTest, MergeNeedsAllFieldsIfEitherSideDoes) {
+    ce::TopLevelSampleFields fields{StringSet{"a"}};
+    fields.merge(ce::TopLevelSampleFields::allFields());
+    ASSERT_TRUE(fields.needsAllFields());
+    fields.merge(ce::TopLevelSampleFields{StringSet{"b"}});
+    ASSERT_TRUE(fields.needsAllFields());
+}
+
+TEST(TopLevelSampleFieldsTest, RelevantIndexOutputWritesThroughToFieldNames) {
+    ce::TopLevelSampleFields fields{StringSet{"a"}};
+    auto out = fields.relevantIndexOutput();
+    ASSERT_TRUE(out.has_value());
+    out->insert("b");
+    ASSERT_EQ(fields.fieldNames(), (StringSet{"a", "b"}));
+    ASSERT_FALSE(ce::TopLevelSampleFields::allFields().relevantIndexOutput().has_value());
+}
+
+TEST(TopLevelSampleFieldsTest, ToProjectionParamsProjectsOnlyNonEmptyFieldNames) {
+    auto projection = ce::TopLevelSampleFields{StringSet{"a", "b"}}.toProjectionParams();
+    ASSERT_EQ(std::get<ce::TopLevelFieldsProjection>(projection), (StringSet{"a", "b"}));
+    ASSERT_TRUE(std::holds_alternative<ce::NoProjection>(
+        ce::TopLevelSampleFields{StringSet{}}.toProjectionParams()));
+    ASSERT_TRUE(std::holds_alternative<ce::NoProjection>(
+        ce::TopLevelSampleFields::allFields().toProjectionParams()));
+}
+
+DEATH_TEST(TopLevelSampleFieldsDeathTest, FieldNamesOfAllFieldsIsInvalid, "13452602") {
+    ce::TopLevelSampleFields::allFields().fieldNames();
 }
 
 using SamplingEstimatorTestDeathTest = SamplingEstimatorTest;
@@ -1105,7 +1343,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     OrderedIntervalList list("a");
@@ -1138,7 +1377,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a", "b.c"});
 }
 
@@ -1156,7 +1396,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{});
 }
 
@@ -1176,36 +1417,13 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a"});
 
     auto operand = BSON("$eq" << 5);
-    EqualityMatchExpression eq("b"_sd, operand["$eq"]);
+    EqualityMatchExpression eq("b"sv, operand["$eq"]);
     samplingEstimator.estimateCardinality(&eq);
-}
-
-DEATH_TEST_F(SamplingEstimatorTestDeathTest,
-             SampleDoesNotContainFieldInMatchExpressionEstimateCardinalityBatched,
-             "MatchExpression contains fields not present in topLevelSampleFieldNames") {
-    insertDocuments(kTestNss, createDocuments(10));
-
-    auto coll = acquireCollection(operationContext(), kTestNss);
-    auto colls = MultipleCollectionAccessor(
-        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
-
-    SamplingEstimatorForTesting samplingEstimator(operationContext(),
-                                                  colls,
-                                                  kTestNss,
-                                                  PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                  kSampleSize,
-                                                  SamplingCEMethodEnum::kRandom,
-                                                  numChunks,
-                                                  makeCardinalityEstimate(10));
-    samplingEstimator.generateSample(StringSet{"a"});
-
-    auto operand = BSON("$eq" << 5);
-    EqualityMatchExpression eq("b"_sd, operand["$eq"]);
-    samplingEstimator.estimateCardinality(std::vector<const MatchExpression*>{&eq});
 }
 
 DEATH_TEST_F(SamplingEstimatorTestDeathTest,
@@ -1224,10 +1442,11 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a"});
     auto operand = BSON("$eq" << 5);
-    EqualityMatchExpression eq("b"_sd, operand["$eq"]);
+    EqualityMatchExpression eq("b"sv, operand["$eq"]);
     OrderedIntervalList list("b");
     list.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
         BSON("" << 0 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
@@ -1254,7 +1473,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a", "b"});
 
     const auto filter = fromjson("{a: 1, b: 2}");
@@ -1291,7 +1511,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a", "b"});
 
     const auto filter = fromjson("{a: 1, b: 2}");
@@ -1328,7 +1549,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
 
     const auto filter = fromjson("{a: 1}");
     const auto expr = parse(filter);
@@ -1356,7 +1578,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
 
     const auto filter = fromjson("{a: 1}");
     const auto expr = parse(filter);
@@ -1384,7 +1607,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   kSampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(10));
+                                                  makeCardinalityEstimate(10),
+                                                  nullptr /*customerQueryExpCtx*/);
 
     const auto filter = fromjson("{a: 1}");
     const auto expr = parse(filter);
@@ -1412,8 +1636,7 @@ void assertBetween(CardinalityEstimate actual, double min, double max) {
 
 void makeNDVAssertions(SamplingEstimatorForTesting& estimator, const size_t sampleSize) {
     // For the purposes of safe assertions, we must generate a stable sample.
-    RAIIServerParameterControllerForTest knobController("internalQuerySamplingBySequentialScan",
-                                                        true);
+    unittest::ServerParameterGuard knobController("internalQuerySamplingBySequentialScan", true);
     estimator.generateSample(ce::NoProjection{});
 
     // We know the true NDV for each of these fields; see 'createDocumentsForNDVTesting' for
@@ -1481,7 +1704,8 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeOnePercent) {
                                           sampleSize,
                                           SamplingCEMethodEnum::kRandom,
                                           numChunks,
-                                          makeCardinalityEstimate(card));
+                                          makeCardinalityEstimate(card),
+                                          nullptr /*customerQueryExpCtx*/);
     makeNDVAssertions(estimator, sampleSize);
 }
 
@@ -1501,7 +1725,8 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeTwoPercent) {
                                           sampleSize,
                                           SamplingCEMethodEnum::kRandom,
                                           numChunks,
-                                          makeCardinalityEstimate(card));
+                                          makeCardinalityEstimate(card),
+                                          nullptr /*customerQueryExpCtx*/);
     makeNDVAssertions(estimator, sampleSize);
 }
 
@@ -1521,7 +1746,8 @@ TEST_F(SamplingEstimatorTest, EstimateNDVForFieldsSampleSizeTenPercent) {
                                           sampleSize,
                                           SamplingCEMethodEnum::kRandom,
                                           numChunks,
-                                          makeCardinalityEstimate(card));
+                                          makeCardinalityEstimate(card),
+                                          nullptr /*customerQueryExpCtx*/);
     makeNDVAssertions(estimator, sampleSize);
 }
 
@@ -1546,7 +1772,7 @@ class EstimateNDVMultiKeyTest : public SamplingEstimatorTest,
 
 TEST_P(EstimateNDVMultiKeyTest, ConsistentWithScalarForSameValueArrays) {
     // Use sequential scan so all estimators draw a deterministic, identically-sized sample.
-    RAIIServerParameterControllerForTest knob("internalQuerySamplingBySequentialScan", true);
+    unittest::ServerParameterGuard knob("internalQuerySamplingBySequentialScan", true);
 
     const size_t card = GetParam().card;
     const size_t sampleSize = GetParam().sampleSize;
@@ -1598,7 +1824,8 @@ TEST_P(EstimateNDVMultiKeyTest, ConsistentWithScalarForSameValueArrays) {
                                                 sampleSize,
                                                 SamplingCEMethodEnum::kRandom,
                                                 numChunks,
-                                                makeCardinalityEstimate(card));
+                                                makeCardinalityEstimate(card),
+                                                nullptr /*customerQueryExpCtx*/);
     scalarEstimator.generateSample(ce::NoProjection{});
     auto ndvScalar = scalarEstimator.estimateNDV({{.path = "a"}});
     auto ndvScalarMK = scalarEstimator.estimateNDVMultiKey({{.path = "a"}});
@@ -1615,7 +1842,8 @@ TEST_P(EstimateNDVMultiKeyTest, ConsistentWithScalarForSameValueArrays) {
                                                     sampleSize,
                                                     SamplingCEMethodEnum::kRandom,
                                                     numChunks,
-                                                    makeCardinalityEstimate(card));
+                                                    makeCardinalityEstimate(card),
+                                                    nullptr /*customerQueryExpCtx*/);
     singleElemEstimator.generateSample(ce::NoProjection{});
     auto ndvSingleElem = singleElemEstimator.estimateNDVMultiKey({{.path = "a"}});
     ASSERT_EQ(ndvScalar, ndvSingleElem);
@@ -1630,7 +1858,8 @@ TEST_P(EstimateNDVMultiKeyTest, ConsistentWithScalarForSameValueArrays) {
                                                    sampleSize,
                                                    SamplingCEMethodEnum::kRandom,
                                                    numChunks,
-                                                   makeCardinalityEstimate(card));
+                                                   makeCardinalityEstimate(card),
+                                                   nullptr /*customerQueryExpCtx*/);
     multiElemEstimator.generateSample(ce::NoProjection{});
     auto ndvMultiElem = multiElemEstimator.estimateNDVMultiKey({{.path = "a"}});
     assertBetween(ndvMultiElem, n * 0.5, n * 2.0 + 1.0);
@@ -1662,7 +1891,8 @@ DEATH_TEST_F(SamplingEstimatorTestDeathTest,
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(StringSet{"a"});
     // Ignore $expr semantics for now.
     absl::flat_hash_set<FieldPath> exprPaths;
@@ -1702,12 +1932,13 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityAndOfEqualitiesFastPath) {
                                                   card,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     // Helper: build AND(EQ(path, v0), EQ(path, v1), ...) and return the CE.
     // We keep the operand BSONObjs alive for the duration of the estimate call.
-    auto estimateAll = [&](StringData path, std::vector<int> vals) -> double {
+    auto estimateAll = [&](std::string_view path, std::vector<int> vals) -> double {
         std::vector<BSONObj> operands;
         std::vector<std::unique_ptr<EqualityMatchExpression>> eqs;
         std::vector<std::unique_ptr<MatchExpression>> children;
@@ -1717,23 +1948,23 @@ TEST_F(SamplingEstimatorTest, EstimateCardinalityAndOfEqualitiesFastPath) {
             children.push_back(std::move(eq));
         }
         AndMatchExpression andExpr(std::move(children));
-        return samplingEstimator.estimateCardinality(&andExpr).cardinality().v();
+        return samplingEstimator.estimateCardinality(&andExpr).toDouble();
     };
 
     // $all:[1,2] -> only docs 0..49 match (50 docs).
-    ASSERT_EQ(estimateAll("f0"_sd, {1, 2}), 50.0);
+    ASSERT_EQ(estimateAll("f0"sv, {1, 2}), 50.0);
 
     // $all:[1,2,3] -> only docs 0..49 match (50 docs).
-    ASSERT_EQ(estimateAll("f0"_sd, {1, 2, 3}), 50.0);
+    ASSERT_EQ(estimateAll("f0"sv, {1, 2, 3}), 50.0);
 
     // $all:[1,3] -> docs 0..74 match (75 docs: both [1,2,3] and [1,3,5] contain 1 and 3).
-    ASSERT_EQ(estimateAll("f0"_sd, {1, 3}), 75.0);
+    ASSERT_EQ(estimateAll("f0"sv, {1, 3}), 75.0);
 
     // $all:[2] -> docs 0..49 and 75..99 match (75 docs: [1,2,3] and [2,4,6] contain 2).
-    ASSERT_EQ(estimateAll("f0"_sd, {2}), 75.0);
+    ASSERT_EQ(estimateAll("f0"sv, {2}), 75.0);
 
     // $all:[1,2,4] -> no docs match (0 docs).
-    ASSERT_EQ(estimateAll("f0"_sd, {1, 2, 4}), 0.0);
+    ASSERT_EQ(estimateAll("f0"sv, {1, 2, 4}), 0.0);
 }
 
 TEST_F(SamplingEstimatorTest, EstimateRIDsWithAllFastPath) {
@@ -1752,7 +1983,8 @@ TEST_F(SamplingEstimatorTest, EstimateRIDsWithAllFastPath) {
                                                   sampleSize,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     // Each document has arr: [10, 20, 30, 40, 50]. A $all query is canonically represented as an
@@ -1763,8 +1995,8 @@ TEST_F(SamplingEstimatorTest, EstimateRIDsWithAllFastPath) {
     {
         auto op1 = BSON("$eq" << 10);
         auto op2 = BSON("$eq" << 20);
-        auto eq1 = std::make_unique<EqualityMatchExpression>("arr"_sd, op1["$eq"]);
-        auto eq2 = std::make_unique<EqualityMatchExpression>("arr"_sd, op2["$eq"]);
+        auto eq1 = std::make_unique<EqualityMatchExpression>("arr"sv, op1["$eq"]);
+        auto eq2 = std::make_unique<EqualityMatchExpression>("arr"sv, op2["$eq"]);
         AndMatchExpression andExpr;
         andExpr.add(std::move(eq1));
         andExpr.add(std::move(eq2));
@@ -1784,8 +2016,8 @@ TEST_F(SamplingEstimatorTest, EstimateRIDsWithAllFastPath) {
     {
         auto op1 = BSON("$eq" << 10);
         auto op2 = BSON("$eq" << 60);
-        auto eq1 = std::make_unique<EqualityMatchExpression>("arr"_sd, op1["$eq"]);
-        auto eq2 = std::make_unique<EqualityMatchExpression>("arr"_sd, op2["$eq"]);
+        auto eq1 = std::make_unique<EqualityMatchExpression>("arr"sv, op1["$eq"]);
+        auto eq2 = std::make_unique<EqualityMatchExpression>("arr"sv, op2["$eq"]);
         AndMatchExpression andExpr;
         andExpr.add(std::move(eq1));
         andExpr.add(std::move(eq2));
@@ -1834,19 +2066,20 @@ TEST_F(SamplingEstimatorTest, FastPathBailsOutWithNonEqChildInMiddle) {
                                                   card,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto opEq1 = BSON("x" << 1);
     auto opGt = BSON("x" << 0);
     auto opEq2 = BSON("x" << 2);
     AndMatchExpression andExpr;
-    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"_sd, opEq1["x"]));
-    andExpr.add(std::make_unique<GTMatchExpression>("f0"_sd, opGt["x"]));
-    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"_sd, opEq2["x"]));
+    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"sv, opEq1["x"]));
+    andExpr.add(std::make_unique<GTMatchExpression>("f0"sv, opGt["x"]));
+    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"sv, opEq2["x"]));
 
     // Expected: 50 docs (f0=[1,2,3] satisfies both equalities and the GT predicate).
-    auto ce = samplingEstimator.estimateCardinality(&andExpr).cardinality().v();
+    auto ce = samplingEstimator.estimateCardinality(&andExpr).toDouble();
     ASSERT_EQ(ce, 50.0);
 }
 
@@ -1882,19 +2115,20 @@ TEST_F(SamplingEstimatorTest, FastPathBailsOutWithDifferentPathEqChildInMiddle) 
                                                   card,
                                                   SamplingCEMethodEnum::kRandom,
                                                   numChunks,
-                                                  makeCardinalityEstimate(card));
+                                                  makeCardinalityEstimate(card),
+                                                  nullptr /*customerQueryExpCtx*/);
     samplingEstimator.generateSample(ce::NoProjection{});
 
     auto opEq1 = BSON("x" << 1);
     auto opOther = BSON("x" << 5);
     auto opEq2 = BSON("x" << 2);
     AndMatchExpression andExpr;
-    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"_sd, opEq1["x"]));
-    andExpr.add(std::make_unique<EqualityMatchExpression>("other"_sd, opOther["x"]));
-    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"_sd, opEq2["x"]));
+    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"sv, opEq1["x"]));
+    andExpr.add(std::make_unique<EqualityMatchExpression>("other"sv, opOther["x"]));
+    andExpr.add(std::make_unique<EqualityMatchExpression>("f0"sv, opEq2["x"]));
 
     // Expected: 50 docs (f0=[1,2,3] and other=5 for docs 0..49).
-    auto ce = samplingEstimator.estimateCardinality(&andExpr).cardinality().v();
+    auto ce = samplingEstimator.estimateCardinality(&andExpr).toDouble();
     ASSERT_EQ(ce, 50.0);
 }
 
@@ -1917,7 +2151,8 @@ TEST_F(SamplingEstimatorTest, EstimateNDVReturnsCollCardWhenDuplicateDocsFromSam
                                           sampleSize,
                                           SamplingCEMethodEnum::kRandom,
                                           numChunks,
-                                          makeCardinalityEstimate(card));
+                                          makeCardinalityEstimate(card),
+                                          nullptr /*customerQueryExpCtx*/);
 
     // Build a sample with 10 unique documents and all-unique "a" values, then append a duplicate
     // of the first document (simulating sampling with replacement producing a duplicate).
@@ -1951,7 +2186,8 @@ TEST_F(SamplingEstimatorTest, EstimateNDVUsesNRWhenFieldGenuinelyNonUnique) {
                                           sampleSize,
                                           SamplingCEMethodEnum::kRandom,
                                           numChunks,
-                                          makeCardinalityEstimate(card));
+                                          makeCardinalityEstimate(card),
+                                          nullptr /*customerQueryExpCtx*/);
 
     // 5 documents with distinct _id values, but "a" is not unique: docs 0 and 4 share a=0.
     std::vector<BSONObj> sample = {
@@ -1966,6 +2202,676 @@ TEST_F(SamplingEstimatorTest, EstimateNDVUsesNRWhenFieldGenuinelyNonUnique) {
 
     auto ndv = estimator.estimateNDV({{.path = "a"}});
     ASSERT_LT(ndv.toDouble(), static_cast<double>(card));
+}
+
+TEST_F(SamplingEstimatorTest, EstimateKeysScannedEmptySampleReturnsZero) {
+    // An empty sample must not divide by '_sampleSize' (== 0). estimateKeysScanned should report
+    // zero keys scanned (mirroring estimateCardinality's empty-sample handling) rather than
+    // producing NaN/inf and tripping assertValid().
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          kSampleSize,
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(5000),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.setSampleForTesting({});  // empty sample
+
+    OrderedIntervalList list("a");
+    list.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 0 << "" << 30), BoundInclusion::kIncludeBothStartAndEndKeys));
+    IndexBounds bounds;
+    bounds.fields.push_back(list);
+
+    ASSERT_EQ(estimator.estimateKeysScanned(bounds).toDouble(), 0.0);
+}
+
+DEATH_TEST_F(SamplingEstimatorTestDeathTest, EstimateNDVMultiKeyEmptySampleTasserts, "12552502") {
+    // NDV over an empty sample is undefined. The non-bounded multikey path must fail with an
+    // explicit precondition rather than divide by an empty sample and return NaN.
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(
+        coll, {}, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          kSampleSize,
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(5000),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.setSampleForTesting({});  // empty sample
+
+    estimator.estimateNDVMultiKey({{.path = "a"}}, boost::none /* non-bounded */);
+}
+
+TEST_F(SamplingEstimatorTest, SamplingEstimatorLoadsMultiPageSample) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // Source collection has docs that must NOT appear in the returned sample — hitting the
+    // persistent sample means we never read from them.
+    insertDocuments(kTestNss, {BSON("_id" << 1 << "tag" << "not_persisted")});
+    // Read the source collection UUID in a scope so its IS lock on the db is released before
+    // we create the samples collection (which needs MODE_X on the same db).
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 2 << "tag" << "persisted"),
+                                       BSON("_id" << 3 << "tag" << "persisted"),
+                                       BSON("_id" << 4 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kRandom,
+                                  persistedDocs.size(),
+                                  {persistedDocs[0], persistedDocs[1]},
+                                  boost::none,
+                                  kPersistentSampleSchemaVersion,
+                                  BSONObj(),
+                                  /*pageNo=*/0),
+         buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kRandom,
+                                  persistedDocs.size(),
+                                  {persistedDocs[2]},
+                                  boost::none,
+                                  kPersistentSampleSchemaVersion,
+                                  BSONObj(),
+                                  /*pageNo=*/1)},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    // Cardinality estimate must exceed `sampleSize` so `generateSample` takes the
+    // generateRandomSample path (which consults the persistent sample) instead of falling
+    // into the full-collection-scan branch.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, TryLoadReportsPagesReadAndBsonBytes) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    const UUID uuid = UUID::gen();
+    // 3 docs across 2 pages, so a `pagesRead` taken from the doc count would report 3, not 2.
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 1), BSON("_id" << 2), BSON("_id" << 3)};
+    const BSONObj pageZero = buildPersistentSampleDoc(uuid,
+                                                      SamplingTechniqueEnum::kRandom,
+                                                      persistedDocs.size(),
+                                                      {persistedDocs[0], persistedDocs[1]},
+                                                      boost::none,
+                                                      kPersistentSampleSchemaVersion,
+                                                      BSONObj(),
+                                                      /*pageNo=*/0);
+    const BSONObj pageOne = buildPersistentSampleDoc(uuid,
+                                                     SamplingTechniqueEnum::kRandom,
+                                                     persistedDocs.size(),
+                                                     {persistedDocs[2]},
+                                                     boost::none,
+                                                     kPersistentSampleSchemaVersion,
+                                                     BSONObj(),
+                                                     /*pageNo=*/1);
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {pageZero, pageOne},
+        /*clustered=*/true);
+
+    PersistentSampleLoader loader;
+    auto result = loader.tryLoad(operationContext(),
+                                 kTestNss.dbName(),
+                                 uuid,
+                                 SamplingTechniqueEnum::kRandom,
+                                 persistedDocs.size(),
+                                 /*numChunks=*/boost::none);
+    ASSERT_OK(result.getStatus());
+    const auto& loaded = result.getValue();
+
+    ASSERT_EQUALS(loaded.pagesRead, 2u);
+    ASSERT_EQUALS(loaded.sample.getDocs().size(), 3u);
+    ASSERT_BSONOBJ_EQ(loaded.sample.getDocs()[0], persistedDocs[0]);
+    ASSERT_BSONOBJ_EQ(loaded.sample.getDocs()[1], persistedDocs[1]);
+    ASSERT_BSONOBJ_EQ(loaded.sample.getDocs()[2], persistedDocs[2]);
+}
+
+TEST_F(SamplingEstimatorTest, RandomSamplingLoadsPersistentSample) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // Source collection has docs that must NOT appear in the returned sample — hitting the
+    // persistent sample means we never read from them.
+    insertDocuments(kTestNss, {BSON("_id" << 1 << "tag" << "not_persisted")});
+    // Read the source collection UUID in a scope so its IS lock on the db is released before
+    // we create the samples collection (which needs MODE_X on the same db).
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 2 << "tag" << "persisted"),
+                                       BSON("_id" << 3 << "tag" << "persisted"),
+                                       BSON("_id" << 4 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(
+            uuid, SamplingTechniqueEnum::kRandom, persistedDocs.size(), persistedDocs)},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    // Cardinality estimate exceeds `sampleSize` so we avoid the full-collection-scan branch.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, RandomSamplingFallsBackOnPersistedMiss) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    insertDocuments(kTestNss,
+                    {BSON("_id" << 1 << "tag" << "not_persisted"),
+                     BSON("_id" << 2 << "tag" << "not_persisted"),
+                     BSON("_id" << 3 << "tag" << "not_persisted"),
+                     BSON("_id" << 4 << "tag" << "not_persisted"),
+                     BSON("_id" << 5 << "tag" << "not_persisted"),
+                     BSON("_id" << 6 << "tag" << "not_persisted"),
+                     BSON("_id" << 7 << "tag" << "not_persisted"),
+                     BSON("_id" << 8 << "tag" << "not_persisted"),
+                     BSON("_id" << 9 << "tag" << "not_persisted"),
+                     BSON("_id" << 10 << "tag" << "not_persisted")});
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          kSampleSize,
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(10),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), kSampleSize);
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, OnTheFlySourceSkipsPersistedLookup) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // A matching persistent sample exists, but the estimator is constructed with kOnTheFlySample so
+    // it must ignore it and sample fresh from the source collection.
+    insertDocuments(kTestNss,
+                    {BSON("_id" << 1 << "tag" << "not_persisted"),
+                     BSON("_id" << 2 << "tag" << "not_persisted"),
+                     BSON("_id" << 3 << "tag" << "not_persisted"),
+                     BSON("_id" << 4 << "tag" << "not_persisted"),
+                     BSON("_id" << 5 << "tag" << "not_persisted"),
+                     BSON("_id" << 6 << "tag" << "not_persisted"),
+                     BSON("_id" << 7 << "tag" << "not_persisted"),
+                     BSON("_id" << 8 << "tag" << "not_persisted"),
+                     BSON("_id" << 9 << "tag" << "not_persisted"),
+                     BSON("_id" << 10 << "tag" << "not_persisted")});
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 11 << "tag" << "persisted"),
+                                       BSON("_id" << 12 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(
+            uuid, SamplingTechniqueEnum::kRandom, persistedDocs.size(), persistedDocs)},
+        /*clustered=*/true);
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(10),
+                                          nullptr /*customerQueryExpCtx*/,
+                                          SamplingSourceEnum::kOnTheFlySample);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        // Would be "persisted" if we had consulted the persistent sample.
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, ChunkSamplingLoadsPersistentSample) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // Source collection has docs that must NOT appear in the returned sample — hitting the
+    // persistent sample means we never read from them.
+    insertDocuments(kTestNss, {BSON("_id" << 1 << "tag" << "not_persisted")});
+    // Read the source collection UUID in a scope so its IS lock on the db is released before
+    // we create the samples collection (which needs MODE_X on the same db).
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 2 << "tag" << "persisted"),
+                                       BSON("_id" << 3 << "tag" << "persisted"),
+                                       BSON("_id" << 4 << "tag" << "persisted")};
+    const int testNumChunks = 1;
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kChunk,
+                                  persistedDocs.size(),
+                                  persistedDocs,
+                                  /*numChunks=*/testNumChunks)},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    // Cardinality estimate exceeds `sampleSize` so we avoid the full-collection-scan branch.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kChunk,
+                                          testNumChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.setPersistentSampleMethodForTesting(SamplingCEMethodEnum::kChunk);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, PersistedLoadFollowsPersistentSampleMethodNotSamplingStyle) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // Persisted-sample method (kRandom) is independent of samplingStyle (kChunk).
+    insertDocuments(kTestNss, {BSON("_id" << 1 << "tag" << "not_persisted")});
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 2 << "tag" << "persisted"),
+                                       BSON("_id" << 3 << "tag" << "persisted"),
+                                       BSON("_id" << 4 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(
+            uuid, SamplingTechniqueEnum::kRandom, persistedDocs.size(), persistedDocs)},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    const int testNumChunks = 1;
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kChunk,
+                                          testNumChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.setPersistentSampleMethodForTesting(SamplingCEMethodEnum::kRandom);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "persisted");
+    }
+    const auto meta = estimator.getSamplingMetadata();
+    ASSERT_TRUE(meta.isPersisted);
+    ASSERT_TRUE(meta.technique == SamplingTechniqueEnum::kRandom);
+    // Page count is only known for a sample that was loaded from the persisted samples collection.
+    ASSERT_TRUE(meta.numPages.has_value());
+    ASSERT_EQUALS(meta.numPages.value(), 1u);
+}
+
+TEST_F(SamplingEstimatorTest, PersistedMissFallsBackToOnTheFlyUsingSamplingStyle) {
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    // Persisted-sample method is kRandom, so the persisted kChunk sample below is a miss.
+    std::vector<BSONObj> sourceDocs;
+    for (int i = 0; i < 20; ++i) {
+        sourceDocs.push_back(BSON("_id" << i << "tag" << "not_persisted"));
+    }
+    insertDocuments(kTestNss, sourceDocs);
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    const int testNumChunks = 1;
+    const size_t sampleSize = 3;
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 100 << "tag" << "persisted"),
+                                       BSON("_id" << 101 << "tag" << "persisted"),
+                                       BSON("_id" << 102 << "tag" << "persisted")};
+    // Persist a chunk sample, which the random lookup must ignore.
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kChunk,
+                                  sampleSize,
+                                  persistedDocs,
+                                  /*numChunks=*/testNumChunks)});
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    // Cardinality estimate exceeds `sampleSize` so we avoid the full-collection-scan branch.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          sampleSize,
+                                          SamplingCEMethodEnum::kChunk,
+                                          testNumChunks,
+                                          makeCardinalityEstimate(sourceDocs.size()),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.setPersistentSampleMethodForTesting(SamplingCEMethodEnum::kRandom);
+    estimator.generateSample(ce::NoProjection{});
+
+    // Fell back to on-the-fly chunk sampling from the source collection.
+    const auto& sample = estimator.getSample();
+    ASSERT_GREATER_THAN(sample.size(), 0u);
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+    const auto meta = estimator.getSamplingMetadata();
+    ASSERT_FALSE(meta.isPersisted);
+    ASSERT_TRUE(meta.technique == SamplingTechniqueEnum::kChunk);
+    // An on-the-fly sample was never paged to disk, so the page count does not apply.
+    ASSERT_FALSE(meta.numPages.has_value());
+}
+
+TEST_F(SamplingEstimatorTest, RandomSamplingSkipsPersistentSampleWhenFeatureFlagDisabled) {
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", false};
+    // A matching persistent sample exists, but the estimator must ignore it and sample
+    // fresh from the source collection.
+    insertDocuments(kTestNss,
+                    {BSON("_id" << 1 << "tag" << "not_persisted"),
+                     BSON("_id" << 2 << "tag" << "not_persisted"),
+                     BSON("_id" << 3 << "tag" << "not_persisted"),
+                     BSON("_id" << 4 << "tag" << "not_persisted"),
+                     BSON("_id" << 5 << "tag" << "not_persisted"),
+                     BSON("_id" << 6 << "tag" << "not_persisted"),
+                     BSON("_id" << 7 << "tag" << "not_persisted"),
+                     BSON("_id" << 8 << "tag" << "not_persisted"),
+                     BSON("_id" << 9 << "tag" << "not_persisted"),
+                     BSON("_id" << 10 << "tag" << "not_persisted")});
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 11 << "tag" << "persisted"),
+                                       BSON("_id" << 12 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(
+            uuid, SamplingTechniqueEnum::kRandom, persistedDocs.size(), persistedDocs)},
+        /*clustered=*/true);
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+
+    // Default samplingSource is kPersistentSample — the feature flag off is the only thing
+    // forcing the fallback to on-the-fly sampling.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(10),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        // Would be "persisted" if the flag check hadn't kicked us off the persistent path.
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, ChunkSamplingSkipsPersistentSampleWhenFeatureFlagDisabled) {
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", false};
+    insertDocuments(kTestNss,
+                    {BSON("_id" << 1 << "tag" << "not_persisted"),
+                     BSON("_id" << 2 << "tag" << "not_persisted"),
+                     BSON("_id" << 3 << "tag" << "not_persisted"),
+                     BSON("_id" << 4 << "tag" << "not_persisted"),
+                     BSON("_id" << 5 << "tag" << "not_persisted"),
+                     BSON("_id" << 6 << "tag" << "not_persisted"),
+                     BSON("_id" << 7 << "tag" << "not_persisted"),
+                     BSON("_id" << 8 << "tag" << "not_persisted"),
+                     BSON("_id" << 9 << "tag" << "not_persisted"),
+                     BSON("_id" << 10 << "tag" << "not_persisted")});
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 11 << "tag" << "persisted"),
+                                       BSON("_id" << 12 << "tag" << "persisted"),
+                                       BSON("_id" << 13 << "tag" << "persisted")};
+    const int testNumChunks = 1;
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kChunk,
+                                  persistedDocs.size(),
+                                  persistedDocs,
+                                  /*numChunks=*/testNumChunks)},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kChunk,
+                                          testNumChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    // A chunk that starts near end-of-collection may return fewer than sampleSize docs
+    // (see ChunkSamplingProcess test). Assert at most sampleSize and at least one doc.
+    ASSERT_GT(sample.size(), 0);
+    ASSERT_LTE(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        // Would be "persisted" if the flag check hadn't kicked us off the persistent path.
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+}
+
+TEST_F(SamplingEstimatorTest, MalformedPersistentSampleFallsBackToOnTheFly) {
+    // A doc with the correct _id key exists in system.stats.samples but is malformed (sampleSize
+    // field disagrees with the docs array length). tryLoadPersistentSample must log the error and
+    // fall back to on-the-fly sampling rather than crashing or returning a corrupt sample.
+    // TODO SERVER-135439: Remove once featureFlagPersistentStats is enabled by default.
+    unittest::ServerParameterGuard persistentStatsFlag{"featureFlagPersistentStats", true};
+    insertDocuments(kTestNss,
+                    {BSON("_id" << 1 << "tag" << "not_persisted"),
+                     BSON("_id" << 2 << "tag" << "not_persisted"),
+                     BSON("_id" << 3 << "tag" << "not_persisted"),
+                     BSON("_id" << 4 << "tag" << "not_persisted"),
+                     BSON("_id" << 5 << "tag" << "not_persisted"),
+                     BSON("_id" << 6 << "tag" << "not_persisted"),
+                     BSON("_id" << 7 << "tag" << "not_persisted"),
+                     BSON("_id" << 8 << "tag" << "not_persisted"),
+                     BSON("_id" << 9 << "tag" << "not_persisted"),
+                     BSON("_id" << 10 << "tag" << "not_persisted")});
+    const UUID uuid = [&] {
+        auto srcColl = acquireCollection(operationContext(), kTestNss);
+        return srcColl.getCollectionPtr()->uuid();
+    }();
+    // Build a doc whose _id matches the lookup key but whose sampleSize disagrees with the docs
+    // array — parsePersistentSample will return UnsupportedFormat (not NoSuchKey), triggering
+    // the non-miss logging path and the on-the-fly fallback.
+    std::vector<BSONObj> persistedDocs{BSON("_id" << 11 << "tag" << "persisted"),
+                                       BSON("_id" << 12 << "tag" << "persisted"),
+                                       BSON("_id" << 13 << "tag" << "persisted")};
+    createCollAndInsertDocuments(
+        operationContext(),
+        NamespaceStringUtil::deserialize(kTestNss.dbName(), kSamplesCollectionName),
+        {buildPersistentSampleDoc(uuid,
+                                  SamplingTechniqueEnum::kRandom,
+                                  persistedDocs.size(),
+                                  persistedDocs,
+                                  /*numChunks=*/boost::none,
+                                  /*schemaVersion=*/kPersistentSampleSchemaVersion,
+                                  // Corrupt sampleSize: claims 1 doc but array has 3.
+                                  BSON(PersistentSampleDoc::kSampleSizeFieldName << 1LL))},
+        /*clustered=*/true);
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          persistedDocs.size(),
+                                          SamplingCEMethodEnum::kRandom,
+                                          numChunks,
+                                          makeCardinalityEstimate(100),
+                                          nullptr /*customerQueryExpCtx*/);
+    estimator.generateSample(ce::NoProjection{});
+
+    const auto& sample = estimator.getSample();
+    ASSERT_EQUALS(sample.size(), persistedDocs.size());
+    for (const auto& doc : sample) {
+        ASSERT_EQUALS(doc.getStringField("tag"), "not_persisted");
+    }
+}
+
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
+             GenerateSampleAssertsOnReuse,
+             "SamplingEstimatorImpl must not be reused") {
+    auto estimator =
+        createSamplingEstimatorForTesting(10 /* collCard */, kSampleSize, ce::NoProjection{});
+    // This is indeed the 2nd call since createSamplingEstimatorForTesting() calls generateSample()
+    // once already.
+    estimator.generateSample(ce::NoProjection{});
+}
+
+DEATH_TEST_F(SamplingEstimatorTestDeathTest,
+             GetSamplingMetadataAssertsOnNonOwnedDoc,
+             "Sample documents must be owned BSONObjs") {
+    auto estimator =
+        createSamplingEstimatorForTesting(10 /* collCard */, kSampleSize, ce::NoProjection{});
+
+    // Create a non-owned BSONObj (raw-pointer view into an existing buffer).
+    auto owned = BSON("a" << 1);
+    BSONObj unowned(owned.objdata());
+
+    estimator.setSampleForTesting({unowned});
+    estimator.getSamplingMetadata();
+}
+
+TEST_F(SamplingEstimatorTest, OnTheFlyFullSampleIsAuthoritative) {
+    const int collectionSize = 50;
+    insertDocuments(kTestNss, createDocuments(collectionSize));
+
+    auto coll = acquireCollection(operationContext(), kTestNss);
+    auto colls = MultipleCollectionAccessor(coll, {}, false);
+
+    // Request a sample larger than the collection.
+    SamplingEstimatorForTesting estimator(operationContext(),
+                                          colls,
+                                          kTestNss,
+                                          PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                          collectionSize * 2,
+                                          SamplingCEMethodEnum::kRandom,
+                                          boost::none,
+                                          makeCardinalityEstimate(collectionSize),
+                                          nullptr /*customerQueryExpCtx*/,
+                                          SamplingSourceEnum::kOnTheFlySample);
+    estimator.generateSample(ce::NoProjection{});
+    ASSERT_EQUALS(estimator.getSample().size(), static_cast<size_t>(collectionSize));
+
+    const auto filter = fromjson("{a: 1}");
+    const auto matchExpr = parse(filter);
+    CardinalityEstimate est = estimator.estimateCardinality(matchExpr.get());
+    ASSERT_EQUALS(est.source(), cost_based_ranker::EstimationSource::Code);
+}
+
+// When a persistent sample's size >= collCard the estimate must NOT be authoritative, because the
+// collection may have changed since the sample was collected.
+// Inject directly through setSampleForTesting.
+TEST_F(SamplingEstimatorTest, PersistentFullSampleIsNotAuthoritative) {
+    const int collCard = 3;
+    // collCard * 2 > collCard so createSamplingEstimatorForTesting takes the full collscan path
+    // and _wasSamplePersisted is left false — we then override both sample and persisted flag.
+    auto estimator = createSamplingEstimatorForTesting(collCard, collCard * 2, ce::NoProjection{});
+
+    // Inject 4 docs (> collCard) and mark as persistent.
+    std::vector<BSONObj> docs{BSON("a" << 1), BSON("a" << 1), BSON("a" << 1), BSON("a" << 1)};
+    estimator.setSampleForTesting(std::move(docs), /*wasPersisted=*/true);
+
+    const auto filter = fromjson("{a: 1}");
+    const auto matchExpr = parse(filter);
+    CardinalityEstimate est = estimator.estimateCardinality(matchExpr.get());
+    ASSERT_EQUALS(est.source(), cost_based_ranker::EstimationSource::Sampling);
 }
 
 }  // namespace mongo::ce

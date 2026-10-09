@@ -4,7 +4,12 @@ const keyFile = "jstests/libs/key1";
 const mongod = MongoRunner.runMongod({auth: "", keyFile: keyFile});
 const admin = mongod.getDB("admin");
 
-admin.createUser({user: "admin", pwd: "pwd", roles: ["root"], mechanisms: ["SCRAM-SHA-1", "SCRAM-SHA-256"]});
+admin.createUser({
+    user: "admin",
+    pwd: "pwd",
+    roles: ["root"],
+    mechanisms: ["SCRAM-SHA-1", "SCRAM-SHA-256"],
+});
 admin.auth("admin", "pwd");
 
 function test(uri, succeed) {
@@ -18,7 +23,8 @@ function test(uri, succeed) {
 }
 
 function assertStats(cb) {
-    const mechStats = assert.commandWorked(admin.runCommand({serverStatus: 1})).security.authentication.mechanisms;
+    const mechStats = assert.commandWorked(admin.runCommand({serverStatus: 1})).security
+        .authentication.mechanisms;
     cb(mechStats);
 }
 
@@ -54,7 +60,9 @@ function expectN(mechStats, mech, N1, M1, N2 = 0, M2 = 0) {
 }
 
 function assertSpecLog(severity, expectedAttrs, expectedCount) {
-    assert(checkLog.checkContainsWithCountJson(admin, 5286307, expectedAttrs, expectedCount, severity));
+    assert(
+        checkLog.checkContainsWithCountJson(admin, 5286307, expectedAttrs, expectedCount, severity),
+    );
 }
 
 const baseOKURI = "mongodb://admin:pwd@localhost:" + mongod.port + "/admin";
@@ -184,12 +192,48 @@ assertStats((s) => expectN(s, "SCRAM-SHA-256", 7, 3));
 // Test "intra-cluster" speculative authentication.
 const systemPass = cat(keyFile).replace(/\s/g, "");
 test(
-    "mongodb://__system:" + systemPass + "@localhost:" + mongod.port + "/admin" + "?authMechanism=SCRAM-SHA-256",
+    "mongodb://__system:" +
+        systemPass +
+        "@localhost:" +
+        mongod.port +
+        "/admin" +
+        "?authMechanism=SCRAM-SHA-256",
     true,
 );
 assertStats((s) => expectN(s, "SCRAM-SHA-256", 8, 4, 1, 1));
 
-test("mongodb://__system:hunter2@localhost:" + mongod.port + "/admin" + "?authMechanism=SCRAM-SHA-256", false);
+// SERVER-126148: Speculative SCRAM authentication (including the default keyfile-based
+// internal cluster auth path) must include skipEmptyExchange in the saslStart options.
+// Otherwise every internal connection pays an extra round-trip on the empty 3rd saslContinue.
+// Verify that speculative cluster auth completes in 2 steps, not 3.
+assert.soon(
+    () =>
+        checkLog.checkContainsWithCountJson(
+            admin,
+            5286306,
+            {
+                "isSpeculative": true,
+                "isClusterMember": true,
+                "mechanism": "SCRAM-SHA-256",
+                "user": "__system",
+                "metrics": {
+                    "conversation_duration": {"summary": [{"step_total": 2}, {"step_total": 2}]},
+                },
+            },
+            1,
+            null,
+            true,
+        ),
+    "Did not observe a successful speculative cluster auth with step_total: 2",
+);
+
+test(
+    "mongodb://__system:hunter2@localhost:" +
+        mongod.port +
+        "/admin" +
+        "?authMechanism=SCRAM-SHA-256",
+    false,
+);
 assertStats((s) => expectN(s, "SCRAM-SHA-256", 9, 4, 3, 1));
 assertSpecLog("I", speculativeClusterAuthFailedAttrs, 1);
 assertSpecLog("I", clusterAuthFailedAttrs, 1);

@@ -23,9 +23,10 @@
 import {TimeseriesAggTests} from "jstests/core/timeseries/libs/timeseries_agg_helpers.js";
 import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
 import {
-    runningWithViewlessTimeseriesUpgradeDowngrade,
     isViewfulTimeseriesOnlySuite,
+    isViewlessTimeseriesOnlySuite,
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
@@ -41,7 +42,11 @@ const outColl = testDB.out_coll;
 // Observer coll for the $out without timeseries.
 const observerOutColl = testDB.observer_out_coll;
 
-let [inColl, observerInColl] = TimeseriesAggTests.prepareInputCollections(numHosts, numIterations, true);
+let [inColl, observerInColl] = TimeseriesAggTests.prepareInputCollections(
+    numHosts,
+    numIterations,
+    true,
+);
 
 function runOutAndCompareResults({
     observer: observerPipeline,
@@ -58,7 +63,12 @@ function runOutAndCompareResults({
     );
 
     // Gets the actual results from a time-series input collection.
-    const timeseriesResults = TimeseriesAggTests.getOutputAggregateResults(inColl, timeseriesPipeline, null, false);
+    const timeseriesResults = TimeseriesAggTests.getOutputAggregateResults(
+        inColl,
+        timeseriesPipeline,
+        null,
+        false,
+    );
 
     // Verifies that results are as expected in both the timeseries and observer cases.
     TimeseriesAggTests.verifyResults(timeseriesResults, observerResults);
@@ -70,7 +80,11 @@ function runOutAndCompareResults({
     // Make sure we only have 1 collection - either created if it didn't exist, or replaced the
     // existing one.
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
-    assert.eq(collections.length, 1, `$out should replace the existing collection ${JSON.stringify(collections)}`);
+    assert.eq(
+        collections.length,
+        1,
+        `$out should replace the existing collection ${JSON.stringify(collections)}`,
+    );
 
     if (expectedTSOptions) {
         // Make sure the output collection is a timeseries collection.
@@ -86,7 +100,10 @@ function runOutAndCompareResults({
         if (isViewfulTimeseriesOnlySuite(testDB)) {
             // Make sure we have both the buckets collection and the timeseries view.
             const bucketsColl = assert.commandWorked(
-                testDB.runCommand({listCollections: 1, filter: {name: "system.buckets." + outColl.getName()}}),
+                testDB.runCommand({
+                    listCollections: 1,
+                    filter: {name: "system.buckets." + outColl.getName()},
+                }),
             );
             assert.eq(1, bucketsColl.cursor.firstBatch.length);
 
@@ -104,7 +121,10 @@ function runOutAndCompareResults({
             // TODO (SERVER-122417) Remove this workaround once v9.0 branches out.
             index = IndexCatalogHelpers.addSimpleCollationToIndexIfMissing(testDB, index);
 
-            if (index == timeseriesDefaultIndex() || bsonUnorderedFieldsCompare(index, timeseriesDefaultIndex()) == 0) {
+            if (
+                index == timeseriesDefaultIndex() ||
+                bsonUnorderedFieldsCompare(index, timeseriesDefaultIndex()) == 0
+            ) {
                 containsDefaultIndex = true;
                 break;
             }
@@ -112,7 +132,8 @@ function runOutAndCompareResults({
 
         assert(
             containsDefaultIndex,
-            "Output collection does not contain default timeseries index: " + tojson(timeseriesDefaultIndex()),
+            "Output collection does not contain default timeseries index: " +
+                tojson(timeseriesDefaultIndex()),
         );
     } else {
         // Make sure the output collection is not a timeseries collection.
@@ -148,6 +169,27 @@ function validateCollectionOptions({expected: expectedOptions, actual: actualOpt
             )}`,
         );
     }
+}
+
+// Returns the expected timeseries options after '$out' stage execution, given raw timeseries
+// options (e.g. collectionInfo["options"]["timeseries"] or a manually-built options object).
+function getExpectedTSOptions(tsOptions) {
+    const result = {...tsOptions};
+    if (
+        isViewlessTimeseriesOnlySuite(testDB) &&
+        FeatureFlagUtil.isPresentAndEnabled(testDB, "FixedBucketingCatalog")
+    ) {
+        // In suites where viewless timeseries are the only possible kind of timeseries (i.e., the
+        // feature is enabled and there are no FCV transitions), '$out' always produces a timeseries
+        // with 'fixedBucketing: true'.
+        result.fixedBucketing = true;
+    } else {
+        // In suites that can change FCV in the background, 'fixedBucketing' can change
+        // unpredictably during the test (a downgrade strips it, and a re-upgrade re-adds it set to
+        // false). Remove it from expected options so that validateCollectionOptions() ignores it.
+        delete result.fixedBucketing;
+    }
+    return result;
 }
 
 function dropOutCollections() {
@@ -201,9 +243,15 @@ function timeseriesDefaultIndex() {
     const tsOptions = {timeField: "time", metaField: "tags"};
     // Having the timeseries option should cause the result $out collection to be a timeseries
     // collection.
-    const timeseriesPipeline = [{$out: {db: dbName, coll: outColl.getName(), timeseries: tsOptions}}];
+    const timeseriesPipeline = [
+        {$out: {db: dbName, coll: outColl.getName(), timeseries: tsOptions}},
+    ];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: tsOptions});
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: getExpectedTSOptions(tsOptions),
+    });
 })();
 
 (function testSourceTimeseriesOutToTimeseriesCollection() {
@@ -220,13 +268,23 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    // Get the original timeseries options, these should stay the same post $out.
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
+    // For the '$out' spec, get the original timeseries options, but strip the 'fixedBucketing' field which is not allowed in '$out' spec.
+    const tsOptions = {...collections[0]["options"]["timeseries"]};
+    delete tsOptions.fixedBucketing;
 
     const observerPipeline = [{$out: {db: dbName, coll: observerOutColl.getName()}}];
-    const timeseriesPipeline = [{$out: {db: dbName, coll: outColl.getName(), timeseries: expectedTSOptions}}];
+    const timeseriesPipeline = [
+        {$out: {db: dbName, coll: outColl.getName(), timeseries: tsOptions}},
+    ];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: expectedTSOptions});
+    // Derive expected timeseries options from the original ones.
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
+
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: expectedTSOptions,
+    });
 })();
 
 (function testTimeseriesOutToTimeseriesCollectionWithoutOptions() {
@@ -243,9 +301,6 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    // Get the original timeseries options, these should stay the same post $out.
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
-
     // Change the "time" field in the pipeline, so we can confirm the value is changed in the
     // result.
     const newDate = new Date();
@@ -257,7 +312,13 @@ function timeseriesDefaultIndex() {
     // Both inColl and outColl are timeseries collections. We want to make sure that a timeseries
     // collection can write to another timeseries collection without the timeseriesOptions, so we
     // don't specify those here.
-    const timeseriesPipeline = [{$set: {"time": newDate}}, {$out: {db: testDB.getName(), coll: outColl.getName()}}];
+    const timeseriesPipeline = [
+        {$set: {"time": newDate}},
+        {$out: {db: testDB.getName(), coll: outColl.getName()}},
+    ];
+
+    // Derive expected timeseries options from the original ones.
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
 
     runOutAndCompareResults({
         observer: observerPipeline,
@@ -280,12 +341,17 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
-
     const observerPipeline = [{$out: {db: testDB.getName(), coll: observerOutColl.getName()}}];
     const timeseriesPipeline = [{$out: {db: testDB.getName(), coll: outColl.getName()}}];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: expectedTSOptions});
+    // Derive expected timeseries options from the original ones.
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
+
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: expectedTSOptions,
+    });
 
     // Make sure the secondary index was maintained.
     const indexSpecs = testDB[outColl].getIndexes();
@@ -295,7 +361,10 @@ function timeseriesDefaultIndex() {
 // TODO(SERVER-111600): Remove once $out on a different DB routed by a stale router can not fail to converge in multiversion suites (SERVER-123635).
 const isV82OrLower =
     TestData.multiversionBinVersion &&
-    MongoRunner.compareBinVersions(MongoRunner.getBinVersionFor(TestData.multiversionBinVersion), "8.2") <= 0;
+    MongoRunner.compareBinVersions(
+        MongoRunner.getBinVersionFor(TestData.multiversionBinVersion),
+        "8.2",
+    ) <= 0;
 if (isV82OrLower) {
     TestData.pinToSingleMongos = true;
 }
@@ -325,7 +394,9 @@ if (isV82OrLower) {
     assert.commandWorked(destDB.dropDatabase());
 
     const tsOptions = {timeField: "time", metaField: "tags"};
-    inColl.aggregate([{$out: {db: destDB.getName(), coll: outColl.getName(), timeseries: tsOptions}}]);
+    inColl.aggregate([
+        {$out: {db: destDB.getName(), coll: outColl.getName(), timeseries: tsOptions}},
+    ]);
 
     assert.eq(300, destDB[outColl.getName()].find().itcount());
 
@@ -335,13 +406,15 @@ if (isV82OrLower) {
     // Both paths return the same raw format, so no mode-specific branching is needed.
     const rawColl = getTimeseriesCollForRawOps(destDB, outColl.getName());
     const rawSpec = getRawOperationSpec(destDB);
-    const indexes = assert.commandWorked(destDB.runCommand({listIndexes: rawColl, ...rawSpec})).cursor.firstBatch;
+    const indexes = assert.commandWorked(destDB.runCommand({listIndexes: rawColl, ...rawSpec}))
+        .cursor.firstBatch;
     const hasDefaultIndex = indexes.some(
         (idx) => idx.key["meta"] !== undefined && idx.key["control.min.time"] !== undefined,
     );
     assert(
         hasDefaultIndex,
-        "Default timeseries index not found on $out collection in non-existent DB: " + tojson(indexes),
+        "Default timeseries index not found on $out collection in non-existent DB: " +
+            tojson(indexes),
     );
 })();
 
@@ -358,7 +431,11 @@ if (isV82OrLower) {
 
     const pipeline = [
         {
-            $out: {db: testDB.getName(), coll: observerOutColl.getName(), timeseries: {timeField: "time"}},
+            $out: {
+                db: testDB.getName(),
+                coll: observerOutColl.getName(),
+                timeseries: {timeField: "time"},
+            },
         },
     ];
 
@@ -418,6 +495,28 @@ if (isV82OrLower) {
     assert.throwsWithCode(() => observerInColl.aggregate(pipeline), 40415);
 })();
 
+(function testCannotSpecifyFixedBucketingInOutSpec() {
+    dropOutCollections();
+
+    for (const fixedBucketing of [true, false]) {
+        const pipeline = [
+            {
+                $out: {
+                    db: testDB.getName(),
+                    coll: outColl.getName(),
+                    timeseries: {timeField: "time", metaField: "tags", fixedBucketing},
+                },
+            },
+        ];
+        // On pre-9.0 binaries 'fixedBucketing' is an unknown field rejected with IDLUnknownField.
+        // TODO SERVER-120014: Remove IDLUnknownField once 9.0 becomes last LTS.
+        assert.throwsWithCode(
+            () => inColl.aggregate(pipeline),
+            [ErrorCodes.InvalidOptions, ErrorCodes.IDLUnknownField],
+        );
+    }
+})();
+
 (function testCannotHaveMismatchingTimeField() {
     // Drop both collections.
     dropOutCollections();
@@ -428,7 +527,11 @@ if (isV82OrLower) {
     // Timeseries options attempt to change the timeField, which is not allowed.
     const pipeline = [
         {
-            $out: {db: testDB.getName(), coll: outColl.getName(), timeseries: {timeField: "invalidTime"}},
+            $out: {
+                db: testDB.getName(),
+                coll: outColl.getName(),
+                timeseries: {timeField: "invalidTime"},
+            },
         },
     ];
 
@@ -472,7 +575,11 @@ if (isV82OrLower) {
             $out: {
                 db: testDB.getName(),
                 coll: outColl.getName(),
-                timeseries: {timeField: "time", bucketMaxSpanSeconds: 330, bucketRoundingSeconds: 330},
+                timeseries: {
+                    timeField: "time",
+                    bucketMaxSpanSeconds: 330,
+                    bucketRoundingSeconds: 330,
+                },
             },
         },
     ];
@@ -509,10 +616,15 @@ if (isV82OrLower) {
     if (!FixtureHelpers.isMongos(testDB)) {
         // can not shard a view.
         assert.commandWorked(testDB.createCollection("view_out", {viewOn: "out"}));
-        const pipeline = [{$out: {db: testDB.getName(), coll: "view_out", timeseries: {timeField: "time"}}}];
+        const pipeline = [
+            {$out: {db: testDB.getName(), coll: "view_out", timeseries: {timeField: "time"}}},
+        ];
         // TODO SERVER-111600: Remove 7268700 error code once 9.0 becomes last LTS.
         // This error was thrown by older versions when $out used timeseries options with the out collection being a non-timeseries view.
-        assert.throwsWithCode(() => inColl.aggregate(pipeline), [ErrorCodes.CommandNotSupportedOnView, 7268700]);
+        assert.throwsWithCode(
+            () => inColl.aggregate(pipeline),
+            [ErrorCodes.CommandNotSupportedOnView, 7268700],
+        );
         assert.throwsWithCode(
             () => observerInColl.aggregate(pipeline),
             [ErrorCodes.CommandNotSupportedOnView, 7268700],

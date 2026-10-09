@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/shim.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
@@ -42,6 +15,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/read_concern.h"
 #include "mongo/db/read_concern_mongod_gen.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
@@ -94,6 +68,8 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeLinearizableReadConcern);
+MONGO_FAIL_POINT_DEFINE(hangInWaitForLastStableRecoveryTimestampLoop);
+MONGO_FAIL_POINT_DEFINE(failSnapshotReads);
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly);
 
 /**
@@ -146,9 +122,7 @@ private:
 /**
  *  Schedule a write via appendOplogNote command to the primary of this replica set.
  */
-Status makeNoopWriteIfNeeded(OperationContext* opCtx,
-                             LogicalTime clusterTime,
-                             const DatabaseName& dbName) {
+Status makeNoopWriteToAdvanceClusterTimeImpl(OperationContext* opCtx, LogicalTime clusterTime) {
     repl::ReplicationCoordinator* const replCoord = repl::ReplicationCoordinator::get(opCtx);
     invariant(replCoord->getSettings().isReplSet());
 
@@ -353,6 +327,13 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
             return {ErrorCodes::NotAReplicaSet,
                     "node needs to be a replica set member to use readConcern: snapshot"};
         }
+        if (MONGO_unlikely(failSnapshotReads.shouldFail([&](const BSONObj& data) {
+                const auto comment = opCtx->getComment();
+                return !data.hasField("comment") ||
+                    (comment && comment->checkAndGetStringData() == data.getStringField("comment"));
+            }))) {
+            return {ErrorCodes::SnapshotUnavailable, "failSnapshotReads failpoint is on"};
+        }
     }
 
     auto afterClusterTime = readConcernArgs.getArgsAfterClusterTime();
@@ -386,9 +367,9 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
             const auto currentTime = VectorClock::get(opCtx)->getTime();
             const auto clusterTime = currentTime.clusterTime();
             if (!VectorClock::isValidComponentTime(clusterTime)) {
-                // currentTime should only be uninitialized if we are in startup recovery or initial
-                // sync.
-                invariant(memberState.startup() || memberState.startup2());
+                // currentTime should only be uninitialized if we are in startup recovery, initial
+                // sync, or on an arbiter.
+                invariant(memberState.startup() || memberState.startup2() || memberState.arbiter());
                 return {ErrorCodes::NotPrimaryOrSecondary,
                         str::stream() << "Current clusterTime is uninitialized, cannot service the "
                                          "requested clusterTime. Requested clusterTime: "
@@ -404,7 +385,7 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
                                       << "; current clusterTime: " << clusterTime.toString()};
             }
 
-            auto status = makeNoopWriteIfNeeded(opCtx, *targetClusterTime, dbName);
+            auto status = makeNoopWriteToAdvanceClusterTimeImpl(opCtx, *targetClusterTime);
             if (!status.isOK()) {
                 LOGV2(20990,
                       "Failed noop write",
@@ -514,29 +495,44 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
                 ->isAuthorizedForActionsOnResource(
                     ResourcePattern::forClusterResource(dbName.tenantId()), ActionType::internal));
         auto* const storageEngine = opCtx->getServiceContext()->getStorageEngine();
-        Lock::GlobalLock global(opCtx,
-                                MODE_IS,
-                                Date_t::max(),
-                                Lock::InterruptBehavior::kThrow,
-                                Lock::GlobalLockOptions{.skipRSTLLock = true});
-        auto lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
-        if (!lastStableRecoveryTimestamp ||
-            *lastStableRecoveryTimestamp < atClusterTime->asTimestamp()) {
-            // If the lastStableRecoveryTimestamp hasn't passed atClusterTime, we invoke
-            // flushAllFiles explicitly here to push it. By default, fsync will run every minute to
-            // call flushAllFiles. The lastStableRecoveryTimestamp should already be updated after
-            // flushAllFiles return but we add a retry to make sure we wait until the timestamp gets
-            // advanced.
-            storageEngine->flushAllFiles(opCtx, /*callerHoldsReadLock*/ true);
-            while (true) {
-                lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
+        bool needsPoll = false;
+
+        {
+            Lock::GlobalLock global(opCtx,
+                                    MODE_IS,
+                                    Date_t::max(),
+                                    Lock::InterruptBehavior::kThrow,
+                                    Lock::GlobalLockOptions{.skipRSTLLock = true});
+            auto lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
+            if (!lastStableRecoveryTimestamp ||
+                *lastStableRecoveryTimestamp < atClusterTime->asTimestamp()) {
+                // flushAllFiles does not guarantee that the lastStableRecoveryTimestamp will
+                // advance, since with some persistence providers, secondaries do not take their own
+                // checkpoints.
+                storageEngine->flushAllFiles(opCtx, /*callerHoldsReadLock*/ true);
+                needsPoll = true;
+            }
+        }
+
+        // Poll until lastStableRecoveryTimestamp advances past atClusterTime. Each
+        // iteration briefly acquires Global IS to read the timestamp, then releases it
+        // before sleeping so that step-up (which needs Global X) can make progress.
+        while (needsPoll) {
+            opCtx->checkForInterrupt();
+            hangInWaitForLastStableRecoveryTimestampLoop.pauseWhileSet(opCtx);
+            {
+                Lock::GlobalLock global(opCtx,
+                                        MODE_IS,
+                                        Date_t::max(),
+                                        Lock::InterruptBehavior::kThrow,
+                                        Lock::GlobalLockOptions{.skipRSTLLock = true});
+                auto lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
                 if (lastStableRecoveryTimestamp &&
                     *lastStableRecoveryTimestamp >= atClusterTime->asTimestamp()) {
                     break;
                 }
-
-                opCtx->sleepFor(Milliseconds(100));
             }
+            opCtx->sleepFor(Milliseconds(100));
         }
     }
     return Status::OK();
@@ -668,6 +664,8 @@ auto waitForLinearizableReadConcernRegistration = MONGO_WEAK_FUNCTION_REGISTRATI
     waitForLinearizableReadConcern, waitForLinearizableReadConcernImpl);
 auto waitForSpeculativeMajorityReadConcernRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
     waitForSpeculativeMajorityReadConcern, waitForSpeculativeMajorityReadConcernImpl);
+auto makeNoopWriteToAdvanceClusterTimeRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
+    makeNoopWriteToAdvanceClusterTime, makeNoopWriteToAdvanceClusterTimeImpl);
 }  // namespace
 
 }  // namespace mongo

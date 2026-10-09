@@ -2,6 +2,7 @@
  * This test enables a failpoint that recreates an interruption on the OpCtx while planShardedSearch
  * is executing. The test assures that the correct error is thrown instead of the server
  * segfaulting.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite (e2e/sharding_no_passthrough/sharded_search_network_interruption.js).
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {
@@ -31,11 +32,15 @@ const mongos = st.s;
 const testDB = mongos.getDB(dbName);
 const testColl = testDB.getCollection(collName);
 
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 st.shardColl(testColl, {_id: 1}, {_id: 10}, {_id: 10 + 1});
 
 assert.commandWorked(
-    mongos.getDB("admin").runCommand({configureFailPoint: "shardedSearchOpCtxDisconnect", mode: "alwaysOn"}),
+    mongos
+        .getDB("admin")
+        .runCommand({configureFailPoint: "shardedSearchOpCtxDisconnect", mode: "alwaysOn"}),
 );
 const mongotQuery = {
     $search: {},

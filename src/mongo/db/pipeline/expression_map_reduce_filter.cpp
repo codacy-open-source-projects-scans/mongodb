@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_walker.h"
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -69,8 +45,9 @@ boost::intrusive_ptr<Expression> ExpressionMap::parse(ExpressionContext* const e
                                                       BSONElement expr,
                                                       const VariablesParseState& vpsIn) {
     MONGO_verify(expr.fieldNameStringData() == "$map");
-
     uassert(16878, "$map only supports an object as its argument", expr.type() == BSONType::object);
+    expCtx->checkAndIncrementMemoryIntensiveExprCount(expr.fieldNameStringData());
+
 
     const bool isExposeArrayIndexEnabled = expCtx->shouldParserIgnoreFeatureFlagCheck() ||
         feature_flags::gFeatureFlagExposeArrayIndexInMapFilterReduce
@@ -152,7 +129,7 @@ ExpressionMap::ExpressionMap(ExpressionContext* const expCtx,
       _varId(varId),
       _idxName(std::move(idxName)),
       _idxId(idxId) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 boost::intrusive_ptr<Expression> ExpressionMap::optimize() {
@@ -169,7 +146,7 @@ boost::intrusive_ptr<Expression> ExpressionMap::optimize() {
     return this;
 }
 
-Value ExpressionMap::serialize(const SerializationOptions& options) const {
+Value ExpressionMap::serialize(const query_shape::SerializationOptions& options) const {
     return Value(
         Document{{"$map",
                   Document{{"input", _children[_kInput]->serialize(options)},
@@ -179,8 +156,10 @@ Value ExpressionMap::serialize(const SerializationOptions& options) const {
                            {"in", _children[_kEach]->serialize(options)}}}});
 }
 
-Value ExpressionMap::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMap::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ------------------------ ExpressionReduce ------------------------------ */
@@ -193,6 +172,7 @@ boost::intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* cons
             str::stream() << "$reduce requires an object as an argument, found: "
                           << typeName(expr.type()),
             expr.type() == BSONType::object);
+    expCtx->checkAndIncrementMemoryIntensiveExprCount(expr.fieldNameStringData());
 
     const bool isExposeArrayIndexEnabled = expCtx->shouldParserIgnoreFeatureFlagCheck() ||
         feature_flags::gFeatureFlagExposeArrayIndexInMapFilterReduce
@@ -244,7 +224,8 @@ boost::intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* cons
     // "vpsSub" gets our variables, "vps" doesn't.
     VariablesParseState vpsSub(vps);
 
-    auto parseVariableDefinition = [&vpsSub](const BSONElement& elem, StringData defaultName) {
+    auto parseVariableDefinition = [&vpsSub](const BSONElement& elem,
+                                             std::string_view defaultName) {
         boost::optional<std::string> name;
         if (elem) {
             name = elem.str();
@@ -305,8 +286,10 @@ boost::intrusive_ptr<Expression> ExpressionReduce::parse(ExpressionContext* cons
                                             valueId);
 }
 
-Value ExpressionReduce::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionReduce::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionReduce::optimize() {
@@ -323,7 +306,7 @@ boost::intrusive_ptr<Expression> ExpressionReduce::optimize() {
     return this;
 }
 
-Value ExpressionReduce::serialize(const SerializationOptions& options) const {
+Value ExpressionReduce::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {"$reduce",
          Document{
@@ -441,7 +424,7 @@ ExpressionFilter::ExpressionFilter(ExpressionContext* const expCtx,
       _idxName(std::move(idxName)),
       _idxId(idxId),
       _limit(_children.size() == 3 ? 2 : boost::optional<size_t>(boost::none)) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 boost::intrusive_ptr<Expression> ExpressionFilter::optimize() {
@@ -461,7 +444,7 @@ boost::intrusive_ptr<Expression> ExpressionFilter::optimize() {
     return this;
 }
 
-Value ExpressionFilter::serialize(const SerializationOptions& options) const {
+Value ExpressionFilter::serialize(const query_shape::SerializationOptions& options) const {
     return Value(
         Document{{"$filter",
                   Document{{"input", _children[_kInput]->serialize(options)},
@@ -472,8 +455,10 @@ Value ExpressionFilter::serialize(const SerializationOptions& options) const {
                            {"limit", _limit ? _children[*_limit]->serialize(options) : Value()}}}});
 }
 
-Value ExpressionFilter::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionFilter::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 }  // namespace mongo

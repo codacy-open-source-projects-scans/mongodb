@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,7 +7,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -69,6 +42,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -161,10 +135,17 @@ public:
         return BSONObj();
     }
 
-    std::pair<SchemaValidationResult, Status> checkValidation(OperationContext* opCtx,
-                                                              const BSONObj& document) const final {
+    StatusWith<std::shared_ptr<MatchExpression>> getValidatorFilter() const final {
+        return StatusWith<std::shared_ptr<MatchExpression>>(nullptr);
+    }
+
+    std::pair<DocumentValidationResult, Status> checkValidation(
+        OperationContext* opCtx, const BSONObj& document) const final {
         unimplementedTasserted();
-        return {SchemaValidationResult::kError, Status(ErrorCodes::UnknownError, "unknown")};
+        return {DocumentValidationResult{
+                    SchemaValidationResult::kError,
+                    DocumentValidationResult::NonComplianceReason::kValidatorError},
+                Status(ErrorCodes::UnknownError, "unknown")};
     }
 
     Status checkValidationAndParseResult(OperationContext* opCtx,
@@ -213,10 +194,12 @@ public:
     }
 
 
-    Status setValidationOptions(OperationContext* opCtx,
-                                boost::optional<ValidationLevelEnum> newLevel,
-                                boost::optional<ValidationActionEnum> newAction,
-                                boost::optional<Validator> newValidator) final {
+    Status setValidationOptions(
+        OperationContext* opCtx,
+        boost::optional<ValidationLevelEnum> newLevel,
+        boost::optional<ValidationActionEnum> newAction,
+        boost::optional<Validator> newValidator,
+        boost::optional<bool> newPrepareConstraintValidationLevel = boost::none) final {
         unimplementedTasserted();
         return Status(ErrorCodes::UnknownError, "unknown");
     }
@@ -282,16 +265,6 @@ public:
         return false;
     }
 
-    boost::optional<bool> timeseriesBucketingParametersHaveChanged() const final {
-        unimplementedTasserted();
-        return false;
-    }
-
-    void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
-                                                 boost::optional<bool> value) final {
-        unimplementedTasserted();
-    }
-
     bool shouldRemoveLegacyTimeseriesBucketingParametersHaveChanged() const final {
         unimplementedTasserted();
         return false;
@@ -309,12 +282,6 @@ public:
 
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final {
         unimplementedTasserted();
-    }
-
-    bool areTimeseriesBucketsFixed() const final {
-        // A virtual collection is never a time-series collection, so it can never have fixed
-        // buckets.
-        return false;
     }
 
     bool isClustered() const final {
@@ -349,21 +316,21 @@ public:
     }
 
     void updateTTLSetting(OperationContext* opCtx,
-                          StringData idxName,
+                          std::string_view idxName,
                           long long newExpireSeconds) final {
         unimplementedTasserted();
     }
 
-    void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) final {
+    void updateHiddenSetting(OperationContext* opCtx, std::string_view idxName, bool hidden) final {
         unimplementedTasserted();
     }
 
-    void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) final {
+    void updateUniqueSetting(OperationContext* opCtx, std::string_view idxName, bool unique) final {
         unimplementedTasserted();
     }
 
     void updatePrepareUniqueSetting(OperationContext* opCtx,
-                                    StringData idxName,
+                                    std::string_view idxName,
                                     bool prepareUnique) final {
         unimplementedTasserted();
     }
@@ -378,37 +345,37 @@ public:
         unimplementedTasserted();
     }
 
-    void removeIndex(OperationContext* opCtx, StringData indexName) final {
+    void removeIndex(OperationContext* opCtx, std::string_view indexName) final {
         unimplementedTasserted();
     }
 
     Status prepareForIndexBuild(OperationContext* opCtx,
                                 const IndexDescriptor* spec,
-                                StringData indexIdent,
+                                std::string_view indexIdent,
                                 boost::optional<UUID> buildUUID) final {
         unimplementedTasserted();
         return Status(ErrorCodes::UnknownError, "unknown");
     }
 
-    boost::optional<UUID> getIndexBuildUUID(StringData indexName) const final {
+    boost::optional<UUID> getIndexBuildUUID(std::string_view indexName) const final {
         unimplementedTasserted();
         return boost::none;
     }
 
     bool isIndexMultikey(OperationContext* opCtx,
-                         StringData indexName,
+                         std::string_view indexName,
                          MultikeyPaths* multikeyPaths,
                          int indexOffset) const final {
         unimplementedTasserted();
         return false;
     }
 
-    bool setIndexIsMultikey(OperationContext* opCtx,
-                            StringData indexName,
-                            const MultikeyPaths& multikeyPaths,
-                            int indexOffset) const final {
+    int64_t setIndexIsMultikey(OperationContext* opCtx,
+                               std::string_view indexName,
+                               const MultikeyPaths& multikeyPaths,
+                               int indexOffset) const final {
         unimplementedTasserted();
-        return false;
+        return 0;
     }
 
     void forceSetIndexIsMultikey(OperationContext* opCtx,
@@ -426,7 +393,7 @@ public:
         return 0;
     }
 
-    BSONObj getIndexSpec(StringData indexName, bool expandSimpleCollation) const final {
+    BSONObj getIndexSpec(std::string_view indexName, bool expandSimpleCollation) const final {
         return BSONObj();
     }
 
@@ -434,11 +401,11 @@ public:
 
     void getReadyIndexes(std::vector<std::string>* names) const final {}
 
-    bool isIndexPresent(StringData indexName) const final {
+    bool isIndexPresent(std::string_view indexName) const final {
         return false;
     }
 
-    bool isIndexReady(StringData indexName) const final {
+    bool isIndexReady(std::string_view indexName) const final {
         return false;
     }
 
@@ -450,6 +417,11 @@ public:
     bool isMetadataEqual(const BSONObj& otherMetadata) const final {
         unimplementedTasserted();
         return false;
+    }
+
+    std::shared_ptr<const durable_catalog::CatalogEntryMetaData> getMetadata() const final {
+        unimplementedTasserted();
+        return nullptr;
     }
 
     bool needsCappedLock() const final {

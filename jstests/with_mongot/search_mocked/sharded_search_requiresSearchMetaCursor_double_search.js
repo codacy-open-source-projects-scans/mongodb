@@ -7,6 +7,9 @@
  *
  * Note that you can't access $$SEARCH_META after a stage with a sub-pipeline, so the top-level
  * pipeline can only reference $$SEARCH_META prior to a $lookup or $unionWith.
+ *
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an
+ * e2e suite.
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {
@@ -130,7 +133,13 @@ function mockShards() {
 }
 
 function mockPlanShardedSearchFromMongos() {
-    mockPlanShardedSearchResponse(shardedColl.getName(), mongotQuery, dbName, undefined /*sortSpec*/, stWithMock);
+    mockPlanShardedSearchResponse(
+        shardedColl.getName(),
+        mongotQuery,
+        dbName,
+        undefined /*sortSpec*/,
+        stWithMock,
+    );
 }
 
 // Mongos will non-deterministically choose a shard to run the sub-pipeline, so we'll mock a
@@ -315,7 +324,12 @@ runRequiresSearchMetaCursorTest({
         {
             $lookup: {
                 from: shardedCollName,
-                pipeline: [{$search: mongotQuery}, {$sort: {y: -1}}, {$limit: 1}, {$project: {_id: 0}}],
+                pipeline: [
+                    {$search: mongotQuery},
+                    {$sort: {y: -1}},
+                    {$limit: 1},
+                    {$project: {_id: 0}},
+                ],
                 as: "out",
             },
         },

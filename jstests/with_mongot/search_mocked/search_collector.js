@@ -1,6 +1,7 @@
 /**
  * Verify that `$search` sets '$$SEARCH_META' variable information. SEARCH_META is not supported on
  * sharded collections.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite (e2e/search/search_collector.js).
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {MongotMock} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -64,13 +65,18 @@ const cursorId = NumberLong(123);
         },
     ];
 
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}),
+    );
 }
 
 // Verify that a $search query sets SEARCH_META results if returned from mongot.
 // Also verify that unset SEARCH_META fields evaluate to missing.
 let cursor = coll.aggregate(
-    [{$search: searchQuery}, {$project: {_id: 1, meta: "$$SEARCH_META", missingMeta: "$$SEARCH_META.missing"}}],
+    [
+        {$search: searchQuery},
+        {$project: {_id: 1, meta: "$$SEARCH_META", missingMeta: "$$SEARCH_META.missing"}},
+    ],
     {cursor: {}},
 );
 

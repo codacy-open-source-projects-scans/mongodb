@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/connection_string.h"
@@ -40,6 +13,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/path.hpp>
@@ -60,7 +34,7 @@ void RecordMyLocation(const char* _argv0);
 void installShellUtils(Scope& scope);
 
 void initScope(Scope& scope);
-void onConnect(DBClientBase& c, StringData uri);
+void onConnect(DBClientBase& c, std::string_view uri);
 
 boost::filesystem::path getHistoryFilePath();
 void setEnterpriseShellCallback(EnterpriseShellCallback* callback);
@@ -85,7 +59,7 @@ private:
 class ConnectionRegistry {
 public:
     ConnectionRegistry();
-    void registerConnection(DBClientBase& client, StringData uri);
+    void registerConnection(DBClientBase& client, std::string_view uri);
     void killOperationsOnAllConnections(bool withPrompt) const;
 
 private:
@@ -123,7 +97,7 @@ std::string getURIFromArgs(const std::string& arg,
 }  // namespace shell_utils
 
 // Specifically scoped namespace for usages that are "unfortunately public"
-namespace MONGO_MOD_NEEDS_REPLACEMENT shell_utils {
+namespace [[MONGO_MOD_NEEDS_REPLACEMENT]] shell_utils {
 
 enum class NormalizationOpts : uint32_t {
     kResults = 0,
@@ -176,5 +150,5 @@ BSONObj normalizeBSONObj(const BSONObj& input,
                          NormalizationOptsSet opts = NormalizationOpts::kResults);
 
 
-}  // namespace MONGO_MOD_NEEDS_REPLACEMENT shell_utils
+}  // namespace shell_utils
 }  // namespace mongo

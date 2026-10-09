@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -64,6 +37,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -80,10 +54,35 @@ namespace executor {
 class TaskExecutor;
 }  // namespace executor
 
+struct [[MONGO_MOD_PARENT_PRIVATE]] ExpiredHistoryFilter {
+    ShardId shardId;            // this shard's identity: ShardId
+    Timestamp oldestTimestamp;  // WT oldest timestamp
+};
+
+/**
+ * Builds the aggregation that joins a "collections" namespace with its "chunks" namespace in order
+ * to retrieve the routing table of 'nss'.
+ *
+ * When 'sinceVersion' shares the collection's epoch the aggregation only returns the chunks that
+ * changed since that version (incremental refresh). Otherwise it returns all of the collection's
+ * chunks (full refresh); pass ChunkVersion::UNTRACKED() to always force a full refresh.
+ *
+ * 'expiredFilter' carries data for filtering WT unreachable chunks from the aggregation
+ * result. Pass boost::none to disable filtering.
+ */
+[[MONGO_MOD_PARENT_PRIVATE]] AggregateCommandRequest makeCollectionAndChunksAggregation(
+    OperationContext* opCtx,
+    const NamespaceString& collectionsNss,
+    const NamespaceString& chunksNss,
+    const NamespaceString& nss,
+    const ChunkVersion& sinceVersion,
+    const boost::optional<ExpiredHistoryFilter>& expiredFilter = boost::none);
+
 /**
  * Implements the catalog client for reading from replica set config servers.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT ShardingCatalogClientImpl final : public ShardingCatalogClient {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] ShardingCatalogClientImpl final
+    : public ShardingCatalogClient {
 
 public:
     ShardingCatalogClientImpl(std::shared_ptr<Shard> overrideConfigShard);
@@ -99,62 +98,57 @@ public:
                                                    const CollectionType& coll,
                                                    bool upsert);
 
-    std::vector<BSONObj> runCatalogAggregation(OperationContext* opCtx,
-                                               AggregateCommandRequest& aggRequest,
-                                               const repl::ReadConcernArgs& readConcern,
-                                               const Milliseconds& maxTimeout = Milliseconds(
-                                                   defaultConfigCommandTimeoutMS.load())) override;
+    std::vector<BSONObj> runCatalogAggregation(
+        OperationContext* opCtx,
+        AggregateCommandRequest& aggRequest,
+        const repl::ReadConcernArgs& readConcern,
+        const Milliseconds& maxTimeout = Milliseconds(defaultConfigCommandTimeoutMS.load()),
+        Shard::RetryPolicy retryPolicy = Shard::RetryPolicy::kIdempotent) override;
 
     DatabaseType getDatabase(OperationContext* opCtx,
                              const DatabaseName& db,
-                             repl::ReadConcernLevel readConcernLevel) override;
+                             repl::ReadConcernArgs readConcern) override;
 
     std::vector<DatabaseType> getAllDBs(
         OperationContext* opCtx,
-        repl::ReadConcernLevel readConcern,
+        repl::ReadConcernArgs readConcern,
         const boost::optional<ReadPreferenceSetting>& readPref = boost::none) override;
 
     CollectionType getCollection(OperationContext* opCtx,
                                  const NamespaceString& nss,
-                                 repl::ReadConcernLevel readConcernLevel) override;
+                                 repl::ReadConcernArgs readConcern) override;
 
     CollectionType getCollection(OperationContext* opCtx,
                                  const UUID& uuid,
-                                 repl::ReadConcernLevel readConcernLevel) override;
+                                 repl::ReadConcernArgs readConcern) override;
 
     std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
                                                       const DatabaseName& db,
-                                                      repl::ReadConcernLevel readConcernLevel,
+                                                      repl::ReadConcernArgs readConcern,
                                                       const BSONObj& sort) override;
 
     std::vector<CollectionType> getCollections(OperationContext* opCtx,
                                                const DatabaseName& db,
-                                               repl::ReadConcernLevel readConcernLevel,
+                                               repl::ReadConcernArgs readConcern,
                                                const BSONObj& sort) override;
 
     std::vector<NamespaceString> getShardedCollectionNamespacesForDb(
         OperationContext* opCtx,
         const DatabaseName& dbName,
-        repl::ReadConcernLevel readConcern,
+        repl::ReadConcernArgs readConcern,
         const BSONObj& sort = BSONObj()) override;
 
     std::vector<NamespaceString> getCollectionNamespacesForDb(
         OperationContext* opCtx,
         const DatabaseName& dbName,
-        repl::ReadConcernLevel readConcern,
+        repl::ReadConcernArgs readConcern,
         const BSONObj& sort = BSONObj()) override;
 
     std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDb(
         OperationContext* opCtx,
         const DatabaseName& dbName,
-        repl::ReadConcernLevel readConcern,
+        repl::ReadConcernArgs readConcern,
         const BSONObj& sort = BSONObj()) override;
-
-    std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-        OperationContext* opCtx,
-        const DatabaseName& dbName,
-        const std::vector<ShardId>& excludedShards,
-        repl::ReadConcernLevel readConcern) override;
 
     StatusWith<std::vector<DatabaseName>> getDatabasesForShard(OperationContext* opCtx,
                                                                const ShardId& shardName) override;
@@ -167,7 +161,7 @@ public:
         repl::OpTime* opTime,
         const OID& epoch,
         const Timestamp& timestamp,
-        repl::ReadConcernLevel readConcern,
+        repl::ReadConcernArgs readConcern,
         const boost::optional<BSONObj>& hint = boost::none) override;
 
     std::pair<CollectionType, std::vector<ChunkType>> getCollectionAndChunks(
@@ -185,11 +179,11 @@ public:
         OperationContext* opCtx, const DatabaseName& dbName) override;
 
     repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
-                                                          repl::ReadConcernLevel readConcern,
+                                                          repl::ReadConcernArgs readConcern,
                                                           BSONObj filter = BSONObj()) override;
 
     Status runUserManagementWriteCommand(OperationContext* opCtx,
-                                         StringData commandName,
+                                         std::string_view commandName,
                                          const DatabaseName& dbname,
                                          const BSONObj& cmdObj,
                                          BSONObjBuilder* result) override;
@@ -199,10 +193,10 @@ public:
                                       const BSONObj& cmdObj,
                                       BSONObjBuilder* result) override;
 
-    StatusWith<BSONObj> getGlobalSettings(OperationContext* opCtx, StringData key) override;
+    StatusWith<BSONObj> getGlobalSettings(OperationContext* opCtx, std::string_view key) override;
 
     StatusWith<VersionType> getConfigVersion(OperationContext* opCtx,
-                                             repl::ReadConcernLevel readConcern) override;
+                                             repl::ReadConcernArgs readConcern) override;
 
     Status insertConfigDocument(OperationContext* opCtx,
                                 const NamespaceString& nss,
@@ -232,14 +226,14 @@ public:
 
     StatusWith<std::vector<KeysCollectionDocument>> getNewInternalKeys(
         OperationContext* opCtx,
-        StringData purpose,
+        std::string_view purpose,
         const LogicalTime& newerThanThis,
-        repl::ReadConcernLevel readConcernLevel) override;
+        repl::ReadConcernArgs readConcern) override;
 
     StatusWith<std::vector<ExternalKeysCollectionDocument>> getAllExternalKeys(
         OperationContext* opCtx,
-        StringData purpose,
-        repl::ReadConcernLevel readConcernLevel) override;
+        std::string_view purpose,
+        repl::ReadConcernArgs readConcern) override;
 
     bool anyShardRemovedSince(OperationContext* opCtx, const Timestamp& clusterTime) override;
 
@@ -268,7 +262,7 @@ private:
     StatusWith<repl::OpTimeWith<std::vector<BSONObj>>> _exhaustiveFindOnConfig(
         OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
-        const repl::ReadConcernLevel& readConcern,
+        const repl::ReadConcernArgs& readConcern,
         const NamespaceString& nss,
         const BSONObj& query,
         const BSONObj& sort,
@@ -283,7 +277,7 @@ private:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const ReadPreferenceSetting& readPref,
-        repl::ReadConcernLevel readConcernLevel);
+        repl::ReadConcernArgs readConcern);
 
     /**
      * Returns the Shard type that should be used to access the config server. Unless an instance

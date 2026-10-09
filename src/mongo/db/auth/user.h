@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/crypto/sha1_block.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/action_set.h"
+#include "mongo/db/auth/auth_mechanism.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/restriction_set.h"
@@ -43,7 +17,7 @@
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -55,6 +29,7 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -64,7 +39,8 @@
 #include <boost/optional/optional.hpp>
 
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Represents the properties required to request a UserHandle.
@@ -129,8 +105,8 @@ public:
     virtual const boost::optional<std::set<RoleName>>& getRoles() const = 0;
     virtual UserRequestType getType() const = 0;
     virtual void setRoles(boost::optional<std::set<RoleName>> roles) = 0;
-    virtual void setAuthenticatedMechanism(StringData mechanism) = 0;
-    virtual boost::optional<StringData> getAuthenticatedMechanism() const = 0;
+    virtual void setAuthenticatedMechanism(std::string_view mechanism) = 0;
+    virtual boost::optional<std::string_view> getAuthenticatedMechanism() const = 0;
     virtual std::unique_ptr<UserRequest> clone() const = 0;
 
     /**
@@ -152,12 +128,12 @@ class UserRequestGeneral : public UserRequest {
 public:
     UserRequestGeneral(UserName name,
                        boost::optional<std::set<RoleName>> roles,
-                       boost::optional<StringData> authMechanism = boost::none)
+                       boost::optional<std::string_view> authMechanism = boost::none)
         : name(std::move(name)), roles(std::move(roles)) {
         if (authMechanism) {
             uassert(ErrorCodes::BadValue,
                     "User name must be provided with an authenticated mechanism",
-                    this->name.getUser() != ""_sd);
+                    !this->name.getUser().empty());
             authenticatedMechanism = std::string(*authMechanism);
         }
     }
@@ -178,19 +154,19 @@ public:
         this->roles = std::move(roles);
     }
 
-    void setAuthenticatedMechanism(StringData mechanism) final {
+    void setAuthenticatedMechanism(std::string_view mechanism) final {
         if (mechanism.empty()) {
             authenticatedMechanism = boost::none;
             return;
         }
         uassert(ErrorCodes::BadValue,
                 "User name must be provided with an authenticated mechanism",
-                name.getUser() != ""_sd);
+                !name.getUser().empty());
         authenticatedMechanism = std::string{mechanism};
     }
 
-    boost::optional<StringData> getAuthenticatedMechanism() const final {
-        return authenticatedMechanism ? boost::optional<StringData>(*authenticatedMechanism)
+    boost::optional<std::string_view> getAuthenticatedMechanism() const final {
+        return authenticatedMechanism ? boost::optional<std::string_view>(*authenticatedMechanism)
                                       : boost::none;
     }
 
@@ -241,13 +217,13 @@ class User {
 
 public:
     using UserId = std::vector<std::uint8_t>;
-    constexpr static auto kSHA1FieldName = "SCRAM-SHA-1"_sd;
-    constexpr static auto kSHA256FieldName = "SCRAM-SHA-256"_sd;
-    constexpr static auto kExternalFieldName = "external"_sd;
-    constexpr static auto kIterationCountFieldName = "iterationCount"_sd;
-    constexpr static auto kSaltFieldName = "salt"_sd;
-    constexpr static auto kServerKeyFieldName = "serverKey"_sd;
-    constexpr static auto kStoredKeyFieldName = "storedKey"_sd;
+    constexpr static auto kSHA1FieldName = auth::kMechanismScramSha1;
+    constexpr static auto kSHA256FieldName = auth::kMechanismScramSha256;
+    constexpr static auto kExternalFieldName = "external"sv;
+    constexpr static auto kIterationCountFieldName = "iterationCount"sv;
+    constexpr static auto kSaltFieldName = "salt"sv;
+    constexpr static auto kServerKeyFieldName = "serverKey"sv;
+    constexpr static auto kStoredKeyFieldName = "storedKey"sv;
 
     template <typename HashBlock>
     struct SCRAMCredentials {
@@ -312,8 +288,8 @@ public:
             }
         }
 
-        std::vector<StringData> toMechanismsVector() const {
-            std::vector<StringData> mechanismsVec;
+        std::vector<std::string_view> toMechanismsVector() const {
+            std::vector<std::string_view> mechanismsVec;
             if (scram_sha1.isValid()) {
                 mechanismsVec.push_back(kSHA1FieldName);
             }
@@ -532,4 +508,4 @@ using UserCache = ReadThroughCache<UserRequest::UserRequestCacheKey,
                                    SharedUserAcquisitionStats>;
 using UserHandle = UserCache::ValueHandle;
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -8,54 +8,6 @@
 
 #pragma once
 
-#ifdef HAVE_DIAGNOSTIC
-/*
- * Capture cases where a single session handle is used by multiple threads in parallel. The check
- * isn't trivial because some API calls re-enter via public API entry points and the session with ID
- * 0 is the default session in the connection handle which can be used across multiple threads.
- */
-#define WT_SINGLE_THREAD_CHECK_START(s)                                                      \
-    {                                                                                        \
-        uintmax_t __tmp_api_tid;                                                             \
-        __wt_thread_id(&__tmp_api_tid);                                                      \
-                                                                                             \
-        /*                                                                                   \
-         * Only a single thread should use this session at a time. It's ok                   \
-         * (but unexpected) if different threads use the session consecutively,              \
-         * but concurrent access is not allowed. Verify this by having the thread            \
-         * take a lock on first API access. Failing to take the lock implies                 \
-         * another thread holds it and we're attempting concurrent access of the             \
-         * session.                                                                          \
-         *                                                                                   \
-         * The default session (ID == 0) is an exception where concurrent access             \
-         * is allowed. We can also skip taking the lock if we're re-entrant and              \
-         * already hold it.                                                                  \
-         */                                                                                  \
-        if (!WT_SESSION_IS_DEFAULT(s) && (s)->thread_check.owning_thread != __tmp_api_tid) { \
-            bool lock_success = __wt_spin_trylock((s), &(s)->thread_check.lock);             \
-            WT_ASSERT((s), lock_success == 0);                                               \
-            (s)->thread_check.owning_thread = __tmp_api_tid;                                 \
-        }                                                                                    \
-                                                                                             \
-        ++(s)->thread_check.entry_count;                                                     \
-    }
-
-#define WT_SINGLE_THREAD_CHECK_STOP(s)                          \
-    {                                                           \
-        uintmax_t __tmp_api_tid;                                \
-        __wt_thread_id(&__tmp_api_tid);                         \
-        if (--((s)->thread_check.entry_count) == 0) {           \
-            if ((s)->id != 0) {                                 \
-                (s)->thread_check.owning_thread = 0;            \
-                __wt_spin_unlock((s), &(s)->thread_check.lock); \
-            }                                                   \
-        }                                                       \
-    }
-#else
-#define WT_SINGLE_THREAD_CHECK_START(s)
-#define WT_SINGLE_THREAD_CHECK_STOP(s)
-#endif
-
 #define API_SESSION_PUSH(s, struct_name, func_name, dh)                                      \
     WT_DATA_HANDLE *__olddh = (s)->dhandle;                                                  \
     const char *__oldname;                                                                   \
@@ -72,26 +24,28 @@
     --(s)->api_call_counter
 
 /* Standard entry points to the API: declares/initializes local variables. */
-#define API_SESSION_INIT(s, struct_name, func_name, dh)                                  \
-    WT_TRACK_OP_DECL;                                                                    \
-    API_SESSION_PUSH(s, struct_name, func_name, dh);                                     \
-    /*                                                                                   \
-     * No code before this line, otherwise error handling won't be                       \
-     * correct.                                                                          \
-     */                                                                                  \
-    WT_ERR(WT_SESSION_CHECK_PANIC(s));                                                   \
-    WT_SINGLE_THREAD_CHECK_START(s);                                                     \
-    WT_TRACK_OP_INIT(s);                                                                 \
-    if ((s)->api_call_counter == 1 && !F_ISSET(s, WT_SESSION_INTERNAL))                  \
-        __wt_op_timer_start(s);                                                          \
-    /* Reset wait time if this isn't an API reentry. */                                  \
-    if ((s)->api_call_counter == 1)                                                      \
-        (s)->cache_wait_us = 0;                                                          \
-    /*                                                                                   \
-     * Reset the err_info struct back to default only if the prior API call had an error \
-     */                                                                                  \
-    if ((s)->api_call_counter == 1 && (s)->err_info.err != 0)                            \
-        __wt_session_reset_last_error((s));                                              \
+#define API_SESSION_INIT(s, struct_name, func_name, dh)                             \
+    WT_TRACK_OP_DECL;                                                               \
+    API_SESSION_PUSH(s, struct_name, func_name, dh);                                \
+    /*                                                                              \
+     * No code before this line, otherwise error handling won't be                  \
+     * correct.                                                                     \
+     */                                                                             \
+    WT_ERR(WT_SESSION_CHECK_PANIC(s));                                              \
+    __wt_single_thread_check_start(s);                                              \
+    WT_TRACK_OP_INIT(s);                                                            \
+    /*                                                                              \
+     * Internal sessions save errors only on behalf of the application session that \
+     * spawned them; leave error information to that session.                       \
+     */                                                                             \
+    if ((s)->api_call_counter == 1 && !F_ISSET(s, WT_SESSION_INTERNAL)) {           \
+        __wt_op_timer_start(s);                                                     \
+        if ((s)->err_info.err != 0)                                                 \
+            __wt_session_reset_last_error((s));                                     \
+    }                                                                               \
+    /* Reset wait time if this isn't an API reentry. */                             \
+    if ((s)->api_call_counter == 1)                                                 \
+        (s)->cache_wait_us = 0;                                                     \
     __wt_verbose((s), WT_VERB_API, "%s", "CALL: " #struct_name ":" #func_name)
 
 #define API_CALL_NOCONF_NOERRCLEAR(s, struct_name, func_name, dh, set_err) \
@@ -128,10 +82,10 @@
 #define API_END(s, ret)                                                                            \
     if ((s) != NULL) {                                                                             \
         WT_TRACK_OP_END(s);                                                                        \
-        WT_SINGLE_THREAD_CHECK_STOP(s);                                                            \
+        __wt_single_thread_check_stop(s);                                                          \
         if ((ret) != 0 && __set_err)                                                               \
             __wt_txn_err_set(s, (ret));                                                            \
-        if ((s)->api_call_counter == 1) {                                                          \
+        if ((s)->api_call_counter == 1 && !F_ISSET(s, WT_SESSION_INTERNAL)) {                      \
             /*                                                                                     \
              * Check that the API return value matches what is stored in the err_info struct.      \
              *                                                                                     \
@@ -151,8 +105,7 @@
                 else                                                                               \
                     (s)->err_info.err = (ret);                                                     \
             };                                                                                     \
-            if (!F_ISSET(s, WT_SESSION_INTERNAL))                                                  \
-                __wt_op_timer_stop(s);                                                             \
+            __wt_op_timer_stop(s);                                                                 \
         }                                                                                          \
         /*                                                                                         \
          * FIXME-WT-7247 Ideally we would not leave any history store cursors open when we         \
@@ -316,6 +269,19 @@
     TXN_API_CALL(s, WT_SESSION, func_name, NULL, config, cfg); \
     SESSION_API_PREPARE_CHECK(s, ret, WT_SESSION, func_name)
 
+#define CURSOR_API_CHECK_SYSTEM_OVERLOAD(s, ret)                                               \
+    do {                                                                                       \
+        if (API_USER_ENTRY(s) &&                                                               \
+          (!F_ISSET(                                                                           \
+            s, WT_SESSION_INTERNAL | WT_SESSION_CHECKPOINT | WT_SESSION_IGNORE_CACHE_SIZE))) { \
+            if (__wt_conn_load_control_read_loadshed(s)) {                                     \
+                WT_STAT_CONN_INCR(s, read_reject_count);                                       \
+                (ret) = WT_ROLLBACK;                                                           \
+                goto err;                                                                      \
+            }                                                                                  \
+        }                                                                                      \
+    } while (0)
+
 #define CURSOR_API_CALL(cur, s, ret, func_name, dh)          \
     (s) = CUR2S(cur);                                        \
     API_CALL_NOCONF(s, WT_CURSOR, func_name, dh, true);      \
@@ -337,10 +303,10 @@
     WT_ERR(__wt_cursor_cached(cur))
 
 /*
- * API_RETRYABLE and API_RETRYABLE_END are used to wrap API calls so that they are silently
- * retried on rollback errors. Generally, these only need to be used with readonly APIs, as
- * writable APIs have their own retry code via TXN_API_CALL.  These macros may be used with
- * *API_CALL and API_END* provided they are ordered in a balanced way.
+ * API_RETRYABLE and API_RETRYABLE_END are used to wrap API calls so that they are silently retried
+ * on rollback errors. Generally, these only need to be used with readonly APIs, as writable APIs
+ * have their own retry code via TXN_API_CALL. These macros may be used with *API_CALL and API_END*
+ * provided they are ordered in a balanced way.
  */
 #define API_RETRYABLE(s) do {
 
@@ -353,22 +319,46 @@
     /* !!!! This is a while(1) loop. !!!! */                                                     \
     while (1)
 
-#define CURSOR_REMOVE_API_CALL(cur, s, ret, dh)      \
-    (s) = CUR2S(cur);                                \
-    TXN_API_CALL_NOCONF(s, WT_CURSOR, remove, (dh)); \
+#define CURSOR_REMOVE_API_CALL(cur, s, ret, dh)                                                    \
+    (s) = CUR2S(cur);                                                                              \
+    TXN_API_CALL_NOCONF(s, WT_CURSOR, remove, (dh));                                               \
+    if (API_USER_ENTRY(s) &&                                                                       \
+      (!F_ISSET(s, WT_SESSION_INTERNAL | WT_SESSION_CHECKPOINT | WT_SESSION_IGNORE_CACHE_SIZE))) { \
+        if (__wt_conn_load_control_write_loadshed(s)) {                                            \
+            WT_STAT_CONN_INCR(s, write_reject_count);                                              \
+            (ret) = WT_ROLLBACK;                                                                   \
+            goto err;                                                                              \
+        }                                                                                          \
+    }                                                                                              \
     SESSION_API_PREPARE_CHECK(s, ret, WT_CURSOR, remove)
 
-#define CURSOR_UPDATE_API_CALL_BTREE(cur, s, ret, func_name)                                  \
-    (s) = CUR2S(cur);                                                                         \
-    TXN_API_CALL_NOCONF(s, WT_CURSOR, func_name, ((WT_CURSOR_BTREE *)(cur))->dhandle);        \
-    SESSION_API_PREPARE_CHECK(s, ret, WT_CURSOR, func_name);                                  \
-    if (F_ISSET(S2C(s), WT_CONN_IN_MEMORY) && !F_ISSET(CUR2BT(cur), WT_BTREE_IGNORE_CACHE) && \
-      __wt_cache_full(s))                                                                     \
+#define CURSOR_UPDATE_API_CALL_BTREE(cur, s, ret, func_name)                                       \
+    (s) = CUR2S(cur);                                                                              \
+    TXN_API_CALL_NOCONF(s, WT_CURSOR, func_name, ((WT_CURSOR_BTREE *)(cur))->dhandle);             \
+    if (API_USER_ENTRY(s) &&                                                                       \
+      (!F_ISSET(s, WT_SESSION_INTERNAL | WT_SESSION_CHECKPOINT | WT_SESSION_IGNORE_CACHE_SIZE))) { \
+        if (__wt_conn_load_control_write_loadshed(s)) {                                            \
+            WT_STAT_CONN_INCR(s, write_reject_count);                                              \
+            (ret) = WT_ROLLBACK;                                                                   \
+            goto err;                                                                              \
+        }                                                                                          \
+    }                                                                                              \
+    SESSION_API_PREPARE_CHECK(s, ret, WT_CURSOR, func_name);                                       \
+    if (F_ISSET(S2C(s), WT_CONN_IN_MEMORY) && !F_ISSET(CUR2BT(cur), WT_BTREE_IGNORE_CACHE) &&      \
+      __wt_cache_full(s))                                                                          \
         WT_ERR(WT_CACHE_FULL);
 
-#define CURSOR_UPDATE_API_CALL(cur, s, ret, func_name, dh) \
-    (s) = CUR2S(cur);                                      \
-    TXN_API_CALL_NOCONF(s, WT_CURSOR, func_name, dh);      \
+#define CURSOR_UPDATE_API_CALL(cur, s, ret, func_name, dh)                                         \
+    (s) = CUR2S(cur);                                                                              \
+    TXN_API_CALL_NOCONF(s, WT_CURSOR, func_name, dh);                                              \
+    if (API_USER_ENTRY(s) &&                                                                       \
+      (!F_ISSET(s, WT_SESSION_INTERNAL | WT_SESSION_CHECKPOINT | WT_SESSION_IGNORE_CACHE_SIZE))) { \
+        if (__wt_conn_load_control_write_loadshed(s)) {                                            \
+            WT_STAT_CONN_INCR(s, write_reject_count);                                              \
+            (ret) = WT_ROLLBACK;                                                                   \
+            goto err;                                                                              \
+        }                                                                                          \
+    }                                                                                              \
     SESSION_API_PREPARE_CHECK(s, ret, WT_CURSOR, func_name)
 
 #define CURSOR_UPDATE_API_END_RETRY(s, ret, retry) \
@@ -391,12 +381,12 @@
  * eviction of hot pages. These macros facilitate tracking when that is OK.
  */
 #define CURSOR_REPOSITION_ENTER(c, s)                                      \
-    if (FLD_ISSET(S2C(s)->debug_flags, WT_CONN_DEBUG_CURSOR_REPOSITION) && \
+    if (FLD_ISSET(S2C(s)->debug.flags, WT_CONN_DEBUG_CURSOR_REPOSITION) && \
       (s)->api_call_counter == 1)                                          \
     F_SET((c), WT_CURSTD_EVICT_REPOSITION)
 
 #define CURSOR_REPOSITION_END(c, s)                                        \
-    if (FLD_ISSET(S2C(s)->debug_flags, WT_CONN_DEBUG_CURSOR_REPOSITION) && \
+    if (FLD_ISSET(S2C(s)->debug.flags, WT_CONN_DEBUG_CURSOR_REPOSITION) && \
       (s)->api_call_counter == 1)                                          \
     F_CLR((c), WT_CURSTD_EVICT_REPOSITION)
 

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/logv2/bson_formatter.h"
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/attribute_storage.h"
@@ -47,6 +20,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <variant>
 
 #include <boost/cstdint.hpp>
@@ -69,7 +43,7 @@ struct BSONValueExtractor {
         _builder.done();
     }
 
-    void operator()(StringData name, CustomAttributeValue const& val) {
+    void operator()(std::string_view name, CustomAttributeValue const& val) {
         try {
             // Try to format as BSON first if available. Prefer BSONAppend if available as we might
             // only want the value and not the whole element.
@@ -96,32 +70,32 @@ struct BSONValueExtractor {
     }
 
     // BSONObj is coming as a pointer, the generic one handles references
-    void operator()(StringData name, const BSONObj val) {
+    void operator()(std::string_view name, const BSONObj val) {
         _builder.append(name, val);
     }
 
-    void operator()(StringData name, const BSONArray val) {
+    void operator()(std::string_view name, const BSONArray val) {
         _builder.append(name, val);
     }
 
     // BSON is lacking unsigned types, so store unsigned int32 as signed int64
-    void operator()(StringData name, unsigned int val) {
+    void operator()(std::string_view name, unsigned int val) {
         _builder.append(name, static_cast<long long>(val));
     }
 
     // BSON is lacking unsigned types, so store unsigned int64 as signed int64, users need to deal
     // with this.
-    void operator()(StringData name, unsigned long long val) {
+    void operator()(std::string_view name, unsigned long long val) {
         _builder.append(name, static_cast<long long>(val));
     }
 
     template <typename Period>
-    void operator()(StringData name, const Duration<Period>& value) {
+    void operator()(std::string_view name, const Duration<Period>& value) {
         _builder.append(fmt::format("{}{}", name, value.mongoUnitSuffix()), value.count());
     }
 
     template <typename T>
-    void operator()(StringData name, const T& value) {
+    void operator()(std::string_view name, const T& value) {
         _builder.append(name, value);
     }
 
@@ -151,9 +125,9 @@ void BSONFormatter::operator()(boost::log::record_view const& rec, BSONObjBuilde
         builder.append(constants::kServiceFieldName,
                        getNameForLog(extract<LogService>(attributes::service(), rec).get()));
     builder.append(constants::kContextFieldName,
-                   extract<StringData>(attributes::threadName(), rec).get());
+                   extract<std::string_view>(attributes::threadName(), rec).get());
     builder.append(constants::kMessageFieldName,
-                   extract<StringData>(attributes::message(), rec).get());
+                   extract<std::string_view>(attributes::message(), rec).get());
 
     if (!attrs.get().empty()) {
         BSONValueExtractor extractor(builder);

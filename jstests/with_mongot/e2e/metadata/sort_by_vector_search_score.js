@@ -2,7 +2,7 @@
  * Tests using "vectorSearchScore" (and its equivalent alias metadata field "score") in a sort
  * expression. This isn't expected to be very common, but one anticipated use case is to compute
  * rank or other window fields, where a sort expression is required.
- * @tags: [featureFlagRankFusionFull, requires_fcv_81]
+ * @tags: [requires_fcv_81]
  */
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
 import {
@@ -30,7 +30,10 @@ function runTest(metadataSortFieldName) {
         // Get the embedding for 'Beauty and the Beast', which has _id = 14.
         makeMovieVectorExactQuery({queryVector: getMoviePlotEmbeddingById(14), limit: 10}),
         {
-            $setWindowFields: {sortBy: {score: {$meta: metadataSortFieldName}}, output: {rank: {$rank: {}}}},
+            $setWindowFields: {
+                sortBy: {score: {$meta: metadataSortFieldName}},
+                output: {rank: {$rank: {}}},
+            },
         },
         {$sort: {score: {$meta: metadataSortFieldName}, _id: 1}},
         {$project: {rank: 1, score: {$meta: metadataSortFieldName}, _id: 1}},
@@ -84,12 +87,16 @@ function runTest(metadataSortFieldName) {
         // Now insert a duplicate record of 'Beauty and the Beast' - we should see two records with
         // rank 1, the rest should be in order now starting at rank 3.
         assert.commandWorked(
-            coll.insertOne(coll.aggregate([{$match: {_id: 14}}, {$set: {_id: {$const: "duplicate"}}}]).next()),
+            coll.insertOne(
+                coll.aggregate([{$match: {_id: 14}}, {$set: {_id: {$const: "duplicate"}}}]).next(),
+            ),
         );
         waitUntilDocIsVisibleByQuery({
             docId: "duplicate",
             coll: coll,
-            queryPipeline: [makeMovieVectorExactQuery({queryVector: getMoviePlotEmbeddingById(14), limit: 10})],
+            queryPipeline: [
+                makeMovieVectorExactQuery({queryVector: getMoviePlotEmbeddingById(14), limit: 10}),
+            ],
         });
 
         const results = coll.aggregate(testRankingPipeline).toArray();

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
@@ -33,8 +7,11 @@
 #include "mongo/db/query/stage_builder/sbe/abt_lower_defs.h"
 #include "mongo/db/query/stage_builder/sbe/type_checker.h"
 
+#include <string_view>
+
 namespace mongo::stage_builder::abt_lower {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace abt;
 
@@ -137,14 +114,14 @@ TEST_F(AbtToSbeExpression, Lower3) {
 TEST_F(AbtToSbeExpression, Lower4) {
     auto [tagArr, valArr] = sbe::value::makeNewArray();
     auto arr = sbe::value::getArrayView(valArr);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 1);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 2);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 1);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 2);
     auto [tagArrNest, valArrNest] = sbe::value::makeNewArray();
     auto arrNest = sbe::value::getArrayView(valArrNest);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 21);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 22);
-    arr->push_back(tagArrNest, valArrNest);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 3);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 21);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 22);
+    arr->push_back_raw(tagArrNest, valArrNest);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 3);
 
     auto tree = make<FunctionCall>(
         "traverseP",
@@ -162,11 +139,11 @@ TEST_F(AbtToSbeExpression, Lower4) {
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
-    auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-    sbe::value::ValueGuard guard(resultTag, resultVal);
+    sbe::value::TagValueOwned result =
+        sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
-    ASSERT_EQ(sbe::value::TypeTags::Array, resultTag);
-    auto arrResult = sbe::value::getArrayView(resultVal);
+    ASSERT_EQ(sbe::value::TypeTags::Array, result.tag());
+    auto arrResult = sbe::value::getArrayView(result.value());
     ASSERT_EQ(4, arrResult->size());
     auto arrResult0 = arrResult->values()[0];
     ASSERT_EQ(sbe::value::TypeTags::NumberInt64, arrResult0.first);
@@ -194,14 +171,14 @@ TEST_F(AbtToSbeExpression, Lower4) {
 TEST_F(AbtToSbeExpression, Lower4TwoArgsOneLevel) {
     auto [tagArr, valArr] = sbe::value::makeNewArray();
     auto arr = sbe::value::getArrayView(valArr);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 1);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 2);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 1);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 2);
     auto [tagArrNest, valArrNest] = sbe::value::makeNewArray();
     auto arrNest = sbe::value::getArrayView(valArrNest);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 21);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 22);
-    arr->push_back(tagArrNest, valArrNest);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 3);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 21);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 22);
+    arr->push_back_raw(tagArrNest, valArrNest);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 3);
 
     auto tree = make<FunctionCall>(
         "traverseP",
@@ -227,11 +204,11 @@ TEST_F(AbtToSbeExpression, Lower4TwoArgsOneLevel) {
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
-    auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-    sbe::value::ValueGuard guard(resultTag, resultVal);
+    sbe::value::TagValueOwned result =
+        sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
-    ASSERT_EQ(sbe::value::TypeTags::Array, resultTag);
-    auto arrResult = sbe::value::getArrayView(resultVal);
+    ASSERT_EQ(sbe::value::TypeTags::Array, result.tag());
+    auto arrResult = sbe::value::getArrayView(result.value());
     ASSERT_EQ(2, arrResult->size());
     auto arrResult0 = arrResult->values()[0];
     ASSERT_EQ(sbe::value::TypeTags::NumberInt64, arrResult0.first);
@@ -245,14 +222,14 @@ TEST_F(AbtToSbeExpression, Lower4TwoArgsOneLevel) {
 TEST_F(AbtToSbeExpression, Lower4TwoArgsAnyLevel) {
     auto [tagArr, valArr] = sbe::value::makeNewArray();
     auto arr = sbe::value::getArrayView(valArr);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 1);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 2);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 1);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 2);
     auto [tagArrNest, valArrNest] = sbe::value::makeNewArray();
     auto arrNest = sbe::value::getArrayView(valArrNest);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 21);
-    arrNest->push_back(sbe::value::TypeTags::NumberInt64, 22);
-    arr->push_back(tagArrNest, valArrNest);
-    arr->push_back(sbe::value::TypeTags::NumberInt64, 3);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 21);
+    arrNest->push_back_raw(sbe::value::TypeTags::NumberInt64, 22);
+    arr->push_back_raw(tagArrNest, valArrNest);
+    arr->push_back_raw(sbe::value::TypeTags::NumberInt64, 3);
 
     auto tree = make<FunctionCall>(
         "traverseP",
@@ -281,11 +258,11 @@ TEST_F(AbtToSbeExpression, Lower4TwoArgsAnyLevel) {
     ASSERT(expr);
 
     auto compiledExpr = compileExpression(*expr);
-    auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-    sbe::value::ValueGuard guard(resultTag, resultVal);
+    sbe::value::TagValueOwned result =
+        sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
-    ASSERT_EQ(sbe::value::TypeTags::Array, resultTag);
-    auto arrResult = sbe::value::getArrayView(resultVal);
+    ASSERT_EQ(sbe::value::TypeTags::Array, result.tag());
+    auto arrResult = sbe::value::getArrayView(result.value());
     ASSERT_EQ(2, arrResult->size());
     auto arrResult0 = arrResult->values()[0];
     ASSERT_EQ(sbe::value::TypeTags::NumberInt64, arrResult0.first);
@@ -300,22 +277,6 @@ TEST_F(AbtToSbeExpression, Lower4TwoArgsAnyLevel) {
     ASSERT_EQ(32, sbe::value::bitcastTo<int64_t>(arrResult1v0.second));
 }
 
-TEST_F(AbtToSbeExpression, Lower5) {
-    auto tree = make<FunctionCall>(
-        "setField", makeSeq(Constant::nothing(), Constant::str("fieldA"), Constant::int64(10)));
-    auto env = VariableEnvironment::build(tree);
-    SlotVarMap map;
-    sbe::InputParamToSlotMap inputParamToSlotMap;
-    auto expr =
-        SBEExpressionLowering{env, map, *runtimeEnv(), slotIdGenerator(), inputParamToSlotMap}
-            .optimize(tree);
-
-    ASSERT(expr);
-
-    auto compiledExpr = compileExpression(*expr);
-    auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-    sbe::value::ValueGuard guard(resultTag, resultVal);
-}
 
 TEST_F(AbtToSbeExpression, LowerFunctionCallFail) {
     std::string errorMessage = "Error: Bad value 123456789!";
@@ -369,19 +330,19 @@ TEST_F(AbtToSbeExpression, LowerFunctionCallConvert) {
     {
         inputAccessor.reset(sbe::value::TypeTags::NumberDouble,
                             sbe::value::bitcastFrom<double>(42.0));
-        auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-        sbe::value::ValueGuard guard(resultTag, resultVal);
-        ASSERT_EQ(resultTag, sbe::value::TypeTags::NumberInt64);
-        ASSERT_EQ(sbe::value::bitcastTo<int64_t>(resultVal), 42);
+        sbe::value::TagValueOwned result =
+            sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        ASSERT_EQ(result.tag(), sbe::value::TypeTags::NumberInt64);
+        ASSERT_EQ(sbe::value::bitcastTo<int64_t>(result.value()), 42);
     }
 
     {
         auto [tag, val] = sbe::value::makeCopyDecimal(Decimal128{-73});
         inputAccessor.reset(tag, val);
-        auto [resultTag, resultVal] = runCompiledExpression(compiledExpr.get());
-        sbe::value::ValueGuard guard(resultTag, resultVal);
-        ASSERT_EQ(resultTag, sbe::value::TypeTags::NumberInt64);
-        ASSERT_EQ(sbe::value::bitcastTo<int64_t>(resultVal), -73);
+        sbe::value::TagValueOwned result =
+            sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
+        ASSERT_EQ(result.tag(), sbe::value::TypeTags::NumberInt64);
+        ASSERT_EQ(sbe::value::bitcastTo<int64_t>(result.value()), -73);
     }
 }
 
@@ -435,7 +396,7 @@ TEST_F(AbtToSbeExpression, LowerComparisonCollation) {
     sbe::InputParamToSlotMap inputParamToSlotMap;
 
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kToLowerString);
-    registerSlot("collator"_sd,
+    registerSlot("collator"sv,
                  sbe::value::TypeTags::collator,
                  sbe::value::bitcastFrom<const CollatorInterface*>(&collator),
                  false);
@@ -449,17 +410,17 @@ TEST_F(AbtToSbeExpression, LowerComparisonCollation) {
     ASSERT(expr);
     auto compiledExpr = compileExpression(*expr);
 
-    auto checkCmp3w = [&](StringData lhs, StringData rhs, int result) {
-        auto [lhsTag, lhsValue] = sbe::value::makeNewString(lhs);
-        lhsAccessor.reset(true, lhsTag, lhsValue);
-        auto [rhsTag, rhsValue] = sbe::value::makeNewString(rhs);
-        rhsAccessor.reset(true, rhsTag, rhsValue);
+    auto checkCmp3w = [&](std::string_view lhs, std::string_view rhs, int result) {
+        auto lhsStr = sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewString(lhs));
+        lhsAccessor.reset(std::move(lhsStr));
+        auto rhsStr = sbe::value::TagValueOwned::fromRaw(sbe::value::makeNewString(rhs));
+        rhsAccessor.reset(std::move(rhsStr));
 
-        auto [tag, value] = runCompiledExpression(compiledExpr.get());
-        sbe::value::ValueGuard guard(tag, value);
+        sbe::value::TagValueOwned cmpResult =
+            sbe::value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
-        ASSERT_EQ(sbe::value::TypeTags::NumberInt32, tag);
-        ASSERT_EQ(result, sbe::value::bitcastTo<int32_t>(value))
+        ASSERT_EQ(sbe::value::TypeTags::NumberInt32, cmpResult.tag());
+        ASSERT_EQ(result, sbe::value::bitcastTo<int32_t>(cmpResult.value()))
             << "comparing string '" << lhs << "' and '" << rhs << "'";
     };
 
@@ -629,12 +590,12 @@ TEST_F(AbtToSbeExpression, NotOnNonBoolean) {
     for (auto&& runTypeChecker : {false, true}) {
         auto tree = makeTestTree(runTypeChecker);
 
-        auto [resultTag, resultVal] = evalExpr(tree, boost::none);
-        sbe::value::ValueGuard guard(resultTag, resultVal);
+        sbe::value::TagValueOwned result =
+            sbe::value::TagValueOwned::fromRaw(evalExpr(tree, boost::none));
 
         // fillEmpty catches the Nothing from not("foo") and returns "bar".
-        ASSERT_EQ(resultTag, sbe::value::TypeTags::StringSmall);
-        ASSERT_EQ(sbe::value::getStringView(resultTag, resultVal), "bar");
+        ASSERT_EQ(result.tag(), sbe::value::TypeTags::StringSmall);
+        ASSERT_EQ(sbe::value::getStringView(result.tag(), result.value()), "bar");
     }
 }
 

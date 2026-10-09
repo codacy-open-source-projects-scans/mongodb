@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/rollback_impl.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -95,7 +68,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -110,6 +83,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/flat_hash_map.h>
@@ -134,6 +108,7 @@ MONGO_FAIL_POINT_DEFINE(rollbackHangBeforeTransitioningToRollback);
 MONGO_FAIL_POINT_DEFINE(hangBeforeResettingOpTimesAfterRollback);
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 // Used to set RollbackImpl::_newCounts to force a collection scan to fix count.
 constexpr long long kCollectionScanRequired = -1;
@@ -141,12 +116,12 @@ constexpr long long kCollectionScanRequired = -1;
 RollbackImpl::Listener kNoopListener;
 
 // The name of the insert, update and delete commands as found in oplog command entries.
-constexpr auto kInsertCmdName = "insert"_sd;
-constexpr auto kUpdateCmdName = "update"_sd;
-constexpr auto kDeleteCmdName = "delete"_sd;
-constexpr auto kNumRecordsFieldName = "numRecords"_sd;
-constexpr auto kToFieldName = "to"_sd;
-constexpr auto kDropTargetFieldName = "dropTarget"_sd;
+constexpr auto kInsertCmdName = "insert"sv;
+constexpr auto kUpdateCmdName = "update"sv;
+constexpr auto kDeleteCmdName = "delete"sv;
+constexpr auto kNumRecordsFieldName = "numRecords"sv;
+constexpr auto kToFieldName = "to"sv;
+constexpr auto kDropTargetFieldName = "dropTarget"sv;
 
 /**
  * Parses the o2 field of a drop or rename oplog entry for the count of the collection that was
@@ -154,7 +129,7 @@ constexpr auto kDropTargetFieldName = "dropTarget"_sd;
  */
 boost::optional<long long> _parseDroppedCollectionCount(const OplogEntry& oplogEntry) {
     auto commandType = oplogEntry.getCommandType();
-    auto desc = OplogEntry::CommandType::kDrop == commandType ? "drop"_sd : "rename"_sd;
+    auto desc = OplogEntry::CommandType::kDrop == commandType ? "drop"sv : "rename"sv;
 
     auto obj2 = oplogEntry.getObject2();
     if (!obj2) {
@@ -270,8 +245,9 @@ Status RollbackImpl::runRollback(OperationContext* opCtx) {
     // the size storer information is no longer accurate. This may be necessary if capped deletes
     // are rolled-back or if rollback occurs across a collection rename.
     sizeRecovery.setRecordStoresShouldAlwaysCheckSize(true);
-    ScopeGuard sizeRecoveryStateGuard{
-        [&sizeRecovery] { sizeRecovery.setRecordStoresShouldAlwaysCheckSize(false); }};
+    ScopeGuard sizeRecoveryStateGuard{[&sizeRecovery] {
+        sizeRecovery.setRecordStoresShouldAlwaysCheckSize(false);
+    }};
 
     // After successfully transitioning to the ROLLBACK state, we must always transition back to
     // SECONDARY, even if we fail at any point during the rollback process.
@@ -398,7 +374,24 @@ Status RollbackImpl::_transitionToRollback(OperationContext* opCtx) {
                                  .killConflictingOperations(
                                      rss::consensus::IntentRegistry::InterruptionType::Rollback,
                                      opCtx,
-                                     0 /* no timeout */)
+                                     [svcCtx = opCtx->getServiceContext()] {
+                                         // Kill unprepared transactions to release intents whose
+                                         // lifetimes were extended by the WUOW but do not belong to
+                                         // an active opCtx.
+                                         auto client = svcCtx->getService()->makeClient(
+                                             "KillSessionsForRollback", Client::noSession());
+                                         AlternativeClientRegion acr(client);
+                                         auto killOpCtx = cc().makeOperationContext();
+                                         shard_role_details::getRecoveryUnit(killOpCtx.get())
+                                             ->setNoEvictionAfterCommitOrRollback();
+                                         SessionKiller::Matcher matcher(KillAllSessionsByPatternSet{
+                                             makeKillAllSessionsByPattern(killOpCtx.get())});
+                                         killSessionsAbortUnpreparedTransactions(
+                                             killOpCtx.get(),
+                                             matcher,
+                                             ErrorCodes::InterruptedDueToReplStateChange);
+                                     },
+                                     boost::optional<uint32_t>{0} /* no timeout */)
                                  .get());
         }
         rstlLock.emplace(opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
@@ -442,6 +435,10 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
     // Wait for all background operations to complete by waiting on each database. Single-phase
     // index builds are not stopped before rollback, so we must wait for these index builds to
     // complete.
+    //
+    // Only the index builds this node is running are waited for. Primary-driven index builds that
+    // are merely registered have no thread of their own, and their registry entries are cleared and
+    // repopulated from disk by closeCatalog()/openCatalog() below, so there is nothing to wait for.
     std::vector<DatabaseName> dbNames(dbs.begin(), dbs.end());
     LOGV2(21595, "Waiting for all background operations to complete before starting rollback");
     for (const auto& dbName : dbNames) {
@@ -452,7 +449,8 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
                         "Waiting for background operations to complete",
                         "numBackgroundOperationsInProgress"_attr = numInProg,
                         logAttrs(dbName));
-            IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(opCtx, dbName);
+            IndexBuildsCoordinator::get(opCtx)->awaitNoBgOpInProgForDb(
+                opCtx, dbName, {IndexBuildProtocol::kSinglePhase});
         }
     }
 
@@ -470,8 +468,9 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
         uuids.insert(opUUID.get());
     }
 
-    // No namespaces for a no-op or keyMaterial.
-    if (opType == OpTypeEnum::kNoop || opType == OpTypeEnum::kKeyMaterial) {
+    // No namespaces for a no-op, keyMaterial, or kCMKRotation.
+    if (opType == OpTypeEnum::kNoop || opType == OpTypeEnum::kKeyMaterial ||
+        opType == OpTypeEnum::kCMKRotation) {
         return std::make_pair(std::set<NamespaceString>(), std::set<UUID>());
     }
 
@@ -527,6 +526,8 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
             case OplogEntry::CommandType::kCollMod:
             case OplogEntry::CommandType::kTruncateRange:
             case OplogEntry::CommandType::kInvalidateCollectionMetadata:
+            case OplogEntry::CommandType::kSetAllowChunkOperations:
+            case OplogEntry::CommandType::kUpdateCollectionMetadata:
             case OplogEntry::CommandType::kSetMultikeyMetadata: {
                 // For all other command types, we should be able to parse the collection name from
                 // the first command argument.
@@ -543,6 +544,8 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
             case OplogEntry::CommandType::kAbortTransaction:
             case OplogEntry::CommandType::kCreateDatabaseMetadata:
             case OplogEntry::CommandType::kDropDatabaseMetadata:
+            case OplogEntry::CommandType::kInvalidateAllCollectionMetadata:
+            case OplogEntry::CommandType::kInvalidateAllDatabaseMetadata:
             case OplogEntry::CommandType::kInitReplicatedFastCount:
             case OplogEntry::CommandType::kDropIdent: {
                 // There is no specific namespace to save for these operations.
@@ -705,7 +708,7 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
 
     // Log the total number of insert and update operations that have been rolled back as a
     // result of recovering to the stable timestamp.
-    auto getCommandCount = [&](StringData key) {
+    auto getCommandCount = [&](std::string_view key) {
         const auto& m = _observerInfo.rollbackCommandCounts;
         auto it = m.find(key);
         return (it == m.end()) ? 0 : it->second;
@@ -986,8 +989,9 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
         return status;
     }
 
-    // No information to record for a no-op.
-    if (opType == OpTypeEnum::kNoop || opType == OpTypeEnum::kKeyMaterial) {
+    // No information to record for a no-op, KeyMaterial, or CMKRotation.
+    if (opType == OpTypeEnum::kNoop || opType == OpTypeEnum::kKeyMaterial ||
+        opType == OpTypeEnum::kCMKRotation) {
         return Status::OK();
     }
 

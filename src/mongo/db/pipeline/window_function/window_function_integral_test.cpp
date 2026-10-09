@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
@@ -39,6 +12,7 @@
 #include "mongo/util/time_support.h"
 
 #include <cmath>
+#include <string_view>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -294,18 +268,18 @@ TEST_F(WindowFunctionIntegralTest, InputParameterWrongTypeTest) {
     auto singleton = Value{std::vector<Value>{{Value(5.0)}}};
     ASSERT_THROWS_CODE(integral->add(singleton), DBException, 5423900);
 
-    auto doubleString =
-        Value(std::vector<Value>{Value{StringData{"hello"}}, Value{StringData{"world"}}});
+    auto doubleString = Value(
+        std::vector<Value>{Value{std::string_view{"hello"}}, Value{std::string_view{"world"}}});
     ASSERT_THROWS_CODE(integral->add(doubleString), DBException, 5423900);
 
-    auto str1 = Value(std::vector<Value>{Value{StringData{"hello"}}, Value{1}});
+    auto str1 = Value(std::vector<Value>{Value{std::string_view{"hello"}}, Value{1}});
     ASSERT_THROWS_CODE(integral->add(str1), DBException, 5423900);
 
-    auto str2 = Value(std::vector<Value>{Value{1}, Value{StringData{"world"}}});
+    auto str2 = Value(std::vector<Value>{Value{1}, Value{std::string_view{"world"}}});
     ASSERT_THROWS_CODE(integral->add(str2), DBException, 5423900);
 
-    auto str2date = Value(
-        std::vector<Value>{Value{Date_t::fromMillisSinceEpoch(1000)}, Value{StringData{"world"}}});
+    auto str2date = Value(std::vector<Value>{Value{Date_t::fromMillisSinceEpoch(1000)},
+                                             Value{std::string_view{"world"}}});
     ASSERT_THROWS_CODE(integral->add(str2), DBException, 5423900);
 }
 

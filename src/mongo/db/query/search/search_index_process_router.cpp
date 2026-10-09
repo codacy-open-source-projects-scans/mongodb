@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/search/search_index_process_router.h"
 
+#include "mongo/db/api_parameters.h"
 #include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/router_role/router_role.h"
 #include "mongo/db/service_context.h"
@@ -62,13 +37,17 @@ namespace {
 // When future work is completed to cache the views catalog on the router aware, we will be able to
 // eliminate this race condition and get a single/locked instance of the view graph for each search
 // index command.
-StatusWith<std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>> resolveViewHelper(
+StatusWith<std::pair<boost::optional<UUID>, boost::optional<ResolvedNamespace>>> resolveViewHelper(
     OperationContext* opCtx, const CachedDatabaseInfo& cdb, NamespaceString nss) {
 
     BSONObjBuilder bob;
     bob.append("_shardsvrResolveView", 1);
     bob.append("nss", NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
 
+    // _shardsvrResolveView is an internal command that does not participate in API versioning.
+    // Strip any API parameters so they are not forwarded with the command, which would cause it
+    // to fail if the client set apiStrict: true.
+    IgnoreAPIParametersBlock ignoreAPIParams(opCtx);
     auto response = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
         opCtx,
         nss.dbName(),
@@ -76,12 +55,12 @@ StatusWith<std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>> reso
         bob.obj(),
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         Shard::RetryPolicy::kIdempotent);
-    boost::optional<ResolvedView> resolvedView;
+    boost::optional<ResolvedNamespace> resolvedView;
     boost::optional<UUID> uuid;
     auto data = uassertStatusOK(response.swResponse).data;
 
     if (data.hasField("resolvedView")) {
-        resolvedView = boost::make_optional(ResolvedView::parseFromBSON(data["resolvedView"]));
+        resolvedView = boost::make_optional(ResolvedNamespace::parseFromBSON(data["resolvedView"]));
     }
     if (data.hasField("collectionUUID")) {
         uuid = boost::make_optional(uassertStatusOK(UUID::parse(data["collectionUUID"])));
@@ -90,7 +69,7 @@ StatusWith<std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>> reso
 }
 }  // namespace
 
-std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>
+std::pair<boost::optional<UUID>, boost::optional<ResolvedNamespace>>
 SearchIndexProcessRouter::fetchCollectionUUIDAndResolveView(OperationContext* opCtx,
                                                             const NamespaceString& nss,
                                                             bool failOnTsColl) {
@@ -98,7 +77,7 @@ SearchIndexProcessRouter::fetchCollectionUUIDAndResolveView(OperationContext* op
     auto uuidAndPossibleCollName = router.route(
         "get collection UUID",
         [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb)
-            -> std::pair<boost::optional<UUID>, boost::optional<ResolvedView>> {
+            -> std::pair<boost::optional<UUID>, boost::optional<ResolvedNamespace>> {
             ListCollections listCollections;
             listCollections.setDbName(nss.dbName());
             listCollections.setFilter(BSON("name" << nss.coll()));
@@ -140,7 +119,7 @@ SearchIndexProcessRouter::fetchCollectionUUIDAndResolveView(OperationContext* op
     return uuidAndPossibleCollName;
 }
 
-std::pair<UUID, boost::optional<ResolvedView>>
+std::pair<UUID, boost::optional<ResolvedNamespace>>
 SearchIndexProcessRouter::fetchCollectionUUIDAndResolveViewOrThrow(OperationContext* opCtx,
                                                                    const NamespaceString& nss) {
     auto uuidResolvdNssPair = fetchCollectionUUIDAndResolveView(opCtx, nss);

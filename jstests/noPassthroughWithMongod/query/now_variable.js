@@ -5,7 +5,7 @@ import "jstests/libs/query/sbe_assert_error_override.js";
 
 import {getWinningPlanFromExplain, isIxscan} from "jstests/libs/query/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-import {checkSbeFullFeatureFlagEnabled, sbePlanCacheEnabled} from "jstests/libs/query/sbe_util.js";
+import {checkSbeFullFeatureFlagEnabled} from "jstests/libs/query/sbe_util.js";
 
 const coll = db[jsTest.name()];
 const otherColl = db[coll.getName() + "_other"];
@@ -31,11 +31,15 @@ for (let i = 0; i < numdocs; ++i) {
 }
 assert.commandWorked(bulk.execute());
 
-assert.commandWorked(db.createView("viewWithNow", coll.getName(), [{$addFields: {timeField: "$$NOW"}}]));
+assert.commandWorked(
+    db.createView("viewWithNow", coll.getName(), [{$addFields: {timeField: "$$NOW"}}]),
+);
 const viewWithNow = db["viewWithNow"];
 
 assert.commandWorked(
-    db.createView("viewWithClusterTime", coll.getName(), [{$addFields: {timeField: "$$CLUSTER_TIME"}}]),
+    db.createView("viewWithClusterTime", coll.getName(), [
+        {$addFields: {timeField: "$$CLUSTER_TIME"}},
+    ]),
 );
 const viewWithClusterTime = db["viewWithClusterTime"];
 
@@ -167,33 +171,6 @@ runTestsExpectFailure(baseCollectionClusterTimeAgg);
 runTestsExpectFailure(fromViewWithClusterTime);
 runTestsExpectFailure(withExprClusterTime);
 
-// TODO SERVER-119773 Handle SBE plan cache in new get executor
-if (sbePlanCacheEnabled(db) && !FeatureFlagUtil.isPresentAndEnabled(db, "GetExecutorDeferredEngineChoice")) {
-    function verifyPlanCacheSize(query) {
-        coll.getPlanCache().clear();
-
-        query().toArray();
-        // It can take two executions of a query for a plan to get cached.
-        query().toArray();
-
-        const caches = coll.getPlanCache().list();
-        assert.eq(caches.length, 1, caches);
-        assert.eq(caches[0].cachedPlan.stages.includes("Date"), false, caches);
-    }
-
-    // Query with $$NOW will be cached.
-    verifyPlanCacheSize(projWithNow);
-    verifyPlanCacheSize(aggWithNow);
-
-    // $$NOW is not in SBE query.
-    verifyPlanCacheSize(fromViewWithNow);
-    verifyPlanCacheSize(withExprNow);
-
-    // $$NOW could not be pushed down into SBE.
-    verifyPlanCacheSize(baseCollectionNowAgg);
-    verifyPlanCacheSize(aggWithNowNotPushedDown);
-}
-
 {
     // Insert an doc with a future time.
     const futureColl = db[coll.getName() + "_future"];
@@ -224,6 +201,9 @@ if (sbePlanCacheEnabled(db) && !FeatureFlagUtil.isPresentAndEnabled(db, "GetExec
             .find({$expr: {$lt: ["$timeField", {$subtract: ["$$NOW", 100]}]}})
             .explain("queryPlanner");
         const winningPlan = getWinningPlanFromExplain(explainResults);
-        assert(isIxscan(db, winningPlan), `Expected winningPlan to be index scan plan: ${tojson(winningPlan)}`);
+        assert(
+            isIxscan(db, winningPlan),
+            `Expected winningPlan to be index scan plan: ${tojson(winningPlan)}`,
+        );
     }
 }

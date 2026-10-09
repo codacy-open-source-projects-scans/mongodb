@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/authenticate.h"
@@ -45,7 +18,7 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/logv2/log_severity.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/op_msg.h"
@@ -55,6 +28,7 @@
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/net/connection_purpose.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_options.h"
@@ -69,6 +43,7 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -90,7 +65,7 @@ class DBClientCursor;
  * exception, it is legal to call shutdown() or shutdownAndDisallowReconnect() from any thread as a
  * way to interrupt the owning thread.
  */
-class MONGO_MOD_PUBLIC DBClientSession : public DBClientBase {
+class [[MONGO_MOD_PUBLIC]] DBClientSession : public DBClientBase {
 public:
     /**
      * A hook used to validate the reply of a "hello" command during connection. If the hook
@@ -110,7 +85,8 @@ public:
                     double soTimeout,
                     MongoURI uri,
                     const HandshakeValidationHook& hook,
-                    const ClientAPIVersionParameters* apiParameters);
+                    const ClientAPIVersionParameters* apiParameters,
+                    ConnectionPurpose connectionPurpose = ConnectionPurpose::kDefault);
 
     ~DBClientSession() override {}
 
@@ -123,7 +99,7 @@ public:
      * @param server The server to connect to.
      */
     virtual void connect(const HostAndPort& server,
-                         StringData applicationName,
+                         std::string_view applicationName,
                          const boost::optional<TransientSSLParams>& transientSSLParams);
 
     /**
@@ -227,11 +203,15 @@ public:
         return _authenticatedDuringConnect;
     }
 
+    ConnectionPurpose getConnectionPurpose() const {
+        return _connectionPurpose;
+    }
+
     const MongoURI& getURI() const {
         return _uri;
     }
 
-    static Status appendClientMetadata(StringData applicationName, BSONObjBuilder* bob);
+    static Status appendClientMetadata(std::string_view applicationName, BSONObjBuilder* bob);
 
 #ifdef MONGO_CONFIG_SSL
     const SSLConfiguration* getSSLConfiguration() override;
@@ -270,6 +250,8 @@ protected:
     bool _isReplicaSetMember = false;
     bool _isMongos = false;
 
+    // used for purpose-specific metrics, such as replication
+    ConnectionPurpose _connectionPurpose;
     // The session mutex must be held to shutdown the _session from a non-owning thread, or to
     // rebind the handle from the owning thread. The thread that owns this DBClientSession is
     // allowed to use the _session without locking the mutex. This mutex also guards writes to
@@ -280,8 +262,8 @@ protected:
     uint64_t _sessionCreationTimeMicros = INVALID_SOCK_CREATION_TIME;
     Date_t _lastConnectivityCheck;
 
-    AtomicWord<bool> _stayFailed{false};
-    AtomicWord<bool> _failed{false};
+    Atomic<bool> _stayFailed{false};
+    Atomic<bool> _failed{false};
     const bool _autoReconnect;
 
     HostAndPort _serverAddress;

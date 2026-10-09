@@ -10,7 +10,7 @@ import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {waitForIndexStatusMetrics} from "jstests/noPassthrough/index_builds/libs/index_build_otel_utils.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
-import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_file_export_helpers.js";
+import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_metrics_file_export_helpers.js";
 
 const {metricsDir, otelParams} = otelFileExportParams(jsTestName());
 const rst = new ReplSetTest({
@@ -45,7 +45,10 @@ const baselineMetrics = waitForIndexStatusMetrics(
 );
 
 const res = assert.commandWorked(
-    primary.adminCommand({configureFailPoint: "hangBeforeInitializingIndexBuild", mode: "alwaysOn"}),
+    primary.adminCommand({
+        configureFailPoint: "hangBeforeInitializingIndexBuild",
+        mode: "alwaysOn",
+    }),
 );
 const failpointTimesEntered = res.count;
 
@@ -74,7 +77,9 @@ try {
     // Step down the primary.
     assert.commandWorked(primary.adminCommand({replSetStepDown: 60, force: true}));
 } finally {
-    assert.commandWorked(primary.adminCommand({configureFailPoint: "hangBeforeInitializingIndexBuild", mode: "off"}));
+    assert.commandWorked(
+        primary.adminCommand({configureFailPoint: "hangBeforeInitializingIndexBuild", mode: "off"}),
+    );
 }
 
 // Wait for the index build to stop.

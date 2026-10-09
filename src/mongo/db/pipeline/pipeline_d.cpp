@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/pipeline_d.h"
 
@@ -71,6 +45,7 @@
 #include "mongo/db/pipeline/document_source_sample_from_random_cursor.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
@@ -98,7 +73,7 @@
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
-#include "mongo/db/query/query_knob_configuration.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -132,6 +107,7 @@
 #include <iterator>
 #include <list>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -199,9 +175,8 @@ std::unique_ptr<FindCommandRequest> createFindCommand(
  *
  * Returns the field name of a geo-indexed field, or boost::none if none were found.
  */
-boost::optional<StringData> extractGeoNearFieldFromIndexesByType(OperationContext* opCtx,
-                                                                 const CollectionPtr& collection,
-                                                                 const string& indexType) {
+boost::optional<std::string_view> extractGeoNearFieldFromIndexesByType(
+    OperationContext* opCtx, const CollectionPtr& collection, const string& indexType) {
     std::vector<const IndexCatalogEntry*> idxs;
     const IndexDescriptor* idxToUse = nullptr;
     collection->getIndexCatalog()->findIndexByType(opCtx, indexType, idxs);
@@ -237,8 +212,8 @@ boost::optional<StringData> extractGeoNearFieldFromIndexesByType(OperationContex
  *
  * The 'collection' is required to exist. Throws if no usable 2d or 2dsphere index could be found.
  */
-StringData extractGeoNearFieldFromIndexes(OperationContext* opCtx,
-                                          const CollectionPtr& collection) {
+std::string_view extractGeoNearFieldFromIndexes(OperationContext* opCtx,
+                                                const CollectionPtr& collection) {
     tassert(9911911, "", collection);
 
     // Look for relevant 2d index first. If none, look for relevant 2dsphere index.
@@ -753,9 +728,49 @@ void PipelineD::buildAndAttachInnerQueryExecutorAndBindCatalogInfoToPipeline(
 namespace {
 
 /**
- * Checks if $group or $sort+$group at the beginning of the pipeline that could qualify for the
- * DISTINCT_SCAN plan that visits the first document in each group (SERVER-9507). If found, return
- * the stage that would replace them in the pipeline on top of DISTINCT_SCAN.
+ * Checks if $unwind immediately followed by $group can be answered by a DISTINCT_SCAN on a
+ * (possibly multikey) index on the unwound field (SERVER-33715). This is only the case when
+ * preserveNullAndEmptyArrays=true, because with it nullish values and empty arrays all produce a
+ * null group key, matching the index's null and undefined keys. Without it they produce no group at
+ * all, but the index cannot distinguish them from e.g. a [null] element, which does.
+ */
+bool canRewriteUnwindGroupAsDistinctScan(const DocumentSourceUnwind& unwindStage,
+                                         const DocumentSourceGroupBase& groupStage) {
+    // includeArrayIndex and strict mode cannot be reproduced from the index keys alone.
+    if (!unwindStage.preserveNullAndEmptyArrays() || unwindStage.indexPath() ||
+        unwindStage.isStrict()) {
+        return false;
+    }
+
+    // Accumulators would need the unwound documents rather than one covered document per key.
+    // TODO SERVER-133206: Support $first, $last, $top and $bottom.
+    if (!groupStage.getAccumulationStatements().empty()) {
+        return false;
+    }
+
+    // Composite group keys are not supported.
+    const auto& idExpressions = groupStage.getIdExpressions();
+    if (idExpressions.size() != 1) {
+        return false;
+    }
+
+    auto fieldPathExpr = dynamic_cast<ExpressionFieldPath*>(idExpressions.front().get());
+    if (!fieldPathExpr || fieldPathExpr->isVariableReference()) {
+        return false;
+    }
+
+    // Dotted paths are not supported because index key generation unwinds arrays on every component
+    // along the dotted path but $unwind doesn't.
+    // TODO SERVER-133204: Support dotted paths where only the leaf is multikey.
+    const auto& fieldPath = fieldPathExpr->getFieldPath();
+    return fieldPath.getPathLength() == 2 &&
+        fieldPath.tail().fullPath() == unwindStage.getUnwindPath();
+}
+
+/**
+ * Checks if $group, $sort+$group or $unwind+$group at the beginning of the pipeline could qualify
+ * for the DISTINCT_SCAN plan that visits the first document in each group (SERVER-9507). If found,
+ * return the stage that would replace them in the pipeline on top of DISTINCT_SCAN.
  *
  * Returns RewriteOnFirstDocumentResult.
  */
@@ -763,6 +778,21 @@ RewriteOnFirstDocumentResult tryDistinctGroupRewrite(const DocumentSourceContain
     auto sourcesIt = sources.begin();
     boost::optional<SortPattern> sortStagePattern{};
     if (sourcesIt != sources.end()) {
+        if (auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(sourcesIt->get()); unwindStage) {
+            auto groupIt = std::next(sourcesIt);
+            if (groupIt == sources.end()) {
+                return {};
+            }
+            auto groupStage = dynamic_cast<DocumentSourceGroupBase*>(groupIt->get());
+            if (!groupStage || !canRewriteUnwindGroupAsDistinctScan(*unwindStage, *groupStage)) {
+                // TODO SERVER-133195: Support a $match between the $unwind and the $group.
+                return {};
+            }
+            auto rewrite = groupStage->rewriteGroupAsTransformOnFirstDocument(boost::none);
+            rewrite.groupFollowsUnwind = true;
+            return rewrite;
+        }
+
         auto sortStage = dynamic_cast<DocumentSourceSort*>(sourcesIt->get());
         if (sortStage) {
             if (!sortStage->hasLimit()) {
@@ -976,7 +1006,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
     // If the pushed-down sort stage will output sortKey metadata, mark it as available for the
     // remaining pipeline stages. This ensures that stages like extension stages or $setWindowFields
     // can declare dependencies on sortKey metadata even after the sort has been pushed down.
-    if (sortStage && sortStage->shouldSetSortKeyMetadata()) {
+    if (sortStage && sortStage->providesSortKeyMetadata()) {
         availableMetadata.set(DocumentMetadataFields::kSortKey);
     }
 
@@ -1034,7 +1064,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
             // The $match stage manages its own state for SBE compatibility without modifying the
             // ExpressionContext. Instead of re-parsing the MatchExpression to set the
             // compatibility we manually set it here.
-            expCtx->setSbeCompatibility(leadingMatch->sbeCompatibility());
+            expCtx->overrideSbeCompatibility(leadingMatch->sbeCompatibility());
             tassert(8897900,
                     "Expected non-empty query for pushing down leading $match stage",
                     !queryObj.isEmpty());
@@ -1048,7 +1078,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
             // Reset the 'sbeCompatible' flag before canonicalizing the 'findCommand' to potentially
             // allow SBE to execute the portion of the query that's pushed down, even if the portion
             // of the query that is not pushed down contains expressions not supported by SBE.
-            expCtx->setSbeCompatibility(SbeCompatibility::noRequirements);
+            expCtx->overrideSbeCompatibility(SbeCompatibility::noRequirements);
             return uassertStatusOK(parsed_find_command::parse(
                 expCtx,
                 ParsedFindCommandParams{
@@ -1064,7 +1094,8 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
         {.expCtx = expCtx,
          .parsedFind = std::move(parsedFind),
          .isCountLike = *shouldProduceEmptyDocs,
-         .isSearchQuery = PipelineD::isSearchPresentAndEligibleForSbe(pipeline)});
+         .isSearchQuery = PipelineD::isSearchPresentAndEligibleForSbe(pipeline),
+         .aggWithNonEmptyPipeline = !pipeline->empty()});
 
     if (!swCq.isOK()) {
         return swCq.getStatus();
@@ -1127,8 +1158,23 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
                            std::size_t plannerOpts) {
     // We want to do this before createCanonicalQuery() which does the last-minute optimization to
     // 'pipeline' and hence modifies it.
-    auto [sortPattern, sortDirectionChangeIsRequired, rewrittenGroupStage] =
-        tryDistinctGroupRewrite(pipeline->getSources());
+    auto groupRewrite = tryDistinctGroupRewrite(pipeline->getSources());
+    auto& [sortPattern, sortDirectionChangeIsRequired, rewrittenGroupStage, groupFollowsUnwind] =
+        groupRewrite;
+
+    // 'INCLUDE_SHARD_FILTER' is only added to the planner options by 'getExecutorFind()' later,
+    // so we have to check whether the collection is sharded here directly.
+    const bool needsShardFilter = (plannerOpts & QueryPlannerParams::INCLUDE_SHARD_FILTER) ||
+        (collections.hasMainCollection() &&
+         collections.getMainCollectionAcquisition().getShardingDescription().isSharded());
+
+    if (groupFollowsUnwind && (!queryObj.isEmpty() || expCtx->getCollator() || needsShardFilter)) {
+        // Filters, non-simple collations or shard filtering are not supported with the
+        // $unwind+$group to DISTINCT_SCAN rewrite.
+        // TODO SERVER-133187: Support sharded collections.
+        // TODO SERVER-133195: Support filters.
+        rewrittenGroupStage.reset();
+    }
 
     const bool isDistinctMultiplanningEnabled =
         expCtx->isFeatureFlagShardFilteringDistinctScanEnabled();
@@ -1173,9 +1219,23 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
         return StatusWith{std::move(cq)};
     }
 
+    if (groupFollowsUnwind && cq->metadataDeps().any()) {
+        // $groupByDistinctScan doesn't preserve metadata and the $unwind+$group rewrite must
+        // always replace both stages, so it can't be applied when metadata is requested.
+        return StatusWith{std::move(cq)};
+    }
+
     // If the feature flag is disabled, preserve the old behavior where we reset planner options
     // when constructing an executor for distinct.
-    plannerOpts = isDistinctMultiplanningEnabled ? plannerOpts : QueryPlannerParams::DEFAULT;
+    if (!isDistinctMultiplanningEnabled) {
+        // A forced shard-filter read (e.g. a never-routed local _id lookup) can't use the legacy
+        // DISTINCT_SCAN path, which resets planner options without the mandatory shard-filter bit;
+        // fall through to the ordinary executor.
+        if (expCtx->forceShardFilter()) {
+            return StatusWith{std::move(cq)};
+        }
+        plannerOpts = QueryPlannerParams::DEFAULT;
+    }
     plannerOpts |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
 
     if (!*shouldProduceEmptyDocs) {
@@ -1201,7 +1261,8 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
                                       false,
                                       boost::optional<UUID>(),
                                       boost::optional<BSONObj>(),
-                                      flipDistinctScanDirection));
+                                      flipDistinctScanDirection,
+                                      groupFollowsUnwind));
 
     if (isDistinctMultiplanningEnabled) {
         // In the context of distinct multiplanning, if there are no indexes suitable for distinct
@@ -1256,6 +1317,9 @@ tryPrepareDistinctExecutor(const intrusive_ptr<ExpressionContext>& expCtx,
                 "Failed to determine whether query system can provide a DISTINCT_SCAN grouping");
         }
 
+        if (groupFollowsUnwind) {
+            pipeline->popFrontWithName(DocumentSourceUnwind::kStageName);
+        }
         pipeline->popFrontWithName(rewrittenGroupStage->originalStageName());
 
         boost::intrusive_ptr<DocumentSource> groupTransform(
@@ -1314,6 +1378,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
     bool timeseriesBoundedSortOptimization,
     std::size_t plannerOpts = QueryPlannerParams::DEFAULT,
     boost::optional<TraversalPreference> traversalPreference = boost::none) {
+
+    // If this pipeline is a change stream, then the cursor must use the simple collation, so we
+    // temporarily switch the collator on the ExpressionContext to nullptr for the entire executor
+    // preparation. This must be done before the CanonicalQuery is built, because the oplog $match
+    // filter (which is pushed down into the cursor) is parsed using the ExpressionContext's
+    // collator. Namespace strings and other values matched against oplog entries must always be
+    // compared with the simple collation, regardless of the pipeline's configured collation. Any
+    // user-defined collation applies only to the change events produced downstream, not to the scan
+    // over the oplog. Note that 'collatorStash' restores the original collator when it leaves
+    // scope.
+    const bool isChangeStream =
+        pipeline->peekFront() && pipeline->peekFront()->constraints().isChangeStreamStage();
+    auto collatorStash = isChangeStream ? expCtx->temporarilyChangeCollator(nullptr) : nullptr;
+
     // See if could use DISTINCT_SCAN with the pipeline (SERVER-9507 & SERVER-84347).
     auto swExecOrCq = tryPrepareDistinctExecutor(expCtx,
                                                  collections,
@@ -1351,20 +1429,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
         plannerOpts |= QueryPlannerParams::RETURN_OWNED_DATA;
     }
 
-    // If this pipeline is a change stream, then the cursor must use the simple collation, so we
-    // temporarily switch the collator on the ExpressionContext to nullptr. We do this here because
-    // by this point, all the necessary pipeline analyses and optimizations have already been
-    // performed. Note that 'collatorStash' restores the original collator when it leaves scope.
-    const bool isChangeStream =
-        pipeline->peekFront() && pipeline->peekFront()->constraints().isChangeStreamStage();
-    std::unique_ptr<CollatorInterface> collatorForCursor = nullptr;
-    auto collatorStash =
-        isChangeStream ? expCtx->temporarilyChangeCollator(std::move(collatorForCursor)) : nullptr;
-
     auto cq = std::move(std::get<1>(execOrCq));
     std::unique_ptr<GroupFromFirstDocumentTransformation> rewrittenGroupStage = nullptr;
+    bool distinctUnwindsArrays = false;
     if (cq->getDistinct()) {
         rewrittenGroupStage = cq->getDistinct()->releaseRewrittenGroupStage();
+        distinctUnwindsArrays = cq->getDistinct()->unwindsArrays();
         plannerOpts |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
     }
 
@@ -1386,10 +1456,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
                 "The pipeline of an executor that has a distinct scan needs to have a rewritten "
                 "group stage component.",
                 rewrittenGroupStage);
-
         if (!executor.getValue()->getCanonicalQuery()->metadataDeps().any()) {
             // $groupByDistinctScan doesn't preserve metadata. Thus we can only apply the rewrite if
             // no metadata is requested.
+            if (distinctUnwindsArrays) {
+                pipeline->popFrontWithName(DocumentSourceUnwind::kStageName);
+            }
             pipeline->popFrontWithName(rewrittenGroupStage->originalStageName());
 
             auto groupTransform = make_intrusive<DocumentSourceSingleDocumentTransformation>(
@@ -1398,6 +1470,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
                 "$groupByDistinctScan",
                 false /* independentOfAnyCollection */);
             pipeline->addInitialSource(std::move(groupTransform));
+        } else {
+            // $groupByDistinctScan doesn't preserve metadata and the $unwind+$group rewrite must
+            // always replace both stages, so it can't be applied when metadata is requested. This
+            // should have been validated earlier on.
+            tassert(3371502,
+                    "Unexpected metadata dependencies for the $unwind+$group rewrite",
+                    !distinctUnwindsArrays);
         }
     }
 
@@ -1461,8 +1540,8 @@ PipelineD::supportsSort(const timeseries::BucketUnpacker& bucketUnpacker,
             const auto& controlMinTime = bucketUnpacker.getMinField(time);
             const auto& controlMaxTime = bucketUnpacker.getMaxField(time);
 
-            auto directionCompatible = [&](const BSONElement& keyPatternComponent,
-                                           const SortPatternPart& sortComponent) -> bool {
+            auto directionCompatible = [&scan](const BSONElement& keyPatternComponent,
+                                               const SortPatternPart& sortComponent) -> bool {
                 // The index component must not be special.
                 if (!keyPatternComponent.isNumber() || abs(keyPatternComponent.numberInt()) != 1)
                     return false;
@@ -1472,6 +1551,14 @@ PipelineD::supportsSort(const timeseries::BucketUnpacker& bucketUnpacker,
                 // For example: a backwards scan of a descending index produces ascending data.
                 const bool scanIsAscending = scan->isForward() == indexIsAscending;
                 return scanIsAscending == sortComponent.isAscending;
+            };
+
+            auto hasPointPredicate = [&scan](std::string_view fieldName) -> bool {
+                for (auto&& field : scan->getBounds().fields) {
+                    if (field.name == fieldName)
+                        return field.isPoint();
+                }
+                return false;
             };
 
             // Return none if the keyPattern cannot support the sort.
@@ -1498,12 +1585,14 @@ PipelineD::supportsSort(const timeseries::BucketUnpacker& bucketUnpacker,
                     return boost::none;
                 }
 
+
                 // Does the leading sort field match the index?
 
                 if (sortAndKeyPatternPartAgreeAndOnMeta(bucketUnpacker,
                                                         keyPatternIter->fieldNameStringData(),
                                                         *sortIter->fieldPath)) {
-                    if (!directionCompatible(*keyPatternIter, *sortIter))
+                    if (!directionCompatible(*keyPatternIter, *sortIter) &&
+                        !hasPointPredicate(keyPatternIter->fieldNameStringData()))
                         return boost::none;
 
                     // No conflict. Continue comparing the index vs the sort.
@@ -1513,13 +1602,6 @@ PipelineD::supportsSort(const timeseries::BucketUnpacker& bucketUnpacker,
                 }
 
                 // Does this index field have a point predicate?
-                auto hasPointPredicate = [&](StringData fieldName) -> bool {
-                    for (auto&& field : scan->getBounds().fields) {
-                        if (field.name == fieldName)
-                            return field.isPoint();
-                    }
-                    return false;
-                };
                 if (hasPointPredicate(keyPatternIter->fieldNameStringData())) {
                     ++keyPatternIter;
                     continue;
@@ -1604,7 +1686,7 @@ PipelineD::checkTimeHelper(const timeseries::BucketUnpacker& bucketUnpacker,
 
 bool PipelineD::sortAndKeyPatternPartAgreeAndOnMeta(
     const timeseries::BucketUnpacker& bucketUnpacker,
-    StringData keyPatternFieldName,
+    std::string_view keyPatternFieldName,
     const FieldPath& sortFieldPath) {
     FieldPath keyPatternFieldPath = FieldPath(
         keyPatternFieldName, false /* precomputeHashes */, false /* validateFieldNames */);
@@ -1769,6 +1851,14 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorGeneric(
     // and perform the rewrite here.
     const bool timeseriesBoundedSortOptimization = unpack && sort && (su.unpackIdx < su.sortIdx);
     std::size_t plannerOpts = QueryPlannerParams::DEFAULT;
+    if (expCtx->forceShardFilter() &&
+        collections.getMainCollectionAcquisition().getShardingDescription().isSharded()) {
+        // Shard-local read that was never routed by a mongos: keep the shard-filter stage even
+        // when the query extracts the full shard key (see
+        // QueryPlannerParams::requiresShardFiltering, which consults forceShardFilter() on the
+        // expCtx).
+        plannerOpts |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
+    }
     boost::optional<TraversalPreference> traversalPreference = boost::none;
     if (timeseriesBoundedSortOptimization) {
         traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);
@@ -2043,7 +2133,7 @@ void PipelineD::performBoundedSortOptimization(PlanStage* rootStage,
                         }
                     }(),
                     sort->getLimit(),
-                    sort->shouldSetSortKeyMetadata(),
+                    sort->providesSortKeyMetadata(),
                     expCtx));
 
             if (!indexSortOrderAgree) {
@@ -2113,17 +2203,7 @@ BSONObj PipelineD::getPostBatchResumeToken(const exec::agg::Pipeline* pipeline) 
 }
 
 bool PipelineD::isSearchPresentAndEligibleForSbe(const Pipeline* pipeline) {
-    auto expCtx = pipeline->getContext();
-
-    auto firstStageIsSearch = search_helpers::isSearchPipeline(pipeline) ||
-        search_helpers::isSearchMetaPipeline(pipeline);
-
-    auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabled();
-    auto forceClassicEngine =
-        expCtx->getQueryKnobConfiguration().getInternalQueryFrameworkControlForOp() ==
-        QueryFrameworkControlEnum::kForceClassicEngine;
-
-    return firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;
+    return false;
 }
 
 StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(

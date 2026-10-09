@@ -1,8 +1,9 @@
 /**
- * Test the use of "explain" with the "$search" aggregation stage. This tests  "executionStats" and
+ * Test the use of "explain" with the "$search" aggregation stage. This tests "executionStats" and
  * "allPlansExecution" verbosities and checks that they function as expected.
+ * TODO SERVER-131069: Mocked-only coverage not in e2e: controlled getMore
+ * sequencing, deterministic missing-ID filtering, multi-batch nReturned.
  * @tags: [requires_fcv_81]
- *
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
@@ -30,7 +31,10 @@ const collName = coll.getName();
 
 const explainObject = getDefaultLastExplainContents();
 
-if (checkSbeRestrictedOrFullyEnabled(db) && FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "SearchInSbe")) {
+if (
+    checkSbeRestrictedOrFullyEnabled(db) &&
+    FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "SearchInSbe")
+) {
     jsTestLog("Skipping the test because it only applies to $search in classic engine.");
     MongoRunner.stopMongod(conn);
     mongotmock.stop();

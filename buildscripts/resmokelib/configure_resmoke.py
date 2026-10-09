@@ -14,6 +14,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 import traceback
 from functools import cache
@@ -90,20 +91,20 @@ def _set_up_modules():
     # loop through all modules, we need to act on both enabled and disabled modules
     for module in module_configs.keys():
         module_config = module_configs[module]
-        all_paths_present = True
-        for key in ("fixture_dirs", "hook_dirs", "suite_dirs", "jstest_dirs"):
-            if key not in module_config:
-                continue
-            assert (
-                type(module_config[key]) == list
-            ), f"{key} in {module} did not have the expected type of list"
-            for module_dir in module_config[key]:
-                if not os.path.exists(module_dir):
-                    all_paths_present = False
-                    break
 
-        if module in _config.MODULES and all_paths_present:
-            # both the fixures and the hooks just need to be loaded once for resmoke to recognize them
+        # A module is considered "present" when the dirs that are actually imported
+        # (fixture_dirs and hook_dirs) all exist.  suite_dirs and jstest_dirs are
+        # optional path hints: if they exist they are surfaced; if they don't (e.g.
+        # in a Bazel sandbox where only declared data deps are present) the module
+        # still loads its Python code correctly.
+        loading_dirs_present = all(
+            os.path.exists(d)
+            for key in ("fixture_dirs", "hook_dirs")
+            for d in module_config.get(key, [])
+        )
+
+        if module in _config.MODULES and loading_dirs_present:
+            # both the fixtures and the hooks just need to be loaded once for resmoke to recognize them
             for resource_dir in module_config.get("fixture_dirs", []) + module_config.get(
                 "hook_dirs", []
             ):
@@ -112,10 +113,11 @@ def _set_up_modules():
                 autoloader.load_all_modules(package, [norm_path])
 
             for suite_dir in module_config.get("suite_dirs", []):
-                _config.MODULE_SUITE_DIRS.append(suite_dir)
+                if os.path.exists(suite_dir):
+                    _config.MODULE_SUITE_DIRS.append(suite_dir)
 
             for suite_dir in module_config.get("matrix_suite_dirs", []):
-                if suite_dir not in _config.MODULE_MATRIX_SUITE_DIRS:
+                if suite_dir not in _config.MODULE_MATRIX_SUITE_DIRS and os.path.exists(suite_dir):
                     _config.MODULE_MATRIX_SUITE_DIRS.append(suite_dir)
         else:
             for jstest_dir in module_config.get("jstest_dirs", []):
@@ -430,7 +432,8 @@ def _set_up_tracing(
                 extra_context["git.branch_name"] = branch_name
             except Exception:
                 print(
-                    "Unable to setup git repo. This will result in incomplete telemetry data being uploaded."
+                    "Unable to setup git repo. This will result in incomplete telemetry data being uploaded.",
+                    file=sys.stderr,
                 )
 
             processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=COLLECTOR_ENDPOINT))
@@ -704,28 +707,13 @@ flags in common: {common_set}
     _config.ENABLE_EVERGREEN_API_TEST_SELECTION = config.pop("enable_evergreen_api_test_selection")
     _config.EVERGREEN_TEST_SELECTION_STRATEGY = config.pop("test_selection_strategies_array")
 
-    # Read TSS_ENABLED from Evergreen expansions if available
-    _config.TSS_ENABLED = None
-    if os.path.exists(EVERGREEN_EXPANSIONS_FILE):
-        try:
-            expansions = read_config_file(EVERGREEN_EXPANSIONS_FILE)
-            tss_enabled_value = expansions.get("tss_enabled", None)
-            if tss_enabled_value is not None:
-                # Handle various boolean representations from YAML
-                if isinstance(tss_enabled_value, bool):
-                    _config.TSS_ENABLED = tss_enabled_value
-                elif isinstance(tss_enabled_value, str):
-                    _config.TSS_ENABLED = tss_enabled_value.lower() in ("true", "1", "yes")
-        except Exception:
-            # If we can't read expansions, default to None (TSS disabled)
-            pass
-
     shard_index = config.pop("shard_index")
     shard_count = config.pop("shard_count")
     _config.SHARD_INDEX = int(shard_index) if shard_index is not None else None
     _config.SHARD_COUNT = int(shard_count) if shard_count is not None else None
 
     _config.HISTORIC_TEST_RUNTIMES = config.pop("historic_test_runtimes")
+    _config.TSS_TEST_LIST = config.pop("tss_test_list")
 
     mongo_version_file = config.pop("mongo_version_file")
     if mongo_version_file is not None:
@@ -777,14 +765,6 @@ flags in common: {common_set}
         return utils.dump_yaml(ret)
 
     _config.MONGOD_EXECUTABLE = _expand_user(config.pop("mongod_executable"))
-
-    # TODO SERVER-116054, SERVER-116052, SERVER-116055, SERVER-116053: Remove this js_engine handling
-    # section and_detect_js_engine once mozjs-wasm supports $where, $function, $accumulator, and
-    # mapReduce, eliminating the need for this startup-time binary invocation.
-    _config.JS_ENGINE = _detect_js_engine(_config.MONGOD_EXECUTABLE)
-    if _config.JS_ENGINE == "mozjs-wasm":
-        _config.EXCLUDE_WITH_ANY_TAGS.append("mozjs_wasm_unsupported")
-        _config.EXCLUDE_FILES = _find_mozjs_jstestfuzz_files()
 
     mongod_set_parameters = config.pop("mongod_set_parameters")
 
@@ -860,10 +840,10 @@ flags in common: {common_set}
                             patch += mongot_patch_version
 
                     # Ensure we don't append the current version.
-                    if (
-                        major == mongot_major_version
-                        and minor == mongot_minor_version
-                        and patch == mongot_patch_version
+                    if (major, minor, patch) == (
+                        mongot_major_version,
+                        mongot_minor_version,
+                        mongot_patch_version,
                     ):
                         continue
                     mongot_excluded_versions.append(f"requires_mongot_{major}_{minor}_{patch}")
@@ -934,6 +914,21 @@ flags in common: {common_set}
         "skip_extensions_signature_verification"
     )
     _config.NO_HOOKS = config.pop("no_hooks")
+    _config.MESSAGE_FILTER_PLUGIN = config.pop("message_filter_plugin")
+    if _config.MESSAGE_FILTER_PLUGIN:
+        plugin_dir = tempfile.mkdtemp(prefix="mfp_")
+        _config.MESSAGE_FILTER_PLUGIN_PATH = os.path.join(plugin_dir, "plugin.so")
+        mfp_param = json.dumps({"messageFilterPluginPath": _config.MESSAGE_FILTER_PLUGIN_PATH})
+        _config.MONGOD_SET_PARAMETERS = _merge_set_params(
+            [_config.MONGOD_SET_PARAMETERS, mfp_param]
+        )
+        _config.MONGOS_SET_PARAMETERS = _merge_set_params(
+            [_config.MONGOS_SET_PARAMETERS, mfp_param]
+        )
+        plugin_src = _find_mfp_plugin_source()
+        shutil.copy2(plugin_src, _config.MESSAGE_FILTER_PLUGIN_PATH)
+        # The loader rejects plugins whose file has any write bits set (tamper-resistance check).
+        os.chmod(_config.MESSAGE_FILTER_PLUGIN_PATH, 0o444)
     _config.HANG_ANALYZER_HOOK_TIMEOUT = config.pop("hang_analyzer_hook_timeout")
 
     _config.JSDBG = config.pop("jsdbg")
@@ -954,6 +949,7 @@ flags in common: {common_set}
     _config.EVERGREEN_REVISION_ORDER_ID = config.pop("revision_order_id")
     _config.EVERGREEN_TASK_ID = config.pop("task_id")
     _config.EVERGREEN_TASK_NAME = config.pop("task_name")
+    _config.EVERGREEN_DISPLAY_TASK_NAME = config.pop("display_task_name")
     _config.EVERGREEN_TASK_DOC = config.pop("task_doc")
     _config.EVERGREEN_VARIANT_NAME = config.pop("variant_name")
     _config.EVERGREEN_VERSION_ID = config.pop("version_id")
@@ -1190,69 +1186,28 @@ def _set_logging_config():
         raise IOError("Directory {} does not exist.".format(_config.LOGGER_DIR))
 
 
-_MOZJS_PATTERNS = (
-    # TODO SERVER-116052: Add support for $function.
-    '"$function"',
-    # TODO SERVER-116053: Add support for mapReduce.
-    "mapReduce",
-    "mapreduce",
-    # TODO SERVER-116054: Add support for $where.
-    '"$where"',
-    # TODO SERVER-116055: Add support for $accumulator.
-    '"$accumulator"',
-)
-
-
-def _find_mozjs_jstestfuzz_files() -> list[str]:
-    """Return paths of jstestfuzz output files that contain MozJS-dependent operations.
-
-    Scans all files under jstestfuzz/out/ and excludes any that reference $function, $where,
-    $accumulator, or mapReduce — operators that require the MozJS JavaScript engine and fail
-    on a mozjs-wasm server.
-    """
-    excluded = []
-    for path in glob.glob("jstestfuzz/out/*.js"):
-        try:
-            content = Path(path).read_text(encoding="utf-8")
-        except OSError:
-            continue
-        if any(pattern in content for pattern in _MOZJS_PATTERNS):
-            excluded.append(path)
-    return excluded
-
-
-def _detect_js_engine(mongod_executable: Optional[str]) -> Optional[str]:
-    """Return the JS engine name reported by the mongod binary, or None if the binary does not exist
-    or it cannot be determined (i.e. --version does not output javascriptEngine).
-
-    Runs ``mongod --version`` and parses the ``javascriptEngine`` field from the Build Info JSON.
-    If the binary exists, returns e.g. ``"mozjs"`` or ``"mozjs-wasm"``, or ``none``.
-    Note that ''none'' is a valid JS engine that indicates the server was built without a JS engine,
-    and is not the same as returning None to indicate the binary doesn't exist.
-
-    When ``mongod_executable`` is not specified, falls back to the default executable name
-    (``"mongod"``), which may be resolved via PATH (e.g. via DEPS_PATH in the Bazel test runner).
-    """
-    executable = mongod_executable or _config.DEFAULT_MONGOD_EXECUTABLE
-    if shutil.which(executable) is None:
-        return None
-    try:
-        result = subprocess.run(
-            [executable, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        # The output is: "db version v...\nBuild Info: <pretty-printed JSON>\n"
-        # Grab everything from "Build Info: " to the end and parse it as one JSON blob.
-        marker = "Build Info:"
-        idx = result.stdout.find(marker)
-        if idx != -1:
-            build_info = json.loads(result.stdout[idx + len(marker) :].strip())
-            return build_info.get("javascriptEngine")
-    except Exception:  # pylint: disable=broad-except
-        pass
-    return None
+def _find_mfp_plugin_source() -> str:
+    """Return the path to the compiled MFP Rust plugin .so, or raise if not found."""
+    candidates = [
+        os.path.join(_config.RESMOKE_ROOT, "dist-test/lib/libmessage_filter_plugin.so"),
+        os.path.join(
+            _config.RESMOKE_ROOT,
+            "bazel-bin/install-dist-test/lib/libmessage_filter_plugin.so",
+        ),
+        os.path.join(
+            _config.RESMOKE_ROOT,
+            "bazel-bin/src/mongo/db/modules/enterprise/src/mfp/plugin/libmessage_filter_plugin.so",
+        ),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise RuntimeError(
+        "Could not find the MFP Rust plugin .so. Build it with "
+        "'bazel build //src/mongo/db/modules/enterprise/src/mfp/plugin:message_filter_plugin' "
+        "or ensure dist-test/lib/ is populated. "
+        f"Searched: {candidates}"
+    )
 
 
 def _expand_user(pathname):

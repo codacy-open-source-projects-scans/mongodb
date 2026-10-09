@@ -25,7 +25,7 @@ class TestErrorcodes(unittest.TestCase):
             captured_error_codes.append(code)
 
         errorcodes.parse_source_files(accumulate_files, TESTDATA_DIR + "regex_matching/")
-        self.assertEqual(32, len(captured_error_codes))
+        self.assertEqual(28, len(captured_error_codes))
 
     def test_dup_checking(self):
         """Test dup checking."""
@@ -67,3 +67,7 @@ class TestErrorcodes(unittest.TestCase):
         self.assertEqual(1234, errorcodes.coerce_to_number("server-1234"))
         self.assertEqual(1234, errorcodes.coerce_to_number("SERVER-1234"))
         self.assertEqual(-1, errorcodes.coerce_to_number("not a ticket"))
+
+
+if __name__ == "__main__":
+    unittest.main()

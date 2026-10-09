@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/json.h"
@@ -91,6 +64,34 @@ TEST(CollectionOptions, Validator) {
     CollectionOptions defaultOptions;
     ASSERT_BSONOBJ_EQ(defaultOptions.validator, BSONObj());
     ASSERT(!defaultOptions.toBSON()["validator"]);
+}
+
+TEST(CollectionOptions, PrepareConstraintValidationLevelDefaultsToFalse) {
+    CollectionOptions options;
+    ASSERT_FALSE(options.prepareConstraintValidationLevel);
+    // Not serialized when false.
+    ASSERT(!options.toBSON()["prepareConstraintValidationLevel"]);
+}
+
+TEST(CollectionOptions, PrepareConstraintValidationLevelRoundTripWhenTrue) {
+    CollectionOptions options;
+    options.prepareConstraintValidationLevel = true;
+    ASSERT_TRUE(options.toBSON()["prepareConstraintValidationLevel"].boolean());
+    checkRoundTrip(options);
+}
+
+TEST(CollectionOptions, PrepareConstraintValidationLevelNotSerializedWhenFalse) {
+    CollectionOptions options =
+        assertGet(CollectionOptions::parse(fromjson("{prepareConstraintValidationLevel: false}")));
+    ASSERT_FALSE(options.prepareConstraintValidationLevel);
+    ASSERT(!options.toBSON()["prepareConstraintValidationLevel"]);
+}
+
+TEST(CollectionOptions, PrepareConstraintValidationLevelRejectsNonBoolean) {
+    ASSERT_NOT_OK(
+        CollectionOptions::parse(fromjson("{prepareConstraintValidationLevel: 1}")).getStatus());
+    ASSERT_NOT_OK(CollectionOptions::parse(fromjson("{prepareConstraintValidationLevel: 'yes'}"))
+                      .getStatus());
 }
 
 TEST(CollectionOptions, ErrorBadSize) {
@@ -1181,7 +1182,7 @@ TEST(FLECollectionOptions, Text_ExtraFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "string",
-                    "queries": {"queryType": "substringPreview", sparsity:1}
+                    "queries": {"queryType": "substring", sparsity:1}
                 }
             ]
         }})")));
@@ -1193,7 +1194,7 @@ TEST(FLECollectionOptions, Text_ExtraFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "string",
-                    "queries": {"queryType": "substringPreview", min:1}
+                    "queries": {"queryType": "substring", min:1}
                 }
             ]
         }})")));
@@ -1205,7 +1206,7 @@ TEST(FLECollectionOptions, Text_ExtraFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "string",
-                    "queries": {"queryType": "substringPreview", max:1}
+                    "queries": {"queryType": "substring", max:1}
                 }
             ]
         }})")));
@@ -1217,7 +1218,7 @@ TEST(FLECollectionOptions, Text_ExtraFields) {
                 "path": "firstName",
                 "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                 "bsonType": "string",
-                "queries": {"queryType": "substringPreview", trimFactor:1}
+                "queries": {"queryType": "substring", trimFactor:1}
             }
         ]
     }})")));
@@ -1229,7 +1230,7 @@ TEST(FLECollectionOptions, Text_ExtraFields) {
                     "path": "firstName",
                     "keyId": { '$uuid': '5f34e99a-b214-451f-b6f6-d3d28e933d15' },
                     "bsonType": "string",
-                    "queries": {"queryType": "substringPreview", precision:1}
+                    "queries": {"queryType": "substring", precision:1}
                 }
             ]
         }})")));

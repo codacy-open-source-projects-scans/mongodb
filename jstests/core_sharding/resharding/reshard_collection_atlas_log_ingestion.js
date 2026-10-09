@@ -14,8 +14,6 @@
  *  does_not_support_stepdowns,
  *  # resharding can't run during FCV transitions
  *  cannot_run_during_upgrade_downgrade,
- *   # TODO(SERVER-124153): Remove.
- *   featureFlagReplicatedFastCount_incompatible,
  * ]
  */
 
@@ -24,6 +22,7 @@ import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {configureFailPointForRS} from "jstests/libs/fail_point_util.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {CreateShardedCollectionUtil} from "jstests/sharding/libs/create_sharded_collection_util.js";
+import {isReshardingVerificationEnabled} from "jstests/sharding/libs/reshard_collection_util.js";
 import {createChunks, getShardNames} from "jstests/sharding/libs/sharding_util.js";
 
 const TestMode = {
@@ -56,7 +55,7 @@ const MetricAvailability = {
     recipientTotalFetched: TestMode.kFailInCloning,
     copyDurationMs: TestMode.kFailInCloning,
     totalBytesCloned: TestMode.kFailInCloning,
-    totalDocumentsCloned: TestMode.kFailInCloning,
+    totalDocumentsFinal: TestMode.kFailInCloning,
     totalOplogsFetched: TestMode.kFailInCloning,
     maxRecipientIndexes: TestMode.kFailInCloning,
     numberOfIndexesDelta: TestMode.kFailInCloning,
@@ -94,10 +93,27 @@ const newShardKey = {
     newKey: 1,
 };
 
+// Expected validation outcomes per test mode; modes not listed have no outcome assertions.
+const kExpectedValidationOutcomes = {
+    [TestMode.kSuccess]: {clonedDocumentCount: "success", finalDocumentCount: "success"},
+    [TestMode.kFailInAwaitingFetchTimestamp]: {
+        clonedDocumentCount: "incomplete",
+        finalDocumentCount: "incomplete",
+    },
+    [TestMode.kFailInApplying]: {clonedDocumentCount: "success", finalDocumentCount: "incomplete"},
+};
+
 main();
 
 function main() {
-    const testCases = [TestMode.kSuccess, TestMode.kFailInCloning, TestMode.kFailInAwaitingFetchTimestamp];
+    const verificationEnabled = isReshardingVerificationEnabled(db);
+
+    const testCases = [
+        TestMode.kSuccess,
+        TestMode.kFailInCloning,
+        TestMode.kFailInAwaitingFetchTimestamp,
+        TestMode.kFailInApplying,
+    ];
 
     for (const mode of testCases) {
         const isSuccess = mode === TestMode.kSuccess;
@@ -114,7 +130,7 @@ function main() {
         }
         unsetFailpoints(failpoints);
         const logs = getCompletionLogs(uuid);
-        verifyCompletionLogs(collName, logs, mode);
+        verifyCompletionLogs(collName, logs, mode, verificationEnabled);
     }
 }
 
@@ -134,7 +150,11 @@ function initializeCollection(collName) {
 
 function runResharding(collName, uuid) {
     jsTest.log.info(`Running resharding with user supplied UUID: ${tojson(uuid)}`);
-    return db.adminCommand({reshardCollection: `${dbName}.${collName}`, key: newShardKey, reshardingUUID: uuid});
+    return db.adminCommand({
+        reshardCollection: `${dbName}.${collName}`,
+        key: newShardKey,
+        reshardingUUID: uuid,
+    });
 }
 
 function getAllReplicaSets() {
@@ -200,10 +220,14 @@ function getCompletionLogs(uuid) {
         });
 }
 
-function verifyCompletionLogs(collName, logs, mode) {
+function verifyCompletionLogs(collName, logs, mode, verificationEnabled) {
     // There could be multiple completion logs if deleting the coordinator state document is rolled
     // back.
-    assert.gt(logs.length, 0, "No log lines with id 7763800 emitted on config server following resharding.");
+    assert.gt(
+        logs.length,
+        0,
+        "No log lines with id 7763800 emitted on config server following resharding.",
+    );
     const completionLog = JSON.parse(logs.pop());
     jsTest.log.info(`Completion log found: ${tojson(completionLog)}`);
     const info = completionLog.attr.info;
@@ -222,8 +246,9 @@ function verifyCompletionLogs(collName, logs, mode) {
     assert.gt(stats.numberOfDestinationShards, 0, "numberOfDestinationShards");
     verifyDonorMetrics(stats, mode);
     verifyRecipientMetrics(stats, mode);
-    verifyTotals(stats, mode);
+    verifyTotals(stats, mode, verificationEnabled);
     verifyCriticalSection(stats, mode);
+    verifyValidation(stats, mode, verificationEnabled);
 }
 
 function verifyDonorMetrics(stats, mode) {
@@ -235,10 +260,17 @@ function verifyDonorMetrics(stats, mode) {
         assert.gt(donor.bytesToClone, 0, "bytesToClone");
         assert.gt(donor.documentsToClone, 0, "documentsToClone");
         assert.gt(donor.indexCount, 0, "donor indexCount");
-        assert(donor.hasOwnProperty("writesDuringCriticalSection"), "Missing writesDuringCriticalSection");
+        assert(
+            donor.hasOwnProperty("writesDuringCriticalSection"),
+            "Missing writesDuringCriticalSection",
+        );
         if (isSuccess) {
             assert(donor.hasOwnProperty("phaseDurations"), "Missing donor phaseDurations");
-            assert.gte(donor.phaseDurations.criticalSectionDurationMs, 0, "criticalSectionDurationMs");
+            assert.gte(
+                donor.phaseDurations.criticalSectionDurationMs,
+                0,
+                "criticalSectionDurationMs",
+            );
             assert(donor.hasOwnProperty("criticalSectionInterval"));
             const interval = donor.criticalSectionInterval;
             assert(interval.hasOwnProperty("start"), "Missing criticalSectionInterval start");
@@ -260,7 +292,7 @@ function verifyRecipientMetrics(stats, mode) {
     for (const recipient of Object.values(stats.recipients)) {
         assert(recipient.hasOwnProperty("shardName"), "Missing recipient shardName");
         recipientTotals.recipientTotalBytes += recipient.bytesCloned;
-        recipientTotals.recipientTotalDocs += recipient.documentsCloned;
+        recipientTotals.recipientTotalDocs += recipient.documentsFinal;
         recipientTotals.recipientTotalFetched += recipient.oplogsFetched;
         recipientTotals.recipientTotalApplied += recipient.oplogsApplied;
         assert(recipient.hasOwnProperty("phaseDurations"), "Missing recipient phaseDurations");
@@ -268,7 +300,11 @@ function verifyRecipientMetrics(stats, mode) {
             assert.gt(duration, 0, `Phase ${phaseName} had no duration`);
         }
         if (isSuccess) {
-            for (const expected of ["copyDurationMs", "applyDurationMs", "buildingIndexDurationMs"]) {
+            for (const expected of [
+                "copyDurationMs",
+                "applyDurationMs",
+                "buildingIndexDurationMs",
+            ]) {
                 assert(
                     recipient.phaseDurations.hasOwnProperty(expected),
                     `Successful operation did not report ${expected}`,
@@ -283,7 +319,7 @@ function verifyRecipientMetrics(stats, mode) {
     assertMetricGtZero("recipientTotalApplied", recipientTotals, mode);
 }
 
-function verifyTotals(stats, mode) {
+function verifyTotals(stats, mode, verificationEnabled) {
     assert(stats.hasOwnProperty("totals"), "Missing totals");
     const totals = stats.totals;
 
@@ -296,19 +332,37 @@ function verifyTotals(stats, mode) {
     assert.gt(totals.averageDocSize, 0, "averageDocSize");
 
     assertMetricGtZero("totalBytesCloned", totals, mode);
-    assertMetricGtZero("totalDocumentsCloned", totals, mode);
+    assertMetricGtZero("totalDocumentsFinal", totals, mode);
     assertMetricGtZero("totalOplogsFetched", totals, mode);
     assertMetricGtZero("totalOplogsApplied", totals, mode);
 
     assert.gt(totals.maxDonorIndexes, 0, "maxDonorIndexes");
     assertMetricGtZero("maxRecipientIndexes", totals, mode);
-    assertMetricEq("numberOfIndexesDelta", totals, totals.maxRecipientIndexes - totals.maxDonorIndexes, mode);
+    assertMetricEq(
+        "numberOfIndexesDelta",
+        totals,
+        totals.maxRecipientIndexes - totals.maxDonorIndexes,
+        mode,
+    );
+
+    assert.eq(
+        totals.hasOwnProperty("totalDocumentsCloned"),
+        verificationEnabled,
+        "totalDocumentsCloned presence should match verificationEnabled",
+        {totals},
+    );
 }
 
 function verifyCriticalSection(stats, mode) {
-    const isSuccess = mode === TestMode.kSuccess;
-    assert(stats.hasOwnProperty("criticalSection") === isSuccess, "Incorrect critical section presence");
-    if (!isSuccess) {
+    // kFailInApplying fires after the coordinator has already entered BlockingWrites, so the
+    // critical section appears in the stats even though the operation ultimately failed.
+    const hadCriticalSection = mode === TestMode.kSuccess || mode === TestMode.kFailInApplying;
+    assert(
+        stats.hasOwnProperty("criticalSection") === hadCriticalSection,
+        "Incorrect critical section presence",
+    );
+
+    if (mode !== TestMode.kSuccess) {
         return;
     }
     const criticalSection = stats.criticalSection;
@@ -321,4 +375,53 @@ function verifyCriticalSection(stats, mode) {
         criticalSection.hasOwnProperty("totalWritesDuringCriticalSection"),
         "Missing totalWritesDuringCriticalSection",
     );
+}
+
+function verifyValidation(stats, mode, verificationEnabled) {
+    assert.eq(
+        stats.hasOwnProperty("validation"),
+        verificationEnabled,
+        "validation field presence should match featureFlagReshardingVerification",
+    );
+    if (!verificationEnabled) {
+        return;
+    }
+
+    const {clonedDocumentCount, finalDocumentCount} = stats.validation;
+    assert(clonedDocumentCount, "Missing validation.clonedDocumentCount", {
+        validation: stats.validation,
+    });
+    assert(finalDocumentCount, "Missing validation.finalDocumentCount", {
+        validation: stats.validation,
+    });
+
+    const expected = kExpectedValidationOutcomes[mode];
+    if (expected) {
+        assert.eq(
+            clonedDocumentCount.outcome,
+            expected.clonedDocumentCount,
+            "Unexpected clonedDocumentCount outcome",
+        );
+        assert.eq(
+            finalDocumentCount.outcome,
+            expected.finalDocumentCount,
+            "Unexpected finalDocumentCount outcome",
+        );
+    }
+
+    if (clonedDocumentCount.outcome === "success") {
+        assert.eq(
+            clonedDocumentCount.documentsToCopy,
+            clonedDocumentCount.documentsCloned,
+            "cloning doc count mismatch",
+        );
+    }
+
+    if (finalDocumentCount.outcome === "success") {
+        assert.eq(
+            finalDocumentCount.sourceDocumentCount,
+            finalDocumentCount.reshardedDocumentCount,
+            "final doc count mismatch",
+        );
+    }
 }

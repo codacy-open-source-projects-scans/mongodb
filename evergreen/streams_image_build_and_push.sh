@@ -4,6 +4,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 set -o errexit
 set -o pipefail
 
+# Variant: streams_image_build_and_push_sanitizer.sh. Keep in sync.
 REGISTRY="664315256653.dkr.ecr.us-east-1.amazonaws.com"
 REPO="${streams_ecr_repo:-mongo/mongostream-testing}"
 IMAGE="$REGISTRY/$REPO"
@@ -82,6 +83,9 @@ VENV_PID=$!
 cd "$SRC_DIR"
 
 # Install system deps for maven/js engine (runs in parallel with bazel/venv).
+# If you update this Java version, also update <java.version> in aspio/pom.xml and
+# java-17-amazon-corretto-devel in evergreen/streams_aspio_lint.sh and
+# evergreen/streams_image_build_and_push_sanitizer.sh
 if ! command -v javac >/dev/null 2>&1; then
     sudo dnf -y install java-17-amazon-corretto-devel wget unzip
 fi

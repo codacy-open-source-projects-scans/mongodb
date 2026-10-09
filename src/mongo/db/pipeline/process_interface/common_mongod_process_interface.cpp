@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/process_interface/common_mongod_process_interface.h"
@@ -70,6 +44,7 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/s/transaction_coordinator_curop.h"
@@ -105,7 +80,6 @@
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
-#include "mongo/db/storage/feature_document_util.h"
 #include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -120,7 +94,7 @@
 #include "mongo/db/version_context.h"
 #include "mongo/db/views/view.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
@@ -133,6 +107,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <limits>
+#include <string_view>
 #include <vector>
 
 #include <boost/none.hpp>
@@ -144,6 +119,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 MONGO_FAIL_POINT_DEFINE(hangAfterFirstListCatalogRead);
 namespace {
 
@@ -163,10 +139,10 @@ void assertIgnorePrepareConflictsBehavior(const boost::intrusive_ptr<ExpressionC
  * Create a BSONObjBuilder with all fields common to collections, views and timeseries.
  */
 BSONObjBuilder createCommonNsFields(const VersionContext& vCtx,
-                                    StringData shardName,
+                                    std::string_view shardName,
                                     const NamespaceString& ns,
                                     const BSONObj& extraElements,
-                                    StringData type) {
+                                    std::string_view type) {
     BSONObjBuilder builder;
     builder.append("db",
                    DatabaseNameUtil::serialize(ns.dbName(), SerializationContext::stateDefault()));
@@ -184,7 +160,7 @@ BSONObjBuilder createCommonNsFields(const VersionContext& vCtx,
 }
 
 BSONObj createListCatalogEntryForCollection(const VersionContext& vCtx,
-                                            StringData shardName,
+                                            std::string_view shardName,
                                             const NamespaceString& ns,
                                             const BSONObj& catalogEntry) {
     auto type = [&]() {
@@ -193,10 +169,10 @@ BSONObj createListCatalogEntryForCollection(const VersionContext& vCtx,
         // thus we can always return "timeseries" if the collection has timeseries options
         if (catalogEntry["md"]["options"]["timeseries"].ok() &&
             !ns.isTimeseriesBucketsCollection()) {
-            return "timeseries"_sd;
+            return "timeseries"sv;
         }
 
-        return "collection"_sd;
+        return "collection"sv;
     }();
 
     return createCommonNsFields(vCtx, shardName, ns, catalogEntry, type).obj();
@@ -207,32 +183,17 @@ BSONObj createListCatalogEntryForCollection(const VersionContext& vCtx,
  * <db>.system.views namespaces found.
  */
 void listDurableCatalog(OperationContext* opCtx,
-                        StringData shardName,
+                        std::string_view shardName,
                         std::deque<BSONObj>* docs,
                         std::vector<NamespaceStringOrUUID>* systemViewsNamespaces) {
-    auto cursor = MDBCatalog::get(opCtx)->getCursor(opCtx);
-    if (!cursor) {
-        return;
-    }
-
-    while (auto record = cursor->next()) {
-        BSONObj obj = record->data.releaseToBson();
-
-        // For backwards compatibility where older version have a written feature document.
-        // See SERVER-57125.
-        if (feature_document_util::isFeatureDocument(obj)) {
-            continue;
-        }
-
-        NamespaceString ns(NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(
-            obj.getStringField("ns")));
-        if (ns.isSystemDotViews()) {
-            systemViewsNamespaces->push_back(ns);
-        }
-
-        docs->push_back(createListCatalogEntryForCollection(
-            VersionContext::getDecoration(opCtx), shardName, ns, obj));
-    }
+    const auto& vCtx = VersionContext::getDecoration(opCtx);
+    shard_role_nocheck::iterateDurableCatalog(
+        opCtx, [&](const NamespaceString& ns, const BSONObj& catalogEntry) {
+            if (ns.isSystemDotViews()) {
+                systemViewsNamespaces->push_back(ns);
+            }
+            docs->push_back(createListCatalogEntryForCollection(vCtx, shardName, ns, catalogEntry));
+        });
 }
 
 bool isQEColl(const CollectionAcquisition& acquisition) {
@@ -259,7 +220,10 @@ bool acquireCollectionsForPipeline(const boost::intrusive_ptr<ExpressionContext>
                                    CollectionOrViewAcquisitionMap& allAcquisitions) {
     // Reparse 'pipeline' to discover whether there are secondary namespaces that we need to lock
     // when constructing our query executor.
-    auto lpp = LiteParsedPipeline(expCtx->getNamespaceString(), pipeline);
+    auto lpp = LiteParsedPipeline(expCtx->getNamespaceString(),
+                                  pipeline,
+                                  false,
+                                  LiteParserOptions{.ifrContext = expCtx->getIfrContext()});
     std::vector<NamespaceStringOrUUID> secondaryNamespaces = lpp.getForeignExecutionNamespaces();
     auto* opCtx = expCtx->getOperationContext();
 
@@ -458,7 +422,7 @@ CommonMongodProcessInterface::createTransactionHistoryIterator(repl::OpTime time
 
 std::vector<Document> CommonMongodProcessInterface::getIndexStats(OperationContext* opCtx,
                                                                   const NamespaceString& ns,
-                                                                  StringData host,
+                                                                  std::string_view host,
                                                                   bool addShardName) {
     // Using kPretendUnsharded as
     // 1. the function is called in a stage where the shard version has already been checked.
@@ -832,7 +796,8 @@ CommonMongodProcessInterface::finalizeAndAttachCursorToPipelineForLocalRead(
     }
 
     CollectionOrViewAcquisitionMap allAcquisitions;
-    auto serializedPipeline = pipeline->serializeToBson();
+    query_shape::SerializationOptions opts{.isSerializingForRemoteDispatch = true};
+    auto serializedPipeline = pipeline->serializeToBson(opts);
     bool isAnySecondaryCollectionNotLocal =
         acquireCollectionsForPipeline(expCtx, serializedPipeline, allAcquisitions);
 
@@ -844,10 +809,13 @@ CommonMongodProcessInterface::finalizeAndAttachCursorToPipelineForLocalRead(
     auto hybridSearchFlagEnabled = ifrCtx &&
         ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
     if (hybridSearchFlagEnabled) {
-        LiteParsedPipeline(expCtx->getNamespaceString(), serializedPipeline)
+        LiteParsedPipeline(expCtx->getNamespaceString(),
+                           serializedPipeline,
+                           false,
+                           LiteParserOptions{.ifrContext = ifrCtx})
             .validateWithCollectionMetadata(primaryAcquisition);
     } else {
-        // TODO SERVER-117803 Delete this duplicated check.
+        // TODO SERVER-121094 Delete this duplicated check.
         pipeline->validateWithCollectionMetadata(primaryAcquisition);
     }
     pipeline->performPreOptimizationRewrites(expCtx, primaryAcquisition);
@@ -892,8 +860,9 @@ std::unique_ptr<Pipeline> CommonMongodProcessInterface::attachCursorSourceToPipe
     }
 
     CollectionOrViewAcquisitionMap allAcquisitions;
-    bool isAnySecondaryCollectionNotLocal =
-        acquireCollectionsForPipeline(expCtx, pipeline->serializeToBson(), allAcquisitions);
+    query_shape::SerializationOptions wireOptsForAcquire{.isSerializingForRemoteDispatch = true};
+    bool isAnySecondaryCollectionNotLocal = acquireCollectionsForPipeline(
+        expCtx, pipeline->serializeToBson(wireOptsForAcquire), allAcquisitions);
 
     return attachCursorSourceToPipelineForLocalReadImpl(std::move(pipeline),
                                                         allAcquisitions,
@@ -1017,7 +986,7 @@ std::vector<BSONObj> CommonMongodProcessInterface::getMatchingPlanCacheEntryStat
         BSONObjBuilder out;
         Explain::planCacheEntryToBSON(entry, &out);
         if (auto querySettings = key.querySettings().toBSON(); !querySettings.isEmpty()) {
-            out.append("querySettings"_sd, querySettings);
+            out.append("querySettings"sv, querySettings);
         }
         return out.obj();
     };
@@ -1134,7 +1103,7 @@ BSONObj CommonMongodProcessInterface::_reportCurrentOpForClient(
 
     OperationContext* clientOpCtx = client->getOperationContext();
 
-    if (clientOpCtx) {
+    if (clientOpCtx && !client->operationContextIsPendingDestruction()) {
         if (CurOp::get(clientOpCtx)->getShouldOmitDiagnosticInformation()) {
             return builder.obj();
         }
@@ -1286,20 +1255,44 @@ void CommonMongodProcessInterface::_handleTimeseriesCreateError(const DBExceptio
         throw;
     }
     auto timeseriesOpts = _getTimeseriesOptions(opCtx, ns);
-    // Confirming there is a time-series view in that namespace and the time-series options of the
-    // existing view are the same as expected.
-    if (!timeseriesOpts || !mongo::timeseries::optionsAreEqual(timeseriesOpts.value(), userOpts)) {
+    if (!timeseriesOpts) {
+        throw;
+    }
+
+    // If the target was concurrently upgraded to viewless, it now carries the system-managed
+    // 'fixedBucketing' option, whereas 'userOpts' never does ('fixedBucketing' is rejected in the
+    // $out spec and legacy timeseries lack it). Strip it from the existing options so the
+    // comparison isn't tripped by that difference.
+    // TODO(SERVER-128579): Revisit once 9.0 becomes last LTS and viewful timeseries no longer
+    // exist.
+    timeseriesOpts->setFixedBucketing(OptionalBool{});
+
+    if (!mongo::timeseries::optionsAreEqual(timeseriesOpts.value(), userOpts)) {
         throw;
     }
 }
 
 boost::optional<TimeseriesOptions> CommonMongodProcessInterface::_getTimeseriesOptions(
     OperationContext* opCtx, const NamespaceString& ns) {
-    auto view = CollectionCatalog::get(opCtx)->lookupView(opCtx, ns);
-    if (!view || !view->timeseries()) {
+    // TODO(SERVER-123282): Use `CommonMongodProcessInterface::getCollectionOptions` here once it
+    // uses listCollections so it returns the proper timeseries options for legacy timeseries views.
+    // We can then remove the `ShardServerProcessInterface::_getTimeseriesOptions` overload.
+    BSONObj options;
+    try {
+        options = getCollectionInfoFromPrimary(opCtx, ns).getOptions().value_or(BSONObj{});
+    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+        options = BSONObj{};
+    }
+
+    if (options.isEmpty()) {
         return boost::none;
     }
-    return mongo::timeseries::getTimeseriesOptions(opCtx, ns, true /*convertToBucketsNamespace*/);
+    const BSONElement timeseries = options["timeseries"];
+    if (!timeseries || !timeseries.isABSONObj()) {
+        return boost::none;
+    }
+    return TimeseriesOptions::parseOwned(timeseries.Obj().getOwned(),
+                                         IDLParserContext("TimeseriesOptions"));
 }
 
 void CommonMongodProcessInterface::writeRecordsToSpillTable(

@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/sbe/values/value_size.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 
@@ -354,6 +329,8 @@ struct ValueBlock {
         return boost::none;
     }
 
+    virtual int getApproximateSize() const = 0;
+
 protected:
     virtual DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) = 0;
 
@@ -379,6 +356,11 @@ public:
     static std::unique_ptr<MonoBlock> makeNothingBlock(size_t ct);
 
     MonoBlock(size_t count, TypeTags tag, Value val) : _tag(tag), _val(val), _count(count) {}
+
+    MonoBlock(size_t count, value::TagValueOwned owned)
+        : _tag(owned.tag()), _val(owned.value()), _count(count) {
+        owned.disown();
+    }
 
     MonoBlock(const MonoBlock& o) : ValueBlock(o), _count(o._count) {
         std::tie(_tag, _val) = copyValue(o._tag, o._val);
@@ -432,8 +414,7 @@ public:
     }
 
     std::unique_ptr<ValueBlock> map(const ColumnOp& op) override {
-        auto [tag, val] = op.processSingle(_tag, _val);
-        return std::make_unique<MonoBlock>(_count, tag, val);
+        return std::make_unique<MonoBlock>(_count, op.processSingle(_tag, _val));
     }
 
     TokenizedBlock tokenize() override;
@@ -480,6 +461,10 @@ public:
     value::TagValueView at(size_t idx) override {
         tassert(11089617, "Out of bounds read in MonoBlock", idx < _count);
         return {_tag, _val};
+    }
+
+    int getApproximateSize() const final {
+        return sbe::value::getApproximateSize(_tag, _val);
     }
 
 private:
@@ -561,6 +546,14 @@ public:
     }
 
     std::unique_ptr<ValueBlock> map(const ColumnOp& op) override;
+
+    int getApproximateSize() const final {
+        int result = sizeof(*this);
+        for (size_t i = 0; i < _vals.size(); ++i) {
+            result += sbe::value::getApproximateSize(_tags[i], _vals[i]);
+        }
+        return result;
+    }
 
 private:
     void release() noexcept {
@@ -779,6 +772,22 @@ public:
 
     const std::vector<Value>& getVector() const {
         return _vals;
+    }
+
+    int getApproximateSize() const final {
+        const int bitsetHeapBytes = static_cast<int>(_presentBitset.num_blocks() *
+                                                     sizeof(HomogeneousBlockBitset::block_type));
+        if constexpr (isShallowType(TypeTag)) {
+            return sizeof(Value) * _vals.capacity() + bitsetHeapBytes + sizeof(*this);
+        } else {
+            int result = sizeof(*this) + bitsetHeapBytes;
+            for (size_t i = 0; i < _vals.size(); ++i) {
+                if (_presentBitset.at(i)) {
+                    result += sbe::value::getApproximateSize(TypeTag, _vals[i]);
+                }
+            }
+            return result;
+        }
     }
 
 private:

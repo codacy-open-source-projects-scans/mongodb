@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/add_shard_coordinator.h"
 
@@ -53,6 +27,7 @@
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/uuid.h"
 
 #include <fmt/format.h>
 
@@ -127,6 +102,28 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                                                              _executorWithoutGossip);
 
                 _doc.setChosenName(shardName);
+
+                // Assign a UUID for the new shard when the feature flag is enabled.
+                if (!_doc.getShardUuid().has_value() &&
+                    feature_flags::gFeatureFlagAssignUUIDToShard.isEnabled(
+                        VersionContext::getDecoration(opCtx),
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                    if (_doc.getIsConfigShard()) {
+                        // For config-shard transitions, reuse the UUID already stored in the
+                        // config server's shard identity document.
+                        auto shardIdentityDoc =
+                            ShardingInitializationMongoD::getShardIdentityDoc(opCtx);
+                        tassert(10964202,
+                                "Config server is missing shard identity document",
+                                shardIdentityDoc);
+                        tassert(10964203,
+                                "Config server's shard identity is missing UUID",
+                                shardIdentityDoc->getUuid().has_value());
+                        _doc.setShardUuid(*shardIdentityDoc->getUuid());
+                    } else {
+                        _doc.setShardUuid(UUID::gen());
+                    }
+                }
 
                 // Check if the replicaset has any residue sharding related data
                 if (!_doc.getIsConfigShard()) {
@@ -217,7 +214,7 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kEnterCriticalSection,
             [this, _ = shared_from_this()](auto* opCtx) {
-                return feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabled(
+                return feature_flags::gAuthoritativeShardsDDL.isEnabled(
                     VersionContext::getDecoration(opCtx),
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
             },
@@ -230,7 +227,7 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                     blockCRUDOperationsRequest.setBlockType(
                         mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
                     blockCRUDOperationsRequest.setReason(_critSecReason);
-                    blockCRUDOperationsRequest.setClearDbInfo(false);
+                    blockCRUDOperationsRequest.setClearShardCatalogCache(false);
                     const auto session = getNewSession(opCtx);
                     generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
                     generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
@@ -262,9 +259,9 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                 auto shardMembershipLock =
                     shardingCatalogManager.acquireShardMembershipLockForTopologyChange(opCtx);
 
-
                 ShardType shard;
                 shard.setName(std::string{*_doc.getChosenName()});
+                shard.setUuid(_doc.getShardUuid());
                 shard.setHost(targeter.connectionString().toString());
 
                 auto newTopologyTime = VectorClockMutable::get(opCtx)->tickClusterTime(1);
@@ -316,14 +313,14 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                             .commandStatus);
                 }
 
-                if (feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabled(
+                if (feature_flags::gAuthoritativeShardsDDL.isEnabled(
                         VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                     const auto dbs = _doc.getPreExistingDatabasesOnPromotion();
 
                     for (const auto& dbName : dbs) {
                         auto database = shardingCatalogManager.localCatalogClient()->getDatabase(
-                            opCtx, dbName, repl::ReadConcernLevel::kLocalReadConcern);
+                            opCtx, dbName, repl::ReadConcernArgs::kLocal);
                         const auto& session = getNewSession(opCtx);
                         sharding_ddl_util::commitCreateDatabaseMetadataToShardCatalog(
                             opCtx, database, session, executor, token);
@@ -359,7 +356,7 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kExitCriticalSection,
             [this, _ = shared_from_this()](auto* opCtx) {
-                return feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabled(
+                return feature_flags::gAuthoritativeShardsDDL.isEnabled(
                     VersionContext::getDecoration(opCtx),
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
             },
@@ -372,7 +369,7 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                     unblockCRUDOperationsRequest.setBlockType(
                         mongo::CriticalSectionBlockTypeEnum::kUnblock);
                     unblockCRUDOperationsRequest.setReason(_critSecReason);
-                    unblockCRUDOperationsRequest.setClearDbInfo(false);
+                    unblockCRUDOperationsRequest.setClearShardCatalogCache(false);
                     const auto session = getNewSession(opCtx);
                     generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
                     generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
@@ -394,7 +391,9 @@ ExecutorFuture<void> AddShardCoordinator::_runImpl(
                     opCtx, ConfigsvrCoordinatorTypeEnum::kSetUserWriteBlockMode);
                 topology_change_helpers::propagateClusterUserWriteBlockToReplicaSet(
                     opCtx, _getTargeter(opCtx), **executor);
-                _unblockFCVChangesOnNewShard(opCtx, **executor);
+                const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+                _unblockFCVChangesOnNewShard(opCtx, **executor, isAuthoritative);
                 topology_change_helpers::unblockDDLCoordinators(opCtx,
                                                                 /*removeRecoveryDocument*/ false);
             }))
@@ -448,8 +447,8 @@ void AddShardCoordinator::_installShardIdentity(OperationContext* opCtx,
             apiParameters = APIParameters::fromBSON(params.value());
         }
 
-        const auto shardIdentity =
-            topology_change_helpers::createShardIdentity(opCtx, std::string{*_doc.getChosenName()});
+        const auto shardIdentity = topology_change_helpers::createShardIdentity(
+            opCtx, std::string{*_doc.getChosenName()}, _doc.getShardUuid());
 
         topology_change_helpers::installShardIdentity(
             opCtx, shardIdentity, targeter, apiParameters, _osiGenerator(), _executorWithoutGossip);
@@ -878,7 +877,9 @@ void AddShardCoordinator::_blockFCVChangesOnReplicaSet(
 }
 
 void AddShardCoordinator::_unblockFCVChangesOnNewShard(
-    OperationContext* opCtx, std::shared_ptr<executor::TaskExecutor> executor) {
+    OperationContext* opCtx,
+    std::shared_ptr<executor::TaskExecutor> executor,
+    bool isAuthoritative) {
     // Drop the collection to clean up the namespace
     auto& targeter = _getTargeter(opCtx);
     const auto osi = (*_osiGenerator())(opCtx);
@@ -886,6 +887,7 @@ void AddShardCoordinator::_unblockFCVChangesOnNewShard(
         NamespaceString::kBlockFCVChangesNamespace);
     dropCollectionParticipantCommand.setDropSystemCollections(true);
     dropCollectionParticipantCommand.setRequireCollectionEmpty(false);
+    dropCollectionParticipantCommand.setForceLegacyRefresh(!isAuthoritative);
     generic_argument_util::setMajorityWriteConcern(dropCollectionParticipantCommand);
     generic_argument_util::setOperationSessionInfo(dropCollectionParticipantCommand, osi);
     const auto dropCmdResponse =

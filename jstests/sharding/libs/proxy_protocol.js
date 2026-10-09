@@ -41,7 +41,8 @@ export class ProxyProtocolServer {
 
         // The file that will serve as stdin for the ProxyProtocolServer process. This file will
         // only be used to supply tlv structs to the server.
-        this.tlvFile = MongoRunner.dataPath + `proxyprotocol_tlvs_${ingress_port}_${egress_port}.json`;
+        this.tlvFile =
+            MongoRunner.dataPath + `proxyprotocol_tlvs_${ingress_port}_${egress_port}.json`;
         writeFile(this.tlvFile, "");
     }
 
@@ -146,7 +147,9 @@ export class ProxyProtocolServer {
                         ["/bin/sh", "-c", "fuser -v -n tcp " + this.ingress_port],
                         ["/bin/sh", "-c", "ps -ef | grep " + this.ingress_port],
                     ];
-                    commands.map((args) => _startMongoProgram({args})).map((pid) => waitProgram(pid));
+                    commands
+                        .map((args) => _startMongoProgram({args}))
+                        .map((pid) => waitProgram(pid));
                 }
                 return {checkProgramResult, checkLogResult, expectedLogPattern};
             },
@@ -165,12 +168,14 @@ export class ProxyProtocolServer {
      *
      * A TLV object has the following format:
      * - type: Number indicating the TLV type
-     * - value: UTF-8 string
+     * - value: UTF-8 string, or an array of {role: string, db: string} objects. Any value
+     *   corresponding to type 0xE1 (MongoDB roles) is converted into a DER-encoded sequence of roles.
+     *   All other types are carried as UTF-8 text.
      *
      * An SSL TLV object has the following format:
      * - ssl: array of TLV objects
      *
-     * Ex. { [{"type":0xE1,"value":"hello"}, {...}, {ssl: [{"type":0xE2,"value":"hello2"}, {...}]] }
+     * Ex. { [{"type":0x02,"value":"hello"}, {...}, {ssl: [{"type":0xE2,"value":"hello2"}, {...}]] }
      */
     setTLVs(tlvs) {
         const jsonString = JSON.stringify(tlvs) + "\n";
@@ -205,7 +210,9 @@ export class ProxyProtocolServer {
 
             const match = rawMongoProgramOutput(".*").match(regex);
             if (match === null) {
-                throw Error(`The output of ${args[0]} did not contain a connection to egress port ${this.egress_port}`);
+                throw Error(
+                    `The output of ${args[0]} did not contain a connection to egress port ${this.egress_port}`,
+                );
             }
 
             return parseInt(match[1], 10);

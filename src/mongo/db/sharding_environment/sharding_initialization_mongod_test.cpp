@@ -1,43 +1,18 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
+#include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/sharding_catalog_client_impl.h"
 #include "mongo/db/global_catalog/type_shard_identity.h"
@@ -46,6 +21,9 @@
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_mock.h"
+#include "mongo/db/repl/always_allow_non_local_writes.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/router_role/routing_cache/config_server_catalog_cache_loader_impl.h"
 #include "mongo/db/router_role/routing_cache/shard_server_catalog_cache_loader_impl.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
@@ -59,6 +37,7 @@
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
@@ -84,17 +63,14 @@ protected:
                 [&](OperationContext* opCtx, const ShardIdentity& shardIdentity) {
                     const auto& configConnStr = shardIdentity.getConfigsvrConnectionString();
 
-                    auto loader = std::make_shared<ShardServerCatalogCacheLoaderImpl>(
-                        std::make_unique<ConfigServerCatalogCacheLoaderImpl>());
-                    auto catalogCache = std::make_unique<CatalogCache>(
-                        opCtx->getServiceContext(),
-                        std::make_unique<ConfigServerCatalogCacheLoaderImpl>(),
-                        loader,
-                        true /* cascadeDatabaseCacheLoaderShutdown */,
-                        false /* cascadeCollectionCacheLoaderShutdown */);
+                    auto routerLoader = std::make_shared<ConfigServerCatalogCacheLoaderImpl>();
+                    auto catalogCache = std::make_unique<CatalogCache>(opCtx->getServiceContext(),
+                                                                       std::move(routerLoader));
 
+                    auto shardLoader = std::make_shared<ShardServerCatalogCacheLoaderImpl>(
+                        std::make_unique<ConfigServerCatalogCacheLoaderImpl>());
                     uassertStatusOK(initializeGlobalShardingStateForMongodForTest(
-                        configConnStr, std::move(catalogCache), std::move(loader)));
+                        configConnStr, std::move(catalogCache), std::move(shardLoader)));
 
                     // Set the ConnectionString return value on the mock targeter so that later
                     // calls to the targeter's getConnString() return the appropriate value
@@ -637,7 +613,7 @@ TEST_F(
     ASSERT(!ShardingInitializationMongoD::getShardIdentityDoc(operationContext()));
 }
 
-using ShardCatalogIndexTest = ShardingMongoDTestFixture;
+using ShardServerIndexTest = ShardingMongoDTestFixture;
 
 /**
  * Helper to get the list of indexes on a namespace using DBDirectClient.
@@ -649,8 +625,29 @@ std::list<BSONObj> getIndexes(OperationContext* opCtx, const NamespaceString& ns
     return client.getIndexSpecs(nss, includeBuildUUIDs, options);
 }
 
-TEST_F(ShardCatalogIndexTest, CreatesCollectionsAndIndexes) {
-    ASSERT_OK(ensureShardLocalCatalogIndexes(operationContext()));
+Status ensureShardServerIndexesAtStepUp(OperationContext* opCtx) {
+    auto* replCoord =
+        static_cast<repl::ReplicationCoordinatorMock*>(repl::ReplicationCoordinator::get(opCtx));
+    const auto canAcceptNonLocalWrites = replCoord->canAcceptNonLocalWrites();
+    replCoord->setCanAcceptNonLocalWrites(false);
+
+    Status status = Status::OK();
+    {
+        repl::AllowNonLocalWritesBlock allowNonLocalWrites(opCtx);
+        status = ensureShardServerIndexes(opCtx);
+    }
+
+    replCoord->setCanAcceptNonLocalWrites(canAcceptNonLocalWrites);
+    return status;
+}
+
+TEST_F(ShardServerIndexTest, CreatesCollectionsAndIndexes) {
+    ASSERT_OK(ensureShardServerIndexesAtStepUp(operationContext()));
+
+    // config.rangeDeletions should have _id + the range deletion index.
+    auto rangeDeletionIndexes =
+        getIndexes(operationContext(), NamespaceString::kRangeDeletionNamespace);
+    ASSERT_EQ(2U, rangeDeletionIndexes.size());
 
     // config.shard.catalog.collections should have the _id index only.
     auto collectionsIndexes =
@@ -663,14 +660,45 @@ TEST_F(ShardCatalogIndexTest, CreatesCollectionsAndIndexes) {
     ASSERT_EQ(5U, chunksIndexes.size());
 }
 
-TEST_F(ShardCatalogIndexTest, IdempotentWhenCalledMultipleTimes) {
+TEST_F(ShardServerIndexTest, IdempotentWhenCalledMultipleTimes) {
     // First call.
-    ASSERT_OK(ensureShardLocalCatalogIndexes(operationContext()));
+    ASSERT_OK(ensureShardServerIndexesAtStepUp(operationContext()));
 
     // Second call should also succeed without errors.
-    ASSERT_OK(ensureShardLocalCatalogIndexes(operationContext()));
+    ASSERT_OK(ensureShardServerIndexesAtStepUp(operationContext()));
 
     // Verify index counts remain the same.
+    auto rangeDeletionIndexes =
+        getIndexes(operationContext(), NamespaceString::kRangeDeletionNamespace);
+    ASSERT_EQ(2U, rangeDeletionIndexes.size());
+
+    auto collectionsIndexes =
+        getIndexes(operationContext(), NamespaceString::kConfigShardCatalogCollectionsNamespace);
+    ASSERT_EQ(1U, collectionsIndexes.size());
+
+    auto chunksIndexes =
+        getIndexes(operationContext(), NamespaceString::kConfigShardCatalogChunksNamespace);
+    ASSERT_EQ(5U, chunksIndexes.size());
+}
+
+using ShardServerIndexDeathTest = ShardServerIndexTest;
+
+DEATH_TEST_F(ShardServerIndexDeathTest,
+             ContinuesCreatingIndexesAfterNonEmptyCollectionError,
+             "12352501") {
+    // Make the range deletions collection non-empty without its required non-unique index.
+    DBDirectClient client(operationContext());
+    client.insert(NamespaceString::kRangeDeletionNamespace, BSON("_id" << 1));
+
+    auto status = ensureShardServerIndexesAtStepUp(operationContext());
+    ASSERT_EQ(12352501, status.code());
+
+    // The shard catalog collections and chunks indexes are still created before the function
+    // returns the range deletions collection failure.
+    auto rangeDeletionIndexes =
+        getIndexes(operationContext(), NamespaceString::kRangeDeletionNamespace);
+    ASSERT_EQ(1U, rangeDeletionIndexes.size());
+
     auto collectionsIndexes =
         getIndexes(operationContext(), NamespaceString::kConfigShardCatalogCollectionsNamespace);
     ASSERT_EQ(1U, collectionsIndexes.size());

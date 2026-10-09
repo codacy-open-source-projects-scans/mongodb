@@ -1,42 +1,13 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/initializer.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/intrusive_counter.h"
 
-#include <algorithm>
+#include <functional>
 
 #include <boost/algorithm/string/join.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -189,6 +160,8 @@ MONGO_INITIALIZER_GENERAL(InitExpressionsForCloneTest, ("EndExpressionRegistrati
         fromjson("{$week: {date: '$foo', timezone: '$tz'}}"),
         fromjson("{$year: {date: '$foo', timezone: '$tz'}}"),
         fromjson("{$zip: {inputs: [['a'], ['b'], ['c']]}}"),
+        fromjson("{$zip: {inputs: [['a'], ['b']], defaults: ['x', 'y'], useLongestLength: true}}"),
+        fromjson("{$zip: {inputs: [['a'], ['b']], defaults: '$foo', useLongestLength: true}}"),
         fromjson("{$_internalFindAllValuesAtPath: 'foo'}"),
         fromjson(R"({
             "$_internalFleBetween": {
@@ -353,19 +326,54 @@ TEST(ExpressionCloneTest, AllRegisteredExpressionsHaveATest) {
 
 TEST(ExpressionCloneTest, SerializedClonedExpressionIsEquivalentToOriginal) {
     auto exprCtx = make_intrusive<ExpressionContextForTest>();
+    auto newExpCtx = make_intrusive<ExpressionContextForTest>();
+
+    auto assertClone =
+        [](const Expression& origExpr, ExpressionContext* cloneExpCtx, const BSONObj& exprSpec) {
+            auto cloned = origExpr.clone(*cloneExpCtx);
+            ASSERT_TRUE(ValueComparator().evaluate(origExpr.serialize() == cloned->serialize()))
+                << "Mismatch between cloned and original expressions for: " << exprSpec;
+        };
 
     for (auto&& exprSpec : testExpressions) {
-        auto&& [clonedExpr, origExprSerialized, backedBson] =
-            [&]() -> std::tuple<boost::intrusive_ptr<Expression>, Value, BSONObj> {
-            auto&& [origExpr, backedBson] = makeExpression(exprCtx.get(), exprSpec);
-            // Upon retruning from this lambda the 'origExpression' should be destroyed, as it's not
-            // shared with any other expression. If the cloned expression somehow keeps raw pointers
-            // or references to the original expression tree, the test should fail.
-            return {origExpr->clone(), origExpr->serialize(), backedBson};
-        }();
+        auto&& [origExpr, _] = makeExpression(exprCtx.get(), exprSpec);
 
-        ASSERT_TRUE(ValueComparator().evaluate(origExprSerialized == clonedExpr->serialize()))
-            << "Mismatch between cloned and original expressions: " << exprSpec;
+        // Passing a new context.
+        assertClone(*origExpr, newExpCtx.get(), exprSpec);
+        // Passing the same context.
+        assertClone(*origExpr, exprCtx.get(), exprSpec);
+    }
+}
+
+TEST(ExpressionCloneTest, CloneUsesCorrectExpressionContext) {
+    auto exprCtx = make_intrusive<ExpressionContextForTest>();
+    auto newExpCtx = make_intrusive<ExpressionContextForTest>();
+
+    // Recursively checks every node in the cloned tree, not just the root.
+    std::function<void(const Expression&, ExpressionContext*, const BSONObj&)> assertAllNodes =
+        [&](const Expression& expr, ExpressionContext* cloneExpCtx, const BSONObj& exprSpec) {
+            ASSERT_EQ(expr.getExpressionContext(), cloneExpCtx)
+                << "Cloned expression has unexpected ExpressionContext for: " << exprSpec;
+            for (auto& child : expr.getChildren()) {
+                if (child) {
+                    assertAllNodes(*child, cloneExpCtx, exprSpec);
+                }
+            }
+        };
+
+    auto assertClone =
+        [&](const Expression& origExpr, ExpressionContext* cloneExpCtx, const BSONObj& exprSpec) {
+            auto cloned = origExpr.clone(*cloneExpCtx);
+            assertAllNodes(*cloned, cloneExpCtx, exprSpec);
+        };
+
+    for (auto&& exprSpec : testExpressions) {
+        auto&& [origExpr, _] = makeExpression(exprCtx.get(), exprSpec);
+
+        // Passing a new context.
+        assertClone(*origExpr, newExpCtx.get(), exprSpec);
+        // Passing the same context.
+        assertClone(*origExpr, exprCtx.get(), exprSpec);
     }
 }
 

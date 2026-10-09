@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/projection_node.h"
 
@@ -34,6 +8,8 @@
 #include "mongo/db/query/compiler/dependency_analysis/document_transformation_helpers.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -57,7 +33,7 @@ void ProjectionNode::_addProjectionForPath(const FieldPath& path) {
         // Add to projection unless we already have `path` as a projection.
         if (!_projectedFieldsSet.contains(path.fullPath())) {
             auto it = _projectedFields.insert(_projectedFields.end(), path.fullPath());
-            _projectedFieldsSet.insert(StringData(*it));
+            _projectedFieldsSet.insert(std::string_view(*it));
         }
     } else {
         // FieldPath can't be empty, so it is safe to obtain the first path component here.
@@ -95,14 +71,12 @@ void ProjectionNode::_addExpressionForPath(const FieldPath& path,
 }
 
 boost::intrusive_ptr<Expression> ProjectionNode::getExpressionForPath(const FieldPath& path) const {
-    // The FieldPath always conatins at least one field.
+    // The FieldPath always contains at least one field.
     auto fieldName = std::string{path.getFieldName(0)};
 
     if (path.getPathLength() == 1) {
-        if (_expressions.find(fieldName) != _expressions.end()) {
-            return _expressions.at(fieldName);
-        }
-        return nullptr;
+        auto it = _expressions.find(fieldName);
+        return (it != _expressions.end()) ? it->second : nullptr;
     }
     if (auto child = getChild(fieldName)) {
         return child->getExpressionForPath(path.tail());
@@ -131,13 +105,14 @@ ProjectionNode* ProjectionNode::getChild(const std::string& field) const {
     return childIt == _children.end() ? nullptr : childIt->second.get();
 }
 
-Document ProjectionNode::applyToDocument(const Document& inputDoc) const {
+Document ProjectionNode::applyToDocument(const Document& inputDoc,
+                                         const EvaluationContext& ctx) const {
     // Defer to the derived class to initialize the output document, then apply.
     MutableDocument outputDoc{initializeOutputDocument(inputDoc)};
     applyProjections(inputDoc, &outputDoc);
 
     if (_subtreeContainsComputedFields) {
-        applyExpressions(inputDoc, &outputDoc);
+        applyExpressions(inputDoc, &outputDoc, ctx);
     }
 
     // Make sure that we always pass through any metadata present in the input doc.
@@ -157,7 +132,10 @@ void ProjectionNode::applyProjections(const Document& inputDoc, MutableDocument*
     while (it.more()) {
         auto fieldName = it.fieldName();
 
-        if (_projectedFieldsSet.find(fieldName) != _projectedFieldsSet.end()) {
+        // Pre-compute the hash once and reuse it for both set and map lookups.
+        const auto hashedName = StringMapHasher{}.hashed_key(fieldName);
+
+        if (_projectedFieldsSet.find(hashedName) != _projectedFieldsSet.end()) {
             if (isIncl) {
                 outputProjectedField(fieldName, it.next().second, outputDoc);
             } else {
@@ -165,7 +143,7 @@ void ProjectionNode::applyProjections(const Document& inputDoc, MutableDocument*
                 it.advance();
             }
             ++projectedFields;
-        } else if (auto childIt = _children.find(fieldName); childIt != _children.end()) {
+        } else if (auto childIt = _children.find(hashedName); childIt != _children.end()) {
             outputProjectedField(
                 fieldName, childIt->second->applyProjectionsToValue(it.next().second), outputDoc);
             ++projectedFields;
@@ -174,7 +152,7 @@ void ProjectionNode::applyProjections(const Document& inputDoc, MutableDocument*
         }
 
         // Check if we can avoid reading from the document any further.
-        if (_maxFieldsToProject && _maxFieldsToProject <= projectedFields) {
+        if (projectedFields >= _maxFieldsToProject) {
             break;
         }
     }
@@ -210,17 +188,30 @@ Value ProjectionNode::applyProjectionsToValue(Value inputValue) const {
     }
 }
 
-void ProjectionNode::outputProjectedField(StringData field, Value val, MutableDocument* doc) const {
+void ProjectionNode::outputProjectedField(std::string_view field,
+                                          Value val,
+                                          MutableDocument* doc) const {
     doc->setField(field, val);
 }
 
-void ProjectionNode::applyExpressions(const Document& root, MutableDocument* outputDoc) const {
+void ProjectionNode::applyExpressions(const Document& root,
+                                      MutableDocument* outputDoc,
+                                      const EvaluationContext& ctx) const {
     for (auto&& field : _orderToProcessAdditionsAndChildren) {
         auto childIt = _children.find(field);
         if (childIt != _children.end()) {
-            outputDoc->setField(field,
-                                childIt->second->applyExpressionsToValue(
-                                    root, outputDoc->peek()[StringData{field}]));
+            // Use position-based access to avoid a second hash lookup when reading and writing the
+            // field value.
+            const Document& doc = outputDoc->peek();
+            const auto pos = doc.positionOf(std::string_view{field});
+            Value currentValue = pos.found() ? doc.getField(pos) : Value{};
+            Value newValue =
+                childIt->second->applyExpressionsToValue(root, std::move(currentValue), ctx);
+            if (pos.found()) {
+                outputDoc->setField(pos, std::move(newValue));
+            } else {
+                outputDoc->setField(std::string_view{field}, std::move(newValue));
+            }
         } else {
             auto expressionIt = _expressions.find(field);
             tassert(7241726,
@@ -229,21 +220,23 @@ void ProjectionNode::applyExpressions(const Document& root, MutableDocument* out
             outputDoc->setField(
                 field,
                 expressionIt->second->evaluate(
-                    root, &expressionIt->second->getExpressionContext()->variables));
+                    root, &expressionIt->second->getExpressionContext()->variables, ctx));
         }
     }
 }
 
-Value ProjectionNode::applyExpressionsToValue(const Document& root, Value inputValue) const {
+Value ProjectionNode::applyExpressionsToValue(const Document& root,
+                                              Value inputValue,
+                                              const EvaluationContext& ctx) const {
     if (inputValue.getType() == BSONType::object) {
         MutableDocument outputDoc(inputValue.getDocument());
-        applyExpressions(root, &outputDoc);
+        applyExpressions(root, &outputDoc, ctx);
         return outputDoc.freezeToValue();
     } else if (inputValue.getType() == BSONType::array) {
         std::vector<Value> values;
         values.reserve(inputValue.getArrayLength());
         for (const auto& input : inputValue.getArray()) {
-            auto value = applyExpressionsToValue(root, input);
+            auto value = applyExpressionsToValue(root, input, ctx);
             if (!value.missing()) {
                 values.push_back(std::move(value));
             }
@@ -255,7 +248,7 @@ Value ProjectionNode::applyExpressionsToValue(const Document& root, Value inputV
             // document of all the computed values. This case represents applying a projection like
             // {"a.b": {$literal: 1}} to the document {a: 1}. This should yield {a: {b: 1}}.
             MutableDocument outputDoc;
-            applyExpressions(root, &outputDoc);
+            applyExpressions(root, &outputDoc, ctx);
             return outputDoc.freezeToValue();
         }
         // We didn't have any expressions, so just skip this value.
@@ -340,16 +333,17 @@ void ProjectionNode::optimize() {
         childPair.second->optimize();
     }
 
-    _maxFieldsToProject = maxFieldsToProject();
+    _maxFieldsToProject = maxFieldsToProject().value_or(kUnlimitedFieldsToProject);
 }
 
-Document ProjectionNode::serialize(const SerializationOptions& options) const {
+Document ProjectionNode::serialize(const query_shape::SerializationOptions& options) const {
     MutableDocument outputDoc;
     serialize(&outputDoc, options);
     return outputDoc.freeze();
 }
 
-void ProjectionNode::serialize(MutableDocument* output, const SerializationOptions& options) const {
+void ProjectionNode::serialize(MutableDocument* output,
+                               const query_shape::SerializationOptions& options) const {
     // Determine the boolean value for projected fields in the explain output.
     const bool projVal = isIncluded();
 

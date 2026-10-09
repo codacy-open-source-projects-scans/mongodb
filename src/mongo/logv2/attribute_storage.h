@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/constants.h"
 #include "mongo/logv2/log_attr.h"
@@ -39,13 +12,13 @@
 #include "mongo/util/modules.h"
 
 #include <functional>
-#include <string_view>  // NOLINT
+#include <string_view>
 #include <variant>
 
 #include <boost/container/small_vector.hpp>
 
 namespace mongo {
-namespace MONGO_MOD_PUBLIC logv2 {
+namespace [[MONGO_MOD_PUBLIC]] logv2 {
 
 class TypeErasedAttributeStorage;
 
@@ -53,7 +26,7 @@ class TypeErasedAttributeStorage;
 struct CustomAttributeValue {
     std::function<void(BSONObjBuilder&)> BSONSerialize;
     std::function<BSONArray()> toBSONArray;
-    std::function<void(BSONObjBuilder&, StringData)> BSONAppend;
+    std::function<void(BSONObjBuilder&, std::string_view)> BSONAppend;
 
     // Have both serialize and toString available, using toString() with a serialize interface is
     // inefficient.
@@ -74,6 +47,7 @@ template <typename It>
 auto mapLog(It begin, It end);
 
 namespace detail {
+using namespace std::literals::string_view_literals;
 
 template <template <class...> class Template, typename... Args>
 struct IsInstantiationOf : std::false_type {};
@@ -130,8 +104,8 @@ template <typename T>
 constexpr bool hasBSONSerialize = stdx::is_detected_v<HasBSONSerializeOp, T>;
 
 template <typename T>
-using HasBSONBuilderAppendOp =
-    decltype(std::declval<BSONObjBuilder>().append(std::declval<StringData>(), std::declval<T>()));
+using HasBSONBuilderAppendOp = decltype(std::declval<BSONObjBuilder>().append(
+    std::declval<std::string_view>(), std::declval<T>()));
 template <typename T>
 constexpr bool hasBSONBuilderAppend = stdx::is_detected_v<HasBSONBuilderAppendOp, T>;
 
@@ -147,7 +121,7 @@ template <typename T>
 constexpr bool hasToString = stdx::is_detected_exact_v<std::string, HasToStringOp, T>;
 template <typename T>
 constexpr bool hasToStringReturnStringData =
-    stdx::is_detected_convertible_v<StringData, HasToStringOp, T>;
+    stdx::is_detected_convertible_v<std::string_view, HasToStringOp, T>;
 
 template <typename T>
 using HasNonMemberToStringOp = decltype(toString(std::declval<T>()));
@@ -156,7 +130,7 @@ constexpr bool hasNonMemberToString =
     stdx::is_detected_exact_v<std::string, HasNonMemberToStringOp, T>;
 template <typename T>
 constexpr bool hasNonMemberToStringReturnStringData =
-    stdx::is_detected_convertible_v<StringData, HasNonMemberToStringOp, T>;
+    stdx::is_detected_convertible_v<std::string_view, HasNonMemberToStringOp, T>;
 
 template <typename T>
 using HasNonMemberToBSONOp = decltype(toBSON(std::declval<T>()));
@@ -175,9 +149,9 @@ constexpr inline bool isCustomLoggable =
     hasToStringForLogging<T> ||               //   std::string toStringForLogging(x)
     hasStringSerialize<T> ||                  //   x.serialize(fmt::memory_buffer&)
     hasToString<T> ||                         //   std::string x.toString()
-    hasToStringReturnStringData<T> ||         //   StringData x.toString()
+    hasToStringReturnStringData<T> ||         //   std::string_view x.toString()
     hasNonMemberToString<T> ||                //   std::string toString(x)
-    hasNonMemberToStringReturnStringData<T>;  //   StringData toString(x)
+    hasNonMemberToStringReturnStringData<T>;  //   std::string_view toString(x)
 
 template <typename T>
 void requireCustomLoggable() {
@@ -226,19 +200,16 @@ inline double mapValue(double value) {
     return value;
 }
 
-inline StringData mapValue(StringData value) {
+inline std::string_view mapValue(std::string_view value) {
     return value;
 }
-inline StringData mapValue(std::string const& value) {
+inline std::string_view mapValue(std::string const& value) {
     return value;
 }
-inline StringData mapValue(std::string_view value) {  // NOLINT
-    return toStringDataForInterop(value);
-}
-inline StringData mapValue(char* value) {
+inline std::string_view mapValue(char* value) {
     return value;
 }
-inline StringData mapValue(const char* value) {
+inline std::string_view mapValue(const char* value) {
     return value;
 }
 
@@ -264,7 +235,7 @@ inline CustomAttributeValue mapValue(boost::none_t val) {
     CustomAttributeValue custom;
     // Use BSONAppend instead of toBSON because we just want the null value and not a whole
     // object with a field name
-    custom.BSONAppend = [](BSONObjBuilder& builder, StringData fieldName) {
+    custom.BSONAppend = [](BSONObjBuilder& builder, std::string_view fieldName) {
         builder.appendNull(fieldName);
     };
     custom.toString = [] {
@@ -295,7 +266,7 @@ auto mapValue(T val) {
     } else if constexpr (hasNonMemberToStringReturnStringData<T>) {
         CustomAttributeValue custom;
         custom.stringSerialize = [val](fmt::memory_buffer& buffer) {
-            StringData sd = toString(val);
+            std::string_view sd = toString(val);
             buffer.append(sd.data(), sd.data() + sd.size());
         };
         return custom;
@@ -336,7 +307,7 @@ CustomAttributeValue mapValue(const T& val) {
     requireCustomLoggable<T>();
     CustomAttributeValue custom;
     if constexpr (hasBSONBuilderAppend<T>) {
-        custom.BSONAppend = [&val](BSONObjBuilder& builder, StringData fieldName) {
+        custom.BSONAppend = [&val](BSONObjBuilder& builder, std::string_view fieldName) {
             builder.append(fieldName, val);
         };
     }
@@ -373,7 +344,7 @@ CustomAttributeValue mapValue(const T& val) {
         };
     } else if constexpr (hasToStringReturnStringData<T>) {
         custom.stringSerialize = [&val](fmt::memory_buffer& buffer) {
-            StringData sd = val.toString();
+            std::string_view sd = val.toString();
             buffer.append(sd.data(), sd.data() + sd.size());
         };
     } else if constexpr (hasNonMemberToString<T>) {
@@ -382,7 +353,7 @@ CustomAttributeValue mapValue(const T& val) {
         };
     } else if constexpr (hasNonMemberToStringReturnStringData<T>) {
         custom.stringSerialize = [&val](fmt::memory_buffer& buffer) {
-            StringData sd = toString(val);
+            std::string_view sd = toString(val);
             buffer.append(sd.data(), sd.data() + sd.size());
         };
     }
@@ -391,7 +362,7 @@ CustomAttributeValue mapValue(const T& val) {
 }
 
 template <typename It>
-class MONGO_MOD_NEEDS_REPLACEMENT SequenceContainerLogger {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] SequenceContainerLogger {
 public:
     SequenceContainerLogger(It begin, It end) : _begin(begin), _end(end) {}
 
@@ -405,8 +376,8 @@ public:
                 if constexpr (std::is_same_v<V, CustomAttributeValue&&>) {
                     if (val.BSONAppend) {
                         BSONObjBuilder objBuilder;
-                        val.BSONAppend(objBuilder, ""_sd);
-                        builder.append(objBuilder.done().getField(""_sd));
+                        val.BSONAppend(objBuilder, ""sv);
+                        builder.append(objBuilder.done().getField(""sv));
                     } else if (val.BSONSerialize) {
                         BSONObjBuilder objBuilder;
                         val.BSONSerialize(objBuilder);
@@ -445,7 +416,7 @@ public:
 
     // Text Format: (elem1, elem2, ..., elemN)
     void serialize(fmt::memory_buffer& buffer) const {
-        StringData separator;
+        std::string_view separator;
         buffer.push_back('(');
         for (auto it = _begin; it != _end; ++it) {
             const auto& item = *it;
@@ -464,8 +435,8 @@ public:
                             JsonStringFormat::ExtendedRelaxedV2_0_0, 0, false, buffer);
                     } else if (val.BSONAppend) {
                         BSONObjBuilder objBuilder;
-                        val.BSONAppend(objBuilder, ""_sd);
-                        objBuilder.done().getField(""_sd).jsonStringBuffer(
+                        val.BSONAppend(objBuilder, ""sv);
+                        objBuilder.done().getField(""sv).jsonStringBuffer(
                             JsonStringFormat::ExtendedRelaxedV2_0_0, false, false, 0, buffer);
                     } else {
                         val.toBSONArray().jsonStringBuffer(
@@ -494,7 +465,7 @@ public:
                 append(mapValue(item));
             }
 
-            separator = ", "_sd;
+            separator = ", "sv;
         }
         buffer.push_back(')');
     }
@@ -507,7 +478,7 @@ private:
 template <typename It>
 class AssociativeContainerLogger {
 public:
-    static_assert(std::is_same_v<decltype(mapValue(std::declval<It>()->first)), StringData>,
+    static_assert(std::is_same_v<decltype(mapValue(std::declval<It>()->first)), std::string_view>,
                   "key in associative container needs to be a string");
 
     AssociativeContainerLogger(It begin, It end) : _begin(begin), _end(end) {}
@@ -516,7 +487,7 @@ public:
     void serialize(BSONObjBuilder* builder) const {
         for (auto it = _begin; it != _end; ++it) {
             const auto& item = *it;
-            auto append = [builder](StringData key, auto&& val) {
+            auto append = [builder](std::string_view key, auto&& val) {
                 using V = decltype(val);
                 if constexpr (std::is_same_v<V, CustomAttributeValue&&>) {
                     if (val.BSONAppend) {
@@ -558,13 +529,13 @@ public:
 
     // Text Format: (elem1: val1, elem2: val2, ..., elemN: valN)
     void serialize(fmt::memory_buffer& buffer) const {
-        StringData separator = ""_sd;
+        std::string_view separator = ""sv;
         buffer.push_back('(');
         for (auto it = _begin; it != _end; ++it) {
             const auto& item = *it;
             buffer.append(separator.data(), separator.data() + separator.size());
 
-            auto append = [&buffer](StringData key, auto&& val) {
+            auto append = [&buffer](std::string_view key, auto&& val) {
                 if constexpr (std::is_same_v<decltype(val), CustomAttributeValue&&>) {
                     if (val.stringSerialize) {
                         fmt::format_to(std::back_inserter(buffer), "{}: ", key);
@@ -579,9 +550,9 @@ public:
                             JsonStringFormat::ExtendedRelaxedV2_0_0, 0, false, buffer);
                     } else if (val.BSONAppend) {
                         BSONObjBuilder objBuilder;
-                        val.BSONAppend(objBuilder, ""_sd);
+                        val.BSONAppend(objBuilder, ""sv);
                         fmt::format_to(std::back_inserter(buffer), "{}: ", key);
-                        objBuilder.done().getField(""_sd).jsonStringBuffer(
+                        objBuilder.done().getField(""sv).jsonStringBuffer(
                             JsonStringFormat::ExtendedRelaxedV2_0_0, false, false, 0, buffer);
                     } else {
                         fmt::format_to(std::back_inserter(buffer), "{}: ", key);
@@ -613,7 +584,7 @@ public:
                 append(key, mapValue(item.second));
             }
 
-            separator = ", "_sd;
+            separator = ", "sv;
         }
         buffer.push_back(')');
     }
@@ -624,7 +595,7 @@ private:
 };
 
 // Named attribute, storage for a name-value attribute.
-class MONGO_MOD_NEEDS_REPLACEMENT NamedAttribute {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] NamedAttribute {
 public:
     NamedAttribute() = default;
     NamedAttribute(const char* n, long double val) = delete;
@@ -648,7 +619,7 @@ public:
                  unsigned long long,
                  bool,
                  double,
-                 StringData,
+                 std::string_view,
                  Nanoseconds,
                  Microseconds,
                  Milliseconds,
@@ -742,7 +713,7 @@ public:
     void add(const char (&name)[N], T&& value) = delete;
 
     template <size_t N>
-    void add(const char (&name)[N], StringData value) {
+    void add(const char (&name)[N], std::string_view value) {
         _attributes.emplace_back(name, value);
     }
 
@@ -750,7 +721,7 @@ public:
     template <size_t N>
     void addDeepCopy(const char (&name)[N], std::string value) {
         _copiedStrings.push_front(std::move(value));
-        add(name, StringData(_copiedStrings.front()));
+        add(name, std::string_view(_copiedStrings.front()));
     }
 
     // Does not have the protections of add() above. Be careful about lifetime of value!
@@ -780,7 +751,7 @@ class TypeErasedAttributeStorage {
 public:
     using const_iterator = const detail::NamedAttribute*;
 
-    TypeErasedAttributeStorage() : _size(0) {}
+    TypeErasedAttributeStorage() : _data(nullptr), _size(0) {}
 
     template <typename... Args>
     TypeErasedAttributeStorage(const detail::AttributeStorage<Args...>& store)
@@ -801,13 +772,15 @@ public:
         return _data;
     }
     const_iterator end() const {
-        return _data + _size;
+        // Guard against forming _data + _size when _data is null (as in a default-constructed
+        // instance), which would be undefined pointer arithmetic even when _size is 0.
+        return _data ? _data + _size : _data;
     }
 
     // Applies a function to every stored named attribute in order they are captured
     template <typename Func>
     void apply(Func&& f) const {
-        std::for_each(_data, _data + _size, [&](const auto& attr) {
+        std::for_each(begin(), end(), [&](const auto& attr) {
             visit([&](auto&& val) { f(attr.name, val); }, attr.value);
         });
     }
@@ -842,5 +815,5 @@ auto mapLog(It begin, It end) {
     return detail::AssociativeContainerLogger(begin, end);
 }
 
-}  // namespace MONGO_MOD_PUBLIC logv2
+}  // namespace logv2
 }  // namespace mongo

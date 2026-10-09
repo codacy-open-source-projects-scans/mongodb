@@ -36,7 +36,13 @@ function killopIndexBuildOnSecondaryOnFailpoint(rst, failpointName, shouldSuccee
     let expectedErrors = shouldSucceed ? ErrorCodes.IndexBuildAborted : [];
 
     const fp = configureFailPoint(secondary, failpointName);
-    const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {}, expectedErrors);
+    const createIdx = IndexBuildTest.startIndexBuild(
+        primary,
+        coll.getFullName(),
+        {a: 1},
+        {},
+        expectedErrors,
+    );
 
     // When the index build starts, find its op id.
     const opId = IndexBuildTest.waitForIndexBuildToStart(secondaryDB);
@@ -89,7 +95,10 @@ function killopIndexBuildOnSecondaryOnFailpoint(rst, failpointName, shouldSuccee
         });
 
         // After restarting the secondary, expect that the index build completes successfully.
-        rst.stop(secondary.nodeId, undefined, {forRestart: true, allowedExitCode: MongoRunner.EXIT_ABORT});
+        rst.stop(secondary.nodeId, undefined, {
+            forRestart: true,
+            allowedExitCode: MongoRunner.EXIT_ABORT,
+        });
         rst.start(secondary.nodeId, undefined, true /* restart */);
 
         secondary = rst.getSecondary();
@@ -136,7 +145,11 @@ rst.initiate();
 
 // Kill the build before it has voted for commit.
 jsTestLog("killOp index build on secondary before vote for commit readiness");
-killopIndexBuildOnSecondaryOnFailpoint(rst, "hangAfterIndexBuildFirstDrain", /*shouldSucceed*/ true);
+killopIndexBuildOnSecondaryOnFailpoint(
+    rst,
+    "hangAfterIndexBuildFirstDrain",
+    /*shouldSucceed*/ true,
+);
 
 jsTestLog("killOp index build on secondary after vote for commit readiness");
 killopIndexBuildOnSecondaryOnFailpoint(

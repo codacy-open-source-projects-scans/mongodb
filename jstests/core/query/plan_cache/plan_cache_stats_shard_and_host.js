@@ -2,6 +2,7 @@
 // for each plan cache entry when appropriate.
 //
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   assumes_read_concern_unchanged,
 //   assumes_read_preference_unchanged,
@@ -41,7 +42,11 @@ function filterPlanCacheEntriesByKey(planCacheKey, planCacheContents) {
 let planCacheContents = filterPlanCacheEntriesByKey(planCacheKey, planCache.list());
 
 // We expect every shard that has a chunk for the collection to have produced a plan cache entry.
-assert.eq(FixtureHelpers.numberOfShardsForCollection(coll), planCacheContents.length, planCacheContents);
+assert.eq(
+    FixtureHelpers.numberOfShardsForCollection(coll),
+    planCacheContents.length,
+    planCacheContents,
+);
 
 // Check that the "host" field is present for every plan cache entry.
 for (const entry of planCacheContents) {
@@ -52,12 +57,7 @@ for (const entry of planCacheContents) {
 // Otherwise, we expect "shard" to be absent. In either case, this should be true for each
 // individual plan cache entry.
 for (const entry of planCacheContents) {
-    assert.eq(
-        FixtureHelpers.isMongos(db) ||
-            (TestData.hasOwnProperty("testingReplicaSetEndpoint") && TestData.testingReplicaSetEndpoint),
-        entry.hasOwnProperty("shard"),
-        entry,
-    );
+    assert.eq(FixtureHelpers.isMongos(db), entry.hasOwnProperty("shard"), entry);
 }
 
 // If we group the results by shard or host, then we should only get one plan cache entry for each

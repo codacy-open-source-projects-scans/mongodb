@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 
@@ -39,17 +13,18 @@
 #include "mongo/db/keypattern.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_util.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution_helpers.h"
 #include "mongo/db/query/query_planner_common.h"
-#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 
 #include <algorithm>
 #include <queue>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -69,21 +44,11 @@
 #include <fmt/format.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
 namespace wcp = ::mongo::wildcard_planning;
-
-void assertSupportsLeftMostBranchTraversal(const QuerySolutionNode* node) {
-    // At the moment, we only extend a solution plan with a tree for $group stage(s), which have
-    // exactly one child. The only node with more than one child that we accept is $lookup,
-    // where we descend down the first child, representing the main collection. We'll replace
-    // the left-most branch descent with a full tree traversal, if/when it becomes necessary.
-    tassert(5842800,
-            "Only chain extension trees are supported",
-            node->children.size() == 1 || node->getType() == StageType::STAGE_EQ_LOOKUP ||
-                node->getType() == StageType::STAGE_EQ_LOOKUP_UNWIND);
-}
 
 // Create an ordred interval list which represents the bounds for all BSON elements of type String,
 // Object, or Array.
@@ -126,7 +91,84 @@ bool rangeCanContainString(const BSONElement& startKey,
     return !stringBoundsOil.intervals.empty();
 }
 
-// Helper for 'getAllSecondaryNamespaces' that deduplicates namespaces.
+// Helper to extract a keypattern from a QSN node that has one.
+boost::optional<KeyPattern> getKeyPattern(const QuerySolutionNode* node) {
+    switch (node->getType()) {
+        case STAGE_COUNT_SCAN: {
+            return KeyPattern{static_cast<const CountScanNode*>(node)->index.keyPattern};
+        }
+        case STAGE_DISTINCT_SCAN: {
+            return KeyPattern{static_cast<const DistinctNode*>(node)->index.keyPattern};
+        }
+        case STAGE_GEO_NEAR_2D: {
+            return KeyPattern{static_cast<const GeoNear2DNode*>(node)->index.keyPattern};
+        }
+        case STAGE_GEO_NEAR_2DSPHERE: {
+            return KeyPattern{static_cast<const GeoNear2DSphereNode*>(node)->index.keyPattern};
+        }
+        case STAGE_INDEX_PROBE_NODE: {
+            return KeyPattern{static_cast<const IndexProbeNode*>(node)->index.keyPattern};
+        }
+        case STAGE_IXSCAN: {
+            return KeyPattern{static_cast<const IndexScanNode*>(node)->index.keyPattern};
+        }
+        case STAGE_TEXT_MATCH: {
+            return KeyPattern{static_cast<const TextMatchNode*>(node)->indexPrefix};
+        }
+        default:
+            return boost::none;
+    }
+}
+
+// Helper to extract a namespace from a QSN node that has one.
+boost::optional<NamespaceString> getNamespace(const QuerySolutionNode* qsn) {
+    if (auto node = dynamic_cast<const EqLookupNode*>(qsn)) {
+        return node->foreignCollection;
+    }
+
+    if (auto node = dynamic_cast<const IndexScanNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const FetchNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const CollectionScanNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const CountScanNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const DistinctNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const TextMatchNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const SearchNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const GeoNear2DNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const GeoNear2DSphereNode*>(qsn)) {
+        return node->nss;
+    }
+
+    if (auto node = dynamic_cast<const IndexProbeNode*>(qsn)) {
+        return node->nss;
+    }
+
+    return boost::none;
+}
+
 void getAllSecondaryNamespacesHelper(const QuerySolutionNode* qsn,
                                      const NamespaceString& mainNss,
                                      std::set<NamespaceString>& secondaryNssSet) {
@@ -134,49 +176,65 @@ void getAllSecondaryNamespacesHelper(const QuerySolutionNode* qsn,
         return;
     }
 
-    if (auto node = dynamic_cast<const EqLookupNode*>(qsn);
-        node && node->foreignCollection != mainNss) {
-        secondaryNssSet.emplace(node->foreignCollection);
-    }
-
-    if (auto node = dynamic_cast<const IndexScanNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const FetchNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const CollectionScanNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const CountScanNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const DistinctNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const TextMatchNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const SearchNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const GeoNear2DNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
-    }
-
-    if (auto node = dynamic_cast<const GeoNear2DSphereNode*>(qsn); node && node->nss != mainNss) {
-        secondaryNssSet.emplace(node->nss);
+    if (auto nss = getNamespace(qsn); nss && *nss != mainNss) {
+        secondaryNssSet.emplace(*nss);
     }
 
     for (auto&& child : qsn->children) {
         getAllSecondaryNamespacesHelper(child.get(), mainNss, secondaryNssSet);
+    }
+}
+
+// Appends a compact, functional summary of the plan rooted at 'node' to 'sb'.
+// A join node renders as:
+//    <JOIN>( <leftField> = ( <left operand> ), <rightField> = ( <right operand> ) )
+// with each operand's collections named, and each operand wrapped in parentheses so that it reads
+// as a single argument of the join. Non-join interior nodes contribute nothing to the summary
+// themselves and simply render their children in order.
+void summaryStringRecursive(const QuerySolutionNode* node,
+                            StringBuilder& sb,
+                            bool includeNss = false) {
+    if (auto joinNode = dynamic_cast<const BinaryJoinEmbeddingNode*>(node)) {
+        // Join node!
+        sb << nodeStageTypeToString(node, true /* brief */);
+        sb << "( ";
+        sb << (joinNode->leftEmbeddingField ? joinNode->leftEmbeddingField->fullPath()
+                                            : std::string{"_"})
+           << " = ( ";
+        summaryStringRecursive(joinNode->children[0].get(), sb, true /* includeNss */);
+        sb << " ), "
+           << (joinNode->rightEmbeddingField ? joinNode->rightEmbeddingField->fullPath()
+                                             : std::string{"_"})
+           << " = ( ";
+        summaryStringRecursive(joinNode->children[1].get(), sb, true /* includeNss */);
+        sb << " ) )";
+        return;
+    }
+
+    if (node->children.empty()) {
+        // Leaf node!
+        sb << nodeStageTypeToString(node, true /* brief */);
+        if (includeNss) {
+            if (auto nss = getNamespace(node); nss) {
+                sb << " ["
+                   << NamespaceStringUtil::serialize(*nss, SerializationContext::stateDefault())
+                   << "]";
+            }
+        }
+        if (auto kp = getKeyPattern(node); kp) {
+            sb << " " << *kp;
+        }
+        return;
+    }
+
+    // "Interior" node, e.g. OR.
+    bool comma = false;
+    for (auto&& child : node->children) {
+        if (comma) {
+            sb << ", ";
+        }
+        summaryStringRecursive(child.get(), sb, includeNss);
+        comma = true;
     }
 }
 }  // namespace
@@ -272,72 +330,8 @@ std::pair<const QuerySolutionNode*, size_t> QuerySolutionNode::getFirstNodeByTyp
 
 std::string QuerySolution::summaryString() const {
     tassert(5968205, "QuerySolutionNode cannot be null in this QuerySolution", _root);
-
     StringBuilder sb;
-    bool seenLeaf = false;
-    std::queue<const QuerySolutionNode*> queue;
-    queue.push(_root.get());
-
-    while (!queue.empty()) {
-        auto node = queue.front();
-        queue.pop();
-
-        if (node->children.empty()) {
-            if (seenLeaf) {
-                sb << ", ";
-            } else {
-                seenLeaf = true;
-            }
-
-            sb << nodeStageTypeToString(node);
-
-            switch (node->getType()) {
-                case STAGE_COUNT_SCAN: {
-                    auto csn = static_cast<const CountScanNode*>(node);
-                    const KeyPattern keyPattern{csn->index.keyPattern};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                case STAGE_DISTINCT_SCAN: {
-                    auto dn = static_cast<const DistinctNode*>(node);
-                    const KeyPattern keyPattern{dn->index.keyPattern};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                case STAGE_GEO_NEAR_2D: {
-                    auto geo2d = static_cast<const GeoNear2DNode*>(node);
-                    const KeyPattern keyPattern{geo2d->index.keyPattern};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                case STAGE_GEO_NEAR_2DSPHERE: {
-                    auto geo2dsphere = static_cast<const GeoNear2DSphereNode*>(node);
-                    const KeyPattern keyPattern{geo2dsphere->index.keyPattern};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                case STAGE_IXSCAN: {
-                    auto ixn = static_cast<const IndexScanNode*>(node);
-                    const KeyPattern keyPattern{ixn->index.keyPattern};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                case STAGE_TEXT_MATCH: {
-                    auto tn = static_cast<const TextMatchNode*>(node);
-                    const KeyPattern keyPattern{tn->indexPrefix};
-                    sb << " " << keyPattern;
-                    break;
-                }
-                default:
-                    break;
-            }
-        }
-
-        for (auto&& child : node->children) {
-            queue.push(child.get());
-        }
-    }
-
+    summaryStringRecursive(_root.get(), sb);
     return sb.str();
 }
 
@@ -363,7 +357,7 @@ int QuerySolution::extendWith(std::unique_ptr<QuerySolutionNode> extensionRoot) 
                 "Cannot find the sentinel node in the extension tree",
                 !parentOfSentinel->children.empty());
 
-        assertSupportsLeftMostBranchTraversal(parentOfSentinel);
+        QuerySolutionNode::assertSupportsLeftMostBranchTraversal(parentOfSentinel);
 
         current = parentOfSentinel->children[0].get();
         ++extensionDepth;
@@ -389,7 +383,7 @@ int QuerySolution::removePathFromExtension(PlanNodeId targetNode) {
     while ((*current)->nodeId() != targetNode) {
         QuerySolutionNode* currentPtr = current->get();
 
-        assertSupportsLeftMostBranchTraversal(currentPtr);
+        QuerySolutionNode::assertSupportsLeftMostBranchTraversal(currentPtr);
 
         tassert(12152002,
                 "Cannot remove a path that extends beyond the unextended root node",
@@ -467,8 +461,7 @@ std::unique_ptr<QuerySolutionNode> CollectionScanNode::clone() const {
     cloneBaseData(copy.get());
 
     copy->nss = this->nss;
-    copy->minRecord = this->minRecord;
-    copy->maxRecord = this->maxRecord;
+    copy->rangeList = this->rangeList;
     copy->clusteredIndex = this->clusteredIndex;
     copy->hasCompatibleCollation = this->hasCompatibleCollation;
     copy->requestResumeToken = this->requestResumeToken;
@@ -479,7 +472,6 @@ std::unique_ptr<QuerySolutionNode> CollectionScanNode::clone() const {
     copy->direction = this->direction;
     copy->isClustered = this->isClustered;
     copy->isOplog = this->isOplog;
-    copy->boundInclusion = this->boundInclusion;
     copy->shouldWaitForOplogVisibility = this->shouldWaitForOplogVisibility;
     copy->stopApplyingFilterAfterFirstMatch = this->stopApplyingFilterAfterFirstMatch;
     return copy;
@@ -822,7 +814,8 @@ FieldAvailability IndexScanNode::getFieldAvailability(const string& field) const
     // If the index has a non-simple collation and we have collation keys inside 'field', then this
     // index scan does not provide that field (and the query cannot be covered).
     if (index.collator) {
-        std::set<StringData> collatedFields = getFieldsWithStringBounds(bounds, index.keyPattern);
+        std::set<std::string_view> collatedFields =
+            getFieldsWithStringBounds(bounds, index.keyPattern);
         if (collatedFields.find(field) != collatedFields.end()) {
             return FieldAvailability::kNotProvided;
         }
@@ -837,7 +830,7 @@ FieldAvailability IndexScanNode::getFieldAvailability(const string& field) const
             tassert(7246701,
                     "Expected element at the position before the wildcard field to be the virtual "
                     "field $_path.",
-                    elt.fieldNameStringData() == "$_path"_sd);
+                    elt.fieldNameStringData() == "$_path"sv);
             ++keyPatternFieldIndex;
             continue;
         }
@@ -884,8 +877,8 @@ bool IndexScanNode::sortedByDiskLoc() const {
 }
 
 // static
-std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds& inputBounds,
-                                                              const BSONObj& indexKeyPattern) {
+std::set<std::string_view> IndexScanNode::getFieldsWithStringBounds(
+    const IndexBounds& inputBounds, const BSONObj& indexKeyPattern) {
     // Produce a copy of the bounds which are all ascending, as we can only compute intersections
     // of ascending bounds.
     IndexBounds bounds = inputBounds.forwardize();
@@ -913,7 +906,7 @@ std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds&
                 }
 
                 // Any remaining keys could have strings.
-                std::set<StringData> ret;
+                std::set<std::string_view> ret;
                 while (keyPatternIterator.more()) {
                     ret.insert(keyPatternIterator.next().fieldNameStringData());
                 }
@@ -923,10 +916,10 @@ std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds&
             keyPatternIterator.next();
         }
 
-        return std::set<StringData>{};
+        return std::set<std::string_view>{};
     }
 
-    std::set<StringData> ret;
+    std::set<std::string_view> ret;
     tassert(11051911,
             "Expect the number of input bounds to match the number of fields in index key pattern",
             bounds.fields.size() == static_cast<size_t>(indexKeyPattern.nFields()));
@@ -943,9 +936,9 @@ std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds&
 }
 
 namespace {
-std::set<StringData> getMultikeyFields(const BSONObj& keyPattern,
-                                       const MultikeyPaths& multikeyPaths) {
-    std::set<StringData> multikeyFields;
+std::set<std::string_view> getMultikeyFields(const BSONObj& keyPattern,
+                                             const MultikeyPaths& multikeyPaths) {
+    std::set<std::string_view> multikeyFields;
     size_t i = 0;
     for (auto&& elem : keyPattern) {
         if (!multikeyPaths[i].empty()) {
@@ -965,9 +958,9 @@ std::set<StringData> getMultikeyFields(const BSONObj& keyPattern,
  * further explained in SERVER-31898.
  */
 bool confirmBoundsProvideSortComponentGivenMultikeyness(
-    StringData sortPatternComponent,
+    std::string_view sortPatternComponent,
     const IndexBounds& bounds,
-    const std::set<StringData>& multikeyFields) {
+    const std::set<std::string_view>& multikeyFields) {
     // Forwardize the bounds to correctly apply checks to descending sorts and well as ascending
     // sorts.
     const auto ascendingBounds = bounds.forwardize();
@@ -1103,7 +1096,7 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
                                     int direction,
                                     const IndexBounds& bounds,
                                     const CollatorInterface* queryCollator,
-                                    const std::set<StringData>& multikeyFields,
+                                    const std::set<std::string_view>& multikeyFields,
                                     const std::vector<interval_evaluation_tree::IET>* iets) {
     // If 'index' is the result of expanding a wildcard index, then its key pattern should look like
     // {<optional non-wildcard prefix>, $_path: 1, <field>: 1, <optional non-wildcard suffix>}. The
@@ -1182,8 +1175,8 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
     // field 'b'.
     //
     std::set<std::string> equalityFields = extractEqualityFields(bounds, index, iets);
-    std::set<StringData> unsupportedFields;
-    std::set<StringData> ignoreFields;
+    std::set<std::string_view> unsupportedFields;
+    std::set<std::string_view> ignoreFields;
     if (!CollatorInterface::collatorsMatch(queryCollator, index.collator)) {
         for (auto&& collatedField :
              IndexScanNode::getFieldsWithStringBounds(bounds, index.keyPattern)) {
@@ -1221,7 +1214,7 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
         const auto& fieldName = elt.fieldNameStringData();
 
         // Exclude the "$_path" field, which shouldn't end up in the sort order.
-        if (isWildcardIndex && fieldName == "$_path"_sd) {
+        if (isWildcardIndex && fieldName == "$_path"sv) {
             // If the bounds for the "$_path" field are multi-interval then we can't provide sorts
             // on any following fields.
             tassert(7767200,
@@ -1273,7 +1266,7 @@ ProvidedSortSet computeSortsForScan(const IndexEntry& index,
  * scan. The second field is a set populated with the names of all fields that the index indicates
  * are multikey.
  */
-std::pair<ProvidedSortSet, std::set<StringData>> computeSortsAndMultikeyPathsForScan(
+std::pair<ProvidedSortSet, std::set<std::string_view>> computeSortsAndMultikeyPathsForScan(
     const IndexEntry& index,
     int direction,
     const IndexBounds& bounds,
@@ -1285,7 +1278,7 @@ std::pair<ProvidedSortSet, std::set<StringData>> computeSortsAndMultikeyPathsFor
         return {};
     }
 
-    std::set<StringData> multikeyFieldsOut;
+    std::set<std::string_view> multikeyFieldsOut;
     if (index.multikey) {
         multikeyFieldsOut = getMultikeyFields(index.keyPattern, index.multikeyPaths);
     }
@@ -1519,7 +1512,7 @@ std::unique_ptr<QuerySolutionNode> SortKeyGeneratorNode::clone() const {
 // SortNode
 //
 
-SortNode::SortNode(const SortNode& other) {
+SortNode::SortNode(const SortNode& other) : maxMemoryUsageBytes(other.maxMemoryUsageBytes) {
     other.cloneSortData(this);
 }
 
@@ -1552,10 +1545,6 @@ std::unique_ptr<QuerySolutionNode> SortNodeDefault::clone() const {
 
 std::unique_ptr<QuerySolutionNode> SortNodeSimple::clone() const {
     return std::make_unique<SortNodeSimple>(*this);
-}
-
-uint64_t SortNode::_loadMaxMemoryUsageBytes() {
-    return loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes);
 }
 
 //
@@ -1609,6 +1598,17 @@ std::unique_ptr<QuerySolutionNode> SkipNode::clone() const {
     return std::make_unique<SkipNode>(*this);
 }
 
+std::unique_ptr<MatchExpression>* getGeoNearDocFilter(QuerySolutionNode& node) {
+    switch (node.getType()) {
+        case STAGE_GEO_NEAR_2D:
+            return &static_cast<GeoNear2DNode&>(node).residualFilter;
+        case STAGE_GEO_NEAR_2DSPHERE:
+            return &static_cast<GeoNear2DSphereNode&>(node).residualFilter;
+        default:
+            return nullptr;
+    }
+}
+
 //
 // GeoNear2DNode
 //
@@ -1626,6 +1626,10 @@ void GeoNear2DNode::appendToString(str::stream* ss, int indent) const {
         addIndent(ss, indent + 1);
         *ss << " filter = " << filter->debugString();
     }
+    if (nullptr != residualFilter) {
+        addIndent(ss, indent + 1);
+        *ss << " residualFilter = " << residualFilter->debugString();
+    }
 }
 
 std::unique_ptr<QuerySolutionNode> GeoNear2DNode::clone() const {
@@ -1636,6 +1640,9 @@ std::unique_ptr<QuerySolutionNode> GeoNear2DNode::clone() const {
     copy->baseBounds = this->baseBounds;
     copy->addPointMeta = this->addPointMeta;
     copy->addDistMeta = this->addDistMeta;
+    if (this->residualFilter) {
+        copy->residualFilter = this->residualFilter->clone();
+    }
 
     return copy;
 }
@@ -1659,6 +1666,10 @@ void GeoNear2DSphereNode::appendToString(str::stream* ss, int indent) const {
         addIndent(ss, indent + 1);
         *ss << " filter = " << filter->debugString();
     }
+    if (nullptr != residualFilter) {
+        addIndent(ss, indent + 1);
+        *ss << " residualFilter = " << residualFilter->debugString();
+    }
 }
 
 std::unique_ptr<QuerySolutionNode> GeoNear2DSphereNode::clone() const {
@@ -1669,6 +1680,9 @@ std::unique_ptr<QuerySolutionNode> GeoNear2DSphereNode::clone() const {
     copy->baseBounds = this->baseBounds;
     copy->addPointMeta = this->addPointMeta;
     copy->addDistMeta = this->addDistMeta;
+    if (this->residualFilter) {
+        copy->residualFilter = this->residualFilter->clone();
+    }
 
     return copy;
 }
@@ -1727,6 +1741,7 @@ std::unique_ptr<QuerySolutionNode> DistinctNode::clone() const {
     copy->direction = this->direction;
     copy->isShardFiltering = this->isShardFiltering;
     copy->isFetching = this->isFetching;
+    copy->unwindsArrays = this->unwindsArrays;
 
     return copy;
 }
@@ -1852,18 +1867,11 @@ std::unique_ptr<QuerySolutionNode> TextMatchNode::clone() const {
  */
 void GroupNode::appendToString(str::stream* ss, int indent) const {
     addIndent(ss, indent);
-    *ss << "GROUP\n";
+    *ss << nodeStageTypeToString(this) << '\n';
     addIndent(ss, indent + 1);
     *ss << "key = ";
-    auto idx = 0;
-    if (auto exprObj = dynamic_cast<const ExpressionObject*>(groupByExpression.get()); exprObj) {
-        for (auto&& [groupName, expr] : exprObj->getChildExpressions()) {
-            if (idx > 0) {
-                *ss << ", ";
-            }
-            *ss << "{" << groupName << ": " << exprObj->serialize().toString() << "}";
-            ++idx;
-        }
+    if (dynamic_cast<const ExpressionObject*>(groupByExpression.get())) {
+        *ss << groupByExpression->serialize().toString();
     } else {
         *ss << "{_id: " << groupByExpression->serialize().toString() << "}";
     }
@@ -1877,12 +1885,13 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
         auto& acc = accumulators[idx];
         *ss << "{" << acc.fieldName << ": {" << acc.expr.name << ": "
             << acc.expr.argument
-                   ->serialize(SerializationOptions{
+                   ->serialize(query_shape::SerializationOptions{
                        .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
                    .toString()
             << "}}";
     }
     *ss << "]" << '\n';
+    appendSpecificToString(ss, indent);
     addCommon(ss, indent);
     addIndent(ss, indent + 1);
     *ss << "Child:" << '\n';
@@ -1896,6 +1905,27 @@ std::unique_ptr<QuerySolutionNode> GroupNode::clone() const {
                                             doingMerge,
                                             willBeMerged,
                                             shouldProduceBson);
+    return copy;
+}
+
+/**
+ * StreamingGroupNode.
+ */
+void StreamingGroupNode::appendSpecificToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent + 1);
+    *ss << "streamingKey = [";
+    for (size_t idx = 0; idx < streamingKey.size(); ++idx) {
+        if (idx > 0) {
+            *ss << ", ";
+        }
+        *ss << streamingKey[idx].fullPath();
+    }
+    *ss << "]" << '\n';
+}
+
+std::unique_ptr<QuerySolutionNode> StreamingGroupNode::clone() const {
+    auto copy = std::make_unique<StreamingGroupNode>(
+        children[0]->clone(), groupByExpression, accumulators, shouldProduceBson, streamingKey);
     return copy;
 }
 
@@ -1958,7 +1988,8 @@ std::unique_ptr<QuerySolutionNode> EqLookupNode::clone() const {
                                               lookupStrategy,
                                               shouldProduceBson,
                                               unwindSpec->preserveNullAndEmptyArrays,
-                                              unwindSpec->indexPath);
+                                              unwindSpec->indexPath,
+                                              collationCompatibleForDilj);
     }
     return std::make_unique<EqLookupNode>(std::move(childrenClone),
                                           foreignCollection,
@@ -1966,7 +1997,8 @@ std::unique_ptr<QuerySolutionNode> EqLookupNode::clone() const {
                                           joinFieldForeign,
                                           joinField,
                                           lookupStrategy,
-                                          shouldProduceBson);
+                                          shouldProduceBson,
+                                          collationCompatibleForDilj);
 }
 
 /**
@@ -2002,47 +2034,6 @@ void SearchNode::appendToString(str::stream* ss, int indent) const {
         addIndent(ss, indent + 1);
         *ss << "limit = " << limit << '\n';
     }
-}
-
-/**
- * WindowNode.
- */
-std::unique_ptr<QuerySolutionNode> WindowNode::clone() const {
-    return std::make_unique<WindowNode>(children[0]->clone(), partitionBy, sortBy, outputFields);
-}
-
-void WindowNode::appendToString(str::stream* ss, int indent) const {
-    addIndent(ss, indent);
-    *ss << "WINDOW\n";
-    if (partitionBy) {
-        addIndent(ss, indent + 1);
-        *ss << "partitionBy = " << (*partitionBy)->serialize().toString() << '\n';
-    }
-    if (sortBy) {
-        addIndent(ss, indent + 1);
-        *ss << "sortBy = "
-            << sortBy->serialize(SortPattern::SortKeySerialization::kForExplain).toBson().toString()
-            << '\n';
-    }
-    addIndent(ss, indent + 1);
-    *ss << "outputFields = [";
-    for (size_t idx = 0; idx < outputFields.size(); ++idx) {
-        if (idx > 0) {
-            *ss << ", ";
-        }
-        auto& outputField = outputFields[idx];
-        MutableDocument boundsDoc;
-        outputField.expr->bounds().serialize(boundsDoc, SerializationOptions{});
-        auto boundsBson = boundsDoc.freeze().toBson();
-        *ss << "{" << outputField.fieldName << ": {" << outputField.expr->getOpName() << ": "
-            << outputField.expr->input()->serialize().toString()
-            << "window: " << boundsBson.toString() << "}}";
-    }
-    *ss << "]" << '\n';
-    addCommon(ss, indent);
-    addIndent(ss, indent + 1);
-    *ss << "Child:" << '\n';
-    children[0]->appendToString(ss, indent + 2);
 }
 
 HashJoinEmbeddingNode::HashJoinEmbeddingNode(std::unique_ptr<QuerySolutionNode> leftChildArg,

@@ -6,8 +6,6 @@
 //   uses_transactions,
 // ]
 import {withRetryOnTransientTxnError} from "jstests/libs/auto_retry_transaction_in_sharding.js";
-import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const dbNameShard0 = "test";
@@ -24,12 +22,20 @@ const versionSupportsSingleWriteShardCommitOptimization =
     MongoRunner.compareBinVersions(jsTestOptions().mongosBinVersion, "7.1") >= 0;
 
 // Create two databases with different shards as their primaries.
-assert.commandWorked(st.s.adminCommand({enableSharding: dbNameShard0, primaryShard: st.shard0.shardName}));
-assert.commandWorked(st.s.getDB(dbNameShard0)[collName].insert({_id: 5}, {writeConcern: {w: "majority"}}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbNameShard0, primaryShard: st.shard0.shardName}),
+);
+assert.commandWorked(
+    st.s.getDB(dbNameShard0)[collName].insert({_id: 5}, {writeConcern: {w: "majority"}}),
+);
 
 // Set up another collection with a different shard (shard2) as its primary shard.
-assert.commandWorked(st.s.adminCommand({enableSharding: dbNameShard2, primaryShard: st.shard2.shardName}));
-assert.commandWorked(st.s.getDB(dbNameShard2)[collName].insert({_id: 4}, {writeConcern: {w: "majority"}}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbNameShard2, primaryShard: st.shard2.shardName}),
+);
+assert.commandWorked(
+    st.s.getDB(dbNameShard2)[collName].insert({_id: 4}, {writeConcern: {w: "majority"}}),
+);
 
 const session = st.s.getDB(dbNameShard0).getMongo().startSession({causalConsistency: false});
 
@@ -53,18 +59,10 @@ withRetryOnTransientTxnError(
         assert.commandWorked(sessionDBShard0.createCollection(newCollName));
         assert.commandWorked(sessionDBShard2.createCollection(newCollName));
 
-        // TODO SERVER-77915: Remove when deleting the feature flag.
-        if (FeatureFlagUtil.isPresentAndEnabled(st.s, "CreateCollectionInPreparedTransactions")) {
-            assert.commandWorked(session.commitTransaction_forTesting());
-
-            assertDropCollection(st.s.getDB(dbNameShard0), newCollName);
-            assertDropCollection(st.s.getDB(dbNameShard2), newCollName);
-        } else {
-            assert.commandFailedWithCode(
-                session.commitTransaction_forTesting(),
-                ErrorCodes.OperationNotSupportedInTransaction,
-            );
-        }
+        assert.commandFailedWithCode(
+            session.commitTransaction_forTesting(),
+            ErrorCodes.OperationNotSupportedInTransaction,
+        );
     },
     () => {
         session.abortTransaction();

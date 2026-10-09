@@ -1,38 +1,14 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/assert_util.h"
 
 #include "mongo/config.h"
 #include "mongo/logv2/log.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/active_exception_witness.h"
 #include "mongo/util/debugger.h"
+#include "mongo/util/demangle.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers_synchronous.h"
@@ -40,8 +16,10 @@
 #include "mongo/util/str.h"
 
 #include <csignal>
+#include <cstdio>
 #include <exception>
 #include <ostream>
+#include <string_view>
 
 #include <boost/exception/diagnostic_information.hpp>
 #include <boost/exception/exception.hpp>
@@ -54,6 +32,7 @@
 #define XSTR(x) XSTR_INNER_(x)
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 // Used by `logScopedDebugInfo` below to determine if we should log anything.
 Atomic<bool> shouldLogScopedDebugInfoInAssertUtil{true};
@@ -92,7 +71,8 @@ MONGO_COMPILER_NORETURN void callAbort() {
     if (reentry++)
         endProcessWithSignal(SIGABRT);
 
-    [[maybe_unused]] static auto initOnce = (std::abort(), 0);
+    [[maybe_unused]] static auto initOnce =
+        (std::fflush(stdout), std::fflush(stderr), std::abort(), 0);
     MONGO_COMPILER_UNREACHABLE;
 }
 }  // namespace
@@ -111,7 +91,45 @@ bool getScopedDebugInfoStackEnabled() {
 
 AssertionCount assertionCount;
 
-AssertionCount::AssertionCount() : regular(0), warning(0), msg(0), user(0), rollovers(0) {}
+namespace {
+Atomic<AssertionIncrementObserver> gAssertionIncrementObserver{nullptr};
+
+void notifyAssertionIncrement(AssertionKind kind) noexcept {
+    if (auto observer = gAssertionIncrementObserver.loadRelaxed()) {
+        observer(kind);
+    }
+}
+
+// Bumps the legacy AssertionCount field for `kind` and notifies the observer. The caller
+// passes only the kind; the helper looks up the matching legacy field so a (kind, counter)
+// mismatch is impossible at the call site.
+void bumpAssertion(AssertionKind kind) {
+    switch (kind) {
+        case AssertionKind::kRegular:
+            assertionCount.condrollover(assertionCount.regular.addAndFetch(1));
+            break;
+        case AssertionKind::kMsg:
+            assertionCount.condrollover(assertionCount.msg.addAndFetch(1));
+            break;
+        case AssertionKind::kUser:
+            assertionCount.condrollover(assertionCount.user.addAndFetch(1));
+            break;
+        case AssertionKind::kTripwire:
+            assertionCount.condrollover(assertionCount.tripwire.addAndFetch(1));
+            break;
+    }
+    notifyAssertionIncrement(kind);
+}
+}  // namespace
+
+void setAssertionIncrementObserver(AssertionIncrementObserver observer) noexcept {
+    auto prev = gAssertionIncrementObserver.swap(observer);
+    // Allow nullptr→observer (initial install) and observer→nullptr (shutdown clear). Reject
+    // observer→different-observer so accidental double-install surfaces loudly in dev/test.
+    invariant(
+        prev == nullptr || observer == nullptr,
+        "assertion increment observer already installed; clear with nullptr before replacing");
+}
 
 void AssertionCount::rollover() {
     rollovers.fetchAndAdd(1);
@@ -181,7 +199,7 @@ MONGO_COMPILER_NOINLINE void invariantFailedWithMsg(const char* expr,
 }
 
 MONGO_COMPILER_NOINLINE void verifyFailed(const char* expr, SourceLocation loc) {
-    assertionCount.condrollover(assertionCount.regular.addAndFetch(1));
+    bumpAssertion(AssertionKind::kRegular);
     LOGV2_ERROR(23076, "Assertion failure", "expr"_attr = expr, "location"_attr = loc);
     logErrorBlock();
     std::stringstream temp;
@@ -280,13 +298,13 @@ MONGO_COMPILER_NORETURN void failedNoTrace(MsgId msgid,
 
 namespace error_details {
 MONGO_COMPILER_NOINLINE void uassertedWithLocation(const Status& status, SourceLocation loc) {
-    assertionCount.condrollover(assertionCount.user.addAndFetch(1));
+    bumpAssertion(AssertionKind::kUser);
     LOGV2_DEBUG(23074, 1, "User assertion", "error"_attr = redact(status), "location"_attr = loc);
     error_details::throwExceptionForStatus(status);
 }
 
-MONGO_COMPILER_NOINLINE void msgassertedWithLocation(const Status& status, SourceLocation loc) {
-    assertionCount.condrollover(assertionCount.msg.addAndFetch(1));
+MONGO_COMPILER_NOINLINE void massertedWithLocation(const Status& status, SourceLocation loc) {
+    bumpAssertion(AssertionKind::kMsg);
     LOGV2_ERROR(23077, "Assertion", "error"_attr = redact(status), "location"_attr = loc);
     error_details::throwExceptionForStatus(status);
 }
@@ -296,12 +314,16 @@ void iassertFailed(const Status& status, SourceLocation loc) {
     error_details::throwExceptionForStatus(status);
 }
 
-void tassertFailed(const Status& status, SourceLocation loc) {
-    assertionCount.condrollover(assertionCount.tripwire.addAndFetch(1));
+void tassertNoThrowFailed(const Status& status, SourceLocation loc) {
+    bumpAssertion(AssertionKind::kTripwire);
     LOGV2_ERROR(
         TRIPWIRE_ASSERTION_ID, "Tripwire assertion", "error"_attr = status, "location"_attr = loc);
     logErrorBlock();
     breakpoint();
+}
+
+void tassertFailed(const Status& status, SourceLocation loc) {
+    tassertNoThrowFailed(status, loc);
     error_details::throwExceptionForStatus(status);
 }
 
@@ -321,29 +343,13 @@ void warnIfTripwireAssertionsOccurred() {
     }
 }
 
-std::string causedBy(StringData e) {
-    static constexpr auto prefix = " :: caused by :: "_sd;
+std::string causedBy(std::string_view e) {
+    static constexpr auto prefix = " :: caused by :: "sv;
     std::string out;
     out.reserve(prefix.size() + e.size());
     out += prefix;
     out += e;
     return out;
-}
-
-std::string demangleName(const std::type_info& typeinfo) {
-#ifdef _WIN32
-    return typeinfo.name();
-#else
-    int status;
-
-    char* niceName = abi::__cxa_demangle(typeinfo.name(), nullptr, nullptr, &status);
-    if (!niceName)
-        return typeinfo.name();
-
-    std::string s = niceName;
-    free(niceName);
-    return s;
-#endif
 }
 
 Status exceptionToStatus() {

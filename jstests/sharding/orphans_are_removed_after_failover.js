@@ -11,8 +11,6 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
-
 const dbName = "test";
 const collName = "foo";
 const ns = dbName + "." + collName;
@@ -29,7 +27,9 @@ let st = new ShardingTest({
 
 // Create a sharded collection with three chunks:
 //     [-inf, -10), [-10, 10), [10, inf)
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: -10}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: 10}}));

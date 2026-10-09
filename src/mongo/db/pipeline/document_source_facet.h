@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
@@ -50,7 +23,7 @@
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/modules.h"
 
@@ -58,6 +31,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -68,6 +42,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 class BSONElement;
 class ExpressionContext;
@@ -77,14 +52,15 @@ class DSFacetExecStatsWrapper {
 public:
     class StatsProvider {
     public:
-        virtual std::vector<Value> getStats(size_t facetId, const SerializationOptions& opts) = 0;
+        virtual std::vector<Value> getStats(size_t facetId,
+                                            const query_shape::SerializationOptions& opts) = 0;
         virtual ~StatsProvider() = default;
     };
 
     /**
      * Retrieves the execution statistics tracked by the pipeline given by 'facetId'.
      */
-    std::vector<Value> getExecStats(size_t facetId, const SerializationOptions& opts) {
+    std::vector<Value> getExecStats(size_t facetId, const query_shape::SerializationOptions& opts) {
         if (!_provider) {
             return {};
         }
@@ -114,10 +90,10 @@ DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Facet);
  * stage which will produce a document like the following:
  * {facetA: [<all input documents except the first one>], facetB: [<the first document>]}.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceFacet final : public DocumentSource {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DocumentSourceFacet final : public DocumentSource {
 public:
-    MONGO_MOD_NEEDS_REPLACEMENT static constexpr StringData kStageName = "$facet"_sd;
-    static constexpr StringData kTeeConsumerStageName = "$internalFacetTeeConsumer"_sd;
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] static constexpr std::string_view kStageName = "$facet"sv;
+    static constexpr std::string_view kTeeConsumerStageName = "$internalFacetTeeConsumer"sv;
     struct FacetPipeline {
         FacetPipeline(std::string name, std::unique_ptr<Pipeline> pipeline)
             : name(std::move(name)), pipeline(std::move(pipeline)) {}
@@ -132,7 +108,7 @@ public:
                                                  const BSONElement& spec,
                                                  const LiteParserOptions& options);
 
-        LiteParsed(const BSONElement& spec, std::vector<LiteParsedPipeline> pipelines)
+        LiteParsed(const BSONElement& spec, std::vector<OwnedLiteParsedPipeline> pipelines)
             : LiteParsedDocumentSourceNestedPipelines(spec, boost::none, std::move(pipelines)) {}
 
         PrivilegeVector requiredPrivileges(bool isMongos,
@@ -155,7 +131,7 @@ public:
     static boost::intrusive_ptr<DocumentSourceFacet> create(
         std::vector<FacetPipeline> facetPipelines,
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        size_t bufferSizeBytes = loadMemoryLimit(StageMemoryLimit::QueryFacetBufferSizeBytes),
+        boost::optional<size_t> bufferSizeBytes = boost::none,
         size_t maxOutputDocBytes = internalQueryFacetMaxOutputDocSizeBytes.load());
 
     /**
@@ -169,8 +145,8 @@ public:
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
 
-    const char* getSourceName() const final {
-        return DocumentSourceFacet::kStageName.data();
+    std::string_view getSourceName() const final {
+        return DocumentSourceFacet::kStageName;
     }
 
     static const Id& id;
@@ -215,7 +191,8 @@ private:
                         size_t bufferSizeBytes,
                         size_t maxOutputDocBytes);
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
 
     std::vector<FacetPipeline> _facets;
     std::shared_ptr<DSFacetExecStatsWrapper> _execStatsWrapper;

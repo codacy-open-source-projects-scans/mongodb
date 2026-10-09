@@ -3,6 +3,7 @@
 // there are not many, the index order (nongeo, geo) should be faster than (geo, nongeo)
 // for 2dsphere.
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   operations_longer_than_stepdown_interval_in_txns,
 // ]
@@ -34,7 +35,10 @@ function makepoints(needle) {
 
 function runTest(index) {
     assert.commandWorked(coll.createIndex(index, add2dsphereVersionIfNeededForSpec(index)));
-    const cursor = coll.find({nongeo: needle, geo: {$within: {$centerSphere: [[0, 0], Math.PI / 180.0]}}});
+    const cursor = coll.find({
+        nongeo: needle,
+        geo: {$within: {$centerSphere: [[0, 0], Math.PI / 180.0]}},
+    });
     const stats = cursor.explain("executionStats").executionStats;
     assert.commandWorked(coll.dropIndex(index));
     return stats;

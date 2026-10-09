@@ -27,6 +27,7 @@ mongo_cc_library(
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:service_context",
+        "//src/mongo/db/storage:checkpoint_schedule_policy",
     ],
 )
 
@@ -65,6 +66,16 @@ mongo_cc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+mongo_cc_library(
+    name = "disable_snapshotting_fail_point",
+    srcs = ["disable_snapshotting_fail_point.cpp"],
+    hdrs = ["disable_snapshotting_fail_point.h"],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/util:fail_point",
+    ],
 )
 
 idl_generator(

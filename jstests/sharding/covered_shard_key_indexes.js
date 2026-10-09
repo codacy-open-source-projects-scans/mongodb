@@ -3,6 +3,7 @@
 // particular queries
 //
 
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getChunkSkipsFromShard} from "jstests/libs/query/analyze_plan.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
@@ -16,7 +17,9 @@ coll.drop();
 assert.commandWorked(st.s0.adminCommand({shardCollection: coll.getFullName(), key: {_id: 1}}));
 st.printShardingStatus();
 
-assert.commandWorked(st.shard0.adminCommand({setParameter: 1, logComponentVerbosity: {query: {verbosity: 5}}}));
+assert.commandWorked(
+    st.shard0.adminCommand({setParameter: 1, logComponentVerbosity: {query: {verbosity: 5}}}),
+);
 
 // Insert some data
 assert.commandWorked(coll.insert({_id: true, a: true, b: true}));
@@ -44,7 +47,9 @@ assert.eq(0, explainOut.executionStats.totalDocsExamined);
 
 jsTest.log("Tests with _id : hashed shard key");
 coll.drop();
-assert.commandWorked(st.s0.adminCommand({shardCollection: coll.getFullName(), key: {_id: "hashed"}}));
+assert.commandWorked(
+    st.s0.adminCommand({shardCollection: coll.getFullName(), key: {_id: "hashed"}}),
+);
 st.printShardingStatus();
 
 // Insert some data
@@ -120,7 +125,11 @@ assert.commandWorked(st.s0.adminCommand({shardCollection: coll.getFullName(), ke
 st.printShardingStatus();
 
 // Insert some bad data manually on the shard
-assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: coll.getFullName()}));
+if (!FeatureFlagUtil.isPresentAndEnabled(st.shard0, "AuthoritativeShardsCRUD")) {
+    assert.commandWorked(
+        st.shard0.adminCommand({_flushRoutingTableCacheUpdates: coll.getFullName()}),
+    );
+}
 assert.commandWorked(st.shard0.getCollection(coll.toString()).insert({_id: "bad data", c: true}));
 
 // Index without shard key query - not covered but succeeds

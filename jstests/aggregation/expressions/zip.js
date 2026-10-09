@@ -7,15 +7,25 @@ import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 let coll = db.zip;
 coll.drop();
 
-coll.insert({"long": [1, 2, 3], "short": ["x", "y"]});
+assert.commandWorked(coll.insert({"long": [1, 2, 3], "short": ["x", "y"]}));
 
 let zipObj = 3;
-assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34460, "$zip requires an object" + " as an argument.");
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    34460,
+    "$zip requires an object" + " as an argument.",
+);
 
 zipObj = {
     inputs: [],
 };
-assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34465, "$zip requires at least" + " one input array");
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    34465,
+    "$zip requires at least" + " one input array",
+);
 
 zipObj = {
     inputs: {"a": "b"},
@@ -46,17 +56,40 @@ assertErrorCode(
 );
 
 zipObj = {
-    inputs: ["$a"],
+    inputs: [[1, 2], [1]],
     defaults: {"a": "b"},
+    useLongestLength: true,
 };
-assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34462, "defaults is not an" + " array");
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    [10961500, 34462],
+    "defaults did not resolve to an array",
+);
+
+zipObj = {
+    inputs: [[1, 2, 3], ["A", "B"], [true]],
+    defaults: "$short",
+    useLongestLength: true,
+};
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    [10961501, 34462],
+    "defaults resolved to an array whose length does not match inputs",
+);
 
 zipObj = {
     inputs: ["$a"],
     defaults: ["A"],
     useLongestLength: 1,
 };
-assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34463, "useLongestLength is not" + " a bool");
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    34463,
+    "useLongestLength is not" + " a bool",
+);
 
 zipObj = {
     inputs: ["$a", "$b"],
@@ -68,7 +101,12 @@ assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34464, "unknown ar
 zipObj = {
     inputs: ["A", "B"],
 };
-assertErrorCode(coll, [{$project: {zipped: {$zip: zipObj}}}], 34468, "an element of inputs" + " was not an array.");
+assertErrorCode(
+    coll,
+    [{$project: {zipped: {$zip: zipObj}}}],
+    34468,
+    "an element of inputs" + " was not an array.",
+);
 
 zipObj = {
     inputs: [

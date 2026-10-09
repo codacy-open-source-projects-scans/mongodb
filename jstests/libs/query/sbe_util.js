@@ -49,7 +49,9 @@ function discoverNodesAndCheck(theDB, checkFunction) {
                 } else if (result !== mode) {
                     // SBE mode not consistent in all nodes, test could fail due to unexpected SBE
                     // mode so quit the test.
-                    jsTestLog("Skipping test because SBE configuration is not consistent across hosts!");
+                    jsTestLog(
+                        "Skipping test because SBE configuration is not consistent across hosts!",
+                    );
                     quit();
                 }
             } catch (e) {
@@ -98,7 +100,10 @@ export function checkSbeStatus(theDB) {
         if (frameworkControl == "forceClassicEngine") {
             // Always overrides anything else.
             return kSbeDisabled;
-        } else if (TestData.setParameters.featureFlagSbeFull && TestData.setParameters.featureFlagSbeFull == "true") {
+        } else if (
+            TestData.setParameters.featureFlagSbeFull &&
+            TestData.setParameters.featureFlagSbeFull == "true"
+        ) {
             // Otherwise, if this feature flag is enabled, we ignore the query knob.
             return kFeatureFlagSbeFullEnabled;
         } else if (frameworkControl === "trySbeEngine") {
@@ -157,21 +162,6 @@ export function checkSbeNonLeadingMatchEnabled(theDB) {
     }
 }
 
-export function checkSbeEqLookupUnwindEnabled(theDB) {
-    if (theDB !== null) {
-        return discoverNodesAndCheck(theDB, (conn) => {
-            return FeatureFlagUtil.isPresentAndEnabled(conn, "SbeEqLookupUnwind");
-        });
-    } else {
-        // If we don't have a database available, we can only look at the TestData to see what
-        // parameters resmoke was given.
-        return (
-            TestData.setParameters.featureFlagSbeEqLookupUnwind &&
-            TestData.setParameters.featureFlagSbeEqLookupUnwind === "true"
-        );
-    }
-}
-
 export function isDeferredGetExecutorEnabled(theDB) {
     if (theDB !== null) {
         return discoverNodesAndCheck(theDB, (conn) => {
@@ -208,22 +198,32 @@ export function checkSbeTransformStagesEnabled(theDB) {
 }
 
 /**
+ * Check if featureFlagSbeAccumulatorExpressions is enabled in the cluster.
+ *
+ * Quits test if there is no primary node and we are running in a mixed configuration.
+ */
+export function checkSbeAccumulatorExpressionsEnabled(theDB) {
+    if (theDB !== null) {
+        return discoverNodesAndCheck(theDB, (conn) => {
+            return FeatureFlagUtil.isPresentAndEnabled(conn, "SbeAccumulatorExpressions");
+        });
+    } else {
+        // If we don't have a database available, we can only look at the TestData to see what
+        // parameters resmoke was given.
+        return (
+            TestData.setParameters.featureFlagSbeAccumulatorExpressions &&
+            TestData.setParameters.featureFlagSbeAccumulatorExpressions === "true"
+        );
+    }
+}
+
+/**
  * Check if featureFlagSbeFull is enabled in the cluster.
  *
  * Quits test if there is no primary node and we are running in a mixed configuration.
  */
 export function checkSbeFullFeatureFlagEnabled(theDB) {
     return checkSbeStatus(theDB) === kFeatureFlagSbeFullEnabled;
-}
-
-/**
- * Check if the SBE plan cache is enabled.
- * If the `featureFlagGetExecutorDeferredEngineChoice` is enabled, return false since the SBE cache
- * is not implemented yet.
- * TODO SERVER-119773 enable SBE plan cache in new get executor.
- */
-export function sbePlanCacheEnabled(theDB) {
-    return checkSbeFullFeatureFlagEnabled(theDB) && !isDeferredGetExecutorEnabled(theDB);
 }
 
 /**
@@ -245,7 +245,11 @@ export function checkSbeFullyEnabled(theDB) {
  */
 export function checkSbeRestrictedOrFullyEnabled(theDB) {
     const status = checkSbeStatus(theDB);
-    return status === kSbeRestricted || status === kSbeFullyEnabled || status == kFeatureFlagSbeFullEnabled;
+    return (
+        status === kSbeRestricted ||
+        status === kSbeFullyEnabled ||
+        status == kFeatureFlagSbeFullEnabled
+    );
 }
 
 /**

@@ -2,7 +2,7 @@
  * Tests that checking out an already checked out session doesn't lead to a self-deadlock. This is a
  * regression test for SERVER-36007.
  *
- * @tags: [uses_transactions]
+ * @tags: [uses_transactions, requires_fsync]
  */
 import {Thread} from "jstests/libs/parallelTester.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
@@ -49,7 +49,11 @@ try {
 
     assert.soon(
         () => {
-            const ops = db.currentOp({"command.insert": "mycoll", "command.txnNumber": {$eq: 1}, waitingForLock: true});
+            const ops = db.currentOp({
+                "command.insert": "mycoll",
+                "command.txnNumber": {$eq: 1},
+                waitingForLock: true,
+            });
             return ops.inprog.length === 1;
         },
         () => {

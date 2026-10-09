@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/basic_types.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/query_shape/query_shape_hash.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -116,7 +91,7 @@ public:
      * Note this may involve re-parsing command BSON and so is not necessarily cheap.
      */
     BSONObj toBson(OperationContext*,
-                   const SerializationOptions&,
+                   const query_shape::SerializationOptions&,
                    const SerializationContext& serializationContext) const;
 
     /**
@@ -144,6 +119,8 @@ public:
         h = H::combine(std::move(h), shape.nssOrUUID, shape.specificComponents());
         if (!shape.collation.isEmpty())
             h = H::combine(std::move(h), simpleHash(shape.collation));
+        if (shape.rawData)
+            h = H::combine(std::move(h), shape.rawData);
         return h;
     }
 
@@ -153,8 +130,26 @@ public:
     // Never shapified. If it's empty, leave it off.
     BSONObj collation;
 
+    // Common command option folded into the shape when true. It MUST be sourced from the command
+    // request (and not from the operation context), so that query shapes built inside the
+    // setQuerySettings command still set rawData when the represented query has it. The
+    // setQuerySettings command runs on its own operation context, which does not carry the
+    // represented query's rawData, so an opCtx lookup would omit it and the shape would never match
+    // the executed query.
+    bool rawData;
+
 protected:
-    Shape(NamespaceStringOrUUID, BSONObj collation_);
+    Shape(NamespaceStringOrUUID, BSONObj collation_, bool rawData_ = false);
+
+    /**
+     * Encodes boolean options common to every command shape (bit 0: rawData; a new flag claims the
+     * next free bit and 0 must mean "absent/false"). Sub-classes implementing sha256Hash() append
+     * this word to their hash buffer only when it is non-zero, so commands without any common
+     * options keep their pre-existing hashes.
+     */
+    std::uint16_t commonOptionsWord() const {
+        return rawData ? 1u : 0u;
+    }
 
     /**
      * Along with the hash implementation, this is the main way that shapes are 'shapified' -
@@ -162,14 +157,17 @@ protected:
      * object. Depending on 'opts', this may be eligible to be used for output in $queryStats or as
      * the object to compute the QueryShapeHash.
      */
-    virtual void appendCmdSpecificShapeComponents(BSONObjBuilder&,
-                                                  OperationContext*,
-                                                  const SerializationOptions& opts) const = 0;
+    virtual void appendCmdSpecificShapeComponents(
+        BSONObjBuilder&,
+        OperationContext*,
+        const query_shape::SerializationOptions& opts) const = 0;
 
 private:
     void appendCmdNsOrUUID(BSONObjBuilder&,
-                           const SerializationOptions&,
+                           const query_shape::SerializationOptions&,
                            const SerializationContext& serializationContext) const;
-    void appendCmdNs(BSONObjBuilder&, const NamespaceString&, const SerializationOptions&) const;
+    void appendCmdNs(BSONObjBuilder&,
+                     const NamespaceString&,
+                     const query_shape::SerializationOptions&) const;
 };
 }  // namespace mongo::query_shape

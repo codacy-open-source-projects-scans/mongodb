@@ -1,30 +1,5 @@
-# Copyright (C) 2018-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 """
 IDL Enum type information.
 
@@ -118,7 +93,7 @@ class EnumTypeInfoBase(object, metaclass=ABCMeta):
         """Return a constexpr function returning the default fieldName for IDLParserContext.
         The generated function is found via ADL."""
         cpp_type = self.get_cpp_type_name()
-        return f'{mod_tag}constexpr ::mongo::StringData {_DEFAULT_PARSER_ADL_HOOK}({cpp_type}) {{ return "{cpp_type}"; }}'
+        return f'{mod_tag}constexpr std::string_view {_DEFAULT_PARSER_ADL_HOOK}({cpp_type}) {{ return "{cpp_type}"; }}'
 
     def _get_populated_extra_values(self):
         # type: () -> List[Union[syntax.EnumValue,ast.EnumValue]]
@@ -231,7 +206,7 @@ void {_DESERIALIZER_ADL_HOOK}({cpp_type}& en, std::int32_t value, const IDLParse
         """Generate the serializer ADL hook function definition."""
 
         indented_writer._stream.write(f"""
-{self.get_serializer_adl_hook_declaration('')} {{
+{self.get_serializer_adl_hook_declaration("")} {{
     return static_cast<std::int32_t>(value);
 }}""")
 
@@ -260,7 +235,7 @@ class _EnumTypeString(EnumTypeInfoBase, metaclass=ABCMeta):
     def get_deserializer_adl_hook_declaration(self, mod_tag):
         # type: () -> str
         cpp_type = self.get_cpp_type_name()
-        return f"{mod_tag}void {_DESERIALIZER_ADL_HOOK}({cpp_type}& en, ::mongo::StringData value, const IDLParserContext& ctxt)"
+        return f"{mod_tag}void {_DESERIALIZER_ADL_HOOK}({cpp_type}& en, std::string_view value, const IDLParserContext& ctxt)"
 
     def gen_deserializer_adl_hook_definition(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
@@ -275,12 +250,12 @@ class _EnumTypeString(EnumTypeInfoBase, metaclass=ABCMeta):
                 indented_writer, f"constexpr std::array {cpp_type}_names{{", "};"
             ):
                 for e in self._enum.values:
-                    indented_writer.write_line(f'"{e.value}"_sd,')
+                    indented_writer.write_line(f'std::string_view{{"{e.value}"}},')
         indented_writer.write_empty_line()
 
         with writer.IndentedScopedBlock(
             indented_writer,
-            f"void {_DESERIALIZER_ADL_HOOK}({cpp_type}& en, ::mongo::StringData value, const IDLParserContext& ctxt) {{",
+            f"void {_DESERIALIZER_ADL_HOOK}({cpp_type}& en, std::string_view value, const IDLParserContext& ctxt) {{",
             "}",
         ):
             indented_writer.write_line(
@@ -299,14 +274,14 @@ class _EnumTypeString(EnumTypeInfoBase, metaclass=ABCMeta):
         # type: () -> str
         """Get the serializer ADL hook function declaration minus trailing semicolon."""
         cpp_type = self.get_cpp_type_name()
-        return f"{mod_tag}::mongo::StringData {_SERIALIZER_ADL_HOOK}({cpp_type} value)"
+        return f"{mod_tag} std::string_view {_SERIALIZER_ADL_HOOK}({cpp_type} value)"
 
     def gen_serializer_adl_hook_definition(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
         """Generate the serializer ADL hook function definition."""
         cpp_type = self.get_cpp_type_name()
         indented_writer._stream.write(f"""
-::mongo::StringData {_SERIALIZER_ADL_HOOK}({cpp_type} value) {{
+std::string_view {_SERIALIZER_ADL_HOOK}({cpp_type} value) {{
     auto idx = static_cast<size_t>(value);
     invariant(idx < {cpp_type}_names.size());
     return {cpp_type}_names[idx];

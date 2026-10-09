@@ -10,9 +10,7 @@ compile_commands.json
 cscope.in.out
 cscope.out
 cscope.po.out
-build/
-build_*/
-dist/clang-format
+build*/
 /docs/
 test-compatibility-run/
 COMPATIBILITY_TEST/
@@ -25,3 +23,9 @@ TCMALLOC_LIB/
 .idea
 cmake-build-release
 cmake-build-debug
+
+# Claude Code
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/agent-memory-local/
+.claude/worktrees/

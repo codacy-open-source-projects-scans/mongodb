@@ -19,17 +19,37 @@
  *     does_not_support_config_fuzzer,
  * ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getAggPlanStages, getLookupStageIndexStrategy} from "jstests/libs/query/analyze_plan.js";
-import {getQueryInfoAtTopLevelOrFirstStage, getSbePlanStages} from "jstests/libs/query/sbe_explain_helpers.js";
+import {
+    getQueryInfoAtTopLevelOrFirstStage,
+    getSbePlanStages,
+} from "jstests/libs/query/sbe_explain_helpers.js";
 import {
     checkSbeFullyEnabled,
     checkSbeRestrictedOrFullyEnabled,
-    checkSbeEqLookupUnwindEnabled,
+    isDeferredGetExecutorEnabled,
 } from "jstests/libs/query/sbe_util.js";
 
 const isSBEFullyEnabled = checkSbeFullyEnabled(db);
 const isSBELookupEnabled = checkSbeRestrictedOrFullyEnabled(db);
-const isSBEEqLookupUnwindEnabled = checkSbeEqLookupUnwindEnabled(db);
+const deferredGetExecutorEnabled = isDeferredGetExecutorEnabled(db);
+const eqLookupUnwindCollscanEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "SbeEqLookupUnwindLocalCollscan",
+);
+const eqLookupUnwindNestedLoopJoinEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "SbeEqLookupUnwindNestedLoopJoin",
+);
+const eqLookupUnwindIndexedLoopJoinEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "SbeEqLookupUnwindIndexedLoopJoin",
+);
+const eqLookupUnwindDynamicIndexedLoopJoinEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "SbeEqLookupUnwindDynamicIndexedLoopJoin",
+);
 const testDB = db.getSiblingDB("lookup_query_stats");
 testDB.dropDatabase();
 
@@ -91,7 +111,9 @@ let aggregationLookupPipeline = function (localColl, fromColl, options, withUnwi
         },
     };
     const sortStage = {$sort: {localField: 1}};
-    const pipeline = withUnwind ? [lookupStage, {$unwind: {path: "$output"}}, sortStage] : [lookupStage, sortStage];
+    const pipeline = withUnwind
+        ? [lookupStage, {$unwind: {path: "$output"}}, sortStage]
+        : [lookupStage, sortStage];
     return localColl.aggregate(pipeline, options);
 };
 
@@ -100,7 +122,12 @@ let doAggregationLookup = function (localColl, fromColl, options, withUnwind) {
 };
 
 let explainAggregationLookup = function (localColl, fromColl, verbosityLevel, options, withUnwind) {
-    return aggregationLookupPipeline(localColl.explain(verbosityLevel), fromColl, options, withUnwind);
+    return aggregationLookupPipeline(
+        localColl.explain(verbosityLevel),
+        fromColl,
+        options,
+        withUnwind,
+    );
 };
 
 let getCurrentQueryExecutorStats = function () {
@@ -115,9 +142,15 @@ let getCurrentQueryExecutorStats = function () {
     return [curScannedObjects, curScannedKeys];
 };
 
-let checkExplainOutputForVerLevel = function (explainOutput, expected, verbosityLevel, expectedQueryPlan, withUnwind) {
+let checkExplainOutputForVerLevel = function (
+    explainOutput,
+    expected,
+    verbosityLevel,
+    expectedQueryPlan,
+    withUnwind,
+) {
     // Only make SBE specific assertions when we know that our $lookup has been pushed down.
-    if (isSBEFullyEnabled || (isSBELookupEnabled && (isSBEEqLookupUnwindEnabled || !withUnwind))) {
+    if (isSBEFullyEnabled || (isSBELookupEnabled && (deferredGetExecutorEnabled || !withUnwind))) {
         // If the SBE lookup is enabled, the "$lookup" stage is pushed down to the SBE and it's
         // not visible in 'stages' field of the explain output. Instead, 'queryPlan.stage' must be
         // "EQ_LOOKUP" or "EQ_LOOKUP_UNWIND".
@@ -130,21 +163,33 @@ let checkExplainOutputForVerLevel = function (explainOutput, expected, verbosity
 
         const queryInfo = getQueryInfoAtTopLevelOrFirstStage(explainOutput);
         const planner = queryInfo.queryPlanner;
-        assert(planner.hasOwnProperty("winningPlan") && planner.winningPlan.hasOwnProperty("queryPlan"), explainOutput);
+        assert(
+            planner.hasOwnProperty("winningPlan") &&
+                planner.winningPlan.hasOwnProperty("queryPlan"),
+            explainOutput,
+        );
         const plan = planner.winningPlan.queryPlan;
 
         assert(lkpStage.hasOwnProperty("stage"), lkpStage);
         assert(lkpStage.stage == "EQ_LOOKUP" || lkpStage.stage == "EQ_LOOKUP_UNWIND", lkpStage);
         assert(expectedQueryPlan.hasOwnProperty("strategy"), expectedQueryPlan);
-        assert(lkpStage.hasOwnProperty("strategy") && lkpStage.strategy == expectedQueryPlan.strategy, lkpStage);
+        assert(
+            lkpStage.hasOwnProperty("strategy") && lkpStage.strategy == expectedQueryPlan.strategy,
+            lkpStage,
+        );
         if (
             expectedQueryPlan.strategy == "IndexedLoopJoin" ||
             expectedQueryPlan.strategy === "DynamicIndexedLoopJoin"
         ) {
-            assert.eq(getLookupStageIndexStrategy(lkpStage).indexName, expectedQueryPlan.indexName, lkpStage);
+            assert.eq(
+                getLookupStageIndexStrategy(lkpStage).indexName,
+                expectedQueryPlan.indexName,
+                lkpStage,
+            );
         }
 
-        const expectedTopLevelJoinStage = expectedQueryPlan.strategy == "HashJoin" ? "hash_lookup" : "nlj";
+        const expectedTopLevelJoinStage =
+            expectedQueryPlan.strategy == "HashJoin" ? "hash_lookup" : "nlj";
 
         const sbeNljStages = getSbePlanStages(explainOutput, expectedTopLevelJoinStage);
         if (verbosityLevel && verbosityLevel !== kQueryPlanner) {
@@ -259,7 +304,13 @@ let checkExplainOutputForAllVerbosityLevels = function (
 
     // The `explain` verbosity level is not passed.
     let explainOutput = explainAggregationLookup(localColl, fromColl, {}, allowDiskUse, withUnwind);
-    checkExplainOutputForVerLevel(explainOutput, expectedExplainResult, {}, expectedQueryPlan, withUnwind);
+    checkExplainOutputForVerLevel(
+        explainOutput,
+        expectedExplainResult,
+        {},
+        expectedQueryPlan,
+        withUnwind,
+    );
 };
 
 let createIndexForCollection = function (collection, fieldName) {
@@ -269,6 +320,12 @@ let createIndexForCollection = function (collection, fieldName) {
 };
 
 let testQueryExecutorStatsWithCollectionScan = function (params) {
+    if (
+        params.withUnwind &&
+        (!eqLookupUnwindCollscanEnabled || !eqLookupUnwindNestedLoopJoinEnabled)
+    ) {
+        return;
+    }
     let output = doAggregationLookup(localColl, fromColl, {allowDiskUse: false}, params.withUnwind);
 
     assert.eq(output, params.expectedOutput);
@@ -284,7 +341,10 @@ let testQueryExecutorStatsWithCollectionScan = function (params) {
     // There is no index in the collection.
     assert.eq(0, curScannedKeys);
 
-    if (isSBEFullyEnabled || (isSBELookupEnabled && (isSBEEqLookupUnwindEnabled || !params.withUnwind))) {
+    if (
+        isSBEFullyEnabled ||
+        (isSBELookupEnabled && (deferredGetExecutorEnabled || !params.withUnwind))
+    ) {
         checkExplainOutputForAllVerbosityLevels(
             localColl,
             fromColl,
@@ -375,6 +435,12 @@ let testQueryExecutorStatsWithHashLookup = function (params) {
 };
 
 let testQueryExecutorStatsWithIndexScan = function (params) {
+    if (
+        params.withUnwind &&
+        (!eqLookupUnwindCollscanEnabled || !eqLookupUnwindIndexedLoopJoinEnabled)
+    ) {
+        return;
+    }
     createIndexForCollection(fromColl, "foreignField");
 
     let output = doAggregationLookup(localColl, fromColl, {allowDiskUse: false}, params.withUnwind);
@@ -394,7 +460,10 @@ let testQueryExecutorStatsWithIndexScan = function (params) {
     // match with the local collection
     assert.eq(foreignDocMatchIndex, curScannedKeys);
 
-    if (isSBEFullyEnabled || (isSBELookupEnabled && (isSBEEqLookupUnwindEnabled || !params.withUnwind))) {
+    if (
+        isSBEFullyEnabled ||
+        (isSBELookupEnabled && (deferredGetExecutorEnabled || !params.withUnwind))
+    ) {
         checkExplainOutputForAllVerbosityLevels(
             localColl,
             fromColl,
@@ -441,6 +510,12 @@ let testQueryExecutorStatsWithIndexScan = function (params) {
 };
 
 let testQueryExecutorStatsWithDynamicIndexedLoopJoin = function (params) {
+    if (
+        params.withUnwind &&
+        (!eqLookupUnwindCollscanEnabled || !eqLookupUnwindDynamicIndexedLoopJoinEnabled)
+    ) {
+        return;
+    }
     createIndexForCollection(fromColl, "foreignField");
 
     let output = doAggregationLookup(
@@ -462,7 +537,10 @@ let testQueryExecutorStatsWithDynamicIndexedLoopJoin = function (params) {
     const localDocCountIndex = params.localWithIndex; // 2;
     const foreignDocMatchIndex = params.foreignMatchIndex; //
     const expectedScannedObjects =
-        localDocCountIndex + foreignDocMatchIndex + localDocCountNoIndex + localDocCountNoIndex * foreignDocCount;
+        localDocCountIndex +
+        foreignDocMatchIndex +
+        localDocCountNoIndex +
+        localDocCountNoIndex * foreignDocCount;
 
     assert.eq(expectedScannedObjects, curScannedObjects);
 
@@ -470,7 +548,10 @@ let testQueryExecutorStatsWithDynamicIndexedLoopJoin = function (params) {
     // collection that are match using an index
     assert.eq(foreignDocMatchIndex, curScannedKeys);
 
-    if (isSBEFullyEnabled || (isSBELookupEnabled && (isSBEEqLookupUnwindEnabled || !params.withUnwind))) {
+    if (
+        isSBEFullyEnabled ||
+        (isSBELookupEnabled && (deferredGetExecutorEnabled || !params.withUnwind))
+    ) {
         checkExplainOutputForAllVerbosityLevels(
             localColl,
             fromColl,

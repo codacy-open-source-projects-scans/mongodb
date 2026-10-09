@@ -4,7 +4,7 @@
  * 2. An aggregation pipeline containing a $search and non-$search stage.
  * 3. A non-search aggregation pipeline.
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_81 ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {
@@ -82,7 +82,12 @@ const addFieldsBaseCaseTestCases = (isStoredSource) => {
         },
         {$project: {pop: 1, _id: 1}},
     ];
-    validateSearchExplain(addFieldsView, pipelineWithStageAfterSearch, isStoredSource, viewPipeline);
+    validateSearchExplain(
+        addFieldsView,
+        pipelineWithStageAfterSearch,
+        isStoredSource,
+        viewPipeline,
+    );
 
     // =========================================================================================
     // Case 3: Non-search query on a view indexed by mongot, ensuring view transforms are still

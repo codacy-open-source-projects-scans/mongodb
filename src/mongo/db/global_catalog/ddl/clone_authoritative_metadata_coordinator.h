@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -36,7 +10,7 @@
 
 namespace mongo {
 
-class MONGO_MOD_NEEDS_REPLACEMENT CloneAuthoritativeMetadataCoordinator final
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] CloneAuthoritativeMetadataCoordinator final
     : public RecoverableShardingDDLCoordinator<CloneAuthoritativeMetadataCoordinatorDocument> {
 public:
     CloneAuthoritativeMetadataCoordinator(ShardingCoordinatorService* service,
@@ -68,17 +42,39 @@ private:
      * catalog. This function iterates through the list of databases and attempts to clone them
      * individually.
      */
-    void _clone(OperationContext* opCtx);
+    void _clone(OperationContext* opCtx,
+                const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                const CancellationToken& token);
 
     /**
-     * Clones the metadata for a single database while entering in shard role.
+     * Enters the shard role then clones the database and collection metadata for a single database.
      */
-    void _cloneSingleDatabaseWithShardRole(OperationContext* opCtx, const DatabaseName& dbName);
+    void _cloneSingleDatabaseWithShardRole(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& token);
+
+    /**
+     * Clones the metadata of config.system.sessions, the only collection of the config database
+     * that is allowed to be tracked. The config database is not registered in config.databases, so
+     * it is not part of the databases handled by '_clone'; this collection is therefore cloned
+     * explicitly. Only invoked on the config server, which is the primary shard of the config
+     * database.
+     */
+    void _cloneConfigSystemSessions(OperationContext* opCtx,
+                                    const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+                                    const CancellationToken& token);
 
     /**
      * Removes a database from the list of databases to be cloned.
      */
     void _removeDbFromCloningList(OperationContext* opCtx, const DatabaseName& dbName);
+
+    /**
+     * Persists the last collection cloned for the current database.
+     */
+    void _updateLastClonedCollection(OperationContext* opCtx, const NamespaceString& nss);
 };
 
 }  // namespace mongo

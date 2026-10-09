@@ -58,6 +58,22 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "storage_oplog_manager",
+    srcs = [
+        "storage_oplog_manager.cpp",
+    ],
+    hdrs = [
+        "storage_oplog_manager.h",
+    ],
+    deps = [
+        ":record_store_base",
+        ":recovery_unit_base",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/storage/kv:kv_engine",
+    ],
+)
+
+mongo_cc_library(
     name = "remove_saver",
     srcs = [
         "remove_saver.cpp",
@@ -176,6 +192,7 @@ mongo_cc_library(
         "//src/mongo/bson:bson_validate",
         "//src/mongo/bson/dotted_path:dotted_path_support",
         "//src/mongo/db:server_base",
+        "//src/mongo/rpc:object_check",
     ],
 )
 
@@ -254,11 +271,28 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "checkpoint_schedule_policy",
+    srcs = [
+        "checkpoint_schedule_policy.cpp",
+    ],
+    hdrs = [
+        "checkpoint_schedule_policy.h",
+    ],
+    deps = [
+        ":storage_options",
+        "//src/mongo:base",
+        "//src/mongo/util:clock_sources",
+        "//src/mongo/util/concurrency:spin_lock",
+    ],
+)
+
+mongo_cc_library(
     name = "checkpointer",
     srcs = [
         "checkpointer.cpp",
     ],
     deps = [
+        ":checkpoint_schedule_policy",
         ":storage_options",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
@@ -275,6 +309,7 @@ mongo_cc_library(
         "//src/mongo/db/storage/control:storage_control.cpp",
     ],
     deps = [
+        ":checkpoint_schedule_policy",
         ":checkpointer",
         ":journal_flusher",
         ":storage_options",
@@ -319,6 +354,9 @@ mongo_cc_library(
         "//src/mongo/db:service_context",
         "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/repl:local_oplog_info",
+        "//src/mongo/db/replicated_fast_count:replicated_fast_count_enabled",
+        "//src/mongo/db/replicated_fast_count:replicated_fast_count_manager",
+        "//src/mongo/db/replicated_fast_count:replicated_fast_count_uncommitted_changes",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/lock_manager",
         "//src/mongo/db/shard_role/shard_catalog:collection_catalog",
@@ -340,6 +378,8 @@ mongo_cc_library(
     deps = [
         ":record_store_base",
         "//src/mongo/db/rss:replicated_storage_service",
+        "//src/mongo/db/shard_role:shard_role_api_stor_ex",
+        "//src/mongo/db/shard_role/lock_manager:exception_util",
         "//src/mongo/db/storage/kv:kv_engine",
     ],
 )
@@ -380,6 +420,7 @@ mongo_cc_library(
     deps = [
         ":disk_space_monitor",
         ":record_store_base",
+        "//src/mongo/db/shard_role:shard_role_api_stor_ex",
         "//src/mongo/db/shard_role/lock_manager:exception_util",
     ],
 )
@@ -398,6 +439,7 @@ mongo_cc_library(
         ":storage_repair_observer",
         ":storage_tier",
         "//src/mongo/db:server_base",
+        "//src/mongo/db/rss:persistence_provider",
         "//src/mongo/db/rss:replicated_storage_service",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper",
@@ -411,18 +453,6 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
-    ],
-)
-
-mongo_cc_library(
-    name = "storage_engine_direct_crud",
-    srcs = [
-        "storage_engine_direct_crud.cpp",
-    ],
-    deps = [
-        "//src/mongo:base",
-        "//src/mongo/db/storage:recovery_unit_base",
-        "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper",
     ],
 )
 
@@ -496,6 +526,19 @@ mongo_cc_library(
     ],
 )
 
+# Storage engine-agnostic way for unit tests to turn on the write conflict fail points. The storage
+# engine in use registers its own fail points, so this must not depend on any specific engine.
+mongo_cc_library(
+    name = "record_store_write_conflict_fail_points",
+    srcs = [
+        "record_store_write_conflict_fail_points.cpp",
+    ],
+    deps = [
+        ":storage_options",
+        "//src/mongo/util:fail_point",
+    ],
+)
+
 mongo_cc_library(
     name = "record_store_test_harness",
     srcs = [
@@ -538,6 +581,7 @@ mongo_cc_library(
     ],
     deps = [
         ":record_store_test_harness",
+        ":record_store_write_conflict_fail_points",
         ":storage_options",
         "//src/mongo/db:record_id_helpers",
         "//src/mongo/db:shard_role_api",
@@ -608,6 +652,8 @@ mongo_cc_library(
 mongo_cc_unit_test(
     name = "db_storage_test",
     srcs = [
+        "checkpoint_schedule_policy_test.cpp",
+        "checkpointer_test.cpp",
         "collection_truncate_markers_test.cpp",
         "disk_space_monitor_test.cpp",
         "index_entry_comparison_test.cpp",
@@ -628,8 +674,11 @@ mongo_cc_unit_test(
         "server-storage-engine-integration",
     ],
     deps = [
+        ":checkpoint_schedule_policy",
+        ":checkpointer",
         ":disk_space_monitor",
         ":record_store_base",
+        ":record_store_write_conflict_fail_points",
         ":spill_table",
         ":spill_util",
         ":storage_engine_common",
@@ -642,6 +691,7 @@ mongo_cc_unit_test(
         "//src/mongo/db:service_context_d_test_fixture",
         "//src/mongo/db:startup_recovery",
         "//src/mongo/db/index_builds:resumable_index_builds_idl",
+        "//src/mongo/db/repl:intent_registry",
         "//src/mongo/db/rss:persistence_provider_impl",
         "//src/mongo/db/rss:service_lifecycle_impl",
         "//src/mongo/db/shard_role",
@@ -651,7 +701,6 @@ mongo_cc_unit_test(
         "//src/mongo/db/shard_role/shard_catalog:collection_options",
         "//src/mongo/db/shard_role/shard_catalog:durable_catalog",
         "//src/mongo/db/storage:storage_control",
-        "//src/mongo/db/storage:storage_engine_direct_crud",
         "//src/mongo/db/storage:storage_engine_impl",
         "//src/mongo/db/storage:storage_repair_observer",
         "//src/mongo/db/storage/devnull:storage_devnull_core",
@@ -661,6 +710,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/timeseries:timeseries_options",
         "//src/mongo/executor:network_interface_factory",
         "//src/mongo/executor:network_interface_mock",
+        "//src/mongo/util:clock_source_mock",
         "//src/mongo/util:periodic_runner_factory",
     ],
 )
@@ -675,6 +725,22 @@ mongo_cc_unit_test(
         "//src/mongo/db/repl:oplog_applier_impl_test_fixture",
         "//src/mongo/db/repl:replication_recovery",
         "//src/mongo/db/repl:storage_interface",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "compute_oplog_truncation_bound_test",
+    srcs = [
+        "compute_oplog_truncation_bound_test.cpp",
+    ],
+    tags = ["mongo_unittest_sixth_group"],
+    deps = [
+        ":oplog_truncation",
+        ":record_store_write_conflict_fail_points",
+        "//src/mongo/db/replicated_fast_count:replicated_fast_count_init",
+        "//src/mongo/db/replicated_fast_count:replicated_fast_count_test_helpers",
+        "//src/mongo/db/shard_role/shard_catalog:catalog_test_fixture",
+        "//src/mongo/util:fail_point",
     ],
 )
 

@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -62,10 +35,12 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
@@ -83,12 +58,14 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/version_context.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -103,6 +80,7 @@
 #include <cstdlib>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -113,6 +91,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 repl::MutableOplogEntry makeOplog(const NamespaceString& nss,
                                   const UUID& uuid,
@@ -231,13 +210,20 @@ public:
         return std::make_unique<ReshardingOplogFetcher::Env>(_svcCtx, _metrics.get());
     }
 
+    ForwardableOperationMetadata makeTestFom() {
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
+        return fom;
+    }
+
     auto makeExecutor() {
-        ThreadPool::Options threadPoolOpts;
-        threadPoolOpts.maxThreads = 100;
-        threadPoolOpts.threadNamePrefix = "ReshardingOplogFetcherTest-";
-        threadPoolOpts.poolName = "ReshardingOplogFetcherTestThreadPool";
         return executor::ThreadPoolTaskExecutor::create(
-            std::make_unique<ThreadPool>(threadPoolOpts),
+            ThreadPool::make({
+                .poolName = "ReshardingOplogFetcherTestThreadPool",
+                .threadNamePrefix = "ReshardingOplogFetcherTest-",
+                .maxThreads = 100,
+            }),
             std::make_unique<executor::NetworkInterfaceMock>());
     }
 
@@ -253,10 +239,9 @@ public:
         public:
             StaticCatalogClient(std::vector<ShardId> shardIds) : _shardIds(std::move(shardIds)) {}
 
-            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
-                OperationContext* opCtx,
-                repl::ReadConcernLevel readConcern,
-                BSONObj filter) override {
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
+                                                                  repl::ReadConcernArgs readConcern,
+                                                                  BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : _shardIds) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(
@@ -567,7 +552,7 @@ public:
 
     long long currentOpFetchedCount() const {
         auto curOp = _metrics->reportForCurrentOp();
-        return curOp["oplogEntriesFetched"_sd].Long();
+        return curOp["oplogEntriesFetched"sv].Long();
     }
 
     long long persistedFetchedCount(OperationContext* opCtx) const {
@@ -670,7 +655,8 @@ protected:
                                            _donorShard,
                                            _destinationShard,
                                            outputCollectionNss,
-                                           storeProgress);
+                                           storeProgress,
+                                           makeTestFom());
             fetcher.useReadConcernForTest(false);
             if (initialAggregateBatchSize) {
                 fetcher.setInitialBatchSizeForTest(*initialAggregateBatchSize);
@@ -721,7 +707,7 @@ protected:
                                                     const NamespaceString& outputCollectionNss,
                                                     bool storeProgress) {
         auto batchLimitOperations = 5;
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "reshardingOplogFetcherInsertBatchLimitOperations", batchLimitOperations);
         auto numInsertOplogEntries = 8;
         auto initialAggregateBatchSize = boost::none;
@@ -747,7 +733,7 @@ protected:
         const NamespaceString& outputCollectionNss,
         bool storeProgress) {
         auto batchLimitBytes = 1 * 1024;
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "reshardingOplogFetcherInsertBatchLimitBytes", batchLimitBytes);
         auto numInsertOplogEntries = 2;
         auto approxInsertOplogEntrySizeBytes = 3 * 1024;
@@ -808,9 +794,9 @@ protected:
 
 private:
     // Set the sleep to 0 to speed up the tests.
-    RAIIServerParameterControllerForTest _sleepMillisBeforeCriticalSection{
+    unittest::ServerParameterGuard _sleepMillisBeforeCriticalSection{
         "reshardingOplogFetcherSleepMillisBeforeCriticalSection", 0};
-    RAIIServerParameterControllerForTest _sleepMillisDuringCriticalSection{
+    unittest::ServerParameterGuard _sleepMillisDuringCriticalSection{
         "reshardingOplogFetcherSleepMillisDuringCriticalSection", 0};
 
     static HostAndPort makeHostAndPort(const ShardId& shardId) {
@@ -835,8 +821,8 @@ TEST_F(ReshardingOplogFetcherTest, TestBasicSingleApplyOps) {
 // Tests that recordIds replicated for the donor's data collection aren't leaked in the output
 // collection for the resharding fetcher.
 TEST_F(ReshardingOplogFetcherTest, TestBasicSingleApplyOpsStripsRids) {
-    RAIIServerParameterControllerForTest _featureFlagReplRidController{
-        "featureFlagRecordIdsReplicated", true};
+    unittest::ServerParameterGuard _featureFlagReplRidController{"featureFlagRecordIdsReplicated",
+                                                                 true};
     for (bool storeProgress : {false, true}) {
         LOGV2(8919200, "Running case", "storeProgress"_attr = storeProgress);
 
@@ -871,8 +857,8 @@ TEST_F(ReshardingOplogFetcherTest, TestBasicMultipleApplyOps_BatchLimitOperation
 }
 
 TEST_F(ReshardingOplogFetcherTest, TestBasicMultipleApplyOpsStripsRids) {
-    RAIIServerParameterControllerForTest _featureFlagReplRidController{
-        "featureFlagRecordIdsReplicated", true};
+    unittest::ServerParameterGuard _featureFlagReplRidController{"featureFlagRecordIdsReplicated",
+                                                                 true};
     for (bool storeProgress : {false, true}) {
         LOGV2(8919201, "Running case", "storeProgress"_attr = storeProgress);
 
@@ -903,7 +889,7 @@ TEST_F(ReshardingOplogFetcherTest, TestBasicMultipleApplyOps_BatchLimitBytes) {
             "dbtests.runFetchIteration" + std::to_string(storeProgress));
 
         auto batchLimitBytes = 10 * 1024;
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "reshardingOplogFetcherInsertBatchLimitBytes", batchLimitBytes);
         auto numInsertOplogEntries = 8;
         auto approxInsertOplogEntrySizeBytes = 3 * 1024;
@@ -949,8 +935,8 @@ TEST_F(ReshardingOplogFetcherTest,
 
 TEST_F(ReshardingOplogFetcherTest,
        TestBasicMultipleApplyOpsStripsRids_SingleOplogEntrySizeExceedsBatchLimitBytes) {
-    RAIIServerParameterControllerForTest _featureFlagReplRidController{
-        "featureFlagRecordIdsReplicated", true};
+    unittest::ServerParameterGuard _featureFlagReplRidController{"featureFlagRecordIdsReplicated",
+                                                                 true};
 
     for (bool storeProgress : {false, true}) {
         LOGV2(8919202, "Running case", "storeProgress"_attr = storeProgress);
@@ -982,7 +968,7 @@ TEST_F(ReshardingOplogFetcherTest, TestBasicMultipleApplyOps_FinalOplogEntry) {
             "dbtests.runFetchIteration" + std::to_string(storeProgress));
 
         auto batchLimitOperations = 5;
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "reshardingOplogFetcherInsertBatchLimitOperations", batchLimitOperations);
         auto numInsertOplogEntriesBeforeFinal = 8;
         auto approxInsertOplogEntrySizeBytes = 1;
@@ -1041,7 +1027,8 @@ TEST_F(ReshardingOplogFetcherTest, TestTrackLastSeen) {
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       storeProgress);
+                                       storeProgress,
+                                       makeTestFom());
         fetcher.useReadConcernForTest(false);
         fetcher.setInitialBatchSizeForTest(2);
         fetcher.setMaxBatchesForTest(maxBatches);
@@ -1093,7 +1080,8 @@ TEST_F(ReshardingOplogFetcherTest, TestFallingOffOplog) {
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       storeProgress);
+                                       storeProgress,
+                                       makeTestFom());
         fetcher.useReadConcernForTest(false);
 
         // Status has a private default constructor so we wrap it in a boost::optional to placate
@@ -1149,7 +1137,8 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
 
     // The ReshardingOplogFetcher hasn't inserted a record yet so awaitInsert(startAt) won't be
     // immediately ready.
@@ -1247,7 +1236,8 @@ TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       storeProgress);
+                                       storeProgress,
+                                       makeTestFom());
 
         // Insert a document into the data collection and have it generate an oplog entry with a
         // "destinedRecipient" field.
@@ -1384,7 +1374,8 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       true /* storeProgress */);
+                                       true /* storeProgress */,
+                                       makeTestFom());
         fetcher.useReadConcernForTest(false);
         fetcher.setInitialBatchSizeForTest(2);
 
@@ -1394,7 +1385,14 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
 
     onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
         // Simulate the remote donor shard stepping down or transitioning into rollback.
+        // The aggregation should be retried.
         return {ErrorCodes::InterruptedDueToReplStateChange, "operation was interrupted"};
+    });
+
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        // Inject network timeout error.
+        // This kills the aggregation.
+        return {ErrorCodes::NetworkInterfaceExceededTimeLimit, "exceeded network time limit"};
     });
 
     auto moreToCome = fetcherJob.timed_get(Seconds(5));
@@ -1433,7 +1431,8 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnNetworkTimeoutError) {
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       true /* storeProgress */);
+                                       true /* storeProgress */,
+                                       makeTestFom());
 
         auto factory = makeCancelableOpCtx();
         return fetcher.iterate(&cc(), factory);
@@ -1476,7 +1475,8 @@ TEST_F(ReshardingOplogFetcherTest, ImmediatelyDoneWhenFinalOpHasAlreadyBeenFetch
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
 
     auto future = fetcher.schedule(nullptr, CancellationToken::uncancelable());
 
@@ -1519,7 +1519,8 @@ DEATH_TEST_REGEX_F(ReshardingOplogFetcherTestDeathTest,
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       true /* storeProgress */);
+                                       true /* storeProgress */,
+                                       makeTestFom());
         fetcher.setInitialBatchSizeForTest(2);
 
         auto factory = makeCancelableOpCtx();
@@ -1558,7 +1559,8 @@ TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_Targ
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -1613,9 +1615,9 @@ TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_Targ
     bool scheduledAggResponse = false;
     onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
         auto cmdName = request.cmdObj.firstElementFieldName();
-        if (cmdName == "killCursors"_sd) {
+        if (cmdName == "killCursors"sv) {
             return makeKillCursorResponse(request);
-        } else if (cmdName == "aggregate"_sd) {
+        } else if (cmdName == "aggregate"sv) {
             scheduledAggResponse = true;
             return makeAggResponse(request);
         }
@@ -1634,7 +1636,7 @@ TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_Targ
 }
 
 TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_NotTargetPrimary) {
-    RAIIServerParameterControllerForTest targetPrimaryDuringCriticalSection{
+    unittest::ServerParameterGuard targetPrimaryDuringCriticalSection{
         "reshardingOplogFetcherTargetPrimaryDuringCriticalSection", false};
 
     const NamespaceString outputCollectionNss =
@@ -1657,7 +1659,8 @@ TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_NotT
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -1738,7 +1741,8 @@ TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionBeforeScheduling) {
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     fetcher.prepareForCriticalSection();
 
     auto executor = makeExecutor();
@@ -1784,7 +1788,8 @@ TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionMoreThanOnce) {
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -1835,7 +1840,7 @@ TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionAfterFetchingFinalOp
     for (bool targetPrimary : {false, true}) {
         LOGV2(10355403, "Running case", "targetPrimary"_attr = targetPrimary);
 
-        RAIIServerParameterControllerForTest targetPrimaryDuringCriticalSection{
+        unittest::ServerParameterGuard targetPrimaryDuringCriticalSection{
             "reshardingOplogFetcherTargetPrimaryDuringCriticalSection", targetPrimary};
 
         const NamespaceString outputCollectionNss = NamespaceString::createNamespaceString_forTest(
@@ -1858,7 +1863,8 @@ TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionAfterFetchingFinalOp
                                        _donorShard,
                                        _destinationShard,
                                        outputCollectionNss,
-                                       true /* storeProgress */);
+                                       true /* storeProgress */,
+                                       makeTestFom());
         auto executor = makeExecutor();
         executor->startup();
 
@@ -1919,7 +1925,7 @@ TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionAfterFetchingFinalOp
 TEST_F(ReshardingOplogFetcherTest,
        UpdateAverageTimeToFetchCursorAdvancedBasic_WithPostBatchResumeToken) {
     auto smoothingFactor = 0.5;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     const NamespaceString outputCollectionNss =
@@ -1951,7 +1957,8 @@ TEST_F(ReshardingOplogFetcherTest,
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2026,7 +2033,7 @@ TEST_F(ReshardingOplogFetcherTest,
 TEST_F(ReshardingOplogFetcherTest,
        UpdateAverageTimeToFetchCursorAdvancedBasic_WithoutPostBatchResumeToken) {
     auto smoothingFactor = 0.5;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     const NamespaceString outputCollectionNss =
@@ -2058,7 +2065,8 @@ TEST_F(ReshardingOplogFetcherTest,
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2185,7 +2193,8 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayLessThan
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2260,7 +2269,8 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayZeroSeco
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2331,7 +2341,8 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayNegative
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2374,7 +2385,7 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayNegative
 
 TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchCursorNotAdvanced) {
     auto smoothingFactor = 0.6;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     const NamespaceString outputCollectionNss =
@@ -2406,7 +2417,8 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchCursorNotAdvanced) {
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2494,7 +2506,7 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchCursorNotAdvanced) {
 
 TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchMultipleCursors) {
     auto smoothingFactor = 0.7;
-    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+    const unittest::ServerParameterGuard smoothingFactorServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
 
     const NamespaceString outputCollectionNss =
@@ -2526,7 +2538,8 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchMultipleCursors) {
                                    _donorShard,
                                    _destinationShard,
                                    outputCollectionNss,
-                                   true /* storeProgress */);
+                                   true /* storeProgress */,
+                                   makeTestFom());
     auto executor = makeExecutor();
     executor->startup();
     auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
@@ -2592,6 +2605,136 @@ TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchMultipleCursors) {
     executor->join();
 }
 
+TEST_F(ReshardingOplogFetcherTest, RollsBackPartialBatchOnRetryableError) {
+    for (bool storeProgress : {false, true}) {
+        LOGV2(10635006, "Running case", "storeProgress"_attr = storeProgress);
+
+        const NamespaceString outputCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.outputCollection" + std::to_string(storeProgress));
+        const NamespaceString dataCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.runFetchIteration" + std::to_string(storeProgress));
+
+        // 3 inserts + 1 final noop sentinel = 4 total entries
+        setupBasic(outputCollectionNss, dataCollectionNss, _destinationShard, 3);
+        const int expectedTotal = 4;
+
+        const auto collectionUUID = [&] {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            return dataColl->uuid();
+        }();
+
+        ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                       _reshardingUUID,
+                                       collectionUUID,
+                                       {_fetchTimestamp, _fetchTimestamp},
+                                       _donorShard,
+                                       _destinationShard,
+                                       outputCollectionNss,
+                                       storeProgress,
+                                       makeTestFom());
+
+        const auto staringNumOplogEntriesCopied = fetcher.getNumOplogEntriesCopied();
+        const auto startingLastSeenTimestamp = fetcher.getLastSeenTimestamp();
+
+        auto fetcherJob = launchAsync([&, this] {
+            ThreadClient tc("RetryRollbackRunner", _svcCtx->getService(), Client::noSession());
+            fetcher.useReadConcernForTest(false);
+            // Batch size 2 so the first aggregate returns 2 entries with a live cursor,
+            // allowing us to inject a network error on the subsequent getMore.
+            fetcher.setInitialBatchSizeForTest(2);
+            auto factory = makeCancelableOpCtx();
+            // Mirror the real coordinator: call iterate() until moreToCome=false. The first call
+            // fails mid-batch (getMore error triggers the retry/rollback callback), and subsequent
+            // calls pick up from _startAt and complete fetching.
+            bool moreToCome = true;
+            while (moreToCome) {
+                moreToCome = fetcher.iterate(&cc(), factory);
+            }
+        });
+
+        struct SyncAndHang {
+        public:
+            void waitForSync() {
+                syncPoint.countDownAndWait();
+            }
+
+            void hang() {
+                pf.future.get();
+            }
+
+            void cont() {
+                pf.promise.emplaceValue();
+            }
+
+        private:
+            unittest::Barrier syncPoint{2};
+            PromiseAndFuture<void> pf;
+        };
+
+        size_t callbackHit{0};
+        auto passthrough = [&](boost::optional<std::reference_wrapper<SyncAndHang>> sync =
+                                   boost::none) {
+            onCommand([&](const auto& request) {
+                callbackHit++;
+                if (sync) {
+                    sync->get().waitForSync();
+                    sync->get().hang();
+                }
+                DBDirectClient client(cc().getOperationContext());
+                BSONObj result;
+                client.runCommand(request.dbname, request.cmdObj, result);
+                return result;
+            });
+        };
+        auto fail = [&](boost::optional<std::reference_wrapper<SyncAndHang>> sync = boost::none) {
+            onCommand([&](const auto&) {
+                callbackHit++;
+                if (sync) {
+                    sync->get().waitForSync();
+                    sync->get().hang();
+                }
+                return Status{ErrorCodes::HostUnreachable, "injected"};
+            });
+        };
+
+        SyncAndHang syncPointBeforeFail;
+        SyncAndHang syncPointAfterFail;
+
+        stdx::thread beforeFail([&] {
+            syncPointBeforeFail.waitForSync();
+            ASSERT_GT(fetcher.getNumOplogEntriesCopied(), staringNumOplogEntriesCopied);
+            ASSERT_GT(fetcher.getLastSeenTimestamp(), startingLastSeenTimestamp);
+            syncPointBeforeFail.cont();
+        });
+
+        stdx::thread afterFail([&] {
+            syncPointAfterFail.waitForSync();
+            ASSERT_EQ(fetcher.getNumOplogEntriesCopied(), staringNumOplogEntriesCopied);
+            ASSERT_EQ(fetcher.getLastSeenTimestamp(), startingLastSeenTimestamp);
+            syncPointAfterFail.cont();
+        });
+
+        passthrough();
+        fail(std::ref(syncPointBeforeFail));
+        passthrough(std::ref(syncPointAfterFail));
+        passthrough();
+
+        fetcherJob.timed_get(Seconds(5));
+        beforeFail.join();
+        afterFail.join();
+
+        // Whether the rollback callback succeeds (deletes the 2 partial entries and resets
+        // _startAt) or fails with WriteConflict (leaving _startAt at the last inserted entry), the
+        // final output has exactly expectedTotal entries with no duplicates.
+        ASSERT_EQ(expectedTotal, itcount(outputCollectionNss));
+        ASSERT_EQ(storeProgress ? expectedTotal : 0, persistedFetchedCount(_opCtx))
+            << " Verify persisted progress metrics";
+        ASSERT_EQ(callbackHit, 4);
+
+        resetResharding();
+    }
+}
+
 class ReshardingOplogFetcherProgressMarkOplogTest : public ReshardingOplogFetcherTest {
 protected:
     struct OplogFetcherState {
@@ -2640,8 +2783,8 @@ protected:
         NamespaceString outputCollectionNss;
         NamespaceString dataCollectionNss;
         UUID dataCollectionUUID;
-        RAIIServerParameterControllerForTest movingAvgFeatureFlag;
-        RAIIServerParameterControllerForTest movingAvgServerParameter;
+        unittest::ServerParameterGuard movingAvgFeatureFlag;
+        unittest::ServerParameterGuard movingAvgServerParameter;
     };
 
     std::vector<TestOptions> makeAllTestOptions() {
@@ -2671,6 +2814,9 @@ protected:
         }();
 
         auto startAt = ReshardingDonorOplogId{_fetchTimestamp, _fetchTimestamp};
+        ForwardableOperationMetadata fom;
+        fom.setVersionContext(
+            VersionContext{serverGlobalParams.featureCompatibility.acquireFCVSnapshot()});
         auto fetcher = std::make_unique<ReshardingOplogFetcher>(makeFetcherEnv(),
                                                                 _reshardingUUID,
                                                                 dataCollectionUUID,
@@ -2678,7 +2824,8 @@ protected:
                                                                 _donorShard,
                                                                 _destinationShard,
                                                                 outputCollectionNss,
-                                                                testOptions.storeProgress);
+                                                                testOptions.storeProgress,
+                                                                std::move(fom));
 
         return {std::move(fetcher),
                 startAt,
@@ -3206,7 +3353,7 @@ TEST_F(
 TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
        DuringOplogApplication_BatchEmptyAndTimestampEqualToLastSeen) {
     auto movingAvgInterval = Milliseconds(50);
-    RAIIServerParameterControllerForTest intervalMillisServerParameter{
+    unittest::ServerParameterGuard intervalMillisServerParameter{
         "reshardingExponentialMovingAverageTimeToFetchAndApplyIntervalMillis",
         movingAvgInterval.count()};
 

@@ -2,7 +2,6 @@
  * Enabling queryStats on shard servers is possible but considered undefined behavior. This test
  * asserts that it does not crash the server, especially in the case where multiple cursors are
  * created per operation (eg sharded $search).
- * @tags: [featureFlagQueryStats]
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {
@@ -26,7 +25,7 @@ const stWithMock = new ShardingTestWithMongotMock({
     other: {
         rsOptions: {
             setParameter: {
-                internalQueryStatsRateLimit: -1,
+                internalQueryStatsSampleRate: 1,
             },
         },
     },
@@ -36,7 +35,9 @@ const st = stWithMock.st;
 
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 
 const testColl = testDB.getCollection(collName);
 testColl.drop();
@@ -141,7 +142,13 @@ function testBasicCase(shard0Conn, shard1Conn) {
         {_id: 1, x: "ow"},
     ];
 
-    mockPlanShardedSearchResponse(testColl.getName(), mongotQuery, dbName, undefined /*sortSpec*/, stWithMock);
+    mockPlanShardedSearchResponse(
+        testColl.getName(),
+        mongotQuery,
+        dbName,
+        undefined /*sortSpec*/,
+        stWithMock,
+    );
 
     assert.eq(testColl.aggregate(pipeline).toArray(), expectedDocs);
 }

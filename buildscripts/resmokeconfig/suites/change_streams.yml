@@ -3,6 +3,12 @@ test_kind: js_test
 selector:
   roots:
     - jstests/change_streams/**/*.js
+  exclude_files:
+    # This test exercises the internal behavior of $changeStream v1 and is not compatible with v2.
+    - jstests/change_streams/create_event_from_chunk_migration.js
+
+    # TODO: SERVER-114511 re-enable this test.
+    - jstests/change_streams/migrate_last_chunk_from_shard_event.js
   exclude_with_any_tags:
     ##
     # The next tags correspond to the special errors thrown by the
@@ -33,7 +39,6 @@ executor:
       # are bound to the oplog visibility rules. Using causal consistency forces the visibility
       # point to advance to the timestamp of the last write before doing a new read.
       eval: >-
-        globalThis.testingReplication = true;
         await import('jstests/libs/override_methods/set_read_and_write_concerns.js');
         await import('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
       # Set longer host discovery time to handle change stream resumable errors.

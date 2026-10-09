@@ -11,12 +11,97 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {after, afterEach, before, beforeEach, describe, it} from "jstests/libs/mochalite.js";
-import {IndexBuildTest, ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
+import {
+    IndexBuildTest,
+    ResumableIndexBuildTest,
+} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 const collName = "t";
 const dbName = "test";
+
+describe("index build throughput metrics", function () {
+    const keyCount = 1000;
+    const minBytesPerKey = 4; // The fields are 4 bytes, so the index keys generated must be >= 4 bytes each.
+
+    before(() => {
+        this.conn = MongoRunner.runMongod();
+        this.db = this.conn.getDB(dbName);
+    });
+
+    beforeEach(() => {
+        this.coll = this.db.getCollection(collName);
+
+        assert.commandWorked(
+            this.coll.insertMany(Array.from({length: keyCount}, (_, i) => ({a: `foo${i}`}))),
+        );
+    });
+
+    it("keys and bytes processed", () => {
+        const before = this.db.serverStatus().metrics.indexBuilds;
+
+        const fp = configureFailPoint(this.db, "hangIndexBuildDuringBulkLoadPhase", {
+            iteration: 0,
+            indexNames: ["a_1"],
+        });
+
+        const checkIndexBuildMetrics = (current, original, phasesCompleted) => {
+            assert.eq(current.keysProcessed, original.keysProcessed + keyCount * phasesCompleted);
+            assert.gte(
+                current.bytesProcessed,
+                original.bytesProcessed + keyCount * minBytesPerKey * phasesCompleted,
+            );
+        };
+
+        const awaitCreateIndex = IndexBuildTest.startIndexBuild(
+            this.conn,
+            this.coll.getFullName(),
+            {a: 1},
+        );
+
+        fp.wait();
+        const during = this.db.serverStatus().metrics.indexBuilds;
+        checkIndexBuildMetrics(during, before, 1);
+
+        fp.off();
+        awaitCreateIndex();
+        const after = this.db.serverStatus().metrics.indexBuilds;
+        checkIndexBuildMetrics(after, before, 2);
+    });
+
+    it("phase durations", () => {
+        const before = this.db.serverStatus().metrics.indexBuilds;
+
+        const fp = configureFailPoint(this.db, "hangIndexBuildDuringBulkLoadPhase", {
+            iteration: 0,
+            indexNames: ["a_1"],
+        });
+
+        const awaitCreateIndex = IndexBuildTest.startIndexBuild(
+            this.conn,
+            this.coll.getFullName(),
+            {a: 1},
+        );
+
+        fp.wait();
+        const during = this.db.serverStatus().metrics.indexBuilds;
+        assert.gt(during.phaseDurationMicros, before.phaseDurationMicros);
+
+        fp.off();
+        awaitCreateIndex();
+        const after = this.db.serverStatus().metrics.indexBuilds;
+        assert.gt(after.phaseDurationMicros, during.phaseDurationMicros);
+    });
+
+    afterEach(() => {
+        this.coll.drop();
+    });
+
+    after(() => {
+        MongoRunner.stopMongod(this.conn);
+    });
+});
 
 describe("index build failures", function () {
     before(() => {
@@ -35,7 +120,10 @@ describe("index build failures", function () {
         assert.eq(0, this.db.serverStatus().indexBuilds.failedDueToDuplicateKeyError);
         assert.eq(0, this.db.serverStatus().metrics.operation.insertFailedDueToDuplicateKeyError);
 
-        assert.commandFailedWithCode(this.coll.createIndex({a: 1}, {unique: 1}), ErrorCodes.DuplicateKey);
+        assert.commandFailedWithCode(
+            this.coll.createIndex({a: 1}, {unique: 1}),
+            ErrorCodes.DuplicateKey,
+        );
 
         IndexBuildTest.assertIndexes(this.coll, 1, ["_id_"]);
         assert.eq(1, this.db.serverStatus().indexBuilds.failedDueToDuplicateKeyError);
@@ -57,7 +145,11 @@ describe("index build failures", function () {
         assert.eq(0, this.db.serverStatus().indexBuilds.failedDueToManualCancellation);
 
         const fp = configureFailPoint(this.db, "hangAfterInitializingIndexBuild");
-        const awaitCreateIndex = IndexBuildTest.startIndexBuild(this.conn, this.coll.getFullName(), {a: 1});
+        const awaitCreateIndex = IndexBuildTest.startIndexBuild(
+            this.conn,
+            this.coll.getFullName(),
+            {a: 1},
+        );
 
         fp.wait();
         assert.commandWorked(this.coll.dropIndex({a: 1}));
@@ -102,7 +194,11 @@ describe("lastCommittedMillis", function () {
 
         // Hang index build before completion to extend duration.
         const fp = configureFailPoint(this.primary, "hangIndexBuildBeforeCommit");
-        const awaitCreateIndex = IndexBuildTest.startIndexBuild(this.primary, this.coll.getFullName(), {a: 1});
+        const awaitCreateIndex = IndexBuildTest.startIndexBuild(
+            this.primary,
+            this.coll.getFullName(),
+            {a: 1},
+        );
 
         // Initiate the failpoint and then sleep for 1000ms to ensure duration >= 1000ms.
         fp.wait();
@@ -132,7 +228,9 @@ describe("lastCommittedMillis", function () {
         fp.wait();
 
         const buildUUID = extractUUIDFromObject(
-            IndexBuildTest.assertIndexes(this.coll, 2, ["_id_"], ["a_1"], {includeBuildUUIDs: true})["a_1"].buildUUID,
+            IndexBuildTest.assertIndexes(this.coll, 2, ["_id_"], ["a_1"], {
+                includeBuildUUIDs: true,
+            })["a_1"].buildUUID,
         );
 
         // Restart to trigger resume.
@@ -169,12 +267,19 @@ describe("lastCommittedMillis", function () {
         fp.wait();
 
         const buildUUID = extractUUIDFromObject(
-            IndexBuildTest.assertIndexes(this.coll, 2, ["_id_"], ["a_1"], {includeBuildUUIDs: true})["a_1"].buildUUID,
+            IndexBuildTest.assertIndexes(this.coll, 2, ["_id_"], ["a_1"], {
+                includeBuildUUIDs: true,
+            })["a_1"].buildUUID,
         );
 
         // Kill process to require index build to start over. The `forRestart` flag is required to
         // preserve state between stop and start.
-        this.rst.stop(0, 9 /* signal */, {allowedExitCode: MongoRunner.EXIT_SIGKILL}, {forRestart: true});
+        this.rst.stop(
+            0,
+            9 /* signal */,
+            {allowedExitCode: MongoRunner.EXIT_SIGKILL},
+            {forRestart: true},
+        );
 
         // Wait for the parallel shell to exit.
         awaitCreateIndex({checkExitStatus: false});

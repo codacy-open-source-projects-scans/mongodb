@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 
@@ -36,6 +10,7 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_set.h>
@@ -60,7 +35,7 @@ uint8_t numDigits(uint32_t num) {
 Bucket::Bucket(TrackingContexts& trackingContexts,
                const BucketId& bId,
                BucketKey k,
-               StringData tf,
+               std::string_view tf,
                Date_t mt,
                BucketStateRegistry& bsr)
     : minTime(mt),
@@ -92,7 +67,7 @@ bool allCommitted(const Bucket& bucket) {
 
 bool schemaIncompatible(Bucket& bucket,
                         const BSONObj& input,
-                        boost::optional<StringData> metaField,
+                        boost::optional<std::string_view> metaField,
                         const StringDataComparator* comparator) {
     auto result = bucket.schema.update(input, metaField, comparator);
     return (result == Schema::UpdateStatus::Failed);
@@ -101,7 +76,7 @@ bool schemaIncompatible(Bucket& bucket,
 void calculateBucketFieldsAndSizeChange(TrackingContexts& trackingContexts,
                                         const Bucket& bucket,
                                         const BSONObj& doc,
-                                        boost::optional<StringData> metaField,
+                                        boost::optional<std::string_view> metaField,
                                         Bucket::NewFieldNames& newFieldNamesToBeInserted,
                                         Sizes& sizesToBeAdded) {
     // BSON size for an object with an empty object field where field name is empty string.
@@ -169,19 +144,19 @@ void calculateBucketFieldsAndSizeChange(TrackingContexts& trackingContexts,
 std::shared_ptr<WriteBatch> activeBatch(TrackingContexts& trackingContexts,
                                         Bucket& bucket,
                                         OperationId opId,
-                                        std::uint8_t stripe,
                                         ExecutionStatsController& stats) {
     auto it = bucket.batches.find(opId);
     if (it == bucket.batches.end()) {
         it = bucket.batches
-                 .try_emplace(opId,
-                              std::make_shared<WriteBatch>(
-                                  trackingContexts,
-                                  bucket.bucketId,
-                                  bucket.key,
-                                  opId,
-                                  stats,
-                                  StringData{bucket.timeField.data(), bucket.timeField.size()}))
+                 .try_emplace(
+                     opId,
+                     std::make_shared<WriteBatch>(
+                         trackingContexts,
+                         bucket.bucketId,
+                         bucket.key,
+                         opId,
+                         stats,
+                         std::string_view{bucket.timeField.data(), bucket.timeField.size()}))
                  .first;
     }
     return it->second;

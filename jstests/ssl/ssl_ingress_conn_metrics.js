@@ -4,6 +4,7 @@
  * @tags: [requires_fcv_63]
  */
 import {detectDefaultTLSProtocol, determineSSLProvider} from "jstests/ssl/libs/ssl_helpers.js";
+import {windowsSupportsTLS13} from "jstests/libs/server_security/os_helpers.js";
 
 // Short circuits for system configurations that do not support this setParameter, (i.e. OpenSSL
 // versions that don't support TLS 1.3)
@@ -56,7 +57,9 @@ let runTest = (connectionHealthLoggingOn) => {
     jsTestLog(`totalTLSHandshakeTimeMillis: ${initialHandshakeTimeMillis}`);
 
     if (connectionHealthLoggingOn) {
-        checkLog.containsJson(mongod, 6723804, {durationMillis: Number(initialHandshakeTimeMillis)});
+        checkLog.containsJson(mongod, 6723804, {
+            durationMillis: Number(initialHandshakeTimeMillis),
+        });
     } else {
         assert.eq(checkLog.checkContainsOnceJson(mongod, 6723804, {}), false);
     }
@@ -79,9 +82,11 @@ let runTest = (connectionHealthLoggingOn) => {
             break;
         case "windows":
             logId = 6723802;
-            // This cipher is chosen to represent the cipher negotiated by Windows Server 2019
-            // by default.
-            cipherSuite = "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384";
+            // On Windows Server 2022+ with TLS 1.3, the default negotiated cipher is a TLS 1.3
+            // suite. On older Windows (e.g. Server 2019), TLS 1.2 is the default.
+            cipherSuite = windowsSupportsTLS13()
+                ? "TLS_AES_256_GCM_SHA384"
+                : "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384";
             break;
         case "apple":
             logId = 6723803;

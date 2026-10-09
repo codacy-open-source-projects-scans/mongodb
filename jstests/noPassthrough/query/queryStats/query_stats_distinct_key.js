@@ -4,7 +4,11 @@
  *
  * @tags: [requires_fcv_81]
  */
-import {runCommandAndValidateQueryStats, withQueryStatsEnabled} from "jstests/libs/query/query_stats_utils.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {
+    runCommandAndValidateQueryStats,
+    withQueryStatsEnabled,
+} from "jstests/libs/query/query_stats_utils.js";
 
 const collName = jsTestName();
 
@@ -54,12 +58,20 @@ withQueryStatsEnabled(collName, (coll) => {
     // Have to create an index for hint not to fail.
     assert.commandWorked(coll.createIndex({v: 1}));
 
+    // The router always records the resolved readConcern in the key, including the implicit
+    // default when the client didn't supply one; mongod only records readConcern when the
+    // client supplies one explicitly, so it's absent from the key for this no-readConcern
+    // command.
+    const requiredKeyFields = FixtureHelpers.isMongos(coll.getDB())
+        ? [...distinctKeyFieldsRequired, "readConcern"]
+        : distinctKeyFieldsRequired;
+
     runCommandAndValidateQueryStats({
         coll: coll,
         commandName: "distinct",
         commandObj: distinctCommandObjRequired,
         shapeFields: queryShapeDistinctFieldsRequired,
-        keyFields: distinctKeyFieldsRequired,
+        keyFields: requiredKeyFields,
     });
 
     runCommandAndValidateQueryStats({

@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -45,7 +18,6 @@
 #include "mongo/db/exec/sbe/stages/ix_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
-#include "mongo/db/exec/sbe/stages/makeobj.h"
 #include "mongo/db/exec/sbe/stages/merge_join.h"
 #include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
@@ -66,6 +38,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -175,6 +148,7 @@ TEST_F(PlanSizeTest, HashJoin) {
                                       mockSV(),
                                       makeSV(),
                                       generateSlotId(),
+                                      true /* allowDiskUse */,
                                       nullptr /* yieldPolicy */,
                                       kEmptyPlanNodeId,
                                       boost::none);
@@ -185,7 +159,7 @@ TEST_F(PlanSizeTest, SimpleIndexScanStage) {
     auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
     auto stage = makeS<SimpleIndexScanStage>(collUuid,
                                              DatabaseName(),
-                                             StringData(),
+                                             std::string_view(),
                                              true,
                                              generateSlotId(),
                                              generateSlotId(),
@@ -209,7 +183,7 @@ TEST_F(PlanSizeTest, GenericIndexScanStage) {
                                        Ordering::allAscending()};
     auto stage = makeS<GenericIndexScanStage>(collUuid,
                                               DatabaseName(),
-                                              StringData(),
+                                              std::string_view(),
                                               std::move(params),
                                               generateSlotId(),
                                               generateSlotId(),
@@ -233,20 +207,6 @@ TEST_F(PlanSizeTest, LimitSkip) {
 TEST_F(PlanSizeTest, LoopJoin) {
     auto stage =
         makeS<LoopJoinStage>(mockS(), mockS(), makeSV(), makeSV(), nullptr, kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, MakeObj) {
-    auto stage = makeS<MakeObjStage>(mockS(),
-                                     generateSlotId(),
-                                     generateSlotId(),
-                                     MakeObjFieldBehavior::keep,
-                                     std::vector<std::string>(),
-                                     std::vector<std::string>(),
-                                     makeSV(),
-                                     true,
-                                     false,
-                                     kEmptyPlanNodeId);
     assertPlanSize(*stage);
 }
 

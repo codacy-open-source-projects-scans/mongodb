@@ -9,7 +9,8 @@ import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 MongoRunner.validateCollectionsCallback = function (port, options) {
     options = options || {};
-    const CommandSequenceWithRetriesImpl = options.CommandSequenceWithRetries || CommandSequenceWithRetries;
+    const CommandSequenceWithRetriesImpl =
+        options.CommandSequenceWithRetries || CommandSequenceWithRetries;
     const validateCollectionsImpl = options.validateCollections || validateCollections;
 
     if (jsTest.options().skipCollectionAndIndexValidation) {
@@ -41,7 +42,9 @@ MongoRunner.validateCollectionsCallback = function (port, options) {
             } else if (!res.ismaster && !res.secondary) {
                 return {
                     shouldStop: true,
-                    reason: "not running validate since mongod isn't in the PRIMARY" + " or SECONDARY states",
+                    reason:
+                        "not running validate since mongod isn't in the PRIMARY" +
+                        " or SECONDARY states",
                 };
             }
         })
@@ -52,7 +55,10 @@ MongoRunner.validateCollectionsCallback = function (port, options) {
         })
         .then("best effort to step down node forever", function (conn) {
             // TODO(SERVER-112500): Remove this check.
-            if (TestData.doesNotSupportGracefulStepdown) {
+            if (
+                TestData.doesNotSupportGracefulPlannedStepdown ||
+                TestData.doesNotSupportGracefulUnplannedStepdown
+            ) {
                 jsTest.log.info("Skipping stepdown as it is not supported in this test");
                 return true;
             }
@@ -104,7 +110,9 @@ MongoRunner.validateCollectionsCallback = function (port, options) {
                         );
                         return false;
                     },
-                    "Timed out running 'replSetStepDown' and 'replSetFreeze' node in " + "port " + conn.port,
+                    "Timed out running 'replSetStepDown' and 'replSetFreeze' node in " +
+                        "port " +
+                        conn.port,
                 );
             }
         })
@@ -115,7 +123,10 @@ MongoRunner.validateCollectionsCallback = function (port, options) {
             const cmdObj = multitenancy ? {listDatabasesForAllTenants: 1} : {listDatabases: 1};
             const res = conn.adminCommand(cmdObj);
             if (!res.ok) {
-                assert.commandFailedWithCode(res, [ErrorCodes.Unauthorized, ErrorCodes.NotPrimaryOrSecondary]);
+                assert.commandFailedWithCode(res, [
+                    ErrorCodes.Unauthorized,
+                    ErrorCodes.NotPrimaryOrSecondary,
+                ]);
                 return {shouldStop: true, reason: "cannot run listDatabases"};
             }
             assert.commandWorked(res);
@@ -138,7 +149,8 @@ MongoRunner.validateCollectionsCallback = function (port, options) {
             const validateOptions = {
                 full: true,
                 enforceFastCount: true,
-                enforceFastSize: !TestData.allowUncleanShutdowns && TestData.enforceFastSizeOnValidate,
+                enforceFastSize:
+                    !TestData.allowUncleanShutdowns && TestData.enforceFastSizeOnValidate,
                 checkBSONConformance: true,
             };
             // TODO (SERVER-24266): Once fast counts are tolerant to unclean shutdowns, remove the

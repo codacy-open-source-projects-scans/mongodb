@@ -11,11 +11,15 @@ import {
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 const rst = new ReplSetTest({
-    nodes: {n1: {binVersion: "last-lts"}, n2: {binVersion: "last-lts"}, n3: {binVersion: "last-lts"}},
+    nodes: {
+        n1: {binVersion: "last-lts"},
+        n2: {binVersion: "last-lts"},
+        n3: {binVersion: "last-lts"},
+    },
 });
 
 // Turn on the collecting of query stats metrics.
-rst.startSet(getQueryStatsServerParameters());
+rst.startSet({setParameter: {internalQueryStatsSampleRate: 1}});
 rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 let conn = rst.getPrimary();

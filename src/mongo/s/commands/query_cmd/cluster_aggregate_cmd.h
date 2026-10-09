@@ -1,47 +1,26 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/change_stream_metrics_util.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/extension_metrics.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/query_memory_load_shedding.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/router_role/cluster_commands_helpers.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
 #include "mongo/util/modules.h"
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Implements the cluster aggregate command on both mongos (router) and shard servers.
@@ -74,6 +53,10 @@ public:
         return Impl::getApiVersions();
     }
 
+    bool supportsQuerySettings() const override {
+        return true;
+    }
+
     class Invocation final : public TC::MinimalInvocationBase {
         using TC::MinimalInvocationBase::MinimalInvocationBase;
         using TC::MinimalInvocationBase::request;
@@ -84,15 +67,12 @@ public:
             : TC::MinimalInvocationBase(opCtx, cmd, opMsgRequest),
               _extensionMetrics(static_cast<const ClusterAggregateCommandBase*>(cmd)
                                     ->getExtensionMetricsAllocation()),
-              // Create IFRContext early to ensure consistent flag values throughout the operation,
-              // including retries on view errors. Unlike mongod, mongos receives requests directly
-              // from clients (which cannot include ifrFlags), so we always create an empty context
-              // here.
-              _ifrContext(std::make_shared<IncrementalFeatureRolloutContext>()),
-              _liteParsedPipeline(
-                  request(),
-                  false /* isRunningAgainstView_ForHybridSearch */,
-                  {.ifrContext = _ifrContext, .extensionMetrics = &_extensionMetrics}),
+              _ifrContext(IncrementalFeatureRolloutContext::get(opCtx)),
+              _liteParsedPipeline(request(),
+                                  false /* isRunningAgainstView_ForHybridSearch */,
+                                  {.ifrContext = _ifrContext,
+                                   .opCtx = opCtx,
+                                   .extensionMetrics = &_extensionMetrics}),
               _privileges(uassertStatusOK(
                   auth::getPrivilegesForAggregate(opCtx,
                                                   AuthorizationSession::get(opCtx->getClient()),
@@ -108,6 +88,10 @@ public:
             // Only checks for the last stage since currently write stages are only allowed to be at
             // the end of the pipeline.
             return !_liteParsedPipeline.endsWithWriteStage();
+        }
+
+        bool shouldBypassQuerySettingsRejection() const override {
+            return _liteParsedPipeline.shouldBypassQuerySettingsRejection();
         }
 
     private:
@@ -133,6 +117,8 @@ public:
                     opCtx, unparsedRequest().body, *pipelineForLog);
             }
 
+            setReadWriteConcern(opCtx, request(), true /* setRC */, !verbosity /* setWC */);
+
             const auto& nss = ns();
             uassertStatusOK(ClusterAggregate::runAggregate(opCtx,
                                                            ClusterAggregate::Namespaces{nss, nss},
@@ -141,22 +127,29 @@ public:
                                                            _privileges,
                                                            verbosity,
                                                            result,
-                                                           "ClusterAggregate::runAggregate"_sd,
-                                                           _ifrContext));
+                                                           "ClusterAggregate::runAggregate"sv));
             _extensionMetrics.markSuccess();
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
-            const auto& body = unparsedRequest().body;
-            CommandHelpers::handleMarkKillOnClientDisconnect(opCtx,
-                                                             !Pipeline::aggHasWriteStage(body));
-            uassertNoQuerySettings();
+            globalOpCounters().gotAggregate();
 
-            // Run aggregate-specific semantic validation beyond what the IDL-parsing provides. We
-            // pass boost::none as explainVerbosity because 'validate()' interprets a non-none
-            // explainVerbosity as a top-level explain.
-            // TODO SERVER-119402: Change explainVerbosity parameter to bool.
-            aggregation_request_helper::validate(request(), body, ns(), boost::none);
+            if (_liteParsedPipeline.hasChangeStream()) {
+                change_stream::recordCursorOptionMetrics(request().getCursor().getBatchSize(),
+                                                         request().getMaxTimeMS());
+            }
+
+            const auto& body = unparsedRequest().body;
+            const bool hasWriteStage = Pipeline::aggHasWriteStage(body);
+            CommandHelpers::handleMarkKillOnClientDisconnect(opCtx, !hasWriteStage);
+
+            // Opt in to query-memory load shedding for read-only aggregations.
+            if (!hasWriteStage) {
+                markOperationQueryMemorySheddingEligible(opCtx);
+            }
+
+            // Run aggregate-specific semantic validation beyond what the IDL-parsing provides.
+            aggregation_request_helper::validate(request(), body, ns(), opCtx->getClient());
 
             Impl::checkCanRunHere(opCtx);
 
@@ -172,18 +165,18 @@ public:
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
             Impl::checkCanExplainHere(opCtx);
-            uassertNoQuerySettings();
 
             // Mark this request as 'explain' so that downstream components such as query stats key
             // construction can see it.
             request().setExplain(true);
 
-            // Run aggregate-specific semantic validation beyond what the IDL-parsing provides. We
-            // pass boost::none as explainVerbosity because 'validate()' interprets a non-none
-            // explainVerbosity as a top-level explain.
-            // TODO SERVER-119402: Change explainVerbosity parameter to bool.
+            uassert(ErrorCodes::FailedToParse,
+                    "The 'explain' option is illegal when an explain verbosity is also provided",
+                    !unparsedRequest().body.hasField(AggregateCommandRequest::kExplainFieldName));
+
+            // Run aggregate-specific semantic validation beyond what the IDL-parsing provides.
             aggregation_request_helper::validate(
-                request(), unparsedRequest().body, ns(), verbosity);
+                request(), unparsedRequest().body, ns(), opCtx->getClient());
 
             auto bodyBuilder = result->getBodyBuilder();
             _runAggCommand(opCtx, &bodyBuilder, verbosity);
@@ -191,16 +184,6 @@ public:
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
             Impl::doCheckAuthorization(opCtx, unparsedRequest(), _privileges);
-        }
-
-        // TODO SERVER-119513: Remove once aggregation_request_helper::validate() handles this
-        // check.
-        void uassertNoQuerySettings() const {
-            // Forbid users from passing 'querySettings' explicitly unless the feature flag is on.
-            uassert(7708000,
-                    "BSON field 'querySettings' is an unknown field",
-                    !request().getQuerySettings().has_value() ||
-                        feature_flags::gFeatureFlagAllowUserFacingQuerySettings.isEnabled());
         }
 
         NamespaceString ns() const override {
@@ -236,15 +219,11 @@ public:
     }
 
     /**
-     * A pipeline/aggregation command does not increment the command counter, but rather increments
-     * the query counter.
+     * Previously counted as a query (opcounters.queries). As of SERVER-123987, aggregate has its
+     * own dedicated counter (opcounters.aggregates), incremented directly in run().
      */
     bool shouldAffectCommandCounter() const final {
         return false;
-    }
-
-    bool shouldAffectQueryCounter() const final {
-        return true;
     }
 
     bool adminOnly() const override {

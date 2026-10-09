@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This module describes free functions for logging various operations of interest to a
@@ -36,7 +10,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -59,6 +32,7 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -76,14 +50,13 @@ class OperationContext;
 
 class OpObserverRegistry;
 class ServiceContext;
-class StringData;
 class UserName;
 
 namespace mutablebson {
 class Document;
 }  // namespace mutablebson
 
-namespace MONGO_MOD_PUBLIC audit {
+namespace [[MONGO_MOD_PUBLIC]] audit {
 
 // AuditManager hooks.
 extern std::function<void(OperationContext*)> initializeManager;
@@ -94,12 +67,12 @@ extern std::function<void()> shutdownSynchronizeJob;
 /**
  * Narrow API for the parts of mongo::Command used by the audit library.
  */
-class MONGO_MOD_OPEN CommandInterface {
+class [[MONGO_MOD_OPEN]] CommandInterface {
 public:
     virtual ~CommandInterface() = default;
-    virtual std::set<StringData> sensitiveFieldNames() const = 0;
+    virtual std::set<std::string_view> sensitiveFieldNames() const = 0;
     virtual void snipForLogging(mutablebson::Document* cmdObj) const = 0;
-    virtual StringData getName() const = 0;
+    virtual std::string_view getName() const = 0;
     virtual NamespaceString ns() const = 0;
     virtual bool redactArgs() const = 0;
 };
@@ -118,13 +91,13 @@ class AuthenticateEvent {
 public:
     using Appender = unique_function<void(BSONObjBuilder*)>;
 
-    AuthenticateEvent(StringData mechanism,
+    AuthenticateEvent(std::string_view mechanism,
                       const UserName& user,
                       Appender appender,
                       ErrorCodes::Error result)
         : _mechanism(mechanism), _user(user), _appender(std::move(appender)), _result(result) {}
 
-    StringData getMechanism() const {
+    std::string_view getMechanism() const {
         return _mechanism;
     }
 
@@ -141,7 +114,7 @@ public:
     }
 
 private:
-    StringData _mechanism;
+    std::string_view _mechanism;
     UserName _user;
 
     Appender _appender;
@@ -288,7 +261,7 @@ void logReplSetReconfig(Client* client, const BSONObj* oldConfig, const BSONObj*
 /**
  * Logs the result of an ApplicationMessage command.
  */
-void logApplicationMessage(Client* client, StringData msg);
+void logApplicationMessage(Client* client, std::string_view msg);
 
 /**
  * Logs the options associated with a startup event.
@@ -304,7 +277,7 @@ void logShutdown(Client* client);
  * Logs the users authenticated to a session before and after a logout command.
  */
 void logLogout(Client* client,
-               StringData reason,
+               std::string_view reason,
                const BSONArray& initialUsers,
                const BSONArray& updatedUsers,
                const boost::optional<Date_t>& loginTime);
@@ -314,9 +287,9 @@ void logLogout(Client* client,
  */
 void logCreateIndex(Client* client,
                     const BSONObj* indexSpec,
-                    StringData indexname,
+                    std::string_view indexname,
                     const NamespaceString& nsname,
-                    StringData indexBuildState,
+                    std::string_view indexBuildState,
                     ErrorCodes::Error result);
 
 /**
@@ -347,7 +320,7 @@ void logCreateDatabase(Client* client, const DatabaseName& dbname);
 /**
  * Logs the result of a dropIndex command.
  */
-void logDropIndex(Client* client, StringData indexname, const NamespaceString& nsname);
+void logDropIndex(Client* client, std::string_view indexname, const NamespaceString& nsname);
 
 /**
  * Logs the result of a dropCollection command on a collection.
@@ -378,17 +351,17 @@ void logRenameCollection(Client* client,
 /**
  * Logs the result of a enableSharding command.
  */
-void logEnableSharding(Client* client, StringData dbname);
+void logEnableSharding(Client* client, std::string_view dbname);
 
 /**
  * Logs the result of a addShard command.
  */
-void logAddShard(Client* client, StringData name, const std::string& servers);
+void logAddShard(Client* client, std::string_view name, const std::string& servers);
 
 /**
  * Logs the result of a removeShard command.
  */
-void logRemoveShard(Client* client, StringData shardname);
+void logRemoveShard(Client* client, std::string_view shardname);
 
 /**
  * Logs the result of a shardCollection command.
@@ -454,5 +427,5 @@ void logRotateLog(Client* client,
                   const std::vector<Status>& errors,
                   const std::string& suffix);
 
-}  // namespace MONGO_MOD_PUBLIC audit
+}  // namespace audit
 }  // namespace mongo

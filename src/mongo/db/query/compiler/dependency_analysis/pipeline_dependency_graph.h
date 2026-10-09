@@ -1,51 +1,41 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 
-#include "mongo/base/string_data.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/type_system/type.h"
 #include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 
+#include <boost/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::pipeline::dependency_graph {
 
-using PathRef = StringData;
+/**
+ * A dot-separated field path. Every component is interpreted as a field name and never as an
+ * array index.
+ */
+using PathRef = std::string_view;
 
-using CanPathBeArray = std::function<bool(StringData)>;
+/**
+ * Callback used to query whether a path from the input of the pipeline (i.e. the base collection)
+ * may resolve to an array.
+ */
+using CanPathBeArray = std::function<bool(std::string_view)>;
 
-bool defaultCanPathBeArray(StringData path);
+/**
+ * Always returns true (any path may be an array).
+ */
+bool defaultCanPathBeArray(std::string_view path);
 
 /**
  * Result of looking up which stage last declared or modified a field path.
@@ -58,6 +48,75 @@ struct DeclaringStageResult {
 
     // True when the declaring stage was resolved inside a sub-pipeline (e.g. $lookup, $unionWith).
     bool fromSubpipeline = false;
+};
+
+/**
+ * A "dead" field detected by the aliveness analysis, i.e. a field path that was introduced by a
+ * pipeline stage but whose value is never used by any downstream stage and does not appear
+ * in the pipeline's final output.
+ */
+struct DeadField {
+    /// The stage which introduced this path.
+    boost::intrusive_ptr<mongo::DocumentSource> stage;
+    /// The field path that was introduced.
+    FieldPath path;
+};
+
+/**
+ * Classifies where a field path came from, resolved by a single hop (see resolveFieldOrigin).
+ */
+enum class FieldOriginKind : uint8_t {
+    /**
+     * The field path passed through unchanged from the pipeline input (the base document).
+     * The reported input path is the same as the queried path.
+     * Examples:
+     * 1. {$project: {a: 1}}
+     * 2. {$set: {b: 1}}
+     *    > the origin of 'a' is {kBaseDocument, inputField="a"}
+     */
+    kBaseDocument,
+    /**
+     * The field path is a value-preserving alias of another path (a "simple" rename). The aliased
+     * path is reported. Prefix-aliases are also applied.
+     * Examples:
+     * 1. {$set: {a: '$b'}}
+     *    > The origin of 'a' is {kAlias, inputField="b"}
+     *    > The origin of 'a.x' is {kAlias, inputField="b.x"}
+     *    > The origin of 'a.x.y' is {kAlias, inputField="b.x.y"}
+     * 2. {$set: {a: '$b.c'}} (requires canPathBeArray('b') == false to guard array traversal)
+     *    > The origin of 'a' is {kAlias, inputField="b.c"}
+     * 3. {$set: {'a.b': '$c'}} (requires canPathBeArray('a') == false to guard reshaping)
+     *    > The origin of 'a.b' is {kAlias, inputField="c"}
+     * If the requirements are not met, the origin kind is reported as kOther.
+     */
+    kAlias,
+    /**
+     * The field path is produced by a sub-pipeline (e.g. a $lookup "as" field). The path from the
+     * sub-pipeline is reported.
+     * Examples:
+     * 1. {$lookup: {as: 'a', pipeline: [{$set: 'b'}]}}, {$unwind: 'a'}
+     *    > The origin of 'a.b' is {kSubpipeline, inputField='b'}
+     *    > The origin of 'a.b.x' is {kSubpipeline, inputField='b.x'}
+     */
+    kSubpipeline,
+    /**
+     * The field path is modified in any other way which prevents further origin resolution.
+     * This could be because the path is removed, computed, reshaped, required array traversal of
+     * the source path and so on.
+     */
+    kOther,
+};
+
+/**
+ * Result of resolving a field path's origin.
+ */
+struct FieldOrigin {
+    /// The kind of operation which produced the path in the query.
+    FieldOriginKind kind;
+    /// The stage which modified the field. nullptr only for kBaseDocument.
+    boost::intrusive_ptr<mongo::DocumentSource> modifyingStage;
+    /// The prior path which produced the path in the query. none only for kOther.
+    boost::optional<std::string> inputField;
 };
 
 /**
@@ -82,51 +141,119 @@ public:
     DependencyGraph& operator=(DependencyGraph&&) noexcept;
 
     /**
-     * Return the stage which last modified the path visible from the given DocumentSource. If no
-     * DocumentSource is given, returns the stage which last modified the path in the whole
-     * pipeline. The stage must have either declared, modified or removed the path. If nullptr, the
-     * path is unmodified and assumed to originate from the pipeline input.
+     * Returns the stage within the pipeline represented by this DependencyGraph instance which last
+     * declared, modified or removed the path as seen at the input of 'stage'. If 'stage' is
+     * nullptr, returns the stage which last touched the path at the end of the pipeline. Returns
+     * nullptr when the path passes through unchanged from the pipeline input.
      *
-     * For example, the following stages all modify the path 'a'.
+     * For example, the following stages all modify the path 'a':
      * - {$set: {a: 1}}
      * - {$set: {a.b: 1}}
      * - {$project: {a: 0}}
      * - {$group: {_id: ...}}
-     */
-    boost::intrusive_ptr<mongo::DocumentSource> getDeclaringStage(DocumentSource* stage,
-                                                                  PathRef path) const;
-
-    /**
-     * Return the stage which last modified the path visible from the given DocumentSource along
-     * with all the intermediate stages that contain subpipelines. The stage must have either
-     * declared, modified or removed the path. If the stage is nullptr, the path is originating from
-     * the pipeline input.
      *
-     * When the path crosses into a sub-pipeline (e.g. "docs.x" through a $lookup), the result
-     * will have 'fromSubpipeline' set to true and 'srcStages' vector populated with pointers to the
-     * sequence of intermediate stages with subpipelines and the final declaring stage or nullptr
-     * (if it comes from the collection).
+     * Note: if this field was last modified by a stage with a sub-pipeline (e.g. $lookup), this
+     * does NOT recurse into subpipelines to report which specific subpipeline stage modified this
+     * field (if any). If we have a stage like:
+     *   {$lookup: {... as: "b", pipeline: [{$set: {x: 12}}]}}
+     * querying for field "b.x" after this stage will return the $lookup, NOT the $set.
      */
-    DeclaringStageResult getDeclaringStageIncludingSubpipelines(DocumentSource* stage,
-                                                                PathRef path) const;
+    boost::intrusive_ptr<mongo::DocumentSource> getPrevModifyingStage(const DocumentSource* stage,
+                                                                      PathRef path) const;
 
     /**
-     * Returns false if the path visible from the given DocumentSource can be assumed to not contain
-     * arrays. If nullptr, the path is assumed to originate from the pipeline input.
+     * Like getPrevModifyingStage, but additionally records the chain of intermediate sub-pipeline
+     * containing stages that the path crosses through (i.e. in the example above, will return a
+     * pointer to $set).
+     *
+     * When the path crosses into a sub-pipeline (e.g. "docs.x" through a $lookup), the result has
+     * 'fromSubpipeline' set to true and 'srcStages' populated with the chain of intermediate
+     * sub-pipeline containing stages followed by the final declaring stage (or nullptr if the path
+     * comes from the sub-pipeline's input).
      */
-    bool canPathBeArray(DocumentSource* stage, PathRef path) const;
+    DeclaringStageResult getPrevModifyingStageIncludingSubpipelines_forTest(
+        const DocumentSource* stage, PathRef path) const;
+
+    /**
+     * Returns false if the path as seen at the input of 'stage' can be proven to not be an array.
+     * Returns true otherwise. If 'stage' is nullptr, the path is evaluated as it appears at the end
+     * of the pipeline.
+     */
+    bool canPathBeArray(const DocumentSource* stage, PathRef path) const;
+
+    /**
+     * Returns the constant value of 'path' visible to 'stage' (i.e., as it appears in the input
+     * document to 'stage'), if statically known. If 'stage' is nullptr, returns the value visible
+     * at the end of the pipeline. Constants are not tracked for fields originating from the
+     * pipeline input.
+     *
+     * A `missing()` Value means the path is provably absent. Returns boost::none when the value is
+     * not statically known, which includes the case where resolving the path would have to
+     * traverse an array element.
+     */
+    boost::optional<Value> getConstant(const DocumentSource* stage, PathRef path) const;
+
+    /**
+     * Returns the result of getType(). Only used for testing.
+     */
+    type_system::Type getType_forTest(const DocumentSource* stage, PathRef path) const;
+
+    /**
+     * Returns the stages we run type inference on when getType() is called for the given stage and
+     * path.
+     */
+    std::vector<const DocumentSource*> getPossiblyNarrowingStages_forTest(
+        const DocumentSource* stage, PathRef path) const;
 
     /**
      * Returns the dependency graph for the sub-pipeline of the given stage (e.g. $lookup,
      * $unionWith), or nullptr if the stage has no sub-pipeline.
      */
-    const DependencyGraph* getSubpipelineGraph(DocumentSource* stage) const;
+    const DependencyGraph* getSubpipelineGraph(const DocumentSource* stage) const;
 
     /**
-     * Invalidate and recompute the subgraph starting from the earliest nodes which correspond to
-     * the stage pointed to by 'stageIt'.
+     * Returns the field path, visible at the input of 'stage', that is a value-preserving alias of
+     * the base-document (collection) field 'baseDocumentPath'. If 'stage' is nullptr, resolves at
+     * the end of the pipeline. Returns boost::none when no visible alias exists.
+     *
+     * Prefix aliases are resolved: querying 'b.x' returns 'a.x' for {$project: {a: '$b'}}.
+     * When several aliases reach the queried path, the one that yields the fewest visible path
+     * components is returned, breaking ties lexicographically.
+     *
+     * Examples:
+     * 1. {$project: {a: '$b'}}
+     *    getBaseDocumentFieldAlias(nullptr, "b") -> "a"
+     *    getBaseDocumentFieldAlias(nullptr, "b.x") -> "a.x"
+     *    getBaseDocumentFieldAlias(nullptr, "c") -> boost::none (unknown field)
+     * 2. {$set: {a: '$b'}}
+     *    getBaseDocumentFieldAlias(nullptr, "b") -> "a"
+     * 3. {$project: {'p.q': '$a', r: '$a.x', s: '$a.x'}}
+     *    getBaseDocumentFieldAlias(nullptr, "a.x") -> "r"
+     *    'p.q' resolves to 'p.q.x', which is longer than 'r' and 's', and 'r' wins.
      */
-    void recompute(boost::optional<DocumentSourceContainer::const_iterator> stageIt = {});
+    boost::optional<FieldPath> getBaseDocumentFieldAlias(const DocumentSource* stage,
+                                                         PathRef baseDocumentPath) const;
+
+    /**
+     * Like 'getBaseDocumentFieldAlias', but returns every aliasing path rather than the shortest.
+     */
+    OrderedPathSet getAllBaseDocumentFieldAliases_forTest(const DocumentSource* stage,
+                                                          PathRef baseDocumentPath) const;
+
+    /**
+     * Resolves 'path', as seen at the input of 'stage', back by a single hop toward its origin.
+     * If 'stage' is nullptr, the path is resolved as it appears at the end of the pipeline.
+     *
+     * See FieldOrigin for more information.
+     */
+    FieldOrigin resolveFieldOrigin(const DocumentSource* stage, PathRef path) const;
+
+    /**
+     * Invalidate and recompute the graph from the stage pointed to by 'stageIt' onwards. If
+     * 'stageIt' is not given, recomputes the entire graph from the beginning of the container. Only
+     * used for testing.
+     */
+    void recompute_forTest(boost::optional<DocumentSourceContainer::const_iterator> stageIt = {});
 
     /**
      * Resizes the graph so that it covers the stages in the range [container.begin(), newEndIt).
@@ -173,29 +300,61 @@ public:
      */
     void resize(DocumentSourceContainer::const_iterator newEndIt);
 
+    /**
+     * Returns the set of "dead" fields introduced by single-document transformation stages
+     * that are guaranteed to never affect the pipeline output. Deadness is transitive: a field
+     * whose only usages are themselves dead is also reported.
+     *
+     * TODO(SERVER-127212): also walk sub-pipelines and return their dead fields. For now,
+     * sub-pipelines are not analyzed; call getSubpipelineGraph(stage)->getDeadFields() to
+     * inspect a sub-pipeline.
+     */
+    std::vector<DeadField> getDeadFields() const;
+
+    /**
+     * Renders the graph as a string for debug and golden-test output.
+     */
     std::string toDebugString() const;
+
+    /**
+     * Renders the graph as BSON for debug and golden-test output.
+     */
     BSONObj toBSON() const;
 
 private:
+    /**
+     * Returns the type of the path at the input of 'stage'. If nothing can be said about the type,
+     * returns Type::any(). If 'stage' is nullptr, the path is evaluated as it appears at the end of
+     * the pipeline.
+     *
+     * The result is the type of the aggregation expression '$<path>'. This is not necessarily the
+     * same type the matcher sees for 'path', since the matcher's array traversal semantics are
+     * different in some cases.
+     */
+    type_system::Type getType(const DocumentSource* stage, PathRef path) const;
+
     class Impl;
     std::unique_ptr<Impl> _impl;
 };
 
 /**
- * Constructs the DependencyGraph and allows it to be invalidated and recomputed.
+ * Owns and lazily constructs the DependencyGraph for a pipeline and allows it to be invalidated and
+ * recomputed as the pipeline is rewritten.
  */
 class DependencyGraphContext {
 public:
     DependencyGraphContext(ExpressionContext& expCtx, DocumentSourceContainer& container);
 
     /**
-     * Get a dependency graph which is valid up to the given element.
+     * Returns a dependency graph that covers the stages from the beginning of the container up to
+     * and including 'maxStageIt'. If 'maxStageIt' is not given, covers the whole container.
      */
     const DependencyGraph& getGraph(
         boost::optional<DocumentSourceContainer::const_iterator> maxStageIt = {}) const;
 
     /**
-     * Report that the stages starting at 'startIt' may have changed.
+     * Report that the stages starting at 'startIt' may have changed. The graph will be recomputed
+     * for those stages on the next call to getGraph().
      */
     void invalidateFrom(DocumentSourceContainer::const_iterator startIt);
 

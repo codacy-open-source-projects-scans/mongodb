@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/session/logical_session_cache_impl.h"
@@ -221,6 +195,18 @@ Status LogicalSessionCacheImpl::_reap(Client* client) {
     // starved by admission control during periods of high load.
     admission::execution_control::ScopedTaskTypeNonDeprioritizable nonDeprioritizable(opCtx);
 
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
+        opCtx, AdmissionContext::Priority::kExempt);
+    // Only impose a deadline when we own the opCtx (background job).  If the opCtx was
+    // supplied by the caller (e.g. reapLogicalSessionCacheNow / refreshLogicalSessionCacheNow)
+    // we leave their deadline intact.  maxTimeMS in the command BSON cannot be used here
+    // because DBDirectClient rejects it; setting the deadline directly on the opCtx is the
+    // correct mechanism for the loopback path.
+    if (uniqueCtx && logicalSessionCacheJobTimeoutEnabled) {
+        opCtx->setDeadlineAfterNowBy(Milliseconds(logicalSessionRefreshMillis) * 9 / 10,
+                                     ErrorCodes::MaxTimeMSExpired);
+    }
+
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (replCoord && replCoord->getSettings().isReplSet() &&
         replCoord->getMemberState().arbiter()) {
@@ -298,6 +284,18 @@ Status LogicalSessionCacheImpl::_refresh(Client* client) {
     // Mark this operation as non-deprioritizable to prevent session refresh from being
     // starved by admission control during periods of high load.
     admission::execution_control::ScopedTaskTypeNonDeprioritizable nonDeprioritizable(opCtx);
+
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
+        opCtx, AdmissionContext::Priority::kExempt);
+    // Only impose a deadline when we own the opCtx (background job).  If the opCtx was
+    // supplied by the caller (e.g. reapLogicalSessionCacheNow / refreshLogicalSessionCacheNow)
+    // we leave their deadline intact.  maxTimeMS in the command BSON cannot be used here
+    // because DBDirectClient rejects it; setting the deadline directly on the opCtx is the
+    // correct mechanism for the loopback path.
+    if (uniqueCtx && logicalSessionCacheJobTimeoutEnabled) {
+        opCtx->setDeadlineAfterNowBy(Milliseconds(logicalSessionRefreshMillis) * 9 / 10,
+                                     ErrorCodes::MaxTimeMSExpired);
+    }
 
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     if (replCoord && replCoord->getSettings().isReplSet() &&
@@ -392,15 +390,24 @@ Status LogicalSessionCacheImpl::_refresh(Client* client) {
     {
         std::lock_guard<std::mutex> lk(_mutex);
 
-        // Store sessions that failed to update back in _activeSessions to be retried next time.
-        LogicalSessionIdSet failedLsids;
-        for (const auto& record : refreshRes.failedSessions) {
-            failedLsids.insert(record.getId());
-        }
+        // Store sessions that failed to update back in _activeSessions to be retried next time,
+        // unless the failure was specifically MaxTimeMSExpired (our own job deadline firing). In
+        // that case re-storing the backlog would just cause the next cycle to hit the same wall.
+        // For any other failure (network error, write concern timeout, etc.) we do re-store so
+        // those sessions are retried normally, regardless of whether the timeout is enabled.
+        const bool failedDueToJobTimeout = logicalSessionCacheJobTimeoutEnabled &&
+            !refreshRes.errors.empty() &&
+            refreshRes.errors[0].code() == ErrorCodes::MaxTimeMSExpired;
+        if (!failedDueToJobTimeout) {
+            LogicalSessionIdSet failedLsids;
+            for (const auto& record : refreshRes.failedSessions) {
+                failedLsids.insert(record.getId());
+            }
 
-        for (const auto& [lsid, record] : activeSessions) {
-            if (failedLsids.count(lsid) > 0) {
-                _activeSessions.emplace(lsid, record);
+            for (const auto& [lsid, record] : activeSessions) {
+                if (failedLsids.count(lsid) > 0) {
+                    _activeSessions.emplace(lsid, record);
+                }
             }
         }
 

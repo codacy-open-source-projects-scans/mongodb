@@ -38,7 +38,6 @@ let rs = new ReplSetTest({
             ingressConnectionEstablishmentBurstCapacitySecs: 1,
             ingressConnectionEstablishmentMaxQueueDepth: 0,
             ingressConnectionEstablishmentRateLimiterBypass: {ranges: [exemptIP]},
-            featureFlagRateLimitIngressConnectionEstablishment: true,
         },
     },
 });
@@ -60,7 +59,11 @@ rs.initiate();
         assert.neq(null, conn, "Client was unable to connect");
     }
 
-    assert.soon(() => getConnectionStats(rs.getPrimary())["establishmentRateLimit"]["exempted"] >= numConnections);
+    assert.soon(
+        () =>
+            getConnectionStats(rs.getPrimary())["establishmentRateLimit"]["exempted"] >=
+            numConnections,
+    );
 
     proxy_server.stop();
 }
@@ -93,12 +96,22 @@ rs.getPrimary().adminCommand({
         try {
             new Mongo(`mongodb://${nonExemptIP}:${ingressPort}`);
         } catch (e) {
-            return e.message.includes("Connection closed by peer");
+            // The rejected establishment is normally a graceful FIN ("Connection closed by peer"),
+            // but depending on socket timing/buffering the OS may deliver it as a reset or abort.
+            // Accept any of these, matching the sibling exemption tests.
+            return (
+                e.message.includes("Connection closed by peer") ||
+                e.message.includes("Connection reset by peer") ||
+                e.message.includes("established connection was aborted") ||
+                e.message.includes("Broken pipe")
+            );
         }
         return false;
     });
 
-    assert.soon(() => 1 == getConnectionStats(rs.getPrimary())["establishmentRateLimit"]["rejected"]);
+    assert.soon(
+        () => 1 == getConnectionStats(rs.getPrimary())["establishmentRateLimit"]["rejected"],
+    );
 
     proxy_server.stop();
 }

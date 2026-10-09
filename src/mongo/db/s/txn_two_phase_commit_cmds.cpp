@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
@@ -58,7 +32,6 @@
 #include "mongo/db/shard_role/shard_catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -82,6 +55,7 @@
 #include <utility>
 #include <vector>
 
+#include <boost/algorithm/string/join.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -94,6 +68,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterStartingCoordinateCommit);
 MONGO_FAIL_POINT_DEFINE(participantReturnNetworkErrorForPrepareAfterExecutingPrepareLogic);
+MONGO_FAIL_POINT_DEFINE(hangAfterFirstRecoveryCheckout);
 
 class PrepareTransactionCmd : public TypedCommand<PrepareTransactionCmd> {
 public:
@@ -157,31 +132,18 @@ public:
                         "sessionId"_attr = opCtx->getLogicalSessionId()->toBSON(),
                         "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter);
 
-            if (!feature_flags::gCreateCollectionInPreparedTransactions.isEnabled(
-                    VersionContext::getDecoration(opCtx),
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                        "Cannot create new collections inside distributed transactions",
-                        UncommittedCatalogUpdates::get(opCtx).isEmpty());
-            } else {
-                // TODO SERVER-81037: This can be removed whenever the catalog uses the new schema
-                // and we can rely on WT to detect these changes.
-                //
-                // We now verify that the created collections are not part of the latest catalog.
-                // That means that there is a prepare conflict and we should error.
-                auto latestCatalog = CollectionCatalog::latest(opCtx);
-                const auto& updates = UncommittedCatalogUpdates::get(opCtx);
-                for (const auto& update : updates.entries()) {
-                    if (update.action !=
-                        UncommittedCatalogUpdates::Entry::Action::kCreatedCollection) {
-                        continue;
-                    }
-                    // TODO SERVER-81937: Verify that the DDL Coordinator locks are acquired for all
-                    // uncommitted collection catalog entries.
-
-                    latestCatalog->ensureCollectionIsNew(opCtx, update.nss);
+            const auto& updates = UncommittedCatalogUpdates::get(opCtx);
+            std::vector<std::string> collectionsToCreate;
+            for (const auto& update : updates.entries()) {
+                if (update.action == UncommittedCatalogUpdates::Entry::Action::kCreatedCollection) {
+                    collectionsToCreate.push_back(update.nss.toStringForErrorMsg());
                 }
             }
+            std::string collectionsToCreateCSV = boost::algorithm::join(collectionsToCreate, ", ");
+            uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                    str::stream() << "Cannot create new collections: " << collectionsToCreateCSV
+                                  << " inside distributed transactions",
+                    UncommittedCatalogUpdates::get(opCtx).isEmpty());
 
             uassert(ErrorCodes::NoSuchTransaction,
                     "Transaction isn't in progress",
@@ -417,6 +379,11 @@ public:
 
             // Wait for the participant to exit prepare.
             participantExitPrepareFuture->get(opCtx);
+
+            if (MONGO_unlikely(hangAfterFirstRecoveryCheckout.shouldFail())) {
+                LOGV2(12558900, "Hit hangAfterFirstRecoveryCheckout failpoint");
+                hangAfterFirstRecoveryCheckout.pauseWhileSet(opCtx);
+            }
 
             {
                 auto sessionTxnState = mongoDSessionCatalog->checkOutSession(opCtx);

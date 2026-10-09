@@ -383,12 +383,9 @@ what C++ does.
 
 ### Strings
 
-- We do not use `std::string_view`. Use `StringData` from `base/string_data.h` instead. For
-  interoperability with functions that accept or return `std::string_view` (e.g. `std::string`), use
-  the pair of conversion functions `toStdStringViewForInterop` and `toStringDataForInterop`.
-
-- Working with `char*` strings can be notoriously error-prone. Convert such data to `StringData` or
-  `std::string` for safety, or use utilities in `util/str.h` for this sort of thing.
+- Working with `char*` strings can be notoriously error-prone. Convert such data to
+  `std::string_view` or `std::string` for safety, or use utilities in `util/str.h` for this sort of
+  thing.
 
 ### Performing String Formatting
 
@@ -441,12 +438,12 @@ void appendData(const std::string& tag, std::vector<MyType>& out) {
   ```
 
 - Do not use "using directives" (i.e. `using namespace foo;`) for arbitrary namespaces as a naming
-  shortcut. Some namespaces are designed to be used this way in restricted contexts, but still never
-  at namespace-scope in header files. These carefully curated namespaces contain only a few
-  definitions. Examples of these limited exceptional namespaces would include:
+  shortcut. Some namespaces are designed to be used this way in restricted contexts, but even these
+  are generally disallowed at namespace-scope in header files. These carefully curated namespaces
+  contain only a few definitions. Examples of these limited exceptional namespaces would include:
 
-  - The `std::literals`, `fmt::literals`, and similar namespaces that hold user-defined literal
-    operators. Using directives are necessary for importing user-defined literals.
+  - The `std::string_literals`, `fmt::literals`, and similar namespaces that hold user-defined
+    literal operators. Using directives are necessary for importing user-defined literals.
   - The `std::placeholders` namespace containing `_1`, `_2`, for use with the `std::bind` API (which
     we have banned anyway).
 
@@ -456,6 +453,21 @@ void appendData(const std::string& tag, std::vector<MyType>& out) {
   namespace bc = timeseries::bucket_catalog;
   namespace bfs = boost::filesystem;
   ```
+
+  - As controlled and specific exceptions, `namespace mongo` and nested namespaces within it may
+    contain _using directives_ for `std::string_literals` or `std::string_view_literals`, even in
+    headers. Example:
+
+    ```c++
+    // .h file
+    #include <string>
+    #include <string_view>
+    namespace mongo {
+    using namespace std::string_view_literals;
+    constexpr auto myGreeting = "hello"sv;
+    constexpr auto myBlob = "\x00\x01\x02\x03\x04"sv;
+    }  // namespace mongo
+    ```
 
 - No unnamed namespaces in headers at all. They can produce subtle correctness risks, particularly
   in the form of
@@ -834,37 +846,11 @@ newCode = `load("${overridesFile}"); (${jsCode})();`;
 
 - All new C++ files added to the MongoDB code base that will be upstreamed for public consumption
   (such as anything upstreamed to `mongodb/mongo`) should use the following copyright notice and
-  SSPL license language, substituting the current year for `YYYY` as appropriate:
+  SPDX license identifier:
 
 ```c++
-/**
- *    Copyright (C) YYYY-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 ```
 
 - Enterprise source code is not SSPL, and must bear a shorter copyright notice:

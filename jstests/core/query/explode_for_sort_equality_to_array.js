@@ -6,6 +6,7 @@
  * This test was originally designed to reproduce SERVER-75304.
  *
  * @tags: [
+ *   uses_explain,
  *   # explain does not support majority read concern
  *   assumes_read_concern_local,
  *   # Time series collections do not support indexing array values in measurement fields.
@@ -28,5 +29,9 @@ const explain = assert.commandWorked(
         .sort({num: 1})
         .explain("executionStats"),
 );
-assert.gt(getPlanStages(getWinningPlanFromExplain(explain.queryPlanner), "SORT_MERGE").length, 0, tojson(explain));
+assert.gt(
+    getPlanStages(getWinningPlanFromExplain(explain.queryPlanner), "SORT_MERGE").length,
+    0,
+    tojson(explain),
+);
 assert.eq(1, explain.executionStats.nReturned, tojson(explain));

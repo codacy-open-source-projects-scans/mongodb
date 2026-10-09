@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,6 +21,8 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/query_memory_load_shedding.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -84,7 +59,6 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/db_raii.h"
@@ -111,6 +85,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -122,6 +97,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 std::unique_ptr<CanonicalQuery> parseDistinctCmd(
     OperationContext* opCtx,
@@ -152,29 +128,26 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
         return shape_helpers::tryMakeShape<query_shape::DistinctCmdShape>(*parsedDistinct, expCtx);
     }};
     auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
-        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss); });
+        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape); });
 
-    // Perform the query settings lookup and attach it to 'expCtx'.
+    // Resolve the query settings for this operation.
     auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
-    auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
-        expCtx, queryShapeHash, nss, parsedDistinct->distinctCommandRequest->getQuerySettings());
-    expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+    auto& distinctReq = *parsedDistinct->distinctCommandRequest;
+    querySettingsService.initializeSettingsForQuery(
+        expCtx, queryShapeHash, distinctReq.getQuerySettings());
 
     // We do not collect queryStats on explain for distinct.
-    if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabledUseLastLTSFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-        !verbosity.has_value()) {
+    if (!verbosity.has_value()) {
         query_stats::registerRequest(opCtx, nss, [&]() {
             uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
             return std::make_unique<query_stats::DistinctKey>(
                 expCtx,
-                *parsedDistinct->distinctCommandRequest,
+                distinctReq,
                 std::move(deferredShape->getValue()),
                 collOrViewAcquisition.getCollectionType());
         });
 
-        if (parsedDistinct->distinctCommandRequest->getIncludeQueryStatsMetrics()) {
+        if (distinctReq.getIncludeQueryStatsMetrics()) {
             CurOp::get(opCtx)->debug().getQueryStatsInfo().metricsRequested = true;
         }
     }
@@ -326,6 +299,10 @@ public:
         return ReadWriteType::kRead;
     }
 
+    bool supportsQuerySettings() const override {
+        return true;
+    }
+
     std::size_t reserveBytesForReply() const override {
         return FindCommon::kInitReplyBufferSize;
     }
@@ -348,7 +325,7 @@ public:
             : MinimalInvocationBase(opCtx, cmd, opMsgRequest),
               _ns(request().getNamespaceOrUUID().isNamespaceString()
                       ? request().getNamespaceOrUUID().nss()
-                      : shard_role_nocheck::resolveNssWithoutAcquisition(
+                      : shard_role_nocheck::resolveNssWithoutAcquisitionAtLatest(
                             opCtx,
                             request().getNamespaceOrUUID().dbName(),
                             request().getNamespaceOrUUID().uuid())) {
@@ -403,7 +380,7 @@ public:
                 return;
             }
 
-            const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisition(
+            const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisitionAtLatest(
                 opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
             uassertStatusOK(auth::checkAuthForFind(authSession, resolvedNss, hasTerm));
         }
@@ -501,6 +478,7 @@ public:
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+            markOperationQueryMemorySheddingEligible(opCtx);
             auto distinctRequest = request();
 
             // Acquire locks and resolve possible UUID. The RAII object is optional, because in
@@ -606,6 +584,12 @@ public:
                     opCtx, std::move(canonicalQuery), boost::none /* verbosity */, reply);
                 return;
             }
+
+            // For the purposes of OpDebug's reporting, we only need 'collectionType' to distinguish
+            // between view/timeseries/collection. For view/timeseries, 'collectionType' will be set
+            // on the agg path taken above. In the normal path (i.e. here), we bypass the
+            // getCollectionType() call and hardcode "kCollection".
+            CurOp::get(opCtx)->debug().collectionType = query_shape::CollectionType::kCollection;
 
             // Create an RAII object that prints the collection's shard key in the case of a tassert
             // or crash.
@@ -725,7 +709,7 @@ public:
             if (!opCtx->inMultiDocumentTransaction() &&
                 repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime()) {
                 result.append(
-                    "atClusterTime"_sd,
+                    "atClusterTime"sv,
                     repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime()->asTimestamp());
             }
 
@@ -773,16 +757,22 @@ public:
             auto ownedQueryStatsKey = std::move(curOp->debug().getQueryStatsInfo().key);
             curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
 
+            // This aggregation was derived locally from the distinct, so any IFR flag kickback it
+            // raises has to be absorbed here rather than propagated to the router.
+            //
             // If running explain distinct as agg, then aggregate is executed without privilege
             // checks and without response formatting.
             if (verbosity) {
-                uassertStatusOK(runAggregate(opCtx,
-                                             distinctAggRequest,
-                                             {distinctAggRequest},
-                                             distinctAggRequest.toBSON(),
-                                             PrivilegeVector(),
-                                             verbosity,
-                                             replyBuilder));
+                retryOnLocalIFRFlagKickback(
+                    opCtx, distinctAggRequest, "explain distinct as aggregation", [&] {
+                        uassertStatusOK(runAggregate(opCtx,
+                                                     distinctAggRequest,
+                                                     {distinctAggRequest},
+                                                     distinctAggRequest.toBSON(),
+                                                     PrivilegeVector(),
+                                                     verbosity,
+                                                     replyBuilder));
+                    });
                 return;
             }
 
@@ -792,13 +782,15 @@ public:
                                                 distinctAggRequest.getNamespace(),
                                                 distinctAggRequest,
                                                 false /* isMongos */));
-            uassertStatusOK(runAggregate(opCtx,
-                                         distinctAggRequest,
-                                         {distinctAggRequest},
-                                         distinctAggRequest.toBSON(),
-                                         privileges,
-                                         verbosity,
-                                         replyBuilder));
+            retryOnLocalIFRFlagKickback(opCtx, distinctAggRequest, "distinct as aggregation", [&] {
+                uassertStatusOK(runAggregate(opCtx,
+                                             distinctAggRequest,
+                                             {distinctAggRequest},
+                                             distinctAggRequest.toBSON(),
+                                             privileges,
+                                             verbosity,
+                                             replyBuilder));
+            });
 
             // Copy the result from the aggregate command.
             auto resultBuilder = replyBuilder->getBodyBuilder();

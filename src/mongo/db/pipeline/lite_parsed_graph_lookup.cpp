@@ -1,46 +1,24 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lite_parsed_graph_lookup.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/namespace_string_util.h"
 #include "mongo/db/pipeline/document_source_graph_lookup_gen.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -67,7 +45,7 @@ NamespaceString parseFromAndResolveNamespace(const BSONElement& elem,
  * Extracts a string-typed field from the parsed IDL spec. 'elem' must be present (empty BSONElement
  * is not accepted).
  */
-std::string requireString(StringData fieldName, BSONElement elem) {
+std::string requireString(std::string_view fieldName, BSONElement elem) {
     uassert(12109311,
             str::stream() << "$graphLookup '" << fieldName << "' field must be a string, but found "
                           << typeName(elem.type()),
@@ -102,22 +80,25 @@ LiteParsedGraphLookUp::LiteParsedGraphLookUp(const BSONElement& spec,
                                              boost::optional<FieldPath> as,
                                              boost::optional<FieldPath> connectFromField,
                                              boost::optional<FieldPath> connectToField,
-                                             boost::optional<BSONElement> startWith,
+                                             boost::optional<BSONObj> startWith,
                                              boost::optional<BSONObj> additionalFilter,
                                              boost::optional<FieldPath> depthField,
-                                             boost::optional<long long> maxDepth)
-    // TODO SERVER-125119 $graphLookup does not yet accept a user-provided sub-pipeline, but it
-    // is modeled as a LiteParsedDocumentSourceNestedPipelines so that view definitions resolved
-    // from the foreign namespace can be attached as sub-pipelines during lite parsing.
+                                             boost::optional<long long> maxDepth,
+                                             const LiteParserOptions& options,
+                                             boost::optional<OwnedLiteParsedPipeline> fromPipeline)
     : LiteParsedDocumentSourceNestedPipelines(
-          spec, std::move(foreignNss), std::vector<LiteParsedPipeline>{}),
+          spec, options, std::move(foreignNss), std::vector<OwnedLiteParsedPipeline>{}),
       _as(std::move(as)),
       _connectFromField(std::move(connectFromField)),
       _connectToField(std::move(connectToField)),
-      _startWith(startWith),
+      _startWith(std::move(startWith)),
       _additionalFilter(std::move(additionalFilter)),
       _depthField(std::move(depthField)),
-      _maxDepth(maxDepth) {}
+      _maxDepth(maxDepth) {
+    if (fromPipeline) {
+        _pipelines.push_back(std::move(*fromPipeline));
+    }
+}
 
 std::unique_ptr<LiteParsedGraphLookUp> LiteParsedGraphLookUp::parse(
     const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
@@ -175,9 +156,22 @@ std::unique_ptr<LiteParsedGraphLookUp> LiteParsedGraphLookUp::parse(
         additionalFilter = elem.embeddedObject().getOwned();
     }
 
-    boost::optional<BSONElement> startWith;
+    boost::optional<BSONObj> startWith;
     if (const auto& sw = parsedSpec.getStartWith()) {
-        startWith = sw->getElement();
+        startWith = sw->getElement().wrap().getOwned();
+    }
+
+    // $_internalFromPipeline is an internal field set by mongos when dispatching to shards.
+    // Reject it from external clients.
+    boost::optional<OwnedLiteParsedPipeline> fromPipeline;
+    if (const auto& fromPipelineStages = parsedSpec.getInternalFromPipeline()) {
+        if (options.opCtx) {
+            assertAllowedInternalIfRequired(
+                options.opCtx,
+                DocumentSourceGraphLookUpSpec::kInternalFromPipelineFieldName,
+                AllowedWithClientType::kInternal);
+        }
+        fromPipeline.emplace(foreignNss, *fromPipelineStages, options);
     }
 
     return std::make_unique<LiteParsedGraphLookUp>(spec,
@@ -185,17 +179,19 @@ std::unique_ptr<LiteParsedGraphLookUp> LiteParsedGraphLookUp::parse(
                                                    std::move(as),
                                                    std::move(connectFromField),
                                                    std::move(connectToField),
-                                                   startWith,
+                                                   std::move(startWith),
                                                    std::move(additionalFilter),
                                                    std::move(depthField),
-                                                   maxDepth);
+                                                   maxDepth,
+                                                   options,
+                                                   std::move(fromPipeline));
 }
 
 PrivilegeVector LiteParsedGraphLookUp::requiredPrivileges(bool isMongos,
                                                           bool bypassDocumentValidation) const {
-    // TODO SERVER-125119 Once $graphLookup populates `_pipelines` (e.g. via view definition
-    // resolution), this must also account for the privileges required by each pipeline in
-    // `_pipelines` in addition to `_foreignNss`.
+    // find on the 'from' namespace is the correct and complete required privilege. MongoDB's view
+    // access control model gates access at the view boundary: find on the view is sufficient, and
+    // the view's underlying pipeline stages are checked at view creation time, not query time.
     tassert(12509600, "Expected foreign namespace to be set for $graphLookup", _foreignNss);
     return {Privilege(ResourcePattern::forExactNamespace(*_foreignNss), ActionType::find)};
 }
@@ -213,15 +209,24 @@ Status LiteParsedGraphLookUp::checkShardedForeignCollAllowed(
 }
 
 std::unique_ptr<StageParams> LiteParsedGraphLookUp::getStageParams() const {
+    boost::optional<OwnedLiteParsedPipeline> lpp;
+    if (!_pipelines.empty()) {
+        lpp.emplace(_pipelines[0]);
+    }
+    boost::optional<BSONElement> startWithElem;
+    if (_startWith) {
+        startWithElem = _startWith->firstElement();
+    }
     return std::make_unique<GraphLookUpStageParams>(*_foreignNss,
                                                     _as,
                                                     _connectFromField,
                                                     _connectToField,
-                                                    _startWith,
+                                                    startWithElem,
                                                     _additionalFilter,
                                                     _depthField,
                                                     _maxDepth,
-                                                    getOriginalBson());
+                                                    getOriginalBson(),
+                                                    std::move(lpp));
 }
 
 }  // namespace mongo

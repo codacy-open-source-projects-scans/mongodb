@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/expression_array.h"
 
@@ -46,13 +20,14 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DEATH_TEST_REGEX(ElemMatchObjectMatchExpressionDeathTest,
                  GetChildFailsIndexGreaterThanOne,
                  "Tripwire assertion.*6400204") {
     auto baseOperand = BSON("c" << 6);
-    auto eq = std::make_unique<EqualityMatchExpression>("c"_sd, baseOperand["c"]);
-    auto op = ElemMatchObjectMatchExpression{"a.b"_sd, std::move(eq)};
+    auto eq = std::make_unique<EqualityMatchExpression>("c"sv, baseOperand["c"]);
+    auto op = ElemMatchObjectMatchExpression{"a.b"sv, std::move(eq)};
 
     const size_t numChildren = 1;
     ASSERT_EQ(op.numChildren(), numChildren);
@@ -77,9 +52,9 @@ DEATH_TEST_REGEX(ElemMatchValueMatchExpressionDeathTest,
                  GetChildFailsOnIndexLargerThanChildSet,
                  "Tripwire assertion.*6400205") {
     auto baseOperand = BSON("$gt" << 6);
-    auto gt = std::make_unique<GTMatchExpression>(""_sd, baseOperand["$gt"]);
+    auto gt = std::make_unique<GTMatchExpression>(""sv, baseOperand["$gt"]);
     auto op =
-        ElemMatchValueMatchExpression{"a.b"_sd, std::unique_ptr<MatchExpression>{std::move(gt)}};
+        ElemMatchValueMatchExpression{"a.b"sv, std::unique_ptr<MatchExpression>{std::move(gt)}};
 
     const size_t numChildren = 1;
     ASSERT_EQ(op.numChildren(), numChildren);
@@ -88,8 +63,8 @@ DEATH_TEST_REGEX(ElemMatchValueMatchExpressionDeathTest,
 
 TEST(ElemMatchValueMatchExpression, IsReducedToAlwaysFalseIfContainsIt) {
     auto baseOperand = BSON("$gt" << 6);
-    auto gt = std::make_unique<GTMatchExpression>(""_sd, baseOperand["$gt"]);
-    auto expr = std::make_unique<ElemMatchValueMatchExpression>("a"_sd, std::move(gt));
+    auto gt = std::make_unique<GTMatchExpression>(""sv, baseOperand["$gt"]);
+    auto expr = std::make_unique<ElemMatchValueMatchExpression>("a"sv, std::move(gt));
     expr->add(std::make_unique<AlwaysFalseMatchExpression>());
     ASSERT_FALSE(expr->isTriviallyFalse());
     auto optimizedExpr = optimizeMatchExpression(std::move(expr), true);
@@ -111,9 +86,9 @@ TEST(ElemMatchValueMatchExpression, MatchesIndexKey) {
 */
 
 TEST(SizeMatchExpression, Equivalent) {
-    auto e1 = SizeMatchExpression{"a"_sd, 5};
-    auto e2 = SizeMatchExpression{"a"_sd, 6};
-    auto e3 = SizeMatchExpression{"v"_sd, 5};
+    auto e1 = SizeMatchExpression{"a"sv, 5};
+    auto e2 = SizeMatchExpression{"a"sv, 6};
+    auto e3 = SizeMatchExpression{"v"sv, 5};
 
     ASSERT(e1.equivalent(&e1));
     ASSERT(!e1.equivalent(&e2));
@@ -123,7 +98,7 @@ TEST(SizeMatchExpression, Equivalent) {
 DEATH_TEST_REGEX(SizeMatchExpressionDeathTest,
                  GetChildFailsIndexGreaterThanZero,
                  "Tripwire assertion.*6400206") {
-    auto e1 = SizeMatchExpression{"a"_sd, 5};
+    auto e1 = SizeMatchExpression{"a"sv, 5};
 
     const size_t numChildren = 0;
     ASSERT_EQ(e1.numChildren(), numChildren);

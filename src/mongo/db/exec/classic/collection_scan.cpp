@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/classic/collection_scan.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/admission/ticketing/admission_context.h"
@@ -42,6 +15,8 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/query/record_id_range.h"
+#include "mongo/db/query/record_id_range_list.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
@@ -63,13 +38,9 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-namespace {
 MONGO_FAIL_POINT_DEFINE(hangCollScanDoWork);
-}  // namespace
 
 namespace mongo {
-
-using std::unique_ptr;
 
 namespace {
 bool shouldIncludeStartRecord(const CollectionScanParams& params) {
@@ -83,6 +54,18 @@ const char* getStageName(const CollectionAcquisition& coll, const CollectionScan
         ? "CLUSTERED_IXSCAN"
         : "COLLSCAN";
 }
+
+void handleCollScanDoWorkFailpoint() {
+    if (auto fp = hangCollScanDoWork.scoped(); MONGO_unlikely(fp.isActive())) {
+        const BSONObj& data = fp.getData();
+        if (auto delay = data.getField("delay"); delay.isNumber()) {
+            sleepFor(Milliseconds(delay.numberInt()));
+        } else {
+            hangCollScanDoWork.pauseWhileSet();
+        }
+    }
+}
+
 }  // namespace
 
 
@@ -98,9 +81,30 @@ CollectionScan::CollectionScan(ExpressionContext* expCtx,
     const auto& collPtr = collection.getCollectionPtr();
     // Explain reports the direction of the collection scan.
     _specificStats.direction = params.direction;
-    _specificStats.minRecord = params.minRecord;
-    _specificStats.maxRecord = params.maxRecord;
     _specificStats.tailable = params.tailable;
+    // Mirror the bounds as a single-range RecordIdRangeList so explain output is uniform with
+    // MultiRangeClusteredScan. Inclusivity is expressed in min/max (value) order; for BACKWARD
+    // scans, the user-facing "start" is the max and "end" is the min, so the inclusivity flags
+    // get swapped accordingly.
+    if (params.minRecord || params.maxRecord) {
+        const bool startInclusive =
+            (params.boundInclusion ==
+                 CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords ||
+             params.boundInclusion ==
+                 CollectionScanParams::ScanBoundInclusion::kIncludeStartRecordOnly);
+        const bool endInclusive =
+            (params.boundInclusion ==
+                 CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords ||
+             params.boundInclusion ==
+                 CollectionScanParams::ScanBoundInclusion::kIncludeEndRecordOnly);
+        const bool minInclusive =
+            (params.direction == CollectionScanParams::FORWARD) ? startInclusive : endInclusive;
+        const bool maxInclusive =
+            (params.direction == CollectionScanParams::FORWARD) ? endInclusive : startInclusive;
+        RecordIdRange range;
+        range.intersectRange(params.minRecord, params.maxRecord, minInclusive, maxInclusive);
+        _specificStats.rangeList = RecordIdRangeList(std::move(range));
+    }
     if (params.minRecord || params.maxRecord) {
         // The 'minRecord' and 'maxRecord' parameters are used for a special optimization that
         // applies only to forwards scans of the oplog and scans on clustered collections.
@@ -183,7 +187,7 @@ BSONObj getFirstEntry(RecoveryUnit& ru, SeekableRecordCursor* newCursor) {
     newCursor->saveUnpositioned();
     newCursor->restore(ru);
     return entry;
-};
+}
 
 /**
  * Asserts that the timestamp has not already fallen off the oplog and then returns an unpositioned
@@ -243,9 +247,7 @@ void CollectionScan::initCursor(OperationContext* opCtx,
 }
 
 PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
-    if (MONGO_unlikely(hangCollScanDoWork.shouldFail())) {
-        hangCollScanDoWork.pauseWhileSet();
-    }
+    handleCollScanDoWorkFailpoint();
 
     if (_commonStats.isEOF) {
         _priority.reset();
@@ -302,6 +304,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                                                 << "tailable cursor position. "
                                                 << "Last seen record id: " << _lastSeenId);
                     }
+                    ++_specificStats.seeks;
                 }
 
                 if (_params.resumeScanPoint) {
@@ -330,10 +333,12 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                     // positioned on the recordId we want to return so we don't need to advance it
                     // again below. If tolerateKeyNotFound = false, we throw.
                     auto testRecord = _cursor->seekExact(recordIdToSeek);
+                    ++_specificStats.seeks;
                     if (!testRecord) {
                         if (resumeScanPoint.tolerateKeyNotFound) {
                             record = _cursor->seek(recordIdToSeek,
                                                    SeekableRecordCursor::BoundInclusion::kInclude);
+                            ++_specificStats.seeks;
                             return PlanStage::ADVANCED;
                         } else {
                             uasserted(
@@ -353,6 +358,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                                            shouldIncludeStartRecord(_params)
                                                ? SeekableRecordCursor::BoundInclusion::kInclude
                                                : SeekableRecordCursor::BoundInclusion::kExclude);
+                    ++_specificStats.seeks;
                     return PlanStage::ADVANCED;
                 } else if (_lastSeenId.isNull() &&
                            _params.direction == CollectionScanParams::BACKWARD &&
@@ -362,6 +368,7 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
                                            shouldIncludeStartRecord(_params)
                                                ? SeekableRecordCursor::BoundInclusion::kInclude
                                                : SeekableRecordCursor::BoundInclusion::kExclude);
+                    ++_specificStats.seeks;
                     return PlanStage::ADVANCED;
                 }
             }
@@ -411,19 +418,36 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
 }
 
 void CollectionScan::setLatestOplogEntryTimestamp(const Record& record) {
-    auto tsElem = record.data.toBson()[repl::OpTime::kTimestampFieldName];
-    uassert(ErrorCodes::Error(4382100),
-            str::stream() << "CollectionScan was asked to track latest operation time, "
-                             "but found a result without a valid 'ts' field: "
-                          << record.data.toBson().toString(),
-            tsElem.type() == BSONType::timestamp);
+    auto extractTimestampFromTsField = [&]() {
+        auto tsElem = record.data.toBson()[repl::OpTime::kTimestampFieldName];
+        uassert(ErrorCodes::Error(4382100),
+                str::stream() << "CollectionScan was asked to track latest operation time, "
+                                 "but found a result without a valid 'ts' field: "
+                              << record.data.toBson().toString(),
+                tsElem.type() == BSONType::timestamp);
+        return tsElem.timestamp();
+    };
+
+    const Timestamp ts = [&]() {
+        // For oplog records, the RecordId is the timestamp key, so the scan can avoid reparsing
+        // BSON just to read the 'ts' field.
+        if (record.id.isLong()) {
+            Timestamp tsFromId = Timestamp(static_cast<unsigned long long>(record.id.getLong()));
+            dassert(tsFromId == extractTimestampFromTsField());
+            return tsFromId;
+        }
+
+        // Fallback: extract timestamp from "ts" field of BSON record.
+        return extractTimestampFromTsField();
+    }();
+
     LOGV2_DEBUG(550450,
                 5,
                 "Setting _latestOplogEntryTimestamp to the max of the timestamp of the current "
                 "latest oplog entry and the timestamp of the current record",
                 "latestOplogEntryTimestamp"_attr = _latestOplogEntryTimestamp,
-                "currentRecordTimestamp"_attr = tsElem.timestamp());
-    _latestOplogEntryTimestamp = std::max(_latestOplogEntryTimestamp, tsElem.timestamp());
+                "currentRecordTimestamp"_attr = ts);
+    _latestOplogEntryTimestamp = std::max(_latestOplogEntryTimestamp, ts);
 }
 
 BSONObj CollectionScan::getPostBatchResumeToken() const {
@@ -474,26 +498,6 @@ bool pastEndOfRange(const CollectionScanParams& params, const WorkingSetMember& 
     }
 }
 
-bool beforeStartOfRange(const CollectionScanParams& params, const WorkingSetMember& member) {
-    if (params.direction == CollectionScanParams::FORWARD) {
-        // A forward scan begins with the minRecord when it is specified.
-        if (!params.minRecord) {
-            return false;
-        }
-
-        const auto& startRecord = params.minRecord->recordId();
-        return member.recordId < startRecord ||
-            (member.recordId == startRecord && !shouldIncludeStartRecord(params));
-    } else {
-        // A backward scan begins with the maxRecord when specified.
-        if (!params.maxRecord) {
-            return false;
-        }
-        const auto& startRecord = params.maxRecord->recordId();
-        return member.recordId > startRecord ||
-            (member.recordId == startRecord && !shouldIncludeStartRecord(params));
-    }
-}
 }  // namespace
 
 PlanStage::StageState CollectionScan::returnIfMatches(WorkingSetMember* member,
@@ -565,13 +569,14 @@ void CollectionScan::doReattachToOperationContext() {
         _cursor->reattachToOperationContext(opCtx());
 }
 
-unique_ptr<PlanStageStats> CollectionScan::getStats() {
+std::unique_ptr<PlanStageStats> CollectionScan::getStats() {
     // Add a BSON representation of the filter to the stats tree, if there is one.
     if (nullptr != _filter) {
         _commonStats.filter = _filter->serialize();
     }
 
-    unique_ptr<PlanStageStats> ret = std::make_unique<PlanStageStats>(_commonStats, STAGE_COLLSCAN);
+    std::unique_ptr<PlanStageStats> ret =
+        std::make_unique<PlanStageStats>(_commonStats, STAGE_COLLSCAN);
     ret->specific = std::make_unique<CollectionScanStats>(_specificStats);
     return ret;
 }

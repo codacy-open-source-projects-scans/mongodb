@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file contains tests for sbe::HashLookupStage.
@@ -33,6 +7,7 @@
 
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
 #include "mongo/db/exec/sbe/sbe_hash_lookup_shared_test.h"
+#include "mongo/db/exec/sbe/sbe_unittest_assert.h"
 #include "mongo/db/exec/sbe/stages/hash_lookup.h"
 
 namespace mongo::sbe {
@@ -330,19 +305,16 @@ TEST_F(HashLookupStageTest, ForceSpillTest) {
     auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
 
     std::vector<std::vector<std::pair<value::TypeTags, value::Value>>> expectedResults;
-    std::vector<std::pair<value::TypeTags, value::Value>> flatValues;
+    std::vector<value::TagValueOwned> flatValues;
     while (lookupStage->getNext() == PlanState::ADVANCED) {
         std::vector<std::pair<value::TypeTags, value::Value>> results{};
         results.reserve(resultAccessors.size());
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
-            flatValues.emplace_back(resultAccessors[i]->getCopyOfValue().releaseToRaw());
-            results.emplace_back(flatValues.back());
+            flatValues.emplace_back(resultAccessors[i]->getCopyOfValue());
+            results.emplace_back(flatValues.back().view());
         }
         expectedResults.emplace_back(std::move(results));
     }
-
-    // This is used to release the values when the test is done.
-    ValueVectorGuard resultsGuard{flatValues};
 
     // Close the stage and execute again with spilling.
     lookupStage->close();
@@ -352,13 +324,9 @@ TEST_F(HashLookupStageTest, ForceSpillTest) {
     while (lookupStage->getNext() == PlanState::ADVANCED) {
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
             const auto [resTag, resValue] = resultAccessors[i]->getViewOfValue();
-            const auto [expectedTag, exprectedValue] = expectedResults[idx][i];
+            const auto [expectedTag, expectedValue] = expectedResults[idx][i];
 
-            auto [compTag, compVal] =
-                value::compareValue(expectedTag, exprectedValue, resTag, resValue);
-
-            ASSERT_EQ(value::TypeTags::NumberInt32, compTag);
-            ASSERT_EQ(0, compVal);
+            ASSERT_SBE_VALUE_EQ(expectedTag, expectedValue, resTag, resValue);
         }
 
         if (idx == 1) {
@@ -401,7 +369,7 @@ TEST_F(HashLookupStageTest, DuplicateDocumentKeyCausesSpillTest) {
 
     // Set the memory limit so that the initial key fits into memory, but adding more duplicates
     // push memory over the limit.
-    RAIIServerParameterControllerForTest maxMemoryLimit(
+    unittest::ServerParameterGuard maxMemoryLimit(
         "internalQuerySlotBasedExecutionHashLookupApproxMemoryUseInBytesBeforeSpill",
         static_cast<long long>(kKey.objsize() + 8 * kDupCount / 2));
 
@@ -439,40 +407,109 @@ TEST_F(HashLookupStageTest, DuplicateDocumentKeyCausesSpillTest) {
     lookupSlots.push_back(lookupStageOutputSlot);
     auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
 
-    std::vector<std::vector<std::pair<value::TypeTags, value::Value>>> actualResults;
-    std::vector<std::pair<value::TypeTags, value::Value>> flatValues;
+    std::vector<std::vector<value::TagValueOwned>> actualResults;
     while (lookupStage->getNext() == PlanState::ADVANCED) {
-        std::vector<std::pair<value::TypeTags, value::Value>> results{};
+        std::vector<value::TagValueOwned> results;
         results.reserve(resultAccessors.size());
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
-            flatValues.emplace_back(resultAccessors[i]->getCopyOfValue().releaseToRaw());
-            results.emplace_back(flatValues.back());
+            results.emplace_back(resultAccessors[i]->getCopyOfValue());
         }
         actualResults.emplace_back(std::move(results));
     }
 
-    ValueVectorGuard resultsGuard{flatValues};
     lookupStage->close();
 
     ASSERT_EQ(actualResults.size(), 1);
     ASSERT_EQ(actualResults[0].size(), 2);
-    ASSERT_EQ(value::compareValue(actualResults[0][0].first,
-                                  actualResults[0][0].second,
-                                  value::TypeTags::bsonObject,
-                                  value::bitcastFrom<const char*>(lookupInput.objdata())),
-              std::make_pair(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0)));
-    ASSERT_EQ(value::compareValue(actualResults[0][1].first,
-                                  actualResults[0][1].second,
-                                  value::TypeTags::bsonArray,
-                                  value::bitcastFrom<const char*>(lookupOutput.objdata())),
-              std::make_pair(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0)));
+    ASSERT_SBE_VALUE_EQ(actualResults[0][0].tag(),
+                        actualResults[0][0].value(),
+                        value::TypeTags::bsonObject,
+                        value::bitcastFrom<const char*>(lookupInput.objdata()));
+    ASSERT_SBE_VALUE_EQ(actualResults[0][1].tag(),
+                        actualResults[0][1].value(),
+                        value::TypeTags::bsonArray,
+                        value::bitcastFrom<const char*>(lookupOutput.objdata()));
+}
+
+// The SBE $lookup hash-join lowering (see gen_lookup.cpp buildKeySetForLocal with
+// convertArrayToSet=false) leaves the outer/probe key as a plain array rather than de-duplicating
+// it into an ArraySet. This test verifies that the HashLookupStage still produces each matching
+// inner document exactly once even when the outer array key contains duplicate values, because
+// LookupHashTableIter de-duplicates the matched buffer indices while probing.
+TEST_F(HashLookupStageTest, DuplicateOuterArrayKeyDedupsMatches) {
+    // Outer document has a single key array with a duplicate value (10 appears twice).
+    const BSONArray outer{fromjson(R"""([
+        [{_id: 1}, [10, 10, 11]]
+    ])""")};
+    // Inner documents: two of them (_id 11 and 13) match the duplicated outer key value 10, and one
+    // (_id 12) matches 11.
+    const BSONArray inner{fromjson(R"""([
+        [{_id: 11}, 10],
+        [{_id: 12}, 11],
+        [{_id: 13}, 10]
+    ])""")};
+
+    auto [innerScanSlots, innerScanStage] = generateVirtualScanMulti(2, inner);
+    auto [outerScanSlots, outerScanStage] = generateVirtualScanMulti(2, outer);
+
+    auto ctx = makeCompileCtx();
+
+    value::SlotId lookupStageOutputSlot = generateSlotId();
+    SlotExprPair agg = std::make_pair(
+        lookupStageOutputSlot, makeFunction(EFn::kAddToArray, makeE<EVariable>(innerScanSlots[0])));
+    auto lookupStage = makeS<HashLookupStage>(std::move(outerScanStage),
+                                              std::move(innerScanStage),
+                                              outerScanSlots[1],
+                                              innerScanSlots[1],
+                                              innerScanSlots[0],
+                                              std::move(agg),
+                                              boost::none,
+                                              kEmptyPlanNodeId);
+
+    value::SlotVector lookupSlots;
+    lookupSlots.reserve(2);
+    lookupSlots.push_back(outerScanSlots[0]);
+    lookupSlots.push_back(lookupStageOutputSlot);
+    auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
+
+    std::vector<std::vector<value::TagValueOwned>> actualResults;
+    while (lookupStage->getNext() == PlanState::ADVANCED) {
+        std::vector<value::TagValueOwned> results;
+        results.reserve(resultAccessors.size());
+        for (size_t i = 0; i < resultAccessors.size(); ++i) {
+            results.emplace_back(resultAccessors[i]->getCopyOfValue());
+        }
+        actualResults.emplace_back(std::move(results));
+    }
+
+    lookupStage->close();
+
+    // A single outer document, so a single output row.
+    ASSERT_EQ(actualResults.size(), 1);
+    ASSERT_EQ(actualResults[0].size(), 2);
+
+    // The outer document is passed through unchanged.
+    const BSONObj expectedOuter = fromjson(R"""({_id: 1})""");
+    ASSERT_SBE_VALUE_EQ(actualResults[0][0].tag(),
+                        actualResults[0][0].value(),
+                        value::TypeTags::bsonObject,
+                        value::bitcastFrom<const char*>(expectedOuter.objdata()));
+
+    // Each matching inner document appears exactly once, even though the outer key value 10 is
+    // duplicated. The matches are returned in buffer-index (insertion) order: _id 11, _id 12,
+    // _id 13.
+    const BSONArray expectedMatches{fromjson(R"""([{_id: 11}, {_id: 12}, {_id: 13}])""")};
+    ASSERT_SBE_VALUE_EQ(actualResults[0][1].tag(),
+                        actualResults[0][1].value(),
+                        value::TypeTags::bsonArray,
+                        value::bitcastFrom<const char*>(expectedMatches.objdata()));
 }
 
 TEST_F(HashLookupStageTest, SpillLargeStringWithCollationTest) {
     constexpr size_t kStringLength = 64;
     constexpr size_t kStringCount = 26;
 
-    RAIIServerParameterControllerForTest maxMemoryLimit(
+    unittest::ServerParameterGuard maxMemoryLimit(
         "internalQuerySlotBasedExecutionHashLookupApproxMemoryUseInBytesBeforeSpill",
         static_cast<long long>(kStringCount * kStringLength / 2));
 
@@ -533,18 +570,17 @@ TEST_F(HashLookupStageTest, SpillLargeStringWithCollationTest) {
     auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
 
     std::vector<std::vector<std::pair<value::TypeTags, value::Value>>> actualResultView;
-    std::vector<std::pair<value::TypeTags, value::Value>> ownedValues;
+    std::vector<value::TagValueOwned> ownedValues;
     while (lookupStage->getNext() == PlanState::ADVANCED) {
         std::vector<std::pair<value::TypeTags, value::Value>> results{};
         results.reserve(resultAccessors.size());
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
-            ownedValues.emplace_back(resultAccessors[i]->getCopyOfValue().releaseToRaw());
-            results.emplace_back(ownedValues.back());
+            ownedValues.emplace_back(resultAccessors[i]->getCopyOfValue());
+            results.emplace_back(ownedValues.back().view());
         }
         actualResultView.emplace_back(std::move(results));
     }
 
-    ValueVectorGuard resultsGuard{ownedValues};
     lookupStage->close();
 
     ASSERT_EQ(actualResultView.size(), kStringCount);
@@ -552,15 +588,15 @@ TEST_F(HashLookupStageTest, SpillLargeStringWithCollationTest) {
         const auto& result = actualResultView[i];
         ASSERT_EQ(result.size(), 2);
         const BSONObj input = BSON("_id" << static_cast<long long>(i));
-        assertValuesEqual(result[0].first,
-                          result[0].second,
-                          value::TypeTags::bsonObject,
-                          value::bitcastFrom<const char*>(input.objdata()));
+        ASSERT_SBE_VALUE_EQ(result[0].first,
+                            result[0].second,
+                            value::TypeTags::bsonObject,
+                            value::bitcastFrom<const char*>(input.objdata()));
         const BSONArray output = BSON_ARRAY(input);
-        assertValuesEqual(result[1].first,
-                          result[1].second,
-                          value::TypeTags::bsonArray,
-                          value::bitcastFrom<const char*>(output.objdata()));
+        ASSERT_SBE_VALUE_EQ(result[1].first,
+                            result[1].second,
+                            value::TypeTags::bsonArray,
+                            value::bitcastFrom<const char*>(output.objdata()));
     }
 }
 

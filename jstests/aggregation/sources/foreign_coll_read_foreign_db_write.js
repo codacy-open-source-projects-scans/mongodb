@@ -6,17 +6,6 @@
 //   # Serverless does not support $out
 //   command_not_supported_in_serverless,
 // ]
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 const localDB = db.getSiblingDB(`${jsTestName()}` + "_local_db");
 const outputDBName = `${jsTestName()}` + "_output_db";
@@ -49,7 +38,9 @@ function runTest({
     let localTarget = localColl;
     if (localTargetIsView) {
         localColl = localDB[localTargetName + "_coll"];
-        assert.commandWorked(localDB.createView(localTargetName, localColl.getName(), [] /* identity view */));
+        assert.commandWorked(
+            localDB.createView(localTargetName, localColl.getName(), [] /* identity view */),
+        );
         localTarget = localDB[localTargetName];
     }
 
@@ -60,11 +51,17 @@ function runTest({
     let foreignColl_uninvolvedDB = uninvolvedDB[foreignTargetName];
     if (foreignTargetIsView) {
         foreignColl = localDB[foreignTargetName + "_coll"];
-        assert.commandWorked(localDB.createView(foreignTargetName, foreignColl.getName(), [] /* identity view */));
+        assert.commandWorked(
+            localDB.createView(foreignTargetName, foreignColl.getName(), [] /* identity view */),
+        );
 
         foreignColl_uninvolvedDB = uninvolvedDB[foreignTargetName + "_coll"];
         assert.commandWorked(
-            uninvolvedDB.createView(foreignTargetName, foreignColl_uninvolvedDB.getName(), [] /* identity view */),
+            uninvolvedDB.createView(
+                foreignTargetName,
+                foreignColl_uninvolvedDB.getName(),
+                [] /* identity view */,
+            ),
         );
     }
 
@@ -80,7 +77,9 @@ function runTest({
     assert.commandWorked(outputDB.createCollection("uninvolvedColl"));
 
     // Run the pipeline against localColl which writes to outputColl.
-    assert.commandWorked(localDB.runCommand({aggregate: localTarget.getName(), pipeline: pipeline, cursor: {}}));
+    assert.commandWorked(
+        localDB.runCommand({aggregate: localTarget.getName(), pipeline: pipeline, cursor: {}}),
+    );
 
     assert.sameMembers(outputDB[foreignTargetName].find().toArray(), expectedOutput);
 

@@ -2,6 +2,7 @@
  * Test the distinct command with views.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   requires_fcv_71,
@@ -42,7 +43,11 @@ assert.commandWorked(bulk.execute());
 // Create views on the data.
 assert.commandWorked(viewsDB.runCommand({create: "identityView", viewOn: "coll"}));
 assert.commandWorked(
-    viewsDB.runCommand({create: "largePopView", viewOn: "identityView", pipeline: [{$match: {pop: {$gt: 5}}}]}),
+    viewsDB.runCommand({
+        create: "largePopView",
+        viewOn: "identityView",
+        pipeline: [{$match: {pop: {$gt: 5}}}],
+    }),
 );
 let identityView = viewsDB.getCollection("identityView");
 let largePopView = viewsDB.getCollection("largePopView");
@@ -91,29 +96,33 @@ getAllNodeExplains(largePopView.explain().count({foo: "bar"})).forEach((explainP
 });
 
 // Distinct with explicit explain modes works on a view.
-getAllNodeExplains(assert.commandWorked(largePopView.explain("queryPlanner").distinct("pop"))).forEach(
-    (explainPlan) => {
-        assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
-        assert(!explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
-    },
-);
+getAllNodeExplains(
+    assert.commandWorked(largePopView.explain("queryPlanner").distinct("pop")),
+).forEach((explainPlan) => {
+    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
+    assert(!explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+});
 
 let nReturned = 0;
-getAllNodeExplains(largePopView.explain("executionStats").distinct("pop")).forEach((explainPlan) => {
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
-    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
-    nReturned += explainPlan.stages[0].$cursor.executionStats.nReturned;
-    assert(!explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
-});
+getAllNodeExplains(largePopView.explain("executionStats").distinct("pop")).forEach(
+    (explainPlan) => {
+        assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
+        assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+        nReturned += explainPlan.stages[0].$cursor.executionStats.nReturned;
+        assert(!explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
+    },
+);
 assert.eq(nReturned, 2);
 
 nReturned = 0;
-getAllNodeExplains(largePopView.explain("allPlansExecution").distinct("pop")).forEach((explainPlan) => {
-    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
-    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
-    nReturned += explainPlan.stages[0].$cursor.executionStats.nReturned;
-    assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
-});
+getAllNodeExplains(largePopView.explain("allPlansExecution").distinct("pop")).forEach(
+    (explainPlan) => {
+        assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_distinct.coll");
+        assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+        nReturned += explainPlan.stages[0].$cursor.executionStats.nReturned;
+        assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
+    },
+);
 assert.eq(nReturned, 2);
 
 // Distinct with hints work on views.
@@ -148,7 +157,11 @@ if (!isHintsToQuerySettingsSuite) {
 
     // Make sure that the hint produces the right results.
     assert(arrayEq([10, 7], largePopView.distinct("pop", {}, {hint: {state: 1}})));
-    const result = largePopView.runCommand("distinct", {"key": "a", query: {a: 1, b: 2}, hint: {bad: 1, hint: 1}});
+    const result = largePopView.runCommand("distinct", {
+        "key": "a",
+        query: {a: 1, b: 2},
+        hint: {bad: 1, hint: 1},
+    });
     assert.commandFailedWithCode(result, ErrorCodes.BadValue, result);
     const regex = new RegExp("hint provided does not correspond to an existing index");
     assert(regex.test(result.errmsg));

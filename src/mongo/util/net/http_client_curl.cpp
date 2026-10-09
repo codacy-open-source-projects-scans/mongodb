@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands/server_status/server_status.h"
@@ -60,6 +33,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <arpa/inet.h>
 #include <curl/curl.h>
@@ -70,6 +44,7 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 using namespace executor;
 
 /**
@@ -221,24 +196,24 @@ long longSeconds(Seconds tm) {
 }
 
 
-StringData enumToString(curl_infotype type) {
+std::string_view enumToString(curl_infotype type) {
     switch (type) {
         case CURLINFO_TEXT:
-            return "TEXT"_sd;
+            return "TEXT"sv;
         case CURLINFO_HEADER_IN:
-            return "HEADER_IN"_sd;
+            return "HEADER_IN"sv;
         case CURLINFO_HEADER_OUT:
-            return "HEADER_OUT"_sd;
+            return "HEADER_OUT"sv;
         case CURLINFO_DATA_IN:
-            return "DATA_IN"_sd;
+            return "DATA_IN"sv;
         case CURLINFO_DATA_OUT:
-            return "DATA_OUT"_sd;
+            return "DATA_OUT"sv;
         case CURLINFO_SSL_DATA_IN:
-            return "SSL_DATA_IN"_sd;
+            return "SSL_DATA_IN"sv;
         case CURLINFO_SSL_DATA_OUT:
-            return "SSL_DATA_OUT"_sd;
+            return "SSL_DATA_OUT"sv;
         default:
-            return "unknown"_sd;
+            return "unknown"sv;
     }
 }
 
@@ -253,7 +228,7 @@ int curlDebugCallback(CURL* handle, curl_infotype type, char* data, size_t size,
                         1,
                         "Curl",
                         "type"_attr = enumToString(type),
-                        "message"_attr = StringData(data, size));
+                        "message"_attr = std::string_view(data, size));
             [[fallthrough]];
 
         default:
@@ -634,22 +609,22 @@ StatusWith<CurlHandle> CurlPool::get(HostAndPort server, Protocols protocol) {
     return {CurlHandle(std::move(swHandle.getValue()), curlHandle)};
 }
 
-HostAndPort exactHostAndPortFromUrl(StringData url) {
+HostAndPort exactHostAndPortFromUrl(std::string_view url) {
     // Treat the URL as a host and port
     // URL: http(s)?://(host):(port)/...
     //
-    constexpr StringData slashes = "//"_sd;
+    constexpr std::string_view slashes = "//"sv;
     auto slashesIndex = url.find(slashes);
     uassert(5413902, str::stream() << "//, URL: " << url, slashesIndex != std::string::npos);
 
     url = url.substr(slashesIndex + slashes.size());
     if (url.find('/') != std::string::npos) {
-        url = url.substr(0, url.find("/"));
+        url = url.substr(0, url.find('/'));
     }
 
     auto hp = HostAndPort(url);
     if (!hp.hasPort()) {
-        if (url.starts_with("http://"_sd)) {
+        if (url.starts_with("http://"sv)) {
             return HostAndPort(hp.host(), 80);
         }
 
@@ -687,7 +662,7 @@ public:
     }
 
     HttpReply request(HttpMethod method,
-                      StringData url,
+                      std::string_view url,
                       ConstDataRange cdr = {nullptr, 0}) const final {
         auto protocol = _allowInsecure ? Protocols::kHttpOrHttps : Protocols::kHttpsOnly;
         if (_pool == HttpConnectionPool::kUse) {
@@ -769,7 +744,10 @@ private:
         curl_easy_setopt(handle, CURLOPT_SEEKDATA, bufReader);
     }
 
-    HttpReply request(CURL* handle, HttpMethod method, StringData url, ConstDataRange cdr) const {
+    HttpReply request(CURL* handle,
+                      HttpMethod method,
+                      std::string_view url,
+                      ConstDataRange cdr) const {
         uassert(ErrorCodes::InternalError, "Curl initialization failed", handle);
 
         if (!_cidrDenyList.empty()) {

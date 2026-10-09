@@ -1,47 +1,22 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/vectorizer.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/algebra/polyvalue.h"
 #include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/db/query/stage_builder/sbe/tests/abt_unit_test_utils.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo::stage_builder {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace abt;
 
@@ -56,7 +31,7 @@ TEST(VectorizerTest, ConvertDateTrunc) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
                                     boost::none));
 
@@ -108,7 +83,7 @@ TEST(VectorizerTest, ConvertDateTrunc) {
 
 TEST(VectorizerTest, ConvertDateDiff) {
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
                                     boost::none));
     {
@@ -230,7 +205,7 @@ TEST(VectorizerTest, ConvertGt) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -287,7 +262,7 @@ TEST(VectorizerTest, ConvertGt) {
 TEST(VectorizerTest, ConvertGtOnCell) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -377,7 +352,7 @@ TEST(VectorizerTest, ConvertLte) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -437,7 +412,7 @@ TEST(VectorizerTest, ConvertCmp3w) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -516,7 +491,7 @@ TEST(VectorizerTest, ConvertBooleanAndOnCell) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -612,7 +587,7 @@ TEST(VectorizerTest, ConvertBooleanNaryAndOnCell) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -708,7 +683,7 @@ TEST(VectorizerTest, ConvertBooleanOrOnCell) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -830,7 +805,7 @@ TEST(VectorizerTest, ConvertBooleanNaryOrOnCell) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -947,7 +922,7 @@ TEST(VectorizerTest, ConvertBooleanNaryOrOnCell) {
 TEST(VectorizerTest, ConvertFilter) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1049,7 +1024,7 @@ TEST(VectorizerTest, ConvertTypeMatch) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1097,7 +1072,7 @@ TEST(VectorizerTest, ConvertIsNumber) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1145,7 +1120,7 @@ TEST(VectorizerTest, ConvertIsDate) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1193,7 +1168,7 @@ TEST(VectorizerTest, ConvertIsString) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1241,7 +1216,7 @@ TEST(VectorizerTest, ConvertIsTimestamp) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1289,7 +1264,7 @@ TEST(VectorizerTest, ConvertIsArray) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1337,7 +1312,7 @@ TEST(VectorizerTest, ConvertIsObject) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1385,7 +1360,7 @@ TEST(VectorizerTest, ConvertIsNull) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1434,7 +1409,7 @@ TEST(VectorizerTest, ConvertIsTimezone) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1476,10 +1451,41 @@ TEST(VectorizerTest, ConvertIsTimezone) {
         *processed.expr);
 }
 
+TEST(VectorizerTest, ConvertMqlComparisonRank) {
+    auto tree1 = make<FunctionCall>("mqlComparisonRank", makeSeq(make<Variable>("inputVar")));
+
+    sbe::value::FrameIdGenerator generator;
+    Vectorizer::VariableTypes bindings;
+    bindings.emplace(
+        "inputVar"sv,
+        std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
+                       boost::none));
+
+    auto processed = Vectorizer{&generator, Vectorizer::Purpose::Project}.vectorize(
+        tree1, bindings, boost::none);
+
+    // Without a block version of 'mqlComparisonRank', the "Nothing" fallback that
+    // generateExpressionCompare emits for comparison expressions would make the whole expression
+    // unvectorizable, silently disabling block processing for it (SERVER-131544).
+    ASSERT_TRUE(processed.expr.has_value());
+    ASSERT_EXPLAIN_BSON_AUTO(
+        "{\n"
+        "    nodeType: \"FunctionCall\", \n"
+        "    name: \"valueBlockMqlComparisonRank\", \n"
+        "    arguments: [\n"
+        "        {\n"
+        "            nodeType: \"Variable\", \n"
+        "            name: \"inputVar\"\n"
+        "        }\n"
+        "    ]\n"
+        "}\n",
+        *processed.expr);
+}
+
 TEST(VectorizerTest, ConvertBlockIf) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -1884,7 +1890,7 @@ TEST(VectorizerTest, ConvertMultipleBlockIf) {
         sbe::value::FrameIdGenerator generator;
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "inputVar1"_sd,
+            "inputVar1"sv,
             std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -2379,7 +2385,7 @@ TEST(VectorizerTest, ConvertMultipleBlockIf) {
         sbe::value::FrameIdGenerator generator;
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "inputVar"_sd,
+            "inputVar"sv,
             std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -2979,7 +2985,7 @@ TEST(VectorizerTest, ConvertMixedScalarIf) {
     // Test conversion of "if" operators on a scalar test expression with only one branch yielding a
     // block value.
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -3472,7 +3478,7 @@ TEST(VectorizerTest, ConvertProjection) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -3633,10 +3639,6 @@ void assertArithmeticOperationBlockBlockBlock(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Variable\", \n"
-            "            name: \"var1\"\n"
-            "        }, \n"
-            "        {\n"
             "            nodeType: \"FunctionCall\", \n"
             "            name: \"" +
             fnStr +
@@ -3648,13 +3650,17 @@ void assertArithmeticOperationBlockBlockBlock(const std::string& fnStr,
             "                }, \n"
             "                {\n"
             "                    nodeType: \"Variable\", \n"
-            "                    name: \"var2\"\n"
+            "                    name: \"var1\"\n"
             "                }, \n"
             "                {\n"
             "                    nodeType: \"Variable\", \n"
-            "                    name: \"var3\"\n"
+            "                    name: \"var2\"\n"
             "                }\n"
             "            ]\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"var3\"\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3676,24 +3682,30 @@ void assertArithmeticOperationBlockScalarScalar(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Variable\", \n"
-            "            name: \"var\"\n"
+            "            nodeType: \"FunctionCall\", \n"
+            "            name: \"" +
+            fnStr +
+            "\", \n"
+            "            arguments: [\n"
+            "                {\n"
+            "                    nodeType: \"Const\", \n"
+            "                    tag: \"Nothing\"\n"
+            "                }, \n"
+            "                {\n"
+            "                    nodeType: \"Variable\", \n"
+            "                    name: \"var\"\n"
+            "                }, \n"
+            "                {\n"
+            "                    nodeType: \"Const\", \n"
+            "                    tag: \"NumberInt32\", \n"
+            "                    value: 9\n"
+            "                }\n"
+            "            ]\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"BinaryOp\", \n"
-            "            op: \"" +
-            opStr +
-            "\", \n"
-            "            left: {\n"
-            "                nodeType: \"Const\", \n"
-            "                tag: \"NumberInt32\", \n"
-            "                value: 9\n"
-            "            }, \n"
-            "            right: {\n"
-            "                nodeType: \"Const\", \n"
-            "                tag: \"NumberInt32\", \n"
-            "                value: 20\n"
-            "            }\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"NumberInt32\", \n"
+            "            value: 20\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3714,11 +3726,6 @@ void assertArithmeticOperationScalarBlockScalar(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Const\", \n"
-            "            tag: \"NumberInt32\", \n"
-            "            value: 9\n"
-            "        }, \n"
-            "        {\n"
             "            nodeType: \"FunctionCall\", \n"
             "            name: \"" +
             fnStr +
@@ -3729,15 +3736,20 @@ void assertArithmeticOperationScalarBlockScalar(const std::string& fnStr,
             "                    tag: \"Nothing\"\n"
             "                }, \n"
             "                {\n"
-            "                    nodeType: \"Variable\", \n"
-            "                    name: \"var\"\n"
-            "                }, \n"
-            "                {\n"
             "                    nodeType: \"Const\", \n"
             "                    tag: \"NumberInt32\", \n"
-            "                    value: 20\n"
+            "                    value: 9\n"
+            "                }, \n"
+            "                {\n"
+            "                    nodeType: \"Variable\", \n"
+            "                    name: \"var\"\n"
             "                }\n"
             "            ]\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"NumberInt32\", \n"
+            "            value: 20\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3745,6 +3757,7 @@ void assertArithmeticOperationScalarBlockScalar(const std::string& fnStr,
 }
 
 void assertArithmeticOperationScalarScalarBlock(const std::string& fnStr,
+                                                const std::string& opStr,
                                                 const Vectorizer::Tree& processed) {
     ASSERT_EXPLAIN_BSON(
         "{\n"
@@ -3758,30 +3771,24 @@ void assertArithmeticOperationScalarScalarBlock(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Const\", \n"
-            "            tag: \"NumberInt32\", \n"
-            "            value: 9\n"
+            "            nodeType: \"BinaryOp\", \n"
+            "            op: \"" +
+            opStr +
+            "\", \n"
+            "            left: {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"NumberInt32\", \n"
+            "                value: 9\n"
+            "            }, \n"
+            "            right: {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"NumberInt32\", \n"
+            "                value: 20\n"
+            "            }\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"FunctionCall\", \n"
-            "            name: \"" +
-            fnStr +
-            "\", \n"
-            "            arguments: [\n"
-            "                {\n"
-            "                    nodeType: \"Const\", \n"
-            "                    tag: \"Nothing\"\n"
-            "                }, \n"
-            "                {\n"
-            "                    nodeType: \"Const\", \n"
-            "                    tag: \"NumberInt32\", \n"
-            "                    value: 20\n"
-            "                }, \n"
-            "                {\n"
-            "                    nodeType: \"Variable\", \n"
-            "                    name: \"var\"\n"
-            "                }\n"
-            "            ]\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"var\"\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3802,10 +3809,6 @@ void assertArithmeticOperationBlockBlockScalar(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Variable\", \n"
-            "            name: \"var1\"\n"
-            "        }, \n"
-            "        {\n"
             "            nodeType: \"FunctionCall\", \n"
             "            name: \"" +
             fnStr +
@@ -3817,14 +3820,18 @@ void assertArithmeticOperationBlockBlockScalar(const std::string& fnStr,
             "                }, \n"
             "                {\n"
             "                    nodeType: \"Variable\", \n"
-            "                    name: \"var2\"\n"
+            "                    name: \"var1\"\n"
             "                }, \n"
             "                {\n"
-            "                    nodeType: \"Const\", \n"
-            "                    tag: \"NumberInt32\", \n"
-            "                    value: 9\n"
+            "                    nodeType: \"Variable\", \n"
+            "                    name: \"var2\"\n"
             "                }\n"
             "            ]\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"NumberInt32\", \n"
+            "            value: 9\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3845,10 +3852,6 @@ void assertArithmeticOperationBlockScalarBlock(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Variable\", \n"
-            "            name: \"var1\"\n"
-            "        }, \n"
-            "        {\n"
             "            nodeType: \"FunctionCall\", \n"
             "            name: \"" +
             fnStr +
@@ -3859,15 +3862,19 @@ void assertArithmeticOperationBlockScalarBlock(const std::string& fnStr,
             "                    tag: \"Nothing\"\n"
             "                }, \n"
             "                {\n"
+            "                    nodeType: \"Variable\", \n"
+            "                    name: \"var1\"\n"
+            "                }, \n"
+            "                {\n"
             "                    nodeType: \"Const\", \n"
             "                    tag: \"NumberInt32\", \n"
             "                    value: 9\n"
-            "                }, \n"
-            "                {\n"
-            "                    nodeType: \"Variable\", \n"
-            "                    name: \"var2\"\n"
             "                }\n"
             "            ]\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"var2\"\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3888,11 +3895,6 @@ void assertArithmeticOperationScalarBlockBlock(const std::string& fnStr,
             "            tag: \"Nothing\"\n"
             "        }, \n"
             "        {\n"
-            "            nodeType: \"Const\", \n"
-            "            tag: \"NumberInt32\", \n"
-            "            value: 9\n"
-            "        }, \n"
-            "        {\n"
             "            nodeType: \"FunctionCall\", \n"
             "            name: \"" +
             fnStr +
@@ -3903,14 +3905,19 @@ void assertArithmeticOperationScalarBlockBlock(const std::string& fnStr,
             "                    tag: \"Nothing\"\n"
             "                }, \n"
             "                {\n"
-            "                    nodeType: \"Variable\", \n"
-            "                    name: \"var1\"\n"
+            "                    nodeType: \"Const\", \n"
+            "                    tag: \"NumberInt32\", \n"
+            "                    value: 9\n"
             "                }, \n"
             "                {\n"
             "                    nodeType: \"Variable\", \n"
-            "                    name: \"var2\"\n"
+            "                    name: \"var1\"\n"
             "                }\n"
             "            ]\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"var2\"\n"
             "        }\n"
             "    ]\n"
             "}\n",
@@ -3926,11 +3933,6 @@ void assertArithmeticOperationScalarScalarScalar(const std::string& opStr,
             opStr +
             "\", \n"
             "    left: {\n"
-            "        nodeType: \"Const\", \n"
-            "        tag: \"NumberInt32\", \n"
-            "        value: 9\n"
-            "    }, \n"
-            "    right: {\n"
             "        nodeType: \"BinaryOp\", \n"
             "        op: \"" +
             opStr +
@@ -3938,13 +3940,18 @@ void assertArithmeticOperationScalarScalarScalar(const std::string& opStr,
             "        left: {\n"
             "            nodeType: \"Const\", \n"
             "            tag: \"NumberInt32\", \n"
-            "            value: 20\n"
+            "            value: 9\n"
             "        }, \n"
             "        right: {\n"
             "            nodeType: \"Const\", \n"
             "            tag: \"NumberInt32\", \n"
-            "            value: 100\n"
+            "            value: 20\n"
             "        }\n"
+            "    }, \n"
+            "    right: {\n"
+            "        nodeType: \"Const\", \n"
+            "        tag: \"NumberInt32\", \n"
+            "        value: 100\n"
             "    }\n"
             "}\n",
         *processed.expr);
@@ -3961,11 +3968,11 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -3982,7 +3989,7 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -3999,7 +4006,7 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4030,15 +4037,15 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var1"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var3"_sd,
+            "var3"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4056,7 +4063,7 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4074,7 +4081,7 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4092,7 +4099,7 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4101,7 +4108,7 @@ TEST(VectorizerTest, ConvertAdd) {
             treeScalarScalarBlock, bindings, boost::none);
 
         ASSERT_TRUE(processed.expr.has_value());
-        assertArithmeticOperationScalarScalarBlock(fnStr, processed);
+        assertArithmeticOperationScalarScalarBlock(fnStr, opStr, processed);
     }
 
     {
@@ -4124,11 +4131,11 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4146,11 +4153,11 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4168,11 +4175,11 @@ TEST(VectorizerTest, ConvertAdd) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4196,11 +4203,11 @@ TEST(VectorizerTest, ConvertSub) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4217,7 +4224,7 @@ TEST(VectorizerTest, ConvertSub) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4234,7 +4241,7 @@ TEST(VectorizerTest, ConvertSub) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4271,11 +4278,11 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4292,7 +4299,7 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4309,7 +4316,7 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4340,15 +4347,15 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var1"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var3"_sd,
+            "var3"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4366,7 +4373,7 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4384,7 +4391,7 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4402,7 +4409,7 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4411,7 +4418,7 @@ TEST(VectorizerTest, ConvertMult) {
             treeScalarScalarBlock, bindings, boost::none);
 
         ASSERT_TRUE(processed.expr.has_value());
-        assertArithmeticOperationScalarScalarBlock(fnStr, processed);
+        assertArithmeticOperationScalarScalarBlock(fnStr, opStr, processed);
     }
 
     {
@@ -4434,11 +4441,11 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4456,11 +4463,11 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4478,11 +4485,11 @@ TEST(VectorizerTest, ConvertMult) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "var"_sd,
+            "var1"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "var2"_sd,
+            "var2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4506,11 +4513,11 @@ TEST(VectorizerTest, ConvertDiv) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4527,7 +4534,7 @@ TEST(VectorizerTest, ConvertDiv) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "lInputVar"_sd,
+            "lInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4544,7 +4551,7 @@ TEST(VectorizerTest, ConvertDiv) {
 
         Vectorizer::VariableTypes bindings;
         bindings.emplace(
-            "rInputVar"_sd,
+            "rInputVar"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
 
@@ -4578,7 +4585,7 @@ TEST(VectorizerTest, ConvertEqMemberOnCell) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
                                     boost::none));
 
@@ -4632,7 +4639,7 @@ TEST(VectorizerTest, ConvertIsMemberFunction) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4665,7 +4672,7 @@ TEST(VectorizerTest, ConvertCoerceToBoolFunction) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4679,7 +4686,7 @@ TEST(VectorizerTest, ConvertRound) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4738,7 +4745,7 @@ TEST(VectorizerTest, ConvertTrunc) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4797,7 +4804,7 @@ TEST(VectorizerTest, ConvertMod) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4831,7 +4838,7 @@ TEST(VectorizerTest, ConvertMod) {
 
     {
         bindings.emplace(
-            "inputVar2"_sd,
+            "inputVar2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         auto tree = make<FunctionCall>(
@@ -4858,7 +4865,7 @@ TEST(VectorizerTest, ConvertNumConvert) {
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "inputVar"_sd,
+        "inputVar"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
@@ -4892,7 +4899,7 @@ TEST(VectorizerTest, ConvertNumConvert) {
 
     {
         bindings.emplace(
-            "inputVar2"_sd,
+            "inputVar2"sv,
             std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                            boost::none));
         auto tree = make<FunctionCall>(
@@ -4925,7 +4932,7 @@ TEST(VectorizerTest, ConvertDateAdd) {
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
                                     boost::none));
 
@@ -4978,14 +4985,14 @@ TEST(VectorizerTest, ConvertSwitch) {
                   make<FunctionCall>("dateAdd",
                                      makeSeq(make<Variable>("timezoneVar"),
                                              make<Variable>("inputVar"),
-                                             Constant::str("hour"_sd),
+                                             Constant::str("hour"sv),
                                              Constant::int32(8),
-                                             Constant::str("UTC"_sd))),
+                                             Constant::str("UTC"sv))),
                   Constant::null()});
 
     sbe::value::FrameIdGenerator generator;
     Vectorizer::VariableTypes bindings;
-    bindings.emplace("inputVar"_sd,
+    bindings.emplace("inputVar"sv,
                      std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
                                     boost::none));
 
@@ -5184,7 +5191,7 @@ TEST(VectorizerTest, ConvertSwitch) {
 
 TEST(VectorizerTest, ConvertMultiLet) {
     // TODO SERVER-100579 Remove this when feature flag is removed
-    RAIIServerParameterControllerForTest sbeUpgradeBinaryTreesFeatureFlag{
+    unittest::ServerParameterGuard sbeUpgradeBinaryTreesFeatureFlag{
         "featureFlagSbeUpgradeBinaryTrees", true};
 
     auto tree = make<MultiLet>(
@@ -5195,20 +5202,20 @@ TEST(VectorizerTest, ConvertMultiLet) {
 
     Vectorizer::VariableTypes bindings;
     bindings.emplace(
-        "s1"_sd,
+        "s1"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
     bindings.emplace(
-        "s2"_sd,
+        "s2"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 
     bindings.emplace(
-        "s3"_sd,
+        "s3"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
     bindings.emplace(
-        "s4"_sd,
+        "s4"sv,
         std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType),
                        boost::none));
 

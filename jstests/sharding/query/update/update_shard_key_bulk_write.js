@@ -7,23 +7,20 @@
  * ]
  */
 
-import {cursorEntryValidator, cursorSizeValidator, summaryFieldsValidator} from "jstests/libs/bulk_write_utils.js";
+import {
+    cursorEntryValidator,
+    cursorSizeValidator,
+    summaryFieldsValidator,
+} from "jstests/libs/bulk_write_utils.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {shardCollectionMoveChunks} from "jstests/sharding/libs/update_shard_key_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-const failpointSetParameter = isMultiversion
-    ? {}
-    : {"failpoint.useInMemoryReplicatedSizeCount": tojson({mode: "alwaysOn"})};
 
 const st = new ShardingTest({
     mongos: 1,
     shards: {rs0: {nodes: 3}, rs1: {nodes: 3}},
     rsOptions: {
-        setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS, ...failpointSetParameter},
+        setParameter: {maxTransactionLockRequestTimeoutMillis: ReplSetTest.kDefaultTimeoutMS},
     },
 });
 
@@ -66,11 +63,31 @@ const adminDB = st.s.getDB("admin");
 
     cursorSizeValidator(res, 1);
     if (upsert) {
-        cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1, nModified: 0, upserted: {_id: 1}});
-        summaryFieldsValidator(res, {nErrors: 0, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 1});
+        cursorEntryValidator(res.cursor.firstBatch[0], {
+            ok: 1,
+            idx: 0,
+            n: 1,
+            nModified: 0,
+            upserted: {_id: 1},
+        });
+        summaryFieldsValidator(res, {
+            nErrors: 0,
+            nInserted: 0,
+            nDeleted: 0,
+            nMatched: 0,
+            nModified: 0,
+            nUpserted: 1,
+        });
     } else {
         cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1, nModified: 1});
-        summaryFieldsValidator(res, {nErrors: 0, nInserted: 0, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
+        summaryFieldsValidator(res, {
+            nErrors: 0,
+            nInserted: 0,
+            nDeleted: 0,
+            nMatched: 1,
+            nModified: 1,
+            nUpserted: 0,
+        });
     }
 
     // Run a similar update for the x:4 document, to test moving in the opposite direction
@@ -88,11 +105,31 @@ const adminDB = st.s.getDB("admin");
 
     cursorSizeValidator(res, 1);
     if (upsert) {
-        cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1, nModified: 0, upserted: {_id: 2}});
-        summaryFieldsValidator(res, {nErrors: 0, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 1});
+        cursorEntryValidator(res.cursor.firstBatch[0], {
+            ok: 1,
+            idx: 0,
+            n: 1,
+            nModified: 0,
+            upserted: {_id: 2},
+        });
+        summaryFieldsValidator(res, {
+            nErrors: 0,
+            nInserted: 0,
+            nDeleted: 0,
+            nMatched: 0,
+            nModified: 0,
+            nUpserted: 1,
+        });
     } else {
         cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1, nModified: 1});
-        summaryFieldsValidator(res, {nErrors: 0, nInserted: 0, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
+        summaryFieldsValidator(res, {
+            nErrors: 0,
+            nInserted: 0,
+            nDeleted: 0,
+            nMatched: 1,
+            nModified: 1,
+            nUpserted: 0,
+        });
     }
 
     // For the purpose of this test case upsert being true/false is irrelevant so we only run it
@@ -122,7 +159,14 @@ const adminDB = st.s.getDB("admin");
             n: 0,
             nModified: 0,
         });
-        summaryFieldsValidator(res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+        summaryFieldsValidator(res, {
+            nErrors: 1,
+            nInserted: 0,
+            nDeleted: 0,
+            nMatched: 0,
+            nModified: 0,
+            nUpserted: 0,
+        });
     }
 });
 

@@ -2,6 +2,7 @@
  * Tests that compound wildcard indexes can support queries on non-wildcard prefix.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_read_concern_local,
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
@@ -56,7 +57,9 @@ for (const query of supportedQueries) {
     WildcardIndexHelpers.assertExpectedIndexIsUsed(explainRes, indexSpec.indexName);
 
     for (const sortOrder of nonBlockingSorts) {
-        explainRes = assert.commandWorked(coll.find(query).sort(sortOrder).explain("executionStats"));
+        explainRes = assert.commandWorked(
+            coll.find(query).sort(sortOrder).explain("executionStats"),
+        );
 
         WildcardIndexHelpers.assertExpectedIndexIsUsed(explainRes, indexSpec.indexName);
         assertBlockingSort(explainRes, false);
@@ -68,7 +71,9 @@ for (const query of supportedQueries) {
     }
 
     for (const sortOrder of blockingSorts) {
-        explainRes = assert.commandWorked(coll.find(query).sort(sortOrder).explain("executionStats"));
+        explainRes = assert.commandWorked(
+            coll.find(query).sort(sortOrder).explain("executionStats"),
+        );
 
         WildcardIndexHelpers.assertExpectedIndexIsUsed(explainRes, indexSpec.indexName);
         assertBlockingSort(explainRes, true);

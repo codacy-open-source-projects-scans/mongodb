@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/fts/fts_language.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/fts/fts_basic_tokenizer.h"
 #include "mongo/db/fts/fts_tokenizer.h"
 #include "mongo/db/fts/fts_unicode_tokenizer.h"
@@ -42,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 #include <fmt/format.h>
@@ -49,13 +23,14 @@
 namespace mongo::fts {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
- * Case-insensitive StringData comparator.
+ * Case-insensitive std::string_view comparator.
  * Returns true if a < b.
  */
 struct LanguageStringCompare {
-    bool operator()(StringData a, StringData b) const {
+    bool operator()(std::string_view a, std::string_view b) const {
         return std::lexicographical_compare(
             a.begin(), a.end(), b.begin(), b.end(), [](char a, char b) {
                 return ctype::toLower(a) < ctype::toLower(b);
@@ -71,25 +46,25 @@ struct LanguageStringCompare {
 // - language alias
 //
 struct {
-    StringData name;   // - lower case string name
-    StringData alias;  // - language alias (if nonempty)
+    std::string_view name;   // - lower case string name
+    std::string_view alias;  // - language alias (if nonempty)
 } static constexpr kLanguagesV2V3[] = {
-    {"none"_sd, {}},
-    {"danish"_sd, "da"_sd},
-    {"dutch"_sd, "nl"_sd},
-    {"english"_sd, "en"_sd},
-    {"finnish"_sd, "fi"_sd},
-    {"french"_sd, "fr"_sd},
-    {"german"_sd, "de"_sd},
-    {"hungarian"_sd, "hu"_sd},
-    {"italian"_sd, "it"_sd},
-    {"norwegian"_sd, "nb"_sd},
-    {"portuguese"_sd, "pt"_sd},
-    {"romanian"_sd, "ro"_sd},
-    {"russian"_sd, "ru"_sd},
-    {"spanish"_sd, "es"_sd},
-    {"swedish"_sd, "sv"_sd},
-    {"turkish"_sd, "tr"_sd},
+    {"none"sv, {}},
+    {"danish"sv, "da"sv},
+    {"dutch"sv, "nl"sv},
+    {"english"sv, "en"sv},
+    {"finnish"sv, "fi"sv},
+    {"french"sv, "fr"sv},
+    {"german"sv, "de"sv},
+    {"hungarian"sv, "hu"sv},
+    {"italian"sv, "it"sv},
+    {"norwegian"sv, "nb"sv},
+    {"portuguese"sv, "pt"sv},
+    {"romanian"sv, "ro"sv},
+    {"russian"sv, "ru"sv},
+    {"spanish"sv, "es"sv},
+    {"swedish"sv, "sv"sv},
+    {"turkish"sv, "tr"sv},
 };
 
 //
@@ -99,19 +74,17 @@ struct {
 //
 
 struct {
-    StringData name;
+    std::string_view name;
 } static constexpr kLanguagesV1[] = {
-    {"none"_sd},       {"da"_sd},      {"dan"_sd},       {"danish"_sd},   {"de"_sd},
-    {"deu"_sd},        {"dut"_sd},     {"dutch"_sd},     {"en"_sd},       {"eng"_sd},
-    {"english"_sd},    {"es"_sd},      {"esl"_sd},       {"fi"_sd},       {"fin"_sd},
-    {"finnish"_sd},    {"fr"_sd},      {"fra"_sd},       {"fre"_sd},      {"french"_sd},
-    {"ger"_sd},        {"german"_sd},  {"hu"_sd},        {"hun"_sd},      {"hungarian"_sd},
-    {"it"_sd},         {"ita"_sd},     {"italian"_sd},   {"nl"_sd},       {"nld"_sd},
-    {"no"_sd},         {"nor"_sd},     {"norwegian"_sd}, {"por"_sd},      {"porter"_sd},
-    {"portuguese"_sd}, {"pt"_sd},      {"ro"_sd},        {"romanian"_sd}, {"ron"_sd},
-    {"ru"_sd},         {"rum"_sd},     {"rus"_sd},       {"russian"_sd},  {"spa"_sd},
-    {"spanish"_sd},    {"sv"_sd},      {"swe"_sd},       {"swedish"_sd},  {"tr"_sd},
-    {"tur"_sd},        {"turkish"_sd},
+    {"none"sv},      {"da"sv},      {"dan"sv},       {"danish"sv},  {"de"sv},      {"deu"sv},
+    {"dut"sv},       {"dutch"sv},   {"en"sv},        {"eng"sv},     {"english"sv}, {"es"sv},
+    {"esl"sv},       {"fi"sv},      {"fin"sv},       {"finnish"sv}, {"fr"sv},      {"fra"sv},
+    {"fre"sv},       {"french"sv},  {"ger"sv},       {"german"sv},  {"hu"sv},      {"hun"sv},
+    {"hungarian"sv}, {"it"sv},      {"ita"sv},       {"italian"sv}, {"nl"sv},      {"nld"sv},
+    {"no"sv},        {"nor"sv},     {"norwegian"sv}, {"por"sv},     {"porter"sv},  {"portuguese"sv},
+    {"pt"sv},        {"ro"sv},      {"romanian"sv},  {"ron"sv},     {"ru"sv},      {"rum"sv},
+    {"rus"sv},       {"russian"sv}, {"spa"sv},       {"spanish"sv}, {"sv"sv},      {"swe"sv},
+    {"swedish"sv},   {"tr"sv},      {"tur"sv},       {"turkish"sv},
 };
 
 template <TextIndexVersion ver>
@@ -125,7 +98,7 @@ public:
     using KeyCompare =
         std::conditional_t<(ver >= TEXT_INDEX_VERSION_2), LanguageStringCompare, std::less<>>;
 
-    void add(StringData name, StringData alias = {}) {
+    void add(std::string_view name, std::string_view alias = {}) {
         auto p = std::make_shared<const LanguageType>(std::string{name});
         _map[std::string{name}] = p;
         if (!alias.empty()) {
@@ -133,7 +106,7 @@ public:
         }
     }
 
-    const LanguageType& make(StringData langName) const {
+    const LanguageType& make(std::string_view langName) const {
         std::string nameStr{langName};
         auto it = _map.find(nameStr);
         if (it == _map.end()) {
@@ -178,7 +151,7 @@ const LanguageRegistry<ver>& getLanguageRegistry() {
 
 }  // namespace
 
-const FTSLanguage& FTSLanguage::make(StringData langName, TextIndexVersion textIndexVersion) {
+const FTSLanguage& FTSLanguage::make(std::string_view langName, TextIndexVersion textIndexVersion) {
     switch (textIndexVersion) {
         case TEXT_INDEX_VERSION_1:
             return getLanguageRegistry<TEXT_INDEX_VERSION_1>().make(langName);

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/query/util/jparse_util.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
@@ -37,6 +11,7 @@
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -46,6 +21,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using std::ostringstream;
 using std::string;
@@ -81,9 +57,9 @@ static const char *LBRACE = "{", *RBRACE = "}", *LBRACKET = "[", *RBRACKET = "]"
                   *SINGLEQUOTE = "'", *DOUBLEQUOTE = "\"";
 }  // namespace
 
-JParseUtil::JParseUtil(StringData str) : _jparse(str) {}
+JParseUtil::JParseUtil(std::string_view str) : _jparse(str) {}
 
-Status JParseUtil::value(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::value(std::string_view fieldName, BSONObjBuilder& builder) {
     MONGO_JPARSE_UTIL_DEBUG("fieldName: " << fieldName);
     if (peekToken(LBRACE)) {
         Status ret = object(fieldName, builder);
@@ -182,7 +158,7 @@ Status JParseUtil::parse(BSONObjBuilder& builder) {
     return _jparse.isArray() ? array("UNUSED", builder, false) : object("UNUSED", builder, false);
 }
 
-Status JParseUtil::object(StringData fieldName, BSONObjBuilder& builder, bool subObject) {
+Status JParseUtil::object(std::string_view fieldName, BSONObjBuilder& builder, bool subObject) {
     MONGO_JPARSE_UTIL_DEBUG("fieldName: " << fieldName);
     if (!readToken(LBRACE)) {
         return _jparse.parseError("Expecting '{'");
@@ -370,7 +346,7 @@ Status JParseUtil::object(StringData fieldName, BSONObjBuilder& builder, bool su
     return Status::OK();
 }
 
-Status JParseUtil::regexObject(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::regexObject(std::string_view fieldName, BSONObjBuilder& builder) {
     if (!readToken(COLON)) {
         return _jparse.parseError("Expecting ':'");
     }
@@ -420,7 +396,7 @@ Status JParseUtil::regexObject(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::dbRefObject(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::dbRefObject(std::string_view fieldName, BSONObjBuilder& builder) {
     BSONObjBuilder subBuilder(builder.subobjStart(fieldName));
 
     if (!readToken(COLON)) {
@@ -469,7 +445,7 @@ Status JParseUtil::dbRefObject(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::array(StringData fieldName, BSONObjBuilder& builder, bool subObject) {
+Status JParseUtil::array(std::string_view fieldName, BSONObjBuilder& builder, bool subObject) {
     MONGO_JPARSE_UTIL_DEBUG("fieldName: " << fieldName);
     if (!readToken(LBRACKET)) {
         return _jparse.parseError("Expecting '['");
@@ -485,7 +461,7 @@ Status JParseUtil::array(StringData fieldName, BSONObjBuilder& builder, bool sub
     if (!peekToken(RBRACKET)) {
         DecimalCounter<uint32_t> index;
         do {
-            Status ret = value(StringData{index}, *arrayBuilder);
+            Status ret = value(std::string_view{index}, *arrayBuilder);
             if (!ret.isOK()) {
                 return ret;
             }
@@ -503,7 +479,7 @@ Status JParseUtil::array(StringData fieldName, BSONObjBuilder& builder, bool sub
  * constructors, but for now it only allows "new" before Date().
  * Also note that unlike the interactive shell "Date(x)" and "new Date(x)"
  * have the same behavior.  XXX: this may not be desired. */
-Status JParseUtil::constructor(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::constructor(std::string_view fieldName, BSONObjBuilder& builder) {
     if (readToken("Date")) {
         date(fieldName, builder).transitional_ignore();
     } else {
@@ -512,7 +488,7 @@ Status JParseUtil::constructor(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::date(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::date(std::string_view fieldName, BSONObjBuilder& builder) {
     if (!readToken(LPAREN)) {
         return _jparse.parseError("Expecting '('");
     }
@@ -530,7 +506,7 @@ Status JParseUtil::date(StringData fieldName, BSONObjBuilder& builder) {
         if (boost::lexical_cast<int>(dateString.substr(0, 4)) < 1970) {
             const TimeZoneDatabase kDefaultTimeZoneDatabase{};
             const TimeZone kDefaultTimeZone = TimeZoneDatabase::utcZone();
-            auto format = "%Y-%m-%dT%H:%M:%SZ"_sd;
+            auto format = "%Y-%m-%dT%H:%M:%SZ"sv;
             date = kDefaultTimeZoneDatabase.fromString(dateString, kDefaultTimeZone, format);
         } else {
             // Parse date strings in an ISODate format.
@@ -555,11 +531,11 @@ Status JParseUtil::date(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::numberLong(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::numberLong(std::string_view fieldName, BSONObjBuilder& builder) {
     if (!readToken(LPAREN)) {
         return _jparse.parseError("Expecting '('");
     }
-    char* endptr;
+    const char* endptr;
     int64_t val;
 
     // Check if the number begins in quotations.
@@ -589,7 +565,7 @@ Status JParseUtil::numberLong(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::dbRef(StringData fieldName, BSONObjBuilder& builder) {
+Status JParseUtil::dbRef(std::string_view fieldName, BSONObjBuilder& builder) {
     BSONObjBuilder subBuilder(builder.subobjStart(fieldName));
 
     if (!readToken(LPAREN)) {
@@ -630,8 +606,8 @@ Status JParseUtil::dbRef(StringData fieldName, BSONObjBuilder& builder) {
     return Status::OK();
 }
 
-Status JParseUtil::number(StringData fieldName, BSONObjBuilder& builder) {
-    char* endptrd;
+Status JParseUtil::number(std::string_view fieldName, BSONObjBuilder& builder) {
+    const char* endptrd;
     double retd;
 
     Status parsedStatus = NumberParser::strToAny()(_jparse._input, &retd, &endptrd);
@@ -690,7 +666,7 @@ BSONObj fromFuzzerJson(const char* jsonString, int* len) {
     return builder.obj();
 }
 
-BSONObj fromFuzzerJson(StringData str) {
+BSONObj fromFuzzerJson(std::string_view str) {
     return fromFuzzerJson(std::string{str}.c_str());
 }
 

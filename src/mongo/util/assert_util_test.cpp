@@ -1,40 +1,15 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/assert_util.h"
 
 #include "mongo/base/static_assert.h"
 #include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/demangle.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/str.h"
@@ -43,9 +18,13 @@
 #include <ostream>
 #include <type_traits>
 
+#include "gmock/gmock.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 namespace mongo {
 namespace {
+constexpr int kTripwireLogId = 4457000;
+
 struct PrinterMockTassert {
     auto format(auto& fc) const {
         tasserted(9513401, "tasserting in mock printer");
@@ -93,6 +72,9 @@ struct formatter<mongo::PrinterMockInvariant> : mongo::MemberCallFormatter {};
 
 namespace mongo {
 namespace {
+
+using ::testing::ElementsAre;
+
 #define ASSERT_CATCHES(code, Type)                                         \
     ([] {                                                                  \
         try {                                                              \
@@ -257,7 +239,7 @@ TEST(AssertUtils, UassertIncrementsUserAssertionCounter) {
     auto userAssertions = assertionCount.user.load();
     auto asserted = false;
     try {
-        Status status = {ErrorCodes::BadValue, "Test"};
+        Status status{ErrorCodes::BadValue, "Test"};
         uassertStatusOK(status);
     } catch (const DBException&) {
         asserted = true;
@@ -269,7 +251,7 @@ TEST(AssertUtils, UassertIncrementsUserAssertionCounter) {
 TEST(AssertUtils, InternalAssertWithStatus) {
     auto userAssertions = assertionCount.user.load();
     try {
-        Status status = {ErrorCodes::BadValue, "Test"};
+        Status status{ErrorCodes::BadValue, "Test"};
         iassert(status);
     } catch (const DBException& ex) {
         ASSERT_EQ(ex.code(), ErrorCodes::BadValue);
@@ -297,7 +279,7 @@ TEST(AssertUtils, InternalAssertWithExpression) {
 
 TEST(AssertUtils, MassertTypedExtraInfoWorks) {
     try {
-        msgasserted(ErrorExtraInfoExample(123), "");
+        masserted(ErrorExtraInfoExample(123), "");
     } catch (const DBException& ex) {
         ASSERT(ex.extraInfo());
         ASSERT(ex.extraInfo<ErrorExtraInfoExample>());
@@ -319,16 +301,16 @@ void doTassert() {
     auto tripwireAssertions = assertionCount.tripwire.load();
 
     try {
-        Status status = {ErrorCodes::BadValue, "Test with Status"};
+        Status status{ErrorCodes::BadValue, "Test with Status"};
         tassert(status);
     } catch (const DBException& ex) {
         ASSERT_EQ(ex.code(), ErrorCodes::BadValue);
         ASSERT_EQ(ex.reason(), "Test with Status");
     }
-    ASSERT_EQ(tripwireAssertions + 1, assertionCount.tripwire.load());
+    ASSERT_EQ(assertionCount.tripwire.load(), tripwireAssertions + 1);
 
     tassert(Status::OK());
-    ASSERT_EQ(tripwireAssertions + 1, assertionCount.tripwire.load());
+    ASSERT_EQ(assertionCount.tripwire.load(), tripwireAssertions + 1);
 
     try {
         tassert(4457090, "Test with expression", false);
@@ -336,10 +318,10 @@ void doTassert() {
         ASSERT_EQ(ex.code(), 4457090);
         ASSERT_EQ(ex.reason(), "Test with expression");
     }
-    ASSERT_EQ(tripwireAssertions + 2, assertionCount.tripwire.load());
+    ASSERT_EQ(assertionCount.tripwire.load(), tripwireAssertions + 2);
 
     tassert(4457091, "Another test with expression", true);
-    ASSERT_EQ(tripwireAssertions + 2, assertionCount.tripwire.load());
+    ASSERT_EQ(assertionCount.tripwire.load(), tripwireAssertions + 2);
 
     try {
         tasserted(4457092, "Test with tasserted");
@@ -347,7 +329,7 @@ void doTassert() {
         ASSERT_EQ(ex.code(), 4457092);
         ASSERT_EQ(ex.reason(), "Test with tasserted");
     }
-    ASSERT_EQ(tripwireAssertions + 3, assertionCount.tripwire.load());
+    ASSERT_EQ(assertionCount.tripwire.load(), tripwireAssertions + 3);
 }
 
 DEATH_TEST_REGEX(TassertTerminationTestDeathTest,
@@ -381,6 +363,114 @@ DEATH_TEST_REGEX(TassertTerminationTestDeathTest,
     } catch (const DBException&) {
         // Catch the DBException, to ensure that we eventually abort during clean exit.
     }
+}
+
+/**
+ * Resets tripwires at teardown.
+ */
+class TripwireTest : public unittest::Test {
+public:
+    void setUp() override {
+        _initialTripwireCount = _getTripwireCount();
+    }
+
+    void tearDown() override {
+        assertionCount.tripwire.store(_initialTripwireCount);
+    }
+
+protected:
+    /** Number of tripwires that occurred during the test. */
+    [[nodiscard]] int getTestTripwireCount() const {
+        return assertionCount.tripwire.load() - _initialTripwireCount;
+    }
+
+private:
+    [[nodiscard]] int _getTripwireCount() const {
+        return assertionCount.tripwire.load();
+    }
+
+    int _initialTripwireCount = 0;
+};
+
+/**
+ * Captures log and resets tripwires at teardown.
+ */
+class AssertUtilsTripwireTest : public TripwireTest {
+protected:
+    [[nodiscard]] const unittest::LogCaptureGuard& getLog() const {
+        return _logs;
+    }
+
+    /**
+     * Assert log line is generated correctly.
+     *
+     * Wrap calls in `ASSERT_NO_FATAL_FAILURE()` so test body stops running on failure.
+     */
+    void assertLogFormat(int code, std::string_view errmsg) const {
+        const auto idLines = getLog().indicesOfBSONContainingSubset(BSON("id" << kTripwireLogId));
+        ASSERT_EQ(idLines.size(), 1);
+        const size_t expectedLineIdx = idLines[0];
+
+        ASSERT_THAT(getLog().indicesOfBSONContainingSubset(
+                        BSON("attr" << BSON("error" << BSON("errmsg" << errmsg)))),
+                    ElementsAre(expectedLineIdx));
+        ASSERT_THAT(getLog().indicesOfBSONContainingSubset(
+                        BSON("attr" << BSON("error" << BSON("code" << code)))),
+                    ElementsAre(expectedLineIdx));
+    }
+    void assertLogFormat(Status status) const {
+        assertLogFormat(status.code(), status.reason());
+    }
+
+    /**
+     * Assert no log line is generated.
+     *
+     * Wrap calls in `ASSERT_NO_FATAL_FAILURE()` so test body stops running on failure.
+     */
+    void assertNoLog() const {
+        ASSERT_EQ(getLog().countBSONContainingSubset(BSON("id" << kTripwireLogId)), 0);
+    }
+
+private:
+    unittest::LogCaptureGuard _logs;
+};
+
+TEST_F(AssertUtilsTripwireTest, TassertNoThrowTestWithStatusTrigger) {
+    Status status{ErrorCodes::BadValue, "Test with Status"};
+    tassertNoThrow(status);
+    ASSERT_NO_FATAL_FAILURE(assertLogFormat(status));
+    ASSERT_EQ(getTestTripwireCount(), 1);
+}
+
+TEST_F(AssertUtilsTripwireTest, TassertNoThrowTestWithStatusNoTrigger) {
+    static constexpr Status status = Status::OK();
+    tassertNoThrow(status);
+    ASSERT_EQ(getTestTripwireCount(), 0);
+    ASSERT_NO_FATAL_FAILURE(assertNoLog());
+}
+
+TEST_F(AssertUtilsTripwireTest, TassertNoThrowTestWithExpressionTrigger) {
+    static constexpr int code = 13313500;
+    std::string_view errmsg = "Test with expression";
+    tassertNoThrow(code, errmsg, false);
+    ASSERT_NO_FATAL_FAILURE(assertLogFormat(code, errmsg));
+    ASSERT_EQ(getTestTripwireCount(), 1);
+}
+
+TEST_F(AssertUtilsTripwireTest, TassertNoThrowTestWithExpressionNoTrigger) {
+    static constexpr int code = 4457091;
+    std::string_view errmsg = "Another test with expression";
+    tassertNoThrow(code, errmsg, true);
+    ASSERT_EQ(getTestTripwireCount(), 0);
+    ASSERT_NO_FATAL_FAILURE(assertNoLog());
+}
+
+TEST_F(AssertUtilsTripwireTest, TassertedNoThrowTest) {
+    static constexpr int code = 13313501;
+    std::string_view errmsg = "Test with tassertedNoThrow";
+    tassertedNoThrow(code, errmsg);
+    ASSERT_NO_FATAL_FAILURE(assertLogFormat(code, errmsg));
+    ASSERT_EQ(getTestTripwireCount(), 1);
 }
 
 // fassert and its friends
@@ -678,8 +768,7 @@ DEATH_TEST_REGEX(ScopedDebugInfoDeathTest,
                  InvariantWhenSignalHandlerLoggingDisabled,
                  "(?s)^(?!.*h"
                  "ello)") {
-    RAIIServerParameterControllerForTest knobController("signalHandlerUsesDiagnosticLogging",
-                                                        false);
+    unittest::ServerParameterGuard knobController("signalHandlerUsesDiagnosticLogging", false);
     // The literal is split so it doesn't appear verbatim in stacktrace code snippet.
     ScopedDebugInfo guard("test",
                           "h"
@@ -718,8 +807,7 @@ DEATH_TEST_REGEX(ScopedDebugInfoDeathTest,
                  SignalWhenSignalHandlerLoggingDisabled,
                  "(?s)^(?!.*h"
                  "ello)") {
-    RAIIServerParameterControllerForTest knobController("signalHandlerUsesDiagnosticLogging",
-                                                        false);
+    unittest::ServerParameterGuard knobController("signalHandlerUsesDiagnosticLogging", false);
     // The literal is split so it doesn't appear verbatim in stacktrace code snippet.
     ScopedDebugInfo guard("test",
                           "h"
@@ -767,6 +855,10 @@ constexpr bool checkCanUseUMITassertInConstexprCode = [] {
     tassert(Status::OK());
     tassert(StatusWith(1));
 
+    tassertNoThrow(ErrorCodes::BadValue, "with message", true);
+    tassertNoThrow(Status::OK());
+    tassertNoThrow(StatusWith(1));
+
     return true;
 }();
 
@@ -811,11 +903,110 @@ TEST(ScopedDebugInfoStack, Enabled) {
 }
 
 TEST(ScopedDebugInfoStack, Disabled) {
-    RAIIServerParameterControllerForTest knobController("enableDiagnosticLogging", false);
+    unittest::ServerParameterGuard knobController("enableDiagnosticLogging", false);
     ASSERT(!getScopedDebugInfoStackEnabled());
     ASSERT_EQ(error_details::scopedDebugInfoStack().size(), 0);
     ScopedDebugInfo scopedInfo("test", "hello");
     ASSERT_EQ(error_details::scopedDebugInfoStack().size(), 0);
+}
+
+// AssertionIncrementObserver tests
+//
+// Shared file-static state for observer probes. The observer typedef is a captureless function
+// pointer, so probes can't carry per-test state via lambda capture; they fan out into these.
+namespace observer_probe {
+std::atomic<int> count{0};
+std::atomic<AssertionKind> lastKind{AssertionKind::kRegular};
+
+void record(AssertionKind kind) noexcept {
+    count.fetch_add(1);
+    lastKind.store(kind);
+}
+
+void reset() {
+    count.store(0);
+    lastKind.store(AssertionKind::kRegular);
+}
+
+struct InstallGuard {
+    explicit InstallGuard(AssertionIncrementObserver observer) {
+        reset();
+        setAssertionIncrementObserver(observer);
+    }
+    ~InstallGuard() {
+        setAssertionIncrementObserver(nullptr);
+    }
+};
+}  // namespace observer_probe
+
+class AssertionIncrementObserverTripwireTest : public TripwireTest {};
+
+TEST(AssertionIncrementObserver, UassertNotifiesUser) {
+    observer_probe::InstallGuard guard(&observer_probe::record);
+    try {
+        uasserted(ErrorCodes::BadValue, "probe");
+    } catch (const DBException&) {
+    }
+    ASSERT_EQ(observer_probe::count.load(), 1);
+    ASSERT(observer_probe::lastKind.load() == AssertionKind::kUser);
+}
+
+TEST_F(AssertionIncrementObserverTripwireTest, MassertNotifiesMsg) {
+    observer_probe::InstallGuard guard(&observer_probe::record);
+    try {
+        masserted(ErrorCodes::BadValue, "probe");
+    } catch (const DBException&) {
+    }
+    ASSERT_EQ(observer_probe::count.load(), 1);
+    ASSERT(observer_probe::lastKind.load() == AssertionKind::kMsg);
+}
+
+TEST_F(AssertionIncrementObserverTripwireTest, TassertNotifiesTripwire) {
+    observer_probe::InstallGuard guard(&observer_probe::record);
+    try {
+        tasserted(Status(ErrorCodes::BadValue, "probe"));
+    } catch (const DBException&) {
+    }
+    ASSERT_EQ(observer_probe::count.load(), 1);
+    ASSERT(observer_probe::lastKind.load() == AssertionKind::kTripwire);
+}
+
+TEST_F(AssertionIncrementObserverTripwireTest, TassertNoThrowNotifiesTripwire) {
+    observer_probe::InstallGuard guard(&observer_probe::record);
+    tassertedNoThrow(ErrorCodes::BadValue, "probe");
+
+    ASSERT_EQ(observer_probe::count.load(), 1);
+    ASSERT_EQ(observer_probe::lastKind.load(), AssertionKind::kTripwire);
+}
+
+TEST(AssertionIncrementObserver, ClearingObserverStopsNotifications) {
+    {
+        observer_probe::InstallGuard guard(&observer_probe::record);
+        try {
+            uasserted(ErrorCodes::BadValue, "probe-installed");
+        } catch (const DBException&) {
+        }
+        ASSERT_EQ(observer_probe::count.load(), 1);
+    }
+    // Observer cleared on guard destruction.
+    const auto countAfterClear = observer_probe::count.load();
+    try {
+        uasserted(ErrorCodes::BadValue, "probe-cleared");
+    } catch (const DBException&) {
+    }
+    ASSERT_EQ(observer_probe::count.load(), countAfterClear);
+}
+
+namespace double_install_probe {
+void a(AssertionKind) noexcept {}
+void b(AssertionKind) noexcept {}
+}  // namespace double_install_probe
+
+DEATH_TEST_REGEX(AssertionIncrementObserverDeathTest,
+                 DoubleInstallTriggersInvariant,
+                 "observer already installed") {
+    setAssertionIncrementObserver(&double_install_probe::a);
+    setAssertionIncrementObserver(&double_install_probe::b);  // must abort.
 }
 
 }  // namespace

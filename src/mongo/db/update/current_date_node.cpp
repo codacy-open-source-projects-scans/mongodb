@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/update/current_date_node.h"
@@ -41,14 +15,17 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <string_view>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
 namespace {
-constexpr StringData kType = "$type"_sd;
-constexpr StringData kDate = "date"_sd;
-constexpr StringData kTimestamp = "timestamp"_sd;
+using namespace std::literals::string_view_literals;
+constexpr std::string_view kType = "$type"sv;
+constexpr std::string_view kDate = "date"sv;
+constexpr std::string_view kTimestamp = "timestamp"sv;
 
 void setValue(ServiceContext* service, mutablebson::Element* element, bool typeIsDate) {
     if (typeIsDate) {
@@ -71,7 +48,7 @@ Status CurrentDateNode::init(BSONElement modExpr,
         for (auto&& elem : modExpr.Obj()) {
             if (elem.fieldNameStringData() == kType) {
                 if (elem.type() == BSONType::string) {
-                    StringData valueString = elem.valueStringData();
+                    std::string_view valueString = elem.valueStringData();
                     if (valueString == kDate) {
                         _typeIsDate = true;
                         foundValidType = true;
@@ -116,7 +93,7 @@ void CurrentDateNode::setValueForNewElement(mutablebson::Element* element) const
     setValue(_service, element, _typeIsDate);
 }
 
-BSONObj CurrentDateNode::operatorValue(const SerializationOptions& opts) const {
+BSONObj CurrentDateNode::operatorValue(const query_shape::SerializationOptions& opts) const {
     // We do not need to do any special serialization here, because type is simply an enum with only
     // two possible values.
     BSONObjBuilder bob;

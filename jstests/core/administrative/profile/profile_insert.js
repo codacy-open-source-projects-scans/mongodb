@@ -14,7 +14,7 @@
 // ]
 
 import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
 let testDB = db.getSiblingDB("profile_insert");
@@ -25,12 +25,16 @@ let coll = testDB.getCollection(collName);
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
 assert.commandWorked(
-    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+    testDB.setProfilingLevel(1, {
+        filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}},
+    }),
 );
 
 // Increase this deadline in order to prevent flakiness in this test.
 assert.commandWorked(
-    testDB.getSiblingDB("admin").runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
+    testDB
+        .getSiblingDB("admin")
+        .runCommand({setParameter: 1, internalQueryGlobalProfilingLockDeadlineMs: 1000}),
 );
 
 //

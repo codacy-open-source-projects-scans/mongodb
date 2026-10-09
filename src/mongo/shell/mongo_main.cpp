@@ -1,70 +1,12 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <algorithm>
-#include <array>
-#include <csignal>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <exception>
-#include <fstream>  // IWYU pragma: keep
-#include <iostream>
-#include <iterator>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
+#include "mongo/shell/mongo_main.h"
 
-#include <boost/core/null_deleter.hpp>
-#include <boost/exception/exception.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/log/attributes/value_extraction.hpp>
-#include <boost/log/core/core.hpp>
-#include <boost/log/core/record_view.hpp>
-// IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
-// IWYU pragma: no_include "boost/log/detail/locking_ptr.hpp"
-#include <boost/log/sinks/sync_frontend.hpp>
-#include <boost/log/sinks/text_ostream_backend.hpp>
-#include <boost/log/utility/formatting_ostream_fwd.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/make_shared_object.hpp>
-#include <boost/smart_ptr/shared_ptr.hpp>
-// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -91,11 +33,10 @@
 #include "mongo/logv2/log_manager.h"
 #include "mongo/logv2/log_tag.h"
 #include "mongo/logv2/plain_formatter.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/linenoise.h"
-#include "mongo/shell/mongo_main.h"
 #include "mongo/shell/program_runner.h"
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils.h"
@@ -125,8 +66,37 @@
 #include "mongo/util/version.h"
 #include "mongo/util/version/releases.h"
 
+#include <algorithm>
+#include <array>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <exception>
+#include <fstream>  // IWYU pragma: keep
+#include <iostream>
+#include <iterator>
+#include <memory>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
+#include <boost/core/null_deleter.hpp>
+#include <boost/exception/exception.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/log/attributes/value_extraction.hpp>
+#include <boost/log/core/core.hpp>
+#include <boost/log/core/record_view.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/log/utility/formatting_ostream_fwd.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
 #include <boost/thread/exceptions.hpp>
 
 #ifdef MONGO_CONFIG_GRPC
@@ -146,6 +116,9 @@
 #include <unistd.h>
 #endif
 #endif
+// IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
+// IWYU pragma: no_include "boost/log/detail/locking_ptr.hpp"
+// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -157,7 +130,7 @@ namespace {
 
 bool gotInterrupted = false;
 bool inMultiLine = false;
-static AtomicWord<bool> atPrompt(false);  // can eval before getting to prompt
+static Atomic<bool> atPrompt(false);  // can eval before getting to prompt
 
 
 // Initialize the featureCompatibilityVersion server parameter since the mongo shell does not have a
@@ -557,7 +530,7 @@ static void edit(const std::string& whatToEdit) {
             remove(filename.c_str());
             return;
         }
-        sb.append(StringData(buf, bytes));
+        sb.append(std::string_view(buf, bytes));
     } while (bytes);
 
     // Done with temp file, close and delete it
@@ -577,7 +550,7 @@ static void edit(const std::string& whatToEdit) {
 
 bool mechanismRequiresPassword(const MongoURI& uri) {
     if (const auto authMechanisms = uri.getOption("authMechanism")) {
-        constexpr std::array<StringData, 3> passwordlessMechanisms{
+        constexpr std::array<std::string_view, 3> passwordlessMechanisms{
             auth::kMechanismGSSAPI, auth::kMechanismMongoX509, auth::kMechanismMongoOIDC};
         const std::string& authMechanism = authMechanisms.value();
         for (const auto& mechanism : passwordlessMechanisms) {
@@ -745,11 +718,13 @@ int mongo_main(int argc, char* argv[]) {
             bool usingPassword = !shellGlobalParams.password.empty();
 
             if (mechanismRequiresPassword(parsedURI) &&
-                (parsedURI.getUser().size() || shellGlobalParams.username.size())) {
+                ((parsedURI.getCredential() && parsedURI.getCredential()->username) ||
+                 shellGlobalParams.username.size())) {
                 usingPassword = true;
             }
 
-            if (usingPassword && parsedURI.getPassword().empty()) {
+            if (usingPassword &&
+                (!parsedURI.getCredential() || !parsedURI.getCredential()->password)) {
                 if (!shellGlobalParams.password.empty()) {
                     parsedURI.setPassword(std::as_const(shellGlobalParams.password));
                 } else {
@@ -757,7 +732,8 @@ int mongo_main(int argc, char* argv[]) {
                 }
             }
 
-            if (parsedURI.getUser().empty() && !shellGlobalParams.username.empty()) {
+            if ((!parsedURI.getCredential() || !parsedURI.getCredential()->username) &&
+                !shellGlobalParams.username.empty()) {
                 parsedURI.setUser(std::as_const(shellGlobalParams.username));
             }
 
@@ -782,6 +758,8 @@ int mongo_main(int argc, char* argv[]) {
         mongo::ScriptEngine::setConnectCallback(mongo::shell_utils::onConnect);
         mongo::ScriptEngine::setup(ExecutionEnvironment::TestRunner);
         mongo::getGlobalScriptEngine()->setJSHeapLimitMB(shellGlobalParams.jsHeapLimitMB);
+        mongo::getGlobalScriptEngine()->setJSAbortOnOutOfMemory(
+            shellGlobalParams.jsAbortOnOutOfMemory);
         mongo::getGlobalScriptEngine()->setScopeInitCallback(mongo::shell_utils::initScope);
         mongo::getGlobalScriptEngine()->enableJavaScriptProtection(
             shellGlobalParams.javascriptProtection);
@@ -891,11 +869,12 @@ int mongo_main(int argc, char* argv[]) {
                 //
                 // TestData.ignoreChildProcessErrorCode is set to false by default.
                 bool ignoreChildProcessErrorCode = false;
-                StringData code =
+                shellMainScope->invokeSafe(
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('ignoreChildProcessErrorCode') && "
-                    "TestData.ignoreChildProcessErrorCode === true; }"_sd;
-                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
+                    "TestData.ignoreChildProcessErrorCode === true; }",
+                    nullptr,
+                    nullptr);
                 ignoreChildProcessErrorCode = shellMainScope->getBoolean("__returnValue");
                 auto childProcessErrorCode = mongo::shell_utils::KillMongoProgramInstances();
 
@@ -925,11 +904,12 @@ int mongo_main(int argc, char* argv[]) {
                 //
                 // TestData.ignoreUnterminatedProcesses is set to false by default.
                 bool ignoreUnterminatedProcesses = false;
-                code =
+                shellMainScope->invokeSafe(
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('ignoreUnterminatedProcesses') && "
-                    "TestData.ignoreUnterminatedProcesses === true; }"_sd;
-                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
+                    "TestData.ignoreUnterminatedProcesses === true; }",
+                    nullptr,
+                    nullptr);
                 ignoreUnterminatedProcesses = shellMainScope->getBoolean("__returnValue");
 
                 if (!ignoreUnterminatedProcesses) {
@@ -973,11 +953,12 @@ int mongo_main(int argc, char* argv[]) {
             }
 
             if (!coreDumpsFound.empty()) {
-                auto code =
+                shellMainScope->invokeSafe(
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('cleanUpCoreDumpsFromExpectedCrash') && "
-                    "TestData.cleanUpCoreDumpsFromExpectedCrash === true; }"_sd;
-                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
+                    "TestData.cleanUpCoreDumpsFromExpectedCrash === true; }",
+                    nullptr,
+                    nullptr);
                 bool cleanUpCoreDumpsFromExpectedCrash =
                     shellMainScope->getBoolean("__returnValue");
 
@@ -1003,8 +984,7 @@ int mongo_main(int argc, char* argv[]) {
         }
 
         {
-            const StringData parallelShellCode = "uncheckedParallelShellPidsString();"_sd;
-            shellMainScope->invokeSafe(parallelShellCode.data(), nullptr, nullptr);
+            shellMainScope->invokeSafe("uncheckedParallelShellPidsString();", nullptr, nullptr);
             std::string ret = shellMainScope->getString("__returnValue");
             if (!ret.empty()) {
                 std::cout << "exiting due to parallel shells with unchecked return values. "

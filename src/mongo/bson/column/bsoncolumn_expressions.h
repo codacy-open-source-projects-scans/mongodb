@@ -1,38 +1,13 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/bson/column/bsoncolumn_expressions_internal.h"
 #include "mongo/util/modules.h"
 
-MONGO_MOD_PUBLIC;
+
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo::bsoncolumn {
 
@@ -94,42 +69,50 @@ typename CMaterializer::Element last(BSONBinData bin,
 }
 
 /**
- * Return 'min' element in this BSONColumn.
+ * Return the 'min' element of a BSONColumn paired with its logical row index (counting missing
+ * slots). If the column has no defined values, the element is the materializer's missing
+ * representation and the index is undefined.
  */
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element min(const char* buffer,
-                                    size_t size,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator = nullptr) {
+std::pair<typename CMaterializer::Element, size_t> min(
+    const char* buffer,
+    size_t size,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator = nullptr) {
     return internal::min<CMaterializer>(buffer, size, std::move(allocator), comparator);
 }
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element min(BSONBinData bin,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator = nullptr) {
+std::pair<typename CMaterializer::Element, size_t> min(
+    BSONBinData bin,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator = nullptr) {
     tassert(9095602, "Invalid BSON type for column", bin.type == BinDataType::Column);
     return internal::min<CMaterializer>(
         reinterpret_cast<const char*>(bin.data), bin.length, std::move(allocator), comparator);
 }
 
 /**
- * Return 'max' element in this BSONColumn.
+ * Return the 'max' element of a BSONColumn paired with its logical row index (counting missing
+ * slots). If the column has no defined values, the element is the materializer's missing
+ * representation and the index is undefined.
  */
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element max(const char* buffer,
-                                    size_t size,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator = nullptr) {
+std::pair<typename CMaterializer::Element, size_t> max(
+    const char* buffer,
+    size_t size,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator = nullptr) {
     return internal::max<CMaterializer>(buffer, size, std::move(allocator), comparator);
 }
 template <class CMaterializer>
 requires Materializer<CMaterializer>
-typename CMaterializer::Element max(BSONBinData bin,
-                                    boost::intrusive_ptr<BSONElementStorage> allocator,
-                                    const StringDataComparator* comparator = nullptr) {
+std::pair<typename CMaterializer::Element, size_t> max(
+    BSONBinData bin,
+    boost::intrusive_ptr<BSONElementStorage> allocator,
+    const StringDataComparator* comparator = nullptr) {
     tassert(9095603, "Invalid BSON type for column", bin.type == BinDataType::Column);
     return internal::max<CMaterializer>(
         reinterpret_cast<const char*>(bin.data), bin.length, std::move(allocator), comparator);

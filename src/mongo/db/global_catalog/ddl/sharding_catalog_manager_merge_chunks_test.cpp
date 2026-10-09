@@ -1,42 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -53,17 +21,23 @@
 #include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/namespace_string_util.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/sharding_environment/config_server_test_fixture.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/version_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/random.h"
+#include "mongo/unittest/server_parameter_guard.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/version/releases.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -71,6 +45,12 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -175,7 +155,7 @@ TEST_F(MergeChunkTest, MergeExistingChunksCorrectlyShouldSucceed) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -254,7 +234,7 @@ TEST_F(MergeChunkTest, MergeSeveralChunksCorrectlyShouldSucceed) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -340,7 +320,7 @@ TEST_F(MergeChunkTest, NewMergeShouldClaimHighestVersion) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -424,7 +404,7 @@ TEST_F(MergeChunkTest, MergeLeavesOtherChunksAlone) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -581,7 +561,7 @@ TEST_F(MergeChunkTest, MergeAlreadyHappenedSucceeds) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -596,6 +576,75 @@ TEST_F(MergeChunkTest, MergeAlreadyHappenedSucceeds) {
     ChunkType foundChunk = uassertStatusOK(
         ChunkType::parseFromConfigBSON(chunksVector.front(), collEpoch, collTimestamp));
     ASSERT_BSONOBJ_EQ(mergedChunk.toConfigBSON(), foundChunk.toConfigBSON());
+}
+
+TEST_F(MergeChunkTest, RetryCommittedMergeSucceedsDuringFCVTransition) {
+    const auto collEpoch = OID::gen();
+    const Timestamp collTimestamp(42);
+    const auto collUuid = UUID::gen();
+
+    ChunkType chunk;
+    chunk.setName(OID::gen());
+    chunk.setCollectionUUID(collUuid);
+    chunk.setVersion(ChunkVersion({collEpoch, collTimestamp}, {1, 0}));
+    chunk.setShard(_shardId);
+    chunk.setOnCurrentShardSince(Timestamp{100, 0});
+    chunk.setHistory({ChunkHistory{*chunk.getOnCurrentShardSince(), _shardId}});
+
+    auto chunk2(chunk);
+    chunk2.setName(OID::gen());
+    chunk2.setOnCurrentShardSince(Timestamp{200, 0});
+    chunk2.setHistory({ChunkHistory{*chunk2.getOnCurrentShardSince(), _shardId}});
+
+    const auto chunkMin = BSON("a" << 1);
+    const auto chunkBound = BSON("a" << 5);
+    const auto chunkMax = BSON("a" << 10);
+    chunk.setRange({chunkMin, chunkBound});
+    chunk2.setRange({chunkBound, chunkMax});
+
+    setupCollection(_nss2, _keyPattern, {chunk, chunk2});
+
+    const ChunkRange rangeToBeMerged(chunkMin, chunkMax);
+    const auto doMerge = [&] {
+        return ShardingCatalogManager::get(operationContext())
+            ->commitChunksMerge(operationContext(),
+                                _nss2,
+                                collEpoch,
+                                collTimestamp,
+                                collUuid,
+                                rangeToBeMerged,
+                                _shardId);
+    };
+
+    ASSERT_OK(doMerge());
+
+    const auto originalFCV =
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+    ScopeGuard restoreFCV([&] { serverGlobalParams.mutableFCV.setVersion(originalFCV); });
+    // (Generic FCV reference): the retry carries a stable last LTS OFCV while server FCV
+    // transitions.
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastLTS);
+    VersionContext::FixedOperationFCVRegion fixedOperationFCV(operationContext());
+    serverGlobalParams.mutableFCV.setVersion(
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
+
+    ASSERT_OK(doMerge());
+
+    const auto query = BSON(ChunkType::collectionUUID() << collUuid);
+    auto findResponse = uassertStatusOK(
+        getConfigShard()->exhaustiveFindOnConfig(operationContext(),
+                                                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                                 repl::ReadConcernArgs::kLocal,
+                                                 NamespaceString::kConfigsvrChunksNamespace,
+                                                 query,
+                                                 BSON(ChunkType::lastmod << -1),
+                                                 boost::none));
+    ASSERT_EQ(1u, findResponse.docs.size());
+
+    auto mergedChunk = uassertStatusOK(
+        ChunkType::parseFromConfigBSON(findResponse.docs.front(), collEpoch, collTimestamp));
+    ASSERT_BSONOBJ_EQ(chunkMin, mergedChunk.getMin());
+    ASSERT_BSONOBJ_EQ(chunkMax, mergedChunk.getMax());
 }
 
 TEST_F(MergeChunkTest, MergingChunksWithDollarPrefixShouldSucceed) {
@@ -654,7 +703,7 @@ TEST_F(MergeChunkTest, MergingChunksWithDollarPrefixShouldSucceed) {
     auto findResponse = uassertStatusOK(
         getConfigShard()->exhaustiveFindOnConfig(operationContext(),
                                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                 repl::ReadConcernLevel::kLocalReadConcern,
+                                                 repl::ReadConcernArgs::kLocal,
                                                  NamespaceString::kConfigsvrChunksNamespace,
                                                  query,
                                                  BSON(ChunkType::lastmod << -1),
@@ -971,7 +1020,7 @@ protected:
         auto findResponse = uassertStatusOK(getConfigShard()->exhaustiveFindOnConfig(
             operationContext(),
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            repl::ReadConcernLevel::kLocalReadConcern,
+            repl::ReadConcernArgs::kLocal,
             NamespaceString::kConfigsvrChunksNamespace,
             query,
             BSON(ChunkType::min << 1),
@@ -1205,7 +1254,7 @@ protected:
             auto response = assertGet(getConfigShard()->exhaustiveFindOnConfig(
                 operationContext(),
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                repl::ReadConcernLevel::kLocalReadConcern,
+                repl::ReadConcernArgs::kLocal,
                 ChangeLogType::ConfigNS,
                 query.obj(),
                 BSONObj(),
@@ -1297,6 +1346,365 @@ TEST_F(MergeAllChunksOnShardTest, AllMergeableChunksGetSquashed) {
 
         throw;
     }
+}
+
+TEST_F(MergeAllChunksOnShardTest, RetryCommittedMergeAllChunksOnShardSucceedsDuringFCVTransition) {
+    const ShardId shardId{_shards.at(0).getName()};
+    auto version = ChunkVersion{{_epoch, _ts}, {1, 0}};
+
+    ChunkType chunk;
+    chunk.setName(OID::gen());
+    chunk.setCollectionUUID(_collUuid);
+    chunk.setVersion(version);
+    chunk.setShard(shardId);
+    chunk.setRange({_keyPattern.globalMin(), BSON("x" << 0)});
+    chunk.setOnCurrentShardSince(Timestamp(0, 1));
+    chunk.setHistory({ChunkHistory{*chunk.getOnCurrentShardSince(), shardId}});
+
+    version.incMinor();
+    ChunkType chunk2;
+    chunk2.setName(OID::gen());
+    chunk2.setCollectionUUID(_collUuid);
+    chunk2.setVersion(version);
+    chunk2.setShard(shardId);
+    chunk2.setRange({BSON("x" << 0), _keyPattern.globalMax()});
+    chunk2.setOnCurrentShardSince(Timestamp(0, 1));
+    chunk2.setHistory({ChunkHistory{*chunk2.getOnCurrentShardSince(), shardId}});
+
+    setupCollection(_nss, _keyPattern, {chunk, chunk2});
+
+    const auto doMergeAll = [&] {
+        return ShardingCatalogManager::get(operationContext())
+            ->commitMergeAllChunksOnShard(operationContext(), _nss, shardId);
+    };
+
+    ASSERT_OK(doMergeAll());
+
+    const auto originalFCV =
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion();
+    ScopeGuard restoreFCV([&] { serverGlobalParams.mutableFCV.setVersion(originalFCV); });
+    // (Generic FCV reference): the retry carries a stable last LTS OFCV while server FCV
+    // transitions.
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastLTS);
+    VersionContext::FixedOperationFCVRegion fixedOperationFCV(operationContext());
+    serverGlobalParams.mutableFCV.setVersion(
+        multiversion::GenericFCV::kUpgradingFromLastLTSToLatest);
+
+    ASSERT_OK(doMergeAll());
+
+    const auto chunks = getChunks();
+    ASSERT_EQ(1u, chunks.size());
+    ASSERT_EQ(shardId, chunks.front().getShard());
+    ASSERT_BSONOBJ_EQ(_keyPattern.globalMin(), chunks.front().getMin());
+    ASSERT_BSONOBJ_EQ(_keyPattern.globalMax(), chunks.front().getMax());
+}
+
+// Returns the field names of 'obj' in sorted order. Used to compare the shape (not the values) of
+// two chunk documents.
+std::vector<std::string> sortedFieldNames(const BSONObj& obj) {
+    std::vector<std::string> names;
+    for (const auto& element : obj) {
+        names.push_back(element.fieldName());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+class CommitMergeTest : public MergeChunkTest {
+protected:
+    // Returns the highest chunk version owned by 'shard', i.e. its shard placement version.
+    ChunkVersion getShardVersion(const UUID& collUuid,
+                                 const OID& collEpoch,
+                                 const Timestamp& collTimestamp,
+                                 const ShardId& shard) {
+        auto doc = uassertStatusOK(findOneOnConfigCollection(
+            operationContext(),
+            NamespaceString::kConfigsvrChunksNamespace,
+            BSON(ChunkType::collectionUUID << collUuid << ChunkType::shard(shard.toString())),
+            BSON(ChunkType::lastmod << -1)));
+        return uassertStatusOK(ChunkType::parseFromConfigBSON(doc, collEpoch, collTimestamp))
+            .getVersion();
+    }
+
+    std::vector<ChunkType> commitMerge(const NamespaceString& nss,
+                                       const ChunkVersion& shardVersionPreMerge,
+                                       const ChunkRange& chunkRange,
+                                       const ShardId& shardId) {
+        return assertGet(
+            ShardingCatalogManager::get(operationContext())
+                ->commitMerge(operationContext(), nss, shardVersionPreMerge, chunkRange, shardId));
+    }
+
+    // Asserts two changed-chunks lists describe the same chunks (keyed by chunk min).
+    void assertSameChangedChunks(std::vector<ChunkType> lhs, std::vector<ChunkType> rhs) {
+        ASSERT_EQ(lhs.size(), rhs.size());
+        const auto byMin = [](const ChunkType& l, const ChunkType& r) {
+            return l.getMin().woCompare(r.getMin()) < 0;
+        };
+        std::sort(lhs.begin(), lhs.end(), byMin);
+        std::sort(rhs.begin(), rhs.end(), byMin);
+        for (size_t i = 0; i < lhs.size(); ++i) {
+            ASSERT_BSONOBJ_EQ(lhs[i].getMin(), rhs[i].getMin());
+            ASSERT_BSONOBJ_EQ(lhs[i].getMax(), rhs[i].getMax());
+            ASSERT_EQ(lhs[i].getShard(), rhs[i].getShard());
+            ASSERT_EQ(lhs[i].getVersion(), rhs[i].getVersion());
+        }
+    }
+
+    // Simulates a concurrent DDL disabling chunk operations on the collection by clearing the
+    // allowChunkOperations flag on its config.collections document.
+    void disallowChunkOperations(const NamespaceString& nss) {
+        DBDirectClient client(operationContext());
+        client.update(
+            NamespaceString::kConfigsvrCollectionsNamespace,
+            BSON(CollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
+            BSON("$set" << BSON(CollectionType::kAllowChunkOperationsFieldName << false)));
+    }
+
+    // Sets up a collection with two contiguous chunks on '_shardId' spanning [1, 5) and [5, 10).
+    void setupTwoContiguousChunks(const NamespaceString& nss,
+                                  const UUID& collUuid,
+                                  const OID& collEpoch,
+                                  const Timestamp& collTimestamp) {
+        ChunkType chunk1;
+        chunk1.setName(OID::gen());
+        chunk1.setCollectionUUID(collUuid);
+        chunk1.setVersion(ChunkVersion({collEpoch, collTimestamp}, {1, 0}));
+        chunk1.setShard(_shardId);
+        chunk1.setRange({BSON("a" << 1), BSON("a" << 5)});
+        chunk1.setOnCurrentShardSince(Timestamp(100, 0));
+        chunk1.setHistory({ChunkHistory(Timestamp(100, 0), _shardId)});
+
+        ChunkType chunk2;
+        chunk2.setName(OID::gen());
+        chunk2.setCollectionUUID(collUuid);
+        chunk2.setVersion(ChunkVersion({collEpoch, collTimestamp}, {1, 1}));
+        chunk2.setShard(_shardId);
+        chunk2.setRange({BSON("a" << 5), BSON("a" << 10)});
+        chunk2.setOnCurrentShardSince(Timestamp(200, 0));
+        chunk2.setHistory({ChunkHistory(Timestamp(200, 0), _shardId)});
+
+        setupCollection(nss, _keyPattern, {chunk1, chunk2});
+    }
+};
+
+TEST_F(CommitMergeTest, CommitMergeReturnsMergedChunk) {
+    const auto collEpoch = OID::gen();
+    const Timestamp collTimestamp(42);
+    const auto collUuid = UUID::gen();
+    setupTwoContiguousChunks(_nss1, collUuid, collEpoch, collTimestamp);
+
+    const auto shardVersionPreMerge = ChunkVersion({collEpoch, collTimestamp}, {1, 1});
+    auto changedChunks = commitMerge(
+        _nss1, shardVersionPreMerge, ChunkRange(BSON("a" << 1), BSON("a" << 10)), _shardId);
+
+    ASSERT_EQ(1U, changedChunks.size());
+    ASSERT_BSONOBJ_EQ(BSON("a" << 1), changedChunks[0].getMin());
+    ASSERT_BSONOBJ_EQ(BSON("a" << 10), changedChunks[0].getMax());
+    ASSERT_EQ(_shardId, changedChunks[0].getShard());
+    ASSERT_EQ(std::partial_ordering::less, shardVersionPreMerge <=> changedChunks[0].getVersion());
+}
+
+TEST_F(CommitMergeTest, IdempotentRetryReturnsSameChangedChunks) {
+    const auto collEpoch = OID::gen();
+    const Timestamp collTimestamp(42);
+    const auto collUuid = UUID::gen();
+    setupTwoContiguousChunks(_nss1, collUuid, collEpoch, collTimestamp);
+
+    const auto shardVersionPreMerge = ChunkVersion({collEpoch, collTimestamp}, {1, 1});
+    const ChunkRange range(BSON("a" << 1), BSON("a" << 10));
+
+    auto firstResult = commitMerge(_nss1, shardVersionPreMerge, range, _shardId);
+    const auto versionAfterFirst = getShardVersion(collUuid, collEpoch, collTimestamp, _shardId);
+
+    // Retry with the same arguments; the merge is already committed.
+    auto secondResult = commitMerge(_nss1, shardVersionPreMerge, range, _shardId);
+
+    assertSameChangedChunks(firstResult, secondResult);
+
+    // The retry must not bump any version.
+    ASSERT_EQ(versionAfterFirst, getShardVersion(collUuid, collEpoch, collTimestamp, _shardId));
+}
+
+// An idempotent retry of an already-applied commit must return OK even when chunk operations have
+// since been disallowed on the collection. The allowChunkOperations check runs only on the
+// non-retry path.
+TEST_F(CommitMergeTest, IdempotentRetrySucceedsWhenChunkOperationsDisallowed) {
+    const auto collEpoch = OID::gen();
+    const Timestamp collTimestamp(42);
+    const auto collUuid = UUID::gen();
+    setupTwoContiguousChunks(_nss1, collUuid, collEpoch, collTimestamp);
+
+    const auto shardVersionPreMerge = ChunkVersion({collEpoch, collTimestamp}, {1, 1});
+    const ChunkRange range(BSON("a" << 1), BSON("a" << 10));
+
+    auto firstResult = commitMerge(_nss1, shardVersionPreMerge, range, _shardId);
+
+    disallowChunkOperations(_nss1);
+
+    auto secondResult = commitMerge(_nss1, shardVersionPreMerge, range, _shardId);
+
+    assertSameChangedChunks(firstResult, secondResult);
+}
+
+// The commit returns a chunk that participants store alongside chunks they load from the global
+// catalog, so both must expose the same set of fields. This compares the field set (format), not
+// the values, of the merged chunk against the durable chunk for the same range.
+TEST_F(CommitMergeTest, ChangedChunksHaveSameFormatAsDurableChunks) {
+    const auto collEpoch = OID::gen();
+    const Timestamp collTimestamp(42);
+    const auto collUuid = UUID::gen();
+    setupTwoContiguousChunks(_nss1, collUuid, collEpoch, collTimestamp);
+
+    const auto shardVersionPreMerge = ChunkVersion({collEpoch, collTimestamp}, {1, 1});
+    auto changedChunks = commitMerge(
+        _nss1, shardVersionPreMerge, ChunkRange(BSON("a" << 1), BSON("a" << 10)), _shardId);
+    ASSERT_EQ(1U, changedChunks.size());
+
+    auto fromCatalog = uassertStatusOK(getChunkDoc(
+        operationContext(), collUuid, changedChunks[0].getMin(), collEpoch, collTimestamp));
+    ASSERT_EQ(sortedFieldNames(changedChunks[0].toConfigBSON()),
+              sortedFieldNames(fromCatalog.toConfigBSON()));
+}
+
+class CommitMergeAllPrecomputedChunksOnShardTest : public MergeAllChunksOnShardTest {
+protected:
+    ShardId shard0() const {
+        return ShardId{_shards.at(0).getName()};
+    }
+
+    // Sets up '_nss' with two contiguous mergeable chunks on shard0 spanning [MinKey, 0) and
+    // [0, MaxKey).
+    void setupTwoContiguousChunksOnShard0() {
+        auto version = ChunkVersion{{_epoch, _ts}, {1, 0}};
+
+        ChunkType chunk;
+        chunk.setName(OID::gen());
+        chunk.setCollectionUUID(_collUuid);
+        chunk.setVersion(version);
+        chunk.setShard(shard0());
+        chunk.setRange({_keyPattern.globalMin(), BSON("x" << 0)});
+        chunk.setOnCurrentShardSince(Timestamp(0, 1));
+        chunk.setHistory({ChunkHistory{Timestamp(0, 1), shard0()}});
+
+        version.incMinor();
+        ChunkType chunk2;
+        chunk2.setName(OID::gen());
+        chunk2.setCollectionUUID(_collUuid);
+        chunk2.setVersion(version);
+        chunk2.setShard(shard0());
+        chunk2.setRange({BSON("x" << 0), _keyPattern.globalMax()});
+        chunk2.setOnCurrentShardSince(Timestamp(0, 1));
+        chunk2.setHistory({ChunkHistory{Timestamp(0, 1), shard0()}});
+
+        setupCollection(_nss, _keyPattern, {chunk, chunk2});
+    }
+
+    // Builds the precomputed post-merge layout to commit: a single chunk on shard0 spanning the
+    // whole key space. The embedded version is ignored (recomputed under the chunk-op lock).
+    std::vector<ChunkType> makeMergedChunkList() {
+        ChunkType merged;
+        merged.setName(OID::gen());
+        merged.setCollectionUUID(_collUuid);
+        merged.setVersion(ChunkVersion{{_epoch, _ts}, {1, 0}});
+        merged.setShard(shard0());
+        merged.setRange({_keyPattern.globalMin(), _keyPattern.globalMax()});
+        merged.setOnCurrentShardSince(Timestamp(0, 1));
+        merged.setHistory({ChunkHistory{Timestamp(0, 1), shard0()}});
+        return {merged};
+    }
+
+    std::pair<ShardingCatalogManager::ShardAndCollectionPlacementVersions, std::vector<ChunkType>>
+    commitPrecomputed(std::vector<ChunkType> newChunks) {
+        return assertGet(ShardingCatalogManager::get(operationContext())
+                             ->commitMergeAllPrecomputedChunksOnShard(
+                                 operationContext(), _nss, shard0(), std::move(newChunks)));
+    }
+
+    // Simulates a concurrent DDL disabling chunk operations on the collection by clearing the
+    // allowChunkOperations flag on its config.collections document.
+    void disallowChunkOperations(const NamespaceString& nss) {
+        DBDirectClient client(operationContext());
+        client.update(
+            NamespaceString::kConfigsvrCollectionsNamespace,
+            BSON(CollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())),
+            BSON("$set" << BSON(CollectionType::kAllowChunkOperationsFieldName << false)));
+    }
+
+    // Asserts two changed-chunks lists describe the same chunks (keyed by chunk min).
+    void assertSameChangedChunks(std::vector<ChunkType> lhs, std::vector<ChunkType> rhs) {
+        ASSERT_EQ(lhs.size(), rhs.size());
+        const auto byMin = [](const ChunkType& l, const ChunkType& r) {
+            return l.getMin().woCompare(r.getMin()) < 0;
+        };
+        std::sort(lhs.begin(), lhs.end(), byMin);
+        std::sort(rhs.begin(), rhs.end(), byMin);
+        for (size_t i = 0; i < lhs.size(); ++i) {
+            ASSERT_BSONOBJ_EQ(lhs[i].getMin(), rhs[i].getMin());
+            ASSERT_BSONOBJ_EQ(lhs[i].getMax(), rhs[i].getMax());
+            ASSERT_EQ(lhs[i].getShard(), rhs[i].getShard());
+            ASSERT_EQ(lhs[i].getVersion(), rhs[i].getVersion());
+        }
+    }
+};
+
+// A fresh commit merges the precomputed ranges and returns the resulting chunk(s), which match the
+// durable catalog exactly (same fields, same version as the new collection placement version).
+TEST_F(CommitMergeAllPrecomputedChunksOnShardTest, ReturnsMergedChunks) {
+    setupTwoContiguousChunksOnShard0();
+
+    auto [placement, changedChunks] = commitPrecomputed(makeMergedChunkList());
+
+    ASSERT_EQ(1U, changedChunks.size());
+    ASSERT_BSONOBJ_EQ(_keyPattern.globalMin(), changedChunks[0].getMin());
+    ASSERT_BSONOBJ_EQ(_keyPattern.globalMax(), changedChunks[0].getMax());
+    ASSERT_EQ(shard0(), changedChunks[0].getShard());
+    ASSERT_EQ(changedChunks[0].getVersion(), placement.collectionPlacementVersion);
+
+    const auto durableChunks = getChunks();
+    ASSERT_EQ(1U, durableChunks.size());
+    ASSERT_BSONOBJ_EQ(changedChunks[0].toConfigBSON(), durableChunks[0].toConfigBSON());
+}
+
+// Re-running the commit with the same precomputed input and no retryable-write session must be
+// idempotent: because there is no session to deduplicate against, this can only succeed through the
+// range-based already-committed detection. It returns the same chunks and does not bump the
+// version.
+TEST_F(CommitMergeAllPrecomputedChunksOnShardTest, IdempotentRetryReturnsSameChangedChunks) {
+    setupTwoContiguousChunksOnShard0();
+    const auto newChunks = makeMergedChunkList();
+
+    const auto firstChanged = commitPrecomputed(newChunks).second;
+    const auto versionAfterFirst = firstChanged[0].getVersion();
+
+    const auto secondChanged = commitPrecomputed(newChunks).second;
+
+    assertSameChangedChunks(firstChanged, secondChanged);
+
+    // The retry must not re-merge or bump any version.
+    const auto durableChunks = getChunks();
+    ASSERT_EQ(1U, durableChunks.size());
+    ASSERT_EQ(versionAfterFirst, durableChunks[0].getVersion());
+    ASSERT_EQ(versionAfterFirst, secondChanged[0].getVersion());
+}
+
+// An idempotent retry of an already-applied commit must return OK even when chunk operations have
+// since been disallowed on the collection. The allowChunkOperations check runs only on the fresh
+// (non-already-committed) path.
+TEST_F(CommitMergeAllPrecomputedChunksOnShardTest,
+       IdempotentRetrySucceedsWhenChunkOperationsDisallowed) {
+    setupTwoContiguousChunksOnShard0();
+    const auto newChunks = makeMergedChunkList();
+
+    const auto firstChanged = commitPrecomputed(newChunks).second;
+
+    disallowChunkOperations(_nss);
+
+    const auto secondChanged = commitPrecomputed(newChunks).second;
+
+    assertSameChangedChunks(firstChanged, secondChanged);
 }
 
 }  // namespace

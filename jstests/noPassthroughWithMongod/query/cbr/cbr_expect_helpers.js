@@ -16,7 +16,9 @@ export class Stage {
 
     constructor(stageExplain) {
         this.explain = stageExplain;
-        const children = stageExplain.inputStage ? [stageExplain.inputStage] : stageExplain.inputStages || [];
+        const children = stageExplain.inputStage
+            ? [stageExplain.inputStage]
+            : stageExplain.inputStages || [];
         this.children = children.map((c) => new Stage(c));
     }
 
@@ -50,7 +52,16 @@ export class Stage {
     }
 
     getStage(stageName) {
-        return this.is(stageName) ? this : this.children.find((s) => s.getStage(stageName));
+        if (this.is(stageName)) {
+            return this;
+        }
+        for (const child of this.children) {
+            const found = child.getStage(stageName);
+            if (found) {
+                return found;
+            }
+        }
+        return undefined;
     }
 
     #expectInner(stageName, ...expectations) {
@@ -115,7 +126,10 @@ export const ce = new ArithmeticExpectations("cardinalityEstimate", (stage) => s
  * e.g.,
  *    new Stage(queryPlanner.winningPlan).expect("IXSCAN", ce.eq(10), numKeys.eq(10));
  */
-export const numKeys = new ArithmeticExpectations("numKeysEstimate", (stage) => stage.numKeysEstimate);
+export const numKeys = new ArithmeticExpectations(
+    "numKeysEstimate",
+    (stage) => stage.numKeysEstimate,
+);
 
 /* Used to set an expectation on the key pattern of an IXSCAN.
  * e.g.,

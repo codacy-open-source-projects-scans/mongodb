@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_shape/agg_cmd_shape.h"
 
@@ -36,6 +10,10 @@
 #include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo::query_shape {
 
@@ -52,9 +30,9 @@ public:
     }
 
     std::unique_ptr<AggregateCommandRequest> makeAggregateCommandRequest(
-        std::vector<StringData> stagesJson,
-        boost::optional<StringData> letJson = boost::none,
-        boost::optional<StringData> collationJson = boost::none) {
+        std::vector<std::string_view> stagesJson,
+        boost::optional<std::string_view> letJson = boost::none,
+        boost::optional<std::string_view> collationJson = boost::none) {
         std::vector<BSONObj> pipeline;
         for (auto&& stage : stagesJson) {
             pipeline.push_back(fromjson(stage));
@@ -72,12 +50,16 @@ public:
     }
 
     std::unique_ptr<AggCmdShape> makeShapeFromPipeline(
-        std::vector<StringData> stagesJson,
-        boost::optional<StringData> letJson = boost::none,
-        boost::optional<StringData> collationJson = boost::none) {
+        std::vector<std::string_view> stagesJson,
+        boost::optional<std::string_view> letJson = boost::none,
+        boost::optional<std::string_view> collationJson = boost::none,
+        boost::optional<bool> rawData = boost::none) {
 
         auto aggRequest = makeAggregateCommandRequest(
             std::move(stagesJson), std::move(letJson), std::move(collationJson));
+        if (rawData.has_value()) {
+            aggRequest->setRawData(*rawData);
+        }
 
         auto parsedPipeline = pipeline_factory::makePipeline(
             aggRequest->getPipeline(), _expCtx, pipeline_factory::kOptionsMinimal);
@@ -89,8 +71,11 @@ public:
     }
 
     std::unique_ptr<AggCmdShapeComponents> makeShapeComponentsFromPipeline(
-        std::vector<StringData> stagesJson, OptionalBool allowDiskUse = {}) {
+        std::vector<std::string_view> stagesJson, OptionalBool allowDiskUse = {}) {
         auto aggRequest = makeAggregateCommandRequest(std::move(stagesJson));
+        if (allowDiskUse.has_value()) {
+            aggRequest->setAllowDiskUse(bool(allowDiskUse));
+        }
 
         auto parsedPipeline = pipeline_factory::makePipeline(
             aggRequest->getPipeline(), _expCtx, pipeline_factory::kOptionsMinimal);
@@ -98,7 +83,7 @@ public:
             *aggRequest,
             stdx::unordered_set<NamespaceString>{kDefaultTestNss},
             parsedPipeline->serializeToBson(
-                SerializationOptions::kRepresentativeQueryShapeSerializeOptions),
+                query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions),
             LetShapeComponent(aggRequest->getLet(), _expCtx));
     }
 
@@ -110,7 +95,7 @@ public:
 
 TEST_F(AggCmdShapeTest, BasicPipelineShape) {
     auto shape =
-        makeShapeFromPipeline({R"({$match: {x: 3, y: {$lte: 3}}})"_sd,
+        makeShapeFromPipeline({R"({$match: {x: 3, y: {$lte: 3}}})"sv,
                                R"({$group: {_id: "$y", z: {$max: "$z"}, w: {$avg: "$w"}}})"});
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -150,13 +135,13 @@ TEST_F(AggCmdShapeTest, BasicPipelineShape) {
             ]
         })",
         shape->toBson(_operationContext.get(),
-                      SerializationOptions::kDebugQueryShapeSerializeOptions,
+                      query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions,
                       SerializationContext::stateDefault()));
 }
 
 TEST_F(AggCmdShapeTest, IncludesLet) {
-    auto shape = makeShapeFromPipeline({R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd},
-                                       R"({x: 4, y: "str"})"_sd);
+    auto shape = makeShapeFromPipeline({R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv},
+                                       R"({x: 4, y: "str"})"sv);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "cmdNs": {
@@ -182,7 +167,7 @@ TEST_F(AggCmdShapeTest, IncludesLet) {
             ]
         })",
         shape->toBson(_operationContext.get(),
-                      SerializationOptions::kDebugQueryShapeSerializeOptions,
+                      query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions,
                       SerializationContext::stateDefault()));
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -214,15 +199,15 @@ TEST_F(AggCmdShapeTest, IncludesLet) {
             ]
         })",
         shape->toBson(_operationContext.get(),
-                      SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                      query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
                       SerializationContext::stateDefault()));
 }
 
 // Verifies that "aggregate" command shape hash value is stable (does not change between the
 // versions of the server).
 TEST_F(AggCmdShapeTest, StableQueryShapeHashValue) {
-    auto shape = makeShapeFromPipeline({R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd},
-                                       R"({x: 4, y: "str"})"_sd);
+    auto shape = makeShapeFromPipeline({R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv},
+                                       R"({x: 4, y: "str"})"sv);
 
     auto serializationContext = SerializationContext::stateCommandRequest();
     const auto hash = shape->sha256Hash(_operationContext.get(), serializationContext);
@@ -232,7 +217,7 @@ TEST_F(AggCmdShapeTest, StableQueryShapeHashValue) {
 
 TEST_F(AggCmdShapeTest, SizeOfAggCmdShapeComponents) {
     auto aggComponents = makeShapeComponentsFromPipeline(
-        {R"({$match: {x: 3, y: {$lte: 3}}})"_sd,
+        {R"({$match: {x: 3, y: {$lte: 3}}})"sv,
          R"({$group: {_id: "$y", z: {$max: "$z"}, w: {$avg: "$w"}}})"},
         false /*allowDiskUse*/);
 
@@ -253,11 +238,11 @@ TEST_F(AggCmdShapeTest, SizeOfAggCmdShapeComponents) {
 
 TEST_F(AggCmdShapeTest, EquivalentAggCmdShapeComponentSizes) {
     auto aggComponentsDiskUseFalse = makeShapeComponentsFromPipeline(
-        {R"({$match: {x: 3, y: {$lte: 3}}})"_sd,
+        {R"({$match: {x: 3, y: {$lte: 3}}})"sv,
          R"({$group: {_id: "$y", z: {$max: "$z"}, w: {$avg: "$w"}}})"},
         false /*allowDiskUse*/);
     auto aggComponentsDiskUseTrue = makeShapeComponentsFromPipeline(
-        {R"({$match: {x: 3, y: {$lte: 3}}})"_sd,
+        {R"({$match: {x: 3, y: {$lte: 3}}})"sv,
          R"({$group: {_id: "$y", z: {$max: "$z"}, w: {$avg: "$w"}}})"},
         true /*allowDiskUse*/);
     ASSERT_EQ(aggComponentsDiskUseFalse->size(), aggComponentsDiskUseTrue->size());
@@ -267,25 +252,67 @@ TEST_F(AggCmdShapeTest, DifferentAggCmdShapeComponentSizes) {
     auto smallAggComponents = makeShapeComponentsFromPipeline({R"({$match: {x: 3, y: {$lte: 3}}})"},
                                                               false /*allowDiskUse*/);
     auto largeAggComponents = makeShapeComponentsFromPipeline(
-        {R"({$match: {x: 3, y: {$lte: 3}}})"_sd,
+        {R"({$match: {x: 3, y: {$lte: 3}}})"sv,
          R"({$group: {_id: "$y", z: {$max: "$z"}, w: {$avg: "$w"}}})"},
         false /*allowDiskUse*/);
     ASSERT_LT(smallAggComponents->size(), largeAggComponents->size());
 }
 
 TEST_F(AggCmdShapeTest, SizeOfAggCmdShapeWithAndWithoutLet) {
-    auto shapeWithoutLet = makeShapeFromPipeline({R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd});
-    auto shapeWithLet = makeShapeFromPipeline({R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd},
-                                              R"({x: 4, y: "str"})"_sd);
+    auto shapeWithoutLet = makeShapeFromPipeline({R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv});
+    auto shapeWithLet = makeShapeFromPipeline({R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv},
+                                              R"({x: 4, y: "str"})"sv);
     ASSERT_LT(shapeWithoutLet->size(), shapeWithLet->size());
 }
 
 TEST_F(AggCmdShapeTest, SizeOfAggCmdShapeWithAndWithoutCollation) {
     auto shapeWithoutCollation =
-        makeShapeFromPipeline({R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd});
+        makeShapeFromPipeline({R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv});
     auto shapeWithCollation = makeShapeFromPipeline(
-        {R"({$match: {x: 3}})"_sd, R"({$limit: 2})"_sd}, boost::none, R"({locale: "en_US"})"_sd);
+        {R"({$match: {x: 3}})"sv, R"({$limit: 2})"sv}, boost::none, R"({locale: "en_US"})"sv);
     ASSERT_LT(shapeWithoutCollation->size(), shapeWithCollation->size());
 }
+
+TEST_F(AggCmdShapeTest, RawDataTrueAppearsInShape) {
+    auto shape = makeShapeFromPipeline({R"({$match: {x: 1}})"}, {}, {}, true);
+
+    auto shapeBson = shape->toBson(_operationContext.get(),
+                                   SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                                   SerializationContext::stateDefault());
+    ASSERT_TRUE(shapeBson.hasField(AggregateCommandRequest::kRawDataFieldName));
+    ASSERT_TRUE(shapeBson[AggregateCommandRequest::kRawDataFieldName].boolean());
+}
+
+TEST_F(AggCmdShapeTest, RawDataAbsentOrFalseNotInShape) {
+    // rawData=false is normalized to absent: it does not change the query shape.
+    for (auto rawDataVal : {boost::optional<bool>{}, boost::optional<bool>{false}}) {
+        auto shape = makeShapeFromPipeline({R"({$match: {x: 1}})"}, {}, {}, rawDataVal);
+
+        ASSERT_FALSE(shape->rawData);
+
+        auto shapeBson =
+            shape->toBson(_operationContext.get(),
+                          SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                          SerializationContext::stateDefault());
+        ASSERT_FALSE(shapeBson.hasField(AggregateCommandRequest::kRawDataFieldName));
+    }
+}
+
+TEST_F(AggCmdShapeTest, RawDataDifferentiatesQueryShape) {
+    auto shapeNoRawData = makeShapeFromPipeline({R"({$match: {x: 1}})"});
+    auto shapeRawDataTrue = makeShapeFromPipeline({R"({$match: {x: 1}})"}, {}, {}, true);
+    auto shapeRawDataFalse = makeShapeFromPipeline({R"({$match: {x: 1}})"}, {}, {}, false);
+
+    auto hashNone = shapeNoRawData->sha256Hash(_operationContext.get(), SerializationContext{});
+    auto hashTrue = shapeRawDataTrue->sha256Hash(_operationContext.get(), SerializationContext{});
+    auto hashFalse = shapeRawDataFalse->sha256Hash(_operationContext.get(), SerializationContext{});
+
+    // rawData=absent and rawData=false should produce the same hash (false does not change shape).
+    // rawData=true should be distinct from both.
+    ASSERT_NE(hashNone.toHexString(), hashTrue.toHexString());
+    ASSERT_EQ(hashNone.toHexString(), hashFalse.toHexString());
+    ASSERT_NE(hashTrue.toHexString(), hashFalse.toHexString());
+}
+
 }  // namespace
 }  // namespace mongo::query_shape

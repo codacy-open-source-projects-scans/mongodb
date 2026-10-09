@@ -2,7 +2,7 @@
  * Test that the plan cache hits, misses and skipped serverStatus' counters are updated correctly
  * when serving queries.
  */
-import {sbePlanCacheEnabled, checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 
 const conn = MongoRunner.runMongod({});
 const db = conn.getDB("plan_cache_hits_and_misses_metrics");
@@ -17,8 +17,6 @@ assert.commandWorked(coll.insert({a: 1}));
 assert.commandWorked(collCapped.insert({a: 1}));
 
 const shouldGenerateSbePlan = checkSbeFullyEnabled(db);
-const isUsingSbePlanCache = sbePlanCacheEnabled(db);
-
 /**
  * Retrieves the "hits", "misses" and "skipped" serverStatus metrics for the given 'planCacheType'
  * (sbe or classic) and returns them as an object: {hits: <number>, misses: <number>, skipped:
@@ -57,7 +55,7 @@ function runCommandAndCheckPlanCacheMetric({
     command,
     indexes,
     expectedCacheBehaviors,
-    planCacheType = isUsingSbePlanCache ? "sbe" : "classic",
+    planCacheType = "classic",
 }) {
     if (indexes) {
         assert.commandWorked(coll.dropIndexes());
@@ -91,7 +89,10 @@ function runCommandAndCheckPlanCacheMetric({
             default:
                 assert(
                     false,
-                    "Unknown cache behavior: " + expectedCacheBehavior + " Command: " + JSON.stringify(command),
+                    "Unknown cache behavior: " +
+                        expectedCacheBehavior +
+                        " Command: " +
+                        JSON.stringify(command),
                 );
         }
     });
@@ -102,7 +103,7 @@ function runCommandAndCheckPlanCacheMetric({
     // A simple collection scan. We should only recover from plan cache when SBE is on.
     {
         command: {find: coll.getName(), filter: {a: 1}, comment: "query coll scan"},
-        expectedCacheBehaviors: [cacheBehavior.miss, isUsingSbePlanCache ? cacheBehavior.hit : cacheBehavior.miss],
+        expectedCacheBehaviors: [cacheBehavior.miss, cacheBehavior.miss],
     },
     // Same as above but with an aggregate command.
     {
@@ -112,7 +113,7 @@ function runCommandAndCheckPlanCacheMetric({
             cursor: {},
             comment: "query coll scan aggregate",
         },
-        expectedCacheBehaviors: [isUsingSbePlanCache ? cacheBehavior.hit : cacheBehavior.miss],
+        expectedCacheBehaviors: [cacheBehavior.miss],
     },
     // Same query but with two indexes on the collection. We should recover from plan cache on
     // third run when a plan cache entry gets activated.
@@ -123,7 +124,11 @@ function runCommandAndCheckPlanCacheMetric({
     },
     // Same query shape as above, should always recover from plan cache.
     {
-        command: {find: coll.getName(), filter: {a: 5}, comment: "query two indexes different eq cost"},
+        command: {
+            find: coll.getName(),
+            filter: {a: 5},
+            comment: "query two indexes different eq cost",
+        },
         expectedCacheBehaviors: [cacheBehavior.hit],
     },
     // Same query as above, but with an aggregate command. Should always recover from plan cache.
@@ -146,10 +151,7 @@ function runCommandAndCheckPlanCacheMetric({
     // query shape when the SBE cache is used, so we expect to recover only on a second run.
     {
         command: {find: coll.getName(), filter: {a: 1}, comment: "query hint", hint: {a: 1}},
-        expectedCacheBehaviors: [
-            shouldGenerateSbePlan && isUsingSbePlanCache ? cacheBehavior.miss : cacheBehavior.skip,
-            shouldGenerateSbePlan && isUsingSbePlanCache ? cacheBehavior.hit : cacheBehavior.skip,
-        ],
+        expectedCacheBehaviors: [cacheBehavior.skip, cacheBehavior.skip],
     },
     // Min queries never get cached.
     {
@@ -180,13 +182,22 @@ function runCommandAndCheckPlanCacheMetric({
     },
     // Tailable cursor queries never get cached.
     {
-        command: {find: collCapped.getName(), filter: {a: 1}, comment: "query tailable", tailable: true},
+        command: {
+            find: collCapped.getName(),
+            filter: {a: 1},
+            comment: "query tailable",
+            tailable: true,
+        },
         expectedCacheBehaviors: [cacheBehavior.skip, cacheBehavior.skip, cacheBehavior.skip],
         planCacheType: "classic",
     },
     // Trivially false queries never get cached.
     {
-        command: {find: coll.getName(), filter: {"$alwaysFalse": 1}, comment: "trivially false query"},
+        command: {
+            find: coll.getName(),
+            filter: {"$alwaysFalse": 1},
+            comment: "trivially false query",
+        },
         expectedCacheBehaviors: [cacheBehavior.skip],
     },
     // Queries on non existing collections never get cached.

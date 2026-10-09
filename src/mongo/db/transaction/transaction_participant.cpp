@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #define LOGV2_FOR_TRANSACTION(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kTransaction}, MESSAGE, ##__VA_ARGS__)
@@ -35,7 +9,9 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
@@ -57,6 +33,8 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_uncommitted_changes.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/s/resharding/sharding_write_router.h"
@@ -98,6 +76,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/clock_source.h"
@@ -118,6 +97,7 @@
 #include <exception>
 #include <fstream>  // IWYU pragma: keep
 #include <future>
+#include <string_view>
 #include <type_traits>
 
 #include <absl/container/node_hash_set.h>
@@ -134,6 +114,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 // Failpoint which will pause an operation just after allocating a point-in-time storage engine
@@ -201,10 +182,9 @@ void fassertOnRepeatedExecution(const LogicalSessionId& lsid,
 }
 
 void validateTransactionHistoryApplyOpsOplogEntry(const repl::OplogEntry& oplogEntry) {
-    // A multiOpType of MultiOplogEntryType::kApplyOpsAppliedSeparately
-    // indicates this applyOps is not expected to be part of an internal transaction.
-    if (oplogEntry.getMultiOpType().value_or(repl::MultiOplogEntryType::kLegacyMultiOpType) ==
-        repl::MultiOplogEntryType::kApplyOpsAppliedSeparately)
+    // Retryable-applyOps entries are not internal transactions; skip the internal-transaction
+    // validations below.
+    if (oplogEntry.applyOpsIsMarkedRetryable())
         return;
 
     uassert(5875601,
@@ -320,9 +300,10 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                     str::stream() << "Found an oplog entry with an invalid stmtId "
                                   << entry.toBSONForLogging(),
                     stmtId >= 0);
-            const auto insertRes = result.committedStatements.emplace(stmtId, entry.getOpTime());
+            const auto insertRes = result.committedStatements.emplace(
+                stmtId, std::pair(entry.getOpTime(), entry.getWallClockTime()));
             if (!insertRes.second) {
-                const auto& existingOpTime = insertRes.first->second;
+                const auto& existingOpTime = insertRes.first->second.first;
                 fassertOnRepeatedExecution(lsid,
                                            result.lastTxnRecord->getTxnNum(),
                                            stmtId,
@@ -521,8 +502,8 @@ void updateSessionEntry(OperationContext* opCtx,
 
         if (status == ErrorCodes::DuplicateKey) {
             throwWriteConflictException(
-                str::stream() << "Updating session entry failed with duplicate key, session "_sd
-                              << sessionId << ", transaction "_sd << txnNum);
+                str::stream() << "Updating session entry failed with duplicate key, session "sv
+                              << sessionId << ", transaction "sv << txnNum);
         }
 
         uassertStatusOK(status);
@@ -620,7 +601,7 @@ TransactionParticipant::Participant::Participant(OperationContext* opCtx, Sessio
 TransactionParticipant::Participant::Participant(const SessionToKill& session)
     : Observer(&getTransactionParticipant(session.get())) {}
 
-void TransactionParticipant::performNoopWrite(OperationContext* opCtx, StringData msg) {
+void TransactionParticipant::performNoopWrite(OperationContext* opCtx, std::string_view msg) {
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
 
     // The locker must not have a max lock timeout when this noop write is performed, since if it
@@ -901,6 +882,17 @@ bool TransactionParticipant::Participant::_shouldRestartTransactionOnReuseActive
             "txnNumber"_attr = o().activeTxnNumberAndRetryCounter.getTxnNumber());
         return true;
     } else if (o().txnState.isInSet(TransactionState::kAbortedWithoutPrepare)) {
+        // Only startTransaction (kStart) may restart an aborted transaction in place. A
+        // startOrContinueTransaction (sub-router) must not: it would silently drop the prior
+        // attempt's writes, and could resurrect a participant that coordinateCommitTransaction
+        // recovery already aborted. NoSuchTransaction carries TransientTransactionError, so the
+        // whole transaction retries at a new txnNumber.
+        uassert(ErrorCodes::NoSuchTransaction,
+                str::stream() << "Cannot restart transaction "
+                              << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " on session "
+                              << _sessionId()
+                              << " because it was aborted and only startTransaction may restart it",
+                action == TransactionActions::kStart);
         LOGV2_DEBUG(
             11362501,
             3,
@@ -1016,6 +1008,7 @@ void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
         {
             std::lock_guard<Client> lk(*opCtx->getClient());
             o(lk).transactionMetricsObserver.onUnstash(
+                opCtx,
                 ServerTransactionsMetrics::get(opCtx->getServiceContext()),
                 opCtx->getServiceContext()->getTickSource());
         }
@@ -1078,7 +1071,20 @@ void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
 void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
     OperationContext* opCtx,
     const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
-    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext,
+    const boost::optional<bool> isServerInitiatedTransaction) {
+    auto limit = gMaxConcurrentMultiDocumentTransactions.load();
+    if (limit > 0 && !isProcessInternalClient(*opCtx->getClient())) {
+        auto currentOpen =
+            ServerTransactionsMetrics::get(opCtx->getServiceContext())->getCurrentOpen();
+        uassert(ErrorCodes::TooManyOpenTransactions,
+                str::stream() << "cannot start a new multi-document transaction; there are already "
+                              << currentOpen
+                              << " open transactions, which meets or exceeds the limit of "
+                              << limit,
+                currentOpen < static_cast<decltype(currentOpen)>(limit));
+    }
+
     // Aborts any in-progress txns.
     _setNewTxnNumberAndRetryCounter(opCtx, txnNumberAndRetryCounter);
     p().autoCommit = false;
@@ -1110,12 +1116,16 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(
 
         o(lk).transactionExpireDate = now + Seconds(gTransactionLifetimeLimitSeconds.load());
 
+        bool isServerInitiatedTransactionResolved =
+            isServerInitiatedTransaction.value_or(!opCtx->getClient()->session());
+
         o(lk).transactionMetricsObserver.onStart(
             ServerTransactionsMetrics::get(opCtx->getServiceContext()),
             *p().autoCommit,
             tickSource,
             now,
-            *o().transactionExpireDate);
+            *o().transactionExpireDate,
+            isServerInitiatedTransactionResolved);
         o(lk).readConcernArgs = repl::ReadConcernArgs::get(opCtx);
 
         if (o(lk).transactionRuntimeContext.has_value() &&
@@ -1150,7 +1160,8 @@ void TransactionParticipant::Participant::beginOrContinue(
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
     TransactionActions action,
-    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext) {
+    const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext,
+    const boost::optional<bool> isServerInitiatedTransaction) {
     opCtx->setActiveTransactionParticipant();
 
     if (_isInternalSessionForRetryableWrite()) {
@@ -1281,7 +1292,8 @@ void TransactionParticipant::Participant::beginOrContinue(
         return;
     }
 
-    _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter, transactionRuntimeContext);
+    _beginMultiDocumentTransaction(
+        opCtx, txnNumberAndRetryCounter, transactionRuntimeContext, isServerInitiatedTransaction);
 
     // Remember whether or not this operation is starting a transaction, in case something later
     // in the execution needs to adjust its behavior based on this.
@@ -1467,7 +1479,7 @@ TransactionParticipant::TxnResources::TxnResources(ClientLock& clientLock,
     if (opCtx->getLogicalSessionId()) {
         auto& lsid = opCtx->getLogicalSessionId();
         std::string debugInfo = str::stream()
-            << "lsid: "_sd << lsid->getId() << ", " << lsid->getUid().toString() << ", "
+            << "lsid: "sv << lsid->getId() << ", " << lsid->getUid().toString() << ", "
             << lsid->getTxnNumber() << ", " << lsid->getTxnUUID();
         _locker->setDebugInfo(std::move(debugInfo));
     }
@@ -1645,7 +1657,8 @@ void TransactionParticipant::Participant::_stashActiveTransaction(OperationConte
     ClientLock lk(opCtx->getClient());
     {
         auto tickSource = opCtx->getServiceContext()->getTickSource();
-        o(lk).transactionMetricsObserver.onStash(ServerTransactionsMetrics::get(opCtx), tickSource);
+        o(lk).transactionMetricsObserver.onStash(
+            opCtx, ServerTransactionsMetrics::get(opCtx), tickSource);
 
         auto curop = CurOp::get(opCtx);
         o(lk).transactionMetricsObserver.onTransactionOperation(opCtx,
@@ -1817,8 +1830,10 @@ void TransactionParticipant::Participant::unstashTransactionResources(
         }
 
         _releaseTransactionResourcesToOpCtx(opCtx, maxLockTimeout);
+
         std::lock_guard<Client> lg(*opCtx->getClient());
-        o(lg).transactionMetricsObserver.onUnstash(ServerTransactionsMetrics::get(opCtx),
+        o(lg).transactionMetricsObserver.onUnstash(opCtx,
+                                                   ServerTransactionsMetrics::get(opCtx),
                                                    opCtx->getServiceContext()->getTickSource());
         return;
     }
@@ -1894,7 +1909,8 @@ void TransactionParticipant::Participant::unstashTransactionResources(
 
     {
         std::lock_guard<Client> lg(*opCtx->getClient());
-        o(lg).transactionMetricsObserver.onUnstash(ServerTransactionsMetrics::get(opCtx),
+        o(lg).transactionMetricsObserver.onUnstash(opCtx,
+                                                   ServerTransactionsMetrics::get(opCtx),
                                                    opCtx->getServiceContext()->getTickSource());
     }
 }
@@ -2088,6 +2104,9 @@ TransactionParticipant::Participant::prepareTransaction(
     // RSTL.
     const bool unlocked = shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
     invariant(unlocked || gFeatureFlagIntentRegistration.isEnabled());
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        rss::consensus::IntentRegistry::get(opCtx).deregisterTokensForSession(opCtx, _sessionId());
+    }
 
     return {prepareOplogSlot.getTimestamp(), o().affectedNamespaces};
 }
@@ -2128,6 +2147,7 @@ void TransactionParticipant::Participant::restorePreparedTxnFromPreciseCheckpoin
         for (auto&& ns : txnRecord.getAffectedNamespaces()) {
             o(lg).affectedNamespaces.emplace(std::move(ns));
         }
+        p().preparedSizeMetadata = std::move(txnRecord.getSizeMetadata());
 
         p().recoveredFromPreciseCheckpointRequiresOplogScan = true;
         p().transactionOperations.markAsUnavailable();
@@ -2144,6 +2164,33 @@ void TransactionParticipant::Participant::restorePreparedTxnFromPreciseCheckpoin
 
     const bool unlocked = shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
     invariant(unlocked || gFeatureFlagIntentRegistration.isEnabled());
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        rss::consensus::IntentRegistry::get(opCtx).deregisterTokensForSession(opCtx, _sessionId());
+    }
+
+    // Re-seed the in-memory fast count changes for the restored prepared transaction.
+    if (isReplicatedFastCountEnabled(opCtx)) {
+        if (const auto& sizeMetadata = p().preparedSizeMetadata) {
+            const auto catalog = CollectionCatalog::get(opCtx);
+            auto& uncommittedChanges = UncommittedFastCountChanges::getForWrite(opCtx);
+            for (const auto& metadata : *sizeMetadata) {
+                const Collection* collection =
+                    catalog->lookupCollectionByUUID(opCtx, metadata.getUuid());
+                massert(12615200,
+                        fmt::format("Expected catalog to contain namespace string for collection "
+                                    "in config.transactions with UUID {}",
+                                    metadata.getUuid().toString()),
+                        collection);
+                uncommittedChanges.record(
+                    collection->ns(),
+                    metadata.getUuid(),
+                    UncommittedFastCountChange{
+                        .delta = {.size = metadata.getSz(), .count = metadata.getCt()},
+                        .recordStore = collection->getRecordStore(),
+                    });
+            }
+        }
+    }
 }
 
 void TransactionParticipant::Participant::setPrepareOpTimeForRecovery(OperationContext* opCtx,
@@ -2197,12 +2244,22 @@ TransactionOperations* TransactionParticipant::Participant::retrieveCompletedTra
     return &(p().transactionOperations.getExpectAvailable());
 }
 
-BSONObj TransactionParticipant::Participant::getResponseMetadata() {
-    return BSON(TxnResponseMetadata::kReadOnlyFieldName
-                // An in progress transaction cannot have gone through prepare recovery, so
-                // transactionOperations should always be available.
-                << (o().txnState.isInSet(TransactionState::kInProgress) &&
-                    p().transactionOperations.getExpectAvailable().isEmpty()));
+BSONObj TransactionParticipant::Participant::getResponseMetadata(OperationContext* opCtx) {
+    BSONObjBuilder bob;
+    bob.append(TxnResponseMetadata::kReadOnlyFieldName,
+               // An in progress transaction cannot have gone through prepare recovery, so
+               // transactionOperations should always be available.
+               o().txnState.isInSet(TransactionState::kInProgress) &&
+                   p().transactionOperations.getExpectAvailable().isEmpty());
+    // Attach the participant's current replication term so the originating router can detect a
+    // participant that changed primaries mid-transaction.
+    // TODO SERVER-130332: Replace '$replData.term' with a dedicated 'participantTerm' field.
+    if (opCtx->inMultiDocumentTransaction()) {
+        if (auto* replCoord = repl::ReplicationCoordinator::get(opCtx)) {
+            rpc::ReplSetMetadata::appendTermOnly(&bob, replCoord->getTerm());
+        }
+    }
+    return bob.obj();
 }
 
 void TransactionParticipant::Participant::clearOperationsInMemory(OperationContext* opCtx) {
@@ -2220,6 +2277,11 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
     uassert(ErrorCodes::InvalidOptions,
             "commitTransaction must provide commitTimestamp to prepared transaction.",
             !o().txnState.isPrepared());
+
+    boost::optional<rss::consensus::IntentGuard> txnGuard;
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        txnGuard.emplace(rss::consensus::IntentRegistry::Intent::Write, opCtx);
+    }
 
     auto* txnOps = retrieveCompletedTransactionOperations(opCtx);
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
@@ -3195,7 +3257,7 @@ void TransactionParticipant::Participant::_transactionInfoForLog(
 
     attrs.add("prepareReadConflicts", singleTransactionStats.getPrepareReadConflicts());
 
-    StringData terminationCauseString =
+    std::string_view terminationCauseString =
         terminationCause == TerminationCause::kCommitted ? "committed" : "aborted";
     attrs.add("terminationCause", terminationCauseString);
 
@@ -3653,14 +3715,21 @@ void TransactionParticipant::Participant::onWriteOpCompletedOnPrimary(
 
     updateSessionEntry(
         opCtx, _sessionId(), sessionTxnRecord.toBSON(), sessionTxnRecord.getTxnNum());
-    _registerUpdateCacheOnCommit(
-        opCtx, std::move(stmtIdsWritten), sessionTxnRecord.getLastWriteOpTime());
+    _registerUpdateCacheOnCommit(opCtx,
+                                 std::move(stmtIdsWritten),
+                                 sessionTxnRecord.getLastWriteOpTime(),
+                                 sessionTxnRecord.getLastWriteDate());
 }
 
 void TransactionParticipant::Participant::addToAffectedNamespaces(OperationContext* opCtx,
                                                                   const NamespaceString& nss) {
     std::lock_guard<Client> lk(*opCtx->getClient());
     o(lk).affectedNamespaces.emplace(nss);
+}
+
+void TransactionParticipant::Participant::setPreparedSizeMetadata(
+    boost::optional<std::vector<MultiOpSizeMetadata>> metadata) {
+    p().preparedSizeMetadata = std::move(metadata);
 }
 
 void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
@@ -3675,8 +3744,10 @@ void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
 
     updateSessionEntry(
         opCtx, _sessionId(), sessionTxnRecord.toBSON(), sessionTxnRecord.getTxnNum());
-    _registerUpdateCacheOnCommit(
-        opCtx, std::move(stmtIdsWritten), sessionTxnRecord.getLastWriteOpTime());
+    _registerUpdateCacheOnCommit(opCtx,
+                                 std::move(stmtIdsWritten),
+                                 sessionTxnRecord.getLastWriteOpTime(),
+                                 sessionTxnRecord.getLastWriteDate());
 }
 
 void TransactionParticipant::Participant::_invalidate(WithLock wl) {
@@ -3712,6 +3783,7 @@ void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
     }
 
     p().transactionOperations.reset();
+    p().preparedSizeMetadata = boost::none;
     o(*lk).affectedNamespaces.clear();
     o(*lk).prepareOpTime = repl::OpTime();
     o(*lk).recoveryPrepareOpTime = repl::OpTime();
@@ -3822,6 +3894,26 @@ bool TransactionParticipant::Participant::checkStatementExecuted(OperationContex
     return bool(_checkStatementExecuted(opCtx, stmtId));
 }
 
+boost::optional<repl::OpTime>
+TransactionParticipant::Participant::checkStatementExecutedAndGetOpTime(OperationContext* opCtx,
+                                                                        StmtId stmtId) const {
+    const auto stmtInfo = _checkStatementExecuted(opCtx, stmtId);
+    if (!stmtInfo) {
+        return boost::none;
+    }
+    return stmtInfo->oplogEntryOpTime;
+}
+
+boost::optional<Date_t>
+TransactionParticipant::Participant::checkStatementExecutedAndGetWallClockTime(
+    OperationContext* opCtx, StmtId stmtId) const {
+    const auto stmtInfo = _checkStatementExecuted(opCtx, stmtId);
+    if (!stmtInfo) {
+        return boost::none;
+    }
+    return stmtInfo->wallClockTime;
+}
+
 boost::optional<TransactionParticipant::Participant::StatementInfo>
 TransactionParticipant::Participant::_checkStatementExecuted(OperationContext* opCtx,
                                                              StmtId stmtId) const {
@@ -3881,7 +3973,8 @@ TransactionParticipant::Participant::_checkStatementExecutedSelf(StmtId stmtId) 
         return boost::none;
     }
 
-    StatementInfo statementInfo(it->second);
+    const auto& tsPair = it->second;
+    StatementInfo statementInfo(tsPair.first, tsPair.second);
     statementInfo.commitTimestamp = _getCommitTimestamp();
     return statementInfo;
 }
@@ -3925,7 +4018,7 @@ void mapLogv2ToBSON(BSONObjBuilder& builder,
     } else if (value.stringSerialize) {
         fmt::memory_buffer out;
         value.stringSerialize(out);
-        builder.append(name, StringData{out.data(), out.size()});
+        builder.append(name, std::string_view{out.data(), out.size()});
     } else if (value.toString) {
         builder.append(name, value.toString());
     } else {
@@ -3958,10 +4051,12 @@ BSONObj TransactionParticipant::Participant::getTransactionInfoForLogForTest(
 void TransactionParticipant::Participant::addCommittedStmtIds(
     OperationContext* opCtx,
     const std::vector<StmtId>& stmtIdsCommitted,
-    const repl::OpTime& writeOpTime) {
+    const repl::OpTime& writeOpTime,
+    Date_t writeWallClockTime) {
     std::lock_guard<Client> lg(*opCtx->getClient());
     for (auto stmtId : stmtIdsCommitted) {
-        p().activeTxnCommittedStatements.getExpectAvailable().emplace(stmtId, writeOpTime);
+        p().activeTxnCommittedStatements.getExpectAvailable().emplace(
+            stmtId, std::pair(writeOpTime, writeWallClockTime));
     }
 }
 
@@ -4029,10 +4124,11 @@ void TransactionParticipant::Participant::addPreparedTransactionPreciseCheckpoin
 void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
     OperationContext* opCtx,
     std::vector<StmtId> stmtIdsWritten,
-    const repl::OpTime& lastStmtIdWriteOpTime) {
+    const repl::OpTime& lastStmtIdWriteOpTime,
+    Date_t wallClockTime) {
     shard_role_details::getRecoveryUnit(opCtx)->onCommit(
-        [stmtIdsWritten = std::move(stmtIdsWritten),
-         lastStmtIdWriteOpTime](OperationContext* opCtx, boost::optional<Timestamp>) {
+        [stmtIdsWritten = std::move(stmtIdsWritten), lastStmtIdWriteOpTime, wallClockTime](
+            OperationContext* opCtx, boost::optional<Timestamp>) {
             TransactionParticipant::Participant participant(opCtx);
             invariant(participant.o().isValid);
 
@@ -4045,6 +4141,7 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
             // subsequent writes have the correct point to start from.
             participant.o(lg).lastWriteOpTime = lastStmtIdWriteOpTime;
 
+            const auto& writeWallClockTime = wallClockTime;
             for (const auto stmtId : stmtIdsWritten) {
                 if (stmtId == kIncompleteHistoryStmtId) {
                     participant.o(lg).hasIncompleteHistory = true;
@@ -4053,9 +4150,9 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
 
                 const auto insertRes =
                     participant.p().activeTxnCommittedStatements.getExpectAvailable().emplace(
-                        stmtId, lastStmtIdWriteOpTime);
+                        stmtId, std::pair(lastStmtIdWriteOpTime, writeWallClockTime));
                 if (!insertRes.second) {
-                    const auto& existingOpTime = insertRes.first->second;
+                    const auto& existingOpTime = insertRes.first->second.first;
                     fassertOnRepeatedExecution(participant._sessionId(),
                                                participant.o().activeTxnNumberAndRetryCounter,
                                                stmtId,

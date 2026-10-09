@@ -1,53 +1,27 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo::pcre {
 
 /*
  * Mongo's C++ wrapper for the PCRE2 library. Applies mongo-isms like
- * StringData.
+ * std::string_view.
  *
  * This wrapper is deliberately low-level and intended to be ignorant of mongo
  * server code's app-level preferences. It provides only a general-purpose PCRE2
@@ -499,9 +473,9 @@ public:
     MatchData match(std::string input) const;
 
     /** Can avoid a string copy when input will outlive the returned MatchData. */
-    MatchData matchView(StringData input, MatchOptions options, size_t startPos) const;
-    MatchData matchView(StringData input, MatchOptions options) const;
-    MatchData matchView(StringData input) const;
+    MatchData matchView(std::string_view input, MatchOptions options, size_t startPos) const;
+    MatchData matchView(std::string_view input, MatchOptions options) const;
+    MatchData matchView(std::string_view input) const;
 
     /**
      * Replaces occurrences in `str` of this pattern with `replacement`.
@@ -513,7 +487,7 @@ public:
      *
      * See https://www.pcre.org/current/doc/html/pcre2api.html#SEC36
      */
-    int substitute(StringData replacement,
+    int substitute(std::string_view replacement,
                    std::string* str,
                    MatchOptions options = {},
                    size_t startPos = 0) const;
@@ -559,15 +533,15 @@ public:
      * Throws `ExceptionFor<NoSuchKey>` if capture not found.
      * Requires `i <= captureCount()`.
      */
-    StringData operator[](size_t i) const;
-    StringData operator[](const std::string& name) const;
+    std::string_view operator[](size_t i) const;
+    std::string_view operator[](const std::string& name) const;
     /** @} */
 
     /**
      * All capture groups. For MatchData `m`:
      *     {m[1]... m[captureCount()]};
      */
-    std::vector<StringData> getCaptures() const;
+    std::vector<std::string_view> getCaptures() const;
 
     /** Same as `getCaptures`, but as `std::vector<std::string>`. */
     std::vector<std::string> getCapturesStrings() const {
@@ -579,7 +553,7 @@ public:
      * For MatchData `m`:
      *     {m[0], m[1]... m[m.captureCount()]};
      */
-    std::vector<StringData> getMatchList() const;
+    std::vector<std::string_view> getMatchList() const;
 
     /** Same as `getMatchList`, but as `std::vector<std::string>`. */
     std::vector<std::string> getMatchListStrings() const {
@@ -593,17 +567,17 @@ public:
      * The input to the match that created this object. If this MatchData was
      * created by a `match` call, the `input` refers to a string owned by this
      * object. If this MatchData was created by a `matchView` call, then this
-     * `input` result refers to the StringData provided to it.
+     * `input` result refers to the std::string_view provided to it.
      */
-    StringData input() const;
+    std::string_view input() const;
 
     size_t startPos() const;
 
 private:
-    static std::vector<std::string> _strVec(const std::vector<StringData>& v) {
+    static std::vector<std::string> _strVec(const std::vector<std::string_view>& v) {
         std::vector<std::string> r;
         r.reserve(v.size());
-        for (StringData s : v)
+        for (std::string_view s : v)
             r.push_back(std::string{s});
         return r;
     }
@@ -617,10 +591,10 @@ inline MatchData Regex::match(std::string input, MatchOptions options) const {
 inline MatchData Regex::match(std::string input) const {
     return match(std::move(input), MatchOptions{}, 0);
 }
-inline MatchData Regex::matchView(StringData input, MatchOptions options) const {
+inline MatchData Regex::matchView(std::string_view input, MatchOptions options) const {
     return matchView(input, options, 0);
 }
-inline MatchData Regex::matchView(StringData input) const {
+inline MatchData Regex::matchView(std::string_view input) const {
     return matchView(input, MatchOptions{}, 0);
 }
 

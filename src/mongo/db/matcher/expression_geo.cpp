@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/matcher/expression_geo.h"
@@ -40,6 +14,7 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <s2cellid.h>
@@ -92,7 +67,7 @@ GeoNearExpression::GeoNearExpression(const std::string& f)
 /**
  * Takes ownership of the passed-in GeoExpression.
  */
-GeoMatchExpression::GeoMatchExpression(boost::optional<StringData> path,
+GeoMatchExpression::GeoMatchExpression(boost::optional<std::string_view> path,
                                        const GeoExpression* query,
                                        const BSONObj& rawObj,
                                        clonable_ptr<ErrorAnnotation> annotation)
@@ -105,7 +80,7 @@ GeoMatchExpression::GeoMatchExpression(boost::optional<StringData> path,
 /**
  * Takes shared ownership of the passed-in GeoExpression.
  */
-GeoMatchExpression::GeoMatchExpression(boost::optional<StringData> path,
+GeoMatchExpression::GeoMatchExpression(boost::optional<std::string_view> path,
                                        std::shared_ptr<const GeoExpression> query,
                                        const BSONObj& rawObj,
                                        clonable_ptr<ErrorAnnotation> annotation)
@@ -124,9 +99,8 @@ void GeoMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     _debugStringAttachTagInfo(&debug);
 }
 
-void GeoMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                       const SerializationOptions& opts,
-                                                       bool includePath) const {
+void GeoMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     if (!opts.isKeepingLiteralsUnchanged()) {
         geoExpressionCustomSerialization(*bob, _rawObj, opts, includePath);
         return;
@@ -162,12 +136,12 @@ std::unique_ptr<MatchExpression> GeoMatchExpression::clone() const {
 // Parse-only geo expressions: geoNear (formerly known as near).
 //
 
-GeoNearMatchExpression::GeoNearMatchExpression(boost::optional<StringData> path,
+GeoNearMatchExpression::GeoNearMatchExpression(boost::optional<std::string_view> path,
                                                const GeoNearExpression* query,
                                                const BSONObj& rawObj)
     : LeafMatchExpression(GEO_NEAR, path), _rawObj(rawObj), _query(query) {}
 
-GeoNearMatchExpression::GeoNearMatchExpression(boost::optional<StringData> path,
+GeoNearMatchExpression::GeoNearMatchExpression(boost::optional<std::string_view> path,
                                                std::shared_ptr<const GeoNearExpression> query,
                                                const BSONObj& rawObj)
     : LeafMatchExpression(GEO_NEAR, path), _rawObj(rawObj), _query(query) {}
@@ -179,9 +153,8 @@ void GeoNearMatchExpression::debugString(StringBuilder& debug, int indentationLe
     _debugStringAttachTagInfo(&debug);
 }
 
-void GeoNearMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                           const SerializationOptions& opts,
-                                                           bool includePath) const {
+void GeoNearMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     if (!opts.isKeepingLiteralsUnchanged()) {
         geoNearExpressionCustomSerialization(*bob, _rawObj, opts, includePath);
         return;

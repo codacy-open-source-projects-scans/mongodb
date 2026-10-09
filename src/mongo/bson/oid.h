@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,7 +7,6 @@
 #include "mongo/base/data_view.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/util/assert_util.h"
@@ -44,10 +17,11 @@
 #include <cstring>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
 #include <sys/types.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 class SecureRandom;
@@ -89,7 +63,7 @@ public:
     enum { kOIDSize = 12, kTimestampSize = 4, kInstanceUniqueSize = 5, kIncrementSize = 3 };
 
     /** init from a 24 char hex string */
-    explicit OID(StringData s) {
+    explicit OID(std::string_view s) {
         init(s);
     }
 
@@ -147,13 +121,13 @@ public:
      * This method creates and initializes an OID from a string,
      * returning a bad Status on failure.
      */
-    static StatusWith<OID> parse(StringData input);
+    static StatusWith<OID> parse(std::string_view input);
 
     /**
      * This method creates and initializes an OID from a string, throwing a BadValue exception if
      * the string is not a valid OID.
      */
-    static OID createFromString(StringData input) {
+    static OID createFromString(std::string_view input) {
         return uassertStatusOK(parse(input));
     }
 
@@ -161,7 +135,7 @@ public:
     void init();
 
     /** init from a 24 char hex std::string */
-    void init(StringData s);
+    void init(std::string_view s);
 
     /** Set to the min/max OID that could be generated at given timestamp. */
     void init(Date_t date, bool max = false);
@@ -171,6 +145,12 @@ public:
      * followed by an big endian 8 byte term id
      */
     void initFromTermNumber(int64_t term);
+
+    /**
+     * Sets the contents to contain a leading zero Timestamp followed by a big endian 8 byte
+     * int64 value.
+     */
+    void initFromInt64(int64_t val);
 
     time_t asTimeT() const;
     Date_t asDateT() const {
@@ -203,7 +183,7 @@ public:
     template <typename H>
     friend H AbslHashValue(H h, const OID& oid) {
         const auto& d = oid._data;
-        return H::combine(std::move(h), toStdStringViewForInterop({d, sizeof(d)}));
+        return H::combine(std::move(h), std::string_view{d, sizeof(d)});
     }
 
     /** call this after a fork to update the process id */

@@ -2,7 +2,7 @@
  * This test verifies that a nested $lookup with $search queries on both the outer, inner, and
  * top-level view applies the view definitions and returns results as expected.
  *
- * @tags: [ requires_fcv_81, featureFlagMongotIndexedViews ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {
@@ -55,8 +55,12 @@ const moviesViewPipeline = [
     {
         $addFields: {
             display_title: {$concat: ["$title", " (", {$toString: "$year"}, ")"]},
-            decade: {$concat: [{$toString: {$subtract: [{$trunc: {$divide: ["$year", 10]}}, 0]}}, "0s"]},
-            runtime_minutes: {$cond: {if: {$eq: ["$title", "The Godfather"]}, then: 175, else: 142}},
+            decade: {
+                $concat: [{$toString: {$subtract: [{$trunc: {$divide: ["$year", 10]}}, 0]}}, "0s"],
+            },
+            runtime_minutes: {
+                $cond: {if: {$eq: ["$title", "The Godfather"]}, then: 175, else: 142},
+            },
         },
     },
 ];

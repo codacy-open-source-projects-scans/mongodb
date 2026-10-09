@@ -19,6 +19,15 @@ const oldValue = originalValue.was;
 const coll = db.group_pushdown;
 coll.drop();
 
+const internalConn = new Mongo(db.getMongo().host);
+assert.commandWorked(
+    internalConn.getDB("admin").runCommand({
+        hello: 1,
+        internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)},
+    }),
+);
+const internalDB = internalConn.getDB(db.getName());
+
 const docs = [
     {"_id": 1, "item": "a", "price": 10, "quantity": 2, "date": ISODate("2014-01-01T08:00:00Z")},
     {"_id": 2, "item": "b", "price": 20, "quantity": 1, "date": ISODate("2014-02-03T09:00:00Z")},
@@ -28,7 +37,13 @@ const docs = [
 ];
 assert.commandWorked(coll.insert(docs));
 
-let assertGroupPushdown = function (coll, pipeline, expectedResults, expectedGroupCountInExplain, options = {}) {
+let assertGroupPushdown = function (
+    coll,
+    pipeline,
+    expectedResults,
+    expectedGroupCountInExplain,
+    options = {},
+) {
     const explain = coll.explain().aggregate(pipeline, options);
     // When $group is pushed down it will never be present as a stage in the 'winningPlan' of
     // $cursor.
@@ -50,7 +65,12 @@ let assertNoGroupPushdown = function (coll, pipeline, expectedResults, options =
     assert.sameMembers(resultNoGroupPushdown, expectedResults);
 };
 
-let assertResultsMatchWithAndWithoutPushdown = function (coll, pipeline, expectedResults, expectedGroupCountInExplain) {
+let assertResultsMatchWithAndWithoutPushdown = function (
+    coll,
+    pipeline,
+    expectedResults,
+    expectedGroupCountInExplain,
+) {
     // Make sure the provided pipeline is eligible for pushdown.
     assertGroupPushdown(coll, pipeline, expectedResults, expectedGroupCountInExplain);
 
@@ -80,10 +100,15 @@ let assertShardedGroupResultsMatch = function (coll, pipeline, expectedGroupCoun
         needsMerge: true,
         fromRouter: true,
         cursor: {},
+        readConcern: {},
+        writeConcern: {},
     };
 
-    const classicalRes = coll.runCommand(cmd).cursor.firstBatch;
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}));
+    const internalCollDB = internalConn.getDB(coll.getDB().getName());
+    const classicalRes = internalCollDB.runCommand(cmd).cursor.firstBatch;
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}),
+    );
     const explainCmd = {
         aggregate: coll.getName(),
         pipeline: pipeline,
@@ -91,14 +116,18 @@ let assertShardedGroupResultsMatch = function (coll, pipeline, expectedGroupCoun
         fromRouter: true,
         explain: true,
         cursor: {},
+        readConcern: {},
+        writeConcern: {},
     };
-    const explain = coll.runCommand(explainCmd);
+    const explain = internalCollDB.runCommand(explainCmd);
     assert.eq(expectedGroupCountInExplain, getAggPlanStages(explain, "GROUP").length, explain);
-    const sbeRes = coll.runCommand(cmd).cursor.firstBatch;
+    const sbeRes = internalCollDB.runCommand(cmd).cursor.firstBatch;
 
     assert.sameMembers(sbeRes, classicalRes);
 
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: originalFrameworkControl}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: originalFrameworkControl}),
+    );
 };
 
 // Try a pipeline with no group stage.
@@ -206,7 +235,12 @@ assertResultsMatchWithAndWithoutPushdown(
     coll,
     [
         {
-            $group: {_id: "$item", ps1: {$sum: "$price"}, ps2: {$sum: "$price"}, qs: {$sum: "$quantity"}},
+            $group: {
+                _id: "$item",
+                ps1: {$sum: "$price"},
+                ps2: {$sum: "$price"},
+                qs: {$sum: "$quantity"},
+            },
         },
     ],
     [
@@ -254,7 +288,10 @@ assertResultsMatchWithAndWithoutPushdown(
 // "returnKey" / "snapshotId" / "indexId" / "indexKey" / "indexKeyPattern" which are reserved names
 // inside the SBE stage builder. These special names must not hide user-defined field names.
 [
-    [{$group: {_id: "$item", psum: {$sum: "$price"}}}, {$group: {_id: "$_id", ss: {$sum: {$add: ["$psum", "$psum"]}}}}],
+    [
+        {$group: {_id: "$item", psum: {$sum: "$price"}}},
+        {$group: {_id: "$_id", ss: {$sum: {$add: ["$psum", "$psum"]}}}},
+    ],
     [
         {$group: {_id: "$item", result: {$sum: "$price"}}},
         {$group: {_id: "$_id", ss: {$sum: {$add: ["$result", "$result"]}}}},
@@ -307,7 +344,9 @@ assertResultsMatchWithAndWithoutPushdown(
                 lowp: {
                     $sum: {$switch: {branches: [{case: {$lte: ["$_id", 3]}, then: 1}], default: 0}},
                 },
-                highp: {$sum: {$switch: {branches: [{case: {$gt: ["$_id", 3]}, then: 1}], default: 0}}},
+                highp: {
+                    $sum: {$switch: {branches: [{case: {$gt: ["$_id", 3]}, then: 1}], default: 0}},
+                },
             },
         },
     ],
@@ -435,7 +474,10 @@ assertResultsMatchWithAndWithoutPushdown(
 // The second $group stage refers to a sub-field which does exist.
 assertResultsMatchWithAndWithoutPushdown(
     coll,
-    [{$group: {_id: {i: "$item", p: {$divide: ["$price", 5]}}}}, {$group: {_id: "$_id.p", s: {$sum: 1}}}],
+    [
+        {$group: {_id: {i: "$item", p: {$divide: ["$price", 5]}}}},
+        {$group: {_id: "$_id.p", s: {$sum: 1}}},
+    ],
     [
         {"_id": 1, "s": 2},
         {"_id": 2, "s": 2},
@@ -513,7 +555,12 @@ assertGroupPushdown(
 );
 
 // Run a pipeline with match, sort, group to check if the whole pipeline gets pushed down.
-assertGroupPushdown(coll, [{$match: {item: "a"}}, {$sort: {price: 1}}, {$group: {_id: "$item"}}], [{"_id": "a"}], 1);
+assertGroupPushdown(
+    coll,
+    [{$match: {item: "a"}}, {$sort: {price: 1}}, {$group: {_id: "$item"}}],
+    [{"_id": "a"}],
+    1,
+);
 
 // Make sure the DISTINCT_SCAN case where the sort is provided by an index still works and is not
 // executed in SBE.
@@ -605,18 +652,23 @@ assert(explain.stages[1].hasOwnProperty("$group"));
 
 // Another case of supported group and then a group with no supported accumulators. $convert is not
 // supported by SBE.
-explain = coll
-    .explain()
-    .aggregate([
-        {$group: {_id: "$item", s: {$sum: "$price"}}},
-        {$group: {_id: "$quantity", x: {$sum: {$convert: {to: "int", input: "$_id", onError: "NULL"}}}}},
-    ]);
+explain = coll.explain().aggregate([
+    {$group: {_id: "$item", s: {$sum: "$price"}}},
+    {
+        $group: {
+            _id: "$quantity",
+            x: {$sum: {$convert: {to: "int", input: "$_id", onError: "NULL"}}},
+        },
+    },
+]);
 
 assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
 assert(explain.stages[1].hasOwnProperty("$group"));
 
 // A group with one supported and one unsupported accumulators.
-explain = coll.explain().aggregate([{$group: {_id: "$item", s: {$sum: "$price"}, stdev: {$stdDevPop: "$price"}}}]);
+explain = coll
+    .explain()
+    .aggregate([{$group: {_id: "$item", s: {$sum: "$price"}, stdev: {$stdDevPop: "$price"}}}]);
 assert.neq(null, getAggPlanStage(explain, "GROUP", true), explain);
 
 // $group can be pushed down to SBE when subplanning is involved. Note that the top $or expression
@@ -689,7 +741,11 @@ assertResultsMatchWithAndWithoutPushdown(
     coll,
     [
         {
-            $bucket: {groupBy: "$price", boundaries: [1, 10, 50], output: {quantity: {$sum: "$quantity"}}},
+            $bucket: {
+                groupBy: "$price",
+                boundaries: [1, 10, 50],
+                output: {quantity: {$sum: "$quantity"}},
+            },
         },
     ],
     [
@@ -750,13 +806,15 @@ assert(explain.stages[1].hasOwnProperty("$group"));
 // stage at the shard-side which does the partial aggregation. The shard-side $group stage is
 // requested with 'needsMerge' and 'fromRouter' flags set to true from the mongos, which we should
 // verify that is also pushed down and produces the correct results.
-explain = coll.runCommand({
+explain = internalDB.runCommand({
     aggregate: coll.getName(),
     explain: true,
     pipeline: [{$group: {_id: "$item"}}],
     needsMerge: true,
     fromRouter: true,
     cursor: {},
+    readConcern: {},
+    writeConcern: {},
 });
 assert.neq(null, getAggPlanStage(explain, "GROUP"), explain);
 
@@ -819,11 +877,18 @@ const basicGroupResults = [
 assertGroupPushdown(coll, basicGroup, basicGroupResults, /* expectedGroupCountInExplain */ 1);
 
 // Turn group pushdown off.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionDisableGroupPushdown: true}));
+assert.commandWorked(
+    db.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionDisableGroupPushdown: true}),
+);
 assertNoGroupPushdown(coll, basicGroup, basicGroupResults);
 
 // Reset 'internalQuerySlotBasedExecutionDisableGroupPushdown' to its original value.
-assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionDisableGroupPushdown: oldValue}));
+assert.commandWorked(
+    db.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionDisableGroupPushdown: oldValue,
+    }),
+);
 
 (function testConstNothingForIdMappedToNull() {
     // Prepare a collection.
@@ -833,7 +898,8 @@ assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySlotBasedExe
 
     // $$REMOVE produce Nothing constant and it should be converted to Null. Without an accumulator
     // $group is not pushed down and we need an accumulator.
-    assert.eq(coll.aggregate([{$group: {_id: "$$REMOVE", o: {$first: "$non_existent_field"}}}]).toArray(), [
-        {_id: null, o: null},
-    ]);
+    assert.eq(
+        coll.aggregate([{$group: {_id: "$$REMOVE", o: {$first: "$non_existent_field"}}}]).toArray(),
+        [{_id: null, o: null}],
+    );
 })();

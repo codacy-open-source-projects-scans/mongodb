@@ -25,6 +25,20 @@ export function checkPlatformCompatibleWithExtensions() {
 }
 
 /**
+ * Returns the directory where extension .conf files are generated.
+ *
+ * Must stay in sync with get_conf_out_dir() in
+ * buildscripts/resmokelib/extensions/generate_extension_configs.py.
+ */
+export function getExtensionConfDir() {
+    const tmpdir = _getEnv("TMPDIR") || _getEnv("TEMP") || _getEnv("TMP") || "/tmp";
+    // Trim trailing slashes before appending the suffix so a TMPDIR like "/tmp/" doesn't produce a
+    // double slash ("/tmp//mongo/extensions"). This keeps the result in sync with os.path.join() in
+    // generate_extension_configs.py.
+    return tmpdir.replace(/\/+$/, "") + "/mongo/extensions";
+}
+
+/**
  * @param {string|string[]} soFileNames A shared object file name or a list of shared object file names
  *      to generate .conf files for.
  */
@@ -59,6 +73,27 @@ function _generateExtensionConfigsInternal(soFileNames, manualOptions = "") {
         const extensionName = fileName.substring(0, fileName.lastIndexOf("."));
         return extensionName.replace(/^lib/, "").replace(/_mongo_extension$/, "") + `_${hash}`;
     });
+}
+
+/**
+ * Ensures the extension config directory exists with restricted (non group/other-writable)
+ * permissions. Delegates creation to generate_extension_configs.py (invoked with no .so files) so
+ * the directory is always created with mode 0o700, matching the server's requirement that the
+ * extensionsConfigPath not be writable by group or other users. This is needed even when no
+ * extensions are loaded, since withExtensions() always passes extensionsConfigPath and the server
+ * rejects a non-existent path at startup.
+ */
+export function ensureExtensionConfDir() {
+    const ret = runNonMongoProgram(
+        getPython3Binary(),
+        "-m",
+        "buildscripts.resmokelib.extensions.generate_extension_configs",
+        "--so-files",
+        "",
+        "--with-suffix",
+        "unused",
+    );
+    assert.eq(ret, 0, "Failed to create extension config directory");
 }
 
 /**
@@ -108,8 +143,20 @@ export function withExtensions(
 ) {
     const extensionsToLoad = [];
 
+    // Ensure the config directory exists up front so it can be populated with .conf files below and
+    // so extensionsConfigPath can always be passed, even when no extensions are loaded (in which
+    // case generateExtensionConfigWithOptions() never runs to create it, and the server rejects a
+    // non-existent extensionsConfigPath at startup). ensureExtensionConfDir() creates it with
+    // restricted permissions (mode 0o700) via Python; a plain mkdir() would inherit the shell's
+    // umask and can leave the directory group/other-writable, which the server rejects.
+    const extensionConfDir = getExtensionConfDir();
+    ensureExtensionConfDir();
+
     for (const [extLib, extensionOptions] of Object.entries(extToOptionsMap)) {
-        const cfgStr = typeof extensionOptions === "string" ? extensionOptions : JSON.stringify(extensionOptions);
+        const cfgStr =
+            typeof extensionOptions === "string"
+                ? extensionOptions
+                : JSON.stringify(extensionOptions);
         const extensionName = generateExtensionConfigWithOptions(extLib, cfgStr);
         extensionsToLoad.push(extensionName);
     }
@@ -117,6 +164,7 @@ export function withExtensions(
     const options = Object.assign(
         {
             loadExtensions: extensionsToLoad,
+            extensionsConfigPath: extensionConfDir,
         },
         additionalMongodOptions,
     );
@@ -211,7 +259,13 @@ export function withExtensionsAndMongot(
     });
 
     try {
-        withExtensions(extToOptionsMap, wrappedTestFn, topologiesToTest, shardingOptions, additionalOptions);
+        withExtensions(
+            extToOptionsMap,
+            wrappedTestFn,
+            topologiesToTest,
+            shardingOptions,
+            additionalOptions,
+        );
     } finally {
         if (mongotmock) {
             mongotmock.stop();
@@ -223,25 +277,33 @@ export function withExtensionsAndMongot(
  * Verifies that starting mongod or mongos with the given options fails as expected.
  */
 export function checkExtensionFailsToLoad({options, st, validateExitCode = true}) {
-    function tryStartup(startupFn) {
+    function tryStartup(startupFn, expectedExitCode) {
         try {
             startupFn();
             assert(false, "Expected startup to fail but it succeeded");
         } catch (e) {
             assert(e instanceof MongoRunner.StopError, e);
             if (validateExitCode) {
-                assert.eq(e.returnCode, MongoRunner.EXIT_BADOPTIONS, e);
+                assert.eq(e.returnCode, expectedExitCode, e);
             }
         }
     }
-    // Test mongod.
+    // On Linux, mongod fasserts on extension load failure (SIGABRT). On non-Linux, extensions are
+    // rejected at option parsing (badOptions). Callers must set
+    // TestData.cleanUpCoreDumpsFromExpectedCrash = true at their test's top level so resmoke
+    // cleans up any resulting core dump in its post-test scan.
+    const mongodExpectedExitCode = isPlatformCompatibleWithExtensions()
+        ? MongoRunner.EXIT_ABORT
+        : MongoRunner.EXIT_BADOPTIONS;
     tryStartup(() => {
         const conn = MongoRunner.runMongod(options);
         MongoRunner.stopMongod(conn);
-    });
-    // Test mongos.
+    }, mongodExpectedExitCode);
+    // mongos returns badOptions on extension load failure.
     tryStartup(() => {
-        const conn = MongoRunner.runMongos(Object.assign({configdb: st.configRS.getURL()}, options));
+        const conn = MongoRunner.runMongos(
+            Object.assign({configdb: st.configRS.getURL()}, options),
+        );
         MongoRunner.stopMongos(conn);
-    });
+    }, MongoRunner.EXIT_BADOPTIONS);
 }

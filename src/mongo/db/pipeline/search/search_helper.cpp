@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/search/search_helper.h"
 
@@ -34,6 +8,7 @@
 #include "mongo/db/ifr_flag_retry_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_internal_document_results_and_metadata.h"
 #include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
@@ -50,14 +25,15 @@
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/util/assert_util.h"
 
 #include <list>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -68,7 +44,39 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(searchReturnEofImmediately);
 
 namespace search_helpers {
+using namespace std::literals::string_view_literals;
 namespace {
+// Returns true if 'source' is an $_internalDocumentResultsAndMetadata stage wrapping an extension
+// search stage.
+bool isExtensionSearchWrappedInDocResAndMetadata(
+    const boost::intrusive_ptr<DocumentSource>& source) {
+    if (auto* wrapper =
+            dynamic_cast<DocumentSourceInternalDocumentResultsAndMetadata*>(source.get())) {
+        const auto& inner = wrapper->getSourceStage();
+        return inner && isExtensionSearchStage(std::string(inner->getSourceName()));
+    }
+    return false;
+}
+
+// Returns true if 'source' is an extension stage that can set $$SEARCH_META. Two cases apply:
+//
+//  1. $_internalDocumentResultsAndMetadata with its metadata spec populated: the post-desugar host
+//     stage that will bind $$SEARCH_META via $setVariableFromSubPipeline at execution time. If a
+//     metadata spec is not present, this stage cannot set $$SEARCH_META.
+//
+//  2. An unexpanded desugar placeholder (i.e. DocumentSourceExtensionForQueryShape). We can't
+//     inspect the pre-desugar stage's output, so we conservatively treat every placeholder as a
+//     potential setter. The post-desugar re-validation pass on the fully expanded pipeline is
+//     authoritative. TODO SPM-4488: remove the placeholder branch once query shapes are generated
+//     at LiteParsed time and desugar placeholders are no longer present during this validation.
+bool extensionCanSetSearchMeta(const boost::intrusive_ptr<DocumentSource>& source) {
+    if (const auto* drm =
+            dynamic_cast<const DocumentSourceInternalDocumentResultsAndMetadata*>(source.get())) {
+        return drm->getMetadata().has_value();
+    }
+    return source->isUnexpandedDesugarPlaceholder();
+}
+
 // Asserts that $$SEARCH_META is accessed correctly, that is, it is set by a prior stage, and is
 // not accessed in a subpipline. It is assumed that if there is a
 // 'DocumentSourceInternalSearchMongotRemote' then '$$SEARCH_META' will be set at some point in the
@@ -84,12 +92,12 @@ void assertSearchMetaAccessValidHelper(
     for (const auto* pipeline : pipelines) {
         for (const auto& source : *pipeline) {
             // Check if this is a stage that sets $$SEARCH_META.
-            static constexpr StringData kSetVarName =
+            static constexpr std::string_view kSetVarName =
                 DocumentSourceSetVariableFromSubPipeline::kStageName;
-            auto stageName = StringData(source->getSourceName());
+            auto stageName = std::string_view(source->getSourceName());
             if (stageName == DocumentSourceInternalSearchMongotRemote::kStageName ||
                 stageName == DocumentSourceSearch::kStageName || stageName == kSetVarName ||
-                stageName == kExtensionSearchStageName) {
+                extensionCanSetSearchMeta(source)) {
                 searchMetaSet = true;
                 if (stageName == kSetVarName) {
                     tassert(6448003,
@@ -180,6 +188,28 @@ parseMongotResponseCursors(std::vector<std::unique_ptr<executor::TaskExecutorCur
     }
     return result;
 }
+
+// Single source of truth for the security-trusted, mongod-owned $vectorSearch field names. mongod
+// derives these from trusted sources (the target collection name, its UUID, and the authorized view
+// name) when building the command sent to mongot.
+constexpr std::array kVectorSearchTrustedFields{mongot_cursor::kVectorSearchCmd,
+                                                mongot_cursor::kCollectionUuidField,
+                                                mongot_cursor::kViewNameField};
+
+static const std::vector<std::string_view>& getInternalOnlyFieldNames() {
+    static const std::vector<std::string_view> fields = {
+        InternalSearchMongotRemoteSpec::kMongotQueryFieldName,
+        InternalSearchMongotRemoteSpec::kMetadataMergeProtocolVersionFieldName,
+        InternalSearchMongotRemoteSpec::kMergingPipelineFieldName,
+        InternalSearchMongotRemoteSpec::kLimitFieldName,
+        InternalSearchMongotRemoteSpec::kRequiresSearchSequenceTokenFieldName,
+        InternalSearchMongotRemoteSpec::kSortSpecFieldName,
+        InternalSearchMongotRemoteSpec::kRequiresSearchMetaCursorFieldName,
+        InternalSearchMongotRemoteSpec::kDocsNeededBoundsFieldName,
+        InternalSearchMongotRemoteSpec::kViewFieldName,
+    };
+    return fields;
+}
 }  // namespace
 
 void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -219,7 +249,7 @@ void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
     // Send the planShardedSearch to the remote, retrying on network errors.
     auto response = mongot_cursor::runSearchCommandWithRetries(expCtx, cmdObj);
 
-    remoteSpec->setMetadataMergeProtocolVersion(response.data["protocolVersion"_sd].Int());
+    remoteSpec->setMetadataMergeProtocolVersion(response.data["protocolVersion"sv].Int());
     auto rawPipeline = response.data["metaPipeline"];
     LOGV2_DEBUG(
         9497009, 5, "planShardedSearch response", "mergePipeline"_attr = redact(rawPipeline));
@@ -239,6 +269,22 @@ bool hasReferenceToSearchMeta(const DocumentSource& ds) {
                                              std::set<Variables::Id>{Variables::kSearchMetaId});
 }
 
+void excludeOperationMemoryTrackingForSecondaryMetadataCursor(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    if (expCtx->getExcludeOperationMemoryTracking()) {
+        return;
+    }
+    LOGV2_DEBUG(13090700,
+                4,
+                "Disabling operation memory tracking: this $search query establishes a secondary "
+                "metadata cursor that shares the operation's memory tracker");
+    expCtx->setExcludeOperationMemoryTracking(true);
+}
+
+bool canMovePastDuringSplit(const DocumentSource& ds) {
+    return !hasReferenceToSearchMeta(ds) && ds.constraints().preservesOrderAndMetadata;
+}
+
 bool isSearchPipeline(const Pipeline* pipeline) {
     if (!pipeline || pipeline->empty()) {
         return false;
@@ -255,7 +301,7 @@ bool isSearchMetaPipeline(const Pipeline* pipeline) {
 
 void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
                              const LiteParsedPipeline& liteParsedPipeline,
-                             ResolvedView resolvedView,
+                             const ResolvedNamespace& resolvedView,
                              const NamespaceString& viewName) {
     // Search queries on views behave differently than non-search aggregations on views.
     // When a user pipeline contains a $search/$vectorSearch stage, idLookup will apply the
@@ -266,9 +312,9 @@ void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
     // storedSource is disabled, idLookup will retrieve full/unmodified documents during
     // (from the _id values returned by mongot), apply the view's data transforms, and pass
     // said transformed documents through the rest of the user pipeline.
-    if (liteParsedPipeline.hasSearchStage() && !resolvedView.getPipeline().empty()) {
-        expCtx->setView(boost::make_optional(
-            ViewInfo(viewName, resolvedView.getNamespace(), resolvedView.getPipeline())));
+    if (liteParsedPipeline.hasSearchStage() && !resolvedView.getBsonPipeline().empty()) {
+        expCtx->setView(boost::make_optional(ResolvedNamespace::makeForView(
+            viewName, resolvedView.getResolvedNamespace(), resolvedView.getBsonPipeline())));
     }
 }
 
@@ -309,14 +355,16 @@ bool isMongotStage(DocumentSource* stage) {
          dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage));
 }
 
-// TODO SERVER-116021 Remove this function when the extension can do this through bindViewInfo().
-bool isExtensionVectorSearchStage(std::string stageName) {
+// TODO SERVER-121094 Remove this function when the extension can do this through
+// bindResolvedNamespace().
+bool isExtensionVectorSearchStage(std::string_view stageName) {
     return stageName == kExtensionVectorSearchStageName ||
         stageName == DocumentSourceVectorSearch::kStageName;
 }
 
-// TODO SERVER-116021 Remove this function when the extension can do this through bindViewInfo().
-bool isExtensionSearchStage(std::string stageName) {
+// TODO SERVER-121094 Remove this function when the extension can do this through
+// bindResolvedNamespace().
+bool isExtensionSearchStage(std::string_view stageName) {
     return stageName == kExtensionSearchStageName ||
         stageName == DocumentSourceSearch::kStageName ||
         stageName == kExtensionSearchMetaStageName ||
@@ -330,14 +378,15 @@ bool isExtensionMongotPipeline(const Pipeline* pipeline) {
     const auto& stages = pipeline->getSources();
     return std::any_of(stages.begin(), stages.end(), [](const auto& stage) {
         return isExtensionVectorSearchStage(stage->getSourceName()) ||
-            isExtensionSearchStage(stage->getSourceName());
+            isExtensionSearchStage(stage->getSourceName()) ||
+            isExtensionSearchWrappedInDocResAndMetadata(stage);
     });
 }
 
 void throwIfrKickbackIfNecessary(bool kickbackCondition,
                                  const IncrementalRolloutFeatureFlag& flag,
                                  Counter64& metric,
-                                 StringData errorMsg) {
+                                 std::string_view errorMsg) {
     if (kickbackCondition) {
         metric.increment();
         uassertStatusOK(Status(IFRFlagRetryInfo(flag.getName()), errorMsg));
@@ -665,7 +714,7 @@ boost::optional<SearchQueryViewSpec> getViewFromExpCtx(
     if (expCtx->getView()) {
         const auto& expCtxView = *expCtx->getView();
         return boost::make_optional(SearchQueryViewSpec(
-            std::string(expCtxView.getViewName().coll()), expCtxView.getOriginalBson()));
+            std::string(expCtxView.getNamespace().coll()), expCtxView.getOriginalBson()));
     }
 
     return boost::none;
@@ -680,30 +729,21 @@ boost::optional<SearchQueryViewSpec> getViewFromBSONObj(const BSONObj& spec) {
     return boost::none;
 }
 
-void validateViewNotSetByUser(boost::intrusive_ptr<ExpressionContext> expCtx, const BSONObj& spec) {
-    // During $rankFusion parsing, if there's more than 1 mongot input pipeline, a view key will be
-    // injected during the parsing of that mongot stage (ex: $search, $vectorSearch, $searchMeta).
-    // Since $rankFusion passes the serialized version of the parsed pipeline to a
-    // DocumentSource::UnionWith(..) constructor, that serialized pipeline eventually gets reparsed.
-    // Because the view key already exists in the pipeline and the internal client flag is not set,
-    // this internal client error gets thrown.
-
-    // To avoid that, the isHybridSearch flag is only set after the initial parsing of the
-    // user-provided $rankFusion/$scoreFusion pipeline and its value is checked here to avoid
-    // throwing an internal client error.
-    if (spec.hasField(kViewFieldName) && !expCtx->isHybridSearch()) {
-        assertAllowedInternalIfRequired(
-            expCtx->getOperationContext(), kViewFieldName, AllowedWithClientType::kInternal);
+void validateInternalSearchFieldsNotSetByUser(const OperationContext* opCtx, const BSONObj& spec) {
+    for (const auto& name : getInternalOnlyFieldNames()) {
+        if (spec.hasField(name)) {
+            assertAllowedInternalIfRequired(opCtx, name, AllowedWithClientType::kInternal);
+        }
     }
 }
 
-void validateMongotIndexedViewsFF(boost::intrusive_ptr<ExpressionContext> expCtx,
-                                  const std::vector<BSONObj>& effectivePipeline) {
-    // Queries on views with empty effective pipelines (i.e. identity views) are treated as queries
-    // on the underlying collection, therefore allowed on all FCV versions that support search.
-    uassert(ErrorCodes::OptionNotSupportedOnView,
-            "search stages are unsupported on views",
-            effectivePipeline.empty() || expCtx->isFeatureFlagMongotIndexedViewsEnabled());
+void validateUserSpecDoesNotOverrideTrustedFields(const BSONObj& spec) {
+    for (const auto& field : kVectorSearchTrustedFields) {
+        uassert(12961800,
+                str::stream() << "Cannot specify the reserved field '" << field
+                              << "' in a $vectorSearch stage",
+                !spec.hasField(field));
+    }
 }
 
 void promoteStoredSourceOrAddIdLookup(

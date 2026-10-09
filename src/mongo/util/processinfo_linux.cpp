@@ -1,40 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/filesystem/exception.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "bits/types/struct_rusage.h"
 #include "mongo/util/processinfo.h"
 
 #include <algorithm>
@@ -51,12 +18,19 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
-// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
+
+#include <boost/filesystem/exception.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #ifndef _WIN32
 #include <sched.h>
@@ -77,7 +51,6 @@
 
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -95,6 +68,8 @@
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+// IWYU pragma: no_include "bits/types/struct_rusage.h"
+// IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -103,6 +78,7 @@
 #define KLF "l"
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 class LinuxProc {
 public:
@@ -111,7 +87,7 @@ public:
         FILE* f = fopen(name.c_str(), "r");
         if (!f) {
             auto ec = lastSystemError();
-            msgasserted(13538, fmt::format("couldn't open [{}] {}", name, errorMessage(ec)));
+            masserted(13538, fmt::format("couldn't open [{}] {}", name, errorMessage(ec)));
         }
         int found = fscanf(f,
                            "%d %127s %c "
@@ -525,15 +501,20 @@ public:
         };
         std::set<CpuId, decltype(cmp)> cpuIds(cmp);
 
-        CpuInfoParser cpuInfoParser{
-            {
-                {"physical id", [&](const std::string& value) { parsedCpuId.physical = value; }},
-                {"core id", [&](const std::string& value) { parsedCpuId.core = value; }},
-            },
-            [&]() {
-                cpuIds.insert(parsedCpuId);
-                parsedCpuId = CpuId{};
-            }};
+        CpuInfoParser cpuInfoParser{{
+                                        {"physical id",
+                                         [&](const std::string& value) {
+                                             parsedCpuId.physical = value;
+                                         }},
+                                        {"core id",
+                                         [&](const std::string& value) {
+                                             parsedCpuId.core = value;
+                                         }},
+                                    },
+                                    [&]() {
+                                        cpuIds.insert(parsedCpuId);
+                                        parsedCpuId = CpuId{};
+                                    }};
         cpuInfoParser.run();
 
         physicalCores = cpuIds.size();
@@ -545,11 +526,14 @@ public:
     static int getNumCpuSockets() {
         std::set<std::string> socketIds;
 
-        CpuInfoParser cpuInfoParser{
-            {
-                {"physical id", [&](const std::string& value) { socketIds.insert(value); }},
-            },
-            []() {}};
+        CpuInfoParser cpuInfoParser{{
+                                        {"physical id",
+                                         [&](const std::string& value) {
+                                             socketIds.insert(value);
+                                         }},
+                                    },
+                                    []() {
+                                    }};
         cpuInfoParser.run();
 
         // On ARM64, the "physical id" field is unpopulated, causing there to be 0 sockets found. In
@@ -572,25 +556,61 @@ public:
 
         procCount = 0;
 
-        CpuInfoParser cpuInfoParser{
-            {
+        CpuInfoParser cpuInfoParser{{
 #ifdef __s390x__
-                {R"re(processor\s+\d+)re", [&](const std::string& value) { procCount++; }},
-                {"cpu MHz static", [&](const std::string& value) { freq = value; }},
-                {"features", [&](const std::string& value) { features = value; }},
+                                        {R"re(processor\s+\d+)re",
+                                         [&](const std::string& value) {
+                                             procCount++;
+                                         }},
+                                        {"cpu MHz static",
+                                         [&](const std::string& value) {
+                                             freq = value;
+                                         }},
+                                        {"features",
+                                         [&](const std::string& value) {
+                                             features = value;
+                                         }},
 #else
-                {"processor", [&](const std::string& value) { procCount++; }},
-                {"model name", [&](const std::string& value) { modelString = value; }},
-                {"cpu MHz", [&](const std::string& value) { freq = value; }},
-                {"flags", [&](const std::string& value) { features = value; }},
-                {"CPU implementer", [&](const std::string& value) { cpuImplementer = value; }},
-                {"CPU architecture", [&](const std::string& value) { cpuArchitecture = value; }},
-                {"CPU variant", [&](const std::string& value) { cpuVariant = value; }},
-                {"CPU part", [&](const std::string& value) { cpuPart = value; }},
-                {"CPU revision", [&](const std::string& value) { cpuRevision = value; }},
+                                        {"processor",
+                                         [&](const std::string& value) {
+                                             procCount++;
+                                         }},
+                                        {"model name",
+                                         [&](const std::string& value) {
+                                             modelString = value;
+                                         }},
+                                        {"cpu MHz",
+                                         [&](const std::string& value) {
+                                             freq = value;
+                                         }},
+                                        {"flags",
+                                         [&](const std::string& value) {
+                                             features = value;
+                                         }},
+                                        {"CPU implementer",
+                                         [&](const std::string& value) {
+                                             cpuImplementer = value;
+                                         }},
+                                        {"CPU architecture",
+                                         [&](const std::string& value) {
+                                             cpuArchitecture = value;
+                                         }},
+                                        {"CPU variant",
+                                         [&](const std::string& value) {
+                                             cpuVariant = value;
+                                         }},
+                                        {"CPU part",
+                                         [&](const std::string& value) {
+                                             cpuPart = value;
+                                         }},
+                                        {"CPU revision",
+                                         [&](const std::string& value) {
+                                             cpuRevision = value;
+                                         }},
 #endif
-            },
-            []() {}};
+                                    },
+                                    []() {
+                                    }};
         cpuInfoParser.run();
     }
 
@@ -751,11 +771,11 @@ public:
             return {};
         }
         // The entry for cgroup v2 is always in the format “0::$PATH”.
-        const StringData prefixV2 = "0::"_sd;
+        const std::string_view prefixV2 = "0::"sv;
         const size_t prefixLength = prefixV2.length();
 
         // Check if the input starts with the prefix
-        if (StringData{line}.starts_with(prefixV2)) {
+        if (std::string_view{line}.starts_with(prefixV2)) {
             // cgroup v2.
             return fmt::format("/sys/fs/cgroup{}", line.substr(prefixLength));
         } else {
@@ -817,7 +837,7 @@ public:
     }
 };
 
-void appendIfExists(BSONObjBuilder* bob, StringData key, StringData value) {
+void appendIfExists(BSONObjBuilder* bob, std::string_view key, std::string_view value) {
     if (!value.empty()) {
         bob->append(key, value);
     }
@@ -825,24 +845,25 @@ void appendIfExists(BSONObjBuilder* bob, StringData key, StringData value) {
 
 void collectPressureStallInfo(BSONObjBuilder& builder) {
 
-    auto parsePressureFile = [](StringData key, StringData filename, BSONObjBuilder& bob) {
-        BSONObjBuilder psiParseBuilder;
-        auto status = procparser::parseProcPressureFile(key, filename, &psiParseBuilder);
-        if (status.isOK()) {
-            bob.appendElements(psiParseBuilder.obj());
-        }
-        return status.isOK();
-    };
+    auto parsePressureFile =
+        [](std::string_view key, std::string_view filename, BSONObjBuilder& bob) {
+            BSONObjBuilder psiParseBuilder;
+            auto status = procparser::parseProcPressureFile(key, filename, &psiParseBuilder);
+            if (status.isOK()) {
+                bob.appendElements(psiParseBuilder.obj());
+            }
+            return status.isOK();
+        };
 
     BSONObjBuilder psiBuilder;
     bool parseStatus = false;
 
-    parseStatus |= parsePressureFile("memory", "/proc/pressure/memory"_sd, psiBuilder);
-    parseStatus |= parsePressureFile("cpu", "/proc/pressure/cpu"_sd, psiBuilder);
-    parseStatus |= parsePressureFile("io", "/proc/pressure/io"_sd, psiBuilder);
+    parseStatus |= parsePressureFile("memory", "/proc/pressure/memory"sv, psiBuilder);
+    parseStatus |= parsePressureFile("cpu", "/proc/pressure/cpu"sv, psiBuilder);
+    parseStatus |= parsePressureFile("io", "/proc/pressure/io"sv, psiBuilder);
 
     if (parseStatus) {
-        builder.append("pressure"_sd, psiBuilder.obj());
+        builder.append("pressure"sv, psiBuilder.obj());
     }
 }
 
@@ -891,11 +912,11 @@ void appendCpuCgroupV2Info(BSONObjBuilder& bob) {
     std::string cpuMax, cpuMaxBurst, cpuUclampMin, cpuUclampMax, cpuWeight;
     LinuxSysHelper::getCpuCgroupV2Info(
         ProcessId::getCurrent(), cpuMax, cpuMaxBurst, cpuUclampMin, cpuUclampMax, cpuWeight);
-    appendIfExists(&bob, "cpuMax"_sd, cpuMax);
-    appendIfExists(&bob, "cpuMaxBurst"_sd, cpuMaxBurst);
-    appendIfExists(&bob, "cpuUclampMin"_sd, cpuUclampMin);
-    appendIfExists(&bob, "cpuUclampMax"_sd, cpuUclampMax);
-    appendIfExists(&bob, "cpuWeight"_sd, cpuWeight);
+    appendIfExists(&bob, "cpuMax"sv, cpuMax);
+    appendIfExists(&bob, "cpuMaxBurst"sv, cpuMaxBurst);
+    appendIfExists(&bob, "cpuUclampMin"sv, cpuUclampMin);
+    appendIfExists(&bob, "cpuUclampMax"sv, cpuUclampMax);
+    appendIfExists(&bob, "cpuWeight"sv, cpuWeight);
 }
 
 }  // namespace
@@ -909,14 +930,14 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
+boost::optional<uint64_t> ProcessInfo::getNumCoresForProcess() {
     cpu_set_t set;
 
     if (sched_getaffinity(0, sizeof(cpu_set_t), &set) == 0) {
 #ifdef CPU_COUNT  // glibc >= 2.6 has CPU_COUNT defined
         return CPU_COUNT(&set);
 #else
-        unsigned long count = 0;
+        uint64_t count = 0;
         for (size_t i = 0; i < CPU_SETSIZE; i++)
             if (CPU_ISSET(i, &set))
                 count++;
@@ -943,8 +964,8 @@ int ProcessInfo::getResidentSize() {
     return (int)((p.getResidentSizeInPages() * getPageSize()) / (1024.0 * 1024));
 }
 
-StatusWith<std::string> ProcessInfo::readTransparentHugePagesParameter(StringData parameter,
-                                                                       StringData directory) {
+StatusWith<std::string> ProcessInfo::readTransparentHugePagesParameter(std::string_view parameter,
+                                                                       std::string_view directory) {
     auto line =
         LinuxSysHelper::parseLineFromFile(fmt::format("{}/{}", directory, parameter).c_str());
     if (line.empty()) {
@@ -967,11 +988,11 @@ StatusWith<std::string> ProcessInfo::readTransparentHugePagesParameter(StringDat
 
     // Check against acceptable values of opMode.
     static constexpr std::array acceptableValues{
-        "always"_sd,
-        "defer"_sd,
-        "defer+madvise"_sd,
-        "madvise"_sd,
-        "never"_sd,
+        "always"sv,
+        "defer"sv,
+        "defer+madvise"sv,
+        "madvise"sv,
+        "never"sv,
     };
     if (std::find(acceptableValues.begin(), acceptableValues.end(), opMode) ==
         acceptableValues.end()) {
@@ -991,7 +1012,7 @@ bool ProcessInfo::checkGlibcRseqTunable() {
     const char* envPtr = getenv(kGlibcTunableEnvVar);
     if (!envPtr)
         return false;
-    StringData glibcEnv = envPtr;
+    std::string_view glibcEnv = envPtr;
     auto foundIndex = glibcEnv.find(kRseqKey);
 
     if (foundIndex != std::string::npos) {
@@ -1016,12 +1037,12 @@ void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
      * Since both are system dependent, I am converting to int64_t and taking a small hit from the
      * FP processor and the BSONBuilder compression. At worst, this calls 100x/sec.
      */
-    auto appendTime = [&info](StringData fieldName, struct timeval tv) {
+    auto appendTime = [&info](std::string_view fieldName, struct timeval tv) {
         auto value = (static_cast<int64_t>(tv.tv_sec) * 1000 * 1000) + tv.tv_usec;
         info.append(fieldName, value);
     };
 
-    auto appendNumber = [&info](StringData fieldName, auto value) {
+    auto appendNumber = [&info](std::string_view fieldName, auto value) {
         info.append(fieldName, static_cast<int64_t>(value));
     };
 

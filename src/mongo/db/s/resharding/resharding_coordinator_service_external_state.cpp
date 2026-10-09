@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_coordinator_service_external_state.h"
 
@@ -38,10 +12,10 @@
 #include "mongo/db/s/resharding/resharding_coordinator_service_util.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/resharding/shardsvr_resharding_commands_gen.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/util/duration.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -100,9 +74,22 @@ std::map<ShardId, int64_t> extractDocumentsToCopy(
 
     LOGV2(9929908,
           "Fetched cloning metrics for donor shards",
+          "reshardingUUID"_attr = coordinatorDoc.getReshardingUUID(),
           "documentsToCopy"_attr = reportBuilder.obj());
 
     return docsToCopy;
+}
+
+/**
+ * Builds a BSON object mapping each shard id to the string form of its error, for use in a
+ * summary log line.
+ */
+BSONObj errorsToBSON(const std::map<ShardId, Status>& errors) {
+    BSONObjBuilder errorsBuilder;
+    for (const auto& [shardId, error] : errors) {
+        errorsBuilder.append(shardId.toString(), error.toString());
+    }
+    return errorsBuilder.obj();
 }
 
 }  // namespace
@@ -142,7 +129,7 @@ ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
                                     ->catalogClient()
                                     ->getDatabase(opCtx,
                                                   coordinatorDoc.getSourceNss().dbName(),
-                                                  repl::ReadConcernLevel::kMajorityReadConcern)
+                                                  repl::ReadConcernArgs::kMajority)
                                     .getPrimary();
 
     recipientShardIds.emplace(dbPrimaryShard);
@@ -197,7 +184,10 @@ ReshardingCoordinatorExternalStateImpl::calculateParticipantShardsAndChunks(
         const SplitPolicyParams splitParams{coordinatorDoc.getReshardingUUID(),
                                             *donorShardIds.begin()};
 
-        if (shardKey.hasHashedPrefix()) {
+        // Evenly distributing one chunk per shard is only correct when the caller has not asked for
+        // a specific placement. 'SplitPointsBasedSplitPolicy' is not zone or shard distribution
+        // aware, so it would silently ignore those constraints.
+        if (!parsedZones && !coordinatorDoc.getShardDistribution() && shardKey.hasHashedPrefix()) {
             auto initialSplitter = SplitPointsBasedSplitPolicy(boost::none /* availableShardIds */);
             splitResult = initialSplitter.createFirstChunks(opCtx, shardKey, splitParams);
         } else if (const auto& shardDistribution = coordinatorDoc.getShardDistribution()) {
@@ -339,69 +329,59 @@ std::map<ShardId, int64_t> ReshardingCoordinatorExternalStateImpl::getDocumentsT
     const NamespaceString& nss,
     const Timestamp& cloneTimestamp,
     const std::map<ShardId, ShardVersion>& shardVersions) {
-    std::vector<BSONObj> pipeline;
-    pipeline.push_back(BSON("$count" << "count"));
-    AggregateCommandRequest aggRequest(nss, pipeline);
-    BSONObj hint = BSON("_id" << 1);
-    aggRequest.setHint(hint);
-
-    // TODO SERVER-107180 always set rawData once 9.0 becomes last LTS
-    if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        aggRequest.setRawData(true);
-    }
-
-    aggRequest.setWriteConcern(WriteConcernOptions());
-    aggRequest.setReadConcern(repl::ReadConcernArgs::snapshot(LogicalTime(cloneTimestamp)));
-
+    ShardsvrReshardingDonorGetCloneCount cmd(nss);
+    cmd.setReshardingUUID(reshardingUUID);
+    cmd.setCloneTimestamp(cloneTimestamp);
+    cmd.setDbName(DatabaseName::kAdmin);
+    cmd.setReadConcern(repl::ReadConcernArgs::snapshot(LogicalTime(cloneTimestamp)));
     auto readPref = ReadPreferenceSetting{ReadPreference::SecondaryPreferred};
-    aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
+    cmd.setReadPreference(readPref);
 
-    const auto opts = std::make_shared<async_rpc::AsyncRPCOptions<AggregateCommandRequest>>(
-        executor, token, aggRequest);
-    opts->cmd.setDbName(nss.dbName());
-    auto responses = resharding::sendCommandToShards(opCtx, opts, shardVersions, readPref);
+    auto fetchStart = resharding::getCurrentTime();
+
+    const auto opts =
+        std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrReshardingDonorGetCloneCount>>(
+            executor, token, cmd);
+    auto responses = resharding::sendCommandToShards(
+        opCtx, opts, shardVersions, readPref, false /* throwOnError */);
 
     std::map<ShardId, int64_t> docsToCopy;
+    std::map<ShardId, Status> errors;
 
     for (auto&& response : responses) {
         const auto& donorShardId = response.shardId;
 
-        uassertStatusOK(AsyncRequestsSender::Response::getEffectiveStatus(response));
-        auto cursorReply = CursorInitialReply::parse(
+        auto status = AsyncRequestsSender::Response::getEffectiveStatus(response);
+        if (!status.isOK()) {
+            errors.emplace(donorShardId, status);
+            continue;
+        }
+        auto reply = ShardsvrReshardingDonorGetCloneCountResponse::parse(
             response.swResponse.getValue().data, IDLParserContext("getDocumentsToCopyFromDonors"));
-        auto firstBatch = cursorReply.getCursor()->getFirstBatch();
-
-        uassert(9858102,
-                str::stream() << "The aggregation result from fetching the number of "
-                                 "documents from the donor shard '"
-                              << donorShardId
-                              << "' should contain at most one document but it contains "
-                              << firstBatch.size() << " documents .",
-                firstBatch.size() <= 1);
-
-        int64_t count = [&] {
-            // If there are no documents in the collection, the count aggregation would not
-            // return any documents.
-            if (firstBatch.size() == 0) {
-                return 0LL;
-            }
-            auto doc = firstBatch[0];
-            uassert(9858103,
-                    str::stream() << "The aggregation result from fetching the number of "
-                                     "documents from the donor shard '"
-                                  << donorShardId << "' does not have the field 'count' set.",
-                    doc.hasField("count"));
-            return doc["count"].numberLong();
-        }();
+        int64_t count = reply.getDocumentsToCopy();
         docsToCopy.emplace(donorShardId, count);
 
         LOGV2(9858107,
               "Fetched documents to copy from donor shard",
+              "reshardingUUID"_attr = reshardingUUID,
               "shardId"_attr = donorShardId,
               "documentsToCopy"_attr = count);
     }
+
+    if (!errors.empty()) {
+        LOGV2(12992507,
+              "Failed to fetch documents to copy from one or more donor shards",
+              "reshardingUUID"_attr = reshardingUUID,
+              "errors"_attr = errorsToBSON(errors));
+        uassertStatusOK(errors.begin()->second);
+    }
+
+    LOGV2(12992501,
+          "Completed RPC fetch of documents to copy from donor shards",
+          "reshardingUUID"_attr = reshardingUUID,
+          "numDonorShards"_attr = docsToCopy.size(),
+          "durationMillis"_attr =
+              durationCount<Milliseconds>(resharding::getCurrentTime() - fetchStart));
 
     return docsToCopy;
 }
@@ -463,6 +443,7 @@ ReshardingCoordinatorExternalStateImpl::_getDocumentsCopiedFromRecipients(
     const auto opts = std::make_shared<async_rpc::AsyncRPCOptions<AggregateCommandRequest>>(
         executor, token, aggRequest);
     opts->cmd.setDbName(DatabaseName::kConfig);
+    auto fetchStart = resharding::getCurrentTime();
     auto responses = resharding::sendCommandToShards(opCtx, opts, shardIds);
 
     std::map<ShardId, int64_t> docsCopied;
@@ -521,9 +502,17 @@ ReshardingCoordinatorExternalStateImpl::_getDocumentsCopiedFromRecipients(
 
         LOGV2(9929911,
               "Fetched cloning metrics for recipient shard",
+              "reshardingUUID"_attr = reshardingUUID,
               "shardId"_attr = recipientShardId,
               "documentsCopied"_attr = obj);
     }
+
+    LOGV2(12992506,
+          "Completed RPC fetch of documents copied from recipient shards",
+          "reshardingUUID"_attr = reshardingUUID,
+          "numRecipientShards"_attr = shardIds.size(),
+          "durationMillis"_attr =
+              durationCount<Milliseconds>(resharding::getCurrentTime() - fetchStart));
 
     return docsCopied;
 }
@@ -540,18 +529,93 @@ std::map<ShardId, int64_t> ReshardingCoordinatorExternalStateImpl::getDocumentsD
         async_rpc::AsyncRPCOptions<ShardsvrReshardingDonorFetchFinalCollectionStats>>(
         executor, token, cmd);
     opts->cmd.setDbName(DatabaseName::kAdmin);
-    auto responses = resharding::sendCommandToShards(opCtx, opts, shardIds);
+    // Fetch from all donors without throwing on the first failure so that every per-shard error
+    // can be logged before the fetch is retried.
+    auto responses =
+        resharding::sendCommandToShards(opCtx, opts, shardIds, false /* throwOnError */);
 
     std::map<ShardId, int64_t> docsDelta;
+    std::map<ShardId, Status> errors;
 
     for (auto&& response : responses) {
         const auto& donorShardId = response.shardId;
 
-        uassertStatusOK(AsyncRequestsSender::Response::getEffectiveStatus(response));
+        auto status = AsyncRequestsSender::Response::getEffectiveStatus(response);
+        if (!status.isOK()) {
+            errors.emplace(donorShardId, status);
+            continue;
+        }
         auto collStatsResponse = ShardsvrReshardingDonorFetchFinalCollectionStatsResponse::parse(
             response.swResponse.getValue().data, IDLParserContext("getDocumentsDeltaFromDonors"));
 
-        docsDelta.emplace(donorShardId, collStatsResponse.getDocumentsDelta());
+        int64_t delta = collStatsResponse.getDocumentsDelta();
+        docsDelta.emplace(donorShardId, delta);
+
+        LOGV2(12992503,
+              "Fetched documents delta from donor shard",
+              "reshardingUUID"_attr = reshardingUUID,
+              "shardId"_attr = donorShardId,
+              "documentsDelta"_attr = delta);
+    }
+
+    if (!errors.empty()) {
+        LOGV2(12992508,
+              "Failed to fetch documents delta from one or more donor shards",
+              "reshardingUUID"_attr = reshardingUUID,
+              "errors"_attr = errorsToBSON(errors));
+        uassertStatusOK(errors.begin()->second);
+    }
+
+    return docsDelta;
+}
+
+std::map<ShardId, int64_t> ReshardingCoordinatorExternalStateImpl::getDocumentsDeltaFromRecipients(
+    OperationContext* opCtx,
+    const std::shared_ptr<executor::TaskExecutor>& executor,
+    CancellationToken token,
+    const UUID& reshardingUUID,
+    const NamespaceString& nss,
+    const std::vector<ShardId>& shardIds) {
+    ShardsvrReshardingRecipientFetchFinalCollectionStats cmd(nss, reshardingUUID);
+    const auto opts = std::make_shared<
+        async_rpc::AsyncRPCOptions<ShardsvrReshardingRecipientFetchFinalCollectionStats>>(
+        executor, token, cmd);
+    opts->cmd.setDbName(DatabaseName::kAdmin);
+    auto responses =
+        resharding::sendCommandToShards(opCtx, opts, shardIds, false /* throwOnError */);
+
+    std::map<ShardId, int64_t> docsDelta;
+    std::map<ShardId, Status> errors;
+
+    for (auto&& response : responses) {
+        const auto& recipientShardId = response.shardId;
+
+        auto status = AsyncRequestsSender::Response::getEffectiveStatus(response);
+        if (!status.isOK()) {
+            errors.emplace(recipientShardId, status);
+            continue;
+        }
+        auto collStatsResponse =
+            ShardsvrReshardingRecipientFetchFinalCollectionStatsResponse::parse(
+                response.swResponse.getValue().data,
+                IDLParserContext("getDocumentsDeltaFromRecipients"));
+
+        int64_t delta = collStatsResponse.getDocumentsDelta();
+        docsDelta.emplace(recipientShardId, delta);
+
+        LOGV2(12992505,
+              "Fetched documents delta from recipient shard",
+              "reshardingUUID"_attr = reshardingUUID,
+              "shardId"_attr = recipientShardId,
+              "documentsDelta"_attr = delta);
+    }
+
+    if (!errors.empty()) {
+        LOGV2(12992509,
+              "Failed to fetch documents delta from one or more recipient shards",
+              "reshardingUUID"_attr = reshardingUUID,
+              "errors"_attr = errorsToBSON(errors));
+        uassertStatusOK(errors.begin()->second);
     }
 
     return docsDelta;
@@ -623,14 +687,14 @@ void ReshardingCoordinatorExternalStateImpl::verifyFinalCollection(
     int64_t numDocsTemporary = 0;
     BSONObjBuilder recipientReportBuilder;
     for (const auto& recipientEntry : coordinatorDoc.getRecipientShards()) {
-        auto mutableState = recipientEntry.getMutableState();
+        auto finalCount = recipientEntry.getDocumentsFinal();
         uassert(ErrorCodes::ReshardingValidationIncompleteData,
                 str::stream() << "Expected the coordinator document to have the "
                                  "final number of documents on the recipient shard '"
                               << recipientEntry.getId() << "'",
-                mutableState.getTotalNumDocuments());
-        numDocsTemporary += *mutableState.getTotalNumDocuments();
-        recipientReportBuilder.append(recipientEntry.getId(), *mutableState.getTotalNumDocuments());
+                finalCount);
+        numDocsTemporary += *finalCount;
+        recipientReportBuilder.append(recipientEntry.getId(), *finalCount);
     }
 
     LOGV2(9858601,
@@ -654,18 +718,43 @@ void ReshardingCoordinatorExternalStateImpl::verifyFinalCollection(
         "recipientDocumentsFinal"_attr = numDocsTemporary);
 }
 
-void ReshardingCoordinatorExternalStateImpl::stopMigrations(OperationContext* opCtx,
-                                                            const NamespaceString& nss,
-                                                            const UUID& expectedCollectionUUID,
-                                                            const OperationSessionInfo& osi) {
-    sharding_ddl_util::stopMigrations(opCtx, nss, expectedCollectionUUID, osi);
+namespace {
+AuthoritativeMetadataAccessLevelEnum convert(
+    ReshardingAuthoritativeMetadataAccessLevelEnum reshardingVersion) {
+    switch (reshardingVersion) {
+        case ReshardingAuthoritativeMetadataAccessLevelEnum::kNone:
+            return AuthoritativeMetadataAccessLevelEnum::kNone;
+        case ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAllowed:
+            return AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+        case ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed:
+            return AuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed;
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+}  // namespace
+
+void ReshardingCoordinatorExternalStateImpl::stopMigrations(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const UUID& expectedCollectionUUID,
+    ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+    std::function<OperationSessionInfo()> osiGenerator) {
+    sharding_ddl_util::stopMigrations(
+        opCtx, nss, expectedCollectionUUID, osiGenerator, convert(authoritativeMetadataLevel));
 }
 
-void ReshardingCoordinatorExternalStateImpl::resumeMigrations(OperationContext* opCtx,
-                                                              const NamespaceString& nss,
-                                                              const UUID& expectedCollectionUUID,
-                                                              const OperationSessionInfo& osi) {
-    sharding_ddl_util::resumeMigrations(opCtx, nss, expectedCollectionUUID, osi);
+void ReshardingCoordinatorExternalStateImpl::resumeMigrations(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+    std::function<OperationSessionInfo()> osiGenerator) {
+    // Re-enable chunk operations on the source namespace, regardless of the collection's UUID.
+    sharding_ddl_util::resumeMigrations(opCtx,
+                                        nss,
+                                        boost::none /* expectedCollectionUUID */,
+                                        osiGenerator,
+                                        convert(authoritativeMetadataLevel));
 }
 
 std::unique_ptr<CausalityBarrier> ReshardingCoordinatorExternalStateImpl::buildCausalityBarrier(

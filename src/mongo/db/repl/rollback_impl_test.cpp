@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/rollback_impl.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -72,12 +45,12 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/cluster_role.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
@@ -88,6 +61,7 @@
 #include <list>
 #include <memory>
 #include <ostream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -105,21 +79,21 @@ NamespaceString kOplogNSS = NamespaceString::createNamespaceString_forTest("loca
 NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
 std::string kGenericUUIDStr = "b4c66a44-c1ca-4d86-8d25-12e82fa2de5b";
 
-BSONObj makeInsertOplogEntry(long long time, BSONObj obj, StringData ns, UUID uuid) {
+BSONObj makeInsertOplogEntry(long long time, BSONObj obj, std::string_view ns, UUID uuid) {
     return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "i"
                      << "o" << obj << "ns" << ns << "ui" << uuid << "wall" << Date_t());
 }
 
 BSONObj makeUpdateOplogEntry(
-    long long time, BSONObj query, BSONObj update, StringData ns, UUID uuid) {
+    long long time, BSONObj query, BSONObj update, std::string_view ns, UUID uuid) {
     return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "u"
                      << "ns" << ns << "ui" << uuid << "o2" << query << "o" << BSON("$set" << update)
                      << "wall" << Date_t());
 }
 
-BSONObj makeDeleteOplogEntry(long long time, BSONObj id, StringData ns, UUID uuid) {
+BSONObj makeDeleteOplogEntry(long long time, BSONObj id, std::string_view ns, UUID uuid) {
     return BSON("ts" << Timestamp(time, time) << "t" << time << "op"
                      << "d"
                      << "ns" << ns << "ui" << uuid << "o" << id << "wall" << Date_t());
@@ -2302,7 +2276,7 @@ TEST_F(RollbackImplObserverInfoTest,
 TEST_F(
     RollbackImplObserverInfoTest,
     NamespacesAndUUIDsForOpsExtractsNamespacesAndUUIDOfRenameCollectionOplogEntryWithMultitenancy) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     boost::optional<TenantId> tid(OID::gen());
     auto fromNss = NamespaceString::createNamespaceString_forTest(tid, "test", "source");
@@ -2328,8 +2302,8 @@ TEST_F(
 TEST_F(
     RollbackImplObserverInfoTest,
     NamespacesAndUUIDsForOpsExtractsNamespacesAndUUIDOfRenameCollectionOplogEntryRequiresTenantId) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     boost::optional<TenantId> tid(OID::gen());
     auto fromNss = NamespaceString::createNamespaceString_forTest(tid, "test", "source");
@@ -2570,7 +2544,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackFailsOnUnknownOplogEntryCommandType
     ASSERT_OK(_insertOplogEntry(commonOp.first));
     ASSERT_OK(_insertOplogEntry(unknownCmdOp.first));
 
-    const StringData err(
+    const std::string_view err(
         "Enumeration value 'unknownCommand' for field 'commandString' is not a valid value.");
     ASSERT_THROWS_CODE_AND_WHAT(
         _rollback->runRollback(_opCtx.get()), DBException, ErrorCodes::BadValue, err);

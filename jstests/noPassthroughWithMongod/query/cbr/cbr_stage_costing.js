@@ -3,6 +3,9 @@
  * absolute costs, which may change on recalibration, we rather assert
  * on the general principles that should always hold.
  *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 
 import {getPlanStage, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
@@ -44,6 +47,21 @@ const collZeroRows = db[collZeroRowsName];
 collZeroRows.createIndex({a: 1});
 collZeroRows.runCommand({analyze: collZeroRows, key: "a"});
 
+// Collection used to test NDV-based seek estimation for skip-scan index scans.
+// field 'unique' has 2000 distinct values; 'binary' has 2 values (0 or 1, half each).
+const collSkipScanName = collName + "_skip_scan";
+const collSkipScan = db[collSkipScanName];
+collSkipScan.drop();
+{
+    const docs = [];
+    for (let i = 0; i < 2000; i++) {
+        docs.push({unique: i, binary: i % 2});
+    }
+    collSkipScan.insert(docs);
+    collSkipScan.createIndex({unique: 1, binary: 1});
+    collSkipScan.createIndex({binary: 1});
+}
+
 /**
  * Extracts the complete cost of the winning plan
  */
@@ -63,7 +81,11 @@ function rootStageCost(cursor) {
     if (winningPlan.inputStage) {
         const rootStageCost = winningPlan.costEstimate - winningPlan.inputStage.costEstimate;
         if (winningPlan.cardinalityEstimate > 0) {
-            assert.gt(rootStageCost, 0, "root stage cost is expected to be greater than the inputStage cost");
+            assert.gt(
+                rootStageCost,
+                0,
+                "root stage cost is expected to be greater than the inputStage cost",
+            );
         }
         return rootStageCost;
     } else {
@@ -97,6 +119,7 @@ function runTest(planRankerMode) {
             db.adminCommand({
                 setParameter: 1,
                 featureFlagCostBasedRanker: true,
+                internalQueryPlanRanker: "costBased",
                 internalQueryCBRCEMode: planRankerMode,
             }),
         );
@@ -109,10 +132,16 @@ function runTest(planRankerMode) {
     assert.lt(rootStageCost(collZeroRows.find().hint({$natural: 1})), 0.0001);
 
     // COLLSCAN cost is dependent on input collection size.
-    assert.gt(rootStageCost(coll.find().hint({$natural: 1})), rootStageCost(collOneRow.find().hint({$natural: 1})));
+    assert.gt(
+        rootStageCost(coll.find().hint({$natural: 1})),
+        rootStageCost(collOneRow.find().hint({$natural: 1})),
+    );
 
     // COLLSCAN cost should be smaller if no filter.
-    assert.lt(rootStageCost(coll.find().hint({$natural: 1})), rootStageCost(coll.find({a: 1}).hint({$natural: 1})));
+    assert.lt(
+        rootStageCost(coll.find().hint({$natural: 1})),
+        rootStageCost(coll.find({a: 1}).hint({$natural: 1})),
+    );
 
     // COLLSCAN cost is dependent on the number of predicates.
     assert.gt(
@@ -128,7 +157,10 @@ function runTest(planRankerMode) {
 
     // With this collection, the COLLSCAN stage alone is more expensive than just the IXSCAN stage alone (without the
     // FETCH).
-    assert.lt(rootStageCost(coll.find().hint({$natural: 1})), ixscanCost({predicate: {}, hint: {a: 1}}));
+    assert.lt(
+        rootStageCost(coll.find().hint({$natural: 1})),
+        ixscanCost({predicate: {}, hint: {a: 1}}),
+    );
 
     // The complete COLLSCAN plan is less expensive than the complete IXCAN plan.
     assert.lt(planCost(coll.find().hint({$natural: 1})), planCost(coll.find().hint({a: 1})));
@@ -139,15 +171,21 @@ function runTest(planRankerMode) {
 
     // Some cost assertions require actual, non-heuristic cardinality estimates
     if (planRankerMode !== "heuristicCE") {
-        // IXSCAN cost for an interval containing no documents should be small.
-        assert.close(ixscanCost({predicate: {a: {$lt: 0}}, hint: {a: 1}}), 0.000009);
+        // IXSCAN cost for an interval containing no documents should be small. The CE for
+        // such an interval is approximate-source zero, which clampZeroEstimates clamps to
+        // 1, so the cost matches that of a one-document interval rather than collapsing to
+        // minCost.
+        assert.between(0.0, ixscanCost({predicate: {a: {$lt: 0}}, hint: {a: 1}}), 0.005);
 
         // IXSCAN cost for an interval containing one document should be small.
         assert.between(0.0, ixscanCost({predicate: {a: {$lte: 0}}, hint: {a: 1}}), 0.005);
 
         // IXSCAN cost for an interval containing all documents should be the
         // same as IXSCAN over the entire index.
-        assert.eq(ixscanCost({predicate: {}, hint: {a: 1}}), ixscanCost({predicate: {a: {$gte: 0}}, hint: {a: 1}}));
+        assert.eq(
+            ixscanCost({predicate: {}, hint: {a: 1}}),
+            ixscanCost({predicate: {a: {$gte: 0}}, hint: {a: 1}}),
+        );
 
         // IXSCAN over 1/2 of the documents should have cost ~ 1/2 of the full IXSCAN.
         assert.between(
@@ -165,10 +203,27 @@ function runTest(planRankerMode) {
 
         // IXSCAN of same number of keys over one or more than one interval should have similar
         // cost.
-        assert.close(
-            ixscanCost({predicate: {a: {$lte: 3}}, hint: {a: 1}}),
-            ixscanCost({predicate: {$or: [{a: 0}, {a: 1}, {a: 2}, {a: 3}]}, hint: {a: 1}}),
-        );
+        if (planRankerMode == "samplingCE") {
+            // IXSCAN of same number of keys over multiple intervals will estimate a higher than
+            // expected cost; estimation of seeks doesn't predict that contiguous intervals will be
+            // provided.
+            assert.lt(
+                ixscanCost({predicate: {a: {$lte: 3}}, hint: {a: 1}}),
+                ixscanCost({predicate: {$or: [{a: 0}, {a: 1}, {a: 2}, {a: 3}]}, hint: {a: 1}}),
+            );
+
+            // IXSCAN of same number of keys over multiple non-consecutive intervals will *correctly*
+            // estimate a higher cost than one interval.
+            assert.lt(
+                ixscanCost({predicate: {a: {$lte: 3}}, hint: {a: 1}}),
+                ixscanCost({predicate: {$or: [{a: 0}, {a: 2}, {a: 4}, {a: 6}]}, hint: {a: 1}}),
+            );
+        } else {
+            assert.close(
+                ixscanCost({predicate: {a: {$lte: 3}}, hint: {a: 1}}),
+                ixscanCost({predicate: {$or: [{a: 0}, {a: 1}, {a: 2}, {a: 3}]}, hint: {a: 1}}),
+            );
+        }
 
         // IXSCAN over $or should have similar cost as an IXSCAN over an equivalent $in.
         assert.close(
@@ -198,12 +253,91 @@ function runTest(planRankerMode) {
     //          ixscanCost({predicate: {a_multikey: 1}, hint: {a_multikey: 1}}));
 
     // IXSCAN with a single seek should have a lower cost than an index scan with skips.
-    const predicateOverAandB = {a: 5, b: {$gt: 6}};
-    // TODO SERVER-100611: re-enable these tests.
-    // assert.lt(
-    //     ixscanCost({predicate: predicateOverAandB, hint: {a: 1, b: 1}}),
-    //     ixscanCost({predicate: predicateOverAandB, hint: {b: 1, a: 1}}),
-    // );
+    // Use a predicate that actually matches (in the dataset a == b == i, so a=5 AND b>4 matches
+    // one document, i=5) to avoid the 1.0 inflation that kicks in for zero CEs.
+    const predicateOverAandB = {a: 5, b: {$gt: 4}};
+    assert.lt(
+        ixscanCost({predicate: predicateOverAandB, hint: {a: 1, b: 1}}),
+        ixscanCost({predicate: predicateOverAandB, hint: {b: 1, a: 1}}),
+    );
+
+    if (planRankerMode === "samplingCE") {
+        // Specifically validate that NDV-based seek count estimation produces correct plan
+        // selection for skip-scan patterns.
+
+        {
+            const skipScanExplain = collSkipScan.find({unique: {$gte: 0}, binary: 1}).explain();
+            const skipScanWinningPlan = getWinningPlanFromExplain(skipScanExplain);
+            const winningIxScan = getPlanStage(skipScanWinningPlan, "IXSCAN");
+            assert.eq(
+                winningIxScan.indexName,
+                "binary_1",
+                "CBR should prefer {binary:1} over skip-scan {unique:1,binary:1}",
+            );
+        }
+        {
+            // This test fails with the equality-prefix heuristic.
+            //
+            // With the equality-prefix heuristic:
+            //
+            // {unique:1, binary:1} estimates
+            //  * numKeys ~1200
+            //  * cardinality ~600
+            //
+            // and {binary:1}
+            //  * numKeys ~1000
+            //  * cardinality ~1000
+            //
+            // And the heuristic wrongly prefers the skip-scan, as the lower cardinality leads
+            // to a lower overall plan cost (including a FETCH).
+            //
+            // With NDV-based seek estimation, the skip-scan must seek ~NDV(unique<=1200)=1200 times,
+            // making it more expensive than a single-seek scan over {binary:1}.
+            const skipScanExplain = collSkipScan.find({unique: {$lte: 1200}, binary: 1}).explain();
+            const skipScanWinningPlan = getWinningPlanFromExplain(skipScanExplain);
+            const winningIxScan = getPlanStage(skipScanWinningPlan, "IXSCAN");
+            assert.eq(
+                winningIxScan.indexName,
+                "binary_1",
+                "CBR with NDV based seek estimation should prefer {binary:1} over skip-scan {unique:1,binary:1}",
+            );
+        }
+
+        // Verify that indexSeekEstimate is present in explain for IXSCAN stages. It is only
+        // populated in sampling CE mode.
+        {
+            // A point query uses a single seek, so indexSeekEstimate should be 1.
+            const explainPoint = coll.find({a: 1}).hint({a: 1}).explain();
+            const ixscanPoint = getPlanStage(explainPoint, "IXSCAN");
+            assert(
+                ixscanPoint.hasOwnProperty("indexSeekEstimate"),
+                "IXSCAN should have indexSeekEstimate in sampling CE mode: " + tojson(ixscanPoint),
+            );
+            assert.eq(
+                ixscanPoint.indexSeekEstimate,
+                1,
+                "Point query should require exactly 1 seek",
+            );
+
+            // A skip-scan over {unique:1, binary:1} with a range on 'unique' requires seeking
+            // for each distinct value of 'unique', so indexSeekEstimate should be >> 1.
+            const explainSkipScan = collSkipScan
+                .find({unique: {$gte: 0}, binary: 1})
+                .hint({unique: 1, binary: 1})
+                .explain();
+            const ixscanSkipScan = getPlanStage(explainSkipScan, "IXSCAN");
+            assert(
+                ixscanSkipScan.hasOwnProperty("indexSeekEstimate"),
+                "Skip-scan IXSCAN should have indexSeekEstimate in sampling CE mode: " +
+                    tojson(ixscanSkipScan),
+            );
+            assert.gt(
+                ixscanSkipScan.indexSeekEstimate,
+                1,
+                "Skip-scan should require multiple seeks: " + tojson(ixscanSkipScan),
+            );
+        }
+    }
 
     // IXSCAN over an index that matches all predicates should produce a lower-cost
     // plan than any of the alternatives.
@@ -238,7 +372,8 @@ function runTest(planRankerMode) {
 
         // FETCH cost should be the approximately the same with or without a residual predicate.
         assert.lt(
-            rootStageCost(coll.find({a: 1, b: 1}).hint({a: 1})) - rootStageCost(coll.find({a: 1}).hint({a: 1})),
+            rootStageCost(coll.find({a: 1, b: 1}).hint({a: 1})) -
+                rootStageCost(coll.find({a: 1}).hint({a: 1})),
             0.01,
         );
     }
@@ -250,7 +385,10 @@ function runTest(planRankerMode) {
     );
 
     // FETCH cost should be the same regardless of the selectivity of the residual predicate.
-    assert.eq(rootStageCost(coll.find({b: 0}).hint({a: 1})), rootStageCost(coll.find({b: 1}).hint({a: 1})));
+    assert.eq(
+        rootStageCost(coll.find({b: 0}).hint({a: 1})),
+        rootStageCost(coll.find({b: 1}).hint({a: 1})),
+    );
 
     /*
      * Cost of SORT
@@ -350,7 +488,10 @@ function runTest(planRankerMode) {
         rootStageCost(coll.find().limit(1).hint({$natural: 1})),
         rootStageCost(coll.find().limit(100).hint({$natural: 1})),
     );
-    assert.lt(rootStageCost(coll.find().limit(1).hint({a: 1})), rootStageCost(coll.find().limit(100).hint({a: 1})));
+    assert.lt(
+        rootStageCost(coll.find().limit(1).hint({a: 1})),
+        rootStageCost(coll.find().limit(100).hint({a: 1})),
+    );
 
     assert.lt(
         inputStageCost(coll.find().limit(1).hint({$natural: 1})),
@@ -393,7 +534,10 @@ function runTest(planRankerMode) {
 
     // LIMIT 0 is equivalent to no limit and should be optimized away to not appear in the plan at
     // all
-    assert.eq(planCost(coll.find().hint({$natural: 1})), planCost(coll.find().limit(0).hint({$natural: 1})));
+    assert.eq(
+        planCost(coll.find().hint({$natural: 1})),
+        planCost(coll.find().limit(0).hint({$natural: 1})),
+    );
     assert.eq(planCost(coll.find().hint({a: 1})), planCost(coll.find().limit(0).hint({a: 1})));
 
     /*
@@ -402,7 +546,10 @@ function runTest(planRankerMode) {
 
     // Skipping documents seems to be slightly more expensive than passing them to the parent stage.
     // Plan with skip(1) should have lower cost than the same plan with skip(1000).
-    assert.lt(planCost(coll.find().skip(1).hint({$natural: 1})), planCost(coll.find().skip(1000).hint({$natural: 1})));
+    assert.lt(
+        planCost(coll.find().skip(1).hint({$natural: 1})),
+        planCost(coll.find().skip(1000).hint({$natural: 1})),
+    );
 
     // Costs of SKIP stage with skip parameter larger than the input size are the same.
     assert.eq(
@@ -426,11 +573,17 @@ function runTest(planRankerMode) {
 
     // In indexed plans without predicate the higher the skip parameter the lower the cost of the
     // root stage FETCH above the SKIP.
-    assert.gt(rootStageCost(coll.find().skip(100).hint({a: 1})), rootStageCost(coll.find().skip(1000).hint({a: 1})));
+    assert.gt(
+        rootStageCost(coll.find().skip(100).hint({a: 1})),
+        rootStageCost(coll.find().skip(1000).hint({a: 1})),
+    );
 
     // skip(0) is equivalent to no skip() and should be optimized away to not appear in the plan at
     // all.
-    assert.eq(planCost(coll.find().hint({$natural: 1})), planCost(coll.find().skip(0).hint({$natural: 1})));
+    assert.eq(
+        planCost(coll.find().hint({$natural: 1})),
+        planCost(coll.find().skip(0).hint({$natural: 1})),
+    );
     assert.eq(planCost(coll.find().hint({a: 1})), planCost(coll.find().skip(0).hint({a: 1})));
 
     /*
@@ -438,7 +591,10 @@ function runTest(planRankerMode) {
      */
 
     // Projections increase the cost of the plan.
-    assert.gt(planCost(coll.find({}, {_id: 0}).hint({$natural: 1})), planCost(coll.find().hint({$natural: 1})));
+    assert.gt(
+        planCost(coll.find({}, {_id: 0}).hint({$natural: 1})),
+        planCost(coll.find().hint({$natural: 1})),
+    );
     assert.gt(planCost(coll.find({}, {_id: 0}).hint({a: 1})), planCost(coll.find().hint({a: 1})));
 
     // Projections over empty imputs have negligible cost.
@@ -450,7 +606,10 @@ function runTest(planRankerMode) {
         rootStageCost(coll.find({}, {_id: 0}).hint({$natural: 1})),
         rootStageCost(collOneRow.find().hint({$natural: 1})),
     );
-    assert.gt(rootStageCost(coll.find({}, {_id: 0}).hint({a: 1})), rootStageCost(collOneRow.find().hint({a: 1})));
+    assert.gt(
+        rootStageCost(coll.find({}, {_id: 0}).hint({a: 1})),
+        rootStageCost(collOneRow.find().hint({a: 1})),
+    );
 
     // More projections are more costly.
     assert.gt(
@@ -461,7 +620,9 @@ function runTest(planRankerMode) {
 
 for (const planRankerMode of ["samplingCE", "histogramCE", "heuristicCE"]) {
     try {
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: true}));
+        assert.commandWorked(
+            db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: true}),
+        );
         assert.commandWorked(db.adminCommand({setParameter: 1, samplingConfidenceInterval: "99"}));
         assert.commandWorked(db.adminCommand({setParameter: 1, samplingMarginOfError: 1}));
 
@@ -469,7 +630,9 @@ for (const planRankerMode of ["samplingCE", "histogramCE", "heuristicCE"]) {
     } finally {
         // Make sure that we restore the defaults no matter what
         assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: false}));
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: false}));
+        assert.commandWorked(
+            db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: false}),
+        );
         assert.commandWorked(db.adminCommand({setParameter: 1, samplingConfidenceInterval: "95"}));
         assert.commandWorked(db.adminCommand({setParameter: 1, samplingMarginOfError: 5}));
     }

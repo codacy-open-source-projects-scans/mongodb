@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/op_observer/batched_write_policy.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -108,12 +81,12 @@ TEST_F(BatchedWritePolicyTest, TooFewDocumentsTest) {
     auto record = cm.next();
 
     buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(3, stmts.size());
+    EXPECT_EQ(3, stmts.size());
 
     // Exhausted Cursor.
     stmts.clear();
     buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(0, stmts.size());
+    EXPECT_EQ(0, stmts.size());
 }
 
 TEST_F(BatchedWritePolicyTest, TooManyDocumentsTest) {
@@ -126,11 +99,11 @@ TEST_F(BatchedWritePolicyTest, TooManyDocumentsTest) {
     auto record = cm.next();
 
     buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(4, stmts.size());
+    EXPECT_EQ(4, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 }
 
 TEST_F(BatchedWritePolicyTest, TooManyDocumentsMultiTest) {
@@ -148,12 +121,12 @@ TEST_F(BatchedWritePolicyTest, TooManyDocumentsMultiTest) {
     for (size_t i = 0; i < numFullBatches; i++) {
         buildBatchedWritesWithPolicy(
             maxSizeBytes, batchSize, [&cm]() { return cm.next(); }, record, stmts);
-        ASSERT_EQ(batchSize, stmts.size());
+        EXPECT_EQ(batchSize, stmts.size());
         stmts.clear();
     }
     buildBatchedWritesWithPolicy(
         maxSizeBytes, batchSize, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(static_cast<size_t>(numRecords % batchSize), stmts.size());
+    EXPECT_EQ(static_cast<size_t>(numRecords % batchSize), stmts.size());
 }
 
 TEST_F(BatchedWritePolicyTest, TooManyBigDocumentsTest) {
@@ -166,11 +139,11 @@ TEST_F(BatchedWritePolicyTest, TooManyBigDocumentsTest) {
     auto record = cm.next();
 
     buildBatchedWritesWithPolicy(4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(4, stmts.size());
+    EXPECT_EQ(4, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 }
 
 TEST_F(BatchedWritePolicyTest, TooBigDocumentTest) {
@@ -184,15 +157,15 @@ TEST_F(BatchedWritePolicyTest, TooBigDocumentTest) {
     auto record = cm.next();
 
     buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 }
 
 TEST_F(BatchedWritePolicyTest, UnBatchedCappedCollectionTest) {
@@ -206,22 +179,22 @@ TEST_F(BatchedWritePolicyTest, UnBatchedCappedCollectionTest) {
 
     buildBatchedWritesWithPolicy(
         maxSizeBytes, 2, [&cm]() { return cm.next(); }, record, stmts, /*canBeBatched=*/false);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(
         maxSizeBytes, 2, [&cm]() { return cm.next(); }, record, stmts, /*canBeBatched=*/false);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(
         maxSizeBytes, 2, [&cm]() { return cm.next(); }, record, stmts, /*canBeBatched=*/false);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 
     stmts.clear();
     buildBatchedWritesWithPolicy(
         maxSizeBytes, 2, [&cm]() { return cm.next(); }, record, stmts, /*canBeBatched=*/false);
-    ASSERT_EQ(1, stmts.size());
+    EXPECT_EQ(1, stmts.size());
 }
 
 }  // namespace

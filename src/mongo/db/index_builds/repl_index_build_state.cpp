@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/index_builds/repl_index_build_state.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
@@ -44,14 +17,19 @@
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/version_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -74,24 +52,24 @@ std::vector<std::string> extractIndexNames(const std::vector<BSONObj>& specs) {
 
 }  // namespace
 
-StringData indexBuildProtocolToString(IndexBuildProtocol protocol) {
+std::string_view indexBuildProtocolToString(IndexBuildProtocol protocol) {
     switch (protocol) {
         case IndexBuildProtocol::kSinglePhase:
-            return "single phase"_sd;
+            return "single phase"sv;
         case IndexBuildProtocol::kTwoPhase:
-            return "two phase"_sd;
+            return "two phase"sv;
         case IndexBuildProtocol::kPrimaryDriven:
-            return "primary driven"_sd;
+            return "primary driven"sv;
     }
     MONGO_UNREACHABLE;
 }
 
-IndexBuildProtocol parseIndexBuildProtocol(StringData str) {
-    if (str == "single phase"_sd) {
+IndexBuildProtocol parseIndexBuildProtocol(std::string_view str) {
+    if (str == "single phase"sv) {
         return IndexBuildProtocol::kSinglePhase;
-    } else if (str == "two phase"_sd) {
+    } else if (str == "two phase"sv) {
         return IndexBuildProtocol::kTwoPhase;
-    } else if (str == "primary driven"_sd) {
+    } else if (str == "primary driven"sv) {
         return IndexBuildProtocol::kPrimaryDriven;
     }
     uasserted(ErrorCodes::BadValue,
@@ -715,6 +693,11 @@ Status ReplIndexBuildState::onConflictWithNewIndexBuild(const ReplIndexBuildStat
 
 bool ReplIndexBuildState::isResumable() const {
     std::lock_guard lk(_mutex);
+    if (protocol == IndexBuildProtocol::kPrimaryDriven) {
+        return feature_flags::gResumablePrimaryDrivenIndexBuilds
+            .isEnabledUseLastLTSFCVWhenUninitialized(
+                VersionContext{}, serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    }
     // It's implied that the IndexBuildProtocol is resumable if _lastOpTimeBeforeInterceptors is
     // set.
     return !_lastOpTimeBeforeInterceptors.isNull();
@@ -763,6 +746,30 @@ void ReplIndexBuildState::setVotedToCommitTime(const Date_t& time) {
 void ReplIndexBuildState::setReceivedCommitIndexBuildEntryTime(const Date_t& time) {
     std::lock_guard lk(_mutex);
     _metrics.commitIndexOplogEntryTime = time;
+}
+
+void ReplIndexBuildState::setIndexBuildStartPhase(IndexBuildPhaseEnum phase) {
+    std::lock_guard lk(_mutex);
+    _metrics.startPhase = phase;
+}
+
+SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats> ReplIndexBuildState::getOutcomeFuture()
+    const {
+    return _outcomePromise.getFuture();
+}
+
+void ReplIndexBuildState::fulfillOutcome(OperationContext* opCtx,
+                                         StatusWith<IndexCatalogStats> result) {
+    if (VersionContext::getDecoration(opCtx).isLongRunningOperation()) {
+        ClientLock lk(opCtx->getClient());
+        VersionContext::clearDecorationLongRunningMarker(lk, opCtx);
+    }
+
+    if (result.isOK()) {
+        _outcomePromise.emplaceValue(std::move(result.getValue()));
+    } else {
+        _outcomePromise.setError(result.getStatus());
+    }
 }
 
 bool ReplIndexBuildState::_shouldSkipIndexBuildStateTransitionCheck(OperationContext* opCtx) const {

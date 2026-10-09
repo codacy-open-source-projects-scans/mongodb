@@ -19,7 +19,10 @@ let replSet = new ReplSetTest({
     nodeOptions: {
         wiredTigerEngineConfigString:
             "cache_size=256M,cache_stuck_timeout_ms=600000,eviction=(threads_min=1,threads_max=1)",
-        setParameter: {cachePressureQueryPeriodMilliseconds: 0, transactionLifetimeLimitSeconds: 600},
+        setParameter: {
+            cachePressureQueryPeriodMilliseconds: 0,
+            transactionLifetimeLimitSeconds: 600,
+        },
     },
 });
 
@@ -43,7 +46,9 @@ const doTxnsFn = function (dbName, collName) {
         let session = testDb.getMongo().startSession();
         try {
             session.startTransaction();
-            assert.commandWorked(session.getDatabase(dbName).getCollection(collName).insert(largeDoc));
+            assert.commandWorked(
+                session.getDatabase(dbName).getCollection(collName).insert(largeDoc),
+            );
         } catch (e) {
             jsTestLog("Non-fatal exception: " + e);
         }
@@ -73,8 +78,22 @@ assert.gt(serverStatus.transactions.currentInactive, 0);
 // Wait for an active transaction that's stuck during cache pressure to be interrupted by stepdown.
 assert.soon(() => {
     // Keep stepping down until we interrupt an active transaction. There's a small chance that we
-    // might not have an active transaction in the system yet during cache pressure.
-    assert.commandWorked(primary.getDB("admin").runCommand({replSetStepDown: 1, force: true}));
+    // might not have an active transaction in the system yet during cache pressure. Failed attempts
+    // are retried. The stepdown period can expire while conflicting operations are still being
+    // killed under cache pressure.
+    let res;
+    try {
+        res = primary.getDB("admin").runCommand({replSetStepDown: 1, force: true});
+    } catch (e) {
+        jsTest.log.info("replSetStepDown threw. Retrying", {error: e});
+        sleep(1000);
+        return false;
+    }
+    if (!res.ok) {
+        jsTest.log.info("replSetStepDown failed. Retrying", {res});
+        sleep(1000);
+        return false;
+    }
 
     let serverStatus = assert.commandWorked(db.adminCommand({serverStatus: 1}));
     let appInterrupts = serverStatus.wiredTiger.cache["application requested eviction interrupt"];
@@ -85,7 +104,7 @@ assert.soon(() => {
     // Wait a bit longer.
     sleep(5000);
     return false;
-});
+}, "Timed out waiting for stepdown to interrupt an active transaction under cache pressure");
 
 awaitTxns();
 

@@ -408,10 +408,16 @@ ABC"y" : null
             let json;
 
             json = JSON.stringify(x);
-            assert.eq(json, '{"$binary":"VG8gYmUgb3Igbm90IHRvIGJlLi4uIFRoYXQgaXMgdGhlIHF1ZXN0aW9uLg==","$type":"00"}');
+            assert.eq(
+                json,
+                '{"$binary":"VG8gYmUgb3Igbm90IHRvIGJlLi4uIFRoYXQgaXMgdGhlIHF1ZXN0aW9uLg==","$type":"00"}',
+            );
 
             json = toJsonForLog(x);
-            assert.eq(json, '{"$binary":"VG8gYmUgb3Igbm90IHRvIGJlLi4uIFRoYXQgaXMgdGhlIHF1ZXN0aW9uLg==","$type":"00"}');
+            assert.eq(
+                json,
+                '{"$binary":"VG8gYmUgb3Igbm90IHRvIGJlLi4uIFRoYXQgaXMgdGhlIHF1ZXN0aW9uLg==","$type":"00"}',
+            );
         });
 
         it("regex", function () {
@@ -630,8 +636,14 @@ ABC"y" : null
             assert.eq(toJsonForLog(new Error(stringThatNeedsEscaping)), '{"$error":"ho\\"la"}');
 
             assert.eq("{}", JSON.stringify(new SyntaxError(stringThatNeedsEscaping)));
-            assert.eq(tojson(new SyntaxError(stringThatNeedsEscaping)), 'new SyntaxError("ho\\"la")');
-            assert.eq(toJsonForLog(new SyntaxError(stringThatNeedsEscaping)), '{"$error":"ho\\"la"}');
+            assert.eq(
+                tojson(new SyntaxError(stringThatNeedsEscaping)),
+                'new SyntaxError("ho\\"la")',
+            );
+            assert.eq(
+                toJsonForLog(new SyntaxError(stringThatNeedsEscaping)),
+                '{"$error":"ho\\"la"}',
+            );
         });
     });
 
@@ -695,6 +707,31 @@ describe("tojsonObject", () => {
         );
     });
 
+    it("escapes field names so the output survives eval()", () => {
+        // tojson's contract is that eval() of its output reproduces the input. Field names are
+        // arbitrary strings and a collection name can hold a backslash or a quote, so they have
+        // to be escaped like values are.
+        const keys = [
+            String.raw`^\Q\|\E`,
+            String.raw`index_bounds_pipe/^\|b/`,
+            'quote"inside',
+            "tab\there",
+            "back\\slash",
+        ];
+        for (const key of keys) {
+            const obj = {[key]: 1};
+            const roundTripped = eval("(" + tojsonObject(obj, "", true) + ")");
+            assert.eq(
+                Object.keys(roundTripped),
+                [key],
+                `field name ${JSON.stringify(key)} did not survive tojson -> eval`,
+            );
+        }
+
+        // A field name needing no escaping is unchanged.
+        assert.eq(tojsonObject({"foo.bar": 1}, "", true), '{ "foo.bar" : 1 }');
+    });
+
     it("multiple fields", () => {
         assert.eq(
             tojsonObject({a: 1, b: 2}, "", false),
@@ -727,7 +764,10 @@ describe("tojsonObject", () => {
 	}
 }`,
         );
-        assert.eq(tojsonObject({a: 1, b: {bb: 2, cc: 3}}, "", true), '{ "a" : 1, "b" : { "bb" : 2, "cc" : 3 } }');
+        assert.eq(
+            tojsonObject({a: 1, b: {bb: 2, cc: 3}}, "", true),
+            '{ "a" : 1, "b" : { "bb" : 2, "cc" : 3 } }',
+        );
         assert.eq(
             tojsonObject({a: 1, b: {bb: 2, cc: 3}}, "\t\t", false),
             `\

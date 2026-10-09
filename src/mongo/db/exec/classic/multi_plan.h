@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -44,15 +18,18 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 extern FailPoint sleepWhileMultiplanning;
 
@@ -68,7 +45,7 @@ extern FailPoint sleepWhileMultiplanning;
  */
 class MultiPlanStage final : public RequiresCollectionStage {
 public:
-    static const char* kStageType;
+    static constexpr std::string_view kStageType = "MULTI_PLAN"sv;
 
     struct EstimationResult {
         // The total cost of all plans (sum of plan costs).
@@ -228,8 +205,21 @@ public:
         return _isStateSaved;
     }
 
-    void stopCollectingMetrics() {
-        _shouldNotCollectMetrics = true;
+    // Call when CBR has chosen the winning plan, before the finishing-up trial runs. Emits the
+    // accumulated stats from the capped trial, then suppresses all further metric collection so
+    // the finishing-up trial's work/time are not counted.
+    void markCBRChoseWinner();
+
+    // Emits the accumulated multi-planner metrics without running a new trial. Used by strategies
+    // that run a capped estimation trial followed by a non-MP ranker (e.g., CBR), ensuring
+    // metrics are emitted exactly once per planning invocation even when no finishing-up trial
+    // runs.
+    void emitAccumulatedStats();
+
+    // Call when this MultiPlanStage is planning a subquery (e.g. a branch of an $or query).
+    // Prevents increment of multiPlannerChoseWinningPlan counter.
+    void markBranchPlanner() {
+        _isBranchPlanner = true;
     }
 
 protected:
@@ -335,7 +325,20 @@ private:
     // query.multiplanner.choseWinningPlan does not make sense to update, because the winning plan
     // had already been chosen by CBR). This boolean is used to conditionally increment metrics in
     // order to prevent this.
+    // Also set by markCBRChoseWinner() (after emitting capped-trial stats) to suppress all metric
+    // collection in the finishing-up trial.
     bool _shouldNotCollectMetrics = false;
+
+    // Set by markBranchPlanner() when this MP is planning a subquery.
+    // Prevents incrementing multiPlannerChoseWinningPlan since it does not choose the overall
+    // winning plan. Does NOT affect accumulation of stats (time, works).
+    bool _isBranchPlanner = false;
+
+    // Counters accumulated across all runTrials() phases. Emitted once on the finishing-up trial
+    // (!isCappedTrialPhase) or on the capped trial if it finishes with an early exit.
+    size_t _accumulatedNumPlans{0};
+    size_t _accumulatedWorks{0};
+    Microseconds _accumulatedMicros{0};
 };
 
 }  // namespace mongo

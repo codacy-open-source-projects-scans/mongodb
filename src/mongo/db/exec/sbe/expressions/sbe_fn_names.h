@@ -1,35 +1,11 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
+
+#include <cstdint>
+#include <string_view>
 
 /**
  * Enum and string constants for all function names that can appear in ABT FunctionCall nodes.
@@ -40,7 +16,7 @@
  *    is lowered to EVariable, and kBlockTraverseFPlaceholder, which is resolved by the vectorizer)
  *
  * EFn is an enum class whose integer values index into a parallel array of string names in
- * sbe_fn_names.cpp. Use toString(EFn) to get the string and fromString(StringData) to reverse
+ * sbe_fn_names.cpp. Use toString(EFn) to get the string and fromString(std::string_view) to reverse
  * the mapping.
  *
  * The authoritative source for VM dispatch is the kBuiltinFunctions and kInstrFunctions maps in
@@ -55,7 +31,7 @@
  *    Increment kNumFunctions by adjusting the sentinel; it is the last enumerator and its
  *    value is computed automatically.
  *
- * 2. sbe_fn_names.cpp — add a {StringData, EFn} entry to kEFnByName[] in the same
+ * 2. sbe_fn_names.cpp — add a {std::string_view, EFn} entry to kEFnByName[] in the same
  *    alphabetical position as step 1. This array must remain sorted by string value
  *    and its enum values must stay in sequential order (both are compile-time checked).
  *    If the function is only reachable from the ABT/optimizer layer under a different
@@ -195,7 +171,7 @@ enum class EFn : uint16_t {
     kAtan,
     kAtan2,
     kAtanh,
-    kAvgOfArray,
+    kAvgFromAcc,
     kBitTestMask,
     kBitTestPosition,
     kBitTestZero,
@@ -248,6 +224,7 @@ enum class EFn : uint16_t {
     kDoubleDoublePartialSumFinalize,
     kDoubleDoubleSum,
     kDoubleDoubleSumFinalize,
+    kDoubleDoubleSumFromAcc,
     kDropFields,
     kExists,
     kExp,
@@ -288,6 +265,7 @@ enum class EFn : uint16_t {
     kIsMinKey,
     kIsNaN,
     kIsNull,
+    kIsNullish,
     kIsNumber,
     kIsObject,
     kIsRecordId,
@@ -306,19 +284,20 @@ enum class EFn : uint16_t {
     kLn,
     kLog10,
     kLtrim,
-    kMagicTraverseF,
     kMakeBsonObj,
     kMakeObj,
     kMakeOwn,
     kMax,
-    kMaxOfArray,
+    kMaxFromAcc,
     kMergeObjects,
+    kMergeObjectsForExpr,
     kMillisecond,
     kMin,
-    kMinOfArray,
+    kMinFromAcc,
     kMinute,
     kMod,
     kMonth,
+    kMqlComparisonRank,
     kNewArray,
     kNewArrayFromRange,
     kNewBsonObj,
@@ -339,7 +318,6 @@ enum class EFn : uint16_t {
     kSecond,
     kSetDifference,
     kSetEquals,
-    kSetField,
     kSetIntersection,
     kSetIsSubset,
     kSetToArray,
@@ -354,16 +332,15 @@ enum class EFn : uint16_t {
     kSortKeyComponentVectorToArray,
     kSplit,
     kSqrt,
-    kStdDevPop,
     kStdDevPopFinalize,
-    kStdDevSamp,
+    kStdDevPopFromAcc,
     kStdDevSampFinalize,
+    kStdDevSampFromAcc,
     kStrLenBytes,
     kStrLenCP,
     kSubstrBytes,
     kSubstrCP,
     kSum,
-    kSumOfArray,
     kTan,
     kTanh,
     kToLower,
@@ -408,6 +385,7 @@ enum class EFn : uint16_t {
     kValueBlockGtScalar,
     kValueBlockGteScalar,
     kValueBlockIsMember,
+    kValueBlockIsNullish,
     kValueBlockIsTimezone,
     kValueBlockLogicalAnd,
     kValueBlockLogicalNot,
@@ -415,6 +393,7 @@ enum class EFn : uint16_t {
     kValueBlockLtScalar,
     kValueBlockLteScalar,
     kValueBlockMod,
+    kValueBlockMqlComparisonRank,
     kValueBlockMult,
     kValueBlockNeqScalar,
     kValueBlockNewFill,
@@ -435,7 +414,7 @@ enum class EFn : uint16_t {
  * Convert an EFn value to its canonical string representation.
  * Calling with an out-of-range value is a programming error (invariant).
  */
-StringData toString(EFn fn);
+std::string_view toString(EFn fn);
 
 /**
  * Reverse mapping: look up an EFn by its string name (or a recognised alias
@@ -444,7 +423,7 @@ StringData toString(EFn fn);
  * invalid function name, which is a programmer error, not a recoverable
  * condition.
  */
-EFn fromString(StringData name);
+EFn fromString(std::string_view name);
 
 // clang-format on
 

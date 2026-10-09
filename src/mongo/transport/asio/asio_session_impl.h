@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -51,7 +25,7 @@ namespace mongo::transport {
  * NOTE: This functionality is currently provided by inheritance, but composition might be a
  * preferred approach after more refactoring.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT CommonAsioSession : public AsioSession {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] CommonAsioSession : public AsioSession {
 public:
     /**
      * If the socket is disconnected while any of these options are being set, this constructor
@@ -135,17 +109,10 @@ public:
 
     bool isConnected() override;
 
-    bool isConnectedToLoadBalancerPort() const override;
-
-    bool isConnectedToPriorityPort() const override;
-
-    bool isConnectedToProxyUnixSocket() const override;
+    bool waitForPeerDisconnectUntil(Date_t deadline) override;
 
     Status validateProxyUnixSocketPeerPermissions() override;
 
-    bool isLoadBalancerPeer() const override;
-
-    void setisLoadBalancerPeer(bool helloHasLoadBalancedOption) override;
 
     bool bindsToOperationState() const override {
         return isLoadBalancerPeer();
@@ -160,8 +127,7 @@ protected:
     const std::shared_ptr<SSLManagerInterface>& getSSLManager() const;
     /** Constructs a SSL socket required to initiate SSL handshake for egress connections. */
     Status buildSSLSocket(const HostAndPort& target) override;
-    Future<void> handshakeSSLForEgress(const HostAndPort& target,
-                                       const ReactorHandle& reactor) override;
+    Future<void> handshakeSSLForEgress(const HostAndPort& target) override;
 #endif
 
     GenericSocket& getSocket() override;
@@ -214,7 +180,7 @@ protected:
          *  +--------------------------+--------------+
          */
         enum class State { kNotStarted, kRunning, kCanceled };
-        AtomicWord<State> _state{State::kNotStarted};
+        Atomic<State> _state{State::kNotStarted};
     };
 
     Future<Message> sourceMessageImpl(const BatonHandle& baton = nullptr);
@@ -314,29 +280,7 @@ protected:
     std::mutex _sslSocketLock{};
 
     AsioTransportLayer* const _tl;
-    bool _isIngressSession;
 
-    /**
-     * We have a distinction here. A load balancer port can accept connections that are
-     * either attempting to connect to a load balancer or as a normal targeted connection.
-     * The bools below describe if 1/ the connection is connecting to the load balancer port,
-     * and 2/ the connection is a load balancer type connection. We only find out if the
-     * connection is a LoadBalancerConnection if the hello command parses {loadBalancer: 1}.
-     */
-    bool _isConnectedToLoadBalancerPort = false;
-    bool _isLoadBalancerPeer = false;
-
-    /**
-     * Indicates whether the connection targets the priority port or its corresponding unix
-     * socket. These connection are intended to allow high-priority operations during connection
-     * storms.
-     */
-    bool _isConnectedToPriorityPort = false;
-
-    /**
-     * Indicates whether this is a proxy unix domain socket connection.
-     */
-    bool _isConnectedToProxyUnixSocket = false;
 
     boost::optional<HostAndPort> _proxiedSrcEndpoint;
     boost::optional<HostAndPort> _proxiedDstEndpoint;

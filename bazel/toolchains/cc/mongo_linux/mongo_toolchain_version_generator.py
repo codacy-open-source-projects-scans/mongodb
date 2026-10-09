@@ -31,6 +31,7 @@ PLATFORM_NAME_MAP = {
     "amazon_linux_2_x86_64": "amazon2",
     "debian10_x86_64": "debian10",
     "debian12_x86_64": "debian12",
+    "debian13_x86_64": "debian13",
     "rhel8_aarch64": "rhel82-arm64",
     "rhel8_ppc64le": "rhel81-ppc64le",
     "rhel8_s390x": "rhel80-zseries",
@@ -40,8 +41,11 @@ PLATFORM_NAME_MAP = {
     "rhel9_s390x": "rhel90-zseries",
     "rhel9_x86_64": "rhel90",
     "rhel10_aarch64": "rhel10-arm64",
+    "rhel10_ppc64le": "rhel10-ppc64le",
+    "rhel10_s390x": "rhel10-zseries",
     "rhel10_x86_64": "rhel10",
     "suse15_x86_64": "suse15",
+    "suse16_x86_64": "suse16",
     "ubuntu18_x86_64": "ubuntu1804",
     "ubuntu20_aarch64": "ubuntu2004-arm64",
     "ubuntu20_x86_64": "ubuntu2004",
@@ -49,6 +53,8 @@ PLATFORM_NAME_MAP = {
     "ubuntu22_x86_64": "ubuntu2204",
     "ubuntu24_aarch64": "ubuntu2404-arm64",
     "ubuntu24_x86_64": "ubuntu2404",
+    "ubuntu26_aarch64": "ubuntu2604-arm64",
+    "ubuntu26_x86_64": "ubuntu2604",
 }
 
 REQUESTS_SESSION = requests.Session()

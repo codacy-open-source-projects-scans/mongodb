@@ -1,39 +1,20 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/transport/asio/asio_utils.h"
 
 #include "mongo/config.h"
 #include "mongo/logv2/log.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
+#ifdef MONGO_CONFIG_SSL
+#include "mongo/util/net/ssl.hpp"
+#endif
 
+#include <string_view>
+
+#include <fmt/format.h>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 namespace mongo::transport {
 
@@ -41,13 +22,13 @@ Status errorCodeToStatus(const std::error_code& ec) {
     return errorCodeToStatus(ec, {});
 }
 
-Status errorCodeToStatus(const std::error_code& ec, StringData context) {
+Status errorCodeToStatus(const std::error_code& ec, std::string_view context) {
     if (!ec)
         return Status::OK();
 
     // Add additional context string to Status reason if included.
-    auto makeStatus = [&](ErrorCodes::Error code, StringData reason) {
-        Status result(code, reason);
+    auto makeStatus = [&](ErrorCodes::Error code, std::string reason) {
+        Status result(code, std::move(reason));
         if (context.data())
             result.addContext(context);
         return result;
@@ -64,9 +45,22 @@ Status errorCodeToStatus(const std::error_code& ec, StringData context) {
 #endif
         return makeStatus(ErrorCodes::NetworkTimeout, "Socket operation timed out");
     } else if (ec == asio::error::eof) {
-        return makeStatus(ErrorCodes::HostUnreachable, "Connection closed by peer");
-    } else if (ec == asio::error::connection_reset) {
-        return makeStatus(ErrorCodes::HostUnreachable, "Connection reset by peer");
+        // Non-TLS graceful FIN. Same code as stream_truncated below; the appended ec.message()
+        // distinguishes the two transport modes for diagnosis.
+        return makeStatus(ErrorCodes::ConnectionClosedByPeer,
+                          fmt::format("Connection closed by peer: {}", ec.message()));
+#ifdef MONGO_CONFIG_SSL
+    } else if (ec == asio::ssl::error::stream_truncated) {
+        // TLS peer closed without a proper close_notify — semantically identical to EOF.
+        return makeStatus(ErrorCodes::ConnectionClosedByPeer,
+                          fmt::format("Connection closed by peer: {}", ec.message()));
+#endif
+    } else if (ec == asio::error::connection_reset || ec == asio::error::connection_aborted) {
+        // Normalize abortive peer closes to ConnectionClosedByPeer so establishment-phase peer
+        // closes are classified consistently across platforms. ec.message() keeps variants
+        // distinguishable in diagnostics.
+        return makeStatus(ErrorCodes::ConnectionClosedByPeer,
+                          fmt::format("Connection closed by peer: {}", ec.message()));
     } else if (ec == asio::error::network_reset) {
         return makeStatus(ErrorCodes::HostUnreachable, "Connection reset by network");
     } else if (ec == asio::error::in_progress) {
@@ -108,7 +102,9 @@ BSONObj errorDescription(const std::system_error& ex) {
 }
 
 asio::generic::stream_protocol::endpoint getLocalEndpoint(
-    asio::generic::stream_protocol::socket& sock, StringData errorLogNote, logv2::LogSeverity sev) {
+    asio::generic::stream_protocol::socket& sock,
+    std::string_view errorLogNote,
+    logv2::LogSeverity sev) {
     try {
         return sock.local_endpoint();
     } catch (const std::system_error& ex) {
@@ -122,7 +118,9 @@ asio::generic::stream_protocol::endpoint getLocalEndpoint(
 }
 
 asio::generic::stream_protocol::endpoint getRemoteEndpoint(
-    asio::generic::stream_protocol::socket& sock, StringData errorLogNote, logv2::LogSeverity sev) {
+    asio::generic::stream_protocol::socket& sock,
+    std::string_view errorLogNote,
+    logv2::LogSeverity sev) {
     try {
         return sock.remote_endpoint();
     } catch (const std::system_error& ex) {
@@ -213,7 +211,7 @@ StatusWith<unsigned> pollASIOSocket(asio::generic::stream_protocol::socket& sock
 }
 
 void failedSetSocketOption(const std::system_error& ex,
-                           StringData errorLogNote,
+                           std::string_view errorLogNote,
                            BSONObj optionDescription,
                            logv2::LogSeverity errorLogSeverity) {
     LOGV2_DEBUG(5693100,

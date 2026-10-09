@@ -8,6 +8,7 @@ import shutil
 import string
 import sys
 import threading
+import urllib.parse
 import uuid
 from typing import Optional
 
@@ -94,6 +95,10 @@ class _SingleJSTestCase(interface.ProcessTestCase):
             if is_timeseries_file:
                 break
 
+        if "queryable_dbpath" in test_data and not os.path.isabs(test_data["queryable_dbpath"]):
+            base = config.DBPATH_PREFIX or config.DEFAULT_DBPATH_PREFIX
+            test_data["queryable_dbpath"] = os.path.join(base, test_data["queryable_dbpath"])
+
         global_vars["TestData"] = test_data
         self.shell_options["global_vars"] = global_vars
 
@@ -145,13 +150,30 @@ class _SingleJSTestCase(interface.ProcessTestCase):
         )
 
     def _make_process(self) -> "process.Process":
+        connection_url = self.fixture.get_shell_connection_url()
+
+        # Allow hooks to specify a custom appName in shell_options.
+        # Pop from a local copy rather than mutating self.shell_options: _make_process() runs more
+        # than once per test (e.g. as_command() during startTest() then again in run_test()), so a
+        # destructive pop would drop appName on the actual run.
+        shell_options = dict(self.shell_options)
+        app_name = shell_options.pop("appName", None)
+        if app_name:
+            encoded_app_name = urllib.parse.quote(app_name, safe="")
+            if "?" in connection_url:
+                connection_url = f"{connection_url}&appName={encoded_app_name}"
+            else:
+                # MongoDB URI requires a slash before query params if no database is specified.
+                slash = "" if connection_url.endswith("/") else "/"
+                connection_url = f"{connection_url}{slash}?appName={encoded_app_name}"
+
         return core.programs.mongo_shell_program(
             self.logger,
             executable=self.shell_executable,
             filenames=self.js_filenames,
             test_name=os.path.splitext(os.path.basename(self.test_name))[0],
-            connection_string=self.fixture.get_shell_connection_url(),
-            **self.shell_options,
+            connection_string=connection_url,
+            **shell_options,
         )
 
 

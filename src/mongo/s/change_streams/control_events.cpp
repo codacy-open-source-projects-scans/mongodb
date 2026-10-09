@@ -1,56 +1,33 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/s/change_streams/control_events.h"
 
 #include "mongo/db/namespace_spec_gen.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
 namespace mongo {
 namespace {
-static constexpr StringData kClusterTimeField = "clusterTime"_sd;
-static constexpr StringData kIdField = "_id"_sd;
-static constexpr StringData kNamespaceField = "ns"_sd;
-static constexpr StringData kOperationTypeField = "operationType"_sd;
-static constexpr StringData kFullDocumentField = "fullDocument"_sd;
-static constexpr StringData kCommittedAtField = "committedAt"_sd;
-static constexpr StringData kDonorField = "donor"_sd;
-static constexpr StringData kRecipientField = "recipient"_sd;
-static constexpr StringData kAllCollectionChunksMigratedFromDonorField =
-    "allCollectionChunksMigratedFromDonor"_sd;
-static constexpr StringData kFromField = "from"_sd;
-static constexpr StringData kToField = "to"_sd;
-static constexpr StringData kOperationDescriptionField = "operationDescription"_sd;
+using namespace std::literals::string_view_literals;
+static constexpr std::string_view kClusterTimeField = "clusterTime"sv;
+static constexpr std::string_view kIdField = "_id"sv;
+static constexpr std::string_view kNamespaceField = "ns"sv;
+static constexpr std::string_view kOperationTypeField = "operationType"sv;
+static constexpr std::string_view kFullDocumentField = "fullDocument"sv;
+static constexpr std::string_view kCommittedAtField = "committedAt"sv;
+static constexpr std::string_view kDonorField = "donor"sv;
+static constexpr std::string_view kRecipientField = "recipient"sv;
+static constexpr std::string_view kAllCollectionChunksMigratedFromDonorField =
+    "allCollectionChunksMigratedFromDonor"sv;
+static constexpr std::string_view kFromField = "from"sv;
+static constexpr std::string_view kToField = "to"sv;
+static constexpr std::string_view kOperationDescriptionField = "operationDescription"sv;
 
-Value assertFieldType(const Document& document, StringData fieldName, BSONType expectedType) {
+Value assertFieldType(const Document& document, std::string_view fieldName, BSONType expectedType) {
     auto val = document[fieldName];
     uassert(ErrorCodes::BadValue,
             str::stream() << "failed to convert change event into control event: expected \""

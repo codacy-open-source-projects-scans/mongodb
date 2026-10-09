@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
@@ -36,49 +10,48 @@ namespace vm {
 std::pair<SortSpec*, CollatorInterface*> ByteCode::generateSortKeyHelper(ArityType arity) {
     tassert(11080009, "Unexpected arity value", arity == 2 || arity == 3);
 
-    auto [ssOwned, ssTag, ssVal] = getFromStack(0);
-    auto [objOwned, objTag, objVal] = getFromStack(1);
-    if (ssTag != value::TypeTags::sortSpec || !value::isObject(objTag)) {
+    auto ssView = viewFromStack(0);
+    auto objView = viewFromStack(1);
+    if (ssView.tag != value::TypeTags::sortSpec || !value::isObject(objView.tag)) {
         return {nullptr, nullptr};
     }
 
     CollatorInterface* collator{nullptr};
     if (arity == 3) {
-        auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
-        if (collatorTag != value::TypeTags::collator) {
+        auto collatorView = viewFromStack(2);
+        if (collatorView.tag != value::TypeTags::collator) {
             return {nullptr, nullptr};
         }
-        collator = value::getCollatorView(collatorVal);
+        collator = value::getCollatorView(collatorView.value);
     }
 
-    auto ss = value::getSortSpecView(ssVal);
+    auto ss = value::getSortSpecView(ssView.value);
     return {ss, collator};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateCheapSortKey(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinGenerateCheapSortKey(ArityType arity) {
     auto [sortSpec, collator] = generateSortKeyHelper(arity);
     if (!sortSpec) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     // We "move" the object argument into the sort spec.
     auto sortKeyComponentVector =
-        sortSpec->generateSortKeyComponentVector(moveFromStack(1), collator);
+        sortSpec->generateSortKeyComponentVector(moveMaybeOwnedFromStack(1), collator);
 
     return {false,
             value::TypeTags::sortKeyComponentVector,
             value::bitcastFrom<value::SortKeyComponentVector*>(sortKeyComponentVector)};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinGenerateSortKey(ArityType arity) {
     auto [sortSpec, collator] = generateSortKeyHelper(arity);
     if (!sortSpec) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto [objOwned, objTag, objVal] = getFromStack(1);
-    auto bsonObj = [objTag = objTag, objVal = objVal]() {
+    auto objView = viewFromStack(1);
+    auto bsonObj = [objTag = objView.tag, objVal = objView.value]() {
         if (objTag == value::TypeTags::bsonObject) {
             return BSONObj{value::bitcastTo<const char*>(objVal)};
         } else if (objTag == value::TypeTags::Object) {
@@ -95,19 +68,18 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey(
             value::makeKeyString(sortSpec->generateSortKey(bsonObj, collator)).second};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponentVectorGetElement(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinSortKeyComponentVectorGetElement(ArityType arity) {
     tassert(11080008, "Unexpected arity value", arity == 2);
 
-    auto [sortVecOwned, sortVecTag, sortVecVal] = getFromStack(0);
-    auto [idxOwned, idxTag, idxVal] = getFromStack(1);
-    if (sortVecTag != value::TypeTags::sortKeyComponentVector ||
-        idxTag != value::TypeTags::NumberInt32) {
-        return {false, value::TypeTags::Nothing, 0};
+    auto sortVec = viewFromStack(0);
+    auto idx = viewFromStack(1);
+    if (sortVec.tag != value::TypeTags::sortKeyComponentVector ||
+        idx.tag != value::TypeTags::NumberInt32) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto* sortObj = value::getSortKeyComponentVectorView(sortVecVal);
-    const auto idxInt32 = value::bitcastTo<int32_t>(idxVal);
+    auto* sortObj = value::getSortKeyComponentVectorView(sortVec.value);
+    const auto idxInt32 = value::bitcastTo<int32_t>(idx.value);
 
     tassert(11086803,
             "Unexpected idx parameter value",
@@ -116,32 +88,29 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponent
     return {false, outTag, outVal};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponentVectorToArray(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinSortKeyComponentVectorToArray(ArityType arity) {
     tassert(11080007, "Unexpected arity value", arity == 1);
 
-    auto [sortVecOwned, sortVecTag, sortVecVal] = getFromStack(0);
-    if (sortVecTag != value::TypeTags::sortKeyComponentVector) {
-        return {false, value::TypeTags::Nothing, 0};
+    auto sortVecView = viewFromStack(0);
+    if (sortVecView.tag != value::TypeTags::sortKeyComponentVector) {
+        return value::TagValueMaybeOwned::nothing();
     }
-    auto* sortVec = value::getSortKeyComponentVectorView(sortVecVal);
+    auto* sortVec = value::getSortKeyComponentVectorView(sortVecView.value);
 
     if (sortVec->elts.size() == 1) {
         auto [tag, val] = sortVec->elts[0];
         auto [copyTag, copyVal] = value::copyValue(tag, val);
         return {true, copyTag, copyVal};
     } else {
-        auto [arrayTag, arrayVal] = value::makeNewArray();
-        value::ValueGuard arrayGuard{arrayTag, arrayVal};
-        auto array = value::getArrayView(arrayVal);
+        value::TagValueOwned arr = value::TagValueOwned::fromRaw(value::makeNewArray());
+        auto array = value::getArrayView(arr.value());
         array->reserve(sortVec->elts.size());
         for (size_t i = 0; i < sortVec->elts.size(); ++i) {
             auto [tag, val] = sortVec->elts[i];
             auto [copyTag, copyVal] = value::copyValue(tag, val);
-            array->push_back(copyTag, copyVal);
+            array->push_back_raw(copyTag, copyVal);
         }
-        arrayGuard.reset();
-        return {true, arrayTag, arrayVal};
+        return std::move(arr);
     }
 }
 
@@ -201,14 +170,14 @@ std::pair<value::TypeTags, value::Value> builtinGetSortKeyImpl(value::TypeTags i
 }
 
 template <bool IsAscending, bool IsLeaf>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinGetSortKey(ArityType arity) {
     tassert(11080006, "Unexpected arity value", arity == 1 || arity == 2);
 
     CollatorInterface* collator = nullptr;
     if (arity == 2) {
-        auto [_, collTag, collVal] = getFromStack(1);
-        if (collTag == value::TypeTags::collator) {
-            collator = value::getCollatorView(collVal);
+        auto collView = viewFromStack(1);
+        if (collView.tag == value::TypeTags::collator) {
+            collator = value::getCollatorView(collView.value);
         }
     }
 
@@ -218,9 +187,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey(Arity
     // is Nothing or another simple type, treat it as the return value.
     if (!value::isArray(inputTag)) {
         if (inputTag != value::TypeTags::Nothing) {
-            return moveFromStack(0);
+            return moveMaybeOwnedFromStack(0);
         } else {
-            return {false, value::TypeTags::Null, 0};
+            return value::TagValueMaybeOwned::null();
         }
     }
 
@@ -236,14 +205,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey(Arity
         return {false, resultTag, resultVal};
     }
 }
-template FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey<false, false>(
-    ArityType arity);
-template FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey<false, true>(
-    ArityType arity);
-template FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey<true, false>(
-    ArityType arity);
-template FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetSortKey<true, true>(
-    ArityType arity);
+template value::TagValueMaybeOwned ByteCode::builtinGetSortKey<false, false>(ArityType arity);
+template value::TagValueMaybeOwned ByteCode::builtinGetSortKey<false, true>(ArityType arity);
+template value::TagValueMaybeOwned ByteCode::builtinGetSortKey<true, false>(ArityType arity);
+template value::TagValueMaybeOwned ByteCode::builtinGetSortKey<true, true>(ArityType arity);
 
 std::pair<value::TypeTags, value::Value> GetSortKeyAscFunctor::operator()(value::TypeTags tag,
                                                                           value::Value val) const {

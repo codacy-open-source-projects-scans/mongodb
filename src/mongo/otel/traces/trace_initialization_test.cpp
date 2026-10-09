@@ -1,65 +1,38 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/traces/trace_initialization.h"
 
-#include "mongo/config.h"
-#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/otel/traces/trace_settings.h"
 #include "mongo/otel/traces/trace_settings_gen.h"
 #include "mongo/otel/traces/tracer_provider_service.h"
+#include "mongo/otel/traces/tracer_provider_service_factory.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/scopeguard.h"
 
+#include <gmock/gmock.h>
 #include <opentelemetry/trace/noop.h>
 #include <opentelemetry/trace/provider.h>
 
-namespace mongo {
+namespace mongo::otel::traces {
 namespace {
 
-class TraceInitializationTest : public ServiceContextTest {
+constexpr auto kServiceName = "mongod";
+
+class TraceInitializationTest : public unittest::Test {
 public:
     void setUp() override {
-        ServiceContextTest::setUp();
         // Initialize TracerProviderService with no-op provider
-        auto tracerProviderService = otel::traces::TracerProviderService::create();
+        auto tracerProviderService = createNoOpTracerProviderService();
         tracerProviderService->setTracerProvider_ForTest(
-            std::make_shared<opentelemetry::trace::NoopTracerProvider>());
-        otel::traces::TracerProviderService::set(getServiceContext(),
-                                                 std::move(tracerProviderService));
-
-        otel::traces::gOpenTelemetryHttpEndpoint.clear();
-        otel::traces::gOpenTelemetryTraceDirectory.clear();
+            std::make_unique<opentelemetry::trace::NoopTracerProvider>());
+        setGlobalTracerProviderService(std::move(tracerProviderService));
     }
 
     void tearDown() override {
-        // Clear the TracerProviderService
-        otel::traces::TracerProviderService::set(getServiceContext(), nullptr);
-        ServiceContextTest::tearDown();
+        setGlobalTracerProviderService(nullptr);
     }
 };
 
@@ -68,61 +41,112 @@ bool isNoop(opentelemetry::trace::TracerProvider* provider) {
 }
 
 TEST_F(TraceInitializationTest, NoTraceProvider) {
-    ASSERT_OK(otel::traces::initialize(getServiceContext(), "mongod"));
+    ASSERT_OK(otel::traces::initialize(kServiceName));
 
-    auto tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    auto tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_FALSE(tracerProviderService->isEnabled());
+    EXPECT_FALSE(tracerProviderService->getTracerProvider());
 }
 
 TEST_F(TraceInitializationTest, Shutdown) {
-    otel::traces::shutdown(getServiceContext());
+    shutdown();
 
-    auto tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    auto tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_FALSE(tracerProviderService->isEnabled());
+    EXPECT_FALSE(tracerProviderService->getTracerProvider());
 
-    otel::traces::gOpenTelemetryTraceDirectory = "/tmp/";
-    otel::traces::shutdown(getServiceContext());
+    unittest::ServerParameterGuard directoryParam{"opentelemetryTraceDirectory", "/tmp/"};
+    shutdown();
 
-    // After calling shutdown, the service should still exist but be disabled
-    tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_FALSE(tracerProviderService->isEnabled());
+    EXPECT_FALSE(tracerProviderService->getTracerProvider());
 }
 
 TEST_F(TraceInitializationTest, FileTraceProvider) {
-    otel::traces::gOpenTelemetryTraceDirectory = "/tmp/";
-    ASSERT_OK(otel::traces::initialize(getServiceContext(), "mongod"));
+    unittest::ServerParameterGuard directoryParam{"opentelemetryTraceDirectory", "/tmp/"};
+    ASSERT_OK(initialize(kServiceName));
 
-    auto tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    auto tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_TRUE(tracerProviderService->isEnabled());
-    ASSERT_FALSE(isNoop(tracerProviderService->getTracerProvider().get()));
+    auto* provider = tracerProviderService->getTracerProvider();
+    ASSERT_NE(provider, nullptr);
+    EXPECT_FALSE(isNoop(provider));
 }
 
 TEST_F(TraceInitializationTest, HttpTraceProvider) {
-    otel::traces::gOpenTelemetryHttpEndpoint = "http://localhost:4318/v1/traces";
-    ASSERT_OK(otel::traces::initialize(getServiceContext(), "mongod"));
+    unittest::ServerParameterGuard endpointParam{"opentelemetryHttpEndpoint",
+                                                 "http://localhost:4318/v1/traces"};
+    ASSERT_OK(initialize(kServiceName));
 
-    auto tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    auto tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_TRUE(tracerProviderService->isEnabled());
-    ASSERT_FALSE(isNoop(tracerProviderService->getTracerProvider().get()));
+    auto* provider = tracerProviderService->getTracerProvider();
+    ASSERT_NE(provider, nullptr);
+    EXPECT_FALSE(isNoop(provider));
 }
 
-TEST_F(TraceInitializationTest, HttpAndDirectory) {
-    otel::traces::gOpenTelemetryHttpEndpoint = "http://localhost:4318/v1/traces";
-    otel::traces::gOpenTelemetryTraceDirectory = "/tmp/";
-    ASSERT_THROWS_CODE(otel::traces::initialize(getServiceContext(), "mongod"),
-                       DBException,
-                       ErrorCodes::InvalidOptions);
+TEST_F(TraceInitializationTest, HttpAndDirectorySetSimultaneouslyFails) {
+    unittest::ServerParameterGuard endpointParam{"opentelemetryHttpEndpoint",
+                                                 "http://localhost:4318/v1/traces"};
+    unittest::ServerParameterGuard directoryParam{"opentelemetryTraceDirectory", "/tmp/"};
+    ASSERT_THROWS_CODE(initialize(kServiceName), DBException, ErrorCodes::InvalidOptions);
 
-    auto tracerProviderService = otel::traces::TracerProviderService::get(getServiceContext());
+    auto tracerProviderService = getGlobalTracerProviderService();
     ASSERT_TRUE(tracerProviderService);
-    ASSERT_TRUE(tracerProviderService->isEnabled());
-    ASSERT_TRUE(isNoop(tracerProviderService->getTracerProvider().get()));
+    auto* provider = tracerProviderService->getTracerProvider();
+    ASSERT_NE(provider, nullptr);
+    EXPECT_TRUE(isNoop(provider));
+}
+
+TEST_F(TraceInitializationTest, InvalidCompressionFails) {
+    unittest::ServerParameterGuard compressionParam{"openTelemetryTracingCompression", "zstd"};
+    ASSERT_THROWS_CODE(initialize(kServiceName), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(TraceInitializationTest, GzipCompressionWithoutHttpEndpointFails) {
+    unittest::ServerParameterGuard compressionParam{"openTelemetryTracingCompression", "gzip"};
+    ASSERT_THROWS_CODE(initialize(kServiceName), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(TraceInitializationTest, GzipCompressionWithHttpEndpointSucceeds) {
+    unittest::ServerParameterGuard compressionParam{"openTelemetryTracingCompression", "gzip"};
+    unittest::ServerParameterGuard endpointParam{"opentelemetryHttpEndpoint",
+                                                 "http://localhost:4318/v1/traces"};
+    ASSERT_OK(initialize(kServiceName));
+}
+
+TEST_F(TraceInitializationTest, MaxBatchSizeExceedsMaxQueueSizeFails) {
+    unittest::ServerParameterGuard batchSizeParam{"openTelemetryTracingMaxBatchSize", 5000};
+    unittest::ServerParameterGuard queueSizeParam{"openTelemetryTracingMaxQueueSize", 100};
+    ASSERT_THROWS_CODE(initialize(kServiceName), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(TraceInitializationTest, MaxBatchSizeEqualToMaxQueueSizeSucceeds) {
+    unittest::ServerParameterGuard batchSizeParam{"openTelemetryTracingMaxBatchSize", 512};
+    unittest::ServerParameterGuard queueSizeParam{"openTelemetryTracingMaxQueueSize", 512};
+    ASSERT_OK(initialize(kServiceName));
+}
+
+TEST_F(TraceInitializationTest, HeadersWithoutHttpExporterLogsWarning) {
+    // Configure HTTP export headers while only the file exporter is enabled. The headers cannot be
+    // sent without the HTTP exporter, so initialization must log a warning.
+    unittest::ServerParameterGuard directoryParam{"opentelemetryTraceDirectory", "/tmp/"};
+
+    OpenTelemetryTracingHttpExportHeaders headersParam{"openTelemetryTracingHttpExportHeaders",
+                                                       ServerParameterType::kStartupOnly};
+    auto setHeaders = [&](BSONObj doc) {
+        auto storage = BSON("v" << doc);
+        return headersParam.set(storage.firstElement(), /*tenantId=*/boost::none);
+    };
+    ASSERT_OK(setHeaders(BSON("Authorization" << "Bearer ignored-token")));
+    ON_BLOCK_EXIT([&] { invariant(setHeaders(BSONObj{})); });
+
+    unittest::LogCaptureGuard logs;
+    ASSERT_OK(initialize(kServiceName));
+    logs.stop();
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("id" << 12877900)), 1);
 }
 
 }  // namespace
-}  // namespace mongo
+}  // namespace mongo::otel::traces

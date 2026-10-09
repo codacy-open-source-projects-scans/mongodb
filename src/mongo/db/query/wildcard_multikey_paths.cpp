@@ -1,40 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <cstddef>
-#include <iterator>
-#include <memory>
-#include <utility>
+#include "mongo/db/query/wildcard_multikey_paths.h"
 
-#include <boost/container/small_vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include "mongo/base/string_data.h"
+#include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -44,25 +13,37 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/wildcard_access_method.h"
+#include "mongo/db/index/wildcard_metadata_key.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
-#include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/txn_wildcard_multikey_paths.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <string_view>
+#include <utility>
+
+#include <boost/container/small_vector.hpp>
 #include <boost/none.hpp>
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 
 /**
  * A wildcard index contains an unbounded set of multikey paths, therefore, it was decided to store
@@ -81,6 +62,7 @@
  * the position of the value "1" in a multikey metadata key.
  */
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Extracts the multikey path from a metadata key stored within a wildcard index.
@@ -106,40 +88,14 @@ static FieldRef extractMultikeyPathFromIndexKey(const IndexKeyEntry& entry) {
                         record_id_helpers::ReservationId::kWildcardMultikeyMetadataId,
                         KeyFormat::String));
 
-    // Validate that the first piece of the key is the integer 1.
-    BSONObjIterator iter(entry.key);
-    while (iter.more()) {
-        const auto elem = iter.next();
-        if (elem.type() != BSONType::minKey) {
-            tassert(7354603,
-                    "An int value must follow MinKey values in a metadata key of a wildcard "
-                    "index.",
-                    elem.isNumber());
-            tassert(7354604,
-                    "The int value '1' must follow MinKey values in a metadata key of a wildcard "
-                    "index.",
-                    elem.numberInt() == 1);
-            tassert(7354605,
-                    "A string value must follow an int value in a metadata key of a wildcard index",
-                    iter.more());
-            const auto nextElem = iter.next();
-            tassert(7354606,
-                    "A string value must follow an int value in a metadata key of a wildcard index",
-                    nextElem.type() == BSONType::string);
-            return FieldRef(nextElem.valueStringData());
-        }
-    }
-
-    tasserted(7354607,
-              str::stream() << "Unexpected format of a metadata key of a wildcard index: "
-                            << entry.key);
+    return decodeWildcardMultikeyMetadataPath(entry.key);
 }
 
 /**
  * Returns IndexBoundsChecker's key pattern for the given Wildcard Index's key pattern.
  */
 static BSONObj buildIndexBoundsKeyPattern(const BSONObj& wiKeyPattern) {
-    static constexpr StringData emptyFieldName = ""_sd;
+    static constexpr std::string_view emptyFieldName = ""sv;
 
     BSONObjBuilder builder{};
 
@@ -161,62 +117,108 @@ static BSONObj buildIndexBoundsKeyPattern(const BSONObj& wiKeyPattern) {
 }
 
 /**
- * Retrieves from the wildcard index the set of multikey path metadata keys bounded by
- * 'indexBounds'. Returns the set of multikey paths represented by the keys.
+ * Scans wildcard multikey metadata keys from the index using the given recovery unit and
+ * index bounds. Adds discovered multikey paths to 'multikeyPaths' and updates 'stats'.
  */
-static std::set<FieldRef> getWildcardMultikeyPathSetHelper(OperationContext* opCtx,
-                                                           const IndexCatalogEntry* index,
-                                                           const IndexBounds& indexBounds,
-                                                           MultikeyMetadataAccessStats* stats) {
-    const WildcardAccessMethod* wam =
-        static_cast<const WildcardAccessMethod*>(index->accessMethod());
-
-    stats->numSeeks = 0;
-    stats->keysExamined = 0;
-    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+static void scanWildcardMetadataKeys(OperationContext* opCtx,
+                                     const WildcardAccessMethod* wam,
+                                     RecoveryUnit& ru,
+                                     const IndexBounds& indexBounds,
+                                     const BSONObj& keyPattern,
+                                     std::set<FieldRef>* multikeyPaths,
+                                     MultikeyMetadataAccessStats* stats) {
     auto cursor = wam->newCursor(opCtx, ru);
 
     constexpr int kForward = 1;
-    const auto keyPattern = buildIndexBoundsKeyPattern(index->descriptor()->keyPattern());
+    const auto* sortedDataInterface = wam->getSortedDataInterface();
     IndexBoundsChecker checker(&indexBounds, keyPattern, kForward);
     IndexSeekPoint seekPoint;
     if (!checker.getStartSeekPoint(&seekPoint)) {
-        return {};
+        return;
     }
 
-    std::set<FieldRef> multikeyPaths{};
-    key_string::Builder builder(wam->getSortedDataInterface()->getKeyStringVersion(),
-                                wam->getSortedDataInterface()->getOrdering());
+    key_string::Builder builder(sortedDataInterface->getKeyStringVersion(),
+                                sortedDataInterface->getOrdering());
 
-    auto entry = cursor->seek(
+    auto view = cursor->seekForKeyValueView(
         ru, IndexEntryComparison::makeKeyStringFromSeekPointForSeek(seekPoint, kForward, builder));
 
     ++stats->numSeeks;
-    while (entry) {
+    while (!view.isEmpty()) {
         ++stats->keysExamined;
 
-        switch (checker.checkKey(entry->key, &seekPoint)) {
+        BSONObj dehydratedKey = key_string::toBson(view.getKeyStringWithoutRecordIdView(),
+                                                   sortedDataInterface->getOrdering(),
+                                                   view.getTypeBitsView(),
+                                                   view.getVersion());
+
+        switch (checker.checkKey(dehydratedKey, &seekPoint)) {
             case IndexBoundsChecker::VALID:
-                multikeyPaths.emplace(extractMultikeyPathFromIndexKey(*entry));
-                entry = cursor->next(ru);
+                multikeyPaths->emplace(extractMultikeyPathFromIndexKey(
+                    {.key = dehydratedKey, .loc = *view.getRecordId()}));
+                view = cursor->nextKeyValueView(ru);
                 break;
 
             case IndexBoundsChecker::MUST_ADVANCE: {
                 ++stats->numSeeks;
-                key_string::Builder builder(wam->getSortedDataInterface()->getKeyStringVersion(),
-                                            wam->getSortedDataInterface()->getOrdering());
-                entry = cursor->seek(ru,
-                                     IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
-                                         seekPoint, kForward, builder));
+                key_string::Builder builder(sortedDataInterface->getKeyStringVersion(),
+                                            sortedDataInterface->getOrdering());
+                view = cursor->seekForKeyValueView(
+                    ru,
+                    IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
+                        seekPoint, kForward, builder));
                 break;
             }
 
             case IndexBoundsChecker::DONE:
-                entry = boost::none;
+                view.reset();
                 break;
 
             default:
                 MONGO_UNREACHABLE;
+        }
+    }
+}
+
+/**
+ * Retrieves from the wildcard index the set of multikey path metadata keys bounded by
+ * 'indexBounds'. Returns the set of multikey paths represented by the keys.
+ */
+static std::set<FieldRef> getWildcardMultikeyPathSetHelper(OperationContext* opCtx,
+                                                           const UUID& collectionUuid,
+                                                           const IndexCatalogEntry* index,
+                                                           const IndexBounds& indexBounds,
+                                                           MultikeyMetadataAccessStats* stats) {
+    const WildcardAccessMethod* wam =
+        checked_cast<const WildcardAccessMethod*>(index->accessMethod());
+
+    stats->numSeeks = 0;
+    stats->keysExamined = 0;
+
+    const auto keyPattern = buildIndexBoundsKeyPattern(index->descriptor()->keyPattern());
+    auto& parentRu = *shard_role_details::getRecoveryUnit(opCtx);
+
+    std::set<FieldRef> multikeyPaths{};
+
+    // Always read from the parent transaction's RU. This covers both the case where keys existed in
+    // the snapshot when the transaction started, and the fallback case where the side transaction
+    // was abandoned (because the index was created in the same transaction and is not visible to
+    // the side transaction's snapshot). In that case, metadata keys were written directly in the
+    // parent transaction and are not tracked in TxnWildcardMultikeyPaths.
+    scanWildcardMetadataKeys(opCtx, wam, parentRu, indexBounds, keyPattern, &multikeyPaths, stats);
+
+    // In active multi-document transactions, also union the in-process cache of multikey paths
+    // recorded by side-transaction writes earlier in this transaction. The parent transaction's
+    // WT snapshot was taken before those side commits, so the parent-RU scan above cannot see them.
+    // Without this union, the planner would under-report multikey paths and could produce incorrect
+    // query results.
+    //
+    // The cache lives as a RecoveryUnit::Snapshot decoration, so it survives statement boundaries
+    // via RU stash/unstash and dies automatically with the snapshot on abort or abandonment.
+    if (opCtx->inMultiDocumentTransaction() && parentRu.isActive()) {
+        if (const auto* paths = TxnWildcardMultikeyPaths::tryGet(opCtx)) {
+            paths->appendMatchingPaths(
+                collectionUuid, index->descriptor()->indexName(), &multikeyPaths);
         }
     }
 
@@ -347,6 +349,7 @@ static IndexBounds buildMetadataKeysIndexBounds(const BSONObj& keyPattern,
 }
 
 std::set<FieldRef> getWildcardMultikeyPathSet(OperationContext* opCtx,
+                                              const UUID& collectionUuid,
                                               const IndexCatalogEntry* entry,
                                               const stdx::unordered_set<std::string>& fieldSet,
                                               MultikeyMetadataAccessStats* stats) {
@@ -354,14 +357,14 @@ std::set<FieldRef> getWildcardMultikeyPathSet(OperationContext* opCtx,
 
     const auto& indexBounds =
         buildMetadataKeysIndexBounds(entry->descriptor()->keyPattern(), fieldSet);
-    return getWildcardMultikeyPathSetHelper(opCtx, entry, indexBounds, stats);
+    return getWildcardMultikeyPathSetHelper(opCtx, collectionUuid, entry, indexBounds, stats);
 }
 
 /**
  * Return key range to retrieve all multikey metadata keys.
  */
 static std::pair<BSONObj, BSONObj> buildMetadataKeyRange(const BSONObj& keyPattern) {
-    static constexpr StringData emptyFieldName = ""_sd;
+    static constexpr std::string_view emptyFieldName = ""sv;
 
     BSONObjBuilder rangeBeginBuilder{};
     BSONObjBuilder rangeEndBuilder{};

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/rewrites/matcher/expression_simplifier.h"
 
@@ -42,6 +16,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 inline void assertExpr(const MatchExpression* expected, MatchExpression* actual) {
     ASSERT_TRUE(expected->equivalent(actual))
         << expected->debugString() << " != " << actual->debugString();
@@ -113,27 +88,27 @@ inline void assertDNFTransformation(const MatchExpression& expr, const MatchExpr
 
 TEST(ExpressionSimplifierTests, SimpleEq) {
     BSONObj operand = BSON("a" << 5);
-    EqualityMatchExpression eq("a"_sd, operand["a"]);
+    EqualityMatchExpression eq("a"sv, operand["a"]);
     assertSimplification(eq);
 }
 
 TEST(ExpressionSimplifierTests, SimpleNe) {
     auto baseOperand = BSON("$eq" << 5);
-    auto eq = std::make_unique<EqualityMatchExpression>("a"_sd, baseOperand["$eq"]);
+    auto eq = std::make_unique<EqualityMatchExpression>("a"sv, baseOperand["$eq"]);
     auto expr = NotMatchExpression{eq.release()};
     assertSimplification(expr);
 }
 
 TEST(ExpressionSimplifierTests, SimpleLt) {
     auto baseOperand = BSON("$lt" << 5);
-    auto lt = std::make_unique<LTMatchExpression>("a"_sd, baseOperand["$lt"]);
+    auto lt = std::make_unique<LTMatchExpression>("a"sv, baseOperand["$lt"]);
     auto expr = NotMatchExpression{lt.release()};
     assertSimplification(expr);
 }
 
 TEST(ExpressionSimplifierTests, MultikeyLt) {
     auto baseOperand = BSON("$lt" << 5);
-    auto lt = std::make_unique<LTMatchExpression>("a"_sd, baseOperand["$lt"]);
+    auto lt = std::make_unique<LTMatchExpression>("a"sv, baseOperand["$lt"]);
     auto expr = NotMatchExpression{lt.release()};
     assertSimplification(expr);
 }
@@ -142,8 +117,8 @@ TEST(ExpressionSimplifierTests, MultikeyLt) {
 TEST(ExpressionSimplifierTests, Or) {
     auto firstOperand = BSON("$gt" << 10);
     auto secondOperand = BSON("$lte" << 5);
-    auto firstExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
-    auto secondExpr = std::make_unique<LTEMatchExpression>("b"_sd, secondOperand["$lte"]);
+    auto firstExpr = std::make_unique<GTMatchExpression>("a"sv, firstOperand["$gt"]);
+    auto secondExpr = std::make_unique<LTEMatchExpression>("b"sv, secondOperand["$lte"]);
     OrMatchExpression expr{};
     expr.add(std::move(firstExpr));
     expr.add(std::move(secondExpr));
@@ -154,9 +129,9 @@ TEST(ExpressionSimplifierTests, SimpleNor) {
     auto firstOperand = BSON("$gt" << 5);
     auto secondOperand = BSON("$eq" << 10);
     auto thirdOperand = BSON("$lt" << 10);
-    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
-    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
-    auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"sv, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"sv, secondOperand["$eq"]);
+    auto ltExpr = std::make_unique<LTMatchExpression>("c"sv, thirdOperand["$lt"]);
 
     NorMatchExpression expr{};
     expr.add(gtExpr->clone());
@@ -183,9 +158,9 @@ TEST(ExpressionSimplifierTests, NorWithNotDNFOnly) {
     auto firstOperand = BSON("$gt" << 5);
     auto secondOperand = BSON("$eq" << 10);
     auto thirdOperand = BSON("$lt" << 10);
-    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
-    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
-    auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"sv, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"sv, secondOperand["$eq"]);
+    auto ltExpr = std::make_unique<LTMatchExpression>("c"sv, thirdOperand["$lt"]);
 
     // (a & ~b) nor (a & b & c)
     NorMatchExpression expr{};
@@ -232,9 +207,9 @@ TEST(ExpressionSimplifierTests, NorWithNot) {
     auto firstOperand = BSON("$gt" << 5);
     auto secondOperand = BSON("$eq" << 10);
     auto thirdOperand = BSON("$lt" << 10);
-    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
-    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
-    auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"sv, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"sv, secondOperand["$eq"]);
+    auto ltExpr = std::make_unique<LTMatchExpression>("c"sv, thirdOperand["$lt"]);
 
     // (a & ~b) nor (a & b & c)
     NorMatchExpression expr{};
@@ -272,8 +247,8 @@ TEST(ExpressionSimplifierTests, NorWithNot) {
 TEST(ExpressionSimplifierTests, And) {
     auto firstOperand = BSON("$gt" << 10);
     auto secondOperand = BSON("$lte" << 5);
-    auto firstExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
-    auto secondExpr = std::make_unique<LTEMatchExpression>("b"_sd, secondOperand["$lte"]);
+    auto firstExpr = std::make_unique<GTMatchExpression>("a"sv, firstOperand["$gt"]);
+    auto secondExpr = std::make_unique<LTEMatchExpression>("b"sv, secondOperand["$lte"]);
     AndMatchExpression expr{};
     expr.add(std::move(firstExpr));
     expr.add(std::move(secondExpr));
@@ -288,11 +263,11 @@ TEST(ExpressionSimplifierTests, NotExpression) {
     auto operand1 = BSON("$gt" << 1);
     auto operand2 = BSON("$lt" << 2);
 
-    auto gtA = std::make_unique<GTMatchExpression>("a"_sd, operand1["$gt"]);
-    auto gtB = std::make_unique<GTMatchExpression>("b"_sd, operand1["$gt"]);
+    auto gtA = std::make_unique<GTMatchExpression>("a"sv, operand1["$gt"]);
+    auto gtB = std::make_unique<GTMatchExpression>("b"sv, operand1["$gt"]);
 
-    auto ltA = std::make_unique<LTMatchExpression>("a"_sd, operand2["$lt"]);
-    auto ltB = std::make_unique<LTMatchExpression>("b"_sd, operand2["$lt"]);
+    auto ltA = std::make_unique<LTMatchExpression>("a"sv, operand2["$lt"]);
+    auto ltB = std::make_unique<LTMatchExpression>("b"sv, operand2["$lt"]);
 
     auto or1 = std::make_unique<OrMatchExpression>();
     or1->add(gtA->clone());
@@ -330,8 +305,8 @@ TEST(ExpressionSimplifierTests, NotExpression) {
  */
 TEST(ExpressionSimplifierTests, OrOfTheSame) {
     auto operand = BSON("$lt" << 0);
-    auto lt1 = std::make_unique<LTMatchExpression>("a"_sd, operand["$lt"]);
-    auto lt2 = std::make_unique<LTMatchExpression>("a"_sd, operand["$lt"]);
+    auto lt1 = std::make_unique<LTMatchExpression>("a"sv, operand["$lt"]);
+    auto lt2 = std::make_unique<LTMatchExpression>("a"sv, operand["$lt"]);
 
     OrMatchExpression expr{};
     expr.add(lt1->clone());
@@ -346,10 +321,10 @@ TEST(ExpressionSimplifierTests, ElemMatch) {
     auto secondOperand = BSON("$eq" << 10);
     auto thirdOperand = BSON("$lt" << 10);
 
-    ElemMatchValueMatchExpression expr{"a"_sd};
-    expr.add(std::make_unique<GTMatchExpression>(""_sd, firstOperand["$gt"]));
-    expr.add(std::make_unique<EqualityMatchExpression>(""_sd, secondOperand["$eq"]));
-    expr.add(std::make_unique<LTMatchExpression>(""_sd, thirdOperand["$lt"]));
+    ElemMatchValueMatchExpression expr{"a"sv};
+    expr.add(std::make_unique<GTMatchExpression>(""sv, firstOperand["$gt"]));
+    expr.add(std::make_unique<EqualityMatchExpression>(""sv, secondOperand["$eq"]));
+    expr.add(std::make_unique<LTMatchExpression>(""sv, thirdOperand["$lt"]));
 
     assertSimplification(expr);
 }
@@ -361,11 +336,11 @@ TEST(ExpressionSimplifierTests, ElemMatchObject) {
     auto thirdOperand = BSON("$lt" << 10);
 
     auto child = std::make_unique<AndMatchExpression>();
-    child->add(std::make_unique<GTMatchExpression>("b"_sd, firstOperand["$gt"]));
-    child->add(std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]));
-    child->add(std::make_unique<LTMatchExpression>("b"_sd, thirdOperand["$lt"]));
+    child->add(std::make_unique<GTMatchExpression>("b"sv, firstOperand["$gt"]));
+    child->add(std::make_unique<EqualityMatchExpression>("b"sv, secondOperand["$eq"]));
+    child->add(std::make_unique<LTMatchExpression>("b"sv, thirdOperand["$lt"]));
 
-    ElemMatchObjectMatchExpression expr{"a"_sd, std::move(child)};
+    ElemMatchObjectMatchExpression expr{"a"sv, std::move(child)};
 
     assertSimplification(expr);
 }
@@ -374,13 +349,13 @@ TEST(ExpressionSimplifierTests, ElemMatchObject) {
 TEST(ExpressionSimplifierTests, TwoElemMatches) {
     auto operand = BSON("$gt" << 21 << "$lt" << 21);
 
-    auto gt = std::make_unique<GTMatchExpression>(""_sd, operand["$gt"]);
+    auto gt = std::make_unique<GTMatchExpression>(""sv, operand["$gt"]);
     auto notGt = std::make_unique<NotMatchExpression>(gt->clone());
-    auto elemMatchGt = std::make_unique<ElemMatchValueMatchExpression>("a"_sd);
+    auto elemMatchGt = std::make_unique<ElemMatchValueMatchExpression>("a"sv);
     elemMatchGt->add(notGt->clone());
 
-    auto lt = std::make_unique<GTMatchExpression>(""_sd, operand["$lt"]);
-    auto elemMatchLt = std::make_unique<ElemMatchValueMatchExpression>("a"_sd);
+    auto lt = std::make_unique<GTMatchExpression>(""sv, operand["$lt"]);
+    auto elemMatchLt = std::make_unique<ElemMatchValueMatchExpression>("a"sv);
     elemMatchLt->add(lt->clone());
     auto notElemMatchLt = std::make_unique<NotMatchExpression>(elemMatchLt->clone());
 
@@ -511,6 +486,34 @@ TEST(ExpressionSimplifierTests, NorAlwaysBoolean) {
     assertSimplification(*parse(query), alwaysFalse);
     query = fromjson("{$or: [{$nor: [{$nor: [{$nor: [{$alwaysTrue : 1}]}]}]}, {$alwaysFalse: 1}]}");
     assertSimplification(*parse(query), alwaysFalse);
+}
+
+// (a & ~b) | ~a | (a & b) is a tautology: every assignment of 'a' and 'b' satisfies at least one
+// disjunct, so it must simplify to always-true. Note that the simplification produces the two
+// single-literal disjuncts 'a' and '~a', which is what SERVER-131802 mishandled.
+TEST(ExpressionSimplifierTests, OrWithComplementaryLiteralsIsAlwaysTrue) {
+    auto query = fromjson("{$or: [{a: 1, b: {$ne: 1}}, {a: {$ne: 1}}, {a: 1, b: 1}]}");
+    // Always-true is represented by an empty $and (matches every document).
+    auto expected = fromjson("{}");
+    assertSimplification(query, expected);
+}
+
+TEST(ExpressionSimplifierTests, OrOfComplementaryConjunctionsIsNotAlwaysTrue) {
+    // (~a & b) | (a & c) cannot be simplified
+    auto query = fromjson("{$or: [{a: {$ne: 1}, b: 1}, {a: 1, c: 1}]}");
+    assertSimplification(query);
+}
+
+TEST(ExpressionSimplifierTests, OrOfLiteralAndComplementaryConjunction) {
+    // a | (~a & b) cannot be simplified
+    auto query = fromjson("{$or: [{a: 1}, {a: {$ne: 1}, b: 1}]}");
+    assertSimplification(query);
+}
+
+TEST(ExpressionSimplifierTests, OrOfNegatedLiteralAndComplementaryConjunction) {
+    // ~a | (a & b) cannot be simplified
+    auto query = fromjson("{$or: [{a: {$ne: 1}}, {a: 1, b: 1}]}");
+    assertSimplification(query);
 }
 
 }  // namespace

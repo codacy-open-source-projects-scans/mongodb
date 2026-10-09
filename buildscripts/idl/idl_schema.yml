@@ -367,6 +367,7 @@ properties:
           - description
           - cpp_type
           - bson_serialization_type
+          - is_view
   enums:
     description: YAML map that allows integer and string enumeration.
     type: object
@@ -577,7 +578,7 @@ properties:
             description: >
               Must contain the value startup, runtime, [startup, runtime], or cluster. If runtime
               is specified along with cpp_varname, then decltype(cpp_varname) must refer to a
-              thread-safe storage type, specifically: AtomicWord<T>, AtomicWord<double>, std::atomic<T>,
+              thread-safe storage type, specifically: Atomic<T>, Atomic<double>, std::atomic<T>,
               or boost::synchronized<T>. Parameters declared as cluster can only be set at
               runtime and exhibit numerous differences.
             oneOf:
@@ -950,14 +951,14 @@ properties:
               Set to a value other than the default ('not_for_incremental_rollout') to make an
               Incremental Feature Rollout (IFR) feature flag, which can be toggled at runtime. IFR
               feature flags are disabled by default when in the 'in_development' phase and enabled
-              by default in the 'rollout' and 'released' phases. Client software can query a feature
+              by default in the 'rollout' and 'release' phases. Client software can query a feature
               flag's phase using the getParameter command with 'showDetails' enabled. Non-IFR
               feature flags must specify an explicit 'default' value.
             enum:
               - not_for_incremental_rollout
               - in_development
               - rollout
-              - released
+              - release
           serialize_on_outgoing_requests:
             type: boolean
             description: >

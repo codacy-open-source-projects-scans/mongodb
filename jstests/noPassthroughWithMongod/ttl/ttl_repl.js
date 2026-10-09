@@ -9,7 +9,6 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {reconfig} from "jstests/replsets/rslib.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 let rt = new ReplSetTest({name: "ttl_repl", nodes: 2});
 
@@ -51,7 +50,9 @@ printjson(secondary1col.stats());
 // create TTL index, wait for TTL monitor to kick in, then check that
 // the correct number of docs age out
 let initialExpireAfterSeconds = 20000;
-assert.commandWorked(primarycol.createIndex({x: 1}, {expireAfterSeconds: initialExpireAfterSeconds}));
+assert.commandWorked(
+    primarycol.createIndex({x: 1}, {expireAfterSeconds: initialExpireAfterSeconds}),
+);
 rt.awaitReplication();
 
 sleep(70 * 1000); // TTL monitor runs every 60 seconds, so wait 70
@@ -79,10 +80,7 @@ let secondary2col = secondary.getDB("d")["c"];
 print("New Secondary stats:");
 printjson(secondary2col.stats());
 
-// TODO(SERVER-122560): Remove this check.
-if (!FeatureFlagUtil.isPresentAndEnabled(primary, "featureFlagReplicatedFastCount")) {
-    assert.eq(6, secondary2col.count(), "wrong number of docs on new secondary");
-}
+assert.eq(secondary2col.count(), 6, "wrong number of docs on new secondary");
 
 /******* Part 3 *****************/
 // Check that the collMod command successfully updates the expireAfterSeconds field

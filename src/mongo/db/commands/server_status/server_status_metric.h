@@ -1,40 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/counter.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/topology/cluster_role.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/synchronized_value.h"
@@ -44,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <variant>
@@ -84,7 +58,7 @@ public:
      * Appends this metric to the current `b` as name `leafName`.
      * Metrics do not know the name to appear under: `leafName` tells them.
      */
-    virtual void appendTo(BSONObjBuilder& b, StringData leafName) const = 0;
+    virtual void appendTo(BSONObjBuilder& b, std::string_view leafName) const = 0;
 
     /**
      * If the predicate has been set, is is consulted when appending the metric.
@@ -113,7 +87,7 @@ private:
  *
  *     p.appendTo(bob, leafName)
  *         A customization point, whereby this metric specifies how it will
- *         append itself as a field `StringData leafName` to the
+ *         append itself as a field `std::string_view leafName` to the
  *         `BSONObjBuilder& bob`.
  *
  *     T& p.value()
@@ -139,7 +113,7 @@ public:
         return status_metric_detail::voidlessValue(_policy);
     }
 
-    void appendTo(BSONObjBuilder& b, StringData leafName) const override {
+    void appendTo(BSONObjBuilder& b, std::string_view leafName) const override {
         if (!isEnabled())
             return;
         _policy.appendTo(b, leafName);
@@ -186,7 +160,7 @@ public:
 
     using ChildMap = std::map<std::string, TreeNode, std::less<>>;
 
-    void add(StringData path, std::unique_ptr<ServerStatusMetric> metric);
+    void add(std::string_view path, std::unique_ptr<ServerStatusMetric> metric);
 
     void appendTo(BSONObjBuilder& b, const BSONObj& excludePaths = {}) const;
 
@@ -201,10 +175,14 @@ public:
      * without a leading '.' is implicitly rooted under "metrics.". Does nothing if `path` is
      * empty or does not exist in the tree. Intended for use in tests only.
      */
-    void removeForTests(StringData path);
+    void removeForTests(std::string_view path);
+
+    void freeze() {
+        _frozen = true;
+    }
 
 private:
-    void _add(StringData path, std::unique_ptr<ServerStatusMetric> metric);
+    void _add(std::string_view path, std::unique_ptr<ServerStatusMetric> metric);
 
     /**
      * The helper for `removeForTests`. Removes the node at `path` (a dot-separated absolute path
@@ -212,12 +190,13 @@ private:
      * after the removal. Silently returns without modifying the tree when any component of
      * `path` is missing or when an intermediate component is a leaf metric rather than a subtree.
      */
-    void _removeForTests(StringData path);
+    void _removeForTests(std::string_view path);
 
     ChildMap _children;
+    bool _frozen = false;
 };
 
-class MetricTreeSet {
+class [[MONGO_MOD_PUBLIC]] MetricTreeSet {
 public:
     /**
      * Returns the metric tree for the specified ClusterRole.
@@ -225,13 +204,19 @@ public:
      */
     MetricTree& operator[](ClusterRole role);
 
+    /**
+     * Freezes all metric trees, preventing any further metric additions.
+     * Any subsequent call to MetricTree::add() on a frozen tree will result in an error.
+     */
+    void freeze();
+
 private:
     MetricTree _none;
     MetricTree _shard;
     MetricTree _router;
 };
 
-MetricTreeSet& globalMetricTreeSet();
+[[MONGO_MOD_PUBLIC]] MetricTreeSet& globalMetricTreeSet();
 
 
 /**
@@ -244,7 +229,7 @@ void appendMergedTrees(std::vector<const MetricTree*> trees,
                        const BSONObj& excludePaths = {});
 
 template <typename Policy>
-class MONGO_MOD_PUBLIC CustomMetricBuilder {
+class [[MONGO_MOD_PUBLIC]] CustomMetricBuilder {
 public:
     using Metric = BasicServerStatusMetric<Policy>;
 
@@ -313,7 +298,7 @@ public:
         return _v;
     }
 
-    void appendTo(BSONObjBuilder& b, StringData leafName) const {
+    void appendTo(BSONObjBuilder& b, std::string_view leafName) const {
         b.append(leafName, _v);
     }
 
@@ -323,7 +308,7 @@ private:
 
 /** Trait for choosing a policy for a metric. */
 template <typename T>
-struct ServerStatusMetricPolicySelection {
+struct [[MONGO_MOD_PUBLIC]] ServerStatusMetricPolicySelection {
     using type = DefaultStatusMetricValuePolicy<T>;
 };
 template <typename T>
@@ -341,7 +326,8 @@ using ServerStatusMetricPolicySelectionT = typename ServerStatusMetricPolicySele
  * thread-safety.
  */
 template <typename T>
-using MetricBuilder MONGO_MOD_PUBLIC = CustomMetricBuilder<ServerStatusMetricPolicySelectionT<T>>;
+using MetricBuilder [[MONGO_MOD_PUBLIC]] =
+    CustomMetricBuilder<ServerStatusMetricPolicySelectionT<T>>;
 
 /**
  * Leverage `synchronized_value<T>` to make a thread-safe `T` metric, for `T`
@@ -359,7 +345,7 @@ struct ServerStatusMetricPolicySelection<synchronized_value<T>> {
             return _v;
         }
 
-        void appendTo(BSONObjBuilder& b, StringData leafName) const {
+        void appendTo(BSONObjBuilder& b, std::string_view leafName) const {
             b.append(leafName, **_v);
         }
 
@@ -376,7 +362,7 @@ public:
         return _v;
     }
 
-    void appendTo(BSONObjBuilder& b, StringData leafName) const {
+    void appendTo(BSONObjBuilder& b, std::string_view leafName) const {
         b.append(leafName, static_cast<long long>(_v.get()));
     }
 

@@ -1,3 +1,6 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+
 package(default_visibility = ["//visibility:public"])
 
 exports_files(
@@ -27,8 +30,6 @@ cc_library(
         "MongoNoUniqueAddressCheck.cpp",
         "MongoRWMutexCheck.cpp",
         "MongoRandCheck.cpp",
-        "MongoStringDataConstRefCheck.cpp",
-        "MongoStringDataStringViewApi.cpp",
         "MongoTidyModule.cpp",
         "MongoTraceCheck.cpp",
         "MongoUninterruptibleLockGuardCheck.cpp",
@@ -53,8 +54,6 @@ cc_library(
         "MongoNoUniqueAddressCheck.h",
         "MongoRWMutexCheck.h",
         "MongoRandCheck.h",
-        "MongoStringDataConstRefCheck.h",
-        "MongoStringDataStringViewApi.h",
         "MongoTidyUtils.h",
         "MongoTraceCheck.h",
         "MongoUninterruptibleLockGuardCheck.h",
@@ -90,7 +89,6 @@ cc_library(
         "-Woverloaded-virtual",
         "-Wwrite-strings",
         "-Wsuggest-override",
-        "-Iexternal/mongo_toolchain_v5/stow/llvm-v5/include",
     ],
     features = [
         "-dwarf64",
@@ -165,7 +163,6 @@ cc_shared_library(
         "-Wl,-O3",
         "-Wl,--gc-sections",
         "-Wl,-rpath,\\$ORIGIN/../lib",  # Ensure that the shared library can find its dependencies.
-        "-Wl,-rpath-link,external/mongo_toolchain_v5/stow/llvm-v5/lib",
     ],
     deps = [
         ":mongo_tidy_checks_static",

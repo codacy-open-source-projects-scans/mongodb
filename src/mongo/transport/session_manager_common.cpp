@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/transport/session_manager_common.h"
 
@@ -40,10 +14,7 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/otel/metrics/metric_unit.h"
-#include "mongo/otel/metrics/metrics_counter.h"
-#include "mongo/otel/metrics/metrics_service.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
@@ -51,6 +22,7 @@
 #include "mongo/transport/session_manager_common_gen.h"
 #include "mongo/transport/session_workflow.h"
 #include "mongo/transport/transport_options_gen.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/observable_mutex.h"
 #include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/processinfo.h"
@@ -174,18 +146,6 @@ std::size_t getSupportedMax() {
     return supportedMax;
 }
 
-auto& connectionsProcessedCounter = otel::metrics::MetricsService::instance().createInt64Counter(
-    otel::metrics::MetricNames::kConnectionsProcessed,
-    "Total number of ingress connections processed (accepted or rejected)",
-    otel::metrics::MetricUnit::kConnections,
-    {.serverStatusOptions = otel::metrics::ServerStatusOptions{
-         .dottedPath = "network.connectionsProcessed", .role = ClusterRole::None}});
-
-auto& openConnectionsGauge = otel::metrics::MetricsService::instance().createInt64Gauge(
-    otel::metrics::MetricNames::kOpenConnections,
-    "Total number of open sessions",
-    otel::metrics::MetricUnit::kConnections);
-
 }  // namespace
 
 /**
@@ -196,7 +156,7 @@ auto& openConnectionsGauge = otel::metrics::MetricsService::instance().createInt
 class SessionManagerCommon::Sessions {
 public:
     Sessions() {
-        ObservableMutexRegistry::get().add("SessionManagerCommon::Sessions::_mutex", _mutex);
+        ObservableMutexRegistry::get().add("sessionManagerCommonSessionsMutex", _mutex);
     }
     struct Entry {
         explicit Entry(std::shared_ptr<SessionWorkflow> workflow) : workflow{std::move(workflow)} {}
@@ -260,7 +220,6 @@ public:
     private:
         void _onSizeChange() {
             _src->_size.store(_src->_byClient.size());
-            openConnectionsGauge.set(_src->_size.load());
             _src->_cv.notify_all();
         }
 
@@ -320,15 +279,17 @@ SessionManagerCommon::SessionManagerCommon(
 
 SessionManagerCommon::~SessionManagerCommon() = default;
 
+CancellationToken SessionManagerCommon::getShutdownToken() {
+    return _shutdownSource.token();
+}
+
 void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
     invariant(session);
+    invariant(session->isIngress());
+
     IngressHandshakeMetrics::get(*session).onSessionStarted(_svcCtx->getTickSource());
 
-    connectionsProcessedCounter.add(1);
-
-    serverGlobalParams.maxIncomingConnsOverride.refreshSnapshot(maxIncomingConnsOverride);
-    const bool isPrivilegedSession = session->isConnectedToPriorityPort() ||
-        (maxIncomingConnsOverride && session->isExemptedByCIDRList(*maxIncomingConnsOverride));
+    const bool isPrivilegedSession = isPrivileged(*session);
     const bool verbose = !quiet();
 
     auto service = _svcCtx->getService();
@@ -353,7 +314,7 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
             return;
         }
 
-        configureServiceExecutorContext(client, isPrivilegedSession);
+        configureServiceExecutorContext(*client, isPrivilegedSession);
 
         workflow = SessionWorkflow::make(std::move(uniqueClient));
         auto iter = sync.insert(workflow);
@@ -382,6 +343,11 @@ void SessionManagerCommon::endAllSessionsNoTagMask() {
 }
 
 bool SessionManagerCommon::shutdown(Milliseconds timeout) {
+    // Cancel the shutdown token before draining sessions. Any egress-response rate-limiter waiter
+    // parked on a session thread polls this token and returns InterruptedAtShutdown within one poll
+    // slice, so the egress path never blocks shutdown for longer than that slice.
+    _shutdownSource.cancel();
+
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
     static constexpr bool kSanitizerBuild = true;
 #else
@@ -434,8 +400,7 @@ bool SessionManagerCommon::waitForNoSessions(Milliseconds timeout) {
 }
 
 std::size_t SessionManagerCommon::numOpenSessions() const {
-    auto sync = _sessions->sync();
-    return sync.size();
+    return _sessions->size();
 }
 
 std::vector<std::pair<SessionId, std::string>> SessionManagerCommon::getOpenSessionIDs() const {
@@ -459,6 +424,14 @@ std::size_t SessionManagerCommon::numRejectedSessions() const {
     return _sessions->rejected();
 }
 
+void SessionManagerCommon::onLoadBalancerPeerSet(bool isLoadBalancerPeer) {
+    if (isLoadBalancerPeer) {
+        _loadBalancedSessions.increment();
+    } else {
+        _loadBalancedSessions.decrement();
+    }
+}
+
 void SessionManagerCommon::endSessionByClient(Client* client) {
     onClientDisconnect(client);
     for (auto&& observer : _observers) {
@@ -479,6 +452,47 @@ void SessionManagerCommon::endSessionByClient(Client* client) {
               "Connection ended",
               logv2::DynamicAttributes{logAttrs(summary), "connectionCount"_attr = sync.size()});
     }
+}
+
+SessionManagerCommon::SessionStats SessionManagerCommon::getSessionStats() const {
+    return {
+        .numOpenSessions = static_cast<int64_t>(numOpenSessions()),
+        .maxOpenSessions = static_cast<int64_t>(maxOpenSessions()),
+        .numCreatedSessions = static_cast<int64_t>(numCreatedSessions()),
+        .numRejectedSessions = static_cast<int64_t>(numRejectedSessions()) +
+            _sessionEstablishmentRateLimiter.rejected(),
+        .numActiveOperations = static_cast<int64_t>(getActiveOperations()),
+
+        .numLoadBalancedSessions = _loadBalancedSessions.get(),
+        .numPrioritySessions = _prioritySessions.get(),
+    };
+}
+
+void SessionManagerCommon::onClientConnect(Client* client) {
+    auto session = client->session();
+    // isLoadBalancerPeer can only be set here if the clientIsLoadBalancedPeer failpoint is enabled.
+    if (MONGO_unlikely(session && session->isLoadBalancerPeer())) {
+        _loadBalancedSessions.increment();
+    }
+    if (session && session->isConnectedToPriorityPort()) {
+        _prioritySessions.increment();
+    }
+}
+
+void SessionManagerCommon::onClientDisconnect(Client* client) {
+    auto session = client->session();
+    if (session && session->isLoadBalancerPeer()) {
+        _loadBalancedSessions.decrement();
+    }
+    if (session && session->isConnectedToPriorityPort()) {
+        _prioritySessions.decrement();
+    }
+}
+
+bool SessionManagerCommon::isPrivileged(const Session& session) const {
+    serverGlobalParams.maxIncomingConnsOverride.refreshSnapshot(maxIncomingConnsOverride);
+    return session.isConnectedToPriorityPort() ||
+        (maxIncomingConnsOverride && session.isExemptedByCIDRList(*maxIncomingConnsOverride));
 }
 
 }  // namespace mongo::transport

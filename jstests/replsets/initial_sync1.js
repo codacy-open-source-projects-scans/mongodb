@@ -24,7 +24,10 @@ print("1. Bring up set");
 // SERVER-7455, this test is called from ssl/auth_x509.js
 let x509_options1;
 let x509_options2;
-let replTest = new ReplSetTest({name: basename, nodes: {node0: x509_options1, node1: x509_options2}});
+let replTest = new ReplSetTest({
+    name: basename,
+    nodes: {node0: x509_options1, node1: x509_options2},
+});
 
 let conns = replTest.startSet();
 replTest.initiate();
@@ -93,7 +96,7 @@ print("Config 3: " + tojsononeline(config3));
 assert(config3);
 assert.eq(config3.version, config.version + 1);
 
-replTest.waitForState(secondary2, [ReplSetTest.State.SECONDARY, ReplSetTest.State.RECOVERING]);
+replTest.waitForMyState(secondary2, [ReplSetTest.State.SECONDARY, ReplSetTest.State.RECOVERING]);
 
 print("7. Kill the secondary in the middle of syncing");
 replTest.stop(secondary1);
@@ -105,7 +108,7 @@ replTest.awaitSecondaryNodes(60 * 1000, [secondary2]);
 print("9. Bring the secondary back up");
 replTest.start(secondary1, {}, true);
 reconnect(secondary1);
-replTest.waitForState(secondary1, [ReplSetTest.State.PRIMARY, ReplSetTest.State.SECONDARY]);
+replTest.awaitSecondaryNodes(null /* timeout */, [secondary1]);
 
 print("10. Insert some stuff");
 primary = replTest.getPrimary();

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -45,6 +19,7 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/query/exec/cluster_client_cursor.h"
 #include "mongo/s/query/exec/cluster_client_cursor_guard.h"
@@ -63,13 +38,14 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class ClockSource;
 class OperationContext;
@@ -89,6 +65,17 @@ using AuthzCheckFn = std::function<Status(AuthzCheckFnInputType)>;
 // user has privileges over a namespace.
 using ReleaseMemoryAuthzCheckFnInputType = const NamespaceString&;
 using ReleaseMemoryAuthzCheckFn = std::function<Status(ReleaseMemoryAuthzCheckFnInputType)>;
+
+// 'KillCursorAuthzCheckFnInput' carries both the cursor's stored namespace and its authenticated
+// owner — the two fields required by auth::checkAuthForKillCursors.  Using a dedicated input type
+// (rather than the user-only AuthzCheckFn) ensures the auth check is evaluated against the
+// cursor's actual namespace, not the client-supplied request namespace.
+struct KillCursorAuthzCheckFnInput {
+    const NamespaceString& nss;
+    const boost::optional<UserName>& userName;
+};
+using KillCursorAuthzCheckFnInputType = const KillCursorAuthzCheckFnInput&;
+using KillCursorAuthzCheckFn = std::function<Status(KillCursorAuthzCheckFnInputType)>;
 
 /**
  * ClusterCursorManager is a container for ClusterClientCursor objects.  It manages the lifetime of
@@ -337,7 +324,7 @@ public:
          * must unpack the cursor from the returned guard.
          */
         ClusterClientCursorGuard releaseCursor(OperationContext* opCtx,
-                                               StringData commandName = "") {
+                                               std::string_view commandName = "") {
             invariant(!_operationUsingCursor);
             tassert(11052336, "Expected CursorEntry to own a cursor", _cursor);
             invariant(opCtx);
@@ -358,7 +345,7 @@ public:
             return _operationUsingCursor;
         }
 
-        StringData getCommandUsingCursor() const {
+        std::string_view getCommandUsingCursor() const {
             return _commandUsingCursor;
         }
 
@@ -497,7 +484,7 @@ public:
                                             OperationContext* opCtx,
                                             std::function<Status(T)> authChecker,
                                             AuthCheck checkSessionAuth = kCheckSession,
-                                            StringData commandName = "");
+                                            std::string_view commandName = "");
 
     /**
      * Moves the given cursor to the 'pinned' state, and transfers ownership of the cursor to the
@@ -515,7 +502,7 @@ public:
      */
     StatusWith<PinnedCursor> checkOutCursorNoAuthCheck(CursorId cursorId,
                                                        OperationContext* opCtx,
-                                                       StringData commandName = "");
+                                                       std::string_view commandName = "");
 
     /**
      * This method will find the given cursor, and if it exists, call 'authChecker', passing the
@@ -546,7 +533,7 @@ public:
      */
     Status killCursorWithAuthCheck(OperationContext* opCtx,
                                    CursorId cursorId,
-                                   AuthzCheckFn authChecker);
+                                   KillCursorAuthzCheckFn authChecker);
 
     /**
      * Kill the cursors satisfying the given predicate. Returns the number of cursors killed.
@@ -657,11 +644,15 @@ private:
      */
     void killOperationUsingCursor(WithLock, CursorEntry* entry);
 
-    Status _killCursor(OperationContext* opCtx, CursorId cursorId, AuthzCheckFn authChecker);
+    Status _killCursor(OperationContext* opCtx,
+                       CursorId cursorId,
+                       KillCursorAuthzCheckFn authChecker);
 
     // Clock source.  Used when the 'last active' time for a cursor needs to be set/updated.  May be
     // concurrently accessed by multiple threads.
     ClockSource* _clockSource;
+
+    mongo::Atomic<size_t> _cursorsTimedOut{0};
 
     // Synchronizes access to all private state variables below.
     mutable std::mutex _mutex;
@@ -674,8 +665,6 @@ private:
 
     // Map from CursorId to CursorEntry.
     CursorEntryMap _cursorEntryMap;
-
-    size_t _cursorsTimedOut = 0;
 };
 
 /* For the killCursors command the list of users authorised to access the cursor is used to
@@ -700,4 +689,13 @@ struct ClusterCursorManager::AuthzCheckPolicy<ReleaseMemoryAuthzCheckFnInputType
     }
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+/* For the killCursors command, auth is evaluated against the cursor's *stored* namespace and its
+ * authenticated owner — never the client-supplied request namespace. */
+template <>
+struct ClusterCursorManager::AuthzCheckPolicy<KillCursorAuthzCheckFnInputType> {
+    static Status authzCheck(CursorEntry* entry, const KillCursorAuthzCheckFn& authChecker) {
+        return authChecker({entry->getNamespace(), entry->getAuthenticatedUser()});
+    }
+};
+
+}  // namespace mongo

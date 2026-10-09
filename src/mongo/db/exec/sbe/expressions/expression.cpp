@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
 
@@ -52,6 +26,7 @@
 
 namespace mongo {
 namespace sbe {
+using namespace std::literals::string_view_literals;
 
 
 /**
@@ -124,14 +99,14 @@ std::string EExpression::toString() const {
 }
 
 std::unique_ptr<EExpression> EConstant::clone() const {
-    auto [tag, val] = value::copyValue(_tag, _val);
+    auto [tag, val] = value::copyValue(_val.tag(), _val.value());
     return std::make_unique<EConstant>(tag, val);
 }
 
 vm::CodeFragment EConstant::compileDirect(CompileCtx& ctx) const {
     vm::CodeFragment code;
 
-    code.appendConstVal(_tag, _val);
+    code.appendConstVal(_val.tag(), _val.value());
 
     return code;
 }
@@ -141,7 +116,7 @@ std::vector<DebugPrinter::Block> EConstant::debugPrint() const {
     std::stringstream ss;
     value::ValuePrinters::make(ss,
                                PrintOptions().useTagForAmbiguousValues(true).normalizeOutput(true))
-        .writeValueToStream(_tag, _val);
+        .writeValueToStream(_val.tag(), _val.value());
 
     ret.emplace_back(ss.str());
 
@@ -150,7 +125,7 @@ std::vector<DebugPrinter::Block> EConstant::debugPrint() const {
 
 size_t EConstant::estimateSize() const {
     size_t size = sizeof(*this);
-    size += size_estimator::estimate(_tag, _val);
+    size += size_estimator::estimate(_val.tag(), _val.value());
     size += size_estimator::estimate(_nodes);
     return size;
 }
@@ -183,7 +158,7 @@ std::vector<DebugPrinter::Block> EVariable::debugPrint() const {
     std::vector<DebugPrinter::Block> ret;
 
     if (_moveFrom) {
-        ret.emplace_back("move(`"_sd);
+        ret.emplace_back("move(`"sv);
     }
     if (_frameId) {
         DebugPrinter::addIdentifier(ret, *_frameId, _var);
@@ -191,7 +166,7 @@ std::vector<DebugPrinter::Block> EVariable::debugPrint() const {
         DebugPrinter::addIdentifier(ret, _var);
     }
     if (_moveFrom) {
-        ret.emplace_back("`)"_sd);
+        ret.emplace_back("`)"sv);
     }
 
     return ret;
@@ -204,6 +179,24 @@ std::unique_ptr<EExpression> EPrimNary::clone() const {
         args.emplace_back(arg->clone());
     }
     return std::make_unique<EPrimNary>(_op, std::move(args));
+}
+
+namespace {
+
+/**
+ * Return whether the provided expression is guaranteed to never return a Nothing value as result.
+ */
+template <typename Expression>
+bool cannotReturnNothing(const Expression& expr) {
+    if (auto primary = expr->template as<EPrimBinary>(); primary) {
+        if (auto rhs = dynamic_cast<const EConstant*>(primary->rhs()); rhs) {
+            return primary->op() == EPrimBinary::Op::fillEmpty &&
+                rhs->getConstant().first != value::TypeTags::Nothing;
+        }
+    } else if (auto function = expr->template as<EFunction>(); function) {
+        return function->fn() == EFn::kExists || function->fn() == EFn::kIsNullish;
+    }
+    return false;
 }
 
 /*
@@ -246,7 +239,9 @@ vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx, const Vector& clauses, b
         vm::CodeFragment code;
         for (size_t i = 0; i < clauses.size() - 1; i++) {
             auto clauseCode = clauses.at(i)->compileDirect(ctx);
-            clauseCode.appendLabelJumpNothing(endLabel);
+            if (!cannotReturnNothing(clauses.at(i))) {
+                clauseCode.appendLabelJumpNothing(endLabel);
+            }
 
             if (isDisjunction) {
                 clauseCode.appendLabelJumpTrue(resultLabel);
@@ -274,6 +269,8 @@ vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx, const Vector& clauses, b
         return code;
     });
 }
+
+}  // namespace
 
 vm::CodeFragment EPrimNary::compileDirect(CompileCtx& ctx) const {
     if (_op == EPrimNary::logicAnd || _op == EPrimNary::logicOr) {
@@ -728,6 +725,8 @@ static stdx::unordered_map<EFn, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::addToArrayCapped, true}},
     {EFn::kMergeObjects,
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::mergeObjects, true}},
+    {EFn::kMergeObjectsForExpr,
+     BuiltinFn{kAnyNumberOfArgs, vm::Builtin::mergeObjectsForExpr, false}},
     {EFn::kAddToSet, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::addToSet, true}},
     {EFn::kAddToSetCapped,
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::addToSetCapped, true}},
@@ -746,10 +745,17 @@ static stdx::unordered_map<EFn, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDoubleDoubleSum, true}},
     {EFn::kAggMergeDoubleDoubleSums,
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggMergeDoubleDoubleSums, true}},
+    {EFn::kDoubleDoubleSumFromAcc,
+     BuiltinFn{kAnyNumberOfArgs, vm::Builtin::doubleDoubleSumFromAcc, false}},
+    {EFn::kMinFromAcc, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::minFromAcc, false}},
+    {EFn::kMaxFromAcc, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::maxFromAcc, false}},
+    {EFn::kAvgFromAcc, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::avgFromAcc, false}},
     {EFn::kDoubleDoubleSumFinalize,
      BuiltinFn{[](size_t n) { return n > 0; }, vm::Builtin::doubleDoubleSumFinalize, false}},
     {EFn::kDoubleDoublePartialSumFinalize,
      BuiltinFn{[](size_t n) { return n > 0; }, vm::Builtin::doubleDoublePartialSumFinalize, false}},
+    {EFn::kStdDevPopFromAcc, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::stdDevPopFromAcc, false}},
+    {EFn::kStdDevSampFromAcc, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::stdDevSampFromAcc, false}},
     {EFn::kAggStdDev, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggStdDev, true}},
     {EFn::kAggMergeStdDevs,
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggMergeStdDevs, true}},
@@ -916,12 +922,6 @@ static stdx::unordered_map<EFn, BuiltinFn> kBuiltinFunctions = {
     {EFn::kCollArrayToSet,
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::collArrayToSet, false}},
     {EFn::kArray, BuiltinFn{kAnyNumberOfArgs, vm::Builtin::newArray, false}},
-    {EFn::kAvgOfArray, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::avgOfArray, false}},
-    {EFn::kMaxOfArray, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::maxOfArray, false}},
-    {EFn::kMinOfArray, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::minOfArray, false}},
-    {EFn::kStdDevPop, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::stdDevPop, false}},
-    {EFn::kStdDevSamp, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::stdDevSamp, false}},
-    {EFn::kSumOfArray, BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::sumOfArray, false}},
     {EFn::kAggFirstNNeedsMoreInput,
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggFirstNNeedsMoreInput, false}},
     {EFn::kAggFirstN, BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggFirstN, false}},
@@ -1088,6 +1088,10 @@ static stdx::unordered_map<EFn, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableBottomNFinalize, false}},
     {EFn::kValueBlockExists,
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockExists, false}},
+    {EFn::kValueBlockIsNullish,
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockIsNullish, false}},
+    {EFn::kValueBlockMqlComparisonRank,
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockMqlComparisonRank, false}},
     {EFn::kValueBlockTypeMatch,
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::valueBlockTypeMatch, false}},
     {EFn::kValueBlockIsTimezone,
@@ -1358,9 +1362,6 @@ static stdx::unordered_map<EFn, InstrFn> kInstrFunctions = {
      InstrFn{2, generator<2, &vm::CodeFragment::appendGetFieldOrElement>, false}},
     {EFn::kTraverseP, InstrFn{3, generateTraverseP, false}},
     {EFn::kTraverseF, InstrFn{3, generateTraverseF, false}},
-    {EFn::kMagicTraverseF,
-     InstrFn{5, generatorLegacy<&vm::CodeFragment::appendMagicTraverseF>, false}},
-    {EFn::kSetField, InstrFn{3, generatorLegacy<&vm::CodeFragment::appendSetField>, false}},
     {EFn::kSum, InstrFn{1, generatorLegacy<&vm::CodeFragment::appendSum>, true}},
     {EFn::kCount, InstrFn{0, generatorLegacy<&vm::CodeFragment::appendCount>, true}},
     {EFn::kMin, InstrFn{1, generatorLegacy<&vm::CodeFragment::appendMin>, true}},
@@ -1374,6 +1375,7 @@ static stdx::unordered_map<EFn, InstrFn> kInstrFunctions = {
     {EFn::kIsDate, InstrFn{1, generator<1, &vm::CodeFragment::appendIsDate>, false}},
     {EFn::kIsNumber, InstrFn{1, generator<1, &vm::CodeFragment::appendIsNumber>, false}},
     {EFn::kIsNull, InstrFn{1, generator<1, &vm::CodeFragment::appendIsNull>, false}},
+    {EFn::kIsNullish, InstrFn{1, generator<1, &vm::CodeFragment::appendIsNullish>, false}},
     {EFn::kIsObject, InstrFn{1, generator<1, &vm::CodeFragment::appendIsObject>, false}},
     {EFn::kIsArray, InstrFn{1, generator<1, &vm::CodeFragment::appendIsArray>, false}},
     {EFn::kIsInList, InstrFn{1, generator<1, &vm::CodeFragment::appendIsInList>, false}},
@@ -1386,6 +1388,8 @@ static stdx::unordered_map<EFn, InstrFn> kInstrFunctions = {
     {EFn::kIsMaxKey, InstrFn{1, generator<1, &vm::CodeFragment::appendIsMaxKey>, false}},
     {EFn::kIsTimestamp, InstrFn{1, generator<1, &vm::CodeFragment::appendIsTimestamp>, false}},
     {EFn::kIsKeyString, InstrFn{1, generator<1, &vm::CodeFragment::appendIsKeyString>, false}},
+    {EFn::kMqlComparisonRank,
+     InstrFn{1, generator<1, &vm::CodeFragment::appendMqlComparisonRank>, false}},
     {EFn::kValueBlockApplyLambda,
      InstrFn{3, generatorLegacy<&vm::CodeFragment::appendValueBlockApplyLambda>, false}},
 };
@@ -1433,7 +1437,7 @@ vm::CodeFragment EFunction::compileDirect(CompileCtx& ctx) const {
             auto binSize = value::bitcastTo<int64_t>(binSizeLong.value());
 
             auto [timezoneTag, timezoneVal] = _nodes[4]->as<EConstant>()->getConstant();
-            auto timezone = vm::getTimezone(timezoneTag, timezoneVal, timezoneDB);
+            auto timezone = vm::getTimezone({timezoneTag, timezoneVal}, timezoneDB);
 
             DayOfWeek startOfWeek{kStartOfWeekDefault};
             if (unit == TimeUnit::week) {
@@ -1539,7 +1543,9 @@ vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
         auto code = _nodes[0]->compileDirect(ctx);
 
         // Compile the jumps
-        code.appendLabelJumpNothing(endLabel);
+        if (!cannotReturnNothing(_nodes[0])) {
+            code.appendLabelJumpNothing(endLabel);
+        }
         code.appendLabelJumpTrue(thenLabel);
 
         // Compile else-branch
@@ -1627,7 +1633,9 @@ vm::CodeFragment ESwitch::compileDirect(CompileCtx& ctx) const {
         // Compile the condition
         auto code = getCondition(i)->compileDirect(ctx);
         // Compile the jumps
-        code.appendLabelJumpNothing(endLabel);
+        if (!cannotReturnNothing(getCondition(i))) {
+            code.appendLabelJumpNothing(endLabel);
+        }
         code.appendLabelJumpTrue(labels[i]);
         mainCode.append(std::move(code));
     }
@@ -1708,10 +1716,7 @@ vm::CodeFragment ELocalBind::compileDirect(CompileCtx& ctx) const {
     // After the execution we have to cleanup the stack; i.e. local variables go out of scope.
     // However, note that the top of the stack holds the overall result (i.e. the 'in' expression)
     // and it cannot be destroyed. So we 'bubble' it down with a series of swap/pop instructions.
-    for (size_t idx = 0; idx < _nodes.size() - 1; ++idx) {
-        code.appendSwap();
-        code.appendPop();
-    }
+    code.appendSwapAndPop(_nodes.size() - 1);
 
     // Local variables are no longer accessible after this point so remove the frame.
     code.removeFrame(_frameId);
@@ -1823,7 +1828,7 @@ size_t ELocalLambda::estimateSize() const {
 
 
 std::unique_ptr<EExpression> EFail::clone() const {
-    return std::make_unique<EFail>(_code, getStringView(_messageTag, _messageVal));
+    return std::make_unique<EFail>(_code, getStringView(_message.tag(), _message.value()));
 }
 
 vm::CodeFragment EFail::compileDirect(CompileCtx& ctx) const {
@@ -1832,7 +1837,7 @@ vm::CodeFragment EFail::compileDirect(CompileCtx& ctx) const {
     code.appendConstVal(value::TypeTags::NumberInt64,
                         value::bitcastFrom<int64_t>(static_cast<int64_t>(_code)));
 
-    code.appendConstVal(_messageTag, _messageVal);
+    code.appendConstVal(_message.tag(), _message.value());
 
     code.appendFail();
 
@@ -1848,7 +1853,7 @@ std::vector<DebugPrinter::Block> EFail::debugPrint() const {
     ret.emplace_back(std::to_string(_code));
     ret.emplace_back("`,");
     ret.emplace_back("\"`");
-    ret.emplace_back(getStringView(_messageTag, _messageVal));
+    ret.emplace_back(getStringView(_message.tag(), _message.value()));
     ret.emplace_back("`\"`");
 
     ret.emplace_back("`)");
@@ -1857,7 +1862,7 @@ std::vector<DebugPrinter::Block> EFail::debugPrint() const {
 }
 
 size_t EFail::estimateSize() const {
-    return sizeof(*this) + size_estimator::estimate(_messageTag, _messageVal) +
+    return sizeof(*this) + size_estimator::estimate(_message.tag(), _message.value()) +
         size_estimator::estimate(_nodes);
 }
 

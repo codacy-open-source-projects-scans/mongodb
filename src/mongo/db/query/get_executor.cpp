@@ -1,39 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/get_executor.h"
 
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
@@ -77,6 +46,7 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
 #include "mongo/db/query/distinct_access.h"
 #include "mongo/db/query/engine_selection.h"
+#include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor_deferred_engine_choice.h"
 #include "mongo/db/query/get_executor_fast_paths.h"
@@ -91,6 +61,7 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_ranking/plan_ranker.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
@@ -127,6 +98,12 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -176,7 +153,6 @@ namespace {
  */
 class SlotBasedPrepareExecutionResult {
 public:
-    using QuerySolutionVector = std::vector<std::unique_ptr<QuerySolution>>;
     using PlanStageVector =
         std::vector<std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>>;
 
@@ -337,7 +313,8 @@ public:
             } else {
                 planCacheCounters.incrementClassicSkippedCounter();
             }
-            return buildSingleSolutionPlan(std::move(solution), boost::none);
+            return buildSingleSolutionPlan(
+                std::move(solution), boost::none, PlanSelectionStrategy::kSinglePlan);
         }
 
         // Tailable: If the query requests tailable the collection must be capped.
@@ -397,6 +374,14 @@ public:
         // TODO SERVER-120492: Investigate if we can remove the replanning restriction on
         // subplanning. If not, add a descriptive comment here about why.
         if (!isReplanning() && SubplanStage::needsSubplanning(*_cq)) {
+            // The V3 explain verbosity modes (planSummary, plannerChoice, plannerStats, execStats)
+            // are not yet supported for rooted $or queries.
+            if (auto verbosity = _cq->getExplain()) {
+                uassert(13145000,
+                        "V3 explain verbosity is not supported for rooted $or queries",
+                        !ExplainOptions::isV3Verbosity(*verbosity));
+            }
+
             LOGV2_DEBUG(20924,
                         2,
                         "Running query as sub-queries",
@@ -419,7 +404,7 @@ public:
                                                  getCollections(),
                                                  makePlannerData(),
                                                  usingClassic());
-        if (_plannerParams->cbrEnabled && rankerResult.isOK() &&
+        if (_plannerParams->isCBREnabled() && rankerResult.isOK() &&
             !rankerResult.getValue().solutions.empty()) {
             // The plan ranker will place the best plan at index 0.
             captureCardinalityEstimationMethodForQueryStats(
@@ -453,7 +438,8 @@ public:
                 // Only one possible plan. Build the stages from the solution.
                 result.solutions[0]->indexFilterApplied = _plannerParams->indexFiltersApplied;
                 return buildSingleSolutionPlan(std::move(result.solutions[0]),
-                                               std::move(result.maybeExplainData));
+                                               std::move(result.maybeExplainData),
+                                               result.planSelectionStrategy);
             }
         }
 
@@ -525,7 +511,8 @@ protected:
      */
     virtual std::unique_ptr<ResultType> buildSingleSolutionPlan(
         std::unique_ptr<QuerySolution> solution,
-        boost::optional<PlanExplainerData> maybeExplainData) = 0;
+        boost::optional<PlanExplainerData> maybeExplainData,
+        PlanSelectionStrategy planSelectionStrategy) = 0;
 
     /**
      * Either constructs a PlanStage tree from a cached plan (if exists in the plan cache), or
@@ -672,7 +659,8 @@ private:
                 nullptr,  // The solution is owned by the MultiPlanStage, so we pass a nullptr here
                           // to avoid confusion.
                 std::move(explainData),
-                std::move(classicExecState));
+                std::move(classicExecState),
+                rResult.planSelectionStrategy);
         return result;
     }
 
@@ -689,13 +677,15 @@ private:
 
     std::unique_ptr<ClassicRuntimePlannerResult> buildSingleSolutionPlan(
         std::unique_ptr<QuerySolution> solution,
-        boost::optional<PlanExplainerData> maybeExplainData) final {
+        boost::optional<PlanExplainerData> maybeExplainData,
+        PlanSelectionStrategy planSelectionStrategy) final {
         auto result = releaseResult();
         result->runtimePlanner = std::make_unique<crp_classic::SingleSolutionPassthroughPlanner>(
             makePlannerData(),
             std::move(solution),
             maybeExplainData.has_value() ? std::move(maybeExplainData.value())
-                                         : PlanExplainerData{});
+                                         : PlanExplainerData{},
+            planSelectionStrategy);
         return result;
     }
 
@@ -753,7 +743,8 @@ private:
             planRankingResult.maybeExplainData.has_value()
                 ? std::move(planRankingResult.maybeExplainData.value())
                 : PlanExplainerData{},
-            planRankingResult.needsWorksMeasuredForPlanCache);
+            planRankingResult.needsWorksMeasuredForPlanCache,
+            planRankingResult.planSelectionStrategy);
         return result;
     }
 
@@ -804,13 +795,11 @@ public:
         const MultipleCollectionAccessor& collections,
         CanonicalQuery* cq,
         PlanYieldPolicy::YieldPolicy policy,
-        std::unique_ptr<QueryPlannerParams> plannerParams,
-        bool useSbePlanCache)
+        std::unique_ptr<QueryPlannerParams> plannerParams)
         : PrepareExecutionHelper<CacheKey,
                                  RuntimePlanningResult,
                                  classic_runtime_planner_for_sbe::PlannerDataForSBE>(
-              opCtx, collections, policy, cq, std::move(plannerParams)),
-          _useSbePlanCache{useSbePlanCache} {}
+              opCtx, collections, policy, cq, std::move(plannerParams)) {}
 
 protected:
     crp_sbe::PlannerDataForSBE makePlannerData() override {
@@ -826,7 +815,7 @@ protected:
             _cachedPlanHash,
             PlanYieldPolicySBE::make(
                 this->_opCtx, this->_yieldPolicy, this->_collections, this->_cq->nss()),
-            _useSbePlanCache};
+        };
     }
 
     bool usingClassic() final {
@@ -845,11 +834,12 @@ protected:
 
     std::unique_ptr<SbeWithClassicRuntimePlanningResult> buildSingleSolutionPlan(
         std::unique_ptr<QuerySolution> solution,
-        boost::optional<PlanExplainerData> maybeExplainData) final {
-        // TODO SERVER-92589: Support CBR with SBE plans
+        boost::optional<PlanExplainerData> maybeExplainData,
+        PlanSelectionStrategy planSelectionStrategy) final {
+        // TODO SERVER-92589: Support CBR with SBE plans.
         auto result = this->releaseResult();
         result->runtimePlanner = std::make_unique<crp_sbe::SingleSolutionPassthroughPlanner>(
-            makePlannerData(), std::move(solution));
+            makePlannerData(), std::move(solution), planSelectionStrategy);
         return result;
     }
 
@@ -873,92 +863,24 @@ protected:
                  .getUseMultiplannerForSingleSolutions() &&
              !this->_cq->isSearchQuery())) {
             auto result = this->releaseResult();
-            result->runtimePlanner =
-                std::make_unique<crp_sbe::MultiPlanner>(this->makePlannerData(),
-                                                        std::move(planRankingResult.solutions),
-                                                        true /*shouldWriteToPlanCache*/);
+            result->runtimePlanner = std::make_unique<crp_sbe::MultiPlanner>(
+                this->makePlannerData(),
+                std::move(planRankingResult.solutions),
+                true /*shouldWriteToPlanCache*/,
+                []() {
+                } /*incrementReplannedPlanIsCachedPlanCounterCb*/,
+                boost::none /*replanReason*/,
+                planRankingResult.planSelectionStrategy);
             return result;
         } else {
             return this->buildSingleSolutionPlan(std::move(planRankingResult.solutions[0]),
-                                                 std::move(planRankingResult.maybeExplainData));
+                                                 std::move(planRankingResult.maybeExplainData),
+                                                 planRankingResult.planSelectionStrategy);
         }
     }
-
-    const bool _useSbePlanCache;
 
     // If there is a matching cache entry, this is the hash of that plan.
     boost::optional<size_t> _cachedPlanHash;
-};
-
-/**
- * Helper for SBE with classic runtime planning and SBE plan cache.
- */
-class SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper final
-    : public SbeWithClassicRuntimePlanningPrepareExecutionHelperBase<
-          sbe::PlanCacheKey,
-          SbeWithClassicRuntimePlanningResult> {
-public:
-    SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper(
-        OperationContext* opCtx,
-        const MultipleCollectionAccessor& collections,
-        CanonicalQuery* cq,
-        PlanYieldPolicy::YieldPolicy policy,
-        std::unique_ptr<QueryPlannerParams> plannerParams)
-        : SbeWithClassicRuntimePlanningPrepareExecutionHelperBase{
-              opCtx, collections, cq, policy, std::move(plannerParams), true /*useSbePlanCache*/} {}
-
-private:
-    sbe::PlanCacheKey buildPlanCacheKey() const override {
-        return plan_cache_key_factory::make(*_cq, _collections);
-    }
-
-    std::unique_ptr<SbeWithClassicRuntimePlanningResult> tryToBuildCachedPlanFromSbeCache(
-        const sbe::PlanCacheKey& sbeCacheKey) {
-        auto&& planCache = sbe::getPlanCache(_opCtx);
-
-        auto cacheEntry = planCache.getCacheEntryIfActive(sbeCacheKey);
-        if (!cacheEntry) {
-            planCacheCounters.incrementSbeMissesCounter();
-            return nullptr;
-        }
-        planCacheCounters.incrementSbeHitsCounter();
-
-        auto result = releaseResult();
-        const auto cachedSolutionHash = cacheEntry->cachedPlan->solutionHash;
-        result->runtimePlanner = crp_sbe::makePlannerForSbeCacheEntry(
-            makePlannerData(), std::move(cacheEntry), cachedSolutionHash);
-        return result;
-    }
-
-    /**
-     * Helper for getting the plan hash from the SBE cache.
-     */
-    boost::optional<size_t> getPlanHashFromSbeCache(const sbe::PlanCacheKey& key) {
-        auto&& planCache = sbe::getPlanCache(_opCtx);
-        if (auto cacheEntry = planCache.getCacheEntryIfActive(key); cacheEntry) {
-            return cacheEntry->cachedPlan->solutionHash;
-        }
-        return boost::none;
-    }
-
-    std::unique_ptr<SbeWithClassicRuntimePlanningResult> buildCachedPlan(
-        const sbe::PlanCacheKey& key) final {
-        if (shouldCacheQuery(*_cq)) {
-            return tryToBuildCachedPlanFromSbeCache(key);
-        }
-
-        planCacheCounters.incrementSbeSkippedCounter();
-        return nullptr;
-    }
-
-    boost::optional<size_t> getCachedPlanHash(const sbe::PlanCacheKey& key) final {
-        if (_cachedPlanHash) {
-            return _cachedPlanHash;
-        }
-
-        _cachedPlanHash = getPlanHashFromSbeCache(key);
-        return _cachedPlanHash;
-    }
 };
 
 /**
@@ -976,8 +898,7 @@ public:
         PlanYieldPolicy::YieldPolicy policy,
         std::unique_ptr<QueryPlannerParams> plannerParams)
         : SbeWithClassicRuntimePlanningPrepareExecutionHelperBase{
-              opCtx, collections, cq, policy, std::move(plannerParams), false /*useSbePlanCache*/} {
-    }
+              opCtx, collections, cq, policy, std::move(plannerParams)} {}
 
 private:
     PlanCacheKey buildPlanCacheKey() const override {
@@ -1099,26 +1020,6 @@ std::unique_ptr<PlannerInterface> getClassicPlannerForSbe(
     setOpDebugPlanCacheInfo(opCtx, planningResult->planCacheInfo());
     return std::move(planningResult->runtimePlanner);
 }
-
-bool shouldUseSbePlanCache(const QueryPlannerParams& params) {
-    // The logic in this funtion depends on the fact that we clear the SBE plan cache on index
-    // creation.
-
-    // SBE feature flag guards SBE plan cache use. Check this first to avoid doing potentially
-    // expensive checks unnecessarily.
-    if (!feature_flags::gFeatureFlagSbeFull.isEnabled()) {
-        return false;
-    }
-
-    // SBE plan cache does not support partial indexes.
-    // TODO SERVER-94392: Remove this restriction once they are supported.
-    for (const auto& idx : params.mainCollectionInfo.indexes) {
-        if (idx.filterExpr) {
-            return false;
-        }
-    }
-    return true;
-}
 }  // namespace
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
@@ -1153,9 +1054,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                 .collections = collections,
                 .plannerOptions = options,
                 .traversalPreference = traversalPreference,
-                .cbrEnabled = cq.getExpCtx()->getIfrContext()->getSavedFlagValue(
-                    feature_flags::gFeatureFlagCostBasedRanker),
-                .planRankerMode = cq.getExpCtx()->getQueryKnobConfiguration().getPlanRankerMode(),
+                .planRanker = cq.getExpCtx()->getQueryKnobConfiguration().getPlanRanker(),
             });
         result->replanningData = std::move(replanningData);
         return result;
@@ -1166,14 +1065,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         CurOp::get(opCtx)->stopQueryPlanningTimer();
     });
 
-    // isIdHackQuery was set at ExpCtx build time from the raw BSON filter (isSimpleIdQuery()),
-    // but filters like {_id: {$in: [v]}} only normalize to a simple _id equality after parsing.
-    // Upgrade the flag now that the MatchExpression and collection collator are both available.
-    // This must precede tryExpress() and chooseEngine() in both the deferred and non-deferred
-    // paths.
-    maybeUpgradeIdHackFlag(*canonicalQuery, collections.getMainCollection());
-
-    if (MONGO_unlikely(feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled())) {
+    if (canonicalQuery->getExpCtx()->getIfrContext()->getSavedFlagValue(
+            feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice)) {
         return exec_deferred_engine_choice::getExecutorFindDeferredEngineChoice(
             opCtx,
             collections,
@@ -1189,6 +1082,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     if (expressResult.executor) {
         return std::move(expressResult.executor);
     }
+
+    // Past the express decision: this plan may build a memory tracker, so opting into load
+    // shedding can now be worth its cost. Express plans never track memory and are left ineligible.
+    markShedEligibleIfFindCommand(opCtx);
+
     // If no express executor was returned, we can reuse the planner params created by `tryExpress`
     // for other planning logic.
     tassert(11742300, "Expected planner params to be initialized.", expressResult.plannerParams);
@@ -1248,30 +1146,10 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
 
             plannerParams->setTargetSbeStageBuilder(*canonicalQuery, collections);
 
-            if (shouldUseSbePlanCache(*plannerParams)) {
-                canonicalQuery->setUsingSbePlanCache(true);
-                return getClassicPlannerForSbe<
-                    SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper>(
-                    opCtx,
-                    collections,
-                    canonicalQuery.get(),
-                    yieldPolicy,
-                    std::move(plannerParams));
-            } else {
-                canonicalQuery->setUsingSbePlanCache(false);
-                return getClassicPlannerForSbe<
-                    SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper>(
-                    opCtx,
-                    collections,
-                    canonicalQuery.get(),
-                    yieldPolicy,
-                    std::move(plannerParams));
-            }
+            return getClassicPlannerForSbe<
+                SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper>(
+                opCtx, collections, canonicalQuery.get(), yieldPolicy, std::move(plannerParams));
         }
-
-        // This codepath will use the classic runtime planner with classic PlanStages, so will not
-        // use the SBE plan cache.
-        canonicalQuery->setUsingSbePlanCache(false);
 
         // Default to using the classic executor with the classic runtime planner.
         return getClassicPlanner(opCtx,
@@ -1386,9 +1264,7 @@ auto makeQueryPlannerParamsFactory(OperationContext* opCtx,
                 .canonicalQuery = cq,
                 .collections = collections,
                 .plannerOptions = plannerOptions,
-                .cbrEnabled = cq.getExpCtx()->getIfrContext()->getSavedFlagValue(
-                    feature_flags::gFeatureFlagCostBasedRanker),
-                .planRankerMode = cq.getExpCtx()->getQueryKnobConfiguration().getPlanRankerMode(),
+                .planRanker = cq.getExpCtx()->getQueryKnobConfiguration().getPlanRanker(),
             });
         result->replanningData = std::move(replanningData);
         return result;
@@ -1525,7 +1401,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
 
     // This is the regular path for when we have a CanonicalQuery.
     std::unique_ptr<CanonicalQuery> cq(canonicalDelete.releaseParsedQuery());
-    maybeUpgradeIdHackFlag(*cq, collectionPtr);
 
     const auto policy = canonicalDelete.yieldPolicy();
 
@@ -1714,7 +1589,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     // This is the regular path for when we have a CanonicalQuery.
     UpdateStageParams updateStageParams(request, driver, opDebug, std::move(documentCounter));
     std::unique_ptr<CanonicalQuery> cq(canonicalUpdate.releaseParsedQuery());
-    maybeUpgradeIdHackFlag(*cq, collectionPtr);
 
     std::unique_ptr<projection_ast::Projection> projection;
     if (!request->getProj().isEmpty()) {
@@ -1808,8 +1682,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
                                            false, /* whether we must return owned BSON */
                                            cq->getFindCommandRequest().getNamespaceOrUUID().nss());
     }
-
-    maybeUpgradeIdHackFlag(*cq, coll.getCollectionPtr());
 
     // Can't encode plan cache key for non-existent collections. Add plan cache key information to
     // curOp here so both FastCountStage and multi-planner codepaths properly populate it.

@@ -1,4 +1,4 @@
-load("@poetry//:dependencies.bzl", "dependency")
+load("//bazel/uv:defs.bzl", "dependency")
 load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library", "mongo_cc_unit_test")
 load("//bazel/config:render_template.bzl", "render_template")
 
@@ -289,6 +289,19 @@ idl_generator(
 )
 
 mongo_cc_library(
+    name = "auth_mechanism",
+    srcs = [
+        "auth_mechanism.cpp",
+    ],
+    hdrs = [
+        "auth_mechanism.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
     name = "auth_options",
     srcs = [
         ":auth_options_gen",
@@ -350,6 +363,7 @@ mongo_cc_library(
         "sasl_options.cpp",
     ],
     deps = [
+        ":auth_mechanism",
         "//src/mongo/db:server_base",
         "//src/mongo/db/exec/document_value",
         "//src/mongo/db/stats:counters",
@@ -552,6 +566,7 @@ mongo_cc_library(
     deps = [
         "auth",
         "authprivilege",
+        ":auth_mechanism",
         "//src/mongo/crypto:sha_block",
         "//src/mongo/db:server_base",
     ],
@@ -656,6 +671,7 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
         "//src/mongo/db/commands:test_commands_enabled",
+        "//src/mongo/rpc:object_check",
         "//src/mongo/util:icu",
         "//src/mongo/util:md5",
         "//src/mongo/util/net:network",

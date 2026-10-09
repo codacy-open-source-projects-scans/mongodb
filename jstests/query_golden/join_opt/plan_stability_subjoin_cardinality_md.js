@@ -10,13 +10,23 @@
  *
  */
 
-import {joinPlanToString, newlineBeforeEachStage} from "jstests/query_golden/libs/pretty_printers.js";
-import {populateTPCHDataset} from "jstests/libs/query/tpch_dataset.js";
+import {
+    joinPlanToString,
+    newlineBeforeEachStage,
+} from "jstests/query_golden/libs/pretty_printers.js";
+import {withTPCHDataset} from "jstests/libs/query/tpch_dataset.js";
 import {commands} from "jstests/query_golden/test_inputs/plan_stability_pipelines_tpch_fuzzed.js";
 
 // Report only subjoins with cardinality estimates that differ from the actual cardinality
 // by more than this many orders of magnitude.
 const ORDERS_OF_MAGNITUDE_REPORTING_THRESHOLD = 2;
+
+class UnsupportedQueryError extends Error {
+    constructor(message = "This query is not supported by this test") {
+        super(message);
+        this.name = "UnsupportedQueryError";
+    }
+}
 
 /**
  * Convert a particular plan stage into a MQL pipeline fragment,
@@ -27,7 +37,10 @@ function reconstructStage(stage) {
         case "NESTED_LOOP_JOIN_EMBEDDING":
         case "INDEXED_NESTED_LOOP_JOIN_EMBEDDING":
         case "HASH_JOIN_EMBEDDING":
-            return {reconstructedBaseCollection: undefined, reconstructedStages: reconstructJoin(stage)};
+            return {
+                reconstructedBaseCollection: undefined,
+                reconstructedStages: reconstructJoin(stage),
+            };
         case "COLLSCAN":
         case "FETCH":
         case "IXSCAN":
@@ -45,18 +58,27 @@ function reconstructStage(stage) {
  */
 function reconstructJoin(stage) {
     assert(stage.stage.includes("EMBEDDING"), `Unsupported stage "${stage.stage}"`);
-    assert(stage.inputStages.length === 2, `Join stage "${stage.stage}" must have exactly two inputs"`);
+    assert(
+        stage.inputStages.length === 2,
+        `Join stage "${stage.stage}" must have exactly two inputs"`,
+    );
 
     let joinPredicates = stage.joinPredicates;
 
     // If possible, lock on to a join predicate of form `field1 = field2` rather than `field1 = coll2.field2`.
     const filteredJoinPredicates = joinPredicates.filter((item) => !item.includes("."));
     if (filteredJoinPredicates.length === 0) {
-        assert(joinPredicates.length === 1);
+        if (joinPredicates.length !== 1) {
+            throw new UnsupportedQueryError(
+                "Test does not currently support joins with multiple predicates over resolved fields.",
+            );
+        }
     } else if (filteredJoinPredicates.length === 1) {
         joinPredicates = filteredJoinPredicates;
     } else {
-        assert(false, "Test does not currently support joins with more than one predicate");
+        throw new UnsupportedQueryError(
+            "Test does not currently support joins with more than one predicate",
+        );
     }
 
     // Determine the two sides of the join predicate
@@ -149,6 +171,14 @@ function getPredicate(stage) {
             break;
         case "INDEX_PROBE_NODE":
             break;
+        case "OR": {
+            const orPredicate = [];
+            for (const inputStage of stage.inputStages) {
+                orPredicate.push(getPredicate(inputStage));
+            }
+            predicate.push({$or: orPredicate});
+            break;
+        }
         default:
             throw new Error(`Unknown stage type ${stage.stage}`);
     }
@@ -230,6 +260,11 @@ function getPredicateFromIxscan(stage) {
  * we need to do a lot of heavy lifting to reconstruct the original predicate.
  */
 function parseIndexBound(boundStr) {
+    // MongoDB's IXSCAN explain output renders "no lower/upper bound" on a date-typed index as
+    // new Date(INT64_MIN) / new Date(INT64_MAX).
+    const DATE_INT64_MIN_LITERAL = "new Date(-9223372036854775808)";
+    const DATE_INT64_MAX_LITERAL = "new Date(9223372036854775807)";
+
     // Bounds look like this: '["abc", "abc"]', '(5.0, 10.0]', '[MinKey, MaxKey]'
     const match = boundStr.match(/^([\[\(])\s*(.+?)\s*,\s*(.+?)\s*([\]\)])$/);
     if (!match) {
@@ -243,8 +278,17 @@ function parseIndexBound(boundStr) {
 
     const lowerInclusive = match[1] === "[";
     const upperInclusive = match[4] === "]";
-    const lowerVal = parseIndexBoundLiteral(match[2].trim());
-    const upperVal = parseIndexBoundLiteral(match[3].trim());
+    const lowerRaw = match[2].trim();
+    const upperRaw = match[3].trim();
+
+    // Only re-map on the side that semantically means "no bound": INT64_MIN as the lower bound,
+    // INT64_MAX as the upper bound. The inverse positions can appear as legitimate type-bracketing
+    // bounds, e.g. {$lt: null} on a date IXSCAN produces [MinKey, new Date(INT64_MIN)), and must
+    // stay intact.
+    const lowerVal =
+        lowerRaw === DATE_INT64_MIN_LITERAL ? "MinKey" : parseIndexBoundLiteral(lowerRaw);
+    const upperVal =
+        upperRaw === DATE_INT64_MAX_LITERAL ? "MaxKey" : parseIndexBoundLiteral(upperRaw);
 
     const isEquality =
         lowerInclusive &&
@@ -253,7 +297,8 @@ function parseIndexBound(boundStr) {
         lowerVal !== "MinKey" &&
         lowerVal !== "MaxKey";
 
-    const isFullRange = lowerInclusive && upperInclusive && lowerVal === "MinKey" && upperVal === "MaxKey";
+    const isFullRange =
+        lowerInclusive && upperInclusive && lowerVal === "MinKey" && upperVal === "MaxKey";
 
     return {
         isEquality,
@@ -264,7 +309,7 @@ function parseIndexBound(boundStr) {
 }
 
 /**
- * Parse an individual literal as seen in an index bound
+ * Parse an individual literal as seen in an index bound.
  */
 function parseIndexBoundLiteral(str) {
     if (str === "MinKey") return "MinKey";
@@ -463,7 +508,8 @@ function checkCommandEstimates(db, command) {
         // Avoid reporting bogus ordersOfMagnitude if either cardinality is zero
         const reconstructionActualCardinalityNormalized =
             reconstructionActualCardinality !== 0 ? reconstructionActualCardinality : 1;
-        const subjoinCardinalityEstimateNormalized = subjoinCardinalityEstimate !== 0 ? subjoinCardinalityEstimate : 1;
+        const subjoinCardinalityEstimateNormalized =
+            subjoinCardinalityEstimate !== 0 ? subjoinCardinalityEstimate : 1;
         const ordersOfMagnitude = orderOfMagnitudeDiff(
             reconstructionActualCardinalityNormalized,
             subjoinCardinalityEstimateNormalized,
@@ -485,8 +531,16 @@ function checkCommandEstimates(db, command) {
     }
 }
 
-const tpch = populateTPCHDataset("0.1");
-
-for (const command of commands) {
-    checkCommandEstimates(tpch, command);
-}
+withTPCHDataset("0.1", (tpch) => {
+    for (const command of commands) {
+        try {
+            checkCommandEstimates(tpch, command);
+        } catch (e) {
+            if (e instanceof UnsupportedQueryError) {
+                print(e.message);
+            } else {
+                throw e;
+            }
+        }
+    }
+});

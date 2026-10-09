@@ -19,6 +19,7 @@
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {randomUpdateDelete} from "jstests/concurrency/fsm_workload_modifiers/random_update_delete.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const $baseConfig = {
     threadCount: 5,
@@ -52,7 +53,8 @@ const $baseConfig = {
                 const res = assert.commandWorked(
                     db.adminCommand({
                         setParameter: 1,
-                        reshardingMinimumOperationDurationMillis: this.originalReshardingMinimumOperationDurationMillis,
+                        reshardingMinimumOperationDurationMillis:
+                            this.originalReshardingMinimumOperationDurationMillis,
                     }),
                 );
             });
@@ -79,14 +81,50 @@ export const $config = extendWorkload($partialConfig, function ($config, $super)
     $config.states.reshardCollection = function reshardCollection(db, collName, connCache) {
         const namespace = `${db}.${collName}`;
         jsTestLog(`Attempting to reshard collection ${namespace}`);
-        const result = assert.commandWorked(
-            db.adminCommand({
+
+        let result;
+        assert.soon(() => {
+            // TODO(SERVER-131275): Remove reshardingUUID once the reshardCollectionCoordinator supports retryability.
+            // A failed user-supplied reshardingUUID stays quiesced and replays its stored
+            // error. Generate a new UUID on each attempt.
+            const reshardingUUID = UUID();
+            result = db.adminCommand({
                 reshardCollection: namespace,
                 key: this.getShardKey(collName),
                 numInitialChunks: 1,
                 forceRedistribution: true,
-            }),
-        );
+                reshardingUUID,
+            });
+
+            if (result.code === 28799 || result.code === 4952606) {
+                jsTestLog("reshardCollection hit transient sampling failure, retrying", {result});
+                return false;
+            }
+
+            return true;
+        }, "reshardCollection kept failing with transient sampling error");
+
+        if (
+            result.code === ErrorCodes.NamespaceNotFound &&
+            FixtureHelpers.maySkipImplicitSharding() &&
+            FixtureHelpers.isUntracked(db.getCollection(collName))
+        ) {
+            // When implicit sharding is skipped, the collection may not have been sharded at
+            // setup time, making reshardCollection legitimately fail with NamespaceNotFound.
+            jsTestLog(`reshardCollection skipped for ${namespace}: collection is not sharded`);
+            return;
+        }
+        if (
+            result.code === ErrorCodes.ConflictingOperationInProgress ||
+            result.code === ErrorCodes.ReshardCollectionInProgress
+        ) {
+            // Multiple threads may reshard the same namespace concurrently.
+            jsTestLog(
+                `reshardCollection skipped for ${namespace}: another reshard already in progress`,
+            );
+            return;
+        }
+        assert.commandWorked(result);
         jsTestLog(`Reshard collection result for ${namespace}: ${tojson(result)}`);
     };
 

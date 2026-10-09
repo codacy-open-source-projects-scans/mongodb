@@ -1,36 +1,11 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
 #include "mongo/db/query/compiler/optimizer/join/join_graph.h"
+#include "mongo/db/query/util/named_enum.h"
 #include "mongo/util/modules.h"
 
 namespace mongo::join_ordering {
@@ -47,9 +22,32 @@ using NodeCardinalities = std::vector<cost_based_ranker::CardinalityEstimate>;
 using NodeCBRCosts = std::vector<cost_based_ranker::CostEstimate>;
 
 /**
- * Tracks for each edge ID the selectivity estimate.
+ * Tracks the origin of an NDV estimate.
+ * TODO SERVER-133669: Delete this enum/ extend the NDV sources in CE instead.
  */
-using EdgeSelectivities = std::vector<cost_based_ranker::SelectivityEstimate>;
+#define JOIN_NDV_ESTIMATE_SOURCE_NAMES(F) \
+    F(kSampling, "sampling")              \
+    F(kHLL, "hyperLogLog")                \
+    F(kUniqueIndex, "uniqueIndex")
+QUERY_UTIL_NAMED_ENUM_DEFINE(JoinNdvEstimateSource, JOIN_NDV_ESTIMATE_SOURCE_NAMES);
+#undef JOIN_NDV_ESTIMATE_SOURCE_NAMES
+
+/**
+ * Stores information about the selectivity of a join edge.
+ */
+struct JoinEdgeSelectivityEstimate {
+    // Namespace we used as the primary key.
+    NamespaceString assumedPkSide;
+    cost_based_ranker::CardinalityEstimate ndv;
+    cost_based_ranker::SelectivityEstimate selectivity;
+    JoinNdvEstimateSource source;
+};
+
+/**
+ * Tracks selectivity estimates of edges indexed by their EdgeIds, as well as additional estimation
+ * info for explain.
+ */
+using EdgeSelectivities = std::vector<JoinEdgeSelectivityEstimate>;
 
 /**
  * Tracks for each JoinSubset (represented by a NodeSet) the estimated cardinality of the join.

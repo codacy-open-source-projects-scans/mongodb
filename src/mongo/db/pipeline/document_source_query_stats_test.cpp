@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_query_stats.h"
 
@@ -33,20 +7,35 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/query/query_shape/agg_cmd_shape.h"
 #include "mongo/db/query/query_shape/shape_helpers.h"
+#include "mongo/db/query/query_stats/agg_key.h"
 #include "mongo/db/query/query_stats/find_key.h"
+#include "mongo/db/query/query_stats/query_stats_top_k_metrics.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/intrusive_counter.h"
 
+#include <algorithm>
+#include <string_view>
+#include <vector>
+
+#include <absl/hash/hash.h>
 #include <boost/none.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 namespace {
@@ -78,6 +67,26 @@ public:
                                                       *parsedFind->findCommandRequest,
                                                       std::move(statusWithShape.getValue()),
                                                       query_shape::CollectionType::kCollection);
+    }
+
+    std::unique_ptr<const Key> makeAggKeyWithAllowPartialResults(
+        boost::optional<bool> allowPartialResults) {
+        auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
+        auto rawPipeline = {fromjson(R"({ $match: { x: 1 } })")};
+        AggregateCommandRequest acr(kDefaultTestNss.nss());
+        acr.setPipeline(rawPipeline);
+        if (allowPartialResults) {
+            acr.setAllowPartialResults(*allowPartialResults);
+        }
+        auto pipeline =
+            pipeline_factory::makePipeline(rawPipeline, expCtx, pipeline_factory::kOptionsMinimal);
+        auto aggShape = std::make_unique<query_shape::AggCmdShape>(
+            acr, kDefaultTestNss.nss(), pipeline->getInvolvedCollections(), *pipeline, expCtx);
+        return std::make_unique<query_stats::AggKey>(expCtx,
+                                                     acr,
+                                                     std::move(aggShape),
+                                                     pipeline->getInvolvedCollections(),
+                                                     query_shape::CollectionType::kCollection);
     }
 
     QueryStatsStore& setUpQueryStatsStore(unsigned numPartitions = 1) {
@@ -113,6 +122,35 @@ public:
         ASSERT_TRUE(doc["asOf"].coercibleToDate());
 
         return std::string(filterObj.fieldName());
+    }
+
+    void populateStoreWithExecCounts(QueryStatsStore& queryStatsStore, int numEntries) {
+        for (int i = 0; i < numEntries; ++i) {
+            BSONObjBuilder filter;
+            filter.append("field" + std::to_string(i), i);
+            queryStatsStore.put(i, QueryStatsEntry{makeFindKeyFromQuery(filter.obj())});
+            queryStatsStore.lookup(i).getValue()->execCount = i;
+        }
+    }
+
+    boost::intrusive_ptr<exec::agg::Stage> buildTopKExecCountStage(long long limit) {
+        const auto source =
+            DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+        static_cast<DocumentSourceQueryStats*>(source.get())
+            ->setTopKSortSpec(
+                query_stats::TopKSortSpec{"metrics.execCount", false /* isAscending */, limit});
+        return exec::agg::buildStage(source);
+    }
+
+    static std::vector<long long> drainExecCounts(boost::intrusive_ptr<exec::agg::Stage> stage) {
+        std::vector<long long> execCounts;
+        for (auto result = stage->getNext(); !result.isEOF(); result = stage->getNext()) {
+            ASSERT_TRUE(result.isAdvanced());
+            execCounts.push_back(
+                result.getDocument().getNestedField({"metrics.execCount"}).coerceToLong());
+        }
+        std::sort(execCounts.begin(), execCounts.end(), std::greater<>());
+        return execCounts;
     }
 
     static const BSONObj kQueryStatsStage;
@@ -187,7 +225,7 @@ TEST_F(DocumentSourceQueryStatsTest, ParseAndSerializeShouldIncludeHmacKey) {
     const auto expected =
         Document{{"$queryStats",
                   Document{{"transformIdentifiers",
-                            Document{{"algorithm", "hmac-sha-256"_sd},
+                            Document{{"algorithm", "hmac-sha-256"sv},
                                      {"hmacKey",
                                       BSONBinData("an arbitrary HMACkey for testing",
                                                   32,
@@ -278,6 +316,59 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextOverMultiplePartitions) {
     ASSERT_EQ(filters.size(), 3);
 }
 
+TEST_F(DocumentSourceQueryStatsTest, GetNextForAllowPartialResultsTriState) {
+    // Populate the query stats store with 3 agg entries differing only in allowPartialResults:
+    // omitted, true, and false.
+    auto& queryStatsStore = setUpQueryStatsStore();
+    auto keyOmitted = makeAggKeyWithAllowPartialResults(boost::none);
+    const auto hashOmitted = absl::HashOf(*keyOmitted);
+    queryStatsStore.put(hashOmitted, QueryStatsEntry{std::move(keyOmitted)});
+    auto keyTrue = makeAggKeyWithAllowPartialResults(true);
+    const auto hashTrue = absl::HashOf(*keyTrue);
+    queryStatsStore.put(hashTrue, QueryStatsEntry{std::move(keyTrue)});
+    auto keyFalse = makeAggKeyWithAllowPartialResults(false);
+    const auto hashFalse = absl::HashOf(*keyFalse);
+    queryStatsStore.put(hashFalse, QueryStatsEntry{std::move(keyFalse)});
+
+    const auto source =
+        DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+    auto stage = exec::agg::buildStage(source);
+
+    // allowPartialResults is a command-level key field, not part of the query shape, so all three
+    // entries must produce the same queryShapeHash despite having distinct keyHash values. Each
+    // entry is identified by its own 'key.allowPartialResults' field (missing/true/false),
+    // independent of iteration order.
+    StringMap<std::string> keyHashesByLabel;
+    boost::optional<std::string> sharedQueryShapeHash;
+    for (int i = 0; i < 3; ++i) {
+        auto result = stage->getNext();
+        ASSERT_TRUE(result.isAdvanced());
+        const auto& doc = result.getDocument();
+
+        const auto& allowPartialResultsField = doc.getNestedField({"key.allowPartialResults"});
+        std::string label = allowPartialResultsField.missing()
+            ? "omitted"
+            : (allowPartialResultsField.getBool() ? "true" : "false");
+        ASSERT_FALSE(keyHashesByLabel.contains(label)) << "Saw duplicate entry for: " << label;
+        keyHashesByLabel.emplace(label, std::string(doc["keyHash"].getString()));
+
+        auto queryShapeHash = std::string(doc["queryShapeHash"].getString());
+        if (sharedQueryShapeHash) {
+            ASSERT_EQ(*sharedQueryShapeHash, queryShapeHash);
+        } else {
+            sharedQueryShapeHash = queryShapeHash;
+        }
+    }
+
+    ASSERT_TRUE(stage->getNext().isEOF());
+
+    // We should see all three distinct entries exactly once, with distinct keyHash values.
+    ASSERT_EQ(keyHashesByLabel.size(), 3);
+    ASSERT_NE(keyHashesByLabel["omitted"], keyHashesByLabel["true"]);
+    ASSERT_NE(keyHashesByLabel["omitted"], keyHashesByLabel["false"]);
+    ASSERT_NE(keyHashesByLabel["true"], keyHashesByLabel["false"]);
+}
+
 TEST_F(DocumentSourceQueryStatsTest, GetNextTransformIdentifiers) {
     // First, populate the query stats store. Both entries will be in the single store partition.
     auto& queryStatsStore = setUpQueryStatsStore();
@@ -315,7 +406,7 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextKeyFailsToReParse) {
     // but be unable to re-parse the serialized representative value.
     auto parsedFind = uassertStatusOK(parsed_find_command::parse(
         getExpCtx(), {std::make_unique<FindCommandRequest>(kDefaultTestNss)}));
-    parsedFind->filter = std::make_unique<LTEMatchExpression>("a"_sd, Value(BSONRegEx(".*")));
+    parsedFind->filter = std::make_unique<LTEMatchExpression>("a"sv, Value(BSONRegEx(".*")));
 
     auto statusWithShape =
         shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, getExpCtx());
@@ -349,6 +440,57 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextKeyFailsToReParse) {
     auto stage = exec::agg::buildStage(source);
     // This should raise an user assertion.
     ASSERT_THROWS_CODE(stage->getNext(), DBException, ErrorCodes::QueryStatsFailedToRecord);
+}
+
+TEST_F(DocumentSourceQueryStatsTest, TopKReturnsOnlyCandidatesWhenAllMaterialize) {
+    auto& queryStatsStore = setUpQueryStatsStore(3 /* numPartitions */);
+    populateStoreWithExecCounts(queryStatsStore, 10);
+
+    // With no materialization failures the stage emits only the top-K candidates and never falls
+    // back to scanning the rest of the store.
+    const std::vector<long long> expected{9, 8, 7};
+    ASSERT(drainExecCounts(buildTopKExecCountStage(3)) == expected);
+}
+
+TEST_F(DocumentSourceQueryStatsTest, TopKFallsBackToFullScanWhenCandidateFailsToMaterialize) {
+    auto& queryStatsStore = setUpQueryStatsStore(3 /* numPartitions */);
+    populateStoreWithExecCounts(queryStatsStore, 10);
+
+    // The candidates are execCounts {7, 8, 9}. Fail the first materialization, which hits one of
+    // them, so the top-K pass alone would emit only 2 documents for a limit of 3.
+    FailPointEnableBlock fp("queryStatsGenerateQueryFeatureNotAllowedError",
+                            FailPoint::ModeOptions{FailPoint::nTimes, 1, {}});
+    const auto execCounts = drainExecCounts(buildTopKExecCountStage(3));
+
+    // The stage falls back to the full scan, which emits every entry that wasn't already a
+    // candidate: the 2 surviving candidates plus the 7 non-candidates, with no duplicates.
+    ASSERT_EQ(execCounts.size(), 9);
+    ASSERT(std::adjacent_find(execCounts.begin(), execCounts.end()) == execCounts.end());
+    const auto numCandidatesEmitted =
+        std::count_if(execCounts.begin(), execCounts.end(), [](long long c) { return c >= 7; });
+    ASSERT_EQ(numCandidatesEmitted, 2);
+    for (long long nonCandidate = 0; nonCandidate <= 6; ++nonCandidate) {
+        ASSERT(std::find(execCounts.begin(), execCounts.end(), nonCandidate) != execCounts.end())
+            << "missing non-candidate execCount " << nonCandidate;
+    }
+}
+
+TEST_F(DocumentSourceQueryStatsTest, ClonePreservesTopKSortSpec) {
+    auto source =
+        DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+    static_cast<DocumentSourceQueryStats*>(source.get())
+        ->setTopKSortSpec(
+            query_stats::TopKSortSpec{"metrics.execCount", false /* isAscending */, 3});
+
+    auto clone = source->clone(getExpCtx());
+    query_shape::SerializationOptions explainOpts;
+    explainOpts.verbosity = ExplainOptions::Verbosity::kQueryPlanner;
+    Value topKSort =
+        clone->serialize(explainOpts).getDocument()["$queryStats"]["topKSortOptimization"];
+    ASSERT_FALSE(topKSort.missing()) << "clone dropped the top-K sort spec";
+    ASSERT_BSONOBJ_EQ(
+        BSON("path" << "metrics.execCount" << "limit" << 3LL << "isAscending" << false),
+        topKSort.getDocument().toBson());
 }
 
 TEST_F(DocumentSourceQueryStatsTest, DataTypeHashConsistency) {

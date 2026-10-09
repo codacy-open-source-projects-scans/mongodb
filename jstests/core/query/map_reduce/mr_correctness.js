@@ -10,6 +10,9 @@
 //   requires_getmore,
 //   uses_map_reduce_with_temp_collections,
 //   requires_scripting,
+//   uses_map_reduce_internal_merge_pipeline,
+//   # Map reduce requires a stable collection UUID, but MoveCollection drops the collection and recreates it with a new UUID.
+//   assumes_stable_collection_uuid,
 // ]
 const coll = db.mr_correctness;
 coll.drop();
@@ -48,7 +51,8 @@ outColl.drop();
     assert.eq(
         3,
         outColl.find().count(),
-        () => `expected 3 distinct tags: ['a', 'b', 'c'], found ${tojson(outColl.find().toArray())}`,
+        () =>
+            `expected 3 distinct tags: ['a', 'b', 'c'], found ${tojson(outColl.find().toArray())}`,
     );
     const keys = {};
     for (let result of outColl.find().toArray()) {
@@ -137,7 +141,8 @@ function reduceNumbers(key, values) {
     assert.eq(
         4,
         outColl.find().count(),
-        () => `expected 4 distinct tags: ['a', 'b', 'c', 'd'], found ${tojson(outColl.find().toArray())}`,
+        () =>
+            `expected 4 distinct tags: ['a', 'b', 'c', 'd'], found ${tojson(outColl.find().toArray())}`,
     );
     assert.eq("a,b,c,d", outColl.distinct("_id"));
 

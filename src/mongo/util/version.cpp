@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/version.h"
@@ -38,7 +12,6 @@
 #endif
 #endif
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -50,6 +23,7 @@
 
 #include <climits>
 #include <sstream>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -77,27 +51,27 @@ public:
         return 0;
     }
 
-    StringData version() const noexcept final {
+    std::string_view version() const noexcept final {
         return "unknown";
     }
 
-    StringData gitVersion() const noexcept final {
+    std::string_view gitVersion() const noexcept final {
         return "none";
     }
 
-    std::vector<StringData> modules() const final {
+    std::vector<std::string_view> modules() const final {
         return {"unknown"};
     }
 
-    StringData allocator() const noexcept final {
+    std::string_view allocator() const noexcept final {
         return "unknown";
     }
 
-    StringData jsEngine() const noexcept final {
+    std::string_view jsEngine() const noexcept final {
         return "unknown";
     }
 
-    StringData targetMinOS() const noexcept final {
+    std::string_view targetMinOS() const noexcept final {
         return "unknown";
     }
 
@@ -131,11 +105,12 @@ const VersionInfoInterface& VersionInfoInterface::instance(NotEnabledAction acti
     LOGV2_FATAL(40278, "Terminating because valid version info has not been configured");
 }
 
-std::string VersionInfoInterface::makeVersionString(StringData binaryName) const {
+std::string VersionInfoInterface::makeVersionString(std::string_view binaryName) const {
     return fmt::format("{} v{}", binaryName, version());
 }
 
-std::string VersionInfoInterface::openSSLVersion(StringData prefix, StringData suffix) const {
+std::string VersionInfoInterface::openSSLVersion(std::string_view prefix,
+                                                 std::string_view suffix) const {
 #if !defined(MONGO_CONFIG_SSL) || MONGO_CONFIG_SSL_PROVIDER != MONGO_CONFIG_SSL_PROVIDER_OPENSSL
     return "";
 #elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
@@ -172,7 +147,7 @@ void VersionInfoInterface::logBuildInfo(std::ostream* os) const {
     }
 }
 
-std::string formatVersionString(StringData versioned, const VersionInfoInterface& provider) {
+std::string formatVersionString(std::string_view versioned, const VersionInfoInterface& provider) {
     return fmt::format("{} version v{}", versioned, provider.version());
 }
 

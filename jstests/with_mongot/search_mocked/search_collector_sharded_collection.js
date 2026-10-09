@@ -1,5 +1,6 @@
 /**
  * Verify that `$search` queries that set '$$SEARCH_META' succeed on sharded collections.
+ * TODO (SERVER-131069): Remove this mocked test file now that its coverage is provided by e2e/search/search_collector.js running in the sharded e2e passthrough suites.
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {mongotCommandForQuery} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -194,7 +195,10 @@ const expectedCommand = mongotCommandForQuery({
     mongot.setMockResponses(mergingPipelineHistory, 1);
 }
 
-let cursor = testColl.aggregate([{$search: searchQuery}, {$project: {_id: 1, meta: "$$SEARCH_META"}}]);
+let cursor = testColl.aggregate([
+    {$search: searchQuery},
+    {$project: {_id: 1, meta: "$$SEARCH_META"}},
+]);
 
 const metaDoc = {
     type: 1,

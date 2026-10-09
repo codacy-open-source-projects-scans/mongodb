@@ -56,7 +56,6 @@ selector:
     - requires_standalone
     - assumes_balancer_off
     - assumes_against_mongod_not_mongos
-    - requires_replication
     # Sharing cursors between state functions will fail in this suite because it will attempt to use
     # the same cursor in multiple transactions.
     - state_functions_share_cursor
@@ -119,6 +118,7 @@ executor:
           traceExceptions: false
           runningWithBalancer: true
           implicitlyShardOnCreateCollectionOnly: true
+          shardCollectionProbability: 0.5
 
   hooks:
     # TODO SERVER-120162: Re-enable once all the false positive have been addressed and the test is stable.

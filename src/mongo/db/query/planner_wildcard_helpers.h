@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -61,9 +35,11 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
                               std::vector<IndexEntry>* out);
 
 /**
- * Determines if any of the expanded index entries in the input 'ixscanNodes' can satisfy a query on
- * a wildcard field with a FETCH (for e.g., it may only be able to answer a query on the prefix if
- * the wildcard field is being queried with an incompatible $not predicate).
+ * Always returns false: both non-generic CWI entries (concrete wildcard path, tight bounds)
+ * and the generic entry ("$_path", prefix scan) can satisfy queries with a FETCH stage
+ * handling residual predicates. Asserts that any non-generic entry reaching this point was
+ * assigned a wildcard predicate, as guaranteed by
+ * stripInvalidAssignmentsToCompoundWildcardIndexes.
  */
 bool canOnlyAnswerWildcardPrefixQuery(
     const std::vector<std::unique_ptr<QuerySolutionNode>>& ixscanNodes);

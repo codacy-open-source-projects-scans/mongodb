@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/in_list.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
@@ -37,6 +11,7 @@
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/represent_as.h"
+#include "mongo/util/str.h"
 
 #include <algorithm>
 #include <utility>
@@ -68,19 +43,110 @@ bool emptyPositionInfo(const std::vector<int32_t>& positionInfo) {
  * Given a ValueBlock as input, returns a BoolBlock indicating whether each value in the input was
  * non-Nothing (true) or Nothing (false).
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockExists(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockExists(ArityType arity) {
     tassert(11079924, "Unexpected arity value", arity == 1);
-    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+    auto input = viewFromStack(0);
 
     tassert(8625700,
             "Expected argument to be of valueBlock type",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
     auto out = valueBlockIn->exists();
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(out.release()));
+}
+
+/*
+ * Given a ValueBlock as input, returns a BoolBlock indicating whether each value in the input was
+ * either Nothing, Null or Undefined.
+ */
+value::TagValueOwned ByteCode::builtinValueBlockIsNullish(ArityType arity) {
+    tassert(12697000, "Unexpected arity value", arity == 1);
+    auto input = viewFromStack(0);
+
+    tassert(12697001,
+            "Expected argument to be of valueBlock type",
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
+
+    uint32_t nullUndefinedTypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::null) |
+                                                           getBSONTypeMask(BSONType::undefined));
+    const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
+        [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
+            if (tag == value::TypeTags::Nothing) {
+                return {value::TypeTags::Boolean, value::bitcastFrom<bool>(true)};
+            }
+            return {value::TypeTags::Boolean,
+                    value::bitcastFrom<bool>(
+                        static_cast<bool>(getBSONTypeMask(tag) & nullUndefinedTypeMask))};
+        },
+        [&](value::TypeTags inTag,
+            const value::Value* inVals,
+            value::TypeTags* outTags,
+            value::Value* outVals,
+            size_t count) {
+            auto [outTag, outVal] = [&]() -> std::pair<value::TypeTags, value::Value> {
+                if (inTag == value::TypeTags::Nothing) {
+                    return {value::TypeTags::Boolean, value::bitcastFrom<bool>(true)};
+                }
+                return {value::TypeTags::Boolean,
+                        value::bitcastFrom<bool>(
+                            static_cast<bool>(getBSONTypeMask(inTag) & nullUndefinedTypeMask))};
+            }();
+
+            for (size_t index = 0; index < count; index++) {
+                outTags[index] = outTag;
+                outVals[index] = outVal;
+            }
+        });
+
+    auto valueBlockOut = valueBlockIn->map(cmpOp);
+
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release()));
+}
+
+/*
+ * Given a ValueBlock as input, returns a ValueBlock of Int32 ranks describing each value's position
+ * relative to a missing value in the MQL comparison order: MinKey (0) < Nothing/missing/undefined
+ * (1) < any other value (2). This never produces Nothing, even for a Nothing input.
+ */
+value::TagValueOwned ByteCode::builtinValueBlockMqlComparisonRank(ArityType arity) {
+    tassert(13154401, "Unexpected arity value", arity == 1);
+    auto input = viewFromStack(0);
+
+    tassert(13154400,
+            "Expected argument to be of valueBlock type",
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
+
+    auto rankOf = [](value::TypeTags tag) -> value::TagValueView {
+        return {value::TypeTags::NumberInt32,
+                value::bitcastFrom<int32_t>(ByteCode::mqlComparisonRank(tag))};
+    };
+
+    const auto rankOp = value::makeColumnOp<ColumnOpType::kMonotonic>(
+        [&](value::TypeTags tag, value::Value val) -> value::TagValueView { return rankOf(tag); },
+        [&](value::TypeTags inTag,
+            const value::Value* inVals,
+            value::TypeTags* outTags,
+            value::Value* outVals,
+            size_t count) {
+            // The rank depends only on the type tag, so a homogeneous input has a uniform rank.
+            auto [outTag, outVal] = rankOf(inTag);
+
+            std::fill(outTags, outTags + count, outTag);
+            std::fill(outVals, outVals + count, outVal);
+        });
+
+    auto valueBlockOut = valueBlockIn->map(rankOp);
+
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release()));
 }
 
 /* This instruction takes as input a ValueBlock and a type mask and returns a ValueBlock indicating
@@ -88,25 +154,24 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockExists
  * Nothing then Nothing is returned. If no type mask is provided, it returns a MonoBlock with
  * Nothing.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockTypeMatch(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockTypeMatch(ArityType arity) {
     tassert(11079923, "Unexpected arity value", arity == 2);
 
-    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+    auto input = viewFromStack(0);
     tassert(8300800,
             "First argument of valueBlockTypeMatch must be block of values",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
-    auto [typeMaskOwned, typeMaskTag, typeMaskVal] = getFromStack(1);
-    if (typeMaskTag != value::TypeTags::NumberInt32) {
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(
-                    value::MonoBlock::makeNothingBlock(valueBlockIn->count()).release())};
+    auto typeMaskView = viewFromStack(1);
+    if (typeMaskView.tag != value::TypeTags::NumberInt32) {
+        return value::TagValueOwned::fromRaw(
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(
+                value::MonoBlock::makeNothingBlock(valueBlockIn->count()).release()));
     }
 
-    auto typeMask = static_cast<uint32_t>(value::bitcastTo<int32_t>(typeMaskVal));
+    auto typeMask = static_cast<uint32_t>(value::bitcastTo<int32_t>(typeMaskView.value));
 
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
@@ -138,34 +203,33 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockTypeMa
 
     auto valueBlockOut = valueBlockIn->map(cmpOp);
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release()));
 }
 
 /* This instruction takes as input a timezoneDB and a ValueBlock and returns a ValueBlock indicating
  * whether each value in the ValueBlock is a valid timezone. If no timezoneDB is provided, it
  * returns a MonoBlock with Nothing.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsTimezone(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockIsTimezone(ArityType arity) {
     tassert(11079922, "Unexpected arity value", arity == 2);
 
-    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    auto input = viewFromStack(1);
     tassert(8300801,
             "Second argument of valueBlockIsTimezone must be block of values",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
-    auto [timezoneDBOwned, timezoneDBTag, timezoneDBVal] = getFromStack(0);
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
+    auto timezoneDBView = viewFromStack(0);
+    if (timezoneDBView.tag != value::TypeTags::timeZoneDB) {
         auto nothingBlock =
             std::make_unique<value::MonoBlock>(valueBlockIn->count(), value::TypeTags::Nothing, 0);
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(nothingBlock.release())};
+        return value::TagValueOwned::fromRaw(
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(nothingBlock.release()));
     }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBVal);
+    auto timezoneDB = value::getTimeZoneDBView(timezoneDBView.value);
 
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
@@ -179,9 +243,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsTime
 
     auto valueBlockOut = valueBlockIn->map(cmpOp);
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(valueBlockOut.release()));
 }
 
 /**
@@ -189,28 +253,27 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsTime
  * SBE value, and produces a new block where all missing values in the block have been replaced
  * with the SBE value.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEmpty(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockFillEmpty(ArityType arity) {
     tassert(11079921, "Unexpected arity value", arity == 2);
-    auto [fillOwned, fillTag, fillVal] = getFromStack(1);
-    if (fillTag == value::TypeTags::Nothing) {
-        return moveFromStack(0);
+    auto fill = viewFromStack(1);
+    if (fill.tag == value::TypeTags::Nothing) {
+        return moveMaybeOwnedFromStack(0);
     }
 
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto block = viewFromStack(0);
     tassert(8625701,
             "Expected argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(blockVal);
+            block.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(block.value);
 
-    auto out = valueBlockIn->fillEmpty(fillTag, fillVal);
+    auto out = valueBlockIn->fillEmpty(fill.tag, fill.value);
     if (!out) {
         // Input block was dense so we can just return it unmodified.
-        return moveFromStack(0);
+        return moveMaybeOwnedFromStack(0);
     }
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
+    return value::TagValueMaybeOwned(
+        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release()));
 }
 
 /**
@@ -218,23 +281,22 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEm
  * same size, and produces a new block where all missing values in the first block have been
  * replaced with the correpsonding value in the second block.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEmptyBlock(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockFillEmptyBlock(ArityType arity) {
     tassert(11079920, "Unexpected arity value", arity == 2);
-    auto [fillOwned, fillTag, fillVal] = getFromStack(1);
-    if (fillTag == value::TypeTags::Nothing) {
-        return moveFromStack(0);
+    auto fill = viewFromStack(1);
+    if (fill.tag == value::TypeTags::Nothing) {
+        return moveMaybeOwnedFromStack(0);
     }
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto block = viewFromStack(0);
     tassert(8141618,
             "Arguments of valueBlockFillEmptyBlock must be block of values",
-            fillTag == value::TypeTags::valueBlock && blockTag == value::TypeTags::valueBlock);
+            fill.tag == value::TypeTags::valueBlock && block.tag == value::TypeTags::valueBlock);
 
-    auto* fillBlockIn = value::bitcastTo<value::ValueBlock*>(fillVal);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(blockVal);
+    auto* fillBlockIn = value::bitcastTo<value::ValueBlock*>(fill.value);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(block.value);
 
     if (valueBlockIn->tryDense().get_value_or(false)) {
-        return moveFromStack(0);
+        return moveMaybeOwnedFromStack(0);
     }
 
     auto extractedFill = fillBlockIn->extract();
@@ -257,8 +319,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEm
     }
     auto res = buildBlockFromStorage(std::move(tagOut), std::move(valueOut));
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueMaybeOwned(
+        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
 /**
@@ -267,53 +329,53 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEm
  * replaced with the SBE value. Any Nothings in the input will be preserved as Nothings in the
  * output regardless of what the type mask is.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillType(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockFillType(ArityType arity) {
     tassert(11079919, "Unexpected arity value", arity == 3);
-    auto [fillOwned, fillTag, fillVal] = getFromStack(2);
+    auto fill = viewFromStack(2);
 
-    auto [typeMaskOwned, typeMaskTag, typeMaskVal] = getFromStack(1);
+    auto typeMaskView = viewFromStack(1);
 
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto blockView = viewFromStack(0);
     tassert(8872900,
             "Expected argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
-    auto* block = value::bitcastTo<value::ValueBlock*>(blockVal);
+            blockView.tag == value::TypeTags::valueBlock);
+    auto* block = value::bitcastTo<value::ValueBlock*>(blockView.value);
 
-    if (typeMaskTag != value::TypeTags::NumberInt32) {
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(
-                    value::MonoBlock::makeNothingBlock(block->count()).release())};
+    if (typeMaskView.tag != value::TypeTags::NumberInt32) {
+        return value::TagValueMaybeOwned(
+            true,
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(
+                value::MonoBlock::makeNothingBlock(block->count()).release()));
     }
-    uint32_t typeMask = static_cast<uint32_t>(value::bitcastTo<int32_t>(typeMaskVal));
+    uint32_t typeMask = static_cast<uint32_t>(value::bitcastTo<int32_t>(typeMaskView.value));
 
-    auto out = block->fillType(typeMask, fillTag, fillVal);
+    auto out = block->fillType(typeMask, fill.tag, fill.value);
     if (!out) {
         // Input block didn't have any non-Nothing values that matched the type mask so we can
         // return it unmodified.
-        return moveFromStack(0);
+        return moveMaybeOwnedFromStack(0);
     }
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
+    return value::TagValueMaybeOwned(
+        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release()));
 }
 
 template <bool less>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockMinMaxImpl(
-    value::ValueBlock* inputBlock, value::ValueBlock* bitsetBlock) {
+value::TagValueOwned ByteCode::valueBlockMinMaxImpl(value::ValueBlock* inputBlock,
+                                                    value::ValueBlock* bitsetBlock) {
     if (bitsetBlock->allTrue().get_value_or(false)) {
         if constexpr (less) {
             auto [minTag, minVal] = inputBlock->tryMin();
             if (minTag != value::TypeTags::Nothing) {
                 auto [minTagCpy, minValCpy] = value::copyValue(minTag, minVal);
-                return {true, minTagCpy, minValCpy};
+                return value::TagValueOwned::fromRaw(minTagCpy, minValCpy);
             }
         } else {
             auto [maxTag, maxVal] = inputBlock->tryMax();
             if (maxTag != value::TypeTags::Nothing) {
                 auto [maxTagCpy, maxValCpy] = value::copyValue(maxTag, maxVal);
-                return {true, maxTagCpy, maxValCpy};
+                return value::TagValueOwned::fromRaw(maxTagCpy, maxValCpy);
             }
         }
     }
@@ -345,62 +407,53 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockMinMaxImpl(
     }
 
     auto [retTag, retVal] = value::copyValue(accTag, accVal);
-    return {true, retTag, retVal};
+    return value::TagValueOwned::fromRaw(retTag, retVal);
 }
 
 template <bool less>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockAggMinMaxImpl(
-    value::TypeTags accTag,
-    value::Value accVal,
-    value::TypeTags inputTag,
-    value::Value inputVal,
-    value::TypeTags bitsetTag,
-    value::Value bitsetVal) {
-    // The caller transferred ownership of 'acc' to us, so set up a guard.
-    value::ValueGuard guard{accTag, accVal};
-
+value::TagValueOwned ByteCode::valueBlockAggMinMaxImpl(value::TagValueOwned acc,
+                                                       value::TagValueView input,
+                                                       value::TagValueView bitset) {
     tassert(8625702,
             "Expected input argument to be of valueBlock type",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
     tassert(8625703,
             "Expected bitset argument to be of valueBlock type",
-            bitsetTag == value::TypeTags::valueBlock);
-    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+            bitset.tag == value::TypeTags::valueBlock);
+    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitset.value);
 
     // If there is a valid accumulated value and the min(/max) value of the entire block is
     // greater(/less) than the accumulated value then we can directly return the accumulated value
-    if (accTag != value::TypeTags::Nothing) {
+    if (acc.tag() != value::TypeTags::Nothing) {
         auto [minOrMaxTag, minOrMaxVal] = less ? valueBlockIn->tryMin() : valueBlockIn->tryMax();
         if (minOrMaxTag != value::TypeTags::Nothing) {
-            auto [cmpTag, cmpVal] = value::compare3way(minOrMaxTag, minOrMaxVal, accTag, accVal);
+            auto [cmpTag, cmpVal] =
+                value::compare3way(minOrMaxTag, minOrMaxVal, acc.tag(), acc.value());
             if (cmpTag == value::TypeTags::NumberInt32) {
                 int32_t cmp = value::bitcastTo<int32_t>(cmpVal);
                 if (less ? cmp >= 0 : cmp <= 0) {
-                    guard.reset();
-                    return {true, accTag, accVal};
+                    return acc;
                 }
             }
         }
     }
 
     // Evaluate the min/max value in the block taking into account the bitmap
-    auto [resultOwned, resultTag, resultVal] =
-        valueBlockMinMaxImpl<less>(valueBlockIn, bitsetBlock);
-
-    value::ValueGuard resultGuard{resultOwned, resultTag, resultVal};
+    auto result = valueBlockMinMaxImpl<less>(valueBlockIn, bitsetBlock);
 
     // If 'result' is not Nothing, check if we should return 'result'.
-    if (resultTag != value::TypeTags::Nothing) {
+    if (result.tag() != value::TypeTags::Nothing) {
         bool returnResult = false;
 
-        if (accTag == value::TypeTags::Nothing) {
+        if (acc.tag() == value::TypeTags::Nothing) {
             // If 'acc' is Nothing, then we should return 'result'.
             returnResult = true;
         } else {
             // If 'acc' is not Nothing, compare 'result' with 'acc'.
-            auto [tag, val] = value::compare3way(resultTag, resultVal, accTag, accVal);
+            auto [tag, val] =
+                value::compare3way(result.tag(), result.value(), acc.tag(), acc.value());
 
             if (tag == value::TypeTags::NumberInt32) {
                 // If 'result' is less than or equal to 'acc' (is 'less' is true) or if 'result'
@@ -412,19 +465,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockAggMinMaxImpl
         }
 
         if (returnResult) {
-            // If the result is not owned, make it owned.
-            if (!resultOwned) {
-                std::tie(resultTag, resultVal) = value::copyValue(resultTag, resultVal);
-            }
             // Return result as the updated accumulator state.
-            resultGuard.reset();
-            return {true, resultTag, resultVal};
+            return result;
         }
     }
 
     // Return the current accumulator state unmodified.
-    guard.reset();
-    return {true, accTag, accVal};
+    return acc;
 }
 
 /*
@@ -432,18 +479,17 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockAggMinMaxImpl
  * in the block based on compareValue. Values whose corresponding bit is set to false get ignored.
  * This function will return a non-Nothing value if the block contains any non-Nothing values.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggMin(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggMin(ArityType arity) {
     tassert(11079918, "Unexpected arity value", arity == 3);
 
-    auto [_, inputTag, inputVal] = getFromStack(2);
-    auto [__, bitsetTag, bitsetVal] = getFromStack(1);
+    auto input = viewFromStack(2);
+    auto bitset = viewFromStack(1);
 
     // Move the incoming accumulator state from the stack. We now own and have exclusive access
     // to the accumulator state and can make in-place modifications if desired.
-    auto [accTag, accVal] = moveOwnedFromStack(0);
+    auto acc = moveOwnedFromStack(0);
 
-    return valueBlockAggMinMaxImpl<true /* less */>(
-        accTag, accVal, inputTag, inputVal, bitsetTag, bitsetVal);
+    return valueBlockAggMinMaxImpl<true /* less */>(std::move(acc), input, bitset);
 }
 
 /*
@@ -451,44 +497,42 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggMin
  * in the block based on compareValue. Values whose corresponding bit is set to false get ignored.
  * This function will return a non-Nothing value if the block contains any non-Nothing values.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggMax(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggMax(ArityType arity) {
     tassert(11079917, "Unexpected arity value", arity == 3);
 
-    auto [_, inputTag, inputVal] = getFromStack(2);
-    auto [__, bitsetTag, bitsetVal] = getFromStack(1);
+    auto input = viewFromStack(2);
+    auto bitset = viewFromStack(1);
 
     // Move the incoming accumulator state from the stack. We now own and have exclusive access
     // to the accumulator state and can make in-place modifications if desired.
-    auto [accTag, accVal] = moveOwnedFromStack(0);
+    auto acc = moveOwnedFromStack(0);
 
-    return valueBlockAggMinMaxImpl<false /* less */>(
-        accTag, accVal, inputTag, inputVal, bitsetTag, bitsetVal);
+    return valueBlockAggMinMaxImpl<false /* less */>(std::move(acc), input, bitset);
 }
 
 /*
  * Given a ValueBlock bitset, count how many "true" elements there are.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggCount(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggCount(ArityType arity) {
     // TODO SERVER-83450 add monoblock fast path.
     tassert(11079916, "Unexpected arity value", arity == 2);
 
     // Move the incoming accumulator state from the stack. We now own and have exclusive access
     // to the accumulator state and can make in-place modifications if desired.
-    auto [accTag, accVal] = moveOwnedFromStack(0);
-    value::ValueGuard guard{accTag, accVal};
+    auto acc = moveOwnedFromStack(0);
 
-    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    auto bitsetView = viewFromStack(1);
     tassert(8625706,
             "Expected bitset argument to be of valueBlock type",
-            bitsetTag == value::TypeTags::valueBlock);
-    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+            bitsetView.tag == value::TypeTags::valueBlock);
+    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetView.value);
 
     value::DeblockedTagVals bitset = bitsetBlock->extract();
 
     dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
-    int64_t n = accTag == value::TypeTags::NumberInt64 ? value::bitcastTo<int64_t>(accVal) : 0;
+    int64_t n =
+        acc.tag() == value::TypeTags::NumberInt64 ? value::bitcastTo<int64_t>(acc.value()) : 0;
 
     int64_t count = 0;
     for (size_t i = 0; i < bitset.count(); ++i) {
@@ -497,7 +541,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggCou
         }
     }
 
-    return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(n + count)};
+    return value::TagValueOwned::numberInt64(n + count);
 }
 
 /*
@@ -506,26 +550,25 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggCou
  * elements where the bitset indicates true, we return a value. If there are only Nothing elements,
  * we return Nothing.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggSum(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggSum(ArityType arity) {
     // TODO SERVER-83450 add monoblock fast path.
     tassert(11079915, "Unexpected arity value", arity == 3);
 
     // Move the incoming accumulator state from the stack. We now own and have exclusive access
     // to the accumulator state and can make in-place modifications if desired.
-    auto [accTag, accVal] = moveOwnedFromStack(0);
-    value::ValueGuard guard{accTag, accVal};
+    value::TagValueOwned acc = moveOwnedFromStack(0);
 
-    auto [inputOwned, inputTag, inputVal] = getFromStack(2);
+    auto input = viewFromStack(2);
     tassert(8625707,
             "Expected input argument to be of valueBlock type",
-            inputTag == value::TypeTags::valueBlock);
-    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(input.value);
 
-    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    auto bitsetView = viewFromStack(1);
     tassert(8625708,
             "Expected bitset argument to be of valueBlock type",
-            bitsetTag == value::TypeTags::valueBlock);
-    value::ValueBlock* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+            bitsetView.tag == value::TypeTags::valueBlock);
+    value::ValueBlock* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetView.value);
 
     const value::DeblockedTagVals block = inputBlock->extract();
     const value::DeblockedTagVals bitset = bitsetBlock->extract();
@@ -534,70 +577,60 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggSum
         8151801, "Expected block and bitset to be the same size", block.count() == bitset.count());
     dassert(allBools(bitset.tags(), bitset.count()), "Expected bitset to be all bools");
 
-    value::TypeTags blockResTag = value::TypeTags::Nothing;
-    value::Value blockResVal = 0;
+    value::TagValueOwned blockRes = value::TagValueOwned::nothing();
     for (size_t i = 0; i < bitset.count(); ++i) {
         if (value::bitcastTo<bool>(bitset[i].value) && value::isNumber(block.tags()[i])) {
             // If 'blockRes' is Nothing, set 'blockRes' equal to 'block[i]'. Otherwise, compute the
             // sum of 'blockRes' and 'block[i]' and store the result back into 'blockRes'.
-            if (blockResTag == value::TypeTags::Nothing) {
-                std::tie(blockResTag, blockResVal) =
-                    value::copyValue(block.tags()[i], block.vals()[i]);
+            if (blockRes.tag() == value::TypeTags::Nothing) {
+                blockRes = value::TagValueOwned::fromRaw(
+                    value::copyValue(block.tags()[i], block.vals()[i]));
             } else {
-                value::ValueGuard curBlockResGuard{blockResTag, blockResVal};
-
-                auto [sumTag, sumVal] =
-                    genericAdd(blockResTag, blockResVal, block.tags()[i], block.vals()[i])
-                        .releaseToOwnedRaw();
-
-                std::tie(blockResTag, blockResVal) = std::pair(sumTag, sumVal);
+                blockRes = value::TagValueOwned::fromRaw(
+                    genericAdd(blockRes.tag(), blockRes.value(), block.tags()[i], block.vals()[i])
+                        .releaseToOwnedRaw());
             }
         }
     }
 
-    if (blockResTag == value::TypeTags::Nothing) {
+    if (blockRes.tag() == value::TypeTags::Nothing) {
         // Return the accumulator state unmodified.
-        guard.reset();
-        return {true, accTag, accVal};
+        return acc;
     }
 
-    value::ValueGuard blockResGuard{blockResTag, blockResVal};
-
-    if (accTag == value::TypeTags::Nothing) {
+    if (acc.tag() == value::TypeTags::Nothing) {
         // Return 'blockRes' as the updated accumulator state.
-        blockResGuard.reset();
-        return {true, blockResTag, blockResVal};
+        return blockRes;
     }
 
     // Compute the result of adding the accumulator state with 'blockRes'.
     auto [resultTag, resultVal] =
-        genericAdd(accTag, accVal, blockResTag, blockResVal).releaseToOwnedRaw();
+        genericAdd(acc.tag(), acc.value(), blockRes.tag(), blockRes.value()).releaseToOwnedRaw();
 
     // Return 'result' as the updated accumulator state.
-    return {true, resultTag, resultVal};
+    return value::TagValueOwned::fromRaw(resultTag, resultVal);
 }  // builtinValueBlockAggSum
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggDoubleDoubleSum(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggDoubleDoubleSum(ArityType arity) {
     tassert(11079914, "Unexpected arity value", arity == 3);
 
     // Input: next block to accumulate.
-    auto [blockOwned, blockTag, blockVal] = getFromStack(2);
+    auto blockView = viewFromStack(2);
     tassert(8695107,
             "Expected input argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
-    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(blockVal);
+            blockView.tag == value::TypeTags::valueBlock);
+    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(blockView.value);
 
     // Input: bitset matching 'inputBlock'.
-    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    auto bitsetView = viewFromStack(1);
     tassert(8695108,
             "Expected bitset argument to be of valueBlock type",
-            bitsetTag == value::TypeTags::valueBlock);
-    value::ValueBlock* inputBitset = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+            bitsetView.tag == value::TypeTags::valueBlock);
+    value::ValueBlock* inputBitset = value::bitcastTo<value::ValueBlock*>(bitsetView.value);
 
-    // Input-output: running accumulator result. moveOwnedFromStack() takes ownership by our local
-    // copy so we can do in-place updates to it.
-    auto accTagValue = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    // Input-output: running accumulator result. moveOwnedFromStack() takes ownership so our local
+    // copy can do in-place updates to it.
+    auto accTagValue = moveOwnedFromStack(0);
 
     // Initialize the accumulator if this is the first use of it.
     if (accTagValue.tag() == value::TypeTags::Nothing) {
@@ -620,7 +653,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggDou
         }
     }
 
-    return accTagValue.releaseToMaybeOwnedRaw();
+    return accTagValue;
 }  // builtinValueBlockAggDoubleDoubleSum
 
 namespace {
@@ -692,21 +725,17 @@ int addNewPair(value::Array* mergeArr,
                const PairKeyComp<Comp>& keyLess) {
     int memDelta = memAdded({keyTag, keyVal}, {outTag, outVal});
 
-    auto [pairArrTag, pairArrVal] = value::makeNewArray();
-    value::ValueGuard pairArrGuard{pairArrTag, pairArrVal};
-    auto* pairArr = value::getArrayView(pairArrVal);
-    pairArr->reserve(2);
+    value::TagValueOwned pairArr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto* pairArrView = value::getArrayView(pairArr.value());
+    pairArrView->reserve(2);
 
     // Update the sortKey with a copy.
-    pairArr->push_back(value::copyValue(keyTag, keyVal));
+    pairArrView->push_back_raw(value::copyValue(keyTag, keyVal));
 
-    // Add a coppy of the output value to the SBE pair array.
-    pairArr->push_back(value::copyValue(outTag, outVal));
+    // Add a copy of the output value to the SBE pair array.
+    pairArrView->push_back_raw(value::copyValue(outTag, outVal));
 
-    // The caller of this function will take ownership of the pair array.
-    pairArrGuard.reset();
-
-    mergeArr->push_back(pairArrTag, pairArrVal);
+    mergeArr->push_back(std::move(pairArr));
 
     auto& mergeHeap = mergeArr->values();
     std::push_heap(mergeHeap.begin(), mergeHeap.end(), keyLess);
@@ -747,8 +776,8 @@ int updateWorstPair(value::Array* mergeArr,
 }
 
 std::pair<value::Array*, value::TagValueView> getWorst(value::Array* mergeArr) {
-    auto [worstTag, worstVal] = mergeArr->getAt(0);
-    auto worstArr = value::getArrayView(worstVal);
+    auto worstTagVal = mergeArr->getAt(0);
+    auto worstArr = value::getArrayView(worstTagVal.value);
     return {worstArr, worstArr->getAt(0)};
 }
 
@@ -1004,13 +1033,11 @@ bool tryHomogeneousFastPath(TopBottomSense sense,
 // Currently, this is a specialized implementation for the single sort key, single output field case
 // of $top[N]/$bottom[N].
 template <TopBottomSense Sense, bool ValueIsDecomposedArray>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottomNImpl(
-    value::TypeTags stateTag,
-    value::Value stateVal,
-    value::ValueBlock* bitsetBlock,
-    SortSpec* sortSpec,
-    size_t numKeysBlocks,
-    size_t numValuesBlocks) {
+value::TagValueOwned ByteCode::blockNativeAggTopBottomNImpl(value::TagValueOwned state,
+                                                            value::ValueBlock* bitsetBlock,
+                                                            SortSpec* sortSpec,
+                                                            size_t numKeysBlocks,
+                                                            size_t numValuesBlocks) {
 
     static_assert(!ValueIsDecomposedArray);
 
@@ -1020,30 +1047,27 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
     tassert(11086818, "Expecting number of keys blocks to be 1", numKeysBlocks == 1);
     tassert(11086814, "Expecting number of values blocks to be 1", numValuesBlocks == 1);
 
-    value::ValueGuard stateGuard{stateTag, stateVal};
-
     // We already read numKeysBlocks (stack position 3) in builtinValueBlockAggTopBottomNImpl before
     // calling into this function.
 
     constexpr size_t keysBlocksStartOffset = 4;
     const size_t valuesBlocksStartOffset = keysBlocksStartOffset + numKeysBlocks;
 
-    auto [sortKeyBlockOwned, sortKeyBlockTag, sortKeyBlockVal] =
-        getFromStack(keysBlocksStartOffset);
+    auto sortKeyBlockView = viewFromStack(keysBlocksStartOffset);
     tassert(8794906,
             "Expected key argument to be of valueBlock type",
-            sortKeyBlockTag == value::TypeTags::valueBlock);
-    auto* sortKeyBlock = value::getValueBlock(sortKeyBlockVal);
+            sortKeyBlockView.tag == value::TypeTags::valueBlock);
+    auto* sortKeyBlock = value::getValueBlock(sortKeyBlockView.value);
     size_t sortKeyCount = sortKeyBlock->count();
 
-    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(valuesBlocksStartOffset);
+    auto valBlockView = viewFromStack(valuesBlocksStartOffset);
     tassert(8794905,
             "Expected key argument to be of valueBlock type",
-            valBlockTag == value::TypeTags::valueBlock);
-    auto* valBlock = value::getValueBlock(valBlockVal);
+            valBlockView.tag == value::TypeTags::valueBlock);
+    auto* valBlock = value::getValueBlock(valBlockView.value);
 
-    MultiAccState stateTuple = getMultiAccState(stateTag, stateVal);
-    auto [state, mergeArr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] = stateTuple;
+    MultiAccState stateTuple = getMultiAccState(state.view());
+    auto [stateArray, mergeArr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] = stateTuple;
     tassert(11093700, "maxSize must be greater than zero", maxSize > 0);
 
     tassert(11093701,
@@ -1069,15 +1093,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
     // possible value wouldn't make it into the accumulated heap, it doesn't matter if this value
     // passed any filters.
     if (tryFullMergeArrFastPath(Sense, isAscending, mergeArr, maxSize, sortKeyBlock, less)) {
-        stateGuard.reset();
-        return {true, stateTag, stateVal};
+        return state;
     }
 
     // Try to use the argMin/Max API if possible instead of calling extract on the sortKeyBlock.
     if (tryArgMinMaxFastPath(
             Sense, isAscending, stateTuple, bitsetBlock, sortKeyBlock, valBlock, less)) {
-        stateGuard.reset();
-        return {true, stateTag, stateVal};
+        return state;
     }
 
     auto bitset = bitsetBlock->extract();
@@ -1089,15 +1111,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
     // Fast path for $top/$bottom with homogeneous sort field input and no missing values.
     if (tryHomogeneousFastPath(Sense,
                                isAscending,
-                               stateTag,
-                               stateVal,
+                               state.tag(),
+                               state.value(),
                                stateTuple,
                                bitsetVals,
                                sortKeys,
                                valBlock,
                                less)) {
-        stateGuard.reset();
-        return {true, stateTag, stateVal};
+        return state;
     }
 
     // We will use a std::vector of TopBottomSortKeyAndIdx structs instead of a nested SBE array for
@@ -1146,8 +1167,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottom
     combineBlockNativeAggTopBottomN(stateTuple, newArr, valBlock, less);
 
     // Return the input state since mergeArr was updated in-place.
-    stateGuard.reset();
-    return {true, stateTag, stateVal};
+    return state;
 }
 
 class ByteCode::TopBottomArgsFromBlocks final : public ByteCode::TopBottomArgs {
@@ -1179,9 +1199,8 @@ public:
 
         if (_sense == TopBottomSense::kTop) {
             for (size_t i = 0; i < sortPattern.size(); i++) {
-                auto [keyTag, keyVal] = _keys[i][_blockIndex];
-                auto [itemTag, itemVal] = itemArray->getAt(i);
-                int32_t cmp = compare<TopBottomSense::kTop>(keyTag, keyVal, itemTag, itemVal);
+                int32_t cmp =
+                    compare<TopBottomSense::kTop>(_keys[i][_blockIndex], itemArray->getAt(i));
 
                 if (cmp != 0) {
                     return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
@@ -1189,9 +1208,8 @@ public:
             }
         } else {
             for (size_t i = 0; i < sortPattern.size(); i++) {
-                auto [keyTag, keyVal] = _keys[i][_blockIndex];
-                auto [itemTag, itemVal] = itemArray->getAt(i);
-                int32_t cmp = compare<TopBottomSense::kBottom>(keyTag, keyVal, itemTag, itemVal);
+                int32_t cmp =
+                    compare<TopBottomSense::kBottom>(_keys[i][_blockIndex], itemArray->getAt(i));
 
                 if (cmp != 0) {
                     return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
@@ -1209,7 +1227,7 @@ public:
         for (size_t i = 0; i < _keys.size(); ++i) {
             auto [keyTag, keyVal] = _keys[i][_blockIndex];
             std::tie(keyTag, keyVal) = value::copyValue(keyTag, keyVal);
-            keysArr->push_back(keyTag, keyVal);
+            keysArr->push_back_raw(keyTag, keyVal);
         }
 
         return keys;
@@ -1222,7 +1240,7 @@ public:
         for (size_t i = 0; i < _values.size(); ++i) {
             auto [valueTag, valueVal] = _values[i][_blockIndex];
             std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
-            valuesArr->push_back(valueTag, valueVal);
+            valuesArr->push_back_raw(valueTag, valueVal);
         }
 
         return values;
@@ -1245,49 +1263,47 @@ public:
 };
 
 template <TopBottomSense Sense, bool ValueIsDecomposedArray>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopBottomNImpl(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggTopBottomNImpl(ArityType arity) {
 
-    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    auto bitsetView = viewFromStack(1);
     tassert(8448708,
             "Expected bitset argument to be of valueBlock type",
-            bitsetTag == value::TypeTags::valueBlock);
+            bitsetView.tag == value::TypeTags::valueBlock);
 
-    auto [sortSpecOwned, sortSpecTag, sortSpecVal] = getFromStack(2);
-    tassert(8448709, "Argument must be of sortSpec type", sortSpecTag == value::TypeTags::sortSpec);
+    auto sortSpec = viewFromStack(2);
+    tassert(
+        8448709, "Argument must be of sortSpec type", sortSpec.tag == value::TypeTags::sortSpec);
 
     size_t numKeysBlocks = 1;
     bool keyIsDecomposed = false;
-    auto [_, numKeysBlocksTag, numKeysBlocksVal] = getFromStack(3);
-    if (numKeysBlocksTag == value::TypeTags::NumberInt32) {
-        numKeysBlocks = static_cast<size_t>(value::bitcastTo<int32_t>(numKeysBlocksVal));
+    auto numKeysBlocksView = viewFromStack(3);
+    if (numKeysBlocksView.tag == value::TypeTags::NumberInt32) {
+        numKeysBlocks = static_cast<size_t>(value::bitcastTo<int32_t>(numKeysBlocksView.value));
         keyIsDecomposed = true;
     } else {
         tassert(8448710,
                 "Expected numKeys to be Null or Int32",
-                numKeysBlocksTag == value::TypeTags::Null);
+                numKeysBlocksView.tag == value::TypeTags::Null);
     }
 
     constexpr size_t keysBlocksStartOffset = 4;
     const size_t valuesBlocksStartOffset = keysBlocksStartOffset + numKeysBlocks;
     const size_t numValuesBlocks = ValueIsDecomposedArray ? arity - valuesBlocksStartOffset : 1;
 
-    auto [stateTag, stateVal] = moveOwnedFromStack(0);
-    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto state = moveOwnedFromStack(0);
 
-    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
-    auto ss = value::getSortSpecView(sortSpecVal);
+    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetView.value);
+    auto ss = value::getSortSpecView(sortSpec.value);
 
     if constexpr (!ValueIsDecomposedArray) {
         if (!keyIsDecomposed) {
-            stateGuard.reset();
             return blockNativeAggTopBottomNImpl<Sense, ValueIsDecomposedArray>(
-                stateTag, stateVal, bitsetBlock, ss, numKeysBlocks, numValuesBlocks);
+                std::move(state), bitsetBlock, ss, numKeysBlocks, numValuesBlocks);
         }
     }
 
-    auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTag, stateVal);
+    auto [stateArray, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
+        getMultiAccState(state.view());
     tassert(11093703, "maxSize must be greater than zero", maxSize > 0);
 
     value::DeblockedTagVals bitset = bitsetBlock->extract();
@@ -1300,12 +1316,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTop
     values.reserve(numValuesBlocks);
 
     for (size_t i = 0; i < numKeysBlocks; ++i) {
-        auto [_, keysBlockTag, keysBlockVal] = getFromStack(keysBlocksStartOffset + i);
+        auto keysBlock = viewFromStack(keysBlocksStartOffset + i);
         tassert(8448712,
                 "Expected argument to be of valueBlock type",
-                keysBlockTag == value::TypeTags::valueBlock);
+                keysBlock.tag == value::TypeTags::valueBlock);
 
-        keys.emplace_back(value::getValueBlock(keysBlockVal)->extract());
+        keys.emplace_back(value::getValueBlock(keysBlock.value)->extract());
 
         tassert(8448713,
                 "Expected block and bitset to be the same size",
@@ -1313,12 +1329,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTop
     }
 
     for (size_t i = 0; i < numValuesBlocks; ++i) {
-        auto [_, valuesBlockTag, valuesBlockVal] = getFromStack(valuesBlocksStartOffset + i);
+        auto valuesBlock = viewFromStack(valuesBlocksStartOffset + i);
         tassert(8448714,
                 "Expected argument to be of valueBlock type",
-                valuesBlockTag == value::TypeTags::valueBlock);
+                valuesBlock.tag == value::TypeTags::valueBlock);
 
-        values.emplace_back(value::getValueBlock(valuesBlockVal)->extract());
+        values.emplace_back(value::getValueBlock(valuesBlock.value)->extract());
 
         tassert(8448715,
                 "Expected block and bitset to be the same size",
@@ -1333,40 +1349,38 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTop
             topBottomArgs.initForBlockIndex(blockIndex);
 
             if constexpr (Sense == TopBottomSense::kTop) {
-                memUsage = aggTopNAdd(state, array, maxSize, memUsage, memLimit, topBottomArgs);
+                memUsage =
+                    aggTopNAdd(stateArray, array, maxSize, memUsage, memLimit, topBottomArgs);
             } else {
-                memUsage = aggBottomNAdd(state, array, maxSize, memUsage, memLimit, topBottomArgs);
+                memUsage =
+                    aggBottomNAdd(stateArray, array, maxSize, memUsage, memLimit, topBottomArgs);
             }
         }
     }
 
-    stateGuard.reset();
-    return {true, stateTag, stateVal};
+    return state;
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopN(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggTopN(ArityType arity) {
     return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kTop, false>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggBottomN(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggBottomN(ArityType arity) {
     return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kBottom, false>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopNArray(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggTopNArray(ArityType arity) {
     return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kTop, true>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggBottomNArray(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAggBottomNArray(ArityType arity) {
     return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kBottom, true>(arity);
 }
 
 enum class ArithmeticOp { Addition, Subtraction, Multiplication, Division };
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithmeticOperation(
+value::TagValueOwned ByteCode::builtinBlockBlockArithmeticOperation(
     const value::TypeTags* bitsetTags,
     const value::Value* bitsetVals,
     value::ValueBlock* leftInputBlock,
@@ -1404,10 +1418,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithm
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    leftBlock[i].tag, leftBlock[i].value, rightBlock[i].tag, rightBlock[i].value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(leftBlock[i], rightBlock[i]).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1415,13 +1426,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithm
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithmeticOperation(
+value::TagValueOwned ByteCode::builtinBlockBlockArithmeticOperation(
     value::ValueBlock* leftInputBlock, value::ValueBlock* rightInputBlock, size_t valsNum) {
     auto leftBlock = leftInputBlock->extract();
     auto rightBlock = rightInputBlock->extract();
@@ -1452,10 +1462,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithm
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    leftBlock[i].tag, leftBlock[i].value, rightBlock[i].tag, rightBlock[i].value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(leftBlock[i], rightBlock[i]).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1463,13 +1470,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockBlockArithm
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArithmeticOperation(
+value::TagValueOwned ByteCode::builtinScalarBlockArithmeticOperation(
     const value::TypeTags* bitsetTags,
     const value::Value* bitsetVals,
     value::TagValueView scalar,
@@ -1506,10 +1512,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArith
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    scalar.tag, scalar.value, extractedValues[i].tag, extractedValues[i].value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(scalar, extractedValues[i]).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1517,14 +1520,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArith
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArithmeticOperation(
-    value::TagValueView scalar, value::ValueBlock* block, size_t valsNum) {
+value::TagValueOwned ByteCode::builtinScalarBlockArithmeticOperation(value::TagValueView scalar,
+                                                                     value::ValueBlock* block,
+                                                                     size_t valsNum) {
     auto extractedValues = block->extract();
 
     std::vector<value::TypeTags> tagsOut(valsNum, value::TypeTags::Nothing);
@@ -1553,10 +1556,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArith
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    scalar.tag, scalar.value, extractedValues[i].tag, extractedValues[i].value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(scalar, extractedValues[i]).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1564,13 +1564,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarBlockArith
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArithmeticOperation(
+value::TagValueOwned ByteCode::builtinBlockScalarArithmeticOperation(
     const value::TypeTags* bitsetTags,
     const value::Value* bitsetVals,
     value::ValueBlock* block,
@@ -1607,10 +1606,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArith
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    extractedValues[i].tag, extractedValues[i].value, scalar.tag, scalar.value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(extractedValues[i], scalar).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1618,14 +1614,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArith
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArithmeticOperation(
-    value::ValueBlock* block, value::TagValueView scalar, size_t valsNum) {
+value::TagValueOwned ByteCode::builtinBlockScalarArithmeticOperation(value::ValueBlock* block,
+                                                                     value::TagValueView scalar,
+                                                                     size_t valsNum) {
     auto extractedValues = block->extract();
 
     std::vector<value::TypeTags> tagsOut(valsNum, value::TypeTags::Nothing);
@@ -1654,10 +1650,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArith
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-            auto [resTag, resVal] =
-                genericDiv(
-                    extractedValues[i].tag, extractedValues[i].value, scalar.tag, scalar.value)
-                    .releaseToOwnedRaw();
+            auto [resTag, resVal] = genericDiv(extractedValues[i], scalar).releaseToOwnedRaw();
             tagsOut[i] = resTag;
             valuesOut[i] = resVal;
         }
@@ -1665,13 +1658,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBlockScalarArith
 
     auto resBlock = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarScalarArithmeticOperation(
+value::TagValueOwned ByteCode::builtinScalarScalarArithmeticOperation(
     value::TagValueView leftInputScalar, value::TagValueView rightInputScalar, size_t valsNum) {
     std::unique_ptr<value::MonoBlock> resBlock;
     if constexpr (static_cast<int>(ArithmeticOp::Addition) == op) {
@@ -1696,42 +1688,38 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinScalarScalarArit
                                             .releaseToOwnedRaw();
         resBlock = std::make_unique<value::MonoBlock>(valsNum, resultTag, resultValue);
     } else if constexpr (static_cast<int>(ArithmeticOp::Division) == op) {
-        auto [resultTag, resultValue] = genericDiv(leftInputScalar.tag,
-                                                   leftInputScalar.value,
-                                                   rightInputScalar.tag,
-                                                   rightInputScalar.value)
-                                            .releaseToOwnedRaw();
+        auto [resultTag, resultValue] =
+            genericDiv(leftInputScalar, rightInputScalar).releaseToOwnedRaw();
         resBlock = std::make_unique<value::MonoBlock>(valsNum, resultTag, resultValue);
     } else {
         resBlock = std::make_unique<value::MonoBlock>(valsNum, value::TypeTags::Nothing, 0);
     }
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(resBlock.release())};
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(resBlock.release()));
 }
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithmeticOperation(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockArithmeticOperation(ArityType arity) {
 
     static_assert(op >= 0 && op <= 3, "op should be between 0 and 3 inclusive");
 
     tassert(11079913, "Unexpected arity value", arity == 3);
 
-    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(0);
-    auto [lOwned, lTag, lVal] = getFromStack(1);
-    auto [rOwned, rTag, rVal] = getFromStack(2);
+    auto bitsetView = viewFromStack(0);
+    auto l = viewFromStack(1);
+    auto r = viewFromStack(2);
 
     tassert(8332300,
             "First argument of block arithmetic operation must be block of values representing a "
             "bitmask or Nothing",
-            bitsetTag == value::TypeTags::valueBlock || bitsetTag == value::TypeTags::Nothing);
+            bitsetView.tag == value::TypeTags::valueBlock ||
+                bitsetView.tag == value::TypeTags::Nothing);
     const value::Value* bitsetVals = nullptr;
     const value::TypeTags* bitsetTags = nullptr;
     size_t valsNum = 0;
-    if (bitsetTag == value::TypeTags::valueBlock) {
-        auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+    if (bitsetView.tag == value::TypeTags::valueBlock) {
+        auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetView.value);
         auto bitset = bitsetBlock->extract();
         bitsetVals = bitset.vals();
         bitsetTags = bitset.tags();
@@ -1741,13 +1729,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithm
     tassert(8332302,
             "At least one of the second and third arguments of block arithmetic operation must be "
             "block of values",
-            lTag == value::TypeTags::valueBlock || rTag == value::TypeTags::valueBlock);
+            l.tag == value::TypeTags::valueBlock || r.tag == value::TypeTags::valueBlock);
 
-    if (lTag == value::TypeTags::valueBlock && rTag == value::TypeTags::valueBlock) {
+    if (l.tag == value::TypeTags::valueBlock && r.tag == value::TypeTags::valueBlock) {
         // Block - Block
 
-        auto* leftInputBlock = value::bitcastTo<value::ValueBlock*>(lVal);
-        auto* rightInputBlock = value::bitcastTo<value::ValueBlock*>(rVal);
+        auto* leftInputBlock = value::bitcastTo<value::ValueBlock*>(l.value);
+        auto* rightInputBlock = value::bitcastTo<value::ValueBlock*>(r.value);
 
         auto leftMonoBlock = leftInputBlock->as<value::MonoBlock>();
         auto rightMonoBlock = rightInputBlock->as<value::MonoBlock>();
@@ -1809,9 +1797,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithm
                 {rightMonoBlock->getTag(), rightMonoBlock->getValue()},
                 valsNum);
         }
-    } else if (lTag != value::TypeTags::valueBlock && rTag == value::TypeTags::valueBlock) {
+    } else if (l.tag != value::TypeTags::valueBlock && r.tag == value::TypeTags::valueBlock) {
         // scalar - block
-        auto* rightInputBlock = value::bitcastTo<value::ValueBlock*>(rVal);
+        auto* rightInputBlock = value::bitcastTo<value::ValueBlock*>(r.value);
         auto rightMonoBlock = rightInputBlock->as<value::MonoBlock>();
         auto rightValsNum = rightInputBlock->count();
         if (valsNum == 0) {
@@ -1826,19 +1814,18 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithm
 
         if (bitsetVals) {
             return builtinScalarBlockArithmeticOperation<op>(
-                bitsetTags, bitsetVals, {lTag, lVal}, rightInputBlock, valsNum);
+                bitsetTags, bitsetVals, l, rightInputBlock, valsNum);
         } else if (rightMonoBlock) {
             return builtinScalarScalarArithmeticOperation<op>(
-                {lTag, lVal}, {rightMonoBlock->getTag(), rightMonoBlock->getValue()}, valsNum);
+                l, {rightMonoBlock->getTag(), rightMonoBlock->getValue()}, valsNum);
 
         } else {
-            return builtinScalarBlockArithmeticOperation<op>(
-                {lTag, lVal}, rightInputBlock, valsNum);
+            return builtinScalarBlockArithmeticOperation<op>(l, rightInputBlock, valsNum);
         }
 
-    } else if (lTag == value::TypeTags::valueBlock && rTag != value::TypeTags::valueBlock) {
+    } else if (l.tag == value::TypeTags::valueBlock && r.tag != value::TypeTags::valueBlock) {
         // block - scalar
-        auto* leftInputBlock = value::bitcastTo<value::ValueBlock*>(lVal);
+        auto* leftInputBlock = value::bitcastTo<value::ValueBlock*>(l.value);
         auto leftMonoBlock = leftInputBlock->as<value::MonoBlock>();
         auto leftValsNum = leftInputBlock->count();
         if (valsNum == 0) {
@@ -1853,12 +1840,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithm
 
         if (bitsetVals) {
             return builtinBlockScalarArithmeticOperation<op>(
-                bitsetTags, bitsetVals, leftInputBlock, {rTag, rVal}, valsNum);
+                bitsetTags, bitsetVals, leftInputBlock, r, valsNum);
         } else if (leftMonoBlock) {
             return builtinScalarScalarArithmeticOperation<op>(
-                {leftMonoBlock->getTag(), leftMonoBlock->getValue()}, {rTag, rVal}, valsNum);
+                {leftMonoBlock->getTag(), leftMonoBlock->getValue()}, r, valsNum);
         } else {
-            return builtinBlockScalarArithmeticOperation<op>(leftInputBlock, {rTag, rVal}, valsNum);
+            return builtinBlockScalarArithmeticOperation<op>(leftInputBlock, r, valsNum);
         }
 
     } else {
@@ -1866,59 +1853,58 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockArithm
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAdd(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockAdd(ArityType arity) {
     return builtinValueBlockArithmeticOperation<static_cast<int>(ArithmeticOp::Addition)>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockSub(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockSub(ArityType arity) {
     return builtinValueBlockArithmeticOperation<static_cast<int>(ArithmeticOp::Subtraction)>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockMult(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockMult(ArityType arity) {
     return builtinValueBlockArithmeticOperation<static_cast<int>(ArithmeticOp::Multiplication)>(
         arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDiv(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockDiv(ArityType arity) {
     return builtinValueBlockArithmeticOperation<static_cast<int>(ArithmeticOp::Division)>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockRoundTrunc(
-    std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity) {
+value::TagValueMaybeOwned ByteCode::blockRoundTrunc(std::string_view funcName,
+                                                    Decimal128::RoundingMode roundingMode,
+                                                    ArityType arity) {
     tassert(11079912, "Unexpected arity value", arity == 1 || arity == 2);
-    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+    auto input = viewFromStack(0);
     tassert(8333100,
-            "First argument of " + funcName + " must be block of values.",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            str::stream() << "First argument of " << funcName << " must be block of values.",
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
     int32_t place = 0;
     if (arity == 2) {
-        const auto [placeOwn, placeTag, placeVal] = getFromStack(1);
-        if (!value::isNumber(placeTag)) {
-            return {false, value::TypeTags::Nothing, 0};
+        const auto placeView = viewFromStack(1);
+        if (!value::isNumber(placeView.tag)) {
+            return value::TagValueMaybeOwned::nothing();
         }
-        place = convertNumericToInt32(placeTag, placeVal);
+        place = convertNumericToInt32(placeView);
     }
 
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
-        [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
-            auto [_, resTag, resVal] =
-                genericRoundTrunc(funcName, roundingMode, place, tag, val).releaseToRaw();
-            return {resTag, resVal};
+        [&](value::TypeTags tag, value::Value val) -> value::TagValueOwned {
+            return genericRoundTrunc(funcName, roundingMode, place, tag, val).moveToOwned();
         });
 
     auto res = valueBlockIn->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueMaybeOwned(
+        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockTrunc(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockTrunc(ArityType arity) {
     return blockRoundTrunc("$trunc", Decimal128::kRoundTowardZero, arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockRound(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockRound(ArityType arity) {
     return blockRoundTrunc("$round", Decimal128::kRoundTiesToEven, arity);
 }
 
@@ -1937,9 +1923,9 @@ void compareNativeCppType(size_t count,
 }
 
 template <class Cmp, ColumnOpType::Flags AddFlags = ColumnOpType::kNoFlags>
-FastTuple<bool, value::TypeTags, value::Value> blockCompareGeneric(value::ValueBlock* blockView,
-                                                                   value::TypeTags rhsTag,
-                                                                   value::Value rhsVal) {
+value::TagValueOwned blockCompareGeneric(value::ValueBlock* blockView,
+                                         value::TypeTags rhsTag,
+                                         value::Value rhsVal) {
     const auto cmpOp = value::makeColumnOp<AddFlags>(
         [&](value::TypeTags tag, value::Value val) {
             return value::genericCompare<Cmp>(tag, val, rhsTag, rhsVal);
@@ -2009,50 +1995,44 @@ FastTuple<bool, value::TypeTags, value::Value> blockCompareGeneric(value::ValueB
 
     auto res = blockView->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 }  // namespace
 
 template <class Cmp, ColumnOpType::Flags AddFlags>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCmpScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockCmpScalar(ArityType arity) {
     tassert(11079911, "Unexpected arity value", arity == 2);
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto block = viewFromStack(0);
     tassert(8625709,
             "Expected argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
-    auto [valueOwned, valueTag, valueVal] = getFromStack(1);
+            block.tag == value::TypeTags::valueBlock);
+    auto scalar = viewFromStack(1);
 
-    auto blockView = value::getValueBlock(blockVal);
+    auto blockView = value::getValueBlock(block.value);
 
-    return blockCompareGeneric<Cmp, AddFlags>(blockView, valueTag, valueVal);
+    return blockCompareGeneric<Cmp, AddFlags>(blockView, scalar.tag, scalar.value);
 }
 
 /*
  * Comparison against scalar functions.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGtScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockGtScalar(ArityType arity) {
     return builtinValueBlockCmpScalar<std::greater<>, ColumnOpType::kMonotonic>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGteScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockGteScalar(ArityType arity) {
     return builtinValueBlockCmpScalar<std::greater_equal<>, ColumnOpType::kMonotonic>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockEqScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockEqScalar(ArityType arity) {
     // This is not monotonic, because the min and max not being equal to the target value does not
     // imply that no values in the block will be equal to the target value.
     return builtinValueBlockCmpScalar<std::equal_to<>>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNeqScalar(
-    ArityType arity) {
-    auto [blockOwned, blockTag, blockVal] = builtinValueBlockCmpScalar<std::equal_to<>>(arity);
-    value::ValueGuard guard(blockTag, blockVal);
+value::TagValueOwned ByteCode::builtinValueBlockNeqScalar(ArityType arity) {
+    auto equalResult = builtinValueBlockCmpScalar<std::equal_to<>>(arity);
 
     // For neq we apply equal_to and then use genericNot() to negate it, just like the scalar
     // variation in the VM.
@@ -2061,43 +2041,40 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNeqSca
 
     tassert(8625710,
             "Expected argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
+            equalResult.tag() == value::TypeTags::valueBlock);
 
-    auto res = value::getValueBlock(blockVal)->map(notOp);
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    auto res = value::getValueBlock(equalResult.value())->map(notOp);
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLtScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockLtScalar(ArityType arity) {
     return builtinValueBlockCmpScalar<std::less<>, ColumnOpType::kMonotonic>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLteScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockLteScalar(ArityType arity) {
     return builtinValueBlockCmpScalar<std::less_equal<>, ColumnOpType::kMonotonic>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCmp3wScalar(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockCmp3wScalar(ArityType arity) {
     tassert(11079910, "Unexpected arity value", arity == 2);
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto block = viewFromStack(0);
     tassert(8625711,
             "Expected argument to be of valueBlock type",
-            blockTag == value::TypeTags::valueBlock);
-    auto value = getFromStack(1);
+            block.tag == value::TypeTags::valueBlock);
+    auto value = viewFromStack(1);
 
-    auto blockView = value::getValueBlock(blockVal);
+    auto blockView = value::getValueBlock(block.value);
 
     const auto cmpOp =
         value::makeColumnOp<ColumnOpType::kMonotonic>([&](value::TypeTags tag, value::Value val) {
-            return value::compare3way(tag, val, value.b, value.c);
+            return value::compare3way(tag, val, value.tag, value.value);
         });
 
     auto res = blockView->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
 /*
@@ -2105,14 +2082,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCmp3wS
  * argument when the matching entry in the mask is True, and the values from the second argument
  * when the matching entry in the mask is False.
  */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCombine(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockCombine(ArityType arity) {
     tassert(11079909, "Unexpected arity value", arity == 3);
 
-    auto [bitmapOwned, bitmapTag, bitmapVal] = getFromStack(2);
+    auto bitmapView = viewFromStack(2);
     tassert(8141609,
             "valueBlockCombine expects a block of boolean values as mask",
-            bitmapTag == value::TypeTags::valueBlock);
-    auto* bitmap = value::getValueBlock(bitmapVal);
+            bitmapView.tag == value::TypeTags::valueBlock);
+    auto* bitmap = value::getValueBlock(bitmapView.value);
     auto bitmapExtracted = bitmap->extract();
 
     if (allBools(bitmapExtracted.tags(), bitmapExtracted.count())) {
@@ -2120,8 +2097,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCombin
         for (size_t i = 0; i < bitmapExtracted.count(); i++) {
             numTrue += value::bitcastTo<bool>(bitmapExtracted.vals()[i]);
         }
-        auto promoteArgAsResult =
-            [&](size_t stackPos) -> FastTuple<bool, value::TypeTags, value::Value> {
+        auto promoteArgAsResult = [&](size_t stackPos) -> value::TagValueMaybeOwned {
             auto [owned, tag, val] = moveFromStack(stackPos);
             tassert(8141611,
                     "valueBlockCombine expects a block as argument",
@@ -2130,7 +2106,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCombin
             tassert(8141612,
                     "valueBlockCombine expects the arguments to have the same size",
                     rhsBlock->count() == bitmapExtracted.count());
-            return {owned, tag, val};
+            return value::TagValueMaybeOwned(owned, tag, val);
         };
         if (numTrue == 0) {
             return promoteArgAsResult(1);
@@ -2139,16 +2115,16 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCombin
         }
     }
 
-    auto [lhsOwned, lhsTag, lhsVal] = getFromStack(0);
+    auto lhs = viewFromStack(0);
     tassert(8141615,
             "valueBlockCombine expects a block as first argument",
-            lhsTag == value::TypeTags::valueBlock);
-    auto [rhsOwned, rhsTag, rhsVal] = getFromStack(1);
+            lhs.tag == value::TypeTags::valueBlock);
+    auto rhs = viewFromStack(1);
     tassert(8141616,
             "valueBlockCombine expects a block as second argument",
-            rhsTag == value::TypeTags::valueBlock);
-    auto* lhsBlock = value::getValueBlock(lhsVal);
-    auto* rhsBlock = value::getValueBlock(rhsVal);
+            rhs.tag == value::TypeTags::valueBlock);
+    auto* lhsBlock = value::getValueBlock(lhs.value);
+    auto* rhsBlock = value::getValueBlock(rhs.value);
 
     auto lhsExtracted = lhsBlock->extract();
     auto rhsExtracted = rhsBlock->extract();
@@ -2173,9 +2149,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCombin
 
     auto blockOut = buildBlockFromStorage(std::move(tagOut), std::move(valueOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(blockOut.release())};
+    return value::TagValueMaybeOwned(true,
+                                     value::TypeTags::valueBlock,
+                                     value::bitcastFrom<value::ValueBlock*>(blockOut.release()));
 }
 
 static const auto invokeLambdaOp =
@@ -2190,15 +2166,15 @@ static const auto invokeLambdaOp =
 void ByteCode::valueBlockApplyLambda(const CodeFragment* code) {
     auto [lamOwn, lamTag, lamVal] = moveFromStack(0);
     popAndReleaseStack();
-    value::ValueGuard lamGuard(lamOwn, lamTag, lamVal);
+    value::TagValueMaybeOwned lam{lamOwn, lamTag, lamVal};
 
     auto [blockOwn, blockTag, blockVal] = moveFromStack(0);
     popAndReleaseStack();
-    value::ValueGuard blockGuard(blockOwn, blockTag, blockVal);
+    value::TagValueMaybeOwned ownedBlock{blockOwn, blockTag, blockVal};
 
     auto [maskOwn, maskTag, maskVal] = moveFromStack(0);
     popAndReleaseStack();
-    value::ValueGuard maskGuard(maskOwn, maskTag, maskVal);
+    value::TagValueMaybeOwned ownedMask{maskOwn, maskTag, maskVal};
 
     if (lamTag != value::TypeTags::LocalOneArgLambda) {
         pushStack(false, value::TypeTags::Nothing, 0);
@@ -2249,22 +2225,21 @@ void ByteCode::valueBlockApplyLambda(const CodeFragment* code) {
 enum class LogicalOp { AND, OR };
 
 template <int op>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogicalOperation(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockLogicalOperation(ArityType arity) {
     static_assert(op >= 0 && op <= 1, "op should be either 0 or 1");
 
     tassert(11079908, "Unexpected arity value", arity == 2);
-    auto [leftOwned, leftInputTag, leftInputVal] = getFromStack(0);
+    auto leftInput = viewFromStack(0);
     tassert(8625714,
             "Expected 'left' argument to be of valueBlock type",
-            leftInputTag == value::TypeTags::valueBlock);
-    auto* leftValueBlock = value::bitcastTo<value::ValueBlock*>(leftInputVal);
+            leftInput.tag == value::TypeTags::valueBlock);
+    auto* leftValueBlock = value::bitcastTo<value::ValueBlock*>(leftInput.value);
 
-    auto [rightOwned, rightInputTag, rightInputVal] = getFromStack(1);
+    auto rightInput = viewFromStack(1);
     tassert(8625715,
             "Expected 'right' argument to be of valueBlock type",
-            rightInputTag == value::TypeTags::valueBlock);
-    auto* rightValueBlock = value::bitcastTo<value::ValueBlock*>(rightInputVal);
+            rightInput.tag == value::TypeTags::valueBlock);
+    auto* rightValueBlock = value::bitcastTo<value::ValueBlock*>(rightInput.value);
 
     auto leftBlockSize = leftValueBlock->count();
     auto rightBlockSize = rightValueBlock->count();
@@ -2285,15 +2260,16 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
         if (leftMonoBlock->getTag() == value::TypeTags::Nothing) {
             auto nothingBlock =
                 std::make_unique<value::MonoBlock>(leftBlockSize, value::TypeTags::Nothing, 0);
-            return {true,
-                    value::TypeTags::valueBlock,
-                    value::bitcastFrom<value::ValueBlock*>(nothingBlock.release())};
+            return value::TagValueMaybeOwned(
+                true,
+                value::TypeTags::valueBlock,
+                value::bitcastFrom<value::ValueBlock*>(nothingBlock.release()));
         }
 
         if (outputLeft(leftMonoBlock->getTag(), leftMonoBlock->getValue())) {
-            return moveFromStack(0);
+            return moveMaybeOwnedFromStack(0);
         } else {
-            return moveFromStack(1);
+            return moveMaybeOwnedFromStack(1);
         }
     }
 
@@ -2316,116 +2292,112 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
 
     auto blockOut = buildBlockFromStorage(std::move(tagsOut), std::move(valuesOut));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(blockOut.release())};
+    return value::TagValueMaybeOwned(true,
+                                     value::TypeTags::valueBlock,
+                                     value::bitcastFrom<value::ValueBlock*>(blockOut.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogicalAnd(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockLogicalAnd(ArityType arity) {
     return builtinValueBlockLogicalOperation<static_cast<int>(LogicalOp::AND)>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogicalOr(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockLogicalOr(ArityType arity) {
     return builtinValueBlockLogicalOperation<static_cast<int>(LogicalOp::OR)>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNewFill(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockNewFill(ArityType arity) {
     tassert(11079907, "Unexpected arity value", arity == 2);
 
     auto right = viewFromStack(1);
-    auto [countOwned, countTag, countVal] =
-        value::genericNumConvert(right.tag, right.value, value::TypeTags::NumberInt32)
-            .releaseToRaw();
+    auto count = value::genericNumConvert(right.tag, right.value, value::TypeTags::NumberInt32);
     tassert(8141602,
             "valueBlockNewFill expects an integer in the size argument",
-            countTag == value::TypeTags::NumberInt32);
+            count.tag() == value::TypeTags::NumberInt32);
 
     // Take ownership of the value, we are transferring it to the block.
-    auto [leftTag, leftVal] = moveOwnedFromStack(0);
-    auto blockOut =
-        std::make_unique<value::MonoBlock>(value::bitcastTo<int32_t>(countVal), leftTag, leftVal);
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(blockOut.release())};
+    auto blockOut = std::make_unique<value::MonoBlock>(value::bitcastTo<int32_t>(count.value()),
+                                                       moveOwnedFromStack(0));
+    return value::TagValueOwned::fromRaw(
+        value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(blockOut.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockSize(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockSize(ArityType arity) {
     tassert(11079906, "Unexpected arity value", arity == 1);
 
-    auto [_, blockTag, blockVal] = getFromStack(0);
+    auto blockView = viewFromStack(0);
     tassert(8141603,
             "valueBlockSize expects a block as argument",
-            blockTag == value::TypeTags::valueBlock);
-    auto* block = value::getValueBlock(blockVal);
+            blockView.tag == value::TypeTags::valueBlock);
+    auto* block = value::getValueBlock(blockView.value);
     auto count = block->count();
     tassert(8141604, "block exceeds maximum length", std::in_range<int32_t>(count));
 
-    return {false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(count)};
+    return value::TagValueMaybeOwned(
+        false, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(count));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNone(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockNone(ArityType arity) {
     tassert(11079905, "Unexpected arity value", arity == 2);
 
-    auto [blockOwned, blockTag, blockVal] = getFromStack(0);
+    auto blockView = viewFromStack(0);
     tassert(8141605,
             "valueBlockNone expects a block as first argument",
-            blockTag == value::TypeTags::valueBlock);
-    auto [searchOwned, searchTag, searchVal] = getFromStack(1);
+            blockView.tag == value::TypeTags::valueBlock);
+    auto search = viewFromStack(1);
 
-    auto* block = value::getValueBlock(blockVal);
+    auto* block = value::getValueBlock(blockView.value);
     auto extracted = block->extract();
 
     for (size_t i = 0; i < extracted.count(); i++) {
         auto [cmpTag, cmpVal] = sbe::value::compareValue(
-            extracted.tags()[i], extracted.vals()[i], searchTag, searchVal);
+            extracted.tags()[i], extracted.vals()[i], search.tag, search.value);
         if (cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0) {
-            return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
+            return value::TagValueMaybeOwned(
+                false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
         }
     }
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true)};
+    return value::TagValueMaybeOwned(
+        false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogicalNot(
-    ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockLogicalNot(ArityType arity) {
     tassert(11079904, "Unexpected arity value", arity == 1);
 
-    auto [bitmapOwned, bitmapTag, bitmapVal] = getFromStack(0);
+    auto bitmap = viewFromStack(0);
     tassert(8141607,
             "valueBlockLogicalNot expects a block of boolean values as argument",
-            bitmapTag == value::TypeTags::valueBlock);
+            bitmap.tag == value::TypeTags::valueBlock);
 
-    auto bitmapView = value::getValueBlock(bitmapVal);
+    auto bitmapView = value::getValueBlock(bitmap.value);
 
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) { return genericNot(tag, val); });
 
     auto res = bitmapView->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellFoldValues_F(ArityType arity) {
-    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinCellFoldValues_F(ArityType arity) {
+    auto valBlock = viewFromStack(0);
     tassert(8625718,
             "Expected argument to be of valueBlock type",
-            valBlockTag == value::TypeTags::valueBlock);
-    auto* valueBlock = value::bitcastTo<value::ValueBlock*>(valBlockVal);
+            valBlock.tag == value::TypeTags::valueBlock);
+    auto* valueBlock = value::bitcastTo<value::ValueBlock*>(valBlock.value);
 
-    auto [cellOwned, cellTag, cellVal] = getFromStack(1);
+    auto cell = viewFromStack(1);
     tassert(8625719,
             "Expected argument to be of cellBlock type",
-            cellTag == value::TypeTags::cellBlock);
-    auto* cellBlock = value::bitcastTo<value::CellBlock*>(cellVal);
+            cell.tag == value::TypeTags::cellBlock);
+    auto* cellBlock = value::bitcastTo<value::CellBlock*>(cell.value);
 
     const auto& positionInfo = cellBlock->filterPositionInfo();
     const bool isEmptyPositionInfo = emptyPositionInfo(positionInfo);
 
     if (isEmptyPositionInfo && valueBlock->allTrue().has_value()) {
         // The block is made of all boolean values, return the input unchanged.
-        return moveFromStack(0);
+        return moveMaybeOwnedFromStack(0);
     }
 
     auto valsExtracted = valueBlock->extract();
@@ -2482,70 +2454,66 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellFoldValues_F
 
     auto blockOut = std::make_unique<value::BoolBlock>(std::move(folded));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(blockOut.release())};
+    return value::TagValueMaybeOwned(true,
+                                     value::TypeTags::valueBlock,
+                                     value::bitcastFrom<value::ValueBlock*>(blockOut.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellFoldValues_P(ArityType arity) {
-    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(0);
+value::TagValueMaybeOwned ByteCode::builtinCellFoldValues_P(ArityType arity) {
+    auto valBlock = viewFromStack(0);
     tassert(8625720,
             "Expected argument to be of valueBlock type",
-            valBlockTag == value::TypeTags::valueBlock);
+            valBlock.tag == value::TypeTags::valueBlock);
 
-    auto [cellOwned, cellTag, cellVal] = getFromStack(1);
+    auto cell = viewFromStack(1);
     tassert(8625721,
             "Expected argument to be of cellBlock type",
-            cellTag == value::TypeTags::cellBlock);
-    auto* cellBlock = value::bitcastTo<value::CellBlock*>(cellVal);
+            cell.tag == value::TypeTags::cellBlock);
+    auto* cellBlock = value::bitcastTo<value::CellBlock*>(cell.value);
 
     const auto& positionInfo = cellBlock->filterPositionInfo();
     uassert(7953901, "Only top-level cell values are supported", emptyPositionInfo(positionInfo));
     // Return the input unchanged.
-    return moveFromStack(0);
+    return moveMaybeOwnedFromStack(0);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellBlockGetFlatValuesBlock(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinCellBlockGetFlatValuesBlock(ArityType arity) {
     tassert(11079903, "Unexpected arity value", arity == 1);
     auto [cellOwn, cellTag, cellVal] = getFromStack(0);
 
     if (cellTag != value::TypeTags::cellBlock) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
     tassert(7946600, "Cannot process temporary cell values", !cellOwn);
 
     auto* cell = value::getCellBlock(cellVal);
 
-    return {false,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(&cell->getValueBlock())};
+    return value::TagValueMaybeOwned(
+        false,
+        value::TypeTags::valueBlock,
+        value::bitcastFrom<value::ValueBlock*>(&cell->getValueBlock()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMember(
-    ArityType arity) {
-    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(0);
-    auto [arrOwned, arrTag_, arrVal_] = getFromStack(1);
+value::TagValueOwned ByteCode::builtinValueBlockIsMember(ArityType arity) {
+    auto valBlock = viewFromStack(0);
+    auto arr = viewFromStack(1);
 
     tassert(8625722,
             "Expected argument to be of valueBlock type",
-            valBlockTag == value::TypeTags::valueBlock);
-    auto valueBlockView = value::getValueBlock(valBlockVal);
+            valBlock.tag == value::TypeTags::valueBlock);
+    auto valueBlockView = value::getValueBlock(valBlock.value);
 
-    if (!value::isArray(arrTag_) && arrTag_ != value::TypeTags::inList) {
+    if (!value::isArray(arr.tag) && arr.tag != value::TypeTags::inList) {
         auto blockOut = std::make_unique<value::MonoBlock>(
             valueBlockView->count(), value::TypeTags::Nothing, 0);
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(blockOut.release())};
+        return value::TagValueOwned::fromRaw(
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(blockOut.release()));
     }
 
-    auto arrTag = arrTag_;
-    auto arrVal = arrVal_;
-
     auto res = [&]() {
-        if (arrTag == value::TypeTags::inList) {
-            auto inList = value::getInListView(arrVal);
+        if (arr.tag == value::TypeTags::inList) {
+            auto inList = value::getInListView(arr.value);
 
             return valueBlockView->map(value::makeColumnOp<ColumnOpType::kNoFlags>(
                 [&](value::TypeTags tag, value::Value val) {
@@ -2553,8 +2521,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMemb
                                      value::bitcastFrom<bool>(tag != value::TypeTags::Nothing &&
                                                               inList->contains(tag, val))};
                 }));
-        } else if (arrTag == value::TypeTags::ArraySet) {
-            auto arrSet = value::getArraySetView(arrVal);
+        } else if (arr.tag == value::TypeTags::ArraySet) {
+            auto arrSet = value::getArraySetView(arr.value);
             auto& values = arrSet->values();
 
             return valueBlockView->map(value::makeColumnOp<ColumnOpType::kNoFlags>(
@@ -2565,9 +2533,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMemb
                 }));
         } else {
             value::ValueSetType values(0, value::ValueHash(nullptr), value::ValueEq(nullptr));
-            value::arrayForEach(arrTag, arrVal, [&](value::TypeTags elemTag, value::Value elemVal) {
-                values.insert({elemTag, elemVal});
-            });
+            value::arrayForEach(
+                arr.tag, arr.value, [&](value::TypeTags elemTag, value::Value elemVal) {
+                    values.insert({elemTag, elemVal});
+                });
 
             return valueBlockView->map(value::makeColumnOp<ColumnOpType::kNoFlags>(
                 [&](value::TypeTags tag, value::Value val) {
@@ -2578,57 +2547,57 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockIsMemb
         }
     }();
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockCoerceToBool(
-    ArityType arity) {
-    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(0);
+value::TagValueOwned ByteCode::builtinValueBlockCoerceToBool(ArityType arity) {
+    auto valBlock = viewFromStack(0);
 
     tassert(8625723,
             "Expected argument to be of valueBlock type",
-            valBlockTag == value::TypeTags::valueBlock);
-    auto valueBlockView = value::getValueBlock(valBlockVal);
+            valBlock.tag == value::TypeTags::valueBlock);
+    auto valueBlockView = value::getValueBlock(valBlock.value);
 
     auto res = valueBlockView->map(value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) { return value::coerceToBool(tag, val); }));
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockMod(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockMod(ArityType arity) {
     tassert(11079902, "Unexpected arity value", arity == 2);
-    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+    auto input = viewFromStack(0);
 
     tassert(8332900,
             "First argument of $mod must be block of values.",
-            inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+            input.tag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(input.value);
 
-    auto mod = getFromStack(1);
-    if (!value::isNumber(mod.b)) {
+    auto mod = viewFromStack(1);
+    if (!value::isNumber(mod.tag)) {
         auto nothingBlock =
             std::make_unique<value::MonoBlock>(valueBlockIn->count(), value::TypeTags::Nothing, 0);
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(nothingBlock.release())};
+        return value::TagValueOwned::fromRaw(
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(nothingBlock.release()));
     }
 
     const auto cmpOp = value::makeColumnOp<ColumnOpType::kNoFlags>(
         [&](value::TypeTags tag, value::Value val) -> std::pair<value::TypeTags, value::Value> {
-            auto [resTag, resVal] = genericMod(tag, val, mod.b, mod.c).releaseToOwnedRaw();
+            auto [resTag, resVal] =
+                genericMod(value::TagValueView{tag, val}, mod).releaseToOwnedRaw();
             return {resTag, resVal};
         });
 
     auto res = valueBlockIn->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockConvert(ArityType arity) {
+value::TagValueOwned ByteCode::builtinValueBlockConvert(ArityType arity) {
     tassert(11079901, "Unexpected arity value", arity == 2);
     auto input = viewFromStack(0);
 
@@ -2651,55 +2620,55 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockConver
 
     auto res = valueBlockIn->map(cmpOp);
 
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
+    return value::TagValueOwned::fromRaw(value::TypeTags::valueBlock,
+                                         value::bitcastFrom<value::ValueBlock*>(res.release()));
 }
 
 template <bool IsAscending>
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKey(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockGetSortKey(ArityType arity) {
     tassert(11079900, "Unexpected arity value", arity == 1 || arity == 2);
 
     CollatorInterface* collator = nullptr;
     if (arity == 2) {
-        auto [_, collTag, collVal] = getFromStack(1);
-        if (collTag == value::TypeTags::collator) {
-            collator = value::getCollatorView(collVal);
+        auto coll = viewFromStack(1);
+        if (coll.tag == value::TypeTags::collator) {
+            collator = value::getCollatorView(coll.value);
         }
     }
 
-    auto [_, blockTag, blockVal] = getFromStack(0);
-    tassert(8448716, "Expected argument to be valueBlock", blockTag == value::TypeTags::valueBlock);
+    auto blockView = viewFromStack(0);
+    tassert(8448716,
+            "Expected argument to be valueBlock",
+            blockView.tag == value::TypeTags::valueBlock);
 
-    auto block = value::getValueBlock(blockVal);
+    auto block = value::getValueBlock(blockView.value);
 
     if (!block->tryHasArray().get_value_or(true)) {
         // Fast path for non-array case. We just fill any empty values with null.
         std::unique_ptr<value::ValueBlock> filledBlock = block->fillEmpty(value::TypeTags::Null, 0);
         if (!filledBlock) {
             // The block was already dense.
-            return moveFromStack(0);
+            return moveMaybeOwnedFromStack(0);
         }
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(filledBlock.release())};
+        return value::TagValueMaybeOwned(
+            true,
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(filledBlock.release()));
     }
 
     auto outBlock = IsAscending ? block->map(getSortKeyAscOp.bindParams(collator))
                                 : block->map(getSortKeyDescOp.bindParams(collator));
 
-    return {true,
-            value::TypeTags::valueBlock,
-            value::bitcastFrom<value::ValueBlock*>(outBlock.release())};
+    return value::TagValueMaybeOwned(true,
+                                     value::TypeTags::valueBlock,
+                                     value::bitcastFrom<value::ValueBlock*>(outBlock.release()));
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKeyAsc(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockGetSortKeyAsc(ArityType arity) {
     return builtinValueBlockGetSortKey<true /*IsAscending*/>(arity);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKeyDesc(
-    ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinValueBlockGetSortKeyDesc(ArityType arity) {
     return builtinValueBlockGetSortKey<false /*IsAscending*/>(arity);
 }
 }  // namespace mongo::sbe::vm

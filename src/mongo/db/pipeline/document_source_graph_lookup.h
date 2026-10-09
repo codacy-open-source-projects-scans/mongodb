@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -44,6 +17,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/lite_parsed_graph_lookup.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
@@ -59,6 +33,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -66,6 +41,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 struct GraphLookUpParams {
     NamespaceString from;
@@ -76,16 +52,19 @@ struct GraphLookUpParams {
     boost::optional<BSONObj> additionalFilter;
     boost::optional<FieldPath> depthField;
     boost::optional<long long> maxDepth;
+    boost::optional<OwnedLiteParsedPipeline>
+        fromLpp;  // Always set after construction: the resolved view definition(s) for 'from', or
+                  // an empty pipeline for a regular collection.
 };
 
 class DocumentSourceGraphLookUp final : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$graphLookup"_sd;
+    static constexpr std::string_view kStageName = "$graphLookup"sv;
 
     DocumentSourceGraphLookUp(const DocumentSourceGraphLookUp&,
                               const boost::intrusive_ptr<ExpressionContext>&);
 
-    const char* getSourceName() const final;
+    std::string_view getSourceName() const final;
 
     static const Id& id;
 
@@ -138,7 +117,8 @@ public:
     };
 
     void serializeToArray(std::vector<Value>& array,
-                          const SerializationOptions& opts = SerializationOptions{}) const final;
+                          const query_shape::SerializationOptions& opts =
+                              query_shape::SerializationOptions{}) const final;
 
     /**
      * Returns the 'as' path, and possibly the fields modified by an absorbed $unwind.
@@ -228,7 +208,8 @@ private:
         GraphLookUpParams params,
         boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> unwindSrc);
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final {
         // Should not be called; use serializeToArray instead.
         MONGO_UNREACHABLE_TASSERT(7484306);
     }
@@ -238,22 +219,21 @@ private:
      */
     bool foreignShardedGraphLookupAllowed() const;
 
+    std::pair<Value, Value> serializeFromAndInternalFromPipeline(
+        const query_shape::SerializationOptions& opts) const;
+
     GraphLookUpParams _params;
 
     // The ExpressionContext used when performing aggregation pipelines against the '_from'
     // namespace.
     boost::intrusive_ptr<ExpressionContext> _fromExpCtx;
 
-    // TODO: SERVER-105521 Check if '_fromPipeline' can be moved instead of copied.
-    // The aggregation pipeline to perform against the '_from' namespace.
-    std::vector<BSONObj> _fromPipeline;
-
     // Keep track of a $unwind that was absorbed into this stage.
     boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> _unwind;
 
     // Holds variables defined both in this stage and in parent pipelines. These are copied to the
     // '_fromExpCtx' ExpressionContext's 'variables' and 'variablesParseState' for use in the
-    // '_fromPipeline' execution.
+    // '_params.fromLpp' execution.
     Variables _variables;
     VariablesParseState _variablesParseState;
 };

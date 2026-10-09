@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/graph_lookup_stage.h"
 
@@ -35,17 +9,25 @@
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/lite_parsed_desugarer.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/pipeline/resolved_namespace.h"  // IWYU pragma: keep
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/views/resolved_view.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
+#include "mongo/util/fail_point.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
+namespace mongo::exec::agg {
+MONGO_FAIL_POINT_DEFINE(graphLookupStageKickbackFailpoint);
+}  // namespace mongo::exec::agg
 
 namespace mongo {
 
@@ -61,7 +43,6 @@ boost::intrusive_ptr<exec::agg::Stage> documentSourceGraphLookUpToStageFn(
                                                        graphLookupDS->getExpCtx(),
                                                        graphLookupDS->_params,
                                                        graphLookupDS->_fromExpCtx,
-                                                       graphLookupDS->_fromPipeline,
                                                        graphLookupDS->_unwind,
                                                        graphLookupDS->_variables,
                                                        graphLookupDS->_variablesParseState);
@@ -74,18 +55,16 @@ REGISTER_AGG_STAGE_MAPPING(graphLookup,
                            documentSourceGraphLookUpToStageFn);
 
 GraphLookUpStage::GraphLookUpStage(
-    StringData stageName,
+    std::string_view stageName,
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
     GraphLookUpParams params,
     boost::intrusive_ptr<ExpressionContext> fromExpCtx,
-    std::vector<BSONObj> fromPipeline,
     boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> unwind,
     Variables variables,
     VariablesParseState variablesParseState)
     : Stage(stageName, pExpCtx),
       _params(std::move(params)),
       _fromExpCtx(std::move(fromExpCtx)),
-      _fromPipeline(std::move(fromPipeline)),
       _unwind(std::move(unwind)),
       _variables(std::move(variables)),
       _variablesParseState(std::move(variablesParseState)),
@@ -93,10 +72,18 @@ GraphLookUpStage::GraphLookUpStage(
           *pExpCtx,
           pExpCtx->getAllowDiskUse(),
           loadMemoryLimit(StageMemoryLimit::DocumentSourceGraphLookupMaxMemoryBytes))),
+      _expressionEvaluationMemoryTracker(
+          OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForStage(*pExpCtx)),
       _queue(pExpCtx.get(), &_memoryUsageTracker),
       _visitedDocuments(pExpCtx.get(), &_memoryUsageTracker, "VisitedDocumentsMap"),
       _visitedFromValues(pExpCtx.get(), &_memoryUsageTracker, "VisitedFromValuesSet"),
-      _cache(pExpCtx->getValueComparator()) {}
+      _cache(pExpCtx->getValueComparator()) {
+    if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled() &&
+        feature_flags::gFeatureFlagExpressionMemoryTracking.isEnabled()) {
+        _expressionEvalCtx.tracker = &_expressionEvaluationMemoryTracker;
+    }
+    _expressionEvalCtx.stageName = _commonStats.stageTypeStr;
+}
 
 GraphLookUpStage::~GraphLookUpStage() {
     const SpillingStats& stats = _stats.spillingStats;
@@ -119,7 +106,7 @@ bool GraphLookUpStage::validateOperationContext(const OperationContext* opCtx) c
         _fromExpCtx->getOperationContext() == opCtx;
 }
 
-Document GraphLookUpStage::getExplainOutput(const SerializationOptions& opts) const {
+Document GraphLookUpStage::getExplainOutput(const query_shape::SerializationOptions& opts) const {
     auto out = MutableDocument(Stage::getExplainOutput(opts));
     out["usedDisk"] = opts.serializeLiteral(_stats.spillingStats.getSpills() > 0);
     out["spills"] = opts.serializeLiteral(static_cast<long long>(_stats.spillingStats.getSpills()));
@@ -132,6 +119,10 @@ Document GraphLookUpStage::getExplainOutput(const SerializationOptions& opts) co
     if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
         out["peakTrackedMemBytes"] =
             opts.serializeLiteral(static_cast<long long>(_stats.maxMemoryUsageBytes));
+        if (_expressionEvalCtx.tracker) {
+            out["expressionEvaluationPeakMemoryBytes"] = opts.serializeLiteral(
+                static_cast<long long>(_expressionEvalCtx.tracker->peakTrackedMemoryBytes()));
+        }
     }
 
     return out.freeze();
@@ -274,7 +265,8 @@ void GraphLookUpStage::performSearch() {
     // Make sure _input is set before calling performSearch().
     invariant(_input);
 
-    Value startingValue = _params.startWith->evaluate(*_input, &pExpCtx->variables);
+    Value startingValue =
+        _params.startWith->evaluate(*_input, &pExpCtx->variables, _expressionEvalCtx);
 
     // If _startWith evaluates to an array, treat each value as a separate starting point.
     _queue.clear();
@@ -369,11 +361,12 @@ void GraphLookUpStage::doBreadthFirstSearch() {
 }
 
 void GraphLookUpStage::checkMemoryUsage() {
-    if (_memoryUsageTracker.withinMemoryLimit()) {
-        _cache.evictDownTo(_memoryUsageTracker.maxAllowedMemoryUsageBytes() -
-                           _memoryUsageTracker.inUseTrackedMemoryBytes());
+    if (_memoryUsageTracker.withinMemoryLimit(getContext()->getOperationContext())) {
+        _cache.evictDownTo(
+            _memoryUsageTracker.maxAllowedMemoryUsageBytes(getContext()->getOperationContext()) -
+            _memoryUsageTracker.inUseTrackedMemoryBytes());
     } else {
-        spill(_memoryUsageTracker.maxAllowedMemoryUsageBytes());
+        spill(_memoryUsageTracker.maxAllowedMemoryUsageBytes(getContext()->getOperationContext()));
     }
 }
 
@@ -569,73 +562,82 @@ void tryOptimizeMatchOnlyPipelineDirectly(mongo::Pipeline* pipe) {
 
 std::unique_ptr<mongo::Pipeline> GraphLookUpStage::makePipeline(BSONObj match,
                                                                 bool allowForeignSharded) {
-    // We've already allocated space for the trailing $match stage in '_fromPipeline'.
-    _fromPipeline.back() = std::move(match);
+    _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
 
     const ShardTargetingPolicy shardTargetingPolicy =
         allowForeignSharded ? ShardTargetingPolicy::kAllowed : ShardTargetingPolicy::kNotAllowed;
-    _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
 
-    // Query settings are looked up after parsing and therefore are not populated in the
-    // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings
-    // to the '_fromExpCtx' by copying them from the parent query ExpressionContext.
-    _fromExpCtx->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
+    // Attempt pipeline construction. On retry due to a sharded view, _params.fromLpp and
+    // _fromExpCtx reflect the resolved definition. A collection may be remapped into a view while
+    // the query is executing, leading to subsequent CommandOnShardedViewNotSupportedOnMongod
+    // throws. Handle this race condition gracefully until we exhaust retries.
+    constexpr int kMaxAttempts = 5;
+    for (int attempt = 1; attempt <= kMaxAttempts; attempt++) {
+        // Combine the view stages from _params.fromLpp (possibly empty for a plain collection)
+        // with the per-iteration $match. _params.fromLpp is already desugared at its storage sites
+        // (the DocumentSourceGraphLookUp constructor, and the sharded-view rebuild in the catch
+        // block below), and the appended $match is not an extension stage, so no desugar is needed
+        // here.
+        auto lpp = (*_params.fromLpp)->clone();
+        lpp.appendStage(LiteParsedDocumentSource::parse(_fromExpCtx->getNamespaceString(), match));
 
-    auto pipeline = mongo::pipeline_factory::makePipeline(
-        _fromPipeline, _fromExpCtx, pipeline_factory::kDesugarOnly);
-    try {
-        return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
-            _fromExpCtx,
-            std::move(pipeline),
-            true /* attachCursorAfterOptimizing */,
-            tryOptimizeMatchOnlyPipelineDirectly,
-            shardTargetingPolicy);
-    } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
-        // This exception returns the information we need to resolve a sharded view. Update
-        // the pipeline with the resolved view definition, but don't optimize or attach the
-        // cursor source yet.
-        auto opts = pipeline_factory::kDesugarOnly;
-        const std::vector<BSONObj>& resolvedPipe =
-            (e->isTimeseries() && isRawDataOperation(pExpCtx->getOperationContext()))
-            ? std::vector<BSONObj>{}
-            : e->getPipeline();
-        pipeline = pipeline_factory::makePipelineFromViewDefinition(
-            _fromExpCtx,
-            ResolvedNamespace{e->getNamespace(), resolvedPipe},
-            _fromPipeline,
-            opts,
-            _params.from);
+        try {
+            // Test-only: force a sharded-view kickback on every attempt so the retry loop runs to
+            // exhaustion. The kickback resolves the foreign namespace to itself (empty pipeline) so
+            // each attempt re-throws. At the top of the attempt so it fires wherever the stage runs
+            // (a shard node or the merging mongos).
+            if (MONGO_unlikely(graphLookupStageKickbackFailpoint.shouldFail())) {
+                uassertStatusOK(Status(
+                    ResolvedNamespace(_fromExpCtx->getNamespaceString(), std::vector<BSONObj>{}),
+                    "graphLookupStageKickbackFailpoint forced sharded view kickback"));
+            }
+            return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
+                _fromExpCtx,
+                mongo::Pipeline::parseFromLiteParsed(lpp, _fromExpCtx),
+                true /* attachCursorAfterOptimizing */,
+                tryOptimizeMatchOnlyPipelineDirectly,
+                shardTargetingPolicy);
+        } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
+            if (attempt == kMaxAttempts) {
+                // Still resolving to a sharded view after every retry (e.g. the view keeps being
+                // concurrently remapped). Propagate rather than falling through to the tassert.
+                throw;
+            }
 
-        // Update '_fromPipeline' with the resolved view definition to avoid triggering this
-        // exception next time.
-        _fromPipeline = pipeline->serializeToBson();
+            // This exception returns the information we need to resolve a sharded view. Rebuild
+            // _params.fromLpp from the resolved view definition so subsequent iterations don't
+            // re-throw.
+            const std::vector<BSONObj>& resolvedViewPipe =
+                (e->isTimeseries() && isRawDataOperation(pExpCtx->getOperationContext()))
+                ? std::vector<BSONObj>{}
+                : e->getBsonPipeline();
 
-        // Update the expression context with any new namespaces the resolved pipeline has
-        // introduced.
-        LiteParsedPipeline liteParsedPipeline(e->getNamespace(), resolvedPipe);
-        _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx, e->getNamespace());
-        _fromExpCtx->addResolvedNamespaces(liteParsedPipeline.getInvolvedNamespaces());
+            // The exception owns the BSONObjs in resolvedViewPipe; they are freed when 'e' goes
+            // out of scope at catch-block exit. Construct _params.fromLpp from those stages now,
+            // while they are still valid, so that subsequent makePipeline() calls use the resolved
+            // view definition rather than re-throwing.
+            LiteParserOptions lppOpts;
+            lppOpts.ifrContext = _fromExpCtx->getIfrContext();
+            _params.fromLpp.emplace(e->getResolvedNamespace(), resolvedViewPipe, lppOpts);
+            _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx, e->getResolvedNamespace());
+            _fromExpCtx->addResolvedNamespaces((*_params.fromLpp)->getInvolvedNamespaces());
 
-        LOGV2_DEBUG(5865400,
-                    3,
-                    "$graphLookup found view definition. ns: {namespace}, pipeline: {pipeline}. "
-                    "New $graphLookup sub-pipeline: {new_pipe}",
-                    logAttrs(e->getNamespace()),
-                    "pipeline"_attr =
-                        mongo::Pipeline::serializePipelineForLogging(e->getPipeline()),
-                    "new_pipe"_attr = mongo::Pipeline::serializePipelineForLogging(_fromPipeline));
+            // Preserve the storage-site invariant: _params.fromLpp is always stored desugared.
+            LiteParsedDesugarer::desugar(&(**_params.fromLpp), _fromExpCtx->getIfrContext());
 
-        // We can now safely optimize and reattempt attaching the cursor source.
-        pipeline = mongo::pipeline_factory::makePipeline(
-            _fromPipeline, _fromExpCtx, pipeline_factory::kDesugarOnly);
-
-        return pExpCtx->getMongoProcessInterface()->finalizeAndMaybePreparePipelineForExecution(
-            _fromExpCtx,
-            std::move(pipeline),
-            true /* attachCursorAfterOptimizing */,
-            tryOptimizeMatchOnlyPipelineDirectly,
-            shardTargetingPolicy);
+            LOGV2_DEBUG(
+                5865400,
+                3,
+                "$graphLookup found view definition. ns: {namespace}, pipeline: {pipeline}. "
+                "New $graphLookup sub-pipeline: {new_pipe}",
+                logAttrs(e->getResolvedNamespace()),
+                "pipeline"_attr =
+                    mongo::Pipeline::serializePipelineForLogging(e->getBsonPipeline()),
+                "new_pipe"_attr = mongo::Pipeline::serializePipelineForLogging(resolvedViewPipe));
+        }
     }
+    uasserted(ErrorCodes::CollectionBecameView,
+              "view configuration changed too many times during $graphLookup execution");
 }
 
 }  // namespace exec::agg

@@ -1,53 +1,51 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/query/bson/multikey_dotted_path_support.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
 
 namespace mongo {
 
 namespace exec::expression {
 
-Value evaluate(const ExpressionObject& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionObject& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& expressions = expr.getChildExpressions();
     MutableDocument outputDoc(expressions.size());
+
+    // Account the expression's memory in a plain local counter and enforce the per-expression cap.
+    size_t currentMemoryBytes = 0;
+    const size_t maxMemoryBytes =
+        static_cast<size_t>(internalQueryMaxSingleExpressionMemoryUsageBytes.loadRelaxed());
+
     for (auto&& pair : expressions) {
-        outputDoc.addField(pair.first, pair.second->evaluate(root, variables));
+        Value fieldVal = pair.second->evaluate(root, variables, ctx);
+
+        const size_t fieldBytes = pair.first.size() + 1 + fieldVal.getApproximateSize();
+        currentMemoryBytes += fieldBytes;
+        if (MONGO_unlikely(currentMemoryBytes > maxMemoryBytes)) {
+            uasserted(ErrorCodes::ExceededMemoryLimit,
+                      str::stream()
+                          << "$object needs too much memory. Needs: " << currentMemoryBytes
+                          << " bytes. Memory limit: " << maxMemoryBytes << " bytes");
+        }
+
+        outputDoc.addField(pair.first, std::move(fieldVal));
     }
     return outputDoc.freezeToValue();
 }
 
-Value evaluate(const ExpressionBsonSize& expr, const Document& root, Variables* variables) {
-    Value arg = expr.getChildren()[0]->evaluate(root, variables);
+Value evaluate(const ExpressionBsonSize& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value arg = expr.getChildren()[0]->evaluate(root, variables, ctx);
 
     if (arg.nullish()) {
         return Value(BSONNULL);
@@ -58,7 +56,7 @@ Value evaluate(const ExpressionBsonSize& expr, const Document& root, Variables* 
                           << typeName(arg.getType()),
             arg.getType() == BSONType::object);
 
-    return Value(arg.getDocument().toBson().objsize());
+    return Value(arg.getDocument().toBson<BSONObj::LargeSizeTrait>().objsize());
 }
 
 Value evaluatePath(const FieldPath& fieldPath, size_t index, const Document& input) {
@@ -104,8 +102,11 @@ Value evaluatePathArray(const FieldPath& fieldPath, size_t index, const Value& i
     return Value(std::move(result));
 }
 
-Value evaluate(const ExpressionGetField& expr, const Document& root, Variables* variables) {
-    auto fieldValue = expr.getField()->evaluate(root, variables);
+Value evaluate(const ExpressionGetField& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto fieldValue = expr.getField()->evaluate(root, variables, ctx);
     // If '_children[_kField]' is a constant expression, the parser guarantees that it evaluates to
     // a string. If it's a dynamic expression, its type can't be deduced during parsing.
     uassert(3041704,
@@ -115,7 +116,7 @@ Value evaluate(const ExpressionGetField& expr, const Document& root, Variables* 
                           << typeName(fieldValue.getType()),
             fieldValue.getType() == BSONType::string);
 
-    auto inputValue = expr.getInput()->evaluate(root, variables);
+    auto inputValue = expr.getInput()->evaluate(root, variables, ctx);
     if (inputValue.nullish()) {
         if (inputValue.missing()) {
             return Value();
@@ -129,8 +130,11 @@ Value evaluate(const ExpressionGetField& expr, const Document& root, Variables* 
     return inputValue.getDocument().getField(fieldValue.getStringData());
 }
 
-Value evaluate(const ExpressionSetField& expr, const Document& root, Variables* variables) {
-    auto input = expr.getInput()->evaluate(root, variables);
+Value evaluate(const ExpressionSetField& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto input = expr.getInput()->evaluate(root, variables, ctx);
     if (input.nullish()) {
         return Value(BSONNULL);
     }
@@ -140,7 +144,7 @@ Value evaluate(const ExpressionSetField& expr, const Document& root, Variables* 
                           << " requires 'input' to evaluate to type Object",
             input.getType() == BSONType::object);
 
-    auto value = expr.getValue()->evaluate(root, variables);
+    auto value = expr.getValue()->evaluate(root, variables, ctx);
 
     // Build output document and modify 'field'.
     MutableDocument outputDoc(input.getDocument());
@@ -150,7 +154,8 @@ Value evaluate(const ExpressionSetField& expr, const Document& root, Variables* 
 
 Value evaluate(const ExpressionInternalFindAllValuesAtPath& expr,
                const Document& root,
-               Variables* variables) {
+               Variables* variables,
+               const EvaluationContext& ctx) {
     BSONElementSet elts(expr.getExpressionContext()->getCollator());
     auto bsonRoot = root.toBson();
     multikey_dotted_path_support::extractAllElementsAlongPath(

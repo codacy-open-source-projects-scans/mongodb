@@ -1,54 +1,47 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "boost/container/detail/flat_tree.hpp"
-#include <boost/container/flat_set.hpp>
-#include <boost/container/vector.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
-// IWYU pragma: no_include "boost/move/detail/iterator_to_raw_pointer.hpp"
 #include "mongo/db/multi_key_path_tracker.h"
+
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <iterator>
 #include <sstream>
 
+#include <boost/container/flat_set.hpp>
+#include <boost/container/vector.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+// IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
+// IWYU pragma: no_include "boost/move/detail/iterator_to_raw_pointer.hpp"
 
 namespace mongo {
 
 const OperationContext::Decoration<MultikeyPathTracker> MultikeyPathTracker::get =
     OperationContext::declareDecoration<MultikeyPathTracker>();
+
+bool MultikeyPathInfo::sameIndexAndCollectionAtTime(const MultikeyPathInfo& info) const {
+    return collectionUUID == info.collectionUUID && indexName == info.indexName &&
+        earliestTimestamp == info.earliestTimestamp;
+}
+
+void MultikeyPathInfo::mergePathsAndKeys(MultikeyPathInfo&& info) {
+    invariant(sameIndexAndCollectionAtTime(info));
+
+    if (multikeyPaths.empty()) {
+        multikeyPaths = std::move(info.multikeyPaths);
+    } else if (!info.multikeyPaths.empty()) {
+        MultikeyPathTracker::mergeMultikeyPaths(&multikeyPaths, info.multikeyPaths);
+    }
+    multikeyMetadataKeys.insert(std::make_move_iterator(info.multikeyMetadataKeys.begin()),
+                                std::make_move_iterator(info.multikeyMetadataKeys.end()));
+}
 
 // static
 std::string MultikeyPathTracker::dumpMultikeyPaths(const MultikeyPaths& multikeyPaths) {
@@ -89,25 +82,35 @@ bool MultikeyPathTracker::covers(const MultikeyPaths& parent, const MultikeyPath
     }
     return true;
 }
+WorkerMultikeyPathInfo MultikeyPathTracker::sortByTimestamp() const {
+    WorkerMultikeyPathInfo sortedPathInfo;
+    sortedPathInfo.reserve(_multikeyPathInfo.size());
+    for (const MultikeyPathInfo& info : _multikeyPathInfo) {
+        sortedPathInfo.push_back(info);
+    }
+    std::stable_sort(sortedPathInfo.begin(),
+                     sortedPathInfo.end(),
+                     [](const MultikeyPathInfo& lhs, const MultikeyPathInfo& rhs) {
+                         return lhs.earliestTimestamp < rhs.earliestTimestamp;
+                     });
+    return sortedPathInfo;
+}
 
-void MultikeyPathTracker::addMultikeyPathInfo(MultikeyPathInfo info) {
+void MultikeyPathTracker::addMultikeyPathInfo(MultikeyPathInfo&& info) {
     invariant(_trackMultikeyPathInfo);
-    // Merge the `MultikeyPathInfo` input into the accumulated value being tracked for the
-    // (collection, index) key.
+    // Add entries to _multikeyPathInfo keyed by (collection UUID, index, timestamp). Entries that
+    // share the same (uuid, index, timestamp) are merged immediately because they represent the
+    // same catalog write made by the primary.
     for (auto& existingChanges : _multikeyPathInfo) {
-        if (existingChanges.nss != info.nss || existingChanges.indexName != info.indexName) {
+        if (!existingChanges.sameIndexAndCollectionAtTime(info)) {
             continue;
         }
-
-        mergeMultikeyPaths(&existingChanges.multikeyPaths, info.multikeyPaths);
-        existingChanges.multikeyMetadataKeys.insert(
-            std::make_move_iterator(info.multikeyMetadataKeys.begin()),
-            std::make_move_iterator(info.multikeyMetadataKeys.end()));
+        existingChanges.mergePathsAndKeys(std::move(info));
         return;
     }
 
-    // If an existing entry wasn't found for the (collection, index) input, create a new entry.
-    _multikeyPathInfo.emplace_back(info);
+    // No entry for this write yet; create a new one.
+    _multikeyPathInfo.push_back(std::move(info));
 }
 
 void MultikeyPathTracker::clear() {
@@ -131,6 +134,7 @@ boost::optional<MultikeyPaths> MultikeyPathTracker::getMultikeyPathInfo(
 }
 
 void MultikeyPathTracker::startTrackingMultikeyPathInfo() {
+    invariant(!_trackMultikeyPathInfo);
     _trackMultikeyPathInfo = true;
 }
 

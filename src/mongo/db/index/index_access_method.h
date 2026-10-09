@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/database_name.h"
@@ -55,6 +28,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -84,7 +58,7 @@ enum class ContainerWriteBehavior { kDoNotReplicate, kReplicate };
  * We assume the caller has whatever locks required.  This interface is not thread safe.
  *
  */
-class MONGO_MOD_OPEN IndexAccessMethod {
+class [[MONGO_MOD_OPEN]] IndexAccessMethod {
     IndexAccessMethod(const IndexAccessMethod&) = delete;
     IndexAccessMethod& operator=(const IndexAccessMethod&) = delete;
 
@@ -110,7 +84,7 @@ public:
                                                    const NamespaceString& nss,
                                                    const CollectionOptions& collectionOptions,
                                                    IndexCatalogEntry* entry,
-                                                   StringData ident);
+                                                   std::string_view ident);
 
     /**
      * Equivalent to (but shorter and faster than): dynamic_cast<SortedDataIndexAccessMethod*>(this)
@@ -178,7 +152,7 @@ public:
     virtual IndexValidateResults validate(
         OperationContext* opCtx,
         RecoveryUnit& ru,
-        const CollectionValidation::ValidationOptions& options) const = 0;
+        const collection_validation::ValidationOptions& options) const = 0;
 
     /**
      * Returns the number of keys in the index, traversing the index to do so.
@@ -238,13 +212,18 @@ public:
                                             const InsertDeleteOptions& options,
                                             KeyHandlerFn&& onDuplicateKey,
                                             int64_t* keysInserted,
-                                            int64_t* keysDeleted) = 0;
+                                            int64_t* keysDeleted,
+                                            int64_t* bytesInserted,
+                                            int64_t* bytesDeleted) = 0;
 
     //
     // Bulk operations support
     //
 
-    class MONGO_MOD_OPEN BulkBuilder {
+    using OnNKeysLoadedFn = std::function<void()>;
+    using OnBatchCommittedFn = std::function<void(int64_t keysWritten, int64_t bytesWritten)>;
+
+    class [[MONGO_MOD_OPEN]] BulkBuilder {
     public:
         virtual ~BulkBuilder() = default;
 
@@ -261,7 +240,14 @@ public:
                               const ShouldRelaxConstraintsFn& shouldRelaxConstraints = nullptr) = 0;
 
         /**
-         * Call this when you are ready to finish your bulk work.
+         * Signals to the builder that inserting has been completed. Must be called exactly once,
+         * before commit().
+         */
+        virtual void done(bool forceSpill = false) = 0;
+
+        /**
+         * Commit the data that was inserted. done() must have been called first.
+         *
          * @param dupsAllowed - If false and 'dupRecords' is not null, append with the RecordIds of
          *                      the uninserted duplicates.
          * @param yieldIterations - The number of iterations run before each yielding. Will not
@@ -272,6 +258,12 @@ public:
          * duplicate keys.
          * @param yieldFn - A function to invoke to request a yield and then restore. It returns the
          * new CollectionPtr* and IndexCatalogEntry* entry that shall be used from this point on.
+         * @param onNKeysLoaded - Called every onNKeysLoadedFnInterval committed
+         * keys. Pass a no-op if periodic resume-state writes are not needed.
+         * @param onBatchCommitted - Called once per committed batch with the number of keys and
+         * the number of bytes that batch wrote to the index.
+         * @param onNKeysLoadedFnInterval - The number of committed keys between invocations of
+         * onNKeysLoaded. Must be >= 1.
          * @param keyBatchSize -  The maximum number of index keys that will be batched together
          * into a single storage transaction.
          * @param keyBatchBytes - The maximum number of bytes that will be batched together into a
@@ -286,6 +278,9 @@ public:
                               const KeyHandlerFn& onDuplicateKeyInserted,
                               const RecordIdHandlerFn& onDuplicateRecord,
                               const YieldFn& yieldFn,
+                              const OnNKeysLoadedFn& onNKeysLoaded,
+                              const OnBatchCommittedFn& onBatchCommitted,
+                              int64_t onNKeysLoadedFnInterval,
                               size_t keyBatchSize,
                               size_t keyBatchBytes) = 0;
 
@@ -293,10 +288,17 @@ public:
 
         virtual bool isMultikey() const = 0;
 
+        virtual IndexStateInfo getPersistedState() = 0;
+
         /**
          * Persists on disk the keys that have been inserted using this BulkBuilder.
          */
         virtual IndexStateInfo persistDataForShutdown() = 0;
+
+        /**
+         * Releases the builder's sorter and any resources it holds.
+         */
+        virtual void releaseSorter() = 0;
 
     protected:
         static void countNewBuildInStats();
@@ -360,7 +362,7 @@ struct UpdateTicket {
 /**
  * Flags we can set for inserts and deletes (and updates, which are kind of both).
  */
-struct MONGO_MOD_PUBLIC InsertDeleteOptions {
+struct [[MONGO_MOD_PUBLIC]] InsertDeleteOptions {
     // Are duplicate keys allowed in the index?
     bool dupsAllowed = false;
 
@@ -391,7 +393,7 @@ struct MONGO_MOD_PUBLIC InsertDeleteOptions {
  * for the initialization and core functionality of this abstract class. To avoid any circular
  * dependencies, it is important that IndexAccessMethod remain an interface.
  */
-class MONGO_MOD_OPEN SortedDataIndexAccessMethod : public IndexAccessMethod {
+class [[MONGO_MOD_OPEN]] SortedDataIndexAccessMethod : public IndexAccessMethod {
     SortedDataIndexAccessMethod(const SortedDataIndexAccessMethod&) = delete;
     SortedDataIndexAccessMethod& operator=(const SortedDataIndexAccessMethod&) = delete;
 
@@ -458,9 +460,15 @@ public:
 
     /**
      * Inserts the specified keys into the index. Does not attempt to determine whether the
-     * insertion of these keys should cause the index to become multikey. The 'numInserted' output
-     * parameter, if non-nullptr, will be reset to the number of keys inserted by this function
-     * call, or to zero in the case of either a non-OK return Status or an empty 'keys' argument.
+     * insertion of these keys should cause the index to become multikey.
+     *
+     * The 'numInserted' output parameter, if non-nullptr, will be reset to the number of keys
+     * inserted by this function call, and also counts keys that already existed and were no-ops.
+     * The paremeter is set to zero in the case of either a non-OK return Status or an empty 'keys'
+     * argument.
+     *
+     * The 'numSkipped' output parameter, if non-nullptr, is reset to the number of keys that were
+     * already present in the index and therefore skipped as no-ops.
      */
     Status insertKeys(
         OperationContext* opCtx,
@@ -471,6 +479,7 @@ public:
         const InsertDeleteOptions& options,
         KeyHandlerFn&& onDuplicateKey,
         int64_t* numInserted,
+        int64_t* numSkipped = nullptr,
         IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff,
         ContainerWriteBehavior containerWriteBehavior = ContainerWriteBehavior::kDoNotReplicate);
 
@@ -506,19 +515,6 @@ public:
                       int64_t* numDeleted,
                       ContainerWriteBehavior containerWriteBehavior =
                           ContainerWriteBehavior::kDoNotReplicate) const;
-
-    /**
-     * Gets the keys of the documents 'from' and 'to' and prepares them for the update.
-     * Provides a ticket for actually performing the update.
-     */
-    void prepareUpdate(OperationContext* opCtx,
-                       const CollectionPtr& collection,
-                       const IndexCatalogEntry* entry,
-                       const BSONObj& from,
-                       const BSONObj& to,
-                       const RecordId& loc,
-                       const InsertDeleteOptions& options,
-                       UpdateTicket* ticket) const;
 
     /**
      * Perform a validated update.  The keys for the 'from' object will be removed, and the keys
@@ -647,7 +643,7 @@ public:
     IndexValidateResults validate(
         OperationContext* opCtx,
         RecoveryUnit& ru,
-        const CollectionValidation::ValidationOptions& options) const final;
+        const collection_validation::ValidationOptions& options) const final;
 
     int64_t numKeys(OperationContext* opCtx, RecoveryUnit& ru) const final;
 
@@ -680,7 +676,9 @@ public:
                                     const InsertDeleteOptions& options,
                                     KeyHandlerFn&& onDuplicateKey,
                                     int64_t* keysInserted,
-                                    int64_t* keysDeleted) final;
+                                    int64_t* keysDeleted,
+                                    int64_t* bytesInserted,
+                                    int64_t* bytesDeleted) final;
 
     std::unique_ptr<BulkBuilder> initiateBulk(
         OperationContext* opCtx,
@@ -747,9 +745,24 @@ private:
                       bool dupsAllowed,
                       ContainerWriteBehavior containerWriteBehavior) const;
 
+    /**
+     * Gets the keys of the documents 'from' and 'to' and prepares them for the update.
+     * Provides a ticket for actually performing the update if there is anything to do. Returns
+     * false if no updates are needed.
+     */
+    bool _prepareUpdate(OperationContext* opCtx,
+                        const CollectionPtr& collection,
+                        const IndexCatalogEntry* entry,
+                        const BSONObj& from,
+                        const BSONObj& to,
+                        const RecordId& loc,
+                        const InsertDeleteOptions& options,
+                        UpdateTicket* ticket) const;
+
     Status _indexKeysOrWriteToSideTable(OperationContext* opCtx,
                                         const CollectionPtr& coll,
                                         const IndexCatalogEntry* entry,
+                                        const RecordId& recordId,
                                         const KeyStringSet& keys,
                                         const KeyStringSet& multikeyMetadataKeys,
                                         const MultikeyPaths& multikeyPaths,
@@ -760,6 +773,7 @@ private:
     void _unindexKeysOrWriteToSideTable(OperationContext* opCtx,
                                         const CollectionPtr& coll,
                                         const IndexCatalogEntry* entry,
+                                        const RecordId& recordId,
                                         const KeyStringSet& keys,
                                         const BSONObj& obj,
                                         bool logIfError,
@@ -769,5 +783,13 @@ private:
 
     const std::unique_ptr<SortedDataInterface> _newInterface;
 };
+
+/**
+ * Records updates to the metrics tracking keys and key bytes processed during an index build's side
+ * write drain process, as well as time spent, directly incrementing the counters.
+ */
+void recordIndexBuildSideWritesProcessedStats(int64_t keysProcessed,
+                                              int64_t bytesProcessed,
+                                              Microseconds durationMicros);
 
 }  // namespace mongo

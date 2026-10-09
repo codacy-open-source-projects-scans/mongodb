@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/service_entry_point_shard_role.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/client/read_preference.h"
@@ -40,8 +13,12 @@
 #include "mongo/db/admission/ingress_admission_control_gen.h"
 #include "mongo/db/admission/ingress_admission_controller.h"
 #include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/admission/ingress_request_rate_limiter_gen.h"
 #include "mongo/db/admission/ticketing/admission_context.h"
 #include "mongo/db/admission/ticketing/ticketholder.h"
+#include "mongo/db/admission/write_throttler.h"
+#include "mongo/db/admission/write_throttler_admission_context.h"
+#include "mongo/db/admission/write_throttler_parameters_gen.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_contract.h"
 #include "mongo/db/auth/authorization_contract_guard.h"
@@ -73,7 +50,11 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/profile_collection.h"
 #include "mongo/db/profile_settings.h"
+#include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
+#include "mongo/db/query/query_latency_accumulator.h"
+#include "mongo/db/query/query_lifespan.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/read_concern_mongod_gen.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
@@ -87,6 +68,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/request_execution_context.h"
+#include "mongo/db/rss/disable_snapshotting_fail_point.h"
 #include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
@@ -107,6 +89,7 @@
 #include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/stats/api_version_metrics.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/stats/external_client_on_router.h"
 #include "mongo/db/stats/read_preference_metrics.h"
 #include "mongo/db/stats/server_read_concern_metrics.h"
 #include "mongo/db/stats/top.h"
@@ -127,7 +110,8 @@
 #include "mongo/otel/telemetry_context_holder.h"
 #include "mongo/otel/traces/span/span.h"
 #include "mongo/otel/traces/telemetry_context_serialization.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/otel/traces/tracing_enablement.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/message.h"
@@ -151,12 +135,14 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/serialization_context.h"
+#include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 
 #include <algorithm>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -185,7 +171,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeAfterSessionCheckOut);
-MONGO_FAIL_POINT_DEFINE(failIngressRequestRateLimiting);
+MONGO_FAIL_POINT_DEFINE(hangBeforeComputeOperationTimeForMajorityRead);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -198,7 +184,41 @@ auto& notPrimaryUnackWrites =
     *MetricBuilder<Counter64>{"repl.network.notPrimaryUnacknowledgedWrites"};
 
 namespace {
+using namespace std::literals::string_view_literals;
 
+
+bool isWriteThrottlerOperation(Command::ReadWriteType readWriteType) {
+    return readWriteType == Command::ReadWriteType::kWrite ||
+        readWriteType == Command::ReadWriteType::kTransaction;
+}
+
+void admitWriteThrottlerIfNeeded(OperationContext* opCtx,
+                                 CommandInvocation* invocation,
+                                 bool isExemptFromAdmissionControl) {
+    if (!gWriteThrottlerEnabled.load() || isExemptFromAdmissionControl ||
+        !invocation->supportsWriteConcern() ||
+        !isWriteThrottlerOperation(invocation->definition()->getReadWriteType())) {
+        return;
+    }
+    if (auto* throttler = WriteThrottler::get(opCtx)) {
+        throttler->admitOperation(opCtx);
+    }
+}
+
+bool shouldFinalizeWriteThrottlerAdmission(OperationContext* opCtx,
+                                           Command::ReadWriteType readWriteType) {
+    if (!isWriteThrottlerOperation(readWriteType)) {
+        return false;
+    }
+
+    if (gWriteThrottlerEnabled.load()) {
+        return true;
+    }
+
+    // Preserve command-end reconciliation for writes admitted before a runtime disable, while
+    // keeping reads out of the write-throttler finalization path.
+    return WriteThrottlerAdmissionContext::get(opCtx).getAdmissions() > 0;
+}
 
 void runCommandInvocation(const RequestExecutionContext& rec, CommandInvocation* invocation) {
     CommandHelpers::runCommandInvocation(rec.getOpCtx(), invocation, rec.getReplyBuilder());
@@ -320,8 +340,23 @@ LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOpera
 
         // Note: ReadConcernArgs::getLevel returns kLocal if none was set.
         if (readConcernArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern) {
-            operationTime =
-                LogicalTime(replCoord->getCurrentCommittedSnapshotOpTime().getTimestamp());
+            hangBeforeComputeOperationTimeForMajorityRead.executeIf(
+                [&](const BSONObj&) {
+                    hangBeforeComputeOperationTimeForMajorityRead.pauseWhileSet();
+                },
+                [&](const BSONObj& data) {
+                    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns");
+                    return fpNss.isEmpty() || CurOp::get(opCtx)->getNSS() == fpNss;
+                });
+            auto readTs = [&]() -> boost::optional<Timestamp> {
+                if (gTestingSnapshotBehaviorInIsolation ||
+                    MONGO_unlikely(disableSnapshotting.shouldFail())) {
+                    return boost::none;
+                }
+                return shard_role_details::getRecoveryUnit(opCtx)->getLastUsedReadTimestamp();
+            }();
+            operationTime = LogicalTime(
+                readTs ? *readTs : replCoord->getCurrentCommittedSnapshotOpTime().getTimestamp());
         } else {
             // Use the lockfree atomic shadow to avoid acquiring the ReplicationCoordinator
             // mutex on every response. Slight staleness is acceptable for operationTime.
@@ -421,17 +456,19 @@ void appendAdditionalParticipants(OperationContext* opCtx, BSONObjBuilder* comma
 
     std::vector<BSONObj> participantArray;
     for (const auto& p : *additionalParticipants) {
-        auto shardId = ShardId(p.first);
-
+        BSONObjBuilder entry;
+        entry.append(AdditionalParticipantInfo::kShardIdFieldName, ShardId(p.first));
         // The "readOnly" value is set for participants upon a successful response. If an error
         // occurred before getting a response from a participant, it will not have a readOnly value
         // set.
-        auto readOnly = p.second;
-        if (readOnly) {
-            participantArray.emplace_back(BSON("shardId" << shardId << "readOnly" << *readOnly));
-        } else {
-            participantArray.emplace_back(BSON("shardId" << shardId));
+        if (p.second.readOnly) {
+            entry.append(AdditionalParticipantInfo::kReadOnlyFieldName, *p.second.readOnly);
         }
+        // Forward the replication term observed for this participant.
+        if (p.second.term) {
+            entry.append(AdditionalParticipantInfo::kTermFieldName, *p.second.term);
+        }
+        participantArray.emplace_back(entry.obj());
     }
 
     commandBodyFieldsBob->appendElements(
@@ -665,6 +702,12 @@ private:
     bool _cannotRetry = false;
 
     boost::optional<Ticket> _admissionTicket;
+
+    // When a command with maxTimeMS is executed in a DBDirectClient context (nested operation),
+    // this guard pushes an artificial deadline that is min(parent_deadline, child_maxTimeMS). On
+    // destruction, the parent's original deadline is automatically restored. This allows child
+    // operations to time out independently while the parent resumes with its original deadline.
+    boost::optional<Interruptible::DeadlineGuard> _deadlineGuard;
 };
 
 class RunCommandImpl {
@@ -834,7 +877,7 @@ void CheckoutSessionAndInvokeCommand::run() {
             txnParticipant.handleWouldChangeOwningShardError(opCtx, wouldChangeOwningShardInfo);
             _stashTransaction(txnParticipant);
 
-            auto txnResponseMetadata = txnParticipant.getResponseMetadata();
+            auto txnResponseMetadata = txnParticipant.getResponseMetadata(opCtx);
             (_ecd->getExtraFieldsBuilder())->appendElements(txnResponseMetadata);
             return ex.toStatus();
         } catch (const DBException& ex) {
@@ -961,7 +1004,8 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
                     {*sessionOptions.getTxnNumber(), sessionOptions.getTxnRetryCounter()},
                     sessionOptions.getAutocommit(),
                     transactionAction,
-                    sessionOptions.getTransactionRuntimeContext());
+                    sessionOptions.getTransactionRuntimeContext(),
+                    sessionOptions.getIsServerInitiatedTransaction());
                 beganOrContinuedTxn = true;
             } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
                 auto prevTxnExitedPrepare = txnParticipant.onExitPrepare();
@@ -1131,7 +1175,7 @@ void CheckoutSessionAndInvokeCommand::_commitInvocation() {
 
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
             serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            auto txnResponseMetadata = txnParticipant.getResponseMetadata();
+            auto txnResponseMetadata = txnParticipant.getResponseMetadata(execContext.getOpCtx());
             auto bodyBuilder = replyBuilder->getBodyBuilder();
             bodyBuilder.appendElements(txnResponseMetadata);
             appendAdditionalParticipants(execContext.getOpCtx(), &bodyBuilder);
@@ -1171,8 +1215,11 @@ void RunCommandImpl::_prologue() {
         // Skip incrementing metrics when the command is not a read operation, as we expect to all
         // commands sent via the driver to inherit the read preference, even if we don't use it.
         if (command->shouldAffectReadOptionCounters()) {
+            // Commands forwarded from a router (mongos) on behalf of an external user should
+            // be counted as "external", even though the mongos connection is an internal client.
+            auto isInternal = _isInternalClient() && !isExternalClientOnRouter(opCtx);
             ReadPreferenceMetrics::get(opCtx)->recordReadPreference(
-                ReadPreferenceSetting::get(opCtx), _isInternalClient(), isPrimary);
+                ReadPreferenceSetting::get(opCtx), isInternal, isPrimary);
         }
     }
 }
@@ -1187,12 +1234,13 @@ void RunCommandImpl::_epilogue() {
     // This fail point blocks all commands which are running on the specified namespace, or which
     // are present in the given list of commands, or which match a given comment. If no namespace,
     // command list, or comment are provided, then the failpoint will block all commands.
-    waitAfterCommandFinishesExecution.executeIf(
-        [&](const BSONObj& data) {
-            CurOpFailpointHelpers::waitWhileFailPointEnabled(
-                &waitAfterCommandFinishesExecution, opCtx, "waitAfterCommandFinishesExecution");
-        },
-        [&](const BSONObj& data) {
+    CurOpFailpointHelpers::waitWhileFailPointEnabled(
+        &waitAfterCommandFinishesExecution,
+        opCtx,
+        "waitAfterCommandFinishesExecution",
+        /*whileWaiting=*/nullptr,
+        /*nss=*/{},
+        /*extraPred=*/[&](const BSONObj& data) {
             auto& request = execContext.getRequest();
             auto commands =
                 data.hasField("commands") ? data["commands"].Array() : std::vector<BSONElement>();
@@ -1280,11 +1328,11 @@ void RunCommandAndWaitForWriteConcern::_waitForWriteConcern(BSONObjBuilder& bb) 
     if (auto scoped = failCommand.scopedIf([&](const BSONObj& obj) {
             return CommandHelpers::shouldActivateFailCommandFailPoint(
                        obj, invocation, opCtx->getClient()) &&
-                obj.hasField("writeConcernError"_sd) && !bb.hasField("writeConcernError"_sd);
+                obj.hasField("writeConcernError"sv) && !bb.hasField("writeConcernError"sv);
         });
         MONGO_unlikely(scoped.isActive())) {
         const BSONObj& data = scoped.getData();
-        bb.append(data["writeConcernError"_sd]);
+        bb.append(data["writeConcernError"sv]);
         if (data.hasField(kErrorLabelsFieldName) &&
             data[kErrorLabelsFieldName].type() == BSONType::array) {
             // Propagate error labels specified in the failCommand failpoint to the
@@ -1297,6 +1345,12 @@ void RunCommandAndWaitForWriteConcern::_waitForWriteConcern(BSONObjBuilder& bb) 
     }
 
     CurOp::get(opCtx)->debug().writeConcern.emplace(opCtx->getWriteConcern());
+    LOGV2_DEBUG(12091302,
+                2,
+                "Waiting for write concern",
+                "command"_attr = invocation->definition()->getName(),
+                "opTime"_attr = _ecd->getLastOpBeforeRun(),
+                "writeConcern"_attr = opCtx->getWriteConcern().toBSON());
     service_entry_point_shard_role_helpers::waitForWriteConcern(
         opCtx, invocation, _ecd->getLastOpBeforeRun(), bb);
 }
@@ -1370,13 +1424,12 @@ void RunCommandAndWaitForWriteConcern::_setup() {
                   fmt::format("unexpected unset provenance on writeConcern: {}",
                               _extractedWriteConcern->toBSON().jsonString()));
 
-        uassert(ErrorCodes::UnsatisfiableWriteConcern,
-                "Unsupported WriteConcernOptions",
-                rss::ReplicatedStorageService::get(opCtx->getServiceContext())
-                    .getPersistenceProvider()
-                    .supportsWriteConcernOptions(_extractedWriteConcern.get()));
-
         opCtx->setWriteConcern(*_extractedWriteConcern);
+        LOGV2_DEBUG(12091301,
+                    2,
+                    "Extracted write concern for command",
+                    "command"_attr = command->getName(),
+                    "writeConcern"_attr = _extractedWriteConcern->toBSON());
     }
 }
 
@@ -1451,19 +1504,34 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
     if (auto& rc = _invocation->getGenericArguments().getReadConcern()) {
         readConcernArgs = *rc;
     }
-    bool clientSuppliedReadConcern = !readConcernArgs.isEmpty();
+    // True only when the client set a level. Partial RCs (e.g. {afterClusterTime: T}) get the
+    // level filled in below, so provenance resolves to customDefault / implicitDefault.
+    bool clientSuppliedReadConcern = readConcernArgs.hasLevel();
     bool customDefaultWasApplied = false;
     auto readConcernSupport = _invocation->supportsReadConcern(readConcernArgs.getLevel(),
                                                                readConcernArgs.isImplicitDefault());
 
-    auto applyDefaultReadConcern = [&](const repl::ReadConcernArgs rcDefault) -> void {
+    auto applyReadConcernDefault = [&](repl::ReadConcernArgs rcDefault) {
         LOGV2_DEBUG(21955,
                     2,
                     "Applying default readConcern on command",
                     "readConcernDefault"_attr = rcDefault,
+                    "providedReadConcern"_attr = readConcernArgs,
+                    "isImplicit"_attr = !readConcernSupport.defaultReadConcernPermit.isOK(),
                     "command"_attr = _invocation->definition()->getName());
-        readConcernArgs = std::move(rcDefault);
-        // Update the readConcernSupport, since the default RC was applied.
+        if (readConcernArgs.isEmpty()) {
+            readConcernArgs = std::move(rcDefault);
+        } else if (rcDefault.getLevel() == repl::ReadConcernLevel::kAvailableReadConcern &&
+                   readConcernArgs.getArgsAfterClusterTime()) {
+            // A default level of "available" cannot be combined with afterClusterTime (see
+            // ReadConcernArgs::validate()). Promote to "local": afterClusterTime is honored
+            // and the level resolves as if no default were configured.
+            readConcernArgs.setLevel(repl::ReadConcernLevel::kLocalReadConcern);
+        } else {
+            readConcernArgs.setLevel(rcDefault.getLevel());
+        }
+        // Applying a default must never produce an invalid combination.
+        uassertStatusOK(readConcernArgs.validate());
         readConcernSupport =
             _invocation->supportsReadConcern(readConcernArgs.getLevel(), !customDefaultWasApplied);
     };
@@ -1492,11 +1560,9 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
                 //       "command"_attr = _invocation->definition()->getName());
             }
 
-            // A member in a regular replica set.  Since these servers receive client queries, in
-            // this context empty RC (ie. readConcern: {}) means the same as if absent/unspecified,
-            // which is to apply the CWRWC defaults if present.  This means we just test isEmpty(),
-            // since this covers both isSpecified() && !isSpecified()
-            if (readConcernArgs.isEmpty()) {
+            // Apply the CWRC default when the client did not set a level. Empty RC: replace
+            // whole; partial RC: merge level only to preserve afterClusterTime / opTime.
+            if (!readConcernArgs.hasLevel()) {
                 const auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
                 const auto rcDefault = rwcDefaults.getDefaultReadConcern();
                 if (rcDefault) {
@@ -1504,20 +1570,19 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
                     customDefaultWasApplied =
                         (readConcernSource &&
                          readConcernSource.value() == DefaultReadConcernSourceEnum::kGlobal);
-
-                    applyDefaultReadConcern(*rcDefault);
+                    applyReadConcernDefault(*rcDefault);
                 }
             }
         }
     }
 
-    // Apply the implicit default read concern even if the command does not support a cluster wide
-    // read concern.
+    // Apply the implicit default RC when the command does not support CWRC and the client did
+    // not set a level.
     if (!readConcernSupport.defaultReadConcernPermit.isOK() &&
         readConcernSupport.implicitDefaultReadConcernPermit.isOK() && shouldApplyDefaults &&
-        !_isInternalClient() && readConcernArgs.isEmpty()) {
-        auto rcDefault = ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern();
-        applyDefaultReadConcern(rcDefault);
+        !_isInternalClient() && !readConcernArgs.hasLevel()) {
+        applyReadConcernDefault(
+            ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern());
     }
 
     // It's fine for clients to provide any provenance value to mongod. But if they haven't, then an
@@ -1590,7 +1655,7 @@ void ExecCommandDatabase::_initiateCommand() {
         // Preload generic ClientMetadata ahead of our first hello request. After the first
         // request, metaElement should always be empty.
         auto metaElem = request.body[kMetadataDocumentName];
-        auto isInternalClient = request.body["internalClient"_sd].ok();
+        auto isInternalClient = request.body["internalClient"sv].ok();
         ClientMetadata::setFromMetadata(opCtx->getClient(), metaElem, isInternalClient);
     }
 
@@ -1637,14 +1702,6 @@ void ExecCommandDatabase::_initiateCommand() {
                 _isInternalClient());
     }
 
-    if (auto& traceCtx = genericArgs.getTraceCtx()) {
-        auto telemetryCtx = otel::traces::TelemetryContextSerializer::fromBSON(*traceCtx);
-        if (telemetryCtx) {
-            auto& telemetryCtxHolder = otel::TelemetryContextHolder::getDecoration(opCtx);
-            telemetryCtxHolder.setTelemetryContext(telemetryCtx);
-        }
-    }
-
     if (MONGO_unlikely(genericArgs.getHelp().value_or(false))) {
         // We disable not-primary-error tracker for help requests due to SERVER-11492, because
         // config servers use help requests to determine which commands are database writes, and so
@@ -1659,28 +1716,6 @@ void ExecCommandDatabase::_initiateCommand() {
 
     boost::optional<rss::consensus::WriteIntentGuard> writeGuard;
     auto& rss = rss::ReplicatedStorageService::get(opCtx->getServiceContext());
-
-    // On DSC, we block writes to local collections.
-    // We block transactions to local collections in case part of the transaction is a write for
-    // future proofing.
-    if (dbName == DatabaseName::kLocal &&
-        !rss.getPersistenceProvider().supportsLocalCollections()) {
-        bool commandIsWrite = (command->getReadWriteType() == Command::ReadWriteType::kWrite ||
-                               command->getReadWriteType() == Command::ReadWriteType::kTransaction);
-        uassert(ErrorCodes::IllegalOperation,
-                "Not allowed to write to 'local' database",
-                !commandIsWrite);
-
-        bool commandIsCreateCollection = command->getName() == "create";
-        uassert(ErrorCodes::IllegalOperation,
-                "Not allowed to create 'local' collections",
-                !commandIsCreateCollection);
-
-        bool commandIsCreateIndex = command->getName() == "createIndexes";
-        uassert(ErrorCodes::IllegalOperation,
-                "Not allowed to create indexes on 'local' collections",
-                !commandIsCreateIndex);
-    }
 
     if (!opCtx->getClient()->isInDirectClient() &&
         !MONGO_unlikely(skipCheckingForNotPrimaryInCommandDispatch.shouldFail())) {
@@ -1700,15 +1735,15 @@ void ExecCommandDatabase::_initiateCommand() {
         bool optedIn = couldHaveOptedIn && ReadPreferenceSetting::get(opCtx).canRunOnSecondary();
         bool canRunHere = commandCanRunHere(opCtx, dbName, command, inMultiDocumentTransaction);
         if (!canRunHere && couldHaveOptedIn) {
-            const auto msg = client->supportsHello() ? "not primary and secondaryOk=false"_sd
-                                                     : "not master and slaveOk=false"_sd;
+            const auto msg = client->supportsHello() ? "not primary and secondaryOk=false"sv
+                                                     : "not master and slaveOk=false"sv;
             uasserted(ErrorCodes::NotPrimaryNoSecondaryOk, msg);
         }
 
         if (MONGO_unlikely(respondWithNotPrimaryInCommandDispatch.shouldFail())) {
             uassert(ErrorCodes::NotWritablePrimary, "not primary", canRunHere);
         } else {
-            const auto msg = client->supportsHello() ? "not primary"_sd : "not master"_sd;
+            const auto msg = client->supportsHello() ? "not primary"sv : "not master"sv;
             uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
         }
 
@@ -1784,85 +1819,57 @@ void ExecCommandDatabase::_initiateCommand() {
 
         if ((maxTimeMS > Milliseconds::zero() || maxTimeMSOpOnly > Milliseconds::zero()) &&
             command->getLogicalOp() != LogicalOp::opGetMore) {
-            uassert(40119,
-                    "Illegal attempt to set operation deadline within DBDirectClient",
-                    !opCtx->getClient()->isInDirectClient());
 
             // The "hello" command should not inherit the deadline from the user op it is operating
             // as a part of as that can interfere with replica set monitoring and host selection.
             const bool ignoreMaxTimeMSOpOnly = isHello();
 
-            if (!ignoreMaxTimeMSOpOnly && maxTimeMSOpOnly > Milliseconds::zero() &&
-                (maxTimeMS == Milliseconds::zero() || maxTimeMSOpOnly < maxTimeMS)) {
+            // maxTimeMSOpOnly takes precedence over maxTimeMS only when it is shorter (or when
+            // maxTimeMS is unset). When it takes precedence we also remember the original
+            // maxTimeMS so it can be re-applied to subsequent admissions of this operation.
+            const bool useMaxTimeMSOpOnly = !ignoreMaxTimeMSOpOnly &&
+                maxTimeMSOpOnly > Milliseconds::zero() &&
+                (maxTimeMS == Milliseconds::zero() || maxTimeMSOpOnly < maxTimeMS);
+
+            Date_t deadline = Date_t::max();
+            if (useMaxTimeMSOpOnly) {
                 opCtx->storeMaxTimeMS(maxTimeMS);
-                opCtx->setDeadlineByDate(_execContext.getStarted() + maxTimeMSOpOnly,
-                                         ErrorCodes::MaxTimeMSExpired);
+                deadline = _execContext.getStarted() + maxTimeMSOpOnly;
             } else if (maxTimeMS > Milliseconds::zero()) {
-                opCtx->setDeadlineByDate(_execContext.getStarted() + maxTimeMS,
-                                         ErrorCodes::MaxTimeMSExpired);
+                deadline = _execContext.getStarted() + maxTimeMS;
             }
+            if (deadline < Date_t::max()) {
+                if (opCtx->getClient()->isInDirectClient()) {
+                    // In a DBDirectClient context the opCtx is reused from the parent operation and
+                    // may already carry a deadline (and a corresponding timeout error code) owned
+                    // by that parent. We only want to nest the child's maxTimeMS when it actually
+                    // tightens the deadline.
+                    //
+                    // Skipping the push when the child does not tighten the deadline matches
+                    // remote-client semantics: when a parent's local deadline fires first, the
+                    // caller observes the parent's error code rather than the remote command's
+                    // error code.
+                    if (deadline < opCtx->getDeadline()) {
+                        _deadlineGuard.emplace(*opCtx, deadline, ErrorCodes::MaxTimeMSExpired);
+                    }
+                } else {
+                    opCtx->setDeadlineByDate(deadline, ErrorCodes::MaxTimeMSExpired);
+                }
+            }
+
             opCtx->setUsesDefaultMaxTimeMS(genericArgs.getUsesDefaultMaxTimeMS().value_or(false) ||
                                            usesDefaultMaxTimeMS);
         }
     }
 
-    // TODO(SERVER-114130): Move those condition inside the gIngressAdmissionControlEnabled scope.
     const auto isProcessInternalCommand = isProcessInternalClient(*opCtx->getClient());
     const auto isExemptFromAdmissionControl = isProcessInternalCommand ||
         !_invocation->isSubjectToIngressAdmissionControl() ||
         IngressAdmissionContext::get(opCtx).isHoldingTicket();
 
-    failIngressRequestRateLimiting.executeIf(
-        [&](const BSONObj& data) {
-            // TODO(SERVER-114130): Remove error label override when moving to the ingress
-            // request rate limiter.
-            BSONArrayBuilder arrayBuilder;
-            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
-            arrayBuilder.append(ErrorLabel::kRetryableError);
-            arrayBuilder.append(ErrorLabel::kNoWritesPerformed);
-            auto& errorLabels = errorLabelsOverride(opCtx);
-            invariant(!errorLabels);
-            errorLabels.emplace(arrayBuilder.arr());
-
-            // We simulate a request being rejected by the rate limiter.
-            uasserted(ErrorCodes::IngressRequestRateLimitExceeded,
-                      "Rejection from the 'failIngressRequestRateLimiting' fail point");
-        },
-        [&](const BSONObj& data) {
-            // Because we don't have a priority port yet, we must only simulate the rate limiter
-            // on non critical operations.
-            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
-            // remove this condition.
-            if (isExemptFromAdmissionControl) {
-                return false;
-            }
-
-            // Because we don't have a priority port yet, we must only simulate the rate limiter
-            // on requests directly coming from mongod and mongos. As the priority port is
-            // implemented, background checks and heatbeat won't interfere with rate-limiting
-            // behavior.
-            // TODO(SERVER-114130): Move this fail point to the ingress request rate limiter and
-            // remove this condition.
-            auto clientMetadata = ClientMetadata::get(opCtx->getClient());
-            if (clientMetadata) {
-                auto document = clientMetadata->getDocument();
-                auto clientName = clientMetadata->getApplicationName();
-                auto isFromMongoExecutable =
-                    clientName.ends_with("mongos") || clientName.ends_with("mongod");
-
-                if (!isFromMongoExecutable) {
-                    return false;
-                }
-            }
-
-            // Respect the ingressRequestRateLimiterApplicationExemptions list so that internal
-            // clients are exempt from the failpoint.
-            if (IngressRequestRateLimiter::isAppNameExempted(opCtx->getClient())) {
-                return false;
-            }
-
-            return true;
-        });
+    if (gFeatureFlagIngressRateLimiting.isEnabled()) {
+        uassertStatusOK(admission::IngressRequestRateLimiter::waitForAdmission(opCtx));
+    }
 
     if (gIngressAdmissionControlEnabled.load()) {
         // The way ingress admission works, one ticket should cover all the work for the operation.
@@ -1876,6 +1883,8 @@ void ExecCommandDatabase::_initiateCommand() {
         auto& admissionController = IngressAdmissionController::get(opCtx);
         _admissionTicket = admissionController.admitOperation(opCtx);
     }
+
+    admitWriteThrottlerIfNeeded(opCtx, getInvocation(), isExemptFromAdmissionControl);
 
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
 
@@ -1989,12 +1998,6 @@ void ExecCommandDatabase::_initiateCommand() {
 void ExecCommandDatabase::_commandExec() {
     auto opCtx = _execContext.getOpCtx();
 
-    // We do not want to create a span for every incoming command, we only want a span when
-    // $traceCtx is specified on the command so we call Span::startIfExistingTraceParent instead of
-    // Span::start.
-    auto otelSpan =
-        otel::traces::Span::startIfExistingTraceParent(opCtx, _execContext.getCommand()->getName());
-
     // If this command should start a new transaction, waitForReadConcern will be invoked
     // after invoking the TransactionParticipant, which will determine whether a transaction
     // is being started or continued.
@@ -2044,8 +2047,16 @@ void ExecCommandDatabase::_commandExec() {
 
             const bool waitedForInitialized = _awaitShardingInitializedIfNeeded(ex.toStatus());
 
+            // TODO (SERVER-98118): remove once 9.0 becomes last LTS. Note that the service entry
+            // point never retries operations that are run in a DBDirectClient, hence the exclusion
+            // here. Callers that may hit this error via dbDirectClient handle their own retries.
+            const bool shouldRetryDueToFCVTransition =
+                ex.code() == ErrorCodes::DDLCoordinatorMustRetryDueToFCVTransition &&
+                !opCtx->getClient()->isInDirectClient();
+
             const bool errorMayBeRetried =
-                staleExceptionIsRetryable == shard_role_loop::CanRetry::YES || waitedForInitialized;
+                staleExceptionIsRetryable == shard_role_loop::CanRetry::YES ||
+                waitedForInitialized || shouldRetryDueToFCVTransition;
 
             if (errorMayBeRetried && canRetryCommand(ex.toStatus())) {
                 _resetLockerStateAfterShardingUpdate(opCtx);
@@ -2063,11 +2074,8 @@ void ExecCommandDatabase::_commandExec() {
     if (auto writeError = OperationShardingState::get(opCtx).resetShardingOperationFailedStatus()) {
         try {
             shard_role_loop::handleStaleError(opCtx, *writeError, shardRetryCtx);
-        } catch (ExceptionFor<ErrorCategory::Interruption>& ex) {
-            ex.addContext("interruption while recovering sharding metadata upon write error");
-            throw;
         } catch (const DBException&) {
-            // Ignore other exceptions. We don't want to destroy the top-level command status.
+            // Ignore exceptions. We don't want to destroy the top-level command status.
         }
     }
 }
@@ -2120,6 +2128,11 @@ bool ExecCommandDatabase::canRetryCommand(const Status& execError) {
     if (execError == ErrorCodes::StaleDbVersion || execError == ErrorCodes::StaleConfig ||
         execError == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
         return _invocation->canRetryOnStaleShardMetadataError(_execContext.getRequest());
+    }
+
+    // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+    if (execError == ErrorCodes::DDLCoordinatorMustRetryDueToFCVTransition) {
+        return true;
     }
 
     return false;
@@ -2229,6 +2242,14 @@ void parseCommand(HandleRequest::ExecutionContext& execContext) try {
         checkAllowedOpQueryCommand(*client, opMsgReq.getCommandName());
     }
     execContext.setRequest(opMsgReq);
+
+    // Check for the presence of a telemetry context in the request first as that is much cheaper
+    // than checking if tracing is enabled.
+    if (execContext.getRequest().telemetryContext &&
+        otel::traces::isTracingEnabled(execContext.getOpCtx())) {
+        execContext.setTelemetryContext(otel::traces::TelemetryContextSerializer::fromSection(
+            execContext.getRequest().telemetryContext));
+    }
 } catch (const DBException& ex) {
     // Need to set request as `makeCommandResponse` expects an empty request on failure.
     execContext.setRequest({});
@@ -2259,6 +2280,19 @@ void executeCommand(HandleRequest::ExecutionContext& execContext) {
     }
 
     Command* c = execContext.getCommand();
+    auto& telemetryCtx = execContext.getTelemetryContext();
+    execContext.setOtelSpan(otel::traces::Span::startIngressSpan(
+        telemetryCtx,
+        c->getTraceSpanName(),
+        /*options=*/
+        {.kind = execContext.hasMoreToComeFlag() ? otel::traces::SpanKind::kConsumer
+                                                 : otel::traces::SpanKind::kServer}));
+    // Keep the OpCtx decoration in sync so later Span::start(opCtx, ...) calls see the same
+    // context. Skip when null so the common no-tracing path never touches the decoration.
+    if (telemetryCtx) {
+        otel::TelemetryContextHolder::getDecoration(opCtx).setTelemetryContext(telemetryCtx);
+    }
+
     LOGV2_DEBUG(
         21965,
         2,
@@ -2292,7 +2326,7 @@ DbResponse makeCommandResponse(const HandleRequest::ExecutionContext& execContex
     const Command* c = execContext.getCommand();
     auto replyBuilder = execContext.getReplyBuilder();
 
-    if (OpMsg::isFlagSet(message, OpMsg::kMoreToCome)) {
+    if (execContext.hasMoreToComeFlag()) {
         // Close the connection to get client to go through server selection again.
         if (NotPrimaryErrorTracker::get(opCtx->getClient()).hadError()) {
             if (c && c->getReadWriteType() == Command::ReadWriteType::kWrite)
@@ -2430,6 +2464,13 @@ DbResponse HandleRequest::runOperation() {
 void HandleRequest::completeOperation(DbResponse& response) {
     auto opCtx = executionContext.getOpCtx();
     auto& currentOp = executionContext.currentOp();
+    const auto readWriteType = currentOp.getReadWriteType();
+
+    if (shouldFinalizeWriteThrottlerAdmission(opCtx, readWriteType)) {
+        if (auto* throttler = WriteThrottler::get(opCtx)) {
+            throttler->finalizeAdmission(opCtx);
+        }
+    }
 
     // Mark the op as complete, and log it if appropriate. Returns a boolean indicating whether
     // this op should be written to the profiler.
@@ -2446,7 +2487,14 @@ void HandleRequest::completeOperation(DbResponse& response) {
         .increment(opCtx,
                    currentOp.elapsedTimeExcludingPauses(),
                    currentOp.debug().workingTimeMillis,
-                   currentOp.getReadWriteType());
+                   readWriteType);
+
+    // Add this op's time toward its query's total; the originating find/aggregate already recorded
+    // the strategy on the accumulator (shared via QueryLifespan). getIfExists lets non-query ops
+    // skip cheaply.
+    if (shouldRecordLatencyStats(opCtx) && QueryLifespan::getIfExists(opCtx)) {
+        QueryLatencyAccumulator::get(opCtx).addLatency(currentOp.elapsedTimeExcludingPauses());
+    }
 
     if (shouldProfile) {
         // Performance profiling is on
@@ -2472,6 +2520,23 @@ void HandleRequest::completeOperation(DbResponse& response) {
         auto ldapCumulativeOperationsStats = LDAPCumulativeOperationStats::get();
         if (ldapCumulativeOperationsStats) {
             ldapCumulativeOperationsStats->recordOpStats(ldapOperationStatsSnapshot);
+        }
+    }
+
+    const auto& errInfo = currentOp.debug().errInfo;
+    if (!errInfo.isOK()) {
+        try {
+            collectQueryStatsMongodReadErrored(opCtx, errInfo.code());
+        } catch (const DBException& ex) {
+            // Failing to collect query stats for an errored operation is a bug. Surface a BF/AF,
+            // but swallow it and fire once per process to avoid any negative impact on the cluster.
+            static std::once_flag once;
+            std::call_once(once, [&] {
+                tassertedNoThrow(13192400,
+                                 str::stream()
+                                     << "Failed to collect query stats for an errored operation: "
+                                     << redact(ex));
+            });
         }
     }
 }

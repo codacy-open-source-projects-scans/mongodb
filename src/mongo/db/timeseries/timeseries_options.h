@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -38,17 +12,23 @@
 
 #include <utility>
 
-MONGO_MOD_PUBLIC;
+#include <boost/optional.hpp>
+
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo::timeseries {
 
 /**
- * Evaluates whether the timeseries bucket's options are fixed (unchanged).
+ * Evaluates whether fixed-bucket query optimizations can be used.
  *
- * Returns true if `options.bucketRoundingSeconds` and `options.bucketMaxSpanSeconds` are equal and
- * the `parametersChanged` argument is `false`.
+ * Returns true if fixed-bucket query optimizations are enabled (via
+ * featureFlagFixedBucketingOptimizations), applicable to the specified timeseries options, and the
+ * caller has confirmed there is no extended-range data to worry about. 'hasExtendedRangeData' is
+ * boost::none when the caller cannot determine this (e.g. on the router, which lacks per-shard
+ * extended-range information) and the optimizations must conservatively be disabled.
  */
-bool areTimeseriesBucketsFixed(const TimeseriesOptions& options, bool parametersChanged);
+bool canUseFixedBucketOptimizations(const TimeseriesOptions& options,
+                                    boost::optional<bool> hasExtendedRangeData = boost::none);
 
 /**
  * Evaluates whether the transition of timeseries granularities is valid (returning Status::OK if
@@ -85,6 +65,23 @@ Date_t roundTimestampToGranularity(const Date_t& time, const TimeseriesOptions& 
  * Rounds down timestamp by the specified seconds.
  */
 Date_t roundTimestampBySeconds(const Date_t& time, long long roundingSeconds);
+
+/**
+ * Defaults the 'fixedBucketing' option to true for a NEW viewless time-series collection when the
+ * user omitted it. No-op when 'fixedBucketingEnabled' (featureFlagFixedBucketingCatalog) is false,
+ * or when the field was set explicitly (an explicit false is preserved). Only call for viewless
+ * collections; the caller is responsible for the viewless check.
+ */
+void setFixedBucketingDefaultForNewCollection(TimeseriesOptions& timeseriesOptions,
+                                              bool fixedBucketingEnabled);
+
+/**
+ * Inherits the 'fixedBucketing' value from 'existing' into 'requested' if the field is absent
+ * in 'requested'.
+ */
+void inheritFixedBucketingIfOmitted(TimeseriesOptions& requested,
+                                    const TimeseriesOptions& existing);
+
 /**
  * Validates the combination of bucketRoundingSeconds, bucketMaxSpanSeconds and granularity in
  * TimeseriesOptions. If the parameters are not valid we return a bad status and if no parameters

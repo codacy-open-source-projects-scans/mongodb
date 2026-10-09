@@ -2,6 +2,7 @@
 // Using GeoNearRandom because this test needs a lot of points in the index.
 // If there aren't enough points the test passes even if the code is broken.
 // @tags: [
+//   uses_explain,
 //   assumes_read_concern_local,
 //   requires_getmore,
 // ]
@@ -35,8 +36,12 @@ let oneDegree = Math.PI / 180; // in radians
 if (0) {
     assert.eq(test.t.count({loc: {$within: {$centerSphere: [[180, 0], oneDegree]}}}), 2);
     assert.eq(test.t.count({loc: {$within: {$centerSphere: [[-180, 0], oneDegree]}}}), 2);
-    test.t.find({loc: {$within: {$centerSphere: [[180, 0], oneDegree]}}}).forEach(assertXIsPositive);
-    test.t.find({loc: {$within: {$centerSphere: [[-180, 0], oneDegree]}}}).forEach(assertXIsNegative);
+    test.t
+        .find({loc: {$within: {$centerSphere: [[180, 0], oneDegree]}}})
+        .forEach(assertXIsPositive);
+    test.t
+        .find({loc: {$within: {$centerSphere: [[-180, 0], oneDegree]}}})
+        .forEach(assertXIsNegative);
 }
 
 assert.eq(

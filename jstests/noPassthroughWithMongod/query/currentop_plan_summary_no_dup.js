@@ -3,8 +3,8 @@
 // the cursor establishing command.
 //
 // @tags: [
-//   # TODO SERVER-116054: Add support for $where.
-//   mozjs_wasm_unsupported,
+//   # Uses a $where with a JavaScript predicate, which requires server-side scripting.
+//   requires_scripting,
 // ]
 TestData.disableImplicitSessions = true;
 
@@ -28,7 +28,8 @@ const cmdRes = assert.commandWorked(
         batchSize: 0,
     }),
 );
-const cmdStr = "db.runCommand({getMore: " + cmdRes.cursor.id.toString() + ', collection: "' + collName + '"})';
+const cmdStr =
+    "db.runCommand({getMore: " + cmdRes.cursor.id.toString() + ', collection: "' + collName + '"})';
 const awaitShell = startParallelShell(cmdStr);
 
 assert.soon(function () {

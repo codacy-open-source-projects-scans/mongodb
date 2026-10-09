@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/js_function.h"
 #include "mongo/db/exec/sbe/values/bson.h"
@@ -37,17 +11,17 @@
 namespace mongo {
 namespace sbe {
 namespace vm {
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinFtsMatch(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinFtsMatch(ArityType arity) {
     tassert(11080025, "Unexpected arity value", arity == 2);
 
-    auto [matcherOwn, matcherTag, matcherVal] = getFromStack(0);
-    auto [inputOwn, inputTag, inputVal] = getFromStack(1);
+    auto matcher = viewFromStack(0);
+    auto input = viewFromStack(1);
 
-    if (matcherTag != value::TypeTags::ftsMatcher || !value::isObject(inputTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (matcher.tag != value::TypeTags::ftsMatcher || !value::isObject(input.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto obj = [inputTag = inputTag, inputVal = inputVal]() {
+    auto obj = [inputTag = input.tag, inputVal = input.value]() {
         if (inputTag == value::TypeTags::bsonObject) {
             return BSONObj{value::bitcastTo<const char*>(inputVal)};
         }
@@ -59,59 +33,58 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinFtsMatch(ArityTy
         return builder.obj();
     }();
 
-    const bool matches = value::getFtsMatcherView(matcherVal)->matches(obj);
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(matches)};
+    const bool matches = value::getFtsMatcherView(matcher.value)->matches(obj);
+    return value::TagValueMaybeOwned::boolean(matches);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRunJsPredicate(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinRunJsPredicate(ArityType arity) {
     tassert(11080024, "Unexpected arity value", arity == 2);
 
-    auto [predicateOwned, predicateType, predicateValue] = getFromStack(0);
-    auto [inputOwned, inputType, inputValue] = getFromStack(1);
+    auto predicate = viewFromStack(0);
+    auto input = viewFromStack(1);
 
-    if (predicateType != value::TypeTags::jsFunction || !value::isObject(inputType)) {
-        return {false, value::TypeTags::Nothing, value::bitcastFrom<int64_t>(0)};
+    if (predicate.tag != value::TypeTags::jsFunction || !value::isObject(input.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
     BSONObj obj;
-    if (inputType == value::TypeTags::Object) {
+    if (input.tag == value::TypeTags::Object) {
         BSONObjBuilder objBuilder;
-        bson::convertToBsonObj(objBuilder, value::getObjectView(inputValue));
+        bson::convertToBsonObj(objBuilder, value::getObjectView(input.value));
         obj = objBuilder.obj();
-    } else if (inputType == value::TypeTags::bsonObject) {
-        obj = BSONObj(value::getRawPointerView(inputValue));
+    } else if (input.tag == value::TypeTags::bsonObject) {
+        obj = BSONObj(value::getRawPointerView(input.value));
     } else {
         MONGO_UNREACHABLE_TASSERT(11122945);
     }
 
-    auto predicate = value::getJsFunctionView(predicateValue);
-    auto predicateResult = predicate->runAsPredicate(obj);
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(predicateResult)};
+    auto jsFn = value::getJsFunctionView(predicate.value);
+    auto predicateResult = jsFn->runAsPredicate(obj);
+    return value::TagValueMaybeOwned::boolean(predicateResult);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinShardFilter(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinShardFilter(ArityType arity) {
     tassert(11080023, "Unexpected arity value", arity == 2);
 
-    auto [ownedFilter, filterTag, filterValue] = getFromStack(0);
-    auto [ownedShardKey, shardKeyTag, shardKeyValue] = getFromStack(1);
+    auto filter = viewFromStack(0);
+    auto shardKey = viewFromStack(1);
 
-    if (filterTag != value::TypeTags::shardFilterer || shardKeyTag != value::TypeTags::bsonObject) {
-        if (filterTag == value::TypeTags::shardFilterer &&
-            shardKeyTag == value::TypeTags::Nothing) {
+    if (filter.tag != value::TypeTags::shardFilterer ||
+        shardKey.tag != value::TypeTags::bsonObject) {
+        if (filter.tag == value::TypeTags::shardFilterer &&
+            shardKey.tag == value::TypeTags::Nothing) {
             LOGV2_WARNING(5071200,
                           "No shard key found in document, it may have been inserted manually "
                           "into shard",
                           "keyPattern"_attr =
-                              value::getShardFiltererView(filterValue)->getKeyPattern());
+                              value::getShardFiltererView(filter.value)->getKeyPattern());
         }
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    BSONObj keyAsUnownedBson{sbe::value::bitcastTo<const char*>(shardKeyValue)};
-    return {false,
-            value::TypeTags::Boolean,
-            value::bitcastFrom<bool>(
-                value::getShardFiltererView(filterValue)->keyBelongsToMe(keyAsUnownedBson))};
+    BSONObj keyAsUnownedBson{sbe::value::bitcastTo<const char*>(shardKey.value)};
+    return value::TagValueMaybeOwned::boolean(
+        value::getShardFiltererView(filter.value)->keyBelongsToMe(keyAsUnownedBson));
 }
 
 }  // namespace vm

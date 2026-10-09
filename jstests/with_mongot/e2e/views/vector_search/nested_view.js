@@ -1,7 +1,7 @@
 /**
  * This file tests $vectorSearch with a nested view pipeline.
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_81 ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {
     actionMoviesViewPipeline,
@@ -18,7 +18,9 @@ import {
 } from "jstests/with_mongot/e2e_lib/search_e2e_utils.js";
 
 // Create the action movies view on top of the enriched title view.
-const actionMoviesWithEnrichedTitle = createMoviesViewAndIndex(datasets.ACTION_MOVIES_WITH_ENRICHED_TITLE);
+const actionMoviesWithEnrichedTitle = createMoviesViewAndIndex(
+    datasets.ACTION_MOVIES_WITH_ENRICHED_TITLE,
+);
 const vectorQuery = makeMovieVectorExactQuery({
     queryVector: getMoviePlotEmbeddingById(6),
     limit: 5,

@@ -19,10 +19,13 @@
  *  # may set cluster/server parameters incompatible with the current/target FCV
  *  does_not_support_config_fuzzer,
  *  runs_set_fcv,
+ *  requires_getmore,
  * ]
  */
 
+import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 const timeFieldName = "t_field";
 const metaFieldName = "m_field";
@@ -41,143 +44,149 @@ export const $config = (function () {
         return meta_values[Random.randInt(3)];
     };
 
+    // Errors that are expected transiently while CRUD runs concurrently with FCV transitions in the
+    // rate-limited suite, and which the workload should tolerate rather than fail on:
+    //  - InterruptedDueToTimeseriesUpgradeDowngrade: a concurrent FCV transition interrupted the op.
+    //  - IngressRequestRateLimitExceeded: the rate-limited suite injects the
+    //    failIngressRequestRateLimiting failpoint on the shards. Reads are not labeled
+    //    RetryableError (they are not marked idempotent; SERVER-108898 is not planned), so shed
+    //    reads are not retried by mongos and surface directly to the shell. Writes can likewise
+    //    surface this error once mongos exhausts its internal retries. This is expected behavior in
+    //    the rate-limited suite, not a transient FCV artifact.
+    const commonAcceptedErrors = [
+        ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade,
+        ErrorCodes.IngressRequestRateLimitExceeded,
+    ];
+
+    // Runs 'fn', swallowing the commonly-accepted transient errors (plus any 'extraAcceptedErrors'
+    // specific to the caller) and rethrowing anything else.
+    let runToleratingAcceptedErrors = function (fn, extraAcceptedErrors = []) {
+        try {
+            fn();
+        } catch (e) {
+            const acceptedErrors = [...commonAcceptedErrors, ...extraAcceptedErrors];
+            if (e.code && acceptedErrors.includes(e.code)) {
+                return;
+            }
+            throw e;
+        }
+    };
+
+    // FCV transitions race with concurrent CRUD/index operations in this workload. Treat known
+    // transient errors as a no-op for this iteration.
+    let runSetFCVToleratingErrors = function (db, targetFCV) {
+        try {
+            assert.commandWorked(
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
+            );
+        } catch (e) {
+            if (handleRandomSetFCVErrors(e, targetFCV)) return;
+            throw e;
+        }
+    };
+
     let states = {
         upgrade: function (db, collName) {
             jsTestLog(`Upgrade`);
-            assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+            runSetFCVToleratingErrors(db, latestFCV);
         },
         downgrade: function (db, collName) {
             jsTestLog(`Downgrade`);
-            assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
+            runSetFCVToleratingErrors(db, lastLTSFCV);
         },
         insertOne: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = assert.commandWorked(
-                    coll.insertOne({"op": "insertOne", [metaFieldName]: rndMeta(), [timeFieldName]: ISODate()}),
+                    coll.insertOne({
+                        "op": "insertOne",
+                        [metaFieldName]: rndMeta(),
+                        [timeFieldName]: ISODate(),
+                    }),
                 );
                 jsTest.log(`${coll.getName()} insertOne: ${tojsononeline(res)}`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         insertMany: function (db, collName) {
             const coll = db[getCollNames()[0]];
             let docs = [];
             for (let i = 0; i < 1000; i++) {
-                docs.push({"op": "insertMany", [metaFieldName]: rndMeta(), [timeFieldName]: ISODate()});
+                docs.push({
+                    "op": "insertMany",
+                    [metaFieldName]: rndMeta(),
+                    [timeFieldName]: ISODate(),
+                });
             }
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = assert.commandWorked(coll.insertMany(docs));
                 jsTest.log(`${coll.getName()} insertMany: ${tojsononeline(res)}`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         deleteOne: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = assert.commandWorked(coll.deleteOne({[metaFieldName]: rndMeta()}));
                 jsTest.log(`${coll.getName()} deleteOne: ${tojsononeline(res)}`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         deleteMany: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = assert.commandWorked(coll.deleteMany({[metaFieldName]: rndMeta()}));
                 jsTest.log(`${coll.getName()} deleteMany: ${tojsononeline(res)}`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         updateMany: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
-                const res = assert.commandWorked(
-                    coll.updateMany({[metaFieldName]: rndMeta()}, {$set: {[metaFieldName]: rndMeta()}}),
-                );
-                jsTest.log(`${coll.getName()} updateMany: ${tojsononeline(res)}`);
-            } catch (e) {
-                const acceptedErrors = [
-                    ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade,
-                    // A concurrent FCV transition can cause a partial multi-update to fail with
-                    // QueryPlanKilled (StaleConfig rewritten to prevent unsafe router retry).
-                    ErrorCodes.QueryPlanKilled,
-                ];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            runToleratingAcceptedErrors(
+                () => {
+                    const res = assert.commandWorked(
+                        coll.updateMany(
+                            {[metaFieldName]: rndMeta()},
+                            {$set: {[metaFieldName]: rndMeta()}},
+                        ),
+                    );
+                    jsTest.log(`${coll.getName()} updateMany: ${tojsononeline(res)}`);
+                },
+                // A concurrent FCV transition can cause a partial multi-update to fail with
+                // QueryPlanKilled (StaleConfig rewritten to prevent unsafe router retry).
+                [ErrorCodes.QueryPlanKilled],
+            );
         },
         find: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = coll.find().itcount();
                 jsTest.log(`${coll.getName()} find ${res} docs`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         countDocuments: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = coll.countDocuments({});
                 jsTest.log(`${coll.getName()} counted ${res} docs`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
         aggregate: function (db, collName) {
             const coll = db[getCollNames()[0]];
-            try {
+            runToleratingAcceptedErrors(() => {
                 const res = coll.aggregate([{"$match": {[metaFieldName]: rndMeta()}}]).toArray();
                 jsTest.log(`${coll.getName()} aggregate found ${res.length}`);
-            } catch (e) {
-                const acceptedErrors = [ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade];
-                if (e.code && acceptedErrors.includes(e.code)) {
-                    return;
-                }
-                throw e;
-            }
+            });
         },
     };
 
     let setup = function (db, collName) {
         const collNames = getCollNames();
         for (const collName of collNames) {
-            db.createCollection(collName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}});
+            db.createCollection(collName, {
+                timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+            });
         }
     };
 
     let teardown = function (db, collName) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
     };
 
     return {

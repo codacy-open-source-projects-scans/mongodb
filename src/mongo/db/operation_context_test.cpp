@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/db/operation_context.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
@@ -44,7 +17,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
@@ -52,6 +24,7 @@
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/join_thread.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
@@ -63,13 +36,13 @@
 
 #include <functional>
 #include <future>  // IWYU pragma: keep
-#include <future>
 #include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <ostream>
 #include <ratio>
 #include <string>
+#include <string_view>
 #include <type_traits>
 
 #include <boost/move/utility_core.hpp>
@@ -82,6 +55,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 constexpr auto operator""_sec(unsigned long long n) noexcept {
     return Seconds{static_cast<long long>(n)};
@@ -287,6 +261,7 @@ public:
         : OperationTestWithMockClock(std::make_shared<ClockSourceMock>()) {}
 
     void setUp() override {
+        OperationContextTest::setUp();
         client = getServiceContext()->getService()->makeClient("OperationDeadlineTest");
     }
 
@@ -1123,19 +1098,19 @@ TEST_F(OperationContextTest, TestIsWaitingForConditionOrInterrupt) {
     ASSERT_FALSE(optCtx->isWaitingForConditionOrInterrupt());
 }
 
-TEST_F(OperationContextTest, CurrentOpExcludesKilledOperations) {
+TEST_F(OperationContextTest, CurrentOpExcludesPendingDestructionOperations) {
     auto client = getService()->makeClient("MainClient");
     auto opCtx = client->makeOperationContext();
     const auto expCtx = ExpressionContextBuilder{}
                             .opCtx(opCtx.get())
-                            .ns(NamespaceString::createNamespaceString_forTest("foo.bar"_sd))
+                            .ns(NamespaceString::createNamespaceString_forTest("foo.bar"sv))
                             .build();
     for (auto truncateOps : {true, false}) {
-        BSONObjBuilder bobNoOpCtx, bobKilledOpCtx;
+        BSONObjBuilder bobNoOpCtx, bobPendingDestructionOpCtx;
         // We use a separate client thread to generate CurrentOp reports in presence and absence
         // of an `opCtx`. This is because `CurOp::reportCurrentOpForClient()` accepts an `opCtx`
         // as input and requires it to be present throughout its execution.
-        stdx::thread thread([&]() mutable {
+        stdx::thread([&]() {
             std::lock_guard<Client> lk(*opCtx->getClient());
 
             auto threadClient = getService()->makeClient("ThreadClient");
@@ -1145,34 +1120,35 @@ TEST_F(OperationContextTest, CurrentOpExcludesKilledOperations) {
                 lk, expCtx, threadClient.get(), truncateOps, &bobNoOpCtx);
 
             auto threadOpCtx = threadClient->makeOperationContext();
-            getServiceContext()->killAndDelistOperation(threadOpCtx.get());
+            getServiceContext()->markOperationAsPendingDestruction(threadOpCtx.get());
 
-            // Generate report in presence of a killed opCtx
+            // Generate report in presence of a pending destruction opCtx
             CurOp::reportCurrentOpForClient(
-                lk, expCtx, threadClient.get(), truncateOps, &bobKilledOpCtx);
-        });
+                lk, expCtx, threadClient.get(), truncateOps, &bobPendingDestructionOpCtx);
+        }).join();
 
-        thread.join();
         auto objNoOpCtx = bobNoOpCtx.obj();
-        auto objKilledOpCtx = bobKilledOpCtx.obj();
+        auto objPendingDestructionOpCtx = bobPendingDestructionOpCtx.obj();
 
         LOGV2_DEBUG(4780201, 1, "With no opCtx", "object"_attr = objNoOpCtx);
-        LOGV2_DEBUG(4780202, 1, "With killed opCtx", "object"_attr = objKilledOpCtx);
+        LOGV2_DEBUG(4780202,
+                    1,
+                    "With pending destruction opCtx",
+                    "object"_attr = objPendingDestructionOpCtx);
 
-        ASSERT_EQ(objNoOpCtx.nFields(), objKilledOpCtx.nFields());
+        ASSERT_EQ(objNoOpCtx.nFields(), objPendingDestructionOpCtx.nFields());
 
         auto compareBSONObjs = [](BSONObj& a, BSONObj& b) -> bool {
             return (a == b).type == BSONObj::DeferredComparison::Type::kEQ;
         };
-        ASSERT(compareBSONObjs(objNoOpCtx, objKilledOpCtx));
+        ASSERT(compareBSONObjs(objNoOpCtx, objPendingDestructionOpCtx));
     }
 }
 
 TEST_F(OperationTestWithMockClock, InterruptCheckOnTime) {
-    RAIIServerParameterControllerForTest enableDelinquentTracking(
-        "featureFlagRecordDelinquentMetrics", true);
-    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
-                                                               1);
+    unittest::ServerParameterGuard enableDelinquentTracking("featureFlagRecordDelinquentMetrics",
+                                                            true);
+    unittest::ServerParameterGuard alwaysTrackInterrupts("overdueInterruptCheckSamplingRate", 1);
     auto client = getService()->makeClient("MainClient");
     auto opCtx = client->makeOperationContext();
     opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
@@ -1201,10 +1177,9 @@ TEST_F(OperationTestWithMockClock, InterruptCheckOnTime) {
 }
 
 TEST_F(OperationTestWithMockClock, InfrequentInterruptChecks) {
-    RAIIServerParameterControllerForTest enableDelinquentTracking(
-        "featureFlagRecordDelinquentMetrics", true);
-    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
-                                                               1);
+    unittest::ServerParameterGuard enableDelinquentTracking("featureFlagRecordDelinquentMetrics",
+                                                            true);
+    unittest::ServerParameterGuard alwaysTrackInterrupts("overdueInterruptCheckSamplingRate", 1);
     auto client = getService()->makeClient("MainClient");
     auto opCtx = client->makeOperationContext();
     opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());

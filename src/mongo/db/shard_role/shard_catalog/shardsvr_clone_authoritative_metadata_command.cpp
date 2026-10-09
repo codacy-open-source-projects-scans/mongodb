@@ -1,38 +1,16 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/global_catalog/ddl/clone_authoritative_metadata_coordinator.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/version_context.h"
+#include "mongo/logv2/log.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -81,6 +59,23 @@ public:
             // received by a lagging secondary config server node.
             VectorClockMutable::get(opCtx)->waitForDurableConfigTime().get(opCtx);
 
+            boost::optional<FixedFCVRegion> fcvRegion{boost::in_place_init, opCtx};
+
+            const auto accessLevel = sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
+                VersionContext::getDecoration(opCtx), fcvRegion.get()->acquireFCVSnapshot());
+            tassert(12806400,
+                    "CloneAuthoritativeMetadata invoked on a fully non-authoritative shard",
+                    accessLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed);
+            // If the shard is already authoritative, return OK by idempotency.
+            // Cloning again is unsafe due to concurrent reads, chunk migrations, etc.
+            // Note we can not tassert here; see SERVER-128064 for how this path may be reached.
+            if (accessLevel == AuthoritativeMetadataAccessLevelEnum::kWritesAndReadsAllowed) {
+                LOGV2(12806401,
+                      "Skipping CloneAuthoritativeMetadata: shard is already authoritative",
+                      "accessLevel"_attr = idlSerialize(accessLevel));
+                return;
+            }
+
             auto coordinatorDoc = CloneAuthoritativeMetadataCoordinatorDocument();
             coordinatorDoc.setShardingCoordinatorMetadata(
                 {{NamespaceString::kConfigShardCatalogDatabasesNamespace,
@@ -88,8 +83,10 @@ public:
 
             auto service = ShardingCoordinatorService::getService(opCtx);
             auto coordinator = checked_pointer_cast<CloneAuthoritativeMetadataCoordinator>(
-                service->getOrCreateInstance(
-                    opCtx, coordinatorDoc.toBSON(), FixedFCVRegion{opCtx}));
+                service->getOrCreateInstance(opCtx, coordinatorDoc.toBSON(), *fcvRegion));
+            // Release the FCV region while the coordinator executes
+            fcvRegion.reset();
+
             coordinator->getCompletionFuture().get(opCtx);
         }
 
@@ -112,7 +109,9 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrCloneAuthoritativeMetadataCommand).forShard();
+MONGO_REGISTER_COMMAND(ShardsvrCloneAuthoritativeMetadataCommand)
+    .requiresFeatureFlag(feature_flags::gAuthoritativeShardsDDL)
+    .forShard();
 
 }  // namespace
 }  // namespace mongo

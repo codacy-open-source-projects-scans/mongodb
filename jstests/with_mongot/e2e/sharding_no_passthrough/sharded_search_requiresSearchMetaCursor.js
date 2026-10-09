@@ -32,7 +32,9 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         assert.gte(shardNames.length, 2, "Test requires at least 2 shards");
 
         // Set primary shard so the unsharded collection lives on a specific shard.
-        assert.commandWorked(testDb.adminCommand({enableSharding: testDb.getName(), primaryShard: shardNames[0]}));
+        assert.commandWorked(
+            testDb.adminCommand({enableSharding: testDb.getName(), primaryShard: shardNames[0]}),
+        );
 
         shardedColl.drop();
         unshardedColl.drop();
@@ -53,8 +55,12 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         assert.commandWorked(unshardedColl.insert([{b: 1}, {b: 3}, {b: 5}]));
 
         // Shard the test collection, split it at {_id: 10}, and move the higher chunk to shard1.
-        assert.commandWorked(testDb.adminCommand({shardCollection: shardedColl.getFullName(), key: {_id: 1}}));
-        assert.commandWorked(testDb.adminCommand({split: shardedColl.getFullName(), middle: {_id: 10}}));
+        assert.commandWorked(
+            testDb.adminCommand({shardCollection: shardedColl.getFullName(), key: {_id: 1}}),
+        );
+        assert.commandWorked(
+            testDb.adminCommand({split: shardedColl.getFullName(), middle: {_id: 10}}),
+        );
         assert.commandWorked(
             testDb.adminCommand({
                 moveChunk: shardedColl.getFullName(),
@@ -147,6 +153,41 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
         }
     }
 
+    // Runs a pipeline with two $search stages (outer + inner via $unionWith or $lookup),
+    // then confirms via system.profile that requiresSearchMetaCursor is set independently
+    // for each $search when commands are dispatched to shards.
+    function runDoubleSearchRequiresSearchMetaCursorTest({
+        pipeline,
+        outerShouldRequire,
+        innerShouldRequire,
+        queryComment,
+    }) {
+        resetShardProfilers();
+
+        const results = shardedColl.aggregate(pipeline, {comment: queryComment}).toArray();
+        assert.gt(results.length, 0, "Expected at least one result");
+
+        for (let shardDB of [shard0DB, shard1DB]) {
+            const res = shardDB.system.profile
+                .find({
+                    "command.comment": queryComment,
+                    "command.aggregate": shardedCollName,
+                    "command.pipeline.0.$search": {$exists: true},
+                    "errCode": {"$ne": ErrorCodes.StaleConfig},
+                    "ok": 1,
+                })
+                .toArray();
+            if (res.length > 0) {
+                assert.eq(2, res.length, res);
+                const values = new Set(
+                    res.map((r) => r.command.pipeline[0].$search.requiresSearchMetaCursor),
+                );
+                assert(values.has(outerShouldRequire), res);
+                assert(values.has(innerShouldRequire), res);
+            }
+        }
+    }
+
     // Use an exists query on _id to match all documents in the collection.
     const mongotQuery = {
         index: searchIndexName,
@@ -185,7 +226,11 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
 
     it("should require search meta cursor when $$SEARCH_META is used in $project after $sort", function () {
         runRequiresSearchMetaCursorTest({
-            pipeline: [{$search: mongotQuery}, {$sort: {_id: -1}}, {$project: {_id: 0, foo: "$$SEARCH_META"}}],
+            pipeline: [
+                {$search: mongotQuery},
+                {$sort: {_id: -1}},
+                {$project: {_id: 0, foo: "$$SEARCH_META"}},
+            ],
             coll: shardedColl,
             expectedDocs: [
                 {foo: {count: {lowerBound: NumberLong(8)}}},
@@ -203,7 +248,12 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
 
     it("should not require search meta cursor for $search with $sort, $limit, and $project without $$SEARCH_META", function () {
         runRequiresSearchMetaCursorTest({
-            pipeline: [{$search: mongotQuery}, {$sort: {_id: -1}}, {$limit: 4}, {$project: {_id: 1}}],
+            pipeline: [
+                {$search: mongotQuery},
+                {$sort: {_id: -1}},
+                {$limit: 4},
+                {$project: {_id: 1}},
+            ],
             coll: shardedColl,
             expectedDocs: [{_id: 14}, {_id: 13}, {_id: 12}, {_id: 11}],
             shouldRequireSearchMetaCursor: false,
@@ -212,7 +262,11 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
 
     it("should require search meta cursor when $$SEARCH_META is used in $addFields", function () {
         runRequiresSearchMetaCursorTest({
-            pipeline: [{$search: mongotQuery}, {$limit: 1}, {$addFields: {meta: "$$SEARCH_META.count.lowerBound"}}],
+            pipeline: [
+                {$search: mongotQuery},
+                {$limit: 1},
+                {$addFields: {meta: "$$SEARCH_META.count.lowerBound"}},
+            ],
             coll: shardedColl,
             shouldRequireSearchMetaCursor: true,
         });
@@ -367,6 +421,100 @@ describe("requiresSearchMetaCursor in sharded search queries", function () {
             ],
             coll: unshardedColl,
             shouldRequireSearchMetaCursor: false,
+        });
+    });
+
+    it("should set both requiresSearchMetaCursor to false for double $search with no $$SEARCH_META via $unionWith", function () {
+        runDoubleSearchRequiresSearchMetaCursorTest({
+            pipeline: [
+                {$search: mongotQuery},
+                {$sort: {_id: 1}},
+                {$limit: 1},
+                {
+                    $unionWith: {
+                        coll: shardedCollName,
+                        pipeline: [{$search: mongotQuery}, {$sort: {_id: -1}}, {$limit: 1}],
+                    },
+                },
+            ],
+            outerShouldRequire: false,
+            innerShouldRequire: false,
+            queryComment: "double_search_no_meta",
+        });
+    });
+
+    it("should set both requiresSearchMetaCursor to true for double $search with $$SEARCH_META in both via $unionWith", function () {
+        runDoubleSearchRequiresSearchMetaCursorTest({
+            pipeline: [
+                {$search: mongotQuery},
+                {$sort: {_id: 1}},
+                {$limit: 1},
+                {$project: {meta: "$$SEARCH_META"}},
+                {
+                    $unionWith: {
+                        coll: shardedCollName,
+                        pipeline: [
+                            {$search: mongotQuery},
+                            {$sort: {_id: -1}},
+                            {$limit: 1},
+                            {$project: {meta: "$$SEARCH_META"}},
+                        ],
+                    },
+                },
+            ],
+            outerShouldRequire: true,
+            innerShouldRequire: true,
+            queryComment: "double_search_both_meta",
+        });
+    });
+
+    it("should set outer false and inner true for double $search with $$SEARCH_META only in $lookup subpipeline", function () {
+        runDoubleSearchRequiresSearchMetaCursorTest({
+            pipeline: [
+                {$search: mongotQuery},
+                {$match: {_id: {$lt: 3}}},
+                {
+                    $lookup: {
+                        from: shardedCollName,
+                        pipeline: [
+                            {$search: mongotQuery},
+                            {$match: {y: "ipsum"}},
+                            {$project: {_id: 1, meta: "$$SEARCH_META"}},
+                            {$limit: 1},
+                        ],
+                        as: "out",
+                    },
+                },
+                {$project: {_id: 1, out: 1}},
+            ],
+            outerShouldRequire: false,
+            innerShouldRequire: true,
+            queryComment: "double_search_inner_meta_only",
+        });
+    });
+
+    it("should set outer true and inner false for double $search with $$SEARCH_META only in outer via $lookup", function () {
+        runDoubleSearchRequiresSearchMetaCursorTest({
+            pipeline: [
+                {$search: mongotQuery},
+                {$limit: 2},
+                {$project: {_id: 0, meta: "$$SEARCH_META"}},
+                {
+                    $lookup: {
+                        from: shardedCollName,
+                        pipeline: [
+                            {$search: mongotQuery},
+                            {$sort: {y: -1}},
+                            {$limit: 1},
+                            {$project: {_id: 0}},
+                        ],
+                        as: "out",
+                    },
+                },
+            ],
+            outerShouldRequire: true,
+            innerShouldRequire: false,
+            queryComment: "double_search_outer_meta_only",
         });
     });
 });

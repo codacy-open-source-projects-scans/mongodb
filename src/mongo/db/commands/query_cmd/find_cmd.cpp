@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -60,6 +33,7 @@
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -101,6 +75,7 @@
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/repl_network_traffic_stats.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/server_feature_flags_gen.h"
@@ -122,7 +97,7 @@
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/message.h"
@@ -146,6 +121,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional.hpp>
@@ -157,13 +133,14 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 // Ticks for server-side Javascript deprecation log messages.
 Rarely _samplerFunctionJs, _samplerWhereClause;
 
 MONGO_FAIL_POINT_DEFINE(allowExternalReadsForReverseOplogScanRule);
 MONGO_FAIL_POINT_DEFINE(hangBeforeFetcherFindCommandOnOplog);
 
-const auto kTermField = "term"_sd;
+const auto kTermField = "term"sv;
 
 /**
  * Fills out the CurOp for "opCtx" with information about this query.
@@ -212,29 +189,29 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
         return shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedRequest, expCtx);
     }};
     auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
-        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss); });
+        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape); });
 
-    // Perform the query settings lookup and attach it to 'expCtx'.
+    // Resolve the query settings for this operation.
     auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
-    auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
-        expCtx, queryShapeHash, nss, parsedRequest->findCommandRequest->getQuerySettings());
-    expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+    auto& findReq = *parsedRequest->findCommandRequest;
+    querySettingsService.initializeSettingsForQuery(
+        expCtx, queryShapeHash, findReq.getQuerySettings());
 
     // Register query stats collection. Exclude queries with encrypted fields as indicated by the
     // inclusion of encryptionInformation in the request.
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
-    if (!parsedRequest->findCommandRequest->getEncryptionInformation()) {
+    if (!findReq.getEncryptionInformation()) {
         query_stats::registerRequest(opCtx, nss, [&]() {
             uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
             return std::make_unique<query_stats::FindKey>(
                 expCtx,
-                *parsedRequest->findCommandRequest,
+                findReq,
                 std::move(deferredShape->getValue()),
                 collOrViewAcquisition.getCollectionType());
         });
 
-        if (parsedRequest->findCommandRequest->getIncludeQueryStatsMetrics()) {
+        if (findReq.getIncludeQueryStatsMetrics()) {
             CurOp::get(opCtx)->debug().getQueryStatsInfo().metricsRequested = true;
         }
     }
@@ -298,13 +275,16 @@ public:
         return ReadWriteType::kRead;
     }
 
+    bool supportsQuerySettings() const override {
+        return true;
+    }
+
     std::size_t reserveBytesForReply() const override {
         return FindCommon::kInitReplyBufferSize;
     }
 
     /**
-     * A find command does not increment the command counter, but rather increments the
-     * query counter.
+     * Counted via opcounters.queries rather than the generic command counter.
      */
     bool shouldAffectCommandCounter() const override {
         return false;
@@ -346,6 +326,8 @@ public:
                 CommandHelpers::ensureValidCollectionName(request().getNamespaceOrUUID().nss());
             }
             assertInternalParamsAreSetByInternalClients(opCtx->getClient(), request());
+            Variables::validateRuntimeConstantsArePermitted(opCtx,
+                                                            request().getLegacyRuntimeConstants());
             uassert(ErrorCodes::FailedToParse,
                     "Use of forcedPlanSolutionHash not permitted.",
                     !request().getForcedPlanSolutionHash() ||
@@ -408,7 +390,7 @@ public:
                         nsOrUUID.nss().isValid());
                 uassertStatusOK(auth::checkAuthForFind(authSession, nsOrUUID.nss(), hasTerm));
             } else {
-                const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisition(
+                const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisitionAtLatest(
                     opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
                 uassertStatusOK(auth::checkAuthForFind(authSession, resolvedNss, hasTerm));
             }
@@ -520,14 +502,13 @@ public:
                                                                               expCtx);
             }};
             auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
-                return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, ns);
+                return shape_helpers::computeQueryShapeHash(expCtx, deferredShape);
             });
 
-            // Perform the query settings lookup and attach it to 'expCtx'.
+            // Resolve the query settings for this operation.
             auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
-            auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
-                expCtx, queryShapeHash, ns, parsedRequest->findCommandRequest->getQuerySettings());
-            expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+            querySettingsService.initializeSettingsForQuery(
+                expCtx, queryShapeHash, parsedRequest->findCommandRequest->getQuerySettings());
 
             auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
                 .expCtx = std::move(expCtx), .parsedFind = std::move(parsedRequest)});
@@ -677,12 +658,22 @@ public:
                     CurOpFailpointHelpers::waitWhileFailPointEnabled(
                         &hangBeforeFetcherFindCommandOnOplog,
                         opCtx,
-                        "hangBeforeFetcherFindCommandOnOplog");
+                        "hangBeforeFetcherFindCommandOnOplog",
+                        nullptr,
+                        _ns);
                 }
                 // We do not want to wait to take tickets for internal (replication) oplog reads.
                 // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
                 // depend on data reaching secondaries in order to proceed; and secondaries may get
                 // stalled replicating because of an inability to acquire a read ticket.
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
+            }
+            // Critical collection reads from internal clients must make forward progress without
+            // blocking on ticket acquisition. Since this is for internal clients it does not
+            // include loopback requests through DBDirectClient.
+            if (!admissionPriority && isSystemCriticalNss &&
+                opCtx->getClient()->isInternalClient()) {
+                systemCriticalTaskType.reset();
                 admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
             }
 
@@ -956,6 +947,13 @@ public:
                 throw;
             }
 
+            // Account the first oplog batch served to a replication oplog fetcher. A term is only
+            // permitted on an oplog read for internal replication clients, so (term && isOplogNss)
+            // identifies oplog fetching and excludes other oplog readers (backups, etc.).
+            if (term && isOplogNss) {
+                repl::recordOplogBytesSent(static_cast<int64_t>(firstBatch.bytesUsed()));
+            }
+
             // Set up the cursor for getMore.
             CursorId cursorId = 0;
             if (shouldSaveCursor(opCtx, collectionPtr, exec.get())) {
@@ -1050,19 +1048,24 @@ public:
                                                     false));
             // This will do view definition resolution for views and timeseries things for
             // timeseries queries.
-            const auto status = runAggregate(opCtx,
-                                             aggRequest,
-                                             {aggRequest},
-                                             unparsedRequest().body,
-                                             privileges,
-                                             verbosity,
-                                             replyBuilder);
-            if (status.code() == ErrorCodes::InvalidPipelineOperator) {
-                uasserted(ErrorCodes::InvalidPipelineOperator,
-                          str::stream{} << "Unsupported operator in converted pipeline: "
-                                        << status.reason());
-            }
-            uassertStatusOK(status);
+            //
+            // This aggregation was derived locally from the find, so any IFR flag kickback it
+            // raises has to be absorbed here rather than propagated to the router.
+            retryOnLocalIFRFlagKickback(opCtx, aggRequest, "find as aggregation", [&] {
+                const auto status = runAggregate(opCtx,
+                                                 aggRequest,
+                                                 {aggRequest},
+                                                 unparsedRequest().body,
+                                                 privileges,
+                                                 verbosity,
+                                                 replyBuilder);
+                if (status.code() == ErrorCodes::InvalidPipelineOperator) {
+                    uasserted(ErrorCodes::InvalidPipelineOperator,
+                              str::stream{} << "Unsupported operator in converted pipeline: "
+                                            << status.reason());
+                }
+                uassertStatusOK(status);
+            });
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {

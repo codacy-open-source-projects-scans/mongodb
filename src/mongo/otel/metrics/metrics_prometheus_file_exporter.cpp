@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/metrics_prometheus_file_exporter.h"
 
@@ -94,6 +68,32 @@ Counter<int64_t>& skippedWritesCounter = MetricsService::instance().createInt64C
     MetricUnit::kEvents,
     {.serverStatusOptions = ServerStatusOptions{
          .dottedPath = "prometheusFileExporter.skippedWrites", .role = ClusterRole::None}});
+
+Histogram<int64_t>& writeDurationHistogram = MetricsService::instance().createInt64Histogram(
+    MetricNames::kPrometheusFileExporterWriteDuration,
+    "The time taken to write a metrics file in the Prometheus file exporter.",
+    MetricUnit::kMilliseconds);
+
+Histogram<int64_t>& writeSizeHistogram = MetricsService::instance().createInt64Histogram(
+    MetricNames::kPrometheusFileExporterWriteSize,
+    "The size of the serialized metrics written by the Prometheus file exporter.",
+    MetricUnit::kBytes,
+    // Powers of 2 from 1 KiB (2^10) through 16 MiB (2^24), the first power of 2 above 10 MiB.
+    {.explicitBucketBoundaries = std::vector<double>{1024,
+                                                     2048,
+                                                     4096,
+                                                     8192,
+                                                     16384,
+                                                     32768,
+                                                     65536,
+                                                     131072,
+                                                     262144,
+                                                     524288,
+                                                     1048576,
+                                                     2097152,
+                                                     4194304,
+                                                     8388608,
+                                                     16777216}});
 
 /**
  * Exports Opentelemetry metrics in Prometheus format to a file. This exports all metrics to the
@@ -287,6 +287,7 @@ Status PrometheusFileExporter::_writeMetrics(const std::vector<MetricFamily>& me
     // combination of the two. Additionally, if a process is reading the old file when it is
     // overwritten by a new file, the old file will not be deleted from disk until the reader closes
     // the file handle.
+    Date_t start = _clockSource.now();
     std::string serializedMetrics = _serializer.Serialize(metrics);
     std::ofstream filestream;
     filestream.open(_tempFilepath.c_str(), std::ios_base::out | std::ios_base::trunc);
@@ -300,7 +301,10 @@ Status PrometheusFileExporter::_writeMetrics(const std::vector<MetricFamily>& me
     if (filestream.fail()) {
         return Status(
             ErrorCodes::FileStreamFailed,
-            fmt::format("Writing to metrics temp file failed. filepath: {}", _tempFilepath));
+            fmt::format(
+                "Writing to metrics temp file failed. filepath: {} metrics size (bytes): {}",
+                _tempFilepath,
+                serializedMetrics.size()));
     }
     std::error_code ec;
     std::filesystem::rename(_tempFilepath, _filepath, ec);
@@ -312,6 +316,8 @@ Status PrometheusFileExporter::_writeMetrics(const std::vector<MetricFamily>& me
                                   _filepath,
                                   ec.message()));
     }
+    writeDurationHistogram.record((_clockSource.now() - start).count());
+    writeSizeHistogram.record(static_cast<int64_t>(serializedMetrics.size()));
     return Status::OK();
 }
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/vote_requester.h"
@@ -55,6 +29,7 @@
 
 namespace mongo {
 namespace repl {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -138,7 +113,7 @@ void VoteRequester::Algorithm::processResponse(const RemoteCommandRequest& reque
 
     _responsesProcessed++;
     if (!response.isOK()) {  // failed response
-        logAttrs.add("failReason", "failed to receive response"_sd);
+        logAttrs.add("failReason", "failed to receive response"sv);
         logAttrs.add("error", response.status);
         logAttrs.add("from", request.target);
         return;
@@ -155,7 +130,7 @@ void VoteRequester::Algorithm::processResponse(const RemoteCommandRequest& reque
         status = voteResponse.initialize(response.data);
     }
     if (!status.isOK()) {
-        logAttrs.add("failReason", "received an invalid response"_sd);
+        logAttrs.add("failReason", "received an invalid response"sv);
         logAttrs.add("error", status);
         logAttrs.add("from", request.target);
         logAttrs.add("message", response.data);
@@ -163,14 +138,14 @@ void VoteRequester::Algorithm::processResponse(const RemoteCommandRequest& reque
     }
 
     if (voteResponse.getVoteGranted()) {
-        logAttrs.add("vote", "yes"_sd);
+        logAttrs.add("vote", "yes"sv);
         logAttrs.add("from", request.target);
         if (_primaryHost == request.target) {
             _primaryVote = PrimaryVote::Yes;
         }
         _votes++;
     } else {
-        logAttrs.add("vote", "no"_sd);
+        logAttrs.add("vote", "no"sv);
         logAttrs.add("from", request.target);
         logAttrs.add("reason", voteResponse.getReason());
     }

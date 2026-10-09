@@ -12,13 +12,18 @@ import {
     profilerHasSingleMatchingEntryOrThrow,
     profilerHasZeroMatchingEntriesOrThrow,
 } from "jstests/libs/profiler.js";
-import {getAggPlanStages, getPlanStage, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
+import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 
 const conn = MongoRunner.runMongod({setParameter: {featureFlagExtendedAutoSpilling: true}});
 const testDB = conn.getDB("profile_agg");
 const collName = jsTestName();
 const coll = testDB.getCollection(collName);
+
+// The explicit plan cache clear below is only needed when SBE is fully enabled; under the classic
+// engine the test keeps its original behavior so it still exercises the classic plan cache.
+const sbeFullyEnabled = checkSbeFullyEnabled(testDB);
 
 testDB.setProfilingLevel(2);
 
@@ -50,8 +55,20 @@ profileObj = getLatestProfilerEntry(testDB);
 assert(!profileObj.hasOwnProperty("usedDisk"), tojson(profileObj));
 assert.eq(profileObj.hasSortStage, true, tojson(profileObj));
 
-assert.commandWorked(testDB.adminCommand({setParameter: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 10}));
-assert.eq(8, coll.aggregate([{$match: {a: {$gte: 2}}}, {$sort: {a: 1}}], {allowDiskUse: true}).itcount());
+assert.commandWorked(
+    testDB.adminCommand({setParameter: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 10}),
+);
+// TODO SERVER-67035: Remove this explicit plan cache clear once 'featureFlagSbeFull' is removed.
+// Under SBE full, changing the sort memory limit no longer implicitly clears the SBE plan cache, so
+// clear it explicitly; otherwise the cached plan built with the previous limit is reused and won't
+// spill. Gated on SBE full so we don't mask classic plan cache behavior.
+if (sbeFullyEnabled) {
+    coll.getPlanCache().clear();
+}
+assert.eq(
+    8,
+    coll.aggregate([{$match: {a: {$gte: 2}}}, {$sort: {a: 1}}], {allowDiskUse: true}).itcount(),
+);
 profileObj = getLatestProfilerEntry(testDB);
 
 assert.eq(profileObj.usedDisk, true, tojson(profileObj));
@@ -88,11 +105,30 @@ assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 //
 resetCollection();
 
+// When featureFlagSbeAccumulatorExpressions is enabled, the $avg group key makes this $group
+// eligible for SBE, whose hash agg spills eagerly in debug builds and obeys its own memory knob
+// rather than 'internalDocumentSourceGroupMaxMemoryBytes'. Pin its spilling behavior so the
+// assertions below hold in either engine.
+assert.commandWorked(
+    testDB.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "never",
+    }),
+);
+
 coll.aggregate([{$group: {"_id": {$avg: "$a"}}}], {allowDiskUse: true});
 profileObj = getLatestProfilerEntry(testDB);
 assert(!profileObj.hasOwnProperty("usedDisk"), tojson(profileObj));
 
-assert.commandWorked(testDB.adminCommand({setParameter: 1, internalDocumentSourceGroupMaxMemoryBytes: 10}));
+assert.commandWorked(
+    testDB.adminCommand({setParameter: 1, internalDocumentSourceGroupMaxMemoryBytes: 10}),
+);
+assert.commandWorked(
+    testDB.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill: 10,
+    }),
+);
 resetCollection();
 coll.aggregate([{$group: {"_id": {$avg: "$a"}}}], {allowDiskUse: true});
 profileObj = getLatestProfilerEntry(testDB);
@@ -116,9 +152,12 @@ assert.commandWorked(
 assert.commandWorked(coll.createIndex({a: "text"}));
 assert.commandWorked(testDB.adminCommand({setParameter: 1, internalTextOrStageMaxMemoryBytes: 1}));
 
-coll.aggregate([{$match: {$text: {$search: "black tea"}}}, {$addFields: {score: {$meta: "textScore"}}}], {
-    allowDiskUse: true,
-});
+coll.aggregate(
+    [{$match: {$text: {$search: "black tea"}}}, {$addFields: {score: {$meta: "textScore"}}}],
+    {
+        allowDiskUse: true,
+    },
+);
 profileObj = getLatestProfilerEntry(testDB);
 assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 assert.gt(profileObj.textOrSpills, 0, tojson(profileObj));
@@ -155,7 +194,9 @@ assert.commandWorked(
         {_id: 7},
     ]),
 );
-assert.commandWorked(testDB.adminCommand({setParameter: 1, internalDocumentSourceGraphLookupMaxMemoryBytes: 1}));
+assert.commandWorked(
+    testDB.adminCommand({setParameter: 1, internalDocumentSourceGraphLookupMaxMemoryBytes: 1}),
+);
 
 const graphLookupStage = {
     $graphLookup: {
@@ -188,24 +229,16 @@ assert.gt(profileObj.graphLookupSpilledDataStorageSize, 0, tojson(profileObj));
 // Confirm that usedDisk is correctly detected for the $setWindowFields stage.
 //
 
-const setWindowFieldsPipeline = [{$setWindowFields: {sortBy: {a: 1}, output: {as: {$addToSet: "$a"}}}}];
+const setWindowFieldsPipeline = [
+    {$setWindowFields: {sortBy: {a: 1}, output: {as: {$addToSet: "$a"}}}},
+];
 
-function getSetWindowFieldsMemoryLimit() {
-    const explain = coll.explain().aggregate(setWindowFieldsPipeline);
-    // If $setWindowFields was pushed down to SBE, set a lower limit. We can't set it to 1 byte
-    // for Classic because DocumentSourceSetWindowFields will fail if it still doesn't fit into
-    // memory limit after spilling.
-    if (getPlanStage(getWinningPlanFromExplain(explain), "WINDOW")) {
-        return 1;
-    } else {
-        return 500;
-    }
-}
-
+// We can't set the limit to 1 byte because DocumentSourceSetWindowFields will fail if it still
+// doesn't fit into the memory limit after spilling.
 assert.commandWorked(
     testDB.adminCommand({
         setParameter: 1,
-        internalDocumentSourceSetWindowFieldsMaxMemoryBytes: getSetWindowFieldsMemoryLimit(),
+        internalDocumentSourceSetWindowFieldsMaxMemoryBytes: 500,
     }),
 );
 resetCollection();
@@ -227,7 +260,10 @@ assert.gt(profileObj.sortSpilledDataStorageSize, 0, tojson(profileObj));
 resetCollection();
 resetForeignCollection();
 coll.aggregate(
-    [{$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "foreign", as: "same"}}, {$unwind: "$same"}],
+    [
+        {$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "foreign", as: "same"}},
+        {$unwind: "$same"},
+    ],
     {allowDiskUse: true},
 );
 profileObj = getLatestProfilerEntry(testDB);
@@ -239,9 +275,12 @@ assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 //
 resetCollection();
 resetForeignCollection();
-coll.aggregate([{$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "foreign", as: "same"}}], {
-    allowDiskUse: true,
-});
+coll.aggregate(
+    [{$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "foreign", as: "same"}}],
+    {
+        allowDiskUse: true,
+    },
+);
 profileObj = getLatestProfilerEntry(testDB);
 assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 
@@ -281,13 +320,19 @@ assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 // Test that usedDisk is not set for a $lookup with a pipeline that does not use disk.
 //
 assert.commandWorked(
-    testDB.adminCommand({setParameter: 1, internalQueryMaxBlockingSortMemoryUsageBytes: 100 * 1024 * 1024}),
+    testDB.adminCommand({
+        setParameter: 1,
+        internalQueryMaxBlockingSortMemoryUsageBytes: 100 * 1024 * 1024,
+    }),
 );
 resetCollection();
 resetForeignCollection();
-coll.aggregate([{$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "otherTest", as: "same"}}], {
-    allowDiskUse: true,
-});
+coll.aggregate(
+    [{$lookup: {let: {var1: "$a"}, pipeline: [{$sort: {a: 1}}], from: "otherTest", as: "same"}}],
+    {
+        allowDiskUse: true,
+    },
+);
 profileObj = getLatestProfilerEntry(testDB);
 assert(!profileObj.hasOwnProperty("usedDisk"), tojson(profileObj));
 
@@ -298,13 +343,19 @@ assert.commandWorked(
     }),
 );
 assert.commandWorked(
-    testDB.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "never"}),
+    testDB.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "never",
+    }),
 );
 
 function checkHashLookup(pipeline) {
     // HashLookup spills only in SBE
     const explain = coll.explain().aggregate(pipeline);
-    if (getAggPlanStages(explain, "EQ_LOOKUP_UNWIND").length > 0 || getAggPlanStages(explain, "EQ_LOOKUP").length > 0) {
+    if (
+        getAggPlanStages(explain, "EQ_LOOKUP_UNWIND").length > 0 ||
+        getAggPlanStages(explain, "EQ_LOOKUP").length > 0
+    ) {
         coll.aggregate(pipeline, {allowDiskUse: true});
         const profileObj = getLatestProfilerEntry(testDB);
         assert.eq(profileObj.usedDisk, true, tojson(profileObj));
@@ -315,7 +366,9 @@ function checkHashLookup(pipeline) {
     }
 }
 
-const lookupPipeline = [{$lookup: {from: "foreign", localField: "a", foreignField: "b", as: "same"}}];
+const lookupPipeline = [
+    {$lookup: {from: "foreign", localField: "a", foreignField: "b", as: "same"}},
+];
 checkHashLookup(lookupPipeline);
 
 const lookupUnwindPipeline = [
@@ -341,18 +394,24 @@ assert.throws(() =>
 //
 resetCollection();
 resetForeignCollection();
-coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$group: {"_id": {$avg: "$b"}}}]}}], {allowDiskUse: true});
+coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$group: {"_id": {$avg: "$b"}}}]}}], {
+    allowDiskUse: true,
+});
 profileObj = getLatestProfilerEntry(testDB);
 assert.eq(profileObj.usedDisk, true, tojson(profileObj));
 
 //
 // Test that usedDisk is not set for a $unionWith with a sub-pipeline that does not use disk.
 //
-coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$sort: {b: 1}}]}}], {allowDiskUse: true});
+coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$sort: {b: 1}}]}}], {
+    allowDiskUse: true,
+});
 profileObj = getLatestProfilerEntry(testDB);
 assert(!profileObj.usedDisk, tojson(profileObj));
 
-coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$match: {a: 1}}]}}], {allowDiskUse: true});
+coll.aggregate([{$unionWith: {coll: "foreign", pipeline: [{$match: {a: 1}}]}}], {
+    allowDiskUse: true,
+});
 profileObj = getLatestProfilerEntry(testDB);
 assert(!profileObj.usedDisk, tojson(profileObj));
 
@@ -361,10 +420,20 @@ MongoRunner.stopMongod(conn);
 //
 // Tests on a sharded cluster.
 //
-const st = new ShardingTest({shards: 2});
+// Non-deterministic query stats collection can lead to non-deterministic usedDisk in system.profile.
+const queryStatsDisabled = {internalQueryStatsRateLimit: 0, internalQueryStatsSampleRate: 0};
+const st = new ShardingTest({
+    shards: 2,
+    other: {
+        mongosOptions: {setParameter: queryStatsDisabled},
+        rsOptions: {setParameter: queryStatsDisabled},
+    },
+});
 const shardedDB = st.s.getDB(jsTestName());
 
-assert.commandWorked(st.s0.adminCommand({enableSharding: shardedDB.getName(), primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s0.adminCommand({enableSharding: shardedDB.getName(), primaryShard: st.shard0.shardName}),
+);
 
 const shardedSourceColl = shardedDB.coll1;
 const shardedForeignColl = shardedDB.coll2;
@@ -398,7 +467,26 @@ function restartProfiler() {
     }
 }
 
-assert.commandWorked(shard0DB.adminCommand({setParameter: 1, internalDocumentSourceGroupMaxMemoryBytes: 10}));
+assert.commandWorked(
+    shard0DB.adminCommand({setParameter: 1, internalDocumentSourceGroupMaxMemoryBytes: 10}),
+);
+// As above, pin SBE hash agg spilling in case featureFlagSbeAccumulatorExpressions pushes the
+// $avg-keyed $group stages below into SBE on the shards. The spill threshold mirrors the classic
+// knob and is only set on shard0, which is where the assertions below expect spilling.
+for (let shardDB of [shard0DB, shard1DB]) {
+    assert.commandWorked(
+        shardDB.adminCommand({
+            setParameter: 1,
+            internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "never",
+        }),
+    );
+}
+assert.commandWorked(
+    shard0DB.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill: 10,
+    }),
+);
 restartProfiler();
 // Test that 'usedDisk' doesn't get populated on the profiler entry of the base pipeline, when the
 // $unionWith'd pipeline needs to use disk on a sharded collection.
@@ -407,7 +495,10 @@ assert.commandWorked(
         aggregate: shardedSourceColl.getName(),
         pipeline: [
             {
-                $unionWith: {coll: shardedForeignColl.getName(), pipeline: [{$group: {"_id": {$avg: "$x"}}}]},
+                $unionWith: {
+                    coll: shardedForeignColl.getName(),
+                    pipeline: [{$group: {"_id": {$avg: "$x"}}}],
+                },
             },
         ],
         cursor: {},
@@ -417,7 +508,11 @@ assert.commandWorked(
 // Verify that the $unionWith'd pipeline always has the profiler entry.
 profilerHasSingleMatchingEntryOrThrow({
     profileDB: shard0DB,
-    filter: {"command.getMore": {$exists: true}, usedDisk: true, ns: shardedForeignColl.getFullName()},
+    filter: {
+        "command.getMore": {$exists: true},
+        usedDisk: true,
+        ns: shardedForeignColl.getFullName(),
+    },
 });
 
 // If the $mergeCursor is ran on the shard0DB, then the profiler entry should have the 'usedDisk'
@@ -460,14 +555,21 @@ restartProfiler();
 assert.commandWorked(
     shardedDB.runCommand({
         aggregate: shardedSourceColl.getName(),
-        pipeline: [{$group: {"_id": {$avg: "$x"}}}, {$unionWith: {coll: shardedForeignColl.getName(), pipeline: []}}],
+        pipeline: [
+            {$group: {"_id": {$avg: "$x"}}},
+            {$unionWith: {coll: shardedForeignColl.getName(), pipeline: []}},
+        ],
         cursor: {},
         allowDiskUse: true,
     }),
 );
 profilerHasSingleMatchingEntryOrThrow({
     profileDB: shard0DB,
-    filter: {"command.getMore": {$exists: true}, usedDisk: true, ns: shardedSourceColl.getFullName()},
+    filter: {
+        "command.getMore": {$exists: true},
+        usedDisk: true,
+        ns: shardedSourceColl.getFullName(),
+    },
 });
 profilerHasZeroMatchingEntriesOrThrow({
     profileDB: shard0DB,
@@ -477,7 +579,16 @@ profilerHasZeroMatchingEntriesOrThrow({
 // Set the 'internalDocumentSourceGroupMaxMemoryBytes' to a higher value so that st.stop()
 // doesn't fail.
 assert.commandWorked(
-    shard0DB.adminCommand({setParameter: 1, internalDocumentSourceGroupMaxMemoryBytes: 100 * 1024 * 1024}),
+    shard0DB.adminCommand({
+        setParameter: 1,
+        internalDocumentSourceGroupMaxMemoryBytes: 100 * 1024 * 1024,
+    }),
+);
+assert.commandWorked(
+    shard0DB.adminCommand({
+        setParameter: 1,
+        internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill: 100 * 1024 * 1024,
+    }),
 );
 
 st.stop();

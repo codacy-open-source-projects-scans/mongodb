@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/user.h"
 
@@ -55,19 +29,20 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 // Field names used when serializing User objects to BSON for usersInfo.
-constexpr auto kIdFieldName = "_id"_sd;
-constexpr auto kUserIdFieldName = "userId"_sd;
-constexpr auto kUserFieldName = "user"_sd;
-constexpr auto kDbFieldName = "db"_sd;
-constexpr auto kMechanismsFieldName = "mechanisms"_sd;
-constexpr auto kCredentialsFieldName = "credentials"_sd;
-constexpr auto kRolesFieldName = "roles"_sd;
-constexpr auto kInheritedRolesFieldName = "inheritedRoles"_sd;
-constexpr auto kInheritedPrivilegesFieldName = "inheritedPrivileges"_sd;
+constexpr auto kIdFieldName = "_id"sv;
+constexpr auto kUserIdFieldName = "userId"sv;
+constexpr auto kUserFieldName = "user"sv;
+constexpr auto kDbFieldName = "db"sv;
+constexpr auto kMechanismsFieldName = "mechanisms"sv;
+constexpr auto kCredentialsFieldName = "credentials"sv;
+constexpr auto kRolesFieldName = "roles"sv;
+constexpr auto kInheritedRolesFieldName = "inheritedRoles"sv;
+constexpr auto kInheritedPrivilegesFieldName = "inheritedPrivileges"sv;
 constexpr auto kInheritedAuthenticationRestrictionsFieldName =
-    "inheritedAuthenticationRestrictions"_sd;
-constexpr auto kAuthenticationRestrictionsFieldName = "authenticationRestrictions"_sd;
+    "inheritedAuthenticationRestrictions"sv;
+constexpr auto kAuthenticationRestrictionsFieldName = "authenticationRestrictions"sv;
 
 SHA256Block computeDigest(const UserName& name) {
     auto fn = name.getDisplayName();

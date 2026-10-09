@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -72,19 +46,20 @@ struct UniversalKeyComponents {
         std::unique_ptr<APIParameters> apiParams,
         query_shape::CollectionType collectionType,
         bool maxTimeMS,
-        boost::optional<query_shape::QueryShapeHash> originalQueryShapeHash = boost::none);
+        boost::optional<query_shape::QueryShapeHash> originalQueryShapeHash = boost::none,
+        bool inTransaction = false);
     /**
      * Returns a copy of the read concern object. If there is an "afterClusterTime" or
      * "atClusterTime" component, the timestamp is shapified according to 'opts'.
      */
     static BSONObj shapifyReadConcern(
         const BSONObj& readConcern,
-        const SerializationOptions& opts =
-            SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+        const query_shape::SerializationOptions& opts =
+            query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
 
     size_t size() const;
 
-    void appendTo(BSONObjBuilder& bob, const SerializationOptions& opts) const;
+    void appendTo(BSONObjBuilder& bob, const query_shape::SerializationOptions& opts) const;
 
     // Avoid using boost::optional here because it creates extra padding at the beginning of the
     // struct. Since each QueryStatsEntry has its own Key subclass, it's better to minimize
@@ -115,6 +90,9 @@ struct UniversalKeyComponents {
     // This value is not known when run a query is run on mongos over an unsharded collection, so it
     // is not set through that code path.
     query_shape::CollectionType _collectionType;
+
+    // Whether the query is executing within a multi-document transaction.
+    bool _inTransaction = false;
 
     // The tenant id associated with the collection targeted by the query if '_hasField.tenantId' is
     // set.
@@ -185,6 +163,7 @@ H AbslHashValue(H h, const UniversalKeyComponents& components) {
                    simpleHash(components._shapifiedReadConcern),
                    components._apiParams ? APIParameters::Hash{}(*components._apiParams) : 0,
                    components._collectionType,
+                   components._inTransaction,
                    components._hasField);
     if (components._hasField.originalQueryShapeHash) {
         // QueryShapeHash is var-length block (32 bytes). Use `combine_contiguous` instead of
@@ -280,7 +259,7 @@ public:
      * (as it is used for $queryStats) or perhaps one day persist it to storage.
      */
     BSONObj toBson(OperationContext* opCtx,
-                   const SerializationOptions& opts,
+                   const query_shape::SerializationOptions& opts,
                    const SerializationContext& serializationContext) const;
 
     /**
@@ -299,18 +278,6 @@ public:
     template <typename H>
     friend H AbslHashValue(H h, const Key& key) {
         return H::combine(std::move(h), key._universalComponents, key.specificComponents());
-    }
-
-    // The default implementation of hashing for smart pointers is not a good one for our purposes.
-    // Here we overload them to actually take the hash of the object, rather than hashing the
-    // pointer itself.
-    template <typename H>
-    friend H AbslHashValue(H h, const std::unique_ptr<const Key>& key) {
-        return H::combine(std::move(h), *key);
-    }
-    template <typename H>
-    friend H AbslHashValue(H h, const std::shared_ptr<const Key>& key) {
-        return H::combine(std::move(h), *key);
     }
 
 protected:
@@ -335,8 +302,8 @@ protected:
      * process often needs the context of things tracked in _universalComponents, which is hard to
      * access from the specific components.
      */
-    virtual void appendCommandSpecificComponents(BSONObjBuilder& bob,
-                                                 const SerializationOptions& opts) const = 0;
+    virtual void appendCommandSpecificComponents(
+        BSONObjBuilder& bob, const query_shape::SerializationOptions& opts) const = 0;
 
 private:
     UniversalKeyComponents _universalComponents;
@@ -344,4 +311,25 @@ private:
 static_assert(
     sizeof(Key) == sizeof(void*) /*vtable ptr*/ + sizeof(UniversalKeyComponents),
     "If the class' members have changed, this assert may need to be updated with a new value.");
+
+/**
+ * The default implementation of hashing for smart pointers is not a good one for our purposes. Here
+ * we overload them to actually take the hash of the object, rather than hashing the pointer itself.
+ *
+ * These overloads are found via ADL for all Key subclasses in namespace mongo::query_stats. A
+ * subclass in a different namespace would not pick these up and would silently fall back to hashing
+ * the pointer.
+ */
+template <typename H, typename K>
+requires std::derived_from<K, Key>
+H AbslHashValue(H h, const std::unique_ptr<const K>& key) {
+    return H::combine(std::move(h), *key);
+}
+
+template <typename H, typename K>
+requires std::derived_from<K, Key>
+H AbslHashValue(H h, const std::shared_ptr<const K>& key) {
+    return H::combine(std::move(h), *key);
+}
+
 }  // namespace mongo::query_stats

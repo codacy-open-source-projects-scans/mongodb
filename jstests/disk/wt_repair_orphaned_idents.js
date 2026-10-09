@@ -50,11 +50,17 @@ for (let collName of collNames) {
 
         if (collName == orphanedImportantCollName) {
             assert.commandWorked(
-                localDb.adminCommand({renameCollection: "local." + collName, to: "test." + importantCollName}),
+                localDb.adminCommand({
+                    renameCollection: "local." + collName,
+                    to: "test." + importantCollName,
+                }),
             );
         } else {
             assert.commandWorked(
-                localDb.adminCommand({renameCollection: "local." + collName, to: "test.recovered" + recoveredCount}),
+                localDb.adminCommand({
+                    renameCollection: "local." + collName,
+                    to: "test.recovered" + recoveredCount,
+                }),
             );
         }
         recoveredCount++;
@@ -76,7 +82,7 @@ for (let entry of res.cursor.firstBatch) {
 
     // Assert _id index has been successfully created.
     // TODO(SERVER-122306): Remove this check when replicated fast count no longer uses collections.
-    if (!FeatureFlagUtil.isPresentAndEnabled(mongod, "featureFlagReplicatedFastCount")) {
+    if (!FeatureFlagUtil.isPresentAndEnabled(mongod, "ReplicatedFastCount")) {
         assert("idIndex" in entry);
     }
 

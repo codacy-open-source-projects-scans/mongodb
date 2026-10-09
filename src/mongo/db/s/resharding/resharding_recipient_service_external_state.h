@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
@@ -45,6 +18,8 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -81,14 +56,14 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason) = 0;
+        std::string_view reason) = 0;
 
     virtual MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         const ShardId& fromShardId) = 0;
 
     virtual MigrationDestinationManager::IndexesAndIdIndex getCollectionIndexes(
@@ -96,12 +71,12 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         Timestamp afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         bool expandSimpleCollation = true) = 0;
 
     virtual void route(OperationContext* opCtx,
                        const NamespaceString& nss,
-                       StringData reason,
+                       std::string_view reason,
                        unique_function<void(OperationContext* opCtx,
                                             const CollectionRoutingInfo& cri)> callback) = 0;
 
@@ -109,7 +84,7 @@ public:
                                            const BSONObj& query,
                                            const BSONObj& update) = 0;
 
-    virtual void clearFilteringMetadataOnTempReshardingCollection(
+    virtual void clearCollectionMetadataOnTempReshardingCollection(
         OperationContext* opCtx, const NamespaceString& tempReshardingNss) = 0;
 
     virtual void ensureReshardingStashCollectionsEmpty(
@@ -127,7 +102,8 @@ public:
      */
     void ensureTempReshardingCollectionExistsWithIndexes(OperationContext* opCtx,
                                                          const CommonReshardingMetadata& metadata,
-                                                         Timestamp cloneTimestamp);
+                                                         Timestamp cloneTimestamp,
+                                                         const BSONObj& critSecReason);
 
     virtual std::unique_ptr<ReshardingDataReplicationInterface> makeDataReplication(
         OperationContext* opCtx,
@@ -157,14 +133,14 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason) override;
+        std::string_view reason) override;
 
     MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
         OperationContext* opCtx,
         const NamespaceString& nss,
         const UUID& uuid,
         boost::optional<Timestamp> afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         const ShardId& fromShardId) override;
 
     MigrationDestinationManager::IndexesAndIdIndex getCollectionIndexes(
@@ -172,13 +148,13 @@ public:
         const NamespaceString& nss,
         const UUID& uuid,
         Timestamp afterClusterTime,
-        StringData reason,
+        std::string_view reason,
         bool expandSimpleCollation = true) override;
 
 
     void route(OperationContext* opCtx,
                const NamespaceString& nss,
-               StringData reason,
+               std::string_view reason,
                unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)>
                    callback) override;
 
@@ -186,7 +162,7 @@ public:
                                    const BSONObj& query,
                                    const BSONObj& update) override;
 
-    void clearFilteringMetadataOnTempReshardingCollection(
+    void clearCollectionMetadataOnTempReshardingCollection(
         OperationContext* opCtx, const NamespaceString& tempReshardingNss) override;
 
     std::unique_ptr<ReshardingDataReplicationInterface> makeDataReplication(

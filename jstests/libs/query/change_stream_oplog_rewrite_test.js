@@ -7,7 +7,12 @@ import {
     getAllChangeStreamEvents,
     isPlainObject,
 } from "jstests/libs/query/change_stream_rewrite_util.js";
-import {getClusterTime} from "jstests/libs/query/change_stream_util.js";
+import {
+    advanceClusterTime,
+    getClusterTime,
+    getNextClusterTime,
+} from "jstests/libs/query/change_stream_util.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 // Function to generate a list of all paths to be tested from those observed in the event stream.
 function traverseEvent(event, outputMap, prefixPath = "") {
@@ -37,7 +42,9 @@ function traverseEvent(event, outputMap, prefixPath = "") {
 
         // Helper function to add a new value into the fields list.
         function addToPredicatesList(fieldPath, fieldVal) {
-            const alreadyExists = outputMap[fieldPath].values.some((elem) => friendlyEqual(elem, fieldVal));
+            const alreadyExists = outputMap[fieldPath].values.some((elem) =>
+                friendlyEqual(elem, fieldVal),
+            );
             const numValues = outputMap[fieldPath].values.length;
             if (!alreadyExists && numValues < maxValuesPerPath) {
                 outputMap[fieldPath].values.push(fieldVal);
@@ -71,12 +78,25 @@ function traverseEvent(event, outputMap, prefixPath = "") {
 export function generateEventsAndFieldsToBeTestedForOplogRewrites(db, dbName, collName) {
     const testDB = db.getSiblingDB(dbName);
 
-    // Establish a resume token at a point before anything actually happens in the test.
-    const startPoint = getClusterTime(db);
+    // Start strictly after the current cluster time so that leftover oplog entries from previously
+    // run tests (in suites that reuse the fixture) cannot leak into the harvested event window.
+    // 'startAtOperationTime' is inclusive, so using the current time directly would pick up the
+    // last entry written before this test began.
+    const startPoint = getNextClusterTime(getClusterTime(db));
     const numDocs = 8;
 
     // Generate a write workload for the change stream to consume.
-    generateChangeStreamWriteWorkload(testDB, collName, numDocs, false /* includeInvalidatingEvents */);
+    generateChangeStreamWriteWorkload(
+        testDB,
+        collName,
+        numDocs,
+        false /* includeInvalidatingEvents */,
+    );
+
+    const endPoint = getClusterTime(db);
+
+    // Make sure cluster time advances beyond endpoint even if the no-op oplog writer is disabled.
+    advanceClusterTime(db);
 
     // Obtain a list of all events that occurred during the write workload.
     const allEvents = getAllChangeStreamEvents(
@@ -84,9 +104,10 @@ export function generateEventsAndFieldsToBeTestedForOplogRewrites(db, dbName, co
         [],
         {fullDocument: "updateLookup", showExpandedEvents: true},
         startPoint,
+        endPoint,
     );
 
-    jsTestLog(`All events: ${tojson(allEvents)}`);
+    jsTest.log.info(`All events: ${tojson(allEvents)}`);
     assert.gt(allEvents.length, 0, "expecting allEvents to be non-empty");
 
     // List of specific fields and values that we wish to test. This will be populated during traversal
@@ -110,14 +131,23 @@ export function generateEventsAndFieldsToBeTestedForOplogRewrites(db, dbName, co
     // Traverse each event in the stream and build up a map of all field paths.
     allEvents.forEach((event) => traverseEvent(event, fieldsToBeTested));
 
-    jsTestLog(`Final set of fields to test: ${tojson(fieldsToBeTested)}`);
+    jsTest.log.info(`Final set of fields to test: ${tojson(fieldsToBeTested)}`);
 
     return {startPoint, fieldsToBeTested};
 }
 
 // Confirm that the output of an optimized change stream matches an unoptimized stream.
-export function compareOptimizedAndNonOptimizedChangeStreamResults(db, dbName, predicatesToTest, startPoint) {
+export function compareOptimizedAndNonOptimizedChangeStreamResults(
+    db,
+    dbName,
+    predicatesToTest,
+    startPoint,
+) {
     const endPoint = getClusterTime(db);
+
+    // Make sure cluster time advances beyond endpoint even if the no-op oplog writer is disabled.
+    advanceClusterTime(db);
+
     const testDB = db.getSiblingDB(dbName);
 
     const csConfig = {fullDocument: "updateLookup", showExpandedEvents: true};
@@ -143,7 +173,9 @@ export function compareOptimizedAndNonOptimizedChangeStreamResults(db, dbName, p
             return config;
         })();
 
-        jsTestLog(`Testing filter ${tojsononeline(matchExpr)} with ${tojsononeline(actualCsConfig)}`);
+        jsTest.log.info(
+            `Testing filter ${tojsononeline(matchExpr)} with ${tojsononeline(actualCsConfig)}`,
+        );
 
         // Extract all results from each of the pipelines.
         const nonOptimizedOutput = getAllChangeStreamEvents(
@@ -173,7 +205,10 @@ export function compareOptimizedAndNonOptimizedChangeStreamResults(db, dbName, p
         for (let i = 0; i < nonOptimizedOutput.length; ++i) {
             try {
                 assert(i < optimizedOutput.length);
-                if (optimizedOutput[i].hasOwnProperty("wallTime") && nonOptimizedOutput[i].hasOwnProperty("wallTime")) {
+                if (
+                    optimizedOutput[i].hasOwnProperty("wallTime") &&
+                    nonOptimizedOutput[i].hasOwnProperty("wallTime")
+                ) {
                     optimizedOutput[i].wallTime = nonOptimizedOutput[i].wallTime;
                 }
                 assert(friendlyEqual(optimizedOutput[i], nonOptimizedOutput[i]));
@@ -183,7 +218,7 @@ export function compareOptimizedAndNonOptimizedChangeStreamResults(db, dbName, p
                     csConfig: actualCsConfig,
                     events: {nonOptimized: nonOptimizedOutput[i], optimized: optimizedOutput[i]},
                 });
-                jsTestLog(`Total failures: ${failedTestCases.length}`);
+                jsTest.log.info(`Total failures: ${failedTestCases.length}`);
                 break;
             }
         }

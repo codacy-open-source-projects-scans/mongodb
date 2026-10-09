@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/inlined_storage.h"
@@ -37,9 +10,10 @@
 
 #include <bit>
 #include <iterator>
+#include <string_view>
 #include <type_traits>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 namespace bitset_details {
 template <typename T>
 T maskbit(size_t bitIndex) {
@@ -146,7 +120,7 @@ public:
     /**
      * Create a bitset from a binary strings containing only '0's and '1's.
      */
-    explicit DynamicBitset(StringData binaryString)
+    explicit DynamicBitset(std::string_view binaryString)
         : _storage(getRequiredNumberOfBlocks(binaryString.size())) {
         const size_t offset = binaryString.size() - 1;
         for (size_t i = 0; i < binaryString.size(); ++i) {
@@ -610,4 +584,4 @@ DynamicBitsetPopulationView<T, nBlocks, Storage> makePopulationView(
     const DynamicBitset<T, nBlocks, Storage>& bitset) {
     return DynamicBitsetPopulationView<T, nBlocks, Storage>(bitset);
 }
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

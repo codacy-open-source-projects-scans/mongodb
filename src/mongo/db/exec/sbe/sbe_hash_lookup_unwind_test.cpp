@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file contains tests for sbe::HashLookupUnwindStage.
  */
 
 #include "mongo/db/exec/sbe/sbe_hash_lookup_shared_test.h"
+#include "mongo/db/exec/sbe/sbe_unittest_assert.h"
 #include "mongo/db/exec/sbe/stages/hash_lookup_unwind.h"
 
 namespace mongo::sbe {
@@ -320,19 +295,16 @@ TEST_F(HashLookupUnwindStageTest, ForceSpillTest) {
 
     // The expected results are the results without forceSpill.
     std::vector<std::vector<std::pair<value::TypeTags, value::Value>>> expectedResults;
-    std::vector<std::pair<value::TypeTags, value::Value>> flatValues;
+    std::vector<value::TagValueOwned> flatValues;
     while (lookupStage->getNext() == PlanState::ADVANCED) {
         std::vector<std::pair<value::TypeTags, value::Value>> results{};
         results.reserve(resultAccessors.size());
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
-            flatValues.emplace_back(resultAccessors[i]->getCopyOfValue().releaseToRaw());
-            results.emplace_back(flatValues.back());
+            flatValues.emplace_back(resultAccessors[i]->getCopyOfValue());
+            results.emplace_back(flatValues.back().view());
         }
         expectedResults.emplace_back(std::move(results));
     }
-
-    // This is used to release the values when the test is done.
-    ValueVectorGuard resultsGuard{flatValues};
 
     // Close the stage and execute again with spilling.
     lookupStage->close();
@@ -342,13 +314,9 @@ TEST_F(HashLookupUnwindStageTest, ForceSpillTest) {
     while (lookupStage->getNext() == PlanState::ADVANCED) {
         for (size_t i = 0; i < resultAccessors.size(); ++i) {
             const auto [resTag, resValue] = resultAccessors[i]->getViewOfValue();
-            const auto [expectedTag, exprectedValue] = expectedResults[idx][i];
+            const auto [expectedTag, expectedValue] = expectedResults[idx][i];
 
-            auto [compTag, compVal] =
-                value::compareValue(expectedTag, exprectedValue, resTag, resValue);
-
-            ASSERT_EQ(value::TypeTags::NumberInt32, compTag);
-            ASSERT_EQ(0, compVal);
+            ASSERT_SBE_VALUE_EQ(expectedTag, expectedValue, resTag, resValue);
         }
 
         if (idx == 1) {
@@ -430,40 +398,36 @@ TEST_F(HashLookupUnwindStageTest, InnerJoinIncludeIndex) {
     lookupSlots.push_back(*indexSlot);
     auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
 
-    std::vector<std::pair<value::TypeTags, value::Value>> outerDocs{
-        stage_builder::makeValue(BSON("_id" << 1)),
-        stage_builder::makeValue(BSON("_id" << 2)),
-        stage_builder::makeValue(BSON("_id" << 3)),
-        stage_builder::makeValue(BSON("_id" << 4)),
-        stage_builder::makeValue(BSON("_id" << 5))};
-    ValueVectorGuard outerDocsGuard{outerDocs};
-    std::vector<std::pair<value::TypeTags, value::Value>> innerDocs{
-        stage_builder::makeValue(BSON("_id" << 11)),
-        stage_builder::makeValue(BSON("_id" << 12)),
-        stage_builder::makeValue(BSON("_id" << 13)),
-        stage_builder::makeValue(BSON("_id" << 14))};
-    ValueVectorGuard innerDocsGuard{innerDocs};
+    auto outerDocs = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 1)),
+                                      stage_builder::makeValue(BSON("_id" << 2)),
+                                      stage_builder::makeValue(BSON("_id" << 3)),
+                                      stage_builder::makeValue(BSON("_id" << 4)),
+                                      stage_builder::makeValue(BSON("_id" << 5))});
+    auto innerDocs = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 11)),
+                                      stage_builder::makeValue(BSON("_id" << 12)),
+                                      stage_builder::makeValue(BSON("_id" << 13)),
+                                      stage_builder::makeValue(BSON("_id" << 14))});
     // Expected output: each outer doc has one or more inner doc matches.
     std::vector<std::vector<sbe::value::Value>> expected{
-        {outerDocs[0].second, innerDocs[0].second, 0},
-        {outerDocs[1].second, innerDocs[1].second, 0},
-        {outerDocs[1].second, innerDocs[3].second, 1},
-        {outerDocs[2].second, innerDocs[1].second, 0},
-        {outerDocs[2].second, innerDocs[3].second, 1},
-        {outerDocs[3].second, innerDocs[2].second, 0}};
+        {outerDocs[0].value(), innerDocs[0].value(), 0},
+        {outerDocs[1].value(), innerDocs[1].value(), 0},
+        {outerDocs[1].value(), innerDocs[3].value(), 1},
+        {outerDocs[2].value(), innerDocs[1].value(), 0},
+        {outerDocs[2].value(), innerDocs[3].value(), 1},
+        {outerDocs[3].value(), innerDocs[2].value(), 0}};
     int i = 0;
     for (auto st = lookupStage->getNext(); st == PlanState::ADVANCED;
          st = lookupStage->getNext(), i++) {
         ASSERT_LT(i, expected.size());
 
         auto [outerTag, outerVal] = resultAccessors[0]->getViewOfValue();
-        assertValuesEqual(outerTag, outerVal, value::TypeTags::bsonObject, expected[i][0]);
+        ASSERT_SBE_VALUE_EQ(outerTag, outerVal, value::TypeTags::bsonObject, expected[i][0]);
 
         auto [innerTag, innerVal] = resultAccessors[1]->getViewOfValue();
-        assertValuesEqual(innerTag, innerVal, value::TypeTags::bsonObject, expected[i][1]);
+        ASSERT_SBE_VALUE_EQ(innerTag, innerVal, value::TypeTags::bsonObject, expected[i][1]);
 
         auto [indexTag, indexVal] = resultAccessors[2]->getViewOfValue();
-        assertValuesEqual(indexTag, indexVal, value::TypeTags::NumberInt32, expected[i][2]);
+        ASSERT_SBE_VALUE_EQ(indexTag, indexVal, value::TypeTags::NumberInt32, expected[i][2]);
     }
     ASSERT_EQ(i, expected.size());
 
@@ -511,22 +475,164 @@ TEST_F(HashLookupUnwindStageTest, LeftJoinIncludeIndex) {
 
     // Expected output: each outer doc has no match, but it's part of the results due to left join
     // being used.
-    std::vector<std::pair<value::TypeTags, value::Value>> expected{
-        stage_builder::makeValue(BSON("_id" << 1))};
-    ValueVectorGuard expectedGuard{expected};
+    auto expected = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 1))});
     int i = 0;
     for (auto st = lookupStage->getNext(); st == PlanState::ADVANCED;
          st = lookupStage->getNext(), i++) {
         ASSERT_LT(i, expected.size());
 
         auto [outerTag, outerVal] = resultAccessors[0]->getViewOfValue();
-        assertValuesEqual(outerTag, outerVal, value::TypeTags::bsonObject, expected[i].second);
+        ASSERT_SBE_VALUE_EQ(outerTag, outerVal, value::TypeTags::bsonObject, expected[i].value());
 
         auto [innerTag, innerVal] = resultAccessors[1]->getViewOfValue();
-        assertValuesEqual(innerTag, innerVal, value::TypeTags::Nothing, 0);
+        ASSERT_SBE_VALUE_EQ(innerTag, innerVal, value::TypeTags::Nothing, 0);
 
         auto [indexTag, indexVal] = resultAccessors[2]->getViewOfValue();
-        assertValuesEqual(indexTag, indexVal, value::TypeTags::Null, 0);
+        ASSERT_SBE_VALUE_EQ(indexTag, indexVal, value::TypeTags::Null, 0);
+    }
+    ASSERT_EQ(i, expected.size());
+
+    lookupStage->close();
+}
+
+// Verifies that when the outer key is an array, the matching inner-document buffer indices are
+// iterated in sorted order, even when the array elements are enumerated in an order that produces
+// unsorted buffer indices. This exercises the array-key path of LookupHashTableIter, which sorts
+// the reused match vector after collecting matches.
+TEST_F(HashLookupUnwindStageTest, ArrayKeySortedMatchIndices) {
+    // The inner docs are buffered in scan order, so their buffer indices are 0, 1, 2 for keys
+    // 5, 3, 1 respectively.
+    const BSONArray outer{fromjson(R"""([
+     [{_id: 1}, [1, 3, 5]]
+  ])""")};
+    const BSONArray inner{fromjson(R"""([
+     [{_id: 11}, 5],
+     [{_id: 12}, 3],
+     [{_id: 13}, 1]
+  ])""")};
+
+    // Build a scan for the outer loop.
+    auto [outerScanSlots, outerScanStage] = generateVirtualScanMulti(2, outer);
+    // Build a scan for the inner loop.
+    auto [innerScanSlots, innerScanStage] = generateVirtualScanMulti(2, inner);
+
+    auto ctx = makeCompileCtx();
+
+    boost::optional<value::SlotId> collatorSlot;
+
+    value::SlotId lookupStageOutputSlot = generateSlotId();
+    boost::optional<value::SlotId> indexSlot = generateSlotId();
+    auto lookupStage = makeS<HashLookupUnwindStage>(std::move(outerScanStage),
+                                                    std::move(innerScanStage),
+                                                    outerScanSlots[1],
+                                                    innerScanSlots[1],
+                                                    innerScanSlots[0],
+                                                    lookupStageOutputSlot,
+                                                    collatorSlot,
+                                                    sbe::JoinType::Inner,
+                                                    indexSlot,
+                                                    kEmptyPlanNodeId);
+
+    value::SlotVector lookupSlots;
+    lookupSlots.reserve(3);
+    lookupSlots.push_back(outerScanSlots[0]);
+    lookupSlots.push_back(lookupStageOutputSlot);
+    lookupSlots.push_back(*indexSlot);
+    auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
+
+    auto outerDocs = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 1))});
+    auto innerDocs = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 11)),
+                                      stage_builder::makeValue(BSON("_id" << 12)),
+                                      stage_builder::makeValue(BSON("_id" << 13))});
+    // Expected output: inner docs are visited in ascending buffer-index order (0, 1, 2), i.e. the
+    // docs with keys 5, 3, 1 in that order, regardless of the outer array's [1, 3, 5] ordering.
+    std::vector<std::vector<sbe::value::Value>> expected{
+        {outerDocs[0].value(), innerDocs[0].value(), 0},
+        {outerDocs[0].value(), innerDocs[1].value(), 1},
+        {outerDocs[0].value(), innerDocs[2].value(), 2}};
+    int i = 0;
+    for (auto st = lookupStage->getNext(); st == PlanState::ADVANCED;
+         st = lookupStage->getNext(), i++) {
+        ASSERT_LT(i, expected.size());
+
+        auto [outerTag, outerVal] = resultAccessors[0]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(outerTag, outerVal, value::TypeTags::bsonObject, expected[i][0]);
+
+        auto [innerTag, innerVal] = resultAccessors[1]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(innerTag, innerVal, value::TypeTags::bsonObject, expected[i][1]);
+
+        auto [indexTag, indexVal] = resultAccessors[2]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(indexTag, indexVal, value::TypeTags::NumberInt32, expected[i][2]);
+    }
+    ASSERT_EQ(i, expected.size());
+
+    lookupStage->close();
+}
+
+// Verifies that when the outer key is an array, an inner document reachable via more than one outer
+// array element (because the inner document itself has an array key) is returned exactly once. This
+// exercises the de-duplication (std::unique) of the array-key path in LookupHashTableIter.
+TEST_F(HashLookupUnwindStageTest, ArrayKeyDeduplicatedMatchIndices) {
+    // Inner doc {_id: 11} has array key [2, 3], so its buffer index 0 is registered under both keys
+    // 2 and 3. Inner doc {_id: 12} has key 4 at buffer index 1.
+    const BSONArray outer{fromjson(R"""([
+     [{_id: 1}, [2, 3, 4]]
+  ])""")};
+    const BSONArray inner{fromjson(R"""([
+     [{_id: 11}, [2, 3]],
+     [{_id: 12}, 4]
+  ])""")};
+
+    // Build a scan for the outer loop.
+    auto [outerScanSlots, outerScanStage] = generateVirtualScanMulti(2, outer);
+    // Build a scan for the inner loop.
+    auto [innerScanSlots, innerScanStage] = generateVirtualScanMulti(2, inner);
+
+    auto ctx = makeCompileCtx();
+
+    boost::optional<value::SlotId> collatorSlot;
+
+    value::SlotId lookupStageOutputSlot = generateSlotId();
+    boost::optional<value::SlotId> indexSlot = generateSlotId();
+    auto lookupStage = makeS<HashLookupUnwindStage>(std::move(outerScanStage),
+                                                    std::move(innerScanStage),
+                                                    outerScanSlots[1],
+                                                    innerScanSlots[1],
+                                                    innerScanSlots[0],
+                                                    lookupStageOutputSlot,
+                                                    collatorSlot,
+                                                    sbe::JoinType::Inner,
+                                                    indexSlot,
+                                                    kEmptyPlanNodeId);
+
+    value::SlotVector lookupSlots;
+    lookupSlots.reserve(3);
+    lookupSlots.push_back(outerScanSlots[0]);
+    lookupSlots.push_back(lookupStageOutputSlot);
+    lookupSlots.push_back(*indexSlot);
+    auto resultAccessors = prepareTree(ctx.get(), lookupStage.get(), lookupSlots);
+
+    auto outerDocs = makeOwnedVector({stage_builder::makeValue(BSON("_id" << 1))});
+    auto innerDocs = makeOwnedVector(
+        {stage_builder::makeValue(BSON("_id" << 11)), stage_builder::makeValue(BSON("_id" << 12))});
+    // Expected output: {_id: 11} appears once even though outer keys 2 and 3 both match it, then
+    // {_id: 12} for key 4.
+    std::vector<std::vector<sbe::value::Value>> expected{
+        {outerDocs[0].value(), innerDocs[0].value(), 0},
+        {outerDocs[0].value(), innerDocs[1].value(), 1}};
+    int i = 0;
+    for (auto st = lookupStage->getNext(); st == PlanState::ADVANCED;
+         st = lookupStage->getNext(), i++) {
+        ASSERT_LT(i, expected.size());
+
+        auto [outerTag, outerVal] = resultAccessors[0]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(outerTag, outerVal, value::TypeTags::bsonObject, expected[i][0]);
+
+        auto [innerTag, innerVal] = resultAccessors[1]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(innerTag, innerVal, value::TypeTags::bsonObject, expected[i][1]);
+
+        auto [indexTag, indexVal] = resultAccessors[2]->getViewOfValue();
+        ASSERT_SBE_VALUE_EQ(indexTag, indexVal, value::TypeTags::NumberInt32, expected[i][2]);
     }
     ASSERT_EQ(i, expected.size());
 

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/update/document_diff_serialization.h"
@@ -37,15 +10,17 @@
 #include "mongo/util/modules.h"
 
 #include <cstddef>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 /**
  * This provides helpers for creating oplog entries.
  */
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 namespace mongo::update_oplog_entry {
-static inline constexpr StringData kDiffObjectFieldName = "diff"_sd;
+using namespace std::literals::string_view_literals;
+static inline constexpr std::string_view kDiffObjectFieldName = "diff"sv;
 
 constexpr size_t kSizeOfDeltaOplogEntryMetadata = 15;
 
@@ -74,16 +49,13 @@ enum class FieldRemovedStatus { kFieldRemoved, kFieldNotRemoved, kUnknown };
 BSONObj makeDeltaOplogEntry(const doc_diff::Diff& diff);
 
 /**
- * Given a $v: 2 delta-style oplog entry, return the embedded diff object.
- */
-boost::optional<BSONObj> extractDiffFromOplogEntry(const BSONObj& opLog);
-
-/**
  * Produce the contents of the 'o' field of a replacement style oplog entry.
+ *
+ * If 'replacement' contains an _id field that is not already the first field, this returns a copy
+ * with _id moved to the front so that the oplog entry matches the on-disk field order produced by
+ * fixDocumentForInsert(). If _id is already first (or absent), 'replacement' is returned unchanged.
  */
-inline BSONObj makeReplacementOplogEntry(const BSONObj& replacement) {
-    return replacement;
-}
+BSONObj makeReplacementOplogEntry(const BSONObj& replacement);
 
 /**
  * Given the 'o' field of an update oplog entry, determine its type. Throws if the object is not of
@@ -107,7 +79,7 @@ UpdateType extractUpdateType(const BSONObj& oField);
  * It is a programming error to call this function with a value for 'updateObj' that is not a valid
  * update.
  */
-BSONElement extractNewValueForField(const BSONObj& updateObj, StringData fieldName);
+BSONElement extractNewValueForField(const BSONObj& updateObj, std::string_view fieldName);
 
 /**
  * Given the 'o' field of an update oplog entry document, this function will determine whether the
@@ -121,5 +93,5 @@ BSONElement extractNewValueForField(const BSONObj& updateObj, StringData fieldNa
  * It is a programming error to call this function with a value for 'updateObj' that is not a valid
  * update.
  */
-FieldRemovedStatus isFieldRemovedByUpdate(const BSONObj& updateObj, StringData fieldName);
+FieldRemovedStatus isFieldRemovedByUpdate(const BSONObj& updateObj, std::string_view fieldName);
 }  // namespace mongo::update_oplog_entry

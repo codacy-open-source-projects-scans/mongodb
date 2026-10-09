@@ -1,44 +1,23 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/sdk/host_services.h"
 
 #include "mongo/db/extension/host_connector/adapter/host_services_adapter.h"
 #include "mongo/db/extension/host_connector/adapter/query_shape_opts_adapter.h"
 #include "mongo/db/extension/sdk/aggregation_stage.h"
+#include "mongo/db/extension/shared/byte_buf.h"
+#include "mongo/db/extension/shared/extension_status.h"
+#include "mongo/db/extension/shared/handle/aggregation_stage/ast_node.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/parse_node.h"
+#include "mongo/db/pipeline/document_source_internal_document_results_and_metadata.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo::extension {
 namespace {
@@ -238,7 +217,8 @@ TEST_F(HostServicesTest, NestedFilterParseNodeBasicPredicate) {
         std::make_unique<NestedFilterParseNode>(filterSpec));
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
     ASSERT_BSONOBJ_EQ(
@@ -257,7 +237,8 @@ TEST_F(HostServicesTest, NestedFilterParseNodeComplexPredicate) {
         std::make_unique<NestedFilterParseNode>(filterSpec));
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
     ASSERT_BSONOBJ_EQ(
@@ -278,7 +259,7 @@ TEST_F(HostServicesTest, NestedFilterParseNodeRejectsInvalidPredicate1) {
         std::make_unique<NestedFilterParseNode>(filterSpec));
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
 
     ASSERT_THROWS_CODE(handle->getQueryShape(adapter), DBException, ErrorCodes::BadValue);
@@ -292,10 +273,143 @@ TEST_F(HostServicesTest, NestedFilterParseNodeRejectsInvalidPredicate2) {
         std::make_unique<NestedFilterParseNode>(filterSpec));
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
 
     ASSERT_THROWS_CODE(handle->getQueryShape(adapter), DBException, ErrorCodes::BadValue);
+}
+
+// Helper that assembles the full $_internalDocumentResultsAndMetadata stage BSON from an inner
+// source spec and an optional metadata variable name.
+BSONObj makeDrmStageSpec(BSONObj sourceSpec, std::string_view varName = std::string_view{}) {
+    BSONObjBuilder stageBuilder;
+    {
+        BSONObjBuilder innerBuilder(
+            stageBuilder.subobjStart(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+        innerBuilder.append("source", sourceSpec);
+        if (!varName.empty()) {
+            innerBuilder.append("metadata", BSON("as" << varName));
+        }
+    }
+    return stageBuilder.obj();
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_EmptySpecFails) {
+    BSONObj emptySpec;
+    ASSERT_THROWS_CODE(
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(emptySpec),
+        DBException,
+        12601501);
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_WrongStageNameFails) {
+    BSONObj wrongStage = BSON("$_internalSearchIdLookup" << BSONObj());
+    ASSERT_THROWS_CODE(
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(
+            wrongStage),
+        DBException,
+        12601501);
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_ValidSpecWithMetadata) {
+    BSONObj stageSpec = makeDrmStageSpec(BSON("$collStats" << BSONObj()), "SEARCH_META");
+    auto hostAstNode =
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(stageSpec);
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_ValidSpecWithoutMetadata) {
+    BSONObj stageSpec = makeDrmStageSpec(BSON("$collStats" << BSONObj()));
+    auto hostAstNode =
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(stageSpec);
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_NestedSourceSpecWithMetadata) {
+    // A non-trivial source spec with nested objects and arrays must flow through unchanged.
+    BSONObj sourceSpec =
+        BSON("$search" << BSON("index" << "default" << "text"
+                                       << BSON("query" << "foo" << "path" << BSON_ARRAY("a" << "b"))
+                                       << "returnStoredSource" << true));
+    BSONObj stageSpec = makeDrmStageSpec(sourceSpec, "SEARCH_META");
+    auto hostAstNode =
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(stageSpec);
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+}
+
+// Helpers for DPL callback tests.
+struct SDKDPLCallbackState {
+    bool called = false;
+    bool destroyed = false;
+};
+
+static ::MongoExtensionStatus* sdkTestDPLCallback(void* userData,
+                                                  ::MongoExtensionQueryExecutionContext*,
+                                                  ::MongoExtensionByteBuf** sortPatternOut,
+                                                  ::MongoExtensionByteBuf** mergeOut) {
+    auto* s = static_cast<SDKDPLCallbackState*>(userData);
+    s->called = true;
+    *sortPatternOut = new mongo::extension::ByteBuf(BSON("score" << -1));
+    *mergeOut = nullptr;
+    return &mongo::extension::ExtensionStatusOK::getInstance();
+}
+
+static void sdkTestDPLCallbackDestroy(void* userData) {
+    static_cast<SDKDPLCallbackState*>(userData)->destroyed = true;
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_WithDPLCallback_DestroyCalledOnReset) {
+    SDKDPLCallbackState state;
+    BSONObj stageSpec = makeDrmStageSpec(BSON("$collStats" << BSONObj()), "SEARCH_META");
+    {
+        auto hostAstNode =
+            extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(
+                stageSpec, &sdkTestDPLCallback, &state, &sdkTestDPLCallbackDestroy);
+        // getName() works.
+        ASSERT_EQ(hostAstNode->getName(),
+                  std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+        // Callback NOT invoked at construction — DPL is lazy.
+        ASSERT_FALSE(state.called);
+        // hostAstNode goes out of scope here, firing the destructor which calls dplCallbackDestroy.
+    }
+    ASSERT_TRUE(state.destroyed);
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_NullCallbackDefaultsWork) {
+    // Calling with only the stage spec (defaulted nullptr DPL params) still works.
+    BSONObj stageSpec = makeDrmStageSpec(BSON("$collStats" << BSONObj()), "SEARCH_META");
+    auto hostAstNode =
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(stageSpec);
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_NestedSourceSpecWithoutMetadata) {
+    BSONObj sourceSpec =
+        BSON("$search" << BSON("index" << "default" << "text"
+                                       << BSON("query" << "foo" << "path" << BSON_ARRAY("a" << "b"))
+                                       << "returnStoredSource" << true));
+    BSONObj stageSpec = makeDrmStageSpec(sourceSpec);
+    auto hostAstNode =
+        extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(stageSpec);
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
+}
+
+TEST_F(HostServicesTest, CreateDocumentResultsAndMetadata_NodeOutlivesStageSpecBuffer) {
+    // The node must remain valid after the caller's BSON is destroyed, exercising the owned copy of
+    // the stage BSON taken during construction.
+    extension::AggStageAstNodeHandle hostAstNode = [] {
+        BSONObj stageSpec = makeDrmStageSpec(
+            BSON("$collStats" << BSON("latencyStats" << BSONObj())), "SEARCH_META");
+        return extension::sdk::HostServicesAPI::getInstance()->createDocumentResultsAndMetadata(
+            stageSpec);
+    }();
+    ASSERT_EQ(hostAstNode->getName(),
+              std::string(DocumentSourceInternalDocumentResultsAndMetadata::kStageName));
 }
 
 }  // namespace

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/index/wildcard_access_method.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
@@ -33,7 +7,10 @@
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
 
+#include <string_view>
+
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -67,15 +44,11 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
-    bool sideWritesAllowed() const override {
+    std::shared_ptr<IndexBuildInterceptor> indexBuildInterceptor() const override {
         MONGO_UNIMPLEMENTED;
     }
 
-    IndexBuildInterceptor* indexBuildInterceptor() const override {
-        MONGO_UNIMPLEMENTED;
-    }
-
-    void setIndexBuildInterceptor(IndexBuildInterceptor* interceptor) override {
+    void setIndexBuildInterceptor(std::shared_ptr<IndexBuildInterceptor> interceptor) override {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -120,6 +93,7 @@ public:
 
     void setMultikeyForApplyOps(OperationContext* opCtx,
                                 const CollectionPtr& coll,
+                                const KeyStringSet& multikeyMetadataKeys,
                                 const MultikeyPaths& multikeyPaths) const override {
         MONGO_UNREACHABLE;
     }
@@ -161,7 +135,7 @@ private:
     IndexDescriptor* _descriptor;
 };
 
-std::unique_ptr<IndexDescriptor> makeIndexDescriptor(StringData indexName,
+std::unique_ptr<IndexDescriptor> makeIndexDescriptor(std::string_view indexName,
                                                      BSONObj keyPattern,
                                                      BSONObj wildcardProjection) {
     auto indexSpec = BSON(IndexDescriptor::kIndexVersionFieldName
@@ -178,7 +152,7 @@ std::unique_ptr<IndexDescriptor> makeIndexDescriptor(StringData indexName,
 }  // namespace
 
 TEST(IndexCatalogEntryTest, computeUpdateIndexDataForCompoundWildcardIndex) {
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test"_sd);
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test"sv);
     auto uuid = UUID::gen();
     DevNullKVEngine engine{};
     RecoveryUnitNoop ru{};
@@ -203,18 +177,18 @@ TEST(IndexCatalogEntryTest, computeUpdateIndexDataForCompoundWildcardIndex) {
     index_catalog_helpers::computeUpdateIndexData(&indexCatalogEntry, &accessMethod, &outData);
 
     // Asserting that expected fields are included.
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"a"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"b"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"c"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"_id"_sd}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"a"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"b"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"c"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"_id"sv}));
 
     // Asserting that unexpected fields are not included.
-    ASSERT_FALSE(outData.mightBeIndexed(FieldRef{"d"_sd}));
-    ASSERT_FALSE(outData.mightBeIndexed(FieldRef{"$**"_sd}));
+    ASSERT_FALSE(outData.mightBeIndexed(FieldRef{"d"sv}));
+    ASSERT_FALSE(outData.mightBeIndexed(FieldRef{"$**"sv}));
 }
 
 TEST(IndexCatalogEntryTest, computeUpdateIndexDataForCompoundWildcardIndex_ExcludeCase) {
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test"_sd);
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test"sv);
     auto uuid = UUID::gen();
     DevNullKVEngine engine{};
     RecoveryUnitNoop ru{};
@@ -240,11 +214,11 @@ TEST(IndexCatalogEntryTest, computeUpdateIndexDataForCompoundWildcardIndex_Exclu
 
     // When wildcardProjection has exclusion, everything is "indexed", since we don't know for sure,
     // which fields are indexed.
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"a"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"b"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"c"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"d"_sd}));
-    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"_id"_sd}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"a"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"b"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"c"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"d"sv}));
+    ASSERT_TRUE(outData.mightBeIndexed(FieldRef{"_id"sv}));
 }
 
 }  // namespace mongo

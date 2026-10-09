@@ -2,6 +2,7 @@
  * Make sure that $gt and $lt queries return the same results regardless of whether there is a
  * multikey index.
  * @tags: [
+ *     uses_explain,
  *     requires_fcv_81,
  *     requires_getmore,
  *     # This test runs too long for TSAN and code coverage builds.
@@ -14,7 +15,11 @@
 
 import {arrayDiff, arrayEq} from "jstests/aggregation/extras/utils.js";
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
-import {getWinningPlanFromExplain, isCollscan, isIxscanMultikey} from "jstests/libs/query/analyze_plan.js";
+import {
+    getWinningPlanFromExplain,
+    isCollscan,
+    isIxscanMultikey,
+} from "jstests/libs/query/analyze_plan.js";
 
 function buildErrorString(q, indexed, nonIndexed) {
     const arrDiff = arrayDiff(indexed, nonIndexed);
@@ -79,7 +84,11 @@ const insertDocs = singleValues
 
 assert.commandWorked(coll.insert(insertDocs));
 
-assert.eq(coll.find({}).toArray().length, singleValues.length * 3, "Wrong number of documents found!");
+assert.eq(
+    coll.find({}).toArray().length,
+    singleValues.length * 3,
+    "Wrong number of documents found!",
+);
 
 const flattenPredicates = [
     [2, 2],
@@ -150,7 +159,9 @@ queryList.forEach(function (q) {
         const nonIndexedRes = coll.find(query, projOutId).hint({$natural: 1}).toArray().sort();
         const nonIndexedPlan = coll.find(query, projOutId).hint({$natural: 1}).explain();
         assert(isCollscan(db, nonIndexedPlan), nonIndexedPlan);
-        assert(arrayEq(indexRes, nonIndexedRes), () => buildErrorString(query, indexRes, nonIndexedRes));
+        assert(arrayEq(indexRes, nonIndexedRes), () =>
+            buildErrorString(query, indexRes, nonIndexedRes),
+        );
     });
 });
 // Test queries with multiple intervals.

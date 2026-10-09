@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -99,7 +73,7 @@
  * };
  */
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * Runtime options that control the Sorter's behavior
@@ -409,7 +383,7 @@ private:
  * Data iterator over an Input stream used in the MergeIterator.
  */
 template <typename Key, typename Value>
-class MONGO_MOD_PRIVATE Stream {
+class [[MONGO_MOD_PRIVATE]] Stream {
 public:
     typedef sorter::Iterator<Key, Value> Input;
     Stream(size_t sourceId, std::shared_ptr<Input> iter)
@@ -449,7 +423,7 @@ private:
 //
 // Used for the BoundedSorter and spillWithHeap in the sorter::Spiller class.
 template <typename Key, typename Value, typename Comparator>
-struct MONGO_MOD_PRIVATE Greater {
+struct [[MONGO_MOD_PRIVATE]] Greater {
 
     // Prevent default construction.
     explicit Greater(Comparator const* compare) : compare(compare) {}
@@ -494,9 +468,9 @@ public:
         Settings;
     typedef std::pair<Key, Value> Data;
 
-    virtual std::shared_ptr<Iterator<Key, Value>> spill(const SortOptions& opts,
-                                                        const Settings& settings,
-                                                        std::span<std::pair<Key, Value>> data) = 0;
+    virtual void spill(const SortOptions& opts,
+                       const Settings& settings,
+                       std::span<std::pair<Key, Value>> data) = 0;
 
     virtual std::unique_ptr<Iterator<Key, Value>> spillUnique(
         const SortOptions& opts,
@@ -509,21 +483,19 @@ public:
         std::priority_queue<Data, std::vector<Data>, Greater<Key, Value, Comparator>>& heap) = 0;
 
     /**
-     * Merge 'iters' in groups of at most 'maxSpillsPerMerge' until at most
+     * Merge the spiller's iterators in groups of at most 'maxSpillsPerMerge' until at most
      * 'numTargetedSpills' remain.
-     *
-     * 'iters' must be ordered by increasing range start offset and form one contiguous
-     * range.
      */
     virtual void mergeSpills(const SortOptions& opts,
                              const Settings& settings,
                              SorterStats& stats,
-                             std::vector<std::shared_ptr<Iterator<Key, Value>>>& iters,
                              Comparator comp,
                              std::size_t numTargetedSpills,
                              std::size_t maxSpillsPerMerge) = 0;
 
     virtual Storage<Key, Value>& getStorage() = 0;
+
+    virtual std::vector<std::shared_ptr<Iterator<Key, Value>>>& iterators() = 0;
 
     /**
      * Retrieves the directory where the storage is created for spilling data.
@@ -543,10 +515,10 @@ public:
         : _storage(std::move(storage)),
           _minAvailableDiskBytesToSpill(minAvailableDiskBytesToSpill) {}
 
-    std::shared_ptr<Iterator<Key, Value>> spill(const SortOptions& opts,
-                                                const Settings& settings,
-                                                std::span<std::pair<Key, Value>> data) override {
-        return _spill(opts, settings, data)->done();
+    void spill(const SortOptions& opts,
+               const Settings& settings,
+               std::span<std::pair<Key, Value>> data) override {
+        _iterators.push_back(_spill(opts, settings, data)->done());
     }
 
     std::unique_ptr<Iterator<Key, Value>> spillUnique(
@@ -574,8 +546,13 @@ public:
         return *_storage;
     }
 
+    std::vector<std::shared_ptr<Iterator<Key, Value>>>& iterators() override {
+        return _iterators;
+    }
+
 protected:
     std::unique_ptr<Storage<Key, Value>> _storage;
+    std::vector<std::shared_ptr<Iterator<Key, Value>>> _iterators;
     int64_t _minAvailableDiskBytesToSpill;
 
 private:
@@ -586,6 +563,9 @@ private:
 };
 
 }  // namespace sorter
+
+template <typename Key, typename Value>
+class SorterBatchGuard;
 
 /**
  * Each instance of this class accepts (Key, Value) pairs and, depending on its SortOptions and the
@@ -666,6 +646,14 @@ public:
     virtual ~Sorter() {}
 
     /**
+     * Returns the current persisted sorter state which can then be used to later reconstruct a
+     * sorter.
+     */
+    virtual PersistedState getPersistedState() {
+        MONGO_UNREACHABLE_TASSERT(12576000);
+    }
+
+    /**
      * Spills all of the sorted data to disk, preserves the temporary storage, and then returns
      * metadata which can be passed to makeFromExistingRanges() to use the spill storage later. May
      * be called before or after calling done().
@@ -684,11 +672,68 @@ public:
     virtual void spill() = 0;
 
 protected:
+    /**
+     * Spills if the in-memory data has grown past 'maxMemoryUsageBytes' and spilling is not
+     * currently suppressed.
+     */
+    void _spillIfOverBudget() {
+        if (!_spillingSuppressed && _stats.memUsage() > _opts.maxMemoryUsageBytes) {
+            spill();
+        }
+    }
+
     SortOptions _opts;
 
-    std::vector<std::shared_ptr<Iterator>> _iters;  // Data that has already been spilled.
-
     boost::optional<SharedBufferFragmentBuilder> _memPool;
+
+private:
+    friend class SorterBatchGuard<Key, Value>;
+
+    void _suppressSpilling() {
+        invariant(!_spillingSuppressed);
+        _spillingSuppressed = true;
+    }
+
+    void _allowSpilling() {
+        invariant(_spillingSuppressed);
+        _spillingSuppressed = false;
+    }
+
+    bool _spillingSuppressed = false;
+};
+
+/**
+ * Scoped guard that keeps the given sorter from spilling partway through a batch. As a result, the
+ * sorter may temporarily exceed its configured memory limit while this guard is active.
+ */
+template <typename Key, typename Value>
+class SorterBatchGuard {
+    SorterBatchGuard(const SorterBatchGuard&) = delete;
+    SorterBatchGuard& operator=(const SorterBatchGuard&) = delete;
+
+public:
+    explicit SorterBatchGuard(Sorter<Key, Value>& sorter) : _sorter(&sorter) {
+        _sorter->_suppressSpilling();
+    }
+
+    ~SorterBatchGuard() {
+        if (_sorter) {
+            _sorter->_allowSpilling();
+        }
+    }
+
+    /**
+     * Closes the batch, spilling if the sorter is now over its memory budget. Call exactly once.
+     */
+    void finish() {
+        invariant(_sorter);
+        auto* sorter = std::exchange(_sorter, nullptr);
+        sorter->_allowSpilling();
+        sorter->_spillIfOverBudget();
+    }
+
+private:
+    Sorter<Key, Value>* _sorter;
 };
 
 
@@ -735,7 +780,7 @@ public:
     virtual std::pair<Key, Value> next() = 0;
 
     // Serialize the bound for explain output
-    virtual Document serializeBound(const SerializationOptions& opts) const = 0;
+    virtual Document serializeBound(const query_shape::SerializationOptions& opts) const = 0;
 
     virtual size_t limit() const = 0;
 
@@ -808,7 +853,7 @@ public:
     std::pair<Key, Value> next() override;
 
     // Serialize the bound for explain output
-    Document serializeBound(const SerializationOptions& opts) const override {
+    Document serializeBound(const query_shape::SerializationOptions& opts) const override {
         return {makeBound.serialize(opts)};
     };
 
@@ -849,4 +894,4 @@ private:
     boost::optional<Key> _min;
     bool _done = false;
 };
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

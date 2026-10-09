@@ -6,7 +6,9 @@
  * ]
  */
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {PersistenceProviderUtil} from "jstests/libs/server-rss/persistence_provider_util.js";
 
 // Create a new single-node replica set, and ensure that it can support $changeStream.
 const rst = new ReplSetTest({nodes: 1});
@@ -19,12 +21,23 @@ const testCollection = assertDropAndRecreateCollection(db, collName);
 const otherCollection = assertDropAndRecreateCollection(db, "unrelated_" + collName);
 const oplogColl = db.getSiblingDB("local").oplog.rs;
 
+const replicatedFastCountEnabled =
+    !PersistenceProviderUtil.allNodesHavePropertyWithValue(
+        db,
+        "shouldUseReplicatedFastCount",
+        false,
+    ) || FeatureFlagUtil.isEnabled(db, "ReplicatedFastCount");
+
 let docId = 0; // Tracks _id of documents inserted to ensure that we do not duplicate.
 const batchSize = 2;
 
 // Helper function to perform generic comparisons and dump the oplog on failure.
 function assertCompare(cmpFn, left, right, cmpOp, cmpVal) {
-    assert[cmpOp](cmpFn(left, right), cmpVal, {left: left, right: right, oplogEntries: oplogColl.find().toArray()});
+    assert[cmpOp](cmpFn(left, right), cmpVal, {
+        left: left,
+        right: right,
+        oplogEntries: oplogColl.find().toArray(),
+    });
 }
 
 // Start watching the test collection in order to capture a resume token.
@@ -104,11 +117,13 @@ assertCompare(timestampCmp, txnEvent3.clusterTime, txnClusterTime, "eq", 0);
 assertCompare(bsonWoCompare, txnEvent3._id, previousGetMorePBRT, "gt", 0);
 
 // Because we wrote to the unrelated collection, the final event in the transaction does not
-// appear in the batch. But in this case it also does not allow our PBRT to advance beyond the
-// last event in the batch, because the unrelated event is within the same transaction and
-// therefore has the same clusterTime.
+// appear in the batch. The filtered event is within the same transaction and therefore has the
+// same clusterTime, so it does not on its own allow our PBRT to advance beyond the last event.
 getMorePBRT = csCursor.getResumeToken();
-assertCompare(bsonWoCompare, getMorePBRT, txnEvent3._id, "eq", 0);
+// When enabled, the replicated fastcount store can write additional oplog entries in the
+// background, which may advance the reader's scan position. Use a more relaxed assert in this case.
+const cmpOp = replicatedFastCountEnabled ? "gte" : "eq";
+assertCompare(bsonWoCompare, getMorePBRT, txnEvent3._id, cmpOp, 0);
 
 // Confirm that resuming from the PBRT of the first batch gives us the third transaction write.
 csCursor = testCollection.watch([], {resumeAfter: resumePBRT});

@@ -35,7 +35,9 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:vector_clock",
         "//src/mongo/db/index:index_access_method",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
         "//src/mongo/db/query:collection_query_info",
+        "//src/mongo/db/query/plan_cache:join_plan_cache",
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/shard_role/shard_catalog:collection_catalog",
         "//src/mongo/db/shard_role/shard_catalog:durable_catalog",
@@ -55,6 +57,7 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
         "//src/mongo/db/collection_crud",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
         "//src/mongo/db/repl:local_oplog_info",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/lock_manager:exception_util",
@@ -86,6 +89,7 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/bson/util:bson_extract",
         "//src/mongo/db/index:multikey_paths",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
         "//src/mongo/db/op_observer:op_observer_util",
         "//src/mongo/db/repl:oplog_entry",
     ],
@@ -117,19 +121,23 @@ mongo_cc_library(
         ":commit_quorum_options",
         ":index_build_entry_helpers",
         ":index_build_entry_idl",
+        ":index_build_knobs_idl",
         ":index_build_oplog_entry",
         ":multi_index_block",
+        ":resumable_index_builds_common",
         ":resumable_index_builds_idl",
-        ":two_phase_index_build_knobs_idl",
         "//src/mongo/db:dbhelpers",
         "//src/mongo/db:index_repair",
         "//src/mongo/db:server_base",
+        "//src/mongo/db/admission/execution_control:in_progress_time_accumulator",
         "//src/mongo/db/index:multikey_paths",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
         "//src/mongo/db/index_builds/primary_driven:primary_driven_index_builds",
         "//src/mongo/db/query/query_stats",
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/repl:timestamp_block",
         "//src/mongo/db/repl/initial_sync:cloner_utils",
+        "//src/mongo/db/rss:replicated_storage_service",
         "//src/mongo/db/s:local_resharding_operations_registry",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/lock_manager:exception_util",
@@ -142,6 +150,7 @@ mongo_cc_library(
         "//src/mongo/db/storage:storage_options",
         "//src/mongo/db/storage:storage_repair_observer",
         "//src/mongo/executor:task_executor_interface",
+        "//src/mongo/otel/metrics:otel_metrics_service",
         "//src/mongo/util:progress_meter",
     ],
 )
@@ -167,11 +176,12 @@ mongo_cc_library(
     ],
     no_undefined_ref_DO_NOT_USE = False,
     deps = [
+        ":index_build_knobs_idl",
         ":index_builds_common",
-        ":two_phase_index_build_knobs_idl",
         "//src/mongo/db:server_base",
         "//src/mongo/db/collection_crud:container_write",
         "//src/mongo/db/index:preallocated_container_pool",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/shard_role/lock_manager:exception_util",
         "//src/mongo/db/sorter:sorter_stats",
@@ -190,9 +200,11 @@ mongo_cc_library(
     deps = [
         ":index_build_entry_helpers",
         ":index_build_entry_idl",
+        ":index_build_knobs_idl",
         ":index_builds_coordinator",
         ":resumable_index_builds_idl",
-        ":two_phase_index_build_knobs_idl",
+        "//src/mongo/db/index_builds/primary_driven:enabled",
+        "//src/mongo/db/rss:replicated_storage_service",
         "//src/mongo/db/s:forwardable_operation_metadata",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/shard_catalog:collection_catalog",
@@ -215,13 +227,17 @@ mongo_cc_library(
     ],
     deps = [
         ":index_build_block",
+        ":index_build_knobs_idl",
         ":resumable_index_builds_idl",
         "//src/mongo/db:multi_key_path_tracker",
         "//src/mongo/db:query_exec",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
+        "//src/mongo/db:throttle_cursor",
+        "//src/mongo/db/collection_crud:container_write",
         "//src/mongo/db/index:index_access_method",
         "//src/mongo/db/query:collection_query_info",
+        "//src/mongo/db/query/plan_cache:join_plan_cache",
         "//src/mongo/db/query/query_stats",
         "//src/mongo/db/repl:repl_coordinator_interface",
         "//src/mongo/db/shard_role",
@@ -244,6 +260,18 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/db/sorter:sorter_base",
         "//src/mongo/idl:idl_parser",
+    ],
+)
+
+mongo_cc_library(
+    name = "resumable_index_builds_common",
+    srcs = [
+        "resumable_index_builds_common.cpp",
+    ],
+    deps = [
+        ":index_builds_common",
+        ":resumable_index_builds_idl",
+        "//src/mongo:base",
     ],
 )
 
@@ -292,13 +320,25 @@ idl_generator(
 )
 
 idl_generator(
+    name = "index_build_knobs_gen",
+    src = "index_build_knobs.idl",
+)
+
+idl_generator(
+    name = "primary_driven_index_build_knobs_gen",
+    src = "primary_driven_index_build_knobs.idl",
+)
+
+idl_generator(
     name = "two_phase_index_build_knobs_gen",
     src = "two_phase_index_build_knobs.idl",
 )
 
 mongo_cc_library(
-    name = "two_phase_index_build_knobs_idl",
+    name = "index_build_knobs_idl",
     srcs = [
+        ":index_build_knobs_gen",
+        ":primary_driven_index_build_knobs_gen",
         ":two_phase_index_build_knobs_gen",
     ],
     deps = [
@@ -308,6 +348,7 @@ mongo_cc_library(
 
 mongo_cc_unit_test(
     name = "index_builds_test",
+    size = "large",
     srcs = [
         "commit_quorum_options_test.cpp",
         "index_build_entry_helpers_test.cpp",
@@ -315,22 +356,21 @@ mongo_cc_unit_test(
         "index_build_interceptor_test.cpp",
         "index_builds_coordinator_mongod_test.cpp",
         "index_builds_coordinator_test.cpp",
+        "index_builds_durations_histogram_test.cpp",
         "index_builds_manager_test.cpp",
         "multi_index_block_test.cpp",
+        "repl_index_build_state_test.cpp",
+        "resumable_index_builds_common_test.cpp",
     ],
     tags = [
-        "cpu:2",
         "mongo_unittest_seventh_group",
         "server-index-builds",
     ],
-    target_compatible_with = select({
-        "//bazel/config:use_wiredtiger_enabled": [],
-        "//conditions:default": ["@platforms//:incompatible"],
-    }),
     deps = [
         ":index_build_entry_helpers",
         ":index_build_entry_idl",
         ":index_builds_coordinator_mongod",
+        ":resumable_index_builds_common",
         "//src/mongo/db:query_exec",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context_d_test_fixture",
@@ -340,6 +380,7 @@ mongo_cc_unit_test(
         "//src/mongo/db/repl:storage_interface_impl",
         "//src/mongo/db/shard_role",
         "//src/mongo/db/shard_role/shard_catalog:catalog_test_fixture",
+        "//src/mongo/db/storage:record_store_write_conflict_fail_points",
         "//src/mongo/otel/metrics:metrics_test_util",
     ],
 )

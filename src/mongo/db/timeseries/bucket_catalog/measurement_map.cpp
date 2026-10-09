@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/bucket_catalog/measurement_map.h"
 
@@ -34,6 +8,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -80,19 +56,20 @@ void MeasurementMap::initBuilders(BSONObj bucketDataDocWithCompressedBuilders,
                     10402,
                     logv2::LogTruncation::Disabled,
                     "Detected incorrect internal state when reopening from following binary: ",
-                    "binary"_attr = base64::encode(StringData(binData, binLength)));
+                    "binary"_attr = base64::encode(std::string_view(binData, binLength)));
             }
             invariant(isInternalStateCorrect);
         }
     }
 }
 
-std::vector<std::pair<StringData, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>
+std::vector<std::pair<std::string_view, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>
 MeasurementMap::intermediate(int32_t& compressedSizeDelta) {
     int32_t previousCompressedSize = _compressedSize;
     _compressedSize = 0;
 
-    std::vector<std::pair<StringData, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>
+    std::vector<
+        std::pair<std::string_view, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>
         intermediates;
     for (auto& entry : _builders) {
         auto& builder = entry.second.builder;
@@ -100,14 +77,14 @@ MeasurementMap::intermediate(int32_t& compressedSizeDelta) {
 
         _compressedSize += (diff.offset() + diff.size());
         intermediates.push_back(
-            {StringData(entry.first.c_str(), entry.first.size()), std::move(diff)});
+            {std::string_view(entry.first.c_str(), entry.first.size()), std::move(diff)});
     }
 
     compressedSizeDelta = _compressedSize - previousCompressedSize;
     return intermediates;
 }
 
-void MeasurementMap::_insertNewKey(StringData key, const BSONElement& elem, size_t count) {
+void MeasurementMap::_insertNewKey(std::string_view key, const BSONElement& elem, size_t count) {
     BSONColumnBuilder<tracking::Allocator<void>> columnBuilder(
         count, _trackingContext.get().makeAllocator<void>());
     columnBuilder.append(elem);
@@ -116,9 +93,11 @@ void MeasurementMap::_insertNewKey(StringData key, const BSONElement& elem, size
                           count + 1 /* account for the append above */);
 }
 
-void MeasurementMap::insertOne(const BSONObj& measurement, boost::optional<StringData> metaField) {
+void MeasurementMap::insertOne(const BSONObj& measurement,
+                               boost::optional<std::string_view> metaField) {
+    // First pass to append all elements present in this measurement.
     for (const auto& elem : measurement) {
-        StringData key = elem.fieldNameStringData();
+        std::string_view key = elem.fieldNameStringData();
         // Skip the meta field values because they aren't stored in a BSONColumn.
         if (key == metaField) {
             continue;
@@ -129,11 +108,18 @@ void MeasurementMap::insertOne(const BSONObj& measurement, boost::optional<Strin
             _insertNewKey(key, elem, _measurementCount);
         } else {
             builderIt->second.builder.append(elem);
-            ++builderIt->second.count;
+
+            uassert(12602102,
+                    "Measurements with duplicate field names cannot be stored in timeseries "
+                    "collections",
+                    builderIt->second.count++ <= _measurementCount);
         }
     }
-    // Increment our total measurement count
+
+    // Increment our total measurement count. Needs to be after the first pass above so that
+    // builders for new keys are initialized with the correct count.
     ++_measurementCount;
+
     // Perform a second pass over our builders and perform a skip for the ones that did not get an
     // element appended to them in the first pass above.
     for (auto&& entry : _builders) {
@@ -144,7 +130,7 @@ void MeasurementMap::insertOne(const BSONObj& measurement, boost::optional<Strin
     }
 }
 
-Date_t MeasurementMap::timeOfLastMeasurement(StringData key) const {
+Date_t MeasurementMap::timeOfLastMeasurement(std::string_view key) const {
     const auto it = _builders.find(key);
     invariant(it != _builders.end());
     return it->second.builder.last().date();

@@ -1,6 +1,7 @@
 /**
  * Verify that `$search` queries that set '$$SEARCH_META' succeed on unsharded collections on
  * sharded clusters even with a stage in the pipeline that can't be passed to the shards.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite (the merge-forcing case in e2e/search/search_collector.js).
  */
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {mockPlanShardedSearchResponse} from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
@@ -26,7 +27,9 @@ const testColl = testDB.getCollection(collName);
 const foreignColl = testDB.getCollection(foreignCollName);
 
 // Ensure primary shard is shard1 so we only set the correct mongot to have history.
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard1.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard1.name}),
+);
 
 assert.commandWorked(testColl.insert({_id: 1, shardKey: 0, x: "ow"}));
 assert.commandWorked(testColl.insert({_id: 2, shardKey: 0, x: "now", y: "lorem"}));
@@ -71,7 +74,11 @@ const searchCmd = {
 mockPlanShardedSearchResponse(collName, searchQuery, dbName, undefined /*sortSpec*/, stWithMock);
 
 let cursor = testColl.aggregate(
-    [{$search: searchQuery}, {$project: {_id: 1, meta: "$$SEARCH_META"}}, {$out: foreignColl.getName()}],
+    [
+        {$search: searchQuery},
+        {$project: {_id: 1, meta: "$$SEARCH_META"}},
+        {$out: foreignColl.getName()},
+    ],
     {cursor: {}},
 );
 

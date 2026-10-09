@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_internal_split_pipeline.h"
 
@@ -40,10 +14,12 @@
 #include "mongo/util/str.h"
 
 #include <string>
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 REGISTER_LITE_PARSED_DOCUMENT_SOURCE(_internalSplitPipeline,
                                      InternalSplitPipelineLiteParsed::parse,
@@ -55,7 +31,7 @@ REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(_internalSplitPipeline,
 
 ALLOCATE_DOCUMENT_SOURCE_ID(_internalSplitPipeline, DocumentSourceInternalSplitPipeline::id);
 
-constexpr StringData DocumentSourceInternalSplitPipeline::kStageName;
+constexpr std::string_view DocumentSourceInternalSplitPipeline::kStageName;
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -69,16 +45,16 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
     HostTypeRequirement mergeType = HostTypeRequirement::kNone;
     boost::optional<ShardId> mergeShardId = boost::none;
     for (auto&& elt : specObj) {
-        if (elt.fieldNameStringData() == "mergeType"_sd) {
+        if (elt.fieldNameStringData() == "mergeType"sv) {
             const auto type = elt.type();
 
             if (type == BSONType::string) {
                 auto mergeTypeString = elt.valueStringData();
-                if ("localOnly"_sd == mergeTypeString) {
-                    mergeType = HostTypeRequirement::kLocalOnly;
-                } else if ("anyShard"_sd == mergeTypeString) {
-                    mergeType = HostTypeRequirement::kAnyShard;
-                } else if ("router"_sd == mergeTypeString || "mongos"_sd == mergeTypeString) {
+                if ("localOnly"sv == mergeTypeString) {
+                    mergeType = HostTypeRequirement::kReceivingHostOnly;
+                } else if ("anyShard"sv == mergeTypeString) {
+                    mergeType = HostTypeRequirement::kTargetedShards;
+                } else if ("router"sv == mergeTypeString || "mongos"sv == mergeTypeString) {
                     mergeType = HostTypeRequirement::kRouter;
                 } else {
                     uasserted(ErrorCodes::BadValue,
@@ -87,7 +63,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
                 }
             } else if (type == BSONType::object) {
                 auto specificShardObj = elt.Obj();
-                auto specificShardElem = specificShardObj.getField("specificShard"_sd);
+                auto specificShardElem = specificShardObj.getField("specificShard"sv);
                 uassert(7958300,
                         "Object argument to $_internalSplitPipeline must contain a single string "
                         "field named 'specificShard'",
@@ -122,16 +98,17 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
     return new DocumentSourceInternalSplitPipeline(expCtx, mergeType, mergeShardId);
 }
 
-Value DocumentSourceInternalSplitPipeline::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceInternalSplitPipeline::serialize(
+    const query_shape::SerializationOptions& opts) const {
     std::string mergeTypeString;
     Document specificShardDoc;
 
     switch (_mergeType) {
-        case HostTypeRequirement::kAnyShard:
+        case HostTypeRequirement::kTargetedShards:
             mergeTypeString = "anyShard";
             break;
 
-        case HostTypeRequirement::kLocalOnly:
+        case HostTypeRequirement::kReceivingHostOnly:
             mergeTypeString = "localOnly";
             break;
 

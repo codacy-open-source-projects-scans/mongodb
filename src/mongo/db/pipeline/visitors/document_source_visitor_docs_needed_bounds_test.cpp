@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
 
 #include "mongo/bson/bsonmisc.h"
@@ -53,6 +27,7 @@
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 class VisitorDocsNeededBoundsTest : public AggregationContextFixture {
 protected:
     VisitorDocsNeededBoundsTest() {
@@ -111,7 +86,7 @@ protected:
     }
 
     auto project() {
-        return DocumentSourceProject::create(BSON("a" << 1), getExpCtx(), "$project"_sd);
+        return DocumentSourceProject::create(BSON("a" << 1), getExpCtx(), "$project"sv);
     }
 
     auto sample() {
@@ -195,8 +170,8 @@ protected:
     }
 
     auto internalSearchIdLookup() {
-        return DocumentSourceInternalSearchIdLookUp::createFromBson(
-            BSON("$_internalSearchIdLookup" << BSONObj()).firstElement(), getExpCtx());
+        return make_intrusive<DocumentSourceInternalSearchIdLookUp>(DocumentSourceIdLookupSpec{},
+                                                                    getExpCtx());
     }
 };
 
@@ -660,13 +635,18 @@ TEST_F(VisitorDocsNeededBoundsTest, SearchBucketAutoSetVariableFromSubPipelineLo
     assertNeedAll(bounds.getMaxBounds());
 }
 
-TEST_F(VisitorDocsNeededBoundsTest, InternalSearchIdLookup) {
-    // In the context of using these bounds for mongot batchSize tuning, $_internalSearchIdLookUp
-    // should never be encountered since this algorithm is run prior to desugaring $search.
-    // For that reason, this stage does not have an implemented visitor and should fall into the
-    // "unknown" case.
+TEST_F(VisitorDocsNeededBoundsTest, InternalSearchIdLookupIsTransparent) {
+    // $_internalSearchIdLookup is treated as a transparent stage for batchSize tuning purposes.
+    // A suffix of just [$_internalSearchIdLookup] (no limit) still produces Unknown bounds.
     auto bounds = buildPipelineAndExtractBounds({internalSearchIdLookup()});
     assertUnknown(bounds.getMinBounds());
     assertUnknown(bounds.getMaxBounds());
+}
+
+TEST_F(VisitorDocsNeededBoundsTest, InternalSearchIdLookupWithDownstreamLimit) {
+    // Because $_internalSearchIdLookup is transparent, a downstream $limit propagates through it.
+    auto bounds = buildPipelineAndExtractBounds({internalSearchIdLookup(), limit(10)});
+    assertDiscreteAndEq(bounds.getMinBounds(), 10);
+    assertDiscreteAndEq(bounds.getMaxBounds(), 10);
 }
 }  // namespace mongo

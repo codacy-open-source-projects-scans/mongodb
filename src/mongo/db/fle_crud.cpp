@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/fle_crud.h"
@@ -33,14 +7,15 @@
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/fle_payload_validation.h"
 #include "mongo/crypto/fle_stats_gen.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/validated_tenancy_scope_factory.h"
@@ -94,6 +69,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <variant>
@@ -122,8 +98,12 @@ MONGO_FAIL_POINT_DEFINE(fleCrudHangPreFindAndModify);
 
 MONGO_FAIL_POINT_DEFINE(fleCrudPauseNonTxnGetTags);
 
+MONGO_FAIL_POINT_DEFINE(fleCrudThrowTransientTxnError);
+
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
+
 std::vector<write_ops::WriteError> singleStatusToWriteErrors(const Status& status) {
     std::vector<write_ops::WriteError> errors;
 
@@ -331,6 +311,19 @@ const std::shared_ptr<executor::TaskExecutor>& getFLE2TaskExecutorForMongoS(
     return Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
 }
 
+void assertFLECrudNotYetProcessed(const EncryptionInformation& ei) {
+    tassert(12783101,
+            "FLE2 CRUD processing entered but command is already processed.",
+            !ei.getCrudProcessed().value_or(false));
+}
+
+void assertFLECrudNotYetProcessed(const boost::optional<EncryptionInformation>& ei) {
+    tassert(12783102,
+            "FLE2 CRUD processing entered without encryptionInformation in the command.",
+            ei.has_value());
+    assertFLECrudNotYetProcessed(*ei);
+}
+
 namespace {
 /**
  * Make an expression context from a batch command request and a specific operation. Templated out
@@ -384,9 +377,9 @@ using VTS = auth::ValidatedTenancyScope;
 void validateInsertUpdatePayloads(OperationContext* opCtx,
                                   const std::vector<EncryptedField>& fields,
                                   const std::vector<EDCServerPayloadInfo>& payload) {
-    std::map<StringData, UUID> pathToKeyIdMap;
+    std::map<std::string_view, const EncryptedField*> pathToFieldMap;
     for (const auto& field : fields) {
-        pathToKeyIdMap.insert({field.getPath(), field.getKeyId()});
+        pathToFieldMap.insert({field.getPath(), &field});
     }
 
     uassert(9783803,
@@ -399,17 +392,20 @@ void validateInsertUpdatePayloads(OperationContext* opCtx,
                     VersionContext::getDecoration(opCtx),
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
-    for (const auto& field : payload) {
-        auto& fieldPath = field.fieldPathName;
-        auto expect = pathToKeyIdMap.find(fieldPath);
+    for (const auto& info : payload) {
+        auto& fieldPath = info.fieldPathName;
+        auto expect = pathToFieldMap.find(fieldPath);
         uassert(6726300,
                 str::stream() << "Field '" << fieldPath << "' is unexpectedly encrypted",
-                expect != pathToKeyIdMap.end());
-        auto& indexKeyId = field.payload.getIndexKeyId();
+                expect != pathToFieldMap.end());
+        const auto& field = *expect->second;
+        auto& indexKeyId = info.payload.getIndexKeyId();
         uassert(6726301,
                 str::stream() << "Mismatched keyId for field '" << fieldPath << "' expected "
-                              << expect->second << ", found " << indexKeyId,
-                indexKeyId == expect->second);
+                              << field.getKeyId() << ", found " << indexKeyId,
+                indexKeyId == field.getKeyId());
+
+        validatePayloadAgainstQueryTypeConfig(fieldPath, field, toFLE2PayloadParams(info.payload));
     }
 }
 
@@ -432,6 +428,7 @@ insertSingleDocument(OperationContext* opCtx,
 
     validateInsertUpdatePayloads(opCtx, efc.getFields(), *serverPayload);
 
+    FLEStatusSection::get().incrementInsertCount(edcNss, efc);
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx, boost::none);
 
     // The function that handles the transaction may outlive this function so we need to use
@@ -458,6 +455,12 @@ insertSingleDocument(OperationContext* opCtx,
             if (MONGO_unlikely(fleCrudHangPreInsert.shouldFail())) {
                 LOGV2(6516701, "Hanging due to fleCrudHangPreInsert fail point");
                 fleCrudHangPreInsert.pauseWhileSet();
+            }
+
+            if (MONGO_unlikely(fleCrudThrowTransientTxnError.shouldFail())) {
+                uasserted(
+                    ErrorCodes::LockTimeout,
+                    "insertSingleDocument failed due to fleCrudThrowTransientTxnError fail point");
             }
 
             *reply = uassertStatusOK(processInsert(&queryImpl,
@@ -597,6 +600,11 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
         CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
     }
 
+    auto& edcNss = deleteRequest.getNamespace();
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+        edcNss, deleteRequest.getEncryptionInformation().value());
+    FLEStatusSection::get().incrementDeleteCount(edcNss, efc);
+
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx, boost::none);
 
     auto reply = std::make_shared<write_ops::DeleteCommandReply>();
@@ -616,7 +624,7 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
     auto expCtx = makeExpCtx(opCtx, ownedDeleteRequest, ownedDeleteOpEntry);
     // The function that handles the transaction may outlive this function so we need to use
     // shared_ptrs
-    auto deleteBlock = std::make_tuple(ownedDeleteRequest, expCtx);
+    auto deleteBlock = std::make_tuple(ownedDeleteRequest, expCtx, efc);
     auto sharedDeleteBlock = std::make_shared<decltype(deleteBlock)>(deleteBlock);
     auto service = opCtx->getService();
 
@@ -626,15 +634,19 @@ write_ops::DeleteCommandReply processDelete(OperationContext* opCtx,
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
-            auto [deleteRequest2, expCtx2] = *sharedDeleteBlock.get();
+            auto [deleteRequest2, expCtx2, efc2] = *sharedDeleteBlock.get();
 
             if (MONGO_unlikely(fleCrudHangPreDelete.shouldFail())) {
                 LOGV2(6516702, "Hanging due to fleCrudHangPreDelete fail point");
                 fleCrudHangPreDelete.pauseWhileSet();
             }
 
+            if (MONGO_unlikely(fleCrudThrowTransientTxnError.shouldFail())) {
+                uasserted(ErrorCodes::LockTimeout,
+                          "processDelete failed due to fleCrudThrowTransientTxnError fail point");
+            }
 
-            *reply = processDelete(&queryImpl, expCtx2, deleteRequest2);
+            *reply = processDelete(&queryImpl, expCtx2, deleteRequest2, efc2);
 
             if (MONGO_unlikely(fleCrudHangDelete.shouldFail())) {
                 LOGV2(6371902, "Hanging due to fleCrudHangDelete fail point");
@@ -715,6 +727,11 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
         CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
     }
 
+    auto& edcNss = updateRequest.getNamespace();
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+        edcNss, updateRequest.getEncryptionInformation().value());
+    FLEStatusSection::get().incrementUpdateCount(edcNss, efc);
+
     std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxns(opCtx, boost::none);
 
     // The function that handles the transaction may outlive this function so we need to use
@@ -734,7 +751,7 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
     auto ownedUpdateOpEntry = ownedUpdateRequest.getUpdates()[0];
 
     auto expCtx = makeExpCtx(opCtx, ownedUpdateRequest, ownedUpdateOpEntry);
-    auto updateBlock = std::make_tuple(ownedUpdateRequest, expCtx);
+    auto updateBlock = std::make_tuple(ownedUpdateRequest, expCtx, efc);
     auto sharedupdateBlock = std::make_shared<decltype(updateBlock)>(updateBlock);
     auto service = opCtx->getService();
 
@@ -744,14 +761,19 @@ write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
-            auto [updateRequest2, expCtx2] = *sharedupdateBlock.get();
+            auto [updateRequest2, expCtx2, efc2] = *sharedupdateBlock.get();
 
             if (MONGO_unlikely(fleCrudHangPreUpdate.shouldFail())) {
                 LOGV2(6516703, "Hanging due to fleCrudHangPreUpdate fail point");
                 fleCrudHangPreUpdate.pauseWhileSet();
             }
 
-            *reply = processUpdate(&queryImpl, expCtx2, updateRequest2);
+            if (MONGO_unlikely(fleCrudThrowTransientTxnError.shouldFail())) {
+                uasserted(ErrorCodes::LockTimeout,
+                          "processUpdate failed due to fleCrudThrowTransientTxnError fail point");
+            }
+
+            *reply = processUpdate(&queryImpl, expCtx2, updateRequest2, efc2);
 
             if (MONGO_unlikely(fleCrudHangUpdate.shouldFail())) {
                 LOGV2(6371901, "Hanging due to fleCrudHangUpdate fail point");
@@ -1029,7 +1051,7 @@ void validateFindAndModifyRequest(OperationContext* opCtx,
         update = updateMod.getUpdateReplacement();
     } else {
         invariant(updateMod.type() == write_ops::UpdateModification::Type::kModifier);
-        update = updateMod.getUpdateModifier().getObjectField("$set"_sd);
+        update = updateMod.getUpdateModifier().getObjectField("$set"sv);
     }
 
     if (!update.firstElement().eoo()) {
@@ -1092,6 +1114,12 @@ StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
             if (MONGO_unlikely(fleCrudHangPreFindAndModify.shouldFail())) {
                 LOGV2(6516704, "Hanging due to fleCrudHangPreFindAndModify fail point");
                 fleCrudHangPreFindAndModify.pauseWhileSet();
+            }
+
+            if (MONGO_unlikely(fleCrudThrowTransientTxnError.shouldFail())) {
+                uasserted(
+                    ErrorCodes::LockTimeout,
+                    "processFindAndModify failed due to fleCrudThrowTransientTxnError fail point");
             }
 
             *reply = processCallback(expCtx, &queryImpl, findAndModifyRequest2);
@@ -1162,13 +1190,10 @@ StatusWith<write_ops::InsertCommandReply> processInsert(
 
 write_ops::DeleteCommandReply processDelete(FLEQueryInterface* queryImpl,
                                             boost::intrusive_ptr<ExpressionContext> expCtx,
-                                            const write_ops::DeleteCommandRequest& deleteRequest) {
+                                            const write_ops::DeleteCommandRequest& deleteRequest,
+                                            const EncryptedFieldConfig& efc) {
 
-    auto edcNss = deleteRequest.getNamespace();
-    auto ei = deleteRequest.getEncryptionInformation().value();
-
-    auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
-
+    auto& edcNss = deleteRequest.getNamespace();
     int32_t stmtId = getStmtIdForWriteAt(deleteRequest, 0);
 
     auto newDeleteRequest = deleteRequest;
@@ -1221,12 +1246,11 @@ bool hasIndexedFieldsInSchema(const std::vector<EncryptedField>& fields) {
  */
 write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
                                             boost::intrusive_ptr<ExpressionContext> expCtx,
-                                            const write_ops::UpdateCommandRequest& updateRequest) {
+                                            const write_ops::UpdateCommandRequest& updateRequest,
+                                            const EncryptedFieldConfig& efc) {
 
-    auto edcNss = updateRequest.getNamespace();
+    auto& edcNss = updateRequest.getNamespace();
     auto ei = updateRequest.getEncryptionInformation().value();
-
-    auto efc = EncryptionInformationHelpers::getAndValidateSchema(edcNss, ei);
 
     const auto updateOpEntry = updateRequest.getUpdates()[0];
 
@@ -1316,7 +1340,7 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
     auto idElement = originalDocument.firstElement();
     uassert(6371504,
             "Missing _id field in pre-image document",
-            idElement.fieldNameStringData() == "_id"_sd);
+            idElement.fieldNameStringData() == "_id"sv);
     BSONObj newDocument = queryImpl->getById(edcNss, idElement);
 
     // Fail if we could not find the new document
@@ -1344,7 +1368,7 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
         auto pullUpdateOpEntry = write_ops::UpdateOpEntry();
         pullUpdateOpEntry.setUpsert(false);
         pullUpdateOpEntry.setMulti(false);
-        pullUpdateOpEntry.setQ(BSON("_id"_sd << idElement));
+        pullUpdateOpEntry.setQ(BSON("_id"sv << idElement));
         pullUpdateOpEntry.setU(mongo::write_ops::UpdateModification(
             pullUpdate, write_ops::UpdateModification::ModifierUpdateTag{}));
         newUpdateRequest.setUpdates({pullUpdateOpEntry});
@@ -1360,14 +1384,7 @@ write_ops::UpdateCommandReply processUpdate(FLEQueryInterface* queryImpl,
 FLEBatchResult processFLEBatch(OperationContext* opCtx,
                                const BatchedCommandRequest& request,
                                BatchedCommandResponse* response) {
-    {
-        std::lock_guard<Client> lk(*opCtx->getClient());
-        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-    }
-
-    if (request.getWriteCommandRequestBase().getEncryptionInformation()->getCrudProcessed()) {
-        return FLEBatchResult::kNotProcessed;
-    }
+    assertFLECrudNotYetProcessed(request.getWriteCommandRequestBase().getEncryptionInformation());
 
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Insert) {
         auto insertRequest = request.getInsertRequest();
@@ -1422,7 +1439,8 @@ FLEBatchResult processFLEBatch(OperationContext* opCtx,
 
 std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
     OperationContext* opCtx, const BatchedCommandRequest& request) {
-    invariant(request.hasEncryptionInformation());
+    assertFLECrudNotYetProcessed(request.getWriteCommandRequestBase().getEncryptionInformation());
+
     auto getExpCtx = [&](const auto& op) {
         auto expCtx =
             ExpressionContextBuilder{}
@@ -1436,21 +1454,20 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
         return expCtx;
     };
 
-    {
-        std::lock_guard<Client> lk(*opCtx->getClient());
-        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-    }
-
     if (request.getBatchType() == BatchedCommandRequest::BatchType_Delete) {
         auto deleteRequest = request.getDeleteRequest();
         auto newDeleteOp = deleteRequest.getDeletes()[0];
+        auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+            request.getNS(), deleteRequest.getEncryptionInformation().value());
+
         newDeleteOp.setQ(fle::rewriteQuery(opCtx,
                                            getExpCtx(newDeleteOp),
                                            request.getNS(),
                                            deleteRequest.getEncryptionInformation().value(),
                                            newDeleteOp.getQ(),
                                            &getTransactionWithRetriesForMongoS,
-                                           fle::EncryptedCollScanModeAllowed::kAllow));
+                                           fle::EncryptedCollScanModeAllowed::kAllow,
+                                           efc));
         deleteRequest.setDeletes({newDeleteOp});
         deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(
             makeEmptyProcessEncryptionInformation());
@@ -1462,6 +1479,8 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
         auto encryptedCollScanModeAllowed = newUpdateOp.getUpsert()
             ? fle::EncryptedCollScanModeAllowed::kDisallow
             : fle::EncryptedCollScanModeAllowed::kAllow;
+        auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+            request.getNS(), updateRequest.getEncryptionInformation().value());
 
         newUpdateOp.setQ(fle::rewriteQuery(opCtx,
                                            getExpCtx(newUpdateOp),
@@ -1469,7 +1488,8 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
                                            updateRequest.getEncryptionInformation().value(),
                                            newUpdateOp.getQ(),
                                            &getTransactionWithRetriesForMongoS,
-                                           encryptedCollScanModeAllowed));
+                                           encryptedCollScanModeAllowed,
+                                           efc));
         updateRequest.setUpdates({newUpdateOp});
         updateRequest.getWriteCommandRequestBase().setEncryptionInformation(
             makeEmptyProcessEncryptionInformation());
@@ -1582,7 +1602,7 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     auto idElement = originalDocument.firstElement();
     uassert(6371403,
             "Missing _id field in pre-image document, the fields document must contain _id",
-            idElement.fieldNameStringData() == "_id"_sd);
+            idElement.fieldNameStringData() == "_id"sv);
 
     // Is this a delete? If so, there's no need to GarbageCollect.
     if (findAndModifyRequest.getRemove().value_or(false)) {
@@ -1622,7 +1642,7 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
         auto pullUpdateOpEntry = write_ops::UpdateOpEntry();
         pullUpdateOpEntry.setUpsert(false);
         pullUpdateOpEntry.setMulti(false);
-        pullUpdateOpEntry.setQ(BSON("_id"_sd << idElement));
+        pullUpdateOpEntry.setQ(BSON("_id"sv << idElement));
         pullUpdateOpEntry.setU(mongo::write_ops::UpdateModification(
             pullUpdate, write_ops::UpdateModification::ModifierUpdateTag{}));
         newUpdateRequest.setUpdates({pullUpdateOpEntry});
@@ -1668,21 +1688,7 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
                                        const write_ops::FindAndModifyCommandRequest& request,
                                        StatusWith<write_ops::FindAndModifyCommandReply>& swReply,
                                        boost::optional<WriteConcernErrorDetail>& wceReply) {
-    if (!request.getEncryptionInformation().has_value()) {
-        return FLEBatchResult::kNotProcessed;
-    }
-
-    {
-        std::lock_guard<Client> lk(*opCtx->getClient());
-        CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-    }
-
-    // FLE2 Mongos CRUD operations loopback through MongoS with EncryptionInformation as
-    // findAndModify so query can do any necessary transformations. But on the nested call, CRUD
-    // does not need to do any more work.
-    if (request.getEncryptionInformation()->getCrudProcessed()) {
-        return FLEBatchResult::kNotProcessed;
-    }
+    assertFLECrudNotYetProcessed(request.getEncryptionInformation());
 
     // This callback ensures that any write concern errors are returned in the event that
     // processFindAndModifyRequest returned a non-OK status, which is then thrown.
@@ -1726,9 +1732,7 @@ FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
 std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
 processFLEFindAndModifyExplainMongos(OperationContext* opCtx,
                                      const write_ops::FindAndModifyCommandRequest& request) {
-    tassert(6513400,
-            "Missing encryptionInformation for findAndModify",
-            request.getEncryptionInformation().has_value());
+    assertFLECrudNotYetProcessed(request.getEncryptionInformation());
 
     return uassertStatusOK(processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
         opCtx, request, &getTransactionWithRetriesForMongoS, processFindAndModifyExplain));
@@ -2017,12 +2021,14 @@ std::vector<BSONObj> FLEQueryInterfaceImpl::findDocuments(const NamespaceString&
 void processFLEFindS(OperationContext* opCtx,
                      const NamespaceString& nss,
                      FindCommandRequest* findCommand) {
+    assertFLECrudNotYetProcessed(findCommand->getEncryptionInformation());
     fle::processFindCommand(opCtx, nss, findCommand, &getTransactionWithRetriesForMongoS);
 }
 
 void processFLECountS(OperationContext* opCtx,
                       const NamespaceString& nss,
                       CountCommandRequest& countCommand) {
+    assertFLECrudNotYetProcessed(countCommand.getEncryptionInformation());
     fle::processCountCommand(opCtx, nss, &countCommand, &getTransactionWithRetriesForMongoS);
 }
 
@@ -2030,6 +2036,7 @@ std::unique_ptr<Pipeline> processFLEPipelineS(OperationContext* opCtx,
                                               NamespaceString nss,
                                               const EncryptionInformation& encryptInfo,
                                               std::unique_ptr<Pipeline> toRewrite) {
+    assertFLECrudNotYetProcessed(encryptInfo);
     return fle::processPipeline(
         opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoS);
 }

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/oplog_entry.h"
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -54,8 +27,8 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/version_context.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
@@ -63,6 +36,7 @@
 #include "mongo/util/version/releases.h"
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/cstdint.hpp>
@@ -115,6 +89,7 @@ TEST_F(OplogEntryTest, Insert) {
     ASSERT(entry.isCrudOpType());
     ASSERT_FALSE(entry.isContainerOpType());
     ASSERT_FALSE(entry.shouldPrepare());
+    EXPECT_FALSE(entry.applyOpsIsMarkedRetryable());
     ASSERT_BSONOBJ_EQ(entry.getIdElement().wrap("_id"), BSON("_id" << docId));
     ASSERT_BSONOBJ_EQ(entry.getOperationToApply(), doc);
     ASSERT_BSONOBJ_EQ(entry.getObjectContainingDocumentKey(), doc);
@@ -247,7 +222,7 @@ TEST_F(OplogEntryTest, CreateWithCatalogIdentifier) {
     std::string identUniqueTag = "collection_ident";
     std::string idIndexIdentUniqueTag = "id_index_ident";
     const auto oplogEntryObject2Doc = MutableOplogEntry::makeCreateCollObject2(
-        catalogId, identUniqueTag, StringData(idIndexIdentUniqueTag));
+        catalogId, identUniqueTag, std::string_view(idIndexIdentUniqueTag));
     ASSERT_BSONOBJ_EQ(oplogEntryObject2Doc,
                       BSON("catalogId" << 1 << "ident" << identUniqueTag << "idIndexIdent"
                                        << idIndexIdentUniqueTag));
@@ -277,7 +252,7 @@ TEST_F(OplogEntryTest, CreateO2RoundTrip) {
     std::string identUniqueTag = "collection_ident";
     std::string idIndexIdentUniqueTag = "id_index_ident";
     const auto rawO2 = MutableOplogEntry::makeCreateCollObject2(
-        catalogId, identUniqueTag, StringData(idIndexIdentUniqueTag));
+        catalogId, identUniqueTag, std::string_view(idIndexIdentUniqueTag));
 
     // Test parsing of 'o2' BSON.
     const auto parsedO2 = CreateOplogEntryO2::parse(rawO2, IDLParserContext("createOplogEntryO2"));
@@ -386,7 +361,7 @@ TEST_F(OplogEntryTest, IndexBuildO2RoundTrip) {
 }
 
 TEST_F(OplogEntryTest, ContainerInsert) {
-    StringData containerIdent = "container_ident";
+    std::string_view containerIdent = "container_ident";
     auto key = BSONBinData("k", 1, BinDataType::BinDataGeneral);
     auto value = BSONBinData("v", 1, BinDataType::BinDataGeneral);
     auto entry = makeContainerInsertOplogEntry(entryOpTime, containerIdent, key, value);
@@ -405,7 +380,7 @@ TEST_F(OplogEntryTest, ContainerInsert) {
 }
 
 TEST_F(OplogEntryTest, ContainerDelete) {
-    StringData containerIdent = "container_ident";
+    std::string_view containerIdent = "container_ident";
     auto key = BSONBinData("k", 1, BinDataType::BinDataGeneral);
     auto entry = makeContainerDeleteOplogEntry(entryOpTime, containerIdent, key);
 
@@ -478,6 +453,36 @@ TEST_F(OplogEntryTest, ContainerDeleteParse) {
     ASSERT_EQ(*entry.getContainer(), ident);
 }
 
+TEST_F(OplogEntryTest, ContainerUpdateParse) {
+    const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    const std::string ident = "test_ident";
+
+    const BSONObj oplogBson = [&] {
+        BSONObjBuilder bob;
+        bob.append("ts", Timestamp(1, 1));
+        bob.append("t", 1LL);
+        bob.append("op", "cu");
+        bob.append("ns", nss.ns_forTest());
+        bob.append("container", ident);
+        bob.append("wall", Date_t());
+
+        BSONObjBuilder oBuilder(bob.subobjStart("o"));
+        oBuilder.appendBinData("k", 3, BinDataGeneral, "abc");
+        oBuilder.appendBinData("v", 4, BinDataGeneral, "defg");
+        oBuilder.append("$v", 1LL);
+        oBuilder.done();
+
+        return bob.obj();
+    }();
+
+    auto entry = unittest::assertGet(DurableOplogEntry::parse(oplogBson));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kContainerUpdate);
+    ASSERT_EQ(entry.getNss(), nss);
+    ASSERT_TRUE(entry.getContainer());
+    ASSERT_EQ(*entry.getContainer(), ident);
+}
+
 TEST_F(OplogEntryTest, ContainerOpMissingContainer) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
 
@@ -507,7 +512,7 @@ TEST_F(OplogEntryTest, ContainerInsertORoundTripIntKey) {
         ContainerInsertOplogEntryO::parse(rawO, IDLParserContext("ContainerInsertOplogEntryO"));
     ASSERT_TRUE(parsed.getKey().isIntKey());
     ASSERT_EQ(parsed.getKey().getIntKey(), 42);
-    ASSERT_EQ(parsed.getValue().data().size(), 5);
+    ASSERT_EQ(parsed.getValue().value().data().size(), 5);
 
     const auto serialized = parsed.toBSON();
     ASSERT_BSONOBJ_EQ(rawO, serialized);
@@ -604,6 +609,7 @@ TEST_F(OplogEntryTest, ApplyOpsNotInSession) {
     ASSERT_FALSE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_FALSE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsSingleEntryTransaction) {
@@ -628,6 +634,7 @@ TEST_F(OplogEntryTest, ApplyOpsSingleEntryTransaction) {
     ASSERT_FALSE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_TRUE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsStartMultiEntryTransaction) {
@@ -653,6 +660,7 @@ TEST_F(OplogEntryTest, ApplyOpsStartMultiEntryTransaction) {
     ASSERT_TRUE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_TRUE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsMiddleMultiEntryTransaction) {
@@ -678,6 +686,7 @@ TEST_F(OplogEntryTest, ApplyOpsMiddleMultiEntryTransaction) {
     ASSERT_TRUE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_TRUE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsEndMultiEntryTransaction) {
@@ -702,6 +711,7 @@ TEST_F(OplogEntryTest, ApplyOpsEndMultiEntryTransaction) {
     ASSERT_FALSE(applyOpsEntry.isPartialTransaction());
     ASSERT_TRUE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_TRUE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsFirstOrOnlyRetryableWrite) {
@@ -726,6 +736,7 @@ TEST_F(OplogEntryTest, ApplyOpsFirstOrOnlyRetryableWrite) {
     ASSERT_FALSE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_FALSE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_TRUE(applyOpsEntry.applyOpsIsMarkedRetryable());
 }
 
 TEST_F(OplogEntryTest, ApplyOpsSubsequentRetryableWrite) {
@@ -752,6 +763,176 @@ TEST_F(OplogEntryTest, ApplyOpsSubsequentRetryableWrite) {
     ASSERT_FALSE(applyOpsEntry.isPartialTransaction());
     ASSERT_FALSE(applyOpsEntry.isEndOfLargeTransaction());
     ASSERT_FALSE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+    EXPECT_TRUE(applyOpsEntry.applyOpsIsMarkedRetryable());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableAppliedAtomically) {
+    UUID uuid(UUID::gen());
+    auto sessionId = makeLogicalSessionIdForTest();
+    const auto applyOpsBson =
+        BSON("ts" << Timestamp(1, 1) << "t" << 1LL << "op"
+                  << "c"
+                  << "ns"
+                  << "admin.$cmd"
+                  << "wall" << Date_t() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                             << "ns" << nss.ns_forTest() << "ui"
+                                                             << uuid << "o" << BSON("_id" << 1))))
+                  << "lsid" << sessionId.toBSON() << "txnNumber" << TxnNumber(5) << "stmtId"
+                  << StmtId(0) << "prevOpTime" << OpTime() << "multiOpType"
+                  << static_cast<int>(MultiOplogEntryType::kApplyOpsAppliedAtomically));
+    auto applyOpsEntry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+    EXPECT_TRUE(applyOpsEntry.applyOpsIsMarkedRetryable());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableAppliedAtomicallyWithPrevOpTime) {
+    UUID uuid(UUID::gen());
+    auto sessionId = makeLogicalSessionIdForTest();
+    const auto applyOpsBson =
+        BSON("ts" << Timestamp(1, 2) << "t" << 1LL << "op"
+                  << "c"
+                  << "ns"
+                  << "admin.$cmd"
+                  << "wall" << Date_t() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                             << "ns" << nss.ns_forTest() << "ui"
+                                                             << uuid << "o" << BSON("_id" << 1))))
+                  << "lsid" << sessionId.toBSON() << "txnNumber" << TxnNumber(5) << "stmtId"
+                  << StmtId(0) << "prevOpTime" << OpTime(Timestamp(1, 1), 1) << "multiOpType"
+                  << static_cast<int>(MultiOplogEntryType::kApplyOpsAppliedAtomically));
+    auto applyOpsEntry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+    EXPECT_TRUE(applyOpsEntry.applyOpsIsMarkedRetryable());
+    EXPECT_TRUE(applyOpsEntry.applyOpsIsLinkedTransactionally());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableExcludesInternalSessionForRetryableWrite) {
+    UUID uuid(UUID::gen());
+    // An internal-session-for-retryable-write lsid carries a txnNumber inside the
+    // LogicalSessionId itself. Build one by appending the txnNumber field to the lsid BSON.
+    auto baseSessionId = makeLogicalSessionIdForTest();
+    BSONObjBuilder lsidBob;
+    baseSessionId.serialize(&lsidBob);
+    lsidBob.append("txnNumber", TxnNumber(0));
+    const auto internalSessionLsid = lsidBob.obj();
+
+    const auto applyOpsBson =
+        BSON("ts" << Timestamp(1, 1) << "t" << 1LL << "op"
+                  << "c"
+                  << "ns"
+                  << "admin.$cmd"
+                  << "wall" << Date_t() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                             << "ns" << nss.ns_forTest() << "ui"
+                                                             << uuid << "o" << BSON("_id" << 1))))
+                  << "lsid" << internalSessionLsid << "txnNumber" << TxnNumber(5) << "stmtId"
+                  << StmtId(0) << "prevOpTime" << OpTime());
+    auto applyOpsEntry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+    // applyOpsIsMarkedRetryable() only matches multiOpType-tagged entries; an internal-session
+    // applyOps without a multiOpType tag is not "marked" even though it represents a retryable
+    // write. Callers that want to cover both must compose the two predicates explicitly.
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
+    ASSERT_TRUE(applyOpsEntry.getSessionId().has_value());
+    EXPECT_TRUE(isInternalSessionForRetryableWrite(*applyOpsEntry.getSessionId()));
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableMultiDocTxnIsNotMarked) {
+    UUID uuid(UUID::gen());
+    auto sessionId = makeLogicalSessionIdForTest();
+    // End of a multi-entry transaction: non-null prevOpTime links to a prior applyOps entry.
+    const auto applyOpsBson =
+        BSON("ts" << Timestamp(1, 2) << "t" << 1LL << "op"
+                  << "c"
+                  << "ns"
+                  << "admin.$cmd"
+                  << "wall" << Date_t() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                             << "ns" << nss.ns_forTest() << "ui"
+                                                             << uuid << "o" << BSON("_id" << 1))))
+                  << "lsid" << sessionId.toBSON() << "txnNumber" << TxnNumber(5) << "stmtId"
+                  << StmtId(0) << "prevOpTime" << OpTime(Timestamp(1, 1), 1));
+    auto applyOpsEntry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableNotInSessionIsNotMarked) {
+    UUID uuid(UUID::gen());
+    const auto applyOpsBson =
+        BSON("ts" << Timestamp(1, 1) << "t" << 1LL << "op"
+                  << "c"
+                  << "ns"
+                  << "admin.$cmd"
+                  << "wall" << Date_t() << "o"
+                  << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                             << "ns" << nss.ns_forTest() << "ui"
+                                                             << uuid << "o" << BSON("_id" << 1)))));
+    auto applyOpsEntry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+    EXPECT_FALSE(applyOpsEntry.applyOpsIsMarkedRetryable());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsIsMarkedRetryableNonApplyOpsWithMultiOpTypeIsNotMarked) {
+    UUID uuid(UUID::gen());
+    const auto insertBson =
+        BSON("ts" << Timestamp(1, 1) << "t" << 1LL << "op"
+                  << "i"
+                  << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o"
+                  << BSON("_id" << 1) << "multiOpType"
+                  << static_cast<int>(MultiOplogEntryType::kApplyOpsAppliedSeparately));
+    auto insertEntry = unittest::assertGet(OplogEntry::parse(insertBson));
+    EXPECT_FALSE(insertEntry.applyOpsIsMarkedRetryable());
+}
+
+TEST_F(OplogEntryTest, ApplyOpsAppliedAtomicallyIsNotTransaction) {
+    UUID uuid(UUID::gen());
+    auto sessionId = makeLogicalSessionIdForTest();
+    // Null prevOpTime (single entry).
+    {
+        const auto applyOpsBson = BSON(
+            "ts" << Timestamp(1, 1) << "t" << 1LL << "op"
+                 << "c"
+                 << "ns"
+                 << "admin.$cmd"
+                 << "wall" << Date_t() << "o"
+                 << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                            << "ns" << nss.ns_forTest() << "ui"
+                                                            << uuid << "o" << BSON("_id" << 1))))
+                 << "lsid" << sessionId.toBSON() << "txnNumber" << TxnNumber(5) << "stmtId"
+                 << StmtId(0) << "prevOpTime" << OpTime() << "multiOpType"
+                 << static_cast<int>(MultiOplogEntryType::kApplyOpsAppliedAtomically));
+        auto entry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+        ASSERT_TRUE(entry.isCommand());
+        ASSERT_FALSE(entry.isInTransaction());
+        ASSERT_TRUE(entry.isTerminalApplyOps());
+        ASSERT_FALSE(entry.isSingleOplogEntryTransaction());
+        ASSERT_FALSE(entry.isPartialTransaction());
+        ASSERT_FALSE(entry.isEndOfLargeTransaction());
+        ASSERT_TRUE(entry.applyOpsIsLinkedTransactionally());
+        EXPECT_TRUE(entry.applyOpsIsMarkedRetryable());
+    }
+
+    // Non-null prevOpTime (chained entry in an oversized batch).
+    {
+        const auto applyOpsBson = BSON(
+            "ts" << Timestamp(1, 2) << "t" << 1LL << "op"
+                 << "c"
+                 << "ns"
+                 << "admin.$cmd"
+                 << "wall" << Date_t() << "o"
+                 << BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                            << "ns" << nss.ns_forTest() << "ui"
+                                                            << uuid << "o" << BSON("_id" << 1))))
+                 << "lsid" << sessionId.toBSON() << "txnNumber" << TxnNumber(5) << "stmtId"
+                 << StmtId(0) << "prevOpTime" << OpTime(Timestamp(1, 1), 1) << "multiOpType"
+                 << static_cast<int>(MultiOplogEntryType::kApplyOpsAppliedAtomically));
+        auto entry = unittest::assertGet(OplogEntry::parse(applyOpsBson));
+        ASSERT_TRUE(entry.isCommand());
+        ASSERT_FALSE(entry.isInTransaction());
+        ASSERT_TRUE(entry.isTerminalApplyOps());
+        ASSERT_FALSE(entry.isSingleOplogEntryTransaction());
+        ASSERT_FALSE(entry.isPartialTransaction());
+        ASSERT_FALSE(entry.isEndOfLargeTransaction());
+        ASSERT_TRUE(entry.applyOpsIsLinkedTransactionally());
+        EXPECT_TRUE(entry.applyOpsIsMarkedRetryable());
+    }
 }
 
 TEST_F(OplogEntryTest, OpTimeBaseNonStrictParsing) {
@@ -785,8 +966,8 @@ TEST_F(OplogEntryTest, OpTimeBaseNonStrictParsing) {
 }
 
 TEST_F(OplogEntryTest, InsertIncludesTidField) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
     const BSONObj doc = BSON("_id" << docId << "a" << 5);
     TenantId tid(OID::gen());
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "foo", "bar");
@@ -800,8 +981,8 @@ TEST_F(OplogEntryTest, InsertIncludesTidField) {
 }
 
 TEST_F(OplogEntryTest, ParseMutableOplogEntryIncludesTidField) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const TenantId tid(OID::gen());
 
@@ -827,8 +1008,8 @@ TEST_F(OplogEntryTest, ParseMutableOplogEntryIncludesTidField) {
 }
 
 TEST_F(OplogEntryTest, ParseDurableOplogEntryIncludesTidField) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const TenantId tid(OID::gen());
     const NamespaceString nssWithTid =
@@ -854,8 +1035,8 @@ TEST_F(OplogEntryTest, ParseDurableOplogEntryIncludesTidField) {
 }
 
 TEST_F(OplogEntryTest, ParseReplOperationIncludesTidField) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     UUID uuid(UUID::gen());
     TenantId tid(OID::gen());
@@ -883,8 +1064,8 @@ TEST_F(OplogEntryTest, ParseReplOperationIncludesTidField) {
 
 TEST_F(OplogEntryTest, ConvertMutableOplogEntryToReplOperation) {
     // Required by setTid to take effect
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
-    RAIIServerParameterControllerForTest multitenancySupportController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancySupportController("multitenancySupport", true);
     auto tid = TenantId(OID::gen());
     auto nssWithTid = NamespaceString::createNamespaceString_forTest(tid, nss.ns_forTest());
     auto opType = repl::OpTypeEnum::kCommand;
@@ -1155,7 +1336,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                                                            << "internal-constraintViolations-1"))));
 
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
         EXPECT_EQ(parsed.indexBuildMethod, IndexBuildMethodEnum::kPrimaryDriven);
@@ -1187,7 +1368,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                                                              << "internal-skippedRecords-0"))));
 
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
         EXPECT_EQ(parsed.indexBuildMethod, IndexBuildMethodEnum::kPrimaryDriven);
@@ -1229,9 +1410,9 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                       << "indexBuildIdent" << expectedIdent);
 
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
-        RAIIServerParameterControllerForTest resumablePrimaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard resumablePrimaryDrivenIndexBuildsEnabled(
             "featureFlagResumablePrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
         ASSERT_EQ(parsed.indexes.size(), 2);
@@ -1262,9 +1443,9 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                       << "indexBuildIdent" << "not/a/valid/ident");
 
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
-        RAIIServerParameterControllerForTest resumablePrimaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard resumablePrimaryDrivenIndexBuildsEnabled(
             "featureFlagResumablePrimaryDrivenIndexBuilds", true);
         auto result = IndexBuildOplogEntry::parse(_opCtx.get(), entry);
         ASSERT_EQ(result.getStatus(), ErrorCodes::BadValue);
@@ -1291,7 +1472,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                            << "indexBuildIdent" << wellFormedIdent);
 
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         // featureFlagResumablePrimaryDrivenIndexBuilds intentionally NOT enabled.
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
@@ -1385,7 +1566,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                                                                 << "skippedRecordsIdent"
                                                                 << "internal-skippedRecords-1"))));
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
         ASSERT_EQ(parsed.commandType, OplogEntry::CommandType::kCommitIndexBuild);
@@ -1515,7 +1696,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
                                                    << "skippedRecordsIdent"
                                                    << "internal-skippedRecordsTracker-1"))));
         const auto entry = makeCommandOplogEntry(entryOpTime, nss, o, o2, uuid);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(_opCtx.get(), entry));
         EXPECT_EQ(parsed.commandType, OplogEntry::CommandType::kAbortIndexBuild);
@@ -1564,7 +1745,7 @@ TEST_F(OplogEntryTest, ParseValidIndexBuildOplogEntry) {
 
 void assertIndexBuildSkipsO2WhenParseO2False(OperationContext* opCtx,
                                              const OpTime& opTime,
-                                             StringData commandName,
+                                             std::string_view commandName,
                                              OplogEntry::CommandType expectedCommandType) {
     const std::string ns = "test.coll";
     const auto nss = NamespaceString::createNamespaceString_forTest(ns);
@@ -1626,7 +1807,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
                                << "indexBuildUUID" << UUID::gen() << "indexes"
                                << BSON_ARRAY(BSON("v" << 2 << "key" << BSON("x" << 1) << "name"
                                                       << "x_1")));
-    auto setField = [&](StringData name, auto value) {
+    auto setField = [&](std::string_view name, auto value) {
         return baseObj.addFields(BSON(name << value));
     };
 
@@ -1676,7 +1857,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Non-unique indexes always omit constraintViolationsIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         auto parsed = unittest::assertGet(IndexBuildOplogEntry::parse(
             _opCtx.get(),
@@ -1697,7 +1878,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject an internalIdents object that omits one of its required non-optional fields.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -1712,7 +1893,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject a startIndexBuild batch where only some indexes specify internalIdents.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         const auto mixedBaseObj = BSON(
             "startIndexBuild" << "test.coll" << "indexBuildUUID" << UUID::gen() << "indexes"
@@ -1737,7 +1918,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Unique indexes require constraintViolationsIdent in primary-driven index builds.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         const auto uniqueBaseObj =
             BSON("startIndexBuild" << "test.coll" << "indexBuildUUID" << UUID::gen() << "indexes"
@@ -1758,7 +1939,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // _id indexes require constraintViolationsIdent in primary-driven index builds.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         const auto idBaseObj = BSON(
             "startIndexBuild" << "test.coll" << "indexBuildUUID" << UUID::gen() << "indexes"
@@ -1823,7 +2004,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
         ErrorCodes::BadValue);
     // Reject a commitIndexBuild batch where only some indexes specify internalIdents.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_EQ(
             parse(baseObj,
@@ -1839,7 +2020,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required sideWritesIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(
@@ -1857,7 +2038,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required sorterIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -1876,7 +2057,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required skippedRecordsIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -1924,7 +2105,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
         ErrorCodes::BadValue);
     // Reject a commitIndexBuild batch where only some indexes specify internalIdents.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_EQ(
             parse(baseObj,
@@ -1940,7 +2121,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required sideWritesIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(
@@ -1958,7 +2139,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required sorterIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -1977,7 +2158,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject commitIndexBuild internalIdents missing required skippedRecordsIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -2004,7 +2185,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
         const auto uniqueBaseObj = BSON("commitIndexBuild" << "test.coll"
                                                            << "indexBuildUUID" << UUID::gen()
                                                            << "indexes" << uniqueIndexSpecs);
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_EQ(
             parse(uniqueBaseObj,
@@ -2091,7 +2272,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
         ErrorCodes::BadValue);
     // Reject an abortIndexBuild batch where only some indexes specify internalIdents.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_EQ(
             parse(baseObj,
@@ -2107,7 +2288,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject abortIndexBuild internalIdents missing required sideWritesIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(
@@ -2125,7 +2306,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject abortIndexBuild internalIdents missing required sorterIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -2144,7 +2325,7 @@ TEST_F(OplogEntryTest, ParseInvalidIndexBuildOplogEntry) {
 
     // Reject abortIndexBuild internalIdents missing required skippedRecordsIdent.
     {
-        RAIIServerParameterControllerForTest primaryDrivenIndexBuildsEnabled(
+        unittest::ServerParameterGuard primaryDrivenIndexBuildsEnabled(
             "featureFlagPrimaryDrivenIndexBuilds", true);
         ASSERT_THROWS_CODE(
             parse(baseObj,
@@ -2447,12 +2628,41 @@ TEST_F(OplogEntryTest, SizeMetadataSingleOpRoundTrip) {
     EXPECT_EQ(expectedSizeMetadata.getSz(), parsedSingleOpSizeMetadata->getSz());
 }
 
+TEST_F(OplogEntryTest, SizeMetadataSingleOpAbsentSzRoundTrip) {
+    SingleOpSizeMetadata expectedSizeMetadata;
+    ASSERT_FALSE(expectedSizeMetadata.getSz().has_value());
+
+    const BSONObj oplogEntryBson = [&] {
+        BSONObjBuilder bob;
+        bob.append("ts", Timestamp(1, 1));
+        bob.append("t", 1LL);
+        bob.append("op", "i");
+        bob.append("ns", nss.ns_forTest());
+        bob.append("wall", Date_t());
+        bob.append("o", BSON("_id" << 1));
+        bob.append("m", expectedSizeMetadata.toBSON());
+        return bob.obj();
+    }();
+
+    const auto entry = unittest::assertGet(DurableOplogEntry::parse(oplogEntryBson));
+    const auto& parsedSizeMetadata = entry.getSizeMetadata();
+    ASSERT_TRUE(parsedSizeMetadata.has_value());
+    const auto* parsedSingleOpSizeMetadata =
+        std::get_if<SingleOpSizeMetadata>(&parsedSizeMetadata.value());
+    ASSERT_NE(parsedSingleOpSizeMetadata, nullptr);
+    EXPECT_FALSE(parsedSingleOpSizeMetadata->getSz().has_value());
+}
+
 TEST_F(OplogEntryTest, SizeMetadataMultiOpRoundTrip) {
+    const int64_t expectedHash = 0x0011223344556677LL;
+
     MultiOpSizeMetadata expectedMeta1;
     expectedMeta1.setUuid(UUID::gen());
     expectedMeta1.setSz(100);
     expectedMeta1.setCt(3);
+    expectedMeta1.setH(expectedHash);
 
+    // 'h' is optional; leave it unset on the second entry.
     MultiOpSizeMetadata expectedMeta2;
     expectedMeta2.setUuid(UUID::gen());
     expectedMeta2.setSz(200);
@@ -2484,10 +2694,13 @@ TEST_F(OplogEntryTest, SizeMetadataMultiOpRoundTrip) {
     EXPECT_EQ(expectedMeta1.getUuid(), (*parsedMultiOpSizeMetadata)[0].getUuid());
     EXPECT_EQ(expectedMeta1.getSz(), (*parsedMultiOpSizeMetadata)[0].getSz());
     EXPECT_EQ(expectedMeta1.getCt(), (*parsedMultiOpSizeMetadata)[0].getCt());
+    ASSERT_TRUE((*parsedMultiOpSizeMetadata)[0].getH().has_value());
+    EXPECT_EQ(expectedHash, *(*parsedMultiOpSizeMetadata)[0].getH());
 
     EXPECT_EQ(expectedMeta2.getUuid(), (*parsedMultiOpSizeMetadata)[1].getUuid());
     EXPECT_EQ(expectedMeta2.getSz(), (*parsedMultiOpSizeMetadata)[1].getSz());
     EXPECT_EQ(expectedMeta2.getCt(), (*parsedMultiOpSizeMetadata)[1].getCt());
+    EXPECT_FALSE((*parsedMultiOpSizeMetadata)[1].getH().has_value());
 }
 
 TEST_F(OplogEntryTest, SizeMetadataMultiOpEmptyArray) {

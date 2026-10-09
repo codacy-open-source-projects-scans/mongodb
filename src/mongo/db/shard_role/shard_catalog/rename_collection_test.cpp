@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/rename_collection.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
@@ -59,17 +32,22 @@
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
+#include "mongo/db/topology/user_write_block/replica_set_writes_block_reason_gen.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -89,6 +67,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Mock OpObserver that tracks dropped collections and databases.
@@ -135,7 +114,7 @@ public:
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    const std::vector<RecordId>& recordIds,
-                   std::vector<bool> fromMigrate,
+                   const std::vector<bool>& fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override;
 
@@ -260,7 +239,7 @@ void OpObserverMock::onInserts(OperationContext* opCtx,
                                std::vector<InsertStatement>::const_iterator begin,
                                std::vector<InsertStatement>::const_iterator end,
                                const std::vector<RecordId>& recordIds,
-                               std::vector<bool> fromMigrate,
+                               const std::vector<bool>& fromMigrate,
                                bool defaultFromMigrate,
                                OpStateAccumulator* opAccumulator) {
     if (onInsertsThrows) {
@@ -475,8 +454,11 @@ void _createCollection(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const CollectionOptions options = {}) {
     writeConflictRetry(opCtx, "_createCollection", nss, [=] {
-        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
-        auto db = autoDb.ensureDbExists(opCtx);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        auto db = DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName());
         ASSERT_TRUE(db) << "Cannot create collection " << nss.toStringForErrorMsg()
                         << " because database " << nss.toStringForErrorMsg() << " does not exist.";
 
@@ -561,16 +543,19 @@ void _createIndexOnEmptyCollection(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    const std::string& indexName) {
     writeConflictRetry(opCtx, "_createIndexOnEmptyCollection", nss, [=] {
-        AutoGetCollection collection(opCtx, nss, MODE_X);
-        ASSERT_TRUE(collection) << "Cannot create index on empty collection "
-                                << nss.toStringForErrorMsg() << " because collection "
-                                << nss.toStringForErrorMsg() << " does not exist.";
+        auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        ASSERT_TRUE(collection.exists())
+            << "Cannot create index on empty collection " << nss.toStringForErrorMsg()
+            << " because collection " << nss.toStringForErrorMsg() << " does not exist.";
 
         auto indexInfoObj = BSON("v" << int(IndexConfig::kLatestIndexVersion) << "key"
                                      << BSON("a" << 1) << "name" << indexName);
 
         WriteUnitOfWork wuow(opCtx);
-        CollectionWriter writer{opCtx, collection};
+        CollectionWriter writer{opCtx, &collection};
 
         auto indexCatalog = writer.getWritableCollection(opCtx)->getIndexCatalog();
         ASSERT_OK(indexCatalog
@@ -588,13 +573,16 @@ void _createIndexOnEmptyCollection(OperationContext* opCtx,
  */
 void _insertDocument(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& doc) {
     writeConflictRetry(opCtx, "_insertDocument", nss, [=] {
-        AutoGetCollection collection(opCtx, nss, MODE_X);
-        ASSERT_TRUE(collection) << "Cannot insert document " << doc << " into collection "
-                                << nss.toStringForErrorMsg() << " because collection "
-                                << nss.toStringForErrorMsg() << " does not exist.";
+        auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        ASSERT_TRUE(collection.exists())
+            << "Cannot insert document " << doc << " into collection " << nss.toStringForErrorMsg()
+            << " because collection " << nss.toStringForErrorMsg() << " does not exist.";
 
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(Helpers::insert(opCtx, *collection, doc));
+        ASSERT_OK(Helpers::insert(opCtx, collection.getCollectionPtr(), doc));
         wuow.commit();
     });
 }
@@ -1068,20 +1056,94 @@ TEST_F(RenameCollectionTest,
                                                     {});
 }
 
-TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseDropsTemporaryCollectionOnException) {
+TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseCreatesTemporaryCollection) {
+    RenameCollectionOptions opts;
+    opts.newTargetCollectionUuid = UUID::gen();
     _createCollection(_opCtx.get(), _sourceNss);
     _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
     _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
     _opObserver->onInsertsThrows = true;
     _opObserver->oplogEntries.clear();
-    ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}),
+    ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts),
                        AssertionException,
                        ErrorCodes::OperationFailed);
-    std::vector<std::string> expectedOplogEntries;
-    // Empty Collections generate createIndexes oplog entry even if the node
-    // supports 2 phase index build.
-    expectedOplogEntries = {"create", "index", "drop"};
-    _checkOplogEntries(_opObserver->oplogEntries, expectedOplogEntries);
+    const auto& tmp = CollectionCatalog::get(_opCtx.get())
+                          ->lookupNSSByUUID(_opCtx.get(), *opts.newTargetCollectionUuid);
+    ASSERT(tmp);
+    ASSERT_TRUE(_isTempCollection(_opCtx.get(), *tmp));
+}
+
+TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseRetryCleansUpOldTemporaryCollection) {
+    RenameCollectionOptions opts;
+    opts.newTargetCollectionUuid = UUID::gen();
+    _createCollection(_opCtx.get(), _sourceNss);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
+    _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
+    _opObserver->onInsertsThrows = true;
+    _opObserver->oplogEntries.clear();
+    ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts),
+                       AssertionException,
+                       ErrorCodes::OperationFailed);
+    _opObserver->onInsertsThrows = false;
+    ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts));
+}
+
+TEST_F(RenameCollectionTest,
+       RenameCollectionAcrossDatabaseRetryAfterRenameSucceedsButBeforeSourceDrop) {
+    RenameCollectionOptions opts;
+    opts.newTargetCollectionUuid = UUID::gen();
+    opts.dropTarget = true;
+    _createCollection(_opCtx.get(), _sourceNss);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
+    _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
+    {
+        FailPointEnableBlock failPoint("failRenameAfterFinalizeButBeforeSourceDrop");
+        ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts),
+                           AssertionException,
+                           ErrorCodes::BadValue);
+    }
+    ASSERT_TRUE(_collectionExists(_opCtx.get(), _sourceNss));
+    ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts));
+    ASSERT_FALSE(_collectionExists(_opCtx.get(), _sourceNss));
+    auto destOptions = _getCollectionOptions(_opCtx.get(), _targetNssDifferentDb);
+    ASSERT_EQUALS(destOptions.uuid, *opts.newTargetCollectionUuid);
+}
+
+TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseFailsAfterFinalizeAndSourceDrop) {
+    RenameCollectionOptions opts;
+    opts.newTargetCollectionUuid = UUID::gen();
+    opts.dropTarget = true;
+    _createCollection(_opCtx.get(), _sourceNss);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
+    _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
+    {
+        FailPointEnableBlock failPoint("failRenameAfterFinalizeAndAfterSourceDrop");
+        ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts),
+                           AssertionException,
+                           13180500);
+    }
+
+    ASSERT_FALSE(_collectionExists(_opCtx.get(), _sourceNss));
+    auto destOptions = _getCollectionOptions(_opCtx.get(), _targetNssDifferentDb);
+    ASSERT_EQUALS(destOptions.uuid, *opts.newTargetCollectionUuid);
+
+    // Can't attempt a retry here as we don't get any benefit - renameCollection will fail with
+    // source namespace not found
+}
+
+TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabaseRetryAfterRenameSucceeds) {
+    RenameCollectionOptions opts;
+    opts.newTargetCollectionUuid = UUID::gen();
+    _createCollection(_opCtx.get(), _sourceNss);
+    _createIndexOnEmptyCollection(_opCtx.get(), _sourceNss, "a_1");
+    _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
+    ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts));
+    ASSERT_THROWS_CODE(
+        uassertStatusOK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, opts)),
+        AssertionException,
+        ErrorCodes::NamespaceNotFound);
+    auto destOptions = _getCollectionOptions(_opCtx.get(), _targetNssDifferentDb);
+    ASSERT_EQUALS(destOptions.uuid, *opts.newTargetCollectionUuid);
 }
 
 TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabasesWithoutLocks) {
@@ -1089,6 +1151,21 @@ TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabasesWithoutLocks) {
     _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
     ASSERT_OK(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}));
     ASSERT_FALSE(_opObserver->onInsertsIsTargetDatabaseExclusivelyLocked);
+}
+
+TEST_F(RenameCollectionTest,
+       RenameCollectionAcrossDatabasesBlockedAtStartIfReplicaSetWriteBlockIsEnabled) {
+    _createCollection(_opCtx.get(), _sourceNss);
+    _insertDocument(_opCtx.get(), _sourceNss, BSON("_id" << 0));
+
+    auto* writeBlockState = ReplicaSetWriteBlockState::get(_opCtx.get());
+    ON_BLOCK_EXIT([&] { writeBlockState->disableReplicaSetWriteBlocking(); });
+    writeBlockState->enableReplicaSetWriteBlocking(
+        ReplicaSetWritesBlockReasonEnum::kInsufficientDiskSpace);
+
+    ASSERT_THROWS_CODE(renameCollection(_opCtx.get(), _sourceNss, _targetNssDifferentDb, {}),
+                       DBException,
+                       ErrorCodes::ReplicaSetWritesBlocked);
 }
 
 TEST_F(RenameCollectionTest, RenameCollectionAcrossDatabasesWithLocks) {
@@ -1196,7 +1273,7 @@ protected:
 };
 
 void RenameCollectionTestMultitenancy::setUp() {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     RenameCollectionTest::setUp();
 
@@ -1208,8 +1285,8 @@ void RenameCollectionTestMultitenancy::setUp() {
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOps) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_tenantId, _otherNs);
@@ -1231,8 +1308,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOps) {
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsCommonRandomTid) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _sourceNs);
@@ -1248,8 +1325,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsCommonRandom
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsCommonTid) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _otherNs);
@@ -1266,8 +1343,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsCommonTid) {
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSourceExistsOnWrongTenant) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     const NamespaceString otherSourceNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _sourceNs);
@@ -1287,8 +1364,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSourceExists
 
 TEST_F(RenameCollectionTestMultitenancy,
        RenameCollectionForApplyOpsSourceExistsOnWrongTenantRequireTenantIdFalse) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", false);
 
     const NamespaceString otherSourceNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _sourceNs);
@@ -1307,8 +1384,8 @@ TEST_F(RenameCollectionTestMultitenancy,
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsRequireTenantIdFalse) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", false);
 
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_tenantId, _otherNs);
@@ -1322,8 +1399,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsRequireTenan
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSameNS) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", true);
 
     // A tid field supersedes tenantIds maintained in source or target. See above.
     auto cmd = BSON("renameCollection" << _sourceNssTid.toString_forTest() << "to"
@@ -1332,8 +1409,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSameNS) {
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSameNSRequireTenantIdFalse) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", false);
 
     auto cmd = BSON("renameCollection" << _sourceNssTid.toStringWithTenantId_forTest() << "to"
                                        << _sourceNssTid.toStringWithTenantId_forTest());
@@ -1341,8 +1418,8 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsSameNSRequir
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsAcrossTenantIds) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID", false);
 
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _sourceNs);
@@ -1358,7 +1435,7 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionForApplyOpsAcrossTenant
 }
 
 TEST_F(RenameCollectionTestMultitenancy, RenameCollectionAcrossTenantIds) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
     const NamespaceString targetNssTid =
         NamespaceString::createNamespaceString_forTest(_otherTenantId, _otherNs);
     ASSERT_NOT_EQUALS(_sourceNssTid, targetNssTid);
@@ -1368,6 +1445,94 @@ TEST_F(RenameCollectionTestMultitenancy, RenameCollectionAcrossTenantIds) {
     options.dropTarget = true;
     ASSERT_EQUALS(ErrorCodes::IllegalOperation,
                   renameCollection(_opCtx.get(), _sourceNssTid, targetNssTid, options));
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for checkTargetCollectionOptionsMatch.
+//
+// checkTargetCollectionOptionsMatch is the rename options guard used by $out's finalize rename.
+// These tests run without a server fixture — the function only operates on
+// BSONObjs and a NamespaceString.
+// ---------------------------------------------------------------------------
+class CheckTargetCollectionOptionsMatchTest : public unittest::Test {
+protected:
+    const NamespaceString _nss =
+        NamespaceString::createNamespaceString_forTest("testdb", "testcoll");
+
+    // Build a minimal timeseries collection-options BSON, optionally with fixedBucketing.
+    static BSONObj makeOpts(boost::optional<bool> fixedBucketing = boost::none,
+                            boost::optional<BucketGranularityEnum> granularity = boost::none) {
+        TimeseriesOptions ts{"t" /* timeField */};
+        ts.setMetaField("m"sv);
+        ts.setGranularity(granularity);
+        ts.setFixedBucketing(fixedBucketing ? OptionalBool(*fixedBucketing) : OptionalBool{});
+
+        CollectionOptions options;
+        options.clusteredIndex = clustered_util::makeCanonicalClusteredInfoForLegacyFormat();
+        options.timeseries = std::move(ts);
+        return options.toBSON(/*includeUUID=*/false);
+    }
+};
+
+// Identical options — always OK.
+TEST_F(CheckTargetCollectionOptionsMatchTest, IdenticalOptionsMatch) {
+    const auto opts = makeOpts(true);
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, opts, opts));
+}
+
+// The existing uuid exclusion must still hold.
+TEST_F(CheckTargetCollectionOptionsMatchTest, UuidDifferenceIsIgnored) {
+    const auto base = makeOpts();
+    auto addUuid = [&base] {
+        BSONObjBuilder bob(base);
+        UUID::gen().appendToBuilder(&bob, "uuid");
+        return bob.obj();
+    };
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, addUuid(), addUuid()));
+}
+
+// fixedBucketing deltas must all be ignored, regardless of direction or value.
+TEST_F(CheckTargetCollectionOptionsMatchTest, FixedBucketingPresentVsAbsentIsIgnored) {
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(true), makeOpts()));
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(), makeOpts(true)));
+}
+
+TEST_F(CheckTargetCollectionOptionsMatchTest, FixedBucketingFalseVsAbsentIsIgnored) {
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(false), makeOpts()));
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(), makeOpts(false)));
+}
+
+TEST_F(CheckTargetCollectionOptionsMatchTest, FixedBucketingTrueVsFalseIsIgnored) {
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(true), makeOpts(false)));
+    ASSERT_OK(checkTargetCollectionOptionsMatch(_nss, makeOpts(false), makeOpts(true)));
+}
+
+// A real shape difference (granularity) must still be rejected.
+TEST_F(CheckTargetCollectionOptionsMatchTest, GranularityDifferenceIsRejected) {
+    ASSERT_EQUALS(
+        ErrorCodes::CommandFailed,
+        checkTargetCollectionOptionsMatch(_nss,
+                                          makeOpts(boost::none, BucketGranularityEnum::Seconds),
+                                          makeOpts(boost::none, BucketGranularityEnum::Minutes)));
+}
+
+// fixedBucketing difference combined with a real difference must also be rejected
+// (the granularity delta is still caught even when fixedBucketing differs too).
+TEST_F(CheckTargetCollectionOptionsMatchTest,
+       GranularityDifferenceIsRejectedEvenWithFixedBucketingDelta) {
+    ASSERT_EQUALS(
+        ErrorCodes::CommandFailed,
+        checkTargetCollectionOptionsMatch(_nss,
+                                          makeOpts(true, BucketGranularityEnum::Seconds),
+                                          makeOpts(false, BucketGranularityEnum::Minutes)));
+}
+
+// Non-timeseries options are unaffected — a validator difference must still be rejected.
+TEST_F(CheckTargetCollectionOptionsMatchTest, NonTimeseriesOptionsDifferenceIsRejected) {
+    const auto withValidator = BSON("validator" << BSON("x" << BSON("$gt" << 0)));
+    const auto withoutValidator = BSONObj();
+    ASSERT_EQUALS(ErrorCodes::CommandFailed,
+                  checkTargetCollectionOptionsMatch(_nss, withValidator, withoutValidator));
 }
 
 }  // namespace

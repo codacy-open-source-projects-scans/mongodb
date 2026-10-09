@@ -8,14 +8,23 @@ load(
 )
 load(
     "//bazel/toolchains/cc:mongo_compiler_flags.bzl",
+    "LIBVOIDSTAR_INPUTS",
     "get_copts",
     "get_linkopts",
 )
 load("@bazel_skylib//lib:selects.bzl", "selects")
-load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
+load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain")
+load("//bazel/install_rules:bolt.bzl", "bolt_optimize")
 load("@com_github_grpc_grpc//bazel:generate_cc.bzl", "generate_cc")
-load("@poetry//:dependencies.bzl", "dependency")
-load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library", "cc_shared_library")
+load("//bazel/config:py_action_env.bzl", "py_exec_import_paths")
+load("//bazel/uv:defs.bzl", "dependency")
+load("@rules_python//python:py_info.bzl", "PyInfo")
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_shared_library", "rust_test")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load(
     "//bazel:separate_debug.bzl",
@@ -27,12 +36,20 @@ load(
     "extract_debuginfo_test",
 )
 load("@local_host_values//:local_host_values_set.bzl", "NUM_CPUS")
-load("@evergreen_variables//:evergreen_variables.bzl", "UNSAFE_COMPILE_VARIANT", "UNSAFE_VERSION_ID")
+load(
+    "@evergreen_variables//:evergreen_variables.bzl",
+    "UNSAFE_COMPILE_TASK_TYPE",
+    "UNSAFE_COMPILE_VARIANT",
+    "UNSAFE_VERSION_ID",
+)
 load("//bazel/toolchains/cc/mongo_windows:mongo_windows_cc_toolchain_config.bzl", "MIN_VER_MAP")
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//bazel/config:generate_config_header.bzl", "generate_config_header")
 load("//bazel/auto_header:auto_header.bzl", "binary_srcs_with_all_headers", "build_selects_and_flat_files", "concat_selects", "dedupe_preserve_order", "maybe_all_headers", "maybe_compute_auto_headers", "strings_only")
 load("//bazel:test_exec_properties.bzl", "test_exec_properties")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 
 COMPILEDB_TAG = "mongo_compiledb"
 
@@ -173,6 +190,21 @@ PDB_GENERATION_ENABLED = select({
     "//conditions:default": True,
 })
 
+GDB_INDEX_ENABLED = select({
+    "//bazel/config:gdb_index_enabled_linux": True,
+    "//conditions:default": False,
+})
+
+GDB_GENERATE_INDEX = select({
+    "//bazel/config:gdb_index_enabled_linux": "//:gdb-generate-index",
+    "//conditions:default": "//bazel:gdb-generate-index-noop",
+})
+
+GDB_INDEX_MESSAGE_DATA = select({
+    "//bazel/config:gdb_index_enabled_linux": [],
+    "//conditions:default": ["//bazel:gdb-index-message"],
+})
+
 TCMALLOC_ERROR_MESSAGE = """
 Error:\n" +
     Build failed due to unsupported platform for current allocator selection:
@@ -208,14 +240,18 @@ DISABLE_3RD_PARTY_FEATURES = select({
         "thread_safety_warnings",
         "first_party_gcc_or_clang_warnings",
         "-ubsan_third_party",
+        "-system_include_paths",
     ],
     "//bazel/config:compiler_type_gcc": [
         "-disable_warnings_for_third_party_libraries_gcc",
         "first_party_gcc_or_clang_warnings",
         "first_party_gcc_warnings",
         "-ubsan_third_party",
+        "-system_include_paths",
     ],
-    "//conditions:default": [],
+    "//conditions:default": [
+        "-system_include_paths",
+    ],
 })
 
 MONGO_GLOBAL_SRC_DEPS = [
@@ -231,7 +267,7 @@ MONGO_GLOBAL_SRC_DEPS = [
     "//src/third_party/valgrind:headers",
 ]
 
-MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES
+MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES + LIBVOIDSTAR_INPUTS
 
 def hex32(val):
     """Returns zero-padded 8-character lowercase hex string of 32-bit hash."""
@@ -489,7 +525,7 @@ def mongo_cc_library(
                 "//bazel/config:simple_build_id_enabled": ["-Wl,--build-id=0x" +
                                                            hex32(hash(name)) +
                                                            hex32(hash(name)) +
-                                                           hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT)))],
+                                                           hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT) + str(UNSAFE_COMPILE_TASK_TYPE)))],
                 "//conditions:default": [],
             }),
             target_compatible_with = target_compatible_with,
@@ -545,6 +581,7 @@ def _mongo_cc_binary_and_test(
         skip_global_deps = [],
         env = {},
         _program_type = "",
+        bolt_profile = None,
         skip_windows_crt_flags = False,
         auto_header = True,
         srcs_select = None,
@@ -667,7 +704,7 @@ def _mongo_cc_binary_and_test(
         "visibility": visibility,
         "testonly": testonly,
         "copts": copts,
-        "data": data + SANITIZER_DATA + ["//bazel:test_wrapper"],
+        "data": data + SANITIZER_DATA + ["//bazel:test_wrapper"] + GDB_INDEX_MESSAGE_DATA,
         "tags": tags,
         "linkopts": linkopts + rpath_flags + select({
             "//bazel/config:thin_lto_enabled": ["-Wl,--threads=" + str(NUM_CPUS)],
@@ -676,7 +713,7 @@ def _mongo_cc_binary_and_test(
             "//bazel/config:simple_build_id_enabled": ["-Wl,--build-id=0x" +
                                                        hex32(hash(name)) +
                                                        hex32(hash(name)) +
-                                                       hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT)))],
+                                                       hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT) + str(UNSAFE_COMPILE_TASK_TYPE)))],
             "//conditions:default": [],
         }),
         "linkstatic": LINKSTATIC_ENABLED,
@@ -720,19 +757,40 @@ def _mongo_cc_binary_and_test(
 
     if _program_type == "binary":
         cc_binary(**args)
+
+        if bolt_profile != None:
+            bolt_optimize(
+                name = name + "_bolt",
+                binary_to_optimize = ":" + name + WITH_DEBUG_SUFFIX,
+                perf_data = bolt_profile,
+                use_gnu_stack = select({
+                    "//bazel/config:bolt_use_gnu_stack_disabled": False,
+                    "//conditions:default": True,
+                }),
+                target_compatible_with = select({
+                    "//bazel/config:bolt_profile_use_enabled": [],
+                    "//conditions:default": ["@platforms//:incompatible"],
+                }),
+            )
+
         extract_debuginfo_binary(
             name = name,
-            binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
+            binary_with_debug = select({
+                "//bazel/config:bolt_profile_use_enabled": ":" + name + "_bolt",
+                "//conditions:default": ":" + name + WITH_DEBUG_SUFFIX,
+            }) if bolt_profile != None else ":" + name + WITH_DEBUG_SUFFIX,
             type = "program",
             tags = original_tags + ["final_target"],
             enabled = SEPARATE_DEBUG_ENABLED,
             enable_pdb = PDB_GENERATION_ENABLED,
+            gdb_index_enabled = GDB_INDEX_ENABLED,
+            gdb_generate_index = GDB_GENERATE_INDEX,
             deps = all_deps,
             visibility = visibility,
             exec_properties = exec_properties,
         )
     else:
-        native.cc_test(**args)
+        cc_test(**args)
         extract_debuginfo_test(
             name = name,
             binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
@@ -740,6 +798,8 @@ def _mongo_cc_binary_and_test(
             tags = original_tags + ["final_target"],
             enabled = SEPARATE_DEBUG_ENABLED,
             enable_pdb = PDB_GENERATION_ENABLED,
+            gdb_index_enabled = GDB_INDEX_ENABLED,
+            gdb_generate_index = GDB_GENERATE_INDEX,
             deps = all_deps,
             visibility = visibility,
             exec_properties = exec_properties,
@@ -766,6 +826,7 @@ def mongo_cc_binary(
         exec_properties = {},
         skip_global_deps = [],
         env = {},
+        bolt_profile = None,
         **kwargs):
     """Wrapper around cc_binary.
 
@@ -818,6 +879,7 @@ def mongo_cc_binary(
         skip_global_deps,
         env,
         _program_type = "binary",
+        bolt_profile = bolt_profile,
         **kwargs
     )
 
@@ -871,7 +933,7 @@ def mongo_cc_test(
         bazel.
     """
 
-    exec_properties = exec_properties | test_exec_properties(tags)
+    exec_properties = exec_properties | test_exec_properties(kwargs.get("size", "medium"))  # medium is the bazel default size for all tests
 
     _mongo_cc_binary_and_test(
         name,
@@ -968,7 +1030,36 @@ def idl_generator_impl(ctx):
     gen_source = ctx.actions.declare_file(base + "_gen.cpp")
     gen_header = ctx.actions.declare_file(base + "_gen.h")
 
-    python = ctx.toolchains["@rules_python//python:toolchain_type"].py3_runtime
+    use_macos_local_container = ctx.attr._macos_cross_local_container_actions[BuildSettingInfo].value
+    use_windows_local_container = ctx.attr._windows_cross_local_container_actions[BuildSettingInfo].value
+    use_linux_python = (
+        ctx.attr._idl_use_linux_python[BuildSettingInfo].value or
+        use_macos_local_container or
+        use_windows_local_container
+    )
+    if use_linux_python:
+        linux_python_interpreter = ctx.attr._linux_aarch64_python_interpreter
+        linux_python_files = ctx.attr._linux_aarch64_python_files
+        if ctx.attr._macos_cross_linux_python_arch[BuildSettingInfo].value == "x86_64":
+            linux_python_interpreter = ctx.attr._linux_x86_64_python_interpreter
+            linux_python_files = ctx.attr._linux_x86_64_python_files
+
+        linux_python_interpreters = linux_python_interpreter.files.to_list()
+        if len(linux_python_interpreters) != 1:
+            fail("Linux Python runtime was requested for IDL generation but is not available")
+        python_interpreter = linux_python_interpreters[0].path
+        python_files = linux_python_files.files
+        if use_windows_local_container:
+            python_interpreter = python_interpreter.replace("\\", "/")
+            for python_file in python_files.to_list():
+                if python_file.basename.startswith("python3.") and not python_file.basename.endswith("-config"):
+                    python_interpreter = python_file.path.replace("\\", "/")
+                    break
+    else:
+        python = ctx.toolchains["@rules_python//python:toolchain_type"].py3_runtime
+        python_interpreter = python.interpreter.path
+        python_files = python.files
+
     dep_depsets = [dep[IdlInfo].idl_deps for dep in ctx.attr.deps]
 
     # Transitive headers from deps + explicit hdrs attr
@@ -977,48 +1068,55 @@ def idl_generator_impl(ctx):
         [hdr[DefaultInfo].files for hdr in ctx.attr.hdrs]
     )
 
-    # collect deps from python modules and setup the corresponding
-    # path so all modules can be found by the toolchain.
-    python_path = []
-    for py_dep in ctx.attr.py_deps:
-        for path in py_dep[PyInfo].imports.to_list():
-            if path not in python_path:
-                python_path.append(ctx.expand_make_variables(
-                    "python_library_imports",
-                    "$(BINDIR)/external/" + path,
-                    ctx.var,
-                ))
-
+    # Collect deps from python modules and set up PYTHONPATH so the
+    # toolchain can find them at action-execution time. `py_deps` is
+    # `cfg = "exec"`; see py_exec_import_paths for why the exec bindir
+    # prefix must be derived rather than taken from $(BINDIR).
     py_depsets = [py_dep[PyInfo].transitive_sources for py_dep in ctx.attr.py_deps]
+
+    python_path = py_exec_import_paths(ctx, ctx.attr.py_deps)
 
     inputs = depset(transitive = [
         ctx.attr.src.files,
         ctx.attr.idlc.files,
-        python.files,
+        python_files,
     ] + dep_depsets + py_depsets)
 
     include_directives = ["--include", "src"]
     if "src/mongo/db/modules/enterprise/src" in ctx.attr.src.files.to_list()[0].path:
         include_directives += ["--include", "src/mongo/db/modules/enterprise/src"]
 
+    idlc_arguments = [
+        "buildscripts/idl/idlc.py",
+        "--base_dir",
+        ctx.bin_dir.path + "/src",
+        "--target_arch",
+        ctx.var["TARGET_CPU"],
+        "--header",
+        gen_header.path,
+        "--output",
+        gen_source.path,
+        ctx.attr.src.files.to_list()[0].path,
+    ] + include_directives
+
+    if use_macos_local_container:
+        action_wrapper = ctx.executable._macos_cross_action_wrapper
+    else:
+        action_wrapper = None
+
+    if use_windows_local_container:
+        python_path_value = ":".join([path.replace("\\", "/") for path in python_path])
+    else:
+        python_path_value = ctx.configuration.host_path_separator.join(python_path)
+
     ctx.actions.run(
-        executable = python.interpreter.path,
+        executable = action_wrapper if use_macos_local_container else python_interpreter,
         outputs = [gen_source, gen_header],
         inputs = inputs,
-        arguments = [
-            "buildscripts/idl/idlc.py",
-            "--base_dir",
-            ctx.bin_dir.path + "/src",
-            "--target_arch",
-            ctx.var["TARGET_CPU"],
-            "--header",
-            gen_header.path,
-            "--output",
-            gen_source.path,
-            ctx.attr.src.files.to_list()[0].path,
-        ] + include_directives,
+        arguments = ([python_interpreter] if use_macos_local_container else []) + idlc_arguments,
         mnemonic = "IdlcGenerator",
-        env = {"PYTHONPATH": ctx.configuration.host_path_separator.join(python_path)},
+        env = {"PYTHONPATH": python_path_value},
+        use_default_shell_env = use_macos_local_container,
     )
 
     # Depsets we’ll publish
@@ -1069,6 +1167,19 @@ idl_generator_rule = rule(
                 dependency("pyyaml", group = "core"),
                 dependency("pymongo", group = "core"),
             ],
+            # SERVER-XXXX: pin py_deps to the EXEC config. idl_generator
+            # runs idlc.py at build time via ctx.actions.run() — the deps
+            # are inputs to the *action*, not runtime deps of the consumer
+            # target. Without `cfg = "exec"`, py_deps inherit the
+            # consumer's configuration. Under mongo's wasi_transition
+            # (mozjs wasm builds — see //bazel/toolchains/cc/mongo_wasm),
+            # py_deps get analyzed with `--platforms=//bazel/platforms:wasm32`,
+            # but pycross's per-wheel select() has no wasm32 branch and
+            # analysis fails. `cfg = "exec"` routes py_deps through the
+            # exec platform, whose constraints (linux/x86_64 on CI,
+            # darwin/aarch64 locally) do have matching pycross env
+            # branches.
+            cfg = "exec",
         ),
         "src": attr.label(
             doc = "The idl file to generate cpp/h files from.",
@@ -1078,6 +1189,35 @@ idl_generator_rule = rule(
             doc = "Dependent headers required by this IDL target",
             allow_files = True,
             default = [],
+        ),
+        "_idl_use_linux_python": attr.label(
+            default = "//bazel/config:idl_use_linux_python",
+        ),
+        "_macos_cross_local_container_actions": attr.label(
+            default = "//bazel/config:macos_cross_local_container_actions",
+        ),
+        "_windows_cross_local_container_actions": attr.label(
+            default = "//bazel/config:windows_cross_local_container_actions",
+        ),
+        "_macos_cross_linux_python_arch": attr.label(
+            default = "//bazel/config:macos_cross_linux_python_arch",
+        ),
+        "_macos_cross_action_wrapper": attr.label(
+            default = "//bazel/toolchains/cc/mongo_apple_cross:macos_cross_action_wrapper_sh",
+            executable = True,
+            cfg = "exec",
+        ),
+        "_linux_aarch64_python_files": attr.label(
+            default = "@py_linux_arm64//:files",
+        ),
+        "_linux_aarch64_python_interpreter": attr.label(
+            default = "@py_linux_arm64//:interpreter",
+        ),
+        "_linux_x86_64_python_files": attr.label(
+            default = "@py_linux_x86_64//:files",
+        ),
+        "_linux_x86_64_python_interpreter": attr.label(
+            default = "@py_linux_x86_64//:interpreter",
         ),
     },
     outputs = {
@@ -1134,7 +1274,7 @@ def symlink(name, tags = [], **kwargs):
     )
 
 def strip_deps_impl(ctx):
-    cc_toolchain = find_cpp_toolchain(ctx)
+    cc_toolchain = find_cc_toolchain(ctx)
     feature_configuration = cc_common.configure_features(
         ctx = ctx,
         cc_toolchain = cc_toolchain,
@@ -1199,7 +1339,7 @@ def mongo_cc_proto_library(
         deps,
         tags = [],
         **kwargs):
-    native.cc_proto_library(
+    cc_proto_library(
         name = name + "_raw",
         deps = deps,
         **kwargs
@@ -1672,8 +1812,43 @@ def windows_rc(name, src, manifest_in = None, icon = None):
         src = src,
         resources = resources,
         rc = select({
+            "//bazel/platforms:windows_cross": "@mongo_windows_cross_toolchain_files//:rc",
             "@platforms//os:windows": "@mongo_windows_toolchain//:rc",
             "//conditions:default": None,
         }),
         windows_version_minimal = "//bazel/config:win_min_version",
+    )
+
+def mongo_rust_library(name, rustc_flags = [], target_compatible_with = [], **kwargs):
+    compile_data = kwargs.pop("compile_data", []) + LIBVOIDSTAR_INPUTS
+    rust_library(
+        name = name,
+        compile_data = compile_data,
+        rustc_flags = rustc_flags,
+        target_compatible_with = target_compatible_with,
+        **kwargs
+    )
+    rust_test(
+        name = name + "_test",
+        crate = ":" + name,
+        # most arguments are automatically propagated from the crate. These are the exceptions:
+        rustc_flags = rustc_flags,
+        target_compatible_with = target_compatible_with,
+    )
+
+def mongo_rust_shared_library(name, rustc_flags = [], target_compatible_with = [], **kwargs):
+    compile_data = kwargs.pop("compile_data", []) + LIBVOIDSTAR_INPUTS
+    rust_shared_library(
+        name = name,
+        compile_data = compile_data,
+        rustc_flags = rustc_flags,
+        target_compatible_with = target_compatible_with,
+        **kwargs
+    )
+    rust_test(
+        name = name + "_test",
+        crate = ":" + name,
+        # most arguments are automatically propagated from the crate. These are the exceptions:
+        rustc_flags = rustc_flags,
+        target_compatible_with = target_compatible_with,
     )

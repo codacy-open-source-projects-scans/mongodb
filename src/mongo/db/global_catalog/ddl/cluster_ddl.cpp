@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/cluster_ddl.h"
@@ -67,6 +41,7 @@
 
 namespace mongo {
 namespace cluster {
+using namespace std::literals::string_view_literals;
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(createUnshardedCollectionRandomizeDataShard);
@@ -85,7 +60,6 @@ std::vector<AsyncRequestsSender::Request> buildUntrackedRequestsForAllShards(
     return requests;
 }
 
-// TODO (SERVER-100309): remove once 9.0 becomes last LTS.
 AsyncRequestsSender::Response executeCommandAgainstFirstShard(OperationContext* opCtx,
                                                               const DatabaseName& dbName,
                                                               const NamespaceString& nss,
@@ -162,8 +136,7 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
 }
 
 CreateCollectionResponse createCollection(OperationContext* opCtx,
-                                          ShardsvrCreateCollection request,
-                                          bool againstFirstShard) {
+                                          ShardsvrCreateCollection request) {
     const auto& nss = request.getNamespace();
 
     if (MONGO_unlikely(hangCreateUnshardedCollection.shouldFail()) && request.getUnsplittable() &&
@@ -244,14 +217,6 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
 
     const bool isSharded = !request.getUnsplittable();
     auto cmdObjWithWc = [&]() {
-        // TODO SERVER-77915: Remove the check "isSharded && nss.isConfigDB()" once 8.0 becomes last
-        // LTS. This is a special check for config.system.sessions since the request comes from
-        // the CSRS which is upgraded first
-        if (isSharded && nss.isConfigDB()) {
-            generic_argument_util::setMajorityWriteConcern(request);
-            return request.toBSON();
-        }
-
         // Upgrade the request WC to 'majority', unless it is part of a transaction
         // (where only the implicit default value can be applied).
         if (!opCtx->inMultiDocumentTransaction()) {
@@ -262,14 +227,7 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
 
     boost::optional<executor::RemoteCommandResponse> remoteResponse;
 
-    // TODO (SERVER-100309): remove againstFirstShard option once 9.0 becomes last LTS.
-    if (againstFirstShard) {
-        tassert(
-            113986,
-            "createCollection can only run against the first shard for `config.system.sessions` "
-            "collection.",
-            nss == NamespaceString::kLogicalSessionsNamespace);
-
+    if (isSharded && nss.isConfigDB()) {
         const auto dbInfo =
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
         const auto cmdResponse =
@@ -288,7 +246,7 @@ CreateCollectionResponse createCollection(OperationContext* opCtx,
         sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
         router.createDbImplicitlyOnRoute();
         router.route(
-            "createCollection"_sd, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+            "createCollection"sv, [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
                 const auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
                     opCtx,
                     nss.dbName(),

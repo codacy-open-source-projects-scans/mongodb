@@ -4,7 +4,6 @@
 // @tags: [
 //   requires_fcv_90,
 //   requires_sbe,
-//   featureFlagPathArrayness
 // ]
 //
 import {joinOptUsed} from "jstests/libs/query/join_utils.js";
@@ -20,7 +19,11 @@ function joinOptimizationRuns(db, baseColl, coll1, coll2) {
     ];
 
     const explain = db[baseColl].explain().aggregate(pipeline);
-    jsTest.log.info({context: "Explain for pipeline", explain, output: db[baseColl].aggregate(pipeline).toArray()});
+    jsTest.log.info({
+        context: "Explain for pipeline",
+        explain,
+        output: db[baseColl].aggregate(pipeline).toArray(),
+    });
     return joinOptUsed(explain);
 }
 
@@ -37,13 +40,29 @@ for (const coll of ["coll1", "coll2", "coll3", "coll4"]) {
 }
 
 // Ensure join optimization is disabled.
-assert(sharded.shard0.getDB("test").adminCommand({setParameter: 1, internalEnableJoinOptimization: false}));
-assert(sharded.shard1.getDB("test").adminCommand({setParameter: 1, internalEnableJoinOptimization: false}));
+assert(
+    sharded.shard0
+        .getDB("test")
+        .adminCommand({setParameter: 1, internalEnableJoinOptimization: false}),
+);
+assert(
+    sharded.shard1
+        .getDB("test")
+        .adminCommand({setParameter: 1, internalEnableJoinOptimization: false}),
+);
 assert(!joinOptimizationRuns(db, "coll1", "coll2", "coll3"));
 
 // Enable join optimization.
-assert(sharded.shard0.getDB("test").adminCommand({setParameter: 1, internalEnableJoinOptimization: true}));
-assert(sharded.shard1.getDB("test").adminCommand({setParameter: 1, internalEnableJoinOptimization: true}));
+assert(
+    sharded.shard0
+        .getDB("test")
+        .adminCommand({setParameter: 1, internalEnableJoinOptimization: true}),
+);
+assert(
+    sharded.shard1
+        .getDB("test")
+        .adminCommand({setParameter: 1, internalEnableJoinOptimization: true}),
+);
 assert(joinOptimizationRuns(db, "coll1", "coll2", "coll3"));
 
 // Enable sharding on the database. Should work.

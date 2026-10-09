@@ -10,10 +10,6 @@
 //   assumes_balancer_off,
 //   # TODO(SERVER-84158): Try to include this test(s).
 //   exclude_from_timeseries_crud_passthrough,
-//   # TODO SERVER-116052: Add support for $function.
-//   # TODO SERVER-116054: Add support for $where.
-//   # TODO SERVER-116055: Add support for $accumulate.
-//   mozjs_wasm_unsupported,
 // ]
 
 const testDB = db.getSiblingDB("system_js_access");
@@ -43,13 +39,21 @@ assert.commandWorked(
 );
 
 // $where can access stored functions.
-assert.commandWorked(testDB.runCommand({find: coll.getName(), filter: {$where: "isAdult(this.age)"}}));
+assert.commandWorked(
+    testDB.runCommand({find: coll.getName(), filter: {$where: "isAdult(this.age)"}}),
+);
 
 // $function cannot access stored functions.
 assert.commandFailedWithCode(
     testDB.runCommand({
         aggregate: coll.getName(),
-        pipeline: [{$addFields: {isAdult: {$function: {body: "isAdult(age)", args: ["$age"], lang: "js"}}}}],
+        pipeline: [
+            {
+                $addFields: {
+                    isAdult: {$function: {body: "isAdult(age)", args: ["$age"], lang: "js"}},
+                },
+            },
+        ],
         cursor: {},
     }),
     ErrorCodes.JSInterpreterFailure,

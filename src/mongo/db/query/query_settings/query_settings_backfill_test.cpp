@@ -1,40 +1,15 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_settings/query_settings_backfill.h"
 
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 
 #include <memory>
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -47,7 +22,8 @@ using query_shape::QueryShapeHash;
  * Creates a mock QueryShapeHash and QueryInstance pair for testing purposes by creating a BSONObj
  * with a single field named 'fieldName', and then hashing it for the 'queryShapeHash'.
  */
-std::pair<QueryShapeHash, QueryInstance> makeMockQueryShapeHashAndInstance(StringData fieldName) {
+std::pair<QueryShapeHash, QueryInstance> makeMockQueryShapeHashAndInstance(
+    std::string_view fieldName) {
     auto queryInstance = BSON(fieldName << 0);
     auto queryShapeHash =
         SHA256Block::computeHash((const uint8_t*)queryInstance.objdata(), queryInstance.objsize());
@@ -61,7 +37,6 @@ std::pair<QueryShapeHash, QueryInstance> makeMockQueryShapeHashAndInstance(Strin
 struct BackfillOnCompletionHookResponse {
     std::vector<QueryShapeHash> hashes;
     LogicalTime time;
-    boost::optional<TenantId> tenantId;
 };
 
 /**
@@ -113,15 +88,13 @@ public:
         ShardingTestFixture::setUp();
         query_settings::QuerySettingsService::initializeForTest(getGlobalServiceContext());
         BackfillCoordinator::OnCompletionHook setPromise =
-            [this](std::vector<QueryShapeHash> hashes,
-                   LogicalTime time,
-                   boost::optional<TenantId> tenantId) {
+            [this](std::vector<QueryShapeHash> hashes, LogicalTime time) {
                 // Ensure that 'expectFutureBackfill()' was called beforehand.
                 ASSERT(optionalPromise.has_value());
                 // Ensure that emplacing the promise won't throw any exceptions. Setting a promise
                 // more than once will throw 'BrokenPromise'.
-                ASSERT_DOES_NOT_THROW(optionalPromise->emplaceValue(
-                    std::move(hashes), std::move(time), std::move(tenantId)));
+                ASSERT_DOES_NOT_THROW(
+                    optionalPromise->emplaceValue(std::move(hashes), std::move(time)));
             };
         _backfiilCoordinator =
             std::make_unique<BackfillCoordinatorForTest>(std::move(setPromise), executor());
@@ -194,16 +167,16 @@ TEST_F(BackfillCoordinatorTest, ShouldmarkForBackfillAndScheduleIfNeeded) {
     ASSERT_FALSE(BackfillCoordinator::shouldBackfill(expCtx, /* hasRepresentativeQuery*/ false));
 
     // It should skip backfilling queries if 'internalQuerySettingsDisableBackfill' is set to true.
-    RAIIServerParameterControllerForTest internalQuerySettingsDisableBackfill{
+    unittest::ServerParameterGuard internalQuerySettingsDisableBackfill{
         "internalQuerySettingsDisableBackfill", true};
     expCtx->setExplain(boost::none);
     ASSERT_FALSE(BackfillCoordinator::shouldBackfill(expCtx, /* hasRepresentativeQuery*/ false));
 }
 
 TEST_F(BackfillCoordinatorTest, markForBackfillAndScheduleIfNeededShouldWaitBufferAndExecute) {
-    RAIIServerParameterControllerForTest internalQuerySettingsBackfillDelaySeconds{
+    unittest::ServerParameterGuard internalQuerySettingsBackfillDelaySeconds{
         "internalQuerySettingsBackfillDelaySeconds", 30};
-    RAIIServerParameterControllerForTest internalQuerySettingsBackfillMemoryLimitBytes{
+    unittest::ServerParameterGuard internalQuerySettingsBackfillMemoryLimitBytes{
         "internalQuerySettingsBackfillMemoryLimitBytes", 16777248};
     const auto clusterParameterTime = LogicalTime(Timestamp(1234));
     std::string veryLargeQueryField(BSONObjMaxUserSize - 11, 'x');
@@ -220,9 +193,8 @@ TEST_F(BackfillCoordinatorTest, markForBackfillAndScheduleIfNeededShouldWaitBuff
                                                       {hash1, QuerySettings()},
                                                       {bigQueryHash, QuerySettings()},
                                                   },
-                                              .clusterParameterTime = clusterParameterTime},
-        /* tenantId */ boost::none);
-    ON_BLOCK_EXIT([&] { service().removeAllQueryShapeConfigurations(/* tenantId */ boost::none); });
+                                              .clusterParameterTime = clusterParameterTime});
+    ON_BLOCK_EXIT([&] { service().removeAllQueryShapeConfigurations(); });
 
     // Mark one query and expect it to be buffered and scheduled for
     // execution.
@@ -274,7 +246,7 @@ TEST_F(BackfillCoordinatorTest, markForBackfillAndScheduleIfNeededShouldWaitBuff
     coordinator()->markForBackfillAndScheduleIfNeeded(operationContext(), bigQueryHash, bigQuery);
     waitAndExecuteTasks(Seconds{1});
     ASSERT_TRUE(future.isReady());
-    auto [backfilledHashes0, backfillLastModifiedTime0, _tenantId0] = future.get();
+    auto [backfilledHashes0, backfillLastModifiedTime0] = future.get();
     ASSERT_EQ(backfilledHashes0[0], hash0);
     ASSERT_EQ(backfilledHashes0[1], hash1);
     ASSERT_EQ(backfillLastModifiedTime0, clusterParameterTime);
@@ -301,7 +273,7 @@ TEST_F(BackfillCoordinatorTest, markForBackfillAndScheduleIfNeededShouldWaitBuff
         });
     waitAndExecuteTasks(Seconds{30});
     ASSERT_TRUE(future.isReady());
-    auto [backfilledHashes1, backfillLastModifiedTime1, _tenantId1] = future.get();
+    auto [backfilledHashes1, backfillLastModifiedTime1] = future.get();
     ASSERT_EQ(backfilledHashes1[0], bigQueryHash);
     ASSERT_EQ(backfillLastModifiedTime1, clusterParameterTime);
 
@@ -313,20 +285,17 @@ TEST_F(BackfillCoordinatorTest, markForBackfillAndScheduleIfNeededShouldWaitBuff
 }
 
 TEST_F(BackfillCoordinatorTest, ExecuteDoesNotInsertQueriesWithoutSettings) {
-    RAIIServerParameterControllerForTest internalQuerySettingsBackfillDelaySeconds{
+    unittest::ServerParameterGuard internalQuerySettingsBackfillDelaySeconds{
         "internalQuerySettingsBackfillDelaySeconds", 30};
 
     // Start by setting some settings on 'hash, mark it and expect it to be buffered.
     auto future = expectFutureBackfillCompletion();
     const auto [hash, query] = makeMockQueryShapeHashAndInstance("SoonToBeRemoved");
-    LogicalTime clusterParameterTime =
-        service().getClusterParameterTime(/* tenantId */ boost::none);
+    LogicalTime clusterParameterTime = service().getClusterParameterTime();
     clusterParameterTime.addTicks(1);
-    service().setAllQueryShapeConfigurations(
-        QueryShapeConfigurationsWithTimestamp{
-            .queryShapeConfigurations = {QueryShapeConfiguration{hash, QuerySettings()}},
-            .clusterParameterTime = clusterParameterTime},
-        /* tenantId */ boost::none);
+    service().setAllQueryShapeConfigurations(QueryShapeConfigurationsWithTimestamp{
+        .queryShapeConfigurations = {QueryShapeConfiguration{hash, QuerySettings()}},
+        .clusterParameterTime = clusterParameterTime});
     coordinator()->markForBackfillAndScheduleIfNeeded(operationContext(), hash, query);
     auto state = peekCoordinatorState();
     ASSERT_TRUE(state->taskScheduled);
@@ -336,7 +305,7 @@ TEST_F(BackfillCoordinatorTest, ExecuteDoesNotInsertQueriesWithoutSettings) {
     // Remove all the settings, increment the current time to start the backfill operation, and
     // expect no inserts to happen and the BackfillCoordinator::OnCompletionHook callback to never
     // be called.
-    service().removeAllQueryShapeConfigurations(/* tenantId */ boost::none);
+    service().removeAllQueryShapeConfigurations();
     setInsertRepresentativeQueriesImpl([](auto&&) {
         // Fail if any inserts are dispatched.
         ASSERT(false);
@@ -353,7 +322,7 @@ TEST_F(BackfillCoordinatorTest, ExecuteDoesNotInsertQueriesWithoutSettings) {
 }
 
 TEST_F(BackfillCoordinatorTest, CancelStopsFutureTasks) {
-    RAIIServerParameterControllerForTest internalQuerySettingsBackfillDelaySeconds{
+    unittest::ServerParameterGuard internalQuerySettingsBackfillDelaySeconds{
         "internalQuerySettingsBackfillDelaySeconds", 30};
     auto future = expectFutureBackfillCompletion();
     setInsertRepresentativeQueriesImpl([](auto&&) {
@@ -382,7 +351,7 @@ TEST_F(BackfillCoordinatorTest, CancelStopsFutureTasks) {
 }
 
 TEST_F(BackfillCoordinatorTest, MarkForBackfillAndScheduleIfNeededDoesNotLeakErrors) {
-    RAIIServerParameterControllerForTest internalQuerySettingsBackfillDelaySeconds{
+    unittest::ServerParameterGuard internalQuerySettingsBackfillDelaySeconds{
         "internalQuerySettingsBackfillDelaySeconds", 30};
     auto future = expectFutureBackfillCompletion();
     setInsertRepresentativeQueriesImpl([](auto&&) {

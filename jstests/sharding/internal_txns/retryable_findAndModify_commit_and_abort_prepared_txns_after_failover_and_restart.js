@@ -12,8 +12,6 @@
 // transaction's storage engine transaction. Therefore, when the prepared transaction is aborted,
 // the write to image collection only gets rolled back on secondaries.
 TestData.skipCheckDBHashes = true;
-// This test requires running transactions directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
 
 import {
     makeAbortTransactionCmdObj,
@@ -96,7 +94,9 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts) {
     });
     const stepDownShard0PrimaryFunc = () => {
         const oldPrimary = st.rs0.getPrimary();
-        assert.commandWorked(oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}));
+        assert.commandWorked(
+            oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
+        );
         assert.commandWorked(oldPrimary.adminCommand({replSetFreeze: 0}));
     };
 
@@ -141,7 +141,9 @@ function runTest(st, stepDownShard0PrimaryFunc, testOpts) {
     const stepDownShard0PrimaryFunc = () => {
         assert.commandWorked(st.rs0.getSecondary().adminCommand({replSetFreeze: 0}));
         assert.commandWorked(
-            st.rs0.getPrimary().adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
+            st.rs0
+                .getPrimary()
+                .adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
         );
     };
 

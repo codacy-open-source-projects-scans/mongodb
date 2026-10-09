@@ -28,19 +28,26 @@ function runTest(sessionDB) {
     session.startTransaction();
     let error = assert.throws(() => sessionColl.find().itcount());
     assert.commandFailedWithCode(error, ErrorCodes.OperationNotSupportedInTransaction);
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.abortTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 
     jsTest.log("Testing write commands are forbidden.");
     session.startTransaction();
-    assert.commandFailedWithCode(sessionColl.insert({}), ErrorCodes.OperationNotSupportedInTransaction);
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        sessionColl.insert({}),
+        ErrorCodes.OperationNotSupportedInTransaction,
+    );
+    assert.commandFailedWithCode(
+        session.abortTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 }
 
-if (!TestData.testingReplicaSetEndpoint) {
-    // This test drops a collection the config database, which is not allowed via a router on a
-    // sharded cluster.
-    runTest(session.getDatabase("config"));
-}
+// This test drops a collection in the config database, which is not allowed via a router on a
+// sharded cluster.
+runTest(session.getDatabase("config"));
 
 if (PersistenceProviderUtil.allNodesHavePropertyWithValue(db, "supportsLocalCollections", true)) {
     runTest(session.getDatabase("local"));

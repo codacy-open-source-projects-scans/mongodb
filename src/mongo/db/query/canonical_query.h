@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -53,7 +27,6 @@
 #include <utility>
 #include <vector>
 
-#include <boost/logic/tribool.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -61,15 +34,17 @@ namespace mongo {
 
 class OperationContext;
 
-struct MONGO_MOD_NEEDS_REPLACEMENT CanonicalQueryParams {
+struct [[MONGO_MOD_NEEDS_REPLACEMENT]] CanonicalQueryParams {
     boost::intrusive_ptr<ExpressionContext> expCtx;
     std::variant<std::unique_ptr<ParsedFindCommand>, ParsedFindCommandParams> parsedFind;
     std::vector<boost::intrusive_ptr<DocumentSource>> pipeline = {};
     bool isCountLike = false;
     bool isSearchQuery = false;
+    // True if this query comes from an aggregation command with a non-empty pipeline.
+    bool aggWithNonEmptyPipeline = false;
 };
 
-class MONGO_MOD_NEEDS_REPLACEMENT CanonicalQuery {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] CanonicalQuery {
 public:
     // A type that encodes the notion of query shape suitable for use with the plan cache. Encodes
     // the query's match, projection, sort, etc. potentially with some constants removed or replaced
@@ -239,18 +214,6 @@ public:
         return _sbeCompatible;
     }
 
-    void setUsingSbePlanCache(bool usingSbePlanCache) {
-        _usingSbePlanCache = usingSbePlanCache;
-    }
-
-    // setUsingSbePlanCache() must be invoked before this function.
-    bool isUsingSbePlanCache() const {
-        tassert(9421201,
-                "_usingSbePlanCache should be initialized",
-                !boost::indeterminate(_usingSbePlanCache));
-        return static_cast<bool>(_usingSbePlanCache);
-    }
-
     bool isParameterized() const {
         return !_inputParamIdToExpressionMap.empty();
     }
@@ -322,33 +285,6 @@ public:
     }
 
     /**
-     * Called to indicate the query execution plan should not be cached for SBE. See comments on the
-     * '_isUncacheableSbe' member for more details.
-     */
-    void setUncacheableSbe() {
-        _isUncacheableSbe = true;
-    }
-
-    /**
-     * Check if the query execution plan should not be cached for SBE. See comments on the
-     * '_isUncacheableSbe' member for more details.
-     */
-    bool isUncacheableSbe() const {
-        return _isUncacheableSbe;
-    }
-
-    /**
-     * Tests whether a 'matchExpr' from this query should be parameterized for the SBE plan cache.
-     */
-    bool shouldParameterizeSbe(MatchExpression* matchExpr) const;
-
-    /**
-     * Tests if limit and skip amounts from find command request should be parameterized for the SBE
-     * plan cache.
-     */
-    bool shouldParameterizeLimitSkip() const;
-
-    /**
      * Add parameters for match expressions that were pushed down via '_cqPipeline'.
      */
     void addMatchParams(const std::vector<const MatchExpression*>& newParams) {
@@ -389,12 +325,21 @@ public:
         return _findCommand->getForcedPlanSolutionHash();
     }
 
+    void setAggWithNonEmptyPipeline(bool aggWithNonEmptyPipeline) {
+        _aggWithNonEmptyPipeline = aggWithNonEmptyPipeline;
+    }
+
+    bool aggWithNonEmptyPipeline() const {
+        return _aggWithNonEmptyPipeline;
+    }
+
 private:
     void initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
                 std::vector<boost::intrusive_ptr<DocumentSource>> cqPipeline,
                 bool isCountLike,
                 bool isSearchQuery,
+                bool aggWithNonEmptyPipeline,
                 bool optimizeMatchExpression);
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
@@ -411,7 +356,14 @@ private:
     boost::optional<CanonicalDistinct> _distinct;
 
     // A query can include a post-processing pipeline here. Logically it is applied after all the
-    // other operations (filter, sort, project, skip, limit).
+    // other operations (filter, sort, project, skip, limit). Holds the SBE-eligible document
+    // sources.
+    //  - In the default get_executor path, this is populated before query optimization and all
+    //  stages
+    //    will be executed in SBE.
+    //  - In the deferred get_executor path, it's populated after QO (during engine selection) and
+    //  all
+    //    or some of the stages might be executed in SBE, depending on engine selection logic.
     std::vector<boost::intrusive_ptr<DocumentSource>> _cqPipeline;
 
     // True iff '_cqPipeline' contains all aggregation pipeline stages in the query. When
@@ -424,12 +376,6 @@ private:
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;
-
-    // Indicate whether this query will be cached using the SBE plan cache.
-    // Use a tribool because this value is uninitialized for a large part of the life of a
-    // CanonicalQuery. If this value is not boost::indeterminate, that means it has been not set.
-    // We chose to use a tribool instead of optional<bool> to avoid confusion of operator bool.
-    boost::tribool _usingSbePlanCache = boost::indeterminate;
 
     // True if this query must produce a RecordId output in addition to the BSON objects that
     // constitute the result set of the query. Any generated query solution must not discard record
@@ -455,15 +401,13 @@ private:
     // the index scan.
     bool _isCountLike = false;
 
-    // If true, indicates that we should not cache this plan in the SBE plan cache. This gets set to
-    // true if a MatchExpression was not parameterized because it contains a large number of
-    // predicates (usally > 512). This flag can be reused for additional do-not-cache conditions in
-    // the future.
-    bool _isUncacheableSbe = false;
 
     bool _isSearchQuery = false;
 
     bool _forSubPlanner = false;
+
+    // Value is true if this was an aggregate query with a non-empty pipeline.
+    bool _aggWithNonEmptyPipeline = false;
 };
 
 }  // namespace mongo

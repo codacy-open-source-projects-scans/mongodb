@@ -1,38 +1,12 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/parsed_distinct_command.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -47,7 +21,8 @@ public:
                           const BSONObj& filter = BSONObj(),
                           const BSONObj& sort = BSONObj(),
                           const BSONObj& proj = BSONObj(),
-                          const bool flipDistinctScanDirection = false) {
+                          const bool flipDistinctScanDirection = false,
+                          const bool unwindsArrays = false) {
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
         findCommand->setFilter(filter);
         findCommand->setSort(sort);
@@ -68,7 +43,8 @@ public:
                               // In order to replicate what distinct() does, we set up our
                               // projection here for potential use in an optimization.
                               parsed_distinct_command::getDistinctProjection(distinctKey),
-                              flipDistinctScanDirection));
+                              flipDistinctScanDirection,
+                              unwindsArrays));
 
         auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq, params);
         if (statusWithMultiPlanSolns.getStatus().code() ==
@@ -92,8 +68,7 @@ namespace {
  * A query solution that contains a FETCH with a filter is not eligible for a DISTINCT_SCAN.
  */
 TEST_F(QueryPlannerDistinctTest, PredicateNotCovered) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1}"));
     addIndex(fromjson("{y: 1}"));
     addIndex(fromjson("{z: 1}"));
@@ -116,8 +91,7 @@ TEST_F(QueryPlannerDistinctTest, PredicateNotCovered) {
  * bounds (namely, covered by a DISTINCT_SCAN), it is eligible for conversion.
  */
 TEST_F(QueryPlannerDistinctTest, PredicateCovered) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1}"));
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{y: 1, z: 1}"));
@@ -137,8 +111,7 @@ TEST_F(QueryPlannerDistinctTest, PredicateCovered) {
  * the sort pattern.
  */
 TEST_F(QueryPlannerDistinctTest, SortCovered) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1}"));
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{y: 1, z: 1}"));
@@ -158,8 +131,7 @@ TEST_F(QueryPlannerDistinctTest, SortCovered) {
  */
 TEST_F(QueryPlannerDistinctTest, StrictDistinctOnlyRequirements) {
     params.mainCollectionInfo.options |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1}"));
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{y: 1, x: 1}"));
@@ -181,8 +153,7 @@ TEST_F(QueryPlannerDistinctTest, StrictDistinctOnlyRequirements) {
  * direction of the sort pattern.
  */
 TEST_F(QueryPlannerDistinctTest, DifferentSortDirections) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{x: 1, y: -1}"));
     addIndex(fromjson("{x: -1, y: 1}"));
@@ -205,8 +176,7 @@ TEST_F(QueryPlannerDistinctTest, DifferentSortDirections) {
  * transformed to have a distinct scan.
  */
 TEST_F(QueryPlannerDistinctTest, DistinctScanWithProjection) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{x: 1, z: 1}"));
 
@@ -238,8 +208,7 @@ TEST_F(QueryPlannerDistinctTest, DistinctScanWithProjection) {
  * rewritten pipeline.
  */
 TEST_F(QueryPlannerDistinctTest, FlipDistinctScanDirection) {
-    RAIIServerParameterControllerForTest shardFiltering("featureFlagShardFilteringDistinctScan",
-                                                        true);
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
     addIndex(fromjson("{x: 1, y: 1}"));
     addIndex(fromjson("{x: 1, z: 1}"));
 
@@ -262,6 +231,63 @@ TEST_F(QueryPlannerDistinctTest, FlipDistinctScanDirection) {
     assertCandidateExists(
         "{sort: {pattern: {x: 1, y: 1}, limit: 0, type: 'simple', node: {fetch: {node: {ixscan: "
         "{pattern: {x: 1, z: 1}, dir: 1}}}}}}");
+}
+
+TEST_F(QueryPlannerDistinctTest, MultikeyIndexEligibleOnlyForUnwoundDistinct) {
+    params.mainCollectionInfo.options |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
+    addIndex(fromjson("{x: 1}"), true /*multikey*/);
+
+    runDistinctQuery("x");
+    assertNumSolutions(1);
+    assertCandidateExists("{cscan: {dir: 1}}");
+
+    runDistinctQuery("x", BSONObj(), BSONObj(), BSONObj(), false /*flip*/, true /*unwindsArrays*/);
+    assertNumSolutions(1);
+    assertCandidateExists(
+        "{proj: {spec: {_id: 0, x: 1}, node: {distinct: {key: 'x', indexPattern: {x: 1}}}}}");
+}
+
+// See '_replaceUndefinedWithNull' in the DistinctScan executor.
+TEST_F(QueryPlannerDistinctTest, UnwoundDistinctReversesDescendingIndexScan) {
+    params.mainCollectionInfo.options |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
+    addIndex(fromjson("{x: -1}"), true /*multikey*/);
+
+    runDistinctQuery("x", BSONObj(), BSONObj(), BSONObj(), false /*flip*/, true /*unwindsArrays*/);
+    assertNumSolutions(1);
+    assertCandidateExists(
+        "{proj: {spec: {_id: 0, x: 1}, node: {distinct: {key: 'x', indexPattern: {x: -1}, "
+        "direction: '-1'}}}}");
+}
+
+/**
+ * Even for an unwound distinct, a multikey index cannot answer a filtered query: skipping to the
+ * next distinct value could skip over entries of documents matching the filter.
+ */
+TEST_F(QueryPlannerDistinctTest, UnwoundDistinctWithFilterCannotUseMultikeyIndex) {
+    params.mainCollectionInfo.options |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
+    addIndex(fromjson("{x: 1}"), true /*multikey*/);
+
+    runDistinctQuery(
+        "x", fromjson("{x: {$gt: 3}}"), BSONObj(), BSONObj(), false, true /*unwindsArrays*/);
+    assertNumSolutions(1);
+    assertCandidateExists("{fetch: {node: {ixscan: {pattern: {x: 1}}}}}");
+}
+
+/**
+ * A non-multikey index qualifies for an unwound distinct scan as well.
+ */
+TEST_F(QueryPlannerDistinctTest, UnwoundDistinctWithNonMultikeyIndex) {
+    params.mainCollectionInfo.options |= QueryPlannerParams::STRICT_DISTINCT_ONLY;
+    unittest::ServerParameterGuard shardFiltering("featureFlagShardFilteringDistinctScan", true);
+    addIndex(fromjson("{x: 1}"));
+
+    runDistinctQuery("x", BSONObj(), BSONObj(), BSONObj(), false /*flip*/, true /*unwindsArrays*/);
+    assertNumSolutions(1);
+    assertCandidateExists(
+        "{proj: {spec: {_id: 0, x: 1}, node: {distinct: {key: 'x', indexPattern: {x: 1}}}}}");
 }
 
 }  // namespace

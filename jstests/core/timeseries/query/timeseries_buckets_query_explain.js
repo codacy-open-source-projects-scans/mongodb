@@ -2,6 +2,7 @@
  * Tests explaining read operations over the buckets of a time-series collection (with rawData).
  *
  * @tags: [
+ *   uses_explain,
  *   # Refusing to run a test that issues an aggregation command with explain because it may return
  *   # incomplete results if interrupted by a stepdown.
  *   does_not_support_stepdowns,
@@ -18,7 +19,7 @@ import {
     isViewfulTimeseriesOnlySuite,
     isViewlessTimeseriesOnlySuite,
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
-import {getPlanStage} from "jstests/libs/query/analyze_plan.js";
+import {getPlanStage, getShardsFromExplain} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db[jsTestName()];
 
@@ -27,7 +28,9 @@ const metaField = "m";
 const time = new Date("2024-01-01T00:00:00Z");
 
 coll.drop();
-assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: timeField, metaField: metaField}}));
+assert.commandWorked(
+    db.createCollection(coll.getName(), {timeseries: {timeField: timeField, metaField: metaField}}),
+);
 
 assert.commandWorked(
     coll.insert([
@@ -62,7 +65,7 @@ const assertQueryPlannerNamespace = function (explain) {
             `Expected query planner namespace to be ${tojson(timeseriesNss)} but got ${tojson(explain)}`,
         );
     } else {
-        for (const shardPlan of explain.queryPlanner.winningPlan.shards) {
+        for (const shardPlan of getShardsFromExplain(explain)) {
             assert(
                 timeseriesNss.includes(shardPlan.namespace),
                 `Expected winning shard plan query planner namespace to be ${tojson(timeseriesNss)} but got ${tojson(shardPlan)}`,
@@ -83,7 +86,10 @@ const assertExplain = function (explain, commandRun) {
     assertQueryPlannerNamespace(explain);
     assertCommandNamespace(explain, commandRun);
     assert(kIsRawOperationSupported === (explain.command.rawData ?? false));
-    assert(!getPlanStage(explain, "UNPACK_TS_BUCKET"), `Expected to find no unpack stage but got ${tojson(explain)}`);
+    assert(
+        !getPlanStage(explain, "UNPACK_TS_BUCKET"),
+        `Expected to find no unpack stage but got ${tojson(explain)}`,
+    );
 };
 
 assertExplain(
@@ -92,6 +98,15 @@ assertExplain(
         .aggregate([{$match: {"control.count": 2}}], kRawOperationSpec),
     "aggregate",
 );
-assertExplain(getTimeseriesCollForRawOps(coll).explain().count({"control.count": 2}, kRawOperationSpec), "count");
-assertExplain(getTimeseriesCollForRawOps(coll).explain().distinct("control.count", {}, kRawOperationSpec), "distinct");
-assertExplain(getTimeseriesCollForRawOps(coll).explain().find({"control.count": 2}).rawData().finish(), "find");
+assertExplain(
+    getTimeseriesCollForRawOps(coll).explain().count({"control.count": 2}, kRawOperationSpec),
+    "count",
+);
+assertExplain(
+    getTimeseriesCollForRawOps(coll).explain().distinct("control.count", {}, kRawOperationSpec),
+    "distinct",
+);
+assertExplain(
+    getTimeseriesCollForRawOps(coll).explain().find({"control.count": 2}).rawData().finish(),
+    "find",
+);

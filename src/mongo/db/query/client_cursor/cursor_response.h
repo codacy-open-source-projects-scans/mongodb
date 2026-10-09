@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -39,6 +12,8 @@
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
@@ -47,13 +22,48 @@
 #include "mongo/util/serialization_context.h"
 
 #include <cstddef>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
+
+/**
+ * Returns true if any metric collection flag in 'metrics' is enabled.
+ */
+bool hasAnyMetricsRequested(const IncludeMetrics& metrics);
+
+template <typename Request>
+void setRemoteMetricsToInclude(Request& request, bool includeQueryStats, OperationContext* opCtx) {
+    if (!includeQueryStats) {
+        return;
+    }
+    // Use the new 'includeMetrics.queryStats' field only when the feature flag is enabled
+    // to avoid sending unknown fields to older nodes; fall back to the deprecated
+    // 'includeQueryStatsMetrics' otherwise.
+    // TODO (SERVER-126099): Remove the 'includeQueryStatsMetrics' field and always use
+    // 'includeMetrics.queryStats' once the feature flag is removed.
+    if (feature_flags::gFeatureFlagIncludeMetricsObjectOption
+            .isEnabledUseLastLTSFCVWhenUninitialized(
+                opCtx ? VersionContext::getDecoration(opCtx) : VersionContext{},
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (request.getIncludeMetrics()) {
+            request.getIncludeMetrics()->setQueryStats(true);
+        } else {
+            IncludeMetrics im;
+            im.setQueryStats(true);
+            request.setIncludeMetrics(std::move(im));
+        }
+        // Clear the deprecated field: its value has been migrated to 'includeMetrics.queryStats'
+        // above, so mongod only sees the new field.
+        request.setIncludeQueryStatsMetrics(OptionalBool());
+    } else {
+        request.setIncludeQueryStatsMetrics(true);
+    }
+}
 
 /**
  * Builds the cursor field for a reply to a cursor-generating command in-place.
@@ -178,7 +188,7 @@ void appendCursorResponseObject(
     long long cursorId,
     const NamespaceString& cursorNamespace,
     BSONArray firstBatch,
-    boost::optional<StringData> cursorType,
+    boost::optional<std::string_view> cursorType,
     BSONObjBuilder* builder,
     const SerializationContext& serializationContext = SerializationContext::stateCommandReply());
 
@@ -292,6 +302,10 @@ public:
         return _partialResultsReturned;
     }
 
+    void setPartialResultsReturned(bool partialResultsReturned) {
+        _partialResultsReturned = partialResultsReturned;
+    }
+
     bool getInvalidated() const {
         return _invalidated;
     }
@@ -329,4 +343,4 @@ private:
     bool _wasStatementExecuted = false;
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -46,6 +19,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -64,7 +38,7 @@ class GroupFromFirstDocumentTransformation final : public TransformerInterface {
 public:
     GroupFromFirstDocumentTransformation(
         const std::string& groupId,
-        StringData originalStageName,
+        std::string_view originalStageName,
         std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> accumulatorExprs,
         AccumulatorDocumentsNeeded docsNeeded = AccumulatorDocumentsNeeded::kFirstInputDocument)
         : _accumulatorExprs(std::move(accumulatorExprs)),
@@ -84,7 +58,7 @@ public:
         return _groupId;
     }
 
-    StringData originalStageName() const {
+    std::string_view originalStageName() const {
         return _originalStageName;
     }
 
@@ -92,14 +66,15 @@ public:
         return _docsNeeded;
     }
 
-    Document applyTransformation(const Document& input) const final;
+    Document applyTransformation(const Document& input, const EvaluationContext& ctx) const final;
 
     void optimize() final;
 
     DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
                                                    DocumentSourceContainer* container) final;
 
-    Document serializeTransformation(const SerializationOptions& options = {}) const final;
+    Document serializeTransformation(
+        const query_shape::SerializationOptions& options = {}) const final;
 
     DepsTracker::State addDependencies(DepsTracker* deps) const final;
 
@@ -113,14 +88,14 @@ public:
     static std::unique_ptr<GroupFromFirstDocumentTransformation> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const std::string& groupId,
-        StringData originalStageName,
+        std::string_view originalStageName,
         std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> accumulatorExprs,
         AccumulatorDocumentsNeeded docsNeeded);
 
 private:
     std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> _accumulatorExprs;
     std::string _groupId;
-    StringData _originalStageName;
+    std::string_view _originalStageName;
     AccumulatorDocumentsNeeded _docsNeeded;
 };
 

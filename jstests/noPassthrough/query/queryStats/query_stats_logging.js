@@ -4,7 +4,10 @@
  */
 
 let options = {
-    setParameter: {internalQueryStatsRateLimit: -1},
+    setParameter: {
+        internalQueryStatsSampleRate: 1,
+        internalQueryStatsWriteCmdSampleRate: 0,
+    },
 };
 
 function countMatching(arr, func) {
@@ -39,9 +42,18 @@ function runQueryStatsAndVerifyLogs({pipeline, transformed, logLevel}) {
 
     if (logLevel >= 1) {
         // Checking that we log the invocation of $queryStats.
-        let spec = transformed ? {"transformIdentifiers": {"algorithm": "hmac-sha-256", "hmacKey": "###"}} : {};
+        let spec = transformed
+            ? {"transformIdentifiers": {"algorithm": "hmac-sha-256", "hmacKey": "###"}}
+            : {};
         assert(
-            checkLog.checkContainsWithCountJson(conn, 7808300, {"commandSpec": spec}, 1, null, true),
+            checkLog.checkContainsWithCountJson(
+                conn,
+                7808300,
+                {"commandSpec": spec},
+                1,
+                null,
+                true,
+            ),
             "failed to find log with id " + 7808300,
         );
     }
@@ -61,7 +73,12 @@ function runQueryStatsAndVerifyLogs({pipeline, transformed, logLevel}) {
         assert.eq(
             countMatching(query.log, function (v) {
                 const has = (s) => v.indexOf(s) !== -1;
-                return has("thisOutput") && has("key:") && has("queryShape") && (has("?number") || has("?string"));
+                return (
+                    has("thisOutput") &&
+                    has("key:") &&
+                    has("queryShape") &&
+                    (has("?number") || has("?string"))
+                );
             }),
             2,
         );

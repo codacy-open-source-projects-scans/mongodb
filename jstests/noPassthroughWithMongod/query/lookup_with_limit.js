@@ -3,18 +3,29 @@
  */
 import {flattenQueryPlanTree, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
 import {
-    checkSbeFullFeatureFlagEnabled,
     checkSbeFullyEnabled,
     checkSbeRestrictedOrFullyEnabled,
-    checkSbeEqLookupUnwindEnabled,
+    isDeferredGetExecutorEnabled,
 } from "jstests/libs/query/sbe_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-const isFeatureFlagSbeFullEnabled = checkSbeFullFeatureFlagEnabled(db);
+const frameworkControl = assert.commandWorked(
+    db.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1}),
+);
+// Force classic overrides other knobs.
+const forceClassicEngineSet =
+    frameworkControl.internalQueryFrameworkControl === "forceClassicEngine";
+
+const isFeatureFlagSbeFullEnabled =
+    FeatureFlagUtil.isPresentAndEnabled(db, "SbeUnwind") && checkSbeFullyEnabled(db);
 const isSbeEnabled = checkSbeFullyEnabled(db);
 const isSbeGroupLookupOnly = checkSbeRestrictedOrFullyEnabled(db);
-const isSbeEqLookupUnwind = checkSbeEqLookupUnwindEnabled(db);
-const isSbeTransformStagesEnabled = FeatureFlagUtil.isPresentAndEnabled(db, "SbeTransformStages");
+const isLookupUnwindPushdownEnabled =
+    isDeferredGetExecutorEnabled(db) &&
+    FeatureFlagUtil.isPresentAndEnabled(db, "SbeEqLookupUnwindHashJoin") &&
+    !forceClassicEngineSet;
+const isSbeTransformStagesEnabled =
+    FeatureFlagUtil.isPresentAndEnabled(db, "SbeTransformStages") && !forceClassicEngineSet;
 
 const coll = db.lookup_with_limit;
 const other = db.lookup_with_limit_other;
@@ -32,7 +43,9 @@ function checkResults(pipeline, isOptimized, expected) {
     );
     const explain = coll.explain().aggregate(pipeline);
     if (explain.stages) {
-        const queryStages = flattenQueryPlanTree(getWinningPlanFromExplain(explain.stages[0].$cursor.queryPlanner));
+        const queryStages = flattenQueryPlanTree(
+            getWinningPlanFromExplain(explain.stages[0].$cursor.queryPlanner),
+        );
         const pipelineStages = explain.stages.slice(1).map((s) => Object.keys(s)[0]);
         assert.eq(queryStages.concat(pipelineStages), expected, explain);
     } else {
@@ -58,7 +71,10 @@ assert.commandWorked(bulk_other.execute());
 
 // TEST_01: Check that lookup->limit is reordered to limit->lookup, with the limit stage pushed down
 // to query system.
-let pipeline = [{$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "from_other"}}, {$limit: 5}];
+let pipeline = [
+    {$lookup: {from: other.getName(), localField: "x", foreignField: "x", as: "from_other"}},
+    {$limit: 5},
+];
 if (isSbeEnabled) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "LIMIT"]);
     checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP"]);
@@ -79,11 +95,35 @@ pipeline = [
     {$limit: 5},
 ];
 if (isSbeEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP", "LIMIT"]);
-    checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "EQ_LOOKUP",
+        "LIMIT",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "LIMIT",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "EQ_LOOKUP",
+    ]);
 } else if (isSbeGroupLookupOnly && isSbeTransformStagesEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "PROJECTION_DEFAULT", "EQ_LOOKUP"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "EQ_LOOKUP",
+        "$limit",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "LIMIT",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "EQ_LOOKUP",
+    ]);
 } else if (isSbeGroupLookupOnly) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$addFields", "$lookup", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "LIMIT", "EQ_LOOKUP", "$addFields", "$lookup"]);
@@ -105,7 +145,7 @@ if (isFeatureFlagSbeFullEnabled) {
 } else if (isSbeEnabled) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP_UNWIND", "LIMIT"]);
-} else if (isSbeEqLookupUnwind) {
+} else if (isLookupUnwindPushdownEnabled) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP_UNWIND", "$limit"]);
 } else if (isSbeGroupLookupOnly) {
@@ -125,11 +165,35 @@ pipeline = [
     {$limit: 5},
 ];
 if (isFeatureFlagSbeFullEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "UNWIND", "LIMIT"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "UNWIND", "LIMIT"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "UNWIND",
+        "LIMIT",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "UNWIND",
+        "LIMIT",
+    ]);
 } else if (isSbeEnabled || (isSbeGroupLookupOnly && isSbeTransformStagesEnabled)) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "$unwind", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "$unwind", "$limit"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "$unwind",
+        "$limit",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "$unwind",
+        "$limit",
+    ]);
 } else if (isSbeGroupLookupOnly) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$project", "$unwind", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "$project", "$unwind", "$limit"]);
@@ -154,7 +218,7 @@ if (isFeatureFlagSbeFullEnabled) {
 } else if (isSbeEnabled) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$sort", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP_UNWIND", "SORT"]);
-} else if (isSbeEqLookupUnwind) {
+} else if (isLookupUnwindPushdownEnabled) {
     checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$unwind", "$sort", "$limit"]);
     checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP_UNWIND", "$sort"]);
 } else if (isSbeGroupLookupOnly) {
@@ -175,18 +239,81 @@ pipeline = [
     {$limit: 5},
 ];
 if (isFeatureFlagSbeFullEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "UNWIND", "SORT", "LIMIT"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "SORT", "UNWIND", "LIMIT"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "UNWIND",
+        "SORT",
+        "LIMIT",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "SORT",
+        "UNWIND",
+        "LIMIT",
+    ]);
 } else if (isSbeEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "$unwind", "$sort", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "SORT", "$unwind", "$limit"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "$unwind",
+        "$sort",
+        "$limit",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "SORT",
+        "$unwind",
+        "$limit",
+    ]);
 } else if (isSbeGroupLookupOnly && isSbeTransformStagesEnabled) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "$unwind", "$sort", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "PROJECTION_DEFAULT", "$sort", "$unwind", "$limit"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "$unwind",
+        "$sort",
+        "$limit",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "PROJECTION_DEFAULT",
+        "$sort",
+        "$unwind",
+        "$limit",
+    ]);
 } else if (isSbeGroupLookupOnly) {
-    checkResults(pipeline, false, ["COLLSCAN", "EQ_LOOKUP", "$project", "$unwind", "$sort", "$limit"]);
-    checkResults(pipeline, true, ["COLLSCAN", "EQ_LOOKUP", "$project", "$sort", "$unwind", "$limit"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "$project",
+        "$unwind",
+        "$sort",
+        "$limit",
+    ]);
+    checkResults(pipeline, true, [
+        "COLLSCAN",
+        "EQ_LOOKUP",
+        "$project",
+        "$sort",
+        "$unwind",
+        "$limit",
+    ]);
 } else {
-    checkResults(pipeline, false, ["COLLSCAN", "$lookup", "$project", "$unwind", "$sort", "$limit"]);
+    checkResults(pipeline, false, [
+        "COLLSCAN",
+        "$lookup",
+        "$project",
+        "$unwind",
+        "$sort",
+        "$limit",
+    ]);
     checkResults(pipeline, true, ["COLLSCAN", "$lookup", "$project", "$sort", "$unwind", "$limit"]);
 }

@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
@@ -40,6 +13,7 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/matcher/doc_validation/constraint_validation_level_upgrade.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
@@ -51,7 +25,9 @@
 #include "mongo/db/shard_role/ddl/coll_mod_reply_validation.h"
 #include "mongo/db/shard_role/ddl/replica_set_ddl_tracker.h"
 #include "mongo/db/shard_role/shard_catalog/coll_mod.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
@@ -160,7 +136,8 @@ public:
                 }
             }
 
-            if (cmd.getValidator() || cmd.getValidationLevel() || cmd.getValidationAction()) {
+            if (cmd.getValidator() || cmd.getValidationLevel() || cmd.getValidationAction() ||
+                cmd.getPrepareConstraintValidationLevel()) {
                 // Check for config.settings in the user command since a validator is allowed
                 // internally on this collection but the user may not modify the validator.
                 uassert(ErrorCodes::InvalidOptions,
@@ -177,12 +154,21 @@ public:
                                 .isEnabledUseLastLTSFCVWhenUninitialized(
                                     VersionContext::getDecoration(opCtx), fcvSnapshot));
                 }
-                if (cmd.getValidationLevel() == ValidationLevelEnum::constraint) {
+                if (cmd.getValidationLevel() == ValidationLevelEnum::constraint ||
+                    cmd.getPrepareConstraintValidationLevel()) {
                     uassert(ErrorCodes::InvalidOptions,
                             "Validation level 'constraint' is not supported with current FCV",
                             gFeatureFlagConstraintValidationLevel
                                 .isEnabledUseLastLTSFCVWhenUninitialized(
                                     VersionContext::getDecoration(opCtx), fcvSnapshot));
+                }
+                if (cmd.getValidationLevel() == ValidationLevelEnum::constraint) {
+                    auto& oss = OperationShardingState::get(opCtx);
+                    uassertStatusOK(noDocumentsViolatingValidator(
+                        opCtx,
+                        nss,
+                        PlacementConcern{oss.getDbVersion(nss.dbName()), oss.getShardVersion(nss)},
+                        /*localOnly=*/true));
                 }
             }
 
@@ -191,6 +177,10 @@ public:
             auto result = reply->getBodyBuilder();
             uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
                 opCtx, nss, cmd, true, &result));
+
+            if (const auto level = cmd.getValidationLevel()) {
+                validationLevelCounters.increment(cmd.kCommandName, *level);
+            }
 
             // Only validate results in test mode so that we don't expose users to errors if we
             // construct an invalid reply.

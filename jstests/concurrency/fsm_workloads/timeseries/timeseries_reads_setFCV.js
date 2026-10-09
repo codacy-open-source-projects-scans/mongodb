@@ -22,17 +22,34 @@
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
-// Runs `func` and retries if it is interrupted with a transient timeseries upgrade/downgrade error.
-function withRetryOnTimeseriesUpgradeDowngradeError(func) {
+// Errors that are expected transiently while reads run concurrently with FCV transitions:
+//  - InterruptedDueToTimeseriesUpgradeDowngrade: a concurrent FCV transition interrupted the read.
+//  - IngressRequestRateLimitExceeded: the rate-limited suite injects the
+//    failIngressRequestRateLimiting failpoint on the shards. A read shed on a shard is rejected
+//    before the command runs, and that rejection does carry the RetryableError label. mongos does
+//    not forward the shard's labels though: it rebuilds them for the client, and no longer treats
+//    this error as idempotent, so the label is dropped and mongos does not retry -- the error
+//    reaches the shell. SERVER-128710 removed that special case deliberately (mongos may have
+//    already retried, and the original request may not be idempotent); A concurrent FCV transition
+//    makes this more likely, since each StaleConfig-driven routing retry is another chance to be
+//    shed.
+const acceptedErrors = [
+    ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade,
+    ErrorCodes.IngressRequestRateLimitExceeded,
+];
+
+// Runs `func` and retries if it fails with one of the accepted transient errors.
+function withRetryOnAcceptedErrors(func) {
     let result;
     assert.soonRetryOnAcceptableErrors(
         () => {
             result = func();
             return true;
         },
-        ErrorCodes.InterruptedDueToTimeseriesUpgradeDowngrade,
-        "Timed out waiting for timeseries operation to succeed without upgrade/downgrade error",
+        acceptedErrors,
+        "Timed out waiting for timeseries operation to succeed without a transient error",
     );
     return result;
 }
@@ -61,7 +78,9 @@ export const $config = (function () {
             const targetFCV = fcvValues[Random.randInt(2)];
             jsTestLog("Executing FCV state, setting to:" + targetFCV);
             try {
-                assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
+                assert.commandWorked(
+                    db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
+                );
             } catch (e) {
                 if (handleRandomSetFCVErrors(e, targetFCV)) return;
                 throw e;
@@ -70,11 +89,15 @@ export const $config = (function () {
         },
 
         listCollections: function (db, collName) {
-            const listCollections = db.getCollectionInfos({name: {$regex: new RegExp(jsTestName())}});
+            const listCollections = db.getCollectionInfos({
+                name: {$regex: new RegExp(jsTestName())},
+            });
             const collectionNames = new Set(listCollections.map((n) => n.name));
 
             // All timeseries collections used by the FSM should be visible.
-            const mainCollections = listCollections.filter((n) => !n.name.startsWith("system.buckets."));
+            const mainCollections = listCollections.filter(
+                (n) => !n.name.startsWith("system.buckets."),
+            );
             assert.eq(mainCollections.length, numCollections, tojson(listCollections));
 
             // We should observe a consistent state: Each timeseries collection should have a
@@ -89,14 +112,14 @@ export const $config = (function () {
         find: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const actualDocs = withRetryOnTimeseriesUpgradeDowngradeError(() => coll.find({}, {_id: 0}).toArray());
+            const actualDocs = withRetryOnAcceptedErrors(() => coll.find({}, {_id: 0}).toArray());
             assert.sameMembers(expectedDocs, actualDocs);
         },
 
         findWithMajority: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const actualDocs = withRetryOnTimeseriesUpgradeDowngradeError(() =>
+            const actualDocs = withRetryOnAcceptedErrors(() =>
                 coll.find({}, {_id: 0}).readConcern("majority").toArray(),
             );
             assert.sameMembers(expectedDocs, actualDocs);
@@ -105,7 +128,7 @@ export const $config = (function () {
         findOne: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const doc = withRetryOnTimeseriesUpgradeDowngradeError(() =>
+            const doc = withRetryOnAcceptedErrors(() =>
                 coll.findOne({t: expectedDocs[0].t}, {_id: 0}),
             );
             assert.eq(doc, expectedDocs[0]);
@@ -114,7 +137,7 @@ export const $config = (function () {
         aggregate: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const result = withRetryOnTimeseriesUpgradeDowngradeError(() =>
+            const result = withRetryOnAcceptedErrors(() =>
                 coll.aggregate([{$group: {_id: null, minTemp: {$min: "$temp"}}}]).toArray(),
             );
             assert.eq(result[0].minTemp, expectedDocs[0].temp);
@@ -123,14 +146,14 @@ export const $config = (function () {
         countDocuments: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const count = withRetryOnTimeseriesUpgradeDowngradeError(() => coll.countDocuments({}));
+            const count = withRetryOnAcceptedErrors(() => coll.countDocuments({}));
             assert.eq(count, expectedDocs.length);
         },
 
         collStatsCmd: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const result = withRetryOnTimeseriesUpgradeDowngradeError(() =>
+            const result = withRetryOnAcceptedErrors(() =>
                 assert.commandWorked(db.runCommand({collStats: coll.getName()})),
             );
             assert.hasFields(result, ["timeseries"]);
@@ -139,7 +162,7 @@ export const $config = (function () {
         collStatsAgg: function (db, collName) {
             const coll = getCollection(db, Random.randInt(numCollections));
 
-            const result = withRetryOnTimeseriesUpgradeDowngradeError(() =>
+            const result = withRetryOnAcceptedErrors(() =>
                 coll.aggregate([{$collStats: {storageStats: {}}}]).toArray(),
             );
             assert.hasFields(result[0], ["storageStats"]);
@@ -147,12 +170,22 @@ export const $config = (function () {
         },
     };
 
+    // The legacy shell does not attach readConcern.afterClusterTime to collStats, so it can read a
+    // snapshot predating this workload's setup when causal consistency suites route it to a
+    // secondary. Remove the state and its transitions in those suites, but retain collStats coverage
+    // everywhere else.
+    if (TestData.runningWithCausalConsistency) {
+        delete states.collStatsCmd;
+    }
+
     const setup = function (db, collName, cluster) {
         // Work with multiple collections to maximize the chance we find upgrade/downgrade issues
         // by spending a bigger fraction on time of setFCV on timeseries upgrade/downgrade.
         for (let i = 0; i < numCollections; i++) {
             const coll = getCollection(db, i);
-            assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: "t"}}));
+            assert.commandWorked(
+                db.createCollection(coll.getName(), {timeseries: {timeField: "t"}}),
+            );
             assert.commandWorked(coll.insertMany(expectedDocs));
         }
 
@@ -173,7 +206,7 @@ export const $config = (function () {
             configureFailPoint(adminDb, "hangBeforePublishingCatalogUpdates", {}, "off");
         });
 
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
     };
 
     return {

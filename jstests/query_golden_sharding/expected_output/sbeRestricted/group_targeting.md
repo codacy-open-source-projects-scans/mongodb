@@ -119,7 +119,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -301,7 +300,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"_id" : 1
@@ -417,7 +415,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -527,7 +524,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -618,7 +614,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -698,6 +693,14 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
+						"filter" : {
+							"_id" : {
+								"$lte" : "shard1_1"
+							}
+						},
+						"stage" : "MATCH"
+					},
+					{
 						"stage" : "GROUP"
 					},
 					{
@@ -710,13 +713,6 @@
 						"stage" : "COLLSCAN"
 					}
 				]
-			}
-		},
-		{
-			"$match" : {
-				"_id" : {
-					"$lte" : "shard1_1"
-				}
 			}
 		},
 		{
@@ -733,6 +729,14 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
+						"filter" : {
+							"_id" : {
+								"$lte" : "shard1_1"
+							}
+						},
+						"stage" : "MATCH"
+					},
+					{
 						"stage" : "GROUP"
 					},
 					{
@@ -745,13 +749,6 @@
 						"stage" : "COLLSCAN"
 					}
 				]
-			}
-		},
-		{
-			"$match" : {
-				"_id" : {
-					"$lte" : "shard1_1"
-				}
 			}
 		},
 		{
@@ -769,7 +766,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"sort" : {
 					"_id" : 1
@@ -910,7 +906,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1043,7 +1038,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1217,7 +1211,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1389,7 +1382,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1498,7 +1490,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1617,7 +1608,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1736,7 +1726,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1837,7 +1826,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -1945,7 +1933,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2056,7 +2043,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2116,74 +2102,66 @@
 ### Summarized explain
 ```json
 {
-	"group_targeting-rs0" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting",
-						"stage" : "COLLSCAN"
-					}
-				]
+	"group_targeting-rs0" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : "$otherField"
+				}
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"otherField" : true
+				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$addFields" : {
-				"shardKey" : "$otherField"
+		]
+	},
+	"group_targeting-rs1" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : "$otherField"
+				}
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"otherField" : true
+				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$group" : {
-				"_id" : "$shardKey"
-			}
-		}
-	],
-	"group_targeting-rs1" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting",
-						"stage" : "COLLSCAN"
-					}
-				]
-			}
-		},
-		{
-			"$addFields" : {
-				"shardKey" : "$otherField"
-			}
-		},
-		{
-			"$group" : {
-				"_id" : "$shardKey"
-			}
-		}
-	],
+		]
+	},
 	"mergeType" : "router",
 	"mergerPart" : [
 		{
@@ -2191,7 +2169,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2286,7 +2263,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2429,7 +2405,6 @@
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2527,7 +2502,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2595,86 +2569,78 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 ### Summarized explain
 ```json
 {
-	"group_targeting-rs0" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting",
-						"stage" : "COLLSCAN"
-					}
-				]
+	"group_targeting-rs0" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : "$otherField"
+				}
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : false
+				}
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"otherField" : true
+				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$project" : {
-				"_id" : true,
-				"shardKey" : false
+		]
+	},
+	"group_targeting-rs1" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : "$otherField"
+				}
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"shardKey" : false
+				}
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"otherField" : true
+				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$addFields" : {
-				"shardKey" : "$otherField"
-			}
-		},
-		{
-			"$group" : {
-				"_id" : "$shardKey"
-			}
-		}
-	],
-	"group_targeting-rs1" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting",
-						"stage" : "COLLSCAN"
-					}
-				]
-			}
-		},
-		{
-			"$project" : {
-				"_id" : true,
-				"shardKey" : false
-			}
-		},
-		{
-			"$addFields" : {
-				"shardKey" : "$otherField"
-			}
-		},
-		{
-			"$group" : {
-				"_id" : "$shardKey"
-			}
-		}
-	],
+		]
+	},
 	"mergeType" : "router",
 	"mergerPart" : [
 		{
@@ -2682,7 +2648,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2791,7 +2756,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -2893,7 +2857,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3005,7 +2968,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3137,7 +3099,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3286,7 +3247,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3398,7 +3358,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3531,7 +3490,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3648,7 +3606,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}
@@ -3731,114 +3688,80 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 ### Summarized explain
 ```json
 {
-	"group_targeting-rs0" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"sk0" : 1,
-							"sk1" : 1,
-							"sk2" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting_compound",
-						"stage" : "COLLSCAN"
+	"group_targeting-rs0" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"complex" : {
+						"$rand" : { }
 					}
-				]
-			}
-		},
-		{
-			"$addFields" : {
-				"complex" : {
-					"$rand" : { }
 				}
-			}
-		},
-		{
-			"$group" : {
-				"$willBeMerged" : false,
-				"_id" : {
-					"complex" : "$complex",
-					"sk0" : "$sk0",
-					"sk1" : "$sk1",
-					"sk2" : "$sk2"
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"sk0" : true,
+					"sk1" : true,
+					"sk2" : true
 				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting_compound",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$group" : {
-				"$willBeMerged" : false,
-				"_id" : {
-					"sk0" : "$_id.sk0",
-					"sk1" : "$_id.sk1",
-					"sk2" : "$_id.sk2"
-				}
-			}
-		}
-	],
-	"group_targeting-rs1" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"sk0" : 1,
-							"sk1" : 1,
-							"sk2" : 1
-						}
-					},
-					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
-						"direction" : "forward",
-						"nss" : "test.group_targeting_compound",
-						"stage" : "COLLSCAN"
+		]
+	},
+	"group_targeting-rs1" : {
+		"rejectedPlans" : [ ],
+		"winningPlan" : [
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "GROUP"
+			},
+			{
+				"stage" : "PROJECTION_DEFAULT",
+				"transformBy" : {
+					"complex" : {
+						"$rand" : { }
 					}
-				]
-			}
-		},
-		{
-			"$addFields" : {
-				"complex" : {
-					"$rand" : { }
 				}
-			}
-		},
-		{
-			"$group" : {
-				"$willBeMerged" : false,
-				"_id" : {
-					"complex" : "$complex",
-					"sk0" : "$sk0",
-					"sk1" : "$sk1",
-					"sk2" : "$sk2"
+			},
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : false,
+					"sk0" : true,
+					"sk1" : true,
+					"sk2" : true
 				}
+			},
+			{
+				"stage" : "SHARDING_FILTER"
+			},
+			{
+				"direction" : "forward",
+				"filter" : { },
+				"nss" : "test.group_targeting_compound",
+				"stage" : "COLLSCAN"
 			}
-		},
-		{
-			"$group" : {
-				"$willBeMerged" : false,
-				"_id" : {
-					"sk0" : "$_id.sk0",
-					"sk1" : "$_id.sk1",
-					"sk2" : "$_id.sk2"
-				}
-			}
-		}
-	],
+		]
+	},
 	"mergeType" : "router",
 	"mergerPart" : [
 		{
@@ -3846,7 +3769,6 @@ Note: If we have duplicate _ids in the output, that signals a bug here.
 				"allowPartialResults" : false,
 				"compareWholeSortKey" : false,
 				"nss" : "test.group_targeting_compound",
-				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
 			}

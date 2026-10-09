@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/cluster_parameters/cluster_server_parameter_common.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,6 +21,7 @@
 #include <algorithm>
 #include <iterator>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,6 +33,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
     OperationContext* opCtx, Shard& shard) {
@@ -68,7 +43,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
     // Find all tenant config databases.
     ListDatabasesForAllTenantsCommand listDbCommand;
     listDbCommand.setDbName(DatabaseName::kAdmin);
-    listDbCommand.setFilter(BSON("name"_sd << "config"));
+    listDbCommand.setFilter(BSON("name"sv << "config"));
     listDbCommand.setNameOnly(true);
     std::set<boost::optional<TenantId>> tenantIds;
 
@@ -82,7 +57,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
         return swListDbResponse.getStatus();
     }
     std::vector<BSONElement> databases =
-        swListDbResponse.getValue().response["databases"_sd].Array();
+        swListDbResponse.getValue().response["databases"sv].Array();
     LOGV2_DEBUG(6831301,
                 2,
                 "ListDatabasesForAllTenants w/ default executor finished",
@@ -92,7 +67,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
                    databases.end(),
                    std::inserter(tenantIds, tenantIds.end()),
                    [](const BSONElement& elem) -> boost::optional<TenantId> {
-                       auto tenantElem = elem.Obj()["tenantId"_sd];
+                       auto tenantElem = elem.Obj()["tenantId"sv];
                        if (tenantElem.eoo()) {
                            return boost::none;
                        } else {
@@ -114,7 +89,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
     // Find all tenant config databases.
     ListDatabasesForAllTenantsCommand listDbCommand;
     listDbCommand.setDbName(DatabaseName::kAdmin);
-    listDbCommand.setFilter(BSON("name"_sd << "config"));
+    listDbCommand.setFilter(BSON("name"sv << "config"));
     listDbCommand.setNameOnly(true);
     std::set<boost::optional<TenantId>> tenantIds;
 
@@ -143,7 +118,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
         return response.status;
     }
     std::vector<BSONElement> databases;
-    response.data["databases"_sd].Obj().elems(databases);
+    response.data["databases"sv].Obj().elems(databases);
     LOGV2_DEBUG(6831302,
                 2,
                 "ListDatabasesForAllTenants w/ special executor finished",
@@ -153,7 +128,7 @@ StatusWith<std::set<boost::optional<TenantId>>> getTenantsWithConfigDbsOnShard(
                    databases.end(),
                    std::inserter(tenantIds, tenantIds.end()),
                    [](const BSONElement& elem) -> boost::optional<TenantId> {
-                       auto tenantElem = elem.Obj()["tenantId"_sd];
+                       auto tenantElem = elem.Obj()["tenantId"sv];
                        if (tenantElem.eoo()) {
                            return boost::none;
                        } else {

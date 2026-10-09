@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
@@ -49,6 +23,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/str.h"
+
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -57,11 +34,12 @@
 namespace mongo {
 
 namespace search_index_testing_helper {
+using namespace std::literals::string_view_literals;
 
-constexpr mongo::StringData kListCommand = "$listSearchIndexes"_sd;
-constexpr mongo::StringData kCreateCommand = "createSearchIndexes"_sd;
-constexpr mongo::StringData kUpdateCommand = "updateSearchIndex"_sd;
-constexpr mongo::StringData kDropCommand = "dropSearchIndex"_sd;
+constexpr std::string_view kListCommand = "$listSearchIndexes"sv;
+constexpr std::string_view kCreateCommand = "createSearchIndexes"sv;
+constexpr std::string_view kUpdateCommand = "updateSearchIndex"sv;
+constexpr std::string_view kDropCommand = "dropSearchIndex"sv;
 // In production sharded clusters, search index commands are received by the router which forwards
 // them to the SearchIndexManagement service (Envoy) which are then routed to MMS and stored in the
 // control plane DB. The mongots makes regular calls to the control plane to get the updated set of
@@ -209,11 +187,14 @@ inline void blockUntilIndexQueryable(OperationContext* opCtx,
     // TODO SERVER-101359 dynamically set maxTimeout depending on if we're running on evergreen or
     // locally.
     auto maxTimeout = Milliseconds(10 * 60 * 1000);
-    auto runElapsed = Milliseconds(0);
     auto executor = Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor();
 
     for (auto& host : allClusterHosts) {
         auto runStart = clock.now();
+        auto runElapsed = Milliseconds(0);
+        // Tracks the most recent retriable failure so that, if we exhaust the retry budget below,
+        // the resulting error names the underlying cause rather than an opaque timeout.
+        Status lastError = Status::OK();
         do {
             executor::RemoteCommandRequest request(host,
                                                    dbName,
@@ -254,16 +235,47 @@ inline void blockUntilIndexQueryable(OperationContext* opCtx,
 
             if (!response.isOK()) {
                 if (!Shard::shouldErrorBePropagated(response.status.code())) {
-                    uasserted(ErrorCodes::OperationFailed,
-                              str::stream() << "failed to run command " << listSearchIndexesCmdObj
-                                            << causedBy(response.status));
+                    // Covers NetworkInterfaceExceededTimeLimit and mongos-retriable network
+                    // errors. On slow sanitizer builds (e.g. aubsan), shards can take longer
+                    // than kRemoteCommandTimeout to respond. Retry rather than throw so
+                    // transient slowness doesn't cause a spurious BF.
+                    LOGV2_DEBUG(9638407,
+                                1,
+                                "blockUntilIndexQueryable: retriable error, retrying",
+                                "host"_attr = host,
+                                "error"_attr = response.status);
+                    opCtx->sleepFor(kRetryPeriodMs);
+                    lastError = response.status;
+                    runElapsed = clock.now() - runStart;
+                    continue;
                 }
                 uassertStatusOK(response.status);
             }
 
             BSONObj result = response.data.getOwned();
-            uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                                       "blockUntilIndexQueryable failed");
+            auto cmdStatus = getStatusFromCommandResult(result);
+            if (!cmdStatus.isOK()) {
+                // SearchIndexManagementHostUnreachable means the mongod could not reach its
+                // mongot-localdev (see getSearchIndexManagerResponse). This is transient on slow
+                // builds (e.g. aubsan) where mongot may still be starting up. Retry instead of
+                // immediately failing so we don't produce a spurious BF.
+                // MaxTimeMSExpired means this single round trip exceeded kRemoteCommandTimeout.
+                // That is expected on a slow host and is precisely what the maxTimeout budget below
+                // exists to absorb, so retry rather than aborting on the first attempt.
+                if (cmdStatus.code() == ErrorCodes::SearchIndexManagementHostUnreachable ||
+                    cmdStatus.code() == ErrorCodes::MaxTimeMSExpired) {
+                    LOGV2_DEBUG(12706500,
+                                1,
+                                "blockUntilIndexQueryable: retriable command error, retrying",
+                                "host"_attr = host,
+                                "error"_attr = cmdStatus);
+                    opCtx->sleepFor(kRetryPeriodMs);
+                    lastError = cmdStatus;
+                    runElapsed = clock.now() - runStart;
+                    continue;
+                }
+                uassertStatusOKWithContext(cmdStatus, "blockUntilIndexQueryable failed");
+            }
 
             LOGV2_DEBUG(
                 9638403, 0, "One response", "result"_attr = result, "hostAndPort"_attr = host);
@@ -273,13 +285,18 @@ inline void blockUntilIndexQueryable(OperationContext* opCtx,
             }
 
             LOGV2_DEBUG(9638404, 1, "Index not yet queryable, retrying", "response"_attr = result);
+            opCtx->sleepFor(kRetryPeriodMs);
 
             runElapsed = clock.now() - runStart;
         } while (runElapsed < maxTimeout);
-    }
 
-    if (runElapsed > maxTimeout) {
-        uasserted(9638406, "Index is not replicated and queryable within the max timeout");
+        if (runElapsed > maxTimeout) {
+            uasserted(9638406,
+                      str::stream()
+                          << "Index is not replicated and queryable within the max timeout"
+                          << (lastError.isOK() ? std::string{}
+                                               : "; last error: " + lastError.toString()));
+        }
     }
 }
 

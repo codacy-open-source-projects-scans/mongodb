@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/fle/range_predicate.h"
 
+#include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_tags.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
@@ -43,6 +18,7 @@
 #include <algorithm>
 #include <functional>
 #include <iterator>
+#include <string_view>
 #include <utility>
 
 #include <boost/smart_ptr.hpp>
@@ -58,12 +34,17 @@ REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE(LTE, RangePredicate);
 REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE(ExpressionCompare, RangePredicate);
 
 namespace {
-// Validate the range operator passed in and return the fieldpath and payload for the rewrite. If
-// the passed-in expression is a comparison with $eq, $ne, or $cmp, none of which represent a range
-// predicate, then return null to the caller so that the rewrite can return null.
-std::pair<boost::intrusive_ptr<Expression>, Value> validateRangeOp(Expression* expr) {
+// Validate the range operator passed in and return the fieldpath, its path string, and the payload
+// for the rewrite. If the passed-in expression is a comparison with $eq, $ne, or $cmp, none of
+// which represent a range predicate, then return a null fieldpath so the rewrite can return null.
+struct RangeOp {
+    boost::intrusive_ptr<Expression> fieldpath;
+    std::string path;
+    Value payload;
+};
+RangeOp validateRangeOp(const Expression* expr) {
     auto children = [&]() {
-        auto cmpExpr = dynamic_cast<ExpressionCompare*>(expr);
+        auto cmpExpr = dynamic_cast<const ExpressionCompare*>(expr);
         tassert(
             6720901, "Range rewrite should only be called with a comparison operator.", cmpExpr);
         switch (cmpExpr->getOp()) {
@@ -81,20 +62,21 @@ std::pair<boost::intrusive_ptr<Expression>, Value> validateRangeOp(Expression* e
         return std::vector<boost::intrusive_ptr<Expression>>();
     }();
     if (children.empty()) {
-        return {nullptr, Value()};
+        return {nullptr, "", Value()};
     }
     // ExpressionCompare has a fixed arity of 2.
     auto fieldpath = dynamic_cast<ExpressionFieldPath*>(children[0].get());
     uassert(6720903, "first argument should be a fieldpath", fieldpath);
     auto secondArg = dynamic_cast<ExpressionConstant*>(children[1].get());
     uassert(6720904, "second argument should be a constant", secondArg);
-    auto payload = secondArg->getValue();
-    return {children[0], payload};
+    return {children[0],
+            fieldpath->getFieldPathWithoutCurrentPrefix().fullPath(),
+            secondArg->getValue()};
 }
 }  // namespace
 
 std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayload(
-    StringData path, ParsedFindRangePayload payload) const {
+    std::string_view path, ParsedFindRangePayload payload) const {
     auto* expCtx = _rewriter->getExpressionContext();
     return fleBetweenFromPayload(ExpressionFieldPath::createPathFromString(
                                      expCtx, std::string{path}, expCtx->variablesParseState),
@@ -122,8 +104,9 @@ std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayl
         expCtx, fieldpath, std::move(serverZerosTokens));
 }
 
-std::vector<PrfBlock> RangePredicate::generateTags(BSONValue payload) const {
-    auto parsedPayload = parseFindPayload<ParsedFindRangePayload>(payload);
+std::vector<PrfBlock> RangePredicate::generateTags(BSONValue payload, std::string_view path) const {
+    auto parsedPayload = parseFindPayload<ParsedFindRangePayload>(
+        payload, path, _rewriter->getEncryptedFieldConfigForValidation());
     std::vector<PrfBlock> tags;
     tassert(7030500, "Must generate tags from a non-stub payload.", !parsedPayload.isStub());
 
@@ -152,13 +135,13 @@ std::unique_ptr<MatchExpression> RangePredicate::rewriteToTagDisjunction(
         if (isStub(payload)) {
             return std::make_unique<AlwaysTrueMatchExpression>();
         }
-        return makeTagDisjunction(toBSONArray(generateTags(payload)));
+        return makeTagDisjunction(toBSONArray(generateTags(payload, compExpr->path())));
     }
     MONGO_UNREACHABLE_TASSERT(6720900);
 }
 
 std::unique_ptr<Expression> RangePredicate::rewriteToTagDisjunction(Expression* expr) const {
-    auto [fieldpath, payload] = validateRangeOp(expr);
+    auto [fieldpath, path, payload] = validateRangeOp(expr);
     if (!fieldpath) {
         return nullptr;
     }
@@ -169,7 +152,7 @@ std::unique_ptr<Expression> RangePredicate::rewriteToTagDisjunction(Expression* 
         return std::make_unique<ExpressionConstant>(_rewriter->getExpressionContext(), Value(true));
     }
 
-    auto tags = toValues(generateTags(std::ref(payload)));
+    auto tags = toValues(generateTags(std::ref(payload), path));
 
     return makeTagDisjunction(_rewriter->getExpressionContext(), std::move(tags));
 }
@@ -199,7 +182,8 @@ std::unique_ptr<MatchExpression> RangePredicate::rewriteToRuntimeComparison(
     if (!isPayload(ffp)) {
         return nullptr;
     }
-    auto payload = parseFindPayload<ParsedFindRangePayload>(ffp);
+    auto payload = parseFindPayload<ParsedFindRangePayload>(
+        ffp, expr->path(), _rewriter->getEncryptedFieldConfigForValidation());
     auto internalFleBetween = fleBetweenFromPayload(expr->path(), payload);
 
     return std::make_unique<ExprMatchExpression>(
@@ -208,14 +192,15 @@ std::unique_ptr<MatchExpression> RangePredicate::rewriteToRuntimeComparison(
 }
 
 std::unique_ptr<Expression> RangePredicate::rewriteToRuntimeComparison(Expression* expr) const {
-    auto [fieldpath, ffp] = validateRangeOp(expr);
+    auto [fieldpath, path, ffp] = validateRangeOp(expr);
     if (!fieldpath) {
         return nullptr;
     }
     if (!isPayload(ffp)) {
         return nullptr;
     }
-    auto payload = parseFindPayload<ParsedFindRangePayload>(ffp);
+    auto payload = parseFindPayload<ParsedFindRangePayload>(
+        ffp, path, _rewriter->getEncryptedFieldConfigForValidation());
     if (payload.isStub()) {
         return std::make_unique<ExpressionConstant>(_rewriter->getExpressionContext(), Value(true));
     }

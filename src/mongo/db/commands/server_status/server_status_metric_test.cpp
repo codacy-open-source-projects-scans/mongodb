@@ -1,40 +1,17 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/server_status/server_status_metric.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/logv2/log.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -83,7 +60,7 @@ protected:
         return bob.obj();
     }
 
-    Counter64& addCounter(StringData path, MetricTree& tree) {
+    Counter64& addCounter(std::string_view path, MetricTree& tree) {
         auto m = std::make_unique<
             BasicServerStatusMetric<ServerStatusMetricPolicySelectionT<Counter64>>>();
         auto& ref = m->value();
@@ -91,7 +68,7 @@ protected:
         return ref;
     }
 
-    Counter64& addCounter(StringData path, ClusterRole role = {}) {
+    Counter64& addCounter(std::string_view path, ClusterRole role = {}) {
         return addCounter(path, trees()[role]);
     }
 
@@ -100,7 +77,7 @@ protected:
         std::vector<std::string> nodes;
         // Extract node names from metrics tree
         for (auto&& el : metrics) {
-            StringData key = el.fieldNameStringData();
+            std::string_view key = el.fieldNameStringData();
             switch (el.type()) {
                 case BSONType::object:
                     for (auto&& v : extractTreeNodes(el.Obj(), pred))
@@ -115,8 +92,8 @@ protected:
         return nodes;
     }
 
-    std::vector<StringData> dotSplit(StringData path) {
-        std::vector<StringData> parts;
+    std::vector<std::string_view> dotSplit(std::string_view path) {
+        std::vector<std::string_view> parts;
         while (true) {
             auto dot = path.find(".");
             if (dot == std::string::npos) {
@@ -142,12 +119,12 @@ protected:
     }
 
     /** Parses `json` and nests the result under the "metrics" root. */
-    static BSONObj mJson(StringData json) {
+    static BSONObj mJson(std::string_view json) {
         return BSON("metrics" << fromjson(json));
     }
 
     /** Adds the implicit "metrics" root to the dotted `path`. */
-    static std::string mStr(StringData path) {
+    static std::string mStr(std::string_view path) {
         return fmt::format("metrics.{}", path);
     }
 
@@ -159,14 +136,14 @@ protected:
         return out;
     }
 
-    void appendJsonToTree(MetricTree& tree, StringData json) {
+    void appendJsonToTree(MetricTree& tree, std::string_view json) {
         for (auto&& path : extractTreeNodes(mJson(json)["metrics"].Obj()))
             addCounter(path, tree);
     }
 
     BSONObj actualMerged(const std::vector<std::string>& specs, BSONObj excludedPaths = {}) {
         std::vector<std::unique_ptr<MetricTree>> componentTrees;
-        for (StringData json : specs) {
+        for (std::string_view json : specs) {
             auto tree = std::make_unique<MetricTree>();
             appendJsonToTree(*tree, json);
             componentTrees.push_back(std::move(tree));
@@ -182,7 +159,7 @@ protected:
     BSONObj expectedMerged(const std::vector<std::string>& specs, BSONObj excludedPaths = {}) {
         BSONObjBuilder b;
         MetricTree mt;
-        for (StringData json : specs)
+        for (std::string_view json : specs)
             appendJsonToTree(mt, json);
         mt.appendTo(b);
         return erasePaths(b.obj(), extractTreeNodes(excludedPaths, falseNodesPredicate));
@@ -193,13 +170,13 @@ private:
 };
 
 TEST_F(MetricTreeTest, DefaultMetricsSubtree) {
-    for (StringData path : {"foo", "bar"})
+    for (std::string_view path : {"foo", "bar"})
         addCounter(path);
     ASSERT_BSONOBJ_EQ(serialize(), mJson("{bar:0,foo:0}"));
 }
 
 TEST_F(MetricTreeTest, LeadingDotMeansRoot) {
-    for (StringData path : {".foo", ".bar"})
+    for (std::string_view path : {".foo", ".bar"})
         addCounter(path);
     ASSERT_BSONOBJ_EQ(serialize(), fromjson("{bar:0,foo:0}"));
 }
@@ -338,6 +315,36 @@ TEST_F(MetricTreeTest, MetricTreeSet) {
 TEST_F(MetricTreeTest, MetricBuilderSetTreeSet) {
     *MetricBuilder<Counter64>{"test.m1"}.setTreeSet(&trees());
     ASSERT_BSONOBJ_EQ(serialize(trees()[ClusterRole::None]), mJson("{test:{m1:0}}"));
+}
+
+using MetricTreeDeathTest = MetricTreeTest;
+
+DEATH_TEST_F(MetricTreeDeathTest, FreezePreventsFurtherAdds, "Cannot add metric") {
+    addCounter("before.freeze");
+    trees().freeze();
+    addCounter("after.freeze");
+}
+
+DEATH_TEST_F(MetricTreeDeathTest, FreezeAppliesToNoneRole, "Cannot add metric") {
+    trees().freeze();
+    addCounter("m", ClusterRole::None);
+}
+
+DEATH_TEST_F(MetricTreeDeathTest, FreezeAppliesToShardRole, "Cannot add metric") {
+    trees().freeze();
+    addCounter("m", ClusterRole::ShardServer);
+}
+
+DEATH_TEST_F(MetricTreeDeathTest, FreezeAppliesToRouterRole, "Cannot add metric") {
+    trees().freeze();
+    addCounter("m", ClusterRole::RouterServer);
+}
+
+DEATH_TEST_F(MetricTreeDeathTest, AddFromNonMainThreadFails, "non-main thread") {
+    // Add once on the main thread first to ensure isMainThread() has captured the main thread's
+    // id, then adding from another thread must crash regardless of test execution order.
+    addCounter("on.main.thread");
+    stdx::thread([this] { addCounter("from.worker.thread"); }).join();
 }
 
 }  // namespace

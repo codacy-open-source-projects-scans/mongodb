@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/compiler/parsers/matcher/schema/json_schema_parser.h"
@@ -78,6 +52,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -98,20 +73,21 @@ using ErrorAnnotation = MatchExpression::ErrorAnnotation;
 using AnnotationMode = ErrorAnnotation::Mode;
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-using findBSONTypeAliasFun = std::function<boost::optional<BSONType>(StringData)>;
+using findBSONTypeAliasFun = std::function<boost::optional<BSONType>(std::string_view)>;
 
 // Explicitly unsupported JSON Schema keywords.
-const std::set<StringData> unsupportedKeywords{
-    "$ref"_sd,
-    "$schema"_sd,
-    "default"_sd,
-    "definitions"_sd,
-    "format"_sd,
-    "id"_sd,
+const std::set<std::string_view> unsupportedKeywords{
+    "$ref"sv,
+    "$schema"sv,
+    "default"sv,
+    "definitions"sv,
+    "format"sv,
+    "id"sv,
 };
 
-constexpr StringData kNamePlaceholder = JSONSchemaParser::kNamePlaceholder;
+constexpr std::string_view kNamePlaceholder = JSONSchemaParser::kNamePlaceholder;
 
 /**
  * Parses 'schema' to the semantically equivalent match expression. If the schema has an associated
@@ -123,7 +99,7 @@ constexpr StringData kNamePlaceholder = JSONSchemaParser::kNamePlaceholder;
  * path, e.g. for top-level schemas, then 'path' is not set.
  */
 StatusWithMatchExpression _parse(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                 boost::optional<StringData> path,
+                                 boost::optional<std::string_view> path,
                                  BSONObj schema,
                                  AllowedFeatureSet allowedFeatures,
                                  bool ignoreUnknownKeywords);
@@ -145,7 +121,7 @@ StatusWithMatchExpression _parse(const boost::intrusive_ptr<ExpressionContext>& 
 std::unique_ptr<MatchExpression> makeRestriction(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MatcherTypeSet& restrictionType,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     std::unique_ptr<MatchExpression> restrictionExpr,
     InternalSchemaTypeExpression* statedType) {
     tassert(11051916,
@@ -195,8 +171,8 @@ std::unique_ptr<MatchExpression> makeRestriction(
 
 StatusWith<std::unique_ptr<InternalSchemaTypeExpression>> parseType(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
-    StringData keywordName,
+    boost::optional<std::string_view> path,
+    std::string_view keywordName,
     BSONElement typeElt,
     const findBSONTypeAliasFun& aliasMapFind) {
 
@@ -221,7 +197,7 @@ StatusWith<std::unique_ptr<InternalSchemaTypeExpression>> parseType(
 }
 
 StatusWithMatchExpression parseMaximum(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       boost::optional<StringData> path,
+                                       boost::optional<std::string_view> path,
                                        BSONElement maximum,
                                        InternalSchemaTypeExpression* typeExpr,
                                        bool isExclusiveMaximum) {
@@ -261,7 +237,7 @@ StatusWithMatchExpression parseMaximum(const boost::intrusive_ptr<ExpressionCont
 }
 
 StatusWithMatchExpression parseMinimum(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       boost::optional<StringData> path,
+                                       boost::optional<std::string_view> path,
                                        BSONElement minimum,
                                        InternalSchemaTypeExpression* typeExpr,
                                        bool isExclusiveMinimum) {
@@ -305,7 +281,7 @@ StatusWithMatchExpression parseMinimum(const boost::intrusive_ptr<ExpressionCont
  */
 template <class T>
 StatusWithMatchExpression parseLength(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                      boost::optional<StringData> path,
+                                      boost::optional<std::string_view> path,
                                       BSONElement length,
                                       InternalSchemaTypeExpression* typeExpr,
                                       BSONType restrictionType) {
@@ -325,7 +301,7 @@ StatusWithMatchExpression parseLength(const boost::intrusive_ptr<ExpressionConte
 }
 
 StatusWithMatchExpression parsePattern(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       boost::optional<StringData> path,
+                                       boost::optional<std::string_view> path,
                                        BSONElement pattern,
                                        InternalSchemaTypeExpression* typeExpr) {
     if (pattern.type() != BSONType::string) {
@@ -350,7 +326,7 @@ StatusWithMatchExpression parsePattern(const boost::intrusive_ptr<ExpressionCont
 }
 
 StatusWithMatchExpression parseMultipleOf(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                          boost::optional<StringData> path,
+                                          boost::optional<std::string_view> path,
                                           BSONElement multipleOf,
                                           InternalSchemaTypeExpression* typeExpr) {
     if (!multipleOf.isNumber()) {
@@ -382,7 +358,7 @@ StatusWithMatchExpression parseMultipleOf(const boost::intrusive_ptr<ExpressionC
 
 template <class T>
 StatusWithMatchExpression parseLogicalKeyword(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                              boost::optional<StringData> path,
+                                              boost::optional<std::string_view> path,
                                               BSONElement logicalElement,
                                               AllowedFeatureSet allowedFeatures,
                                               bool ignoreUnknownKeywords) {
@@ -422,7 +398,7 @@ StatusWithMatchExpression parseLogicalKeyword(const boost::intrusive_ptr<Express
 }
 
 StatusWithMatchExpression parseEnum(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    boost::optional<StringData> path,
+                                    boost::optional<std::string_view> path,
                                     BSONElement enumElement) {
     if (enumElement.type() != BSONType::array) {
         return {ErrorCodes::TypeMismatch,
@@ -526,12 +502,13 @@ StatusWith<StringDataSet> parseRequired(BSONElement requiredElt) {
 StatusWithMatchExpression translateRequired(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                             const StringDataSet& requiredProperties,
                                             BSONElement requiredElt,
-                                            boost::optional<StringData> path,
+                                            boost::optional<std::string_view> path,
                                             InternalSchemaTypeExpression* typeExpr) {
     auto andExpr = std::make_unique<AndMatchExpression>(
         doc_validation_error::createAnnotation(expCtx, "required", requiredElt.wrap()));
 
-    std::vector<StringData> sortedProperties(requiredProperties.begin(), requiredProperties.end());
+    std::vector<std::string_view> sortedProperties(requiredProperties.begin(),
+                                                   requiredProperties.end());
     std::sort(sortedProperties.begin(), sortedProperties.end());
     for (auto&& propertyName : sortedProperties) {
         // This node is tagged as '_propertyExists' to indicate that it will produce a path instead
@@ -556,7 +533,7 @@ StatusWithMatchExpression translateRequired(const boost::intrusive_ptr<Expressio
 }
 
 StatusWithMatchExpression parseProperties(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                          boost::optional<StringData> path,
+                                          boost::optional<std::string_view> path,
                                           BSONElement propertiesElt,
                                           InternalSchemaTypeExpression* typeExpr,
                                           const StringDataSet& requiredProperties,
@@ -734,7 +711,7 @@ StatusWithMatchExpression parseAdditionalProperties(
  */
 StatusWithMatchExpression parseAllowedProperties(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     BSONElement propertiesElt,
     BSONElement patternPropertiesElt,
     BSONElement additionalPropertiesElt,
@@ -745,7 +722,7 @@ StatusWithMatchExpression parseAllowedProperties(
     // Collect the set of properties named by the 'properties' keyword.
     StringDataSet propertyNames;
     if (propertiesElt) {
-        std::vector<StringData> propertyNamesVec;
+        std::vector<std::string_view> propertyNamesVec;
         for (auto&& elem : propertiesElt.embeddedObject()) {
             propertyNamesVec.push_back(elem.fieldNameStringData());
         }
@@ -815,7 +792,7 @@ StatusWithMatchExpression parseAllowedProperties(
  */
 template <class T>
 StatusWithMatchExpression parseNumProperties(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                             boost::optional<StringData> path,
+                                             boost::optional<std::string_view> path,
                                              BSONElement numProperties,
                                              InternalSchemaTypeExpression* typeExpr) {
     auto parsedNumProps = numProperties.parseIntegerElementToNonNegativeLong();
@@ -843,8 +820,8 @@ StatusWithMatchExpression parseNumProperties(const boost::intrusive_ptr<Expressi
 
 StatusWithMatchExpression makeDependencyExistsClause(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
-    StringData dependencyName) {
+    boost::optional<std::string_view> path,
+    std::string_view dependencyName) {
     // This node is tagged as '_propertyExists' to indicate that it will produce a path instead
     // of a detailed BSONObj error during error generation.
     auto existsExpr = std::make_unique<ExistsMatchExpression>(
@@ -864,7 +841,7 @@ StatusWithMatchExpression makeDependencyExistsClause(
 
 StatusWithMatchExpression translateSchemaDependency(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     BSONElement dependency,
     AllowedFeatureSet allowedFeatures,
     bool ignoreUnknownKeywords) {
@@ -899,7 +876,7 @@ StatusWithMatchExpression translateSchemaDependency(
 
 StatusWithMatchExpression translatePropertyDependency(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     BSONElement dependency) {
     tassert(
         11051914, "Expect dependency bson to be an array", dependency.type() == BSONType::array);
@@ -916,7 +893,7 @@ StatusWithMatchExpression translatePropertyDependency(
     // array of properties during error generation.
     auto propertyDependencyExpr = std::make_unique<AndMatchExpression>(
         doc_validation_error::createAnnotation(expCtx, "_propertiesExistList", dependency.wrap()));
-    std::set<StringData> propertyDependencyNames;
+    std::set<std::string_view> propertyDependencyNames;
     for (auto&& propertyDependency : dependency.embeddedObject()) {
         if (propertyDependency.type() != BSONType::string) {
             return {ErrorCodes::TypeMismatch,
@@ -966,7 +943,7 @@ StatusWithMatchExpression translatePropertyDependency(
 }
 
 StatusWithMatchExpression parseDependencies(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                            boost::optional<StringData> path,
+                                            boost::optional<std::string_view> path,
                                             BSONElement dependencies,
                                             AllowedFeatureSet allowedFeatures,
                                             bool ignoreUnknownKeywords) {
@@ -1012,7 +989,7 @@ StatusWithMatchExpression parseDependencies(const boost::intrusive_ptr<Expressio
 
 StatusWithMatchExpression parseUniqueItems(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            BSONElement uniqueItemsElt,
-                                           boost::optional<StringData> path,
+                                           boost::optional<std::string_view> path,
                                            InternalSchemaTypeExpression* typeExpr) {
     auto errorAnnotation = doc_validation_error::createAnnotation(
         expCtx, std::string{uniqueItemsElt.fieldNameStringData()}, uniqueItemsElt.wrap());
@@ -1038,7 +1015,7 @@ StatusWithMatchExpression parseUniqueItems(const boost::intrusive_ptr<Expression
  */
 StatusWith<boost::optional<long long>> parseItems(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     BSONElement itemsElt,
     AllowedFeatureSet allowedFeatures,
     bool ignoreUnknownKeywords,
@@ -1137,7 +1114,7 @@ StatusWith<boost::optional<long long>> parseItems(
 }
 
 Status parseAdditionalItems(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            boost::optional<StringData> path,
+                            boost::optional<std::string_view> path,
                             BSONElement additionalItemsElt,
                             boost::optional<long long> startIndexForAdditionalItems,
                             AllowedFeatureSet allowedFeatures,
@@ -1203,7 +1180,7 @@ Status parseAdditionalItems(const boost::intrusive_ptr<ExpressionContext>& expCt
 
 Status parseItemsAndAdditionalItems(StringMap<BSONElement>& keywordMap,
                                     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                    boost::optional<StringData> path,
+                                    boost::optional<std::string_view> path,
                                     AllowedFeatureSet allowedFeatures,
                                     bool ignoreUnknownKeywords,
                                     InternalSchemaTypeExpression* typeExpr,
@@ -1244,7 +1221,7 @@ Status parseItemsAndAdditionalItems(StringMap<BSONElement>& keywordMap,
  */
 Status translateLogicalKeywords(StringMap<BSONElement>& keywordMap,
                                 const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                boost::optional<StringData> path,
+                                boost::optional<std::string_view> path,
                                 AndMatchExpression* andExpr,
                                 AllowedFeatureSet allowedFeatures,
                                 bool ignoreUnknownKeywords) {
@@ -1319,7 +1296,7 @@ Status translateLogicalKeywords(StringMap<BSONElement>& keywordMap,
  */
 Status translateArrayKeywords(StringMap<BSONElement>& keywordMap,
                               const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                              boost::optional<StringData> path,
+                              boost::optional<std::string_view> path,
                               AllowedFeatureSet allowedFeatures,
                               bool ignoreUnknownKeywords,
                               InternalSchemaTypeExpression* typeExpr,
@@ -1369,7 +1346,7 @@ Status translateArrayKeywords(StringMap<BSONElement>& keywordMap,
  */
 Status translateObjectKeywords(StringMap<BSONElement>& keywordMap,
                                const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                               boost::optional<StringData> path,
+                               boost::optional<std::string_view> path,
                                InternalSchemaTypeExpression* typeExpr,
                                AndMatchExpression* andExpr,
                                AllowedFeatureSet allowedFeatures,
@@ -1483,7 +1460,7 @@ Status translateObjectKeywords(StringMap<BSONElement>& keywordMap,
  */
 Status translateScalarKeywords(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                StringMap<BSONElement>& keywordMap,
-                               boost::optional<StringData> path,
+                               boost::optional<std::string_view> path,
                                InternalSchemaTypeExpression* typeExpr,
                                AndMatchExpression* andExpr) {
     // String keywords.
@@ -1583,7 +1560,7 @@ Status translateScalarKeywords(const boost::intrusive_ptr<ExpressionContext>& ex
  */
 Status translateEncryptionKeywords(StringMap<BSONElement>& keywordMap,
                                    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                   boost::optional<StringData> path,
+                                   boost::optional<std::string_view> path,
                                    AllowedFeatureSet allowedFeatures,
                                    AndMatchExpression* andExpr) {
     auto encryptElt = keywordMap[JSONSchemaParser::kSchemaEncryptKeyword];
@@ -1685,7 +1662,7 @@ Status validateMetadataKeywords(StringMap<BSONElement>& keywordMap) {
 }
 
 StatusWithMatchExpression _parse(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                 boost::optional<StringData> path,
+                                 boost::optional<std::string_view> path,
                                  BSONObj schema,
                                  AllowedFeatureSet allowedFeatures,
                                  bool ignoreUnknownKeywords) {
@@ -1879,7 +1856,7 @@ StatusWith<MatcherTypeSet> JSONSchemaParser::parseTypeSet(
                                      << "' must be either a string or an array of strings")};
     }
 
-    std::set<StringData> aliases;
+    std::set<std::string_view> aliases;
     if (typeElt.type() == BSONType::string) {
         if (typeElt.valueStringData() == JSONSchemaParser::kSchemaTypeInteger) {
             return {ErrorCodes::FailedToParse,
@@ -1944,7 +1921,7 @@ StatusWithMatchExpression JSONSchemaParser::parse(
                     expCtx, "$jsonSchema", oldAnnotation, schema));
             }
         }
-        expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+        expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
         return translation;
     } catch (const DBException& ex) {
         return {ex.toStatus()};

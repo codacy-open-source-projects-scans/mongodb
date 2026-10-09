@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 
@@ -59,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -71,6 +46,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -90,8 +66,8 @@ BSONObj createPathProjection(const BSONObj& infoObj) {
 using IndexVersion = IndexDescriptor::IndexVersion;
 
 namespace {
-std::map<StringData, BSONElement> populateOptionsMapForEqualityCheck(const BSONObj& spec) {
-    std::map<StringData, BSONElement> optionsMap;
+std::map<std::string_view, BSONElement> populateOptionsMapForEqualityCheck(const BSONObj& spec) {
+    std::map<std::string_view, BSONElement> optionsMap;
 
     // These index options are not considered for equality.
     static const StringDataSet kIndexOptionsNotConsideredForEqualityCheck{
@@ -115,7 +91,7 @@ std::map<StringData, BSONElement> populateOptionsMapForEqualityCheck(const BSONO
     while (it.more()) {
         const BSONElement e = it.next();
 
-        StringData fieldName = e.fieldNameStringData();
+        std::string_view fieldName = e.fieldNameStringData();
         if (kIndexOptionsNotConsideredForEqualityCheck.count(fieldName) == 0) {
             optionsMap[fieldName] = e;
         }
@@ -125,32 +101,32 @@ std::map<StringData, BSONElement> populateOptionsMapForEqualityCheck(const BSONO
 }
 }  // namespace
 
-constexpr StringData IndexDescriptor::k2dIndexBitsFieldName;
-constexpr StringData IndexDescriptor::k2dIndexMaxFieldName;
-constexpr StringData IndexDescriptor::k2dIndexMinFieldName;
-constexpr StringData IndexDescriptor::k2dsphereCoarsestIndexedLevel;
-constexpr StringData IndexDescriptor::k2dsphereFinestIndexedLevel;
-constexpr StringData IndexDescriptor::k2dsphereVersionFieldName;
-constexpr StringData IndexDescriptor::kBackgroundFieldName;
-constexpr StringData IndexDescriptor::kCollationFieldName;
-constexpr StringData IndexDescriptor::kDefaultLanguageFieldName;
-constexpr StringData IndexDescriptor::kDropDuplicatesFieldName;
-constexpr StringData IndexDescriptor::kExpireAfterSecondsFieldName;
-constexpr StringData IndexDescriptor::kIndexNameFieldName;
-constexpr StringData IndexDescriptor::kIndexVersionFieldName;
-constexpr StringData IndexDescriptor::kKeyPatternFieldName;
-constexpr StringData IndexDescriptor::kLanguageOverrideFieldName;
+constexpr std::string_view IndexDescriptor::k2dIndexBitsFieldName;
+constexpr std::string_view IndexDescriptor::k2dIndexMaxFieldName;
+constexpr std::string_view IndexDescriptor::k2dIndexMinFieldName;
+constexpr std::string_view IndexDescriptor::k2dsphereCoarsestIndexedLevel;
+constexpr std::string_view IndexDescriptor::k2dsphereFinestIndexedLevel;
+constexpr std::string_view IndexDescriptor::k2dsphereVersionFieldName;
+constexpr std::string_view IndexDescriptor::kBackgroundFieldName;
+constexpr std::string_view IndexDescriptor::kCollationFieldName;
+constexpr std::string_view IndexDescriptor::kDefaultLanguageFieldName;
+constexpr std::string_view IndexDescriptor::kDropDuplicatesFieldName;
+constexpr std::string_view IndexDescriptor::kExpireAfterSecondsFieldName;
+constexpr std::string_view IndexDescriptor::kIndexNameFieldName;
+constexpr std::string_view IndexDescriptor::kIndexVersionFieldName;
+constexpr std::string_view IndexDescriptor::kKeyPatternFieldName;
+constexpr std::string_view IndexDescriptor::kLanguageOverrideFieldName;
 // TODO(SERVER-100328): remove after 9.0 is branched.
-constexpr StringData IndexDescriptor::kNamespaceFieldName;
-constexpr StringData IndexDescriptor::kPartialFilterExprFieldName;
-constexpr StringData IndexDescriptor::kWildcardProjectionFieldName;
-constexpr StringData IndexDescriptor::kSparseFieldName;
-constexpr StringData IndexDescriptor::kStorageEngineFieldName;
-constexpr StringData IndexDescriptor::kTextVersionFieldName;
-constexpr StringData IndexDescriptor::kUniqueFieldName;
-constexpr StringData IndexDescriptor::kHiddenFieldName;
-constexpr StringData IndexDescriptor::kWeightsFieldName;
-constexpr StringData IndexDescriptor::kPrepareUniqueFieldName;
+constexpr std::string_view IndexDescriptor::kNamespaceFieldName;
+constexpr std::string_view IndexDescriptor::kPartialFilterExprFieldName;
+constexpr std::string_view IndexDescriptor::kWildcardProjectionFieldName;
+constexpr std::string_view IndexDescriptor::kSparseFieldName;
+constexpr std::string_view IndexDescriptor::kStorageEngineFieldName;
+constexpr std::string_view IndexDescriptor::kTextVersionFieldName;
+constexpr std::string_view IndexDescriptor::kUniqueFieldName;
+constexpr std::string_view IndexDescriptor::kHiddenFieldName;
+constexpr std::string_view IndexDescriptor::kWeightsFieldName;
+constexpr std::string_view IndexDescriptor::kPrepareUniqueFieldName;
 
 /**
  * Constructs an IndexDescriptor object. Arguments:
@@ -294,8 +270,8 @@ IndexDescriptor::Comparison IndexDescriptor::compareIndexOptions(
         std::equal(thisOptionsMap.begin(),
                    thisOptionsMap.end(),
                    existingIndexOptionsMap.begin(),
-                   [](const std::pair<StringData, BSONElement>& lhs,
-                      const std::pair<StringData, BSONElement>& rhs) {
+                   [](const std::pair<std::string_view, BSONElement>& lhs,
+                      const std::pair<std::string_view, BSONElement>& rhs) {
                        return lhs.first == rhs.first &&
                            SimpleBSONElementComparator::kInstance.evaluate(lhs.second ==
                                                                            rhs.second);
@@ -307,10 +283,10 @@ IndexDescriptor::Comparison IndexDescriptor::compareIndexOptions(
 }
 
 std::vector<const char*> IndexDescriptor::getFieldNames() const {
-    constexpr auto kFTSTerm = "term"_sd;
-    constexpr auto kFTSWeight = "weight"_sd;
-    constexpr auto kFTSFieldName = "_fts"_sd;
-    constexpr auto kFTSXFieldName = "_ftsx"_sd;
+    constexpr auto kFTSTerm = "term"sv;
+    constexpr auto kFTSWeight = "weight"sv;
+    constexpr auto kFTSFieldName = "_fts"sv;
+    constexpr auto kFTSXFieldName = "_ftsx"sv;
 
     std::vector<const char*> fieldNames;
 

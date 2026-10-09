@@ -64,7 +64,11 @@ function runTest(getShardKey, performChunkSplit) {
     assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
 
     // Create timeseries collection.
-    assert.commandWorked(mainDB.createCollection(collName, {timeseries: {timeField: timeField, metaField: metaField}}));
+    assert.commandWorked(
+        mainDB.createCollection(collName, {
+            timeseries: {timeField: timeField, metaField: metaField},
+        }),
+    );
     const coll = mainDB.getCollection(collName);
 
     // Shard timeseries collection.
@@ -94,7 +98,10 @@ function runTest(getShardKey, performChunkSplit) {
         }
 
         assert.commandWorked(
-            mongos.adminCommand({split: getTimeseriesCollForDDLOps(mainDB, coll).getFullName(), middle: splitPoint}),
+            mongos.adminCommand({
+                split: getTimeseriesCollForDDLOps(mainDB, coll).getFullName(),
+                middle: splitPoint,
+            }),
         );
 
         // Ensure that currently both chunks reside on the primary shard.
@@ -120,15 +127,21 @@ function runTest(getShardKey, performChunkSplit) {
     }
 
     // TODO SERVER-101784 remove this check once only viewless timeseries exist.
-    // TODO SERVER-107138 update once drop on the buckets namespace fails on FCV 9.0.
-    if (!areViewlessTimeseriesEnabled(mainDB)) {
+    {
         // Confirm it's illegal to directly drop the time-series buckets collection.
+        //
+        // Starting from FCV 9.0 the server is emitting CommandNotSupportedOnLegacyTimeseriesBucketsNamespace instead of IllegalOperation
         assert.commandFailedWithCode(
             mainDB.runCommand({drop: getTimeseriesBucketsColl(collName)}),
-            ErrorCodes.IllegalOperation,
+            [
+                ErrorCodes.IllegalOperation,
+                ErrorCodes.CommandNotSupportedOnLegacyTimeseriesBucketsNamespace,
+            ],
         );
         ensureCollectionExists(collName, mainDB);
-        ensureCollectionExists(getTimeseriesBucketsColl(collName), mainDB);
+        if (!areViewlessTimeseriesEnabled(mainDB)) {
+            ensureCollectionExists(getTimeseriesBucketsColl(collName), mainDB);
+        }
     }
 
     // Drop the time-series collection.
@@ -142,7 +155,12 @@ function runTest(getShardKey, performChunkSplit) {
     ensureCollectionDoesNotExist(getTimeseriesBucketsColl(collName));
 
     // Ensure that the time-series collection gets deleted from the config database.
-    assert.eq([], configDB.collections.find({_id: getTimeseriesCollForDDLOps(mainDB, coll).getFullName()}).toArray());
+    assert.eq(
+        [],
+        configDB.collections
+            .find({_id: getTimeseriesCollForDDLOps(mainDB, coll).getFullName()})
+            .toArray(),
+    );
 }
 
 try {

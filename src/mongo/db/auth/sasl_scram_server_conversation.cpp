@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/sasl_scram_server_conversation.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
@@ -60,6 +33,7 @@
 #include <deque>
 #include <memory>
 #include <set>
+#include <string_view>
 
 #include <absl/strings/str_split.h>
 #include <boost/algorithm/string/replace.hpp>
@@ -74,7 +48,7 @@ namespace mongo {
 
 template <typename Policy>
 StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::stepImpl(
-    OperationContext* opCtx, StringData inputData) {
+    OperationContext* opCtx, std::string_view inputData) {
     _step++;
 
     const unsigned int numSteps = _totalSteps();
@@ -114,7 +88,7 @@ static void decodeSCRAMUsername(std::string& user) {
  */
 template <typename Policy>
 StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_firstStep(
-    OperationContext* opCtx, StringData inputData) {
+    OperationContext* opCtx, std::string_view inputData) {
     const auto badCount = [](int got) {
         return Status(ErrorCodes::BadValue,
                       str::stream()
@@ -170,8 +144,8 @@ StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_fir
      * This does not impact _authMessage, as it's composed from the raw
      * string input, rather than the output of the split operation.
      */
-    const std::vector<std::string> input = absl::StrSplit(
-        toStdStringViewForInterop(client_first_message_bare), ",", absl::SkipEmpty());
+    const std::vector<std::string> input =
+        absl::StrSplit(client_first_message_bare, ",", absl::SkipEmpty());
 
 
     if (input.size() < 2) {
@@ -291,7 +265,7 @@ StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_fir
     SecureRandom().fill(binaryNonce, sizeof(binaryNonce));
 
     _nonce = clientNonce +
-        base64::encode(StringData(reinterpret_cast<char*>(binaryNonce), sizeof(binaryNonce)));
+        base64::encode(std::string_view(reinterpret_cast<char*>(binaryNonce), sizeof(binaryNonce)));
     StringBuilder sb;
     sb << "r=" << _nonce << ",s=" << scramCredentials.salt
        << ",i=" << scramCredentials.iterationCount;
@@ -317,7 +291,7 @@ StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_fir
  **/
 template <typename Policy>
 StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_secondStep(
-    OperationContext* opCtx, StringData inputData) {
+    OperationContext* opCtx, std::string_view inputData) {
     const auto badCount = [](int got) {
         return Status(ErrorCodes::BadValue,
                       str::stream()
@@ -345,8 +319,8 @@ StatusWith<std::tuple<bool, std::string>> SaslSCRAMServerMechanism<Policy>::_sec
     }
     const auto proof = last_field.substr(2);
 
-    const std::vector<std::string> input = absl::StrSplit(
-        toStdStringViewForInterop(client_final_message_without_proof), ",", absl::SkipEmpty());
+    const std::vector<std::string> input =
+        absl::StrSplit(client_final_message_without_proof, ",", absl::SkipEmpty());
 
     if (input.size() < 2) {
         // Add count for proof back on.

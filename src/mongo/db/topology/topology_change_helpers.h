@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
@@ -45,7 +18,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -56,8 +28,10 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
 
 #include <climits>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -76,19 +50,6 @@ namespace topology_change_helpers {
 // Returns the count of range deletion tasks locally on the config server.
 long long getRangeDeletionCount(OperationContext* opCtx);
 
-/**
- * Gets the latest non processing range deletion task scheduled for
- * future deletion. Used during transitionToDedicatedConfigServer to check for any pending delayed
- * range deletion tasks.
- */
-boost::optional<RangeDeletionTask> getLatestNonProcessingRangeDeletionTask(OperationContext* opCtx);
-
-/**
- * Checks if the orphan cleanup delay has elapsed. If not, throws a RemoveShardDrainingInfo
- * exception.
- */
-void checkOrphanCleanupDelayElapsed(OperationContext* opCtx, const RangeDeletionTask& task);
-
 // Calls ShardsvrJoinMigrations locally on the config server.
 void joinMigrations(OperationContext* opCtx);
 
@@ -101,10 +62,11 @@ void joinMigrations(OperationContext* opCtx);
  * shards from disk or more likely indicates that an existing shard conflicts with the shard being
  * added and they have different options, so the addShard attempt must be aborted.
  */
-boost::optional<ShardType> getExistingShard(OperationContext* opCtx,
-                                            const ConnectionString& proposedShardConnectionString,
-                                            const boost::optional<StringData>& proposedShardName,
-                                            ShardingCatalogClient& localCatalogClient);
+boost::optional<ShardType> getExistingShard(
+    OperationContext* opCtx,
+    const ConnectionString& proposedShardConnectionString,
+    const boost::optional<std::string_view>& proposedShardName,
+    ShardingCatalogClient& localCatalogClient);
 
 /**
  * Runs a command against a "shard" that is not yet in the cluster and thus not present in the
@@ -198,13 +160,16 @@ void getClusterTimeKeysFromReplicaSet(OperationContext* opCtx,
 std::string createShardName(OperationContext* opCtx,
                             RemoteCommandTargeter& targeter,
                             bool isConfigShard,
-                            const boost::optional<StringData>& proposedShardName,
+                            const boost::optional<std::string_view>& proposedShardName,
                             std::shared_ptr<executor::TaskExecutor> executor);
 
 /**
- * Creates a ShardIdentity
+ * Creates a ShardIdentity. When shardUuid is provided it is stored in the identity document so
+ * that the receiving shard can persist its unique UUID alongside its human-readable name.
  */
-ShardIdentityType createShardIdentity(OperationContext* opCtx, const ShardId& shardName);
+ShardIdentityType createShardIdentity(OperationContext* opCtx,
+                                      const ShardId& shardName,
+                                      boost::optional<UUID> shardUuid = boost::none);
 
 /**
  * Issues a command on the remote host to insert a shard identity document
@@ -261,10 +226,11 @@ TenantIdMap<std::vector<BSONObj>> getClusterParametersLocally(OperationContext* 
  * Runs a count with the given query against the localConfigShard. Returns the result of that count
  * and throws any error that occurs while running this command.
  */
-MONGO_MOD_PARENT_PRIVATE long long runCountCommandOnConfig(OperationContext* opCtx,
-                                                           std::shared_ptr<Shard> localConfigShard,
-                                                           const NamespaceString& nss,
-                                                           BSONObj query);
+[[MONGO_MOD_PARENT_PRIVATE]] long long runCountCommandOnConfig(
+    OperationContext* opCtx,
+    std::shared_ptr<Shard> localConfigShard,
+    const NamespaceString& nss,
+    BSONObj query);
 
 struct DrainingShardUsage {
     bool isFullyDrained() const {

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/row.h"
 
@@ -40,7 +14,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value_builder.h"
-#include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/exec/sbe/values/value_size.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/platform/decimal128.h"
@@ -52,6 +26,7 @@
 #include <array>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <tuple>
 
 #include <boost/optional/optional.hpp>
@@ -126,7 +101,7 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
                 arr->reserve(cnt);
                 for (size_t idx = 0; idx < cnt; ++idx) {
                     auto [tag, val] = deserializeValue(buf, collator);
-                    arr->push_back(tag, val);
+                    arr->push_back_raw(tag, val);
                 }
             }
             tag = arrTag;
@@ -144,7 +119,7 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
                 arr->reserve(cnt);
                 for (size_t idx = 0; idx < cnt; ++idx) {
                     auto [tag, val] = deserializeValue(buf, collator);
-                    arr->push_back(tag, val);
+                    arr->push_back_raw(tag, val);
                 }
             }
             tag = arrTag;
@@ -161,7 +136,7 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
             if (cnt) {
                 for (size_t idx = 0; idx < cnt; ++idx) {
                     auto [tag, val] = deserializeValue(buf, collator);
-                    arr->push_back(tag, val);
+                    arr->push_back_raw(tag, val);
                 }
             }
             tag = arrTag;
@@ -177,7 +152,7 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
                 for (size_t idx = 0; idx < cnt; ++idx) {
                     auto fieldName = buf.readCStr();
                     auto [tag, val] = deserializeValue(buf, collator);
-                    obj->push_back(fieldName, tag, val);
+                    obj->push_back_raw(fieldName, tag, val);
                 }
             }
             tag = objTag;
@@ -330,8 +305,8 @@ static void serializeValue(BufBuilder& buf, TypeTags tag, Value val) {
             auto arr = getArrayView(val);
             buf.appendNum(arr->size());
             for (size_t idx = 0; idx < arr->size(); ++idx) {
-                auto [tag, val] = arr->getAt(idx);
-                serializeValue(buf, tag, val);
+                auto tagVal = arr->getAt(idx);
+                serializeValue(buf, tagVal.tag, tagVal.value);
             }
             break;
         }
@@ -348,8 +323,8 @@ static void serializeValue(BufBuilder& buf, TypeTags tag, Value val) {
             buf.appendNum(obj->size());
             for (size_t idx = 0; idx < obj->size(); ++idx) {
                 buf.appendCStr(obj->field(idx));
-                auto [tag, val] = obj->getAt(idx);
-                serializeValue(buf, tag, val);
+                auto tagVal = obj->getAt(idx);
+                serializeValue(buf, tagVal.tag, tagVal.value);
             }
             break;
         }
@@ -441,7 +416,7 @@ static void serializeValueIntoKeyString(key_string::Builder& buf,
                                         Value val,
                                         const CollatorInterface* collator) {
 
-    const auto stringTransformFn = [&](StringData stringData) {
+    const auto stringTransformFn = [&](std::string_view stringData) {
         return collator->getComparisonString(stringData);
     };
 
@@ -648,7 +623,7 @@ void RowBase<RowType>::deserializeForSorterIntoRow(BufReader& buf,
     }
     for (size_t idx = 0; idx < cnt; ++idx) {
         auto [tag, val] = deserializeValue(buf, settings.collator);
-        row.reset(idx, true, tag, val);
+        row.reset(idx, TagValueOwned::fromRaw(tag, val));
     }
 }
 
@@ -702,152 +677,6 @@ RowType RowBase<RowType>::deserializeFromKeyString(const key_string::Value& keyS
     RowType result{sizeOfRow};
     valBuilder.readValues(result);
 
-    return result;
-}
-
-int getApproximateSize(TypeTags tag, Value val) {
-    int result = sizeof(tag) + sizeof(val);
-    switch (tag) {
-        // These are shallow types.
-        case TypeTags::Nothing:
-        case TypeTags::Null:
-        case TypeTags::NumberInt32:
-        case TypeTags::NumberInt64:
-        case TypeTags::NumberDouble:
-        case TypeTags::Date:
-        case TypeTags::Timestamp:
-        case TypeTags::Boolean:
-        case TypeTags::StringSmall:
-        case TypeTags::MinKey:
-        case TypeTags::MaxKey:
-        case TypeTags::bsonUndefined:
-        case TypeTags::LocalOneArgLambda:
-        case TypeTags::LocalTwoArgLambda:
-            break;
-        // There are deep types.
-        case TypeTags::RecordId:
-            result += getRecordIdView(val)->memUsage();
-            break;
-        case TypeTags::NumberDecimal:
-            result += sizeof(Decimal128);
-            break;
-        case TypeTags::StringBig:
-        case TypeTags::bsonString: {
-            result += sizeof(uint32_t) + getStringLength(tag, val) + sizeof(char);
-            break;
-        }
-        case TypeTags::bsonSymbol:
-            result += sizeof(uint32_t) + getStringOrSymbolView(tag, val).size() + sizeof(char);
-            break;
-        case TypeTags::Array: {
-            auto arr = getArrayView(val);
-            result += sizeof(*arr);
-            for (size_t idx = 0; idx < arr->size(); ++idx) {
-                auto [tag, val] = arr->getAt(idx);
-                result += getApproximateSize(tag, val);
-            }
-            break;
-        }
-        case TypeTags::ArraySet: {
-            auto arr = getArraySetView(val);
-            result += sizeof(*arr);
-            for (auto& kv : arr->values()) {
-                result += getApproximateSize(kv.first, kv.second);
-            }
-            break;
-        }
-        case TypeTags::ArrayMultiSet: {
-            auto arr = getArrayMultiSetView(val);
-            result += sizeof(*arr);
-            for (auto& kv : arr->values()) {
-                result += getApproximateSize(kv.first, kv.second);
-            }
-            break;
-        }
-        case TypeTags::Object: {
-            auto obj = getObjectView(val);
-            result += sizeof(*obj);
-            for (size_t idx = 0; idx < obj->size(); ++idx) {
-                result += obj->field(idx).size();
-                auto [tag, val] = obj->getAt(idx);
-                result += getApproximateSize(tag, val);
-            }
-            break;
-        }
-        case TypeTags::MultiMap: {
-            auto multiMap = getMultiMapView(val);
-            result += sizeof(*multiMap);
-            for (auto& [key, value] : multiMap->values()) {
-                result += getApproximateSize(key.first, key.second);
-                result += getApproximateSize(value.first, value.second);
-            }
-            break;
-        }
-        case TypeTags::ObjectId:
-        case TypeTags::bsonObjectId:
-            result += sizeof(ObjectIdType);
-            break;
-        case TypeTags::bsonObject:
-        case TypeTags::bsonArray: {
-            auto ptr = getRawPointerView(val);
-            result += ConstDataView(ptr).read<LittleEndian<uint32_t>>();
-            break;
-        }
-        case TypeTags::bsonBinData:
-            // The 32-bit 'length' at the beginning of a BinData does _not_ account for the
-            // 'length' field itself or the 'subtype' field, so we account for that here.
-            result += sizeof(uint32_t) + sizeof(char) +
-                ConstDataView(getRawPointerView(val)).read<LittleEndian<uint32_t>>();
-            break;
-        case TypeTags::keyString: {
-            auto ks = getKeyString(val);
-            result += ks->getSerializedSize();
-            break;
-        }
-        case TypeTags::bsonRegex: {
-            auto regex = getBsonRegexView(val);
-            result += regex.byteSize();
-            break;
-        }
-        case TypeTags::bsonJavascript: {
-            auto code = getBsonJavascriptView(val);
-            result += sizeof(uint32_t) + code.size() + sizeof(char);
-            break;
-        }
-        case TypeTags::bsonDBPointer:
-            result += getBsonDBPointerView(val).byteSize();
-            break;
-        case TypeTags::bsonCodeWScope:
-            // CodeWScope's 'length' field accounts for the full length of the CodeWScope
-            // including the 'length' field itself.
-            result += ConstDataView(getRawPointerView(val)).read<LittleEndian<uint32_t>>();
-            break;
-        case TypeTags::timeZoneDB:
-            // This type points to a block of memory that it doesn't own, so we don't acccount
-            // for the size of this block of memory here.
-            break;
-        case TypeTags::timeZone:
-            // The timezone obj stores an offset counter, and a pointer to a timelib struct
-            // which it doesn't own, so we don't need to account for the timelib obj.
-            result += sizeof(TimeZone);
-            break;
-        case TypeTags::collator:
-        case TypeTags::inList:
-            // This type points to a block of memory that it doesn't own, so we don't acccount
-            // for the size of this block of memory here.
-            break;
-        case TypeTags::pcreRegex:
-        case TypeTags::jsFunction:
-        case TypeTags::shardFilterer:
-        case TypeTags::ftsMatcher:
-        case TypeTags::sortSpec:
-        case TypeTags::makeObjSpec:
-        case TypeTags::indexBounds:
-            result += getExtendedTypeOps(tag)->getApproximateSize(val);
-            break;
-        default:
-            MONGO_UNREACHABLE_TASSERT(11122917);
-    }
     return result;
 }
 

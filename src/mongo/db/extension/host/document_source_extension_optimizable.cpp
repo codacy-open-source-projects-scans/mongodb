@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/host/document_source_extension_optimizable.h"
 
+#include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/db/extension/host/document_source_extension_for_query_shape.h"
 #include "mongo/db/extension/host/extension_search_server_status.h"
@@ -37,7 +12,7 @@
 #include "mongo/db/extension/host_connector/adapter/pipeline_dependencies_adapter.h"
 #include "mongo/db/extension/host_connector/adapter/pipeline_rewrite_context_adapter.h"
 #include "mongo/db/extension/host_connector/adapter/query_execution_context_adapter.h"
-#include "mongo/db/extension/host_connector/adapter/view_info_adapter.h"
+#include "mongo/db/extension/host_connector/adapter/resolved_namespace_adapter.h"
 #include "mongo/db/extension/public/api.h"
 #include "mongo/db/extension/shared/handle/aggregation_stage/stage_descriptor.h"
 #include "mongo/db/extension/shared/handle/pipeline_rewrite_context_handle.h"
@@ -45,9 +20,15 @@
 #include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/search/vector_search_helper.h"
+#include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
+#include "mongo/db/pipeline/visitors/document_source_visitor_registry.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
+
 namespace mongo::extension::host {
+using namespace std::literals::string_view_literals;
 
 ALLOCATE_STAGE_PARAMS_ID(expandable, ExpandableStageParams::id);
 
@@ -58,8 +39,10 @@ DocumentSourceContainer expandableStageParamsToDocumentSourceFn(
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     auto* expandableParams = static_cast<ExpandableStageParams*>(stageParams.get());
     auto parseNode = expandableParams->releaseParseNode();
+    auto originalStage = expandableParams->releaseOriginalStage();
 
-    return {DocumentSourceExtensionForQueryShape::create(expCtx, std::move(parseNode))};
+    return {DocumentSourceExtensionForQueryShape::create(
+        expCtx, std::move(parseNode), std::move(originalStage))};
 }
 
 REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(expandable,
@@ -82,12 +65,12 @@ public:
     ExpansionValidationFrame(ExpansionState& state, std::string stageName)
         : _state(state), _stageName(std::move(stageName)) {
         const auto newDepth = _state.currDepth + 1;
-        tassert(10955800,
+        tassert(ErrorCodes::ExtensionError,
                 str::stream() << "Stage expansion exceeded maximum depth of " << kMaxExpansionDepth,
                 newDepth <= kMaxExpansionDepth);
 
         const auto inserted = _state.seenStages.insert(_stageName).second;
-        tassert(10955801,
+        tassert(ErrorCodes::ExtensionError,
                 str::stream() << "Cycle detected during stage expansion for stage " << _stageName
                               << ": " << _formatCyclePath(_state, _stageName),
                 inserted);
@@ -120,7 +103,7 @@ private:
         }
 
         StringBuilder sb;
-        constexpr StringData arrow = " -> "_sd;
+        constexpr std::string_view arrow = " -> "sv;
         // Construct the path starting from the first occurrence.
         for (size_t i = start; i < state.expansionPath.size(); ++i) {
             if (i > start) {
@@ -165,11 +148,7 @@ LiteParsedList DocumentSourceExtensionOptimizable::LiteParsedExpandable::expandI
             outExpanded.splice(outExpanded.end(), children);
         },
         [&](const HostAggStageAstNodeAdapter& hostAst) {
-            const auto& spec = hostAst.getIdLookupSpec();
-            auto fullStageBson = BSON(hostAst.getStageName() << spec.toBSON());
-            auto lpds = LiteParsedDocumentSource::parse(nss, fullStageBson, options);
-            lpds->makeOwned();
-            outExpanded.emplace_back(std::move(lpds));
+            outExpanded.emplace_back(hostAst.expandToLiteParsed(nss, options));
         },
         [&](AggStageAstNodeHandle handle) {
             outExpanded.emplace_back(std::make_unique<LiteParsedExpanded>(
@@ -190,34 +169,32 @@ LiteParsedDesugarer::StageExpander
             return pipeline->replaceStageWith(index, std::move(expanded));
         };
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(RegisterStageExpanderForLiteParsedExtensionExpandable,
-                                     ("EndStageIdAllocation"))
-(InitializerContext*) {
-    tassert(11533001,
-            "ExpandableStageParams::id must be allocated before registering expander",
-            ExpandableStageParams::id != StageParams::kUnallocatedId);
-    LiteParsedDesugarer::registerStageExpander(
-        ExpandableStageParams::id,
-        DocumentSourceExtensionOptimizable::LiteParsedExpandable::stageExpander);
-}
+REGISTER_LITE_PARSED_DESUGARER_STAGE_EXPANDER(
+    extensionExpandable,
+    ExpandableStageParams::id,
+    DocumentSourceExtensionOptimizable::LiteParsedExpandable::stageExpander);
 
-// TODO SERVER-116021 Remove this check when the extension can do this through bindViewInfo().
+// TODO SERVER-121094 Remove this check when the extension can do this through
+// bindResolvedNamespace().
 bool DocumentSourceExtensionOptimizable::LiteParsedExpandable::hasExtensionVectorSearchStage()
     const {
     return search_helpers::isExtensionVectorSearchStage(getParseTimeName());
 }
 
-// TODO SERVER-116021 Remove this check when the extension can do this through bindViewInfo().
+// TODO SERVER-121094 Remove this check when the extension can do this through
+// bindResolvedNamespace().
 bool DocumentSourceExtensionOptimizable::LiteParsedExpandable::hasExtensionSearchStage() const {
     return search_helpers::isExtensionSearchStage(getParseTimeName());
 }
 
-// TODO SERVER-116021 Remove this check when the extension can do this through bindViewInfo().
+// TODO SERVER-121094 Remove this check when the extension can do this through
+// bindResolvedNamespace().
 bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::hasExtensionVectorSearchStage() const {
     return search_helpers::isExtensionVectorSearchStage(getParseTimeName());
 }
 
-// TODO SERVER-116021 Remove this check when the extension can do this through bindViewInfo().
+// TODO SERVER-121094 Remove this check when the extension can do this through
+// bindResolvedNamespace().
 bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::hasExtensionSearchStage() const {
     return search_helpers::isExtensionSearchStage(getParseTimeName());
 }
@@ -227,8 +204,14 @@ DocumentSourceExtensionOptimizable::LiteParsedExpanded::getFirstStageViewApplica
     return view_util::toFirstStageApplicationPolicy(_astNode->getFirstStageViewApplicationPolicy());
 }
 
-void DocumentSourceExtensionOptimizable::LiteParsedExpanded::bindViewInfo(
-    const ViewInfo& viewInfo, const ResolvedNamespaceMap& resolvedNamespaces) {
+void DocumentSourceExtensionOptimizable::LiteParsedExpanded::bindResolvedNamespace(
+    const ResolvedNamespace& view, const ResolvedNamespaceMap& resolvedNamespaces) {
+    if (view.getNamespace().isEmpty()) {
+        // An empty view namespace means this stage is being notified that its pipeline is *not*
+        // running on a view. Skip the view-policy checks and the SDK bindResolvedNamespace handoff.
+        // TODO SERVER-125741 Enable extensions to bind to non-top-level involved namespaces.
+        return;
+    }
     auto hybridSearchFlagEnabled = _ifrContext &&
         _ifrContext->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
     if (!hybridSearchFlagEnabled) {
@@ -252,13 +235,14 @@ void DocumentSourceExtensionOptimizable::LiteParsedExpanded::bindViewInfo(
             "$search/$searchMeta-as-an-extension are not allowed against views.");
     }
 
-    auto viewInfoAdapter = host_connector::ViewInfoAdapter::fromViewInfo(viewInfo);
-    _astNode->bindViewInfo(viewInfoAdapter.getAsBoundaryType());
+    auto resolvedNamespaceAdapter =
+        host_connector::ResolvedNamespaceAdapter::fromResolvedNamespace(view);
+    _astNode->bindResolvedNamespace(resolvedNamespaceAdapter.getAsBoundaryType());
 }
 
 bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::isRankedStage() const {
     const auto& provided = _properties.getProvidedMetadataFields();
-    if (!provided.has_value() || provided->empty()) {
+    if (!provided || provided->empty()) {
         return false;
     }
     return std::find(provided->begin(),
@@ -269,11 +253,21 @@ bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::isRankedStage() con
 
 bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::isScoredStage() const {
     const auto& provided = _properties.getProvidedMetadataFields();
-    if (!provided.has_value() || provided->empty()) {
+    if (!provided || provided->empty()) {
         return false;
     }
     return std::any_of(
         provided->begin(), provided->end(), DocumentMetadataFields::isScoreProducingMetaType);
+}
+
+bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::isScoreDetailsStage() const {
+    const auto& provided = _properties.getProvidedMetadataFields();
+    if (!provided || provided->empty()) {
+        return false;
+    }
+    return std::any_of(provided->begin(),
+                       provided->end(),
+                       DocumentMetadataFields::isScoreDetailsProducingMetaType);
 }
 
 bool DocumentSourceExtensionOptimizable::LiteParsedExpanded::isSelectionStage() const {
@@ -302,17 +296,14 @@ void DocumentSourceExtensionOptimizable::registerStage(AggStageDescriptorHandle 
         {.parser = std::move(parser),
          .fromExtension = true,
          .allowedWithApiStrict = AllowedWithApiStrict::kAlways,
-         .allowedWithClientType = AllowedWithClientType::kAny});
+         .allowedWithClientType =
+             descriptor_util::toAllowedWithClientType(descriptor->getClientType())});
 }
 
 ALLOCATE_DOCUMENT_SOURCE_ID(extensionOptimizable, DocumentSourceExtensionOptimizable::id);
 
-Value DocumentSourceExtensionOptimizable::serialize(const SerializationOptions& opts) const {
-    tassert(11217800,
-            "SerializationOptions should keep literals unchanged while represented as a "
-            "DocumentSourceExtensionOptimizable",
-            opts.isKeepingLiteralsUnchanged());
-
+Value DocumentSourceExtensionOptimizable::serialize(
+    const query_shape::SerializationOptions& opts) const {
     if (opts.isSerializingForExplain()) {
         auto wrappedCtx = std::make_unique<QueryExecutionContext>(getExpCtx().get());
         host_connector::QueryExecutionContextAdapter ctxAdapter(std::move(wrappedCtx));
@@ -332,7 +323,7 @@ StageConstraints DocumentSourceExtensionOptimizable::constraints(
                          DiskUseRequirement::kNoDiskUse,
                          FacetRequirement::kNotAllowed,
                          TransactionRequirement::kNotAllowed,
-                         LookupRequirement::kNotAllowed,
+                         LookupRequirement::kAllowed,
                          UnionRequirement::kAllowed,
                          ChangeStreamRequirement::kDenylist);
     constraints.canRunOnTimeseries = false;
@@ -350,10 +341,12 @@ StageConstraints DocumentSourceExtensionOptimizable::constraints(
     if (!_properties.getAllowedInUnionWith()) {
         constraints.unionRequirement = StageConstraints::UnionRequirement::kNotAllowed;
     }
-    // TODO SERVER-117259 Enable extension stages in $lookup; change the default back to 'kAllowed'.
-    // if (!_properties.getAllowedInLookup()) {
-    //     constraints.lookupRequirement = StageConstraints::LookupRequirement::kNotAllowed;
-    // }
+    auto ifrCtx = getExpCtx()->getIfrContext();
+    const bool hybridSearchFlagEnabled = ifrCtx &&
+        ifrCtx->getSavedFlagValue(feature_flags::gFeatureFlagExtensionsInsideHybridSearch);
+    if (!_properties.getAllowedInLookup() || !hybridSearchFlagEnabled) {
+        constraints.lookupRequirement = StageConstraints::LookupRequirement::kNotAllowed;
+    }
 
     // TODO SERVER-117260 Enable extension stages in $facet; change the default back to 'kAllowed'.
     // if (!_properties.getAllowedInFacet()) {
@@ -368,17 +361,22 @@ DocumentSource::Id DocumentSourceExtensionOptimizable::getId() const {
 }
 
 DepsTracker::State DocumentSourceExtensionOptimizable::getDependencies(DepsTracker* deps) const {
-    auto processFields = [](const auto& fields, auto&& apply) {
+    auto processFields = [&](const auto& fields, auto propertyName, auto&& apply) {
         if (fields.has_value()) {
             for (const auto& fieldName : *fields) {
-                auto metaType = DocumentMetadataFields::parseMetaType(fieldName);
-                apply(metaType);
+                uassert(12489100,
+                        str::stream() << "Extension stage '" << getSourceName() << "' declared '"
+                                      << fieldName << "' in " << propertyName
+                                      << ", which is not a recognized metadata field",
+                        DocumentMetadataFields::isValidMetaType(fieldName));
+                apply(DocumentMetadataFields::parseMetaType(fieldName));
             }
         }
     };
 
     // Report required metadata fields for this stage.
     processFields(_properties.getRequiredMetadataFields(),
+                  "requiredMetadataFields",
                   [&](auto metaType) { deps->setNeedsMetadata(metaType); });
 
     // Drop upstream metadata fields if this stage does not preserve them.
@@ -389,6 +387,7 @@ DepsTracker::State DocumentSourceExtensionOptimizable::getDependencies(DepsTrack
 
     // Report provided metadata fields for this stage.
     processFields(_properties.getProvidedMetadataFields(),
+                  "providedMetadataFields",
                   [&](auto metaType) { deps->setMetadataAvailable(metaType); });
 
     // Return SEE_NEXT to ensure metadata dependencies are propagated to the pipeline.
@@ -419,7 +418,7 @@ DocumentSourceExtensionOptimizable::distributedPlanLogic(const DistributedPlanCo
 
                         // Validate that the host parse node does not contain an extension stage.
                         auto stageName = bsonSpec.firstElementFieldNameStringData();
-                        uassert(11882000,
+                        tassert(ErrorCodes::ExtensionError,
                                 str::stream() << "Extension stage '" << getSourceName()
                                               << "' returned an invalid distributedPlanLogic: the "
                                                  "host parse node contains extension stage '"
@@ -438,7 +437,7 @@ DocumentSourceExtensionOptimizable::distributedPlanLogic(const DistributedPlanCo
                     // originating stage. Because of this assumption, we can pass in the static
                     // properties from the originating stage. Otherwise we would not have access to
                     // the new stage's properties here, since they live on the ASTNode.
-                    uassert(11513800,
+                    tassert(ErrorCodes::ExtensionError,
                             "an extension logical stage in a distributed plan pipeline must be the "
                             "same type as its originating stage",
                             dplLogicalStage->getName() == _logicalStage->getName());
@@ -454,11 +453,11 @@ DocumentSourceExtensionOptimizable::distributedPlanLogic(const DistributedPlanCo
     // Convert shardsPipeline.
     auto shardsPipeline = dplHandle->extractShardsPipeline();
     if (!shardsPipeline.empty()) {
-        tassert(11420601,
+        tassert(ErrorCodes::ExtensionError,
                 "Shards pipeline must have exactly one element per API specification",
                 shardsPipeline.size() == 1);
         auto shardsStages = convertDPLHandleToDocumentSources(shardsPipeline[0]);
-        tassert(11420602,
+        tassert(ErrorCodes::ExtensionError,
                 "Single shardsStage must expand to exactly one DocumentSource",
                 shardsStages.size() == 1);
         logic.shardsStage = shardsStages.front();
@@ -475,16 +474,13 @@ DocumentSourceExtensionOptimizable::distributedPlanLogic(const DistributedPlanCo
     const auto sortPattern = dplHandle->getSortPattern();
     if (!sortPattern.isEmpty()) {
         logic.mergeSortPattern = sortPattern.getOwned();
-    }
-
-    // For source stages (no input required), the DPL sort pattern is the only sort order the
-    // merging pipeline will observe. It must match what the stage declares via getSortPattern()
-    // so the optimizer can reason about it correctly.
-    if (!_properties.getRequiresInputDocSource()) {
-        tassert(12327102,
-                str::stream() << "Source extension stage '" << getSourceName()
-                              << "': DPL sortPattern must equal getSortPattern()",
-                sortPattern.woCompare(_logicalStage->getSortPattern()) == 0);
+        uassert(12489101,
+                str::stream() << "Extension stage '" << getSourceName()
+                              << "' returned a distributedPlanLogic with a merge sort pattern but "
+                                 "does not declare sortKey in its providedMetadataFields; a stage "
+                                 "that produces a merge sort pattern must also provide sortKey "
+                                 "metadata on every document",
+                providesSortKeyMetadata());
     }
 
     return logic;
@@ -495,20 +491,24 @@ boost::intrusive_ptr<DocumentSourceExtensionOptimizable> DocumentSourceExtension
     const AggStageParseNodeHandle& parseNodeHandle) {
     auto expanded = parseNodeHandle->expand();
 
-    tassert(
-        11623000, "Expected parseNode to only expand into a single node.", expanded.size() == 1);
+    tassert(ErrorCodes::ExtensionError,
+            "Expected parseNode to only expand into a single node.",
+            expanded.size() == 1);
 
     boost::intrusive_ptr<DocumentSourceExtensionOptimizable> optimizable = nullptr;
     helper::visitExpandedNodes(
         expanded,
         [&](const HostAggStageParseNodeAdapter& host) {
-            tasserted(11623001, "Expected extension AST node, got host parse node.");
+            tasserted(ErrorCodes::ExtensionError,
+                      "Expected extension AST node, got host parse node.");
         },
         [&](const AggStageParseNodeHandle& handle) {
-            tasserted(11623002, "Expected extension AST node, got extension parse node.");
+            tasserted(ErrorCodes::ExtensionError,
+                      "Expected extension AST node, got extension parse node.");
         },
         [&](const HostAggStageAstNodeAdapter& hostAst) {
-            tasserted(11623003, "Expected extension AST node, got host AST node.");
+            tasserted(ErrorCodes::ExtensionError,
+                      "Expected extension AST node, got host AST node.");
         },
         [&](AggStageAstNodeHandle handle) {
             optimizable = DocumentSourceExtensionOptimizable::create(expCtx, std::move(handle));
@@ -535,9 +535,7 @@ std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceExtensionOptimizab
             outExpanded.splice(outExpanded.end(), children);
         },
         [&](const HostAggStageAstNodeAdapter& hostAst) {
-            const auto& spec = hostAst.getIdLookupSpec();
-            auto fullStageBson = BSON(hostAst.getStageName() << spec.toBSON());
-            outExpanded.splice(outExpanded.end(), DocumentSource::parse(expCtx, fullStageBson));
+            outExpanded.splice(outExpanded.end(), hostAst.expandToDocumentSource(expCtx));
         },
         [&](AggStageAstNodeHandle handle) {
             outExpanded.emplace_back(
@@ -566,21 +564,12 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceExtensionOptimizable::clone(
 
 DocumentSourceContainer::iterator DocumentSourceExtensionOptimizable::optimizeAt(
     DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
-    // TODO SERVER-123972: Only apply the sort optimization when featureFlagExtensionsOptimizations
-    // is disabled.
-
-    // Attempt to remove a $sort on metadata if the extension stage is sorted by vector
-    // search score.
-    if (_logicalStage->isSortedByVectorSearchScore_deprecated()) {
-        if (auto result = search_helpers::applyVectorSearchSortOptimization(itr, container)) {
-            return *result;
-        }
+    // The REDUNDANT_SORT_REMOVAL rule takes care of $extensionVectorSearch's desired $sort
+    // optimization.
+    if (!feature_flags::gFeatureFlagExtensionsOptimizations.isEnabled()) {
+        _limit = search_helpers::setVectorSearchLimitForOptimization(itr, container, _limit);
+        _logicalStage->setExtractedLimitVal_deprecated(_limit);
     }
-
-    // TODO SERVER-122005: Only apply the limit optimization when featureFlagExtensionsOptimizations
-    // is disabled.
-    _limit = search_helpers::setVectorSearchLimitForOptimization(itr, container, _limit);
-    _logicalStage->setExtractedLimitVal_deprecated(_limit);
     return std::next(itr);
 }
 
@@ -589,19 +578,19 @@ stdx::unordered_map<std::string, std::vector<PipelineRewriteRule>>
 
 // static
 void DocumentSourceExtensionOptimizable::registerStageRules(
-    StringData stageName, const std::vector<extension::PipelineRewriteRule>& rules) {
+    std::string_view stageName, const std::vector<extension::PipelineRewriteRule>& rules) {
     auto [_, inserted] = _extensionRuleRegistry.emplace(stageName, rules);
     tassert(12201405, "Rules already registered for stage: " + std::string{stageName}, inserted);
 }
 
 // static
-void DocumentSourceExtensionOptimizable::unregisterStageRules_forTest(StringData stageName) {
+void DocumentSourceExtensionOptimizable::unregisterStageRules_forTest(std::string_view stageName) {
     _extensionRuleRegistry.erase(std::string_view(stageName));
 }
 
 // static
 const std::vector<PipelineRewriteRule>* DocumentSourceExtensionOptimizable::getStageRules_forTest(
-    StringData stageName) {
+    std::string_view stageName) {
     auto it = _extensionRuleRegistry.find(std::string_view(stageName));
     if (it == _extensionRuleRegistry.end()) {
         return nullptr;
@@ -641,6 +630,12 @@ void DocumentSourceExtensionOptimizable::applyPipelineSuffixDependencies(
     _logicalStage->applyPipelineSuffixDependencies(&deps);
 }
 
+void DocumentSourceExtensionOptimizable::applyPipelineSuffixDependencies(
+    const DepsTracker& deps, const std::set<std::string>& builtinVarRefs) {
+    const host_connector::PipelineDependenciesAdapter adapter(deps, builtinVarRefs);
+    applyPipelineSuffixDependencies(adapter);
+}
+
 bool extensionDispatcherReorderingPrecondition(
     rule_based_rewrites::pipeline::PipelineRewriteContext& ctx) {
     const auto* stage = dynamic_cast<const DocumentSourceExtensionOptimizable*>(&ctx.current());
@@ -664,7 +659,7 @@ bool extensionApplyDependenciesPrecondition(
 
 bool extensionApplyDependenciesTransform(
     rule_based_rewrites::pipeline::PipelineRewriteContext& ctx) {
-    auto* stage = dynamic_cast<DocumentSourceExtensionOptimizable*>(&ctx.current());
+    auto* stage = checked_cast<DocumentSourceExtensionOptimizable*>(&ctx.current());
     const host_connector::PipelineDependenciesAdapter adapter(
         ctx.getPipelineSuffixDependencies(), ctx.getBuiltInVariableRefsInPipelineSuffix());
     stage->applyPipelineSuffixDependencies(adapter);
@@ -697,9 +692,74 @@ REGISTER_RULES_WITH_FEATURE_FLAG(
         .name = "EXTENSION_APPLY_PIPELINE_SUFFIX_DEPENDENCIES",
         .precondition = mongo::extension::host::extensionApplyDependenciesPrecondition,
         .transform = mongo::extension::host::extensionApplyDependenciesTransform,
-        .priority = kDefaultOptimizeInPlacePriority,
+        .priority = kDefaultOptimizeInPlacePriority + 1,
         .tags = PipelineRewriteContext::Tags::InPlace,
     });
 REGISTER_RULES(DocumentSourceExtensionOptimizable,
                OPTIMIZE_AT_RULE(DocumentSourceExtensionOptimizable));
 }  // namespace mongo::rule_based_rewrites::pipeline
+
+// The DocsNeededBounds visitor function definitions and their registration live here rather than
+// in docs_needed_bounds_visitor, to avoid a circular BUILD dependency:
+//   docs_needed_bounds_visitor → extension_host → host_adapters → docs_needed_bounds_visitor
+// Defining and registering from extension_host means only binaries that link extension_host (e.g.
+// mongod) pay the typeinfo cost; binaries like dbtest that link docs_needed_bounds_visitor but not
+// extension_host compile and link cleanly.
+namespace mongo {
+const ServiceContext::ConstructorActionRegisterer extensionDocsNeededBoundsVisitorRegisterer{
+    "ExtensionDocsNeededBoundsVisitorRegisterer", [](ServiceContext* service) {
+        auto& registry = getDocumentSourceVisitorRegistry(service);
+        registry.registerVisitorFunc<DocsNeededBoundsContext,
+                                     extension::host::DocumentSourceExtensionOptimizable>(
+            &visit<DocsNeededBoundsContext, extension::host::DocumentSourceExtensionOptimizable>);
+        registry.registerVisitorFunc<DocsNeededBoundsContext,
+                                     extension::host::DocumentSourceExtensionForQueryShape>(
+            &visit<DocsNeededBoundsContext, extension::host::DocumentSourceExtensionForQueryShape>);
+    }};
+
+namespace {
+void applyDocsNeededBoundsEffect(DocsNeededBoundsContext* ctx,
+                                 extension::MongoExtensionDocsNeededBoundsEffectEnum effect,
+                                 boost::optional<std::int64_t> value) {
+    using namespace mongo;
+    // The IDL validator validateDocsNeededBoundsInfo guarantees that 'value' is set iff 'effect' is
+    // kLimit or kSkip, so the dereferences below are safe.
+    using Effect = extension::MongoExtensionDocsNeededBoundsEffectEnum;
+    switch (effect) {
+        case Effect::kUnknown:
+            ctx->applyUnknownStage();
+            return;
+        case Effect::kBlocking:
+            ctx->applyBlockingStage();
+            return;
+        case Effect::kPossibleDecrease:
+            ctx->applyPossibleDecreaseStage();
+            return;
+        case Effect::kPossibleIncrease:
+            ctx->applyPossibleIncreaseStage();
+            return;
+        case Effect::kNoEffect:
+            return;
+        case Effect::kLimit:
+            ctx->applyLimit(*value);
+            return;
+        case Effect::kSkip:
+            ctx->applySkip(*value);
+            return;
+    }
+    MONGO_UNREACHABLE;
+}
+}  // namespace
+
+void visitExtensionStage(DocsNeededBoundsContext* ctx,
+                         const extension::host::DocumentSourceExtensionOptimizable& source) {
+    auto boundsInfo = source.getDocsNeededBounds();
+    if (!boundsInfo) {
+        // Default to unknown bounds.
+        ctx->applyUnknownStage();
+        return;
+    }
+
+    applyDocsNeededBoundsEffect(ctx, boundsInfo->getEffect(), boundsInfo->getValue());
+}
+}  // namespace mongo

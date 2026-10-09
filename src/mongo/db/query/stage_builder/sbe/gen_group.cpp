@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
 #include "mongo/db/query/expression_walker.h"
@@ -45,9 +19,10 @@ namespace mongo::stage_builder {
 namespace {
 
 template <typename F>
-struct FieldPathAndCondPreVisitor : public SelectiveConstExpressionVisitorBase {
+struct FieldPathAndCondPreVisitor
+    : public SelectiveConstExpressionVisitorBase<FieldPathAndCondPreVisitor<F>> {
     // To avoid overloaded-virtual warnings.
-    using SelectiveConstExpressionVisitorBase::visit;
+    using SelectiveConstExpressionVisitorBase<FieldPathAndCondPreVisitor<F>>::visit;
 
     explicit FieldPathAndCondPreVisitor(const F& fn) : _fn(fn) {}
 
@@ -747,8 +722,9 @@ boost::optional<SbBlockAggExprVector> tryToGenerateOneBlockAccumulator(
  * exit.
  */
 auto makeValueGuard(auto* dst, auto val) {
-    return ScopeGuard{
-        [dst, old = std::exchange(*dst, std::move(val))]() mutable { *dst = std::move(old); }};
+    return ScopeGuard{[dst, old = std::exchange(*dst, std::move(val))]() mutable {
+        *dst = std::move(old);
+    }};
 }
 
 SbHashAggAccumulatorVector generateScalarAccumulators(StageBuilderState& state,
@@ -1020,6 +996,7 @@ std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> buil
     const auto& accStmts = groupNode.accumulators;  // explicit accs in the original query
 
     std::vector<SbSlotVector> aggSlotsVec;
+    aggSlotsVec.reserve(accStmts.size());
     auto groupOutSlotsIt = groupOutSlots.begin();
 
     for (size_t idxAcc = 0; idxAcc < accStmts.size(); ++idxAcc) {
@@ -1401,10 +1378,17 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroup(const Query
     childReqs.setCanProcessBlockValues(!childReqs.hasResult());
 
     auto [childStage, childOutputs] = build(childNode, childReqs);
-    auto stage = std::move(childStage);
 
-    // Build the group stage in a separate helper method, so that the variables that are not needed
-    // to setup the recursive call to build() don't consume precious stack.
+    return buildGroupFinalizeOutputs(
+        reqs, groupNode, std::move(childStage), std::move(childOutputs));
+}
+
+MONGO_COMPILER_NOINLINE
+std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroupFinalizeOutputs(
+    const PlanStageReqs& reqs,
+    const GroupNode* groupNode,
+    SbStage stage,
+    PlanStageSlots childOutputs) {
     auto [outStage, fieldNames, finalSlots, outputs] =
         buildGroupImpl(std::move(stage), reqs, std::move(childOutputs), groupNode);
     stage = std::move(outStage);
@@ -1438,7 +1422,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroup(const Query
         const auto& reqEffects = reqs.getResultInfoEffects();
 
         // Get the effects of this $group stage.
-        effects = getQsnInfo(root).effects;
+        effects = getQsnInfo(groupNode).effects;
 
         bool canParticipate = false;
         if (effects) {
@@ -1476,11 +1460,11 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroup(const Query
     }
 
     return {std::move(stage), std::move(outputs)};
-}  // SlotBasedStageBuilder::buildGroup
+}
 
 /**
- * This function is called by buildGroup(), and it plus its helpers buildGroupImplBlock() and
- * buildGroupImplScalar() contain most of the implementation for $group.
+ * This function is called by buildGroupFinalizeOutputs(), and it plus its helpers
+ * buildGroupImplBlock() and buildGroupImplScalar() contain most of the implementation for $group.
  *
  * It takes the GroupNode, the child's SBE stage tree, and the PlanStageSlots generated by the child
  * as input, and it returns a tuple containing the updated SBE stage tree, a list of output field
@@ -1543,8 +1527,7 @@ SlotBasedStageBuilder::buildGroupImplBlock(SbStage stage,  // moved in
     // - Query uses a collator
     // - Any accumulator does not support block mode
     // - Any accumulator has a variable (i.e. non-null, non-constant) initializer expression
-    if ((!feature_flags::gFeatureFlagSbeFull.isEnabled() &&
-         !feature_flags::gFeatureFlagSbeBlockHashAgg.isEnabled()) ||
+    if ((!feature_flags::gFeatureFlagSbeBlockHashAgg.isEnabled()) ||
         !childOutputs.hasBlockOutput() || _state.getCollatorSlot() ||
         !accsSupportBlockMode(groupNode) || hasVariableAccInit(groupNode)) {
         // Aborting. Move 'stage' back out to caller.
@@ -1793,4 +1776,10 @@ SlotBasedStageBuilder::buildGroupImplScalar(SbStage stage,  // moved in
                                 std::move(accumulatorList),
                                 *groupNode);
 }  // SlotBasedStageBuilder::buildGroupImplScalar
+
+std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildStreamingGroup(
+    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    tassert(13600700, "buildStreamingGroup() is not implemented yet", false);
+    MONGO_UNREACHABLE;
+}
 }  // namespace mongo::stage_builder

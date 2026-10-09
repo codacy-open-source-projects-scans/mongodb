@@ -1,39 +1,17 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/convert_utils.h"
 #include "mongo/db/exec/expression/evaluate.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 
 #include <bit>
 #include <cstring>
+#include <string_view>
 
 #include <boost/optional.hpp>
 
@@ -62,14 +40,24 @@ ValueUnorderedMap<std::vector<int>> arrayToIndexMap(const Value& val,
     return indexMap;
 }
 
-Value evaluate(const ExpressionArray& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     std::vector<Value> values;
     values.reserve(children.size());
+
+    BatchedExpressionMemoryCharger memCharger(expr, ctx);
+
     for (auto&& child : children) {
-        Value elemVal = child->evaluate(root, variables);
-        values.push_back(elemVal.missing() ? Value(BSONNULL) : std::move(elemVal));
+        Value elemVal = child->evaluate(root, variables, ctx);
+        Value& stored =
+            values.emplace_back(elemVal.missing() ? Value(BSONNULL) : std::move(elemVal));
+
+        memCharger.add(static_cast<int64_t>(stored.getApproximateSize()));
     }
+    memCharger.flush();
     return Value(std::move(values));
 }
 
@@ -107,28 +95,40 @@ Value arrayElemAt(const ExpressionNary& self, Value array, Value indexArg) {
 }
 }  // namespace
 
-Value evaluate(const ExpressionArrayElemAt& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArrayElemAt& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value array = children[0]->evaluate(root, variables);
-    const Value indexArg = children[1]->evaluate(root, variables);
+    const Value array = children[0]->evaluate(root, variables, ctx);
+    const Value indexArg = children[1]->evaluate(root, variables, ctx);
     return arrayElemAt(expr, array, indexArg);
 }
 
-Value evaluate(const ExpressionFirst& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionFirst& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value array = children[0]->evaluate(root, variables);
+    const Value array = children[0]->evaluate(root, variables, ctx);
     return arrayElemAt(expr, array, Value(0));
 }
 
-Value evaluate(const ExpressionLast& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionLast& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value array = children[0]->evaluate(root, variables);
+    const Value array = children[0]->evaluate(root, variables, ctx);
     return arrayElemAt(expr, array, Value(-1));
 }
 
-Value evaluate(const ExpressionObjectToArray& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionObjectToArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value targetVal = children[0]->evaluate(root, variables);
+    const Value targetVal = children[0]->evaluate(root, variables, ctx);
 
     if (targetVal.nullish()) {
         return Value(BSONNULL);
@@ -153,9 +153,12 @@ Value evaluate(const ExpressionObjectToArray& expr, const Document& root, Variab
     return Value(std::move(output));
 }
 
-Value evaluate(const ExpressionArrayToObject& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionArrayToObject& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value input = children[0]->evaluate(root, variables);
+    const Value input = children[0]->evaluate(root, variables, ctx);
     if (input.nullish()) {
         return Value(BSONNULL);
     }
@@ -259,25 +262,36 @@ Value evaluate(const ExpressionArrayToObject& expr, const Document& root, Variab
     return output.freezeToValue();
 }
 
-Value evaluate(const ExpressionConcatArrays& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionConcatArrays& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     const size_t n = children.size();
     std::vector<Value> values;
 
+    BatchedExpressionMemoryCharger memCharger(expr, ctx);
+
     for (size_t i = 0; i < n; ++i) {
-        Value val = children[i]->evaluate(root, variables);
+        Value val = children[i]->evaluate(root, variables, ctx);
         if (val.nullish()) {
             return Value(BSONNULL);
         }
 
         uassert(28664,
-                str::stream() << "$concatArrays only supports arrays, not "
+                str::stream() << expr.getOpName() << " only supports arrays, not "
                               << typeName(val.getType()),
                 val.isArray());
 
         const auto& subValues = val.getArray();
+        size_t valuesSize = 0;
+        for (const auto& v : subValues) {
+            valuesSize += v.getApproximateSize();
+        }
         values.insert(values.end(), subValues.begin(), subValues.end());
+        memCharger.add(static_cast<int64_t>(valuesSize));
     }
+    memCharger.flush();
     return Value(std::move(values));
 }
 
@@ -293,8 +307,8 @@ struct Arguments {
 };
 
 void uassertIfNotIntegralAndNonNegative(Value val,
-                                        StringData expressionName,
-                                        StringData argumentName) {
+                                        std::string_view expressionName,
+                                        std::string_view argumentName) {
     uassert(9711600,
             str::stream() << expressionName << "requires an integral " << argumentName
                           << ", found a value of type: " << typeName(val.getType())
@@ -318,11 +332,12 @@ Arguments evaluateAndValidateArguments(const ExpressionIndexOfArray& expr,
                                        const Document& root,
                                        const Expression::ExpressionVector& operands,
                                        size_t arrayLength,
-                                       Variables* variables) {
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) {
 
     int startIndex = 0;
     if (operands.size() > 2) {
-        Value startIndexArg = operands[2]->evaluate(root, variables);
+        Value startIndexArg = operands[2]->evaluate(root, variables, ctx);
         uassertIfNotIntegralAndNonNegative(startIndexArg, expr.getOpName(), "starting index");
 
         startIndex = startIndexArg.coerceToInt();
@@ -330,19 +345,22 @@ Arguments evaluateAndValidateArguments(const ExpressionIndexOfArray& expr,
 
     int endIndex = arrayLength;
     if (operands.size() > 3) {
-        Value endIndexArg = operands[3]->evaluate(root, variables);
+        Value endIndexArg = operands[3]->evaluate(root, variables, ctx);
         uassertIfNotIntegralAndNonNegative(endIndexArg, expr.getOpName(), "ending index");
         // Don't let 'endIndex' exceed the length of the array.
 
         endIndex = std::min(static_cast<int>(arrayLength), endIndexArg.coerceToInt());
     }
-    return {operands[1]->evaluate(root, variables), startIndex, endIndex};
+    return {operands[1]->evaluate(root, variables, ctx), startIndex, endIndex};
 }
 }  // namespace
 
-Value evaluate(const ExpressionIndexOfArray& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionIndexOfArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value arrayArg = children[0]->evaluate(root, variables);
+    Value arrayArg = children[0]->evaluate(root, variables, ctx);
 
     if (arrayArg.nullish()) {
         return Value(BSONNULL);
@@ -354,7 +372,7 @@ Value evaluate(const ExpressionIndexOfArray& expr, const Document& root, Variabl
             arrayArg.isArray());
 
     const std::vector<Value>& array = arrayArg.getArray();
-    auto args = evaluateAndValidateArguments(expr, root, children, array.size(), variables);
+    auto args = evaluateAndValidateArguments(expr, root, children, array.size(), variables, ctx);
 
     if (expr.getParsedIndexMap()) {
         auto indexVec = expr.getParsedIndexMap()->find(args.targetOfSearch);
@@ -382,15 +400,21 @@ Value evaluate(const ExpressionIndexOfArray& expr, const Document& root, Variabl
     return Value(-1);
 }
 
-Value evaluate(const ExpressionIsArray& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionIsArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value argument = children[0]->evaluate(root, variables);
+    Value argument = children[0]->evaluate(root, variables, ctx);
     return Value(argument.isArray());
 }
 
-Value evaluate(const ExpressionReverseArray& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionReverseArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value input(children[0]->evaluate(root, variables));
+    Value input(children[0]->evaluate(root, variables, ctx));
 
     if (input.nullish()) {
         return Value(BSONNULL);
@@ -410,8 +434,11 @@ Value evaluate(const ExpressionReverseArray& expr, const Document& root, Variabl
     return Value(std::move(array));
 }
 
-Value evaluate(const ExpressionSortArray& expr, const Document& root, Variables* variables) {
-    Value input(expr.getInput()->evaluate(root, variables));
+Value evaluate(const ExpressionSortArray& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value input(expr.getInput()->evaluate(root, variables, ctx));
 
     if (input.nullish()) {
         return Value(BSONNULL);
@@ -427,13 +454,49 @@ Value evaluate(const ExpressionSortArray& expr, const Document& root, Variables*
     }
 
     std::vector<Value> array = input.getArray();
-    std::sort(array.begin(), array.end(), expr.getSortBy());
-    return Value(std::move(array));
+    const PatternValueCmp& cmp = expr.getSortBy();
+
+    if (cmp.useWholeValue) {
+        std::sort(array.begin(), array.end(), cmp);
+        return Value(std::move(array));
+    }
+
+    // Pre-extract sort keys once per element rather than re-extracting inside the comparator on
+    // every comparison. Each extraction requires a Value->BSONObj conversion and dotted-path
+    // traversal, which dominates sort cost for pattern-based sorts on arrays of objects.
+    BatchedExpressionMemoryCharger memCharger(expr, ctx, ExpressionSortArray::kName);
+    // Note that we use an ordinary int for the array indexes rather than a size_t here.
+    // We get a solid 5% bump in performance with a 32-bit int, which seems worth it
+    // given that arrays larger than INT_MAX are too large to fit in a BSON document.
+    static_assert(BSONObjMaxUserSize <= std::numeric_limits<int>::max());
+    std::vector<std::pair<BSONObj, int>> keysAndIdx;
+    keysAndIdx.reserve(array.size());
+    for (int i = 0; i < std::ssize(array); ++i) {
+        auto key = cmp.extractSortKey(array[i]);
+        int64_t keySize = static_cast<int64_t>(key.objsize() + sizeof(int));
+        keysAndIdx.emplace_back(std::move(key), i);
+        memCharger.add(keySize);
+    }
+    memCharger.flush();
+
+    std::sort(keysAndIdx.begin(), keysAndIdx.end(), [&](const auto& a, const auto& b) {
+        return a.first.woCompare(b.first, cmp.sortPattern, false, cmp.collator) < 0;
+    });
+
+    std::vector<Value> sorted;
+    sorted.reserve(array.size());
+    for (const auto& [_, i] : keysAndIdx) {
+        sorted.push_back(std::move(array[i]));
+    }
+    return Value(std::move(sorted));
 }
 
-Value evaluate(const ExpressionTopN& expr, const Document& root, Variables* variables) {
-    Value nVal(expr.getN()->evaluate(root, variables));
-    Value input(expr.getInput()->evaluate(root, variables));
+Value evaluate(const ExpressionTopN& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value nVal(expr.getN()->evaluate(root, variables, ctx));
+    Value input(expr.getInput()->evaluate(root, variables, ctx));
 
     if (nVal.nullish() || input.nullish()) {
         return Value(BSONNULL);
@@ -471,8 +534,11 @@ Value evaluate(const ExpressionTopN& expr, const Document& root, Variables* vari
     return Value(std::move(array));
 }
 
-Value evaluate(const ExpressionTop& expr, const Document& root, Variables* variables) {
-    Value input(expr.getInput()->evaluate(root, variables));
+Value evaluate(const ExpressionTop& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value input(expr.getInput()->evaluate(root, variables, ctx));
 
     if (input.nullish()) {
         return Value(BSONNULL);
@@ -494,9 +560,12 @@ Value evaluate(const ExpressionTop& expr, const Document& root, Variables* varia
     return *minIt;
 }
 
-Value evaluate(const ExpressionBottomN& expr, const Document& root, Variables* variables) {
-    Value nVal(expr.getN()->evaluate(root, variables));
-    Value input(expr.getInput()->evaluate(root, variables));
+Value evaluate(const ExpressionBottomN& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value nVal(expr.getN()->evaluate(root, variables, ctx));
+    Value input(expr.getInput()->evaluate(root, variables, ctx));
 
     if (nVal.nullish() || input.nullish()) {
         return Value(BSONNULL);
@@ -539,8 +608,11 @@ Value evaluate(const ExpressionBottomN& expr, const Document& root, Variables* v
     return Value(std::move(array));
 }
 
-Value evaluate(const ExpressionBottom& expr, const Document& root, Variables* variables) {
-    Value input(expr.getInput()->evaluate(root, variables));
+Value evaluate(const ExpressionBottom& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value input(expr.getInput()->evaluate(root, variables, ctx));
 
     if (input.nullish()) {
         return Value(BSONNULL);
@@ -587,10 +659,13 @@ bool setEqualsHelper(const ValueFlatUnorderedSet& lhs,
 
 }  // namespace
 
-Value evaluate(const ExpressionSetDifference& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSetDifference& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value lhs = children[0]->evaluate(root, variables);
-    const Value rhs = children[1]->evaluate(root, variables);
+    const Value lhs = children[0]->evaluate(root, variables, ctx);
+    const Value rhs = children[1]->evaluate(root, variables, ctx);
 
     if (lhs.nullish() || rhs.nullish()) {
         return Value(BSONNULL);
@@ -619,13 +694,16 @@ Value evaluate(const ExpressionSetDifference& expr, const Document& root, Variab
     return Value(std::move(returnVec));
 }
 
-Value evaluate(const ExpressionSetEquals& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSetEquals& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     const size_t n = children.size();
     const auto& valueComparator = expr.getExpressionContext()->getValueComparator();
 
     auto evaluateChild = [&](size_t index) {
-        const Value entry = children[index]->evaluate(root, variables);
+        const Value entry = children[index]->evaluate(root, variables, ctx);
         uassert(17044,
                 str::stream() << "All operands of $setEquals must be arrays. " << (index + 1)
                               << "-th argument is of type: " << typeName(entry.getType()),
@@ -652,13 +730,16 @@ Value evaluate(const ExpressionSetEquals& expr, const Document& root, Variables*
     return Value(true);
 }
 
-Value evaluate(const ExpressionSetIntersection& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSetIntersection& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     const size_t n = children.size();
     const auto& valueComparator = expr.getExpressionContext()->getValueComparator();
     ValueSet currentIntersection = valueComparator.makeOrderedValueSet();
     for (size_t i = 0; i < n; i++) {
-        const Value nextEntry = children[i]->evaluate(root, variables);
+        const Value nextEntry = children[i]->evaluate(root, variables, ctx);
         if (nextEntry.nullish()) {
             return Value(BSONNULL);
         }
@@ -705,9 +786,12 @@ Value setIsSubsetHelper(const std::vector<Value>& lhs, const ValueFlatUnorderedS
 
 }  // namespace
 
-Value evaluate(const ExpressionSetIsSubset& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSetIsSubset& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    const Value lhs = children[0]->evaluate(root, variables);
+    const Value lhs = children[0]->evaluate(root, variables, ctx);
 
     uassert(17046,
             str::stream() << "both operands of $setIsSubset must be arrays. First "
@@ -717,7 +801,7 @@ Value evaluate(const ExpressionSetIsSubset& expr, const Document& root, Variable
     if (expr.getCachedRhsSet()) {
         return setIsSubsetHelper(lhs.getArray(), *expr.getCachedRhsSet());
     } else {
-        const Value rhs = children[1]->evaluate(root, variables);
+        const Value rhs = children[1]->evaluate(root, variables, ctx);
         uassert(17042,
                 str::stream() << "both operands of $setIsSubset must be arrays. Second "
                               << "argument is of type: " << typeName(rhs.getType()),
@@ -729,22 +813,40 @@ Value evaluate(const ExpressionSetIsSubset& expr, const Document& root, Variable
     }
 }
 
-Value evaluate(const ExpressionSetUnion& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSetUnion& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     ValueSet unionedSet = expr.getExpressionContext()->getValueComparator().makeOrderedValueSet();
     auto& children = expr.getChildren();
     const size_t n = children.size();
+
+    BatchedExpressionMemoryCharger memCharger(expr, ctx);
+
     for (size_t i = 0; i < n; i++) {
-        const Value newEntries = children[i]->evaluate(root, variables);
+        const Value newEntries = children[i]->evaluate(root, variables, ctx);
         if (newEntries.nullish()) {
             return Value(BSONNULL);
         }
+
         uassert(17043,
-                str::stream() << "All operands of $setUnion must be arrays. One argument"
-                              << " is of type: " << typeName(newEntries.getType()),
+                str::stream() << "All operands of " << expr.getOpName()
+                              << " must be arrays. One argument is of type: "
+                              << typeName(newEntries.getType()),
                 newEntries.isArray());
 
+        // Count all elements including duplicates already in the set, to keep the bulk insert
+        // below on the hot path. This overestimates memory for inputs with many duplicates but
+        // avoids the ~15% overhead of per-element tracking and insertion.
+        size_t newEntriesSize = 0;
+        for (const auto& v : newEntries.getArray()) {
+            newEntriesSize += v.getApproximateSize();
+        }
+
+        memCharger.add(static_cast<int64_t>(newEntriesSize));
         unionedSet.insert(newEntries.getArray().begin(), newEntries.getArray().end());
     }
+    memCharger.flush();
     return Value(std::vector<Value>(unionedSet.begin(), unionedSet.end()));
 }
 
@@ -755,7 +857,9 @@ namespace {
  * For arrays, borrows directly from the Value (zero-copy). For binData vectors,
  * converts into 'buf' and returns a reference to it.
  */
-const std::vector<Value>& toArray(const Value& val, std::vector<Value>& buf, StringData opName) {
+const std::vector<Value>& toArray(const Value& val,
+                                  std::vector<Value>& buf,
+                                  std::string_view opName) {
     if (val.isArray()) {
         return val.getArray();
     }
@@ -773,17 +877,19 @@ using convert_utils::BinDataVectorView;
 using convert_utils::dType;
 using convert_utils::parseBinDataVector;
 
-static_assert(std::endian::native == std::endian::little,
-              "Vector similarity BinData fast path assumes little-endian platform");
-
 /*
- * Read a float from a potentially-unaligned byte pointer. All MongoDB target platforms are
- * little-endian, matching BSON vector storage order, so no byte-swap is needed.
+ * Read a float from a potentially-unaligned byte pointer. BSON vector storage is
+ * little-endian, so on little-endian targets no byte-swap is needed; big-endian
+ * targets fall back to the portable reader.
  */
 inline float readFloat(const std::byte* p) {
-    float f;
-    std::memcpy(&f, p, sizeof(float));
-    return f;
+    if constexpr (std::endian::native == std::endian::little) {
+        float f;
+        std::memcpy(&f, p, sizeof(float));
+        return f;
+    } else {
+        return ConstDataView(reinterpret_cast<const char*>(p)).read<LittleEndian<float>>();
+    }
 }
 
 /*
@@ -1011,7 +1117,7 @@ auto dispatchDtype(dType d, F&& f) {
 template <SimilarityAlgorithm Algo>
 boost::optional<double> tryBinDataSimilarity(const Value& val1,
                                              const Value& val2,
-                                             StringData opName) {
+                                             std::string_view opName) {
     if (val1.getType() != BSONType::binData || val2.getType() != BSONType::binData) {
         return boost::none;
     }
@@ -1068,7 +1174,7 @@ boost::optional<double> tryBinDataSimilarity(const Value& val1,
  */
 void validate(const std::vector<Value>& array1,
               const std::vector<Value>& array2,
-              StringData opName) {
+              std::string_view opName) {
     uassert(10413202,
             str::stream() << "Arguments to " << opName
                           << " must be the same size, but the first is of size "
@@ -1185,10 +1291,11 @@ double normalize(double v) {
 template <SimilarityAlgorithm Algo>
 Value evaluateSimilarity(const ExpressionVectorSimilarity& expr,
                          const Document& root,
-                         Variables* variables) {
+                         Variables* variables,
+                         const EvaluationContext& ctx) {
     const auto& children = expr.getChildren();
-    const Value val1 = children[0]->evaluate(root, variables);
-    const Value val2 = children[1]->evaluate(root, variables);
+    const Value val1 = children[0]->evaluate(root, variables, ctx);
+    const Value val2 = children[1]->evaluate(root, variables, ctx);
 
     if (val1.nullish() || val2.nullish()) {
         return Value(BSONNULL);
@@ -1215,27 +1322,35 @@ Value evaluateSimilarity(const ExpressionVectorSimilarity& expr,
 
 Value evaluate(const ExpressionSimilarityDotProduct& expr,
                const Document& root,
-               Variables* variables) {
-    return evaluateSimilarity<SimilarityAlgorithm::DotProduct>(expr, root, variables);
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSimilarity<SimilarityAlgorithm::DotProduct>(expr, root, variables, ctx);
 }
 
-Value evaluate(const ExpressionSimilarityCosine& expr, const Document& root, Variables* variables) {
-    return evaluateSimilarity<SimilarityAlgorithm::Cosine>(expr, root, variables);
+Value evaluate(const ExpressionSimilarityCosine& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSimilarity<SimilarityAlgorithm::Cosine>(expr, root, variables, ctx);
 }
 
 Value evaluate(const ExpressionSimilarityEuclidean& expr,
                const Document& root,
-               Variables* variables) {
-    return evaluateSimilarity<SimilarityAlgorithm::Euclidean>(expr, root, variables);
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    return evaluateSimilarity<SimilarityAlgorithm::Euclidean>(expr, root, variables, ctx);
 }
 
-Value evaluate(const ExpressionSlice& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSlice& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
     const size_t n = children.size();
 
-    Value arrayVal = children[0]->evaluate(root, variables);
+    Value arrayVal = children[0]->evaluate(root, variables, ctx);
     // Could be either a start index or the length from 0.
-    Value arg2 = children[1]->evaluate(root, variables);
+    Value arg2 = children[1]->evaluate(root, variables, ctx);
 
     if (arrayVal.nullish() || arg2.nullish()) {
         return Value(BSONNULL);
@@ -1283,7 +1398,7 @@ Value evaluate(const ExpressionSlice& expr, const Document& root, Variables* var
             start = std::min(array.size(), size_t(startInt));
         }
 
-        Value countVal = children[2]->evaluate(root, variables);
+        Value countVal = children[2]->evaluate(root, variables, ctx);
 
         if (countVal.nullish()) {
             return Value(BSONNULL);
@@ -1309,9 +1424,12 @@ Value evaluate(const ExpressionSlice& expr, const Document& root, Variables* var
     return Value(std::vector<Value>(array.begin() + start, array.begin() + end));
 }
 
-Value evaluate(const ExpressionSize& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSize& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value array = children[0]->evaluate(root, variables);
+    Value array = children[0]->evaluate(root, variables, ctx);
 
     uassert(17124,
             str::stream() << "The argument to $size must be an array, but was of type: "
@@ -1320,24 +1438,31 @@ Value evaluate(const ExpressionSize& expr, const Document& root, Variables* vari
     return Value::createIntOrLong(array.getArray().size());
 }
 
-Value evaluate(const ExpressionZip& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionZip& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     // Evaluate input values.
     std::vector<std::vector<Value>> inputValues;
     auto& inputs = expr.getInputs();
     inputValues.reserve(inputs.size());
 
+    BatchedExpressionMemoryCharger memCharger(expr, ctx);
+
     size_t minArraySize = 0;
     size_t maxArraySize = 0;
     for (size_t i = 0; i < inputs.size(); i++) {
-        Value evalExpr = inputs[i].get()->evaluate(root, variables);
+        Value evalExpr = inputs[i].get()->evaluate(root, variables, ctx);
         if (evalExpr.nullish()) {
             return Value(BSONNULL);
         }
 
         uassert(34468,
-                str::stream() << "$zip found a non-array expression in input: "
-                              << evalExpr.toString(),
+                str::stream() << expr.getOpName()
+                              << " found a non-array expression in input: " << evalExpr.toString(),
                 evalExpr.isArray());
+
+        memCharger.add(static_cast<int64_t>(evalExpr.getApproximateSize()));
 
         inputValues.push_back(evalExpr.getArray());
 
@@ -1352,16 +1477,26 @@ Value evaluate(const ExpressionZip& expr, const Document& root, Variables* varia
             maxArraySize = arraySizes.second;
         }
     }
+    Value evaluatedDefaults(std::vector<Value>(inputs.size(), Value(BSONNULL)));
 
-    std::vector<Value> evaluatedDefaults(inputs.size(), Value(BSONNULL));
-
-    // If we need default values, evaluate each expression.
-    if (minArraySize != maxArraySize) {
-        auto& defaults = expr.getDefaults();
-        for (size_t i = 0; i < defaults.size(); i++) {
-            evaluatedDefaults[i] = defaults[i].get()->evaluate(root, variables);
+    // If we need default values, evaluate the defaults expression. A nullish result is treated
+    // the same as absent defaults, so each missing input element falls back to null.
+    if (minArraySize != maxArraySize && expr.getDefaults()) {
+        Value evaluated = expr.getDefaults()->get()->evaluate(root, variables, ctx);
+        if (!evaluated.nullish()) {
+            uassert(10961500,
+                    str::stream() << expr.getOpName()
+                                  << " defaults must resolve to an array, but the expression "
+                                     "evaluated to "
+                                  << evaluated.toString(),
+                    evaluated.isArray());
+            uassert(10961501,
+                    "defaults and inputs must have the same length",
+                    evaluated.getArrayLength() == inputs.size());
+            evaluatedDefaults = evaluated;
         }
     }
+    memCharger.add(static_cast<int64_t>(evaluatedDefaults.getApproximateSize()));
 
     size_t outputLength = expr.getUseLongestLength() ? maxArraySize : minArraySize;
 
@@ -1371,6 +1506,23 @@ Value evaluate(const ExpressionZip& expr, const Document& root, Variables* varia
     // Used to construct each array in the output, e.g. [1, 2, 3].
     std::vector<Value> outputChild;
 
+    // Track the memory for the output and outputChild vectors. Per-element tracking is
+    // unnecessary: large heap-allocated values (strings, arrays, documents) were already
+    // accounted for when evaluating inputs and defaults above, and a copy merely bumps
+    // their ref-count. Inline scalars are bounded by sizeof(Value) per slot.
+
+    // outputChild memory usage
+    memCharger.add(static_cast<int64_t>(inputs.size()) * static_cast<int64_t>(sizeof(Value)));
+    // Per-row output memory: one Value slot in the outer vector, one RCVector<Value> heap
+    // allocation, and inputs.size() Value slots inside it.
+    // Total: outputLength * (sizeof(Value) + sizeof(RCVector<Value>) + inputs.size() *
+    // sizeof(Value))
+    memCharger.add(static_cast<int64_t>(outputLength) *
+                   (static_cast<int64_t>(sizeof(Value) + sizeof(RCVector<Value>)) +
+                    static_cast<int64_t>(inputs.size()) * static_cast<int64_t>(sizeof(Value))));
+    // Flush here to make sure all memory has been accounted for before reserving the output
+    // vectors.
+    memCharger.flush();
     output.reserve(outputLength);
     outputChild.reserve(inputs.size());
 

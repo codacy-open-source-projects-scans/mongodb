@@ -11,7 +11,6 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // The following checks involve talking to the config server, which is shut down in this test
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
@@ -43,7 +42,11 @@ jsTest.log("Config nodes up: 3 of 3, shard nodes up: 2 of 2: " + "Insert test da
 assert.commandWorked(
     st.s0
         .getDB("TestDB")
-        .TestColl.update({_id: 0}, {$inc: {count: 1}}, {upsert: true, writeConcern: {w: 2, wtimeout: 30000}}),
+        .TestColl.update(
+            {_id: 0},
+            {$inc: {count: 1}},
+            {upsert: true, writeConcern: {w: 2, wtimeout: 30000}},
+        ),
 );
 count += 1;
 assert.eq([{_id: 0, count}], st.s0.getDB("TestDB").TestColl.find().toArray());
@@ -59,26 +62,39 @@ if (TestData.configShard) {
 assert.commandWorked(
     st.s0
         .getDB("TestDB")
-        .TestColl.update({_id: 0}, {$inc: {count: 1}}, {upsert: true, writeConcern: {w: 2, wtimeout: 30000}}),
+        .TestColl.update(
+            {_id: 0},
+            {$inc: {count: 1}},
+            {upsert: true, writeConcern: {w: 2, wtimeout: 30000}},
+        ),
 );
 count += 1;
 assert.eq([{_id: 0, count}], st.s0.getDB("TestDB").TestColl.find().toArray());
 
 if (!TestData.configShard) {
     // For a config shard, the config server is the shard, so we can't have a different number up.
-    jsTest.log("Config nodes up: 1 of 3, shard nodes up: 2 of 2: " + "Inserts and queries must work");
+    jsTest.log(
+        "Config nodes up: 1 of 3, shard nodes up: 2 of 2: " + "Inserts and queries must work",
+    );
     st.configRS.stop(1, undefined /* signal */, stopOpts, {forRestart: true});
     st.restartMongos(0);
     assert.commandWorked(
         st.s0
             .getDB("TestDB")
-            .TestColl.update({_id: 0}, {$inc: {count: 1}}, {upsert: true, writeConcern: {w: 2, wtimeout: 30000}}),
+            .TestColl.update(
+                {_id: 0},
+                {$inc: {count: 1}},
+                {upsert: true, writeConcern: {w: 2, wtimeout: 30000}},
+            ),
     );
     count += 1;
     assert.eq([{_id: 0, count}], st.s0.getDB("TestDB").TestColl.find().toArray());
 }
 
-jsTest.log("Config nodes up: 1 of 3, shard nodes up: 1 of 2: " + "Only queries will work (no shard primary)");
+jsTest.log(
+    "Config nodes up: 1 of 3, shard nodes up: 1 of 2: " +
+        "Only queries will work (no shard primary)",
+);
 st.rs0.stop(0, undefined /* signal */, stopOpts);
 st.restartMongos(0);
 st.s0.setSecondaryOk();
@@ -98,7 +114,8 @@ if (!TestData.configShard) {
 }
 
 jsTest.log(
-    "Config nodes up: 0 of 3, shard nodes up: 0 of 2: " + "Metadata cannot be loaded at all, no operations will work",
+    "Config nodes up: 0 of 3, shard nodes up: 0 of 2: " +
+        "Metadata cannot be loaded at all, no operations will work",
 );
 if (!TestData.configShard) {
     st.configRS.stop(2, undefined /* signal */, stopOpts);

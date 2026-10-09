@@ -38,10 +38,15 @@ const configPrimary = st.configRS.getPrimary();
 
 const dbName = "testDb";
 const testDb = st.s.getDB(dbName);
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 
 // Feature is FCV-gated, so effective state is cluster-wide; one node is enough (config primary).
-const cloneNoRefreshEnabled = FeatureFlagUtil.isPresentAndEnabled(configPrimary, "ReshardingCloneNoRefresh");
+const cloneNoRefreshEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    configPrimary,
+    "ReshardingCloneNoRefresh",
+);
 const noRefreshApplyingAndBlockingWritesEnabled = FeatureFlagUtil.isPresentAndEnabled(
     configPrimary,
     "ReshardingNoRefreshApplyingAndBlockingWrites",
@@ -66,7 +71,10 @@ function configureFailPointToBlockCommand(node, cmdName, numSkips) {
 }
 
 function testCriticalSectionTimeoutWhileWaiting(cmdName, numSkips) {
-    jsTest.log("Test resharding critical section timeout while coordinator is waiting for responses for " + cmdName);
+    jsTest.log(
+        "Test resharding critical section timeout while coordinator is waiting for responses for " +
+            cmdName,
+    );
 
     const collName = "testColl" + testNum++;
     const ns = dbName + "." + collName;
@@ -90,7 +98,10 @@ function testCriticalSectionTimeoutWhileWaiting(cmdName, numSkips) {
     const moveThread = new Thread(runMoveCollection, st.s.host, ns, st.shard1.shardName);
     moveThread.start();
     moveThread.join();
-    assert.commandFailedWithCode(moveThread.returnData(), ErrorCodes.ReshardingCriticalSectionTimeout);
+    assert.commandFailedWithCode(
+        moveThread.returnData(),
+        ErrorCodes.ReshardingCriticalSectionTimeout,
+    );
 
     fp.off();
     assert.commandWorked(
@@ -102,7 +113,9 @@ function testCriticalSectionTimeoutWhileWaiting(cmdName, numSkips) {
 }
 
 function testAbortWhileWaiting(cmdName, numSkips) {
-    jsTest.log("Test aborting resharding while coordinator is waiting for responses for " + cmdName);
+    jsTest.log(
+        "Test aborting resharding while coordinator is waiting for responses for " + cmdName,
+    );
 
     const collName = "testColl" + testNum++;
     const ns = dbName + "." + collName;
@@ -128,28 +141,26 @@ function testAbortWhileWaiting(cmdName, numSkips) {
     fp.off();
 }
 
-// When featureFlagReshardingCloneNoRefresh is off, coordinator sends _flushReshardingStateChange
-// to donors in kApplying and kBlockingWrites (2 calls); use 2 skips to block the critical-section
-// one. When the flag is on, coordinator only sends to donors in kApplying and kBlockingWrites
-// but the cloning refresh is skipped, so we use 1 skip to block the kBlockingWrites flush.
-let expectedFlushCount = 2;
-if (cloneNoRefreshEnabled) {
-    expectedFlushCount -= 1;
-}
-if (noRefreshApplyingAndBlockingWritesEnabled) {
-    // TODO SERVER-124256: Instead of decrementing the flush count here, we should block on the newly added command instead of _flushReshardingStateChange when this feature flag is enabled.
-    expectedFlushCount -= 1;
-}
-const cmdsToBlock = [
-    {
+// Determine which command to block in order to stall the coordinator during the critical section
+// (kBlockingWrites). When featureFlagReshardingNoRefreshApplyingAndBlockingWrites is on, the
+// coordinator sends '_shardsvrReshardDonorCriticalSectionStarted' to donors instead of
+// '_flushReshardingStateChange', so we block on that command directly.
+//
+// When that flag is off, the coordinator sends '_flushReshardingStateChange' to donors in both
+// kApplying and kBlockingWrites, plus once during cloning when featureFlagReshardingCloneNoRefresh
+// is off. We therefore skip the first calls to _flushReshardingStateChange, which occur before the
+// critical section, and block on the one that occurs during the critical section.
+const criticalSectionDonorBlock = (() => {
+    if (noRefreshApplyingAndBlockingWritesEnabled) {
+        return {cmdName: "_shardsvrReshardDonorCriticalSectionStarted", numSkips: 0};
+    }
+    return {
         cmdName: "_flushReshardingStateChange",
-        numSkips: expectedFlushCount,
-    },
-    {
-        cmdName: "_shardsvrReshardingDonorFetchFinalCollectionStats",
-        // No skipping.
-        numSkips: 0,
-    },
+        numSkips: cloneNoRefreshEnabled ? 1 : 2,
+    };
+})();
+const cmdsToBlock = [
+    criticalSectionDonorBlock,
     {
         cmdName: "_shardsvrReshardRecipientCriticalSectionStarted",
         // No skipping.

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/storage_engine_impl.h"
 
@@ -40,6 +14,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <string_view>
 
 namespace mongo {
 namespace {
@@ -127,7 +102,7 @@ TEST_F(TimestampKVEngineTest, TimestampMonitorRunning) {
     if (!_storageEngine->getEngine()->supportsRecoveryTimestamp())
         return;
 
-    ASSERT_TRUE(_storageEngine->getTimestampMonitor()->isRunning_forTestOnly());
+    EXPECT_TRUE(_storageEngine->getTimestampMonitor()->isRunning_forTestOnly());
 }
 
 TEST_F(TimestampKVEngineTest, TimestampListeners) {
@@ -200,7 +175,7 @@ TEST_F(TimestampKVEngineTest, TimestampMonitorNotifiesListeners) {
 
 TEST_F(TimestampKVEngineTest, TimestampAdvancesOnNotification) {
     Timestamp previous = Timestamp();
-    AtomicWord<int> timesNotified{0};
+    Atomic<int> timesNotified{0};
 
     TimestampListener listener([&](OperationContext* opCtx, const Timestamps& timestamps) {
         ASSERT_TRUE(previous < timestamps.stable);
@@ -224,10 +199,10 @@ public:
     MOCK_METHOD(Status,
                 dropIdent,
                 (RecoveryUnit & ru,
-                 StringData ident,
+                 std::string_view ident,
                  bool identHasSizeInfo,
-                 const StorageEngine::DropIdentCallback& onDrop,
-                 boost::optional<uint64_t> schemaEpoch),
+                 boost::optional<uint64_t> schemaEpoch,
+                 bool),
                 (override));
 };
 
@@ -287,14 +262,14 @@ TEST_F(StorageEngineImplTest, DropIdentTimestampedPassesTimestampToKVEngine) {
 
     EXPECT_CALL(*_mockKVEngine, dropIdent)
         .WillOnce([&](RecoveryUnit& calledRu,
-                      StringData calledIdent,
+                      std::string_view calledIdent,
                       bool identHasSizeInfo,
-                      const StorageEngine::DropIdentCallback& onDrop,
-                      boost::optional<uint64_t> schemaEpoch) {
-            ASSERT_EQ(calledIdent, StringData{ident});
+                      boost::optional<uint64_t> schemaEpoch,
+                      bool waitForLocks) {
+            ASSERT_EQ(calledIdent, std::string_view{ident});
             ASSERT_EQ(identHasSizeInfo, ident::isCollectionIdent(calledIdent));
-            ASSERT_FALSE(static_cast<bool>(onDrop));
             ASSERT_EQ(schemaEpoch, expectedSchemaEpoch);
+            ASSERT_TRUE(waitForLocks);
             return Status::OK();
         });
 
@@ -305,14 +280,14 @@ TEST_F(StorageEngineImplTest, DropIdentTimestampedPassesTimestampToKVEngine) {
                                         std::make_shared<Ident>(ident));
     EXPECT_CALL(*_mockKVEngine, dropIdent)
         .WillOnce([&](RecoveryUnit& calledRu,
-                      StringData calledIdent,
+                      std::string_view calledIdent,
                       bool identHasSizeInfo,
-                      const StorageEngine::DropIdentCallback& onDrop,
-                      boost::optional<uint64_t> schemaEpoch) {
-            ASSERT_EQ(calledIdent, StringData{ident});
+                      boost::optional<uint64_t> schemaEpoch,
+                      bool waitForLocks) {
+            ASSERT_EQ(calledIdent, std::string_view{ident});
             ASSERT_EQ(identHasSizeInfo, ident::isCollectionIdent(calledIdent));
-            ASSERT_FALSE(static_cast<bool>(onDrop));
             ASSERT_EQ(schemaEpoch, expectedSchemaEpoch);
+            ASSERT_TRUE(waitForLocks);
             return Status(ErrorCodes::OperationFailed, "Mock KV engine dropIdent failed.");
         });
 

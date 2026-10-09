@@ -2,6 +2,7 @@
  * Tests dbHash collisions in WT with full validation.
  * dbHash should not experience races on data, or EBUSY errors in the storage engine.
  * @tags: [
+ *   assumes_against_mongod_not_mongos,
  *   requires_persistence,
  *   requires_wiredtiger,
  *   requires_replication,
@@ -18,14 +19,21 @@ export const $config = (function () {
         dbHash: function (db, collName) {
             jsTestLog("dbHash: " + db + "." + collName + " tid: " + this.tid);
             let opTime = assert.commandWorked(
-                db.runCommand({insert: collName, documents: [{x: 1}], writeConcern: {w: "majority"}}),
+                db.runCommand({
+                    insert: collName,
+                    documents: [{x: 1}],
+                    writeConcern: {w: "majority"},
+                }),
             ).operationTime;
             jsTestLog("dbHash opTime:" + tojson(opTime));
             jsTestLog("dbHash begin opTime:" + tojson(opTime));
             let dbHashRes = assert.commandWorked(
                 db.collName.runCommand({
                     dbHash: 1,
-                    readConcern: {level: "snapshot", atClusterTime: Timestamp(opTime["t"], opTime["i"])},
+                    readConcern: {
+                        level: "snapshot",
+                        atClusterTime: Timestamp(opTime["t"], opTime["i"]),
+                    },
                 }),
             );
             jsTestLog("dbHash done" + dbHashRes.timeMillis);

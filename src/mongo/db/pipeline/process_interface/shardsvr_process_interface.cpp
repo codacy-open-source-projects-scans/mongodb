@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -72,6 +45,7 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <typeinfo>
 #include <utility>
 
@@ -136,7 +110,10 @@ void writeToLocalShard(OperationContext* opCtx,
             const auto status = getStatusFromCommandResult(cmdResponse);
 
             if (!status.isOK()) {
-                return {status, executor::extractErrorLabels(cmdResponse), primaryHostAndPort};
+                return {status,
+                        executor::extractErrorLabels(cmdResponse),
+                        primaryHostAndPort,
+                        executor::extractBaseBackoffMS(cmdResponse)};
             }
 
             return RetryStrategy::Result{cmdResponse, primaryHostAndPort};
@@ -412,7 +389,7 @@ query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
     }
     const BSONObj& listCollectionsResult = response[0];
 
-    const StringData typeString = listCollectionsResult["type"].valueStringDataSafe();
+    const std::string_view typeString = listCollectionsResult["type"].valueStringDataSafe();
     tassert(9072002,
             "All collections returned by listCollections must have a type element",
             !typeString.empty());
@@ -470,61 +447,29 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
                                                           const DatabaseName& dbName,
                                                           const BSONObj& cmdObj,
                                                           boost::optional<ShardId> dataShard) {
-    // TODO (SERVER-77915): Remove the FCV check and keep only the 'else' branch
-    if (!feature_flags::g80CollectionCreationPath.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        sharding::router::DBPrimaryRouter router(opCtx, dbName);
-        router.createDbImplicitlyOnRoute(dataShard);
-        router.route("ShardServerProcessInterface::_createCollectionCommon",
-                     [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
-                         BSONObjBuilder finalCmdBuilder(cmdObj);
-                         finalCmdBuilder.append(WriteConcernOptions::kWriteConcernField,
-                                                opCtx->getWriteConcern().toBSON());
-                         BSONObj finalCmdObj = finalCmdBuilder.obj();
-                         auto response = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-                             opCtx,
-                             dbName,
-                             cdb,
-                             finalCmdObj,
-                             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                             Shard::RetryPolicy::kIdempotent);
-                         uassertStatusOKWithContext(response.swResponse,
-                                                    str::stream() << "failed while running command "
-                                                                  << finalCmdObj);
-                         auto result = response.swResponse.getValue().data;
-                         uassertStatusOKWithContext(getStatusFromCommandResult(result),
-                                                    str::stream() << "failed while running command "
-                                                                  << finalCmdObj);
-                         uassertStatusOKWithContext(
-                             getWriteConcernStatusFromCommandResult(result),
-                             str::stream()
-                                 << "write concern failed while running command " << finalCmdObj);
-                     });
-    } else {
-        const auto collName = cmdObj.firstElement().String();
-        const auto nss = NamespaceStringUtil::deserialize(dbName, collName);
+    const auto collName = cmdObj.firstElement().String();
+    const auto nss = NamespaceStringUtil::deserialize(dbName, collName);
 
-        // Creating the ShardsvrCreateCollectionRequest by parsing the {create..} bsonObj guarantees
-        // to propagate the apiVersion and apiStrict paramers. Note that shardsvrCreateCollection as
-        // internal command will skip the apiVersionCheck. However in case of view, the create
-        // command might run an aggregation. Having those fields propagated guarantees the api
-        // version check will keep working within the aggregation framework.
-        auto request = ShardsvrCreateCollectionRequest::parse(cmdObj, IDLParserContext("create"));
+    // Creating the ShardsvrCreateCollectionRequest by parsing the {create..} bsonObj guarantees
+    // to propagate the apiVersion and apiStrict paramers. Note that shardsvrCreateCollection as
+    // internal command will skip the apiVersionCheck. However in case of view, the create
+    // command might run an aggregation. Having those fields propagated guarantees the api
+    // version check will keep working within the aggregation framework.
+    auto request = ShardsvrCreateCollectionRequest::parse(cmdObj, IDLParserContext("create"));
 
-        ShardsvrCreateCollection shardsvrCollCommand(nss);
-        request.setUnsplittable(true);
+    ShardsvrCreateCollection shardsvrCollCommand(nss);
+    request.setUnsplittable(true);
 
-        // Configure the data shard if one was requested.
-        request.setDataShard(dataShard);
+    // Configure the data shard if one was requested.
+    request.setDataShard(dataShard);
 
-        shardsvrCollCommand.setShardsvrCreateCollectionRequest(request);
-        sharding::router::DBPrimaryRouter router(opCtx, dbName);
-        router.createDbImplicitlyOnRoute(dataShard);
-        router.route("ShardServerProcessInterface::_createCollectionCommon",
-                     [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
-                         cluster::createCollection(opCtx, shardsvrCollCommand);
-                     });
-    }
+    shardsvrCollCommand.setShardsvrCreateCollectionRequest(request);
+    sharding::router::DBPrimaryRouter router(opCtx, dbName);
+    router.createDbImplicitlyOnRoute(dataShard);
+    router.route("ShardServerProcessInterface::_createCollectionCommon",
+                 [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+                     cluster::createCollection(opCtx, shardsvrCollCommand);
+                 });
 }
 
 void ShardServerProcessInterface::createCollection(OperationContext* opCtx,

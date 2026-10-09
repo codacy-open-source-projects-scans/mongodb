@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/admission/execution_control/execution_control_parameters_gen.h"
@@ -42,6 +15,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -53,8 +27,9 @@
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -69,6 +44,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -191,7 +167,7 @@ TEST_F(DConcurrencyTestFixture, ResourceMutex) {
         void waitFor(int n) {
             waitFor([this, n]() { return this->step.load() == n; });
         }
-        AtomicWord<int> step{0};
+        Atomic<int> step{0};
     } state;
 
     stdx::thread t1([&]() {
@@ -256,18 +232,22 @@ TEST_F(DConcurrencyTestFixture, GlobalRead) {
     auto opCtx = makeOperationContext();
     Lock::GlobalRead globalRead(opCtx.get());
     ASSERT(shard_role_details::getLocker(opCtx.get())->isR());
-    ASSERT_EQ(shard_role_details::getLocker(opCtx.get())
-                  ->getLockMode(resourceIdReplicationStateTransitionLock),
-              MODE_IX);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx.get())
+                      ->getLockMode(resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, GlobalWrite) {
     auto opCtx = makeOperationContext();
     Lock::GlobalWrite globalWrite(opCtx.get());
     ASSERT(shard_role_details::getLocker(opCtx.get())->isW());
-    ASSERT_EQ(shard_role_details::getLocker(opCtx.get())
-                  ->getLockMode(resourceIdReplicationStateTransitionLock),
-              MODE_IX);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx.get())
+                      ->getLockMode(resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, GlobalWriteAndGlobalRead) {
@@ -283,7 +263,9 @@ TEST_F(DConcurrencyTestFixture, GlobalWriteAndGlobalRead) {
     }
 
     ASSERT(lockState->isW());
-    ASSERT_EQ(lockState->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(lockState->getLockMode(resourceIdReplicationStateTransitionLock), MODE_IX);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, GlobalLockS_Timeout) {
@@ -316,6 +298,9 @@ TEST_F(DConcurrencyTestFixture, GlobalLockX_Timeout) {
 }
 
 TEST_F(DConcurrencyTestFixture, RSTLmodeX_Timeout) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     Lock::ResourceLock rstl(
         clients[0].second.get(), resourceIdReplicationStateTransitionLock, MODE_X);
@@ -452,7 +437,7 @@ TEST_F(DConcurrencyTestFixture, DBLockTakesTenantLock) {
         LockMode expectedTenantLockMode;
     };
 
-    StringData testDatabaseName{"test"};
+    std::string_view testDatabaseName{"test"};
     const bool tenantOwned{true};
     const bool tenantless{false};
     const boost::optional<LockMode> none;
@@ -721,15 +706,23 @@ TEST_F(DConcurrencyTestFixture, GlobalLockWaitIsInterruptible) {
     });
 
     ASSERT_THROWS_CODE(result.get(), AssertionException, ErrorCodes::Interrupted);
-    ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_IX);
-    ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_NONE);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_NONE);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, GlobalLockWaitIsInterruptibleBlockedOnRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        // With intent registration enabled, GlobalLock no longer acquires the RSTL, so a raw
+        // RSTL acquisition on opCtx1 does not conflict with opCtx2's GlobalLock and this
+        // scenario is not reproducible.
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto opCtx1 = clients[0].second.get();
     auto opCtx2 = clients[1].second.get();
@@ -790,12 +783,14 @@ TEST_F(DConcurrencyTestFixture, GlobalLockWaitNotInterruptedWithLeaveUnlockedBeh
     ASSERT(g1.isLocked());
     ASSERT(g2 != boost::none);
     ASSERT(!g2->isLocked());
-    ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_IX);
-    ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_NONE);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_NONE);
+    }
 
     // Should not throw an exception.
     result.get();
@@ -803,6 +798,9 @@ TEST_F(DConcurrencyTestFixture, GlobalLockWaitNotInterruptedWithLeaveUnlockedBeh
 
 TEST_F(DConcurrencyTestFixture,
        GlobalLockWaitNotInterruptedWithLeaveUnlockedBehaviorBlockedOnRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto opCtx1 = clients[0].second.get();
     auto opCtx2 = clients[1].second.get();
@@ -860,16 +858,20 @@ TEST_F(DConcurrencyTestFixture, SetMaxLockTimeoutMillisAndDoNotUsingWithInterrup
 
     ASSERT(g1.isLocked());
     ASSERT(!g2.isLocked());
-
-    ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_IX);
-    ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_NONE);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_NONE);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture, SetMaxLockTimeoutMillisAndNotUsingInterruptBehaviorBlockedOnRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto opCtx1 = clients[0].second.get();
     auto opCtx2 = clients[1].second.get();
@@ -910,17 +912,21 @@ TEST_F(DConcurrencyTestFixture, SetMaxLockTimeoutMillisAndThrowUsingInterruptBeh
         ErrorCodes::LockTimeout);
 
     ASSERT(g1.isLocked());
-
-    ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_IX);
-    ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
-                  resourceIdReplicationStateTransitionLock),
-              MODE_NONE);
+    if (!gFeatureFlagIntentRegistration.isEnabled()) {
+        ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_IX);
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(
+                      resourceIdReplicationStateTransitionLock),
+                  MODE_NONE);
+    }
 }
 
 TEST_F(DConcurrencyTestFixture,
        SetMaxLockTimeoutMillisAndThrowUsingInterruptBehaviorBlockedOnRSTL) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto opCtx1 = clients[0].second.get();
     auto opCtx2 = clients[1].second.get();
@@ -946,6 +952,9 @@ TEST_F(DConcurrencyTestFixture,
 }
 
 TEST_F(DConcurrencyTestFixture, FailedGlobalLockShouldUnlockRSTLOnlyOnce) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto opCtx1 = clients[0].second.get();
     auto opCtx2 = clients[1].second.get();
@@ -967,9 +976,10 @@ TEST_F(DConcurrencyTestFixture, FailedGlobalLockShouldUnlockRSTLOnlyOnce) {
         ErrorCodes::LockTimeout);
     auto opCtx2Locker = shard_role_details::getLocker(opCtx2);
     // GlobalLock failed, but the RSTL should be successfully acquired and pending unlocked.
-    ASSERT(opCtx2Locker->getRequestsForTest().find(resourceIdGlobal).finished());
-    ASSERT_EQ(opCtx2Locker->getRequestsForTest().find(resourceRSTL).objAddr()->unlockPending, 1U);
-    ASSERT_EQ(opCtx2Locker->getRequestsForTest().find(resourceRSTL).objAddr()->recursiveCount, 1U);
+    auto requestsSnapshot = opCtx2Locker->getRequestsForTest();
+    ASSERT(requestsSnapshot.find(resourceIdGlobal) == requestsSnapshot.end());
+    ASSERT_EQ(requestsSnapshot.find(resourceRSTL)->value().unlockPending, 1U);
+    ASSERT_EQ(requestsSnapshot.find(resourceRSTL)->value().recursiveCount, 1U);
     shard_role_details::getLocker(opCtx2)->endWriteUnitOfWork();
     ASSERT_EQ(shard_role_details::getLocker(opCtx1)->getLockMode(resourceRSTL), MODE_IX);
     ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(resourceRSTL), MODE_NONE);
@@ -1038,6 +1048,9 @@ TEST_F(DConcurrencyTestFixture, DBLockWaitIsNotInterruptibleWithLockGuard) {
 }
 
 TEST_F(DConcurrencyTestFixture, LockCompleteInterruptedWhenUncontested) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clientOpctxPairs = makeKClientsWithLockers(2);
     auto opCtx1 = clientOpctxPairs[0].second.get();
     auto opCtx2 = clientOpctxPairs[1].second.get();
@@ -1159,7 +1172,7 @@ TEST_F(DConcurrencyTestFixture, IsDbLockedForMode_IsCollectionLockedForMode) {
     };
 
     TenantId tenantId{OID::gen()};
-    StringData testDatabaseName{"test"};
+    std::string_view testDatabaseName{"test"};
     std::vector<TestCase> testCases{
         // Only global lock acquired.
         {MODE_X, MODE_NONE, kAll, MODE_NONE, MODE_X, true},
@@ -1317,7 +1330,7 @@ TEST_F(DConcurrencyTestFixture, Stress) {
     std::vector<std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>>
         clients = makeKClientsWithLockers(kMaxStressThreads);
 
-    AtomicWord<int> ready{0};
+    Atomic<int> ready{0};
     std::vector<stdx::thread> threads;
 
     DatabaseName fooDb = DatabaseName::createDatabaseName_forTest(boost::none, "foo");
@@ -1452,7 +1465,7 @@ TEST_F(DConcurrencyTestFixture, StressPartitioned) {
     std::vector<std::pair<ServiceContext::UniqueClient, ServiceContext::UniqueOperationContext>>
         clients = makeKClientsWithLockers(kMaxStressThreads);
 
-    AtomicWord<int> ready{0};
+    Atomic<int> ready{0};
     std::vector<stdx::thread> threads;
 
     for (int threadId = 0; threadId < kMaxStressThreads; threadId++) {
@@ -1787,7 +1800,9 @@ TEST_F(DConcurrencyTestFixture,
         auto result = task.get_future();
         stdx::thread taskThread{std::move(task)};
 
-        ScopeGuard joinGuard{[&taskThread] { taskThread.join(); }};
+        ScopeGuard joinGuard{[&taskThread] {
+            taskThread.join();
+        }};
 
         // Wait for the database X lock to conflict.
         while (!shard_role_details::getLocker(opCtx2)->hasLockPending()) {
@@ -2022,6 +2037,9 @@ TEST_F(DConcurrencyTestFixture, CollectionLockTimeout) {
 }
 
 TEST_F(DConcurrencyTestFixture, CompatibleFirstWithSXIS) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     // Currently, we are allowed to acquire IX and X lock modes for RSTL. To overcome it,
     // this fail point will allow the test to acquire RSTL in any lock modes.
     FailPointEnableBlock enableTestOnlyFlag("enableTestOnlyFlagforRSTL");
@@ -2048,8 +2066,10 @@ TEST_F(DConcurrencyTestFixture, CompatibleFirstWithSXIS) {
     ASSERT(!lockX.isLocked());
 }
 
-
 TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSIXIS) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     // Currently, we are allowed to acquire IX and X lock modes for RSTL. To overcome it,
     // this fail point will allow the test to acquire RSTL in any lock modes.
     FailPointEnableBlock enableTestOnlyFlag("enableTestOnlyFlagforRSTL");
@@ -2074,7 +2094,6 @@ TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSIXIS) {
         opctx4, MODE_IS, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
     ASSERT(!lockIS.isLocked());
 
-
     // Now release the MODE_X and ensure that MODE_S will switch policy to compatibleFirst
     lockX.reset();
     lockS->waitForLockUntil(Date_t::now());
@@ -2090,6 +2109,9 @@ TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSIXIS) {
 }
 
 TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSXIXIS) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     // Currently, we are allowed to acquire IX and X lock modes for RSTL. To overcome it,
     // this fail point will allow the test to acquire RSTL in any lock modes.
     FailPointEnableBlock enableTestOnlyFlag("enableTestOnlyFlagforRSTL");
@@ -2123,7 +2145,6 @@ TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSXIXIS) {
         opctx5, MODE_IS, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
     ASSERT(!lockIS.isLocked());
 
-
     // Now release the granted MODE_X and ensure that MODE_S will switch policy to compatibleFirst,
     // not locking the MODE_X or MODE_IX, but instead granting the final MODE_IS.
     lockXgranted.reset();
@@ -2144,8 +2165,8 @@ TEST_F(DConcurrencyTestFixture, CompatibleFirstWithXSXIXIS) {
 TEST_F(DConcurrencyTestFixture, CompatibleFirstStress) {
     int numThreads = 8;
     int testMicros = 500'000;
-    AtomicWord<unsigned long long> readOnlyInterval{0};
-    AtomicWord<bool> done{false};
+    Atomic<unsigned long long> readOnlyInterval{0};
+    Atomic<bool> done{false};
     std::vector<uint64_t> acquisitionCount(numThreads);
     std::vector<uint64_t> timeoutCount(numThreads);
     std::vector<uint64_t> busyWaitCount(numThreads);
@@ -2353,6 +2374,9 @@ TEST_F(DConcurrencyTestFixture, TestGlobalLockDoesNotAbandonSnapshotWhenInWriteU
 }
 
 TEST_F(DConcurrencyTestFixture, RSTLLockGuardTimeout) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto firstOpCtx = clients[0].second.get();
     auto secondOpCtx = clients[1].second.get();
@@ -2383,6 +2407,9 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardTimeout) {
 }
 
 TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto firstOpCtx = clients[0].second.get();
     auto secondOpCtx = clients[1].second.get();
@@ -2395,7 +2422,6 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
                   ->getLockMode(resourceIdReplicationStateTransitionLock),
               MODE_X);
 
-
     // The second opCtx enqueues the lock request but cannot acquire it.
     repl::ReplicationStateTransitionLockGuard secondRSTL(
         secondOpCtx, MODE_X, repl::ReplicationStateTransitionLockGuard::EnqueueOnly());
@@ -2407,7 +2433,6 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
                   ->getLockMode(resourceIdReplicationStateTransitionLock),
               MODE_NONE);
 
-
     secondRSTL.waitForLockUntil(Date_t::now());
     ASSERT_TRUE(secondRSTL.isLocked());
     ASSERT_EQ(shard_role_details::getLocker(secondOpCtx)
@@ -2416,6 +2441,9 @@ TEST_F(DConcurrencyTestFixture, RSTLLockGuardEnqueueAndWait) {
 }
 
 TEST_F(DConcurrencyTestFixture, RSTLLockGuardResilientToExceptionThrownBeforeWaitForRSTLComplete) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return;
+    }
     auto clients = makeKClientsWithLockers(2);
     auto firstOpCtx = clients[0].second.get();
     auto secondOpCtx = clients[1].second.get();
@@ -2586,6 +2614,284 @@ TEST_F(DConcurrencyTestFixture, ConflictingTenantDBLockThrows) {
 
     ASSERT_THROWS_CODE(result.get(), AssertionException, ErrorCodes::Interrupted);
     ASSERT(shard_role_details::getLocker(opCtx1)->isDbLockedForMode(dbName1, MODE_X));
+}
+
+TEST_F(DConcurrencyTestFixture, CollectionLockWithCallback_ActionCalledWhenContended) {
+    auto clients = makeKClientsWithLockers(2);
+    auto opCtx1 = clients[0].second.get();
+    auto opCtx2 = clients[1].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.coll");
+    const ResourceId resId(RESOURCE_COLLECTION, collNss);
+
+    // Thread 1 holds a conflicting exclusive lock on the collection.
+    Lock::GlobalLock globalLock1(opCtx1, MODE_IX);
+    Lock::DBLock dbLock1(opCtx1, collNss.dbName(), MODE_IX);
+    boost::optional<Lock::CollectionLock> collLock1;
+    collLock1.emplace(opCtx1, collNss, MODE_X);
+
+    Atomic<bool> actionCalled{false};
+    stdx::thread t2([&] {
+        Lock::GlobalLock globalLock2(opCtx2, MODE_IS);
+        Lock::DBLock dbLock2(opCtx2, collNss.dbName(), MODE_IS);
+        Lock::CollectionLock collLock2(
+            opCtx2, collNss, MODE_S, [&](OperationContext*) { actionCalled.store(true); });
+        // By the time we get here, the lock should be granted.
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(resId), MODE_S);
+    });
+
+    // Poll until the action is called or we time out.
+    auto deadline = Date_t::now() + Seconds(1);
+    while (!actionCalled.load() && Date_t::now() < deadline) {
+        sleepFor(Milliseconds(10));
+    }
+    ASSERT_TRUE(actionCalled.load()) << "Timed out waiting for lock enqueue action to be called";
+
+    // Release so thread can clean up.
+    collLock1.reset();
+    t2.join();
+}
+
+TEST_F(DConcurrencyTestFixture, CollectionLockWithCallback_ActionCalledThenTimeout) {
+    auto clients = makeKClientsWithLockers(2);
+    auto opCtx1 = clients[0].second.get();
+    auto opCtx2 = clients[1].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.collTimeout");
+    const ResourceId resId(RESOURCE_COLLECTION, collNss);
+
+    // Thread 1 holds a conflicting exclusive lock on the collection and never releases it.
+    Lock::GlobalLock globalLock1(opCtx1, MODE_IX);
+    Lock::DBLock dbLock1(opCtx1, collNss.dbName(), MODE_IX);
+    Lock::CollectionLock collLock1(opCtx1, collNss, MODE_X);
+
+    Atomic<bool> actionCalled{false};
+    stdx::thread t2([&] {
+        Lock::GlobalLock globalLock2(opCtx2, MODE_IS);
+        Lock::DBLock dbLock2(opCtx2, collNss.dbName(), MODE_IS);
+
+        // Use a short deadline so lockComplete times out while the conflicting lock is held.
+        ASSERT_THROWS_CODE(Lock::CollectionLock(
+                               opCtx2,
+                               collNss,
+                               MODE_S,
+                               [&](OperationContext*) { actionCalled.store(true); },
+                               Date_t::now() + Milliseconds(50)),
+                           AssertionException,
+                           ErrorCodes::LockTimeout);
+
+        // The lock should NOT be held after the timeout — the ScopeGuard cleaned it up.
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(resId), MODE_NONE);
+    });
+
+    t2.join();
+
+    // The callback should have been invoked (the lock was contended).
+    ASSERT_TRUE(actionCalled.load());
+}
+
+TEST_F(DConcurrencyTestFixture, CollectionLockWithCallback_ActionNotCalledWhenUncontended) {
+    auto clients = makeKClientsWithLockers(1);
+    auto opCtx = clients[0].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.coll");
+    const ResourceId resId(RESOURCE_COLLECTION, collNss);
+
+    Lock::GlobalLock globalLock(opCtx, MODE_IX);
+    Lock::DBLock dbLock(opCtx, collNss.dbName(), MODE_IX);
+
+    bool actionCalled = false;
+    {
+        Lock::CollectionLock collLock(
+            opCtx, collNss, MODE_S, [&](OperationContext*) { actionCalled = true; });
+        ASSERT_EQ(shard_role_details::getLocker(opCtx)->getLockMode(resId), MODE_S);
+    }
+    ASSERT_FALSE(actionCalled);
+
+    // After the guard is destroyed, the lock should be released.
+    ASSERT_EQ(shard_role_details::getLocker(opCtx)->getLockMode(resId), MODE_NONE);
+}
+
+TEST_F(DConcurrencyTestFixture, CollectionLockWithCallback_UnlocksOnActionException) {
+    auto clients = makeKClientsWithLockers(2);
+    auto opCtx1 = clients[0].second.get();
+    auto opCtx2 = clients[1].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.coll3");
+    const ResourceId resId(RESOURCE_COLLECTION, collNss);
+
+    // Hold a conflicting lock to force the LOCK_WAITING path.
+    Lock::GlobalLock globalLock1(opCtx1, MODE_IX);
+    Lock::DBLock dbLock1(opCtx1, collNss.dbName(), MODE_IX);
+    Lock::CollectionLock collLock1(opCtx1, collNss, MODE_X);
+
+    stdx::thread t2([&] {
+        Lock::GlobalLock globalLock2(opCtx2, MODE_IS);
+        Lock::DBLock dbLock2(opCtx2, collNss.dbName(), MODE_IS);
+        ASSERT_THROWS_CODE(Lock::CollectionLock(opCtx2,
+                                                collNss,
+                                                MODE_S,
+                                                [](OperationContext*) {
+                                                    uasserted(ErrorCodes::InternalError,
+                                                              "action threw");
+                                                }),
+                           AssertionException,
+                           ErrorCodes::InternalError);
+
+        // The lock should NOT be held after the exception.
+        ASSERT_EQ(shard_role_details::getLocker(opCtx2)->getLockMode(resId), MODE_NONE);
+    });
+
+    t2.join();
+}
+
+TEST_F(DConcurrencyTestFixture, CollectionLockWithCallback_MoveSemantics) {
+    auto clients = makeKClientsWithLockers(1);
+    auto opCtx = clients[0].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.coll4");
+    const ResourceId resId(RESOURCE_COLLECTION, collNss);
+
+    Lock::GlobalLock globalLock(opCtx, MODE_IX);
+    Lock::DBLock dbLock(opCtx, collNss.dbName(), MODE_IX);
+
+    boost::optional<Lock::CollectionLock> movedGuard;
+    {
+        Lock::CollectionLock original(opCtx, collNss, MODE_S, nullptr);
+        ASSERT_EQ(shard_role_details::getLocker(opCtx)->getLockMode(resId), MODE_S);
+
+        // Move into a new guard.
+        movedGuard.emplace(std::move(original));
+    }
+    // Original is destroyed but lock should still be held via the moved guard.
+    ASSERT_EQ(shard_role_details::getLocker(opCtx)->getLockMode(resId), MODE_S);
+
+    // Destroy the moved guard — lock should be released.
+    movedGuard.reset();
+    ASSERT_EQ(shard_role_details::getLocker(opCtx)->getLockMode(resId), MODE_NONE);
+}
+
+TEST_F(DConcurrencyTestFixture, GetConflictingLockerIds_MultipleIXHoldersConflictWithS) {
+    auto clients = makeKClientsWithLockers(4);
+    auto queryOpCtx = clients[3].second.get();
+
+    const auto collNss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection");
+    const ResourceId collResId(RESOURCE_COLLECTION, collNss);
+
+    // Three holders each acquire MODE_IX on the collection.
+    Lock::GlobalLock hGlobal0(clients[0].second.get(), MODE_IX);
+    Lock::DBLock hDb0(clients[0].second.get(), collNss.dbName(), MODE_IX);
+    boost::optional<Lock::CollectionLock> hColl0;
+    hColl0.emplace(clients[0].second.get(), collNss, MODE_IX);
+
+    Lock::GlobalLock hGlobal1(clients[1].second.get(), MODE_IX);
+    Lock::DBLock hDb1(clients[1].second.get(), collNss.dbName(), MODE_IX);
+    boost::optional<Lock::CollectionLock> hColl1;
+    hColl1.emplace(clients[1].second.get(), collNss, MODE_IX);
+
+    Lock::GlobalLock hGlobal2(clients[2].second.get(), MODE_IX);
+    Lock::DBLock hDb2(clients[2].second.get(), collNss.dbName(), MODE_IX);
+    boost::optional<Lock::CollectionLock> hColl2;
+    hColl2.emplace(clients[2].second.get(), collNss, MODE_IX);
+
+    LockerId holderIds[3] = {
+        shard_role_details::getLocker(clients[0].second.get())->getId(),
+        shard_role_details::getLocker(clients[1].second.get())->getId(),
+        shard_role_details::getLocker(clients[2].second.get())->getId(),
+    };
+
+    // Use the callback to get the MODE_S conflict with MODE_IX list.
+    std::vector<LockerId> capturedIds;
+    Atomic<bool> callbackDone{false};
+    stdx::thread t([&] {
+        Lock::GlobalLock queryGlobal(queryOpCtx, MODE_IS);
+        Lock::DBLock queryDb(queryOpCtx, collNss.dbName(), MODE_IS);
+        Lock::CollectionLock queryColl(queryOpCtx, collNss, MODE_S, [&](OperationContext* cbOpCtx) {
+            capturedIds =
+                shard_role_details::getLocker(cbOpCtx)->getConflictingLockerIds(collResId, MODE_S);
+            callbackDone.store(true);
+        });
+    });
+
+    auto deadline = Date_t::now() + Seconds(1);
+    while (!callbackDone.load() && Date_t::now() < deadline) {
+        sleepFor(Milliseconds(10));
+    }
+    ASSERT_TRUE(callbackDone.load());
+
+    // Release holders so the query thread can complete.
+    hColl0.reset();
+    hColl1.reset();
+    hColl2.reset();
+    t.join();
+
+    ASSERT_EQ(capturedIds.size(), 3U);
+    stdx::unordered_set<LockerId> idSet(capturedIds.begin(), capturedIds.end());
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(idSet.count(holderIds[i])) << "Missing LockerId for holder " << i;
+    }
+}
+
+TEST_F(DConcurrencyTestFixture, GetConflictingLockerIds_MixedGrantedModesOnlyConflictsReturned) {
+    auto clients = makeKClientsWithLockers(4);
+    auto queryOpCtx = clients[3].second.get();
+
+    const auto collNss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "TestDB.collection");
+    const ResourceId collResId(RESOURCE_COLLECTION, collNss);
+
+    // Three holders each acquire MODE_S. We verify that MODE_S sees no conflicts
+    // (compatible) while MODE_X sees all three as conflicting.
+    Lock::GlobalLock hGlobal0(clients[0].second.get(), MODE_IS);
+    Lock::DBLock hDb0(clients[0].second.get(), collNss.dbName(), MODE_IS);
+    Lock::CollectionLock hColl0(clients[0].second.get(), collNss, MODE_S);
+
+    Lock::GlobalLock hGlobal1(clients[1].second.get(), MODE_IS);
+    Lock::DBLock hDb1(clients[1].second.get(), collNss.dbName(), MODE_IS);
+    Lock::CollectionLock hColl1(clients[1].second.get(), collNss, MODE_S);
+
+    Lock::GlobalLock hGlobal2(clients[2].second.get(), MODE_IS);
+    Lock::DBLock hDb2(clients[2].second.get(), collNss.dbName(), MODE_IS);
+    Lock::CollectionLock hColl2(clients[2].second.get(), collNss, MODE_S);
+
+    LockerId holderIds[3] = {
+        shard_role_details::getLocker(clients[0].second.get())->getId(),
+        shard_role_details::getLocker(clients[1].second.get())->getId(),
+        shard_role_details::getLocker(clients[2].second.get())->getId(),
+    };
+
+    // MODE_S is compatible with MODE_S — none returned.
+    auto idsS =
+        shard_role_details::getLocker(queryOpCtx)->getConflictingLockerIds(collResId, MODE_S);
+    ASSERT_TRUE(idsS.empty());
+
+    // MODE_X conflicts with all three MODE_S holders.
+    auto idsX =
+        shard_role_details::getLocker(queryOpCtx)->getConflictingLockerIds(collResId, MODE_X);
+    ASSERT_EQ(idsX.size(), 3U);
+
+    stdx::unordered_set<LockerId> idSet(idsX.begin(), idsX.end());
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(idSet.count(holderIds[i])) << "Missing LockerId for holder " << i;
+    }
+}
+
+using DConcurrencyDeathTestFixture = DConcurrencyTestFixture;
+
+DEATH_TEST_F(DConcurrencyDeathTestFixture,
+             CollectionLockWithCallback_RejectsIntentModes,
+             "CollectionLock with callback only supports MODE_S and MODE_X") {
+    auto clients = makeKClientsWithLockers(1);
+    auto opCtx = clients[0].second.get();
+
+    const auto collNss = NamespaceString::createNamespaceString_forTest("db.coll");
+
+    Lock::GlobalLock globalLock(opCtx, MODE_IX);
+    Lock::DBLock dbLock(opCtx, collNss.dbName(), MODE_IX);
+
+    // MODE_IS is not allowed when a callback is provided — should invariant-fail.
+    Lock::CollectionLock collLock(opCtx, collNss, MODE_IS, [](OperationContext*) {});
 }
 
 }  // namespace

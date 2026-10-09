@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/auth/sasl_plain_server_conversation.h"
 
@@ -33,7 +7,6 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/secure_allocator.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/crypto/mechanism_scram.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/sasl_mechanism_registry.h"
@@ -51,6 +24,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -60,7 +34,7 @@
 namespace mongo {
 namespace {
 template <typename HashBlock>
-StatusWith<bool> trySCRAM(const User::CredentialData& credentials, StringData pwd) {
+StatusWith<bool> trySCRAM(const User::CredentialData& credentials, std::string_view pwd) {
     const auto scram = credentials.scram<HashBlock>();
     if (!scram.isValid()) {
         // No stored credentials available.
@@ -75,8 +49,8 @@ StatusWith<bool> trySCRAM(const User::CredentialData& credentials, StringData pw
                                       decodedSalt.size()),
         scram.iterationCount));
     if (scram.storedKey !=
-        base64::encode(StringData(reinterpret_cast<const char*>(secrets.storedKey().data()),
-                                  secrets.storedKey().size()))) {
+        base64::encode(std::string_view(reinterpret_cast<const char*>(secrets.storedKey().data()),
+                                        secrets.storedKey().size()))) {
         return Status(ErrorCodes::AuthenticationFailed,
                       str::stream() << "Incorrect user name or password");
     }
@@ -86,7 +60,7 @@ StatusWith<bool> trySCRAM(const User::CredentialData& credentials, StringData pw
 }  // namespace
 
 StatusWith<std::tuple<bool, std::string>> SASLPlainServerMechanism::stepImpl(
-    OperationContext* opCtx, StringData inputData) {
+    OperationContext* opCtx, std::string_view inputData) {
     if (_authenticationDatabase == "$external") {
         return Status(ErrorCodes::AuthenticationFailed,
                       "PLAIN mechanism must be used with internal users");
@@ -182,9 +156,6 @@ StatusWith<std::tuple<bool, std::string>> SASLPlainServerMechanism::stepImpl(
     }
 
     return Status(ErrorCodes::AuthenticationFailed, str::stream() << "No credentials available.");
-
-
-    return std::make_tuple(true, std::string());
 }
 
 namespace {

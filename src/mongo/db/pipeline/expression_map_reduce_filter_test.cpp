@@ -1,35 +1,6 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <absl/container/node_hash_map.h>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
@@ -41,19 +12,25 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 
 #include <climits>
 #include <cmath>
+#include <string_view>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace ExpressionTests {
+using namespace std::literals::string_view_literals;
 
 class ExpressionMapReduceFilterTest : public mongo::unittest::Test {
 public:
@@ -63,7 +40,7 @@ public:
 
     // Parse 'json' into an expression of type T.
     template <class T>
-    boost::intrusive_ptr<T> parse(StringData json) {
+    boost::intrusive_ptr<T> parse(std::string_view json) {
         return parse<T>(fromjson(json));
     }
 
@@ -103,12 +80,13 @@ static Document fromJson(const std::string& json) {
 
 TEST_F(ExpressionMapReduceFilterTest, MapNonArray) {
     auto expressionMap = parse<ExpressionMap>("{ $map: {input: 'MongoDB', in: 15213}}");
-    ASSERT_CODE(expressionMap->evaluate(MutableDocument().freeze(), &getExpCtx().variables), 16883);
+    ASSERT_CODE(expressionMap->evaluate(MutableDocument().freeze(), &getExpCtx().variables, {}),
+                16883);
 }
 
 // Test several parsing errors.
 TEST_F(ExpressionMapReduceFilterTest, MapParseConstraints) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
 
     // Uppercase first letter.
@@ -137,7 +115,7 @@ TEST_F(ExpressionMapReduceFilterTest, MapParseConstraints) {
                 ErrorCodes::FailedToParse);
 
     // Identifier with embedded null.
-    StringData str("fo\0o", 4);
+    std::string_view str("fo\0o", 4);
     BSONObj query = BSONObjBuilder()
                         .append("$map",
                                 BSONObjBuilder()
@@ -208,7 +186,7 @@ TEST(ExpressionMapTest, MapTypeMismatch) {
 }
 
 TEST(ExpressionMapTest, MapIndices) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson("{ $map: { input: { $literal: [1, 1, 1]}, in: '$$IDX'}}");
@@ -221,7 +199,7 @@ TEST(ExpressionMapTest, MapIndices) {
 }
 
 TEST(ExpressionMapTest, MapIndicesNamed) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr =
@@ -235,7 +213,7 @@ TEST(ExpressionMapTest, MapIndicesNamed) {
 }
 
 TEST(ExpressionMapTest, MapIndicesNamedFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr =
@@ -248,7 +226,7 @@ TEST(ExpressionMapTest, MapIndicesNamedFeatureDisabled) {
 }
 
 TEST(ExpressionMapTest, MapIndicesDefaultFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson("{ $map: { input: { $literal: [1, 1, 1]}, in: '$$IDX'}}");
@@ -260,7 +238,7 @@ TEST(ExpressionMapTest, MapIndicesDefaultFeatureDisabled) {
 }
 
 TEST(ExpressionMapTest, MapIndicesAPIStrict) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -275,7 +253,7 @@ TEST(ExpressionMapTest, MapIndicesAPIStrict) {
 }
 
 TEST(ExpressionMapTest, MapIndicesAPIStrictFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -290,7 +268,7 @@ TEST(ExpressionMapTest, MapIndicesAPIStrictFeatureDisabled) {
 }
 
 TEST_F(ExpressionMapReduceFilterTest, MapRemoveUnusedVar) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     boost::intrusive_ptr<ExpressionMap> map;
 
@@ -360,7 +338,7 @@ TEST_F(ExpressionMapReduceFilterTest, MapRemoveUnusedVar) {
 
 // Test several parsing errors.
 TEST_F(ExpressionMapReduceFilterTest, ReduceParseConstraints) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
 
     // Identifier with uppercase first letter.
@@ -392,7 +370,7 @@ TEST_F(ExpressionMapReduceFilterTest, ReduceParseConstraints) {
                 ErrorCodes::FailedToParse);
 
     // Identifier with embedded null.
-    StringData str("fo\0o", 4);
+    std::string_view str("fo\0o", 4);
     BSONObj query =
         BSONObjBuilder()
             .append(
@@ -443,7 +421,7 @@ TEST(ExpressionReduceTest, ReduceStringConcat) {
         ExpressionReduce::parse(&expCtx, expr.firstElement(), expCtx.variablesParseState);
     Value val = expressionReduce->evaluate(MutableDocument().freeze(), &expCtx.variables);
 
-    ASSERT_VALUE_EQ(val, Value(("abc"_sd)));
+    ASSERT_VALUE_EQ(val, Value(("abc"sv)));
 }
 
 TEST(ExpressionReduceTest, ReduceSumProduct) {
@@ -489,7 +467,7 @@ TEST(ExpressionReduceTest, ReduceEmptyExceptionExpression) {
 }
 
 TEST(ExpressionReduceTest, ReduceIndicesDefault) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -505,7 +483,7 @@ TEST(ExpressionReduceTest, ReduceIndicesDefault) {
 }
 
 TEST(ExpressionReduceTest, ReduceIndicesNamed) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -521,7 +499,7 @@ TEST(ExpressionReduceTest, ReduceIndicesNamed) {
 }
 
 TEST(ExpressionReduceTest, ReduceIndicesAPIStrict) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -537,7 +515,7 @@ TEST(ExpressionReduceTest, ReduceIndicesAPIStrict) {
 }
 
 TEST(ExpressionReduceTest, ReduceIndicesAPIStrictFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -553,7 +531,7 @@ TEST(ExpressionReduceTest, ReduceIndicesAPIStrictFeatureDisabled) {
 }
 
 TEST_F(ExpressionMapReduceFilterTest, ReduceRemoveUnusedVar) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     boost::intrusive_ptr<ExpressionReduce> reduce;
 
@@ -631,7 +609,7 @@ TEST_F(ExpressionMapReduceFilterTest, ReduceRemoveUnusedVar) {
 
 // Test several parsing errors.
 TEST_F(ExpressionMapReduceFilterTest, FilterParseConstraints) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
 
     // Identifier with uppercase first letter.
@@ -668,7 +646,7 @@ TEST_F(ExpressionMapReduceFilterTest, FilterParseConstraints) {
         ErrorCodes::FailedToParse);
 
     // Identifier with embedded null.
-    StringData str("fo\0o", 4);
+    std::string_view str("fo\0o", 4);
     BSONObj query =
         BSONObjBuilder()
             .append("$filter",
@@ -808,7 +786,7 @@ TEST(ExpressionFilterTest, FilterConditionFalse) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesDefault) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -823,7 +801,7 @@ TEST(ExpressionFilterTest, FilterIndicesDefault) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesNamed) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -839,7 +817,7 @@ TEST(ExpressionFilterTest, FilterIndicesNamed) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesDefaultLimited) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -854,7 +832,7 @@ TEST(ExpressionFilterTest, FilterIndicesDefaultLimited) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesNamedLimited) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -870,7 +848,7 @@ TEST(ExpressionFilterTest, FilterIndicesNamedLimited) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesDefaultFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -884,7 +862,7 @@ TEST(ExpressionFilterTest, FilterIndicesDefaultFeatureDisabled) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesNamedFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson(
@@ -899,7 +877,7 @@ TEST(ExpressionFilterTest, FilterIndicesNamedFeatureDisabled) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesAPIStrict) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -916,7 +894,7 @@ TEST(ExpressionFilterTest, FilterIndicesAPIStrict) {
 }
 
 TEST(ExpressionFilterTest, FilterIndicesAPIStrictFeatureDisabled) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", false);
     auto expCtx = ExpressionContextForTest{};
     APIParameters::get(expCtx.getOperationContext()).setAPIVersion("1");
@@ -933,7 +911,7 @@ TEST(ExpressionFilterTest, FilterIndicesAPIStrictFeatureDisabled) {
 }
 
 TEST_F(ExpressionMapReduceFilterTest, FilterRemoveUnusedVar) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     boost::intrusive_ptr<ExpressionFilter> filter;
 

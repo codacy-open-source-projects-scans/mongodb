@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/ftdc/ftdc_mongod.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,6 +16,7 @@
 #include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/ftdc/ftdc_server.h"
 #include "mongo/db/ftdc/networking_collectors.h"
+#include "mongo/db/ftdc/register_module_ftdc_collectors.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -56,6 +30,7 @@
 #include "mongo/util/synchronized_value.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/optional/optional.hpp>
@@ -83,27 +58,27 @@ Status validateCollectionStatsNamespaces(const std::vector<std::string> value,
 }
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 struct CollectionStatsSpec {
-    StringData statsName;
-    StringData collName;
+    std::string_view statsName;
+    std::string_view collName;
     const DatabaseName& dbName;
 };
 
 std::vector<CollectionStatsSpec> getCollectionSpecs(ServiceContext* serviceContext) {
     std::vector<CollectionStatsSpec> specs{
-        {"local.oplog.rs.stats"_sd, "oplog.rs"_sd, DatabaseName::kLocal},
+        {"local.oplog.rs.stats"sv, "oplog.rs"sv, DatabaseName::kLocal},
     };
 
     auto& rss = rss::ReplicatedStorageService::get(serviceContext);
     if (!rss.getPersistenceProvider().shouldUseReplicatedFastCount()) {
-        specs.emplace_back(
-            "config.transactions.stats"_sd, "transactions"_sd, DatabaseName::kConfig);
+        specs.emplace_back("config.transactions.stats"sv, "transactions"sv, DatabaseName::kConfig);
     }
 
     if (rss.getPersistenceProvider().supportsFindAndModifyImageCollection()) {
         specs.emplace_back(
-            "config.image_collection.stats"_sd, "image_collection"_sd, DatabaseName::kConfig);
+            "config.image_collection.stats"sv, "image_collection"sv, DatabaseName::kConfig);
     }
 
     return specs;
@@ -254,6 +229,7 @@ void startMongoDFTDC(ServiceContext* serviceContext) {
 
     std::vector<RegisterCollectorsFunction> registerFns{
         registerShardCollectors,
+        registerModuleFTDCCollectors,
     };
 
     startFTDC(serviceContext, dir, FTDCStartMode::kStart, std::move(registerFns));

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,9 +11,13 @@
 
 #include <set>
 
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 class ExpressionContext;
+class NamespaceString;
+class PathArrayness;
 
 /**
  * A monotonically-increasing set of FieldPaths. Supports insertion and iteration but not removal.
@@ -48,6 +26,10 @@ class MonotonicallyIncreasingFieldPathSet {
 public:
     void insert(const FieldPath& path) {
         _paths.insert(path);
+    }
+
+    bool empty() const {
+        return _paths.empty();
     }
 
     auto begin() const {
@@ -62,6 +44,13 @@ private:
     std::set<FieldPath> _paths;
 };
 
+struct PathArraynessChecker {
+    const MonotonicallyIncreasingFieldPathSet nonArrayPaths;
+    boost::optional<uint64_t> prevEpoch;
+
+    void uassertIfInvalidatedAndSyncEpoch(const PathArrayness& current, const NamespaceString& ns);
+};
+
 /**
  * Data structure representing arrayness of field paths.
  */
@@ -70,17 +59,26 @@ class PathArrayness {
     class TrieNode;
 
 public:
-    PathArrayness() {}
+    explicit PathArrayness(uint64_t epoch = 0) : _epoch(epoch) {}
 
     ~PathArrayness() = default;
 
+    uint64_t epoch() const {
+        return _epoch;
+    }
+
+    void incrementEpoch() {
+        ++_epoch;
+    }
+
     /**
-     * Returns true if any path in 'nonArrayPaths' is now possibly-array in 'current'. Used during
-     * yield restore to detect invalidated assumptions. The 'nonArrayPaths' set is maintained
-     * per-query on the ExpressionContext, not on the shared PathArrayness instance.
+     * Returns the first path in 'nonArrayPaths' that is now possibly-array in 'current', or
+     * boost::none if no paths are invalidated.
      */
-    static bool hasInvalidatedPaths(const MonotonicallyIncreasingFieldPathSet& nonArrayPaths,
-                                    const PathArrayness& current);
+    static boost::optional<FieldPath> getFirstInvalidatedPath(
+        const MonotonicallyIncreasingFieldPathSet& nonArrayPaths,
+        const PathArrayness& current,
+        const NamespaceString& ns);
 
     /**
      * Returns a reference to an empty PathArrayness instance. This represents the conservative
@@ -132,7 +130,9 @@ public:
      * column store, etc.) either have unbounded multikey paths, do not expose meaningful array path
      * semantics, or are not used by the query planner in a way that benefits from this structure.
      * Among BTREE indexes, partial indexes (don't cover the full document set) and hidden indexes
-     * (invisible to the query optimizer) are also excluded.
+     * (invisible to the query optimizer) are also excluded. Indexes whose key pattern contains a
+     * numeric path component (e.g. {"a.0.x": 1}) are also excluded, because positional array access
+     * means the multikey metadata does not reliably reflect whether the parent path is an array.
      */
     static bool isIndexEligibleToAddToPathArrayness(const IndexDescriptor& descriptor);
 
@@ -203,6 +203,8 @@ private:
          */
         bool _canBeArray = true;
     };
+
+    uint64_t _epoch = 0;
 
     /**
      * The root to the trie.

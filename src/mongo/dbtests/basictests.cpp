@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
@@ -44,6 +17,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/strings/str_join.h>
@@ -51,6 +25,7 @@
 
 namespace mongo {
 namespace BasicTests {
+using namespace std::literals::string_view_literals;
 
 using std::cout;
 using std::dec;
@@ -94,7 +69,7 @@ public:
 
     void roundTrip(const unsigned char* _data, int len) {
         const char* data = (const char*)_data;
-        string s = base64::encode(StringData(data, len));
+        string s = base64::encode(std::string_view(data, len));
         string out = base64::decode(s);
         ASSERT_EQUALS(out.size(), static_cast<size_t>(len));
         bool broke = false;
@@ -117,12 +92,12 @@ public:
     }
 
     void run() {
-        ASSERT_EQUALS("ZWxp", base64::encode("eli"_sd));
-        ASSERT_EQUALS("ZWxpb3Rz", base64::encode("eliots"_sd));
+        ASSERT_EQUALS("ZWxp", base64::encode("eli"sv));
+        ASSERT_EQUALS("ZWxpb3Rz", base64::encode("eliots"sv));
         ASSERT_EQUALS("ZWxpb3Rz", base64::encode("eliots"));
 
-        ASSERT_EQUALS("ZQ==", base64::encode("e"_sd));
-        ASSERT_EQUALS("ZWw=", base64::encode("el"_sd));
+        ASSERT_EQUALS("ZQ==", base64::encode("e"sv));
+        ASSERT_EQUALS("ZWw=", base64::encode("el"sv));
 
         roundTrip("e");
         roundTrip("el");

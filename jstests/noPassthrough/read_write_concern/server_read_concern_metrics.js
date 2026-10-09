@@ -1,5 +1,7 @@
 // Tests readConcern level metrics in the serverStatus output.
 // @tags: [
+//   # Runs mapReduce with JS map/reduce functions, which requires server-side scripting.
+//   requires_scripting,
 //   requires_majority_read_concern,
 //   requires_persistence,
 //   uses_transactions,
@@ -15,7 +17,8 @@ function verifyServerStatusFields(serverStatusResponse) {
 
     assert(
         serverStatusResponse.readConcernCounters.hasOwnProperty("nonTransactionOps"),
-        "Missing 'nonTransactionOps' from 'readConcernCounters'\n" + tojson(serverStatusResponse.readConcernCounters),
+        "Missing 'nonTransactionOps' from 'readConcernCounters'\n" +
+            tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
         serverStatusResponse.readConcernCounters.nonTransactionOps.hasOwnProperty("none"),
@@ -43,12 +46,16 @@ function verifyServerStatusFields(serverStatusResponse) {
             tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
-        serverStatusResponse.readConcernCounters.nonTransactionOps.snapshot.hasOwnProperty("withClusterTime"),
+        serverStatusResponse.readConcernCounters.nonTransactionOps.snapshot.hasOwnProperty(
+            "withClusterTime",
+        ),
         "Missing 'withClusterTime' from 'readConcernCounters.nonTransactionOps.snapshot'\n" +
             tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
-        serverStatusResponse.readConcernCounters.nonTransactionOps.snapshot.hasOwnProperty("withoutClusterTime"),
+        serverStatusResponse.readConcernCounters.nonTransactionOps.snapshot.hasOwnProperty(
+            "withoutClusterTime",
+        ),
         "Missing 'withoutClusterTime' from 'readConcernCounters.nonTransactionOps.snapshot'\n" +
             tojson(serverStatusResponse.readConcernCounters),
     );
@@ -60,11 +67,13 @@ function verifyServerStatusFields(serverStatusResponse) {
 
     assert(
         serverStatusResponse.readConcernCounters.hasOwnProperty("transactionOps"),
-        "Missing 'transactionOps' from 'readConcernCounters'\n" + tojson(serverStatusResponse.readConcernCounters),
+        "Missing 'transactionOps' from 'readConcernCounters'\n" +
+            tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
         serverStatusResponse.readConcernCounters.transactionOps.hasOwnProperty("none"),
-        "Missing 'none' from 'readConcernCounters.transactionOps'\n" + tojson(serverStatusResponse.readConcernCounters),
+        "Missing 'none' from 'readConcernCounters.transactionOps'\n" +
+            tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
         serverStatusResponse.readConcernCounters.transactionOps.hasOwnProperty("local"),
@@ -82,12 +91,16 @@ function verifyServerStatusFields(serverStatusResponse) {
             tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
-        serverStatusResponse.readConcernCounters.transactionOps.snapshot.hasOwnProperty("withClusterTime"),
+        serverStatusResponse.readConcernCounters.transactionOps.snapshot.hasOwnProperty(
+            "withClusterTime",
+        ),
         "Missing 'withClusterTime' from 'readConcernCounters.transactionOps.snapshot'\n" +
             tojson(serverStatusResponse.readConcernCounters),
     );
     assert(
-        serverStatusResponse.readConcernCounters.transactionOps.snapshot.hasOwnProperty("withoutClusterTime"),
+        serverStatusResponse.readConcernCounters.transactionOps.snapshot.hasOwnProperty(
+            "withoutClusterTime",
+        ),
         "Missing 'withoutClusterTime' from 'readConcernCounters.transactionOps.snapshot'\n" +
             tojson(serverStatusResponse.readConcernCounters),
     );
@@ -148,7 +161,12 @@ function verifyServerStatusChange(
 
             assert(
                 newParent.hasOwnProperty(pathComponents[i]),
-                "newStats did not contain component " + i + " of path " + fieldPath + ", newStats: " + tojson(newStats),
+                "newStats did not contain component " +
+                    i +
+                    " of path " +
+                    fieldPath +
+                    ", newStats: " +
+                    tojson(newStats),
             );
             newParent = newParent[pathComponents[i]];
         }
@@ -162,7 +180,10 @@ function verifyServerStatusChange(
         }
         assert(
             newParent.hasOwnProperty(lastPathComponent),
-            "newStats did not contain last component of path " + fieldPath + ", newStats: " + tojson(newStats),
+            "newStats did not contain last component of path " +
+                fieldPath +
+                ", newStats: " +
+                tojson(newStats),
         );
         assert.eq(
             initialValue + expectedIncrement,
@@ -246,12 +267,21 @@ for (let level of ["none", "local", "available", "snapshot", "majority", "linear
     verifyServerStatusChange(serverStatus, newStatus, level, 1);
     serverStatus = newStatus;
 
-    assert.commandWorked(testDB.runCommand({aggregate: collName, pipeline: [], cursor: {}, readConcern: readConcern}));
+    assert.commandWorked(
+        testDB.runCommand({
+            aggregate: collName,
+            pipeline: [],
+            cursor: {},
+            readConcern: readConcern,
+        }),
+    );
     newStatus = getServerStatus(testDB);
     verifyServerStatusChange(serverStatus, newStatus, level, 1);
     serverStatus = newStatus;
 
-    assert.commandWorked(testDB.runCommand({distinct: collName, key: "_id", readConcern: readConcern}));
+    assert.commandWorked(
+        testDB.runCommand({distinct: collName, key: "_id", readConcern: readConcern}),
+    );
     newStatus = getServerStatus(testDB);
     verifyServerStatusChange(serverStatus, newStatus, level, 1);
     serverStatus = newStatus;
@@ -285,7 +315,9 @@ for (let level of ["none", "local", "available", "snapshot", "majority", "linear
 
     // getMore does not count toward readConcern metrics. getMore inherits the readConcern of the
     // originating command.
-    let res = assert.commandWorked(testDB.runCommand({find: collName, batchSize: 0, readConcern: readConcern}));
+    let res = assert.commandWorked(
+        testDB.runCommand({find: collName, batchSize: 0, readConcern: readConcern}),
+    );
     serverStatus = getServerStatus(testDB);
     assert.commandWorked(testDB.runCommand({getMore: res.cursor.id, collection: collName}));
     newStatus = getServerStatus(testDB);
@@ -299,11 +331,41 @@ let insertTimestamp = assert.commandWorked(
 jsTestLog("Testing non-transaction reads with atClusterTime");
 serverStatus = getServerStatus(testDB);
 assert.commandWorked(
-    testDB.runCommand({find: "atClusterTime", readConcern: {level: "snapshot", atClusterTime: insertTimestamp}}),
+    testDB.runCommand({
+        find: "atClusterTime",
+        readConcern: {level: "snapshot", atClusterTime: insertTimestamp},
+    }),
 );
 newStatus = getServerStatus(testDB);
 verifyServerStatusChange(serverStatus, newStatus, "snapshot", 1, {atClusterTime: true});
 serverStatus = newStatus;
+
+// Partial readConcern (afterClusterTime only, no level) without any CWRC configured: the
+// server backfills the implicit local default, which is recorded under
+// noneInfo.implicitDefault. Must run before any CWRC is set because there's no documented
+// way to unset a CWRC once configured.
+{
+    jsTestLog("Testing afterClusterTime-only read with no CWRC configured");
+    const ts = assert.commandWorked(
+        testDB.runCommand({
+            insert: "atClusterTime",
+            documents: [{}],
+            writeConcern: {w: "majority"},
+        }),
+    ).operationTime;
+    serverStatus = getServerStatus(testDB);
+    assert.commandWorked(
+        testDB.runCommand({find: "atClusterTime", readConcern: {afterClusterTime: ts}}),
+    );
+    newStatus = getServerStatus(testDB);
+    verifyServerStatusChange(
+        serverStatus,
+        newStatus,
+        ["none", "noneInfo.implicitDefault.local"],
+        1,
+    );
+    serverStatus = newStatus;
+}
 
 // Transaction reads.
 for (let level of ["none", "local", "snapshot", "majority"]) {
@@ -326,7 +388,9 @@ for (let level of ["none", "local", "snapshot", "majority"]) {
     serverStatus = newStatus;
 
     // Run an insert in the same transaction. This should not count toward the readConcern metrics.
-    assert.commandWorked(sessionDb.runCommand({insert: "transaction", documents: [{level: level}]}));
+    assert.commandWorked(
+        sessionDb.runCommand({insert: "transaction", documents: [{level: level}]}),
+    );
     newStatus = getServerStatus(testDB);
     verifyServerStatusChange(serverStatus, newStatus, level, 0, {isTransaction: true});
     assert.commandWorked(session.abortTransaction_forTesting());
@@ -343,19 +407,27 @@ serverStatus = getServerStatus(testDB);
 
 assert.eq(sessionColl.find().itcount(), 1);
 newStatus = getServerStatus(testDB);
-verifyServerStatusChange(serverStatus, newStatus, "snapshot", 1, {isTransaction: true, atClusterTime: true});
+verifyServerStatusChange(serverStatus, newStatus, "snapshot", 1, {
+    isTransaction: true,
+    atClusterTime: true,
+});
 serverStatus = newStatus;
 
 // Perform another read in the same transaction.
 assert.eq(sessionColl.find().itcount(), 1);
 newStatus = getServerStatus(testDB);
-verifyServerStatusChange(serverStatus, newStatus, "snapshot", 1, {isTransaction: true, atClusterTime: true});
+verifyServerStatusChange(serverStatus, newStatus, "snapshot", 1, {
+    isTransaction: true,
+    atClusterTime: true,
+});
 assert.commandWorked(session.abortTransaction_forTesting());
 
 // Non-transaction CWRC reads.
 for (let level of ["local", "available", "majority"]) {
     jsTestLog("Testing non-transaction reads with CWRC readConcern " + level);
-    assert.commandWorked(primary.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: level}}));
+    assert.commandWorked(
+        primary.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: level}}),
+    );
 
     assert.commandWorked(testDB.runCommand({find: collName}));
     newStatus = getServerStatus(testDB);
@@ -405,29 +477,70 @@ for (let level of ["local", "available", "majority"]) {
     verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 0);
 }
 
+// Non-transaction reads with a partial readConcern (afterClusterTime only, no level) must
+// inherit the CWRC level and count under noneInfo.CWRC, not under explicitLevelCount or
+// implicitDefault. Skips "available" because afterClusterTime requires
+// majority/local/snapshot. Uses a separate collection so subsequent tests' count
+// invariants on `collName` are preserved.
+const afterClusterTimeColl = "after_cluster_time_metrics";
+for (let level of ["local", "majority"]) {
+    jsTestLog("Testing afterClusterTime-only read with CWRC readConcern " + level);
+    assert.commandWorked(
+        primary.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: level}}),
+    );
+
+    // Get a current operationTime via a majority-committed write so the read does not block.
+    const insertRes = assert.commandWorked(
+        testDB.runCommand({
+            insert: afterClusterTimeColl,
+            documents: [{}],
+            writeConcern: {w: "majority"},
+        }),
+    );
+    const ts = insertRes.operationTime;
+    serverStatus = getServerStatus(testDB);
+
+    assert.commandWorked(
+        testDB.runCommand({find: afterClusterTimeColl, readConcern: {afterClusterTime: ts}}),
+    );
+    newStatus = getServerStatus(testDB);
+    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 1);
+    serverStatus = newStatus;
+}
+
 // Transaction CWRC reads.
 for (let level of ["local", "majority"]) {
     jsTestLog("Testing transaction reads with CWRC readConcern " + level);
-    assert.commandWorked(primary.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: level}}));
+    assert.commandWorked(
+        primary.adminCommand({setDefaultRWConcern: 1, defaultReadConcern: {level: level}}),
+    );
 
     session.startTransaction({readConcern: {}});
 
     assert.eq(sessionColl.find().itcount(), 1);
     newStatus = getServerStatus(testDB);
-    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 1, {isTransaction: true});
+    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 1, {
+        isTransaction: true,
+    });
     serverStatus = newStatus;
 
     // Run a second find in the same transaction. It will inherit the readConcern from the
     // transaction.
     assert.eq(sessionColl.find().itcount(), 1);
     newStatus = getServerStatus(testDB);
-    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 1, {isTransaction: true});
+    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 1, {
+        isTransaction: true,
+    });
     serverStatus = newStatus;
 
     // Run an insert in the same transaction. This should not count toward the readConcern metrics.
-    assert.commandWorked(sessionDb.runCommand({insert: "transaction", documents: [{level: level}]}));
+    assert.commandWorked(
+        sessionDb.runCommand({insert: "transaction", documents: [{level: level}]}),
+    );
     newStatus = getServerStatus(testDB);
-    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 0, {isTransaction: true});
+    verifyServerStatusChange(serverStatus, newStatus, ["none", "noneInfo.CWRC." + level], 0, {
+        isTransaction: true,
+    });
     assert.commandWorked(session.abortTransaction_forTesting());
     serverStatus = newStatus;
 }

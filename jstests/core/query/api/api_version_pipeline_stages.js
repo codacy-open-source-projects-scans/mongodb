@@ -11,17 +11,6 @@
  */
 
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124193): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 // This test makes assertions about sessions on a particular node, which are not compatible with
 // random mongos dispatching.
@@ -44,44 +33,10 @@ const unstablePipelines = [
     [{$listLocalSessions: {}}],
     [{$listSessions: {}}],
     [{$planCacheStats: {}}],
+    [{$joinPlanCacheStats: {}}],
     [{$unionWith: {coll: "coll2", pipeline: [{$collStats: {latencyStats: {}}}]}}],
     [{$lookup: {from: "coll2", as: "out", pipeline: [{$indexStats: {}}]}}],
     [{$facet: {field1: [], field2: [{$indexStats: {}}]}}],
-    [{$rankFusion: {input: {pipelines: {field1: [{$sort: {foo: 1}}]}}}}],
-    [{$score: {score: 10}}],
-    [
-        {
-            $setWindowFields: {
-                sortBy: {_id: 1},
-                output: {
-                    "relativeXValue": {
-                        $minMaxScaler: {
-                            input: "$x",
-                        },
-                        window: {range: ["unbounded", "unbounded"]},
-                    },
-                },
-            },
-        },
-    ],
-    [
-        {
-            $scoreFusion: {
-                input: {
-                    pipelines: {
-                        score2: [
-                            {
-                                $search: {index: "search_index", text: {query: "mystery", path: "genres"}},
-                            },
-                            {$match: {author: "dave"}},
-                        ],
-                    },
-                    normalization: "none",
-                },
-                combination: {weights: {score2: 5}},
-            },
-        },
-    ],
 ];
 
 function assertAggregateFailsWithAPIStrict(pipeline) {
@@ -135,7 +90,9 @@ assertAggregateFailsWithAPIStrict([{$collStats: {latencyStats: {histograms: true
 assertAggregateFailsWithAPIStrict([{$collStats: {storageStats: {}}}]);
 assertAggregateFailsWithAPIStrict([{$collStats: {queryExecStats: {}}}]);
 assertAggregateFailsWithAPIStrict([{$collStats: {latencyStats: {}, queryExecStats: {}}}]);
-assertAggregateFailsWithAPIStrict([{$collStats: {latencyStats: {}, storageStats: {scale: 1024}, queryExecStats: {}}}]);
+assertAggregateFailsWithAPIStrict([
+    {$collStats: {latencyStats: {}, storageStats: {scale: 1024}, queryExecStats: {}}},
+]);
 
 assert.commandWorked(
     testDb.runCommand({

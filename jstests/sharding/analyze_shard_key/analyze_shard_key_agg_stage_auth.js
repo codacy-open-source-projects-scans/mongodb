@@ -7,8 +7,9 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_sampling_util.js";
 
-function runTest(primary) {
+function runTest(primary, hmacKeyConn = primary) {
     const dbName = "testDb";
     const collName0 = "testColl0";
     const collName1 = "testColl1";
@@ -16,8 +17,24 @@ function runTest(primary) {
     const ns1 = dbName + "." + collName1;
 
     const adminDb = primary.getDB("admin");
-    assert.commandWorked(adminDb.runCommand({createUser: "super", pwd: "super", roles: ["__system"]}));
+    assert.commandWorked(
+        adminDb.runCommand({createUser: "super", pwd: "super", roles: ["__system"]}),
+    );
     assert(adminDb.auth("super", "super"));
+    // HMAC keys live on the config server. Authenticate via a fresh connection
+    // rather than hmacKeyConn directly because teardown re-authenticates the cached getPrimary()
+    // connection as __system, which fails if it was already authenticated as a different user.
+    let hmacConn = primary;
+    if (hmacKeyConn !== primary) {
+        assert.commandWorked(
+            hmacKeyConn
+                .getDB("admin")
+                .runCommand({createUser: "super", pwd: "super", roles: ["__system"]}),
+        );
+        hmacConn = new Mongo(hmacKeyConn.host);
+        assert(hmacConn.getDB("admin").auth("super", "super"));
+    }
+    QuerySamplingUtil.awaitHMACKeys(hmacConn);
     const testDb = adminDb.getSiblingDB(dbName);
     const docs = [];
     const numDocs = 1000;
@@ -64,7 +81,9 @@ function runTest(primary) {
         testDb.runCommand({
             createRole: "role_ns0_priv",
             roles: [],
-            privileges: [{resource: {db: dbName, collection: collName0}, actions: ["analyzeShardKey"]}],
+            privileges: [
+                {resource: {db: dbName, collection: collName0}, actions: ["analyzeShardKey"]},
+            ],
         }),
     );
     assert.commandWorked(
@@ -77,7 +96,10 @@ function runTest(primary) {
     assert(adminDb.logout());
     // Verify that the user is authorized to run the aggregation stage against ns0 but not ns1.
     assert(testDb.auth("user_with_explicit_ns0_priv", "pwd"));
-    assert.commandWorkedOrFailedWithCode(testDb.runCommand(aggregateCmd0), ErrorCodes.ShardNotFound);
+    assert.commandWorkedOrFailedWithCode(
+        testDb.runCommand(aggregateCmd0),
+        ErrorCodes.ShardNotFound,
+    );
     assert.commandFailedWithCode(testDb.runCommand(aggregateCmd1), ErrorCodes.Unauthorized);
     assert(testDb.logout());
 
@@ -93,8 +115,14 @@ function runTest(primary) {
     assert(adminDb.logout());
     // Verify that the user is authorized to run the aggregation stage against both ns0 and ns1.
     assert(adminDb.auth("user_cluster_mgr", "pwd"));
-    assert.commandWorkedOrFailedWithCode(testDb.runCommand(aggregateCmd0), ErrorCodes.ShardNotFound);
-    assert.commandWorkedOrFailedWithCode(testDb.runCommand(aggregateCmd1), ErrorCodes.ShardNotFound);
+    assert.commandWorkedOrFailedWithCode(
+        testDb.runCommand(aggregateCmd0),
+        ErrorCodes.ShardNotFound,
+    );
+    assert.commandWorkedOrFailedWithCode(
+        testDb.runCommand(aggregateCmd1),
+        ErrorCodes.ShardNotFound,
+    );
     assert(adminDb.logout());
 
     // Set up a user with the 'enableSharding' role.
@@ -109,15 +137,21 @@ function runTest(primary) {
     assert(adminDb.logout());
     // Verify that the user is authorized to run the aggregation command against both ns0 and ns1.
     assert(adminDb.auth("user_enable_sharding", "pwd"));
-    assert.commandWorkedOrFailedWithCode(testDb.runCommand(aggregateCmd0), ErrorCodes.ShardNotFound);
-    assert.commandWorkedOrFailedWithCode(testDb.runCommand(aggregateCmd1), ErrorCodes.ShardNotFound);
+    assert.commandWorkedOrFailedWithCode(
+        testDb.runCommand(aggregateCmd0),
+        ErrorCodes.ShardNotFound,
+    );
+    assert.commandWorkedOrFailedWithCode(
+        testDb.runCommand(aggregateCmd1),
+        ErrorCodes.ShardNotFound,
+    );
     assert(adminDb.logout());
 }
 
 {
     const st = new ShardingTest({shards: 1, keyFile: "jstests/libs/key1"});
 
-    runTest(st.rs0.getPrimary());
+    runTest(st.rs0.getPrimary(), st.configRS.getPrimary());
 
     st.stop();
 }

@@ -2,14 +2,21 @@
  * Contains common test utilities for e2e search tests involving mongot.
  */
 import {stringifyArray} from "jstests/aggregation/extras/utils.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     createSearchIndex,
     dropSearchIndex,
     waitForSearchIndexQueryable,
 } from "jstests/libs/query_integration_search/search.js";
-import {getMovieData, getMovieDataWithEnrichedTitle} from "jstests/with_mongot/e2e_lib/data/movies.js";
+import {
+    getMovieData,
+    getMovieDataWithEnrichedTitle,
+} from "jstests/with_mongot/e2e_lib/data/movies.js";
 import {getRentalData} from "jstests/with_mongot/e2e_lib/data/rentals.js";
-import {assertViewAppliedCorrectly, assertViewNotApplied} from "jstests/with_mongot/e2e_lib/explain_utils.js";
+import {
+    assertViewAppliedCorrectly,
+    assertViewNotApplied,
+} from "jstests/with_mongot/e2e_lib/explain_utils.js";
 
 /**
  * This function is used in place of direct assertions between expected and actual document array
@@ -49,6 +56,15 @@ import {assertViewAppliedCorrectly, assertViewNotApplied} from "jstests/with_mon
  *     can be kept low, but an outlier can still be accepted, without opening up the tolerance to
  *     something needlessly large for all docs.
  */
+/**
+ * Strips the 'score' field from every document in the array. Useful before calling
+ * assertDocArrExpectedFuzzy() when the expected and actual arrays come from two separate search
+ * queries: assertDocArrExpectedFuzzy() does an exact docEq per matched document, and exact
+ * floating-point comparison of search scores between two separate mongot queries can flake. Do not
+ * use this when the test intends to verify exact score values.
+ */
+export const stripScores = (docArr) => docArr.map(({score, ...rest}) => rest);
+
 export const defaultTolerancePercentage = 0.3;
 export const FuzzingStrategy = Object.freeze({
     EnforceTolerancePerDoc: 0,
@@ -90,7 +106,9 @@ export function assertDocArrExpectedFuzzy(
     assert(Array.isArray(actualDocArr), "'actualDocArr' must be of type array.");
     assert(
         tolerancePercentage >= 0 && tolerancePercentage <= 1,
-        "'tolerancePercentage' must be between 0 and 1 (inclusive), but instead is: '" + tolerancePercentage + "'.",
+        "'tolerancePercentage' must be between 0 and 1 (inclusive), but instead is: '" +
+            tolerancePercentage +
+            "'.",
     );
     assert(
         fuzzingStrategy == FuzzingStrategy.EnforceTolerancePerDoc ||
@@ -173,14 +191,20 @@ export function assertDocArrExpectedFuzzy(
     if (tolerancePercentage != 0) {
         // If tolerance percentage is not 0, positional tolerance per doc should be at least 1.
         // Otherwise, round the resulting decimal to the nearest whole number.
-        positionalTolerancePerDoc = Math.max(Math.round(expectedDocArr.length * tolerancePercentage), 1);
+        positionalTolerancePerDoc = Math.max(
+            Math.round(expectedDocArr.length * tolerancePercentage),
+            1,
+        );
     }
 
     // Helper function when the FuzzingStrategy is 'EnforceTolerancePerDoc'.
     // Returns a boolean for if each doc is within positional tolerance.
     function withinTolerance(expectedPos, actualPos) {
         let lowerLimit = Math.max(0, expectedPos - positionalTolerancePerDoc);
-        let upperLimit = Math.min(expectedDocArr.length - 1, expectedPos + positionalTolerancePerDoc);
+        let upperLimit = Math.min(
+            expectedDocArr.length - 1,
+            expectedPos + positionalTolerancePerDoc,
+        );
         if (actualPos < lowerLimit || actualPos > upperLimit) {
             return false;
         }
@@ -251,7 +275,11 @@ export function assertDocArrExpectedFuzzy(
         );
 
         // Set this entry back as seen for future duplication checks.
-        expectedDocMap.set(actualId, {pos: expectedDocEntry.expectedPos, seenInActual: true, actualPos: i});
+        expectedDocMap.set(actualId, {
+            pos: expectedDocEntry.expectedPos,
+            seenInActual: true,
+            actualPos: i,
+        });
 
         // Ensure that the entire actual document matches the expected document.
         assert.docEq(
@@ -334,13 +362,65 @@ export function assertDocArrExpectedFuzzy(
  *     later use to examine this document.
  */
 export function waitUntilDocIsVisibleByQuery({docId, coll, queryPipeline}) {
-    assert.soon(() => coll.aggregate(queryPipeline.concat([{$match: {_id: docId}}])).itcount() === 1);
+    assert.soon(
+        () => coll.aggregate(queryPipeline.concat([{$match: {_id: docId}}])).itcount() === 1,
+    );
+}
+
+/**
+ * $vectorSearch inside a $lookup/$graphLookup subpipeline is only supported when
+ * featureFlagExtensionsInsideHybridSearch is enabled. If the flag is off, this asserts that
+ * running the pipeline is rejected with error 51047. If the flag is on, it invokes 'onAllowed' so
+ * the caller can assert success.
+ *
+ * TODO SERVER-121094 Remove this once featureFlagExtensionsInsideHybridSearch is removed.
+ *
+ * @param {DB} db - used to check the feature flag value.
+ * @param {Function} runPipeline - runs the aggregate command and returns its raw result, e.g.
+ *     `() => coll.runCommand("aggregate", {pipeline, cursor: {}})`.
+ * @param {Function} onAllowed - invoked with no arguments to assert success when the flag is
+ *     enabled.
+ */
+export function assertIfVectorSearchNotAllowedInLookup(db, runPipeline, onAllowed) {
+    if (!FeatureFlagUtil.isPresentAndEnabled(db, "ExtensionsInsideHybridSearch")) {
+        assert.commandFailedWithCode(runPipeline(), 51047);
+        return;
+    }
+    onAllowed();
+}
+
+/**
+ * A $lookup with a $rankFusion/$scoreFusion subpipeline using localField/foreignField join syntax
+ * is only supported when featureFlagExtensionsInsideHybridSearch is enabled. If the flag is off,
+ * this asserts that running the pipeline is rejected with error 12982600. If the flag is on, it
+ * invokes 'onAllowed' so the caller can assert success.
+ *
+ * @param {DB} db - used to check the feature flag value.
+ * @param {Function} runPipeline - runs the aggregate command and returns its raw result, e.g.
+ *     `() => coll.runCommand("aggregate", {pipeline, cursor: {}})`.
+ * @param {Function} onAllowed - invoked with no arguments to assert success when the flag is
+ *     enabled.
+ */
+export function assertIfLocalForeignFieldNotAllowedInHybridSearchLookup(
+    db,
+    runPipeline,
+    onAllowed,
+) {
+    if (!FeatureFlagUtil.isPresentAndEnabled(db, "ExtensionsInsideHybridSearch")) {
+        assert.commandFailedWithCode(runPipeline(), 12982600);
+        return;
+    }
+    onAllowed();
 }
 
 export const datasets = {
     MOVIES: {id: 1, indexName: "moviesIndex"},
     RENTALS: {id: 2},
-    MOVIES_WITH_ENRICHED_TITLE: {id: 3, viewName: "moviesWithEnrichedTitle", indexName: "moviesWithEnrichedTitleIndex"},
+    MOVIES_WITH_ENRICHED_TITLE: {
+        id: 3,
+        viewName: "moviesWithEnrichedTitle",
+        indexName: "moviesWithEnrichedTitleIndex",
+    },
     ACTION_MOVIES: {id: 4, viewName: "actionMovies", indexName: "actionMoviesIndex"},
     // Nested view.
     ACTION_MOVIES_WITH_ENRICHED_TITLE: {
@@ -429,7 +509,11 @@ export function createSearchIndexesWithCleanup(config, isStoredSource = true) {
  * @param {Function} testFn - The test function to execute with the created indexes. This function
  *     must take in one parameter which specifies whether the tests are storedSource or not.
  */
-export function createSearchIndexesAndExecuteTests(indexConfig, testFn, runWithStoredSource = true) {
+export function createSearchIndexesAndExecuteTests(
+    indexConfig,
+    testFn,
+    runWithStoredSource = true,
+) {
     // Create indexes with cleanup function.
     const cleanup = createSearchIndexesWithCleanup(indexConfig);
     try {

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -45,12 +18,14 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(ReplaceRoot);
 
@@ -75,7 +50,7 @@ public:
         return TransformerType::kReplaceRoot;
     }
 
-    Document applyTransformation(const Document& input) const final;
+    Document applyTransformation(const Document& input, const EvaluationContext& ctx) const final;
 
     // Optimize the newRoot expression.
     void optimize() final {
@@ -83,9 +58,7 @@ public:
         // longer be executed in SBE. When that happens, the expression optimizer updates the
         // 'sbeCompatibility' value in the ExpressionContext, which we can use to update the
         // '_sbeCompatibility' value for this $replaceRoot operation.
-        SbeCompatibility originalSbeCompatibility =
-            _expCtx->sbeCompatibilityExchange(_sbeCompatibility);
-        ON_BLOCK_EXIT([&] { this->_expCtx->setSbeCompatibility(originalSbeCompatibility); });
+        TemporarySbeCompatibilityGuard guard(_expCtx.get(), _sbeCompatibility);
 
         _newRoot = _newRoot->optimize();
 
@@ -101,7 +74,8 @@ public:
         return fieldPath && fieldPath->isROOT();
     }
 
-    Document serializeTransformation(const SerializationOptions& options = {}) const final {
+    Document serializeTransformation(
+        const query_shape::SerializationOptions& options = {}) const final {
         return Document{{"newRoot", _newRoot->serialize(options)}};
     }
 
@@ -193,9 +167,9 @@ private:
     // This can be helpful if you are using $replaceRoot as part of an alias expansion as we do in
     // $documents for example. Goes first in the template error message below.
     std::string _errMsgContextForNonObject;
-    static constexpr StringData kErrorTemplate =
+    static constexpr std::string_view kErrorTemplate =
         "{} must evaluate to an object, but resulting value was: {}. Type of resulting value: "
-        "'{}'. Input document: {}"_sd;
+        "'{}'. Input document: {}"sv;
 
     SbeCompatibility _sbeCompatibility = SbeCompatibility::notCompatible;
 };
@@ -212,8 +186,8 @@ private:
  */
 class DocumentSourceReplaceRoot final {
 public:
-    static constexpr StringData kStageName = "$replaceRoot"_sd;
-    static constexpr StringData kAliasNameReplaceWith = "$replaceWith"_sd;
+    static constexpr std::string_view kStageName = "$replaceRoot"sv;
+    static constexpr std::string_view kAliasNameReplaceWith = "$replaceWith"sv;
     /**
      * Creates a new replaceRoot DocumentSource from the BSON specification of the $replaceRoot
      * stage.

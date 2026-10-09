@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -49,12 +22,14 @@
 #include <cmath>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace expression_evaluation_test {
+using namespace std::literals::string_view_literals;
 
 class ExpressionBaseTest : public unittest::Test {
 public:
@@ -640,10 +615,10 @@ public:
 };
 
 TEST_F(ExpressionBinarySizeTest, HandlesStrings) {
-    assertEval("abc"_sd, 3);
-    assertEval(""_sd, 0);
-    assertEval("ab\0c"_sd, 4);
-    assertEval("abc\0"_sd, 4);
+    assertEval("abc"sv, 3);
+    assertEval(""sv, 0);
+    assertEval("ab\0c"sv, 4);
+    assertEval("abc\0"sv, 4);
 }
 
 TEST_F(ExpressionBinarySizeTest, HandlesBinData) {
@@ -674,9 +649,9 @@ public:
 };
 
 TEST_F(ExpressionFirstTest, HandlesArrays) {
-    assertEval(std::vector<Value>{Value("A"_sd)}, "A"_sd);
-    assertEval(std::vector<Value>{Value("A"_sd), Value("B"_sd)}, "A"_sd);
-    assertEval(std::vector<Value>{Value("A"_sd), Value("B"_sd), Value("C"_sd)}, "A"_sd);
+    assertEval(std::vector<Value>{Value("A"sv)}, "A"sv);
+    assertEval(std::vector<Value>{Value("A"sv), Value("B"sv)}, "A"sv);
+    assertEval(std::vector<Value>{Value("A"sv), Value("B"sv), Value("C"sv)}, "A"sv);
 }
 
 TEST_F(ExpressionFirstTest, HandlesEmptyArray) {
@@ -690,7 +665,7 @@ TEST_F(ExpressionFirstTest, HandlesNullish) {
 }
 
 TEST_F(ExpressionFirstTest, RejectsNonArrays) {
-    assertEvalFails("asdf"_sd);
+    assertEvalFails("asdf"sv);
     assertEvalFails(BSONBinData("asdf", 4, BinDataGeneral));
 }
 
@@ -709,9 +684,9 @@ public:
 };
 
 TEST_F(ExpressionLastTest, HandlesArrays) {
-    assertEval(std::vector<Value>{Value("A"_sd)}, "A"_sd);
-    assertEval(std::vector<Value>{Value("A"_sd), Value("B"_sd)}, "B"_sd);
-    assertEval(std::vector<Value>{Value("A"_sd), Value("B"_sd), Value("C"_sd)}, "C"_sd);
+    assertEval(std::vector<Value>{Value("A"sv)}, "A"sv);
+    assertEval(std::vector<Value>{Value("A"sv), Value("B"sv)}, "B"sv);
+    assertEval(std::vector<Value>{Value("A"sv), Value("B"sv), Value("C"sv)}, "C"sv);
 }
 
 TEST_F(ExpressionLastTest, HandlesEmptyArray) {
@@ -725,7 +700,7 @@ TEST_F(ExpressionLastTest, HandlesNullish) {
 }
 
 TEST_F(ExpressionLastTest, RejectsNonArrays) {
-    assertEvalFails("asdf"_sd);
+    assertEvalFails("asdf"sv);
     assertEvalFails(BSONBinData("asdf", 4, BinDataGeneral));
 }
 

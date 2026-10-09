@@ -6,8 +6,9 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_sampling_util.js";
 
-function runTest(conn) {
+function runTest(conn, hmacKeyConn = conn) {
     const dbName = "testDb";
     const collName0 = "testColl0";
     const collName1 = "testColl1";
@@ -15,8 +16,18 @@ function runTest(conn) {
     const ns1 = dbName + "." + collName1;
 
     const adminDb = conn.getDB("admin");
-    assert.commandWorked(adminDb.runCommand({createUser: "super", pwd: "super", roles: ["__system"]}));
+    assert.commandWorked(
+        adminDb.runCommand({createUser: "super", pwd: "super", roles: ["__system"]}),
+    );
     assert(adminDb.auth("super", "super"));
+    let hmacConn = conn;
+    if (hmacKeyConn !== conn) {
+        // Open a fresh connection so we don't permanently authenticate the cached
+        // getPrimary() connection that the test harness reuses during teardown.
+        hmacConn = new Mongo(hmacKeyConn.host);
+        assert(hmacConn.getDB("admin").auth("super", "super"));
+    }
+    QuerySamplingUtil.awaitHMACKeys(hmacConn);
     const testDb = adminDb.getSiblingDB(dbName);
     const docs = [];
     const numDocs = 1000;
@@ -34,8 +45,14 @@ function runTest(conn) {
     // Verify that the user is not authorized to run the analyzeShardKey command against ns0 or
     // ns1.
     assert(adminDb.auth("user_no_priv", "pwd"));
-    assert.commandFailedWithCode(adminDb.runCommand({"analyzeShardKey": ns0, key: {_id: 1}}), ErrorCodes.Unauthorized);
-    assert.commandFailedWithCode(adminDb.runCommand({"analyzeShardKey": ns1, key: {_id: 1}}), ErrorCodes.Unauthorized);
+    assert.commandFailedWithCode(
+        adminDb.runCommand({"analyzeShardKey": ns0, key: {_id: 1}}),
+        ErrorCodes.Unauthorized,
+    );
+    assert.commandFailedWithCode(
+        adminDb.runCommand({"analyzeShardKey": ns1, key: {_id: 1}}),
+        ErrorCodes.Unauthorized,
+    );
     assert(adminDb.logout());
 
     // Set up a user with the 'analyzeShardKey' privilege against ns0.
@@ -44,7 +61,9 @@ function runTest(conn) {
         adminDb.runCommand({
             createRole: "role_ns0_priv",
             roles: [],
-            privileges: [{resource: {db: dbName, collection: collName0}, actions: ["analyzeShardKey"]}],
+            privileges: [
+                {resource: {db: dbName, collection: collName0}, actions: ["analyzeShardKey"]},
+            ],
         }),
     );
     assert.commandWorked(
@@ -59,7 +78,10 @@ function runTest(conn) {
     // ns1.
     assert(adminDb.auth("user_with_explicit_ns0_priv", "pwd"));
     assert.commandWorked(adminDb.runCommand({"analyzeShardKey": ns0, key: {_id: 1}}));
-    assert.commandFailedWithCode(adminDb.runCommand({"analyzeShardKey": ns1, key: {_id: 1}}), ErrorCodes.Unauthorized);
+    assert.commandFailedWithCode(
+        adminDb.runCommand({"analyzeShardKey": ns1, key: {_id: 1}}),
+        ErrorCodes.Unauthorized,
+    );
     assert(adminDb.logout());
 
     // Set up a user with the 'clusterManager' role.
@@ -100,7 +122,7 @@ function runTest(conn) {
 {
     const st = new ShardingTest({shards: 1, keyFile: "jstests/libs/key1"});
 
-    runTest(st.s);
+    runTest(st.s, st.configRS.getPrimary());
 
     st.stop();
 }

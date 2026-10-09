@@ -1,12 +1,14 @@
 /**
- * Overrides runCommand so operations that encounter the BackgroundOperationInProgressForNs/Db error
- * codes automatically retry.
+ * Overrides runCommand so that operations encountering errors caused by conflicting migrations
+ * (usually balancer-issued requests) get automatically retried.
  *
- * Suites can extend the retry surface via TestData:
- *   TestData.migrationRetryExtraDDLCommands  - array of extra command names to retry
- *   TestData.migrationRetryExtraDDLErrors    - array of extra ErrorCodes names to retry
- *   TestData.migrationRetryMatchFCVErrors    - boolean, retry FCV-related CommandNotSupported
- *   TestData.migrationRetryWriteErrors       - boolean, also retry on matching writeErrors
+ * Individual tests can control whether to retry on DDL errors by setting TestData.implicitRetryDdlOnConflictWithMigration (defaults to true).
+ *
+ * Suites can further customize the retry surface via TestData:
+ *   TestData.migrationRetryExtraDDLCommands  - array of extra DDL commands to be assessed according to implicitRetryDdlOnConflictWithMigration
+ *   TestData.migrationRetryExtraDDLErrors    - array of extra ErrorCodes names to be assessed according to implicitRetryDdlOnConflictWithMigration
+ *   TestData.migrationRetryMatchFCVErrors    - boolean, retry FCV-related CommandNotSupported (defaults to false)
+ *   TestData.migrationRetryWriteErrors       - boolean, also retry on matching writeErrors (defaults to false)
  *                                              (e.g. insert returning ok:1 with writeErrors)
  */
 
@@ -34,7 +36,23 @@ const MigrationRetryConfig = {
     retryJitterMS: TestData.migrationRetryJitterMS || 0,
 };
 
-function _runAndExhaustQueryWithRetryUponMigration(conn, commandName, commandObj, func, makeFuncArgs) {
+function _isRetryableDDLCommand(commandName) {
+    const retryOnDDLError = TestData.implicitRetryDdlOnConflictWithMigration ?? true;
+    return retryOnDDLError && MigrationRetryConfig.ddlCommands.has(commandName);
+}
+
+function _isRetryableDDLError(errorCode) {
+    const retryOnDDLError = TestData.implicitRetryDdlOnConflictWithMigration ?? true;
+    return retryOnDDLError && MigrationRetryConfig.ddlErrors.has(errorCode);
+}
+
+function _runAndExhaustQueryWithRetryUponMigration(
+    conn,
+    commandName,
+    commandObj,
+    func,
+    makeFuncArgs,
+) {
     let queryResponse;
     let attempt = 0;
     const lsid = commandObj["lsid"];
@@ -48,14 +66,21 @@ function _runAndExhaustQueryWithRetryUponMigration(conn, commandName, commandObj
 
             queryResponse = func.apply(conn, makeFuncArgs(commandObj));
 
-            if (commandName === "explain" && RetryableWritesUtil.shouldRetryExplainCommand(queryResponse)) {
+            if (
+                commandName === "explain" &&
+                RetryableWritesUtil.shouldRetryExplainCommand(queryResponse)
+            ) {
                 jsTest.log(`Retrying failed explain command`);
                 return stopRetrying;
             }
 
             let latestBatchResponse = queryResponse;
 
-            while (latestBatchResponse.ok === 1 && latestBatchResponse.cursor && latestBatchResponse.cursor.id != 0) {
+            while (
+                latestBatchResponse.ok === 1 &&
+                latestBatchResponse.cursor &&
+                latestBatchResponse.cursor.id != 0
+            ) {
                 const ns = queryResponse.cursor.ns;
                 const collName = getCollectionNameFromFullNamespace(ns);
 
@@ -89,7 +114,7 @@ function _runAndExhaustQueryWithRetryUponMigration(conn, commandName, commandObj
             if (latestBatchResponse.ok === 1) {
                 stopRetrying = true;
             } else if (
-                !MigrationRetryConfig.ddlErrors.has(latestBatchResponse.code) &&
+                !_isRetryableDDLError(latestBatchResponse.code) &&
                 !MigrationRetryConfig.queryErrors.has(latestBatchResponse.code)
             ) {
                 // Non-retryable error detected; forward the response to the test.
@@ -99,7 +124,11 @@ function _runAndExhaustQueryWithRetryUponMigration(conn, commandName, commandObj
 
             return stopRetrying;
         },
-        () => "Timed out while retrying command '" + tojson(commandObj) + "', response: " + tojson(queryResponse),
+        () =>
+            "Timed out while retrying command '" +
+            tojson(commandObj) +
+            "', response: " +
+            tojson(queryResponse),
     );
 
     return queryResponse;
@@ -112,8 +141,10 @@ function _hasRetryableWriteError(response) {
     if (!response || response.ok !== 1 || !response.writeErrors) {
         return false;
     }
-    const errors = Array.isArray(response.writeErrors) ? response.writeErrors : [response.writeErrors];
-    return errors.some((we) => MigrationRetryConfig.ddlErrors.has(we.code));
+    const errors = Array.isArray(response.writeErrors)
+        ? response.writeErrors
+        : [response.writeErrors];
+    return errors.some((we) => _isRetryableDDLError(we.code));
 }
 
 function _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, func, makeFuncArgs) {
@@ -124,7 +155,7 @@ function _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, fun
     let attempt = 0;
     let interval;
     if (MigrationRetryConfig.retryJitterMS) {
-        interval = 500 + Math.floor(Math.random() * MigrationRetryConfig.retryJitterMS);
+        interval = 1000 + Math.floor(Math.random() * MigrationRetryConfig.retryJitterMS);
     }
 
     assert.soon(
@@ -155,7 +186,7 @@ function _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, fun
                 "): " +
                 tojson(commandResponse);
 
-            if (MigrationRetryConfig.ddlErrors.has(commandResponse.code)) {
+            if (_isRetryableDDLError(commandResponse.code)) {
                 jsTest.log.info(message);
                 return kRetry;
             }
@@ -173,7 +204,11 @@ function _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, fun
             jsTest.log.info("Done retrying " + commandName);
             return kNoRetry;
         },
-        () => "Timed out while retrying command '" + tojson(commandObj) + "', response: " + tojson(commandResponse),
+        () =>
+            "Timed out while retrying command '" +
+            tojson(commandObj) +
+            "', response: " +
+            tojson(commandResponse),
         undefined,
         interval,
     );
@@ -181,10 +216,25 @@ function _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, fun
     return commandResponse;
 }
 
-function runCommandWithRetryUponMigration(conn, dbName, commandName, commandObj, func, makeFuncArgs) {
+function runCommandWithRetryUponMigration(
+    conn,
+    dbName,
+    commandName,
+    commandObj,
+    func,
+    makeFuncArgs,
+) {
     // These are the query commands that will be retried when failing due to a concurrent chunk or
     // collection migrations.
-    const kQueryCommands = new Set(["find", "aggregate", "listIndexes", "count", "distinct", "explain"]);
+    const kQueryCommands = new Set([
+        "find",
+        "aggregate",
+        "listIndexes",
+        "count",
+        "distinct",
+        "explain",
+        "dataSize",
+    ]);
 
     if (typeof commandObj !== "object" || commandObj === null) {
         return func.apply(conn, makeFuncArgs(commandObj));
@@ -193,12 +243,35 @@ function runCommandWithRetryUponMigration(conn, dbName, commandName, commandObj,
     // A transaction can either be issued by the test file or injected by a suite override.
     const inTransaction =
         commandObj.hasOwnProperty("autocommit") ||
-        (TestData.networkErrorAndTxnOverrideConfig && TestData.networkErrorAndTxnOverrideConfig.wrapCRUDinTransactions);
+        (TestData.networkErrorAndTxnOverrideConfig &&
+            TestData.networkErrorAndTxnOverrideConfig.wrapCRUDinTransactions);
 
-    if (!inTransaction && kQueryCommands.has(commandName)) {
-        return _runAndExhaustQueryWithRetryUponMigration(conn, commandName, commandObj, func, makeFuncArgs);
-    } else if (MigrationRetryConfig.ddlCommands.has(commandName)) {
-        return _runDDLCommandWithRetryUponMigration(conn, commandName, commandObj, func, makeFuncArgs);
+    // An inline mapReduce is read-only, so it can be retried wholesale like the query commands
+    // above (e.g. when its cursor is invalidated by a moveCollection/reshardCollection swapping in
+    // a new collection UUID underneath it). A mapReduce that writes its output to a collection is
+    // intentionally excluded, since re-running it from scratch could double-apply "merge"/"reduce"
+    // output modes.
+    const isRetryableMapReduce = OverrideHelpers.isMapReduceWithInlineOutput(
+        commandName,
+        commandObj,
+    );
+
+    if (!inTransaction && (kQueryCommands.has(commandName) || isRetryableMapReduce)) {
+        return _runAndExhaustQueryWithRetryUponMigration(
+            conn,
+            commandName,
+            commandObj,
+            func,
+            makeFuncArgs,
+        );
+    } else if (_isRetryableDDLCommand(commandName)) {
+        return _runDDLCommandWithRetryUponMigration(
+            conn,
+            commandName,
+            commandObj,
+            func,
+            makeFuncArgs,
+        );
     } else {
         return func.apply(conn, makeFuncArgs(commandObj));
     }

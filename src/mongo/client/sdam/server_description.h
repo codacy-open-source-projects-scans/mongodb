@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/bson/bsonelement.h"
@@ -56,7 +30,7 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
-namespace MONGO_MOD_PUBLIC sdam {
+namespace [[MONGO_MOD_PUBLIC]] sdam {
 class ServerDescription {
     ServerDescription() = delete;
 
@@ -94,6 +68,18 @@ public:
     const boost::optional<HostAndPort>& getMe() const;
     const boost::optional<std::string>& getSetName() const;
     const std::map<std::string, std::string>& getTags() const;
+    /**
+     * Returns true if this server is tagged as an injector (i.e. has the tag
+     * _internalProcessType: INJECTOR). Injector-tagged servers belong to a standby cluster's
+     * replica set: they remain visible in the SDAM topology so heartbeats and replication
+     * tracking continue to work, but server selection (in ServerSelector) excludes them so
+     * external client traffic is routed to non-injector members.
+     */
+    bool isInjector() const;
+
+    static inline const std::string kProcessTypeTagKey = "_internalProcessType";
+    static inline const std::string kInjectorTagValue = "INJECTOR";
+
     void appendBsonTags(BSONObjBuilder& builder) const;
 
     // network attributes
@@ -224,5 +210,5 @@ bool operator==(const mongo::sdam::ServerDescription& a, const mongo::sdam::Serv
 bool operator!=(const mongo::sdam::ServerDescription& a, const mongo::sdam::ServerDescription& b);
 std::ostream& operator<<(std::ostream& os, const ServerDescriptionPtr& description);
 std::ostream& operator<<(std::ostream& os, const ServerDescription& description);
-}  // namespace MONGO_MOD_PUBLIC sdam
+}  // namespace sdam
 }  // namespace mongo

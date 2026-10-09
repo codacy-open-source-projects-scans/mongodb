@@ -29,7 +29,10 @@ function assertValidSyntax({pSpec, letSpec, msg}) {
 /**
  * Test missing or unexpected fields in $percentile spec.
  */
-assertInvalidSyntax({pSpec: {$percentile: 0.5}, msg: "Should fail if $percentile is not an object"});
+assertInvalidSyntax({
+    pSpec: {$percentile: 0.5},
+    msg: "Should fail if $percentile is not an object",
+});
 
 assertInvalidSyntax({
     pSpec: {$percentile: {input: "$x", method: "approximate"}},
@@ -74,6 +77,32 @@ assertInvalidSyntax({
     msg: "Should fail if 'p' field in $percentile is an array with any value outside of [0, 1] range",
 });
 
+// A NaN percentile must be rejected. IEEE-754 ordered comparisons against NaN are all false, so a
+// range check of the form `p < 0 || p > 1` would accept NaN, which is not a valid percentile.
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [NaN], input: "$x", method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains NaN",
+});
+
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [0.5, NaN], input: "$x", method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains NaN alongside a valid value",
+});
+
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [Infinity], input: "$x", method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains +Infinity",
+});
+
+assertInvalidSyntax({
+    pSpec: {$percentile: {p: [-Infinity], input: "$x", method: "approximate"}},
+    errorCode: 7750303,
+    msg: "Should fail if 'p' field in $percentile contains -Infinity",
+});
+
 /**
  * Test invalid 'p' field, specified as an expression.
  */
@@ -89,7 +118,11 @@ assertInvalidSyntax({
 
 assertInvalidSyntax({
     pSpec: {
-        $percentile: {p: {$concatArrays: [[0.01, 0.1], ["foo"]]}, input: "$x", method: "approximate"},
+        $percentile: {
+            p: {$concatArrays: [[0.01, 0.1], ["foo"]]},
+            input: "$x",
+            method: "approximate",
+        },
     },
     msg: "'p' should not accept expressions that evaluate to an array with non-numeric elements",
 });
@@ -157,7 +190,10 @@ assertInvalidSyntax({
     msg: "$median should fail if 'input' field is missing",
 });
 
-assertInvalidSyntax({pSpec: {$median: {input: "$x"}}, msg: "Median should fail if 'method' field is missing"});
+assertInvalidSyntax({
+    pSpec: {$median: {input: "$x"}},
+    msg: "Median should fail if 'method' field is missing",
+});
 
 assertInvalidSyntax({
     pSpec: {$median: {input: "$x", method: "approximate", extras: 42}},
@@ -262,4 +298,7 @@ assertValidSyntax({
 /**
  * Tests for valid $median.
  */
-assertValidSyntax({pSpec: {$median: {input: "$x", method: "approximate"}}, msg: "Simple base case for $median."});
+assertValidSyntax({
+    pSpec: {$median: {input: "$x", method: "approximate"}},
+    msg: "Simple base case for $median.",
+});

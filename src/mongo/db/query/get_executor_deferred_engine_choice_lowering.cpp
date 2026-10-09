@@ -1,34 +1,9 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/get_executor_deferred_engine_choice_lowering.h"
 
+#include "mongo/db/curop.h"
 #include "mongo/db/exec/classic/count.h"
 #include "mongo/db/exec/classic/multi_plan.h"
 #include "mongo/db/exec/runtime_planners/planner_types.h"
@@ -38,6 +13,9 @@
 #include "mongo/db/query/engine_selection.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/query_stats/plan_shape_counters/plan_shape_counters.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
@@ -83,6 +61,21 @@ public:
         }
 
         auto solution = std::move(_rankingResult.solutions[0]);
+        tassert(11974310, "Expected a non-null query solution for non-idhack queries", solution);
+
+        // TODO SERVER-130428 remove `internalQueryEnablePlanShapeAnalysis`
+        // Only collect plan shape stats for the top-level query. For example we do not collect
+        // the metrics for the foreign side of a $lookup.
+        const bool inTopLevelQuery = _cq->getExpCtxRaw()->getSubPipelineDepth() == 0;
+        if (internalQueryEnablePlanShapeAnalysis.load() && inTopLevelQuery) {
+            auto& opDebug = CurOp::get(_opCtx)->debug();
+            // Gate on shouldRequestRemoteMetrics, which checks if metrics are requested by
+            // mongos or if the local query stats key exists.
+            if (query_stats::shouldRequestRemoteMetrics(opDebug)) {
+                plan_shape_counters::analyzePlanShapeForCounters(*solution).addTo(
+                    opDebug.getAdditiveMetrics().planShapeCounts);
+            }
+        }
 
         tassert(9735001,
                 "Expected engine selection to be performed during planning",
@@ -164,7 +157,8 @@ private:
                                                std::move(execState.sbeYieldPolicy),
                                                std::move(remoteCursors),
                                                std::move(remoteExplains),
-                                               _rankingResult.cachedPlanHash);
+                                               _rankingResult.cachedPlanHash,
+                                               _rankingResult.planSelectionStrategy);
         }
 
         auto sbeYieldPolicy =
@@ -176,7 +170,7 @@ private:
             sbePlanAndData.second.replanReason =
                 _rankingResult.plannerParams->replanningData->replanReason;
         }
-        // SERVER-119773 integrate with SBE plan cache.
+        // The deferred get_executor path does not support the SBE plan cache.
         static const bool preparingFromSbeCache = false;
         stage_builder::prepareSlotBasedExecutableTree(_opCtx,
                                                       sbePlanAndData.first.get(),
@@ -207,7 +201,8 @@ private:
                                            std::move(remoteCursors),
                                            std::move(remoteExplains),
                                            extractMps(),
-                                           std::move(_rankingResult.maybeExplainData));
+                                           std::move(_rankingResult.maybeExplainData),
+                                           _rankingResult.planSelectionStrategy);
     }
 
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeClassicExecutor(
@@ -278,7 +273,8 @@ private:
                 ? boost::make_optional<std::string>(
                       std::move(_rankingResult.plannerParams->replanningData->replanReason))
                 : boost::none,
-            std::move(_rankingResult.maybeExplainData));
+            std::move(_rankingResult.maybeExplainData),
+            _rankingResult.planSelectionStrategy);
     }
 
     void buildRejectedExecutableTreesForExplain(const QuerySolution* solution,

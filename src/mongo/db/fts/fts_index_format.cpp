@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/fts/fts_index_format.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -47,6 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -95,7 +69,7 @@ const size_t termKeyLengthV3 = termKeyPrefixLengthV3 + termKeySuffixLengthV3;
  * is not legal for there to be an array along the path of the non-text prefix or suffix fields of a
  * text index, unless a particular array index is specified, as in "a.3".
  */
-BSONElement extractNonFTSKeyElement(const BSONObj& obj, StringData path) {
+BSONElement extractNonFTSKeyElement(const BSONObj& obj, std::string_view path) {
     BSONElementSet indexedElements;
     const bool expandArrayOnTrailingField = true;
     MultikeyComponents arrayComponents;
@@ -106,8 +80,7 @@ BSONElement extractNonFTSKeyElement(const BSONObj& obj, StringData path) {
         return nullElt;
     }
     uassert(ErrorCodes::CannotBuildIndexKeys,
-            str::stream() << "Field '" << path
-                          << "' of text index contains an array in document: " << obj,
+            str::stream() << "Field '" << path << "' of text index contains an array in document",
             arrayComponents.empty());
 
     // Since there aren't any arrays, there cannot be more than one extracted element on 'path'.
@@ -118,7 +91,7 @@ BSONElement extractNonFTSKeyElement(const BSONObj& obj, StringData path) {
 /**
  * Legacy version of extractNonFTSKeyElement that uses pre-SERVER-76875 dotted path extraction.
  */
-BSONElement extractNonFTSKeyElementLegacy(const BSONObj& obj, StringData path) {
+BSONElement extractNonFTSKeyElementLegacy(const BSONObj& obj, std::string_view path) {
     BSONElementSet indexedElements;
     const bool expandArrayOnTrailingField = true;
     MultikeyComponents arrayComponents;
@@ -130,8 +103,7 @@ BSONElement extractNonFTSKeyElementLegacy(const BSONObj& obj, StringData path) {
         return nullElt;
     }
     uassert(ErrorCodes::CannotBuildIndexKeys,
-            str::stream() << "Field '" << path
-                          << "' of text index contains an array in document: " << obj,
+            str::stream() << "Field '" << path << "' of text index contains an array in document",
             arrayComponents.empty());
 
     // Since there aren't any arrays, there cannot be more than one extracted element on 'path'.
@@ -183,7 +155,7 @@ void FTSIndexFormat::_appendIndexKey(KeyStringBuilder& keyString,
         } else {
             std::array<char, 16> hash;
             uint32_t seed = 0;
-            murmur3(StringData{term}, seed, hash);
+            murmur3(std::string_view{term}, seed, hash);
             string keySuffix = hexblob::encodeLower(hash.data(), hash.size());
             invariant(termKeySuffixLengthV2 == keySuffix.size());
             keyString.appendString(term.substr(0, termKeyPrefixLengthV2) + keySuffix);

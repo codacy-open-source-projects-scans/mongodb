@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -79,6 +52,7 @@
 #include "mongo/executor/inline_executor.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/logv2/log.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -89,6 +63,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -96,20 +71,13 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 std::shared_ptr<executor::TaskExecutor> _fleCrudExecutor;
-
-ThreadPool::Options getThreadPoolOptions() {
-    ThreadPool::Options tpOptions;
-    tpOptions.poolName = "FLECrud";
-    tpOptions.maxThreads = ThreadPool::Options::kUnlimited;
-
-    // SEPTransactionClient::runCommand manages the client itself so do not create one via
-    // onCreateThread
-    return tpOptions;
-}
 
 void setMongosFieldsInReply(OperationContext* opCtx, write_ops::WriteCommandReplyBase* replyBase) {
     // Update the OpTime for the reply to current OpTime
@@ -168,6 +136,11 @@ public:
                 try {
                     txnParticipant.unstashTransactionResources(opCtx, "aggregate");
                 } catch (ExceptionFor<ErrorCodes::NoSuchTransaction>&) {
+                    LOGV2_WARNING(
+                        12336502,
+                        "FLE unyield: unstashTransactionResources encountered NoSuchTransaction",
+                        "lsid"_attr = opCtx->getLogicalSessionId(),
+                        "txnNumber"_attr = opCtx->getTxnNumber());
                 }
             }
         }
@@ -177,7 +150,7 @@ private:
     bool _yielded = false;
 };
 
-void toBinData(StringData field, PrfBlock block, BSONObjBuilder* builder) {
+void toBinData(std::string_view field, PrfBlock block, BSONObjBuilder* builder) {
     builder->appendBinData(field, block.size(), BinDataType::BinDataGeneral, block.data());
 }
 
@@ -370,7 +343,11 @@ void startFLECrud(ServiceContext* serviceContext) {
     }
 
     _fleCrudExecutor = executor::ThreadPoolTaskExecutor::create(
-        std::make_unique<ThreadPool>(getThreadPoolOptions()),
+        ThreadPool::make({
+            // No .onCreateThread. SEPTransactionClient::runCommand manages the client.
+            .poolName = "FLECrud",
+            .maxThreads = ThreadPool::Options::kUnlimited,
+        }),
         executor::makeNetworkInterface("FLECrudNetwork"));
 
     _fleCrudExecutor->startup();
@@ -387,6 +364,7 @@ void stopFLECrud() {
 FLEBatchResult processFLEInsert(OperationContext* opCtx,
                                 const write_ops::InsertCommandRequest& insertRequest,
                                 write_ops::InsertCommandReply* insertReply) {
+    assertFLECrudNotYetProcessed(insertRequest.getEncryptionInformation());
 
     uassert(
         6371602,
@@ -409,6 +387,7 @@ FLEBatchResult processFLEInsert(OperationContext* opCtx,
 
 write_ops::DeleteCommandReply processFLEDelete(
     OperationContext* opCtx, const write_ops::DeleteCommandRequest& deleteRequest) {
+    assertFLECrudNotYetProcessed(deleteRequest.getEncryptionInformation());
 
     uassert(
         6371701,
@@ -425,6 +404,7 @@ write_ops::DeleteCommandReply processFLEDelete(
 StatusWith<std::pair<write_ops::FindAndModifyCommandReply, OpMsgRequest>>
 processFLEFindAndModifyHelper(OperationContext* opCtx,
                               const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
+    assertFLECrudNotYetProcessed(findAndModifyRequest.getEncryptionInformation());
 
     uassert(
         6371800,
@@ -463,6 +443,7 @@ write_ops::FindAndModifyCommandReply processFLEFindAndModify(
 
 write_ops::UpdateCommandReply processFLEUpdate(
     OperationContext* opCtx, const write_ops::UpdateCommandRequest& updateRequest) {
+    assertFLECrudNotYetProcessed(updateRequest.getEncryptionInformation());
 
     uassert(
         6371905,
@@ -479,12 +460,14 @@ write_ops::UpdateCommandReply processFLEUpdate(
 void processFLEFindD(OperationContext* opCtx,
                      const NamespaceString& nss,
                      FindCommandRequest* findCommand) {
+    assertFLECrudNotYetProcessed(findCommand->getEncryptionInformation());
     fle::processFindCommand(opCtx, nss, findCommand, &getTransactionWithRetriesForMongoD);
 }
 
 void processFLECountD(OperationContext* opCtx,
                       const NamespaceString& nss,
                       CountCommandRequest& countCommand) {
+    assertFLECrudNotYetProcessed(countCommand.getEncryptionInformation());
     fle::processCountCommand(opCtx, nss, &countCommand, &getTransactionWithRetriesForMongoD);
 }
 
@@ -492,6 +475,7 @@ std::unique_ptr<Pipeline> processFLEPipelineD(OperationContext* opCtx,
                                               NamespaceString nss,
                                               const EncryptionInformation& encryptInfo,
                                               std::unique_ptr<Pipeline> toRewrite) {
+    assertFLECrudNotYetProcessed(encryptInfo);
     return fle::processPipeline(
         opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoD);
 }
@@ -503,7 +487,9 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
                                 const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
                                 const boost::optional<BSONObj>& letParameters,
                                 const BSONObj& query) {
+    assertFLECrudNotYetProcessed(info);
 
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, info);
     auto expCtx = ExpressionContextBuilder{}
                       .opCtx(opCtx)
                       .collator(fle::collatorFromBSON(opCtx, collation))
@@ -517,15 +503,14 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
                              info,
                              query,
                              &getTransactionWithRetriesForMongoD,
-                             fle::EncryptedCollScanModeAllowed::kAllow);
+                             fle::EncryptedCollScanModeAllowed::kAllow,
+                             efc);
 }
 
 std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
 processFLEFindAndModifyExplainMongod(OperationContext* opCtx,
                                      const write_ops::FindAndModifyCommandRequest& request) {
-    tassert(6513401,
-            "Missing encryptionInformation for findAndModify",
-            request.getEncryptionInformation().has_value());
+    assertFLECrudNotYetProcessed(request.getEncryptionInformation());
 
     return uassertStatusOK(processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
         opCtx, request, &getTransactionWithRetriesForMongoD, processFindAndModifyExplain));
@@ -561,7 +546,7 @@ std::vector<std::vector<FLEEdgeCountInfo>> getTagsFromStorage(
                 ->getIndexSpec()
                 .getKey()
                 .firstElement()
-                .fieldNameStringData() == "_id"_sd) {
+                .fieldNameStringData() == "_id"sv) {
 
         StorageEngineClusteredCollectionReader reader(opCtx, docCount, nsOrUUID, cursor.get());
 

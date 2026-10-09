@@ -1,30 +1,5 @@
-# Copyright (C) 2020-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 
 # This file defines types used among various resharding-related IDL structs.
 
@@ -94,6 +69,31 @@ enums:
             kRunning: "running"
             kInactive: "inactive"
 
+    # TODO (SERVER-98118): Remove this enum once v9.0 become last-lts.
+    # Note: This is an exact copy of AuthoritativeMetadataAccessLevel in order to avoid a linking shuffle.
+    # Ideally we should instead rely on the existing enum but that's present on the Sharding Coordinator IDL file which
+    # would cause a lot of linking churn just to make the various resharding libraries use it since the sharding
+    # coordinator usages are all linked in a single big library.
+    ReshardingAuthoritativeMetadataAccessLevel:
+        description: >-
+            Indicates the level of access to authoritative metadata granted by the FCV state at the
+            time of DDL document creation. The possible values are:
+                - `kNone`: No access to authoritative metadata. The DDL operates in a
+                    non-authoritative mode.
+                - `kWritesAllowed`: Write operations are permitted on authoritative metadata, but
+                    read access remains restricted. In this phase, the DDL is responsible for
+                    cloning the authoritative metadata from the global catalog to the shard catalog
+                    and committing changes to both catalogs.
+                - `kWritesAndReadsAllowed`: Both read and write operations are fully enabled. The
+                    DDL must still commit to both catalogs, but cloning is no longer required, as
+                    authoritative metadata is already present and reliable.
+        type: string
+        mod_visibility: private
+        values:
+            kNone: "none"
+            kWritesAllowed: "writesAllowed"
+            kWritesAndReadsAllowed: "writesAndReadsAllowed"
+
 structs:
     CommonReshardingMetadata:
         description: "Immutable metadata shared across all node types for a resharding operation."
@@ -152,6 +152,19 @@ structs:
                     operation was initiated. Used to evaluate feature flags consistently throughout
                     the operation lifetime, even across FCV transitions (e.g. downgrades).
                 optional: true
+            primaryShardId:
+                type: shard_id
+                description: Primary shard id for the given namespace being resharded
+                optional: true
+            startingFCV:
+                type: fcv_string
+                description: "The FCV when the coordinator doc was created."
+                optional: true
+
+            authoritativeMetadataAccessLevel:
+                type: ReshardingAuthoritativeMetadataAccessLevel
+                description: "The access level to authoritative metadata granted by the FCV state at the creation of this document."
+                default: kNone
 
     AbortReason:
         description: "Not meant to be used directly. Only use internal fields."
@@ -325,6 +338,10 @@ structs:
             oplogApplied:
                 type: long
                 description: "Number of oplog entries applied on this recipient shard."
+                optional: true
+            numDocumentsCloned:
+                type: long
+                description: "Number of documents cloned to this recipient shard during the cloning phase."
                 optional: true
             totalNumDocuments:
                 type: long

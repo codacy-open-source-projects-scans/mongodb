@@ -14,6 +14,7 @@ import {
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+import {checkLog} from "src/mongo/shell/check_log.js";
 
 const timeField = "my_time";
 const metaField = "my_meta";
@@ -75,11 +76,18 @@ function testDirectBucketTargeting({name, primaryConn, otherConns}) {
 
     // 1) Regular timeseries usage should NOT count as direct system.buckets targeting.
     let coll = testDB.getCollection("ts");
-    assert.commandWorked(testDB.createCollection(coll.getName(), {timeseries: {timeField, metaField}}));
+    assert.commandWorked(
+        testDB.createCollection(coll.getName(), {timeseries: {timeField, metaField}}),
+    );
     assert.commandWorked(coll.insertOne({[timeField]: ISODate("2030-08-08T04:11:10Z")}));
     assert(coll.drop());
 
-    assertSystemBucketsMetrics(primaryConn, otherConns, 0, `[after regular timeseries ops] (${name})`);
+    assertSystemBucketsMetrics(
+        primaryConn,
+        otherConns,
+        0,
+        `[after regular timeseries ops] (${name})`,
+    );
 
     // 2) Directly targeting system.buckets should be counted.
     // When featureFlagBlockDirectSystemBucketsAccess is enabled, commands are rejected after the metric
@@ -94,7 +102,10 @@ function testDirectBucketTargeting({name, primaryConn, otherConns}) {
         testDB.runCommand({insert: coll.getName(), documents: [timeseriesRawDoc]}),
         kBlockedErrorCode,
     );
-    assert.commandWorkedOrFailedWithCode(testDB.runCommand({drop: coll.getName()}), kBlockedErrorCode);
+    assert.commandWorkedOrFailedWithCode(
+        testDB.runCommand({drop: coll.getName()}),
+        kBlockedErrorCode,
+    );
 
     const EXPECTED_DIRECT_BUCKET_COMMANDS = 3; // createCollection + insert + drop
     assertSystemBucketsMetrics(
@@ -107,7 +118,9 @@ function testDirectBucketTargeting({name, primaryConn, otherConns}) {
 
 // TODO SERVER-119235: Remove once chunk-related sharding commands support rawData.
 function testShardingCommandsNotCounted(st) {
-    jsTest.log.info("Testing that sharding commands allowed to target system.buckets do not increment the counter");
+    jsTest.log.info(
+        "Testing that sharding commands allowed to target system.buckets do not increment the counter",
+    );
 
     if (areViewlessTimeseriesEnabled(st.s.getDB("admin"))) {
         return;
@@ -118,7 +131,9 @@ function testShardingCommandsNotCounted(st) {
     const coll = testDB.getCollection("ts");
     const bucketNss = getTimeseriesBucketsColl(coll).getFullName();
 
-    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+    );
     assert.commandWorked(
         st.s.adminCommand({
             shardCollection: coll.getFullName(),
@@ -133,13 +148,27 @@ function testShardingCommandsNotCounted(st) {
     assert.commandWorked(st.s.adminCommand({split: bucketNss, middle: {meta: 0}}));
     assert.commandWorked(st.s.adminCommand({clearJumboFlag: bucketNss, find: {meta: -1}}));
     assert.commandWorked(
-        st.s.adminCommand({moveChunk: bucketNss, find: {meta: 0}, to: st.shard1.shardName, _waitForDelete: true}),
+        st.s.adminCommand({
+            moveChunk: bucketNss,
+            find: {meta: 0},
+            to: st.shard1.shardName,
+            _waitForDelete: true,
+        }),
     );
     assert.commandWorked(
-        st.s.adminCommand({moveRange: bucketNss, min: {meta: 0}, max: {meta: MaxKey}, toShard: st.shard0.shardName}),
+        st.s.adminCommand({
+            moveRange: bucketNss,
+            min: {meta: 0},
+            max: {meta: MaxKey},
+            toShard: st.shard0.shardName,
+        }),
     );
-    assert.commandWorked(st.s.adminCommand({mergeChunks: bucketNss, bounds: [{meta: MinKey}, {meta: MaxKey}]}));
-    assert.commandWorked(st.s.adminCommand({mergeAllChunksOnShard: bucketNss, shard: st.shard0.shardName}));
+    assert.commandWorked(
+        st.s.adminCommand({mergeChunks: bucketNss, bounds: [{meta: MinKey}, {meta: MaxKey}]}),
+    );
+    assert.commandWorked(
+        st.s.adminCommand({mergeAllChunksOnShard: bucketNss, shard: st.shard0.shardName}),
+    );
     assert.commandWorked(st.rs0.getPrimary().adminCommand({cleanupOrphaned: bucketNss}));
     assert.commandWorked(st.s.adminCommand({balancerCollectionStatus: bucketNss}));
     assert.commandWorked(st.s.adminCommand({configureCollectionBalancing: bucketNss}));
@@ -157,9 +186,15 @@ function testShardingCommandsNotCounted(st) {
 
 // Standalone mongod.
 {
-    const mongod = MongoRunner.runMongod();
+    const mongod = MongoRunner.runMongod({useLogFiles: true});
     try {
         testDirectBucketTargeting({name: "standalone", primaryConn: mongod, otherConns: []});
+        checkLog.containsJson(mongod.fullOptions.logFile, 11259900, {
+            command: "create",
+            appName: "MongoDB Shell",
+            driverName: "MongoDB Internal Client",
+            isRouter: false,
+        });
     } finally {
         MongoRunner.stopMongod(mongod);
     }

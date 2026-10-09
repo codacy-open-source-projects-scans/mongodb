@@ -3,6 +3,8 @@ import * as ArrayWorkloads from "jstests/product_limits/libs/array.js";
 import * as FindWorkloads from "jstests/product_limits/libs/find.js";
 import * as GroupingWorkloads from "jstests/product_limits/libs/grouping.js";
 import * as LongPipelineWorkloads from "jstests/product_limits/libs/long_pipelines.js";
+import * as LookupMatchWorkloads from "jstests/product_limits/libs/lookup_match.js";
+import * as LookupWorkloads from "jstests/product_limits/libs/lookup.js";
 import * as MatchWorkloads from "jstests/product_limits/libs/match.js";
 import * as NonLeadingMatchWorkloads from "jstests/product_limits/libs/non_leading_match.js";
 import * as OperatorWorkloads from "jstests/product_limits/libs/operators.js";
@@ -30,6 +32,8 @@ export class Dataset {
         const sessionDb = session.getDatabase(this.constructor.name);
 
         print(`Populating dataset ${this.constructor.name} ...`);
+        // Drop any pre-existing data in the collection.
+        sessionDb.getCollection(this.collection()).remove({});
         this.populate(sessionDb);
         print("Population complete.");
         for (const workload of this.workloads()) {
@@ -130,6 +134,13 @@ export class DatasetOneDocumentOneField extends Dataset {
             ProjectionWorkloads.WorkloadProjectManyStages,
             ProjectionWorkloads.WorkloadProjectNestedFields,
             ProjectionWorkloads.WorkloadReplaceRootNestedFields,
+            LookupMatchWorkloads.WorkloadAndOverSingleField,
+            LookupMatchWorkloads.WorkloadAndPlusOrOverSingleField,
+            LookupMatchWorkloads.WorkloadIn,
+            LookupMatchWorkloads.WorkloadManyIns,
+            LookupMatchWorkloads.WorkloadNin,
+            LookupMatchWorkloads.WorkloadOrOverSingleField,
+            LookupMatchWorkloads.WorkloadOrPlusAndOverSingleField,
         ];
     }
 
@@ -138,7 +149,12 @@ export class DatasetOneDocumentOneField extends Dataset {
         const coll = db.getCollection(this.collection());
         assert.commandWorked(coll.insert({f0: 0}));
     }
+
+    data() {
+        return [{f0: 0}];
+    }
 }
+
 export class DatasetOneFieldIndex extends DatasetOneField {
     populate(db) {
         super.populate(db);
@@ -204,9 +220,10 @@ export class DatasetWideArrayIndex extends DatasetWideArray {
 export class DatasetManyCollections extends Dataset {
     workloads() {
         return [
-            LongPipelineWorkloads.WorkloadManyCollectionsInLookupBushy,
-            LongPipelineWorkloads.WorkloadManyCollectionsInUnionWith,
-            LongPipelineWorkloads.WorkloadManyCollectionsInLookupUnwind,
+            LongPipelineWorkloads.WorkloadManyCollectionsLookupBushy,
+            LongPipelineWorkloads.WorkloadManyCollectionsUnionWith,
+            LongPipelineWorkloads.WorkloadManyCollectionsLookupUnwind,
+            LongPipelineWorkloads.WorkloadManyCollectionsLookupUnwindChained,
         ];
     }
 
@@ -216,7 +233,10 @@ export class DatasetManyCollections extends Dataset {
             print(`Creating collection ${collName}`);
             db.createCollection(collName);
             const coll = db.getCollection(collName);
+            // Remove any pre-existing data.
+            coll.remove({});
             assert.commandWorked(coll.insert({f0: 1}));
+            assert.commandWorked(coll.createIndex({f0: 1}));
         }
     }
 }
@@ -240,6 +260,13 @@ export class DatasetManyFields extends Dataset {
             MatchWorkloads.WorkloadMatchOverManyFields,
             MatchWorkloads.WorkloadOrOverManyFields,
             MatchWorkloads.WorkloadOrPlusAndOverManyFields,
+            LookupMatchWorkloads.WorkloadAndOverManyFields,
+            LookupMatchWorkloads.WorkloadAndPlusOrOverManyFields,
+            LookupMatchWorkloads.WorkloadExists,
+            LookupMatchWorkloads.WorkloadMatchOverManyFields,
+            LookupMatchWorkloads.WorkloadOrOverManyFields,
+            LookupMatchWorkloads.WorkloadOrPlusAndOverManyFields,
+            LookupWorkloads.WorkloadLookupJoinOverManyFields,
             NonLeadingMatchWorkloads.WorkloadAndOverManyFields,
             NonLeadingMatchWorkloads.WorkloadAndPlusOrOverManyFields,
             NonLeadingMatchWorkloads.WorkloadExists,
@@ -295,6 +322,7 @@ export class DatasetManyFields extends Dataset {
         return range(this.scale());
     }
 }
+
 export class DatasetManyFieldsMultiFieldIndex extends DatasetManyFields {
     populate(db) {
         super.populate(db);
@@ -350,7 +378,11 @@ export class DatasetNestedJSON extends Dataset {
         return 100;
     }
     workloads() {
-        return [MatchWorkloads.WorkloadMatchLongPath, NonLeadingMatchWorkloads.WorkloadMatchLongPath];
+        return [
+            MatchWorkloads.WorkloadMatchLongPath,
+            LookupMatchWorkloads.WorkloadMatchLongPath,
+            NonLeadingMatchWorkloads.WorkloadMatchLongPath,
+        ];
     }
     populate(db) {
         const collName = this.collection();
@@ -433,7 +465,10 @@ export class DatasetSharded extends DatasetManyFields {
         const db = this.shardedTest.s.getDB(dbName);
 
         assert.commandWorked(
-            this.shardedTest.s.adminCommand({enableSharding: dbName, primaryShard: primaryShard.shardName}),
+            this.shardedTest.s.adminCommand({
+                enableSharding: dbName,
+                primaryShard: primaryShard.shardName,
+            }),
         );
 
         let collName = this.collection();
@@ -445,7 +480,10 @@ export class DatasetSharded extends DatasetManyFields {
 
         db.createCollection(collName);
         assert.commandWorked(
-            this.shardedTest.s.adminCommand({shardCollection: `${dbName}.${collName}`, key: shardKey}),
+            this.shardedTest.s.adminCommand({
+                shardCollection: `${dbName}.${collName}`,
+                key: shardKey,
+            }),
         );
 
         return db;
@@ -454,25 +492,3 @@ export class DatasetSharded extends DatasetManyFields {
         this.shardedTest.stop();
     }
 }
-
-export const DATASETS = [
-    DatasetOneField,
-    DatasetOneFieldIndex,
-    DatasetOneFieldPartialIndex,
-    DatasetOneDocumentOneField,
-    DatasetOneStringField,
-    DatasetWideArray,
-    DatasetWideArrayIndex,
-    DatasetManyCollections,
-    DatasetManyFields,
-    DatasetManyFieldsMultiFieldIndex,
-    DatasetManyFieldsIndexes,
-    DatasetManyFieldsPartialIndex,
-    DatasetManyFieldsWildcardIndex,
-    DatasetLongValue,
-    DatasetLongValueIndex,
-    DatasetLongValueHashed,
-    DatasetLongValueTextIndex,
-    DatasetSharded,
-    DatasetNestedJSON,
-];

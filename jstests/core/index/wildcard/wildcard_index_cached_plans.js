@@ -2,6 +2,7 @@
  * Test that cached plans which use wildcard indexes work.
  *
  * @tags: [
+ *   uses_explain,
  *   # This test attempts to perform queries and introspect the server's plan cache entries using
  *   # the $planCacheStats aggregation source. Both operations must be routed to the primary, and
  *   # the latter only supports 'local' readConcern.
@@ -29,7 +30,6 @@ import {
     getPlanStages,
     getWinningPlanFromExplain,
 } from "jstests/libs/query/analyze_plan.js";
-import {sbePlanCacheEnabled} from "jstests/libs/query/sbe_util.js";
 
 const coll = db.wildcard_cached_plans;
 
@@ -47,8 +47,6 @@ function getCacheEntryForQuery(query) {
     }
     return null;
 }
-
-const isUsingSbePlanCache = sbePlanCacheEnabled(db);
 
 for (const indexSpec of wildcardIndexes) {
     coll.drop();
@@ -80,32 +78,24 @@ for (const indexSpec of wildcardIndexes) {
     let cacheEntry = getCacheEntryForQuery(query);
     assert.neq(cacheEntry, null);
     assert.eq(cacheEntry.isActive, true);
-    if (!isUsingSbePlanCache) {
-        // Should be at least two plans: one using the {a: 1} index and the other using the b.$**
-        // index.
-        assert.gte(cacheEntry.creationExecStats.length, 2, tojson(cacheEntry.plans));
+    // Should be at least two plans: one using the {a: 1} index and the other using the b.$**
+    // index.
+    assert.gte(cacheEntry.creationExecStats.length, 2, tojson(cacheEntry.plans));
 
-        const ixscan = (function () {
-            const execStats = cacheEntry.creationExecStats;
-            if (!execStats) return null;
-            const elem = execStats[0];
-            if (!elem) return null;
-            if (!elem.executionStages) return null;
-            return getPlanStage(elem.executionStages, "IXSCAN");
-        })();
-        const expectedKeyPattern = {"$_path": 1, "b": 1};
-        if (indexSpec.keyPattern.other) {
-            expectedKeyPattern["other"] = 1;
-        }
-        assert.neq(null, ixscan, cacheEntry);
-        assert(bsonWoCompare(ixscan.keyPattern, expectedKeyPattern) === 0, ixscan);
-    } else {
-        assert(cacheEntry.hasOwnProperty("cachedPlan"), cacheEntry);
-        assert(cacheEntry.cachedPlan.hasOwnProperty("stages"), cacheEntry);
-        const sbePlan = cacheEntry.cachedPlan.stages;
-        // The SBE plan string should contain the name of the b.$** index.
-        assert(sbePlan.includes("b.$**_1"), cacheEntry);
+    const ixscan = (function () {
+        const execStats = cacheEntry.creationExecStats;
+        if (!execStats) return null;
+        const elem = execStats[0];
+        if (!elem) return null;
+        if (!elem.executionStages) return null;
+        return getPlanStage(elem.executionStages, "IXSCAN");
+    })();
+    const expectedKeyPattern = {"$_path": 1, "b": 1};
+    if (indexSpec.keyPattern.other) {
+        expectedKeyPattern["other"] = 1;
     }
+    assert.neq(null, ixscan, cacheEntry);
+    assert(bsonWoCompare(ixscan.keyPattern, expectedKeyPattern) === 0, ixscan);
 
     // Run the query again. This time it should use the cached plan. We should get the same result
     // as earlier.
@@ -125,30 +115,34 @@ for (const indexSpec of wildcardIndexes) {
     // There should only have been one solution for the above query, so it would get cached only by
     // the SBE plan cache.
     cacheEntry = getCacheEntryForQuery({a: 1, b: null});
-    if (isUsingSbePlanCache) {
-        assert.neq(cacheEntry, null);
-        assert.eq(cacheEntry.isActive, true, cacheEntry);
-        assert.eq(cacheEntry.isPinned, true, cacheEntry);
-    } else {
-        assert.eq(cacheEntry, null);
-    }
+    assert.eq(cacheEntry, null);
 
     // Check that indexability discriminators work with collations.
     {
         // Create wildcard index with a collation.
-        assertDropAndRecreateCollection(db, coll.getName(), {collation: {locale: "en_US", strength: 1}});
+        assertDropAndRecreateCollection(db, coll.getName(), {
+            collation: {locale: "en_US", strength: 1},
+        });
         assert.commandWorked(coll.createIndex({"b.$**": 1}));
 
         // Run a query which uses a different collation from that of the index, but does not use
         // string bounds.
-        const queryWithoutStringExplain = coll.explain().find({a: 5, b: 5}).collation({locale: "fr"}).finish();
+        const queryWithoutStringExplain = coll
+            .explain()
+            .find({a: 5, b: 5})
+            .collation({locale: "fr"})
+            .finish();
         let ixScans = getPlanStages(getWinningPlanFromExplain(queryWithoutStringExplain), "IXSCAN");
         assert.eq(ixScans.length, FixtureHelpers.numberOfShardsForCollection(coll));
         assert.eq(ixScans[0].keyPattern, {$_path: 1, b: 1});
 
         // Run a query which uses a different collation from that of the index and does have string
         // bounds.
-        const queryWithStringExplain = coll.explain().find({a: 5, b: "a string"}).collation({locale: "fr"}).finish();
+        const queryWithStringExplain = coll
+            .explain()
+            .find({a: 5, b: "a string"})
+            .collation({locale: "fr"})
+            .finish();
         ixScans = getPlanStages(getWinningPlanFromExplain(queryWithStringExplain), "IXSCAN");
         assert.eq(ixScans.length, 0);
 
@@ -163,7 +157,9 @@ for (const indexSpec of wildcardIndexes) {
     // Check that indexability discriminators work with partial wildcard indexes.
     {
         assertDropAndRecreateCollection(db, coll.getName());
-        assert.commandWorked(coll.createIndex({"$**": 1}, {partialFilterExpression: {a: {$lte: 5}}}));
+        assert.commandWorked(
+            coll.createIndex({"$**": 1}, {partialFilterExpression: {a: {$lte: 5}}}),
+        );
 
         // Run a query for a value included by the partial filter expression.
         const queryIndexedExplain = coll.find({a: 4}).explain();
@@ -178,6 +174,9 @@ for (const indexSpec of wildcardIndexes) {
 
         // Check that the shapes are different since the query which searches for a value not
         // included by the partial filter expression won't be eligible to use the $** index.
-        assert.neq(getPlanCacheKeyFromExplain(queryIndexedExplain), getPlanCacheKeyFromExplain(queryUnindexedExplain));
+        assert.neq(
+            getPlanCacheKeyFromExplain(queryIndexedExplain),
+            getPlanCacheKeyFromExplain(queryUnindexedExplain),
+        );
     }
 }

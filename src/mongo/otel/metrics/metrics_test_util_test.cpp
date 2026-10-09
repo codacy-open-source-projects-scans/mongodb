@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/otel/metrics/metrics_test_util.h"
 
@@ -34,7 +8,10 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::otel::metrics {
+using namespace std::literals::string_view_literals;
 
 namespace {
 class OtelMetricsCapturerTest : public testing::Test {
@@ -101,23 +78,23 @@ TEST_F(OtelMetricsCapturerTest, CounterWrongValueTypeThrowsException) {
 TEST_F(OtelMetricsCapturerTest, CounterReadWithWrongAttributeCountThrowsException) {
     OtelMetricsCapturer metricsCapturer(*metricsService);
 
-    Counter<int64_t, bool, StringData>& int64Counter =
-        metricsService->createInt64Counter<bool, StringData>(
+    Counter<int64_t, bool, std::string_view>& int64Counter =
+        metricsService->createInt64Counter<bool, std::string_view>(
             MetricNames::kTest1,
             "description",
             MetricUnit::kSeconds,
             AttributeDefinition<bool>{.name = "a", .values = {true, false}},
-            AttributeDefinition<StringData>{.name = "b", .values = {"x", "y"}});
-    int64Counter.add(1, {true, "x"_sd});
+            AttributeDefinition<std::string_view>{.name = "b", .values = {"x", "y"}});
+    int64Counter.add(1, {true, "x"sv});
 
-    Counter<double, bool, StringData>& doubleCounter =
-        metricsService->createDoubleCounter<bool, StringData>(
+    Counter<double, bool, std::string_view>& doubleCounter =
+        metricsService->createDoubleCounter<bool, std::string_view>(
             MetricNames::kTest2,
             "description",
             MetricUnit::kSeconds,
             AttributeDefinition<bool>{.name = "a", .values = {true, false}},
-            AttributeDefinition<StringData>{.name = "b", .values = {"x", "y"}});
-    doubleCounter.add(1.0, {true, "x"_sd});
+            AttributeDefinition<std::string_view>{.name = "b", .values = {"x", "y"}});
+    doubleCounter.add(1.0, {true, "x"sv});
 
     // Too few attributes (1 instead of 2).
     ASSERT_THROWS_CODE(metricsCapturer.readInt64Counter(MetricNames::kTest1, std::tuple{true}),
@@ -129,13 +106,13 @@ TEST_F(OtelMetricsCapturerTest, CounterReadWithWrongAttributeCountThrowsExceptio
 
     // Too many attributes (3 instead of 2).
     ASSERT_THROWS_CODE(
-        metricsCapturer.readInt64Counter(MetricNames::kTest1, std::tuple{true, "x"_sd, "extra"_sd}),
+        metricsCapturer.readInt64Counter(MetricNames::kTest1, std::tuple{true, "x"sv, "extra"sv}),
         DBException,
         ErrorCodes::BadValue);
-    ASSERT_THROWS_CODE(metricsCapturer.readDoubleCounter(MetricNames::kTest2,
-                                                         std::tuple{true, "x"_sd, "extra"_sd}),
-                       DBException,
-                       ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(
+        metricsCapturer.readDoubleCounter(MetricNames::kTest2, std::tuple{true, "x"sv, "extra"sv}),
+        DBException,
+        ErrorCodes::BadValue);
 }
 
 TEST_F(OtelMetricsCapturerTest, UpDownCounterWrongValueTypeThrowsException) {
@@ -411,5 +388,20 @@ TEST_F(OtelMetricsCapturerTest, CreateDoubleHistogramWithTwoCapturers) {
             EXPECT_EQ(data.count, 1);
         }
     }
+}
+
+TEST_F(OtelMetricsCapturerTest, MetricsRemainValidAfterCapturerIsDestroyed) {
+    auto& metric1 = metricsService->createDoubleHistogram(
+        MetricNames::kTest1, "description", MetricUnit::kSeconds);
+    auto& metric2 = metricsService->createInt64Counter(
+        MetricNames::kTest2, "description", MetricUnit::kSeconds);
+    {
+        OtelMetricsCapturer capturer(*metricsService);
+        metric1.record(1.5);
+        metric2.add(1);
+    }
+    // These will fail somehow if anything is invalid after the capturer is destroyed.
+    metric1.record(20.5);
+    metric2.add(2);
 }
 }  // namespace mongo::otel::metrics

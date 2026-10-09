@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -40,95 +13,74 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 
 
 TEST(Construction, Empty) {
-    StringData strData;
+    std::string_view strData;
     ASSERT_EQUALS(strData.size(), 0U);
     ASSERT_TRUE(strData.data() == nullptr);
 }
 
 TEST(Construction, FromStdString) {
     std::string base("aaa");
-    StringData strData(base);
+    std::string_view strData(base);
     ASSERT_EQUALS(strData.size(), base.size());
     ASSERT_EQUALS(std::string{strData}, base);
 }
 
 TEST(Construction, FromCString) {
     std::string base("aaa");
-    StringData strData(base.c_str());
+    std::string_view strData(base.c_str());
     ASSERT_EQUALS(strData.size(), base.size());
     ASSERT_EQUALS(std::string{strData}, base);
 }
 
-TEST(Construction, FromNullCString) {
-    constexpr const char* p = nullptr;
-    constexpr StringData sd = stringDataDefaultIfNull(p);
-    ASSERT_EQ(sd.size(), 0);
-    ASSERT_EQ(sd.data(), nullptr);
-}
-
-TEST(Construction, FromNullCStringWithDefault) {
-    constexpr StringData sd = stringDataDefaultIfNull(static_cast<const char*>(nullptr), "oops");
-    ASSERT_EQ(sd, "oops");
-}
-
 TEST(Construction, FromUserDefinedLiteral) {
-    const auto strData = "cc\0c"_sd;
+    const auto strData = "cc\0c"sv;
     ASSERT_EQUALS(strData.size(), 4U);
     ASSERT_EQUALS(std::string{strData}, std::string("cc\0c", 4));
 }
 
 TEST(Construction, FromUserDefinedRawLiteral) {
-    const auto strData = R"("")"_sd;
+    const auto strData = R"("")"sv;
     ASSERT_EQUALS(strData.size(), 2U);
     ASSERT_EQUALS(std::string{strData}, std::string("\"\"", 2));
 }
 
 TEST(Construction, FromEmptyUserDefinedLiteral) {
-    const auto strData = ""_sd;
+    const auto strData = ""sv;
     ASSERT_EQUALS(strData.size(), 0U);
     ASSERT_EQUALS(std::string{strData}, std::string(""));
 }
 
 // Try some constexpr initializations
 TEST(Construction, Constexpr) {
-    constexpr StringData lit = "1234567"_sd;
-    ASSERT_EQUALS(lit, "1234567"_sd);
-    constexpr StringData sub = lit.substr(3, 2);
-    ASSERT_EQUALS(sub, "45"_sd);
+    constexpr std::string_view lit = "1234567"sv;
+    ASSERT_EQUALS(lit, "1234567"sv);
+    constexpr std::string_view sub = lit.substr(3, 2);
+    ASSERT_EQUALS(sub, "45"sv);
 #if MONGO_STRING_DATA_CXX20
-    constexpr StringData range(lit.begin() + 1, lit.end() - 1);
-    ASSERT_EQUALS(range, "23456"_sd);
+    constexpr std::string_view range(lit.begin() + 1, lit.end() - 1);
+    ASSERT_EQUALS(range, "23456"sv);
 #endif
     constexpr char c = lit[1];
     ASSERT_EQUALS(c, '2');
-    constexpr StringData nully{nullptr, 0};
-    ASSERT_EQUALS(nully, ""_sd);
-    static_assert(!std::is_constructible_v<StringData, std::nullptr_t>);
-    constexpr StringData ptr{lit.data() + 1, 3};
-    ASSERT_EQUALS(ptr, "234"_sd);
+    constexpr std::string_view nully{nullptr, 0};
+    ASSERT_EQUALS(nully, ""sv);
+    constexpr std::string_view ptr{lit.data() + 1, 3};
+    ASSERT_EQUALS(ptr, "234"sv);
 }
-
-class StringDataDeathTest : public unittest::Test {};
-
-#if defined(MONGO_CONFIG_DEBUG_BUILD)
-DEATH_TEST(StringDataDeathTest,
-           InvariantNullRequiresEmpty,
-           "StringData(nullptr,len) requires len==0") {
-    [[maybe_unused]] StringData bad{nullptr, 1};
-}
-#endif
 
 TEST(Comparison, BothEmpty) {
-    StringData empty("");
+    std::string_view empty("");
     ASSERT_TRUE(empty == empty);
     ASSERT_FALSE(empty != empty);
     ASSERT_FALSE(empty > empty);
@@ -136,12 +88,12 @@ TEST(Comparison, BothEmpty) {
     ASSERT_FALSE(empty < empty);
     ASSERT_TRUE(empty <= empty);
 
-    static_assert(""_sd.compare(""_sd) == 0);
+    static_assert(""sv.compare(""sv) == 0);
 }
 
 TEST(Comparison, BothNonEmptyOnSize) {
-    StringData a("a");
-    StringData aa("aa");
+    std::string_view a("a");
+    std::string_view aa("aa");
     ASSERT_FALSE(a == aa);
     ASSERT_TRUE(a != aa);
     ASSERT_FALSE(a > aa);
@@ -151,12 +103,12 @@ TEST(Comparison, BothNonEmptyOnSize) {
     ASSERT_TRUE(a <= aa);
     ASSERT_TRUE(a <= a);
 
-    static_assert("a"_sd.compare("aa"_sd) < 0);
+    static_assert("a"sv.compare("aa"sv) < 0);
 }
 
 TEST(Comparison, BothNonEmptyOnContent) {
-    StringData a("a");
-    StringData b("b");
+    std::string_view a("a");
+    std::string_view b("b");
     ASSERT_FALSE(a == b);
     ASSERT_TRUE(a != b);
     ASSERT_FALSE(a > b);
@@ -164,12 +116,12 @@ TEST(Comparison, BothNonEmptyOnContent) {
     ASSERT_TRUE(a < b);
     ASSERT_TRUE(a <= b);
 
-    static_assert("a"_sd.compare("b"_sd) < 0);
+    static_assert("a"sv.compare("b"sv) < 0);
 }
 
 TEST(Comparison, MixedEmptyAndNot) {
-    StringData empty("");
-    StringData a("a");
+    std::string_view empty("");
+    std::string_view a("a");
     ASSERT_FALSE(a == empty);
     ASSERT_TRUE(a != empty);
     ASSERT_TRUE(a > empty);
@@ -177,13 +129,13 @@ TEST(Comparison, MixedEmptyAndNot) {
     ASSERT_FALSE(a < empty);
     ASSERT_FALSE(a <= empty);
 
-    static_assert(""_sd.compare("a"_sd) < 0);
+    static_assert(""sv.compare("a"sv) < 0);
 }
 
 TEST(Find, Char1) {
-    ASSERT_EQUALS(std::string::npos, StringData("foo").find('a'));
-    ASSERT_EQUALS(0U, StringData("foo").find('f'));
-    ASSERT_EQUALS(1U, StringData("foo").find('o'));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").find('a'));
+    ASSERT_EQUALS(0U, std::string_view("foo").find('f'));
+    ASSERT_EQUALS(1U, std::string_view("foo").find('o'));
 
     using namespace std::literals;
     const std::string haystacks[]{"foo", "f", "", "\0"s, "f\0"s, "\0f"s, "ffoo", "afoo"};
@@ -194,27 +146,27 @@ TEST(Find, Char1) {
             for (size_t pos = 0; pos < s.size() + 2; ++pos) {
                 // All expectations should be consistent with std::string::find.
                 auto withStdString = s.find(ch, pos);
-                auto withStringData = StringData{s}.find(ch, pos);
+                auto withStringData = std::string_view{s}.find(ch, pos);
                 ASSERT_EQUALS(withStdString, withStringData)
-                    << fmt::format(R"(s:'{}', ch:'{}', pos:{})", s, StringData{&ch, 1}, pos);
+                    << fmt::format(R"(s:'{}', ch:'{}', pos:{})", s, std::string_view{&ch, 1}, pos);
             }
         }
     }
 }
 
 TEST(Find, Str1) {
-    ASSERT_EQUALS(std::string::npos, StringData("foo").find("asdsadasda"));
-    ASSERT_EQUALS(std::string::npos, StringData("foo").find("a"));
-    ASSERT_EQUALS(std::string::npos, StringData("foo").find("food"));
-    ASSERT_EQUALS(std::string::npos, StringData("foo").find("ooo"));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").find("asdsadasda"));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").find("a"));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").find("food"));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").find("ooo"));
 
-    ASSERT_EQUALS(0U, StringData("foo").find("f"));
-    ASSERT_EQUALS(0U, StringData("foo").find("fo"));
-    ASSERT_EQUALS(0U, StringData("foo").find("foo"));
-    ASSERT_EQUALS(1U, StringData("foo").find("o"));
-    ASSERT_EQUALS(1U, StringData("foo").find("oo"));
+    ASSERT_EQUALS(0U, std::string_view("foo").find("f"));
+    ASSERT_EQUALS(0U, std::string_view("foo").find("fo"));
+    ASSERT_EQUALS(0U, std::string_view("foo").find("foo"));
+    ASSERT_EQUALS(1U, std::string_view("foo").find("o"));
+    ASSERT_EQUALS(1U, std::string_view("foo").find("oo"));
 
-    ASSERT_EQUALS(std::string("foo").find(""), StringData("foo").find(""));
+    ASSERT_EQUALS(std::string("foo").find(""), std::string_view("foo").find(""));
 
     using namespace std::literals;
     const std::string haystacks[]{"", "x", "foo", "fffoo", "\0"s};
@@ -226,7 +178,7 @@ TEST(Find, Str1) {
             for (size_t pos = 0; pos < std::max(s.size(), sub.size()) + 2; ++pos) {
                 // All expectations should be consistent with std::string::find.
                 auto withStdString = s.find(sub, pos);
-                auto withStringData = StringData{s}.find(StringData{sub}, pos);
+                auto withStringData = std::string_view{s}.find(std::string_view{sub}, pos);
                 ASSERT_EQUALS(withStdString, withStringData)
                     << fmt::format(R"(s:'{}', sub:'{}', pos:{})", s, sub, pos);
             }
@@ -237,18 +189,18 @@ TEST(Find, Str1) {
 TEST(Hasher, Str1) {
     static constexpr size_t sizeofSizeT = sizeof(size_t);
     struct Spec {
-        StringData str;
+        std::string_view str;
         uint32_t h4;
         uint64_t h8;
     };
     static constexpr auto specs = std::to_array<Spec>({
-        {""_sd, 0, 0},
-        {"foo"_sd, 0xf6a5c420, 0xe271865701f54561},
-        {"pizza"_sd, 0xd5d988af, 0xa8d485636af33c14},
-        {"mongo"_sd, 0xddfcdb0d, 0x27b47f232477579f},
-        {"murmur"_sd, 0x73f313cd, 0xfd1a3d9eb1a4738f},
+        {""sv, 0, 0},
+        {"foo"sv, 0xf6a5c420, 0xe271865701f54561},
+        {"pizza"sv, 0xd5d988af, 0xa8d485636af33c14},
+        {"mongo"sv, 0xddfcdb0d, 0x27b47f232477579f},
+        {"murmur"sv, 0x73f313cd, 0xfd1a3d9eb1a4738f},
     });
-    auto tryHash = [](StringData str) {
+    auto tryHash = [](std::string_view str) {
         size_t h = 0;
         simpleStringDataComparator.hash_combine(h, str);
         return h;
@@ -265,19 +217,19 @@ TEST(Hasher, Str1) {
 }
 
 TEST(Rfind, Char1) {
-    ASSERT_EQUALS(std::string::npos, StringData("foo").rfind('a'));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo").rfind('a'));
 
-    ASSERT_EQUALS(0U, StringData("foo").rfind('f'));
-    ASSERT_EQUALS(0U, StringData("foo").rfind('f', 3));
-    ASSERT_EQUALS(0U, StringData("foo").rfind('f', 2));
-    ASSERT_EQUALS(0U, StringData("foo").rfind('f', 1));
-    ASSERT_EQUALS(std::string::npos, StringData("foo", 0).rfind('f'));
+    ASSERT_EQUALS(0U, std::string_view("foo").rfind('f'));
+    ASSERT_EQUALS(0U, std::string_view("foo").rfind('f', 3));
+    ASSERT_EQUALS(0U, std::string_view("foo").rfind('f', 2));
+    ASSERT_EQUALS(0U, std::string_view("foo").rfind('f', 1));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo", 0).rfind('f'));
 
-    ASSERT_EQUALS(2U, StringData("foo").rfind('o'));
-    ASSERT_EQUALS(2U, StringData("foo", 3).rfind('o'));
-    ASSERT_EQUALS(1U, StringData("foo", 2).rfind('o'));
-    ASSERT_EQUALS(std::string::npos, StringData("foo", 1).rfind('o'));
-    ASSERT_EQUALS(std::string::npos, StringData("foo", 0).rfind('o'));
+    ASSERT_EQUALS(2U, std::string_view("foo").rfind('o'));
+    ASSERT_EQUALS(2U, std::string_view("foo", 3).rfind('o'));
+    ASSERT_EQUALS(1U, std::string_view("foo", 2).rfind('o'));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo", 1).rfind('o'));
+    ASSERT_EQUALS(std::string::npos, std::string_view("foo", 0).rfind('o'));
 
     using namespace std::literals;
     const std::string haystacks[]{"", "x", "foo", "fffoo", "oof", "\0"s};
@@ -287,9 +239,9 @@ TEST(Rfind, Char1) {
             auto validate = [&](size_t pos) {
                 // All expectations should be consistent with std::string::rfind.
                 auto withStdString = s.rfind(ch, pos);
-                auto withStringData = StringData{s}.rfind(ch, pos);
+                auto withStringData = std::string_view{s}.rfind(ch, pos);
                 ASSERT_EQUALS(withStdString, withStringData)
-                    << fmt::format(R"(s:'{}', ch:'{}', pos:{})", s, StringData{&ch, 1}, pos);
+                    << fmt::format(R"(s:'{}', ch:'{}', pos:{})", s, std::string_view{&ch, 1}, pos);
             };
             // Try all possibly-relevent `pos` arguments.
             for (size_t pos = 0; pos < s.size() + 2; ++pos)
@@ -300,24 +252,25 @@ TEST(Rfind, Char1) {
 }
 
 // this is to verify we match std::string
-void SUBSTR_TEST_HELP(StringData big, StringData small, size_t start, size_t len) {
+void SUBSTR_TEST_HELP(std::string_view big, std::string_view small, size_t start, size_t len) {
     ASSERT_EQUALS(std::string{small}, std::string{big}.substr(start, len));
-    ASSERT_EQUALS(small, StringData(big).substr(start, len));
+    ASSERT_EQUALS(small, std::string_view(big).substr(start, len));
 }
-void SUBSTR_TEST_HELP(StringData big, StringData small, size_t start) {
+void SUBSTR_TEST_HELP(std::string_view big, std::string_view small, size_t start) {
     ASSERT_EQUALS(std::string{small}, std::string{big}.substr(start));
-    ASSERT_EQUALS(small, StringData(big).substr(start));
+    ASSERT_EQUALS(small, std::string_view(big).substr(start));
 }
 
 // [12] is number of args to substr
-#define SUBSTR_1_TEST_HELP(big, small, start)                                                  \
-    ASSERT_EQUALS(std::string{StringData(small)}, std::string{StringData(big)}.substr(start)); \
-    ASSERT_EQUALS(StringData(small), StringData(big).substr(start));
+#define SUBSTR_1_TEST_HELP(big, small, start)                        \
+    ASSERT_EQUALS(std::string{std::string_view(small)},              \
+                  std::string{std::string_view(big)}.substr(start)); \
+    ASSERT_EQUALS(std::string_view(small), std::string_view(big).substr(start));
 
-#define SUBSTR_2_TEST_HELP(big, small, start, len)                  \
-    ASSERT_EQUALS(std::string{StringData(small)},                   \
-                  std::string{StringData(big)}.substr(start, len)); \
-    ASSERT_EQUALS(StringData(small), StringData(big).substr(start, len));
+#define SUBSTR_2_TEST_HELP(big, small, start, len)                        \
+    ASSERT_EQUALS(std::string{std::string_view(small)},                   \
+                  std::string{std::string_view(big)}.substr(start, len)); \
+    ASSERT_EQUALS(std::string_view(small), std::string_view(big).substr(start, len));
 
 TEST(Substr, Simple1) {
     SUBSTR_1_TEST_HELP("abcde", "abcde", 0);
@@ -333,51 +286,51 @@ TEST(Substr, Simple1) {
     SUBSTR_2_TEST_HELP("abcde", "", 5, 0);
     SUBSTR_2_TEST_HELP("abcde", "", 5, 10);
 
-    // make sure we don't blow past the end of the StringData
-    SUBSTR_1_TEST_HELP(StringData("abcdeXXX", 5), "abcde", 0);
-    SUBSTR_2_TEST_HELP(StringData("abcdeXXX", 5), "abcde", 0, 10);
-    SUBSTR_1_TEST_HELP(StringData("abcdeXXX", 5), "de", 3);
-    SUBSTR_2_TEST_HELP(StringData("abcdeXXX", 5), "de", 3, 7);
-    SUBSTR_1_TEST_HELP(StringData("abcdeXXX", 5), "", 5);
-    SUBSTR_2_TEST_HELP(StringData("abcdeXXX", 5), "", 5, 1);
+    // make sure we don't blow past the end of the std::string_view
+    SUBSTR_1_TEST_HELP(std::string_view("abcdeXXX", 5), "abcde", 0);
+    SUBSTR_2_TEST_HELP(std::string_view("abcdeXXX", 5), "abcde", 0, 10);
+    SUBSTR_1_TEST_HELP(std::string_view("abcdeXXX", 5), "de", 3);
+    SUBSTR_2_TEST_HELP(std::string_view("abcdeXXX", 5), "de", 3, 7);
+    SUBSTR_1_TEST_HELP(std::string_view("abcdeXXX", 5), "", 5);
+    SUBSTR_2_TEST_HELP(std::string_view("abcdeXXX", 5), "", 5, 1);
 }
 
 TEST(StartsWith, Simple) {
-    ASSERT(StringData("").starts_with(""));
-    ASSERT(!StringData("").starts_with("x"));
-    ASSERT(StringData("abcde").starts_with(""));
-    ASSERT(StringData("abcde").starts_with("a"));
-    ASSERT(StringData("abcde").starts_with("ab"));
-    ASSERT(StringData("abcde").starts_with("abc"));
-    ASSERT(StringData("abcde").starts_with("abcd"));
-    ASSERT(StringData("abcde").starts_with("abcde"));
-    ASSERT(!StringData("abcde").starts_with("abcdef"));
-    ASSERT(!StringData("abcde").starts_with("abdce"));
-    ASSERT(StringData("abcde").starts_with(StringData("abcdeXXXX").substr(0, 4)));
-    ASSERT(!StringData("abcde").starts_with(StringData("abdef").substr(0, 4)));
-    ASSERT(!StringData("abcde").substr(0, 3).starts_with("abcd"));
+    ASSERT(std::string_view("").starts_with(""));
+    ASSERT(!std::string_view("").starts_with("x"));
+    ASSERT(std::string_view("abcde").starts_with(""));
+    ASSERT(std::string_view("abcde").starts_with("a"));
+    ASSERT(std::string_view("abcde").starts_with("ab"));
+    ASSERT(std::string_view("abcde").starts_with("abc"));
+    ASSERT(std::string_view("abcde").starts_with("abcd"));
+    ASSERT(std::string_view("abcde").starts_with("abcde"));
+    ASSERT(!std::string_view("abcde").starts_with("abcdef"));
+    ASSERT(!std::string_view("abcde").starts_with("abdce"));
+    ASSERT(std::string_view("abcde").starts_with(std::string_view("abcdeXXXX").substr(0, 4)));
+    ASSERT(!std::string_view("abcde").starts_with(std::string_view("abdef").substr(0, 4)));
+    ASSERT(!std::string_view("abcde").substr(0, 3).starts_with("abcd"));
 }
 
 TEST(EndsWith, Simple) {
-    // ASSERT(StringData("").endsWith(""));
-    ASSERT(!StringData("").ends_with("x"));
-    // ASSERT(StringData("abcde").endsWith(""));
-    ASSERT(StringData("abcde").ends_with(StringData("e", 0)));
-    ASSERT(StringData("abcde").ends_with("e"));
-    ASSERT(StringData("abcde").ends_with("de"));
-    ASSERT(StringData("abcde").ends_with("cde"));
-    ASSERT(StringData("abcde").ends_with("bcde"));
-    ASSERT(StringData("abcde").ends_with("abcde"));
-    ASSERT(!StringData("abcde").ends_with("0abcde"));
-    ASSERT(!StringData("abcde").ends_with("abdce"));
-    ASSERT(StringData("abcde").ends_with(StringData("bcdef").substr(0, 4)));
-    ASSERT(!StringData("abcde").ends_with(StringData("bcde", 3)));
-    ASSERT(!StringData("abcde").substr(0, 3).ends_with("cde"));
+    // ASSERT(std::string_view("").endsWith(""));
+    ASSERT(!std::string_view("").ends_with("x"));
+    // ASSERT(std::string_view("abcde").endsWith(""));
+    ASSERT(std::string_view("abcde").ends_with(std::string_view("e", 0)));
+    ASSERT(std::string_view("abcde").ends_with("e"));
+    ASSERT(std::string_view("abcde").ends_with("de"));
+    ASSERT(std::string_view("abcde").ends_with("cde"));
+    ASSERT(std::string_view("abcde").ends_with("bcde"));
+    ASSERT(std::string_view("abcde").ends_with("abcde"));
+    ASSERT(!std::string_view("abcde").ends_with("0abcde"));
+    ASSERT(!std::string_view("abcde").ends_with("abdce"));
+    ASSERT(std::string_view("abcde").ends_with(std::string_view("bcdef").substr(0, 4)));
+    ASSERT(!std::string_view("abcde").ends_with(std::string_view("bcde", 3)));
+    ASSERT(!std::string_view("abcde").substr(0, 3).ends_with("cde"));
 }
 
 TEST(ConstIterator, StdCopy) {
     std::vector<char> chars;
-    auto data = "This is some raw data."_sd;
+    auto data = "This is some raw data."sv;
 
     chars.resize(data.size());
     std::copy(data.begin(), data.end(), chars.begin());
@@ -389,7 +342,7 @@ TEST(ConstIterator, StdCopy) {
 
 TEST(ConstIterator, StdReverseCopy) {
     std::vector<char> chars;
-    auto data = "This is some raw data."_sd;
+    auto data = "This is some raw data."sv;
 
     chars.resize(data.size());
     std::reverse_copy(data.begin(), data.end(), chars.begin());
@@ -403,7 +356,7 @@ TEST(ConstIterator, StdReverseCopy) {
 
 TEST(ConstIterator, StdReplaceCopy) {
     std::vector<char> chars;
-    auto data = "This is some raw data."_sd;
+    auto data = "This is some raw data."sv;
 
     chars.resize(data.size());
     std::replace_copy(data.begin(), data.end(), chars.begin(), ' ', '_');
@@ -416,7 +369,7 @@ TEST(ConstIterator, StdReplaceCopy) {
 }
 
 TEST(StringDataFmt, Fmt) {
-    ASSERT_EQUALS(fmt::format("-{}-", "abc"_sd), "-abc-");
+    ASSERT_EQUALS(fmt::format("-{}-", "abc"sv), "-abc-");
 }
 
 TEST(Ostream, StringDataMatchesStdString) {
@@ -426,12 +379,29 @@ TEST(Ostream, StringDataMatchesStdString) {
         std::function<void(std::ostream&)> manip;
     };
     const TestCase testCases[] = {
-        {__LINE__, [](std::ostream& os) {}},
-        {__LINE__, [](std::ostream& os) { os << std::setw(5); }},
-        {__LINE__, [](std::ostream& os) { os << std::left << std::setw(5); }},
-        {__LINE__, [](std::ostream& os) { os << std::right << std::setw(5); }},
-        {__LINE__, [](std::ostream& os) { os << std::setfill('.') << std::left << std::setw(5); }},
-        {__LINE__, [](std::ostream& os) { os << std::setfill('.') << std::right << std::setw(5); }},
+        {__LINE__,
+         [](std::ostream& os) {
+         }},
+        {__LINE__,
+         [](std::ostream& os) {
+             os << std::setw(5);
+         }},
+        {__LINE__,
+         [](std::ostream& os) {
+             os << std::left << std::setw(5);
+         }},
+        {__LINE__,
+         [](std::ostream& os) {
+             os << std::right << std::setw(5);
+         }},
+        {__LINE__,
+         [](std::ostream& os) {
+             os << std::setfill('.') << std::left << std::setw(5);
+         }},
+        {__LINE__,
+         [](std::ostream& os) {
+             os << std::setfill('.') << std::right << std::setw(5);
+         }},
     };
     for (const auto& testCase : testCases) {
         const std::string location = std::string(" at line:") + std::to_string(testCase.line);
@@ -440,8 +410,12 @@ TEST(Ostream, StringDataMatchesStdString) {
             std::function<void(std::ostream&)> putter;
             std::ostringstream os;
         };
-        Experiment expected{[&](std::ostream& os) { os << s; }};
-        Experiment actual{[&](std::ostream& os) { os << StringData(s); }};
+        Experiment expected{[&](std::ostream& os) {
+            os << s;
+        }};
+        Experiment actual{[&](std::ostream& os) {
+            os << std::string_view(s);
+        }};
         for (auto& x : {&expected, &actual}) {
             x->os << ">>";
             testCase.manip(x->os);
@@ -455,36 +429,19 @@ TEST(Ostream, StringDataMatchesStdString) {
     }
 }
 
-TEST(StringData, PlusEq) {
+TEST(StringDataTest, PlusEq) {
     auto str = std::string("hello ");
-    auto& ret = str += "world"_sd;
+    auto& ret = str += "world"sv;
     ASSERT_EQ(str, "hello world");
     ASSERT_EQ(&ret, &str);
 }
 
-TEST(StringData, ConversionToStdStringViewForInterop) {
-    static constexpr StringData in = "abc";
-    static constexpr auto out = toStdStringViewForInterop(in);
-    static_assert(std::is_same_v<decltype(out), const std::string_view>);
-    ASSERT_EQ(out.data(), in.data());
-    ASSERT_EQ(out.size(), in.size());
-}
-
-TEST(StringData, ConversionToStringDataForInterop) {
-    static constexpr std::string_view in = "abc";
-    static constexpr auto out = toStringDataForInterop(in);
-    static_assert(std::is_same_v<decltype(out), const StringData>);
-    ASSERT_EQ(out.data(), in.data());
-    ASSERT_EQ(out.size(), in.size());
-}
-
-TEST(StringData, GtestPrintTo) {
+TEST(StringDataTest, GtestPrintTo) {
     std::string s(256, '\0');
-    StringData sd{s};
+    std::string_view sd{s};
     std::iota(s.begin(), s.end(), '\0');
     for (auto m = s.begin(); m != s.end(); std::rotate(s.begin(), m++, s.end()))
-        ASSERT_EQ(testing::PrintToString(sd),
-                  testing::PrintToString(toStdStringViewForInterop(sd)));
+        ASSERT_EQ(testing::PrintToString(sd), testing::PrintToString(sd));
 }
 
 }  // namespace

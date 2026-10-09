@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_shape/insert_cmd_shape.h"
 
@@ -34,8 +8,11 @@
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::query_shape {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using write_ops::InsertCommandRequest;
 
@@ -43,12 +20,12 @@ const auto kTestNss = NamespaceString::createNamespaceString_forTest("testdb.tes
 
 class InsertCmdShapeTest : public ServiceContextTest {
 public:
-    InsertCmdShape makeShape(StringData insertCmd) {
+    InsertCmdShape makeShape(std::string_view insertCmd) {
         auto icr = InsertCommandRequest::parseOwned(fromjson(insertCmd));
         return InsertCmdShape(icr);
     }
 
-    QueryShapeHash makeShapeHash(StringData insertCmd) {
+    QueryShapeHash makeShapeHash(std::string_view insertCmd) {
         auto shape = makeShape(insertCmd);
         return shape.sha256Hash(expCtx->getOperationContext(), {});
     }
@@ -74,21 +51,25 @@ TEST_F(InsertCmdShapeTest, DefaultInsertShape) {
 
     const auto expectedRepresentativeShape = fromjson(R"({
         cmdNs: { db: "testdb", coll: "testcoll" },
+        command: "insert",
         documents: [ { "?": "?" } ]
     })");
-    ASSERT_BSONOBJ_EQ(expectedRepresentativeShape,
-                      shape.toBson(expCtx->getOperationContext(),
-                                   SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                                   {}));
+    ASSERT_BSONOBJ_EQ(
+        expectedRepresentativeShape,
+        shape.toBson(expCtx->getOperationContext(),
+                     query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                     {}));
 
     const auto expectedDebugShape = fromjson(R"({
         cmdNs: { db: "testdb", coll: "testcoll" },
+        command: "insert",
         documents: "?array<?object>"
     })");
-    ASSERT_BSONOBJ_EQ(expectedDebugShape,
-                      shape.toBson(expCtx->getOperationContext(),
-                                   SerializationOptions::kDebugQueryShapeSerializeOptions,
-                                   {}));
+    ASSERT_BSONOBJ_EQ(
+        expectedDebugShape,
+        shape.toBson(expCtx->getOperationContext(),
+                     query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions,
+                     {}));
 }
 
 // Test that documents with different field names produce the same shape.
@@ -103,12 +84,13 @@ TEST_F(InsertCmdShapeTest, DocumentsIsAlwaysPlaceholderRegardlessOfFieldNames) {
         documents: [ { b: "hello", c: true } ],
         "$db": "testdb"
     })");
-    ASSERT_BSONOBJ_EQ(shape1.toBson(expCtx->getOperationContext(),
-                                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                                    {}),
-                      shape2.toBson(expCtx->getOperationContext(),
-                                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                                    {}));
+    ASSERT_BSONOBJ_EQ(
+        shape1.toBson(expCtx->getOperationContext(),
+                      query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                      {}),
+        shape2.toBson(expCtx->getOperationContext(),
+                      query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                      {}));
 }
 
 // Test that multiple documents produce the same shape as a single document.
@@ -123,12 +105,13 @@ TEST_F(InsertCmdShapeTest, DocumentsIsAlwaysPlaceholderRegardlessOfDocumentCount
         documents: [ { x: 1 }, { y: 2 }, { z: 3 } ],
         "$db": "testdb"
     })");
-    ASSERT_BSONOBJ_EQ(shape1.toBson(expCtx->getOperationContext(),
-                                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                                    {}),
-                      shape2.toBson(expCtx->getOperationContext(),
-                                    SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
-                                    {}));
+    ASSERT_BSONOBJ_EQ(
+        shape1.toBson(expCtx->getOperationContext(),
+                      query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                      {}),
+        shape2.toBson(expCtx->getOperationContext(),
+                      query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+                      {}));
 }
 
 // Test that the debug format represents documents with a type placeholder.
@@ -138,8 +121,10 @@ TEST_F(InsertCmdShapeTest, InsertShapeDebugFormat) {
         documents: [ { x: 1 } ],
         "$db": "testdb"
     })");
-    const auto bson = shape.toBson(
-        expCtx->getOperationContext(), SerializationOptions::kDebugQueryShapeSerializeOptions, {});
+    const auto bson =
+        shape.toBson(expCtx->getOperationContext(),
+                     query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions,
+                     {});
     // Verify 'documents' is present and shapified (not the original value).
     ASSERT_TRUE(bson.hasField("documents"));
     ASSERT_FALSE(bson["documents"].isABSONObj() && bson["documents"].Obj().hasField("x"));
@@ -212,18 +197,48 @@ TEST_F(InsertCmdShapeTest, ShapeComponentsSizeDoesNotVaryWithDocumentSize) {
         insert: "testcoll",
         documents: [ { a: 1 } ],
         "$db": "testdb"
-    })"_sd));
+    })"sv));
     auto icr2 = InsertCommandRequest::parseOwned(fromjson(R"({
         insert: "testcoll",
         documents: [ { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8 } ],
         "$db": "testdb"
-    })"_sd));
+    })"sv));
 
     InsertCmdShape shape1(icr1);
     InsertCmdShape shape2(icr2);
 
     ASSERT_EQ(static_cast<const InsertCmdShapeComponents&>(shape1.specificComponents()).size(),
               static_cast<const InsertCmdShapeComponents&>(shape2.specificComponents()).size());
+}
+
+// Verifies that "insert" command shape hash value is stable (doesn't change between
+// the versions of the server).
+TEST_F(InsertCmdShapeTest, StableQueryShapeHashValue) {
+    auto hash = makeShapeHash(R"({
+        insert: "testcoll",
+        documents: [ { x: 1 } ],
+        "$db": "testdb"
+    })");
+
+    std::string expectedHash = "AC5B6ED44B30138504E115AEFAF6126598B912F96CE6F3AF75943205260DE0AC";
+    ASSERT_EQ(expectedHash, hash.toHexString());
+
+    // Changing the documents should not change the hash.
+    hash = makeShapeHash(R"({
+        insert: "testcoll",
+        documents: [ { x: 1 }, { y: 1 }, { z: 1 } ],
+        "$db": "testdb"
+    })");
+    ASSERT_EQ(expectedHash, hash.toHexString());
+
+    // Changing the collection should change the hash.
+    hash = makeShapeHash(R"({
+        insert: "testcoll2",
+        documents: [ { x: 1 } ],
+        "$db": "testdb"
+    })");
+    expectedHash = "7D1781C3B954CFED13EC6E3114688A2D7397FA5E6ED9F3EB083C97CB3BDC7B11";
+    ASSERT_EQ(expectedHash, hash.toHexString());
 }
 
 }  // namespace

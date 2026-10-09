@@ -10,7 +10,6 @@
  *   do_not_wrap_aggregations_in_facets,
  *   # This feature flag adjusts the desugaring a bit - requesting 'outputSortKeyMetadata' from the
  *   # $sort stage.
- *   featureFlagRankFusionBasic,
  *   requires_fcv_81,
  * ]
  */
@@ -75,10 +74,13 @@ assert.eq(stages, [
 ]);
 
 // $sort first by partitionBy, then sortBy, because we sort within each partition.
-assert.eq(desugar({$setWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}}), [
-    {$sort: {sortKey: {zip: 1, ts: -1, _id: 1}, outputSortKeyMetadata: true}},
-    {$_internalSetWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}},
-]);
+assert.eq(
+    desugar({$setWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}}),
+    [
+        {$sort: {sortKey: {zip: 1, ts: -1, _id: 1}, outputSortKeyMetadata: true}},
+        {$_internalSetWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}},
+    ],
+);
 
 stages = desugar({
     $setWindowFields: {partitionBy: {$toLower: "$country"}, sortBy: {ts: -1, _id: 1}, output: {}},

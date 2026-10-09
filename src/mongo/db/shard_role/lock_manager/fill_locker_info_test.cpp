@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/lock_manager/fill_locker_info.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,6 +15,7 @@
 #include "mongo/unittest/unittest.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -49,6 +23,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using LockerInfo = Locker::LockerInfo;
 using OneLock = Locker::OneLock;
@@ -92,24 +67,9 @@ TEST(FillLockerInfo, DoesReportLockStats) {
     ASSERT_EQ(infoObj["lockStats"].type(), BSONType::object);
 }
 
-DEATH_TEST(FillLockerInfoDeathTest,
-           ShouldFailIfLocksAreNotSortedAppropriately,
-           "Invariant failure") {
-    LockerInfo info;
-    // The global lock is supposed to come before the database lock.
-    info.locks = {
-        OneLock{ResourceId(RESOURCE_DATABASE,
-                           DatabaseName::createDatabaseName_forTest(boost::none, "TestDB")),
-                MODE_X},
-        OneLock{resourceIdGlobal, MODE_IX}};
-
-    BSONObjBuilder infoBuilder;
-    fillLockerInfo(info, infoBuilder);
-}
-
 TEST(FillLockerInfo, DoesReportLocksHeld) {
     const ResourceId dbId(RESOURCE_DATABASE,
-                          DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"_sd));
+                          DatabaseName::createDatabaseName_forTest(boost::none, "TestDB"sv));
     LockerInfo info;
     info.locks = {OneLock{resourceIdGlobal, MODE_IX}, OneLock{dbId, MODE_IX}};
 
@@ -127,9 +87,9 @@ TEST(FillLockerInfo, DoesReportLocksHeld) {
 
 TEST(FillLockerInfo, ShouldReportMaxTypeHeldForResourceType) {
     const ResourceId firstDbId(RESOURCE_DATABASE,
-                               DatabaseName::createDatabaseName_forTest(boost::none, "FirstDB"_sd));
+                               DatabaseName::createDatabaseName_forTest(boost::none, "FirstDB"sv));
     const ResourceId secondDbId(
-        RESOURCE_DATABASE, DatabaseName::createDatabaseName_forTest(boost::none, "SecondDB"_sd));
+        RESOURCE_DATABASE, DatabaseName::createDatabaseName_forTest(boost::none, "SecondDB"sv));
     LockerInfo info;
     info.locks = {OneLock{resourceIdGlobal, MODE_IX},
                   OneLock{firstDbId, MODE_IX},

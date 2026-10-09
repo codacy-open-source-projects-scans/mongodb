@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/namespace_string.h"
@@ -44,12 +17,13 @@
 #include "mongo/util/modules.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace sharding {
 namespace router {
 
-class MONGO_MOD_PRIVATE RouterBase {
+class [[MONGO_MOD_PRIVATE]] RouterBase {
 protected:
     RouterBase(OperationContext* opCtx, CatalogCache* catalogCache);
 
@@ -59,6 +33,12 @@ protected:
     };
 
     void _initTxnRouterIfNeeded();
+
+    // Arms the StaleConfig retry counter on the OperationContext (sets it to 0 if not already set)
+    // so that versioned requests issued by this router advertise that a protocol-aware router is
+    // driving the operation. Must be called once before the routing retry loop so that retries
+    // (which increment the counter in _onException) are not reset.
+    void _armStaleConfigRetryAttemptTracking();
 
     OperationContext* const _opCtx;
     CatalogCache* const _catalogCache;
@@ -72,14 +52,15 @@ protected:
  * This class should mostly be used for routing of DDL operations which need to be coordinated from
  * the primary shard of the database.
  */
-class MONGO_MOD_PUBLIC DBPrimaryRouter final : public RouterBase {
+class [[MONGO_MOD_PUBLIC]] DBPrimaryRouter final : public RouterBase {
 public:
     DBPrimaryRouter(OperationContext* opCtx, const DatabaseName& db);
 
     template <typename F>
-    auto route(StringData comment, F&& callbackFn) {
+    auto route(std::string_view comment, F&& callbackFn) {
         RoutingRetryInfo retryInfo{std::string{comment}};
         _initTxnRouterIfNeeded();
+        _armStaleConfigRetryAttemptTracking();
 
         while (true) {
             auto cdb = _createDbIfRequestedAndGetRoutingInfo();
@@ -127,7 +108,7 @@ private:
 /**
  * Class which contains logic common to routers which target one or more collections.
  */
-class MONGO_MOD_PRIVATE CollectionRouterCommon : public RouterBase {
+class [[MONGO_MOD_PRIVATE]] CollectionRouterCommon : public RouterBase {
 protected:
     CollectionRouterCommon(OperationContext* opCtx,
                            CatalogCache* catalogCache,
@@ -147,7 +128,7 @@ protected:
  * This class should mostly be used for routing CRUD operations which need to have a view of the
  * entire routing table for a collection.
  */
-class MONGO_MOD_PUBLIC CollectionRouter final : public CollectionRouterCommon {
+class [[MONGO_MOD_PUBLIC]] CollectionRouter final : public CollectionRouterCommon {
 public:
     CollectionRouter(OperationContext* opCtx, NamespaceString nss);
 
@@ -155,7 +136,7 @@ public:
     CollectionRouter(OperationContext* opCtx, CatalogCache* catalogCache, NamespaceString nss);
 
     template <typename F>
-    auto route(StringData comment, F&& callbackFn) {
+    auto route(std::string_view comment, F&& callbackFn) {
         return _routeImpl(comment, [&] {
             auto cri = _createDbIfRequestedAndGetRoutingInfo();
             return callbackFn(_opCtx, cri);
@@ -163,7 +144,7 @@ public:
     }
 
     template <typename F>
-    auto routeWithRoutingContext(StringData comment, F&& callbackFn) {
+    auto routeWithRoutingContext(std::string_view comment, F&& callbackFn) {
         return _routeImpl(comment, [&] {
             RoutingContext routingCtx = _createDbIfRequestedAndGetRoutingContext();
             return routing_context_utils::runAndValidate(
@@ -186,9 +167,10 @@ public:
 
 private:
     template <typename F>
-    auto _routeImpl(StringData comment, F&& work) {
+    auto _routeImpl(std::string_view comment, F&& work) {
         RoutingRetryInfo retryInfo{std::string{comment}};
         _initTxnRouterIfNeeded();
+        _armStaleConfigRetryAttemptTracking();
 
         while (true) {
             try {
@@ -208,7 +190,7 @@ private:
     boost::optional<ShardId> _suggestedPrimaryId;
 };
 
-class MONGO_MOD_PUBLIC MultiCollectionRouter final : public CollectionRouterCommon {
+class [[MONGO_MOD_PUBLIC]] MultiCollectionRouter final : public CollectionRouterCommon {
 public:
     MultiCollectionRouter(OperationContext* opCtx, const std::vector<NamespaceString>& nssList);
 
@@ -222,9 +204,10 @@ public:
 
 
     template <typename F>
-    auto route(StringData comment, F&& callbackFn) {
+    auto route(std::string_view comment, F&& callbackFn) {
         RoutingRetryInfo retryInfo{std::string{comment}};
         _initTxnRouterIfNeeded();
+        _armStaleConfigRetryAttemptTracking();
 
         while (true) {
             stdx::unordered_map<NamespaceString, CollectionRoutingInfo> criMap;
@@ -245,7 +228,7 @@ public:
  * Creates all of the databases referenced by 'nssList' (if they don't already exist), and then
  * creates and returns a RoutingContext that can be used for targeting write ops.
  */
-MONGO_MOD_PUBLIC std::unique_ptr<RoutingContext> createDatabasesAndGetRoutingCtx(
+[[MONGO_MOD_PUBLIC]] std::unique_ptr<RoutingContext> createDatabasesAndGetRoutingCtx(
     OperationContext* opCtx,
     const std::vector<NamespaceString>& nssList,
     bool checkTimeseriesBucketsNss,

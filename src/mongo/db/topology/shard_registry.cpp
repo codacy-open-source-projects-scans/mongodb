@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/shard_registry.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/client.h"
@@ -86,6 +59,8 @@ const Seconds kRefreshPeriod(30);
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 
+MONGO_FAIL_POINT_DEFINE(hangShardRegistryPeriodicPing);
+
 /**
  * Fetches shard documents from the catalog client without creating Shard instances.
  * Returns a map of shardId -> connectionString and the maximum topologyTime found.
@@ -96,7 +71,7 @@ std::pair<ShardRegistryData::ShardIdToConnectionStringMap, Timestamp> fetchFromC
 
     const auto shardsAndOpTime = [&] {
         try {
-            return catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kSnapshotReadConcern);
+            return catalogClient->getAllShards(opCtx, repl::ReadConcernArgs::kSnapshot);
         } catch (DBException& ex) {
             ex.addContext("could not get updated shard list from config server");
             throw;
@@ -178,8 +153,8 @@ ShardRegistry::ShardRegistry(ServiceContext* service,
 
     _threadPool.startup();
 
-    ObservableMutexRegistry::get().add("Router Cache Mutexes", _cacheMutex);
-    ObservableMutexRegistry::get().add("Router Cache Mutexes", _mutex);
+    ObservableMutexRegistry::get().add("routerCacheMutexes", _cacheMutex);
+    ObservableMutexRegistry::get().add("routerCacheMutexes", _mutex);
 }
 
 ShardRegistry::~ShardRegistry() {
@@ -359,18 +334,16 @@ ShardRegistry::Cache::LookupResult ShardRegistry::_lookup(OperationContext* opCt
 }
 
 void ShardRegistry::startupPeriodicReloader(OperationContext* opCtx) {
-    if (MONGO_unlikely(serverGlobalParams.configOnly)) {
-        return;
-    }
-
     // startupPeriodicReloader() must be called only once
     invariant(!_executor);
+    invariant(!serverGlobalParams.configOnly);
 
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(opCtx->getServiceContext()));
 
     // construct task executor
-    auto net = executor::makeNetworkInterface("ShardRegistryUpdater", nullptr, std::move(hookList));
+    auto net = executor::makeNetworkInterface("ShardRegistryUpdater",
+                                              {.metadataHook = std::move(hookList)});
     auto netPtr = net.get();
     _executor = executor::ThreadPoolTaskExecutor::create(
         std::make_unique<executor::NetworkInterfaceThreadPool>(netPtr), std::move(net));
@@ -380,6 +353,8 @@ void ShardRegistry::startupPeriodicReloader(OperationContext* opCtx) {
     AsyncTry([this] {
         ThreadClient tc("Periodic ShardRegistry pinger", getGlobalServiceContext()->getService());
         auto opCtx = cc().makeOperationContext();
+
+        hangShardRegistryPeriodicPing.pauseWhileSet(opCtx.get());
 
         LOGV2_DEBUG(9112100, 2, "Periodic ping to CSRS for ShardRegistry topology time update");
         uassertStatusOK(_pingForNewTopologyTime(opCtx.get()));
@@ -454,46 +429,69 @@ std::shared_ptr<Shard> ShardRegistry::getConfigShard() const {
 }
 
 StatusWith<std::shared_ptr<Shard>> ShardRegistry::getShard(OperationContext* opCtx,
-                                                           const ShardId& shardId) {
-    // First check if this is a non config shard lookup
-    // This call will may be blocking if there is an ongoing or a need of a cache rebuild
-    if (auto shard = _getData(opCtx)->findShard(shardId)) {
-        return shard;
-    }
-
-    // then check if this is a config shard (this call is blocking in any case)
-    {
+                                                           const ShardId& shardId,
+                                                           bool allowNonShardIdIdentifiers) {
+    // In config-only mode the catalog refresh that backs '_getData' is intentionally blocked
+    // (ShardingCatalogClient::getAllShards). The config server is tracked separately in
+    // '_configShardData', so resolve it directly without triggering a refresh. This allows reads on
+    // the fixed 'admin.*'/'config.*' namespaces to be forwarded to the config server. Lookups for
+    // any other (data) shard still fall through below and fail, since data shards are not
+    // reachable.
+    if (MONGO_unlikely(serverGlobalParams.configOnly)) {
         std::lock_guard lk(_mutex);
-        if (auto shard = _configShardData.findShard(shardId)) {
+        if (auto shard = _configShardData.findShard(shardId, allowNonShardIdIdentifiers)) {
             return shard;
         }
     }
 
-    // Reload and try again if the shard was not in the registry
+    // First check if this is a non config shard lookup.
+    // This call may be blocking if there is an ongoing or a needed cache rebuild.
+    if (auto shard = _getData(opCtx)->findShard(shardId, allowNonShardIdIdentifiers)) {
+        return shard;
+    }
+
+    // Then check if this is a config shard (this call is blocking in any case).
+    {
+        std::lock_guard lk(_mutex);
+        if (auto shard = _configShardData.findShard(shardId, allowNonShardIdIdentifiers)) {
+            return shard;
+        }
+    }
+
+    // Reload and try again if the shard was not in the registry.
     reload(opCtx);
-    if (auto shard = _getData(opCtx)->findShard(shardId)) {
+    if (auto shard = _getData(opCtx)->findShard(shardId, allowNonShardIdIdentifiers)) {
         return shard;
     }
 
     return {ErrorCodes::ShardNotFound, str::stream() << "Shard " << shardId << " not found"};
 }
 
-SemiFuture<std::shared_ptr<Shard>> ShardRegistry::getShard(ExecutorPtr executor,
-                                                           const ShardId& shardId) noexcept {
+SemiFuture<std::shared_ptr<Shard>> ShardRegistry::getShard(
+    ExecutorPtr executor, const ShardId& shardId, bool allowNonShardIdIdentifiers) noexcept {
+    // See the comment in the synchronous getShard() overload: in config-only mode the config server
+    // is resolved directly from '_configShardData' to avoid the (blocked) catalog refresh, so that
+    // reads on the fixed 'admin.*'/'config.*' namespaces can be forwarded to the config server.
+    if (MONGO_unlikely(serverGlobalParams.configOnly)) {
+        std::lock_guard lk(_mutex);
+        if (auto shard = _configShardData.findShard(shardId, allowNonShardIdIdentifiers)) {
+            return SemiFuture<std::shared_ptr<Shard>>::makeReady(std::move(shard));
+        }
+    }
 
     // Fetch the shard registry data associated to the latest known topology time
     return _getDataAsync()
         .thenRunOn(executor)
-        .then([this, executor, shardId](auto&& cachedData) {
-            // First check if this is a non config shard lookup
-            if (auto shard = cachedData->findShard(shardId)) {
+        .then([this, executor, shardId, allowNonShardIdIdentifiers](auto&& cachedData) {
+            // First check if this is a non config shard lookup.
+            if (auto shard = cachedData->findShard(shardId, allowNonShardIdIdentifiers)) {
                 return SemiFuture<std::shared_ptr<Shard>>::makeReady(std::move(shard));
             }
 
-            // then check if this is a config shard (this call is blocking in any case)
+            // Then check if this is a config shard (this call is blocking in any case).
             {
                 std::lock_guard lk(_mutex);
-                if (auto shard = _configShardData.findShard(shardId)) {
+                if (auto shard = _configShardData.findShard(shardId, allowNonShardIdIdentifiers)) {
                     return SemiFuture<std::shared_ptr<Shard>>::makeReady(std::move(shard));
                 }
             }
@@ -506,11 +504,11 @@ SemiFuture<std::shared_ptr<Shard>> ShardRegistry::getShard(ExecutorPtr executor,
             //    disk
             // 3. A new primary with a stale ShardRegistry is elected and read the set of shards
             //    from disk and calls ShardRegistry::getShard
-
             return _reloadAsync()
                 .thenRunOn(executor)
-                .then([this, executor, shardId](auto&& cachedData) -> std::shared_ptr<Shard> {
-                    auto shard = cachedData->findShard(shardId);
+                .then([shardId,
+                       allowNonShardIdIdentifiers](auto&& reloadedData) -> std::shared_ptr<Shard> {
+                    auto shard = reloadedData->findShard(shardId, allowNonShardIdIdentifiers);
                     uassert(ErrorCodes::ShardNotFound,
                             str::stream() << "Shard " << shardId << " not found",
                             shard);
@@ -519,6 +517,16 @@ SemiFuture<std::shared_ptr<Shard>> ShardRegistry::getShard(ExecutorPtr executor,
                 .semi();
         })
         .semi();
+}
+
+StatusWith<ShardId> ShardRegistry::resolveShardId(OperationContext* opCtx,
+                                                  const ShardId& shardIdentifier,
+                                                  bool allowNonShardIdIdentifiers) {
+    const auto swShard = getShard(opCtx, shardIdentifier, allowNonShardIdIdentifiers);
+    if (!swShard.isOK()) {
+        return swShard.getStatus();
+    }
+    return swShard.getValue()->getId();
 }
 
 std::vector<ShardId> ShardRegistry::getAllShardIds(OperationContext* opCtx) {
@@ -1024,21 +1032,22 @@ std::shared_ptr<Shard> ShardRegistryData::_findByShardId(const ShardId& shardId)
     return (i != _shardIdLookup.end()) ? i->second : nullptr;
 }
 
-std::shared_ptr<Shard> ShardRegistryData::findShard(const ShardId& shardId) const {
-    auto shard = _findByShardId(shardId);
-    if (shard) {
+std::shared_ptr<Shard> ShardRegistryData::findShard(const ShardId& shardId,
+                                                    bool allowNonShardIdIdentifiers) const {
+    if (auto shard = _findByShardId(shardId)) {
         return shard;
     }
 
-    shard = _findByConnectionString(shardId.toString());
-    if (shard) {
+    if (!allowNonShardIdIdentifiers) {
+        return nullptr;
+    }
+
+    if (auto shard = _findByConnectionString(shardId.toString())) {
         return shard;
     }
 
-    StatusWith<HostAndPort> swHostAndPort = HostAndPort::parse(shardId.toString());
-    if (swHostAndPort.isOK()) {
-        shard = findByHostAndPort(swHostAndPort.getValue());
-        if (shard) {
+    if (auto swHostAndPort = HostAndPort::parse(shardId.toString()); swHostAndPort.isOK()) {
+        if (auto shard = findByHostAndPort(swHostAndPort.getValue())) {
             return shard;
         }
     }
@@ -1069,7 +1078,7 @@ void ShardRegistryData::_addShard(std::shared_ptr<Shard> shard) {
     const ShardId shardId = shard->getId();
     const ConnectionString connString = shard->getConnString();
 
-    auto currentShard = findShard(shardId);
+    auto currentShard = _findByShardId(shardId);
     if (currentShard) {
         for (const auto& host : connString.getServers()) {
             _hostLookup.erase(host);
@@ -1166,7 +1175,7 @@ BSONObj ShardRegistryData::toBSON() const {
 }
 
 ////////////// ShardRegistry::Time
-AtomicWord<ShardRegistry::Increment> ShardRegistry::Time::_forceReloadIncrementSource{0};
+Atomic<ShardRegistry::Increment> ShardRegistry::Time::_forceReloadIncrementSource{0};
 
 ShardRegistry::Time ShardRegistry::Time::makeForForcedReload() {
     // An empty topologyTime signifies that the refresh was due to a forced reload. This is

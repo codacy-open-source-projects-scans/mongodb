@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/ftdc/ftdc_server.h"
 
@@ -57,12 +31,14 @@
 
 #include <fstream>  // IWYU pragma: keep
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
@@ -86,12 +62,15 @@ synchronized_value<boost::filesystem::path> ftdcDirectoryPathParameter;
 FTDCStartupParams ftdcStartupParams;
 
 void DiagnosticDataCollectionDirectoryPathServerParameter::append(
-    OperationContext* opCtx, BSONObjBuilder* b, StringData name, const boost::optional<TenantId>&) {
+    OperationContext* opCtx,
+    BSONObjBuilder* b,
+    std::string_view name,
+    const boost::optional<TenantId>&) {
     b->append(name, ftdcDirectoryPathParameter->generic_string());
 }
 
 Status DiagnosticDataCollectionDirectoryPathServerParameter::setFromString(
-    StringData str, const boost::optional<TenantId>&) {
+    std::string_view str, const boost::optional<TenantId>&) {
     if (!hasGlobalServiceContext()) {
         ftdcDirectoryPathParameter = std::string{str};
         return Status::OK();
@@ -114,7 +93,7 @@ boost::filesystem::path getFTDCDirectoryPathParameter() {
 }
 
 Status onUpdateFTDCEnabled(const bool value) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         return controller->setEnabled(value);
     }
@@ -123,7 +102,7 @@ Status onUpdateFTDCEnabled(const bool value) {
 }
 
 Status onUpdateFTDCMetadataCaptureFrequency(const std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setMetadataCaptureFrequency(potentialNewValue);
     }
@@ -132,7 +111,7 @@ Status onUpdateFTDCMetadataCaptureFrequency(const std::int32_t potentialNewValue
 }
 
 Status onUpdateFTDCPeriod(const std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setPeriod(Milliseconds(potentialNewValue));
         FTDCCollectionMetrics::get(getGlobalServiceContext())
@@ -152,7 +131,7 @@ Status onUpdateFTDCDirectorySize(const std::int32_t potentialNewValue) {
                 << "' which is the current value of diagnosticDataCollectionFileSizeMB.");
     }
 
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setMaxDirectorySizeBytes(potentialNewValue * 1024 * 1024);
     }
@@ -170,7 +149,7 @@ Status onUpdateFTDCFileSize(const std::int32_t potentialNewValue) {
                 << "' which is the current value of diagnosticDataCollectionDirectorySizeMB.");
     }
 
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setMaxFileSizeBytes(potentialNewValue * 1024 * 1024);
     }
@@ -179,7 +158,7 @@ Status onUpdateFTDCFileSize(const std::int32_t potentialNewValue) {
 }
 
 Status onUpdateFTDCSamplesPerChunk(const std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setMaxSamplesPerArchiveMetricChunk(potentialNewValue);
     }
@@ -188,7 +167,7 @@ Status onUpdateFTDCSamplesPerChunk(const std::int32_t potentialNewValue) {
 }
 
 Status onUpdateFTDCPerInterimUpdate(const std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setMaxSamplesPerInterimMetricChunk(potentialNewValue);
     }
@@ -197,7 +176,7 @@ Status onUpdateFTDCPerInterimUpdate(const std::int32_t potentialNewValue) {
 }
 
 Status onUpdateFTDCSampleTimeout(std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         return controller->setSampleTimeout(Milliseconds(potentialNewValue));
     }
@@ -206,7 +185,7 @@ Status onUpdateFTDCSampleTimeout(std::int32_t potentialNewValue) {
 }
 
 Status onUpdateFTDCMinThreads(std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         return controller->setMinThreads(potentialNewValue);
     }
@@ -215,7 +194,7 @@ Status onUpdateFTDCMinThreads(std::int32_t potentialNewValue) {
 }
 
 Status onUpdateFTDCMaxThreads(std::int32_t potentialNewValue) {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         return controller->setMaxThreads(potentialNewValue);
     }
@@ -239,8 +218,8 @@ Status validateSampleTimeoutMillis(std::int32_t potentialNewValue,
     return Status::OK();
 }
 
-FTDCSimpleInternalCommandCollector::FTDCSimpleInternalCommandCollector(StringData command,
-                                                                       StringData name,
+FTDCSimpleInternalCommandCollector::FTDCSimpleInternalCommandCollector(std::string_view command,
+                                                                       std::string_view name,
                                                                        const DatabaseName& db,
                                                                        BSONObj cmdObj)
     : _name(std::string{name}),
@@ -268,8 +247,8 @@ std::string FTDCSimpleInternalCommandCollector::name() const {
  */
 class FTDCServerStatusCommandCollector : public FTDCCollectorInterface {
 private:
-    constexpr static StringData kName = "serverStatus"_sd;
-    constexpr static StringData kCommand = "serverStatus"_sd;
+    constexpr static std::string_view kName = "serverStatus"sv;
+    constexpr static std::string_view kCommand = "serverStatus"sv;
 
 public:
     FTDCServerStatusCommandCollector() : _serverShuttingDown(false) {}
@@ -300,7 +279,6 @@ public:
         commandBuilder.append("timing", false);
         commandBuilder.append("defaultRWConcern", false);
         commandBuilder.append(MirrorMaestro::kServerStatusSectionName, true);
-        commandBuilder.append("lockContentionMetrics", BSON("listAll" << 0));
 
         // Avoid requesting metrics that aren't available during a shutdown.
         if (_serverShuttingDown) {
@@ -321,6 +299,10 @@ public:
         commandBuilder.append("metrics", BSON("apiVersions" << false));
 
         commandBuilder.append("spillWiredTiger", gSpillWiredTigerServerStatusVerbosity.load());
+
+        if (gDiagnosticDataCollectionEnableLockContentionMetrics.load()) {
+            commandBuilder.append("lockContentionMetrics", BSON("listAll" << 0));
+        }
 
         if (gDiagnosticDataCollectionEnableLatencyHistograms.load()) {
             BSONObjBuilder subObjBuilder(commandBuilder.subobjStart("opLatencies"));
@@ -471,7 +453,7 @@ void startFTDC(ServiceContext* serviceContext,
 }
 
 void stopFTDC() {
-    if (FTDCController* controller;
+    if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->stop();
     }

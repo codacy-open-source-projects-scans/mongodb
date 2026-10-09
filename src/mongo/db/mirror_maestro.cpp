@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/mirror_maestro.h"
@@ -57,7 +31,7 @@
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/random.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -76,6 +50,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -90,33 +65,33 @@
 namespace mongo {
 
 namespace {
-constexpr auto kMirrorMaestroName = "MirrorMaestro"_sd;
+using namespace std::literals::string_view_literals;
+constexpr auto kMirrorMaestroName = "MirrorMaestro"sv;
 constexpr auto kMirrorMaestroThreadPoolMaxThreads = 2ull;  // Just enough to allow concurrency
 constexpr auto kMirrorMaestroConnPoolMinSize = 1ull;       // Always be able to mirror eventually
 
-constexpr auto kMirroredReadsParamName = "mirrorReads"_sd;
+constexpr auto kMirroredReadsParamName = "mirrorReads"sv;
 
-constexpr auto kMirroredReadsSeenKey = "seen"_sd;
-constexpr auto kMirroredReadsSentKey = "sent"_sd;
-constexpr auto kMirroredReadsTargetedSentKey = "targetedSent"_sd;
-constexpr auto kMirroredReadsErroredDuringSendKey = "erroredDuringSend"_sd;
-constexpr auto kMirroredReadsTargetedErroredDuringSendKey = "targetedErroredDuringSend"_sd;
-constexpr auto kMirroredReadsProcessedAsSecondaryKey = "processedAsSecondary"_sd;
-constexpr auto kMirroredReadsResolvedKey = "resolved"_sd;
-constexpr auto kMirroredReadsTargetedResolvedKey = "targetedResolved"_sd;
-constexpr auto kMirroredReadsResolvedBreakdownKey = "resolvedBreakdown"_sd;
-constexpr auto kMirroredReadsTargetedResolvedBreakdownKey = "targetedResolvedBreakdown"_sd;
-constexpr auto kMirroredReadsSucceededKey = "succeeded"_sd;
-constexpr auto kMirroredReadsTargetedSucceededKey = "targetedSucceeded"_sd;
-constexpr auto kMirroredReadsPendingKey = "pending"_sd;
-constexpr auto kMirroredReadsTargetedPendingKey = "targetedPending"_sd;
-constexpr auto kMirroredReadsScheduledKey = "scheduled"_sd;
-constexpr auto kMirroredReadsTargetedScheduledKey = "targetedScheduled"_sd;
+constexpr auto kMirroredReadsSeenKey = "seen"sv;
+constexpr auto kMirroredReadsSentKey = "sent"sv;
+constexpr auto kMirroredReadsTargetedSentKey = "targetedSent"sv;
+constexpr auto kMirroredReadsErroredDuringSendKey = "erroredDuringSend"sv;
+constexpr auto kMirroredReadsTargetedErroredDuringSendKey = "targetedErroredDuringSend"sv;
+constexpr auto kMirroredReadsProcessedAsSecondaryKey = "processedAsSecondary"sv;
+constexpr auto kMirroredReadsResolvedKey = "resolved"sv;
+constexpr auto kMirroredReadsTargetedResolvedKey = "targetedResolved"sv;
+constexpr auto kMirroredReadsResolvedBreakdownKey = "resolvedBreakdown"sv;
+constexpr auto kMirroredReadsTargetedResolvedBreakdownKey = "targetedResolvedBreakdown"sv;
+constexpr auto kMirroredReadsSucceededKey = "succeeded"sv;
+constexpr auto kMirroredReadsTargetedSucceededKey = "targetedSucceeded"sv;
+constexpr auto kMirroredReadsPendingKey = "pending"sv;
+constexpr auto kMirroredReadsTargetedPendingKey = "targetedPending"sv;
+constexpr auto kMirroredReadsScheduledKey = "scheduled"sv;
+constexpr auto kMirroredReadsTargetedScheduledKey = "targetedScheduled"sv;
 
 MONGO_FAIL_POINT_DEFINE(mirrorMaestroExpectsResponse);
 MONGO_FAIL_POINT_DEFINE(mirrorMaestroTracksPending);
 MONGO_FAIL_POINT_DEFINE(skipRegisteringMirroredReadsTopologyObserverCallback);
-MONGO_FAIL_POINT_DEFINE(skipTriggeringTargetedHostsListRefreshOnServerParamChange);
 MONGO_FAIL_POINT_DEFINE(mirrorMaestroHangDuringTargetedHostUpdate);
 
 using Tag = std::pair<std::string, std::string>;
@@ -168,15 +143,15 @@ public:
      */
     StatusWith<std::vector<HostAndPort>> getCachedHostsForTargetedMirroring();
 
-    /**
-     * Update the list of hosts to target for targeted mirroring. The list of hosts will be updated
-     * iff the config version has been incremented, or the replica set tag being used to target
-     * hosts has been changed.
-     */
-    void updateCachedHostsForTargetedMirroring(bool tagChanged);
-
     auto isInitialized() const {
         return _isInitialized.load();
+    }
+
+    /**
+     * Test only function used to attempt a recomputation of the hosts list.
+     */
+    void recomputeCachedHostsForTargetedMirroring_forTest() {
+        _cachedHostsForTargetedMirroring.maybeUpdateHosts();
     }
 
     void overrideExecutor_forTest(std::shared_ptr<executor::TaskExecutor> executor) {
@@ -253,13 +228,22 @@ public:
          * should be updated upon an increment in config version, or if the user changes the replica
          * set tag that should be used to target nodes.
          */
-        void maybeUpdateHosts(Tag tag, bool tagChanged) {
+        void maybeUpdateHosts(boost::optional<Tag> newTag = boost::none) {
             std::lock_guard lk(_mutex);
-
             mirrorMaestroHangDuringTargetedHostUpdate.pauseWhileSet();
+
+            auto tagChanged = false;
+
+            // Update _tag if applicible.
+            if (newTag) {
+                _tag = *newTag;
+                tagChanged = true;
+            }
+
             invariant(_topologyVersionObserver);
             auto replSetConfig = _topologyVersionObserver->getReplSetConfig();
 
+            // We need an initialized replSetConfig in order to compute the host list.
             if (!replSetConfig.isInitialized()) {
                 LOGV2_INFO(10735900,
                            "Defering computation of targeted mirroring host list since config is "
@@ -269,7 +253,6 @@ public:
             }
 
             _hosts.refreshSnapshot(_taggedHostsSnapshot);
-
             if (MONGO_likely(_taggedHostsSnapshot)) {
                 // The config version and term should never decrease.
                 invariant(replSetConfig.getConfigVersionAndTerm() >=
@@ -292,8 +275,8 @@ public:
             const auto& tagConfig = replSetConfig.getTagConfig();
             for (const auto& member : replSetConfig.members()) {
                 for (auto&& it = member.tagsBegin(); it != member.tagsEnd(); ++it) {
-                    if (tagConfig.getTagKey(*it) == tag.first &&
-                        tagConfig.getTagValue(*it) == tag.second) {
+                    if (tagConfig.getTagKey(*it) == _tag.first &&
+                        tagConfig.getTagValue(*it) == _tag.second) {
                         updatedHostsValue.hosts.push_back(member.getHostAndPort());
                         break;
                     }
@@ -331,33 +314,11 @@ public:
         repl::TopologyVersionObserver* _topologyVersionObserver{nullptr};
         static thread_local VersionedTaggedHostsType::Snapshot _taggedHostsSnapshot;
         VersionedTaggedHostsType _hosts;
+        Tag _tag;
         Atomic<bool> _deferHostCompute{false};
     };
 
 private:
-    friend void updateCachedHostsForTargetedMirroring_forTest(ServiceContext* serviceContext,
-                                                              bool tagChanged);
-
-    friend std::vector<HostAndPort> getCachedHostsForTargetedMirroring_forTest(
-        ServiceContext* serviceContext);
-
-    friend void setMirroringTaskExecutor_forTest(ServiceContext* serviceContext,
-                                                 std::shared_ptr<executor::TaskExecutor> executor);
-
-    /**
-     * Returns the replica set tag that should be used to target mirrored reads.
-     */
-    Tag _getTagForTargetedMirror() const {
-        _params.refreshSnapshot(_paramsSnapshot);
-
-        if (MONGO_likely(_paramsSnapshot)) {
-            const auto& tag = _paramsSnapshot->getTargetedMirroring().getTag();
-            return toTagFromBSON(tag);
-        }
-
-        return {"", ""};
-    }
-
     /**
      * Attempt to mirror invocation to a subset of hosts based on params
      *
@@ -394,7 +355,7 @@ private:
     // Even if _isInitialized is true, any member function of the variables below must still be
     // inately thread safe. If _isInitialized is false, there may not even be correct pointers to
     // call member functions upon.
-    AtomicWord<bool> _isInitialized;
+    Atomic<bool> _isInitialized;
 
     // The mirrorReads server parameter options. _paramsMutex serializes updates to the stored
     // params and _cachedHostsForTargetedMirroring, which stores the list of hosts to mirror reads
@@ -497,50 +458,50 @@ public:
 
     // Counts the total number of mirrorable operations (either general or targeted), regardless of
     // whether they are mirrored.
-    AtomicWord<CounterT> seen;
+    Atomic<CounterT> seen;
     // Counts the number of remote requests (for general mirroring as primary) that have ever been
     // scheduled to be sent over the network.
-    AtomicWord<CounterT> sent;
+    Atomic<CounterT> sent;
     // Counts the number of remote requests (for targeted mirroring) that have ever been
     // scheduled to be sent over the network.
-    AtomicWord<CounterT> targetedSent;
+    Atomic<CounterT> targetedSent;
     // Counts the number of remote requests (as primary) for general mirroring that failed with some
     // error when sending.
-    AtomicWord<CounterT> erroredDuringSend;
+    Atomic<CounterT> erroredDuringSend;
     // Counts the number of remote requests for targeted mirroring that failed with some error when
     // sending.
-    AtomicWord<CounterT> targetedErroredDuringSend;
+    Atomic<CounterT> targetedErroredDuringSend;
     // Counts the number of general mirroring response from secondaries after mirrored operations.
     // Only reported if mirrorMaestroExpectsResponse failpoint is enabled.
-    AtomicWord<CounterT> resolved;
+    Atomic<CounterT> resolved;
     // Counts the number of responses for targeted mirroring from secondaries after
     // mirrored operations. Only reported if mirrorMaestroExpectsResponse failpoint is enabled.
-    AtomicWord<CounterT> targetedResolved;
+    Atomic<CounterT> targetedResolved;
     // Counts the number of responses (as primary) for general mirroring of successful mirrored
     // operations. Disabled by default, hidden behind the mirrorMaestroExpectsResponse fail point.
-    AtomicWord<CounterT> succeeded;
+    Atomic<CounterT> succeeded;
     // Counts the number of responses for targeted mirroring of successful mirrored
     // operations. Disabled by default, hidden behind the mirrorMaestroExpectsResponse fail point.
-    AtomicWord<CounterT> targetedSucceeded;
+    Atomic<CounterT> targetedSucceeded;
     // Counts the number of operations (as primary) for general mirroring that will be mirrored but
     // are not yet scheduled. Disabled by default, hidden behind the mirrorMaestroTracksPending fail
     // point.
-    AtomicWord<CounterT> pending;
+    Atomic<CounterT> pending;
     // Counts the number of operations for targeted mirroring that will be mirrored but
     // are not yet scheduled. Disabled by default, hidden behind the mirrorMaestroTracksPending fail
     // point.
-    AtomicWord<CounterT> targetedPending;
+    Atomic<CounterT> targetedPending;
     // Counts the number of operations (as primary) for general mirroring that are currently
     // scheduled to be mirrored, but have not yet received any response. Disabled by default, hidden
     // behind the mirrorMaestroTracksPending fail point.
-    AtomicWord<CounterT> scheduled;
+    Atomic<CounterT> scheduled;
     // Counts the number of operations for targeted mirroring that are currently
     // scheduled to be mirrored, but have not yet received any response. Disabled by default, hidden
     // behind the mirrorMaestroTracksPending fail point.
-    AtomicWord<CounterT> targetedScheduled;
+    Atomic<CounterT> targetedScheduled;
     // Counts the number of mirrored operations processed successfully by this node as a
     // secondary.
-    AtomicWord<CounterT> processedAsSecondary;
+    Atomic<CounterT> processedAsSecondary;
 };
 auto& gMirroredReadsSection = *ServerStatusSectionBuilder<MirroredReadsSection>(
                                    std::string{MirrorMaestro::kServerStatusSectionName})
@@ -585,7 +546,7 @@ Status setMirrorReadsParameter(const BSONObj& param) try {
 
 void MirroredReadsServerParameter::append(OperationContext*,
                                           BSONObjBuilder* bob,
-                                          StringData name,
+                                          std::string_view name,
                                           const boost::optional<TenantId>&) {
     auto subBob = BSONObjBuilder(bob->subobjStart(name));
     _data->serialize(&subBob);
@@ -598,7 +559,7 @@ Status MirroredReadsServerParameter::set(const BSONElement& value,
     return e.toStatus();
 }
 
-Status MirroredReadsServerParameter::setFromString(StringData str,
+Status MirroredReadsServerParameter::setFromString(std::string_view str,
                                                    const boost::optional<TenantId>&) try {
     return setMirrorReadsParameter(fromjson(str));
 } catch (const AssertionException& e) {
@@ -658,16 +619,11 @@ void MirrorMaestroImpl::updateMirroringOptions(MirroredReadsParameters params) {
     // Update the hosts list used for targeted mirroring if targeted mirroring is enabled and the
     // tag has been updated
     _params.refreshSnapshot(_paramsSnapshot);
-
-    if (MONGO_unlikely(skipTriggeringTargetedHostsListRefreshOnServerParamChange.shouldFail())) {
-        return;
-    }
-
     const auto& targetedParams = _paramsSnapshot->getTargetedMirroring();
 
     // If targeted mirroring was previously enabled and is now disabled, clear the tagged hosts list
     if (targetedParams.getSamplingRate() == 0 && !prevTag.isEmpty()) {
-        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON({}), true /* tagChanged */);
+        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON({}));
         return;
     }
 
@@ -675,8 +631,7 @@ void MirrorMaestroImpl::updateMirroringOptions(MirroredReadsParameters params) {
     // the hosts list) or if the tag has been updated.
     if (const auto& currTag = targetedParams.getTag(); prevRate == 0 ||
         (targetedParams.getSamplingRate() != 0 && prevTag.woCompare(currTag) != 0)) {
-        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON(currTag),
-                                                          true /* tagChanged */);
+        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON(targetedParams.getTag()));
     }
 }
 
@@ -692,17 +647,17 @@ StatusWith<std::vector<HostAndPort>> MirrorMaestroImpl::getCachedHostsForTargete
         return Status(ErrorCodes::NotYetInitialized, "MirrorMaestro is not yet initialized");
     }
 
+    // If we derefed computing the host list, see if we can compute it now.
     if (MONGO_unlikely(_cachedHostsForTargetedMirroring.consumeDeferHostCompute())) {
         const auto& targetedParams = _paramsSnapshot->getTargetedMirroring();
         const auto& currTag = targetedParams.getTag();
-        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON(currTag),
-                                                          true /* tagChanged */);
-    }
-    return _cachedHostsForTargetedMirroring.getHosts();
-}
 
-void MirrorMaestroImpl::updateCachedHostsForTargetedMirroring(bool tagChanged) {
-    _cachedHostsForTargetedMirroring.maybeUpdateHosts(_getTagForTargetedMirror(), tagChanged);
+        // maybeUpdateHosts will try to early return if nothing that could warrant a host
+        // recomputation has changed. Passing in currTag here will ensure that this doesn't happen.
+        _cachedHostsForTargetedMirroring.maybeUpdateHosts(toTagFromBSON(currTag));
+    }
+
+    return _cachedHostsForTargetedMirroring.getHosts();
 }
 
 void MirrorMaestroImpl::tryMirror(const std::shared_ptr<CommandInvocation>& invocation) {
@@ -977,17 +932,16 @@ void MirrorMaestroImpl::init(ServiceContext* serviceContext) {
                 [] { return gMirrorMaestroConnPoolMaxSize.load(); },
                 "MirrorMaestroDynamicLimitController");
         };
-        return executor::makeNetworkInterface(
-            std::string{kMirrorMaestroName}, {}, {}, std::move(options));
+        return executor::makeNetworkInterface(std::string{kMirrorMaestroName},
+                                              {.connectionPoolOptions = std::move(options)});
     };
 
-    auto makePool = [&] {
-        ThreadPool::Options options;
-        options.poolName = std::string{kMirrorMaestroName};
-        options.maxThreads = kMirrorMaestroThreadPoolMaxThreads;
-        return std::make_unique<ThreadPool>(std::move(options));
-    };
-    _executor = executor::ThreadPoolTaskExecutor::create(makePool(), makeNet());
+    _executor = executor::ThreadPoolTaskExecutor::create(
+        ThreadPool::make({
+            .poolName = std::string{kMirrorMaestroName},
+            .maxThreads = kMirrorMaestroThreadPoolMaxThreads,
+        }),
+        makeNet());
 
     _executor->startup();
     _topologyVersionObserver.init(serviceContext);
@@ -995,7 +949,7 @@ void MirrorMaestroImpl::init(ServiceContext* serviceContext) {
     if (MONGO_likely(!skipRegisteringMirroredReadsTopologyObserverCallback.shouldFail())) {
         _topologyVersionObserver.registerTopologyChangeObserver(
             [this](const repl::ReplSetConfig& replSetConfig) {
-                updateCachedHostsForTargetedMirroring(false /* tagChanged */);
+                _cachedHostsForTargetedMirroring.maybeUpdateHosts();
             });
     }
 
@@ -1051,10 +1005,9 @@ StatusWith<std::vector<HostAndPort>> getCachedHostsForTargetedMirroring_forTest(
     return impl.getCachedHostsForTargetedMirroring();
 }
 
-void updateCachedHostsForTargetedMirroring_forTest(ServiceContext* serviceContext,
-                                                   bool tagChanged) {
+void recomputeCachedHostsForTargetedMirroring_forTest(ServiceContext* serviceContext) {
     auto& impl = getMirrorMaestroImpl(serviceContext);
-    impl.updateCachedHostsForTargetedMirroring(tagChanged);
+    impl.recomputeCachedHostsForTargetedMirroring_forTest();
 }
 
 StatusWith<std::shared_ptr<executor::TaskExecutor>> getMirroringTaskExecutor_forTest(

@@ -16,7 +16,10 @@ import {
     MultipleChangeStreamMatcher,
 } from "jstests/libs/util/change_stream/change_stream_matcher.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
-import {ChangeStreamReader, ChangeStreamReadingMode} from "jstests/libs/util/change_stream/change_stream_reader.js";
+import {
+    ChangeStreamReader,
+    ChangeStreamReadingMode,
+} from "jstests/libs/util/change_stream/change_stream_reader.js";
 import {
     Verifier,
     SingleReaderVerificationTestCase,
@@ -37,7 +40,9 @@ const TEST_COLL = "test_coll_fsm";
 const TEST_COLL_2 = "test_coll_fsm_2";
 
 // Random seed for the entire test run, logged for reproducibility.
-const TEST_SEED = Date.now();
+// Override with `--shellSeed=<n>` (resmoke) to reproduce a previous run.
+const TEST_SEED =
+    typeof TestData !== "undefined" && Number.isFinite(TestData.seed) ? TestData.seed : Date.now();
 
 /**
  * Operation types to filter out before comparison.
@@ -69,13 +74,13 @@ function getCurrentClusterTime(conn, dbName) {
  * @param {boolean} [configShard=false] - If true, one shard doubles as the config server
  * @returns {ShardingTest} The configured sharding test
  */
-function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = false) {
-    const isMultiversion =
-        Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-    // TODO (SERVER-125025): remove the failpoint.
-    const failpointSetParameter = isMultiversion
-        ? {}
-        : {"failpoint.useInMemoryReplicatedSizeCount": tojson({mode: "alwaysOn"})};
+function createShardingTest(
+    mongos = 1,
+    shards = 3,
+    rsNodes = 1,
+    configShard = false,
+    mongosOptions = {},
+) {
     const stOptions = {
         shards: shards,
         mongos: mongos,
@@ -85,7 +90,6 @@ function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = f
             setParameter: {
                 writePeriodicNoops: true,
                 periodicNoopIntervalSecs: 1,
-                ...failpointSetParameter,
             },
         },
         other: {
@@ -97,6 +101,7 @@ function createShardingTest(mongos = 1, shards = 3, rsNodes = 1, configShard = f
                 },
             },
         },
+        ...mongosOptions,
     };
     if (!configShard) {
         stOptions.config = 1;
@@ -122,7 +127,9 @@ function buildExpectedEvents(commands, watchMode) {
  * @returns {SingleChangeStreamMatcher} The configured matcher
  */
 function createMatcher(expectedEvents) {
-    return new SingleChangeStreamMatcher(expectedEvents.map((e) => new ChangeEventMatcher(e.event, e.cursorClosed)));
+    return new SingleChangeStreamMatcher(
+        expectedEvents.map((e) => new ChangeEventMatcher(e.event, e.cursorClosed)),
+    );
 }
 
 /**
@@ -133,33 +140,34 @@ function createMatcher(expectedEvents) {
  */
 function createCompositeMatcher(perCollectionEvents) {
     const subMatchers = perCollectionEvents.map(
-        (events) => new SingleChangeStreamMatcher(events.map((e) => new ChangeEventMatcher(e.event, e.cursorClosed))),
+        (events) =>
+            new SingleChangeStreamMatcher(
+                events.map((e) => new ChangeEventMatcher(e.event, e.cursorClosed)),
+            ),
     );
     return new MultipleChangeStreamMatcher(subMatchers);
 }
 
-/**
- * Compute expected change stream events from a command sequence for a given watch mode.
- */
-function computeExpectedEvents(commands, watchMode) {
-    return commands
-        .flatMap((cmd) => cmd.getChangeEvents(watchMode))
-        .map((e) => ({event: e, cursorClosed: e.operationType === "invalidate"}));
-}
-
-function buildCommandTrace(commands) {
+function buildCommandTrace(commands, source, watchMode = ChangeStreamWatchMode.kCollection) {
     return commands.map((cmd, i) => {
         const shardIds = Array.isArray(cmd.shardSet) ? cmd.shardSet.map((s) => s._id) : [];
         return {
             cmdIndex: i,
             cmdName: cmd.constructor.name,
-            events: cmd.getChangeEvents(ChangeStreamWatchMode.kCollection).map((e) => e.operationType),
+            events: cmd.getChangeEvents(watchMode).map((e) => e.operationType),
             ctx: cmd.collectionCtx ?? null,
             shardSet: shardIds,
             primaryShard: cmd.primaryShard ? cmd.primaryShard._id : null,
             targetShardKey: cmd.targetShardKey ?? null,
+            source,
         };
     });
+}
+
+function buildAggregatedCommandTrace(writers, watchMode = ChangeStreamWatchMode.kCollection) {
+    return writers.flatMap((w) =>
+        buildCommandTrace(w.commands, `${w.dbName}.${w.collName}`, watchMode),
+    );
 }
 
 /**
@@ -191,7 +199,7 @@ function buildReaderSpecs(commandsByWriter, startTime, batchSize, watchMode) {
     switch (watchMode) {
         case ChangeStreamWatchMode.kCollection:
             return commandsByWriter.map((w) => {
-                const events = computeExpectedEvents(w.commands, watchMode);
+                const events = buildExpectedEvents(w.commands, watchMode);
                 return {
                     label: `coll_${w.dbName}_${w.collName}`,
                     createMatcher: () => createMatcher(events),
@@ -201,7 +209,11 @@ function buildReaderSpecs(commandsByWriter, startTime, batchSize, watchMode) {
                         dbName: w.dbName,
                         collName: w.collName,
                         numberOfEventsToRead: events.length,
-                        debugCommandTrace: buildCommandTrace(w.commands),
+                        debugCommandTrace: buildCommandTrace(
+                            w.commands,
+                            `${w.dbName}.${w.collName}`,
+                            watchMode,
+                        ),
                     },
                 };
             });
@@ -212,7 +224,9 @@ function buildReaderSpecs(commandsByWriter, startTime, batchSize, watchMode) {
                 (writersByDb[w.dbName] ??= []).push(w);
             }
             return Object.entries(writersByDb).map(([dbName, writers]) => {
-                const perCollEvents = writers.map((w) => computeExpectedEvents(w.commands, watchMode));
+                const perCollEvents = writers.map((w) =>
+                    buildExpectedEvents(w.commands, watchMode),
+                );
                 const eventCount = perCollEvents.reduce((s, g) => s + g.length, 0);
                 return {
                     label: `db_${dbName}`,
@@ -223,13 +237,16 @@ function buildReaderSpecs(commandsByWriter, startTime, batchSize, watchMode) {
                         dbName,
                         collName: writers[0].collName,
                         numberOfEventsToRead: eventCount,
+                        debugCommandTrace: buildAggregatedCommandTrace(writers, watchMode),
                     },
                 };
             });
         }
 
         case ChangeStreamWatchMode.kCluster: {
-            const perCollEvents = commandsByWriter.map((w) => computeExpectedEvents(w.commands, watchMode));
+            const perCollEvents = commandsByWriter.map((w) =>
+                buildExpectedEvents(w.commands, watchMode),
+            );
             const eventCount = perCollEvents.reduce((s, g) => s + g.length, 0);
             return [
                 {
@@ -241,6 +258,7 @@ function buildReaderSpecs(commandsByWriter, startTime, batchSize, watchMode) {
                         dbName: "admin",
                         collName: null,
                         numberOfEventsToRead: eventCount,
+                        debugCommandTrace: buildAggregatedCommandTrace(commandsByWriter, watchMode),
                     },
                 },
             ];
@@ -261,7 +279,7 @@ function ensureDatabasesExist(writerDefs, mongos, fsmShards) {
         if (startState !== State.DATABASE_ABSENT && !createdDbs.has(w.dbName)) {
             createdDbs.add(w.dbName);
             mongos.getDB(w.dbName).dropDatabase();
-            new CreateDatabaseCommand(w.dbName, w.collName, fsmShards).execute(mongos);
+            new CreateDatabaseCommand({dbName: w.dbName, shardSet: fsmShards}).execute(mongos);
         }
     }
 }
@@ -373,7 +391,8 @@ function runTeardownSteps(...steps) {
     }
     if (errors.length > 0) {
         throw new Error(
-            `Teardown encountered ${errors.length} error(s):\n` + errors.map((e) => e.toString()).join("\n"),
+            `Teardown encountered ${errors.length} error(s):\n` +
+                errors.map((e) => e.toString()).join("\n"),
         );
     }
 }
@@ -456,7 +475,13 @@ function verifyForMode(env, watchMode, verifyOpts) {
             matcherSpecsByInstance[name] = spec.createMatcher();
         }
 
-        return {spec, readerNamesBySuffix, readerConfigs, matcherSpecsByInstance, extraVerifierConfig};
+        return {
+            spec,
+            readerNamesBySuffix,
+            readerConfigs,
+            matcherSpecsByInstance,
+            extraVerifierConfig,
+        };
     });
 
     // Phase 2: verify each spec (readers are already running / finished).
@@ -487,6 +512,7 @@ function verifyContinuous(env, watchMode) {
     verifyForMode(env, watchMode, {
         readers: [{suffix: "cont", configOverrides: {}}],
         createTestCases: (m) => [new SingleReaderVerificationTestCase(m.cont)],
+        extraVerifierConfig: {shardConnections: getShardConnections(env.fsmSt)},
     });
 }
 
@@ -503,7 +529,8 @@ function verifyResume(env, watchMode, startState) {
     // cluster time pool — risking timeouts in long suites like bg_mutator.
     // In cluster mode the stream sees all databases, so we must include both
     // writers in the matcher.
-    const skipNoiseWriter = startState === State.DATABASE_ABSENT && watchMode !== ChangeStreamWatchMode.kCluster;
+    const skipNoiseWriter =
+        startState === State.DATABASE_ABSENT && watchMode !== ChangeStreamWatchMode.kCluster;
 
     verifyForMode(env, watchMode, {
         readers: [{suffix: "resume", configOverrides: {}}],
@@ -520,6 +547,7 @@ function verifyV1V2(env, watchMode) {
             {suffix: "v2", configOverrides: {version: "v2"}},
         ],
         createTestCases: (m) => [new SequentialPairwiseFetchingTestCase(m.v1, m.v2)],
+        extraVerifierConfig: {shardConnections: getShardConnections(env.fsmSt)},
     });
 }
 
@@ -530,9 +558,22 @@ function verifyFetchAndResume(env, watchMode) {
     verifyForMode(env, watchMode, {
         readers: [
             {suffix: "cont", configOverrides: {readingMode: ChangeStreamReadingMode.kContinuous}},
-            {suffix: "foar", configOverrides: {readingMode: ChangeStreamReadingMode.kFetchOneAndResume}},
+            {
+                suffix: "foar",
+                configOverrides: {readingMode: ChangeStreamReadingMode.kFetchOneAndResume},
+            },
+            {
+                suffix: "pbrt",
+                configOverrides: {
+                    readingMode: ChangeStreamReadingMode.kFetchOneAndResumeFromPbrt,
+                },
+            },
         ],
-        createTestCases: (m) => [new SequentialPairwiseFetchingTestCase(m.cont, m.foar)],
+        createTestCases: (m) => [
+            new SequentialPairwiseFetchingTestCase(m.cont, m.foar),
+            new SequentialPairwiseFetchingTestCase(m.cont, m.pbrt),
+        ],
+        extraVerifierConfig: {shardConnections: getShardConnections(env.fsmSt)},
     });
 }
 
@@ -550,6 +591,7 @@ function verifyStrictVsIgnoreRemovedShards(env, watchMode) {
             {suffix: "irs", configOverrides: {version: "v2", ignoreRemovedShards: true}},
         ],
         createTestCases: (m) => [new SequentialPairwiseFetchingTestCase(m.strict, m.irs)],
+        extraVerifierConfig: {shardConnections: getShardConnections(env.fsmSt)},
     });
 }
 
@@ -577,7 +619,9 @@ function removeRandomShardFromSet(st, shardSet) {
     const configDb = st.s.getDB("config");
     const shardedColls = configDb.collections.find({}).toArray();
     for (const coll of shardedColls) {
-        const chunksToMove = configDb.chunks.find({uuid: coll.uuid, shard: shardToRemove._id}).toArray();
+        const chunksToMove = configDb.chunks
+            .find({uuid: coll.uuid, shard: shardToRemove._id})
+            .toArray();
         for (const chunk of chunksToMove) {
             const dest = otherShards[Random.randInt(otherShards.length)];
             assert.commandWorked(
@@ -628,7 +672,12 @@ function verifyIgnoreRemovedShards(env, watchMode, readingMode = "continuous") {
     const shardConnections = isResume ? getShardConnections(env.fsmSt) : [];
 
     verifyForMode(env, watchMode, {
-        readers: [{suffix: selected.suffix, configOverrides: {...irsBase, readingMode: selected.readingMode}}],
+        readers: [
+            {
+                suffix: selected.suffix,
+                configOverrides: {...irsBase, readingMode: selected.readingMode},
+            },
+        ],
         createTestCases: isResume
             ? (m) => [new PrefixReadTestCase(m[selected.suffix], 3, {allowSkips: true})]
             : (m) => [new SingleReaderVerificationTestCase(m[selected.suffix], {allowSkips: true})],

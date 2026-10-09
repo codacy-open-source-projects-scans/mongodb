@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_merge.h"
 
@@ -38,6 +12,7 @@
 #include "mongo/db/pipeline/document_source_merge_gen.h"
 #include "mongo/db/pipeline/document_source_merge_spec.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/variable_validation.h"
 #include "mongo/db/query/allowed_contexts.h"
@@ -56,6 +31,7 @@
 #include <cstdint>
 #include <iosfwd>
 #include <map>
+#include <string_view>
 #include <tuple>
 
 #include <boost/none.hpp>
@@ -68,6 +44,7 @@
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 REGISTER_LITE_PARSED_DOCUMENT_SOURCE(merge,
                                      DocumentSourceMerge::LiteParsed::parse,
@@ -162,7 +139,7 @@ boost::optional<std::set<FieldPath>> convertToFieldPaths(
     return fieldPaths;
 }
 
-auto withErrorContext(const auto&& callback, StringData errorMessage) {
+auto withErrorContext(const auto&& callback, std::string_view errorMessage) {
     try {
         return callback();
     } catch (DBException& ex) {
@@ -199,16 +176,16 @@ std::unique_ptr<DocumentSourceMerge::LiteParsed> DocumentSourceMerge::LiteParsed
                         idl::serialize(whenMatched),
                         idl::serialize(whenNotMatched)),
             isSupportedMergeMode(whenMatched, whenNotMatched));
-    boost::optional<LiteParsedPipeline> liteParsedPipeline;
+    boost::optional<OwnedLiteParsedPipeline> ownedPipeline;
     if (whenMatched == MergeWhenMatchedModeEnum::kPipeline) {
         auto pipeline = mergeSpec.getWhenMatched()->pipeline;
         tassert(11282975, "$merge spec is missing the whenMatched pipeline", pipeline);
-        auto subpipelineParseOptions = options;
-        subpipelineParseOptions.makeSubpipelineOwned = true;
-        liteParsedPipeline = LiteParsedPipeline(nss, *pipeline, false, subpipelineParseOptions);
+        // The whenMatched pipeline runs against documents in the target collection, so parse it
+        // with targetNss to match the convention used by $lookup and $unionWith.
+        ownedPipeline = OwnedLiteParsedPipeline(targetNss, *pipeline, options);
     }
     return std::make_unique<DocumentSourceMerge::LiteParsed>(
-        spec, std::move(targetNss), whenMatched, whenNotMatched, std::move(liteParsedPipeline));
+        spec, std::move(targetNss), whenMatched, whenNotMatched, std::move(ownedPipeline));
 }
 
 PrivilegeVector DocumentSourceMerge::LiteParsed::requiredPrivileges(
@@ -238,7 +215,7 @@ DocumentSourceMerge::DocumentSourceMerge(
     boost::optional<ChunkVersion> collectionPlacementVersion,
     bool allowMergeOnNullishValues,
     MergeProcessor::AllowInsertWithUpdateBackupStrategies allowInsertWithUpdateBackupStrategies)
-    : DocumentSourceWriter(kStageName.data(), std::move(outputNs), expCtx),
+    : DocumentSourceWriter(kStageName, std::move(outputNs), expCtx),
       _mergeOnFields(std::make_shared<std::set<FieldPath>>(std::move(mergeOnFields))),
       _mergeOnFieldsIncludesId(_mergeOnFields->count("_id") == 1),
       _mergeProcessor(std::make_shared<MergeProcessor>(expCtx,
@@ -324,10 +301,10 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceMerge::create(
     if (whenMatched == WhenMatched::kPipeline) {
         // If unspecified, 'letVariables' defaults to {new: "$$ROOT"}.
         letVariables = letVariables.value_or(kDefaultPipelineLet);
-        auto newElt = letVariables->getField("new"_sd);
+        auto newElt = letVariables->getField("new"sv);
         uassert(51273,
                 "'let' may not define a value for the reserved 'new' variable other than '$$ROOT'",
-                !newElt || newElt.valueStringDataSafe() == "$$ROOT"_sd);
+                !newElt || newElt.valueStringDataSafe() == "$$ROOT"sv);
         // If the 'new' variable is missing and this is a {whenNotMatched: "insert"} merge, then the
         // new document *must* be serialized with the update request. Add it to the let variables.
         if (!newElt && whenNotMatched == WhenNotMatched::kInsert) {
@@ -411,7 +388,7 @@ boost::optional<DocumentSource::DistributedPlanLogic> DocumentSourceMerge::distr
     return getMergeShardId() ? DocumentSourceWriter::distributedPlanLogic(ctx) : boost::none;
 }
 
-Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceMerge::serialize(const query_shape::SerializationOptions& opts) const {
     DocumentSourceMergeSpec spec;
     spec.setTargetNss(getOutputNs());
     const auto& letVariables = _mergeProcessor->getLetVariables();
@@ -455,7 +432,7 @@ Value DocumentSourceMerge::serialize(const SerializationOptions& opts) const {
                                                           pipeline_factory::kOptionsMinimal)
                         ->serializeToBson(opts);
                 },
-                "Error parsing $merge.whenMatched pipeline"_sd);
+                "Error parsing $merge.whenMatched pipeline"sv);
         }()});
     spec.setWhenNotMatched(descriptor.mode.second);
     spec.setOn([&]() {

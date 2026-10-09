@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/document_diff_calculator.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,10 +15,12 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 void assertBsonObjEqualUnordered(const BSONObj& lhs, const BSONObj& rhs) {
     UnorderedFieldsBSONObjComparator comparator;
@@ -84,7 +59,7 @@ TEST(IndexUpdateIdentifierTest, EmptyDiff) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -115,7 +90,7 @@ TEST(IndexUpdateIdentifierTest, DiffForSingleIndex) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -160,7 +135,7 @@ TEST(IndexUpdateIdentifierTest, DiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -173,7 +148,7 @@ TEST(IndexUpdateIdentifierTest, DiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("b"_sd);
+            uid.addPathComponent("b"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -186,7 +161,7 @@ TEST(IndexUpdateIdentifierTest, DiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("c"_sd);
+            uid.addPathComponent("c"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -229,19 +204,19 @@ TEST(IndexUpdateIdentifierTest, DiffForMultipleIndexesAllAffected) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(3 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("b"_sd);
+            uid.addPathComponent("b"sv);
             updateIdentifier.addIndex(1, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("c"_sd);
+            uid.addPathComponent("c"sv);
             updateIdentifier.addIndex(2, uid);
         }
 
@@ -293,25 +268,25 @@ TEST(IndexUpdateIdentifierTest, DiffForMultipleIndexesSomeAffected) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(4 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("b"_sd);
+            uid.addPathComponent("b"sv);
             updateIdentifier.addIndex(1, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("c"_sd);
+            uid.addPathComponent("c"sv);
             updateIdentifier.addIndex(2, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("d"_sd);
+            uid.addPathComponent("d"sv);
             updateIdentifier.addIndex(3, uid);
         }
 
@@ -351,13 +326,13 @@ TEST(IndexUpdateIdentifierTest, DiffOnlyForNonIndexedFields) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(2 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
         {
             UpdateIndexData uid;
-            uid.addPathComponent("e"_sd);
+            uid.addPathComponent("e"sv);
             updateIdentifier.addIndex(1, uid);
         }
 
@@ -394,12 +369,12 @@ TEST(IndexUpdateIdentifierTest, DiffForArrayField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(2 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
         {
             UpdateIndexData uid;
-            uid.addPathComponent("b"_sd);
+            uid.addPathComponent("b"sv);
             updateIdentifier.addIndex(1, uid);
         }
 
@@ -580,7 +555,7 @@ TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndex) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -634,7 +609,7 @@ TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("a"_sd);
+            uid.addPathComponent("a"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -647,7 +622,7 @@ TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("b"_sd);
+            uid.addPathComponent("b"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -660,7 +635,7 @@ TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndexDottedField) {
         doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
         {
             UpdateIndexData uid;
-            uid.addPathComponent("c"_sd);
+            uid.addPathComponent("c"sv);
             updateIdentifier.addIndex(0, uid);
         }
 
@@ -1163,7 +1138,7 @@ TEST(DocumentDiffCalculatorTest, SubArrayInSubObjLargeDelta) {
 }
 
 void buildDeepObj(BSONObjBuilder* builder,
-                  StringData fieldName,
+                  std::string_view fieldName,
                   int depth,
                   int maxDepth,
                   std::function<void(BSONObjBuilder*, int, int)> function) {

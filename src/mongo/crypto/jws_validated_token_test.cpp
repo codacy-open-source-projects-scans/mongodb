@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/jws_validated_token.h"
 
@@ -33,11 +7,12 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/crypto/jwk_manager_test_framework.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/base64.h"
 
 #include <string>
+#include <string_view>
 
 #include <fmt/format.h>
 #include <openssl/opensslv.h>
@@ -45,6 +20,7 @@
 #if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 
 namespace mongo::crypto::test {
+using namespace std::literals::string_view_literals;
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L || \
     (defined(LIBRESSL_VERSION_NUMBER) && LIBRESSL_VERSION_NUMBER >= 0x2070000fL)
 
@@ -228,7 +204,7 @@ constexpr auto expiredTokenSignatureES384 =
 
 BSONObj getTestJWKSet() {
     BSONObjBuilder set;
-    BSONArrayBuilder keys(set.subarrayStart("keys"_sd));
+    BSONArrayBuilder keys(set.subarrayStart("keys"sv));
 
     {
         BSONObjBuilder key(keys.subobjStart());
@@ -281,8 +257,8 @@ BSONObj getTestJWKSet() {
 }
 
 
-void validateJWKManagerWithToken(JWKManagerTest* instance, StringData token) {
-    RAIIServerParameterControllerForTest quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
+void validateJWKManagerWithToken(JWKManagerTest* instance, std::string_view token) {
+    unittest::ServerParameterGuard quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
     instance->jwksFetcher()->setKeys(getTestJWKSet());
     ASSERT_OK(instance->jwkManager()->loadKeys());
     ASSERT_THROWS(JWSValidatedToken(instance->jwkManager(), token), DBException);
@@ -292,7 +268,7 @@ void validateTokenFromKeys(JWKManagerTest* instance,
                            const auto validTokenHeader,
                            const auto validTokenBody,
                            const auto validTokenSignature) {
-    RAIIServerParameterControllerForTest quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
+    unittest::ServerParameterGuard quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
 
     auto validToken =
         fmt::format("{}.{}.{}", validTokenHeader, validTokenBody, validTokenSignature);
@@ -501,12 +477,12 @@ TEST_F(JWKManagerTest, parsingErrors) {
 }
 
 TEST_F(JWKManagerTest, getLastAttemptedFetchTime) {
-    RAIIServerParameterControllerForTest quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
+    unittest::ServerParameterGuard quiesceController("JWKSMinimumQuiescePeriodSecs", 0);
 
     // Load just the second key (custom-key-2) from testJWKSet into the JWKManager.
     auto key = [this]() {
         BSONObjBuilder singleKeySetBuilder;
-        BSONArrayBuilder keysBuilder(singleKeySetBuilder.subarrayStart("keys"_sd));
+        BSONArrayBuilder keysBuilder(singleKeySetBuilder.subarrayStart("keys"sv));
 
         auto fullJWKSet = getTestJWKSet();
         keysBuilder.append(fullJWKSet.getField("keys").Array()[1]);

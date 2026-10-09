@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,9 +8,10 @@
 #include "mongo/util/modules.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * Encapsulates metadata fields associated with an index build.
@@ -52,7 +27,7 @@ struct IndexBuildInfo {
      * Creates an IndexBuildInfo with the given index spec and index ident, and generates the
      * internal idents.
      */
-    IndexBuildInfo(BSONObj specObj, StringData idxIdent, StorageEngine& storageEngine);
+    IndexBuildInfo(BSONObj specObj, std::string_view idxIdent, StorageEngine& storageEngine);
 
     /**
      * Creates an IndexBuildInfo with the index spec and generates both the index ident and the
@@ -63,7 +38,7 @@ struct IndexBuildInfo {
     /**
      * Extracts index name from the spec and returns it.
      */
-    StringData getIndexName() const;
+    std::string_view getIndexName() const;
 
     /**
      * Generates new idents and initializes all member fields tracking idents of internal tables.
@@ -114,4 +89,4 @@ std::vector<std::string> toIndexNames(const std::vector<IndexBuildInfo>& indexes
  */
 std::vector<BSONObj> toIndexSpecs(const std::vector<IndexBuildInfo>& indexes);
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

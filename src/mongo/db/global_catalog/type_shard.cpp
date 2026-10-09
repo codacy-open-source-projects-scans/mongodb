@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/type_shard.h"
 
@@ -47,7 +21,13 @@
 
 namespace mongo {
 
+// The UUID is the word "config" in hex (636f6e66-6967) plus the v4
+// required bits.
+const UUID ShardType::kConfigServerUuid =
+    UUID::parse("636f6e66-6967-4000-8000-000000000000").getValue();
+
 const BSONField<std::string> ShardType::name("_id");
+const BSONField<UUID> ShardType::uuid("uuid");
 const BSONField<std::string> ShardType::host("host");
 const BSONField<bool> ShardType::draining("draining");
 const BSONField<BSONArray> ShardType::tags("tags");
@@ -57,7 +37,16 @@ const BSONField<Timestamp> ShardType::topologyTime("topologyTime");
 const BSONField<long long> ShardType::replSetConfigVersion("replSetConfigVersion");
 
 ShardType::ShardType(std::string name, std::string host, std::vector<std::string> tags)
-    : _name(std::move(name)), _host(std::move(host)), _tags(std::move(tags)) {}
+    : ShardType(std::move(name), boost::none, std::move(host), std::move(tags)) {}
+
+ShardType::ShardType(std::string name,
+                     boost::optional<UUID> uuid,
+                     std::string host,
+                     std::vector<std::string> tags)
+    : _name(std::move(name)),
+      _uuid(std::move(uuid)),
+      _host(std::move(host)),
+      _tags(std::move(tags)) {}
 
 StatusWith<ShardType> ShardType::fromBSON(const BSONObj& source) {
     ShardType shard;
@@ -67,7 +56,28 @@ StatusWith<ShardType> ShardType::fromBSON(const BSONObj& source) {
         Status status = bsonExtractStringField(source, name.name(), &shardName);
         if (!status.isOK())
             return status;
-        shard._name = shardName;
+
+        auto swUuid = [&]() -> StatusWith<boost::optional<UUID>> {
+            BSONElement uuidElem = source[uuid.name()];
+            if (uuidElem.eoo()) {
+                return boost::none;
+            }
+
+            if (uuidElem.type() != BSONType::binData ||
+                uuidElem.binDataType() != BinDataType::newUUID) {
+                return Status(ErrorCodes::TypeMismatch,
+                              str::stream() << "\"" << uuid.name() << "\" must be a UUID");
+            }
+
+            return UUID::parse(uuidElem);
+        }();
+
+        if (!swUuid.isOK()) {
+            return swUuid.getStatus();
+        }
+
+        shard._name = std::move(shardName);
+        shard._uuid = swUuid.getValue();
     }
 
     {
@@ -84,7 +94,7 @@ StatusWith<ShardType> ShardType::fromBSON(const BSONObj& source) {
         if (status.isOK()) {
             shard._draining = isShardDraining;
         } else if (status == ErrorCodes::NoSuchKey) {
-            // draining field can be mssing in which case it is presumed false
+            // draining field can be missing in which case it is presumed false
         } else {
             return status;
         }
@@ -116,8 +126,8 @@ StatusWith<ShardType> ShardType::fromBSON(const BSONObj& source) {
         if (status.isOK()) {
             shard._topologyTime = shardTopologyTime;
         } else if (status == ErrorCodes::NoSuchKey) {
-            // topologyTime field can be mssing in which case it is presumed to be an uninitialized
-            // timestamp
+            // topologyTime field can be missing in which case it is presumed to be an
+            // uninitialized timestamp
         } else {
             return status;
         }
@@ -165,6 +175,8 @@ BSONObj ShardType::toBSON() const {
 
     if (_name)
         builder.append(name(), getName());
+    if (_uuid)
+        getUuid().get().appendToBuilder(&builder, uuid());
     if (_host)
         builder.append(host(), getHost());
     if (_draining)
@@ -185,6 +197,10 @@ std::string ShardType::toString() const {
 
 void ShardType::setName(const std::string& name) {
     _name = name;
+}
+
+void ShardType::setUuid(boost::optional<UUID> uuid) {
+    _uuid = uuid;
 }
 
 void ShardType::setHost(const std::string& host) {

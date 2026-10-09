@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/shared/handle/aggregation_stage/logical.h"
 
@@ -35,18 +9,20 @@
 #include "mongo/db/extension/shared/handle/aggregation_stage/executable_agg_stage.h"
 #include "mongo/db/extension/shared/handle/byte_buf_handle.h"
 
+#include <string_view>
+
 namespace mongo::extension {
 
-StringData LogicalAggStageAPI::getName() const {
+std::string_view LogicalAggStageAPI::getName() const {
     auto stringView = byteViewAsStringView(_vtable().get_name(get()));
-    return StringData{stringView.data(), stringView.size()};
+    return std::string_view{stringView.data(), stringView.size()};
 }
 
 BSONObj LogicalAggStageAPI::serialize() const {
     ::MongoExtensionByteBuf* buf{nullptr};
     invokeCAndConvertStatusToException([&]() { return _vtable().serialize(get(), &buf); });
 
-    tassert(11173700,
+    tassert(ErrorCodes::ExtensionSerializationError,
             "Extension implementation of `serialize` encountered nullptr inside the output buffer.",
             buf != nullptr);
 
@@ -64,7 +40,9 @@ BSONObj LogicalAggStageAPI::explain(MongoExtensionQueryExecutionContext& execCtx
             get(), &execCtx, convertHostVerbosityToExtVerbosity(verbosity), &buf);
     });
 
-    tassert(11239400, "buffer returned from explain must not be null", buf);
+    tassert(ErrorCodes::ExtensionSerializationError,
+            "buffer returned from explain must not be null",
+            buf);
 
     // Take ownership of the returned buffer so that it gets cleaned up, then retrieve an owned
     // BSONObj to return to the host.
@@ -94,16 +72,6 @@ LogicalAggStageHandle LogicalAggStageAPI::clone() const {
     return LogicalAggStageHandle(logicalAggStage);
 }
 
-bool LogicalAggStageAPI::isSortedByVectorSearchScore_deprecated() const {
-    bool outIsSortedByVectorSearchScore{false};
-    invokeCAndConvertStatusToException([&]() {
-        return _vtable().is_stage_sorted_by_vector_search_score_deprecated(
-            get(), &outIsSortedByVectorSearchScore);
-    });
-
-    return outIsSortedByVectorSearchScore;
-}
-
 void LogicalAggStageAPI::setExtractedLimitVal_deprecated(
     boost::optional<long long> extractedLimitVal) {
     invokeCAndConvertStatusToException([&]() {
@@ -116,25 +84,26 @@ void LogicalAggStageAPI::setExtractedLimitVal_deprecated(
     });
 }
 
-bool LogicalAggStageAPI::evaluateRulePrecondition(
-    StringData ruleName, MongoExtensionPipelineRewriteContext* pipelineRewriteContext) const {
+bool LogicalAggStageAPI::evaluatePipelineRewriteRulePrecondition(
+    std::string_view ruleName, MongoExtensionPipelineRewriteContext* pipelineRewriteContext) const {
     bool result = false;
     auto nameView = ::MongoExtensionByteView{reinterpret_cast<const uint8_t*>(ruleName.data()),
                                              ruleName.size()};
     invokeCAndConvertStatusToException([&]() {
-        return _vtable().evaluate_rule_precondition(
+        return _vtable().evaluate_pipeline_rewrite_rule_precondition(
             get(), nameView, pipelineRewriteContext, &result);
     });
     return result;
 }
 
-bool LogicalAggStageAPI::evaluateRuleTransform(
-    StringData ruleName, MongoExtensionPipelineRewriteContext* pipelineRewriteContext) {
+bool LogicalAggStageAPI::evaluatePipelineRewriteRuleTransform(
+    std::string_view ruleName, MongoExtensionPipelineRewriteContext* pipelineRewriteContext) {
     bool result = false;
     auto nameView = ::MongoExtensionByteView{reinterpret_cast<const uint8_t*>(ruleName.data()),
                                              ruleName.size()};
     invokeCAndConvertStatusToException([&]() {
-        return _vtable().evaluate_rule_transform(get(), nameView, pipelineRewriteContext, &result);
+        return _vtable().evaluate_pipeline_rewrite_rule_transform(
+            get(), nameView, pipelineRewriteContext, &result);
     });
     return result;
 }
@@ -161,15 +130,17 @@ void LogicalAggStageAPI::applyPipelineSuffixDependencies(
 }
 
 
+void LogicalAggStageAPI::skipStream(::MongoExtensionStreamType streamType) {
+    invokeCAndConvertStatusToException([&]() { return _vtable().skip_stream(get(), streamType); });
+}
+
 /**
  * Returns the sort pattern applied by this stage. Returns an empty BSONObj if the stage does
  * not apply a sort pattern.
  */
 BSONObj LogicalAggStageAPI::getSortPattern() const {
     ::MongoExtensionByteBuf* buf{nullptr};
-    invokeCAndConvertStatusToException([&]() {
-        return _vtable().get_sort_pattern(const_cast<LogicalAggStageAPI*>(this)->get(), &buf);
-    });
+    invokeCAndConvertStatusToException([&]() { return _vtable().get_sort_pattern(get(), &buf); });
 
     if (!buf) {
         return BSONObj();
@@ -178,4 +149,20 @@ BSONObj LogicalAggStageAPI::getSortPattern() const {
     ExtensionByteBufHandle ownedBuf{buf};
     return bsonObjFromByteView(ownedBuf->getByteView()).getOwned();
 }
+
+boost::optional<MongoExtensionDocsNeededBoundsInfo> LogicalAggStageAPI::getDocsNeededBounds()
+    const {
+    ::MongoExtensionByteBuf* buf{nullptr};
+    invokeCAndConvertStatusToException(
+        [&]() { return _vtable().get_docs_needed_bounds(get(), &buf); });
+
+    if (!buf) {
+        return boost::none;
+    }
+
+    ExtensionByteBufHandle ownedBuf{buf};
+    auto bson = bsonObjFromByteView(ownedBuf->getByteView()).getOwned();
+    return MongoExtensionDocsNeededBoundsInfo::parse(bson);
+}
+
 }  // namespace mongo::extension

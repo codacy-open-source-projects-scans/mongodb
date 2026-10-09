@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/database_name_reserved.h"
@@ -49,6 +22,7 @@
 #include <iosfwd>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -58,7 +32,7 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -127,8 +101,8 @@ public:
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC static DatabaseName createDatabaseName_forTest(
-        boost::optional<TenantId> tenantId, StringData dbString) {
+    [[MONGO_MOD_PUBLIC]] static DatabaseName createDatabaseName_forTest(
+        boost::optional<TenantId> tenantId, std::string_view dbString) {
         return DatabaseName(tenantId, dbString);
     }
 
@@ -166,7 +140,7 @@ public:
         return isAdminDB() || isConfigDB() || isLocalDB();
     }
 
-    static bool isInternalDb(StringData db) {
+    static bool isInternalDb(std::string_view db) {
         return db == DatabaseName::kAdmin.db(omitTenant) ||
             db == DatabaseName::kLocal.db(omitTenant) || db == DatabaseName::kConfig.db(omitTenant);
     }
@@ -200,7 +174,7 @@ public:
      * @return if db is an allowed database name
      */
 
-    static bool validDBName(StringData dbName,
+    static bool validDBName(std::string_view dbName,
                             DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow);
 
     static bool isValid(const DatabaseName& dbName,
@@ -208,7 +182,7 @@ public:
         return validDBName(dbName.db(omitTenant), behavior);
     }
 
-    static bool isValid(StringData dbName) {
+    static bool isValid(std::string_view dbName) {
         return validDBName(dbName);
     }
 
@@ -247,7 +221,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC std::string toStringWithTenantId_forTest() const {
+    [[MONGO_MOD_PUBLIC]] std::string toStringWithTenantId_forTest() const {
         return toStringWithTenantId();
     }
 
@@ -256,7 +230,7 @@ public:
      *
      * MUST only be used for tests.
      */
-    MONGO_MOD_PUBLIC std::string toString_forTest() const {
+    [[MONGO_MOD_PUBLIC]] std::string toString_forTest() const {
         return toString();
     }
 
@@ -279,8 +253,8 @@ public:
             return -1;
         }
 
-        return StringData{_data.data() + kDataOffset, sizeWithTenant()}.compare(
-            StringData{other._data.data() + kDataOffset, other.sizeWithTenant()});
+        return std::string_view{_data.data() + kDataOffset, sizeWithTenant()}.compare(
+            std::string_view{other._data.data() + kDataOffset, other.sizeWithTenant()});
     }
 
     friend bool operator==(const DatabaseName& lhs, const DatabaseName& rhs) {
@@ -307,9 +281,7 @@ public:
     template <typename H>
     friend H AbslHashValue(H h, const DatabaseName& obj) {
         //  _data might contain a collection : only hash the discriminator, tenant and database.
-        return H::combine(
-            std::move(h),
-            toStdStringViewForInterop(obj.view().substr(0, obj.sizeWithTenant() + kDataOffset)));
+        return H::combine(std::move(h), obj.view().substr(0, obj.sizeWithTenant() + kDataOffset));
     }
 
     // Adds support for boost::Hash.
@@ -324,7 +296,7 @@ public:
      * DatabaseName that can never contain a tenant id (such as global database constants) otherwise
      * data isolation between tenant can break.
      */
-    constexpr StringData db(OmitTenant) const MONGO_COMPILER_LIFETIME_BOUND {
+    constexpr std::string_view db(OmitTenant) const MONGO_COMPILER_LIFETIME_BOUND {
         return view().substr(dbNameOffsetStart(), size());
     }
 
@@ -365,8 +337,8 @@ protected:
     /**
      * Returns a view of the internal string.
      */
-    constexpr StringData view() const MONGO_COMPILER_LIFETIME_BOUND {
-        return StringData{_data.data(), _data.size()};
+    constexpr std::string_view view() const MONGO_COMPILER_LIFETIME_BOUND {
+        return std::string_view{_data.data(), _data.size()};
     }
 
     /**
@@ -374,7 +346,7 @@ protected:
      * "dbString" is expected only consist of a db name. It is the caller's responsibility to ensure
      * the dbString is a valid db name.
      */
-    DatabaseName(boost::optional<TenantId> tenantId, StringData dbString)
+    DatabaseName(boost::optional<TenantId> tenantId, std::string_view dbString)
         : _data(Storage::make(std::move(tenantId), dbString)) {
         uassert(ErrorCodes::InvalidNamespace,
                 fmt::format("'.' is an invalid character in a db name: {}", dbString),
@@ -402,7 +374,7 @@ protected:
      */
     DatabaseName(const Storage& data, size_t size, TrustedInitTag) noexcept : _data(data, size) {}
 
-    StringData tenantIdView() const MONGO_COMPILER_LIFETIME_BOUND {
+    std::string_view tenantIdView() const MONGO_COMPILER_LIFETIME_BOUND {
         if (!hasTenantId()) {
             return {};
         }
@@ -602,8 +574,8 @@ protected:
             return getFlags() & database_name::kStaticAllocFlag;
         }
 
-        static Storage make(StringData db,
-                            StringData collectionName,
+        static Storage make(std::string_view db,
+                            std::string_view collectionName,
                             bool hasTenant,
                             const char* tenantData) {
             uassert(ErrorCodes::InvalidNamespace,
@@ -659,7 +631,7 @@ protected:
             return data;
         }
 
-        static Storage make(const DatabaseName& dbName, StringData collectionName) {
+        static Storage make(const DatabaseName& dbName, std::string_view collectionName) {
             return make(dbName.db(omitTenant),
                         collectionName,
                         dbName.hasTenantId(),
@@ -667,8 +639,8 @@ protected:
         }
 
         static Storage make(boost::optional<TenantId> tenantId,
-                            StringData db,
-                            StringData collectionName) {
+                            std::string_view db,
+                            std::string_view collectionName) {
             uassert(ErrorCodes::InvalidNamespace,
                     fmt::format("db name must be at most {} characters, found: {}",
                                 kMaxDatabaseNameLength,
@@ -683,10 +655,10 @@ protected:
             return make(db, collectionName, !!tenantId, tenantData);
         }
 
-        static Storage make(boost::optional<TenantId> tenantId, StringData ns) {
+        static Storage make(boost::optional<TenantId> tenantId, std::string_view ns) {
             auto dotIndex = ns.find('.');
             if (dotIndex == std::string::npos) {
-                return make(tenantId, ns, StringData{});
+                return make(tenantId, ns, std::string_view{});
             }
 
             return make(tenantId, ns.substr(0, dotIndex), ns.substr(dotIndex + 1));
@@ -744,16 +716,16 @@ protected:
         std::min(sizeof(Storage) - sizeof(char), size_t(63));
 };
 
-MONGO_MOD_PUBLIC inline std::string stringify_forTest(const DatabaseName& dbName) {
+[[MONGO_MOD_PUBLIC]] inline std::string stringify_forTest(const DatabaseName& dbName) {
     return toStringForLogging(dbName);
 }
 
-inline bool DatabaseName::validDBName(StringData db,
+inline bool DatabaseName::validDBName(std::string_view db,
                                       DatabaseName::DollarInDbNameBehavior behavior) {
     if (db.size() == 0 || db.size() > DatabaseName::kMaxDatabaseNameLength)
         return false;
 
-    for (StringData::const_iterator iter = db.begin(), end = db.end(); iter != end; ++iter) {
+    for (std::string_view::const_iterator iter = db.begin(), end = db.end(); iter != end; ++iter) {
         switch (*iter) {
             case '\0':
             case '/':
@@ -794,8 +766,10 @@ constexpr auto makeDbData(const char* db) {
     p = std::copy_n(db, dbSize, p);
     return result;
 }
-#define X(id, db) constexpr inline auto id##_data = makeDbData<db.size()>(db.data());
-EXPAND_DBNAME_CONSTANT_TABLE(X)
+#define X(id, db)                     \
+    constexpr inline auto id##_data = \
+        makeDbData<std::string_view{db}.size()>(std::string_view{db}.data());
+EXPAND_DBNAME_CONSTANT_TABLE(X)  // NOLINT(bugprone-suspicious-stringview-data-usage)
 #undef X
 }  // namespace dbname_detail::constexpr_data
 

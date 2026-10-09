@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -66,7 +40,7 @@ struct SplitPolicyParams {
     ShardId primaryShardId;
 };
 
-class MONGO_MOD_PUBLIC InitialSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] InitialSplitPolicy {
 public:
     virtual ~InitialSplitPolicy() {}
 
@@ -124,7 +98,7 @@ public:
 /**
  * Default optimization strategy where we create a single chunk on the primary shard.
  */
-class MONGO_MOD_PUBLIC SingleChunkOnPrimarySplitPolicy : public InitialSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] SingleChunkOnPrimarySplitPolicy : public InitialSplitPolicy {
 public:
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                             const ShardKeyPattern& shardKeyPattern,
@@ -134,7 +108,7 @@ public:
 /**
  * Create a single chunk on a specified shard.
  */
-class MONGO_MOD_PUBLIC SingleChunkOnShardSplitPolicy : public InitialSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] SingleChunkOnShardSplitPolicy : public InitialSplitPolicy {
 public:
     SingleChunkOnShardSplitPolicy(OperationContext* opCtx, ShardId dataShard);
 
@@ -150,7 +124,7 @@ private:
  * Split point building strategy to be used when the appropriate splitpoints can be trivially
  * deduced from the shard key.
  */
-class MONGO_MOD_PUBLIC SplitPointsBasedSplitPolicy : public InitialSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] SplitPointsBasedSplitPolicy : public InitialSplitPolicy {
 public:
     /**
      * Constructor used when generating split points for a hashed-prefix shard key.
@@ -217,7 +191,7 @@ private:
 /**
  * In this strategy we directly generate a single chunk for each tag range.
  */
-class MONGO_MOD_PUBLIC SingleChunkPerTagSplitPolicy : public AbstractTagsBasedSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] SingleChunkPerTagSplitPolicy : public AbstractTagsBasedSplitPolicy {
 public:
     SingleChunkPerTagSplitPolicy(
         OperationContext* opCtx,
@@ -237,7 +211,7 @@ private:
  * case, we generate one chunk per tag range and then further split each of these using the hashed
  * field of the shard key.
  */
-class MONGO_MOD_PUBLIC PresplitHashedZonesSplitPolicy : public AbstractTagsBasedSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] PresplitHashedZonesSplitPolicy : public AbstractTagsBasedSplitPolicy {
 public:
     PresplitHashedZonesSplitPolicy(
         OperationContext* opCtx,
@@ -259,7 +233,7 @@ private:
 /**
  * Split point building strategy for resharding.
  */
-class MONGO_MOD_PUBLIC SamplingBasedSplitPolicy : public InitialSplitPolicy {
+class [[MONGO_MOD_PUBLIC]] SamplingBasedSplitPolicy : public InitialSplitPolicy {
 public:
     using SampleDocumentPipeline = std::unique_ptr<Pipeline>;
 
@@ -321,7 +295,7 @@ public:
     static constexpr int kDefaultSamplesPerChunk = 10;
 
     // TODO This should ideally be file_private.
-    MONGO_MOD_NEEDS_REPLACEMENT static std::unique_ptr<SampleDocumentSource>
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] static std::unique_ptr<SampleDocumentSource>
     makePipelineDocumentSource_forTest(OperationContext* opCtx,
                                        boost::intrusive_ptr<DocumentSource> initialSource,
                                        const NamespaceString& ns,

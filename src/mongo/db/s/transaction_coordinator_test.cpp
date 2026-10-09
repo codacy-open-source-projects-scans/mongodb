@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
@@ -34,7 +8,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -70,11 +43,11 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -92,6 +65,7 @@
 #include <memory>
 #include <ratio>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -548,7 +522,9 @@ TEST_F(TransactionCoordinatorDriverTest,
                                    kTwoShardIdList);
 
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; },
-                [&](const executor::RemoteCommandRequest& request) { return kPrepareOk; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kPrepareOk;
+                }});
 
     auto decision = future.get().decision();
 
@@ -587,7 +563,9 @@ TEST_F(TransactionCoordinatorDriverTest,
                                    kTwoShardIdList);
 
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; },
-                [&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kNoSuchTransaction;
+                }});
 
     auto decision = future.get().decision();
     ASSERT(decision.getDecision() == txn::CommitDecision::kAbort);
@@ -954,7 +932,7 @@ TEST_F(TransactionCoordinatorDriverPersistenceTest,
                 return decision;
             }(),
             kDummyAffectedNamespaces);
-        failpoint->waitForTimesEntered(failpoint.initialTimesEntered() + 1);
+        failpoint.waitForOneNewEntry();
         _aws->shutdown({ErrorCodes::TransactionCoordinatorSteppingDown, "Shutdown for test"});
     }
 
@@ -1242,7 +1220,7 @@ public:
     }
 
 private:
-    boost::optional<RAIIServerParameterControllerForTest> _controller;
+    boost::optional<unittest::ServerParameterGuard> _controller;
 };
 
 class TransactionCoordinatorDecisionPersistenceTestWithEOTChangeEventFalse
@@ -1258,7 +1236,7 @@ public:
     }
 
 private:
-    boost::optional<RAIIServerParameterControllerForTest> _controller;
+    boost::optional<unittest::ServerParameterGuard> _controller;
 };
 
 TEST_TRANSACTION_COORDINATOR_DECISION_PERSISTENCE(
@@ -1306,7 +1284,9 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesAbortDecisionOnAbortAndCommi
     auto commitDecisionFuture = coordinator->getDecision();
 
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; },
-                [&](const executor::RemoteCommandRequest& request) { return kPrepareOk; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kPrepareOk;
+                }});
 
     assertAbortSentAndRespondWithSuccess();
     assertAbortSentAndRespondWithSuccess();
@@ -1332,7 +1312,9 @@ TEST_F(TransactionCoordinatorTest,
     auto commitDecisionFuture = coordinator->getDecision();
 
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kNoSuchTransaction;
+                }});
 
     assertAbortSentAndRespondWithSuccess();
     assertAbortSentAndRespondWithSuccess();
@@ -1357,9 +1339,10 @@ TEST_F(TransactionCoordinatorTest,
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
 
-    onCommands(
-        {[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
-         [&](const executor::RemoteCommandRequest& request) { return kTxnRetryCounterTooOld; }});
+    onCommands({[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kTxnRetryCounterTooOld;
+                }});
 
     assertAbortSentAndRespondWithSuccess();
     assertAbortSentAndRespondWithSuccess();
@@ -1411,7 +1394,9 @@ TEST_F(TransactionCoordinatorTest,
 
     // One participant votes commit and other encounters retryable error
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kPrepareOk; },
-                [&](const executor::RemoteCommandRequest& request) { return kRetryableError; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kRetryableError;
+                }});
     advanceClockAndExecuteScheduledTasks();  // Make sure the scheduled retry executes
 
     // One participant votes abort after retry.
@@ -1442,7 +1427,9 @@ TEST_F(TransactionCoordinatorTest,
 
     // One participant votes abort and other encounters retryable error
     onCommands({[&](const executor::RemoteCommandRequest& request) { return kNoSuchTransaction; },
-                [&](const executor::RemoteCommandRequest& request) { return kRetryableError; }});
+                [&](const executor::RemoteCommandRequest& request) {
+                    return kRetryableError;
+                }});
     advanceClockAndExecuteScheduledTasks();  // Make sure the cancellation callback is delivered
 
     assertAbortSentAndRespondWithSuccess();
@@ -1524,7 +1511,7 @@ TEST_F(TransactionCoordinatorTest,
 }
 
 TEST_F(TransactionCoordinatorTest, RunCommitProducesEndOfTransactionOplogEntry) {
-    RAIIServerParameterControllerForTest controller("featureFlagEndOfTransactionChangeEvent", true);
+    unittest::ServerParameterGuard controller("featureFlagEndOfTransactionChangeEvent", true);
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
@@ -1560,6 +1547,8 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesEndOfTransactionOplogEntry) 
 
 TEST_F(TransactionCoordinatorTest,
        CoordinatorTerminatedWithUnexpectedErrorBeforeDurablyWritingDecision) {
+    unittest::LogCaptureGuard logs;
+
     // Create the coordinator.
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
     auto coordinator = std::make_shared<TransactionCoordinator>(
@@ -1579,6 +1568,28 @@ TEST_F(TransactionCoordinatorTest,
     ASSERT_THROWS_CODE(coordinator->onCompletion().get(), DBException, ErrorCodes::InternalError);
     coordinator->shutdown();
     executor::NetworkInterfaceMock::InNetworkGuard(network())->runReadyNetworkOperations();
+
+    ASSERT_GT(logs.countBSONContainingSubset(BSON("id" << 12111100)), 0);
+}
+
+TEST_F(TransactionCoordinatorTest, CanceledBeforeCommitStartIsNotLoggedAsUnexpectedError) {
+    unittest::LogCaptureGuard logs;
+
+    // Create the coordinator and cancel it before two-phase commit ever started, e.g. when the
+    // transaction is committed through the optimized single-shard commit path.
+    auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
+    coordinator->start(operationContext());
+
+    coordinator->cancelIfCommitNotYetStarted();
+    executor::NetworkInterfaceMock::InNetworkGuard(network())->runReadyNetworkOperations();
+    ASSERT_THROWS_CODE(
+        coordinator->onCompletion().get(), DBException, ErrorCodes::TransactionCoordinatorCanceled);
+    coordinator->shutdown();
+    executor::NetworkInterfaceMock::InNetworkGuard(network())->runReadyNetworkOperations();
+
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("id" << 12111100)), 0);
 }
 
 using TransactionCoordinatorTestDeathTest = TransactionCoordinatorTest;
@@ -1723,7 +1734,7 @@ protected:
     }
 
     static void assertClientReportStateFields(BSONObj doc, std::string appName, int connectionId) {
-        ASSERT_EQ(StringData(doc.getStringField("appName")), appName);
+        ASSERT_EQ(std::string_view(doc.getStringField("appName")), appName);
         ASSERT_EQ(doc.getIntField("connectionId"), connectionId);
 
         auto expectedDriverName = std::string("DriverName").insert(0, appName);
@@ -1735,13 +1746,13 @@ protected:
 
         ASSERT_TRUE(doc.hasField("clientMetadata"));
         auto driver = doc.getObjectField("clientMetadata").getObjectField("driver");
-        ASSERT_EQ(StringData(driver.getStringField("name")), expectedDriverName);
-        ASSERT_EQ(StringData(driver.getStringField("version")), expectedDriverVersion);
+        ASSERT_EQ(std::string_view(driver.getStringField("name")), expectedDriverName);
+        ASSERT_EQ(std::string_view(driver.getStringField("version")), expectedDriverVersion);
         auto os = doc.getObjectField("clientMetadata").getObjectField("os");
-        ASSERT_EQ(StringData(os.getStringField("type")), expectedOsType);
-        ASSERT_EQ(StringData(os.getStringField("name")), expectedOsName);
-        ASSERT_EQ(StringData(os.getStringField("architecture")), expectedOsArch);
-        ASSERT_EQ(StringData(os.getStringField("version")), expectedOsVersion);
+        ASSERT_EQ(std::string_view(os.getStringField("type")), expectedOsType);
+        ASSERT_EQ(std::string_view(os.getStringField("name")), expectedOsName);
+        ASSERT_EQ(std::string_view(os.getStringField("architecture")), expectedOsArch);
+        ASSERT_EQ(std::string_view(os.getStringField("version")), expectedOsVersion);
     }
 
     Date_t advanceClockSourceAndReturnNewNow() {
@@ -2597,7 +2608,7 @@ TEST_F(TransactionCoordinatorMetricsTest,
                     "hangBeforeWaitingForParticipantListWriteConcern",
                     ErrorCodes::TransactionCoordinatorReachedAbortDecision);
     participantListFp->setMode(FailPoint::off);
-    decisionFp->waitForTimesEntered(decisionFp.initialTimesEntered() + 1);
+    decisionFp.waitForOneNewEntry();
 
     // We now expect the "currentInSteps" metric for kWritingParticipantList to be 0, and for it to
     // be 1 for "kWritingDecision". All other steps, including "kWaitingForVotes" should be 0.
@@ -2982,7 +2993,7 @@ TEST_F(TransactionCoordinatorMetricsTest, ClientInformationIncludedInReportState
         BSONObjBuilder builder;
         coordinator->reportState(operationContext(), builder);
         BSONObj reportDoc = builder.obj();
-        ASSERT_EQ(StringData(reportDoc.getStringField("desc")), "transaction coordinator");
+        ASSERT_EQ(std::string_view(reportDoc.getStringField("desc")), "transaction coordinator");
         assertClientReportStateFields(reportDoc, expectedAppName, getClient()->getConnectionId());
     }
 
@@ -2995,7 +3006,7 @@ TEST_F(TransactionCoordinatorMetricsTest, ClientInformationIncludedInReportState
         BSONObjBuilder builder;
         coordinator->reportState(operationContext(), builder);
         BSONObj reportDoc = builder.obj();
-        ASSERT_EQ(StringData(reportDoc.getStringField("desc")), "transaction coordinator");
+        ASSERT_EQ(std::string_view(reportDoc.getStringField("desc")), "transaction coordinator");
         assertClientReportStateFields(reportDoc, expectedAppName2, getClient()->getConnectionId());
     }
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include <algorithm>
@@ -40,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -80,6 +55,7 @@
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/random.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/scripting/mozjs/shell/implscope.h"
 #include "mongo/shell/bench.h"
 #include "mongo/shell/debugger/debugger.h"
 #include "mongo/shell/shell_options.h"
@@ -97,7 +73,6 @@
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
 
-#include <mutex>
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
@@ -235,6 +210,7 @@ bool isOpSymbol(char c) {
 }  // namespace
 
 namespace shell_utils {
+using namespace std::literals::string_view_literals;
 
 
 bool isBalanced(const std::string& code) {
@@ -301,7 +277,7 @@ bool isBalanced(const std::string& code) {
             danglingOp = false;
             break;
         }
-        if ("~!%^&*-+=|:,<>/?."_sd.find(code[i]) != std::string::npos)
+        if ("~!%^&*-+=|:,<>/?."sv.find(code[i]) != std::string::npos)
             danglingOp = true;
         else if (!ctype::isSpace(code[i]))
             danglingOp = false;
@@ -426,14 +402,14 @@ BSONObj computeSHA256Block(const BSONObj& a, void* data) {
         case BSONType::binData: {
             int len;
             const char* ptr = ele.binData(len);
-            SHA256Block::computeHash({ConstDataRange(ptr, len)}).appendAsBinData(bob, ""_sd);
+            SHA256Block::computeHash({ConstDataRange(ptr, len)}).appendAsBinData(bob, ""sv);
 
             break;
         }
         case BSONType::string: {
             auto str = ele.valueStringData();
             SHA256Block::computeHash({ConstDataRange(str.data(), str.size())})
-                .appendAsBinData(bob, ""_sd);
+                .appendAsBinData(bob, ""sv);
             break;
         }
         default:
@@ -458,8 +434,8 @@ BSONObj computeSHA256Hmac(const BSONObj& a, void* data) {
     }
 
     auto cmdObj = a.firstElement().Obj();
-    static constexpr StringData kComputeSha256HmacKeyField = "key";
-    static constexpr StringData kComputeSha256HmacPayloadField = "payload";
+    static constexpr std::string_view kComputeSha256HmacKeyField = "key";
+    static constexpr std::string_view kComputeSha256HmacPayloadField = "payload";
 
     uassert(
         ErrorCodes::BadValue,
@@ -545,8 +521,8 @@ BSONObj _createTenantToken(const BSONObj& args, void* data) {
     const auto obj = args.firstElement().Obj();
     uassert(8154401,
             "_createTenantToken requires field `tenant` of type ObjectId",
-            obj.hasField("tenant"_sd) && obj["tenant"_sd].type() == BSONType::oid);
-    const auto tenant = TenantId::parseFromBSON(obj["tenant"_sd]);
+            obj.hasField("tenant"sv) && obj["tenant"sv].type() == BSONType::oid);
+    const auto tenant = TenantId::parseFromBSON(obj["tenant"sv]);
     const auto expectPrefix = obj["expectPrefix"].booleanSafe();
     const auto token = auth::ValidatedTenancyScopeFactory::create(
         tenant,
@@ -771,14 +747,13 @@ BSONObj _closeGoldenData(const BSONObj& input, void*) {
 }
 
 void closeMochaStyleTestContext(Scope& scope) {
-    const StringData code =
-        "if (typeof globalThis.__mochalite_closer === 'function') { await __mochalite_closer(); }"_sd;
-    scope.exec(code.data(),
-               "" /* name */,
-               true /* printResult */,
-               true /* reportError*/,
-               true /* assertOnError*/,
-               0 /*timeoutMs*/);
+    scope.exec(
+        "if (typeof globalThis.__mochalite_closer === 'function') { await __mochalite_closer(); }",
+        "" /* name */,
+        true /* printResult */,
+        true /* reportError*/,
+        true /* assertOnError*/,
+        0 /*timeoutMs*/);
 }
 
 /**
@@ -832,7 +807,7 @@ namespace {
 // Intel's implementation supports magic strings for
 // Infinity and NaN, but not for maximum and minimum size.
 // Intel's match is case insensitive, so ours should be too.
-const std::array<std::pair<StringData, Decimal128>, 6> magicMatches{{
+const std::array<std::pair<std::string_view, Decimal128>, 6> magicMatches{{
     {"max", Decimal128::kLargestPositive},
     {"min", Decimal128::kSmallestPositive},
     {"+max", Decimal128::kLargestPositive},
@@ -1369,6 +1344,10 @@ void initScope(Scope& scope) {
             "_initDebuggerGlobal", mongo::mozjs::debugger::initDebuggerGlobal, &scope);
         try {
             scope.exec("_initDebuggerGlobal()", "(debugger-init)", false, true, false);
+            // Register cleanup to run before JS_DestroyContext: DebuggerObject holds a
+            // PersistentRootedObject that must be released while the JSContext is still alive.
+            mozjs::MozJSImplScope::registerPreDestroyHook(
+                []() { mozjs::debugger::DebuggerGlobal::cleanup(); });
         } catch (const DBException& e) {
             std::cerr << "[JSDEBUG] Failed to initialize debugger: " << e.toString() << std::endl;
         }
@@ -1395,7 +1374,7 @@ bool Prompter::confirm() {
 
 ConnectionRegistry::ConnectionRegistry() = default;
 
-void ConnectionRegistry::registerConnection(DBClientBase& client, StringData uri) {
+void ConnectionRegistry::registerConnection(DBClientBase& client, std::string_view uri) {
     BSONObj info;
     BSONObj command;
     // If apiStrict is set override it, whatsmyuri is not in the Stable API.
@@ -1474,7 +1453,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
 
 ConnectionRegistry connectionRegistry;
 
-void onConnect(DBClientBase& c, StringData uri) {
+void onConnect(DBClientBase& c, std::string_view uri) {
     if (shellGlobalParams.nokillop.load()) {
         return;
     }

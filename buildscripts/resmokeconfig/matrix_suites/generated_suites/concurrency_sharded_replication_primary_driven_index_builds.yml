@@ -21,6 +21,7 @@ executor:
         TestData:
           implicitlyShardOnCreateCollectionOnly: true
           runningWithBalancer: false
+          shardCollectionProbability: 0.5
   fixture:
     class: ShardedClusterFixture
     enable_balancer: false
@@ -61,18 +62,17 @@ matrix_suite: true
 selector:
   exclude_with_any_tags:
     - requires_standalone
-    - requires_replication
     - assumes_against_mongod_not_mongos
     - assumes_balancer_on
     - requires_profiling
     - assumes_unsharded_collection
+    - resumable_primary_driven_index_builds_incompatible
     - primary_driven_index_builds_incompatible
     - rolling_index_builds
     - requires_commit_quorum
     - requires_capped
     - requires_rollbacks
     - requires_index_build_resumability
-    - primary_driven_index_builds_incompatible_due_to_abort_on_step_up
   roots:
     - jstests/concurrency/fsm_workloads/index_builds/*.js
     - jstests/concurrency/fsm_workloads/ddl/create_index_background/*.js

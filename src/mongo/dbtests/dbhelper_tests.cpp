@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -69,11 +42,13 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Unit tests related to DBHelpers
@@ -191,7 +166,7 @@ public:
         BSONObj oplogEntry;
         Helpers::getLast(opCtx1.get(), NamespaceString::kRsOplogNamespace, oplogEntry);
         ASSERT_BSONOBJ_NE(oplogEntry, BSONObj());
-        ASSERT_TRUE(oplogEntry.getStringField("op") == "i"_sd);
+        ASSERT_TRUE(oplogEntry.getStringField("op") == "i"sv);
 
         // Run two concurrent storage transactions. Run findByIdAndNoopUpdate in one, and then
         // attempt to delete all docs in the collection in the other. Assert that the delete op
@@ -249,7 +224,7 @@ private:
         BSONObj oplogEntry;
         Helpers::getLast(opCtx2, NamespaceString::kRsOplogNamespace, oplogEntry);
         ASSERT_BSONOBJ_NE(oplogEntry, BSONObj());
-        ASSERT_TRUE(oplogEntry.getStringField("op") == "i"_sd);
+        ASSERT_TRUE(oplogEntry.getStringField("op") == "i"sv);
     }
 
     void assertFindAndNoopUpdateAfterWriteThrowsWCE(OperationContext* opCtx1,

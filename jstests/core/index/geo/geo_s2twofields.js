@@ -2,6 +2,7 @@
 // performance is what we expect it to be with indexing both fields.
 //
 // @tags: [
+//   uses_explain,
 //   operations_longer_than_stepdown_interval_in_txns,
 //   requires_fastcount,
 // ]
@@ -31,7 +32,10 @@ for (let i = 0; i < maxPoints; ++i) {
     let fromCoord = randomCoord(nyc.coordinates, 0, degrees);
     let toCoord = randomCoord(miami.coordinates, 0, degrees);
 
-    arr.push({from: {type: "Point", coordinates: fromCoord}, to: {type: "Point", coordinates: toCoord}});
+    arr.push({
+        from: {type: "Point", coordinates: fromCoord},
+        to: {type: "Point", coordinates: toCoord},
+    });
 }
 let res = t.insert(arr);
 assert.commandWorked(res);

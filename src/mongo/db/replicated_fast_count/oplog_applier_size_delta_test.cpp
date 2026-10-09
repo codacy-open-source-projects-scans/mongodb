@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Tests for the oplog application invariant that verifies the replicated size delta (m.sz) in
@@ -39,7 +13,8 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -61,8 +36,8 @@ protected:
 
     NamespaceString _nss;
     UUID _uuid = UUID::gen();
-    RAIIServerParameterControllerForTest _recordIdsFlag{"featureFlagRecordIdsReplicated", true};
-    RAIIServerParameterControllerForTest _fastCountFlag{"featureFlagReplicatedFastCount", true};
+    unittest::ServerParameterGuard _recordIdsFlag{"featureFlagRecordIdsReplicated", true};
+    unittest::ServerParameterGuard _fastCountFlag{"featureFlagReplicatedFastCount", true};
 };
 
 typedef SetSteadyStateConstraints<SizeDeltaTest, false> SizeDeltaTestDisable;
@@ -79,7 +54,7 @@ TEST_F(SizeDeltaTestDisable, DeleteCorrectSizeDeltaInSecondaryModeSucceeds) {
     auto op = makeDeleteOplogEntryWithRecordIdAndSizeMetadata(
         nextOpTime(), _nss, _uuid, BSON("_id" << 1), rid, -doc.objsize());
     ASSERT_OK(runOpSteadyState(op));
-    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+    EXPECT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
 }
 
 TEST_F(SizeDeltaTestDisable, DeleteAbsentSizeMetadataIsSkippedInSecondaryMode) {
@@ -90,7 +65,19 @@ TEST_F(SizeDeltaTestDisable, DeleteAbsentSizeMetadataIsSkippedInSecondaryMode) {
 
     auto op = makeDeleteOplogEntryWithRecordId(nextOpTime(), _nss, _uuid, BSON("_id" << 1), rid);
     ASSERT_OK(runOpSteadyState(op));
-    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+    EXPECT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+}
+
+TEST_F(SizeDeltaTestDisable, DeletePresentSizeMetadataWithAbsentSzIsSkippedInSecondaryMode) {
+    // A present SingleOpSizeMetadata whose sz is absent must apply without any size check.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    auto op =
+        makeDeleteOplogEntryWithRecordIdWithoutSz(nextOpTime(), _nss, _uuid, BSON("_id" << 1), rid);
+    ASSERT_OK(runOpSteadyState(op));
+    EXPECT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
 }
 
 TEST_F(SizeDeltaTest, DeleteWrongSizeDeltaInInitialSyncModeIsIgnored) {
@@ -102,7 +89,7 @@ TEST_F(SizeDeltaTest, DeleteWrongSizeDeltaInInitialSyncModeIsIgnored) {
     auto op = makeDeleteOplogEntryWithRecordIdAndSizeMetadata(
         nextOpTime(), _nss, _uuid, BSON("_id" << 1), rid, -doc.objsize() + 999);
     ASSERT_OK(runOpInitialSync(op));
-    ASSERT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
+    EXPECT_FALSE(documentExistsAtRecordId(_opCtx.get(), _nss, rid));
 }
 
 TEST_F(SizeDeltaTestDisable, DeleteWrongSizeDeltaInSecondaryModeReturnsError) {
@@ -113,7 +100,7 @@ TEST_F(SizeDeltaTestDisable, DeleteWrongSizeDeltaInSecondaryModeReturnsError) {
     // Off-by-one to simulate a primary/secondary size divergence.
     auto op = makeDeleteOplogEntryWithRecordIdAndSizeMetadata(
         nextOpTime(), _nss, _uuid, BSON("_id" << 1), rid, -doc.objsize() + 1);
-    ASSERT_EQ(runOpSteadyState(op).code(), 12380200);
+    EXPECT_EQ(runOpSteadyState(op).code(), 12380200);
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +154,17 @@ TEST_F(SizeDeltaTestDisable, UpdateAbsentSizeMetadataIsSkippedInSecondaryMode) {
     ASSERT_OK(runOpSteadyState(op));
 }
 
+TEST_F(SizeDeltaTestDisable, UpdatePresentSizeMetadataWithAbsentSzIsSkippedInSecondaryMode) {
+    // A present SingleOpSizeMetadata whose sz is absent must apply without any size check.
+    const RecordId rid(1);
+    const BSONObj doc = BSON("_id" << 1 << "x" << 100);
+    insertDocumentAtRecordId(_opCtx.get(), _nss, doc, rid);
+
+    auto op = makeUpdateOplogEntryWithRecordIdWithoutSz(
+        nextOpTime(), _nss, BSON("_id" << 1), BSON("$set" << BSON("x" << 200)), rid);
+    ASSERT_OK(runOpSteadyState(op));
+}
+
 TEST_F(SizeDeltaTest, UpdateWrongSizeDeltaInInitialSyncModeIsIgnored) {
     // The size check must be skipped entirely during initial sync.
     const RecordId rid(1);
@@ -186,7 +184,55 @@ TEST_F(SizeDeltaTestDisable, UpdateWrongSizeDeltaInSecondaryModeReturnsError) {
     // The real delta is 0 (int -> int, same size), but we claim 42 to simulate divergence.
     auto op = makeUpdateOplogEntryWithRecordIdAndSizeMetadata(
         nextOpTime(), _nss, BSON("_id" << 1), BSON("$set" << BSON("x" << 200)), rid, 42);
-    ASSERT_EQ(runOpSteadyState(op).code(), 12380201);
+    EXPECT_EQ(runOpSteadyState(op).code(), 12380201);
+}
+
+TEST_F(SizeDeltaTest, RepairReplicatedMetadataNoopAdjustsInMemorySizeCount) {
+    const BSONObj o2 = BSON("type" << "repairReplicatedMetadata"
+                                   << "uuid" << _uuid << "m" << BSON("sz" << 100 << "ct" << 5));
+    auto op = makeOplogEntry(nextOpTime(),
+                             OpTypeEnum::kNoop,
+                             NamespaceString::kEmpty,
+                             _uuid,
+                             BSON("msg" << "Repairing collection's replicated metadata with diffs"),
+                             o2);
+    ASSERT_OK(runOpSteadyState(op));
+
+    AutoGetCollection coll(_opCtx.get(), _nss, MODE_IS);
+    EXPECT_EQ(coll->numRecords(_opCtx.get()), 5);
+    EXPECT_EQ(coll->dataSize(_opCtx.get()), 100);
+}
+
+TEST_F(SizeDeltaTest, RepairReplicatedMetadataNoopSizeOnly) {
+    const BSONObj o2 =
+        BSON("type" << "repairReplicatedMetadata" << "uuid" << _uuid << "m" << BSON("sz" << 100));
+    auto op = makeOplogEntry(nextOpTime(),
+                             OpTypeEnum::kNoop,
+                             NamespaceString::kEmpty,
+                             _uuid,
+                             BSON("msg" << "Repairing collection's replicated metadata with diffs"),
+                             o2);
+    ASSERT_OK(runOpSteadyState(op));
+
+    AutoGetCollection coll(_opCtx.get(), _nss, MODE_IS);
+    EXPECT_EQ(coll->numRecords(_opCtx.get()), 0);
+    EXPECT_EQ(coll->dataSize(_opCtx.get()), 100);
+}
+
+TEST_F(SizeDeltaTest, RepairReplicatedMetadataNoopCountOnly) {
+    const BSONObj o2 =
+        BSON("type" << "repairReplicatedMetadata" << "uuid" << _uuid << "m" << BSON("ct" << 5));
+    auto op = makeOplogEntry(nextOpTime(),
+                             OpTypeEnum::kNoop,
+                             NamespaceString::kEmpty,
+                             _uuid,
+                             BSON("msg" << "Repairing collection's replicated metadata with diffs"),
+                             o2);
+    ASSERT_OK(runOpSteadyState(op));
+
+    AutoGetCollection coll(_opCtx.get(), _nss, MODE_IS);
+    EXPECT_EQ(coll->numRecords(_opCtx.get()), 5);
+    EXPECT_EQ(coll->dataSize(_opCtx.get()), 0);
 }
 
 }  // namespace

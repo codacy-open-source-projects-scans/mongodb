@@ -1,5 +1,9 @@
 /**
  * Test that CBR is able to properly estimate empty collections.
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 import {
     getRejectedPlans,
@@ -62,7 +66,10 @@ function testEmptyColl() {
     // Index union
     const emptyCollUnionExp = coll
         .find({
-            $and: [{$or: [{a: 10}, {b: {$gt: 99}}]}, {$or: [{a: {$in: [5, 1]}}, {b: {$in: [7, 99]}}]}],
+            $and: [
+                {$or: [{a: 10}, {b: {$gt: 99}}]},
+                {$or: [{a: {$in: [5, 1]}}, {b: {$in: [7, 99]}}]},
+            ],
         })
         .explain();
     assertAllPlansHaveZeroCE(emptyCollUnionExp);
@@ -89,7 +96,12 @@ function createHistogram(field) {
 try {
     for (const mode of ["heuristicCE", "samplingCE"]) {
         assert.commandWorked(
-            db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: mode}),
+            db.adminCommand({
+                setParameter: 1,
+                featureFlagCostBasedRanker: true,
+                internalQueryPlanRanker: "costBased",
+                internalQueryCBRCEMode: mode,
+            }),
         );
         testNonExistentColl();
         testEmptyColl();
@@ -98,7 +110,13 @@ try {
     {
         createHistogram("a");
         createHistogram("b");
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryCBRCEMode: "histogramCE"}));
+        assert.commandWorked(
+            db.adminCommand({
+                setParameter: 1,
+                internalQueryPlanRanker: "costBased",
+                internalQueryCBRCEMode: "histogramCE",
+            }),
+        );
         testEmptyColl();
     }
 } finally {

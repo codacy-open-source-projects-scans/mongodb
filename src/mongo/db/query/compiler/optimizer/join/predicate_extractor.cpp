@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/join/predicate_extractor.h"
 
@@ -40,8 +14,9 @@ namespace {
 // Helper visitor to check if an expression contains any references to variables. We assume that any
 // expression which references a variable is ineligible to be a single table predicate (cannot be
 // pushed down into the find layer).
-struct SingleTablePredicateClassifier : public SelectiveConstExpressionVisitorBase {
-    using SelectiveConstExpressionVisitorBase::visit;
+struct SingleTablePredicateClassifier
+    : public SelectiveConstExpressionVisitorBase<SingleTablePredicateClassifier> {
+    using SelectiveConstExpressionVisitorBase<SingleTablePredicateClassifier>::visit;
 
     void visit(const ExpressionFieldPath* expr) final {
         referencesVariables |=
@@ -52,7 +27,8 @@ struct SingleTablePredicateClassifier : public SelectiveConstExpressionVisitorBa
 };
 
 struct PredicateExtractor {
-    PredicateExtractor(const std::vector<LetVariable>& variables) {
+    PredicateExtractor(const DocumentSource* source, const std::vector<LetVariable>& variables)
+        : _source{source} {
         for (auto&& var : variables) {
             _variables.insert(var.id);
         }
@@ -94,7 +70,7 @@ struct PredicateExtractor {
     std::unique_ptr<MatchExpression> aggToMatchExpr(
         boost::intrusive_ptr<const Expression> aggExpr) {
         boost::intrusive_ptr<ExpressionContext> expCtx(aggExpr->getExpressionContext());
-        return std::make_unique<ExprMatchExpression>(aggExpr->clone(), expCtx);
+        return std::make_unique<ExprMatchExpression>(aggExpr->clone(*expCtx), expCtx);
     }
 
     boost::optional<SplitPredicatesResult> splitJoinAndSingleCollectionPredicates(
@@ -137,7 +113,7 @@ struct PredicateExtractor {
         if (auto cmp = dynamic_cast<const ExpressionCompare*>(aggExpr.get())) {
             if (isExprEquijoin(cmp)) {
                 return SplitPredicatesResult{
-                    .joinPredicates = {JoinPredicateExpr::make(cmp, letVars)},
+                    .joinPredicates = {ExtractedJoinPredicate::make(_source, cmp, letVars)},
                 };
             }
         }
@@ -170,7 +146,7 @@ struct PredicateExtractor {
                 return splitJoinAndSingleCollectionPredicates(expr->getExpression(), variables);
             }
             case MatchExpression::AND: {
-                std::vector<JoinPredicateExpr> joinPredicates;
+                std::vector<ExtractedJoinPredicate> joinPredicates;
                 auto singleTablePreds = std::make_unique<AndMatchExpression>();
 
                 // Recursive calls to split for each child and aggregate join and residual
@@ -221,31 +197,35 @@ struct PredicateExtractor {
         return SplitPredicatesResult{.singleTablePredicates = matchExpr->clone()};
     }
 
+    const DocumentSource* _source;
     stdx::unordered_set<Variables::Id> _variables;
 };
 
 class ExtractExprPredicatesHelper {
 public:
-    explicit ExtractExprPredicatesHelper(PathResolver& pathResolver)
-        : _pathResolver(pathResolver), _expressionIsFullyAbsorbed(true) {}
+    explicit ExtractExprPredicatesHelper(PathResolver& pathResolver, const DocumentSource* src)
+        : _src(src),
+          _pathResolver(pathResolver),
+          _fallbackReason(boost::none),
+          _expressionIsFullyAbsorbed(true) {}
 
     ExprPredicatesResult extract(const MatchExpression* expr) {
         _expressionIsFullyAbsorbed = true;
         _predicates.clear();
+        _fallbackReason = boost::none;
         extractMatch(expr);
 
-        return {
-            .expressionIsFullyAbsorbed = _expressionIsFullyAbsorbed,
-            .predicates = std::move(_predicates),
-        };
+        return {.expressionIsFullyAbsorbed = _expressionIsFullyAbsorbed,
+                .predicates = std::move(_predicates),
+                .reason = std::move(_fallbackReason)};
     }
 
 private:
-    class ExpressionVisitor : public SelectiveConstExpressionVisitorBase {
+    class ExpressionVisitor : public SelectiveConstExpressionVisitorBase<ExpressionVisitor> {
     public:
         explicit ExpressionVisitor(ExtractExprPredicatesHelper& helper) : _helper(helper) {}
 
-        using SelectiveConstExpressionVisitorBase::visit;
+        using SelectiveConstExpressionVisitorBase<ExpressionVisitor>::visit;
 
         void visit(const ExpressionAnd* expr) final {
             ++_visited;
@@ -276,8 +256,9 @@ private:
                 extractMatchExpr(static_cast<const ExprMatchExpression*>(expr));
                 break;
             default:
+                // Not a $expr- this $match can't encode a join predicate.
                 _expressionIsFullyAbsorbed = false;
-                // ignore
+                _fallbackReason = JoinFallbackReason::kMatchNonExprPredicate;
                 break;
         }
     }
@@ -291,7 +272,12 @@ private:
     void extractMatchExpr(const ExprMatchExpression* expr) {
         ExpressionVisitor visitor{*this};
         expr->getExpression()->acceptVisitor(&visitor);
-        _expressionIsFullyAbsorbed &= (visitor.numVisitedNodes() == 1);
+        if (visitor.numVisitedNodes() != 1) {
+            // The visitor only visits expressions we can extract join predicates from ($and & $eq),
+            // so an unvisited node is an expression we don't support.
+            _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchUnsupportedExpression;
+        }
     }
 
     void extractExpressionAnd(const ExpressionAnd* expr) {
@@ -299,7 +285,23 @@ private:
         for (const auto& child : expr->getChildren()) {
             child->acceptVisitor(&visitor);
         }
-        _expressionIsFullyAbsorbed &= (visitor.numVisitedNodes() == expr->getChildren().size());
+        if (visitor.numVisitedNodes() != expr->getChildren().size()) {
+            // As above- some child of this $and is an expression we don't support.
+            _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchUnsupportedExpression;
+        }
+    }
+
+    // Returns the field path to pass to PathResolver::resolve(), or boost::none if 'expr' is not a
+    // plain document-field reference. System-variable references ($$NOW, $$NOW.x,
+    // $$CLUSTER_TIME.foo, …) have a non-ROOT variable ID and must be excluded; bare
+    // single-component paths ($$ROOT, $$CURRENT) have no sub-field and would crash
+    // FieldPath::tail().
+    static boost::optional<FieldPath> toResolvablePath(const ExpressionFieldPath* expr) {
+        if (expr->isVariableReference() || expr->getFieldPath().getPathLength() <= 1) {
+            return boost::none;
+        }
+        return expr->getFieldPathWithoutCurrentPrefix();
     }
 
     void extractExpressionCompare(const ExpressionCompare* expr) {
@@ -307,6 +309,7 @@ private:
         if (expr->getOp() != ExpressionCompare::EQ || children.size() != 2) {
             // 1. Extract equality predicates only.
             _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchNonEqualityPredicate;
             return;
         }
 
@@ -316,20 +319,34 @@ private:
         if (left == nullptr || right == nullptr) {
             // 2. Both sides of the equality predicate must be field paths.
             _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchNonFieldPathOperand;
             return;
         }
 
-        auto leftPathId = _pathResolver.resolve(left->getFieldPathWithoutCurrentPrefix());
-        auto rightPathId = _pathResolver.resolve(right->getFieldPathWithoutCurrentPrefix());
+        auto leftPath = toResolvablePath(left);
+        auto rightPath = toResolvablePath(right);
+        if (!leftPath || !rightPath) {
+            // 3. Both field paths must be plain document-field references (i.e. rooted at
+            // $$CURRENT/$$ROOT). A system-variable reference such as '$$NOW.x' or a bare
+            // single-component path ('$$NOW', '$$ROOT', '$$CURRENT') cannot name a field of a
+            // collection and so cannot be a join predicate.
+            _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchVariableOperand;
+            return;
+        }
+
+        auto leftPathId = _pathResolver.resolve(*leftPath, _src, boost::none, _fallbackReason);
+        auto rightPathId = _pathResolver.resolve(*rightPath, _src, boost::none, _fallbackReason);
         if (!leftPathId.has_value() || !rightPathId.has_value()) {
-            // 3. Both field paths must be attributable to a single node in the graph.
+            // 4. Both field paths must be attributable to a single node in the graph.
             _expressionIsFullyAbsorbed = false;
             return;
         }
 
         if (_pathResolver[*leftPathId].nodeId == _pathResolver[*rightPathId].nodeId) {
-            // 4. To be a proper join predicate the field paths must be from different collections.
+            // 5. To be a proper join predicate the field paths must be from different collections.
             _expressionIsFullyAbsorbed = false;
+            _fallbackReason = JoinFallbackReason::kMatchPredicateOnSameNode;
             return;
         }
 
@@ -337,7 +354,9 @@ private:
             {.op = JoinPredicate::ExprEq, .left = *leftPathId, .right = *rightPathId});
     }
 
+    const DocumentSource* _src;
     PathResolver& _pathResolver;
+    boost::optional<JoinFallbackReason> _fallbackReason;
     std::vector<JoinPredicate> _predicates;
     bool _expressionIsFullyAbsorbed;
 };
@@ -352,43 +371,66 @@ U tassert_cast(V* v) {
     return ret;
 }
 
-// Compute the field path which the given variable ID refers to in the local collection of a
-// $lookup. We assume that the given a set of let variables from $lookup all are defined to be
-// simple FieldPaths (i.e.are of the form {foo: '$foo'}). This allows us resolve a variable to
-// underlying FieldPath.
-FieldPath localCollectionFieldPath(const std::vector<LetVariable>& letVars, Variables::Id id) {
+
+/**
+ * Compute the field path which the given variable reference resolves to in the local collection of
+ * a $lookup. We assume that the given set of let variables from $lookup are all defined to be
+ * simple FieldPaths (i.e. are of the form {foo: '$foo'}). The let variable's RHS provides the base
+ * path (e.g. 'x' for {l: '$x'}); any trailing components on the variable reference itself (e.g. the
+ * '.y' in '$$l.y') are appended, since '$$l.y' semantically means "the .y subfield of whatever 'l'
+ * evaluates to".
+ */
+FieldPath localCollectionFieldPath(const std::vector<LetVariable>& letVars,
+                                   const ExpressionFieldPath* varRef) {
+    auto id = varRef->getVariableId();
     auto varIt =
         std::find_if(letVars.cbegin(), letVars.cend(), [&id](auto&& var) { return var.id == id; });
     tassert(
         11317201, "variable ID not found in given set of let variables", varIt != letVars.cend());
     auto& var = *varIt;
     auto localFieldPath = tassert_cast<const ExpressionFieldPath*>(var.expression.get());
-    return localFieldPath->getFieldPathWithoutCurrentPrefix();
+    auto baseLocalFieldPath = localFieldPath->getFieldPathWithoutCurrentPrefix();
+    if (varRef->getFieldPath().getPathLength() > 1) {
+        return baseLocalFieldPath.concat(varRef->getFieldPathWithoutCurrentPrefix());
+    }
+    return baseLocalFieldPath;
 }
 
 }  // namespace
 
-JoinPredicateExpr JoinPredicateExpr::make(const ExpressionCompare* eqNode,
-                                          const std::vector<LetVariable>& letVars) {
+ExtractedJoinPredicate ExtractedJoinPredicate::make(const DocumentSource* source,
+                                                    const ExpressionCompare* eqNode,
+                                                    const std::vector<LetVariable>& letVars) {
     auto left = tassert_cast<const ExpressionFieldPath*>(eqNode->getChildren()[0].get());
     auto right = tassert_cast<const ExpressionFieldPath*>(eqNode->getChildren()[1].get());
 
     if (left->isVariableReference()) {
-        return {localCollectionFieldPath(letVars, left->getVariableId()),
+        return {true /* is $expr */,
+                localCollectionFieldPath(letVars, left),
                 right->getFieldPathWithoutCurrentPrefix(),
-                eqNode};
+                eqNode,
+                source};
     }
 
     tassert(11317203,
             "Expected a variable & a field path in a join predicate",
             right->isVariableReference());
-    return {localCollectionFieldPath(letVars, right->getVariableId()),
+    return {true /* is $expr */,
+            localCollectionFieldPath(letVars, right),
             left->getFieldPathWithoutCurrentPrefix(),
-            eqNode};
+            eqNode,
+            source};
+}
+
+ExtractedJoinPredicate ExtractedJoinPredicate::make(FieldPath localField,
+                                                    FieldPath foreignField,
+                                                    const DocumentSource* source) {
+    return {
+        false /* isn't $expr */, std::move(localField), std::move(foreignField), nullptr, source};
 }
 
 boost::optional<SplitPredicatesResult> splitJoinAndSingleCollectionPredicates(
-    const MatchExpression* matchExpr, const std::vector<LetVariable>& variables) {
+    const DocumentSourceMatch* match, const std::vector<LetVariable>& variables) {
     // Verify the let variables are suitable for extracting join predicates.
     for (auto&& variable : variables) {
         auto rhs = dynamic_cast<ExpressionFieldPath*>(variable.expression.get());
@@ -404,13 +446,13 @@ boost::optional<SplitPredicatesResult> splitJoinAndSingleCollectionPredicates(
         // At this point, we have verified the RHS of the variable refers to a field in the local
         // collection, which can be used to specify a join predicate.
     }
-    return PredicateExtractor{variables}.splitJoinAndSingleCollectionPredicates(matchExpr,
-                                                                                variables);
+    return PredicateExtractor{match, variables}.splitJoinAndSingleCollectionPredicates(
+        match->getMatchExpression(), variables);
 }
 
 ExprPredicatesResult extractExprPredicates(PathResolver& pathResolver,
-                                           const MatchExpression* expr) {
-    ExtractExprPredicatesHelper helper{pathResolver};
-    return helper.extract(expr);
+                                           const DocumentSourceMatch* match) {
+    ExtractExprPredicatesHelper helper{pathResolver, match};
+    return helper.extract(match->getMatchExpression());
 }
 };  // namespace mongo::join_ordering

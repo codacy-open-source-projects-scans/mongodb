@@ -6,7 +6,7 @@ import {getLatestQueryStatsEntry} from "jstests/libs/query/query_stats_utils.js"
 
 // Turn on the collecting of queryStats metrics.
 let options = {
-    setParameter: {internalQueryStatsRateLimit: -1},
+    setParameter: {internalQueryStatsSampleRate: 1},
 };
 
 const conn = MongoRunner.runMongod(options);
@@ -31,7 +31,11 @@ assert.commandWorked(bulk.execute());
 {
     coll.find({foo: {$regex: ".*", $options: "m"}}).itcount();
     const queryStats = getLatestQueryStatsEntry(testDB, {collName: coll.getName()});
-    assert.eq({"foo": {"$regex": "?string", "$options": "?string"}}, queryStats.key.queryShape.filter, queryStats);
+    assert.eq(
+        {"foo": {"$regex": "?string", "$options": "?string"}},
+        queryStats.key.queryShape.filter,
+        queryStats,
+    );
 }
 
 MongoRunner.stopMongod(conn);

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,20 +9,21 @@
 #include "mongo/util/tracking/string.h"
 
 #include <scoped_allocator>
+#include <string_view>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 namespace tracking {
 
 struct StringMapHashedKey {
 public:
-    StringMapHashedKey(Context& Context, StringData sd, size_t hash)
+    StringMapHashedKey(Context& Context, std::string_view sd, size_t hash)
         : _Context(Context), _sd(sd), _hash(hash) {}
 
     operator string() const {
         return make_string(_Context, _sd.data(), _sd.size());
     }
 
-    StringData key() const {
+    std::string_view key() const {
         return _sd;
     }
 
@@ -58,26 +33,26 @@ public:
 
 private:
     std::reference_wrapper<Context> _Context;
-    StringData _sd;
+    std::string_view _sd;
     size_t _hash;
 };
 
 struct StringMapHasher {
     using is_transparent = void;
 
-    size_t operator()(StringData sd) const {
+    size_t operator()(std::string_view sd) const {
         return absl::Hash<absl::string_view>{}(absl::string_view{sd.data(), sd.size()});
     }
 
     size_t operator()(const string& s) const {
-        return operator()(StringData{s.data(), s.size()});
+        return operator()(std::string_view{s.data(), s.size()});
     }
 
     size_t operator()(StringMapHashedKey key) const {
         return key.hash();
     }
 
-    StringMapHashedKey hashed_key(Context& Context, StringData sd) {
+    StringMapHashedKey hashed_key(Context& Context, std::string_view sd) {
         return {Context, sd, operator()(sd)};
     }
 };
@@ -85,16 +60,16 @@ struct StringMapHasher {
 struct StringMapEq {
     using is_transparent = void;
 
-    bool operator()(StringData lhs, StringData rhs) const {
+    bool operator()(std::string_view lhs, std::string_view rhs) const {
         return lhs == rhs;
     }
 
-    bool operator()(const string& lhs, StringData rhs) const {
-        return StringData{lhs.data(), lhs.size()} == rhs;
+    bool operator()(const string& lhs, std::string_view rhs) const {
+        return std::string_view{lhs.data(), lhs.size()} == rhs;
     }
 
-    bool operator()(StringData lhs, const string& rhs) const {
-        return lhs == StringData{rhs.data(), rhs.size()};
+    bool operator()(std::string_view lhs, const string& rhs) const {
+        return lhs == std::string_view{rhs.data(), rhs.size()};
     }
 
     bool operator()(StringMapHashedKey lhs, StringMapHashedKey rhs) const {
@@ -102,11 +77,11 @@ struct StringMapEq {
     }
 
     bool operator()(const string& lhs, StringMapHashedKey rhs) const {
-        return StringData{lhs.data(), lhs.size()} == rhs.key();
+        return std::string_view{lhs.data(), lhs.size()} == rhs.key();
     }
 
     bool operator()(StringMapHashedKey lhs, const string& rhs) const {
-        return lhs.key() == StringData{rhs.data(), rhs.size()};
+        return lhs.key() == std::string_view{rhs.data(), rhs.size()};
     }
 
     bool operator()(const string& lhs, const string& rhs) const {
@@ -138,4 +113,4 @@ inline StringSet makeStringSet(Context& Context) {
 }
 
 }  // namespace tracking
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

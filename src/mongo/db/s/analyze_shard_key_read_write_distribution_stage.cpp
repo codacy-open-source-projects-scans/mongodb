@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/analyze_shard_key_read_write_distribution_stage.h"
 
@@ -39,6 +13,8 @@
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
+
+#include <string_view>
 
 namespace mongo {
 using namespace analyze_shard_key;
@@ -94,12 +70,10 @@ void fetchSplitPoints(OperationContext* opCtx,
         aggRequest.setWriteConcern(WriteConcernOptions());
         aggRequest.setUnwrappedReadPref(ReadPreferenceSetting::get(opCtx).toContainingBSON());
 
-        // TODO(SERVER-113504): Consider using kIdempotent since onRetry allows read only
-        // aggregation processes to be restarted.
         uassertStatusOK(shard->runAggregation(
             opCtx,
             aggRequest,
-            Shard::RetryPolicy::kStrictlyNotIdempotent,
+            Shard::RetryPolicy::kIdempotent,
             [&](const std::vector<BSONObj>& docs, const boost::optional<BSONObj>&) -> bool {
                 for (const auto& doc : docs) {
                     callbackFn(doc);
@@ -266,7 +240,7 @@ void processSampledDiffs(OperationContext* opCtx,
 
         size_t startIndex = 0;
         while (startIndex < shardKeyFieldName.size()) {
-            const size_t lastDotIndex = shardKeyFieldName.find(".", startIndex);
+            const size_t lastDotIndex = shardKeyFieldName.find('.', startIndex);
             if (lastDotIndex == std::string::npos) {
                 break;
             }
@@ -330,7 +304,7 @@ REGISTER_AGG_STAGE_MAPPING(analyzeShardKeyReadWriteDistributionStage,
                            documentSourceAnalyzeShardKeyReadWriteDistributionToStageFn);
 
 AnalyzeShardKeyReadWriteDistributionStage::AnalyzeShardKeyReadWriteDistributionStage(
-    StringData stageName,
+    std::string_view stageName,
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
     analyze_shard_key::DocumentSourceAnalyzeShardKeyReadWriteDistributionSpec spec)
     : Stage(stageName, pExpCtx), _spec(std::move(spec)) {}

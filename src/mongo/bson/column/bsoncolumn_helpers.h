@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -43,6 +17,7 @@
 #include "mongo/util/modules.h"
 
 #include <concepts>
+#include <string_view>
 
 #include <boost/container/small_vector.hpp>
 
@@ -53,8 +28,12 @@ namespace mongo::bsoncolumn {
  * BSONColumn decompression.
  */
 template <class T>
-concept Appendable MONGO_MOD_PUBLIC = requires(
-    T& t, StringData strVal, BSONBinData binVal, BSONCode codeVal, BSONElement bsonVal, int32_t n) {
+concept Appendable [[MONGO_MOD_PUBLIC]] = requires(T& t,
+                                                   std::string_view strVal,
+                                                   BSONBinData binVal,
+                                                   BSONCode codeVal,
+                                                   BSONElement bsonVal,
+                                                   int32_t n) {
     t.append(true);
     t.append((int32_t)1);
     t.append((int64_t)1);
@@ -79,7 +58,7 @@ concept Appendable MONGO_MOD_PUBLIC = requires(
     t.template append<Timestamp>(bsonVal);
     t.template append<Date_t>(bsonVal);
     t.template append<OID>(bsonVal);
-    t.template append<StringData>(bsonVal);
+    t.template append<std::string_view>(bsonVal);
     t.template append<BSONBinData>(bsonVal);
     t.template append<BSONCode>(bsonVal);
     t.template append<BSONElement>(bsonVal);
@@ -95,6 +74,20 @@ concept Appendable MONGO_MOD_PUBLIC = requires(
 };
 
 /**
+ * A Container for Collector that materializes elements as usual but retains none of them.
+ *
+ * This is for callers that decompress purely for the side effects of decoding and materializing,
+ * such as validation establishing that a column can be unpacked without throwing. Elements are
+ * still materialized into the BSONElementStorage passed to decompress(), so this saves only the
+ * cost of accumulating them, not the cost of materializing them.
+ */
+template <class Element>
+class [[MONGO_MOD_PUBLIC]] DiscardingContainer {
+public:
+    void push_back(const Element&) {}
+};
+
+/**
  * Interface to accept elements decoded from BSONColumn and materialize them
  * as Elements of user-defined type.
  *
@@ -104,7 +97,7 @@ concept Appendable MONGO_MOD_PUBLIC = requires(
  * inlineable, and avoid branching and memory allocations when possible.
  *
  * The data types passed to the materialize() methods could be referencing memory on the stack
- * (e.g., the pointer in a StringData instance) and so implementors should assume this data is
+ * (e.g., the pointer in a std::string_view instance) and so implementors should assume this data is
  * ephemeral. The provided BSONElementStorage can be used to allocate memory with the lifetime of
  * the BSONColumn instance.
  *
@@ -117,12 +110,12 @@ concept Appendable MONGO_MOD_PUBLIC = requires(
  * materializePreallocated() instead of materialize().
  */
 template <class T>
-concept Materializer MONGO_MOD_PUBLIC = requires(T& t,
-                                                 BSONElementStorage& alloc,
-                                                 StringData strVal,
-                                                 BSONBinData binVal,
-                                                 BSONCode codeVal,
-                                                 BSONElement bsonVal) {
+concept Materializer [[MONGO_MOD_PUBLIC]] = requires(T& t,
+                                                     BSONElementStorage& alloc,
+                                                     std::string_view strVal,
+                                                     BSONBinData binVal,
+                                                     BSONCode codeVal,
+                                                     BSONElement bsonVal) {
     typename T::Element;
 
     { T::materialize(alloc, true) } -> std::same_as<typename T::Element>;
@@ -147,7 +140,9 @@ concept Materializer MONGO_MOD_PUBLIC = requires(T& t,
     { T::template materialize<Date_t>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
     { T::template materialize<OID>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
 
-    { T::template materialize<StringData>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    {
+        T::template materialize<std::string_view>(alloc, bsonVal)
+    } -> std::same_as<typename T::Element>;
     { T::template materialize<BSONBinData>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
     { T::template materialize<BSONCode>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
 
@@ -170,7 +165,7 @@ concept Materializer MONGO_MOD_PUBLIC = requires(T& t,
  * to collect the position information of values within documents.
  */
 template <typename T>
-concept PositionInfoAppender MONGO_MOD_PUBLIC = requires(T& t, int32_t n) {
+concept PositionInfoAppender [[MONGO_MOD_PUBLIC]] = requires(T& t, int32_t n) {
     { t.appendPositionInfo(n) } -> std::same_as<void>;
 };
 
@@ -740,7 +735,7 @@ public:
 /**
  * Implements the "materializer" concept such that the output elements are BSONElements.
  */
-class MONGO_MOD_PUBLIC BSONElementMaterializer {
+class [[MONGO_MOD_PUBLIC]] BSONElementMaterializer {
 public:
     using Element = BSONElement;
 
@@ -751,7 +746,7 @@ public:
     static BSONElement materialize(BSONElementStorage& allocator, const Decimal128& val);
     static BSONElement materialize(BSONElementStorage& allocator, const Date_t& val);
     static BSONElement materialize(BSONElementStorage& allocator, const Timestamp& val);
-    static BSONElement materialize(BSONElementStorage& allocator, StringData val);
+    static BSONElement materialize(BSONElementStorage& allocator, std::string_view val);
     static BSONElement materialize(BSONElementStorage& allocator, const BSONBinData& val);
     static BSONElement materialize(BSONElementStorage& allocator, const BSONCode& val);
     static BSONElement materialize(BSONElementStorage& allocator, const OID& val);
@@ -769,7 +764,7 @@ public:
     static T get(const Element& elem) {
         if constexpr (std::is_same_v<T, double>) {
             return BSONElementValue(elem.value()).Double();
-        } else if constexpr (std::is_same_v<T, StringData>) {
+        } else if constexpr (std::is_same_v<T, std::string_view>) {
             return BSONElementValue(elem.value()).String();
         } else if constexpr (std::is_same_v<T, BSONObj>) {
             return BSONElementValue(elem.value()).Obj();
@@ -835,7 +830,7 @@ private:
      */
     static BSONElement writeStringData(BSONElementStorage& allocator,
                                        BSONType bsonType,
-                                       StringData val);
+                                       std::string_view val);
 };
 
 template <>
@@ -893,7 +888,7 @@ inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Tim
 }
 
 template <>
-inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<StringData>(
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<std::string_view>(
     BSONElementStorage& allocator, BSONElement val) {
     dassert(val.type() == BSONType::string, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.valueStringData());

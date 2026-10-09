@@ -1,3 +1,5 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -50,4 +52,10 @@ cc_library(
         "@com_google_absl//absl/types:any",
         "@re2",
     ],
+)
+
+cc_library(
+    name = "gtest_main",
+    srcs = ["dist/googletest/src/gtest_main.cc"],
+    deps = [":gtest"],
 )

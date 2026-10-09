@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/cost_estimator.h"
 
@@ -53,7 +27,8 @@ TEST(CostEstimator, FullCollScanVsFilteredCollScan) {
     costEstimator.estimatePlan(*fullCollScan);
     costEstimator.estimatePlan(*collScanFilter);
 
-    ASSERT_LT(estimates[fullCollScan->root()]->cost, estimates[collScanFilter->root()]->cost);
+    ASSERT_TRUE(
+        approxLt(estimates[fullCollScan->root()]->cost, estimates[collScanFilter->root()]->cost));
 }
 
 CostEstimate getCollScanWithFilterCost(const BSONObj& filterObj) {
@@ -77,7 +52,7 @@ TEST(CostEstimator, FilterCostForSingleLeaf) {
         getCollScanWithFilterCost(fromjson("{a: {$elemMatch: { $gte: 80}}}"));
 
     // The empty filter '{}' is treated the same way as if there was no filter at all.
-    ASSERT_LT(emptyFilterCost, singleLeafCost);
+    ASSERT_TRUE(approxLt(emptyFilterCost, singleLeafCost));
 
     // These are all treated as having 1 leaf.
     ASSERT_EQ(singleLeafCost, singleSizeCost);
@@ -108,8 +83,8 @@ TEST(CostEstimator, FilterCostForMultipleLeaves) {
     auto incrementalLeafCost = twoLeavesCost - singleLeafCost;
 
     // More complex filters should have a higher cost
-    ASSERT_LT(singleLeafCost, twoLeavesCost);
-    ASSERT_LT(twoLeavesCost, fiveLeavesCost);
+    ASSERT_TRUE(approxLt(singleLeafCost, twoLeavesCost));
+    ASSERT_TRUE(approxLt(twoLeavesCost, fiveLeavesCost));
 
     ASSERT_EQ(fiveLeavesCost,
               twoLeavesCost + incrementalLeafCost + incrementalLeafCost + incrementalLeafCost);
@@ -130,7 +105,8 @@ TEST(CostEstimator, VirtualScan) {
     costEstimator.estimatePlan(*fullCollScan);
     costEstimator.estimatePlan(*collScanFilter);
 
-    ASSERT_LT(estimates[fullCollScan->root()]->cost, estimates[collScanFilter->root()]->cost);
+    ASSERT_TRUE(
+        approxLt(estimates[fullCollScan->root()]->cost, estimates[collScanFilter->root()]->cost));
 }
 
 TEST(CostEstimator, PointIndexScanLessCostThanRange) {
@@ -160,10 +136,11 @@ TEST(CostEstimator, PointIndexScanLessCostThanRange) {
     costEstimator.estimatePlan(*rangeIndexScan);
 
     // Cost of point scan plan should be less than that of the range scan
-    ASSERT_LT(estimates[pointIndexScan->root()]->cost, estimates[rangeIndexScan->root()]->cost);
+    ASSERT_TRUE(
+        approxLt(estimates[pointIndexScan->root()]->cost, estimates[rangeIndexScan->root()]->cost));
     // Cost of fetch node should be greater than cost of the index scan as costs are cumulative
-    ASSERT_GT(estimates[pointIndexScan->root()]->cost,
-              estimates[pointIndexScan->root()->children[0].get()]->cost);
+    ASSERT_TRUE(approxGt(estimates[pointIndexScan->root()]->cost,
+                         estimates[pointIndexScan->root()->children[0].get()]->cost));
 }
 
 std::unique_ptr<IndexScanNode> indexScanNode(const NamespaceString& nss,
@@ -207,7 +184,8 @@ void testIndexCombinationDependsOnChildren() {
     CostEstimator costEstimator{estimates};
     costEstimator.estimatePlan(*cheapPlan);
     costEstimator.estimatePlan(*expensivePlan);
-    ASSERT_LT(estimates[cheapPlan->root()]->cost, estimates[expensivePlan->root()]->cost);
+    ASSERT_TRUE(
+        approxLt(estimates[cheapPlan->root()]->cost, estimates[expensivePlan->root()]->cost));
 }
 
 // Increasing child cost increases the cost of index intersection and union plans
@@ -224,19 +202,28 @@ std::unique_ptr<CollectionScanNode> collScanNode(EstimateMap& estimates, QSNEsti
     return node;
 }
 
+// Default sort memory limit used when constructing SortNodes in these tests.
+constexpr uint64_t kSortMaxMemoryUsageBytes = 100 * 1024 * 1024;
+
 template <typename SortNode>
 void testSortCostDependsOnChildren() {
     EstimateMap estimates;
     auto cheapCollScan = collScanNode(estimates, QSNEstimate{makeCard(10), makeCard(10)});
-    auto cheapSort = std::make_unique<SortNode>(
-        std::move(cheapCollScan), BSON("a" << 1), 0, LimitSkipParameterization::Disabled);
+    auto cheapSort = std::make_unique<SortNode>(std::move(cheapCollScan),
+                                                BSON("a" << 1),
+                                                0,
+                                                LimitSkipParameterization::Disabled,
+                                                kSortMaxMemoryUsageBytes);
     estimates[cheapSort.get()] = std::make_unique<QSNEstimate>(makeCard(10));
     auto cheapPlan = std::make_unique<QuerySolution>();
     cheapPlan->setRoot(std::move(cheapSort));
 
     auto expsensiveCollScan = collScanNode(estimates, QSNEstimate{makeCard(100), makeCard(100)});
-    auto expensiveSort = std::make_unique<SortNode>(
-        std::move(expsensiveCollScan), BSON("a" << 1), 0, LimitSkipParameterization::Disabled);
+    auto expensiveSort = std::make_unique<SortNode>(std::move(expsensiveCollScan),
+                                                    BSON("a" << 1),
+                                                    0,
+                                                    LimitSkipParameterization::Disabled,
+                                                    kSortMaxMemoryUsageBytes);
     estimates[expensiveSort.get()] = std::make_unique<QSNEstimate>(makeCard(100));
     auto expensivePlan = std::make_unique<QuerySolution>();
     expensivePlan->setRoot(std::move(expensiveSort));
@@ -244,12 +231,36 @@ void testSortCostDependsOnChildren() {
     CostEstimator costEstimator{estimates};
     costEstimator.estimatePlan(*cheapPlan);
     costEstimator.estimatePlan(*expensivePlan);
-    ASSERT_LT(estimates[cheapPlan->root()]->cost, estimates[expensivePlan->root()]->cost);
+    ASSERT_TRUE(
+        approxLt(estimates[cheapPlan->root()]->cost, estimates[expensivePlan->root()]->cost));
 }
 
 TEST(CostEstimator, SortDefaultOrSimple) {
     testSortCostDependsOnChildren<SortNodeDefault>();
     testSortCostDependsOnChildren<SortNodeSimple>();
+}
+
+TEST(CostEstimator, ShardFilterHasPerDocumentCost) {
+    EstimateMap estimates;
+
+    auto collScanNode = std::make_unique<CollectionScanNode>();
+    auto shardFilterNode = std::make_unique<ShardingFilterNode>();
+    shardFilterNode->children.push_back(std::move(collScanNode));
+
+    auto plan = std::make_unique<QuerySolution>();
+    plan->setRoot(std::move(shardFilterNode));
+
+    estimates[plan->root()] = std::make_unique<QSNEstimate>(makeCard(100));
+    estimates[plan->root()->children[0].get()] =
+        std::make_unique<QSNEstimate>(makeCard(100), makeCard(100));
+
+    CostEstimator costEstimator{estimates};
+    costEstimator.estimatePlan(*plan);
+
+    const auto& shardFilterCost = estimates[plan->root()]->cost;
+    const auto& childCost = estimates[plan->root()->children[0].get()]->cost;
+    // The per-document increment must push the cost above the additive floor.
+    ASSERT_TRUE(approxGt(shardFilterCost, childCost + minCost));
 }
 
 }  // unnamed namespace

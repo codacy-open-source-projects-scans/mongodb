@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,6 +15,7 @@
 #include <algorithm>
 #include <iosfwd>
 #include <iterator>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -84,7 +58,7 @@ ConfigValues mergeConfigValues(const ConfigValues& oldValues, const ConfigValues
 }
 }  // namespace
 
-Status HealthMonitoringIntensitiesServerParameter::setFromString(StringData value,
+Status HealthMonitoringIntensitiesServerParameter::setFromString(std::string_view value,
                                                                  const boost::optional<TenantId>&) {
     const auto oldValue = **_data;
     auto newValue = HealthObserverIntensities::parse(
@@ -108,7 +82,7 @@ Status HealthMonitoringIntensitiesServerParameter::set(const BSONElement& newVal
 
 void HealthMonitoringIntensitiesServerParameter::append(OperationContext*,
                                                         BSONObjBuilder* b,
-                                                        StringData name,
+                                                        std::string_view name,
                                                         const boost::optional<TenantId>&) {
     BSONObjBuilder healthMonitoring;
     _data->serialize(&healthMonitoring);
@@ -116,7 +90,7 @@ void HealthMonitoringIntensitiesServerParameter::append(OperationContext*,
 }
 
 Status HealthMonitoringProgressMonitorServerParameter::setFromString(
-    StringData value, const boost::optional<TenantId>&) {
+    std::string_view value, const boost::optional<TenantId>&) {
     *_data = HealthObserverProgressMonitorConfig::parse(
         fromjson(value), IDLParserContext("health monitoring liveness"));
     return Status::OK();
@@ -131,7 +105,7 @@ Status HealthMonitoringProgressMonitorServerParameter::set(const BSONElement& ne
 
 void HealthMonitoringProgressMonitorServerParameter::append(OperationContext*,
                                                             BSONObjBuilder* b,
-                                                            StringData name,
+                                                            std::string_view name,
                                                             const boost::optional<TenantId>&) {
     BSONObjBuilder healthMonitoring;
     _data->serialize(&healthMonitoring);
@@ -139,7 +113,7 @@ void HealthMonitoringProgressMonitorServerParameter::append(OperationContext*,
 }
 
 Status PeriodicHealthCheckIntervalsServerParameter::setFromString(
-    StringData value, const boost::optional<TenantId>&) {
+    std::string_view value, const boost::optional<TenantId>&) {
     const auto oldValue = **_data;
     auto newValue = HealthObserverIntervals::parse(fromjson(value),
                                                    IDLParserContext("health monitoring interval"));
@@ -160,7 +134,7 @@ Status PeriodicHealthCheckIntervalsServerParameter::set(const BSONElement& newVa
 
 void PeriodicHealthCheckIntervalsServerParameter::append(OperationContext*,
                                                          BSONObjBuilder* b,
-                                                         StringData name,
+                                                         std::string_view name,
                                                          const boost::optional<TenantId>&) {
     BSONObjBuilder healthMonitoring;
     _data->serialize(&healthMonitoring);

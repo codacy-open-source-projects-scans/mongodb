@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/data_range.h"
@@ -261,8 +235,13 @@ private:
 class SymmetricDecryptorOpenSSL : public SymmetricDecryptor {
 public:
     SymmetricDecryptorOpenSSL(const SymmetricKey& key, aesMode mode, ConstDataRange iv)
-        : _ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free), _mode(mode) {
-        initCipherContext(_ctx.get(), key, mode, iv, EVP_DecryptInit_ex);
+        : _ctx(getThreadLocalCtx()), _mode(mode) {
+        // Safe to share the thread-local CTX because aesDecrypt() creates one decryptor
+        // per call and drives it to completion synchronously — at most one decryptor is
+        // live per thread at any instant. Reset discards any partial state from a prior
+        // call that threw mid-sequence, restoring the invariant of a clean context.
+        EVP_CIPHER_CTX_reset(_ctx);
+        initCipherContext(_ctx, key, mode, iv, EVP_DecryptInit_ex);
     }
 
     StatusWith<std::size_t> update(ConstDataRange in, DataRange out) final {
@@ -274,7 +253,7 @@ public:
         } else {
 
             size_t minimumOutputSize = in.length();
-            size_t cipherBlockSize = EVP_CIPHER_CTX_block_size(_ctx.get());
+            size_t cipherBlockSize = EVP_CIPHER_CTX_block_size(_ctx);
             if (in.length() % cipherBlockSize) {
                 minimumOutputSize += cipherBlockSize;
             }
@@ -288,7 +267,7 @@ public:
 
         if (1 !=
             EVP_DecryptUpdate(
-                _ctx.get(), out.data<std::uint8_t>(), &len, in.data<std::uint8_t>(), in.length())) {
+                _ctx, out.data<std::uint8_t>(), &len, in.data<std::uint8_t>(), in.length())) {
             return Status(ErrorCodes::UnknownError,
                           str::stream()
                               << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
@@ -317,14 +296,14 @@ public:
     StatusWith<std::size_t> finalize(DataRange out) final {
         int len = 0;
 
-        size_t cipherBlockSize = EVP_CIPHER_CTX_block_size(_ctx.get());
+        size_t cipherBlockSize = EVP_CIPHER_CTX_block_size(_ctx);
         if (cipherBlockSize > 1 && out.length() < cipherBlockSize) {
             return Status(ErrorCodes::Overflow,
                           str::stream() << "Write buffer too small for Encryptor finalize: "
                                         << static_cast<int>(out.length()));
         }
 
-        if (1 != EVP_DecryptFinal_ex(_ctx.get(), out.data<std::uint8_t>(), &len)) {
+        if (1 != EVP_DecryptFinal_ex(_ctx, out.data<std::uint8_t>(), &len)) {
             return Status(ErrorCodes::UnknownError,
                           str::stream()
                               << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
@@ -337,7 +316,7 @@ public:
         if (_mode == aesMode::gcm) {
 #ifdef EVP_CTRL_GCM_GET_TAG
             if (1 !=
-                EVP_CIPHER_CTX_ctrl(_ctx.get(),
+                EVP_CIPHER_CTX_ctrl(_ctx,
                                     EVP_CTRL_GCM_SET_TAG,
                                     tag.length(),
                                     const_cast<std::uint8_t*>(tag.data<std::uint8_t>()))) {
@@ -357,7 +336,15 @@ public:
     }
 
 private:
-    std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> _ctx;
+    // Amortizes the per-decrypt CRYPTO_zalloc / EVP_CIPHER_CTX_free that
+    // dominated the disk-block decrypt path.
+    static EVP_CIPHER_CTX* getThreadLocalCtx() {
+        thread_local const std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx{
+            EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free};
+        return ctx.get();
+    }
+
+    EVP_CIPHER_CTX* _ctx;
     const aesMode _mode;
 };
 

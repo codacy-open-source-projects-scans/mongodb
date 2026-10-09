@@ -9,8 +9,6 @@
  *   requires_fcv_63,
  *   requires_scripting,
  *   requires_getmore,
- *   # TODO SERVER-116052: Add support for $function.
- *   mozjs_wasm_unsupported,
  * ]
  */
 /**
@@ -138,13 +136,21 @@ function testPipeline(assignments, embedInObject) {
  */
 for (let {assignments, expectedErrorCode, errorShouldContain} of testCases) {
     let error = assert.commandFailedWithCode(
-        db.runCommand({aggregate: 1, pipeline: testPipeline(tojson(assignments), false), cursor: {}}),
+        db.runCommand({
+            aggregate: 1,
+            pipeline: testPipeline(tojson(assignments), false),
+            cursor: {},
+        }),
         expectedErrorCode,
     );
     assert(error.errmsg.indexOf(errorShouldContain) >= 0, error);
 
     error = assert.commandFailedWithCode(
-        db.runCommand({aggregate: 1, pipeline: testPipeline(tojson(assignments), true), cursor: {}}),
+        db.runCommand({
+            aggregate: 1,
+            pipeline: testPipeline(tojson(assignments), true),
+            cursor: {},
+        }),
         expectedErrorCode,
     );
     assert(error.errmsg.indexOf(errorShouldContain) >= 0, error);

@@ -3,8 +3,10 @@
  * shard contains multiple (orphaned) chunks.
  *
  * @tags: [
+ *   # TODO SERVER-128587 remove this tag
+ *   featureFlagGetExecutorDeferredEngineChoice,
  *   featureFlagShardFilteringDistinctScan,
- *   requires_fcv_82
+ *   requires_fcv_82,
  * ]
  */
 
@@ -24,7 +26,10 @@ validateAggPlanCacheUse(coll, [
 ]);
 
 section("$group on shard key with $first/$last");
-validateAggPlanCacheUse(coll, [{$sort: {shardKey: -1}}, {$group: {_id: "$shardKey", accum: {$first: "$shardKey"}}}]);
+validateAggPlanCacheUse(coll, [
+    {$sort: {shardKey: -1}},
+    {$group: {_id: "$shardKey", accum: {$first: "$shardKey"}}},
+]);
 
 validateAggPlanCacheUse(coll, [
     {$sort: {shardKey: 1, notShardKey: 1}},

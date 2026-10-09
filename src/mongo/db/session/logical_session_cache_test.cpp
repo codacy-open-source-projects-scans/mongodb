@@ -1,46 +1,15 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/session/logical_session_cache.h"
+
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/service_liaison_mock.h"
-#include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_gen.h"
 #include "mongo/db/session/logical_session_cache_impl.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -48,6 +17,7 @@
 #include "mongo/db/session/sessions_collection.h"
 #include "mongo/db/session/sessions_collection_mock.h"
 #include "mongo/unittest/ensure_fcv.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_name.h"
@@ -59,6 +29,12 @@
 #include <ostream>
 #include <string>
 #include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo {
 namespace {
@@ -448,21 +424,19 @@ TEST_F(LogicalSessionCacheTest, RefreshMatrixSessionState) {
     }
 }
 
-// Test that refresh operations are marked as non-deprioritizable
-TEST_F(LogicalSessionCacheTest, RefreshIsNonDeprioritizable) {
-    // Track whether operation was marked as non-deprioritizable during execution
-    bool refreshWasNonDeprioritizable = false;
+// Test that refresh operations use kExempt admission priority
+TEST_F(LogicalSessionCacheTest, RefreshUsesKExemptAdmissionPriority) {
+    AdmissionContext::Priority refreshPriority = AdmissionContext::Priority::kNormal;
 
     // Insert a session so there's something to refresh
     auto record = makeLogicalSessionRecordForTest();
     ASSERT_OK(cache()->startSession(opCtx(), record));
 
-    // Set up a hook that runs during refresh to check the non-deprioritizable flag
-    sessions()->setRefreshHook([&refreshWasNonDeprioritizable](const LogicalSessionRecordSet&) {
+    // Set up a hook that runs during refresh to capture the admission priority
+    sessions()->setRefreshHook([&refreshPriority](const LogicalSessionRecordSet&) {
         auto* currentOpCtx = Client::getCurrent()->getOperationContext();
         if (currentOpCtx) {
-            auto& admissionCtx = ExecutionAdmissionContext::get(currentOpCtx);
-            refreshWasNonDeprioritizable = admissionCtx.getMarkedNonDeprioritizable();
+            refreshPriority = ExecutionAdmissionContext::get(currentOpCtx).getPriority();
         }
         return SessionsCollection::RefreshSessionsResult{};
     });
@@ -470,8 +444,72 @@ TEST_F(LogicalSessionCacheTest, RefreshIsNonDeprioritizable) {
     // Force a refresh
     service()->fastForward(kForceRefresh);
     ASSERT_OK(cache()->refreshNow(opCtx()));
-    ASSERT_TRUE(refreshWasNonDeprioritizable)
-        << "LogicalSessionCacheRefresh should mark operation as non-deprioritizable";
+    ASSERT_EQ(refreshPriority, AdmissionContext::Priority::kExempt)
+        << "LogicalSessionCacheRefresh should use kExempt admission priority";
+}
+
+namespace {
+bool containsLsid(const LogicalSessionRecordSet& records, const LogicalSessionId& lsid) {
+    for (const auto& record : records) {
+        if (record.getId() == lsid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Runs one refresh whose sessions all fail with `error`, then returns whether the failed session
+// is retried by the next refresh.
+bool failedSessionIsRetried(LogicalSessionCache* cache,
+                            OperationContext* opCtx,
+                            MockSessionsCollectionImpl* sessions,
+                            Status error) {
+    auto record = makeLogicalSessionRecordForTest();
+    ASSERT_OK(cache->startSession(opCtx, record));
+
+    sessions->setRefreshHook([&](const LogicalSessionRecordSet& toRefresh) {
+        return SessionsCollection::RefreshSessionsResult{{toRefresh.begin(), toRefresh.end()},
+                                                         {error}};
+    });
+    ASSERT_EQ(cache->refreshNow(opCtx), error);
+
+    LogicalSessionRecordSet retried;
+    sessions->setRefreshHook([&](const LogicalSessionRecordSet& toRefresh) {
+        retried = toRefresh;
+        return SessionsCollection::RefreshSessionsResult{};
+    });
+    ASSERT_OK(cache->refreshNow(opCtx));
+    return containsLsid(retried, record.getId());
+}
+}  // namespace
+
+// Sessions that fail to refresh because the job deadline fired must not be retried by the next
+// refresh; re-storing the backlog would just cause the next cycle to hit the same wall.
+TEST_F(LogicalSessionCacheTest, SessionFailedWithMaxTimeMSIsNotRetriedWhenJobTimeoutEnabled) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", true};
+    ASSERT_FALSE(
+        failedSessionIsRetried(cache().get(),
+                               opCtx(),
+                               sessions().get(),
+                               Status(ErrorCodes::MaxTimeMSExpired, "refresh job deadline fired")));
+}
+
+// Sessions that fail to refresh for any other reason must still be retried by the next refresh.
+TEST_F(LogicalSessionCacheTest, SessionFailedWithOtherErrorIsRetriedWhenJobTimeoutEnabled) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", true};
+    ASSERT_TRUE(failedSessionIsRetried(cache().get(),
+                                       opCtx(),
+                                       sessions().get(),
+                                       Status(ErrorCodes::WriteConcernTimeout, "wc timeout")));
+}
+
+// With the job timeout disabled, even MaxTimeMSExpired failures must be retried.
+TEST_F(LogicalSessionCacheTest, SessionFailedWithMaxTimeMSIsRetriedWhenJobTimeoutDisabled) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", false};
+    ASSERT_TRUE(failedSessionIsRetried(cache().get(),
+                                       opCtx(),
+                                       sessions().get(),
+                                       Status(ErrorCodes::MaxTimeMSExpired, "caller's maxTimeMS")));
 }
 
 /**
@@ -490,19 +528,14 @@ public:
         auto mockService = std::make_unique<MockServiceLiaison>(_service);
         auto mockSessions = std::make_unique<MockSessionsCollection>(_sessions);
 
-        // Create cache with a reap callback that checks the non-deprioritizable flag
+        // Create cache with a reap callback that captures the admission priority
         _cache = std::make_unique<LogicalSessionCacheImpl>(
             std::move(mockService),
             std::move(mockSessions),
             [this](OperationContext* opCtx, SessionsCollection&, Date_t) {
-                auto& admissionCtx = ExecutionAdmissionContext::get(opCtx);
-                _reapWasNonDeprioritizable = admissionCtx.getMarkedNonDeprioritizable();
+                _reapPriority = ExecutionAdmissionContext::get(opCtx).getPriority();
                 return 0;
             });
-    }
-
-    void reset() {
-        _reapWasNonDeprioritizable = false;
     }
 
     std::unique_ptr<LogicalSessionCache>& cache() {
@@ -521,8 +554,8 @@ public:
         return _opCtx.get();
     }
 
-    bool reapWasNonDeprioritizable() const {
-        return _reapWasNonDeprioritizable;
+    AdmissionContext::Priority reapPriority() const {
+        return _reapPriority;
     }
 
 private:
@@ -530,15 +563,81 @@ private:
     std::shared_ptr<MockServiceLiaisonImpl> _service;
     std::shared_ptr<MockSessionsCollectionImpl> _sessions;
     std::unique_ptr<LogicalSessionCache> _cache;
-    bool _reapWasNonDeprioritizable = false;
+    AdmissionContext::Priority _reapPriority = AdmissionContext::Priority::kNormal;
 };
 
-// Test that reap operations are marked as non-deprioritizable
-TEST_F(LogicalSessionCacheReapTest, ReapIsNonDeprioritizable) {
+// Test that reap operations use kExempt admission priority
+TEST_F(LogicalSessionCacheReapTest, ReapUsesKExemptAdmissionPriority) {
     // Force a reap
     cache()->reapNow(opCtx());
-    ASSERT_TRUE(reapWasNonDeprioritizable())
-        << "LogicalSessionCacheReap should mark operation as non-deprioritizable";
+    ASSERT_EQ(reapPriority(), AdmissionContext::Priority::kExempt)
+        << "LogicalSessionCacheReap should use kExempt admission priority";
+}
+
+// ---------------------------------------------------------------------------
+// withRefreshTimeout tests
+// ---------------------------------------------------------------------------
+
+TEST(WithRefreshTimeoutTest, AddsMaxTimeMSWhenTimeoutEnabled) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", true};
+    unittest::ServerParameterGuard intervalController{
+        "logicalSessionRefreshMillis",
+        10000  // 10 seconds
+    };
+
+    BSONObj capturedBatch;
+    auto captureFn = [&capturedBatch](BSONObj batch) -> Status {
+        capturedBatch = batch.getOwned();
+        return Status::OK();
+    };
+
+    auto wrapped = SessionsCollection::withRefreshTimeout(captureFn);
+    auto status = wrapped(BSON("update" << "system.sessions"
+                                        << "updates" << BSONArray()));
+    ASSERT_OK(status);
+
+    // maxTimeMS should be 90% of logicalSessionRefreshMillis = 10000 * 9 / 10 = 9000
+    ASSERT_TRUE(capturedBatch.hasField("maxTimeMS"))
+        << "expected maxTimeMS field in batch: " << capturedBatch;
+    ASSERT_EQ(capturedBatch["maxTimeMS"].Long(), 9000LL);
+}
+
+TEST(WithRefreshTimeoutTest, DoesNotAddMaxTimeMSWhenTimeoutDisabled) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", false};
+
+    BSONObj capturedBatch;
+    auto captureFn = [&capturedBatch](BSONObj batch) -> Status {
+        capturedBatch = batch.getOwned();
+        return Status::OK();
+    };
+
+    auto wrapped = SessionsCollection::withRefreshTimeout(captureFn);
+    auto status = wrapped(BSON("update" << "system.sessions"
+                                        << "updates" << BSONArray()));
+    ASSERT_OK(status);
+
+    ASSERT_FALSE(capturedBatch.hasField("maxTimeMS"))
+        << "expected no maxTimeMS field when flag is disabled: " << capturedBatch;
+}
+
+TEST(WithRefreshTimeoutTest, TimeoutIsNinetyPercentOfRefreshInterval) {
+    unittest::ServerParameterGuard timeoutController{"logicalSessionCacheJobTimeoutEnabled", true};
+    unittest::ServerParameterGuard intervalController{
+        "logicalSessionRefreshMillis",
+        300000  // 5 minutes (the default)
+    };
+
+    BSONObj capturedBatch;
+    auto captureFn = [&capturedBatch](BSONObj batch) -> Status {
+        capturedBatch = batch.getOwned();
+        return Status::OK();
+    };
+
+    auto wrapped = SessionsCollection::withRefreshTimeout(captureFn);
+    ASSERT_OK(wrapped(BSONObj()));
+
+    // 300000 * 9 / 10 = 270000
+    ASSERT_EQ(capturedBatch["maxTimeMS"].Long(), 270000LL);
 }
 
 }  // namespace

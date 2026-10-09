@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/unique.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -39,6 +12,7 @@
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/stats/counters.h"
 
+#include <string_view>
 #include <utility>
 
 #include <absl/container/flat_hash_set.h>
@@ -46,6 +20,7 @@
 
 namespace mongo {
 namespace sbe {
+using namespace std::literals::string_view_literals;
 namespace {
 
 template <typename T, typename H, typename E>
@@ -67,7 +42,7 @@ UniqueStage::UniqueStage(std::unique_ptr<PlanStage> input,
                          value::SlotVector keys,
                          PlanNodeId planNodeId,
                          bool participateInTrialRunTracking)
-    : PlanStage("unique"_sd, nullptr /* yieldPolicy */, planNodeId, participateInTrialRunTracking),
+    : PlanStage("unique"sv, nullptr /* yieldPolicy */, planNodeId, participateInTrialRunTracking),
       _keySlots(keys),
       _dedupReporter(OperationMemoryUsageTracker::createDeduplicatorReporter(
           [](int64_t deduplicatedBytes, int64_t deduplicatedRecords) {
@@ -106,7 +81,6 @@ void UniqueStage::open(bool reOpen) {
         _memoryTracker->set(0);
     }
     _children[0]->open(reOpen);
-    _childOpened = true;
 }
 
 PlanState UniqueStage::getNext() {
@@ -116,8 +90,7 @@ PlanState UniqueStage::getNext() {
         value::MaterializedRow key{_inKeyAccessors.size()};
         size_t idx = 0;
         for (auto& accessor : _inKeyAccessors) {
-            auto [tag, val] = accessor->getViewOfValue();
-            key.reset(idx++, false, tag, val);
+            key.reset(idx++, accessor->getViewOfValue());
         }
 
         ++_specificStats.dupsTested;
@@ -125,13 +98,14 @@ PlanState UniqueStage::getNext() {
         if (inserted) {
             const_cast<value::MaterializedRow&>(*it).makeOwned();
             size_t newSeenSizeBytes = estimateSetSizeBytes(_seen);
-            _memoryTracker->add((newSeenSizeBytes - _prevSeenSizeBytes) +
-                                estimateRowSizeBytes(*it));
-            _dedupReporter.add((newSeenSizeBytes - _prevSeenSizeBytes) + estimateRowSizeBytes(*it));
+            const auto deduplicatedBytes =
+                (newSeenSizeBytes - _prevSeenSizeBytes) + estimateRowSizeBytes(*it);
+            _memoryTracker->add(deduplicatedBytes);
+            _dedupReporter.add(deduplicatedBytes);
             _prevSeenSizeBytes = newSeenSizeBytes;
             uassert(11130301,
                     "Exceeded memory limit in record id deduplicator for unique stage",
-                    _memoryTracker->withinMemoryLimit());
+                    _memoryTracker->withinMemoryLimit(_opCtx));
             return trackPlanState(PlanState::ADVANCED);
         } else {
             // This row has been seen already, so we skip it.
@@ -151,10 +125,7 @@ void UniqueStage::close() {
     _prevSeenSizeBytes = 0;
     _specificStats.peakTrackedMemBytes = _memoryTracker->peakTrackedMemoryBytes();
 
-    if (_childOpened) {
-        _children[0]->close();
-        _childOpened = false;
-    }
+    _children[0]->close();
 }
 
 std::unique_ptr<PlanStageStats> UniqueStage::getStats(bool includeDebugInfo) const {
@@ -208,10 +179,8 @@ UniqueRoaringStage::UniqueRoaringStage(std::unique_ptr<PlanStage> input,
                                        value::SlotId key,
                                        PlanNodeId planNodeId,
                                        bool participateInTrialRunTracking)
-    : PlanStage("unique_roaring"_sd,
-                nullptr /* yieldPolicy */,
-                planNodeId,
-                participateInTrialRunTracking),
+    : PlanStage(
+          "unique_roaring"sv, nullptr /* yieldPolicy */, planNodeId, participateInTrialRunTracking),
       _keySlot(key),
       _seen(static_cast<size_t>(internalRoaringBitmapsThreshold.load()),
             static_cast<size_t>(internalRoaringBitmapsBatchSize.load()),
@@ -252,7 +221,6 @@ void UniqueRoaringStage::open(bool reOpen) {
         _prevSeenSizeBytes = 0;
     }
     _children[0]->open(reOpen);
-    _childOpened = true;
 }
 
 PlanState UniqueRoaringStage::getNext() {
@@ -298,7 +266,7 @@ PlanState UniqueRoaringStage::getNext() {
             _prevSeenSizeBytes = newSeenSizeBytes;
             uassert(11130300,
                     "Exceeded memory limit in record id deduplicator for unique_roaring stage",
-                    _memoryTracker->withinMemoryLimit());
+                    _memoryTracker->withinMemoryLimit(_opCtx));
             return trackPlanState(PlanState::ADVANCED);
         } else {
             // This row has been seen already, so we skip it.
@@ -318,10 +286,7 @@ void UniqueRoaringStage::close() {
     _prevSeenSizeBytes = 0;
     _specificStats.peakTrackedMemBytes = _memoryTracker->peakTrackedMemoryBytes();
 
-    if (_childOpened) {
-        _children[0]->close();
-        _childOpened = false;
-    }
+    _children[0]->close();
 }
 
 std::unique_ptr<PlanStageStats> UniqueRoaringStage::getStats(bool includeDebugInfo) const {

@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/move/utility_core.hpp>
-// IWYU pragma: no_include "cxxabi.h"
+#include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
+
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -50,15 +23,14 @@
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/mongod_and_mongos_server_parameters_gen.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/executor/network_test_env.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/transport/service_executor.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -67,6 +39,9 @@
 
 #include <system_error>
 #include <utility>
+
+#include <boost/move/utility_core.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -374,8 +349,16 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
 
     auto expectFieldIs = [&](bool value) {
         return [value, &fieldName](const executor::RemoteCommandRequest& request) {
-            auto elt = request.cmdObj[fieldName];
-            ASSERT(!elt.eoo());
+            int n = 0;
+            BSONElement elt;
+            for (auto&& e : request.cmdObj) {
+                if (e.fieldNameStringData() == fieldName) {
+                    elt = e;
+                    ++n;
+                }
+            }
+            // A duplicate field fatals debug/ASAN mongos in OpMsgBuilder (40474).
+            ASSERT_EQ(n, 1);
             ASSERT_EQ(elt.boolean(), value);
         };
     };
@@ -388,7 +371,8 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
         // No rate limit i.e., no requests are rate limited and each one is allowed to gather
         // stats. We'll always request metrics, even if the user set includeQueryStatsMetrics
         // to false.
-        RAIIServerParameterControllerForTest rateLimit("internalQueryStatsRateLimit", -1);
+        unittest::ServerParameterGuard rateLimit("internalQueryStatsRateLimit", -1);
+        unittest::ServerParameterGuard sampleRate("internalQueryStatsSampleRate", 1.0);
 
         runCommandInspectRequests(cmd, expectFieldIs(true), isTargeted);
         runCommandInspectRequests(cmdIncludeTrue, expectFieldIs(true), isTargeted);
@@ -397,7 +381,8 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
 
     {
         // Rate limit is 0 i.e., every request is rate-limited.
-        RAIIServerParameterControllerForTest rateLimit("internalQueryStatsRateLimit", 0);
+        unittest::ServerParameterGuard rateLimit("internalQueryStatsRateLimit", 0);
+        unittest::ServerParameterGuard sampleRate("internalQueryStatsSampleRate", 0.0);
 
         // If the user doesn't give includeQueryStatsMetrics, we won't insert the field.
         runCommandInspectRequests(cmd, expectNoField, isTargeted);

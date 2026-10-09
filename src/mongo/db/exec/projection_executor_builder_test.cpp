@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/projection_executor_builder.h"
 
 #include "mongo/base/exact_cast.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -167,13 +140,13 @@ TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionWithId
     auto executor = createProjectionExecutor(projWithId);
     ASSERT_DOCUMENT_EQ(Document{fromjson("{_id: 123, a: 'abc'}")},
                        executor->applyTransformation(
-                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}));
+                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}, {}));
 
     auto projWithoutId = parseWithDefaultPolicies(fromjson("{a: 1, _id: 0}"));
     executor = createProjectionExecutor(projWithoutId);
     ASSERT_DOCUMENT_EQ(Document{fromjson("{a: 'abc'}")},
                        executor->applyTransformation(
-                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}));
+                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionUndottedPath) {
@@ -181,15 +154,15 @@ TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionUndott
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: 'abc', b: 'def'}")},
-        executor->applyTransformation(Document{fromjson("{a: 'abc', b: 'def', c: 'ghi'}")}));
+        executor->applyTransformation(Document{fromjson("{a: 'abc', b: 'def', c: 'ghi'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionDottedPath) {
     auto proj = parseWithDefaultPolicies(fromjson("{'a.b': 1, 'a.d': 1}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(
-        Document{fromjson("{a: {b: 'abc', d: 'ghi'}}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: 'abc', c: 'def', d: 'ghi'}}")}));
+    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: {b: 'abc', d: 'ghi'}}")},
+                       executor->applyTransformation(
+                           Document{fromjson("{a: {b: 'abc', c: 'def', d: 'ghi'}}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionDottedPathNestedArrays) {
@@ -197,7 +170,7 @@ TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectInclusionDotted
     auto executor = createProjectionExecutor(proj);
     Document input{fromjson("{a: [{b: 'abc', c: 'def'}, [{b: 'abc', c: 'def'}, 'd'], 'd']}")};
     BSONObj expected = fromjson("{a: [{b: 'abc'}, [{b: 'abc'}]]}");
-    BSONObj found = executor->applyTransformation(input).toBsonWithMetaData();
+    BSONObj found = executor->applyTransformation(input, {}).toBsonWithMetaData();
     // Using BSONObj instead of Document because non-fastpath projection leaves missing values when
     // projecting scalar elements of array. Because of missing values in the array,
     // ASSERT_DOCUMENT_EQ consideres expected and found Documents different.
@@ -208,15 +181,16 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectExpression) {
     auto proj = parseWithDefaultPolicies(fromjson("{c: {$add: ['$a', '$b']}}"));
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(Document{fromjson("{c: 3}")},
-                       executor->applyTransformation(Document{fromjson("{a: 1, b: 2}")}));
+                       executor->applyTransformation(Document{fromjson("{a: 1, b: 2}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectExpressionWithCommonParent) {
     auto proj = parseWithDefaultPolicies(
         fromjson("{'a.b.c': 1, 'b.c.d': 1, 'a.p.c' : {$add: ['$a.b.e', '$a.p']}, 'a.b.e': 1}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: {b: {e: 4}, p: {c: 6}}}")},
-                       executor->applyTransformation(Document{fromjson("{a: {b: {e: 4}, p: 2}}")}));
+    ASSERT_DOCUMENT_EQ(
+        Document{fromjson("{a: {b: {e: 4}, p: {c: 6}}}")},
+        executor->applyTransformation(Document{fromjson("{a: {b: {e: 4}, p: 2}}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionWithIdPath) {
@@ -224,7 +198,7 @@ TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionWithId
     auto executor = createProjectionExecutor(projWithoutId);
     ASSERT_DOCUMENT_EQ(Document{fromjson("{b: 'def', c: 'ghi'}")},
                        executor->applyTransformation(
-                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}));
+                           Document{fromjson("{_id: 123, a: 'abc', b: 'def', c: 'ghi'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionUndottedPath) {
@@ -232,34 +206,38 @@ TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionUndott
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{c: 'ghi'}")},
-        executor->applyTransformation(Document{fromjson("{a: 'abc', b: 'def', c: 'ghi'}")}));
+        executor->applyTransformation(Document{fromjson("{a: 'abc', b: 'def', c: 'ghi'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionDottedPath) {
     auto proj = parseWithDefaultPolicies(fromjson("{'a.b': 0, 'a.d': 0}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(
-        Document{fromjson("{a: {c: 'def'}}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: 'abc', c: 'def', d: 'ghi'}}")}));
+    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: {c: 'def'}}")},
+                       executor->applyTransformation(
+                           Document{fromjson("{a: {b: 'abc', c: 'def', d: 'ghi'}}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithoutFallBackToDefault, CanProjectExclusionDottedPathNestedArrays) {
     auto proj = parseWithDefaultPolicies(fromjson("{'a.c': 0}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: [{b: 'abc'}, [{b: 'abc'}, 'd'], 'd']}")},
-                       executor->applyTransformation(Document{fromjson(
-                           "{a: [{b: 'abc', c: 'def'}, [{b: 'abc', c: 'def'}, 'd'], 'd']}")}));
+    ASSERT_DOCUMENT_EQ(
+        Document{fromjson("{a: [{b: 'abc'}, [{b: 'abc'}, 'd'], 'd']}")},
+        executor->applyTransformation(
+            Document{fromjson("{a: [{b: 'abc', c: 'def'}, [{b: 'abc', c: 'def'}, 'd'], 'd']}")},
+            {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindPositional) {
     auto proj =
         parseWithFindFeaturesEnabled(fromjson("{'a.b.$': 1}"), fromjson("{'a.b': {$gte: 3}}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: {b: [3]}}")},
-                       executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}}")}));
+    ASSERT_DOCUMENT_EQ(
+        Document{fromjson("{a: {b: [3]}}")},
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}}")}, {}));
 
-    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: {b: [4]}}")},
-                       executor->applyTransformation(Document{fromjson("{a: {b: [4, 3, 2]}}")}));
+    ASSERT_DOCUMENT_EQ(
+        Document{fromjson("{a: {b: [4]}}")},
+        executor->applyTransformation(Document{fromjson("{a: {b: [4, 3, 2]}}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindElemMatchWithInclusion) {
@@ -267,7 +245,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindElemMatchWithI
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: [{b: 3}]}")},
-        executor->applyTransformation(Document{fromjson("{a: [{b: 1}, {b: 2}, {b: 3}]}")}));
+        executor->applyTransformation(Document{fromjson("{a: [{b: 1}, {b: 2}, {b: 3}]}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindElemMatch) {
@@ -276,14 +254,14 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindElemMatch) {
         auto proj = parseWithFindFeaturesEnabled(fromjson("{a: {$elemMatch: {b: 1}}}"));
         auto executor = createProjectionExecutor(proj);
         ASSERT_DOCUMENT_EQ(Document{fromjson("{a: [{b: 1, c: 2}]}")},
-                           executor->applyTransformation(Document{obj}));
+                           executor->applyTransformation(Document{obj}, {}));
     }
 
     {
         auto proj = parseWithFindFeaturesEnabled(fromjson("{a: {$elemMatch: {b: 1, c: 3}}}"));
         auto executor = createProjectionExecutor(proj);
         ASSERT_DOCUMENT_EQ(Document{fromjson("{a: [{b: 1, c: 3}]}")},
-                           executor->applyTransformation(Document{obj}));
+                           executor->applyTransformation(Document{obj}, {}));
     }
 }
 
@@ -297,15 +275,16 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, ElemMatchRespectsCollator) {
 
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{ a: [ \"zdd\" ] }")},
-        executor->applyTransformation(Document{fromjson("{a: ['zaa', 'zbb', 'zdd', 'zee']}")}));
+        executor->applyTransformation(Document{fromjson("{a: ['zaa', 'zbb', 'zdd', 'zee']}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindElemMatchWithExclusion) {
     auto proj = parseWithFindFeaturesEnabled(fromjson("{a: {$elemMatch: {b: {$gte: 3}}}, c: 0}"));
     auto executor = createProjectionExecutor(proj);
-    ASSERT_DOCUMENT_EQ(Document{fromjson("{a: [{b: 3}], d: 'def'}")},
-                       executor->applyTransformation(Document{
-                           fromjson("{a: [{b: 1}, {b: 2}, {b: 3}], c: 'abc', d: 'def'}")}));
+    ASSERT_DOCUMENT_EQ(
+        Document{fromjson("{a: [{b: 3}], d: 'def'}")},
+        executor->applyTransformation(
+            Document{fromjson("{a: [{b: 1}, {b: 2}, {b: 3}], c: 'abc', d: 'def'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceWithInclusion) {
@@ -313,7 +292,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceWithInclu
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: {b: [2,3]}, c: 'abc'}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3]}, c: 'abc'}")}));
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3]}, c: 'abc'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceSkipLimitWithInclusion) {
@@ -321,7 +300,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceSkipLimit
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: {b: [2,3]}, c: 'abc'}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}));
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceBasicWithExclusion) {
@@ -329,7 +308,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceBasicWith
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: {b: [1,2,3]}}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}));
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceSkipLimitWithExclusion) {
@@ -337,7 +316,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceSkipLimit
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: {b: [2,3]}}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}));
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: 'abc'}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceAndPositional) {
@@ -346,7 +325,7 @@ TEST_P(ProjectionExecutorTestWithFallBackToDefault, CanProjectFindSliceAndPositi
     auto executor = createProjectionExecutor(proj);
     ASSERT_DOCUMENT_EQ(
         Document{fromjson("{a: {b: [2,3]}, c: [6]}")},
-        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: [5,6,7]}")}));
+        executor->applyTransformation(Document{fromjson("{a: {b: [1,2,3,4]}, c: [5,6,7]}")}, {}));
 }
 
 TEST_P(ProjectionExecutorTestWithFallBackToDefault, ExecutorOptimizesExpression) {

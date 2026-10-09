@@ -4,6 +4,7 @@
  * creation after drop.
  *
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_80,
  *   requires_non_retryable_commands,
  *   requires_non_retryable_writes,
@@ -38,7 +39,9 @@ function runExpressTest({command, expectedDocs, usesExpress}) {
     // Reset the collection docs then run explain.
     assert.commandWorked(coll.remove({}));
     assert.commandWorked(coll.insert(docs));
-    const explain = assert.commandWorked(db.runCommand({explain: command, verbosity: "executionStats"}));
+    const explain = assert.commandWorked(
+        db.runCommand({explain: command, verbosity: "executionStats"}),
+    );
 
     assert.eq(
         usesExpress,
@@ -68,7 +71,11 @@ const del = {
     q: {_id: "StR"},
     limit: 0,
 };
-runExpressTest({command: {delete: collName, deletes: [del]}, usesExpress: true, expectedDocs: [docs[0]]});
+runExpressTest({
+    command: {delete: collName, deletes: [del]},
+    usesExpress: true,
+    expectedDocs: [docs[0]],
+});
 runExpressTest({
     command: {delete: collName, deletes: [{...del, collation: caseInsensitive}]},
     usesExpress: true,
@@ -127,7 +134,9 @@ runExpressTest({
 // The express path can be used for writes against clustered collections.
 //
 coll.drop();
-assert.commandWorked(db.createCollection(collName, {clusteredIndex: {key: {"_id": 1}, unique: true}}));
+assert.commandWorked(
+    db.createCollection(collName, {clusteredIndex: {key: {"_id": 1}, unique: true}}),
+);
 assert.commandWorked(coll.insert(docs));
 
 runExpressTest({

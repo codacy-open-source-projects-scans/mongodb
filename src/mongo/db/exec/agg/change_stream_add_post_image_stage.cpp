@@ -1,82 +1,50 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/change_stream_add_post_image_stage.h"
 
 #include "mongo/db/exec/agg/change_stream_add_pre_image_stage.h"
-#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/pipeline/change_stream_hashed_field_accessors.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 namespace mongo {
-
-boost::intrusive_ptr<exec::agg::Stage> documentSourceChangeStreamAddPostImageToStageFn(
-    const boost::intrusive_ptr<DocumentSource>& documentSource) {
-    auto* changeStreamAddPostImageDS =
-        dynamic_cast<DocumentSourceChangeStreamAddPostImage*>(documentSource.get());
-
-    tassert(10561301,
-            "expected 'DocumentSourceChangeStreamAddPostImage' type",
-            changeStreamAddPostImageDS);
-
-    return make_intrusive<exec::agg::ChangeStreamAddPostImageStage>(
-        changeStreamAddPostImageDS->kStageName,
-        changeStreamAddPostImageDS->getExpCtx(),
-        changeStreamAddPostImageDS->_fullDocumentMode);
-}
+using FieldAccessors = change_stream::HashedFieldAccessors;
 
 namespace exec::agg {
-
-REGISTER_AGG_STAGE_MAPPING(_internalChangeStreamAddPostImage,
-                           DocumentSourceChangeStreamAddPostImage::id,
-                           documentSourceChangeStreamAddPostImageToStageFn)
+using namespace std::literals::string_view_literals;
 
 namespace {
 constexpr auto makePostImageNotFoundErrorMsg =
     &ChangeStreamAddPreImageStage::makePreImageNotFoundErrorMsg;
 
-Value assertFieldHasType(const Document& fullDoc, StringData fieldName, BSONType expectedType) {
+template <typename T>
+Value assertFieldHasType(const Document& fullDoc, T fieldName, BSONType expectedType) {
     auto val = fullDoc[fieldName];
-    uassert(40578,
-            str::stream() << "failed to look up post image after change: expected \"" << fieldName
-                          << "\" field to have type " << typeName(expectedType)
-                          << ", instead found type " << typeName(val.getType()) << ": "
-                          << val.toString() << ", full object: " << fullDoc.toString(),
-            val.getType() == expectedType);
+    uassert(
+        40578,
+        str::stream() << "failed to look up post image after change: expected \""
+                      << [](T fieldName) -> std::string_view {
+            if constexpr (std::is_same_v<T, HashedFieldName>) {
+                return fieldName.key();
+            } else {
+                return fieldName;
+            }
+        }(fieldName)
+            << "\" field to have type " << typeName(expectedType) << ", instead found type "
+            << typeName(val.getType()) << ": " << val.toString()
+            << ", full object: " << fullDoc.toString(),
+        val.getType() == expectedType);
     return val;
 }
 }  // namespace
 
 ChangeStreamAddPostImageStage::ChangeStreamAddPostImageStage(
-    StringData stageName,
+    std::string_view stageName,
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
     const FullDocumentModeEnum& fullDocumentMode)
     : Stage(stageName, pExpCtx), _fullDocumentMode(fullDocumentMode) {}
@@ -86,17 +54,15 @@ GetNextResult ChangeStreamAddPostImageStage::doGetNext() {
     if (!input.isAdvanced()) {
         return input;
     }
-    auto opTypeVal = assertFieldHasType(
-        input.getDocument(), DocumentSourceChangeStream::kOperationTypeField, BSONType::string);
+    auto opTypeVal =
+        assertFieldHasType(input.getDocument(), FieldAccessors::kOperationType, BSONType::string);
     if (opTypeVal.getStringData() != DocumentSourceChangeStream::kUpdateOpType) {
         return input;
     }
 
     // Create a mutable output document from the input document.
     MutableDocument output(input.releaseDocument());
-    const auto postImageDoc = (_fullDocumentMode == FullDocumentModeEnum::kUpdateLookup
-                                   ? lookupLatestPostImage(output.peek())
-                                   : generatePostImage(output.peek()));
+    const auto postImageDoc = generatePostImage(output.peek());
     uassert(ErrorCodes::NoMatchingDocument,
             str::stream() << "Change stream was configured to require a post-image for all update "
                              "events, but the post-image was not found for event: "
@@ -111,68 +77,6 @@ GetNextResult ChangeStreamAddPostImageStage::doGetNext() {
     output.remove(DocumentSourceChangeStreamAddPostImage::kRawOplogUpdateSpecFieldName);
     output.remove(DocumentSourceChangeStreamAddPostImage::kPreImageIdFieldName);
     return output.freeze();
-}
-
-boost::optional<Document> ChangeStreamAddPostImageStage::lookupLatestPostImage(
-    const Document& updateOp) const {
-    // Make sure we have a well-formed input.
-    auto nss = assertValidNamespace(updateOp);
-
-    auto documentKey = assertFieldHasType(updateOp,
-                                          DocumentSourceChangeStream::kDocumentKeyField,
-                                          BSONType::object)
-                           .getDocument();
-
-    // Extract the resume token data from the input event.
-    auto resumeTokenData =
-        ResumeToken::parse(updateOp[DocumentSourceChangeStream::kIdField].getDocument()).getData();
-
-    auto readConcern = BSON("level" << "majority"
-                                    << "afterClusterTime" << resumeTokenData.clusterTime);
-
-    // Update lookup queries sent from mongoS to shards are allowed to use speculative majority
-    // reads. Even if the lookup itself succeeded, it may not have returned any results if the
-    // document was deleted in the time since the update op.
-    tassert(9797601, "UUID should be present in the resume token", resumeTokenData.uuid);
-    try {
-        // In case we are running $changeStreams and are performing updateLookup, we do not pass
-        // 'collectionUUID' to avoid any UUID validation on the target collection. UUID of the
-        // target collection should only be checked if 'matchCollectionUUIDForUpdateLookup' flag has
-        // been passed.
-        auto collectionUUID =
-            pExpCtx->getChangeStreamSpec()->getMatchCollectionUUIDForUpdateLookup()
-            ? boost::optional<UUID>(*resumeTokenData.uuid)
-            : boost::none;
-        return pExpCtx->getMongoProcessInterface()->lookupSingleDocument(
-            pExpCtx, nss, std::move(collectionUUID), documentKey, std::move(readConcern));
-    } catch (const ExceptionFor<ErrorCodes::TooManyMatchingDocuments>& ex) {
-        uasserted(ErrorCodes::ChangeStreamFatalError, ex.what());
-    }
-}
-
-NamespaceString ChangeStreamAddPostImageStage::assertValidNamespace(
-    const Document& inputDoc) const {
-    auto namespaceObject =
-        assertFieldHasType(inputDoc, DocumentSourceChangeStream::kNamespaceField, BSONType::object)
-            .getDocument();
-    auto dbName = assertFieldHasType(namespaceObject, "db"_sd, BSONType::string);
-    auto collectionName = assertFieldHasType(namespaceObject, "coll"_sd, BSONType::string);
-    NamespaceString nss(NamespaceStringUtil::deserialize(pExpCtx->getNamespaceString().tenantId(),
-                                                         dbName.getStringData(),
-                                                         collectionName.getStringData(),
-                                                         pExpCtx->getSerializationContext()));
-
-    // Change streams on an entire database only need to verify that the database names match. If
-    // the database is 'admin', then this is a cluster-wide $changeStream and we are permitted to
-    // lookup into any namespace.
-    uassert(40579,
-            str::stream() << "unexpected namespace during post image lookup: "
-                          << nss.toStringForErrorMsg() << ", expected "
-                          << pExpCtx->getNamespaceString().toStringForErrorMsg(),
-            nss == pExpCtx->getNamespaceString() ||
-                (pExpCtx->isClusterAggregation() || pExpCtx->isDBAggregation(nss)));
-
-    return nss;
 }
 
 boost::optional<Document> ChangeStreamAddPostImageStage::generatePostImage(
@@ -228,7 +132,7 @@ boost::optional<Document> ChangeStreamAddPostImageStage::generatePostImage(
     // Compute post-image.
     mutablebson::Document postImage(preImage->toBson());
     uassertStatusOK(updateDriver.update(pExpCtx->getOperationContext(),
-                                        StringData(),
+                                        std::string_view(),
                                         &postImage,
                                         false /* validateForStorage */,
                                         FieldRefSet(),

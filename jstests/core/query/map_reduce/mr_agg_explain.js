@@ -2,6 +2,7 @@
  * Tests that running mapReduce with explain behaves as expected.
  *
  * @tags: [
+ *   uses_explain,
  *   # The test runs commands that are not allowed with security token: mapReduce.
  *   not_allowed_with_signed_security_token,
  *   # mapReduce does not support afterClusterTime.
@@ -27,7 +28,9 @@ function reduceFunc(key, values) {
 function runTest(optionsObjOrOutString) {
     // Succeeds for all modes when using agg map reduce.
     for (let verbosity of ["queryPlanner", "executionStats", "allPlansExecution"]) {
-        const results = coll.explain(verbosity).mapReduce(mapFunc, reduceFunc, optionsObjOrOutString);
+        const results = coll
+            .explain(verbosity)
+            .mapReduce(mapFunc, reduceFunc, optionsObjOrOutString);
 
         // Check server info
         assert(results.hasOwnProperty("serverInfo"), results);

@@ -20,7 +20,9 @@ const timeseriesCollName = jsTestName();
 const tsColl = db.getCollection(timeseriesCollName);
 assertDropCollection(db, timeseriesCollName);
 assert.commandWorked(
-    db.createCollection(timeseriesCollName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+    db.createCollection(timeseriesCollName, {
+        timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+    }),
 );
 
 const nDocs = 10;
@@ -43,7 +45,12 @@ assert.commandWorked(bulk.execute());
                     from: timeseriesCollName,
                     let: {lkey: "$key"},
                     pipeline: [
-                        {$search: {index: "default", text: {query: "example", path: metaFieldName}}},
+                        {
+                            $search: {
+                                index: "default",
+                                text: {query: "example", path: metaFieldName},
+                            },
+                        },
                         {$match: {$expr: {$eq: ["$fieldName", "$$lkey"]}}},
                     ],
                     as: "joined",
@@ -54,7 +61,14 @@ assert.commandWorked(bulk.execute());
             {
                 $unionWith: {
                     coll: timeseriesCollName,
-                    pipeline: [{$search: {index: "default", text: {query: "example", path: metaFieldName}}}],
+                    pipeline: [
+                        {
+                            $search: {
+                                index: "default",
+                                text: {query: "example", path: metaFieldName},
+                            },
+                        },
+                    ],
                 },
             },
         ],
@@ -66,7 +80,7 @@ assert.commandWorked(bulk.execute());
     searchPipelines.forEach((pipeline) => {
         assert.commandFailedWithCode(
             tsColl.runCommand("aggregate", {pipeline: pipeline, cursor: {}}),
-            // TODO SERVER-117803 Delete code 10557302 once we only validate in LPP.
+            // TODO SERVER-121094 Delete code 10557302 once we only validate in LPP.
             [10557302, 12093200, 10623000],
             `Expected failure for pipeline: ${tojson(pipeline)}`,
         );
@@ -78,7 +92,7 @@ assert.commandWorked(bulk.execute());
     searchPipelines.forEach((pipeline) => {
         assert.commandFailedWithCode(
             db[viewName].runCommand("aggregate", {pipeline: pipeline, cursor: {}}),
-            // TODO SERVER-117803 Delete code 10557302 once we only validate in LPP.
+            // TODO SERVER-121094 Delete code 10557302 once we only validate in LPP.
             [10557302, 12093200, 10623000, 40602],
             `Expected failure for pipeline: ${tojson(pipeline)}`,
         );
@@ -94,7 +108,7 @@ assert.commandWorked(bulk.execute());
     );
     assert.commandFailedWithCode(
         db[searchView].runCommand("aggregate", {pipeline: [{$match: {}}], cursor: {}}),
-        // TODO SERVER-117803 Delete code 10557302 once we only validate in LPP.
+        // TODO SERVER-121094 Delete code 10557302 once we only validate in LPP.
         [10557302, 12093200, 10623000, 40602],
         `Expected failure for pipeline: ${tojson([{$match: {}}])}`,
     );
@@ -126,12 +140,24 @@ assert.commandWorked(bulk.execute());
                 },
             },
         ],
+        [
+            {
+                $unionWith: {
+                    coll: searchView,
+                    pipeline: [{$match: {}}],
+                },
+            },
+        ],
     ];
     subPipelines.forEach((pipeline) => {
         assert.commandFailedWithCode(
             nonTSColl.runCommand("aggregate", {pipeline: pipeline, cursor: {}}),
-            // TODO SERVER-117803 Delete code 10557302 once we only validate in LPP.
-            [10557302, 12093200, 10623000, 40602],
+            // TODO SERVER-121094 Delete code 10557302 once we only validate in LPP.
+            // 65180 is the extension $search's "view definition is incompatible with Atlas
+            // Search" error, surfaced when the view resolution runs through the extension path.
+            // 13130801 is the $lookup/$graphLookup/$unionWith rejection when their foreign
+            // namespace is a search view over a timeseries collection.
+            [10557302, 12093200, 10623000, 40602, 65180, 13130801],
             `Expected failure for pipeline: ${tojson(pipeline)}`,
         );
     });
@@ -156,13 +182,21 @@ assert.commandWorked(bulk.execute());
     let searchIndexDef = {
         mappings: {dynamic: true, fields: {}},
     };
-    expectCreateSearchIndexFails(tsColl, {name: tsSearchIndexName, definition: searchIndexDef}, [10840700, 10840701]);
+    expectCreateSearchIndexFails(
+        tsColl,
+        {name: tsSearchIndexName, definition: searchIndexDef},
+        [10840700, 10840701],
+    );
 
     // 2. updateSearchIndex
     searchIndexDef.storedSource = {
         exclude: [metaFieldName],
     };
-    expectUpdateSearchIndexFails(tsColl, {name: tsSearchIndexName, definition: searchIndexDef}, [10840700, 10840701]);
+    expectUpdateSearchIndexFails(
+        tsColl,
+        {name: tsSearchIndexName, definition: searchIndexDef},
+        [10840700, 10840701],
+    );
 
     // 3. dropSearchIndex
     expectDropSearchIndexFails(tsColl, {name: tsSearchIndexName}, [10840700, 10840701]);

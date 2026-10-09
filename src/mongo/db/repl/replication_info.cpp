@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/counter.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -39,6 +12,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/audit.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -46,8 +20,6 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/dbhelpers.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
@@ -59,10 +31,12 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/split_horizon/split_horizon.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
@@ -76,15 +50,19 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/topology/user_write_block/global_user_write_block_state.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/idl/idl_command_parser.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/rpc/topology_version_gen.h"
+#include "mongo/transport/backpressure_connection_metrics.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/session.h"
@@ -104,6 +82,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -131,10 +110,11 @@ MONGO_FAIL_POINT_DEFINE(appendHelloOkToHelloResponse);
 
 namespace repl {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kHelloString = "hello"_sd;
-constexpr auto kCamelCaseIsMasterString = "isMaster"_sd;
-constexpr auto kLowerCaseIsMasterString = "ismaster"_sd;
+constexpr auto kHelloString = "hello"sv;
+constexpr auto kCamelCaseIsMasterString = "isMaster"sv;
+constexpr auto kLowerCaseIsMasterString = "ismaster"sv;
 
 void appendPrimaryOnlyServiceInfo(ServiceContext* serviceContext, BSONObjBuilder* result) {
     auto registry = PrimaryOnlyServiceRegistry::get(serviceContext);
@@ -221,6 +201,7 @@ TopologyVersion appendReplicationInfo(OperationContext* opCtx,
 class ReplicationInfoServerStatus : public ServerStatusSection {
 public:
     enum class UserWriteBlockState { kUnknown = 0, kDisabled = 1, kEnabled = 2 };
+    enum class ReplicaSetLevelWriteBlockState { kUnknown = 0, kDisabled = 1, kEnabled = 2 };
 
     using ServerStatusSection::ServerStatusSection;
 
@@ -246,13 +227,22 @@ public:
 
         appendPrimaryOnlyServiceInfo(opCtx->getServiceContext(), &result);
 
-        auto rbid = ReplicationProcess::get(opCtx)->getRollbackID();
-        if (ReplicationProcess::kUninitializedRollbackId != rbid) {
-            result.append("rbid", rbid);
+        // Only look up the rollback ID if we actually have one.
+        // DSC never sets it up, so this check is expected to be false for DSC.
+        const auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        if (provider.supportsLegacyReplSetCommands()) {
+            auto rbid = ReplicationProcess::get(opCtx)->getRollbackID();
+            if (ReplicationProcess::kUninitializedRollbackId != rbid) {
+                result.append("rbid", rbid);
+            }
         }
         {
             auto state = UserWriteBlockState::kUnknown;
             auto reason = UserWritesBlockReasonEnum::kUnspecified;
+            auto replicaSetState = ReplicaSetLevelWriteBlockState::kUnknown;
+            boost::optional<int> replicaSetReason;
+            bool replicaSetAllowDeletions =
+                !ReplicaSetWriteBlockState::get(opCtx)->isReplicaSetDeletionsBlockingEnabled();
             // Try to lock. If we fail (i.e. lock is already held in write mode), don't read the
             // GlobalUserWriteBlockState and set the userWriteBlockMode field to kUnknown.
             Lock::GlobalLock lk(
@@ -262,16 +252,34 @@ public:
                     return options;
                 }());
             if (!lk.isLocked()) {
-                LOGV2_DEBUG(6345700, 2, "Failed to retrieve user write block state");
+                LOGV2_DEBUG(6345700, 2, "Failed to retrieve write block states");
             } else {
                 state = GlobalUserWriteBlockState::get(opCtx)->isUserWriteBlockingEnabled(opCtx)
                     ? UserWriteBlockState::kEnabled
                     : UserWriteBlockState::kDisabled;
                 reason = GlobalUserWriteBlockState::get(opCtx)->getUserWriteBlockingReason(opCtx);
+                auto* replicaSetWriteBlockState = ReplicaSetWriteBlockState::get(opCtx);
+                replicaSetState = replicaSetWriteBlockState->isReplicaSetWriteBlockingEnabled()
+                    ? ReplicaSetLevelWriteBlockState::kEnabled
+                    : ReplicaSetLevelWriteBlockState::kDisabled;
+                if (replicaSetState == ReplicaSetLevelWriteBlockState::kEnabled) {
+                    replicaSetReason =
+                        replicaSetWriteBlockState->getReplicaSetWriteBlockingReason(opCtx);
+                    replicaSetAllowDeletions =
+                        !replicaSetWriteBlockState->isReplicaSetDeletionsBlockingEnabled();
+                }
             }
             result.append("userWriteBlockMode", state);
             result.append("userWriteBlockReason", reason);
             GlobalUserWriteBlockState::get(opCtx)->appendUserWriteBlockModeCounters(result);
+            result.append("replicaSetWritesBlock", replicaSetState);
+            if (replicaSetReason) {
+                result.append("replicaSetWritesBlockReason", *replicaSetReason);
+            }
+            result.append("replicaSetWritesBlockAllowDeletions", replicaSetAllowDeletions);
+            ReplicaSetWriteBlockState::get(opCtx)->appendReplicaSetWritesBlockCounters(result);
+            ReplicaSetWriteBlockState::get(opCtx)->appendReplicaSetWriteBlockRejectionMetrics(
+                result);
         }
 
         return result.obj();
@@ -325,25 +333,7 @@ public:
                 return Timestamp();
             }
 
-            // Try getting earliest oplog timestamp using getEarliestOplogTimestamp
-            auto swEarliestOplogTimestamp =
-                oplogCollection->getRecordStore()->oplog()->getEarliestTimestamp(
-                    *shard_role_details::getRecoveryUnit(opCtx));
-
-            if (swEarliestOplogTimestamp.getStatus() == ErrorCodes::OplogOperationUnsupported) {
-                // Falling back to use getSingleton if the storage engine does not support
-                // getEarliestOplogTimestamp.
-                // Note that getSingleton will take a global IS lock, but this won't block because
-                // we are already holding the global IS lock.
-                BSONObj o;
-                if (Helpers::getSingleton(opCtx, NamespaceString::kRsOplogNamespace, o)) {
-                    return o["ts"].timestamp();
-                }
-            }
-            if (!swEarliestOplogTimestamp.isOK()) {
-                return Timestamp();
-            }
-            return swEarliestOplogTimestamp.getValue();
+            return oplogCollection->getRecordStore()->oplog()->getCachedEarliestTimestamp();
         }();
 
         result.append("earliestOptime", earliestOplogTimestampFetch);
@@ -478,6 +468,19 @@ public:
             // Set split horizon parameters.
             auto sniName = client->getSniNameForSession();
             SplitHorizon::setParameters(client, std::move(sniName));
+
+            // Record client backpressure protocol version for connection metrics.
+            if (auto session = client->session()) {
+                BackpressureVersionMetrics::get(session.get())
+                    ->setVersionFromHelloField(
+                        cmd.getBackpressure().value_or(IDLAnyType{}).getElement());
+            }
+        }
+
+        if (!isInitialHandshake) {
+            if (auto updateDoc = cmd.getClientUpdate()) {
+                ClientMetadata::logClientMetadataUpdate(client, *updateDoc);
+            }
         }
 
         // Parse the optional 'internalClient' field. This is provided by incoming connections from
@@ -529,6 +532,29 @@ public:
             uassert(31372,
                     "topologyVersion must have a non-negative counter",
                     clientTopologyVersion->getCounter() >= 0);
+
+            auto minWait = minWaitForStreamingHelloMillis.load();
+            if (minWait > 0 && maxAwaitTimeMS.value() < minWait) {
+                auto* authSession = AuthorizationSession::get(opCtx->getClient());
+                if (!authSession || !authSession->isAuthenticated()) {
+                    static auto& logSeverity = *new logv2::SeveritySuppressor{
+                        Seconds{5}, logv2::LogSeverity::Info(), logv2::LogSeverity::Debug(3)};
+                    LOGV2_DEBUG(9830101,
+                                logSeverity().toInt(),
+                                "Pre-auth streamable hello with maxAwaitTimeMS below minimum",
+                                "maxAwaitTimeMS"_attr = maxAwaitTimeMS.value(),
+                                "minWaitForStreamingHelloMillis"_attr = minWait);
+
+                    uassert(ErrorCodes::InvalidOptions,
+                            fmt::format("maxAwaitTimeMS of {} ms is below the minimum of {} ms",
+                                        maxAwaitTimeMS.value(),
+                                        minWait),
+                            !abortStreamingHelloWithSmallTimeout.load());
+
+                    // Clamp the effective timeout to the configured minimum.
+                    maxAwaitTimeMS = minWait;
+                }
+            }
 
             LOGV2_DEBUG(23904,
                         3,
@@ -654,7 +680,7 @@ public:
     }
 
 protected:
-    CmdHello(const StringData cmdName, const std::initializer_list<StringData>& alias)
+    CmdHello(const std::string_view cmdName, const std::initializer_list<std::string_view>& alias)
         : BasicCommandWithReplyBuilderInterface(cmdName, alias) {}
 
     virtual bool useLegacyResponseFields() const {

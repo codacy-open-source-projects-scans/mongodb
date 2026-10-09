@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/update_util.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -57,7 +30,7 @@
 #include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/sharding_environment/grid.h"
-#include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
@@ -67,6 +40,7 @@
 
 #include <cstddef>
 #include <map>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -75,12 +49,13 @@
 
 namespace mongo {
 namespace update {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangBeforeThrowWouldChangeOwningShard);
 
-constexpr StringData idFieldName = "_id"_sd;
+constexpr std::string_view idFieldName = "_id"sv;
 const FieldRef idFieldRef(idFieldName);
 
 }  // namespace
@@ -113,7 +88,7 @@ void generateNewDocumentFromSuppliedDoc(OperationContext* opCtx,
     invariant(request->getUpdateConstants());
 
     // Extract the supplied document from the constants and validate that it is an object.
-    auto suppliedDocElt = request->getUpdateConstants()->getField("new"_sd);
+    auto suppliedDocElt = request->getUpdateConstants()->getField("new"sv);
     invariant(suppliedDocElt.type() == BSONType::object);
     auto suppliedDoc = suppliedDocElt.embeddedObject();
 
@@ -124,7 +99,6 @@ void generateNewDocumentFromSuppliedDoc(OperationContext* opCtx,
     replacementDriver.parse(
         write_ops::UpdateModification(suppliedDoc, write_ops::UpdateModification::ReplacementTag{}),
         {});
-    replacementDriver.setLogOp(false);
     replacementDriver.setBypassEmptyTsReplacement(
         static_cast<bool>(request->getBypassEmptyTsReplacement()));
 
@@ -280,10 +254,7 @@ void ShardingChecksForUpdate::checkUpdateChangesReshardingKey(OperationContext* 
                                                               const BSONObj& newObj,
                                                               const Snapshotted<BSONObj>& oldObj) {
 
-    const bool useRegistry =
-        resharding::gFeatureFlagReshardingRegistry.isEnabledUseLatestFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const bool useRegistry = resharding::gFeatureFlagReshardingRegistry.isEnabled();
 
     auto destinedRecipients = useRegistry
         ? resharding::getDestinedRecipientsIfPossiblyDifferent(
@@ -381,6 +352,17 @@ void ShardingChecksForUpdate::checkUpdateChangesExistingShardKey(
     }
 }
 
+bool wouldAffectIndexesForExplain(const IndexCatalog* indexCatalog,
+                                  const boost::optional<BSONObj>& diff) {
+    if (diff.has_value()) {
+        const auto* identifier = indexCatalog->getIndexUpdateIdentifier();
+        return identifier && identifier->determineAffectedIndexes(*diff).any();
+    }
+    // No diff (replacement or pipeline update): conservatively track this RID if
+    // secondary indexes exist.
+    return (indexCatalog->numIndexesReady() + indexCatalog->numIndexesInProgress()) > 1;
+}
+
 std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
                                            const CollectionAcquisition& collection,
                                            const Snapshotted<BSONObj>& oldObj,
@@ -431,7 +413,7 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
             matchedField = matchDetails.elemMatchKey();
     }
 
-    BSONObj logObj;
+    DocumentUpdateRecord updateRecord;
     bool docWasModified = false;
     status = driver->update(opCtx,
                             matchedField,
@@ -439,7 +421,7 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
                             isUserInitiatedWrite,
                             immutablePaths,
                             false, /* isInsert */
-                            &logObj,
+                            &updateRecord,
                             &docWasModified);
     uassertStatusOK(status);
 
@@ -470,7 +452,7 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
 
     // Prepare to modify the document
     CollectionUpdateArgs args{oldObjValue};
-    args.update = logObj;
+    args.update = updateRecord.oplogEntry;
     if (isUserInitiatedWrite) {
         const auto& collDesc = collection.getShardingDescription();
         args.criteria = collDesc.extractDocumentKey(oldObj.value());
@@ -512,7 +494,6 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
                 scfu.checkUpdateChangesShardKeyFields(opCtx, doc, boost::none /* newObj */, oldObj);
             }
 
-            auto diff = update_oplog_entry::extractDiffFromOplogEntry(logObj);
             WriteUnitOfWork wunit(opCtx);
             newObj = uassertStatusOK(collection_internal::updateDocumentWithDamages(
                 opCtx,
@@ -521,7 +502,8 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
                 oldObj,
                 source,
                 damages,
-                diff.has_value() ? &*diff : collection_internal::kUpdateAllIndexes,
+                updateRecord.diff.has_value() ? &*updateRecord.diff
+                                              : collection_internal::kUpdateAllIndexes,
                 &indexesAffected,
                 &CurOp::get(opCtx)->debug(),
                 &args,
@@ -555,7 +537,7 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
                 scfu.checkUpdateChangesShardKeyFields(opCtx, doc, newObj, oldObj);
             }
 
-            auto diff = update_oplog_entry::extractDiffFromOplogEntry(logObj);
+            const auto& diff = updateRecord.diff;
             WriteUnitOfWork wunit(opCtx);
             collection_internal::updateDocument(
                 opCtx,
@@ -579,20 +561,28 @@ std::pair<BSONObj, bool> transformDocument(OperationContext* opCtx,
     // For an example, see the comment above near declaration of '_updatedRecordIds' in
     // UpdateStage.
     //
+    // In a real write, indexesAffected is set by the storage engine when index keys actually
+    // change. In explain mode the storage-engine write is skipped so indexesAffected is never
+    // set; wouldAffectIndexesForExplain estimates whether the update would have affected indexes.
+    //
     // This must be done after the wunit commits so we are sure we won't be rolling back.
-    if (updatedRecordIds && indexesAffected) {
+    const bool wouldAffectIndexes = request->getIsExplain()
+        ? wouldAffectIndexesForExplain(collection.getCollectionPtr()->getIndexCatalog(),
+                                       updateRecord.diff)
+        : indexesAffected;
+    if (updatedRecordIds && wouldAffectIndexes) {
         updatedRecordIds->insert(rid);
     }
 
     return {newObj, docWasModified};
 }
 
-std::pair<UpdateResult, int> parseAndTransformOplogUpdate(OperationContext* opCtx,
-                                                          const CollectionAcquisition& coll,
-                                                          const Snapshotted<BSONObj>& oldObj,
-                                                          const UpdateRequest& request,
-                                                          const RecordId& rid,
-                                                          const SeekableRecordCursor* cursor) {
+std::pair<UpdateResult, BSONObj> parseAndTransformOplogUpdate(OperationContext* opCtx,
+                                                              const CollectionAcquisition& coll,
+                                                              const Snapshotted<BSONObj>& oldObj,
+                                                              const UpdateRequest& request,
+                                                              const RecordId& rid,
+                                                              const SeekableRecordCursor* cursor) {
     // TODO SERVER-118695 Support upsert requests
     tassert(7834901, "This helper cannot be used to serve upsert requests.", !request.isUpsert());
     tassert(7834900,
@@ -649,7 +639,7 @@ std::pair<UpdateResult, int> parseAndTransformOplogUpdate(OperationContext* opCt
         ur.requestedDocImage = oldObj.value().getOwned();
     }
 
-    return {ur, newObj.objsize()};
+    return {ur, newObj};
 }
 
 }  // namespace update

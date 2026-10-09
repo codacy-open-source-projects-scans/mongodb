@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
 
@@ -55,6 +29,7 @@
 #include <cstddef>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <variant>
 
 #include <boost/move/utility_core.hpp>
@@ -87,7 +62,7 @@ public:
     class Capped;
     class Oplog;
 
-    DevNullRecordStore(boost::optional<UUID> uuid, StringData ident, KeyFormat keyFormat)
+    DevNullRecordStore(boost::optional<UUID> uuid, std::string_view ident, KeyFormat keyFormat)
         : RecordStoreBase(uuid, ident), _container(_makeContainer(keyFormat)) {
         _numInserts = 0;
         _dummy = BSON("_id" << 1);
@@ -106,6 +81,22 @@ public:
     }
 
     void setSize(long long numRecords, long long dataSize) override {
+        // Do nothing.
+    }
+
+    int64_t accurateNumRecords() const override {
+        return 0;
+    }
+
+    int64_t accurateDataSize() const override {
+        return 0;
+    }
+
+    void setAccurateSizeCount(int64_t, int64_t) override {
+        // Do nothing.
+    }
+
+    void adjustAccurateSizeCount(int64_t, int64_t) override {
         // Do nothing.
     }
 
@@ -131,6 +122,10 @@ public:
 
     int64_t freeStorageSize(RecoveryUnit&) const override {
         return 0;
+    }
+
+    boost::optional<int64_t> approxNumLeafPages(RecoveryUnit&) const override {
+        return boost::none;
     }
 
     bool updateWithDamagesSupported() const override {
@@ -159,7 +154,7 @@ public:
     }
 
     void validate(RecoveryUnit&,
-                  const CollectionValidation::ValidationOptions&,
+                  const collection_validation::ValidationOptions&,
                   ValidateResults*) override {}
 
     void appendNumericCustomStats(RecoveryUnit& ru,
@@ -274,7 +269,7 @@ private:
 
 class DevNullRecordStore::Capped : public DevNullRecordStore, public RecordStoreBase::Capped {
 public:
-    Capped(boost::optional<UUID> uuid, StringData ident, KeyFormat keyFormat)
+    Capped(boost::optional<UUID> uuid, std::string_view ident, KeyFormat keyFormat)
         : DevNullRecordStore(uuid, ident, keyFormat) {}
 
     bool isCapped() const final {
@@ -297,7 +292,7 @@ private:
 class DevNullRecordStore::Oplog final : public DevNullRecordStore::Capped,
                                         public RecordStoreBase::Oplog {
 public:
-    Oplog(UUID uuid, StringData ident, int64_t maxSize)
+    Oplog(UUID uuid, std::string_view ident, int64_t maxSize)
         : DevNullRecordStore::Capped(uuid, ident, KeyFormat::Long), _maxSize(maxSize) {}
 
     RecordStore::Capped* capped() override {
@@ -331,6 +326,10 @@ public:
         return Status::OK();
     }
 
+    Timestamp getCachedEarliestTimestamp() const override {
+        return Timestamp();
+    }
+
 private:
     int64_t _maxSize;
 };
@@ -347,7 +346,7 @@ public:
 
 class DevNullSortedDataInterface : public SortedDataInterface {
 public:
-    DevNullSortedDataInterface(StringData identName)
+    DevNullSortedDataInterface(std::string_view identName)
         : SortedDataInterface(
               kDataFormatV2KeyStringV1IndexVersionV2, Ordering::make(BSONObj()), KeyFormat::Long) {}
 
@@ -395,7 +394,7 @@ public:
     IndexValidateResults validate(
         OperationContext* opCtx,
         RecoveryUnit& ru,
-        const CollectionValidation::ValidationOptions& options) const override {
+        const collection_validation::ValidationOptions& options) const override {
         return IndexValidateResults{};
     }
 
@@ -465,7 +464,7 @@ std::unique_ptr<RecoveryUnit> DevNullKVEngine::newRecoveryUnit() {
 
 std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* opCtx,
                                                              const NamespaceString& nss,
-                                                             StringData ident,
+                                                             std::string_view ident,
                                                              const RecordStore::Options& options,
                                                              boost::optional<UUID> uuid) {
     if (ident == ident::kMdbCatalog) {
@@ -479,13 +478,13 @@ std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* o
 }
 
 std::unique_ptr<RecordStore> DevNullKVEngine::getInternalRecordStore(RecoveryUnit& ru,
-                                                                     StringData ident,
+                                                                     std::string_view ident,
                                                                      KeyFormat keyFormat) {
     return makeInternalRecordStore(ru, ident, keyFormat);
 }
 
 std::unique_ptr<RecordStore> DevNullKVEngine::makeInternalRecordStore(RecoveryUnit& ru,
-                                                                      StringData ident,
+                                                                      std::string_view ident,
                                                                       KeyFormat keyFormat) {
     return std::make_unique<DevNullRecordStore>(boost::none /* uuid */, ident, keyFormat);
 }
@@ -495,7 +494,7 @@ std::unique_ptr<SortedDataInterface> DevNullKVEngine::getSortedDataInterface(
     RecoveryUnit& ru,
     const NamespaceString& nss,
     const UUID& uuid,
-    StringData ident,
+    std::string_view ident,
     const IndexConfig& config,
     KeyFormat keyFormat) {
     return std::make_unique<DevNullSortedDataInterface>(ident);

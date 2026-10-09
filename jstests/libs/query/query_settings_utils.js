@@ -11,7 +11,10 @@ import {
     getQueryPlanners,
     getWinningPlanFromExplain,
 } from "jstests/libs/query/analyze_plan.js";
-import {getParameter, setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {
+    getParameter,
+    setParameterOnAllNonConfigNodes,
+} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 export class QuerySettingsUtils {
     /**
@@ -135,7 +138,10 @@ export class QuerySettingsUtils {
      * Return 'queryShapeHash' for a given query from 'querySettings'.
      */
     getQueryShapeHashFromQuerySettings(representativeQuery) {
-        const settings = this.getQuerySettings({showQueryShapeHash: true, filter: {representativeQuery}});
+        const settings = this.getQuerySettings({
+            showQueryShapeHash: true,
+            filter: {representativeQuery},
+        });
         assert.lte(
             settings.length,
             1,
@@ -149,7 +155,22 @@ export class QuerySettingsUtils {
      */
     getQueryShapeHashFromExplain(representativeQuery) {
         const explainCmd = getExplainCommand(this.withoutDollarDB(representativeQuery));
-        const explain = assert.commandWorked(this._db.runCommand(explainCmd));
+        let explain;
+        // In sharded passthrough suites with rate-limiting failpoints, the config server replica
+        // set (config-rs) can become transiently unreachable, causing explain() to fail with
+        // FailedToSatisfyReadPreference. Retry on this specific error until the config-rs primary
+        // is reachable again.
+        assert.soon(
+            () => {
+                const result = this._db.runCommand(explainCmd);
+                if (!result.ok && result.code === ErrorCodes.FailedToSatisfyReadPreference) {
+                    return false;
+                }
+                explain = assert.commandWorked(result);
+                return true;
+            },
+            `Failed to run explain for ${tojson(representativeQuery)}`,
+        );
         return explain.queryShapeHash;
     }
 
@@ -184,30 +205,35 @@ export class QuerySettingsUtils {
         ignoreRepresentativeQueryFields = [],
     ) {
         this.forceRefresh();
-        const isRunningFCVUpgradeDowngradeSuite = TestData.isRunningFCVUpgradeDowngradeSuite || false;
+        const isRunningFCVUpgradeDowngradeSuite =
+            TestData.isRunningFCVUpgradeDowngradeSuite || false;
 
         // In case 'expectedQueryShapeConfigurations' has no 'representativeQuery' attribute, we do
         // not perform 'queryShapeHash' assertions.
-        const expectedQueryShapeConfigurationsHaveRepresentativeQuery = expectedQueryShapeConfigurations.every(
-            (config) => config.hasOwnProperty("representativeQuery"),
-        );
+        const expectedQueryShapeConfigurationsHaveRepresentativeQuery =
+            expectedQueryShapeConfigurations.every((config) =>
+                config.hasOwnProperty("representativeQuery"),
+            );
         let showQueryShapeHash =
-            expectedQueryShapeConfigurationsHaveRepresentativeQuery && isRunningFCVUpgradeDowngradeSuite;
-        const rewrittenExpectedQueryShapeConfigurations = expectedQueryShapeConfigurations.map((config) => {
-            const {settings, representativeQuery} = config;
-            const rewrittenSettings = this.wrapIndexHintsIntoArrayIfNeeded(settings);
-            if (!isRunningFCVUpgradeDowngradeSuite || !representativeQuery) {
-                return {...config, settings: rewrittenSettings};
-            }
+            expectedQueryShapeConfigurationsHaveRepresentativeQuery &&
+            isRunningFCVUpgradeDowngradeSuite;
+        const rewrittenExpectedQueryShapeConfigurations = expectedQueryShapeConfigurations.map(
+            (config) => {
+                const {settings, representativeQuery} = config;
+                const rewrittenSettings = this.wrapIndexHintsIntoArrayIfNeeded(settings);
+                if (!isRunningFCVUpgradeDowngradeSuite || !representativeQuery) {
+                    return {...config, settings: rewrittenSettings};
+                }
 
-            // If running in FCV upgrade/downgrade suites, the 'representativeQuery' may be
-            // missing. In that case we avoid asserting for 'representativeQuery' equality.
-            // Instead, we ensure that queryShapeHashes are same.
-            return {
-                queryShapeHash: this.getQueryShapeHashFromExplain(representativeQuery),
-                settings: rewrittenSettings,
-            };
-        });
+                // If running in FCV upgrade/downgrade suites, the 'representativeQuery' may be
+                // missing. In that case we avoid asserting for 'representativeQuery' equality.
+                // Instead, we ensure that queryShapeHashes are same.
+                return {
+                    queryShapeHash: this.getQueryShapeHashFromExplain(representativeQuery),
+                    settings: rewrittenSettings,
+                };
+            },
+        );
 
         assert.soonNoExcept(
             () => {
@@ -216,7 +242,10 @@ export class QuerySettingsUtils {
                     ignoreRepresentativeQueryFields,
                     showRepresentativeQuery: !isRunningFCVUpgradeDowngradeSuite,
                 });
-                assert.sameMembers(actualQueryShapeConfigurations, rewrittenExpectedQueryShapeConfigurations);
+                assert.sameMembers(
+                    actualQueryShapeConfigurations,
+                    rewrittenExpectedQueryShapeConfigurations,
+                );
                 return true;
             },
             () =>
@@ -228,7 +257,10 @@ export class QuerySettingsUtils {
         );
 
         if (shouldRunExplain && expectedQueryShapeConfigurationsHaveRepresentativeQuery) {
-            const settingsArray = this.getQuerySettings({showQueryShapeHash, ignoreRepresentativeQueryFields});
+            const settingsArray = this.getQuerySettings({
+                showQueryShapeHash,
+                ignoreRepresentativeQueryFields,
+            });
             for (const {representativeQuery, settings, queryShapeHash} of settingsArray) {
                 if (representativeQuery) {
                     this.assertExplainQuerySettings(representativeQuery, settings, queryShapeHash);
@@ -248,7 +280,11 @@ export class QuerySettingsUtils {
         const explain = assert.commandWorked(this._db.runCommand(explainCmd));
         if (explain) {
             getQueryPlanners(explain).forEach((queryPlanner) => {
-                this.assertEqualSettings(expectedQuerySettings, queryPlanner.querySettings, queryPlanner);
+                this.assertEqualSettings(
+                    expectedQuerySettings,
+                    queryPlanner.querySettings,
+                    queryPlanner,
+                );
             });
 
             if (expectedQueryShapeHash) {
@@ -275,7 +311,9 @@ export class QuerySettingsUtils {
 
         return nodeThatStoresRepresentativeQueries
             .getDB("config")
-            .queryShapeRepresentativeQueries.aggregate([{$replaceRoot: {newRoot: "$representativeQuery"}}])
+            .queryShapeRepresentativeQueries.aggregate([
+                {$replaceRoot: {newRoot: "$representativeQuery"}},
+            ])
             .toArray();
     }
 
@@ -294,7 +332,9 @@ export class QuerySettingsUtils {
         let settingsArray = this.getQuerySettings({showQueryShapeHash: true});
         while (settingsArray.length > 0) {
             const setting = settingsArray.pop();
-            assert.commandWorked(this._adminDB.runCommand({removeQuerySettings: setting.queryShapeHash}));
+            assert.commandWorked(
+                this._adminDB.runCommand({removeQuerySettings: setting.queryShapeHash}),
+            );
         }
         // Check that all setting have indeed been removed.
         this.assertQueryShapeConfiguration([]);
@@ -314,14 +354,19 @@ export class QuerySettingsUtils {
             queryShapeHash = response.queryShapeHash;
             representativeQuery = response.representativeQuery;
 
-            // Assert that the 'expectedQueryShapeConfiguration' is present in the system.
+            // The reply contains the normalized representative query for new settings.
+            const hasRepresentativeQuery = representativeQuery !== undefined;
             const expectedQueryShapeConfiguration = {queryShapeHash, settings: response.settings};
-            if (representativeQuery) {
+            if (hasRepresentativeQuery) {
                 expectedQueryShapeConfiguration.representativeQuery = representativeQuery;
             }
             this.forceRefresh();
             assert.soonNoExcept(() => {
-                const settings = this.getQuerySettings({filter: {queryShapeHash}, showQueryShapeHash: true});
+                const settings = this.getQuerySettings({
+                    filter: {queryShapeHash},
+                    showQueryShapeHash: true,
+                    showRepresentativeQuery: hasRepresentativeQuery,
+                });
                 assert.sameMembers(settings, [expectedQueryShapeConfiguration]);
                 return true;
             });
@@ -378,7 +423,11 @@ export class QuerySettingsUtils {
         try {
             conn = this._db.getMongo();
             originalDelaySeconds = getParameter(conn, "internalQuerySettingsBackfillDelaySeconds");
-            setParameterOnAllNonConfigNodes(conn, "internalQuerySettingsBackfillDelaySeconds", delaySeconds);
+            setParameterOnAllNonConfigNodes(
+                conn,
+                "internalQuerySettingsBackfillDelaySeconds",
+                delaySeconds,
+            );
             return fn();
         } finally {
             if (originalDelaySeconds !== null && conn !== null) {
@@ -426,7 +475,11 @@ export class QuerySettingsUtils {
      * that the settings are in the same format as seen by the server.
      */
     assertEqualSettings(lhs, rhs, message) {
-        assert.docEq(this.wrapIndexHintsIntoArrayIfNeeded(lhs), this.wrapIndexHintsIntoArrayIfNeeded(rhs), message);
+        assert.docEq(
+            this.wrapIndexHintsIntoArrayIfNeeded(lhs),
+            this.wrapIndexHintsIntoArrayIfNeeded(rhs),
+            message,
+        );
     }
 
     /**
@@ -438,7 +491,9 @@ export class QuerySettingsUtils {
 
         // Apply the provided settings for the query.
         if (settings) {
-            assert.commandWorked(this._db.adminCommand({setQuerySettings: query, settings: settings}));
+            assert.commandWorked(
+                this._db.adminCommand({setQuerySettings: query, settings: settings}),
+            );
             // Wait until the settings have taken effect.
             const expectedConfiguration = [this.makeQueryShapeConfiguration(settings, query)];
             this.assertQueryShapeConfiguration(expectedConfiguration);
@@ -447,7 +502,11 @@ export class QuerySettingsUtils {
         const explainCmd = getExplainCommand(this.withoutDollarDB(query));
         const explain = assert.commandWorked(this._db.runCommand(explainCmd));
         const engine = getEngine(explain);
-        assert.eq(engine, expectedEngine, `Expected engine to be ${expectedEngine} but found ${engine}`);
+        assert.eq(
+            engine,
+            expectedEngine,
+            `Expected engine to be ${expectedEngine} but found ${engine}`,
+        );
 
         // Ensure that no $cursor stage exists, which means the whole query got pushed down to find,
         // if 'expectedEngine' is SBE.
@@ -482,7 +541,8 @@ export class QuerySettingsUtils {
         this.assertQueryShapeConfiguration([]);
 
         const type = Object.keys(query)[0];
-        const getRejectCount = () => db.runCommand({serverStatus: 1}).metrics.commands[type].rejected;
+        const getRejectCount = () =>
+            db.runCommand({serverStatus: 1}).metrics.commands[type].rejected;
 
         const rejectBaseline = getRejectCount();
 
@@ -521,7 +581,10 @@ export class QuerySettingsUtils {
 
         // Set reject flag for query under test.
         assert.commandWorked(
-            db.adminCommand({setQuerySettings: {...query, $db: db.getName()}, settings: {reject: true}}),
+            db.adminCommand({
+                setQuerySettings: {...query, $db: db.getName()},
+                settings: {reject: true},
+            }),
         );
 
         // Confirm settings updated.

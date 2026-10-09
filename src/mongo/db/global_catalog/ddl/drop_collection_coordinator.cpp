@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/drop_collection_coordinator.h"
 
@@ -49,7 +23,6 @@
 #include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/sharding_environment/grid.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
@@ -77,9 +50,9 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
                                                       const NamespaceString& nss,
                                                       bool fromMigrate,
                                                       bool dropSystemCollections,
+                                                      bool forceLegacyRefresh,
                                                       const boost::optional<UUID>& expectedUUID,
-                                                      bool requireCollectionEmpty,
-                                                      bool forceLegacyRefresh) {
+                                                      bool requireCollectionEmpty) {
 
     boost::optional<UUID> collectionUUID;
     {
@@ -186,7 +159,7 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
         // Force the refresh of the filtering metadata cache to purge outdated information.
         // The logic below will cause config.cache.collections.<nss> to be dropped and secondary
         // nodes to clean their filtering metadata (once the flushed data get replicated).
-        FilteringMetadataCache::get(opCtx)->forceCollectionPlacementRefresh(opCtx, nss);
+        FilteringMetadataCache::get(opCtx)->forceCollectionMetadataRefresh_DEPRECATED(opCtx, nss);
         FilteringMetadataCache::get(opCtx)->waitForCollectionFlush(opCtx, nss);
     }
 
@@ -274,8 +247,12 @@ void DropCollectionCoordinator::_freezeMigrations(
 
     if (_doc.getCollInfo()) {
         const auto collUUID = _doc.getCollInfo()->getUuid();
-        const auto session = getNewSession(opCtx);
-        sharding_ddl_util::stopMigrations(opCtx, nss(), collUUID, session);
+        sharding_ddl_util::stopMigrations(
+            opCtx,
+            nss(),
+            collUUID,
+            [&] { return getNewSession(opCtx); },
+            _doc.getAuthoritativeMetadataAccessLevel());
     }
 }
 
@@ -283,33 +260,20 @@ void DropCollectionCoordinator::_enterCriticalSection(
     OperationContext* opCtx,
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) {
-    // TODO (SERVER-113003): Drop metadata for untracked collections.
-    const auto collIsTracked = bool(_doc.getCollInfo());
-
     LOGV2_DEBUG(7038100, 2, "Acquiring critical section", logAttrs(nss()));
 
-    ShardsvrParticipantBlock blockCRUDOperationsRequest(nss());
-    blockCRUDOperationsRequest.setBlockType(mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
-    blockCRUDOperationsRequest.setReason(_critSecReason);
-
-    // When shards are authoritative, there is no need to clear the filtering metadata upon
-    // releasing the critical section; the commit phase is responsible for updating the shard
-    // catalog with current information. This flag is evaluated at insertion time because on
-    // secondaries, metadata is cleared during the onDelete of the critical section document.
-    if (collIsTracked &&
-        feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        blockCRUDOperationsRequest.setClearCollMetadata(false);
-    }
-
-    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(
-        opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+    const auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss(),
+        shardIds,
+        mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 
     LOGV2_DEBUG(7038101, 2, "Acquired critical section", logAttrs(nss()));
 }
@@ -372,9 +336,8 @@ void DropCollectionCoordinator::_commitDropCollection(
         sharding_ddl_util::removeQueryAnalyzerMetadata(opCtx, nss(), session);
     }
 
-    bool isAuthoritative = feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-        VersionContext::getDecoration(opCtx),
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
 
     if (collIsTracked) {
         tassert(10644514,
@@ -433,9 +396,9 @@ void DropCollectionCoordinator::_commitDropCollection(
             session,
             fromMigrate,
             false /* dropSystemCollections */,
+            !isAuthoritative /* forceLegacyRefresh */,
             boost::none /* collectionUUID */,
-            false /* requireCollectionEmpty */,
-            !isAuthoritative /* forceLegacyRefresh */);
+            false /* requireCollectionEmpty */);
     };
 
     auto otherParticipants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
@@ -450,8 +413,11 @@ void DropCollectionCoordinator::_commitDropCollection(
     if (collIsTracked) {
         // 3. Insert the effects of the commit into config.placementHistory, if not already present.
         const auto commitTime = [&]() {
-            const auto currentTime = VectorClock::get(opCtx)->getTime();
-            return currentTime.clusterTime().asTimestamp();
+            // Bump the cluster time value before picking it; this ensures that the commitTime is
+            // always strictly greater than the timestamp assigned to the dropCollection op entry of
+            // the notifier shard (a condition necessary for the correct resumability of change
+            // streams during the execution of this DDL).
+            return VectorClockMutable::get(opCtx)->tickClusterTime(1).asTimestamp();
         }();
 
 
@@ -480,33 +446,20 @@ void DropCollectionCoordinator::_exitCriticalSection(
     OperationContext* opCtx,
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) {
-    // TODO (SERVER-113003): Drop metadata for untracked collections.
-    const auto collIsTracked = bool(_doc.getCollInfo());
-
     LOGV2_DEBUG(7038102, 2, "Releasing critical section", logAttrs(nss()));
 
-    ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss());
-    unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-    unblockCRUDOperationsRequest.setReason(_critSecReason);
-
-    // When shards are authoritative, there is no need to clear the filtering metadata upon
-    // releasing the critical section; the commit phase is responsible for updating the shard
-    // catalog (both durable and in-memory) with current information on both primary and secondary
-    // nodes.
-    if (collIsTracked &&
-        feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        unblockCRUDOperationsRequest.setClearCollMetadata(false);
-    }
-
-    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(
-        opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+    const auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss(),
+        shardIds,
+        CriticalSectionBlockTypeEnum::kUnblock,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 
     LOGV2_DEBUG(7038103, 2, "Released critical section", logAttrs(nss()));
 }

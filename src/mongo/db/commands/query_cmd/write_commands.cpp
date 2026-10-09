@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -72,6 +45,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
+#include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
@@ -98,6 +72,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -108,11 +83,12 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(hangInsertBeforeWrite);
 MONGO_FAIL_POINT_DEFINE(hangUpdateBeforeWrite);
 
-void redactTooLongLog(mutablebson::Document* cmdObj, StringData fieldName) {
+void redactTooLongLog(mutablebson::Document* cmdObj, std::string_view fieldName) {
     namespace mmb = mutablebson;
     mmb::Element root = cmdObj->root();
     mmb::Element field = root.findFirstChildNamed(fieldName);
@@ -306,35 +282,45 @@ public:
             auto [preConditions, isTimeseriesLogicalRequest] =
                 timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
                     opCtx, ns(), request(), request().getCollectionUUID());
+
+            // An insert command always has exactly one operation; its QueryStatsMetrics index is 0.
+            auto maybeAttachQueryStatsMetrics = [&](write_ops::InsertCommandReply& reply) {
+                if (request().getIncludeQueryStatsMetrics()) {
+                    std::vector<write_ops::QueryStatsMetrics> metrics;
+                    metrics.emplace_back(0, CurOp::get(opCtx)->debug().getCursorMetrics());
+                    reply.setQueryStatsMetrics(std::move(metrics));
+                }
+            };
+
+            write_ops::InsertCommandReply insertReply;
             if (isTimeseriesLogicalRequest) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
-                    return timeseries::write_ops::performTimeseriesWrites(
+                    insertReply = timeseries::write_ops::performTimeseriesWrites(
                         opCtx, request(), preConditions);
                 } catch (DBException& ex) {
                     ex.addContext(str::stream()
                                   << "time-series insert failed: " << ns().toStringForErrorMsg());
                     throw;
                 }
+            } else {
+                if (hangInsertBeforeWrite.shouldFail([&](const BSONObj& data) {
+                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"sv);
+                        return fpNss == request().getNamespace();
+                    })) {
+                    hangInsertBeforeWrite.pauseWhileSet();
+                }
+
+                auto reply = write_ops_exec::performInserts(opCtx, request(), preConditions);
+                populateReply(opCtx,
+                              !request().getWriteCommandRequestBase().getOrdered(),
+                              request().getDocuments().size(),
+                              std::move(reply),
+                              &insertReply);
             }
 
-            if (hangInsertBeforeWrite.shouldFail([&](const BSONObj& data) {
-                    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
-                    return fpNss == request().getNamespace();
-                })) {
-                hangInsertBeforeWrite.pauseWhileSet();
-            }
-
-            auto reply = write_ops_exec::performInserts(opCtx, request(), preConditions);
-
-            write_ops::InsertCommandReply insertReply;
-            populateReply(opCtx,
-                          !request().getWriteCommandRequestBase().getOrdered(),
-                          request().getDocuments().size(),
-                          std::move(reply),
-                          &insertReply);
-
+            maybeAttachQueryStatsMetrics(insertReply);
             return insertReply;
         } catch (const DBException& ex) {
             NotPrimaryErrorTracker::get(opCtx->getClient()).recordError(ex.code());
@@ -403,17 +389,30 @@ public:
                    const OpMsgRequest& opMsgRequest)
             : InvocationBaseGen(opCtx, command, opMsgRequest), _commandObj(opMsgRequest.body) {
             UpdateOp::validate(request());
+            Variables::validateRuntimeConstantsArePermitted(opCtx,
+                                                            request().getLegacyRuntimeConstants());
 
             invariant(_commandObj.isOwned());
 
             // Extend the lifetime of `updates` to allow asynchronous mirroring.
-            if (auto seq = opMsgRequest.getSequence("updates"_sd); seq && !seq->objs.empty()) {
+            if (auto seq = opMsgRequest.getSequence("updates"sv); seq && !seq->objs.empty()) {
                 // Current design ignores contents of `updates` array except for the first entry.
                 // Assuming identical collation for all elements in `updates`, future design could
                 // use the disjunction primitive (i.e, `$or`) to compile all queries into a single
                 // filter. Such a design also requires a sound way of combining hints.
+                // TODO (SERVER-134509): Make update commands mirror all elements in the updates
+                // array.
                 invariant(seq->objs.front().isOwned());
                 _updateOpObj = seq->objs.front();
+            } else if (_commandObj.hasField("updates")) {
+                // When updates are not sent as a DocumentSequence, extract the first update object
+                // from the command body.
+                // TODO (SERVER-134509): Make update commands mirror all elements in the updates
+                // array.
+                auto updatesArray = _commandObj["updates"].Array();
+                if (!updatesArray.empty()) {
+                    _updateOpObj = updatesArray[0].Obj();
+                }
             }
         }
 
@@ -446,9 +445,6 @@ public:
                 // "filter", "sort", "hint", and "collation" fields are optional.
                 if (update.isEmpty())
                     return;
-
-                // The constructor verifies the following.
-                invariant(update.isOwned());
 
                 if (update.hasField("q"))
                     bob->append("filter", update["q"].Obj());
@@ -506,6 +502,14 @@ public:
                 isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
                 systemCriticalTaskType.emplace(opCtx);
             }
+            // Session collection upserts from internal clients (refreshSessions) must make forward
+            // progress to prevent TooManyLogicalSessions errors under heavy write load. Since this
+            // is for internal clients it does not include loopback requests through DBDirectClient.
+            boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> admissionPriority;
+            if (isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
+                systemCriticalTaskType.reset();
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
+            }
 
             write_ops::UpdateCommandReply updateReply;
             if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
@@ -516,24 +520,31 @@ public:
                 timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
                     opCtx, ns(), request(), request().getCollectionUUID());
 
-            OperationSource source = isTimeseriesLogicalRequest ? OperationSource::kTimeseriesUpdate
-                                                                : OperationSource::kStandard;
-
             long long nModified = 0;
 
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
-            bool isTimeseriesRetryableUpdate = isTimeseriesLogicalRequest &&
+            const bool isTimeseriesRetryableUpdate = isTimeseriesLogicalRequest &&
                 opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction();
-            if (isTimeseriesRetryableUpdate) {
+
+            // If the command is already wrapped by a sharding operation, atomicity is provided at
+            // that level. Do not reenter the transaction path as it will be rejected by the
+            // transaction wrapper.
+            const bool wrappedByShardingRouter = OperationShardingState::isShardingAware(opCtx);
+
+            if (isTimeseriesRetryableUpdate && !wrappedByShardingRouter) {
                 auto executor = getLocalExecutor(opCtx);
                 ON_BLOCK_EXIT([&] {
-                    // Increments the counter if the command contains retries. This is normally done
-                    // within write_ops_exec::performUpdates. But for retryable timeseries updates,
-                    // we should handle the metrics only once at the caller since each statement
-                    // will be run as a separate update command through the internal transaction
-                    // API. See write_ops_exec::performUpdates for more details.
+                    // Increments the counters of retryable writes and if the command contains
+                    // retries, retried writes. This is normally done within
+                    // write_ops_exec::performUpdates. But for retryable timeseries updates, we
+                    // should handle the metrics only once at the caller since each statement will
+                    // be run as a separate update command through the internal transaction API. See
+                    // write_ops_exec::performUpdates for more details.
+                    if (opCtx->isRetryableWrite()) {
+                        RetryableWritesStats::get(opCtx)->incrementRetryableCommandsCount();
+                    }
                     if (!reply.retriedStmtIds.empty()) {
                         RetryableWritesStats::get(opCtx)->incrementRetriedCommandsCount();
                     }
@@ -542,12 +553,15 @@ public:
                     opCtx, ns(), request(), preConditions, executor, &reply);
             } else {
                 if (hangUpdateBeforeWrite.shouldFail([&](const BSONObj& data) {
-                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
+                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"sv);
                         return fpNss == request().getNamespace();
                     })) {
                     hangUpdateBeforeWrite.pauseWhileSet();
                 }
 
+                const OperationSource source = isTimeseriesLogicalRequest
+                    ? OperationSource::kTimeseriesUpdate
+                    : OperationSource::kStandard;
                 reply = write_ops_exec::performUpdates(opCtx, request(), preConditions, source);
             }
 
@@ -728,6 +742,8 @@ public:
                    const OpMsgRequest& opMsgRequest)
             : InvocationBaseGen(opCtx, command, opMsgRequest), _commandObj(opMsgRequest.body) {
             DeleteOp::validate(request());
+            Variables::validateRuntimeConstantsArePermitted(opCtx,
+                                                            request().getLegacyRuntimeConstants());
         }
 
         bool supportsWriteConcern() const final {
@@ -768,6 +784,14 @@ public:
                 isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
                 systemCriticalTaskType.emplace(opCtx);
             }
+            // Session collection deletes from internal clients (removeRecords) must make forward
+            // progress to prevent TooManyLogicalSessions errors under heavy write load. Since this
+            // is for internal clients it does not include loopback requests through DBDirectClient.
+            boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> admissionPriority;
+            if (isSystemCriticalNss && opCtx->getClient()->isInternalClient()) {
+                systemCriticalTaskType.reset();
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
+            }
 
             if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
                 return processFLEDelete(opCtx, request());
@@ -782,11 +806,31 @@ public:
 
 
             auto reply = write_ops_exec::performDeletes(opCtx, request(), preConditions, source);
+
+            // This is populated by 'singleWriteHandler' and moved into the delete reply in
+            // 'postProcessHandler'.
+            std::vector<write_ops::QueryStatsMetrics> queryStatsMetricsVec;
+
+            // Handler to process each 'SingleWriteResult'.
+            auto singleWriteHandler = [&](const SingleWriteResult& opResult, int /*index*/) {
+                if (auto queryStatsMetrics = opResult.getQueryStatsMetrics()) {
+                    queryStatsMetricsVec.emplace_back(queryStatsMetrics->getOriginalOpIndex(),
+                                                      queryStatsMetrics->getMetrics());
+                }
+            };
+
+            auto postProcessHandler = [&]() {
+                if (!queryStatsMetricsVec.empty()) {
+                    deleteReply.setQueryStatsMetrics(std::move(queryStatsMetricsVec));
+                }
+            };
+
             populateReply(opCtx,
                           !request().getWriteCommandRequestBase().getOrdered(),
                           request().getDeletes().size(),
                           std::move(reply),
-                          &deleteReply);
+                          &deleteReply,
+                          PopulateReplyHooks{singleWriteHandler, postProcessHandler});
 
             return deleteReply;
         } catch (const DBException& ex) {
@@ -842,6 +886,7 @@ public:
 
             write_ops_exec::explainDelete(opCtx,
                                           deleteRequest,
+                                          &request(),
                                           isTimeseriesLogicalRequest,
                                           request().getSerializationContext(),
                                           _commandObj,

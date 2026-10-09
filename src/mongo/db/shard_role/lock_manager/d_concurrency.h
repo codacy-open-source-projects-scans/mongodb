@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -44,12 +18,22 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
 class Lock {
 public:
+    /**
+     * Callback type invoked after a lock request has been enqueued but before waiting for it
+     * to be granted. This allows callers to perform actions (e.g. killing unprepared
+     * transactions) while the lock request is in the queue, preventing new conflicting lock
+     * requests from being granted ahead of this one.
+     *
+     * Only invoked when the lock is contended (lockBegin returns LOCK_WAITING).
+     */
+    using LockEnqueuedAction = std::function<void(OperationContext*)>;
+
     /**
      * General purpose RAII wrapper for a resource managed by the lock manager
      *
@@ -184,6 +168,25 @@ public:
         bool isLocked() const {
             return _result == LOCK_OK;
         }
+
+        /**
+         * Deregisters the replication intent declared by this lock and returns it, or returns
+         * boost::none if none was declared. The caller is responsible for stashing the returned
+         * intent and handing it back to reacquireIntent().
+         *
+         * Used when yielding. A yielded operation releases its locks through the Locker, which
+         * bypasses this object, so without this the intent would outlive the resources it
+         * represents and keep blocking replication state transitions.
+         */
+        boost::optional<rss::consensus::IntentRegistry::Intent> releaseIntent();
+
+        /**
+         * Re-declares an intent previously released by releaseIntent(). Throws
+         * InterruptedDueToReplStateChange, InterruptedAtShutdown or NotWritablePrimary if that
+         * intent is no longer compatible with the current replication state, in which case the
+         * operation must not resume and this lock is left without an intent.
+         */
+        void reacquireIntent(rss::consensus::IntentRegistry::Intent intent);
 
     private:
         /**
@@ -323,6 +326,14 @@ public:
             return _mode;
         }
 
+        /**
+         * The global lock this DBLock acquired on our behalf. Never null for a constructed DBLock.
+         */
+        GlobalLock* getGlobalLock() {
+            invariant(_globalLock);
+            return _globalLock.get_ptr();
+        }
+
     private:
         const ResourceId _id;
         OperationContext* const _opCtx;
@@ -361,6 +372,18 @@ public:
         CollectionLock(OperationContext* opCtx,
                        const NamespaceString& ns,
                        LockMode mode,
+                       Date_t deadline = Date_t::max());
+
+        /**
+         * Constructs a CollectionLock with an enqueue action callback. When the lock is
+         * contended, the callback is invoked after the lock request is enqueued but before
+         * waiting for it to be granted. Only MODE_S and MODE_X are supported when a callback
+         * is provided.
+         */
+        CollectionLock(OperationContext* opCtx,
+                       const NamespaceString& ns,
+                       LockMode mode,
+                       LockEnqueuedAction lockEnqueuedAction,
                        Date_t deadline = Date_t::max());
 
         CollectionLock(CollectionLock&&);

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -33,8 +7,10 @@
 #include "mongo/util/modules.h"
 
 #include <ostream>
+#include <string_view>
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 /**
  * The sbe::MatchPath class is used by SBE to represent field paths for MatchExpressions. This class
@@ -50,7 +26,7 @@ public:
     MatchPath(const FieldRef& other) : FieldRef(other) {}
     MatchPath(FieldRef&& other) : FieldRef(other) {}
 
-    explicit MatchPath(StringData path) : FieldRef(path) {}
+    explicit MatchPath(std::string_view path) : FieldRef(path) {}
 
     MatchPath& operator=(const FieldRef& other) {
         *static_cast<FieldRef*>(this) = other;
@@ -67,36 +43,36 @@ public:
         return n ? n : 1;
     }
 
-    StringData getPart(FieldIndex i) const {
-        return FieldRef::numParts() == 0 && i == 0 ? ""_sd : FieldRef::getPart(i);
+    std::string_view getPart(FieldIndex i) const {
+        return FieldRef::numParts() == 0 && i == 0 ? ""sv : FieldRef::getPart(i);
     }
 
-    StringData operator[](int index) const {
+    std::string_view operator[](int index) const {
         return getPart(index);
     }
 
-    bool equalsDottedField(StringData other) const {
-        return FieldRef::numParts() == 0 ? other == ""_sd : FieldRef::equalsDottedField(other);
+    bool equalsDottedField(std::string_view other) const {
+        return FieldRef::numParts() == 0 ? other == ""sv : FieldRef::equalsDottedField(other);
     }
 
-    StringData dottedField(FieldIndex offsetFromStart = 0) const {
+    std::string_view dottedField(FieldIndex offsetFromStart = 0) const {
         if (FieldRef::numParts() == 0) {
-            return (offsetFromStart == 0) ? ""_sd : StringData();
+            return (offsetFromStart == 0) ? ""sv : std::string_view();
         }
 
         return FieldRef::dottedField(offsetFromStart);
     }
 
-    StringData dottedSubstring(FieldIndex startPart, FieldIndex endPart) const {
+    std::string_view dottedSubstring(FieldIndex startPart, FieldIndex endPart) const {
         if (!FieldRef::numParts()) {
-            return (startPart == 0 && endPart == 1) ? ""_sd : StringData();
+            return (startPart == 0 && endPart == 1) ? ""sv : std::string_view();
         }
 
         return FieldRef::dottedSubstring(startPart, endPart);
     }
 
     bool isPathComponentEmpty(FieldIndex i) const {
-        return getPart(i) == ""_sd;
+        return getPart(i) == ""sv;
     }
 
     bool hasEmptyPathComponents() const {

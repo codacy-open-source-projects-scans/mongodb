@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/transport/asio/asio_transport_layer.h"
@@ -53,6 +27,7 @@
 #include "mongo/transport/transport_options_gen.h"
 #include "mongo/util/active_exception_witness.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/executor_stats.h"
 #include "mongo/util/net/hostandport.h"
@@ -311,7 +286,7 @@ private:
 
     asio::io_context _ioContext;
 
-    AtomicWord<bool> _closedForScheduling{false};
+    Atomic<bool> _closedForScheduling{false};
 };
 
 AsioTransportLayer::Options::Options(const ServerGlobalParams* params)
@@ -392,6 +367,16 @@ AsioTransportLayer::AsioTransportLayer(const AsioTransportLayer::Options& opts,
                                        std::unique_ptr<SessionManager> sessionManager)
     : _ingressReactor(std::make_shared<AsioReactor>()),
       _egressReactor(std::make_shared<AsioReactor>()),
+      _tlsHandshakePool([] {
+          ThreadPool::Options opts;
+          opts.poolName = "TLSHandshakePool";
+          opts.threadNamePrefix = "TLSHandshake";
+          opts.minThreads = 1;
+          opts.maxThreads = 1;
+          auto pool = std::make_shared<ThreadPool>(std::move(opts));
+          pool->startup();
+          return pool;
+      }()),
       _listenerInterfaceMainPort(
           std::make_unique<ListenerInterface>(_mutex, std::make_shared<AsioReactor>(), this)),
       _listenerInterfacePriorityPort(
@@ -416,7 +401,7 @@ struct AsioTransportLayer::AcceptorRecord {
     GenericAcceptor acceptor;
     // Tracks the amount of incoming connections waiting to be accepted by the server on this
     // acceptor.
-    AtomicWord<int> backlogQueueDepth{0};
+    Atomic<int> backlogQueueDepth{0};
 };
 
 class WrappedEndpoint {
@@ -925,7 +910,7 @@ StatusWith<std::shared_ptr<Session>> AsioTransportLayer::connect(
     Milliseconds dnsResolveLatency = Date_t::now() - timeBefore;
     _dnsResolveStatsMillis.record(durationCount<Milliseconds>(dnsResolveLatency));
     if (dnsResolveLatency > kSlowOperationThreshold) {
-        networkCounter.incrementNumSlowDNSOperations();
+        globalNetworkCounter().incrementNumSlowDNSOperations();
     }
 
     if (!swEndpoints.isOK()) {
@@ -991,11 +976,11 @@ StatusWith<std::shared_ptr<Session>> AsioTransportLayer::connect(
 #endif
 
         Date_t timeBefore = Date_t::now();
-        auto sslStatus = session->handshakeSSLForEgress(peer, nullptr).getNoThrow();
+        auto sslStatus = session->handshakeSSLForEgress(peer).getNoThrow();
         Date_t timeAfter = Date_t::now();
 
         if (timeAfter - timeBefore > kSlowOperationThreshold) {
-            networkCounter.incrementNumSlowSSLOperations();
+            globalNetworkCounter().incrementNumSlowSSLOperations();
         }
 
         if (finishLine->arriveStrongly()) {
@@ -1126,7 +1111,7 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
               peer(std::move(peer)),
               reactor(reactor) {}
 
-        AtomicWord<bool> done{false};
+        Atomic<bool> done{false};
         Promise<std::shared_ptr<Session>> promise;
 
         std::mutex mutex;
@@ -1210,7 +1195,7 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
                                   "DNS resolution while connecting to peer was slow",
                                   "peer"_attr = connector->peer,
                                   "duration"_attr = resolveLatency);
-                    networkCounter.incrementNumSlowDNSOperations();
+                    globalNetworkCounter().incrementNumSlowDNSOperations();
                 }
 
                 std::lock_guard<std::mutex> lk(connector->mutex);
@@ -1265,8 +1250,7 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
                     return sslStatus;
                 }
                 Date_t timeBefore = Date_t::now();
-                return connector->session
-                    ->handshakeSSLForEgress(connector->peer, connector->reactor)
+                return connector->session->handshakeSSLForEgress(connector->peer)
                     .then([connector, timeBefore, connectionMetrics] {
                         const auto duration = Date_t::now() - timeBefore;
                         LOGV2_DEBUG(9484012,
@@ -1278,7 +1262,7 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
                         connectionMetrics->onTLSHandshakeFinished();
 
                         if (duration > kSlowOperationThreshold) {
-                            networkCounter.incrementNumSlowSSLOperations();
+                            globalNetworkCounter().incrementNumSlowSSLOperations();
                         }
                         return Status::OK();
                     });
@@ -1484,7 +1468,9 @@ void AsioTransportLayer::appendStatsForServerStatus(BSONObjBuilder* bob) const {
     dnsStatsBuilder.done();
 }
 
-void AsioTransportLayer::appendStatsForFTDC(BSONObjBuilder&) const {}
+void AsioTransportLayer::appendStatsForFTDC(BSONObjBuilder& bob) const {
+    bob.append("numSelfConnections", _numNonUDSSelfConnections.get());
+}
 
 Status AsioTransportLayer::start() {
     std::unique_lock lk(_mutex);
@@ -1530,6 +1516,9 @@ void AsioTransportLayer::shutdown() {
 
     _timerService->stop();
 
+    _tlsHandshakePool->shutdown();
+    _tlsHandshakePool->join();
+
     if (_sessionManager) {
         LOGV2(4784923, "Shutting down the ASIO transport SessionManager");
         if (!_sessionManager->shutdown(kSessionShutdownTimeout)) {
@@ -1565,6 +1554,10 @@ void AsioTransportLayer::stopAcceptingSessionsWithLock(std::unique_lock<std::mut
 
 void AsioTransportLayer::stopAcceptingSessions() {
     stopAcceptingSessionsWithLock(std::unique_lock(_mutex));
+}
+
+ExecutorPtr AsioTransportLayer::tlsHandshakePool() const {
+    return _tlsHandshakePool;
 }
 
 ReactorHandle AsioTransportLayer::getReactor(WhichReactor which) {
@@ -1642,7 +1635,7 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
             TcpInfoOption tcpi{};
             peerSocket.get_option(tcpi);
             if (tcpi->tcpi_options & TCPI_OPT_SYN_DATA)
-                networkCounter.acceptedTFOIngress();
+                globalNetworkCounter().acceptedTFOIngress();
         } catch (const asio::system_error&) {
         }
 #endif
@@ -1652,9 +1645,20 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
             _acceptConnection(acceptor);
         });
 
+
+        constexpr static auto logOnError = [](const DBException& e) {
+            LOGV2_WARNING(23023, "Error accepting new connection", "error"_attr = e);
+        };
+
         try {
             std::shared_ptr<AsioSession> session(
                 new SyncAsioSession(this, std::move(peerSocket), true));
+            // Do not count UDS connections towards the number of self connections
+            if ((session->remote().isLocalHost() ||
+                 session->local().host() == session->remote().host()) &&
+                !isUnixDomainSocket(session->remote().host())) {
+                _numNonUDSSelfConnections.increment();
+            }
             if (session->isConnectedToLoadBalancerPort() ||
                 session->isConnectedToProxyUnixSocket()) {
                 // This session is not counted towards the number of accepted connections until the
@@ -1678,8 +1682,7 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
                         "rejected"_attr = _discardedDueToMaximumPendingOnProxyHeader.get());
                     return;
                 }
-                if (session->isConnectedToProxyUnixSocket() &&
-                    gProxyUnixSocketCheckPermissions.loadRelaxed()) {
+                if (session->isConnectedToProxyUnixSocket()) {
                     Status status = session->validateProxyUnixSocketPeerPermissions();
                     if (status.code() == ErrorCodes::Unauthorized) {
                         static logv2::SeveritySuppressor suppressor{Seconds(10),
@@ -1705,7 +1708,11 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
                     .getAsync([this, session = std::move(session), t = std::move(token)](Status s) {
                         if (s.isOK()) {
                             invariant(!!_sessionManager);
-                            _sessionManager->startSession(std::move(session));
+                            try {
+                                _sessionManager->startSession(std::move(session));
+                            } catch (const DBException& e) {
+                                logOnError(e);
+                            }
                         }
                         // We will release the token (i.e. `t`) as we leave this function.
                     });
@@ -1719,7 +1726,7 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
                     5746600, "Error accepting new connection", "error"_attr = e.code().message());
             }
         } catch (const DBException& e) {
-            LOGV2_WARNING(23023, "Error accepting new connection", "error"_attr = e);
+            logOnError(e);
         }
     };
 
@@ -1728,6 +1735,50 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
     _trySetListenerSocketBacklogQueueDepth(acceptor);
 
     acceptor.async_accept(*_ingressReactor, std::move(acceptCb));
+}
+
+std::optional<std::vector<SessionStats>> AsioTransportLayer::collectReplicationSessionStats() {
+    std::scoped_lock lock(_replicationSessionLock);
+    std::vector<SessionStats> stats;
+    std::erase_if(_replicationSessions,
+                  [](const std::weak_ptr<AsioSession>& wp) { return wp.expired(); });
+    stats.reserve(_replicationSessions.size());
+#ifdef __linux__
+    for (const auto& wp : _replicationSessions) {
+        if (const auto sp = wp.lock()) {
+            try {
+                auto& socket = sp->getSocket();
+                TcpInfoOption tcpi;
+                asio::socket_base::receive_buffer_size rcvSize;
+                asio::socket_base::bytes_readable rcvBytes;
+                socket.get_option(tcpi);
+                socket.io_control(rcvBytes);
+                socket.get_option(rcvSize);
+                stats.push_back({.congestionWindowSizeBytes = tcpi->tcpi_snd_cwnd,
+                                 .receiveBufferSizeBytes = rcvSize.value(),
+                                 .receiveBufferBytes = static_cast<int64_t>(rcvBytes.get())});
+            } catch (const asio::system_error& e) {
+                static logv2::SeveritySuppressor suppressor{
+                    Seconds(10), logv2::LogSeverity::Warning(), logv2::LogSeverity::Debug(2)};
+                LOGV2_DEBUG(13510401,
+                            suppressor().toInt(),
+                            "Error getting replication socket information",
+                            "error"_attr = e.what());
+                return {};
+            }
+        }
+    }
+    return stats;
+#else
+    return {};
+#endif
+}
+
+void AsioTransportLayer::registerReplicationSession(std::shared_ptr<Session> session) {
+    std::scoped_lock lock(_replicationSessionLock);
+    const auto asioSession = dynamic_pointer_cast<AsioSession>(session);
+    invariant(asioSession, "All replication sessions should be AsioSessions");
+    _replicationSessions.push_back(std::move(asioSession));
 }
 
 void AsioTransportLayer::_trySetListenerSocketBacklogQueueDepth(GenericAcceptor& acceptor) {

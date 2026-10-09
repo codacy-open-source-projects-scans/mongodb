@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/transport/message_compressor_manager.h"
@@ -58,6 +32,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,6 +45,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const auto assertOk = [](auto&& sw) {
     ASSERT(sw.isOK());
@@ -108,7 +84,7 @@ void checkNegotiationResult(const BSONObj& result, const std::vector<std::string
     }
 }
 
-void checkServerNegotiation(const boost::optional<std::vector<StringData>>& input,
+void checkServerNegotiation(const boost::optional<std::vector<std::string_view>>& input,
                             const std::vector<std::string>& expected) {
     auto registry = buildRegistry();
     MessageCompressorManager manager(&registry);
@@ -130,7 +106,7 @@ void checkFidelity(const Message& msg, std::unique_ptr<MessageCompressorBase> co
 
     MessageCompressorManager mgr(&registry);
     BSONObjBuilder negotiatorOut;
-    std::vector<StringData> negotiator({compressorName});
+    std::vector<std::string_view> negotiator({compressorName});
     mgr.serverNegotiate(negotiator, &negotiatorOut);
     checkNegotiationResult(negotiatorOut.done(), {compressorName});
 
@@ -203,7 +179,7 @@ void checkUndersize(const Message& compressedMsg,
 
     MessageCompressorManager mgr(&registry);
     BSONObjBuilder negotiatorOut;
-    std::vector<StringData> negotiator({compressorName});
+    std::vector<std::string_view> negotiator({compressorName});
     mgr.serverNegotiate(negotiator, &negotiatorOut);
     checkNegotiationResult(negotiatorOut.done(), {compressorName});
 
@@ -230,22 +206,22 @@ TEST(MessageCompressorManager, NoCompressionRequested) {
 }
 
 TEST(MessageCompressorManager, NormalCompressionRequested) {
-    std::vector<StringData> input{"noop"_sd};
+    std::vector<std::string_view> input{"noop"sv};
     checkServerNegotiation(input, {"noop"});
 }
 
 TEST(MessageCompressorManager, BadCompressionRequested) {
-    std::vector<StringData> input{"fakecompressor"_sd};
+    std::vector<std::string_view> input{"fakecompressor"sv};
     checkServerNegotiation(input, {});
 }
 
 TEST(MessageCompressorManager, BadAndGoodCompressionRequested) {
-    std::vector<StringData> input{"fakecompressor"_sd, "noop"_sd};
+    std::vector<std::string_view> input{"fakecompressor"sv, "noop"sv};
     checkServerNegotiation(input, {"noop"});
 }
 
 // Transitional: Parse BSON "isMaster"-like docs for compressor lists.
-boost::optional<std::vector<StringData>> parseBSON(BSONObj input) {
+boost::optional<std::vector<std::string_view>> parseBSON(BSONObj input) {
     auto elem = input["compression"];
     if (!elem) {
         return boost::none;
@@ -255,7 +231,7 @@ boost::optional<std::vector<StringData>> parseBSON(BSONObj input) {
             str::stream() << "'compression' is not an array: " << elem,
             elem.type() == BSONType::array);
 
-    std::vector<StringData> ret;
+    std::vector<std::string_view> ret;
     for (const auto& e : elem.Obj()) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "'compression' element is not a string: " << e,
@@ -538,7 +514,7 @@ public:
         return out;
     }
 
-    static std::vector<uint8_t> strVec(StringData s) {
+    static std::vector<uint8_t> strVec(std::string_view s) {
         return std::vector<uint8_t>(s.begin(), s.end());
     }
 

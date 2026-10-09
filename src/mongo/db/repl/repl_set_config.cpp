@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/repl_set_config.h"
@@ -53,6 +27,7 @@
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -89,7 +64,7 @@ namespace {
 
 const std::string kStepDownCheckWriteConcernModeName = "$stepDownCheck";
 
-bool isValidCIDRRange(StringData host) {
+bool isValidCIDRRange(std::string_view host) {
     return CIDR::parse(host).isOK();
 }
 
@@ -410,6 +385,16 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                                     << kMaxVotingMembers);
     }
 
+    if (getSettings()->getElectionTimeoutMillis() <= getSettings()->getHeartbeatIntervalMillis()) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream()
+                          << "electionTimeoutMillis (" << getSettings()->getElectionTimeoutMillis()
+                          << ") must be greater than heartbeatIntervalMillis ("
+                          << getSettings()->getHeartbeatIntervalMillis()
+                          << ") to allow at least one heartbeat before the election "
+                             "timeout expires");
+    }
+
     if (electableCount == 0) {
         return Status(ErrorCodes::BadValue,
                       "Replica set configuration must contain at least "
@@ -595,11 +580,12 @@ bool ReplSetConfig::isLocalHostAllowed() const {
     return getMembers().begin()->getHostAndPort().isLocalHost();
 }
 
-ReplSetTag ReplSetConfig::findTag(StringData key, StringData value) const {
+ReplSetTag ReplSetConfig::findTag(std::string_view key, std::string_view value) const {
     return _tagConfig.findTag(key, value);
 }
 
-StatusWith<ReplSetTagPattern> ReplSetConfig::findCustomWriteMode(StringData patternName) const {
+StatusWith<ReplSetTagPattern> ReplSetConfig::findCustomWriteMode(
+    std::string_view patternName) const {
     // The string "majority" corresponds to the internal "$majority" custom write mode
     if (patternName == WriteConcernOptions::kMajority) {
         patternName = kMajorityWriteConcernModeName;

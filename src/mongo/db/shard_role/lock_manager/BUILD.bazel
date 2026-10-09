@@ -26,7 +26,7 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:server_options_servers",
         "//src/mongo/db/commands/server_status:server_status_core",
-        "//src/mongo/db/query/query_stats",
+        "//src/mongo/db/storage:execution_context",
         "//src/mongo/db/storage:recovery_unit_base",
         "//src/mongo/util:log_and_backoff",
     ],
@@ -47,6 +47,8 @@ mongo_cc_library(
     deps = [
         ":flow_control_ticketholder",
         "//src/mongo/db:server_base",
+        "//src/mongo/db/admission:flow_control_parameters",
+        "//src/mongo/db/admission:flow_control_rate_limiter",
         "//src/mongo/db/admission/execution_control:execution_admission_context",
         "//src/mongo/db/admission/execution_control:ticketing_system",
         "//src/mongo/db/admission/ticketing:ticketholder",
@@ -91,6 +93,7 @@ mongo_cc_unit_test(
 mongo_cc_unit_test(
     name = "lock_manager_test",
     srcs = [
+        "fast_list_based_map_test.cpp",
         "fast_map_noalloc_test.cpp",
         "fill_locker_info_test.cpp",
         "lock_manager_test.cpp",

@@ -1,38 +1,15 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/extension/sdk/assert_util.h"
 #include "mongo/db/extension/sdk/extension_factory.h"
 #include "mongo/db/extension/sdk/query_shape_opts_handle.h"
 #include "mongo/db/extension/sdk/test_extension_util.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo::extension::sdk {
 
@@ -90,7 +67,7 @@ protected:
 };
 
 /**
- * Default AggStageAstNode implementation for a stage that binds to type 'LogicalStageType'.
+ * Default AggStageAstNode implementation for a stage that promotes to type 'LogicalStageType'.
  */
 template <typename LogicalStageType>
 class TestAstNode : public sdk::AggStageAstNode {
@@ -98,7 +75,7 @@ public:
     TestAstNode(std::string_view stageName, const mongo::BSONObj& arguments)
         : sdk::AggStageAstNode(stageName), _arguments(arguments.getOwned()) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<LogicalStageType>(getName(), _arguments);
     };
@@ -164,7 +141,12 @@ struct StringLiteral {
  * 'ParseNodeType'. If 'ExpectEmptyStageDefinition' is true, the stage input will be validated
  * during parsing to ensure that it is an empty object.
  *
- * Supports custom validation via validate() method override.
+ * The default parse() validates the stage definition and constructs 'ParseNodeType' (see parse()
+ * for how), covering the common case where parsing is just validate-then-construct. Two extension
+ * points let a descriptor customize this without reimplementing the whole flow:
+ *   - Override validate() to add argument checks that run before the parse node is constructed.
+ *   - Override parse() when construction itself needs custom logic (transforming the arguments,
+ *     choosing between parse nodes, etc.); 'ParseNodeType' is still the declared parse node type.
  *
  * This can be instantiated using a stage name constant or with the stage name as an inline string
  * literal: using GroupStageDescriptor = TestStageDescriptor<"$group", GroupParseNode>;
@@ -179,14 +161,32 @@ public:
 
     TestStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
 
+    /**
+     * Validates the stage definition, then builds the parse node from whichever constructor
+     * 'ParseNodeType' provides: a (name, arguments) constructor is preferred, otherwise a default
+     * constructor. A parse node with neither cannot be built generically, so its descriptor must
+     * override parse() -- the tassert flags the case where one forgot to.
+     */
     std::unique_ptr<sdk::AggStageParseNode> parse(mongo::BSONObj stageBson) const override {
         auto arguments =
             sdk::validateStageDefinition(stageBson, kStageName, ExpectEmptyStageDefinition);
         validate(arguments);
-        return std::make_unique<ParseNodeType>(kStageName, arguments);
+        if constexpr (std::is_constructible_v<ParseNodeType, std::string, mongo::BSONObj>) {
+            return std::make_unique<ParseNodeType>(kStageName, arguments);
+        } else if constexpr (std::is_default_constructible_v<ParseNodeType>) {
+            return std::make_unique<ParseNodeType>();
+        } else {
+            sdk_tasserted(11409200, "TestStageDescriptor subclass must override parse()");
+            return nullptr;  // sdk_tasserted always throws.
+        }
     }
 
     virtual void validate(const mongo::BSONObj& arguments) const {}
+
+    // Test stages are user-facing by default; internal-only test stages override this.
+    ::MongoExtensionClientType getClientType() const override {
+        return ::kMongoExtensionClientTypeAny;
+    }
 };
 }  // namespace mongo::extension::sdk
 
@@ -212,7 +212,7 @@ namespace sdk = mongo::extension::sdk;
     };
 /*
  * Defines a default AstNode class implementation with the name <ExtensionName>AstNode. This class
- * will bind() to <ExtensionName>LogicalStage (which must also exist).
+ * will promote() to <ExtensionName>LogicalStage (which must also exist).
  */
 #define DEFAULT_AST_NODE(ExtensionName)                                                     \
     class ExtensionName##AstNode : public sdk::TestAstNode<ExtensionName##LogicalStage> {   \

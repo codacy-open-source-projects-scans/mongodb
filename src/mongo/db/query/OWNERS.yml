@@ -136,9 +136,12 @@ filters:
     approvers:
       - 10gen/query-optimization
       - 10gen/query-execution
-  - "query_knob_*":
+  - "query_knob_descriptors_optimization.h":
     approvers:
       - 10gen/query-optimization
+  - "query_knob_descriptors_execution.h":
+    approvers:
+      - 10gen/query-execution
   - "query_execution_knobs*":
     approvers:
       - 10gen/query-execution
@@ -151,6 +154,9 @@ filters:
   - "query_request*":
     approvers:
       - 10gen/query-optimization
+  - "query_solution_analyzer*":
+    approvers:
+      - 10gen/query-execution
   - "query_test_service_context.*":
     approvers:
       - 10gen/query-optimization
@@ -182,6 +188,9 @@ filters:
   - "record_id_*":
     approvers:
       - 10gen/query-optimization
+  - "max_estimated_scan_bytes_metrics*":
+    approvers:
+      - 10gen/query-execution
   - "restore_context*":
     approvers:
       - 10gen/query-optimization
@@ -224,9 +233,15 @@ filters:
   - "*plan_executor*":
     approvers:
       - 10gen/query-execution-classic
+  - "plan_executor_sbe*":
+    approvers:
+      - 10gen/query-execution-sbe
   - "plan_insert_listener*":
     approvers:
       - 10gen/query-execution-classic
+  - "write_conflict_backoff*":
+    approvers:
+      - 10gen/query-execution-write-exec
   - "sbe*":
     approvers:
       - 10gen/query-execution-sbe
@@ -239,7 +254,7 @@ filters:
   - "bind_input_params*":
     approvers:
       - 10gen/query-optimization
-  - "partitioned_cache.h":
+  - "partitioned_cache*":
     approvers:
       - 10gen/query-optimization
   - "canonical_query*":
@@ -288,3 +303,6 @@ filters:
     approvers:
       - 10gen/query-optimization
       - 10gen/query-execution
+  - "clustered_collection_scan*":
+    approvers:
+      - 10gen/query-optimization

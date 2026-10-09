@@ -1,45 +1,68 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/memory_tracking/memory_usage_tracker.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/log_capture.h"
 #include "mongo/unittest/unittest.h"
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace {
+
+using namespace std::literals::string_view_literals;
+
+// Reads the process-wide metrics.query.operationsFailedDueToMemoryLimit counter out of the
+// serverStatus metric tree. We navigate to and serialize only this one metric (rather than
+// appending the entire tree) since other registered metrics may require a running global
+// ServiceContext. Returns none when the metric is absent, e.g. on build variants without
+// OpenTelemetry.
+boost::optional<long long> readOperationsFailedDueToMemoryLimit() {
+    const MetricTree::ChildMap* children = &globalMetricTreeSet()[ClusterRole::None].children();
+    const MetricTree::TreeNode* leaf = nullptr;
+    for (std::string_view component :
+         {"metrics"sv, "query"sv, "operationsFailedDueToMemoryLimit"sv}) {
+        auto it = children->find(component);
+        if (it == children->end()) {
+            return boost::none;
+        }
+        if (component == "operationsFailedDueToMemoryLimit"sv) {
+            leaf = &it->second;
+            break;
+        }
+        if (!it->second.isSubtree()) {
+            return boost::none;
+        }
+        children = &it->second.getSubtree()->children();
+    }
+    if (!leaf || leaf->isSubtree()) {
+        return boost::none;
+    }
+
+    BSONObjBuilder bob;
+    leaf->getMetric()->appendTo(bob, "operationsFailedDueToMemoryLimit");
+    BSONObj obj = bob.obj();
+    BSONElement el = obj.getField("operationsFailedDueToMemoryLimit");
+    if (el.eoo()) {
+        return boost::none;
+    }
+    return el.Long();
+}
+
 
 class MemoryUsageTrackerTest : public unittest::Test {
 public:
     static constexpr auto kDefaultMax = 1 * 1024;  // 1KB max.
     MemoryUsageTrackerTest()
-        : _tracker(false /** allowDiskUse */, kDefaultMax), _funcTracker(_tracker["funcTracker"]) {}
+        : _tracker(false /** allowDiskUse */, MemoryUsageLimit{kDefaultMax}),
+          _funcTracker(_tracker["funcTracker"]) {}
 
 
     MemoryUsageTracker _tracker;
@@ -56,8 +79,8 @@ TEST_F(MemoryUsageTrackerTest, FreshMemoryUsageTrackerInitializedCorrectly) {
 
     ASSERT_EQ(freshMemoryUsageTracker.inUseTrackedMemoryBytes(), 0);
     ASSERT_EQ(freshMemoryUsageTracker.peakTrackedMemoryBytes(), 0);
-    ASSERT_EQ(freshMemoryUsageTracker.maxAllowedMemoryUsageBytes(),
-              _tracker.maxAllowedMemoryUsageBytes());
+    ASSERT_EQ(freshMemoryUsageTracker.maxAllowedMemoryUsageBytes(nullptr),
+              _tracker.maxAllowedMemoryUsageBytes(nullptr));
 }
 
 TEST_F(MemoryUsageTrackerTest, FreshSimpleMemoryUsageTrackerInitializedCorrectly) {
@@ -71,14 +94,15 @@ TEST_F(MemoryUsageTrackerTest, FreshSimpleMemoryUsageTrackerInitializedCorrectly
 
     ASSERT_EQ(freshSimpleMemoryUsageTracker.inUseTrackedMemoryBytes(), 0);
     ASSERT_EQ(freshSimpleMemoryUsageTracker.peakTrackedMemoryBytes(), 0);
-    ASSERT_EQ(freshSimpleMemoryUsageTracker.maxAllowedMemoryUsageBytes(),
-              _funcTracker.maxAllowedMemoryUsageBytes());
+    ASSERT_EQ(freshSimpleMemoryUsageTracker.maxAllowedMemoryUsageBytes(nullptr),
+              _funcTracker.maxAllowedMemoryUsageBytes(nullptr));
 }
 
 TEST_F(MemoryUsageTrackerTest, FreshMemoryUsageTrackerCopiesBaseCorrectly) {
-    SimpleMemoryUsageTracker memTrackerA =
-        SimpleMemoryUsageTracker(nullptr, _tracker.maxAllowedMemoryUsageBytes());
-    MemoryUsageTracker memTrackerB = MemoryUsageTracker(&memTrackerA, false, kDefaultMax);
+    SimpleMemoryUsageTracker memTrackerA = SimpleMemoryUsageTracker(
+        nullptr, MemoryUsageLimit{_tracker.maxAllowedMemoryUsageBytes(nullptr)});
+    MemoryUsageTracker memTrackerB =
+        MemoryUsageTracker(&memTrackerA, false, MemoryUsageLimit{kDefaultMax});
     MemoryUsageTracker memTrackerC = memTrackerB.makeFreshMemoryUsageTracker();
 
     memTrackerB.add(50LL);
@@ -265,6 +289,171 @@ TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenCanBeStoredInVector) {
     assertZeroMemory();
 }
 
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenAddUpdatesCurrentAndTracker) {
+    MemoryUsageToken token{50LL, &_funcTracker};
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 50LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 50LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 50LL);
+
+    token.add(30LL);
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 80LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 80LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 80LL);
+    ASSERT_EQ(_tracker.peakTrackedMemoryBytes(), 80LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenAddNegativeDecreasesCurrentAndTracker) {
+    MemoryUsageToken token{80LL, &_funcTracker};
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 80LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 80LL);
+
+    token.add(-30LL);
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 50LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 50LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 50LL);
+    ASSERT_EQ(_tracker.peakTrackedMemoryBytes(), 80LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenAddWithNullTrackerIsNoOp) {
+    MemoryUsageToken token;
+    token.add(100LL);
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 0LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenSetIncreasesCurrentAndTracker) {
+    MemoryUsageToken token{50LL, &_funcTracker};
+    token.set(80LL);
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 80LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 80LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 80LL);
+    ASSERT_EQ(_tracker.peakTrackedMemoryBytes(), 80LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenSetDecreasesCurrentAndTracker) {
+    MemoryUsageToken token{80LL, &_funcTracker};
+    token.set(30LL);
+    ASSERT_EQ(token.getCurrentMemoryUsageBytes(), 30LL);
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 30LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 30LL);
+    ASSERT_EQ(_tracker.peakTrackedMemoryBytes(), 80LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenSetReleasesCorrectAmountOnDestruction) {
+    {
+        MemoryUsageToken token{50LL, &_funcTracker};
+        token.set(80LL);
+        ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 80LL);
+    }
+    ASSERT_EQ(_funcTracker.inUseTrackedMemoryBytes(), 0LL);
+    ASSERT_EQ(_funcTracker.peakTrackedMemoryBytes(), 80LL);
+    ASSERT_EQ(_tracker.inUseTrackedMemoryBytes(), 0LL);
+    ASSERT_EQ(_tracker.peakTrackedMemoryBytes(), 80LL);
+}
+
+TEST_F(MemoryUsageTrackerTest, WithinMemoryLimitChecksAncestorLimit) {
+    // Operation-wide tracker enforces a 100 byte cap; stage limit is much larger.
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{100}};
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{10 * 1024}};
+
+    stageTracker.add(50);
+    ASSERT_TRUE(stageTracker.withinMemoryLimit(nullptr));
+
+    // Stage usage exceeds the op limit but not its own stage limit. The chain check still
+    // catches the breach at the ancestor level.
+    stageTracker.add(51);
+    ASSERT_FALSE(stageTracker.withinMemoryLimit(nullptr));
+
+    stageTracker.add(-51);
+    ASSERT_TRUE(stageTracker.withinMemoryLimit(nullptr));
+}
+
+TEST_F(MemoryUsageTrackerTest, WithinMemoryLimitAlsoChecksLocalLimit) {
+    // Op limit is effectively unbounded, but the stage limit is tight. A local breach must
+    // still fail withinMemoryLimit().
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{std::numeric_limits<int64_t>::max()}};
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{100}};
+
+    stageTracker.add(50);
+    ASSERT_TRUE(stageTracker.withinMemoryLimit(nullptr));
+
+    stageTracker.add(51);
+    ASSERT_FALSE(stageTracker.withinMemoryLimit(nullptr));
+}
+
+TEST_F(MemoryUsageTrackerTest, WithinMemoryLimitOnStandaloneTrackerIsLocalOnly) {
+    // No base: chain check collapses to the local check.
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(50);
+    ASSERT_TRUE(tracker.withinMemoryLimit(nullptr));
+    tracker.add(51);
+    ASSERT_FALSE(tracker.withinMemoryLimit(nullptr));
+}
+
+TEST_F(MemoryUsageTrackerTest, RemainingMemoryUsageBytesReflectsAncestorLimit) {
+    // Operation-wide tracker enforces a 100 byte cap; stage limit is much larger, so the ancestor
+    // is the binding constraint and 'remaining' should reflect that, not the stage's own headroom.
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{100}};
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{10 * 1024}};
+
+    stageTracker.add(50);
+    // Stage has 10 * 1024 - 50 bytes of local headroom, but the op tracker only has 50 left.
+    ASSERT_EQ(stageTracker.remainingMemoryUsageBytes(nullptr), 50);
+
+    stageTracker.add(51);
+    // Now over the op limit: remaining goes negative even though the stage's own limit isn't hit.
+    ASSERT_EQ(stageTracker.remainingMemoryUsageBytes(nullptr), -1);
+}
+
+TEST_F(MemoryUsageTrackerTest, RemainingMemoryUsageBytesReflectsLocalLimitWhenTighter) {
+    // Op limit is effectively unbounded, so the stage's own (tighter) limit is what binds.
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{std::numeric_limits<int64_t>::max()}};
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{100}};
+
+    stageTracker.add(50);
+    ASSERT_EQ(stageTracker.remainingMemoryUsageBytes(nullptr), 50);
+
+    stageTracker.add(51);
+    ASSERT_EQ(stageTracker.remainingMemoryUsageBytes(nullptr), -1);
+}
+
+TEST_F(MemoryUsageTrackerTest, RemainingMemoryUsageBytesOnStandaloneTrackerIsLocalOnly) {
+    // No base: the chain walk collapses to the local check, same as withinMemoryLimit().
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(50);
+    ASSERT_EQ(tracker.remainingMemoryUsageBytes(nullptr), 50);
+    tracker.add(51);
+    ASSERT_EQ(tracker.remainingMemoryUsageBytes(nullptr), -1);
+}
+
+TEST_F(MemoryUsageTrackerTest, RemainingMemoryUsageBytesTakesMinimumAcrossChain) {
+    // A three-level chain where the middle tracker is the tightest: 'remaining' should reflect
+    // the minimum across all levels, not just the immediate tracker or the root.
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{10 * 1024}};
+    SimpleMemoryUsageTracker midTracker{&opTracker, MemoryUsageLimit{100}};
+    SimpleMemoryUsageTracker leafTracker{&midTracker, MemoryUsageLimit{10 * 1024}};
+
+    leafTracker.add(60);
+    // op: 10*1024 - 60, mid: 100 - 60 = 40, leaf: 10*1024 - 60. The minimum (mid) is 40.
+    ASSERT_EQ(leafTracker.remainingMemoryUsageBytes(nullptr), 40);
+}
+
+TEST_F(MemoryUsageTrackerTest, WithinMemoryLimitOnMemoryUsageTracker) {
+    // MemoryUsageTracker is the per-function variant whose internal _baseTracker is linked to
+    // the op-wide tracker. The forwarder should pick up the op-wide breach too.
+    SimpleMemoryUsageTracker opTracker{MemoryUsageLimit{100}};
+    MemoryUsageTracker stageTracker{&opTracker,
+                                    false /* allowDiskUse */,
+                                    MemoryUsageLimit{10 * 1024} /* maxMemoryUsageBytes */};
+    SimpleMemoryUsageTracker& funcTracker = stageTracker["fn"];
+
+    funcTracker.add(50);
+    ASSERT_TRUE(stageTracker.withinMemoryLimit(nullptr));
+
+    funcTracker.add(51);
+    // Stage's own roll-up is still within the stage limit; op tally exceeds the op limit.
+    ASSERT_FALSE(stageTracker.withinMemoryLimit(nullptr));
+}
+
 TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenWith) {
     static const std::vector<std::string> kLines = {"a", "bb", "ccc", "dddd"};
 
@@ -285,6 +474,483 @@ TEST_F(MemoryUsageTrackerTest, MemoryUsageTokenWith) {
         ASSERT_EQ(total_size, _tracker.inUseTrackedMemoryBytes());
         ASSERT_EQ(max_size, _tracker.peakTrackedMemoryBytes());
     }
+}
+
+class DeduplicatorReporterTest : public unittest::Test {
+public:
+    DeduplicatorReporterTest()
+        : _reporter(
+              [this](int64_t bytesDelta, int64_t recordsDelta) {
+                  _lastBytesDelta = bytesDelta;
+                  _lastRecordsDelta = recordsDelta;
+                  ++_callbackCount;
+              },
+              /* chunkSize = */ 1) {}
+
+protected:
+    int64_t _lastBytesDelta = 0;
+    int64_t _lastRecordsDelta = 0;
+    int _callbackCount = 0;
+    DeduplicatorReporter _reporter;
+};
+
+TEST_F(DeduplicatorReporterTest, DefaultRecordsDiffIsOne) {
+    _reporter.add(100);
+    ASSERT_EQ(_callbackCount, 1);
+    ASSERT_EQ(_lastBytesDelta, 100);
+    ASSERT_EQ(_lastRecordsDelta, 1);
+}
+
+TEST_F(DeduplicatorReporterTest, ExplicitRecordsDiffIsReported) {
+    _reporter.add(100, 5);
+    ASSERT_EQ(_callbackCount, 1);
+    ASSERT_EQ(_lastBytesDelta, 100);
+    ASSERT_EQ(_lastRecordsDelta, 5);
+}
+
+TEST_F(DeduplicatorReporterTest, NegativeRecordsDiffDecrementsCount) {
+    _reporter.add(100);
+    _reporter.add(50, -1);
+    ASSERT_EQ(_callbackCount, 2);
+    ASSERT_EQ(_lastBytesDelta, 50);
+    ASSERT_EQ(_lastRecordsDelta, -1);
+}
+
+TEST_F(DeduplicatorReporterTest, NoCallbackWhenBytesUnchanged) {
+    _reporter.add(0, 5);
+    ASSERT_EQ(_callbackCount, 0);
+}
+
+TEST_F(DeduplicatorReporterTest, RecordsDeltaAccumulatesUntilChunkCrossing) {
+    DeduplicatorReporter reporter(
+        [this](int64_t bytesDelta, int64_t recordsDelta) {
+            _lastBytesDelta = bytesDelta;
+            _lastRecordsDelta = recordsDelta;
+            ++_callbackCount;
+        },
+        100);
+
+    reporter.add(50, 3);  // bytes=50, within chunk [0,100), no callback
+    ASSERT_EQ(_callbackCount, 0);
+
+    reporter.add(100, 2);  // bytes=150, crosses into chunk [100,200), reports accumulated delta
+    ASSERT_EQ(_callbackCount, 1);
+    ASSERT_EQ(_lastBytesDelta, 100);
+    ASSERT_EQ(_lastRecordsDelta, 5);
+}
+
+using DeduplicatorReporterTestDeathTest = DeduplicatorReporterTest;
+DEATH_TEST_F(DeduplicatorReporterTestDeathTest,
+             RecordCountUnderflowIsDisallowed,
+             "Underflow in record count tracking") {
+    _reporter.add(100);    // count = 1
+    _reporter.add(0, -2);  // would bring count to -1
+}
+
+DEATH_TEST_F(DeduplicatorReporterTestDeathTest,
+             MemoryUnderflowIsDisallowed,
+             "Underflow in memory tracking") {
+    _reporter.add(100);   // bytes = 100
+    _reporter.add(-200);  // would bring bytes to -100
+}
+
+/**
+ * Test-only subclass that exposes setWriteToCurOp() so tests can observe what gets reported to
+ * CurOp.
+ */
+class TestableMemoryUsageTracker : public SimpleMemoryUsageTracker {
+public:
+    using SimpleMemoryUsageTracker::setWriteToCurOp;
+    using SimpleMemoryUsageTracker::SimpleMemoryUsageTracker;
+};
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDecouplesBasePropagationFromCurOpReporting) {
+    constexpr int64_t kChunkSize = 100;
+    constexpr int64_t kBig = 10 * 1024 * 1024;
+
+    int curOpWriteCount = 0;
+    int64_t lastReportedInUse = -1;
+    int64_t lastReportedPeak = -1;
+
+    // The op-wide tracker is the root: no base, but it reports to CurOp.
+    TestableMemoryUsageTracker opTracker{MemoryUsageLimit{kBig}};
+    opTracker.setWriteToCurOp([&](int64_t inUse, int64_t peak) {
+        ++curOpWriteCount;
+        lastReportedInUse = inUse;
+        lastReportedPeak = peak;
+    });
+
+    // The stage tracker chunks its reporting to CurOp.
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{kBig}, kChunkSize};
+
+    // Within the first chunk [0, 100): the op-wide tracker must see the exact total, but nothing
+    // is reported to CurOp yet.
+    stageTracker.add(50);
+    ASSERT_EQ(opTracker.inUseTrackedMemoryBytes(), 50);
+    ASSERT_EQ(opTracker.peakTrackedMemoryBytes(), 50);
+    ASSERT_EQ(curOpWriteCount, 0);
+
+    // Crossing into chunk [100, 200) triggers a single CurOp write. Both the base total and the
+    // value reported to CurOp are exact (110)
+    stageTracker.add(60);
+    ASSERT_EQ(opTracker.inUseTrackedMemoryBytes(), 110);
+    ASSERT_EQ(opTracker.peakTrackedMemoryBytes(), 110);
+    ASSERT_EQ(curOpWriteCount, 1);
+    ASSERT_EQ(lastReportedInUse, 110);
+    ASSERT_EQ(lastReportedPeak, 110);
+
+    // Another update that stays within chunk [100, 200) propagates exactly to the base but does
+    // not write to CurOp.
+    stageTracker.add(30);
+    ASSERT_EQ(opTracker.inUseTrackedMemoryBytes(), 140);
+    ASSERT_EQ(curOpWriteCount, 1);
+
+    // Releasing memory back across a chunk boundary reports again with the exact in-use total (50).
+    stageTracker.add(-90);
+    ASSERT_EQ(opTracker.inUseTrackedMemoryBytes(), 50);
+    ASSERT_EQ(curOpWriteCount, 2);
+    ASSERT_EQ(lastReportedInUse, 50);
+    // Peak is exact and monotonically non-decreasing.
+    ASSERT_EQ(lastReportedPeak, 140);
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingOnIntermediateTrackerStillPropagatesExactlyToRoot) {
+    constexpr int64_t kChunkSize = 100;
+    constexpr int64_t kBig = 10 * 1024 * 1024;
+
+    int curOpWriteCount = 0;
+    int64_t lastReportedInUse = -1;
+
+    // Chain: leaf (no chunking) -> mid (chunking) -> root (reports to CurOp).
+    TestableMemoryUsageTracker rootTracker{MemoryUsageLimit{kBig}};
+    rootTracker.setWriteToCurOp([&](int64_t inUse, int64_t peak) {
+        ++curOpWriteCount;
+        lastReportedInUse = inUse;
+    });
+    SimpleMemoryUsageTracker midTracker{&rootTracker, MemoryUsageLimit{kBig}, kChunkSize};
+    SimpleMemoryUsageTracker leafTracker{&midTracker, MemoryUsageLimit{kBig}};
+
+    leafTracker.add(50);
+    // Exact propagation all the way to the root, but no CurOp write within the first chunk.
+    ASSERT_EQ(rootTracker.inUseTrackedMemoryBytes(), 50);
+    ASSERT_EQ(midTracker.inUseTrackedMemoryBytes(), 50);
+    ASSERT_EQ(curOpWriteCount, 0);
+
+    leafTracker.add(60);  // mid crosses into [100, 200)
+    ASSERT_EQ(rootTracker.inUseTrackedMemoryBytes(), 110);
+    ASSERT_EQ(curOpWriteCount, 1);
+    // CurOp reports the exact in-use total (110), gated by the mid tracker's chunk crossing.
+    ASSERT_EQ(lastReportedInUse, 110);
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsZeroWhenFullyReleased) {
+    constexpr int64_t kChunkSize = 100;
+    constexpr int64_t kBig = 10 * 1024 * 1024;
+
+    int64_t lastReportedInUse = -1;
+
+    TestableMemoryUsageTracker opTracker{MemoryUsageLimit{kBig}};
+    opTracker.setWriteToCurOp([&](int64_t inUse, int64_t peak) { lastReportedInUse = inUse; });
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{kBig}, kChunkSize};
+
+    // Grow past a chunk boundary so CurOp holds a non-zero value.
+    stageTracker.add(150);
+    ASSERT_EQ(lastReportedInUse, 150);
+
+    // Release down into the first chunk: this crossing reports the exact value (30).
+    stageTracker.add(-120);
+    ASSERT_EQ(stageTracker.inUseTrackedMemoryBytes(), 30);
+    ASSERT_EQ(lastReportedInUse, 30);
+
+    // Fully release the remaining memory. This stays within the first chunk (no boundary crossing),
+    // but CurOp must still be driven back to zero rather than left stale at 30.
+    stageTracker.add(-30);
+    ASSERT_EQ(stageTracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_EQ(opTracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_EQ(lastReportedInUse, 0);
+}
+
+
+constexpr int64_t kChunkSizeForTest = 100;
+
+/**
+ * The chunk-crossing path reaches the new lower bound by stepping one chunk when the crossing is to
+ * an adjacent chunk and by dividing otherwise. Walk usage across boundaries in both directions, by
+ * one chunk and by many, and assert that every crossing reports the exact total -- i.e. that all
+ * three ways of computing the bound agree.
+ */
+std::pair<int64_t, int64_t> getLastReportedValues(int64_t initialValue, int64_t nextValue) {
+    constexpr int64_t kBig = 10 * 1024 * 1024;
+
+    int64_t lastReportedInUse = -1;
+
+    TestableMemoryUsageTracker opTracker{MemoryUsageLimit{kBig}};
+    opTracker.setWriteToCurOp([&](int64_t inUse, int64_t peak) { lastReportedInUse = inUse; });
+    SimpleMemoryUsageTracker stageTracker{&opTracker, MemoryUsageLimit{kBig}, kChunkSizeForTest};
+
+    stageTracker.add(initialValue);
+    stageTracker.add(nextValue);
+    return {lastReportedInUse, stageTracker.inUseTrackedMemoryBytes()};
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsInitialCrossing) {
+    ASSERT_THAT(getLastReportedValues(0, kChunkSizeForTest + 20),
+                std::pair(kChunkSizeForTest + 20, kChunkSizeForTest + 20))
+        << "Single chunk up, from chunk [0, 100) to [100, 200).";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsUpwardCrossing) {
+    ASSERT_THAT(getLastReportedValues(kChunkSizeForTest + 20, 8 * kChunkSizeForTest + 30),
+                std::pair(9 * kChunkSizeForTest + 50, 9 * kChunkSizeForTest + 50))
+        << "Several chunks up at once: [100, 200) to [900, 1000). Too far to step, so this "
+           "divides.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDoesNotReportNonCrossing) {
+    ASSERT_THAT(getLastReportedValues(9 * kChunkSizeForTest + 50, 20),
+                std::pair(9 * kChunkSizeForTest + 50, 9 * kChunkSizeForTest + 70))
+        << "Within the new chunk: no crossing, no report.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsDownwardCrossing) {
+    ASSERT_THAT(getLastReportedValues(9 * kChunkSizeForTest + 70, -kChunkSizeForTest),
+                std::pair(8 * kChunkSizeForTest + 70, 8 * kChunkSizeForTest + 70))
+        << "Single chunk down, to [800, 900).";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDoesNotReportDownwardCrossingOnBoundary) {
+    ASSERT_THAT(getLastReportedValues(8 * kChunkSizeForTest + 70, -70),
+                std::pair(8 * kChunkSizeForTest + 70, 8 * kChunkSizeForTest))
+        << "Exactly onto a boundary: 800 is the base of [800, 900), which is the chunk already "
+           "reported, so this is not a crossing.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsDownwardCrossingFromBoundary) {
+    ASSERT_THAT(getLastReportedValues(8 * kChunkSizeForTest, -1),
+                std::pair(8 * kChunkSizeForTest - 1, 8 * kChunkSizeForTest - 1))
+        << "One byte below that boundary crosses down into [700, 800).";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsDownwardCrossingAcrossMultipleChunks) {
+    ASSERT_THAT(getLastReportedValues(8 * kChunkSizeForTest - 1, -7 * kChunkSizeForTest - 49),
+                std::pair(50, 50))
+        << "Several chunks down at once, back into the first chunk but not to zero.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDoesNotReportGoingToZeroInSameChunk) {
+    ASSERT_THAT(getLastReportedValues(50, -50), std::pair(0, 0))
+        << "From within the first chunk down to zero.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsWhenCrossingMultipleBoundariesAtOnce) {
+    ASSERT_THAT(getLastReportedValues(0, 50 * kChunkSizeForTest),
+                std::pair(50 * kChunkSizeForTest, 50 * kChunkSizeForTest))
+        << "Many chunk crossings up at once.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsWhenCrossingSingleBoundaryAtChunkSize) {
+    ASSERT_THAT(getLastReportedValues(kChunkSizeForTest, kChunkSizeForTest),
+                std::pair(2 * kChunkSizeForTest, 2 * kChunkSizeForTest))
+        << "Single chunk crossing up, from boundary to next boundary.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDoesNotReportWhenAddingOneBelowChunkSize) {
+    ASSERT_THAT(getLastReportedValues(kChunkSizeForTest, kChunkSizeForTest - 1),
+                std::pair(kChunkSizeForTest, 2 * kChunkSizeForTest - 1))
+        << "Adding one less then chunkSize.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, ChunkingDoesNotReportWhenAddingZero) {
+    ASSERT_THAT(getLastReportedValues(kChunkSizeForTest, 0),
+                std::pair(kChunkSizeForTest, kChunkSizeForTest))
+        << "Adding zero does not report.";
+}
+
+/**
+ * A release from far above straight to zero crosses many chunks at once and lands exactly on the
+ * boundary at zero. This is the one case where the divide-based bound and the return-to-zero rule
+ * both apply, so it must still report exactly once.
+ */
+TEST(SimpleMemoryUsageTrackerTest, ChunkingReportsZeroWhenReleasedFromManyChunksAbove) {
+    ASSERT_THAT(getLastReportedValues(5000, -5000), std::pair(0, 0))
+        << "Many chunk crossings down at once, back to zero.";
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitDoesNotThrowWhenUnderLimit) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{1000}};
+    tracker.add(500);
+    ASSERT_DOES_NOT_THROW(tracker.assertWithinMemoryLimit(nullptr, "$testExpr"));
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitDoesNotThrowWhenAtLimit) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{1000}};
+    tracker.add(1000);
+    ASSERT_DOES_NOT_THROW(tracker.assertWithinMemoryLimit(nullptr, "$testExpr"));
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitThrowsWhenOverLimit) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "$testExpr");
+        ASSERT_STRING_CONTAINS(ex.reason(), "200");  // current usage
+        ASSERT_STRING_CONTAINS(ex.reason(), "100");  // local limit
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitIncludesGlobalLimitWhenBaseIsSet) {
+    SimpleMemoryUsageTracker base{MemoryUsageLimit{5000}};
+    SimpleMemoryUsageTracker tracker{&base, MemoryUsageLimit{100}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "100");   // local limit
+        ASSERT_STRING_CONTAINS(ex.reason(), "5000");  // global limit from base
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitThrowsWhenOnlyGlobalLimitExceeded) {
+    SimpleMemoryUsageTracker base{MemoryUsageLimit{100}};
+    SimpleMemoryUsageTracker tracker{&base, MemoryUsageLimit{10 * 1024}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "Global memory limit: 100");
+        // The overflowing level is the base, so surface how much memory the base is actually using
+        // (200).
+        ASSERT_STRING_CONTAINS(ex.reason(), "Global memory used: 200");
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitReportsUsageForIntermediateLevel) {
+    // Three-level chain (leaf -> intermediate -> global root) where the intermediate tracker is the
+    // one that overflows: the leaf and root limits are generous, the intermediate limit is small.
+    SimpleMemoryUsageTracker root{MemoryUsageLimit{100000}};
+    SimpleMemoryUsageTracker intermediate{&root, MemoryUsageLimit{100}};
+    SimpleMemoryUsageTracker tracker{&intermediate, MemoryUsageLimit{100000}};
+    // add() propagates up the chain, so every tracker ends up holding 200 bytes.
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        // The overflowing tracker is the intermediate base, so its in-use memory (200) and limit
+        // (100) must be surfaced under a "Level N" entry rather than only the leaf's usage.
+        ASSERT_STRING_CONTAINS(ex.reason(),
+                               "Level 1 memory used: 200 bytes. Level 1 memory limit: 100 bytes");
+        // The root beyond the intermediate is still reported as the global level.
+        ASSERT_STRING_CONTAINS(ex.reason(), "Global memory used: 200");
+        ASSERT_STRING_CONTAINS(ex.reason(), "Global memory limit: 100000");
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitOmitsGlobalLimitWhenNoBase) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "100");
+        ASSERT_STRING_OMITS(ex.reason(), "Global memory limit");
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitIncludesStageNameWhenProvided) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr", "$group");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_CONTAINS(ex.reason(), "$testExpr");
+        ASSERT_STRING_CONTAINS(ex.reason(), "Stage: $group");
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitOmitsStageNameWhenNotProvided) {
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    try {
+        tracker.assertWithinMemoryLimit(nullptr, "$testExpr");
+        FAIL("Expected ExceededMemoryLimit to be thrown");
+    } catch (const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::ExceededMemoryLimit);
+        ASSERT_STRING_OMITS(ex.reason(), "Stage:");
+    }
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitLogsErrorWhenOverLimit) {
+    unittest::LogCaptureGuard logs{};
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    ASSERT_THROWS_CODE(tracker.assertWithinMemoryLimit(nullptr, "$testExpr", "$group"),
+                       AssertionException,
+                       ErrorCodes::ExceededMemoryLimit);
+    logs.stop();
+    bool foundLog = false;
+    for (const auto& line : logs.getBSON()) {
+        if (line["id"].numberLong() == 12932700) {
+            foundLog = true;
+            ASSERT_STRING_CONTAINS(line["attr"].Obj()["error"].String(), "Stage: $group");
+        }
+    }
+    ASSERT(foundLog);
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitDoesNotLogWhenUnderLimit) {
+    unittest::LogCaptureGuard logs{};
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{1000}};
+    tracker.add(500);
+    ASSERT_DOES_NOT_THROW(tracker.assertWithinMemoryLimit(nullptr, "$testExpr", "$group"));
+    logs.stop();
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("id" << 12932700)), 0);
+}
+
+TEST(SimpleMemoryUsageTrackerTest, AssertWithinMemoryLimitIncrementsFailureMetricWhenOverLimit) {
+    auto before = readOperationsFailedDueToMemoryLimit();
+    if (!before) {
+        // serverStatus surfacing of OpenTelemetry metrics is unavailable on this build variant.
+        return;
+    }
+
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{100}};
+    tracker.add(200);
+    ASSERT_THROWS_CODE(tracker.assertWithinMemoryLimit(nullptr, "$testExpr"),
+                       AssertionException,
+                       ErrorCodes::ExceededMemoryLimit);
+
+    // The counter is process-wide and monotonically non-decreasing, so assert it advanced by
+    // exactly one relative to the value observed before the failure.
+    ASSERT_EQ(*readOperationsFailedDueToMemoryLimit(), *before + 1);
+}
+
+TEST(SimpleMemoryUsageTrackerTest,
+     AssertWithinMemoryLimitDoesNotIncrementFailureMetricWhenUnderLimit) {
+    auto before = readOperationsFailedDueToMemoryLimit();
+    if (!before) {
+        // serverStatus surfacing of OpenTelemetry metrics is unavailable on this build variant.
+        return;
+    }
+
+    SimpleMemoryUsageTracker tracker{MemoryUsageLimit{1000}};
+    tracker.add(500);
+    ASSERT_DOES_NOT_THROW(tracker.assertWithinMemoryLimit(nullptr, "$testExpr"));
+
+    ASSERT_EQ(*readOperationsFailedDueToMemoryLimit(), *before);
 }
 
 }  // namespace

@@ -1,61 +1,198 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/field_ref.h"
+#include "mongo/db/matcher/expression_expr.h"
+#include "mongo/db/matcher/match_expression_walker.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_list_sessions.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/compiler/dependency_analysis/document_transformation_helpers.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::rule_based_rewrites::pipeline {
 namespace {
 /**
- * Verifies whether or not a $group is able to swap with a succeeding $match stage. While ordinarily
- * $group can swap with a $match, it cannot if the following $match has exactly one field as the
- * $group key and either:
- *     (1) an $exists predicate on _id
- *     (2) a $type predicate on _id
+ * Verifies that an Expression will not change its result if the containing $match is swapped with
+ * $group, accounting for $group semantics.
  *
- * For $exists, every document will have an _id field following such a $group stage, including those
- * whose group key was missing before the $group. As an example, the following optimization would be
- * incorrect as the post-optimization pipeline would handle documents that had nullish _id fields
- * differently. Thus, given such a $group and $match, this function would return false.
+ * Requires the caller to have established that the expression depends on a $group _id field.
+ */
+class ExpressionGroupSwapValidator
+    : public SelectiveConstExpressionVisitorBase<ExpressionGroupSwapValidator> {
+public:
+    using SelectiveConstExpressionVisitorBase<ExpressionGroupSwapValidator>::visit;
+
+    void visit(const ExpressionCompare* expr) override {
+        // We only allow field paths and constants.
+        const auto& operands = expr->getOperandList();
+        if (!validateCompareOperands(operands)) {
+            isValid = false;
+        }
+    }
+
+    void visit(const ExpressionIn* expr) override {
+        const auto& operands = expr->getOperandList();
+        if (!validateInOperands(operands)) {
+            isValid = false;
+        }
+    }
+
+    void visit(const ExpressionAnd* expr) override {
+        visitLogicOperands(expr->getOperandList());
+    }
+
+    void visit(const ExpressionOr* expr) override {
+        visitLogicOperands(expr->getOperandList());
+    }
+
+    void visit(const ExpressionNot* expr) override {
+        visitLogicOperands(expr->getOperandList());
+    }
+
+    template <typename T>
+    void visitDefault(const T* expr) {
+        // Everything else is disallowed by default.
+        isValid = false;
+    }
+
+    bool isValid{true};
+
+private:
+    static boost::intrusive_ptr<Expression> optimizeClone(
+        const boost::intrusive_ptr<Expression>& expr) {
+        return expr->clone(*expr->getExpressionContext())->optimize();
+    }
+
+    static bool validateCompareOperands(const Expression::ExpressionVector& operands) {
+        tassert(11277200, "ExpressionCompare should have two operands", operands.size() == 2);
+
+        // Optimize operands so that constant sub-expressions (e.g. arithmetic on literals)
+        // are folded into ExpressionConstant before we inspect them.
+        auto firstArg = optimizeClone(operands[0]);
+        auto secondArg = optimizeClone(operands[1]);
+
+        const ExpressionConstant* constantExpr =
+            dynamic_cast<const ExpressionConstant*>(firstArg.get());
+        const Expression* otherExpr = secondArg.get();
+        if (!constantExpr) {
+            constantExpr = dynamic_cast<const ExpressionConstant*>(secondArg.get());
+            otherExpr = firstArg.get();
+        }
+        if (!constantExpr) {
+            return false;
+        }
+
+        // Do not allow null since $group buckets null and missing together.
+        if (constantExpr->getValue().nullish()) {
+            return false;
+        }
+
+        // We only allow ExpressionFieldPath for the non-constant operand.
+        return dynamic_cast<const ExpressionFieldPath*>(otherExpr) != nullptr;
+    }
+
+    static bool validateInOperands(const Expression::ExpressionVector& operands) {
+        // $in has exactly two operands: the element to test and the array to test against.
+        tassert(11277203, "ExpressionIn should have two operands", operands.size() == 2);
+
+        // The element being tested must be a field path. Nothing optimizes to ExpressionFieldPath,
+        // so there is no need to call optimize() here.
+        if (!dynamic_cast<const ExpressionFieldPath*>(operands[0].get())) {
+            return false;
+        }
+
+        // Optimize the array operand so that an ExpressionArray of constant children
+        // (e.g. [3, 4]) folds into a single ExpressionConstant.
+        auto candidateArray = optimizeClone(operands[1]);
+
+        // The array must have optimized down to a single ExpressionConstant.
+        const auto* constArray = dynamic_cast<const ExpressionConstant*>(candidateArray.get());
+        if (!constArray || constArray->getValue().getType() != BSONType::array) {
+            return false;
+        }
+
+        // Do not allow null elements since $group buckets null and missing together.
+        const auto constArrayValue = constArray->getValue();
+        for (const auto& elem : constArrayValue.getArray()) {
+            if (elem.nullish()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void visitLogicOperands(const Expression::ExpressionVector& operands) {
+        for (auto&& op : operands) {
+            if (!isValid) {
+                return;
+            }
+            op->acceptVisitor(this);
+        }
+    }
+};
+
+/**
+ * Validates the $expr predicates within a MatchExpression can be swapped with $group safely. If
+ * there's an incompatible $expr predicate that depends on the _id field we cannot swap: $group
+ * places null and missing in the same bucket, and numerics that compare equal (e.g. Int(1) and
+ * Long(1)) share a bucket, so the _id value may differ from the source field.
+ */
+bool validateExprMatchExpressionsForSwapWithGroup(const MatchExpression& expr) {
+    struct ExprValidator : SelectiveMatchExpressionVisitorBase<true> {
+        using SelectiveMatchExpressionVisitorBase<true>::visit;
+
+        void visit(const ExprMatchExpression* expr) override {
+            if (!isValid || expression::isIndependentOfConst(*expr, idFields)) {
+                return;
+            }
+            ExpressionGroupSwapValidator validator;
+            expr->getExpression()->acceptVisitor(&validator);
+            if (!validator.isValid) {
+                isValid = false;
+            }
+        }
+
+        const OrderedPathSet idFields{"_id"};
+        bool isValid{true};
+    };
+
+    ExprValidator visitor;
+    MatchExpressionWalker walker{&visitor, nullptr, nullptr};
+    tree_walker::walk<true, MatchExpression>(&expr, &walker);
+    return visitor.isValid;
+}
+
+/**
+ * Verifies whether or not a $group is able to swap with a succeeding $match stage.
+ * The swap is allowable because $group reports the _id fields as renames.
+ * Example:
+ *   {$group: {_id: "$x"}}
+ * Reports that $group simply renames x -> _id.
+ *
+ * Most $match predicates on the _id field can therefore be pushed down. This function guards
+ * against pushdown of $match which contains predicates sensitive to the $group bucketing behaviour.
+ * $group places null and missing in the same bucket, and numerics that compare equal (e.g. Int(1)
+ * and Long(1)) share a bucket, so the _id value may differ from the source field.
+ *
+ * This affects $exists checks (since after $group we always have null), $type checks, $expr which
+ * distinguishes null/missing and can contain other unsafe expressions.
+ *
+ * As an example, the following optimization would be incorrect as the post-optimization pipeline
+ * would handle documents that had nullish _id fields differently. Thus, given such a $group and
+ * $match, this function would return false.
  *   {$group: {_id: "$x"}}
  *   {$match: {_id: {$exists: true}}
  * ---->
@@ -69,6 +206,10 @@ namespace {
  * stage, meaning documents that are regarded unequally in the $match stage are equated in the
  * $group stage. This leads to varied results depending on the order of the $match and $group.
  * Type predicates are incorrect to push ahead regardless of _id spec.
+ *
+ * For $expr, we allow only certain $expr shapes. Any $expr that is not explicitly allowed is
+ * disallowed (so we don't have to prove that arbitrary complex expressions depending on `_id` are
+ * safe to swap before $group).
  */
 bool groupMatchSwapVerified(const DocumentSourceMatch& nextMatch,
                             const DocumentSourceGroup& thisGroup) {
@@ -90,6 +231,10 @@ bool groupMatchSwapVerified(const DocumentSourceMatch& nextMatch,
         return false;
     }
 
+    if (!validateExprMatchExpressionsForSwapWithGroup(*nextMatch.getMatchExpression())) {
+        return false;
+    }
+
     /**
      * If there's a compound _id spec (e.g. {_id: {x: ..., y: ..., ...}}), we can swap regardless of
      * existence predicate.
@@ -108,7 +253,7 @@ bool groupMatchSwapVerified(const DocumentSourceMatch& nextMatch,
  * Returns 'true' if the given stage is an internal change stream stage that can appear in a router
  * (mongoS) pipeline, or 'false' otherwise.
  */
-bool isChangeStreamRouterPipelineStage(StringData stageName) {
+bool isChangeStreamRouterPipelineStage(std::string_view stageName) {
     return change_stream_constants::kChangeStreamRouterPipelineStages.contains(stageName);
 }
 
@@ -185,7 +330,7 @@ DocumentSource::GetModPathsReturn buildModPaths(PipelineRewriteContext& ctx, Doc
         return toGetModPathsReturn(prev);
     }
 
-    auto canPathBeArray = [&](StringData path) {
+    auto canPathBeArray = [&](std::string_view path) {
         return ctx.getDependencyGraph().canPathBeArray(&prev, path);
     };
 
@@ -250,7 +395,7 @@ bool matchContainsTestingField(PipelineRewriteContext& ctx) {
     auto& match = checked_cast<DocumentSourceMatch&>(ctx.current());
     auto me = match.getMatchExpression();
 
-    if (!me->path().contains("test")) {
+    if (me->path().find("test") == std::string_view::npos) {
         return false;
     }
 
@@ -286,7 +431,7 @@ bool introduceArrayTypeFilteringToMatch(PipelineRewriteContext& ctx) {
         auto query = match.getQuery();
         for (const auto& elem : query) {
             auto typeExpr = std::make_unique<TypeMatchExpression>(
-                StringData(elem.fieldNameStringData()), MatcherTypeSet(BSONType::array));
+                std::string_view(elem.fieldNameStringData()), MatcherTypeSet(BSONType::array));
             if (ctx.getExpCtx().canPathBeArrayForNss(FieldPath(elem.fieldNameStringData()),
                                                      ctx.getExpCtx().getNamespaceString())) {
                 additionalFilter->add(std::move(typeExpr));
@@ -363,6 +508,17 @@ REGISTER_RULES(DocumentSourceListSessions,
                    .priority = kDefaultPushdownPriority,
                    .tags = PipelineRewriteContext::Tags::Reordering,
                });
+
+// Projection rewrites require $match pushdown to be attempted before the other rules for the stage.
+REGISTER_RULES_WITH_FEATURE_FLAG(DocumentSourceSingleDocumentTransformation,
+                                 &feature_flags::gFeatureFlagImprovedDepsAnalysis,
+                                 {
+                                     .name = "PUSH_MATCH_BEFORE_SINGLE_DOC_TRANSFORMATION",
+                                     .precondition = canSwapWithSubsequentMatch,
+                                     .transform = pushMatchBeforeCurrentStage,
+                                     .priority = kDefaultPushdownPriority,
+                                     .tags = PipelineRewriteContext::Tags::Reordering,
+                                 });
 
 // Timeseries rewrites require $match pushdown to be attempted before the other optimizations
 // implemented in 'optimizeAt()'.

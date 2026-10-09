@@ -1,4 +1,5 @@
 // @tags: [
+//  uses_explain,
 //  requires_fcv_90,
 //  # Explain will return different plan than expected when a collection becomes a time-series
 //  # collection. Also, query shape will be different.
@@ -65,7 +66,9 @@ const normalPoly = {
     assert.commandWorked(
         coll.createIndex(
             {loc: "2dsphere"},
-            add2dsphereVersionIfNeeded({partialFilterExpression: {loc: {$geoWithin: {$geometry: normalPoly}}}}),
+            add2dsphereVersionIfNeeded({
+                partialFilterExpression: {loc: {$geoWithin: {$geometry: normalPoly}}},
+            }),
         ),
     );
 
@@ -104,7 +107,10 @@ const normalPoly = {
     assert.commandWorked(coll.insert({_id: 1, loc: {type: "Point", coordinates: [50, 50]}}));
 
     assert.commandWorked(
-        coll.createIndex({a: 1}, {partialFilterExpression: {loc: {$geoWithin: {$geometry: bigPoly20Comp}}}}),
+        coll.createIndex(
+            {a: 1},
+            {partialFilterExpression: {loc: {$geoWithin: {$geometry: bigPoly20Comp}}}},
+        ),
     );
 
     let results = coll.find({loc: {$geoWithin: {$geometry: bigPoly20}}}, {_id: 1}).toArray();

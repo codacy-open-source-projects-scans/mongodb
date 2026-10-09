@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/bsoncolumn_materializer.h"
 
@@ -33,6 +7,8 @@
 #include "mongo/bson/column/bsoncolumnbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo::sbe::bsoncolumn {
 namespace {
@@ -243,10 +219,10 @@ TEST_F(BSONColumnMaterializerTest, SBEMaterializer) {
     uint64_t uts = ConstDataView{obj.firstElement().value()}.read<LittleEndian<uint64_t>>();
     assertMaterializedValue(ts, {value::TypeTags::Timestamp, uts});
 
-    StringData strSmall{"cramped"};
+    std::string_view strSmall{"cramped"};
     assertMaterializedValue(strSmall, value::makeSmallString(strSmall));
 
-    StringData strBig{"spacious"};
+    std::string_view strBig{"spacious"};
     obj = BSON("" << strBig);
     const char* strStorage = obj.firstElement().value();
     assertMaterializedValue(
@@ -259,7 +235,7 @@ TEST_F(BSONColumnMaterializerTest, SBEMaterializer) {
     assertMaterializedValue(
         bsonBinData, {value::TypeTags::bsonBinData, value::bitcastFrom<const char*>(bdStorage)});
 
-    BSONCode code{StringData{"x = 0"}};
+    BSONCode code{std::string_view{"x = 0"}};
     obj = BSON("" << code);
     auto codeStorage = obj.firstElement().value();
     assertMaterializedValue(
@@ -275,7 +251,7 @@ TEST_F(BSONColumnMaterializerTest, SBEMaterializer) {
     std::string longStr;
     for (size_t strSize = 0; strSize < 4097; ++strSize) {
         {
-            StringData sd{longStr};
+            std::string_view sd{longStr};
             obj = BSON("" << sd);
             strStorage = obj.firstElement().value();
 
@@ -288,7 +264,7 @@ TEST_F(BSONColumnMaterializerTest, SBEMaterializer) {
         }
 
         {
-            BSONCode code{StringData{longStr}};
+            BSONCode code{std::string_view{longStr}};
             obj = BSON("" << code);
             auto codeStorage = obj.firstElement().value();
             assertMaterializedValue(
@@ -378,7 +354,7 @@ TEST_F(BSONColumnMaterializerTest, DecompressIterativeSimpleWithSBEMaterializer)
     uint64_t uts = ConstDataView{obj.firstElement().value()}.read<LittleEndian<uint64_t>>();
     verifyDecompressionIterative(obj, {value::TypeTags::Timestamp, uts});
 
-    StringData strBig{"hello_world"};
+    std::string_view strBig{"hello_world"};
     obj = BSON("" << strBig);
     verifyDecompressionIterative(
         obj,
@@ -391,7 +367,7 @@ TEST_F(BSONColumnMaterializerTest, DecompressIterativeSimpleWithSBEMaterializer)
                                  {value::TypeTags::bsonBinData,
                                   value::bitcastFrom<const char*>(obj.firstElement().value())});
 
-    BSONCode code{StringData{"x = 0"}};
+    BSONCode code{std::string_view{"x = 0"}};
     obj = BSON("" << code);
     verifyDecompressionIterative(obj,
                                  {value::TypeTags::bsonJavascript,
@@ -875,19 +851,19 @@ TEST_F(BSONColumnMaterializerTest, DecompressGeneralWithBindata) {
 }
 
 TEST_F(BSONColumnMaterializerTest, DecompressGeneralWithCode) {
-    std::vector<BSONCode> codes = {BSONCode(StringData{"x = 0"}),
-                                   BSONCode(StringData{"x = 1"}),
-                                   BSONCode(StringData{"x = 2"}),
-                                   BSONCode(StringData{"x = 3"})};
+    std::vector<BSONCode> codes = {BSONCode(std::string_view{"x = 0"}),
+                                   BSONCode(std::string_view{"x = 1"}),
+                                   BSONCode(std::string_view{"x = 2"}),
+                                   BSONCode(std::string_view{"x = 3"})};
 
     verifyDecompressWithDifferentTypes(codes);
 }
 
 TEST_F(BSONColumnMaterializerTest, DecompressGeneralWithString) {
-    std::vector<StringData> strs = {StringData("hello_world0"),
-                                    StringData("hello_world1"),
-                                    StringData("hello_world2"),
-                                    StringData("hello_world3")};
+    std::vector<std::string_view> strs = {std::string_view("hello_world0"),
+                                          std::string_view("hello_world1"),
+                                          std::string_view("hello_world2"),
+                                          std::string_view("hello_world3")};
 
     verifyDecompressWithDifferentTypes(strs);
 }

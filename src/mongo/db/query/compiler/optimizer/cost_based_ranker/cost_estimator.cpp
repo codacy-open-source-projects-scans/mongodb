@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/optimizer/cost_based_ranker/cost_estimator.h"
 
@@ -54,16 +28,15 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
                                           const std::vector<CostEstimate>& childCosts,
                                           const std::vector<CardinalityEstimate>& childCEs,
                                           QSNEstimate& qsnEst) {
-    if (qsnEst.inCE && *qsnEst.inCE == zeroCE) {
-        qsnEst.cost = minCost;
-        return;
-    }
-
     auto addEstimates = [](const auto& e1, const auto& e2) {
         return e1 + e2;
     };
 
     CostEstimate nodeCost = zeroCost;
+    // Sum of the children's costs. Zero for leaf stages (empty 'childCosts'). Used both by the
+    // per-case cost formulae and by the additive floor below.
+    const CostEstimate childSum =
+        std::accumulate(childCosts.begin(), childCosts.end(), zeroCost, addEstimates);
     // Empty predicates may be represented as an empty AND.
     const MatchExpression* filter = node->filter
         ? (node->filter->matchType() == MatchExpression::AND && node->filter->numChildren() == 0)
@@ -109,15 +82,13 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
             const auto totalIncrementalFieldCost =
                 incrementalFieldCost * (numIncrementalFields * inCE);
 
-            // TODO SERVER-100611: Incorporate index seek cost (coefficient 'indexSeek') by adding
-            // 'indexSeek * estimatedNumSeeks' to 'nodeCost'. In the meantime, we know there will
-            // always be at least one seek.
+            const auto& seekEst = qsnEst.indexSeekCE.value_or(oneCE);
             if (ixscanNode->direction == 1) {
                 nodeCost += indexScanForwardExamineKey * inCE + totalIncrementalFieldCost +
-                    indexForwardSeek * oneCE;
+                    indexForwardSeek * seekEst;
             } else {
                 nodeCost += indexScanBackwardExamineKey * inCE + totalIncrementalFieldCost +
-                    indexBackwardSeek * oneCE;
+                    indexBackwardSeek * seekEst;
             }
 
             if (filter) {
@@ -126,7 +97,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
             break;
         }
         case STAGE_FETCH: {
-            nodeCost = childCosts[0];
+            nodeCost = childSum;
             const auto& inCE = childCEs[0];
             auto fetchNode = static_cast<const FetchNode*>(node);
 
@@ -148,8 +119,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
                                   << childCEs.size(),
                     childCEs.size() == 2);
             // The cost to read all children
-            nodeCost +=
-                std::accumulate(childCosts.begin(), childCosts.end(), zeroCost, addEstimates);
+            nodeCost += childSum;
 
             const auto& numReturned = qsnEst.outCE;
             nodeCost += andHashBuild * childCEs[0] + andHashProbe * childCEs[1] +
@@ -159,8 +129,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
         }
         case STAGE_AND_SORTED: {
             // Intersects streams of sorted RIDs
-            nodeCost +=
-                std::accumulate(childCosts.begin(), childCosts.end(), zeroCost, addEstimates);
+            nodeCost += childSum;
 
             const auto& numProcessed =
                 std::accumulate(childCEs.begin(), childCEs.end(), zeroCE, addEstimates);
@@ -177,8 +146,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
             tassert(11028601, "Encountered an OR stage with a filter", !orNode->filter);
             tassert(11028605, "Encountered an OR stage with dedup = false", orNode->dedup);
 
-            nodeCost =
-                std::accumulate(childCosts.begin(), childCosts.end(), zeroCost, addEstimates);
+            nodeCost = childSum;
 
             const auto& numProcessed =
                 std::accumulate(childCEs.begin(), childCEs.end(), zeroCE, addEstimates);
@@ -189,8 +157,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
         case STAGE_SORT_MERGE: {
             // Merges the outputs of N children, each of which is sorted in the order specified by
             // some pattern.
-            nodeCost +=
-                std::accumulate(childCosts.begin(), childCosts.end(), zeroCost, addEstimates);
+            nodeCost += childSum;
 
             const auto& numProcessed =
                 std::accumulate(childCEs.begin(), childCEs.end(), zeroCE, addEstimates);
@@ -210,7 +177,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
         }
         case STAGE_SORT_DEFAULT:
         case STAGE_SORT_SIMPLE: {
-            nodeCost = childCosts[0];
+            nodeCost = childSum;
 
             // The 'numProcessedLogFactor' is used to estimate the number of sort steps. Even for
             // very small estimates make sure to count at least one sort step per input document.
@@ -229,7 +196,7 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
                 // The 'numReturnedLogFactor' is used to estimate the number of sort steps. Even
                 // for very small estimates make sure to count at least one sort step per input
                 // document.
-                const auto& numReturned = std::min(numProcessed, sortLimitCE);
+                const auto numReturned = exactMin(numProcessed, sortLimitCE);
                 double numReturnedLogFactor = numReturned.toDouble();
                 numReturnedLogFactor += 1;
 
@@ -274,41 +241,46 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
         }
         case STAGE_PROJECTION_DEFAULT: {
             const auto& inCE = childCEs[0];
-            nodeCost = defaultProjectionIncrement * inCE + childCosts[0];
+            nodeCost = defaultProjectionIncrement * inCE + childSum;
             break;
         }
         case STAGE_PROJECTION_COVERED: {
             const auto& inCE = childCEs[0];
-            nodeCost = coveredProjectionIncrement * inCE + childCosts[0];
+            nodeCost = coveredProjectionIncrement * inCE + childSum;
             break;
         }
         case STAGE_PROJECTION_SIMPLE: {
             const auto& inCE = childCEs[0];
-            nodeCost = simpleProjectionIncrement * inCE + childCosts[0];
+            nodeCost = simpleProjectionIncrement * inCE + childSum;
+            break;
+        }
+        case STAGE_SHARDING_FILTER: {
+            const auto& inCE = childCEs[0];
+            nodeCost = shardingFilterIncrement * inCE + childSum;
+            break;
+        }
+        case STAGE_EOF: {
+            // EOF stages produce no rows; they are costed purely via the per-stage overhead
+            // enforced by the additive floor below.
             break;
         }
         case STAGE_LIMIT: {
-            nodeCost = childCosts[0];
+            nodeCost = childSum;
             const auto& inCE = childCEs[0];
             auto limitNode = static_cast<const LimitNode*>(node);
             auto limitCE = CardinalityEstimate{
                 CardinalityType{static_cast<double>(limitNode->limit)}, EstimationSource::Metadata};
-            auto adjLimitCE = std::min(limitCE, inCE);
+            auto adjLimitCE = exactMin(limitCE, inCE);
             nodeCost += limitIncrement * adjLimitCE;
             break;
         }
         case STAGE_SKIP: {
-            nodeCost = childCosts[0];
+            nodeCost = childSum;
             const auto& inCE = childCEs[0];
             auto skipNode = static_cast<const SkipNode*>(node);
             auto skipCE = CardinalityEstimate{CardinalityType{static_cast<double>(skipNode->skip)},
                                               EstimationSource::Metadata};
-            // < must be used instead of std::min() because std::min() returns the first argument if
-            // it is <= the second argument. CardinalityEstimate overloads these operators with an
-            // approximate implementation of equality, which can lead to a tassert due to a negative
-            // value during the subtraction operation below.
-            auto adjSkipCE = skipCE < inCE ? skipCE : inCE;
-
+            auto adjSkipCE = exactMin(skipCE, inCE);
             auto passCE = inCE - adjSkipCE;
             nodeCost += skipIncrement * adjSkipCE + passIncrement * passCE;
             break;
@@ -317,7 +289,13 @@ void CostEstimator::computeAndSetNodeCost(const QuerySolutionNode* node,
             MONGO_UNIMPLEMENTED_TASSERT(9695102);
     }
 
-    qsnEst.cost = (nodeCost < minCost) ? minCost : nodeCost;
+    // Each stage's cost must be at least 'minCost' above the sum of its children's costs.
+    // The resulting invariant 'cost(parent) >= sum(cost(children)) + minCost' is what
+    // differentiates structurally different plans when input cardinalities collapse to zero.
+    // TODO SERVER-97933 make this even more fine-grained with different minCosts for different
+    // node types.
+    const CostEstimate additiveFloor = childSum + minCost;
+    qsnEst.cost = approxMax(additiveFloor, nodeCost);
 }
 
 /**
@@ -425,6 +403,9 @@ const CostCoefficient CostEstimator::sortedMergeOutput = makeCostCoefficient(nse
 const CostCoefficient CostEstimator::simpleProjectionIncrement = makeCostCoefficient(nsec(317.60));
 const CostCoefficient CostEstimator::coveredProjectionIncrement = makeCostCoefficient(nsec(216.77));
 const CostCoefficient CostEstimator::defaultProjectionIncrement = makeCostCoefficient(nsec(768.21));
+
+// TODO: SERVER-129663 calibrate this number for passing/skipping a doc.
+const CostCoefficient CostEstimator::shardingFilterIncrement = makeCostCoefficient(nsec(202.32));
 
 const CostCoefficient CostEstimator::limitIncrement = makeCostCoefficient(nsec(109.50));
 

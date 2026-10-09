@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/change_stream_pre_images_truncate_manager.h"
 
@@ -33,6 +7,8 @@
 #include "mongo/db/change_stream_pre_image_id_util.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_truncate_markers.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -50,6 +26,8 @@
 namespace mongo {
 
 MONGO_FAIL_POINT_DEFINE(preImagesTruncateOnlyOnSecondaries);
+MONGO_FAIL_POINT_DEFINE(preImagesTruncateHangBeforeExecution);
+MONGO_FAIL_POINT_DEFINE(preImagesTruncateHangOnEarlyBailOut);
 
 BSONObj PreImagesTruncateManager::MarkerCreationStats::toBSON() const {
     BSONObjBuilder builder;
@@ -61,6 +39,20 @@ BSONObj PreImagesTruncateManager::MarkerCreationStats::toBSON() const {
 
 PreImagesTruncateStats PreImagesTruncateManager::truncateExpiredPreImages(
     OperationContext* opCtx, bool useReplicatedTruncates) {
+    if (MONGO_unlikely(preImagesTruncateHangBeforeExecution.shouldFail())) {
+        preImagesTruncateHangBeforeExecution.pauseWhileSet();
+    }
+
+    if (auto replCoord = repl::ReplicationCoordinator::get(opCtx)) {
+        if (replCoord->getSettings().isReplSet() && !replCoord->getMemberState().readable()) {
+            // Early exit in case the node is not ready at the moment, e.g. it is still in recovery.
+            if (MONGO_unlikely(preImagesTruncateHangOnEarlyBailOut.shouldFail())) {
+                preImagesTruncateHangOnEarlyBailOut.pauseWhileSet();
+            }
+            return {};
+        }
+    }
+
     // Pre image truncation is marked non-deprio, as with this it has the same pace as the user
     // writes that generates new entries in the config.system.preimages collection
     admission::execution_control::ScopedTaskTypeNonDeprioritizable prioGuard(opCtx);

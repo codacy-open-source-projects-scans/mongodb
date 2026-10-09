@@ -25,6 +25,13 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
                     ErrorCodes.StaleConfig,
                     // Expected in balancer suites.
                     ErrorCodes.MigrationConflict,
+                    // May happen when resharding interrupts the query or aborts the transaction.
+                    ErrorCodes.InterruptedDueToReshardingCriticalSection,
+                    ErrorCodes.NoSuchTransaction,
+                    // May happen when the balancer commits a moveCollection between two statements
+                    // of the transaction.
+                    ErrorCodes.SnapshotUnavailable,
+                    ErrorCodes.StaleChunkHistory,
                 ];
                 assert.contains(e.code, allowedCodes);
             }

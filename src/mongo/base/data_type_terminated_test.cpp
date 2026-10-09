@@ -1,41 +1,15 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/data_type_terminated.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/unittest/unittest.h"
 
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace mongo {
@@ -102,7 +76,8 @@ namespace {
  */
 
 TEST(DataTypeTerminated, StringDataNormalStore) {
-    const StringData writes[] = {StringData("a"), StringData("bb"), StringData("ccc")};
+    const std::string_view writes[] = {
+        std::string_view("a"), std::string_view("bb"), std::string_view("ccc")};
     std::string buf(100, '\xff');
     char* const bufBegin = &*buf.begin();
     char* ptr = bufBegin;
@@ -110,8 +85,8 @@ TEST(DataTypeTerminated, StringDataNormalStore) {
     std::string expected;
     for (const auto& w : writes) {
         size_t adv;
-        ASSERT_OK(
-            DataType::store(Terminated<'\0', StringData>(w), ptr, avail, &adv, ptr - bufBegin));
+        ASSERT_OK(DataType::store(
+            Terminated<'\0', std::string_view>(w), ptr, avail, &adv, ptr - bufBegin));
         ASSERT_EQ(adv, w.size() + 1);
         ptr += adv;
         avail -= adv;
@@ -122,7 +97,8 @@ TEST(DataTypeTerminated, StringDataNormalStore) {
 }
 
 TEST(DataTypeTerminated, StringDataNormalLoad) {
-    const StringData writes[] = {StringData("a"), StringData("bb"), StringData("ccc")};
+    const std::string_view writes[] = {
+        std::string_view("a"), std::string_view("bb"), std::string_view("ccc")};
     std::string buf;
     for (const auto& w : writes) {
         buf += std::string{w};
@@ -134,7 +110,7 @@ TEST(DataTypeTerminated, StringDataNormalLoad) {
 
     for (const auto& w : writes) {
         size_t adv;
-        auto term = Terminated<'\0', StringData>{};
+        auto term = Terminated<'\0', std::string_view>{};
         ASSERT_OK(DataType::load(&term, ptr, avail, &adv, ptr - bufBegin));
         ASSERT_EQ(adv, term.value.size() + 1);
         ptr += adv;
@@ -159,14 +135,14 @@ TEST(DataTypeTerminated, StoreStatusOkAdvanced) {
     size_t advanced = 123;  // should be overwritten
     Status s = DataType::store(Terminated<'\0', Dummy<3>>(), buf, sizeof(buf), &advanced, 0);
     ASSERT_OK(s);
-    ASSERT_EQ(StringData(buf, 4), StringData(std::string{'d', 'd', 'd', '\0'}));
+    ASSERT_EQ(std::string_view(buf, 4), std::string_view(std::string{'d', 'd', 'd', '\0'}));
     ASSERT_EQUALS(advanced, 4u);  // OK must overwrite advanced
 }
 
 TEST(DataTypeTerminated, ErrorUnterminatedRead) {
     const char buf[] = {'h', 'e', 'l', 'l', 'o'};
     size_t advanced = 123;
-    auto x = Terminated<'\0', StringData>();
+    auto x = Terminated<'\0', std::string_view>();
     Status s = DataType::load(&x, buf, sizeof(buf), &advanced, 0);
     ASSERT_EQ(s.codeString(), "Overflow");
     ASSERT_STRING_CONTAINS(s.reason(), "couldn't locate");

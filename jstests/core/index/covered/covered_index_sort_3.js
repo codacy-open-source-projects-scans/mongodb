@@ -2,13 +2,14 @@
 // able to be covered when they aren't on the shard key since the document needs to be fetched in
 // order to apply the SHARDING_FILTER stage.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 // ]
 
 // Compound index covered query tests with sort
 
 // Include helpers for analyzing explain output.
-import {isIndexOnly} from "jstests/libs/query/analyze_plan.js";
+import {getWinningPlanFromExplain, isIndexOnly} from "jstests/libs/query/analyze_plan.js";
 
 let coll = db.getCollection("covered_sort_3");
 coll.drop();
@@ -24,7 +25,14 @@ let plan = coll
     .sort({a: 1, b: -1, c: 1})
     .hint({a: 1, b: -1, c: 1})
     .explain("executionStats");
-assert(isIndexOnly(db, plan.queryPlanner.winningPlan), "sort.3.1 - indexOnly should be true on covered query");
-assert.eq(0, plan.executionStats.totalDocsExamined, "sort.3.1 - docs examined should be 0 for covered query");
+assert(
+    isIndexOnly(db, getWinningPlanFromExplain(plan)),
+    "sort.3.1 - indexOnly should be true on covered query",
+);
+assert.eq(
+    0,
+    plan.executionStats.totalDocsExamined,
+    "sort.3.1 - docs examined should be 0 for covered query",
+);
 
 print("all tests pass");

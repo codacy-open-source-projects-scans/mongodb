@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_type_endian.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
@@ -64,6 +37,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -73,6 +47,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(Sort);
 class SortLiteParsed final : public LiteParsedDocumentSourceDefault<SortLiteParsed> {
@@ -82,9 +57,7 @@ public:
 
     static std::unique_ptr<SortLiteParsed> parse(const NamespaceString& nss,
                                                  const BSONElement& spec,
-                                                 const LiteParserOptions& options) {
-        return std::make_unique<SortLiteParsed>(spec);
-    }
+                                                 const LiteParserOptions& options);
 
     std::unique_ptr<StageParams> getStageParams() const final {
         return std::make_unique<SortStageParams>(_originalBson);
@@ -103,13 +76,13 @@ public:
 };
 DEFINE_LITE_PARSED_STAGE_DEFAULT_DERIVED(InternalBoundedSort);
 
-class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceSort final : public DocumentSource {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] DocumentSourceSort final : public DocumentSource {
 public:
-    static constexpr StringData kMin = "min"_sd;
-    static constexpr StringData kMax = "max"_sd;
-    static constexpr StringData kOffset = "offsetSeconds"_sd;
-    static constexpr StringData kInternalLimit = "$_internalLimit"_sd;
-    static constexpr StringData kInternalOutputSortKey = "$_internalOutputSortKeyMetadata"_sd;
+    static constexpr std::string_view kMin = "min"sv;
+    static constexpr std::string_view kMax = "max"sv;
+    static constexpr std::string_view kOffset = "offsetSeconds"sv;
+    static constexpr std::string_view kInternalLimit = "$_internalLimit"sv;
+    static constexpr std::string_view kInternalOutputSortKey = "$_internalOutputSortKeyMetadata"sv;
 
     struct SortStageOptions {
         uint64_t limit = 0;
@@ -138,7 +111,7 @@ public:
 
     using TimeSorterInterface = BoundedSorterInterface<SortableDate, Document>;
 
-    static constexpr StringData kStageName = "$sort"_sd;
+    static constexpr std::string_view kStageName = "$sort"sv;
 
     /**
      * Parses a $sort stage from the user-supplied BSON.
@@ -167,7 +140,7 @@ public:
     // outputSortKeyMetadata.
     static boost::intrusive_ptr<DocumentSourceSort> createBoundedSort(
         SortPattern pat,
-        StringData boundBase,
+        std::string_view boundBase,
         long long boundOffset,
         boost::optional<long long> limit,
         bool outputSortKeyMetadata,
@@ -186,8 +159,8 @@ public:
                        const SortPattern&,
                        SortStageOptions);
 
-    const char* getSourceName() const final {
-        return kStageName.data();
+    std::string_view getSourceName() const final {
+        return kStageName;
     }
 
     static const Id& id;
@@ -197,7 +170,8 @@ public:
     }
 
     void serializeToArray(std::vector<Value>& array,
-                          const SerializationOptions& opts = SerializationOptions{}) const final;
+                          const query_shape::SerializationOptions& opts =
+                              query_shape::SerializationOptions{}) const final;
 
     GetModPathsReturn getModifiedPaths() const final {
         // A $sort does not modify any paths.
@@ -211,11 +185,7 @@ public:
         _outputSortKeyMetadata = true;
     }
 
-    /**
-     * Returns true if the output documents of this $sort stage are supposed to have the sort key
-     * metadata field populated.
-     */
-    bool shouldSetSortKeyMetadata() const {
+    bool providesSortKeyMetadata() const override {
         // TODO SERVER-98624 It would be preferable to just set '_outputSortKeyMetadata' based on
         // 'getNeedsMerge()' in the constructor or some earlier time. Sadly, we can't do this right
         // now without adding complexity elsewhere to account for mixed-version clusters. If you set
@@ -256,10 +226,6 @@ public:
         return _sortExecutor;
     }
 
-    SortPattern getSortPattern() const override {
-        return _sortExecutor->sortPattern();
-    }
-
     /**
      * Returns the the limit, if a subsequent $limit stage has been coalesced with this $sort stage.
      * Otherwise, returns boost::none.
@@ -284,16 +250,19 @@ private:
     friend boost::intrusive_ptr<exec::agg::Stage> documentSourceSortToStageFn(
         const boost::intrusive_ptr<DocumentSource>& documentSource);
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MONGO_UNREACHABLE_TASSERT(7484302);  // Should call serializeToArray instead.
     }
 
     /**
      * Helper functions used by serializeToArray() to serialize this stage.
      */
-    void serializeForBoundedSort(std::vector<Value>& array, const SerializationOptions& opts) const;
-    void serializeWithVerbosity(std::vector<Value>& array, const SerializationOptions& opts) const;
-    void serializeForCloning(std::vector<Value>& array, const SerializationOptions& opts) const;
+    void serializeForBoundedSort(std::vector<Value>& array,
+                                 const query_shape::SerializationOptions& opts) const;
+    void serializeWithVerbosity(std::vector<Value>& array,
+                                const query_shape::SerializationOptions& opts) const;
+    void serializeForCloning(std::vector<Value>& array,
+                             const query_shape::SerializationOptions& opts) const;
 
     QueryMetadataBitSet _requiredMetadata;
 

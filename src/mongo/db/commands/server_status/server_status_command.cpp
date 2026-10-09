@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/initializer.h"
 #include "mongo/base/secure_allocator.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,13 +21,16 @@
 #include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/metrics_filtering_util.h"
+#include "mongo/db/metrics_policy_manager.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -69,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
@@ -76,7 +53,8 @@
 
 namespace mongo {
 namespace {
-constexpr auto kTimingSection = "timing"_sd;
+using namespace std::literals::string_view_literals;
+constexpr auto kTimingSection = "timing"sv;
 
 class CmdServerStatus : public BasicCommand {
 public:
@@ -122,13 +100,13 @@ public:
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) final {
+             BSONObjBuilder& inputResultBuilder) final {
         const auto service = opCtx->getServiceContext();
         const auto clock = service->getFastClockSource();
         const auto runStart = clock->now();
         BSONObjBuilder timeBuilder(256);
         Date_t phaseStart = runStart;
-        auto recordPhase = [&](StringData name) {
+        auto recordPhase = [&](std::string_view name) {
             const Date_t t = clock->now();
             timeBuilder.appendNumber(fmt::format("after {}", name),
                                      durationCount<Milliseconds>(t - phaseStart));
@@ -137,6 +115,19 @@ public:
 
         ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
             opCtx, AdmissionContext::Priority::kExempt);
+
+        // If filtering is required by the metrics policy, append the header and metrics fields to a
+        // temporary result builder and filter them at the end. Otherwise, append directly to the
+        // input result builder to avoid additional costs in the non-filtering case.
+        auto& metricsPolicyManager = MetricsPolicyManager::get(opCtx);
+        bool requireFiltering = metricsPolicyManager.requiresFiltering(
+            opCtx, MetricsCategoryEnum::kServerStatus, cmdObj["forceFiltered"].trueValue());
+
+        boost::optional<BSONObjBuilder> tmpResultBuilder;
+        if (requireFiltering) {
+            tmpResultBuilder.emplace();
+        }
+        BSONObjBuilder& result = requireFiltering ? *tmpResultBuilder : inputResultBuilder;
 
         // --- basic fields that are global
 
@@ -151,7 +142,7 @@ public:
         result.appendDate("localTime", Date_t::now());
 
         // Milliseconds spent building the fixed header fields above (not cumulative since start).
-        recordPhase("basic"_sd);
+        recordPhase("basic"sv);
 
         // Individual section 'includeByDefault()' settings will be bypassed if the caller specified
         // {all: 1}.
@@ -207,7 +198,7 @@ public:
         }
 
         // --- counters
-        auto metricsEl = cmdObj["metrics"_sd];
+        auto metricsEl = cmdObj["metrics"sv];
         if ((!excludeAllSections && metricsEl.eoo()) || metricsEl.trueValue()) {
             // Always gather the role-agnostic metrics. If `opCtx` has a role,
             // additionally merge that role's associated metrics.
@@ -220,7 +211,7 @@ public:
             if (metricsEl.type() == BSONType::object)
                 excludePaths = BSON("metrics" << metricsEl.embeddedObject());
             appendMergedTrees(metricTrees, result, excludePaths);
-            recordPhase("metrics"_sd);
+            recordPhase("metrics"sv);
         }
 
         // --- some hard coded global things hard to pull out
@@ -242,6 +233,16 @@ public:
             if (include_timing) {
                 result.append(kTimingSection, t);
             }
+        }
+
+        // If filtering is required, we appended the header and metrics fields in a temporary result
+        // builder. Now extract and append only the ones matching the allowlist to the input result
+        // builder.
+        if (requireFiltering) {
+            const auto& matcher =
+                metricsPolicyManager.getAllowlistMatcher(MetricsCategoryEnum::kServerStatus);
+            metrics_filtering_util::appendPaths(
+                inputResultBuilder, tmpResultBuilder->obj(), matcher);
         }
 
         return true;
@@ -308,7 +309,7 @@ public:
 auto asserts = *ServerStatusSectionBuilder<Asserts>("asserts");
 
 struct MemBaseMetricPolicy {
-    void appendTo(BSONObjBuilder& bob, StringData leafName) const {
+    void appendTo(BSONObjBuilder& bob, std::string_view leafName) const {
         BSONObjBuilder b{bob.subobjStart(leafName)};
         b.append("bits", static_cast<int>(sizeof(void*) * CHAR_BIT));
 

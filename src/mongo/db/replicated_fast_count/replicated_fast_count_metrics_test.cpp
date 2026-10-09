@@ -1,47 +1,29 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/replicated_fast_count/replicated_fast_count_metrics.h"
 
 #include "mongo/db/replicated_fast_count/replicated_fast_count_advance_checkpoint.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_init.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_op_observer.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_test_helpers.h"
 #include "mongo/db/replicated_fast_count/size_count_store.h"
 #include "mongo/db/replicated_fast_count/size_count_timestamp_store.h"
+#include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_test_fixture.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/otel/metrics/metric_names.h"
 #include "mongo/otel/metrics/metrics_test_util.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/time_support.h"
+
+#include <string_view>
 
 namespace mongo::replicated_fast_count {
 namespace {
@@ -53,7 +35,9 @@ TEST(ReplicatedFastCountMetricsTest, MetricsInitialization) {
     otel::metrics::OtelMetricsCapturer capturer;
 
     for (const auto& gaugeName : {
-             MetricNames::kReplicatedFastCountIsRunning,
+             MetricNames::kReplicatedFastCountOplogLagSecs,
+             MetricNames::kReplicatedFastCountTailerIsRunning,
+             MetricNames::kReplicatedFastCountFlusherIsRunning,
          }) {
         EXPECT_EQ(capturer.readInt64Gauge(gaugeName), 0);
     }
@@ -65,108 +49,144 @@ TEST(ReplicatedFastCountMetricsTest, MetricsInitialization) {
              MetricNames::kReplicatedFastCountFlushedDocsTotal,
              MetricNames::kReplicatedFastCountInsertCount,
              MetricNames::kReplicatedFastCountUpdateCount,
-             MetricNames::kReplicatedFastCountWriteTimeMsTotal,
+             MetricNames::kReplicatedFastCountTailerFailureCount,
+             MetricNames::kReplicatedFastCountFlushRetriedCount,
+             MetricNames::kReplicatedFastCountTailerRetriedScanCount,
+             MetricNames::kReplicatedFastCountWatermarksWritten,
+             MetricNames::kReplicatedFastCountTailerWatermarksSeen,
+             MetricNames::kReplicatedFastCountWatermarkAwaitTimeMsTotal,
          }) {
         EXPECT_EQ(capturer.readInt64Counter(counterName), 0);
     }
 }
 
-TEST(ReplicatedFastCountMetricsTest, IsRunningGaugeClearedBySetIsRunning) {
-    OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
-    metrics.setIsRunning(false);
-
-    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountIsRunning), 0);
-
-    metrics.setIsRunning(true);
-
-    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountIsRunning), 1);
-}
-
 TEST(ReplicatedFastCountMetricsTest, FlushSuccessCounterIncrementsViaRecordFlush) {
     OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
-    metrics.recordFlush(Date_t::now() - Milliseconds(10),
-                        /*batchSize=*/1);
-    metrics.recordFlush(Date_t::now() - Milliseconds(10),
-                        /*batchSize=*/1);
+    recordFlush(Date_t::now(), /*batchSize=*/1);
+    recordFlush(Date_t::now(), /*batchSize=*/1);
 
     EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountFlushSuccessCount), 2);
 }
 
 TEST(ReplicatedFastCountMetricsTest, FlushFailureCounterIncrement) {
     OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
 
-    metrics.incrementFlushFailureCount();
-    metrics.incrementFlushFailureCount();
+    incrementFlushFailureCount();
+    incrementFlushFailureCount();
 
     EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountFlushFailureCount), 2);
 }
 
 TEST(ReplicatedFastCountMetricsTest, InsertAndUpdateCountersIncrement) {
     OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
 
-    metrics.incrementInsertCount();
-    metrics.incrementInsertCount();
+    incrementInsertCount();
+    incrementInsertCount();
 
-    metrics.incrementUpdateCount();
-    metrics.incrementUpdateCount();
+    incrementUpdateCount();
+    incrementUpdateCount();
 
     EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountInsertCount), 2);
     EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountUpdateCount), 2);
 }
 
-TEST(ReplicatedFastCountMetricsTest, WriteMsTimeTotalAdd) {
+TEST(ReplicatedFastCountMetricsTest, TailerIsRunningGaugeClearedBySetTailerIsRunning) {
     OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
+    setTailerIsRunning(false);
 
-    metrics.addWriteTimeMsTotal(1);
-    metrics.addWriteTimeMsTotal(5);
-    metrics.addWriteTimeMsTotal(100);
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountTailerIsRunning), 0);
 
-    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountWriteTimeMsTotal), 106);
+    setTailerIsRunning(true);
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountTailerIsRunning), 1);
+
+    setTailerIsRunning(false);
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountTailerIsRunning), 0);
+}
+
+TEST(ReplicatedFastCountMetricsTest, FlusherIsRunningGaugeClearedBySetFlusherIsRunning) {
+    OtelMetricsCapturer capturer;
+    setFlusherIsRunning(false);
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountFlusherIsRunning), 0);
+
+    setFlusherIsRunning(true);
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountFlusherIsRunning), 1);
+
+    setFlusherIsRunning(false);
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountFlusherIsRunning), 0);
+}
+
+TEST(ReplicatedFastCountMetricsTest, TailerExceptionCounterIncrement) {
+    OtelMetricsCapturer capturer;
+
+    incrementTailerFailureCount();
+    incrementTailerFailureCount();
+    incrementTailerFailureCount();
+
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountTailerFailureCount), 3);
+}
+
+TEST(ReplicatedFastCountMetricsTest, RetriedFlushCounterIncrement) {
+    OtelMetricsCapturer capturer;
+
+    incrementRetriedFlushCount();
+    incrementRetriedFlushCount();
+    incrementRetriedFlushCount();
+
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountFlushRetriedCount), 3);
+}
+
+TEST(ReplicatedFastCountMetricsTest, RetriedTailerScanCounterIncrement) {
+    OtelMetricsCapturer capturer;
+
+    incrementRetriedTailerScanCount();
+    incrementRetriedTailerScanCount();
+
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountTailerRetriedScanCount),
+              2);
+}
+
+TEST(ReplicatedFastCountMetricsTest, WatermarkCountersIncrement) {
+    OtelMetricsCapturer capturer;
+
+    incrementWatermarksWrittenCount();
+    incrementWatermarksWrittenCount();
+    incrementWatermarksWrittenCount();
+    incrementTailerWatermarksSeenCount();
+    incrementTailerWatermarksSeenCount();
+
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountWatermarksWritten), 3);
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountTailerWatermarksSeen), 2);
+}
+
+TEST(ReplicatedFastCountMetricsTest, WatermarkAwaitTimeTotalAccumulates) {
+    OtelMetricsCapturer capturer;
+
+    recordWatermarkAwaitTime(Milliseconds(5));
+    recordWatermarkAwaitTime(Milliseconds(7));
+
+    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountWatermarkAwaitTimeMsTotal),
+              12);
 }
 
 TEST(ReplicatedFastCountMetricsTest, FlushedDocsTotalUpdatedAfterFlushes) {
     OtelMetricsCapturer capturer;
-    ReplicatedFastCountMetrics metrics;
-    metrics.recordFlush(Date_t::now() - Milliseconds(1),
-                        /*batchSize=*/3);
-    metrics.recordFlush(Date_t::now() - Milliseconds(1),
-                        /*batchSize=*/7);
-    metrics.recordFlush(Date_t::now() - Milliseconds(1),
-                        /*batchSize=*/1);
+    recordFlush(Date_t::now(), /*batchSize=*/3);
+    recordFlush(Date_t::now(), /*batchSize=*/7);
+    recordFlush(Date_t::now(), /*batchSize=*/1);
 
     EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountFlushedDocsTotal), 11);
-}
-
-TEST(ReplicatedFastCountMetricsTest, StaticMetrics) {
-    OtelMetricsCapturer capturer;
-
-    ReplicatedFastCountManager manager1;
-    manager1.getReplicatedFastCountMetrics().incrementUpdateCount();
-    manager1.getReplicatedFastCountMetrics().incrementInsertCount();
-
-    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountInsertCount), 1);
-    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountUpdateCount), 1);
-
-    ReplicatedFastCountManager manager2;
-    manager2.getReplicatedFastCountMetrics().incrementUpdateCount();
-    manager2.getReplicatedFastCountMetrics().incrementInsertCount();
-
-    // Metrics are shared between ReplicatedFastCountManager instances.
-    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountInsertCount), 2);
-    EXPECT_EQ(capturer.readInt64Counter(MetricNames::kReplicatedFastCountUpdateCount), 2);
 }
 
 class ReplicatedFastCountManagerMetricsTest : public CatalogTestFixture {
 public:
     ReplicatedFastCountManagerMetricsTest()
         : CatalogTestFixture(Options().setPersistenceProvider(
-              std::make_unique<replicated_fast_count_test_helpers::
-                                   ReplicatedFastCountTestPersistenceProvider>())) {}
+              std::make_unique<test_helpers::ReplicatedFastCountTestPersistenceProvider>())) {}
 
 protected:
     void setUp() override {
@@ -186,32 +206,6 @@ protected:
     OtelMetricsCapturer _capturer;
 };
 
-TEST_F(ReplicatedFastCountManagerMetricsTest, MetadataMutexRegisteredWithObservableMutexRegistry) {
-    _fastCountManager->flushSync(operationContext());
-
-    const BSONObj report = ObservableMutexRegistry::get().report(false);
-    const StringData name = "ReplicatedFastCountManager::_metadataMutex";
-    ASSERT_TRUE(report.hasField(name)) << "Missing " << name << " in " << report;
-    const BSONObj exclusive =
-        report.getObjectField(name).getObjectField(ObservableMutexRegistry::kExclusiveFieldName);
-    EXPECT_GT(exclusive.getIntField(ObservableMutexRegistry::kTotalAcquisitionsFieldName), 0);
-}
-
-TEST_F(ReplicatedFastCountManagerMetricsTest, IsRunningGaugeSetByStartup) {
-    EXPECT_EQ(_capturer.readInt64Gauge(MetricNames::kReplicatedFastCountIsRunning), 1);
-}
-
-
-TEST_F(ReplicatedFastCountManagerMetricsTest, FlushFailureCounterIncrementsDuringFailure) {
-    auto& failDuringFlushFp = *globalFailPointRegistry().find("failDuringFlush");
-
-    failDuringFlushFp.setMode(FailPoint::alwaysOn);
-    _fastCountManager->flushSync(operationContext());
-    failDuringFlushFp.setMode(FailPoint::off);
-
-    EXPECT_EQ(_capturer.readInt64Counter(MetricNames::kReplicatedFastCountFlushFailureCount), 1);
-}
-
 // TODO SERVER-122992: Re-enable once the number of entries inserted versus updated are
 // communicated.
 // TEST_F(ReplicatedFastCountManagerMetricsTest,
@@ -219,8 +213,8 @@ TEST_F(ReplicatedFastCountManagerMetricsTest, FlushFailureCounterIncrementsDurin
 //     const UUID uuid = UUID::gen();
 //     boost::container::flat_map<UUID, CollectionSizeCount> changes;
 //     changes[uuid] = {/*count=*/1, /*size=*/100};
-//     _fastCountManager->commit(changes, /*commitTime=*/boost::none);
-//     _fastCountManager->flushSync(operationContext());
+//     _fastCountManager->commit(changes);
+//     _fastCountManager->flushSync_ForTest(operationContext());
 //
 //     // After flushing, at least the above change should be inserted.
 //     EXPECT_GE(
@@ -228,8 +222,8 @@ TEST_F(ReplicatedFastCountManagerMetricsTest, FlushFailureCounterIncrementsDurin
 //         1);
 //
 //     changes[uuid] = {/*count=*/1, /*size=*/50};
-//     _fastCountManager->commit(changes, /*commitTime=*/boost::none);
-//     _fastCountManager->flushSync(operationContext());
+//     _fastCountManager->commit(changes);
+//     _fastCountManager->flushSync_ForTest(operationContext());
 //
 //     // The above change should update the existing document.
 //     EXPECT_GE(
@@ -237,19 +231,6 @@ TEST_F(ReplicatedFastCountManagerMetricsTest, FlushFailureCounterIncrementsDurin
 //         1);
 // }
 //
-
-TEST_F(ReplicatedFastCountManagerMetricsTest, WriteTimeMsTotalIncrementsAfterFlush) {
-    const UUID uuid = UUID::gen();
-    boost::container::flat_map<UUID, CollectionSizeCount> changes;
-    changes[uuid] = {/*count=*/1, /*size=*/100};
-    _fastCountManager->commit(changes, /*commitTime=*/boost::none);
-    _fastCountManager->flushSync(operationContext());
-
-    // writeTimeMsTotal is the time spent inside the WriteUnitOfWork; it may be 0ms on a fast
-    // machine. We can only assert that addWriteTimeMsTotal() was called (i.e., the OTel counter
-    // has a data point at a non-negative value).
-    EXPECT_GE(_capturer.readInt64Counter(MetricNames::kReplicatedFastCountWriteTimeMsTotal), 0);
-}
 
 TEST(ReplicatedFastCountMetricsTest, CheckpointOplogEntriesProcessedCounterIncrements) {
     OtelMetricsCapturer capturer;
@@ -301,21 +282,92 @@ TEST(ReplicatedFastCountMetricsTest, CheckpointCountersInitializedToZero) {
               0);
 }
 
+TEST(ReplicatedFastCountMetricsTest, OplogLagSecsStaysZeroWhenCheckpointNeverAdvances) {
+    OtelMetricsCapturer capturer;
+    resetOplogLagState_ForTest();
+
+    // With fastcount disabled, the AppliedOpTime observer still fires (it's registered
+    // unconditionally), but no writes ever land on `config.fast_count_metadata_store_timestamps`,
+    // so `recordCheckpointAdvanced` never runs. The gauge must stay at 0 regardless of how many
+    // applied opTimes flow through.
+    recordAppliedOpTime(Timestamp{1000, 1});
+    recordAppliedOpTime(Timestamp{2000, 5});
+    recordAppliedOpTime(Timestamp{3000, 17});
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
+}
+
+TEST(ReplicatedFastCountMetricsTest, OplogLagSecsGoesNegativeWhenCheckpointAheadOfApplied) {
+    OtelMetricsCapturer capturer;
+    resetOplogLagState_ForTest();
+
+    // The OpTimeObserver dispatcher is async, so the observed applied opTime (lastAppliedSecs)
+    // can transiently lag a just-recorded checkpoint timestamp. The gauge reflects the raw
+    // (negative) difference rather than clamping. A sustained negative value signals a real bug
+    // (e.g., the AppliedOpTime observer not being registered) rather than the brief dispatcher
+    // window, so it's worth surfacing.
+    recordAppliedOpTime(Timestamp{100, 1});
+    recordCheckpointAdvanced(Timestamp{150, 1});
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), -50);
+}
+
+TEST(ReplicatedFastCountMetricsTest, OplogLagSecsComputesAppliedMinusCheckpoint) {
+    OtelMetricsCapturer capturer;
+
+    recordCheckpointAdvanced(Timestamp{100, 1});
+    recordAppliedOpTime(Timestamp{130, 5});
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 30);
+}
+
+TEST(ReplicatedFastCountMetricsTest, OplogLagSecsUpdatesOnNewAppliedOpTime) {
+    OtelMetricsCapturer capturer;
+
+    recordCheckpointAdvanced(Timestamp{100, 1});
+    recordAppliedOpTime(Timestamp{110, 1});
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 10);
+
+    recordAppliedOpTime(Timestamp{145, 1});
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 45);
+}
+
+TEST(ReplicatedFastCountMetricsTest, OplogLagSecsUpdatesOnNewCheckpoint) {
+    OtelMetricsCapturer capturer;
+
+    recordAppliedOpTime(Timestamp{200, 1});
+    recordCheckpointAdvanced(Timestamp{100, 1});
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 100);
+
+    // A new checkpoint catches up; lag shrinks.
+    recordCheckpointAdvanced(Timestamp{190, 1});
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 10);
+}
+
 // Fixture that wires OtelMetricsCapturer with the same CatalogTestFixture used by the
 // advance-checkpoint tests, allowing end-to-end verification that advanceCheckpoint fires
 // the checkpoint scan counters.
 class CheckpointScanMetricsTest : public CatalogTestFixture {
+public:
+    CheckpointScanMetricsTest()
+        : CatalogTestFixture(Options().setPersistenceProvider(
+              std::make_unique<test_helpers::ReplicatedFastCountTestPersistenceProvider>())) {}
+
 protected:
     void setUp() override {
         CatalogTestFixture::setUp();
         opCtx = operationContext();
-        ASSERT_OK(createReplicatedFastCountCollection(storageInterface(), opCtx));
-        ASSERT_OK(createReplicatedFastCountTimestampCollection(storageInterface(), opCtx));
+
+        auto stores = test_helpers::createContainerFastCountStores(opCtx);
+        sizeCountStore = std::move(stores.sizeCountStore);
+        timestampStore = std::move(stores.timestampStore);
+
+        registerReplicatedFastCountOpObserver(opCtx->getServiceContext());
     }
 
     OperationContext* opCtx;
-    SizeCountStore sizeCountStore;
-    SizeCountTimestampStore timestampStore;
+    std::unique_ptr<SizeCountStore> sizeCountStore;
+    std::unique_ptr<SizeCountTimestampStore> timestampStore;
     OtelMetricsCapturer capturer;
 };
 
@@ -332,7 +384,7 @@ TEST_F(CheckpointScanMetricsTest, ProcessedAndSizeCountFireForUserEntries) {
         test_helpers::makeOplogEntry(
             Timestamp{1, 2}, collA, repl::OpTypeEnum::kInsert, /*sizeDelta=*/20));
 
-    advanceCheckpoint(opCtx, sizeCountStore, timestampStore);
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
 
     EXPECT_EQ(
         capturer.readInt64Counter(MetricNames::kReplicatedFastCountCheckpointOplogEntriesProcessed),
@@ -356,17 +408,14 @@ TEST_F(CheckpointScanMetricsTest, SkippedFiresForFastCountInternalEntries) {
             Timestamp{1, 1}, collA, repl::OpTypeEnum::kInsert, /*sizeDelta=*/10));
 
     // Run the first checkpoint so the timestamp store advances to ts{1,1}.
-    advanceCheckpoint(opCtx, sizeCountStore, timestampStore);
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
 
-    // Now write an applyOps that only touches the internal fast count collections. This entry
+    // Now write an applyOps that only touches the internal fast count containers. This entry
     // should be counted as skipped, not processed.
-    const auto fastCountStoreNss =
-        NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore);
     BSONArrayBuilder innerOps;
-    innerOps.append(BSON("op" << "u"
-                              << "ns" << fastCountStoreNss.ns_forTest() << "ui" << UUID::gen()
-                              << "o" << BSON("$set" << BSON("count" << 1)) << "o2"
-                              << BSON("_id" << 1)));
+    innerOps.append(BSON("op" << "cu"
+                              << "container" << ident::kFastCountMetadataStore << "o"
+                              << BSON("k" << 1)));
     const repl::OplogEntry internalEntry = repl::DurableOplogEntry{repl::DurableOplogEntryParams{
         .opTime = repl::OpTime(Timestamp{1, 2}, 1),
         .opType = repl::OpTypeEnum::kCommand,
@@ -376,7 +425,7 @@ TEST_F(CheckpointScanMetricsTest, SkippedFiresForFastCountInternalEntries) {
     }};
     test_helpers::writeToOplog(opCtx, internalEntry);
 
-    advanceCheckpoint(opCtx, sizeCountStore, timestampStore);
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
 
     // The internal applyOps entry must have been skipped (not processed).
     EXPECT_GT(
@@ -384,8 +433,26 @@ TEST_F(CheckpointScanMetricsTest, SkippedFiresForFastCountInternalEntries) {
         0);
 }
 
+TEST_F(CheckpointScanMetricsTest, CheckpointAdvancePopulatesOplogLagSecs) {
+    // Seed an applied oplog timestamp that is ahead of the checkpoint we're about to persist so the
+    // gauge has a meaningful non-zero value.
+    recordAppliedOpTime(Timestamp{1000, 1});
+
+    const test_helpers::NsAndUUID collA{
+        .nss = NamespaceString::createNamespaceString_forTest("db", "collA"), .uuid = UUID::gen()};
+    test_helpers::writeToOplog(
+        opCtx,
+        test_helpers::makeOplogEntry(
+            Timestamp{500, 1}, collA, repl::OpTypeEnum::kInsert, /*sizeDelta=*/10));
+
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
+
+    // applied=1000, checkpoint=500 -> lag=500.
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 500);
+}
+
 TEST_F(CheckpointScanMetricsTest, NoCountersFireWhenOplogIsEmpty) {
-    advanceCheckpoint(opCtx, sizeCountStore, timestampStore);
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
 
     EXPECT_EQ(
         capturer.readInt64Counter(MetricNames::kReplicatedFastCountCheckpointOplogEntriesProcessed),
@@ -403,7 +470,7 @@ TEST_F(CheckpointScanMetricsTest, NoCountersFireWhenOplogIsEmpty) {
 // - One applyOps entry whose inner ops are all on user collections and carry size metadata.
 //   This entry is counted as processed (1) and each inner op increments sizeCount.
 //
-// - One applyOps entry whose inner ops are all on fast-count-internal collections.
+// - One applyOps entry whose inner ops are all on fast-count-internal containers.
 //   Because every inner op is internal, the entire entry is skipped (1).
 //
 // Expected: processed=1, skipped=1, sizeCount=3.
@@ -412,13 +479,11 @@ TEST_F(CheckpointScanMetricsTest, ApplyOpsWithUserAndInternalEntriesExercisesAll
         .nss = NamespaceString::createNamespaceString_forTest("db", "collA"), .uuid = UUID::gen()};
     const NamespaceString adminCmdNss =
         NamespaceString::createNamespaceString_forTest("admin", "$cmd");
-    const NamespaceString fastCountStoreNss =
-        NamespaceString::makeGlobalConfigCollection(NamespaceString::kReplicatedFastCountStore);
 
     // -- Entry 1: applyOps with 3 user inserts, each carrying size metadata.
-    // operationsOnFastCountCollections() returns false (user ops present), so this entry is
-    // counted as processed. extractSizeCountDeltasForApplyOps sees 3 inner ops with "m.sz",
-    // so sizeCount is incremented 3 times.
+    // isContainerOpOnFastCountIdent() returns false (user ops present), so this entry is
+    // counted as processed. extractReplicatedMetadataDeltasForApplyOps sees 3 inner ops with
+    // "m.sz", so sizeCount is incremented 3 times.
     const BSONObj userInsert1 = BSON("op" << "i"
                                           << "ns" << collA.nss.ns_forTest() << "ui" << collA.uuid
                                           << "o" << BSON("_id" << 1) << "m" << BSON("sz" << 10));
@@ -438,16 +503,14 @@ TEST_F(CheckpointScanMetricsTest, ApplyOpsWithUserAndInternalEntriesExercisesAll
             .wallClockTime = Date_t::now(),
         }}});
 
-    // -- Entry 2: applyOps with 2 ops that only touch internal fast-count collections.
-    // operationsOnFastCountCollections() returns true, so the entire entry is skipped.
+    // -- Entry 2: applyOps with 2 ops that only touch internal fast-count containers.
+    // isContainerOpOnFastCountIdent() returns true, so the entire entry is skipped.
     const BSONObj internalOp1 =
-        BSON("op" << "u"
-                  << "ns" << fastCountStoreNss.ns_forTest() << "ui" << UUID::gen() << "o"
-                  << BSON("$set" << BSON("count" << 5)) << "o2" << BSON("_id" << 1));
+        BSON("op" << "cu"
+                  << "container" << ident::kFastCountMetadataStore << "o" << BSON("k" << 1));
     const BSONObj internalOp2 =
-        BSON("op" << "u"
-                  << "ns" << fastCountStoreNss.ns_forTest() << "ui" << UUID::gen() << "o"
-                  << BSON("$set" << BSON("count" << 3)) << "o2" << BSON("_id" << 2));
+        BSON("op" << "cu"
+                  << "container" << ident::kFastCountMetadataStore << "o" << BSON("k" << 2));
     test_helpers::writeToOplog(
         opCtx,
         repl::OplogEntry{repl::DurableOplogEntry{repl::DurableOplogEntryParams{
@@ -458,7 +521,7 @@ TEST_F(CheckpointScanMetricsTest, ApplyOpsWithUserAndInternalEntriesExercisesAll
             .wallClockTime = Date_t::now(),
         }}});
 
-    advanceCheckpoint(opCtx, sizeCountStore, timestampStore);
+    advanceCheckpoint(opCtx, *sizeCountStore, *timestampStore);
 
     EXPECT_EQ(
         capturer.readInt64Counter(MetricNames::kReplicatedFastCountCheckpointOplogEntriesProcessed),
@@ -469,6 +532,146 @@ TEST_F(CheckpointScanMetricsTest, ApplyOpsWithUserAndInternalEntriesExercisesAll
     EXPECT_EQ(capturer.readInt64Counter(
                   MetricNames::kReplicatedFastCountCheckpointSizeCountEntriesProcessed),
               3);
+}
+
+// Tests that writes through `SizeCountTimestampStore::write` advance `oplog_lag_secs` via the
+// `ReplicatedFastCountOpObserver` hooks — container writes fire `onContainerInsert`/
+// `onContainerUpdate`.
+class TimestampStoreMetricsTest : public CatalogTestFixture {
+public:
+    TimestampStoreMetricsTest()
+        : CatalogTestFixture(Options().setPersistenceProvider(
+              std::make_unique<test_helpers::ReplicatedFastCountTestPersistenceProvider>())) {}
+
+protected:
+    void setUp() override {
+        CatalogTestFixture::setUp();
+        opCtx = operationContext();
+        resetOplogLagState_ForTest();
+        registerReplicatedFastCountOpObserver(opCtx->getServiceContext());
+
+        store = test_helpers::createContainerFastCountStores(opCtx).timestampStore;
+    }
+
+    OperationContext* opCtx;
+    std::unique_ptr<SizeCountTimestampStore> store;
+    OtelMetricsCapturer capturer;
+};
+
+TEST_F(TimestampStoreMetricsTest, WriteAdvancesOplogLagSecsOnCommit) {
+    // applied=1000, checkpoint=400 -> expect lag=600.
+    recordAppliedOpTime(Timestamp(1000, 1));
+
+    {
+        Lock::GlobalLock writeLock(opCtx, MODE_IX);
+        WriteUnitOfWork wuow(opCtx);
+        store->write(opCtx, Timestamp(400, 1));
+        // Pre-commit the gauge must remain at its prior value; the on-commit hook hasn't fired.
+        EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
+        wuow.commit();
+    }
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 600);
+}
+
+TEST_F(TimestampStoreMetricsTest, RolledBackWriteDoesNotAdvanceOplogLagSecs) {
+    recordAppliedOpTime(Timestamp(1000, 1));
+
+    {
+        Lock::GlobalLock writeLock(opCtx, MODE_IX);
+        WriteUnitOfWork wuow(opCtx);
+        store->write(opCtx, Timestamp(400, 1));
+        // No commit; WUOW destructor rolls back.
+    }
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
+}
+
+TEST_F(TimestampStoreMetricsTest, RepeatedWritesAdvanceOplogLagSecs) {
+    recordAppliedOpTime(Timestamp(1000, 1));
+
+    {
+        Lock::GlobalLock writeLock(opCtx, MODE_IX);
+        WriteUnitOfWork wuow(opCtx);
+        store->write(opCtx, Timestamp(200, 1));
+        wuow.commit();
+    }
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 800);
+
+    // Second write should overwrite the existing record (update path) and update the gauge.
+    {
+        Lock::GlobalLock writeLock(opCtx, MODE_IX);
+        WriteUnitOfWork wuow(opCtx);
+        store->write(opCtx, Timestamp(900, 1));
+        wuow.commit();
+    }
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 100);
+}
+
+// Tests for `recordContainerWriteForFastCountTimestamp`, the helper called both by the
+// `ReplicatedFastCountOpObserver` container hooks and by `applyContainerOperations` on the
+// secondary apply path. The helper must filter on ident and only update the gauge when the op
+// targets the fast-count timestamps container.
+class ContainerApplyHookTest : public CatalogTestFixture {
+public:
+    ContainerApplyHookTest()
+        : CatalogTestFixture(Options().setPersistenceProvider(
+              std::make_unique<test_helpers::ReplicatedFastCountTestPersistenceProvider>())) {}
+
+protected:
+    void setUp() override {
+        CatalogTestFixture::setUp();
+        opCtx = operationContext();
+        resetOplogLagState_ForTest();
+        recordAppliedOpTime(Timestamp{1000, 1});
+    }
+
+    void scheduleAndCommit(std::string_view identArg, std::span<const char> valueBytes) {
+        WriteUnitOfWork wuow(opCtx);
+        recordContainerWriteForFastCountTimestamp(opCtx, identArg, valueBytes);
+        wuow.commit();
+    }
+
+    OperationContext* opCtx;
+    OtelMetricsCapturer capturer;
+};
+
+TEST_F(ContainerApplyHookTest, FiresForTimestampsIdent) {
+    const auto value = BSON(kValidAsOfKey << Timestamp(300, 1));
+    scheduleAndCommit(ident::kFastCountMetadataStoreTimestamps,
+                      std::span<const char>(value.objdata(), static_cast<size_t>(value.objsize())));
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 700);
+}
+
+TEST_F(ContainerApplyHookTest, NoOpForOtherIdent) {
+    const auto value = BSON(kValidAsOfKey << Timestamp(300, 1));
+    scheduleAndCommit(ident::kFastCountMetadataStore,
+                      std::span<const char>(value.objdata(), static_cast<size_t>(value.objsize())));
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
+}
+
+TEST_F(ContainerApplyHookTest, NoOpForEmptyValue) {
+    // Mirrors what `applyContainerOperations` passes for kContainerDelete: an empty span. The
+    // helper must not crash and must not register an on-commit hook.
+    scheduleAndCommit(ident::kFastCountMetadataStoreTimestamps, std::span<const char>{});
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
+}
+
+TEST_F(ContainerApplyHookTest, NoOpForRolledBackWuow) {
+    const auto value = BSON(kValidAsOfKey << Timestamp(300, 1));
+    {
+        WriteUnitOfWork wuow(opCtx);
+        recordContainerWriteForFastCountTimestamp(
+            opCtx,
+            ident::kFastCountMetadataStoreTimestamps,
+            std::span<const char>(value.objdata(), static_cast<size_t>(value.objsize())));
+        // No commit; on-commit hook must not fire.
+    }
+
+    EXPECT_EQ(capturer.readInt64Gauge(MetricNames::kReplicatedFastCountOplogLagSecs), 0);
 }
 }  // namespace
 }  // namespace mongo::replicated_fast_count

@@ -1,44 +1,25 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/hasher.h"
+#include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/uuid.h"
 
 #include <memory>
 #include <utility>
@@ -47,6 +28,7 @@ namespace mongo {
 namespace {
 
 const NamespaceString kNss = NamespaceString::createNamespaceString_forTest("TestDB", "TestColl");
+const ShardId kThisShard = ShardId{"thisShard"};
 
 class ChunkManagerTest : public RouterCatalogCacheTestFixture {
 public:
@@ -158,6 +140,191 @@ TEST_F(ChunkManagerTest, FindIntersectingWithConstantHashedPrefixAndVaryingRange
                           cri.getChunkManager(),
                           BSON("a.b" << hashedValueOfZero << "c.d" << BSONNULL),
                           BSON("a.b" << hashedValueOfZero << "c.d" << -100));
+}
+
+// CurrentChunkManager::makeUpdated is a thin wrapper: it forwards a delta of changed chunks (plus
+// the collection's timeseries/resharding/allowMigrations/unsplittable attributes) to
+// RoutingTableHistory::makeUpdated and rewraps the result. The delta-application semantics
+// themselves (dropping overlapped chunks, opening/filling gaps, version handling) live in the
+// routing-table layer and are exhaustively covered by routing_table_history_test.cpp. The single
+// test below only pins what this wrapper layer can independently break: forwarding the delta,
+// rewrapping the resulting version, and carrying the source's own attributes forward rather than
+// substituting defaults.
+class CurrentChunkManagerUpdateTest : public unittest::Test {
+public:
+    ChunkVersion chunkVersion(uint32_t major, uint32_t minor) const {
+        return ChunkVersion{{_epoch, _collTimestamp}, {major, minor}};
+    }
+
+    ChunkType makeChunk(const BSONObj& min,
+                        const BSONObj& max,
+                        const ChunkVersion& version,
+                        const ShardId& shard = kThisShard) const {
+        return ChunkType{_collUUID, ChunkRange{min, max}, version, shard};
+    }
+
+    BSONObj key(int value) const {
+        return BSON("a" << value);
+    }
+
+    // Builds a CurrentChunkManager over a gap-allowing routing table, wrapping it the same way
+    // CurrentChunkManager::makeUpdated does internally.
+    CurrentChunkManager makeCmAllowingGaps(const std::vector<ChunkType>& chunks) const {
+        auto rt = RoutingTableHistory::makeNewAllowingGaps(kNss,
+                                                           _collUUID,
+                                                           _shardKeyPattern,
+                                                           false, /* unsplittable */
+                                                           nullptr,
+                                                           false,
+                                                           _epoch,
+                                                           _collTimestamp,
+                                                           boost::none /* timeseriesFields */,
+                                                           boost::none /* reshardingFields */,
+                                                           true,
+                                                           chunks);
+        auto version = rt.getVersion();
+        auto handle = RoutingTableHistoryValueHandle(
+            std::make_shared<RoutingTableHistory>(std::move(rt)),
+            ComparableChunkVersion::makeComparableChunkVersion(version));
+        return CurrentChunkManager(std::move(handle));
+    }
+
+protected:
+    KeyPattern _shardKeyPattern{BSON("a" << 1)};
+    const OID _epoch{OID::gen()};
+    const Timestamp _collTimestamp{1, 1};
+    const UUID _collUUID{UUID::gen()};
+};
+
+// The wrapper forwards the delta to the routing-table layer and rewraps the result: the new chunk
+// is applied (overlapped old chunks dropped, as proven at the routing-table layer), the resulting
+// ChunkManager reports the delta's version, and the source collection's own attributes are carried
+// forward rather than replaced by defaults.
+TEST_F(CurrentChunkManagerUpdateTest, MakeUpdatedForwardsDeltaAndCarriesAttributes) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(0), key(10), chunkVersion(1, 0)),
+                                  makeChunk(key(10), key(20), chunkVersion(1, 1)),
+                                  makeChunk(key(20), key(30), chunkVersion(1, 2))});
+
+    // [5, 15) overlaps [0, 10) and [10, 20); applying it must reach the routing-table layer.
+    auto updated = cm.makeUpdated({makeChunk(key(5), key(15), chunkVersion(2, 0))});
+
+    // Delta was forwarded and applied.
+    ASSERT_EQ(updated.numChunks(), 2);  // [5, 15) and the surviving [20, 30)
+    ASSERT_TRUE(updated.keyBelongsToShard(key(7), kThisShard));
+    ASSERT_FALSE(updated.keyBelongsToShard(key(2), kThisShard));
+
+    // Result is rewrapped at the delta's version.
+    ASSERT_EQ(updated.getVersion(), chunkVersion(2, 0));
+
+    // Source attributes are carried forward, not reset to defaults.
+    ASSERT_EQ(updated.isUnsplittable(), cm.isUnsplittable());
+    ASSERT_EQ(updated.allowMigrations(), cm.allowMigrations());
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkOwnedKeyReturnsContainsShardKey) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(10), key(20), chunkVersion(1, 0))});
+    auto result = cm.nearestOwnedChunk(key(15), kThisShard, ChunkMap::Direction::Forward);
+    ASSERT_TRUE(result.containsShardKey);
+    ASSERT_TRUE(result.nearestOwnedChunk.has_value());
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkForwardFromLeadingGap) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(10), key(20), chunkVersion(1, 0))});
+    auto result = cm.nearestOwnedChunk(key(5), kThisShard, ChunkMap::Direction::Forward);
+    ASSERT_FALSE(result.containsShardKey);
+    ASSERT_TRUE(result.nearestOwnedChunk.has_value());
+    ASSERT_BSONOBJ_EQ(result.nearestOwnedChunk->getMin(), key(10));
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkBackwardEqualsLeftChunkBorder) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(5), key(20), chunkVersion(1, 0))});
+    auto result = cm.nearestOwnedChunk(key(5), kThisShard, ChunkMap::Direction::Backward);
+    ASSERT_TRUE(result.containsShardKey);
+    ASSERT_TRUE(result.nearestOwnedChunk.has_value());
+    ASSERT_BSONOBJ_EQ(result.nearestOwnedChunk->getMin(), key(5));
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkBackwardFromLeadingGap) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(10), key(20), chunkVersion(1, 0))});
+    auto result = cm.nearestOwnedChunk(key(5), kThisShard, ChunkMap::Direction::Backward);
+    ASSERT_FALSE(result.containsShardKey);
+    ASSERT_FALSE(result.nearestOwnedChunk.has_value());
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkForwardFromTrailingGap) {
+    auto cm = makeCmAllowingGaps({makeChunk(key(0), key(10), chunkVersion(1, 0))});
+    auto result = cm.nearestOwnedChunk(key(15), kThisShard, ChunkMap::Direction::Forward);
+    ASSERT_FALSE(result.containsShardKey);
+    ASSERT_FALSE(result.nearestOwnedChunk.has_value());
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkForwardFromGapBetweenChunks) {
+    const ShardId kOtherShard{"otherShard"};
+    auto cm = makeCmAllowingGaps({makeChunk(key(0), key(10), chunkVersion(1, 0), kOtherShard),
+                                  makeChunk(key(20), key(30), chunkVersion(1, 1))});
+    auto result = cm.nearestOwnedChunk(key(15), kThisShard, ChunkMap::Direction::Forward);
+    ASSERT_FALSE(result.containsShardKey);
+    ASSERT_TRUE(result.nearestOwnedChunk.has_value());
+    ASSERT_BSONOBJ_EQ(result.nearestOwnedChunk->getMin(), key(20));
+}
+
+TEST_F(CurrentChunkManagerUpdateTest, NearestOwnedChunkBackwardFromGapBetweenChunks) {
+    const ShardId kOtherShard{"otherShard"};
+    auto cm = makeCmAllowingGaps({makeChunk(key(0), key(10), chunkVersion(1, 0)),
+                                  makeChunk(key(20), key(30), chunkVersion(1, 1), kOtherShard)});
+    auto result = cm.nearestOwnedChunk(key(15), kThisShard, ChunkMap::Direction::Backward);
+    ASSERT_FALSE(result.containsShardKey);
+    ASSERT_TRUE(result.nearestOwnedChunk.has_value());
+    ASSERT_BSONOBJ_EQ(result.nearestOwnedChunk->getMax(), key(10));
+}
+
+class ChunkMapFindClosestTest : public unittest::Test {
+public:
+    ChunkVersion chunkVersion(uint32_t major, uint32_t minor) const {
+        return ChunkVersion{{_epoch, _collTimestamp}, {major, minor}};
+    }
+
+    BSONObj key(int value) const {
+        return BSON("a" << value);
+    }
+
+    ChunkType makeChunk(const BSONObj& min, const BSONObj& max, const ChunkVersion& version) const {
+        return ChunkType{_collUUID, ChunkRange{min, max}, version, kThisShard};
+    }
+
+    // Creates a gap-allowing ChunkMap with chunkVectorSize=2, so 4 chunks produce two map entries:
+    //   Entry A (key=10): [0,5), [5,10)
+    //   Entry B (key=35): [20,25), [30,35)   <- gap at 25-30 within Entry B
+    ChunkMap makeMapWithMidVectorGapInSecondEntry() const {
+        ChunkMap::ChunkVector chunkInfos;
+        for (const auto& c : {makeChunk(key(0), key(5), chunkVersion(1, 0)),
+                              makeChunk(key(5), key(10), chunkVersion(1, 1)),
+                              makeChunk(key(20), key(25), chunkVersion(1, 2)),
+                              makeChunk(key(30), key(35), chunkVersion(1, 3))}) {
+            chunkInfos.push_back(std::make_shared<ChunkInfo>(c));
+        }
+        return ChunkMap{_epoch, _collTimestamp, 2 /*chunkVectorSize*/, true /*allowGaps*/}
+            .createMerged(std::move(chunkInfos));
+    }
+
+private:
+    const OID _epoch{OID::gen()};
+    const Timestamp _collTimestamp{1, 1};
+    const UUID _collUUID{UUID::gen()};
+};
+
+TEST_F(ChunkMapFindClosestTest, BackwardFromMidVectorGapInNonFirstEntry) {
+    auto chunkMap = makeMapWithMidVectorGapInSecondEntry();
+    auto it = chunkMap.findClosestInDirection(key(27), ChunkMap::Direction::Backward);
+    ASSERT(it != chunkMap.end());
+    ASSERT_BSONOBJ_EQ((*it)->getRange().getMax(), key(25));
+}
+
+TEST_F(ChunkMapFindClosestTest, ForwardFromMidVectorGapInNonFirstEntry) {
+    auto chunkMap = makeMapWithMidVectorGapInSecondEntry();
+    auto it = chunkMap.findClosestInDirection(key(27), ChunkMap::Direction::Forward);
+    ASSERT(it != chunkMap.end());
+    ASSERT_BSONOBJ_EQ((*it)->getRange().getMin(), key(30));
 }
 
 }  // namespace

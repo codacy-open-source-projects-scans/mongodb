@@ -1,45 +1,24 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/lookup_stage.h"
 
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/pipeline/resolved_namespace.h"  // IWYU pragma: keep
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
-#include "mongo/db/views/resolved_view.h"  // IWYU pragma: keep
+#include "mongo/db/views/pipeline_resolver.h"
 #include "mongo/logv2/log.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -106,13 +85,33 @@ void addCacheStageAndOptimize(boost::intrusive_ptr<DocumentSource> source,
     // Optimize the pipeline, with the cache in its correct position if it exists.
     pipeline_optimization::optimizeEachStage(*pipeline.getContext(), &container);
 }
+
+// Returns a callback (for MakePipelineOptions::resolveInvolvedNamespacesFn) that binds foreign-view
+// info onto the (extension) stages of a $lookup subpipeline that targets a view. The already-
+// materialized view prefix is skipped; user stages and nested pipelines are bound.
+std::function<void(LiteParsedPipeline&)> makeLookupViewBinder(
+    const boost::intrusive_ptr<ExpressionContext>& fromExpCtx, size_t viewPrefixLength) {
+    return [fromExpCtx, viewPrefixLength](LiteParsedPipeline& liteParsedPipeline) {
+        const auto& resolvedNamespaces = fromExpCtx->getResolvedNamespaces();
+        const auto& userNss = fromExpCtx->getUserNss();
+        auto it = resolvedNamespaces.find(userNss);
+        if (it == resolvedNamespaces.end() || !it->second.isInvolvedNamespaceAView()) {
+            return;
+        }
+        PipelineResolver::resolveInvolvedNamespacesOnLiteParsedPipeline(&liteParsedPipeline,
+                                                                        userNss,
+                                                                        resolvedNamespaces,
+                                                                        /*bindOnly*/ true,
+                                                                        viewPrefixLength);
+    };
+}
 }  // namespace
 
 namespace exec::agg {
 
 REGISTER_AGG_STAGE_MAPPING(lookup, DocumentSourceLookUp::id, documentSourceLookUpToStageFn);
 
-LookUpStage::LookUpStage(StringData stageName,
+LookUpStage::LookUpStage(std::string_view stageName,
                          const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                          boost::intrusive_ptr<ExpressionContext> fromExpCtx,
                          NamespaceString fromNs,
@@ -144,15 +143,23 @@ LookUpStage::LookUpStage(StringData stageName,
       _unwindIndexPathField(std::move(unwindIndexPathField)),
       _unwindPreserveNullsAndEmptyArrays(unwindPreserveNullsAndEmptyArrays),
       _additionalFilter(additionalFilter.getOwned()),
-      _sharedState(std::move(sharedState)) {
+      _sharedState(std::move(sharedState)),
+      _memoryTracker(
+          OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForStage(*pExpCtx)) {
     if (!hasLocalFieldForeignFieldJoin()) {
         // When local/foreignFields are included, we cannot enable the cache because the $match
         // is a correlated prefix that will not be detected. Here, local/foreignFields are absent,
         // so we enable the cache.
         _cache = std::make_shared<SequentialDocumentCache>(
-            loadMemoryLimit(StageMemoryLimit::DocumentSourceLookupCacheSizeBytes));
+            loadMemoryLimit(StageMemoryLimit::DocumentSourceLookupCacheSizeBytes)
+                .get(pExpCtx->getOperationContext()));
     }
-};
+    if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled() &&
+        feature_flags::gFeatureFlagExpressionMemoryTracking.isEnabled()) {
+        _expressionEvalCtx.tracker = &_memoryTracker;
+    }
+    _expressionEvalCtx.stageName = _commonStats.stageTypeStr;
+}
 
 void LookUpStage::detachFromOperationContext() {
     if (_sharedState->execPipeline) {
@@ -221,7 +228,7 @@ bool LookUpStage::usedDisk() const {
     return _sharedState->execPipeline && _sharedState->execPipeline->usedDisk();
 }
 
-Document LookUpStage::getExplainOutput(const SerializationOptions& opts) const {
+Document LookUpStage::getExplainOutput(const query_shape::SerializationOptions& opts) const {
     auto doc = MutableDocument(Stage::getExplainOutput(opts));
 
     const PlanSummaryStats& stats = _stats.planSummaryStats;
@@ -234,6 +241,11 @@ Document LookUpStage::getExplainOutput(const SerializationOptions& opts) const {
                    std::back_inserter(indexesUsedVec),
                    [](const std::string& idx) -> Value { return Value(idx); });
     doc["indexesUsed"] = Value{std::move(indexesUsedVec)};
+
+    if (_expressionEvalCtx.tracker) {
+        doc["expressionEvaluationPeakMemoryBytes"] = opts.serializeLiteral(
+            static_cast<long long>(_expressionEvalCtx.tracker->peakTrackedMemoryBytes()));
+    }
 
     return doc.freeze();
 }
@@ -337,7 +349,10 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipelineFromViewDefinition(
 
     // Store the pipeline with resolved namespaces so that we only trigger this exception on the
     // first input document.
-    _sharedState->resolvedPipeline = resolvedPipeline->serializeToBson();
+    query_shape::SerializationOptions wireOptsForResolvedStore{.isSerializingForRemoteDispatch =
+                                                                   true};
+    _sharedState->resolvedPipeline = resolvedPipeline->serializeToBson(wireOptsForResolvedStore);
+    _sharedState->resolvedPipelineViewBinding = LookupResolvedPipelineViewBinding::kAlreadyBound;
 
     LOGV2_DEBUG(3254800,
                 3,
@@ -367,11 +382,12 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipelineFromViewDefinition(
     // Update the expression context with any new namespaces the resolved pipeline has
     // introduced.
     LiteParsedPipeline liteParsedPipeline(resolvedNs, viewPipeline);
-    _fromExpCtx = makeCopyFromExpressionContext(_fromExpCtx,
-                                                resolvedNs,
-                                                boost::none,
-                                                boost::none,
-                                                ViewInfo(_fromNs, resolvedNs, viewPipeline));
+    _fromExpCtx = makeCopyFromExpressionContext(
+        _fromExpCtx,
+        resolvedNs,
+        boost::none,
+        boost::none,
+        ResolvedNamespace::makeForView(_fromNs, resolvedNs, viewPipeline));
 
     // TODO SERVER-122035 Remove this workaround once viewless timeseries collections become the
     // default after 9.0 branching.
@@ -395,7 +411,7 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipelineFromViewDefinition(
     // Parse the new pipeline and prepare it again. We must resolve the view before entering
     // 'finalizeAndMaybePreparePipelineForExecution', since that function requires accessing
     // collection catalog data.
-    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kOptionsMinimal;
+    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kDesugarOnly;
     pipelineOpts.validator = mongo::lookupPipeValidator;
     std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::pipeline_factory::makePipeline(
         _sharedState->resolvedPipeline, _fromExpCtx, pipelineOpts);
@@ -421,11 +437,6 @@ void LookUpStage::prepareStateToBuildPipeline(
     // Copy all 'let' variables into the foreign pipeline's expression context.
     _variables.copyToExpCtx(_variablesParseState, fromExpCtx.get());
     fromExpCtx->setPlanCache(ExpressionContext::PlanCacheOptions::kForcePlanCache);
-
-    // Query settings are looked up after parsing and therefore are not populated in the
-    // 'fromExpCtx' as part of DocumentSourceLookUp constructor. Assign query settings to the
-    // 'fromExpCtx' by copying them from the parent query ExpressionContext.
-    fromExpCtx->setQuerySettingsIfNotPresent(getContext()->getQuerySettings());
 
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &fromExpCtx->variables);
@@ -468,9 +479,14 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
         ? ShardTargetingPolicy::kAllowed
         : ShardTargetingPolicy::kNotAllowed;
 
-    // Parse the pipeline.
-    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kOptionsMinimal;
+    pipeline_factory::MakePipelineOptions pipelineOpts = pipeline_factory::kDesugarOnly;
     pipelineOpts.validator = mongo::lookupPipeValidator;
+    if (_sharedState->resolvedPipelineViewBinding ==
+        LookupResolvedPipelineViewBinding::kNeedsBinding) {
+        pipelineOpts.resolveInvolvedNamespacesFn =
+            makeLookupViewBinder(fromExpCtx, _sharedState->viewBindingStart);
+    }
+
     std::unique_ptr<mongo::Pipeline> parsedPipeline = mongo::pipeline_factory::makePipeline(
         _sharedState->resolvedPipeline, fromExpCtx, pipelineOpts);
 
@@ -489,10 +505,10 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
             // pipeline with the resolved view definition.
             return buildPipelineFromViewDefinition(
                 fromExpCtx,
-                e->getNamespace(),
+                e->getResolvedNamespace(),
                 isRawDataOperation(pExpCtx->getOperationContext()) && e->isTimeseries()
                     ? std::vector<BSONObj>{}
-                    : e->getPipeline(),
+                    : e->getBsonPipeline(),
                 true /* attachCursorAfterOptimizing */,
                 shardTargetingPolicy,
                 pipeline_optimization::optimizeAndValidatePipeline);
@@ -529,10 +545,10 @@ std::unique_ptr<mongo::Pipeline> LookUpStage::buildPipeline(
         // pipeline with the resolved view definition and retry to attach the cursor.
         pipeline = buildPipelineFromViewDefinition(
             fromExpCtx,
-            e->getNamespace(),
+            e->getResolvedNamespace(),
             isRawDataOperation(pExpCtx->getOperationContext()) && e->isTimeseries()
                 ? std::vector<BSONObj>{}
-                : e->getPipeline(),
+                : e->getBsonPipeline(),
             !cacheIsServing,
             shardTargetingPolicy,
             optimizePipeline);
@@ -619,7 +635,7 @@ void LookUpStage::resolveLetVariables(const Document& localDoc, Variables* varia
     invariant(variables);
 
     for (auto& letVar : _letVariables) {
-        auto value = letVar.expression->evaluate(localDoc, &pExpCtx->variables);
+        auto value = letVar.expression->evaluate(localDoc, &pExpCtx->variables, _expressionEvalCtx);
         variables->setConstantValue(letVar.id, value);
     }
 }

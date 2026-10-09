@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/lock_manager/exception_util.h"
 
@@ -36,12 +10,13 @@
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/execution_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/log_and_backoff.h"
 
 #include <cstddef>
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -67,7 +42,7 @@ Dur floatScaleDuration(double scale, Dur dur) {
 
 void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
                                                 RecoveryUnit& ru,
-                                                StringData opStr,
+                                                std::string_view opStr,
                                                 const NamespaceStringOrUUID& nssOrUUID,
                                                 const Status& s,
                                                 size_t writeConflictAttempts) {
@@ -103,8 +78,8 @@ void recordTemporarilyUnavailableErrors(OperationContext* opCtx, int64_t n) {
 }
 
 void logWriteConflictAndBackoff(size_t attempt,
-                                StringData operation,
-                                StringData reason,
+                                std::string_view operation,
+                                std::string_view reason,
                                 const NamespaceStringOrUUID& nssOrUUID) {
     auto severity = ((attempt != 0) && ((attempt % 1000) == 0)) ? logv2::LogSeverity::Info()
                                                                 : logv2::LogSeverity::Debug(1);
@@ -121,8 +96,8 @@ void logWriteConflictAndBackoff(size_t attempt,
 
 void logAndRecordWriteConflictAndBackoff(OperationContext* opCtx,
                                          size_t attempt,
-                                         StringData operation,
-                                         StringData reason,
+                                         std::string_view operation,
+                                         std::string_view reason,
                                          const NamespaceStringOrUUID& nssOrUUID) {
     recordWriteConflict(opCtx);
     logWriteConflictAndBackoff(attempt, operation, reason, nssOrUUID);
@@ -130,7 +105,7 @@ void logAndRecordWriteConflictAndBackoff(OperationContext* opCtx,
 
 void handleTemporarilyUnavailableException(OperationContext* opCtx,
                                            size_t tempUnavailAttempts,
-                                           StringData opStr,
+                                           std::string_view opStr,
                                            const NamespaceStringOrUUID& nssOrUUID,
                                            const Status& s,
                                            size_t& writeConflictAttempts) {
@@ -145,7 +120,7 @@ void handleTemporarilyUnavailableException(OperationContext* opCtx,
 void handleTemporarilyUnavailableException(OperationContext* opCtx,
                                            RecoveryUnit& ru,
                                            size_t tempUnavailAttempts,
-                                           StringData opStr,
+                                           std::string_view opStr,
                                            const NamespaceStringOrUUID& nssOrUUID,
                                            const Status& s,
                                            size_t& writeConflictAttempts) {
@@ -194,7 +169,7 @@ void handleTemporarilyUnavailableException(OperationContext* opCtx,
 }
 
 void convertToWCEAndRethrow(OperationContext* opCtx,
-                            StringData opStr,
+                            std::string_view opStr,
                             const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e) {
     // For multi-document transactions, since WriteConflicts are tagged as
     // TransientTransactionErrors and TemporarilyUnavailable errors are not, convert the error to a
@@ -205,7 +180,7 @@ void convertToWCEAndRethrow(OperationContext* opCtx,
     throwWriteConflictException(e.reason());
 }
 
-void WriteConflictRetryAlgorithm::_emitLog(StringData reason) {
+void WriteConflictRetryAlgorithm::_emitLog(std::string_view reason) {
     logv2::detail::doLog(46404,
                          _logSeverity(),
                          {logv2::LogComponent::kWrite},
@@ -274,7 +249,13 @@ void WriteConflictRetryAlgorithm::_handleWriteConflictException(const Status& s)
     _recoveryUnit().abandonSnapshot();
     _emitLog(s.reason());
 
-    sleepFor(floatScaleDuration(_backoffFactor / _attemptCount, _conflictTime));
+    // We have a backoff of ~1.1x, at 10ms the growth rate overtakes the loss of converting to ms.
+    auto backoff = floatScaleDuration(_backoffFactor / _attemptCount, _conflictTime);
+    if (backoff > Milliseconds(10)) {
+        _opCtx->sleepFor(duration_cast<Milliseconds>(backoff));
+    } else {
+        sleepFor(backoff);
+    }
     _backoffFactor *= backoffGrowth;
 
     _assertRetryLimit();

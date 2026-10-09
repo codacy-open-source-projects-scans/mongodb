@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/s/resharding/resharding_metrics.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,6 +20,7 @@
 #include "mongo/util/duration.h"
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -70,12 +45,13 @@ const auto kTimedPhaseNamesMap = [] {
         {TimedPhase::kApplying, "totalApplyTimeElapsedSecs"},
         {TimedPhase::kCriticalSection, "totalCriticalSectionTimeElapsedSecs"},
         {TimedPhase::kBuildingIndex, "totalIndexBuildTimeElapsedSecs"},
+        {TimedPhase::kDonorCloneCountFetchDuration, "donorCloneCountFetchTimeElapsedSecs"},
         {TimedPhase::kVerificationPreApplying, "verificationPreApplyingTimeElapsedSecs"},
         {TimedPhase::kVerificationPreCommit, "verificationPreCommitTimeElapsedSecs"},
         {TimedPhase::kChangeStreamMonitor, "changeStreamMonitorTotalTimeElapsedSecs"}};
 }();
 
-boost::optional<Milliseconds> readCoordinatorEstimate(const AtomicWord<Milliseconds>& field) {
+boost::optional<Milliseconds> readCoordinatorEstimate(const Atomic<Milliseconds>& field) {
     auto estimate = field.load();
     if (estimate == kNoEstimate) {
         return boost::none;
@@ -85,7 +61,7 @@ boost::optional<Milliseconds> readCoordinatorEstimate(const AtomicWord<Milliseco
 
 template <typename T>
 void appendOptionalMillisecondsFieldAs(BSONObjBuilder& builder,
-                                       StringData fieldName,
+                                       std::string_view fieldName,
                                        const boost::optional<Milliseconds> value) {
     if (!value) {
         return;
@@ -100,12 +76,12 @@ BSONObj createOriginalCommand(const NamespaceString& nss, BSONObj shardKey) {
     using Arr = std::vector<Value>;
     using V = Value;
 
-    return Doc{
-        {"reshardCollection",
-         V{StringData{NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())}}},
-        {"key", std::move(shardKey)},
-        {"unique", V{StringData{"false"}}},
-        {"collation", V{Doc{{"locale", V{StringData{"simple"}}}}}}}
+    return Doc{{"reshardCollection",
+                V{std::string_view{
+                    NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())}}},
+               {"key", std::move(shardKey)},
+               {"unique", V{std::string_view{"false"}}},
+               {"collation", V{Doc{{"locale", V{std::string_view{"simple"}}}}}}}
         .toBson();
 }
 
@@ -373,6 +349,58 @@ void ReshardingMetrics::setLastOpEndingChunkImbalance(int64_t imbalanceCount) {
     _cumulativeMetrics->setLastOpEndingChunkImbalance(imbalanceCount);
 }
 
+void ReshardingMetrics::onSearchIndexAbort() {
+    _cumulativeMetrics->onSearchIndexAbort();
+}
+
+void ReshardingMetrics::onPreApplyVerificationSuccess() {
+    getCumulativeMetrics()->onPreApplyVerificationSuccess();
+}
+
+void ReshardingMetrics::onPreApplyVerificationFailure() {
+    getCumulativeMetrics()->onPreApplyVerificationFailure();
+}
+
+void ReshardingMetrics::onPreApplyVerificationSkipped() {
+    getCumulativeMetrics()->onPreApplyVerificationSkipped();
+}
+
+void ReshardingMetrics::onPreApplyVerificationTimedOut() {
+    getCumulativeMetrics()->onPreApplyVerificationTimedOut();
+}
+
+void ReshardingMetrics::onPreApplyVerificationRetry() {
+    getCumulativeMetrics()->onPreApplyVerificationRetry();
+}
+
+void ReshardingMetrics::onPreCommitVerificationSuccess() {
+    getCumulativeMetrics()->onPreCommitVerificationSuccess();
+}
+
+void ReshardingMetrics::onPreCommitVerificationFailure() {
+    getCumulativeMetrics()->onPreCommitVerificationFailure();
+}
+
+void ReshardingMetrics::onPreCommitVerificationSkipped() {
+    getCumulativeMetrics()->onPreCommitVerificationSkipped();
+}
+
+void ReshardingMetrics::onPreCommitVerificationTimedOut() {
+    getCumulativeMetrics()->onPreCommitVerificationTimedOut();
+}
+
+void ReshardingMetrics::onPreCommitDonorVerificationRetry() {
+    getCumulativeMetrics()->onPreCommitDonorVerificationRetry();
+}
+
+void ReshardingMetrics::onCoordinatorRetry(std::string_view label) {
+    getCumulativeMetrics()->onCoordinatorRetry(label);
+}
+
+void ReshardingMetrics::onPreCommitRecipientVerificationRetry() {
+    getCumulativeMetrics()->onPreCommitRecipientVerificationRetry();
+}
+
 void ReshardingMetrics::onInsertApplied() {
     _insertsApplied.fetchAndAdd(1);
     getCumulativeMetrics()->onInsertApplied();
@@ -468,14 +496,15 @@ boost::optional<Milliseconds> ReshardingMetrics::getMaxAverageTimeToFetchAndAppl
 
     auto shouldLog = logOption == CalculationLogOption::Show;
     auto summaryBuilder = shouldLog ? boost::make_optional(BSONObjBuilder{}) : boost::none;
-    auto appendOptionalTime =
-        [](BSONObjBuilder* builder, StringData fieldName, boost::optional<Milliseconds> time) {
-            if (time.has_value()) {
-                builder->append(fieldName, time->count());
-            } else {
-                builder->appendNull(fieldName);
-            }
-        };
+    auto appendOptionalTime = [](BSONObjBuilder* builder,
+                                 std::string_view fieldName,
+                                 boost::optional<Milliseconds> time) {
+        if (time.has_value()) {
+            builder->append(fieldName, time->count());
+        } else {
+            builder->appendNull(fieldName);
+        }
+    };
 
     boost::optional<Milliseconds> maxAvgTimeToFetchAndApply;
     bool incomplete = false;
@@ -653,10 +682,12 @@ std::unique_ptr<ReshardingMetrics> ReshardingMetrics::makeInstance_forTest(
                                                ReshardingProvenanceEnum::kReshardCollection);
 }
 
-StringData ReshardingMetrics::getStateString() const {
+std::string_view ReshardingMetrics::getStateString() const {
     return visit(OverloadedVisitor{[](CoordinatorStateEnum state) { return idl::serialize(state); },
                                    [](RecipientStateEnum state) { return idl::serialize(state); },
-                                   [](DonorStateEnum state) { return idl::serialize(state); }},
+                                   [](DonorStateEnum state) {
+                                       return idl::serialize(state);
+                                   }},
                  getState());
 }
 
@@ -716,6 +747,8 @@ BSONObj ReshardingMetrics::getDiagnosticMetrics() const {
                        elapsedMillisOr(TimedPhase::kChangeStreamMonitor));
             break;
         case Role::kCoordinator:
+            bob.append(kCoordinatorDonorCloneCountFetchTimeElapsedMillis,
+                       elapsedMillisOr(TimedPhase::kDonorCloneCountFetchDuration));
             bob.append(kCoordinatorVerificationPreApplyingTimeElapsedMillis,
                        elapsedMillisOr(TimedPhase::kVerificationPreApplying));
             bob.append(kCoordinatorVerificationPreCommitTimeElapsedMillis,
@@ -745,6 +778,7 @@ BSONObj ReshardingMetrics::getDiagnosticMetricDefaults(ReshardingMetricsCommon::
             bob.append(kRecipientChangeStreamMonitorTotalTimeElapsedMillis, kNotAvailable);
             break;
         case Role::kCoordinator:
+            bob.append(kCoordinatorDonorCloneCountFetchTimeElapsedMillis, kNotAvailable);
             bob.append(kCoordinatorVerificationPreApplyingTimeElapsedMillis, kNotAvailable);
             bob.append(kCoordinatorVerificationPreCommitTimeElapsedMillis, kNotAvailable);
             break;

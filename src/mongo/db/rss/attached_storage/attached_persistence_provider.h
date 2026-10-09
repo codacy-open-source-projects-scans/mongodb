@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/storage/checkpoint_schedule_policy.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/modules.h"
 
@@ -70,9 +45,20 @@ public:
     bool mustUsePrimaryDrivenIndexBuilds() const override;
 
     /**
+     * Attached storage does not replicate table-level operations through the oplog.
+     */
+    bool mustUseContainerWrites() const override;
+
+    /**
      * Attached storage does not require replicated RecordIds to function correctly.
      */
     bool shouldUseReplicatedRecordIds() const override;
+
+    /**
+     * Attached storage gates the clustered-on-_id oplog apply fast path behind the FCV-gated
+     * featureFlagClusteredCollectionOplogApplyFastPath, so the provider does not mandate it.
+     */
+    bool shouldUseClusteredCollectionOplogFastPath() const override;
 
     /**
      * Attached storage uses unreplicated truncates.
@@ -83,6 +69,19 @@ public:
      * Attached storage uses unreplicated fastcounts.
      */
     bool shouldUseReplicatedFastCount() const override;
+
+    /**
+     * Attached storage nodes own their physical state, so per-document validation hashes are not
+     * replicated on the oplog.
+     */
+    bool shouldUseContinuousInternodeValidation() const override;
+
+    /**
+     * Attached storage nodes own their physical container state, and initial sync cannot seed
+     * container contents for unreplicated namespaces (e.g. the oplog's own fast count entry), so
+     * container op application self-heals on state mismatches.
+     */
+    bool relaxContainerOplogConstraints() const override;
 
     /**
      * Flow control is based on the rate of generation of oplog data and the ability of the
@@ -106,11 +105,6 @@ public:
      */
     bool shouldAvoidDuplicateCheckpoints() const override;
 
-    /**
-     * We can safely use wiredTigerCursorModify(), so no need to force a full update.
-     */
-    bool shouldForceUpdateWithFullDocument() const override;
-
     bool supportsCursorReuseForExpressPathQueries() const override;
 
     /**
@@ -127,6 +121,11 @@ public:
      * We do not support preserving prepared transactions in the precise checkpoints.
      */
     bool supportsPreservingPreparedTxnInPreciseCheckpoints() const override;
+
+    /**
+     * We can support version cursors.
+     */
+    bool supportsVersionCursor() const override;
 
     /**
      * We can support table logging.
@@ -156,9 +155,10 @@ public:
     bool supportsAsyncOplogMarkerGeneration() const override;
 
     /*
-     * We can support oplog sampling.
+     * We can support scanning and sampling the oplog.
      */
     bool supportsOplogSampling() const override;
+    bool supportsOplogScanning() const override;
 
     bool supportsWriteConcernOptions(const WriteConcernOptions& writeConcernOptions) const override;
 
@@ -174,11 +174,15 @@ public:
      */
     multiversion::FeatureCompatibilityVersion getMinimumRequiredFCV() const override;
 
-
     /**
      * The default memory_page_max value to set on WT for the oplog in string format.
      */
     const char* getWTMemoryPageMaxForOplogStrValue() const override;
+
+    /**
+     * The lowest size the oplog collection can be resized to via replSetResizeOplog.
+     */
+    double getMinOplogSizeMB() const override;
 
     /**
      * We can support compaction.
@@ -240,9 +244,30 @@ public:
     bool supportsColdCollections() const override;
 
     /**
-     * Attached storage supports read preference enforcement for change streams.
+     * Attached storage supports replSetTestEgress and replSetGetRBID commands.
      */
-    bool enforcesChangeStreamReadPreferenceOnGetMore() const override;
+    bool supportsLegacyReplSetCommands() const override;
+
+    /**
+     * Attached storage supports external usage of dbHash.
+     */
+    bool supportsDBHashExternalCall() const override;
+
+    /**
+     * Returns a FixedIntervalPolicy that schedules checkpoints at a fixed interval controlled by
+     * the syncdelay parameter.
+     */
+    std::unique_ptr<CheckpointSchedulePolicy> makeCheckpointSchedulePolicy() const override;
+
+    /**
+     * Attached storage supports the apply ops user-facing command.
+     */
+    bool supportsApplyOpsCommand() const override;
+
+    /**
+     * Attached storage supports external usage of getDiagnosticData.
+     */
+    bool supportsGetDiagnosticDataExternalCall() const override;
 };
 
 }  // namespace mongo::rss

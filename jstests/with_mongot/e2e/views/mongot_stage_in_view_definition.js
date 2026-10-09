@@ -2,10 +2,11 @@
  * Tests that having a view defined with $search/$vectorSearch works correctly at the top level
  * command, inside a $unionWith, and inside a $lookup.
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_82 ]
+ * @tags: [ requires_fcv_82 ]
  */
 
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     getMovieData,
     getMoviePlotEmbeddingById,
@@ -28,7 +29,11 @@ assert.commandWorked(coll.insertMany(getMovieData()));
 const matchPipeline = [{$match: {$expr: {$in: ["Adventure", "$genres"]}}}];
 const buildSearchPipeline = (indexName) => [
     {
-        $search: {index: indexName, text: {query: "ape", path: ["fullplot", "title"]}, scoreDetails: true},
+        $search: {
+            index: indexName,
+            text: {query: "ape", path: ["fullplot", "title"]},
+            scoreDetails: true,
+        },
     },
 ];
 const buildVectorSearchPipeline = (indexName) => [
@@ -76,9 +81,15 @@ const vectorSearchIndexOnCollName = "vector_search_movie_coll";
 const vectorSearchIndexOnMatchViewName = "vector_search_match_view";
 
 // Create the views.
-assert.commandWorked(db.createView(searchViewName, collName, buildSearchPipeline(searchIndexOnCollName)));
 assert.commandWorked(
-    db.createView(vectorSearchViewName, collName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+    db.createView(searchViewName, collName, buildSearchPipeline(searchIndexOnCollName)),
+);
+assert.commandWorked(
+    db.createView(
+        vectorSearchViewName,
+        collName,
+        buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+    ),
 );
 assert.commandWorked(
     db.createView(
@@ -88,7 +99,11 @@ assert.commandWorked(
     ),
 );
 assert.commandWorked(
-    db.createView(lookupViewName, collName, buildLookupPipeline(collName, buildSearchPipeline(searchIndexOnCollName))),
+    db.createView(
+        lookupViewName,
+        collName,
+        buildLookupPipeline(collName, buildSearchPipeline(searchIndexOnCollName)),
+    ),
 );
 assert.commandWorked(db.createView(matchViewName, collName, matchPipeline));
 
@@ -99,7 +114,10 @@ const unionWithView = db[unionWithViewName];
 const lookupView = db[lookupViewName];
 
 // Create the mongot indexes on the collection.
-createSearchIndex(coll, {name: searchIndexOnCollName, definition: getMovieSearchIndexSpec().definition});
+createSearchIndex(coll, {
+    name: searchIndexOnCollName,
+    definition: getMovieSearchIndexSpec().definition,
+});
 createSearchIndex(coll, {
     name: vectorSearchIndexOnCollName,
     type: "vectorSearch",
@@ -107,7 +125,10 @@ createSearchIndex(coll, {
 });
 
 // Create the mongot indexes on the $match view.
-createSearchIndex(matchView, {name: searchIndexOnMatchViewName, definition: getMovieSearchIndexSpec().definition});
+createSearchIndex(matchView, {
+    name: searchIndexOnMatchViewName,
+    definition: getMovieSearchIndexSpec().definition,
+});
 createSearchIndex(matchView, {
     name: vectorSearchIndexOnMatchViewName,
     type: "vectorSearch",
@@ -128,32 +149,65 @@ const expectedResultsVectorSearch = buildExpectedResults(
     datasets.MOVIES,
 );
 const expectedResultsMatchSearch = buildExpectedResults([6, 2, 4, 5], datasets.MOVIES);
-const expectedResultsMatchVectorSearch = buildExpectedResults([6, 4, 8, 9, 12, 13, 5, 2, 11], datasets.MOVIES);
+const expectedResultsMatchVectorSearch = buildExpectedResults(
+    [6, 4, 8, 9, 12, 13, 5, 2, 11],
+    datasets.MOVIES,
+);
 
 const runTest = (collOrView, pipeline, expectedResults) => {
     const results = collOrView.aggregate(pipeline).toArray();
     assertDocArrExpectedFuzzy(expectedResults, results);
 
     // Confirm that running explain works.
-    assert.commandWorked(collOrView.runCommand("aggregate", {pipeline: pipeline, explain: true, cursor: {}}));
+    assert.commandWorked(
+        collOrView.runCommand("aggregate", {pipeline: pipeline, explain: true, cursor: {}}),
+    );
 };
 
-const runTestFails = (collOrView, pipeline, isShardedLookup = false) => {
+const runTestFails = (
+    collOrView,
+    pipeline,
+    isShardedLookup = false,
+    outerNamespaceIsView = false,
+) => {
     assert.commandFailedWithCode(
         collOrView.runCommand("aggregate", {pipeline: pipeline, explain: false, cursor: {}}),
         [10623000, 10623001],
     );
 
-    // Sharded lookups will successfully run explain, all other topologies will fail on explain.
-    if (isShardedLookup) {
-        assert.commandWorked(collOrView.runCommand("aggregate", {pipeline: pipeline, explain: true, cursor: {}}));
+    const ffOn = FeatureFlagUtil.isEnabled(db.getMongo(), "ExtensionsInsideHybridSearch");
+    const explainResult = collOrView.runCommand("aggregate", {
+        pipeline: pipeline,
+        explain: true,
+        cursor: {},
+    });
+
+    let expectedExplainWorked;
+    if (!isShardedLookup) {
+        // Non-sharded: explain goes to a single mongod, which fully resolves the $lookup's
+        // sub-pipeline view and validation runs, failing the explain.
+        expectedExplainWorked = false;
+    } else if (outerNamespaceIsView && ffOn) {
+        // Sharded + outer view: mongos LPP view resolution path processes the $lookup's
+        // sub-pipeline view (via resolveInvolvedNamespacesOnLiteParsed) and binds view info to
+        // $search → shard calls validate() on the bound view → explain fails.
+        expectedExplainWorked = false;
     } else {
-        assert.commandFailedWithCode(
-            collOrView.runCommand("aggregate", {pipeline: pipeline, explain: true, cursor: {}}),
-            [10623000, 10623001],
-        );
+        // Sharded + (outer is a plain collection OR FF off): mongos dispatches explain to the
+        // shard without binding view info into the $lookup's sub-pipeline LPP. The shard's
+        // explain parsing does not trigger validate() for $lookup sub-pipelines.
+        expectedExplainWorked = true;
+    }
+
+    if (expectedExplainWorked) {
+        assert.commandWorked(explainResult);
+    } else {
+        assert.commandFailedWithCode(explainResult, [10623000, 10623001]);
     }
 };
+
+const runTestFailsWithOuterView = (collOrView, pipeline, isShardedLookup = false) =>
+    runTestFails(collOrView, pipeline, isShardedLookup, /* outerNamespaceIsView */ true);
 
 const isShardedCollection = coll.stats().sharded;
 
@@ -169,8 +223,16 @@ const isShardedCollection = coll.stats().sharded;
 })();
 
 (function matchSubpipelineFromSearchViewAgainstTopLevelSearchView() {
-    runTest(searchView, buildUnionWithPipeline(searchViewName, matchPipeline), expectedResultsMatchSearch);
-    runTest(searchView, buildLookupPipeline(searchViewName, matchPipeline), expectedResultsMatchSearch);
+    runTest(
+        searchView,
+        buildUnionWithPipeline(searchViewName, matchPipeline),
+        expectedResultsMatchSearch,
+    );
+    runTest(
+        searchView,
+        buildLookupPipeline(searchViewName, matchPipeline),
+        expectedResultsMatchSearch,
+    );
 })();
 
 (function lookupSearchSubpipelineFromSearchView() {
@@ -179,22 +241,22 @@ const isShardedCollection = coll.stats().sharded;
         buildLookupPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(
+    runTestFailsWithOuterView(
         matchView,
         buildLookupPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(
+    runTestFailsWithOuterView(
         searchView,
         buildLookupPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(
+    runTestFailsWithOuterView(
         unionWithView,
         buildLookupPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(
+    runTestFailsWithOuterView(
         lookupView,
         buildLookupPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
@@ -202,11 +264,26 @@ const isShardedCollection = coll.stats().sharded;
 })();
 
 (function unionWithSearchSubpipelineFromSearchView() {
-    runTestFails(coll, buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)));
-    runTestFails(matchView, buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)));
-    runTestFails(searchView, buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)));
-    runTestFails(unionWithView, buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)));
-    runTestFails(lookupView, buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)));
+    runTestFails(
+        coll,
+        buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFails(
+        matchView,
+        buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFails(
+        searchView,
+        buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFails(
+        unionWithView,
+        buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFails(
+        lookupView,
+        buildUnionWithPipeline(searchViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
 })();
 
 (function searchSubpipelineFromCollection() {
@@ -276,26 +353,38 @@ const isShardedCollection = coll.stats().sharded;
 })();
 
 (function searchSubpipelineFromUnionWithView() {
-    runTestFails(searchView, buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        searchView,
+        buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         searchView,
         buildLookupPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(unionWithView, buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        unionWithView,
+        buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         unionWithView,
         buildLookupPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(lookupView, buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        lookupView,
+        buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         lookupView,
         buildLookupPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(matchView, buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        matchView,
+        buildUnionWithPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         matchView,
         buildLookupPipeline(unionWithViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
@@ -303,26 +392,38 @@ const isShardedCollection = coll.stats().sharded;
 })();
 
 (function searchSubpipelineFromLookupView() {
-    runTestFails(searchView, buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        searchView,
+        buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         searchView,
         buildLookupPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(unionWithView, buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        unionWithView,
+        buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         unionWithView,
         buildLookupPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(lookupView, buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        lookupView,
+        buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         lookupView,
         buildLookupPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
     );
-    runTestFails(matchView, buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)));
     runTestFails(
+        matchView,
+        buildUnionWithPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
+    );
+    runTestFailsWithOuterView(
         matchView,
         buildLookupPipeline(lookupViewName, buildSearchPipeline(searchIndexOnCollName)),
         isShardedCollection,
@@ -351,23 +452,38 @@ const isShardedCollection = coll.stats().sharded;
 (function unionWithVectorSearchSubpipelineFromVectorSearchView() {
     runTestFails(
         coll,
-        buildUnionWithPipeline(vectorSearchViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            vectorSearchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         matchView,
-        buildUnionWithPipeline(vectorSearchViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            vectorSearchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         vectorSearchView,
-        buildUnionWithPipeline(vectorSearchViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            vectorSearchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         unionWithView,
-        buildUnionWithPipeline(vectorSearchViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            vectorSearchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         lookupView,
-        buildUnionWithPipeline(vectorSearchViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            vectorSearchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
 })();
 
@@ -392,17 +508,26 @@ const isShardedCollection = coll.stats().sharded;
 (function vectorSearchSubpipelineFromMatchView() {
     runTest(
         vectorSearchView,
-        buildUnionWithPipeline(matchViewName, buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName)),
+        buildUnionWithPipeline(
+            matchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName),
+        ),
         expectedResultsMatchVectorSearch,
     );
     runTest(
         unionWithView,
-        buildUnionWithPipeline(matchViewName, buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName)),
+        buildUnionWithPipeline(
+            matchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName),
+        ),
         expectedResultsMatchVectorSearch,
     );
     runTest(
         lookupView,
-        buildUnionWithPipeline(matchViewName, buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName)),
+        buildUnionWithPipeline(
+            matchViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnMatchViewName),
+        ),
         expectedResultsMatchVectorSearch,
     );
 })();
@@ -410,38 +535,62 @@ const isShardedCollection = coll.stats().sharded;
 (function vectorSearchSubpipelineFromUnionWithView() {
     runTestFails(
         vectorSearchView,
-        buildUnionWithPipeline(unionWithViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            unionWithViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         unionWithView,
-        buildUnionWithPipeline(unionWithViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            unionWithViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         lookupView,
-        buildUnionWithPipeline(unionWithViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            unionWithViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         matchView,
-        buildUnionWithPipeline(unionWithViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            unionWithViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
 })();
 
 (function vectorSearchSubpipelineFromLookupView() {
     runTestFails(
         vectorSearchView,
-        buildUnionWithPipeline(lookupViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            lookupViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         unionWithView,
-        buildUnionWithPipeline(lookupViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            lookupViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         lookupView,
-        buildUnionWithPipeline(lookupViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            lookupViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
     runTestFails(
         matchView,
-        buildUnionWithPipeline(lookupViewName, buildVectorSearchPipeline(vectorSearchIndexOnCollName)),
+        buildUnionWithPipeline(
+            lookupViewName,
+            buildVectorSearchPipeline(vectorSearchIndexOnCollName),
+        ),
     );
 })();
 

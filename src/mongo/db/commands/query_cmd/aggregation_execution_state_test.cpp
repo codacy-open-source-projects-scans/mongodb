@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/commands/query_cmd/aggregation_execution_state.h"
 
@@ -47,11 +21,13 @@
 #include "mongo/unittest/unittest.h"
 
 #include <memory>
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Test the basic functionality of each subclass of AggCatalogState.
@@ -79,7 +55,7 @@ protected:
         }
 
         CollectionShardingRuntime::acquireExclusive(opCtx, nss)
-            ->setFilteringMetadata_nonAuthoritative(opCtx, CollectionMetadata::UNTRACKED());
+            ->setCollectionMetadata(opCtx, CollectionMetadata::UNTRACKED());
         PointInTimeChunkManager cm(RoutingTableHistoryValueHandle{OptionalRoutingTableHistory{}},
                                    _dbVersion.getTimestamp());
         getCatalogCacheMock()->setCollectionReturnValue(
@@ -143,7 +119,7 @@ protected:
         }
 
         CollectionShardingRuntime::acquireExclusive(opCtx, nss)
-            ->setFilteringMetadata_nonAuthoritative(opCtx, collectionMetadata);
+            ->setCollectionMetadata(opCtx, collectionMetadata);
 
         getCatalogCacheMock()->setCollectionReturnValue(
             nss,
@@ -156,7 +132,7 @@ protected:
         return DatabaseType(_dbName, kMyShardName, DatabaseVersion(uuid, timestamp));
     }
 
-    NamespaceString createTestCollectionWithMetadata(StringData coll, bool sharded) {
+    NamespaceString createTestCollectionWithMetadata(std::string_view coll, bool sharded) {
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(_dbName, coll);
         auto opCtx = operationContext();
 
@@ -171,7 +147,7 @@ protected:
         return nss;
     }
 
-    NamespaceString createTimeseriesCollection(StringData coll,
+    NamespaceString createTimeseriesCollection(std::string_view coll,
                                                bool sharded,
                                                bool requiresExtendedRangeSupport) {
         auto tsNss = NamespaceString::createNamespaceString_forTest(_dbName, coll);
@@ -200,7 +176,7 @@ protected:
     }
 
     std::pair<NamespaceString, std::vector<BSONObj>> createTestViewWithMetadata(
-        StringData viewName, StringData collName) {
+        std::string_view viewName, std::string_view collName) {
         NamespaceString viewNss = NamespaceString::createNamespaceString_forTest(_dbName, viewName);
         NamespaceString collNss = NamespaceString::createNamespaceString_forTest(_dbName, collName);
         auto opCtx = operationContext();
@@ -216,7 +192,8 @@ protected:
     /**
      * Create an AggExState instance that one might see for a typical query.
      */
-    std::unique_ptr<AggExState> createDefaultAggExState(StringData coll, bool rawData = false) {
+    std::unique_ptr<AggExState> createDefaultAggExState(std::string_view coll,
+                                                        bool rawData = false) {
         auto opCtx = operationContext();
         if (rawData) {
             isRawDataOperation(opCtx) = true;
@@ -243,13 +220,15 @@ protected:
      * Create an AggExState instance that one might see for a typical query.
      */
     std::unique_ptr<AggExState> createDefaultAggExStateWithSecondaryCollections(
-        StringData main, StringData secondary) {
+        std::string_view main, std::string_view secondary) {
         auto opCtx = operationContext();
 
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", main);
         NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("test", secondary);
 
-        BSONObj lookup = BSON("$lookup" << BSON("from" << nss2.coll() << "as" << "out"));
+        BSONObj lookup =
+            BSON("$lookup" << BSON("from" << nss2.coll() << "as" << "out" << "localField" << "a"
+                                          << "foreignField" << "b"));
         BSONArray pipeline = BSON_ARRAY(lookup);
         _cmdObj = BSON("aggregate" << main << "pipeline" << pipeline << "cursor" << BSONObj{});
         _request =
@@ -269,7 +248,7 @@ protected:
     /**
      * Create an AggExState instance that one might see for change stream query.
      */
-    std::unique_ptr<AggExState> createOplogAggExState(StringData coll, bool rawData = false) {
+    std::unique_ptr<AggExState> createOplogAggExState(std::string_view coll, bool rawData = false) {
         auto opCtx = operationContext();
         isRawDataOperation(opCtx) = rawData;
 
@@ -306,7 +285,7 @@ protected:
     std::unique_ptr<AggExState> createCollectionlessAggExState() {
         auto opCtx = operationContext();
 
-        StringData coll = "$cmd.aggregate"_sd;
+        std::string_view coll = "$cmd.aggregate"sv;
         NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", coll);
 
         BSONObj documentsStage = BSON("$documents" << BSON_ARRAY(BSON("a" << 1)));
@@ -348,7 +327,7 @@ void AggregationExecutionStateTest::setUp() {
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogState) {
-    StringData coll{"coll"};
+    std::string_view coll{"coll"};
     auto nss = createTestCollectionWithMetadata(coll, false /*sharded*/);
     std::unique_ptr<AggExState> aggExState = createDefaultAggExState(coll);
     std::unique_ptr<AggCatalogState> aggCatalogState = aggExState->createAggCatalogState();
@@ -376,7 +355,7 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogState) {
 }
 
 TEST_F(AggregationExecutionStateTest, CreateIfrContextForAggExStateAndExpressionContext) {
-    StringData coll{"coll"};
+    std::string_view coll{"coll"};
     createTestCollectionWithMetadata(coll, false /*sharded*/);
 
     std::unique_ptr<AggExState> aggExState = createDefaultAggExState(coll);
@@ -391,9 +370,23 @@ TEST_F(AggregationExecutionStateTest, CreateIfrContextForAggExStateAndExpression
     ASSERT_EQ(ifrContext.get(), expCtx->getIfrContext().get());
 }
 
+TEST_F(AggregationExecutionStateTest, IFRContextReachableFromCatalogState) {
+    std::string_view coll{"coll"};
+    createTestCollectionWithMetadata(coll, false /*sharded*/);
+
+    std::unique_ptr<AggExState> aggExState = createDefaultAggExState(coll);
+    auto ifrContext = aggExState->getIfrContext();
+    ASSERT_TRUE(ifrContext != nullptr);
+
+    std::unique_ptr<AggCatalogState> aggCatalogState = aggExState->createAggCatalogState();
+
+    // Verify that AggCatalogState::getIfrContext() returns the same pointer as AggExState.
+    ASSERT_EQ(ifrContext.get(), aggCatalogState->getIfrContext().get());
+}
+
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryCollection) {
-    StringData main{"main"};
-    StringData secondaryColl{"secondaryColl"};
+    std::string_view main{"main"};
+    std::string_view secondaryColl{"secondaryColl"};
 
     auto mainNss = createTestCollectionWithMetadata(main, false /*sharded*/);
     auto secondaryNssColl = createTestCollectionWithMetadata(secondaryColl, false /*sharded*/);
@@ -429,8 +422,8 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryC
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryShardedCollection) {
-    StringData main{"main"};
-    StringData secondaryColl{"secondaryColl"};
+    std::string_view main{"main"};
+    std::string_view secondaryColl{"secondaryColl"};
 
     auto mainNss = createTestCollectionWithMetadata(main, false /*sharded*/);
     auto secondaryNssColl = createTestCollectionWithMetadata(secondaryColl, true /*sharded*/);
@@ -470,9 +463,9 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryS
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryView) {
-    StringData main{"main"};
-    StringData secondaryColl{"secondaryColl"};
-    StringData secondaryView{"secondaryView"};
+    std::string_view main{"main"};
+    std::string_view secondaryColl{"secondaryColl"};
+    std::string_view secondaryView{"secondaryView"};
 
     auto mainNss = createTestCollectionWithMetadata(main, false /*sharded*/);
     auto secondaryNssColl = createTestCollectionWithMetadata(secondaryColl, false /*sharded*/);
@@ -510,8 +503,8 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateWithSecondaryV
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateView) {
-    StringData coll{"coll"};
-    StringData view{"view"};
+    std::string_view coll{"coll"};
+    std::string_view view{"view"};
     auto viewOn = createTestCollectionWithMetadata(coll, false /*sharded*/);
     auto [viewNss, expectedPipeline] = createTestViewWithMetadata(view, coll);
     std::unique_ptr<AggExState> aggExState = createDefaultAggExState(view);
@@ -533,8 +526,8 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateView) {
     // Check the resolved view correspond to the expected one
     auto resolvedView = aggCatalogState->resolveView(operationContext(), viewNss, boost::none);
     ASSERT_TRUE(resolvedView.isOK());
-    ASSERT_EQ(resolvedView.getValue().getNamespace(), viewOn);
-    std::vector<BSONObj> result = resolvedView.getValue().getPipeline();
+    ASSERT_EQ(resolvedView.getValue().getResolvedNamespace(), viewOn);
+    std::vector<BSONObj> result = resolvedView.getValue().getBsonPipeline();
     ASSERT_EQ(expectedPipeline.size(), result.size());
     for (uint32_t i = 0; i < expectedPipeline.size(); i++) {
         ASSERT(SimpleBSONObjComparator::kInstance.evaluate(expectedPipeline[i] == result[i]));
@@ -552,10 +545,10 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateView) {
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateViewfulTimeseries) {
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
     std::unique_ptr<AggExState> aggExState = createDefaultAggExState(timeseriesColl);
@@ -581,10 +574,10 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateViewfulTimeser
 }
 
 TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateViewlessTimeseries) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
     std::unique_ptr<AggExState> aggExState = createDefaultAggExState(timeseriesColl);
@@ -616,10 +609,10 @@ TEST_F(AggregationExecutionStateTest, CreateDefaultAggCatalogStateViewlessTimese
 TEST_F(AggregationExecutionStateTest,
        CheckViewfulTimeseriesCollWithRawDataIsNotConsideredTimeseries) {
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
 
@@ -635,10 +628,10 @@ TEST_F(AggregationExecutionStateTest,
 
 TEST_F(AggregationExecutionStateTest,
        CheckViewlessTimeseriesCollWithRawDataIsNotConsideredTimeseries) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
 
@@ -654,11 +647,14 @@ TEST_F(AggregationExecutionStateTest,
 
 TEST_F(AggregationExecutionStateTest, UnshardedSecondaryViewfulTsNssRequiresExtendedRangeSupport) {
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
+    // Extensions inside hybrid search are not supported with viewful timeseries (throws
+    // IFRFlagRetry). Disable the flag for this viewful-ts test.
+    unittest::ServerParameterGuard extensionsFlag("featureFlagExtensionsInsideHybridSearch", false);
 
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, false /*sharded*/);
     createTimeseriesCollection(
@@ -675,11 +671,11 @@ TEST_F(AggregationExecutionStateTest, UnshardedSecondaryViewfulTsNssRequiresExte
 }
 
 TEST_F(AggregationExecutionStateTest, UnshardedSecondaryViewlessTsNssRequiresExtendedRangeSupport) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, false /*sharded*/);
     createTimeseriesCollection(
@@ -697,10 +693,13 @@ TEST_F(AggregationExecutionStateTest, UnshardedSecondaryViewlessTsNssRequiresExt
 
 TEST_F(AggregationExecutionStateTest, ShardedSecondaryViewfulTsNssRequiresExtendedRangeSupport) {
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    // Extensions inside hybrid search are not supported with viewful timeseries (throws
+    // IFRFlagRetry). Disable the flag for this viewful-ts test.
+    unittest::ServerParameterGuard extensionsFlag("featureFlagExtensionsInsideHybridSearch", false);
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, true /*sharded*/);
     createTimeseriesCollection(
@@ -717,10 +716,10 @@ TEST_F(AggregationExecutionStateTest, ShardedSecondaryViewfulTsNssRequiresExtend
 }
 
 TEST_F(AggregationExecutionStateTest, ShardedSecondaryViewlessTsNssRequiresExtendedRangeSupport) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, true /*sharded*/);
     createTimeseriesCollection(
@@ -738,10 +737,13 @@ TEST_F(AggregationExecutionStateTest, ShardedSecondaryViewlessTsNssRequiresExten
 
 TEST_F(AggregationExecutionStateTest, SecondaryViewfulTsNssNoExtendedRangeSupport) {
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    // Extensions inside hybrid search are not supported with viewful timeseries (throws
+    // IFRFlagRetry). Disable the flag for this viewful-ts test.
+    unittest::ServerParameterGuard extensionsFlag("featureFlagExtensionsInsideHybridSearch", false);
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, false /*sharded*/);
     createTimeseriesCollection(
@@ -758,10 +760,10 @@ TEST_F(AggregationExecutionStateTest, SecondaryViewfulTsNssNoExtendedRangeSuppor
 }
 
 TEST_F(AggregationExecutionStateTest, SecondaryViewlessTsNssNoExtendedRangeSupport) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
-    StringData main{"coll"};
-    StringData timeseriesColl{"timeseries"};
+    std::string_view main{"coll"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTestCollectionWithMetadata(main, false /*sharded*/);
     createTimeseriesCollection(
@@ -785,17 +787,20 @@ TEST_F(AggregationExecutionStateTest, ViewOnViewfulTsUsingExtendRangeAsSecondary
     // and confirm that AggCatalogState reports that the aggregation uses extended range data.
     //
     // TODO SERVER-111172: Remove this test once view-ful timeseries are removed and 9.0 is LTS.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
+    // Extensions inside hybrid search are not supported with viewful timeseries (throws
+    // IFRFlagRetry). Disable the flag for this viewful-ts test.
+    unittest::ServerParameterGuard extensionsFlag("featureFlagExtensionsInsideHybridSearch", false);
 
-    StringData main{"main"};
+    std::string_view main{"main"};
     auto mainNss = createTestCollectionWithMetadata(main, false /*sharded*/);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     auto secondaryTsNss = createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, true /*requiresExtendedRangeSupport*/);
 
-    StringData viewOnTs{"view_on_ts"};
+    std::string_view viewOnTs{"view_on_ts"};
     auto [secondaryTsViewNss, _] = createTestViewWithMetadata(viewOnTs, timeseriesColl);
 
     std::unique_ptr<AggExState> aggExState =
@@ -817,17 +822,17 @@ TEST_F(AggregationExecutionStateTest, ViewOnViewlessTsUsingExtendRangeAsSecondar
     // - That has extended range data
     // and confirm that AggCatalogState reports that the aggregation uses extended range data.
 
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData main{"main"};
+    std::string_view main{"main"};
     auto mainNss = createTestCollectionWithMetadata(main, false /*sharded*/);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     auto secondaryTsNss = createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, true /*requiresExtendedRangeSupport*/);
 
-    StringData viewOnTs{"view_on_ts"};
+    std::string_view viewOnTs{"view_on_ts"};
     auto [secondaryTsViewNss, _] = createTestViewWithMetadata(viewOnTs, timeseriesColl);
 
     std::unique_ptr<AggExState> aggExState =
@@ -843,7 +848,7 @@ TEST_F(AggregationExecutionStateTest, ViewOnViewlessTsUsingExtendRangeAsSecondar
 }
 
 TEST_F(AggregationExecutionStateTest, CreateOplogAggCatalogState) {
-    StringData coll{"coll"};
+    std::string_view coll{"coll"};
     createTestCollectionWithMetadata(coll, false /*sharded*/);
     std::unique_ptr<AggExState> aggExState = createOplogAggExState(coll);
     std::unique_ptr<AggCatalogState> aggCatalogState = aggExState->createAggCatalogState();
@@ -872,8 +877,8 @@ TEST_F(AggregationExecutionStateTest, CreateOplogAggCatalogState) {
 }
 
 TEST_F(AggregationExecutionStateTest, CreateOplogAggCatalogStateFailsOnView) {
-    StringData coll{"coll"};
-    StringData view{"view"};
+    std::string_view coll{"coll"};
+    std::string_view view{"view"};
     createTestCollectionWithMetadata(coll, false /*sharded*/);
     createTestViewWithMetadata(view, coll);
 
@@ -887,10 +892,10 @@ TEST_F(AggregationExecutionStateTest, CreateOplogAggCatalogStateFailsOnView) {
 
 TEST_F(AggregationExecutionStateTest,
        CreateOplogAggCatalogStateFailsOnViewfulTimeseriesCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
 
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
@@ -905,9 +910,9 @@ TEST_F(AggregationExecutionStateTest,
 
 TEST_F(AggregationExecutionStateTest,
        Given_OplogAggCatalogStateWithViewlessTimeseriesColl_Then_IsTimeseries) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
 
@@ -919,9 +924,9 @@ TEST_F(AggregationExecutionStateTest,
 TEST_F(
     AggregationExecutionStateTest,
     Given_OplogAggCatalogStateWithViewTimeseriesColl_When_CallingValidate_Then_ExceptionIsThrown) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
 
@@ -947,10 +952,10 @@ TEST_F(
 TEST_F(
     AggregationExecutionStateTest,
     Given_OplogAggCatalogStateWithViewlessTimeseriesCollAndNoRawData_When_CallingValidate_Then_ExceptionIsThrown) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
     auto aggExState = createOplogAggExState(timeseriesColl, false /*rawData*/);
@@ -963,10 +968,10 @@ TEST_F(
 TEST_F(
     AggregationExecutionStateTest,
     Given_OplogAggCatalogStateWithViewlessTimeseriesCollAndRawData_When_CallingValidate_Then_NoExceptionIsThrown) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", true);
 
-    StringData timeseriesColl{"timeseries"};
+    std::string_view timeseriesColl{"timeseries"};
     createTimeseriesCollection(
         timeseriesColl, false /*sharded*/, false /*requiresExtendedRangeSupport*/);
     auto aggExState = createOplogAggExState(timeseriesColl, true /*rawData*/);

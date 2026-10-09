@@ -1,36 +1,12 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -40,7 +16,7 @@ namespace mongo {
  * Suitable base class of OpObserver implementations that do not need to implement most of the
  * OpObserver interface.
  */
-class MONGO_MOD_OPEN OpObserverNoop : public OpObserver {
+class [[MONGO_MOD_OPEN]] OpObserverNoop : public OpObserver {
 public:
     NamespaceFilters getNamespaceFilters() const override {
         return {NamespaceFilter::kAll, NamespaceFilter::kAll};
@@ -92,7 +68,7 @@ public:
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    const std::vector<RecordId>& recordIds,
-                   std::vector<bool> fromMigrate,
+                   const std::vector<bool>& fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override {}
 
@@ -109,30 +85,70 @@ public:
                   OpStateAccumulator* opAccumulator = nullptr) override {}
 
     void onContainerInsert(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            int64_t key,
                            std::span<const char> value) override {}
 
     void onContainerInsert(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            std::span<const char> key,
                            std::span<const char> value) override {}
 
+    void onContainerInsert(OperationContext* opCtx,
+                           std::string_view ident,
+                           std::span<const std::span<const char>> keys,
+                           std::span<const char> value) override {
+        // Defer to the single-op in a loop, which may be overridden
+        for (auto key : keys) {
+            onContainerInsert(opCtx, ident, key, value);
+        }
+    }
+
+    void onContainerInsert(OperationContext* opCtx,
+                           std::string_view ident,
+                           int64_t base,
+                           std::span<const std::span<const char>> vals) override {
+        // Early exit empty values
+        if (vals.empty()) {
+            return;
+        }
+        // Check for overflow, overflow::add returns true if overflow occurred
+        int64_t maxKey;
+        massert(13064500,
+                "record id overflowed in batched insert",
+                !overflow::add(base, static_cast<int64_t>(vals.size() - 1), &maxKey));
+
+        // Defer to the single-op in a loop, which may be overridden
+        for (size_t i = 0; i < vals.size(); ++i) {
+            onContainerInsert(opCtx, ident, base + i, vals[i]);
+        }
+    }
+
+
     void onContainerUpdate(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            int64_t key,
                            std::span<const char> value) override {}
 
     void onContainerUpdate(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            std::span<const char> key,
                            std::span<const char> value) override {}
 
-    void onContainerDelete(OperationContext* opCtx, StringData ident, int64_t key) override {}
+    void onContainerDelete(OperationContext* opCtx, std::string_view ident, int64_t key) override {}
 
     void onContainerDelete(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            std::span<const char> key) override {}
+
+    void onContainerDelete(OperationContext* opCtx,
+                           std::string_view ident,
+                           std::span<const std::span<const char>> keys) override {
+        // Defer to the single-op in a loop, which may be overridden
+        for (auto key : keys) {
+            onContainerDelete(opCtx, ident, key);
+        }
+    }
 
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
@@ -283,8 +299,18 @@ public:
 
     void onDropDatabaseMetadata(OperationContext* opCtx, const repl::OplogEntry& op) override {}
 
+    void onInvalidateAllCollectionMetadata(OperationContext* opCtx,
+                                           const repl::OplogEntry& op) override {}
+
+    void onInvalidateAllDatabaseMetadata(OperationContext* opCtx,
+                                         const repl::OplogEntry& op) override {}
+
     void onInvalidateCollectionMetadata(OperationContext* opCtx,
                                         const repl::OplogEntry& op) override {}
+
+    void onSetAllowChunkOperations(OperationContext* opCtx, const repl::OplogEntry& op) override {}
+
+    void onUpdateCollectionMetadata(OperationContext* opCtx, const repl::OplogEntry& op) override {}
 
     void onTruncateRange(OperationContext* opCtx,
                          const CollectionPtr& coll,

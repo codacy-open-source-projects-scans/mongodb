@@ -1,39 +1,13 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/timeseries_options.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -136,9 +110,12 @@ Status checkBucketingParameters(TimeseriesOptions& timeseriesOptions,
 
 }  // namespace
 
-bool areTimeseriesBucketsFixed(const TimeseriesOptions& options, const bool parametersChanged) {
-    return !parametersChanged &&
-        options.getBucketMaxSpanSeconds() == options.getBucketRoundingSeconds();
+bool canUseFixedBucketOptimizations(const TimeseriesOptions& options,
+                                    boost::optional<bool> hasExtendedRangeData) {
+    return feature_flags::gFixedBucketingOptimizations.isEnabled() &&
+        options.getFixedBucketing().value_or(false) &&
+        options.getBucketMaxSpanSeconds() == options.getBucketRoundingSeconds() &&
+        hasExtendedRangeData.has_value() && !hasExtendedRangeData.value();
 }
 
 Status isTimeseriesGranularityValidAndUnchanged(const TimeseriesOptions& currentOptions,
@@ -281,17 +258,17 @@ int getMaxSpanSecondsFromGranularity(BucketGranularityEnum granularity) {
 StatusWith<std::pair<TimeseriesOptions, bool>> applyTimeseriesOptionsModifications(
     const TimeseriesOptions& currentOptions, const CollModTimeseries& mod) {
     TimeseriesOptions newOptions = currentOptions;
-    bool shouldUpdateOptions = true;
+    bool shouldUpdateBucketingOptions = true;
     bool updated = false;
     auto targetGranularity = mod.getGranularity();
 
-    auto isValidTransition =
-        isTimeseriesGranularityValidAndUnchanged(currentOptions, mod, &shouldUpdateOptions);
+    auto isValidTransition = isTimeseriesGranularityValidAndUnchanged(
+        currentOptions, mod, &shouldUpdateBucketingOptions);
     if (!isValidTransition.isOK()) {
         return isValidTransition;
     }
 
-    if (shouldUpdateOptions) {
+    if (shouldUpdateBucketingOptions) {
         int32_t targetMaxSpanSeconds = 0;
         boost::optional<int32_t> targetRoundingSeconds = boost::none;
 
@@ -307,6 +284,13 @@ StatusWith<std::pair<TimeseriesOptions, bool>> applyTimeseriesOptionsModificatio
         newOptions.setBucketMaxSpanSeconds(targetMaxSpanSeconds);
         newOptions.setBucketRoundingSeconds(targetRoundingSeconds);
         updated = true;
+
+        // If bucketing parameters are changing, set fixedBucketing to false (if currently set
+        // to true). Leave unset and false unchanged, so legacy collections (where the field is
+        // never set to true) are unaffected.
+        if (currentOptions.getFixedBucketing()) {
+            newOptions.setFixedBucketing(false);
+        }
     }
 
     return std::make_pair(newOptions, updated);
@@ -368,6 +352,19 @@ bool optionsAreEqual(const TimeseriesOptions& option1, const TimeseriesOptions& 
         return false;
     }
 
+    // The fixedBucketing option must match exactly. Treat unset, false, and true as three distinct
+    // states.
+    // NOTE: in practice, calling code normalizes the 'unset' case for brand-new collections, but
+    // legacy timeseries collections still have 'unset'.
+    // TODO(SERVER-127534): assert that 'fixedBucketing' is never unset once support for legacy
+    // timeseries is fully removed (NOTE: some malformed legacy timeseries can survive in FCV 9.0)
+    if (option1.getFixedBucketing().has_value() != option2.getFixedBucketing().has_value()) {
+        return false;
+    }
+    if (bool(option1.getFixedBucketing()) != bool(option2.getFixedBucketing())) {
+        return false;
+    }
+
     return true;
 }
 
@@ -416,6 +413,25 @@ Date_t roundTimestampBySeconds(const Date_t& time, const long long roundingSecon
         roundedTimeMilliSeconds -= roundingMilliSeconds;
     }
     return Date_t::fromMillisSinceEpoch(roundedTimeMilliSeconds);
+}
+
+void setFixedBucketingDefaultForNewCollection(TimeseriesOptions& timeseriesOptions,
+                                              bool fixedBucketingEnabled) {
+    // TODO SERVER-127534: Remove the featureFlagFixedBucketingCatalog gating and default
+    // 'fixedBucketing' unconditionally once 9.0 becomes last LTS.
+    // Default 'fixedBucketing' to true when the user omitted it. No-op when the feature flag is
+    // off or the user set the field explicitly (an explicit false is preserved). Use has_value()
+    // (not operator bool()) so that an explicit false is preserved.
+    if (fixedBucketingEnabled && !timeseriesOptions.getFixedBucketing().has_value()) {
+        timeseriesOptions.setFixedBucketing(true);
+    }
+}
+
+void inheritFixedBucketingIfOmitted(TimeseriesOptions& requested,
+                                    const TimeseriesOptions& existing) {
+    if (!requested.getFixedBucketing().has_value()) {
+        requested.setFixedBucketing(existing.getFixedBucketing());
+    }
 }
 
 Status validateAndSetBucketingParameters(TimeseriesOptions& timeseriesOptions) {

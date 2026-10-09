@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/field_ref.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -45,7 +21,7 @@ namespace mongo {
 class PathMatchExpression : public MatchExpression {
 public:
     PathMatchExpression(MatchType matchType,
-                        boost::optional<StringData> path,
+                        boost::optional<std::string_view> path,
                         ElementPath::LeafArrayBehavior leafArrBehavior,
                         ElementPath::NonLeafArrayBehavior nonLeafArrayBehavior,
                         clonable_ptr<ErrorAnnotation> annotation = nullptr)
@@ -59,7 +35,7 @@ public:
      * empty path as well as no path cases. optPath() should be preferred in order to
      * distinguish between the two.
      */
-    MONGO_MOD_NEEDS_REPLACEMENT StringData path() const final {
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] std::string_view path() const final {
         return _elementPath ? _elementPath->fieldRef().dottedField() : "";
     }
 
@@ -75,15 +51,15 @@ public:
      * Gets the path that the expression applies to. If the expression does not apply to a specific
      * path, returns boost::none.
      */
-    boost::optional<StringData> optPath() const {
-        return _elementPath ? boost::optional<StringData>(path()) : boost::none;
+    boost::optional<std::string_view> optPath() const {
+        return _elementPath ? boost::optional<std::string_view>(path()) : boost::none;
     }
 
     /**
      * Resets the path for this expression. Note that this method will make a copy of 'path' such
      * that there's no lifetime requirements for the string which 'path' points into.
      */
-    void setPath(StringData path) {
+    void setPath(std::string_view path) {
         invariant(_elementPath);
         _elementPath->reset(path);
     }
@@ -115,7 +91,7 @@ public:
     }
 
     /**
-     * Returns a pair of bool and boost::optional<StringData>.
+     * Returns a pair of bool and boost::optional<std::string_view>.
      *
      * - The bool indicates whether renames will always succeed if any rename is applicable. No
      *   applicable renames is considered as a successful rename and returns true with the second
@@ -129,7 +105,8 @@ public:
      *   Another similar example is expr = {x: {$elemMatch: {$eq: {y: 3}}}} and renames = {{"x.y",
      *   "a.b"}}.
 
-     * - The boost::optional<StringData> is the rewritten path iff one rename is applicable. The
+     * - The boost::optional<std::string_view> is the rewritten path iff one rename is applicable.
+     The
      *   rewritten path is the path after applying the only applicable rename in 'renameList'. If no
      *   rename is applicable, the rewritten path is boost::none.
      *
@@ -206,7 +183,7 @@ public:
     }
 
     void serialize(BSONObjBuilder* out,
-                   const SerializationOptions& opts = {},
+                   const query_shape::SerializationOptions& opts = {},
                    bool includePath = true) const override {
         if (includePath) {
             auto maybeDollarPath = path();
@@ -242,10 +219,10 @@ public:
      * to another expression, if that is possible syntactically.
      */
     virtual void appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                               const SerializationOptions& opts = {},
+                                               const query_shape::SerializationOptions& opts = {},
                                                bool includePath = true) const = 0;
 
-    BSONObj getSerializedRightHandSide(const SerializationOptions& opts = {},
+    BSONObj getSerializedRightHandSide(const query_shape::SerializationOptions& opts = {},
                                        bool includePath = true) const {
         BSONObjBuilder bob;
         appendSerializedRightHandSide(&bob, opts, includePath);

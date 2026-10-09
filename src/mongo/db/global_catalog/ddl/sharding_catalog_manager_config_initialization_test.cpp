@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -55,6 +28,7 @@
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -76,7 +50,7 @@
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -122,6 +96,21 @@ protected:
         WaitForMajorityService::get(getServiceContext()).startup(getServiceContext());
     }
 
+    Status initializeConfigDatabaseIfNeededAtStepUp() {
+        auto* opCtx = operationContext();
+        const auto canAcceptNonLocalWrites = replicationCoordinator()->canAcceptNonLocalWrites();
+        replicationCoordinator()->setCanAcceptNonLocalWrites(false);
+
+        Status status = Status::OK();
+        {
+            repl::AllowNonLocalWritesBlock allowNonLocalWrites(opCtx);
+            status = ShardingCatalogManager::get(opCtx)->initializeConfigDatabaseIfNeeded(opCtx);
+        }
+
+        replicationCoordinator()->setCanAcceptNonLocalWrites(canAcceptNonLocalWrites);
+        return status;
+    }
+
     void tearDown() override {
         TransactionCoordinatorService::get(operationContext())->interruptForStepDown();
         WaitForMajorityService::get(getServiceContext()).shutDown();
@@ -131,13 +120,14 @@ protected:
     /* Generate and insert an entry into the config.shards collection using the received shard ID
      * and an auto generated value for the host port.
      */
-    ShardType createShardMetadata(OperationContext* opCtx, const ShardId& shardId) {
-        static uint32_t numInvocations = 0;
-        const std::string host("localhost:" + std::to_string(30000 + numInvocations++));
-        ShardType shard(shardId.toString(), host);
-        ASSERT_OK(insertToConfigCollection(
-            opCtx, NamespaceString::kConfigsvrShardsNamespace, shard.toBSON()));
-        return shard;
+    void createShardMetadata(const std::vector<ShardId>& shardIds) {
+        uint32_t portOffset = 0;
+        std::vector<ShardType> shards;
+        for (const auto& shardId : shardIds) {
+            const std::string host("localhost:" + std::to_string(30000 + portOffset++));
+            shards.emplace_back(shardId.toString(), host);
+        }
+        setupShards(std::move(shards));
     }
 
 
@@ -206,9 +196,7 @@ TEST_F(ConfigInitializationTest, InitClusterMultipleVersionDocs) {
                                        NamespaceString::kConfigVersionNamespace,
                                        BSON("_id" << "a second document")));
 
-    ASSERT_EQ(ErrorCodes::TooManyMatchingDocuments,
-              ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_EQ(ErrorCodes::TooManyMatchingDocuments, initializeConfigDatabaseIfNeededAtStepUp());
 }
 
 TEST_F(ConfigInitializationTest, InitInvalidConfigVersionDoc) {
@@ -219,9 +207,7 @@ TEST_F(ConfigInitializationTest, InitInvalidConfigVersionDoc) {
     ASSERT_OK(insertToConfigCollection(
         operationContext(), NamespaceString::kConfigVersionNamespace, versionDoc));
 
-    ASSERT_EQ(ErrorCodes::TypeMismatch,
-              ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_EQ(ErrorCodes::TypeMismatch, initializeConfigDatabaseIfNeededAtStepUp());
 }
 
 
@@ -231,8 +217,7 @@ TEST_F(ConfigInitializationTest, InitNoVersionDocEmptyConfig) {
                   findOneOnConfigCollection(
                       operationContext(), NamespaceString::kConfigVersionNamespace, BSONObj()));
 
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     auto versionDoc = assertGet(findOneOnConfigCollection(
         operationContext(), NamespaceString::kConfigVersionNamespace, BSONObj()));
@@ -243,8 +228,7 @@ TEST_F(ConfigInitializationTest, InitNoVersionDocEmptyConfig) {
 }
 
 TEST_F(ConfigInitializationTest, OnlyRunsOnce) {
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     auto versionDoc = assertGet(findOneOnConfigCollection(
         operationContext(), NamespaceString::kConfigVersionNamespace, BSONObj()));
@@ -253,14 +237,11 @@ TEST_F(ConfigInitializationTest, OnlyRunsOnce) {
 
     ASSERT_TRUE(foundVersion.getClusterId().isSet());
 
-    ASSERT_EQUALS(ErrorCodes::AlreadyInitialized,
-                  ShardingCatalogManager::get(operationContext())
-                      ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_EQUALS(ErrorCodes::AlreadyInitialized, initializeConfigDatabaseIfNeededAtStepUp());
 }
 
 TEST_F(ConfigInitializationTest, ReRunsIfDocRolledBackThenReElected) {
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     auto versionDoc = assertGet(findOneOnConfigCollection(
         operationContext(), NamespaceString::kConfigVersionNamespace, BSONObj()));
@@ -307,8 +288,7 @@ TEST_F(ConfigInitializationTest, ReRunsIfDocRolledBackThenReElected) {
         ->discardCachedConfigDatabaseInitializationState();
 
     // Re-create the config.version document.
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     auto newVersionDoc = assertGet(findOneOnConfigCollection(
         operationContext(), NamespaceString::kConfigVersionNamespace, BSONObj()));
@@ -321,8 +301,7 @@ TEST_F(ConfigInitializationTest, ReRunsIfDocRolledBackThenReElected) {
 }
 
 TEST_F(ConfigInitializationTest, BuildsNecessaryIndexes) {
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     std::vector<BSONObj> expectedChunksIndexes = std::vector<BSONObj>{
         BSON("v" << 2 << "key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
@@ -345,7 +324,9 @@ TEST_F(ConfigInitializationTest, BuildsNecessaryIndexes) {
         BSON("v" << 2 << "key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                  << "collation" << BSON("locale" << "simple")),
         BSON("v" << 2 << "unique" << true << "key" << BSON("host" << 1) << "name"
-                 << "host_1" << "collation" << BSON("locale" << "simple"))};
+                 << "host_1" << "collation" << BSON("locale" << "simple")),
+        BSON("v" << 2 << "unique" << true << "key" << BSON("uuid" << 1) << "name"
+                 << "uuid_1" << "collation" << BSON("locale" << "simple"))};
     auto expectedTagsIndexes = std::vector<BSONObj>{
         BSON("v" << 2 << "key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                  << "collation" << BSON("locale" << "simple")),
@@ -378,9 +359,47 @@ TEST_F(ConfigInitializationTest, BuildsNecessaryIndexes) {
     assertBSONObjsSame(expectedPlacementHistoryIndexes, foundPlacementHistoryIndexes);
 }
 
+using ConfigInitializationTestDeathTest = ConfigInitializationTest;
+DEATH_TEST_F(ConfigInitializationTestDeathTest,
+             ContinuesCreatingIndexesAfterNonEmptyCollectionError,
+             "Tripwire assertion") {
+    // Make config.tags non-empty without its required non-unique index.
+    DBDirectClient client(operationContext());
+    client.insert(TagsType::ConfigNS, BSON("_id" << 1));
+
+    auto status = initializeConfigDatabaseIfNeededAtStepUp();
+    ASSERT_EQ(12352501, status.code());
+
+    // Indexes for every collection after config.tags are created before returning its error.
+    ASSERT_EQ(1U, assertGet(getIndexes(operationContext(), TagsType::ConfigNS)).size());
+    ASSERT_EQ(
+        2U,
+        assertGet(getIndexes(operationContext(), NamespaceString::kConfigQueryAnalyzersNamespace))
+            .size());
+    ASSERT_EQ(3U,
+              assertGet(getIndexes(operationContext(),
+                                   NamespaceString::kConfigsvrPlacementHistoryNamespace))
+                  .size());
+}
+
+DEATH_TEST_F(ConfigInitializationTestDeathTest,
+             ReturnsFirstErrorWhenLaterIndexCreationFails,
+             "Tripwire assertion") {
+    DBDirectClient client(operationContext());
+
+    // Cause the config.tags non-unique index build to fail with 12352501.
+    client.insert(TagsType::ConfigNS, BSON("_id" << 1));
+
+    // Cause the later config.queryAnalyzers index build to fail with a non-tripwire error.
+    client.createIndexes(NamespaceString::kConfigQueryAnalyzersNamespace,
+                         {BSON("key" << BSON("x" << 1) << "name" << "collUuid_1")});
+
+    auto status = initializeConfigDatabaseIfNeededAtStepUp();
+    ASSERT_EQ(12352501, status.code());
+}
+
 TEST_F(ConfigInitializationTest, InitializePlacementHistory) {
-    ASSERT_OK(ShardingCatalogManager::get(operationContext())
-                  ->initializeConfigDatabaseIfNeeded(operationContext()));
+    ASSERT_OK(initializeConfigDatabaseIfNeededAtStepUp());
 
     // Test setup
     // - Four shards
@@ -388,9 +407,7 @@ TEST_F(ConfigInitializationTest, InitializePlacementHistory) {
     // - Three sharded collections (one with corrupted placement data)
     const std::vector<ShardId> allShardIds = {
         ShardId("shard1"), ShardId("shard2"), ShardId("shard3"), ShardId("shard4")};
-    for (const auto& id : allShardIds) {
-        createShardMetadata(operationContext(), id);
-    }
+    createShardMetadata(allShardIds);
 
     // (dbname, primaryShard, timestamp field of DatabaseVersion)
     const std::vector<std::tuple<DatabaseName, ShardId, Timestamp>> databaseInfos{

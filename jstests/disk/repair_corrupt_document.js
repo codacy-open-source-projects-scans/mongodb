@@ -1,9 +1,5 @@
 /**
  * Tests that --repair deletes corrupt BSON documents.
- * @tags: [
- *   # TODO SERVER-117520: Re-visit this tag after implementing unclean shutdown repair.
- *   featureFlagReplicatedFastCount_incompatible,
- * ]
  */
 
 import {
@@ -52,7 +48,9 @@ let corruptDocumentOnInsert = function (db, coll) {
         }),
     );
     assert.commandWorked(coll.insert(doc2));
-    assert.commandWorked(db.adminCommand({configureFailPoint: "corruptDocumentOnInsert", mode: "off"}));
+    assert.commandWorked(
+        db.adminCommand({configureFailPoint: "corruptDocumentOnInsert", mode: "off"}),
+    );
 };
 
 /**

@@ -4,11 +4,11 @@
  *
  * @tags: [
  *      requires_sbe,
- *      featureFlagSbeEqLookupUnwind,
  *      assumes_against_mongod_not_mongos,
  *      assumes_read_preference_unchanged,
  *      requires_pipeline_optimization,
  *      do_not_wrap_aggregations_in_facets,
+ *      requires_fcv_90
  *  ]
  */
 
@@ -22,6 +22,7 @@ import {
     getNestedProperties,
 } from "jstests/libs/query/analyze_plan.js";
 import {checkSbeRestricted} from "jstests/libs/query/sbe_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 if (!checkSbeRestricted(db)) {
     jsTest.log.info("Skipping test because SBE is not in restricted mode.");
@@ -45,7 +46,10 @@ function seedCollection(collection, numDocs, fieldName) {
 function assertClassicLookupUnwind(explain) {
     // Assert that the $lookup stage is present in the classic aggregation plan.
     const lookup = getAggPlanStage(explain, "$lookup");
-    assert(lookup, "Expected to find $lookup stage in the aggregation plan, explain: " + tojson(explain));
+    assert(
+        lookup,
+        "Expected to find $lookup stage in the aggregation plan, explain: " + tojson(explain),
+    );
 
     // Assert that the $unwind stage was absorbed into the $lookup stage.
     assert(
@@ -64,8 +68,14 @@ function assertClassicLookupUnwind(explain) {
  */
 function assertSbeLookupUnwind(explain) {
     // Assert that neither the $lookup nor the $unwind stages are present in the aggregation plan.
-    assert(!aggPlanHasStage(explain, "$lookup"), `Expected $lookup to be pushed down, explain: ${tojson(explain)}`);
-    assert(!aggPlanHasStage(explain, "$unwind"), `Expected $unwind to be pushed down, explain: ${tojson(explain)}`);
+    assert(
+        !aggPlanHasStage(explain, "$lookup"),
+        `Expected $lookup to be pushed down, explain: ${tojson(explain)}`,
+    );
+    assert(
+        !aggPlanHasStage(explain, "$unwind"),
+        `Expected $unwind to be pushed down, explain: ${tojson(explain)}`,
+    );
 
     // Assert that there is a single EQ_LOOKUP_UNWIND stage in the winning SBE plan.
     const queryPlan = getWinningPlanFromExplain(explain);
@@ -85,7 +95,10 @@ function assertSbeLookupUnwind(explain) {
  */
 function assertSbeLookupClassicUnwind(explain) {
     // Assert that the lookup stage is present in the SBE aggregation plan.
-    assert(!aggPlanHasStage(explain, "$lookup"), `Expected $lookup to be in SBE, explain: ${tojson(explain)}`);
+    assert(
+        !aggPlanHasStage(explain, "$lookup"),
+        `Expected $lookup to be in SBE, explain: ${tojson(explain)}`,
+    );
     const queryPlan = getWinningPlanFromExplain(explain);
     assert(
         planHasStage(db, queryPlan, "EQ_LOOKUP"),
@@ -93,7 +106,10 @@ function assertSbeLookupClassicUnwind(explain) {
     );
 
     // Assert that the unwind stage is present in the classic aggregation plan.
-    assert(aggPlanHasStage(explain, "$unwind"), `Expected $unwind to be in classic, explain: ${tojson(explain)}`);
+    assert(
+        aggPlanHasStage(explain, "$unwind"),
+        `Expected $unwind to be in classic, explain: ${tojson(explain)}`,
+    );
 }
 
 describe("$LU pushdown", function () {
@@ -109,10 +125,29 @@ describe("$LU pushdown", function () {
         assert(this.foreignCollection.drop());
     });
 
+    // These shapes scan the local collection (COLLSCAN) and join on an unindexed foreign
+    // field, so pushdown requires both the collscan access path and the nested-loop
+    // join strategy feature flags to be enabled.
+    function canPushdownCollscanNestedLoopJoin() {
+        return (
+            FeatureFlagUtil.isEnabled(db, "SbeEqLookupUnwindLocalCollscan") &&
+            FeatureFlagUtil.isEnabled(db, "SbeEqLookupUnwindNestedLoopJoin")
+        );
+    }
+
     it("Should pushdown lookup-unwind", function () {
+        if (!canPushdownCollscanNestedLoopJoin()) {
+            jsTest.log.info(
+                "Skipping: lookup-unwind pushdown requires SbeEqLookupUnwindLocalCollscan and SbeEqLookupUnwindNestedLoopJoin to be enabled.",
+            );
+            return;
+        }
         const explain = this.collection
             .explain()
-            .aggregate([{$lookup: {from: "foreign", localField: "a", foreignField: "b", as: "c"}}, {$unwind: "$c"}]);
+            .aggregate([
+                {$lookup: {from: "foreign", localField: "a", foreignField: "b", as: "c"}},
+                {$unwind: "$c"},
+            ]);
         assertSbeLookupUnwind(explain);
     });
 
@@ -127,6 +162,12 @@ describe("$LU pushdown", function () {
     });
 
     it("Should pushdown when preserveNullAndEmptyArrays is set to true", function () {
+        if (!canPushdownCollscanNestedLoopJoin()) {
+            jsTest.log.info(
+                "Skipping: lookup-unwind pushdown requires SbeEqLookupUnwindLocalCollscan and SbeEqLookupUnwindNestedLoopJoin to be enabled.",
+            );
+            return;
+        }
         const explain = this.collection
             .explain()
             .aggregate([
@@ -137,6 +178,12 @@ describe("$LU pushdown", function () {
     });
 
     it("Should pushdown when includeArrayIndex is set", function () {
+        if (!canPushdownCollscanNestedLoopJoin()) {
+            jsTest.log.info(
+                "Skipping: lookup-unwind pushdown requires SbeEqLookupUnwindLocalCollscan and SbeEqLookupUnwindNestedLoopJoin to be enabled.",
+            );
+            return;
+        }
         const explain = this.collection
             .explain()
             .aggregate([
@@ -175,7 +222,10 @@ describe("$LU pushdown", function () {
     it("Should not push down lookup-unwind when internalQuerySlotBasedExecutionDisableLookupUnwindPushdown is set", function () {
         const setDisablePushdown = (value) =>
             assert.commandWorked(
-                db.adminCommand({setParameter: 1, internalQuerySlotBasedExecutionDisableLookupUnwindPushdown: value}),
+                db.adminCommand({
+                    setParameter: 1,
+                    internalQuerySlotBasedExecutionDisableLookupUnwindPushdown: value,
+                }),
             );
         const explain = (() => {
             try {

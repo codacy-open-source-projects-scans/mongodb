@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #ifdef __linux__
 #include <csignal>
@@ -33,6 +7,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include <fcntl.h>
 
@@ -55,7 +30,7 @@ namespace {
 #ifdef __linux__
 enum class PerfMode : int { record = 0, counters };
 
-void runProfiler(StringData profile_name, PerfMode mode, StringData parentPid) {
+void runProfiler(const std::string& profileName, PerfMode mode, const std::string& parentPid) {
     const std::string perfBinary = "/usr/bin/perf";
     const std::string perfName = perfBinary.substr(perfBinary.find_last_of('/') + 1);
     // Clear the signal mask set from mongod so that perf can handle SIGINT properly.
@@ -72,9 +47,9 @@ void runProfiler(StringData profile_name, PerfMode mode, StringData parentPid) {
                             "record",
                             "-g",
                             "-o",
-                            profile_name.data(),
+                            profileName.c_str(),
                             "-p",
-                            parentPid.data(),
+                            parentPid.c_str(),
                             nullptr));
         } break;
         case PerfMode::counters: {
@@ -88,20 +63,18 @@ void runProfiler(StringData profile_name, PerfMode mode, StringData parentPid) {
                             "instructions,branch-misses,"
                             "dTLB-load-misses,dTLB-loads",
                             "-o",
-                            profile_name.data(),
+                            profileName.c_str(),
                             "-p",
-                            parentPid.data(),
+                            parentPid.c_str(),
                             nullptr));
         } break;
     }
 }
 
-pid_t spawn(StringData filename, PerfMode mode) {
-    std::stringstream pidStream;
-    pidStream << getpid();
-    auto pidString = pidStream.str();
-
-    auto profile_name = std::string{filename} + ((mode == PerfMode::record) ? ".data" : ".txt");
+pid_t spawn(std::string_view filename, PerfMode mode) {
+    std::string pidString = std::to_string(getpid());
+    std::string profileName =
+        fmt::format("{}.{}", filename, mode == PerfMode::record ? "data" : "txt");
     pid_t pid = fork();
     switch (pid) {
         case -1:
@@ -109,7 +82,7 @@ pid_t spawn(StringData filename, PerfMode mode) {
             break;
         case 0:
             // Child process.
-            runProfiler(profile_name, mode, pidString.c_str());
+            runProfiler(profileName, mode, pidString);
             break;
         default:
             LOGV2(8387202, "A child process is forked for perf.", "pid"_attr = pid);
@@ -167,7 +140,7 @@ public:
                 // kill profiler
                 reply.setOk(stop(*pid));
             } else {
-                StringData filename = request().getFilename();
+                std::string_view filename = request().getFilename();
                 PerfMode mode = request().getMode() == ProfileModeEnum::record ? PerfMode::record
                                                                                : PerfMode::counters;
                 reply.setPid(spawn(filename, mode));

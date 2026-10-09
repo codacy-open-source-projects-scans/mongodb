@@ -1,5 +1,10 @@
 /**
  * Tests for the `$search` aggregation pipeline stage.
+ *
+ * TODO (SERVER-131069): Remove the success-path cases in this file now that they have been migrated
+ * to an e2e suite (basic search, searchScore, searchScoreDetails, and multi-batch coverage lives in
+ * e2e/search/search.js and e2e/search/search_metadata.js). The malformed-response validation cases
+ * (invalid $searchScoreDetails values) must stay mocked, since real mongot cannot produce them.
  */
 import {assertCreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
@@ -47,7 +52,12 @@ coll.insert({_id: 0});
                 db: dbName,
                 collectionUUID: collUUID,
             }),
-            response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), collNS, responseOk),
+            response: mongotResponseForBatch(
+                mongotResponseBatch,
+                NumberLong(0),
+                collNS,
+                responseOk,
+            ),
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
@@ -71,7 +81,12 @@ coll.insert({_id: 0});
                 db: dbName,
                 collectionUUID: collUUID,
             }),
-            response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), collNS, responseOk),
+            response: mongotResponseForBatch(
+                mongotResponseBatch,
+                NumberLong(0),
+                collNS,
+                responseOk,
+            ),
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
@@ -83,7 +98,10 @@ coll.insert({_id: 0});
     const mongotQuery = {scoreDetails: true};
     const cursorId = NumberLong(123);
     const searchScoreDetails = {value: 1.234, description: "great score", details: []};
-    const pipeline = [{$search: mongotQuery}, {$project: {_id: 1, scoreInfo: {$meta: "searchScoreDetails"}}}];
+    const pipeline = [
+        {$search: mongotQuery},
+        {$project: {_id: 1, scoreInfo: {$meta: "searchScoreDetails"}}},
+    ];
     const mongotResponseBatch = [{_id: 0, $searchScoreDetails: searchScoreDetails}];
     const responseOk = 1;
     const expectedDocs = [{_id: 0, scoreInfo: searchScoreDetails}];
@@ -96,7 +114,12 @@ coll.insert({_id: 0});
                 db: dbName,
                 collectionUUID: collUUID,
             }),
-            response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), collNS, responseOk),
+            response: mongotResponseForBatch(
+                mongotResponseBatch,
+                NumberLong(0),
+                collNS,
+                responseOk,
+            ),
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
@@ -107,7 +130,10 @@ coll.insert({_id: 0});
 {
     const mongotQuery = {scoreDetails: true};
     const cursorId = NumberLong(123);
-    const pipeline = [{$search: mongotQuery}, {$project: {_id: 1, scoreInfo: {$meta: "searchScoreDetails"}}}];
+    const pipeline = [
+        {$search: mongotQuery},
+        {$project: {_id: 1, scoreInfo: {$meta: "searchScoreDetails"}}},
+    ];
     const mongotResponseBatch = [{_id: 0, $searchScoreDetails: "great score"}];
     const responseOk = 1;
 
@@ -119,7 +145,12 @@ coll.insert({_id: 0});
                 db: dbName,
                 collectionUUID: collUUID,
             }),
-            response: mongotResponseForBatch(mongotResponseBatch, NumberLong(0), collNS, responseOk),
+            response: mongotResponseForBatch(
+                mongotResponseBatch,
+                NumberLong(0),
+                collNS,
+                responseOk,
+            ),
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
@@ -177,7 +208,10 @@ coll.insert({_id: 20});
         },
     ];
     mongotMock.setMockResponses(history, cursorId);
-    assert.eq(testDB[collName].aggregate(pipeline, {cursor: {batchSize: 2}}).toArray(), expectedDocs);
+    assert.eq(
+        testDB[collName].aggregate(pipeline, {cursor: {batchSize: 2}}).toArray(),
+        expectedDocs,
+    );
 }
 
 mongotMock.stop();

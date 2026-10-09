@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_settings/index_hints_serialization.h"
 
@@ -34,11 +8,16 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
+#include <string_view>
+
+using namespace std::literals::string_view_literals;
+
+using namespace std::literals::string_view_literals;
 namespace mongo::query_settings::index_hints {
 
-auto makeDbName(StringData dbName) {
+auto makeDbName(std::string_view dbName) {
     return DatabaseNameUtil::deserialize(
-        boost::none /*tenantId=*/, dbName, SerializationContext::stateDefault());
+        /* tenantId */ boost::none, dbName, SerializationContext::stateDefault());
 }
 
 TEST(IndexHintSpecsSerialization, TestSerialization) {
@@ -46,13 +25,13 @@ TEST(IndexHintSpecsSerialization, TestSerialization) {
     {
         NamespaceSpec ns;
         ns.setDb(makeDbName("testDbA"));
-        ns.setColl("testCollA"_sd);
+        ns.setColl("testCollA"sv);
         indexHints.emplace_back(IndexHintSpec(ns, {IndexHint("a_1"), IndexHint("b_1")}));
     }
     {
         NamespaceSpec ns;
         ns.setDb(makeDbName("testDbB"));
-        ns.setColl("testCollB"_sd);
+        ns.setColl("testCollB"sv);
         indexHints.emplace_back(IndexHintSpec(
             ns, {IndexHint(NaturalOrderHint(NaturalOrderHint::Direction::kForward))}));
     }
@@ -82,7 +61,7 @@ TEST(IndexHintSpecsSerialization, TestSerialization) {
 
 TEST(IndexHintSpecsSerialization, TestDeserializationSingleSpec) {
     auto testDbName = "testDb";
-    auto testCollName = "testColl"_sd;
+    auto testCollName = "testColl"sv;
     auto dbName = makeDbName(testDbName);
     NamespaceSpec ns;
     ns.setDb(dbName);
@@ -94,7 +73,7 @@ TEST(IndexHintSpecsSerialization, TestDeserializationSingleSpec) {
       },
       "allowedIndexes": [{"$natural": -1}]
     })");
-    auto parsedIndexHintSpecs = parse(boost::none /*tenantId=*/,
+    auto parsedIndexHintSpecs = parse(/* tenantId */ boost::none,
                                       BSON("" << obj).firstElement(),
                                       SerializationContext::stateDefault());
 
@@ -105,14 +84,14 @@ TEST(IndexHintSpecsSerialization, TestDeserializationSingleSpec) {
 
 TEST(IndexHintSpecsSerialization, TestDeserializationMultipleSpecs) {
     auto testDbNameA = "testDbA";
-    auto testCollNameA = "testCollA"_sd;
+    auto testCollNameA = "testCollA"sv;
     auto dbNameA = makeDbName(testDbNameA);
     NamespaceSpec nsA;
     nsA.setDb(dbNameA);
     nsA.setColl(testCollNameA);
 
     auto testDbNameB = "testDbB";
-    auto testCollNameB = "testCollB"_sd;
+    auto testCollNameB = "testCollB"sv;
     auto dbNameB = makeDbName(testDbNameB);
     NamespaceSpec nsB;
     nsB.setDb(dbNameB);
@@ -134,7 +113,7 @@ TEST(IndexHintSpecsSerialization, TestDeserializationMultipleSpecs) {
       "allowedIndexes": [{a: 1}, {b: 1}]
     })");
     BSONArray array = BSON_ARRAY(indexHintSpecA << indexHintSpecB);
-    auto parsedIndexHintSpecs = parse(boost::none /*tenantId=*/,
+    auto parsedIndexHintSpecs = parse(/* tenantId */ boost::none,
                                       BSON("" << array).firstElement(),
                                       SerializationContext::stateDefault());
 
@@ -146,12 +125,12 @@ TEST(IndexHintSpecsSerialization, TestDeserializationMultipleSpecs) {
 
 TEST(IndexHintSpecsSerialization, TestFailedDeserialization) {
     BSONObj invalidIndexHintsSpecs;
-    ASSERT_THROWS_CODE(parse(boost::none /*tenantId=*/,
+    ASSERT_THROWS_CODE(parse(/* tenantId */ boost::none,
                              BSON("" << invalidIndexHintsSpecs).firstElement(),
                              SerializationContext::stateDefault()),
                        DBException,
                        ErrorCodes::IDLFailedToParse);
-    ASSERT_THROWS_CODE(parse(boost::none /*tenantId=*/,
+    ASSERT_THROWS_CODE(parse(/* tenantId */ boost::none,
                              BSON("" << 1).firstElement(),
                              SerializationContext::stateDefault()),
                        DBException,

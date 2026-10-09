@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/shell/debugger/debugger.h"
 
@@ -42,6 +16,9 @@
 #include <js/CompilationAndEvaluation.h>
 #include <js/Conversions.h>
 #include <js/SourceText.h>
+#ifndef _WIN32
+#include <sys/select.h>
+#endif
 
 namespace mongo {
 
@@ -61,19 +38,19 @@ namespace debugger {
 using namespace protocol;
 
 // Execution state
-static AtomicWord<bool> _paused{false};
+static Atomic<bool> _paused{false};
 static std::string _pausedScript;
 static int _pausedLine{0};
 
-AtomicWord<bool> _configurationDone{false};
+Atomic<bool> _configurationDone{false};
 static stdx::condition_variable _pauseCV;
 
 // Evaluation state for debugger REPL
 std::string _pendingEval;
 std::string _evalResult;
-AtomicWord<bool> _hasEvalRequest{false};
-AtomicWord<bool> _evalComplete{false};
-AtomicWord<bool> _fromInteractiveREPL{false};
+Atomic<bool> _hasEvalRequest{false};
+Atomic<bool> _evalComplete{false};
+Atomic<bool> _fromInteractiveREPL{false};
 
 // Data captured when paused
 static std::vector<Scope> _capturedScopes;
@@ -89,7 +66,7 @@ static std::map<std::string, std::set<int>> _breakpoints;
 
 // URLs that were updated after scripts may have already loaded (for retroactive application)
 static std::vector<std::string> _pendingBPUpdateUrls;
-static AtomicWord<bool> _hasBPUpdateRequest{false};
+static Atomic<bool> _hasBPUpdateRequest{false};
 
 /**
  *  DebuggerObject
@@ -786,7 +763,7 @@ std::string DebuggerObject::setVariable(SetVariableRequest request) {
 }
 
 Status DebuggerObject::compileJSCodeBlock(JSFile jsfile, JS::MutableHandleValue out) {
-    auto code = std::string(toStdStringViewForInterop(jsfile.source));
+    std::string code{jsfile.source};
     auto name = jsfile.name;
     return DebuggerObject::compileJSCodeBlock(code.c_str(), name, out);
 }
@@ -948,7 +925,19 @@ void DebuggerGlobal::unpause() {
     _pauseCV.notify_all();
 }
 
+static Atomic<bool> _shouldStop{false};
 std::unique_ptr<std::thread> _stdinThread;
+
+void DebuggerGlobal::cleanup() {
+    // Stop the stdin thread so it can't access _debuggerObject while we're resetting it.
+    _shouldStop.store(true);
+    if (_stdinThread && _stdinThread->joinable()) {
+        _stdinThread->join();
+    }
+    // Reset _debuggerObject while the JSContext is still alive. Its destructor calls
+    // ~PersistentRootedObject which must run before JS_DestroyContext.
+    _debuggerObject.reset();
+}
 
 void DebuggerGlobal::handleStdinThread() {
     // Open /dev/tty to read directly from the terminal, even when stdin is redirected
@@ -967,38 +956,68 @@ void DebuggerGlobal::handleStdinThread() {
         return;
     }
 
+    int tty_fd = fileno(tty_in);
     char buffer[256];
-    while (true) {
-        if (_paused.load()) {
-            if (!_pausedScript.empty()) {
-                fprintf(tty_out, "JSDEBUG@%s:%d> ", _pausedScript.c_str(), _pausedLine);
-            } else {
-                fprintf(tty_out, "JSDEBUG> ");
-            }
-            fflush(tty_out);
-            if (!fgets(buffer, sizeof(buffer), tty_in)) {
-                // EOF or error
+
+    while (!_shouldStop.load()) {
+        if (!_paused.load()) {
+            // Not paused: sleep in short intervals to stay responsive to _shouldStop.
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+
+        // Paused: print prompt then wait for input. Use select() with a 100ms timeout
+        // so we can re-check _shouldStop instead of blocking indefinitely in fgets.
+        if (!_pausedScript.empty()) {
+            fprintf(tty_out, "JSDEBUG@%s:%d> ", _pausedScript.c_str(), _pausedLine);
+        } else {
+            fprintf(tty_out, "JSDEBUG> ");
+        }
+        fflush(tty_out);
+
+        bool inputReady = false;
+#ifndef _WIN32
+        while (!_shouldStop.load() && _paused.load()) {
+            fd_set fds;
+            FD_ZERO(&fds);
+            FD_SET(tty_fd, &fds);
+            // Wait up to 100ms for the user to type something. If nothing arrives we loop
+            // back and recheck _shouldStop, so cleanup() can unblock this thread promptly
+            // rather than waiting forever for keyboard input.
+            struct timeval tv = {0, 100000};  // {seconds, microseconds}
+            int ret = select(tty_fd + 1, &fds, nullptr, nullptr, &tv);
+            if (ret > 0) {
+                inputReady = true;
+                break;
+            } else if (ret < 0) {
+                // select() error (e.g. EBADF after tty closed); stop polling.
                 break;
             }
+        }
+#endif
 
-            std::string command(buffer);
+        if (!inputReady) {
+            continue;
+        }
 
-            // Trim whitespace and newline
-            command.erase(0, command.find_first_not_of(" \t\n\r"));
-            command.erase(command.find_last_not_of(" \t\n\r") + 1);
+        if (!fgets(buffer, sizeof(buffer), tty_in)) {
+            break;
+        }
 
-            if (command == "dbcont") {
-                fprintf(tty_out, "JSDEBUG> Continuing execution...\n");
-                fflush(tty_out);
-                _paused.store(false);
-            } else if (!command.empty()) {
-                auto result = evaluateInREPL(command);
-                fprintf(tty_out, "%s\n", result.c_str());
-                fflush(tty_out);
-            }
-        } else {
-            // Not paused, sleep a bit to avoid spinning
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        std::string command(buffer);
+
+        // Trim whitespace and newline
+        command.erase(0, command.find_first_not_of(" \t\n\r"));
+        command.erase(command.find_last_not_of(" \t\n\r") + 1);
+
+        if (command == "dbcont") {
+            fprintf(tty_out, "JSDEBUG> Continuing execution...\n");
+            fflush(tty_out);
+            _paused.store(false);
+        } else if (!command.empty()) {
+            auto result = evaluateInREPL(command);
+            fprintf(tty_out, "%s\n", result.c_str());
+            fflush(tty_out);
         }
     }
 
@@ -1007,6 +1026,14 @@ void DebuggerGlobal::handleStdinThread() {
 }
 
 Status DebuggerGlobal::init(JSContext* cx) {
+    // The shell may create multiple JS scopes (e.g., for parallel operations). The debugger
+    // is process-wide state: only initialize it once for the first scope.
+    static Atomic<bool> _initialized{false};
+    if (_initialized.swap(true)) {
+        return Status::OK();
+    }
+    // Reset the flag if we return early due to an error, so a future call can retry.
+    ScopeGuard resetOnFailure([&]() { _initialized.store(false); });
 
     // Get the main global object (the one running user code)
     JS::RootedObject mainGlobal(cx, JS::CurrentGlobalOrNull(cx));
@@ -1092,6 +1119,7 @@ Status DebuggerGlobal::init(JSContext* cx) {
     // Start stdin handling thread for debugger statement evaluations
     _stdinThread = std::make_unique<std::thread>(handleStdinThread);
 
+    resetOnFailure.dismiss();
     return status;
 }
 

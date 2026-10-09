@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/change_stream_document_diff_parser.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/field_ref.h"
@@ -38,6 +11,7 @@
 #include <cstddef>
 #include <list>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -51,7 +25,7 @@ using doc_diff::DocumentDiffReader;
 
 namespace {
 using DeltaUpdateDescription = change_stream_document_diff_parser::DeltaUpdateDescription;
-using FieldNameOrArrayIndex = std::variant<StringData, size_t>;
+using FieldNameOrArrayIndex = std::variant<std::string_view, size_t>;
 
 /**
  * DeltaUpdateDescriptionBuilder is responsible both for tracking the current path as we traverse
@@ -66,7 +40,7 @@ struct DeltaUpdateDescriptionBuilder {
     }
 
     // Adds the specified entry to the 'removedFields' vector in the DeltaUpdateDescription.
-    void addToRemovedFields(StringData terminalFieldName) {
+    void addToRemovedFields(std::string_view terminalFieldName) {
         DeltaUpdateDescriptionBuilder::TempAppendToPath tmpAppend(*this, terminalFieldName);
         _updateDesc.removedFields.push_back(Value(_fieldRef.dottedField()));
         _addToDisambiguatedPathsIfRequired();
@@ -88,7 +62,7 @@ struct DeltaUpdateDescriptionBuilder {
     }
 
     // Returns the last field in the current path.
-    StringData lastPart() const {
+    std::string_view lastPart() const {
         return _fieldRef.getPart(_fieldRef.numParts() - 1);
     }
 
@@ -130,7 +104,7 @@ private:
         // Resolve the FieldNameOrArrayIndex to one or the other, and append it to the path.
         const bool isArrayIndex = holds_alternative<size_t>(field);
         _fieldRef.appendPart(isArrayIndex ? std::to_string(get<size_t>(field))
-                                          : get<StringData>(field));
+                                          : get<std::string_view>(field));
 
         // Once a path has become ambiguous, it will remain so as new fields are added. If the final
         // path component is marked ambiguous, retain that value and add the type of the new field.
@@ -215,9 +189,10 @@ void buildUpdateDescriptionWithDeltaOplog(
 
                   while (auto nextSubDiff = reader->nextSubDiff()) {
                       std::variant<DocumentDiffReader*, ArrayDiffReader*> nextReader;
-                      visit(
-                          OverloadedVisitor{[&nextReader](auto& reader) { nextReader = &reader; }},
-                          nextSubDiff->second);
+                      visit(OverloadedVisitor{[&nextReader](auto& reader) {
+                                nextReader = &reader;
+                            }},
+                            nextSubDiff->second);
                       buildUpdateDescriptionWithDeltaOplog(
                           nextReader, builder, {{nextSubDiff->first}});
                   }

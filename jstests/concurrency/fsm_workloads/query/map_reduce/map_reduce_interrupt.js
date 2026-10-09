@@ -16,8 +16,6 @@
  *   # TODO (SERVER-91002): server side javascript execution is deprecated, and the balancer is not
  *   # compatible with it, once the incompatibility is taken care off we can re-enable this test
  *   assumes_balancer_off,
- *   # TODO SERVER-116053: Add support for mapReduce.
- *   mozjs_wasm_unsupported,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
@@ -29,7 +27,11 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.states.killOp = function killOp(db, collName) {
         const mrOps = db
             .getSiblingDB("admin")
-            .aggregate([{$currentOp: {}}, {$match: {"command.mapreduce": collName}}, {$project: {opid: "$opid"}}])
+            .aggregate([
+                {$currentOp: {}},
+                {$match: {"command.mapreduce": collName}},
+                {$project: {opid: "$opid"}},
+            ])
             .toArray();
 
         if (mrOps.length > 0) {
@@ -98,7 +100,10 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         // Cleanup occurs as part of its own operations, which can also be interrupted, but the
         // 'killOp' state of this test only targets map-reduce operations.
 
-        const dbTempCollectionsResult = db.runCommand({listCollections: 1, filter: {"options.temp": true}});
+        const dbTempCollectionsResult = db.runCommand({
+            listCollections: 1,
+            filter: {"options.temp": true},
+        });
         assert.commandWorked(dbTempCollectionsResult);
         assert.eq(dbTempCollectionsResult.cursor.firstBatch.length, 0, dbTempCollectionsResult);
 
@@ -109,7 +114,11 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
                 .getSiblingDB("local")
                 .runCommand({listCollections: 1, filter: {"options.temp": true}});
             assert.commandWorked(localTempCollectionsResult);
-            assert.eq(localTempCollectionsResult.cursor.firstBatch.length, 0, localTempCollectionsResult);
+            assert.eq(
+                localTempCollectionsResult.cursor.firstBatch.length,
+                0,
+                localTempCollectionsResult,
+            );
 
             // Unsetting CWWC is not allowed, so explicitly restore the default write concern to be
             // majority by setting CWWC to {w: majority}.

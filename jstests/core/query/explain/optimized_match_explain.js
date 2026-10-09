@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   does_not_support_stepdowns,
 // ]
 
@@ -19,7 +20,11 @@ assert.commandWorked(coll.insert({a: 1, b: 4}));
 // $and should not be in the explain output because it is optimized out.
 let explain = coll
     .explain()
-    .aggregate([{$sort: {b: -1}}, {$addFields: {c: {$mod: ["$a", 4]}}}, {$match: {$and: [{c: 1}]}}]);
+    .aggregate([
+        {$sort: {b: -1}},
+        {$addFields: {c: {$mod: ["$a", 4]}}},
+        {$match: {$and: [{c: 1}]}},
+    ]);
 
 assert.commandWorked(explain);
 

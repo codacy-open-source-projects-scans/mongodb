@@ -28,7 +28,9 @@ const collectionName = "coll";
 const testDB = primaryNode.getDB(jsTestName());
 
 // Create a collection with change stream pre- and post-images enabled.
-assert.commandWorked(testDB.createCollection(collectionName, {changeStreamPreAndPostImages: {enabled: true}}));
+assert.commandWorked(
+    testDB.createCollection(collectionName, {changeStreamPreAndPostImages: {enabled: true}}),
+);
 const coll = testDB[collectionName];
 
 // Insert a document for the test.
@@ -59,7 +61,10 @@ assert.commandWorked(coll.updateOne({_id: 1}, {$inc: {v: 1}}, {writeConcern: {w:
 
 // Resume the initial sync process.
 assert.commandWorked(
-    initialSyncNode.adminCommand({configureFailPoint: "initialSyncHangBeforeCopyingDatabases", mode: "off"}),
+    initialSyncNode.adminCommand({
+        configureFailPoint: "initialSyncHangBeforeCopyingDatabases",
+        mode: "off",
+    }),
 );
 
 // Wait until the initial sync process is complete and the new node becomes a fully
@@ -78,25 +83,20 @@ assert.neq(lastOplogEntryToBeRemoved, null);
 const largeString = "a".repeat(256 * 1024);
 const otherColl = primaryNode.getDB(jsTestName())["otherCollection"];
 
-// Checks if the oplog has been rolled over from the timestamp of
-// 'lastOplogEntryToBeRemoved', ie. the timestamp of the first entry in the oplog is greater
-// than 'lastOplogEntryToBeRemoved'.
-function oplogIsRolledOver() {
-    return (
-        timestampCmp(lastOplogEntryToBeRemoved.ts, getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts) <= 0
-    );
-}
+assert.soon(() => {
+    if (
+        timestampCmp(
+            lastOplogEntryToBeRemoved.ts,
+            getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts,
+        ) <= 0
+    )
+        return true;
 
-while (!oplogIsRolledOver()) {
-    // Reducing the number of documents inserted to prevent using too much memory.
     // The oplog rollover depends on timestamp, sleeping between inserts can significantly reduce
     // the total number of documents.
-    sleep(20);
-    // Insert a large document with a write concern that ensures that before proceeding the
-    // operation gets replicated to all 3 nodes in the replica set, since, otherwise, the node that
-    // is being initial synced may not be able to catchup due to a small size of the oplog.
     assert.commandWorked(otherColl.insert({long_str: largeString}, {writeConcern: {w: 3}}));
-}
+    return false;
+}, "Timeout waiting for oplog to roll over on primary");
 
 // Wait until 'PeriodicChangeStreamExpiredPreImagesRemover' job deletes the expired pre-images
 // (all).

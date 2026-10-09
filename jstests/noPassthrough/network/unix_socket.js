@@ -34,7 +34,6 @@ TestData.ignoreUnterminatedProcesses = true;
 // Do not check metadata or UUID consistency as it would require a connection to the mongos and this
 // is bound to a specific socket for testing purposes.
 TestData.skipCheckMetadataConsistency = true;
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
 let doesLogMatchRegex = function (logArray, regex) {
     for (let i = logArray.length - 1; i >= 0; i--) {
@@ -70,7 +69,10 @@ let checkSocket = function (serverHandle, path) {
     assert(fileExists(path), `${start.toISOString()}: ${path} does not exist`);
 
     let conn = new Mongo(path);
-    assert.commandWorked(conn.getDB("admin").runCommand("ping"), `Expected ping command to succeed for ${path}`);
+    assert.commandWorked(
+        conn.getDB("admin").runCommand("ping"),
+        `Expected ping command to succeed for ${path}`,
+    );
     checkConnectionAcceptedLog(serverHandle, path);
 };
 
@@ -182,7 +184,13 @@ if (jsTestOptions().shellGRPC) {
 if (jsTestOptions().shellGRPC) {
     var grpcPort = allocatePort();
     var sockName = `socketdir/mongodb-grpc-${grpcPort}.sock`;
-    testSockOptions(undefined, sockName, {unixSocketPrefix: socketPrefix, grpcPort: grpcPort}, ",", true);
+    testSockOptions(
+        undefined,
+        sockName,
+        {unixSocketPrefix: socketPrefix, grpcPort: grpcPort},
+        ",",
+        true,
+    );
 } else {
     var port = allocatePort();
     var sockName = `socketdir/mongodb-${port}.sock`;

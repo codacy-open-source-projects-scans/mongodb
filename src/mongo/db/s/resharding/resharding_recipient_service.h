@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
@@ -48,17 +21,20 @@
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
+#include "mongo/db/s/resharding/resharding_recipient_promises.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/otel/telemetry_context.h"
 #include "mongo/otel/traces/span/span.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
@@ -66,8 +42,10 @@
 #include "mongo/util/time_support.h"
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -76,43 +54,47 @@
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
-class MONGO_MOD_PUBLIC ReshardingRecipientService : public repl::PrimaryOnlyService {
+class [[MONGO_MOD_PUBLIC]] ReshardingRecipientService : public repl::PrimaryOnlyService {
 public:
-    static constexpr StringData kServiceName = "ReshardingRecipientService"_sd;
+    static constexpr std::string_view kServiceName = "ReshardingRecipientService"sv;
 
     explicit ReshardingRecipientService(ServiceContext* serviceContext)
         : PrimaryOnlyService(serviceContext), _serviceContext(serviceContext) {}
     ~ReshardingRecipientService() override = default;
 
-    class MONGO_MOD_PRIVATE RecipientStateMachine;
+    class [[MONGO_MOD_PRIVATE]] RecipientStateMachine;
 
-    class MONGO_MOD_PRIVATE RecipientStateMachineExternalState;
+    class [[MONGO_MOD_PRIVATE]] RecipientStateMachineExternalState;
 
-    MONGO_MOD_PRIVATE StringData getServiceName() const override {
+    [[MONGO_MOD_PRIVATE]] std::string_view getServiceName() const override {
         return kServiceName;
     }
 
-    MONGO_MOD_PRIVATE NamespaceString getStateDocumentsNS() const override {
+    [[MONGO_MOD_PRIVATE]] NamespaceString getStateDocumentsNS() const override {
         return NamespaceString::kRecipientReshardingOperationsNamespace;
     }
 
-    MONGO_MOD_PRIVATE ThreadPool::Limits getThreadPoolLimits() const override;
+    [[MONGO_MOD_PRIVATE]] ThreadPoolLimits getThreadPoolLimits() const override;
 
     // The service implemented its own conflict check before this method was added.
-    MONGO_MOD_PRIVATE void checkIfConflictsWithOtherInstances(
+    [[MONGO_MOD_PRIVATE]] void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
         const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override {
     };
 
-    MONGO_MOD_PRIVATE std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
+    [[MONGO_MOD_PRIVATE]] std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override;
 
-    MONGO_MOD_PRIVATE inline std::vector<std::shared_ptr<PrimaryOnlyService::Instance>>
+    [[MONGO_MOD_PRIVATE]] inline std::vector<std::shared_ptr<PrimaryOnlyService::Instance>>
     getAllReshardingInstances(OperationContext* opCtx) {
         return getAllInstances(opCtx);
     }
+
+    [[MONGO_MOD_PRIVATE]] void stepDown_forTest();
+    [[MONGO_MOD_PRIVATE]] void stepUp_forTest();
 
 private:
     ServiceContext* _serviceContext;
@@ -125,24 +107,7 @@ private:
 class ReshardingRecipientService::RecipientStateMachine final
     : public repl::PrimaryOnlyService::TypedInstance<RecipientStateMachine> {
 public:
-    struct CloneDetails {
-        Timestamp cloneTimestamp;
-        int64_t approxDocumentsToCopy;
-        int64_t approxBytesToCopy;
-        std::vector<DonorShardFetchTimestamp> donorShards;
-
-        auto lens() const {
-            return std::tie(cloneTimestamp, approxDocumentsToCopy, approxBytesToCopy);
-        }
-
-        friend bool operator==(const CloneDetails& a, const CloneDetails& b) {
-            return a.lens() == b.lens();
-        }
-
-        friend bool operator!=(const CloneDetails& a, const CloneDetails& b) {
-            return a.lens() != b.lens();
-        }
-    };
+    using CloneDetails = ReshardingRecipientPromises::CloneDetails;
 
     explicit RecipientStateMachine(
         const ReshardingRecipientService* recipientService,
@@ -161,8 +126,9 @@ public:
 
     /**
      * Notifies the coordinator if the recipient is in kStrictConsistency or kError and waits for
-     * _coordinatorHasDecisionPersisted to be fulfilled (success) or for the abortToken to be
-     * canceled (failure or stepdown).
+     * _coordinatorCommitted to become ready — either successfully (commit) or with an error
+     * (coordinator abort via setCoordinatorError() or stepdown via setRunnerError()), or for the
+     * abortToken to be canceled.
      */
     ExecutorFuture<void> _notifyCoordinatorAndAwaitDecision(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
@@ -185,20 +151,28 @@ public:
     void prepareForCriticalSection();
 
     /**
-     * Returns a Future fulfilled once the recipient locally updates its state to
-     * RecipientStateEnum::kApplying or RecipientStateEnum::kError.
+     * Returns a future that becomes ready once the recipient has majority committed
+     * RecipientStateEnum::kCreatingCollection.
      */
-    SharedSemiFuture<void> awaitInApplyingOrError() const {
-        return _inApplyingOrError.getFuture();
+    SharedSemiFuture<void> awaitInCreatingCollection() const {
+        return _promises.getInCreatingCollectionFuture();
     }
 
     /**
-     * Returns a Future fulfilled once the recipient locally persists its final state before the
-     * coordinator makes its decision to commit or abort (RecipientStateEnum::kError or
-     * RecipientStateEnum::kStrictConsistency).
+     * Returns a Future fulfilled once the recipient transitions to RecipientStateEnum::kApplying
+     * or RecipientStateEnum::kError and that state change has been majority committed.
+     */
+    SharedSemiFuture<void> awaitInApplyingOrError() const {
+        return _promises.getInApplyingOrErrorFuture();
+    }
+
+    /**
+     * Returns a Future fulfilled once the recipient majority commits its final state before the
+     * coordinator makes its decision to commit or abort (RecipientStateEnum::kStrictConsistency
+     * or RecipientStateEnum::kError).
      */
     SharedSemiFuture<void> awaitInStrictConsistencyOrError() const {
-        return _inStrictConsistencyOrError.getFuture();
+        return _promises.getInStrictConsistencyOrErrorFuture();
     }
 
     /**
@@ -206,6 +180,7 @@ public:
      * making forward progress.
      */
     SharedSemiFuture<void> getCompletionFuture() const {
+        // coverity[missing_lock]
         return _completionPromise.getFuture();
     }
 
@@ -219,7 +194,7 @@ public:
      * Waits for the monitor to complete and returns the final document delta from the applying
      * phase. Throws an error if verification is not enabled or skipCloningAndApplying is true.
      */
-    SharedSemiFuture<int64_t> awaitChangeStreamsMonitorCompletedForTest();
+    SharedSemiFuture<int64_t> awaitChangeStreamsMonitorCompleted();
 
     inline const CommonReshardingMetadata& getMetadata() const {
         return _metadata;
@@ -243,18 +218,29 @@ public:
                                    const TypeCollectionReshardingFields& reshardingFields,
                                    bool noChunksToCopy);
 
+    /**
+     * Fulfills the subset of recipient promises that are driven by the coordinator advancing
+     * through its state machine. Shared entry point for command handlers and
+     * onReshardingFieldsChanges. Idempotent and cascading: calling with the same state multiple
+     * times is safe, and calling with a later state fulfills all promises up to and including that
+     * state (via >= checks in ReshardingRecipientPromises::onCoordinatorStateAdvanced).
+     *
+     * Promises fulfilled here:
+     *   newState >= kCloning && cloneDetails -> _allDonorsPreparedToDonate
+     *   newState >= kBlockingWrites          -> _coordinatorBlockingWrites
+     *   newState >= kCommitting              -> _coordinatorCommitted
+     *
+     * Side effects:
+     *   newState == kBlockingWrites          -> _dataReplication->prepareForCriticalSection()
+     */
+    void onCoordinatorStateAdvanced(CoordinatorStateEnum newState,
+                                    boost::optional<CloneDetails> cloneDetails = boost::none);
+
     static void insertStateDocument(OperationContext* opCtx,
                                     const ReshardingRecipientDocument& recipientDoc);
 
     /**
-     * Indicates that the coordinator has engaged the critical section. Unblocks the
-     * _coordinatorHasEngagedCriticalSection promise.
-     */
-    void onCriticalSectionStarted();
-
-    /**
-     * Indicates that the coordinator has persisted a decision. Unblocks the
-     * _coordinatorHasDecisionPersisted promise.
+     * Indicates that the coordinator has committed. Unblocks the _coordinatorCommitted promise.
      */
     void commit();
 
@@ -265,9 +251,15 @@ public:
 
     void checkIfOptionsConflict(const BSONObj& stateDoc) const final {}
 
-    SemiFuture<void> fulfillAllDonorsPreparedToDonate(CloneDetails cloneDetails);
-
 private:
+    /**
+     * With-lock implementation of onCoordinatorStateAdvanced. Used by callers that already hold
+     * _mutex (e.g. onReshardingFieldsChanges).
+     */
+    void _onCoordinatorStateAdvanced(WithLock lk,
+                                     CoordinatorStateEnum newState,
+                                     boost::optional<CloneDetails> cloneDetails);
+
     class CloningMetrics {
     public:
         void add(int64_t documentsCopied, int64_t bytesCopied);
@@ -331,6 +323,9 @@ private:
     void _cleanupReshardingCollections(
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
 
+    void _verifyIndexesBuilt(OperationContext* opCtx, bool shardKeyIndexAdded);
+    void _verifyCollectionOptions(OperationContext* opCtx);
+
     // Transitions the on-disk and in-memory state to 'newState'.
     void _transitionState(RecipientStateEnum newState,
                           std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
@@ -387,6 +382,10 @@ private:
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
 
+    void _createChangeStreamsMonitor(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
+
     ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory);
@@ -406,11 +405,6 @@ private:
 
     void _updateContextMetrics(OperationContext* opCtx);
 
-    // Initializes the _cancelState. Note: Should only be called once per lifetime.
-    void _initCancelState(const CancellationToken& stepdownToken);
-
-    void _assertRecipientInitialized(WithLock) const;
-
     // Get indexesToBuild and indexesBuilt from the index catalog, then save them in _metrics
     void _tryFetchBuildIndexMetrics(OperationContext* opCtx);
 
@@ -418,14 +412,13 @@ private:
     // in the cloner resume data documents. Otherwise, return none.
     boost::optional<CloningMetrics> _tryFetchCloningMetrics(OperationContext* opCtx);
 
-    void _fulfillPromisesOnStepup(boost::optional<mongo::ReshardingRecipientMetrics> metrics);
+    void _fulfillPromisesOnStepup(const ReshardingRecipientDocument&);
 
     /**
      * Creates a new span with the resharding UUID set as an attribute.
      */
     otel::traces::Span _startSpan(std::shared_ptr<otel::TelemetryContext> telemetryCtx,
-                                  const std::string& spanName,
-                                  bool keepSpan = false);
+                                  otel::traces::SpanName spanName);
 
     // The primary-only service instance corresponding to the recipient instance. Not owned.
     const ReshardingRecipientService* const _recipientService;
@@ -489,9 +482,8 @@ private:
     // Protects the state below
     mutable std::mutex _mutex;
 
-    // Manages abort state and provides cancellation tokens for async operations. Initialized in
-    // _initCancelState().
-    std::unique_ptr<primary_only_service_helpers::CancelState> _cancelState;
+    // Manages abort state and provides cancellation tokens for async operations.
+    primary_only_service_helpers::CancelState _cancelState;
 
     std::unique_ptr<ReshardingDataReplicationInterface> _dataReplication;
     std::shared_ptr<ReshardingChangeStreamsMonitor> _changeStreamsMonitor;
@@ -505,20 +497,11 @@ private:
     // It states whether or not the user has aborted the resharding operation.
     boost::optional<bool> _userCanceled;
 
-    // Each promise below corresponds to a state on the recipient state machine. They are listed in
-    // ascending order, such that the first promise below will be the first promise fulfilled.
-    SharedPromise<CloneDetails> _allDonorsPreparedToDonate;
+    Atomic<long long> _lastWriteBlockWarningAt{std::numeric_limits<long long>::min()};
 
-    SharedPromise<void> _inApplyingOrError;
-    SharedPromise<void> _inStrictConsistencyOrError;
-
-    SharedPromise<void> _coordinatorHasEngagedCriticalSection;
-    SharedPromise<void> _coordinatorHasDecisionPersisted;
+    ReshardingRecipientPromises _promises;
 
     SharedPromise<void> _completionPromise;
-
-    // This promise is emplaced if the recipient has majority committed the createCollection state.
-    SharedPromise<void> _transitionedToCreateCollection;
 };
 
 }  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,11 +9,13 @@
 
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <typeinfo>
 
 #include <boost/core/demangle.hpp>
 
 namespace mongo::stage_builder::abt_lower::unit_test_abt_literals {
+using namespace std::literals::string_view_literals;
 using namespace sbe::value;
 using namespace abt;
 
@@ -63,7 +39,7 @@ using ExprHolder = ABTHolder<ExprTag>;
  * ABT Expressions
  */
 template <class T, class T1>
-inline T getEnumByName(StringData str, const T1& toStr) {
+inline T getEnumByName(std::string_view str, const T1& toStr) {
     for (size_t i = 0; i < sizeof(toStr) / sizeof(toStr[0]); i++) {
         if (str == toStr[i]) {
             return static_cast<T>(i);
@@ -72,7 +48,7 @@ inline T getEnumByName(StringData str, const T1& toStr) {
     MONGO_UNREACHABLE;
 }
 
-inline Operations getOpByName(StringData str) {
+inline Operations getOpByName(std::string_view str) {
     return getEnumByName<Operations>(str, OperationsEnumString::arr_);
 }
 
@@ -141,8 +117,8 @@ inline auto _carray(auto&&... elements) {
 
     auto [tag, val] = makeNewArray();
     auto arr = getArrayView(val);
-    (arr->push_back(copyValue(elements._n.template cast<Constant>()->get().tag,
-                              elements._n.template cast<Constant>()->get().value)),
+    (arr->push_back_raw(copyValue(elements._n.template cast<Constant>()->get().tag,
+                                  elements._n.template cast<Constant>()->get().value)),
      ...);
 
     return ExprHolder{make<Constant>(tag, val)};
@@ -160,7 +136,7 @@ inline auto _cempobj() {
 
 // Variable.
 inline auto operator""_var(const char* c, size_t len) {
-    return ExprHolder{make<Variable>(ProjectionName{StringData{c, len}})};
+    return ExprHolder{make<Variable>(ProjectionName{std::string_view{c, len}})};
 }
 
 // Vector of variable names.
@@ -171,17 +147,17 @@ inline auto _varnames(Ts&&... pack) {
     return names;
 }
 
-inline auto _unary(StringData name, ExprHolder input) {
+inline auto _unary(std::string_view name, ExprHolder input) {
     return ExprHolder{make<UnaryOp>(getOpByName(name), std::move(input._n))};
 }
 
-inline auto _binary(StringData name, ExprHolder input1, ExprHolder input2) {
+inline auto _binary(std::string_view name, ExprHolder input1, ExprHolder input2) {
     return ExprHolder{
         make<BinaryOp>(getOpByName(name), std::move(input1._n), std::move(input2._n))};
 }
 
 template <typename... Ts>
-inline auto _nary(StringData name, Ts&&... pack) {
+inline auto _nary(std::string_view name, Ts&&... pack) {
     std::vector<ExprHolder> v;
     (v.push_back(std::forward<Ts>(pack)), ...);
     return ExprHolder{make<NaryOp>(getOpByName(name), holdersToABTs(std::move(v)))};
@@ -223,28 +199,31 @@ inline auto _switch(ExprHolder condExpr1,
     return ExprHolder{make<Switch>(std::move(conditions), std::move(elseExpr._n))};
 }
 
-inline auto _let(StringData pn, ExprHolder inBind, ExprHolder inExpr) {
+inline auto _let(std::string_view pn, ExprHolder inBind, ExprHolder inExpr) {
     return ExprHolder{make<Let>(ProjectionName{pn}, std::move(inBind._n), std::move(inExpr._n))};
 }
 
-inline auto _multiLet(StringData pn1, ExprHolder inBind1, ExprHolder inExpr) {
+inline auto _multiLet(std::string_view pn1, ExprHolder inBind1, ExprHolder inExpr) {
     return ExprHolder{make<MultiLet>(
         std::vector{std::pair{ProjectionName{pn1}, std::move(inBind1._n)}}, std::move(inExpr._n))};
 }
 
-inline auto _multiLet(
-    StringData pn1, ExprHolder inBind1, StringData pn2, ExprHolder inBind2, ExprHolder inExpr) {
+inline auto _multiLet(std::string_view pn1,
+                      ExprHolder inBind1,
+                      std::string_view pn2,
+                      ExprHolder inBind2,
+                      ExprHolder inExpr) {
     return ExprHolder{
         make<MultiLet>(std::vector{std::pair{ProjectionName{pn1}, std::move(inBind1._n)},
                                    std::pair{ProjectionName{pn2}, std::move(inBind2._n)}},
                        std::move(inExpr._n))};
 }
 
-inline auto _multiLet(StringData pn1,
+inline auto _multiLet(std::string_view pn1,
                       ExprHolder inBind1,
-                      StringData pn2,
+                      std::string_view pn2,
                       ExprHolder inBind2,
-                      StringData pn3,
+                      std::string_view pn3,
                       ExprHolder inBind3,
                       ExprHolder inExpr) {
     return ExprHolder{
@@ -254,12 +233,12 @@ inline auto _multiLet(StringData pn1,
                        std::move(inExpr._n))};
 }
 
-inline auto _lambda(StringData pn, ExprHolder body) {
+inline auto _lambda(std::string_view pn, ExprHolder body) {
     return ExprHolder{make<LambdaAbstraction>(ProjectionName{pn}, std::move(body._n))};
 }
 
 template <typename... Ts>
-inline auto _fn(StringData name, Ts&&... pack) {
+inline auto _fn(std::string_view name, Ts&&... pack) {
     std::vector<ExprHolder> v;
     (v.push_back(std::forward<Ts>(pack)), ...);
     return ExprHolder{make<FunctionCall>(std::string{name}, holdersToABTs(std::move(v)))};
@@ -302,7 +281,7 @@ public:
                                         .str();
                                 case TypeTags::StringSmall:
                                     return str::stream{} << "sbe::value::makeSmallString(" << arg
-                                                         << "_sd).second";
+                                                         << "sv).second";
                                 default:
                                     return str::stream{} << "unimplemented(" << arg << ")";
                             }

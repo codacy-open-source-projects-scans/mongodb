@@ -4,7 +4,7 @@
  *
  * This test exists to verify the pipeline splitting behavior for a source stage followed by idLookup in sharded contexts.
  *
- * @tags: [featureFlagExtensionsAPI]
+ * @tags: [ featureFlagExtensionsAPI, requires_fcv_90 ]
  */
 
 const collName = jsTestName();
@@ -35,17 +35,36 @@ assert.sameMembers(results, documents);
 results = coll.aggregate([{$readNDocuments: {numDocs: 6, sortById: true}}]).toArray();
 assert.eq(results, documents);
 
-// TODO SERVER-117259 Test in lookup.
-// results = coll.aggregate([{$sort: {_id: 1}}, {$limit: 1}, {$lookup: {from: collName, pipeline: [{$readNDocuments: {numDocs: 2, sortById: true}}], as: "dogs"}}]).toArray();
-// assert.eq(results, [{_id: 0, dog: "labradoodle", dogs: documents.slice(0, 2)}]);
+results = coll
+    .aggregate([
+        {$sort: {_id: 1}},
+        {$limit: 1},
+        {
+            $lookup: {
+                from: collName,
+                pipeline: [{$readNDocuments: {numDocs: 2, sortById: true}}],
+                as: "dogs",
+            },
+        },
+    ])
+    .toArray();
+assert.eq(results, [{_id: 0, dog: "labradoodle", dogs: documents.slice(0, 2)}]);
 
-// results = coll.aggregate([{$sort: {_id: 1}}, {$limit: 1}, {$lookup: {from: collName, pipeline: [{$readNDocuments: {numDocs: 2}}], as: "dogs"}}]).toArray();
-// assert.eq(results.length, 1, results);
-// assert(results[0].hasOwnProperty("dogs"));
-// assert.sameMembers(documents.slice(0, 2), results[0].dogs);
+results = coll
+    .aggregate([
+        {$sort: {_id: 1}},
+        {$limit: 1},
+        {$lookup: {from: collName, pipeline: [{$readNDocuments: {numDocs: 2}}], as: "dogs"}},
+    ])
+    .toArray();
+assert.eq(results.length, 1, results);
+assert(results[0].hasOwnProperty("dogs"));
+assert.sameMembers(documents.slice(0, 2), results[0].dogs);
 
 // Test in $unionWith.
-results = coll.aggregate([{$unionWith: {coll: collName, pipeline: [{$readNDocuments: {numDocs: 2}}]}}]).toArray();
+results = coll
+    .aggregate([{$unionWith: {coll: collName, pipeline: [{$readNDocuments: {numDocs: 2}}]}}])
+    .toArray();
 assert.sameMembers(results, documents.concat(documents.slice(0, 2)));
 results = coll
     .aggregate([

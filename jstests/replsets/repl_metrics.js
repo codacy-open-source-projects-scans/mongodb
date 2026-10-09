@@ -6,7 +6,7 @@
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 // Compares only key sets, ignoring the values
-function verifySameProperties(actual, expected) {
+function verifySameProperties(actual, expected, prefix = "") {
     // Helper function to get the property keys of an object
     function getKeys(obj) {
         return Object.keys(obj).sort();
@@ -19,15 +19,22 @@ function verifySameProperties(actual, expected) {
         const key = keys1[i];
         assert(
             expected.hasOwnProperty(key),
-            () => `Server Status metrics repl section has unexpected property ${key}, please fix this test`,
+            () =>
+                `Server Status metrics repl section ${prefix.substring(0, prefix.length - 1)}` +
+                ` has unexpected property ${key}, please fix this test`,
         );
     }
     for (let i = 0; i < keys2.length; i++) {
         const key = keys2[i];
-        assert(actual.hasOwnProperty(key), () => `Server Status metrics repl section has no expected property ${key}`);
+        assert(
+            actual.hasOwnProperty(key),
+            () =>
+                `Server Status metrics repl section ${prefix.substring(0, prefix.length - 1)}` +
+                ` has no expected property ${key}`,
+        );
         // Recursively verify nested objects
         if (typeof actual[key] === "object" && typeof expected[key] === "object") {
-            verifySameProperties(actual[key], expected[key]);
+            verifySameProperties(actual[key], expected[key], `${prefix}${key}.`);
         }
     }
 }
@@ -60,8 +67,10 @@ const expectedReplSection = {
     },
     "heartBeat": {"handleQueueSize": 0, "maxSeenHandleQueueSize": 0},
     "initialSync": {"completed": 0, "failedAttempts": 0, "failures": 0},
+    "internodeConsistency": {"hashMismatch": {"insert": 0, "update": 0, "delete": 0}},
     "network": {
         "bytes": 0,
+        "bytesSent": 0,
         "getmores": {"num": 0, "totalMillis": 0, "numEmptyBatches": 0},
         "notPrimaryLegacyUnacknowledgedWrites": 0,
         "notPrimaryUnacknowledgedWrites": 0,

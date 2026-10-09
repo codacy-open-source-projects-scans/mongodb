@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,12 +9,14 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry_mock.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 
+#include <string_view>
+
 namespace mongo {
 
 /**
  * This class comprises a mock IndexCatalog for use in unit tests.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT IndexCatalogMock : public IndexCatalog {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] IndexCatalogMock : public IndexCatalog {
 public:
     /**
      * Creates a cloned IndexCatalogMock.
@@ -77,6 +53,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    const doc_diff::IndexUpdateIdentifier* getIndexUpdateIdentifier() const override {
+        MONGO_UNREACHABLE;
+    }
+
     bool haveIdIndex(OperationContext*) const override {
         MONGO_UNREACHABLE;
     }
@@ -92,7 +72,7 @@ public:
     // Note that the inclusion policy is currently ignored for this mock implementation (all added
     // indexes are considered).
     const IndexCatalogEntry* findIndexByName(OperationContext*,
-                                             StringData name,
+                                             std::string_view name,
                                              InclusionPolicy) const override {
         for (const auto& entry : _indexEntries) {
             if (entry->descriptor()->indexName() == name) {
@@ -124,7 +104,7 @@ public:
     }
 
     const IndexCatalogEntry* findIndexByIdent(OperationContext*,
-                                              StringData ident,
+                                              std::string_view ident,
                                               InclusionPolicy) const override {
         for (const auto& entry : _indexEntries) {
             if (entry->getIdent() == ident) {
@@ -142,7 +122,7 @@ public:
     }
 
     IndexCatalogEntry* getWritableEntryByName(OperationContext*,
-                                              StringData,
+                                              std::string_view,
                                               InclusionPolicy) override {
         MONGO_UNREACHABLE;
     }

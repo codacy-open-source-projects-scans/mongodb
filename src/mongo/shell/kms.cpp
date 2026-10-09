@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/shell/kms.h"
 
@@ -35,14 +9,16 @@
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
 
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
 
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
-BSONObj KMSService::encryptDataKeyByString(ConstDataRange cdr, StringData keyId) {
+BSONObj KMSService::encryptDataKeyByString(ConstDataRange cdr, std::string_view keyId) {
     uasserted(5380101,
               str::stream() << "Customer Master Keys for " << name()
                             << " must be BSON object, not a string.");
@@ -63,7 +39,7 @@ void KMSServiceController::registerFactory(KMSProviderEnum provider,
     invariant(ret.second);
 }
 
-std::unique_ptr<KMSService> KMSServiceController::createFromClient(StringData kmsProvider,
+std::unique_ptr<KMSService> KMSServiceController::createFromClient(std::string_view kmsProvider,
                                                                    const BSONObj& config) {
     KMSProviderEnum provider =
         idl::deserialize<KMSProviderEnum>(kmsProvider, IDLParserContext("client fle options"));
@@ -75,7 +51,7 @@ std::unique_ptr<KMSService> KMSServiceController::createFromClient(StringData km
 
 std::unique_ptr<KMSService> KMSServiceController::createFromDisk(const BSONObj& config,
                                                                  const BSONObj& masterKey) {
-    auto providerObj = masterKey.getStringField("provider"_sd);
+    auto providerObj = masterKey.getStringField("provider"sv);
     auto provider = idl::deserialize<KMSProviderEnum>(providerObj, IDLParserContext("root"));
     auto service = _factories.at(provider)->create(config);
     uassert(51193, str::stream() << "Cannot find disk kms provider " << providerObj, service);

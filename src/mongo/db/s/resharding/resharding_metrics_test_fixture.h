@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -39,6 +13,8 @@
 #include "mongo/util/future.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/static_immortal.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -146,13 +122,13 @@ protected:
         _cumulativeMetrics = initializeCumulativeMetrics();
     }
 
-    virtual StringData getRootSectionName() {
+    virtual std::string_view getRootSectionName() {
         return kTestMetricsName;
     }
 
     enum Section { kRoot, kActive, kLatencies, kCurrentInSteps };
 
-    StringData getSectionName(Section section) {
+    std::string_view getSectionName(Section section) {
         switch (section) {
             case kRoot:
                 return getRootSectionName();
@@ -195,7 +171,7 @@ protected:
     void assertAltersCumulativeMetricsField(ReshardingMetrics* metrics,
                                             const std::function<void(ReshardingMetrics*)>& mutateFn,
                                             Section section,
-                                            StringData fieldName,
+                                            std::string_view fieldName,
                                             const std::function<bool(int, int)>& verifyFn) {
         assertAltersCumulativeMetrics(metrics, mutateFn, [&](auto reportBefore, auto reportAfter) {
             auto before = getReportSection(reportBefore, section).getIntField(fieldName);
@@ -208,7 +184,7 @@ protected:
         ReshardingMetrics* metrics,
         const std::function<void(ReshardingMetrics*)>& mutateFn,
         Section section,
-        StringData fieldName) {
+        std::string_view fieldName) {
         assertAltersCumulativeMetricsField(
             metrics, mutateFn, section, fieldName, [](auto before, auto after) {
                 return after > before;
@@ -219,7 +195,7 @@ protected:
         ReshardingMetrics* metrics,
         const std::function<void(ReshardingMetrics*)>& mutateFn,
         Section section,
-        StringData fieldName) {
+        std::string_view fieldName) {
         assertAltersCumulativeMetricsField(
             metrics, mutateFn, section, fieldName, [](auto before, auto after) {
                 return after < before;

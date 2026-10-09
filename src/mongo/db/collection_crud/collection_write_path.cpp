@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/collection_crud/collection_write_path.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -80,6 +53,7 @@
 #include <cstdint>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -89,6 +63,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 // This failpoint throws a WriteConflictException after a successful call to
 // insertDocumentForBulkLoader
@@ -301,7 +276,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
 
         if (MONGO_unlikely(corruptDocumentOnInsert.shouldFail())) {
             auto scoped = corruptDocumentOnInsert.scoped();
-            const auto fpNss = NamespaceStringUtil::parseFailPointData(scoped.getData(), "ns"_sd);
+            const auto fpNss = NamespaceStringUtil::parseFailPointData(scoped.getData(), "ns"sv);
             if (collection->ns() == fpNss) {
                 //  Insert a truncated record that is half the expected size of the source document.
                 records.emplace_back(
@@ -344,7 +319,30 @@ Status insertDocumentsImpl(OperationContext* opCtx,
             invariant(rId,
                       "Clustered Collections must return the RecordId when returning a duplicate "
                       "key error");
-            BSONObj obj = record_id_helpers::toBSONAs(*rId, "");
+            // The clustered RecordId is a KeyString of the cluster key with the TypeBits discarded
+            // (see record_id_helpers::keyForElem), so decoding it back to BSON cannot recover types
+            // such as Decimal128 or a non-integral double and would throw a KeyString format error
+            // (SERVER-128392). Recover the key value from the document we attempted to insert,
+            // whose _id is the duplicated cluster key with its original type. Only fall back to
+            // decoding the RecordId if we cannot locate the offending document.
+            BSONObj obj;
+            size_t dupIdx = 0;
+            for (auto it = begin; it != end; ++it, ++dupIdx) {
+                if (records[dupIdx].id == *rId) {
+                    obj = it->doc["_id"].wrap("");
+                    break;
+                }
+            }
+            if (obj.isEmpty()) {
+                LOGV2_WARNING(
+                    12839200,
+                    "Could not match the duplicate clustered key RecordId to an inserted "
+                    "document. Falling back to decoding the RecordId, which may not "
+                    "recover cluster key types such as Decimal128 or non-integral doubles",
+                    "namespace"_attr = collection->ns(),
+                    "recordId"_attr = rId->toString());
+                obj = record_id_helpers::toBSONAs(*rId, "");
+            }
             status = buildDupKeyErrorStatus(obj,
                                             NamespaceString(collection->ns()),
                                             "" /* indexName */,
@@ -410,13 +408,18 @@ Status insertDocumentsImpl(OperationContext* opCtx,
             /*fromMigrate=*/makeFromMigrateForInserts(opCtx, nss, begin, end, fromMigrate),
             /*defaultFromMigrate=*/fromMigrate);
         if (isReplicatedFastCountEnabled(opCtx)) {
-            UncommittedFastCountChange::getForWrite(opCtx).record(
+            UncommittedFastCountChanges::getForWrite(opCtx).record(
                 collection->ns(),
                 collection->uuid(),
-                records.size(),
-                std::accumulate(records.begin(), records.end(), 0LL, [](auto acc, const Record& r) {
-                    return acc + r.data.size();
-                }));
+                UncommittedFastCountChange{
+                    .delta = {.size = std::accumulate(
+                                  records.begin(),
+                                  records.end(),
+                                  0LL,
+                                  [](auto acc, const Record& r) { return acc + r.data.size(); }),
+                              .count = static_cast<int64_t>(records.size())},
+                    .recordStore = collection->getRecordStore(),
+                });
         }
     }
 
@@ -783,8 +786,13 @@ void updateDocument(OperationContext* opCtx,
     opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
 
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChange::getForWrite(opCtx).record(
-            collection->ns(), collection->uuid(), 0, newDoc.objsize() - oldDoc.value().objsize());
+        UncommittedFastCountChanges::getForWrite(opCtx).record(
+            collection->ns(),
+            collection->uuid(),
+            UncommittedFastCountChange{
+                .delta = {.size = newDoc.objsize() - oldDoc.value().objsize(), .count = 0},
+                .recordStore = collection->getRecordStore(),
+            });
     }
 }
 
@@ -882,8 +890,13 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
 
     opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, onUpdateArgs);
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChange::getForWrite(opCtx).record(
-            collection->ns(), collection->uuid(), 0, newDoc.objsize() - oldDoc.value().objsize());
+        UncommittedFastCountChanges::getForWrite(opCtx).record(
+            collection->ns(),
+            collection->uuid(),
+            UncommittedFastCountChange{
+                .delta = {.size = newDoc.objsize() - oldDoc.value().objsize(), .count = 0},
+                .recordStore = collection->getRecordStore(),
+            });
     }
     return newDoc;
 }
@@ -978,8 +991,13 @@ void deleteDocument(OperationContext* opCtx,
         opCtx, collection, stmtId, doc.value(), documentKey, deleteArgs);
 
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChange::getForWrite(opCtx).record(
-            collection->ns(), collection->uuid(), -1, -doc.value().objsize());
+        UncommittedFastCountChanges::getForWrite(opCtx).record(
+            collection->ns(),
+            collection->uuid(),
+            UncommittedFastCountChange{
+                .delta = {.size = -doc.value().objsize(), .count = -1},
+                .recordStore = collection->getRecordStore(),
+            });
     }
 
     if (opDebug) {
@@ -1050,8 +1068,13 @@ repl::OpTime truncateRange(OperationContext* opCtx,
     opCtx->getServiceContext()->getOpObserver()->onTruncateRange(
         opCtx, collection, minRecordId, maxRecordId, bytesDeleted, docsDeleted, opTime);
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChange::getForWrite(opCtx).record(
-            collection->ns(), collection->uuid(), -docsDeleted, -bytesDeleted);
+        UncommittedFastCountChanges::getForWrite(opCtx).record(
+            collection->ns(),
+            collection->uuid(),
+            UncommittedFastCountChange{
+                .delta = {.size = -bytesDeleted, .count = -docsDeleted},
+                .recordStore = collection->getRecordStore(),
+            });
     }
     return opTime;
 }

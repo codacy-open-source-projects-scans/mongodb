@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/expression_const_eval.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/docval_to_sbeval.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
@@ -42,9 +15,11 @@
 #include "mongo/unittest/unittest.h"
 
 #include <cstdint>
+#include <string_view>
 
 namespace mongo::stage_builder {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace abt;
 using namespace abt_lower::unit_test_abt_literals;
@@ -268,6 +243,34 @@ TEST(ConstEvalTest, FoldRedundantExists) {
 
     // Eliminates the exists call in favor of a boolean true.
     ASSERT_EQ(constEval(exists)->getValueBool(), true);
+}
+
+TEST(ConstEvalTest, FoldMqlComparisonRank) {
+    // MinKey ranks below a missing value, which ranks below every other value. Note that a Nothing
+    // argument folds to a rank of 1 rather than to Nothing.
+    ABT minKey = make<FunctionCall>(
+        "mqlComparisonRank",
+        makeSeq(make<Constant>(sbe::value::TypeTags::MinKey, sbe::value::Value{0u})));
+    ASSERT_EQ(constEval(minKey)->getValueInt32(), 0);
+
+    ABT nothing = make<FunctionCall>("mqlComparisonRank", makeSeq(Constant::nothing()));
+    ASSERT_EQ(constEval(nothing)->getValueInt32(), 1);
+
+    ABT undefined = make<FunctionCall>(
+        "mqlComparisonRank",
+        makeSeq(make<Constant>(sbe::value::TypeTags::bsonUndefined, sbe::value::Value{0u})));
+    ASSERT_EQ(constEval(undefined)->getValueInt32(), 1);
+
+    ABT null = make<FunctionCall>("mqlComparisonRank", makeSeq(Constant::null()));
+    ASSERT_EQ(constEval(null)->getValueInt32(), 2);
+
+    ABT number = make<FunctionCall>("mqlComparisonRank", makeSeq(Constant::int32(29336)));
+    ASSERT_EQ(constEval(number)->getValueInt32(), 2);
+
+    ABT maxKey = make<FunctionCall>(
+        "mqlComparisonRank",
+        makeSeq(make<Constant>(sbe::value::TypeTags::MaxKey, sbe::value::Value{0u})));
+    ASSERT_EQ(constEval(maxKey)->getValueInt32(), 2);
 }
 
 TEST(ConstEvalTest, AndOrFoldNonNothingLhs) {
@@ -943,7 +946,7 @@ TEST(Optimizer, ConstFoldSwitchAnd) {
 TEST(Optimizer, ConstFoldMultiLet) {
     {
         ExpressionConstEval evaluator{nullptr};
-        auto tree = _multiLet("x"_sd, "A"_cstr, "y"_sd, "B"_cstr, "z"_var)._n;
+        auto tree = _multiLet("x"sv, "A"_cstr, "y"sv, "B"_cstr, "z"_var)._n;
         evaluator.optimize(tree);
 
 
@@ -953,8 +956,7 @@ TEST(Optimizer, ConstFoldMultiLet) {
     }
     {
         ExpressionConstEval evaluator{nullptr};
-        auto tree =
-            _multiLet("x"_sd, "A"_cstr, "y"_sd, "B"_cstr, _binary("Eq", "x"_var, "y"_var))._n;
+        auto tree = _multiLet("x"sv, "A"_cstr, "y"sv, "B"_cstr, _binary("Eq", "x"_var, "y"_var))._n;
         evaluator.optimize(tree);
 
         ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
@@ -964,9 +966,9 @@ TEST(Optimizer, ConstFoldMultiLet) {
     {
         // inline variables with single references
         ExpressionConstEval evaluator{nullptr};
-        auto tree = _multiLet("x"_sd,
+        auto tree = _multiLet("x"sv,
                               _fn("floor", "v1"_var),
-                              "y"_sd,
+                              "y"sv,
                               _fn("floor", "v2"_var),
                               _binary("Mult", "x"_var, "y"_var))
                         ._n;
@@ -982,11 +984,11 @@ TEST(Optimizer, ConstFoldMultiLet) {
     }
     {
         ExpressionConstEval evaluator{nullptr};
-        auto tree = _multiLet("x"_sd,
+        auto tree = _multiLet("x"sv,
                               _fn("floor", "v1"_var),
-                              "y"_sd,
+                              "y"sv,
                               _fn("floor", "v2"_var),
-                              "z"_sd,
+                              "z"sv,
                               _fn("floor", "v3"_var),
                               _binary("Mult", "z"_var, "5"_cint32))
                         ._n;
@@ -1001,11 +1003,11 @@ TEST(Optimizer, ConstFoldMultiLet) {
     }
     {
         ExpressionConstEval evaluator{nullptr};
-        auto tree = _multiLet("x"_sd,
+        auto tree = _multiLet("x"sv,
                               _fn("floor", "v1"_var),
-                              "y"_sd,
+                              "y"sv,
                               _fn("floor", "v2"_var),
-                              "z"_sd,
+                              "z"sv,
                               _fn("floor", "v3"_var),
                               _binary("Mult", "z"_var, "z"_var))
                         ._n;
@@ -1022,11 +1024,11 @@ TEST(Optimizer, ConstFoldMultiLet) {
     }
     {
         ExpressionConstEval evaluator{nullptr};
-        auto tree = _multiLet("x"_sd,
+        auto tree = _multiLet("x"sv,
                               _fn("floor", "v1"_var),
-                              "y"_sd,
+                              "y"sv,
                               _fn("floor", "v2"_var),
-                              "z"_sd,
+                              "z"sv,
                               _fn("floor", "v3"_var),
                               _binary("Add",
                                       _binary("Mult", "x"_var, "x"_var),
@@ -1053,9 +1055,9 @@ TEST(Optimizer, ConstFoldMultiLet) {
         ExpressionConstEval evaluator{nullptr};
         auto tree =
             _multiLet(
-                "x"_sd,
+                "x"sv,
                 _fn("floor", "v1"_var),
-                _multiLet("y"_sd, _fn("floor", "v2"_var), _binary("Mult", "1"_cint64, "y"_var)))
+                _multiLet("y"sv, _fn("floor", "v2"_var), _binary("Mult", "1"_cint64, "y"_var)))
                 ._n;
 
         evaluator.optimize(tree);
@@ -1080,7 +1082,7 @@ TEST_F(AbtToSbeExpression, NonNullableLhsOrTrueConstFold) {
     auto treeConstFold = constFold(tree);
 
     auto var =
-        std::make_pair(ProjectionName{"x"_sd}, sbe::value::makeValue(mongo::Value((int32_t)1)));
+        std::make_pair(ProjectionName{"x"sv}, sbe::value::makeValue(mongo::Value((int32_t)1)));
 
     auto res = evalExpr(tree, var);
     auto resConstFold = evalExpr(treeConstFold, var);
@@ -1095,7 +1097,7 @@ TEST_F(AbtToSbeExpression, NonNullableLhsOrFalseConstFold) {
     auto treeConstFold = constFold(tree);
 
     auto var =
-        std::make_pair(ProjectionName{"x"_sd}, sbe::value::makeValue(mongo::Value((int32_t)1)));
+        std::make_pair(ProjectionName{"x"sv}, sbe::value::makeValue(mongo::Value((int32_t)1)));
 
     auto res = evalExpr(tree, var);
     auto resConstFold = evalExpr(treeConstFold, var);
@@ -1136,7 +1138,7 @@ TEST_F(AbtToSbeExpression, NonNullableLhsAndFalseConstFold) {
     auto treeConstFold = constFold(tree);
 
     auto var =
-        std::make_pair(ProjectionName{"x"_sd}, sbe::value::makeValue(mongo::Value((int32_t)1)));
+        std::make_pair(ProjectionName{"x"sv}, sbe::value::makeValue(mongo::Value((int32_t)1)));
     auto res = evalExpr(tree, var);
     auto resConstFold = evalExpr(treeConstFold, var);
 
@@ -1150,7 +1152,7 @@ TEST_F(AbtToSbeExpression, NonNullableLhsAndTrueConstFold) {
     auto treeConstFold = constFold(tree);
 
     auto var =
-        std::make_pair(ProjectionName{"x"_sd}, sbe::value::makeValue(mongo::Value((int32_t)1)));
+        std::make_pair(ProjectionName{"x"sv}, sbe::value::makeValue(mongo::Value((int32_t)1)));
     auto res = evalExpr(tree, var);
     auto resConstFold = evalExpr(treeConstFold, var);
 

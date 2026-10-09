@@ -4,6 +4,7 @@
  * the fetch stage.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain of a resolved view must be executed by mongos.
  *   directly_against_shardsvrs_incompatible,
  *   # Refusing to run a test that issues a command with explain because it may return
@@ -12,6 +13,8 @@
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   requires_fcv_70,
+ *   # The explain assertions assume unsharded collection (getAggPlanStage).
+ *   assumes_unsharded_collection,
  * ]
  */
 import {getAggPlanStage} from "jstests/libs/query/analyze_plan.js";
@@ -19,7 +22,9 @@ import {getAggPlanStage} from "jstests/libs/query/analyze_plan.js";
 const coll = db[jsTestName()];
 
 coll.drop();
-assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: "time", metaField: "tag"}}));
+assert.commandWorked(
+    db.createCollection(coll.getName(), {timeseries: {timeField: "time", metaField: "tag"}}),
+);
 
 assert.commandWorked(
     coll.insertMany([
@@ -49,8 +54,12 @@ function checkIndexScanAndFilter(coll, predicate, indexName, filterField) {
 }
 
 const timeDate = ISODate("2021-10-01 00:00:00.000Z");
-assert.commandWorked(coll.createIndex({time: 1}, {name: "time_1_tag", partialFilterExpression: {tag: {$gt: 1}}}));
+assert.commandWorked(
+    coll.createIndex({time: 1}, {name: "time_1_tag", partialFilterExpression: {tag: {$gt: 1}}}),
+);
 checkIndexScanAndFilter(coll, {time: {$gte: timeDate}, tag: {$gt: 1}}, "time_1_tag", "tag");
 
-assert.commandWorked(coll.createIndex({tag: 1}, {name: "tag_1_b", partialFilterExpression: {b: {$gte: 10}}}));
+assert.commandWorked(
+    coll.createIndex({tag: 1}, {name: "tag_1_b", partialFilterExpression: {b: {$gte: 10}}}),
+);
 checkIndexScanAndFilter(coll, {tag: {$gt: 1}, b: {$gte: 10}}, "tag_1_b", "b");

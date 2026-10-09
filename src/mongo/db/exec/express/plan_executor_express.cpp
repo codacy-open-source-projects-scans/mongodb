@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/express/plan_executor_express.h"
 
@@ -52,11 +26,14 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer_express.h"
 #include "mongo/db/query/planner_ixselect.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/write_conflict_backoff.h"
 #include "mongo/db/query/write_ops/canonical_delete.h"
 #include "mongo/db/query/write_ops/canonical_update.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/scoped_collection_metadata.h"
@@ -67,8 +44,10 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
 
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -78,7 +57,12 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(expressExecutorHangBeforeLogAndBackoff);
+MONGO_FAIL_POINT_DEFINE(expressExecutorHangBeforeTemporarilyUnavailableBackoff);
+
 namespace {
+using namespace std::literals::string_view_literals;
 class DoNotRecoverPolicy final : public express::ExceptionRecoveryPolicy {
 public:
     express::PlanProgress recoverIfPossible(
@@ -97,13 +81,13 @@ public:
 
     express::PlanProgress recoverIfPossible(
         ExceptionFor<ErrorCodes::TransactionTooLargeForCache>& exception) const override {
-        exception.addContext("Internal retry explicitly disabled for query"_sd);
+        exception.addContext("Internal retry explicitly disabled for query"sv);
         throw exception;
     }
 
     express::PlanProgress recoverIfPossible(
         ExceptionFor<ErrorCodes::StaleConfig>& exception) const override {
-        exception.addContext("Internal retry explicitly disabled for query"_sd);
+        exception.addContext("Internal retry explicitly disabled for query"sv);
         throw exception;
     }
 };
@@ -160,7 +144,7 @@ public:
     }
 };
 
-static const RecoveryPolicyForPrimary recoveryPolicyForSecondary;
+static const RecoveryPolicyForSecondary recoveryPolicyForSecondary;
 
 template <class Plan>
 class PlanExecutorExpress final : public PlanExecutor {
@@ -291,7 +275,7 @@ public:
         return _planExplainer;
     }
 
-    boost::optional<StringData> getExecutorType() const override {
+    boost::optional<std::string_view> getExecutorType() const override {
         return idl::serialize(_cursorType);
     }
 
@@ -377,45 +361,50 @@ PlanExecutorExpress<Plan>::PlanExecutorExpress(
 
 template <class Plan>
 PlanExecutor::ExecState PlanExecutorExpress<Plan>::getNext(BSONObj* out, RecordId* dlOut) {
-    auto optTimer = maybeMakeScopedTimer(_opCtx,
-                                         _commonStats.executionTime.precision,
-                                         &_commonStats.executionTime.executionTimeEstimate);
-
     bool haveOutput = false;
-    size_t numUnavailabilityYieldsSinceLastSuccess = 0;
-    size_t numWriteConflictYieldsSinceLastSuccess = 0;
+    {
+        auto optTimer = maybeMakeScopedTimer(_opCtx,
+                                             _commonStats.executionTime.precision,
+                                             &_commonStats.executionTime.executionTimeEstimate);
 
-    checkFailPointPlanExecAlwaysFails(nss());
+        size_t numUnavailabilityYieldsSinceLastSuccess = 0;
+        size_t numWriteConflictYieldsSinceLastSuccess = 0;
 
-    express::PlanProgress progress((express::Ready()));
-    while (!haveOutput) {
-        if (_plan.exhausted()) {
-            return ExecState::IS_EOF;
-        }
+        checkFailPointPlanExecAlwaysFails(nss());
 
-        _opCtx->checkForInterrupt();
-
-        progress = _plan.proceed(_opCtx, [&](RecordId rid, BSONObj obj) {
-            if (dlOut) {
-                *dlOut = std::move(rid);
+        express::PlanProgress progress((express::Ready()));
+        while (!haveOutput) {
+            if (_plan.exhausted()) {
+                return ExecState::IS_EOF;
             }
-            if (out) {
-                *out = std::move(obj);
-                if (_mustReturnOwnedBson) {
-                    out->makeOwned();
+
+            _opCtx->checkForInterrupt();
+
+            progress = _plan.proceed(_opCtx, [&](RecordId rid, BSONObj obj) {
+                if (dlOut) {
+                    *dlOut = std::move(rid);
                 }
-            }
-            haveOutput = true;
-            return express::Ready();
-        });
+                if (out) {
+                    *out = std::move(obj);
+                }
+                haveOutput = true;
+                return express::Ready();
+            });
 
-        std::visit(
-            [&, this](auto result) {
-                this->readyPlanExecution(std::move(result),
-                                         numUnavailabilityYieldsSinceLastSuccess,
-                                         numWriteConflictYieldsSinceLastSuccess);
-            },
-            std::move(progress));
+            std::visit(
+                [&, this](auto result) {
+                    this->readyPlanExecution(std::move(result),
+                                             numUnavailabilityYieldsSinceLastSuccess,
+                                             numWriteConflictYieldsSinceLastSuccess);
+                },
+                std::move(progress));
+        }
+    }
+
+    // Copying here that the timer is no longer active to avoid polluting the execution time metric
+    // with the cost of copying the BSONObj.
+    if (out && _mustReturnOwnedBson) {
+        out->makeOwned();
     }
 
     return ExecState::ADVANCED;
@@ -436,33 +425,56 @@ void PlanExecutorExpress<Plan>::readyPlanExecution(express::WaitingForYield,
                                                    size_t& numWriteConflictYieldsSinceLastSuccess) {
     // No increasing write conflict metric as it was already increased before this point
     // in ExceptionRecoveryPolicy::recoverFromNonFatalWriteException
-    logWriteConflictAndBackoff(numWriteConflictYieldsSinceLastSuccess++,
-                               "plan execution",
-                               "write contention during express execution"_sd,
-                               NamespaceStringOrUUID(_nss));
+    auto writeConflictsInARow = ++numWriteConflictYieldsSinceLastSuccess;
 
-    // TODO SERVER-116168: Is this the desired behavior?
-    _plan.temporarilyReleaseResourcesAndYield(_opCtx, []() {
-        // No-op.
-    });
+    // When release-ticket backoff is enabled, we yield the ticket before sleeping so other
+    // writers can make progress.
+    if (internalQueryEnableWriteConflictBackoffWithoutTicket.load()) {
+        _plan.temporarilyReleaseResourcesAndYield(_opCtx, [this, writeConflictsInARow]() {
+            if (MONGO_unlikely(expressExecutorHangBeforeLogAndBackoff.shouldFail())) {
+                expressExecutorHangBeforeLogAndBackoff.pauseWhileSet(_opCtx);
+            }
+            write_conflict_backoff::logAndBackoff(_opCtx,
+                                                  writeConflictsInARow,
+                                                  "plan execution",
+                                                  "write contention during express execution"sv,
+                                                  NamespaceStringOrUUID(_nss));
+        });
+    } else {
+        if (MONGO_unlikely(expressExecutorHangBeforeLogAndBackoff.shouldFail())) {
+            expressExecutorHangBeforeLogAndBackoff.pauseWhileSet(_opCtx);
+        }
+        // Log and backoff while holding the ticket. Use the legacy stepped schedule here: the
+        // exponential ramp sleeps up to ~2x capMs, far too long to hold a ticket through.
+        logWriteConflictAndBackoff(writeConflictsInARow,
+                                   "plan execution",
+                                   "write contention during express execution"sv,
+                                   NamespaceStringOrUUID(_nss));
+        _plan.temporarilyReleaseResourcesAndYield(_opCtx, []() {});
+    }
 }
 
 template <class Plan>
 void PlanExecutorExpress<Plan>::readyPlanExecution(express::WaitingForBackoff,
                                                    size_t& numUnavailabilityYieldsSinceLastSuccess,
                                                    size_t& numWriteConflictYieldsSinceLastSuccess) {
-    handleTemporarilyUnavailableException(_opCtx,
-                                          numUnavailabilityYieldsSinceLastSuccess++,
-                                          "plan executor",
-                                          NamespaceStringOrUUID(_nss),
-                                          Status(ErrorCodes::TemporarilyUnavailable,
-                                                 "resource contention during express execution"_sd),
-                                          numWriteConflictYieldsSinceLastSuccess);
-
-    // TODO SERVER-116168: Is this the desired behavior?
-    _plan.temporarilyReleaseResourcesAndYield(_opCtx, []() {
-        // No-op.
-    });
+    // Capture count before incrementing so the lambda sees the pre-increment value.
+    auto numUnavailabilityAttempts = numUnavailabilityYieldsSinceLastSuccess++;
+    _plan.temporarilyReleaseResourcesAndYield(
+        _opCtx, [this, numUnavailabilityAttempts, &numWriteConflictYieldsSinceLastSuccess]() {
+            if (MONGO_unlikely(
+                    expressExecutorHangBeforeTemporarilyUnavailableBackoff.shouldFail())) {
+                expressExecutorHangBeforeTemporarilyUnavailableBackoff.pauseWhileSet(_opCtx);
+            }
+            handleTemporarilyUnavailableException(
+                _opCtx,
+                numUnavailabilityAttempts,
+                "plan executor",
+                NamespaceStringOrUUID(_nss),
+                Status(ErrorCodes::TemporarilyUnavailable,
+                       "resource contention during express execution"sv),
+                numWriteConflictYieldsSinceLastSuccess);
+        });
 }
 
 template <class Plan>
@@ -843,7 +855,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeExpressExecutorForDelet
 
 bool canCoverProjection(const IndexEntry& index,
                         const OrderedPathSet& paths,
-                        StringData filterPath,
+                        std::string_view filterPath,
                         bool collationRelevantForFilter) {
     if (index.multikey && index.multikeyPaths.empty()) {
         return false;
@@ -861,7 +873,7 @@ bool canCoverProjection(const IndexEntry& index,
     StringDataSet coveredPaths;
     size_t keyPatternFieldIndex = 0;
     for (auto&& elt : index.keyPattern) {
-        StringData path = elt.fieldNameStringData();
+        std::string_view path = elt.fieldNameStringData();
         if (elt.isNumber() &&
             (!index.multikey || index.multikeyPaths[keyPatternFieldIndex].empty()) &&
             paths.contains(path)) {

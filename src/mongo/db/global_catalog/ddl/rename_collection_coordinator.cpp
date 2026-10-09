@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/rename_collection_coordinator.h"
@@ -57,10 +31,10 @@
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/router_role/cluster_commands_helpers.h"
 #include "mongo/db/router_role/router_role.h"
-#include "mongo/db/s/primary_only_service_helpers/all_shards_and_config_causality_barrier.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/shard_role/ddl/list_collections_gen.h"
+#include "mongo/db/shard_role/ddl/list_indexes_gen.h"
 #include "mongo/db/shard_role/lock_manager/d_concurrency.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
@@ -74,9 +48,11 @@
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/topology/user_write_block/replica_set_write_block_state.h"
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/transaction_api.h"
@@ -148,7 +124,7 @@ void checkDatabaseRestrictions(OperationContext* opCtx,
                                const NamespaceString& toNss) {
     if (!fromCollType || fromCollType->getUnsplittable().value_or(false)) {
         const auto toDB = Grid::get(opCtx)->catalogClient()->getDatabase(
-            opCtx, toNss.dbName(), repl::ReadConcernLevel::kMajorityReadConcern);
+            opCtx, toNss.dbName(), repl::ReadConcernArgs::kMajority);
 
         uassert(ErrorCodes::CommandFailed,
                 "Source and destination collections must be on same shard",
@@ -280,6 +256,71 @@ void checkCatalogConsistencyAcrossShards(OperationContext* opCtx,
     }
 }
 
+/**
+ * Best-effort check that no index builds are in progress on the given namespaces across all
+ * participant shards. This mirrors the replica-set behavior where renameCollection fails
+ * immediately with BackgroundOperationInProgressForNamespace if an index build is ongoing.
+ * The check is best-effort because an index build could start after this check.
+ */
+void checkForInProgressIndexBuildsAcrossShards(
+    OperationContext* opCtx,
+    const std::vector<NamespaceString>& nsses,
+    std::shared_ptr<executor::ScopedTaskExecutor> executor,
+    const CancellationToken& token) {
+    auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+
+    for (const auto& nss : nsses) {
+        ListIndexes listIndexesCmd(nss);
+        listIndexesCmd.setIncludeIndexBuildInfo(true);
+        listIndexesCmd.setDbName(nss.dbName());
+        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ListIndexes>>(
+            **executor, token, listIndexesCmd);
+        auto responses = sharding_ddl_util::sendAuthenticatedCommandToShards(
+            opCtx, opts, shardIds, /*throwOnError=*/false);
+
+        for (const auto& cmdResponse : responses) {
+            // Best-effort: skip shards where the collection doesn't exist or is a view (the
+            // collection is unsharded and only lives on the primary shard; views don't have
+            // indexes). Re-throw unexpected errors.
+            const auto status = AsyncRequestsSender::Response::getEffectiveStatus(cmdResponse);
+            if (!status.isOK()) {
+                if (status.code() == ErrorCodes::NamespaceNotFound ||
+                    status.code() == ErrorCodes::CommandNotSupportedOnView) {
+                    continue;
+                }
+                uassertStatusOK(status);
+            }
+
+            const auto& replyData = cmdResponse.swResponse.getValue().data;
+
+            // The listIndexes reply contains a cursor subdocument with firstBatch and id.
+            // The storage engine allows at most 64 indexes per collection, the total should be
+            // well under the 16MB batch limit. In the off-chance it is not, log a warning and
+            // proceed with firstBatch only, given that the check is best-effort.
+            const auto cursorObj = replyData["cursor"];
+            const auto cursorId = cursorObj["id"].numberLong();
+            if (cursorId != 0) {
+                LOGV2_WARNING(11762400,
+                              "listIndexes reply has unexhausted cursor; "
+                              "index build check may be incomplete",
+                              "nss"_attr = nss,
+                              "shard"_attr = cmdResponse.shardId,
+                              "cursorId"_attr = cursorId);
+            }
+
+            for (const auto& indexEntry : cursorObj["firstBatch"].Array()) {
+                if (indexEntry["indexBuildInfo"].type() != BSONType::eoo) {
+                    uasserted(ErrorCodes::BackgroundOperationInProgressForNamespace,
+                              str::stream()
+                                  << "cannot perform rename: an index build is currently "
+                                  << "running for collection " << nss.toStringForErrorMsg()
+                                  << " on shard " << cmdResponse.shardId.toString());
+                }
+            }
+        }
+    }
+}
+
 // TODO (SERVER-98118): Remove this method (assuming a true condition on each invocation)
 // once v9.0 become last-lts.
 bool supportsPreciseChangeStreamTargeter(OperationContext* opCtx) {
@@ -306,7 +347,7 @@ void persistPlacementChangeForCollectionBeingRenamed(
             nss,
             uuidUponRename,
             timeAtNewPlacementForTargetCollection,
-            std::move(shardIds),
+            shardIds,
             stmtId);
 
         return SemiFuture<void>::makeReady();
@@ -322,11 +363,15 @@ void renameTrackedCollectionStatement(const txn_api::TransactionClient& txnClien
                                       const boost::optional<UUID>& newTargetCollectionUuid,
                                       const Timestamp& timeInsertion,
                                       const OID& renamedCollectionEpoch,
+                                      bool disallowChunkOperations,
                                       int stmtId) {
     auto newCollectionType = oldCollection;
     newCollectionType.setNss(newNss);
     newCollectionType.setTimestamp(timeInsertion);
     newCollectionType.setEpoch(renamedCollectionEpoch);
+    if (disallowChunkOperations) {
+        newCollectionType.setAllowChunkOperations(false);
+    }
     if (newTargetCollectionUuid.has_value()) {
         newCollectionType.setUuid(newTargetCollectionUuid.get());
     }
@@ -394,18 +439,36 @@ void deleteZonesStatement(const txn_api::TransactionClient& txnClient, const Nam
     uassertStatusOK(txnClient.runCRUDOpSync(request, {-1}).toStatus());
 }
 
+bool shouldDisallowChunkOperations(OperationContext* opCtx,
+                                   AuthoritativeMetadataAccessLevelEnum authMetadataAccessLevel,
+                                   const boost::optional<CollectionType>& collMetadata) {
+    if (!feature_flags::gCreateRenameNewSetAllowChunkOperationsBehavior.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return false;
+    }
+
+    // Chunk operations are disallowed on unsplittable collections, there is no need to explicitly
+    // block them with `allowChunkOperations: false`. Not doing it saves an `allowChunkOperations:
+    // true` command later.
+    return authMetadataAccessLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed &&
+        collMetadata.has_value() && !collMetadata->getUnsplittable().value_or(false);
+}
+
 // TODO (SERVER-98118): remove the logTargetPlacementChange parameter (assuming a 'false' value)
 // once v9.0 become last-lts.
-void renameCollectionMetadataInTransaction(OperationContext* opCtx,
-                                           const boost::optional<CollectionType>& optFromCollType,
-                                           const NamespaceString& fromNss,
-                                           const NamespaceString& toNss,
-                                           const boost::optional<UUID>& droppedTargetUUID,
-                                           const boost::optional<UUID>& newTargetCollectionUuid,
-                                           const Timestamp& commitTime,
-                                           const OID& renamedCollectionEpoch,
-                                           const std::shared_ptr<executor::TaskExecutor>& executor,
-                                           const OperationSessionInfo& osi) {
+void renameCollectionMetadataInTransaction(
+    OperationContext* opCtx,
+    const boost::optional<CollectionType>& optFromCollType,
+    const NamespaceString& fromNss,
+    const NamespaceString& toNss,
+    const boost::optional<UUID>& droppedTargetUUID,
+    const boost::optional<UUID>& newTargetCollectionUuid,
+    const Timestamp& commitTime,
+    const OID& renamedCollectionEpoch,
+    const std::shared_ptr<executor::TaskExecutor>& executor,
+    const OperationSessionInfo& osi,
+    AuthoritativeMetadataAccessLevelEnum authMetadataAccessLevel) {
     const auto isFromCollTracked = optFromCollType.has_value();
 
     auto transactionChain = [&](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
@@ -420,13 +483,15 @@ void renameCollectionMetadataInTransaction(OperationContext* opCtx,
             sharding_ddl_util::deleteTrackedCollectionInTransaction(
                 txnClient, fromNss, fromUUID, stmtId++);
             // Persist the entry for the renamed collection
-            renameTrackedCollectionStatement(txnClient,
-                                             *optFromCollType,
-                                             toNss,
-                                             newTargetCollectionUuid,
-                                             commitTime,
-                                             renamedCollectionEpoch,
-                                             stmtId++);
+            renameTrackedCollectionStatement(
+                txnClient,
+                *optFromCollType,
+                toNss,
+                newTargetCollectionUuid,
+                commitTime,
+                renamedCollectionEpoch,
+                shouldDisallowChunkOperations(opCtx, authMetadataAccessLevel, optFromCollType),
+                stmtId++);
             // Log the placement change of FROM.
             sharding_ddl_util::upsertPlacementHistoryDocInTransaction(
                 txnClient, fromNss, fromUUID, commitTime, {} /*shards*/, stmtId++);
@@ -567,6 +632,13 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 const auto& fromNss = nss();
                 const auto& toNss = _request.getTo();
 
+                // If the rename is cross-DBs and the replica set write block is enabled, reject the
+                // operation.
+                if (fromNss.db_forSharding() != toNss.db_forSharding()) {
+                    ReplicaSetWriteBlockState::get(opCtx)->checkReplicaSetWritesAllowed(
+                        opCtx, toNss, ReplicaSetWriteBlockRejectedWriteOp::kInsert);
+                }
+
                 const auto criticalSectionReason =
                     sharding_ddl_util::getCriticalSectionReasonForRename(fromNss, toNss);
 
@@ -656,6 +728,8 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     _doc.setTargetUUID(getCollectionUUID(
                         opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
 
+                    checkDatabaseRestrictions(opCtx, fromNss, optSourceCollType, toNss);
+
                     if (fromNss.db_forSharding() != toNss.db_forSharding()) {
                         // Renaming across databases will result in a new UUID that is generated by
                         // the coordinator and will be propagated to the participants.
@@ -670,12 +744,15 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         // does not exist, it will be later released by the rename participant. In
                         // the collection exists, the critical section can be released right away as
                         // the participant will re-acquire it when needed.
+                        const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                            AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
                         auto criticalSection = ShardingRecoveryService::get(opCtx);
                         criticalSection->acquireRecoverableCriticalSectionBlockWrites(
                             opCtx,
                             toNss,
                             criticalSectionReason,
-                            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
+                            ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
+                            !isAuthoritative /* clearShardCatalogCache */);
                         criticalSection->promoteRecoverableCriticalSectionToBlockAlsoReads(
                             opCtx,
                             toNss,
@@ -699,8 +776,6 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     sharding_ddl_util::checkRenamePreconditions(
                         opCtx, toNss, optTargetCollType, isSourceUnsharded, _doc.getDropTarget());
 
-                    checkDatabaseRestrictions(opCtx, fromNss, optSourceCollType, toNss);
-
                     checkCatalogConsistencyAcrossShards(opCtx,
                                                         fromNss,
                                                         optSourceCollType,
@@ -709,7 +784,17 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                                         executor,
                                                         token);
 
-                    // Check that the target collection is not sharded, if requested.
+                    // Best-effort check for in-progress index builds on the source and target
+                    // (when dropTarget is true) across all shards, mirroring replica-set behavior.
+                    // This prevents acquiring the critical section and then retrying indefinitely
+                    // while CRUD is blocked (SERVER-117624).
+                    auto nssesToCheck = std::vector<NamespaceString>{fromNss};
+                    if (_doc.getDropTarget()) {
+                        nssesToCheck.push_back(toNss);
+                    }
+
+                    checkForInProgressIndexBuildsAcrossShards(opCtx, nssesToCheck, executor, token);
+
                     if (_doc.getRenameCollectionRequest().getTargetMustNotBeSharded().get_value_or(
                             false)) {
                         uassert(ErrorCodes::IllegalOperation,
@@ -778,17 +863,24 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
 
                 // Block migrations on involved collections.
                 try {
-                    const auto session = getNewSession(opCtx);
                     sharding_ddl_util::stopMigrations(
-                        opCtx, fromNss, _doc.getSourceUUID(), session);
+                        opCtx,
+                        fromNss,
+                        _doc.getSourceUUID(),
+                        [&] { return getNewSession(opCtx); },
+                        _doc.getAuthoritativeMetadataAccessLevel());
                 } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                     // stopMigrations is allowed to fail when the source collection is not tracked
                     // by the sharding catalog.
                 }
 
                 try {
-                    const auto session = getNewSession(opCtx);
-                    sharding_ddl_util::stopMigrations(opCtx, toNss, _doc.getTargetUUID(), session);
+                    sharding_ddl_util::stopMigrations(
+                        opCtx,
+                        toNss,
+                        _doc.getTargetUUID(),
+                        [&] { return getNewSession(opCtx); },
+                        _doc.getAuthoritativeMetadataAccessLevel());
                 } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                     // stopMigrations is allowed to fail when the target collection doesn't exist or
                     // is not tracked by the sharding catalog.
@@ -806,19 +898,17 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 auto acquireCriticalSectionOnParticipantsFor = [&](const NamespaceString& nss) {
                     LOGV2_DEBUG(10488800, 2, "Acquiring critical section", "nss"_attr = nss);
 
-                    ShardsvrParticipantBlock blockCRUDOperationsRequest(nss);
-                    blockCRUDOperationsRequest.setBlockType(
-                        mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
-                    blockCRUDOperationsRequest.setReason(reason);
-
-                    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-                    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                                   getNewSession(opCtx));
-                    auto opts =
-                        std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                            **executor, token, blockCRUDOperationsRequest);
-                    sharding_ddl_util::sendAuthenticatedCommandToShards(
-                        opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+                    const auto session = getNewSession(opCtx);
+                    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+                        opCtx,
+                        nss,
+                        Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+                        mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites,
+                        reason,
+                        _doc.getAuthoritativeMetadataAccessLevel(),
+                        session,
+                        executor,
+                        token);
 
                     LOGV2_DEBUG(10488801, 2, "Acquired critical section", "nss"_attr = nss);
                 };
@@ -846,14 +936,11 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 acquireCriticalSectionOnParticipantsFor(fromNss);
                 acquireCriticalSectionOnParticipantsFor(toNss);
 
-                // 2. Define stable values for:
-                // - The new epoch for FROM, once renamed to TO.
-                // - The identity of the shard that will notify change stream readers of FROM once
-                //   the operation gets committed.
-                if (!_doc.getRenamedCollectionEpoch()) {
+                // 2. Define a stable value for the identity of the shard that will notify change
+                // stream readers of FROM once the operation gets committed.
+                if (!_doc.getChangeStreamsNotifier()) {
                     auto newDoc = _doc;
 
-                    newDoc.setRenamedCollectionEpoch(OID::gen());
                     auto changeStreamsNotifierForSource =
                         getChangeStreamNotifierShardIdFor(_doc.getSourceUUID().value());
                     LOGV2(10488802,
@@ -911,11 +998,6 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kBlockCrudAndRename,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
-                if (!_firstExecution) {
-                    AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-                    performCausalityBarrier(opCtx, barrier);
-                }
-
                 const auto& fromNss = nss();
 
                 // On participant shards:
@@ -930,6 +1012,17 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 renameCollParticipantRequest.setNewTargetCollectionUuid(
                     _doc.getNewTargetCollectionUuid());
                 renameCollParticipantRequest.setRenameCollectionRequest(_request);
+
+                // When shards are authoritative, there is no need to clear the filtering
+                // metadata upon releasing the critical section; the commit phase is responsible
+                // for updating the shard catalog with current information. This flag is
+                // evaluated at insertion time because on secondaries, metadata is cleared
+                // during the onDelete of the critical section document.
+                bool isDDLAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+                if (isDDLAuthoritative) {
+                    renameCollParticipantRequest.setClearCollMetadata(false);
+                }
 
                 const auto opSessionInfo = getNewSession(opCtx);
                 generic_argument_util::setMajorityWriteConcern(renameCollParticipantRequest);
@@ -995,13 +1088,6 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     sharding_ddl_util::removeQueryAnalyzerMetadata(opCtx, getCollUuidsToRemove());
                 }
 
-                // For an untracked collection the CSRS server can not verify the targetUUID.
-                // Use the session ID + txnNumber to ensure no stale requests get through.
-                if (!_firstExecution) {
-                    AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-                    performCausalityBarrier(opCtx, barrier);
-                }
-
                 // Commit the collection and chunks metadata on the global catalog.
                 // (This will also have the effect of resuming migrations on the renamed namespace).
                 const auto& fromNss = nss();
@@ -1013,25 +1099,40 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     return now.clusterTime().asTimestamp();
                 }();
 
-                const auto renamedCollectionEpoch = [&] {
-                    if (preciseChangeStreamTargeterEnabled) {
-                        return _doc.getRenamedCollectionEpoch().value();
-                    }
+                const auto authMetadataAccessLevel = _doc.getAuthoritativeMetadataAccessLevel();
+                const auto renamedCollectionEpoch = OID::gen();
 
-                    return OID::gen();
-                }();
+                {
+                    const auto session = getNewSession(opCtx);
+                    renameCollectionMetadataInTransaction(opCtx,
+                                                          _doc.getOptTrackedCollInfo(),
+                                                          fromNss,
+                                                          toNss,
+                                                          _doc.getTargetUUID(),
+                                                          _doc.getNewTargetCollectionUuid(),
+                                                          commitTime,
+                                                          renamedCollectionEpoch,
+                                                          **executor,
+                                                          session,
+                                                          authMetadataAccessLevel);
+                }
 
-                const auto session = getNewSession(opCtx);
-                renameCollectionMetadataInTransaction(opCtx,
-                                                      _doc.getOptTrackedCollInfo(),
-                                                      fromNss,
-                                                      toNss,
-                                                      _doc.getTargetUUID(),
-                                                      _doc.getNewTargetCollectionUuid(),
-                                                      commitTime,
-                                                      renamedCollectionEpoch,
-                                                      **executor,
-                                                      session);
+                if (authMetadataAccessLevel >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
+                    const auto session = getNewSession(opCtx);
+                    sharding_ddl_util::commitRenameCollectionMetadataToShardCatalog(
+                        opCtx,
+                        fromNss,
+                        toNss,
+                        _doc.getSourceUUID(),
+                        _doc.getTargetUUID(),
+                        _doc.getNewTargetCollectionUuid(),
+                        _doc.getAuthoritativeMetadataAccessLevel(),
+                        Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+                        session,
+                        executor,
+                        token);
+                }
 
                 // Generate post-commit placement change event for FROM.
                 if (preciseChangeStreamTargeterEnabled) {
@@ -1056,12 +1157,8 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kUnblockCRUD,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
-                if (!_firstExecution) {
-                    AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-                    performCausalityBarrier(opCtx, barrier);
-                }
-
                 const auto& fromNss = nss();
+                const auto& toNss = _request.getTo();
                 // On participant shards:
                 // - Unblock CRUD on participants for both source and destination collections
                 ShardsvrRenameCollectionUnblockParticipant unblockParticipantRequest(
@@ -1089,6 +1186,19 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         NamespaceString::kConfigsvrChunksNamespace,
                         query,
                         defaultMajorityWriteConcernDoNotUse()));
+                }
+
+                if (const auto authMetadataAccessLevel = _doc.getAuthoritativeMetadataAccessLevel();
+                    shouldDisallowChunkOperations(
+                        opCtx, authMetadataAccessLevel, _doc.getOptTrackedCollInfo())) {
+                    // After the commit, the target collection has allowChunkOperations set to
+                    // false. We need to re-enable chunk operations after releasing the CS.
+                    sharding_ddl_util::resumeMigrations(
+                        opCtx,
+                        toNss,
+                        _doc.getNewTargetCollectionUuid(),
+                        [&] { return getNewSession(opCtx); },
+                        authMetadataAccessLevel);
                 }
             }))
         .then(_buildPhaseHandler(

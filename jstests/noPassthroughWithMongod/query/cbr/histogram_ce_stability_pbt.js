@@ -3,6 +3,7 @@
  * histogram-based plan ranking.
  *
  * @tags: [
+ *    requires_fcv_90,
  *    query_intensive_pbt,
  *    # Runs queries that may return many results, requiring getmores.
  *    requires_getmore,
@@ -43,7 +44,11 @@ function histogramPlanStabilityProperty(getQuery, testHelpers, {numberBuckets}) 
     const allFields = prefixes.flatMap((p) => suffixes.map((s) => p + s));
     for (const analyzeKey of allFields) {
         assert.commandWorked(
-            experimentColl.runCommand({analyze: experimentColl.getName(), key: analyzeKey, numberBuckets}),
+            experimentColl.runCommand({
+                analyze: experimentColl.getName(),
+                key: analyzeKey,
+                numberBuckets,
+            }),
         );
     }
 
@@ -52,9 +57,19 @@ function histogramPlanStabilityProperty(getQuery, testHelpers, {numberBuckets}) 
 
 try {
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
-    testProperty(histogramPlanStabilityProperty, {experimentColl}, createStabilityWorkload(numQueriesPerRun), numRuns);
+    testProperty(
+        histogramPlanStabilityProperty,
+        {experimentColl},
+        createStabilityWorkload(numQueriesPerRun),
+        numRuns,
+    );
 } finally {
     // Reset the plan ranker mode to its default value.
     assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: false}));

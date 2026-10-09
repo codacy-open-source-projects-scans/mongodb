@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/controller.h"
@@ -41,9 +14,11 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -53,6 +28,7 @@
 #include <linux/if.h>
 #include <linux/sockios.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 
@@ -61,56 +37,168 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-static const std::vector<StringData> kCpuKeys{
-    "btime"_sd, "cpu"_sd, "ctxt"_sd, "processes"_sd, "procs_blocked"_sd, "procs_running"_sd};
+static const std::vector<std::string_view> kCpuKeys{
+    "btime"sv, "cpu"sv, "ctxt"sv, "processes"sv, "procs_blocked"sv, "procs_running"sv};
 
-static const std::vector<StringData> kMemKeys{
-    "MemAvailable"_sd,
-    "MemTotal"_sd,
-    "MemFree"_sd,
-    "Cached"_sd,
-    "Dirty"_sd,
-    "Buffers"_sd,
-    "SwapTotal"_sd,
-    "SwapCached"_sd,
-    "SwapFree"_sd,
-    "Active"_sd,
-    "Inactive"_sd,
-    "Active(anon)"_sd,
-    "Inactive(anon)"_sd,
-    "Active(file)"_sd,
-    "Inactive(file)"_sd,
-    "AnonHugePages"_sd,
+static const std::vector<std::string_view> kMemKeys{
+    "MemAvailable"sv,
+    "MemTotal"sv,
+    "MemFree"sv,
+    "Cached"sv,
+    "Dirty"sv,
+    "Buffers"sv,
+    "SwapTotal"sv,
+    "SwapCached"sv,
+    "SwapFree"sv,
+    "Active"sv,
+    "Inactive"sv,
+    "Active(anon)"sv,
+    "Inactive(anon)"sv,
+    "Active(file)"sv,
+    "Inactive(file)"sv,
+    "AnonHugePages"sv,
 };
 
-static const std::vector<StringData> kNetstatKeys{
-    "Tcp:"_sd,
-    "Ip:"_sd,
-    "TcpExt:"_sd,
-    "IpExt:"_sd,
+static const std::vector<std::string_view> kNetstatKeys{
+    "Tcp:"sv,
+    "Ip:"sv,
+    "TcpExt:"sv,
+    "IpExt:"sv,
 };
 
-static const std::vector<StringData> kVMKeys{
-    "balloon_deflate"_sd,
-    "balloon_inflate"_sd,
-    "nr_mlock"_sd,
-    "numa_pages_migrated"_sd,
-    "pgfault"_sd,
-    "pgmajfault"_sd,
-    "pswpin"_sd,
-    "pswpout"_sd,
-    "nr_anon_transparent_hugepages"_sd,
-    "thp_fault_alloc"_sd,
-    "thp_collapse_alloc"_sd,
-    "thp_fault_fallback"_sd,
-    "thp_swpout"_sd,
+static const std::vector<std::string_view> kVMKeys{
+    "balloon_deflate"sv,
+    "balloon_inflate"sv,
+    "nr_mlock"sv,
+    "numa_pages_migrated"sv,
+    "pgfault"sv,
+    "pgmajfault"sv,
+    "pswpin"sv,
+    "pswpout"sv,
+    "nr_anon_transparent_hugepages"sv,
+    "thp_fault_alloc"sv,
+    "thp_collapse_alloc"sv,
+    "thp_fault_fallback"sv,
+    "thp_swpout"sv,
 };
 
 // Keys the system stats collector wants to collect out of the /proc/net/sockstat file.
-static const std::map<StringData, std::set<StringData>> kSockstatKeys{
-    {"sockets"_sd, {"used"_sd}},
-    {"TCP"_sd, {"inuse"_sd, "orphan"_sd, "tw"_sd, "alloc"_sd}},
+static const std::map<std::string_view, std::set<std::string_view>> kSockstatKeys{
+    {"sockets"sv, {"used"sv}},
+    {"TCP"sv, {"inuse"sv, "orphan"sv, "tw"sv, "alloc"sv}},
+};
+
+/**
+ * Required to work around kernel CVE-2025-68795.
+ *
+ * On kernels that do not patch this vulnerability, a mismatch between the expected number of
+ * ethtool stats and the actual number can cause the kernel to overflow the provided userspace
+ * buffer. There is no mitigation in userspace to prevent this short of making it a hard error for
+ * the kernel to write past the provided buffer.
+ *
+ * Once we no longer support any kernels that have this vulnerability, this class can be removed and
+ * we can go back to allocating a buffer normally.
+ */
+class ProtectedEthToolBuf {
+public:
+    explicit ProtectedEthToolBuf(size_t len) : _buf(nullptr), _usableLen(0), _mapSize(0) {
+        if (len == 0) {
+            LOGV2_ERROR(13433904, "Length of zero is invalid", "len"_attr = len);
+            return;
+        }
+        const auto pageSize = static_cast<size_t>(ProcessInfo::getPageSize());
+        if (pageSize == 0) {
+            LOGV2_ERROR(13433905, "Couldn't read page size", "pageSize"_attr = pageSize);
+            return;
+        }
+
+        // Calculate the amount of memory we need to mmap.
+        // We need a whole number of pages that can contain the requested length, plus an
+        // additional guard page afterward, and these pages need to be aligned.
+        const size_t nPages = (len - 1) / pageSize + 1;
+        if (nPages > std::numeric_limits<size_t>::max() / pageSize) {
+            LOGV2_ERROR(
+                13433906, "Provided length is too large", "len"_attr = len, "nPages"_attr = nPages);
+            return;
+        }
+
+        size_t usable = nPages * pageSize;
+        if (usable > std::numeric_limits<size_t>::max() - pageSize) {
+            LOGV2_ERROR(13433907,
+                        "Usable length is too large to add a guard page",
+                        "len"_attr = len,
+                        "nPages"_attr = nPages,
+                        "usable"_attr = usable);
+            return;
+        }
+
+        const size_t mapSize = usable + pageSize;
+
+        // mmap + mprotect so we have control over the guard page landing on a page boundary.
+        void* mapping =
+            mmap(nullptr, mapSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            // There are no reasonably transient failure cases for an mmap call like this.
+            auto ec = lastSystemError();
+            LOGV2_ERROR(13433908,
+                        "mmap failed",
+                        "len"_attr = len,
+                        "mapSize"_attr = mapSize,
+                        "error"_attr = errorMessage(ec));
+            return;
+        }
+
+        // Mark the page immediately after the usable region as inaccessible. Kernel
+        // copy_to_user() into it returns EFAULT instead of overflowing the heap.
+        if (mprotect(static_cast<char*>(mapping) + usable, pageSize, PROT_NONE) != 0) {
+            auto ec = lastSystemError();
+            LOGV2_ERROR(13433909,
+                        "mprotect failed",
+                        "len"_attr = len,
+                        "mapping"_attr = unsignedHex(reinterpret_cast<uintptr_t>(mapping)),
+                        "usable"_attr = usable,
+                        "mapSize"_attr = mapSize,
+                        "pageSize"_attr = pageSize,
+                        "error"_attr = errorMessage(ec));
+            munmap(mapping, mapSize);
+            return;
+        }
+
+        _buf = mapping;
+        _usableLen = usable;
+        _mapSize = mapSize;
+    }
+
+    ~ProtectedEthToolBuf() {
+        if (_buf) {
+            if (munmap(_buf, _mapSize) != 0) {
+                auto ec = lastSystemError();
+                LOGV2_ERROR(13433910,
+                            "munmap failed",
+                            "buf"_attr = unsignedHex(reinterpret_cast<uintptr_t>(_buf)),
+                            "mapSize"_attr = _mapSize,
+                            "error"_attr = errorMessage(ec));
+            }
+        }
+    }
+
+    ProtectedEthToolBuf(const ProtectedEthToolBuf&) = delete;
+    ProtectedEthToolBuf& operator=(const ProtectedEthToolBuf&) = delete;
+
+    void* get() {
+        return _buf;
+    }
+
+    size_t usableLen() const {
+        return _usableLen;
+    }
+
+private:
+    void* _buf;
+    size_t _usableLen;
+    size_t _mapSize;
 };
 
 /**
@@ -118,7 +206,7 @@ static const std::map<StringData, std::set<StringData>> kSockstatKeys{
  */
 class EthTool {
 public:
-    static std::unique_ptr<EthTool> create(StringData interface) {
+    static std::unique_ptr<EthTool> create(std::string_view interface) {
         int fd = socket(AF_INET, SOCK_DGRAM, 0);
         if (fd == -1) {
             auto ec = lastPosixError();
@@ -133,9 +221,12 @@ public:
         // Some Linux interfaces cannot be found by ethtool IOCTL.
         // Some Linux interfaces have no stats (i.e. the "bridge" driver used by containers).
         if (!drvinfo.has_value() || drvinfo->n_stats == 0) {
-            LOGV2_WARNING(10985540,
-                          "Skipping Ethtool stats collection for interface",
-                          "interface"_attr = interface);
+            LOGV2_DEBUG(10985540,
+                        1,
+                        "Skipping Ethtool stats collection for interface",
+                        "interface"_attr = interface,
+                        "reason"_attr = !drvinfo.has_value() ? "driver info unavailable"sv
+                                                             : "interface reports no stats"sv);
             return nullptr;
         }
 
@@ -143,8 +234,6 @@ public:
     }
 
     ~EthTool() {
-        free(_gstrings);
-
         close(_fd);
     }
 
@@ -177,7 +266,7 @@ public:
     }
 
     // Get a list of stats names for a given interface
-    std::vector<StringData>& get_strings() {
+    const std::vector<std::string>& get_strings() {
         if (!_names.has_value()) {
             auto drvinfo = get_info();
             _get_strings(drvinfo.has_value() ? drvinfo->n_stats : 0);
@@ -197,8 +286,7 @@ public:
 
     // Get a some basic information about the interface
     boost::optional<ethtool_drvinfo> get_info() {
-        ethtool_drvinfo drvinfo;
-        memset(&drvinfo, 0, sizeof(drvinfo));
+        ethtool_drvinfo drvinfo{};
         drvinfo.cmd = ETHTOOL_GDRVINFO;
 
         if (_ioctlNoThrow("drvinfo", &drvinfo)) {
@@ -209,42 +297,78 @@ public:
     }
 
     // Name of the interface this class monitors
-    StringData name() const {
+    std::string_view name() const {
         return _interface;
     }
 
 private:
-    explicit EthTool(StringData interface, int fd) : _fd(fd), _interface(std::string(interface)) {}
+    explicit EthTool(std::string_view interface, int fd)
+        : _fd(fd), _interface(std::string(interface)) {}
 
     void _get_strings(size_t count) {
-        _gstrings = static_cast<ethtool_gstrings*>(
-            calloc(1, sizeof(ethtool_gstrings) + count * ETH_GSTRING_LEN));
-
-        _gstrings->cmd = ETHTOOL_GSTRINGS;
-        _gstrings->string_set = ETH_SS_STATS;
-        _gstrings->len = count;
-
-        _names.emplace(std::vector<StringData>());
-
-        if (_ioctlNoThrow("get_strings", _gstrings)) {
+        if (!_names) {
+            _names.emplace();
+        } else {
+            _names->clear();
+        }
+        if (count == 0) {
+            LOGV2_WARNING(
+                13433900, "get_strings called with a count of 0", "interface"_attr = _interface);
             return;
         }
 
-        char* ptr = reinterpret_cast<char*>(_gstrings) + sizeof(ethtool_gstrings);
+        auto bufLen = sizeof(ethtool_gstrings) + (count * ETH_GSTRING_LEN);
+
+        if (!_ethToolBuf.has_value() || _ethToolBuf->usableLen() < bufLen) {
+            _ethToolBuf.emplace(bufLen);
+            invariant(_ethToolBuf->get());
+        }
+
+        auto gstrings = static_cast<ethtool_gstrings*>(_ethToolBuf->get());
+        gstrings->cmd = ETHTOOL_GSTRINGS;
+        gstrings->string_set = ETH_SS_STATS;
+        gstrings->len = count;
+
+        // "len" is an out-parameter only on older kernels, and is both an in and out parameter on
+        // newer kernels. If the value after the ioctl does not match the expected count, then the
+        // returned buffer is not guaranteed to have the names we expect.
+        if (_ioctlNoThrow("get_strings", gstrings)) {
+            return;
+        }
+
+        if (gstrings->len != count) {
+            LOGV2_WARNING(13433901,
+                          "get_strings returned a mismatched length",
+                          "interface"_attr = _interface,
+                          "expectedLen"_attr = count,
+                          "outputLen"_attr = gstrings->len);
+            return;
+        }
+
+        char* ptr = reinterpret_cast<char*>(gstrings) + sizeof(ethtool_gstrings);
         for (size_t i = 0; i < count; i++) {
-            auto s = StringData(ptr);
-
-            _names->push_back(s);
-
+            auto sv = std::string_view(ptr, ETH_GSTRING_LEN);
+            _names->emplace_back(sv.substr(0, sv.find('\0')));
             ptr += ETH_GSTRING_LEN;
         }
     }
 
     std::vector<uint64_t> _get_stats(size_t count) {
-        std::vector<char> stats_buf(sizeof(ethtool_stats) + count * 8,
-                                    0); /* 8 is the number specfied in ethtool.h */
+        if (count == 0) {
+            LOGV2_WARNING(
+                13433902, "get_stats called with a count of 0", "interface"_attr = _interface);
+            return std::vector<uint64_t>();
+        }
 
-        ethtool_stats* stats = reinterpret_cast<ethtool_stats*>(stats_buf.data());
+        auto statsLen = count * sizeof(uint64_t);
+        auto bufLen = sizeof(ethtool_stats) + statsLen;
+
+        if (!_ethToolBuf.has_value() || _ethToolBuf->usableLen() < bufLen) {
+            _ethToolBuf.emplace(bufLen);
+            invariant(_ethToolBuf->get());
+        }
+
+        ethtool_stats* stats = reinterpret_cast<ethtool_stats*>(_ethToolBuf->get());
         stats->cmd = ETHTOOL_GSTATS;
         stats->n_stats = count;
 
@@ -252,15 +376,20 @@ private:
             return std::vector<uint64_t>();
         }
 
-        char* ptr = reinterpret_cast<char*>(stats) + sizeof(ethtool_stats);
+        if (stats->n_stats != count) {
+            LOGV2_WARNING(13433903,
+                          "get_stats returned a mismatched length",
+                          "interface"_attr = _interface,
+                          "expectedLen"_attr = count,
+                          "outputLen"_attr = stats->n_stats);
+            return std::vector<uint64_t>();
+        }
 
-        std::vector<uint64_t> stats_vec(ptr, ptr + count * 8);
-
-        return stats_vec;
+        return std::vector<uint64_t>(stats->data, stats->data + count);
     }
 
     // Returns non-zero on error
-    int _ioctlNoThrow(StringData name, void* cmd) {
+    int _ioctlNoThrow(std::string_view name, void* cmd) {
         ifreq ifr;
 
         strcpy(ifr.ifr_name, _interface.c_str());
@@ -269,7 +398,7 @@ private:
         auto ret = ioctl(_fd, SIOCETHTOOL, &ifr);
 
         if (MONGO_unlikely(ret) && !_warningLogged) {
-            auto ec = lastPosixError();
+            auto ec = lastSystemError();
             _warningLogged = true;
 
             LOGV2_WARNING(10985553,
@@ -285,9 +414,9 @@ private:
 private:
     int _fd;
 
-    ethtool_gstrings* _gstrings{nullptr};
+    boost::optional<ProtectedEthToolBuf> _ethToolBuf;
 
-    boost::optional<std::vector<StringData>> _names;
+    boost::optional<std::vector<std::string>> _names;
 
     std::string _interface;
 
@@ -300,7 +429,7 @@ private:
  */
 class LinuxSystemMetricsCollector final : public SystemMetricsCollector {
 public:
-    LinuxSystemMetricsCollector() : _disks(procparser::findPhysicalDisks("/sys/block"_sd)) {
+    LinuxSystemMetricsCollector() : _disks(procparser::findPhysicalDisks("/sys/block"sv)) {
         for (const auto& disk : _disks) {
             _disksStringData.emplace_back(disk);
         }
@@ -318,7 +447,7 @@ public:
 
     void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("cpu"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("cpu"sv));
 
             // Include the number of cpus to simplify client calculations
             ProcessInfo p;
@@ -331,15 +460,15 @@ public:
             }
 
             processStatusErrors(
-                procparser::parseProcStatFile("/proc/stat"_sd, kCpuKeys, &subObjBuilder),
+                procparser::parseProcStatFile("/proc/stat"sv, kCpuKeys, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("memory"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("memory"sv));
             processStatusErrors(
-                procparser::parseProcMemInfoFile("/proc/meminfo"_sd, kMemKeys, &subObjBuilder),
+                procparser::parseProcMemInfoFile("/proc/meminfo"sv, kMemKeys, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
@@ -353,20 +482,20 @@ public:
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("netstat"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("netstat"sv));
             processStatusErrors(procparser::parseProcNetstatFile(
-                                    kNetstatKeys, "/proc/net/netstat"_sd, &subObjBuilder),
+                                    kNetstatKeys, "/proc/net/netstat"sv, &subObjBuilder),
                                 &subObjBuilder);
             processStatusErrors(
-                procparser::parseProcNetstatFile(kNetstatKeys, "/proc/net/snmp"_sd, &subObjBuilder),
+                procparser::parseProcNetstatFile(kNetstatKeys, "/proc/net/snmp"sv, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("sockstat"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("sockstat"sv));
             processStatusErrors(procparser::parseProcSockstatFile(
-                                    kSockstatKeys, "/proc/net/sockstat"_sd, &subObjBuilder),
+                                    kSockstatKeys, "/proc/net/sockstat"sv, &subObjBuilder),
                                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
@@ -374,33 +503,33 @@ public:
         // Skip the disks section if we could not find any disks.
         // This can happen when we do not have permission to /sys/block for instance.
         if (!_disksStringData.empty()) {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("disks"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("disks"sv));
             processStatusErrors(procparser::parseProcDiskStatsFile(
-                                    "/proc/diskstats"_sd, _disksStringData, &subObjBuilder),
+                                    "/proc/diskstats"sv, _disksStringData, &subObjBuilder),
                                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("mounts"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("mounts"sv));
             processStatusErrors(
-                procparser::parseProcSelfMountStatsFile("/proc/self/mountinfo"_sd, &subObjBuilder),
+                procparser::parseProcSelfMountStatsFile("/proc/self/mountinfo"sv, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("vmstat"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("vmstat"sv));
             processStatusErrors(
-                procparser::parseProcVMStatFile("/proc/vmstat"_sd, kVMKeys, &subObjBuilder),
+                procparser::parseProcVMStatFile("/proc/vmstat"sv, kVMKeys, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("files"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("files"sv));
             processStatusErrors(
-                procparser::parseProcSysFsFileNrFile("/proc/sys/fs/file-nr"_sd,
+                procparser::parseProcSysFsFileNrFile("/proc/sys/fs/file-nr"sv,
                                                      procparser::FileNrKey::kFileHandlesInUse,
                                                      &subObjBuilder),
                 &subObjBuilder);
@@ -408,28 +537,28 @@ public:
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("pressure"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("pressure"sv));
             processStatusErrors(
-                procparser::parseProcPressureFile("cpu", "/proc/pressure/cpu"_sd, &subObjBuilder),
+                procparser::parseProcPressureFile("cpu", "/proc/pressure/cpu"sv, &subObjBuilder),
                 &subObjBuilder);
 
             processStatusErrors(procparser::parseProcPressureFile(
-                                    "memory", "/proc/pressure/memory"_sd, &subObjBuilder),
+                                    "memory", "/proc/pressure/memory"sv, &subObjBuilder),
                                 &subObjBuilder);
 
             processStatusErrors(
-                procparser::parseProcPressureFile("io", "/proc/pressure/io"_sd, &subObjBuilder),
+                procparser::parseProcPressureFile("io", "/proc/pressure/io"sv, &subObjBuilder),
                 &subObjBuilder);
             subObjBuilder.doneFast();
         }
 
         {
-            BSONObjBuilder subObjBuilder(builder.subobjStart("ethtool"_sd));
+            BSONObjBuilder subObjBuilder(builder.subobjStart("ethtool"sv));
 
             for (auto& tool : _ethtools) {
                 BSONObjBuilder subNICBuilder(subObjBuilder.subobjStart(tool->name()));
 
-                auto names = tool->get_strings();
+                auto& names = tool->get_strings();
                 if (names.empty()) {
                     continue;
                 }
@@ -438,7 +567,7 @@ public:
                 if (stats.empty()) {
                     continue;
                 }
-                invariant(stats.size() >= names.size());
+                invariant(stats.size() == names.size());
 
                 for (size_t i = 0; i < names.size(); i++) {
                     subNICBuilder.append(names[i], static_cast<long long>(stats[i]));
@@ -451,15 +580,16 @@ private:
     // List of physical disks to collect stats from as string from findPhysicalDisks.
     std::vector<std::string> _disks;
 
-    // List of physical disks to collect stats from as StringData to pass to parseProcDiskStatsFile.
-    std::vector<StringData> _disksStringData;
+    // List of physical disks to collect stats from as std::string_view to pass to
+    // parseProcDiskStatsFile.
+    std::vector<std::string_view> _disksStringData;
 
     std::vector<std::unique_ptr<EthTool>> _ethtools;
 };
 
 class SimpleFunctionCollector final : public FTDCCollectorInterface {
 public:
-    SimpleFunctionCollector(StringData name,
+    SimpleFunctionCollector(std::string_view name,
                             unique_function<void(OperationContext*, BSONObjBuilder&)> collectFn)
         : _name(std::string{name}), _collectFn(std::move(collectFn)) {}
 
@@ -477,7 +607,7 @@ private:
 };
 
 
-void collectUlimit(int resource, StringData resourceName, BSONObjBuilder& builder) {
+void collectUlimit(int resource, std::string_view resourceName, BSONObjBuilder& builder) {
 
     struct rlimit rlim;
 
@@ -494,18 +624,18 @@ void collectUlimit(int resource, StringData resourceName, BSONObjBuilder& builde
 }
 
 void collectUlimits(OperationContext*, BSONObjBuilder& builder) {
-    collectUlimit(RLIMIT_CPU, "cpuTime_secs"_sd, builder);
-    collectUlimit(RLIMIT_FSIZE, "fileSize_blocks"_sd, builder);
-    collectUlimit(RLIMIT_DATA, "dataSegSize_kb"_sd, builder);
-    collectUlimit(RLIMIT_STACK, "stackSize_kb"_sd, builder);
-    collectUlimit(RLIMIT_CORE, "coreFileSize_blocks"_sd, builder);
-    collectUlimit(RLIMIT_RSS, "residentSize_kb"_sd, builder);
-    collectUlimit(RLIMIT_NOFILE, "fileDescriptors"_sd, builder);
-    collectUlimit(RLIMIT_AS, "addressSpace_kb"_sd, builder);
-    collectUlimit(RLIMIT_NPROC, "processes"_sd, builder);
-    collectUlimit(RLIMIT_MEMLOCK, "memLock_kb"_sd, builder);
-    collectUlimit(RLIMIT_LOCKS, "fileLocks"_sd, builder);
-    collectUlimit(RLIMIT_SIGPENDING, "pendingSignals"_sd, builder);
+    collectUlimit(RLIMIT_CPU, "cpuTime_secs"sv, builder);
+    collectUlimit(RLIMIT_FSIZE, "fileSize_blocks"sv, builder);
+    collectUlimit(RLIMIT_DATA, "dataSegSize_kb"sv, builder);
+    collectUlimit(RLIMIT_STACK, "stackSize_kb"sv, builder);
+    collectUlimit(RLIMIT_CORE, "coreFileSize_blocks"sv, builder);
+    collectUlimit(RLIMIT_RSS, "residentSize_kb"sv, builder);
+    collectUlimit(RLIMIT_NOFILE, "fileDescriptors"sv, builder);
+    collectUlimit(RLIMIT_AS, "addressSpace_kb"sv, builder);
+    collectUlimit(RLIMIT_NPROC, "processes"sv, builder);
+    collectUlimit(RLIMIT_MEMLOCK, "memLock_kb"sv, builder);
+    collectUlimit(RLIMIT_LOCKS, "fileLocks"sv, builder);
+    collectUlimit(RLIMIT_SIGPENDING, "pendingSignals"sv, builder);
 }
 
 }  // namespace

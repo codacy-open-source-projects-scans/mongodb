@@ -2,7 +2,8 @@
  * Verifies that $or queries on clustered collections produce plans with IXSCAN and
  * CLUSTERED_IXSCAN stages when possible.
  * @tags: [
- *   requires_fcv_71,
+ *  uses_explain,
+ *  requires_fcv_71,
  *  # Explain for the aggregate command cannot run within a multi-document transaction.
  *  does_not_support_transactions,
  *  # Refusing to run a test that issues an aggregation command with explain because it may return
@@ -16,6 +17,7 @@
  */
 
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     getAggPlanStages,
     getPlanStage,
@@ -30,7 +32,9 @@ assertDropCollection(db, coll.getName());
 const isSbeGroupEnabled = checkSbeRestrictedOrFullyEnabled(db);
 
 // Create a clustered collection and create indexes.
-assert.commandWorked(db.createCollection(coll.getName(), {clusteredIndex: {key: {_id: 1}, unique: true}}));
+assert.commandWorked(
+    db.createCollection(coll.getName(), {clusteredIndex: {key: {_id: 1}, unique: true}}),
+);
 assert.commandWorked(coll.createIndex({a: 1}));
 assert.commandWorked(coll.createIndex({c: 1}));
 assert.commandWorked(coll.createIndex({b: "text"}));
@@ -43,11 +47,6 @@ for (let i = 0; i < numDocs; i++) {
     docs.push({b: textFields[i], a: i, _id: i, c: i * 2, d: [{e: i * 2}, {g: i / 2}], noIndex: i});
 }
 assert.commandWorked(coll.insertMany(docs));
-
-function haveShardMergeStage(winningPlan, stage = "SHARD_MERGE") {
-    let shardMergeStage = getPlanStages(winningPlan, stage);
-    return shardMergeStage.length > 0;
-}
 
 function assertCorrectResults({query, expectedDocIds, projection, limit, skip}) {
     // Test different find queries. With and without a sort, and with and without a projection.
@@ -85,17 +84,29 @@ assertCorrectResults({query: coll.find({$or: [{_id: 123}, {a: 11}]}), expectedDo
 
 //$or query which uses a clustered collection scan plan and secondary index plan, and each predicate
 // matches some of the documents.
-assertCorrectResults({query: coll.find({$or: [{_id: 9}, {a: {$lte: 3}}]}), expectedDocIds: [0, 1, 2, 3, 9]});
+assertCorrectResults({
+    query: coll.find({$or: [{_id: 9}, {a: {$lte: 3}}]}),
+    expectedDocIds: [0, 1, 2, 3, 9],
+});
 
 // $or query which uses a clustered collection scan plan and secondary index plan, and some
 // documents match both predicates.
-assertCorrectResults({query: coll.find({$or: [{_id: {$lt: 2}}, {a: {$lte: 3}}]}), expectedDocIds: [0, 1, 2, 3]});
+assertCorrectResults({
+    query: coll.find({$or: [{_id: {$lt: 2}}, {a: {$lte: 3}}]}),
+    expectedDocIds: [0, 1, 2, 3],
+});
 
 //  $or query that uses two clustered collection scan plans.
-assertCorrectResults({query: coll.find({$or: [{_id: {$lt: 2}}, {_id: {$gt: 8}}]}), expectedDocIds: [0, 1, 9]});
+assertCorrectResults({
+    query: coll.find({$or: [{_id: {$lt: 2}}, {_id: {$gt: 8}}]}),
+    expectedDocIds: [0, 1, 9],
+});
 
 // $or query that uses two secondary index scan plans.
-assertCorrectResults({query: coll.find({$or: [{a: {$lt: 2}}, {a: {$gt: 8}}]}), expectedDocIds: [0, 1, 9]});
+assertCorrectResults({
+    query: coll.find({$or: [{a: {$lt: 2}}, {a: {$gt: 8}}]}),
+    expectedDocIds: [0, 1, 9],
+});
 
 function validateQueryPlan({query, expectedStageCount, expectedDocIds, noFetchWithCount}) {
     // TODO SERVER-77601 add coll.find(query).sort({_id: 1}) to 'queries'.
@@ -127,7 +138,9 @@ function validateQueryPlan({query, expectedStageCount, expectedDocIds, noFetchWi
             aggregate: true,
         },
         {
-            explainQuery: coll.explain().aggregate([{$match: query}, {$group: {_id: null, count: {$sum: 1}}}]),
+            explainQuery: coll
+                .explain()
+                .aggregate([{$match: query}, {$group: {_id: null, count: {$sum: 1}}}]),
             additionalStages: {"GROUP": 1},
             actualQuery: coll.aggregate([{$match: query}, {$group: {_id: null, count: {$sum: 1}}}]),
             aggregate: true,
@@ -170,7 +183,9 @@ function validateQueryPlan({query, expectedStageCount, expectedDocIds, noFetchWi
         // Validate all the stages appear the correct number of times in the winning plan.
         const expectedStages = Object.assign({}, expectedStageCount, test.additionalStages);
         for (let stage in expectedStages) {
-            let planStages = test.aggregate ? getAggPlanStages(explain, stage) : getPlanStages(explain, stage);
+            let planStages = test.aggregate
+                ? getAggPlanStages(explain, stage)
+                : getPlanStages(explain, stage);
             assert(planStages, tojson(explain));
             if (shardMergeStage || shards) {
                 assert.gte(
@@ -195,7 +210,10 @@ function validateQueryPlan({query, expectedStageCount, expectedDocIds, noFetchWi
             assert.eq(
                 expectedDocIds.length,
                 results,
-                "Expected " + expectedDocIds.length.toString() + " number of docs, but got " + tojson(test.actualQuery),
+                "Expected " +
+                    expectedDocIds.length.toString() +
+                    " number of docs, but got " +
+                    tojson(test.actualQuery),
             );
         } else {
             assertCorrectResults({
@@ -315,8 +333,6 @@ validateQueryOR({
 });
 
 // TODO SERVER-77601 remove this function, once supported in SBE.
-// We prevented allowing MERGE_SORT plans with clustered collection scans, so the plan should
-// fallback to using a collection scan.
 function validateQuerySort() {
     let explain = coll
         .explain()
@@ -324,23 +340,49 @@ function validateQuerySort() {
         .sort({_id: 1})
         .finish();
     const winningPlan = getWinningPlanFromExplain(explain);
-    let expectedStageCount = {"MERGE_SORT": 0, "COLLSCAN": 1, "CLUSTERED_IXSCAN": 0, "OR": 0};
-    const shardMergeStage = haveShardMergeStage(winningPlan, "SHARD_MERGE_SORT");
-    const shards = "shards" in winningPlan;
-    for (let stage in expectedStageCount) {
-        let planStages = getPlanStages(winningPlan, stage);
+    // The disjoint $or may be planned as a single-range COLLSCAN (when the
+    // multi-range clustered collscan feature flag is off or the binary is old)
+    // or as a multi-range CLUSTERED_IXSCAN (when the flag is on).
+    // TODO SERVER-133667 remove 'featureFlagClusteredCollScanMultiRange'.
+    const multiRangeEnabled = FeatureFlagUtil.isPresentAndEnabledOnAllNodes(
+        db,
+        "ClusteredCollScanMultiRange",
+    );
+    for (const stage of ["MERGE_SORT", "OR"]) {
+        const planStages = getPlanStages(winningPlan, stage);
         assert(planStages, tojson(winningPlan));
-        if (shardMergeStage || shards) {
-            assert.gte(
-                planStages.length,
-                expectedStageCount[stage],
-                "Expected " + stage + " to appear, but got plan: " + tojson(winningPlan),
+        assert.eq(
+            planStages.length,
+            0,
+            "Expected " + stage + " to be absent, but got plan: " + tojson(winningPlan),
+        );
+    }
+    // If sharded: for each shard's winning plan. Otherwise, for the (single) winning plan.
+    for (const shard of winningPlan["shards"] ?? [winningPlan]) {
+        const collscanStages = getPlanStages(shard, "COLLSCAN");
+        const clusteredIxscanStages = getPlanStages(shard, "CLUSTERED_IXSCAN");
+        if (multiRangeEnabled) {
+            assert.eq(
+                collscanStages.length,
+                0,
+                "Expected no COLLSCAN with multi-range enabled, but got plan: " + tojson(shard),
+            );
+            assert.eq(
+                clusteredIxscanStages.length,
+                1,
+                "Expected CLUSTERED_IXSCAN with multi-range enabled, but got plan: " +
+                    tojson(shard),
             );
         } else {
+            // Flag off or old binary: the legacy planner treats $or as a black box, so no
+            // bounds are extracted and the scan is unbounded. A COLLSCAN on a clustered
+            // collection returns docs in _id order, satisfying the sort without MERGE_SORT.
+            // In a multiversion context, the query may land on a node with the flag on
+            // (CLUSTERED_IXSCAN) or off/old (COLLSCAN), so accept either.
             assert.eq(
-                planStages.length,
-                expectedStageCount[stage],
-                "Expected " + stage + " to appear, but got plan: " + tojson(winningPlan),
+                collscanStages.length + clusteredIxscanStages.length,
+                1,
+                "Expected either COLLSCAN or CLUSTERED_IXSCAN, but got plan: " + tojson(shard),
             );
         }
     }
@@ -386,5 +428,7 @@ validateQueryOR({
 });
 
 // $or with a text index and an unindexed field should still fail.
-const err = assert.throws(() => coll.find({$or: [{$text: {$search: "foo"}}, {noIndex: 1}]}).toArray());
+const err = assert.throws(() =>
+    coll.find({$or: [{$text: {$search: "foo"}}, {noIndex: 1}]}).toArray(),
+);
 assert.commandFailedWithCode(err, ErrorCodes.NoQueryExecutionPlans);

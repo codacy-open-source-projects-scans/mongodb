@@ -75,7 +75,10 @@ function test(serverDisabledProtocols, clientDisabledProtocols, shouldStart, sho
                 allowInvalidCertificates: true,
             },
         });
-        assert.commandWorked(connection.adminCommand({connectionStatus: 1}), "Running with " + configStr);
+        assert.commandWorked(
+            connection.adminCommand({connectionStatus: 1}),
+            "Running with " + configStr,
+        );
     } catch (e) {
         assert(!shouldSucceed, "Running with " + configStr);
     }
@@ -108,9 +111,10 @@ const tlsSupport =
           (supportsTLS1_1 ? TLS_1_1 : 0) |
           (supportsTLS1_2 ? TLS_1_2 : 0) |
           (supportsTLS1_3 ? TLS_1_3 : 0)
-        : TLS_1_0 | TLS_1_1 | TLS_1_2;
+        : TLS_1_0 | TLS_1_1 | TLS_1_2 | (supportsTLS1_3 ? TLS_1_3 : 0);
 const defaultServerDisable = determineSSLProvider() === "openssl" ? TLS_1_0 | TLS_1_1 : 0;
-const defaultClientDisable = (supportsTLS1_2 ? TLS_1_1 : 0) | (supportsTLS1_2 || supportsTLS1_1 ? TLS_1_0 : 0);
+const defaultClientDisable =
+    (supportsTLS1_2 ? TLS_1_1 : 0) | (supportsTLS1_2 || supportsTLS1_1 ? TLS_1_0 : 0);
 
 function shouldStart(serverDisable) {
     const serverDisabledProtocols = serverDisable === null ? defaultServerDisable : serverDisable;
@@ -123,12 +127,35 @@ function shouldStart(serverDisable) {
             return false;
         }
     }
-    // All valid TLS modes are disabled for Apple or Windows
-    if (determineSSLProvider() === "apple" || determineSSLProvider() === "windows") {
-        if ((serverDisabledProtocols & (TLS_1_0 | TLS_1_1 | TLS_1_2)) === (TLS_1_0 | TLS_1_1 | TLS_1_2)) {
-            // apple & windows only check for 1.0, 1.1, 1.2 and ignores 1.3
-            // SERVER-98279: support tls 1.3 for windows & apple
+    // All valid TLS modes are disabled for Apple
+    if (determineSSLProvider() === "apple") {
+        if (
+            (serverDisabledProtocols & (TLS_1_0 | TLS_1_1 | TLS_1_2)) ===
+            (TLS_1_0 | TLS_1_1 | TLS_1_2)
+        ) {
+            // apple only checks for 1.0, 1.1, 1.2 and ignores 1.3
+            // SERVER-121261: support tls 1.3 for apple
             return false;
+        }
+    }
+
+    // Windows: if the platform supports TLS 1.3, include it in the "all disabled" check;
+    // otherwise behave like Apple and only check 1.0/1.1/1.2.
+    if (determineSSLProvider() === "windows") {
+        if (supportsTLS1_3) {
+            if (
+                (serverDisabledProtocols & (TLS_1_0 | TLS_1_1 | TLS_1_2 | TLS_1_3)) ===
+                (TLS_1_0 | TLS_1_1 | TLS_1_2 | TLS_1_3)
+            ) {
+                return false;
+            }
+        } else {
+            if (
+                (serverDisabledProtocols & (TLS_1_0 | TLS_1_1 | TLS_1_2)) ===
+                (TLS_1_0 | TLS_1_1 | TLS_1_2)
+            ) {
+                return false;
+            }
         }
     }
 
@@ -196,9 +223,9 @@ if (determineSSLProvider() === "apple") {
 
 serverScenarios.forEach((serverDisable) =>
     clientScenarios.forEach((clientDisable) => {
-        // SERVER-98279: support tls 1.3 for windows & apple
+        // SERVER-121261: support tls 1.3 for apple
         // skip any tests disabling TLS 1.3 since it's not supported for those platforms yet
-        if (determineSSLProvider() === "apple" || determineSSLProvider() === "windows") {
+        if (determineSSLProvider() === "apple") {
             if (serverDisable & TLS_1_3) return;
         }
         test(

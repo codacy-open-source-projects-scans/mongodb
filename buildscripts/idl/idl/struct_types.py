@@ -1,30 +1,5 @@
-# Copyright (C) 2018-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 """Provide code generation information for structs and commands in a polymorphic way."""
 
 import textwrap
@@ -363,7 +338,7 @@ class _StructTypeInfo(StructTypeInfoBase):
         # type: () -> MethodInfo
         args = ["BSONObjBuilder* builder"]
         if self._struct.query_shape_component:
-            args.append("const SerializationOptions& options = {}")
+            args.append("const query_shape::SerializationOptions& options = {}")
         return MethodInfo(
             common.title_case(self._struct.cpp_name), "serialize", args, "void", const=True
         )
@@ -372,7 +347,7 @@ class _StructTypeInfo(StructTypeInfoBase):
         # type: () -> MethodInfo
         args = []
         if self._struct.query_shape_component:
-            args.append("const SerializationOptions& options = {}")
+            args.append("const query_shape::SerializationOptions& options = {}")
         return MethodInfo(
             common.title_case(self._struct.cpp_name), "toBSON", args, "BSONObj", const=True
         )
@@ -481,7 +456,7 @@ class _IgnoredCommandTypeInfo(_CommandBaseTypeInfo):
 
     def gen_serializer(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
-        indented_writer.write_line('builder->append("%s"_sd, 1);' % (self._command.name))
+        indented_writer.write_line(f'builder->append("{self._command.name}", 1);')
 
     def gen_namespace_check(self, indented_writer, db_name, element):
         # type: (writer.IndentedTextWriter, str, str) -> None
@@ -656,13 +631,11 @@ class _CommandWithNamespaceTypeInfo(_CommandBaseTypeInfo):
         # type: (writer.IndentedTextWriter) -> None
         if self._struct.allow_global_collection_name:
             indented_writer.write_line(
-                '_nss.serializeCollectionName(builder, "%s"_sd);' % (self._command.name)
+                '_nss.serializeCollectionName(builder, "%s");' % (self._command.name)
             )
         else:
             indented_writer.write_line("invariant(!_nss.isEmpty());")
-            indented_writer.write_line(
-                'builder->append("%s"_sd, _nss.coll());' % (self._command.name)
-            )
+            indented_writer.write_line('builder->append("%s", _nss.coll());' % (self._command.name))
         indented_writer.write_empty_line()
 
     def gen_namespace_check(self, indented_writer, db_name, element):
@@ -766,14 +739,16 @@ class _CommandWithUUIDNamespaceTypeInfo(_CommandBaseTypeInfo):
 
     def gen_serializer(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
-        indented_writer.write_line('_nssOrUUID.serialize(builder, "%s"_sd);' % (self._command.name))
+        indented_writer.write_line(
+            '_nssOrUUID.serialize(builder, std::string_view{"%s"});' % (self._command.name)
+        )
         indented_writer.write_empty_line()
 
     def gen_namespace_check(self, indented_writer, db_name, element):
         # type: (writer.IndentedTextWriter, str, str) -> None
         indented_writer._stream.write(f"""
     auto collOrUUID = ctxt.checkAndAssertCollectionNameOrUUID({element});
-    _nssOrUUID = std::holds_alternative<StringData>(collOrUUID) ? NamespaceStringUtil::deserialize({db_name}, get<StringData>(collOrUUID)) : NamespaceStringOrUUID({db_name}, get<UUID>(collOrUUID));
+    _nssOrUUID = std::holds_alternative<std::string_view>(collOrUUID) ? NamespaceStringUtil::deserialize({db_name}, get<std::string_view>(collOrUUID)) : NamespaceStringOrUUID({db_name}, get<UUID>(collOrUUID));
     uassert(ErrorCodes::InvalidNamespace, str::stream() << "Invalid namespace specified: " << _nssOrUUID.toStringForErrorMsg(), !_nssOrUUID.isNamespaceString() || _nssOrUUID.nss().isValid());
 """)
 

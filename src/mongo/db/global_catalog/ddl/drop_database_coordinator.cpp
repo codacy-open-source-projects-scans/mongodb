@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/drop_database_coordinator.h"
@@ -43,7 +17,6 @@
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
-#include "mongo/db/global_catalog/ddl/shardsvr_commit_create_database_metadata_command.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/global_catalog/type_namespace_placement_gen.h"
@@ -54,15 +27,14 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
-#include "mongo/db/s/primary_only_service_helpers/all_shards_and_config_causality_barrier.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/shard_role/ddl/list_collections_filter.h"
+#include "mongo/db/shard_role/shard_catalog/commit_database_metadata_locally.h"
 #include "mongo/db/shard_role/shard_catalog/flush_database_cache_updates_gen.h"
 #include "mongo/db/shard_role/shard_catalog/participant_block_gen.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/shard_registry.h"
@@ -116,12 +88,22 @@ BSONObj makeDatabaseQuery(const DatabaseName& dbName, const DatabaseVersion& dbV
 
 void removeDatabaseMetadataFromShard(OperationContext* opCtx,
                                      const DatabaseName& dbName,
-                                     const OperationSessionInfo& osi,
-                                     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-                                     const CancellationToken& token) {
-    const auto thisShardId = ShardingState::get(opCtx)->shardId();
-    sharding_ddl_util::commitDropDatabaseMetadataToShardCatalog(
-        opCtx, dbName, thisShardId, osi, executor, token);
+                                     AuthoritativeMetadataAccessLevelEnum authoritativeLevel) {
+    // Remove config.shard.catalog.database entry.
+    //
+    // Only write the dropDatabaseMetadata oplog entry when in kWritesAllowed or
+    // kWritesAndReadsAllowed. Otherwise there could be replicas that are still running an old
+    // binary that does not understand that oplog entry.
+    const bool writeDropDBMetadataEntry =
+        authoritativeLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+    shard_catalog_commit::commitDropDatabaseMetadataLocally(
+        opCtx, dbName, writeDropDBMetadataEntry);
+
+    // Wait for majority write concern.
+    WriteConcernResult ignoreResult;
+    const auto latestOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+    uassertStatusOK(waitForWriteConcern(
+        opCtx, latestOpTime, defaultMajorityWriteConcernDoNotUse(), &ignoreResult));
 }
 
 /**
@@ -131,25 +113,9 @@ void removeDatabaseMetadataFromShard(OperationContext* opCtx,
  *
  * TODO (SERVER-98118): Remove this method once v9.0 become last-lts.
  */
-void cloneAuthoritativeDatabaseMetadata(OperationContext* opCtx,
-                                        const DatabaseName& dbName,
-                                        const BSONObj& critSecReason) {
-    auto recoveryService = ShardingRecoveryService::get(opCtx);
-    recoveryService->acquireRecoverableCriticalSectionBlockWrites(
-        opCtx,
-        NamespaceString(dbName),
-        critSecReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-        false /* clearDbMetadata */);
-    recoveryService->promoteRecoverableCriticalSectionToBlockAlsoReads(
-        opCtx,
-        NamespaceString(dbName),
-        critSecReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
-
+void cloneAuthoritativeDatabaseMetadata(OperationContext* opCtx, const DatabaseName& dbName) {
     auto catalogClient = Grid::get(opCtx)->catalogClient();
-    auto dbMetadata =
-        catalogClient->getDatabase(opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto dbMetadata = catalogClient->getDatabase(opCtx, dbName, repl::ReadConcernArgs::kMajority);
 
     const auto thisShardId = ShardingState::get(opCtx)->shardId();
 
@@ -162,15 +128,8 @@ void cloneAuthoritativeDatabaseMetadata(OperationContext* opCtx,
                         thisShardId.toString()),
             thisShardId == dbMetadata.getPrimary());
 
-    commitCreateDatabaseMetadataLocally(opCtx, dbMetadata);
-
-    recoveryService->releaseRecoverableCriticalSection(
-        opCtx,
-        NamespaceString(dbName),
-        critSecReason,
-        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-        ShardingRecoveryService::NoCustomAction(),
-        false /* throwIfReasonDiffers */);
+    shard_catalog_commit::commitCreateDatabaseMetadataLocally(
+        opCtx, dbMetadata, true /* fromClone */);
 }
 
 /**
@@ -192,8 +151,11 @@ Timestamp commitDropDatabaseOnGlobalCatalog(
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
 
     const auto commitTime = [&] {
-        const auto currentTime = VectorClock::get(opCtx)->getTime();
-        return currentTime.clusterTime().asTimestamp();
+        // Bump the cluster time value before picking it; this ensures that the commitTime is always
+        // strictly greater than the timestamp assigned to the dropDatabase op entry of the primary
+        // shard (a condition necessary for the correct resumability of change streams during the
+        // execution of this DDL).
+        return VectorClockMutable::get(opCtx)->tickClusterTime(1).asTimestamp();
     }();
 
     const auto transactionChain = [&](const txn_api::TransactionClient& txnClient,
@@ -267,8 +229,8 @@ bool isDbAlreadyDropped(OperationContext* opCtx,
     if (dbVersion) {
         try {
             auto const catalogClient = Grid::get(opCtx)->catalogClient();
-            const auto db = catalogClient->getDatabase(
-                opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern);
+            const auto db =
+                catalogClient->getDatabase(opCtx, dbName, repl::ReadConcernArgs::kMajority);
             if (dbVersion->getUuid() != db.getVersion().getUuid()) {
                 // The database was dropped and re-created with a different UUID
                 return true;
@@ -299,28 +261,17 @@ void DropDatabaseCoordinator::_dropTrackedCollection(
     const auto& nss = coll.getNss();
 
     {
-        ShardsvrParticipantBlock blockCRUDOperationsRequest(nss);
-        blockCRUDOperationsRequest.setBlockType(
-            mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
-        blockCRUDOperationsRequest.setReason(getReasonForDropCollection(nss));
-
-        // When shards are authoritative, there is no need to clear the filtering metadata upon
-        // releasing the critical section; the commit phase is responsible for updating the shard
-        // catalog with current information. This flag is evaluated at insertion time because on
-        // secondaries, metadata is cleared during the onDelete of the critical section document.
-        if (feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-                VersionContext::getDecoration(opCtx),
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            blockCRUDOperationsRequest.setClearCollMetadata(false);
-        }
-
-        generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-        generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                       getNewSession(opCtx));
-        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-            **executor, token, blockCRUDOperationsRequest);
-        sharding_ddl_util::sendAuthenticatedCommandToShards(
-            opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+            opCtx,
+            nss,
+            Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+            mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites,
+            getReasonForDropCollection(nss),
+            _doc.getAuthoritativeMetadataAccessLevel(),
+            session,
+            executor,
+            token);
     }
 
     sharding_ddl_util::removeCollAndChunksMetadataFromConfig(
@@ -338,9 +289,8 @@ void DropDatabaseCoordinator::_dropTrackedCollection(
         sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss, session);
     }
 
-    bool isAuthoritative = feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-        VersionContext::getDecoration(opCtx),
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
 
     if (isAuthoritative) {
         const auto session = getNewSession(opCtx);
@@ -372,9 +322,9 @@ void DropDatabaseCoordinator::_dropTrackedCollection(
             getNewSession(opCtx),
             fromMigrate,
             false /* dropSystemCollections */,
+            !isAuthoritative /* forceLegacyRefresh */,
             boost::none /* collectionUUID */,
-            false /* requireCollectionEmpty */,
-            !isAuthoritative /* forceLegacyRefresh */);
+            false /* requireCollectionEmpty */);
     };
     auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
     // Remove primary shard from participants
@@ -418,27 +368,17 @@ void DropDatabaseCoordinator::_dropTrackedCollection(
         opCtx, notification, changeStreamsNotifierShardId, buildNewSessionFn, executor, token);
 
     {
-        ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss);
-        unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-        unblockCRUDOperationsRequest.setReason(getReasonForDropCollection(nss));
-
-        // When shards are authoritative, there is no need to clear the filtering metadata upon
-        // releasing the critical section; the commit phase is responsible for updating the shard
-        // catalog (both durable and in-memory) with current information on both primary and
-        // secondary nodes.
-        if (feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-                VersionContext::getDecoration(opCtx),
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            unblockCRUDOperationsRequest.setClearCollMetadata(false);
-        }
-
-        generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
-        generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
-                                                       getNewSession(opCtx));
-        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-            **executor, token, unblockCRUDOperationsRequest);
-        sharding_ddl_util::sendAuthenticatedCommandToShards(
-            opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+            opCtx,
+            nss,
+            Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+            CriticalSectionBlockTypeEnum::kUnblock,
+            getReasonForDropCollection(nss),
+            _doc.getAuthoritativeMetadataAccessLevel(),
+            session,
+            executor,
+            token);
     }
 }
 
@@ -450,11 +390,6 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kDrop,
             [this, token, dbNss, executor = executor, anchor = shared_from_this()](auto* opCtx) {
-                if (!_firstExecution) {
-                    AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-                    performCausalityBarrier(opCtx, barrier);
-                }
-
                 ShardingLogging::get(opCtx)->logChange(opCtx, "dropDatabase.start", dbNss);
                 const auto primaryShardId = ShardingState::get(opCtx)->shardId();
 
@@ -473,12 +408,12 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
 
                 if (_doc.getAuthoritativeMetadataAccessLevel() ==
                     AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
-                    cloneAuthoritativeDatabaseMetadata(opCtx, _dbName, _critSecReason);
+                    cloneAuthoritativeDatabaseMetadata(opCtx, _dbName);
                 }
 
                 // Drop all collections under this DB
-                const auto allTrackedCollectionsForDb = catalogClient->getCollections(
-                    opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern);
+                const auto allTrackedCollectionsForDb =
+                    catalogClient->getCollections(opCtx, _dbName, repl::ReadConcernArgs::kMajority);
 
                 // Check if the operation was previously interrupted in the middle of a sharded
                 // collection drop; if so, resume the step.
@@ -503,7 +438,11 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     // before persisting its identity on the recovery doc (This condition won't be
                     // reinforced in case of a stepdown)
                     sharding_ddl_util::stopMigrations(
-                        opCtx, nss, coll.getUuid(), getNewSession(opCtx));
+                        opCtx,
+                        nss,
+                        coll.getUuid(),
+                        [&] { return getNewSession(opCtx); },
+                        _doc.getAuthoritativeMetadataAccessLevel());
 
                     auto newStateDoc = _doc;
                     newStateDoc.setCollInfo(coll);
@@ -531,7 +470,9 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     }());
                     _updateStateDocument(opCtx, std::move(newStateDoc));
 
-                    const auto& changeStreamsNotifier = *_doc.getCollChangeStreamsNotifier();
+                    // Copy by value: _dropTrackedCollection() persists new sessions that reassign
+                    // _doc, which would leave a reference into _doc dangling.
+                    const auto changeStreamsNotifier = *_doc.getCollChangeStreamsNotifier();
                     LOGV2_DEBUG(5494505,
                                 2,
                                 "Dropping tracked collection",
@@ -663,11 +604,8 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                         }
                     }
 
-                    if (_doc.getAuthoritativeMetadataAccessLevel() >=
-                        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
-                        const auto& session = getNewSession(opCtx);
-                        removeDatabaseMetadataFromShard(opCtx, _dbName, session, executor, token);
-                    }
+                    removeDatabaseMetadataFromShard(
+                        opCtx, _dbName, _doc.getAuthoritativeMetadataAccessLevel());
 
                     {
                         auto buildNewSessionFn = [this](OperationContext* opCtx) {

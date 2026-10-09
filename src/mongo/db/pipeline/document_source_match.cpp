@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -55,12 +29,14 @@
 #include <iterator>
 #include <list>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 using boost::intrusive_ptr;
 using std::pair;
@@ -99,9 +75,7 @@ DocumentSourceMatch::DocumentSourceMatch(const BSONObj& query,
 
 void DocumentSourceMatch::rebuild(BSONObj predicate) {
     predicate = predicate.getOwned();
-    SbeCompatibility originalSbeCompatibility =
-        getExpCtx()->sbeCompatibilityExchange(SbeCompatibility::noRequirements);
-    ON_BLOCK_EXIT([&] { getExpCtx()->setSbeCompatibility(originalSbeCompatibility); });
+    TemporarySbeCompatibilityGuard guard(getExpCtx().get(), SbeCompatibility::noRequirements);
     std::unique_ptr<MatchExpression> expr = uassertStatusOK(MatchExpressionParser::parse(
         predicate, getExpCtx(), ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
     _sbeCompatibility = getExpCtx()->getSbeCompatibility();
@@ -118,12 +92,12 @@ void DocumentSourceMatch::rebuild(BSONObj predicate, std::unique_ptr<MatchExpres
         std::move(expr), std::move(dependencies), std::move(predicate));
 }
 
-const char* DocumentSourceMatch::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceMatch::getSourceName() const {
+    return kStageName;
 }
 
-Value DocumentSourceMatch::serialize(const SerializationOptions& opts) const {
-    if (opts.isSerializingForExplain() || opts.isSerializingForQueryStats()) {
+Value DocumentSourceMatch::serialize(const query_shape::SerializationOptions& opts) const {
+    if (opts.isSerializingForExplain() || opts.isShapifying()) {
         return Value(
             DOC(getSourceName() << Document(_matchProcessor->getExpression()->serialize(opts))));
     }
@@ -179,7 +153,7 @@ namespace {
 // the Match expression has been successfully parsed so they can assume that
 // input is well formed.
 
-bool isFieldnameRedactSafe(StringData fieldName) {
+bool isFieldnameRedactSafe(std::string_view fieldName) {
     // Can't have numeric elements in the dotted path since redacting elements from an array
     // would change the indexes.
 
@@ -187,8 +161,8 @@ bool isFieldnameRedactSafe(StringData fieldName) {
     if (dotPos == string::npos)
         return fieldName.empty() || !str::isAllDigits(fieldName);
 
-    const StringData part = fieldName.substr(0, dotPos);
-    const StringData rest = fieldName.substr(dotPos + 1);
+    const std::string_view part = fieldName.substr(0, dotPos);
+    const std::string_view rest = fieldName.substr(dotPos + 1);
     return (part.empty() || !str::isAllDigits(part)) && isFieldnameRedactSafe(rest);
 }
 
@@ -278,7 +252,7 @@ Document redactSafePortionDollarOps(BSONObj expr) {
             case PathAcceptingKeyword::ELEM_MATCH: {
                 BSONObj subIn = field.Obj();
                 Document subOut;
-                if (subIn.firstElementFieldName()[0] == '$') {
+                if (subIn.firstElementFieldNameStringData().starts_with('$')) {
                     subOut = redactSafePortionDollarOps(subIn);
                 } else {
                     subOut = redactSafePortionTopLevel(subIn);
@@ -329,7 +303,7 @@ Document redactSafePortionDollarOps(BSONObj expr) {
 Document redactSafePortionTopLevel(BSONObj query) {
     MutableDocument output;
     for (BSONElement field : query) {
-        StringData fieldName = field.fieldNameStringData();
+        std::string_view fieldName = field.fieldNameStringData();
         if (fieldName.starts_with("$")) {
             if (fieldName == "$or") {
                 // $or must be all-or-nothing (line $in). Can't include subset of elements.
@@ -403,8 +377,8 @@ std::unique_ptr<MatchLiteParsed> MatchLiteParsed::parse(const NamespaceString& n
 
 bool DocumentSourceMatch::isTextQuery(const BSONObj& query) {
     for (auto&& e : query) {
-        const StringData fieldName = e.fieldNameStringData();
-        if (fieldName == "$text"_sd)
+        const std::string_view fieldName = e.fieldNameStringData();
+        if (fieldName == "$text"sv)
             return true;
 
         if (e.isABSONObj() && isTextQuery(e.Obj()))
@@ -638,10 +612,11 @@ void DocumentSourceMatch::addVariableRefs(std::set<Variables::Id>* refs) const {
     dependency_analysis::addVariableRefs(_matchProcessor->getExpression().get(), refs);
 }
 
-Value DocumentSourceInternalChangeStreamMatch::serialize(const SerializationOptions& opts) const {
-    if (opts.isSerializingForQueryStats()) {
-        // Stages made internally by 'DocumentSourceChangeStream' should not be serialized for
-        // query stats. For query stats we will serialize only the user specified $changeStream
+Value DocumentSourceInternalChangeStreamMatch::serialize(
+    const query_shape::SerializationOptions& opts) const {
+    if (opts.isShapifying()) {
+        // Stages made internally by 'DocumentSourceChangeStream' should not be included in the
+        // query shape. When shapifying we will serialize only the user specified $changeStream
         // stage.
         return Value();
     }

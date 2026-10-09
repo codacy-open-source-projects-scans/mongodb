@@ -75,28 +75,40 @@ def read_sha_file(filename):
         return content.strip().split()[0]
 
 
+def _reserve_temp_path() -> str:
+    """
+    Create a unique temp file and return its path with no handle left open.
+
+    Downloaders here write to a caller-supplied path, and some of them (boto3/s3transfer) replace
+    it rather than writing in place. Keeping our own handle open makes that replacement fail on
+    Windows, so every temp destination in this module must be closed before use.
+    """
+    fd, path = tempfile.mkstemp()
+    os.close(fd)
+    return path
+
+
 def _fetch_remote_sha256_hash(s3_path: str):
     downloaded = False
     result = None
-    tempfile_name = None
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        tempfile_name = temp_file.name
-        try:
-            from buildscripts.util.download_utils import download_from_s3_with_boto
+    # See _reserve_temp_path: the destination must not be held open across the download.
+    tempfile_name = _reserve_temp_path()
+    try:
+        from buildscripts.util.download_utils import download_from_s3_with_boto
 
-            download_from_s3_with_boto(s3_path + ".sha256", temp_file.name)
+        download_from_s3_with_boto(s3_path + ".sha256", tempfile_name)
+        downloaded = True
+    except Exception:
+        traceback.print_exc()
+        try:
+            from buildscripts.util.download_utils import download_from_s3_with_requests
+
+            download_from_s3_with_requests(s3_path + ".sha256", tempfile_name, raise_on_error=True)
             downloaded = True
         except Exception:
             traceback.print_exc()
-            try:
-                from buildscripts.util.download_utils import download_from_s3_with_requests
-
-                download_from_s3_with_requests(s3_path + ".sha256", temp_file.name)
-                downloaded = True
-            except Exception:
-                traceback.print_exc()
-                # curl/wget fallback
-                downloaded = _download_with_curl_or_wget(s3_path + ".sha256", temp_file.name)
+            # curl/wget fallback
+            downloaded = _download_with_curl_or_wget(s3_path + ".sha256", tempfile_name)
 
     if downloaded:
         result = read_sha_file(tempfile_name)
@@ -152,7 +164,7 @@ def validate_file(s3_path, output_path, remote_sha_allowed):
         raise ValueError(f"No SHA256 hash available for {s3_path}")
 
 
-def _download_and_verify(s3_path, output_path, remote_sha_allowed, ignore_file_not_exist):
+def _download_and_verify(s3_path, output_path, remote_sha_allowed, ignore_file_not_exist) -> bool:
     for i in range(5):
         try:
             print(f"Downloading {s3_path}...")
@@ -185,11 +197,11 @@ def _download_and_verify(s3_path, output_path, remote_sha_allowed, ignore_file_n
             if not ok:
                 if ignore_file_not_exist:
                     print("Failed to find remote file. Ignoring and skipping...")
-                    return
+                    return False
                 raise RuntimeError("All download methods failed")
 
             validate_file(s3_path, output_path, remote_sha_allowed)
-            break
+            return True
 
         except Exception:
             print("Download failed:")
@@ -220,9 +232,18 @@ def download_s3_binary(
 
     tempfile_name = None
     try:
-        with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-            tempfile_name = temp_file.name
-            _download_and_verify(s3_path, tempfile_name, remote_sha_allowed, ignore_file_not_exist)
+        # Reserve the temp path but hand the downloaders a *closed* file. boto3/s3transfer
+        # finishes a download by renaming its own scratch file over the destination, which first
+        # os.remove()s the destination; Windows refuses to remove a file this process still has
+        # open (WinError 32, "being used by another process"). POSIX permits it, so holding the
+        # handle -- as a `with tempfile.NamedTemporaryFile(...)` block does -- broke only Windows.
+        tempfile_name = _reserve_temp_path()
+        downloaded = _download_and_verify(
+            s3_path, tempfile_name, remote_sha_allowed, ignore_file_not_exist
+        )
+
+        if not downloaded:
+            return True  # remote file absent, caller requested we ignore it
 
         try:
             os.replace(tempfile_name, local_path)

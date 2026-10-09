@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/session/session_catalog_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -149,7 +122,16 @@ void killSessionTokens(OperationContext* opCtx,
         [service = opCtx->getServiceContext(),
          ti,
          sessionKillTokens = std::move(sessionKillTokens)](auto status) mutable {
-            invariant(status);
+            if (!status.isOK()) {
+                if (ErrorCodes::isCancellationError(status)) {
+                    LOGV2_DEBUG(10580200,
+                                3,
+                                "Not killing sessions because task scheduling was cancelled",
+                                "status"_attr = status);
+                    return;
+                }
+                invariant(status);
+            }
 
             // TODO(SERVER-111754): Please revisit if this thread could be made killable.
             ThreadClient tc(
@@ -191,16 +173,9 @@ LogicalSessionIdSet removeExpiredTransactionSessionsNotInUseFromMemory(
     const auto catalog = SessionCatalog::get(opCtx);
 
     // Find the possibly expired logical session ids in the in-memory catalog.
-    LogicalSessionIdSet possiblyExpiredLogicalSessionIds;
     // Skip child transaction sessions since they correspond to the same logical session as their
     // parent transaction session so they have the same last check-out time as the parent's.
-    catalog->scanParentSessions([&](const ObservableSession& session) {
-        const auto sessionId = session.getSessionId();
-        invariant(isParentSessionId(sessionId));
-        if (session.getLastCheckout() < possiblyExpired) {
-            possiblyExpiredLogicalSessionIds.insert(sessionId);
-        }
-    });
+    auto possiblyExpiredLogicalSessionIds = catalog->findExpiredParentSessions(possiblyExpired);
     // From the possibly expired logical session ids, find the ones that have been removed from
     // from the config.system.sessions collection.
     LogicalSessionIdSet expiredLogicalSessionIds =
@@ -576,15 +551,17 @@ void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
     std::vector<SessionCatalog::KillToken> sessionKillTokens;
 
     // Scan all sessions and reacquire locks for prepared transactions.
-    // There may be sessions that are checked out during this scan, but none of them
-    // can be prepared transactions, since only oplog application can make transactions
-    // prepared on secondaries and oplog application has been stopped at this moment.
+    // There may be sessions that are checked out during this scan, but none of them can be prepared
+    // transactions, since only oplog application and prepared transaction recovery can make
+    // transactions prepared on secondaries and oplog application has been stopped at this moment.
     std::vector<OperationSessionInfo> sessionsToReacquireLocks;
 
     SessionKiller::Matcher matcher(
         KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-    catalog->scanSessions(
-        matcher, _ti->makeSessionWorkerFnForStepUp(&sessionKillTokens, &sessionsToReacquireLocks));
+    sessionKillTokens = catalog->killSessions(matcher,
+                                              ErrorCodes::InterruptedDueToReplStateChange,
+                                              _ti->makeKillPredicateForStepUp(),
+                                              _ti->makeScanFnForStepUp(&sessionsToReacquireLocks));
     killSessionTokens(opCtx, _ti.get(), std::move(sessionKillTokens));
 
     if (sessionsToReacquireLocks.size() > 0) {
@@ -667,25 +644,28 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
 
     const auto lsid =
         LogicalSessionId::parse(singleSessionDoc["_id"].Obj(), IDLParserContext("lsid"));
-    catalog->scanSession(lsid, [&, ti = _ti.get()](const ObservableSession& session) {
-        uassert(ErrorCodes::PreparedTransactionInProgress,
-                str::stream() << "Cannot modify the entry for session " << lsid.getId()
-                              << " because it is in the prepared state",
-                !ti->isTransactionPrepared(session));
+    // 'killSessionIf' hands the token back with the session's partition released, so registering
+    // the change below cannot deadlock against returning the kill if it throws.
+    auto killToken =
+        catalog->killSessionIf(lsid, [&, ti = _ti.get()](const ObservableSession& session) {
+            uassert(ErrorCodes::PreparedTransactionInProgress,
+                    str::stream() << "Cannot modify the entry for session " << lsid.getId()
+                                  << " because it is in the prepared state",
+                    !ti->isTransactionPrepared(session));
 
-        // Internal sessions for an old retryable write are marked as reapable as soon as a
-        // retryable write or transaction with a newer txnNumber starts. Therefore, when deleting
-        // the config.transactions doc for such internal sessions, the corresponding transaction
-        // sessions should not be interrupted since they are guaranteed to be performing a
-        // transaction or retryable write for newer txnNumber.
-        bool shouldRegisterKill = !isInternalSessionForRetryableWrite(lsid) ||
-            *lsid.getTxnNumber() >= session.getLastClientTxnNumberStarted();
-        if (shouldRegisterKill) {
-            shard_role_details::getRecoveryUnit(opCtx)->registerChange(
-                std::make_unique<KillSessionTokenOnCommit>(ti,
-                                                           session.kill(ErrorCodes::Interrupted)));
-        }
-    });
+            // Internal sessions for an old retryable write are marked as reapable as soon as a
+            // retryable write or transaction with a newer txnNumber starts. Therefore, when
+            // deleting the config.transactions doc for such internal sessions, the corresponding
+            // transaction sessions should not be interrupted since they are guaranteed to be
+            // performing a transaction or retryable write for newer txnNumber.
+            return !isInternalSessionForRetryableWrite(lsid) ||
+                *lsid.getTxnNumber() >= session.getLastClientTxnNumberStarted();
+        });
+
+    if (killToken) {
+        shard_role_details::getRecoveryUnit(opCtx)->registerChange(
+            std::make_unique<KillSessionTokenOnCommit>(_ti.get(), std::move(*killToken)));
+    }
 }
 
 void MongoDSessionCatalog::invalidateAllSessions(OperationContext* opCtx) {
@@ -693,13 +673,9 @@ void MongoDSessionCatalog::invalidateAllSessions(OperationContext* opCtx) {
 
     const auto catalog = SessionCatalog::get(opCtx);
 
-    std::vector<SessionCatalog::KillToken> sessionKillTokens;
-
     SessionKiller::Matcher matcher(
         KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-    catalog->scanSessions(matcher, [&sessionKillTokens](const ObservableSession& session) {
-        sessionKillTokens.emplace_back(session.kill());
-    });
+    auto sessionKillTokens = catalog->killSessions(matcher);
 
     killSessionTokens(opCtx, _ti.get(), std::move(sessionKillTokens));
 }

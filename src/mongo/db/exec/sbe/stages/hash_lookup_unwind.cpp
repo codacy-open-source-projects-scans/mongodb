@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/hash_lookup_unwind.h"
 
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -38,8 +11,10 @@
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 
 #include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 HashLookupUnwindStage::HashLookupUnwindStage(std::unique_ptr<PlanStage> outer,
                                              std::unique_ptr<PlanStage> inner,
@@ -52,7 +27,7 @@ HashLookupUnwindStage::HashLookupUnwindStage(std::unique_ptr<PlanStage> outer,
                                              boost::optional<value::SlotId> indexSlot,
                                              PlanNodeId planNodeId,
                                              bool participateInTrialRunTracking)
-    : PlanStage("hash_lookup_unwind"_sd,
+    : PlanStage("hash_lookup_unwind"sv,
                 nullptr /* yieldPolicy */,
                 planNodeId,
                 participateInTrialRunTracking),
@@ -192,7 +167,6 @@ void HashLookupUnwindStage::open(bool reOpen) {
 
     innerChild()->close();
     outerChild()->open(reOpen);
-    _outerOpened = true;
 }  // HashLookupUnwindStage::open
 
 PlanState HashLookupUnwindStage::getNext() {
@@ -217,8 +191,7 @@ PlanState HashLookupUnwindStage::getNext() {
             tassert(11846701, "Expected non-empty innerMatch", innerMatch);
             _lookupStageOutputAccessor.reset(*innerMatch);
             if (_indexSlot) {
-                _lookupStageIndexAccessor.reset(
-                    false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(_matchIndex));
+                _lookupStageIndexAccessor.reset(value::TagValueView::numberInt64(_matchIndex));
                 ++_matchIndex;
             }
             _innerSideMatched = true;
@@ -226,10 +199,10 @@ PlanState HashLookupUnwindStage::getNext() {
         }
         _outerKeyOpen = false;
         if (_joinType == sbe::JoinType::Left && !_innerSideMatched) {
-            _lookupStageOutputAccessor.reset(false, value::TypeTags::Nothing, 0);
+            _lookupStageOutputAccessor.reset(value::TagValueView::nothing());
             if (_indexSlot) {
                 // Match $unwind semantics: null when no match/element.
-                _lookupStageIndexAccessor.reset(false, value::TypeTags::Null, 0);
+                _lookupStageIndexAccessor.reset(value::TagValueView::null());
             }
             return trackPlanState(PlanState::ADVANCED);
         }
@@ -239,10 +212,7 @@ PlanState HashLookupUnwindStage::getNext() {
 void HashLookupUnwindStage::close() {
     auto optTimer(getOptTimer(_opCtx));
     trackClose();
-    if (_outerOpened) {
-        outerChild()->close();
-        _outerOpened = false;
-    }
+    outerChild()->close();
     reset(true /* fromClose */);
 }
 

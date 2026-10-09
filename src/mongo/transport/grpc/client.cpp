@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/transport/grpc/client.h"
 
@@ -49,6 +23,7 @@
 #include "mongo/util/uuid.h"
 
 #include <mutex>
+#include <string_view>
 
 #include <grpcpp/channel.h>
 #include <grpcpp/client_context.h>
@@ -577,72 +552,129 @@ class StubFactoryImpl : public GRPCClient::StubFactory {
         ::grpc::internal::RpcMethod _authenticatedCommandStreamMethod;
     };
 
+    struct TLSCache {
+        std::shared_ptr<::grpc::experimental::CertificateProviderInterface> certificateProvider;
+        SSLConfiguration sslConfig;
+    };
+
+    static bool _resolveSSLMode(ConnectSSLMode sslMode) {
+#ifndef MONGO_CONFIG_SSL
+        if (sslMode == kEnableSSL) {
+            uasserted(ErrorCodes::InvalidSSLConfiguration, "SSL requested but not supported");
+        }
+        return false;
+#else
+        auto globalSSLMode = static_cast<SSLParams::SSLModes>(getSSLGlobalParams().sslMode.load());
+
+        return (sslMode == kEnableSSL ||
+                (sslMode == kGlobalSSLMode &&
+                 ((globalSSLMode == SSLParams::SSLMode_preferSSL) ||
+                  (globalSSLMode == SSLParams::SSLMode_requireSSL))));
+#endif
+    }
+
+    static ::grpc::experimental::TlsChannelCredentialsOptions _makeTlsOptions(
+        const TLSCache& tlsInfo, const GRPCClient::Options& options) {
+        ::grpc::experimental::TlsChannelCredentialsOptions tlsOps;
+
+        tlsOps.set_certificate_provider(tlsInfo.certificateProvider);
+
+        if (options.tlsCertificateKeyFile) {
+            tlsOps.watch_identity_key_cert_pairs();
+        }
+
+        if (options.tlsCAFile || sslGlobalParams.sslUseSystemCA ||
+            options.tlsAllowInvalidCertificates) {
+            // We also watch the cert when options.tlsAllowInvalidCertificates is true
+            // because of a bug in grpc that causes a segfault on older openssl versions when
+            // skipping cert validation and no cert is provided.
+            tlsOps.watch_root_certs();
+        }
+
+        if (options.tlsAllowInvalidCertificates || options.tlsAllowInvalidHostnames) {
+            // The CertificateVerifier handles extended attribute validation, and does not actually
+            // pertain to validating the whole certificate chain. Setting it to NoOp ensures that
+            // the default verifier, which verifies hostnames, is not used.
+            tlsOps.set_certificate_verifier(
+                std::make_shared<::grpc::experimental::NoOpCertificateVerifier>());
+            // libgrpc also performs per-call (as opposed to per-connection) hostname verification
+            // by default. This codepath is separate from the certificate verifier set above, so we
+            // also need to disable this.
+            tlsOps.set_check_call_host(false);
+
+            if (options.tlsAllowInvalidCertificates) {
+                // This invocation ensures the certificate chain is not verified. The prior steps
+                // also need to be taken when tlsAllowInvalidCertificates is set even when this is
+                // called, since hostname verification and certificate chain verification are
+                // also separate codepaths within libgrpc.
+                tlsOps.set_verify_server_certs(false);
+            }
+        } else {
+            // This is the default certificate verifier used by libgrpc, but we set it explicitly
+            // here for clarity.
+            tlsOps.set_certificate_verifier(
+                std::make_shared<::grpc::experimental::HostNameCertificateVerifier>());
+        }
+
+        return tlsOps;
+    }
+
+    static std::shared_ptr<Channel> _makeChannel(
+        const synchronized_value<boost::optional<TLSCache>>& tlsCache,
+        const GRPCClient::Options& options,
+        const HostAndPort& remote,
+        bool useSSL) {
+        auto uri = util::toGRPCFormattedURI(remote);
+        auto [credentials,
+              sslConfig] = [&]() -> std::pair<std::shared_ptr<::grpc::ChannelCredentials>,
+                                              boost::optional<SSLConfiguration>> {
+            if (!useSSL || util::isUnixSchemeGRPCFormattedURI(uri)) {
+                return {::grpc::InsecureChannelCredentials(), boost::none};
+            }
+            auto tls = tlsCache.synchronize();
+            invariant(tls->has_value());
+            return {::grpc::experimental::TlsCredentials(_makeTlsOptions(**tls, options)),
+                    (*tls)->sslConfig};
+        }();
+        auto uuid = UUID::gen();
+
+        ::grpc::ChannelArguments channel_args;
+        channel_args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, serverGlobalParams.grpcKeepAliveTimeMs);
+        channel_args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS,
+                            serverGlobalParams.grpcKeepAliveTimeoutMs);
+        channel_args.SetMaxReceiveMessageSize(MaxMessageSizeBytes);
+        channel_args.SetMaxSendMessageSize(MaxMessageSizeBytes);
+        channel_args.SetCompressionAlgorithm(::grpc_compression_algorithm::GRPC_COMPRESS_NONE);
+        // We must set unique channel arguments on each channel object to force gRPC to use
+        // a separate TCP connection per channel:
+        // https://stackoverflow.com/questions/53564748
+        channel_args.SetString("channelId", uuid.toString());
+        return std::make_shared<Channel>(
+            ::grpc::CreateCustomChannel(uri, credentials, channel_args), sslConfig, uuid);
+    }
+
 public:
     explicit StubFactoryImpl(GRPCClient::Options options, ServiceContext* svcCtx)
-        : _options(std::move(options)), _svcCtx(svcCtx) {
-        // The pool calls into `ClockSource` to record the last usage of gRPC channels. Since the
-        // pool is not concerned with sub-minute durations and this call happens as part of
-        // destroying gRPC stubs (i.e., on threads running user operations), it is important to use
-        // `FastClockSource` to minimize the performance implications of recording time on user
-        // operations.
-        _pool = std::make_shared<ChannelPool<std::shared_ptr<Channel>, Stub>>(
-            svcCtx->getFastClockSource(),
-            [](ConnectSSLMode sslMode) -> bool {
-#ifndef MONGO_CONFIG_SSL
-                if (sslMode == kEnableSSL) {
-                    uasserted(ErrorCodes::InvalidSSLConfiguration,
-                              "SSL requested but not supported");
-                }
-                return false;
-#else
-                auto globalSSLMode =
-                    static_cast<SSLParams::SSLModes>(getSSLGlobalParams().sslMode.load());
-
-                return (sslMode == kEnableSSL ||
-                        (sslMode == kGlobalSSLMode &&
-                         ((globalSSLMode == SSLParams::SSLMode_preferSSL) ||
-                          (globalSSLMode == SSLParams::SSLMode_requireSSL))));
-#endif
-            },
-            [&](const HostAndPort& remote, bool useSSL) {
-                auto uri = util::toGRPCFormattedURI(remote);
-                auto [credentials,
-                      sslConfig] = [&]() -> std::pair<std::shared_ptr<::grpc::ChannelCredentials>,
-                                                      boost::optional<SSLConfiguration>> {
-                    if (!useSSL || util::isUnixSchemeGRPCFormattedURI(uri)) {
-                        return {::grpc::InsecureChannelCredentials(), boost::none};
-                    }
-                    auto tlsCache = _tlsCache.synchronize();
-                    invariant(tlsCache->has_value());
-                    return {::grpc::experimental::TlsCredentials(_makeTlsOptions(**tlsCache)),
-                            (*tlsCache)->sslConfig};
-                }();
-                auto uuid = UUID::gen();
-
-                ::grpc::ChannelArguments channel_args;
-                channel_args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS,
-                                    serverGlobalParams.grpcKeepAliveTimeMs);
-                channel_args.SetInt(GRPC_ARG_KEEPALIVE_TIMEOUT_MS,
-                                    serverGlobalParams.grpcKeepAliveTimeoutMs);
-                channel_args.SetMaxReceiveMessageSize(MaxMessageSizeBytes);
-                channel_args.SetMaxSendMessageSize(MaxMessageSizeBytes);
-                channel_args.SetCompressionAlgorithm(
-                    ::grpc_compression_algorithm::GRPC_COMPRESS_NONE);
-                // We must set unique channel arguments on each channel object to force gRPC to use
-                // a separate TCP connection per channel:
-                // https://stackoverflow.com/questions/53564748
-                channel_args.SetString("channelId", uuid.toString());
-                return std::make_shared<Channel>(
-                    ::grpc::CreateCustomChannel(uri, credentials, channel_args), sslConfig, uuid);
-            },
-            [](std::shared_ptr<Channel>& channel) { return Stub(channel); });
-    }
+        : _options(std::move(options)),
+          _svcCtx(svcCtx),
+          // The pool calls into `ClockSource` to record the last usage of gRPC channels. Since the
+          // pool is not concerned with sub-minute durations and this call happens as part of
+          // destroying gRPC stubs (i.e., on threads running user operations), it is important to
+          // use `FastClockSource` to minimize the performance implications of recording time on
+          // user operations.
+          _pool(std::make_shared<ChannelPool<std::shared_ptr<Channel>, Stub>>(
+              svcCtx->getFastClockSource(),
+              &_resolveSSLMode,
+              [&](const HostAndPort& remote, bool useSSL) {
+                  return _makeChannel(_tlsCache, _options, remote, useSSL);
+              },
+              [](std::shared_ptr<Channel>& channel) { return Stub(channel); })) {}
 
     void start() {
         std::shared_ptr<SSLManagerInterface> manager = nullptr;
         if (SSLManagerCoordinator::get() &&
             (manager = SSLManagerCoordinator::get()->getSSLManager())) {
-            _loadTlsCertificates(manager->getSSLConfiguration());
+            _loadTlsCertificates(manager->getSSLConfiguration(), *manager);
         }
         _prunerService.start(_svcCtx, _pool);
     }
@@ -657,9 +689,10 @@ public:
     }
 
 #ifdef MONGO_CONFIG_SSL
-    Status rotateCertificates(const SSLConfiguration& sslConfig) try {
+    Status rotateCertificates(const SSLConfiguration& sslConfig,
+                              const SSLManagerInterface& sslManager) try {
         LOGV2_DEBUG(9886801, 3, "Rotating certificates used for creating gRPC channels");
-        _loadTlsCertificates(sslConfig);
+        _loadTlsCertificates(sslConfig, sslManager);
         return Status::OK();
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -671,11 +704,6 @@ public:
     }
 
 private:
-    struct TLSCache {
-        std::shared_ptr<::grpc::experimental::CertificateProviderInterface> certificateProvider;
-        SSLConfiguration sslConfig;
-    };
-
     /**
      * Utilize gRPC's ssl_client_handshaker_factory to verify that the user has provided valid TLS
      * certificates. Throws an exception if the provided certificates are not valid.
@@ -714,7 +742,8 @@ private:
     }
 
 #ifdef MONGO_CONFIG_SSL
-    void _loadTlsCertificates(const SSLConfiguration& sslConfig) {
+    void _loadTlsCertificates(const SSLConfiguration& sslConfig,
+                              const SSLManagerInterface& manager) {
         auto cache = [&]() -> boost::optional<TLSCache> {
             if (!_options.tlsCAFile && !_options.tlsCertificateKeyFile) {
                 return boost::none;
@@ -722,7 +751,20 @@ private:
 
             std::vector<::grpc::experimental::IdentityKeyCertPair> certKeyPairs;
             if (_options.tlsCertificateKeyFile) {
-                auto sslPair = util::parsePEMKeyFile(_options.tlsCertificateKeyFile.get());
+                ::grpc::SslServerCredentialsOptions::PemKeyCertPair sslPair;
+
+                auto certificateKeyFileContents =
+                    uassertStatusOK(ssl_util::readPEMFile(_options.tlsCertificateKeyFile.get()));
+                sslPair.cert_chain = certificateKeyFileContents;
+                auto swDecrypted = manager.decryptPEMKey(
+                    certificateKeyFileContents,
+                    _options.tlsCertificatePassword.value_or(std::string_view{}));
+                if (swDecrypted == ErrorCodes::NotImplemented) {
+                    sslPair.private_key = certificateKeyFileContents;
+                } else {
+                    sslPair.private_key = uassertStatusOK(std::move(swDecrypted));
+                }
+
                 certKeyPairs.push_back(
                     {std::move(sslPair.private_key), std::move(sslPair.cert_chain)});
             }
@@ -762,58 +804,13 @@ private:
     }
 #endif
 
-    ::grpc::experimental::TlsChannelCredentialsOptions _makeTlsOptions(const TLSCache& tlsInfo) {
-        ::grpc::experimental::TlsChannelCredentialsOptions tlsOps;
-
-        tlsOps.set_certificate_provider(tlsInfo.certificateProvider);
-
-        if (_options.tlsCertificateKeyFile) {
-            tlsOps.watch_identity_key_cert_pairs();
-        }
-
-        if (_options.tlsCAFile || sslGlobalParams.sslUseSystemCA ||
-            _options.tlsAllowInvalidCertificates) {
-            // We also watch the cert when _options.tlsAllowInvalidCertificates is true
-            // because of a bug in grpc that causes a segfault on older openssl versions when
-            // skipping cert validation and no cert is provided.
-            tlsOps.watch_root_certs();
-        }
-
-        if (_options.tlsAllowInvalidCertificates || _options.tlsAllowInvalidHostnames) {
-            // The CertificateVerifier handles extended attribute validation, and does not actually
-            // pertain to validating the whole certificate chain. Setting it to NoOp ensures that
-            // the default verifier, which verifies hostnames, is not used.
-            tlsOps.set_certificate_verifier(
-                std::make_shared<::grpc::experimental::NoOpCertificateVerifier>());
-            // libgrpc also performs per-call (as opposed to per-connection) hostname verification
-            // by default. This codepath is separate from the certificate verifier set above, so we
-            // also need to disable this.
-            tlsOps.set_check_call_host(false);
-
-            if (_options.tlsAllowInvalidCertificates) {
-                // This invocation ensures the certificate chain is not verified. The prior steps
-                // also need to be taken when tlsAllowInvalidCertificates is set even when this is
-                // called, since hostname verification and certificate chain verification are
-                // also separate codepaths within libgrpc.
-                tlsOps.set_verify_server_certs(false);
-            }
-        } else {
-            // This is the default certificate verifier used by libgrpc, but we set it explicitly
-            // here for clarity.
-            tlsOps.set_certificate_verifier(
-                std::make_shared<::grpc::experimental::HostNameCertificateVerifier>());
-        }
-
-        return tlsOps;
-    }
-
-    GRPCClient::Options _options;
+    const GRPCClient::Options _options;
     ServiceContext* const _svcCtx;
 
-    std::shared_ptr<ChannelPool<std::shared_ptr<Channel>, Stub>> _pool;
-    ChannelPrunerService<decltype(_pool)> _prunerService;
-
     synchronized_value<boost::optional<TLSCache>> _tlsCache;
+
+    const std::shared_ptr<ChannelPool<std::shared_ptr<Channel>, Stub>> _pool;
+    ChannelPrunerService<decltype(_pool)> _prunerService;
 };
 
 GRPCClient::GRPCClient(TransportLayer* tl,
@@ -843,8 +840,9 @@ void GRPCClient::appendStats(GRPCConnectionStats& stats) const {
 }
 
 #ifdef MONGO_CONFIG_SSL
-Status GRPCClient::rotateCertificates(const SSLConfiguration& config) {
-    return static_cast<StubFactoryImpl&>(*_stubFactory).rotateCertificates(config);
+Status GRPCClient::rotateCertificates(const SSLConfiguration& config,
+                                      const SSLManagerInterface& sslManager) {
+    return static_cast<StubFactoryImpl&>(*_stubFactory).rotateCertificates(config, sslManager);
 }
 #endif
 

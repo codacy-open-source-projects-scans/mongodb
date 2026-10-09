@@ -3,7 +3,7 @@
  * with parameters that would put the request over the limit. This is to ensure that our search
  * index interface correctly catches and returns such errors.
  *
- * @tags: [ featureFlagMongotIndexedViews, requires_fcv_81 ]
+ * @tags: [ requires_fcv_81 ]
  */
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {createSearchIndex} from "jstests/libs/query_integration_search/search.js";
@@ -73,7 +73,9 @@ const maxSizeRequestTestCases = (isStoredSource) => {
                 name: "tooLargeDefinitionIndex",
                 definition: {
                     "mappings": {"dynamic": true},
-                    "fields": {"large_metadata": {"type": "string", "meta": "b".repeat(1024 * 800)}},
+                    "fields": {
+                        "large_metadata": {"type": "string", "meta": "b".repeat(1024 * 800)},
+                    },
                 },
             }),
         ErrorCodes.BSONObjectTooLarge,

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/timeseries_collmod.h"
 
@@ -38,11 +12,12 @@
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class TimeseriesCollmodTest : public timeseries::TimeseriesTestFixture {
 protected:
@@ -56,7 +31,6 @@ protected:
         auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(service);
         ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
         repl::ReplicationCoordinator::set(service, std::move(replCoord));
-        repl::createOplog(_opCtx);
     }
     NamespaceString testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
 };
@@ -74,7 +48,7 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModCommandTranslation) {
     collModCmd.setValidator(BSON("a" << "1"));
     collModCmd.setValidationLevel(ValidationLevelEnum::strict);
     collModCmd.setValidationAction(ValidationActionEnum::errorAndLog);
-    collModCmd.setViewOn("test.view"_sd);
+    collModCmd.setViewOn("test.view"sv);
     std::vector<BSONObj> pipeline = {BSON("$match" << BSON("a" << 1))};
     collModCmd.setPipeline(pipeline);
     ChangeStreamPreAndPostImagesOptions changeStreamPreAndPostImagesOptions;
@@ -91,15 +65,15 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModCommandTranslation) {
 
     ASSERT(collModBuckets);
     ASSERT((*collModBuckets->getValidator()).binaryEqual(BSON("a" << "1")));
-    ASSERT_EQ(*(collModBuckets->getValidationLevel()), ValidationLevelEnum::strict);
-    ASSERT_EQ(*(collModBuckets->getValidationAction()), ValidationActionEnum::errorAndLog);
-    ASSERT_EQ(collModBuckets->getViewOn(), "test.view"_sd);
+    EXPECT_EQ(*(collModBuckets->getValidationLevel()), ValidationLevelEnum::strict);
+    EXPECT_EQ(*(collModBuckets->getValidationAction()), ValidationActionEnum::errorAndLog);
+    EXPECT_EQ(collModBuckets->getViewOn(), "test.view"sv);
     ASSERT((*collModBuckets->getPipeline())[0].binaryEqual(BSON("$match" << BSON("a" << 1))));
-    ASSERT_EQ(collModBuckets->getChangeStreamPreAndPostImages()->getEnabled(), true);
-    ASSERT_EQ(std::get<int64_t>(*(collModBuckets->getExpireAfterSeconds())), 100);
-    ASSERT_EQ(*(collModBuckets->getTimeseries()->getGranularity()), BucketGranularityEnum::Seconds);
-    ASSERT_EQ(*(collModBuckets->getTimeseriesBucketsMayHaveMixedSchemaData()), true);
-    ASSERT_EQ(*(collModBuckets->getDryRun()), true);
+    EXPECT_EQ(collModBuckets->getChangeStreamPreAndPostImages()->getEnabled(), true);
+    EXPECT_EQ(std::get<int64_t>(*(collModBuckets->getExpireAfterSeconds())), 100);
+    EXPECT_EQ(*(collModBuckets->getTimeseries()->getGranularity()), BucketGranularityEnum::Seconds);
+    EXPECT_EQ(*(collModBuckets->getTimeseriesBucketsMayHaveMixedSchemaData()), true);
+    EXPECT_EQ(*(collModBuckets->getDryRun()), true);
 }
 
 // Collmods that specify an index should have that index correctly translated to timeseries buckets
@@ -187,8 +161,8 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModViewTranslationInvalidMod) {
 
 // Check that timeseries options are correctly translated to a new CollMod.
 TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTSBucketingParametersUnchanged", true);
+    unittest::ServerParameterGuard fixedBucketingCatalogController(
+        "featureFlagFixedBucketingCatalog", true);
 
     auto collModTimeseries = CollModTimeseries();
     // Create a command that requires timeseries translation.
@@ -203,12 +177,27 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
     CreateCommand cmd = CreateCommand(testNss);
     cmd.getCreateCollectionRequest().setTimeseries(std::move(timeseriesOptions));
     uassertStatusOK(createCollection(_opCtx, cmd));
+    {
+        // Ensure the collection has fixedBucketing set to true.
+        const auto collectionAcquisition = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest(_resolveTimeseriesNss(testNss),
+                                         PlacementConcern{boost::none, ShardVersion::UNTRACKED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        ASSERT_TRUE(collectionAcquisition.exists());
+        ASSERT_TRUE(
+            collectionAcquisition.getCollectionPtr()->getTimeseriesOptions()->getFixedBucketing());
+    }
 
     auto status = timeseries::processCollModCommandWithTimeSeriesTranslation(
         _opCtx, testNss, collModCmd, false, nullptr);
 
     ASSERT_OK(status);
-    // Editing timeseries options sets a flag in the collection that we can check.
+    // Verify the timeseries options were translated: a granularity of minutes yields a
+    // bucketMaxSpanSeconds of 86400, and fixedBucketing is forced to false because the bucketing
+    // parameters changed.
     auto resolvedNss = _resolveTimeseriesNss(testNss);
     {
         const auto collectionAcquisition = acquireCollection(
@@ -218,10 +207,13 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
-        // Assert the bucketing parameters have changed on the collection.
         ASSERT_TRUE(collectionAcquisition.exists());
-        ASSERT_TRUE(
-            *collectionAcquisition.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
+        const auto& tsOpts = collectionAcquisition.getCollectionPtr()->getTimeseriesOptions();
+        ASSERT_TRUE(tsOpts.has_value());
+        EXPECT_EQ(BucketGranularityEnum::Minutes, *tsOpts->getGranularity());
+        EXPECT_EQ(86400, *tsOpts->getBucketMaxSpanSeconds());
+        // Bucketing parameters changed: fixedBucketing must be explicitly set to 'false'.
+        EXPECT_EQ(false, tsOpts->getFixedBucketing().value_or(true));
     }
     _addNsToValidate(testNss);
 }
@@ -229,9 +221,7 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
 // If timeseries translation and view translation are both required, both should be executed.
 // TODO SERVER-123350: Remove this test once 9.0 is last LTS.
 TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndView) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTSBucketingParametersUnchanged", true);
-    RAIIServerParameterControllerForTest viewlessController(
+    unittest::ServerParameterGuard viewlessController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
 
     auto collModTimeseries = CollModTimeseries();
@@ -268,7 +258,8 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndV
 
     // View translation is successful if this function returns OK.
     ASSERT_OK(status);
-    // Editing timeseries options sets a flag in the collection that we can check.
+    // Verify the timeseries options were translated: a granularity of minutes yields a
+    // bucketMaxSpanSeconds of 86400.
     auto bucketsColl =
         NamespaceString::createNamespaceString_forTest("test.system.buckets.curColl");
     {
@@ -279,10 +270,12 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndV
                                          repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
-        // Assert the bucketing parameters have changed on the collection.
         ASSERT_TRUE(collectionAcquisition.exists());
-        ASSERT_TRUE(
-            *collectionAcquisition.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
+        const auto& tsOpts = collectionAcquisition.getCollectionPtr()->getTimeseriesOptions();
+        ASSERT_TRUE(tsOpts.has_value());
+        EXPECT_EQ(BucketGranularityEnum::Minutes, *tsOpts->getGranularity());
+        EXPECT_EQ(86400, *tsOpts->getBucketMaxSpanSeconds());
+        EXPECT_FALSE(tsOpts->getFixedBucketing().has_value());
     }
     _addNsToValidate(testNss);
 }
@@ -311,7 +304,7 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationNotT
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
         ASSERT_TRUE(collectionAcquisition.exists());
-        ASSERT_FALSE(collectionAcquisition.getCollectionPtr()->getTimeseriesOptions());
+        EXPECT_FALSE(collectionAcquisition.getCollectionPtr()->getTimeseriesOptions());
     }
     _addNsToValidate(testNss);
 }

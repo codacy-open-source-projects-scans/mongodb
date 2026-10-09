@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,7 +9,6 @@
  * TODO: De-inline.
  */
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/platform/bits.h"
@@ -50,6 +23,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional.hpp>
@@ -59,7 +33,7 @@
 #include <strings.h>
 #endif
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 namespace str {
@@ -74,7 +48,7 @@ namespace str {
 
     TODO: To avoid implicit conversions in relational operation expressions, this stream
     class should provide a full symmetric set of relational operators vs itself, vs
-    std::string, vs mongo::StringData, and vs const char*, but that's a lot of functions.
+    std::string, vs std::string_view, and vs const char*, but that's a lot of functions.
 */
 class stream {
 public:
@@ -87,8 +61,15 @@ public:
     operator std::string() const {
         return ss.str();
     }
-    operator StringData() const {
+    operator std::string_view() const {
         return ss.stringData();
+    }
+
+    // Explicit ostream operator to resolve ambiguity: with std::string_view = std::string_view,
+    // both operator std::string() and operator std::string_view() (= operator std::string_view())
+    // would compete for operator<<(ostream, ...), causing an ambiguous overload error.
+    friend std::ostream& operator<<(std::ostream& os, const stream& s) {
+        return os << s.ss.stringData();
     }
 
     /**
@@ -99,11 +80,11 @@ public:
     template <typename R, typename... Args>
     stream& operator<<(R (*val)(Args...)) = delete;
 
-    bool operator==(StringData s) const {
+    bool operator==(std::string_view s) const {
         return ss.stringData() == s;
     }
 
-    auto operator<=>(StringData s) const {
+    auto operator<=>(std::string_view s) const {
         return ss.stringData() <=> s;
     }
 };
@@ -155,7 +136,7 @@ inline const char* after(const char* s, char x) {
     const char* p = strchr(s, x);
     return (p != nullptr) ? p + 1 : "";
 }
-inline mongo::StringData after(mongo::StringData s, char x) {
+inline std::string_view after(std::string_view s, char x) {
     auto pos = s.find(x);
     return s.substr(pos == std::string::npos ? s.size() : pos + 1);
 }
@@ -165,38 +146,38 @@ inline const char* after(const char* s, const char* x) {
     const char* p = strstr(s, x);
     return (p != nullptr) ? p + strlen(x) : "";
 }
-inline mongo::StringData after(mongo::StringData s, mongo::StringData x) {
+inline std::string_view after(std::string_view s, std::string_view x) {
     auto pos = s.find(x);
     return s.substr(pos == std::string::npos ? s.size() : pos + x.size());
 }
 
 /** @return true if s contains x */
-inline bool contains(mongo::StringData s, mongo::StringData x) {
+inline bool contains(std::string_view s, std::string_view x) {
     return s.find(x) != std::string::npos;
 }
 
 /** @return true if s contains x */
-inline bool contains(mongo::StringData s, char x) {
+inline bool contains(std::string_view s, char x) {
     return s.find(x) != std::string::npos;
 }
 
 /** @return everything before the character x, else entire string */
-inline mongo::StringData before(const char* s, char x) {
+inline std::string_view before(const char* s, char x) {
     const char* p = s;
     // loop instead of strchr, so if we fail to find we don't have to iterate again.
     for (; *p && *p != x; ++p) {
     }
-    return mongo::StringData(s, p - s);
+    return std::string_view(s, p - s);
 }
 
 /** @return everything before the character x, else entire string */
-inline mongo::StringData before(mongo::StringData s, char x) {
+inline std::string_view before(std::string_view s, char x) {
     auto pos = s.find(x);
     return pos == std::string::npos ? s : s.substr(0, pos);
 }
 
 /** @return everything before the string x, else entire string */
-inline mongo::StringData before(mongo::StringData s, mongo::StringData x) {
+inline std::string_view before(std::string_view s, std::string_view x) {
     auto pos = s.find(x);
     return pos != std::string::npos ? s.substr(0, pos) : s;
 }
@@ -237,14 +218,11 @@ inline unsigned toUnsigned(const std::string& a) {
    If char not present, 'before' contains entire input string and 'after' is empty.
    @return true if char found
 */
-inline bool splitOn(mongo::StringData s,
-                    char c,
-                    mongo::StringData& before,
-                    mongo::StringData& after) {
+inline bool splitOn(std::string_view s, char c, std::string_view& before, std::string_view& after) {
     auto pos = s.find(c);
     if (pos == std::string::npos) {
         before = s;
-        after = mongo::StringData();
+        after = std::string_view();
         return false;
     }
     before = s.substr(0, pos);
@@ -252,20 +230,45 @@ inline bool splitOn(mongo::StringData s,
     return true;
 }
 /** split scanning reverse direction. Splits ONCE ONLY. */
-inline bool rSplitOn(mongo::StringData s,
+inline bool rSplitOn(std::string_view s,
                      char c,
-                     mongo::StringData& before,
-                     mongo::StringData& after) {
+                     std::string_view& before,
+                     std::string_view& after) {
     auto pos = s.rfind(c);
     if (pos == std::string::npos) {
         before = s;
-        after = mongo::StringData();
+        after = std::string_view();
         return false;
     }
     before = s.substr(0, pos);
     after = s.substr(pos + 1);
     return true;
 }
+
+class SplitIterator {
+public:
+    SplitIterator(std::string_view input, char delim) : _remaining(input), _delim(delim) {
+        if (input.empty()) {
+            _remaining = boost::none;
+        }
+    }
+
+    boost::optional<std::string_view> next();
+
+    std::vector<std::string_view> collect();
+
+private:
+    boost::optional<std::string_view> _remaining;
+    char _delim;
+};
+
+/**
+ * @return a generator for the components of `input` delimited by `delim`
+ */
+inline SplitIterator split_iter(std::string_view input, char delim) {
+    return SplitIterator(input, delim);
+}
+
 
 /** @return number of occurrences of c in s */
 inline unsigned count(const std::string& s, char c) {
@@ -277,7 +280,7 @@ inline unsigned count(const std::string& s, char c) {
 }
 
 /** trim leading spaces. spaces only, not tabs etc. */
-inline mongo::StringData ltrim(mongo::StringData s) {
+inline std::string_view ltrim(std::string_view s) {
     auto i = s.data();
     auto end = s.data() + s.size();
     for (; i != end && *i == ' '; ++i) {
@@ -326,7 +329,7 @@ inline bool isUTF8ContinuationByte(char charByte) {
  * Assuming 'str' stores a UTF-8 string, returns the number of UTF codepoints. The return value is
  * undefined if the input is not a well formed UTF-8 string.
  */
-inline size_t lengthInUTF8CodePoints(mongo::StringData str) {
+inline size_t lengthInUTF8CodePoints(std::string_view str) {
     size_t strLen = 0;
     for (char byte : str) {
         strLen += !isUTF8ContinuationByte(byte);
@@ -371,9 +374,9 @@ Iterator UTF8SafeTruncation(Iterator begin, Iterator end, std::size_t maximum) {
     return it.base() + offset;
 }
 
-inline StringData UTF8SafeTruncation(StringData input, std::size_t maximum) {
+inline std::string_view UTF8SafeTruncation(std::string_view input, std::size_t maximum) {
     auto truncatedEnd = UTF8SafeTruncation(input.begin(), input.end(), maximum);
-    return StringData(input.data(), truncatedEnd - input.begin());
+    return input.substr(0, truncatedEnd - input.begin());
 }
 
 inline int caseInsensitiveCompare(const char* s1, const char* s2) {
@@ -385,7 +388,7 @@ inline int caseInsensitiveCompare(const char* s1, const char* s2) {
 }
 
 /** Uses tolower, and therefore does not handle some languages correctly. */
-constexpr bool equalCaseInsensitive(StringData a, StringData b) {
+constexpr bool equalCaseInsensitive(std::string_view a, std::string_view b) {
     return a.size() == b.size() &&
         std::equal(a.begin(), a.end(), b.begin(), b.end(), [](char ac, char bc) {
                return ctype::toLower(ac) == ctype::toLower(bc);
@@ -396,7 +399,7 @@ void splitStringDelim(const std::string& str, std::vector<std::string>* res, cha
 
 void joinStringDelim(const std::vector<std::string>& strs, std::string* res, char delim);
 
-inline std::string toLower(StringData input) {
+inline std::string toLower(std::string_view input) {
     std::string r{input};
     for (char& c : r)
         c = ctype::toLower(c);
@@ -414,9 +417,9 @@ public:
      * For convenience, character 255 is greater than anything else.
      * @param lexOnly - compare all characters lexically, including digits.
      */
-    static int cmp(StringData s1, StringData s2, bool lexOnly);
-    int cmp(StringData s1, StringData s2) const;
-    bool operator()(StringData s1, StringData s2) const;
+    static int cmp(std::string_view s1, std::string_view s2, bool lexOnly);
+    int cmp(std::string_view s1, std::string_view s2) const;
+    bool operator()(std::string_view s1, std::string_view s2) const;
 
 private:
     bool _lexOnly;
@@ -426,14 +429,14 @@ private:
  * A method to escape whitespace and control characters in strings. For example, the string "\t"
  * goes to "\\t". If `escape_slash` is true, then "/" goes to "\\/".
  */
-std::string escape(StringData s, bool escape_slash = false);
+std::string escape(std::string_view s, bool escape_slash = false);
 
 /**
  * Converts 'integer' from a base-10 string to a size_t value or returns boost::none if 'integer'
  * is not a valid base-10 string. A valid string is not allowed to have anything but decimal
  * numerals, not even a +/- prefix or leading/trailing whitespace.
  */
-boost::optional<size_t> parseUnsignedBase10Integer(StringData integer);
+boost::optional<size_t> parseUnsignedBase10Integer(std::string_view integer);
 
 /**
  * Converts a double to a string with specified precision. If unspecified, default to 17, which is

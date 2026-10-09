@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -38,11 +12,12 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo::unittest::match {
 using namespace ::testing;
@@ -51,12 +26,12 @@ using ::testing::Matcher;
 // TODO(SERVER-120602): Replace when we have a safer bin data API.
 struct BSONBinDataView {
     BinDataType type;
-    StringData data;
+    std::string_view data;
 
     friend bool operator==(const BSONBinDataView&, const BSONBinDataView&) = default;
 };
 
-namespace MONGO_MOD_FILE_PRIVATE match_details {
+namespace [[MONGO_MOD_FILE_PRIVATE]] match_details {
 
 using AnythingMatcher = decltype(_);
 
@@ -100,11 +75,11 @@ inline BSONBinDataView makeBinDataView(BSONElement el) {
     auto data = el.binData(size);
     return {
         .type = el.binDataType(),
-        .data = StringData{data, static_cast<size_t>(size)},
+        .data = std::string_view{data, static_cast<size_t>(size)},
     };
 }
 
-}  // namespace MONGO_MOD_FILE_PRIVATE match_details
+}  // namespace match_details
 
 /**
  * `BSONObjElements(match)` match all elements of a BSONObj against a matcher.
@@ -137,7 +112,7 @@ MATCHER_P3(
     value,
     fmt::format("is a BSONElement which {}has name which {} and type which {} and value which {}{}",
                 negation ? "not (" : "",
-                DescribeMatcher<StringData>(name),
+                DescribeMatcher<std::string_view>(name),
                 DescribeMatcher<BSONType>(type),
                 match_details::describeTypeErasedMatcher(value),
                 negation ? ")" : "")) {
@@ -223,6 +198,20 @@ BSON_MATCHER_SIMPLE_CMP_(BSONObjLE, "<=", <=);
 BSON_MATCHER_SIMPLE_CMP_(BSONObjGT, ">", >);
 BSON_MATCHER_SIMPLE_CMP_(BSONObjGE, ">=", >=);
 #undef BSON_MATCHER_SIMPLE_CMP_
+
+/**
+ * `BSONObjBinaryEQ(obj)` Matcher for bson objects that test equality via BSONObj::binaryEqual.
+ *
+ * Example:
+ *   ASSERT_THAT(actual, BSONObjBinaryEQ(expected));
+ */
+MATCHER_P(BSONObjBinaryEQ,
+          rhs,
+          fmt::format("{} a BSONObj binary equal to {}",
+                      negation ? "isn't" : "is",
+                      rhs.toString())) {
+    return arg.binaryEqual(rhs);
+}
 
 /**
  * `BSONElement{EQ,NE,LT,LE,GT,GE}(elem)` Comparsion machers for bson elemens that uses

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/json.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -34,11 +8,12 @@
 #include "mongo/db/exec/expression/evaluate_test_helpers.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace expression_evaluation_test {
+using namespace std::literals::string_view_literals;
 
 TEST(ExpressionMetaTest, ExpressionMetaSearchScore) {
     auto expCtx = ExpressionContextForTest{};
@@ -178,8 +153,6 @@ TEST(ExpressionMetaTest, ExpressionMetaVectorSearchScore) {
 }
 
 TEST(ExpressionMetaTest, ExpressionMetaScore) {
-    // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson("{$meta: \"score\"}");
     auto expressionMeta =
@@ -191,8 +164,6 @@ TEST(ExpressionMetaTest, ExpressionMetaScore) {
 }
 
 TEST(ExpressionMetaTest, ExpressionMetaScoreDetails) {
-    // Used to set 'scoreDetails' metadata.
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     auto expCtx = ExpressionContextForTest{};
     BSONObj expr = fromjson("{$meta: \"scoreDetails\"}");
     auto expressionMeta =
@@ -207,8 +178,8 @@ TEST(ExpressionMetaTest, ExpressionMetaScoreDetails) {
 }
 
 TEST(ExpressionMetaTest, ExpressionMetaStream) {
-    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
-        "featureFlagStreams", true);
+    unittest::ServerParameterGuard searchHybridScoringPrerequisitesController("featureFlagStreams",
+                                                                              true);
 
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
@@ -257,7 +228,7 @@ TEST(ExpressionMetaTest, ExpressionMetaStream) {
     // Test reading header metadata with path.
     expr = fromjson("{$meta: \"stream.source.headers.k\"}");
     exp = ExpressionMeta::parse(&expCtx, expr.firstElement(), vps);
-    ASSERT_VALUE_EQ(Value(std::vector<Value>{Value("foo"_sd), Value("foo2"_sd)}),
+    ASSERT_VALUE_EQ(Value(std::vector<Value>{Value("foo"sv), Value("foo2"sv)}),
                     exp->evaluate(makeDoc(kafkaMeta), &expCtx.variables));
 
     // Test reading window metadata.
@@ -286,12 +257,12 @@ TEST(ExpressionMetaTest, ExpressionMetaStream) {
     }
     )");
     exp = ExpressionLet::parse(&expCtx, expr.firstElement(), vps);
-    ASSERT_VALUE_EQ(Value("foo-hello"_sd), exp->evaluate(makeDoc(kafkaMeta), &expCtx.variables));
+    ASSERT_VALUE_EQ(Value("foo-hello"sv), exp->evaluate(makeDoc(kafkaMeta), &expCtx.variables));
 }
 
 TEST(ExpressionMetaTest, ExpressionMetaStreamSerialization) {
-    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
-        "featureFlagStreams", true);
+    unittest::ServerParameterGuard searchHybridScoringPrerequisitesController("featureFlagStreams",
+                                                                              true);
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
 
@@ -315,7 +286,7 @@ TEST(ExpressionMetaTest, ExpressionMetaStreamSerialization) {
     auto result = expressionMeta->evaluate(doc, &expCtx.variables).getDocument();
     expressionMeta = ExpressionMeta::parse(
         &expCtx2,
-        expressionMeta->serialize(SerializationOptions{.serializeForCloning = true})
+        expressionMeta->serialize(query_shape::SerializationOptions{.serializeForCloning = true})
             .getDocument()
             .toBson()
             .firstElement(),
@@ -325,92 +296,92 @@ TEST(ExpressionMetaTest, ExpressionMetaStreamSerialization) {
 }
 
 TEST(ExpressionTypeTest, WithMinKeyValue) {
-    assertExpectedResults("$type", {{{Value(MINKEY)}, Value("minKey"_sd)}});
+    assertExpectedResults("$type", {{{Value(MINKEY)}, Value("minKey"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithDoubleValue) {
-    assertExpectedResults("$type", {{{Value(1.0)}, Value("double"_sd)}});
+    assertExpectedResults("$type", {{{Value(1.0)}, Value("double"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithStringValue) {
-    assertExpectedResults("$type", {{{Value("stringValue"_sd)}, Value("string"_sd)}});
+    assertExpectedResults("$type", {{{Value("stringValue"sv)}, Value("string"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithObjectValue) {
     BSONObj objectVal = fromjson("{a: {$literal: 1}}");
-    assertExpectedResults("$type", {{{Value(objectVal)}, Value("object"_sd)}});
+    assertExpectedResults("$type", {{{Value(objectVal)}, Value("object"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithArrayValue) {
-    assertExpectedResults("$type", {{{Value(BSON_ARRAY(1 << 2))}, Value("array"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSON_ARRAY(1 << 2))}, Value("array"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithBinDataValue) {
     BSONBinData binDataVal = BSONBinData("", 0, BinDataGeneral);
-    assertExpectedResults("$type", {{{Value(binDataVal)}, Value("binData"_sd)}});
+    assertExpectedResults("$type", {{{Value(binDataVal)}, Value("binData"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithUndefinedValue) {
-    assertExpectedResults("$type", {{{Value(BSONUndefined)}, Value("undefined"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONUndefined)}, Value("undefined"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithOIDValue) {
-    assertExpectedResults("$type", {{{Value(OID())}, Value("objectId"_sd)}});
+    assertExpectedResults("$type", {{{Value(OID())}, Value("objectId"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithBoolValue) {
-    assertExpectedResults("$type", {{{Value(true)}, Value("bool"_sd)}});
+    assertExpectedResults("$type", {{{Value(true)}, Value("bool"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithDateValue) {
     Date_t dateVal = BSON("" << DATENOW).firstElement().Date();
-    assertExpectedResults("$type", {{{Value(dateVal)}, Value("date"_sd)}});
+    assertExpectedResults("$type", {{{Value(dateVal)}, Value("date"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithNullValue) {
-    assertExpectedResults("$type", {{{Value(BSONNULL)}, Value("null"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONNULL)}, Value("null"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithRegexValue) {
-    assertExpectedResults("$type", {{{Value(BSONRegEx("a.b"))}, Value("regex"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONRegEx("a.b"))}, Value("regex"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithSymbolValue) {
-    assertExpectedResults("$type", {{{Value(BSONSymbol("a"))}, Value("symbol"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONSymbol("a"))}, Value("symbol"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithDBRefValue) {
-    assertExpectedResults("$type", {{{Value(BSONDBRef("", OID()))}, Value("dbPointer"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONDBRef("", OID()))}, Value("dbPointer"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithCodeWScopeValue) {
     assertExpectedResults(
         "$type",
-        {{{Value(BSONCodeWScope("var x = 3", BSONObj()))}, Value("javascriptWithScope"_sd)}});
+        {{{Value(BSONCodeWScope("var x = 3", BSONObj()))}, Value("javascriptWithScope"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithCodeValue) {
-    assertExpectedResults("$type", {{{Value(BSONCode("var x = 3"))}, Value("javascript"_sd)}});
+    assertExpectedResults("$type", {{{Value(BSONCode("var x = 3"))}, Value("javascript"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithIntValue) {
-    assertExpectedResults("$type", {{{Value(1)}, Value("int"_sd)}});
+    assertExpectedResults("$type", {{{Value(1)}, Value("int"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithDecimalValue) {
-    assertExpectedResults("$type", {{{Value(Decimal128(0.3))}, Value("decimal"_sd)}});
+    assertExpectedResults("$type", {{{Value(Decimal128(0.3))}, Value("decimal"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithLongValue) {
-    assertExpectedResults("$type", {{{Value(1LL)}, Value("long"_sd)}});
+    assertExpectedResults("$type", {{{Value(1LL)}, Value("long"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithTimestampValue) {
-    assertExpectedResults("$type", {{{Value(Timestamp(0, 0))}, Value("timestamp"_sd)}});
+    assertExpectedResults("$type", {{{Value(Timestamp(0, 0))}, Value("timestamp"sv)}});
 }
 
 TEST(ExpressionTypeTest, WithMaxKeyValue) {
-    assertExpectedResults("$type", {{{Value(MAXKEY)}, Value("maxKey"_sd)}});
+    assertExpectedResults("$type", {{{Value(MAXKEY)}, Value("maxKey"sv)}});
 }
 
 }  // namespace expression_evaluation_test

@@ -1,42 +1,16 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/rss/persistence_provider.h"
+#include "mongo/db/storage/flush_all_files_observer.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/kv/kv_engine.h"
@@ -45,11 +19,11 @@
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/storage_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cache_pressure_monitor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_event_handler.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_extensions.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_prepared_transactions_iterator.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
@@ -57,13 +31,13 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/platform/atomic.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/elapsed_tracker.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
+#include "mongo/util/synchronized_value.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -74,6 +48,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <wiredtiger.h>
@@ -268,13 +243,14 @@ public:
         return _clockSource;
     }
 
-    virtual WiredTigerOplogManager* getOplogManager() const {
-        return nullptr;
-    }
-
     size_t getCacheSizeMB() const override {
         return _wtConfig.cacheSizeMB;
     }
+
+    StatusWith<int64_t> getIndexStorageSize(
+        OperationContext* opCtx, const std::vector<std::string>& indexIdents) const override;
+
+    StatusWith<int64_t> getSharedHistoryStoreStorageSize(OperationContext* opCtx) const override;
 
     void setRecordStoreExtraOptions(const std::string& options);
 
@@ -284,28 +260,11 @@ public:
 
     BlindWritePolicy chooseBlindWritePolicy(OperationContext* opCtx) override;
 
-    Status insertIntoIdent(RecoveryUnit& ru,
-                           StringData ident,
-                           IdentKey key,
-                           std::span<const char> value,
-                           BlindWritePolicy policy) override;
+    std::unique_ptr<KVEngineDirectCrudCursor> getDirectCursor(RecoveryUnit& ru,
+                                                              std::string_view ident,
+                                                              BlindWritePolicy policy) override;
 
-    Status updateInIdent(RecoveryUnit& ru,
-                         StringData ident,
-                         IdentKey key,
-                         std::span<const char> value,
-                         BlindWritePolicy policy) override;
-
-    StatusWith<UniqueBuffer> getFromIdent(RecoveryUnit& ru,
-                                          StringData ident,
-                                          IdentKey key) override;
-
-    Status deleteFromIdent(RecoveryUnit& ru,
-                           StringData ident,
-                           IdentKey key,
-                           BlindWritePolicy policy) override;
-
-    virtual Status alterMetadata(StringData uri, StringData config) {
+    virtual Status alterMetadata(std::string_view uri, std::string_view config) {
         MONGO_UNREACHABLE;
     }
 
@@ -367,7 +326,7 @@ public:
      * schemaEpoch.
      */
     virtual void publishIdent(WiredTigerRecoveryUnit& ru,
-                              StringData ident,
+                              const std::string& uri,
                               uint64_t schemaEpoch) = 0;
 
 protected:
@@ -384,7 +343,7 @@ protected:
     /**
      * Returns the table id for the given ident, generating one if it hasn't already been assigned.
      */
-    uint64_t _getTableIdForIdent(StringData ident);
+    uint64_t _getTableIdForIdent(std::string_view ident);
 
     // Configuration parameters to configure the WiredTiger instance.
     WiredTigerConfig _wtConfig;
@@ -466,7 +425,7 @@ public:
     Status createRecordStore(const rss::PersistenceProvider& provider,
                              RecoveryUnit& ru,
                              const NamespaceString& ns,
-                             StringData ident,
+                             std::string_view ident,
                              const RecordStore::Options& options) override {
         // Parameters required for a standard WiredTigerRecordStore.
         return _createRecordStore(provider,
@@ -480,16 +439,16 @@ public:
 
     std::unique_ptr<RecordStore> getRecordStore(OperationContext* opCtx,
                                                 const NamespaceString& nss,
-                                                StringData ident,
+                                                std::string_view ident,
                                                 const RecordStore::Options& options,
                                                 boost::optional<UUID> uuid) override;
 
     std::unique_ptr<RecordStore> getInternalRecordStore(RecoveryUnit& ru,
-                                                        StringData ident,
+                                                        std::string_view ident,
                                                         KeyFormat keyFormat) override;
 
     std::unique_ptr<RecordStore> makeInternalRecordStore(RecoveryUnit& ru,
-                                                         StringData ident,
+                                                         std::string_view ident,
                                                          KeyFormat keyFormat) override;
 
     Status createSortedDataInterface(
@@ -497,7 +456,7 @@ public:
         RecoveryUnit&,
         const NamespaceString& nss,
         const UUID& uuid,
-        StringData ident,
+        std::string_view ident,
         const IndexConfig& indexConfig,
         const boost::optional<mongo::BSONObj>& storageEngineIndexOptions) override;
 
@@ -505,7 +464,7 @@ public:
                                                                 RecoveryUnit& ru,
                                                                 const NamespaceString& nss,
                                                                 const UUID& uuid,
-                                                                StringData ident,
+                                                                std::string_view ident,
                                                                 const IndexConfig& config,
                                                                 KeyFormat keyFormat) override;
 
@@ -520,13 +479,13 @@ public:
      * absolutely required to ensure the import succeeds
      */
     Status importRecordStore(RecoveryUnit& ru,
-                             StringData ident,
+                             std::string_view ident,
                              const BSONObj& storageMetadata,
                              bool panicOnCorruptWtMetadata,
                              bool repair) override;
 
     Status importSortedDataInterface(RecoveryUnit&,
-                                     StringData ident,
+                                     std::string_view ident,
                                      const BSONObj& storageMetadata,
                                      bool panicOnCorruptWtMetadata,
                                      bool repair) override;
@@ -534,22 +493,22 @@ public:
     /**
      * Drops the specified ident for resumable index builds.
      */
-    Status dropSortedDataInterface(RecoveryUnit&, StringData ident) override;
+    Status dropSortedDataInterface(RecoveryUnit&, std::string_view ident) override;
 
     Status dropIdent(RecoveryUnit& ru,
-                     StringData ident,
+                     std::string_view ident,
                      bool identHasSizeInfo,
-                     const StorageEngine::DropIdentCallback& onDrop = nullptr,
-                     boost::optional<uint64_t> schemaEpoch = boost::none) override;
+                     boost::optional<uint64_t> schemaEpoch,
+                     bool waitForLocks) override;
 
-    void dropIdentForImport(Interruptible&, RecoveryUnit&, StringData ident) override;
+    void dropIdentForImport(Interruptible&, RecoveryUnit&, std::string_view ident) override;
 
     void alterIdentMetadata(RecoveryUnit&,
-                            StringData ident,
+                            std::string_view ident,
                             const IndexConfig& config,
                             bool isForceUpdateMetadata) override;
 
-    Status alterMetadata(StringData uri, StringData config) override;
+    Status alterMetadata(std::string_view uri, std::string_view config) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -568,17 +527,17 @@ public:
 
     StatusWith<std::deque<std::string>> extendBackupCursor() override;
 
-    int64_t getIdentSize(RecoveryUnit&, StringData ident) override;
+    int64_t getIdentSize(RecoveryUnit&, std::string_view ident) override;
 
-    Status repairIdent(RecoveryUnit& ru, StringData ident) override;
+    Status repairIdent(RecoveryUnit& ru, std::string_view ident) override;
 
     Status recoverOrphanedIdent(const rss::PersistenceProvider&,
                                 RecoveryUnit& ru,
                                 const NamespaceString& nss,
-                                StringData ident,
+                                std::string_view ident,
                                 const RecordStore::Options& options) override;
 
-    bool hasIdent(RecoveryUnit&, StringData ident) const override;
+    bool hasIdent(RecoveryUnit&, std::string_view ident) const override;
 
     std::vector<std::string> getAllIdents(RecoveryUnit&) const override;
 
@@ -590,13 +549,21 @@ public:
 
     void setJournalListener(JournalListener* jl) final;
 
+    void setFlushAllFilesObserver(FlushAllFilesObserver* observer) final;
+
+    FlushAllFilesObserver* getFlushAllFilesObserver() const final;
+
     void setLastMaterializedLsn(uint64_t lsn) final;
 
-    void setRecoveryCheckpointMetadata(StringData checkpointMetadata) final;
+    Status setRecoveryCheckpointMetadata(std::string_view checkpointMetadata) final;
 
     void promoteToLeader() final;
 
+    void demoteToFollower() final;
+
     void setStableTimestamp(Timestamp stableTimestamp, bool force) override;
+
+    void setStepDownTimestamp(WithLock, Timestamp stepDownTimestamp) override;
 
     void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
 
@@ -636,11 +603,15 @@ public:
     uint64_t getRawAllDurableTimestamp() const override;
     void pinAllDurableTimestamp(uint64_t ts) override;
     void unpinAllDurableTimestamp(uint64_t ts) override;
-    void publishIdent(WiredTigerRecoveryUnit& ru, StringData ident, uint64_t schemaEpoch) override;
+    void publishIdent(WiredTigerRecoveryUnit& ru,
+                      const std::string& uri,
+                      uint64_t schemaEpoch) override;
 
     bool usesSchemaEpochs() const override {
         return _usesSchemaEpochs;
     }
+    boost::optional<uint64_t> getStableSchemaEpoch() override;
+    void setStableSchemaEpoch(uint64_t schemaEpoch) override;
 
     bool supportsReadConcernSnapshot() const final;
 
@@ -657,20 +628,26 @@ public:
     bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
 
     Timestamp getStableTimestamp() const override;
+    Timestamp getStepDownTimestamp() const override;
     Timestamp getOldestTimestamp() const override;
     Timestamp getCheckpointTimestamp() const override;
+    boost::optional<uint64_t> getStepDownEpoch() const;
 
     void syncSizeInfo(bool sync) const;
 
     /*
      * Always returns a non-null pointer and is valid for the lifetime of this KVEngine. However,
-     * the WiredTigerOplogManager may not have been initialized, which happens after the oplog
+     * the StorageOplogManager may not have been initialized, which happens after the oplog
      * RecordStore is constructed.
      *
-     * See WiredTigerOplogManager for details on thread safety.
+     * See StorageOplogManager for details on thread safety.
      */
-    WiredTigerOplogManager* getOplogManager() const override {
+    StorageOplogManager* getOplogManager() const override {
         return _oplogManager.get();
+    }
+
+    bool isReplSet() const final {
+        return _isReplSet;
     }
 
     /**
@@ -723,7 +700,7 @@ public:
      * file can not be found. This will attempt to locate a file even if the storage engine's own
      * metadata is not aware of the ident. This is intended for database repair purposes only.
      */
-    boost::optional<boost::filesystem::path> getDataFilePathForIdent(StringData ident) const;
+    boost::optional<boost::filesystem::path> getDataFilePathForIdent(std::string_view ident) const;
 
     /**
      * Returns the minimum possible Timestamp value in the oplog that replication may need for
@@ -751,7 +728,15 @@ public:
 
     Status autoCompact(RecoveryUnit&, const AutoCompactOptions& options) override;
 
+    StatusWith<std::string> wiredTigerRepair(const std::string& config) override;
+
+    Status fixDatabaseSize() override;
+
+    Status pauseAutoCompactForReplicaSetWritesBlock(RecoveryUnit&) override;
+
     bool hasOngoingLiveRestore() override;
+
+    bool isInLeaderMode() override;
 
     static Status updateEvictionThreadsMax(const int32_t& threadsMax);
 
@@ -776,9 +761,9 @@ public:
 
     void dump() const override;
 
-    StatusWith<BSONObj> getStorageMetadata(StringData ident) const override;
+    StatusWith<BSONObj> getStorageMetadata(std::string_view ident) const override;
 
-    KeyFormat getKeyFormat(RecoveryUnit&, StringData ident) const override;
+    KeyFormat getKeyFormat(RecoveryUnit&, std::string_view ident) const override;
 
     /**
      * As part of the periodic runner cache pressure rollback thread, this function will
@@ -791,17 +776,19 @@ public:
     bool underCachePressure(int concurrentOpOuts) override;
 
     BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
-                                    StringData flagName,
+                                    std::string_view flagName,
                                     boost::optional<bool> flagValue) const override;
 
     boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
-                                                    StringData flagName) const override;
+                                                    std::string_view flagName) const override;
 
     [[nodiscard]] BSONObj setStorageTierToStorageOptions(const BSONObj& storageEngineOptions,
                                                          StorageTierLevelEnum value) const override;
 
     boost::optional<StorageTierLevelEnum> getStorageTierFromStorageOptions(
         const BSONObj& storageEngineOptions) const override;
+
+    boost::optional<BSONObj> collectStorageStats() override;
 
     // TODO SERVER-81069: Remove this since it's intrinsically tied to encryption options only.
     BSONObj getSanitizedStorageOptionsForSecondaryReplication(
@@ -827,16 +814,17 @@ public:
         return _eventHandler.isWtConnReadyForStatsCollection();
     }
 
+    std::unique_lock<std::mutex> lockStepDown() override {
+        return std::unique_lock(_stepdownMutex);
+    }
+
 private:
-    struct IdentToDrop {
-        std::string uri;
-        StorageEngine::DropIdentCallback callback;
-    };
+    Status _reconfigureAutoCompact(RecoveryUnit& ru, const AutoCompactOptions& options);
 
     Status _createRecordStore(const rss::PersistenceProvider& provider,
                               RecoveryUnit& ru,
                               const NamespaceString& ns,
-                              StringData ident,
+                              std::string_view ident,
                               KeyFormat keyFormat,
                               const BSONObj& storageEngineCollectionOptions,
                               boost::optional<std::string> customBlockCompressor);
@@ -859,7 +847,7 @@ private:
     // Guarantees that the necessary directories exist in case the ident lives in a subdirectory of
     // the database (i.e. because of --directoryPerDb). The caller should hold the lock until
     // whatever they were doing with the ident has been persisted to disk.
-    [[nodiscard]] std::unique_lock<std::mutex> _ensureIdentPath(StringData ident);
+    [[nodiscard]] std::unique_lock<std::mutex> _ensureIdentPath(std::string_view ident);
 
     /**
      * Recreates a WiredTiger ident from the provided URI by dropping and recreating the ident.
@@ -907,10 +895,12 @@ private:
 
     // Removes empty directories associated with ident (or subdirectories, when startPos is set).
     // Returns true if directories were removed (or there weren't any to remove).
-    bool _removeIdentDirectoryIfEmpty(StringData ident, size_t startPos = 0);
+    bool _removeIdentDirectoryIfEmpty(std::string_view ident, size_t startPos = 0);
 
     // Wrapped method call to WT_SESSION::drop that handles sub-level error codes if applicable.
     Status _drop(WiredTigerSession& session, const char* uri, const char* config);
+
+    int _publishIdent(WiredTigerRecoveryUnit& ru, const std::string& uri, uint64_t schemaEpoch);
 
     mutable std::mutex _oldestActiveTransactionTimestampCallbackMutex;
     StorageEngine::OldestActiveTransactionTimestampCallback
@@ -918,7 +908,7 @@ private:
 
     WiredTigerFileVersion _fileVersion;
 
-    const std::unique_ptr<WiredTigerOplogManager> _oplogManager;
+    const std::unique_ptr<StorageOplogManager> _oplogManager;
 
     // This buffer is only used when the replicated fastcount collection is not available, so
     // nullptr is expected and valid when the replicated fastcount collection is enabled.
@@ -943,21 +933,28 @@ private:
     Timestamp _recoveryTimestamp;
 
     // Tracks the stable and oldest timestamps we've set on the storage engine.
-    AtomicWord<std::uint64_t> _oldestTimestamp;
-    AtomicWord<std::uint64_t> _stableTimestamp;
+    Atomic<std::uint64_t> _oldestTimestamp;
+    Atomic<std::uint64_t> _stableTimestamp;
+
+    // The last stepdown timestamp we've set for the storage engine, if any.
+    Atomic<Timestamp> _stepDownTimestamp;
+    std::mutex _stepdownMutex;
+
+    // Last successful publication. Retained across role changes.
+    synchronized_value<std::uint64_t> _lastPublishedMaterializedLsn{0};
 
     // Timestamp of data at startup. Used internally to advise checkpointing and recovery to a
     // timestamp. Provided by replication layer because WT does not persist timestamps.
-    AtomicWord<std::uint64_t> _initialDataTimestamp;
+    Atomic<std::uint64_t> _initialDataTimestamp;
 
-    AtomicWord<std::uint64_t> _oplogNeededForCrashRecovery;
+    Atomic<std::uint64_t> _oplogNeededForCrashRecovery;
 
     mutable std::mutex _oldestTimestampPinRequestsMutex;
     std::map<std::string, Timestamp> _oldestTimestampPinRequests;
 
     // Pins the oplog so that OplogTruncateMarkers will not truncate oplog history equal or newer to
     // this timestamp.
-    AtomicWord<std::uint64_t> _pinnedOplogTimestamp;
+    Atomic<std::uint64_t> _pinnedOplogTimestamp;
 
     std::mutex _checkpointMutex;
 
@@ -969,8 +966,8 @@ private:
     // successfully been checkpointed or not.
     //
     // This is valid because durability is a state all operations will converge to eventually.
-    AtomicWord<std::uint64_t> _currentCheckpointIteration{0};
-    AtomicWord<std::uint64_t> _finishedCheckpointIteration{0};
+    Atomic<std::uint64_t> _currentCheckpointIteration{0};
+    Atomic<std::uint64_t> _finishedCheckpointIteration{0};
 
     // Protects getting and setting the _journalListener below.
     std::mutex _journalListenerMutex;
@@ -983,8 +980,11 @@ private:
     // points is always valid.
     JournalListener* _journalListener = nullptr;
 
+    // Observer notified while flushing all files.
+    synchronized_value<FlushAllFilesObserver*> _flushAllFilesObserver{nullptr};
+
     // Counter and critical section mutex for waitUntilDurable
-    AtomicWord<unsigned> _lastSyncTime;
+    Atomic<unsigned> _lastSyncTime;
     std::mutex _lastSyncMutex;
 
     // A long-lived session for ensuring data is periodically flushed to disk.
@@ -1012,7 +1012,7 @@ private:
     std::multiset<uint64_t> _pinnedAllDurableTimestamps;
     // Lock-free snapshot of the minimum pinned timestamp. Set to max uint64 when no pins
     // exist. Writers update this under _allDurablePinMutex; readers load it without locking.
-    AtomicWord<uint64_t> _minPinnedTimestamp{std::numeric_limits<uint64_t>::max()};
+    Atomic<uint64_t> _minPinnedTimestamp{std::numeric_limits<uint64_t>::max()};
 
     // Reference to the persistence provider for accessing storage configuration.
     rss::PersistenceProvider& _provider;
@@ -1021,16 +1021,16 @@ private:
 /**
  * Generates config string for wiredtiger_open() from the given config options.
  */
-MONGO_MOD_USE_REPLACEMENT(jstest)
+[[MONGO_MOD_USE_REPLACEMENT(jstest)]]
 std::string generateWTOpenConfigString(const WiredTigerKVEngineBase::WiredTigerConfig& wtConfig,
-                                       StringData extensionsConfig,
-                                       StringData providerConfig);
+                                       std::string_view extensionsConfig,
+                                       std::string_view providerConfig);
 
 /**
  * Returns a WiredTigerKVEngineBase::WiredTigerConfig populated with config values provided at
  * startup.
  */
-MONGO_MOD_USE_REPLACEMENT(jstest)
+[[MONGO_MOD_USE_REPLACEMENT(jstest)]]
 WiredTigerKVEngineBase::WiredTigerConfig getWiredTigerConfigFromStartupOptions(
     const rss::PersistenceProvider&);
 

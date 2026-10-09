@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/change_stream_filter_helpers.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_tree.h"
@@ -48,9 +21,8 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 
-#include <cstdint>
-#include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -67,7 +39,7 @@ BSONObj getCRUDOplogEntryTypesFilter() {
     // expected oplog entry types below. If the new oplog entry type needs to be handled in change
     // streams, add it to the code below and also to the change stream event transformer, which
     // transforms oplog entries into change events.
-    constexpr size_t kExpectedOplogEntryTypes = 9;
+    constexpr size_t kExpectedOplogEntryTypes = 10;
     static_assert(idlEnumCount<repl::OpTypeEnum> == kExpectedOplogEntryTypes,
                   "unexpected number of oplog entry types - when adding a new oplog entry type, "
                   "please make sure that the change stream oplog filter handles it correctly!");
@@ -84,6 +56,7 @@ BSONObj getCRUDOplogEntryTypesFilter() {
     // - "cu": container update
     // - "cd": container delete
     // - "km": key material
+    // - "cmk": CMK rotation
     return BSON("$in" << BSON_ARRAY("d" << "i" << "u"));
 }
 
@@ -98,6 +71,7 @@ void appendCommonTransactionFilter(BSONObjBuilder& applyOpsBuilder) {
 }  // namespace
 
 namespace change_stream_filter {
+using namespace std::literals::string_view_literals;
 
 std::unique_ptr<MatchExpression> buildTsFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -123,7 +97,7 @@ std::unique_ptr<MatchExpression> buildFromMigrateSystemOpFilter(
     std::vector<BSONObj>& backingBsonObjs) {
     BSONObj cmdMatch = DocumentSourceChangeStream::getCmdNsMatchObjForChangeStream(expCtx);
 
-    // The filter {fromMigrate:true} allows quickly skip nonrelevant oplog entries
+    // The filter {fromMigrate:true} allows us to quickly skip non-relevant oplog entries.
     auto andMigrateEvents = std::make_unique<AndMatchExpression>();
     andMigrateEvents->add(MatchExpressionParser::parseAndNormalize(
         backingBsonObjs.emplace_back(BSON("fromMigrate" << true)), expCtx));
@@ -161,7 +135,6 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MatchExpression* userMatch,
     std::vector<BSONObj>& backingBsonObjs) {
-
     // Match expressions for matching each of the necessary namespace components for the current
     // stream type.
     BSONObj nsMatch = DocumentSourceChangeStream::getNsMatchObjForChangeStream(expCtx);
@@ -208,10 +181,9 @@ std::unique_ptr<MatchExpression> buildOperationFilter(
     auto renameFromEvent =
         backingBsonObjs.emplace_back(BSON("o.renameCollection" << nsMatch.firstElement()));
     auto upgradeDowngradeViewlessTimeseriesEvent = [&]() {
-        const auto& nss = expCtx->getNamespaceString();
-        auto streamType = ChangeStream::getChangeStreamType(nss);
-
         if (streamType == ChangeStreamType::kCollection) {
+            const auto& nss = expCtx->getNamespaceString();
+
             // A single timeseries collection change stream is invalidated when migrating from
             // system.buckets to viewless timeseries collections and back.
             auto filterBSON = nss.isTimeseriesBucketsCollection()
@@ -359,7 +331,6 @@ std::unique_ptr<MatchExpression> buildTransactionFilter(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const MatchExpression* userMatch,
     std::vector<BSONObj>& backingBsonObjs) {
-
     BSONObjBuilder applyOpsBuilder;
     appendBaseTransactionFilter(applyOpsBuilder);
 
@@ -500,18 +471,18 @@ std::unique_ptr<MatchExpression> buildInternalOpFilter(
     //   - reshardBegin: A resharding operation begins.
     //   - reshardDoneCatchUp: "Catch up" phase of reshard operation completes.
     //   - shardCollection: A shardCollection operation has completed.
-    std::vector<StringData> internalOpTypes = {
-        "reshardBegin"_sd, "reshardDoneCatchUp"_sd, "shardCollection"_sd};
+    std::vector<std::string_view> internalOpTypes = {
+        "reshardBegin"sv, "reshardDoneCatchUp"sv, "shardCollection"sv};
 
     // Only return the 'migrateLastChunkFromShard' event and the 'reshardBlockingWrites' event if
     // 'showSystemEvents' is set.
     if (expCtx->getChangeStreamSpec()->getShowSystemEvents()) {
-        internalOpTypes.push_back("migrateLastChunkFromShard"_sd);
-        internalOpTypes.push_back("reshardBlockingWrites"_sd);
+        internalOpTypes.push_back("migrateLastChunkFromShard"sv);
+        internalOpTypes.push_back("reshardBlockingWrites"sv);
     }
 
-    internalOpTypes.push_back("refineCollectionShardKey"_sd);
-    internalOpTypes.push_back("reshardCollection"_sd);
+    internalOpTypes.push_back("refineCollectionShardKey"sv);
+    internalOpTypes.push_back("reshardCollection"sv);
 
     // Build the oplog filter to match the required internal op types.
     BSONArrayBuilder internalOpTypeOrBuilder;

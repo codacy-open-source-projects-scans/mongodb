@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/query/fle/range_validator.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -50,6 +23,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -81,14 +55,14 @@ public:
     {                                                                              \
         auto input = fromjson(json);                                               \
         auto expr = uassertStatusOK(MatchExpressionParser::parse(input, _expCtx)); \
-        ASSERT_DOES_NOT_THROW(validateRanges(*expr.get()));                        \
+        ASSERT_DOES_NOT_THROW(validateRanges(*expr.get(), boost::none));           \
     }
 
-#define ASSERT_INVALID_RANGE_MATCH(code, json)                                     \
-    {                                                                              \
-        auto input = fromjson(json);                                               \
-        auto expr = uassertStatusOK(MatchExpressionParser::parse(input, _expCtx)); \
-        ASSERT_THROWS_CODE(validateRanges(*expr.get()), DBException, code);        \
+#define ASSERT_INVALID_RANGE_MATCH(code, json)                                           \
+    {                                                                                    \
+        auto input = fromjson(json);                                                     \
+        auto expr = uassertStatusOK(MatchExpressionParser::parse(input, _expCtx));       \
+        ASSERT_THROWS_CODE(validateRanges(*expr.get(), boost::none), DBException, code); \
     }
 
 
@@ -97,7 +71,7 @@ public:
         auto input = fromjson(json);                                                         \
         auto expr =                                                                          \
             Expression::parseExpression(_expCtx.get(), input, _expCtx->variablesParseState); \
-        ASSERT_DOES_NOT_THROW(validateRanges(*expr.get()));                                  \
+        ASSERT_DOES_NOT_THROW(validateRanges(*expr.get(), boost::none));                     \
     }
 
 #define ASSERT_INVALID_RANGE_EXPR(code, json)                                                \
@@ -105,10 +79,11 @@ public:
         auto input = fromjson(json);                                                         \
         auto expr =                                                                          \
             Expression::parseExpression(_expCtx.get(), input, _expCtx->variablesParseState); \
-        ASSERT_THROWS_CODE(validateRanges(*expr.get()), DBException, code);                  \
+        ASSERT_THROWS_CODE(validateRanges(*expr.get(), boost::none), DBException, code);     \
     }
 
 namespace {
+using namespace std::literals::string_view_literals;
 // These helper functions help construct encrypted queries in a succinct way. The function names are
 // short in order to make the queries that we are testing more readable at the callsite.
 // All of these functions generate strings with JSON which ultimately are parsed into
@@ -118,7 +93,7 @@ namespace {
  * Generate a range payload. Edges can be empty because we don't actually look at the payload's
  * contents during validation.
  */
-std::string payload(StringData path,
+std::string payload(std::string_view path,
                     int32_t payloadId,
                     Fle2RangeOperator firstOp,
                     boost::optional<Fle2RangeOperator> secondOp) {
@@ -141,7 +116,7 @@ std::string payload(StringData path,
 /**
  * Generate a range stub.
  */
-std::string stub(StringData path,
+std::string stub(std::string_view path,
                  int32_t payloadId,
                  Fle2RangeOperator firstOp,
                  boost::optional<Fle2RangeOperator> secondOp) {
@@ -260,6 +235,20 @@ std::string eq(std::string field, std::string rhs) {
     return queryOp("$eq", {quote(dollar(field)), rhs});
 }
 }  // namespace agg
+
+// Builds an EncryptedFieldConfig with a single range-indexed field at `path` and the given
+// contention, for exercising the EFC-aware validation path through validateRanges.
+EncryptedFieldConfig rangeEfc(std::string_view path, int64_t contention) {
+    QueryTypeConfig qtc;
+    qtc.setQueryType(QueryTypeEnum::Range);
+    qtc.setContention(contention);
+    EncryptedField ef(indexKeyId, std::string{path});
+    ef.setBsonType("int"sv);
+    ef.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{std::move(qtc)});
+    EncryptedFieldConfig efc;
+    efc.setFields({std::move(ef)});
+    return efc;
+}
 }  // namespace
 
 ///////////////////////////////
@@ -678,5 +667,28 @@ TEST_F(RangeValidatorTest, PayloadUnderEqualityOp) {
 
     ASSERT_VALID_RANGE_MATCH(match::eq("age", stub("age", 0, Fle2RangeOperator::kGt, boost::none)));
     ASSERT_VALID_RANGE_EXPR(agg::eq("age", stub("age", 0, Fle2RangeOperator::kGt, boost::none)));
+}
+
+TEST_F(RangeValidatorTest, EfcValidationThroughValidateRanges) {
+    // Test-helper payloads carry contention 0. A field configured with a different contention must
+    // be rejected, and a matching one accepted, confirming the EFC threads through validateRanges
+    // into the payload validation.
+    auto p = payload("age", 0, Fle2RangeOperator::kGt, boost::none);
+
+    // The parsed MatchExpression/Expression reference the input BSONObj without owning it, so the
+    // inputs must outlive the validateRanges calls below.
+    auto matchInput = fromjson(match::range("age", Fle2RangeOperator::kGt, p));
+    auto matchExpr = uassertStatusOK(MatchExpressionParser::parse(matchInput, _expCtx));
+    auto aggInput = fromjson(agg::range("age", Fle2RangeOperator::kGt, p));
+    auto aggExpr =
+        Expression::parseExpression(_expCtx.get(), aggInput, _expCtx->variablesParseState);
+
+    auto mismatched = rangeEfc("age", 8);
+    ASSERT_THROWS_CODE(validateRanges(*matchExpr.get(), mismatched), DBException, 9188701);
+    ASSERT_THROWS_CODE(validateRanges(*aggExpr.get(), mismatched), DBException, 9188701);
+
+    auto matching = rangeEfc("age", 0);
+    ASSERT_DOES_NOT_THROW(validateRanges(*matchExpr.get(), matching));
+    ASSERT_DOES_NOT_THROW(validateRanges(*aggExpr.get(), matching));
 }
 }  // namespace mongo::fle

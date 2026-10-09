@@ -15,20 +15,34 @@ const mongosColl = mongosDB[jsTestName()];
 assert.commandWorked(mongosDB.dropDatabase());
 
 // Enable sharding on the test DB and ensure its primary is st.shard0.shardName.
-assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs0.getURL()}));
+assert.commandWorked(
+    mongosDB.adminCommand({enableSharding: mongosDB.getName(), primaryShard: st.rs0.getURL()}),
+);
 
 // Test that command succeeds when no internal options have been specified.
-assert.commandWorked(mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}}));
+assert.commandWorked(
+    mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}}),
+);
 
 // Test that the command fails if we have 'needsMerge: false' without 'fromRouter'.
 assert.commandFailedWithCode(
-    mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}, needsMerge: false}),
+    mongosDB.runCommand({
+        aggregate: mongosColl.getName(),
+        pipeline: [],
+        cursor: {},
+        needsMerge: false,
+    }),
     ErrorCodes.FailedToParse,
 );
 
 // Test that the command fails if we have 'needsMerge: true' without 'fromRouter'.
 assert.commandFailedWithCode(
-    mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}, needsMerge: true}),
+    mongosDB.runCommand({
+        aggregate: mongosColl.getName(),
+        pipeline: [],
+        cursor: {},
+        needsMerge: true,
+    }),
     ErrorCodes.FailedToParse,
 );
 
@@ -58,14 +72,26 @@ assert.commandFailedWithCode(
 );
 
 // Test that 'fromRouter: true' cannot be specified in a command sent to mongoS.
+// External clients get BadValue from validateRequestWithClient; internal clients get 51089 from
+// the router-level check.
 assert.commandFailedWithCode(
-    mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}, fromRouter: true}),
-    51089,
+    mongosDB.runCommand({
+        aggregate: mongosColl.getName(),
+        pipeline: [],
+        cursor: {},
+        fromRouter: true,
+    }),
+    [51089, ErrorCodes.BadValue],
 );
 
 // Test that 'fromRouter: false' can be specified in a command sent to mongoS.
 assert.commandWorked(
-    mongosDB.runCommand({aggregate: mongosColl.getName(), pipeline: [], cursor: {}, fromRouter: false}),
+    mongosDB.runCommand({
+        aggregate: mongosColl.getName(),
+        pipeline: [],
+        cursor: {},
+        fromRouter: false,
+    }),
 );
 
 // Test that the command fails if we have 'needsMerge: true' with 'fromRouter: false'.
@@ -89,7 +115,7 @@ assert.commandFailedWithCode(
         needsMerge: true,
         fromRouter: true,
     }),
-    51089,
+    [51089, ErrorCodes.BadValue],
 );
 
 // Test that 'needsMerge: false' can be specified in a command sent to mongoS along with
@@ -105,6 +131,7 @@ assert.commandWorked(
 );
 
 // Test that the 'exchange' parameter cannot be specified in a command sent to mongoS.
+// External clients are now rejected with BadValue before reaching the mongos-level check (51028).
 assert.commandFailedWithCode(
     mongosDB.runCommand({
         aggregate: mongosColl.getName(),
@@ -112,10 +139,11 @@ assert.commandFailedWithCode(
         cursor: {},
         exchange: {policy: "roundrobin", consumers: NumberInt(2)},
     }),
-    51028,
+    [ErrorCodes.BadValue, 51028],
 );
 
 // Test that the command fails when all internal parameters have been specified.
+// Exchange from an external client fails with BadValue before any other check.
 assert.commandFailedWithCode(
     mongosDB.runCommand({
         aggregate: mongosColl.getName(),
@@ -125,7 +153,7 @@ assert.commandFailedWithCode(
         fromRouter: true,
         exchange: {policy: "roundrobin", consumers: NumberInt(2)},
     }),
-    51028,
+    [51028, ErrorCodes.BadValue],
 );
 
 // Test that the command fails when all internal parameters but exchange have been specified.
@@ -137,7 +165,7 @@ assert.commandFailedWithCode(
         needsMerge: true,
         fromRouter: true,
     }),
-    51089,
+    [51089, ErrorCodes.BadValue],
 );
 
 st.stop();

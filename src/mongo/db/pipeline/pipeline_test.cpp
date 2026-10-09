@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/pipeline.h"
 
@@ -39,6 +13,8 @@
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/change_stream_reader_builder_mock.h"
+#include "mongo/db/pipeline/data_to_shards_allocation_query_service_mock.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_add_post_image.h"
@@ -58,6 +34,7 @@
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_test_optimizations.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/db/pipeline/pipeline_factory.h"
@@ -68,6 +45,7 @@
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/stage_params.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_test_service_context.h"
@@ -78,9 +56,9 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log_util.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -89,6 +67,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -99,13 +78,14 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-const StringData kDBName = "test";
+const std::string_view kDBName = "test";
 const NamespaceString kTestNss =
     NamespaceString::createNamespaceString_forTest(kDBName, "collection");
 const NamespaceString kAdminCollectionlessNss =
     NamespaceString::createNamespaceString_forTest("admin.$cmd.aggregate");
-const auto kExplain = SerializationOptions{
+const auto kExplain = query_shape::SerializationOptions{
     .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
 
 constexpr size_t getChangeStreamStageSize() {
@@ -153,7 +133,7 @@ class StubExplainInterface : public StubMongoProcessInterface {
             optimizePipeline(pipeline.get());
         }
         BSONArrayBuilder bab;
-        auto opts = SerializationOptions{.verbosity = boost::make_optional(verbosity)};
+        auto opts = query_shape::SerializationOptions{.verbosity = boost::make_optional(verbosity)};
         auto pipelineVec = pipeline->writeExplainOps(opts);
         for (auto&& stage : pipelineVec) {
             bab << stage;
@@ -198,9 +178,6 @@ protected:
         ctx->setResolvedNamespace(lookupCollNs, {lookupCollNs, std::vector<BSONObj>{}});
         ctx->setResolvedNamespace(unionCollNs, {unionCollNs, std::vector<BSONObj>{}});
 
-        // Query settings needed for some tests.
-        ctx->setQuerySettingsIfNotPresent(query_settings::QuerySettings());
-
         auto outputPipe = pipeline_factory::makePipeline(
             request.getPipeline(), ctx, pipeline_factory::kOptionsMinimal);
         pipeline_optimization::optimizePipeline(*outputPipe);
@@ -208,7 +185,7 @@ protected:
         // We normalize match expressions in the pipeline here to ensure the stability of the
         // predicate order after optimizations.
         outputPipe = normalizeMatchStageInPipeline(std::move(outputPipe));
-        auto opts = SerializationOptions{
+        auto opts = query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
         ASSERT_VALUE_EQ(Value(outputPipe->writeExplainOps(opts)),
                         Value(outputPipeExpected["pipeline"]));
@@ -216,7 +193,7 @@ protected:
     }
 
     void assertPipelineSerializesTo(const Pipeline& pipeline,
-                                    boost::optional<const SerializationOptions&> opts,
+                                    boost::optional<const query_shape::SerializationOptions&> opts,
                                     const std::string& serializedPipeJson) {
         const BSONObj serializePipeExpected = pipelineFromJsonArray(serializedPipeJson);
         ASSERT_VALUE_EQ(Value(pipeline.serialize(opts)), Value(serializePipeExpected["pipeline"]));
@@ -471,7 +448,7 @@ TEST_F(PipelineOptimizationTest, SortSwapsBeforeUnwind) {
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -719,7 +696,7 @@ TEST_F(PipelineOptimizationTest, LimitDuplicatesBeforeSortUnwindAndIsMergedWithS
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {b: 1, $_internalLimit: 100}}"
         ",{$unwind : {path: '$a', preserveNullAndEmptyArrays: true}}"
@@ -749,7 +726,7 @@ TEST_F(PipelineOptimizationTest, SortAndLimitSwapsBeforeUnwindAndMerges) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort : {b: 1, $_internalLimit: 5}}"
         ",{$unwind : {path: '$a', preserveNullAndEmptyArrays: true}}"
@@ -805,7 +782,7 @@ TEST_F(PipelineOptimizationTest, SortMatchProjSkipLimBecomesMatchTopKSortSkipPro
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {a: 1}}"
         ",{$sort: {a: 1, $_internalLimit: 8}}"
@@ -842,7 +819,7 @@ TEST_F(PipelineOptimizationTest, SortMatchWithExprProjSkipLimBecomesMatchTopKSor
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {$expr: {$eq: ['$a', 1]}}}"
         ",{$sort: {a: 1, $_internalLimit: 8}}"
@@ -924,7 +901,7 @@ TEST_F(PipelineOptimizationTest, SortSortLimitBecomesFinalKeyTopKSort) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 5}}"
         "]";
@@ -953,7 +930,7 @@ TEST_F(PipelineOptimizationTest, SortSortSkipLimitBecomesTopKSortSkip) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 8}}"
         ",{$skip : 3}"
@@ -981,7 +958,7 @@ TEST_F(PipelineOptimizationTest, SortLimitSortLimitBecomesTopKSort) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 12}}"
         "]";
@@ -1007,7 +984,7 @@ TEST_F(PipelineOptimizationTest, SortLimitSortRetainsLimit) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 12}}"
         "]";
@@ -1031,7 +1008,7 @@ TEST_F(PipelineOptimizationTest, SortLimitSortWithDifferentSortPatterns) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 12}}"
         ",{$sort: {b: 1}}"
@@ -1057,7 +1034,7 @@ TEST_F(PipelineOptimizationTest, SortSortLimitRetainsLimit) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 20}}"
         "]";
@@ -1093,7 +1070,7 @@ TEST_F(PipelineOptimizationTest, SortSortSortMatchProjSkipLimBecomesMatchTopKSor
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {a: 1}}"
         ",{$sort: {a: 1, $_internalLimit: 8}}"
@@ -1132,7 +1109,7 @@ TEST_F(PipelineOptimizationTest, SortSortSortMatchOnExprProjSkipLimBecomesMatchT
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {$expr: {$eq: ['$a', 1]}}}"
         ",{$sort: {a: 1, $_internalLimit: 8}}"
@@ -1168,7 +1145,7 @@ TEST_F(PipelineOptimizationTest, NonIdenticalSortsBecomeFinalKeyTopKSort) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 5}}"
         ",{$project : {_id: true, a: true}}"
@@ -1203,7 +1180,7 @@ TEST_F(PipelineOptimizationTest, SubsequentSortsMergeAndBecomeTopKSortWithFinalK
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: -1, $_internalLimit: 7}}"
         ",{$project : {_id: true, a: true}}"
@@ -1449,7 +1426,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldCoalesceWithUnwindOnAs) {
         "]";
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
         "'right', $_internalUnwind: {$unwind: {path: '$same'}}}}]";
@@ -1472,7 +1449,7 @@ TEST_F(PipelineOptimizationTest, LookupWithPipelineSyntaxShouldCoalesceWithUnwin
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from : 'lookupColl', as : 'same', let: {}, pipeline: [], "
         "$_internalUnwind: {$unwind: {path: '$same'}}}}"
@@ -1498,7 +1475,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldCoalesceWithUnwindOnAsWithPreserveE
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
         "'right', "
@@ -1525,7 +1502,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldCoalesceWithUnwindOnAsWithIncludeAr
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from : 'lookupColl', as : 'same', localField: 'left', foreignField: "
         "'right', "
@@ -1574,7 +1551,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldSwapWithMatch) {
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -1593,7 +1570,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldSwapWithMatchOnExpr) {
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -1625,7 +1602,7 @@ TEST_F(PipelineOptimizationTest, LookupWithPipelineSyntaxShouldSwapWithMatchOnEx
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -1658,7 +1635,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldNotAbsorbMatchOnAs) {
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -1676,7 +1653,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldNotAbsorbMatchWithExprOnAs) {
 
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -1698,7 +1675,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldAbsorbUnwindMatch) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
         "'z',  let: {}, pipeline: [{$match: {subfield: {$eq: 1}}}], "
@@ -1724,7 +1701,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldAbsorbUnwindAndTypeMatch) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
         "'z', let: {}, pipeline: [{$match: {subfield: {$type: [2]}}}], "
@@ -1749,7 +1726,7 @@ TEST_F(PipelineOptimizationTest, LookupWithPipelineSyntaxShouldAbsorbUnwindMatch
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'asField', let: {}, "
         "pipeline: [{$match: {subfield: {$eq: 1}}}], "
@@ -1778,7 +1755,7 @@ TEST_F(PipelineOptimizationTest, LookupWithPipelineSyntaxShouldAbsorbUnwindAndTw
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'asField', let: {}, "
         "pipeline: [{$match: {subfield1: {$eq: 1}}}, {$match: {$and: [{subfield2: {$eq: 1}}, "
@@ -1815,7 +1792,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldAbsorbUnwindAndSplitAndAbsorbMatch)
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {independentField: {$gt: 2}}}, "
         " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
@@ -1849,7 +1826,7 @@ TEST_F(PipelineOptimizationTest, LookupShouldNotSplitIndependentAndDependentOrCl
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
         "'z', $_internalUnwind: {$unwind: {path: '$asField'}}}},"
@@ -1887,7 +1864,7 @@ TEST_F(PipelineOptimizationTest, LookupWithMatchOnArrayIndexFieldShouldNotCoales
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {independent: {$eq: 1}}}, "
         " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
@@ -1924,7 +1901,7 @@ TEST_F(PipelineOptimizationTest, LookupWithUnwindPreservingNullAndEmptyArraysSho
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$match: {independent: {$eq: 1}}}, "
         " {$lookup: {from: 'lookupColl', as: 'asField', localField: 'y', foreignField: "
@@ -1958,7 +1935,7 @@ TEST_F(PipelineOptimizationTest, LookupDoesNotAbsorbElemMatch) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$lookup: {from: 'lookupColl', as: 'x', localField: 'y', foreignField: 'z', "
         " $_internalUnwind: {$unwind: {path: '$x'}}}}, "
@@ -2015,34 +1992,6 @@ TEST_F(PipelineOptimizationTest, GroupShouldSwapWithMatchIfFilteringOnID) {
 
 /* ----- GROUP & MATCH ----- */
 /* ----- GROUP & MATCH : Nonexistence/nontype queries ----- */
-TEST_F(PipelineOptimizationTest, GroupShouldSwapWithMatchOnExprIfFilteringOnID) {
-    std::string inputPipe =
-        "[{$group: {_id: '$a'}}, "
-        " {$match: {$expr: {$eq: ['$_id', 4]}}}]";
-    std::string outputPipe =
-        "[{$match: {$and: [{$expr: {$eq: ['$a', {$const: 4}]}}, {a: {$_internalExprEq: 4}}]}},"
-        " {$group: {_id: '$a', $willBeMerged: false}}]";
-    std::string serializedPipe =
-        "[{$match: {$expr: {$eq: ['$a', {$const: 4}]}}}, "
-        " {$group: {_id: '$a', $willBeMerged: false}}]";
-
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST_F(PipelineOptimizationTest, GroupShouldNotSwapWithMatchOnExprIfNotFilteringOnID) {
-    std::string inputPipe =
-        "[{$group : {_id:'$a'}}, "
-        " {$match: {$expr: {$eq: ['$b', 4]}}}]";
-    std::string outputPipe =
-        "[{$group : {_id:'$a', $willBeMerged: false}}, "
-        " {$match: {$and: [{$expr: {$eq: ['$b', {$const: 4}]}}, {b: {$_internalExprEq: 4}}]}}]";
-    std::string serializedPipe =
-        "[{$group : {_id:'$a', $willBeMerged: false}}, "
-        " {$match: {$expr: {$eq: ['$b', 4]}}}]";
-
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
 TEST_F(PipelineOptimizationTest, GroupShouldSwapWithCompoundMatchIfFilteringOnID) {
     std::string inputPipe =
         "[{$group : {_id:'$x'}}, "
@@ -2183,6 +2132,337 @@ TEST_F(PipelineOptimizationTest, GroupShouldNotSwapWithCompoundMatchIfTypePredic
         " {$match: {$or : [ {_id : {$type: [18]}}, {_id : {$gt : 70}}]}}]";
 
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
+/* ----- GROUP & MATCH : Expr queries ----- */
+
+// Verify that $match with $expr using $eq on _id field swaps before $group.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapWithMatchOnExprIfEqOnID) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$eq: ['$_id', 4]}}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{$expr: {$eq: ['$a', {$const: 4}]}}, {a: {$_internalExprEq: 4}}]}},"
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+    std::string serializedPipe =
+        "[{$match: {$expr: {$eq: ['$a', {$const: 4}]}}}, "
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
+TEST_F(PipelineOptimizationTest, GroupShouldSwapWithMatchOnExprIfEqOnIDReverse) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$eq: [4, '$_id']}}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{$expr: {$eq: [{$const: 4}, '$a']}}, {a: {$_internalExprEq: 4}}]}},"
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+    std::string serializedPipe =
+        "[{$match: {$expr: {$eq: [{$const: 4}, '$a']}}}, "
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
+// Verify that $match with $expr using $eq on non-_id fields does not swap before $group.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapWithMatchOnExprIfNotFilteringOnID) {
+    std::string inputPipe =
+        "[{$group : {_id:'$a'}}, "
+        " {$match: {$expr: {$eq: ['$b', 4]}}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$a', $willBeMerged: false}}, "
+        " {$match: {$and: [{$expr: {$eq: ['$b', {$const: 4}]}}, {b: {$_internalExprEq: 4}}]}}]";
+    std::string serializedPipe =
+        "[{$group : {_id:'$a', $willBeMerged: false}}, "
+        " {$match: {$expr: {$eq: ['$b', 4]}}}]";
+
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
+// Verify that $match with $expr using comparison operators on _id field swaps before $group.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithExprComparisonOnIdField) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$gte: ['$_id', 4]}}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{$expr: {$gte: ['$a', {$const: 4}]}}, "
+        "   {a: {$_internalExprGte: 4}}]}},"
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that we allow composition of logical expressions.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithLogicExpressionsAndComparisonOnIdField) {
+    // !(_id == 4 || (_id > 3 && _id < 10))
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$not: {$or: ["
+        "   {$eq: ['$_id', 4]}, "
+        "   {$and: [{$gt: ['$_id', 3]}, {$lt: ['$_id', 10]}]}"
+        " ]}}}}]";
+
+    std::string outputPipe =
+        "[{$match: {$expr: {$not: [{$or: ["
+        "   {$eq: ['$a', {$const: 4}]}, "
+        "   {$and: [{$gt: ['$a', {$const: 3}]}, {$lt: ['$a', {$const: 10}]}]}"
+        " ]}]}}}, "
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that we correctly prevent rewrite if any expression compares to null.
+TEST_F(PipelineOptimizationTest,
+       GroupShouldNotSwapMatchWithLogicExpressionsAndComparisonOnIdFieldWithNull) {
+    // !(_id == null || (_id > 3 && _id < 10))
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$not: {$or: ["
+        "   {$eq: ['$_id', null]}, "
+        "   {$and: [{$gt: ['$_id', 3]}, {$lt: ['$_id', 10]}]}"
+        " ]}}}}]";
+
+    std::string outputPipe =
+        "[{$group: {_id: '$a', $willBeMerged: false}}, "
+        " {$match: {$expr: {$not: [{$or: ["
+        "   {$eq: ['$_id', {$const: null}]}, "
+        "   {$and: [{$gt: ['$_id', {$const: 3}]}, {$lt: ['$_id', {$const: 10}]}]}"
+        " ]}]}}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that we allow composition of multiple $expr predicates.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithLogicPredicatesAndComparisonOnIdField) {
+    // !(_id == 4 || (_id > 3 && _id < 10))
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$nor: ["
+        "   {$expr: {$eq: ['$_id', 4]}}, "
+        "   {$and: ["
+        "     {$expr: {$gt: ['$_id', 3]}}, "
+        "     {$expr: {$lt: ['$_id', 10]}}"
+        "   ]}"
+        " ]}}]";
+
+    // After swap: $match moves before $group. Within each $nor arm, all $expr predicates and
+    // their $_internalExpr companions are collected into a single flat $and.
+    std::string outputPipe =
+        "[{$match: {$nor: ["
+        "   {$and: [{$expr: {$gt: ['$a', {$const: 3}]}}, {$expr: {$lt: ['$a', {$const: 10}]}}, "
+        "           {a: {$_internalExprGt: 3}}, {a: {$_internalExprLt: 10}}]}, "
+        "   {$and: [{$expr: {$eq: ['$a', {$const: 4}]}}, {a: {$_internalExprEq: 4}}]}"
+        " ]}},"
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that we correctly prevent rewrite if any expression compares to null.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithLogicPredicatesAndComparisonOnIdField) {
+    // !(_id == null || (_id > 3 && _id < 10))
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$nor: ["
+        "   {$expr: {$eq: ['$_id', null]}}, "
+        "   {$and: ["
+        "     {$expr: {$gt: ['$_id', 3]}}, "
+        "     {$expr: {$lt: ['$_id', 10]}}"
+        "   ]}"
+        " ]}}]";
+
+    // No swap: $group stays first. The $match references $_id (the post-group field) and gets
+    // $_internalExpr companions, but the field path is not renamed since no pushdown occurred.
+    std::string outputPipe =
+        "[{$group: {_id: '$a', $willBeMerged: false}}, "
+        " {$match: {$nor: ["
+        "   {$and: [{$expr: {$gt: ['$_id', {$const: 3}]}}, {$expr: {$lt: ['$_id', {$const: 10}]}}, "
+        "           {_id: {$_internalExprGt: 3}}, {_id: {$_internalExprLt: 10}}]}, "
+        "   {$and: [{$expr: {$eq: ['$_id', {$const: null}]}}, {_id: {$_internalExprEq: null}}]}"
+        " ]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr comparing _id to null does not swap before $group, as this would be
+// semantically incorrect due to $group's treatment of missing fields.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprComparisonToNullOnIdField) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$gte: ['$_id', null]}}}]";
+    std::string outputPipe =
+        "[{$group: {_id: '$a', $willBeMerged: false}},"
+        " {$match: {$and: [{$expr: {$gte: ['$_id', {$const: null}]}},"
+        "   {_id: {$_internalExprGte: null}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $not inside $expr propagates the null-blocking rule: even though $not wraps the
+// null comparison, the swap is still rejected because the underlying comparison involves null.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprNotContainingNullComparison) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$not: {$eq: ['$_id', null]}}}}]";
+    std::string outputPipe =
+        "[{$group: {_id: '$a', $willBeMerged: false}}, "
+        " {$match: {$expr: {$not: [{$eq: ['$_id', {$const: null}]}]}}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $not at the MatchExpression level alongside a safe $expr predicate
+// swaps before $group. NotMatchExpression wraps a path predicate on the group-key field, which
+// is safe to push past $group.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithNotMatchExpressionAlongsideExprPredicate) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$and: [{$expr: {$eq: ['$_id', 4]}}, {_id: {$not: {$gt: 3}}}]}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{a: {$not: {$gt: 3}}}, "
+        "                  {$expr: {$eq: ['$a', {$const: 4}]}}, "
+        "                  {a: {$_internalExprEq: 4}}]}}, "
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr using $in operator on _id field with non-null constants swaps
+// before $group. The $in against a constant non-null array is safe: no null/missing conflation
+// can change the membership result.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithExprInOperatorOnIdField) {
+    std::string inputPipe =
+        "[{$group: {_id: '$a'}}, "
+        " {$match: {$expr: {$in: ['$_id', [3,4]]}}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{a: {$in: [3, 4]}}, {$expr: {$in: ['$a', {$const: [3, 4]}]}}]}},"
+        " {$group: {_id: '$a', $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr comparing a subfield of compound _id to null does not swap before
+// $group, as missing fields would be treated incorrectly.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprEqNullOnSubfieldOfCompoundId) {
+    std::string inputPipe =
+        "[{$group : {_id: {a: '$a'}}}, "
+        " {$match: {$expr: {$eq: ['$_id.a', null]}}}]";
+    std::string outputPipe =
+        "[{$group : {_id: {a: '$a'}, $willBeMerged: false}}, "
+        " {$match: {$and: [{$expr: {$eq: ['$_id.a', {$const: null}]}}, {'_id.a': "
+        "{$_internalExprEq: null}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr using $eq on a subfield of compound _id swaps before $group.
+TEST_F(PipelineOptimizationTest, GroupShouldSwapMatchWithExprEqOnSubfieldOfCompoundId) {
+    std::string inputPipe =
+        "[{$group : {_id: {a: '$a', b: '$b'}}}, "
+        " {$match: {$expr: {$eq: ['$_id.a', 4]}}}]";
+    std::string outputPipe =
+        "[{$match: {$and: [{$expr: {$eq: ['$a', {$const: 4}]}},"
+        "   {'a':  {$_internalExprEq: 4}}]}},"
+        " {$group: {_id: {a: '$a', b: '$b'}, $willBeMerged: false}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr comparing compound _id subfields to null does not swap before
+// $group, preserving correct null/missing semantics.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprEqNullOnCompoundIdSubfield) {
+    std::string inputPipe =
+        "[{$group : {_id: {a: '$a', b: '$b'}}}, "
+        " {$match: {$expr: {$eq: ['$_id.a', null]}}}]";
+    std::string outputPipe =
+        "[{$group: {_id: {a: '$a', b: '$b'}, $willBeMerged: false}}, "
+        " {$match: {$and: [{$expr: {$eq: ['$_id.a', {$const: null}]}}, {'_id.a': "
+        "{$_internalExprEq: null}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr directly comparing _id to null does not swap before $group to
+// maintain correct handling of missing values.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprEqNullOnSimpleIdField) {
+    std::string inputPipe =
+        "[{$group : {_id:'$x'}}, "
+        " {$match: {$expr: {$eq: ['$_id', null]}}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$x', $willBeMerged: false}}, "
+        " {$match: {$and: [{$expr: {$eq: ['$_id', {$const: null}]}}, {_id: {$_internalExprEq: "
+        "null}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with $expr comparing null to _id (reversed operand order) does not swap before
+// $group.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprEqNullAsFirstArgument) {
+    std::string inputPipe =
+        "[{$group : {_id:'$x'}}, "
+        " {$match: {$expr: {$eq: [null, '$_id']}}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$x', $willBeMerged: false}}, "
+        " {$match: {$and: [{$expr: {$eq: [{$const: null}, '$_id']}}, {_id: {$_internalExprEq: "
+        "null}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that complex $match with $or containing $expr null comparison on _id does not swap before
+// $group.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithCompoundOrContainingExprEqNull) {
+    std::string inputPipe =
+        "[{$group : {_id:'$x'}}, "
+        " {$match: {$or : [ {$expr: {$eq: ['$_id', null]}}, {_id : {$gt : 70}}]}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$x', $willBeMerged: false}}, "
+        " {$match: {$or: [{$and: [{$expr: {$eq: ['$_id', {$const: null}]}}, {_id: "
+        "   {$_internalExprEq: null}}]}, {_id: {$gt: 70}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with nested $expr containing $ifNull.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithIfNull) {
+    std::string inputPipe =
+        "[{$group : {_id:'$x'}}, "
+        " {$match: {$expr: { $ifNull: ['$_id', true] }}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$x', $willBeMerged: false}}, "
+        " {$match: {$expr: {$ifNull: ['$_id', {$const: true}]}}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match with nested $expr containing null comparison on _id does not swap before
+// $group.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithNestedExprEqNullComparison) {
+    std::string inputPipe =
+        "[{$group : {_id:'$x'}}, "
+        " {$match: {$expr: { $eq: [{ $eq: ['$_id', null]}, true]}}}]";
+    std::string outputPipe =
+        "[{$group : {_id:'$x', $willBeMerged: false}}, "
+        " {$match: {$expr: {$eq: [{$eq: ['$_id', {$const: null}]}, {$const: true}]}}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
+}
+
+// Verify that $match using $expr with $type operator on compound _id subfields does not swap before
+// $group.
+TEST_F(PipelineOptimizationTest, GroupShouldNotSwapMatchWithExprTypeCheckOnCompoundIdSubfield) {
+    std::string inputPipe =
+        "[{$group : {_id: {a: '$a', b: '$b'}}}, "
+        " {$match: {$or: [{'_id.a' : 4}, {$expr: {$eq: ['int', {$type: '$_id.b'}]}}]}}]";
+    std::string outputPipe =
+        "[{$group : {_id: {a: '$a', b: '$b'}, $willBeMerged: false}}, "
+        " {$match: {$or: [{'_id.a': {$eq: 4}}, {$expr: {$eq: [{$const: 'int'},"
+        "   {$type: ['$_id.b']}]}}]}}]";
+
+    assertPipelineOptimizesTo(inputPipe, outputPipe);
 }
 
 TEST_F(PipelineOptimizationTest, MatchShouldDuplicateItselfBeforeRedact) {
@@ -2792,15 +3072,15 @@ TEST_F(PipelineOptimizationTest, MatchCanMoveAcrossDottedRenameOnGroupingMixedPr
     assertPipelineOptimizesAndSerializesTo(inputPipeline, outputPipeline, serializedPipe);
 }
 
-TEST_F(PipelineOptimizationTest, AvoidPushingMatchOverGroupWithLongDottedRename) {
+TEST_F(PipelineOptimizationTest, MatchCanMoveAcrossLongDottedRenameOnGrouping) {
     std::string inputPipeline =
         "[{$group: {_id: {a: {b: '$a'}}}},"
         "{$project: {renamed: '$_id.a.b'}},"
         "{$match: {renamed: {$eq: 5}}}]";
     std::string outputPipeline =
-        "[{$group: {_id: {a: {b: '$a'}}, $willBeMerged: false}},"
-        "{$project: {_id: true, renamed: '$_id.a.b'}},"
-        "{$match: {renamed: {$eq: 5 }}}]";
+        "[{$match: {a: {$eq: 5}}},"
+        "{$group: {_id: {a: {b: '$a'}}, $willBeMerged: false}},"
+        "{$project: {_id: true, renamed: '$_id.a.b'}}]";
     assertPipelineOptimizesAndSerializesTo(inputPipeline, outputPipeline);
 }
 
@@ -2950,7 +3230,7 @@ TEST_F(PipelineOptimizationTest,
     // The $addFields simply maps an array of objects to one containing their inner 'elementField'
     // scalar values . The $match stage on the reshaped array should not be swapped with $project to
     // preserve the original $elemMatch semantics.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     std::string pipeline = R"(
 [
@@ -3032,7 +3312,7 @@ TEST_F(PipelineOptimizationTest,
     // The $project simply renames 'a.b' & 'a.c' to 'd.e' & 'd.f' but the dependency tracker reports
     // the 'd' for $elemMatch as a modified dependency and so $match cannot be swapped with
     // $project.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     std::string inputPipe = R"(
 [
@@ -3125,7 +3405,7 @@ TEST_F(PipelineOptimizationTest, MatchEqObjectCanNotSplitAcrossRenameWithMapAndP
 TEST_F(PipelineOptimizationTest, FeatureMatchEqObjectCanNotSplitAcrossRenameWithMapAndProject) {
     // The $project simply renames 'a.b' & 'a.c' to 'd.e' & 'd.f' but the dependency tracker reports
     // the 'd' for $eq as a modified dependency and so $match cannot be swapped with $project.
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagExposeArrayIndexInMapFilterReduce", true);
     std::string inputPipe = R"(
 [
@@ -3729,6 +4009,17 @@ public:
         _expCtx->setUUID(UUID::gen());
         _expCtx->setInRouter(options.inRouter);
         setMockReplicationCoordinatorOnOpCtx(_expCtx->getOperationContext());
+
+        // Register v2 reader prerequisites on the test's service context. The query service mock
+        // returns 'kNotAvailable' for every call, which drives
+        // '_determineChangeStreamReaderVersion' back to v1 — mirroring production behavior when
+        // shard placement info is unavailable.
+        ChangeStreamReaderBuilder::set(_testServiceContext.getServiceContext(),
+                                       std::make_unique<ChangeStreamReaderBuilderMock>());
+        auto queryService = std::make_unique<DataToShardsAllocationQueryServiceMock>();
+        queryService->setDefaultStatus(AllocationToShardsStatus::kNotAvailable);
+        DataToShardsAllocationQueryService::set(_testServiceContext.getServiceContext(),
+                                                std::move(queryService));
     }
 
     BSONObj changestreamStage(const std::string& stageStr) {
@@ -3754,7 +4045,7 @@ public:
                                           ResumeTokenData::kDefaultTokenVersion,
                                           0,
                                           UUID::gen(),
-                                          Value(Document{{"operationType", "drop"_sd}})};
+                                          Value(Document{{"operationType", "drop"sv}})};
         return ResumeToken(resumeTokenDataIn).toBSON().toString();
     }
 
@@ -3910,7 +4201,7 @@ TEST_F(PipelineOptimizationTest, SortLimProjLimBecomesTopKSortProj) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 5}}"
         ",{$project : {_id: true, a: true}}"
@@ -3944,7 +4235,7 @@ TEST_F(PipelineOptimizationTest, SortProjUnwindLimLimBecomesSortProjUnwindLim) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     assertPipelineSerializesTo(*pipeline, options, serializedPipe);
 }
 
@@ -3969,7 +4260,7 @@ TEST_F(PipelineOptimizationTest, SortSkipLimBecomesTopKSortSkip) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 7}}"
         ",{$skip: 2}"
@@ -4026,7 +4317,7 @@ TEST_F(PipelineOptimizationTest, SortProjSkipLimBecomesTopKSortSkipProj) {
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 8}}"
         ",{$skip: 3}"
@@ -4062,7 +4353,7 @@ TEST_F(PipelineOptimizationTest, SortSkipProjSkipLimSkipLimBecomesTopKSortSkipPr
     auto pipeline = assertPipelineOptimizesTo(inputPipe, outputPipe);
     assertPipelineSerializesTo(*pipeline, boost::none, serializedPipe);
 
-    SerializationOptions options{.serializeForCloning = true};
+    query_shape::SerializationOptions options{.serializeForCloning = true};
     serializedPipe =
         "[{$sort: {a: 1, $_internalLimit: 15}}"
         ",{$skip: 12}"
@@ -4384,18 +4675,11 @@ TEST_F(PipelineOptimizationTest, MatchNotPushedBeforeMultipleReplaceWithsSamePre
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
-auto enablePipelineOptimizationAdditionalTestingRules() {
-    bool previousQueryKnobValue =
-        internalEnablePipelineOptimizationAdditionalTestingRules.swap(true);
-    return mongo::ScopeGuard([=] {
-        internalEnablePipelineOptimizationAdditionalTestingRules.store(previousQueryKnobValue);
-    });
-}
-
 // 'a' is unset, therefore it cannot have type array.
 TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenNonArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
-    auto cleanup = enablePipelineOptimizationAdditionalTestingRules();
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard enableAdditionalTestingRules{
+        "internalEnablePipelineOptimizationAdditionalTestingRules", true};
     std::string inputPipe =
         "["
         " {$unset: 'a'},"
@@ -4416,8 +4700,9 @@ TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenNonArray) {
 
 // 'a' is computed and could be array or null (if $b is null).
 TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenCanBeArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
-    auto cleanup = enablePipelineOptimizationAdditionalTestingRules();
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard enableAdditionalTestingRules{
+        "internalEnablePipelineOptimizationAdditionalTestingRules", true};
     std::string inputPipe =
         "["
         " {$set: {a: {$objectToArray: ['$b']}}},"
@@ -4437,8 +4722,9 @@ TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenCanBeArray) {
 }
 
 TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenNonArrayMultiple) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
-    auto cleanup = enablePipelineOptimizationAdditionalTestingRules();
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard enableAdditionalTestingRules{
+        "internalEnablePipelineOptimizationAdditionalTestingRules", true};
     std::string inputPipe =
         "["
         " {$unset: 'a'},"
@@ -4462,8 +4748,9 @@ TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenNonArrayMultiple) {
 }
 
 TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenMixedArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
-    auto cleanup = enablePipelineOptimizationAdditionalTestingRules();
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard enableAdditionalTestingRules{
+        "internalEnablePipelineOptimizationAdditionalTestingRules", true};
     std::string inputPipe =
         "["
         " {$set: {a: {$objectToArray: ['$d']}}},"
@@ -4493,7 +4780,7 @@ TEST_F(PipelineOptimizationTest, MatchTypeArrayWhenMixedArray) {
 // After $set{x: 1}, x is known non-array, so {a: "$x.y"} is a safe rename. $match should push past
 // $addFields (but not past $set, since $set defines x).
 TEST_F(PipelineOptimizationTest, MatchSwapsPastComplexRenameWhenNonArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$set: {x: 1}},"
@@ -4515,10 +4802,31 @@ TEST_F(PipelineOptimizationTest, MatchSwapsPastComplexRenameWhenNonArray) {
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
+TEST_F(PipelineOptimizationTest, MatchSwapsPastComplexRenameWhenTypeIsNonArray) {
+    unittest::ServerParameterGuard featureFlag{"featureFlagQueryTypeInference", true};
+    std::string inputPipe =
+        "["
+        " {$match: {x: {$not: {$type: 'array'}}}},"
+        " {$addFields: {a: '$x.y'}},"
+        " {$match: {a: 42}}"
+        "]";
+    std::string outputPipe =
+        "["
+        " {$match: {$and: [{'x.y': {$eq: 42}}, {x: {$not: {$type: [4]}}}]}},"
+        " {$addFields: {a: '$x.y'}}"
+        "]";
+    std::string serializedPipe =
+        "["
+        " {$match: {$and: [{x: {$not: {$type: 'array'}}}, {'x.y': {$eq: 42}}]}},"
+        " {$addFields: {a: '$x.y'}}"
+        "]";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
 // After $set{x: 1}, x is known non-array. The subsequent $set{x: {y: 1}} inherits x's non-array
 // metadata and establishes x.y as non-array too, so {a: "$x.y.z"} is a safe rename.
 TEST_F(PipelineOptimizationTest, MatchSwapsPastDeeperComplexRenameWhenNonArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$set: {x: 1}},"
@@ -4545,7 +4853,7 @@ TEST_F(PipelineOptimizationTest, MatchSwapsPastDeeperComplexRenameWhenNonArray) 
 
 // Without proof that 'b' is not an array, $match should NOT push past deeper complex rename.
 TEST_F(PipelineOptimizationTest, DeeperComplexRenameNotPromotedWithoutProof) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$addFields: {a: '$b.c.d'}},"
@@ -4567,7 +4875,7 @@ TEST_F(PipelineOptimizationTest, DeeperComplexRenameNotPromotedWithoutProof) {
 // After $set{a: 1}, "a" is known non-array. The rename {"a.b": "$c"} has left-side dots,
 // but since "a" is proven non-array, the match on "a.b" can be rewritten to "c" and pushed down.
 TEST_F(PipelineOptimizationTest, MatchSwapsPastLeftDottedRenameWhenNonArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$set: {a: 1}},"
@@ -4592,7 +4900,7 @@ TEST_F(PipelineOptimizationTest, MatchSwapsPastLeftDottedRenameWhenNonArray) {
 // Both sides have dots: {"a.b": "$c.d"}. With proof that both "a" and "c" are non-array,
 // the match on "a.b" is rewritten to "c.d" and pushed down.
 TEST_F(PipelineOptimizationTest, MatchSwapsPastBothSidesDottedRenameWhenNonArray) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$set: {a: 1, c: 1}},"
@@ -4616,7 +4924,7 @@ TEST_F(PipelineOptimizationTest, MatchSwapsPastBothSidesDottedRenameWhenNonArray
 
 // Without proof that "a" is non-array, $match should NOT push past left-dotted rename.
 TEST_F(PipelineOptimizationTest, LeftDottedRenameNotPromotedWithoutProof) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$addFields: {'a.b': '$c'}},"
@@ -4637,7 +4945,7 @@ TEST_F(PipelineOptimizationTest, LeftDottedRenameNotPromotedWithoutProof) {
 
 // Without proof that 'b' is not an array, $match should NOT push past complex rename.
 TEST_F(PipelineOptimizationTest, ComplexRenameNotPromotedWithoutProof) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$addFields: {a: '$b.c'}},"
@@ -4660,7 +4968,7 @@ TEST_F(PipelineOptimizationTest, ComplexRenameNotPromotedWithoutProof) {
 // from that array path (e.g. {c: "$arr.b"}) should NOT allow $match to push past $project,
 // because the rename source prefix is always an array and the rename is unsafe to reverse.
 TEST_F(PipelineOptimizationTest, ComplexRenameNotPromotedWhenPipelineIntroducesArrays) {
-    RAIIServerParameterControllerForTest featureFlag{"featureFlagImprovedDepsAnalysis", true};
+    unittest::ServerParameterGuard featureFlag{"featureFlagImprovedDepsAnalysis", true};
     std::string inputPipe =
         "["
         " {$group: {_id: '$x', arr: {$push: '$b'}}},"
@@ -4859,7 +5167,7 @@ void assertTwoPipelinesOptimizeAndMergeTo(const std::string& inputPipe1,
         pipeline1->pushBack(source);
     }
     pipeline_optimization::optimizePipeline(*pipeline1);
-    auto opts = SerializationOptions{
+    auto opts = query_shape::SerializationOptions{
         .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
     ASSERT_VALUE_EQ(Value(pipeline1->writeExplainOps(opts)), Value(outputBson["pipeline"]));
 }
@@ -5185,7 +5493,7 @@ public:
 
         auto splitPipeline =
             sharded_agg_helpers::SplitPipeline::split(std::move(mergePipe), shardKey);
-        const auto explain = SerializationOptions{
+        const auto explain = query_shape::SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
 
         ASSERT_VALUE_EQ(Value(splitPipeline.shardsPipeline->writeExplainOps(explain)),
@@ -5568,7 +5876,7 @@ TEST_F(PipelineOptimizations, ShouldNotPushdownGroupIfAddFieldsOverwritesShardKe
 };
 
 TEST_F(PipelineOptimizations, ShouldNotPushdownGroupIfUsingAddFieldsWithoutShardFilteringDistinct) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", false);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", false);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$addFields: {new: '$shardKey'}}, {$sort: {shardKey: 1}}, {$group: {_id: '$shardKey'}}]" /*inputPipeJson*/
@@ -5581,7 +5889,7 @@ TEST_F(PipelineOptimizations, ShouldNotPushdownGroupIfUsingAddFieldsWithoutShard
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupIfUsingAddFields) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$addFields: {new: '$shardKey'}}, {$sort: {shardKey: 1}}, {$group: {_id: '$shardKey'}}]", /*inputPipeJson*/
@@ -5594,7 +5902,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupIfUsingAddFields) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKey) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"_id"};
     doTest(
         "[{$sort: {a: 1}}, {$group: {_id: '$_id'}}]" /*inputPipeJson*/,
@@ -5606,7 +5914,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKey) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKey) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
     doTest("[{$sort: {a: 1}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}}}]", /*inputPipeJson*/
            "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}, "
@@ -5617,7 +5925,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKey) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInArray) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
     doTest("[{$sort: {a: 1}}, {$group: {_id: ['$a', '$b', '$c']}}]", /*inputPipeJson*/
            "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', '$b', '$c'], $willBeMerged: "
@@ -5628,7 +5936,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInArray) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInNestedStructure) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
     doTest("[{$sort: {a: 1}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}}}]", /*inputPipeJson*/
            "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}, "
@@ -5639,7 +5947,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInNestedStr
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyWithIrrelevantFieldsModified) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
     doTest(
         "[{$addFields: {c:{$const:'foobar'}}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b', "
@@ -5652,7 +5960,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyWithIrrelev
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRenameProject) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a"};
     doTest(
         "[{$project:{'a':true, b:'$a'}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
@@ -5664,7 +5972,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRena
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRenameAddFields) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a"};
     doTest(
         "[{$addFields:{b:'$a'}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
@@ -5676,7 +5984,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRena
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithUnrelatedExclusion) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a"};
     doTest(
         "[{$project:{'c':false}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
@@ -5698,7 +6006,7 @@ TEST_F(PipelineOptimizations, ShouldNotPushdownGroupIfComputesValue) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithRenames) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$project: {rename: '$shardKey'}}"
@@ -5715,7 +6023,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithRenames) {
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMultipleRenames) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$project: {rename: '$shardKey'}}"
@@ -5732,7 +6040,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMultipleRenames) 
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMatchBetweenSortAndGroup) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$sort: {shardKey: 1}}, {$match: {shardKey: 'val'}}, {$group: {_id: '$shardKey'}}]" /*inputPipeJson*/
@@ -5746,7 +6054,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMatchBetweenSortA
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithFirstAccumulator) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$sort: {shardKey: 1}}, {$group: {_id: '$shardKey', first: {$first: '$other'}}}]" /*inputPipeJson*/
@@ -5760,7 +6068,7 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithFirstAccumulator)
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithTopAccumulator) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"shardKey"};
     doTest(
         "[{$sort: {shardKey: 1}}"
@@ -5783,7 +6091,7 @@ class PipelineOptimizationsShardMerger : public PipelineOptimizations {
 public:
     void setUp() override {
         PipelineOptimizations::setUp();
-        getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
+        getConfigServerCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
             DatabaseType{DatabaseName::createDatabaseName_forTest(boost::none, "a"),
                          kMyShardName,
                          DatabaseVersion{}});
@@ -5861,8 +6169,8 @@ TEST_F(PipelineOptimizationsShardMerger, Out) {
 };
 
 TEST_F(PipelineOptimizationsShardMerger, MergeWithUntrackedCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagAllowMergeOnNullishValues", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagAllowMergeOnNullishValues",
+                                                         true);
 
     const Timestamp timestamp{1, 1};
     getCatalogCacheMock()->setCollectionReturnValue(
@@ -5884,14 +6192,14 @@ TEST_F(PipelineOptimizationsShardMerger, MergeWithUntrackedCollection) {
 };
 
 TEST_F(PipelineOptimizationsShardMerger, MergeWithShardedCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagAllowMergeOnNullishValues", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagAllowMergeOnNullishValues",
+                                                         true);
     doMergeWithCollectionWithRoutingTableTest(false /*unsplittable*/);
 };
 
 TEST_F(PipelineOptimizationsShardMerger, MergeWithUnsplittableCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagAllowMergeOnNullishValues", true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagAllowMergeOnNullishValues",
+                                                         true);
     doMergeWithCollectionWithRoutingTableTest(true /*unsplittable*/);
 };
 
@@ -6055,12 +6363,12 @@ TEST_F(PipelineMustRunOnRouterTest, SplitRouterMergePipelineAssertsIfShardStageP
 TEST_F(PipelineMustRunOnRouterTest, SplittablePipelineAssertsIfRouterStageOnShardSideOfSplit) {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
     auto pipeline = makePipeline(
-        {matchStage("{x: 5}"), runOnRouter(), splitStage(HostTypeRequirement::kAnyShard)});
+        {matchStage("{x: 5}"), runOnRouter(), splitStage(HostTypeRequirement::kTargetedShards)});
     pipeline_optimization::optimizePipeline(*pipeline);
 
     // The 'runOnRouter' stage comes before any splitpoint, so this entire pipeline must run on
-    // rotuer. However, the pipeline *cannot* run on router and *must* split at
-    // $_internalSplitPipeline due to the latter's 'anyShard' requirement. The rotuer stage would
+    // router. However, the pipeline *cannot* run on router and *must* split at
+    // $_internalSplitPipeline due to the latter's 'anyShard' requirement. The router stage would
     // end up on the shard side of this split, and so it asserts.
     ASSERT_TRUE(pipeline->requiredToRunOnRouter());
     ASSERT_NOT_OK(pipeline->canRunOnRouter());
@@ -6960,7 +7268,7 @@ TEST_F(InvolvedNamespacesTest, NoInvolvedNamespacesForMatchSortProject) {
         {mockSource(),
          matchStage("{x: 1}"),
          sortStage("{y: -1}"),
-         DocumentSourceProject::create(BSON("x" << 1 << "y" << 1), expCtx, "$project"_sd)});
+         DocumentSourceProject::create(BSON("x" << 1 << "y" << 1), expCtx, "$project"sv)});
     auto involvedNssSet = pipeline->getInvolvedCollections();
     ASSERT(involvedNssSet.empty());
 }
@@ -7104,6 +7412,30 @@ TEST_F(InvolvedNamespacesTest, IncludesAllCollectionsWhenResolvingViews) {
     ASSERT(involvedNssSet.find(nssIncludedInResolvedView) != involvedNssSet.end());
     ASSERT(involvedNssSet.find(normalCollectionNss) != involvedNssSet.end());
 };
+
+TEST(PipelineTest, ParseFromStageParamsBuildsCorrectPipeline) {
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    // spec must outlive the StageParams: DefaultStageParams holds a BSONElement view into it.
+    BSONObj spec = BSON("$match" << BSON("x" << 1));
+    auto liteParsed = LiteParsedDocumentSource::parse(nss, spec, {});
+
+    std::vector<std::unique_ptr<StageParams>> params;
+    params.push_back(liteParsed->getStageParams());
+
+    auto pipeline = Pipeline::parseFromStageParams(std::move(params), expCtx);
+
+    ASSERT_EQ(pipeline->getSources().size(), 1u);
+    ASSERT_EQ(pipeline->getSources().front()->getSourceName(), "$match"sv);
+}
+
+TEST(PipelineTest, ParseFromStageParamsEmptyVectorBuildsEmptyPipeline) {
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    std::vector<std::unique_ptr<StageParams>> params;
+    auto pipeline = Pipeline::parseFromStageParams(std::move(params), expCtx);
+    ASSERT_TRUE(pipeline->getSources().empty());
+}
 
 }  // namespace
 }  // namespace mongo

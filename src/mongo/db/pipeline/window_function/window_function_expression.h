@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -67,6 +40,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -127,6 +101,7 @@ class PartitionIterator;
 
 
 namespace mongo::window_function {
+using namespace std::literals::string_view_literals;
 
 /**
  * A window-function expression describes how to compute a single output value in a
@@ -146,7 +121,7 @@ namespace mongo::window_function {
  */
 class Expression : public RefCountable {
 public:
-    static constexpr StringData kWindowArg = "window"_sd;
+    static constexpr std::string_view kWindowArg = "window"sv;
     /**
      * Parses a single window-function expression. One of the BSONObj's keys is the function
      * name, and the other (optional) key is 'window': for example, the whole BSONObj might be
@@ -184,7 +159,7 @@ public:
     /**
      * Is this a function that the parser knows about?
      */
-    inline static bool isFunction(mongo::StringData name) {
+    inline static bool isFunction(std::string_view name) {
         return parserMap.find(name) != parserMap.end();
     }
 
@@ -206,7 +181,7 @@ public:
           _input(std::move(input)),
           _bounds(std::move(bounds)) {}
 
-    StringData getOpName() const {
+    std::string_view getOpName() const {
         return _accumulatorName;
     }
 
@@ -238,7 +213,7 @@ public:
         }
     }
 
-    virtual Value serialize(const SerializationOptions& opts) const {
+    virtual Value serialize(const query_shape::SerializationOptions& opts) const {
         MutableDocument args;
 
         args[_accumulatorName] = _input->serialize(opts);
@@ -268,7 +243,7 @@ public:
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
         // 'obj' is something like '{$func: <args>, window: {...}}'
-        boost::optional<StringData> accumulatorName;
+        boost::optional<std::string_view> accumulatorName;
         WindowBounds bounds = WindowBounds::defaultBounds();
         boost::intrusive_ptr<::mongo::Expression> input;
         for (const auto& arg : obj) {
@@ -308,9 +283,7 @@ public:
                               std::string accumulatorName,
                               boost::intrusive_ptr<::mongo::Expression> input,
                               WindowBounds bounds)
-        : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {
-        expCtx->setSbeWindowCompatibility(SbeCompatibility::notCompatible);
-    }
+        : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {}
 };
 
 /**
@@ -328,7 +301,7 @@ public:
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
         // 'obj' is something like '{$func: <expressionArg>}'
-        boost::optional<StringData> accumulatorName;
+        boost::optional<std::string_view> accumulatorName;
         // These expressions have variable lower bounds, but the functions themselves will handle
         // the specifics of what documents to count. All documents preceding current must be
         // seen by the function.
@@ -373,7 +346,7 @@ public:
                                 << " is not supported as a removable window function");
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument args;
         args.addField(_accumulatorName, Value(_input->serialize(opts)));
         return args.freezeToValue();
@@ -387,7 +360,7 @@ public:
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
         // 'obj' is something like '{$func: <args>, window: {...}}'
-        boost::optional<StringData> accumulatorName;
+        boost::optional<std::string_view> accumulatorName;
         WindowBounds bounds = WindowBounds::defaultBounds();
         boost::intrusive_ptr<::mongo::Expression> input;
         for (const auto& arg : obj) {
@@ -432,36 +405,12 @@ public:
 template <typename RankType>
 class ExpressionFromRankAccumulator : public Expression {
 public:
-    static auto createLegacyRankWF(ExpressionContext* expCtx,
-                                   StringData accumulatorName,
-                                   const SortPattern& sortBy,
-                                   WindowBounds bounds) {
-        auto sortPatternPart = sortBy[0];
-        if (sortPatternPart.fieldPath) {
-            auto sortExpression = ExpressionFieldPath::createPathFromString(
-                expCtx, sortPatternPart.fieldPath->fullPath(), expCtx->variablesParseState);
-            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
-                expCtx,
-                std::string{accumulatorName},
-                std::move(sortExpression),
-                sortPatternPart.isAscending,
-                std::move(bounds));
-        } else {
-            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
-                expCtx,
-                std::string{accumulatorName},
-                sortPatternPart.expression,
-                sortPatternPart.isAscending,
-                std::move(bounds));
-        }
-    }
-
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
         // 'obj' is something like '{$func: <args>}'
         uassert(5371601, "Rank style window functions take no other arguments", obj.nFields() == 1);
-        boost::optional<StringData> accumulatorName;
+        boost::optional<std::string_view> accumulatorName;
         // Rank based accumulators are always unbounded to current.
         WindowBounds bounds = WindowBounds{
             WindowBounds::DocumentBased{WindowBounds::Unbounded{}, WindowBounds::Current{}}};
@@ -485,24 +434,9 @@ public:
                                  "exactly one element",
                 sortBy && sortBy->isSingleElementKey());
 
-        // Use the new $rank implementation that depends on sort key metadata if
-        // 1) we are the context of a $rankFusion query, or
-        // 2) the feature flag is enabled
-        // #1 is because $rankFusion was backported to 8.0, and we don't want $rankFusion queries to
-        // fail during an FCV-gated upgrade.
-        // #2 is because we still need to preserve FCV-gating for generic $setWindowFields queries
-        // in order to avoid failures during upgrade (this $setWindowFields feature is *only*
-        // enabled for $rankFusion on 8.0, so it is new behavior on this version).
-        // TODO SERVER-85426 Always use the new $rank implementation.
-        if (expCtx->isHybridSearch() || expCtx->isBasicRankFusionFeatureFlagEnabled()) {
-            // The 'modern' way to do $rank is to just use the sort key. But we only support this on
-            // newer versions, since we need to make sure that the $sort stage is giving us the sort
-            // key.
-            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
-                expCtx, std::string{*accumulatorName}, std::move(bounds));
-        }
-        // TODO SERVER-85426 This whole branch/helper can be deleted.
-        return createLegacyRankWF(expCtx, *accumulatorName, *sortBy, std::move(bounds));
+        // The 'modern' way to do $rank is to just use the sort key.
+        return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
+            expCtx, std::string{*accumulatorName}, std::move(bounds));
     }
 
     ExpressionFromRankAccumulator(ExpressionContext* expCtx,
@@ -535,7 +469,7 @@ public:
                                 << " is not supported with a removable window");
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument args;
         args.addField(_accumulatorName, Value(Document()));
         return args.freezeToValue();
@@ -549,10 +483,10 @@ private:
 
 class ExpressionExpMovingAvg : public Expression {
 public:
-    static constexpr StringData kAccName = "$expMovingAvg"_sd;
-    static constexpr StringData kInputArg = "input"_sd;
-    static constexpr StringData kNArg = "N"_sd;
-    static constexpr StringData kAlphaArg = "alpha"_sd;
+    static constexpr std::string_view kAccName = "$expMovingAvg"sv;
+    static constexpr std::string_view kInputArg = "input"sv;
+    static constexpr std::string_view kNArg = "N"sv;
+    static constexpr std::string_view kAlphaArg = "alpha"sv;
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx);
@@ -589,7 +523,7 @@ public:
                                 << " is not supported with a removable window");
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument subObj;
         tassert(5433604, "ExpMovingAvg neither N nor alpha was set", _N || _alpha);
         if (_N) {
@@ -620,8 +554,8 @@ protected:
 
 class ExpressionWithUnit : public Expression {
 public:
-    static constexpr StringData kArgInput = "input"_sd;
-    static constexpr StringData kArgUnit = "unit"_sd;
+    static constexpr std::string_view kArgInput = "input"sv;
+    static constexpr std::string_view kArgUnit = "unit"sv;
 
     ExpressionWithUnit(ExpressionContext* expCtx,
                        std::string accumulatorName,
@@ -646,7 +580,7 @@ public:
         return milliseconds;
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument result;
         result[_accumulatorName][kArgInput] = _input->serialize(opts);
         if (_unit) {
@@ -705,7 +639,7 @@ protected:
 
 class ExpressionDerivative : public ExpressionWithUnit {
 public:
-    static constexpr StringData kName = "$derivative"_sd;
+    static constexpr std::string_view kName = "$derivative"sv;
     ExpressionDerivative(ExpressionContext* expCtx,
                          boost::intrusive_ptr<::mongo::Expression> input,
                          WindowBounds bounds,
@@ -730,7 +664,7 @@ public:
             auto argName = arg.fieldNameStringData();
             if (argName == kWindowArg) {
                 bounds = WindowBounds::parse(arg, sortBy, expCtx);
-            } else if (argName == "$derivative"_sd) {
+            } else if (argName == "$derivative"sv) {
                 derivativeArgs = arg;
             } else {
                 uasserted(ErrorCodes::FailedToParse,
@@ -809,7 +743,7 @@ public:
                         "There can be only one 'window' field for $integral",
                         bounds == boost::none);
                 bounds = WindowBounds::parse(arg, sortBy, expCtx);
-            } else if (argName == "$integral"_sd) {
+            } else if (argName == "$integral"sv) {
                 integralArgs = arg;
             } else {
                 uasserted(ErrorCodes::FailedToParse,
@@ -856,7 +790,7 @@ public:
 
 class ExpressionLinearFill : public Expression {
 public:
-    static constexpr StringData kName = "$linearFill"_sd;
+    static constexpr std::string_view kName = "$linearFill"sv;
     ExpressionLinearFill(ExpressionContext* expCtx,
                          std::string accumulatorName,
                          boost::intrusive_ptr<::mongo::Expression> input,
@@ -865,11 +799,10 @@ public:
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
-        boost::optional<StringData> accumulatorName;
+        boost::optional<std::string_view> accumulatorName;
         WindowBounds bounds = WindowBounds::defaultBounds();
         boost::intrusive_ptr<::mongo::Expression> input;
 
-        std::vector<std::pair<std::string, boost::intrusive_ptr<mongo::Expression>>> linearFillVec;
         bool windowFieldMissing = true;
         for (const auto& arg : obj) {
             auto argName = arg.fieldNameStringData();
@@ -900,6 +833,9 @@ public:
                               << " must be specified with a top level sortBy expression with "
                                  "exactly one element",
                 sortBy && sortBy->isSingleElementKey());
+        uassert(ErrorCodes::FailedToParse,
+                str::stream() << accumulatorName << " requires a non-expression sortBy",
+                !sortBy->begin()->expression);
 
         return make_intrusive<ExpressionLinearFill>(
             expCtx, std::string{*accumulatorName}, std::move(input), std::move(bounds));
@@ -913,7 +849,7 @@ public:
         MONGO_UNREACHABLE_TASSERT(5490705);
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument args;
         args.addField(_accumulatorName, Value(_input->serialize(opts)));
         return args.freezeToValue();
@@ -986,10 +922,10 @@ public:
 
 class ExpressionMinMaxScaler : public Expression {
 public:
-    static constexpr StringData kWindowFnName = "$minMaxScaler"_sd;
-    static constexpr StringData kInputArg = "input"_sd;
-    static constexpr StringData kMinArg = "min"_sd;
-    static constexpr StringData kMaxArg = "max"_sd;
+    static constexpr std::string_view kWindowFnName = "$minMaxScaler"sv;
+    static constexpr std::string_view kInputArg = "input"sv;
+    static constexpr std::string_view kMinArg = "min"sv;
+    static constexpr std::string_view kMaxArg = "max"sv;
 
     ExpressionMinMaxScaler(ExpressionContext* expCtx,
                            boost::intrusive_ptr<::mongo::Expression> input,
@@ -1019,7 +955,7 @@ public:
         return WindowFunctionMinMaxScaler::create(_expCtx, _sMinAndsMax);
     }
 
-    Value serialize(const SerializationOptions& opts) const final {
+    Value serialize(const query_shape::SerializationOptions& opts) const final {
         MutableDocument result;
         // $minMaxScaler args
         result[_accumulatorName][kInputArg] = _input->serialize(opts);
@@ -1069,7 +1005,7 @@ public:
           nExpr(std::move(nExpr)),
           sortPattern(std::move(sortPattern)) {}
 
-    Value serialize(const SerializationOptions& opts) const final;
+    Value serialize(const query_shape::SerializationOptions& opts) const final;
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final;
 
@@ -1124,11 +1060,9 @@ public:
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)),
           _ps(std::move(ps)),
           _method(method),
-          _intializeExpr(std::move(initializeExpr)) {
-        expCtx->setSbeWindowCompatibility(SbeCompatibility::notCompatible);
-    }
+          _intializeExpr(std::move(initializeExpr)) {}
 
-    Value serialize(const SerializationOptions& opts) const final;
+    Value serialize(const query_shape::SerializationOptions& opts) const final;
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final;
 

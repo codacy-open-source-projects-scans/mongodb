@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -79,14 +52,22 @@ namespace {
 void releaseCriticalSectionInEmptySession(OperationContext* opCtx,
                                           ShardingRecoveryService* service,
                                           const NamespaceString& bucketNs,
-                                          const BSONObj& reason) {
+                                          const BSONObj& reason,
+                                          bool clearMetadata) {
+    std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction> actionPtr;
+    if (clearMetadata) {
+        actionPtr = std::make_unique<ShardingRecoveryService::FilteringMetadataClearer>();
+    } else {
+        actionPtr = std::make_unique<ShardingRecoveryService::NoCustomAction>();
+    }
+
     auto txnParticipant = TransactionParticipant::get(opCtx);
     if (txnParticipant) {
         // Use an AlternativeClientRegion because releasing a RecoverableCriticalSection
         // triggers an update with `multi: true`, which cannot be executed inside a
         // transaction.
         auto newClient = getGlobalServiceContext()->getService()->makeClient(
-            "ShardsvrMovePrimaryExitCriticalSection");
+            "ShardsvrCollModParticipantCommandExitCriticalSection");
         AlternativeClientRegion acr(newClient);
         auto newOpCtx = CancelableOperationContext(
             cc().makeOperationContext(),
@@ -98,7 +79,7 @@ void releaseCriticalSectionInEmptySession(OperationContext* opCtx,
             bucketNs,
             reason,
             ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-            ShardingRecoveryService::FilteringMetadataClearer());
+            *actionPtr);
     } else {
         // No need to create a new operation context if no session is checked-out
         service->releaseRecoverableCriticalSection(
@@ -106,7 +87,7 @@ void releaseCriticalSectionInEmptySession(OperationContext* opCtx,
             bucketNs,
             reason,
             ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-            ShardingRecoveryService::FilteringMetadataClearer());
+            *actionPtr);
     }
 }
 
@@ -236,7 +217,9 @@ public:
                 // operation context will cause a dead lock since the session has been already
                 // checked-out. We prevent the issue by using a new operation context with an
                 // empty session.
-                releaseCriticalSectionInEmptySession(opCtx, service, bucketNs, reason);
+                const bool clearMetadata = request().getClearCollMetadata().value_or(true);
+                releaseCriticalSectionInEmptySession(
+                    opCtx, service, bucketNs, reason, clearMetadata);
             }
 
             BSONObjBuilder builder;

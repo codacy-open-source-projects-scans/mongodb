@@ -5,8 +5,6 @@
  * does_not_support_stepdowns,
  * # unshardCollection can't run during FCV transitions
  * cannot_run_during_upgrade_downgrade,
- * # TODO(SERVER-124153): Remove.
- * featureFlagReplicatedFastCount_incompatible,
  * ]
  */
 
@@ -44,8 +42,12 @@ assert.commandWorked(testDb.adminCommand({split: ns, middle: {x: 0}}));
 assert.commandWorked(testDb.adminCommand({moveChunk: ns, find: {x: 0}, to: shard1._id}));
 
 // Define zones for test collection.
-assert.commandWorked(testDb.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "zone1"}));
-assert.commandWorked(testDb.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "zone2"}));
+assert.commandWorked(
+    testDb.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "zone1"}),
+);
+assert.commandWorked(
+    testDb.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "zone2"}),
+);
 
 for (let i = 0; i < 5000; i++) {
     testDb.getCollection(ns).insert({x: i});

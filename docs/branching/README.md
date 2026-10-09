@@ -51,16 +51,15 @@ VERSION=8.3
 
 ### Copybara configuration
 
-Run the following automation and verify results:
+Run the following automation in the private repo and verify results:
 
 ```sh
-sed -i "s/master/v$VERSION/g" copy.bara.sky
-sed -i 's/branch = "master"/branch = "v'"$VERSION"'"/' buildscripts/sync_repo_with_copybara.py
+sed -i "s/master/v$VERSION/g" buildscripts/copybara/copy.bara.sky buildscripts/copybara/sync_repo_with_copybara.py
 ```
 
-For each file [`copy.bara.sky`](../../copy.bara.sky) and
-[`sync_repo_with_copybara.py`](../../buildscripts/sync_repo_with_copybara.py), the "master" branch
-references should be replaced with the new branch name.
+In the private repo, `buildscripts/copybara/copy.bara.sky` and
+`buildscripts/copybara/sync_repo_with_copybara.py` should have their `"master"` branch references
+replaced with the new branch name.
 
 ### Evergreen YAML configurations
 
@@ -207,6 +206,17 @@ In the file [`etc/coverity.yml`](../../etc/coverity.yml), the "stream" should be
 branch.
 
 #### Finally: format and lint
+
+Run the following automation and verify results:
+
+```sh
+sed -i "s/DEFAULT_ORIGIN_BRANCH = \"master\"/DEFAULT_ORIGIN_BRANCH = \"v$VERSION\"/g" buildscripts/bazel_rules_mongo/utils/evergreen_git.py
+```
+
+In the file
+[`buildscripts/bazel_rules_mongo/utils/evergreen_git.py`](../../buildscripts/bazel_rules_mongo/utils/evergreen_git.py),
+`DEFAULT_ORIGIN_BRANCH` should be updated to the new branch. This makes `bazel run format` and
+`bazel run lint --fix` compare changed files against the new release branch instead of `master`.
 
 ```sh
 bazel run format && bazel run lint --fix

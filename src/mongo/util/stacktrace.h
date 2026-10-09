@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * Tools for working with in-process stack traces.
  */
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/util/future.h"
@@ -44,9 +17,10 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 #include <utility>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 /**
  * All-thread backtrace is only implemented on Linux. Even on Linux, it's only AS-safe
@@ -67,13 +41,13 @@ const size_t kStackTraceFrameMax = 100;
 /** Abstract sink onto which stacktrace is piecewise emitted. */
 class StackTraceSink {
 public:
-    StackTraceSink& operator<<(StringData v) {
+    StackTraceSink& operator<<(std::string_view v) {
         doWrite(v);
         return *this;
     }
 
 private:
-    virtual void doWrite(StringData v) = 0;
+    virtual void doWrite(std::string_view v) = 0;
 };
 
 class OstreamStackTraceSink : public StackTraceSink {
@@ -81,7 +55,7 @@ public:
     explicit OstreamStackTraceSink(std::ostream& os) : _os(os) {}
 
 private:
-    void doWrite(StringData v) override {
+    void doWrite(std::string_view v) override {
         _os << v;
     }
     std::ostream& _os;
@@ -92,7 +66,7 @@ public:
     StringStackTraceSink(std::string& s) : _s{s} {}
 
 private:
-    void doWrite(StringData v) override {
+    void doWrite(std::string_view v) override {
         _s.append(v.data(), v.size());
     }
 
@@ -142,51 +116,51 @@ private:
 namespace stacktrace_details {
 /**
  * A utility for uint64_t <=> uppercase hex string conversions. It
- * can be used to produce a StringData.
+ * can be used to produce a std::string_view.
  *
  *     sink << Hex(x);  // as a temporary
  *
  *     Hex hx(x);
- *     StringData sd = hx;  // sd storage is in `hx`.
+ *     std::string_view sd = hx;  // sd storage is in `hx`.
  */
 class Hex {
 public:
     using Buf = std::array<char, 18>;  // 64/4 hex digits plus potential "0x"
 
-    static StringData toHex(uint64_t x, Buf& buf, bool showBase = false);
+    static std::string_view toHex(uint64_t x, Buf& buf, bool showBase = false);
 
-    static uint64_t fromHex(StringData s);
+    static uint64_t fromHex(std::string_view s);
 
     explicit Hex(uint64_t x, bool showBase = false) : _str{toHex(x, _buf, showBase)} {}
     explicit Hex(const void* x, bool showBase = false)
         : Hex{reinterpret_cast<uintptr_t>(x), showBase} {}
 
-    operator StringData() const {
+    operator std::string_view() const {
         return _str;
     }
 
 private:
     Buf _buf;
-    StringData _str;
+    std::string_view _str;
 };
 
 class Dec {
 public:
     using Buf = std::array<char, 20>;  // ceil(64*log10(2))
 
-    static StringData toDec(uint64_t x, Buf& buf);
+    static std::string_view toDec(uint64_t x, Buf& buf);
 
-    static uint64_t fromDec(StringData s);
+    static uint64_t fromDec(std::string_view s);
 
     explicit Dec(uint64_t x) : _str(toDec(x, _buf)) {}
 
-    operator StringData() const {
+    operator std::string_view() const {
         return _str;
     }
 
 private:
     Buf _buf;
-    StringData _str;
+    std::string_view _str;
 };
 
 void logBacktraceObject(const BSONObj& bt, StackTraceSink* sink, bool withHumanReadable);
@@ -274,7 +248,7 @@ public:
             _name.clear();
         }
 
-        void assign(uintptr_t newBase, StringData newName) {
+        void assign(uintptr_t newBase, std::string_view newName) {
             _base = newBase;
             if (newBase != 0)
                 _name.assign(newName.begin(), newName.end());
@@ -285,7 +259,7 @@ public:
         uintptr_t base() const {
             return _base;
         }
-        StringData name() const {
+        std::string_view name() const {
             return _name;
         }
 

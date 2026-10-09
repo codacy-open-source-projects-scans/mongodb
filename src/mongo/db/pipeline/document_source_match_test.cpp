@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/document_source_match.h"
@@ -65,6 +39,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 using std::string;
 
 // This provides access to getExpCtx(), but we'll use a different name for this test suite.
@@ -510,7 +485,7 @@ TEST_F(DocumentSourceMatchTest, DoesNotPushProjectBeforeSelf) {
     DocumentSourceContainer container;
     auto match = DocumentSourceMatch::create(BSON("_id" << 1), getExpCtx());
     auto project =
-        DocumentSourceProject::create(BSON("fullDocument" << true), getExpCtx(), "$project"_sd);
+        DocumentSourceProject::create(BSON("fullDocument" << true), getExpCtx(), "$project"sv);
 
     container.push_back(match);
     container.push_back(project);
@@ -695,7 +670,7 @@ TEST_F(DocumentSourceMatchTest, ShouldCorrectlyEvaluateJSONSchemaPredicate) {
         fromjson("{$jsonSchema: {properties: {a: {type: 'number'}}}}"), getExpCtx());
 
     const auto mock = DocumentSourceMock::createForTest(
-        {Document{{"a", 1}}, Document{{"a", "str"_sd}}, Document{{"a", {Document{{{}, 1}}}}}},
+        {Document{{"a", 1}}, Document{{"a", "str"sv}}, Document{{"a", {Document{{{}, 1}}}}}},
         getExpCtx());
 
     auto mockStage = exec::agg::buildStage(mock);
@@ -719,11 +694,11 @@ TEST_F(DocumentSourceMatchTest, ShouldShowOptimizationsInExplainOutputWhenOptimi
 
     auto expectedMatch = fromjson("{$match: {a:{$eq: 1}}}");
 
-    ASSERT_VALUE_EQ(
-        Value((static_cast<DocumentSourceMatch*>(optimizedMatch.get()))
-                  ->serialize(SerializationOptions{.verbosity = boost::make_optional(
-                                                       ExplainOptions::Verbosity::kQueryPlanner)})),
-        Value(expectedMatch));
+    ASSERT_VALUE_EQ(Value((static_cast<DocumentSourceMatch*>(optimizedMatch.get()))
+                              ->serialize(query_shape::SerializationOptions{
+                                  .verbosity = boost::make_optional(
+                                      ExplainOptions::Verbosity::kQueryPlanner)})),
+                    Value(expectedMatch));
 }
 
 TEST_F(DocumentSourceMatchTest, RedactionWithAnd) {

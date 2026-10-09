@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/fle_crud.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/secure_allocator.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -71,11 +44,11 @@
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection_options.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/random.h"
 #include "mongo/shell/kms_gen.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
@@ -91,6 +64,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/node_hash_map.h>
@@ -99,6 +73,9 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
+using namespace std::literals::string_view_literals;
+
+using namespace std::literals::string_view_literals;
 namespace mongo {
 
 namespace fle {
@@ -107,8 +84,8 @@ size_t sizeArrayElementsMemory(size_t tagCount);
 
 namespace {
 
-constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
-constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
+constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"sv;
+constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"sv;
 static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId));
 static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
 
@@ -117,14 +94,14 @@ std::vector<char> testValue2 = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 
 
 const FLEIndexKey& getIndexKey() {
     static std::string indexVec = hexblob::decode(
-        "f502e66502ff5d4559452ce928a0f08557a9853c4dfeacca77cff482434f0ca1251fbd60d200bc35f24309521b45ad781b2d3c4df788cacef3c0e7beca8170b6cfc514ecfcf27e217ed697ae65c08272886324def514b14369c7c60414e80f22"_sd);
+        "f502e66502ff5d4559452ce928a0f08557a9853c4dfeacca77cff482434f0ca1251fbd60d200bc35f24309521b45ad781b2d3c4df788cacef3c0e7beca8170b6cfc514ecfcf27e217ed697ae65c08272886324def514b14369c7c60414e80f22"sv);
     static FLEIndexKey indexKey(KeyMaterial(indexVec.begin(), indexVec.end()));
     return indexKey;
 }
 
 const FLEUserKey& getUserKey() {
     static std::string userVec = hexblob::decode(
-        "cbebdf05fe16099fef502a6d045c1cbb77d29d2fe19f51aec5079a81008305d8868358845d2e3ab38e4fa9cbffcd651a0fc07201d7c9ed9ca3279bfa7cd673ec37b362a0aaa92f95062405a999afd49e4b1f7f818f766c49715407011ac37fa9"_sd);
+        "cbebdf05fe16099fef502a6d045c1cbb77d29d2fe19f51aec5079a81008305d8868358845d2e3ab38e4fa9cbffcd651a0fc07201d7c9ed9ca3279bfa7cd673ec37b362a0aaa92f95062405a999afd49e4b1f7f818f766c49715407011ac37fa9"sv);
     static FLEUserKey userKey(KeyMaterial(userVec.begin(), userVec.end()));
     return userKey;
 }
@@ -205,7 +182,7 @@ BSONObj TestKeyVault::getEncryptedKey(const UUID& uuid) {
     return makeKeyStoreRecord(uuid, ciphertext).toBSON();
 }
 
-UUID fieldNameToUUID(StringData field) {
+UUID fieldNameToUUID(std::string_view field) {
     std::array<char, UUID::kNumBytes> buf;
     murmur3(field, 123456 /*seed*/, buf);
     return UUID::fromCDR(buf);
@@ -225,6 +202,17 @@ int32_t getTestSeed() {
 
     return rnd->nextInt32();
 }
+
+BSONObj insertUpdatePayloadAsDocument(std::string_view path, const FLE2InsertUpdatePayloadV2& iup) {
+    auto payload = iup.toBSON();
+    std::vector<uint8_t> buf(payload.objsize() + 1);
+    buf[0] = static_cast<uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayloadV2);
+    std::copy(payload.objdata(), payload.objdata() + payload.objsize(), buf.data() + 1);
+    BSONObjBuilder builder;
+    builder.appendBinData(path, buf.size(), BinDataType::Encrypt, buf.data());
+    return builder.obj();
+}
+
 class FleCrudTest : public ServiceContextMongoDTest {
 protected:
     void setUp() override;
@@ -260,7 +248,7 @@ protected:
 
     void doFindAndModify(write_ops::FindAndModifyCommandRequest& request, Fle2AlgorithmInt alg);
 
-    using ValueGenerator = std::function<std::string(StringData fieldName, uint64_t row)>;
+    using ValueGenerator = std::function<std::string(std::string_view fieldName, uint64_t row)>;
 
     void doSingleWideInsert(int id, uint64_t fieldCount, ValueGenerator func);
 
@@ -271,9 +259,9 @@ protected:
 
     ESCTwiceDerivedTagToken getTestESCToken(BSONElement value);
     ESCTwiceDerivedTagToken getTestESCToken(BSONObj obj);
-    ESCTwiceDerivedTagToken getTestESCToken(StringData name, StringData value);
+    ESCTwiceDerivedTagToken getTestESCToken(std::string_view name, std::string_view value);
 
-    void assertECOCDocumentCountByField(StringData fieldName, uint64_t expect);
+    void assertECOCDocumentCountByField(std::string_view fieldName, uint64_t expect);
 
     std::vector<char> generatePlaceholder(UUID keyId, BSONElement value);
 
@@ -382,7 +370,8 @@ ESCTwiceDerivedTagToken FleCrudTest::getTestESCToken(BSONObj obj) {
     return getTestESCToken(obj.firstElement());
 }
 
-ESCTwiceDerivedTagToken FleCrudTest::getTestESCToken(StringData name, StringData value) {
+ESCTwiceDerivedTagToken FleCrudTest::getTestESCToken(std::string_view name,
+                                                     std::string_view value) {
 
     auto doc = BSON("i" << value);
     auto element = doc.firstElement();
@@ -399,7 +388,7 @@ ESCTwiceDerivedTagToken FleCrudTest::getTestESCToken(StringData name, StringData
     return ESCTwiceDerivedTagToken::deriveFrom(escContentionToken);
 }
 
-void FleCrudTest::assertECOCDocumentCountByField(StringData fieldName, uint64_t expect) {
+void FleCrudTest::assertECOCDocumentCountByField(std::string_view fieldName, uint64_t expect) {
     auto query = BSON(EcocDocument::kFieldNameFieldName << fieldName);
     auto results = _queryImpl->findDocuments(_ecocNs, query);
     ASSERT_EQ(results.size(), expect);
@@ -469,7 +458,7 @@ EncryptedFieldConfig getTestEncryptedFieldConfig(
     return EncryptedFieldConfig::parse(fromjson(rangeSchemaV2), IDLParserContext("root"));
 }
 
-void parseEncryptedInvalidFieldConfig(StringData esc, StringData ecoc) {
+void parseEncryptedInvalidFieldConfig(std::string_view esc, std::string_view ecoc) {
 
     auto invalidCollectionNameSchema =
         // "{" +
@@ -720,7 +709,7 @@ void FleCrudTest::doSingleUpdateWithUpdateDoc(int id,
                       .runtimeConstants(updateRequest.getLegacyRuntimeConstants())
                       .letParameters(updateRequest.getLet())
                       .build();
-    processUpdate(_queryImpl.get(), expCtx, updateRequest);
+    processUpdate(_queryImpl.get(), expCtx, updateRequest, efc);
 }
 
 void FleCrudTest::doSingleDelete(int id, Fle2AlgorithmInt alg) {
@@ -745,7 +734,7 @@ void FleCrudTest::doSingleDelete(int id, Fle2AlgorithmInt alg) {
                       .runtimeConstants(deleteRequest.getLegacyRuntimeConstants())
                       .letParameters(deleteRequest.getLet())
                       .build();
-    processDelete(_queryImpl.get(), expCtx, deleteRequest);
+    processDelete(_queryImpl.get(), expCtx, deleteRequest, efc);
 }
 
 void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& request,
@@ -880,7 +869,7 @@ TEST_F(FleCrudTest, InsertTwoDifferent) {
 TEST_F(FleCrudTest, Insert100Fields) {
 
     uint64_t fieldCount = 100;
-    ValueGenerator valueGenerator = [](StringData fieldName, uint64_t row) {
+    ValueGenerator valueGenerator = [](std::string_view fieldName, uint64_t row) {
         return std::string{fieldName};
     };
     doSingleWideInsert(1, fieldCount, valueGenerator);
@@ -909,7 +898,7 @@ TEST_F(FleCrudTest, Insert20Fields50Rows) {
     uint64_t fieldCount = 20;
     uint64_t rowCount = 50;
 
-    ValueGenerator valueGenerator = [](StringData fieldName, uint64_t row) {
+    ValueGenerator valueGenerator = [](std::string_view fieldName, uint64_t row) {
         return std::string{fieldName} + std::to_string(row % 7);
     };
 
@@ -1048,15 +1037,67 @@ TEST_F(FleCrudTest, InsertPayloadIsBothRangeAndTextSearch) {
     payload.setEdgeTokenSet(std::vector<EdgeTokenSetV2>{{{}, {}, {}, bogusEncryptedTokens}});
     payload.setTextSearchTokenSets(
         TextSearchTokenSets{{{}, {}, {}, bogusEncryptedTokens}, {}, {}, {}});
-    auto iup = payload.toBSON();
-    std::vector<uint8_t> buf(iup.objsize() + 1);
-    buf[0] = static_cast<uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayloadV2);
-    std::copy(iup.objdata(), iup.objdata() + iup.objsize(), buf.data() + 1);
-    BSONObjBuilder builder;
-    builder.appendBinData("encrypted", buf.size(), BinDataType::Encrypt, buf.data());
-    BSONObj document = builder.obj();
-
+    auto document = insertUpdatePayloadAsDocument("encrypted", payload);
     ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(document), DBException, 9783801);
+}
+
+// Test insert update range payload containing too many token sets is rejected.
+TEST_F(FleCrudTest, InsertRangePayloadHasTooManyTokenSets) {
+    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false, boost::none).encrypt({{}});
+    FLE2InsertUpdatePayloadV2 payload({},
+                                      {},
+                                      bogusEncryptedTokens,
+                                      indexKeyId,
+                                      stdx::to_underlying(BSONType::numberInt),
+                                      {},
+                                      {},
+                                      {},
+                                      0);
+    std::vector<EdgeTokenSetV2> ets(EncryptionInformationHelpers::kFLE2RangeFieldMaxTags + 1,
+                                    {{}, {}, {}, bogusEncryptedTokens});
+    payload.setEdgeTokenSet(ets);
+    auto document = insertUpdatePayloadAsDocument("encrypted", payload);
+    ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(document), DBException, 12785600);
+
+    ets.pop_back();
+    payload.setEdgeTokenSet(ets);
+    ASSERT_EQ(payload.getEdgeTokenSet()->size(),
+              EncryptionInformationHelpers::kFLE2RangeFieldMaxTags);
+    document = insertUpdatePayloadAsDocument("encrypted", payload);
+    ASSERT_DOES_NOT_THROW(EDCServerCollection::getEncryptedFieldInfo(document));
+}
+
+// Test insert update string search payload containing too many token sets is rejected.
+TEST_F(FleCrudTest, InsertStringSearchPayloadHasTooManyTokenSets) {
+    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false, boost::none).encrypt({{}});
+    FLE2InsertUpdatePayloadV2 payload({},
+                                      {},
+                                      bogusEncryptedTokens,
+                                      indexKeyId,
+                                      stdx::to_underlying(BSONType::string),
+                                      {},
+                                      {},
+                                      {},
+                                      0);
+    // Split kFLE2PerFieldTagLimit token sets across all 3 token set types.
+    size_t affixCount = EncryptionInformationHelpers::kFLE2PerFieldTagLimit / 3;
+    size_t substringCount = affixCount + (EncryptionInformationHelpers::kFLE2PerFieldTagLimit % 3);
+
+    std::vector<TextSubstringTokenSet> subts(substringCount, {{}, {}, {}, bogusEncryptedTokens});
+    std::vector<TextSuffixTokenSet> sts(affixCount, {{}, {}, {}, bogusEncryptedTokens});
+    std::vector<TextPrefixTokenSet> pts(affixCount, {{}, {}, {}, bogusEncryptedTokens});
+
+    // Test with kFLE2PerFieldTagLimit + 1 total token sets (+1 due to exact match token set)
+    payload.setTextSearchTokenSets(
+        TextSearchTokenSets{{{}, {}, {}, bogusEncryptedTokens}, subts, sts, pts});
+    auto document = insertUpdatePayloadAsDocument("encrypted", payload);
+    ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(document), DBException, 12785601);
+
+    // Take out one substring token set to test with a total of kFLE2PerFieldTagLimit token sets
+    subts.pop_back();
+    payload.getTextSearchTokenSets()->setSubstringTokenSets(subts);
+    document = insertUpdatePayloadAsDocument("encrypted", payload);
+    ASSERT_DOES_NOT_THROW(EDCServerCollection::getEncryptedFieldInfo(document));
 }
 
 // Insert and delete one document
@@ -1449,27 +1490,19 @@ TEST_F(FleCrudTest, FindAndModify_SetSafeContent) {
     ASSERT_THROWS_CODE(doFindAndModify(req, Fle2AlgorithmInt::kEquality), DBException, 6666200);
 }
 
-BSONObj makeInsertUpdatePayload(StringData path, const UUID& uuid) {
+BSONObj makeInsertUpdatePayload(std::string_view path, const UUID& uuid) {
     // Actual values don't matter for these tests (apart from indexKeyId).
     auto encryptedTokens = StateCollectionTokensV2({{}}, boost::none, boost::none).encrypt({{}});
-    auto bson = FLE2InsertUpdatePayloadV2({},
-                                          {},
-                                          std::move(encryptedTokens),
-                                          uuid,
-                                          stdx::to_underlying(BSONType::string),
-                                          {},
-                                          {},
-                                          {},
-                                          0)
-                    .toBSON();
-    std::vector<std::uint8_t> bindata;
-    bindata.resize(bson.objsize() + 1);
-    bindata[0] = static_cast<std::uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayloadV2);
-    memcpy(bindata.data() + 1, bson.objdata(), bson.objsize());
-
-    BSONObjBuilder bob;
-    bob.appendBinData(path, bindata.size(), BinDataType::Encrypt, bindata.data());
-    return bob.obj();
+    auto iup = FLE2InsertUpdatePayloadV2({},
+                                         {},
+                                         std::move(encryptedTokens),
+                                         uuid,
+                                         stdx::to_underlying(BSONType::string),
+                                         {},
+                                         {},
+                                         {},
+                                         0);
+    return insertUpdatePayloadAsDocument(path, iup);
 }
 
 TEST_F(FleCrudTest, validateIndexKeyValid) {
@@ -1499,6 +1532,78 @@ TEST_F(FleCrudTest, validateIndexKeyInvalid) {
                                                             << "Mismatched keyId for field '"
                                                             << field.getPath() << "'");
                              });
+}
+
+namespace {
+// Build an FLE2 insert payload BSON for a single text-search field. The payload is wrapped in
+// BinData(Encrypt) with the kFLE2InsertUpdatePayloadV2 type byte so downstream parsing succeeds.
+BSONObj makeTextInsertPayload(std::string_view path, const UUID& keyId, int64_t contentionFactor) {
+    auto bogusEncryptedTokens =
+        StateCollectionTokensV2({{}}, boost::none, boost::none).encrypt({{}});
+    FLE2InsertUpdatePayloadV2 payload({},
+                                      {},
+                                      bogusEncryptedTokens,
+                                      keyId,
+                                      stdx::to_underlying(BSONType::string),
+                                      {},
+                                      {},
+                                      {},
+                                      contentionFactor);
+    // Populate the prefix token-set array (the field is configured for Prefix) alongside the
+    // always- present exact token set, mirroring a real prefix insert payload.
+    payload.setTextSearchTokenSets(TextSearchTokenSets{
+        {{}, {}, {}, bogusEncryptedTokens}, {}, {}, {{{}, {}, {}, bogusEncryptedTokens}}});
+    auto iup = payload.toBSON();
+    std::vector<uint8_t> buf(iup.objsize() + 1);
+    buf[0] = static_cast<uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayloadV2);
+    std::copy(iup.objdata(), iup.objdata() + iup.objsize(), buf.data() + 1);
+    BSONObjBuilder builder;
+    builder.appendBinData(path, buf.size(), BinDataType::Encrypt, buf.data());
+    return builder.obj();
+}
+
+EncryptedFieldConfig makeTextEfcSingleField(std::string_view path,
+                                            const UUID& keyId,
+                                            int64_t contention) {
+    QueryTypeConfig qtc;
+    qtc.setQueryType(QueryTypeEnum::Prefix);
+    qtc.setContention(contention);
+    qtc.setStrMinQueryLength(2);
+    qtc.setStrMaxQueryLength(10);
+    qtc.setCaseSensitive(true);
+    qtc.setDiacriticSensitive(true);
+    EncryptedField ef(keyId, std::string{path});
+    ef.setBsonType("string"sv);
+    ef.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{std::move(qtc)});
+    EncryptedFieldConfig efc({std::move(ef)});
+    efc.setEscCollection(std::string{"enxcol_.coll.esc"});
+    efc.setEcocCollection(std::string{"enxcol_.coll.ecoc"});
+    efc.setStrEncodeVersion(1);
+    return efc;
+}
+}  // namespace
+
+TEST_F(FleCrudTest, validateTextSearchInsertContentionExceedsMax) {
+    unittest::ServerParameterGuard ffctrl{"featureFlagQETextSearchPreview", true};
+    const UUID keyId = UUID::gen();
+    auto efc = makeTextEfcSingleField("encrypted"sv, keyId, 1 /* contention */);
+    auto fields = efc.getFields();
+
+    auto doc = makeTextInsertPayload("encrypted"sv, keyId, 100 /* sampled c */);
+    auto payload = EDCServerCollection::getEncryptedFieldInfo(doc);
+    ASSERT_THROWS_CODE(
+        validateInsertUpdatePayloads(_opCtx.get(), fields, payload), DBException, 9188700);
+}
+
+TEST_F(FleCrudTest, validateTextSearchInsertValidContention) {
+    unittest::ServerParameterGuard ffctrl{"featureFlagQETextSearchPreview", true};
+    const UUID keyId = UUID::gen();
+    auto efc = makeTextEfcSingleField("encrypted"sv, keyId, 1 /* contention */);
+    auto fields = efc.getFields();
+
+    auto doc = makeTextInsertPayload("encrypted"sv, keyId, 1 /* sampled c */);
+    auto payload = EDCServerCollection::getEncryptedFieldInfo(doc);
+    validateInsertUpdatePayloads(_opCtx.get(), fields, payload);
 }
 
 TEST_F(FleTagsTest, InsertOne) {
@@ -1767,7 +1872,7 @@ protected:
                              uint64_t cpos,
                              boost::optional<QueryTypeEnum> qtype);
 
-    void verifyESCEntriesForString(StringData testString,
+    void verifyESCEntriesForString(std::string_view testString,
                                    uint32_t expectedCount,
                                    boost::optional<QueryTypeEnum> type = boost::none,
                                    bool padding = false);
@@ -1790,7 +1895,7 @@ protected:
                                                          uint32_t lb,
                                                          uint32_t ub);
     void verifyExpectationsAfterInsertions(
-        const std::vector<std::pair<StringData, StringData>>& inserted);
+        const std::vector<std::pair<std::string_view, std::string_view>>& inserted);
 
     /**
      * Given an array of unfolded & folded string pairs, inserts each unfolded string
@@ -1799,12 +1904,12 @@ protected:
      * verified to have the correct number of entries.
      */
     void doInsertsAndVerifyExpectations(
-        const std::vector<std::pair<StringData, StringData>>& inserts);
+        const std::vector<std::pair<std::string_view, std::string_view>>& inserts);
 
-    static constexpr StringData kTestFieldName = "field"_sd;
+    static constexpr std::string_view kTestFieldName = "field"sv;
     std::vector<TextSearchSchema> _schemas;
     StackBufBuilder _stackBuf;
-    boost::optional<RAIIServerParameterControllerForTest> _ffctrl;
+    boost::optional<unittest::ServerParameterGuard> _ffctrl;
 };
 
 EncryptedFieldConfig QETextSearchCrudTest::getEFC() {
@@ -1812,7 +1917,8 @@ EncryptedFieldConfig QETextSearchCrudTest::getEFC() {
     for (const auto& schema : _schemas) {
         QueryTypeConfig qtc;
         qtc.setQueryType(schema.type);
-        if (schema.type == QueryTypeEnum::SubstringPreview) {
+        if (schema.type == QueryTypeEnum::Substring ||
+            schema.type == QueryTypeEnum::SubstringPreviewDeprecated) {
             qtc.setStrMaxLength(schema.mlen);
         }
         qtc.setStrMinQueryLength(schema.lb);
@@ -1823,7 +1929,7 @@ EncryptedFieldConfig QETextSearchCrudTest::getEFC() {
     }
     EncryptedField ef(UUID::gen(), std::string{kTestFieldName});
     std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig> vqtcs = std::move(qtcs);
-    ef.setBsonType("string"_sd);
+    ef.setBsonType("string"sv);
     ef.setQueries(vqtcs);
     EncryptedFieldConfig efc({std::move(ef)});
     efc.setEscCollection(_escNs.coll());
@@ -1839,7 +1945,8 @@ BSONObj QETextSearchCrudTest::generateInsertSpec(BSONElement value) {
     spec.setDiacriticFold(_schemas[0].diacf);
     for (const auto& schema : _schemas) {
         switch (schema.type) {
-            case QueryTypeEnum::SubstringPreview:
+            case QueryTypeEnum::SubstringPreviewDeprecated:
+            case QueryTypeEnum::Substring:
                 spec.setSubstringSpec(FLE2SubstringInsertSpec(schema.mlen, schema.ub, schema.lb));
                 break;
             case QueryTypeEnum::SuffixPreviewDeprecated:
@@ -1903,7 +2010,8 @@ PrfBlock QETextSearchCrudTest::getTestESCDataToken(BSONElement element,
             .asPrfBlock();
     }
     switch (*type) {
-        case QueryTypeEnum::SubstringPreview: {
+        case QueryTypeEnum::SubstringPreviewDeprecated:
+        case QueryTypeEnum::Substring: {
             auto escTextToken = ESCTextSubstringToken::deriveFrom(escToken);
             return ESCTextSubstringDerivedFromDataToken::deriveFrom(escTextToken, toCDR(element))
                 .asPrfBlock();
@@ -1935,7 +2043,8 @@ PrfBlock QETextSearchCrudTest::getTestEDCDataToken(BSONElement element,
             .asPrfBlock();
     }
     switch (*type) {
-        case QueryTypeEnum::SubstringPreview: {
+        case QueryTypeEnum::SubstringPreviewDeprecated:
+        case QueryTypeEnum::Substring: {
             auto edcTextToken = EDCTextSubstringToken::deriveFrom(edcToken);
             return EDCTextSubstringDerivedFromDataToken::deriveFrom(edcTextToken, toCDR(element))
                 .asPrfBlock();
@@ -1968,7 +2077,8 @@ ESCTwiceDerivedTagToken QETextSearchCrudTest::getTestESCTwiceDerivedToken(
                          .asPrfBlock();
     } else {
         switch (*type) {
-            case QueryTypeEnum::SubstringPreview: {
+            case QueryTypeEnum::SubstringPreviewDeprecated:
+            case QueryTypeEnum::Substring: {
                 cfTokenBlk =
                     ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
                         ESCTextSubstringDerivedFromDataToken{dataTokenBlk}, 0)
@@ -2008,7 +2118,8 @@ EDCTwiceDerivedToken QETextSearchCrudTest::getTestEDCTwiceDerivedToken(
                          .asPrfBlock();
     } else {
         switch (*type) {
-            case QueryTypeEnum::SubstringPreview: {
+            case QueryTypeEnum::SubstringPreviewDeprecated:
+            case QueryTypeEnum::Substring: {
                 cfTokenBlk =
                     EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
                         EDCTextSubstringDerivedFromDataToken{dataTokenBlk}, 0)
@@ -2045,7 +2156,7 @@ BSONObj QETextSearchCrudTest::findESCNonAnchor(BSONElement element,
                                    &hmacCtx, getTestESCTwiceDerivedToken(element, qtype), cpos));
 }
 
-void QETextSearchCrudTest::verifyESCEntriesForString(StringData testString,
+void QETextSearchCrudTest::verifyESCEntriesForString(std::string_view testString,
                                                      uint32_t expectedCount,
                                                      boost::optional<QueryTypeEnum> qtype,
                                                      bool padding) {
@@ -2119,7 +2230,7 @@ stdx::unordered_set<std::string> QETextSearchCrudTest::getExpectedPrefixes(
 }
 
 void QETextSearchCrudTest::verifyExpectationsAfterInsertions(
-    const std::vector<std::pair<StringData, StringData>>& inserted) {
+    const std::vector<std::pair<std::string_view, std::string_view>>& inserted) {
     stdx::unordered_map<std::string, int> affixCounts[3];
     stdx::unordered_map<std::string, int> exactCounts;
     stdx::unordered_map<std::string, uint32_t> paddingCounts[3];
@@ -2127,7 +2238,8 @@ void QETextSearchCrudTest::verifyExpectationsAfterInsertions(
 
     auto queryTypeToIndex = [](QueryTypeEnum qt) -> uint8_t {
         switch (qt) {
-            case QueryTypeEnum::SubstringPreview:
+            case QueryTypeEnum::SubstringPreviewDeprecated:
+            case QueryTypeEnum::Substring:
                 return 0;
             case QueryTypeEnum::SuffixPreviewDeprecated:
             case QueryTypeEnum::Suffix:
@@ -2153,7 +2265,8 @@ void QETextSearchCrudTest::verifyExpectationsAfterInsertions(
             uint32_t msize;
             stdx::unordered_set<std::string> affixes;
             switch (schema.type) {
-                case QueryTypeEnum::SubstringPreview:
+                case QueryTypeEnum::SubstringPreviewDeprecated:
+                case QueryTypeEnum::Substring:
                     msize =
                         msizeForSubstring(unfoldedStr.size(), schema.lb, schema.ub, schema.mlen);
                     affixes = getExpectedSubstrings(unicodeFoldedStr, schema.lb, schema.ub);
@@ -2186,8 +2299,7 @@ void QETextSearchCrudTest::verifyExpectationsAfterInsertions(
         verifyESCEntriesForString(exactStr, count);
     }
 
-    for (auto qt :
-         {QueryTypeEnum::SubstringPreview, QueryTypeEnum::Suffix, QueryTypeEnum::Prefix}) {
+    for (auto qt : {QueryTypeEnum::Substring, QueryTypeEnum::Suffix, QueryTypeEnum::Prefix}) {
         auto qt_index = queryTypeToIndex(qt);
         for (const auto& [exactStr, count] : paddingCounts[qt_index]) {
             verifyESCEntriesForString(exactStr, count, qt, true /*padding*/);
@@ -2202,8 +2314,8 @@ void QETextSearchCrudTest::verifyExpectationsAfterInsertions(
 }
 
 void QETextSearchCrudTest::doInsertsAndVerifyExpectations(
-    const std::vector<std::pair<StringData, StringData>>& inserts) {
-    std::vector<std::pair<StringData, StringData>> inserted;
+    const std::vector<std::pair<std::string_view, std::string_view>>& inserts) {
+    std::vector<std::pair<std::string_view, std::string_view>> inserted;
     verifyExpectationsAfterInsertions(inserted);
 
     for (size_t i = 0; i < inserts.size(); i++) {
@@ -2215,7 +2327,7 @@ void QETextSearchCrudTest::doInsertsAndVerifyExpectations(
 }
 
 TEST_F(QETextSearchCrudTest, BasicSubstring) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 10,
                .ub = 100,
                .mlen = 1000,
@@ -2241,7 +2353,7 @@ TEST_F(QETextSearchCrudTest, BasicPrefixAndSuffix) {
 }
 
 TEST_F(QETextSearchCrudTest, RepeatingSubstring) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 10,
                .ub = 100,
                .mlen = 1000,
@@ -2262,7 +2374,7 @@ TEST_F(QETextSearchCrudTest, FoldAsciiSuffix) {
 }
 
 TEST_F(QETextSearchCrudTest, UnicodeSubstring) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 1,
                .ub = 5,
                .mlen = 1000,
@@ -2272,7 +2384,7 @@ TEST_F(QETextSearchCrudTest, UnicodeSubstring) {
 }
 
 TEST_F(QETextSearchCrudTest, FoldUnicodeSubstring) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 3,
                .ub = 5,
                .mlen = 1000,
@@ -2284,7 +2396,7 @@ TEST_F(QETextSearchCrudTest, FoldUnicodeSubstring) {
 }
 
 TEST_F(QETextSearchCrudTest, BasicSubstringMultipleInserts) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 10,
                .ub = 100,
                .mlen = 1000,
@@ -2332,9 +2444,9 @@ TEST_F(QETextSearchCrudTest, BasicPrefixAndSuffixMultipleInserts) {
 // Test insert update payloads containing text search token sets ('b') with embedded encryptedTokens
 // of invalid length in the exact/substring/prefix/suffix token sets are rejected.
 TEST_F(QETextSearchCrudTest, InsertPayloadHasInvalidExactEncryptedTokensForTextSearch) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 2,
-               .ub = 10,
+               .ub = 6,
                .mlen = 400,
                .casef = false,
                .diacf = false});
@@ -2368,9 +2480,9 @@ TEST_F(QETextSearchCrudTest, InsertPayloadHasInvalidExactEncryptedTokensForTextS
 }
 
 TEST_F(QETextSearchCrudTest, InsertPayloadHasInvalidSubstringEncryptedTokensForTextSearch) {
-    addSchema({.type = QueryTypeEnum::SubstringPreview,
+    addSchema({.type = QueryTypeEnum::Substring,
                .lb = 2,
-               .ub = 10,
+               .ub = 6,
                .mlen = 400,
                .casef = false,
                .diacf = false});

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/resharding/reshard_collection_coordinator.h"
@@ -114,18 +88,10 @@ void ReshardCollectionCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuil
 }
 
 BSONObj ReshardCollectionCoordinator::_computeFinalShardKey(const CurrentChunkManager& cmOld) {
-    auto provenance = _doc.getProvenance();
-    if (resharding::isRewriteCollection(provenance)) {
-        // rewriteCollection reshards the collection on its existing key.
-        return cmOld.getShardKeyPattern().getKeyPattern().toBSON();
-    }
-
-    if (cmOld.isTimeseriesCollection() && resharding::isOrdinaryReshardCollection(provenance)) {
-        const auto& tsOptions = cmOld.getTimeseriesFields().get().getTimeseriesOptions();
-        return shardkeyutil::validateAndTranslateTimeseriesShardKey(tsOptions, *_doc.getKey());
-    }
-
-    return *_doc.getKey();
+    return resharding::computeReshardingShardKey(_doc.getProvenance(),
+                                                 cmOld.getShardKeyPattern(),
+                                                 cmOld.getTimeseriesFields(),
+                                                 _doc.getKey());
 }
 
 ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
@@ -171,9 +137,9 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
                 _doc.getRecipientOplogBatchTaskCount());
 
             // TODO SERVER-92437 ensure this behavior is safe during FCV upgrade/downgrade
-            if (!resharding::gFeatureFlagReshardingRelaxedMode.isEnabled(
-                    VersionContext::getDecoration(opCtx),
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            if (!resharding::isEnabledWithPinnedVersion(
+                    _doc.getForwardableOpMetadata(),
+                    resharding::gFeatureFlagReshardingRelaxedMode)) {
                 uassert(ErrorCodes::InvalidOptions,
                         "Relaxed mode is not enabled, reject relaxed parameter",
                         !_doc.getRelaxed().has_value());
@@ -196,40 +162,26 @@ ExecutorFuture<void> ReshardCollectionCoordinator::_runImpl(
             configsvrReshardCollection.setForceRedistribution(_doc.getForceRedistribution());
             configsvrReshardCollection.setUserReshardingUUID(_doc.getUserReshardingUUID());
 
-            resharding::validatePerformVerification(VersionContext::getDecoration(opCtx),
+            resharding::validatePerformVerification(_doc.getForwardableOpMetadata(),
                                                     _doc.getPerformVerification());
             configsvrReshardCollection.setPerformVerification(_doc.getPerformVerification());
 
             auto provenance = _doc.getProvenance();
-            if (resharding::isMoveCollection(provenance)) {
-                uassert(ErrorCodes::NamespaceNotFound,
-                        str::stream()
-                            << "MoveCollection can only be called on an unsharded collection.",
-                        !cmOld.isSharded());
-            } else if (resharding::isUnshardCollection(provenance)) {
-                // Pick the "to" shard if the client did not specify one.
-                if (!_doc.getShardDistribution()) {
-                    auto toShard = sharding_util::selectLeastLoadedNonDrainingShard(opCtx);
-                    mongo::ShardKeyRange destinationRange(toShard);
-                    destinationRange.setMin(cluster::unsplittable::kUnsplittableCollectionMinKey);
-                    destinationRange.setMax(cluster::unsplittable::kUnsplittableCollectionMaxKey);
-                    std::vector<mongo::ShardKeyRange> distribution = {destinationRange};
-                    configsvrReshardCollection.setShardDistribution(distribution);
-                }
-            } else {
-                uassert(ErrorCodes::NamespaceNotSharded,
-                        "Collection has to be a sharded collection.",
-                        cmOld.isSharded());
+            resharding::validateReshardCollectionRequest(
+                provenance,
+                cmOld.isSharded(),
+                cmOld.getShardKeyPattern(),
+                finalShardKey,
+                _doc.getForceRedistribution().value_or(false));
 
-                if (_doc.getForceRedistribution() && *_doc.getForceRedistribution()) {
-                    uassert(ErrorCodes::InvalidOptions,
-                            str::stream()
-                                << "The new shard key must be the same as the original shard key "
-                                   "when using the forceRedistribution option. The "
-                                   "forceRedistribution option is meant for redistributing the "
-                                   "collection to a different set of shards.",
-                            cmOld.getShardKeyPattern().isShardKey(finalShardKey));
-                }
+            // For unshardCollection, pick the destination shard if the client did not specify one.
+            if (resharding::isUnshardCollection(provenance) && !_doc.getShardDistribution()) {
+                auto toShard = sharding_util::selectLeastLoadedNonDrainingShard(opCtx);
+                mongo::ShardKeyRange destinationRange(toShard);
+                destinationRange.setMin(cluster::unsplittable::kUnsplittableCollectionMinKey);
+                destinationRange.setMax(cluster::unsplittable::kUnsplittableCollectionMaxKey);
+                std::vector<mongo::ShardKeyRange> distribution = {destinationRange};
+                configsvrReshardCollection.setShardDistribution(distribution);
             }
 
             configsvrReshardCollection.setProvenance(provenance);

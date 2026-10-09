@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/db/extension/public/api.h"
@@ -34,6 +8,8 @@
 #include "mongo/db/extension/shared/handle/aggregation_stage/logical.h"
 #include "mongo/db/extension/shared/handle/handle.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 #include <absl/base/nullability.h>
 
@@ -57,11 +33,11 @@ public:
         : VTableAPI<::MongoExtensionAggStageAstNode>(ptr) {}
 
     /**
-     * Returns a StringData containing the name of this aggregation stage.
+     * Returns a std::string_view containing the name of this aggregation stage.
      */
-    StringData getName() const {
+    std::string_view getName() const {
         auto stringView = byteViewAsStringView(_vtable().get_name(get()));
-        return StringData{stringView.data(), stringView.size()};
+        return std::string_view{stringView.data(), stringView.size()};
     }
 
     MongoExtensionStaticProperties getProperties() const;
@@ -74,7 +50,7 @@ public:
      * On failure, the error triggers an assertion.
      *
      */
-    LogicalAggStageHandle bind(const ::MongoExtensionCatalogContext& catalogContext) const;
+    LogicalAggStageHandle promote(const ::MongoExtensionCatalogContext& catalogContext) const;
 
     /**
      * Clones this AST node into an identical AST node.
@@ -95,19 +71,27 @@ public:
     /**
      * Binds view information to this AST node.
      */
-    void bindViewInfo(const ::MongoExtensionViewInfo& viewInfo);
+    void bindResolvedNamespace(const ::MongoExtensionResolvedNamespace& resolvedNamespace);
 
     static void assertVTableConstraints(const VTable_t& vtable) {
-        tassert(11217601, "AggStageAstNode 'get_name' is null", vtable.get_name != nullptr);
-        tassert(
-            11347800, "AggStageAstNode 'get_properties' is null", vtable.get_properties != nullptr);
-        tassert(11113700, "AggStageAstNode 'bind' is null", vtable.bind != nullptr);
-        tassert(11565501, "AggStageAstNode 'clone' is null", vtable.clone != nullptr);
-        tassert(11507400,
+        tassert(ErrorCodes::InvalidExtensionVTable,
+                "AggStageAstNode 'get_name' is null",
+                vtable.get_name != nullptr);
+        tassert(ErrorCodes::InvalidExtensionVTable,
+                "AggStageAstNode 'get_properties' is null",
+                vtable.get_properties != nullptr);
+        tassert(ErrorCodes::InvalidExtensionVTable,
+                "AggStageAstNode 'promote' is null",
+                vtable.promote != nullptr);
+        tassert(ErrorCodes::InvalidExtensionVTable,
+                "AggStageAstNode 'clone' is null",
+                vtable.clone != nullptr);
+        tassert(ErrorCodes::InvalidExtensionVTable,
                 "AggStageAstNode 'get_first_stage_view_application_policy` is null",
                 vtable.get_first_stage_view_application_policy != nullptr);
-        tassert(
-            11507500, "AggStageAstNode `bind_view_info` is null", vtable.bind_view_info != nullptr);
+        tassert(ErrorCodes::InvalidExtensionVTable,
+                "AggStageAstNode `bind_resolved_namespace` is null",
+                vtable.bind_resolved_namespace != nullptr);
     }
 };
 

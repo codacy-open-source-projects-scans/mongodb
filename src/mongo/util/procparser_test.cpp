@@ -1,36 +1,23 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
+
+#include "mongo/util/procparser.h"
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/errno_util.h"
+#include "mongo/util/string_map.h"
 
 #include <array>
 #include <cerrno>
+#include <fstream>
 #include <map>
+#include <string_view>
 #include <system_error>
 
 #include <fcntl.h>
@@ -38,22 +25,15 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <fmt/format.h>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/logv2/log.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/errno_util.h"
-#include "mongo/util/procparser.h"
-#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 class BaseProcTest : public unittest::Test {
 public:
@@ -76,7 +56,7 @@ public:
     }
 
     template <typename T>
-    bool contains(const StringMap<T>& container, StringData key) {
+    bool contains(const StringMap<T>& container, std::string_view key) {
         return container.find(key) != container.end();
     }
 
@@ -85,13 +65,13 @@ public:
 
 class FTDCProcStat : public BaseProcTest {
 public:
-    void parseStat(const std::vector<StringData>& keys, StringData input) {
+    void parseStat(const std::vector<std::string_view>& keys, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcStat(keys, input, 1000, &builder));
         uint64Map = toStringMap(builder.done());
     }
 
-    std::vector<StringData> keys{"cpu", "ctxt", "processes"};
+    std::vector<std::string_view> keys{"cpu", "ctxt", "processes"};
 };
 
 TEST_F(FTDCProcStat, TestStat) {
@@ -192,7 +172,7 @@ TEST_F(FTDCProcStat, TestEmpty) {
 // Normally when run in the FTDC loop we return a non-fatal error so we may not notice the failure
 // otherwise.
 TEST_F(FTDCProcStat, TestLocalStat) {
-    std::vector<StringData> keys{
+    std::vector<std::string_view> keys{
         "btime",
         "cpu",
         "ctxt",
@@ -226,7 +206,7 @@ TEST_F(FTDCProcStat, TestLocalStat) {
 }
 
 TEST_F(FTDCProcStat, TestLocalNonExistentStat) {
-    std::vector<StringData> keys{
+    std::vector<std::string_view> keys{
         "btime",
         "cpu",
         "ctxt",
@@ -241,13 +221,13 @@ TEST_F(FTDCProcStat, TestLocalNonExistentStat) {
 
 class FTDCProcMemInfo : public BaseProcTest {
 public:
-    void parseMeminfo(const std::vector<StringData>& keys, StringData input) {
+    void parseMeminfo(const std::vector<std::string_view>& keys, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcMemInfo(keys, input, &builder));
         uint64Map = toStringMap(builder.done());
     }
 
-    std::vector<StringData> keys{"Key1", "Key2", "Key3"};
+    std::vector<std::string_view> keys{"Key1", "Key2", "Key3"};
 };
 
 TEST_F(FTDCProcMemInfo, TestMemInfo) {
@@ -293,7 +273,7 @@ TEST_F(FTDCProcMemInfo, TestEmptyString) {
 // Normally when run in the FTDC loop we return a non-fatal error so we may not notice the failure
 // otherwise.
 TEST_F(FTDCProcMemInfo, TestLocalMemInfo) {
-    std::vector<StringData> keys{
+    std::vector<std::string_view> keys{
         "Active",         "Active(anon)",
         "Active(file)",   "AnonHugePages",
         "AnonPages",      "Bounce",
@@ -364,7 +344,7 @@ TEST_F(FTDCProcMemInfo, TestLocalMemInfo) {
 }
 
 TEST_F(FTDCProcMemInfo, TestLocalNonExistentMemInfo) {
-    std::vector<StringData> keys{};
+    std::vector<std::string_view> keys{};
     BSONObjBuilder builder;
 
     ASSERT_NOT_OK(procparser::parseProcMemInfoFile("/proc/does_not_exist", keys, &builder));
@@ -372,13 +352,13 @@ TEST_F(FTDCProcMemInfo, TestLocalNonExistentMemInfo) {
 
 class FTDCProcNetstat : public BaseProcTest {
 public:
-    void parseNetstat(const std::vector<StringData>& keys, StringData input) {
+    void parseNetstat(const std::vector<std::string_view>& keys, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcNetstat(keys, input, &builder));
         uint64Map = toStringMap(builder.done());
     }
 
-    std::vector<StringData> keys{"pfx1", "pfx2", "pfx3"};
+    std::vector<std::string_view> keys{"pfx1", "pfx2", "pfx3"};
 };
 
 TEST_F(FTDCProcNetstat, TestNetstat) {
@@ -453,7 +433,7 @@ TEST_F(FTDCProcNetstat, TestLocalNetstat) {
 
     BSONObjBuilder builder;
 
-    std::vector<StringData> keys{"TcpExt:"_sd, "IpExt:"_sd};
+    std::vector<std::string_view> keys{"TcpExt:"sv, "IpExt:"sv};
 
     ASSERT_OK(procparser::parseProcNetstatFile(keys, "/proc/net/netstat", &builder));
 
@@ -477,7 +457,7 @@ TEST_F(FTDCProcNetstat, TestLocalNetSnmp) {
 
     BSONObjBuilder builder;
 
-    std::vector<StringData> keys{"Tcp:"_sd, "Ip:"_sd};
+    std::vector<std::string_view> keys{"Tcp:"sv, "Ip:"sv};
 
     ASSERT_OK(procparser::parseProcNetstatFile(keys, "/proc/net/snmp", &builder));
 
@@ -491,7 +471,7 @@ TEST_F(FTDCProcNetstat, TestLocalNetSnmp) {
 }
 
 TEST_F(FTDCProcNetstat, TestLocalNonExistentNetstat) {
-    std::vector<StringData> keys{};
+    std::vector<std::string_view> keys{};
     BSONObjBuilder builder;
 
     ASSERT_NOT_OK(procparser::parseProcNetstatFile(keys, "/proc/does_not_exist", &builder));
@@ -499,13 +479,13 @@ TEST_F(FTDCProcNetstat, TestLocalNonExistentNetstat) {
 
 class FTDCProcDiskStats : public BaseProcTest {
 public:
-    void parseDiskStat(const std::vector<StringData>& disks, StringData input) {
+    void parseDiskStat(const std::vector<std::string_view>& disks, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcDiskStats(disks, input, &builder));
         uint64Map = toStringMap(builder.done());
     }
 
-    std::vector<StringData> disks{"dm-1", "sda", "sdb"};
+    std::vector<std::string_view> disks{"dm-1", "sda", "sdb"};
 };
 
 TEST_F(FTDCProcDiskStats, TestDiskStats) {
@@ -594,7 +574,7 @@ TEST_F(FTDCProcDiskStats, TestFindPathNoPermission) {
 TEST_F(FTDCProcDiskStats, TestLocalDiskStats) {
     auto disks = procparser::findPhysicalDisks("/sys/block");
 
-    std::vector<StringData> disks2;
+    std::vector<std::string_view> disks2;
     for (const auto& disk : disks) {
         LOGV2(23368, "DISK:{disk}", "disk"_attr = disk);
         disks2.emplace_back(disk);
@@ -657,7 +637,7 @@ public:
         return result;
     }
 
-    void parseNetstat(StringData input) {
+    void parseNetstat(std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcSelfMountStatsImpl(input, &builder, &mockGetSpace));
         obj = builder.obj();
@@ -786,15 +766,39 @@ TEST_F(FTDCProcMountStats, TestLocalMountStats) {
     ASSERT(obj.hasElement("/"));
 }
 
+TEST_F(FTDCProcMountStats, HugeFile) {
+    unittest::TempDir tempDir("fakeProc");
+    auto path = tempDir.path() + "/mountinfo.fake";
+
+    std::ofstream out(path);
+    size_t bytes = 0;
+    size_t minFileSize = size_t{2} << 20;
+    for (size_t i = 0; bytes < minFileSize; ++i) {
+        auto line =
+            fmt::format("{} 26 0:{} / /tmp/mount{} rw shared:19 - tmpfs tmpfs rw\n", i, i, i);
+        bytes += line.size();
+        out << line;
+    }
+    out.close();
+
+    BSONObjBuilder bb;
+    boost::optional<Status> st;
+    ASSERT_DOES_NOT_THROW([&] {
+        st = procparser::parseProcSelfMountStatsFile(path, &bb);
+    }());
+    ASSERT_EQ(st->code(), ErrorCodes::FileStreamFailed);
+    ASSERT_STRING_CONTAINS(st->reason(), fmt::format("Huge file \"{}\"", path));
+}
+
 class FTDCProcVMStat : public BaseProcTest {
 public:
-    void parseVMStat(const std::vector<StringData>& keys, StringData input) {
+    void parseVMStat(const std::vector<std::string_view>& keys, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcVMStat(keys, input, &builder));
         uint64Map = toStringMap(builder.done());
     }
 
-    std::vector<StringData> keys{"Key1", "Key2", "Key3"};
+    std::vector<std::string_view> keys{"Key1", "Key2", "Key3"};
 };
 
 TEST_F(FTDCProcVMStat, TestVMStat) {
@@ -825,16 +829,16 @@ TEST_F(FTDCProcVMStat, TestEmptyString) {
 // Normally when run in the FTDC loop we return a non-fatal error so we may not notice the failure
 // otherwise.
 TEST_F(FTDCProcVMStat, TestLocalVMStat) {
-    std::vector<StringData> keys{
-        "balloon_deflate"_sd,
-        "balloon_inflate"_sd,
-        "nr_mlock"_sd,
-        "numa_pages_migrated"_sd,  // Not on RHEL 6, added with
-                                   // https://github.com/torvalds/linux/commit/03c5a6e16322c
-        "pgfault"_sd,
-        "pgmajfault"_sd,
-        "pswpin"_sd,
-        "pswpout"_sd,
+    std::vector<std::string_view> keys{
+        "balloon_deflate"sv,
+        "balloon_inflate"sv,
+        "nr_mlock"sv,
+        "numa_pages_migrated"sv,  // Not on RHEL 6, added with
+                                  // https://github.com/torvalds/linux/commit/03c5a6e16322c
+        "pgfault"sv,
+        "pgmajfault"sv,
+        "pswpin"sv,
+        "pswpout"sv,
     };
 
     BSONObjBuilder builder;
@@ -851,7 +855,7 @@ TEST_F(FTDCProcVMStat, TestLocalVMStat) {
 
 
 TEST_F(FTDCProcVMStat, TestLocalNonExistentVMStat) {
-    std::vector<StringData> keys{};
+    std::vector<std::string_view> keys{};
     BSONObjBuilder builder;
 
     ASSERT_NOT_OK(procparser::parseProcVMStatFile("/proc/does_not_exist", keys, &builder));
@@ -859,7 +863,7 @@ TEST_F(FTDCProcVMStat, TestLocalNonExistentVMStat) {
 
 class FTDCProcSysFsFileNr : public BaseProcTest {
 public:
-    void parseSysFsFileNr(procparser::FileNrKey key, StringData input) {
+    void parseSysFsFileNr(procparser::FileNrKey key, std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcSysFsFileNr(key, input, &builder));
         uint64Map = toStringMap(builder.done());
@@ -916,7 +920,7 @@ TEST_F(FTDCProcSysFsFileNr, TestFile) {
 
 class FTDCProcPressure : public BaseProcTest {
 public:
-    bool isPSISupported(StringData filename) {
+    bool isPSISupported(std::string_view filename) {
         int fd = open(std::string{filename}.c_str(), 0);
         if (fd == -1) {
             return false;
@@ -935,7 +939,7 @@ public:
         return true;
     }
 
-    void parsePressure(StringData input) {
+    void parsePressure(std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcPressure(input, &builder));
         obj = builder.obj();
@@ -1047,13 +1051,14 @@ public:
     // Parse "keys" out of "input", which should be a string matching the format of a
     // /proc/net/sockstat file. Asserts that we can parse the keys successfully and returns a
     // BSONObj of the parsed data.
-    BSONObj assertParseSockstat(std::map<StringData, std::set<StringData>> keys, StringData input) {
+    BSONObj assertParseSockstat(std::map<std::string_view, std::set<std::string_view>> keys,
+                                std::string_view input) {
         BSONObjBuilder builder;
         ASSERT_OK(procparser::detail::parseProcSockstat(keys, input, &builder));
         return builder.obj();
     }
 
-    std::map<StringData, std::set<StringData>> testKeys{
+    std::map<std::string_view, std::set<std::string_view>> testKeys{
         {"sockets", {"used"}},
         {"TCP", {"inuse", "tw", "mem"}},
     };
@@ -1078,7 +1083,7 @@ TEST_F(FTDCProcSockstat, TestSockstatSuccess) {
 }
 
 TEST_F(FTDCProcSockstat, TestBadSocketString) {
-    StringData badString = "I'm not in the right format";
+    std::string_view badString = "I'm not in the right format";
     BSONObjBuilder bob;
     auto s = procparser::detail::parseProcSockstat(testKeys, badString, &bob);
     // No desired keys found so error.
@@ -1086,7 +1091,7 @@ TEST_F(FTDCProcSockstat, TestBadSocketString) {
 }
 
 TEST_F(FTDCProcSockstat, TestEmptyString) {
-    StringData badString = "";
+    std::string_view badString = "";
     BSONObjBuilder bob;
     auto s = procparser::detail::parseProcSockstat(testKeys, badString, &bob);
     // No desired keys found so error.
@@ -1094,7 +1099,7 @@ TEST_F(FTDCProcSockstat, TestEmptyString) {
 }
 
 TEST_F(FTDCProcSockstat, TestStringWithNoNumber) {
-    StringData badString = "sockets: used alot";
+    std::string_view badString = "sockets: used alot";
     BSONObjBuilder bob;
     auto s = procparser::detail::parseProcSockstat(testKeys, badString, &bob);
     ASSERT_EQ(s.code(), ErrorCodes::FailedToParse);
@@ -1119,7 +1124,7 @@ TEST_F(FTDCProcNetstat, TestLocalSockstat) {
 
     BSONObjBuilder builder;
 
-    std::map<StringData, std::set<StringData>> testKeys{
+    std::map<std::string_view, std::set<std::string_view>> testKeys{
         {"sockets", {"used"}},
         {"TCP", {"inuse", "orphan", "tw", "alloc", "mem"}},
     };

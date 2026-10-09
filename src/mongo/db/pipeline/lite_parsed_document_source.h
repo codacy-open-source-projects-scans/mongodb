@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/api_parameters.h"
@@ -53,6 +26,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -60,9 +34,10 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_UNFORTUNATELY_OPEN mongo {
+namespace [[MONGO_MOD_UNFORTUNATELY_OPEN]] mongo {
 
 class LiteParsedPipeline;
+class OwnedLiteParsedPipeline;
 
 struct LiteParserOptions {
     // Allows the foreign collection of a lookup to be in a different database than the local
@@ -85,14 +60,6 @@ struct LiteParserOptions {
     // Optional tracker to note when extensions are used in a given aggregate, and track whether
     // that command succeeds. Should be owned by the command invocation, not here.
     ExtensionMetrics* extensionMetrics = nullptr;
-
-    // Indicates whether the LiteParsedPipeline constructor for a stage's subpipeline should take
-    // ownership of the BSON *during* parsing, not after. This is needed for extension stages that
-    // execute inside of subpipelines, since they will call 'getOriginalBson()' and so need the
-    // underlying BSON to be preserved.
-    //
-    // TODO SERVER-117525 Delete this option once the subpipeline has an owned wrapper.
-    bool makeSubpipelineOwned = false;
 };
 
 namespace exec::agg {
@@ -107,67 +74,12 @@ class LoadNativeVectorSearchTest;
 class LiteParsedDocumentSource;
 
 /**
- * A ViewInfo struct stores the view namespace, resolved namespace (underlying collection), and the
- * desugared view pipeline from ResolvedView.
- *
- * TODO SERVER-122116 Remove this class once all callers have been transitioned to the new
- * ResolvedNamespace.
+ * Returns a desugared view ResolvedNamespace for `nss` if it resolves to a view with a pre-parsed
+ * pipeline in `resolvedNamespaces`, or nullptr otherwise. Used by $unionWith and $lookup to consume
+ * the drain loop's pre-stitched LPP directly instead of re-parsing from BSON.
  */
-struct MONGO_MOD_PUBLIC ViewInfo {
-    ViewInfo() = default;
-    ~ViewInfo();
-
-    // Move-only semantics (viewPipeline contains unique_ptrs which are non-copyable).
-    ViewInfo(ViewInfo&&) noexcept;
-    ViewInfo& operator=(ViewInfo&&) noexcept;
-
-    ViewInfo(const ViewInfo&) = delete;
-    ViewInfo& operator=(const ViewInfo&) = delete;
-
-    /**
-     * Constructs a ViewInfo object from the view namespace, underlying collection's namespace, and
-     * parses the bson stages in the view pipeline into LiteParsedDocumentSources.
-     *
-     * Note that the ViewInfo owns the backing BSONObj for `viewPipeline`.
-     */
-    ViewInfo(NamespaceString viewName_,
-             NamespaceString resolvedNss_,
-             std::vector<BSONObj> viewPipeBson_,
-             const LiteParserOptions& options_ = LiteParserOptions{});
-
-    ViewInfo(const ResolvedNamespace& resolvedNamespace);
-
-    NamespaceString getViewName() const {
-        return _wrappedNamespace.getNamespace();
-    }
-
-    /**
-     * Returns the original BSON view pipeline. Note that this is the pre-desugared version of the
-     * pipeline.
-     */
-    std::vector<BSONObj> getOriginalBson() const;
-
-    /**
-     * Returns the serialized LiteParsedPipeline as BSON. If the view pipeline has been desugared,
-     * the returned BSON will represent the desugared version of the pipeline.
-     */
-    std::vector<BSONObj> getSerializedViewPipeline() const;
-
-    /**
-     * Returns a cloned instance of the view pipeline with all stages owning their BSON.
-     */
-    LiteParsedPipeline getViewPipeline() const;
-
-    // Desugars the internally-parsed view pipeline in place. Must be called before handleView()
-    // so that extension stages in view definitions are expanded prior to stitching. See
-    // ResolvedNamespace::ViewPipelineDesugarer for why a callback is used instead of a direct call.
-    void desugarViewPipeline();
-
-    ViewInfo clone() const;
-
-private:
-    ResolvedNamespace _wrappedNamespace;
-};
+std::shared_ptr<ResolvedNamespace> tryGetPreResolvedNamespace(
+    const NamespaceString& nss, const ResolvedNamespaceMap& resolvedNamespaces);
 
 /**
  * Describes what the pipeline as a whole should do with a view on the main aggregate
@@ -199,7 +111,7 @@ enum class FirstStageViewApplicationPolicy {
  * - Owned: The instance owns BSON data via '_ownedBson'. Call makeOwned() to transition from
  * unowned to owned when the source BSON lifetime cannot be guaranteed.
  */
-class MONGO_MOD_UNFORTUNATELY_OPEN LiteParsedDocumentSource {
+class [[MONGO_MOD_UNFORTUNATELY_OPEN]] LiteParsedDocumentSource {
 public:
     /*
      * This is the type of parser you should register using REGISTER_DOCUMENT_SOURCE. It need not
@@ -279,6 +191,11 @@ public:
     LiteParsedDocumentSource(const BSONElement& originalBson)
         : _originalBson(originalBson), _parseTimeName(originalBson.fieldNameStringData()) {}
 
+    LiteParsedDocumentSource(const BSONElement& originalBson, const LiteParserOptions& options)
+        : _originalBson(originalBson),
+          _ifrContext(options.ifrContext),
+          _parseTimeName(originalBson.fieldNameStringData()) {}
+
     /**
      * Constructs a LiteParsedDocumentSource that takes ownership of the provided BSONObj. The stage
      * name is extracted from the first element's field name.
@@ -352,20 +269,20 @@ public:
     /**
      * Returns true if the given stage name is registered as an extension stage.
      */
-    static bool isRegisteredExtensionStage(StringData stageName);
+    static bool isRegisteredExtensionStage(std::string_view stageName);
 
-    void setApiStrict(AllowedWithApiStrict& apiStrict) {
+    void setApiStrict(AllowedWithApiStrict apiStrict) {
         _apiStrict = apiStrict;
     }
 
-    void setClientType(AllowedWithClientType& clientType) {
+    void setClientType(AllowedWithClientType clientType) {
         _clientType = clientType;
     }
 
-    const AllowedWithApiStrict& getApiStrict() {
+    const AllowedWithApiStrict& getApiStrict() const {
         return _apiStrict;
     };
-    const AllowedWithClientType& getClientType() {
+    const AllowedWithClientType& getClientType() const {
         return _clientType;
     };
 
@@ -407,10 +324,36 @@ public:
 
     /**
      * Bind view information to this stage. Called by handleView() when running against a view.
+     * An empty `view` (i.e. one whose namespace is empty) is a sentinel meaning the pipeline
+     * is *not* running on a view.
      */
-    virtual void bindViewInfo(const ViewInfo& viewInfo,
-                              const ResolvedNamespaceMap& resolvedNamespaces) {
+    virtual void bindResolvedNamespace(const ResolvedNamespace& view,
+                                       const ResolvedNamespaceMap& resolvedNamespaces) {
         // Default implementation is a no-op.
+    }
+
+    /**
+     * Returns the resolved backing namespace this stage currently knows about: the most-resolved
+     * form of the namespace its subpipeline targets.
+     */
+    virtual ResolvedNamespace getResolvedBackingNss() const {
+        return {};
+    }
+
+    /**
+     * Returns true if PipelineResolver::resolveInvolvedNamespacesOnLiteParsedPipeline should
+     * recurse into this stage's subpipelines (via getMutableSubPipelines()) to apply view
+     * stitching. Defaults to true. Stages whose subpipelines are not "real" subpipelines run
+     * against a target nss but are instead consumed by stage-internal desugaring (e.g. $rankFusion
+     * / $scoreFusion, where the first input pipeline is spliced into the outer output and the rest
+     * are wrapped in $unionWith) should override to return false: their subpipeline view resolution
+     * will happen once the desugar has produced concrete $unionWith stages, on the per-stage path
+     * or on a subsequent recursive resolver pass after LP-level desugaring lands.
+     * TODO SERVER-121094 Remove this override once $rankFusion / $scoreFusion
+     * desugar at LiteParsed time.
+     */
+    virtual bool shouldResolveSubpipelineViews() const {
+        return true;
     }
 
     /**
@@ -472,6 +415,23 @@ public:
     }
 
     /**
+     * Returns true to bypass rejection by query settings with 'reject: true'.
+     *
+     * Reserved for admin operations whose rejection would render the cluster unusable
+     * (e.g. $querySettings). Do NOT override for ordinary stages.
+     */
+    virtual bool shouldBypassQuerySettingsRejection() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this is a $currentOp stage.
+     */
+    virtual bool isCurrentOpStage() const {
+        return false;
+    }
+
+    /**
      * Simple constraints for LiteParsed-level validation, mirroring a subset of
      * DocumentSource::StageConstraints.
      */
@@ -482,7 +442,7 @@ public:
         // Override for the stage name in timeseries error messages. If not set,
         // getParseTimeName() is used. Useful when a stage is conditionally disallowed
         // (e.g. $match is only disallowed when it contains $text).
-        boost::optional<StringData> timeseriesUnsupportedStageName;
+        boost::optional<std::string_view> timeseriesUnsupportedStageName;
     };
 
     virtual Constraints constraints() const {
@@ -490,9 +450,16 @@ public:
     }
 
     /**
-     * Stage-specific validation. Called by LiteParsedPipeline::validate().
+     * Stage-specific validation. Called by LiteParsedPipeline::validate() after parsing.
      */
-    virtual void validate() const {};
+    virtual void validate(const OperationContext* opCtx) const {};
+
+    /**
+     * Returns true if this stage is allowed inside a $lookup sub-pipeline.
+     */
+    virtual bool isAllowedInLookupPipeline() const {
+        return true;
+    }
 
     /**
      * Returns true if this is a search stage ($search, $vectorSearch, $rankFusion, etc.)
@@ -503,8 +470,8 @@ public:
 
     /**
      * Returns true if this is a vector search stage ($vectorSearch) or has a nested $vectorSearch.
-     * TODO SERVER-116021 Remove this override when extensions can handle views through
-     * bindViewInfo().
+     * TODO SERVER-121094 Remove this override when extensions can handle views through
+     * bindResolvedNamespace().
      */
     virtual bool hasExtensionVectorSearchStage() const {
         return false;
@@ -512,8 +479,8 @@ public:
 
     /**
      * Returns true if this is a $search or $searchMeta extension stage, or has a nested one.
-     * TODO SERVER-116021 Remove this override when extensions can handle views through
-     * bindViewInfo().
+     * TODO SERVER-121094 Remove this override when extensions can handle views through
+     * bindResolvedNamespace().
      */
     virtual bool hasExtensionSearchStage() const {
         return false;
@@ -529,7 +496,7 @@ public:
     /**
      * Returns true if this stage produces output sort key metadata ($sortKey) or is an explicit
      * $sort stage.
-     * TODO SERVER-121091 This can be removed once hybrid search desugars into the internal hybrid
+     * TODO SERVER-121094 This can be removed once hybrid search desugars into the internal hybrid
      * search stage.
      */
     virtual bool isRankedStage() const {
@@ -538,7 +505,7 @@ public:
 
     /**
      * Returns true if this stage produces score metadata.
-     * TODO SERVER-121091 This can be removed once hybrid search desugars into the internal hybrid
+     * TODO SERVER-121094 This can be removed once hybrid search desugars into the internal hybrid
      * search stage.
      */
     virtual bool isScoredStage() const {
@@ -546,9 +513,18 @@ public:
     }
 
     /**
+     * Returns true if this stage produces scoreDetails metadata.
+     * TODO SERVER-121094 This can be removed once hybrid search desugars into the internal hybrid
+     * search stage.
+     */
+    virtual bool isScoreDetailsStage() const {
+        return false;
+    }
+
+    /**
      * Returns true if this stage is a selection stage. A selection stage does not modify or
      * transform documents.
-     * TODO SERVER-121091 This can be removed once hybrid search desugars into the internal hybrid
+     * TODO SERVER-121094 This can be removed once hybrid search desugars into the internal hybrid
      * search stage.
      */
     virtual bool isSelectionStage() const {
@@ -600,18 +576,19 @@ public:
     virtual void assertSupportsMultiDocumentTransaction() const {}
 
     /**
-     * Returns this document source's subpipelines (const view). If none exist, a reference to an
-     * empty vector is returned.
+     * Returns this document source's subpipelines (const view), or nullptr if none exist.
      */
-    const std::vector<LiteParsedPipeline>& getSubPipelines() const {
+    const std::vector<OwnedLiteParsedPipeline>* getSubPipelines() const {
         return const_cast<LiteParsedDocumentSource*>(this)->getMutableSubPipelines();
     }
 
     /**
-     * Returns mutable subpipelines. Overridden by stages that have subpipelines (e.g. $lookup,
-     * $facet).
+     * Returns mutable subpipelines, or nullptr if this stage has none.
+     * Overridden by stages that have subpipelines (e.g. $lookup, $facet).
      */
-    virtual std::vector<LiteParsedPipeline>& getMutableSubPipelines();
+    virtual std::vector<OwnedLiteParsedPipeline>* getMutableSubPipelines() {
+        return nullptr;
+    }
 
     /**
      * Returns the name of the stage that this LiteParsedDocumentSource represents.
@@ -649,8 +626,17 @@ public:
      * is destroyed.
      *
      * Call makeOwned() on an unowned clone if the external BSON lifetime cannot be guaranteed.
+     *
+     * Subclasses customize the copy by implementing _doClone(); this wrapper then carries over the
+     * parse-time validation metadata (apiStrict, clientType) that parse() stamps on every instance,
+     * so a subclass that reconstructs rather than copy-constructs cannot silently drop it.
      */
-    virtual std::unique_ptr<LiteParsedDocumentSource> clone() const = 0;
+    std::unique_ptr<LiteParsedDocumentSource> clone() const {
+        auto cloned = _doClone();
+        cloned->setApiStrict(getApiStrict());
+        cloned->setClientType(getClientType());
+        return cloned;
+    }
 
     /**
      * Converts the LiteParsedDocumentSource to own the BSON it holds, similar to
@@ -670,10 +656,11 @@ public:
         _originalBson = _ownedBson->firstElement();
     }
 
-    // TODO SERVER-117525 Delete this function.
-    void setOwnedBson(BSONObj obj) {
-        _ownedBson = obj;
-        _originalBson = _ownedBson->firstElement();
+    /**
+     * Returns the IFR context used to create this LPDS.
+     */
+    const std::shared_ptr<IncrementalFeatureRolloutContext>& getIfrContext() const {
+        return _ifrContext;
     }
 
 protected:
@@ -681,14 +668,16 @@ protected:
 
     BSONElement _originalBson;
 
-    void transactionNotSupported(StringData stageName) const {
+    std::shared_ptr<IncrementalFeatureRolloutContext> _ifrContext;
+
+    void transactionNotSupported(std::string_view stageName) const {
         uasserted(ErrorCodes::OperationNotSupportedInTransaction,
                   str::stream() << "Operation not permitted in transaction :: caused by :: "
                                 << "Aggregation stage " << stageName << " cannot run within a "
                                 << "multi-document transaction.");
     }
 
-    ReadConcernSupportResult onlySingleReadConcernSupported(StringData stageName,
+    ReadConcernSupportResult onlySingleReadConcernSupported(std::string_view stageName,
                                                             repl::ReadConcernLevel supportedLevel,
                                                             repl::ReadConcernLevel candidateLevel,
                                                             bool isImplicitDefault) const {
@@ -704,7 +693,7 @@ protected:
                                 << " does not permit default readConcern to be applied."}}};
     }
 
-    ReadConcernSupportResult onlyReadConcernLocalSupported(StringData stageName,
+    ReadConcernSupportResult onlyReadConcernLocalSupported(std::string_view stageName,
                                                            repl::ReadConcernLevel level,
                                                            bool isImplicitDefault) const {
         return onlySingleReadConcernSupported(
@@ -712,6 +701,13 @@ protected:
     }
 
 private:
+    /**
+     * Subclass hook for clone(): returns a copy carrying all subclass state. The base-class
+     * validation metadata is applied by clone() and need not be copied here. Private so that only
+     * clone() can invoke it (NVI); overrides may be private too.
+     */
+    virtual std::unique_ptr<LiteParsedDocumentSource> _doClone() const = 0;
+
     /**
      * Give access to 'parserMap' so we can remove a registered parser with
      * 'unregisterParser_forTest'.
@@ -766,10 +762,14 @@ private:
  *   class MyLiteParsed final : public LiteParsedDocumentSourceDefault<MyLiteParsed> { ... };
  */
 template <typename Derived>
-class MONGO_MOD_OPEN LiteParsedDocumentSourceDefault : public LiteParsedDocumentSource {
+class [[MONGO_MOD_OPEN]] LiteParsedDocumentSourceDefault : public LiteParsedDocumentSource {
 public:
     LiteParsedDocumentSourceDefault(const BSONElement& originalBson)
         : LiteParsedDocumentSource(originalBson) {}
+
+    LiteParsedDocumentSourceDefault(const BSONElement& originalBson,
+                                    const LiteParserOptions& options)
+        : LiteParsedDocumentSource(originalBson, options) {}
 
     explicit LiteParsedDocumentSourceDefault(BSONObj ownedBson)
         : LiteParsedDocumentSource(std::move(ownedBson)) {}
@@ -791,7 +791,8 @@ public:
         return false;
     }
 
-    std::unique_ptr<LiteParsedDocumentSource> clone() const override {
+private:
+    std::unique_ptr<LiteParsedDocumentSource> _doClone() const override {
         return std::make_unique<Derived>(static_cast<const Derived&>(*this));
     }
 };
@@ -806,7 +807,7 @@ public:
  *   class MyLiteParsed final : public LiteParsedDocumentSourceInternal<MyLiteParsed> { ... };
  */
 template <typename Derived>
-class MONGO_MOD_OPEN LiteParsedDocumentSourceInternal
+class [[MONGO_MOD_OPEN]] LiteParsedDocumentSourceInternal
     : public LiteParsedDocumentSourceDefault<Derived> {
 public:
     LiteParsedDocumentSourceInternal(const BSONElement& originalBson)
@@ -967,4 +968,4 @@ public:
         mongo::LiteParsedDocumentSource::Constraints constraints() \
             const override { return {.canRunOnTimeseries = false}; })
 
-}  // namespace MONGO_MOD_UNFORTUNATELY_OPEN mongo
+}  // namespace mongo

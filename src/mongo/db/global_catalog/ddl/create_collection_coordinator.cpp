@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/create_collection_coordinator.h"
@@ -48,7 +22,6 @@
 #include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/global_catalog/ddl/create_collection_coordinator_document_gen.h"
 #include "mongo/db/global_catalog/ddl/notify_sharding_event_gen.h"
-#include "mongo/db/global_catalog/ddl/remove_chunks_gen.h"
 #include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
 #include "mongo/db/global_catalog/ddl/shard_key_util.h"
 #include "mongo/db/global_catalog/ddl/shard_util.h"
@@ -151,6 +124,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 MONGO_FAIL_POINT_DEFINE(failAtCommitCreateCollectionCoordinator);
 MONGO_FAIL_POINT_DEFINE(hangBeforeCommitOnShardingCatalog);
+MONGO_FAIL_POINT_DEFINE(createCollectionHangBeforeExitCriticalSection);
 
 namespace mongo {
 
@@ -282,6 +256,14 @@ bool isTimeseries(const ShardsvrCreateCollectionRequest& request) {
 bool isTimeseries(const boost::optional<CollectionAcquisition>& collection) {
     return collection.has_value() && collection->exists() &&
         collection->getCollectionPtr()->getTimeseriesOptions().has_value();
+}
+
+// TODO SERVER-81447: This method should go away when we explicitly use the IDL chained structs
+// since it will explicitly serialize the full collation.
+Collation parseCollationBackwardsCompatible(const BSONObj& spec) {
+    // Empty spec is sent whenever the collation is actually the simple one.
+    const auto& actualSpec = spec.isEmpty() ? CollationSpec::kSimpleSpec : spec;
+    return Collation::parse(actualSpec);
 }
 
 bool viewlessTimeseriesEnabled(OperationContext* opCtx) {
@@ -543,7 +525,8 @@ void broadcastDropCollection(OperationContext* opCtx,
                              const CancellationToken& token,
                              const OperationSessionInfo& osi,
                              const boost::optional<UUID>& expectedUUID,
-                             bool fromMigrate) {
+                             bool fromMigrate,
+                             bool isAuthoritative) {
     const auto primaryShardId = ShardingState::get(opCtx)->shardId();
 
     auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
@@ -564,6 +547,7 @@ void broadcastDropCollection(OperationContext* opCtx,
         osi,
         fromMigrate,
         false /* dropSystemCollections */,
+        !isAuthoritative /* forceLegacyRefresh */,
         expectedUUID);
 }
 
@@ -722,15 +706,18 @@ void checkLocalCatalogCollectionOptions(OperationContext* opCtx,
                 "provided must match the ones of the existing collection.",
                 isTimeseries(targetColl));
 
+        const auto& existingOptions = *targetColl->getCollectionPtr()->getTimeseriesOptions();
+        auto requestedOptions = *request.getTimeseries();
+        timeseries::inheritFixedBucketingIfOmitted(requestedOptions, existingOptions);
+
         uassert(
             ErrorCodes::InvalidOptions,
             fmt::format(
                 "The `timeseries` options provided must match the ones of the existing collection. "
                 "Requested {} but found {}",
                 request.getTimeseries()->toBSON().toString(),
-                targetColl->getCollectionPtr()->getTimeseriesOptions()->toBSON().toString()),
-            timeseries::optionsAreEqual(*request.getTimeseries(),
-                                        *targetColl->getCollectionPtr()->getTimeseriesOptions()));
+                existingOptions.toBSON().toString()),
+            timeseries::optionsAreEqual(requestedOptions, existingOptions));
     }
 }
 
@@ -796,15 +783,16 @@ void checkShardingCatalogCollectionOptions(OperationContext* opCtx,
                                            request.getCollation(),
                                            request.getUnsplittable(),
                                            request.getRegisterExistingCollectionInGlobalCatalog());
-        const auto defaultCollator =
-            cm.getDefaultCollator() ? cm.getDefaultCollator()->getSpec().toBSON() : BSONObj();
+        const auto defaultCollator = cm.getDefaultCollator()
+            ? cm.getDefaultCollator()->getSpec()
+            : Collation::parse(CollationSpec::kSimpleSpec);
         uassert(ErrorCodes::AlreadyInitialized,
                 fmt::format("Collection '{}' already exists with a different 'collator' option. "
                             "Requested {} but found {}",
                             targetNss.toStringForErrorMsg(),
                             requestedCollator.toString(),
-                            defaultCollator.toString()),
-                SimpleBSONObjComparator::kInstance.evaluate(defaultCollator == requestedCollator));
+                            defaultCollator.toBSON().toString()),
+                defaultCollator == parseCollationBackwardsCompatible(requestedCollator));
     }
 
     {
@@ -820,13 +808,16 @@ void checkShardingCatalogCollectionOptions(OperationContext* opCtx,
                 // they match
                 const auto& existingTimeseriesOptions =
                     cm.getTimeseriesFields()->getTimeseriesOptions();
+                auto requestedTimeseriesOptions = *request.getTimeseries();
+                timeseries::inheritFixedBucketingIfOmitted(requestedTimeseriesOptions,
+                                                           existingTimeseriesOptions);
                 uassert(ErrorCodes::AlreadyInitialized,
                         fmt::format("Collection '{}' already exists with a different timeseries "
                                     "options. Requested '{}' but found '{}'",
                                     targetNss.toStringForErrorMsg(),
                                     request.getTimeseries()->toBSON().toString(),
                                     existingTimeseriesOptions.toBSON().toString()),
-                        timeseries::optionsAreEqual(*request.getTimeseries(),
+                        timeseries::optionsAreEqual(requestedTimeseriesOptions,
                                                     existingTimeseriesOptions));
             } else {
                 // The collection exists and is timeseries but it was requested to create a normal
@@ -874,13 +865,10 @@ void checkShardingCatalogCollectionOptions(OperationContext* opCtx,
 boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions(
     OperationContext* opCtx,
     const ShardsvrCreateCollectionRequest& request,
-    const NamespaceString& originalNss,
-    bool newSessionsCollectionPath) {
+    const NamespaceString& originalNss) {
 
     boost::optional<NamespaceString> optTargetNss;
     boost::optional<UUID> optTargetCollUUID;
-    // TODO (SERVER-100309): Remove once 9.0 becomes last LTS.
-    bool missingSessionsCollectionLocally = false;
 
     {
         // 1. Check if the collection already exists in the local catalog with same options
@@ -896,14 +884,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions
         }
 
         if (!targetColl->exists()) {
-            // TODO (SERVER-100309): Remove once 9.0 becomes last LTS.
-            if (newSessionsCollectionPath &&
-                originalNss == NamespaceString::kLogicalSessionsNamespace) {
-                optTargetNss = originalNss;
-                missingSessionsCollectionLocally = true;
-            } else {
-                return boost::none;
-            }
+            return boost::none;
         } else {
             optTargetNss = targetColl->nss();
             optTargetCollUUID = targetColl->uuid();
@@ -917,9 +898,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions
 
     tassert(10644538, "Expected optTargetNss to be set", optTargetNss);
     const auto& targetNss = *optTargetNss;
-    tassert(10644539,
-            "Expected optTargetCollUUID to be set unless creating system.sessions",
-            optTargetCollUUID || missingSessionsCollectionLocally);
+    tassert(10644539, "Expected optTargetCollUUID to be set", optTargetCollUUID);
 
     // 2. Make sure we're not trying to track a temporary aggregation collection upon moveCollection
     if (request.getRegisterExistingCollectionInGlobalCatalog()) {
@@ -951,14 +930,6 @@ boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions
         Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, targetNss));
 
     if (!cm.hasRoutingTable()) {
-        // If the sessions collection does not already exist we need to make sure that there is an
-        // available shard for us to make it on.
-        if (targetNss == NamespaceString::kLogicalSessionsNamespace) {
-            uassert(ErrorCodes::IllegalOperation,
-                    "There are no suitable shards to create the sessions collection on",
-                    Grid::get(opCtx)->shardRegistry()->getNumShards(opCtx) != 0);
-        }
-
         // The collection is not tracked in the sharding catalog. We either need to register it or
         // to shard it. Proceed with the coordinator.
         return boost::none;
@@ -989,18 +960,6 @@ boost::optional<CreateCollectionResponse> checkIfCollectionExistsWithSameOptions
         }
         // For a timeseries request, the bucket collection already exists and it's tracked but the
         // view is missing locally. We need to create it. Proceed with the coordinator.
-        return boost::none;
-    }
-
-    // If the sessions collection exists in the sharding catalog but not locally, we want to
-    // run the coordinator so that we can create the collection locally. This is also true if we
-    // have a mismatched uuid locally - we want to run the coordinator and replace the local version
-    // of the collection.
-    //
-    // TODO (SERVER-100309): Remove once 9.0 becomes last LTS.
-    if (missingSessionsCollectionLocally ||
-        (targetNss == NamespaceString::kLogicalSessionsNamespace &&
-         !cm.uuidMatches(*optTargetCollUUID))) {
         return boost::none;
     }
 
@@ -1111,15 +1070,22 @@ void logStartCreateCollection(OperationContext* opCtx,
 }
 
 void enterCriticalSectionsOnCoordinator(OperationContext* opCtx,
+                                        AuthoritativeMetadataAccessLevelEnum metadataAccessLevel,
                                         const BSONObj& critSecReason,
                                         const NamespaceString& originalNss) {
-
     auto mainNss = originalNss.isTimeseriesBucketsCollection()
         ? originalNss.getTimeseriesViewNamespace()
         : originalNss;
 
+    const bool isAuthoritative =
+        metadataAccessLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
     ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
-        opCtx, mainNss, critSecReason, defaultMajorityWriteConcernDoNotUse());
+        opCtx,
+        mainNss,
+        critSecReason,
+        defaultMajorityWriteConcernDoNotUse(),
+        !isAuthoritative /* clearShardCatalogCache */);
 
     // Preventively acquire the critical section protecting the buckets namespace that the
     // creation of a timeseries collection would require.
@@ -1127,10 +1093,12 @@ void enterCriticalSectionsOnCoordinator(OperationContext* opCtx,
         opCtx,
         mainNss.makeTimeseriesBucketsNamespace(),
         critSecReason,
-        defaultMajorityWriteConcernDoNotUse());
+        defaultMajorityWriteConcernDoNotUse(),
+        !isAuthoritative /* clearShardCatalogCache */);
 }
 
 void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
+                                       AuthoritativeMetadataAccessLevelEnum metadataAccessLevel,
                                        bool throwIfReasonDiffers,
                                        const BSONObj& critSecReason,
                                        const NamespaceString& originalNss) {
@@ -1139,12 +1107,11 @@ void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
         ? originalNss.getTimeseriesViewNamespace()
         : originalNss;
 
-    const bool clearFilteringMetadata = !feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-        VersionContext::getDecoration(opCtx),
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const bool clearCollectionMetadata =
+        metadataAccessLevel == AuthoritativeMetadataAccessLevelEnum::kNone;
 
     std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction> actionPtr;
-    if (clearFilteringMetadata) {
+    if (clearCollectionMetadata) {
         actionPtr = std::make_unique<ShardingRecoveryService::FilteringMetadataClearer>();
     } else {
         actionPtr = std::make_unique<ShardingRecoveryService::NoCustomAction>();
@@ -1311,14 +1278,8 @@ boost::optional<UUID> createCollectionAndIndexes(
     LOGV2_DEBUG(
         5277903, 2, "Create collection createCollectionAndIndexes", logAttrs(translatedNss));
 
-    // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
-    boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
-        allowCollectionCreation;
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    if (!fcvSnapshot.isVersionInitialized() ||
-        feature_flags::g80CollectionCreationPath.isEnabled(fcvSnapshot)) {
-        allowCollectionCreation.emplace(opCtx, originalNss);
-    }
+    OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE allowCollectionCreation(
+        opCtx, originalNss);
 
     auto translatedRequest = request;
     translatedRequest.setCollation(translatedRequestParams.getCollation());
@@ -1389,6 +1350,24 @@ boost::optional<UUID> createCollectionAndIndexes(
     return *sharding_ddl_util::getCollectionUUID(opCtx, translatedNss);
 }
 
+// TODO (SERVER-133881): without the feature flag check, this function reduces to just checking
+// `isUnsplittable`, so just remove the function as it doesn't make much sense anymore.
+bool shouldDisallowChunkOperations(OperationContext* opCtx,
+                                   AuthoritativeMetadataAccessLevelEnum authMetadataAccessLevel,
+                                   bool isUnsplittable) {
+    if (!feature_flags::gCreateRenameNewSetAllowChunkOperationsBehavior.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return false;
+    }
+
+    // Chunk operations are disallowed on unsplittable collections, there is no need to explicitly
+    // block them with `allowChunkOperations: false`. Not doing it saves an `allowChunkOperations:
+    // true` command later.
+    return authMetadataAccessLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed &&
+        !isUnsplittable;
+}
+
 /**
  * Does the following writes:
  * 1. Replaces the config.chunks entries for the new collection;
@@ -1405,7 +1384,8 @@ void commit(OperationContext* opCtx,
             const NamespaceString& nss,
             const std::set<ShardId>& shardsHoldingData,
             const TranslatedRequestParams& translatedRequestParams,
-            std::function<OperationSessionInfo(OperationContext*)> newSessionBuilder) {
+            std::function<OperationSessionInfo(OperationContext*)> newSessionBuilder,
+            AuthoritativeMetadataAccessLevelEnum authMetadataAccessLevel) {
     LOGV2_DEBUG(5277906, 2, "Create collection commit", logAttrs(nss));
 
     if (MONGO_unlikely(nss == NamespaceString::kLogicalSessionsNamespace)) {
@@ -1427,8 +1407,12 @@ void commit(OperationContext* opCtx,
                                Date_t::now(),
                                *collectionUUID,
                                translatedRequestParams.getKeyPattern());
-    if (isUnsplittable(request))
-        coll.setUnsplittable(isUnsplittable(request));
+
+    auto const unsplittable = isUnsplittable(request);
+
+    if (unsplittable) {
+        coll.setUnsplittable(unsplittable);
+    }
 
     const auto& placementVersion = initialChunks->chunks.back().getVersion();
 
@@ -1444,6 +1428,10 @@ void commit(OperationContext* opCtx,
         coll.setUnique(*request.getUnique());
     }
 
+    if (shouldDisallowChunkOperations(opCtx, authMetadataAccessLevel, unsplittable)) {
+        coll.setAllowChunkOperations(false);
+    }
+
     auto ops = sharding_ddl_util::getOperationsToCreateOrShardCollectionOnShardingCatalog(
         coll, initialChunks->chunks, placementVersion, shardsHoldingData);
 
@@ -1457,8 +1445,27 @@ void CreateCollectionCoordinator::checkIfOptionsConflict(const BSONObj& doc) con
     const auto otherDoc = CreateCollectionCoordinatorDocument::parse(
         doc, IDLParserContext("CreateCollectionCoordinatorDocument"));
 
-    const auto& selfReq = _request.toBSON();
-    const auto& otherReq = otherDoc.getShardsvrCreateCollectionRequest().toBSON();
+    // Normalize collations such that checks are done with the semantically equivalent values.
+    // {locale: "simple"} is equivalent to the full explicit collation with default values for
+    // example.
+    // TODO SERVER-81447: This should go away once the coordinator document reuses the create
+    // command IDL.
+    const auto& selfReq = [&] {
+        auto copy = _request;
+        if (copy.getCollation().has_value()) {
+            auto collation = Collation::parse(*copy.getCollation());
+            copy.setCollation(collation.toBSON());
+        }
+        return copy.toBSON();
+    }();
+    const auto& otherReq = [&] {
+        auto copy = otherDoc.getShardsvrCreateCollectionRequest();
+        if (copy.getCollation().has_value()) {
+            auto collation = Collation::parse(*copy.getCollation());
+            copy.setCollation(collation.toBSON());
+        }
+        return copy.toBSON();
+    }();
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
             str::stream() << "Another create collection with different arguments is already "
@@ -1493,29 +1500,18 @@ void CreateCollectionCoordinator::_exitCriticalSectionOnShards(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token,
     const std::vector<ShardId>& shardIds) {
-    ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss());
-    unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-    unblockCRUDOperationsRequest.setReason(_critSecReason);
-    unblockCRUDOperationsRequest.setThrowIfReasonDiffers(throwIfReasonDiffers);
-
-    // When shards are authoritative, there is no need to clear the filtering metadata upon
-    // releasing the critical section; the commit phase is responsible for updating the shard
-    // catalog (both durable and in-memory) with current information on both primary and secondary
-    // nodes.
-    bool isDDLAuthoritative = feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-        VersionContext::getDecoration(opCtx),
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    if (isDDLAuthoritative) {
-        unblockCRUDOperationsRequest.setClearCollMetadata(false);
-    }
-
-    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss(),
+        shardIds,
+        CriticalSectionBlockTypeEnum::kUnblock,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token,
+        throwIfReasonDiffers);
 }
 
 bool CreateCollectionCoordinator::_mustAlwaysMakeProgress() {
@@ -1549,8 +1545,11 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                     LOGV2(8119050,
                           "Found that collection already exists with matching option after taking "
                           "the collection critical section");
-                    exitCriticalSectionsOnCoordinator(
-                        opCtx, _firstExecution, _critSecReason, originalNss());
+                    exitCriticalSectionsOnCoordinator(opCtx,
+                                                      _doc.getAuthoritativeMetadataAccessLevel(),
+                                                      _firstExecution,
+                                                      _critSecReason,
+                                                      originalNss());
                     throw ex;
                 }
             }))
@@ -1620,19 +1619,24 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
             auto opCtxHolder = makeOperationContext();
             auto* opCtx = opCtxHolder.get();
 
-            auto involvedShards = *_doc.getShardIds();
-            auto addIfNotPresent = [&](const ShardId& shard) {
-                if (std::find(involvedShards.begin(), involvedShards.end(), shard) ==
-                    involvedShards.end())
-                    involvedShards.push_back(shard);
-            };
+            const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+            if (!isAuthoritative) {
+                auto involvedShards = *_doc.getShardIds();
+                auto addIfNotPresent = [&](const ShardId& shard) {
+                    if (std::find(involvedShards.begin(), involvedShards.end(), shard) ==
+                        involvedShards.end())
+                        involvedShards.push_back(shard);
+                };
 
-            // The filtering information has been cleared on all participant shards. Here we issue a
-            // best effort refresh on all shards involved in the operation to install the correct
-            // filtering information.
-            addIfNotPresent(ShardingState::get(opCtx)->shardId());
-            addIfNotPresent(*_doc.getOriginalDataShard());
-            sharding_util::triggerFireAndForgetShardRefreshes(opCtx, involvedShards, nss());
+                // The filtering information has been cleared on all participant shards. Here we
+                // issue a best effort refresh on all shards involved in the operation to install
+                // the correct filtering information. In authoritative mode, the commit phase
+                // already updates the shard catalog and installs the in-memory metadata.
+                addIfNotPresent(ShardingState::get(opCtx)->shardId());
+                addIfNotPresent(*_doc.getOriginalDataShard());
+                sharding_util::triggerFireAndForgetShardRefreshes(opCtx, involvedShards, nss());
+            }
 
             if (_firstExecution) {
                 const auto& placementVersion = _initialChunks->chunks.back().getVersion();
@@ -1718,11 +1722,8 @@ void CreateCollectionCoordinator::_checkPreconditions(OperationContext* opCtx) {
 
     // Perform a preliminary check on whether the request may resolve into a no-op before acquiring
     // any critical section.
-    auto createCollectionResponseOpt = checkIfCollectionExistsWithSameOptions(
-        opCtx,
-        _request,
-        originalNss(),
-        _doc.getCreateSessionsCollectionRemotelyOnFirstShard().value_or(false));
+    auto createCollectionResponseOpt =
+        checkIfCollectionExistsWithSameOptions(opCtx, _request, originalNss());
     if (createCollectionResponseOpt) {
         _result = createCollectionResponseOpt;
         // Launch an exception to directly jump to the end of the continuation chain
@@ -1736,9 +1737,7 @@ void CreateCollectionCoordinator::_checkPreconditions(OperationContext* opCtx) {
     // This is important in order to fix a race where create collection for 'config.system.session',
     // which is sent to a random shard, could otherwise execute on a config server that is no longer
     // a data-bearing shard.
-    // TODO (SERVER-100309): Remove this once 9.0 becomes last LTS.
-    if (!_doc.getCreateSessionsCollectionRemotelyOnFirstShard() &&
-        ShardingState::get(opCtx)->pollClusterRole()->has(ClusterRole::ConfigServer)) {
+    if (ShardingState::get(opCtx)->pollClusterRole()->has(ClusterRole::ConfigServer)) {
         const auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
         bool amIAConfigShard = std::find(allShardIds.begin(),
                                          allShardIds.end(),
@@ -1766,7 +1765,8 @@ void CreateCollectionCoordinator::_checkPreconditions(OperationContext* opCtx) {
 
 void CreateCollectionCoordinator::_enterWriteCriticalSectionOnCoordinator(OperationContext* opCtx) {
     logStartCreateCollection(opCtx, _request, originalNss());
-    enterCriticalSectionsOnCoordinator(opCtx, _critSecReason, originalNss());
+    enterCriticalSectionsOnCoordinator(
+        opCtx, _doc.getAuthoritativeMetadataAccessLevel(), _critSecReason, originalNss());
 }
 
 void CreateCollectionCoordinator::_translateRequestParameters(OperationContext* opCtx) {
@@ -1804,29 +1804,24 @@ void CreateCollectionCoordinator::_translateRequestParameters(OperationContext* 
                 if (!mixedSchemaBucketsState.mustConsiderMixedSchemaBucketsInReads()) {
                     extendedTimeseriesFields.setTimeseriesBucketsMayHaveMixedSchemaData(false);
                 }
-
-                if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
-                        VersionContext::getDecoration(opCtx),
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                    // Set bucketingParametersChanged property
-                    extendedTimeseriesFields.setTimeseriesBucketingParametersHaveChanged(
-                        coll.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
-                }
             }
 
             optExtendedTimeseriesFields = std::move(extendedTimeseriesFields);
         } else if (_request.getTimeseries()) {
             // The collection does not exists so we are creating a new timeseries collection.
+            auto timeseriesOptions = *_request.getTimeseries();
             auto extendedTimeseriesFields = TypeCollectionTimeseriesFields();
-            extendedTimeseriesFields.setTimeseriesOptions(*_request.getTimeseries());
             if (viewlessTimeseriesEnabled(opCtx)) {
                 extendedTimeseriesFields.setTimeseriesBucketsMayHaveMixedSchemaData(false);
-                if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
-                        VersionContext::getDecoration(opCtx),
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                    extendedTimeseriesFields.setTimeseriesBucketingParametersHaveChanged(false);
-                }
+
+                // Default 'fixedBucketing' to true for a new viewless time-series collection so the
+                // global catalog entry matches what the shard-local create persists.
+                timeseries::setFixedBucketingDefaultForNewCollection(
+                    timeseriesOptions,
+                    gFeatureFlagFixedBucketingCatalog.isEnabledUseLatestFCVWhenUninitialized(
+                        VersionContext::getDecoration(opCtx)));
             }
+            extendedTimeseriesFields.setTimeseriesOptions(timeseriesOptions);
 
             optExtendedTimeseriesFields = std::move(extendedTimeseriesFields);
         }
@@ -1879,12 +1874,6 @@ void CreateCollectionCoordinator::_enterWriteCriticalSectionOnDataShardAndCheckC
         return;
     }
 
-    // TODO (SERVER-87265) Remove this call if possible.
-    if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
-    }
-
     _enterCriticalSectionOnShards(opCtx,
                                   executor,
                                   token,
@@ -1916,51 +1905,14 @@ void CreateCollectionCoordinator::_syncIndexesOnCoordinator(
     const CancellationToken& token) {
     // If the collection does not exist or the current data shard is the coordinator, then the
     // indexes on the coordinator will already be accurate.
-    bool collectionExists = [&] {
-        // During the transition from running the create coordintor for config.system.sessions on
-        // the first shard to running it on the config server, the collection may be sharded but the
-        // collection will not exist locally on the config server. This logic will ensure that we
-        // create the collection locally on the config server the first time the coordinator is run
-        // on the config server.
-        //
-        // TODO (SERVER-100309): Remove once 9.0 becomes last LTS
-        if (_doc.getCreateSessionsCollectionRemotelyOnFirstShard() &&
-            nss() == NamespaceString::kLogicalSessionsNamespace) {
-            const auto cri = uassertStatusOK(
-                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss()));
-            return cri.hasRoutingTable();
-        } else {
-            return sharding_ddl_util::getCollectionUUID(opCtx, nss()).is_initialized();
-        }
-    }();
+    bool collectionExists = sharding_ddl_util::getCollectionUUID(opCtx, nss()).is_initialized();
     if (!collectionExists || *_doc.getOriginalDataShard() == ShardingState::get(opCtx)->shardId()) {
         return;
     }
 
-    // TODO (SERVER-87265) Remove this call if possible.
-    if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
-    }
-
     auto optUuid = sharding_ddl_util::getCollectionUUID(opCtx, nss());
-    // TODO (SERVER-100309): Remove sessions collection handling once 9.0 becomes last LTS.
-    if (!optUuid) {
-        tassert(10644508,
-                "Expected the namespace to be system.sessions",
-                nss() == NamespaceString::kLogicalSessionsNamespace);
-        tassert(10644509,
-                "Expected createSessionsCollectionRemotelyOnFirstShard to be set on the "
-                "coordinator document",
-                _doc.getCreateSessionsCollectionRemotelyOnFirstShard());
-        // If we are in the state described above, we cannot get the uuid locally and so we need to
-        // take the existing one from config.collections.
-        const auto& cri = uassertStatusOK(
-            Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss()));
-        _uuid = cri.getChunkManager().getUUID();
-    } else {
-        _uuid = *optUuid;
-    }
+    tassert(10644508, "Expected collection UUID to be available locally", optUuid);
+    _uuid = *optUuid;
 
     // Get indexes from the dataShard and copy them to the coordinator.
     const auto session = getNewSession(opCtx);
@@ -2002,15 +1954,8 @@ void CreateCollectionCoordinator::_createCollectionOnCoordinator(
                                   _request.getUnique().value_or(false));
     }
 
-    auto dataShardForPolicy =
+    const auto dataShardForPolicy =
         _request.getDataShard() ? _request.getDataShard() : _doc.getOriginalDataShard();
-    if (_doc.getCreateSessionsCollectionRemotelyOnFirstShard() &&
-        nss() == NamespaceString::kLogicalSessionsNamespace &&
-        dataShardForPolicy == ShardingState::get(opCtx)->shardId()) {
-        auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-        std::sort(allShardIds.begin(), allShardIds.end());
-        dataShardForPolicy = allShardIds[0];
-    }
     const auto splitPolicy = create_collection_util::createPolicy(
         opCtx,
         shardKeyPattern,
@@ -2049,27 +1994,23 @@ void CreateCollectionCoordinator::_enterCriticalSectionOnShards(
     const NamespaceString& nss,
     const std::vector<ShardId>& shardIds,
     mongo::CriticalSectionBlockTypeEnum blockType) {
-    ShardsvrParticipantBlock blockCRUDOperationsRequest(nss);
-    blockCRUDOperationsRequest.setBlockType(blockType);
-    blockCRUDOperationsRequest.setReason(_critSecReason);
-
-    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, shardIds);
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss,
+        shardIds,
+        blockType,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 }
 
 void CreateCollectionCoordinator::_enterCriticalSection(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
-    if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
-    }
-
     // Block reads and writes on all shards other than the dbPrimary.
     auto participants = *_doc.getShardIds();
     // Ensure the critical section is promoted to block reads on the data shard if the data shard is
@@ -2156,9 +2097,6 @@ void CreateCollectionCoordinator::_createCollectionOnParticipants(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
     if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
-
         _uuid = sharding_ddl_util::getCollectionUUID(opCtx, nss());
     }
 
@@ -2230,15 +2168,17 @@ void CreateCollectionCoordinator::_notifyChangeStreamReadersOnPlacementChanged(
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
     NamespacePlacementChanged notification(nss(), commitTime);
-    const auto& changeStreamsNotifierShardId = _doc.getOriginalDataShard().value();
     auto buildNewSessionFn = [this](OperationContext* opCtx) {
         return getNewSession(opCtx);
     };
 
+    // Copy by value: generatePlacementChangeNotificationOnShard() persists new sessions that
+    // reassign _doc, which would leave a reference into _doc dangling.
+    const auto changeStreamsNotifierShardId = _doc.getOriginalDataShard().value();
+
     sharding_ddl_util::generatePlacementChangeNotificationOnShard(
         opCtx, notification, changeStreamsNotifierShardId, buildNewSessionFn, executor, token);
 }
-
 
 void CreateCollectionCoordinator::_commitOnGlobalCatalog(
     OperationContext* opCtx,
@@ -2254,9 +2194,6 @@ void CreateCollectionCoordinator::_commitOnGlobalCatalog(
     }
 
     if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
-
         // Check if a previous request already created and committed the collection.
         const auto shardKeyPattern =
             ShardKeyPattern(_doc.getTranslatedRequestParams()->getKeyPattern());
@@ -2265,7 +2202,8 @@ void CreateCollectionCoordinator::_commitOnGlobalCatalog(
                     opCtx,
                     nss(),
                     shardKeyPattern.toBSON(),
-                    _doc.getTranslatedRequestParams()->getCollation(),
+                    parseCollationBackwardsCompatible(
+                        _doc.getTranslatedRequestParams()->getCollation()),
                     _request.getUnique().value_or(false),
                     _request.getUnsplittable().value_or(false));
             committedSpecs.has_value()) {
@@ -2332,15 +2270,17 @@ void CreateCollectionCoordinator::_commitOnGlobalCatalog(
         involvedShards.emplace(chunk.getShard());
     }
 
-    commit(opCtx,
-           **executor,
-           _request,
-           _initialChunks,
-           _uuid,
-           nss(),
-           involvedShards,
-           *_doc.getTranslatedRequestParams(),
-           [this](OperationContext* opCtx) { return getNewSession(opCtx); });
+    commit(
+        opCtx,
+        **executor,
+        _request,
+        _initialChunks,
+        _uuid,
+        nss(),
+        involvedShards,
+        *_doc.getTranslatedRequestParams(),
+        [this](OperationContext* opCtx) { return getNewSession(opCtx); },
+        _doc.getAuthoritativeMetadataAccessLevel());
     const auto& commitTime = _initialChunks->chunks.back().getVersion().getTimestamp();
     _notifyChangeStreamReadersOnPlacementChanged(opCtx, commitTime, executor, token);
 
@@ -2353,9 +2293,7 @@ void CreateCollectionCoordinator::_commitOnShardCatalog(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
-    if (!feature_flags::gShardAuthoritativeCollMetadata.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+    if (_doc.getAuthoritativeMetadataAccessLevel() == AuthoritativeMetadataAccessLevelEnum::kNone) {
         return;
     }
 
@@ -2367,29 +2305,31 @@ void CreateCollectionCoordinator::_commitOnShardCatalog(
     const auto& cm = uassertStatusOK(
         Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, nss()));
     cm.getAllShardIds(&involvedShards);
+    // The DB primary shard must always know that a collection is tracked, even when it does not
+    // own any chunks. For config.system.sessions, the DB primary is the config server, but the
+    // coordinator runs on the first shard instead, so add it explicitly.
+    involvedShards.emplace(nss().isConfigDB() ? ShardId::kConfigServerId
+                                              : ShardingState::get(opCtx)->shardId());
+    // The original data shard may no longer own chunks after applying the final placement (for
+    // example, due to zones), but it still needs the shard catalog commit to clear the previous
+    // unsplittable collection metadata.
+    if (_doc.getOriginalDataShard()) {
+        involvedShards.emplace(*_doc.getOriginalDataShard());
+    }
 
     const auto session = getNewSession(opCtx);
     sharding_ddl_util::commitCreateCollectionMetadataToShardCatalog(
         opCtx, nss(), {involvedShards.begin(), involvedShards.end()}, session, executor, token);
-
-    // The DB primary shard must always know that a collection is tracked, even when it does not
-    // own any chunks. We persist a placeholder chunk locally so that (1) disk recovery can
-    // distinguish a chunkless-tracked collection from an untracked one without special-case
-    // logic, and (2) CheckMetadataConsistency can verify the DB primary always has an entry.
-    const auto primaryShardId = ShardingState::get(opCtx)->shardId();
-    if (involvedShards.find(primaryShardId) == involvedShards.end()) {
-        shard_catalog_commit::commitCreateCollectionChunklessLocally(opCtx, nss());
-    }
 }
 
 void CreateCollectionCoordinator::_setPostCommitMetadata(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
-    if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
+    const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
 
+    if (!_firstExecution) {
         _uuid = sharding_ddl_util::getCollectionUUID(opCtx, nss());
 
         // Get the shards committed to the sharding catalog.
@@ -2425,6 +2365,7 @@ void CreateCollectionCoordinator::_setPostCommitMetadata(
                 session,
                 true /* fromMigrate */,
                 false /* dropSystemCollections */,
+                !isAuthoritative /* forceLegacyRefresh */,
                 _uuid);
         }
     }
@@ -2449,6 +2390,7 @@ void CreateCollectionCoordinator::_setPostCommitMetadata(
             session,
             true,
             false,
+            !isAuthoritative /* forceLegacyRefresh */,
             _uuid);
     }
 }
@@ -2457,9 +2399,9 @@ void CreateCollectionCoordinator::_exitCriticalSection(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
-    if (!_firstExecution) {
-        AllShardsAndConfigCausalityBarrier barrier{**executor, token};
-        performCausalityBarrier(opCtx, barrier);
+
+    if (MONGO_unlikely(createCollectionHangBeforeExitCriticalSection.shouldFail())) {
+        createCollectionHangBeforeExitCriticalSection.pauseWhileSet();
     }
 
     // Exit critical section on all shards other than the coordinator.
@@ -2481,8 +2423,22 @@ void CreateCollectionCoordinator::_exitCriticalSection(
     // If the coordinator successfully committed the collection during a previous execution, the
     // critical section may have already been released. In such case, it is safe to skip the release
     // if the reason does not match because a migration may have already re-acquired it.
-    exitCriticalSectionsOnCoordinator(
-        opCtx, _firstExecution /* throwIfReasonDiffers */, _critSecReason, originalNss());
+    exitCriticalSectionsOnCoordinator(opCtx,
+                                      _doc.getAuthoritativeMetadataAccessLevel(),
+                                      _firstExecution /* throwIfReasonDiffers */,
+                                      _critSecReason,
+                                      originalNss());
+
+    if (const auto authMetadataAccessLevel = _doc.getAuthoritativeMetadataAccessLevel();
+        shouldDisallowChunkOperations(opCtx, authMetadataAccessLevel, isUnsplittable(_request))) {
+        // The commit creates the collection with allowChunkOperations set to false. After the
+        // critical section is released, we need to enable chunk operations.
+        if (!_firstExecution && !_uuid) {
+            _uuid = sharding_ddl_util::getCollectionUUID(opCtx, nss());
+        }
+        sharding_ddl_util::resumeMigrations(
+            opCtx, nss(), _uuid, [&] { return getNewSession(opCtx); }, authMetadataAccessLevel);
+    }
 }
 
 ExecutorFuture<void> CreateCollectionCoordinator::_cleanupOnAbort(
@@ -2502,6 +2458,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_cleanupOnAbort(
                 // TODO SERVER-83774: Remove the following tassert and skip the broadcast if the
                 // _uuid does not exist.
                 tassert(10644512, "Expected _uuid to be set", _uuid);
+                const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
                 const auto session = getNewSession(opCtx);
                 broadcastDropCollection(opCtx,
                                         nss(),
@@ -2510,7 +2468,8 @@ ExecutorFuture<void> CreateCollectionCoordinator::_cleanupOnAbort(
                                         token,
                                         session,
                                         _uuid,
-                                        false /*fromMigrate*/);
+                                        false /*fromMigrate*/,
+                                        isAuthoritative /*isAuthoritative*/);
             }
 
 
@@ -2536,8 +2495,11 @@ ExecutorFuture<void> CreateCollectionCoordinator::_cleanupOnAbort(
 
 
             // Exit both critical sections on the coordinator
-            exitCriticalSectionsOnCoordinator(
-                opCtx, true /* throwIfReasonDiffers */, _critSecReason, originalNss());
+            exitCriticalSectionsOnCoordinator(opCtx,
+                                              _doc.getAuthoritativeMetadataAccessLevel(),
+                                              true /* throwIfReasonDiffers */,
+                                              _critSecReason,
+                                              originalNss());
         })
         .onError([this, anchor = shared_from_this()](const Status& status) {
             const auto opCtxHolder = makeOperationContext();

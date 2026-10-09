@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
@@ -41,10 +14,11 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 class StringListSet {
@@ -56,25 +30,26 @@ private:
         return val & ((1u << n) - 1u);
     }
 
-    inline static size_t computeFastHash1(const char* str, size_t len) {
+    inline static size_t computeFastHash1(std::string_view s) {
+        size_t len = s.size();
         if (MONGO_unlikely(len == 0)) {
             return 126;
         }
         // The lowest 5 bits of 'str[len - 1]' and the lowest 2 bits of 'len' are decent sources
         // of entropy. Combine them to generate a pseudo-random number 'h' where 0 <= h <= 127.
-        size_t h = getLowestNBits(size_t(str[len - 1]) + (len << 5u), 7);
+        size_t h = getLowestNBits(size_t(s[len - 1]) + (len << 5u), 7);
         return h;
     }
 
-    inline static size_t computeFastHash2(const char* str, size_t len, size_t fastHash1) {
-        if (MONGO_unlikely(len == 0)) {
+    inline static size_t computeFastHash2(std::string_view s, size_t fastHash1) {
+        if (MONGO_unlikely(s.empty())) {
             return 38;
         }
-        // The lowest 5 bits of 'str[0]' are a decent source of entropy. Using 'str[0]' and
+        // The lowest 5 bits of 's[0]' are a decent source of entropy. Using 's[0]' and
         // 'fastHash1', generate a pseudo-random number 'h' where 0 <= h <= 127 and where
         // h != fastHash1.
-        size_t h = getLowestNBits(
-            fastHash1 + size_t(str[0]) + getLowestNBits(~size_t(str[0]) >> 4u, 1), 7);
+        uint8_t b0 = s[0];
+        size_t h = getLowestNBits(fastHash1 + b0 + getLowestNBits(~b0 >> 4u, 1), 7);
         return h;
     }
 
@@ -138,9 +113,9 @@ public:
         return _strings.at(idx);
     }
 
-    inline size_t findPos(StringData str) const {
+    inline size_t findPos(std::string_view str) const {
         size_t len = str.size();
-        size_t fastHash = computeFastHash1(str.data(), len);
+        size_t fastHash = computeFastHash1(str);
         size_t encodedIdx = 0;
 
         if (useFastHash()) {
@@ -175,19 +150,19 @@ public:
                 }
 
                 // If this was our first attempt, try again using computeFastHash2().
-                fastHash = computeFastHash2(str.data(), len, fastHash);
+                fastHash = computeFastHash2(str, fastHash);
             }
         }
 
         return findInMapImpl(str);
     }
 
-    inline std::vector<std::string>::const_iterator find(StringData str) const {
+    inline std::vector<std::string>::const_iterator find(std::string_view str) const {
         auto pos = findPos(str);
         return pos != npos ? _strings.cbegin() + pos : _strings.cend();
     }
 
-    inline size_t count(StringData str) const {
+    inline size_t count(std::string_view str) const {
         auto pos = findPos(str);
         return pos != npos ? 1 : 0;
     }
@@ -210,7 +185,7 @@ private:
 
     std::array<uint8_t, 128> buildFastHash();
 
-    size_t findInMapImpl(StringData str) const;
+    size_t findInMapImpl(std::string_view str) const;
 
     std::vector<std::string> _strings;
     StringDataMap<size_t> _stringToIndexMap;

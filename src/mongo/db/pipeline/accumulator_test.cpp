@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/accumulator.h"
@@ -37,7 +11,6 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
-#include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_for_window_functions.h"
 #include "mongo/db/pipeline/accumulator_js_reduce.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
@@ -69,8 +42,11 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
+using namespace std::literals::string_view_literals;
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
+using namespace std::literals::string_view_literals;
 namespace mongo {
 namespace AccumulatorTests {
 
@@ -348,12 +324,12 @@ TEST(Accumulators, FirstN) {
              Value(std::vector<Value>{Value(BSONNULL), Value(BSONNULL)})},
 
             // Testing mixed types.
-            {{Value(4), Value("str"_sd), Value(3.2), Value(4.0)},
-             Value(std::vector<Value>{Value(4), Value("str"_sd)})},
+            {{Value(4), Value("str"sv), Value(3.2), Value(4.0)},
+             Value(std::vector<Value>{Value(4), Value("str"sv)})},
 
             // Testing duplicate values.
-            {{Value("std"_sd), Value("std"_sd), Value("test"_sd)},
-             Value(std::vector<Value>{Value("std"_sd), Value("std"_sd)})},
+            {{Value("std"sv), Value("std"sv), Value("test"sv)},
+             Value(std::vector<Value>{Value("std"sv), Value("std"sv)})},
 
             {{Value(9.1), Value(4.22), Value(4.22)},
              Value(std::vector<Value>{Value(9.1), Value(4.22)})},
@@ -439,12 +415,12 @@ TEST(Accumulators, LastN) {
              Value(std::vector<Value>{Value(BSONNULL), Value(BSONNULL)})},
 
             // Testing mixed types.
-            {{Value(4), Value("str"_sd), Value(3.2), Value(4.0)},
+            {{Value(4), Value("str"sv), Value(3.2), Value(4.0)},
              Value(std::vector<Value>{Value(3.2), Value(4.0)})},
 
             // Testing duplicate values.
-            {{Value("std"_sd), Value("std"_sd), Value("test"_sd)},
-             Value(std::vector<Value>{Value("std"_sd), Value("test"_sd)})},
+            {{Value("std"sv), Value("std"sv), Value("test"sv)},
+             Value(std::vector<Value>{Value("std"sv), Value("test"sv)})},
 
             {{Value(9.1), Value(4.22), Value(4.22)},
              Value(std::vector<Value>{Value(4.22), Value(4.22)})},
@@ -496,7 +472,7 @@ TEST(Accumulators, MinRespectsCollation) {
         std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kReverseString);
     expCtx.setCollator(std::move(collator));
     assertExpectedResults2<AccumulatorMin>(&expCtx,
-                                           {{{Value("abc"_sd), Value("cba"_sd)}, Value("cba"_sd)}});
+                                           {{{Value("abc"sv), Value("cba"sv)}, Value("cba"sv)}});
 }
 
 TEST(Accumulators, MinN) {
@@ -540,8 +516,8 @@ TEST(Accumulators, MinNRespectsCollation) {
     const auto n = Value(2);
     assertExpectedResults2<AccumulatorMinN>(
         &expCtx,
-        {{{Value("abc"_sd), Value("cba"_sd), Value("cca"_sd)},
-          Value(std::vector<Value>{Value("cba"_sd), Value("cca"_sd)})}},
+        {{{Value("abc"sv), Value("cba"sv), Value("cca"sv)},
+          Value(std::vector<Value>{Value("cba"sv), Value("cca"sv)})}},
         false /* skipMerging */,
         n);
 }
@@ -587,8 +563,8 @@ TEST(Accumulators, MaxNRespectsCollation) {
     const auto n = Value(2);
     assertExpectedResults2<AccumulatorMaxN>(
         &expCtx,
-        {{{Value("abc"_sd), Value("cba"_sd), Value("cca"_sd)},
-          Value(std::vector<Value>{Value("abc"_sd), Value("cca"_sd)})}},
+        {{{Value("abc"sv), Value("cba"sv), Value("cca"sv)},
+          Value(std::vector<Value>{Value("abc"sv), Value("cca"sv)})}},
         false /* skipMerging */,
         n);
 }
@@ -617,7 +593,7 @@ TEST(Accumulators, MaxRespectsCollation) {
         std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kReverseString);
     expCtx.setCollator(std::move(collator));
     assertExpectedResults2<AccumulatorMax>(&expCtx,
-                                           {{{Value("abc"_sd), Value("cba"_sd)}, Value("abc"_sd)}});
+                                           {{{Value("abc"sv), Value("cba"sv)}, Value("abc"sv)}});
 }
 
 TEST(Accumulators, Sum) {
@@ -724,8 +700,8 @@ TEST(Accumulators, TopBottomNRespectsCollation) {
     };
 
     OperationsType bottomCasesAscending{
-        {{mkdoc(Value("abc"_sd)), mkdoc(Value("cba"_sd)), mkdoc(Value("cca"_sd))},
-         Value(std::vector<Value>{Value("cca"_sd), Value("abc"_sd)})}};
+        {{mkdoc(Value("abc"sv)), mkdoc(Value("cba"sv)), mkdoc(Value("cca"sv))},
+         Value(std::vector<Value>{Value("cca"sv), Value("abc"sv)})}};
 
     assertExpectedResults1(
         expCtx.get(),
@@ -738,8 +714,8 @@ TEST(Accumulators, TopBottomNRespectsCollation) {
         });
 
     OperationsType bottomCasesDescending{
-        {{mkdoc(Value("abc"_sd)), mkdoc(Value("cba"_sd)), mkdoc(Value("cca"_sd))},
-         Value(std::vector<Value>{Value("cca"_sd), Value("cba"_sd)})}};
+        {{mkdoc(Value("abc"sv)), mkdoc(Value("cba"sv)), mkdoc(Value("cca"sv))},
+         Value(std::vector<Value>{Value("cca"sv), Value("cba"sv)})}};
     assertExpectedResults1(
         expCtx.get(),
         bottomCasesDescending,
@@ -751,8 +727,8 @@ TEST(Accumulators, TopBottomNRespectsCollation) {
         });
 
     OperationsType topCasesAscending{
-        {{mkdoc(Value("abc"_sd)), mkdoc(Value("cba"_sd)), mkdoc(Value("cca"_sd))},
-         Value(std::vector<Value>{Value("cba"_sd), Value("cca"_sd)})}};
+        {{mkdoc(Value("abc"sv)), mkdoc(Value("cba"sv)), mkdoc(Value("cca"sv))},
+         Value(std::vector<Value>{Value("cba"sv), Value("cca"sv)})}};
     assertExpectedResults1(
         expCtx.get(),
         topCasesAscending,
@@ -764,8 +740,8 @@ TEST(Accumulators, TopBottomNRespectsCollation) {
         });
 
     OperationsType topCasesDescending{
-        {{mkdoc(Value("abc"_sd)), mkdoc(Value("cba"_sd)), mkdoc(Value("cca"_sd))},
-         Value(std::vector<Value>{Value("abc"_sd), Value("cca"_sd)})}};
+        {{mkdoc(Value("abc"sv)), mkdoc(Value("cba"sv)), mkdoc(Value("cca"sv))},
+         Value(std::vector<Value>{Value("abc"sv), Value("cca"sv)})}};
     assertExpectedResults1(
         expCtx.get(),
         topCasesDescending,
@@ -1824,29 +1800,29 @@ TEST(Accumulators, AddToSetRespectsCollation) {
     auto collator =
         std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kAlwaysEqual);
     expCtx.setCollator(std::move(collator));
-    assertExpectedResults2<AccumulatorAddToSet>(&expCtx,
-                                                {{{Value("a"_sd), Value("b"_sd), Value("c"_sd)},
-                                                  Value(std::vector<Value>{Value("a"_sd)})}});
+    assertExpectedResults2<AccumulatorAddToSet>(
+        &expCtx,
+        {{{Value("a"sv), Value("b"sv), Value("c"sv)}, Value(std::vector<Value>{Value("a"sv)})}});
 }
 
 TEST(Accumulators, AddToSetRespectsMaxMemoryConstraint) {
     auto expCtx = ExpressionContextForTest{};
-    const int maxMemoryBytes = 20ull;
+    const MemoryUsageLimit maxMemoryBytes{20};
     auto addToSet = AccumulatorAddToSet(&expCtx, maxMemoryBytes);
     ASSERT_THROWS_CODE(
         addToSet.process(
-            Value("This is a large string. Certainly we must be over 20 bytes by now"_sd), false),
+            Value("This is a large string. Certainly we must be over 20 bytes by now"sv), false),
         AssertionException,
         ErrorCodes::ExceededMemoryLimit);
 }
 
 TEST(Accumulators, PushRespectsMaxMemoryConstraint) {
     auto expCtx = ExpressionContextForTest{};
-    const int maxMemoryBytes = 20ull;
+    const MemoryUsageLimit maxMemoryBytes{20};
     auto addToSet = AccumulatorPush(&expCtx, maxMemoryBytes);
     ASSERT_THROWS_CODE(
         addToSet.process(
-            Value("This is a large string. Certainly we must be over 20 bytes by now"_sd), false),
+            Value("This is a large string. Certainly we must be over 20 bytes by now"sv), false),
         AssertionException,
         ErrorCodes::ExceededMemoryLimit);
 }
@@ -2014,7 +1990,7 @@ TEST(Accumulators, AccumulatorExpMovingAvg) {
     ASSERT_EQ(BSONType::null, acc.getValue(false /* toBeMerged */).getType());
 
     // Process a non-numeric input. Still not initialized.
-    acc.processInternal(Value("string"_sd), false /* merging */);
+    acc.processInternal(Value("string"sv), false /* merging */);
     ASSERT_EQ(BSONType::null, acc.getValue(false /* toBeMerged */).getType());
 
     // Process integer input 1. This will initialize the accumulator to the value of the input,
@@ -2040,17 +2016,18 @@ TEST(Accumulators, AccumulatorExpMovingAvg) {
 /* ------------------------- AccumulatorPercentile ---------------------------------------------- */
 
 // Runs AccumulatorPercentile tests with the various different percentile algorithms.
-void accumulatorPercentileHelper(PercentileMethodEnum method,
-                                 const std::vector<double>& percentiles,
-                                 const std::string& mergeFalseExpected,
-                                 boost::optional<int> maxMemoryUsageBytes = 1024) {
+void accumulatorPercentileHelper(
+    PercentileMethodEnum method,
+    const std::vector<double>& percentiles,
+    const std::string& mergeFalseExpected,
+    boost::optional<MemoryUsageLimit> maxMemoryUsageBytes = MemoryUsageLimit{1024}) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx =
         make_intrusive<ExpressionContextForTest>();
     AccumulatorPercentile acc{expCtx.get(), percentiles, method, maxMemoryUsageBytes};
 
     // Processing a non-numeric input when not merging does not accumulate anything, so the current
     // value should be an array of [null, null].
-    acc.processInternal(Value("string"_sd), false /* merging */);
+    acc.processInternal(Value("string"sv), false /* merging */);
     ASSERT_EQ(BSONType::array, acc.getValue(false /* toBeMerged */).getType());
     std::ostringstream oss;
     oss << acc.getValue(false /* toBeMerged */);  // final value
@@ -2097,22 +2074,28 @@ TEST(Accumulators, AccumulatorPercentileContinuous) {
 // Tests the AccumulatorPercentile class when it runs out of memory using
 // PercentileMethodEnum::kApproximate
 TEST(Accumulators, AccumulatorPercentileOOMApproximate) {
-    accumulatorPercentileHelper(
-        PercentileMethodEnum::kApproximate, std::vector<double>{0.5, 0.8}, "[0.5, 0.8]", 1);
+    accumulatorPercentileHelper(PercentileMethodEnum::kApproximate,
+                                std::vector<double>{0.5, 0.8},
+                                "[0.5, 0.8]",
+                                MemoryUsageLimit{1});
 }
 
 // Tests the AccumulatorPercentile class when it runs out of memory using
 // PercentileMethodEnum::kDiscrete
 TEST(Accumulators, AccumulatorPercentileOOMDiscrete) {
-    accumulatorPercentileHelper(
-        PercentileMethodEnum::kDiscrete, std::vector<double>{0.5, 0.8}, "[0.5, 0.8]", 1);
+    accumulatorPercentileHelper(PercentileMethodEnum::kDiscrete,
+                                std::vector<double>{0.5, 0.8},
+                                "[0.5, 0.8]",
+                                MemoryUsageLimit{1});
 }
 
 // Tests the AccumulatorPercentile class when it runs out of memory using
 // PercentileMethodEnum::kContinuous
 TEST(Accumulators, AccumulatorPercentileOOMContinuous) {
-    accumulatorPercentileHelper(
-        PercentileMethodEnum::kContinuous, std::vector<double>{0.5, 0.8}, "[0.55, 0.82]", 1);
+    accumulatorPercentileHelper(PercentileMethodEnum::kContinuous,
+                                std::vector<double>{0.5, 0.8},
+                                "[0.55, 0.82]",
+                                MemoryUsageLimit{1});
 }
 
 /* ------------------------- Other accumulators ------------------------------------------------- */
@@ -2121,7 +2104,8 @@ Value parseAndSerializeAccumExpr(
     const BSONObj& obj,
     std::function<boost::intrusive_ptr<Expression>(
         ExpressionContext* expCtx, BSONElement, const VariablesParseState&)> func) {
-    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions options =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = make_intrusive<ExpressionContextForTest>();
     auto expr = func(expCtx.get(), obj.firstElement(), expCtx->variablesParseState);
     return expr->serialize(options);
@@ -2131,7 +2115,8 @@ Document parseAndSerializeAccum(
     const BSONElement elem,
     std::function<AccumulationExpression(
         ExpressionContext* const expCtx, BSONElement, VariablesParseState)> func) {
-    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+    query_shape::SerializationOptions options =
+        query_shape::SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = make_intrusive<ExpressionContextForTest>();
     VariablesParseState vps = expCtx->variablesParseState;
 
@@ -2144,7 +2129,8 @@ Document parseAndSerializeAccumRepresentative(
     const BSONElement elem,
     std::function<AccumulationExpression(
         ExpressionContext* const expCtx, BSONElement, VariablesParseState)> func) {
-    SerializationOptions options = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    query_shape::SerializationOptions options =
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     auto expCtx = make_intrusive<ExpressionContextForTest>();
     VariablesParseState vps = expCtx->variablesParseState;
 
@@ -2394,10 +2380,10 @@ TEST(AccumulatorMergeObjects, MergingDisjointObjectsShouldIncludeAllFields) {
 
 TEST(AccumulatorMergeObjects, MergingIntersectingObjectsShouldOverrideInOrderReceived) {
     auto expCtx = ExpressionContextForTest{};
-    auto first = Value(Document({{"a", "oldValue"_sd}, {"b", 0}, {"c", 1}}));
-    auto second = Value(Document({{"a", "newValue"_sd}}));
+    auto first = Value(Document({{"a", "oldValue"sv}, {"b", 0}, {"c", 1}}));
+    auto second = Value(Document({{"a", "newValue"sv}}));
     assertExpectedResults2<AccumulatorMergeObjects>(
-        &expCtx, {{{first, second}, Value(Document({{"a", "newValue"_sd}, {"b", 0}, {"c", 1}}))}});
+        &expCtx, {{{first, second}, Value(Document({{"a", "newValue"sv}, {"b", 0}, {"c", 1}}))}});
 }
 
 TEST(AccumulatorMergeObjects, MergingIntersectingEmbeddedObjectsShouldOverrideInOrderReceived) {
@@ -2452,10 +2438,10 @@ TEST(ExpressionMergeObjects, MergingDisjointObjectsShouldIncludeAllFields) {
 }
 
 TEST(ExpressionMergeObjects, MergingIntersectingObjectsShouldOverrideInOrderReceived) {
-    auto first = Document({{"a", "oldValue"_sd}, {"b", 0}, {"c", 1}});
-    auto second = Document({{"a", "newValue"_sd}});
+    auto first = Document({{"a", "oldValue"sv}, {"b", 0}, {"c", 1}});
+    auto second = Document({{"a", "newValue"sv}});
     assertExpectedResults3(
-        "$mergeObjects", {{{first, second}, Document({{"a", "newValue"_sd}, {"b", 0}, {"c", 1}})}});
+        "$mergeObjects", {{{first, second}, Document({{"a", "newValue"sv}, {"b", 0}, {"c", 1}})}});
 }
 
 TEST(ExpressionMergeObjects, MergingIntersectingEmbeddedObjectsShouldOverrideInOrderReceived) {
@@ -2488,16 +2474,16 @@ TEST(ExpressionMergeObjects, MergingArrayWithDocumentShouldThrowException) {
 }
 
 TEST(ExpressionMergeObjects, MergingArrayContainingInvalidTypesShouldThrowException) {
-    std::vector<Value> first = {Value(Document({{"validType", 1}})), Value("invalidType"_sd)};
+    std::vector<Value> first = {Value(Document({{"validType", 1}})), Value("invalidType"sv)};
     ASSERT_THROWS_CODE(evaluateExpression("$mergeObjects", {first}), AssertionException, 40400);
 }
 
 TEST(ExpressionMergeObjects, MergingNonObjectsShouldThrowException) {
     ASSERT_THROWS_CODE(
-        evaluateExpression("$mergeObjects", {"invalidArg"_sd}), AssertionException, 40400);
+        evaluateExpression("$mergeObjects", {"invalidArg"sv}), AssertionException, 40400);
 
     ASSERT_THROWS_CODE(
-        evaluateExpression("$mergeObjects", {"invalidArg"_sd, Document({{"validArg", 1}})}),
+        evaluateExpression("$mergeObjects", {"invalidArg"sv, Document({{"validArg", 1}})}),
         AssertionException,
         40400);
 
@@ -2510,12 +2496,12 @@ TEST(ExpressionMergeObjects, MergingNonObjectsShouldThrowException) {
 
 TEST(AccumulatorConcatArrays, ConcatArraysRespectsMaxMemoryContraint) {
     auto expCtx = ExpressionContextForTest{};
-    const int maxMemoryBytes = 20ull;
+    const MemoryUsageLimit maxMemoryBytes{20};
     auto concatArrays = AccumulatorConcatArrays(&expCtx, maxMemoryBytes);
     ASSERT_THROWS_CODE(concatArrays.process(
-                           Value(std::vector<Value>{Value("A somewhat long string"_sd),
-                                                    Value("Another somewhat long string"_sd),
-                                                    Value("Yet another somewhat long string!"_sd)}),
+                           Value(std::vector<Value>{Value("A somewhat long string"sv),
+                                                    Value("Another somewhat long string"sv),
+                                                    Value("Yet another somewhat long string!"sv)}),
                            false),
                        AssertionException,
                        ErrorCodes::ExceededMemoryLimit);
@@ -2526,7 +2512,7 @@ TEST(AccumulatorConcatArrays, ConcatArraysRefusesNonArrayValue) {
     auto concatArrays = AccumulatorConcatArrays(&expCtx);
 
     // $concatArrays should error if it encounters a non-array
-    const std::vector<Value> nonArrayValues = {Value("A string"_sd), Value(1), Value(BSONNULL)};
+    const std::vector<Value> nonArrayValues = {Value("A string"sv), Value(1), Value(BSONNULL)};
     for (auto& val : nonArrayValues) {
         ASSERT_THROWS_CODE(
             concatArrays.process(val, false), AssertionException, ErrorCodes::TypeMismatch);
@@ -2582,16 +2568,16 @@ TEST(AccumulatorConcatArrays, DoubleNestedArraysShouldReturnNestedArrays) {
 
     std::vector<Value> values = {
         Value(std::vector<Value>({
-            Value(std::vector<Value>({Value("In a double nested array"_sd)})),
-            Value(std::vector<Value>({Value("Also in a double nested array"_sd)})),
+            Value(std::vector<Value>({Value("In a double nested array"sv)})),
+            Value(std::vector<Value>({Value("Also in a double nested array"sv)})),
         })),
-        Value(std::vector<Value>({Value("Only singly nested"_sd)})),
+        Value(std::vector<Value>({Value("Only singly nested"sv)})),
         Value(std::vector<Value>({Value(std::vector<Value>({Value(1), Value(2)}))}))};
 
     std::vector<Value> expected = {
-        Value(std::vector<Value>({Value("In a double nested array"_sd)})),
-        Value(std::vector<Value>({Value("Also in a double nested array"_sd)})),
-        Value("Only singly nested"_sd),
+        Value(std::vector<Value>({Value("In a double nested array"sv)})),
+        Value(std::vector<Value>({Value("Also in a double nested array"sv)})),
+        Value("Only singly nested"sv),
         Value(std::vector<Value>({Value(1), Value(2)}))};
 
     assertExpectedResults2<AccumulatorConcatArrays>(&expCtx, {{values, Value{expected}}});
@@ -2630,12 +2616,12 @@ static void assertSetUnionResults(
 
 TEST(AccumulatorSetUnion, SetUnionRespectsMaxMemoryContraint) {
     auto expCtx = ExpressionContextForTest{};
-    const int maxMemoryBytes = 20ull;
+    const MemoryUsageLimit maxMemoryBytes{20};
     auto setUnion = AccumulatorSetUnion(&expCtx, maxMemoryBytes);
     ASSERT_THROWS_CODE(
-        setUnion.process(Value(std::vector<Value>{Value("A somewhat long string"_sd),
-                                                  Value("Another somwhat long string"_sd),
-                                                  Value("Yet another somewhat long string!"_sd)}),
+        setUnion.process(Value(std::vector<Value>{Value("A somewhat long string"sv),
+                                                  Value("Another somwhat long string"sv),
+                                                  Value("Yet another somewhat long string!"sv)}),
                          false),
         AssertionException,
         ErrorCodes::ExceededMemoryLimit);
@@ -2646,7 +2632,7 @@ TEST(AccumulatorSetUnion, SetUnionRefusesNonArrayValue) {
     auto setUnion = AccumulatorSetUnion(&expCtx);
 
     // $setUnion should error if it encounters a non-array value.
-    const std::vector<Value> nonArrayValues = {Value("A string"_sd), Value(1), Value(BSONNULL)};
+    const std::vector<Value> nonArrayValues = {Value("A string"sv), Value(1), Value(BSONNULL)};
     for (auto& val : nonArrayValues) {
         ASSERT_THROWS_CODE(
             setUnion.process(val, false), AssertionException, ErrorCodes::TypeMismatch);
@@ -2660,9 +2646,9 @@ TEST(AccumulatorSetUnion, SetUnionRespectsCollation) {
     expCtx.setCollator(std::move(collator));
 
     std::vector<Value> values = {
-        Value(std::vector<Value>({Value("a"_sd), Value("b"_sd), Value("c"_sd)})),
-        Value(std::vector<Value>({Value("d"_sd)}))};
-    std::vector<Value> expected = {Value("a"_sd)};
+        Value(std::vector<Value>({Value("a"sv), Value("b"sv), Value("c"sv)})),
+        Value(std::vector<Value>({Value("d"sv)}))};
+    std::vector<Value> expected = {Value("a"sv)};
 
     assertSetUnionResults(&expCtx, {{values, Value(expected)}});
 }
@@ -2738,17 +2724,17 @@ TEST(AccumulatorSetUnion, DoubleNestedArraysShouldReturnNestedArrays) {
 
     std::vector<Value> values = {
         Value(std::vector<Value>({
-            Value(std::vector<Value>({Value("In a double nested array"_sd)})),
-            Value(std::vector<Value>({Value("Also in a double nested array"_sd)})),
+            Value(std::vector<Value>({Value("In a double nested array"sv)})),
+            Value(std::vector<Value>({Value("Also in a double nested array"sv)})),
         })),
-        Value(std::vector<Value>({Value("Only singly nested"_sd)})),
+        Value(std::vector<Value>({Value("Only singly nested"sv)})),
         Value(std::vector<Value>({Value(std::vector<Value>({Value(1), Value(2)}))}))};
 
     std::vector<Value> expected = {
-        Value("Only singly nested"_sd),
+        Value("Only singly nested"sv),
         Value(std::vector<Value>({Value(1), Value(2)})),
-        Value(std::vector<Value>({Value("Also in a double nested array"_sd)})),
-        Value(std::vector<Value>({Value("In a double nested array"_sd)})),
+        Value(std::vector<Value>({Value("Also in a double nested array"sv)})),
+        Value(std::vector<Value>({Value("In a double nested array"sv)})),
     };
 
     assertSetUnionResults(&expCtx, {{values, Value{expected}}});
@@ -2757,7 +2743,7 @@ TEST(AccumulatorSetUnion, DoubleNestedArraysShouldReturnNestedArrays) {
 TEST(ExpressionFromAccumulators, Avg) {
     assertExpectedResults3("$avg",
                            {// $avg ignores non-numeric inputs.
-                            {{Value("string"_sd), Value(BSONNULL), Value(), Value(3)}, Value(3.0)},
+                            {{Value("string"sv), Value(BSONNULL), Value(), Value(3)}, Value(3.0)},
                             // $avg always returns a double.
                             {{Value(10LL), Value(20LL)}, Value(15.0)},
                             // $avg returns null when no arguments are provided.
@@ -2802,8 +2788,8 @@ TEST(ExpressionFromAccumulators, FirstNLastN) {
 TEST(ExpressionFromAccumulators, Max) {
     assertExpectedResults3("$max",
                            {// $max treats non-numeric inputs as valid arguments.
-                            {{Value(1), Value(BSONNULL), Value(), Value("a"_sd)}, Value("a"_sd)},
-                            {{Value("a"_sd), Value("b"_sd)}, Value("b"_sd)},
+                            {{Value(1), Value(BSONNULL), Value(), Value("a"sv)}, Value("a"sv)},
+                            {{Value("a"sv), Value("b"sv)}, Value("b"sv)},
                             // $max always preserves the type of the result.
                             {{Value(10LL), Value(0.0), Value(5)}, Value(10LL)},
                             // $max returns null when no arguments are provided.
@@ -2813,9 +2799,9 @@ TEST(ExpressionFromAccumulators, Max) {
 TEST(ExpressionFromAccumulators, Min) {
     assertExpectedResults3("$min",
                            {// $min treats non-numeric inputs as valid arguments.
-                            {{Value("string"_sd)}, Value("string"_sd)},
-                            {{Value(1), Value(BSONNULL), Value(), Value("a"_sd)}, Value(1)},
-                            {{Value("a"_sd), Value("b"_sd)}, Value("a"_sd)},
+                            {{Value("string"sv)}, Value("string"sv)},
+                            {{Value(1), Value(BSONNULL), Value(), Value("a"sv)}, Value(1)},
+                            {{Value("a"sv), Value("b"sv)}, Value("a"sv)},
                             // $min always preserves the type of the result.
                             {{Value(0LL), Value(20.0), Value(10)}, Value(0LL)},
                             // $min returns null when no arguments are provided.
@@ -2858,7 +2844,7 @@ TEST(ExpressionFromAccumulators, Sum) {
     assertExpectedResults3(
         "$sum",
         {// $sum ignores non-numeric inputs.
-         {{Value("string"_sd), Value(BSONNULL), Value(), Value(3)}, Value(3)},
+         {{Value("string"sv), Value(BSONNULL), Value(), Value(3)}, Value(3)},
          // If any argument is a double, $sum returns a double
          {{Value(10LL), Value(10.0)}, Value(20.0)},
          // If no arguments are doubles and an argument is a long, $sum returns a long
@@ -2870,7 +2856,7 @@ TEST(ExpressionFromAccumulators, Sum) {
 TEST(ExpressionFromAccumulators, StdDevPop) {
     assertExpectedResults3("$stdDevPop",
                            {// $stdDevPop ignores non-numeric inputs.
-                            {{Value("string"_sd), Value(BSONNULL), Value(), Value(3)}, Value(0.0)},
+                            {{Value("string"sv), Value(BSONNULL), Value(), Value(3)}, Value(0.0)},
                             // $stdDevPop always returns a double.
                             {{Value(1LL), Value(3LL)}, Value(1.0)},
                             // $stdDevPop returns null when no arguments are provided.
@@ -2881,7 +2867,7 @@ TEST(ExpressionFromAccumulators, StdDevSamp) {
     assertExpectedResults3(
         "$stdDevSamp",
         {// $stdDevSamp ignores non-numeric inputs.
-         {{Value("string"_sd), Value(BSONNULL), Value(), Value(3)}, Value(BSONNULL)},
+         {{Value("string"sv), Value(BSONNULL), Value(), Value(3)}, Value(BSONNULL)},
          // $stdDevSamp always returns a double.
          {{Value(1LL), Value(2LL), Value(3LL)}, Value(1.0)},
          // $stdDevSamp returns null when no arguments are provided.

@@ -3,6 +3,12 @@ filters:
   - "*":
     approvers:
       - 10gen/query
+  - "collmod_upgrade_to_constraint_sharded.js":
+    approvers:
+      - 10gen/query-execution
+  - "collmod_constraint_scan_with_chunk_migration.js":
+    approvers:
+      - 10gen/query-execution
   - "bulk_write*":
     approvers:
       - 10gen/query-execution-router
@@ -21,7 +27,13 @@ filters:
   - "hidden_index.js":
     approvers:
       - 10gen/query-optimization
+  - "internal_search_id_lookup*.js":
+    approvers:
+      - 10gen/query-integration-search
   - "sharded_profile.js":
+    approvers:
+      - 10gen/query-integration-observability
+  - "count_explain_raw_data_query_shape.js":
     approvers:
       - 10gen/query-integration-observability
   - "authwhere.js":
@@ -50,4 +62,11 @@ filters:
       - 10gen/query-integration-observability
   - "release_memory*":
     approvers:
+      - 10gen/query-execution
+  - "opcounters_aggregate.js":
+    approvers:
+      - 10gen/query-integration-observability
+  - "ifr_*.js":
+    approvers:
+      - 10gen/query-integration-features
       - 10gen/query-execution

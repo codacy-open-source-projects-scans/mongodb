@@ -5,8 +5,12 @@
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {describe, beforeEach, afterEach, it} from "jstests/libs/mochalite.js";
-import {stopReplicationOnSecondaries, restartReplicationOnSecondaries} from "jstests/libs/write_concern_util.js";
+import {
+    stopReplicationOnSecondaries,
+    restartReplicationOnSecondaries,
+} from "jstests/libs/write_concern_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 describe("Read/write concern defaults directly against shard servers", function () {
@@ -26,7 +30,31 @@ describe("Read/write concern defaults directly against shard servers", function 
         this.dbName = "test";
         this.collName = "foo";
         this.counter = 1;
-        assert.commandWorked(this.replSet.getPrimary().getDB(this.dbName).createCollection(this.collName));
+        assert.commandWorked(
+            this.replSet.getPrimary().getDB(this.dbName).createCollection(this.collName),
+        );
+
+        // Fetch the sharding metadata so that the write doesn't have to do a refresh.
+        this.ensureFilteringMetadataIsKnown = function () {
+            if (
+                FeatureFlagUtil.isPresentAndEnabled(
+                    this.replSet.getPrimary(),
+                    "AuthoritativeShardsCRUD",
+                )
+            ) {
+                (this.mongos ?? this.cluster.s)
+                    .getDB(this.dbName)
+                    .getCollection(this.collName)
+                    .find()
+                    .toArray();
+            } else {
+                assert.commandWorked(
+                    this.replSet.getPrimary().adminCommand({
+                        _flushRoutingTableCacheUpdates: this.dbName + "." + this.collName,
+                    }),
+                );
+            }
+        };
 
         // This function expects the implicit defaults to be:
         //   defaultWriteConcern: {w: "majority", wtimeout: 0}
@@ -40,11 +68,17 @@ describe("Read/write concern defaults directly against shard servers", function 
                 this.replSet
                     .getPrimary()
                     .getDB(this.dbName)
-                    .runCommand({insert: this.collName, documents: [{x: this.counter}], maxTimeMS: 500}),
+                    .runCommand({
+                        insert: this.collName,
+                        documents: [{x: this.counter}],
+                        maxTimeMS: 500,
+                    }),
                 ErrorCodes.MaxTimeMSExpired,
             );
 
-            jsTest.log.info("Do a read, it should return the document anyways since the default is local");
+            jsTest.log.info(
+                "Do a read, it should return the document anyways since the default is local",
+            );
             let docFound = this.replSet
                 .getPrimary()
                 .getDB(this.dbName)
@@ -77,7 +111,9 @@ describe("Read/write concern defaults directly against shard servers", function 
                 ErrorCodes.WriteConcernTimeout,
             );
 
-            jsTest.log.info("Do a read, it should not return the document since the read concern is majority");
+            jsTest.log.info(
+                "Do a read, it should not return the document since the read concern is majority",
+            );
             let docFound = this.replSet
                 .getPrimary()
                 .getDB(this.dbName)
@@ -116,10 +152,7 @@ describe("Read/write concern defaults directly against shard servers", function 
         jsTest.log.info("Check implicit defaults after being added to the cluster");
         this.cluster = new ShardingTest({shards: 0});
         assert.commandWorked(this.cluster.s.adminCommand({addShard: this.replSet.getURL()}));
-        // Fetch the sharding metadata so that the write doesn't have to do a refresh.
-        assert.commandWorked(
-            this.replSet.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: this.dbName + "." + this.collName}),
-        );
+        this.ensureFilteringMetadataIsKnown();
         this.checkImplicitDefaults();
     });
 
@@ -135,10 +168,7 @@ describe("Read/write concern defaults directly against shard servers", function 
         jsTest.log.info("Check implicit defaults after being added to the cluster");
         this.mongos = MongoRunner.runMongos({configdb: this.replSet.getURL()});
         assert.commandWorked(this.mongos.adminCommand({transitionFromDedicatedConfigServer: 1}));
-        // Fetch the sharding metadata so that the write doesn't have to do a refresh.
-        assert.commandWorked(
-            this.replSet.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: this.dbName + "." + this.collName}),
-        );
+        this.ensureFilteringMetadataIsKnown();
         this.checkImplicitDefaults();
     });
 
@@ -168,10 +198,7 @@ describe("Read/write concern defaults directly against shard servers", function 
 
         jsTest.log.info("Check user specified defaults after being added to the cluster");
         assert.commandWorked(this.cluster.s.adminCommand({addShard: this.replSet.getURL()}));
-        // Fetch the sharding metadata so that the write doesn't have to do a refresh.
-        assert.commandWorked(
-            this.replSet.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: this.dbName + "." + this.collName}),
-        );
+        this.ensureFilteringMetadataIsKnown();
         this.checkUserSpecifiedDefaults();
     });
 
@@ -198,10 +225,7 @@ describe("Read/write concern defaults directly against shard servers", function 
         jsTest.log.info("Check user specified defaults after being added to the cluster");
         this.mongos = MongoRunner.runMongos({configdb: this.replSet.getURL()});
         assert.commandWorked(this.mongos.adminCommand({transitionFromDedicatedConfigServer: 1}));
-        // Fetch the sharding metadata so that the write doesn't have to do a refresh.
-        assert.commandWorked(
-            this.replSet.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: this.dbName + "." + this.collName}),
-        );
+        this.ensureFilteringMetadataIsKnown();
         this.checkUserSpecifiedDefaults();
     });
 
@@ -212,7 +236,7 @@ describe("Read/write concern defaults directly against shard servers", function 
         this.replSet.startSet({"shardsvr": ""}, true);
         this.replSet.awaitReplication();
         assert.commandWorked(this.cluster.s.adminCommand({addShard: this.replSet.getURL()}));
-        this.replSet.getPrimary().adminCommand({_flushRoutingTableCacheUpdates: this.dbName + "." + this.collName});
+        this.ensureFilteringMetadataIsKnown();
 
         jsTest.log.info("Change the defaults on the config server");
         assert.commandWorked(
@@ -224,7 +248,9 @@ describe("Read/write concern defaults directly against shard servers", function 
             }),
         );
 
-        jsTest.log.info("Check that the defaults are still the implicit ones via direct connection");
+        jsTest.log.info(
+            "Check that the defaults are still the implicit ones via direct connection",
+        );
         this.checkImplicitDefaults();
 
         jsTest.log.info("Verify that the defaults cannot be modified on the shard");

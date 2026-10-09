@@ -2,13 +2,14 @@
 // able to be covered when they aren't on the shard key since the document needs to be fetched in
 // order to apply the SHARDING_FILTER stage.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 // ]
 
 // Simple covered index query test with sort
 
 // Include helpers for analyzing explain output.
-import {isIndexOnly} from "jstests/libs/query/analyze_plan.js";
+import {getWinningPlanFromExplain, isIndexOnly} from "jstests/libs/query/analyze_plan.js";
 
 let coll = db.getCollection("covered_sort_1");
 coll.drop();
@@ -28,13 +29,27 @@ coll.createIndex({foo: 1});
 
 // Test no query and sort ascending
 var plan = coll.find({}, {foo: 1, _id: 0}).sort({foo: 1}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(db, plan.queryPlanner.winningPlan), "sort.1.1 - indexOnly should be true on covered query");
-assert.eq(0, plan.executionStats.totalDocsExamined, "sort.1.1 - docs examined should be 0 for covered query");
+assert(
+    isIndexOnly(db, getWinningPlanFromExplain(plan)),
+    "sort.1.1 - indexOnly should be true on covered query",
+);
+assert.eq(
+    0,
+    plan.executionStats.totalDocsExamined,
+    "sort.1.1 - docs examined should be 0 for covered query",
+);
 
 // Test no query and sort descending
 var plan = coll.find({}, {foo: 1, _id: 0}).sort({foo: -1}).hint({foo: 1}).explain("executionStats");
-assert(isIndexOnly(db, plan.queryPlanner.winningPlan), "sort.1.2 - indexOnly should be true on covered query");
-assert.eq(0, plan.executionStats.totalDocsExamined, "sort.1.2 - docs examined should be 0 for covered query");
+assert(
+    isIndexOnly(db, getWinningPlanFromExplain(plan)),
+    "sort.1.2 - indexOnly should be true on covered query",
+);
+assert.eq(
+    0,
+    plan.executionStats.totalDocsExamined,
+    "sort.1.2 - docs examined should be 0 for covered query",
+);
 
 // Test range query with sort
 var plan = coll
@@ -42,7 +57,14 @@ var plan = coll
     .sort({foo: -1})
     .hint({foo: 1})
     .explain("executionStats");
-assert(isIndexOnly(db, plan.queryPlanner.winningPlan), "sort.1.3 - indexOnly should be true on covered query");
-assert.eq(0, plan.executionStats.totalDocsExamined, "sort.1.3 - docs examined should be 0 for covered query");
+assert(
+    isIndexOnly(db, getWinningPlanFromExplain(plan)),
+    "sort.1.3 - indexOnly should be true on covered query",
+);
+assert.eq(
+    0,
+    plan.executionStats.totalDocsExamined,
+    "sort.1.3 - docs examined should be 0 for covered query",
+);
 
 print("all tests pass");

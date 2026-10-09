@@ -9,10 +9,23 @@ import {ShardedIndexUtil} from "jstests/sharding/libs/sharded_index_util.js";
 export var ClusterIndexConsistencyChecker = (function () {
     function run(mongos, keyFile) {
         /**
-         * Returns an array of config.collections docs for all collections.
+         * Returns an array of config.collections docs for all collections except temporary
+         * resharding ones.
+         *
+         * TODO(SERVER-134200): The system.resharding.* can be unaccessible during resharding
+         * operation, in the window between commit of temporary collection placement metadata
+         * to config and recipient shard fetching the new placement metadata from global catalog.
+         * This is a known limitation that can lead to transient errors and create noise.
+         * Therefore until the flaw of resharding pipeline is fixed, the validation is skipped
+         * for temporary resharding collections.
+         *
          */
         function getCollDocs() {
-            return mongos.getDB("config").collections.find().readConcern("local").toArray();
+            return mongos
+                .getDB("config")
+                .collections.find({_id: {$not: /\.system\.resharding\./}})
+                .readConcern("local")
+                .toArray();
         }
 
         /**
@@ -29,8 +42,20 @@ export var ClusterIndexConsistencyChecker = (function () {
                         // ShardRegistry reloads after choosing which shards to target and a chosen
                         // shard is no longer in the cluster. This error should be transient, so it
                         // can be retried on.
-                        if (e.code === ErrorCodes.ShardNotFound) {
-                            jsTest.log.info("Retrying $indexStats aggregation on ShardNotFound error", {error: e});
+                        //
+                        // Getting the indexes can also fail with HostUnreachable if the mongos
+                        // routes to a node that stepped down since the mongos last polled its SDAM
+                        // state (e.g. after replSetStepUp). The mongos intentionally rewrites
+                        // NotPrimary shard errors as HostUnreachable so that the client retries
+                        // without triggering an SDAM state change. Once the mongos refreshes its
+                        // topology the retry will succeed.
+                        if (
+                            e.code === ErrorCodes.ShardNotFound ||
+                            e.code === ErrorCodes.HostUnreachable
+                        ) {
+                            jsTest.log.info("Retrying $indexStats aggregation on transient error", {
+                                error: e,
+                            });
                             continue;
                         }
                         throw e;
@@ -41,7 +66,9 @@ export var ClusterIndexConsistencyChecker = (function () {
 
         mongos.fullOptions = mongos.fullOptions || {};
         const requiresAuth = keyFile || mongos.fullOptions.clusterAuthMode === "x509";
-        const collDocs = requiresAuth ? authutil.asCluster(mongos, keyFile, getCollDocs) : getCollDocs();
+        const collDocs = requiresAuth
+            ? authutil.asCluster(mongos, keyFile, getCollDocs)
+            : getCollDocs();
         for (const collDoc of collDocs) {
             const ns = collDoc._id;
             const getIndexDocsForNs = makeGetIndexDocsFunc(ns);
@@ -56,7 +83,8 @@ export var ClusterIndexConsistencyChecker = (function () {
                 continue;
             }
 
-            const inconsistentIndexes = ShardedIndexUtil.findInconsistentIndexesAcrossShards(indexDocs);
+            const inconsistentIndexes =
+                ShardedIndexUtil.findInconsistentIndexesAcrossShards(indexDocs);
 
             for (const shard in inconsistentIndexes) {
                 const shardInconsistentIndexes = inconsistentIndexes[shard];

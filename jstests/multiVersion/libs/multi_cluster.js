@@ -56,7 +56,9 @@ ShardingTest.prototype.upgradeCluster = function (binVersion, upgradeOptions, no
         }
     } else if (upgradeOptions.upgradeOneConfigNode >= 0) {
         // Upgrade one specific config server node by index
-        jsTest.log.info(`Upgrading config server node index: ${upgradeOptions.upgradeOneConfigNode}`);
+        jsTest.log.info(
+            `Upgrading config server node index: ${upgradeOptions.upgradeOneConfigNode}`,
+        );
         const nodeIndex = upgradeOptions.upgradeOneConfigNode;
         assert(nodeIndex < this.configRS.nodes.length);
         let configNode = this.configRS.nodes[nodeIndex];
@@ -72,10 +74,15 @@ ShardingTest.prototype.upgradeCluster = function (binVersion, upgradeOptions, no
         });
         this.configRS.awaitSecondaryNodes(this.configRS.timeoutMS, [configNode]);
 
-        jsTest.log.info(`Upgraded config server node index: ${upgradeOptions.upgradeOneConfigNode}, ${configNode}`);
+        jsTest.log.info(
+            `Upgraded config server node index: ${upgradeOptions.upgradeOneConfigNode}, ${configNode}`,
+        );
 
         // Update the reference in the configRS nodes array and shortcuts
-        this["config" + nodeIndex] = this["c" + nodeIndex] = this.configRS.nodes[nodeIndex] = configNode;
+        this["config" + nodeIndex] =
+            this["c" + nodeIndex] =
+            this.configRS.nodes[nodeIndex] =
+                configNode;
 
         this.configRS.awaitNodesAgreeOnPrimary();
         jsTest.log.info(`Config node ${nodeIndex} successfully restarted and rejoined`);
@@ -128,7 +135,11 @@ ShardingTest.prototype.upgradeCluster = function (binVersion, upgradeOptions, no
     }
 };
 
-ShardingTest.prototype.downgradeCluster = function (binVersion, downgradeOptions, nodeOptions = {}) {
+ShardingTest.prototype.downgradeCluster = function (
+    binVersion,
+    downgradeOptions,
+    nodeOptions = {},
+) {
     downgradeOptions = downgradeOptions || {};
     if (downgradeOptions.downgradeShards == undefined) downgradeOptions.downgradeShards = true;
     if (downgradeOptions.downgradeOneShard == undefined) downgradeOptions.downgradeOneShard = false;
@@ -216,10 +227,15 @@ ShardingTest.prototype.downgradeCluster = function (binVersion, downgradeOptions
         });
         this.configRS.awaitSecondaryNodes(this.configRS.timeoutMS, [configNode]);
 
-        jsTest.log.info(`Downgraded config server node index: ${downgradeOptions.downgradeOneConfig}, ${configNode}`);
+        jsTest.log.info(
+            `Downgraded config server node index: ${downgradeOptions.downgradeOneConfig}, ${configNode}`,
+        );
 
         // Update the reference in the configRS nodes array and shortcuts
-        this["config" + nodeIndex] = this["c" + nodeIndex] = this.configRS.nodes[nodeIndex] = configNode;
+        this["config" + nodeIndex] =
+            this["c" + nodeIndex] =
+            this.configRS.nodes[nodeIndex] =
+                configNode;
 
         this.configRS.awaitNodesAgreeOnPrimary();
         jsTest.log.info(`Config node ${nodeIndex} successfully restarted and rejoined`);
@@ -233,14 +249,20 @@ ShardingTest.prototype.downgradeCluster = function (binVersion, downgradeOptions
 ShardingTest.prototype.waitUntilStable = function () {
     // Wait for the config server and shards to become available.
     this.configRS.awaitSecondaryNodes();
+    const configPrimary = this.configRS.getPrimary();
     let shardPrimaries = [];
     for (let rs of this._rs) {
         rs.test.awaitSecondaryNodes();
         shardPrimaries.push(rs.test.getPrimary());
     }
-    // Wait for the ReplicaSetMonitor on mongoS and each shard to reflect the state of all shards.
+    // Wait for the ReplicaSetMonitor on mongoS and each shard to reflect the state of all shards
+    // and of the config server. In config shard mode the config server is also shard 0, so it is
+    // already in 'shardPrimaries' and must not be listed twice.
+    const primariesToAwait = shardPrimaries.some((p) => p.host === configPrimary.host)
+        ? shardPrimaries
+        : [...shardPrimaries, configPrimary];
     for (let client of [...this._mongos, ...shardPrimaries]) {
-        awaitRSClientHosts(client, shardPrimaries, {ok: true, ismaster: true});
+        awaitRSClientHosts(client, primariesToAwait, {ok: true, ismaster: true});
     }
 };
 

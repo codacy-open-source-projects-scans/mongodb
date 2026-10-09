@@ -1,7 +1,9 @@
 /**
  * Tests that an aggregate with a $changeStream stage reports the latest postBatchResumeToken. This
  * test verifies postBatchResumeToken semantics that are common to sharded and unsharded streams.
- * @tags: [uses_transactions]
+ * @tags: [
+ *   uses_transactions,
+ * ]
  */
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
@@ -152,7 +154,10 @@ assert.gte(bsonWoCompare(getMorePBRT, resumeTokenFromSecondDoc), 0);
 // Sharded collection passthroughs use prepared transactions, which require majority read concern.
 // If the collection is sharded and majority read concern is disabled, skip the transaction tests.
 const rcCmdRes = testCollection.runCommand("find", {readConcern: {level: "majority"}});
-if (FixtureHelpers.isSharded(testCollection) && rcCmdRes.code === ErrorCodes.ReadConcernMajorityNotEnabled) {
+if (
+    FixtureHelpers.isSharded(testCollection) &&
+    rcCmdRes.code === ErrorCodes.ReadConcernMajorityNotEnabled
+) {
     jsTestLog("Skipping transaction tests since majority read concern is disabled.");
     quit();
 }
@@ -184,7 +189,10 @@ withRetryOnTransientTxnError(() => {
 previousGetMorePBRT = getMorePBRT;
 assert.soon(() => {
     // Start a new stream from the most recent resume token we retrieved.
-    csCursor = testCollection.watch([], {resumeAfter: previousGetMorePBRT, cursor: {batchSize: batchSize}});
+    csCursor = testCollection.watch([], {
+        resumeAfter: previousGetMorePBRT,
+        cursor: {batchSize: batchSize},
+    });
     // Wait until we see the first results from the stream.
     assert.soon(() => csCursor.hasNext());
     // There should be two distinct events in the batch.

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/replication_recovery.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -75,7 +48,7 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
@@ -158,6 +131,7 @@ public:
     void setInitialDataTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) override {
         std::lock_guard<std::mutex> lock(_mutex);
         _initialDataTimestamp = snapshotName;
+        _initialDataTimestampHistory.push_back(snapshotName);
     }
 
     Timestamp getInitialDataTimestamp(ServiceContext* serviceCtx) const override {
@@ -165,10 +139,16 @@ public:
         return _initialDataTimestamp;
     };
 
+    std::vector<Timestamp> getInitialDataTimestampHistory() const {
+        std::lock_guard<std::mutex> lock(_mutex);
+        return _initialDataTimestampHistory;
+    }
+
 
 private:
     mutable std::mutex _mutex;
     Timestamp _initialDataTimestamp = Timestamp::min();
+    std::vector<Timestamp> _initialDataTimestampHistory;
     boost::optional<Timestamp> _recoveryTimestamp = boost::none;
     Timestamp _pointInTimeReadTimestamp = {};
     bool _supportsRecoverToStableTimestamp = true;
@@ -279,6 +259,7 @@ private:
 
         ServiceContextMongoDTest::tearDown();
         gTakeUnstableCheckpointOnShutdown = false;
+        startupRecoveryForRestore = false;
     }
 
     void _createOpCtx() {
@@ -988,6 +969,22 @@ TEST_F(ReplicationRecoveryTest, RecoveryAppliesUpdatesIdempotently) {
     ASSERT_EQ(getConsistencyMarkers()->getOplogTruncateAfterPoint(opCtx), Timestamp());
 }
 
+TEST_F(ReplicationRecoveryTest, RecoveryRethrowsInterruptedAtShutdown) {
+    // Verify the catch block in recoverFromOplog re-throws shutdown errors rather than calling
+    // std::terminate() so we can continue to shutdown cleanly.
+    auto opCtx = getOperationContext();
+    _setUpOplog(opCtx, getStorageInterface(), {1});
+    dynamic_cast<ReplicationConsistencyMarkersMock*>(getConsistencyMarkers())->getAppliedThroughFn =
+        [&](OperationContext*) {
+            uasserted(ErrorCodes::InterruptedAtShutdown,
+                      "Simulated shutdown during oplog recovery");
+        };
+    ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
+    ASSERT_THROWS_CODE(recovery.recoverFromOplog(opCtx, boost::none),
+                       DBException,
+                       ErrorCodes::InterruptedAtShutdown);
+}
+
 DEATH_TEST_F(ReplicationRecoveryTestDeathTest, RecoveryFailsWithBadOp, "terminate() called") {
     ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
     auto opCtx = getOperationContext();
@@ -1582,6 +1579,88 @@ TEST_F(ReplicationRecoveryTest, RecoverFromOplogAsStandaloneRecoversOplog) {
 
     recovery.recoverFromOplogAsStandalone(opCtx);
     _assertDocsInTestCollection(opCtx, {5});
+}
+
+TEST_F(ReplicationRecoveryTest, RecoverFromOplogAsStandaloneForRestorePinsStable) {
+    startupRecoveryForRestore = true;
+    ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
+    auto opCtx = getOperationContext();
+
+    _setUpOplog(opCtx, getStorageInterface(), {2, 5});
+    getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(2, 2));
+    getConsistencyMarkers()->setAppliedThrough(opCtx, OpTime(Timestamp(2, 2), 1));
+
+    recovery.recoverFromOplogAsStandalone(opCtx);
+    _assertDocsInTestCollection(opCtx, {5});
+
+    const auto history = getStorageInterfaceRecovery()->getInitialDataTimestampHistory();
+    // Assert on order, not membership. The pin to the recovery timestamp must be established before
+    // oplog application so the checkpoints taken during recovery are stable.
+    ASSERT_FALSE(history.empty());
+    ASSERT_EQ(history.front(), Timestamp(2, 2));
+    ASSERT_EQ(history.back(), Timestamp(5, 5));
+    ASSERT(std::find(history.begin(),
+                     history.end(),
+                     Timestamp::kAllowUnstableCheckpointsSentinel) == history.end());
+}
+
+TEST_F(ReplicationRecoveryTest, RecoverFromOplogAsStandaloneForInitialSyncKeepsUnstableSentinel) {
+    ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
+    auto opCtx = getOperationContext();
+
+    _setUpOplog(opCtx, getStorageInterface(), {2, 5});
+    getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(2, 2));
+    getConsistencyMarkers()->setAppliedThrough(opCtx, OpTime(Timestamp(2, 2), 1));
+
+    recovery.recoverFromOplogAsStandalone(opCtx, /*duringInitialSync=*/true);
+
+    const auto history = getStorageInterfaceRecovery()->getInitialDataTimestampHistory();
+    ASSERT(std::find(history.begin(),
+                     history.end(),
+                     Timestamp::kAllowUnstableCheckpointsSentinel) != history.end());
+    ASSERT(std::find(history.begin(), history.end(), Timestamp(2, 2)) == history.end());
+}
+
+TEST_F(ReplicationRecoveryTest,
+       RecoverFromOplogAsStandaloneForInitialSyncAdvancesOldestTimestampWithNoOplogToApply) {
+    ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
+    auto opCtx = getOperationContext();
+
+    // The recovery timestamp is at the top of the oplog, so there are no oplog entries to replay
+    // during initial sync recovery. See SERVER-131554.
+    _setUpOplog(opCtx, getStorageInterface(), {5});
+    getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(5, 5));
+    getConsistencyMarkers()->setAppliedThrough(opCtx, OpTime(Timestamp(5, 5), 1));
+
+    recovery.recoverFromOplogAsStandalone(opCtx, /*duringInitialSync=*/true);
+
+    // The initial data timestamp is set to the top of the oplog, and the oldest timestamp must be
+    // advanced to match it even though no oplog entries were applied. Otherwise the node could
+    // serve reads before the initial data timestamp.
+    ASSERT_EQ(getStorageInterface()->getInitialDataTimestamp(opCtx->getServiceContext()),
+              Timestamp(5, 5));
+    ASSERT_EQ(opCtx->getServiceContext()->getStorageEngine()->getOldestTimestamp(),
+              Timestamp(5, 5));
+}
+
+TEST_F(ReplicationRecoveryTest,
+       RecoverFromOplogAsStandaloneForInitialSyncAdvancesOldestTimestampAfterOplogReplay) {
+    ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
+    auto opCtx = getOperationContext();
+
+    // The recovery timestamp is behind the top of the oplog, so oplog entries are replayed. The
+    // oldest timestamp must reach the top of the oplog / initial data timestamp. See SERVER-131554.
+    _setUpOplog(opCtx, getStorageInterface(), {2, 5});
+    getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(2, 2));
+    getConsistencyMarkers()->setAppliedThrough(opCtx, OpTime(Timestamp(2, 2), 1));
+
+    recovery.recoverFromOplogAsStandalone(opCtx, /*duringInitialSync=*/true);
+    _assertDocsInTestCollection(opCtx, {5});
+
+    ASSERT_EQ(getStorageInterface()->getInitialDataTimestamp(opCtx->getServiceContext()),
+              Timestamp(5, 5));
+    ASSERT_EQ(opCtx->getServiceContext()->getStorageEngine()->getOldestTimestamp(),
+              Timestamp(5, 5));
 }
 
 TEST_F(ReplicationRecoveryTest,

@@ -1,34 +1,10 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/error_extra_info.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
@@ -36,6 +12,7 @@
 #include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
+#include <string_view>
 #include <vector>
 
 #include <absl/container/flat_hash_map.h>
@@ -43,26 +20,28 @@
 
 namespace mongo {
 
-struct MONGO_MOD_PUBLIC TimeseriesViewMetadata {
+struct [[MONGO_MOD_PUBLIC]] TimeseriesViewMetadata {
     boost::optional<TimeseriesOptions> options;
     boost::optional<bool> mayContainMixedData;
     boost::optional<bool> usesExtendedRange;
     boost::optional<bool> fixedBuckets;
 
-    static constexpr StringData kTimeseriesMayContainMixedData = "timeseriesMayContainMixedData"_sd;
-    static constexpr StringData kTimeseriesOptions = "timeseriesOptions"_sd;
-    static constexpr StringData kTimeseriesUsesExtendedRange = "timeseriesUsesExtendedRange"_sd;
-    static constexpr StringData kTimeseriesfixedBuckets = "timeseriesfixedBuckets"_sd;
+    static constexpr std::string_view kTimeseriesMayContainMixedData =
+        "timeseriesMayContainMixedData";
+    static constexpr std::string_view kTimeseriesOptions = "timeseriesOptions";
+    static constexpr std::string_view kTimeseriesUsesExtendedRange = "timeseriesUsesExtendedRange";
+    static constexpr std::string_view kTimeseriesfixedBuckets = "timeseriesfixedBuckets";
 
-    void serialize(BSONObjBuilder* optionsBuilder, BSONObjBuilder* subObjBuilder) const;
+    void serialize(BSONObjBuilder* subObjBuilder) const;
 };
 
 // Forward declare LiteParsedPipeline/LiteParserOptions. The cpp implementation will need to rely on
 // the clone() implementation for the copy constructor of ResolvedNamespace.
 class LiteParsedPipeline;
 struct LiteParserOptions;
+class OwnedLiteParsedPipeline;
 
-struct MONGO_MOD_PUBLIC ResolvedNamespaceViewOptions {
+struct [[MONGO_MOD_PUBLIC]] ResolvedNamespaceViewOptions {
     boost::optional<UUID> collUUID = boost::none;
     bool involvedNamespaceIsAView = true;
     boost::optional<TimeseriesViewMetadata> timeseriesMetadata = boost::none;
@@ -79,8 +58,9 @@ extern const ResolvedNamespaceViewOptions kSimpleViewOptions;
  * the view pipeline (raw BSON and optionally parsed), collation, and timeseries
  * metadata. Supports BSON serialization for the ErrorExtraInfo API.
  */
-class MONGO_MOD_PUBLIC ResolvedNamespace {
+class [[MONGO_MOD_PUBLIC]] ResolvedNamespace final : public ErrorExtraInfo {
 public:
+    static constexpr auto code = ErrorCodes::CommandOnShardedViewNotSupportedOnMongod;
     // Callback type for desugaring a parsed view pipeline. This indirection exists because
     // ResolvedNamespace lives in the lite_parsed_document_source target while the desugarer lives
     // in its own target that depends on lite_parsed_document_source. A direct call would create a
@@ -92,17 +72,27 @@ public:
     // lite_parsed_desugarer.cpp.
     static void setViewPipelineDesugarer(ViewPipelineDesugarer fn);
 
-    // Desugars the internally-parsed view pipeline in place. Callers (e.g. applyViewToLiteParsed)
-    // must invoke this before passing the ResolvedNamespace to handleView so that extension stages
-    // in view definitions are expanded prior to stitching.
+    // (Re-)parses the raw BSON view pipeline into the internal LiteParsedPipeline using this
+    // entry's own LiteParserOptions (which carry the operation's IFR context). Always parses fresh
+    // from the raw BSON, replacing any previously-parsed pipeline. Callers that need a clean,
+    // options-consistent parse of the view definition use this instead of pulling the options out
+    // of the entry.
+    void liteParseViewPipeline();
+
+    // Desugars the internally-parsed view pipeline in place. Callers must invoke this before
+    // passing the ResolvedNamespace to handleView so that extension stages in view definitions
+    // are expanded prior to stitching.
     void desugarViewPipeline();
+
+    // Returns a desugared owned clone of the internally-parsed view pipeline.
+    LiteParsedPipeline desugarAndCloneViewPipeline() const;
 
     ResolvedNamespace();
     ResolvedNamespace(const ResolvedNamespace& other);
     ResolvedNamespace& operator=(const ResolvedNamespace& other);
     ResolvedNamespace(ResolvedNamespace&& other) noexcept;
     ResolvedNamespace& operator=(ResolvedNamespace&& other) noexcept;
-    ~ResolvedNamespace();
+    ~ResolvedNamespace() override;
 
     // Constructor for collections or minimal view resolution (used for secondary namespaces).
     // "Secondary" in this context means a namespace discovered while resolving the pipeline (for
@@ -121,6 +111,16 @@ public:
                       BSONObj defaultCollation,
                       ResolvedNamespaceViewOptions metadata = {});
 
+    // Builds a view ResolvedNamespace whose pipeline is lite-parsed eagerly with the given
+    // options (default LiteParserOptions for the overload without one).
+    static ResolvedNamespace makeForView(NamespaceString viewName,
+                                         NamespaceString resolvedNss,
+                                         std::vector<BSONObj> viewPipeBson);
+    static ResolvedNamespace makeForView(NamespaceString viewName,
+                                         NamespaceString resolvedNss,
+                                         std::vector<BSONObj> viewPipeBson,
+                                         const LiteParserOptions& options);
+
     // The namespace as provided by the user (for views, the view name; for collections, the
     // collection's name).
     const NamespaceString& getNamespace() const;
@@ -129,6 +129,13 @@ public:
     const NamespaceString& getResolvedNamespace() const;
     // The view pipeline as raw BSON; empty for non-view namespaces.
     const std::vector<BSONObj>& getBsonPipeline() const;
+    // The resolved collection's UUID, when known.
+    const boost::optional<UUID>& getCollUUID() const;
+    void setCollUUID(boost::optional<UUID> collUUID) {
+        _uuid = std::move(collUUID);
+    }
+    // True if the involved namespace resolved from a view.
+    bool isInvolvedNamespaceAView() const;
     // Default collation for the namespace (empty BSONObj means simple collation).
     const BSONObj& getDefaultCollation() const;
     // True if this namespace is a timeseries view.
@@ -139,6 +146,23 @@ public:
     // Parsed view pipeline. Requires that the view pipeline was parsed (e.g. via full view
     // resolution).
     LiteParsedPipeline getViewPipeline() const;
+
+    // Mutable raw access to the parsed view pipeline. Returns nullptr if the pipeline was not
+    // parsed (e.g. shouldParseLpp was false).
+    OwnedLiteParsedPipeline* getMutableParsedPipeline();
+    // Read-only access to the parsed view pipeline.
+    const LiteParsedPipeline* getParsedPipeline() const;
+    // Set/replace the LiteParserOptions on this entry. Used by callers that received an entry over
+    // the wire (e.g. mongos harvesting additionalResolvedNamespaces from a kickback) and need to
+    // restore the operation's IFR context — the wire format doesn't carry options.
+    void setLiteParserOptions(std::shared_ptr<LiteParserOptions> opts) {
+        _lpOptions = std::move(opts);
+    }
+    // Returns the LiteParserOptions associated with this namespace, or nullptr if none were set.
+    const std::shared_ptr<LiteParserOptions>& getLiteParserOptions() const {
+        return _lpOptions;
+    }
+
     // Same as getBsonPipeline(): the view pipeline as originally specified (raw BSON).
     std::vector<BSONObj> getOriginalBson() const;
     // Desugared view pipeline as BSON (each stage serialized). Requires a parsed view pipeline.
@@ -146,36 +170,51 @@ public:
     // Returns a deep copy of this ResolvedNamespace.
     ResolvedNamespace clone() const;
 
+    void setAdditionalResolvedNamespaces(std::vector<ResolvedNamespace> additional) {
+        _additionalResolvedNamespaces = std::move(additional);
+    }
+    const std::vector<ResolvedNamespace>& getAdditionalResolvedNamespaces() const {
+        return _additionalResolvedNamespaces;
+    }
+
+    // TODO SERVER-125515 Remove sentinel primary notion when last LTS can understand
+    // additionalResolvedNamespaces serialization.
+    static ResolvedNamespace makeWithSentinelPrimary(std::vector<ResolvedNamespace> additional) {
+        ResolvedNamespace rn(NamespaceString(), std::vector<BSONObj>{});
+        rn._additionalResolvedNamespaces = std::move(additional);
+        rn._hasSentinelPrimary = true;
+        return rn;
+    }
+    bool hasSentinelPrimary() const {
+        return _hasSentinelPrimary;
+    }
+
+    void applyTimeseriesRewrites(std::vector<BSONObj>* resolvedPipeline) const;
+    boost::optional<BSONObj> rewriteIndexHintForTimeseries(const BSONObj& originalHint) const;
+
     // ErrorExtraInfo API
-    // TODO SERVER-122118 Change ResolvedNamespace to inherit from ErrorExtraInfo, to replace
-    // ResolvedView.
     static ResolvedNamespace fromBSON(const BSONObj& commandResponseObj);
-    void serialize(BSONObjBuilder* bob) const;
-    static std::shared_ptr<const ResolvedNamespace> parse(const BSONObj&);
+    void serialize(BSONObjBuilder* bob) const override;
+    static std::shared_ptr<const ErrorExtraInfo> parse(const BSONObj&);
 
     /*
      * These methods support IDL parsing of ResolvedNamespace.
      */
     static ResolvedNamespace parseFromBSON(const BSONElement& elem);
-    void serializeToBSON(StringData fieldName, BSONObjBuilder* bob) const;
-
-    // TODO SERVER-122119 Rename these variables to use the "_" prefix and make them private/add
-    // getters.
-
-    // The namespace of the underlying collection. If this namespace
-    // represents a view, this contains the namespace of the view's underlying
-    // collection, NOT the view namespace.
-    // TODO SERVER-122119 It would be helpful to name this _resolvedNss;
-    NamespaceString ns;
-    // The view's raw BSON object pipeline (empty for collections).
-    std::vector<BSONObj> pipeline;
-    boost::optional<UUID> uuid = boost::none;
-    bool involvedNamespaceIsAView = false;
+    void serializeToBSON(std::string_view fieldName, BSONObjBuilder* bob) const;
 
 private:
-    void liteParseViewPipeline();
-
     // Core member variables - these are always set, no matter what.
+
+    // The namespace of the underlying collection. If this namespace represents a view, this is the
+    // view's underlying collection namespace, not the view namespace.
+    NamespaceString _resolvedNss;
+
+    // The view's raw BSON object pipeline (empty for collections). The constructor enforces that
+    // every stage is owned, so this map can outlive the view-catalog entry it was built from.
+    std::vector<BSONObj> _pipeline;
+    boost::optional<UUID> _uuid = boost::none;
+    bool _involvedNamespaceIsAView = false;
 
     // The namespace provided by the user - in the case of the view, this
     // is the view namespace, NOT the underlying collection.
@@ -190,7 +229,10 @@ private:
     boost::optional<TimeseriesViewMetadata> _timeseriesMetadata = boost::none;
 
     std::shared_ptr<LiteParserOptions> _lpOptions = nullptr;
-    std::unique_ptr<LiteParsedPipeline> _parsedPipeline;
+    std::unique_ptr<OwnedLiteParsedPipeline> _parsedPipeline;
+
+    std::vector<ResolvedNamespace> _additionalResolvedNamespaces;
+    bool _hasSentinelPrimary = false;
 
     inline static ViewPipelineDesugarer _viewPipelineDesugarer;
 };
@@ -198,7 +240,7 @@ private:
 /**
  * Map from view to resolved namespace.
  */
-using ResolvedNamespaceMap MONGO_MOD_PUBLIC =
+using ResolvedNamespaceMap [[MONGO_MOD_PUBLIC]] =
     absl::flat_hash_map<NamespaceString, ResolvedNamespace>;
 
 }  // namespace mongo

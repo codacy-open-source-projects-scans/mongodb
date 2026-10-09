@@ -19,7 +19,10 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {iterateMatchingLogLines} from "jstests/libs/log.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
-import {verifyProfilerMetrics, verifySlowQueryLogMetrics} from "jstests/libs/query/memory_tracking_utils.js";
+import {
+    verifyProfilerMetrics,
+    verifySlowQueryLogMetrics,
+} from "jstests/libs/query/memory_tracking_utils.js";
 
 const serverParams = {
     setParameter: {
@@ -68,10 +71,22 @@ let aggCmd = {
         "bufferSize": NumberInt(128),
         "key": {},
     },
+    readConcern: {},
+    writeConcern: {},
 };
 
-// Create explicit session to avoid session mismatch issues.
-const session = db.getMongo().startSession();
+// Create explicit session on an internal client connection since exchange requires internal client.
+const internalConn = (() => {
+    const conn = new Mongo(db.getMongo().host);
+    assert.commandWorked(
+        conn.getDB("admin").runCommand({
+            hello: 1,
+            internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)},
+        }),
+    );
+    return conn;
+})();
+const session = internalConn.startSession();
 const sessionDb = session.getDatabase(db.getName());
 
 // Run the aggregate command and get cursor IDs.
@@ -105,7 +120,10 @@ for (let i = 0; i < cursorIds.length; i++) {
             });
 
             // Assert that getMore succeeded
-            assert.commandWorked(getMoreResult, `Shell ${args.shellIndex} getMore failed for cursor ${args.cursorId}`);
+            assert.commandWorked(
+                getMoreResult,
+                `Shell ${args.shellIndex} getMore failed for cursor ${args.cursorId}`,
+            );
 
             const batch = getMoreResult.cursor.nextBatch;
             totalDocs += batch.length;
@@ -128,7 +146,12 @@ for (let i = 0; i < cursorIds.length; i++) {
         let logLines = [];
         assert.soon(() => {
             const globalLog = assert.commandWorked(db.adminCommand({getLog: "global"}));
-            logLines = [...iterateMatchingLogLines(globalLog.log, {msg: "Slow query", cursorid: args.cursorId})];
+            logLines = [
+                ...iterateMatchingLogLines(globalLog.log, {
+                    msg: "Slow query",
+                    cursorid: args.cursorId,
+                }),
+            ];
             return logLines.length >= expectedRequests;
         }, `Failed to find 10 log lines for cursorid: ${args.cursorId.toString()}`);
 

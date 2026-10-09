@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/date_time/posix_time/posix_time_types.hpp>
-// IWYU pragma: no_include "cxxabi.h"
-#include "mongo/base/string_data.h"
+#include "mongo/s/balancer_configuration.h"
+
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -43,24 +16,26 @@
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/balancer_configuration.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 
 #include <memory>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
 #include <boost/date_time/gregorian/greg_date.hpp>
 #include <boost/date_time/posix_time/posix_time_duration.hpp>
+#include <boost/date_time/posix_time/posix_time_types.hpp>
 #include <boost/date_time/posix_time/ptime.hpp>
 #include <boost/date_time/time_duration.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
+// IWYU pragma: no_include "cxxabi.h"
 
 namespace mongo {
 namespace {
@@ -93,7 +68,7 @@ protected:
      * Expects a correct find command to be dispatched for the config.settings namespace and returns
      * the specified result. If an empty boost::optional is passed, returns an empty results.
      */
-    void expectSettingsQuery(StringData key, StatusWith<boost::optional<BSONObj>> result) {
+    void expectSettingsQuery(std::string_view key, StatusWith<boost::optional<BSONObj>> result) {
         onFindCommand([&](const RemoteCommandRequest& request) {
             auto opMsg = static_cast<OpMsgRequest>(request);
             auto findCommand = query_request_helper::makeFromFindCommandForTests(opMsg.body);
@@ -473,8 +448,7 @@ TEST_F(BalancerSettingsTestFixture, TimeFormatEdgeCases) {
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWSingleDay) {
     BalancerConfiguration config;
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
     BalancerSettings settings = assertGet(
         config.getSettingsFromBSON(opCtx(),
                                    BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
@@ -516,8 +490,7 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWSingleDay) {
 }
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWMultipleDays) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
 
     BalancerConfiguration config;
     BalancerSettings settings = assertGet(config.getSettingsFromBSON(
@@ -556,8 +529,7 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWMultipleDays) {
 }
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWTimeValidation) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
     BalancerConfiguration config;
 
     auto status1 = config
@@ -582,8 +554,7 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWTimeValidation) {
 }
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWOvernightWindow) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
     BalancerConfiguration config;
     BalancerSettings settings = assertGet(config.getSettingsFromBSON(
         opCtx(),
@@ -633,8 +604,7 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWOvernightWindow) {
 }
 
 TEST_F(BalancerSettingsTestFixture, MultipleTimeWindowsForSameDay) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
     BalancerConfiguration config;
     BalancerSettings settings = assertGet(config.getSettingsFromBSON(
         opCtx(),
@@ -696,8 +666,7 @@ TEST_F(BalancerSettingsTestFixture, MultipleTimeWindowsForSameDay) {
 }
 
 TEST_F(BalancerSettingsTestFixture, ActiveWindowAndActiveWindowDOWPrecedence) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", true);
     BalancerConfiguration config;
     BalancerSettings settings = assertGet(
         config.getSettingsFromBSON(opCtx(),
@@ -742,8 +711,7 @@ TEST_F(BalancerSettingsTestFixture, ActiveWindowAndActiveWindowDOWPrecedence) {
 
 // ===== Feature Flag Disabled Tests =====
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_IgnoresActiveWindowDOW) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", false);
     BalancerConfiguration config;
     unittest::LogCaptureGuard logs;
     BalancerSettings settings = assertGet(
@@ -761,8 +729,7 @@ TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_IgnoresActiveWind
 
 
 TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_FallsBackToActiveWindow) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagBalancerWindowDOW", false);
     BalancerConfiguration config;
     unittest::LogCaptureGuard logs;
 

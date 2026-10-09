@@ -1,64 +1,47 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "cxxabi.h"
+
+#include "mongo/transport/session_workflow.h"
+
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/admission/egress_response_rate_limiter.h"
 #include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/admission/rate_limiter.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/baton.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_strand.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/error_labels.h"
+#include "mongo/db/error_labels_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
+#include "mongo/otel/metrics/metric_names.h"
 #include "mongo/otel/metrics/metrics_service.h"
 #include "mongo/otel/metrics/metrics_test_util.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
+#include "mongo/rpc/factory.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/legacy_reply.h"
 #include "mongo/rpc/legacy_reply_builder.h"
+#include "mongo/rpc/legacy_request.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_compressed.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/op_msg_test.h"
+#include "mongo/rpc/protocol.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/transport/asio/asio_session_manager.h"
 #include "mongo/transport/message_compressor_base.h"
@@ -67,19 +50,22 @@
 #include "mongo/transport/message_compressor_snappy.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_executor.h"
+#include "mongo/transport/session_establishment_rate_limiter.h"
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/session_manager_common_mock.h"
-#include "mongo/transport/session_workflow.h"
+#include "mongo/transport/session_workflow_p.h"
 #include "mongo/transport/session_workflow_test_util.h"
 #include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_options_gen.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
@@ -97,18 +83,49 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::transport {
 namespace {
+using namespace std::literals::string_view_literals;
+
+using namespace admission;
+
 const Status kClosedSessionError{ErrorCodes::SocketException, "Session is closed"};
 const Status kNetworkError{ErrorCodes::HostUnreachable, "Someone is unreachable"};
 const Status kShutdownError{ErrorCodes::ShutdownInProgress, "Something is shutting down"};
 const Status kArbitraryError{ErrorCodes::InternalError, "Something happened"};
+
+// Returns true iff `body` carries all of `expectedLabels` in its errorLabels array and no
+// additional labels.
+bool hasErrorLabels(const BSONObj& body, std::vector<std::string_view> expectedLabels) {
+    if (!body.hasField(kErrorLabelsFieldName)) {
+        return false;
+    }
+    auto labels = body[kErrorLabelsFieldName].Array();
+
+    if (labels.size() != expectedLabels.size()) {
+        return false;
+    }
+
+    return std::all_of(
+        expectedLabels.begin(), expectedLabels.end(), [&](std::string_view expected) {
+            return std::any_of(labels.begin(), labels.end(), [&](const BSONElement& e) {
+                return e.String() == expected;
+            });
+        });
+}
 
 template <typename F>
 struct FunctionTraits;
@@ -141,8 +158,8 @@ struct FunctionTraits<R(A...)> {
 enum class Event { EVENT_TABLE(X) };
 #undef X
 
-StringData toString(Event e) {
-#define X(e, sig) #e ""_sd,
+std::string_view toString(Event e) {
+#define X(e, sig) #e ""sv,
     return std::array{EVENT_TABLE(X)}[static_cast<size_t>(e)];
 #undef X
 }
@@ -172,7 +189,7 @@ template <Event e>
 using EventResultT = typename EventTraits<e>::result_type;
 
 Message makeOpMsg() {
-    static auto nextId = AtomicWord<int>{0};
+    static auto nextId = Atomic<int>{0};
     auto omb = OpMsgBuilder{};
     omb.setBody(BSONObjBuilder{}.append("id", nextId.fetchAndAdd(1)).obj());
     return omb.finish();
@@ -330,6 +347,24 @@ public:
         return std::move(pf->future);
     }
 
+    // Overload that accepts a full callback. Blocks until the callback has returned, so any
+    // captures are visible to the caller as soon as expect() returns.
+    template <Event e>
+    Future<void> asyncExpect(unique_function<EventSigT<e>> cb) {
+        auto pf = std::make_shared<PromiseAndFuture<void>>();
+        injectMockResponse<e>([cb = std::move(cb), pf](auto&&... args) mutable -> EventResultT<e> {
+            if constexpr (std::is_void_v<EventResultT<e>>) {
+                cb(std::forward<decltype(args)>(args)...);
+                pf->promise.emplaceValue();
+            } else {
+                auto result = cb(std::forward<decltype(args)>(args)...);
+                pf->promise.emplaceValue();
+                return result;
+            }
+        });
+        return std::move(pf->future);
+    }
+
     template <Event e>
     void expect(EventResultT<e> r) {
         asyncExpect<e>(std::move(r)).get();
@@ -340,13 +375,41 @@ public:
         asyncExpect<e>().get();
     }
 
+    template <Event e>
+    void expect(unique_function<EventSigT<e>> cb) {
+        asyncExpect<e>(std::move(cb)).get();
+    }
 
+    /**
+     * Installs a one-shot sepHandleRequest mock that runs `cb` with the OperationContext and
+     * Message, then blocks until the mock fires. Using a synchronous wait ensures the
+     * expectation slot is empty by the time the helper returns, so subsequent expect<>/inject
+     * calls can safely push.
+     */
+    void runSepHandleRequest(unique_function<DbResponse(OperationContext*, const Message&)> cb) {
+        auto pf = std::make_shared<PromiseAndFuture<void>>();
+        injectMockResponse<Event::sepHandleRequest>(
+            [cb = std::move(cb), pf](OperationContext* opCtx, const Message& msg) mutable {
+                auto response = cb(opCtx, msg);
+                pf->promise.emplaceValue();
+                return response;
+            });
+        pf->future.get();
+    }
+
+
+    std::function<void(Client*)> onClientConnectCb;
     std::function<void(Client*)> onClientDisconnectCb;
+    std::function<void()> onPreludeCb;
 
 protected:
     class SWTObserver : public ClientTransportObserver {
     public:
         explicit SWTObserver(SessionWorkflowTest* test) : _test(test) {}
+        void onClientConnect(Client* client) override {
+            if (_test->onClientConnectCb)
+                _test->onClientConnectCb(client);
+        }
         void onClientDisconnect(Client* client) override {
             _test->_onMockEvent<Event::sepEndSession>(std::tie(client->session()));
             if (_test->onClientDisconnectCb) {
@@ -382,6 +445,10 @@ private:
             };
             sinkMessageCb = [fixture](const Message& m) {
                 return fixture->_onMockEvent<Event::sessionSinkMessage>(std::tie(m));
+            };
+            preludeCb = [fixture] {
+                if (fixture->onPreludeCb)
+                    fixture->onPreludeCb();
             };
             // The async variants will just run the same callback on `_threadPool`.
             auto async = [fixture](auto cb) {
@@ -452,6 +519,37 @@ private:
     test::TransportLayerMockWithReactor* _transportLayer{nullptr};
 };
 
+/**
+ * Verifies that `Session::prelude()` is invoked exactly once by `SessionWorkflow`, and that this
+ * happens before any messages are sourced (read).
+ */
+TEST_F(SessionWorkflowTest, PreludeCalledExactlyOnceBeforeSourceMessage) {
+    int preludeCount = 0;
+    onPreludeCb = [&] {
+        ++preludeCount;
+    };
+
+    startSession();
+
+    // Once expect<sessionSourceMessage>() returns, the worker has already passed prelude(), so
+    // preludeCount must be 1.
+    expect<Event::sessionSourceMessage>(makeOpMsg());
+    ASSERT_EQ(preludeCount, 1);
+    expect<Event::sepHandleRequest>(makeResponse(makeOpMsg()));
+    expect<Event::sessionSinkMessage>(Status::OK());
+
+    // Second iteration: prelude() will not fire again.
+    expect<Event::sessionSourceMessage>(makeOpMsg());
+    expect<Event::sepHandleRequest>(makeResponse(makeOpMsg()));
+    expect<Event::sessionSinkMessage>(Status::OK());
+
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    ASSERT_EQ(preludeCount, 1);
+}
+
 TEST_F(SessionWorkflowTest, StartThenEndSession) {
     startSession();
     expect<Event::sessionSourceMessage>(kClosedSessionError);
@@ -462,7 +560,12 @@ TEST_F(SessionWorkflowTest, StartThenEndSession) {
 TEST_F(SessionWorkflowTest, OneNormalCommand) {
     startSession();
     expect<Event::sessionSourceMessage>(makeOpMsg());
-    expect<Event::sepHandleRequest>(makeResponse(makeOpMsg()));
+    std::size_t activeOpsWhileHandling = 0;
+    expect<Event::sepHandleRequest>([&](OperationContext*, const Message&) -> Future<DbResponse> {
+        activeOpsWhileHandling = sessionManager()->getSessionStats().numActiveOperations;
+        return makeResponse(makeOpMsg());
+    });
+    ASSERT_EQ(activeOpsWhileHandling, 1);
     expect<Event::sessionSinkMessage>(Status::OK());
     expect<Event::sessionSourceMessage>(kClosedSessionError);
     expect<Event::sepEndSession>();
@@ -501,18 +604,12 @@ TEST_F(SessionWorkflowTest, OnClientDisconnectCalledOnCleanup) {
         ++disconnects;
     };
     startSession();
-    if (capturer.canReadMetrics()) {
-        EXPECT_EQ(capturer.readInt64Gauge(otel::metrics::MetricNames::kOpenConnections), 1);
-    }
     ASSERT_EQ(disconnects, 0);
     expect<Event::sessionSourceMessage>(kClosedSessionError);
     expect<Event::sepEndSession>();
     joinSessions();
     ASSERT_EQ(disconnects, 1);
     onClientDisconnectCb = nullptr;
-    if (capturer.canReadMetrics()) {
-        EXPECT_EQ(capturer.readInt64Gauge(otel::metrics::MetricNames::kOpenConnections), 0);
-    }
 }
 
 /** Repro of one formerly troublesome scenario generated by the StepRunner test below. */
@@ -535,9 +632,13 @@ TEST_F(SessionWorkflowTest, GetOpenSession) {
     startSession();
     auto sessionIds = sessionManager()->getOpenSessionIDs();
     ASSERT_EQ(sessionIds.size(), 1);
+    ASSERT_EQ(sessionManager()->getSessionStats().numOpenSessions, 1);
+    ASSERT_EQ(sessionManager()->getSessionStats().numCreatedSessions, 1);
     expect<Event::sessionSourceMessage>(kShutdownError);
     expect<Event::sepEndSession>();
     joinSessions();
+    ASSERT_EQ(sessionManager()->getSessionStats().numOpenSessions, 0);
+    ASSERT_EQ(sessionManager()->getSessionStats().numCreatedSessions, 1);
 }
 
 /**
@@ -596,7 +697,7 @@ TEST_F(SessionWorkflowTest, CleanupFromGetMore) {
             p.emplaceValue(msg);
             return makeResponse({});
         });
-    ASSERT_EQ(OpMsgRequest::parse(killCursors.future.get()).getCommandName(), "killCursors"_sd);
+    ASSERT_EQ(OpMsgRequest::parse(killCursors.future.get()).getCommandName(), "killCursors"sv);
 
     // Because they're fire-and-forget commands, we will only observe `handleRequest`
     // calls to the SEP for the cleanup "killCursors", and the next thing to happen
@@ -612,17 +713,18 @@ public:
     }
 
     BSONObj getConnectionStats() {
-        BSONObjBuilder bob;
-        sessionManager()->appendStats(&bob);
-        auto stats = bob.obj();
+        auto client = getServiceContext()->getService()->makeClient("getConnectionStats");
+        auto opCtx = client->makeOperationContext();
+        auto stats = _connectionsSection->generateSection(opCtx.get(), BSONElement{});
         LOGV2(10481100, "Connection stats", "stats"_attr = stats);
         return stats;
     }
 
-    void waitUntil(std::function<bool(void)> pred) {
-        auto retries = 0;
-        while (!pred() && retries < 5) {
-            sleepmillis(pow(5, ++retries));
+    void waitUntil(std::function<bool()> pred) {
+        const auto deadline = Date_t::now() + Minutes{2};
+        while (!pred()) {
+            ASSERT_LT(Date_t::now(), deadline) << "waitUntil timed out";
+            sleepmillis(10);
         }
     }
 
@@ -633,16 +735,25 @@ private:
         return sm;
     }
 
-    RAIIServerParameterControllerForTest featureEnabled{
+    ServerStatusSection* _connectionsSection = [] {
+        for (auto it = ServerStatusSectionRegistry::instance()->begin();
+             it != ServerStatusSectionRegistry::instance()->end();
+             ++it) {
+            if (it->second->getSectionName() == "connections")
+                return it->second.get();
+        }
+        MONGO_UNREACHABLE;
+    }();
+
+    unittest::ServerParameterGuard featureEnabled{
         "ingressConnectionEstablishmentRateLimiterEnabled", true};
     unittest::MinimumLoggedSeverityGuard logSeverityGuard{logv2::LogComponent::kDefault,
                                                           logv2::LogSeverity::Debug(4)};
 };
 
 TEST_F(ConnectionEstablishmentQueueingTest, RejectEstablishmentWhenQueueingDisabled) {
-    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
-                                                     1.0};
-    RAIIServerParameterControllerForTest burstCapacitySecs{
+    unittest::ServerParameterGuard refreshRate{"ingressConnectionEstablishmentRatePerSec", 1.0};
+    unittest::ServerParameterGuard burstCapacitySecs{
         "ingressConnectionEstablishmentBurstCapacitySecs", 1};
 
     // The first session gets a token successfully and calls sourceMessage.
@@ -666,17 +777,14 @@ TEST_F(ConnectionEstablishmentQueueingTest, RejectEstablishmentWhenQueueingDisab
     ASSERT_EQ(getConnectionStats()["establishmentRateLimit"]["rejected"].numberLong(), 1);
     ASSERT_EQ(getConnectionStats()["queuedForEstablishment"].numberLong(), 0);
     ASSERT_EQ(getConnectionStats()["totalCreated"].numberLong(), 2);
+    ASSERT_EQ(sessionManager()->getSessionStats().numRejectedSessions, 1);
+    ASSERT_EQ(sessionManager()->getSessionEstablishmentRateLimiter().rejected(), 1);
 
     joinSessions();
 }
 
 TEST_F(ConnectionEstablishmentQueueingTest, InterruptQueuedEstablishments) {
-    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
-                                                     1.0};
-    RAIIServerParameterControllerForTest burstCapacitySecs{
-        "ingressConnectionEstablishmentBurstCapacitySecs", 1};
-    RAIIServerParameterControllerForTest maxQueueDepth{
-        "ingressConnectionEstablishmentMaxQueueDepth", 10};
+    unittest::ServerParameterGuard maxQueueDepth{"ingressConnectionEstablishmentMaxQueueDepth", 10};
     const auto initialAvailable = getConnectionStats()["available"].numberLong();
 
     // The first session gets a token successfully and calls sourceMessage.
@@ -684,7 +792,12 @@ TEST_F(ConnectionEstablishmentQueueingTest, InterruptQueuedEstablishments) {
     expect<Event::sessionSourceMessage>(kClosedSessionError);
     expect<Event::sepEndSession>();
 
-    // The next session fails to get a token and queues until it is interrupted.
+    // Configure the failpoint to make the next session fail to get a token and stay queued until it
+    // is interrupted.
+    FailPointEnableBlock hangInRateLimiterFp(
+        "hangInRateLimiter",
+        BSON("limiter" << transport::SessionEstablishmentRateLimiter::kRateLimiterName));
+
     initializeNewSession();
     startSession();
 
@@ -693,6 +806,7 @@ TEST_F(ConnectionEstablishmentQueueingTest, InterruptQueuedEstablishments) {
     // Queued connections should be counted in "queuedForEstablishment", "totalCreated", and
     // "available" stats.
     ASSERT_EQ(getConnectionStats()["queuedForEstablishment"].numberLong(), 1);
+    ASSERT_EQ(sessionManager()->getSessionEstablishmentRateLimiter().queued(), 1);
     ASSERT_EQ(getConnectionStats()["available"].numberLong(), initialAvailable - 1);
     ASSERT_EQ(getConnectionStats()["totalCreated"].numberLong(), 2);
 
@@ -710,12 +824,11 @@ TEST_F(ConnectionEstablishmentQueueingTest, InterruptQueuedEstablishments) {
 
 TEST_F(ConnectionEstablishmentQueueingTest, BypassQueueingEstablishment) {
     std::string ip = "127.0.0.1";
-    RAIIServerParameterControllerForTest exemptionsGuard(
+    unittest::ServerParameterGuard exemptionsGuard(
         "ingressConnectionEstablishmentRateLimiterBypass",
         BSON("ranges" << BSONArray(BSON("0" << ip))));
-    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
-                                                     1.0};
-    RAIIServerParameterControllerForTest burstCapacitySecs{
+    unittest::ServerParameterGuard refreshRate{"ingressConnectionEstablishmentRatePerSec", 1.0};
+    unittest::ServerParameterGuard burstCapacitySecs{
         "ingressConnectionEstablishmentBurstCapacitySecs", 1};
 
     // The first session gets a token successfully and calls sourceMessage.
@@ -736,8 +849,89 @@ TEST_F(ConnectionEstablishmentQueueingTest, BypassQueueingEstablishment) {
     expect<Event::sessionSourceMessage>(kClosedSessionError);
     expect<Event::sepEndSession>();
     ASSERT_EQ(getConnectionStats()["establishmentRateLimit"]["exempted"].numberLong(), 1);
+    ASSERT_EQ(sessionManager()->getSessionEstablishmentRateLimiter().exempted(), 1);
 
     joinSessions();
+}
+
+/**
+ * Verifies that rateLimitInterrupted is incremented when a queued session's client disconnects.
+ */
+TEST_F(ConnectionEstablishmentQueueingTest, RateLimitInterruptedOnClientDisconnect) {
+    unittest::ServerParameterGuard maxQueueDepth{"ingressConnectionEstablishmentMaxQueueDepth", 10};
+
+    // First session consumes the burst token.
+    startSession();
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    // Configure the failpoint to make the next session fail to get a token and stay queued until
+    // it disconnects.
+    FailPointEnableBlock hangInLimiterFp(
+        "hangInRateLimiter",
+        BSON("limiter" << transport::SessionEstablishmentRateLimiter::kRateLimiterName));
+
+    // Capture the second session's client when it connects.
+    Client* queuedClient = nullptr;
+    onClientConnectCb = [&](Client* client) {
+        queuedClient = client;
+    };
+
+    // Second session queues waiting for a token.
+    initializeNewSession();
+    startSession();
+    onClientConnectCb = nullptr;
+
+    // Wait for the session to queue and for the establishment opCtx to be created.
+    ASSERT_NE(queuedClient, nullptr);
+    waitUntil([&] { return sessionManager()->getSessionEstablishmentRateLimiter().queued() == 1; });
+
+    // Simulate client disconnect by killing the establishment opCtx with ClientDisconnect.
+    {
+        ClientLock clientLock(queuedClient);
+        if (auto* opCtx = queuedClient->getOperationContext()) {
+            getServiceContext()->killOperation(clientLock, opCtx, ErrorCodes::ClientDisconnect);
+        }
+    }
+
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    ASSERT_EQ(
+        sessionManager()->getSessionEstablishmentRateLimiter().interruptedDueToClientDisconnect(),
+        1);
+}
+
+/**
+ * Verifies that `Session::prelude()` is invoked before the session establishment rate limiter is
+ * consulted.
+ */
+TEST_F(ConnectionEstablishmentQueueingTest, PreludeCalledBeforeConnectionEstablishmentRateLimiter) {
+    unittest::ServerParameterGuard refreshRate{"ingressConnectionEstablishmentRatePerSec", 1.0};
+    unittest::ServerParameterGuard burstCapacitySecs{
+        "ingressConnectionEstablishmentBurstCapacitySecs", 1};
+
+    // The first session consumes the burst token and completes.
+    startSession();
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    // Second session: burst is exhausted and queueing is disabled, so the connection establishment
+    // rate limiter will reject it. Verify that `Session::prelude()` was called anyway (before the
+    // rate limiter rejected the session).
+    bool preludeFired = false;
+    onPreludeCb = [&] {
+        preludeFired = true;
+    };
+    initializeNewSession();
+    startSession();
+
+    // Because the rate limiter rejected the session, it is now ended.
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    ASSERT_TRUE(preludeFired);
 }
 
 class IngressRequestRateLimiterTest : public SessionWorkflowTest {
@@ -747,6 +941,8 @@ public:
         std::int32_t successfulAdmissions;
         std::int32_t exemptedAdmissions;
         std::int32_t attemptedAdmissions;
+        std::int32_t addedToQueue;
+        std::int32_t removedFromQueue;
         double totalAvailableTokens;
     };
 
@@ -762,6 +958,12 @@ public:
         }
 
         _requestLimiterEnabled.emplace("ingressRequestRateLimiterEnabled", true);
+
+        // The rate limiter's admission counters are backed by process-global OTel instruments.
+        // Snapshot the counters now so each test can assert on the delta it
+        // produced rather than on absolute, leak-prone values.
+        _baselineStats = getRateLimiterStats();
+        _baselineEgressAttemptedAdmissions = getEgressAttemptedAdmissions();
     }
 
     auto enableRateOverrideBehaviorWithSpecifiedBurstSize(double burstSize) -> void {
@@ -783,7 +985,23 @@ public:
             .successfulAdmissions = stats["successfulAdmissions"].numberInt(),
             .exemptedAdmissions = stats["exemptedAdmissions"].numberInt(),
             .attemptedAdmissions = stats["attemptedAdmissions"].numberInt(),
+            .addedToQueue = stats["addedToQueue"].numberInt(),
+            .removedFromQueue = stats["removedFromQueue"].numberInt(),
             .totalAvailableTokens = stats["totalAvailableTokens"].numberDouble(),
+        };
+    }
+
+    auto getRateLimiterStatsDelta() -> IngressRequestRateLimiterStats {
+        const auto current = getRateLimiterStats();
+        return IngressRequestRateLimiterStats{
+            .rejectedAdmissions = current.rejectedAdmissions - _baselineStats.rejectedAdmissions,
+            .successfulAdmissions =
+                current.successfulAdmissions - _baselineStats.successfulAdmissions,
+            .exemptedAdmissions = current.exemptedAdmissions - _baselineStats.exemptedAdmissions,
+            .attemptedAdmissions = current.attemptedAdmissions - _baselineStats.attemptedAdmissions,
+            .addedToQueue = current.addedToQueue - _baselineStats.addedToQueue,
+            .removedFromQueue = current.removedFromQueue - _baselineStats.removedFromQueue,
+            .totalAvailableTokens = current.totalAvailableTokens,
         };
     }
 
@@ -793,10 +1011,44 @@ public:
         return uassertStatusOK(compressorManager.compressMessage(message, &cid));
     }
 
+    auto getEgressAttemptedAdmissions() -> int64_t {
+        return EgressResponseRateLimiter::get(getServiceContext()).stats().attemptedAdmissions();
+    }
+
+    auto getEgressAttemptedAdmissionsDelta() -> int64_t {
+        return getEgressAttemptedAdmissions() - _baselineEgressAttemptedAdmissions;
+    }
+
+    /**
+     * Drives one fire-and-forget request to consume the burst, then a second request that the
+     * ingress limiter rejects, sinking the rejection reply through the egress path. Returns the
+     * body of the sunk reply.
+     */
+    auto sinkOneRejectionReply() -> BSONObj {
+        startSession();
+
+        expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+        runSepHandleRequest(
+            [](OperationContext*, const Message&) { return makeResponse(Message{}); });
+
+        expect<Event::sessionSourceMessage>(makeOpMsg());
+        BSONObj body;
+        expect<Event::sessionSinkMessage>([&](const Message& m) {
+            body = OpMsg::parse(m).body.getOwned();
+            return Status::OK();
+        });
+
+        expect<Event::sessionSourceMessage>(kClosedSessionError);
+        expect<Event::sepEndSession>();
+        joinSessions();
+
+        return body;
+    }
+
 private:
     double _convertBurstSizeToBurstCapacitySecs(double refreshRate, double burstSize) {
-        // Rounding needed to ensure that the conversion back to burstSize won't be incorrect due
-        // to imprecisions in floating point division.
+        // Rounding needed to ensure that the conversion back to burstSize won't be incorrect
+        // due to imprecisions in floating point division.
         return std::round(burstSize / refreshRate);
     }
 
@@ -806,9 +1058,11 @@ private:
                                                            logv2::LogSeverity::Debug(4)};
 
     boost::optional<FailPointEnableBlock> _overrideFailpoint;
-    boost::optional<RAIIServerParameterControllerForTest> _requestLimiterEnabled;
-    boost::optional<RAIIServerParameterControllerForTest> _requestLimiterBurstCapacitySecs;
-    boost::optional<RAIIServerParameterControllerForTest> _requestAdmissionRatePerSec;
+    boost::optional<unittest::ServerParameterGuard> _requestLimiterEnabled;
+    boost::optional<unittest::ServerParameterGuard> _requestLimiterBurstCapacitySecs;
+    boost::optional<unittest::ServerParameterGuard> _requestAdmissionRatePerSec;
+    IngressRequestRateLimiterStats _baselineStats{};
+    int64_t _baselineEgressAttemptedAdmissions{0};
 };
 
 TEST_F(IngressRequestRateLimiterTest, FireAndForgetResponse) {
@@ -830,7 +1084,7 @@ TEST_F(IngressRequestRateLimiterTest, FireAndForgetResponse) {
 
     joinSessions();
 
-    const auto stats = getRateLimiterStats();
+    const auto stats = getRateLimiterStatsDelta();
 
     ASSERT_EQ(stats.rejectedAdmissions, 1);
     ASSERT_EQ(stats.successfulAdmissions, 1);
@@ -859,13 +1113,386 @@ TEST_F(IngressRequestRateLimiterTest, FireAndForgetResponseCompressed) {
 
     joinSessions();
 
-    const auto stats = getRateLimiterStats();
+    const auto stats = getRateLimiterStatsDelta();
 
     ASSERT_EQ(stats.rejectedAdmissions, 1);
     ASSERT_EQ(stats.successfulAdmissions, 1);
     ASSERT_EQ(stats.exemptedAdmissions, 0);
     ASSERT_EQ(stats.attemptedAdmissions, 2);
     ASSERT_LT(stats.totalAvailableTokens, 1);
+}
+
+// Verifies that SessionWorkflow both sets the deferred admission token on the client and clears it
+// via IterationFrame's destructor at the end of each iteration.
+TEST_F(IngressRequestRateLimiterTest, IterationFrameClearsDeferredAdmissionTokenBetweenIterations) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    // Allow queueing so the post-burst request waits in the limiter rather than being rejected.
+    unittest::ServerParameterGuard queueDepth{"ingressRequestAdmissionMaxQueueDepth", 4};
+
+    startSession();
+
+    // Iteration 1: burst is available; SessionWorkflow's _rateLimit grants a ready token via
+    // admitRequest, leaving no deferred token on the client.
+    expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+    runSepHandleRequest([](OperationContext* opCtx, const Message&) {
+        ASSERT_FALSE(
+            IngressRequestRateLimiter::hasDeferredAdmissionToken_forTest(opCtx->getClient()));
+        return makeResponse(Message{});
+    });
+
+    // Iteration 2: burst is exhausted; admitRequest queues and stores the resulting deferred
+    // token on the client. The handler observes the token, and IterationFrame's destructor must
+    // clear it when the iteration ends.
+    expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+    runSepHandleRequest([](OperationContext* opCtx, const Message&) {
+        ASSERT_TRUE(
+            IngressRequestRateLimiter::hasDeferredAdmissionToken_forTest(opCtx->getClient()));
+        return makeResponse(Message{});
+    });
+
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    // Iter 1 took the burst (success). Iter 2 added one to the queue, and the IterationFrame
+    // destructor tore down the unconsumed deferred token, releasing the queue slot.
+    const auto stats = getRateLimiterStatsDelta();
+    ASSERT_EQ(stats.attemptedAdmissions, 2);
+    ASSERT_EQ(stats.successfulAdmissions, 1);
+    ASSERT_EQ(stats.rejectedAdmissions, 0);
+    ASSERT_EQ(stats.addedToQueue, 1);
+    ASSERT_EQ(stats.removedFromQueue, 1);
+}
+
+TEST_F(IngressRequestRateLimiterTest, ImmediateRejectionHasExpectedErrorLabels) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+    // Default maxQueueDepth is 0: requests are rejected immediately when the burst is
+    // exhausted.
+
+    startSession();
+
+    // Iteration 1: burst is available; consume it with a fire-and-forget request.
+    expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+    runSepHandleRequest([](OperationContext*, const Message&) { return makeResponse(Message{}); });
+
+    // Iteration 2: burst is exhausted; rate limiter rejects immediately without calling
+    // sepHandleRequest. Capture the sunk rejection response; the callback overload of expect()
+    // blocks until the handler returns, so body is populated before the next expect() call.
+    auto input = makeOpMsg();
+    expect<Event::sessionSourceMessage>(input);
+    Message response;
+    expect<Event::sessionSinkMessage>([&](const Message& m) {
+        response = m;
+        return Status::OK();
+    });
+
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    ASSERT_EQ(response.header().getResponseToMsgId(), input.header().getId());
+    auto opmsg = OpMsg::parse(response);
+    ASSERT_EQ(getStatusFromCommandResult(opmsg.body).code(),
+              ErrorCodes::IngressRequestRateLimitExceeded);
+    ASSERT_TRUE(hasErrorLabels(opmsg.body,
+                               {ErrorLabel::kSystemOverloadedError,
+                                ErrorLabel::kRetryableError,
+                                ErrorLabel::kNoWritesPerformed}));
+
+    const auto stats = getRateLimiterStatsDelta();
+    ASSERT_EQ(stats.attemptedAdmissions, 2);
+    ASSERT_EQ(stats.successfulAdmissions, 1);
+    ASSERT_EQ(stats.rejectedAdmissions, 1);
+    ASSERT_EQ(stats.addedToQueue, 0);
+}
+
+// The egress response rate limiter paces IRRL rejection replies, but only when
+// egressResponseRateLimiterEnabled is set. It defaults to off, so a rejection reply must reach the
+// wire without the limiter ever being consulted.
+TEST_F(IngressRequestRateLimiterTest, RejectionSkipsEgressResponseRateLimiterWhenDisabled) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    const auto body = sinkOneRejectionReply();
+
+    ASSERT_EQ(getStatusFromCommandResult(body).code(), ErrorCodes::IngressRequestRateLimitExceeded);
+    ASSERT_EQ(getRateLimiterStatsDelta().rejectedAdmissions, 1);
+    ASSERT_EQ(getEgressAttemptedAdmissionsDelta(), 0);
+}
+
+// The two limiters are independently switchable: the ingress limiter stays enabled by the fixture
+// while the egress limiter is turned on here, and the rejection reply now passes through it. The
+// egress rate is left at its default maximum, so the reply is admitted without any pacing delay.
+TEST_F(IngressRequestRateLimiterTest, RejectionEngagesEgressResponseRateLimiterWhenEnabled) {
+    unittest::ServerParameterGuard egressLimiterEnabled{"egressResponseRateLimiterEnabled", true};
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    const auto body = sinkOneRejectionReply();
+
+    ASSERT_EQ(getStatusFromCommandResult(body).code(), ErrorCodes::IngressRequestRateLimitExceeded);
+    ASSERT_EQ(getRateLimiterStatsDelta().rejectedAdmissions, 1);
+    ASSERT_EQ(getEgressAttemptedAdmissionsDelta(), 1);
+}
+
+TEST_F(IngressRequestRateLimiterTest, QueueDepthExceededRejectionHasExpectedErrorLabels) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+    unittest::ServerParameterGuard queueDepth{"ingressRequestAdmissionMaxQueueDepth", 1};
+
+    startSession();
+
+    // Iteration 1: burst is available; consume it with a fire-and-forget request.
+    expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+    runSepHandleRequest([](OperationContext*, const Message&) { return makeResponse(Message{}); });
+
+    // Fill the single queue slot using a separate client so that the session's iter 2 request
+    // finds the queue at capacity. The session_workflow blocks in sessionSourceMessage.pop()
+    // until we push a handler, so filling the queue here is safe from races.
+    auto queueFillerClient =
+        getServiceContext()->getService()->makeClient("queue-depth-rejection-test");
+    ASSERT_TRUE(
+        IngressRequestRateLimiter::get(getServiceContext()).admitRequest(queueFillerClient.get()));
+    ASSERT_TRUE(
+        IngressRequestRateLimiter::hasDeferredAdmissionToken_forTest(queueFillerClient.get()));
+
+    // Iteration 2: queue is full; rate limiter rejects immediately. Capture the sunk rejection
+    // response; the callback overload of expect() blocks until the handler returns.
+    expect<Event::sessionSourceMessage>(makeOpMsg());
+    BSONObj body;
+    expect<Event::sessionSinkMessage>([&](const Message& m) {
+        body = OpMsg::parse(m).body.getOwned();
+        return Status::OK();
+    });
+
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    // Release the queue slot held by the filler client.
+    IngressRequestRateLimiter::clearDeferredAdmissionToken(queueFillerClient.get());
+
+    ASSERT_EQ(getStatusFromCommandResult(body).code(), ErrorCodes::IngressRequestRateLimitExceeded);
+    ASSERT_TRUE(hasErrorLabels(body,
+                               {ErrorLabel::kSystemOverloadedError,
+                                ErrorLabel::kRetryableError,
+                                ErrorLabel::kNoWritesPerformed}));
+
+    const auto stats = getRateLimiterStatsDelta();
+    ASSERT_EQ(stats.attemptedAdmissions, 3);  // iter1 + queue-filler + iter2
+    ASSERT_EQ(stats.successfulAdmissions, 1);
+    ASSERT_EQ(stats.rejectedAdmissions, 1);
+    ASSERT_EQ(stats.addedToQueue, 1);
+}
+
+// Verifies that logical input bytes are counted even when the rate limiter immediately rejects a
+// request, i.e. hitLogicalIn runs before the admission decision.
+TEST_F(IngressRequestRateLimiterTest, RejectedRequestCountsLogicalBytesIn) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    startSession();
+
+    // Iter 1: consume the burst with a fire-and-forget to avoid sinking a response.
+    expect<Event::sessionSourceMessage>(setMoreToCome(makeOpMsg()));
+    runSepHandleRequest([](OperationContext*, const Message&) { return makeResponse(Message{}); });
+
+    // Snapshot after iter 1 so the diff captures only the rejected iter 2 request.
+    auto before = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress);
+
+    // Iter 2: burst exhausted; rate limiter rejects immediately without dispatching to SEP.
+    auto rejectedMsg = makeOpMsg();
+    expect<Event::sessionSourceMessage>(rejectedMsg);
+    BSONObj body;
+    expect<Event::sessionSinkMessage>([&](const Message& m) {
+        body = OpMsg::parse(m).body.getOwned();
+        return Status::OK();
+    });
+
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    // Verify the sunk response was a rate-limit rejection so the byte-count assertion below is
+    // actually exercising the rejected-request path.
+    ASSERT_EQ(getStatusFromCommandResult(body).code(), ErrorCodes::IngressRequestRateLimitExceeded);
+    ASSERT_TRUE(hasErrorLabels(body,
+                               {ErrorLabel::kSystemOverloadedError,
+                                ErrorLabel::kRetryableError,
+                                ErrorLabel::kNoWritesPerformed}));
+
+    auto diff = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress)
+                    .getDifference(before);
+    ASSERT_EQ(diff.logicalBytesIn, rejectedMsg.size());
+}
+
+class RateLimitRejectionResponseTest : public unittest::Test {
+protected:
+    /** Build a real OP_MSG input with a non-trivial body and the given requestId. */
+    static Message makeOpMsgInput() {
+        constexpr uint32_t kNoFlags = 0;
+        auto m = rpc::test::OpMsgBytes{kNoFlags,
+                                       rpc::test::kBodySection,
+                                       fromjson("{insert: 'c', '$db': 'd', documents: [{x: 1}]}")}
+                     .done();
+        return m;
+    }
+
+    static Message makeOpQueryInput() {
+        return makeMessage(NetworkOp::dbQuery, [](auto&) {});
+    }
+
+    /**
+     * Produces two responses through the fast, cached OP_MSG path and the slower legacy opcode
+     * path.
+     *
+     * Asserts that:
+     *  - The OP_MSG and OP_QUERY response bodies are equivalent.
+     *  - The error code in the response is IngresRequestRateLimitExceeded
+     *
+     * It then passes the parsed body to the provided function for additional assertions.
+     */
+    void runTest(std::function<void(BSONObj)> test) {
+        auto opMsgInput = makeOpMsgInput();
+        Message opMsgResponse = makeDbResponseErrorForRateLimiting(opMsgInput).response;
+        const auto opMsgBody = OpMsg::parse(opMsgResponse).body;
+        LOGV2(12602701, "Parsed OP_MSG response", "response"_attr = opMsgBody);
+        ASSERT_EQ(getStatusFromCommandResult(opMsgBody).code(),
+                  ErrorCodes::IngressRequestRateLimitExceeded);
+
+        auto opQueryInput = makeOpQueryInput();
+        Message opQueryResponse = makeDbResponseErrorForRateLimiting(opQueryInput).response;
+        auto opQueryBody = rpc::LegacyReply(&opQueryResponse);
+        LOGV2(
+            12602702, "Parsed OP_QUERY response", "response"_attr = opQueryBody.getCommandReply());
+        ASSERT_BSONOBJ_EQ(opQueryBody.getCommandReply(), opMsgBody);
+
+        // Only need to run test with one body, since we've already asserted that both the OP_MSG
+        // and OP_QUERY bodies are equivalent.
+        test(opMsgBody);
+    }
+};
+
+TEST_F(RateLimitRejectionResponseTest, DefaultRateLimitRejectionResponse) {
+    runTest([&](auto body) {
+        ASSERT_EQ(getStatusFromCommandResult(body).code(),
+                  ErrorCodes::IngressRequestRateLimitExceeded);
+        ASSERT_TRUE(hasErrorLabels(body,
+                                   {ErrorLabel::kSystemOverloadedError,
+                                    ErrorLabel::kRetryableError,
+                                    ErrorLabel::kNoWritesPerformed}));
+        // With the default (disabled) externalClientBaseBackoffMS, neither path emits
+        // baseBackoffMS.
+        ASSERT_FALSE(body.hasField(kBaseBackoffMSFieldName));
+    });
+}
+
+/**
+ * When the externalClientBaseBackoffMS server parameter is positive, the fast path must stamp the
+ * live value into the cached `baseBackoffMS` slot and stay byte-equivalent to the slow path.
+ */
+TEST_F(RateLimitRejectionResponseTest, BaseBackoffMsStampedIntoFastPathWhenEnabled) {
+    constexpr long long kBaseBackoffMS = 1500;
+    unittest::ServerParameterGuard retryGuard{"externalClientBaseBackoffMS", kBaseBackoffMS};
+
+    runTest([&](auto body) {
+        ASSERT_EQ(getStatusFromCommandResult(body).code(),
+                  ErrorCodes::IngressRequestRateLimitExceeded);
+        ASSERT_TRUE(hasErrorLabels(body,
+                                   {ErrorLabel::kSystemOverloadedError,
+                                    ErrorLabel::kRetryableError,
+                                    ErrorLabel::kNoWritesPerformed}));
+        ASSERT_TRUE(body.hasField(kBaseBackoffMSFieldName));
+        ASSERT_EQ(body[kBaseBackoffMSFieldName].Long(), kBaseBackoffMS);
+    });
+}
+
+/**
+ * Two rejections at different live baseBackoffMS values must each reflect the value in effect at
+ * the time of the call. The cached template only reserves space, it does not freeze the value.
+ */
+TEST_F(RateLimitRejectionResponseTest, BaseBackoffMsReflectsLiveParameterValue) {
+    {
+        unittest::ServerParameterGuard guard{"externalClientBaseBackoffMS", 100};
+        runTest([&](auto body) { ASSERT_EQ(body[kBaseBackoffMSFieldName].Long(), 100); });
+    }
+    {
+        unittest::ServerParameterGuard guard{"externalClientBaseBackoffMS", 9999};
+        runTest([&](auto body) { ASSERT_EQ(body[kBaseBackoffMSFieldName].Long(), 9999); });
+    }
+}
+
+TEST_F(RateLimitRejectionResponseTest, AllowRetriesFalseOmitsRetryableErrorLabel) {
+    {
+        unittest::ServerParameterGuard retryGuard{"ingressRequestRateLimiterAllowRetries", false};
+        runTest([&](auto body) {
+            ASSERT_TRUE(hasErrorLabels(
+                body, {ErrorLabel::kSystemOverloadedError, ErrorLabel::kNoWritesPerformed}));
+            ASSERT_FALSE(body.hasField(kBaseBackoffMSFieldName));
+        });
+    }
+
+    // Once the parameter is reset, the label should be appended again.
+    runTest([&](auto body) {
+        ASSERT_TRUE(hasErrorLabels(body,
+                                   {ErrorLabel::kSystemOverloadedError,
+                                    ErrorLabel::kRetryableError,
+                                    ErrorLabel::kNoWritesPerformed}));
+        ASSERT_FALSE(body.hasField(kBaseBackoffMSFieldName));
+    });
+}
+
+TEST_F(RateLimitRejectionResponseTest, AllowRetriesFalseBaseBackoffMs) {
+    unittest::ServerParameterGuard retryGuard{"ingressRequestRateLimiterAllowRetries", false};
+    unittest::ServerParameterGuard retryMsGuard{"externalClientBaseBackoffMS", 1234};
+
+    runTest([&](auto body) {
+        ASSERT_EQ(getStatusFromCommandResult(body).code(),
+                  ErrorCodes::IngressRequestRateLimitExceeded);
+        ASSERT_TRUE(hasErrorLabels(
+            body, {ErrorLabel::kSystemOverloadedError, ErrorLabel::kNoWritesPerformed}));
+        ASSERT_FALSE(body.hasField(kBaseBackoffMSFieldName));
+    });
+}
+
+// Each fast-path call allocates a fresh buffer, so two consecutive rejections must not share state.
+TEST_F(RateLimitRejectionResponseTest, IndependentBuffersForConsecutiveRejections) {
+    auto inputA = makeOpMsgInput();
+    auto inputB = makeOpMsgInput();
+
+    Message respA = makeDbResponseErrorForRateLimiting(inputA).response;
+    Message respB = makeDbResponseErrorForRateLimiting(inputB).response;
+
+    // Distinct buffers: mutating one must not affect the other.
+    ASSERT_NE(respA.buf(), respB.buf())
+        << "fast path returned aliased buffers for two consecutive rejections; rejection "
+           "responses must own their own SharedBuffer so that in-place mutations by "
+           "_acceptResponse (setId / setResponseToMsgId / appendChecksum) cannot leak between "
+           "iterations";
+
+    // Mutating respA's flags (mimicking what _acceptResponse does on a checksumed connection)
+    // must not be visible on respB.
+    OpMsg::setFlag(&respA, OpMsg::kChecksumPresent);
+    ASSERT_TRUE(OpMsg::isFlagSet(respA, OpMsg::kChecksumPresent));
+    ASSERT_FALSE(OpMsg::isFlagSet(respB, OpMsg::kChecksumPresent))
+        << "setFlag on respA leaked into respB, the two responses are aliasing memory";
+}
+
+// Test that the reserved slack is used (no realloc) and that the resulting checksum is valid.
+TEST_F(RateLimitRejectionResponseTest, AppendChecksumUsesReservedSlackAndIsValid) {
+    auto inputMsg = makeOpMsgInput();
+    Message resp = makeDbResponseErrorForRateLimiting(inputMsg).response;
+
+    const auto capacityBefore = resp.capacity();
+    const char* const bufBefore = resp.buf();
+
+    OpMsg::appendChecksum(&resp);
+
+    ASSERT_TRUE(OpMsg::isFlagSet(resp, OpMsg::kChecksumPresent));
+    ASSERT_EQ(resp.capacity(), capacityBefore)
+        << "appendChecksum reallocated the rejection response";
+    ASSERT_EQ(resp.buf(), bufBefore) << "rejection response buffer moved during appendChecksum";
+
+    // OpMsg::parse recomputes and validates the trailing checksum, so a successful parse proves the
+    // checksum written by appendChecksum is correct for the rejection response bytes.
+    OpMsg::parse(resp);
 }
 
 class StepRunnerSessionWorkflowTest : public SessionWorkflowTest {
@@ -889,8 +1516,8 @@ public:
     enum class Action { ACTION_TABLE(X) };
 #undef X
 
-    friend StringData toString(Action action) {
-#define X(a) #a ""_sd,
+    friend std::string_view toString(Action action) {
+#define X(a) #a ""sv,
         return std::array{ACTION_TABLE(X)}[static_cast<size_t>(action)];
 #undef X
     }
@@ -1158,7 +1785,7 @@ TEST_F(SessionWorkflowTest, OversizedDecompressedMessage) {
         uassertStatusOK(registry.finalizeSupportedCompressors());
     }
 
-    RAIIServerParameterControllerForTest maxSizeController{"preAuthMaximumMessageSizeBytes", 1024};
+    unittest::ServerParameterGuard maxSizeController{"preAuthMaximumMessageSizeBytes", 1024};
 
     startSession();
 
@@ -1214,5 +1841,6 @@ DEATH_TEST_F(SessionWorkflowTestDeathTest,
     expect<Event::sepHandleRequest>(makeResponse(makeMessageWithOpcode(dbCompressed)));
     joinSessions();
 }
+
 }  // namespace
 }  // namespace mongo::transport

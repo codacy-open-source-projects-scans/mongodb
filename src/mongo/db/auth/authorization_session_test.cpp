@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
@@ -60,12 +33,12 @@
 #include "mongo/db/shard_role/ddl/list_collections_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -78,6 +51,7 @@
 #include <initializer_list>
 #include <memory>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -89,6 +63,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class AuthorizationSessionTest : public AuthorizationSessionTestFixture {
 public:
@@ -133,9 +108,9 @@ const NamespaceString testTenant1QuxNss =
 const NamespaceString testTenant2FooNss =
     NamespaceString::createNamespaceString_forTest(kTenantId2, "test", "foo");
 
-const DatabaseName testDB = DatabaseName::createDatabaseName_forTest(boost::none, "test"_sd);
-const DatabaseName otherDB = DatabaseName::createDatabaseName_forTest(boost::none, "other"_sd);
-const DatabaseName ignoredDB = DatabaseName::createDatabaseName_forTest(boost::none, "ignored"_sd);
+const DatabaseName testDB = DatabaseName::createDatabaseName_forTest(boost::none, "test"sv);
+const DatabaseName otherDB = DatabaseName::createDatabaseName_forTest(boost::none, "other"sv);
+const DatabaseName ignoredDB = DatabaseName::createDatabaseName_forTest(boost::none, "ignored"sv);
 
 const ResourcePattern testDBResource = ResourcePattern::forDatabaseName(testDB);
 const ResourcePattern otherDBResource = ResourcePattern::forDatabaseName(otherDB);
@@ -155,16 +130,16 @@ const ResourcePattern testProfileCollResource(ResourcePattern::forExactNamespace
 const ResourcePattern otherProfileCollResource(ResourcePattern::forExactNamespace(
     NamespaceString::createNamespaceString_forTest("other.system.profile")));
 
-const UserName kUser1Test("user1"_sd, "test"_sd);
+const UserName kUser1Test("user1"sv, "test"sv);
 const std::unique_ptr<UserRequest> kUser1TestRequest =
     std::make_unique<UserRequestGeneral>(kUser1Test, boost::none);
-const UserName kUser2Test("user2"_sd, "test"_sd);
+const UserName kUser2Test("user2"sv, "test"sv);
 const std::unique_ptr<UserRequest> kUser2TestRequest =
     std::make_unique<UserRequestGeneral>(kUser2Test, boost::none);
-const UserName kTenant1UserTest("userTenant1"_sd, "test"_sd, kTenantId1);
+const UserName kTenant1UserTest("userTenant1"sv, "test"sv, kTenantId1);
 const std::unique_ptr<UserRequest> kTenant1UserTestRequest =
     std::make_unique<UserRequestGeneral>(kTenant1UserTest, boost::none);
-const UserName kTenant2UserTest("userTenant2"_sd, "test"_sd, kTenantId2);
+const UserName kTenant2UserTest("userTenant2"sv, "test"sv, kTenantId2);
 const std::unique_ptr<UserRequest> kTenant2UserTestRequest =
     std::make_unique<UserRequestGeneral>(kTenant2UserTest, boost::none);
 
@@ -199,14 +174,14 @@ TEST_F(AuthorizationSessionTest, MultiAuthMultiDBDisallowed) {
     authzSession->logoutAllDatabases("Test finished");
 }
 
-const auto kTestDB = DatabaseName::createDatabaseName_forTest(boost::none, "test"_sd);
-const auto kAdminDB = DatabaseName::createDatabaseName_forTest(boost::none, "admin"_sd);
+const auto kTestDB = DatabaseName::createDatabaseName_forTest(boost::none, "test"sv);
+const auto kAdminDB = DatabaseName::createDatabaseName_forTest(boost::none, "admin"sv);
 
-const UserName kSpencerTest("spencer"_sd, kTestDB);
+const UserName kSpencerTest("spencer"sv, kTestDB);
 const std::unique_ptr<UserRequest> kSpencerTestRequest =
     std::make_unique<UserRequestGeneral>(kSpencerTest, boost::none);
 
-const UserName kAdminAdmin("admin"_sd, kAdminDB);
+const UserName kAdminAdmin("admin"sv, kAdminDB);
 const std::unique_ptr<UserRequest> kAdminAdminRequest =
     std::make_unique<UserRequestGeneral>(kAdminAdmin, boost::none);
 
@@ -237,7 +212,7 @@ TEST_F(AuthorizationSessionTest, AddUserAndCheckAuthorization) {
         authzSession->isAuthorizedForActionsOnResource(testDBResource, ActionType::dbStats));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherFooCollResource, ActionType::insert));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 
     // Add an admin user with readWriteAnyDatabase
     ASSERT_OK(createUser({"admin", "admin"}, {{"readWriteAnyDatabase", "admin"}}));
@@ -264,7 +239,7 @@ TEST_F(AuthorizationSessionTest, AddUserAndCheckAuthorization) {
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::collMod));
 
-    authzSession->logoutDatabase(kAdminDB, "Fire the admin!"_sd);
+    authzSession->logoutDatabase(kAdminDB, "Fire the admin!"sv);
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherFooCollResource, ActionType::insert));
     ASSERT_FALSE(
@@ -307,13 +282,13 @@ TEST_F(AuthorizationSessionTest, DuplicateRolesOK) {
         authzSession->isAuthorizedForActionsOnResource(testDBResource, ActionType::dbStats));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherFooCollResource, ActionType::insert));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
-const UserName kRWTest("rw"_sd, "test"_sd);
-const UserName kUserAdminTest("useradmin"_sd, "test"_sd);
-const UserName kRWAnyTest("rwany"_sd, "test"_sd);
-const UserName kUserAdminAnyTest("useradminany"_sd, "test"_sd);
+const UserName kRWTest("rw"sv, "test"sv);
+const UserName kUserAdminTest("useradmin"sv, "test"sv);
+const UserName kRWAnyTest("rwany"sv, "test"sv);
+const UserName kUserAdminAnyTest("useradminany"sv, "test"sv);
 
 const std::unique_ptr<UserRequest> kRWTestRequest =
     std::make_unique<UserRequestGeneral>(kRWTest, boost::none);
@@ -346,7 +321,7 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
         authzSession->isAuthorizedForActionsOnResource(testProfileCollResource, ActionType::find));
     ASSERT_TRUE(
         authzSession->isAuthorizedForActionsOnResource(otherProfileCollResource, ActionType::find));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 
     ASSERT_OK(authzSession->addAndAuthorizeUser(
         _opCtx.get(), kUserAdminAnyTestRequest->clone(), boost::none));
@@ -362,7 +337,7 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
         authzSession->isAuthorizedForActionsOnResource(testProfileCollResource, ActionType::find));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherProfileCollResource, ActionType::find));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kRWTestRequest->clone(), boost::none));
@@ -379,7 +354,7 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
         authzSession->isAuthorizedForActionsOnResource(testProfileCollResource, ActionType::find));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherProfileCollResource, ActionType::find));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 
     ASSERT_OK(authzSession->addAndAuthorizeUser(
         _opCtx.get(), kUserAdminTestRequest->clone(), boost::none));
@@ -395,7 +370,7 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
         authzSession->isAuthorizedForActionsOnResource(testProfileCollResource, ActionType::find));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(otherProfileCollResource, ActionType::find));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
 void AuthorizationSessionTest::testInvalidateUser() {
@@ -448,7 +423,7 @@ void AuthorizationSessionTest::testInvalidateUser() {
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
     ASSERT_FALSE(authzSession->lookupUser(kSpencerTest));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
 TEST_F(AuthorizationSessionTest, InvalidateUserByName) {
@@ -494,7 +469,7 @@ TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
     ASSERT_FALSE(
         authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
 TEST_F(AuthorizationSessionTest, AcquireUserObtainsAndValidatesAuthenticationRestrictions) {
@@ -519,7 +494,7 @@ TEST_F(AuthorizationSessionTest, AcquireUserObtainsAndValidatesAuthenticationRes
         BSONObj()));
 
 
-    auto assertWorks = [this](StringData clientSource, StringData serverAddress) {
+    auto assertWorks = [this](std::string_view clientSource, std::string_view serverAddress) {
         auto mock_session = std::make_shared<transport::MockSession>(
             HostAndPort(),
             SockAddr::create(clientSource, 5555, AF_UNSPEC),
@@ -529,10 +504,10 @@ TEST_F(AuthorizationSessionTest, AcquireUserObtainsAndValidatesAuthenticationRes
         auto opCtx = client->makeOperationContext();
         ASSERT_OK(authzSession->addAndAuthorizeUser(
             opCtx.get(), kSpencerTestRequest->clone(), boost::none));
-        authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+        authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
     };
 
-    auto assertFails = [this](StringData clientSource, StringData serverAddress) {
+    auto assertFails = [this](std::string_view clientSource, std::string_view serverAddress) {
         auto mock_session = std::make_shared<transport::MockSession>(
             HostAndPort(),
             SockAddr::create(clientSource, 5555, AF_UNSPEC),
@@ -586,8 +561,7 @@ TEST_F(AuthorizationSessionTest, AcquireUserObtainsAndValidatesAuthenticationRes
 
 TEST_F(AuthorizationSessionTest, CannotAggregateEmptyPipelineWithoutFindAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
 
         auto aggReq = buildAggReq(nss, BSONArray());
@@ -599,8 +573,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateEmptyPipelineWithoutFindAction) 
 
 TEST_F(AuthorizationSessionTest, CanAggregateEmptyPipelineWithFindAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -616,8 +589,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateEmptyPipelineWithFindAction) {
 
 TEST_F(AuthorizationSessionTest, CannotAggregateWithoutFindActionIfFirstStageNotIndexOrCollStats) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -637,8 +609,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateWithoutFindActionIfFirstStageNot
 
 TEST_F(AuthorizationSessionTest, CannotAggregateWithFindActionIfPipelineContainsIndexOrCollStats) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -656,8 +627,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateWithFindActionIfPipelineContains
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCollStatsWithoutCollStatsAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -674,8 +644,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCollStatsWithoutCollStatsAction)
 
 TEST_F(AuthorizationSessionTest, CanAggregateCollStatsWithCollStatsAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -692,8 +661,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCollStatsWithCollStatsAction) {
 
 TEST_F(AuthorizationSessionTest, CannotAggregateIndexStatsWithoutIndexStatsAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -710,8 +678,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateIndexStatsWithoutIndexStatsActio
 
 TEST_F(AuthorizationSessionTest, CanAggregateIndexStatsWithIndexStatsAction) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -728,8 +695,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateIndexStatsWithIndexStatsAction) {
 
 TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersFalseWithoutInprogActionOnMongoD) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -746,8 +712,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersFalseWithoutInprog
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseWithoutInprogActionOnMongoS) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -764,8 +729,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseWithoutInp
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseIfNotAuthenticatedOnMongoD) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
 
@@ -777,8 +741,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseIfNotAuthe
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseIfNotAuthenticatedOnMongoS) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
 
@@ -793,8 +756,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseIfNotAuthe
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInprogActionOnMongoD) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -811,8 +773,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInpr
 
 TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInprogActionOnMongoS) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -829,8 +790,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInpr
 
 TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActionOnMongoD) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -849,8 +809,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActi
 
 TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActionOnMongoS) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -869,8 +828,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActi
 
 TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMongoD) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -888,8 +846,7 @@ TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMon
 
 TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMongoS) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -907,8 +864,7 @@ TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMon
 
 TEST_F(AuthorizationSessionTest, AddPrivilegesForStageFailsIfOutNamespaceIsNotValid) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -926,8 +882,7 @@ TEST_F(AuthorizationSessionTest, AddPrivilegesForStageFailsIfOutNamespaceIsNotVa
 
 TEST_F(AuthorizationSessionTest, CannotAggregateOutWithoutInsertAndRemoveOnTargetNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -959,8 +914,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateOutWithoutInsertAndRemoveOnTarge
 
 TEST_F(AuthorizationSessionTest, CanAggregateOutWithInsertAndRemoveOnTargetNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -990,8 +944,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateOutWithInsertAndRemoveOnTargetNames
 TEST_F(AuthorizationSessionTest,
        CannotAggregateOutBypassingValidationWithoutBypassDocumentValidationOnTargetNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1014,8 +967,7 @@ TEST_F(AuthorizationSessionTest,
 TEST_F(AuthorizationSessionTest,
        CanAggregateOutBypassingValidationWithBypassDocumentValidationOnTargetNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1039,8 +991,7 @@ TEST_F(AuthorizationSessionTest,
 
 TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1048,8 +999,9 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnJoinedNamespa
 
         authzSession->assumePrivilegesForDB(Privilege(rsrcFoo, ActionType::find), nssFoo.dbName());
 
-        BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssBar.coll() << "as"
-                                                                      << "out")));
+        BSONArray pipeline = BSON_ARRAY(BSON(
+            "$lookup" << BSON("from" << nssBar.coll() << "as"
+                                     << "out" << "localField" << "a" << "foreignField" << "b")));
         auto aggReq = buildAggReq(nssFoo, pipeline);
         PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
             _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
@@ -1059,8 +1011,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnJoinedNamespa
 
 TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1072,7 +1023,9 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnJoinedNamespace) {
             nssFoo.dbName());
 
         BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssBar.coll() << "as"
-                                                                      << "out")));
+                                                                      << "out"
+                                                                      << "localField" << "a"
+                                                                      << "foreignField" << "b")));
         auto aggReq = buildAggReq(nssFoo, pipeline);
         PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
             _opCtx.get(), authzSession.get(), nssFoo, aggReq, true));
@@ -1083,8 +1036,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnJoinedNamespace) {
 
 TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnNestedJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1097,7 +1049,10 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnNestedJoinedN
             nssFoo.dbName());
 
         BSONArray nestedPipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssQux.coll() << "as"
-                                                                            << "out")));
+                                                                            << "out"
+                                                                            << "localField" << "a"
+                                                                            << "foreignField"
+                                                                            << "b")));
         BSONArray pipeline = BSON_ARRAY(
             BSON("$lookup" << BSON("from" << nssBar.coll() << "pipeline" << nestedPipeline << "as"
                                           << "out")));
@@ -1110,8 +1065,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnNestedJoinedN
 
 TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnNestedJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1126,7 +1080,10 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnNestedJoinedNamespa
                                             nssFoo.dbName());
 
         BSONArray nestedPipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssQux.coll() << "as"
-                                                                            << "out")));
+                                                                            << "out"
+                                                                            << "localField" << "a"
+                                                                            << "foreignField"
+                                                                            << "b")));
         BSONArray pipeline = BSON_ARRAY(
             BSON("$lookup" << BSON("from" << nssBar.coll() << "pipeline" << nestedPipeline << "as"
                                           << "out")));
@@ -1139,8 +1096,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnNestedJoinedNamespa
 
 TEST_F(AuthorizationSessionTest, CheckAuthForAggregateWithDeeplyNestedLookup) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1194,8 +1150,7 @@ TEST_F(AuthorizationSessionTest, CheckAuthForAggregateWithDeeplyNestedLookup) {
 
 TEST_F(AuthorizationSessionTest, CannotAggregateGraphLookupWithoutFindOnJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1213,8 +1168,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateGraphLookupWithoutFindOnJoinedNa
 
 TEST_F(AuthorizationSessionTest, CanAggregateGraphLookupWithFindOnJoinedNamespace) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1236,8 +1190,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateGraphLookupWithFindOnJoinedNamespac
 TEST_F(AuthorizationSessionTest,
        CannotAggregateFacetWithLookupAndGraphLookupWithoutFindOnJoinedNamespaces) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1247,9 +1200,10 @@ TEST_F(AuthorizationSessionTest,
         // We only have find on the aggregation namespace.
         authzSession->assumePrivilegesForDB(Privilege(rsrcFoo, ActionType::find), nssFoo.dbName());
 
-        BSONArray pipeline = BSON_ARRAY(
-            fromjson("{$facet: {lookup: [{$lookup: {from: 'bar', as: 'out'}}], graphLookup: "
-                     "[{$graphLookup: {from: 'qux'}}]}}"));
+        BSONArray pipeline =
+            BSON_ARRAY(fromjson("{$facet: {lookup: [{$lookup: {from: 'bar', as: 'out', localField: "
+                                "'a', foreignField: 'b'}}], graphLookup: "
+                                "[{$graphLookup: {from: 'qux'}}]}}"));
         auto aggReq = buildAggReq(nssFoo, pipeline);
         PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
             _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
@@ -1272,8 +1226,7 @@ TEST_F(AuthorizationSessionTest,
 TEST_F(AuthorizationSessionTest,
        CanAggregateFacetWithLookupAndGraphLookupWithFindOnJoinedNamespaces) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
 
         auto nssFoo = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrcFoo = ResourcePattern::forExactNamespace(nssFoo);
@@ -1287,9 +1240,10 @@ TEST_F(AuthorizationSessionTest,
                                              Privilege(rsrcQux, ActionType::find)},
                                             nssFoo.dbName());
 
-        BSONArray pipeline = BSON_ARRAY(
-            fromjson("{$facet: {lookup: [{$lookup: {from: 'bar', as: 'out'}}], graphLookup: "
-                     "[{$graphLookup: {from: 'qux'}}]}}"));
+        BSONArray pipeline =
+            BSON_ARRAY(fromjson("{$facet: {lookup: [{$lookup: {from: 'bar', as: 'out', localField: "
+                                "'a', foreignField: 'b'}}], graphLookup: "
+                                "[{$graphLookup: {from: 'qux'}}]}}"));
 
         auto aggReq = buildAggReq(nssFoo, pipeline);
         PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
@@ -1319,7 +1273,7 @@ TEST_F(AuthorizationSessionTest, AuthorizedSessionIsNotCoauthorizedNobody) {
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest->clone(), boost::none));
     ASSERT_FALSE(authzSession->isCoauthorizedWith(boost::none));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
 TEST_F(AuthorizationSessionTestWithoutAuth,
@@ -1329,21 +1283,21 @@ TEST_F(AuthorizationSessionTestWithoutAuth,
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest->clone(), boost::none));
     ASSERT_TRUE(authzSession->isCoauthorizedWith(kSpencerTest));
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
-const auto listTestCollectionsPayload = BSON("listCollections"_sd << 1 << "$db"
-                                                                  << "test"_sd);
+const auto listTestCollectionsPayload = BSON("listCollections"sv << 1 << "$db"
+                                                                 << "test"sv);
 const auto listTestCollectionsCmd =
     ListCollections::parse(listTestCollectionsPayload, IDLParserContext("listTestCollectionsCmd"));
-const auto listOtherCollectionsPayload = BSON("listCollections"_sd << 1 << "$db"
-                                                                   << "other"_sd);
+const auto listOtherCollectionsPayload = BSON("listCollections"sv << 1 << "$db"
+                                                                  << "other"sv);
 const auto listOtherCollectionsCmd = ListCollections::parse(
     listOtherCollectionsPayload, IDLParserContext("listOtherCollectionsCmd"));
 const auto listOwnTestCollectionsPayload =
-    BSON("listCollections"_sd << 1 << "$db"
-                              << "test"_sd
-                              << "nameOnly"_sd << true << "authorizedCollections"_sd << true);
+    BSON("listCollections"sv << 1 << "$db"
+                             << "test"sv
+                             << "nameOnly"sv << true << "authorizedCollections"sv << true);
 const auto listOwnTestCollectionsCmd = ListCollections::parse(
     listOwnTestCollectionsPayload, IDLParserContext("listOwnTestCollectionsCmd"));
 
@@ -1482,14 +1436,14 @@ TEST_F(AuthorizationSessionTest, MayBypassWriteBlockingModeIsSetCorrectly) {
                                                                                     << "db"
                                                                                     << "admin"))),
                                               BSONObj()));
-    authzSession->logoutDatabase(kTestDB, "End of test"_sd);
+    authzSession->logoutDatabase(kTestDB, "End of test"sv);
 
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kGMarksAdminRequest->clone(), boost::none));
     ASSERT_TRUE(authzSession->mayBypassWriteBlockingMode());
 
     // Remove that user by logging out of the admin db and ensure we can't bypass anymore
-    authzSession->logoutDatabase(kAdminDB, ""_sd);
+    authzSession->logoutDatabase(kAdminDB, ""sv);
     ASSERT_FALSE(authzSession->mayBypassWriteBlockingMode());
 
     // Add a user with the root role, which should confer restore role for cluster resource, and
@@ -1503,18 +1457,18 @@ TEST_F(AuthorizationSessionTest, MayBypassWriteBlockingModeIsSetCorrectly) {
                                                                                     << "db"
                                                                                     << "admin"))),
                                               BSONObj()));
-    authzSession->logoutDatabase(kAdminDB, ""_sd);
+    authzSession->logoutDatabase(kAdminDB, ""sv);
 
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kAdminAdminRequest->clone(), boost::none));
     ASSERT_TRUE(authzSession->mayBypassWriteBlockingMode());
 
     // Remove non-privileged user by logging out of test db and ensure we can still bypass
-    authzSession->logoutDatabase(kTestDB, ""_sd);
+    authzSession->logoutDatabase(kTestDB, ""sv);
     ASSERT_TRUE(authzSession->mayBypassWriteBlockingMode());
 
     // Remove privileged user by logging out of admin db and ensure we cannot bypass
-    authzSession->logoutDatabase(kAdminDB, ""_sd);
+    authzSession->logoutDatabase(kAdminDB, ""sv);
     ASSERT_FALSE(authzSession->mayBypassWriteBlockingMode());
 }
 
@@ -1539,128 +1493,7 @@ TEST_F(AuthorizationSessionTest, NoExpirationTime) {
     assertActive(testFooCollResource, ActionType::insert);
 
     // Assert that logout occurs normally.
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
-    assertLogout(testFooCollResource, ActionType::insert);
-}
-
-TEST_F(AuthorizationSessionTest, TenantSeparation) {
-    const UserName readWriteAnyDBUser = {"rwanyuser", "test"};
-    std::unique_ptr<UserRequest> readWriteAnyDBUserRequest =
-        std::make_unique<UserRequestGeneral>(readWriteAnyDBUser, boost::none);
-    const UserName tenant2SystemUser = {"gmarks", "test", kTenantId2};
-    std::unique_ptr<UserRequest> tenant2SystemUserRequest =
-        std::make_unique<UserRequestGeneral>(tenant2SystemUser, boost::none);
-    const UserName systemUser = {"spencer", "test"};
-    std::unique_ptr<UserRequest> systemUserRequest =
-        std::make_unique<UserRequestGeneral>(systemUser, boost::none);
-
-    auto testSystemRolesResource = ResourcePattern::forExactNamespace(
-        NamespaceString::createNamespaceString_forTest("test", "system.roles"));
-    auto testSystemRolesTenant2Resource = ResourcePattern::forExactNamespace(
-        NamespaceString::createNamespaceString_forTest(kTenantId2, "test", "system.roles"));
-
-    ASSERT_OK(createUser(kTenant1UserTest, {{"readWrite", "test"}}));
-    ASSERT_OK(createUser(kTenant2UserTest, {{"readWriteAnyDatabase", "admin"}}));
-    ASSERT_OK(createUser(kUser1Test, {{"readWrite", "test"}}));
-    ASSERT_OK(createUser(kUser2Test, {{"root", "admin"}}));
-    ASSERT_OK(createUser(readWriteAnyDBUser, {{"readWriteAnyDatabase", "admin"}}));
-    ASSERT_OK(createUser(tenant2SystemUser, {{"__system", "admin"}}));
-    ASSERT_OK(createUser(systemUser, {{"__system", "admin"}}));
-
-    // User with tenant ID #1 with basic read/write privileges on "test" should be able to write to
-    // tenant ID #1's test collection, and no others.
-    ASSERT_OK(authzSession->addAndAuthorizeUser(
-        _opCtx.get(), kTenant1UserTestRequest->clone(), boost::none));
-    assertActive(testTenant1FooCollResource, ActionType::insert);
-    assertNotAuthorized(testFooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTenant1UserTestRequest->getUserName().getDatabaseName(),
-                                 "Log out tenant 1 for test"_sd);
-    assertLogout(testTenant1FooCollResource, ActionType::insert);
-
-    // User with tenant ID #2 with readWriteAny should be able to write to any of tenant ID #2's
-    // normal collections, and no others.
-    ASSERT_OK(authzSession->addAndAuthorizeUser(
-        _opCtx.get(), kTenant2UserTestRequest->clone(), boost::none));
-    assertActive(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testFooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant1FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTenant2UserTestRequest->getUserName().getDatabaseName(),
-                                 "Log out tenant 2 for test"_sd);
-    assertLogout(testTenant2FooCollResource, ActionType::insert);
-
-    // User with no tenant ID with basic read/write privileges on "test" should be able to write to
-    // the no-tenant test collection, and no others.
-    ASSERT_OK(
-        authzSession->addAndAuthorizeUser(_opCtx.get(), kUser1TestRequest->clone(), boost::none));
-    assertActive(testFooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant1FooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTestDB, "Log out user 1 for test"_sd);
-    assertLogout(testFooCollResource, ActionType::insert);
-
-    // User with no tenant ID with root should be able to write to any tenant's normal
-    // collections, because boost::none acts as "any tenant" for privileges which don't specify a
-    // namespace/DB, and root has the useTenant privilege.
-    ASSERT_OK(
-        authzSession->addAndAuthorizeUser(_opCtx.get(), kUser2TestRequest->clone(), boost::none));
-    assertActive(testFooCollResource, ActionType::insert);
-    assertActive(testTenant1FooCollResource, ActionType::insert);
-    assertActive(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTestDB, "Log out user 2 for test"_sd);
-    assertLogout(testFooCollResource, ActionType::insert);
-
-    // User with no tenant ID with readWriteAnyDatabase should be able to write to normal
-    // collections with no tenant ID, because readWriteAnyDatabase lacks the useTenant privilege and
-    // thus can't read/write to other tenants' databases.
-    ASSERT_OK(authzSession->addAndAuthorizeUser(
-        _opCtx.get(), std::move(readWriteAnyDBUserRequest), boost::none));
-    assertActive(testFooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant1FooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTestDB, "Log out read/write any DB user for test"_sd);
-    assertLogout(testFooCollResource, ActionType::insert);
-
-    // User with tenant ID 2 with __system privileges should be able to write to any of tenant 2's
-    // collections, including system collections.
-    ASSERT_OK(authzSession->addAndAuthorizeUser(
-        _opCtx.get(), tenant2SystemUserRequest->clone(), boost::none));
-    assertActive(testTenant2FooCollResource, ActionType::insert);
-    assertNotAuthorized(testFooCollResource, ActionType::insert);
-    assertNotAuthorized(testTenant1FooCollResource, ActionType::insert);
-    assertNotAuthorized(testSystemRolesResource, ActionType::insert);
-    assertActive(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(tenant2SystemUserRequest->getUserName().getDatabaseName(),
-                                 "Log out tenant 2 system user for test"_sd);
-    assertLogout(testTenant2FooCollResource, ActionType::insert);
-
-    // User with no tenant ID with __system privileges should be able to write to any tenant's
-    // collections.
-    ASSERT_OK(
-        authzSession->addAndAuthorizeUser(_opCtx.get(), std::move(systemUserRequest), boost::none));
-    assertActive(testFooCollResource, ActionType::insert);
-    assertActive(testTenant1FooCollResource, ActionType::insert);
-    assertActive(testTenant2FooCollResource, ActionType::insert);
-    assertActive(testSystemRolesResource, ActionType::insert);
-    assertActive(testSystemRolesTenant2Resource, ActionType::insert);
-
-    authzSession->logoutDatabase(kTestDB, "Log out system user for test"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
     assertLogout(testFooCollResource, ActionType::insert);
 }
 
@@ -1706,127 +1539,12 @@ TEST_F(AuthorizationSessionTest, ExpiredSessionWithReauth) {
     assertExpired(testFooCollResource, ActionType::insert);
 
     // Check that explicit logout from an expired connection works as expected.
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
     assertLogout(ResourcePattern::forExactNamespace(
                      NamespaceString::createNamespaceString_forTest("anydb.somecollection")),
                  ActionType::insert);
 }
 
-
-TEST_F(AuthorizationSessionTest, ExpirationWithSecurityTokenNOK) {
-    constexpr auto kVTSKey = "secret"_sd;
-    RAIIServerParameterControllerForTest multitenanyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          kVTSKey);
-
-    // Tests authorization flow from unauthenticated to active (via token) to unauthenticated to
-    // active (via stateful connection) to unauthenticated.
-
-    // Create and authorize a security token user.
-    ASSERT_OK(createUser(kTenant1UserTest, {{"readWrite", "test"}, {"dbAdmin", "test"}}));
-    ASSERT_OK(createUser(kUser1Test, {{"readWriteAnyDatabase", "admin"}}));
-    ASSERT_OK(createUser(kTenant2UserTest, {{"readWriteAnyDatabase", "admin"}}));
-
-    {
-        auth::ValidatedTenancyScope validatedTenancyScope =
-            auth::ValidatedTenancyScopeFactory::create(
-                kTenant1UserTest,
-                kVTSKey,
-                auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
-
-        // Actual expiration used by AuthorizationSession will be the minimum of
-        // the token's known expiraiton time and the expiration time passed in.
-        const auto checkExpiration = [&](const boost::optional<Date_t>& expire,
-                                         const Date_t& expect) {
-            auth::ValidatedTenancyScope::set(_opCtx.get(), validatedTenancyScope);
-            ASSERT_OK(authzSession->addAndAuthorizeUser(
-                _opCtx.get(), kTenant1UserTestRequest->clone(), expire));
-            ASSERT_EQ(authzSession->getExpiration(), expect);
-
-            // Reset for next test.
-            auth::ValidatedTenancyScope::set(_opCtx.get(), boost::none);
-            authzSession->startRequest(_opCtx.get());
-            assertLogout(testTenant1FooCollResource, ActionType::insert);
-        };
-        const auto exp = validatedTenancyScope.getExpiration();
-        checkExpiration(boost::none, exp);    // Uses token's expiration
-        checkExpiration(Date_t::max(), exp);  // Longer expiration does not override token.
-        checkExpiration(exp - Seconds{1}, exp - Seconds{1});  // Shorter expiration does.
-    }
-
-    {
-        auth::ValidatedTenancyScope validatedTenancyScope =
-            auth::ValidatedTenancyScopeFactory::create(
-                kTenant1UserTest,
-                kVTSKey,
-                auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
-
-        // Perform authentication checks.
-        auth::ValidatedTenancyScope::set(_opCtx.get(), validatedTenancyScope);
-        ASSERT_OK(authzSession->addAndAuthorizeUser(
-            _opCtx.get(), kTenant1UserTestRequest->clone(), boost::none));
-
-        // Assert that the session is authenticated and authorized as expected.
-        assertSecurityToken(testTenant1FooCollResource, ActionType::insert);
-
-        // Since user has a tenantId, we expect it should only have access to its own collections.
-        assertNotAuthorized(testFooCollResource, ActionType::insert);
-        assertNotAuthorized(testTenant2FooCollResource, ActionType::insert);
-
-        // Assert that another user can't be authorized while the security token is auth'd.
-        ASSERT_NOT_OK(authzSession->addAndAuthorizeUser(
-            _opCtx.get(), kUser1TestRequest->clone(), boost::none));
-
-        // Check that starting a new request without the security token decoration results in token
-        // user logout.
-        auth::ValidatedTenancyScope::set(_opCtx.get(), boost::none);
-        authzSession->startRequest(_opCtx.get());
-        assertLogout(testTenant1FooCollResource, ActionType::insert);
-
-        // Assert that a connection-based user with an expiration policy can be authorized after
-        // token logout.
-        const auto kSomeCollNss = NamespaceString::createNamespaceString_forTest(
-            boost::none, "anydb"_sd, "somecollection"_sd);
-        const auto kSomeCollRsrc = ResourcePattern::forExactNamespace(kSomeCollNss);
-        ASSERT_OK(authzSession->addAndAuthorizeUser(
-            _opCtx.get(), kUser1TestRequest->clone(), Date_t() + Hours{1}));
-        assertActive(kSomeCollRsrc, ActionType::insert);
-
-        // Check that logout proceeds normally.
-        authzSession->logoutDatabase(kTestDB, "Log out readWriteAny user for test"_sd);
-        assertLogout(kSomeCollRsrc, ActionType::insert);
-    }
-
-    // Create a new validated tenancy scope for the readWriteAny tenant user.
-    {
-        auth::ValidatedTenancyScope validatedTenancyScope =
-            auth::ValidatedTenancyScopeFactory::create(
-                kTenant2UserTest,
-                kVTSKey,
-                auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
-        auth::ValidatedTenancyScope::set(_opCtx.get(), validatedTenancyScope);
-        auth::ValidatedTenancyScope::set(_opCtx.get(), validatedTenancyScope);
-
-        ASSERT_OK(authzSession->addAndAuthorizeUser(
-            _opCtx.get(), kTenant2UserTestRequest->clone(), boost::none));
-
-        // Ensure that even though it has the readWriteAny role, this user only has privileges on
-        // collections with matching tenant ID.
-        assertSecurityToken(testTenant2FooCollResource, ActionType::insert);
-
-        assertNotAuthorized(testFooCollResource, ActionType::insert);
-        assertNotAuthorized(testTenant1FooCollResource, ActionType::insert);
-
-        // Check that starting a new request without the security token decoration results in token
-        // user logout.
-        auth::ValidatedTenancyScope::set(_opCtx.get(), boost::none);
-        authzSession->startRequest(_opCtx.get());
-        assertLogout(testTenant2FooCollResource, ActionType::insert);
-    }
-}
 
 TEST_F(AuthorizationSessionTest, CheckBuiltInRolesForBypassDefaultMaxTimeMS) {
     // Verify the "root" role is authorised  for 'bypassDefaultMaxTimeMS'.
@@ -1843,7 +1561,7 @@ TEST_F(AuthorizationSessionTest, CheckBuiltInRolesForBypassDefaultMaxTimeMS) {
 }
 
 TEST_F(AuthorizationSessionTest, CheckAuthorizationForReleaseMemoryAuthorizedUser) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", false);
     authzManager->setAuthEnabled(true);
 
     UserName username("spencer", "admin", boost::none);
@@ -1906,7 +1624,7 @@ TEST_F(AuthorizationSessionTest, CheckAuthorizationForReleaseMemoryAuthorizedUse
 }
 
 TEST_F(AuthorizationSessionTest, CheckAuthorizationForReleaseMemoryUnauthorizedUser) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", false);
     authzManager->setAuthEnabled(true);
     UserName usernameUnauth("fakeSpencer", "admin");
 
@@ -2052,9 +1770,9 @@ protected:
 };
 
 const DatabaseName SystemBucketsTest::sb_db_test =
-    DatabaseName::createDatabaseName_forTest(boost::none, "sb_db_test"_sd);
+    DatabaseName::createDatabaseName_forTest(boost::none, "sb_db_test"sv);
 const DatabaseName SystemBucketsTest::sb_db_other =
-    DatabaseName::createDatabaseName_forTest(boost::none, "sb_db_other"_sd);
+    DatabaseName::createDatabaseName_forTest(boost::none, "sb_db_other"sv);
 
 const ResourcePattern SystemBucketsTest::testMissingSystemBucketResource(
     ResourcePattern::forExactNamespace(
@@ -2078,16 +1796,16 @@ const ResourcePattern SystemBucketsTest::otherDbSystemBucketResource(
 
 const ResourcePattern SystemBucketsTest::testBucketResource(
     ResourcePattern::forExactSystemBucketsCollection(NamespaceString::createNamespaceString_forTest(
-        boost::none /* tenantId */, "sb_db_test"_sd, "sb_coll_test"_sd)));
+        boost::none /* tenantId */, "sb_db_test"sv, "sb_coll_test"sv)));
 const ResourcePattern SystemBucketsTest::otherBucketResource(
     ResourcePattern::forExactSystemBucketsCollection(NamespaceString::createNamespaceString_forTest(
-        boost::none /* tenantId */, "sb_db_test"_sd, "sb_coll_other"_sd)));
+        boost::none /* tenantId */, "sb_db_test"sv, "sb_coll_other"sv)));
 const ResourcePattern SystemBucketsTest::otherDbBucketResource(
     ResourcePattern::forExactSystemBucketsCollection(NamespaceString::createNamespaceString_forTest(
-        boost::none /* tenantId */, "sb_db_other"_sd, "sb_coll_test"_sd)));
+        boost::none /* tenantId */, "sb_db_other"sv, "sb_coll_test"sv)));
 
 const ResourcePattern SystemBucketsTest::sbCollTestInAnyDB(
-    ResourcePattern::forAnySystemBucketsInAnyDatabase(boost::none, "sb_coll_test"_sd));
+    ResourcePattern::forAnySystemBucketsInAnyDatabase(boost::none, "sb_coll_test"sv));
 
 TEST_F(SystemBucketsTest, CheckExactSystemBucketsCollection) {
     // If we have a system_buckets exact priv
@@ -2400,7 +2118,7 @@ DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(NoPrivsWithAuthzChecks)
 // Test agg stage that doesn't use authz checks and doesn't use opt-out
 class TestDocumentSourceNoPrivsWithAuthzChecks : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$testNoPrivsWithAuthzChecks"_sd;
+    static constexpr std::string_view kStageName = "$testNoPrivsWithAuthzChecks"sv;
 
     class LiteParsed : public LiteParsedDocumentSourceDefault<LiteParsed> {
     public:
@@ -2438,8 +2156,8 @@ public:
         return GetNextResult::makeEOF();
     }
 
-    const char* getSourceName() const override {
-        return kStageName.data();
+    std::string_view getSourceName() const override {
+        return kStageName;
     }
 
     StageConstraints constraints(PipelineSplitState pipStage) const final {
@@ -2461,7 +2179,8 @@ public:
         const DistributedPlanContext* ctx) override {
         return DistributedPlanLogic{};
     }
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override {
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const override {
         return Value{};
     }
 
@@ -2487,10 +2206,10 @@ DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(NoPrivsWithAuthzChecksOptOut)
 class TestDocumentSourceNoPrivsWithAuthzChecksOptOut
     : public TestDocumentSourceNoPrivsWithAuthzChecks {
 public:
-    static constexpr StringData kStageName = "$testNoPrivsWithAuthzChecksOptOut"_sd;
+    static constexpr std::string_view kStageName = "$testNoPrivsWithAuthzChecksOptOut"sv;
 
-    const char* getSourceName() const override {
-        return kStageName.data();
+    std::string_view getSourceName() const override {
+        return kStageName;
     }
 
     class LiteParsedOptOut : public TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed {
@@ -2539,10 +2258,10 @@ DECLARE_STAGE_PARAMS_DERIVED_DEFAULT(WithPrivs)
 // Test agg stage that uses authz checks (no need for opt out)
 class TestDocumentSourceWithPrivs : public TestDocumentSourceNoPrivsWithAuthzChecks {
 public:
-    static constexpr StringData kStageName = "$testWithPrivs"_sd;
+    static constexpr std::string_view kStageName = "$testWithPrivs"sv;
 
-    const char* getSourceName() const override {
-        return kStageName.data();
+    std::string_view getSourceName() const override {
+        return kStageName;
     }
 
     class LiteParsedWithPrivs : public TestDocumentSourceWithPrivs::LiteParsed {
@@ -2598,9 +2317,8 @@ DEATH_TEST_F(
     AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyDisabled,
     "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
     "opt out by overriding requiresAuthzChecks to false") {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
-    RAIIServerParameterControllerForTest featureFlagController{"featureFlagMandatoryAuthzChecks",
-                                                               true};
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", false);
+    unittest::ServerParameterGuard featureFlagController{"featureFlagMandatoryAuthzChecks", true};
 
     auto nss = testFooNss;
     auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -2618,9 +2336,8 @@ DEATH_TEST_F(
     AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyEnabled,
     "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
     "opt out by overriding requiresAuthzChecks to false") {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest featureFlagController{"featureFlagMandatoryAuthzChecks",
-                                                               true};
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard featureFlagController{"featureFlagMandatoryAuthzChecks", true};
 
     auto nss = testTenant1FooNss;
     auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -2634,10 +2351,9 @@ DEATH_TEST_F(
 
 TEST_F(AuthorizationSessionTest, AggStagePassesRequiresAuthzChecksWithPrivilegesOrOptOut) {
     for (auto multitenancy : {false, true}) {
-        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
-                                                                    multitenancy);
-        RAIIServerParameterControllerForTest featureFlagController{
-            "featureFlagMandatoryAuthzChecks", true};
+        unittest::ServerParameterGuard multitenancyController("multitenancySupport", multitenancy);
+        unittest::ServerParameterGuard featureFlagController{"featureFlagMandatoryAuthzChecks",
+                                                             true};
 
         auto nss = multitenancy ? testTenant1FooNss : testFooNss;
         auto rsrc = ResourcePattern::forExactNamespace(nss);
@@ -2704,7 +2420,7 @@ TEST_F(AuthorizationSessionTest, DBDirectClientDoesNotPolluteContract) {
     ASSERT_FALSE(authzSession->getAuthorizationContract().contains(wrongContract));
 
     authzSession->endContractTracking();
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 
 
@@ -2767,7 +2483,7 @@ TEST_F(AuthorizationSessionTest, AuthorizationContractGuardRAII) {
 
         ASSERT_FALSE(authzSession->getAuthorizationContract().contains(wrongContract));
     }
-    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"sv);
 }
 }  // namespace
 }  // namespace mongo

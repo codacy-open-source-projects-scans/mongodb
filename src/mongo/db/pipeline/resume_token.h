@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -41,12 +14,14 @@
 #include <cstddef>
 #include <iosfwd>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 struct ResumeTokenData {
     /*
@@ -74,7 +49,7 @@ struct ResumeTokenData {
                     int versionIn,
                     size_t txnOpIndexIn,
                     const boost::optional<UUID>& uuidIn,
-                    StringData opType,
+                    std::string_view opType,
                     Value documentKey,
                     Value opDescription);
 
@@ -145,10 +120,10 @@ std::ostream& operator<<(std::ostream& out, const ResumeTokenData& tokenData);
  *
  *   As an optimization, the _typeBits field may be missing and should not affect token comparison.
  */
-class MONGO_MOD_PUBLIC ResumeToken {
+class [[MONGO_MOD_PUBLIC]] ResumeToken {
 public:
-    constexpr static StringData kDataFieldName = "_data"_sd;
-    constexpr static StringData kTypeBitsFieldName = "_typeBits"_sd;
+    constexpr static std::string_view kDataFieldName = "_data"sv;
+    constexpr static std::string_view kTypeBitsFieldName = "_typeBits"sv;
 
     /**
      * Parse a resume token from a BSON object; used as an interface to the IDL parser.
@@ -158,6 +133,23 @@ public:
     }
 
     static ResumeToken parse(const Document& document);
+
+    /**
+     * Extracts the timestamp value directly from the hex-encoded value 'hex'. This is a fast path
+     * for accessing the timestamp value without parsing, decoding and validating the full resume
+     * token. Only some residual checks are performed on the input value. The function will uassert
+     * if the timestamp part of the input is malformed.
+     */
+    static Timestamp extractClusterTimeFromHexData(std::string_view hex);
+
+    /**
+     * Extracts the timestamp value directly from the resume token 'token'. This is a fast path for
+     * accessing the timestamp value without parsing, decoding and validating the full resume token.
+     * Only some residual checks are performed on the input value. The function will uassert if the
+     * timestamp part of the input is malformed.
+     */
+    static Timestamp extractClusterTime(const BSONObj& token);
+    static Timestamp extractClusterTime(const Document& token);
 
     /**
      * Generate a high-water-mark token for 'clusterTime', with no UUID or documentKey.
@@ -184,16 +176,16 @@ public:
 
     /**
      * Convenience method to represent the ResumeToken as a Document.
-     * Provides support for specifying SerializationOptions, as this method is used to service the
-     * toBSON().
+     * Provides support for specifying query_shape::SerializationOptions, as this method is used to
+     * service the toBSON().
      */
-    Document toDocument(const SerializationOptions& options = {}) const;
+    Document toDocument(const query_shape::SerializationOptions& options = {}) const;
 
     /**
-     * Serialization to BSONObj. Provides support for specifying SerializationOptions,
+     * Serialization to BSONObj. Provides support for specifying query_shape::SerializationOptions,
      * as ResumeToken requires a "query_shape: custom" specification in its IDL uses.
      */
-    BSONObj toBSON(const SerializationOptions& options = {}) const;
+    BSONObj toBSON(const query_shape::SerializationOptions& options = {}) const;
 
     ResumeTokenData getData() const;
 

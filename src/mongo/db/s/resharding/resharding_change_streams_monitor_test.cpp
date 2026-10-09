@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
 
@@ -55,21 +29,23 @@
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
 
-const StringData kDefaultExecutorDescriptionSuffix = "Default";
+const std::string_view kDefaultExecutorDescriptionSuffix = "Default";
 
 class ReshardingChangeStreamsMonitorTest : public ShardServerTestFixtureWithCatalogCacheMock {
 public:
@@ -381,7 +357,7 @@ public:
                 auto opStr = doc.getStringField("op");
                 auto command = doc["command"].Obj();
 
-                StringData targetedNS;
+                std::string_view targetedNS;
                 if (opStr == "getmore") {
                     targetedNS = command.getStringField("collection");
                 } else if (opStr == "command") {
@@ -400,19 +376,19 @@ public:
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeTaskExecutor(
-        const StringData descSuffix = kDefaultExecutorDescriptionSuffix) {
+        const std::string_view descSuffix = kDefaultExecutorDescriptionSuffix) {
         return _makeTaskExecutor("ReshardingChangeStreamsMonitorTestExecutor" +
                                  std::string{descSuffix});
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeCleanupTaskExecutor(
-        const StringData descSuffix = kDefaultExecutorDescriptionSuffix) {
+        const std::string_view descSuffix = kDefaultExecutorDescriptionSuffix) {
         return _makeTaskExecutor("ReshardingChangeStreamsMonitorTestCleanupExecutor" +
                                  std::string{descSuffix});
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeMarkKilledTaskExecutor(
-        const StringData descSuffix = kDefaultExecutorDescriptionSuffix) {
+        const std::string_view descSuffix = kDefaultExecutorDescriptionSuffix) {
         return _makeTaskExecutor("ReshardingChangeStreamsMonitorTestMarkKilledExecutor" +
                                  std::string{descSuffix});
     }
@@ -448,12 +424,14 @@ protected:
     std::shared_ptr<HierarchicalCancelableOperationContextFactory> factory;
 
     // Set the batch size 1 to test multi-batch processing in unit tests with multiple events.
-    RAIIServerParameterControllerForTest batchSize{
+    unittest::ServerParameterGuard batchSize{
         "reshardingVerificationChangeStreamsEventsBatchSizeLimit", 1};
 
     int delta = 0;
     BSONObj resumeToken;
     bool completed;
+
+    // Note: callback is not thread-safe. Don't try to pass it to more than one monitor at a time.
     ReshardingChangeStreamsMonitor::BatchProcessedCallback callback = [&](const auto& batch) {
         delta += batch.getDocumentsDelta();
         resumeToken = batch.getResumeToken().getOwned();
@@ -567,8 +545,8 @@ TEST_F(ReshardingChangeStreamsMonitorTest, KillCursorAfterCancellationAndExecuto
 
 TEST_F(ReshardingChangeStreamsMonitorTest, ExitsPromptlyWhenChangeStreamInvalidates) {
     // Short batchTimeLimit so a busy loop would be visibly slow.
-    RAIIServerParameterControllerForTest batchTimeOverride{
-        "reshardingVerificationChangeStreamsEventsBatchTimeLimitSeconds", 3};
+    unittest::ServerParameterGuard batchTimeOverride{
+        "reshardingVerificationChangeStreamsEventsBatchTimeLimitMillis", 3000};
 
     createCollectionAndInsertDocuments(tempNss, 0 /*minDocValue*/, 0 /*maxDocValue*/);
     Timestamp startAtTime = replicationCoordinator()->getMyLastAppliedOpTime().getTimestamp();
@@ -609,7 +587,11 @@ TEST_F(ReshardingChangeStreamsMonitorTest, KillCursorFromPreviousTry) {
 
     // Start a monitor.
     auto monitor0 = std::make_shared<TestReshardingChangeStreamsMonitorNoKill>(
-        reshardingUUID, tempNss, startAtTime, boost::none /* startAfterResumeToken */, callback);
+        reshardingUUID,
+        tempNss,
+        startAtTime,
+        boost::none /* startAfterResumeToken */,
+        [](const auto&) {});
     auto awaitCompletion0 =
         monitor0->startMonitoring(executor, cleanupExecutor, cancelSource.token(), factory);
 
@@ -627,8 +609,12 @@ TEST_F(ReshardingChangeStreamsMonitorTest, KillCursorFromPreviousTry) {
 
     auto teardownGuard = ScopeGuard([&] { tearDownExecutors({executor1, cleanupExecutor1}); });
 
-    auto monitor1 = std::make_shared<ReshardingChangeStreamsMonitor>(
-        reshardingUUID, tempNss, startAtTime, boost::none /* startAfterResumeToken */, callback);
+    auto monitor1 =
+        std::make_shared<ReshardingChangeStreamsMonitor>(reshardingUUID,
+                                                         tempNss,
+                                                         startAtTime,
+                                                         boost::none /* startAfterResumeToken */,
+                                                         [](const auto&) {});
     auto awaitCompletion1 =
         monitor1->startMonitoring(executor1, cleanupExecutor1, cancelSource1.token(), factory1);
 
@@ -1188,7 +1174,7 @@ TEST_F(ReshardingChangeStreamsMonitorTest, ChangeBatchSizeWhileChangeStreamOpen)
     auto timesEntered = monitortHangFp->setMode(FailPoint::alwaysOn);
 
     // Update the batch size.
-    RAIIServerParameterControllerForTest batchSizeServerParameter0{
+    unittest::ServerParameterGuard batchSizeServerParameter0{
         "reshardingVerificationChangeStreamsEventsBatchSizeLimit", numEventsBatch0};
 
     auto monitorThread = stdx::thread([&] {
@@ -1216,7 +1202,7 @@ TEST_F(ReshardingChangeStreamsMonitorTest, ChangeBatchSizeWhileChangeStreamOpen)
     monitortHangFp->waitForTimesEntered(timesEntered + 1);
 
     // Update the batch size.
-    RAIIServerParameterControllerForTest batchSizeServerParameter1{
+    unittest::ServerParameterGuard batchSizeServerParameter1{
         "reshardingVerificationChangeStreamsEventsBatchSizeLimit", numEventsBatch1};
 
     // Turn on failpoint during processing to ensure the monitor will fail if the new batchSize is

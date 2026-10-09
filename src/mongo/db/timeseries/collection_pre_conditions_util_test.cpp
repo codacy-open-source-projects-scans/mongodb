@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/collection_pre_conditions_util.h"
 
@@ -52,7 +26,7 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, NoCollectionNotFound) {
         NamespaceString::createNamespaceString_forTest("test.nonexistentColl");
     auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
         _opCtx, collThatDoesntExist, /*expectedUUID=*/boost::none);
-    ASSERT(!preConditions.exists());
+    EXPECT_FALSE(preConditions.exists());
 }
 
 TEST_F(TimeseriesCollectionPreConditionsUtilTest, NonTimeseriesCollection) {
@@ -60,14 +34,14 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, NonTimeseriesCollection) {
     uassertStatusOK(createCollection(_opCtx, cmd));
     auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
         _opCtx, nonTsNss, /*expectedUUID=*/boost::none);
-    ASSERT(preConditions.exists());
-    ASSERT(!preConditions.isTimeseriesCollection());
-    ASSERT(!preConditions.isViewlessTimeseriesCollection());
+    EXPECT_TRUE(preConditions.exists());
+    EXPECT_FALSE(preConditions.isTimeseriesCollection());
+    EXPECT_FALSE(preConditions.isViewlessTimeseriesCollection());
 }
 
 // TODO SERVER-123350: Remove this test once 9.0 is last LTS.
 TEST_F(TimeseriesCollectionPreConditionsUtilTest, LegacyTimeseriesCollection) {
-    RAIIServerParameterControllerForTest featureFlagController(
+    unittest::ServerParameterGuard featureFlagController(
         "featureFlagCreateViewlessTimeseriesCollections", false);
 
     CreateCommand cmd = CreateCommand(viewfulTsNss);
@@ -78,15 +52,15 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, LegacyTimeseriesCollection) {
     auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
         _opCtx, viewfulTsNss, /*expectedUUID=*/boost::none);
 
-    ASSERT(preConditions.exists());
-    ASSERT(preConditions.isTimeseriesCollection());
-    ASSERT(!preConditions.isViewlessTimeseriesCollection());
-    ASSERT(preConditions.wasNssTranslated());
-    ASSERT_EQ(preConditions.getTargetNs(viewfulTsNss), viewfulTsSystemBucketsNss);
+    EXPECT_TRUE(preConditions.exists());
+    EXPECT_TRUE(preConditions.isTimeseriesCollection());
+    EXPECT_FALSE(preConditions.isViewlessTimeseriesCollection());
+    EXPECT_TRUE(preConditions.wasNssTranslated());
+    EXPECT_EQ(preConditions.getTargetNs(viewfulTsNss), viewfulTsSystemBucketsNss);
 }
 
 TEST_F(TimeseriesCollectionPreConditionsUtilTest, ViewlessTimeseriesCollection) {
-    RAIIServerParameterControllerForTest queryKnobController{
+    unittest::ServerParameterGuard queryKnobController{
         "featureFlagCreateViewlessTimeseriesCollections", true};
 
     CreateCommand cmd = CreateCommand(viewlessTsNss);
@@ -97,14 +71,14 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, ViewlessTimeseriesCollection) 
     auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
         _opCtx, viewlessTsNss, /*expectedUUID=*/boost::none);
 
-    ASSERT(preConditions.exists());
-    ASSERT(preConditions.isTimeseriesCollection());
-    ASSERT(preConditions.isViewlessTimeseriesCollection());
-    ASSERT(!preConditions.wasNssTranslated());
+    EXPECT_TRUE(preConditions.exists());
+    EXPECT_TRUE(preConditions.isTimeseriesCollection());
+    EXPECT_TRUE(preConditions.isViewlessTimeseriesCollection());
+    EXPECT_FALSE(preConditions.wasNssTranslated());
 }
 
 TEST_F(TimeseriesCollectionPreConditionsUtilTest, CollectionCreatedAfterPreConditionsCreated) {
-    RAIIServerParameterControllerForTest queryKnobController{
+    unittest::ServerParameterGuard queryKnobController{
         "featureFlagCreateViewlessTimeseriesCollections", true};
     auto preConditions = timeseries::CollectionPreConditions::getCollectionPreConditions(
         _opCtx, viewlessTsNss, /*expectedUUID=*/boost::none);
@@ -129,7 +103,7 @@ TEST_F(TimeseriesCollectionPreConditionsUtilTest, CollectionCreatedAfterPreCondi
 }
 
 TEST_F(TimeseriesCollectionPreConditionsUtilTest, DetectWhenCollectionIsDroppedAndReacquired) {
-    RAIIServerParameterControllerForTest queryKnobController{
+    unittest::ServerParameterGuard queryKnobController{
         "featureFlagCreateViewlessTimeseriesCollections", true};
     CreateCommand cmd = CreateCommand(viewlessTsNss);
     uassertStatusOK(createCollection(_opCtx, cmd));

@@ -1,7 +1,7 @@
 /**
  * Tests an extension transform stage.
  *
- * @tags: [featureFlagExtensionsAPI]
+ * @tags: [ featureFlagExtensionsAPI, requires_fcv_90 ]
  */
 
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
@@ -10,7 +10,14 @@ const collName = jsTestName();
 const coll = db[collName];
 coll.drop();
 
-const breadTypeOrderForDocs = ["sourdough", "rye", "whole wheat", "sourdough", "sourdough", "brioche"];
+const breadTypeOrderForDocs = [
+    "sourdough",
+    "rye",
+    "whole wheat",
+    "sourdough",
+    "sourdough",
+    "brioche",
+];
 assert.commandWorked(coll.insertMany(breadTypeOrderForDocs.map((i) => ({breadType: i}))));
 
 const runTestcase = (inputPipeline, expectedResults) => {
@@ -42,7 +49,12 @@ const sortFieldsRemoveId = {
                                             "$$value",
                                             [
                                                 {
-                                                    k: {$concat: ["slice", {$toString: {$size: "$$value"}}]},
+                                                    k: {
+                                                        $concat: [
+                                                            "slice",
+                                                            {$toString: {$size: "$$value"}},
+                                                        ],
+                                                    },
                                                     v: {
                                                         $arrayToObject: {
                                                             $filter: {
@@ -156,7 +168,11 @@ assert.eq(results.length, 0, results);
         },
     ];
     // The $unionWith has to run in the merging pipeline on a shard, so the $loaf stage will also run on the shard.
-    const pipeline = [{$unionWith: {coll: collName, pipeline: []}}, {$match: {breadType: "brioche"}}, basicLoafStage];
+    const pipeline = [
+        {$unionWith: {coll: collName, pipeline: []}},
+        {$match: {breadType: "brioche"}},
+        basicLoafStage,
+    ];
     runTestcase(pipeline, expectedResults);
 }
 
@@ -198,7 +214,11 @@ assert.eq(results.length, 0, results);
             },
         },
     ];
-    const inputPipeline = [{$match: {breadType: "sourdough"}}, buildLoafStage(2), buildLoafStage(2)];
+    const inputPipeline = [
+        {$match: {breadType: "sourdough"}},
+        buildLoafStage(2),
+        buildLoafStage(2),
+    ];
     runTestcase(inputPipeline, expectedResults);
 }
 
@@ -258,9 +278,10 @@ assert.eq(results.length, 0, results);
     runTestcase(inputPipeline, expectedResults);
 }
 
-// TODO SERVER-117259 Enable tests for $lookup.
 // Transform stage in $lookup.
-// results = coll.aggregate([{$lookup: {from: collName, pipeline: [{$loaf: {numSlices: 2}}], as: "slices"}}]).toArray();
-// assert.gt(results.length, 0);
+results = coll
+    .aggregate([{$lookup: {from: collName, pipeline: [{$loaf: {numSlices: 2}}], as: "slices"}}])
+    .toArray();
+assert.gt(results.length, 0);
 
 // TODO SERVER-117260 Test transform stage in $facet.

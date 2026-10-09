@@ -3,7 +3,6 @@
  *
  * @tags: [
  *   featureFlagExtensionsAPI,
- *   featureFlagVectorSimilarityExpressions,
  *   requires_fcv_82,
  * ]
  */
@@ -16,7 +15,9 @@ function withProjectScore(pipeline) {
 }
 
 function runNativeVectorSearch(spec, projectScore = false) {
-    const pipe = projectScore ? withProjectScore([{$nativeVectorSearch: spec}]) : [{$nativeVectorSearch: spec}];
+    const pipe = projectScore
+        ? withProjectScore([{$nativeVectorSearch: spec}])
+        : [{$nativeVectorSearch: spec}];
     return coll.aggregate(pipe).toArray();
 }
 
@@ -117,15 +118,30 @@ for (const metric of ["cosine", "dotProduct", "euclidean"]) {
 
     const limit = 2;
     assert.eq(
-        runNativeVectorSearchAndGetIds({path: "embedding", queryVector: [1, 0], limit, metric: "cosine"}),
+        runNativeVectorSearchAndGetIds({
+            path: "embedding",
+            queryVector: [1, 0],
+            limit,
+            metric: "cosine",
+        }),
         [1, 2],
     );
     assert.eq(
-        runNativeVectorSearchAndGetIds({path: "embedding", queryVector: [1, 0], limit, metric: "dotProduct"}),
+        runNativeVectorSearchAndGetIds({
+            path: "embedding",
+            queryVector: [1, 0],
+            limit,
+            metric: "dotProduct",
+        }),
         [2, 1],
     );
     assert.eq(
-        runNativeVectorSearchAndGetIds({path: "embedding", queryVector: [1, 0], limit, metric: "euclidean"}),
+        runNativeVectorSearchAndGetIds({
+            path: "embedding",
+            queryVector: [1, 0],
+            limit,
+            metric: "euclidean",
+        }),
         [1, 2],
     );
 }

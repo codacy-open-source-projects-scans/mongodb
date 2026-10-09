@@ -15,9 +15,6 @@
  *    step-up from occurring.
  *
  * @tags: [
- *   # This test passes for the wrong reason. The new primary aborts the index build on step up,
- *   # without trying to resume, which is expected to fail with a CannotIndexParallelArrays error.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   uses_prepare_transaction,
  *   uses_transactions,
  * ]
@@ -40,7 +37,9 @@ const primaryDB = primary.getDB(dbName);
 const primaryColl = primaryDB[collName];
 
 // This will cause the index build to fail with a CannotIndexParallelArrays error.
-assert.commandWorked(primaryColl.insert({_id: 1, x: [1, 2], y: [1, 2]}, {"writeConcern": {"w": 1}}));
+assert.commandWorked(
+    primaryColl.insert({_id: 1, x: [1, 2], y: [1, 2]}, {"writeConcern": {"w": 1}}),
+);
 
 // Enable fail point which makes hybrid index build to hang before it aborts.
 let failPoint;
@@ -53,7 +52,9 @@ let failPoint;
 // holding the lock.
 failPoint = "hangAfterInitializingIndexBuild";
 
-let res = assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
+let res = assert.commandWorked(
+    primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}),
+);
 let timesEntered = res.count;
 
 const indexName = "myidx";
@@ -111,9 +112,12 @@ assert.commandWorked(newSession.abortTransaction_forTesting());
 
 IndexBuildTest.waitForIndexBuildToStop(newPrimary.getDB(dbName), collName, indexName);
 IndexBuildTest.waitForIndexBuildToStop(primary.getDB(dbName), collName, indexName);
+
+// The new primary may resume the unfinished index build on step-up and only abort it once the
+// prepared transaction releases its locks. Wait for the abort to remove the index.
+IndexBuildTest.assertIndexesSoon(newPrimary.getDB(dbName).getCollection(collName), 1, ["_id_"], []);
 rst.awaitReplication();
 
-IndexBuildTest.assertIndexes(newPrimary.getDB(dbName).getCollection(collName), 1, ["_id_"], []);
 IndexBuildTest.assertIndexes(primaryColl, 1, ["_id_"], []);
 
 rst.stopSet();

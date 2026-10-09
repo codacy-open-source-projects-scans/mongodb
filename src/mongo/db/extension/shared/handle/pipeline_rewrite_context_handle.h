@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/db/extension/public/api.h"
@@ -43,7 +17,7 @@ enum PipelineRewriteRuleTags : uint32_t {
 
 class PipelineRewriteRule {
 public:
-    PipelineRewriteRule(std::string name, uint32_t tags) : name(std::move(name)), tags(tags) {};
+    PipelineRewriteRule(std::string_view name, uint32_t tags) : name(name), tags(tags) {};
 
     ::MongoExtensionPipelineRewriteRule convertToCRule() const {
         return {.name = {reinterpret_cast<const uint8_t*>(name.c_str()), name.size()},
@@ -105,6 +79,18 @@ public:
         return result;
     }
 
+    /**
+     * Computes and returns the DocsNeededBounds for all stages in the pipeline after the current
+     * stage.
+     */
+    MongoExtensionDocsNeededBounds getPipelineSuffixBounds() const {
+        MongoExtensionDocsNeededBounds result{};
+
+        invokeCAndConvertStatusToException(
+            [&]() { return _vtable().get_pipeline_suffix_bounds(get(), &result); });
+        return result;
+    }
+
     static void assertVTableConstraints(const VTable_t& vtable) {
         tassert(12200600,
                 "PipelineRewriteContextAPI 'get_nth_next_stage' is null",
@@ -115,6 +101,9 @@ public:
         tassert(12200607,
                 "PipelineRewriteContextAPI 'has_at_least_n_next_stages' is null",
                 vtable.has_at_least_n_next_stages != nullptr);
+        tassert(12200501,
+                "PipelineRewriteContextAPI 'get_pipeline_suffix_bounds' is null",
+                vtable.get_pipeline_suffix_bounds != nullptr);
     }
 };
 

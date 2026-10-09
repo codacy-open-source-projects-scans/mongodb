@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -59,7 +32,6 @@
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/generic_argument_gen.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/topology_version_gen.h"
@@ -68,6 +40,7 @@
 #include "mongo/transport/grpc_connection_stats_gen.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/unittest/integration_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
@@ -91,6 +64,7 @@
 #include <mutex>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -118,6 +92,7 @@ std::ostream& operator<<(std::ostream& out, const NetworkInterface::Counters& co
 }
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 BSONObj makeEchoCmdObj() {
     return BSON("echo" << 1 << "foo"
@@ -312,6 +287,12 @@ public:
         return ++numCurrentOpRan;
     }
 
+    Date_t now() {
+        return MONGO_likely(hasGlobalServiceContext())
+            ? getGlobalServiceContext()->getFastClockSource()->now()
+            : Date_t::now();
+    }
+
     const AsyncClientFactory& getFactory() {
         return checked_cast<NetworkInterfaceTL&>(net()).getClientFactory_forTest();
     }
@@ -423,7 +404,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelLocally) {
                                     .getNoThrow(interruptible()));
             });
 
-        fpb->waitForTimesEntered(fpb.initialTimesEntered() + 1);
+        fpb.waitForOneNewEntry();
 
         cancellationSource.cancel();
 
@@ -549,7 +530,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotelyTimedOut) {
         cancellationSource.cancel();
 
         // Wait for _killOperations for 'echo' to time out.
-        cmdFailedFpb->waitForTimesEntered(interruptible(), cmdFailedFpb.initialTimesEntered() + 1);
+        cmdFailedFpb.waitForOneNewEntry(interruptible());
 
         return deferred;
     }();
@@ -580,7 +561,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelBeforeConnection) {
     });
     ON_BLOCK_EXIT([&] { cmdThread.join(); });
 
-    fpb.get()->waitForTimesEntered(fpb->initialTimesEntered() + 1);
+    fpb->waitForOneNewEntry();
     cancellationSource.cancel();
     fpb.reset();
 
@@ -635,8 +616,8 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorDropsSingleCo
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutDuringConnectionHandshake) {
     SKIP_ON_GRPC("gRPC skips the handshake");
 
-    // If network timeout occurs during connection setup before handshake completes,
-    // HostUnreachable should be returned.
+    // If a network timeout occurs during connection setup before handshake completes, the egress
+    // pool reports it as ConnectionEstablishmentTimeout (previously HostUnreachable).
     FailPointEnableBlock fpb1(
         "connectionPoolDropConnectionsBeforeGetConnection",
         BSON("instance" << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
@@ -644,12 +625,15 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutDuringConnectionHands
         "triggerConnectionSetupHandshakeTimeout",
         BSON("instance" << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
     auto cbh = makeCallbackHandle();
-    auto deferred = runCommand(cbh, makeTestCommand(Milliseconds(100), makeEchoCmdObj()));
+    // The request does not need to have a timeout since the triggerConnectionSetupHandshakeTimeout
+    // failpoint already sets the timeout to 0ms.
+    auto deferred = runCommand(cbh, makeTestCommand(kNoTimeout, makeEchoCmdObj()));
 
     auto result = deferred.get(interruptible());
 
-    ASSERT_EQ(ErrorCodes::HostUnreachable, result.status);
-    // No timeouts are counted as a result of HostUnreachable being returned.
+    ASSERT_EQ(ErrorCodes::ConnectionEstablishmentTimeout, result.status);
+    // A connection-setup timeout is a failed establishment, not an operation timeout, so it is
+    // counted as failed (not timedOut).
     assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 1u, .succeeded = 0u});
 }
 
@@ -775,8 +759,8 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeout) {
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineSooner) {
     // Disable the local buffer time addition for straightforward assertions in this test.
-    const RAIIServerParameterControllerForTest bufferServerParameterRAII{
-        "maxTimeMsLocalBufferTimeMillis", 0};
+    const unittest::ServerParameterGuard bufferServerParameterRAII{"maxTimeMsLocalBufferTimeMillis",
+                                                                   0};
 
     // Kick off operation
     auto cb = makeCallbackHandle();
@@ -788,7 +772,6 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
     auto client = serviceContext->getService()->makeClient("NetworkClient");
     auto opCtx = client->makeOperationContext();
 
-    Timer stopWatch{serviceContext->getTickSource()};
     opCtx->setDeadlineByDate(serviceContext->getPreciseClockSource()->now() + opCtxDeadline,
                              ErrorCodes::ExceededTimeLimit);
 
@@ -809,12 +792,8 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
 
     auto request = makeTestCommand(requestTimeout, makeEchoCmdObj(), opCtx.get());
 
+    const auto start_time = now();
     auto deferred = runCommand(cb, request);
-    // The time returned in result.elapsed is measured from when the command started, which happens
-    // in runCommand. The delay between setting the deadline on opCtx and starting the command can
-    // be long enough that the assertion about opCtxDeadline fails.
-    auto networkStartCommandDelay = stopWatch.elapsed();
-
     auto result = deferred.get(interruptible());
 
     ASSERT_EQ(ErrorCodes::ExceededTimeLimit, result.status);
@@ -822,8 +801,11 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
 
     // check that the request timeout uses the smaller of the operation context deadline and
     // the timeout specified in the request constructor.
-    ASSERT_GTE(result.elapsed.value() + networkStartCommandDelay + Milliseconds(1), opCtxDeadline);
-    ASSERT_LT(result.elapsed.value(), requestTimeout);
+    // NB: if we experience test flake on the ASSERT_LT/upper bound check, consider deleting
+    // it. Upper bound time checks can never be provably correct in all cases.
+    const auto current_time = now();
+    ASSERT_GTE(current_time, opCtx->getDeadline());
+    ASSERT_LT(current_time, start_time + requestTimeout);
     ASSERT_EQ(result.target, fixture().getServers().front());
 
     // The number of timed-out operations is 1 because of the echo command. The number of succeeded
@@ -833,22 +815,14 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineLater) {
     // Disable the local buffer time addition for straightforward assertions in this test.
-    const RAIIServerParameterControllerForTest bufferServerParameterRAII{
-        "maxTimeMsLocalBufferTimeMillis", 0};
+    const unittest::ServerParameterGuard bufferServerParameterRAII{"maxTimeMsLocalBufferTimeMillis",
+                                                                   0};
 
     // Kick off operation
     auto cb = makeCallbackHandle();
 
     constexpr auto opCtxDeadline = Milliseconds{1000};
     constexpr auto requestTimeout = Milliseconds{600};
-
-    auto serviceContext = ServiceContext::make();
-    auto client = serviceContext->getService()->makeClient("NetworkClient");
-    auto opCtx = client->makeOperationContext();
-
-    Timer timer{serviceContext->getTickSource()};
-    opCtx->setDeadlineByDate(serviceContext->getPreciseClockSource()->now() + opCtxDeadline,
-                             ErrorCodes::ExceededTimeLimit);
 
     assertCommandOK(DatabaseName::kAdmin,
                     BSON("configureFailPoint" << "failCommand"
@@ -865,28 +839,26 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
                                                   << "off"));
     });
 
+    auto serviceContext = ServiceContext::make();
+    auto client = serviceContext->getService()->makeClient("NetworkClient");
+    auto opCtx = client->makeOperationContext();
+
+    opCtx->setDeadlineByDate(now() + opCtxDeadline, ErrorCodes::ExceededTimeLimit);
+
     auto request = makeTestCommand(
         requestTimeout, makeEchoCmdObj(), opCtx.get(), false, ErrorCodes::MaxTimeMSExpired);
-    auto createRequestDelay = timer.elapsed();
 
     auto deferred = runCommand(cb, request);
-    // The time returned in result.elapsed is measured from when the command started, which happens
-    // in runCommand. The delay between setting the deadline on opCtx and starting the command can
-    // be long enough that the assertion about opCtxDeadline fails.
-    auto networkStartCommandDelay = timer.elapsed();
-
     auto result = deferred.get(interruptible());
 
     ASSERT_EQ(ErrorCodes::MaxTimeMSExpired, result.status);
     ASSERT(result.elapsed);
 
     // check that the request timeout uses the smaller of the operation context deadline and
-    // the timeout specified in the request constructor.
-    // The absolute deadline is calculated in the RemoteCommandRequest constructor, while the
-    // request timer starts in `runCommand`. `createRequestDelay` may be slightly too low to capture
-    // this discrepancy, so we add some headroom to the final assertion here.
-    ASSERT_GTE(result.elapsed.value() + createRequestDelay + Milliseconds(1), requestTimeout);
-    ASSERT_LT(result.elapsed.value() + networkStartCommandDelay, opCtxDeadline);
+    // the deadline calculated in the request constructor.
+    const auto current_time = now();
+    ASSERT_GTE(current_time, request.deadline);
+    ASSERT_LT(current_time, opCtx->getDeadline());
 
     // The number of timed-out operations is 1 because of the echo command. The number of succeeded
     // operations is 1 because of the 'configureFailPoint' command.
@@ -897,8 +869,16 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
 // to fire later than the nominal deadline.
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutLocalBufferExtendsDeadline) {
     constexpr auto bufferMs = Milliseconds{500};
-    const RAIIServerParameterControllerForTest bufferServerParameterRAII{
-        "maxTimeMsLocalBufferTimeMillis", bufferMs.count()};
+    const unittest::ServerParameterGuard bufferServerParameterRAII{"maxTimeMsLocalBufferTimeMillis",
+                                                                   bufferMs.count()};
+
+    // Pre-warm the pool with a connection so the next command acquires one immediately. Connection
+    // acquisition is bounded by the request deadline (without the buffer), and the local timer with
+    // the buffer only kicks off after acquisition succeeds. If acquiring a connection (e.g.
+    // establishing a gRPC channel) takes longer than the short request timeout below, the request
+    // would fail with a connection error (e.g. HostUnreachable) before the local timer can fire,
+    // so the local buffer would not be exercised.
+    assertCommandOK(DatabaseName::kAdmin, BSON("ping" << 1));
 
     // Block the remote handling of "ping" for much longer than our timeout, so the local timer
     // is the one that fires.
@@ -907,6 +887,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutLocalBufferExt
 
     auto cb = makeCallbackHandle();
     constexpr auto requestTimeout = Milliseconds{100};
+    const auto expirationTime = now() + failCommandBlockTime;
     auto request = makeTestCommand(
         requestTimeout, BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired);
     auto deferred = runCommand(cb, request);
@@ -915,12 +896,11 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutLocalBufferExt
     ASSERT_EQ(ErrorCodes::MaxTimeMSExpired, result.status);
     ASSERT(result.elapsed);
 
-    // The elapsed time should be at least requestTimeout + buffer, minus a small buffer to account
-    // for the time that may pass between calculating the timeout in RCR and starting the timer in
-    // the NITL.
-    ASSERT_GTE(result.elapsed.value(), (requestTimeout + bufferMs) - Milliseconds(10));
-    // And it should not have waited the full failCommand blockTime.
-    ASSERT_LT(result.elapsed.value(), failCommandBlockTime);
+    // The elapsed time should be at least requestTimeout + buffer, and it should
+    // not have waited the full failCommand blockTime.
+    const auto current_time = now();
+    ASSERT_GTE(current_time, request.deadline + bufferMs);
+    ASSERT_LT(request.deadline, expirationTime);
 }
 
 // Test that the "numRequestsTimedOutBeforeSentToRemote" serverStatus metric is incremented when
@@ -974,48 +954,37 @@ TEST_F(NetworkInterfaceTest, NumRequestsTimedOutBeforeSentToRemoteMetric) {
     resetIsInternalClient(true);
     ON_BLOCK_EXIT([&] { resetIsInternalClient(false); });
 
-    // Pre-warm the pool with 2 connection.
+    // Pre-warm the pool with a connection so the command acquires one immediately.
     {
         auto fpGuard = configureFailCommand("echo", {}, Milliseconds(500));
-        auto f1 = runCommand(makeCallbackHandle(), makeTestCommand(Seconds(5), makeEchoCmdObj()));
-        auto f2 = runCommand(makeCallbackHandle(), makeTestCommand(Seconds(5), makeEchoCmdObj()));
-        f1.get(interruptible());
-        f2.get(interruptible());
+        runCommand(makeCallbackHandle(), makeTestCommand(Seconds(5), makeEchoCmdObj()))
+            .get(interruptible());
     }
 
     auto metricBefore = getMetric("numRequestsTimedOutBeforeSentToRemote");
 
-    boost::optional<FailPointEnableBlock> fpb("networkInterfaceHangCommandsAfterAcquireConn");
+    // Configure the failpoint to sleep for longer than the command's deadline. The deadline
+    // check runs after the failpoint, so it is guaranteed to see an expired deadline.
+    constexpr auto kDeadline = Milliseconds(100);
+    boost::optional<FailPointEnableBlock> fpb;
+    fpb.emplace("networkInterfaceDelayCommandsAfterAcquireConn",
+                BSON("delayMs" << (kDeadline.count() + 1)));
 
-    auto cbA = makeCallbackHandle();
-    auto futA = runCommand(cbA, makeTestCommand(kMaxWait, BSON("ping" << 1)));
+    auto cb = makeCallbackHandle();
+    auto fut =
+        runCommand(cb,
+                   makeTestCommand(
+                       kDeadline, BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired));
 
-    // Wait for A to reach the failpoint, confirming the reactor thread is blocked.
-    fpb.get()->waitForTimesEntered(fpb->initialTimesEntered() + 1);
-
-    auto cbB = makeCallbackHandle();
-    auto futB = runCommand(
-        cbB,
-        makeTestCommand(
-            Milliseconds(100), BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired));
-
-    // Wait for B's deadline to expire while its sendRequest is blocked behind A.
-    sleepmillis(500);
-
-    // Release the failpoint. A's sendRequest continues (sends ping), then the reactor picks
-    // up B's queued sendRequest, which finds its deadline expired and increments the metric.
+    // Wait for the command to enter the failpoint, then reset it. The failpoint sleeps
+    // internally for kDeadline+1ms, so by the time it exits the deadline is guaranteed expired.
+    fpb->waitForOneNewEntry();
     fpb.reset();
 
-    // B should have timed out before sending.
-    auto resultB = futB.get(interruptible());
-    ASSERT(!resultB.isOK());
-    ASSERT_EQ(resultB.status.code(), ErrorCodes::MaxTimeMSExpired);
+    auto result = fut.get(interruptible());
+    ASSERT(!result.isOK());
+    ASSERT_EQ(result.status.code(), ErrorCodes::MaxTimeMSExpired);
 
-    // A should succeed normally.
-    auto resultA = futA.get(interruptible());
-    ASSERT(resultA.isOK());
-
-    // Verify the metric was incremented.
     auto metricAfter = getMetric("numRequestsTimedOutBeforeSentToRemote");
     ASSERT_GT(metricAfter, metricBefore);
 }
@@ -1039,8 +1008,8 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, StartCommand) {
     // { echo: { echo: 1, foo: "bar", clientOperationKey: uuid, $db: "admin" }, ok: 1.0 }
     auto cmdObj = res.data.getObjectField("echo");
     ASSERT_EQ(1, cmdObj.getIntField("echo"));
-    ASSERT_EQ("bar"_sd, cmdObj.getStringField("foo"));
-    ASSERT_EQ("admin"_sd, cmdObj.getStringField("$db"));
+    ASSERT_EQ("bar"sv, cmdObj.getStringField("foo"));
+    ASSERT_EQ("admin"sv, cmdObj.getStringField("$db"));
     ASSERT_FALSE(cmdObj["clientOperationKey"].eoo());
     ASSERT_EQ(1, res.data.getIntField("ok"));
     assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 1u});
@@ -1285,7 +1254,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TearDownWaitsForInProgress) 
         });
 
         // Wait for the completion of the command
-        fpb->waitForTimesEntered(fpb.initialTimesEntered() + 1);
+        fpb.waitForOneNewEntry();
 
         tearDownThread = stdx::thread([this, promise = std::move(tearDownPF.promise)]() mutable {
             tearDown();
@@ -1334,8 +1303,8 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, RunCommandOnLeasedStream) {
     // { echo: { echo: 1, foo: "bar", $db: "admin" }, ok: 1.0 }
     auto cmdObj = res.data.getObjectField("echo");
     ASSERT_EQ(1, cmdObj.getIntField("echo"));
-    ASSERT_EQ("bar"_sd, cmdObj.getStringField("foo"));
-    ASSERT_EQ("admin"_sd, cmdObj.getStringField("$db"));
+    ASSERT_EQ("bar"sv, cmdObj.getStringField("foo"));
+    ASSERT_EQ("admin"sv, cmdObj.getStringField("$db"));
     ASSERT_EQ(1, res.data.getIntField("ok"));
 }
 
@@ -1351,7 +1320,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorAssociatedWit
 
     auto result = deferred.get(interruptible());
 
-    ASSERT_EQ(ErrorCodes::HostUnreachable, result.status);
+    ASSERT_EQ(ErrorCodes::SocketException, result.status);
     ASSERT_EQ(result.target, fixture().getServers().front());
     assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 1u, .succeeded = 0u});
 }
@@ -1385,7 +1354,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ShutdownBeforeSendRequest) {
     });
 
     // Once the command thread has reached the failpoint, begin shutdown.
-    fpb.get()->waitForTimesEntered(fpb->initialTimesEntered() + 1);
+    fpb->waitForOneNewEntry();
 
     Notification<void> shutdownComplete;
     auto shutdownThread = stdx::thread([&]() {
@@ -1395,7 +1364,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ShutdownBeforeSendRequest) {
     ON_BLOCK_EXIT([&] { shutdownThread.join(); });
 
     // Wait for the shutdown thread to start draining operations in shutdown.
-    shutdownFp.get()->waitForTimesEntered(shutdownFp->initialTimesEntered() + 1);
+    shutdownFp->waitForOneNewEntry();
 
     // Disable the failpoint so the reactor can proceed and attempt to send the request.
     // Shutdown and draining should then complete despite the blocking failCommand, since the
@@ -1482,8 +1451,10 @@ public:
 protected:
     std::unique_ptr<NetworkInterface> _makeNet(std::string instanceName,
                                                transport::TransportProtocol protocol) override {
-        return makeNetworkInterface(
-            instanceName, std::move(_hook), nullptr, makeDefaultConnectionPoolOptions(), protocol);
+        return makeNetworkInterface(instanceName,
+                                    {.connectionHook = std::move(_hook),
+                                     .connectionPoolOptions = makeDefaultConnectionPoolOptions(),
+                                     .protocol = protocol});
     }
 
 private:

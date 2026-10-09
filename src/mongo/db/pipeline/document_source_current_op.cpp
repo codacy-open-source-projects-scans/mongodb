@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/document_source_current_op.h"
@@ -39,25 +13,28 @@
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
-const StringData kAllUsersFieldName = "allUsers"_sd;
-const StringData kIdleConnectionsFieldName = "idleConnections"_sd;
-const StringData kIdleSessionsFieldName = "idleSessions"_sd;
-const StringData kLocalOpsFieldName = "localOps"_sd;
-const StringData kTruncateOpsFieldName = "truncateOps"_sd;
-const StringData kIdleCursorsFieldName = "idleCursors"_sd;
-const StringData kBacktraceFieldName = "backtrace"_sd;
-const StringData kTargetAllNodesFieldName = "targetAllNodes"_sd;
+const std::string_view kAllUsersFieldName = "allUsers"sv;
+const std::string_view kIdleConnectionsFieldName = "idleConnections"sv;
+const std::string_view kIdleSessionsFieldName = "idleSessions"sv;
+const std::string_view kLocalOpsFieldName = "localOps"sv;
+const std::string_view kTruncateOpsFieldName = "truncateOps"sv;
+const std::string_view kIdleCursorsFieldName = "idleCursors"sv;
+const std::string_view kBacktraceFieldName = "backtrace"sv;
+const std::string_view kTargetAllNodesFieldName = "targetAllNodes"sv;
 
-const StringData kOpIdFieldName = "opid"_sd;
-const StringData kClientFieldName = "client"_sd;
-const StringData kMongosClientFieldName = "client_s"_sd;
-const StringData kShardFieldName = "shard"_sd;
+const std::string_view kOpIdFieldName = "opid"sv;
+const std::string_view kClientFieldName = "client"sv;
+const std::string_view kMongosClientFieldName = "client_s"sv;
+const std::string_view kShardFieldName = "shard"sv;
 }  // namespace
 
 using boost::intrusive_ptr;
@@ -72,7 +49,7 @@ REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(currentOp,
 
 ALLOCATE_DOCUMENT_SOURCE_ID(currentOp, DocumentSourceCurrentOp::id)
 
-constexpr StringData DocumentSourceCurrentOp::kStageName;
+constexpr std::string_view DocumentSourceCurrentOp::kStageName;
 
 std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
@@ -93,7 +70,7 @@ std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::Li
     // the presence of a 'localOps' field, which instructs this $currentOp to list local mongoS
     // operations rather than forwarding the request to the shards.
     for (auto&& elem : spec.embeddedObject()) {
-        if (elem.fieldNameStringData() == "allUsers"_sd) {
+        if (elem.fieldNameStringData() == "allUsers"sv) {
             if (elem.type() != BSONType::boolean) {
                 uasserted(ErrorCodes::TypeMismatch,
                           str::stream() << "The 'allUsers' parameter of the $currentOp stage "
@@ -121,8 +98,8 @@ std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::Li
         spec, nss.tenantId(), allUsers, localOps);
 }
 
-const char* DocumentSourceCurrentOp::getSourceName() const {
-    return kStageName.data();
+std::string_view DocumentSourceCurrentOp::getSourceName() const {
+    return kStageName;
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceCurrentOp::createFromBson(
@@ -230,7 +207,7 @@ intrusive_ptr<DocumentSourceCurrentOp> DocumentSourceCurrentOp::create(
                                        targetAllNodes);
 }
 
-Value DocumentSourceCurrentOp::serialize(const SerializationOptions& opts) const {
+Value DocumentSourceCurrentOp::serialize(const query_shape::SerializationOptions& opts) const {
     return Value(Document{
         {getSourceName(),
          Document{

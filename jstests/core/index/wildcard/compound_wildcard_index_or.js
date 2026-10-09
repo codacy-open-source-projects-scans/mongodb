@@ -3,6 +3,7 @@
  * OR queries.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_against_mongod_not_mongos,
  *   assumes_read_concern_local,
  *   assumes_balancer_off,
@@ -37,7 +38,9 @@ const documentList = [
     },
 ];
 
-const pipeline = [{$match: {$or: [{"str": {$regex: /^Chicken/}}, {"obj.obj.obj.obj.obj": {$exists: true}}]}}];
+const pipeline = [
+    {$match: {$or: [{"str": {$regex: /^Chicken/}}, {"obj.obj.obj.obj.obj": {$exists: true}}]}},
+];
 
 const indexList = [{"obj.obj.obj.$**": 1}, {"str": -1, "obj.obj.obj.obj.$**": -1}];
 
@@ -88,7 +91,10 @@ for (const stage of planStages) {
         assert.eq(stage.keyPattern, expectedKeyPattern, stage);
         assert.eq(
             stage.indexBounds["$_path"],
-            ['["obj.obj.obj.obj.obj", "obj.obj.obj.obj.obj"]', '["obj.obj.obj.obj.obj.", "obj.obj.obj.obj.obj/")'],
+            [
+                '["obj.obj.obj.obj.obj", "obj.obj.obj.obj.obj"]',
+                '["obj.obj.obj.obj.obj.", "obj.obj.obj.obj.obj/")',
+            ],
             stage,
         );
         assert.eq(stage.indexBounds["obj.obj.obj.obj.obj"], ["[MinKey, MaxKey]"], stage);
@@ -112,7 +118,9 @@ assert.commandWorked(
     ]),
 );
 
-explain = assert.commandWorked(collTwoCWI.find({$or: [{num: {$gte: 1}}, {"sub.str": "aa"}]}).explain("executionStats"));
+explain = assert.commandWorked(
+    collTwoCWI.find({$or: [{num: {$gte: 1}}, {"sub.str": "aa"}]}).explain("executionStats"),
+);
 winningPlan = getWinningPlanFromExplain(explain);
 planStages = getPlanStages(winningPlan, "IXSCAN");
 

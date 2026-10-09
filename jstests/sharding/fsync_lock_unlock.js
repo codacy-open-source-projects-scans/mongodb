@@ -38,7 +38,9 @@ function waitUntilOpCountIs(opFilter, num, st) {
 }
 
 async function runTransaction() {
-    const {withTxnAndAutoRetryOnMongos} = await import("jstests/libs/auto_retry_transaction_in_sharding.js");
+    const {withTxnAndAutoRetryOnMongos} = await import(
+        "jstests/libs/auto_retry_transaction_in_sharding.js"
+    );
 
     // Start the transaction and insert a document.
     const sessionOptions = {causalConsistency: false};

@@ -14,7 +14,6 @@ import {stopServerReplication} from "jstests/libs/write_concern_util.js";
 
 // The following checks use connections to shards cached on the ShardingTest object, but this test
 // restarts a shard, so the cached connection is not usable.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
 let st = new ShardingTest({
@@ -28,14 +27,18 @@ let st = new ShardingTest({
 });
 
 jsTestLog("Setting up initial data");
-assert.commandWorked(st.s0.adminCommand({enableSharding: "test", primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s0.adminCommand({enableSharding: "test", primaryShard: st.shard0.shardName}),
+);
 for (let i = 0; i < 100; i++) {
     assert.commandWorked(st.s.getDB("test").foo.insert({_id: i}));
 }
 
 assert.commandWorked(st.s0.adminCommand({shardCollection: "test.foo", key: {_id: 1}}));
 assert.commandWorked(st.s0.adminCommand({split: "test.foo", find: {_id: 50}}));
-assert.commandWorked(st.s0.adminCommand({moveChunk: "test.foo", find: {_id: 75}, to: st.shard1.shardName}));
+assert.commandWorked(
+    st.s0.adminCommand({moveChunk: "test.foo", find: {_id: 75}, to: st.shard1.shardName}),
+);
 
 // Make sure the pre-existing mongos already has the routing information loaded into memory
 assert.eq(100, st.s.getDB("test").foo.find().itcount());
@@ -47,7 +50,9 @@ stopServerReplication(secondary);
 
 const collection = st.s0.getCollection("test.foo");
 for (let i = 75; i < 100; ++i) {
-    assert.commandWorked(collection.update({_id: i}, {$inc: {x: 1}}, {writeConcern: {w: "majority"}}));
+    assert.commandWorked(
+        collection.update({_id: i}, {$inc: {x: 1}}, {writeConcern: {w: "majority"}}),
+    );
 }
 
 jsTestLog("Shutting down all config servers");
@@ -114,7 +119,10 @@ sleep(60000);
 jsTestLog("Queries against the original mongos should work again");
 assert.eq(100, st.s.getDB("test").foo.find().itcount());
 
-jsTestLog("Should now be possible to connect to the mongos that was started while the config " + "servers were down");
+jsTestLog(
+    "Should now be possible to connect to the mongos that was started while the config " +
+        "servers were down",
+);
 let newMongosConn = null;
 let caughtException = null;
 assert.soon(

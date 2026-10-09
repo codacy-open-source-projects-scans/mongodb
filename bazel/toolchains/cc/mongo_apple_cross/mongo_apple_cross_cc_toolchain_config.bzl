@@ -6,7 +6,7 @@ local sandboxed builds and remote execution work correctly.
 """
 
 load(
-    "@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl",
+    "@rules_cc//cc:cc_toolchain_config_lib.bzl",
     "artifact_name_pattern",
     "feature",
     "flag_group",
@@ -14,7 +14,13 @@ load(
     "tool_path",
     "variable_with_value",
 )
-load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
+load("@rules_cc//cc:action_names.bzl", "ACTION_NAMES")
+load(
+    "//bazel/toolchains/cc:mongo_custom_features.bzl",
+    "get_common_features",
+)
+load("@rules_cc//cc/toolchains:cc_toolchain_config_info.bzl", "CcToolchainConfigInfo")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 
 _OBJCPP_EXECUTABLE_ACTION_NAME = "objc++-executable"
 
@@ -190,12 +196,6 @@ def _impl(ctx):
         "-B" + prefix + "/tools",
         "-fuse-ld=lld",
         "-Wl,-platform_version,macos," + ctx.attr.min_macos_version + ",14.0",
-        # Force-load all members of static libraries. This is required because
-        # MongoDB uses MONGO_INITIALIZER registrations via static constructors
-        # that have no direct symbol references - without this, ld64 drops the
-        # object files containing them. The GNU ld equivalent is --whole-archive
-        # but ld64 mode doesn't support positional wrapping; -all_load is global.
-        "-Wl,-all_load",
     ]
 
     # Feature definitions
@@ -228,9 +228,10 @@ def _impl(ctx):
                 actions = all_compile_actions,
                 flag_groups = [
                     flag_group(flags = cross_compile_flags + [
-                        "-Wall",
-                        "-Wextra",
-                        "-Werror=return-type",
+                        # Match the native macOS toolchain (mongo_apple_llvm_cc_toolchain_config),
+                        # which does not pass -Wall or -Wextra. The only -Werror enablement comes
+                        # from the warnings_as_errors_compile feature in get_common_features()
+                        # below, applied to whatever warnings clang has on by default.
                         "-fno-strict-aliasing",
                         "-fno-omit-frame-pointer",
                     ]),
@@ -582,11 +583,22 @@ def _impl(ctx):
                                 flags = ["%{libraries_to_link.name}"],
                             ),
                             flag_group(
+                                flag_groups = [
+                                    flag_group(
+                                        flags = ["%{libraries_to_link.name}"],
+                                        expand_if_false = "libraries_to_link.is_whole_archive",
+                                    ),
+                                    flag_group(
+                                        # ld64.lld does not support positional
+                                        # --whole-archive wrapping in Mach-O mode.
+                                        flags = ["-Wl,-force_load,%{libraries_to_link.name}"],
+                                        expand_if_true = "libraries_to_link.is_whole_archive",
+                                    ),
+                                ],
                                 expand_if_equal = variable_with_value(
                                     name = "libraries_to_link.type",
                                     value = "static_library",
                                 ),
-                                flags = ["%{libraries_to_link.name}"],
                             ),
                             flag_group(
                                 expand_if_equal = variable_with_value(
@@ -609,7 +621,62 @@ def _impl(ctx):
         ],
     )
 
-    # Collect all features
+    # macOS-specific warnings, mirroring the native Apple toolchain's
+    # macos_general_warnings feature. The native toolchain also passes
+    # -Wno-enum-constexpr-conversion, but the LLVM bundled in this toolchain
+    # (22.x) doesn't recognize that option, so it's omitted here.
+    macos_general_warnings_feature = feature(
+        name = "macos_general_warnings",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = all_compile_actions,
+                flag_groups = [
+                    flag_group(flags = [
+                        "-Wunguarded-availability",
+                    ]),
+                ],
+            ),
+        ],
+    )
+
+    # Sized deallocation, also applied unconditionally by the native Apple
+    # toolchain. Kept here for parity.
+    macos_fsized_deallocation_feature = feature(
+        name = "macos_fsized_deallocation",
+        enabled = True,
+        flag_sets = [
+            flag_set(
+                actions = all_compile_actions,
+                flag_groups = [flag_group(flags = ["-fsized-deallocation"])],
+            ),
+        ],
+    )
+
+    disable_warnings_for_third_party_libraries_clang_feature = feature(
+        name = "disable_warnings_for_third_party_libraries_clang",
+        enabled = ctx.attr.compiler == "clang",
+        flag_sets = [
+            flag_set(
+                actions = all_compile_actions,
+                flag_groups = [flag_group(flags = [
+                    "-Wno-character-conversion",
+                ])],
+            ),
+        ],
+    )
+
+    # Collect all features. get_common_features() supplies the per-warning
+    # -Wno-* suppressions (unused-function, defaulted-function-deleted,
+    # unused-private-field, etc.), the warnings_as_errors_compile feature
+    # (-Werror, gated by --//bazel/config:disable_warnings_as_errors), and the
+    # mongo_defines feature, matching what the native Apple toolchain pulls in.
+    #
+    # Feature order matters: flags from earlier features appear earlier on the
+    # command line, and clang's "last flag wins" semantics mean that to let a
+    # target's copts (e.g. mozjs's "-Wno-error") override the toolchain's
+    # -Werror, user_compile_flags_feature must be listed after the features
+    # that contribute -Werror.
     features = [
         supports_pic_feature,
         gcc_quoting_for_param_files_feature,
@@ -617,7 +684,6 @@ def _impl(ctx):
         common_feature,
         default_compile_flags_feature,
         default_link_flags_feature,
-        user_compile_flags_feature,
         user_link_flags_feature,
         include_paths_feature,
         external_include_paths_feature,
@@ -633,22 +699,11 @@ def _impl(ctx):
         output_execpath_flags_feature,
         library_search_directories_feature,
         libraries_to_link_feature,
-        # Apply MONGO_GLOBAL_DEFINES (enterprise defines, sanitizer defines, etc.)
-        # as -D flags. This is a subset of get_common_features() - we only need the
-        # defines, not the warnings_as_errors or optimization features which would
-        # conflict with the cross-compilation toolchain's own settings.
-        feature(
-            name = "mongo_defines",
-            enabled = True,
-            flag_sets = [
-                flag_set(
-                    actions = all_compile_actions,
-                    flag_groups = [flag_group(
-                        flags = ["-D" + define for define in ctx.attr.global_defines],
-                    )],
-                ),
-            ],
-        ),
+        macos_general_warnings_feature,
+        macos_fsized_deallocation_feature,
+    ] + get_common_features(ctx) + [
+        user_compile_flags_feature,
+        disable_warnings_for_third_party_libraries_clang_feature,
     ] + ([supports_start_end_lib_feature] if ctx.attr.supports_start_end_lib else [])
 
     # Artifact name patterns for macOS

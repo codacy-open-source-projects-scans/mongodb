@@ -1,39 +1,13 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/agg/stage.h"
 #include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/granularity_rounder.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -41,12 +15,13 @@
 #include "mongo/util/modules.h"
 
 #include <memory>
+#include <string_view>
 
 namespace mongo::exec::agg {
 
 class BucketAutoStage final : public Stage {
 public:
-    BucketAutoStage(StringData stageName,
+    BucketAutoStage(std::string_view stageName,
                     const boost::intrusive_ptr<ExpressionContext>& expCtx,
                     std::shared_ptr<std::vector<AccumulationStatement>> accumulatedFields,
                     std::shared_ptr<bool> populated,
@@ -63,14 +38,14 @@ public:
                        : _stats.spillingStats.getSpills() > 0;
     }
 
-    Document getExplainOutput(
-        const SerializationOptions& opts = SerializationOptions{}) const final;
+    Document getExplainOutput(const query_shape::SerializationOptions& opts =
+                                  query_shape::SerializationOptions{}) const final;
 
     /**
-     * TODO SERVER-112710: Remove 'MONGO_MOD_PRIVATE' once document_source_bucket_auto_test.cpp is
-     * split into two parts.
+     * TODO SERVER-112710: Remove '[[MONGO_MOD_PRIVATE]]' once document_source_bucket_auto_test.cpp
+     * is split into two parts.
      */
-    MONGO_MOD_PRIVATE const MemoryUsageTracker* getMemoryTracker_forTest() const {
+    [[MONGO_MOD_PRIVATE]] const MemoryUsageTracker* getMemoryTracker_forTest() const {
         return &_memoryTracker;
     }
 
@@ -166,6 +141,16 @@ private:
     DocumentSourceBucketAutoStats _stats;
 
     MemoryUsageTracker _memoryTracker;
+
+    // Tracks memory used while evaluating expressions. Reports to the operation-wide
+    // tracker so all stages contribute to the operation memory total.
+    SimpleMemoryUsageTracker _expressionEvaluationMemoryTracker;
+
+    // Pre-built context passed to every expression evaluation. tracker points to
+    // _expressionEvaluationMemoryTracker when expression memory tracking is enabled, and is
+    // null otherwise. stageName is always set so it can be reported in ExceededMemoryLimit errors.
+    // Both fields are stable for the stage's lifetime.
+    EvaluationContext _expressionEvalCtx;
 };
 
 }  // namespace mongo::exec::agg

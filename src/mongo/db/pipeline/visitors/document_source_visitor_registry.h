@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -36,6 +10,11 @@
 #include <unordered_map>
 
 #include <fmt/format.h>
+
+namespace mongo::extension::host {
+class DocumentSourceExtensionForQueryShape;
+class DocumentSourceExtensionOptimizable;
+}  // namespace mongo::extension::host
 
 namespace mongo {
 
@@ -157,10 +136,21 @@ private:
  * void visit(DocumentSourceVisitorContextBase*, const DocumentSource&);
  * which would require them to cast the parameters.
  */
+template <typename U>
+concept IsExtensionStage = std::is_same_v<U, extension::host::DocumentSourceExtensionOptimizable> ||
+    std::is_same_v<U, extension::host::DocumentSourceExtensionForQueryShape>;
+
 template <typename T, typename U>
 void visit(DocumentSourceVisitorContextBase* ctx, const DocumentSource& ds) {
-    // The visit() function below is defined by visitor implementers outside this file.
-    visit(static_cast<T*>(ctx), static_cast<const U&>(ds));
+    if constexpr (IsExtensionStage<U>) {
+        // Extension stages require explicit handling via visitExtensionStage(). Using a different
+        // function name prevents generic catch-all visit() templates from silently matching,
+        // ensuring each visitor consciously considers extension stage behavior.
+        visitExtensionStage(static_cast<T*>(ctx), static_cast<const U&>(ds));
+    } else {
+        // The visit() function below is defined by visitor implementers outside this file.
+        visit(static_cast<T*>(ctx), static_cast<const U&>(ds));
+    }
 }
 
 // Base case of recursive template defined below.
@@ -184,7 +174,7 @@ void registerVisitFuncs(DocumentSourceVisitorRegistry* reg) {
 }
 
 // Declare visitor registry as a decoration on the service context.
-MONGO_MOD_PUBLIC inline const auto getDocumentSourceVisitorRegistry =
+[[MONGO_MOD_PUBLIC]] inline const auto getDocumentSourceVisitorRegistry =
     ServiceContext::declareDecoration<DocumentSourceVisitorRegistry>();
 
 }  // namespace mongo

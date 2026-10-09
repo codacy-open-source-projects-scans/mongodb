@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/api_parameters.h"
@@ -42,6 +15,8 @@
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/queued_data_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
@@ -52,6 +27,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_stats/supplemental_metrics_stats.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/service_context.h"
@@ -61,6 +37,7 @@
 #include "mongo/otel/metrics/metric_names.h"
 #include "mongo/otel/metrics/metrics_test_util.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
@@ -165,6 +142,88 @@ TEST_F(CursorManagerTest, CanAccessFromOperationContext) {
     ASSERT(cursorManager);
 }
 
+TEST_F(CursorManagerTest, KillingOneOfTwoCursorsSharingMemoryTrackerLeavesSiblingValid) {
+    unittest::ServerParameterGuard featureFlag("featureFlagQueryMemoryTracking", true);
+    OperationContext* opCtx = _opCtx.get();
+
+    auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx, kTestNss);
+
+    // Operation tracker on the opCtx plus a stage-level tracker bound to it, standing in for a
+    // stage in the surviving cursor's executor. Note that 'stageTracker' holds a raw pointer to
+    // the operation tracker as its base, which is what dangles if the tracker is freed while the
+    // surviving cursor is still alive.
+    auto stageTracker =
+        OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForStage(*expCtx);
+    ASSERT_TRUE(OperationMemoryUsageTracker::hasTrackerOnOpCtx(opCtx));
+    stageTracker.add(16);  // Propagates to the operation tracker via _base.
+
+    // A non-owning handle, so the cursors are the only owners below and this test fails under ASAN
+    // if co-ownership regresses. The reference count is the proxy for "who co-owns this tracker
+    // instance": one per cursor, plus the opCtx's until the first pin is released.
+    std::weak_ptr<OperationMemoryUsageTracker> weakTracker;
+    long expectedUseCount = 0;
+
+    // Register two cursors under one operation; both co-own the tracker.
+    CursorId survivorId;
+    CursorId ownerToKillId;
+    {
+        auto survivorPin = makeCursor(opCtx);
+        auto ownerPin = makeCursor(opCtx);
+        survivorId = survivorPin.getCursor()->cursorid();
+        ownerToKillId = ownerPin.getCursor()->cursorid();
+
+        auto owningTracker = OperationMemoryUsageTracker::getOwningIfExists(opCtx);
+        ASSERT(owningTracker);
+        weakTracker = owningTracker;
+        // Both cursors reference the same instance, plus the opCtx's reference and our local one.
+        ASSERT_EQ(4, owningTracker.use_count());
+        expectedUseCount = 2;
+    }
+
+    // Releasing the pins moves the tracker off the opCtx and onto a cursor, so from here the
+    // cursors are its only owners.
+    ASSERT_FALSE(OperationMemoryUsageTracker::hasTrackerOnOpCtx(opCtx));
+    ASSERT_EQ(expectedUseCount, weakTracker.use_count());
+
+    // Kill the cursor registered second, which under the pre-fix model owned the tracker outright.
+    ASSERT_OK(_cursorManager.killCursor(opCtx, ownerToKillId));
+
+    // The surviving cursor is now the sole owner, so writing through the stage tracker's base
+    // pointer is still safe.
+    auto survivingTracker = weakTracker.lock();
+    ASSERT(survivingTracker);
+    ASSERT_EQ(1, weakTracker.use_count() - 1);  // Only the surviving cursor, besides our lock().
+    survivingTracker.reset();
+
+    stageTracker.add(32);
+    ASSERT_EQ(48, weakTracker.lock()->peakTrackedMemoryBytes());
+
+    ASSERT_OK(_cursorManager.killCursor(opCtx, survivorId));
+
+    // With no cursor left to own it, the tracker is destroyed.
+    ASSERT_TRUE(weakTracker.expired());
+}
+
+TEST_F(CursorManagerTest, PublishingNullTrackerDoesNotClobberLiveOperationTracker) {
+    unittest::ServerParameterGuard featureFlag("featureFlagQueryMemoryTracking", true);
+    OperationContext* opCtx = _opCtx.get();
+
+    auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx, kTestNss);
+    auto stageTracker =
+        OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForStage(*expCtx);
+    stageTracker.add(64);
+    ASSERT_TRUE(OperationMemoryUsageTracker::hasTrackerOnOpCtx(opCtx));
+
+    // A tracker-less sibling cursor being pinned publishes a null tracker onto the opCtx.
+    OperationMemoryUsageTracker::attachToOpCtxIfAvailable(opCtx, nullptr);
+
+    // The live tracker must still be there for the sibling's stages to keep reporting through.
+    ASSERT_TRUE(OperationMemoryUsageTracker::hasTrackerOnOpCtx(opCtx));
+    auto tracker = OperationMemoryUsageTracker::getOwningIfExists(opCtx);
+    ASSERT(tracker);
+    ASSERT_EQ(64, tracker->peakTrackedMemoryBytes());
+}
+
 /**
  * Test that an attempt to kill a pinned cursor succeeds.
  */
@@ -261,6 +320,49 @@ TEST_F(CursorManagerTest, InactiveCursorShouldTimeout) {
          BSONObj(),
          PrivilegeVector()});
     ASSERT_EQ(1UL, _cursorManager.timeoutCursors(_opCtx.get(), Date_t::max()));
+    ASSERT_EQ(0UL, _cursorManager.numCursors());
+}
+
+TEST_F(CursorManagerTest, DisposeIdleMongotCursorsForShutdownDisposesOnlyMarkedIdleCursors) {
+    auto unmarkedIdleCursor = makeCursor(_opCtx.get());
+    const auto unmarkedIdleCursorId = unmarkedIdleCursor->cursorid();
+    unmarkedIdleCursor.release();
+
+    auto markedIdleCursor = makeCursor(_opCtx.get());
+    markedIdleCursor->setMayHoldMongotTaskExecutor();
+    markedIdleCursor.release();
+
+    auto markedPinnedCursor = makeCursor(_opCtx.get());
+    const auto markedPinnedCursorId = markedPinnedCursor->cursorid();
+    markedPinnedCursor->setMayHoldMongotTaskExecutor();
+
+    ASSERT_EQ(3UL, _cursorManager.numCursors());
+    ASSERT_EQ(1UL, _cursorManager.disposeIdleMongotCursorsForShutdown(_opCtx.get()));
+    ASSERT_EQ(2UL, _cursorManager.numCursors());
+
+    // The unmarked idle cursor and marked pinned cursor are not disposed by the targeted shutdown
+    // cleanup.
+    ASSERT_OK(_cursorManager.killCursor(_opCtx.get(), unmarkedIdleCursorId));
+    markedPinnedCursor.release();
+    ASSERT_OK(_cursorManager.killCursor(_opCtx.get(), markedPinnedCursorId));
+    ASSERT_EQ(0UL, _cursorManager.numCursors());
+}
+
+TEST_F(CursorManagerTest, DisposeIdleMongotCursorsForShutdownIsIdempotent) {
+    // An empty CursorManager has nothing to dispose.
+    ASSERT_EQ(0UL, _cursorManager.disposeIdleMongotCursorsForShutdown(_opCtx.get()));
+    ASSERT_EQ(0UL, _cursorManager.numCursors());
+
+    // Disposing a marked idle cursor removes it, so a second call disposes nothing. This guards
+    // against the shutdown cleanup being invoked more than once (or an accounting bug in the
+    // count).
+    auto markedIdleCursor = makeCursor(_opCtx.get());
+    markedIdleCursor->setMayHoldMongotTaskExecutor();
+    markedIdleCursor.release();
+
+    ASSERT_EQ(1UL, _cursorManager.disposeIdleMongotCursorsForShutdown(_opCtx.get()));
+    ASSERT_EQ(0UL, _cursorManager.numCursors());
+    ASSERT_EQ(0UL, _cursorManager.disposeIdleMongotCursorsForShutdown(_opCtx.get()));
     ASSERT_EQ(0UL, _cursorManager.numCursors());
 }
 
@@ -504,6 +606,92 @@ TEST_F(CursorManagerTest, CursorStoresAPIParameters) {
     ASSERT_EQ("2", *storedAPIParams.getAPIVersion());
     ASSERT_TRUE(*storedAPIParams.getAPIStrict());
     ASSERT_TRUE(*storedAPIParams.getAPIDeprecationErrors());
+}
+
+/**
+ * Fixture for testing the redaction of a cursor's originating command.
+ */
+class CursorManagerOriginatingCommandTest : public CursorManagerTest {
+protected:
+    ClientCursorPin makeCursorWithOriginatingCommand(BSONObj originatingCommand,
+                                                     bool shouldOmitDiagnosticInformation) {
+        {
+            std::lock_guard<Client> clientLock(*_opCtx->getClient());
+            CurOp::get(_opCtx.get())
+                ->setShouldOmitDiagnosticInformation(clientLock, shouldOmitDiagnosticInformation);
+        }
+        return _cursorManager.registerCursor(
+            _opCtx.get(),
+            {makeFakePlanExecutor(),
+             kTestNss,
+             {},
+             APIParameters(),
+             {},
+             repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+             std::move(originatingCommand),
+             PrivilegeVector()});
+    }
+};
+
+TEST_F(CursorManagerOriginatingCommandTest, NotRedactedWhenDiagnosticsAllowed) {
+    auto originatingCommand =
+        BSON("find" << "collection" << "filter" << BSON("ssn" << "secret") << "$db" << "test");
+    auto cursorPin = makeCursorWithOriginatingCommand(originatingCommand, false);
+
+    ASSERT_BSONOBJ_EQ(originatingCommand, cursorPin->getOriginatingCommandObj());
+    ASSERT_FALSE(cursorPin->toGenericCursor().getRedacted().has_value());
+}
+
+TEST_F(CursorManagerOriginatingCommandTest, RedactedWhenDiagnosticsOmitted) {
+    auto cursorPin = makeCursorWithOriginatingCommand(
+        BSON("find" << "collection" << "filter" << BSON("ssn" << "secret") << "$db" << "test"
+                    << "collection" << "collection" << "comment" << "myComment"),
+        true);
+
+    // Only the command name and the allowlisted fields survive redaction.
+    ASSERT_BSONOBJ_EQ(BSON("find" << "collection" << "$db" << "test" << "collection" << "collection"
+                                  << "comment" << "myComment"),
+                      cursorPin->getOriginatingCommandObj());
+}
+
+TEST_F(CursorManagerOriginatingCommandTest, RedactedCommandOmitsAbsentAllowlistedFields) {
+    auto cursorPin = makeCursorWithOriginatingCommand(BSON("aggregate" << "collection"), true);
+
+    const auto& redacted = cursorPin->getOriginatingCommandObj();
+    ASSERT_BSONOBJ_EQ(BSON("aggregate" << "collection"), redacted);
+    ASSERT_FALSE(redacted["$db"].ok());
+    ASSERT_FALSE(redacted["collection"].ok());
+    ASSERT_FALSE(redacted["comment"].ok());
+}
+
+TEST_F(CursorManagerOriginatingCommandTest, RedactionHandlesEmptyCommand) {
+    auto cursorPin = makeCursorWithOriginatingCommand(BSONObj(), true);
+
+    ASSERT_BSONOBJ_EQ(BSONObj(), cursorPin->getOriginatingCommandObj());
+    // Nothing was stripped, so the cursor is not reported as redacted.
+    ASSERT_FALSE(cursorPin->toGenericCursor().getRedacted().has_value());
+}
+
+TEST_F(CursorManagerOriginatingCommandTest, ToGenericCursorReportsRedactedCommand) {
+    auto cursorPin = makeCursorWithOriginatingCommand(
+        BSON("find" << "collection" << "filter" << BSON("ssn" << "secret") << "$db" << "test"),
+        true);
+
+    auto gc = cursorPin->toGenericCursor();
+    ASSERT_BSONOBJ_EQ(BSON("find" << "collection" << "$db" << "test"), *gc.getOriginatingCommand());
+    // The 'redacted' flag sits alongside the originating command, not within it.
+    ASSERT_TRUE(gc.getRedacted().value_or(false));
+}
+
+TEST_F(CursorManagerOriginatingCommandTest, RedactedCommandIsStableAcrossCalls) {
+    auto cursorPin = makeCursorWithOriginatingCommand(
+        BSON("find" << "collection" << "filter" << BSON("ssn" << "secret")), true);
+
+    // Redaction happens once at construction, so repeated calls return the same buffer rather than
+    // rebuilding (and, historically, dangling).
+    ASSERT_EQ(cursorPin->getOriginatingCommandObj().objdata(),
+              cursorPin->getOriginatingCommandObj().objdata());
 }
 
 class CursorManagerTestCustomOpCtx : public CursorManagerTestBase {
@@ -1061,6 +1249,69 @@ TEST_F(CursorManagerTest, ChangeStreamCursorMetricsTrackCursorOpenAndPin) {
 
     ASSERT_EQ(capturer.readInt64Counter(MetricNames::kChangeStreamCursorsOpenTotal), 0);
     ASSERT_EQ(capturer.readInt64Counter(MetricNames::kChangeStreamCursorsOpenPinned), 0);
+}
+
+TEST_F(CursorManagerTest, UpdateMetricsOnUnpinSetsChangeStreamOptime) {
+    CurOp::get(_opCtx.get())->debug().isChangeStreamQuery = true;
+    auto cursorPin = makeCursor(_opCtx.get());
+
+    {
+        // Without any 'updateMetricsOnUnpin()' call, "changeStreams" is not present in the cursor
+        // report.
+        auto gc = cursorPin->toGenericCursor();
+        ASSERT_FALSE(gc.getChangeStreams());
+    }
+
+    {
+        const Timestamp expectedOptime(42, 1);
+        ChangeStreamCursorMetrics metrics;
+        metrics.setOptime(expectedOptime);
+        cursorPin->updateMetricsOnUnpin(metrics);
+
+        auto gc = cursorPin->toGenericCursor();
+        ASSERT(gc.getChangeStreams());
+        ASSERT_TRUE(gc.getChangeStreams()->getOptime().has_value());
+        ASSERT_EQ(expectedOptime, *gc.getChangeStreams()->getOptime());
+    }
+}
+
+TEST_F(CursorManagerTest, UpdateMetricsOnUnpinIgnoredForRegularCursor) {
+    // 'isChangeStreamQuery' is false by default.
+    auto cursorPin = makeCursor(_opCtx.get());
+
+    ChangeStreamCursorMetrics metrics;
+    metrics.setOptime(Timestamp(42, 1));
+    cursorPin->updateMetricsOnUnpin(metrics);
+
+    auto gc = cursorPin->toGenericCursor();
+    ASSERT_FALSE(gc.getChangeStreams());
+}
+
+TEST_F(CursorManagerTest, SupplementalMetricsCapturedOnceAndFlushedOnTake) {
+    // Supplemental metrics describe planning-time work and are captured once from the planning
+    // OpDebug, then stashed on the cursor to be flushed by takeSupplementalMetrics() at dispose.
+    auto& opDebug = CurOp::get(_opCtx.get())->debug();
+    opDebug.vectorSearchMetrics = OpDebug::VectorSearchMetrics{5, 2.0};
+
+    auto cursorPin = makeCursor(_opCtx.get());
+
+    // The first capture computes supplemental metrics from the planning OpDebug.
+    cursorPin->captureSupplementalMetricsIfNeeded(opDebug);
+    auto firstTake = cursorPin->takeSupplementalMetrics();
+    ASSERT_EQ(firstTake.size(), 1u);
+    ASSERT_EQ(firstTake[0]->metricType, query_stats::SupplementalMetricType::VectorSearch);
+
+    // A second take returns nothing since the stash was moved out, and the optional stays engaged
+    // so has_value() keeps guarding re-capture across getMores.
+    auto secondTake = cursorPin->takeSupplementalMetrics();
+    ASSERT_TRUE(secondTake.empty());
+
+    // Re-capture is a no-op even with a populated OpDebug, because the optional is still engaged
+    // from the first capture.
+    opDebug.vectorSearchMetrics = OpDebug::VectorSearchMetrics{99, 9.0};
+    cursorPin->captureSupplementalMetricsIfNeeded(opDebug);
+    auto thirdTake = cursorPin->takeSupplementalMetrics();
+    ASSERT_TRUE(thirdTake.empty());
 }
 
 }  // namespace

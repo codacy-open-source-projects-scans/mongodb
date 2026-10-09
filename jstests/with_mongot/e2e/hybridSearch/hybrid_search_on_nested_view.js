@@ -2,7 +2,7 @@
  * Tests that $rankFusion and $scoreFusion on a nested view namespace is allowed and works
  * correctly.
  *
- * @tags: [featureFlagSearchHybridScoringFull, requires_fcv_82]
+ * @tags: [requires_fcv_82]
  */
 
 import {verifyExplainStagesAreEqual} from "jstests/with_mongot/e2e_lib/explain_utils.js";
@@ -48,10 +48,18 @@ export function createRankFusionPipeline(inputPipelines, viewPipeline = null) {
  */
 export function createScoreFusionPipeline(inputPipelines, viewPipeline = null) {
     const scoreFusionStage = {
-        $scoreFusion: {input: {pipelines: {}, normalization: "sigmoid"}, combination: {method: "avg"}},
+        $scoreFusion: {
+            input: {pipelines: {}, normalization: "sigmoid"},
+            combination: {method: "avg"},
+        },
     };
 
-    return createHybridSearchPipeline(inputPipelines, viewPipeline, scoreFusionStage, /**isRankFusion*/ false);
+    return createHybridSearchPipeline(
+        inputPipelines,
+        viewPipeline,
+        scoreFusionStage,
+        /**isRankFusion*/ false,
+    );
 }
 
 // Define and create nested views.
@@ -89,7 +97,10 @@ const rankFusionInputPipelines = {
     b: [{$match: {x: {$lte: 15}}}, {$sort: {x: 1}}],
 };
 
-const rankFusionPipelineWithViewPrepended = createRankFusionPipeline(rankFusionInputPipelines, [...viewA, ...viewB]);
+const rankFusionPipelineWithViewPrepended = createRankFusionPipeline(rankFusionInputPipelines, [
+    ...viewA,
+    ...viewB,
+]);
 
 const rankFusionPipelineWithoutView = createRankFusionPipeline(rankFusionInputPipelines);
 
@@ -104,7 +115,10 @@ const scoreFusionInputPipelines = {
     b: [{$match: {x: {$lte: 15}}}, {$score: {score: "$y", normalization: "minMaxScaler"}}],
 };
 
-const scoreFusionPipelineWithViewPrepended = createScoreFusionPipeline(scoreFusionInputPipelines, [...viewA, ...viewB]);
+const scoreFusionPipelineWithViewPrepended = createScoreFusionPipeline(scoreFusionInputPipelines, [
+    ...viewA,
+    ...viewB,
+]);
 
 const scoreFusionPipelineWithoutView = createScoreFusionPipeline(scoreFusionInputPipelines);
 

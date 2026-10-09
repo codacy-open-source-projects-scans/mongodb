@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/streamable_replica_set_monitor.h"
 
@@ -44,7 +18,7 @@
 #include "mongo/client/streamable_replica_set_monitor_query_processor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/str.h"
 
@@ -54,6 +28,7 @@
 #include <mutex>
 #include <ostream>
 #include <set>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 
@@ -79,7 +54,7 @@ using executor::EgressConnectionCloser;
 using executor::TaskExecutor;
 using CallbackArgs = TaskExecutor::CallbackArgs;
 using CallbackHandle = TaskExecutor::CallbackHandle;
-using HandshakeStage = StreamableReplicaSetMonitorErrorHandler::HandshakeStage;
+using TriggerEvent = StreamableReplicaSetMonitorErrorHandler::TriggerEvent;
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly, TagSet());
 
@@ -215,7 +190,7 @@ StreamableReplicaSetMonitor::StreamableReplicaSetMonitor(
         SdamConfiguration(seedsNoDups, TopologyType::kReplicaSetNoPrimary, _uri.getSetName());
     _serverSelector = std::make_unique<ServerSelector>(_sdamConfig);
 
-    ObservableMutexRegistry::get().add("StreamableReplicaSetMonitor::_mutex", _mutex);
+    ObservableMutexRegistry::get().add("streamableReplicaSetMonitorMutex", _mutex);
 }
 
 StreamableReplicaSetMonitor::~StreamableReplicaSetMonitor() {
@@ -475,32 +450,30 @@ void StreamableReplicaSetMonitor::failedHost(const HostAndPort& host, const Stat
 void StreamableReplicaSetMonitor::failedHostPreHandshake(const HostAndPort& host,
                                                          const Status& status,
                                                          BSONObj bson) {
-    _failedHost(host, status, bson, HandshakeStage::kPreHandshake, true);
+    _failedHost(host, status, bson, TriggerEvent::kApplicationPreHandshake);
 }
 
 void StreamableReplicaSetMonitor::failedHostPostHandshake(const HostAndPort& host,
                                                           const Status& status,
                                                           BSONObj bson) {
-    _failedHost(host, status, bson, HandshakeStage::kPostHandshake, true);
+    _failedHost(host, status, bson, TriggerEvent::kApplicationPostHandshake);
 }
 
 void StreamableReplicaSetMonitor::_failedHost(const HostAndPort& host,
                                               const Status& status,
                                               BSONObj bson,
-                                              HandshakeStage stage,
-                                              bool isApplicationOperation) {
+                                              TriggerEvent triggerEvent) {
     if (_isDropped.load())
         return;
 
-    _doErrorActions(
-        host,
-        status.reason(),
-        _errorHandler->computeErrorActions(host, status, stage, isApplicationOperation, bson));
+    _doErrorActions(host,
+                    status.reason(),
+                    _errorHandler->computeErrorActions(host, status, triggerEvent, bson));
 }
 
 void StreamableReplicaSetMonitor::_doErrorActions(
     const HostAndPort& host,
-    const StringData reason,
+    const std::string_view reason,
     const StreamableReplicaSetMonitorErrorHandler::ErrorActions& errorActions) const {
     {
         std::lock_guard lock(_mutex);
@@ -748,19 +721,18 @@ void StreamableReplicaSetMonitor::onServerHeartbeatSucceededEvent(const HostAndP
 void StreamableReplicaSetMonitor::onServerHeartbeatFailureEvent(Status errorStatus,
                                                                 const HostAndPort& hostAndPort,
                                                                 const BSONObj reply) {
-    _failedHost(
-        HostAndPort(hostAndPort), errorStatus, reply, HandshakeStage::kPostHandshake, false);
+    _failedHost(HostAndPort(hostAndPort), errorStatus, reply, TriggerEvent::kHeartbeatFailure);
 }
 
 void StreamableReplicaSetMonitor::onServerPingFailedEvent(const HostAndPort& hostAndPort,
                                                           const Status& status) {
-    _failedHost(HostAndPort(hostAndPort), status, BSONObj(), HandshakeStage::kPostHandshake, false);
+    _failedHost(HostAndPort(hostAndPort), status, BSONObj(), TriggerEvent::kPingFailure);
 }
 
 void StreamableReplicaSetMonitor::onServerHandshakeFailedEvent(const HostAndPort& address,
                                                                const Status& status,
                                                                const BSONObj reply) {
-    _failedHost(HostAndPort(address), status, reply, HandshakeStage::kPreHandshake, false);
+    _failedHost(HostAndPort(address), status, reply, TriggerEvent::kHandshakeFailure);
 };
 
 void StreamableReplicaSetMonitor::onServerPingSucceededEvent(sdam::HelloRTT durationMS,

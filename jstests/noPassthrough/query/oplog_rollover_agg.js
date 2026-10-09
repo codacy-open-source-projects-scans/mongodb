@@ -5,12 +5,18 @@
 // ]
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {getFirstOplogEntry, getLatestOp} from "jstests/replsets/rslib.js";
+import {skipTestIfSizeBasedOplogTruncationDisabled} from "jstests/libs/oplog_truncation_util.js";
 
 const oplogSize = 1; // size in MB
+
 const rst = new ReplSetTest({nodes: 1, oplogSize: oplogSize});
 
-rst.startSet();
+rst.startSet({oplogMinRetentionHours: 0.000001});
 rst.initiate();
+
+// This test relies on marker-based oplog truncation, which may be disabled in disagg.
+// TODO(SERVER-125068) remove this once this feature flag is deleted
+skipTestIfSizeBasedOplogTruncationDisabled(rst.getPrimary(), () => rst.stopSet());
 
 const testDB = rst.getPrimary().getDB(jsTestName());
 const testColl = testDB[jsTestName()];
@@ -20,7 +26,11 @@ const oplogColl = localDB.oplog.rs;
 
 // Insert one document into the test collection.
 const insertCmdRes = assert.commandWorked(
-    testDB.runCommand({insert: testColl.getName(), documents: [{_id: 1}], writeConcern: {w: "majority"}}),
+    testDB.runCommand({
+        insert: testColl.getName(),
+        documents: [{_id: 1}],
+        writeConcern: {w: "majority"},
+    }),
 );
 
 // Record the optime of the insert to resume from later in the test.
@@ -62,7 +72,8 @@ assert.eq(next.o2._id, 1);
 // the first entry in the oplog is the replica set initialization message.
 const firstOplogEntry = getFirstOplogEntry(rst.getPrimary());
 assert(
-    firstOplogEntry.o.msg === "initiating set" || (firstOplogEntry.o.msg === "new primary" && firstOplogEntry.t == 1),
+    firstOplogEntry.o.msg === "initiating set" ||
+        (firstOplogEntry.o.msg === "new primary" && firstOplogEntry.t == 1),
 );
 assert.eq(firstOplogEntry.op, "n");
 
@@ -92,16 +103,20 @@ const mostRecentOplogEntry = getLatestOp(primaryNode);
 assert.neq(mostRecentOplogEntry, null);
 const largeStr = "abcdefghi".repeat(4 * 1024 * oplogSize);
 
-function oplogIsRolledOver() {
-    // The oplog has rolled over if the op that used to be newest is now older than the
-    // oplog's current oldest entry. Said another way, the oplog is rolled over when
-    // everything in the oplog is newer than what used to be the newest entry.
-    return bsonWoCompare(mostRecentOplogEntry.ts, getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts) < 0;
-}
+assert.soon(() => {
+    // The oplog has rolled over when everything in it is newer than what used to be the newest entry.
+    if (
+        bsonWoCompare(
+            mostRecentOplogEntry.ts,
+            getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts,
+        ) < 0
+    ) {
+        return true;
+    }
 
-while (!oplogIsRolledOver()) {
     assert.commandWorked(testColl.insert({long_str: largeStr}, {writeConcern: {w: "majority"}}));
-}
+    return false;
+}, "Timeout waiting for oplog to roll over on primary");
 
 // Test that attempting to start from a timestamp that has already fallen off the oplog fails, if we
 // specify $_requestReshardingResumeToken.

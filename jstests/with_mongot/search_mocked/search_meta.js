@@ -1,5 +1,6 @@
 /**
  * Verify that `$searchMeta` extracts SEARCH_META variable returned by mongot.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite. Note that the slow-query-log 'slowQueryLog' passthrough assertion below is not covered by the e2e version.
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
@@ -53,7 +54,9 @@ const cursorId = NumberLong(17);
             },
         },
     ];
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}),
+    );
 
     let cursorMeta = coll.aggregate([{$searchMeta: searchQuery}], {cursor: {}});
     const expectedMeta = [{value: 42}];
@@ -86,7 +89,9 @@ const cursorId = NumberLong(17);
             },
         },
     ];
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}),
+    );
 
     let cursorMeta = coll.aggregate([{$searchMeta: searchQuery}], {cursor: {}});
     const expectedMeta = [{value: 42}];
@@ -108,7 +113,9 @@ const cursorId = NumberLong(17);
         },
     ];
 
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}),
+    );
 
     const explain = coll.explain("queryPlanner").aggregate([{$searchMeta: searchQuery}]);
 
@@ -162,7 +169,9 @@ const cursorId = NumberLong(17);
             },
         },
     ];
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}),
+    );
 
     // Make sure we capture all queries in slow logs.
     testDB.runCommand({profile: 0, slowms: -1});

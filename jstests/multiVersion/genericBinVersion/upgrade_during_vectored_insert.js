@@ -12,7 +12,10 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 ("use strict");
 
 const latestVersion = "latest";
-const rst = new ReplSetTest({name: jsTestName(), nodes: [{binVersion: latestVersion}, {binVersion: latestVersion}]});
+const rst = new ReplSetTest({
+    name: jsTestName(),
+    nodes: [{binVersion: latestVersion}, {binVersion: latestVersion}],
+});
 rst.startSet();
 rst.initiate();
 const primary = rst.getPrimary();
@@ -20,19 +23,22 @@ const testDB = primary.getDB("test");
 const testColl = testDB.testColl;
 // Start in downgrade FCV,
 jsTestLog("Downgrading FCV");
-assert.commandWorked(testDB.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
+assert.commandWorked(
+    testDB.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+);
 
 // Insert a document to cause an error in batch insertion
 assert.commandWorked(testColl.insert([{"_id": "5"}]));
 
-// Switch to upgrade FCV first.  We have to stop this in the middle so we can get the collmods in
-// _upgradeServerMetadata to finish before allowing FCV to actually change.  This is a very
-// unlikely race!
-let upgradeFp = configureFailPoint(primary, "hangWhileUpgrading");
+// Switch to upgrade FCV first.  We have to stop this in the middle so we can get all upgrade
+// metadata changes to finish before allowing FCV to actually change.  This is a very unlikely race!
+let upgradeFp = configureFailPoint(primary, "hangBeforeFinalizingFCV");
 jsTestLog("Switching to upgrade FCV");
 let upgradeFCVThread = new Thread(function (host) {
     let conn = new Mongo(host);
-    assert.commandWorked(conn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    assert.commandWorked(
+        conn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}),
+    );
 }, primary.host);
 upgradeFCVThread.start();
 upgradeFp.wait();
@@ -52,7 +58,13 @@ let insertThread = new Thread(
         let testColl = conn.getCollection(testCollFullName);
         // Run a batch that will fail on the last document due to a DuplicateKeyError.
         jsTestLog("Inserting data");
-        let res = testColl.insert([{"_id": "1"}, {"_id": "2"}, {"_id": "3"}, {"_id": "4"}, {"_id": "5", new: 1}]);
+        let res = testColl.insert([
+            {"_id": "1"},
+            {"_id": "2"},
+            {"_id": "3"},
+            {"_id": "4"},
+            {"_id": "5", new: 1},
+        ]);
         assert.eq(4, res.nInserted);
         printjson(res);
     },

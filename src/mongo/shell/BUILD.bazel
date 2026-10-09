@@ -1,4 +1,4 @@
-load("@poetry//:dependencies.bzl", "dependency")
+load("//bazel/uv:defs.bzl", "dependency")
 load("//bazel/config:render_template.bzl", "render_template")
 load("//bazel:mongo_js_rules.bzl", "mongo_js_library")
 load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_binary", "mongo_cc_library", "mongo_cc_unit_test", "windows_rc")
@@ -159,6 +159,7 @@ mongo_cc_library(
         "//src/mongo/db/query/virtual_collection",
         "//src/mongo/replay:mongor_lib",
         "//src/mongo/scripting",
+        "//src/mongo/scripting/mozjs/shell:mozjs_shell",
         "//src/mongo/shell/debugger:js_debugger",
         "//src/mongo/transport:message_compressor",
         "//src/mongo/transport/named_pipe",
@@ -212,6 +213,7 @@ mongo_cc_library(
         "//src/mongo/crypto:symmetric_crypto",
         "//src/mongo/db:query_expressions",
         "//src/mongo/db/query/compiler/parsers/matcher/schema:json_schema_parser",
+        "//src/mongo/rpc:object_check",
         "//src/mongo/scripting",
         "//src/mongo/scripting/mozjs/common:mozjs_common",
         "//src/mongo/shell:shell_options_register",
@@ -280,7 +282,7 @@ MONGOJS_CPP_JSFILES = [
     "session.js",
     "session_global.js",
     "stringdiff.js",
-    "types.js",
+    "//src/mongo/scripting/mozjs/common/jsfiles:types.js",
     "utils.js",
     "utils_global.js",
     "utils_auth.js",
@@ -290,16 +292,28 @@ MONGOJS_CPP_JSFILES = [
     ":error_codes_js",
 ]
 
-# Converts core JS file content into CPP structures to be loaded directly
+# Converts std JS file content into CPP structures to be loaded directly
 # into the native binary via bytecode upon startup.
+MONGOJS_STD_JS_MODULES = [
+    ("std:performance", "std/performance.js"),
+]
+
 render_template(
     name = "mongojs_cpp",
-    srcs = MONGOJS_CPP_JSFILES,
+    srcs = MONGOJS_CPP_JSFILES + [file for _, file in MONGOJS_STD_JS_MODULES],
     cmd = [
         "$(location mongojs.cpp)",
     ] + [
         "$(location {})".format(file)
         for file in MONGOJS_CPP_JSFILES
+    ] + [
+        item
+        for name, file in MONGOJS_STD_JS_MODULES
+        for item in [
+            "--module",
+            name,
+            "$(location {})".format(file),
+        ]
     ],
     output = "mongojs.cpp",
     python_file = "//buildscripts:jstoh.py",
@@ -339,6 +353,28 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
+    name = "std_internal_modules",
+    srcs = glob(["std/*.cpp"]),
+    auto_header = False,
+    copts = select({
+        "@platforms//os:windows": [
+            # The default MSVC preprocessor elides commas in some cases as a
+            # convenience, but this behavior breaks compilation of jspubtd.h.
+            # Enabling the newer preprocessor fixes the problem.
+            "/Zc:preprocessor",
+            "/wd5104",
+            "/wd5105",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        ":mongojs",
+        "//src/mongo/scripting/mozjs/shell:internal_module_registry",
+        "//src/third_party/mozjs",
     ],
 )
 

@@ -10,14 +10,14 @@ const assertNonShardedCluster = (conn) => {
     try {
         topology = DiscoverTopology.findConnectedNodes(conn);
     } catch (e) {
-        jsTest.log.info(`Aborted metadata consistency check due to an error during topology discovery: ${e}`);
+        jsTest.log.info(
+            `Aborted metadata consistency check due to an error during topology discovery: ${e}`,
+        );
         return;
     }
 
     assert(
-        topology &&
-            topology.type != Topology.kShardedCluster &&
-            !(topology.type == Topology.kReplicaSet && topology.configsvr && TestData.testingReplicaSetEndpoint),
+        topology && topology.type != Topology.kShardedCluster,
         "Metadata consistency check command not found, but we are unexpectedly on a sharded cluster",
     );
 };
@@ -27,5 +27,7 @@ try {
 } catch (e) {
     if (e.code === ErrorCodes.CommandNotFound) {
         assertNonShardedCluster(conn);
+    } else {
+        throw e;
     }
 }

@@ -1,44 +1,15 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
+#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/bsontypes_util.h"
-#include "mongo/bson/timestamp.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
@@ -46,15 +17,11 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
-#include "mongo/platform/decimal128.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration_test_util.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/scopeguard.h"
 
-#include <cmath>
-#include <iterator>
-#include <limits>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -67,13 +34,15 @@ namespace ExpressionTests {
 /** A dummy child of ExpressionNary used for testing. */
 class Testable : public ExpressionNary {
 public:
-    Value evaluate(const Document& root, Variables* variables) const override {
+    Value evaluate(const Document& root,
+                   Variables* variables,
+                   const EvaluationContext& ctx) const override {
         // Just put all the values in a list.
         // By default, this is not associative/commutative so the results will change if
         // instantiated as commutative or associative and operations are reordered.
         std::vector<Value> values;
         for (auto&& child : _children)
-            values.push_back(child->evaluate(root, variables));
+            values.push_back(child->evaluate(root, variables, ctx));
         return Value(values);
     }
 
@@ -104,8 +73,8 @@ public:
     }
 
 
-    boost::intrusive_ptr<Expression> clone() const final {
-        return Testable::create(getExpressionContext(), _associativity, _isCommutative);
+    boost::intrusive_ptr<Expression> clone(ExpressionContext& expCtx) const final {
+        return Testable::create(&expCtx, _associativity, _isCommutative);
     }
 
 private:
@@ -250,7 +219,7 @@ TEST_F(ExpressionNaryTest, RedactsCorrectlyWithConstantArguments) {
     _notAssociativeNorCommutative->addOperand(ExpressionConstant::create(&expCtx, Value(10)));
     _notAssociativeNorCommutative->addOperand(ExpressionConstant::create(&expCtx, Value(15)));
 
-    SerializationOptions opts;
+    query_shape::SerializationOptions opts;
 
     // The default shape should wrap the constants in $const.
     ASSERT_BSONOBJ_EQ(
@@ -259,7 +228,7 @@ TEST_F(ExpressionNaryTest, RedactsCorrectlyWithConstantArguments) {
         BSON("foo" << _notAssociativeNorCommutative->serialize(opts)));
 
     // The representative shape should be an array of raw constants (i.e. not wrapped in $const).
-    opts.literalPolicy = LiteralSerializationPolicy::kToRepresentativeParseableValue;
+    opts.literalPolicy = query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue;
     ASSERT_BSONOBJ_EQ(BSON("foo" << BSON("$testable" << BSON_ARRAY(1 << 1 << 1))),
                       BSON("foo" << _notAssociativeNorCommutative->serialize(opts)));
 }
@@ -271,7 +240,7 @@ TEST_F(ExpressionNaryTest, RedactsCorrectlyWithMixedArguments) {
         Expression::parseExpression(&expCtx, BSON("$sum" << BSON_ARRAY(1 << 2)), vps));
     _notAssociativeNorCommutative->addOperand(ExpressionFieldPath::parse(&expCtx, "$b", vps));
 
-    SerializationOptions opts;
+    query_shape::SerializationOptions opts;
 
     // The default shape should wrap the constants in $const.
     ASSERT_BSONOBJ_EQ(BSON("foo" << BSON("$testable" << BSON_ARRAY(
@@ -282,7 +251,7 @@ TEST_F(ExpressionNaryTest, RedactsCorrectlyWithMixedArguments) {
                       BSON("foo" << _notAssociativeNorCommutative->serialize(opts)));
 
     // The representative shape should not wrap the constant in $const.
-    opts.literalPolicy = LiteralSerializationPolicy::kToRepresentativeParseableValue;
+    opts.literalPolicy = query_shape::LiteralSerializationPolicy::kToRepresentativeParseableValue;
     ASSERT_BSONOBJ_EQ(BSON("foo" << BSON("$testable" << BSON_ARRAY(
                                              1 << BSON("$sum" << BSON_ARRAY(1 << 1)) << "$b"))),
                       BSON("foo" << _notAssociativeNorCommutative->serialize(opts)));
@@ -753,6 +722,96 @@ TEST_F(ExpressionNaryTest, FlattenInnerOperandsOptimizationOnCommutativeAndAssoc
         BSON_ARRAY("$path3" << "$path1"
                             << "$path2" << BSON_ARRAY(200 << 201 << BSON_ARRAY(100 << 101) << 99));
     assertContents(_associativeAndCommutative, expectedContent);
+}
+
+TEST_F(ExpressionNaryTest, ConstantFoldingObeysExpressionCapWithoutOperationContext) {
+    unittest::ServerParameterGuard queryFlag("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprFlag("featureFlagExpressionMemoryTracking", true);
+    // Constant folding evaluates with a default EvaluationContext, so it charges the
+    // ExpressionContext's fallback tracker. With no OperationContext that fallback is a standalone
+    // tracker bounded by the per-expression cap, which is the only limit folding can exceed here.
+    unittest::ServerParameterGuard exprCap("internalQueryMaxSingleExpressionMemoryUsageBytes",
+                                           100LL);
+
+    BSONArrayBuilder arr1, arr2;
+    for (int i = 0; i < 10; ++i)
+        arr1.append(i);
+    for (int i = 10; i < 20; ++i)
+        arr2.append(i);
+    auto expr =
+        Expression::parseExpression(&expCtx,
+                                    BSON("$concatArrays" << BSON_ARRAY(arr1.arr() << arr2.arr())),
+                                    expCtx.variablesParseState);
+
+    // Null the opCtx so the fallback tracker is standalone (bounded by the per-expression cap).
+    auto* savedOpCtx = expCtx.getOperationContext();
+    expCtx.setOperationContext(nullptr);
+    ON_BLOCK_EXIT([&] { expCtx.setOperationContext(savedOpCtx); });
+
+    ASSERT_THROWS_CODE(expr->optimize(), AssertionException, ErrorCodes::ExceededMemoryLimit);
+}
+
+TEST_F(ExpressionNaryTest, ConstantFoldingIsEnforcedAgainstOperationLimitAtNextCheck) {
+    unittest::ServerParameterGuard queryFlag("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprFlag("featureFlagExpressionMemoryTracking", true);
+    // Constant folding may run before query settings are applied to the operation, so optimize()
+    // itself must not resolve the operation-wide limit. The folded value's footprint stays
+    // charged to the operation, so the next ordinary limit check, which runs once query settings
+    // are applied, enforces the tiny per-operation limit against the fold.
+    QueryKnobGuardForTest limitGuard(
+        expCtx.getOperationContext(), "internalQueryMaxMemoryUsageBytesPerOperation", 100LL);
+    // The opCtx-path fallback is chunked; disable chunking so the small folded array propagates to
+    // the operation tracker immediately instead of being buffered below the chunk threshold.
+    unittest::ServerParameterGuard chunkSize("internalQueryMaxWriteToCurOpMemoryUsageBytes", 0);
+
+    BSONArrayBuilder arr1, arr2;
+    for (int i = 0; i < 10; ++i)
+        arr1.append(i);
+    for (int i = 10; i < 20; ++i)
+        arr2.append(i);
+    auto expr =
+        Expression::parseExpression(&expCtx,
+                                    BSON("$concatArrays" << BSON_ARRAY(arr1.arr() << arr2.arr())),
+                                    expCtx.variablesParseState);
+
+    auto folded = expr->optimize();
+    ASSERT(dynamic_cast<ExpressionConstant*>(folded.get()));
+
+    auto& fallbackTracker = expCtx.getExpressionFallbackTracker();
+    ASSERT_GT(fallbackTracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_THROWS_CODE(
+        fallbackTracker.assertWithinMemoryLimit(expCtx.getOperationContext(), "constant folding"),
+        AssertionException,
+        ErrorCodes::ExceededMemoryLimit);
+}
+
+TEST_F(ExpressionNaryTest, LetParameterSeedingIsEnforcedAgainstOperationLimitAtNextCheck) {
+    unittest::ServerParameterGuard queryFlag("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard exprFlag("featureFlagExpressionMemoryTracking", true);
+    // 'let' parameters are evaluated at ExpressionContext construction, before query settings are
+    // applied, so seeding itself must not resolve the operation-wide limit. The seeded value
+    // lives on for the whole operation, so its footprint stays charged and the next ordinary
+    // limit check enforces the tiny per-operation limit against it.
+    QueryKnobGuardForTest limitGuard(
+        expCtx.getOperationContext(), "internalQueryMaxMemoryUsageBytesPerOperation", 100LL);
+    // The opCtx-path fallback is chunked; disable chunking so the small seeded array propagates
+    // to the operation tracker immediately instead of being buffered below the chunk threshold.
+    unittest::ServerParameterGuard chunkSize("internalQueryMaxWriteToCurOpMemoryUsageBytes", 0);
+
+    BSONArrayBuilder arr;
+    for (int i = 0; i < 20; ++i)
+        arr.append(i);
+    expCtx.variables.seedVariablesWithLetParameters(
+        &expCtx,
+        BSON("c" << BSON("$concatArrays" << BSON_ARRAY(arr.arr()))),
+        [](const Expression*) { return true; });
+
+    auto& fallbackTracker = expCtx.getExpressionFallbackTracker();
+    ASSERT_GT(fallbackTracker.inUseTrackedMemoryBytes(), 0);
+    ASSERT_THROWS_CODE(
+        fallbackTracker.assertWithinMemoryLimit(expCtx.getOperationContext(), "let seeding"),
+        AssertionException,
+        ErrorCodes::ExceededMemoryLimit);
 }
 
 }  // anonymous namespace

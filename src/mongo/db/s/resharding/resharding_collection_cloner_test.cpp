@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_collection_cloner.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -67,7 +40,6 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
@@ -80,6 +52,7 @@
 #include <deque>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -91,6 +64,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using Doc = Document;
 using Arr = std::vector<Value>;
@@ -157,7 +131,7 @@ protected:
         const std::deque<DocumentSource::GetNextResult>& configCacheChunksData,
         const TestOptions& testOptions) {
         _sourceNss = NamespaceString::createNamespaceString_forTest(
-            std::string("testDb"_sd) + std::to_string(_sourceDbNum++), "testColl"_sd);
+            std::string("testDb"sv) + std::to_string(_sourceDbNum++), "testColl"sv);
         _sourceUUID = UUID::gen();
         _tempNss = resharding::constructTemporaryReshardingNss(_sourceNss, _sourceUUID);
         _reshardingUUID = UUID::gen();
@@ -503,13 +477,13 @@ TEST_F(ReshardingCollectionClonerTest, HashedShardKey) {
         std::deque<DocumentSource::GetNextResult> configData{
             Doc{{"_id", Doc{{"x", V(MINKEY)}}},
                 {"max", Doc{{"x", getHashedElementValue(0)}}},
-                {"shard", "shard1"_sd}},
+                {"shard", "shard1"sv}},
             Doc{{"_id", Doc{{"x", getHashedElementValue(0)}}},
                 {"max", Doc{{"x", getHashedElementValue(0) + 1}}},
-                {"shard", "shard2"_sd}},
+                {"shard", "shard2"sv}},
             Doc{{"_id", Doc{{"x", getHashedElementValue(0) + 1}}},
                 {"max", Doc{{"x", V(MAXKEY)}}},
-                {"shard", "shard3"_sd}}};
+                {"shard", "shard3"sv}}};
         constexpr auto kExpectedCopiedCount = 4;
         const auto verify = [](auto cursor) {
             auto next = cursor->next();
@@ -560,13 +534,13 @@ TEST_F(ReshardingCollectionClonerTest, CompoundHashedShardKey) {
         std::deque<DocumentSource::GetNextResult> configData{
             Doc{{"_id", Doc{{"x", V(MINKEY)}, {"y", V(MINKEY)}}},
                 {"max", Doc{{"x", getHashedElementValue(0)}, {"y", 0}}},
-                {"shard", "shard1"_sd}},
+                {"shard", "shard1"sv}},
             Doc{{"_id", Doc{{"x", getHashedElementValue(0)}, {"y", 0}}},
                 {"max", Doc{{"x", getHashedElementValue(0)}, {"y", 1}}},
-                {"shard", "shard2"_sd}},
+                {"shard", "shard2"sv}},
             Doc{{"_id", Doc{{"x", getHashedElementValue(0)}, {"y", 1}}},
                 {"max", Doc{{"x", V(MAXKEY)}, {"y", V(MAXKEY)}}},
-                {"shard", "shard3"_sd}}};
+                {"shard", "shard3"sv}}};
         constexpr auto kExpectedCopiedCount = 1;
         const auto verify = [](auto cursor) {
             auto next = cursor->next();

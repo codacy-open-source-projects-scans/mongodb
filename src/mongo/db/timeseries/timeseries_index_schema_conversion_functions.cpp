@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -56,6 +29,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -69,10 +43,11 @@
 
 
 namespace mongo::timeseries {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
-bool isIndexOnControl(StringData field) {
+bool isIndexOnControl(std::string_view field) {
     return field.starts_with(timeseries::kControlMinFieldNamePrefix) ||
         field.starts_with(timeseries::kControlMaxFieldNamePrefix);
 }
@@ -81,7 +56,7 @@ bool isIndexOnControl(StringData field) {
  * Takes the index specification field name, such as 'control.max.x.y', or 'control.min.z' and
  * returns a pair of the prefix ('control.min.' or 'control.max.') and key ('x.y' or 'z').
  */
-std::pair<std::string, std::string> extractControlPrefixAndKey(StringData field) {
+std::pair<std::string, std::string> extractControlPrefixAndKey(std::string_view field) {
     // Can't use rfind() due to dotted fields such as 'control.max.x.y'.
     size_t numDotsFound = 0;
     auto fieldIt = std::find_if(field.begin(), field.end(), [&numDotsFound](const char c) {
@@ -107,10 +82,10 @@ StatusWith<BSONObj> createBucketsSpecFromTimeseriesSpec(const TimeseriesOptions&
                                                         const BSONObj& timeseriesIndexSpecBSON,
                                                         bool isShardKeySpec) {
     if (timeseriesIndexSpecBSON.isEmpty()) {
-        return {ErrorCodes::BadValue, "Empty object is not a valid index spec"_sd};
+        return {ErrorCodes::BadValue, "Empty object is not a valid index spec"sv};
     }
-    if (timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$hint"_sd ||
-        timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$natural"_sd) {
+    if (timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$hint"sv ||
+        timeseriesIndexSpecBSON.firstElement().fieldNameStringData() == "$natural"sv) {
         return {
             ErrorCodes::BadValue,
             str::stream() << "Invalid index spec (perhaps it's a valid hint, that was incorrectly "
@@ -388,8 +363,8 @@ boost::optional<BSONObj> createBucketsIndexSpecFromBucketsShardKeySpec(
         return {};
     }
 
-    if (bucketShardKeySpecBSON.firstElement().fieldNameStringData() == "$hint"_sd ||
-        bucketShardKeySpecBSON.firstElement().fieldNameStringData() == "$natural"_sd) {
+    if (bucketShardKeySpecBSON.firstElement().fieldNameStringData() == "$hint"sv ||
+        bucketShardKeySpecBSON.firstElement().fieldNameStringData() == "$natural"sv) {
         return {};
     }
 
@@ -572,7 +547,7 @@ bool doesBucketsIndexIncludeMeasurement(OperationContext* opCtx,
         << timeseries::kControlMaxFieldNamePrefix << timeField;
     static const std::string idField = "_id";
 
-    auto isMeasurementField = [&](StringData name) -> bool {
+    auto isMeasurementField = [&](std::string_view name) -> bool {
         if (name == controlMinTimeField || name == controlMaxTimeField) {
             return false;
         }
@@ -630,10 +605,10 @@ bool doesBucketsIndexIncludeMeasurement(OperationContext* opCtx,
 bool isHintIndexKey(const BSONObj& obj) {
     if (obj.isEmpty())
         return false;
-    StringData fieldName = obj.firstElement().fieldNameStringData();
-    if (fieldName == "$hint"_sd)
+    std::string_view fieldName = obj.firstElement().fieldNameStringData();
+    if (fieldName == "$hint"sv)
         return false;
-    if (fieldName == "$natural"_sd)
+    if (fieldName == "$natural"sv)
         return false;
 
     return true;

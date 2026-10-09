@@ -1,30 +1,5 @@
-# Copyright(C) 2022 - present MongoDB, Inc.
-#
-# This program is free software : you can redistribute it and / or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program.If not, see
-# < http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library.You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein.If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so.If you do not wish to do so,
-# delete this exception statement from your version.If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 
 # File containing feature flags for sharding features
 
@@ -56,37 +31,12 @@ feature_flags:
         version: 8.0
         fcv_gated: true
         check_against_fcv: legacy_fcv_snapshot_only
-    # TODO (SERVER-81037): enable this feature flag once it's possible to detect prepare conflicts on the catalog
-    featureFlagCreateCollectionInPreparedTransactions:
-        description: "Feature flag protecting the codepath allowing to create collections in prepared transactions "
-        cpp_varname: feature_flags::gCreateCollectionInPreparedTransactions
-        default: false
-        fcv_gated: true
-    # TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
-    featureFlagTrackUnshardedCollectionsUponMoveCollection:
-        description: "Feature flag for enabling the tracking of user unsharded collection upon moveCollection"
-        cpp_varname: feature_flags::gTrackUnshardedCollectionsUponMoveCollection
-        default: true
-        version: 8.0
-        fcv_gated: true
-        check_against_fcv: legacy_fcv_snapshot_only
-    # TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
-    featureFlag80CollectionCreationPath:
-        description:
-            "Feature flag protecting all codepaths that rely on the 8.0 way of collection creation in a
-            sharded cluster. Namely, no implicit creations by the shards and no usage of the
-            storage-level create command."
-        cpp_varname: feature_flags::g80CollectionCreationPath
-        default: true
-        version: 8.0
-        fcv_gated: true
-        check_against_fcv: legacy_fcv_snapshot_only
     featureFlagCreateDatabaseDDLCoordinator:
         description: >
             Feature flag for enabling the sharding DDL coordinator for database creation.
 
             (Enable on transitional FCV): This DDL coordinator is needed during the transition
-            phase of authoritative databases (featureFlagShardAuthoritativeDbMetadataDDL).
+            phase of authoritative databases (featureFlagAuthoritativeShardsDDL).
             If this feature flag is disabled by a FCV downgrade, all instances of this DDL
             coordinator are drained when finalizing the downgrade.
         cpp_varname: feature_flags::gCreateDatabaseDDLCoordinator
@@ -115,7 +65,7 @@ feature_flags:
             "Feature flag to enable one catalog cache for the shard role and another one for
             the router role."
         cpp_varname: feature_flags::gDualCatalogCache
-        default: false
+        default: true
         fcv_gated: false
     featureFlagUseTopologyChangeCoordinators:
         description: "Feature flag for enabling the coordinator based topology changes."
@@ -124,44 +74,35 @@ feature_flags:
         version: 8.2
         fcv_gated: true
     # TODO (SERVER-98118): remove once 9.0 becomes last LTS.
-    featureFlagShardAuthoritativeDbMetadataCRUD:
+    featureFlagAuthoritativeShardsCRUD:
         description:
-            "Feature flag to enable the authoritative model to read database metadata from
-            stored shard-local information"
-        cpp_varname: feature_flags::gShardAuthoritativeDbMetadataCRUD
-        default: false
+            "Feature flag to enable the authoritative model to read database and collection
+            metadata from stored shard-local information"
+        cpp_varname: feature_flags::gAuthoritativeShardsCRUD
+        default: true
+        version: 9.0
         fcv_gated: true
     # TODO (SERVER-98118): remove once 9.0 becomes last LTS.
-    featureFlagShardAuthoritativeDbMetadataDDL:
+    featureFlagAuthoritativeShardsDDL:
         description: >
             Feature flag to enable the authoritative model to store shard-local information
-            for database metadata.
+            for database and collection metadata.
 
-            (Enable on transitional FCV): Enables cloning and writing of authoritative database
+            (Enable on transitional FCV): Enables cloning and writing of authoritative database and collection
             metadata in shards during the transition phase, so that once the FCV is fully upgraded,
-            operations can start reading from it (via featureFlagShardAuthoritativeDbMetadataCRUD).
+            operations can start reading from it (via featureFlagAuthoritativeShardsCRUD).
             If this feature flag is disabled by a FCV downgrade, all DDL coordinators checking
             this flag are drained when finalizing the downgrade.
-        cpp_varname: feature_flags::gShardAuthoritativeDbMetadataDDL
-        default: false
+        cpp_varname: feature_flags::gAuthoritativeShardsDDL
+        default: true
+        version: 9.0
         fcv_gated: true
         enable_on_transitional_fcv_UNSAFE: true
-    # TODO (SERVER-89169): remove once 9.0 becomes last LTS.
-    featureFlagShardAuthoritativeCollMetadata:
-        description:
-            "Feature flag to enable the authoritative model for storing shard-local information
-            for collections and chunks metadata."
-        cpp_varname: feature_flags::gShardAuthoritativeCollMetadata
+    featureFlagShardCatalogExpiredHistoryFiltering:
+        description: "Feature flag to enable filtering out expired unreachable chunk ownership metadata during shard catalog metadata recovery."
+        cpp_varname: feature_flags::gShardCatalogExpiredHistoryFiltering
         default: false
-        fcv_gated: true
-    # TODO (SERVER-100309): remove once 9.0 becomes last LTS.
-    featureFlagSessionsCollectionCoordinatorOnConfigServer:
-        description:
-            Feature flag for running the shard collection coordinator on the config server for
-            config.system.sessions.
-        cpp_varname: feature_flags::gSessionsCollectionCoordinatorOnConfigServer
-        default: false
-        fcv_gated: true
+        fcv_gated: false
     featureFlagTerminateSecondaryReadsUponRangeDeletion:
         description: "Feature flag to enable the termination of secondary reads due to range deletions."
         cpp_varname: feature_flags::gTerminateSecondaryReadsUponRangeDeletion
@@ -249,6 +190,28 @@ feature_flags:
         cpp_varname: feature_flags::gFeatureFlagCheckVersioningCorrectness
         default: false
         fcv_gated: true
+    featureFlagMaxKeyDetection:
+        description: >-
+            Feature flag protecting the one-shot MaxKey inventory scans run on each primary
+            stepup. On shards, a dedicated per-stepup detector scans for shard-key documents
+            whose leading field is MaxKey and records the result in config.maxKeyOrphanScanState.
+            On the config server, the Balancer scan detects zones whose upper bound matches the
+            buggy trailing-MinKey fingerprint and records the result in config.maxKeyZoneScanState.
+            Disabled by default; the scans can also be enabled at runtime via the
+            enableMaxKeyDetection server parameter without turning on this flag.
+        cpp_varname: feature_flags::gMaxKeyDetection
+        default: false
+        fcv_gated: false
+    featureFlagMaxKeyOrphanGuard:
+        description: >-
+            Feature flag protecting the MaxKey orphan delete-guard. When enabled together with the
+            skipRangeDeletionForMaxKeyChunks server parameter, the range deleter (for tasks
+            pre-classified at step-up and recorded in config.maxKeyOrphanScanState.blockedTasks)
+            deletes ordinary documents in the range but preserves documents whose leading shard-key
+            field is MaxKey, leaving them for out-of-band recovery.
+        cpp_varname: feature_flags::gMaxKeyOrphanGuard
+        default: true
+        fcv_gated: false
     featureFlagHashedShardKeyIndexOptionalUponShardingCollection:
         description:
             "Feature flag to make shardCollection and reshardCollection not require a hashed
@@ -256,8 +219,52 @@ feature_flags:
         cpp_varname: feature_flags::gFeatureFlagHashedShardKeyIndexOptionalUponShardingCollection
         default: false
         fcv_gated: true
+    # TODO(SERVER-123007): remove feature flag once 9.0 becomes last LTS.
     featureFlagBlockReplicaSetWrites:
         description: "Feature flag to enable blocking writes on a specific replica set"
         cpp_varname: feature_flags::gFeatureFlagBlockReplicaSetWrites
+        default: true
+        version: 9.0
+        fcv_gated: true
+    # TODO (SERVER-126212): remove feature flag once 9.0 becomes last LTS.
+    featureFlagAssignUUIDToShard:
+        description: >
+            When enabled, each shard receives a uuid value when added to a cluster
+            (persisted on the related config.shards entry and shard identity documents).
+        cpp_varname: feature_flags::gFeatureFlagAssignUUIDToShard
+        default: true
+        version: 9.0
+        fcv_gated: true
+    # TODO (SERVER-126991): Remove this flag once 9.0 becomes last LTS.
+    featureFlagStrictExpireAfterSecondsTypeChecking:
+        description: >-
+            When enabled, checkMetadataConsistency compares 'expireAfterSeconds' across shards
+            using strict BSON type semantics. When disabled, the cross-shard comparison casts
+            numeric values to long first to tolerate legacy values that pre-7.3 nodes persisted
+            using the BSON type of the user-supplied value (int, long, double, or decimal).
+        cpp_varname: feature_flags::gStrictExpireAfterSecondsTypeChecking
+        default: true
+        version: 9.0
+        fcv_gated: true
+    featureFlagServerInitiatedTransactionClassification:
+        description: >-
+            When enabled, the router attaches the 'isServerInitiatedTransaction' generic argument to
+            the first command sent to each participant of a server-initiated (internal) transaction,
+            so that the participant can attribute its transaction lifecycle metrics as internal
+            rather than external. Gated on FCV to ensure all nodes in the cluster understand the field 
+            before it is sent.
+        cpp_varname: feature_flags::gServerInitiatedTransactionClassification
         default: false
+        fcv_gated: true
+    # TODO (SERVER-133881): Remove this flag once 10.0 becomes last LTS.
+    featureFlagCreateRenameNewSetAllowChunkOperationsBehavior:
+        description: >-
+            When enabled, the create and rename collection DDL coordinators commit the new
+            (splittable) collection with 'allowChunkOperations: false' and only re-enable chunk
+            operations after the critical section has been released. This prevents a chunk
+            operation from acquiring the critical section of a collection while the DDL
+            coordinator is still holding it.
+        cpp_varname: feature_flags::gCreateRenameNewSetAllowChunkOperationsBehavior
+        default: true
+        version: 9.1
         fcv_gated: true

@@ -2,6 +2,7 @@
  * Tests that an aggregation pipeline with stages only allowed with 'trySbeEngine' runs correctly
  * when wrapped with a $group, or $lookup. This makes the query use SBE.
  * @tags: [
+ *    uses_explain,
  *    assumes_unsharded_collection,
  *    assumes_against_mongod_not_mongos,
  *    not_allowed_with_signed_security_token,
@@ -45,14 +46,20 @@ function runAndVerifyQuery(coll, pipeline, [expectedDocsGroup, expectedDocsLooku
     // Run the query and explain.
     pipeline.push({$group: {_id: "$x"}});
     let res = coll.aggregate(pipeline);
-    assert(arrayEq(res.toArray(), expectedDocsGroup), buildErrorString(res.toArray(), expectedDocsGroup));
+    assert(
+        arrayEq(res.toArray(), expectedDocsGroup),
+        buildErrorString(res.toArray(), expectedDocsGroup),
+    );
     let explain = assert.commandWorked(coll.explain().aggregate(pipeline));
     assert.eq(getEngine(explain), "sbe", tojson(explain));
 
     pipeline.pop();
     pipeline.push({$lookup: {from: coll2Name, localField: "y", foreignField: "z", as: "xx"}});
     res = coll.aggregate(pipeline);
-    assert(arrayEq(res.toArray(), expectedDocsLookup), buildErrorString(res.toArray(), expectedDocsLookup));
+    assert(
+        arrayEq(res.toArray(), expectedDocsLookup),
+        buildErrorString(res.toArray(), expectedDocsLookup),
+    );
     explain = assert.commandWorked(coll.explain().aggregate(pipeline));
     assert.eq(getEngine(explain), "sbe", tojson(explain));
 }
@@ -110,7 +117,9 @@ coll2.drop();
 
 try {
     originalParamValue = db.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1});
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeRestricted"}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeRestricted"}),
+    );
 
     const docs = [];
     for (let i = 0; i < 100; i++) {

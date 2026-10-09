@@ -1,36 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/move/utility_core.hpp>
-#include <boost/numeric/conversion/converter_policies.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/matcher/expression_leaf.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonmisc.h"
@@ -40,12 +12,12 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
-#include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
+#include "mongo/logv2/log.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/pcre_util.h"
@@ -54,13 +26,22 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <string_view>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/numeric/conversion/converter_policies.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 template <typename T>
 ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
     MatchType type,
-    boost::optional<StringData> path,
+    boost::optional<std::string_view> path,
     T&& rhs,
     ElementPath::LeafArrayBehavior leafArrBehavior,
     ElementPath::NonLeafArrayBehavior nonLeafArrBehavior,
@@ -76,7 +57,7 @@ ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
 // Instantiate above constructor for 'Value&&' and 'const BSONElement&' types.
 template ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
     MatchType,
-    boost::optional<StringData>,
+    boost::optional<std::string_view>,
     Value&&,
     ElementPath::LeafArrayBehavior,
     ElementPath::NonLeafArrayBehavior,
@@ -84,7 +65,7 @@ template ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
     const CollatorInterface*);
 template ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
     MatchType,
-    boost::optional<StringData>,
+    boost::optional<std::string_view>,
     const BSONElement&,
     ElementPath::LeafArrayBehavior,
     ElementPath::NonLeafArrayBehavior,
@@ -113,15 +94,14 @@ void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int indent
     _debugStringAttachTagInfo(&debug);
 }
 
-void ComparisonMatchExpressionBase::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                                  const SerializationOptions& opts,
-                                                                  bool includePath) const {
+void ComparisonMatchExpressionBase::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     opts.appendLiteral(bob, name(), _rhs);
 }
 
 template <typename T>
 ComparisonMatchExpression::ComparisonMatchExpression(MatchType type,
-                                                     boost::optional<StringData> path,
+                                                     boost::optional<std::string_view> path,
                                                      T&& rhs,
                                                      clonable_ptr<ErrorAnnotation> annotation,
                                                      const CollatorInterface* collator)
@@ -149,21 +129,21 @@ ComparisonMatchExpression::ComparisonMatchExpression(MatchType type,
 
 // Instantiate above constructor for 'Value&&' and 'const BSONElement&' types.
 template ComparisonMatchExpression::ComparisonMatchExpression(MatchType,
-                                                              boost::optional<StringData>,
+                                                              boost::optional<std::string_view>,
                                                               Value&&,
                                                               clonable_ptr<ErrorAnnotation>,
                                                               const CollatorInterface*);
 template ComparisonMatchExpression::ComparisonMatchExpression(MatchType,
-                                                              boost::optional<StringData>,
+                                                              boost::optional<std::string_view>,
                                                               const BSONElement&,
                                                               clonable_ptr<ErrorAnnotation>,
                                                               const CollatorInterface*);
 
-constexpr StringData EqualityMatchExpression::kName;
-constexpr StringData LTMatchExpression::kName;
-constexpr StringData LTEMatchExpression::kName;
-constexpr StringData GTMatchExpression::kName;
-constexpr StringData GTEMatchExpression::kName;
+constexpr std::string_view EqualityMatchExpression::kName;
+constexpr std::string_view LTMatchExpression::kName;
+constexpr std::string_view LTEMatchExpression::kName;
+constexpr std::string_view GTMatchExpression::kName;
+constexpr std::string_view GTEMatchExpression::kName;
 
 const std::set<char> RegexMatchExpression::kValidRegexFlags = {'i', 'm', 's', 'x'};
 
@@ -177,9 +157,9 @@ std::unique_ptr<pcre::Regex> RegexMatchExpression::makeRegex(const std::string& 
             .matchLimit = static_cast<uint32_t>(internalQueryRegexMatchLimit.loadRelaxed())});
 }
 
-RegexMatchExpression::RegexMatchExpression(boost::optional<StringData> path,
-                                           StringData regex,
-                                           StringData options,
+RegexMatchExpression::RegexMatchExpression(boost::optional<std::string_view> path,
+                                           std::string_view regex,
+                                           std::string_view options,
                                            clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(REGEX, path, std::move(annotation)),
       _regex(std::string{regex}),
@@ -212,18 +192,17 @@ void RegexMatchExpression::debugString(StringBuilder& debug, int indentationLeve
     _debugStringAttachTagInfo(&debug);
 }
 
-void RegexMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                         const SerializationOptions& opts,
-                                                         bool includePath) const {
+void RegexMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     // We need to be careful to generate a valid regex representative value, and the default string
     // "?" is not valid.
-    opts.appendLiteral(bob, "$regex", _regex, Value("\\?"_sd));
+    opts.appendLiteral(bob, "$regex", _regex, Value("\\?"sv));
 
     if (!_flags.empty()) {
         // We need to make sure the $options value can be re-parsed as legal regex options, so
         // we'll set the representative value in this case to be the string "i" rather than
         // "?", which is the standard representative for string values.
-        opts.appendLiteral(bob, "$options", _flags, Value("i"_sd));
+        opts.appendLiteral(bob, "$options", _flags, Value("i"sv));
     }
 }
 
@@ -237,7 +216,7 @@ void RegexMatchExpression::shortDebugString(StringBuilder& debug) const {
 
 // ---------
 
-ModMatchExpression::ModMatchExpression(boost::optional<StringData> path,
+ModMatchExpression::ModMatchExpression(boost::optional<std::string_view> path,
                                        long long divisor,
                                        long long remainder,
                                        clonable_ptr<ErrorAnnotation> annotation)
@@ -253,9 +232,8 @@ void ModMatchExpression::debugString(StringBuilder& debug, int indentationLevel)
     _debugStringAttachTagInfo(&debug);
 }
 
-void ModMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                       const SerializationOptions& opts,
-                                                       bool includePath) const {
+void ModMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     bob->append("$mod",
                 BSON_ARRAY(opts.serializeLiteral(_divisor) << opts.serializeLiteral(_remainder)));
 }
@@ -272,7 +250,7 @@ bool ModMatchExpression::equivalent(const MatchExpression* other) const {
 
 // ------------------
 
-ExistsMatchExpression::ExistsMatchExpression(boost::optional<StringData> path,
+ExistsMatchExpression::ExistsMatchExpression(boost::optional<std::string_view> path,
                                              clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(EXISTS, path, std::move(annotation)) {}
 
@@ -282,9 +260,8 @@ void ExistsMatchExpression::debugString(StringBuilder& debug, int indentationLev
     _debugStringAttachTagInfo(&debug);
 }
 
-void ExistsMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                          const SerializationOptions& opts,
-                                                          bool includePath) const {
+void ExistsMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     opts.appendLiteral(bob, "$exists", true);
 }
 
@@ -299,12 +276,12 @@ bool ExistsMatchExpression::equivalent(const MatchExpression* other) const {
 
 // ----
 
-InMatchExpression::InMatchExpression(boost::optional<StringData> path,
+InMatchExpression::InMatchExpression(boost::optional<std::string_view> path,
                                      clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(MATCH_IN, path, std::move(annotation)),
       _equalities(std::make_shared<InListData>()) {}
 
-InMatchExpression::InMatchExpression(boost::optional<StringData> path,
+InMatchExpression::InMatchExpression(boost::optional<std::string_view> path,
                                      clonable_ptr<ErrorAnnotation> annotation,
                                      std::shared_ptr<InListData> equalities)
     : LeafMatchExpression(MATCH_IN, path, std::move(annotation)),
@@ -347,7 +324,7 @@ void InMatchExpression::debugString(StringBuilder& debug, int indentationLevel) 
 }
 
 void InMatchExpression::serializeToShape(BSONObjBuilder* bob,
-                                         const SerializationOptions& opts) const {
+                                         const query_shape::SerializationOptions& opts) const {
     auto firstElementOfEachType =
         _equalities->getFirstOfEachType(opts.inMatchExprSortAndDedupElements);
 
@@ -365,7 +342,7 @@ void InMatchExpression::serializeToShape(BSONObjBuilder* bob,
 }
 
 void InMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                      const SerializationOptions& opts,
+                                                      const query_shape::SerializationOptions& opts,
                                                       bool includePath) const {
     if (!opts.isKeepingLiteralsUnchanged()) {
         serializeToShape(bob, opts);
@@ -441,7 +418,7 @@ Status InMatchExpression::addRegex(std::unique_ptr<RegexMatchExpression> expr) {
 // -----------
 
 BitTestMatchExpression::BitTestMatchExpression(MatchType type,
-                                               boost::optional<StringData> path,
+                                               boost::optional<std::string_view> path,
                                                std::vector<uint32_t> bitPositions,
                                                clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(type, path, std::move(annotation)),
@@ -457,7 +434,7 @@ BitTestMatchExpression::BitTestMatchExpression(MatchType type,
 }
 
 BitTestMatchExpression::BitTestMatchExpression(MatchType type,
-                                               boost::optional<StringData> path,
+                                               boost::optional<std::string_view> path,
                                                uint64_t bitMask,
                                                clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(type, path, std::move(annotation)), _bitMask(bitMask) {
@@ -470,11 +447,13 @@ BitTestMatchExpression::BitTestMatchExpression(MatchType type,
 }
 
 BitTestMatchExpression::BitTestMatchExpression(MatchType type,
-                                               boost::optional<StringData> path,
+                                               boost::optional<std::string_view> path,
                                                const char* bitMaskBinary,
                                                uint32_t bitMaskLen,
                                                clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(type, path, std::move(annotation)) {
+    const auto maxPositions = internalQueryMaxBitTestIntermediatePositions.load();
+    const auto logThreshold = static_cast<size_t>(internalQueryBitTestPositionsLogThreshold.load());
     for (uint32_t byte = 0; byte < bitMaskLen; byte++) {
         char byteAt = bitMaskBinary[byte];
         if (!byteAt) {
@@ -493,7 +472,18 @@ BitTestMatchExpression::BitTestMatchExpression(MatchType type,
 
         for (int bit = 0; bit < 8; bit++) {
             if (byteAt & (1 << bit)) {
+                uassert(12244901,
+                        str::stream() << "BinData bitmask for " << name()
+                                      << " has too many set bits; maximum is " << maxPositions
+                                      << " (controlled by "
+                                         "internalQueryMaxBitTestIntermediatePositions)",
+                        _bitPositions.size() < static_cast<size_t>(maxPositions));
                 _bitPositions.push_back(8 * byte + bit);
+                if (_bitPositions.size() == logThreshold) {
+                    LOGV2_WARNING(12244900,
+                                  "Creating large bitPosition vector",
+                                  "size"_attr = _bitPositions.size());
+                }
             }
         }
     }
@@ -533,9 +523,8 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int indentationLe
     _debugStringAttachTagInfo(&debug);
 }
 
-void BitTestMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
-                                                           const SerializationOptions& opts,
-                                                           bool includePath) const {
+void BitTestMatchExpression::appendSerializedRightHandSide(
+    BSONObjBuilder* bob, const query_shape::SerializationOptions& opts, bool includePath) const {
     std::string opString = "";
 
     switch (matchType()) {

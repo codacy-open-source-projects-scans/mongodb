@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -43,12 +16,14 @@
 #include "mongo/util/modules.h"
 
 #include <set>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 DEFINE_LITE_PARSED_STAGE_INTERNAL_DERIVED(ReshardingIterateTransaction);
 
@@ -68,11 +43,11 @@ DEFINE_LITE_PARSED_STAGE_INTERNAL_DERIVED(ReshardingIterateTransaction);
  * {clusterTime: <transaction commit timestamp>, ts: <applyOps optime.ts>}. For all other documents,
  * this will be {clusterTime: <optime.ts>, ts: <optime.ts>}.
  */
-class MONGO_MOD_PUBLIC DocumentSourceReshardingIterateTransaction : public DocumentSource {
+class [[MONGO_MOD_PUBLIC]] DocumentSourceReshardingIterateTransaction : public DocumentSource {
 public:
-    static constexpr StringData kStageName = "$_internalReshardingIterateTransaction"_sd;
-    static constexpr StringData kIncludeCommitTransactionTimestampFieldName =
-        "includeCommitTransactionTimestamp"_sd;
+    static constexpr std::string_view kStageName = "$_internalReshardingIterateTransaction"sv;
+    static constexpr std::string_view kIncludeCommitTransactionTimestampFieldName =
+        "includeCommitTransactionTimestamp"sv;
 
     static boost::intrusive_ptr<DocumentSourceReshardingIterateTransaction> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -85,7 +60,8 @@ public:
 
     DocumentSource::GetModPathsReturn getModifiedPaths() const final;
 
-    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
+    Value serialize(const query_shape::SerializationOptions& opts =
+                        query_shape::SerializationOptions{}) const final;
 
     StageConstraints constraints(PipelineSplitState pipeState) const final;
 
@@ -94,8 +70,8 @@ public:
         return boost::none;
     }
 
-    const char* getSourceName() const override {
-        return DocumentSourceReshardingIterateTransaction::kStageName.data();
+    std::string_view getSourceName() const override {
+        return DocumentSourceReshardingIterateTransaction::kStageName;
     }
 
     static const Id& id;

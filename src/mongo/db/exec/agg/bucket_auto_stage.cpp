@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/bucket_auto_stage.h"
 
@@ -40,6 +14,8 @@
 #include "mongo/db/sorter/sorter_template_defs.h"  // IWYU pragma: keep
 #include "mongo/db/stats/counters.h"
 #include "mongo/util/assert_util.h"
+
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -66,7 +42,7 @@ REGISTER_AGG_STAGE_MAPPING(bucketAuto,
 namespace exec::agg {
 
 BucketAutoStage::BucketAutoStage(
-    StringData stageName,
+    std::string_view stageName,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::shared_ptr<std::vector<AccumulationStatement>> accumulatedFields,
     std::shared_ptr<bool> populated,
@@ -84,15 +60,23 @@ BucketAutoStage::BucketAutoStage(
       _memoryTracker{OperationMemoryUsageTracker::createMemoryUsageTrackerForStage(
           *pExpCtx,
           pExpCtx->getAllowDiskUse() && !pExpCtx->getInRouter(),
-          loadMemoryLimit(StageMemoryLimit::DocumentSourceBucketAutoMaxMemoryBytes))} {
+          loadMemoryLimit(StageMemoryLimit::DocumentSourceBucketAutoMaxMemoryBytes))},
+      _expressionEvaluationMemoryTracker(
+          OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForStage(*pExpCtx)) {
     for (auto&& accumulationStatement : *_accumulatedFields) {
         _accumulatedFieldMemoryTrackers.push_back(&_memoryTracker[accumulationStatement.fieldName]);
     }
+    if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled() &&
+        feature_flags::gFeatureFlagExpressionMemoryTracking.isEnabled()) {
+        _expressionEvalCtx.tracker = &_expressionEvaluationMemoryTracker;
+    }
+    _expressionEvalCtx.stageName = _commonStats.stageTypeStr;
 }
 
 SortOptions BucketAutoStage::makeSortOptions() {
     SortOptions opts;
-    opts.MaxMemoryUsageBytes(_memoryTracker.maxAllowedMemoryUsageBytes());
+    opts.MaxMemoryUsageBytes(
+        _memoryTracker.maxAllowedMemoryUsageBytes(pExpCtx->getOperationContext()));
     return opts;
 }
 
@@ -140,7 +124,7 @@ Value BucketAutoStage::extractKey(const Document& doc) {
         return Value(BSONNULL);
     }
 
-    Value key = _groupByExpression->evaluate(doc, &pExpCtx->variables);
+    Value key = _groupByExpression->evaluate(doc, &pExpCtx->variables, _expressionEvalCtx);
 
     if (_granularityRounder) {
         uassert(40258,
@@ -176,8 +160,8 @@ void BucketAutoStage::addDocumentToBucket(const std::pair<Value, Document>& entr
         if (accumulator.needsInput()) {
             bool isPositionalAccum = isPositionalAccumulator(accumulator.getOpName());
             auto value = entry.second.getField(AccumulatorN::kFieldNameOutput);
-            auto evaluated = (*_accumulatedFields)[k].expr.argument->evaluate(value.getDocument(),
-                                                                              &pExpCtx->variables);
+            auto evaluated = (*_accumulatedFields)[k].expr.argument->evaluate(
+                value.getDocument(), &pExpCtx->variables, _expressionEvalCtx);
 
             auto prevMemUsage = accumulator.getMemUsage();
             if (isPositionalAccum) {
@@ -272,8 +256,8 @@ boost::optional<BucketAutoStage::Bucket> BucketAutoStage::populateNextBucket() {
     // the group key, but in $bucketAuto there is no single group key per bucket.
     Document emptyDoc;
     for (size_t k = 0; k < _accumulatedFields->size(); ++k) {
-        Value initializerValue =
-            (*_accumulatedFields)[k].expr.initializer->evaluate(emptyDoc, &pExpCtx->variables);
+        Value initializerValue = (*_accumulatedFields)[k].expr.initializer->evaluate(
+            emptyDoc, &pExpCtx->variables, _expressionEvalCtx);
         AccumulatorState& accumulator = *currentBucket._accums[k];
         accumulator.startNewGroup(initializerValue);
         _accumulatedFieldMemoryTrackers[k]->add(accumulator.getMemUsage());
@@ -434,7 +418,7 @@ void BucketAutoStage::doForceSpill() {
     }
 }
 
-Document BucketAutoStage::getExplainOutput(const SerializationOptions& opts) const {
+Document BucketAutoStage::getExplainOutput(const query_shape::SerializationOptions& opts) const {
     MutableDocument out(Stage::getExplainOutput(opts));
     out["usedDisk"] = opts.serializeLiteral(_stats.spillingStats.getSpills() > 0);
     out["spills"] = opts.serializeLiteral(static_cast<long long>(_stats.spillingStats.getSpills()));
@@ -447,8 +431,11 @@ Document BucketAutoStage::getExplainOutput(const SerializationOptions& opts) con
     if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
         out["peakTrackedMemBytes"] =
             opts.serializeLiteral(static_cast<long long>(_memoryTracker.peakTrackedMemoryBytes()));
+        if (_expressionEvalCtx.tracker) {
+            out["expressionEvaluationPeakMemoryBytes"] = opts.serializeLiteral(
+                static_cast<long long>(_expressionEvalCtx.tracker->peakTrackedMemoryBytes()));
+        }
     }
-
 
     return out.freeze();
 }

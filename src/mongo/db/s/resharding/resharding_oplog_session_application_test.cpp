@@ -1,42 +1,11 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -60,7 +29,6 @@
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
-#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
 #include "mongo/db/s/session_catalog_migration_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -91,6 +59,13 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -140,7 +115,9 @@ public:
 
         auto opTime = [opCtx] {
             WriteUnitOfWork wuow(opCtx);
-            ScopeGuard guard{[&wuow] { wuow.commit(); }};
+            ScopeGuard guard{[&wuow] {
+                wuow.commit();
+            }};
             return repl::getNextOpTime(opCtx);
         }();
         WriteUnitOfWork wuow(opCtx);
@@ -313,6 +290,27 @@ public:
         op.setObject(AbortTransactionOplogObject{}.toBSON());
         op.setSessionId(std::move(lsid));
         op.setTxnNumber(std::move(txnNumber));
+        op.setOpTime({{}, {}});
+        op.set_id(Value{
+            Document{{ReshardingDonorOplogId::kClusterTimeFieldName, op.getOpTime().getTimestamp()},
+                     {ReshardingDonorOplogId::kTsFieldName, op.getOpTime().getTimestamp()}}});
+
+        // These are unused by ReshardingOplogSessionApplication but required by IDL parsing.
+        op.setNss({});
+        op.setWallClockTime({});
+
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeApplyOpsOp(LogicalSessionId lsid,
+                                    TxnNumber txnNumber,
+                                    repl::MultiOplogEntryType multiOpType) {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kCommand);
+        op.setObject(BSON("applyOps" << BSONArray()));
+        op.setSessionId(std::move(lsid));
+        op.setTxnNumber(std::move(txnNumber));
+        op.setMultiOpType(multiOpType);
         op.setOpTime({{}, {}});
         op.set_id(Value{
             Document{{ReshardingDonorOplogId::kClusterTimeFieldName, op.getOpTime().getTimestamp()},
@@ -1446,6 +1444,32 @@ TEST_F(ReshardingOplogSessionApplicationTest, IncomingRetryableWriteWithDeadEndS
         auto opCtx = makeOperationContext();
         checkStatementExecutedAndFetchOplogEntry(opCtx.get(), lsid, txnNumber, postFetchStmtId);
     }
+}
+
+// The batch preparer unrolls retryable applyOps (both kApplyOpsAppliedSeparately and
+// kApplyOpsAppliedAtomically) into individual CRUD ops before they reach session application, so a
+// raw retryable applyOps should never legitimately reach tryApplyOperation. The tassert there is a
+// safety net that must reject both retryable-applyOps tags.
+class ReshardingOplogSessionApplicationRetryableApplyOpsTest
+    : public ReshardingOplogSessionApplicationTest,
+      public testing::WithParamInterface<repl::MultiOplogEntryType> {};
+
+INSTANTIATE_TEST_SUITE_P(RetryableApplyOpsMultiOpTypes,
+                         ReshardingOplogSessionApplicationRetryableApplyOpsTest,
+                         testing::Values(repl::MultiOplogEntryType::kApplyOpsAppliedSeparately,
+                                         repl::MultiOplogEntryType::kApplyOpsAppliedAtomically));
+
+TEST_P(ReshardingOplogSessionApplicationRetryableApplyOpsTest, RejectsRawRetryableApplyOps) {
+    auto lsid = makeLogicalSessionIdForTest();
+    auto oplogEntry = makeApplyOpsOp(lsid, 100, GetParam());
+
+    auto opCtx = makeOperationContext();
+    ReshardingOplogSessionApplication applier{oplogBufferNss()};
+    ASSERT_THROWS_WITH_CHECK(
+        applier.tryApplyOperation(opCtx.get(), oplogEntry), DBException, [](const DBException& ex) {
+            EXPECT_EQ(ex.code(), 9572400);
+            assertionCount.tripwire.subtractAndFetch(1);
+        });
 }
 
 }  // namespace

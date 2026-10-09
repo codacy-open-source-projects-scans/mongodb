@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/scripting/mozjs/common/types/bson.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_comparator_interface_base.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
@@ -54,6 +27,8 @@
 
 #include <jsapi.h>
 #if !defined(MONGO_MOZJS_WASI_BUILD)
+#include <string_view>
+
 #include <jscustomallocator.h>
 #endif
 
@@ -229,8 +204,8 @@ void BSONInfo::enumerate(JSContext* cx,
     while (i.more()) {
         BSONElement e = i.next();
 
-        // TODO SERVER-122826: when we get heterogeneous set lookup, switch to StringData rather
-        // than involving the temporary string
+        // TODO SERVER-122826: when we get heterogeneous set lookup, switch to std::string_view
+        // rather than involving the temporary string
         auto fieldNameStringData = e.fieldNameStringData();
         if (holder->_removed.find(std::string{fieldNameStringData}) != holder->_removed.end())
             continue;
@@ -343,13 +318,14 @@ void BSONInfo::Functions::bsonObjToArray::call(JSContext* cx, JS::CallArgs args)
     uassert(ErrorCodes::BadValue, "argument must be an object", args.get(0).isObject());
 
     auto obj = ValueWriter(cx, args.get(0)).toBSON();
+    obj.makeOwned();
     ValueReader(cx, args.rval()).fromBSONArray(obj, nullptr, false);
 }
 
 namespace {
 void bsonCompareCommon(JSContext* cx,
                        JS::CallArgs args,
-                       StringData funcName,
+                       std::string_view funcName,
                        BSONObj::ComparisonRulesSet rules) {
     if (args.length() != 2)
         uasserted(ErrorCodes::BadValue, fmt::format("{} needs 2 arguments", funcName));
@@ -401,7 +377,8 @@ void BSONInfo::Functions::bsonToBase64::call(JSContext* cx, JS::CallArgs args) {
     bool isBSON = getProto<BSONInfo>(runtime).instanceOf(args.get(0));
     BSONObj bsonObject = getBSONFromArg(cx, args.get(0), isBSON);
 
-    auto encoded = mongo::base64::encode(StringData(bsonObject.objdata(), bsonObject.objsize()));
+    auto encoded =
+        mongo::base64::encode(std::string_view(bsonObject.objdata(), bsonObject.objsize()));
     ValueReader(cx, args.rval()).fromStringData(encoded);
 }
 

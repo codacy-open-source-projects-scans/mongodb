@@ -1,5 +1,9 @@
 /**
  * Ensure limit and skip stages in find queries are estimated correctly.
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 
 import {getPlanStage, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
@@ -28,7 +32,12 @@ assert.commandWorked(coll.runCommand({analyze: collName, key: "b"}));
 
 function runTest({query, sort, skip, limit, expectedCard}) {
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
     let cmd = coll.find(query);
     if (sort !== undefined) {
@@ -55,18 +64,21 @@ try {
     runTest({query: {a: {$gt: 500}}, limit: 0, expectedCard: 499.4});
     // Negative limit same effect as positive value
     runTest({query: {a: {$gt: 500}}, limit: -10, expectedCard: 10});
-    runTest({query: {a: {$gt: 10000}}, limit: 5, expectedCard: 0});
+    // Approximate-source (Histogram) zero is clamped to 1 by
+    // CardinalityEstimator::clampZeroEstimates, so cases that would naturally produce
+    // cardinality 0 report 1.
+    runTest({query: {a: {$gt: 10000}}, limit: 5, expectedCard: 1});
 
     runTest({query: {a: {$gt: 500}}, skip: 1, expectedCard: 498.4});
     runTest({query: {a: {$gt: 500}}, skip: 100, expectedCard: 399.4});
-    runTest({query: {a: {$gt: 500}}, skip: 500, expectedCard: 0});
-    runTest({query: {a: {$gt: 10000}}, skip: 5, expectedCard: 0});
+    runTest({query: {a: {$gt: 500}}, skip: 500, expectedCard: 1});
+    runTest({query: {a: {$gt: 10000}}, skip: 5, expectedCard: 1});
     runTest({query: {a: {$gt: 500}}, skip: 0, expectedCard: 499.4});
 
     runTest({query: {a: {$gt: 500}}, skip: 100, limit: 100, expectedCard: 100});
     runTest({query: {a: {$gt: 500}}, skip: 450, limit: 100, expectedCard: 49.4});
-    runTest({query: {a: {$gt: 500}}, skip: 500, limit: 100, expectedCard: 0});
-    runTest({query: {a: {$gt: 10000}}, skip: 100, limit: 100, expectedCard: 0});
+    runTest({query: {a: {$gt: 500}}, skip: 500, limit: 100, expectedCard: 1});
+    runTest({query: {a: {$gt: 10000}}, skip: 100, limit: 100, expectedCard: 1});
     runTest({query: {}, sort: {b: 1}, limit: 42, expectedCard: 42});
     runTest({query: {}, sort: {b: 1}, limit: 1001, expectedCard: 1000});
     runTest({query: {}, sort: {b: 1}, limit: 0, expectedCard: 1000});
@@ -88,7 +100,12 @@ try {
     assert.commandWorked(coll.runCommand({analyze: collName, key: "a"}));
 
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
 
     const query = {a: 1};
@@ -96,7 +113,10 @@ try {
 
     // Get the cost of the skip stage
     const smallCardSkipExplain = coll.find(query).skip(skip).explain();
-    const smallCardSkipCost = getPlanStage(getWinningPlanFromExplain(smallCardSkipExplain), "SKIP").costEstimate;
+    const smallCardSkipCost = getPlanStage(
+        getWinningPlanFromExplain(smallCardSkipExplain),
+        "SKIP",
+    ).costEstimate;
 
     // Add more docs to the collection and update histogram
     assert.commandWorked(coll.insert(docs));
@@ -104,7 +124,10 @@ try {
 
     // Get the cost of the skip stage
     const largeCardSkipExplain = coll.find(query).skip(skip).explain();
-    const largeCardSkipCost = getPlanStage(getWinningPlanFromExplain(largeCardSkipExplain), "SKIP").costEstimate;
+    const largeCardSkipCost = getPlanStage(
+        getWinningPlanFromExplain(largeCardSkipExplain),
+        "SKIP",
+    ).costEstimate;
 
     assert.gt(largeCardSkipCost, smallCardSkipCost);
 } finally {

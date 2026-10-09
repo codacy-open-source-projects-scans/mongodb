@@ -6,7 +6,7 @@
  * TODO SERVER-84678: move this test into core once mongos supports includeQueryStatsMetrics
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-import {isLinux} from "jstests/libs/os_helpers.js";
+import {isLinux} from "jstests/libs/server_security/os_helpers.js";
 
 function assertMetricEqual(metrics, name, expectedValue) {
     if (typeof expectedValue === "undefined") {
@@ -23,15 +23,31 @@ function assertCpuNanosMetricEqual(metrics) {
     const name = "cpuNanos";
     assert(name in metrics, ` ${name} is missing. Returned metrics: ${tojson(metrics)}`);
     if (isLinux()) {
-        assert.gte(metrics[name], 0, `${name} should be positive. Returned metrics: ${tojson(metrics)}`);
+        assert.gte(
+            metrics[name],
+            0,
+            `${name} should be positive. Returned metrics: ${tojson(metrics)}`,
+        );
         return;
     }
-    assert.lte(metrics[name], 0, `${name} should be negative. Returned metrics: ${tojson(metrics)}`);
+    assert.lte(
+        metrics[name],
+        0,
+        `${name} should be negative. Returned metrics: ${tojson(metrics)}`,
+    );
 }
 
 function assertMetricsEqual(
     obj,
-    {keysExamined, docsExamined, workingTimeMillis, hasSortStage, usedDisk, fromMultiPlanner, fromPlanCache} = {},
+    {
+        keysExamined,
+        docsExamined,
+        workingTimeMillis,
+        hasSortStage,
+        usedDisk,
+        fromMultiPlanner,
+        fromPlanCache,
+    } = {},
 ) {
     assert(obj.hasOwnProperty("metrics"), `object is missing metrics field: ${tojson(obj)}`);
     const metrics = obj.metrics;
@@ -103,7 +119,11 @@ function assertWriteMetricsEqual(
 
     {
         // includeQueryStatsMetrics is false, no metrics should be included.
-        const result = testDB.runCommand({find: coll.getName(), filter: {a: 1}, includeQueryStatsMetrics: false});
+        const result = testDB.runCommand({
+            find: coll.getName(),
+            filter: {a: 1},
+            includeQueryStatsMetrics: false,
+        });
         assert.commandWorked(result);
         const cursor = result.cursor;
         assert(!cursor.hasOwnProperty("metrics"));
@@ -111,7 +131,11 @@ function assertWriteMetricsEqual(
 
     {
         // Basic find command with includeQueryStatsMetrics, metrics should appear.
-        const result = testDB.runCommand({find: coll.getName(), filter: {a: 1}, includeQueryStatsMetrics: true});
+        const result = testDB.runCommand({
+            find: coll.getName(),
+            filter: {a: 1},
+            includeQueryStatsMetrics: true,
+        });
         assert.commandWorked(result);
         const cursor = result.cursor;
         assertMetricsEqual(cursor, {
@@ -196,7 +220,11 @@ function assertWriteMetricsEqual(
     {
         // GetMore command without metrics requested.
         const cursor = coll.find({}).batchSize(1);
-        const result = testDB.runCommand({getMore: cursor.getId(), collection: coll.getName(), batchSize: 100});
+        const result = testDB.runCommand({
+            getMore: cursor.getId(),
+            collection: coll.getName(),
+            batchSize: 100,
+        });
         assert.commandWorked(result);
         assert(!result.cursor.hasOwnProperty("metrics"));
     }
@@ -221,87 +249,106 @@ function assertWriteMetricsEqual(
         });
     }
 
-    if (FeatureFlagUtil.isEnabled(testDB.getMongo(), "QueryStatsCountDistinct")) {
-        {
-            // Distinct command without metrics requested.
-            const result = testDB.runCommand({distinct: coll.getName(), key: "b", includeQueryStatsMetrics: false});
-            assert.commandWorked(result);
-            assert(!result.hasOwnProperty("metrics"));
-        }
+    {
+        // Distinct command without metrics requested.
+        const result = testDB.runCommand({
+            distinct: coll.getName(),
+            key: "b",
+            includeQueryStatsMetrics: false,
+        });
+        assert.commandWorked(result);
+        assert(!result.hasOwnProperty("metrics"));
+    }
 
-        {
-            // Distinct command with metrics requested.
-            const result = testDB.runCommand({distinct: coll.getName(), key: "b", includeQueryStatsMetrics: true});
-            assert.commandWorked(result);
-            assertMetricsEqual(result, {
-                keysExamined: 0,
-                docsExamined: 5,
-                hasSortStage: false,
-                usedDisk: false,
-                fromMultiPlanner: false,
-            });
-        }
+    {
+        // Distinct command with metrics requested.
+        const result = testDB.runCommand({
+            distinct: coll.getName(),
+            key: "b",
+            includeQueryStatsMetrics: true,
+        });
+        assert.commandWorked(result);
+        assertMetricsEqual(result, {
+            keysExamined: 0,
+            docsExamined: 5,
+            hasSortStage: false,
+            usedDisk: false,
+            fromMultiPlanner: false,
+        });
+    }
 
-        {
-            // Distinct command against a view - internally rewritten to an aggregate.
-            var viewName = jsTestName() + "_distinct_view";
-            assert.commandWorked(testDB.createView(viewName, coll.getName(), []));
-            const result = testDB.runCommand({distinct: viewName, key: "b", includeQueryStatsMetrics: true});
-            assert.commandWorked(result);
-            const spillParameter = testDB.adminCommand({
-                getParameter: 1,
-                internalQueryEnableAggressiveSpillsInGroup: 1,
-            });
-            const aggressiveSpillsInGroup = spillParameter["internalQueryEnableAggressiveSpillsInGroup"];
-            assertMetricsEqual(result, {
-                keysExamined: 0,
-                docsExamined: 5,
-                hasSortStage: false,
-                usedDisk: aggressiveSpillsInGroup,
-                fromMultiPlanner: false,
-            });
-        }
+    {
+        // Distinct command against a view - internally rewritten to an aggregate.
+        var viewName = jsTestName() + "_distinct_view";
+        assert.commandWorked(testDB.createView(viewName, coll.getName(), []));
+        const result = testDB.runCommand({
+            distinct: viewName,
+            key: "b",
+            includeQueryStatsMetrics: true,
+        });
+        assert.commandWorked(result);
+        const spillParameter = testDB.adminCommand({
+            getParameter: 1,
+            internalQueryEnableAggressiveSpillsInGroup: 1,
+        });
+        const aggressiveSpillsInGroup =
+            spillParameter["internalQueryEnableAggressiveSpillsInGroup"];
+        assertMetricsEqual(result, {
+            keysExamined: 0,
+            docsExamined: 5,
+            hasSortStage: false,
+            usedDisk: aggressiveSpillsInGroup,
+            fromMultiPlanner: false,
+        });
+    }
 
-        {
-            // includeQueryStatsMetrics is false, no metrics should be included.
-            const result = testDB.runCommand({count: coll.getName(), query: {a: 1}, includeQueryStatsMetrics: false});
-            assert.commandWorked(result);
-            assert(!result.hasOwnProperty("metrics"));
-        }
+    {
+        // includeQueryStatsMetrics is false, no metrics should be included.
+        const result = testDB.runCommand({
+            count: coll.getName(),
+            query: {a: 1},
+            includeQueryStatsMetrics: false,
+        });
+        assert.commandWorked(result);
+        assert(!result.hasOwnProperty("metrics"));
+    }
 
-        {
-            // Basic count command with includeQueryStatsMetrics, metrics should appear.
-            const result = testDB.runCommand({count: coll.getName(), query: {a: 1}, includeQueryStatsMetrics: true});
-            assert.commandWorked(result);
-            assertMetricsEqual(result, {
-                keysExamined: 0,
-                docsExamined: 5,
-                hasSortStage: false,
-                usedDisk: false,
-                fromMultiPlanner: false,
-            });
-        }
+    {
+        // Basic count command with includeQueryStatsMetrics, metrics should appear.
+        const result = testDB.runCommand({
+            count: coll.getName(),
+            query: {a: 1},
+            includeQueryStatsMetrics: true,
+        });
+        assert.commandWorked(result);
+        assertMetricsEqual(result, {
+            keysExamined: 0,
+            docsExamined: 5,
+            hasSortStage: false,
+            usedDisk: false,
+            fromMultiPlanner: false,
+        });
+    }
 
-        {
-            // Count command against a non-existent collection, metrics should still appear.
-            const collName = jsTestName() + "_does_not_exist";
-            const nonExistentCollection = testDB[collName];
-            nonExistentCollection.drop();
-            const result = testDB.runCommand({
-                count: nonExistentCollection.getName(),
-                query: {a: 1},
-                includeQueryStatsMetrics: true,
-            });
-            assert.commandWorked(result);
-            assertMetricsEqual(result, {
-                keysExamined: 0,
-                docsExamined: 0,
-                hasSortStage: false,
-                usedDisk: false,
-                fromMultiPlanner: false,
-                fromPlanCache: false,
-            });
-        }
+    {
+        // Count command against a non-existent collection, metrics should still appear.
+        const collName = jsTestName() + "_does_not_exist";
+        const nonExistentCollection = testDB[collName];
+        nonExistentCollection.drop();
+        const result = testDB.runCommand({
+            count: nonExistentCollection.getName(),
+            query: {a: 1},
+            includeQueryStatsMetrics: true,
+        });
+        assert.commandWorked(result);
+        assertMetricsEqual(result, {
+            keysExamined: 0,
+            docsExamined: 0,
+            hasSortStage: false,
+            usedDisk: false,
+            fromMultiPlanner: false,
+            fromPlanCache: false,
+        });
     }
 
     // Update command tests
@@ -358,7 +405,11 @@ function assertWriteMetricsEqual(
             );
 
             const metricsArray = result.queryStatsMetrics;
-            assert.eq(metricsArray.length, 2, "expected 2 metrics entries: " + tojson(metricsArray));
+            assert.eq(
+                metricsArray.length,
+                2,
+                "expected 2 metrics entries: " + tojson(metricsArray),
+            );
 
             // Collect the indices that have metrics.
             const metricsIndices = new Set(metricsArray.map((m) => m.originalOpIndex));

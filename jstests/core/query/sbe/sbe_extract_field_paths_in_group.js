@@ -2,6 +2,7 @@
  * Tests that ExtractFieldPathsStage appears underneath $group.
  *
  * @tags: [
+ *    uses_explain,
  *    assumes_against_mongod_not_mongos,
  *    # Explain command does not support read concerns other than local.
  *    assumes_read_concern_local,
@@ -17,12 +18,22 @@
 import {getEngine} from "jstests/libs/query/analyze_plan.js";
 import {getSbePlanStages} from "jstests/libs/query/sbe_explain_helpers.js";
 
-const originalFrameworkControl = db.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1});
-const originalFeatureFlagExtract = db.adminCommand({getParameter: 1, featureFlagExtractFieldPathsSbeStage: 1});
+const originalFrameworkControl = db.adminCommand({
+    getParameter: 1,
+    internalQueryFrameworkControl: 1,
+});
+const originalFeatureFlagExtract = db.adminCommand({
+    getParameter: 1,
+    featureFlagExtractFieldPathsSbeStage: 1,
+});
 
 try {
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagExtractFieldPathsSbeStage: true}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryFrameworkControl: "trySbeEngine"}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, featureFlagExtractFieldPathsSbeStage: true}),
+    );
     db.c.deleteMany({});
     db.c.insert({_id: 0, a: {b: 1, c: 1}});
     const pipelines = [{$group: {_id: {ab: "$a.b", ac: "$a.c"}, idSum: {$sum: "$_id"}}}];
@@ -43,7 +54,8 @@ try {
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
-            featureFlagExtractFieldPathsSbeStage: originalFeatureFlagExtract.featureFlagExtractFieldPathsSbeStage,
+            featureFlagExtractFieldPathsSbeStage:
+                originalFeatureFlagExtract.featureFlagExtractFieldPathsSbeStage,
         }),
     );
 }

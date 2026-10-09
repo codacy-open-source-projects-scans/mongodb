@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /* Client represents a connection to the database (the server-side) and corresponds
    to an open socket (or logical connection if pooling on sockets) from a client.
@@ -48,6 +22,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <boost/functional/hash.hpp>
 
@@ -78,7 +53,7 @@ std::function<bool(Client*)> checkAuthForInternalClient = [](Client*) {
 
 }  // namespace
 
-void Client::initThread(StringData desc,
+void Client::initThread(std::string_view desc,
                         Service* service,
                         std::shared_ptr<transport::Session> session,
                         ClientOperationKillableByStepdown killable,
@@ -185,7 +160,7 @@ bool isProcessInternalClient(const Client& client) {
  * Non-user connections are listed active if they have an opCtx and not waiting on a condvar.
  */
 bool Client::hasAnyActiveCurrentOp() const {
-    if (!_opCtx)
+    if (!_opCtx || _opCtxIsPendingDestruction)
         return false;
     if (isFromUserConnection() || !_opCtx->isWaitingForConditionOrInterrupt())
         return true;
@@ -200,7 +175,7 @@ void Client::setKilled() {
     }
 }
 
-ThreadClient::ThreadClient(StringData desc,
+ThreadClient::ThreadClient(std::string_view desc,
                            Service* service,
                            std::shared_ptr<transport::Session> session,
                            Killable killable,
@@ -270,10 +245,11 @@ int Client::getLocalPort() const {
 }
 
 void Client::_setOperationContext(OperationContext* opCtx) {
-    _opCtx = opCtx;
     if (_session) {
         _session->setInOperation(opCtx != nullptr);
     }
+    _opCtx = opCtx;
+    _opCtxIsPendingDestruction = false;
 }
 
 bool Client::isInternalClient() {

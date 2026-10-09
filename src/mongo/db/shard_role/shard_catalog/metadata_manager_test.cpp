@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/metadata_manager.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -48,7 +21,7 @@
 #include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/unittest/unittest.h"
 
@@ -200,7 +173,7 @@ private:
 TEST_F(MetadataManagerTest, RefreshAfterSuccessfulMigrationSinglePending) {
     ChunkRange cr1(BSON("key" << 0), BSON("key" << 10));
 
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(), cr1));
     ASSERT_EQ(_manager->getActiveMetadata(boost::none, false)->get().getChunks().size(), 1UL);
 }
@@ -210,13 +183,13 @@ TEST_F(MetadataManagerTest, RefreshAfterSuccessfulMigrationMultiplePending) {
     ChunkRange cr2(BSON("key" << 30), BSON("key" << 40));
 
     {
-        _manager->setFilteringMetadata(
+        _manager->setCollectionMetadata(
             cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(), cr1));
         ASSERT_EQ(_manager->getActiveMetadata(boost::none, false)->get().getChunks().size(), 1UL);
     }
 
     {
-        _manager->setFilteringMetadata(
+        _manager->setCollectionMetadata(
             cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(), cr2));
         ASSERT_EQ(_manager->getActiveMetadata(boost::none, false)->get().getChunks().size(), 2UL);
     }
@@ -226,7 +199,7 @@ TEST_F(MetadataManagerTest, RefreshAfterNotYetCompletedMigrationMultiplePending)
     ChunkRange cr1(BSON("key" << 0), BSON("key" << 10));
     ChunkRange cr2(BSON("key" << 30), BSON("key" << 40));
 
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(),
                                {BSON("key" << 50), BSON("key" << 60)}));
     ASSERT_EQ(_manager->getActiveMetadata(boost::none, false)->get().getChunks().size(), 1UL);
@@ -236,9 +209,9 @@ TEST_F(MetadataManagerTest, BeginReceiveWithOverlappingRange) {
     ChunkRange cr1(BSON("key" << 0), BSON("key" << 10));
     ChunkRange cr2(BSON("key" << 30), BSON("key" << 40));
 
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(), cr1));
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(_manager->getActiveMetadata(boost::none, false)->get(), cr2));
 
     ChunkRange crOverlap(BSON("key" << 5), BSON("key" << 35));
@@ -251,19 +224,19 @@ TEST_F(MetadataManagerTest, GetActiveMetadataDoesNotAlwaysPreserveRange) {
 
     auto metadataWithTimestamp = _manager->getActiveMetadata(LogicalTime(Timestamp(1, 1)), false);
 
-    _manager->setFilteringMetadata(cloneMetadataPlusChunk(metadataWithTimestamp->get(), cr1));
+    _manager->setCollectionMetadata(cloneMetadataPlusChunk(metadataWithTimestamp->get(), cr1));
     ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 0);
 
     auto metadataWithoutTimestampNoPreservation = _manager->getActiveMetadata(boost::none, false);
 
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(metadataWithoutTimestampNoPreservation->get(), cr2));
     ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 0);
 
     auto metadataWithoutTimestampPreserveRange =
         _manager->getActiveMetadata(boost::none, true /* preserveRange */);
 
-    _manager->setFilteringMetadata(
+    _manager->setCollectionMetadata(
         cloneMetadataPlusChunk(metadataWithoutTimestampPreserveRange->get(), cr3));
     ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 1);
 }
@@ -274,12 +247,12 @@ TEST_F(MetadataManagerTest, ClearUnneededChunkManagerObjectsLastSnapshotInList) 
 
     auto scm1 = _manager->getActiveMetadata(boost::none, true);
     {
-        _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm1->get(), cr1));
+        _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm1->get(), cr1));
         ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 1UL);
 
         auto scm2 = _manager->getActiveMetadata(boost::none, true);
         ASSERT_EQ(scm2->get().getChunks().size(), 1UL);
-        _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm2->get(), cr2));
+        _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm2->get(), cr2));
         ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 2UL);
         ASSERT_EQ(_manager->numberOfEmptyMetadataSnapshots(), 0);
     }
@@ -300,17 +273,17 @@ TEST_F(MetadataManagerTest, ClearUnneededChunkManagerObjectSnapshotInMiddleOfLis
     ChunkRange cr4(BSON("key" << 90), BSON("key" << 100));
 
     auto scm = _manager->getActiveMetadata(boost::none, true);
-    _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm->get(), cr1));
+    _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm->get(), cr1));
     ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 1UL);
 
     auto scm2 = _manager->getActiveMetadata(boost::none, true);
     ASSERT_EQ(scm2->get().getChunks().size(), 1UL);
-    _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm2->get(), cr2));
+    _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm2->get(), cr2));
 
     {
         auto scm3 = _manager->getActiveMetadata(boost::none, true);
         ASSERT_EQ(scm3->get().getChunks().size(), 2UL);
-        _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm3->get(), cr3));
+        _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm3->get(), cr3));
         ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 3UL);
         ASSERT_EQ(_manager->numberOfEmptyMetadataSnapshots(), 0);
 
@@ -326,7 +299,7 @@ TEST_F(MetadataManagerTest, ClearUnneededChunkManagerObjectSnapshotInMiddleOfLis
          */
         scm2 = _manager->getActiveMetadata(boost::none, true);
         ASSERT_EQ(scm2->get().getChunks().size(), 3UL);
-        _manager->setFilteringMetadata(cloneMetadataPlusChunk(scm2->get(), cr4));
+        _manager->setCollectionMetadata(cloneMetadataPlusChunk(scm2->get(), cr4));
         ASSERT_EQ(_manager->numberOfMetadataSnapshots(), 4UL);
         ASSERT_EQ(_manager->numberOfEmptyMetadataSnapshots(), 1);
     }

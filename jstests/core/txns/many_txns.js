@@ -7,18 +7,6 @@
 //   uses_transactions
 // ]
 
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
-
 const dbName = "test";
 const collName = "many_txns";
 const numTxns = 150;
@@ -116,4 +104,8 @@ jsTest.log("Test completed with " + numAborted + " aborted transactions in " + e
 // Check whether we should expect aborts. If the parameter doesn't exist (mongos) don't check.
 const getParamRes = db.adminCommand({getParameter: 1, transactionLifetimeLimitSeconds: 1});
 if (getParamRes.ok && elapsedTime < getParamRes.transactionLifetimeLimitSeconds)
-    assert.eq(numAborted, 0, "should not get aborts when transactionLifetimeLimitSeconds not exceeded");
+    assert.eq(
+        numAborted,
+        0,
+        "should not get aborts when transactionLifetimeLimitSeconds not exceeded",
+    );

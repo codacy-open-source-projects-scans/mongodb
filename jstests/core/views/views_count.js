@@ -1,6 +1,7 @@
 // Test the count command with views.
 //
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 //   requires_fastcount,
 //   # Explain of a resolved view must be executed by mongos.
@@ -9,6 +10,10 @@
 // ]
 
 import {getEngine, getSingleNodeExplain} from "jstests/libs/query/analyze_plan.js";
+
+const isMultiversion =
+    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) ||
+    Boolean(TestData.multiversionBinVersion);
 
 const viewsDB = db.getSiblingDB("views_count");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -24,7 +29,11 @@ assert.commandWorked(bulk.execute());
 // Create views on the data.
 assert.commandWorked(viewsDB.runCommand({create: "identityView", viewOn: "coll"}));
 assert.commandWorked(
-    viewsDB.runCommand({create: "greaterThanThreeView", viewOn: "coll", pipeline: [{$match: {x: {$gt: 3}}}]}),
+    viewsDB.runCommand({
+        create: "greaterThanThreeView",
+        viewOn: "coll",
+        pipeline: [{$match: {x: {$gt: 3}}}],
+    }),
 );
 assert.commandWorked(
     viewsDB.runCommand({
@@ -56,6 +65,23 @@ assert.eq(0, lessThanSevenView.count({x: 9}));
 assert.eq(7, identityView.count({x: {$exists: true}}, {skip: 3}));
 assert.eq(3, greaterThanThreeView.count({x: {$lt: 100}}, {limit: 3}));
 assert.eq(1, lessThanSevenView.count({}, {skip: 1, limit: 1}));
+assert.eq(10, identityView.count({}, {skip: 0}));
+
+// Limit of 0 means unlimited on a collection and on a view.
+assert.eq(10, coll.count({}, {limit: 0}));
+if (!isMultiversion) {
+    // A count with {limit: 0} on a view is only translated into a limitless pipeline on binaries
+    // containing the fix for SERVER-132638. Older binaries in a mixed version cluster reject the
+    // translated pipeline with "the limit must be positive".
+    assert.eq(10, identityView.count({}, {limit: 0}));
+    assert.eq(3, greaterThanThreeView.count({}, {limit: 0, skip: 3}));
+    assert.eq(2, lessThanSevenView.count({}, {limit: 0, skip: 1}));
+    assert.commandWorked(identityView.explain().count({}, {limit: 0}));
+}
+
+// Negative limit uses absolute value.
+assert.eq(5, coll.count({}, {limit: -5}));
+assert.eq(3, identityView.count({}, {limit: -3}));
 
 // Count with explain works on a view.
 assert.commandWorked(lessThanSevenView.explain().count());
@@ -77,7 +103,9 @@ if (explainPlan.hasOwnProperty("stages")) {
 assert.eq(explainPlan.queryPlanner.namespace, "views_count.coll");
 assert(!explainPlan.hasOwnProperty("executionStats"));
 
-explainPlan = assert.commandWorked(lessThanSevenView.explain("executionStats").count({x: {$gte: 5}}));
+explainPlan = assert.commandWorked(
+    lessThanSevenView.explain("executionStats").count({x: {$gte: 5}}),
+);
 explainPlan = getSingleNodeExplain(explainPlan);
 if (explainPlan.hasOwnProperty("stages")) {
     explainPlan = explainPlan.stages[0].$cursor;
@@ -91,7 +119,9 @@ assert.eq(
 );
 assert(!explainPlan.executionStats.hasOwnProperty("allPlansExecution"));
 
-explainPlan = assert.commandWorked(lessThanSevenView.explain("allPlansExecution").count({x: {$gte: 5}}));
+explainPlan = assert.commandWorked(
+    lessThanSevenView.explain("allPlansExecution").count({x: {$gte: 5}}),
+);
 explainPlan = getSingleNodeExplain(explainPlan);
 if (explainPlan.hasOwnProperty("stages")) {
     explainPlan = explainPlan.stages[0].$cursor;

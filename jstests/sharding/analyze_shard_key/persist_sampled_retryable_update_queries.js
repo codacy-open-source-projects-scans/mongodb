@@ -7,9 +7,6 @@ import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_sampling_util.js";
 
-// This test requires running commands directly against the shard.
-TestData.replicaSetEndpointIncompatible = true;
-
 // Make the periodic job for writing sampled queries have a period of 1 second to speed up the test.
 const queryAnalysisWriterIntervalSecs = 1;
 
@@ -28,7 +25,13 @@ function testRetryExecutedWrite(rst) {
     const collectionUuid = QuerySamplingUtil.getCollectionUuid(db, collName);
 
     const updateOp0 = {q: {a: 0}, u: {$set: {b: 0}}, multi: false, upsert: false, sampleId: UUID()};
-    const updateOp1 = {q: {a: {$lt: 1}}, u: {$set: {b: "$x"}}, multi: false, upsert: true, sampleId: UUID()};
+    const updateOp1 = {
+        q: {a: {$lt: 1}},
+        u: {$set: {b: "$x"}},
+        multi: false,
+        upsert: true,
+        sampleId: UUID(),
+    };
 
     const originalCmdObj = {update: collName, updates: [updateOp0], lsid, txnNumber};
     const expectedSampledQueryDocs = [
@@ -42,7 +45,12 @@ function testRetryExecutedWrite(rst) {
     const originalRes = assert.commandWorked(db.runCommand(originalCmdObj));
     assert.eq(originalRes.nModified, 1, originalRes);
 
-    QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+    QuerySamplingUtil.assertSoonSampledQueryDocuments(
+        primary,
+        ns,
+        collectionUuid,
+        expectedSampledQueryDocs,
+    );
 
     // Retry updateOp0 with the same sampleId but batched with the new updateOp1.
     const retryCmdObj0 = Object.assign({}, originalCmdObj);
@@ -50,13 +58,20 @@ function testRetryExecutedWrite(rst) {
     expectedSampledQueryDocs.push({
         sampleId: updateOp1.sampleId,
         cmdName: "update",
-        cmdObj: Object.assign(QuerySamplingUtil.makeCmdObjIgnoreSessionInfo(retryCmdObj0), {updates: [updateOp1]}),
+        cmdObj: Object.assign(QuerySamplingUtil.makeCmdObjIgnoreSessionInfo(retryCmdObj0), {
+            updates: [updateOp1],
+        }),
     });
 
     const retryRes0 = assert.commandWorked(db.runCommand(retryCmdObj0));
     assert.eq(retryRes0.nModified, 2, retryRes0);
 
-    QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+    QuerySamplingUtil.assertSoonSampledQueryDocuments(
+        primary,
+        ns,
+        collectionUuid,
+        expectedSampledQueryDocs,
+    );
 
     // Retry both updateOp0 and updateOp1 different sampleIds.
     const retryCmdObj1 = Object.assign({}, retryCmdObj0);
@@ -71,7 +86,12 @@ function testRetryExecutedWrite(rst) {
     // Wait for one interval to verify that no writes occurred as a result of the retry.
     sleep(queryAnalysisWriterIntervalSecs * 1000);
 
-    QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+    QuerySamplingUtil.assertSoonSampledQueryDocuments(
+        primary,
+        ns,
+        collectionUuid,
+        expectedSampledQueryDocs,
+    );
 }
 
 function testRetryUnExecutedWrite(rst) {
@@ -103,7 +123,12 @@ function testRetryUnExecutedWrite(rst) {
     // The update fails after it has been added to the sample buffer.
     assert.commandFailedWithCode(db.runCommand(originalCmdObj), ErrorCodes.InternalError);
 
-    QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+    QuerySamplingUtil.assertSoonSampledQueryDocuments(
+        primary,
+        ns,
+        collectionUuid,
+        expectedSampledQueryDocs,
+    );
 
     fp.off();
 
@@ -115,7 +140,12 @@ function testRetryUnExecutedWrite(rst) {
     // Wait for one interval to verify that no writes occurred as a result of the retry.
     sleep(queryAnalysisWriterIntervalSecs * 1000);
 
-    QuerySamplingUtil.assertSoonSampledQueryDocuments(primary, ns, collectionUuid, expectedSampledQueryDocs);
+    QuerySamplingUtil.assertSoonSampledQueryDocuments(
+        primary,
+        ns,
+        collectionUuid,
+        expectedSampledQueryDocs,
+    );
 }
 
 const st = new ShardingTest({

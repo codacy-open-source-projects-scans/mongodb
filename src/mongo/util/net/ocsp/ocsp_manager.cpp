@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/net/ocsp/ocsp_manager.h"
@@ -34,6 +8,7 @@
 #include "mongo/util/net/ssl_parameters_gen.h"
 
 #include <memory>
+#include <string_view>
 
 namespace mongo {
 
@@ -45,13 +20,14 @@ auto makeTaskExecutor() {
     // This task executor's threads are technically killable. However, since we never create an
     // operation context in any of the tasks which we run on this executor, we don't have to worry
     // about handling interrupts.
-    ThreadPool::Options tpOptions;
-    tpOptions.poolName = "OCSPManagerHTTP";
-    tpOptions.maxThreads = 10;
-    tpOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName, getGlobalServiceContext()->getService());
-    };
-    return std::make_unique<ThreadPool>(tpOptions);
+    return ThreadPool::make({
+        .poolName = "OCSPManagerHTTP",
+        .maxThreads = 10,
+        .onCreateThread =
+            [](const std::string& threadName) {
+                Client::initThread(threadName, getGlobalServiceContext()->getService());
+            },
+    });
 }
 
 }  // namespace
@@ -110,7 +86,7 @@ void OCSPManager::startThreadPool() {
  * Returns a vector of bytes to be constructed into a OCSP response.
  */
 Future<std::vector<uint8_t>> OCSPManager::requestStatus(std::vector<uint8_t> data,
-                                                        StringData responderURI,
+                                                        std::string_view responderURI,
                                                         OCSPPurpose purpose) {
     if (!this->_tlsClientHttp || !this->_tlsServerHttp) {
         return Future<std::vector<uint8_t>>::makeReady(

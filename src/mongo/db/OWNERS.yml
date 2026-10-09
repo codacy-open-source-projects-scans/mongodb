@@ -65,18 +65,25 @@ filters:
   - "generic_argument_util.*":
     approvers:
       - 10gen/server-programmability
+  - "ifr_context_decoration.*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+      - 10gen/query-execution
+  - "ifr_flag_registry.yml":
+    approvers:
+      - 10gen/rollout-flag-managers
   - "ifr_flag_retry_info*":
     approvers:
       - 10gen/server-programmability
+  - "ifr_unrecognized_flag_info*":
+    approvers:
+      - 10gen/query-execution
   - "index_names.*":
     approvers:
       - 10gen/query-execution-write-exec
   - "keys_collection*":
     approvers:
       - 10gen/server-cluster-scalability
-  - "max_time.*":
-    approvers:
-      - 10gen/server-networking-and-observability
   - "mongod.cpp":
     approvers:
       - 10gen/server-programmability
@@ -149,6 +156,9 @@ filters:
   - "*txn*":
     approvers:
       - 10gen/server-transactions
+  - "initialize_operation_session_info*":
+    approvers:
+      - 10gen/server-transactions
   - "dbdirectclient*":
     approvers:
       - 10gen/server-programmability
@@ -169,7 +179,13 @@ filters:
     approvers:
       - 10gen/server-security
       - 10gen/query-integration-features
+  - "fle_compact_cleanup_mutex*":
+    approvers:
+      - 10gen/server-security
   - "/keyfile_option*":
+    approvers:
+      - 10gen/server-security
+  - "landlock*":
     approvers:
       - 10gen/server-security
   - "server_options*":
@@ -360,7 +376,22 @@ filters:
       - 10gen/server-workload-resilience
   - "feature_flag.*":
     approvers:
-      - 10gen/server-programmability
+      - 10gen/server-catalog-and-routing
+      - 10gen/query-execution
+  - "incremental_rollout_metrics.*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+      - 10gen/query-execution
   - "feature_flag_test.idl.tpl":
     approvers:
-      - 10gen/server-programmability
+      - 10gen/server-catalog-and-routing
+      - 10gen/query-execution
+  - "metrics_filtering_util*":
+    approvers:
+      - 10gen/server-networking-and-observability
+  - "metrics_policy_manager*":
+    approvers:
+      - 10gen/server-networking-and-observability
+  - "metrics_category.idl":
+    approvers:
+      - 10gen/server-networking-and-observability

@@ -4,7 +4,7 @@
  *
  * This includes when the view is at the top-level of the query, and/or in the $unionWith/$lookup.
  *
- * @tags: [featureFlagSearchHybridScoringFull, requires_fcv_82]
+ * @tags: [requires_fcv_82]
  */
 
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
@@ -158,7 +158,10 @@ export function runHybridSearchInUnionWithLookupViewTopAndSubTest(
     const lookupPipeline = buildLookupPassthroughPipeline(subViewName, hybridSearchPipeline);
 
     // Test $unionWith
-    const expectedUnionWithResults = coll.aggregate([...topLevelViewPipeline, ...unionWithPipeline]);
+    const expectedUnionWithResults = coll.aggregate([
+        ...topLevelViewPipeline,
+        ...unionWithPipeline,
+    ]);
     const unionWithResults = topLevelView.aggregate(unionWithPipeline);
     assertDocArrExpectedFuzzy(expectedUnionWithResults.toArray(), unionWithResults.toArray());
 

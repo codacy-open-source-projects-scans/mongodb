@@ -1,38 +1,12 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_compiled_configuration.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_managed_session.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/interruptible.h"
@@ -72,16 +46,20 @@ public:
     // RAII type to block and unblock the WiredTigerConnection to shut down.
     class BlockShutdown {
     public:
-        BlockShutdown(WiredTigerConnection* connection) : _conn(connection) {
-            _conn->_shuttingDown.fetchAndAdd(1);
+        BlockShutdown(WiredTigerConnection* connection) : _connection(connection) {
+            _connection->_shuttingDown.fetchAndAdd(1);
         }
 
         ~BlockShutdown() {
-            _conn->_shuttingDown.fetchAndSubtract(1);
+            _connection->_shuttingDown.fetchAndSubtract(1);
+        }
+
+        bool isShuttingDown() const {
+            return _connection->isShuttingDown();
         }
 
     private:
-        WiredTigerConnection* _conn;
+        WiredTigerConnection* _connection{nullptr};
     };
 
     enum class ShutdownReason {
@@ -146,6 +124,13 @@ public:
      * True when in the process of shutting down.
      */
     bool isShuttingDown();
+
+    /**
+     * True only when shutting down for a reason that tears down the underlying WT_CONNECTION
+     * (kCleanShutdown). False when not shutting down or when transiently shutting down for a
+     * rollback to stable, in which case the WT_CONNECTION remains valid.
+     */
+    bool isCleanShuttingDown();
 
     /**
      * Restart a previously shut down cache.
@@ -255,10 +240,13 @@ private:
     CompiledConfigurationsPerConnection _compiledConfigurations;
 
     // Used as follows:
-    //   The low 31 bits are a count of active calls that need to block shutdown.
-    //   The high bit is a flag that is set if and only if we're shutting down.
-    AtomicWord<unsigned> _shuttingDown{0};
-    static const uint32_t kShuttingDownMask = 1 << 31;
+    //   The low 30 bits are a count of active calls that need to block shutdown.
+    //   Bit 30 is set iff the in-progress shutdown is a kCleanShutdown (the WT_CONNECTION will be
+    //     torn down). Set together with kShuttingDownMask; cleared by restart().
+    //   Bit 31 is set if and only if we're shutting down.
+    Atomic<unsigned> _shuttingDown{0};
+    static const uint32_t kShuttingDownMask = 1u << 31;
+    static const uint32_t kCleanShutdownMask = 1u << 30;
 
     std::mutex _cacheLock;
     typedef std::vector<std::unique_ptr<WiredTigerSession>> SessionCache;
@@ -272,13 +260,13 @@ private:
     //      the cursor immediately without caching to prevent leaking the cursor since the cursor is
     //      no longer tracked.
     //  The engine epoch takes precedence over the RTS epoch and should be checked first.
-    AtomicWord<unsigned long long> _engineEpoch;  // atomic so we can check it outside of the lock
-    AtomicWord<unsigned long long> _rtsEpoch;     // atomic so we can check it outside of the lock
+    Atomic<unsigned long long> _engineEpoch;  // atomic so we can check it outside of the lock
+    Atomic<unsigned long long> _rtsEpoch;     // atomic so we can check it outside of the lock
 
     // Mutex and cond var for waiting on prepare commit or abort.
     std::mutex _prepareCommittedOrAbortedMutex;
     stdx::condition_variable _prepareCommittedOrAbortedCond;
-    AtomicWord<std::uint64_t> _prepareCommitOrAbortCounter{0};
+    Atomic<std::uint64_t> _prepareCommitOrAbortCounter{0};
 
     Atomic<int> _openSessions{0};
     Atomic<int> _openUserSessions{0};

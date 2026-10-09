@@ -14,7 +14,7 @@
  * ]
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-import {inhibitOptimizationPerStage} from "jstests/aggregation/extras/utils.js";
+import {assertArrayEq, inhibitOptimizationPerStage} from "jstests/aggregation/extras/utils.js";
 import {runWithParamsAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 import {it} from "jstests/libs/mochalite.js";
 
@@ -29,7 +29,26 @@ assert.commandWorked(db.hoist_computation_secondary.insert({}));
 
 /// Extracts the user-visible aggregation stages.
 function extractUserStages(explain) {
-    return (explain.stages || []).filter((stage) => !stage.$cursor && !stage.$_internalInhibitOptimization);
+    return (explain.stages || []).filter(
+        (stage) => !stage.$cursor && !stage.$_internalInhibitOptimization,
+    );
+}
+
+/// Returns true if `actual` matches `expected`, allowing any leading
+/// $set/$addFields/$project/$match stages in `expected` to be absent because SBE pushdown
+/// can absorb them into the $cursor stage.
+function stagesMatch(actual, expected) {
+    const sbeAbsorbableStages = ["$set", "$addFields", "$project", "$match"];
+    const maybePushedDownToSbe = (stage) => sbeAbsorbableStages.some((s) => s in stage);
+    for (let i = 0; i <= expected.length; i++) {
+        if (i > 0 && !maybePushedDownToSbe(expected[i - 1])) {
+            break;
+        }
+        if (friendlyEqual(actual, expected.slice(i))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Produces a lookup stage which stores [{fromLookup: 1}] in the 'as' field and has some optional field references.
@@ -63,7 +82,10 @@ function runTest({name, docs, pipeline, optimized, expected, policy}) {
         const stripId = ({_id, ...rest}) => rest;
 
         // Verify the unoptimized pipeline produces the expected results (golden baseline).
-        const unoptimizedResults = coll.aggregate(inhibitOptimizationPerStage(pipeline)).toArray().map(stripId);
+        const unoptimizedResults = coll
+            .aggregate(inhibitOptimizationPerStage(pipeline))
+            .toArray()
+            .map(stripId);
         assert.docEq(unoptimizedResults, expected, "unoptimized results");
 
         // Verify the original pipeline's explain matches the expected optimized pipeline.
@@ -77,7 +99,10 @@ function runTest({name, docs, pipeline, optimized, expected, policy}) {
         const optimizedExplain = coll.explain().aggregate(inhibitedOptimized);
         const expectedStages = extractUserStages(optimizedExplain);
 
-        assert.eq(actualStages, expectedStages, "not optimized as expected");
+        assert(stagesMatch(actualStages, expectedStages), "not optimized as expected", {
+            actualStages,
+            expectedStages,
+        });
 
         // Verify the original pipeline produces the same results after optimization.
         const results = coll.aggregate(pipeline).toArray().map(stripId);
@@ -575,14 +600,24 @@ it("maximum paths knob: blocks hoisting above the limit", () => {
             assert.commandWorked(coll.insertMany([{a: 0, b: 0, c: 0}]));
 
             const assertPlan = (input, expected) => {
-                assert.eq(
-                    extractUserStages(coll.explain().aggregate(input)),
-                    extractUserStages(coll.explain().aggregate(inhibitOptimizationPerStage(expected))),
+                const actualStages = extractUserStages(coll.explain().aggregate(input));
+                const expectedStages = extractUserStages(
+                    coll.explain().aggregate(inhibitOptimizationPerStage(expected)),
                 );
+                assert(stagesMatch(actualStages, expectedStages), "not optimized as expected", {
+                    actualStages,
+                    expectedStages,
+                });
             };
 
-            assertPlan([lookupStage("x"), {$set: {a: 1, b: 2, c: 3}}], [lookupStage("x"), {$set: {a: 1, b: 2, c: 3}}]);
-            assertPlan([lookupStage("x"), {$set: {a: 1, b: 2}}], [{$set: {a: 1, b: 2}}, lookupStage("x")]);
+            assertPlan(
+                [lookupStage("x"), {$set: {a: 1, b: 2, c: 3}}],
+                [lookupStage("x"), {$set: {a: 1, b: 2, c: 3}}],
+            );
+            assertPlan(
+                [lookupStage("x"), {$set: {a: 1, b: 2}}],
+                [{$set: {a: 1, b: 2}}, lookupStage("x")],
+            );
         },
     );
 });
@@ -604,6 +639,16 @@ runTest({
 /// $project+$match pushdown cases follow
 /// ------------------------------------
 
+// This test verifies that we apply match pushdown first before we attempt to hoist.
+runTest({
+    name: "$project+$match pushdown: $match pushdown before hoisting",
+    docs: [{a: 5, c: 1}],
+    pipeline: [lookupStage("x"), {$project: {c: "$a", x: 1}}, {$match: {c: 1}}],
+    optimized: [lookupStage("x"), {$project: {c: "$a", x: 1}}],
+    expected: [],
+    policy: "forMatchPushdown",
+});
+
 runTest({
     name: "$project+$match pushdown: independent $set hoisted before $lookup when $match follows",
     docs: [{a: 5, c: 1}],
@@ -616,7 +661,11 @@ runTest({
 runTest({
     name: "$project+$match pushdown: before $lookup",
     docs: [{a: 5, c: 1}],
-    pipeline: [lookupStage("x"), {$project: {sum: {$add: ["$a", 1]}, a: 1, c: 1}}, {$match: {sum: {$gt: 3}}}],
+    pipeline: [
+        lookupStage("x"),
+        {$project: {sum: {$add: ["$a", 1]}, a: 1, c: 1}},
+        {$match: {sum: {$gt: 3}}},
+    ],
     optimized: [
         {$addFields: {sum: {$add: ["$a", 1]}}},
         {$match: {sum: {$gt: 3}}},
@@ -671,46 +720,62 @@ runTest({
     policy: "always",
 });
 
-// TODO(SERVER-124097): Fix this incorrect rewrite.
-// it("$function side effects: outer $set with $function not hoisted before $lookup", function () {
-//     const coll = db.hoist_computation;
-//     coll.drop();
-//     coll.insertOne({c: 1});
-//
-//     const readDistinctTime = function () {
-//         var now = Date.now();
-//         while (Date.now() === now) {}
-//         return new Date(now);
-//     };
-//
-//     const timeFunction = {$function: {body: readDistinctTime, args: [], lang: "js"}};
-//
-//     // The first $set is nested inside the $lookup sub-pipeline and captures time1.
-//     // It spins until the clock ticks so time1 is at a strictly earlier millisecond.
-//     // The outer $set captures time2 after the lookup completes.
-//     // If the optimizer hoisted the outer $set before the $lookup, time2 < time1, which is wrong.
-//     const pipeline = [
-//         {
-//             $lookup: {
-//                 from: "hoist_computation_secondary",
-//                 pipeline: [{$set: {time1: timeFunction}}],
-//                 as: "result",
-//             },
-//         },
-//         {$set: {time2: timeFunction}},
-//     ];
-//
-//     // Verify the outer $set is not hoisted before the $lookup.
-//     const explain = coll.explain().aggregate(pipeline);
-//     const stageTypes = extractUserStages(explain).map((s) => Object.keys(s)[0]);
-//     assert.eq(stageTypes, ["$lookup", "$set"], tojson({stageTypes}));
-//
-//     // Verify execution order: time1 (set inside the lookup) must precede time2 (set after).
-//     const [
-//         {
-//             result: [{time1}],
-//             time2,
-//         },
-//     ] = coll.aggregate(pipeline).toArray();
-//     assert.lt(time1.getTime(), time2.getTime(), tojson({time1, time2}));
-// });
+/// ------------------------------------
+/// $match pushdown inside a $lookup inner pipeline ($sequentialCache interaction)
+/// ------------------------------------
+
+it("match pushdown in $lookup inner pipeline does not crash in $sequentialCache serving mode (SERVER-127822)", () => {
+    // The correlated $lookup inner pipeline below has an uncorrelated leading $match, a chain of
+    // single-document $project transformations, and a trailing correlated $match. The match-pushdown
+    // rule (PUSH_MATCH_BEFORE_SINGLE_DOC_TRANSFORMATION) pushes the correlated $match ahead of the
+    // $project stages. On the 2nd outer document the $sequentialCache is in "serving" mode and erases
+    // the uncorrelated prefix; postTransform() then tries to resize the dependency graph from the
+    // (now-erased) last stage. The test makes sure this doesn't cause a tassert (error 12299003).
+    // Two outer documents are required so the cache reaches serving mode.
+    runWithParamsAllNonConfigNodes(
+        db,
+        {internalQueryTransformHoistPolicy: "forMatchPushdown"},
+        () => {
+            const coll = db.hoist_computation;
+            coll.drop();
+            assert.commandWorked(
+                coll.insertMany([
+                    {_id: 0, bar: 53},
+                    {_id: 1, bar: 100},
+                ]),
+            );
+
+            const pipeline = [
+                {
+                    $lookup: {
+                        from: coll.getName(),
+                        let: {outerId: "$_id"},
+                        pipeline: [
+                            // Uncorrelated leading $match: cached as the uncorrelated prefix and erased
+                            // in serving mode once the correlated $match is pushed in front of the
+                            // $project stages.
+                            {$match: {$expr: {$gt: ["$_id", {$literal: null}]}}},
+                            // A chain of single-document transformations for the correlated $match to be
+                            // pushed in front of.
+                            {$project: {wrapped: "$$ROOT", _id: 0}},
+                            {$project: {inner: {id: "$wrapped._id", bar: "$wrapped.bar"}, _id: 0}},
+                            {$project: {u: "$inner", _id: 0}},
+                            // Correlated $match referencing the let variable.
+                            {$match: {$expr: {$eq: ["$$outerId", "$u.id"]}}},
+                        ],
+                        as: "joined",
+                    },
+                },
+            ];
+
+            // Each outer document self-joins with the inner document having the same _id.
+            assertArrayEq({
+                actual: coll.aggregate(pipeline).toArray(),
+                expected: [
+                    {_id: 0, bar: 53, joined: [{u: {id: 0, bar: 53}}]},
+                    {_id: 1, bar: 100, joined: [{u: {id: 1, bar: 100}}]},
+                ],
+            });
+        },
+    );
+});

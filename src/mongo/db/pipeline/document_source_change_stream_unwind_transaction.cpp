@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/document_source_change_stream_unwind_transaction.h"
@@ -54,6 +28,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 REGISTER_INTERNAL_LITE_PARSED_DOCUMENT_SOURCE(_internalChangeStreamUnwindTransaction,
                                               ChangeStreamUnwindTransactionLiteParsed::parse);
@@ -66,8 +41,14 @@ ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamUnwindTransaction,
                             DocumentSourceChangeStreamUnwindTransaction::id)
 
 namespace {
-const std::set<std::string> kUnwindExcludedFields = {"clusterTime", "lsid", "txnNumber"};
-}
+// These fields are excluded from the unwind transaction filter because individual operation
+// entries within the o.applyOps array do not have these fields. They are populated later by
+// _addRequiredTransactionFields() from the enclosing applyOps oplog entry.
+// "wallTime" is excluded because DurableReplOperation (the type of individual o.applyOps entries)
+// does not have a "wall" field. The wallTime predicate is evaluated later in the pipeline.
+const std::set<std::string> kUnwindExcludedFields = {
+    "clusterTime", "lsid", "txnNumber", "wallTime"};
+}  // namespace
 
 namespace change_stream_filter {
 /**
@@ -158,6 +139,14 @@ DocumentSourceChangeStreamUnwindTransaction::DocumentSourceChangeStreamUnwindTra
 void DocumentSourceChangeStreamUnwindTransaction::rebuild(BSONObj filter) {
     _filter = filter.getOwned();
     _expression = MatchExpressionParser::parseAndNormalize(filter, getExpCtx());
+
+    // This filter is applied to individual operations extracted from transaction oplog entries.
+    // Just like the oplog $match, it compares namespace strings and other oplog values that must
+    // always be matched with the simple collation, regardless of the pipeline's configured
+    // collation. The parse above uses the ExpressionContext's collator, which in a sharded cluster
+    // carries the collection's custom collation, so we strip it here to force case-sensitive
+    // matching.
+    _expression->setCollator(nullptr);
 }
 
 StageConstraints DocumentSourceChangeStreamUnwindTransaction::constraints(
@@ -177,20 +166,20 @@ StageConstraints DocumentSourceChangeStreamUnwindTransaction::constraints(
 }
 
 Value DocumentSourceChangeStreamUnwindTransaction::doSerialize(
-    const SerializationOptions& opts) const {
+    const query_shape::SerializationOptions& opts) const {
     tassert(7481400, "expression has not been initialized", _expression);
 
     if (opts.isSerializingForExplain()) {
         BSONObjBuilder builder;
-        builder.append("stage"_sd, "internalUnwindTransaction"_sd);
+        builder.append("stage"sv, "internalUnwindTransaction"sv);
         builder.append(DocumentSourceChangeStreamUnwindTransactionSpec::kFilterFieldName,
                        _expression->serialize(opts));
 
         return Value(DOC(DocumentSourceChangeStream::kStageName << builder.obj()));
     }
 
-    // 'SerializationOptions' are not required here, since serialization for explain and query
-    // stats occur before this function call.
+    // 'query_shape::SerializationOptions' are not required here, since serialization for explain
+    // and query stats occur before this function call.
     return Value(Document{
         {kStageName, Value{DocumentSourceChangeStreamUnwindTransactionSpec{_filter}.toBSON()}}});
 }

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/matcher/expression_hasher.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_array.h"
@@ -263,16 +236,16 @@ public:
     }
     void visit(const InternalSchemaAllElemMatchFromIndexMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
-        combine(expr->startIndex(), *expr->getExpression());
+        combine(expr->startIndex());
     }
     void visit(const InternalSchemaAllowedPropertiesMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
-        combine(expr->getNamePlaceholder(), *expr->getOtherwise());
+        combine(expr->getNamePlaceholder());
         for (const auto& prop : expr->getProperties()) {
             combine(prop);
         }
         for (const auto& pat : expr->getPatternProperties()) {
-            combine(pat.first.rawRegex, *pat.second.get());
+            combine(pat.first.rawRegex);
         }
     }
     void visit(const InternalSchemaBinDataEncryptedTypeExpression* expr) final {
@@ -299,7 +272,7 @@ public:
     }
     void visit(const InternalSchemaMatchArrayIndexMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
-        combine(expr->arrayIndex(), *expr->getExpression());
+        combine(expr->arrayIndex());
     }
     void visit(const InternalSchemaMaxItemsMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
@@ -327,7 +300,6 @@ public:
     }
     void visit(const InternalSchemaObjectMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
-        combine(MatchExpressionHasher{}(expr->getChild(0)));
     }
     void visit(const InternalSchemaRootDocEqMatchExpression* expr) final {
         hashCombineCommonProperties(expr);
@@ -478,11 +450,6 @@ H hash(H h, const MatchExpression::HashParam&, const Collation& collation) {
 template <typename H>
 H hash(H h, const MatchExpression::HashParam&, const Decimal128& dec) {
     return H::combine(std::move(h), dec.getValue().low64, dec.getValue().high64);
-}
-
-template <typename H>
-H hash(H h, const MatchExpression::HashParam&, const ExpressionWithPlaceholder& dec) {
-    return H::combine(std::move(h), MatchExpressionHasher{}(dec.getFilter()), dec.getPlaceholder());
 }
 
 template <typename H>

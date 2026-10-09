@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/extension/host/aggregation_stage/ast_node.h"
 #include "mongo/db/extension/host/aggregation_stage/parse_node.h"
 #include "mongo/db/extension/host/catalog_context.h"
@@ -45,8 +18,12 @@
 #include "mongo/db/pipeline/lite_parsed_desugarer.h"
 #include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/db/pipeline/search/search_helper.h"
+#include "mongo/db/pipeline/wrapped_extension_source_hooks.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/modules.h"
+
+#include <algorithm>
+#include <string_view>
 
 namespace mongo::extension::host_connector {
 class PipelineDependenciesAdapter;
@@ -66,7 +43,8 @@ using LiteParsedList = std::list<std::unique_ptr<LiteParsedDocumentSource>>;
  */
 class ExpandableStageParams : public StageParams {
 public:
-    ExpandableStageParams(AggStageParseNodeHandle parseNode) : _parseNode(std::move(parseNode)) {}
+    ExpandableStageParams(AggStageParseNodeHandle parseNode, BSONObj originalStage)
+        : _parseNode(std::move(parseNode)), _originalStage(originalStage.getOwned()) {}
 
     static const Id& id;
 
@@ -78,8 +56,14 @@ public:
         return std::move(_parseNode);
     }
 
+    BSONObj releaseOriginalStage() {
+        return std::move(_originalStage);
+    }
+
 private:
     AggStageParseNodeHandle _parseNode;
+    // The original user-provided stage object, e.g. {$myStage: {...}}.
+    BSONObj _originalStage;
 };
 
 /**
@@ -109,7 +93,8 @@ private:
  * DocumentSourceExtensionOptimizable is the concrete implementation for extension stages that can
  * participate in query optimization and execution.
  */
-class DocumentSourceExtensionOptimizable : public DocumentSource {
+class DocumentSourceExtensionOptimizable : public DocumentSource,
+                                           public WrappedExtensionSourceHooks {
 public:
     /**
      * A LiteParsedDocumentSource implementation for extension stages mapping to an
@@ -137,7 +122,7 @@ public:
               _options(options),
               _expanded([&] {
                   auto expandedList = expand();
-                  tassert(10905600,
+                  tassert(ErrorCodes::ExtensionError,
                           "LiteParsedExpandable must not have an empty expanded pipeline",
                           !expandedList.empty());
 
@@ -146,7 +131,8 @@ public:
               }()) {}
 
         std::unique_ptr<StageParams> getStageParams() const override {
-            return std::make_unique<ExpandableStageParams>(_parseNode->clone());
+            return std::make_unique<ExpandableStageParams>(_parseNode->clone(),
+                                                           getOriginalBson().wrap().getOwned());
         }
 
         /**
@@ -188,11 +174,6 @@ public:
             return false;
         }
 
-        std::unique_ptr<LiteParsedDocumentSource> clone() const override {
-            return std::make_unique<LiteParsedExpandable>(
-                getOriginalBson(), _parseNode->clone(), _nss, _options);
-        }
-
         bool hasCustomBsonForLog() const override {
             return true;
         }
@@ -201,17 +182,51 @@ public:
             return _parseNode->toBsonForLog();
         }
 
-        // TODO SERVER-116021 Remove this override when extensions can handle views through
-        // bindViewInfo().
+        // TODO SERVER-121094 Remove this override when extensions can handle views through
+        // bindResolvedNamespace().
         bool hasExtensionVectorSearchStage() const override;
 
-        // TODO SERVER-116021 Remove this override when extensions can handle views through
-        // bindViewInfo().
+        // TODO SERVER-121094 Remove this override when extensions can handle views through
+        // bindResolvedNamespace().
         bool hasExtensionSearchStage() const override;
+
+        // These checks must consider every expanded stage, as if inlined into the pipeline:
+        // ranked/scored if ANY expanded stage is (matching isRankedPipeline()/isScoredPipeline()),
+        // selection only if ALL are. isInitialSource() above intentionally stays front-only.
+        // TODO SERVER-129047: replace this host-side reduction with the extension-declared
+        // ParseNode properties once get_properties is exposed on the ParseNode vtable, and delete
+        // these overrides.
+        bool isRankedStage() const override {
+            return std::any_of(_expanded.begin(), _expanded.end(), [](const auto& stage) {
+                return stage->isRankedStage();
+            });
+        }
+
+        bool isScoredStage() const override {
+            return std::any_of(_expanded.begin(), _expanded.end(), [](const auto& stage) {
+                return stage->isScoredStage();
+            });
+        }
+
+        bool isScoreDetailsStage() const override {
+            return std::any_of(_expanded.begin(), _expanded.end(), [](const auto& stage) {
+                return stage->isScoreDetailsStage();
+            });
+        }
+
+        bool isSelectionStage() const override {
+            return std::all_of(_expanded.begin(), _expanded.end(), [](const auto& stage) {
+                return stage->isSelectionStage();
+            });
+        }
 
         // Extension stages are unsupported on timeseries collections.
         Constraints constraints() const override {
             return {.canRunOnTimeseries = false};
+        }
+
+        FirstStageViewApplicationPolicy getFirstStageViewApplicationPolicy() const override {
+            return _expanded.front()->getFirstStageViewApplicationPolicy();
         }
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
@@ -224,10 +239,21 @@ public:
             this->transactionNotSupported(this->getParseTimeName());
         }
 
+        bool isAllowedInLookupPipeline() const override {
+            return std::all_of(_expanded.begin(), _expanded.end(), [](const auto& s) {
+                return s->isAllowedInLookupPipeline();
+            });
+        }
+
         // Define how to desugar a LiteParsedExpandable.
         static LiteParsedDesugarer::StageExpander stageExpander;
 
     private:
+        std::unique_ptr<LiteParsedDocumentSource> _doClone() const override {
+            return std::make_unique<LiteParsedExpandable>(
+                getOriginalBson(), _parseNode->clone(), _nss, _options);
+        }
+
         /**
          * Carries per-invocation validation state for recursive expansion performed by
          * LiteParsedExpandable. The state is instantiated at the top-level expand() and passed by
@@ -300,7 +326,7 @@ public:
             if (const auto& requiredPrivileges = _properties.getRequiredPrivileges()) {
                 for (const auto& rp : *requiredPrivileges) {
                     tassert(
-                        11350602,
+                        ErrorCodes::ExtensionError,
                         "Only 'namespace' resourcePattern is supported for extension privileges",
                         rp.getResourcePattern() ==
                             MongoExtensionPrivilegeResourcePatternEnum::kNamespace);
@@ -310,7 +336,7 @@ public:
                         actions.addAction(static_properties_util::toActionType(entry.getAction()));
                     }
 
-                    tassert(11350600,
+                    tassert(ErrorCodes::ExtensionError,
                             "requiredPrivileges.actions must not be empty.",
                             !actions.empty());
                     Privilege::addPrivilegeToPrivilegeVector(
@@ -325,16 +351,16 @@ public:
             return !_properties.getRequiresInputDocSource();
         }
 
+        // Extension stages are unsupported on timeseries collections.
+        Constraints constraints() const override {
+            return {.canRunOnTimeseries = false};
+        }
+
         bool requiresAuthzChecks() const override {
             // If the stage specifies a non-empty set of required privileges, mandatory auth checks
             // are required. Otherwise, it is safe to opt out of auth checks.
             const auto& properties = _properties.getRequiredPrivileges();
             return properties.has_value() && !properties->empty();
-        }
-
-        std::unique_ptr<LiteParsedDocumentSource> clone() const override {
-            return std::make_unique<LiteParsedExpanded>(
-                getParseTimeName(), _astNode->clone(), _nss, _ifrContext);
         }
 
         bool hasExtensionVectorSearchStage() const override;
@@ -343,8 +369,8 @@ public:
 
         FirstStageViewApplicationPolicy getFirstStageViewApplicationPolicy() const override;
 
-        void bindViewInfo(const ViewInfo& viewInfo,
-                          const ResolvedNamespaceMap& resolvedNamespaces) override;
+        void bindResolvedNamespace(const ResolvedNamespace& view,
+                                   const ResolvedNamespaceMap& resolvedNamespaces) override;
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const override {
@@ -356,13 +382,24 @@ public:
             this->transactionNotSupported(this->getParseTimeName());
         }
 
+        bool isAllowedInLookupPipeline() const override {
+            return _properties.getAllowedInLookup();
+        }
+
         bool isRankedStage() const override;
 
         bool isScoredStage() const override;
 
+        bool isScoreDetailsStage() const override;
+
         bool isSelectionStage() const override;
 
     private:
+        std::unique_ptr<LiteParsedDocumentSource> _doClone() const override {
+            return std::make_unique<LiteParsedExpanded>(
+                getParseTimeName(), _astNode->clone(), _nss, _ifrContext);
+        }
+
         AggStageAstNodeHandle _astNode;
         const MongoExtensionStaticProperties _properties;
         const NamespaceString _nss;
@@ -397,16 +434,15 @@ public:
 
         if (expCtx->getInLookup() && !hybridSearchFlagEnabled) {
             const auto stageName = std::string(astNode->getName());
-            // Throw the IFR retry error for extension $search/$searchMeta in $lookup if the
-            // feature flag is not enabled. Note: $vectorSearch is independently disallowed in
-            // $lookup (see LookupRequirement::kNotAllowed) and is not handled here.
-            //
-            // TODO SERVER-117259: today this kickback is unreachable because the pre-desugar
-            // LookupRequirement::kNotAllowed constraint on DocumentSourceExtensionForQueryShape
-            // (and on DocumentSourceExtensionOptimizable post-desugar) rejects the stage before
-            // create() is called. Once that ticket lifts the constraint to kAllowed, this
-            // kickback becomes the runtime gate for extension $search/$searchMeta in $lookup
-            // when featureFlagExtensionsInsideHybridSearch is disabled.
+            // Throw the IFR retry error for extension $vectorSearch in $lookup when
+            // featureFlagExtensionsInsideHybridSearch is disabled.
+            search_helpers::throwIfrKickbackIfNecessary(
+                search_helpers::isExtensionVectorSearchStage(stageName),
+                feature_flags::gFeatureFlagVectorSearchExtension,
+                vector_search_metrics::inLookupKickbackRetryCount,
+                "The $vectorSearch extension stage is not supported in a $lookup");
+            // Throw the IFR retry error for extension $search/$searchMeta in $lookup when
+            // featureFlagExtensionsInsideHybridSearch is disabled.
             search_helpers::throwIfrKickbackIfNecessary(
                 search_helpers::isExtensionSearchStage(stageName),
                 feature_flags::gFeatureFlagSearchExtension,
@@ -455,13 +491,13 @@ public:
     // This method is invoked by extensions to register descriptor.
     static void registerStage(AggStageDescriptorHandle descriptor);
 
-    const char* getSourceName() const override {
-        return _stageName.c_str();
+    std::string_view getSourceName() const override {
+        return _stageName;
     }
 
     void addVariableRefs(std::set<Variables::Id>* refs) const override {}
 
-    Value serialize(const SerializationOptions& opts) const override;
+    Value serialize(const query_shape::SerializationOptions& opts) const override;
 
     StageConstraints constraints(PipelineSplitState pipeState) const override;
 
@@ -469,16 +505,23 @@ public:
 
     Id getId() const override;
 
-    SortPattern getSortPattern() const override {
-        auto bson = _logicalStage->getSortPattern();
-        if (bson.isEmpty()) {
-            return SortPattern({});
+    bool providesSortKeyMetadata() const override {
+        const auto& provided = _properties.getProvidedMetadataFields();
+        if (!provided || provided->empty()) {
+            return false;
         }
-        return SortPattern(bson, getExpCtx());
+        return std::find(provided->begin(),
+                         provided->end(),
+                         DocumentMetadataFields::serializeMetaType(
+                             DocumentMetadataFields::MetaType::kSortKey)) != provided->end();
     }
 
     const MongoExtensionStaticProperties& getStaticProperties() const {
         return _properties;
+    }
+
+    boost::optional<MongoExtensionDocsNeededBoundsInfo> getDocsNeededBounds() const {
+        return _logicalStage->getDocsNeededBounds();
     }
 
     DepsTracker::State getDependencies(DepsTracker* deps) const override;
@@ -516,16 +559,41 @@ public:
      * given extension stage name in a static extension rule registry that is populated once at
      * startup and accessible by all DocumentSourceExtensionOptimizable instances.
      */
-    static void registerStageRules(StringData stageName,
+    static void registerStageRules(std::string_view stageName,
                                    const std::vector<PipelineRewriteRule>& rules);
 
-    static void unregisterStageRules_forTest(StringData stageName);
-    static const std::vector<PipelineRewriteRule>* getStageRules_forTest(StringData stageName);
+    static void unregisterStageRules_forTest(std::string_view stageName);
+    static const std::vector<PipelineRewriteRule>* getStageRules_forTest(
+        std::string_view stageName);
 
     /**
      * Pushes the pipeline dependencies to the underlying extension logical stage.
      */
     void applyPipelineSuffixDependencies(const host_connector::PipelineDependenciesAdapter& deps);
+
+    /**
+     * Overridden from WrappedExtensionSourceHooks. Builds the boundary adapter and forwards to the
+     * overload above.
+     */
+    void applyPipelineSuffixDependencies(const DepsTracker& deps,
+                                         const std::set<std::string>& builtinVarRefs) override;
+
+    /**
+     * Overridden from WrappedExtensionSourceHooks. Notifies the underlying extension logical stage
+     * that the metadata stream has been elided.
+     */
+    void skipMetadataStream() override {
+        _logicalStage->skipMetadataStream();
+    }
+
+    /**
+     * Overridden from WrappedExtensionSourceHooks. Enqueues this stage's own in-place extension
+     * rules onto 'ctx'.
+     */
+    void dispatchInPlaceRules(
+        rule_based_rewrites::pipeline::PipelineRewriteContext& ctx) const override {
+        dispatchExtensionRules(ctx, kInPlace);
+    }
 
 protected:
     /**
@@ -541,23 +609,29 @@ protected:
 
     DocumentSourceExtensionOptimizable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        AggStageAstNodeHandle astNode)
-        : DocumentSource(astNode->getName(), expCtx),
-          _stageName(std::string(astNode->getName())),
-          _properties(astNode->getProperties()),
-          _logicalStage([&]() {
-              tassert(11647800,
-                      "DocumentSourceExtensionOptimizable received invalid expression context",
-                      expCtx.get() != nullptr);
-              auto catalogContext = CatalogContext(*expCtx);
-              return astNode->bind(catalogContext.getAsBoundaryType());
-          }()),
-          _ownedRewriteRules(_buildOwnedRewriteRules(
-              _stageName, UnownedLogicalAggStageHandle(_logicalStage.get()))) {}
+        : DocumentSourceExtensionOptimizable(
+              expCtx,
+              [&]() -> LogicalAggStageHandle {
+                  tassert(11647800,
+                          "DocumentSourceExtensionOptimizable "
+                          "received invalid expression context",
+                          expCtx.get() != nullptr);
+                  auto catalogContext = CatalogContext(*expCtx);
+                  return astNode->promote(catalogContext.getAsBoundaryType());
+              }(),
+              astNode->getProperties()) {}
 
     DocumentSourceExtensionOptimizable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        LogicalAggStageHandle logicalStage,
                                        const MongoExtensionStaticProperties& properties)
-        : DocumentSource(logicalStage->getName(), expCtx),
+        : DocumentSource(logicalStage->getName(),
+                         expCtx,
+                         [&]() -> SortPattern {
+                             auto bson = logicalStage->getSortPattern();
+                             return bson.isEmpty()
+                                 ? SortPattern(std::vector<SortPattern::SortPatternPart>{})
+                                 : SortPattern(bson, expCtx);
+                         }()),
           _stageName(std::string(logicalStage->getName())),
           _properties(properties),
           _logicalStage(std::move(logicalStage)),

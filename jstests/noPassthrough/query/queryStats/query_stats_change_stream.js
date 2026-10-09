@@ -21,7 +21,9 @@ function testCollectionChangeStream(conn) {
     assertDropAndRecreateCollection(db, "coll");
 
     // Check change stream explain is recorded.
-    assert.commandWorked(db.coll.explain({"verbosity": "queryPlanner"}).aggregate([{"$changeStream": {}}]));
+    assert.commandWorked(
+        db.coll.explain({"verbosity": "queryPlanner"}).aggregate([{"$changeStream": {}}]),
+    );
     let queryStatsEntry = getLatestQueryStatsEntry(db);
     checkChangeStreamEntry({
         queryStatsEntry: queryStatsEntry,
@@ -223,7 +225,8 @@ function runTest(conn) {
         rs: {nodes: 1, setParameter: {writePeriodicNoops: true, periodicNoopIntervalSecs: 1}},
         mongosOptions: {
             setParameter: {
-                internalQueryStatsRateLimit: -1,
+                internalQueryStatsSampleRate: 1,
+                internalQueryStatsWriteCmdSampleRate: 0,
             },
         },
     });

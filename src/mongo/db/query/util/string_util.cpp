@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/util/string_util.h"
 
@@ -35,6 +9,7 @@
 namespace mongo {
 
 namespace query_string_util {
+
 unsigned int levenshteinDistance(const std::string& s1, const std::string& s2) {
     if (s1.empty()) {
         return s2.size();
@@ -133,6 +108,36 @@ std::vector<std::pair<std::string, std::vector<std::string>>> computeTypoSuggest
         }
     }
     return suggestions;
+}
+
+std::vector<std::pair<std::string, std::vector<std::string>>> computeTypoSuggestions(
+    const std::vector<std::string>& validStrings,
+    const std::vector<std::string>& typos,
+    size_t maxCells) {
+    // Sum matrix cells across all (typo, validString) pairs. Use saturating addition to avoid
+    // overflow from near-BSON-limit field names before the comparison fires.
+    size_t totalCells = 0;
+    for (const auto& typo : typos) {
+        for (const auto& valid : validStrings) {
+            size_t cells = (typo.size() + 1) * (valid.size() + 1);
+            totalCells = (totalCells > maxCells - cells) ? maxCells + 1 : totalCells + cells;
+        }
+    }
+    if (totalCells > maxCells) {
+        // Budget exceeded: skip Levenshtein computation and return all valid strings as
+        // unranked suggestions so the error message still lists valid options.
+        std::vector<std::pair<std::string, std::vector<std::string>>> suggestions;
+        for (const auto& typo : typos) {
+            suggestions.push_back({typo, validStrings});
+        }
+        return suggestions;
+    }
+    return computeTypoSuggestions(validStrings, typos);
+}
+
+std::vector<std::pair<std::string, std::vector<std::string>>> safeComputeTypoSuggestions(
+    const std::vector<std::string>& validStrings, const std::vector<std::string>& typos) {
+    return computeTypoSuggestions(validStrings, typos, kDefaultMaxLevenshteinTotalCells);
 }
 
 }  // namespace query_string_util

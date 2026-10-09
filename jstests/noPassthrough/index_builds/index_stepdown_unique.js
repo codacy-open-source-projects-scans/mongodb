@@ -2,8 +2,6 @@
  * Confirms that unique index builds are committed when a primary steps down during the collection
  * scan phase. This applies to both two phase and single phase index builds.
  * @tags: [
- *   # On step up, we abort in-progress index builds on the new primary.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   requires_replication,
  * ]
  */
@@ -31,7 +29,12 @@ assert.commandWorked(coll.insert(doc1));
 IndexBuildTest.pauseIndexBuilds(primary);
 IndexBuildTest.pauseIndexBuilds(rst.getSecondary());
 
-const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {unique: true});
+const createIdx = IndexBuildTest.startIndexBuild(
+    primary,
+    coll.getFullName(),
+    {a: 1},
+    {unique: true},
+);
 
 // When the index build starts, find its op id.
 const opId = IndexBuildTest.waitForIndexBuildToScanCollection(testDB, coll.getName(), "a_1");

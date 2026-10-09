@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/feature_flag.h"
@@ -44,6 +17,7 @@
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/operation_sharding_state.h"
+#include "mongo/db/shard_role/shard_role_loop.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
@@ -212,7 +186,7 @@ CollectionShardingRuntime::acquireExclusive(OperationContext* opCtx, const Names
 }
 
 void CollectionShardingRuntime::invalidateRangePreserversOlderThanShardVersion(
-    OperationContext* opCtx, const ChunkVersion& shardVersion, const UUID& collectionUUID) {
+    const ChunkVersion& shardVersion, const UUID& collectionUUID) {
     if (shardVersion == ChunkVersion::IGNORED()) {
         return;
     }
@@ -230,7 +204,7 @@ void CollectionShardingRuntime::invalidateRangePreserversOlderThanShardVersion(
                 "shardVersion"_attr = shardVersion);
             return;
         }
-        _metadataManager->invalidateRangePreserversOlderThanShardVersion(opCtx, shardVersion);
+        _metadataManager->invalidateRangePreserversOlderThanShardVersion(shardVersion);
     }
 }
 
@@ -329,7 +303,7 @@ void CollectionShardingRuntime::enterCriticalSectionCatchUpPhase(OperationContex
     _critSec.enterCriticalSectionCatchUpPhase(reason);
 
     if (_placementVersionInRecoverOrRefresh) {
-        _placementVersionInRecoverOrRefresh->cancellationSource.cancel();
+        _placementVersionInRecoverOrRefresh->recovererTrackerAcquisition.cancel();
     }
 }
 
@@ -368,7 +342,7 @@ boost::optional<CriticalSectionSignal> CollectionShardingRuntime::getCriticalSec
     return {};
 }
 
-void CollectionShardingRuntime::_setFilteringMetadata(OperationContext* opCtx,
+void CollectionShardingRuntime::setCollectionMetadata(OperationContext* opCtx,
                                                       CollectionMetadata newMetadata,
                                                       NoRoutingTableAs noRoutingTableAs) {
     tassert(7032302,
@@ -414,7 +388,7 @@ void CollectionShardingRuntime::_setFilteringMetadata(OperationContext* opCtx,
             std::make_shared<MetadataManager>(opCtx->getServiceContext(), _nss, newMetadata);
         ++_numMetadataManagerChanges;
     } else if (newMetadata.hasRoutingTable()) {
-        _metadataManager->setFilteringMetadata(std::move(newMetadata));
+        _metadataManager->setCollectionMetadata(std::move(newMetadata));
     }
     auto newChunkVersion = _metadataManager->getActivePlacementVersion();
     // Wake waiters on the target version as well as any others that had a comparably lesser
@@ -424,28 +398,28 @@ void CollectionShardingRuntime::_setFilteringMetadata(OperationContext* opCtx,
         auto result = waitingVersion <=> newChunkVersion;
         return result == std::partial_ordering::less;
     });
+
+    ShardingStatistics::get(opCtx)
+        .collectionShardingMetadataStatistics.registerCollectionMetadataCacheSet();
 }
 
-void CollectionShardingRuntime::setFilteringMetadata_nonAuthoritative(
-    OperationContext* opCtx, CollectionMetadata newMetadata) {
-    // The non-authoritative path assumes "no routing table" means the collection is genuinely
-    // not tracked by the global catalog. kUnowned is reserved for the authoritative recovery
-    // flow, where a non-DB-primary shard can only say it holds nothing.
-    _setFilteringMetadata(opCtx, std::move(newMetadata), NoRoutingTableAs::kUntracked);
-    _authoritativeState = AuthoritativeState::kNonAuthoritative;
-}
-
-void CollectionShardingRuntime::setFilteringMetadata_authoritative(
-    OperationContext* opCtx, CollectionMetadata newMetadata, NoRoutingTableAs noRoutingTableAs) {
-    _setFilteringMetadata(opCtx, std::move(newMetadata), noRoutingTableAs);
-    _authoritativeState = AuthoritativeState::kAuthoritative;
-}
-
-void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
+void CollectionShardingRuntime::clearCollectionMetadata(OperationContext* opCtx,
                                                         bool collIsDropped) {
     if (_placementVersionInRecoverOrRefresh) {
-        _placementVersionInRecoverOrRefresh->cancellationSource.cancel();
+        _placementVersionInRecoverOrRefresh->recovererTrackerAcquisition.cancel();
     }
+
+    // Drop any in-flight synchronizer immediately so op observers stop enqueueing into a recovery
+    // round that has already been canceled.
+    _metadataSynchronizer.reset();
+
+    // Metadata is gone; clear needsDbPrimaryClassification so a later recover does not wait on
+    // the database primary critical section based on stale empty-catalog state.
+    _needsDbPrimaryClassification = false;
+
+    _shardVersionWaiters.cancelWaiters(Status{ErrorCodes::CallbackCanceled,
+                                              "Filtering metadata got cleared, cancelling callback "
+                                              "to re-evaluate if it's still necessary"});
 
     if (_nss.isNamespaceAlwaysUntracked()) {
         // The namespace is always marked as untracked thus there is no need to clear anything.
@@ -459,78 +433,58 @@ void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
                 "collIsDropped"_attr = collIsDropped);
 
     // If the collection is sharded and it's being dropped we might need to clean up some state.
-    if (collIsDropped)
+    if (collIsDropped) {
         _cleanupBeforeInstallingNewCollectionMetadata(opCtx);
-
-    _metadataType = MetadataType::kUnknown;
-    if (collIsDropped)
         _metadataManager.reset();
-}
-
-void CollectionShardingRuntime::clearFilteringMetadata_nonAuthoritative(OperationContext* opCtx) {
-    _clearFilteringMetadata(opCtx, /* collIsDropped */ false);
-    _authoritativeState = AuthoritativeState::kNonAuthoritative;
-}
-
-void CollectionShardingRuntime::clearFilteringMetadataForDroppedCollection_nonAuthoritative(
-    OperationContext* opCtx) {
-    _clearFilteringMetadata(opCtx, /* collIsDropped */ true);
-    _authoritativeState = AuthoritativeState::kNonAuthoritative;
-}
-
-void CollectionShardingRuntime::clearFilteringMetadata_authoritative(OperationContext* opCtx) {
-    _clearFilteringMetadata(opCtx, /* collIsDropped */ false);
-    _authoritativeState = AuthoritativeState::kAuthoritative;
-}
-
-void CollectionShardingRuntime::clearFilteringMetadata_authoritative(OperationContext* opCtx,
-                                                                     const UUID& collectionUuid) {
-    if (_metadataType == MetadataType::kTracked) {
-        tassert(11995200,
-                "Expected to find matching uuid if collection is tracked and metadata is known",
-                _metadataManager && _metadataManager->getCollectionUuid().has_value() &&
-                    collectionUuid == _metadataManager->getCollectionUuid().get());
+        _allowChunkOperations = true;
     }
 
-    _clearFilteringMetadata(opCtx, /* collIsDropped */ false);
-    _authoritativeState = AuthoritativeState::kAuthoritative;
-}
+    _metadataType = MetadataType::kUnknown;
 
-void CollectionShardingRuntime::clearFilteringMetadataForDroppedCollection_authoritative(
-    OperationContext* opCtx, const UUID& collectionUuid) {
-    // TODO (SERVER-123346): Re-enable this assertion once unshardCollection does not leave stale
-    // UUID metadata on shards.
-    //
-    // if (_metadataType == MetadataType::kTracked) {
-    //    tassert(12220902,
-    //        "Expected to find matching uuid if collection is tracked and metadata is known",
-    //        _metadataManager && _metadataManager->getCollectionUuid().has_value() &&
-    //            collectionUuid == _metadataManager->getCollectionUuid().get());
-    //}
-
-    _clearFilteringMetadata(opCtx, /* collIsDropped */ true);
-    _authoritativeState = AuthoritativeState::kAuthoritative;
+    ShardingStatistics::get(opCtx)
+        .collectionShardingMetadataStatistics.registerCollectionMetadataCacheClear();
 }
 
 Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                                                const NamespaceString& nss,
                                                const UUID& collectionUuid,
                                                ChunkRange orphanRange,
-                                               Date_t deadline) {
+                                               Date_t deadline,
+                                               bool refreshMetadataIfUnknown) {
     while (true) {
         const auto rangeDeleterService = RangeDeleterService::get(opCtx);
         rangeDeleterService->getServiceUpFuture().get(opCtx);
 
-        SharedSemiFuture<void> orphanCleanupFuture = [&]() {
+        auto getOrphanCleanupFuture = [&]() -> SharedSemiFuture<void> {
             AutoGetCollection autoColl(opCtx, nss, MODE_IX);
             const auto self =
                 CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
 
+            // On the authoritative path the filtering metadata may have been transiently cleared on
+            // this node by a concurrent metadata commit (for example movePrimary registering the
+            // collection on the new DB primary) while we wait. That is not a reset of the
+            // collection itself: signal the shard-role loop to recover the metadata from the
+            // durable catalog and retry, rather than treating it as a conflict. A StaleConfig with
+            // no wanted version is how "this shard doesn't know its version" is reported. Whether
+            // the migration is authoritative is decided by the donor and passed in by the caller;
+            // this node does not consult the feature flag itself.
+            if (refreshMetadataIfUnknown && self->_metadataType == MetadataType::kUnknown) {
+                uasserted(StaleConfigInfo(nss,
+                                          ShardVersionPlacementIgnored(),
+                                          boost::none /* wantedVersion */,
+                                          ShardingState::get(opCtx)->shardId()),
+                          str::stream() << "Filtering metadata for " << nss.toStringForErrorMsg()
+                                        << " is not known; recovering before waiting for orphan "
+                                           "cleanup");
+            }
+
             // If the metadata was reset, or the collection was dropped and recreated since the
             // metadata manager was created, return an error.
-            if (self->_metadataType != MetadataType::kTracked ||
-                !self->_metadataManager->getCollectionUuid().has_value() ||
-                collectionUuid != self->_metadataManager->getCollectionUuid().get()) {
+            const bool metadataIsOk = self->_metadataType == MetadataType::kUnowned ||
+                (self->_metadataType == MetadataType::kTracked &&
+                 self->_metadataManager->getCollectionUuid().has_value() &&
+                 collectionUuid == self->_metadataManager->getCollectionUuid().get());
+            if (!metadataIsOk) {
                 return SemiFuture<void>::makeReady(
                            Status(ErrorCodes::ConflictingOperationInProgress,
                                   "Collection being migrated was dropped and created or otherwise "
@@ -538,9 +492,25 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                     .share();
             }
 
-            return rangeDeleterService->getOverlappingRangeDeletionsFuture(
-                self->_metadataManager->getCollectionUuid().get(), orphanRange);
-        }();
+            return rangeDeleterService->getOverlappingRangeDeletionsFuture(collectionUuid,
+                                                                           orphanRange);
+        };
+
+        SharedSemiFuture<void> orphanCleanupFuture;
+        if (refreshMetadataIfUnknown) {
+            try {
+                orphanCleanupFuture =
+                    shard_role_loop::withStaleShardRetry(opCtx, getOrphanCleanupFuture);
+            } catch (const ExceptionFor<ErrorCodes::StaleConfig>&) {
+                // The shard-role loop exhausted its metadata recovery attempts without establishing
+                // known metadata for the collection. Surface the historical "metadata reset" error.
+                return {ErrorCodes::ConflictingOperationInProgress,
+                        "Collection being migrated was dropped and created or otherwise had its "
+                        "metadata reset"};
+            }
+        } else {
+            orphanCleanupFuture = getOrphanCleanupFuture();
+        }
 
         if (orphanCleanupFuture.isReady()) {
             LOGV2_OPTIONS(21918,
@@ -763,9 +733,11 @@ void CollectionShardingRuntime::appendShardVersion(BSONObjBuilder* builder) cons
 }
 
 void CollectionShardingRuntime::setPlacementVersionRecoverRefreshFuture(
-    SharedSemiFuture<void> future, CancellationSource cancellationSource) {
+    SharedSemiFuture<void> future,
+    ShardCatalogRecovererTracker::Acquisition recovererTrackerAcquisition) {
     invariant(!_placementVersionInRecoverOrRefresh);
-    _placementVersionInRecoverOrRefresh.emplace(std::move(future), std::move(cancellationSource));
+    _placementVersionInRecoverOrRefresh.emplace(std::move(future),
+                                                std::move(recovererTrackerAcquisition));
 }
 
 boost::optional<SharedSemiFuture<void>> CollectionShardingRuntime::getMetadataRefreshFuture()
@@ -778,17 +750,18 @@ boost::optional<SharedSemiFuture<void>> CollectionShardingRuntime::getMetadataRe
 void CollectionShardingRuntime::resetPlacementVersionRecoverRefreshFuture() {
     invariant(_placementVersionInRecoverOrRefresh);
     _placementVersionInRecoverOrRefresh = boost::none;
+    _metadataSynchronizer.reset();
 }
 
-void CollectionShardingRuntime::setCollectionRecoverer(
-    std::shared_ptr<CollectionCacheRecoverer> recoverer) {
-    invariant(!(_collectionRecoverer && recoverer));
-    _collectionRecoverer = std::move(recoverer);
+void CollectionShardingRuntime::setMetadataSynchronizer(
+    std::shared_ptr<CollectionMetadataSynchronizer> synchronizer) {
+    invariant(!(_metadataSynchronizer && synchronizer));
+    _metadataSynchronizer = std::move(synchronizer);
 }
 
-std::shared_ptr<CollectionCacheRecoverer> CollectionShardingRuntime::getCollectionCacheRecoverer()
+std::shared_ptr<CollectionMetadataSynchronizer> CollectionShardingRuntime::getMetadataSynchronizer()
     const {
-    return _collectionRecoverer;
+    return _metadataSynchronizer;
 }
 
 SharedSemiFuture<void> CollectionShardingRuntime::registerWaiterForChunkVersion(
@@ -826,9 +799,12 @@ SharedSemiFuture<void> CollectionShardingRuntime::registerWaiterForChunkVersion(
     return versionFut;
 }
 
-CollectionShardingRuntime::AuthoritativeState CollectionShardingRuntime::getAuthoritativeState()
-    const {
-    return _authoritativeState;
+bool CollectionShardingRuntime::allowChunkOperations() const {
+    return _allowChunkOperations;
+}
+
+void CollectionShardingRuntime::setAllowChunkOperations(bool allowChunkOperations) {
+    _allowChunkOperations = allowChunkOperations;
 }
 
 CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx,
@@ -844,9 +820,6 @@ CollectionCriticalSection::CollectionCriticalSection(OperationContext* opCtx,
                                    _opCtx->getServiceContext()->getPreciseClockSource()->now() +
                                    Milliseconds(migrationLockAcquisitionMaxWaitMS.load())));
     auto scopedCsr = CollectionShardingRuntime::acquireExclusive(_opCtx, _nss);
-    tassert(7032305,
-            "Collection metadata unknown when entering critical section",
-            scopedCsr->getCurrentMetadataIfKnown());
     scopedCsr->enterCriticalSectionCatchUpPhase(_opCtx, _reason);
 }
 
@@ -863,9 +836,6 @@ void CollectionCriticalSection::enterCommitPhase() {
                                    _opCtx->getServiceContext()->getPreciseClockSource()->now() +
                                    Milliseconds(migrationLockAcquisitionMaxWaitMS.load())));
     auto scopedCsr = CollectionShardingRuntime::acquireExclusive(_opCtx, _nss);
-    tassert(7032304,
-            "Collection metadata unknown when entering critical section commit phase",
-            scopedCsr->getCurrentMetadataIfKnown());
     scopedCsr->enterCriticalSectionCommitPhase(_opCtx, _reason);
 }
 

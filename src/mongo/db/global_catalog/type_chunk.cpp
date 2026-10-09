@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/type_chunk.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -43,6 +16,7 @@
 #include "mongo/util/str.h"
 
 #include <cstring>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -75,7 +49,7 @@ namespace {
 /**
  * Extracts an Object value from 'obj's field 'fieldName'. Sets the result to 'bsonElement'.
  */
-Status extractObject(const BSONObj& obj, StringData fieldName, BSONElement* bsonElement) {
+Status extractObject(const BSONObj& obj, std::string_view fieldName, BSONElement* bsonElement) {
     Status elementStatus = bsonExtractTypedField(obj, fieldName, BSONType::object, bsonElement);
     if (!elementStatus.isOK()) {
         return elementStatus.withContext(str::stream()
@@ -255,6 +229,26 @@ StatusWith<ChunkType> ChunkType::parseFromConfigBSON(const BSONObj& source,
     return chunk;
 }
 
+std::vector<ChunkType> ChunkType::parseConfigBSONDocuments(const std::vector<BSONObj>& chunkDocs,
+                                                           const UUID& expectedCollectionUUID,
+                                                           const OID& epoch,
+                                                           const Timestamp& timestamp) {
+    std::vector<ChunkType> chunks;
+    chunks.reserve(chunkDocs.size());
+
+    for (const auto& chunkDoc : chunkDocs) {
+        auto chunk = uassertStatusOK(parseFromConfigBSON(chunkDoc, epoch, timestamp));
+        uassert(12698702,
+                str::stream() << "Chunk " << chunk.toString()
+                              << " does not belong to collection UUID " << expectedCollectionUUID,
+                chunk.getCollectionUUID() == expectedCollectionUUID);
+        uassertStatusOK(chunk.validate());
+        chunks.push_back(std::move(chunk));
+    }
+
+    return chunks;
+}
+
 StatusWith<ChunkType> ChunkType::parseFromShardBSON(const BSONObj& source,
                                                     const OID& epoch,
                                                     const Timestamp& timestamp) {
@@ -306,7 +300,8 @@ StatusWith<ChunkType> ChunkType::parseFromShardBSON(const BSONObj& source,
     return chunk;
 }
 
-StatusWith<ChunkType> ChunkType::parseFromNetworkRequest(const BSONObj& source) {
+StatusWith<ChunkType> ChunkType::parseFromNetworkRequest(const BSONObj& source,
+                                                         bool acceptMissingVersion) {
     // Parse history and shard.
     StatusWith<ChunkType> chunkStatus = _parseChunkBase(source);
     if (!chunkStatus.isOK()) {
@@ -355,12 +350,17 @@ StatusWith<ChunkType> ChunkType::parseFromNetworkRequest(const BSONObj& source) 
     }
 
     // Parse version.
-    chunk._version = ChunkVersion::parse(source[ChunkType::lastmod()]);
+    {
+        const auto elem = source[ChunkType::lastmod()];
+        if (!acceptMissingVersion || !elem.eoo()) {
+            chunk._version = ChunkVersion::parse(elem);
+        }
+    }
 
     return chunk;
 }
 
-BSONObj ChunkType::toConfigBSON() const {
+BSONObj ChunkType::toConfigBSON(bool omitVersion) const {
     BSONObjBuilder builder;
     if (_id)
         builder.append(name.name(), getName());
@@ -370,7 +370,7 @@ BSONObj ChunkType::toConfigBSON() const {
         _range->serialize(&builder);
     if (_shard)
         builder.append(shard.name(), getShard().toString());
-    if (_version)
+    if (!omitVersion && _version)
         builder.appendTimestamp(lastmod.name(), _version->toLong());
     if (_estimatedSizeBytes)
         builder.appendNumber(estimatedSizeBytes.name(),

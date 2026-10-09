@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/ident.h"
@@ -43,10 +16,11 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include <boost/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 /**
  * This class manages idents in the KV storage engine that are marked as drop-pending by the
  * two-phase index/collection drop algorithm.
@@ -80,12 +54,8 @@ public:
      * A drop time is considered old enough when:
      * - (Timestamp) The op cannot be rolled back nor new users access the record store data.
      * - (CheckpointIteration) The catalog has made its changes durable.
-     *
-     * onDrop must not call dropIdentsOlderThan() or immediatelyCompletePendingDrop().
      */
-    void addDropPendingIdent(const StorageEngine::DropTime& dropTime,
-                             std::shared_ptr<Ident> ident,
-                             StorageEngine::DropIdentCallback&& onDrop = nullptr);
+    void addDropPendingIdent(const StorageEngine::DropTime& dropTime, std::shared_ptr<Ident> ident);
 
     /**
      * Adds an ident with an unknown drop time that is no later than `stableTimestamp`.
@@ -95,7 +65,7 @@ public:
      * timestamp it must either be no greater than that or be an ident *created* after the stable
      * timestamp.
      */
-    void dropUnknownIdent(const Timestamp& stableTimestamp, StringData ident);
+    void dropUnknownIdent(const Timestamp& stableTimestamp, std::string_view ident);
 
     /**
      * Marks the ident as in use and prevents the reaper from dropping the ident.
@@ -104,7 +74,7 @@ public:
      * being dropped. Returns a shared_ptr to the `dropToken` if it isn't expired, otherwise a new
      * shared_ptr is generated, stored in `dropToken`, and returned.
      */
-    std::shared_ptr<Ident> markIdentInUse(StringData ident);
+    std::shared_ptr<Ident> markIdentInUse(std::string_view ident);
 
     /**
      * Returns earliest drop timestamp in '_dropPendingIdents'.
@@ -152,7 +122,7 @@ public:
      *
      * Only untimestamped drops or drops added with dropUnknownIdent() can be immediately completed.
      */
-    Status immediatelyCompletePendingDrop(OperationContext* opCtx, StringData ident);
+    Status immediatelyCompletePendingDrop(OperationContext* opCtx, std::string_view ident);
 
     /**
      * If the given ident has been registered with the reaper, attempts to immediately drop it
@@ -165,7 +135,7 @@ public:
      * immediate drops are not replicated. Attempting to complete one of them will return BadValue.
      */
     Status immediatelyCompletePendingDropAtTimestamp(OperationContext* opCtx,
-                                                     StringData ident,
+                                                     std::string_view ident,
                                                      Timestamp timestamp);
 
 private:
@@ -180,9 +150,6 @@ private:
         // untimestamped writes.
         StorageEngine::DropTime dropTime;
         std::weak_ptr<Ident> dropToken;
-
-        // Callback to run once the ident has been dropped.
-        StorageEngine::DropIdentCallback onDrop;
 
         // Set to false if the dropTime is an upper bound rather than the exact drop time
         bool dropTimeIsExact = true;
@@ -208,7 +175,7 @@ private:
 
     Status _immediatelyAttemptToCompletePendingDrop(
         OperationContext* opCtx,
-        StringData ident,
+        std::string_view ident,
         boost::optional<Timestamp> replicatedIdentDropTimestamp);
 
     template <typename Field>
@@ -267,4 +234,4 @@ private:
     absl::node_hash_map<std::string, IdentInfo, StringMapHasher, StringMapEq> _dropPendingIdents;
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

@@ -1,35 +1,10 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/split_pipeline.h"
 
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_internal_hybrid_search.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/document_source_skip.h"
@@ -39,6 +14,8 @@
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
@@ -138,6 +115,7 @@ public:
         _limitFieldsSentFromShardsToMerger();
 
         _abandonCacheIfSentToShards();
+        _moveHybridSearchMarkerToShards();
         _splitPipeline.shardsPipeline->setSplitState(PipelineSplitState::kSplitForShards);
         _splitPipeline.mergePipeline->setSplitState(PipelineSplitState::kSplitForMerge);
 
@@ -301,6 +279,27 @@ private:
         }
 
         _splitPipeline.shardCursorsSortSpec = boost::none;
+    }
+
+    /**
+     * The $_internalHybridSearch marker sits at the tail of a desugared hybrid-search pipeline,
+     * so the split always leaves it on the merge half. Move it onto the shards half instead: the
+     * marker's canRunOnTimeseries=false constraint fires at collection acquisitions, which only
+     * happen in the shard role (the mongos/mongod pipeline shape checks that also reject this
+     * are slated for removal), so it buys nothing on the merger.
+     */
+    void _moveHybridSearchMarkerToShards() {
+        auto& mergeSources = _splitPipeline.mergePipeline->getSources();
+        const auto it =
+            std::find_if(mergeSources.begin(), mergeSources.end(), [](const auto& stage) {
+                return stage->template isInstanceOf<DocumentSourceInternalHybridSearch>();
+            });
+        if (it != mergeSources.end()) {
+            mergeSources.erase(it);
+            _splitPipeline.shardsPipeline->addFinalSource(
+                make_intrusive<DocumentSourceInternalHybridSearch>(
+                    _splitPipeline.shardsPipeline->getContext()));
+        }
     }
 
     /**
@@ -524,7 +523,7 @@ private:
      */
     void _abandonCacheIfSentToShards() {
         for (auto&& stage : _splitPipeline.shardsPipeline->getSources()) {
-            if (StringData(stage->getSourceName()) ==
+            if (std::string_view(stage->getSourceName()) ==
                 DocumentSourceSequentialDocumentCache::kStageName) {
                 static_cast<DocumentSourceSequentialDocumentCache*>(stage.get())->abandonCache();
             }

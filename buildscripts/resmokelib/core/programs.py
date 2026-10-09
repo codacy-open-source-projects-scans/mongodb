@@ -3,11 +3,14 @@
 Handles all the nitty-gritty parameter conversion.
 """
 
+import functools
 import json
 import os
 import os.path
 import re
+import shutil
 import stat
+from subprocess import check_output
 from typing import Any, Optional
 
 from opentelemetry import trace
@@ -47,16 +50,38 @@ def get_path_env_var(env_vars):
     return path
 
 
-def get_binary_version(executable):
-    """Return the string for the binary version of the given executable."""
+@functools.cache
+def get_binary_version_output(binary_path):
+    """Run `<binary> --version` for the given binary and return its stdout as a string.
 
-    from buildscripts.resmokelib.multiversionconstants import LATEST_FCV
+    Cached by binary path since a given binary's `--version` output never changes at runtime.
+    """
+    env_vars = os.environ.copy()
+    env_vars["PATH"] = os.pathsep.join(get_path_env_var(env_vars=env_vars))
+
+    # Resolve the binary against the augmented PATH that includes multiversion
+    # and the install directories, in the case where `binary_path` is simply `mongod`.
+    binary = shutil.which(binary_path, path=env_vars["PATH"]) or binary_path
+
+    return check_output([binary, "--version"], env=env_vars).decode("utf-8")
+
+
+def get_version_suffix(executable):
+    """Return the version suffix of the given executable (e.g. '9.0' for 'mongod-9.0'), or None."""
 
     split_executable = os.path.basename(executable).split("-")
     version_regex = re.compile(version.VERSION_PATTERN, re.VERBOSE | re.IGNORECASE)
     if len(split_executable) > 1 and version_regex.match(split_executable[-1]):
         return split_executable[-1]
-    return LATEST_FCV
+    return None
+
+
+def get_binary_version(executable):
+    """Return the string for the binary version of the given executable."""
+
+    from buildscripts.resmokelib.multiversionconstants import LATEST_FCV
+
+    return get_version_suffix(executable) or LATEST_FCV
 
 
 def remove_set_parameter_if_before_version(
@@ -161,6 +186,28 @@ def mongod_program(
     remove_set_parameter_if_before_version(
         suite_set_parameters, "findShardsOnConfigTimeoutMS", bin_version, "8.3.0"
     )
+    # The v9.0 branch predates this parameter but its binaries report the same version (9.0) as
+    # the latest binary, so gate on the version suffix of downloaded multiversion binaries instead.
+    bin_version_suffix = get_version_suffix(executable)
+    if bin_version_suffix:
+        remove_set_parameter_if_before_version(
+            suite_set_parameters,
+            "migrationRecipientPITHistoryToPreserveInSecs",
+            bin_version_suffix,
+            "9.1.0",
+        )
+        remove_set_parameter_if_before_version(
+            suite_set_parameters,
+            "validateParallelTargetRecordsPerSlice",
+            bin_version_suffix,
+            "9.1.0",
+        )
+        remove_set_parameter_if_before_version(
+            suite_set_parameters,
+            "validateParallelMaxRecordStoreSlices",
+            bin_version_suffix,
+            "9.1.0",
+        )
 
     if "grpcPort" not in mongod_options and suite_set_parameters.get("featureFlagGRPC"):
         mongod_options["grpcPort"] = network.PortAllocator.next_fixture_port(job_num)
@@ -526,18 +573,15 @@ def mongo_shell_program(
         'await import("jstests/libs/override_methods/validate_collections_on_shutdown.js")'
     )
 
-    # Load a callback to check UUID consistency before shutting down a ShardingTest.
-    eval_sb.append(
-        'await import("jstests/libs/override_methods/check_uuids_consistent_across_cluster.js")'
-    )
-
     # Load a callback to check index consistency before shutting down a ShardingTest.
     eval_sb.append(
         'await import("jstests/libs/override_methods/check_indexes_consistent_across_cluster.js")'
     )
 
     # Load a callback to check that all orphans are deleted before shutting down a ShardingTest.
-    eval_sb.append('await import("jstests/libs/override_methods/check_orphans_are_deleted.js")')
+    eval_sb.append(
+        'await import("jstests/libs/override_methods/cluster_scalability/check_orphans_are_deleted.js")'
+    )
 
     # Load a callback to check that the info stored in config.collections and config.chunks is
     # semantically correct before shutting down a ShardingTest.
@@ -672,7 +716,7 @@ def dbtest_program(
     """Return a Process instance that starts a dbtest with arguments constructed from 'kwargs'."""
 
     executable = utils.default_if_none(executable, config.DEFAULT_DBTEST_EXECUTABLE)
-    args = [executable]
+    args = [executable, "--enhancedReporter=false"]
 
     if suites is not None:
         args.extend(suites)

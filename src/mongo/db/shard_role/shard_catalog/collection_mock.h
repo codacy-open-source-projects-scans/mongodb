@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,12 +8,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 
+#include <string_view>
+
 namespace mongo {
 
 /**
  * This class comprises a mock Collection for use by CollectionCatalog unit tests.
  */
-class MONGO_MOD_PUBLIC CollectionMock : public Collection {
+class [[MONGO_MOD_PUBLIC]] CollectionMock : public Collection {
 public:
     explicit CollectionMock(const NamespaceString& nss)
         : CollectionMock(UUID::gen(), nss, std::unique_ptr<IndexCatalog>()) {}
@@ -49,15 +25,12 @@ public:
                    const NamespaceString& nss,
                    std::unique_ptr<IndexCatalog> indexCatalog)
         : _uuid(uuid), _nss(nss), _indexCatalog(std::move(indexCatalog)) {}
-    CollectionMock(const NamespaceString& nss, RecordId catalogId)
-        : _nss(nss), _catalogId(std::move(catalogId)) {}
     ~CollectionMock() override = default;
 
     std::shared_ptr<Collection> clone() const override {
         std::unique_ptr<IndexCatalog> indexCatalogCopy =
             _indexCatalog ? _indexCatalog->clone() : nullptr;
         auto copy = std::make_shared<CollectionMock>(_uuid, _nss, std::move(indexCatalogCopy));
-        copy->_catalogId = _catalogId;
         copy->_committed = _committed;
         copy->_options = _options;
         return copy;
@@ -79,11 +52,10 @@ public:
     }
 
     RecordId getCatalogId() const override {
-        return _catalogId;
-    }
-
-    void setCatalogId(RecordId catalogId) {
-        _catalogId = std::move(catalogId);
+        // It is intentionally not possible to have a valid CatalogId for a CollectionMock, as it
+        // represents the location of the Collection's metadata in the durable catalog, and
+        // CollectionMocks are not persisted to disk.
+        return RecordId{};
     }
 
     const NamespaceString& ns() const override {
@@ -116,7 +88,11 @@ public:
         return BSONObj();
     }
 
-    std::pair<SchemaValidationResult, Status> checkValidation(
+    StatusWith<std::shared_ptr<MatchExpression>> getValidatorFilter() const override {
+        return StatusWith<std::shared_ptr<MatchExpression>>(nullptr);
+    }
+
+    std::pair<DocumentValidationResult, Status> checkValidation(
         OperationContext* opCtx, const BSONObj& document) const override {
         MONGO_UNREACHABLE;
     }
@@ -160,10 +136,12 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    Status setValidationOptions(OperationContext* opCtx,
-                                boost::optional<ValidationLevelEnum> newLevel,
-                                boost::optional<ValidationActionEnum> newAction,
-                                boost::optional<Validator> newValidator) override {
+    Status setValidationOptions(
+        OperationContext* opCtx,
+        boost::optional<ValidationLevelEnum> newLevel,
+        boost::optional<ValidationActionEnum> newAction,
+        boost::optional<Validator> newValidator,
+        boost::optional<bool> newPrepareConstraintValidationLevel = boost::none) override {
         MONGO_UNREACHABLE;
     }
 
@@ -206,15 +184,6 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    boost::optional<bool> timeseriesBucketingParametersHaveChanged() const override {
-        MONGO_UNREACHABLE;
-    }
-
-    void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
-                                                 boost::optional<bool> value) override {
-        MONGO_UNREACHABLE;
-    }
-
     bool shouldRemoveLegacyTimeseriesBucketingParametersHaveChanged() const final {
         MONGO_UNREACHABLE;
     }
@@ -236,9 +205,6 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    bool areTimeseriesBucketsFixed() const override {
-        MONGO_UNREACHABLE;
-    }
 
     bool isClustered() const override {
         return false;
@@ -377,21 +343,25 @@ public:
     }
 
     void updateTTLSetting(OperationContext* opCtx,
-                          StringData idxName,
+                          std::string_view idxName,
                           long long newExpireSeconds) override {
         MONGO_UNREACHABLE;
     }
 
-    void updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) override {
+    void updateHiddenSetting(OperationContext* opCtx,
+                             std::string_view idxName,
+                             bool hidden) override {
         MONGO_UNREACHABLE;
     }
 
-    void updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) override {
+    void updateUniqueSetting(OperationContext* opCtx,
+                             std::string_view idxName,
+                             bool unique) override {
         MONGO_UNREACHABLE;
     }
 
     void updatePrepareUniqueSetting(OperationContext* opCtx,
-                                    StringData idxName,
+                                    std::string_view idxName,
                                     bool prepareUnique) override {
         MONGO_UNREACHABLE;
     }
@@ -405,32 +375,32 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void removeIndex(OperationContext* opCtx, StringData indexName) override {
+    void removeIndex(OperationContext* opCtx, std::string_view indexName) override {
         MONGO_UNREACHABLE;
     }
 
     Status prepareForIndexBuild(OperationContext* opCtx,
                                 const IndexDescriptor* spec,
-                                StringData indexIdent,
+                                std::string_view indexIdent,
                                 boost::optional<UUID> buildUUID) override {
         MONGO_UNREACHABLE;
     }
 
-    boost::optional<UUID> getIndexBuildUUID(StringData indexName) const override {
+    boost::optional<UUID> getIndexBuildUUID(std::string_view indexName) const override {
         MONGO_UNREACHABLE;
     }
 
     bool isIndexMultikey(OperationContext* opCtx,
-                         StringData indexName,
+                         std::string_view indexName,
                          MultikeyPaths* multikeyPaths,
                          int indexOffset) const override {
         MONGO_UNREACHABLE;
     }
 
-    bool setIndexIsMultikey(OperationContext* opCtx,
-                            StringData indexName,
-                            const MultikeyPaths& multikeyPaths,
-                            int indexOffset) const override {
+    int64_t setIndexIsMultikey(OperationContext* opCtx,
+                               std::string_view indexName,
+                               const MultikeyPaths& multikeyPaths,
+                               int indexOffset) const override {
         MONGO_UNREACHABLE;
     }
 
@@ -449,7 +419,7 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    BSONObj getIndexSpec(StringData indexName, bool expandSimpleCollation) const override {
+    BSONObj getIndexSpec(std::string_view indexName, bool expandSimpleCollation) const override {
         MONGO_UNREACHABLE;
     }
 
@@ -461,11 +431,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    bool isIndexPresent(StringData indexName) const override {
+    bool isIndexPresent(std::string_view indexName) const override {
         MONGO_UNREACHABLE;
     }
 
-    bool isIndexReady(StringData indexName) const override {
+    bool isIndexReady(std::string_view indexName) const override {
         return true;
     }
 
@@ -475,6 +445,10 @@ public:
     }
 
     bool isMetadataEqual(const BSONObj& otherMetadata) const override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::shared_ptr<const durable_catalog::CatalogEntryMetaData> getMetadata() const override {
         MONGO_UNREACHABLE;
     }
 
@@ -489,7 +463,6 @@ public:
 private:
     UUID _uuid = UUID::gen();
     NamespaceString _nss;
-    RecordId _catalogId{0};
     clonable_ptr<IndexCatalog> _indexCatalog;
     bool _committed = true;
     CollectionOptions _options;

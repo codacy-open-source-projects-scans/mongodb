@@ -1,7 +1,10 @@
 // Tests that if a mongoS cursor exceeds the maxTimeMs timeout, the cursors on the shards will be
 // cleaned up. Exercises the fix for the bug described in SERVER-62710.
 //
-// @tags: [requires_scripting]
+// @tags: [
+//  requires_scripting,
+//  resource_intensive,
+// ]
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -51,7 +54,8 @@ assertNoIdleCursors(st.shard0, collName);
 
 // Perform a query that sleeps after retrieving each document. This is guaranteed to exceed the
 // specified maxTimeMS limit. The timeout may happen either on mongoS or on shard. The query might
-// occasionally return the 'NetworkInterfaceExceededTimeLimit' error.
+// occasionally return the 'NetworkInterfaceExceededTimeLimit' error. When the WASM JS engine is
+// used, the query might get killed with 'Interrupted'.
 {
     const curs = coll
         .find({
@@ -65,7 +69,11 @@ assertNoIdleCursors(st.shard0, collName);
     assert.eq(getIdleCursors(st.shard0, collName).length, 0);
     assert.throwsWithCode(
         () => curs.itcount(),
-        [ErrorCodes.MaxTimeMSExpired, ErrorCodes.NetworkInterfaceExceededTimeLimit],
+        [
+            ErrorCodes.MaxTimeMSExpired,
+            ErrorCodes.NetworkInterfaceExceededTimeLimit,
+            ErrorCodes.Interrupted,
+        ],
     );
     assertNoIdleCursors(st.shard0, collName, curs);
 }
@@ -74,9 +82,13 @@ assertNoIdleCursors(st.shard0, collName);
 // occasionally return the 'NetworkInterfaceExceededTimeLimit' error.
 {
     const curs = coll.find().batchSize(2).maxTimeMS(100);
-    const fp = configureFailPoint(st.shard0, "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch", {
-        shouldCheckForInterrupt: true,
-    });
+    const fp = configureFailPoint(
+        st.shard0,
+        "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch",
+        {
+            shouldCheckForInterrupt: true,
+        },
+    );
     assert.throwsWithCode(
         () => curs.itcount(),
         [ErrorCodes.MaxTimeMSExpired, ErrorCodes.NetworkInterfaceExceededTimeLimit],

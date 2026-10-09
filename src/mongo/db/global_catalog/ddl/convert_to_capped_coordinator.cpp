@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/global_catalog/ddl/convert_to_capped_coordinator.h"
@@ -40,9 +14,11 @@
 #include "mongo/db/s/primary_only_service_helpers/participant_causality_barrier.h"
 #include "mongo/db/shard_role/ddl/list_collections_gen.h"
 #include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/commit_collection_metadata_locally.h"
 #include "mongo/db/shard_role/shard_catalog/db_raii.h"
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/shard_role/shard_role.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
@@ -57,6 +33,7 @@ MONGO_FAIL_POINT_DEFINE(convertToCappedFailBeforeCappingTheCollection);
 MONGO_FAIL_POINT_DEFINE(convertToCappedFailAfterCappingTheCollection);
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 void logConvertToCappedOnChangelog(OperationContext* opCtx,
                                    const NamespaceString& nss,
@@ -109,7 +86,7 @@ bool isCollectionCappedWithRequestedSize(OperationContext* opCtx,
     listCollections.setDbName(nss.dbName());
 
     BSONObjBuilder filterBuilder;
-    expectedUUID.appendToBuilder(&filterBuilder, "info.uuid"_sd);
+    expectedUUID.appendToBuilder(&filterBuilder, "info.uuid"sv);
     filterBuilder.append("name", nss.coll());
     filterBuilder.append("options.capped", true);
     filterBuilder.append("options.size", size);
@@ -237,11 +214,15 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kAcquireCriticalSectionOnCoordinator,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
+                const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
                 ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
                     opCtx,
                     nss(),
                     _critSecReason,
-                    ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
+                    ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
+                    !isAuthoritative /* clearShardCatalogCache */);
 
                 // Check preconditions again under the critical section because we're guaranteed no
                 // catalog changes can happen at this point.
@@ -267,7 +248,10 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
             Phase::kDropCollectionOnShardsNotOwningData,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
                 if (_doc.getOriginalCollection().has_value()) {
-                    // Drop collection form any shard that is not db primary and does not owning
+                    const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
+                    // Drop collection from any shard that is not db primary and does not own
                     // data (getting rid of possible stale incarnations due to SERVER-87010).
                     std::vector<ShardId> participantsNotOwningData;
 
@@ -290,6 +274,7 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                         session,
                         true /* fromMigrate */,
                         false /* dropSystemCollections */,
+                        !isAuthoritative /* forceLegacyRefresh */,
                         _doc.getOriginalCollection()->getUuid());
                 }
             }))
@@ -297,8 +282,7 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
             Phase::kAcquireCriticalSectionOnDataShard,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
                 if (*_doc.getDataShard() != ShardingState::get(opCtx)->shardId()) {
-                    _enterCriticalSectionOnDataShard(
-                        opCtx, executor, token, CriticalSectionBlockTypeEnum::kReadsAndWrites);
+                    _enterCriticalSectionOnDataShard(opCtx, executor, token);
                 }
             }))
         .then(_buildPhaseHandler(
@@ -358,6 +342,9 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                 }();
 
                 if (_doc.getOriginalCollection().has_value()) {
+                    const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                        AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
                     {
                         const auto session = getNewSession(opCtx);
                         // Delete the sharding catalog entries referring the previous incarnation
@@ -369,6 +356,20 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                             defaultMajorityWriteConcernDoNotUse(),
                             session,
                             **executor);
+                    }
+
+                    // Drop the previous incarnation of the collection from the shard catalog on
+                    // every shard.
+                    if (isAuthoritative) {
+                        const auto session = getNewSession(opCtx);
+                        sharding_ddl_util::commitDropCollectionMetadataToShardCatalog(
+                            opCtx,
+                            nss(),
+                            _doc.getOriginalCollection()->getUuid(),
+                            Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+                            session,
+                            executor,
+                            token);
                     }
 
                     const auto [coll, chunkDescriptor] =
@@ -387,6 +388,24 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                         **executor,
                         getNewSession(opCtx),
                         std::move(createCollectionOnShardingCatalogOps));
+
+                    // Install the new incarnation of the collection in the shard catalog.
+                    if (isAuthoritative) {
+                        const auto session = getNewSession(opCtx);
+                        // The DB primary shard must always know that the collection is tracked,
+                        // even when it does not own any chunks.
+                        std::set<ShardId> involvedShards;
+                        involvedShards.emplace(ShardingState::get(opCtx)->shardId());
+                        involvedShards.emplace(*(_doc.getDataShard()));
+
+                        sharding_ddl_util::commitCreateCollectionMetadataToShardCatalog(
+                            opCtx,
+                            nss(),
+                            {involvedShards.begin(), involvedShards.end()},
+                            session,
+                            executor,
+                            token);
+                    }
 
                     // Checkpoint the configTime to ensure that, in the case of a stepdown/crash,
                     // the new primary will start-up from a configTime that is inclusive of the
@@ -425,12 +444,30 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
         .then(_buildPhaseHandler(
             Phase::kReleaseCriticalSectionOnCoordinator,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
+                // When the original collection was tracked and shards are authoritative, the
+                // shard catalog commit phase has already updated the in-memory filtering
+                // metadata on the DB primary with the new incarnation of the collection; there
+                // is no need to clear it upon releasing the critical section.
+                // When the original collection was not tracked, there is no need to clear the
+                // filtering metadata upon releasing the critical section because no changes to the
+                // global / shard catalog were made.
+                const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
+                std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction> actionPtr;
+                if (isAuthoritative) {
+                    actionPtr = std::make_unique<ShardingRecoveryService::NoCustomAction>();
+                } else {
+                    actionPtr =
+                        std::make_unique<ShardingRecoveryService::FilteringMetadataClearer>();
+                }
+
                 ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
                     opCtx,
                     nss(),
                     _critSecReason,
                     defaultMajorityWriteConcernDoNotUse(),
-                    ShardingRecoveryService::FilteringMetadataClearer(),
+                    *actionPtr,
                     true /* throwIfReasonDiffers */);
             }))
         .onError(
@@ -464,16 +501,14 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                     }
                 }
 
-                // If the coordinator succeeded to convert the collection to capped and the
-                // collection is tracked, the sharding catalog must be updated. Thus throw the error
-                // and retry relying on _mustAlwaysMakeProgress that will always be true reached
-                // this phase.
-                if (_mustAlwaysMakeProgress() || _isRetriableErrorForDDLCoordinator(status)) {
-                    // Retry the operation.
-                    return status;
-                }
-
-                if (_doc.getPhase() >= Phase::kAcquireCriticalSectionOnCoordinator) {
+                // Trigger cleanup for non-retriable errors in phases where the critical section is
+                // held but the collection hasn't been capped yet — the operation can safely be
+                // aborted. _mustAlwaysMakeProgress() returning true from
+                // kAcquireCriticalSectionOnCoordinator ensures that if triggerCleanup() fails
+                // transiently, the base class retries and this block is reached again.
+                if (!_isRetriableErrorForDDLCoordinator(status) &&
+                    _doc.getPhase() >= Phase::kAcquireCriticalSectionOnCoordinator &&
+                    _doc.getPhase() < Phase::kConvertCollectionToCappedOnDataShard) {
                     triggerCleanup(opCtx, status);
                     MONGO_UNREACHABLE_TASSERT(10083519);
                 }
@@ -488,12 +523,11 @@ bool ConvertToCappedCoordinator::isInCriticalSection(Phase phase) const {
 }
 
 bool ConvertToCappedCoordinator::_mustAlwaysMakeProgress() {
-    // If the collection was originally tracked on the sharding catalog, the coodinator must always
-    // make forward progress after converting the collection to capped in order to align local and
-    // sharding catalog.
-    const bool isCollectionTrackedOnTheShardingCatalog = _doc.getOriginalCollection().has_value();
-    return isCollectionTrackedOnTheShardingCatalog &&
-        _doc.getPhase() >= Phase::kConvertCollectionToCappedOnDataShard;
+    // Once the critical section is acquired, the coordinator must always make forward progress
+    // so cleanup (critical section release) cannot be skipped. _mustAlwaysMakeProgress()
+    // returning true ensures that even if triggerCleanup() fails transiently, the base class
+    // retries _runImpl and calls triggerCleanup again.
+    return _doc.getPhase() >= Phase::kAcquireCriticalSectionOnCoordinator;
 }
 
 ExecutorFuture<void> ConvertToCappedCoordinator::_cleanupOnAbort(
@@ -506,8 +540,23 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_cleanupOnAbort(
             auto* opCtx = opCtxHolder.get();
 
             if (_doc.getPhase() >= Phase::kAcquireCriticalSectionOnCoordinator) {
+                // On the abort path no changes have been committed to the global catalog, so when
+                // shards are authoritative the filtering metadata is still accurate and there is no
+                // need to invalidate it.
+
                 if (*_doc.getDataShard() != ShardingState::get(opCtx)->shardId()) {
                     _exitCriticalSectionOnDataShard(opCtx, executor, token);
+                }
+
+                const bool isAuthoritative = _doc.getAuthoritativeMetadataAccessLevel() >=
+                    AuthoritativeMetadataAccessLevelEnum::kWritesAllowed;
+
+                std::unique_ptr<ShardingRecoveryService::BeforeReleasingCustomAction> actionPtr;
+                if (isAuthoritative) {
+                    actionPtr = std::make_unique<ShardingRecoveryService::NoCustomAction>();
+                } else {
+                    actionPtr =
+                        std::make_unique<ShardingRecoveryService::FilteringMetadataClearer>();
                 }
 
                 ShardingRecoveryService::get(opCtx)->releaseRecoverableCriticalSection(
@@ -515,7 +564,7 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_cleanupOnAbort(
                     nss(),
                     _critSecReason,
                     defaultMajorityWriteConcernDoNotUse(),
-                    ShardingRecoveryService::NoCustomAction(),
+                    *actionPtr,
                     false /* throwIfReasonDiffers */);
             }
         });
@@ -524,34 +573,35 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_cleanupOnAbort(
 void ConvertToCappedCoordinator::_enterCriticalSectionOnDataShard(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-    const CancellationToken& token,
-    CriticalSectionBlockTypeEnum blockType) {
-    ShardsvrParticipantBlock blockCRUDOperationsRequest(nss());
-    blockCRUDOperationsRequest.setBlockType(blockType);
-    blockCRUDOperationsRequest.setReason(_critSecReason);
-
-    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {*_doc.getDataShard()});
+    const CancellationToken& token) {
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss(),
+        {*_doc.getDataShard()},
+        CriticalSectionBlockTypeEnum::kReadsAndWrites,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 }
 
 void ConvertToCappedCoordinator::_exitCriticalSectionOnDataShard(
     OperationContext* opCtx,
     const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
     const CancellationToken& token) {
-    ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss());
-    unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
-    unblockCRUDOperationsRequest.setReason(_critSecReason);
-
-    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
-    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
-                                                   getNewSession(opCtx));
-    auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest);
-    sharding_ddl_util::sendAuthenticatedCommandToShards(opCtx, opts, {*_doc.getDataShard()});
+    const auto session = getNewSession(opCtx);
+    sharding_ddl_util::sendShardsvrParticipantBlockCommandToShards(
+        opCtx,
+        nss(),
+        {*_doc.getDataShard()},
+        CriticalSectionBlockTypeEnum::kUnblock,
+        _critSecReason,
+        _doc.getAuthoritativeMetadataAccessLevel(),
+        session,
+        executor,
+        token);
 }
 
 logv2::DynamicAttributes ConvertToCappedCoordinator::getCoordinatorLogAttrs() const {

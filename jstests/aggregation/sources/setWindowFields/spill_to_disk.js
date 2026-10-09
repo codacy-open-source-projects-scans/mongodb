@@ -14,7 +14,10 @@
 import "jstests/libs/query/sbe_assert_error_override.js";
 
 import {arrayEq} from "jstests/aggregation/extras/utils.js";
-import {seedWithTickerData, testAccumAgainstGroup} from "jstests/aggregation/extras/window_function_helpers.js";
+import {
+    seedWithTickerData,
+    testAccumAgainstGroup,
+} from "jstests/aggregation/extras/window_function_helpers.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
@@ -50,7 +53,10 @@ function resetProfiler(db) {
     // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
     FixtureHelpers.runCommandOnEachPrimary({
         db: db,
-        cmdObj: {profile: 1, filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}},
+        cmdObj: {
+            profile: 1,
+            filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}},
+        },
     });
 }
 
@@ -61,14 +67,6 @@ function changeSpillLimit({mode, maxDocs}) {
             configureFailPoint: "overrideMemoryLimitForSpill",
             mode: mode,
             "data": {maxDocsBeforeSpill: maxDocs},
-        },
-    });
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: admin,
-        cmdObj: {
-            configureFailPoint: "overrideMemoryLimitForSpillForSBEWindowStage",
-            mode: mode,
-            "data": {spillCounter: maxDocs},
         },
     });
 }
@@ -88,7 +86,11 @@ function testSpillWithDifferentAccumulators() {
     changeSpillLimit({mode: "alwaysOn", maxDocs: 5});
 
     testSingleAccumulator("$sum", 0, "$price");
-    testSingleAccumulator("$percentile", [null], {p: [0.9], input: "$price", method: "approximate"});
+    testSingleAccumulator("$percentile", [null], {
+        p: [0.9],
+        input: "$price",
+        method: "approximate",
+    });
     testSingleAccumulator("$median", null, {input: "$price", method: "approximate"});
 
     // Assert that spilling works across 'getMore' commands
@@ -157,7 +159,11 @@ function testSpillWithDifferentPartitions() {
         if (results[i].partition === 1) {
             assert.eq(results[i].sum, 15, "Unexpected result in first partition at position " + i);
         } else {
-            assert.eq(results[i].sum, 210, "Unexpected result in second partition at position " + i);
+            assert.eq(
+                results[i].sum,
+                210,
+                "Unexpected result in second partition at position " + i,
+            );
         }
     }
     checkProfilerForDiskWrite(db, "$setWindowFields");
@@ -190,7 +196,10 @@ function testSpillWithDifferentPartitions() {
             );
         } else {
             assert(
-                arrayEq(results[i].arr, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]),
+                arrayEq(
+                    results[i].arr,
+                    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+                ),
                 "Unexpected result in second partition at position " + i,
             );
         }
@@ -219,22 +228,20 @@ function testUsedDiskAppearsInExplain() {
         {$sort: {_id: 1}},
     ];
 
-    let explainAllPlansExecution = coll.explain("allPlansExecution").aggregate(explainPipeline, {allowDiskUse: true});
+    let explainAllPlansExecution = coll
+        .explain("allPlansExecution")
+        .aggregate(explainPipeline, {allowDiskUse: true});
 
-    // If setWindowFields is pushed down to SBE, the stage name in explain will be 'window',
-    // otherwise it will be '$_internalSetWindowFields'.
-    let stages = getAggPlanStages(explainAllPlansExecution, "window").concat(
-        getAggPlanStages(explainAllPlansExecution, "$_internalSetWindowFields"),
-    );
+    let stages = getAggPlanStages(explainAllPlansExecution, "$_internalSetWindowFields");
     assert.gt(stages.length, 0, stages);
     assert(stages[0]["usedDisk"], stages);
 
     // Run an explain query with the default memory limit, so 'usedDisk' should be false.
     changeSpillLimit({mode: "off", maxDocs: null});
-    explainAllPlansExecution = coll.explain("allPlansExecution").aggregate(explainPipeline, {allowDiskUse: true});
-    stages = getAggPlanStages(explainAllPlansExecution, "window").concat(
-        getAggPlanStages(explainAllPlansExecution, "$_internalSetWindowFields"),
-    );
+    explainAllPlansExecution = coll
+        .explain("allPlansExecution")
+        .aggregate(explainPipeline, {allowDiskUse: true});
+    stages = getAggPlanStages(explainAllPlansExecution, "$_internalSetWindowFields");
     assert.gt(stages.length, 0, stages);
     assert(!stages[0]["usedDisk"], stages);
 }
@@ -302,7 +309,9 @@ function testUsedDiskInLookupPipeline() {
                         {
                             $setWindowFields: {
                                 sortBy: {_id: 1},
-                                output: {res: {$sum: "$price", window: {documents: ["unbounded", 5]}}},
+                                output: {
+                                    res: {$sum: "$price", window: {documents: ["unbounded", 5]}},
+                                },
                             },
                         },
                     ],
@@ -322,7 +331,13 @@ function runSingleErrorTest({spec, errorCode, diskUse}) {
         db.runCommand({
             aggregate: coll.getName(),
             pipeline: [
-                {$setWindowFields: {partitionBy: "$partition", sortBy: {partition: 1}, output: spec}},
+                {
+                    $setWindowFields: {
+                        partitionBy: "$partition",
+                        sortBy: {partition: 1},
+                        output: spec,
+                    },
+                },
                 {$sort: {_id: 1}},
             ],
             allowDiskUse: diskUse,
@@ -364,7 +379,11 @@ function testErrorsWhenCantSpill() {
     };
     runSingleErrorTest({spec: {percentile: percentileSpec}, errorCode: 5414201, diskUse: true});
     // Assert the pipeline fails when trying to spill, but 'allowDiskUse' is set to false.
-    runSingleErrorTest({spec: {percentile: percentileSpec}, errorCode: 5643011, diskUse: false});
+    runSingleErrorTest({
+        spec: {percentile: percentileSpec},
+        errorCode: ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed,
+        diskUse: false,
+    });
     // Reset the memory limit for other tests.
     setParameterOnAllNonConfigNodes(
         db.getMongo(),

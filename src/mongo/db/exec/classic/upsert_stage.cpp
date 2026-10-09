@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/classic/upsert_stage.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/curop_failpoint_helpers.h"
@@ -43,13 +16,13 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/collection_operation_source.h"
 #include "mongo/db/shard_role/shard_catalog/document_validation.h"
@@ -111,32 +84,39 @@ PlanStage::StageState UpsertStage::doWork(WorkingSetID* out) {
         unReplBlock.emplace(opCtx());
     }
 
-    // First, attempt to perform the update on a matching document.
-    auto updateState = UpdateStage::doWork(out);
+    // If '_newDocumentToInsert' is not yet set, we are not in the insert phase. (We enter the
+    // insert phase below, and stay in it across any WriteConflictException yields so we don't
+    // re-run the update.) First, attempt to perform the update on a matching document.
+    if (!_newDocumentToInsert) {
+        auto updateState = UpdateStage::doWork(out);
 
-    //  If the update returned anything other than EOF, just forward it along. There's a chance we
-    //  still may find a document to update and will not have to insert anything. If it did return
-    //  EOF and we do not need to insert a new document, return EOF immediately here.
-    if (updateState != PlanStage::IS_EOF || isEOF()) {
-        return updateState;
+        //  If the update returned anything other than EOF, just forward it along. There's a chance
+        //  we still may find a document to update and will not have to insert anything. If it did
+        //  return EOF and we do not need to insert a new document, return EOF immediately here.
+        if (updateState != PlanStage::IS_EOF || isEOF()) {
+            return updateState;
+        }
+
+        // If the update resulted in EOF without matching anything, we must insert a new document.
+        invariant(updateState == PlanStage::IS_EOF && !isEOF());
+
+        // Generate the new document to be inserted, once. We cache it (owned) so that its _id/OID
+        // stays stable if the insert below hits a WriteConflictException and has to be retried
+        // after a yield.
+        _newDocumentToInsert = _produceNewDocumentForInsert().getOwned();
     }
-
-    // If the update resulted in EOF without matching anything, we must insert a new document.
-    invariant(updateState == PlanStage::IS_EOF && !isEOF());
-
-    // Since this is an insert, we will be logging it as such in the oplog. We don't need the
-    // driver's help to build the oplog record.
-    _params.driver->setLogOp(false);
-
-    // Generate the new document to be inserted.
-    auto newObj = _produceNewDocumentForInsert();
 
     // If this is an explain, skip performing the actual insert.
     if (!_params.request->explain()) {
-        _performInsert(newObj);
+        const auto insertState = _performInsert(*_newDocumentToInsert, out);
+        if (insertState != PlanStage::NEED_TIME) {
+            // The insert yielded on a conflict. The executor backs off and re-drives doWork(),
+            // which resumes the insert via '_newDocumentToInsert'.
+            return insertState;
+        }
     }
 
-    _specificStats.objInserted = newObj;
+    _specificStats.objInserted = *_newDocumentToInsert;
     _specificStats.nUpserted = 1;
 
     // We should always be EOF at this point.
@@ -147,7 +127,7 @@ PlanStage::StageState UpsertStage::doWork(WorkingSetID* out) {
         *out = _ws->allocate();
         WorkingSetMember* member = _ws->get(*out);
         member->resetDocument(shard_role_details::getRecoveryUnit(opCtx())->getSnapshotId(),
-                              newObj.getOwned());
+                              *_newDocumentToInsert);
         member->transitionToOwnedObj();
         return PlanStage::ADVANCED;
     }
@@ -156,7 +136,7 @@ PlanStage::StageState UpsertStage::doWork(WorkingSetID* out) {
     return PlanStage::IS_EOF;
 }
 
-void UpsertStage::_performInsert(BSONObj newDocument) {
+PlanStage::StageState UpsertStage::_performInsert(const BSONObj& newDocument, WorkingSetID* out) {
     // If this collection is sharded, check if the doc we plan to insert belongs to this shard. The
     // mongoS uses the query field to target a shard, and it is possible the shard key fields in the
     // 'q' field belong to this shard, but those in the 'u' field do not. In this case we need to
@@ -202,35 +182,46 @@ void UpsertStage::_performInsert(BSONObj newDocument) {
             &hangBeforeUpsertPerformsInsert, opCtx(), "hangBeforeUpsertPerformsInsert");
     }
 
-    writeConflictRetry(opCtx(), "upsert", collectionPtr()->ns(), [&] {
-        WriteUnitOfWork wunit(opCtx());
-        InsertStatement insertStmt(_params.request->getStmtIds(), newDocument);
+    return handlePlanStageYield(
+        expCtx(),
+        "UpsertStage performInsert",
+        [&] {
+            WriteUnitOfWork wunit(opCtx());
+            InsertStatement insertStmt(_params.request->getStmtIds(), newDocument);
 
-        auto replCoord = repl::ReplicationCoordinator::get(opCtx());
-        if (collectionPtr()->isCapped() &&
-            !replCoord->isOplogDisabledFor(opCtx(), collectionPtr()->ns())) {
-            if (collectionPtr()->needsCappedLock()) {
-                Lock::ResourceLock heldUntilEndOfWUOW{
-                    opCtx(), ResourceId(RESOURCE_METADATA, collectionPtr()->ns()), MODE_X};
+            auto replCoord = repl::ReplicationCoordinator::get(opCtx());
+            if (collectionPtr()->isCapped() &&
+                !replCoord->isOplogDisabledFor(opCtx(), collectionPtr()->ns())) {
+                if (collectionPtr()->needsCappedLock()) {
+                    Lock::ResourceLock heldUntilEndOfWUOW{
+                        opCtx(), ResourceId(RESOURCE_METADATA, collectionPtr()->ns()), MODE_X};
+                }
+                if (!BatchedWriteContext::get(opCtx()).writesAreBatched()) {
+                    auto oplogInfo = LocalOplogInfo::get(opCtx());
+                    auto oplogSlots = oplogInfo->getNextOpTimes(opCtx(), /*batchSize=*/1);
+                    insertStmt.oplogSlot = oplogSlots.front();
+                }
             }
-            if (!BatchedWriteContext::get(opCtx()).writesAreBatched()) {
-                auto oplogInfo = LocalOplogInfo::get(opCtx());
-                auto oplogSlots = oplogInfo->getNextOpTimes(opCtx(), /*batchSize=*/1);
-                insertStmt.oplogSlot = oplogSlots.front();
-            }
-        }
 
-        uassertStatusOK(collection_internal::insertDocument(opCtx(),
-                                                            collectionPtr(),
-                                                            insertStmt,
-                                                            _params.opDebug,
-                                                            _params.request->source() ==
-                                                                OperationSource::kFromMigrate));
+            uassertStatusOK(collection_internal::insertDocument(opCtx(),
+                                                                collectionPtr(),
+                                                                insertStmt,
+                                                                _params.opDebug,
+                                                                _params.request->source() ==
+                                                                    OperationSource::kFromMigrate));
 
-        // Technically, we should save/restore state here, but since we are going to return
-        // immediately after, it would just be wasted work.
-        wunit.commit();
-    });
+            // Technically, we should save/restore state here, but since we are going to return
+            // immediately after, it would just be wasted work.
+            wunit.commit();
+            return PlanStage::NEED_TIME;
+        },
+        [&] {
+            // yieldHandler: handlePlanStageYield caught a retryable storage conflict (a
+            // WriteConflictException or similar). The WriteUnitOfWork above has already been rolled
+            // back by its destructor. There is no incoming working set member to retry --
+            // '_newDocumentToInsert' is the retry vehicle -- so just clear the output.
+            *out = WorkingSet::INVALID_ID;
+        });
 }
 
 BSONObj UpsertStage::_produceNewDocumentForInsert() {
@@ -287,7 +278,8 @@ void UpsertStage::_assertDocumentToBeInsertedIsValid(const mutablebson::Document
         storage_validation::scanDocument(document,
                                          true, /* allowTopLevelDollarPrefixes */
                                          true, /* Should validate for storage */
-                                         &containsDotsAndDollarsField);
+                                         &containsDotsAndDollarsField,
+                                         false /* fromOplogApplication */);
         if (containsDotsAndDollarsField)
             _params.driver->setContainsDotsAndDollarsField(true);
 

@@ -1,36 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -70,7 +44,7 @@ std::unique_ptr<Pipeline> makePipeline(boost::intrusive_ptr<mongo::ExpressionCon
     return pipeline_factory::makePipeline(stages, expCtx, pipeline_factory::kOptionsMinimal);
 }
 
-std::vector<BSONObj> makeAndOptimizePipeline(
+std::unique_ptr<Pipeline> makeAndOptimizePipelineKeepingStages(
     boost::intrusive_ptr<mongo::ExpressionContextForTest> expCtx,
     std::vector<BSONObj> stages,
     int bucketMaxSpanSeconds,
@@ -80,7 +54,19 @@ std::vector<BSONObj> makeAndOptimizePipeline(
     auto pipeline =
         makePipeline(expCtx, stages, bucketMaxSpanSeconds, fixedBuckets, fields, exclude);
     pipeline_optimization::optimizePipeline(*pipeline);
-    return pipeline->serializeToBson();
+    return pipeline;
+}
+
+std::vector<BSONObj> makeAndOptimizePipeline(
+    boost::intrusive_ptr<mongo::ExpressionContextForTest> expCtx,
+    std::vector<BSONObj> stages,
+    int bucketMaxSpanSeconds,
+    bool fixedBuckets,
+    BSONArray fields = BSONArray(),
+    bool exclude = true) {
+    return makeAndOptimizePipelineKeepingStages(
+               expCtx, stages, bucketMaxSpanSeconds, fixedBuckets, fields, exclude)
+        ->serializeToBson();
 }
 
 // This makes a pipeline and optimizes twice, once as the router, and once as a shard. This is meant
@@ -115,6 +101,13 @@ TEST_F(InternalUnpackBucketGroupReorder, OptimizeForCountAggStage) {
         "'$control.version', {$const : 2} ]}, '$control.count', {$size : [ {$objectToArray : "
         "['$data.t']} ] } ] } }, $willBeMerged: false } }");
     ASSERT_BSONOBJ_EQ(groupOptimized, serialized[0]);
+
+    // The $size in the rewrite is SBE-supported, so the group shouldn't be forced to classic.
+    auto pipeline = makeAndOptimizePipelineKeepingStages(
+        getExpCtx(), {countSpecObj}, 3600 /* bucketMaxSpanSeconds */, false /* fixedBuckets */);
+    auto* group = dynamic_cast<DocumentSourceGroup*>(pipeline->getSources().front().get());
+    ASSERT(group);
+    ASSERT_EQ(SbeCompatibility::noRequirements, group->sbeCompatibility());
 }
 
 TEST_F(InternalUnpackBucketGroupReorder, OptimizeForCountInGroup) {
@@ -129,6 +122,13 @@ TEST_F(InternalUnpackBucketGroupReorder, OptimizeForCountInGroup) {
         "'$control.version', {$const : 2} ]}, '$control.count', {$size : [ {$objectToArray : "
         "['$data.t']} ] } ] } }, $willBeMerged: false } }");
     ASSERT_BSONOBJ_EQ(groupOptimized, serialized[0]);
+
+    // The $size in the rewrite is SBE-supported, so the group shouldn't be forced to classic.
+    auto pipeline = makeAndOptimizePipelineKeepingStages(
+        getExpCtx(), {groupSpecObj}, 3600 /* bucketMaxSpanSeconds */, false /* fixedBuckets */);
+    auto* group = dynamic_cast<DocumentSourceGroup*>(pipeline->getSources().front().get());
+    ASSERT(group);
+    ASSERT_EQ(SbeCompatibility::noRequirements, group->sbeCompatibility());
 }
 
 TEST_F(InternalUnpackBucketGroupReorder, OptimizeForCountNegative) {

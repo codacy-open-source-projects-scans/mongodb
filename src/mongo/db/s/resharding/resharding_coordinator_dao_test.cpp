@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_coordinator_dao.h"
 
@@ -266,7 +240,6 @@ TEST_F(ReshardingCoordinatorDaoFixture, UpdateNumberOfDocsToCopy) {
 DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
              UpdateNumberOfDocsToCopyPhasePreviousStateInvariant,
              "invariant") {
-
     std::map<ShardId, int64_t> shardToNumDocsCopied;
 
     ShardId shard1("shard1");
@@ -276,8 +249,9 @@ DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
     shardToNumDocsCopied.emplace(shard2, 200);
 
     runPhaseTransitionTest(PhaseTransitionTestCase{
-        .initialPhase = CoordinatorStateEnum::kApplying,
-        .transitionFn = [&]() { _dao->updateNumberOfDocsToCopy(_opCtx, shardToNumDocsCopied); }});
+        .initialPhase = CoordinatorStateEnum::kApplying, .transitionFn = [&]() {
+            _dao->updateNumberOfDocsToCopy(_opCtx, shardToNumDocsCopied);
+        }});
 }
 
 TEST_F(ReshardingCoordinatorDaoFixture, UpdateNumberOfDocsCopiedFinal) {
@@ -326,6 +300,51 @@ DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
         }});
 }
 
+TEST_F(ReshardingCoordinatorDaoFixture, UpdateRecipientDocumentsFinal) {
+    std::map<ShardId, int64_t> shardDocumentsFinal;
+    ShardId shard1("shard1");
+    ShardId shard2("shard2");
+
+    shardDocumentsFinal.emplace(shard1, 100);
+    shardDocumentsFinal.emplace(shard2, 200);
+
+    // Set up recipient shards in the coordinator document.
+    std::vector<RecipientShardEntry> recipientShards;
+    RecipientShardContext recipientContext;
+    recipientContext.setState(RecipientStateEnum::kAwaitingFetchTimestamp);
+    recipientShards.emplace_back(shard1, recipientContext);
+    recipientShards.emplace_back(shard2, recipientContext);
+    _state->document.setRecipientShards(recipientShards);
+
+    runPhaseTransitionTest(PhaseTransitionTestCase{
+        .initialPhase = CoordinatorStateEnum::kBlockingWrites,
+        .transitionFn = [&]() { _dao->updateRecipientDocumentsFinal(_opCtx, shardDocumentsFinal); },
+        .set = BSON(std::string(ReshardingCoordinatorDocument::kRecipientShardsFieldName) + ".0." +
+                        std::string(RecipientShardEntry::kDocumentsFinalFieldName)
+                    << 100
+                    << std::string(ReshardingCoordinatorDocument::kRecipientShardsFieldName) +
+                        ".1." + std::string(RecipientShardEntry::kDocumentsFinalFieldName)
+                    << 200)});
+}
+
+DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
+             UpdateRecipientDocumentsFinalPhasePreviousStateInvariant,
+             "invariant") {
+
+    std::map<ShardId, int64_t> shardDocumentsFinal;
+
+    ShardId shard1("shard1");
+    ShardId shard2("shard2");
+
+    shardDocumentsFinal.emplace(shard1, 100);
+    shardDocumentsFinal.emplace(shard2, 200);
+
+    runPhaseTransitionTest(PhaseTransitionTestCase{
+        .initialPhase = CoordinatorStateEnum::kApplying, .transitionFn = [&]() {
+            _dao->updateRecipientDocumentsFinal(_opCtx, shardDocumentsFinal);
+        }});
+}
+
 DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
              TransitionToCloningPhasePreviousStateInvariant,
              "invariant") {
@@ -359,8 +378,9 @@ DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
     auto applyStartTime = _clock->now();
 
     runPhaseTransitionTest(PhaseTransitionTestCase{
-        .initialPhase = CoordinatorStateEnum::kApplying,
-        .transitionFn = [&]() { _dao->transitionToApplyingPhase(_opCtx, applyStartTime); }});
+        .initialPhase = CoordinatorStateEnum::kApplying, .transitionFn = [&]() {
+            _dao->transitionToApplyingPhase(_opCtx, applyStartTime);
+        }});
 }
 
 TEST_F(ReshardingCoordinatorDaoFixture, TransitionToBlockingWritesPhaseSucceeds) {
@@ -448,8 +468,9 @@ DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
     Status abortReason = Status::OK();
 
     runPhaseTransitionTest(PhaseTransitionTestCase{
-        .initialPhase = CoordinatorStateEnum::kApplying,
-        .transitionFn = [&]() { _dao->transitionToAbortingPhase(_opCtx, now, abortReason); }});
+        .initialPhase = CoordinatorStateEnum::kApplying, .transitionFn = [&]() {
+            _dao->transitionToAbortingPhase(_opCtx, now, abortReason);
+        }});
 }
 
 DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
@@ -459,8 +480,9 @@ DEATH_TEST_F(ReshardingCoordinatorDaoFixtureDeathTest,
     Status abortReason{ErrorCodes::InternalError, "Something went horribly wrong"};
 
     runPhaseTransitionTest(PhaseTransitionTestCase{
-        .initialPhase = CoordinatorStateEnum::kCommitting,
-        .transitionFn = [&]() { _dao->transitionToAbortingPhase(_opCtx, now, abortReason); }});
+        .initialPhase = CoordinatorStateEnum::kCommitting, .transitionFn = [&]() {
+            _dao->transitionToAbortingPhase(_opCtx, now, abortReason);
+        }});
 }
 
 TEST_F(ReshardingCoordinatorDaoFixture, UpdateSessionSetsSessionField) {

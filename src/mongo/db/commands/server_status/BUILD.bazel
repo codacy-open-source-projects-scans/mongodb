@@ -19,6 +19,7 @@ mongo_cc_library(
         "//src/mongo/db/extension/host:extension_operation_metrics_registry",
         "//src/mongo/db/query/algebra",
         "//src/mongo/db/sorter:sorter_base",
+        "//src/mongo/db/stats:opcounters",
         "//src/mongo/db/storage:container",
         "//src/mongo/db/storage/key_string",
     ],
@@ -42,6 +43,7 @@ mongo_cc_library(
     ],
     deps = [
         ":server_status_core",
+        "//src/mongo/db/admission:egress_response_rate_limiter",
         "//src/mongo/db/admission:ingress_request_rate_limiter",
         "//src/mongo/db/stats:counters",
         "//src/mongo/otel/metrics:otel_metrics_service",

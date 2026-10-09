@@ -1,7 +1,17 @@
-// Tests the expected behaviour of renameCollection against catalog inconsistencies caused by direct
-// writes to shards (which need a noPassthrough environment to be performed).
+/*
+ * Tests the expected behaviour of renameCollection against catalog inconsistencies caused by direct
+ * writes to shards (which need a noPassthrough environment to be performed).
+ *
+ * @tags: [
+ *   requires_persistence,
+ * ]
+ */
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+
+// Dropping untracked collections leaves UNTRACKED CSS entries on the non-primary shard.
+// TODO (SERVER-133353): Remove this once UNTRACKED is dropped from CSS in direct connections.
+TestData.skipCheckMetadataConsistency = true;
 
 let st = new ShardingTest({});
 
@@ -34,6 +44,8 @@ assert.commandFailedWithCode(
     "Collection rename with `dropTarget=false` must have failed because target collection exists on a non-primary shard",
 );
 // Target collection existing on non-primary shard: rename with `dropTarget=true` must succeed
-assert.commandWorked(st.s0.getDB(dbName).goodcollection.renameCollection("superbadcollection", true));
+assert.commandWorked(
+    st.s0.getDB(dbName).goodcollection.renameCollection("superbadcollection", true),
+);
 
 st.stop();

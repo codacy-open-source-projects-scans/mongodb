@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
 
@@ -35,6 +9,7 @@
 
 #include <array>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -104,8 +79,9 @@ using MetricsPtr = std::unique_ptr<Metrics>;
 const auto getMetrics = ServiceContext::declareDecoration<MetricsPtr>();
 
 const auto metricsRegisterer = ServiceContext::ConstructorActionRegisterer{
-    "ShardingDataTransformMetrics",
-    [](ServiceContext* ctx) { getMetrics(ctx) = std::make_unique<Metrics>(); }};
+    "ShardingDataTransformMetrics", [](ServiceContext* ctx) {
+        getMetrics(ctx) = std::make_unique<Metrics>();
+    }};
 
 }  // namespace
 
@@ -147,7 +123,7 @@ ReshardingCumulativeMetrics::registerInstanceMetrics(const ReshardingMetricsObse
     return std::make_unique<ReshardingCumulativeMetrics::ScopedObserver>(this, role, std::move(it));
 }
 
-boost::optional<StringData> ReshardingCumulativeMetrics::fieldNameFor(AnyState state) {
+boost::optional<std::string_view> ReshardingCumulativeMetrics::fieldNameFor(AnyState state) {
     return StateTracker::getNameFor(state, kReportedStateFieldNamesMap);
 }
 
@@ -262,6 +238,20 @@ void ReshardingCumulativeMetrics::reportForServerStatus(BSONObjBuilder* bob) con
     root.append(kCountFailed, _countFailed.load());
     root.append(kCountCanceled, _countCancelled.load());
     root.append(kLastOpEndingChunkImbalance, _lastOpEndingChunkImbalance.load());
+    root.append(kCountSearchIndexAborts, _countSearchIndexAborts.load());
+    root.append(kCountPreApplyVerificationSucceeded, _countPreApplyVerificationSucceeded.load());
+    root.append(kCountPreApplyVerificationFailed, _countPreApplyVerificationFailed.load());
+    root.append(kCountPreApplyVerificationSkipped, _countPreApplyVerificationSkipped.load());
+    root.append(kCountPreApplyVerificationTimedOut, _countPreApplyVerificationTimedOut.load());
+    root.append(kCountPreApplyVerificationRetried, _countPreApplyVerificationRetried.load());
+    root.append(kCountPreCommitVerificationSucceeded, _countPreCommitVerificationSucceeded.load());
+    root.append(kCountPreCommitVerificationFailed, _countPreCommitVerificationFailed.load());
+    root.append(kCountPreCommitVerificationSkipped, _countPreCommitVerificationSkipped.load());
+    root.append(kCountPreCommitVerificationTimedOut, _countPreCommitVerificationTimedOut.load());
+    root.append(kCountPreCommitDonorVerificationRetried,
+                _countPreCommitDonorVerificationRetried.load());
+    root.append(kCountPreCommitRecipientVerificationRetried,
+                _countPreCommitRecipientVerificationRetried.load());
 
     if (_rootSectionName == kResharding) {
         root.append(kCountSameKeyStarted, _countSameKeyStarted.load());
@@ -285,6 +275,15 @@ void ReshardingCumulativeMetrics::reportForServerStatus(BSONObjBuilder* bob) con
     {
         BSONObjBuilder steps(bob->subobjStart(kCurrentInSteps));
         reportCurrentInSteps(&steps);
+    }
+    {
+        std::lock_guard lock(_coordinatorRetriesMutex);
+        if (!_coordinatorRetryCounts.empty()) {
+            BSONObjBuilder retries(bob->subobjStart("coordinatorRetries"));
+            for (auto& [label, count] : _coordinatorRetryCounts) {
+                retries.append(label, count);
+            }
+        }
     }
 }
 
@@ -372,7 +371,7 @@ void ReshardingCumulativeMetrics::reportCountsForAllStates(
 
 const ReshardingMetricsObserver* ReshardingCumulativeMetrics::getOldestOperation(WithLock,
                                                                                  Role role) const {
-    auto set = getMetricsSetForRole(role);
+    const auto& set = getMetricsSetForRole(role);
     if (set.empty()) {
         return nullptr;
     }
@@ -472,6 +471,59 @@ void ReshardingCumulativeMetrics::onWriteDuringCriticalSection() {
 
 void ReshardingCumulativeMetrics::onWriteToStashedCollections() {
     _writesToStashedCollections.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onSearchIndexAbort() {
+    _countSearchIndexAborts.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreApplyVerificationSuccess() {
+    _countPreApplyVerificationSucceeded.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreApplyVerificationFailure() {
+    _countPreApplyVerificationFailed.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreApplyVerificationSkipped() {
+    _countPreApplyVerificationSkipped.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreApplyVerificationTimedOut() {
+    _countPreApplyVerificationTimedOut.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreApplyVerificationRetry() {
+    _countPreApplyVerificationRetried.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitVerificationSuccess() {
+    _countPreCommitVerificationSucceeded.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitVerificationFailure() {
+    _countPreCommitVerificationFailed.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitVerificationSkipped() {
+    _countPreCommitVerificationSkipped.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitVerificationTimedOut() {
+    _countPreCommitVerificationTimedOut.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitDonorVerificationRetry() {
+    _countPreCommitDonorVerificationRetried.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onPreCommitRecipientVerificationRetry() {
+    _countPreCommitRecipientVerificationRetried.fetchAndAdd(1);
+}
+
+void ReshardingCumulativeMetrics::onCoordinatorRetry(std::string_view label) {
+    std::lock_guard lock(_coordinatorRetriesMutex);
+    ++_coordinatorRetryCounts[std::string{label}];
 }
 
 void ReshardingCumulativeMetrics::onCloningRemoteBatchRetrieval(Milliseconds elapsed) {

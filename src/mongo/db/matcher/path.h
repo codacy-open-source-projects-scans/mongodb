@@ -1,52 +1,27 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
 /**
  * TODO SERVER-114832 Break audit dependency on this class.
  */
-namespace MONGO_MOD_NEEDS_REPLACEMENT mongo {
+namespace [[MONGO_MOD_NEEDS_REPLACEMENT]] mongo {
 
 class ElementPath {
 public:
@@ -91,18 +66,19 @@ public:
         kMatchSubpath,
     };
 
-    ElementPath(StringData path,
+    ElementPath(std::string_view path,
                 LeafArrayBehavior leafArrayBehavior = LeafArrayBehavior::kTraverse,
                 NonLeafArrayBehavior nonLeafArrayBehavior = NonLeafArrayBehavior::kTraverse)
         : _leafArrayBehavior(leafArrayBehavior),
           _nonLeafArrayBehavior(nonLeafArrayBehavior),
+          _legacyDottedPathNullSemantics(internalQueryLegacyDottedPathNullSemantics.loadRelaxed()),
           _fieldRef(path) {}
 
     /**
      * Resets this ElementPath to 'newPath'. Note that this method will make a copy of 'newPath'
      * such that there's no lifetime requirements for the string which 'newPath' points into.
      */
-    void reset(StringData newPath) {
+    void reset(std::string_view newPath) {
         _fieldRef.parse(newPath);
     }
 
@@ -122,6 +98,10 @@ public:
         return _nonLeafArrayBehavior;
     }
 
+    bool legacyDottedPathNullSemantics() const {
+        return _legacyDottedPathNullSemantics;
+    }
+
     const FieldRef& fieldRef() const {
         return _fieldRef;
     }
@@ -129,6 +109,7 @@ public:
 private:
     LeafArrayBehavior _leafArrayBehavior;
     NonLeafArrayBehavior _nonLeafArrayBehavior;
+    bool _legacyDottedPathNullSemantics;
 
     FieldRef _fieldRef;
 };
@@ -270,13 +251,13 @@ private:
         bool more();
         BSONElement next();
 
-        bool isArrayOffsetMatch(StringData fieldName) const;
+        bool isArrayOffsetMatch(std::string_view fieldName) const;
         bool nextEntireRest() const {
             return nextPieceOfPath.size() == restOfPath.size();
         }
 
         std::string restOfPath;
-        StringData nextPieceOfPath;
+        std::string_view nextPieceOfPath;
         bool hasMore;
         bool nextPieceOfPathIsNumber;
 
@@ -295,7 +276,7 @@ private:
 
 struct BSONElementSubIterator {
     BSONElementSubIterator(const BSONObj& objectToIterate,
-                           StringData pathToIterate,
+                           std::string_view pathToIterate,
                            ElementPath::LeafArrayBehavior leafArrayBehavior =
                                ElementPath::LeafArrayBehavior::kTraverse,
                            ElementPath::NonLeafArrayBehavior nonLeafArrayBehavior =
@@ -305,4 +286,4 @@ struct BSONElementSubIterator {
     BSONElementIterator cursor;
 };
 
-}  // namespace MONGO_MOD_NEEDS_REPLACEMENT mongo
+}  // namespace mongo

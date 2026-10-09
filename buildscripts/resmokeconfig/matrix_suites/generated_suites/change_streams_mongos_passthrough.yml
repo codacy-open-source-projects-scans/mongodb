@@ -14,7 +14,7 @@ executor:
   config:
     shell_options:
       eval:
-        globalThis.testingReplication = true; await import('jstests/libs/override_methods/set_read_and_write_concerns.js');
+        await import('jstests/libs/override_methods/set_read_and_write_concerns.js');
         await import('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
       global_vars:
         TestData:
@@ -41,6 +41,9 @@ executor:
       n: 20
 matrix_suite: true
 selector:
+  exclude_files:
+    - jstests/change_streams/create_event_from_chunk_migration.js
+    - jstests/change_streams/migrate_last_chunk_from_shard_event.js
   exclude_with_any_tags:
     - assumes_write_concern_unchanged
     - assumes_against_mongod_not_mongos

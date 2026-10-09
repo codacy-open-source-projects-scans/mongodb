@@ -2,7 +2,7 @@
  * Tests applying weights to $rankFusion and $scoreFusion. Uses the same input pipelines as
  * ranked_fusion_test.js, but with different weighting to produce different result ordering. Also
  * tests that proper error codes are thrown for specifying bad pipeline weights.
- * @tags: [ featureFlagRankFusionFull, featureFlagSearchHybridScoringFull, requires_fcv_82 ]
+ * @tags: [requires_fcv_82]
  */
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
 import {
@@ -66,7 +66,10 @@ function buildQueryWithWeights(weights, stageName) {
         // Must be $scoreFusion.
         query = [
             {
-                $scoreFusion: {input: {pipelines: pipelines, normalization: "none"}, combination: {weights}},
+                $scoreFusion: {
+                    input: {pipelines: pipelines, normalization: "none"},
+                    combination: {weights},
+                },
             },
             {$limit: limit},
         ];
@@ -78,10 +81,16 @@ function buildQueryWithWeights(weights, stageName) {
 function runTest(weights, expectedResultIds) {
     let rankFusionQuery = buildQueryWithWeights(weights, "$rankFusion");
     let rankFusionResults = coll.aggregate(rankFusionQuery).toArray();
-    assertDocArrExpectedFuzzy(buildExpectedResults(expectedResultIds, datasets.MOVIES), rankFusionResults);
+    assertDocArrExpectedFuzzy(
+        buildExpectedResults(expectedResultIds, datasets.MOVIES),
+        rankFusionResults,
+    );
     let scoreFusionQuery = buildQueryWithWeights(weights, "$scoreFusion");
     let scoreFusionResults = coll.aggregate(scoreFusionQuery).toArray();
-    assertDocArrExpectedFuzzy(buildExpectedResults(expectedResultIds, datasets.MOVIES), scoreFusionResults);
+    assertDocArrExpectedFuzzy(
+        buildExpectedResults(expectedResultIds, datasets.MOVIES),
+        scoreFusionResults,
+    );
 }
 
 // Asserts the $rankFusion/$scoreFusion query fails with the expected error code, given a bad
@@ -109,17 +118,19 @@ runTest({search: 0}, [6, 4, 8, 9, 10, 12, 13, 5, 1, 14, 3, 2, 11, 7, 15]);
 // No specified weights defaults to 1 for all pipelines.
 runTest({}, [6, 4, 1, 5, 2, 3, 8, 9, 10, 12, 13, 14, 11, 7, 15]);
 
-// Now test that improperly specified weights fail as expected.
-// More weights than pipelines.
-runTestExpectError({vector: 0.1, search: 0.2, a: 0.3}, 9460301);
+// Now test that improperly specified weights fail as expected. Each accepts two codes: the
+// lite-parse desugar path and the legacy flag-off validation.
+// TODO SERVER-121094: drop the flag-off codes once featureFlagExtensionsInsideHybridSearch is gone.
+// More weights than pipelines: desugar path reports 12559403, flag-off validation 9460301.
+runTestExpectError({vector: 0.1, search: 0.2, a: 0.3}, [12559403, 9460301]);
 // Single non-existent pipeline.
-runTestExpectError({a: 0.1}, 9967500);
+runTestExpectError({a: 0.1}, [9967500]);
 // One existent, and one non-existent pipeline.
-runTestExpectError({vector: 0.1, a: 0.2}, 9967500);
-// Non-numeric weight
-runTestExpectError({vector: 0.1, search: "0.2"}, 13118);
-// Negative weight
-runTestExpectError({vector: 0.1, search: -0.2}, 9460300);
+runTestExpectError({vector: 0.1, a: 0.2}, [9967500]);
+// Non-numeric weight: desugar path reports 12559404, flag-off validation 13118.
+runTestExpectError({vector: 0.1, search: "0.2"}, [12559404, 13118]);
+// Negative weight: desugar path reports 12559401, flag-off validation 9460300.
+runTestExpectError({vector: 0.1, search: -0.2}, [12559401, 9460300]);
 
 dropSearchIndex(coll, {name: getMovieSearchIndexSpec().name});
 dropSearchIndex(coll, {name: getMovieVectorSearchIndexSpec().name});

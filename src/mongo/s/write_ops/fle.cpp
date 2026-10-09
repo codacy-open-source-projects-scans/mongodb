@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/s/write_ops/fle.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/commands/query_cmd/bulk_write_common.h"
+#include "mongo/db/error_labels.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -221,37 +196,19 @@ std::pair<FLEBatchResult, bulk_write_exec::BulkWriteReplyInfo> attemptExecuteFLE
     const auto& ops = clientRequest.getOps();
     BulkWriteCRUDOp firstOp(ops[0]);
     auto firstOpType = firstOp.getType();
-    try {
-        BatchedCommandResponse response;
-        FLEBatchResult fleResult;
+    BatchedCommandResponse response;
+    FLEBatchResult fleResult;
 
-        BatchedCommandRequest fleRequest = makeFLECommandRequest(opCtx, clientRequest, ops);
-        fleResult = processFLEBatch(opCtx, fleRequest, &response);
+    BatchedCommandRequest fleRequest = makeFLECommandRequest(opCtx, clientRequest, ops);
+    fleResult = processFLEBatch(opCtx, fleRequest, &response);
 
-        if (fleResult == FLEBatchResult::kNotProcessed) {
-            return {FLEBatchResult::kNotProcessed, bulk_write_exec::BulkWriteReplyInfo()};
-        }
-
-        bulk_write_exec::BulkWriteReplyInfo replyInfo = processFLEResponse(
-            opCtx, fleRequest, firstOpType, clientRequest.getErrorsOnly(), response);
-        return {FLEBatchResult::kProcessed, std::move(replyInfo)};
-    } catch (const DBException& ex) {
-        LOGV2_WARNING(7749700,
-                      "Failed to process bulkWrite with Queryable Encryption",
-                      "error"_attr = redact(ex));
-        // If Queryable encryption adds support for update with multi: true, we might have to update
-        // the way we make replies here to handle SERVER-15292 correctly.
-        bulk_write_exec::BulkWriteReplyInfo replyInfo;
-        BulkWriteReplyItem reply(0, ex.toStatus());
-        reply.setN(0);
-        if (firstOpType == BulkWriteCRUDOp::kUpdate) {
-            reply.setNModified(0);
-        }
-
-        replyInfo.replyItems.push_back(reply);
-        replyInfo.summaryFields.nErrors = 1;
-        return {FLEBatchResult::kProcessed, std::move(replyInfo)};
+    if (fleResult == FLEBatchResult::kNotProcessed) {
+        return {FLEBatchResult::kNotProcessed, bulk_write_exec::BulkWriteReplyInfo()};
     }
+
+    bulk_write_exec::BulkWriteReplyInfo replyInfo =
+        processFLEResponse(opCtx, fleRequest, firstOpType, clientRequest.getErrorsOnly(), response);
+    return {FLEBatchResult::kProcessed, std::move(replyInfo)};
 }
 
 }  // namespace mongo

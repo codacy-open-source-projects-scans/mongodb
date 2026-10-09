@@ -1,43 +1,19 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_recipient_service_external_state.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_role/lock_manager/lock_manager_defs.h"
 #include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/commit_collection_metadata_locally.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/sharding_state.h"
@@ -49,6 +25,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -59,11 +36,13 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 void ReshardingRecipientService::RecipientStateMachineExternalState::
     ensureTempReshardingCollectionExistsWithIndexes(OperationContext* opCtx,
                                                     const CommonReshardingMetadata& metadata,
-                                                    Timestamp cloneTimestamp) {
+                                                    Timestamp cloneTimestamp,
+                                                    const BSONObj& critSecReason) {
     LOGV2_DEBUG(5002300,
                 1,
                 "Creating temporary resharding collection",
@@ -78,14 +57,14 @@ void ReshardingRecipientService::RecipientStateMachineExternalState::
         metadata.getSourceNss(),
         metadata.getSourceUUID(),
         cloneTimestamp,
-        "loading collection options to create temporary resharding collection"_sd);
+        "loading collection options to create temporary resharding collection"sv);
 
     auto [indexes, idIndex] =
         getCollectionIndexes(opCtx,
                              metadata.getSourceNss(),
                              metadata.getSourceUUID(),
                              cloneTimestamp,
-                             "loading indexes to create temporary resharding collection"_sd);
+                             "loading indexes to create temporary resharding collection"sv);
 
     // Set the temporary resharding collection's UUID to the resharding UUID. Note that
     // BSONObj::addFields() replaces any fields that already exist.
@@ -100,9 +79,23 @@ void ReshardingRecipientService::RecipientStateMachineExternalState::
     MigrationDestinationManager::cloneCollectionIndexesAndOptions(
         opCtx, metadata.getTempReshardingNss(), collOptionsAndIndexes);
 
-    auto scopedCsr =
-        CollectionShardingRuntime::acquireExclusive(opCtx, metadata.getTempReshardingNss());
-    scopedCsr->clearFilteringMetadata_nonAuthoritative(opCtx);
+    if (metadata.getAuthoritativeMetadataAccessLevel() >=
+        ReshardingAuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
+        tassert(12776700,
+                "Expected to have primary shard id given",
+                metadata.getPrimaryShardId().has_value());
+        resharding::withCriticalSectionForTempCollection(
+            opCtx, metadata.getTempReshardingNss(), critSecReason, false, [&] {
+                shard_catalog_commit_for_resharding::commitCreateCollection(
+                    opCtx,
+                    metadata.getTempReshardingNss(),
+                    metadata.getPrimaryShardId() == ShardingState::get(opCtx)->shardId());
+            });
+    } else {
+        auto scopedCsr =
+            CollectionShardingRuntime::acquireExclusive(opCtx, metadata.getTempReshardingNss());
+        scopedCsr->clearCollectionMetadata(opCtx);
+    }
 }
 
 ShardId RecipientStateMachineExternalStateImpl::myShardId(ServiceContext* serviceContext) const {
@@ -133,7 +126,7 @@ RecipientStateMachineExternalStateImpl::getCollectionOptions(
     const NamespaceString& nss,
     const UUID& uuid,
     boost::optional<Timestamp> afterClusterTime,
-    StringData reason) {
+    std::string_view reason) {
     // Load the collection options from the primary shard for the database.
     sharding::router::DBPrimaryRouter router(opCtx, nss.dbName());
     return router.route(reason, [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
@@ -152,7 +145,7 @@ RecipientStateMachineExternalStateImpl::getCollectionOptions(
     const NamespaceString& nss,
     const UUID& uuid,
     boost::optional<Timestamp> afterClusterTime,
-    StringData reason,
+    std::string_view reason,
     const ShardId& fromShardId) {
     // Load the collection options from the specified shard for the database.
     const auto nssOrUUID = NamespaceStringOrUUID{nss.dbName(), uuid};
@@ -165,7 +158,7 @@ RecipientStateMachineExternalStateImpl::getCollectionIndexes(OperationContext* o
                                                              const NamespaceString& nss,
                                                              const UUID& uuid,
                                                              Timestamp afterClusterTime,
-                                                             StringData reason,
+                                                             std::string_view reason,
                                                              bool expandSimpleCollation) {
     // Load the list of indexes from the shard which owns the global minimum chunk.
     sharding::router::CollectionRouter router(opCtx, nss);
@@ -192,7 +185,7 @@ RecipientStateMachineExternalStateImpl::getCollectionIndexes(OperationContext* o
 void RecipientStateMachineExternalStateImpl::route(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    StringData reason,
+    std::string_view reason,
     unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)> callback) {
     sharding::router::CollectionRouter router(opCtx, nss);
     router.route(reason, callback);
@@ -222,10 +215,11 @@ void RecipientStateMachineExternalStateImpl::updateCoordinatorDocument(Operation
     }
 }
 
-void RecipientStateMachineExternalStateImpl::clearFilteringMetadataOnTempReshardingCollection(
+void RecipientStateMachineExternalStateImpl::clearCollectionMetadataOnTempReshardingCollection(
     OperationContext* opCtx, const NamespaceString& tempReshardingNss) {
     stdx::unordered_set<NamespaceString> namespacesToRefresh{tempReshardingNss};
-    resharding::clearFilteringMetadata(opCtx, namespacesToRefresh, true /* scheduleAsyncRefresh */);
+    resharding::clearCollectionMetadata(
+        opCtx, namespacesToRefresh, true /* scheduleAsyncRefresh */);
 }
 
 void RecipientStateMachineExternalStateImpl::ensureReshardingStashCollectionsEmpty(

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /* @file db/client.h
 
@@ -37,18 +11,15 @@
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/random.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/spin_lock.h"
 #include "mongo/util/concurrency/thread_name.h"
-#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
@@ -57,15 +28,13 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 
@@ -117,7 +86,7 @@ public:
      * and for reporting purposes. Its ref count will be bumped by this Client.
      */
     static void initThread(
-        StringData desc,
+        std::string_view desc,
         Service* service,
         std::shared_ptr<transport::Session> session = noSession(),
         ClientOperationKillableByStepdown killable = ClientOperationKillableByStepdown{true},
@@ -245,6 +214,17 @@ public:
         return _opCtx;
     }
 
+    /**
+     * Checks if the operation context associated with this client is for an operation that has
+     * completed and is pending destruction. If this returns true, user-facing operations like CurOp
+     * should treat the operation context as if it was nullptr.
+     *
+     * See ServiceContext::markOperationAsPendingDestruction().
+     */
+    bool operationContextIsPendingDestruction() const {
+        return _opCtxIsPendingDestruction;
+    }
+
     // TODO(spencer): SERVER-10228 SERVER-14779 Remove this/move it fully into OperationContext.
     bool isInDirectClient() const {
         return _inDirectClient;
@@ -261,6 +241,14 @@ public:
     }
     bool isFromSystemConnection() const {
         return _connectionId == 0;
+    }
+
+    /**
+     * Returns true if this client is an external network connection and is not
+     * running under DBDirectClient -- the notion of "user traffic" used for statistics.
+     */
+    bool isExternalUserConnection() const {
+        return isFromUserConnection() && !isInDirectClient();
     }
 
     /**
@@ -443,12 +431,16 @@ private:
     // If != NULL, then contains the currently active OperationContext
     OperationContext* _opCtx = nullptr;
 
+    // If true, the OperationContext stored in _opCtx is pending destruction and should not be
+    // treated as an active operation for user-facing things like CurOp.
+    bool _opCtxIsPendingDestruction = false;
+
     // If the active system client operation is allowed to be killed.
     ClientOperationKillableByStepdown _operationKillable{true};
 
     PseudoRandom _prng;
 
-    AtomicWord<bool> _killed{false};
+    Atomic<bool> _killed{false};
 
     // Whether this client used { helloOk: true } when opening its connection, indicating that
     // it supports the hello command.
@@ -468,7 +460,7 @@ private:
 
     ErrorCodes::Error _disconnectErrorCode = ErrorCodes::ClientDisconnect;
 
-    AtomicWord<TagMask> _tags;
+    Atomic<TagMask> _tags;
 };
 
 /**
@@ -491,7 +483,7 @@ public:
      * Only the Service pointer is a required parameter. All other parameters are optional and will
      * take defaults specified below.
      */
-    ThreadClient(StringData desc,
+    ThreadClient(std::string_view desc,
                  Service* service,
                  std::shared_ptr<transport::Session> session,
                  Killable killable,
@@ -513,16 +505,18 @@ public:
      * Then, if the session pointer is not specified, default it to the sentinel value for no
      * session.
      */
-    ThreadClient(StringData desc, Service* service)
+    ThreadClient(std::string_view desc, Service* service)
         : ThreadClient{desc, service, Client::noSession()} {}
-    ThreadClient(StringData desc, Service* service, Killable killable)
+    ThreadClient(std::string_view desc, Service* service, Killable killable)
         : ThreadClient{desc, service, Client::noSession(), killable} {}
 
     /**
      * Then, if it's not specified whether the client's operation should be killable, default it to
      * true.
      */
-    ThreadClient(StringData desc, Service* service, std::shared_ptr<transport::Session> session)
+    ThreadClient(std::string_view desc,
+                 Service* service,
+                 std::shared_ptr<transport::Session> session)
         : ThreadClient{desc,
                        service,
                        std::move(session),

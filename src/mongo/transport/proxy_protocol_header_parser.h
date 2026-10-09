@@ -1,39 +1,16 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/net/sockaddr.h"
+
 #include <algorithm>
 #include <cstddef>
+#include <string_view>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
@@ -41,18 +18,21 @@
 #include <sys/un.h>
 #endif
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/net/sockaddr.h"
-
 namespace mongo::transport {
+
+// PROXY protocol signature strings. kProxyV2Signature contains an embedded null byte; always use
+// .size() rather than strlen() when working with it.
+inline constexpr std::string_view kProxyV1Signature = "PROXY";
+inline constexpr std::string_view kProxyV2Signature = []() {
+    using namespace std::literals::string_view_literals;  // required due to embedded NUL
+    return "\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A"sv;
+}();
 
 /**
  * The maximum number of bytes ever needed by a proxy protocol header; represents
  * the minimum TCP MTU.
  */
-constexpr size_t kDefaultProxyProtocolHeaderReadSize = 536;
+inline constexpr size_t kDefaultProxyProtocolHeaderReadSize = 536;
 
 /**
  * Adapted from https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt
@@ -89,8 +69,8 @@ constexpr uint8_t kProxyProtocolSSLTlvDN = 0xE0;
 /**
  * MongoDB custom PP2 TLV type as per MongoDB Proxy Protocol Technical Design document.
  * The kProxyProtocolSSLTlvPeerRoles TLV is used to indicate the roles of the peer in the SSL
- * connection. The value of this TLV is a string representing the MongoDB roles. Use the
- * parsePeerRoles function to parse this data into a format the server understands
+ * connection. The value of this TLV is a DER-encoded MongoDBAuthorizationGrants structure; use
+ * parsePeerRoles to parse it into the server's role representation.
  */
 constexpr uint8_t kProxyProtocolSSLTlvPeerRoles = 0xE1;
 
@@ -151,7 +131,8 @@ struct ParserResults {
  *
  * Will throw eagerly on a malformed header.
  */
-boost::optional<ParserResults> parseProxyProtocolHeader(StringData buffer, bool isProxyUnixSock);
+boost::optional<ParserResults> parseProxyProtocolHeader(std::string_view buffer,
+                                                        bool isProxyUnixSock);
 
 /**
  * Peek a buffer for at least 12 bytes to determine if it may be a proxy protocol header.
@@ -161,17 +142,17 @@ boost::optional<ParserResults> parseProxyProtocolHeader(StringData buffer, bool 
  * To be used in determining appropriate error messages during otherwise failed
  * initial handshakes only.
  */
-bool maybeProxyProtocolHeader(StringData buffer);
+bool maybeProxyProtocolHeader(std::string_view buffer);
 
 namespace proxy_protocol_details {
 static constexpr size_t kMaxUnixPathLength = 108;
 
 template <typename AddrUn = sockaddr_un>
-AddrUn parseSockAddrUn(StringData buffer) {
+AddrUn parseSockAddrUn(std::string_view buffer) {
     AddrUn addr{};
     addr.sun_family = AF_UNIX;
 
-    StringData path = buffer.substr(0, buffer.find('\0'));
+    std::string_view path = buffer.substr(0, buffer.find('\0'));
     uassert(ErrorCodes::FailedToParse,
             fmt::format("Provided unix path longer than system supports: {}", buffer),
             path.size() < sizeof(AddrUn::sun_path));
@@ -179,8 +160,8 @@ AddrUn parseSockAddrUn(StringData buffer) {
     return addr;
 }
 
-void validateIpv4Address(StringData addr);
-void validateIpv6Address(StringData addr);
+void validateIpv4Address(std::string_view addr);
+void validateIpv6Address(std::string_view addr);
 
 }  // namespace proxy_protocol_details
 

@@ -7,7 +7,7 @@
 	"settings": {
 		"clangd.checkUpdates": true,
 		"clangd.path": "${workspaceFolder}/buildscripts/clangd_vscode.sh",
-		"clang-format.executable": "${workspaceRoot}/bazel-out/../../../external/mongo_toolchain_v5/v5/bin/clang-format",
+		"clang-format.executable": "${workspaceRoot}/bazel-out/../../../external/+setup_mongo_toolchains+mongo_toolchain_v5/v5/bin/clang-format",
 		"prettier.prettierPath": "bazel-bin/node_modules/.aspect_rules_js/prettier@3.4.2/node_modules/prettier",
 		"clang-tidy.executable": "buildscripts/clang_tidy_vscode.py",
 		"editor.codeActionsOnSave": {
@@ -58,6 +58,10 @@
 			"editor.formatOnSave": true,
 			"editor.defaultFormatter": "charliermarsh.ruff",
 		},
+		"[rust]": {
+			"editor.defaultFormatter": "rust-lang.rust-analyzer",
+			"editor.formatOnSave": true,
+		},
 		"[starlark]": {
 			"editor.defaultFormatter": "BazelBuild.vscode-bazel"
 		},
@@ -72,19 +76,32 @@
 		},
 		"C_Cpp.intelliSenseEngine": "disabled",
 		"typescript.inlayHints.enumMemberValues.enabled": true,
+		// Uncomment this when debug output for TestMate is needed.
+		// "testMate.cpp.log.logpanel": true,
+		"testMate.cpp.discovery.loadOnDemand": true,
 		"testMate.cpp.test.advancedExecutables": [
 			{
 				"pattern": "bazel-bin/src/mongo/**/*test*_with_debug",
 				"exclude": "files.watcherExclude",
 				// "parallelizationLimit": 1, // Needed for unittest_test :(
 				"cwd": "${workspaceFolder}",
-				"runTask": {
-					"before": [ "_buildForTestMate" ],
+				"debug.configTemplate": {
+					"type": "cppdbg",
+					"program": "${exec}",
+					"args": "${argsArray}",
+					"cwd": "${workspaceFolder}",
+					"MIMode": "gdb",
+					"miDebuggerPath": "${workspaceFolder}/buildscripts/vscode_bazel_gdb.sh",
+					"setupCommands": [
+						{ "text": "-enable-pretty-printing", "ignoreFailures": false },
+					],
 				},
 				"gtest": {
 					"prependTestRunningArgs": [
 						// TODO(gtest): Enable fancy output when we add support for it,
 						// if it's not on by default.
+						// TestMate requires full output to detect passing tests.
+						"--enhancedReporter=false"
 					],
 					"testGrouping": {
 						"groupByLabel": { // Binary name w/o "_with_debug"
@@ -99,12 +116,20 @@
 				}
 			},
 		],
+		// Set CLANGD_NO_LIMITS=1 in .vscode/clangd.env to disable systemd resource limits on clangd.
+		// Set CLANGD_JOBS=<n> in .vscode/clangd.env to control clangd parallelism (default: 4).
 		"clangd.arguments": [
-			"-j=4",
 			"--background-index-priority=low",
 			"--pch-storage=disk",
 			"--malloc-trim",
 		],
+		"rust-analyzer.linkedProjects": [
+			"monguard/Cargo.toml",
+			"src/mongo/db/modules/enterprise/src/mfp/plugin/Cargo.toml",
+		],
+		"rust-analyzer.rustfmt.extraArgs": [
+			"+nightly"
+		]
 	},
 	"extensions": {
 		"recommendations": [
@@ -124,6 +149,7 @@
 			"augustocdias.tasks-shell-input",
 			"ms-vscode.cpptools",
 			"matepek.vscode-catch2-test-adapter",
+			"rust-lang.rust-analyzer",
 		]
 	},
 	"tasks": {
@@ -206,47 +232,7 @@
 				"MIMode": "gdb",
 				"preLaunchTask": "_prelaunch_task",
 				"setupCommands": [
-					{
-						"text": "set verbose",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set directories ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set debug-file-directory ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"description": "Enable pretty-printing for gdb",
-						"text": "-enable-pretty-printing",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/optimizer_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_lock.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/wt_dump_table.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/src/third_party/immer/dist/tools/gdb_pretty_printers/autoload.py",
-						"ignoreFailures": false
-					},
+					{ "text": "-enable-pretty-printing", "ignoreFailures": false },
 				],
 				"miDebuggerPath": "${workspaceFolder}/buildscripts/vscode_bazel_gdb.sh",
 			},
@@ -259,47 +245,7 @@
 				"MIMode": "gdb",
 				"preLaunchTask": "_prelaunch_task",
 				"setupCommands": [
-					{
-						"text": "set verbose",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set directories ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set debug-file-directory ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"description": "Enable pretty-printing for gdb",
-						"text": "-enable-pretty-printing",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/optimizer_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_lock.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/wt_dump_table.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/src/third_party/immer/dist/tools/gdb_pretty_printers/autoload.py",
-						"ignoreFailures": false
-					},
+					{ "text": "-enable-pretty-printing", "ignoreFailures": false },
 				],
 				"miDebuggerPath": "${workspaceFolder}/buildscripts/vscode_bazel_gdb.sh",
 			},
@@ -314,47 +260,7 @@
 				"miDebuggerPath": "${workspaceFolder}/buildscripts/vscode_bazel_gdb.sh",
 				"preLaunchTask": "_prelaunch_task",
 				"setupCommands": [
-					{
-						"text": "set verbose",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set directories ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"text": "set debug-file-directory ${workspaceFolder}",
-						"ignoreFailures": false
-					},
-					{
-						"description": "Enable pretty-printing for gdb",
-						"text": "-enable-pretty-printing",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/optimizer_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_printers.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/mongo_lock.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/buildscripts/gdb/wt_dump_table.py",
-						"ignoreFailures": false
-					},
-					{
-						"text": "source ${workspaceFolder}/src/third_party/immer/dist/tools/gdb_pretty_printers/autoload.py",
-						"ignoreFailures": false
-					},
+					{ "text": "-enable-pretty-printing", "ignoreFailures": false },
 				],
 				"coreDumpPath": "${input:pickDumpFile}"
 			}

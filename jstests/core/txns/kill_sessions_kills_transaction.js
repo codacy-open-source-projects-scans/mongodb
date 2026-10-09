@@ -6,17 +6,9 @@
 //   uses_transactions,
 //   uses_parallel_shell
 // ]
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
+// TODO: SERVER-60746 enable multi-router once {killSessions: ..} is supported on multi-router.
+TestData.pinToSingleMongos = true;
 
 const dbName = "test";
 const collName = "kill_sessions_kills_transaction";
@@ -58,7 +50,9 @@ assert.commandWorked(sessionDb.runCommand({find: collName, batchSize: 2}));
 
 // Start a drop, which will hang.
 let awaitDrop = startParallelShell(function () {
-    db.getSiblingDB("test")["kill_sessions_kills_transaction"].drop({writeConcern: {w: "majority"}});
+    db.getSiblingDB("test")["kill_sessions_kills_transaction"].drop({
+        writeConcern: {w: "majority"},
+    });
 });
 
 // Wait for the drop to have a pending MODE_X lock on the database.
@@ -81,7 +75,10 @@ assert.soon(
         );
     },
     function () {
-        return "Failed to find drop in currentOp output: " + tojson(adminDB.aggregate([{$currentOp: {}}]).toArray());
+        return (
+            "Failed to find drop in currentOp output: " +
+            tojson(adminDB.aggregate([{$currentOp: {}}]).toArray())
+        );
     },
 );
 

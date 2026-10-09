@@ -1,6 +1,7 @@
 /**
  * Tests for optimizations applied to trivially false predicates.
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_81,
  *   # Explain command does not support read concerns other than local
  *   assumes_read_concern_local
@@ -22,7 +23,9 @@ const collName = "jstests_explain_find_trivially_false_predicates";
     {description: "Regular collections", collOptions: {}},
     {
         description: "Clustered collections",
-        collOptions: {clusteredIndex: {key: {_id: 1}, unique: true, name: "Clustered index definition"}},
+        collOptions: {
+            clusteredIndex: {key: {_id: 1}, unique: true, name: "Clustered index definition"},
+        },
     },
 ].forEach((testConfig) => {
     jsTestLog(`Testing trivially false optimization with ${testConfig.description}`);

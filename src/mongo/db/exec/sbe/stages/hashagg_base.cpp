@@ -1,37 +1,11 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/hashagg_base.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/stages/block_hashagg.h"
+#include "mongo/db/exec/sbe/stages/compact_hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/util/spilling.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -40,6 +14,7 @@
 #include "mongo/db/storage/storage_options.h"
 
 #include <memory>
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -47,7 +22,7 @@ namespace mongo {
 namespace sbe {
 
 template <class Derived>
-HashAggBaseStage<Derived>::HashAggBaseStage(StringData stageName,
+HashAggBaseStage<Derived>::HashAggBaseStage(std::string_view stageName,
                                             PlanYieldPolicySBE* yieldPolicy,
                                             PlanNodeId planNodeId,
                                             value::SlotAccessor* collatorAccessor,
@@ -161,25 +136,25 @@ int64_t HashAggBaseStage<Derived>::spillRowToDisk(const value::MaterializedRow& 
 
 template <class Derived>
 void HashAggBaseStage<Derived>::spill() {
+    auto& ht = derived().ht();
+    auto& htIt = derived().htIt();
+
     // The stage returns results using an iterator '_htIt' over the hashTable '_ht'. At any moment
     // '_htIt' points to the record that should be returned in the next getNext() invocation. When
     // we spill, we want to spill only the records in '_ht' that have not been already returned to
     // the caller.
-    if (_htIt == _ht->end()) {
+    if (htIt == ht->end()) {
         LOGV2_DEBUG(9915700,
                     2,
                     "All in memory data has been consumed. HashAgg stage has nothing to spill. "
                     "Clearing memory.");
-        _ht->clear();
-        _htIt = _ht->end();
+        ht->clear();
+        htIt = ht->end();
         _memoryTracker.value().set(0);
         return;
     }
 
-    uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
-            "Exceeded memory limit for $group, but didn't allow external spilling;"
-            " pass allowDiskUse:true to opt in",
-            _allowDiskUse);
+    _memoryTracker.value().assertCanSpill(_allowDiskUse, _commonStats.stageType);
 
     // Ensure there is sufficient disk space for spilling
     uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
@@ -190,17 +165,10 @@ void HashAggBaseStage<Derived>::spill() {
         makeInternalRecordStore();
     }
 
-    int64_t spilledBytes = 0;
-    int64_t spilledRecords = 0;
+    auto [spilledBytes, spilledRecords] = derived().spillImpl(_recordStore.get());
 
-    // Spill only the records that have not been already consumed.
-    for (; _htIt != _ht->end(); ++_htIt) {
-        spilledBytes += spillRowToDisk(_htIt->first, _htIt->second);
-        spilledRecords++;
-    }
-
-    _ht->clear();
-    _htIt = _ht->end();
+    ht->clear();
+    htIt = ht->end();
     _memoryTracker.value().set(0);
 
     auto spilledDataStorageIncrease =
@@ -223,7 +191,7 @@ void HashAggBaseStage<Derived>::spill(MemoryCheckData& mcd) {
 template <class Derived>
 void HashAggBaseStage<Derived>::doForceSpill() {
     // The state has already finished (_ht is set in open and unset in close)
-    if (!_ht) {
+    if (!derived().ht()) {
         LOGV2_DEBUG(9915601, 2, "HashAggStage has finished its execution");
         return;
     }
@@ -263,7 +231,9 @@ void HashAggBaseStage<Derived>::doForceSpill() {
 // spilling.
 template <class Derived>
 void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckData& mcd) {
-    if (_ht->empty()) {
+    auto& ht = derived().ht();
+
+    if (ht->empty()) {
         // Simply nothing to spill.
         return;
     }
@@ -276,17 +246,16 @@ void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckD
     }
 
     const long lastEstimatedMemoryUsage = _memoryTracker.value().inUseTrackedMemoryBytes();
-    const long estimatedRowSize =
-        _htIt->first.memUsageForSorter() + _htIt->second.memUsageForSorter();
-    _memoryTracker.value().set(_ht->size() * estimatedRowSize);
+    const long estimatedRowSize = derived().estimatedEntrySizeInBytes();
+    _memoryTracker.value().set(ht->size() * estimatedRowSize);
     static_cast<Derived*>(this)->getHashAggStats()->peakTrackedMemBytes =
         _memoryTracker.value().peakTrackedMemoryBytes();
 
-    if (!_memoryTracker.value().withinMemoryLimit()) {
+    if (!_memoryTracker.value().withinMemoryLimit(_opCtx)) {
         // It is safe to set this to the begining because spilling outside the releaseMemory only
         // happens before any results have been consumed and every time data is spilled the _ht is
         // cleared.
-        _htIt = _ht->begin();
+        derived().htIt() = ht->begin();
         spill(mcd);
     } else {
         // Calculate the next memory checkpoint. We estimate it based on the prior growth of the
@@ -303,7 +272,7 @@ void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckD
 
         const long nextCheckpointCandidate = (estimatedGainPerChildAdvance > 0.1)
             ? mcd.checkpointMargin *
-                (_memoryTracker.value().maxAllowedMemoryUsageBytes() -
+                (_memoryTracker.value().maxAllowedMemoryUsageBytes(_opCtx) -
                  _memoryTracker.value().inUseTrackedMemoryBytes()) /
                 estimatedGainPerChildAdvance
             : mcd.nextMemoryCheckpoint * 2;
@@ -320,5 +289,6 @@ void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckD
 
 template class HashAggBaseStage<HashAggStage>;
 template class HashAggBaseStage<BlockHashAggStage>;
+template class HashAggBaseStage<CompactHashAggStage>;
 }  // namespace sbe
 }  // namespace mongo

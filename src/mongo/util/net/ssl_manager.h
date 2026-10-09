@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,16 +8,16 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/optional.hpp>
 
 #ifdef MONGO_CONFIG_SSL
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/attribute_storage.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/net/sock.h"
@@ -54,14 +28,16 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 
-// SChannel implementation
+// SSL provider-specific headers
 #if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_WINDOWS
+#include "mongo/platform/windows_basic.h"
 #endif
 #endif  // #ifdef MONGO_CONFIG_SSL
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /*
  * @return the SSL version std::string prefixed with prefix and suffixed with suffix
@@ -77,10 +53,10 @@ Status validateOpensslCipherConfig(const std::string&, const boost::optional<Ten
  * Validation callback for setParameter 'disableNonTLSConnectionLogging'.
  */
 Status validateDisableNonTLSConnectionLogging(const bool&, const boost::optional<TenantId>&);
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo
 
 #ifdef MONGO_CONFIG_SSL
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 struct SSLParams;
 class TransientSSLParams;
 
@@ -92,7 +68,7 @@ struct SSLConnectionContext;
 typedef SSL_CTX* SSLContextType;
 typedef SSL* SSLConnectionType;
 #elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_WINDOWS
-typedef SCHANNEL_CRED* SSLContextType;
+typedef SCH_CREDENTIALS* SSLContextType;
 typedef PCtxtHandle SSLConnectionType;
 #elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_APPLE
 typedef asio::ssl::apple::Context* SSLContextType;
@@ -165,11 +141,11 @@ const ASN1OID mongodbClusterMembershipOID(
  * Counts of negogtiated version used by TLS connections.
  */
 struct TLSVersionCounts {
-    AtomicWord<long long> tlsUnknown;
-    AtomicWord<long long> tls10;
-    AtomicWord<long long> tls11;
-    AtomicWord<long long> tls12;
-    AtomicWord<long long> tls13;
+    Atomic<long long> tlsUnknown;
+    Atomic<long long> tls10;
+    Atomic<long long> tls11;
+    Atomic<long long> tls12;
+    Atomic<long long> tls13;
 
     static TLSVersionCounts& get(ServiceContext* serviceContext);
 };
@@ -403,6 +379,17 @@ public:
      * SSL connecctions.
      */
     virtual SSLInformationToLog getSSLInformationToLog() const = 0;
+
+    /**
+     * Decrypt the raw contents of a PEM key file which was encrypted with `password`. Only
+     * implemented for the OpenSSL variant; other implementations return NotImplemented.
+     * TODO SERVER-126149: Replace/remove this function.
+     */
+    virtual StatusWith<std::string> decryptPEMKey(std::string_view pemContents,
+                                                  std::string_view password) const {
+        return Status(ErrorCodes::NotImplemented,
+                      "decryptPEMKey is not supported on this platform");
+    }
 };
 
 /**
@@ -478,7 +465,7 @@ std::string removeFQDNRoot(std::string name);
  *
  * See "2.4 Converting an AttributeValue from ASN.1 to a String" in RFC 2243
  */
-std::string escapeRfc2253(StringData str);
+std::string escapeRfc2253(std::string_view str);
 
 /**
  * Generates a new SSLX509Name containing only the attributes requested in filteredAttributes.
@@ -491,15 +478,15 @@ SSLX509Name filterClusterDN(const SSLX509Name& fullClusterDN,
 /**
  * Parse a DN from a string per RFC 4514
  */
-StatusWith<SSLX509Name> parseDN(StringData str);
+StatusWith<SSLX509Name> parseDN(std::string_view str);
 
 /**
  * These functions map short names for RDN components to numeric OID's and the other way around.
  *
  * The x509ShortNameToOid returns boost::none if no mapping exists for that oid.
  */
-std::string x509OidToShortName(StringData name);
-boost::optional<std::string> x509ShortNameToOid(StringData name);
+std::string x509OidToShortName(const std::string& name);
+boost::optional<std::string> x509ShortNameToOid(const std::string& name);
 
 /**
  * Platform neutral TLS version enum
@@ -540,8 +527,8 @@ void logSSLInfo(const SSLInformationToLog& info,
  * Logs the certificate.
  * @param certType human-readable description of the certificate type.
  */
-void logCert(const CertInformationToLog& cert, StringData certType, int logNum);
+void logCert(const CertInformationToLog& cert, std::string_view certType, int logNum);
 void logCRL(const CRLInformationToLog& crl, int logNum);
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo
 #endif  // #ifdef MONGO_CONFIG_SSL

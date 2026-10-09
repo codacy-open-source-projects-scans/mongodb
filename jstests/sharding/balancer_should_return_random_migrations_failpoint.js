@@ -2,7 +2,6 @@
  * Testing random migration failpoint
  * @tags: [
  *  requires_fcv_80,
- *  featureFlagTrackUnshardedCollectionsUponMoveCollection,
  * ]
  */
 
@@ -16,18 +15,22 @@ TestData.skipCheckShardFilteringMetadata = true;
 
 // The mongod secondaries are set to priority 0 to prevent the primaries from stepping down during
 // migrations on slow evergreen builders.
+const randomMigrationSetParameters = {
+    "failpoint.balancerShouldReturnRandomMigrations": "{mode: 'alwaysOn'}",
+    "reshardingMinimumOperationDurationMillis": 0,
+    "balancerMigrationsThrottlingMs": 0,
+};
+
 let st = new ShardingTest({
     shards: 2,
     other: {
         enableBalancer: true,
         configOptions: {
-            setParameter: {
-                "failpoint.balancerShouldReturnRandomMigrations": "{mode: 'alwaysOn'}",
-                "reshardingMinimumOperationDurationMillis": 0,
-                "balancerMigrationsThrottlingMs": 0,
-            },
+            setParameter: {...randomMigrationSetParameters},
         },
-        rsOptions: {setParameter: {"failpoint.balancerShouldReturnRandomMigrations": "{mode: 'alwaysOn'}"}},
+        rsOptions: {
+            setParameter: {...randomMigrationSetParameters},
+        },
     },
 });
 
@@ -59,7 +62,9 @@ const isReshardingForTimeseriesEnabled = FeatureFlagUtil.isPresentAndEnabled(
         // TODO (SERVER-84744): Remove check for feature flag
         if (isReshardingForTimeseriesEnabled) {
             // Create timeseries collection
-            assert.commandWorked(db.createCollection("timeseries", {timeseries: {timeField: timeFieldName}}));
+            assert.commandWorked(
+                db.createCollection("timeseries", {timeseries: {timeField: timeFieldName}}),
+            );
         }
 
         // Create view

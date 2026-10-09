@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -113,14 +86,14 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangRefineCollectionShardKeyBeforeUpdatingChunks);
 MONGO_FAIL_POINT_DEFINE(hangRefineCollectionShardKeyBeforeCommit);
+MONGO_FAIL_POINT_DEFINE(commitRefineCollectionShardKeyFailsAfterDurableChange);
 
 void triggerFireAndForgetShardRefreshes(OperationContext* opCtx,
                                         Shard* configShard,
                                         ShardingCatalogClient* catalogClient,
                                         const CollectionType& coll) {
     const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-    const auto allShards =
-        catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kLocalReadConcern).value;
+    const auto allShards = catalogClient->getAllShards(opCtx, repl::ReadConcernArgs::kLocal).value;
     for (const auto& shardEntry : allShards) {
         const auto query = BSON(ChunkType::collectionUUID
                                 << coll.getUuid() << ChunkType::shard(shardEntry.getName()));
@@ -128,7 +101,7 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx,
         const auto chunk = uassertStatusOK(configShard->exhaustiveFindOnConfig(
                                                opCtx,
                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                               repl::ReadConcernLevel::kLocalReadConcern,
+                                               repl::ReadConcernArgs::kLocal,
                                                NamespaceString::kConfigsvrChunksNamespace,
                                                query,
                                                BSONObj(),
@@ -392,8 +365,7 @@ void ShardingCatalogManager::commitRefineCollectionShardKey(
 
     // Idempotency check: if the shard key is already the one requested, there is nothing to do
     // except waiting for majority, in case the write haven't been majority written.
-    auto collType =
-        _localCatalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kLocalReadConcern);
+    auto collType = _localCatalogClient->getCollection(opCtx, nss, repl::ReadConcernArgs::kLocal);
     if (newTimestamp == collType.getTimestamp()) {
         uassert(7648607,
                 str::stream() << "Expected refined key " << newShardKeyPattern.toBSON() << " but "
@@ -422,6 +394,11 @@ void ShardingCatalogManager::commitRefineCollectionShardKey(
 
     refineCollectionShardKeyInTxn(
         opCtx, nss, newShardKeyPattern, newTimestamp, newEpoch, oldTimestamp);
+
+    if (MONGO_unlikely(commitRefineCollectionShardKeyFailsAfterDurableChange.shouldFail())) {
+        uasserted(ErrorCodes::LockBusy,
+                  "Failing because of commitRefineCollectionShardKeyFailsAfterDurableChange");
+    }
 }
 
 void ShardingCatalogManager::configureCollectionBalancing(
@@ -519,45 +496,19 @@ void ShardingCatalogManager::configureCollectionBalancing(
         // migrations
         Lock::ExclusiveLock lk(opCtx, _kChunkOpLock);
 
-        withTransaction(opCtx,
-                        NamespaceString::kConfigsvrCollectionsNamespace,
-                        [this, &nss, &update](OperationContext* opCtx, TxnNumber txnNumber) {
-                            const auto query = BSON(
-                                CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+        const auto query = BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
                                     nss, SerializationContext::stateDefault()));
-                            const auto res = writeToConfigDocumentInTxn(
-                                opCtx,
-                                NamespaceString::kConfigsvrCollectionsNamespace,
-                                BatchedCommandRequest::buildUpdateOp(
-                                    NamespaceString::kConfigsvrCollectionsNamespace,
-                                    query,
-                                    update /* update */,
-                                    false /* upsert */,
-                                    false /* multi */),
-                                txnNumber);
-                            const auto numDocsModified = UpdateOp::parseResponse(res).getN();
-                            uassert(ErrorCodes::NamespaceNotSharded,
-                                    str::stream() << "Expected to match one doc for query " << query
-                                                  << " but matched " << numDocsModified,
-                                    numDocsModified == 1);
-
-                            bumpCollectionMinorVersionInTxn(opCtx, nss, txnNumber);
-                        });
-        // Now any migrations that change the list of shards will see the results of the transaction
-        // during refresh, so it is safe to release the chunk lock.
+        const auto didUpdate = uassertStatusOK(_localCatalogClient->updateConfigDocument(
+            opCtx,
+            NamespaceString::kConfigsvrCollectionsNamespace,
+            query,
+            update,
+            false /* upsert */,
+            defaultMajorityWriteConcernDoNotUse()));
+        uassert(ErrorCodes::NamespaceNotSharded,
+                str::stream() << "Expected to match one doc for query " << query,
+                didUpdate);
     }
-
-    const auto cm = uassertStatusOK(
-        RoutingInformationCache::get(opCtx)->getCollectionPlacementInfoWithRefresh(opCtx, nss));
-    std::set<ShardId> shardsIds;
-    cm.getAllShardIds(&shardsIds);
-
-    const auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
-    sharding_util::tellShardsToRefreshCollection(
-        opCtx,
-        {std::make_move_iterator(shardsIds.begin()), std::make_move_iterator(shardsIds.end())},
-        nss,
-        executor);
 
     Balancer::get(opCtx)->notifyPersistedBalancerSettingsChanged(opCtx);
 
@@ -586,17 +537,39 @@ void ShardingCatalogManager::updateTimeSeriesBucketingParameters(
             "Cannot update timeseries fields on a collection that is not a timeseries",
             cm.isTimeseriesCollection());
 
+    // Check whether the bucketing parameters are actually changing, in order to decide whether
+    // they need to be written and whether the `fixedBucketing` option needs to be set to false,
+    // mirroring the behavior of `applyTimeseriesOptionsModifications` on the durable catalog side.
+    //
+    // NOTE: The CollModCoordinator already performed a similar check, but the result is not
+    // forwarded here.
+    bool shouldUpdateBucketingOptions = false;
+    if (timeseriesParameters.has_value()) {
+        const auto status = timeseries::isTimeseriesGranularityValidAndUnchanged(
+            cm.getTimeseriesFields()->getTimeseriesOptions(),
+            timeseriesParameters.get(),
+            &shouldUpdateBucketingOptions);
+        uassertStatusOK(status);
+    }
+
     withTransaction(
         opCtx,
         NamespaceString::kConfigsvrCollectionsNamespace,
-        [this, &nss, &timeseriesParameters, &bucketsMayHaveMixedSchemaData, &shardIds](
-            OperationContext* opCtx, TxnNumber txnNumber) {
+        [this,
+         &nss,
+         &timeseriesParameters,
+         &bucketsMayHaveMixedSchemaData,
+         &shardIds,
+         &cm,
+         shouldUpdateBucketingOptions](OperationContext* opCtx, TxnNumber txnNumber) {
             auto granularityFieldName = std::string{CollectionType::kTimeseriesFieldsFieldName} +
                 "." + std::string{TypeCollectionTimeseriesFields::kGranularityFieldName};
             auto bucketSpanFieldName = std::string{CollectionType::kTimeseriesFieldsFieldName} +
                 "." + std::string{TypeCollectionTimeseriesFields::kBucketMaxSpanSecondsFieldName};
             auto bucketRoundingFieldName = std::string{CollectionType::kTimeseriesFieldsFieldName} +
                 "." + std::string{TypeCollectionTimeseriesFields::kBucketRoundingSecondsFieldName};
+            auto fixedBucketingFieldName = std::string{CollectionType::kTimeseriesFieldsFieldName} +
+                "." + std::string{TypeCollectionTimeseriesFields::kFixedBucketingFieldName};
             auto mixedSchemaFieldName = std::string{CollectionType::kTimeseriesFieldsFieldName} +
                 "." +
                 std::string{TypeCollectionTimeseriesFields::
@@ -605,14 +578,15 @@ void ShardingCatalogManager::updateTimeSeriesBucketingParameters(
             BSONObjBuilder updateBob;
 
             if (timeseriesParameters.has_value()) {
-                BSONObj bucketUp;
+                BSONObjBuilder bucketUpBob;
                 if (timeseriesParameters->getGranularity().has_value()) {
                     auto bucketSpan = timeseries::getMaxSpanSecondsFromGranularity(
                         timeseriesParameters->getGranularity().get());
                     updateBob.append("$unset", BSON(bucketRoundingFieldName << ""));
-                    bucketUp = BSON(granularityFieldName
-                                    << idl::serialize(timeseriesParameters->getGranularity().get())
-                                    << bucketSpanFieldName << bucketSpan);
+                    bucketUpBob.append(
+                        granularityFieldName,
+                        idl::serialize(timeseriesParameters->getGranularity().get()));
+                    bucketUpBob.append(bucketSpanFieldName, bucketSpan);
                 } else {
                     tassert(
                         10533702,
@@ -620,12 +594,21 @@ void ShardingCatalogManager::updateTimeSeriesBucketingParameters(
                         timeseriesParameters->getBucketMaxSpanSeconds().has_value() &&
                             timeseriesParameters->getBucketRoundingSeconds().has_value());
                     updateBob.append("$unset", BSON(granularityFieldName << ""));
-                    bucketUp = BSON(bucketSpanFieldName
-                                    << timeseriesParameters->getBucketMaxSpanSeconds().get()
-                                    << bucketRoundingFieldName
-                                    << timeseriesParameters->getBucketRoundingSeconds().get());
+                    bucketUpBob.append(bucketSpanFieldName,
+                                       timeseriesParameters->getBucketMaxSpanSeconds().get());
+                    bucketUpBob.append(bucketRoundingFieldName,
+                                       timeseriesParameters->getBucketRoundingSeconds().get());
                 }
-                updateBob.append("$set", bucketUp);
+
+                // If bucketing parameters are changing, set fixedBucketing to false (if currently
+                // set to true), mirroring the shard-side logic in
+                // `applyTimeseriesOptionsModifications`.
+                if (shouldUpdateBucketingOptions &&
+                    cm.getTimeseriesFields()->getTimeseriesOptions().getFixedBucketing()) {
+                    bucketUpBob.append(fixedBucketingFieldName, false);
+                }
+
+                updateBob.append("$set", bucketUpBob.obj());
             }
 
             // TODO SERVER-108908: once 9.0 branches out, remove `isViewLessTimeseries` check

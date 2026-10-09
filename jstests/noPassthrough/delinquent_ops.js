@@ -11,6 +11,11 @@
  *
  * This file also tests the operations that have long-duration ticket acquisitions (so called
  * delinquent) are reporting the delinquent stats correctly.
+ *
+ * @tags: [
+ *   # Uses $where with server-side JS to create a slow op, which requires server-side scripting.
+ *   requires_scripting,
+ * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -58,8 +63,16 @@ function assertDelinquentStats(metrics, count, msg, previousOperationMetrics) {
 
 function assertNoOverdueOps(operationMetrics, previousOperationMetrics) {
     assert.eq(operationMetrics.sampledOps, previousOperationMetrics.sampledOps, operationMetrics);
-    assert.eq(operationMetrics.checksFromSample, previousOperationMetrics.checksFromSample, operationMetrics);
-    assert.eq(operationMetrics.overdueOpsFromSample, previousOperationMetrics.overdueOpsFromSample, operationMetrics);
+    assert.eq(
+        operationMetrics.checksFromSample,
+        previousOperationMetrics.checksFromSample,
+        operationMetrics,
+    );
+    assert.eq(
+        operationMetrics.overdueOpsFromSample,
+        previousOperationMetrics.overdueOpsFromSample,
+        operationMetrics,
+    );
     assert.eq(
         operationMetrics.overdueChecksFromSample,
         previousOperationMetrics.overdueChecksFromSample,
@@ -84,9 +97,21 @@ function assertOverdueOps(operationMetrics, previousOperationMetrics) {
     function errorString() {
         return {metricsBefore: previousInterruptMetrics, metricsAfter: operationMetrics};
     }
-    assert.gt(interruptMetrics.checksFromSample, previousInterruptMetrics.checksFromSample, errorString);
-    assert.gt(interruptMetrics.overdueOpsFromSample, previousInterruptMetrics.overdueOpsFromSample, errorString);
-    assert.gt(interruptMetrics.overdueChecksFromSample, previousInterruptMetrics.overdueChecksFromSample, errorString);
+    assert.gt(
+        interruptMetrics.checksFromSample,
+        previousInterruptMetrics.checksFromSample,
+        errorString,
+    );
+    assert.gt(
+        interruptMetrics.overdueOpsFromSample,
+        previousInterruptMetrics.overdueOpsFromSample,
+        errorString,
+    );
+    assert.gt(
+        interruptMetrics.overdueChecksFromSample,
+        previousInterruptMetrics.overdueChecksFromSample,
+        errorString,
+    );
     assert.gt(
         interruptMetrics.overdueInterruptTotalMillisFromSample,
         previousInterruptMetrics.overdueInterruptTotalMillisFromSample,
@@ -101,15 +126,13 @@ function assertOverdueOps(operationMetrics, previousOperationMetrics) {
 
 function assertOverdueOpsSlowlogAndCurop(operationMetrics, count) {
     assert.gte(operationMetrics.numInterruptChecks, count, operationMetrics);
-    assert.gte(operationMetrics.delinquencyInfo.overdueInterruptChecks, count, operationMetrics);
-    assert.gte(
-        operationMetrics.delinquencyInfo.overdueInterruptTotalMillis,
-        count * (waitPerIterationMs - delinquentIntervalMs),
-        operationMetrics,
-    );
-    assert.gte(
+    // Overdue counters are based on wall-clock windows between interrupt checks. Real scheduler
+    // and clock behavior can prevent a forced yield from mapping to exactly one overdue check.
+    assert.gt(operationMetrics.delinquencyInfo.overdueInterruptChecks, 0, operationMetrics);
+    assert.gt(operationMetrics.delinquencyInfo.overdueInterruptTotalMillis, 0, operationMetrics);
+    assert.gt(
         operationMetrics.delinquencyInfo.overdueInterruptApproxMaxMillis,
-        waitPerIterationMs - delinquentIntervalMs,
+        0,
         operationMetrics,
     );
 }
@@ -120,7 +143,9 @@ function setOverdueThreshold(db, thresholdMs) {
         ErrorCodes.BadValue,
     );
 
-    assert.commandWorked(db.adminCommand({setParameter: 1, overdueInterruptCheckIntervalMillis: thresholdMs}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, overdueInterruptCheckIntervalMillis: thresholdMs}),
+    );
 }
 
 function testDelinquencyOnRouter(routerDb) {
@@ -176,7 +201,15 @@ function testDelinquencyOnShard(routerDb, shardDb) {
     const joinShell = startParallelShell(
         funWithArgs(
             function (dbName, findComment) {
-                assert.eq(db.getSiblingDB(dbName).testColl.find().batchSize(3).comment(findComment).itcount(), 4);
+                assert.eq(
+                    db
+                        .getSiblingDB(dbName)
+                        .testColl.find()
+                        .batchSize(3)
+                        .comment(findComment)
+                        .itcount(),
+                    4,
+                );
             },
             routerDb.getName(),
             findComment,
@@ -185,7 +218,11 @@ function testDelinquencyOnShard(routerDb, shardDb) {
     );
 
     failPoint.wait({timesEntered: 3});
-    const curOp = shardDb.currentOp({"command.comment": findComment, "command.find": "testColl", "active": true});
+    const curOp = shardDb.currentOp({
+        "command.comment": findComment,
+        "command.find": "testColl",
+        "active": true,
+    });
 
     failPointDeferred.off();
     joinShell();
@@ -263,8 +300,16 @@ function testDelinquencyOnShard(routerDb, shardDb) {
         const queryMetrics = queryStats[0].metrics;
         const queryExecMetrics = getQueryExecMetrics(queryMetrics);
         assert.gte(queryExecMetrics.delinquentAcquisitions.sum, 4, queryStatsJson);
-        assert.gte(queryExecMetrics.totalAcquisitionDelinquencyMillis.sum, waitPerIterationMs * 4, queryStatsJson);
-        assert.gte(queryExecMetrics.maxAcquisitionDelinquencyMillis.max, waitPerIterationMs, queryStatsJson);
+        assert.gte(
+            queryExecMetrics.totalAcquisitionDelinquencyMillis.sum,
+            waitPerIterationMs * 4,
+            queryStatsJson,
+        );
+        assert.gte(
+            queryExecMetrics.maxAcquisitionDelinquencyMillis.max,
+            waitPerIterationMs,
+            queryStatsJson,
+        );
 
         // For first batch, numInterruptChecks >=4, time ~=600ms
         // For second batch, numInterruptChecks >=3, time~=400ms
@@ -278,33 +323,40 @@ function testDelinquencyOnShard(routerDb, shardDb) {
 
     {
         const serverStatus = shardDb.serverStatus();
-        assertOverdueOps(serverStatus.metrics.operation, previousOperationMetrics.metrics.operation);
+        assertOverdueOps(
+            serverStatus.metrics.operation,
+            previousOperationMetrics.metrics.operation,
+        );
     }
 
     failPoint.off();
 
-    // Run a multi-doc transaction with a long running operation. Assert that it does not get
-    // marked delinquent or bump the delinquency serverStatus counters.
+    // Run a multi-doc transaction with a long-running find(). Assert that it does not get
+    // marked delinquent in the slow query log or query stats.
+    //
+    // Use a failpoint sleep (not $where) so the delay is a deterministic server-side sleep and
+    // cannot hit the JS/WASM function timeout under CPU contention.
     {
         const session = routerDb.getMongo().startSession();
         const sessionDb = session.getDatabase(jsTestName());
         assert.commandWorked(sessionDb.txn_coll.insert({a: 1}));
 
         const findTxnComment = "find_in_txn";
-        const sleepMillis = 10 * 1000;
+
+        // Sleep longer than the delinquency threshold so a non-transaction find() with the same
+        // delay would be considered delinquent.
+        const txnFailPoint = configureFailPoint(shardDb, "waitInFindBeforeMakingBatch", {
+            sleepFor: waitPerIterationMs,
+            comment: findTxnComment,
+        });
 
         {
             session.startTransaction();
-            assert.eq(
-                sessionDb.txn_coll
-                    .find({$where: `sleep(${sleepMillis}); return true;`})
-                    .comment(findTxnComment)
-                    .itcount(),
-                1,
-            );
+            assert.eq(sessionDb.txn_coll.find().comment(findTxnComment).itcount(), 1);
             assert.commandWorked(sessionDb.txn_coll.insert({a: 2}));
             session.commitTransaction();
         }
+        txnFailPoint.off();
 
         const globalLog = assert.commandWorked(shardDb.adminCommand({getLog: "global"}));
         const line = findMatchingLogLine(globalLog.log, {
@@ -314,22 +366,10 @@ function testDelinquencyOnShard(routerDb, shardDb) {
         });
         const parsedLine = JSON.parse(line);
         assert(
-            !("delinquencyInfo" in parsedLine.attr) || !("delinquentAcquisitions" in parsedLine.attr.delinquencyInfo),
+            !("delinquencyInfo" in parsedLine.attr) ||
+                !("delinquentAcquisitions" in parsedLine.attr.delinquencyInfo),
             parsedLine,
         );
-
-        // Check that the server status counters were not bumped. Here we can only do a loose check.
-        {
-            const serverStatus = shardDb.serverStatus();
-            const queues = serverStatus.queues.execution;
-
-            // Ensure that the slow find() did not bump the queue-level counters. To do this, we
-            // assert that the max delinquent value for each queue is less than the time this
-            // operation slept. This assumes that no other background operation that the test
-            // didn't trigger directly was delinquent for more than 'sleepMillis'.
-            assert.lt(queues.write.normalPriority.maxAcquisitionDelinquencyMillis, sleepMillis, queues);
-            assert.lt(queues.read.normalPriority.maxAcquisitionDelinquencyMillis, sleepMillis, queues);
-        }
 
         // Ensure that the query stats for this operation do not indicate that it's delinquent.
         {
@@ -337,7 +377,8 @@ function testDelinquencyOnShard(routerDb, shardDb) {
             const queryExecMetrics = getQueryExecMetrics(queryStats[0].metrics);
             assert(
                 queryStats.length === 1,
-                "Expected to find exactly one query stats entry for 'testColl' " + tojson(queryStats),
+                "Expected to find exactly one query stats entry for 'txn_coll' " +
+                    tojson(queryStats),
             );
             assert.eq(queryExecMetrics.delinquentAcquisitions.sum, 0, queryStats);
             assert.eq(queryExecMetrics.totalAcquisitionDelinquencyMillis.sum, 0, queryStats);
@@ -392,7 +433,8 @@ function runTest(routerDb, shardDb) {
 const startupParameters = {
     featureFlagRecordDelinquentMetrics: true,
     delinquentAcquisitionIntervalMillis: delinquentIntervalMs,
-    internalQueryStatsRateLimit: -1,
+    internalQueryStatsSampleRate: 1,
+    internalQueryStatsWriteCmdSampleRate: 0,
 
     overdueInterruptCheckIntervalMillis: delinquentIntervalMs * 100,
     overdueInterruptCheckSamplingRate: 1.0, // For this test we sample 100% of the time.
@@ -428,7 +470,9 @@ const startupParameters = {
     });
 
     disableDeprioritizationHeuristic(st.rs0.getPrimary());
-    assert.commandWorked(st.shard0.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 1}));
+    assert.commandWorked(
+        st.shard0.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 1}),
+    );
     runTest(st.s.getDB(jsTestName()), st.shard0.getDB(jsTestName()));
     st.stop();
 }

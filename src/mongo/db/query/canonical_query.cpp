@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/canonical_query.h"
@@ -35,7 +9,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_util.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
@@ -48,7 +21,7 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/str.h"
 
 #include <cstddef>
@@ -109,6 +82,7 @@ CanonicalQuery::CanonicalQuery(CanonicalQueryParams&& params) {
            std::move(params.pipeline),
            params.isCountLike,
            params.isSearchQuery,
+           params.aggWithNonEmptyPipeline,
            true /*optimizeMatchExpression*/);
 }
 
@@ -146,6 +120,7 @@ CanonicalQuery::CanonicalQuery(OperationContext* opCtx, const CanonicalQuery& ba
            {} /* an empty cqPipeline */,
            false,  // The parent query countLike is independent from the subquery countLike.
            baseQuery.isSearchQuery(),
+           baseQuery.aggWithNonEmptyPipeline(),
            false /*optimizeMatchExpression*/);
 
     if (baseQuery.getDistinct().has_value()) {
@@ -158,6 +133,7 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                             std::vector<boost::intrusive_ptr<DocumentSource>> cqPipeline,
                             bool isCountLike,
                             bool isSearchQuery,
+                            bool aggWithNonEmptyPipeline,
                             bool optimizeMatchExpression) {
     _expCtx = expCtx;
 
@@ -179,8 +155,8 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
         // When the deferred engine choice path is enabled, it is safe to always optimize because
         // the SBE plan cache is not used, so there is no risk of caching an optimized-away
         // variable reference.
-        bool shouldOptimizeProj =
-            feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled() ||
+        bool shouldOptimizeProj = expCtx->getIfrContext()->getSavedFlagValue(
+                                      feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice) ||
             expCtx->getSbeCompatibility() == SbeCompatibility::notCompatible ||
             !_findCommand->getLet();
         if (parsedFind->proj->requiresMatchDetails()) {
@@ -225,25 +201,16 @@ void CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
     setCqPipeline(std::move(cqPipeline), false /* containsEntirePipeline */);
     _isCountLike = isCountLike;
     _isSearchQuery = isSearchQuery;
+    _aggWithNonEmptyPipeline = aggWithNonEmptyPipeline;
 
-    // Perform SBE auto-parameterization if there is not already a reason not to.
-    _disablePlanCache = internalQueryDisablePlanCache.load() ||
-        _expCtx->getPlanCache() == ExpressionContext::PlanCacheOptions::kDisablePlanCache;
+    _disablePlanCache =
+        // IDHACK should never be cached.
+        _expCtx->isIdHackQuery() ||
+        // The plan cache has been explicitly disabled for this query.
+        _expCtx->getPlanCache() == ExpressionContext::PlanCacheOptions::kDisablePlanCache ||
+        // Obey the caching configuration set by the user.
+        _expCtx->getQueryKnobConfiguration().getDisablePlanCache();
     _maxMatchExpressionParams = loadMaxMatchExpressionParams();
-    if (expCtx->getSbeCompatibility() != SbeCompatibility::notCompatible &&
-        shouldParameterizeSbe(_primaryMatchExpression.get())) {
-        // When the SBE plan cache is enabled, we auto-parameterize queries in the hopes of caching
-        // a parameterized plan. Here we add parameter markers to the appropriate match expression
-        // leaf nodes unless it has too many predicates. If it did not actually get parameterized,
-        // we mark the query as uncacheable for SBE to avoid plan cache flooding.
-        bool parameterized;
-        _inputParamIdToExpressionMap = parameterizeMatchExpression(
-            _primaryMatchExpression.get(), _maxMatchExpressionParams, 0, &parameterized);
-        if (!parameterized) {
-            // Avoid plan cache flooding by not fully parameterized plans.
-            setUncacheableSbe();
-        }
-    }
     // The tree must always be valid after normalization.
     dassert(parsed_find_command::validateAndGetAvailableMetadata(_primaryMatchExpression.get(),
                                                                  *_findCommand)
@@ -399,26 +366,6 @@ void CanonicalQuery::setCqPipeline(std::vector<boost::intrusive_ptr<DocumentSour
                                    bool containsEntirePipeline) {
     _cqPipeline = std::move(cqPipeline);
     _containsEntirePipeline = containsEntirePipeline;
-
-    // Find $match stages that weren't pushed down to find, but will be pushed to SBE. These
-    // need to be parameterized separately from the find layer filters.
-    for (auto& docSource : _cqPipeline) {
-        auto matchStage = dynamic_cast<DocumentSourceMatch*>(docSource.get());
-        if (matchStage) {
-            MatchExpression* matchExpr = matchStage->getMatchExpression();
-            if (shouldParameterizeSbe(matchExpr)) {
-                bool parameterized;
-                std::vector<const MatchExpression*> newParams = parameterizeMatchExpression(
-                    matchExpr, getMaxMatchExpressionParams(), numParams(), &parameterized);
-                if (parameterized) {
-                    addMatchParams(newParams);
-                } else {
-                    // Avoid plan cache flooding by not fully parameterized plans.
-                    setUncacheableSbe();
-                }
-            }
-        }
-    }
 }
 
 void CanonicalQuery::clearCqPipeline() {
@@ -438,15 +385,4 @@ void CanonicalQuery::removeSuffixFromCqPipeline(size_t sourcesToRemove) {
     _containsEntirePipeline = false;
 }
 
-bool CanonicalQuery::shouldParameterizeSbe(MatchExpression* matchExpr) const {
-    if (_disablePlanCache || _isUncacheableSbe || !feature_flags::gFeatureFlagSbeFull.isEnabled() ||
-        QueryPlannerCommon::hasNode(matchExpr, MatchExpression::TEXT)) {
-        return false;
-    }
-    return true;
-}
-
-bool CanonicalQuery::shouldParameterizeLimitSkip() const {
-    return !_disablePlanCache && !_isUncacheableSbe;
-}
 }  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/options_parser/options_parser.h"
@@ -41,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -75,10 +50,6 @@
 #include <yaml-cpp/node/node.h>
 #include <yaml-cpp/node/parse.h>
 #include <yaml-cpp/yaml.h>  // IWYU pragma: keep
-// IWYU pragma: no_include "boost/program_options/detail/parsers.hpp"
-// IWYU pragma: no_include "ext/alloc_traits.h"
-// IWYU pragma: no_include "boost/iostreams/detail/error.hpp"
-// IWYU pragma: no_include "boost/iostreams/detail/streambuf/indirect_streambuf.hpp"
 
 #ifdef _WIN32
 #include <io.h>
@@ -91,7 +62,6 @@
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -116,12 +86,17 @@
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
+// IWYU pragma: no_include "boost/program_options/detail/parsers.hpp"
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "boost/iostreams/detail/error.hpp"
+// IWYU pragma: no_include "boost/iostreams/detail/streambuf/indirect_streambuf.hpp"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 
 namespace mongo {
 namespace optionenvironment {
+using namespace std::literals::string_view_literals;
 
 namespace po = boost::program_options;
 namespace fs = boost::filesystem;
@@ -364,7 +339,7 @@ public:
             }
         };
 
-        const auto uassertedElement = [&prefix](Status status, StringData element) {
+        const auto uassertedElement = [&prefix](Status status, std::string_view element) {
             uasserted(status.code(), str::stream() << prefix << element << ": " << status.reason());
         };
 
@@ -538,7 +513,7 @@ public:
     }
 
 private:
-    static StatusWith<std::vector<std::uint8_t>> hexToVec(StringData hex) {
+    static StatusWith<std::vector<std::uint8_t>> hexToVec(std::string_view hex) {
         if (!hexblob::validate(hex))
             return {ErrorCodes::BadValue, "Not a valid, even length hex string"};
         std::string blob = hexblob::decode(hex);
@@ -572,7 +547,7 @@ private:
     std::string _action;
 };
 
-std::string runYAMLRestExpansion(StringData url, Seconds timeout) {
+std::string runYAMLRestExpansion(std::string_view url, Seconds timeout) {
 
     auto client = HttpClient::createWithoutConnectionPool();
     uassert(
@@ -866,8 +841,8 @@ Status checkLongName(const po::variables_map& vm,
             for (StringVector_t::iterator keyValueVectorIt = keyValueVector.begin();
                  keyValueVectorIt != keyValueVector.end();
                  ++keyValueVectorIt) {
-                StringData keySD;
-                StringData valueSD;
+                std::string_view keySD;
+                std::string_view valueSD;
                 if (!str::splitOn(*keyValueVectorIt, '=', keySD, valueSD)) {
                     StringBuilder sb;
                     sb << "Illegal option assignment: \"" << *keyValueVectorIt << "\"";
@@ -1400,7 +1375,7 @@ bool isYAMLConfig(const YAML::Node& config) {
 }
 
 #ifndef _WIN32
-Status checkFileOwnershipAndMode(int fd, mode_t prohibit, StringData modeDesc) {
+Status checkFileOwnershipAndMode(int fd, mode_t prohibit, std::string_view modeDesc) {
     struct stat stats;
 
     if (::fstat(fd, &stats) == -1) {
@@ -1462,7 +1437,7 @@ Status OptionsParser::readConfigFile(const std::string& filename,
  */
 Status readRawFile(const std::string& filename, std::string* contents, ConfigExpand configExpand) {
     // check if it's a valid file
-    const auto badFile = [&](StringData errMsg) -> Status {
+    const auto badFile = [&](std::string_view errMsg) -> Status {
         return {ErrorCodes::BadValue,
                 str::stream() << "Error opening config file '" << filename << "': " << errMsg};
     };
@@ -1495,7 +1470,7 @@ Status readRawFile(const std::string& filename, std::string* contents, ConfigExp
     ScopeGuard fdguard([&fd] { ::close(fd); });
 
     if (configExpand.rest) {
-        auto status = checkFileOwnershipAndMode(fd, S_IRGRP | S_IROTH, "readable"_sd);
+        auto status = checkFileOwnershipAndMode(fd, S_IRGRP | S_IROTH, "readable"sv);
         if (!status.isOK()) {
             return {status.code(),
                     str::stream() << "When using --configExpand=rest, config file must be "
@@ -1505,7 +1480,7 @@ Status readRawFile(const std::string& filename, std::string* contents, ConfigExp
     }
 
     if (configExpand.exec) {
-        auto status = checkFileOwnershipAndMode(fd, S_IWGRP | S_IWOTH, "writable"_sd);
+        auto status = checkFileOwnershipAndMode(fd, S_IWGRP | S_IWOTH, "writable"sv);
         if (!status.isOK()) {
             return {status.code(),
                     str::stream() << "When using --configExpand=exec, config file must be "
@@ -1753,13 +1728,13 @@ StatusWith<ConfigExpand> parseConfigExpand(const Environment& cli) {
         ret.timeout = Seconds{timeout};
     }
 
-    StringData expandSD(expand);
+    std::string_view expandSD(expand);
     while (!expandSD.empty()) {
-        StringData elem;
+        std::string_view elem;
         auto comma = expandSD.find(',');
         if (comma == std::string::npos) {
             elem = expandSD;
-            expandSD = StringData();
+            expandSD = std::string_view();
         } else {
             elem = expandSD.substr(0, comma);
             expandSD = expandSD.substr(comma + 1);

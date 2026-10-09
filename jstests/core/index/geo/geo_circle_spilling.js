@@ -1,6 +1,7 @@
 // Test spilling in geo near. Data has a lot of points on a circle, which forces NearStage to buffer
 // all of them.
 // @tags: [
+//   uses_explain,
 //   requires_fcv_83,
 //   requires_getmore,
 //   requires_persistence,
@@ -12,13 +13,18 @@
 //   does_not_support_transactions
 // ]
 
-import {getExecutionStages, getPlanStages} from "jstests/libs/query/analyze_plan.js";
+import {
+    getExecutionStages,
+    getPlanStages,
+    getWinningPlanFromExplain,
+} from "jstests/libs/query/analyze_plan.js";
 import {add2dsphereVersionIfNeeded} from "jstests/libs/query/geo_index_version_helpers.js";
 import {setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 // TODO(SERVER-103530) : Remove multiversion check when 9.0 becomes last-continuous.
 const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
+    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) ||
+    Boolean(TestData.multiversionBinVersion);
 
 // Use small strings and a low memory limit to avoid overwhelming test machines while still
 // triggering spilling and memory limit enforcement.
@@ -64,19 +70,24 @@ function assertSpillingAndAllDocumentsReturned(coll) {
 
 function assertNearStageThrowsMemoryLimit(coll) {
     jsTest.log.info("Running query", nearPredicate);
-    // In suites using the multiplanner, explain("queryPlanner") may itself fail with 12227900
-    // because the multiplanner executes all candidate plans during selection. If so, the error
-    // proves the GEO_NEAR_2DSPHERE stage was reached. In other suites (e.g. CBR heuristic),
-    // explain succeeds and we verify the stage in the winning plan before running the query.
+    // In suites using the multiplanner, explain("queryPlanner") may itself fail with
+    // ExceededMemoryLimit because the multiplanner executes all candidate plans during selection.
+    // If so, the error proves the GEO_NEAR_2DSPHERE stage was reached. In other suites
+    // (e.g. CBR heuristic), explain succeeds and we verify the stage in the winning plan before
+    // running the query.
     try {
         const explain = coll.find(nearPredicate).explain("queryPlanner");
-        const foundStages = getPlanStages(explain.queryPlanner.winningPlan, "GEO_NEAR_2DSPHERE");
+        const foundStages = getPlanStages(getWinningPlanFromExplain(explain), "GEO_NEAR_2DSPHERE");
         assert.gt(foundStages.length, 0, "No GEO_NEAR_2DSPHERE stages found: " + tojson(explain));
     } catch (e) {
-        assert.eq(e.code, 12227900, "Unexpected error from explain: " + tojson(e));
+        assert.eq(
+            e.code,
+            ErrorCodes.ExceededMemoryLimit,
+            "Unexpected error from explain: " + tojson(e),
+        );
         return;
     }
-    assert.throwsWithCode(() => coll.find(nearPredicate).toArray(), 12227900);
+    assert.throwsWithCode(() => coll.find(nearPredicate).toArray(), ErrorCodes.ExceededMemoryLimit);
 }
 
 function insertDocuments(coll, generateDocument) {
@@ -98,7 +109,11 @@ const originalMemoryLimit = assert.commandWorked(
 ).internalNearStageMaxMemoryBytes;
 
 try {
-    setParameterOnAllNonConfigNodes(db.getMongo(), "internalNearStageMaxMemoryBytes", kMemoryLimitBytes);
+    setParameterOnAllNonConfigNodes(
+        db.getMongo(),
+        "internalNearStageMaxMemoryBytes",
+        kMemoryLimitBytes,
+    );
 
     {
         // Check regular collection - spilling buffer will spill
@@ -126,7 +141,11 @@ try {
         assert.commandWorked(
             db.runCommand({
                 create: clusteredColl.getName(),
-                clusteredIndex: {"key": {_id: 1}, "unique": true, "name": "small string clustered key"},
+                clusteredIndex: {
+                    "key": {_id: 1},
+                    "unique": true,
+                    "name": "small string clustered key",
+                },
             }),
         );
         clusteredColl.createIndex({geo: "2dsphere"}, add2dsphereVersionIfNeeded());
@@ -152,7 +171,11 @@ try {
         assert.commandWorked(
             db.runCommand({
                 create: clusteredColl.getName(),
-                clusteredIndex: {"key": {_id: 1}, "unique": true, "name": "large string clustered key"},
+                clusteredIndex: {
+                    "key": {_id: 1},
+                    "unique": true,
+                    "name": "large string clustered key",
+                },
             }),
         );
         clusteredColl.createIndex({geo: "2dsphere"}, add2dsphereVersionIfNeeded());
@@ -168,5 +191,9 @@ try {
         assertNearStageThrowsMemoryLimit(clusteredColl);
     }
 } finally {
-    setParameterOnAllNonConfigNodes(db.getMongo(), "internalNearStageMaxMemoryBytes", originalMemoryLimit);
+    setParameterOnAllNonConfigNodes(
+        db.getMongo(),
+        "internalNearStageMaxMemoryBytes",
+        originalMemoryLimit,
+    );
 }

@@ -1,43 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <boost/container/flat_set.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/optional.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+#include "mongo/db/query/planner_wildcard_helpers.h"
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -50,7 +16,6 @@
 #include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/index_multikey_helpers.h"
-#include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -58,19 +23,30 @@
 #include <algorithm>
 #include <iterator>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 
 namespace mongo {
 namespace wildcard_planning {
+using namespace std::literals::string_view_literals;
 namespace {
 /**
  * Returns a new key pattern object with '$_path' and finds the wildcard field name.
  */
-BSONObj makeNewKeyPattern(const IndexEntry* index, StringData* wildcardFieldName) {
+BSONObj makeNewKeyPattern(const IndexEntry* index, std::string_view* wildcardFieldName) {
     BSONObjBuilder newPattern;
     size_t idx = 0;
     for (auto elem : index->keyPattern) {
@@ -372,7 +348,7 @@ bool validateNumericPathComponents(const MultikeyPaths& multikeyPaths,
  * the position of the replaced wildcard field.
  */
 std::pair<BSONObj, size_t> expandWildcardIndexKeyPattern(const BSONObj& wildcardKeyPattern,
-                                                         StringData expandFieldName) {
+                                                         std::string_view expandFieldName) {
     int wildcardFieldPos = -1;
     int fieldPos = 0;
     BSONObjBuilder builder{};
@@ -455,32 +431,6 @@ boost::optional<IndexEntry> createExpandedIndexEntry(const IndexEntry& wildcardI
     return entry;
 }
 
-/**
- * Determines if an expanded index entry can satisfy a query on a wildcard field with a FETCH
- * (for e.g., it may only be able to answer a query on the prefix if the wildcard field is being
- * queried with an incompatible $not predicate).
- *
- * Note: we could just use 'index.keyPattern' here for this check, but then we would have to iterate
- * through the entire pattern to get to the field at 'wildcardPos'.
- */
-bool canOnlyAnswerWildcardPrefixQuery(const IndexEntry& index, const IndexBounds& bounds) {
-    tassert(7444000, "Expected a wildcard index.", index.type == INDEX_WILDCARD);
-    tassert(7444001,
-            "A wildcard index should always have a virtual $_path field at wildcardFieldPos - 1.",
-            bounds.fields[index.wildcardFieldPos - 1].name == "$_path"_sd);
-
-    if (index.wildcardFieldPos == 1) {
-        // This is either a single-field wildcard index, or a compound wildcard index without a
-        // prefix.
-        return false;
-    }
-
-    // If the index entry was not expanded to include a second $_path field, we cannot answer a
-    // query on a wildcard field with an IXSCAN + FETCH if the predicate itself is, for e.g. an
-    // ineligible $not query, because we won't retrieve documents where the wildcard field is
-    // missing from the IXSCAN.
-    return bounds.fields[index.wildcardFieldPos].name != "$_path"_sd;
-}
 }  // namespace
 
 void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
@@ -518,7 +468,7 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
         }
         tassert(7246507,
                 "'$_path' is reserved fieldname for Wildcard Indexes",
-                "$_path"_sd != fieldName);
+                "$_path"sv != fieldName);
         out->push_back(*entry);
     }
 
@@ -550,17 +500,29 @@ void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
 
 bool canOnlyAnswerWildcardPrefixQuery(
     const std::vector<std::unique_ptr<QuerySolutionNode>>& ixscanNodes) {
-    return std::any_of(ixscanNodes.begin(), ixscanNodes.end(), [](const auto& node) {
-        if (node->getType() == StageType::STAGE_IXSCAN) {
-            const auto* ixScanNode = static_cast<IndexScanNode*>(node.get());
-            const auto& index = ixScanNode->index;
-            if (index.type == INDEX_WILDCARD &&
-                canOnlyAnswerWildcardPrefixQuery(index, ixScanNode->bounds)) {
-                return true;
-            }
+    for (const auto& node : ixscanNodes) {
+        if (node->getType() != StageType::STAGE_IXSCAN) {
+            continue;
         }
-        return false;
-    });
+        const auto* ixScanNode = static_cast<const IndexScanNode*>(node.get());
+        const auto& index = ixScanNode->index;
+        if (index.type == INDEX_WILDCARD && index.wildcardFieldPos > 1) {
+            // SERVER-74440 introduced 'name != "$_path"' guard to block non-$_path CWI entries, to
+            // prevent ineligible queries (like $not or $eq null) from producting incorrect results
+            // due to missing documents.
+            // The guard rejected entries with no predicate assigned on the wildcard (name is "").
+            // But it was overly broad and also rejected queries with a predicate on a non-generic
+            // expanded wildcard field like "a.b". The guard can be changed to name != "", but that
+            // became unnecessary, once SERVER-95374 added
+            // stripInvalidAssignmentsToCompoundWildcardIndexes, which strips those entries
+            // (wildcard expanded to path, but no predicate assigned) earlier. Any non-generic entry
+            // reaching this point therefore carries a valid wildcard predicate assignment.
+            tassert(8332201,
+                    "CWI non-generic entry without valid predicate",
+                    !ixScanNode->bounds.fields[index.wildcardFieldPos].name.empty());
+        }
+    }
+    return false;
 }
 
 void finalizeWildcardIndexScanConfiguration(
@@ -585,7 +547,7 @@ void finalizeWildcardIndexScanConfiguration(
                                 MultikeyComponents{});
     bounds->fields.insert(bounds->fields.begin() + index->wildcardFieldPos, {"$_path"});
 
-    StringData wildcardFieldName;
+    std::string_view wildcardFieldName;
     index->keyPattern = makeNewKeyPattern(index, &wildcardFieldName);
 
     if (!ietBuilders->empty()) {
@@ -602,7 +564,7 @@ void finalizeWildcardIndexScanConfiguration(
     // string values and 'MinKey'. The bounds for the generic wildcard field should scan all values
     // with bounds, "[MinKey, MaxKey]". Because the wildcard field can generate multiple keys for
     // one single document, we should also instruct the IXSCAN to dedup keys.
-    if (wildcardFieldName == "$_path"_sd) {
+    if (wildcardFieldName == "$_path"sv) {
         bounds->fields[index->wildcardFieldPos - 1].intervals = makeAllValuesForPath();
         bounds->fields[index->wildcardFieldPos].intervals.push_back(
             IndexBoundsBuilder::allValues());

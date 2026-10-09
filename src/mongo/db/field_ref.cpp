@@ -1,31 +1,15 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
+
+#include "mongo/db/field_ref.h"
+
+#include "mongo/bson/util/builder.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
+#include <algorithm>
+#include <string_view>
+#include <type_traits>
 
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
@@ -33,15 +17,9 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-
-#include <algorithm>
-#include <type_traits>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 enum class NumericPathComponentResult {
@@ -52,8 +30,8 @@ enum class NumericPathComponentResult {
 
 NumericPathComponentResult checkNumericOrDollarPathComponent(const FieldRef& path,
                                                              size_t pathIdx,
-                                                             StringData pathComponent) {
-    if (pathComponent == "$"_sd) {
+                                                             std::string_view pathComponent) {
+    if (pathComponent == "$"sv) {
         return NumericPathComponentResult::kNumericOrDollar;
     }
 
@@ -76,11 +54,11 @@ NumericPathComponentResult checkNumericOrDollarPathComponent(const FieldRef& pat
 
 }  // namespace
 
-FieldRef::FieldRef(StringData path) {
+FieldRef::FieldRef(std::string_view path) {
     parse(path);
 }
 
-void FieldRef::parse(StringData path) {
+void FieldRef::parse(std::string_view path) {
     clear();
 
     if (path.size() == 0) {
@@ -107,7 +85,7 @@ void FieldRef::parse(StringData path) {
 
         // If cur != beg then we advanced cur in the loop above, so we have a real sequence
         // of characters to add as a new part. Otherwise, we may be parsing something odd,
-        // like "..", and we need to add an empty StringData piece to represent the "part"
+        // like "..", and we need to add an empty std::string_view piece to represent the "part"
         // in-between the dots. This also handles the case where 'beg' and 'cur' are both
         // at 'end', which can happen if we are parsing anything with a terminal "."
         // character. In that case, we still need to add an empty part, but we will break
@@ -131,7 +109,7 @@ void FieldRef::parse(StringData path) {
     }
 }
 
-void FieldRef::setPart(FieldIndex i, StringData part) {
+void FieldRef::setPart(FieldIndex i, std::string_view part) {
     dassert(i < _parts.size());
 
     if (_replacements.empty()) {
@@ -142,7 +120,7 @@ void FieldRef::setPart(FieldIndex i, StringData part) {
     _parts[i] = boost::none;
 }
 
-void FieldRef::appendPart(StringData part) {
+void FieldRef::appendPart(std::string_view part) {
     if (_replacements.empty()) {
         _replacements.resize(_parts.size());
     }
@@ -193,7 +171,7 @@ void FieldRef::reserialize() const {
     for (size_t i = 0; i != _parts.size(); ++i) {
         if (i > 0)
             nextDotted.append(1, '.');
-        const StringData part = getPart(i);
+        const std::string_view part = getPart(i);
         nextDotted.append(part.data(), part.size());
     }
 
@@ -236,7 +214,7 @@ void FieldRef::reserialize() const {
     _replacements.clear();
 }
 
-StringData FieldRef::getPart(FieldIndex i) const {
+std::string_view FieldRef::getPart(FieldIndex i) const {
     // boost::container::small_vector already checks that the index `i` is in bounds, so we don't
     // bother checking here. If we change '_parts' to a different container implementation
     // that no longer performs a bounds check, we should add one here.
@@ -248,7 +226,7 @@ StringData FieldRef::getPart(FieldIndex i) const {
     if (part) {
         return part->toStringData(_dotted.get());
     } else {
-        return StringData(_replacements[i].get());
+        return std::string_view(_replacements[i].get());
     }
 }
 
@@ -294,12 +272,12 @@ FieldIndex FieldRef::commonPrefixSize(const FieldRef& other) const {
     return prefixSize;
 }
 
-bool FieldRef::isNumericPathComponentStrict(StringData component) {
+bool FieldRef::isNumericPathComponentStrict(std::string_view component) {
     return !component.empty() && !(component.size() > 1 && component[0] == '0') &&
         FieldRef::isNumericPathComponentLenient(component);
 }
 
-bool FieldRef::isNumericPathComponentLenient(StringData component) {
+bool FieldRef::isNumericPathComponentLenient(std::string_view component) {
     return !component.empty() && str::isAllDigits(component);
 }
 
@@ -337,7 +315,7 @@ bool FieldRef::pathOverlaps(const FieldRef& path, const FieldRef& indexedPath) {
             }
         }
 
-        StringData indexedPathComponent = indexedPath.getPart(indexedPathIdx);
+        std::string_view indexedPathComponent = indexedPath.getPart(indexedPathIdx);
         if (pathComponent != indexedPathComponent) {
             return false;
         }
@@ -373,8 +351,8 @@ FieldRef FieldRef::getCanonicalIndexField(const FieldRef& path) {
     return buf;
 }
 
-bool FieldRef::isComponentPartOfCanonicalizedIndexPath(StringData pathComponent) {
-    return pathComponent != "$"_sd && !FieldRef::isNumericPathComponentLenient(pathComponent);
+bool FieldRef::isComponentPartOfCanonicalizedIndexPath(std::string_view pathComponent) {
+    return pathComponent != "$"sv && !FieldRef::isNumericPathComponentLenient(pathComponent);
 }
 
 bool FieldRef::hasNumericPathComponents() const {
@@ -394,19 +372,19 @@ std::set<FieldIndex> FieldRef::getNumericPathComponents(FieldIndex startPart) co
     return numericPathComponents;
 }
 
-StringData FieldRef::dottedField(FieldIndex offset) const {
+std::string_view FieldRef::dottedField(FieldIndex offset) const {
     return dottedSubstring(offset, numParts());
 }
 
-StringData FieldRef::dottedSubstring(FieldIndex startPart, FieldIndex endPart) const {
+std::string_view FieldRef::dottedSubstring(FieldIndex startPart, FieldIndex endPart) const {
     if (_parts.size() == 0 || startPart >= endPart || endPart > numParts())
-        return StringData();
+        return std::string_view();
 
     if (!_replacements.empty() || _parts.size() != _cachedSize)
         reserialize();
     dassert(_replacements.empty() && _parts.size() == _cachedSize);
 
-    StringData result(_dotted.get());
+    std::string_view result(_dotted.get());
 
     // Fast-path if we want the whole thing
     if (startPart == 0 && endPart == numParts())
@@ -427,11 +405,11 @@ StringData FieldRef::dottedSubstring(FieldIndex startPart, FieldIndex endPart) c
     return result.substr(startChar, endChar - startChar);
 }
 
-bool FieldRef::equalsDottedField(StringData other) const {
-    StringData rest = other;
+bool FieldRef::equalsDottedField(std::string_view other) const {
+    std::string_view rest = other;
 
     for (size_t i = 0; i < _parts.size(); i++) {
-        StringData part = getPart(i);
+        std::string_view part = getPart(i);
 
         if (!rest.starts_with(part))
             return false;

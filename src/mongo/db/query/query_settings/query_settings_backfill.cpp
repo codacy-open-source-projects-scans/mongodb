@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_settings/query_settings_backfill.h"
 
 #include "mongo/client/retry_strategy.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/query/query_settings/query_settings_usage_tracker.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/async_rpc.h"
 #include "mongo/executor/async_rpc_error_info.h"
 #include "mongo/util/assert_util.h"
@@ -225,6 +200,7 @@ public:
     using BackfillCoordinator::BackfillCoordinator;
 
 private:
+    std::shared_ptr<executor::TaskExecutor> makeExecutor(OperationContext* opCtx) final;
     std::unique_ptr<async_rpc::Targeter> makeTargeter(OperationContext* opCtx) final;
 };
 
@@ -237,6 +213,7 @@ public:
     using BackfillCoordinator::BackfillCoordinator;
 
 private:
+    std::shared_ptr<executor::TaskExecutor> makeExecutor(OperationContext* opCtx) final;
     std::unique_ptr<async_rpc::Targeter> makeTargeter(OperationContext* opCtx) final;
 };
 
@@ -260,12 +237,8 @@ bool BackfillCoordinator::shouldBackfill(const boost::intrusive_ptr<ExpressionCo
         return false;
     }
 
-    // We shouldn't attempt the backfill if it's not enabled.
-    const bool isPQSBackfillEnabled = (!internalQuerySettingsDisableBackfill.load()) &&
-        feature_flags::gFeatureFlagPQSBackfill.isEnabledUseLatestFCVWhenUninitialized(
-            VersionContext::getDecoration(expCtx->getOperationContext()),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    if (!isPQSBackfillEnabled) {
+    // We shouldn't attempt the backfill if it's disabled via the server parameter.
+    if (internalQuerySettingsDisableBackfill.load()) {
         return false;
     }
 
@@ -298,7 +271,7 @@ void BackfillCoordinator::markForBackfillAndScheduleIfNeeded(
     auto memoryLimitBytes = internalQuerySettingsBackfillMemoryLimitBytes.load();
     const std::size_t itemSize = sizeof(queryShapeHash) + queryInstance.objsize();
     if (itemSize >= memoryLimitBytes - _state->memoryUsedBytes) {
-        auto prevState = consume_inlock();
+        auto prevState = consume(lock);
         _state->taskScheduled = true;  // The original task is still scheduled.
         auto executor = makeExecutor(opCtx);
         ExecutorFuture<void>{executor}
@@ -380,10 +353,9 @@ ExecutorFuture<void> BackfillCoordinator::execute(
         getGlobalServiceContext()->getService()->makeClient("QuerySettingsBackfillManager");
     auto opCtxHolder = client->makeOperationContext();
     auto* opCtx = opCtxHolder.get();
-    const boost::optional<TenantId> tenantId = boost::none;
     auto&& service = QuerySettingsService::get(opCtx);
     auto [queryShapeConfigurations, clusterParameterTime] =
-        service.getAllQueryShapeConfigurations(tenantId);
+        service.getAllQueryShapeConfigurations();
 
     // Construct the query shape representative query array. Avoid copying over an entry if the
     // corresponding query shape configuration was removed in the meantime.
@@ -415,7 +387,6 @@ ExecutorFuture<void> BackfillCoordinator::execute(
                opCtx, std::move(representativeQueries), std::move(executor))
         .then([this,
                clusterParameterTime,
-               tenantId,
                client = std::move(client),
                opCtxHolder = std::move(opCtxHolder),
                nRepresentativeQueries](std::vector<QueryShapeHash> hashes) {
@@ -430,7 +401,7 @@ ExecutorFuture<void> BackfillCoordinator::execute(
                         "Succesfully inserted the backfilled representative queries",
                         "hashes"_attr = hashes,
                         "representativeQueriesInserted"_attr = nInsertedRepresentativeQueries);
-            _onCompletionHook(std::move(hashes), clusterParameterTime, tenantId);
+            _onCompletionHook(std::move(hashes), clusterParameterTime);
             tracker.incrementSucceededBackfills(nInsertedRepresentativeQueries);
             tracker.incrementFailedBackfills(nRepresentativeQueries -
                                              nInsertedRepresentativeQueries);
@@ -464,18 +435,28 @@ void BackfillCoordinator::cancel() {
 
 std::unique_ptr<BackfillCoordinator::State> BackfillCoordinator::consume() {
     std::lock_guard lk{_mutex};
-    return consume_inlock();
+    return consume(lk);
 }
 
-std::unique_ptr<BackfillCoordinator::State> BackfillCoordinator::consume_inlock() {
+std::unique_ptr<BackfillCoordinator::State> BackfillCoordinator::consume(WithLock) {
     auto&& tracker = QuerySettingsUsageTracker::get(getGlobalServiceContext());
     tracker.setBackfillMemoryUsedBytes(0);
     tracker.setBufferedRepresentativeQueries(0);
     return std::exchange(_state, std::make_unique<BackfillCoordinator::State>());
 }
 
-std::shared_ptr<executor::TaskExecutor> BackfillCoordinator::makeExecutor(OperationContext* opCtx) {
+std::shared_ptr<executor::TaskExecutor> ReplicaSetBackfillCoordinator::makeExecutor(
+    OperationContext* opCtx) {
     return MongoProcessInterface::create(opCtx)->getTaskExecutor();
+}
+
+std::shared_ptr<executor::TaskExecutor> ShardedClusterBackfillCoordinator::makeExecutor(
+    OperationContext* opCtx) {
+    // Use the fixed sharding executor to avoid deadlocks when failpoints are enabled: it runs
+    // continuations on dedicated worker threads (unlike the arbitrary executor, whose
+    // NetworkInterfaceThreadPool runs them on the network reactor thread) while still supporting
+    // the async insert RPC.
+    return Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
 }
 
 std::unique_ptr<async_rpc::Targeter> ShardedClusterBackfillCoordinator::makeTargeter(

@@ -32,7 +32,9 @@ const mongotConn = stWithMock.getMockConnectedToHost(conn);
 
 const dbName = jsTestName();
 const testDB = conn.getDB(dbName);
-assert.commandWorked(conn.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    conn.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 
 const collName = "meta";
 const coll = testDB.getCollection(collName);
@@ -175,7 +177,9 @@ function testExplain({shouldReferenceSearchMeta, disablePipelineOptimization}) {
         let mergingPipeline = explain.splitPipeline.mergerPart;
         // First element in merging pipeline must be a $mergeCursors stage.
         assert.eq(["$mergeCursors"], Object.keys(mergingPipeline[0]));
-        if (shouldReferenceSearchMeta || disablePipelineOptimization) {
+        // The $setVariableFromSubPipeline stage is only attached when a downstream stage
+        // references $$SEARCH_META, regardless of whether pipeline optimization ran.
+        if (shouldReferenceSearchMeta) {
             // Second element sets the variable given the sub-pipeline provided above.
             const acc = {
                 "$setVariableFromSubPipeline": {
@@ -269,7 +273,10 @@ function setQueryMockResponses(removeGetMore, hasSearchStage = false) {
 // returned by mongot(mock).
 function testSearchQuery() {
     setQueryMockResponses(false);
-    let queryResult = coll.aggregate([{$search: searchQuery}, {$project: {"var": "$$SEARCH_META"}}]);
+    let queryResult = coll.aggregate([
+        {$search: searchQuery},
+        {$project: {"var": "$$SEARCH_META"}},
+    ]);
     assert.eq([{_id: 1, var: {_id: {}, value: 56}}], queryResult.toArray());
 }
 

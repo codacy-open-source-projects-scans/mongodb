@@ -50,16 +50,20 @@ class NotificationsConfig(BaseModel):
     slack: SlackConfig
 
 
+# Note: pydantic 2 dropped the v1 behavior where `Optional[X]` implied a
+# default of None — without an explicit `= None` such fields are REQUIRED
+# and yaml entries that omit them fail validation.
 class TeamConfig(BaseModel):
     name: str
-    slack_tags: Optional[list[str]]
-    thresholds: Optional[ThresholdOverride]
+    slack_tags: Optional[list[str]] = None
+    thresholds: Optional[ThresholdOverride] = None
 
 
 class GroupConfig(BaseModel):
     name: str
     teams: list[str]
-    slack_tags: Optional[list[str]]
+    slack_tags: Optional[list[str]] = None
+    thresholds: Optional[ThresholdOverride] = None
 
 
 class CodeLockdownConfig(BaseModel):
@@ -120,6 +124,22 @@ class CodeLockdownConfig(BaseModel):
                 return team.slack_tags or []
 
         return []
+
+    def get_group_thresholds(self, group_name: str, defaults: IssueThresholds) -> IssueThresholds:
+        """
+        Get group thresholds (or defaults if none set)
+        """
+
+        for group in self.groups:
+            if group.name == group_name and group.thresholds:
+                thresholds = deepcopy(defaults)
+                if group.thresholds.hot is not None:
+                    thresholds.hot.count = group.thresholds.hot
+                if group.thresholds.cold is not None:
+                    thresholds.cold.count = group.thresholds.cold
+                return thresholds
+
+        return defaults
 
     def get_team_thresholds(self, team_name: str, defaults: IssueThresholds) -> IssueThresholds:
         """

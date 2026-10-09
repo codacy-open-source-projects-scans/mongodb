@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,6 +18,7 @@
 #include <iosfwd>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -61,7 +35,7 @@ namespace mongo {
  * Consists of a general "name" part, and a "database name" part.
  */
 template <typename T>
-class MONGO_MOD_PUBLIC AuthName {
+class [[MONGO_MOD_PUBLIC]] AuthName {
 public:
     AuthName() = default;
 
@@ -70,19 +44,19 @@ public:
         if constexpr (std::is_same_v<Name, std::string>) {
             _name = std::move(name);
         } else {
-            _name = std::string{StringData(name)};
+            _name = std::string{std::string_view(name)};
         }
         _dbname = std::move(dbname);
     }
 
     template <typename Name>
-    AuthName(Name name, StringData db, boost::optional<TenantId> tenantId = boost::none)
+    AuthName(Name name, std::string_view db, boost::optional<TenantId> tenantId = boost::none)
         : AuthName(std::move(name), DatabaseName(std::move(tenantId), std::move(db))) {}
 
     /**
      * Parses a string of the form "db.name" into an AuthName object with an optional tenant.
      */
-    static StatusWith<T> parse(StringData str,
+    static StatusWith<T> parse(std::string_view str,
                                const boost::optional<TenantId>& tenant = boost::none);
 
     /**
@@ -94,7 +68,7 @@ public:
                               const boost::optional<TenantId>& tenant = boost::none);
     static T parseFromBSON(const BSONElement& elem,
                            const boost::optional<TenantId>& tenant = boost::none);
-    void serializeToBSON(StringData fieldName, BSONObjBuilder* bob) const;
+    void serializeToBSON(std::string_view fieldName, BSONObjBuilder* bob) const;
     void serializeToBSON(BSONArrayBuilder* bob) const;
     void appendToBSON(BSONObjBuilder* bob, bool encodeTenant = false) const;
     BSONObj toBSON(bool encodeTenant = false) const;
@@ -111,7 +85,7 @@ public:
     /**
      * Gets the database name part of an AuthName.
      */
-    StringData getDB() const {
+    std::string_view getDB() const {
         return _dbname.db(OmitTenant{});
     }
 
@@ -201,7 +175,7 @@ static inline Stream& operator<<(Stream& os, const AuthName<T>& name) {
  * Iterator over an unspecified container of AuthName objects.
  */
 template <typename T>
-class MONGO_MOD_PUBLIC AuthNameIterator {
+class [[MONGO_MOD_PUBLIC]] AuthNameIterator {
 public:
     class Impl {
     public:

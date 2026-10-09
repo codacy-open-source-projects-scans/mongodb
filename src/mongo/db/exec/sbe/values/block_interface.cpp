@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/block_interface.h"
 
@@ -91,16 +65,20 @@ std::unique_ptr<ValueBlock> ValueBlock::mapMonotonicFastPath(const ColumnOp& op)
         auto [lbTag, lbVal] = tryLowerBound();
         auto [ubTag, ubVal] = tryUpperBound();
 
-        if (lbTag == ubTag && lbTag != value::TypeTags::Nothing) {
-            auto [lbResTag, lbResVal] = op.processSingle(lbTag, lbVal);
-            ValueGuard minGuard(lbResTag, lbResVal);
-            auto [ubResTag, ubResVal] = op.processSingle(ubTag, ubVal);
-            ValueGuard maxGuard(ubResTag, ubResVal);
+        // NaN is an outlier that compares false against everything, so a bound of NaN breaks the
+        // monotonicity assumption below. Fall back to processing the whole block in that case.
+        if (isNaN(lbTag, lbVal) || isNaN(ubTag, ubVal)) {
+            return nullptr;
+        }
 
-            auto [cmpTag, cmpVal] = value::compareValue(lbResTag, lbResVal, ubResTag, ubResVal);
+        if (lbTag == ubTag && lbTag != value::TypeTags::Nothing) {
+            auto minOwned = op.processSingle(lbTag, lbVal);
+            auto maxOwned = op.processSingle(ubTag, ubVal);
+
+            auto [cmpTag, cmpVal] = value::compareValue(
+                minOwned.tag(), minOwned.value(), maxOwned.tag(), maxOwned.value());
             if (cmpTag == value::TypeTags::NumberInt32 && cmpVal == 0) {
-                // The MonoBlock constructor assumes ownership of lbResVal
-                auto [resTag, resVal] = copyValue(lbResTag, lbResVal);
+                auto [resTag, resVal] = minOwned.releaseToRaw();
                 return std::make_unique<MonoBlock>(count(), resTag, resVal);
             }
         }
@@ -260,8 +238,8 @@ std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::map(const ColumnOp& op
     size_t numVals = _vals.size();
     if (numVals == 0) {
         // The block has only Nothing values.
-        auto [resultTag, resultValue] = op.processSingle(value::TypeTags::Nothing, 0);
-        return std::make_unique<value::MonoBlock>(blockSize, resultTag, resultValue);
+        return std::make_unique<value::MonoBlock>(blockSize,
+                                                  op.processSingle(value::TypeTags::Nothing, 0));
     }
 
     std::vector<TypeTags> tags(numVals, TypeTags::Nothing);
@@ -278,8 +256,7 @@ std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::map(const ColumnOp& op
     }
 
     // If the block is not dense, we have to get the result for Nothing input(s).
-    auto [nullTag, nullVal] = op.processSingle(value::TypeTags::Nothing, 0);
-    ValueGuard nullGuard(nullTag, nullVal);
+    auto nullOwned = op.processSingle(value::TypeTags::Nothing, 0);
 
     // Then, insert it in the proper places.
     std::vector<TypeTags> mergedTags(blockSize, TypeTags::Nothing);
@@ -292,7 +269,7 @@ std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::map(const ColumnOp& op
             mergedVals[i] = vals[valIdx];
             valIdx++;
         } else {
-            std::tie(mergedTags[i], mergedVals[i]) = sbe::value::copyValue(nullTag, nullVal);
+            std::tie(mergedTags[i], mergedVals[i]) = nullOwned.copy().releaseToRaw();
         }
     }
     blockGuard.reset();
@@ -566,11 +543,11 @@ template value::TagValueView DoubleBlock::at(size_t idx);
 template value::TagValueView BoolBlock::at(size_t idx);
 
 void HeterogeneousBlock::push_back(TypeTags t, Value v) {
-    ValueGuard guard(t, v);
+    TagValueOwned owned = TagValueOwned::fromRaw(t, v);
 
     _vals.push_back(v);
     _tags.push_back(t);
 
-    guard.reset();
+    owned.disown();
 }
 }  // namespace mongo::sbe::value

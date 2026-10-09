@@ -1,6 +1,7 @@
 // Test that commands other than retryable writes may not use txnNumber outside transactions.
 //
 // @tags: [
+//   uses_explain,
 //   # The test runs commands that are not allowed with security token: applyOps,
 //   # coordinateCommitTransaction, endSession, killCursors, mapReduce, prepareTransaction.
 //   not_allowed_with_signed_security_token,
@@ -44,12 +45,10 @@ const nonRetryableWriteCommandsMongodOnly = [
 
 nonRetryableWriteCommands.forEach(function (command) {
     jsTest.log("Testing command: " + tojson(command));
-    assert.commandFailedWithCode(sessionDb.runCommand(Object.assign({}, command, {txnNumber: NumberLong(0)})), [
-        50768,
-        50889,
-        ErrorCodes.TypeMismatch,
-        ErrorCodes.InvalidNamespace,
-    ]);
+    assert.commandFailedWithCode(
+        sessionDb.runCommand(Object.assign({}, command, {txnNumber: NumberLong(0)})),
+        [50768, 50889, ErrorCodes.TypeMismatch, ErrorCodes.InvalidNamespace],
+    );
 });
 
 if (!FixtureHelpers.isMongos(db)) {

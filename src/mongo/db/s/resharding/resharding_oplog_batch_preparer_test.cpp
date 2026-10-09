@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_batch_preparer.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,7 +16,6 @@
 #include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
@@ -861,18 +833,35 @@ TEST_F(ReshardingOplogBatchPreparerTest, SessionWriteVectorsForPartialUnprepared
     runTest(makeLogicalSessionIdWithTxnNumberAndUUIDForTest());
 }
 
-TEST_F(ReshardingOplogBatchPreparerTest, SessionWriteVectorsDeriveCrudOpsForMultiApplyOpsBasic) {
+class ReshardingOplogBatchPreparerRetryableApplyOpsTest
+    : public ReshardingOplogBatchPreparerTest,
+      public ::testing::WithParamInterface<repl::MultiOplogEntryType> {};
+
+INSTANTIATE_TEST_SUITE_P(ReshardingOplogBatchPreparerTest,
+                         ReshardingOplogBatchPreparerRetryableApplyOpsTest,
+                         ::testing::Values(repl::MultiOplogEntryType::kApplyOpsAppliedSeparately,
+                                           repl::MultiOplogEntryType::kApplyOpsAppliedAtomically),
+                         [](const ::testing::TestParamInfo<repl::MultiOplogEntryType>& info) {
+                             return info.param ==
+                                     repl::MultiOplogEntryType::kApplyOpsAppliedSeparately
+                                 ? "kApplyOpsAppliedSeparately"
+                                 : "kApplyOpsAppliedAtomically";
+                         });
+
+TEST_P(ReshardingOplogBatchPreparerRetryableApplyOpsTest,
+       SessionWriteVectorsUnrollsRetryableApplyOps) {
+    const auto multiOpType = GetParam();
+
     const auto lsid = makeLogicalSessionIdForTest();
     const TxnNumber txnNumber{1};
 
     OplogBatch batch;
-    // 'makeApplyOpsForInsert' uses the "_id" of each document as the "stmtId"
     batch.emplace_back(makeApplyOpsForInsert({BSON("_id" << 0), BSON("_id" << 1), BSON("_id" << 2)},
                                              lsid,
                                              txnNumber,
                                              false /* isPrepare */,
                                              false /* isPartial */,
-                                             repl::MultiOplogEntryType::kApplyOpsAppliedSeparately,
+                                             multiOpType,
                                              true /* useStmtIds */));
 
     std::list<repl::OplogEntry> derivedOps;
@@ -890,6 +879,46 @@ TEST_F(ReshardingOplogBatchPreparerTest, SessionWriteVectorsDeriveCrudOpsForMult
         ASSERT_BSONOBJ_EQ(writer[i]->getObject(), (BSON("_id" << static_cast<int>(i))));
         ASSERT_FALSE(writer[i]->getMultiOpType());
     }
+}
+
+// A retryable op on a non-terminal (partialTxn) entry of an atomic-write chain is still unrolled.
+TEST_F(ReshardingOplogBatchPreparerTest,
+       SessionWriteVectorsUnrollsRetryableOpInNonTerminalAtomicApplyOps) {
+    const auto lsid = makeLogicalSessionIdForTest();
+    const TxnNumber txnNumber{1};
+
+    OplogBatch batch;
+    // Non-terminal ('partialTxn') entry carrying the retryable statement (stmtId 0).
+    batch.emplace_back(makeApplyOpsForInsert({BSON("_id" << 0)},
+                                             lsid,
+                                             txnNumber,
+                                             false /* isPrepare */,
+                                             true /* isPartial */,
+                                             repl::MultiOplogEntryType::kApplyOpsAppliedAtomically,
+                                             true /* useStmtIds */));
+    // Terminal entry holding only non-retryable ops (no stmtIds), like index side writes.
+    batch.emplace_back(makeApplyOpsForInsert({BSON("_id" << 1)},
+                                             lsid,
+                                             txnNumber,
+                                             false /* isPrepare */,
+                                             false /* isPartial */,
+                                             repl::MultiOplogEntryType::kApplyOpsAppliedAtomically,
+                                             false /* useStmtIds */));
+
+    std::list<repl::OplogEntry> derivedOps;
+    auto writerVectors = _batchPreparer.makeSessionOpWriterVectors(batch, derivedOps);
+
+    // Only the retryable op from the non-terminal entry should be unrolled into a session op; the
+    // terminal entry's non-retryable ops are skipped.
+    ASSERT_EQ(derivedOps.size(), 1U);
+
+    auto writer = getNonEmptyWriterVector(writerVectors);
+    ASSERT_EQ(writer.size(), 1U);
+    ASSERT_EQ(writer[0]->getSessionId(), lsid);
+    ASSERT_EQ(*writer[0]->getTxnNumber(), txnNumber);
+    ASSERT(writer[0]->getOpType() == repl::OpTypeEnum::kInsert);
+    ASSERT_BSONOBJ_EQ(writer[0]->getObject(), (BSON("_id" << 0)));
+    ASSERT_FALSE(writer[0]->getMultiOpType());
 }
 
 }  // namespace

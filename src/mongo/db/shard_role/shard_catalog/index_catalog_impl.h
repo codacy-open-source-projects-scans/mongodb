@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
@@ -54,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -141,6 +115,8 @@ public:
 
     int numIndexesInProgress() const override;
 
+    const doc_diff::IndexUpdateIdentifier* getIndexUpdateIdentifier() const final;
+
     bool haveIdIndex(OperationContext* opCtx) const override;
 
     BSONObj getDefaultIdIndexSpec(const CollectionPtr& collection) const override;
@@ -148,7 +124,7 @@ public:
     const IndexCatalogEntry* findIdIndex(OperationContext* opCtx) const override;
 
     const IndexCatalogEntry* findIndexByName(OperationContext* opCtx,
-                                             StringData name,
+                                             std::string_view name,
                                              InclusionPolicy inclusionPolicy) const override;
 
     const IndexCatalogEntry* findIndexByKeyPatternAndOptions(
@@ -168,7 +144,7 @@ public:
                          InclusionPolicy inclusionPolicy) const override;
 
     const IndexCatalogEntry* findIndexByIdent(OperationContext* opCtx,
-                                              StringData ident,
+                                              std::string_view ident,
                                               InclusionPolicy inclusionPolicy) const override;
 
     const IndexCatalogEntry* refreshEntry(OperationContext* opCtx,
@@ -177,7 +153,7 @@ public:
                                           CreateIndexEntryFlags flags) override;
 
     IndexCatalogEntry* getWritableEntryByName(OperationContext* opCtx,
-                                              StringData name,
+                                              std::string_view name,
                                               InclusionPolicy inclusionPolicy) override;
 
     IndexCatalogEntry* getWritableEntryByKeyPatternAndOptions(
@@ -323,12 +299,6 @@ private:
      */
     std::string _getAccessMethodName(const BSONObj& keyPattern) const;
 
-    Status _indexFilteredRecords(OperationContext* opCtx,
-                                 const CollectionPtr& coll,
-                                 const IndexCatalogEntry* index,
-                                 const std::vector<BsonRecord>& bsonRecords,
-                                 int64_t* keysInsertedOut) const;
-
     Status _indexRecords(OperationContext* opCtx,
                          const CollectionPtr& coll,
                          const IndexCatalogEntry* index,
@@ -398,7 +368,7 @@ private:
         const CollectionPtr& collection,
         const BSONObj& spec,
         InclusionPolicy inclusionPolicy,
-        const std::map<StringData, std::set<IndexType>>* allowedFieldNames = nullptr) const;
+        const std::map<std::string_view, std::set<IndexType>>* allowedFieldNames = nullptr) const;
 
     /**
      * Returns true if the replica set member's config has {buildIndexes:false} set, which means

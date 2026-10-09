@@ -1,5 +1,9 @@
 /**
  * Tests for serverStatus metrics.queryExecutor stats.
+ *
+ * @tags: [
+ *   requires_profiling,
+ * ]
  */
 const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod was unable to start up");
@@ -37,7 +41,13 @@ assert.eq(0, profilerStats.tailable);
 
 // Test a tailable collection scan.
 assert.commandWorked(
-    db.runCommand({find: "system.profile", filter: {}, tailable: true, awaitData: true, batchSize: 0}),
+    db.runCommand({
+        find: "system.profile",
+        filter: {},
+        tailable: true,
+        awaitData: true,
+        batchSize: 0,
+    }),
 );
 profilerStats = getProfilerCollectionScansStats();
 assert.eq(2, profilerStats.total);

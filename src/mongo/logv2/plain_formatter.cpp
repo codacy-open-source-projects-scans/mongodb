@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/logv2/plain_formatter.h"
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -48,6 +21,7 @@
 #include <deque>
 #include <functional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -62,6 +36,7 @@
 #include <fmt/format.h>
 
 namespace mongo::logv2 {
+using namespace std::literals::string_view_literals;
 namespace {
 
 struct TextValueExtractor {
@@ -124,8 +99,8 @@ private:
      * Workaround for `dynamic_format_arg_store`'s desire to copy string
      * values and user-defined values.
      */
-    static auto _wrapValue(StringData val) {
-        return toStdStringViewForInterop(val);
+    static auto _wrapValue(std::string_view val) {
+        return val;
     }
 
     template <typename T>
@@ -142,7 +117,7 @@ private:
     }
 
     void _addString(const char* name, std::string&& val) {
-        _add(name, StringData{_store(std::move(val))});
+        _add(name, std::string_view{_store(std::move(val))});
     }
 
     template <typename T>
@@ -160,7 +135,7 @@ void PlainFormatter::operator()(boost::log::record_view const& rec,
                                 fmt::memory_buffer& buffer) const {
     using boost::log::extract;
 
-    StringData message = extract<StringData>(attributes::message(), rec).get();
+    std::string_view message = extract<std::string_view>(attributes::message(), rec).get();
     const auto& attrs = extract<TypeErasedAttributeStorage>(attributes::attributes(), rec);
 
     // Log messages logged via logd are already formatted and have the id == 0
@@ -174,8 +149,7 @@ void PlainFormatter::operator()(boost::log::record_view const& rec,
     TextValueExtractor extractor;
     extractor.reserve(attrs.get().size());
     attrs.get().apply(extractor);
-    fmt::vformat_to(
-        std::back_inserter(buffer), toStdStringViewForInterop(message), extractor.args());
+    fmt::vformat_to(std::back_inserter(buffer), message, extractor.args());
 
     size_t attributeMaxSize = buffer.size();
     if (extract<LogTruncation>(attributes::truncation(), rec).get() == LogTruncation::Enabled) {
@@ -186,7 +160,7 @@ void PlainFormatter::operator()(boost::log::record_view const& rec,
     }
 
     buffer.resize(std::min(attributeMaxSize, buffer.size()));
-    if (StringData sd(buffer.data(), buffer.size()); sd.ends_with("\n"_sd))
+    if (std::string_view sd(buffer.data(), buffer.size()); sd.ends_with("\n"sv))
         buffer.resize(buffer.size() - 1);
 }
 

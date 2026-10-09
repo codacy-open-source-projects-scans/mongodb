@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 
@@ -39,7 +13,6 @@
 #include "mongo/db/s/primary_only_service_helpers/phase_transition_progress_gen.h"
 #include "mongo/db/s/primary_only_service_helpers/with_automatic_retry.h"
 #include "mongo/db/session/internal_session_pool.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/fail_point.h"
@@ -180,12 +153,12 @@ private:
     SharedPromise<DbResponse> _updateResponse;
     bool _autoCompleteUpdates{true};
     BSONObj _autoCompleteResponse{updateSuccessResponseBSONObj()};
-    AtomicWord<bool> _isUpdatePending{false};
-    AtomicWord<int> _startBlockingMigrationsCount{0};
-    AtomicWord<int> _stopBlockingMigrationsCount{0};
+    Atomic<bool> _isUpdatePending{false};
+    Atomic<int> _startBlockingMigrationsCount{0};
+    Atomic<int> _stopBlockingMigrationsCount{0};
     const InternalSessionPool::Session _session{makeLogicalSessionIdForTest(), 42};
-    AtomicWord<bool> _sessionIsCheckedOut{false};
-    AtomicWord<bool> _migrationsAreBlocked{false};
+    Atomic<bool> _sessionIsCheckedOut{false};
+    Atomic<bool> _migrationsAreBlocked{false};
 
     std::mutex _collectionsLock;
     std::map<NamespaceString, bool> _collections;

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/executor/task_executor_cursor.h"
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/query/client_cursor/kill_cursors_gen.h"
 #include "mongo/db/query/getmore_command_gen.h"
@@ -67,14 +40,16 @@ TaskExecutorCursor::TaskExecutorCursor(std::shared_ptr<executor::TaskExecutor> e
         _lsid = rcr.opCtx->getLogicalSessionId();
     }
     if (_options.pinConnection) {
+        tassert(12712200,
+                "TaskExecutorCursor in pinning mode must have an opCtx to register the "
+                "PinnedConnectionTaskExecutor for shutdown ordering",
+                rcr.opCtx);
         _executor = makePinnedConnectionTaskExecutor(executor);
         _underlyingExecutor = std::move(executor);
         // Hold a (PCTE, underlying executor) pair so shutdown can drain the PCTE before
         // 'underlying' is destroyed.
-        if (rcr.opCtx) {
-            _pcteToken = std::make_unique<PinnedExecutorRegistryToken>(
-                rcr.opCtx->getServiceContext(), _executor, _underlyingExecutor);
-        }
+        _pcteToken = std::make_unique<PinnedExecutorRegistryToken>(
+            rcr.opCtx->getServiceContext(), _executor, _underlyingExecutor);
     } else {
         _executor = std::move(executor);
     }
@@ -111,9 +86,9 @@ TaskExecutorCursor::TaskExecutorCursor(std::shared_ptr<executor::TaskExecutor> e
 }
 
 TaskExecutorCursor::TaskExecutorCursor(TaskExecutorCursor&& other) noexcept
-    : _executor(std::move(other._executor)),
+    : _pcteToken(std::move(other._pcteToken)),
+      _executor(std::move(other._executor)),
       _underlyingExecutor(std::move(other._underlyingExecutor)),
-      _pcteToken(std::move(other._pcteToken)),
       _rcr(other._rcr),  // NOLINT
       _options(std::move(other._options)),
       _lsid(other._lsid),  // NOLINT
@@ -184,19 +159,26 @@ TaskExecutorCursor::~TaskExecutorCursor() {
             tassert(12080501,
                     "TaskExecutorCursor in pinning mode must have an underlying executor",
                     _underlyingExecutor != nullptr);
-            callbackToRun = [main = _executor, underlying = _underlyingExecutor](const auto&) {
-                underlying->schedule([main = std::move(main)](const auto&) {
-                    if (MONGO_unlikely(
-                            blockBeforePinnedExecutorIsDestroyedOnUnderlying.shouldFail())) {
-                        LOGV2(7361300,
-                              "Hanging before destroying a TaskExecutorCursor's pinning executor.");
-                        blockBeforePinnedExecutorIsDestroyedOnUnderlying.pauseWhileSet();
-                    }
-                    // Returning from this callback will destroy the pinned executor on
-                    // underlying if this is the last TaskExecutorCursor using that pinned executor.
-                });
-            };
-            _pcteToken.reset();
+            // Move the registry token into the callback so the PCTE stays registered until
+            // it is fully destroyed. This prevents shutdownPinnedExecutors from missing the
+            // PCTE if server shutdown races with cursor teardown.
+            auto token = std::shared_ptr<PinnedExecutorRegistryToken>(std::move(_pcteToken));
+            callbackToRun =
+                [main = _executor, underlying = _underlyingExecutor, token](const auto&) {
+                    underlying->schedule([main = std::move(main), token](const auto&) {
+                        if (MONGO_unlikely(
+                                blockBeforePinnedExecutorIsDestroyedOnUnderlying.shouldFail())) {
+                            LOGV2(7361300,
+                                  "Hanging before destroying a TaskExecutorCursor's pinning "
+                                  "executor.");
+                            blockBeforePinnedExecutorIsDestroyedOnUnderlying.pauseWhileSet();
+                        }
+                        // Returning from this callback will destroy the pinned executor on
+                        // underlying if this is the last TaskExecutorCursor using that pinned
+                        // executor. The registry token is also released here, keeping the PCTE
+                        // registered until it is fully destroyed.
+                    });
+                };
         }
         auto swCallback = _executor->scheduleRemoteCommand(
             _createRequest(nullptr, KillCursorsCommandRequest(_ns, {_cursorId}).toBSON()),

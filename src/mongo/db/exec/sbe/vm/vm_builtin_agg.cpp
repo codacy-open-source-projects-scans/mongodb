@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/util.h"
@@ -39,12 +13,11 @@ namespace sbe {
 namespace vm {
 template <bool merging>
 value::TagValueMaybeOwned ByteCode::builtinAggDoubleDoubleSum(ArityType arity) {
-    auto [_, fieldTag, fieldValue] = getFromStack(1);
-    value::TagValueView field(fieldTag, fieldValue);
+    auto field = viewFromStack(1);
 
     // Move the incoming accumulator state from the stack. Given that we are now the owner of the
     // state we are free to do any in-place update as we see fit.
-    auto accTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto accTagVal = moveOwnedFromStack(0);
 
     // Initialize the accumulator.
     if (accTagVal.tag() == value::TypeTags::Nothing) {
@@ -69,11 +42,10 @@ template value::TagValueMaybeOwned ByteCode::builtinAggDoubleDoubleSum<true>(Ari
 
 template <bool merging>
 value::TagValueMaybeOwned ByteCode::builtinAggStdDev(ArityType arity) {
-    auto [_, fieldTag, fieldValue] = getFromStack(1);
-    auto field = value::TagValueView{fieldTag, fieldValue};
+    auto field = viewFromStack(1);
 
     // Initialize the accumulator.
-    auto acc = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto acc = moveOwnedFromStack(0);
 
     // Initialize the accumulator if needed.
     if (acc.tag() == value::TypeTags::Nothing) {
@@ -82,9 +54,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggStdDev(ArityType arity) {
         arr->reserve(AggStdDevValueElems::kSizeOfArray);
 
         // The order of the following three elements should match to 'AggStdDevValueElems'.
-        arr->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
-        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
-        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+        arr->push_back_raw(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
+        arr->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+        arr->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
     }
 
     tassert(5755210, "The result slot must be Array-typed", acc.tag() == value::TypeTags::Array);
@@ -93,7 +65,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggStdDev(ArityType arity) {
     if constexpr (merging) {
         aggMergeStdDevsImpl(accumulator, field.tag, field.value);
     } else {
-        aggStdDevImpl(accumulator, field.tag, field.value);
+        aggStdDevImpl(accumulator, field);
     }
 
     // Transfer ownership to return value
@@ -117,8 +89,9 @@ value::TagValueMaybeOwned ByteCode::concatArraysAccumImpl(
         // The order is important! The accumulated array should be at index
         // AggArrayWithSize::kValues, and the size should be at index
         // AggArrayWithSize::kSizeOfValues.
-        accumulatorState->push_back(value::makeNewArray());
-        accumulatorState->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));
+        accumulatorState->push_back_raw(value::makeNewArray());
+        accumulatorState->push_back_raw(value::TypeTags::NumberInt64,
+                                        value::bitcastFrom<int64_t>(0));
     }
     tassert(7039514,
             "Expected array for set accumulator state",
@@ -161,7 +134,7 @@ value::TagValueMaybeOwned ByteCode::concatArraysAccumImpl(
         value::arrayForEach<true>(newArrayElements.tag(),
                                   newArrayElements.value(),
                                   [&](value::TypeTags tagNewElem, value::Value valNewElem) {
-                                      accArray->push_back(tagNewElem, valNewElem);
+                                      accArray->push_back_raw(tagNewElem, valNewElem);
                                   });
     }
 
@@ -169,11 +142,10 @@ value::TagValueMaybeOwned ByteCode::concatArraysAccumImpl(
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggConcatArraysCapped(ArityType arity) {
-    auto lhsAccumulatorStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto rhsAccumulatorStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto lhsAccumulatorStateTagVal = moveOwnedFromStack(0);
+    auto rhsAccumulatorStateTagVal = moveOwnedFromStack(1);
 
-    auto [_, tagSizeCap, valSizeCap] = getFromStack(2);
-    auto sizeCap = value::TagValueView{tagSizeCap, valSizeCap};
+    auto sizeCap = viewFromStack(2);
     tassert(7039508,
             "'cap' parameter must be a 32-bit int",
             sizeCap.tag == value::TypeTags::NumberInt32);
@@ -226,15 +198,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggSetUnion(ArityType arity) {
             accTagVal.tag() == value::TypeTags::ArraySet);
     auto acc = value::getArraySetView(accTagVal.value());
 
-    auto newSet = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto newSet = moveOwnedFromStack(1);
     if (!value::isArray(newSet.tag())) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     value::arrayForEach(
         newSet.tag(), newSet.value(), [&](value::TypeTags elTag, value::Value elVal) {
-            auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-            acc->push_back(copyTag, copyVal);
+            acc->push_back_clone(elTag, elVal);
         });
 
     return accTagVal;
@@ -244,12 +215,11 @@ value::TagValueMaybeOwned ByteCode::builtinAggCollSetUnion(ArityType arity) {
     auto accTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(0));
 
     if (accTagVal.tag() == value::TypeTags::Nothing) {
-        auto [_, collatorTag, collatorVal] = getFromStack(1);
-        auto collatorTagVal = value::TagValueView{collatorTag, collatorVal};
+        auto collatorView = viewFromStack(1);
         tassert(7690402,
                 "Expected value of type 'collator'",
-                collatorTagVal.tag == value::TypeTags::collator);
-        CollatorInterface* collator = value::getCollatorView(collatorTagVal.value);
+                collatorView.tag == value::TypeTags::collator);
+        CollatorInterface* collator = value::getCollatorView(collatorView.value);
 
         // Initialize the accumulator.
         auto [tagAcc, valAcc] = value::makeNewArraySet(collator);
@@ -265,15 +235,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggCollSetUnion(ArityType arity) {
             accTagVal.tag() == value::TypeTags::ArraySet);
     auto acc = value::getArraySetView(accTagVal.value());
 
-    auto newSet = value::TagValueOwned::fromRaw(moveOwnedFromStack(2));
+    auto newSet = moveOwnedFromStack(2);
     if (!value::isArray(newSet.tag())) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     value::arrayForEach(
         newSet.tag(), newSet.value(), [&](value::TypeTags elTag, value::Value elVal) {
-            auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-            acc->push_back(copyTag, copyVal);
+            acc->push_back_clone(elTag, elVal);
         });
 
     return accTagVal;
@@ -307,11 +276,10 @@ value::TagValueMaybeOwned builtinAggSetUnionCappedImpl(
 }  // namespace
 
 value::TagValueMaybeOwned ByteCode::builtinAggSetUnionCapped(ArityType arity) {
-    auto lhsAccumulatorState = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto rhsAccumulatorState = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto lhsAccumulatorState = moveOwnedFromStack(0);
+    auto rhsAccumulatorState = moveOwnedFromStack(1);
 
-    auto [_, tagSizeCap, valSizeCap] = getFromStack(2);
-    value::TagValueView sizeCap(tagSizeCap, valSizeCap);
+    auto sizeCap = viewFromStack(2);
     tassert(7039509,
             "'cap' parameter must be a 32-bit int",
             sizeCap.tag == value::TypeTags::NumberInt32);
@@ -323,16 +291,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggSetUnionCapped(ArityType arity) {
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggCollSetUnionCapped(ArityType arity) {
-    auto lhsAccumulatorState = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto lhsAccumulatorState = moveOwnedFromStack(0);
 
-    auto [_1, tagColl, valColl] = getFromStack(1);
-    auto coll = value::TagValueView{tagColl, valColl};
+    auto coll = viewFromStack(1);
     tassert(7039510, "expected value of type 'collator'", coll.tag == value::TypeTags::collator);
 
-    auto rhsAccumulatorState = value::TagValueOwned::fromRaw(moveOwnedFromStack(2));
+    auto rhsAccumulatorState = moveOwnedFromStack(2);
 
-    auto [_2, tagSizeCap, valSizeCap] = getFromStack(3);
-    auto sizeCap = value::TagValueView{tagSizeCap, valSizeCap};
+    auto sizeCap = viewFromStack(3);
     tassert(7039511,
             "'cap' parameter must be a 32-bit int",
             sizeCap.tag == value::TypeTags::NumberInt32);
@@ -364,7 +330,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggFirstNNeedsMoreInput(ArityType ari
             maxSize.tag == value::TypeTags::NumberInt64);
 
     bool needMoreInput = (array->size() < maxSize.value);
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(needMoreInput)};
+    return value::TagValueMaybeOwned::boolean(needMoreInput);
 }
 
 namespace {
@@ -386,21 +352,20 @@ int32_t aggFirstN(value::Array* state,
 }  // namespace
 
 value::TagValueMaybeOwned ByteCode::builtinAggFirstN(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
-    auto [fieldTag, fieldVal] = moveOwnedFromStack(1);
-    aggFirstN(state, array, maxSize, memUsage, memLimit, {fieldTag, fieldVal});
+    aggFirstN(state, array, maxSize, memUsage, memLimit, moveOwnedFromStack(1));
 
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggFirstNMerge(ArityType arity) {
-    auto mergeStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto mergeStateTagVal = moveOwnedFromStack(0);
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(1);
 
     auto [mergeState,
           mergeArray,
@@ -408,9 +373,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggFirstNMerge(ArityType arity) {
           mergeMaxSize,
           mergeMemUsage,
           mergeMemLimit,
-          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.tag(), mergeStateTagVal.value());
+          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.view());
     auto [state, array, accStartIdx, accMaxSize, accMemUsage, accMemLimit, accIsGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
     uassert(7548604,
             "Two arrays to merge should have the same MaxSize component",
             accMaxSize == mergeMaxSize);
@@ -429,7 +394,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggFirstNMerge(ArityType arity) {
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggFirstNFinalize(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     uassert(7548605, "expected an array", stateTagVal.tag() == value::TypeTags::Array);
     auto state = value::getArrayView(stateTagVal.value());
@@ -481,21 +446,21 @@ std::pair<size_t, int32_t> aggLastN(value::Array* state,
 }  // namespace
 
 value::TagValueMaybeOwned ByteCode::builtinAggLastN(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
-    auto fieldTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto fieldTagVal = moveOwnedFromStack(1);
     aggLastN(state, array, startIdx, maxSize, memUsage, memLimit, std::move(fieldTagVal));
 
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggLastNMerge(ArityType arity) {
-    auto mergeStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto mergeStateTagVal = moveOwnedFromStack(0);
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(1);
 
     auto [mergeState,
           mergeArray,
@@ -503,9 +468,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggLastNMerge(ArityType arity) {
           mergeMaxSize,
           mergeMemUsage,
           mergeMemLimit,
-          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.tag(), mergeStateTagVal.value());
+          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.view());
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
     uassert(7548703,
             "Two arrays to merge should have the same MaxSize component",
             maxSize == mergeMaxSize);
@@ -531,10 +496,10 @@ value::TagValueMaybeOwned ByteCode::builtinAggLastNMerge(ArityType arity) {
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggLastNFinalize(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, arr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
     if (startIdx == 0) {
         if (isGroupAccum) {
             auto out = state->swapAt(0, value::TypeTags::Null, 0);
@@ -562,7 +527,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggLastNFinalize(ArityType arity) {
             auto srcIdx = (i + startIdx) % maxSize;
             auto elem = arr->getAt(srcIdx);
             auto [copyTag, copyVal] = value::copyValue(elem.tag, elem.value);
-            outArray->push_back(copyTag, copyVal);
+            outArray->push_back_raw(copyTag, copyVal);
         }
     }
     return outArrayTagVal;
@@ -637,11 +602,8 @@ protected:
 
         if (_sense == TopBottomSense::kTop) {
             for (size_t i = 0; i < sortPattern.size(); i++) {
-                auto [_, keyTag, keyVal] = _bytecode->getFromStack(_keysStartOffset + i);
-                auto keyTagVal = value::TagValueView{keyTag, keyVal};
-                auto itemTagVal = itemArray->getAt(i);
                 int32_t cmp = compare<TopBottomSense::kTop>(
-                    keyTagVal.tag, keyTagVal.value, itemTagVal.tag, itemTagVal.value);
+                    _bytecode->viewFromStack(_keysStartOffset + i), itemArray->getAt(i));
 
                 if (cmp != 0) {
                     return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
@@ -649,11 +611,8 @@ protected:
             }
         } else {
             for (size_t i = 0; i < sortPattern.size(); i++) {
-                auto [_, keyTag, keyVal] = _bytecode->getFromStack(_keysStartOffset + i);
-                auto keyTagVal = value::TagValueView{keyTag, keyVal};
-                auto itemTagVal = itemArray->getAt(i);
                 int32_t cmp = compare<TopBottomSense::kBottom>(
-                    keyTagVal.tag, keyTagVal.value, itemTagVal.tag, itemTagVal.value);
+                    _bytecode->viewFromStack(_keysStartOffset + i), itemArray->getAt(i));
 
                 if (cmp != 0) {
                     return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
@@ -669,8 +628,7 @@ protected:
         auto keysArr = value::getArrayView(keys.value());
 
         for (size_t i = 0; i < _numKeys; ++i) {
-            auto [keyTag, keyVal] = _bytecode->moveOwnedFromStack(_keysStartOffset + i);
-            keysArr->push_back(keyTag, keyVal);
+            keysArr->push_back(_bytecode->moveOwnedFromStack(_keysStartOffset + i));
         }
 
         return keys;
@@ -681,8 +639,7 @@ protected:
         auto valuesArr = value::getArrayView(values.value());
 
         for (size_t i = 0; i < _numValues; ++i) {
-            auto [valueTag, valueVal] = _bytecode->moveOwnedFromStack(_valuesStartOffset + i);
-            valuesArr->push_back(valueTag, valueVal);
+            valuesArr->push_back(_bytecode->moveOwnedFromStack(_valuesStartOffset + i));
         }
 
         return values;
@@ -706,22 +663,21 @@ value::TagValueMaybeOwned ByteCode::builtinAggTopBottomNImpl(ArityType arity) {
         8448703, "Argument must be of sortSpec type", sortSpec.tag() == value::TypeTags::sortSpec);
     auto ss = value::getSortSpecView(sortSpec.value());
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
     size_t numKeys = 1;
     bool keyIsDecomposed = false;
-    auto [_, numKeysTag, numKeysVal] = getFromStack(2);
-    auto numKeysTagVal = value::TagValueView{numKeysTag, numKeysVal};
-    if (numKeysTagVal.tag == value::TypeTags::NumberInt32) {
-        numKeys = static_cast<size_t>(value::bitcastTo<int32_t>(numKeysTagVal.value));
+    auto numKeysView = viewFromStack(2);
+    if (numKeysView.tag == value::TypeTags::NumberInt32) {
+        numKeys = static_cast<size_t>(value::bitcastTo<int32_t>(numKeysView.value));
         keyIsDecomposed = true;
     } else {
         tassert(8448704,
                 "Expected numKeys to be Null or Int32",
-                numKeysTagVal.tag == value::TypeTags::Null);
+                numKeysView.tag == value::TypeTags::Null);
     }
 
     constexpr size_t keysStartOffset = 3;
@@ -729,11 +685,10 @@ value::TagValueMaybeOwned ByteCode::builtinAggTopBottomNImpl(ArityType arity) {
     const size_t numValues = ValueIsDecomposedArray ? arity - valuesStartOffset : 1;
 
     if (!keyIsDecomposed && !ValueIsDecomposedArray) {
-        auto [keyOwned, keyTag, keyVal] = moveFromStack(keysStartOffset);
-        auto [valueOwned, valueTag, valueVal] = moveFromStack(valuesStartOffset);
+        auto key = moveOwnedFromStack(keysStartOffset);
+        auto val = moveOwnedFromStack(valuesStartOffset);
 
-        TopBottomArgsDirect topBottomArgs{
-            Sense, ss, {keyOwned, keyTag, keyVal}, {valueOwned, valueTag, valueVal}};
+        TopBottomArgsDirect topBottomArgs{Sense, ss, std::move(key), std::move(val)};
 
         aggTopBottomNAdd<Sense>(state, array, maxSize, memUsage, memLimit, topBottomArgs);
     } else {
@@ -781,27 +736,28 @@ value::TagValueMaybeOwned ByteCode::builtinAggTopBottomNMerge(ArityType arity) {
             sortSpecTagVal.tag() == value::TypeTags::sortSpec);
     auto sortSpec = value::getSortSpecView(sortSpecTagVal.value());
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
-    auto mergeStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(1);
+    auto mergeStateTagVal = moveOwnedFromStack(0);
     auto [mergeState,
           mergeArray,
           mergeStartIx,
           mergeMaxSize,
           mergeMemUsage,
           mergeMemLimit,
-          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.tag(), mergeStateTagVal.value());
+          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.view());
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
     tassert(5807008,
             "Two arrays to merge should have the same MaxSize component",
             maxSize == mergeMaxSize);
 
     for (auto [pairTag, pairVal] : array->values()) {
         auto pair = value::getArrayView(pairVal);
-        auto key = pair->swapAt(0, value::TypeTags::Null, 0);
-        auto value = pair->swapAt(1, value::TypeTags::Null, 0);
 
-        TopBottomArgsDirect topBottomArgs{Sense, sortSpec, std::move(key), std::move(value)};
+        TopBottomArgsDirect topBottomArgs{Sense,
+                                          sortSpec,
+                                          pair->swapAt(0, value::TypeTags::Null, 0),
+                                          pair->swapAt(1, value::TypeTags::Null, 0)};
 
         mergeMemUsage = aggTopBottomNAdd<Sense>(
             mergeState, mergeArray, mergeMaxSize, mergeMemUsage, mergeMemLimit, topBottomArgs);
@@ -821,9 +777,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggTopBottomNFinalize(ArityType arity
             sortSpecTagVal.tag() == value::TypeTags::sortSpec);
     auto sortSpec = value::getSortSpecView(sortSpecTagVal.value());
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
     auto outputArrayTagVal = value::TagValueOwned::fromRaw(value::makeNewArray());
     auto outputArray = value::getArrayView(outputArrayTagVal.value());
@@ -841,7 +797,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggTopBottomNFinalize(ArityType arity
         } else {
             auto outTagVal = pair->getAt(1);
             auto [copyTag, copyVal] = value::copyValue(outTagVal.tag, outTagVal.value);
-            outputArray->push_back(copyTag, copyVal);
+            outputArray->push_back_raw(copyTag, copyVal);
         }
     }
 
@@ -896,19 +852,79 @@ int32_t aggMinMaxN(value::Array* state,
 }
 }  // namespace
 
+value::TagValueMaybeOwned ByteCode::builtinAvgFromAcc(ArityType arity) {
+    auto accTagVal = value::TagValueOwned::fromRaw(genericInitializeDoubleDoubleSumState());
+    size_t numNumericArgs = 0;
+    value::Array* accumulator = value::getArrayView(accTagVal.value());
+
+    auto processOne = [&](value::TypeTags tag, value::Value val) {
+        if (value::isNumber(tag)) {
+            aggDoubleDoubleSumImpl(accumulator, tag, val);
+            ++numNumericArgs;
+        }
+    };
+
+    processStackRange(0, arity, processOne);
+
+    if (numNumericArgs == 0) {
+        return value::TagValueMaybeOwned::null();
+    }
+    auto sum = aggDoubleDoubleSumFinalizeImpl(accumulator);
+    return genericDiv(sum.view(), value::TagValueView::numberInt64(numNumericArgs));
+}
+
+template <AccumulatorMinMaxN::MinMaxSense S>
+value::TagValueMaybeOwned ByteCode::builtinMinMaxNFromAcc(ArityType arity) {
+    CollatorInterface* collator = nullptr;
+    ArityType startIdx = 0;
+    if (arity > 0) {
+        auto arg0 = viewFromStack(0);
+        if (arg0.tag == value::TypeTags::collator) {
+            collator = value::getCollatorView(arg0.value);
+            startIdx = 1;
+        }
+    }
+
+    value::TagValueOwned acc = value::TagValueOwned::nothing();
+
+    auto processOne = [&](value::TypeTags tag, value::Value val) {
+        // Mirror how SBE HashAgg handles nullish accumulator inputs.
+        if (value::isNullish(tag)) {
+            tag = value::TypeTags::Nothing;
+            val = 0;
+        }
+        if constexpr (S == AccumulatorMinMaxN::MinMaxSense::kMax) {
+            acc = aggMax(acc.view(), value::TagValueView{tag, val}, collator);
+        } else {
+            acc = aggMin(acc.view(), value::TagValueView{tag, val}, collator);
+        }
+    };
+
+    processStackRange(startIdx, arity, processOne);
+
+    if (acc.tag() == value::TypeTags::Nothing) {
+        return value::TagValueMaybeOwned::null();
+    }
+    return std::move(acc);
+}
+template value::TagValueMaybeOwned
+ByteCode::builtinMinMaxNFromAcc<AccumulatorMinMaxN::MinMaxSense::kMin>(ArityType arity);
+template value::TagValueMaybeOwned
+ByteCode::builtinMinMaxNFromAcc<AccumulatorMinMaxN::MinMaxSense::kMax>(ArityType arity);
+
 template <AccumulatorMinMaxN::MinMaxSense S>
 value::TagValueMaybeOwned ByteCode::builtinAggMinMaxN(ArityType arity) {
     tassert(11080087, "Unexpected arity value", arity == 2 || arity == 3);
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
-    auto fieldTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto fieldTagVal = moveOwnedFromStack(1);
     if (value::isNullish(fieldTagVal.tag())) {
         return stateTagVal;
     }
 
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
     CollatorInterface* collator = nullptr;
     if (arity == 3) {
@@ -917,7 +933,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggMinMaxN(ArityType arity) {
             7548802, "expected a collator argument", collTagVal.tag() == value::TypeTags::collator);
         collator = value::getCollatorView(collTagVal.value());
     }
-    aggMinMaxN<S>(state, array, maxSize, memUsage, memLimit, collator, fieldTagVal.releaseToRaw());
+    aggMinMaxN<S>(state, array, maxSize, memUsage, memLimit, collator, std::move(fieldTagVal));
 
     return stateTagVal;
 }
@@ -930,9 +946,9 @@ template <AccumulatorMinMaxN::MinMaxSense S>
 value::TagValueMaybeOwned ByteCode::builtinAggMinMaxNMerge(ArityType arity) {
     tassert(11080086, "Unexpected arity value", arity == 2 || arity == 3);
 
-    auto mergeStateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto mergeStateTagVal = moveOwnedFromStack(0);
 
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(1);
 
     auto [mergeState,
           mergeArray,
@@ -940,9 +956,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggMinMaxNMerge(ArityType arity) {
           mergeMaxSize,
           mergeMemUsage,
           mergeMemLimit,
-          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.tag(), mergeStateTagVal.value());
+          mergeIsGroupAccum] = getMultiAccState(mergeStateTagVal.view());
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
     uassert(7548801,
             "Two arrays to merge should have the same MaxSize component",
             maxSize == mergeMaxSize);
@@ -976,10 +992,10 @@ template value::TagValueMaybeOwned ByteCode::builtinAggMinMaxNMerge<(Accumulator
 template <AccumulatorMinMaxN::MinMaxSense S>
 value::TagValueMaybeOwned ByteCode::builtinAggMinMaxNFinalize(ArityType arity) {
     tassert(11080085, "Unexpected arity value", arity == 2 || arity == 1);
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
-        getMultiAccState(stateTagVal.tag(), stateTagVal.value());
+        getMultiAccState(stateTagVal.view());
 
     CollatorInterface* collator = nullptr;
     if (arity == 2) {
@@ -1052,47 +1068,41 @@ std::tuple<value::Array*, value::TagValueView, bool, int64_t, int64_t, SortSpec*
     return {state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec};
 }
 
-value::TagValueMaybeOwned builtinAggRankImpl(value::TypeTags stateTag,
-                                             value::Value stateVal,
-                                             bool valueOwned,
-                                             value::TypeTags valueTag,
-                                             value::Value valueVal,
+value::TagValueMaybeOwned builtinAggRankImpl(value::TagValueOwned state,
+                                             value::TagValueMaybeOwned input,
                                              bool isAscending,
                                              bool dense,
                                              CollatorInterface* collator = nullptr) {
 
     const char* kTempSortKeyField = "sortKey";
     // Initialize the accumulator.
-    if (stateTag == value::TypeTags::Nothing) {
+    if (state.tag() == value::TypeTags::Nothing) {
         auto newStateTagVal = value::TagValueOwned::fromRaw(value::makeNewArray());
 
         auto newState = value::getArrayView(newStateTagVal.value());
         newState->reserve(AggRankElems::kRankArraySize);
-        if (!valueOwned) {
-            std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
-        }
-        if (valueTag == value::TypeTags::Nothing) {
-            newState->push_back(value::TypeTags::Null, 0);  // kLastValue
-            newState->push_back(value::TypeTags::Boolean,
-                                value::bitcastFrom<bool>(true));  // kLastValueIsNothing
+        if (input.tag() == value::TypeTags::Nothing) {
+            newState->push_back_raw(value::TypeTags::Null, 0);  // kLastValue
+            newState->push_back_raw(value::TypeTags::Boolean,
+                                    value::bitcastFrom<bool>(true));  // kLastValueIsNothing
         } else {
-            newState->push_back(valueTag, valueVal);  // kLastValue
-            newState->push_back(value::TypeTags::Boolean,
-                                value::bitcastFrom<bool>(false));  // kLastValueIsNothing
+            auto [valueTag, valueVal] = input.releaseToOwnedRaw();
+            newState->push_back_raw(valueTag, valueVal);  // kLastValue
+            newState->push_back_raw(value::TypeTags::Boolean,
+                                    value::bitcastFrom<bool>(false));  // kLastValueIsNothing
         }
-        newState->push_back(value::TypeTags::NumberInt64, 1);  // kLastRank
-        newState->push_back(value::TypeTags::NumberInt64, 1);  // kSameRankCount
+        newState->push_back_raw(value::TypeTags::NumberInt64, 1);  // kLastRank
+        newState->push_back_raw(value::TypeTags::NumberInt64, 1);  // kSameRankCount
 
         auto sortSpec =
             std::make_unique<SortSpec>(BSON(kTempSortKeyField << (isAscending ? 1 : -1)));
-        newState->push_back(value::TypeTags::sortSpec,
-                            value::bitcastFrom<SortSpec*>(sortSpec.release()));  // kSortSpec
+        newState->push_back_raw(value::TypeTags::sortSpec,
+                                value::bitcastFrom<SortSpec*>(sortSpec.release()));  // kSortSpec
         return newStateTagVal;
     }
 
-    value::TagValueOwned stateTagVal(stateTag, stateVal);
-    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec] =
-        rankState(stateTagVal.tag(), stateTagVal.value());
+    auto [stateArr, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec] =
+        rankState(state.tag(), state.value());
     // Update the last value to Nothing before comparison if the flag is set.
     if (lastValueIsNothing) {
         lastValue.tag = value::TypeTags::Nothing;
@@ -1101,55 +1111,52 @@ value::TagValueMaybeOwned builtinAggRankImpl(value::TypeTags stateTag,
 
     // Define sort-order compliant comparison function which uses fast pass logic for null and
     // missing and full sort key logic for arrays.
-    auto isSameValue = [&](SortSpec* keyGen,
-                           std::pair<value::TypeTags, value::Value> currValue,
-                           std::pair<value::TypeTags, value::Value> lastValue) {
-        if (value::isNullish(currValue.first) && value::isNullish(lastValue.first)) {
-            return true;
-        }
-        if (value::isArray(currValue.first) || value::isArray(lastValue.first)) {
-            auto getSortKey = [&](value::TypeTags tag, value::Value val) {
-                BSONObjBuilder builder;
-                bson::appendValueToBsonObj(builder, kTempSortKeyField, tag, val);
-                return keyGen->generateSortKey(builder.obj(), collator);
-            };
-            auto currKey = getSortKey(currValue.first, currValue.second);
-            auto lastKey = getSortKey(lastValue.first, lastValue.second);
-            return currKey.compare(lastKey) == 0;
-        }
-        auto [compareTag, compareVal] = value::compareValue(
-            currValue.first, currValue.second, lastValue.first, lastValue.second, collator);
-        return compareTag == value::TypeTags::NumberInt32 && compareVal == 0;
-    };
+    auto isSameValue =
+        [&](SortSpec* keyGen, value::TagValueView currValue, value::TagValueView lastValue) {
+            if (value::isNullish(currValue.tag) && value::isNullish(lastValue.tag)) {
+                return true;
+            }
+            if (value::isArray(currValue.tag) || value::isArray(lastValue.tag)) {
+                auto getSortKey = [&](value::TypeTags tag, value::Value val) {
+                    BSONObjBuilder builder;
+                    bson::appendValueToBsonObj(builder, kTempSortKeyField, tag, val);
+                    return keyGen->generateSortKey(builder.obj(), collator);
+                };
+                auto currKey = getSortKey(currValue.tag, currValue.value);
+                auto lastKey = getSortKey(lastValue.tag, lastValue.value);
+                return currKey.compare(lastKey) == 0;
+            }
+            auto cmp = value::compareValue(
+                currValue.tag, currValue.value, lastValue.tag, lastValue.value, collator);
+            return cmp.first == value::TypeTags::NumberInt32 && cmp.second == 0;
+        };
 
-    if (isSameValue(
-            sortSpec, std::make_pair(valueTag, valueVal), {lastValue.tag, lastValue.value})) {
-        state->setAt(AggRankElems::kSameRankCount,
-                     value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(sameRankCount + 1));
+    if (isSameValue(sortSpec, input.view(), lastValue)) {
+        stateArr->setAt(AggRankElems::kSameRankCount,
+                        value::TypeTags::NumberInt64,
+                        value::bitcastFrom<int64_t>(sameRankCount + 1));
     } else {
-        if (!valueOwned) {
-            std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
-        }
-        if (valueTag == value::TypeTags::Nothing) {
-            state->setAt(AggRankElems::kLastValue, value::TypeTags::Null, 0);
-            state->setAt(AggRankElems::kLastValueIsNothing,
-                         value::TypeTags::Boolean,
-                         value::bitcastFrom<bool>(true));
+        if (input.tag() == value::TypeTags::Nothing) {
+            stateArr->setAt(AggRankElems::kLastValue, value::TypeTags::Null, 0);
+            stateArr->setAt(AggRankElems::kLastValueIsNothing,
+                            value::TypeTags::Boolean,
+                            value::bitcastFrom<bool>(true));
         } else {
-            state->setAt(AggRankElems::kLastValue, valueTag, valueVal);
-            state->setAt(AggRankElems::kLastValueIsNothing,
-                         value::TypeTags::Boolean,
-                         value::bitcastFrom<bool>(false));
+            auto [valueTag, valueVal] = input.releaseToOwnedRaw();
+            stateArr->setAt(AggRankElems::kLastValue, valueTag, valueVal);
+            stateArr->setAt(AggRankElems::kLastValueIsNothing,
+                            value::TypeTags::Boolean,
+                            value::bitcastFrom<bool>(false));
         }
-        state->setAt(AggRankElems::kLastRank,
-                     value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(dense ? lastRank + 1 : lastRank + sameRankCount));
-        state->setAt(AggRankElems::kSameRankCount,
-                     value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(1));
+        stateArr->setAt(
+            AggRankElems::kLastRank,
+            value::TypeTags::NumberInt64,
+            value::bitcastFrom<int64_t>(dense ? lastRank + 1 : lastRank + sameRankCount));
+        stateArr->setAt(AggRankElems::kSameRankCount,
+                        value::TypeTags::NumberInt64,
+                        value::bitcastFrom<int64_t>(1));
     }
-    return stateTagVal;
+    return state;
 }  // builtinAggRankImpl
 }  // namespace
 
@@ -1158,7 +1165,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRankColl(ArityType arity) {
     auto collatorTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(3));
     auto isAscendingTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
     auto valueTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(1));
-    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto state = moveOwnedFromStack(0);
 
     tassert(8216804,
             "Incorrect value type passed to aggRankColl for 'isAscending' parameter.",
@@ -1170,49 +1177,41 @@ value::TagValueMaybeOwned ByteCode::builtinAggRankColl(ArityType arity) {
             collatorTagVal.tag() == value::TypeTags::collator);
     auto collator = value::getCollatorView(collatorTagVal.value());
 
-    return builtinAggRankImpl(stateTag,
-                              stateVal,
-                              valueTagVal.owned(),
-                              valueTagVal.tag(),
-                              valueTagVal.value(),
-                              isAscending,
-                              false /* dense */,
-                              collator);
+    return builtinAggRankImpl(
+        std::move(state), std::move(valueTagVal), isAscending, false /* dense */, collator);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggDenseRank(ArityType arity) {
     tassert(11080083, "Unexpected arity value", arity == 3);
     auto isAscendingTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
     auto valueTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(1));
-    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto state = moveOwnedFromStack(0);
 
     tassert(8216805,
             "Incorrect value type passed to aggDenseRank for 'isAscending' parameter.",
             isAscendingTagVal.tag() == value::TypeTags::Boolean);
     auto isAscending = value::bitcastTo<bool>(isAscendingTagVal.value());
 
-    return builtinAggRankImpl(stateTag,
-                              stateVal,
-                              valueTagVal.owned(),
-                              valueTagVal.tag(),
-                              valueTagVal.value(),
-                              isAscending,
-                              true /* dense */);
+    return builtinAggRankImpl(
+        std::move(state), std::move(valueTagVal), isAscending, true /* dense */);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRank(ArityType arity) {
     tassert(11080082, "Unexpected arity value", arity == 3);
-    auto [isAscendingOwned, isAscendingTag, isAscendingVal] = getFromStack(2);
-    auto [valueOwned, valueTag, valueVal] = getFromStack(1);
-    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto isAscendingView = viewFromStack(2);
+    auto valueView = viewFromStack(1);
+    auto state = moveOwnedFromStack(0);
 
     tassert(8216803,
             "Incorrect value type passed to aggRank for 'isAscending' parameter.",
-            isAscendingTag == value::TypeTags::Boolean);
-    auto isAscending = value::bitcastTo<bool>(isAscendingVal);
+            isAscendingView.tag == value::TypeTags::Boolean);
+    auto isAscending = value::bitcastTo<bool>(isAscendingView.value);
 
     return builtinAggRankImpl(
-        stateTag, stateVal, valueOwned, valueTag, valueVal, isAscending, false /* dense */);
+        std::move(state),
+        value::TagValueMaybeOwned(false /* owned */, valueView.tag, valueView.value),
+        isAscending,
+        false /* dense */);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggDenseRankColl(ArityType arity) {
@@ -1220,7 +1219,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggDenseRankColl(ArityType arity) {
     auto collatorTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(3));
     auto isAscendingTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
     auto valueTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(1));
-    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto state = moveOwnedFromStack(0);
 
     tassert(8216806,
             "Incorrect value type passed to aggDenseRankColl for 'isAscending' parameter.",
@@ -1232,14 +1231,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggDenseRankColl(ArityType arity) {
             collatorTagVal.tag() == value::TypeTags::collator);
     auto collator = value::getCollatorView(collatorTagVal.value());
 
-    return builtinAggRankImpl(stateTag,
-                              stateVal,
-                              valueTagVal.owned(),
-                              valueTagVal.tag(),
-                              valueTagVal.value(),
-                              isAscending,
-                              true /* dense */,
-                              collator);
+    return builtinAggRankImpl(
+        std::move(state), std::move(valueTagVal), isAscending, true /* dense */, collator);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRankFinalize(ArityType arity) {
@@ -1254,10 +1247,10 @@ value::TagValueMaybeOwned ByteCode::builtinAggRankFinalize(ArityType arity) {
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggExpMovingAvg(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
-    auto [fieldOwned, fieldTag, fieldVal] = getFromStack(1);
-    if (!value::isNumber(fieldTag)) {
+    auto field = viewFromStack(1);
+    if (!value::isNumber(field.tag)) {
         return stateTagVal;
     }
 
@@ -1274,7 +1267,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggExpMovingAvg(ArityType arity) {
 
     auto currentResultTagVal = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kResult));
 
-    auto decimalVal = value::numericCast<Decimal128>(fieldTag, fieldVal);
+    auto decimalVal = value::numericCast<Decimal128>(field);
     auto result = [&]() {
         if (currentResultTagVal.tag == value::TypeTags::Null) {
             // Accumulator result has not been yet initialised. We will now
@@ -1294,7 +1287,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggExpMovingAvg(ArityType arity) {
     auto [resultTag, resultVal] = value::makeCopyDecimal(result);
 
     state->setAt(static_cast<size_t>(AggExpMovingAvgElems::kResult), resultTag, resultVal);
-    if (fieldTag == value::TypeTags::NumberDecimal) {
+    if (field.tag == value::TypeTags::NumberDecimal) {
         state->setAt(static_cast<size_t>(AggExpMovingAvgElems::kIsDecimal),
                      value::TypeTags::Boolean,
                      value::bitcastFrom<bool>(true));
@@ -1303,27 +1296,27 @@ value::TagValueMaybeOwned ByteCode::builtinAggExpMovingAvg(ArityType arity) {
     return stateTagVal;
 }
 
-value::TagValueMaybeOwned ByteCode::builtinAggExpMovingAvgFinalize(ArityType arity) {
+value::TagValueOwned ByteCode::builtinAggExpMovingAvgFinalize(ArityType arity) {
     auto stateTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(0));
 
     uassert(7821204, "State should be of array type", stateTagVal.tag() == value::TypeTags::Array);
     auto state = value::getArrayView(stateTagVal.value());
 
-    auto [resultTag, resultVal] = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kResult));
-    if (resultTag == value::TypeTags::Null) {
-        return {false, value::TypeTags::Null, 0};
+    auto resultTagVal = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kResult));
+    if (resultTagVal.tag == value::TypeTags::Null) {
+        return value::TagValueOwned::null();
     }
-    uassert(7821205, "Unexpected result type", resultTag == value::TypeTags::NumberDecimal);
+    uassert(7821205, "Unexpected result type", resultTagVal.tag == value::TypeTags::NumberDecimal);
 
     auto isDecimalTagVal = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kIsDecimal));
     uassert(7821206, "Unexpected isDecimal type", isDecimalTagVal.tag == value::TypeTags::Boolean);
 
     if (value::bitcastTo<bool>(isDecimalTagVal.value)) {
-        std::tie(resultTag, resultVal) = value::copyValue(resultTag, resultVal);
-        return {true, resultTag, resultVal};
+        return value::TagValueOwned::fromRaw(
+            value::copyValue(resultTagVal.tag, resultTagVal.value));
     } else {
-        auto result = value::bitcastTo<Decimal128>(resultVal).toDouble();
-        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+        auto result = value::bitcastTo<Decimal128>(resultTagVal.value).toDouble();
+        return value::TagValueOwned::numberDouble(result);
     }
 }
 
@@ -1334,27 +1327,25 @@ value::TagValueOwned initializeRemovableSumState() {
     state->reserve(static_cast<size_t>(AggRemovableSumElems::kSizeOfArray));
 
     auto [sumAccTag, sumAccVal] = ByteCode::genericInitializeDoubleDoubleSumState();
-    state->push_back(sumAccTag, sumAccVal);  // kSumAcc
-    state->push_back(value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(0));  // kNanCount
-    state->push_back(value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(0));  // kPosInfinityCount
-    state->push_back(value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(0));  // kNegInfinityCount
-    state->push_back(value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(0));  // kDoubleCount
-    state->push_back(value::TypeTags::NumberInt64,
-                     value::bitcastFrom<int64_t>(0));  // kDecimalCount
-    auto [stateTag, stateVal] = stateTagVal.releaseToRaw();
-    return {stateTag, stateVal};
+    state->push_back_raw(sumAccTag, sumAccVal);  // kSumAcc
+    state->push_back_raw(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kNanCount
+    state->push_back_raw(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kPosInfinityCount
+    state->push_back_raw(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kNegInfinityCount
+    state->push_back_raw(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kDoubleCount
+    state->push_back_raw(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kDecimalCount
+    return stateTagVal;
 }
 }  // namespace
 
 template <int sign>
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableSum(ArityType arity) {
-    auto [_, fieldTag, fieldVal] = getFromStack(1);
-    value::TagValueView field(fieldTag, fieldVal);
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto field = viewFromStack(1);
+    auto state = moveOwnedFromStack(0);
 
     // Initialize the accumulator.
     if (state.tag() == value::TypeTags::Nothing) {
@@ -1366,24 +1357,22 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSum(ArityType arity) {
 
     aggRemovableSumImpl<sign>(stateArray, field.tag, field.value);
 
-    auto [tag, val] = state.releaseToRaw();
-    return value::TagValueMaybeOwned(true, tag, val);
+    return state;
 }
 template value::TagValueMaybeOwned ByteCode::builtinAggRemovableSum<-1>(ArityType arity);
 template value::TagValueMaybeOwned ByteCode::builtinAggRemovableSum<1>(ArityType arity);
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableSumFinalize(ArityType arity) {
-    auto [_, stateTag, stateVal] = getFromStack(0);
-    auto stateTagVal = value::TagValueView{stateTag, stateVal};
+    auto stateView = viewFromStack(0);
 
-    uassert(7795109, "state should be of array type", stateTagVal.tag == value::TypeTags::Array);
-    auto state = value::getArrayView(stateTagVal.value);
-    return value::TagValueMaybeOwned::fromRaw(aggRemovableSumFinalizeImpl(state));
+    uassert(7795109, "state should be of array type", stateView.tag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateView.value);
+    return aggRemovableSumFinalizeImpl(state);
 }
 
 namespace {
 // Initialize an array queue
-std::pair<value::TypeTags, value::Value> arrayQueueInit() {
+value::TagValueOwned arrayQueueInit() {
     auto arrayQueueTagVal = value::TagValueOwned::fromRaw(value::makeNewArray());
     auto arrayQueue = value::getArrayView(arrayQueueTagVal.value());
     arrayQueue->reserve(static_cast<size_t>(ArrayQueueElems::kSizeOfArray));
@@ -1392,13 +1381,12 @@ std::pair<value::TypeTags, value::Value> arrayQueueInit() {
 
     // Make the buffer has at least 1 capacity so that the start index will always be valid.
     auto buffer = value::getArrayView(bufferTagVal.value());
-    buffer->push_back(value::TypeTags::Null, 0);
+    buffer->push_back_raw(value::TypeTags::Null, 0);
 
-    auto [bufferTag, bufferVal] = bufferTagVal.releaseToRaw();
-    arrayQueue->push_back(bufferTag, bufferVal);
-    arrayQueue->push_back(value::TypeTags::NumberInt64, 0);  // kStartIdx
-    arrayQueue->push_back(value::TypeTags::NumberInt64, 0);  // kQueueSize
-    return arrayQueueTagVal.releaseToRaw();
+    arrayQueue->push_back(std::move(bufferTagVal));
+    arrayQueue->push_back_raw(value::TypeTags::NumberInt64, 0);  // kStartIdx
+    arrayQueue->push_back_raw(value::TypeTags::NumberInt64, 0);  // kQueueSize
+    return arrayQueueTagVal;
 }
 }  // namespace
 
@@ -1420,25 +1408,22 @@ value::TagValueMaybeOwned ByteCode::builtinAggIntegralInit(ArityType arity) {
     state->reserve(static_cast<size_t>(AggIntegralElems::kMaxSizeOfArray));
 
     // AggIntegralElems::kInputQueue
-    auto [inputQueueTag, inputQueueVal] = arrayQueueInit();
-    state->push_back(inputQueueTag, inputQueueVal);
+    state->push_back(arrayQueueInit());
 
     // AggIntegralElems::kSortByQueue
-    auto [sortByQueueTag, sortByQueueVal] = arrayQueueInit();
-    state->push_back(sortByQueueTag, sortByQueueVal);
+    state->push_back(arrayQueueInit());
 
     // AggIntegralElems::kIntegral
-    auto [integralTag, integralVal] = initializeRemovableSumState().releaseToRaw();
-    state->push_back(integralTag, integralVal);
+    state->push_back(initializeRemovableSumState());
 
     // AggIntegralElems::kNanCount
-    state->push_back(value::TypeTags::NumberInt64, 0);
+    state->push_back_raw(value::TypeTags::NumberInt64, 0);
 
     // AggIntegralElems::kUnitMillis
-    state->push_back(unitTagVal.tag(), unitTagVal.value());
+    state->push_back_raw(unitTagVal.tag(), unitTagVal.value());
 
     // AggIntegralElems::kIsNonRemovable
-    state->push_back(isNonRemovableTagVal.tag(), isNonRemovableTagVal.value());
+    state->push_back_raw(isNonRemovableTagVal.tag(), isNonRemovableTagVal.value());
 
     return stateTagVal;
 }
@@ -1535,7 +1520,7 @@ value::TagValueMaybeOwned ByteCode::integralOfTwoPointsByTrapezoidalRule(
         value::isNaN(prevSortByVal.tag, prevSortByVal.value) ||
         value::isNaN(newInput.tag, newInput.value) ||
         value::isNaN(newSortByVal.tag, newSortByVal.value)) {
-        return {false, value::TypeTags::NumberInt64, 0};
+        return value::TagValueMaybeOwned::numberInt64(0);
     }
 
     if ((prevSortByVal.tag == value::TypeTags::Date && newSortByVal.tag == value::TypeTags::Date) ||
@@ -1548,13 +1533,10 @@ value::TagValueMaybeOwned ByteCode::integralOfTwoPointsByTrapezoidalRule(
         auto integralTagVal = genericMul(
             sumYTagVal.tag(), sumYTagVal.value(), deltaTagVal.tag(), deltaTagVal.value());
 
-        auto result = genericDiv(integralTagVal.tag(),
-                                 integralTagVal.value(),
-                                 value::TypeTags::NumberInt64,
-                                 value::bitcastFrom<int32_t>(2));
+        auto result = genericDiv(integralTagVal.view(), value::TagValueView::numberInt64(2));
         return result;
     } else {
-        return {false, value::TypeTags::NumberInt64, 0};
+        return value::TagValueMaybeOwned::numberInt64(0);
     }
 }
 
@@ -1606,7 +1588,7 @@ size_t arrayQueueSize(value::Array* arrayQueue) {
 }
 
 // Push an element {tag, value} into the queue
-void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value val) {
+void arrayQueuePush(value::Array* arrayQueue, value::TagValueOwned tagVal) {
     /* The underlying array acts as a circular buffer for the queue with `startIdx` and `queueSize`
      * demarcating the filled region (with remaining region containing nulls). When pushing an
      * element to the queue, we set at the corresponding index [= (startIdx + queueSize) %
@@ -1635,7 +1617,6 @@ void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value 
      *                    |
      *                   startIdx (queueSize = 5, arraySize = 8)
      */
-    value::TagValueOwned tagVal(tag, val);
     auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
     auto cap = array->size();
 
@@ -1646,7 +1627,7 @@ void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value 
         auto extend = newCap - cap;
 
         for (size_t i = 0; i < extend; ++i) {
-            array->push_back(value::TypeTags::Null, 0);
+            array->push_back_raw(value::TypeTags::Null, 0);
         }
 
         if (startIdx > 0) {
@@ -1662,8 +1643,7 @@ void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value 
     }
 
     auto endIdx = (startIdx + queueSize) % cap;
-    auto [tagFinal, valFinal] = tagVal.releaseToRaw();
-    array->setAt(endIdx, tagFinal, valFinal);
+    array->setAt(endIdx, std::move(tagVal));
     updateArrayQueueState(arrayQueue, startIdx, queueSize + 1);
 }
 
@@ -1671,7 +1651,7 @@ void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value 
 value::TagValueOwned arrayQueuePop(value::Array* arrayQueue) {
     auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
     if (queueSize == 0) {
-        return {value::TypeTags::Nothing, 0};
+        return value::TagValueOwned::nothing();
     }
     auto cap = array->size();
     auto pair = array->swapAt(startIdx, value::TypeTags::Null, 0);
@@ -1715,7 +1695,7 @@ value::TagValueOwned arrayQueueFrontN(value::Array* arrayQueue, size_t n) {
 
         auto tagVal = array->getAt(idx);
         auto [copyTag, copyVal] = value::copyValue(tagVal.tag, tagVal.value);
-        resultArray->push_back(copyTag, copyVal);
+        resultArray->push_back_raw(copyTag, copyVal);
     }
 
     return resultArrayTagVal;
@@ -1740,7 +1720,7 @@ value::TagValueOwned arrayQueueBackN(value::Array* arrayQueue, size_t n) {
 
         auto tagVal = array->getAt(idx);
         auto [copyTag, copyVal] = value::copyValue(tagVal.tag, tagVal.value);
-        arr->push_back(copyTag, copyVal);
+        arr->push_back_raw(copyTag, copyVal);
     }
 
     return arrTagVal;
@@ -1748,9 +1728,9 @@ value::TagValueOwned arrayQueueBackN(value::Array* arrayQueue, size_t n) {
 }  // namespace
 
 value::TagValueMaybeOwned ByteCode::builtinAggIntegralAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto inputTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
-    auto sortByTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(2));
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto inputTagVal = moveOwnedFromStack(1);
+    auto sortByTagVal = moveOwnedFromStack(2);
 
     auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable] =
         getIntegralState(stateTagVal.tag(), stateTagVal.value());
@@ -1782,19 +1762,16 @@ value::TagValueMaybeOwned ByteCode::builtinAggIntegralAdd(ArityType arity) {
         arrayQueuePop(sortByQueue);
     }
 
-    auto [inputTag, inputVal] = inputTagVal.releaseToRaw();
-    arrayQueuePush(inputQueue, inputTag, inputVal);
-
-    auto [sortByTag, sortByVal] = sortByTagVal.releaseToRaw();
-    arrayQueuePush(sortByQueue, sortByTag, sortByVal);
+    arrayQueuePush(inputQueue, std::move(inputTagVal));
+    arrayQueuePush(sortByQueue, std::move(sortByTagVal));
 
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggIntegralRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto inputTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
-    auto sortByTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(2));
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto inputTagVal = moveOwnedFromStack(1);
+    auto sortByTagVal = moveOwnedFromStack(2);
 
     auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable] =
         getIntegralState(stateTagVal.tag(), stateTagVal.value());
@@ -1849,24 +1826,18 @@ value::TagValueMaybeOwned ByteCode::builtinAggIntegralFinalize(ArityType arity) 
     auto queueSize = arrayQueueSize(inputQueue);
     uassert(7821118, "Queue sizes should match", queueSize == arrayQueueSize(sortByQueue));
     if (queueSize == 0) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
 
     if (nanCount > 0) {
-        return {false,
-                value::TypeTags::NumberDouble,
-                value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN())};
+        return value::TagValueMaybeOwned::numberDouble(std::numeric_limits<double>::quiet_NaN());
     }
 
-    auto resultTagVal = value::TagValueMaybeOwned::fromRaw(aggRemovableSumFinalizeImpl(integral));
+    auto resultTagVal = aggRemovableSumFinalizeImpl(integral);
     if (unitMillis) {
-        auto [divResultOwned, divResultTag, divResultVal] =
-            genericDiv(resultTagVal.tag(),
-                       resultTagVal.value(),
-                       value::TypeTags::NumberInt64,
-                       value::bitcastFrom<int64_t>(*unitMillis))
-                .releaseToRaw();
-        return {divResultOwned, divResultTag, divResultVal};
+        return genericDiv(resultTagVal.view(),
+                          value::TagValueView{value::TypeTags::NumberInt64,
+                                              value::bitcastFrom<int64_t>(*unitMillis)});
     } else {
         return resultTagVal;
     }
@@ -1881,7 +1852,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggDerivativeFinalize(ArityType arity
 
     if (sortByFirstTagVal.tag() == value::TypeTags::Nothing ||
         sortByLastTagVal.tag() == value::TypeTags::Nothing) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
 
     boost::optional<int64_t> unitMillis;
@@ -1919,16 +1890,15 @@ value::TagValueMaybeOwned ByteCode::builtinAggDerivativeFinalize(ArityType arity
     // Return null if the sortBy delta is zero
     if (runTagVal.tag() == value::TypeTags::NumberDecimal) {
         if (numericCast<Decimal128>(runTagVal.tag(), runTagVal.value()).isZero()) {
-            return {false, value::TypeTags::Null, 0};
+            return value::TagValueMaybeOwned::null();
         }
     } else {
         if (numericCast<double>(runTagVal.tag(), runTagVal.value()) == 0) {
-            return {false, value::TypeTags::Null, 0};
+            return value::TagValueMaybeOwned::null();
         }
     }
 
-    auto divTagVal =
-        genericDiv(riseTagVal.tag(), riseTagVal.value(), runTagVal.tag(), runTagVal.value());
+    auto divTagVal = genericDiv(riseTagVal.view(), runTagVal.view());
 
     if (unitMillis) {
         return genericMul(divTagVal.tag(),
@@ -1972,10 +1942,7 @@ std::tuple<value::Array*, value::Array*, value::Array*, value::Array*, int64_t> 
     return {state, sumX, sumY, cXY, count};
 }
 
-value::TagValueMaybeOwned covarianceCheckNonFinite(value::TypeTags xTag,
-                                                   value::Value xVal,
-                                                   value::TypeTags yTag,
-                                                   value::Value yVal) {
+value::TagValueMaybeOwned covarianceCheckNonFinite(value::TagValueView x, value::TagValueView y) {
     int nanCnt = 0;
     int posCnt = 0;
     int negCnt = 0;
@@ -2002,20 +1969,19 @@ value::TagValueMaybeOwned covarianceCheckNonFinite(value::TypeTags xTag,
             }
         }
     };
-    checkValue(xTag, xVal);
-    checkValue(yTag, yVal);
+    checkValue(x.tag, x.value);
+    checkValue(y.tag, y.value);
 
     if (nanCnt == 0 && posCnt == 0 && negCnt == 0) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
     if (nanCnt > 0 || posCnt * negCnt > 0) {
         if (isDecimal) {
             auto [decimalTag, decimalVal] = value::makeCopyDecimal(Decimal128::kPositiveNaN);
             return {true, decimalTag, decimalVal};
         } else {
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN())};
+            return value::TagValueMaybeOwned::numberDouble(
+                std::numeric_limits<double>::quiet_NaN());
         }
     }
     if (isDecimal) {
@@ -2028,13 +1994,10 @@ value::TagValueMaybeOwned covarianceCheckNonFinite(value::TypeTags xTag,
         }
     } else {
         if (posCnt > 0) {
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(std::numeric_limits<double>::infinity())};
+            return value::TagValueMaybeOwned::numberDouble(std::numeric_limits<double>::infinity());
         } else {
-            return {false,
-                    value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(-std::numeric_limits<double>::infinity())};
+            return value::TagValueMaybeOwned::numberDouble(
+                -std::numeric_limits<double>::infinity());
         }
     }
 }  // covarianceCheckNonFinite
@@ -2043,25 +2006,25 @@ value::TagValueMaybeOwned covarianceCheckNonFinite(value::TypeTags xTag,
 value::TagValueMaybeOwned ByteCode::aggRemovableAvgFinalizeImpl(value::Array* sumState,
                                                                 int64_t count) {
     if (count == 0) {
-        return {false, sbe::value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
-    auto sumTagVal = value::TagValueMaybeOwned::fromRaw(aggRemovableSumFinalizeImpl(sumState));
+    auto sumTagVal = aggRemovableSumFinalizeImpl(sumState);
 
     if (sumTagVal.tag() == value::TypeTags::NumberInt32) {
         auto sum = static_cast<double>(value::bitcastTo<int>(sumTagVal.value()));
         auto avg = sum / static_cast<double>(count);
-        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(avg)};
+        return value::TagValueMaybeOwned::numberDouble(avg);
     } else if (sumTagVal.tag() == value::TypeTags::NumberInt64) {
         auto sum = static_cast<double>(value::bitcastTo<long long>(sumTagVal.value()));
         auto avg = sum / static_cast<double>(count);
-        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(avg)};
+        return value::TagValueMaybeOwned::numberDouble(avg);
     } else if (sumTagVal.tag() == value::TypeTags::NumberDouble) {
         auto sum = value::bitcastTo<double>(sumTagVal.value());
         if (std::isnan(sum) || std::isinf(sum)) {
             return {false, sumTagVal.tag(), sumTagVal.value()};
         }
         auto avg = sum / static_cast<double>(count);
-        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(avg)};
+        return value::TagValueMaybeOwned::numberDouble(avg);
     } else if (sumTagVal.tag() == value::TypeTags::NumberDecimal) {
         auto sum = value::bitcastTo<Decimal128>(sumTagVal.value());
         if (sum.isNaN() || sum.isInfinite()) {
@@ -2076,7 +2039,7 @@ value::TagValueMaybeOwned ByteCode::aggRemovableAvgFinalizeImpl(value::Array* su
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggCovarianceAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
     auto xTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(1));
     auto yTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
 
@@ -2086,13 +2049,11 @@ value::TagValueMaybeOwned ByteCode::builtinAggCovarianceAdd(ArityType arity) {
         auto state = value::getArrayView(stateTagVal.value());
         state->reserve(static_cast<size_t>(AggCovarianceElems::kSizeOfArray));
 
-        auto [sumXStateTag, sumXStateVal] = initializeRemovableSumState().releaseToRaw();
-        state->push_back(sumXStateTag, sumXStateVal);  // kSumX
-        auto [sumYStateTag, sumYStateVal] = initializeRemovableSumState().releaseToRaw();
-        state->push_back(sumYStateTag, sumYStateVal);  // kSumY
-        auto [cXYStateTag, cXYStateVal] = initializeRemovableSumState().releaseToRaw();
-        state->push_back(cXYStateTag, cXYStateVal);                                      // kCXY
-        state->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));  // kCount
+        state->push_back(initializeRemovableSumState());  // kSumX
+        state->push_back(initializeRemovableSumState());  // kSumY
+        state->push_back(initializeRemovableSumState());  // kCXY
+        state->push_back_raw(value::TypeTags::NumberInt64,
+                             value::bitcastFrom<int64_t>(0));  // kCount
     }
 
     if (!value::isNumber(xTagVal.tag()) || !value::isNumber(yTagVal.tag())) {
@@ -2102,12 +2063,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggCovarianceAdd(ArityType arity) {
     auto [state, sumXState, sumYState, cXYState, count] =
         covarianceState(stateTagVal.tag(), stateTagVal.value());
 
-    auto [nonFiniteOwned, nonFiniteTag, nonFiniteVal] =
-        covarianceCheckNonFinite(xTagVal.tag(), xTagVal.value(), yTagVal.tag(), yTagVal.value())
-            .releaseToRaw();
-    if (nonFiniteTag != value::TypeTags::Nothing) {
-        value::ValueGuard nonFiniteGuard{nonFiniteOwned, nonFiniteTag, nonFiniteVal};
-        aggRemovableSumImpl<1>(cXYState, nonFiniteTag, nonFiniteVal);
+    auto nonFiniteTagVal = covarianceCheckNonFinite(xTagVal.view(), yTagVal.view());
+    if (nonFiniteTagVal.tag() != value::TypeTags::Nothing) {
+        aggRemovableSumImpl<1>(cXYState, nonFiniteTagVal.tag(), nonFiniteTagVal.value());
         return stateTagVal;
     }
 
@@ -2157,11 +2115,11 @@ void updateRemovableSumState(value::Array* state,
 }
 
 void aggRemovableSumReset(value::Array* state) {
-    auto [sumAccTag, sumAccVal] = state->getAt(static_cast<size_t>(AggRemovableSumElems::kSumAcc));
+    auto sumAccTagVal = state->getAt(static_cast<size_t>(AggRemovableSumElems::kSumAcc));
     tassert(7820807,
             "sum accumulator elem should be of array type",
-            sumAccTag == value::TypeTags::Array);
-    auto sumAcc = value::getArrayView(sumAccVal);
+            sumAccTagVal.tag == value::TypeTags::Array);
+    auto sumAcc = value::getArrayView(sumAccTagVal.value);
     ByteCode::genericResetDoubleDoubleSumState(sumAcc);
     updateRemovableSumState(state, 0, 0, 0, 0, 0);
 }
@@ -2226,9 +2184,8 @@ void ByteCode::aggRemovableSumImpl(value::Array* state,
             negInfinityCount += sign;
         } else {
             if constexpr (sign == -1) {
-                auto [negDecTag, negDecVal] = value::makeCopyDecimal(value.negate());
-                aggDoubleDoubleSumImpl(sumAcc, negDecTag, negDecVal);
-                value::releaseValue(negDecTag, negDecVal);
+                auto negDec = value::TagValueOwned::fromRaw(value::makeCopyDecimal(value.negate()));
+                aggDoubleDoubleSumImpl(sumAcc, negDec.tag(), negDec.value());
             } else {
                 aggDoubleDoubleSumImpl(sumAcc, rhsTag, rhsVal);
             }
@@ -2241,7 +2198,7 @@ void ByteCode::aggRemovableSumImpl(value::Array* state,
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggCovarianceRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
     auto xTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(1));
     auto yTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
 
@@ -2252,8 +2209,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggCovarianceRemove(ArityType arity) 
     auto [state, sumXState, sumYState, cXYState, count] =
         covarianceState(stateTagVal.tag(), stateTagVal.value());
 
-    auto nonFiniteTagVal =
-        covarianceCheckNonFinite(xTagVal.tag(), xTagVal.value(), yTagVal.tag(), yTagVal.value());
+    auto nonFiniteTagVal = covarianceCheckNonFinite(xTagVal.view(), yTagVal.view());
     if (nonFiniteTagVal.tag() != value::TypeTags::Nothing) {
         aggRemovableSumImpl<-1>(cXYState, nonFiniteTagVal.tag(), nonFiniteTagVal.value());
         return stateTagVal;
@@ -2297,19 +2253,16 @@ value::TagValueMaybeOwned ByteCode::builtinAggCovarianceFinalize(ArityType arity
         covarianceState(stateTagVal.tag(), stateTagVal.value());
 
     if (count == 1 && !isSamp) {
-        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0)};
+        return value::TagValueMaybeOwned::numberDouble(0.0);
     }
 
     double adjustedCount = (isSamp ? count - 1 : count);
     if (adjustedCount <= 0) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
 
-    auto cXYTagVal = value::TagValueMaybeOwned::fromRaw(aggRemovableSumFinalizeImpl(cXYState));
-    return genericDiv(cXYTagVal.tag(),
-                      cXYTagVal.value(),
-                      value::TypeTags::NumberDouble,
-                      value::bitcastFrom<double>(adjustedCount));
+    auto cXYTagVal = aggRemovableSumFinalizeImpl(cXYState);
+    return genericDiv(cXYTagVal.view(), value::TagValueView::numberDouble(adjustedCount));
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggCovarianceSampFinalize(ArityType arity) {
@@ -2321,12 +2274,12 @@ value::TagValueMaybeOwned ByteCode::builtinAggCovariancePopFinalize(ArityType ar
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovablePushAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
     if (stateTagVal.tag() == value::TypeTags::Nothing) {
-        stateTagVal = value::TagValueOwned::fromRaw(arrayQueueInit());
+        stateTagVal = arrayQueueInit();
     }
 
-    auto inputTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto inputTagVal = moveOwnedFromStack(1);
     if (inputTagVal.tag() == value::TypeTags::Nothing) {
         return stateTagVal;
     }
@@ -2334,15 +2287,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovablePushAdd(ArityType arity) 
     uassert(7993100, "State should be of array type", stateTagVal.tag() == value::TypeTags::Array);
     auto state = value::getArrayView(stateTagVal.value());
 
-    auto [inputTag, inputVal] = inputTagVal.releaseToRaw();  // Release ownership first!
-    arrayQueuePush(state, inputTag, inputVal);
+    arrayQueuePush(state, std::move(inputTagVal));
 
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovablePushRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto inputTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto inputTagVal = moveOwnedFromStack(1);
     if (inputTagVal.tag() == value::TypeTags::Nothing) {
         return stateTagVal;
     }
@@ -2389,18 +2341,18 @@ value::TagValueMaybeOwned pushConcatArraysCommonFinalize(value::Array* state) {
         if (idx >= queueBuffer->size()) {
             idx -= queueBuffer->size();
         }
-        auto [tag, val] = queueBuffer->getAt(idx);
-        std::tie(tag, val) = value::copyValue(tag, val);
-        result->push_back(tag, val);
+        auto srcTagVal = queueBuffer->getAt(idx);
+        auto [copyTag, copyVal] = value::copyValue(srcTagVal.tag, srcTagVal.value);
+        result->push_back_raw(copyTag, copyVal);
     }
     return resultTagVal;
 }
 }  // namespace
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovablePushFinalize(ArityType arity) {
-    auto stateTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(0));
-    uassert(7993102, "State should be of array type", stateTagVal.tag() == value::TypeTags::Array);
-    auto state = value::getArrayView(stateTagVal.value());
+    auto stateView = viewFromStack(0);
+    uassert(7993102, "State should be of array type", stateView.tag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateView.value);
 
     return pushConcatArraysCommonFinalize(state);
 }
@@ -2409,20 +2361,17 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysInit(ArityTyp
     auto stateTagVal = value::TagValueOwned::fromRaw(value::makeNewArray());
     auto arr = value::getArrayView(stateTagVal.value());
 
-    // This will be the structure where the accumulated values are stored.
-    auto [accArrTag, accArrVal] = arrayQueueInit();
-
     // The order is important! The accumulated array should be at index
     // AggArrayWithSize::kValues, and the size (bytes) should be at index
     // AggArrayWithSize::kSizeOfValues.
-    arr->push_back(accArrTag, accArrVal);
-    arr->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
+    arr->push_back(arrayQueueInit());
+    arr->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto newElTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto newElTagVal = moveOwnedFromStack(1);
 
     // If the field resolves to Nothing (e.g. if it is missing in the document), then we want to
     // leave the current state as is.
@@ -2443,7 +2392,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysAdd(ArityType
     // example where we might otherwise leak memory is if we get the input off the stack as type
     // 'bsonArray'. Iterating over a 'bsonArray' results in pointers into the underlying BSON. Thus,
     // (without passing 'true') calling 'arrayQueuePush' below would insert elements that are
-    // pointers to memory that will be destroyed with 'newElGuard' above, which is the source of a
+    // pointers to memory that will be destroyed with 'newElTagVal' above, which is the source of a
     // memory leak.
     value::arrayForEach<true>(
         newElTagVal.tag(),
@@ -2464,7 +2413,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysAdd(ArityType
                                         << elemSize << " bytes.");
             }
             // Update the state
-            arrayQueuePush(accArr, elemTag, elemVal);
+            arrayQueuePush(accArr, value::TagValueOwned::fromRaw(elemTag, elemVal));
             accArrSize += elemSize;
         });
     // Update the window field with the new total size.
@@ -2475,8 +2424,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysAdd(ArityType
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto elTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto elTagVal = moveOwnedFromStack(1);
     auto [stateArr, accArr, accArrSize] = concatArraysState(stateTagVal.tag(), stateTagVal.value());
 
     // If the field resolves to Nothing (e.g. if it is missing in the document), then we want to
@@ -2503,7 +2452,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableConcatArraysRemove(ArityT
         // capture a structured binding in a lambda expression.
         [&accArr = accArr, &accArrSize = accArrSize](value::TypeTags elemBeingRemovedTag,
                                                      value::Value elemBeingRemovedVal) {
-            value::TagValueOwned elemBeingRemoved(elemBeingRemovedTag, elemBeingRemovedVal);
+            value::TagValueOwned elemBeingRemoved =
+                value::TagValueOwned::fromRaw(elemBeingRemovedTag, elemBeingRemovedVal);
             auto elemSize =
                 value::getApproximateSize(elemBeingRemoved.tag(), elemBeingRemoved.value());
             tassert(11093708,
@@ -2594,38 +2544,36 @@ void updateRemovableStdDevState(value::Array* state, int64_t count, int64_t nonF
 }  // namespace
 
 template <int quantity>
-void ByteCode::aggRemovableStdDevImpl(value::TypeTags stateTag,
-                                      value::Value stateVal,
-                                      value::TypeTags inputTag,
-                                      value::Value inputVal) {
+void ByteCode::aggRemovableStdDevImpl(value::TagValueView state, value::TagValueView input) {
     static_assert(quantity == 1 || quantity == -1);
-    auto [state, sumState, m2State, count, nonFiniteCount] =
-        removableStdDevState(stateTag, stateVal);
-    if (!value::isNumber(inputTag)) {
+    auto [stateArray, sumState, m2State, count, nonFiniteCount] =
+        removableStdDevState(state.tag, state.value);
+    if (!value::isNumber(input.tag)) {
         return;
     }
-    if ((inputTag == value::TypeTags::NumberDouble &&
-         !std::isfinite(value::bitcastTo<double>(inputVal))) ||
-        (inputTag == value::TypeTags::NumberDecimal &&
-         !value::bitcastTo<Decimal128>(inputVal).isFinite())) {
+    if ((input.tag == value::TypeTags::NumberDouble &&
+         !std::isfinite(value::bitcastTo<double>(input.value))) ||
+        (input.tag == value::TypeTags::NumberDecimal &&
+         !value::bitcastTo<Decimal128>(input.value).isFinite())) {
         nonFiniteCount += quantity;
-        updateRemovableStdDevState(state, count, nonFiniteCount);
+        updateRemovableStdDevState(stateArray, count, nonFiniteCount);
         return;
     }
 
     if (count == 0) {
         // Assuming we are adding value if count == 0.
-        aggDoubleDoubleSumImpl(sumState, inputTag, inputVal);
-        updateRemovableStdDevState(state, ++count, nonFiniteCount);
+        aggDoubleDoubleSumImpl(sumState, input.tag, input.value);
+        updateRemovableStdDevState(stateArray, ++count, nonFiniteCount);
         return;
     } else if (count + quantity == 0) {
         genericResetDoubleDoubleSumState(sumState);
         genericResetDoubleDoubleSumState(m2State);
-        updateRemovableStdDevState(state, 0, 0);
+        updateRemovableStdDevState(stateArray, 0, 0);
         return;
     }
 
-    auto inputDouble = value::bitcastTo<double>(value::coerceToDouble(inputTag, inputVal).second);
+    auto inputDouble =
+        value::bitcastTo<double>(value::coerceToDouble(input.tag, input.value).second);
     auto sumTagVal = aggDoubleDoubleSumFinalizeImpl(sumState);
     double x = count * inputDouble -
         value::bitcastTo<double>(value::coerceToDouble(sumTagVal.tag(), sumTagVal.value()).second);
@@ -2637,12 +2585,12 @@ void ByteCode::aggRemovableStdDevImpl(value::TypeTags stateTag,
         m2State,
         value::TypeTags::NumberDouble,
         value::bitcastFrom<double>(x * x * quantity / (count * (count - quantity))));
-    updateRemovableStdDevState(state, count, nonFiniteCount);
+    updateRemovableStdDevState(stateArray, count, nonFiniteCount);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto input = viewFromStack(1);
     // Initialize the accumulator.
     if (stateTagVal.tag() == value::TypeTags::Nothing) {
         stateTagVal = value::TagValueOwned::fromRaw(value::makeNewArray());
@@ -2650,24 +2598,25 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevAdd(ArityType arity
         state->reserve(static_cast<size_t>(AggRemovableStdDevElems::kSizeOfArray));
 
         auto [sumStateTag, sumStateVal] = genericInitializeDoubleDoubleSumState();
-        state->push_back(sumStateTag, sumStateVal);  // kSum
+        state->push_back_raw(sumStateTag, sumStateVal);  // kSum
         auto [m2StateTag, m2StateVal] = genericInitializeDoubleDoubleSumState();
-        state->push_back(m2StateTag, m2StateVal);                                        // kM2
-        state->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));  // kCount
-        state->push_back(value::TypeTags::NumberInt64,
-                         value::bitcastFrom<int64_t>(0));  // kNonFiniteCount
+        state->push_back_raw(m2StateTag, m2StateVal);  // kM2
+        state->push_back_raw(value::TypeTags::NumberInt64,
+                             value::bitcastFrom<int64_t>(0));  // kCount
+        state->push_back_raw(value::TypeTags::NumberInt64,
+                             value::bitcastFrom<int64_t>(0));  // kNonFiniteCount
     }
 
-    aggRemovableStdDevImpl<1>(stateTagVal.tag(), stateTagVal.value(), inputTag, inputVal);
+    aggRemovableStdDevImpl<1>(stateTagVal.view(), input);
 
     return stateTagVal;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    auto stateTagVal = moveOwnedFromStack(0);
+    auto input = viewFromStack(1);
 
-    aggRemovableStdDevImpl<-1>(stateTagVal.tag(), stateTagVal.value(), inputTag, inputVal);
+    aggRemovableStdDevImpl<-1>(stateTagVal.view(), input);
 
     return stateTagVal;
 }
@@ -2678,11 +2627,11 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevFinalize(ArityType 
     auto [state, sumState, m2State, count, nonFiniteCount] =
         removableStdDevState(stateTagVal.tag(), stateTagVal.value());
     if (nonFiniteCount > 0) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
     const long long adjustedCount = isSamp ? count - 1 : count;
     if (adjustedCount <= 0) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
     auto m2 = aggDoubleDoubleSumFinalizeImpl(m2State);
     auto squaredDifferences =
@@ -2694,11 +2643,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevFinalize(ArityType 
         // we reset _m2 and return 0 for the standard deviation.
         // If we're doing a population std dev of one element, it is also correct to return 0.
         genericResetDoubleDoubleSumState(m2State);
-        return {false, value::TypeTags::NumberInt32, 0};
+        return value::TagValueMaybeOwned::numberInt32(0);
     }
-    return {false,
-            value::TypeTags::NumberDouble,
-            value::bitcastFrom<double>(sqrt(squaredDifferences / adjustedCount))};
+    return value::TagValueMaybeOwned::numberDouble(sqrt(squaredDifferences / adjustedCount));
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableStdDevSampFinalize(ArityType arity) {
@@ -2746,11 +2693,11 @@ linearFillState(value::TypeTags stateTag, value::Value stateVal) {
     auto x2 = state->getAt(static_cast<size_t>(AggLinearFillElems::kX2));
     auto y2 = state->getAt(static_cast<size_t>(AggLinearFillElems::kY2));
     auto prevX = state->getAt(static_cast<size_t>(AggLinearFillElems::kPrevX));
-    auto [countTag, countVal] = state->getAt(static_cast<size_t>(AggLinearFillElems::kCount));
+    auto countTagVal = state->getAt(static_cast<size_t>(AggLinearFillElems::kCount));
     tassert(7971202,
             "Expected count element to be of int64 type",
-            countTag == value::TypeTags::NumberInt64);
-    auto count = value::bitcastTo<int64_t>(countVal);
+            countTagVal.tag == value::TypeTags::NumberInt64);
+    auto count = value::bitcastTo<int64_t>(countTagVal.value);
 
     return {state, x1, y1, x2, y2, prevX, count};
 }
@@ -2765,20 +2712,20 @@ value::TagValueMaybeOwned ByteCode::builtinAggLinearFillCanAdd(ArityType arity) 
     // positive it means there are still more finalize calls to be made. when count == 0 we have
     // exhausted this window.
     if (y2.tag != value::TypeTags::Null) {
-        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(count == 0)};
+        return value::TagValueMaybeOwned::boolean(count == 0);
     }
 
     // if y2 is null it means we have not yet found the upper window bound so keep on adding input
     // values
-    return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(true)};
+    return value::TagValueMaybeOwned::boolean(true);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggLinearFillAdd(ArityType arity) {
-    auto stateTagValue = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagValue = moveOwnedFromStack(0);
 
-    auto inputTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto inputTagVal = moveOwnedFromStack(1);
 
-    auto sortByTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(2));
+    auto sortByTagVal = moveOwnedFromStack(2);
 
     // Validate the types of the values
     uassert(7971203,
@@ -2809,11 +2756,11 @@ value::TagValueMaybeOwned ByteCode::builtinAggLinearFillAdd(ArityType arity) {
     state->setAt(static_cast<size_t>(AggLinearFillElems::kPrevX), copyXTag, copyXVal);
 
     // Update x2/y2 to the current sortby/input values
-    auto [sortByTag, sortByVal] = sortByTagVal.releaseToRaw();
-    auto oldX2 = state->swapAt(static_cast<size_t>(AggLinearFillElems::kX2), sortByTag, sortByVal);
+    auto oldX2 =
+        state->swapAt(static_cast<size_t>(AggLinearFillElems::kX2), std::move(sortByTagVal));
 
-    auto [inputTag, inputVal] = inputTagVal.releaseToRaw();
-    auto oldY2 = state->swapAt(static_cast<size_t>(AggLinearFillElems::kY2), inputTag, inputVal);
+    auto oldY2 =
+        state->swapAt(static_cast<size_t>(AggLinearFillElems::kY2), std::move(inputTagVal));
 
     // If (old) y2 is non-null, it means we need to look for new end-points (x1, y1), (x2, y2)
     // and the segment spanned be previous endpoints is exhausted. Count should be zero at
@@ -2846,7 +2793,7 @@ value::TagValueMaybeOwned ByteCode::linearFillInterpolate(value::TagValueView x1
     auto delX = genericSub(x2.tag, x2.value, x1.tag, x1.value);
 
     // (y2 - y1) / (x2 - x1)
-    auto div = genericDiv(delY.tag(), delY.value(), delX.tag(), delX.value());
+    auto div = genericDiv(delY.view(), delX.view());
 
     // (x - x1)
     auto sub = genericSub(x.tag, x.value, x1.tag, x1.value);
@@ -2871,7 +2818,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggLinearFillFinalize(ArityType arity
 
     // if y2 is null it means the current window is the last window frame in the partition
     if (y2.tag == value::TypeTags::Null) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
 
     // If count == 0, we are currently handling the last document in the window frame (x2/y2)
@@ -2884,7 +2831,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggLinearFillFinalize(ArityType arity
 
     // If y1 is null it means the current window is the first window frame in the partition
     if (y1.tag == value::TypeTags::Null) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
     return linearFillInterpolate(x1, y1, x2, y2, {sortByTagVal.tag(), sortByTagVal.value()});
 }
@@ -2926,33 +2873,29 @@ value::TagValueMaybeOwned ByteCode::builtinAggFirstLastNInit(ArityType arity) {
     auto n = value::bitcastTo<int64_t>(nTagVal.value());
     uassert(8070608, "Expected 'n' to be positive", n > 0);
 
-    auto [queueTag, queueVal] = arrayQueueInit();
-
     auto [stateTag, stateVal] = value::makeNewArray();
     auto stateArr = value::getArrayView(stateVal);
-    stateArr->push_back(queueTag, queueVal);
-    stateArr->push_back(nTagVal.tag(), nTagVal.value());
+    stateArr->push_back(arrayQueueInit());
+    stateArr->push_back_raw(nTagVal.tag(), nTagVal.value());
     return {true, stateTag, stateVal};
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggFirstLastNAdd(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto state = moveOwnedFromStack(0);
 
-    auto field = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto field = moveOwnedFromStack(1);
 
     auto [queue, n] = firstLastNState(state.tag(), state.value());
 
-    auto [tag, val] = field.releaseToRaw();
-    arrayQueuePush(queue, tag, val);
+    arrayQueuePush(queue, std::move(field));
 
-    auto [stateTag, stateVal] = state.releaseToRaw();
-    return value::TagValueMaybeOwned(true, stateTag, stateVal);
+    return std::move(state);
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggFirstLastNRemove(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto state = moveOwnedFromStack(0);
 
-    auto field = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto field = moveOwnedFromStack(1);
 
     auto [queue, n] = firstLastNState(state.tag(), state.value());
 
@@ -2964,16 +2907,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggFirstLastNRemove(ArityType arity) 
             "Encountered unexpected value",
             cmpTag == value::TypeTags::NumberInt32 && cmpVal == 0);
 
-    auto [stateTag, stateVal] = state.releaseToRaw();
-    return value::TagValueMaybeOwned(true, stateTag, stateVal);
+    return std::move(state);
 }
 
 template <AccumulatorFirstLastN::Sense S>
 value::TagValueMaybeOwned ByteCode::builtinAggFirstLastNFinalize(ArityType arity) {
-    auto [_, stateTag, stateVal] = getFromStack(0);
-    auto stateTagVal = value::rawToView({stateTag, stateVal});
+    auto stateView = viewFromStack(0);
 
-    auto [queue, n] = firstLastNState(stateTagVal.tag, stateTagVal.value);
+    auto [queue, n] = firstLastNState(stateView.tag, stateView.value);
 
     if constexpr (S == AccumulatorFirstLastN::Sense::kFirst) {
         auto result = arrayQueueFrontN(queue, n);
@@ -3021,9 +2962,9 @@ value::TagValueMaybeOwned aggRemovableSetCommonInitImpl(CollatorInterface* colla
     auto [mSetTag, mSetVal] = value::makeNewArrayMultiSet(collator);
 
     // the order is important!!!
-    stateArr->push_back(mSetTag, mSetVal);  // the multiset with the values
-    stateArr->push_back(value::TypeTags::NumberInt32,
-                        value::bitcastFrom<int32_t>(0));  // the size in bytes of the multiset
+    stateArr->push_back_raw(mSetTag, mSetVal);  // the multiset with the values
+    stateArr->push_back_raw(value::TypeTags::NumberInt32,
+                            value::bitcastFrom<int32_t>(0));  // the size in bytes of the multiset
     return state;
 }
 }  // namespace
@@ -3041,8 +2982,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetCommonCollInit(ArityTy
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableAddToSetAdd(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto newEl = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto state = moveOwnedFromStack(0);
+    auto newEl = moveOwnedFromStack(1);
     auto sizeCap = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
     tassert(8124905,
             "The size cap must be of type NumberInt32",
@@ -3069,13 +3010,13 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableAddToSetAdd(ArityType ari
                     value::TypeTags::NumberInt32,
                     value::bitcastFrom<int32_t>(accMultiSetSize + newElSize));
     auto [newElTag, newElVal] = newEl.releaseToRaw();
-    accMultiSet->push_back(newElTag, newElVal);
+    accMultiSet->push_back_raw(newElTag, newElVal);
     return state;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableAddToSetRemove(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto el = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto state = moveOwnedFromStack(0);
+    auto el = moveOwnedFromStack(1);
     auto [stateArr, accMultiSet, accMultiSetSize] =
         setOperatorCommonState(state.tag(), state.value());
 
@@ -3101,15 +3042,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetCommonFinalize(ArityTy
         value::TagValueOwned::fromRaw(value::makeNewArraySet(accMultiSet->getCollator()));
     auto accSet = value::getArraySetView(accSetTagValue.value());
     for (const auto& p : accMultiSet->values()) {
-        auto [cTag, cVal] = copyValue(p.first, p.second);
-        accSet->push_back(cTag, cVal);
+        accSet->push_back_clone(p.first, p.second);
     }
     return accSetTagValue;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionAdd(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto newEl = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto state = moveOwnedFromStack(0);
+    auto newEl = moveOwnedFromStack(1);
     auto sizeCapTagVal = value::TagValueMaybeOwned::fromRaw(getFromStack(2));
     tassert(9475901,
             "The size cap must be of type NumberInt32",
@@ -3130,7 +3070,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionAdd(ArityType ari
     // example where we might otherwise leak memory is if we get the input off the stack as type
     // 'bsonArray'. Iterating over a 'bsonArray' results in pointers into the underlying BSON. Thus,
     // (without passing 'true') calling 'arrayQueuePush' below would insert elements that are
-    // pointers to memory that will be destroyed with 'newElGuard' above, which is the source of a
+    // pointers to memory that will be destroyed with 'newEl' above, which is the source of a
     // memory leak.
     value::arrayForEach<true>(
         newEl.tag(),
@@ -3153,7 +3093,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionAdd(ArityType ari
             }
 
             // Update the state
-            accMultiSet->push_back(elemTag, elemVal);
+            accMultiSet->push_back_raw(elemTag, elemVal);
             accMultiSetSize += elemSize;
         });
 
@@ -3166,8 +3106,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionAdd(ArityType ari
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionRemove(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto el = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto state = moveOwnedFromStack(0);
+    auto el = moveOwnedFromStack(1);
     auto [stateArr, accMultiSet, accMultiSetSize] =
         setOperatorCommonState(state.tag(), state.value());
 
@@ -3195,7 +3135,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableSetUnionRemove(ArityType 
         // capture a structured binding in a lambda expression.
         [&accMultiSet = accMultiSet, &accMultiSetSize = accMultiSetSize](
             value::TypeTags elemBeingRemovedTag, value::Value elemBeingRemovedVal) {
-            value::ValueGuard removedGuard{elemBeingRemovedTag, elemBeingRemovedVal};
+            value::TagValueOwned removed =
+                value::TagValueOwned::fromRaw(elemBeingRemovedTag, elemBeingRemovedVal);
             auto elemSize = value::getApproximateSize(elemBeingRemovedTag, elemBeingRemovedVal);
             tassert(11093711,
                     "Size of element is larger than size of accumulator multiset",
@@ -3278,20 +3219,22 @@ value::TagValueMaybeOwned ByteCode::aggRemovableMinMaxNInitImpl(CollatorInterfac
 
     // the order is important!!!
     auto [mSetTag, mSetVal] = value::makeNewArrayMultiSet(collator);
-    stateArr->push_back(mSetTag, mSetVal);
-    stateArr->push_back(nTagVal.tag(),
-                        nTagVal.value());  // The maximum number of elements in the multiset.
-    stateArr->push_back(value::TypeTags::NumberInt32,
-                        value::bitcastFrom<int32_t>(0));  // The size of the multiset in bytes.
-    stateArr->push_back(sizeCap.tag,
-                        sizeCap.value);  // The maximum possible size of the multiset in bytes.
+    stateArr->push_back_raw(mSetTag, mSetVal);
+    stateArr->push_back_raw(nTagVal.tag(),
+                            nTagVal.value());  // The maximum number of elements in the multiset.
+    stateArr->push_back_raw(value::TypeTags::NumberInt32,
+                            value::bitcastFrom<int32_t>(0));  // The size of the multiset in bytes.
+    stateArr->push_back_raw(sizeCap.tag,
+                            sizeCap.value);  // The maximum possible size of the multiset in bytes.
     return state;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNCollInit(ArityType arity) {
-    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
-    tassert(8178111, "expected value of type 'collator'", collatorTag == value::TypeTags::collator);
-    return aggRemovableMinMaxNInitImpl(value::getCollatorView(collatorVal));
+    auto collatorView = viewFromStack(2);
+    tassert(8178111,
+            "expected value of type 'collator'",
+            collatorView.tag == value::TypeTags::collator);
+    return aggRemovableMinMaxNInitImpl(value::getCollatorView(collatorView.value));
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNInit(ArityType arity) {
@@ -3300,8 +3243,8 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNInit(ArityType ari
 
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNAdd(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto newEl = value::TagValueOwned::fromRaw(moveOwnedFromStack(1));
+    auto state = moveOwnedFromStack(0);
+    auto newEl = moveOwnedFromStack(1);
 
     if (value::isNullish(newEl.tag())) {
         return state;
@@ -3323,15 +3266,14 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNAdd(ArityType arit
                            static_cast<size_t>(AggAccumulatorNElems::kMemUsage));
 
     auto [newElTag, newElVal] = newEl.releaseToRaw();
-    accMultiSet->push_back(newElTag, newElVal);
+    accMultiSet->push_back_raw(newElTag, newElVal);
 
     return state;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNRemove(ArityType arity) {
-    auto state = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
-    auto [_, elTag, elVal] = getFromStack(1);
-    auto el = value::TagValueView{elTag, elVal};
+    auto state = moveOwnedFromStack(0);
+    auto el = viewFromStack(1);
 
     if (value::isNullish(el.tag)) {
         return state;
@@ -3376,13 +3318,13 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableMinMaxNFinalize(ArityType
         for (auto it = accMultiSet->values().cbegin();
              it != accMultiSet->values().cend() && resultArray->size() < n;
              ++it) {
-            resultArray->push_back(value::copyValue(it->first, it->second));
+            resultArray->push_back_raw(value::copyValue(it->first, it->second));
         }
     } else {
         for (auto it = accMultiSet->values().crbegin();
              it != accMultiSet->values().crend() && resultArray->size() < n;
              ++it) {
-            resultArray->push_back(value::copyValue(it->first, it->second));
+            resultArray->push_back_raw(value::copyValue(it->first, it->second));
         }
     }
 
@@ -3413,17 +3355,17 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNInit(ArityType 
     auto stateArr = value::getArrayView(state.value());
 
     auto [multiMapTag, multiMapVal] = value::makeNewMultiMap();
-    stateArr->push_back(multiMapTag, multiMapVal);
+    stateArr->push_back_raw(multiMapTag, multiMapVal);
 
-    stateArr->push_back(nTagVal.tag(), nTagVal.value());
-    stateArr->push_back(value::TypeTags::NumberInt32, 0);
-    stateArr->push_back(memLimit.tag, memLimit.value);
+    stateArr->push_back_raw(nTagVal.tag(), nTagVal.value());
+    stateArr->push_back_raw(value::TypeTags::NumberInt32, 0);
+    stateArr->push_back_raw(memLimit.tag, memLimit.value);
 
     return state;
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNAdd(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, multiMapTag, multiMapVal, n, memSize, memLimit] =
         accumulatorNState(stateTagVal.tag(), stateTagVal.value());
@@ -3431,12 +3373,12 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNAdd(ArityType a
     auto multiMap = value::getMultiMapView(multiMapVal);
 
     auto key = moveOwnedFromStack(1);
-    auto value = moveOwnedFromStack(2);
+    auto val = moveOwnedFromStack(2);
 
-    multiMap->insert(key, value);
+    auto kvSize = value::getApproximateSize(key.tag(), key.value()) +
+        value::getApproximateSize(val.tag(), val.value());
+    multiMap->insert(key.releaseToRaw(), val.releaseToRaw());
 
-    auto kvSize = value::getApproximateSize(key.first, key.second) +
-        value::getApproximateSize(value.first, value.second);
     updateAndCheckMemUsage(
         state, memSize, kvSize, memLimit, static_cast<size_t>(AggAccumulatorNElems::kMemUsage));
 
@@ -3444,7 +3386,7 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNAdd(ArityType a
 }
 
 value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNRemove(ArityType arity) {
-    auto stateTagVal = value::TagValueOwned::fromRaw(moveOwnedFromStack(0));
+    auto stateTagVal = moveOwnedFromStack(0);
 
     auto [state, multiMapTag, multiMapVal, n, memSize, memLimit] =
         accumulatorNState(stateTagVal.tag(), stateTagVal.value());
@@ -3493,10 +3435,9 @@ value::TagValueMaybeOwned ByteCode::builtinAggRemovableTopBottomNFinalize(ArityT
 
     auto it = begin;
     for (size_t inserted = 0; inserted < n && it != end; ++inserted, ++it) {
-        const auto& keyOutPair = *it;
-        auto output = keyOutPair.second;
-        auto [copyTag, copyVal] = value::copyValue(output.first, output.second);
-        resArr->push_back(copyTag, copyVal);
+        const auto& output = it->second;
+        resArr->push_back(
+            value::TagValueOwned::fromRaw(value::copyValue(output.first, output.second)));
     };
 
     return res;

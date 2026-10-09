@@ -20,7 +20,7 @@ mongo_cc_library(
         "pipeline_rewrite_context_adapter.cpp",
         "query_execution_context_adapter.cpp",
         "query_shape_opts_adapter.cpp",
-        "view_info_adapter.cpp",
+        "resolved_namespace_adapter.cpp",
     ],
     deps = [
         "//src/mongo/db/exec/document_value",
@@ -30,7 +30,9 @@ mongo_cc_library(
         # Note, for the time being we are linking in the C++ SDK here to reduce code duplication.
         # Eventually, we may decouple the C++ SDK from the server and remove this dependency.
         "//src/mongo/db/extension/sdk:sdk_cpp",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage:aggregation_stage_handles",
         "//src/mongo/db/pipeline:aggregation_request_helper",
+        "//src/mongo/db/pipeline:docs_needed_bounds_visitor",
         "//src/mongo/db/query/compiler/rewrites:rule_based_rewriter",
         "//src/mongo:base",
     ],

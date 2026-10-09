@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_replace_root.h"
 
@@ -52,6 +26,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
@@ -60,9 +35,10 @@ namespace mongo {
 
 using boost::intrusive_ptr;
 
-Document ReplaceRootTransformation::applyTransformation(const Document& input) const {
+Document ReplaceRootTransformation::applyTransformation(const Document& input,
+                                                        const EvaluationContext& ctx) const {
     // Extract subdocument in the form of a Value.
-    Value newRoot = _newRoot->evaluate(input, &_expCtx->variables);
+    Value newRoot = _newRoot->evaluate(input, &_expCtx->variables, ctx);
     // The newRoot expression, if it exists, must evaluate to an object.
     uassert(40228,
             fmt::format(kErrorTemplate.data(),
@@ -97,14 +73,14 @@ boost::intrusive_ptr<DocumentSourceMatch> ReplaceRootTransformation::createTypeN
         MatcherTypeSet typeSet;
         typeSet.bsonTypes.insert(BSONType::array);
         auto typeIsArrayExpr =
-            std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
+            std::make_unique<TypeMatchExpression>(std::string_view(expression), typeSet);
         matchExpr->add(std::move(typeIsArrayExpr));
     }
     {
         MatcherTypeSet typeSet;
         typeSet.bsonTypes.insert(BSONType::object);
         auto typeIsObjectExpr =
-            std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
+            std::make_unique<TypeMatchExpression>(std::string_view(expression), typeSet);
         auto typeIsNotObjectExpr =
             std::make_unique<NotMatchExpression>(std::move(typeIsObjectExpr));
         matchExpr->add(std::move(typeIsNotObjectExpr));
@@ -222,9 +198,7 @@ REGISTER_DOCUMENT_SOURCE_WITH_STAGE_PARAMS_DEFAULT(replaceRoot,
 intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     const auto stageName = elem.fieldNameStringData();
-    SbeCompatibility originalSbeCompatibility =
-        expCtx->sbeCompatibilityExchange(SbeCompatibility::noRequirements);
-    ON_BLOCK_EXIT([&] { expCtx->setSbeCompatibility(originalSbeCompatibility); });
+    TemporarySbeCompatibilityGuard guard(expCtx.get(), SbeCompatibility::noRequirements);
     auto newRootExpression = [&]() {
         if (stageName == kAliasNameReplaceWith) {
             return Expression::parseOperand(expCtx.get(), elem, expCtx->variablesParseState);
@@ -259,7 +233,7 @@ intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
             newRootExpression,
             (stageName == kStageName) ? "'newRoot' expression " : "'replacement document' ",
             expCtx->getSbeCompatibility()),
-        kStageName.data(),
+        kStageName,
         isIndependentOfAnyCollection);
 }
 
@@ -275,7 +249,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::create(
                                                     newRootExpression,
                                                     std::move(errMsgContextForNonObjects),
                                                     expCtx->getSbeCompatibility()),
-        kStageName.data(),
+        kStageName,
         isIndependentOfAnyCollection);
 }
 }  // namespace mongo

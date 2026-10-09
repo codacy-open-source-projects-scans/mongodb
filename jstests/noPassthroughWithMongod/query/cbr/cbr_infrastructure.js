@@ -1,5 +1,9 @@
 /**
  * Ensure that the correct CBR mode is chosen given certain combinations of query knobs.
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 
 import {
@@ -12,6 +16,12 @@ import {
     isCollscan,
 } from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
+
+//TODO SERVER-130034 Re-design test relying on the old CE strategy.
+jsTest.log.info(
+    `Skipping ${jsTestName()}: The test is disabled since it uses outdated automatic strategy that is no longer supported.`,
+);
+quit();
 
 // TODO SERVER-92589: Remove this exemption
 if (checkSbeFullyEnabled(db)) {
@@ -79,17 +89,20 @@ coll.createIndexes([
 assert.commandWorked(coll.runCommand({analyze: collName, key: "a", numberBuckets: 10}));
 assert.commandWorked(coll.runCommand({analyze: collName, key: "b", numberBuckets: 10}));
 assert.commandWorked(coll.runCommand({analyze: collName, key: "c", numberBuckets: 10}));
-assert.commandWorked(coll.runCommand({analyze: collName, key: "missing_90_percent", numberBuckets: 10}));
-assert.commandWorked(coll.runCommand({analyze: collName, key: "missing_10_percent", numberBuckets: 10}));
+assert.commandWorked(
+    coll.runCommand({analyze: collName, key: "missing_90_percent", numberBuckets: 10}),
+);
+assert.commandWorked(
+    coll.runCommand({analyze: collName, key: "missing_10_percent", numberBuckets: 10}),
+);
 assert.commandWorked(coll.runCommand({analyze: collName, key: "mixed", numberBuckets: 10}));
 assert.commandWorked(coll.runCommand({analyze: collName, key: "bool_field", numberBuckets: 10}));
 
 // Test queries
 const queries = [
-    // TODO SERVER-100611: re-enable these tests.
-    // {a: {$gt: 10}, b: {$eq: 99}},
-    // {a: {$in: [5, 1]}, b: {$in: [7, 99]}},
-    // {a: {$gt: 90}, b: {$eq: 99}, c: {$lt: 5}},
+    {a: {$gt: 10}, b: {$eq: 99}},
+    {a: {$in: [5, 1]}, b: {$in: [7, 99]}},
+    {a: {$gt: 90}, b: {$eq: 99}, c: {$lt: 5}},
     /*
     The following query has 4 plans:
     1. Filter: a in (1,5) AND b in (7, 99)
@@ -127,8 +140,7 @@ const queries = [
     {missing_10_percent: {$not: {$exists: false}}},
     {missing_90_percent: {$exists: false}},
     {missing_90_percent: {$not: {$exists: false}}},
-    // TODO SERVER-100611: re-enable this test.
-    // {a: {$not: {$lt: 130}}, b: 12, c: {$not: {$gt: 1200}}},
+    {a: {$not: {$lt: 130}}, b: 12, c: {$not: {$gt: 1200}}},
     {a: {$not: {$in: [[100, 101, 102]]}}},
     {$nor: [{$and: [{a: {$lt: 10}}, {b: {$gt: 19}}]}]},
     {$nor: [{$or: [{a: {$lt: 10}}, {b: {$gt: 19}}]}]},
@@ -141,8 +153,7 @@ const queries = [
     {a: {$gt: 10}, b: {$in: []}},
     {$nor: [{a: 1}]},
     {$nor: [{a: 1}, {b: {$gt: 1000}}]},
-    // TODO SERVER-100611: re-enable these tests.
-    // {$and: [{$nor: [{a: 1}, {a: {$gt: 1000}}]}, {b: {$lt: 100}}]},
+    {$and: [{$nor: [{a: 1}, {a: {$gt: 1000}}]}, {b: {$lt: 100}}]},
     {$and: [{$or: [{$nor: [{a: {$gt: 100}}, {b: {$gt: 50}}]}, {a: 1}]}, {b: {$lt: 100}}]},
     // This query has an empty result, thus should estimate as 0
     {$and: [{$or: [{a: 0}, {a: 1}]}, {$or: [{a: {$gt: 3}}, {a: {$lt: 0}}]}]},
@@ -183,10 +194,9 @@ const queries = [
     // {$or: [{a: 3}, {b: {$size: 9}}]},
 ];
 
-// TODO SERVER-100611: re-enable these tests.
-// queries.push({$or: [queries[0], queries[1]]});
+queries.push({$or: [queries[0], queries[1]]});
 
-function assertCbrExplain(plan) {
+function assertCbrExplain(plan, isSamplingCE = false) {
     assert(plan.hasOwnProperty("cardinalityEstimate"), plan);
     if (plan.stage === "EOF") {
         assert.eq(plan.cardinalityEstimate, 0, plan);
@@ -197,12 +207,21 @@ function assertCbrExplain(plan) {
     }
     assert(plan.hasOwnProperty("costEstimate"), plan);
     assert.gt(plan.costEstimate, 0, plan);
+    if (isSamplingCE && plan.stage === "IXSCAN") {
+        assert(
+            plan.hasOwnProperty("indexSeekEstimate"),
+            "IXSCAN stage must have indexSeekEstimate in sampling CE mode: " + tojson(plan),
+        );
+    }
     if (plan.hasOwnProperty("inputStage")) {
-        assertCbrExplain(plan.inputStage);
+        assertCbrExplain(plan.inputStage, isSamplingCE);
     } else if (plan.hasOwnProperty("inputStages")) {
-        plan.inputStages.forEach((p) => assertCbrExplain(p));
+        plan.inputStages.forEach((p) => assertCbrExplain(p, isSamplingCE));
     } else {
-        assert(plan.hasOwnProperty("numKeysEstimate") || plan.hasOwnProperty("numDocsEstimate"), plan);
+        assert(
+            plan.hasOwnProperty("numKeysEstimate") || plan.hasOwnProperty("numDocsEstimate"),
+            plan,
+        );
     }
 }
 
@@ -220,8 +239,8 @@ function checkWinningPlan({query = {}, project = {}, order = {}}) {
         db.adminCommand({
             setParameter: 1,
             featureFlagCostBasedRanker: true,
-            internalQueryCBRCEMode: "automaticCE",
-            automaticCEPlanRankingStrategy: "HistogramCEWithHeuristicFallback",
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "samplingCE",
         }),
     );
     const e1 = coll.find(query, project).sort(order).explain("executionStats");
@@ -236,43 +255,42 @@ function checkWinningPlan({query = {}, project = {}, order = {}}) {
     r1.map((e) => assertCbrExplain(e));
 
     // The CBR-chosen winning plan is wrapped in a MultiPlanStage (with a single candidate,
-    // namely the CBR winner) so we can reuse the classic multiplanner’s code to:
+    // namely the CBR winner) so we can reuse the classic multiplanner's code to:
     //
     //   1. Measure how many works() the CBR plan needs to reach a multiplanner exit
     //      condition (results limit / EOF / works limit), and
     //   2. Cache that plan together with the measured works value.
     //
-    // This wrapping can introduce a small off‑by‑one difference in the "works" metric for
+    // This wrapping can introduce a small off-by-one difference in the "works" metric for
     // the winning plan in the specific case where the MultiPlan trial hits EOF:
     //
     //   * During the trial, the child plan reaches EOF once.
     //   * Later, when we call doWork() on the MultiPlanStage in normal execution, it first
     //     drains any buffered results and then calls work() on the child again, observing
     //     EOF a second time.
-    //   * Both EOF probes increment the child plan’s works counter, even though no extra
+    //   * Both EOF probes increment the child plan's works counter, even though no extra
     //     keys or documents are examined.
     //
     // As a result, the CBR path can have exactly one more work() call than the pure plan without the
-    // MultiPlan stage at its root. 'cbrWorksEpsilon' captures this off‑by‑one.
+    // MultiPlan stage at its root. 'cbrWorksEpsilon' captures this off-by-one.
     // TODO SERVER-117425: Remove 'cbrWorksEpsilon' once we no longer do a second EOF probe.
     const cbrWorksEpsilon = 1;
 
     // Uncomment to enable more detailed logging to determine which query caused a failure
-    // jsTestLog(`Query ${tojson(query)}, project ${tojson(project)}, order ${tojson(order)}`);
-    // if (e1.executionStats.totalKeysExamined > e0.executionStats.totalKeysExamined) {
-    //     jsTestLog(`e0 ${tojson(e0)})`);
-    //     jsTestLog(`e1 ${tojson(e1)})`);
-    // }
-    // if (e1.executionStats.totalDocsExamined > e0.executionStats.totalDocsExamined) {
-    //     jsTestLog(`e0 ${tojson(e0)})`);
-    //     jsTestLog(`e1 ${tojson(e1)})`);
-    // }
+    if (
+        e1.executionStats.totalKeysExamined > e0.executionStats.totalKeysExamined ||
+        e1.executionStats.totalDocsExamined > e0.executionStats.totalDocsExamined
+    ) {
+        jsTest.log.info("CBR regression details", {query, project, order, e0, e1});
+    }
+
     // if (e1.executionStats.executionStages.works > e0.executionStats.executionStages.works + cbrWorksEpsilon) {
     //     jsTestLog(`e0 ${tojson(e0)})`);
     //     jsTestLog(`e1 ${tojson(e1)})`);
     // }
 
     // CBR's plan must be no worse than the Classic plan
+
     assert(e1.executionStats.totalKeysExamined <= e0.executionStats.totalKeysExamined);
     assert(e1.executionStats.totalDocsExamined <= e0.executionStats.totalDocsExamined);
     // There are cases when a plan may scan twice fewer keys and documents, and still produce more
@@ -290,7 +308,12 @@ function verifyCollectionCardinalityEstimate() {
     coll.drop();
     assert.commandWorked(coll.insertMany(Array.from({length: card}, () => ({a: 1}))));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "automaticCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "mixed",
+            internalQueryCBRCEMode: "samplingCE",
+        }),
     );
     // This query should not have any predicates, as they are taken into account
     // by CE, and estimated cardinality will be less than the total.
@@ -303,15 +326,60 @@ function verifyCollectionCardinalityEstimate() {
 
 function verifyHeuristicEstimateSource() {
     coll.drop();
-    assert.commandWorked(coll.insert({a: 1}));
+    // Use enough docs so that the heuristic estimate is strictly less than the
+    // collection cardinality to ensure that the heuristic estimate will deterministically be used.
+    assert.commandWorked(coll.insertMany(Array.from({length: 100}, (_, i) => ({a: i}))));
     assert.commandWorked(coll.createIndex({a: 1}));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "heuristicCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "heuristicCE",
+        }),
     );
     const e1 = coll.find({a: 1}).explain();
     const w1 = getWinningPlanFromExplain(e1);
     assertCbrExplain(w1);
     assert.eq(w1.estimatesMetadata.ceSource, "Heuristics", w1);
+}
+
+function verifySamplingCEIndexSeekEstimate() {
+    coll.drop();
+    const docs = [];
+    for (let i = 0; i < 1000; i++) {
+        docs.push({a: i, b: i % 10});
+    }
+    assert.commandWorked(coll.insertMany(docs));
+    assert.commandWorked(coll.createIndex({a: 1}));
+    assert.commandWorked(coll.createIndex({b: 1}));
+
+    assert.commandWorked(
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "samplingCE",
+        }),
+    );
+
+    // A query with a range predicate produces a FETCH + IXSCAN plan. Under sampling CE every
+    // IXSCAN stage must expose indexSeekEstimate in explain output.
+    const explain = coll.find({a: {$gt: 100}}).explain();
+    const winningPlan = getWinningPlanFromExplain(explain);
+    assertCbrExplain(winningPlan, true /* isSamplingCE */);
+    getRejectedPlans(explain).forEach((p) => assertCbrExplain(p, true /* isSamplingCE */));
+
+    // A point query also produces a single-seek IXSCAN; indexSeekEstimate should equal 1.
+    const explainPoint = coll.find({a: 42}).hint({a: 1}).explain();
+    const winningPoint = getWinningPlanFromExplain(explainPoint);
+    assertCbrExplain(winningPoint, true /* isSamplingCE */);
+    const ixscanPoint = getPlanStage(winningPoint, "IXSCAN");
+    assert.eq(
+        ixscanPoint.indexSeekEstimate,
+        1,
+        "Point query IXSCAN should have indexSeekEstimate = 1",
+    );
 }
 
 function verifyFetchOverFetchDoesNotAssert() {
@@ -320,10 +388,17 @@ function verifyFetchOverFetchDoesNotAssert() {
     assert.commandWorked(coll.createIndex({a: 1, "b.c": 1}));
 
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "heuristicCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "heuristicCE",
+        }),
     );
 
-    const explain = coll.find({a: 1, $or: [{a: 2}, {b: {$elemMatch: {$or: [{c: 4}, {c: 5}]}}}]}).explain();
+    const explain = coll
+        .find({a: 1, $or: [{a: 2}, {b: {$elemMatch: {$or: [{c: 4}, {c: 5}]}}}]})
+        .explain();
     // At least one plan should contain a FETCH over FETCH stages and that should not raise an
     // assertion in FETCH's cardinality estimation.
     let foundFetchOverFetch = false;
@@ -361,6 +436,7 @@ try {
 
     verifyCollectionCardinalityEstimate();
     verifyHeuristicEstimateSource();
+    verifySamplingCEIndexSeekEstimate();
     verifyFetchOverFetchDoesNotAssert();
 
     /**
@@ -370,13 +446,18 @@ try {
     // With strict mode Histogram CE without an applicable histogram should produce
     // an error. Automatic mode should result in heuristicCE or mixedCE.
 
-    // TODO SERVER-97867: Since in automaticCE mode we always fallback to heuristic CE,
+    // TODO SERVER-97867: Since in mixed plan ranking mode we always fallback to heuristic CE,
     // it is not possible to ever fallback to multi-planning.
 
     assert.commandWorked(coll1.insertOne({a: 1}));
 
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
 
     // Request histogam CE while the collection has no histogram
@@ -387,7 +468,10 @@ try {
 
     // Request histogam CE on a field that doesn't have a histogram
     assert.throwsWithCode(() => coll1.find({a: 1}).explain(), ErrorCodes.HistogramCEFailure);
-    assert.throwsWithCode(() => coll1.find({$and: [{b: 1}, {a: 3}]}).explain(), ErrorCodes.HistogramCEFailure);
+    assert.throwsWithCode(
+        () => coll1.find({$and: [{b: 1}, {a: 3}]}).explain(),
+        ErrorCodes.HistogramCEFailure,
+    );
 
     // $or cannot fail because QueryPlanner::planSubqueries() falls back to choosePlanWholeQuery()
     // when one of the subqueries could not be planned. In this way the CE error is masked.
@@ -395,7 +479,10 @@ try {
     assert(isCollscan(db, getWinningPlanFromExplain(orExpl)));
 
     // Histogram CE fails because of inestimable interval
-    assert.throwsWithCode(() => coll1.find({b: {$gte: {foo: 1}}}).explain(), ErrorCodes.HistogramCEFailure);
+    assert.throwsWithCode(
+        () => coll1.find({b: {$gte: {foo: 1}}}).explain(),
+        ErrorCodes.HistogramCEFailure,
+    );
 } finally {
     // Ensure that query knob doesn't leak into other testcases in the suite.
     assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: false}));

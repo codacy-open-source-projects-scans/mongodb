@@ -15,7 +15,6 @@
  * @tags: [
  *   requires_majority_read_concern,
  *   requires_persistence,
- *   requires_replicated_fast_count_recovery,
  *   requires_sharding,
  * ]
  */
@@ -46,14 +45,20 @@ let cursorTestCases = {
     find: function (coll) {
         return makeCursor(
             coll.getDB(),
-            assert.commandWorked(coll.runCommand("find", {readConcern: {level: "majority"}, batchSize: 0})),
+            assert.commandWorked(
+                coll.runCommand("find", {readConcern: {level: "majority"}, batchSize: 0}),
+            ),
         );
     },
     aggregate: function (coll) {
         return makeCursor(
             coll.getDB(),
             assert.commandWorked(
-                coll.runCommand("aggregate", {readConcern: {level: "majority"}, cursor: {batchSize: 0}, pipeline: []}),
+                coll.runCommand("aggregate", {
+                    readConcern: {level: "majority"},
+                    cursor: {batchSize: 0},
+                    pipeline: [],
+                }),
             ),
         );
     },
@@ -79,7 +84,10 @@ let cursorTestCases = {
 let nonCursorTestCases = {
     count_before: {
         run: function (coll) {
-            let res = coll.runCommand("count", {readConcern: {level: "majority"}, query: {state: "before"}});
+            let res = coll.runCommand("count", {
+                readConcern: {level: "majority"},
+                query: {state: "before"},
+            });
             assert.commandWorked(res);
             return res.n;
         },
@@ -88,7 +96,10 @@ let nonCursorTestCases = {
     },
     count_after: {
         run: function (coll) {
-            let res = coll.runCommand("count", {readConcern: {level: "majority"}, query: {state: "after"}});
+            let res = coll.runCommand("count", {
+                readConcern: {level: "majority"},
+                query: {state: "after"},
+            });
             assert.commandWorked(res);
             return res.n;
         },

@@ -1,40 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/algorithm/string/case_conv.hpp>
-#include <boost/algorithm/string/classification.hpp>
-#include <boost/algorithm/string/compare.hpp>
-#include <boost/algorithm/string/find_iterator.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/range/algorithm/count.hpp>
-// IWYU pragma: no_include "boost/algorithm/string/detail/classification.hpp"
-// IWYU pragma: no_include "boost/algorithm/string/detail/finder.hpp"
+#include "mongo/client/mongo_uri.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -42,7 +10,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/authenticate.h"
-#include "mongo/client/mongo_uri.h"
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/stdx/utility.h"
@@ -59,20 +26,29 @@
 #include <cstddef>
 #include <exception>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
+#include <boost/algorithm/string/case_conv.hpp>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/compare.hpp>
+#include <boost/algorithm/string/find_iterator.hpp>
 #include <boost/algorithm/string/finder.hpp>
+#include <boost/algorithm/string/split.hpp>
 #include <boost/core/addressof.hpp>
 #include <boost/function/function_base.hpp>
 #include <boost/iterator/iterator_facade.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
+#include <boost/range/algorithm/count.hpp>
 #include <boost/range/const_iterator.hpp>
 #include <boost/range/iterator_range_core.hpp>
 #include <boost/type_index/type_index_facade.hpp>
 #include <fmt/format.h>
+// IWYU pragma: no_include "boost/algorithm/string/detail/classification.hpp"
+// IWYU pragma: no_include "boost/algorithm/string/detail/finder.hpp"
 
 using namespace std::literals::string_literals;
 
@@ -93,7 +69,7 @@ const std::vector<std::pair<std::string, std::string>> permittedTXTOptions = {{"
  * Encode data elements in a way which will allow them to be embedded
  * into a mongodb:// URI safely.
  */
-void mongo::uriEncode(std::ostream& ss, StringData toEncode, StringData passthrough) {
+void mongo::uriEncode(std::ostream& ss, std::string_view toEncode, std::string_view passthrough) {
     for (const auto& c : toEncode) {
         if ((c == '-') || (c == '_') || (c == '.') || (c == '~') || ctype::isAlnum(c) ||
             (passthrough.find(c) != std::string::npos)) {
@@ -105,7 +81,7 @@ void mongo::uriEncode(std::ostream& ss, StringData toEncode, StringData passthro
     }
 }
 
-mongo::StatusWith<std::string> mongo::uriDecode(StringData toDecode) {
+mongo::StatusWith<std::string> mongo::uriDecode(std::string_view toDecode) {
     StringBuilder out;
     for (size_t i = 0; i < toDecode.size(); ++i) {
         char c = toDecode[i];
@@ -129,21 +105,22 @@ mongo::StatusWith<std::string> mongo::uriDecode(StringData toDecode) {
 }
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 
-constexpr StringData kURIPrefix = "mongodb://"_sd;
-constexpr StringData kURISRVPrefix = "mongodb+srv://"_sd;
-constexpr StringData kDefaultMongoHost = "127.0.0.1:27017"_sd;
+constexpr std::string_view kURIPrefix = "mongodb://"sv;
+constexpr std::string_view kURISRVPrefix = "mongodb+srv://"sv;
+constexpr std::string_view kDefaultMongoHost = "127.0.0.1:27017"sv;
 
 /**
  * Helper Method for MongoURI::parse() to split a string into exactly 2 pieces by a char
  * delimiter.
  */
-std::pair<StringData, StringData> partitionForward(StringData str, const char c) {
+std::pair<std::string_view, std::string_view> partitionForward(std::string_view str, const char c) {
     const auto delim = str.find(c);
     if (delim == std::string::npos) {
-        return {str, StringData()};
+        return {str, std::string_view()};
     }
     return {str.substr(0, delim), str.substr(delim + 1)};
 }
@@ -152,10 +129,11 @@ std::pair<StringData, StringData> partitionForward(StringData str, const char c)
  * Helper method for MongoURI::parse() to split a string into exactly 2 pieces by a char
  * delimiter searching backward from the end of the string.
  */
-std::pair<StringData, StringData> partitionBackward(StringData str, const char c) {
+std::pair<std::string_view, std::string_view> partitionBackward(std::string_view str,
+                                                                const char c) {
     const auto delim = str.rfind(c);
     if (delim == std::string::npos) {
-        return {StringData(), str};
+        return {std::string_view(), str};
     }
     return {str.substr(0, delim), str.substr(delim + 1)};
 }
@@ -169,7 +147,7 @@ std::pair<StringData, StringData> partitionBackward(StringData str, const char c
  * on multiple parsed option sources.  STL setwise operations require sorted lists.  A map is used
  * instead of a vector of pairs to permit insertion-is-not-overwrite behavior.
  */
-MongoURI::OptionsMap parseOptions(StringData options, StringData url) {
+MongoURI::OptionsMap parseOptions(std::string_view options, std::string_view url) {
     MongoURI::OptionsMap ret;
     if (options.empty()) {
         return ret;
@@ -227,7 +205,7 @@ MongoURI::OptionsMap parseOptions(StringData options, StringData url) {
 
 MongoURI::OptionsMap addTXTOptions(MongoURI::OptionsMap options,
                                    const std::string& host,
-                                   const StringData url,
+                                   const std::string_view url,
                                    const bool isSeedlist) {
     // If there is no seedlist mode, then don't add any TXT options.
     if (!isSeedlist)
@@ -261,20 +239,20 @@ MongoURI::OptionsMap addTXTOptions(MongoURI::OptionsMap options,
     return {std::make_move_iterator(begin(options)), std::make_move_iterator(end(options))};
 }
 
-// Contains the parts of a MongoURI as unowned StringData's. Any code that needs to break up
+// Contains the parts of a MongoURI as unowned std::string_view's. Any code that needs to break up
 // URIs into their basic components without fully parsing them can use this struct.
 // Internally, MongoURI uses this to do basic parsing of the input URI string.
 struct URIParts {
-    explicit URIParts(StringData uri);
-    StringData scheme;
-    StringData username;
-    StringData password;
-    StringData hostIdentifiers;
-    StringData database;
-    StringData options;
+    explicit URIParts(std::string_view uri);
+    std::string_view scheme;
+    std::string_view username;
+    std::string_view password;
+    std::string_view hostIdentifiers;
+    std::string_view database;
+    std::string_view options;
 };
 
-URIParts::URIParts(StringData uri) {
+URIParts::URIParts(std::string_view uri) {
     // 1. Strip off the scheme ("mongo://")
     auto schemeEnd = uri.find("://");
     if (schemeEnd == std::string::npos) {
@@ -316,16 +294,63 @@ URIParts::URIParts(StringData uri) {
     database = databaseAndOptions.first;
     options = databaseAndOptions.second;
 }
+
+// Resolves the auth mechanism with the following precedence:
+// 1. Explicit authMechanism URI option.
+// 2. SCRAM mechanism advertised by the server for the selected auth source (prefer SHA-256).
+// 3. Default to SCRAM-SHA-256 when server mechanisms are unavailable.
+StatusWith<auth::AuthMechanism> resolveMechanism(
+    const MongoURI::OptionsMap& options,
+    boost::optional<std::vector<std::string>> saslMechsForAuth = boost::none) {
+    if (auto it = options.find("authMechanism"); it != options.end())
+        return auth::authMechanismFromString(it->second);
+    if (saslMechsForAuth) {
+        return std::find(saslMechsForAuth->begin(),
+                         saslMechsForAuth->end(),
+                         auth::kMechanismScramSha256) != saslMechsForAuth->end()
+            ? auth::AuthMechanism::kScramSha256
+            : auth::AuthMechanism::kScramSha1;
+    }
+    return auth::AuthMechanism::kScramSha256;
+}
+
+bool mechanismRequiresUsername(auth::AuthMechanism mechanism) {
+    return mechanism != auth::AuthMechanism::kMongoX509 &&
+        mechanism != auth::AuthMechanism::kMongoAWS && mechanism != auth::AuthMechanism::kMongoOIDC;
+}
+
+// Resolves the authentication database with the following precedence:
+// 1. Explicit non-empty authSource URI option.
+// 2. For X.509/AWS/OIDC/GSSAPI, default to $external.
+// 3. For PLAIN, use the URI database when present, otherwise $external.
+// 4. For all other mechanisms, use the URI database when present, otherwise admin.
+std::string resolveAuthSource(auth::AuthMechanism mechanism,
+                              const MongoURI::OptionsMap& options,
+                              std::string_view database) {
+    const bool isExternalDefaultDbMech = mechanism == auth::AuthMechanism::kMongoX509 ||
+        mechanism == auth::AuthMechanism::kMongoAWS ||
+        mechanism == auth::AuthMechanism::kMongoOIDC || mechanism == auth::AuthMechanism::kGSSAPI;
+    if (auto it = options.find("authSource"); it != options.end() && !it->second.empty())
+        return it->second;
+    if (isExternalDefaultDbMech)
+        return std::string{DatabaseName::kExternal.db(omitTenant)};
+    if (mechanism == auth::AuthMechanism::kSaslPlain)
+        return !database.empty() ? std::string{database}
+                                 : std::string{DatabaseName::kExternal.db(omitTenant)};
+    return !database.empty() ? std::string{database}
+                             : std::string{DatabaseName::kAdmin.db(omitTenant)};
+}
+
 }  // namespace
 
 MongoURI::CaseInsensitiveString::CaseInsensitiveString(std::string str)
     : _original(std::move(str)), _lowercase(boost::algorithm::to_lower_copy(_original)) {}
 
-bool MongoURI::isMongoURI(StringData uri) {
+bool MongoURI::isMongoURI(std::string_view uri) {
     return (uri.starts_with(kURIPrefix) || uri.starts_with(kURISRVPrefix));
 }
 
-std::string MongoURI::redact(StringData url) {
+std::string MongoURI::redact(std::string_view url) {
     uassert(50892, "String passed to MongoURI::redact wasn't a MongoURI", isMongoURI(url));
     URIParts parts(url);
     std::ostringstream out;
@@ -342,7 +367,7 @@ std::string MongoURI::redact(StringData url) {
     return out.str();
 }
 
-MongoURI MongoURI::parseImpl(StringData url) {
+MongoURI MongoURI::parseImpl(std::string_view url) {
     // 1. Validate and remove the scheme prefix `mongodb://` or `mongodb+srv://`
     const bool isSeedlist = url.starts_with(kURISRVPrefix);
     if (!(url.starts_with(kURIPrefix) || isSeedlist)) {
@@ -358,7 +383,7 @@ MongoURI MongoURI::parseImpl(StringData url) {
     const auto connectionOptions = parts.options;
 
     // 3. URI decode and validate the username/password
-    const auto containsColonOrAt = [](StringData str) {
+    const auto containsColonOrAt = [](std::string_view str) {
         return (str.find(':') != std::string::npos) || (str.find('@') != std::string::npos);
     };
 
@@ -397,7 +422,7 @@ MongoURI MongoURI::parseImpl(StringData url) {
             continue;
         }
 
-        if ((host.find('/') != std::string::npos) && !StringData(host).ends_with(".sock")) {
+        if ((host.find('/') != std::string::npos) && !std::string_view(host).ends_with(".sock")) {
             uasserted(ErrorCodes::FailedToParse,
                       str::stream()
                           << "'" << host << "' in '" << url
@@ -523,12 +548,32 @@ MongoURI MongoURI::parseImpl(StringData url) {
                               : transport::ConnectSSLMode::kDisableSSL;
     }
 
+    // Build a Credential if the URI carries authentication data.
+    boost::optional<auth::Credential> credential;
+    {
+        auto swMech = resolveMechanism(options);
+        uassertStatusOK(swMech);
+        const auto mechanism = swMech.getValue();
+        // Build credentials when either:
+        // - a username is present, or
+        // - the selected mechanism allows username omission (for example X509/AWS/OIDC).
+        // In the latter case, a non-empty username is still valid and is forwarded when building
+        // the auth command.
+        if (!username.empty() || !mechanismRequiresUsername(mechanism)) {
+            credential = auth::Credential{
+                .mechanism = mechanism,
+                .db = resolveAuthSource(mechanism, options, database),
+                .username = username.empty() ? boost::none : boost::optional<std::string>{username},
+                .password =
+                    password.empty() ? boost::none : boost::optional<std::string>{password}};
+        }
+    }
+
     auto cs = replicaSetName.empty()
         ? ConnectionString::forStandalones(std::move(servers))
         : ConnectionString::forReplicaSet(replicaSetName, std::move(servers));
     return MongoURI(std::move(cs),
-                    username,
-                    password,
+                    std::move(credential),
                     database,
                     retryWrites,
                     tlsMode,
@@ -539,7 +584,7 @@ MongoURI MongoURI::parseImpl(StringData url) {
                     std::move(options));
 }
 
-StatusWith<MongoURI> MongoURI::parse(StringData url) try {
+StatusWith<MongoURI> MongoURI::parse(std::string_view url) try {
     return parseImpl(url);
 } catch (const std::exception&) {
     return exceptionToStatus();
@@ -556,10 +601,10 @@ boost::optional<std::string> MongoURI::getAppName() const {
 std::string MongoURI::canonicalizeURIAsString() const {
     StringBuilder uri;
     uri << kURIPrefix;
-    if (!_user.empty()) {
-        uri << uriEncode(_user);
-        if (!_password.empty()) {
-            uri << ":" << uriEncode(_password);
+    if (_credential && _credential->username && !_credential->username->empty()) {
+        uri << uriEncode(*_credential->username);
+        if (_credential->password && !_credential->password->empty()) {
+            uri << ":" << uriEncode(*_credential->password);
         }
         uri << "@";
     }
@@ -571,7 +616,7 @@ std::string MongoURI::canonicalizeURIAsString() const {
             if (boost::count(hostAndPort.host(), ':') > 1) {
                 uri << delimeter << "[" << uriEncode(hostAndPort.host()) << "]"
                     << ":" << uriEncode(std::to_string(hostAndPort.port()));
-            } else if (StringData(hostAndPort.host()).ends_with(".sock")) {
+            } else if (std::string_view(hostAndPort.host()).ends_with(".sock")) {
                 uri << delimeter << uriEncode(hostAndPort.host());
             } else {
                 uri << delimeter << uriEncode(hostAndPort.host()) << ":"
@@ -600,14 +645,14 @@ std::string MongoURI::canonicalizeURIAsString() const {
 }
 
 namespace {
-constexpr auto kAuthMechanismPropertiesKey = "mechanism_properties"_sd;
+constexpr auto kAuthMechanismPropertiesKey = "mechanism_properties"sv;
 
-constexpr auto kAuthServiceName = "SERVICE_NAME"_sd;
-constexpr auto kAuthServiceRealm = "SERVICE_REALM"_sd;
-constexpr auto kAuthAwsSessionToken = "AWS_SESSION_TOKEN"_sd;
-constexpr auto kAuthOIDCAccessToken = "OIDC_ACCESS_TOKEN"_sd;
+constexpr auto kAuthServiceName = "SERVICE_NAME"sv;
+constexpr auto kAuthServiceRealm = "SERVICE_REALM"sv;
+constexpr auto kAuthAwsSessionToken = "AWS_SESSION_TOKEN"sv;
+constexpr auto kAuthOIDCAccessToken = "OIDC_ACCESS_TOKEN"sv;
 
-constexpr std::array<StringData, 4> kSupportedAuthMechanismProperties = {
+constexpr std::array<std::string_view, 4> kSupportedAuthMechanismProperties = {
     kAuthServiceName, kAuthServiceRealm, kAuthAwsSessionToken, kAuthOIDCAccessToken};
 
 BSONObj parseAuthMechanismProperties(const std::string& propStr) {
@@ -620,7 +665,7 @@ BSONObj parseAuthMechanismProperties(const std::string& propStr) {
                 str::stream() << "authMechanismProperty: " << *it << " is not supported",
                 std::count(std::begin(kSupportedAuthMechanismProperties),
                            std::end(kSupportedAuthMechanismProperties),
-                           StringData(prop)));
+                           std::string_view(prop)));
         ++it;
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "authMechanismProperty: " << prop << " must have a value",
@@ -640,42 +685,28 @@ boost::optional<BSONObj> MongoURI::makeAuthObjFromOptions(
     // and OIDC, which infers it from the access token.
     bool usernameRequired = true;
 
+    const auto credUser =
+        (_credential && _credential->username) ? *_credential->username : std::string{};
+    const auto credPassword =
+        (_credential && _credential->password) ? *_credential->password : std::string{};
+
     BSONObjBuilder bob;
-    if (!_password.empty()) {
-        bob.append(saslCommandPasswordFieldName, _password);
+    if (!credPassword.empty()) {
+        bob.append(saslCommandPasswordFieldName, credPassword);
     }
 
-    auto it = _options.find("authSource");
-    if (it != _options.end()) {
-        bob.append(saslCommandUserDBFieldName, it->second);
-    } else if (!_database.empty()) {
-        bob.append(saslCommandUserDBFieldName, _database);
-    } else {
-        bob.append(saslCommandUserDBFieldName, "admin");
-    }
+    const auto mechanism = resolveMechanism(_options, saslMechsForAuth).getValue();
+    usernameRequired = mechanismRequiresUsername(mechanism);
+    bob.append(saslCommandUserDBFieldName, resolveAuthSource(mechanism, _options, _database));
+    bob.append(saslCommandMechanismFieldName, auth::toString(mechanism));
 
-    it = _options.find("authMechanism");
-    if (it != _options.end()) {
-        bob.append(saslCommandMechanismFieldName, it->second);
-        if (it->second == auth::kMechanismMongoX509 || it->second == auth::kMechanismMongoAWS ||
-            it->second == auth::kMechanismMongoOIDC) {
-            usernameRequired = false;
-        }
-    } else if (std::find(saslMechsForAuth.begin(),
-                         saslMechsForAuth.end(),
-                         auth::kMechanismScramSha256) != saslMechsForAuth.end()) {
-        bob.append(saslCommandMechanismFieldName, auth::kMechanismScramSha256);
-    } else {
-        bob.append(saslCommandMechanismFieldName, auth::kMechanismScramSha1);
-    }
-
-    if (usernameRequired && _user.empty()) {
+    if (usernameRequired && credUser.empty()) {
         return boost::none;
     }
 
-    std::string username(_user);  // may have to tack on service realm before we append
+    std::string username = credUser;  // may have to tack on service realm before we append
 
-    it = _options.find("authMechanismProperties");
+    auto it = _options.find("authMechanismProperties");
     if (it != _options.end()) {
         BSONObj parsed(parseAuthMechanismProperties(it->second));
 

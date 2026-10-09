@@ -1,40 +1,14 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/util/modules.h"
 
 #include <concepts>
+#include <string_view>
 
 #include <boost/intrusive_ptr.hpp>
 #include <boost/noncopyable.hpp>
@@ -88,15 +62,44 @@ private:
  */
 class PreservePath final : public DocumentOperation {
 public:
-    explicit PreservePath(StringData path) : _path(path) {}
+    explicit PreservePath(std::string_view path) : _path(path) {}
 
     /// The path being preserved.
-    StringData getPath() const {
+    std::string_view getPath() const {
         return _path;
     }
 
 private:
-    const StringData _path;
+    const std::string_view _path;
+};
+
+/**
+ * Reports the semantics of the path modification.
+ */
+enum class ModifiedPrefixPolicy {
+    /**
+     * Not supported - the caller should not assume a policy.
+     * Arrays on the modified path may or may not be preserved, they may or may not be replaced with
+     * objects.
+     */
+    kNotSupported,
+    /**
+     * Prefix arrays are traversed implicitly and the modification is applied inside each element.
+     * Example:
+     * $set: {'a.b': 1}
+     * -> If 'a' is an array, the field 'b' is updated in each element.
+     * -> If 'b' is an object, the field 'b' is updated.
+     * -> Else, the path 'a.b' is created.
+     */
+    kPreserveArrays,
+    /**
+     * Prefix components are coerced to plain objects.
+     * Example:
+     * $lookup: {as: 'a.b', ...}
+     * -> If 'a' is an array (or non-object), it is replaced with {b: <results>}
+     * -> If 'a' is object, only the field 'b' is replaced with <results>
+     */
+    kEnsureObjects,
 };
 
 /**
@@ -108,11 +111,17 @@ private:
  */
 class ModifyPath : public DocumentOperation {
 public:
-    explicit ModifyPath(StringData path) : _path(path) {}
+    ModifyPath(std::string_view path, ModifiedPrefixPolicy policy)
+        : _path(path), _prefixPolicy(policy) {}
 
     /// The path being modified.
-    StringData getPath() const {
+    std::string_view getPath() const {
         return _path;
+    }
+
+    /// Returns the prefix policy.
+    ModifiedPrefixPolicy getPrefixPolicy() const {
+        return _prefixPolicy;
     }
 
     /// True if the modification removes the path completely.
@@ -128,8 +137,15 @@ public:
     /// Returns the Expression which determines the new value.
     virtual boost::intrusive_ptr<Expression> getExpression() const;
 
+    /// Returns true if the value at the leaf path element can be an array.
+    /// Note: This is not the same as saying the path cannot be an array.
+    virtual bool canLeafBeArray() const {
+        return true;
+    }
+
 private:
-    const StringData _path;
+    const std::string_view _path;
+    const ModifiedPrefixPolicy _prefixPolicy;
 };
 
 /**
@@ -141,15 +157,16 @@ private:
  */
 class RenamePath : public DocumentOperation {
 public:
-    RenamePath(StringData newPath, StringData oldPath) : _newPath(newPath), _oldPath(oldPath) {}
+    RenamePath(std::string_view newPath, std::string_view oldPath)
+        : _newPath(newPath), _oldPath(oldPath) {}
 
     /// The new name.
-    StringData getNewPath() const {
+    std::string_view getNewPath() const {
         return _newPath;
     }
 
     /// The old name.
-    StringData getOldPath() const {
+    std::string_view getOldPath() const {
         return _oldPath;
     }
 
@@ -166,8 +183,8 @@ public:
     virtual BSONDepthIndex getOldPathMaxArrayTraversals() const;
 
 private:
-    const StringData _newPath;
-    const StringData _oldPath;
+    const std::string_view _newPath;
+    const std::string_view _oldPath;
 };
 
 /**

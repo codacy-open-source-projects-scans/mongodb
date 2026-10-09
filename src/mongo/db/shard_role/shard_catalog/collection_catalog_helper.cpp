@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_catalog_helper.h"
 
@@ -54,6 +28,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
@@ -67,6 +42,7 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(hangBeforeGettingNextCollection);
 
 namespace catalog {
+using namespace std::literals::string_view_literals;
 
 Status checkIfNamespaceExists(OperationContext* opCtx, const NamespaceString& nss) {
     auto catalog = CollectionCatalog::get(opCtx);
@@ -235,13 +211,17 @@ void modifyAllCollectionsMatching(OperationContext* opCtx,
 
 boost::optional<bool> getConfigDebugDump(const VersionContext& vCtx, const NamespaceString& nss) {
     static const std::array kConfigDumpCollections = {
-        "chunks"_sd,
-        "collections"_sd,
-        "databases"_sd,
-        "settings"_sd,
-        "shards"_sd,
-        "tags"_sd,
-        "version"_sd,
+        "chunks"sv,
+        "collections"sv,
+        "databases"sv,
+        "settings"sv,
+        "shards"sv,
+        "tags"sv,
+        "version"sv,
+        // Authoritative shard-local catalog collections (config.shard.catalog.*).
+        "shard.catalog.databases"sv,
+        "shard.catalog.collections"sv,
+        "shard.catalog.chunks"sv,
     };
 
     if (!nss.isConfigDB()) {
@@ -297,7 +277,7 @@ Status dropCollections(OperationContext* opCtx,
 }  // namespace
 
 void removeIndex(OperationContext* opCtx,
-                 StringData indexName,
+                 std::string_view indexName,
                  Collection* collection,
                  std::shared_ptr<IndexCatalogEntry> entry,
                  DataRemoval dataRemoval) {
@@ -481,7 +461,7 @@ void startUpCollectionCatalogDeferred(OperationContext* opCtx) {
     LOGV2(11379201, "Load MDB catalog and collection catalog");
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
     storageEngine->loadMDBCatalog(opCtx, StorageEngine::LastShutdownState::kClean);
-    catalog::initializeCollectionCatalog(opCtx, storageEngine);
+    catalog::initializeCollectionCatalog(opCtx, storageEngine, catalog::InitMode::kStartup);
 }
 
 StorageEngine::LastShutdownState startUpStorageEngineAndCollectionCatalog(
@@ -498,7 +478,8 @@ StorageEngine::LastShutdownState startUpStorageEngineAndCollectionCatalog(
 
     Lock::GlobalWrite globalLk(initializeStorageEngineOpCtx.get());
     catalog::initializeCollectionCatalog(initializeStorageEngineOpCtx.get(),
-                                         service->getStorageEngine());
+                                         service->getStorageEngine(),
+                                         catalog::InitMode::kStartup);
 
     return lastShutdownState;
 }

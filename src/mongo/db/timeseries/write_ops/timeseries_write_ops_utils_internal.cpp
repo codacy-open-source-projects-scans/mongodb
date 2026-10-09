@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils_internal.h"
 
@@ -47,15 +21,19 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/tracking/context.h"
 
+#include <string_view>
+
 #include <boost/iterator/transform_iterator.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo::timeseries::write_ops_utils {
 
+MONGO_FAIL_POINT_DEFINE(timeseriesDataIntegrityCheckFailureInsert);
+MONGO_FAIL_POINT_DEFINE(timeseriesDataIntegrityCheckFailureUpdate);
+
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(timeseriesDataIntegrityCheckFailureUpdate);
 
 // Return a verifierFunction that is used to perform a data integrity check on inserts into
 // a compressed column.
@@ -63,19 +41,21 @@ doc_diff::VerifierFunc makeVerifierFunction(std::shared_ptr<bucket_catalog::Writ
                                             OperationSource source) {
     return [measurements = batch->measurements, batch, source](const BSONObj& docToWrite,
                                                                const BSONObj& pre) {
+        auto throwCompressionFailure = [&](const BSONObj&) {
+            uasserted(timeseries::BucketCompressionFailure(batch->bucketId.collectionUUID,
+                                                           batch->bucketId.oid,
+                                                           batch->bucketId.keySignature),
+                      "Failpoint-triggered data integrity check failure");
+        };
         timeseriesDataIntegrityCheckFailureUpdate.executeIf(
-            [&](const BSONObj&) {
-                uasserted(  // In testing, we want any failures within this check to invariant.
-                            // In production,
-                    timeseries::BucketCompressionFailure(batch->bucketId.collectionUUID,
-                                                         batch->bucketId.oid,
-                                                         batch->bucketId.keySignature),
-                    "Failpoint-triggered data integrity check failure");
-            },
+            throwCompressionFailure,
             [&source](const BSONObj&) { return source == OperationSource::kTimeseriesUpdate; });
+        timeseriesDataIntegrityCheckFailureInsert.executeIf(
+            throwCompressionFailure,
+            [&source](const BSONObj&) { return source == OperationSource::kTimeseriesInsert; });
 
         using AddAttrsFn = std::function<void(logv2::DynamicAttributes&)>;
-        auto failed = [&measurements, &batch, &docToWrite, &pre](StringData reason,
+        auto failed = [&measurements, &batch, &docToWrite, &pre](std::string_view reason,
                                                                  AddAttrsFn addAttrsWithoutData,
                                                                  AddAttrsFn addAttrsWithData) {
             logv2::DynamicAttributes attrs;
@@ -132,12 +112,12 @@ doc_diff::VerifierFunc makeVerifierFunction(std::shared_ptr<bucket_catalog::Writ
         // itself, and a size_t type counter. The iterator allows us to iterate across the
         // BSONColumn as we inspect each element and compare it to the expected value in the actual
         // measurement we inserted. The column is stored to prevent the iterator on it from going
-        // out of scope. The StringData representation of the binary allows us to log the binary in
-        // the case that we encounter an error. The size_t counter represents how many times the
-        // iterator has been advanced - this allows us to detect when we didn't have a value set for
-        // a field in a particular measurement, so that we can check the corresponding BSONColumn
-        // for a skip value.
-        StringDataMap<std::tuple<BSONColumn::Iterator, BSONColumn, StringData, size_t>>
+        // out of scope. The std::string_view representation of the binary allows us to log the
+        // binary in the case that we encounter an error. The size_t counter represents how many
+        // times the iterator has been advanced - this allows us to detect when we didn't have a
+        // value set for a field in a particular measurement, so that we can check the corresponding
+        // BSONColumn for a skip value.
+        StringDataMap<std::tuple<BSONColumn::Iterator, BSONColumn, std::string_view, size_t>>
             fieldsToDataAndNextCountMap;
 
         // First, populate our map.
@@ -150,7 +130,8 @@ doc_diff::VerifierFunc makeVerifierFunction(std::shared_ptr<bucket_catalog::Writ
                 auto it = c.begin();
                 std::advance(it, batch->numPreviouslyCommittedMeasurements);
                 fieldsToDataAndNextCountMap.emplace(
-                    key, std::make_tuple(it, std::move(c), StringData(binData, binLength), 0));
+                    key,
+                    std::make_tuple(it, std::move(c), std::string_view(binData, binLength), 0));
             } catch (const DBException& e) {
                 failed(
                     "exception",
@@ -235,7 +216,7 @@ write_ops_utils::BucketDocument makeNewDocument(const OID& bucketId,
                                                 const BSONObj& min,
                                                 const BSONObj& max,
                                                 StringDataMap<BSONObjBuilder>& dataBuilders,
-                                                StringData timeField,
+                                                std::string_view timeField,
                                                 const NamespaceString& nss,
                                                 const UUID& collectionUUID,
                                                 std::uint32_t keySignature) {
@@ -290,7 +271,7 @@ boost::optional<std::pair<BSONObj, BSONObj>> processTimeseriesMeasurements(
     bool computeMinmax = options && comparator;
 
     auto metadataElem = metadata.firstElement();
-    boost::optional<StringData> metaFieldName;
+    boost::optional<std::string_view> metaFieldName;
     if (metadataElem) {
         metaFieldName = metadataElem.fieldNameStringData();
     }
@@ -381,7 +362,7 @@ BSONObj makeBSONColumnDocDiff(
 BSONObj makeTimeseriesInsertCompressedBucketDocument(
     std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const std::vector<
-        std::pair<StringData, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>&
+        std::pair<std::string_view, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>&
         intermediates) {
     BSONObjBuilder insertBuilder;
     insertBuilder.append(kBucketIdFieldName, batch->bucketId.oid);

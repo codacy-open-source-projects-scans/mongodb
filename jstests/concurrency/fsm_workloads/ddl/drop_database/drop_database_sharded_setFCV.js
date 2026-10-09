@@ -14,6 +14,7 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/ddl/drop_database/drop_database_sharded.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.states.setFCV = function (db, collName) {
@@ -21,7 +22,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         const targetFCV = fcvValues[Random.randInt(3)];
         jsTestLog("Executing FCV state, setting to:" + targetFCV);
         try {
-            assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
+            assert.commandWorked(
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
+            );
         } catch (e) {
             if (handleRandomSetFCVErrors(e, targetFCV)) return;
             throw e;
@@ -55,12 +58,17 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         init: {enableSharding: 0.3, dropDatabase: 0.3, shardCollection: 0.3, setFCV: 0.1},
         enableSharding: {enableSharding: 0.3, dropDatabase: 0.3, shardCollection: 0.3, setFCV: 0.1},
         dropDatabase: {enableSharding: 0.3, dropDatabase: 0.3, shardCollection: 0.3, setFCV: 0.1},
-        shardCollection: {enableSharding: 0.3, dropDatabase: 0.3, shardCollection: 0.3, setFCV: 0.1},
+        shardCollection: {
+            enableSharding: 0.3,
+            dropDatabase: 0.3,
+            shardCollection: 0.3,
+            setFCV: 0.1,
+        },
         setFCV: {enableSharding: 0.3, dropDatabase: 0.3, shardCollection: 0.3, setFCV: 0.1},
     };
 
     $config.teardown = function (db, collName) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
         $super.teardown(db, collName);
     };
 

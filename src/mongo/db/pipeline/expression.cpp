@@ -1,31 +1,33 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
+
+#include "mongo/db/pipeline/expression.h"
+
+#include "mongo/base/data_view.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/crypto/fle_crypto.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/exec/convert_utils.h"
+#include "mongo/db/exec/expression/evaluate.h"
+#include "mongo/db/feature_compatibility_version_documentation.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_parser_gen.h"
+#include "mongo/db/pipeline/variable_validation.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_knob_descriptors_execution.h"
+#include "mongo/db/query/query_optimization_knobs_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/str.h"
 
 #include <algorithm>
 #include <array>
@@ -33,6 +35,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -46,41 +49,8 @@
 // IWYU pragma: no_include <pstl/glue_algorithm_defs.h>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
-#include "mongo/base/parse_number.h"
-#include "mongo/bson/bsonelement_comparator_interface.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/bsontypes_util.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/crypto/fle_crypto.h"
-#include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/api_parameters.h"
-#include "mongo/db/basic_types.h"
-#include "mongo/db/exec/expression/evaluate.h"
-#include "mongo/db/feature_compatibility_version_documentation.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_parser_gen.h"
-#include "mongo/db/pipeline/variable_validation.h"
-#include "mongo/db/query/query_execution_knobs_gen.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/query_integration_knobs_gen.h"
-#include "mongo/db/query/query_optimization_knobs_gen.h"
-#include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/db/query/util/rank_fusion_util.h"
-#include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/db/stats/counters.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
-
 namespace mongo {
+using namespace std::literals::string_view_literals;
 using Parser = Expression::Parser;
 
 using boost::intrusive_ptr;
@@ -88,7 +58,13 @@ using std::pair;
 using std::string;
 using std::vector;
 
-Expression::ExpressionVector Expression::cloneChildren() const {
+bool isSbeAccumulatorExpressionEnabled(ExpressionContext* const expCtx) {
+    const auto& ifrContext = expCtx->getIfrContext();
+    return ifrContext &&
+        ifrContext->getSavedFlagValue(feature_flags::gFeatureFlagSbeAccumulatorExpressions);
+}
+
+Expression::ExpressionVector Expression::cloneChildren(ExpressionContext& expCtx) const {
     if (_children.empty()) {
         return {};
     }
@@ -97,42 +73,26 @@ Expression::ExpressionVector Expression::cloneChildren() const {
 
     copy.resize(_children.size());
     for (size_t childIdx = 0; childIdx < _children.size(); ++childIdx) {
-        copy[childIdx] = cloneChild(childIdx);
+        copy[childIdx] = cloneChild(childIdx, expCtx);
     }
 
     return copy;
 }
 
-boost::intrusive_ptr<Expression> Expression::cloneChild(size_t childIdx) const {
+boost::intrusive_ptr<Expression> Expression::cloneChild(size_t childIdx,
+                                                        ExpressionContext& expCtx) const {
     tassert(
         3100300,
         fmt::format("Child index is out of bounds: idx={}, size={}", childIdx, _children.size()),
         childIdx < _children.size());
-    return _children[childIdx] ? _children[childIdx]->clone() : nullptr;
+    return _children[childIdx] ? _children[childIdx]->clone(expCtx) : nullptr;
 }
 
-// Clone by serializing and reparsing.
-boost::intrusive_ptr<Expression> Expression::cloneUsingNewExpCtx(
-    ExpressionContext* newExpCtx) const {
-    // Serialize this expression to a generic Value.
-    SerializationOptions opts{.serializeForCloning = true};
-    auto val = serialize(opts);
-
-    // Wrap it into a BSONObj as the value of a dummy field.
-    BSONObjBuilder bob;
-    val.addToBsonObj(&bob, "");
-    BSONObj obj = bob.obj();
-    BSONElement elem = obj.firstElement();
-
-    // Re-parse as an operand in the new ExpressionContext.
-    return Expression::parseOperand(newExpCtx, elem, newExpCtx->variablesParseState);
-}
-
-Value ExpressionConstant::serializeConstant(const SerializationOptions& opts,
+Value ExpressionConstant::serializeConstant(const query_shape::SerializationOptions& opts,
                                             Value val,
                                             bool wrapRepresentativeValue) {
     if (val.missing()) {
-        return Value("$$REMOVE"_sd);
+        return Value("$$REMOVE"sv);
     }
     // It's safer to wrap constants in $const when generating representative shapes to avoid
     // ambiguity when re-parsing (SERVER-88296, SERVER-85376). However, we allow certain expressions
@@ -197,15 +157,18 @@ void Expression::registerExpression(string key,
                                     Parser parser,
                                     AllowedWithApiStrict allowedWithApiStrict,
                                     AllowedWithClientType allowedWithClientType,
-                                    FeatureFlag* featureFlag) {
+                                    FeatureFlag* featureFlag,
+                                    bool shouldOmitDiagnosticInformation) {
     auto op = parserMap.find(key);
     massert(17064,
             str::stream() << "Duplicate expression (" << key << ") registered.",
             op == parserMap.end());
     parserMap[key] =
         ParserRegistration{parser, allowedWithApiStrict, allowedWithClientType, featureFlag};
-    // Add this expression to the global map of operator counters for expressions.
-    operatorCountersAggExpressions.addCounter(key);
+    if (!shouldOmitDiagnosticInformation) {
+        // Add this expression to the global map of operator counters for expressions.
+        operatorCountersAggExpressions.addCounter(key);
+    }
 }
 
 void Expression::registerDisabledExpressionName(string key, ExpressionDisabledReason reason) {
@@ -234,7 +197,7 @@ stdx::unordered_set<std::string> Expression::listDisabledExpressions() {
     return expressions;
 }
 
-std::string Expression::getErrorMessage(const StringData key) {
+std::string Expression::getErrorMessage(const std::string_view key) {
     if (const auto it = disabledExpressionNames.find(key); it != disabledExpressionNames.end()) {
         // the expression was disabled: return a more detail error message
         switch (it->second) {
@@ -276,7 +239,7 @@ intrusive_ptr<Expression> Expression::parseExpression(ExpressionContext* const e
         expCtx->ignoreFeatureInParserOrRejectAndThrow(opName, *entry.featureFlag);
     }
 
-    if (expCtx->getOperationContext()) {
+    if (expCtx->getOperationContext() && !expCtx->getIsReparsingRepresentativeQueryShape()) {
         assertLanguageFeatureIsAllowed(expCtx->getOperationContext(),
                                        opName,
                                        entry.allowedWithApiStrict,
@@ -320,7 +283,7 @@ intrusive_ptr<Expression> Expression::parseOperand(ExpressionContext* const expC
     }
 }
 
-bool Expression::isExpressionName(StringData name) {
+bool Expression::isExpressionName(std::string_view name) {
     return parserMap.find(name) != parserMap.end();
 }
 
@@ -334,7 +297,7 @@ boost::intrusive_ptr<Expression> parseDateExpressionAcceptingTimeZone(
     BSONElement operatorElem,
     const VariablesParseState& variablesParseState) {
     if (operatorElem.type() == BSONType::object) {
-        if (operatorElem.embeddedObject().firstElementFieldName()[0] == '$') {
+        if (operatorElem.embeddedObject().firstElementFieldNameStringData().starts_with('$')) {
             // Assume this is an expression specification representing the date argument
             // like {$add: [<date>, 1000]}.
             return new SubClass(expCtx,
@@ -348,9 +311,9 @@ boost::intrusive_ptr<Expression> parseDateExpressionAcceptingTimeZone(
             boost::intrusive_ptr<Expression> timeZone;
             for (const auto& subElem : operatorElem.embeddedObject()) {
                 auto argName = subElem.fieldNameStringData();
-                if (argName == "date"_sd) {
+                if (argName == "date"sv) {
                     date = Expression::parseOperand(expCtx, subElem, variablesParseState);
-                } else if (argName == "timezone"_sd) {
+                } else if (argName == "timezone"sv) {
                     timeZone = Expression::parseOperand(expCtx, subElem, variablesParseState);
                 } else {
                     uasserted(40535,
@@ -385,71 +348,97 @@ boost::intrusive_ptr<Expression> parseDateExpressionAcceptingTimeZone(
 }  // namespace
 
 REGISTER_STABLE_EXPRESSION(dayOfMonth, parseDateExpressionAcceptingTimeZone<ExpressionDayOfMonth>);
-Value ExpressionDayOfMonth::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDayOfMonth::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(dayOfWeek, parseDateExpressionAcceptingTimeZone<ExpressionDayOfWeek>);
-Value ExpressionDayOfWeek::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDayOfWeek::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(dayOfYear, parseDateExpressionAcceptingTimeZone<ExpressionDayOfYear>);
-Value ExpressionDayOfYear::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDayOfYear::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(hour, parseDateExpressionAcceptingTimeZone<ExpressionHour>);
-Value ExpressionHour::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionHour::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(isoDayOfWeek,
                            parseDateExpressionAcceptingTimeZone<ExpressionIsoDayOfWeek>);
-Value ExpressionIsoDayOfWeek::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIsoDayOfWeek::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(isoWeek, parseDateExpressionAcceptingTimeZone<ExpressionIsoWeek>);
-Value ExpressionIsoWeek::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIsoWeek::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(isoWeekYear,
                            parseDateExpressionAcceptingTimeZone<ExpressionIsoWeekYear>);
-Value ExpressionIsoWeekYear::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIsoWeekYear::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(millisecond,
                            parseDateExpressionAcceptingTimeZone<ExpressionMillisecond>);
-Value ExpressionMillisecond::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMillisecond::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(minute, parseDateExpressionAcceptingTimeZone<ExpressionMinute>);
-Value ExpressionMinute::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMinute::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(month, parseDateExpressionAcceptingTimeZone<ExpressionMonth>);
-Value ExpressionMonth::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMonth::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(second, parseDateExpressionAcceptingTimeZone<ExpressionSecond>);
-Value ExpressionSecond::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSecond::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(week, parseDateExpressionAcceptingTimeZone<ExpressionWeek>);
-Value ExpressionWeek::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionWeek::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(year, parseDateExpressionAcceptingTimeZone<ExpressionYear>);
-Value ExpressionYear::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionYear::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> DateExpressionAcceptingTimeZone::optimize() {
@@ -460,22 +449,25 @@ boost::intrusive_ptr<Expression> DateExpressionAcceptingTimeZone::optimize() {
     if (ExpressionConstant::allNullOrConstant({_children[_kDate], _children[_kTimeZone]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone =
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
     }
     return this;
 }
 
 /* ----------------------- ExpressionAbs ---------------------------- */
 
-Value ExpressionAbs::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionAbs::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(abs, ExpressionAbs::parse);
@@ -485,8 +477,10 @@ const char* ExpressionAbs::getOpName() const {
 
 /* ------------------------- ExpressionAdd ----------------------------- */
 
-Value ExpressionAdd::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionAdd::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(add, ExpressionAdd::parse);
@@ -496,8 +490,10 @@ const char* ExpressionAdd::getOpName() const {
 
 /* ------------------------- ExpressionAllElementsTrue -------------------------- */
 
-Value ExpressionAllElementsTrue::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionAllElementsTrue::evaluate(const Document& root,
+                                          Variables* variables,
+                                          const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(allElementsTrue, ExpressionAllElementsTrue::parse);
@@ -545,8 +541,10 @@ intrusive_ptr<Expression> ExpressionAnd::optimize() {
     return pE;
 }
 
-Value ExpressionAnd::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionAnd::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(and, ExpressionAnd::parse);
@@ -556,8 +554,10 @@ const char* ExpressionAnd::getOpName() const {
 
 /* ------------------------- ExpressionAnyElementTrue -------------------------- */
 
-Value ExpressionAnyElementTrue::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionAnyElementTrue::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(anyElementTrue, ExpressionAnyElementTrue::parse);
@@ -567,14 +567,51 @@ const char* ExpressionAnyElementTrue::getOpName() const {
 
 /* ---------------------- ExpressionArray --------------------------- */
 
-Value ExpressionArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value Expression::foldConstant(bool retainResult) const {
+    // Fold against a standalone tracker seeded with the per-expression fallback cap rather than the
+    // operation-wide tracker. Constant folding can run before query settings are resolved (e.g.
+    // representative query-shape serialization and 'let'-parameter evaluation at ExpressionContext
+    // construction). The operation-wide limit is pqs-settable, so reading it here would materialize
+    // (and latch) a value before settings had a chance to override it, tripping the
+    // settings-ordering invariant. The fallback cap is a plain constant that is always safe to
+    // read, so it bounds the fold without touching the per-operation limit; the result is rolled up
+    // into the operation tracker below purely for accounting.
+    SimpleMemoryUsageTracker foldingTracker{
+        MemoryUsageLimit{query_knobs::kMaxSingleExpressionMemoryUsageBytes}};
+    Value folded = evaluate(Document{},
+                            &(getExpressionContext()->variables),
+                            EvaluationContext{.tracker = &foldingTracker});
+    // Only charge the fallback when it rolls up into the operation tracker (same condition under
+    // which the ExpressionContext creates that flavor): charging the standalone flavor would pin
+    // unreleased bytes against the per-expression cap it shares with later evaluations.
+    auto* expCtx = getExpressionContext();
+    if (int64_t peak = foldingTracker.peakTrackedMemoryBytes(); peak > 0 &&
+        expCtx->getOperationContext() &&
+        feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled() &&
+        feature_flags::gFeatureFlagExpressionMemoryTracking.isEnabled()) {
+        const int64_t retained =
+            retainResult ? std::min<int64_t>(folded.getApproximateSize(), peak) : 0;
+        auto& fallbackTracker = expCtx->getExpressionFallbackTracker();
+        fallbackTracker.add(peak);
+        fallbackTracker.add(retained - peak);
+    }
+    return folded;
 }
 
-Value ExpressionArray::serialize(const SerializationOptions& options) const {
+Value ExpressionArray::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
+}
+
+Value ExpressionArray::serialize(const query_shape::SerializationOptions& options) const {
     if (!options.isKeepingLiteralsUnchanged() && selfAndChildrenAreConstant()) {
-        return ExpressionConstant::serializeConstant(
-            options, evaluate(Document{}, &(getExpressionContext()->variables)));
+        // Query-shape serialization folds before query settings are applied; other serialization
+        // modes run post-settings and keep charging the operation-wide tracker.
+        Value folded = options.isReplacingLiteralsWithRepresentativeValues()
+            ? foldConstant(false /* retainResult */)
+            : evaluate(Document{}, &(getExpressionContext()->variables), {});
+        return ExpressionConstant::serializeConstant(options, folded);
     }
     vector<Value> expressions;
     expressions.reserve(_children.size());
@@ -596,8 +633,7 @@ intrusive_ptr<Expression> ExpressionArray::optimize() {
 
     // If all values in ExpressionArray are constant evaluate to ExpressionConstant.
     if (allValuesConstant) {
-        return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
+        return ExpressionConstant::create(getExpressionContext(), foldConstant());
     }
     return this;
 }
@@ -618,8 +654,10 @@ const char* ExpressionArray::getOpName() const {
 
 /* ------------------------- ExpressionArrayElemAt -------------------------- */
 
-Value ExpressionArrayElemAt::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionArrayElemAt::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(arrayElemAt, ExpressionArrayElemAt::parse);
@@ -629,8 +667,10 @@ const char* ExpressionArrayElemAt::getOpName() const {
 
 /* ------------------------- ExpressionFirst -------------------------- */
 
-Value ExpressionFirst::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionFirst::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(first, ExpressionFirst::parse);
@@ -641,8 +681,10 @@ const char* ExpressionFirst::getOpName() const {
 
 /* ------------------------- ExpressionLast -------------------------- */
 
-Value ExpressionLast::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionLast::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(last, ExpressionLast::parse);
@@ -653,8 +695,10 @@ const char* ExpressionLast::getOpName() const {
 
 /* ------------------------- ExpressionObjectToArray -------------------------- */
 
-Value ExpressionObjectToArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionObjectToArray::evaluate(const Document& root,
+                                        Variables* variables,
+                                        const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(objectToArray, ExpressionObjectToArray::parse);
@@ -663,8 +707,10 @@ const char* ExpressionObjectToArray::getOpName() const {
 }
 
 /* ------------------------- ExpressionArrayToObject -------------------------- */
-Value ExpressionArrayToObject::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionArrayToObject::evaluate(const Document& root,
+                                        Variables* variables,
+                                        const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(arrayToObject, ExpressionArrayToObject::parse);
@@ -676,14 +722,18 @@ const char* ExpressionArrayToObject::getOpName() const {
 
 REGISTER_STABLE_EXPRESSION(bsonSize, ExpressionBsonSize::parse);
 
-Value ExpressionBsonSize::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBsonSize::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ------------------------- ExpressionCeil -------------------------- */
 
-Value ExpressionCeil::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionCeil::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(ceil, ExpressionCeil::parse);
@@ -749,8 +799,10 @@ static const CmpOpName cmpOpNames[7] = {
 };
 }  // namespace
 
-Value ExpressionCompare::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionCompare::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 const char* ExpressionCompare::getOpName() const {
@@ -759,8 +811,10 @@ const char* ExpressionCompare::getOpName() const {
 
 /* ------------------------- ExpressionConcat ----------------------------- */
 
-Value ExpressionConcat::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionConcat::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(concat, ExpressionConcat::parse);
@@ -770,8 +824,10 @@ const char* ExpressionConcat::getOpName() const {
 
 /* ------------------------- ExpressionConcatArrays ----------------------------- */
 
-Value ExpressionConcatArrays::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionConcatArrays::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(concatArrays, ExpressionConcatArrays::parse);
@@ -781,8 +837,10 @@ const char* ExpressionConcatArrays::getOpName() const {
 
 /* ----------------------- ExpressionCond ------------------------------ */
 
-Value ExpressionCond::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionCond::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionCond::optimize() {
@@ -856,7 +914,15 @@ const char* ExpressionCond::getOpName() const {
 intrusive_ptr<Expression> ExpressionConstant::parse(ExpressionContext* const expCtx,
                                                     BSONElement exprElement,
                                                     const VariablesParseState& vps) {
-    return new ExpressionConstant(expCtx, Value(exprElement));
+    exec::expression::convert_utils::uassertValidUserConstructedBinData(exprElement,
+                                                                        false /* allowColumn */);
+    Value exprValue = Value(exprElement);
+    // Shred values when parsing collection-validator constants to avoid lazily
+    // populating the BSON cache on write paths.
+    if (MONGO_unlikely(expCtx->getIsParsingCollectionValidator())) {
+        exprValue = exprValue.shred();
+    }
+    return new ExpressionConstant(expCtx, std::move(exprValue));
 }
 
 
@@ -875,11 +941,13 @@ intrusive_ptr<Expression> ExpressionConstant::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionConstant::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionConstant::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
-Value ExpressionConstant::serialize(const SerializationOptions& options) const {
+Value ExpressionConstant::serialize(const query_shape::SerializationOptions& options) const {
     return ExpressionConstant::serializeConstant(options, _value);
 }
 
@@ -916,27 +984,27 @@ intrusive_ptr<Expression> ExpressionDateFromParts::parse(ExpressionContext* cons
     for (auto&& arg : args) {
         auto field = arg.fieldNameStringData();
 
-        if (field == "year"_sd) {
+        if (field == "year"sv) {
             yearElem = arg;
-        } else if (field == "month"_sd) {
+        } else if (field == "month"sv) {
             monthElem = arg;
-        } else if (field == "day"_sd) {
+        } else if (field == "day"sv) {
             dayElem = arg;
-        } else if (field == "hour"_sd) {
+        } else if (field == "hour"sv) {
             hourElem = arg;
-        } else if (field == "minute"_sd) {
+        } else if (field == "minute"sv) {
             minuteElem = arg;
-        } else if (field == "second"_sd) {
+        } else if (field == "second"sv) {
             secondElem = arg;
-        } else if (field == "millisecond"_sd) {
+        } else if (field == "millisecond"sv) {
             millisecondElem = arg;
-        } else if (field == "isoWeekYear"_sd) {
+        } else if (field == "isoWeekYear"sv) {
             isoWeekYearElem = arg;
-        } else if (field == "isoWeek"_sd) {
+        } else if (field == "isoWeek"sv) {
             isoWeekElem = arg;
-        } else if (field == "isoDayOfWeek"_sd) {
+        } else if (field == "isoDayOfWeek"sv) {
             isoDayOfWeekElem = arg;
-        } else if (field == "timezone"_sd) {
+        } else if (field == "timezone"sv) {
             timeZoneElem = arg;
         } else {
             uasserted(40518,
@@ -1046,14 +1114,15 @@ intrusive_ptr<Expression> ExpressionDateFromParts::optimize() {
 
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone =
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
         if (!_parsedTimeZone) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
@@ -1062,7 +1131,7 @@ intrusive_ptr<Expression> ExpressionDateFromParts::optimize() {
     return this;
 }
 
-Value ExpressionDateFromParts::serialize(const SerializationOptions& options) const {
+Value ExpressionDateFromParts::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {"$dateFromParts",
          Document{
@@ -1083,8 +1152,10 @@ Value ExpressionDateFromParts::serialize(const SerializationOptions& options) co
               _children[_kTimeZone] ? _children[_kTimeZone]->serialize(options) : Value()}}}});
 }
 
-Value ExpressionDateFromParts::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateFromParts::evaluate(const Document& root,
+                                        Variables* variables,
+                                        const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ---------------------- ExpressionDateFromString --------------------- */
@@ -1105,15 +1176,15 @@ intrusive_ptr<Expression> ExpressionDateFromString::parse(ExpressionContext* con
     for (auto&& arg : args) {
         auto field = arg.fieldNameStringData();
 
-        if (field == "format"_sd) {
+        if (field == "format"sv) {
             formatElem = arg;
-        } else if (field == "dateString"_sd) {
+        } else if (field == "dateString"sv) {
             dateStringElem = arg;
-        } else if (field == "timezone"_sd) {
+        } else if (field == "timezone"sv) {
             timeZoneElem = arg;
-        } else if (field == "onNull"_sd) {
+        } else if (field == "onNull"sv) {
             onNullElem = arg;
-        } else if (field == "onError"_sd) {
+        } else if (field == "onError"sv) {
             onErrorElem = arg;
         } else {
             uasserted(40541,
@@ -1171,19 +1242,20 @@ intrusive_ptr<Expression> ExpressionDateFromString::optimize() {
                                                _children[_kOnError]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone =
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
     }
     return this;
 }
 
-Value ExpressionDateFromString::serialize(const SerializationOptions& options) const {
+Value ExpressionDateFromString::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {"$dateFromString",
          Document{
@@ -1196,8 +1268,10 @@ Value ExpressionDateFromString::serialize(const SerializationOptions& options) c
               _children[_kOnError] ? _children[_kOnError]->serialize(options) : Value()}}}});
 }
 
-Value ExpressionDateFromString::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateFromString::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ---------------------- ExpressionDateToParts ----------------------- */
@@ -1219,11 +1293,11 @@ intrusive_ptr<Expression> ExpressionDateToParts::parse(ExpressionContext* const 
     for (auto&& arg : args) {
         auto field = arg.fieldNameStringData();
 
-        if (field == "date"_sd) {
+        if (field == "date"sv) {
             dateElem = arg;
-        } else if (field == "timezone"_sd) {
+        } else if (field == "timezone"sv) {
             timeZoneElem = arg;
-        } else if (field == "iso8601"_sd) {
+        } else if (field == "iso8601"sv) {
             isoDateElem = arg;
         } else {
             uasserted(40520,
@@ -1260,14 +1334,15 @@ intrusive_ptr<Expression> ExpressionDateToParts::optimize() {
             {_children[_kDate], _children[_kIso8601], _children[_kTimeZone]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone =
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
         if (!_parsedTimeZone) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
@@ -1276,7 +1351,7 @@ intrusive_ptr<Expression> ExpressionDateToParts::optimize() {
     return this;
 }
 
-Value ExpressionDateToParts::serialize(const SerializationOptions& options) const {
+Value ExpressionDateToParts::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {"$dateToParts",
          Document{{"date", _children[_kDate]->serialize(options)},
@@ -1286,8 +1361,10 @@ Value ExpressionDateToParts::serialize(const SerializationOptions& options) cons
                    _children[_kIso8601] ? _children[_kIso8601]->serialize(options) : Value()}}}});
 }
 
-Value ExpressionDateToParts::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateToParts::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ---------------------- ExpressionDateToString ----------------------- */
@@ -1306,13 +1383,13 @@ intrusive_ptr<Expression> ExpressionDateToString::parse(ExpressionContext* const
     for (auto&& arg : expr.embeddedObject()) {
         auto field = arg.fieldNameStringData();
 
-        if (field == "format"_sd) {
+        if (field == "format"sv) {
             formatElem = arg;
-        } else if (field == "date"_sd) {
+        } else if (field == "date"sv) {
             dateElem = arg;
-        } else if (field == "timezone"_sd) {
+        } else if (field == "timezone"sv) {
             timeZoneElem = arg;
-        } else if (field == "onNull"_sd) {
+        } else if (field == "onNull"sv) {
             onNullElem = arg;
         } else {
             uasserted(18534,
@@ -1357,20 +1434,21 @@ intrusive_ptr<Expression> ExpressionDateToString::optimize() {
             {_children[_kDate], _children[_kFormat], _children[_kTimeZone], _children[_kOnNull]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone =
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
     }
 
     return this;
 }
 
-Value ExpressionDateToString::serialize(const SerializationOptions& options) const {
+Value ExpressionDateToString::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {"$dateToString",
          Document{
@@ -1382,8 +1460,10 @@ Value ExpressionDateToString::serialize(const SerializationOptions& options) con
               _children[_kOnNull] ? _children[_kOnNull]->serialize(options) : Value()}}}});
 }
 
-Value ExpressionDateToString::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateToString::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ----------------------- ExpressionDateDiff ---------------------------- */
@@ -1416,15 +1496,15 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::parse(ExpressionContext* co
     BSONElement startDateElement, endDateElement, unitElement, timezoneElement, startOfWeekElement;
     for (auto&& element : expr.embeddedObject()) {
         auto field = element.fieldNameStringData();
-        if ("startDate"_sd == field) {
+        if ("startDate"sv == field) {
             startDateElement = element;
-        } else if ("endDate"_sd == field) {
+        } else if ("endDate"sv == field) {
             endDateElement = element;
-        } else if ("unit"_sd == field) {
+        } else if ("unit"sv == field) {
             unitElement = element;
-        } else if ("timezone"_sd == field) {
+        } else if ("timezone"sv == field) {
             timezoneElement = element;
-        } else if ("startOfWeek"_sd == field) {
+        } else if ("startOfWeek"sv == field) {
             startOfWeekElement = element;
         } else {
             uasserted(5166302,
@@ -1461,7 +1541,7 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::optimize() {
                                                _children[_kStartOfWeek]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isConstant(_children[_kUnit])) {
         const Value unitValue =
@@ -1469,7 +1549,7 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::optimize() {
         if (unitValue.nullish()) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
-        _parsedUnit = exec::expression::parseTimeUnit(unitValue, "$dateDiff"_sd);
+        _parsedUnit = exec::expression::parseTimeUnit(unitValue, "$dateDiff"sv);
     }
     if (ExpressionConstant::isConstant(_children[_kStartOfWeek])) {
         const Value startOfWeekValue =
@@ -1478,7 +1558,7 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::optimize() {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
         _parsedStartOfWeek =
-            exec::expression::parseDayOfWeek(startOfWeekValue, "$dateDiff"_sd, "startOfWeek"_sd);
+            exec::expression::parseDayOfWeek(startOfWeekValue, "$dateDiff"sv, "startOfWeek"sv);
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone = exec::expression::addContextToAssertionException(
@@ -1486,9 +1566,10 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::optimize() {
                 return exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                                       Document{},
                                                       _children[_kTimeZone].get(),
-                                                      &(getExpressionContext()->variables));
+                                                      &(getExpressionContext()->variables),
+                                                      {});
             },
-            "$dateDiff parameter 'timezone' value parsing failed"_sd);
+            "$dateDiff parameter 'timezone' value parsing failed"sv);
         if (!_parsedTimeZone) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
@@ -1496,21 +1577,23 @@ boost::intrusive_ptr<Expression> ExpressionDateDiff::optimize() {
     return this;
 };
 
-Value ExpressionDateDiff::serialize(const SerializationOptions& options) const {
+Value ExpressionDateDiff::serialize(const query_shape::SerializationOptions& options) const {
     return Value{Document{
-        {"$dateDiff"_sd,
-         Document{{"startDate"_sd, _children[_kStartDate]->serialize(options)},
-                  {"endDate"_sd, _children[_kEndDate]->serialize(options)},
-                  {"unit"_sd, _children[_kUnit]->serialize(options)},
-                  {"timezone"_sd,
+        {"$dateDiff"sv,
+         Document{{"startDate"sv, _children[_kStartDate]->serialize(options)},
+                  {"endDate"sv, _children[_kEndDate]->serialize(options)},
+                  {"unit"sv, _children[_kUnit]->serialize(options)},
+                  {"timezone"sv,
                    _children[_kTimeZone] ? _children[_kTimeZone]->serialize(options) : Value{}},
-                  {"startOfWeek"_sd,
+                  {"startOfWeek"sv,
                    _children[_kStartOfWeek] ? _children[_kStartOfWeek]->serialize(options)
                                             : Value{}}}}}};
 };
 
-Value ExpressionDateDiff::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateDiff::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 monotonic::State ExpressionDateDiff::getMonotonicState(const FieldPath& sortedFieldPath) const {
@@ -1528,8 +1611,10 @@ monotonic::State ExpressionDateDiff::getMonotonicState(const FieldPath& sortedFi
 
 /* ----------------------- ExpressionDivide ---------------------------- */
 
-Value ExpressionDivide::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDivide::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(divide, ExpressionDivide::parse);
@@ -1539,8 +1624,10 @@ const char* ExpressionDivide::getOpName() const {
 
 /* ----------------------- ExpressionExp ---------------------------- */
 
-Value ExpressionExp::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionExp::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(exp, ExpressionExp::parse);
@@ -1579,14 +1666,15 @@ boost::intrusive_ptr<ExpressionObject> ExpressionObject::create(
 intrusive_ptr<ExpressionObject> ExpressionObject::parse(ExpressionContext* const expCtx,
                                                         BSONObj obj,
                                                         const VariablesParseState& vps) {
+    expCtx->checkAndIncrementMemoryIntensiveExprCount("$object"sv);
     // Make sure we don't have any duplicate field names.
     stdx::unordered_set<string> specifiedFields;
 
     std::vector<boost::intrusive_ptr<Expression>> children;
     vector<pair<string, intrusive_ptr<Expression>&>> expressions;
     for (auto&& elem : obj) {
-        // Make sure this element has a valid field name. Use StringData here so that we can detect
-        // if the field name contains a null byte.
+        // Make sure this element has a valid field name. Use std::string_view here so that we can
+        // detect if the field name contains a null byte.
         uassertStatusOKWithContext(
             FieldPath::validateFieldName(elem.fieldNameStringData()),
             "Consider using $getField or $setField for a field path with '.' or '$'.");
@@ -1619,14 +1707,15 @@ intrusive_ptr<Expression> ExpressionObject::optimize() {
     }
     // If all values in ExpressionObject are constant evaluate to ExpressionConstant.
     if (allValuesConstant) {
-        return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
+        return ExpressionConstant::create(getExpressionContext(), foldConstant());
     }
     return this;
 }
 
-Value ExpressionObject::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionObject::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 bool ExpressionObject::selfAndChildrenAreConstant() const {
@@ -1638,7 +1727,7 @@ bool ExpressionObject::selfAndChildrenAreConstant() const {
     return true;
 }
 
-Value ExpressionObject::serialize(const SerializationOptions& options) const {
+Value ExpressionObject::serialize(const query_shape::SerializationOptions& options) const {
     if (!options.isKeepingLiteralsUnchanged() && selfAndChildrenAreConstant()) {
         return ExpressionConstant::serializeConstant(options, Value(Document{}));
     }
@@ -1667,6 +1756,10 @@ Expression::ComputedPaths ExpressionObject::getComputedPaths(const std::string& 
     return outputPaths;
 }
 
+const char* ExpressionObject::getOpName() const {
+    return "$object";
+}
+
 /* --------------------- ExpressionFieldPath --------------------------- */
 
 // this is the new version that supports every syntax
@@ -1682,9 +1775,9 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::parse(ExpressionContext*
             raw.size() >= 2);  // need at least "$" and either "$" or a field name
 
     if (raw[1] == '$') {
-        const StringData rawSD = raw;
-        const StringData fieldPath = rawSD.substr(2);  // strip off $$
-        const StringData varName = fieldPath.substr(0, fieldPath.find('.'));
+        const std::string_view rawSD = raw;
+        const std::string_view fieldPath = rawSD.substr(2);  // strip off $$
+        const std::string_view varName = fieldPath.substr(0, fieldPath.find('.'));
         variableValidation::validateNameForUserRead(varName);
         auto varId = vps.getVariable(varName);
 
@@ -1707,8 +1800,8 @@ intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::createPathFromString(
 }
 intrusive_ptr<ExpressionFieldPath> ExpressionFieldPath::createVarFromString(
     ExpressionContext* const expCtx, const string& raw, const VariablesParseState& vps) {
-    const auto rawSD = StringData{raw};
-    const StringData varName = rawSD.substr(0, rawSD.find('.'));
+    const auto rawSD = std::string_view{raw};
+    const std::string_view varName = rawSD.substr(0, rawSD.find('.'));
     auto varId = vps.getVariable(varName);
     return new ExpressionFieldPath(expCtx, raw, varId);
 }
@@ -1731,28 +1824,9 @@ intrusive_ptr<Expression> ExpressionFieldPath::optimize() {
         return ExpressionConstant::create(getExpressionContext(), Value());
     }
 
-    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled();
-    if (sbeFullEnabled &&
-        (_variable == Variables::kNowId || _variable == Variables::kClusterTimeId ||
-         _variable == Variables::kUserRolesId)) {
-        // Normally, we should be able to constant fold ExpressionFieldPath representing a system
-        // variable into an ExpressionConstant during expression optimization. However, this causes
-        // a problem with the current implementation of the SBE plan cache as it would effectively
-        // embed a value for the system variable into the plan in the cache. This constant folding
-        // optimization is important for queries which want to use an index scan and contain a
-        // predicate referencing a system variable, for example:
-        // {a: {$expr: {$lt: ["$foo", {$subtract: ["$$NOW", 10]}]}}})
-        // Saving such a plan with the constant folded expression in the plan is wrong because a
-        // cache hit will reuse the plan with the wrong constant, resulting in incorrect query
-        // results. To avoid this problem, when featureFlagSbeFull is enabled (the SBE plan cache is
-        // enabled), prohibit this optimization.
-        return intrusive_ptr<Expression>(this);
-    }
-
-    // We allow system variables to be constant folded when the SBE plan cache is not enabled.
     if (getExpressionContext()->variables.hasConstantValue(_variable)) {
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables), {}));
     }
 
     return intrusive_ptr<Expression>(this);
@@ -1768,8 +1842,10 @@ bool ExpressionFieldPath::representsPath(const std::string& dottedPath) const {
     return _fieldPath.tail().fullPath() == dottedPath;
 }
 
-Value ExpressionFieldPath::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionFieldPath::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 namespace {
@@ -1784,7 +1860,7 @@ auto getPrefixAndPath(const FieldPath& path) {
 }
 }  // namespace
 
-Value ExpressionFieldPath::serialize(const SerializationOptions& options) const {
+Value ExpressionFieldPath::serialize(const query_shape::SerializationOptions& options) const {
     auto [prefix, path] = getPrefixAndPath(_fieldPath);
 
     // When generating query shapes on a shard, if this is a system variable with
@@ -1798,7 +1874,7 @@ Value ExpressionFieldPath::serialize(const SerializationOptions& options) const 
         getExpressionContext()->variables.hasConstantValue(_variable)) {
         return ExpressionConstant::serializeConstant(
             options,
-            evaluate(Document(), &(getExpressionContext()->variables)),
+            evaluate(Document(), &(getExpressionContext()->variables), {}),
             true /* wrapRepresentativeValue */);
     }
 
@@ -1893,8 +1969,10 @@ monotonic::State ExpressionFieldPath::getMonotonicState(const FieldPath& sortedF
 
 /* ------------------------- ExpressionFloor -------------------------- */
 
-Value ExpressionFloor::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionFloor::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(floor, ExpressionFloor::parse);
@@ -1911,6 +1989,7 @@ REGISTER_EXPRESSION_CONDITIONALLY(meta,
                                   AllowedWithApiStrict::kConditionally,
                                   AllowedWithClientType::kAny,
                                   nullptr, /* featureFlag */
+                                  false,   /* shouldOmitDiagnosticInformation */
                                   true);
 
 void ExpressionMeta::_assertMetaFieldCompatibleWithStrictAPI(ExpressionContext* const expCtx,
@@ -1935,24 +2014,11 @@ void ExpressionMeta::_assertMetaFieldCompatibleWithStrictAPI(ExpressionContext* 
             !apiStrict || !usesUnstableField);
 }
 
-void ExpressionMeta::_assertMetaFieldCompatibleWithHybridScoringFeatureFlag(
-    ExpressionContext* const expCtx, MetaType type) {
-    static const std::set<MetaType> kHybridScoringProtectedFields = {MetaType::kScore,
-                                                                     MetaType::kScoreDetails};
-    const bool usesHybridScoringProtectedField = kHybridScoringProtectedFields.contains(type);
-    const bool hybridScoringFeatureFlagEnabled =
-        expCtx->shouldParserIgnoreFeatureFlagCheck() || isRankFusionFullEnabled();
-    uassert(ErrorCodes::QueryFeatureNotAllowed,
-            "'featureFlagRankFusionFull' must be enabled to use "
-            "'score' or 'scoreDetails' meta field",
-            !usesHybridScoringProtectedField || hybridScoringFeatureFlagEnabled);
-}
-
 boost::intrusive_ptr<Expression> ExpressionMeta::_rewriteAsLet(
     ExpressionContext* const expCtx,
     DocumentMetadataFields::MetaType type,
-    StringData typeName,
-    StringData path,
+    std::string_view typeName,
+    std::string_view path,
     const VariablesParseState& vpsIn) {
     // Rewrite $meta: "stream.some.path" as
     // {$let: {in: "$$stream.some.path", vars: {"stream": {$meta: "stream"}}}}.
@@ -1969,8 +2035,8 @@ boost::intrusive_ptr<Expression> ExpressionMeta::_rewriteAsLet(
 void ExpressionMeta::_assertMetaFieldCompatibleWithStreamsFeatureFlag(
     ExpressionContext* const expCtx,
     DocumentMetadataFields::MetaType type,
-    StringData typeName,
-    boost::optional<StringData> optionalPath) {
+    std::string_view typeName,
+    boost::optional<std::string_view> optionalPath) {
     bool streamsEnabled = expCtx->shouldParserAllowStreams();
     // $meta: "stream" is only supported when the ff is enabled.
     uassert(9692105,
@@ -1989,10 +2055,10 @@ void ExpressionMeta::_assertMetaFieldCompatibleWithStreamsFeatureFlag(
 }
 
 ExpressionMeta::ParseMetaTypeResult ExpressionMeta::_parseMetaType(ExpressionContext* const expCtx,
-                                                                   StringData typeName) {
-    boost::optional<StringData> fieldPath;
+                                                                   std::string_view typeName) {
+    boost::optional<std::string_view> fieldPath;
     if (size_t idx = typeName.find_first_of('.');
-        idx != StringData::npos && expCtx->shouldParserAllowStreams()) {
+        idx != std::string_view::npos && expCtx->shouldParserAllowStreams()) {
         // An optional path is supported for { $meta: "stream.<path>" }
         uassert(9692107,
                 ExpressionMeta::kParseErrPrefix + std::string{typeName},
@@ -2020,7 +2086,6 @@ intrusive_ptr<Expression> ExpressionMeta::parse(ExpressionContext* const expCtx,
     const auto [metaType, typeName, optionalPath] = _parseMetaType(expCtx, expr.valueStringData());
 
     _assertMetaFieldCompatibleWithStrictAPI(expCtx, metaType);
-    _assertMetaFieldCompatibleWithHybridScoringFeatureFlag(expCtx, metaType);
     _assertMetaFieldCompatibleWithStreamsFeatureFlag(expCtx, metaType, typeName, optionalPath);
 
     if (optionalPath) {
@@ -2031,16 +2096,18 @@ intrusive_ptr<Expression> ExpressionMeta::parse(ExpressionContext* const expCtx,
 
 ExpressionMeta::ExpressionMeta(ExpressionContext* const expCtx, MetaType metaType)
     : Expression(expCtx), _metaType(metaType) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
     expCtx->setSbePipelineCompatibility(SbeCompatibility::notCompatible);
 }
 
-Value ExpressionMeta::serialize(const SerializationOptions& options) const {
+Value ExpressionMeta::serialize(const query_shape::SerializationOptions& options) const {
     return Value(DOC("$meta" << DocumentMetadataFields::serializeMetaType(_metaType)));
 }
 
-Value ExpressionMeta::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMeta::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ------------------------- ExpressionInternalRawSortKey ----------------------------- */
@@ -2050,7 +2117,8 @@ REGISTER_EXPRESSION_CONDITIONALLY(
     ExpressionInternalRawSortKey::parse,
     AllowedWithApiStrict::kInternal,
     AllowedWithClientType::kInternal,
-    nullptr, /* nullptr */
+    nullptr, /* featureFlag */
+    false,   /* shouldOmitDiagnosticInformation */
     true);   // The 'condition' is always true - we just wanted to restrict to internal.
 
 intrusive_ptr<Expression> ExpressionInternalRawSortKey::parse(ExpressionContext* const expCtx,
@@ -2062,19 +2130,24 @@ intrusive_ptr<Expression> ExpressionInternalRawSortKey::parse(ExpressionContext*
     return make_intrusive<ExpressionInternalRawSortKey>(expCtx);
 }
 
-Value ExpressionInternalRawSortKey::serialize(const SerializationOptions& options) const {
+Value ExpressionInternalRawSortKey::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName, Document{}}});
 }
 
-Value ExpressionInternalRawSortKey::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionInternalRawSortKey::evaluate(const Document& root,
+                                             Variables* variables,
+                                             const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ----------------------- ExpressionMod ---------------------------- */
 
 
-Value ExpressionMod::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMod::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(mod, ExpressionMod::parse);
@@ -2084,8 +2157,10 @@ const char* ExpressionMod::getOpName() const {
 
 /* ------------------------- ExpressionMultiply ----------------------------- */
 
-Value ExpressionMultiply::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionMultiply::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(multiply, ExpressionMultiply::parse);
@@ -2101,8 +2176,10 @@ void ExpressionIfNull::validateChildren() const {
             _children.size() >= 2);
 }
 
-Value ExpressionIfNull::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIfNull::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionIfNull::optimize() {
@@ -2118,7 +2195,7 @@ boost::intrusive_ptr<Expression> ExpressionIfNull::optimize() {
     // expression.
     if (allOperandsConst) {
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables), {}));
     }
 
     // Remove all null constants, unless it is the only child or it is the last parameter
@@ -2156,8 +2233,10 @@ REGISTER_STABLE_EXPRESSION(ifNull, ExpressionIfNull::parse);
 
 /* ----------------------- ExpressionIn ---------------------------- */
 
-Value ExpressionIn::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIn::evaluate(const Document& root,
+                             Variables* variables,
+                             const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(in, ExpressionIn::parse);
@@ -2167,8 +2246,10 @@ const char* ExpressionIn::getOpName() const {
 
 /* ----------------------- ExpressionIndexOfArray ------------------ */
 
-Value ExpressionIndexOfArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIndexOfArray::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionIndexOfArray::optimize() {
@@ -2202,8 +2283,10 @@ const char* ExpressionIndexOfArray::getOpName() const {
 
 /* ----------------------- ExpressionIndexOfBytes ------------------ */
 
-Value ExpressionIndexOfBytes::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIndexOfBytes::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(indexOfBytes, ExpressionIndexOfBytes::parse);
@@ -2213,8 +2296,10 @@ const char* ExpressionIndexOfBytes::getOpName() const {
 
 /* ----------------------- ExpressionIndexOfCP --------------------- */
 
-Value ExpressionIndexOfCP::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIndexOfCP::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(indexOfCP, ExpressionIndexOfCP::parse);
@@ -2224,8 +2309,10 @@ const char* ExpressionIndexOfCP::getOpName() const {
 
 /* ----------------------- ExpressionLn ---------------------------- */
 
-Value ExpressionLn::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionLn::evaluate(const Document& root,
+                             Variables* variables,
+                             const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(ln, ExpressionLn::parse);
@@ -2235,8 +2322,10 @@ const char* ExpressionLn::getOpName() const {
 
 /* ----------------------- ExpressionLog ---------------------------- */
 
-Value ExpressionLog::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionLog::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(log, ExpressionLog::parse);
@@ -2246,8 +2335,10 @@ const char* ExpressionLog::getOpName() const {
 
 /* ----------------------- ExpressionLog10 ---------------------------- */
 
-Value ExpressionLog10::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionLog10::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(log10, ExpressionLog10::parse);
@@ -2256,16 +2347,16 @@ const char* ExpressionLog10::getOpName() const {
 }
 
 /* ----------------------- ExpressionInternalFLEEqual ---------------------------- */
-constexpr auto kInternalFleEq = "$_internalFleEq"_sd;
+constexpr auto kInternalFleEq = "$_internalFleEq"sv;
 
 ExpressionInternalFLEEqual::ExpressionInternalFLEEqual(ExpressionContext* const expCtx,
                                                        boost::intrusive_ptr<Expression> field,
                                                        ServerZerosEncryptionToken zerosToken)
     : Expression(expCtx, {std::move(field)}), _evaluatorV2({std::move(zerosToken)}) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
-REGISTER_STABLE_EXPRESSION(_internalFleEq, ExpressionInternalFLEEqual::parse);
+REGISTER_STABLE_EXPRESSION_NO_METRICS(_internalFleEq, ExpressionInternalFLEEqual::parse);
 
 intrusive_ptr<Expression> ExpressionInternalFLEEqual::parse(ExpressionContext* const expCtx,
                                                             BSONElement expr,
@@ -2293,15 +2384,18 @@ Value toValue(const std::array<std::uint8_t, 32>& buf) {
     return Value(BSONBinData(vec.data(), vec.size(), BinDataType::Encrypt));
 }
 
-Value ExpressionInternalFLEEqual::serialize(const SerializationOptions& options) const {
+Value ExpressionInternalFLEEqual::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {kInternalFleEq,
          Document{{"field", _children[0]->serialize(options)},
                   {"server", toValue((_evaluatorV2.zerosDecryptionTokens()[0]).asPrfBlock())}}}});
 }
 
-Value ExpressionInternalFLEEqual::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionInternalFLEEqual::evaluate(const Document& root,
+                                           Variables* variables,
+                                           const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 const char* ExpressionInternalFLEEqual::getOpName() const {
@@ -2310,17 +2404,17 @@ const char* ExpressionInternalFLEEqual::getOpName() const {
 
 /* ----------------------- ExpressionInternalFLEBetween ---------------------------- */
 
-constexpr auto kInternalFleBetween = "$_internalFleBetween"_sd;
+constexpr auto kInternalFleBetween = "$_internalFleBetween"sv;
 
 ExpressionInternalFLEBetween::ExpressionInternalFLEBetween(
     ExpressionContext* const expCtx,
     boost::intrusive_ptr<Expression> field,
     std::vector<ServerZerosEncryptionToken> zerosTokens)
     : Expression(expCtx, {std::move(field)}), _evaluatorV2(std::move(zerosTokens)) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
-REGISTER_STABLE_EXPRESSION(_internalFleBetween, ExpressionInternalFLEBetween::parse);
+REGISTER_STABLE_EXPRESSION_NO_METRICS(_internalFleBetween, ExpressionInternalFLEBetween::parse);
 
 intrusive_ptr<Expression> ExpressionInternalFLEBetween::parse(ExpressionContext* const expCtx,
                                                               BSONElement expr,
@@ -2349,7 +2443,8 @@ intrusive_ptr<Expression> ExpressionInternalFLEBetween::parse(ExpressionContext*
         expCtx, std::move(fieldExpr), std::move(serverZerosEncryptionTokens));
 }
 
-Value ExpressionInternalFLEBetween::serialize(const SerializationOptions& options) const {
+Value ExpressionInternalFLEBetween::serialize(
+    const query_shape::SerializationOptions& options) const {
     std::vector<Value> serverDerivedValues;
     serverDerivedValues.reserve(_evaluatorV2.zerosDecryptionTokens().size());
     for (auto& token : _evaluatorV2.zerosDecryptionTokens()) {
@@ -2360,8 +2455,10 @@ Value ExpressionInternalFLEBetween::serialize(const SerializationOptions& option
                                     {"server", Value(std::move(serverDerivedValues))}}}});
 }
 
-Value ExpressionInternalFLEBetween::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionInternalFLEBetween::evaluate(const Document& root,
+                                             Variables* variables,
+                                             const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 const char* ExpressionInternalFLEBetween::getOpName() const {
@@ -2398,11 +2495,12 @@ intrusive_ptr<Expression> ExpressionNary::optimize() {
             ++constOperandCount;
         }
     }
+
     // If all the operands are constant expressions, collapse the expression into one constant
     // expression.
     if (constOperandCount == _children.size()) {
-        return intrusive_ptr<Expression>(ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document(), &(getExpressionContext()->variables))));
+        return intrusive_ptr<Expression>(
+            ExpressionConstant::create(getExpressionContext(), foldConstant()));
     }
 
     // An operator cannot be left-associative and commutative, because left-associative
@@ -2453,9 +2551,8 @@ intrusive_ptr<Expression> ExpressionNary::optimize() {
                 if (constExpressions.size() > 1) {
                     ExpressionVector childrenSave = std::move(_children);
                     _children = std::move(constExpressions);
-                    optimizedOperands.emplace_back(ExpressionConstant::create(
-                        getExpressionContext(),
-                        evaluate(Document(), &(getExpressionContext()->variables))));
+                    optimizedOperands.emplace_back(
+                        ExpressionConstant::create(getExpressionContext(), foldConstant()));
                     _children = std::move(childrenSave);
                 } else {
                     optimizedOperands.insert(
@@ -2479,9 +2576,8 @@ intrusive_ptr<Expression> ExpressionNary::optimize() {
 
         if (constExpressions.size() > 1) {
             _children = std::move(constExpressions);
-            optimizedOperands.emplace_back(ExpressionConstant::create(
-                getExpressionContext(),
-                evaluate(Document(), &(getExpressionContext()->variables))));
+            optimizedOperands.emplace_back(
+                ExpressionConstant::create(getExpressionContext(), foldConstant()));
         } else {
             optimizedOperands.insert(
                 optimizedOperands.end(), constExpressions.begin(), constExpressions.end());
@@ -2496,9 +2592,11 @@ void ExpressionNary::addOperand(const intrusive_ptr<Expression>& pExpression) {
     _children.push_back(pExpression);
 }
 
-Value ExpressionNary::serialize(const SerializationOptions& options) const {
+Value ExpressionNary::serialize(const query_shape::SerializationOptions& options) const {
     const size_t nOperand = _children.size();
-    vector<Value> array;
+    std::vector<Value> array;
+    array.reserve(nOperand);
+
     /* build up the array */
     for (size_t i = 0; i < nOperand; i++) {
         // If this input is a constant, bypass the standard serialization that wraps the
@@ -2517,8 +2615,10 @@ Value ExpressionNary::serialize(const SerializationOptions& options) const {
 
 /* ------------------------- ExpressionNot ----------------------------- */
 
-Value ExpressionNot::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionNot::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(not, ExpressionNot::parse);
@@ -2528,8 +2628,10 @@ const char* ExpressionNot::getOpName() const {
 
 /* -------------------------- ExpressionOr ----------------------------- */
 
-Value ExpressionOr::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionOr::evaluate(const Document& root,
+                             Variables* variables,
+                             const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionOr::optimize() {
@@ -2588,8 +2690,10 @@ intrusive_ptr<Expression> ExpressionPow::create(ExpressionContext* const expCtx,
     return expr;
 }
 
-Value ExpressionPow::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionPow::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(pow, ExpressionPow::parse);
@@ -2599,8 +2703,10 @@ const char* ExpressionPow::getOpName() const {
 
 /* ------------------------- ExpressionRange ------------------------------ */
 
-Value ExpressionRange::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRange::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(range, ExpressionRange::parse);
@@ -2610,7 +2716,7 @@ const char* ExpressionRange::getOpName() const {
 
 /* ------------------------ ExpressionReplaceBase ------------------------ */
 
-Value ExpressionReplaceBase::serialize(const SerializationOptions& options) const {
+Value ExpressionReplaceBase::serialize(const query_shape::SerializationOptions& options) const {
     return Value(
         Document{{getOpName(),
                   Document{{"input", _children[_kInput]->serialize(options)},
@@ -2636,11 +2742,11 @@ parseExpressionReplaceBase(const char* opName,
     for (auto&& elem : expr.Obj()) {
         auto field = elem.fieldNameStringData();
 
-        if (field == "input"_sd) {
+        if (field == "input"sv) {
             input = Expression::parseOperand(expCtx, elem, vps);
-        } else if (field == "find"_sd) {
+        } else if (field == "find"sv) {
             find = Expression::parseOperand(expCtx, elem, vps);
-        } else if (field == "replacement"_sd) {
+        } else if (field == "replacement"sv) {
             replacement = Expression::parseOperand(expCtx, elem, vps);
         } else {
             uasserted(51750, str::stream() << opName << " found an unknown argument: " << field);
@@ -2675,8 +2781,10 @@ intrusive_ptr<Expression> ExpressionReplaceOne::parse(ExpressionContext* const e
         expCtx, std::move(input), std::move(find), std::move(replacement));
 }
 
-Value ExpressionReplaceOne::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionReplaceOne::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ------------------------ ExpressionReplaceAll ------------------------ */
@@ -2691,14 +2799,18 @@ intrusive_ptr<Expression> ExpressionReplaceAll::parse(ExpressionContext* const e
         expCtx, std::move(input), std::move(find), std::move(replacement));
 }
 
-Value ExpressionReplaceAll::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionReplaceAll::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ------------------------ ExpressionReverseArray ------------------------ */
 
-Value ExpressionReverseArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionReverseArray::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(reverseArray, ExpressionReverseArray::parse);
@@ -2760,8 +2872,10 @@ intrusive_ptr<Expression> ExpressionSortArray::parse(ExpressionContext* const ex
     return new ExpressionSortArray(expCtx, std::move(input), *sortBy);
 }
 
-Value ExpressionSortArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSortArray::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(sortArray, ExpressionSortArray::parse);
@@ -2775,7 +2889,7 @@ intrusive_ptr<Expression> ExpressionSortArray::optimize() {
     return this;
 }
 
-Value ExpressionSortArray::serialize(const SerializationOptions& options) const {
+Value ExpressionSortArray::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"sortBy", _sortBy.getOriginalElement()}}}});
@@ -2821,8 +2935,10 @@ intrusive_ptr<Expression> ExpressionTopN::parse(ExpressionContext* const expCtx,
     return new ExpressionTopN(expCtx, std::move(n), std::move(input), *sortBy);
 }
 
-Value ExpressionTopN::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTopN::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(topN,
@@ -2841,7 +2957,7 @@ intrusive_ptr<Expression> ExpressionTopN::optimize() {
     return this;
 }
 
-Value ExpressionTopN::serialize(const SerializationOptions& options) const {
+Value ExpressionTopN::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"n", _children[_kN]->serialize(options)},
                                     {"input", _children[_kInput]->serialize(options)},
@@ -2884,8 +3000,10 @@ intrusive_ptr<Expression> ExpressionTop::parse(ExpressionContext* const expCtx,
     return new ExpressionTop(expCtx, std::move(input), *sortBy);
 }
 
-Value ExpressionTop::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTop::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(top,
@@ -2903,7 +3021,7 @@ intrusive_ptr<Expression> ExpressionTop::optimize() {
     return this;
 }
 
-Value ExpressionTop::serialize(const SerializationOptions& options) const {
+Value ExpressionTop::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"sortBy", _sortBy.getOriginalElement()}}}});
@@ -2949,8 +3067,10 @@ intrusive_ptr<Expression> ExpressionBottomN::parse(ExpressionContext* const expC
     return new ExpressionBottomN(expCtx, std::move(n), std::move(input), *sortBy);
 }
 
-Value ExpressionBottomN::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBottomN::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bottomN,
@@ -2969,7 +3089,7 @@ intrusive_ptr<Expression> ExpressionBottomN::optimize() {
     return this;
 }
 
-Value ExpressionBottomN::serialize(const SerializationOptions& options) const {
+Value ExpressionBottomN::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"n", _children[_kN]->serialize(options)},
                                     {"input", _children[_kInput]->serialize(options)},
@@ -3012,8 +3132,10 @@ intrusive_ptr<Expression> ExpressionBottom::parse(ExpressionContext* const expCt
     return new ExpressionBottom(expCtx, std::move(input), *sortBy);
 }
 
-Value ExpressionBottom::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBottom::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(bottom,
@@ -3031,7 +3153,7 @@ intrusive_ptr<Expression> ExpressionBottom::optimize() {
     return this;
 }
 
-Value ExpressionBottom::serialize(const SerializationOptions& options) const {
+Value ExpressionBottom::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kName,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"sortBy", _sortBy.getOriginalElement()}}}});
@@ -3039,8 +3161,10 @@ Value ExpressionBottom::serialize(const SerializationOptions& options) const {
 
 /* ----------------------- ExpressionSetDifference ---------------------------- */
 
-Value ExpressionSetDifference::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetDifference::evaluate(const Document& root,
+                                        Variables* variables,
+                                        const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(setDifference, ExpressionSetDifference::parse);
@@ -3056,8 +3180,10 @@ void ExpressionSetEquals::validateChildren() const {
             _children.size() >= 2);
 }
 
-Value ExpressionSetEquals::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetEquals::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /**
@@ -3096,8 +3222,10 @@ const char* ExpressionSetEquals::getOpName() const {
 
 /* ----------------------- ExpressionSetIntersection ---------------------------- */
 
-Value ExpressionSetIntersection::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetIntersection::evaluate(const Document& root,
+                                          Variables* variables,
+                                          const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(setIntersection, ExpressionSetIntersection::parse);
@@ -3107,8 +3235,10 @@ const char* ExpressionSetIntersection::getOpName() const {
 
 /* ----------------------- ExpressionSetIsSubset ---------------------------- */
 
-Value ExpressionSetIsSubset::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetIsSubset::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionSetIsSubset::optimize() {
@@ -3139,8 +3269,10 @@ const char* ExpressionSetIsSubset::getOpName() const {
 
 /* ----------------------- ExpressionSetUnion ---------------------------- */
 
-Value ExpressionSetUnion::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetUnion::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(setUnion, ExpressionSetUnion::parse);
@@ -3150,8 +3282,10 @@ const char* ExpressionSetUnion::getOpName() const {
 
 /* ----------------------- ExpressionIsArray ---------------------------- */
 
-Value ExpressionIsArray::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIsArray::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(isArray, ExpressionIsArray::parse);
@@ -3161,9 +3295,10 @@ const char* ExpressionIsArray::getOpName() const {
 
 /* ----------------------- ExpressionInternalFindAllValuesAtPath --------*/
 Value ExpressionInternalFindAllValuesAtPath::evaluate(const Document& root,
-                                                      Variables* variables) const {
+                                                      Variables* variables,
+                                                      const EvaluationContext& ctx) const {
 
-    return exec::expression::evaluate(*this, root, variables);
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 // This expression is not part of the stable API, but can always be used. It is
 // an internal expression used only for distinct.
@@ -3172,8 +3307,10 @@ REGISTER_STABLE_EXPRESSION(_internalFindAllValuesAtPath,
 
 /* ----------------------- ExpressionSlice ---------------------------- */
 
-Value ExpressionSlice::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSlice::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(slice, ExpressionSlice::parse);
@@ -3230,18 +3367,14 @@ intrusive_ptr<Expression> ExpressionSigmoid::parseExpressionSigmoid(
     return make_intrusive<ExpressionDivide>(expCtx, std::move(divideChildren));
 }
 
-// Note: we do not bypass FCV-gating with 'bypassRankFusionFCVGate' here because this expression was
-// not backported to 8.0.
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(sigmoid,
-                                      ExpressionSigmoid::parseExpressionSigmoid,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &feature_flags::gFeatureFlagRankFusionBasic);
+REGISTER_STABLE_EXPRESSION(sigmoid, ExpressionSigmoid::parseExpressionSigmoid);
 
 /* ----------------------- ExpressionSize ---------------------------- */
 
-Value ExpressionSize::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSize::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(size, ExpressionSize::parse);
@@ -3251,8 +3384,10 @@ const char* ExpressionSize::getOpName() const {
 
 /* ----------------------- ExpressionSplit --------------------------- */
 
-Value ExpressionSplit::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSplit::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(split, ExpressionSplit::parse);
@@ -3262,8 +3397,10 @@ const char* ExpressionSplit::getOpName() const {
 
 /* ----------------------- ExpressionSqrt ---------------------------- */
 
-Value ExpressionSqrt::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSqrt::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(sqrt, ExpressionSqrt::parse);
@@ -3273,8 +3410,10 @@ const char* ExpressionSqrt::getOpName() const {
 
 /* ----------------------- ExpressionStrcasecmp ---------------------------- */
 
-Value ExpressionStrcasecmp::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionStrcasecmp::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(strcasecmp, ExpressionStrcasecmp::parse);
@@ -3284,8 +3423,10 @@ const char* ExpressionStrcasecmp::getOpName() const {
 
 /* ----------------------- ExpressionSubstrBytes ---------------------------- */
 
-Value ExpressionSubstrBytes::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSubstrBytes::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 // $substr is deprecated in favor of $substrBytes, but for now will just parse into a $substrBytes.
@@ -3297,8 +3438,10 @@ const char* ExpressionSubstrBytes::getOpName() const {
 
 /* ----------------------- ExpressionSubstrCP ---------------------------- */
 
-Value ExpressionSubstrCP::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSubstrCP::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(substrCP, ExpressionSubstrCP::parse);
@@ -3308,8 +3451,10 @@ const char* ExpressionSubstrCP::getOpName() const {
 
 /* ----------------------- ExpressionStrLenBytes ------------------------- */
 
-Value ExpressionStrLenBytes::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionStrLenBytes::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(strLenBytes, ExpressionStrLenBytes::parse);
@@ -3319,8 +3464,10 @@ const char* ExpressionStrLenBytes::getOpName() const {
 
 /* -------------------------- ExpressionBinarySize ------------------------------ */
 
-Value ExpressionBinarySize::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBinarySize::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(binarySize, ExpressionBinarySize::parse);
@@ -3331,8 +3478,10 @@ const char* ExpressionBinarySize::getOpName() const {
 
 /* ----------------------- ExpressionStrLenCP ------------------------- */
 
-Value ExpressionStrLenCP::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionStrLenCP::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(strLenCP, ExpressionStrLenCP::parse);
@@ -3342,8 +3491,10 @@ const char* ExpressionStrLenCP::getOpName() const {
 
 /* ----------------------- ExpressionSubtract ---------------------------- */
 
-Value ExpressionSubtract::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSubtract::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(subtract, ExpressionSubtract::parse);
@@ -3365,8 +3516,10 @@ monotonic::State ExpressionSubtract::getMonotonicState(const FieldPath& sortedFi
 
 REGISTER_STABLE_EXPRESSION(switch, ExpressionSwitch::parse);
 
-Value ExpressionSwitch::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSwitch::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionSwitch::parse(ExpressionContext* const expCtx,
@@ -3491,7 +3644,7 @@ boost::intrusive_ptr<Expression> ExpressionSwitch::optimize() {
     return this;
 }
 
-Value ExpressionSwitch::serialize(const SerializationOptions& options) const {
+Value ExpressionSwitch::serialize(const query_shape::SerializationOptions& options) const {
     std::vector<Value> serializedBranches;
     serializedBranches.reserve(numBranches());
 
@@ -3513,8 +3666,10 @@ Value ExpressionSwitch::serialize(const SerializationOptions& options) const {
 
 /* ------------------------- ExpressionToLower ----------------------------- */
 
-Value ExpressionToLower::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionToLower::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(toLower, ExpressionToLower::parse);
@@ -3524,8 +3679,10 @@ const char* ExpressionToLower::getOpName() const {
 
 /* ------------------------- ExpressionToUpper -------------------------- */
 
-Value ExpressionToUpper::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionToUpper::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(toUpper, ExpressionToUpper::parse);
@@ -3544,12 +3701,12 @@ intrusive_ptr<Expression> ExpressionTrim::parse(ExpressionContext* const expCtx,
                                                 const VariablesParseState& vps) {
     const auto name = expr.fieldNameStringData();
     TrimType trimType = TrimType::kBoth;
-    if (name == "$ltrim"_sd) {
+    if (name == "$ltrim"sv) {
         trimType = TrimType::kLeft;
-    } else if (name == "$rtrim"_sd) {
+    } else if (name == "$rtrim"sv) {
         trimType = TrimType::kRight;
     } else {
-        invariant(name == "$trim"_sd);
+        invariant(name == "$trim"sv);
     }
     uassert(50696,
             str::stream() << name << " only supports an object as an argument, found "
@@ -3560,9 +3717,9 @@ intrusive_ptr<Expression> ExpressionTrim::parse(ExpressionContext* const expCtx,
     boost::intrusive_ptr<Expression> characters;
     for (auto&& elem : expr.Obj()) {
         const auto field = elem.fieldNameStringData();
-        if (field == "input"_sd) {
+        if (field == "input"sv) {
             input = parseOperand(expCtx, elem, vps);
-        } else if (field == "chars"_sd) {
+        } else if (field == "chars"sv) {
             characters = parseOperand(expCtx, elem, vps);
         } else {
             uasserted(50694,
@@ -3574,8 +3731,10 @@ intrusive_ptr<Expression> ExpressionTrim::parse(ExpressionContext* const expCtx,
     return new ExpressionTrim(expCtx, trimType, name, input, characters);
 }
 
-Value ExpressionTrim::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTrim::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionTrim::optimize() {
@@ -3586,12 +3745,12 @@ boost::intrusive_ptr<Expression> ExpressionTrim::optimize() {
     if (ExpressionConstant::allNullOrConstant({_children[_kInput], _children[_kCharacters]})) {
         return ExpressionConstant::create(
             getExpressionContext(),
-            this->evaluate(Document(), &(getExpressionContext()->variables)));
+            this->evaluate(Document(), &(getExpressionContext()->variables), {}));
     }
     return this;
 }
 
-Value ExpressionTrim::serialize(const SerializationOptions& options) const {
+Value ExpressionTrim::serialize(const query_shape::SerializationOptions& options) const {
     return Value(
         Document{{_name,
                   Document{{"input", _children[_kInput]->serialize(options)},
@@ -3602,8 +3761,10 @@ Value ExpressionTrim::serialize(const SerializationOptions& options) const {
 
 /* ------------------------- ExpressionRound and ExpressionTrunc -------------------------- */
 
-Value ExpressionRound::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRound::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(round, ExpressionRound::parse);
@@ -3611,8 +3772,10 @@ const char* ExpressionRound::getOpName() const {
     return "$round";
 }
 
-Value ExpressionTrunc::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTrunc::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(trunc, ExpressionTrunc::parse);
@@ -3622,8 +3785,10 @@ const char* ExpressionTrunc::getOpName() const {
 
 /* ------------------------- ExpressionType ----------------------------- */
 
-Value ExpressionType::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionType::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(type, ExpressionType::parse);
@@ -3638,8 +3803,10 @@ REGISTER_EXPRESSION_WITH_FEATURE_FLAG(subtype,
                                       AllowedWithClientType::kAny,
                                       &feature_flags::gFeatureFlagMqlJsEngineGap);
 
-Value ExpressionSubtype::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSubtype::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 const char* ExpressionSubtype::getOpName() const {
@@ -3648,8 +3815,10 @@ const char* ExpressionSubtype::getOpName() const {
 
 /* ------------------------ ExpressionIsNumber --------------------------- */
 
-Value ExpressionIsNumber::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionIsNumber::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(isNumber, ExpressionIsNumber::parse);
@@ -3661,6 +3830,19 @@ const char* ExpressionIsNumber::getOpName() const {
 /* -------------------------- ExpressionZip ------------------------------ */
 
 REGISTER_STABLE_EXPRESSION(zip, ExpressionZip::parse);
+const char* ExpressionZip::getOpName() const {
+    return "$zip";
+}
+
+void ExpressionZip::_validateZipDefaults(const boost::intrusive_ptr<Expression>& defaults,
+                                         size_t numInputs) {
+    if (auto* arrayDefaults = dynamic_cast<ExpressionArray*>(defaults.get())) {
+        uassert(34467,
+                "defaults and inputs must have the same length",
+                arrayDefaults->getChildren().size() == numInputs);
+    }
+}
+
 intrusive_ptr<Expression> ExpressionZip::parse(ExpressionContext* const expCtx,
                                                BSONElement expr,
                                                const VariablesParseState& vps) {
@@ -3668,12 +3850,14 @@ intrusive_ptr<Expression> ExpressionZip::parse(ExpressionContext* const expCtx,
             str::stream() << "$zip only supports an object as an argument, found "
                           << typeName(expr.type()),
             expr.type() == BSONType::object);
+    expCtx->checkAndIncrementMemoryIntensiveExprCount(expr.fieldNameStringData());
 
     auto useLongestLength = false;
     std::vector<boost::intrusive_ptr<Expression>> children;
-    // We need to ensure defaults appear after inputs so we build them seperately and then
-    // concatenate them.
-    std::vector<boost::intrusive_ptr<Expression>> tempDefaultChildren;
+    // The defaults are stored as a single expression that evaluates to the whole defaults array.
+    // A literal defaults array parses to an ExpressionArray; any other expression is used as-is
+    // and its array-ness and length are validated at evaluation time.
+    boost::intrusive_ptr<Expression> defaultsExpr;
 
     for (auto&& elem : expr.Obj()) {
         const auto field = elem.fieldNameStringData();
@@ -3686,13 +3870,7 @@ intrusive_ptr<Expression> ExpressionZip::parse(ExpressionContext* const expCtx,
                 children.push_back(parseOperand(expCtx, subExpr, vps));
             }
         } else if (field == "defaults") {
-            uassert(34462,
-                    str::stream() << "defaults must be an array of expressions, found "
-                                  << typeName(elem.type()),
-                    elem.type() == BSONType::array);
-            for (auto&& subExpr : elem.Array()) {
-                tempDefaultChildren.push_back(parseOperand(expCtx, subExpr, vps));
-            }
+            defaultsExpr = parseOperand(expCtx, elem, vps);
         } else if (field == "useLongestLength") {
             uassert(34463,
                     str::stream() << "useLongestLength must be a bool, found "
@@ -3705,60 +3883,106 @@ intrusive_ptr<Expression> ExpressionZip::parse(ExpressionContext* const expCtx,
         }
     }
 
-    auto numInputs = children.size();
-    std::move(tempDefaultChildren.begin(), tempDefaultChildren.end(), std::back_inserter(children));
+    const auto numInputs = children.size();
+    uassert(34465, "$zip requires at least one input array", numInputs > 0);
 
-    std::vector<std::reference_wrapper<boost::intrusive_ptr<Expression>>> inputs;
-    std::vector<std::reference_wrapper<boost::intrusive_ptr<Expression>>> defaults;
-    for (auto&& child : children) {
-        if (numInputs == 0) {
-            defaults.push_back(child);
-        } else {
-            inputs.push_back(child);
-            numInputs--;
-        }
+    // An empty literal defaults array is equivalent to not specifying defaults at all.
+    if (auto* arrayDefaults = dynamic_cast<ExpressionArray*>(defaultsExpr.get());
+        arrayDefaults && arrayDefaults->getChildren().empty()) {
+        defaultsExpr = nullptr;
     }
-
-    uassert(34465, "$zip requires at least one input array", !inputs.empty());
+    if (defaultsExpr) {
+        _validateZipDefaults(defaultsExpr, numInputs);
+    }
     uassert(34466,
             "cannot specify defaults unless useLongestLength is true",
-            (useLongestLength || defaults.empty()));
-    uassert(34467,
-            "defaults and inputs must have the same length",
-            (defaults.empty() || defaults.size() == inputs.size()));
+            (useLongestLength || !defaultsExpr));
+
+    boost::optional<ExprRef> defaults;
+    if (defaultsExpr) {
+        children.push_back(std::move(defaultsExpr));
+        defaults = ExprRef(children.back());
+    }
+
+    std::vector<ExprRef> inputs;
+    inputs.reserve(numInputs);
+    for (size_t i = 0; i < numInputs; ++i) {
+        inputs.push_back(children[i]);
+    }
 
     return new ExpressionZip(
         expCtx, useLongestLength, std::move(children), std::move(inputs), std::move(defaults));
 }
 
-Value ExpressionZip::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionZip::evaluate(const Document& root,
+                              Variables* variables,
+                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionZip::optimize() {
     for (auto&& input : _inputs)
         input.get() = input.get()->optimize();
-    for (auto&& zipDefault : _defaults)
-        zipDefault.get() = zipDefault.get()->optimize();
+    if (_defaults) {
+        // An all-constant literal defaults array folds into a single constant here; serialize()
+        // reconstructs the per-element query shape from it. A defaults expression that folds
+        // into a non-array constant is deliberately not rejected here: see the comment on
+        // _validateZipDefaults.
+        _defaults->get() = _defaults->get()->optimize();
+    }
     return this;
 }
 
-Value ExpressionZip::serialize(const SerializationOptions& options) const {
+Value ExpressionZip::serialize(const query_shape::SerializationOptions& options) const {
     vector<Value> serializedInput;
-    vector<Value> serializedDefaults;
     Value serializedUseLongestLength = Value(_useLongestLength);
 
     for (auto&& expr : _inputs) {
         serializedInput.push_back(expr.get()->serialize(options));
     }
 
-    for (auto&& expr : _defaults) {
-        serializedDefaults.push_back(expr.get()->serialize(options));
-    }
+    // Absent defaults serialize to an empty array, which parses back to absent defaults.
+    Value serializedDefaults = [&]() -> Value {
+        if (!_defaults) {
+            return Value(std::vector<Value>{});
+        }
+        // A literal defaults array serializes per element. Delegating to
+        // ExpressionArray::serialize instead would collapse an all-constant array into a single
+        // placeholder literal whenever literals are being replaced (query shape serialization),
+        // changing the queryShapeHash.
+        if (auto* literalDefaults = dynamic_cast<ExpressionArray*>(_defaults->get().get())) {
+            vector<Value> perElement;
+            perElement.reserve(literalDefaults->getChildren().size());
+            for (auto&& element : literalDefaults->getChildren()) {
+                perElement.push_back(element->serialize(options));
+            }
+            return Value(std::move(perElement));
+        }
+        // A defaults array that constant-folded during optimization serializes per element as
+        // well, so that the query shape is identical before and after optimization. The length
+        // guard keeps representative shapes re-parseable: array placeholders have fixed lengths,
+        // so a wrong-length constant (which can only fail at evaluation) must keep serializing
+        // as a single literal that re-parses as a constant, rather than as a literal defaults
+        // array that parse would reject.
+        if (auto* constDefaults = dynamic_cast<ExpressionConstant*>(_defaults->get().get())) {
+            const Value& value = constDefaults->getValue();
+            if (value.isArray() && value.getArrayLength() == _inputs.size()) {
+                vector<Value> perElement;
+                perElement.reserve(value.getArrayLength());
+                for (auto&& element : value.getArray()) {
+                    perElement.push_back(ExpressionConstant::serializeConstant(options, element));
+                }
+                return Value(std::move(perElement));
+            }
+        }
+        // Any other defaults expression serializes to the expression itself, so that re-parsing
+        // the serialization produces the same mode.
+        return _defaults->get()->serialize(options);
+    }();
 
-    return Value(DOC("$zip" << DOC("inputs" << Value(serializedInput) << "defaults"
-                                            << Value(serializedDefaults) << "useLongestLength"
-                                            << serializedUseLongestLength)));
+    return Value(
+        DOC("$zip" << DOC("inputs" << Value(serializedInput) << "defaults" << serializedDefaults
+                                   << "useLongestLength" << serializedUseLongestLength)));
 }
 
 /* -------------------------- ExpressionConvert ------------------------------ */
@@ -3766,7 +3990,7 @@ Value ExpressionZip::serialize(const SerializationOptions& options) const {
 namespace {
 
 Expression::Parser makeConversionAlias(
-    const StringData shortcutName,
+    const std::string_view shortcutName,
     BSONType toType,
     boost::optional<BinDataFormat> format = boost::none,
     boost::optional<BinDataType> toSubtype = boost::none,
@@ -3801,30 +4025,27 @@ REGISTER_STABLE_EXPRESSION(convert, ExpressionConvert::parse);
 // Also register shortcut expressions like $toInt, $toString, etc. which can be used as a shortcut
 // for $convert without an 'onNull' or 'onError'.
 REGISTER_STABLE_EXPRESSION(
-    toString, makeConversionAlias("$toString"_sd, BSONType::string, BinDataFormat::kAuto));
-REGISTER_STABLE_EXPRESSION(toObjectId, makeConversionAlias("$toObjectId"_sd, BSONType::oid));
-REGISTER_STABLE_EXPRESSION(toDate, makeConversionAlias("$toDate"_sd, BSONType::date));
-REGISTER_STABLE_EXPRESSION(toDouble, makeConversionAlias("$toDouble"_sd, BSONType::numberDouble));
-REGISTER_STABLE_EXPRESSION(toInt, makeConversionAlias("$toInt"_sd, BSONType::numberInt));
-REGISTER_STABLE_EXPRESSION(toLong, makeConversionAlias("$toLong"_sd, BSONType::numberLong));
-REGISTER_STABLE_EXPRESSION(toDecimal,
-                           makeConversionAlias("$toDecimal"_sd, BSONType::numberDecimal));
-REGISTER_STABLE_EXPRESSION(toBool, makeConversionAlias("$toBool"_sd, BSONType::boolean));
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(toUUID,
-                                      makeConversionAlias("$toUUID"_sd,
-                                                          BSONType::binData,
-                                                          BinDataFormat::kUuid,
-                                                          BinDataType::newUUID),
-                                      AllowedWithApiStrict::kAlways,
-                                      AllowedWithClientType::kAny,
-                                      &feature_flags::gFeatureFlagBinDataConvert);
+    toString, makeConversionAlias("$toString"sv, BSONType::string, BinDataFormat::kAuto));
+REGISTER_STABLE_EXPRESSION(toObjectId, makeConversionAlias("$toObjectId"sv, BSONType::oid));
+REGISTER_STABLE_EXPRESSION(toDate, makeConversionAlias("$toDate"sv, BSONType::date));
+REGISTER_STABLE_EXPRESSION(toDouble, makeConversionAlias("$toDouble"sv, BSONType::numberDouble));
+REGISTER_STABLE_EXPRESSION(toInt, makeConversionAlias("$toInt"sv, BSONType::numberInt));
+REGISTER_STABLE_EXPRESSION(toLong, makeConversionAlias("$toLong"sv, BSONType::numberLong));
+REGISTER_STABLE_EXPRESSION(toDecimal, makeConversionAlias("$toDecimal"sv, BSONType::numberDecimal));
+REGISTER_STABLE_EXPRESSION(toBool, makeConversionAlias("$toBool"sv, BSONType::boolean));
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG(
+    toUUID,
+    makeConversionAlias("$toUUID"sv, BSONType::binData, BinDataFormat::kUuid, BinDataType::newUUID),
+    AllowedWithApiStrict::kAlways,
+    AllowedWithClientType::kAny,
+    &feature_flags::gFeatureFlagBinDataConvert);
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(toArray,
-                                      makeConversionAlias("$toArray"_sd, BSONType::array),
+                                      makeConversionAlias("$toArray"sv, BSONType::array),
                                       AllowedWithApiStrict::kAlways,
                                       AllowedWithClientType::kAny,
                                       &feature_flags::gFeatureFlagMqlJsEngineGap);
 REGISTER_EXPRESSION_WITH_FEATURE_FLAG(toObject,
-                                      makeConversionAlias("$toObject"_sd, BSONType::object),
+                                      makeConversionAlias("$toObject"sv, BSONType::object),
                                       AllowedWithApiStrict::kAlways,
                                       AllowedWithClientType::kAny,
                                       &feature_flags::gFeatureFlagMqlJsEngineGap);
@@ -3836,7 +4057,7 @@ boost::intrusive_ptr<Expression> ExpressionConvert::create(
     boost::optional<BinDataFormat> format,
     boost::optional<BinDataType> toSubtype,
     boost::optional<ConvertByteOrderType> byteOrder) {
-    auto targetType = StringData(typeName(toType));
+    auto targetType = std::string_view(typeName(toType));
     auto toValue = toSubtype
         ? Value(BSON("type" << targetType << "subtype" << static_cast<int>(*toSubtype)))
         : Value(targetType);
@@ -3874,7 +4095,7 @@ ExpressionConvert::ExpressionConvert(ExpressionContext* const expCtx,
                   std::move(byteOrder)}),
       _allowBinDataConvert{allowBinDataConvert},
       _allowBinDataConvertNumeric{allowBinDataConvertNumeric} {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionConvert::parse(ExpressionContext* const expCtx,
@@ -3897,11 +4118,11 @@ intrusive_ptr<Expression> ExpressionConvert::parse(ExpressionContext* const expC
     boost::intrusive_ptr<Expression> byteOrder;
     for (auto&& elem : expr.embeddedObject()) {
         const auto field = elem.fieldNameStringData();
-        if (field == "input"_sd) {
+        if (field == "input"sv) {
             input = parseOperand(expCtx, elem, vps);
-        } else if (field == "to"_sd) {
+        } else if (field == "to"sv) {
             to = parseOperand(expCtx, elem, vps);
-        } else if (field == "base"_sd) {
+        } else if (field == "base"sv) {
             uassert(
                 ErrorCodes::FailedToParse,
                 str::stream() << "The 'base' argument to $convert is not allowed in the "
@@ -3910,7 +4131,7 @@ intrusive_ptr<Expression> ExpressionConvert::parse(ExpressionContext* const expC
                               << ".",
                 expCtx->isFeatureFlagMqlJsEngineGapEnabled());
             base = parseOperand(expCtx, elem, vps);
-        } else if (field == "format"_sd) {
+        } else if (field == "format"sv) {
             uassert(
                 ErrorCodes::FailedToParse,
                 str::stream() << "The 'format' argument to $convert is not allowed in the "
@@ -3921,11 +4142,11 @@ intrusive_ptr<Expression> ExpressionConvert::parse(ExpressionContext* const expC
                 // supports the 'format' field.
                 expCtx->getFromRouter() || allowBinDataConvert);
             format = parseOperand(expCtx, elem, vps);
-        } else if (field == "onError"_sd) {
+        } else if (field == "onError"sv) {
             onError = parseOperand(expCtx, elem, vps);
-        } else if (field == "onNull"_sd) {
+        } else if (field == "onNull"sv) {
             onNull = parseOperand(expCtx, elem, vps);
-        } else if (field == "byteOrder"_sd) {
+        } else if (field == "byteOrder"sv) {
             uassert(
                 ErrorCodes::FailedToParse,
                 str::stream() << "The 'byteOrder' argument to $convert is not allowed in the "
@@ -3971,8 +4192,8 @@ ExpressionConvert::ConvertTargetTypeInfo::parse(Value value) {
     Value typeValue;
     Value subtypeValue;
     if (value.isObject()) {
-        typeValue = value["type"_sd];
-        subtypeValue = value["subtype"_sd];
+        typeValue = value["type"sv];
+        subtypeValue = value["subtype"sv];
     } else {
         typeValue = value;
     }
@@ -3985,8 +4206,10 @@ ExpressionConvert::ConvertTargetTypeInfo::parse(Value value) {
     return ConvertTargetTypeInfo{targetType, subtypeValue};
 }
 
-Value ExpressionConvert::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionConvert::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 boost::intrusive_ptr<Expression> ExpressionConvert::optimize() {
@@ -4022,14 +4245,13 @@ boost::intrusive_ptr<Expression> ExpressionConvert::optimize() {
                                                _children[_kOnError],
                                                _children[_kOnNull],
                                                _children[_kByteOrder]})) {
-        return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+        return ExpressionConstant::create(getExpressionContext(), foldConstant());
     }
 
     return this;
 }
 
-Value ExpressionConvert::serialize(const SerializationOptions& options) const {
+Value ExpressionConvert::serialize(const query_shape::SerializationOptions& options) const {
     // Since the 'to' field is a parameter from a set of valid values and not free user input,
     // we want to avoid boiling it down to the representative value in the query shape. The first
     // condition is so that we can keep serializing correctly whenever the 'to' field is an
@@ -4063,7 +4285,7 @@ BSONType ExpressionConvert::computeTargetType(Value targetTypeName) {
     if (targetTypeName.getType() == BSONType::string) {
         // typeFromName() does not consider "missing" to be a valid type, but we want to accept it,
         // because it is a possible result of the $type aggregation operator.
-        if (targetTypeName.getStringData() == "missing"_sd) {
+        if (targetTypeName.getStringData() == "missing"sv) {
             return BSONType::eoo;
         }
 
@@ -4107,7 +4329,7 @@ namespace {
 auto CommonRegexParse(ExpressionContext* const expCtx,
                       BSONElement expr,
                       const VariablesParseState& vpsIn,
-                      StringData opName) {
+                      std::string_view opName) {
     uassert(51103,
             str::stream() << opName
                           << " expects an object of named arguments but found: " << expr.type(),
@@ -4120,11 +4342,11 @@ auto CommonRegexParse(ExpressionContext* const expCtx,
     } parsed;
     for (auto&& elem : expr.embeddedObject()) {
         const auto field = elem.fieldNameStringData();
-        if (field == "input"_sd) {
+        if (field == "input"sv) {
             parsed.input = Expression::parseOperand(expCtx, elem, vpsIn);
-        } else if (field == "regex"_sd) {
+        } else if (field == "regex"sv) {
             parsed.regex = Expression::parseOperand(expCtx, elem, vpsIn);
-        } else if (field == "options"_sd) {
+        } else if (field == "options"sv) {
             parsed.options = Expression::parseOperand(expCtx, elem, vpsIn);
         } else {
             uasserted(31024,
@@ -4160,7 +4382,7 @@ boost::intrusive_ptr<Expression> ExpressionRegex::optimize() {
     return this;
 }
 
-Value ExpressionRegex::serialize(const SerializationOptions& options) const {
+Value ExpressionRegex::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {_opName,
          Document{{"input", _children[_kInput]->serialize(options)},
@@ -4182,7 +4404,7 @@ ExpressionRegex::getConstantPatternAndOptions() const {
                 patternValue.getType() == BSONType::string);
     auto patternStr = [&]() -> boost::optional<std::string> {
         if (patternValue.getType() == BSONType::regEx) {
-            StringData flags = patternValue.getRegexFlags();
+            std::string_view flags = patternValue.getRegexFlags();
             uassert(5073406,
                     str::stream()
                         << _opName
@@ -4208,7 +4430,7 @@ ExpressionRegex::getConstantPatternAndOptions() const {
             }
         }
         if (patternValue.getType() == BSONType::regEx) {
-            StringData flags = patternValue.getRegexFlags();
+            std::string_view flags = patternValue.getRegexFlags();
             if (!flags.empty()) {
                 return std::string{flags};
             }
@@ -4234,14 +4456,16 @@ REGISTER_STABLE_EXPRESSION(regexFind, ExpressionRegexFind::parse);
 boost::intrusive_ptr<Expression> ExpressionRegexFind::parse(ExpressionContext* const expCtx,
                                                             BSONElement expr,
                                                             const VariablesParseState& vpsIn) {
-    auto opName = "$regexFind"_sd;
+    auto opName = "$regexFind"sv;
     auto [input, regex, options] = CommonRegexParse(expCtx, expr, vpsIn, opName);
     return new ExpressionRegexFind(
         expCtx, std::move(input), std::move(regex), std::move(options), opName);
 }
 
-Value ExpressionRegexFind::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRegexFind::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* -------------------------- ExpressionRegexFindAll ------------------------------ */
@@ -4250,14 +4474,16 @@ REGISTER_STABLE_EXPRESSION(regexFindAll, ExpressionRegexFindAll::parse);
 boost::intrusive_ptr<Expression> ExpressionRegexFindAll::parse(ExpressionContext* const expCtx,
                                                                BSONElement expr,
                                                                const VariablesParseState& vpsIn) {
-    auto opName = "$regexFindAll"_sd;
+    auto opName = "$regexFindAll"sv;
     auto [input, regex, options] = CommonRegexParse(expCtx, expr, vpsIn, opName);
     return new ExpressionRegexFindAll(
         expCtx, std::move(input), std::move(regex), std::move(options), opName);
 }
 
-Value ExpressionRegexFindAll::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRegexFindAll::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* -------------------------- ExpressionRegexMatch ------------------------------ */
@@ -4266,14 +4492,16 @@ REGISTER_STABLE_EXPRESSION(regexMatch, ExpressionRegexMatch::parse);
 boost::intrusive_ptr<Expression> ExpressionRegexMatch::parse(ExpressionContext* const expCtx,
                                                              BSONElement expr,
                                                              const VariablesParseState& vpsIn) {
-    auto opName = "$regexMatch"_sd;
+    auto opName = "$regexMatch"sv;
     auto [input, regex, options] = CommonRegexParse(expCtx, expr, vpsIn, opName);
     return new ExpressionRegexMatch(
         expCtx, std::move(input), std::move(regex), std::move(options), opName);
 }
 
-Value ExpressionRegexMatch::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRegexMatch::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* -------------------------- ExpressionRandom ------------------------------ */
@@ -4297,15 +4525,17 @@ const char* ExpressionRandom::getOpName() const {
     return "$rand";
 }
 
-Value ExpressionRandom::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionRandom::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionRandom::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionRandom::serialize(const SerializationOptions& options) const {
+Value ExpressionRandom::serialize(const query_shape::SerializationOptions& options) const {
     return Value(DOC(getOpName() << Document()));
 }
 
@@ -4336,15 +4566,17 @@ const char* ExpressionCurrentDate::getOpName() const {
     return "$currentDate";
 }
 
-Value ExpressionCurrentDate::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionCurrentDate::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionCurrentDate::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionCurrentDate::serialize(const SerializationOptions& options) const {
+Value ExpressionCurrentDate::serialize(const query_shape::SerializationOptions& options) const {
     return Value(DOC(getOpName() << Document()));
 }
 
@@ -4357,11 +4589,14 @@ boost::intrusive_ptr<Expression> ExpressionToHashedIndexKey::parse(ExpressionCon
     return make_intrusive<ExpressionToHashedIndexKey>(expCtx, parseOperand(expCtx, expr, vps));
 }
 
-Value ExpressionToHashedIndexKey::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionToHashedIndexKey::evaluate(const Document& root,
+                                           Variables* variables,
+                                           const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
-Value ExpressionToHashedIndexKey::serialize(const SerializationOptions& options) const {
+Value ExpressionToHashedIndexKey::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(DOC("$toHashedIndexKey" << _children[0]->serialize(options)));
 }
 
@@ -4370,7 +4605,7 @@ namespace {
 auto commonDateArithmeticsParse(ExpressionContext* const expCtx,
                                 BSONElement expr,
                                 const VariablesParseState& vps,
-                                StringData opName) {
+                                std::string_view opName) {
     uassert(5166400,
             str::stream() << opName << " expects an object as its argument",
             expr.type() == BSONType::object);
@@ -4386,13 +4621,13 @@ auto commonDateArithmeticsParse(ExpressionContext* const expCtx,
     for (auto&& arg : args) {
         auto field = arg.fieldNameStringData();
 
-        if (field == "startDate"_sd) {
+        if (field == "startDate"sv) {
             parsedArgs.startDate = Expression::parseOperand(expCtx, arg, vps);
-        } else if (field == "unit"_sd) {
+        } else if (field == "unit"sv) {
             parsedArgs.unit = Expression::parseOperand(expCtx, arg, vps);
-        } else if (field == "amount"_sd) {
+        } else if (field == "amount"sv) {
             parsedArgs.amount = Expression::parseOperand(expCtx, arg, vps);
-        } else if (field == "timezone"_sd) {
+        } else if (field == "timezone"sv) {
             parsedArgs.timezone = Expression::parseOperand(expCtx, arg, vps);
         } else {
             uasserted(5166401,
@@ -4423,7 +4658,7 @@ boost::intrusive_ptr<Expression> ExpressionDateArithmetics::optimize() {
                                                _children[_kAmount],
                                                _children[_kTimeZone]})) {
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isConstant(_children[_kUnit])) {
         const Value unitVal =
@@ -4438,7 +4673,8 @@ boost::intrusive_ptr<Expression> ExpressionDateArithmetics::optimize() {
             exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                            Document{},
                                            _children[_kTimeZone].get(),
-                                           &(getExpressionContext()->variables));
+                                           &(getExpressionContext()->variables),
+                                           {});
         if (!_parsedTimeZone) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
@@ -4446,7 +4682,7 @@ boost::intrusive_ptr<Expression> ExpressionDateArithmetics::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionDateArithmetics::serialize(const SerializationOptions& options) const {
+Value ExpressionDateArithmetics::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{
         {_opName,
          Document{{"startDate", _children[_kStartDate]->serialize(options)},
@@ -4472,7 +4708,7 @@ REGISTER_STABLE_EXPRESSION(dateAdd, ExpressionDateAdd::parse);
 boost::intrusive_ptr<Expression> ExpressionDateAdd::parse(ExpressionContext* const expCtx,
                                                           BSONElement expr,
                                                           const VariablesParseState& vps) {
-    constexpr auto opName = "$dateAdd"_sd;
+    constexpr auto opName = "$dateAdd"sv;
     auto [startDate, unit, amount, timezone] =
         commonDateArithmeticsParse(expCtx, expr, vps, opName);
     return make_intrusive<ExpressionDateAdd>(expCtx,
@@ -4483,8 +4719,10 @@ boost::intrusive_ptr<Expression> ExpressionDateAdd::parse(ExpressionContext* con
                                              opName);
 }
 
-Value ExpressionDateAdd::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateAdd::evaluate(const Document& root,
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 monotonic::State ExpressionDateAdd::combineMonotonicStateOfArguments(
@@ -4499,7 +4737,7 @@ REGISTER_STABLE_EXPRESSION(dateSubtract, ExpressionDateSubtract::parse);
 boost::intrusive_ptr<Expression> ExpressionDateSubtract::parse(ExpressionContext* const expCtx,
                                                                BSONElement expr,
                                                                const VariablesParseState& vps) {
-    constexpr auto opName = "$dateSubtract"_sd;
+    constexpr auto opName = "$dateSubtract"sv;
     auto [startDate, unit, amount, timezone] =
         commonDateArithmeticsParse(expCtx, expr, vps, opName);
     return make_intrusive<ExpressionDateSubtract>(expCtx,
@@ -4510,8 +4748,10 @@ boost::intrusive_ptr<Expression> ExpressionDateSubtract::parse(ExpressionContext
                                                   opName);
 }
 
-Value ExpressionDateSubtract::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateSubtract::evaluate(const Document& root,
+                                       Variables* variables,
+                                       const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 monotonic::State ExpressionDateSubtract::combineMonotonicStateOfArguments(
@@ -4546,15 +4786,15 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::parse(ExpressionContext* c
     BSONElement dateElement, unitElement, binSizeElement, timezoneElement, startOfWeekElement;
     for (auto&& element : expr.embeddedObject()) {
         auto field = element.fieldNameStringData();
-        if ("date"_sd == field) {
+        if ("date"sv == field) {
             dateElement = element;
-        } else if ("binSize"_sd == field) {
+        } else if ("binSize"sv == field) {
             binSizeElement = element;
-        } else if ("unit"_sd == field) {
+        } else if ("unit"sv == field) {
             unitElement = element;
-        } else if ("timezone"_sd == field) {
+        } else if ("timezone"sv == field) {
             timezoneElement = element;
-        } else if ("startOfWeek"_sd == field) {
+        } else if ("startOfWeek"sv == field) {
             startOfWeekElement = element;
         } else {
             uasserted(5439008,
@@ -4594,7 +4834,7 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::optimize() {
                                                _children[_kStartOfWeek]})) {
         // Everything is a constant, so we can turn into a constant.
         return ExpressionConstant::create(
-            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+            getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables), {}));
     }
     if (ExpressionConstant::isConstant(_children[_kUnit])) {
         const Value unitValue =
@@ -4602,7 +4842,7 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::optimize() {
         if (unitValue.nullish()) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
-        _parsedUnit = exec::expression::parseTimeUnit(unitValue, "$dateTrunc"_sd);
+        _parsedUnit = exec::expression::parseTimeUnit(unitValue, "$dateTrunc"sv);
     }
     if (ExpressionConstant::isConstant(_children[_kStartOfWeek])) {
         const Value startOfWeekValue =
@@ -4611,7 +4851,7 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::optimize() {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
         _parsedStartOfWeek =
-            exec::expression::parseDayOfWeek(startOfWeekValue, "$dateTrunc"_sd, "startOfWeek"_sd);
+            exec::expression::parseDayOfWeek(startOfWeekValue, "$dateTrunc"sv, "startOfWeek"sv);
     }
     if (ExpressionConstant::isNullOrConstant(_children[_kTimeZone])) {
         _parsedTimeZone = exec::expression::addContextToAssertionException(
@@ -4619,9 +4859,10 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::optimize() {
                 return exec::expression::makeTimeZone(getExpressionContext()->getTimeZoneDatabase(),
                                                       Document{},
                                                       _children[_kTimeZone].get(),
-                                                      &(getExpressionContext()->variables));
+                                                      &(getExpressionContext()->variables),
+                                                      {});
             },
-            "$dateTrunc parameter 'timezone' value parsing failed"_sd);
+            "$dateTrunc parameter 'timezone' value parsing failed"sv);
         if (!_parsedTimeZone) {
             return ExpressionConstant::create(getExpressionContext(), Value(BSONNULL));
         }
@@ -4637,22 +4878,24 @@ boost::intrusive_ptr<Expression> ExpressionDateTrunc::optimize() {
     return this;
 };
 
-Value ExpressionDateTrunc::serialize(const SerializationOptions& options) const {
+Value ExpressionDateTrunc::serialize(const query_shape::SerializationOptions& options) const {
     return Value{Document{
-        {"$dateTrunc"_sd,
-         Document{{"date"_sd, _children[_kDate]->serialize(options)},
-                  {"unit"_sd, _children[_kUnit]->serialize(options)},
-                  {"binSize"_sd,
+        {"$dateTrunc"sv,
+         Document{{"date"sv, _children[_kDate]->serialize(options)},
+                  {"unit"sv, _children[_kUnit]->serialize(options)},
+                  {"binSize"sv,
                    _children[_kBinSize] ? _children[_kBinSize]->serialize(options) : Value{}},
-                  {"timezone"_sd,
+                  {"timezone"sv,
                    _children[_kTimeZone] ? _children[_kTimeZone]->serialize(options) : Value{}},
-                  {"startOfWeek"_sd,
+                  {"startOfWeek"sv,
                    _children[_kStartOfWeek] ? _children[_kStartOfWeek]->serialize(options)
                                             : Value{}}}}}};
 };
 
-Value ExpressionDateTrunc::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDateTrunc::evaluate(const Document& root,
+                                    Variables* variables,
+                                    const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 monotonic::State ExpressionDateTrunc::getMonotonicState(const FieldPath& sortedFieldPath) const {
@@ -4683,9 +4926,9 @@ intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const exp
                 fieldExpr = Expression::parseOperand(expCtx, expr, vps);
                 inputExpr = ExpressionFieldPath::parse(expCtx, "$$CURRENT", vps);
                 break;
-            } else if (fieldName == "field"_sd) {
+            } else if (fieldName == "field"sv) {
                 fieldExpr = Expression::parseOperand(expCtx, elem, vps);
-            } else if (fieldName == "input"_sd) {
+            } else if (fieldName == "input"sv) {
                 inputExpr = Expression::parseOperand(expCtx, elem, vps);
             } else {
                 uasserted(3041701,
@@ -4708,15 +4951,17 @@ intrusive_ptr<Expression> ExpressionGetField::parse(ExpressionContext* const exp
     return make_intrusive<ExpressionGetField>(expCtx, fieldExpr, inputExpr);
 }
 
-Value ExpressionGetField::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionGetField::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionGetField::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionGetField::serialize(const SerializationOptions& options) const {
+Value ExpressionGetField::serialize(const query_shape::SerializationOptions& options) const {
     Value fieldValue;
 
     if (auto fieldExprConst = dynamic_cast<ExpressionConstant*>(_children[_kField].get());
@@ -4732,16 +4977,16 @@ Value ExpressionGetField::serialize(const SerializationOptions& options) const {
         // reference, it should be wrapped in $const to make it unambiguous with actual field
         // references.
         if (!options.isSerializingLiteralsAsDebugTypes() || strPath[0] == '$') {
-            maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+            maybeRedactedPath = Value(Document{{"$const"sv, maybeRedactedPath}});
         }
         fieldValue = maybeRedactedPath;
     } else {
         fieldValue = _children[_kField]->serialize(options);
     }
 
-    return Value(Document{{"$getField"_sd,
-                           Document{{"field"_sd, std::move(fieldValue)},
-                                    {"input"_sd, _children[_kInput]->serialize(options)}}}});
+    return Value(Document{{"$getField"sv,
+                           Document{{"field"sv, std::move(fieldValue)},
+                                    {"input"sv, _children[_kInput]->serialize(options)}}}});
 }
 
 /* -------------------------- ExpressionSetField ------------------------------ */
@@ -4767,11 +5012,11 @@ intrusive_ptr<Expression> ExpressionSetField::parse(ExpressionContext* const exp
 
     for (auto&& elem : expr.embeddedObject()) {
         const auto fieldName = elem.fieldNameStringData();
-        if (fieldName == "field"_sd) {
+        if (fieldName == "field"sv) {
             fieldExpr = Expression::parseOperand(expCtx, elem, vps);
-        } else if (fieldName == "input"_sd) {
+        } else if (fieldName == "input"sv) {
             inputExpr = Expression::parseOperand(expCtx, elem, vps);
-        } else if (!isUnsetField && fieldName == "value"_sd) {
+        } else if (!isUnsetField && fieldName == "value"sv) {
             valueExpr = Expression::parseOperand(expCtx, elem, vps);
         } else {
             uasserted(4161101,
@@ -4793,15 +5038,17 @@ intrusive_ptr<Expression> ExpressionSetField::parse(ExpressionContext* const exp
         expCtx, std::move(fieldExpr), std::move(inputExpr), std::move(valueExpr));
 }
 
-Value ExpressionSetField::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSetField::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionSetField::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionSetField::serialize(const SerializationOptions& options) const {
+Value ExpressionSetField::serialize(const query_shape::SerializationOptions& options) const {
     // The parser guarantees that the '_children[_kField]' expression evaluates to a constant
     // string.
     auto strPath =
@@ -4813,13 +5060,13 @@ Value ExpressionSetField::serialize(const SerializationOptions& options) const {
     //  - should be redacted (if that option is set).
     //  - should *not* be wrapped in $const iff we are serializing for a debug string
     if (!options.isSerializingLiteralsAsDebugTypes()) {
-        maybeRedactedPath = Value(Document{{"$const"_sd, maybeRedactedPath}});
+        maybeRedactedPath = Value(Document{{"$const"sv, maybeRedactedPath}});
     }
 
-    return Value(Document{{"$setField"_sd,
-                           Document{{"field"_sd, std::move(maybeRedactedPath)},
-                                    {"input"_sd, _children[_kInput]->serialize(options)},
-                                    {"value"_sd, _children[_kValue]->serialize(options)}}}});
+    return Value(Document{{"$setField"sv,
+                           Document{{"field"sv, std::move(maybeRedactedPath)},
+                                    {"input"sv, _children[_kInput]->serialize(options)},
+                                    {"value"sv, _children[_kValue]->serialize(options)}}}});
 }
 
 std::string ExpressionSetField::getValidFieldName(boost::intrusive_ptr<Expression> fieldExpr) {
@@ -4860,24 +5107,30 @@ std::string ExpressionSetField::getValidFieldName(boost::intrusive_ptr<Expressio
 
 /* ------------------------- ExpressionTsSecond ----------------------------- */
 
-Value ExpressionTsSecond::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTsSecond::evaluate(const Document& root,
+                                   Variables* variables,
+                                   const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(tsSecond, ExpressionTsSecond::parse);
 
 /* ------------------------- ExpressionTsIncrement ----------------------------- */
 
-Value ExpressionTsIncrement::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionTsIncrement::evaluate(const Document& root,
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(tsIncrement, ExpressionTsIncrement::parse);
 
 /* ----------------------- ExpressionBitNot ---------------------------- */
 
-Value ExpressionBitNot::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBitNot::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 REGISTER_STABLE_EXPRESSION(bitNot, ExpressionBitNot::parse);
@@ -4892,16 +5145,22 @@ REGISTER_STABLE_EXPRESSION(bitAnd, ExpressionBitAnd::parse);
 REGISTER_STABLE_EXPRESSION(bitOr, ExpressionBitOr::parse);
 REGISTER_STABLE_EXPRESSION(bitXor, ExpressionBitXor::parse);
 
-Value ExpressionBitAnd::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBitAnd::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
-Value ExpressionBitOr::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBitOr::evaluate(const Document& root,
+                                Variables* variables,
+                                const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
-Value ExpressionBitXor::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionBitXor::evaluate(const Document& root,
+                                 Variables* variables,
+                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 MONGO_INITIALIZER_GROUP(BeginExpressionRegistration, ("default"), ("EndExpressionRegistration"))
@@ -4925,9 +5184,9 @@ boost::intrusive_ptr<Expression> ExpressionInternalKeyStringValue::parse(
 
     for (auto&& element : expr.embeddedObject()) {
         auto field = element.fieldNameStringData();
-        if ("input"_sd == field) {
+        if ("input"sv == field) {
             inputExpr = parseOperand(expCtx, element, vps);
-        } else if ("collation"_sd == field) {
+        } else if ("collation"sv == field) {
             collationExpr = parseOperand(expCtx, element, vps);
         } else {
             uasserted(8281501,
@@ -4942,7 +5201,8 @@ boost::intrusive_ptr<Expression> ExpressionInternalKeyStringValue::parse(
     return make_intrusive<ExpressionInternalKeyStringValue>(expCtx, inputExpr, collationExpr);
 }
 
-Value ExpressionInternalKeyStringValue::serialize(const SerializationOptions& options) const {
+Value ExpressionInternalKeyStringValue::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(
         Document{{getOpName(),
                   Document{{"input", _children[_kInput]->serialize(options)},
@@ -4951,8 +5211,10 @@ Value ExpressionInternalKeyStringValue::serialize(const SerializationOptions& op
                                                    : Value()}}}});
 }
 
-Value ExpressionInternalKeyStringValue::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionInternalKeyStringValue::evaluate(const Document& root,
+                                                 Variables* variables,
+                                                 const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* -------------------------- ExpressionCreateUUID ------------------------------ */
@@ -4963,7 +5225,7 @@ REGISTER_EXPRESSION_WITH_FEATURE_FLAG(createUUID,
                                       &feature_flags::gFeatureFlagUUIDExpression);
 
 ExpressionCreateUUID::ExpressionCreateUUID(ExpressionContext* const expCtx) : Expression(expCtx) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionCreateUUID::parse(ExpressionContext* const expCtx,
@@ -4982,7 +5244,9 @@ const char* ExpressionCreateUUID::getOpName() const {
     return "$createUUID";
 }
 
-Value ExpressionCreateUUID::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionCreateUUID::evaluate(const Document& root,
+                                     Variables* variables,
+                                     const EvaluationContext& ctx) const {
     return Value(UUID::gen());
 }
 
@@ -4990,7 +5254,7 @@ intrusive_ptr<Expression> ExpressionCreateUUID::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionCreateUUID::serialize(const SerializationOptions& options) const {
+Value ExpressionCreateUUID::serialize(const query_shape::SerializationOptions& options) const {
     return Value(DOC(getOpName() << Document()));
 }
 
@@ -5003,7 +5267,7 @@ REGISTER_EXPRESSION_WITH_FEATURE_FLAG(createObjectId,
 
 ExpressionCreateObjectId::ExpressionCreateObjectId(ExpressionContext* const expCtx)
     : Expression(expCtx) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionCreateObjectId::parse(ExpressionContext* const expCtx,
@@ -5022,7 +5286,9 @@ const char* ExpressionCreateObjectId::getOpName() const {
     return "$createObjectId";
 }
 
-Value ExpressionCreateObjectId::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionCreateObjectId::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
     return Value(OID::gen());
 }
 
@@ -5030,7 +5296,7 @@ intrusive_ptr<Expression> ExpressionCreateObjectId::optimize() {
     return intrusive_ptr<Expression>(this);
 }
 
-Value ExpressionCreateObjectId::serialize(const SerializationOptions& options) const {
+Value ExpressionCreateObjectId::serialize(const query_shape::SerializationOptions& options) const {
     return Value(DOC(getOpName() << Document()));
 }
 
@@ -5051,7 +5317,7 @@ ExpressionSerializeEJSON::ExpressionSerializeEJSON(ExpressionContext* const expC
                      std::move(relaxed),
                      std::move(onError),
                  }) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionSerializeEJSON::parse(ExpressionContext* const expCtx,
@@ -5091,8 +5357,10 @@ const char* ExpressionSerializeEJSON::getOpName() const {
     return "$serializeEJSON";
 }
 
-Value ExpressionSerializeEJSON::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSerializeEJSON::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionSerializeEJSON::optimize() {
@@ -5104,7 +5372,7 @@ intrusive_ptr<Expression> ExpressionSerializeEJSON::optimize() {
     return this;
 }
 
-Value ExpressionSerializeEJSON::serialize(const SerializationOptions& options) const {
+Value ExpressionSerializeEJSON::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{
         getOpName(),
         Document{{_kInput, getInput().serialize(options)},
@@ -5113,11 +5381,11 @@ Value ExpressionSerializeEJSON::serialize(const SerializationOptions& options) c
     }});
 }
 
-boost::intrusive_ptr<Expression> ExpressionSerializeEJSON::clone() const {
-    return make_intrusive<ExpressionSerializeEJSON>(getExpressionContext(),
-                                                    cloneChild(_kInputIdx),
-                                                    cloneChild(_kRelaxedIdx),
-                                                    cloneChild(_kOnErrorIdx));
+boost::intrusive_ptr<Expression> ExpressionSerializeEJSON::clone(ExpressionContext& expCtx) const {
+    return make_intrusive<ExpressionSerializeEJSON>(&expCtx,
+                                                    cloneChild(_kInputIdx, expCtx),
+                                                    cloneChild(_kRelaxedIdx, expCtx),
+                                                    cloneChild(_kOnErrorIdx, expCtx));
 }
 
 const Expression& ExpressionSerializeEJSON::getInput() const {
@@ -5147,7 +5415,7 @@ ExpressionDeserializeEJSON::ExpressionDeserializeEJSON(ExpressionContext* const 
                      std::move(input),
                      std::move(onError),
                  }) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionDeserializeEJSON::parse(ExpressionContext* const expCtx,
@@ -5183,8 +5451,10 @@ const char* ExpressionDeserializeEJSON::getOpName() const {
     return "$deserializeEJSON";
 }
 
-Value ExpressionDeserializeEJSON::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionDeserializeEJSON::evaluate(const Document& root,
+                                           Variables* variables,
+                                           const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionDeserializeEJSON::optimize() {
@@ -5196,7 +5466,8 @@ intrusive_ptr<Expression> ExpressionDeserializeEJSON::optimize() {
     return this;
 }
 
-Value ExpressionDeserializeEJSON::serialize(const SerializationOptions& options) const {
+Value ExpressionDeserializeEJSON::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(Document{{
         getOpName(),
         Document{{_kInput, getInput().serialize(options)},
@@ -5204,9 +5475,10 @@ Value ExpressionDeserializeEJSON::serialize(const SerializationOptions& options)
     }});
 }
 
-boost::intrusive_ptr<Expression> ExpressionDeserializeEJSON::clone() const {
+boost::intrusive_ptr<Expression> ExpressionDeserializeEJSON::clone(
+    ExpressionContext& expCtx) const {
     return make_intrusive<ExpressionDeserializeEJSON>(
-        getExpressionContext(), cloneChild(_kInputIdx), cloneChild(_kOnErrorIdx));
+        &expCtx, cloneChild(_kInputIdx, expCtx), cloneChild(_kOnErrorIdx, expCtx));
 }
 
 const Expression& ExpressionDeserializeEJSON::getInput() const {
@@ -5222,7 +5494,7 @@ namespace {
 intrusive_ptr<Expression> parseHash(ExpressionContext* const expCtx,
                                     BSONElement expr,
                                     const VariablesParseState& vps,
-                                    const StringData opName) {
+                                    const std::string_view opName) {
     uassert(ErrorCodes::FailedToParse,
             str::stream() << opName << " expects an object of named arguments but found: "
                           << typeName(expr.type()),
@@ -5267,21 +5539,23 @@ ExpressionHash::ExpressionHash(ExpressionContext* const expCtx,
                                boost::intrusive_ptr<Expression> input,
                                boost::intrusive_ptr<Expression> algorithm)
     : Expression(expCtx, {std::move(input), std::move(algorithm)}) {
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 intrusive_ptr<Expression> ExpressionHash::parse(ExpressionContext* const expCtx,
                                                 BSONElement expr,
                                                 const VariablesParseState& vps) {
-    return parseHash(expCtx, expr, vps, "$hash"_sd);
+    return parseHash(expCtx, expr, vps, "$hash"sv);
 }
 
 const char* ExpressionHash::getOpName() const {
     return "$hash";
 }
 
-Value ExpressionHash::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionHash::evaluate(const Document& root,
+                               Variables* variables,
+                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 intrusive_ptr<Expression> ExpressionHash::optimize() {
@@ -5290,7 +5564,7 @@ intrusive_ptr<Expression> ExpressionHash::optimize() {
     return this;
 }
 
-Value ExpressionHash::serialize(const SerializationOptions& options) const {
+Value ExpressionHash::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{
         getOpName(),
         Document{{kInput, getInput().serialize(options)},
@@ -5298,9 +5572,9 @@ Value ExpressionHash::serialize(const SerializationOptions& options) const {
     }});
 }
 
-boost::intrusive_ptr<Expression> ExpressionHash::clone() const {
+boost::intrusive_ptr<Expression> ExpressionHash::clone(ExpressionContext& expCtx) const {
     return make_intrusive<ExpressionHash>(
-        getExpressionContext(), cloneChild(_kInputIdx), cloneChild(_kAlgorithmIdx));
+        &expCtx, cloneChild(_kInputIdx, expCtx), cloneChild(_kAlgorithmIdx, expCtx));
 }
 
 const Expression& ExpressionHash::getInput() const {
@@ -5317,7 +5591,7 @@ namespace {
 intrusive_ptr<Expression> parseHexHash(ExpressionContext* const expCtx,
                                        BSONElement expr,
                                        const VariablesParseState& vps) {
-    auto hashExpr = parseHash(expCtx, expr, vps, "$hexHash"_sd);
+    auto hashExpr = parseHash(expCtx, expr, vps, "$hexHash"sv);
     return ExpressionConvert::create(expCtx, hashExpr, BSONType::string, BinDataFormat::kHex);
 }
 
@@ -5358,7 +5632,9 @@ ExpressionEncTextSearch::ExpressionEncTextSearch(ExpressionContext* const expCtx
         if (encryptedBinDataType == EncryptedBinDataType::kFLE2FindTextPayload) {
             // Parse the value as a ParsedFindTextSearchPayload, and use the server token to
             // initiate _evaluatorV2 with the zerosTokens.
-            auto tokens = ParsedFindTextSearchPayload(value);
+            // Pass empty string and boost::none to skip validation, since validation already
+            // happened in the rewrite layer and we have no schema context here.
+            auto tokens = ParsedFindTextSearchPayload(value, ""sv, boost::none);
             _evaluatorV2 = EncryptedPredicateEvaluatorV2(
                 {ServerZerosEncryptionToken::deriveFrom(tokens.server)});
         } else {
@@ -5377,7 +5653,7 @@ ExpressionEncTextSearch::ExpressionEncTextSearch(ExpressionContext* const expCtx
                 value.getType() == BSONType::string);
     }
 
-    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
+    expCtx->capSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 const ExpressionFieldPath& ExpressionEncTextSearch::getInput() const {
@@ -5402,18 +5678,18 @@ bool ExpressionEncTextSearch::canBeEvaluated() const {
 }
 
 /* --------------------------------- encStrStartsWith ------------------------------------------- */
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(encStrStartsWith,
-                                      ExpressionEncStrStartsWith::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &gFeatureFlagQETextSearchPreview);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG_NO_METRICS(encStrStartsWith,
+                                                 ExpressionEncStrStartsWith::parse,
+                                                 AllowedWithApiStrict::kNeverInVersion1,
+                                                 AllowedWithClientType::kAny,
+                                                 &gFeatureFlagQETextSearchPreview);
 
 ExpressionEncStrStartsWith::ExpressionEncStrStartsWith(ExpressionContext* const expCtx,
                                                        boost::intrusive_ptr<Expression> input,
                                                        boost::intrusive_ptr<Expression> prefix)
     : ExpressionEncTextSearch(expCtx, std::move(input), std::move(prefix)) {}
 
-constexpr auto kEncStrStartsWith = "$encStrStartsWith"_sd;
+constexpr auto kEncStrStartsWith = "$encStrStartsWith"sv;
 boost::intrusive_ptr<Expression> ExpressionEncStrStartsWith::parse(ExpressionContext* const expCtx,
                                                                    BSONElement expr,
                                                                    const VariablesParseState& vps) {
@@ -5430,7 +5706,8 @@ boost::intrusive_ptr<Expression> ExpressionEncStrStartsWith::parse(ExpressionCon
     return new ExpressionEncStrStartsWith(expCtx, std::move(inputExpr), std::move(prefixExpr));
 }
 
-Value ExpressionEncStrStartsWith::serialize(const SerializationOptions& options) const {
+Value ExpressionEncStrStartsWith::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(Document{{kEncStrStartsWith,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"prefix", _children[_kTextOperand]->serialize(options)}}}});
@@ -5440,26 +5717,28 @@ const char* ExpressionEncStrStartsWith::getOpName() const {
     return kEncStrStartsWith.data();
 }
 
-Value ExpressionEncStrStartsWith::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionEncStrStartsWith::evaluate(const Document& root,
+                                           Variables* variables,
+                                           const EvaluationContext& ctx) const {
     uassert(10111803,
             "ExpressionEncStrStartsWith can't be evaluated without binary payload",
             canBeEvaluated());
-    return exec::expression::evaluate(*this, root, variables);
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* --------------------------------- encStrEndsWith ------------------------------------------- */
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(encStrEndsWith,
-                                      ExpressionEncStrEndsWith::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &gFeatureFlagQETextSearchPreview);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG_NO_METRICS(encStrEndsWith,
+                                                 ExpressionEncStrEndsWith::parse,
+                                                 AllowedWithApiStrict::kNeverInVersion1,
+                                                 AllowedWithClientType::kAny,
+                                                 &gFeatureFlagQETextSearchPreview);
 
 ExpressionEncStrEndsWith::ExpressionEncStrEndsWith(ExpressionContext* const expCtx,
                                                    boost::intrusive_ptr<Expression> input,
                                                    boost::intrusive_ptr<Expression> suffix)
     : ExpressionEncTextSearch(expCtx, std::move(input), std::move(suffix)) {}
 
-constexpr auto kEncStrEndsWith = "$encStrEndsWith"_sd;
+constexpr auto kEncStrEndsWith = "$encStrEndsWith"sv;
 boost::intrusive_ptr<Expression> ExpressionEncStrEndsWith::parse(ExpressionContext* const expCtx,
                                                                  BSONElement expr,
                                                                  const VariablesParseState& vps) {
@@ -5476,7 +5755,7 @@ boost::intrusive_ptr<Expression> ExpressionEncStrEndsWith::parse(ExpressionConte
     return new ExpressionEncStrEndsWith(expCtx, std::move(inputExpr), std::move(suffixExpr));
 }
 
-Value ExpressionEncStrEndsWith::serialize(const SerializationOptions& options) const {
+Value ExpressionEncStrEndsWith::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kEncStrEndsWith,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"suffix", _children[_kTextOperand]->serialize(options)}}}});
@@ -5486,26 +5765,28 @@ const char* ExpressionEncStrEndsWith::getOpName() const {
     return kEncStrEndsWith.data();
 }
 
-Value ExpressionEncStrEndsWith::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionEncStrEndsWith::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
     uassert(10120900,
             "ExpressionEncStrEndsWith can't be evaluated without binary payload",
             canBeEvaluated());
-    return exec::expression::evaluate(*this, root, variables);
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* --------------------------------- encStrContains------------------------------------------- */
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(encStrContains,
-                                      ExpressionEncStrContains::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &gFeatureFlagQETextSearchPreview);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG_NO_METRICS(encStrContains,
+                                                 ExpressionEncStrContains::parse,
+                                                 AllowedWithApiStrict::kNeverInVersion1,
+                                                 AllowedWithClientType::kAny,
+                                                 &gFeatureFlagQETextSearchPreview);
 
 ExpressionEncStrContains::ExpressionEncStrContains(ExpressionContext* const expCtx,
                                                    boost::intrusive_ptr<Expression> input,
                                                    boost::intrusive_ptr<Expression> substring)
     : ExpressionEncTextSearch(expCtx, std::move(input), std::move(substring)) {}
 
-constexpr auto kEncStrContains = "$encStrContains"_sd;
+constexpr auto kEncStrContains = "$encStrContains"sv;
 boost::intrusive_ptr<Expression> ExpressionEncStrContains::parse(ExpressionContext* const expCtx,
                                                                  BSONElement expr,
                                                                  const VariablesParseState& vps) {
@@ -5522,7 +5803,7 @@ boost::intrusive_ptr<Expression> ExpressionEncStrContains::parse(ExpressionConte
     return new ExpressionEncStrContains(expCtx, std::move(inputExpr), std::move(substringExpr));
 }
 
-Value ExpressionEncStrContains::serialize(const SerializationOptions& options) const {
+Value ExpressionEncStrContains::serialize(const query_shape::SerializationOptions& options) const {
     return Value(Document{{kEncStrContains,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"substring", _children[_kTextOperand]->serialize(options)}}}});
@@ -5532,20 +5813,22 @@ const char* ExpressionEncStrContains::getOpName() const {
     return kEncStrContains.data();
 }
 
-Value ExpressionEncStrContains::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionEncStrContains::evaluate(const Document& root,
+                                         Variables* variables,
+                                         const EvaluationContext& ctx) const {
     uassert(10208800,
             "ExpressionEncStrContains can't be evaluated without binary payload",
             canBeEvaluated());
-    return exec::expression::evaluate(*this, root, variables);
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* --------------------------------- encStrNormalizedEq -------------------------------------------
  */
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(encStrNormalizedEq,
-                                      ExpressionEncStrNormalizedEq::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &gFeatureFlagQETextSearchPreview);
+REGISTER_EXPRESSION_WITH_FEATURE_FLAG_NO_METRICS(encStrNormalizedEq,
+                                                 ExpressionEncStrNormalizedEq::parse,
+                                                 AllowedWithApiStrict::kNeverInVersion1,
+                                                 AllowedWithClientType::kAny,
+                                                 &gFeatureFlagQETextSearchPreview);
 
 ExpressionEncStrNormalizedEq::ExpressionEncStrNormalizedEq(
     ExpressionContext* const expCtx,
@@ -5553,7 +5836,7 @@ ExpressionEncStrNormalizedEq::ExpressionEncStrNormalizedEq(
     boost::intrusive_ptr<Expression> substring)
     : ExpressionEncTextSearch(expCtx, std::move(input), std::move(substring)) {}
 
-constexpr auto kEncStrNormalizedEq = "$encStrNormalizedEq"_sd;
+constexpr auto kEncStrNormalizedEq = "$encStrNormalizedEq"sv;
 boost::intrusive_ptr<Expression> ExpressionEncStrNormalizedEq::parse(
     ExpressionContext* const expCtx, BSONElement expr, const VariablesParseState& vps) {
     IDLParserContext ctx(kEncStrNormalizedEq);
@@ -5569,7 +5852,8 @@ boost::intrusive_ptr<Expression> ExpressionEncStrNormalizedEq::parse(
     return new ExpressionEncStrNormalizedEq(expCtx, std::move(inputExpr), std::move(stringExpr));
 }
 
-Value ExpressionEncStrNormalizedEq::serialize(const SerializationOptions& options) const {
+Value ExpressionEncStrNormalizedEq::serialize(
+    const query_shape::SerializationOptions& options) const {
     return Value(Document{{kEncStrNormalizedEq,
                            Document{{"input", _children[_kInput]->serialize(options)},
                                     {"string", _children[_kTextOperand]->serialize(options)}}}});
@@ -5579,11 +5863,13 @@ const char* ExpressionEncStrNormalizedEq::getOpName() const {
     return kEncStrNormalizedEq.data();
 }
 
-Value ExpressionEncStrNormalizedEq::evaluate(const Document& root, Variables* variables) const {
+Value ExpressionEncStrNormalizedEq::evaluate(const Document& root,
+                                             Variables* variables,
+                                             const EvaluationContext& ctx) const {
     uassert(10255705,
             "ExpressionEncStrNormalizedEq can't be evaluated without binary payload",
             canBeEvaluated());
-    return exec::expression::evaluate(*this, root, variables);
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ----------------------- ExpressionVectorSimilarity ---------------------------- */
@@ -5591,7 +5877,7 @@ Value ExpressionEncStrNormalizedEq::evaluate(const Document& root, Variables* va
 auto ExpressionVectorSimilarity::_parseInternal(ExpressionContext* const expCtx,
                                                 BSONElement expr,
                                                 const VariablesParseState& vps,
-                                                const std::string& similarityName) {
+                                                std::string_view similarityName) {
 
     struct {
         bool score{false};
@@ -5647,7 +5933,8 @@ auto ExpressionVectorSimilarity::_parseInternal(ExpressionContext* const expCtx,
     return parsed;
 }
 
-Value ExpressionVectorSimilarity::serialize(const SerializationOptions& options) const {
+Value ExpressionVectorSimilarity::serialize(
+    const query_shape::SerializationOptions& options) const {
     vector<Value> serializedChildren;
     for (auto&& expr : _children) {
         serializedChildren.push_back(expr.get()->serialize(options));
@@ -5659,59 +5946,53 @@ Value ExpressionVectorSimilarity::serialize(const SerializationOptions& options)
 
 /* ----------------------- ExpressionSimilarityDotProduct ---------------------------- */
 
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(similarityDotProduct,
-                                      ExpressionSimilarityDotProduct::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &feature_flags::gFeatureFlagVectorSimilarity);
+REGISTER_STABLE_EXPRESSION(similarityDotProduct, ExpressionSimilarityDotProduct::parse);
 
 intrusive_ptr<Expression> ExpressionSimilarityDotProduct::parse(ExpressionContext* const expCtx,
                                                                 BSONElement expr,
                                                                 const VariablesParseState& vps) {
-    auto [score, children] = _parseInternal(expCtx, expr, vps, kName.data());
+    auto [score, children] = _parseInternal(expCtx, expr, vps, kName);
     return new ExpressionSimilarityDotProduct(expCtx, score, std::move(children));
 }
 
-Value ExpressionSimilarityDotProduct::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSimilarityDotProduct::evaluate(const Document& root,
+                                               Variables* variables,
+                                               const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 
 /* ----------------------- ExpressionSimilarityCosine ---------------------------- */
 
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(similarityCosine,
-                                      ExpressionSimilarityCosine::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &feature_flags::gFeatureFlagVectorSimilarity);
+REGISTER_STABLE_EXPRESSION(similarityCosine, ExpressionSimilarityCosine::parse);
 
 intrusive_ptr<Expression> ExpressionSimilarityCosine::parse(ExpressionContext* const expCtx,
                                                             BSONElement expr,
                                                             const VariablesParseState& vps) {
-    auto [score, children] = _parseInternal(expCtx, expr, vps, kName.data());
+    auto [score, children] = _parseInternal(expCtx, expr, vps, kName);
     return new ExpressionSimilarityCosine(expCtx, score, std::move(children));
 }
 
-Value ExpressionSimilarityCosine::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSimilarityCosine::evaluate(const Document& root,
+                                           Variables* variables,
+                                           const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 /* ----------------------- ExpressionSimilarityEuclidean ---------------------------- */
-REGISTER_EXPRESSION_WITH_FEATURE_FLAG(similarityEuclidean,
-                                      ExpressionSimilarityEuclidean::parse,
-                                      AllowedWithApiStrict::kNeverInVersion1,
-                                      AllowedWithClientType::kAny,
-                                      &feature_flags::gFeatureFlagVectorSimilarity);
+REGISTER_STABLE_EXPRESSION(similarityEuclidean, ExpressionSimilarityEuclidean::parse);
 
 intrusive_ptr<Expression> ExpressionSimilarityEuclidean::parse(ExpressionContext* const expCtx,
                                                                BSONElement expr,
                                                                const VariablesParseState& vps) {
-    auto [score, children] = _parseInternal(expCtx, expr, vps, kName.data());
+    auto [score, children] = _parseInternal(expCtx, expr, vps, kName);
     return new ExpressionSimilarityEuclidean(expCtx, score, std::move(children));
 }
 
-Value ExpressionSimilarityEuclidean::evaluate(const Document& root, Variables* variables) const {
-    return exec::expression::evaluate(*this, root, variables);
+Value ExpressionSimilarityEuclidean::evaluate(const Document& root,
+                                              Variables* variables,
+                                              const EvaluationContext& ctx) const {
+    return exec::expression::evaluate(*this, root, variables, ctx);
 }
 
 }  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
 
@@ -48,6 +22,7 @@
 
 namespace mongo::transport::grpc {
 namespace {
+using namespace std::literals::string_view_literals;
 const Seconds kSessionManagerShutdownTimeout{10};
 
 class GRPCSection : public ServerStatusSection {
@@ -72,7 +47,7 @@ public:
         }
 
         if (tl->isIngress()) {
-            BSONObjBuilder ingressSection(section.subobjStart("ingress"_sd));
+            BSONObjBuilder ingressSection(section.subobjStart("ingress"sv));
             if (auto sm = dynamic_cast<GRPCSessionManager*>(tl->getSessionManager())) {
                 sm->appendStats(&ingressSection);
             };
@@ -203,8 +178,10 @@ Status GRPCTransportLayerImpl::setup() {
             }
             if (!sslGlobalParams.sslClusterFile.empty()) {
                 _clientOptions.tlsCertificateKeyFile = sslGlobalParams.sslClusterFile;
+                _clientOptions.tlsCertificatePassword = sslGlobalParams.sslClusterPassword;
             } else if (!sslGlobalParams.sslPEMKeyFile.empty()) {
                 _clientOptions.tlsCertificateKeyFile = sslGlobalParams.sslPEMKeyFile;
+                _clientOptions.tlsCertificatePassword = sslGlobalParams.sslPEMKeyPassword;
             }
             _clientOptions.tlsAllowInvalidHostnames = sslGlobalParams.sslAllowInvalidHostnames;
             _clientOptions.tlsAllowInvalidCertificates =
@@ -444,7 +421,8 @@ Status GRPCTransportLayerImpl::rotateCertificates(std::shared_ptr<SSLManagerInte
     }
 
     if (_defaultClient) {
-        if (auto status = _defaultClient->rotateCertificates(manager->getSSLConfiguration());
+        if (auto status =
+                _defaultClient->rotateCertificates(manager->getSSLConfiguration(), *manager);
             !status.isOK()) {
             LOGV2_DEBUG(
                 9886803, 1, "Failed to rotate egress gRPC TLS certificates", "error"_attr = status);
@@ -456,7 +434,7 @@ Status GRPCTransportLayerImpl::rotateCertificates(std::shared_ptr<SSLManagerInte
         std::lock_guard lk(_mutex);
         for (auto&& clientEntry : _clients) {
             if (auto c = clientEntry.client.lock()) {
-                if (auto status = c->rotateCertificates(manager->getSSLConfiguration());
+                if (auto status = c->rotateCertificates(manager->getSSLConfiguration(), *manager);
                     !status.isOK()) {
                     LOGV2_DEBUG(10026100,
                                 1,

@@ -9,7 +9,6 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Checking UUID and index consistency involves talking to shards, but this test shuts down shards.
-TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 
 let checkDocCount = function (coll, returnPartialFlag, shardsDown, expectedCount) {
@@ -27,7 +26,12 @@ let admin = mongos.getDB("admin");
 let collOneShard = mongos.getCollection("foo.collOneShard");
 let collAllShards = mongos.getCollection("foo.collAllShards");
 
-assert.commandWorked(admin.runCommand({enableSharding: collOneShard.getDB() + "", primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    admin.runCommand({
+        enableSharding: collOneShard.getDB() + "",
+        primaryShard: st.shard0.shardName,
+    }),
+);
 
 assert.commandWorked(admin.runCommand({shardCollection: collOneShard + "", key: {_id: 1}}));
 assert.commandWorked(admin.runCommand({shardCollection: collAllShards + "", key: {_id: 1}}));
@@ -36,8 +40,12 @@ assert.commandWorked(admin.runCommand({shardCollection: collAllShards + "", key:
 
 assert.commandWorked(admin.runCommand({split: collAllShards + "", middle: {_id: 0}}));
 assert.commandWorked(admin.runCommand({split: collAllShards + "", middle: {_id: 1000}}));
-assert.commandWorked(admin.runCommand({moveChunk: collAllShards + "", find: {_id: 0}, to: st.shard1.shardName}));
-assert.commandWorked(admin.runCommand({moveChunk: collAllShards + "", find: {_id: 1000}, to: st.shard2.shardName}));
+assert.commandWorked(
+    admin.runCommand({moveChunk: collAllShards + "", find: {_id: 0}, to: st.shard1.shardName}),
+);
+assert.commandWorked(
+    admin.runCommand({moveChunk: collAllShards + "", find: {_id: 1000}, to: st.shard2.shardName}),
+);
 
 // Collections are now distributed correctly
 jsTest.log("Collections now distributed correctly.");

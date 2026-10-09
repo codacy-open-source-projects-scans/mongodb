@@ -3,17 +3,6 @@
 //   does_not_support_transactions,
 // ]
 import {dropWithoutImplicitRecreate} from "jstests/aggregation/extras/merge_helpers.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 // Setup and populate input collection.
 const inputName = "out_preserve_coll_options";
@@ -27,7 +16,9 @@ dropWithoutImplicitRecreate(targetName);
 assert.commandWorked(db.createCollection(targetName, {validationLevel: "moderate"}));
 
 // Verify target collection options.
-const targetOptionsResponse = assert.commandWorked(db.runCommand({listCollections: 1, filter: {"name": targetName}}));
+const targetOptionsResponse = assert.commandWorked(
+    db.runCommand({listCollections: 1, filter: {"name": targetName}}),
+);
 const targetOptionsResults = new DBCommandCursor(db, targetOptionsResponse).toArray();
 assert.eq(targetOptionsResults.length, 1, targetOptionsResults);
 assert.eq({validationLevel: "moderate"}, targetOptionsResults[0].options, targetOptionsResults[0]);
@@ -43,4 +34,8 @@ const targetOptionsResponseNew = assert.commandWorked(
 );
 const targetOptionsResultsNew = new DBCommandCursor(db, targetOptionsResponseNew).toArray();
 assert.eq(targetOptionsResultsNew.length, 1, targetOptionsResultsNew);
-assert.eq({validationLevel: "moderate"}, targetOptionsResultsNew[0].options, targetOptionsResultsNew[0]);
+assert.eq(
+    {validationLevel: "moderate"},
+    targetOptionsResultsNew[0].options,
+    targetOptionsResultsNew[0],
+);

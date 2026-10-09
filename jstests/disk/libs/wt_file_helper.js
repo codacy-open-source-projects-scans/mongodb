@@ -1,4 +1,9 @@
-import {getPlanStage, getWinningPlanFromExplain, isExpress, isIxscan} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStage,
+    getWinningPlanFromExplain,
+    isExpress,
+    isIxscan,
+} from "jstests/libs/query/analyze_plan.js";
 
 /**
  * Get the URI of the wt collection file given the collection name.
@@ -48,7 +53,11 @@ export let assertQueryUsesIndex = function (coll, query, indexName) {
         assert(isExpress(coll.getDB(), res), tojson(res));
         stage = getPlanStage(getWinningPlanFromExplain(res), "EXPRESS_IXSCAN");
     }
-    assert.eq(stage.indexName, indexName, "Expecting index scan on " + indexName + ": " + tojson(res));
+    assert.eq(
+        stage.indexName,
+        indexName,
+        "Expecting index scan on " + indexName + ": " + tojson(res),
+    );
 };
 
 /**
@@ -73,7 +82,16 @@ export let assertRepairFailsWithFailpoint = function (dbpath, port, failpoint) {
 
     assert.eq(
         MongoRunner.EXIT_ABRUPT,
-        runMongoProgram("mongod", "--repair", "--port", port, "--dbpath", dbpath, "--setParameter", param),
+        runMongoProgram(
+            "mongod",
+            "--repair",
+            "--port",
+            port,
+            "--dbpath",
+            dbpath,
+            "--setParameter",
+            param,
+        ),
     );
 };
 
@@ -115,7 +133,12 @@ export let assertErrorOnStartupAfterIncompleteRepair = function (dbpath, port) {
     jsTestLog("The node should fail to start up because a previous repair did not complete");
 
     clearRawMongoProgramOutput();
-    let node = MongoRunner.runMongod({dbpath: dbpath, port: port, noCleanData: true, waitForConnect: false});
+    let node = MongoRunner.runMongod({
+        dbpath: dbpath,
+        port: port,
+        noCleanData: true,
+        waitForConnect: false,
+    });
     assert.soon(function () {
         return rawMongoProgramOutput("Fatal assertion").search(/50922/) >= 0;
     });
@@ -172,8 +195,19 @@ export let assertStartAndStopStandaloneOnExistingDbpath = function (dbpath, port
  *
  * Returns the started node.
  */
-export let assertStartInReplSet = function (replSet, originalNode, cleanData, expectResync, testFunc) {
-    jsTestLog("The node should rejoin the replica set. Clean data: " + cleanData + ". Expect resync: " + expectResync);
+export let assertStartInReplSet = function (
+    replSet,
+    originalNode,
+    cleanData,
+    expectResync,
+    testFunc,
+) {
+    jsTestLog(
+        "The node should rejoin the replica set. Clean data: " +
+            cleanData +
+            ". Expect resync: " +
+            expectResync,
+    );
     // Skip clearing initial sync progress after a successful initial sync attempt so that we
     // can check initialSyncStatus fields after initial sync is complete.
     let node = replSet.start(originalNode, {
@@ -194,7 +228,9 @@ export let assertStartInReplSet = function (replSet, originalNode, cleanData, ex
         assert.eq(undefined, res.initialSyncStatus);
     }
 
-    assert.commandWorked(node.adminCommand({configureFailPoint: "skipClearInitialSyncState", mode: "off"}));
+    assert.commandWorked(
+        node.adminCommand({configureFailPoint: "skipClearInitialSyncState", mode: "off"}),
+    );
 
     testFunc(node);
     return node;
@@ -203,7 +239,12 @@ export let assertStartInReplSet = function (replSet, originalNode, cleanData, ex
 /**
  * Assert that mongo crashes on startup when files are missing or corrupt.
  */
-export let assertErrorOnStartupWhenFilesAreCorruptOrMissing = function (dbpath, dbName, collName, deleteOrCorruptFunc) {
+export let assertErrorOnStartupWhenFilesAreCorruptOrMissing = function (
+    dbpath,
+    dbName,
+    collName,
+    deleteOrCorruptFunc,
+) {
     // Start a MongoDB instance, create the collection file.
     const mongod = MongoRunner.runMongod({dbpath: dbpath, cleanData: true});
     const testColl = mongod.getDB(dbName)[collName];
@@ -214,7 +255,10 @@ export let assertErrorOnStartupWhenFilesAreCorruptOrMissing = function (dbpath, 
     deleteOrCorruptFunc(mongod, testColl);
 
     // Restart the MongoDB instance and get the abrupt exit code (14).
-    assert.eq(MongoRunner.EXIT_ABRUPT, runMongoProgram("mongod", "--port", mongod.port, "--dbpath", dbpath));
+    assert.eq(
+        MongoRunner.EXIT_ABRUPT,
+        runMongoProgram("mongod", "--port", mongod.port, "--dbpath", dbpath),
+    );
 };
 
 /**
@@ -325,7 +369,10 @@ export let insertDocDuplicateFieldName = function (coll, uri, conn, numDocs) {
         // Each record takes two lines with a key and a value. We will only modify the values.
         for (let i = wtHeaderLines; i < lines.length; i += 2) {
             // Switch the field name 'b' to 'a' to create a duplicate field name.
-            lines[i] = lines[i].substring(0, offsetToFieldB) + "1" + lines[i].substring(offsetToFieldB + 1);
+            lines[i] =
+                lines[i].substring(0, offsetToFieldB) +
+                "1" +
+                lines[i].substring(offsetToFieldB + 1);
         }
     };
     rewriteTable(uri, conn, makeDuplicateFieldNames);
@@ -341,7 +388,10 @@ export let insertDocSymbolField = function (coll, uri, conn, numDocs) {
         // Each record takes two lines with a key and a value. We will only modify the values.
         for (let i = wtHeaderLines; i < lines.length; i += 2) {
             // Switch the field type from string to symbol.
-            lines[i] = lines[i].substring(0, offsetToFieldAType) + "e" + lines[i].substring(offsetToFieldAType + 1);
+            lines[i] =
+                lines[i].substring(0, offsetToFieldAType) +
+                "e" +
+                lines[i].substring(offsetToFieldAType + 1);
         }
     };
     rewriteTable(uri, conn, makeSymbolField);
@@ -359,7 +409,10 @@ export let insertNonSequentialArrayIndexes = function (coll, uri, conn, numDocs)
         const offsetToNestedIndex0 = 179;
         // Each record takes two lines with a key and a value. We will only modify the values.
         for (let i = wtHeaderLines; i < lines.length; i += 2) {
-            lines[i] = lines[i].substring(0, offsetToNestedIndex0) + "4" + lines[i].substring(offsetToNestedIndex0 + 1);
+            lines[i] =
+                lines[i].substring(0, offsetToNestedIndex0) +
+                "4" +
+                lines[i].substring(offsetToNestedIndex0 + 1);
         }
     };
     rewriteTable(uri, conn, makeNonSequentialIndexes);
@@ -415,7 +468,10 @@ export let insertInvalidUTF8 = function (coll, uri, conn, numDocs) {
         const offsetToString = 76;
         // Each record takes two lines with a key and a value. We will only modify the values.
         for (let i = wtHeaderLines; i < lines.length; i += 2) {
-            lines[i] = lines[i].substring(0, offsetToString) + "8" + lines[i].substring(offsetToString + 1);
+            lines[i] =
+                lines[i].substring(0, offsetToString) +
+                "8" +
+                lines[i].substring(offsetToString + 1);
         }
     };
     rewriteTable(uri, conn, makeInvalidUTF8);
@@ -463,12 +519,59 @@ export let rewriteCatalogTable = function (conn, modifyCatalogEntry) {
 };
 
 /**
+ * Like 'rewriteCatalogTable', but invokes 'modifyHexLine' with the raw hex encoding of each catalog
+ * entry, and writes back whatever it returns. Use this instead of 'rewriteCatalogTable' when the
+ * modification cannot round-trip through BSON in the shell, such as writing bytes that are not
+ * valid UTF-8: the shell re-encodes JS strings as well-formed UTF-8, so assigning them to a field
+ * silently loses the invalid bytes.
+ */
+export let rewriteCatalogTableHex = function (conn, modifyHexLine) {
+    const uri = "_mdb_catalog";
+    const fullURI = "table:" + uri;
+
+    const separator = _isWindows() ? "\\" : "/";
+    const tempDumpFile = conn.dbpath + separator + "temp_dump";
+    const newTableFile = conn.dbpath + separator + "new_table_file" + count++;
+    runWiredTigerTool(
+        "-h",
+        conn.dbpath,
+        "-r",
+        "-C",
+        "log=(compressor=snappy,path=journal)",
+        "dump",
+        "-x",
+        "-f",
+        tempDumpFile,
+        fullURI,
+    );
+
+    let lines = cat(tempDumpFile).split("\n");
+
+    // Each record takes two lines with a key and a value. We will only modify the values.
+    for (let i = wtHeaderLines; i < lines.length; i += 2) {
+        lines[i] = modifyHexLine(lines[i]);
+    }
+
+    writeFile(newTableFile, lines.join("\n"));
+
+    runWiredTigerTool("-h", conn.dbpath, "alter", fullURI, "write_timestamp_usage=never");
+    runWiredTigerTool("-h", conn.dbpath, "load", "-f", newTableFile, "-r", uri);
+    runWiredTigerTool("-h", conn.dbpath, "alter", fullURI, "write_timestamp_usage=none");
+};
+
+/**
  * Extracts KV record lines from a WiredTiger dump output.
  */
 export function wtExtractRecordsFromDump(lines) {
     const start = lines.findIndex((l) => l.trim() === "Data");
     if (start < 0) return [];
-    return lines.slice(start + 1).filter((l) => l.trim() !== "");
+    const records = lines.slice(start + 1);
+    // A zero-length value dumps as a blank line, so interior blanks count as data. Only the final
+    // element is noise: it comes from splitting on the dump file's trailing newline.
+    if (records.length > 0 && records[records.length - 1] === "") {
+        records.pop();
+    }
+    return records;
 }
 
 /**
@@ -484,7 +587,9 @@ export function dumpWtTable(ident, dbpath, dumpType = "hex") {
     });
     const flags = DUMP_FLAGS[dumpType];
     if (!flags) {
-        throw new Error(`Invalid dumpType: ${dumpType}. Use one of: ${Object.keys(DUMP_FLAGS).join(", ")}`);
+        throw new Error(
+            `Invalid dumpType: ${dumpType}. Use one of: ${Object.keys(DUMP_FLAGS).join(", ")}`,
+        );
     }
 
     const sep = _isWindows() ? "\\" : "/";

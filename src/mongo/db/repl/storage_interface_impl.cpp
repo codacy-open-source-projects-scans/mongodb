@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/repl/storage_interface_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -66,6 +39,7 @@
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
+#include "mongo/db/repl/clean_shutdown_gen.h"
 #include "mongo/db/repl/collection_bulk_loader_impl.h"
 #include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/oplog.h"
@@ -107,6 +81,7 @@
 
 #include <limits>
 #include <mutex>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -128,6 +103,15 @@ namespace {
 using UniqueLock = std::unique_lock<std::mutex>;
 
 const auto kIdIndexName = IndexConstants::kIdIndexName;
+
+// Clean shutdowns are rare and each document in this collection is well under 50 bytes, so 1MB
+// should still retain significant history.
+const long long kCleanShutdownCollectionSizeBytes = 1 * 1024 * 1024;
+
+// The _id of the sentinel document that keeps the collection from ever being empty. It sits one
+// below the first real clean shutdown's _id of 0, so readers see it as "no clean shutdown
+// recorded".
+const long long kCleanShutdownSentinelId = -1;
 
 }  // namespace
 
@@ -213,6 +197,98 @@ StatusWith<int> StorageInterfaceImpl::incrementRollbackID(OperationContext* opCt
         return newRBID;
     }
     return status;
+}
+
+Status StorageInterfaceImpl::initializeCleanShutdownCollection(OperationContext* opCtx) {
+    CollectionOptions options;
+    options.capped = true;
+    options.cappedSize = kCleanShutdownCollectionSizeBytes;
+
+    // This runs on every startup, so NamespaceExists is the ordinary case rather than a failure.
+    // Any other error means we do not have a collection to work with, so there is nothing to seed.
+    auto status = createCollection(opCtx, NamespaceString::kCleanShutdownLogNamespace, options);
+    if (!status.isOK() && status != ErrorCodes::NamespaceExists) {
+        return status;
+    }
+
+    // Seed the collection with a sentinel so that it is never both present and empty. That keeps
+    // "has never cleanly shut down" distinct from "does not record clean shutdowns at all": the
+    // former reports the sentinel, the latter has no collection and so reports nothing. The
+    // sentinel's _id is one below that of the first real shutdown, so it reads as exactly the
+    // absence of one and needs no special handling anywhere else.
+    auto lastDoc = getLastCleanShutdownDocument(opCtx);
+    if (!lastDoc.isOK()) {
+        return lastDoc.getStatus();
+    }
+    if (lastDoc.getValue()) {
+        return Status::OK();
+    }
+
+    CleanShutdownDocument sentinel;
+    sentinel.setId(kCleanShutdownSentinelId);
+    sentinel.setCleanShutdownLastCheckpointTimestamp(Timestamp());
+
+    BSONObjBuilder bob;
+    sentinel.serialize(&bob);
+    Timestamp noTimestamp;  // This write is not replicated.
+    return insertDocument(opCtx,
+                          NamespaceString::kCleanShutdownLogNamespace,
+                          TimestampedBSONObj{bob.done(), noTimestamp},
+                          OpTime::kUninitializedTerm);
+}
+
+StatusWith<boost::optional<CleanShutdownDocument>>
+StorageInterfaceImpl::getLastCleanShutdownDocument(OperationContext* opCtx) {
+    try {
+        // Documents are only ever appended, so the last one in natural order is the one with the
+        // highest _id.
+        auto docs = findDocuments(opCtx,
+                                  NamespaceString::kCleanShutdownLogNamespace,
+                                  boost::none,  // Collection scan.
+                                  ScanDirection::kBackward,
+                                  BSONObj(),
+                                  BoundInclusion::kIncludeStartKeyOnly,
+                                  1U);
+        if (!docs.isOK()) {
+            return docs.getStatus();
+        }
+        if (docs.getValue().empty()) {
+            return {boost::none};
+        }
+
+        return boost::make_optional(CleanShutdownDocument::parse(
+            docs.getValue().front(), IDLParserContext("CleanShutdownDocument")));
+    } catch (const DBException&) {
+        return exceptionToStatus();
+    }
+}
+
+Status StorageInterfaceImpl::recordCleanShutdown(OperationContext* opCtx,
+                                                 Timestamp lastCheckpointTs) {
+    auto lastDoc = getLastCleanShutdownDocument(opCtx);
+    if (!lastDoc.isOK()) {
+        return lastDoc.getStatus();
+    }
+
+    CleanShutdownDocument doc;
+    doc.setId(lastDoc.getValue() ? lastDoc.getValue()->getId() + 1 : 0);
+    doc.setCleanShutdownLastCheckpointTimestamp(lastCheckpointTs);
+
+    BSONObjBuilder bob;
+    doc.serialize(&bob);
+    Timestamp noTimestamp;  // This write is not replicated.
+    auto status = insertDocument(opCtx,
+                                 NamespaceString::kCleanShutdownLogNamespace,
+                                 TimestampedBSONObj{bob.done(), noTimestamp},
+                                 OpTime::kUninitializedTerm);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    // We wait until durable because a node that restarts must have this document on disk before it
+    // accepts connections again.
+    JournalFlusher::get(opCtx)->waitForJournalFlush();
+    return Status::OK();
 }
 
 StatusWith<std::unique_ptr<CollectionBulkLoader>>
@@ -687,7 +763,7 @@ enum class FindDeleteMode { kFind, kDelete };
 StatusWith<std::vector<BSONObj>> _findOrDeleteDocuments(
     OperationContext* opCtx,
     const NamespaceStringOrUUID& nsOrUUID,
-    boost::optional<StringData> indexName,
+    boost::optional<std::string_view> indexName,
     StorageInterface::ScanDirection scanDirection,
     const BSONObj& startKey,
     const BSONObj& endKey,
@@ -918,7 +994,7 @@ StatusWith<BSONObj> _findOrDeleteById(OperationContext* opCtx,
 StatusWith<std::vector<BSONObj>> StorageInterfaceImpl::findDocuments(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    boost::optional<StringData> indexName,
+    boost::optional<std::string_view> indexName,
     ScanDirection scanDirection,
     const BSONObj& startKey,
     BoundInclusion boundInclusion,
@@ -937,7 +1013,7 @@ StatusWith<std::vector<BSONObj>> StorageInterfaceImpl::findDocuments(
 StatusWith<std::vector<BSONObj>> StorageInterfaceImpl::deleteDocuments(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    boost::optional<StringData> indexName,
+    boost::optional<std::string_view> indexName,
     ScanDirection scanDirection,
     const BSONObj& startKey,
     BoundInclusion boundInclusion,
@@ -1554,7 +1630,7 @@ Timestamp StorageInterfaceImpl::recoverToStableTimestamp(OperationContext* opCtx
         serviceContext->getStorageEngine()->dump();
     }
     fassert(31049, swStableTimestamp);
-    catalog::openCatalog(opCtx, state, swStableTimestamp.getValue());
+    catalog::openCatalogAfterRollbackToStable(opCtx, state, swStableTimestamp.getValue());
     DurableHistoryRegistry::get(opCtx)->reconcilePins(opCtx);
     serviceContext->getStorageEngine()->restartTimestampMonitor();
 

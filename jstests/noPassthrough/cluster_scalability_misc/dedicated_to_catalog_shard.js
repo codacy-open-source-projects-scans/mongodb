@@ -15,13 +15,12 @@ const collName = "bar";
 const ns = dbName + "." + collName;
 
 function flushRoutingAndDBCacheUpdates(conn) {
-    if (!FeatureFlagUtil.isPresentAndEnabled(conn, "ShardAuthoritativeDbMetadataCRUD")) {
+    if (!FeatureFlagUtil.isPresentAndEnabled(conn, "AuthoritativeShardsCRUD")) {
         assert.commandWorked(conn.adminCommand({_flushDatabaseCacheUpdates: dbName}));
         assert.commandWorked(conn.adminCommand({_flushDatabaseCacheUpdates: "notRealDB"}));
+        assert.commandWorked(conn.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+        assert.commandWorked(conn.adminCommand({_flushRoutingTableCacheUpdates: "does.not.exist"}));
     }
-
-    assert.commandWorked(conn.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-    assert.commandWorked(conn.adminCommand({_flushRoutingTableCacheUpdates: "does.not.exist"}));
 }
 
 const st = new ShardingTest({

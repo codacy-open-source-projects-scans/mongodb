@@ -2,6 +2,9 @@
  * Test the behavior of aggregation containing $out with a concurrent DDL operation. When concurrent
  * DDL operation happens, the observed behavior should either be $out failing, or the same result as
  * if the 2 operations were not interleaved.
+ *
+ * @tags: [
+ * ]
  */
 
 import {waitForCurOpByFailPointNoNS} from "jstests/libs/curop_helpers.js";
@@ -169,34 +172,47 @@ function assertSerializedOrError({desc, failpointName, setupFn, ddlFn, ignorePla
     return aggRes;
 }
 
+// TODO SERVER-132284: Placement under concurrent moveCollection is racy ($out freezes
+// the temp shard at createTemporaryCollection()). We accept that for now and only
+// assert document correctness via ignorePlacement: true.
 assert.commandWorked(
     assertSerializedOrError({
         desc: "Concurrent $out and moveCollection on target",
         failpointName: "hangWhileBuildingDocumentSourceOutBatch",
+        ignorePlacement: true, // TODO SERVER-132284
         setupFn() {
             setup();
-            st.s.adminCommand({enableSharding: targetDB.getName(), primaryShard: st.shard1.shardName});
+            st.s.adminCommand({
+                enableSharding: targetDB.getName(),
+                primaryShard: st.shard1.shardName,
+            });
             targetColl.insertOne({val: "should get overwritten"});
         },
         ddlFn() {
             assert.commandWorked(
-                st.s.adminCommand({moveCollection: targetColl.getFullName(), toShard: st.shard2.shardName}),
+                st.s.adminCommand({
+                    moveCollection: targetColl.getFullName(),
+                    toShard: st.shard2.shardName,
+                }),
             );
         },
     }),
 );
 
-assert.commandWorked(
+assert.commandFailed(
     assertSerializedOrError({
         desc: "Concurrent $out and drop target collection",
         failpointName: "hangWhileBuildingDocumentSourceOutBatch",
         setupFn() {
             setup();
-            st.s.adminCommand({enableSharding: targetDB.getName(), primaryShard: st.shard1.shardName});
+            st.s.adminCommand({
+                enableSharding: targetDB.getName(),
+                primaryShard: st.shard1.shardName,
+            });
             targetColl.insertOne({val: "should get overwritten"});
         },
         ddlFn() {
-            assert(sourceColl.drop());
+            assert(targetColl.drop());
         },
     }),
 );
@@ -205,7 +221,10 @@ for (const targetDBExists of [true, false]) {
     const targetDBDesc = ` and targetDB does${targetDBExists ? " " : " not "}exist`;
     const maybeCreateTargetDB = () => {
         if (targetDBExists) {
-            st.s.adminCommand({enableSharding: targetDB.getName(), primaryShard: st.shard1.shardName});
+            st.s.adminCommand({
+                enableSharding: targetDB.getName(),
+                primaryShard: st.shard1.shardName,
+            });
         }
     };
 
@@ -230,7 +249,10 @@ for (const targetDBExists of [true, false]) {
             },
             ddlFn() {
                 assert.commandWorked(
-                    st.s.adminCommand({moveCollection: sourceColl.getFullName(), toShard: st.shard2.shardName}),
+                    st.s.adminCommand({
+                        moveCollection: sourceColl.getFullName(),
+                        toShard: st.shard2.shardName,
+                    }),
                 );
             },
         }),
@@ -335,7 +357,10 @@ for (const targetDBExists of [true, false]) {
             failpointName: "hangWhileBuildingDocumentSourceOutBatch",
             setupFn() {
                 setup();
-                st.s.adminCommand({moveCollection: sourceColl.getFullName(), toShard: st.shard0.shardName});
+                st.s.adminCommand({
+                    moveCollection: sourceColl.getFullName(),
+                    toShard: st.shard0.shardName,
+                });
                 maybeCreateTargetDB();
             },
             ddlFn() {

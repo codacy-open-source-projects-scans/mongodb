@@ -66,7 +66,10 @@ export function joinPlanToString(stage, indent = 0) {
         return result;
     }
 
-    let filter = stage.filter && Object.keys(stage.filter).length > 0 ? JSON.stringify(stage.filter) + " " : "";
+    let filter =
+        stage.filter && Object.keys(stage.filter).length > 0
+            ? JSON.stringify(stage.filter) + " "
+            : "";
 
     switch (stage.stage) {
         case "HASH_JOIN_EMBEDDING":
@@ -105,6 +108,9 @@ export function joinPlanToString(stage, indent = 0) {
             result += indentString(indent + 1) + "-> ";
             result += joinPlanToString(stage.inputStages[1], indent + 2);
             break;
+        case "EOF":
+            result += "EOF\n";
+            break;
         default:
             throw new Error(`Unknown stage: ${stage.stage} ${tojson(stage)}`);
     }
@@ -129,7 +135,9 @@ export function jsonifyMultilineString(str) {
 
     // Wrap each line in quotes and separate with commas, with no trailing comma
     return lines
-        .map((line, i) => (i === lines.length - 1 ? JSON.stringify(line) : JSON.stringify(line) + ","))
+        .map((line, i) =>
+            i === lines.length - 1 ? JSON.stringify(line) : JSON.stringify(line) + ",",
+        )
         .join("\n");
 }
 
@@ -149,7 +157,14 @@ export function newlineBeforeEachStage(str) {
  * query plan on a single line.
  */
 export function trimPlanToStagesAndIndexes(obj) {
-    const fieldsToKeep = ["stage", "inputStage", "inputStages", "indexName", "indexBounds", "filter"];
+    const fieldsToKeep = [
+        "stage",
+        "inputStage",
+        "inputStages",
+        "indexName",
+        "indexBounds",
+        "filter",
+    ];
 
     if (typeof obj !== "object" || obj === null) {
         return obj;

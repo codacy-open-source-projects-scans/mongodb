@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,7 +9,7 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/modules.h"
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
 namespace service_context_test {
@@ -64,7 +38,7 @@ inline ClusterRole getClusterRole(ServerRoleIndex i) {
  * is often a virtual base and those run before all non-virtual bases.
  */
 template <ServerRoleIndex roleIndex>
-class MONGO_MOD_OPEN RoleOverride {
+class [[MONGO_MOD_OPEN]] RoleOverride {
 public:
     ~RoleOverride() {
         serverGlobalParams.clusterRole = _saved;
@@ -74,9 +48,9 @@ private:
     ClusterRole _saved{std::exchange(serverGlobalParams.clusterRole, getClusterRole(roleIndex))};
 };
 
-using ReplicaSetRoleOverride MONGO_MOD_OPEN = RoleOverride<ServerRoleIndex::replicaSet>;
-using ShardRoleOverride MONGO_MOD_OPEN = RoleOverride<ServerRoleIndex::shard>;
-using RouterRoleOverride MONGO_MOD_OPEN = RoleOverride<ServerRoleIndex::router>;
+using ReplicaSetRoleOverride [[MONGO_MOD_OPEN]] = RoleOverride<ServerRoleIndex::replicaSet>;
+using ShardRoleOverride [[MONGO_MOD_OPEN]] = RoleOverride<ServerRoleIndex::shard>;
+using RouterRoleOverride [[MONGO_MOD_OPEN]] = RoleOverride<ServerRoleIndex::router>;
 
 /**
  * A hook for the ServiceContextTest that is used configure whether or not an egress-only
@@ -104,7 +78,7 @@ struct ServiceContextTestHook {
  * This class will either use the default value of shouldSetupTL or the value set by another object
  * that virtually inherites from ServiceContextTestHook (see example in ServiceContextTestHook).
  */
-class MONGO_MOD_OPEN WithoutSetupTransportLayer : public virtual ServiceContextTestHook {};
+class [[MONGO_MOD_OPEN]] WithoutSetupTransportLayer : public virtual ServiceContextTestHook {};
 
 /**
  * Configures a ServiceContextTest to setup a TransportLayer to be stored on the ServiceContext. It
@@ -112,14 +86,14 @@ class MONGO_MOD_OPEN WithoutSetupTransportLayer : public virtual ServiceContextT
  * value is set up before the ServiceContextTest constructor. It must precede ServiceContextTest (or
  * any of its derived classes) in the base class list.
  */
-class MONGO_MOD_OPEN WithSetupTransportLayer : virtual ServiceContextTestHook {
+class [[MONGO_MOD_OPEN]] WithSetupTransportLayer : virtual ServiceContextTestHook {
 public:
     WithSetupTransportLayer() {
         shouldSetupTL = true;
     }
 };
 
-class MONGO_MOD_OPEN ScopedGlobalServiceContextForTest {
+class [[MONGO_MOD_OPEN]] ScopedGlobalServiceContextForTest {
 public:
     ScopedGlobalServiceContextForTest();
     explicit ScopedGlobalServiceContextForTest(bool shouldSetupTL);
@@ -142,7 +116,8 @@ public:
  * that need to use a TransportLayer for egress should also derive from WithSetupTransportLayer.
  * WithSetupTransportLayer must precede ServiceContextTest in the list of base classess.
  */
-class MONGO_MOD_OPEN ServiceContextTest : public WithoutSetupTransportLayer, public unittest::Test {
+class [[MONGO_MOD_OPEN]] ServiceContextTest : public WithoutSetupTransportLayer,
+                                              public unittest::Test {
 public:
     /**
      * Returns the default Client for this test.
@@ -184,7 +159,7 @@ private:
  * the fast and precise clock sources set to instances of ClockSourceMock and the tick source
  * set to an instance of TickSourceMock.
  */
-class MONGO_MOD_OPEN ClockSourceMockServiceContextTest : public ServiceContextTest {
+class [[MONGO_MOD_OPEN]] ClockSourceMockServiceContextTest : public ServiceContextTest {
 protected:
     ClockSourceMockServiceContextTest();
 };
@@ -194,7 +169,7 @@ protected:
  * the fast and precise clock sources set to instances of SharedClockSourceAdapter with the
  * same underlying clock source.
  */
-class MONGO_MOD_OPEN SharedClockSourceAdapterServiceContextTest : public ServiceContextTest {
+class [[MONGO_MOD_OPEN]] SharedClockSourceAdapterServiceContextTest : public ServiceContextTest {
 protected:
     explicit SharedClockSourceAdapterServiceContextTest(std::shared_ptr<ClockSource> clock);
 };

@@ -10,7 +10,11 @@
  * - Signals completion via Connector.notifyDone(instanceName).
  */
 import {Connector} from "jstests/libs/util/change_stream/change_stream_connector.js";
-import {ChangeStreamTest, ChangeStreamWatchMode, isInvalidated} from "jstests/libs/query/change_stream_util.js";
+import {
+    ChangeStreamTest,
+    ChangeStreamWatchMode,
+    isInvalidated,
+} from "jstests/libs/query/change_stream_util.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 
 /**
@@ -37,6 +41,7 @@ function tryCleanUp(cst, instanceName) {
 const ChangeStreamReadingMode = {
     kContinuous: "continuous",
     kFetchOneAndResume: "fetchOneAndResume",
+    kFetchOneAndResumeFromPbrt: "fetchOneAndResumeFromPbrt",
     kReadUntilDone: "readUntilDone",
     kFetchOneAndResumeUntilDone: "fetchOneAndResumeUntilDone",
 };
@@ -67,8 +72,12 @@ class ChangeStreamReader {
         const host = conn.host;
         const thread = new Thread(
             async function (host, config) {
-                const {ChangeStreamReader} = await import("jstests/libs/util/change_stream/change_stream_reader.js");
-                const {Connector} = await import("jstests/libs/util/change_stream/change_stream_connector.js");
+                const {ChangeStreamReader} = await import(
+                    "jstests/libs/util/change_stream/change_stream_reader.js"
+                );
+                const {Connector} = await import(
+                    "jstests/libs/util/change_stream/change_stream_connector.js"
+                );
                 const conn = new Mongo(host);
                 try {
                     ChangeStreamReader._execute(conn, config);
@@ -147,6 +156,9 @@ class ChangeStreamReader {
             case ChangeStreamReadingMode.kFetchOneAndResume:
                 ChangeStreamReader._readFetchOneAndResume(conn, config);
                 break;
+            case ChangeStreamReadingMode.kFetchOneAndResumeFromPbrt:
+                ChangeStreamReader._readFetchOneAndResume(conn, config, /*resumeFromPbrt=*/ true);
+                break;
             case ChangeStreamReadingMode.kReadUntilDone:
                 ChangeStreamReader._drainEvents(conn, config, false);
                 break;
@@ -170,7 +182,9 @@ class ChangeStreamReader {
      */
     static _openChangeStream(conn, config, resumeToken = null, useStartAfter = false) {
         const db =
-            config.watchMode === ChangeStreamWatchMode.kCluster ? conn.getDB("admin") : conn.getDB(config.dbName);
+            config.watchMode === ChangeStreamWatchMode.kCluster
+                ? conn.getDB("admin")
+                : conn.getDB(config.dbName);
 
         const cst = new ChangeStreamTest(db);
 
@@ -212,6 +226,12 @@ class ChangeStreamReader {
             pipeline.push({$match: {operationType: {$nin: config.excludeOperationTypes}}});
         }
 
+        // TODO SERVER-107688: drop leaked tmp.renameCollection events from cross-DB renames.
+        // Remove once the server marks those internal writes fromMigrate.
+        if (config.watchMode === ChangeStreamWatchMode.kCluster) {
+            pipeline.push({$match: {"ns.coll": {$not: /^tmp[A-Za-z0-9]+\.renameCollection$/}}});
+        }
+
         const cursorOptions = {};
         if (config.batchSize !== undefined) {
             cursorOptions.batchSize = config.batchSize;
@@ -219,7 +239,8 @@ class ChangeStreamReader {
 
         const watchOptions = {
             pipeline: pipeline,
-            collection: config.watchMode === ChangeStreamWatchMode.kCollection ? config.collName : 1,
+            collection:
+                config.watchMode === ChangeStreamWatchMode.kCollection ? config.collName : 1,
             aggregateOptions: {cursor: cursorOptions},
         };
 
@@ -252,7 +273,12 @@ class ChangeStreamReader {
         assert.soon(() => {
             try {
                 if (!cst || !cursor) {
-                    ({cst, cursor} = ChangeStreamReader._openChangeStream(conn, cfg, resumeToken, wasInvalidate));
+                    ({cst, cursor} = ChangeStreamReader._openChangeStream(
+                        conn,
+                        cfg,
+                        resumeToken,
+                        wasInvalidate,
+                    ));
                 }
                 // Always use skipFirst=false to check the current batch before issuing getMore.
                 // This ensures we don't miss events in firstBatch (after open) or nextBatch.
@@ -260,7 +286,10 @@ class ChangeStreamReader {
                 result = {changeEvent, cst, cursor};
                 return true;
             } catch (e) {
-                if (!TestData.enableBgMutator || !ChangeStreamReader.kFCVRetryableErrors.includes(e.code)) {
+                if (
+                    !TestData.enableBgMutator ||
+                    !ChangeStreamReader.kFCVRetryableErrors.includes(e.code)
+                ) {
                     throw e;
                 }
                 jsTest.log.debug("ChangeStreamReader FCV error, will retry", {
@@ -280,7 +309,7 @@ class ChangeStreamReader {
     /**
      * Validate and record a change event. Shared by both reading modes.
      */
-    static _processEvent(conn, cfg, changeEvent, count, readEventTypes) {
+    static _processEvent(conn, cfg, changeEvent, count, readEventTypes, extraFields = {}) {
         assert(changeEvent, `Expected change event at index ${count}, but got none`);
         assert(changeEvent._id, `Change event at index ${count} missing _id (resume token)`);
 
@@ -298,6 +327,7 @@ class ChangeStreamReader {
         Connector.writeChangeEvent(conn, cfg.instanceName, {
             changeEvent,
             cursorClosed: isInvalidate,
+            ...extraFields,
         });
 
         return isInvalidate;
@@ -317,11 +347,24 @@ class ChangeStreamReader {
         let lastWasInvalidate = false;
 
         for (let count = 0; count < cfg.numberOfEventsToRead; count++) {
-            const result = ChangeStreamReader._readOneEvent(conn, cfg, cst, cursor, lastResumeToken, lastWasInvalidate);
+            const result = ChangeStreamReader._readOneEvent(
+                conn,
+                cfg,
+                cst,
+                cursor,
+                lastResumeToken,
+                lastWasInvalidate,
+            );
             cst = result.cst;
             cursor = result.cursor;
 
-            const isInvalidate = ChangeStreamReader._processEvent(conn, cfg, result.changeEvent, count, readEventTypes);
+            const isInvalidate = ChangeStreamReader._processEvent(
+                conn,
+                cfg,
+                result.changeEvent,
+                count,
+                readEventTypes,
+            );
             lastResumeToken = result.changeEvent._id;
             lastWasInvalidate = isInvalidate;
 
@@ -332,7 +375,10 @@ class ChangeStreamReader {
             }
         }
 
-        jsTest.log.debug("ChangeStreamReader Read events", {instanceName: cfg.instanceName, readEventTypes});
+        jsTest.log.debug("ChangeStreamReader Read events", {
+            instanceName: cfg.instanceName,
+            readEventTypes,
+        });
         tryCleanUp(cst, cfg.instanceName);
     }
 
@@ -346,7 +392,10 @@ class ChangeStreamReader {
      * @private
      */
     static _drainEvents(conn, cfg, reopenPerEvent) {
-        jsTest.log.debug(`ChangeStreamReader Starting drain (reopenPerEvent=${reopenPerEvent})`, cfg);
+        jsTest.log.debug(
+            `ChangeStreamReader Starting drain (reopenPerEvent=${reopenPerEvent})`,
+            cfg,
+        );
 
         let lastResumeToken = null;
         const readEventTypes = [];
@@ -355,49 +404,135 @@ class ChangeStreamReader {
         let {cst, cursor} = ChangeStreamReader._openChangeStream(conn, cfg, null, false);
 
         while (true) {
-            cursor = cst.getNextBatch(cursor);
-            const batch = cursor.nextBatch || [];
-            if (batch.length === 0) {
+            const event = ChangeStreamReader._tryGetNextEvent(cst, cursor);
+            if (event === null) {
                 break;
             }
 
-            const event = batch[0];
-            const isInvalidate = ChangeStreamReader._processEvent(conn, cfg, event, count++, readEventTypes);
+            const isInvalidate = ChangeStreamReader._processEvent(
+                conn,
+                cfg,
+                event,
+                count++,
+                readEventTypes,
+            );
             lastResumeToken = event._id;
 
             if (reopenPerEvent || isInvalidate) {
                 tryCleanUp(cst, cfg.instanceName);
-                ({cst, cursor} = ChangeStreamReader._openChangeStream(conn, cfg, lastResumeToken, isInvalidate));
+                ({cst, cursor} = ChangeStreamReader._openChangeStream(
+                    conn,
+                    cfg,
+                    lastResumeToken,
+                    isInvalidate,
+                ));
             }
         }
 
         tryCleanUp(cst, cfg.instanceName);
-        jsTest.log.debug("ChangeStreamReader Read events", {instanceName: cfg.instanceName, readEventTypes});
+        jsTest.log.debug("ChangeStreamReader Read events", {
+            instanceName: cfg.instanceName,
+            readEventTypes,
+        });
     }
 
     /**
      * Read events one at a time, closing and reopening the cursor after each event.
      * Uses resumeAfter with the previous event's token.
      * After an invalidate, uses startAfter to reopen the cursor.
+     *
+     * '_readOneEvent' blocks until an event arrives, so it never sees an empty batch and can
+     * only resume from an event token. With 'resumeFromPbrt' the cursor is kept open for up to
+     * kMaxPbrtGetMores more getMores; the first empty batch yields a postBatchResumeToken,
+     * which is then used to resume, as drivers do on an idle stream.
+     *
      * @private
      */
-    static _readFetchOneAndResume(conn, cfg) {
-        jsTest.log.debug("ChangeStreamReader Starting fetch-one-and-resume", cfg);
+    static _readFetchOneAndResume(conn, cfg, resumeFromPbrt = false) {
+        jsTest.log.debug(
+            `ChangeStreamReader Starting fetch-one-and-resume (resumeFromPbrt=${resumeFromPbrt})`,
+            cfg,
+        );
         let resumeToken = null;
         let useStartAfter = false;
+        // null, "eventToken" or "pbrt": how the current cursor was opened.
+        let resumedFrom = null;
         const readEventTypes = [];
+        const resumeStats = {pbrt: 0, eventToken: 0};
 
-        for (let count = 0; count < cfg.numberOfEventsToRead; count++) {
-            const result = ChangeStreamReader._readOneEvent(conn, cfg, null, null, resumeToken, useStartAfter);
+        let count = 0;
+        while (count < cfg.numberOfEventsToRead) {
+            const {changeEvent, cst, cursor} = ChangeStreamReader._readOneEvent(
+                conn,
+                cfg,
+                null,
+                null,
+                resumeToken,
+                useStartAfter,
+            );
+            let isInvalidate = ChangeStreamReader._processEvent(
+                conn,
+                cfg,
+                changeEvent,
+                count++,
+                readEventTypes,
+                {resumedFrom},
+            );
+            resumeToken = changeEvent._id;
+            resumedFrom = "eventToken";
 
-            const isInvalidate = ChangeStreamReader._processEvent(conn, cfg, result.changeEvent, count, readEventTypes);
-            resumeToken = result.changeEvent._id;
+            // An invalidate closes the cursor, so there is nothing left to poll.
+            if (resumeFromPbrt && !isInvalidate) {
+                for (
+                    let i = 0;
+                    i < ChangeStreamReader.kMaxPbrtGetMores && count < cfg.numberOfEventsToRead;
+                    i++
+                ) {
+                    const event = ChangeStreamReader._tryGetNextEvent(cst, cursor);
+                    if (event === null) {
+                        resumeToken = cst.getResumeToken(cursor);
+                        resumedFrom = "pbrt";
+                        break;
+                    }
+                    isInvalidate = ChangeStreamReader._processEvent(
+                        conn,
+                        cfg,
+                        event,
+                        count++,
+                        readEventTypes,
+                    );
+                    resumeToken = event._id;
+                    if (isInvalidate) {
+                        break;
+                    }
+                }
+            }
+            resumeStats[resumedFrom]++;
             useStartAfter = isInvalidate;
 
-            tryCleanUp(result.cst, cfg.instanceName);
+            tryCleanUp(cst, cfg.instanceName);
         }
 
-        jsTest.log.debug("ChangeStreamReader Read events", {instanceName: cfg.instanceName, readEventTypes});
+        jsTest.log.info("ChangeStreamReader Read events", {
+            instanceName: cfg.instanceName,
+            resumeStats,
+            readEventTypes,
+        });
+    }
+
+    /** Max getMores per cursor when looking for an empty batch (see resumeFromPbrt). */
+    static kMaxPbrtGetMores = 3;
+
+    /**
+     * Issues one getMore (batchSize 1) and returns the event, or null on an empty batch.
+     * Does not block or retry. The cursor is updated in place.
+     * @private
+     */
+    static _tryGetNextEvent(cst, cursor) {
+        cst.getNextBatch(cursor);
+        const batch = cursor.nextBatch || [];
+        assert.lte(batch.length, 1, "expected at most one event per batch", {batch});
+        return batch.length === 0 ? null : batch[0];
     }
 }
 

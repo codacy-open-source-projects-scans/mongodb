@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes_util.h"
@@ -49,6 +22,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include <vm/PosixNSPR.h>
 
@@ -167,11 +141,13 @@ public:
     JSRegEx getRegEx(const char* field) override;
 
     void setNumber(const char* field, double val) override;
-    void setString(const char* field, StringData val) override;
+    void setString(const char* field, std::string_view val) override;
     void setBoolean(const char* field, bool val) override;
     void setElement(const char* field, const BSONElement& e, const BSONObj& parent) override;
     void setObject(const char* field, const BSONObj& obj, bool readOnly) override;
     void setFunction(const char* field, const char* code) override;
+
+    void deleteGlobal(std::string_view name) override;
 
     int type(const char* field) override;
 
@@ -185,7 +161,7 @@ public:
                bool readOnlyArgs = false,
                bool readOnlyRecv = false) override;
 
-    bool exec(StringData code,
+    bool exec(std::string_view code,
               const std::string& name,
               bool printResult,
               bool reportError,

@@ -11,7 +11,7 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
-import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_file_export_helpers.js";
+import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_metrics_file_export_helpers.js";
 import {waitForIndexStatusMetrics} from "jstests/noPassthrough/index_builds/libs/index_build_otel_utils.js";
 
 function killBeforeVoteCommitSucceeds(rst, metricsDir) {
@@ -26,7 +26,8 @@ function killBeforeVoteCommitSucceeds(rst, metricsDir) {
 
     let serverStatus = primaryDB.serverStatus();
     const tookActionCountBefore = serverStatus.metrics.diskSpaceMonitor.tookAction;
-    const killedDueToInsufficientDiskSpaceBefore = serverStatus.indexBuilds.killedDueToInsufficientDiskSpace;
+    const killedDueToInsufficientDiskSpaceBefore =
+        serverStatus.indexBuilds.killedDueToInsufficientDiskSpace;
     const baselineStart = new Date();
     const baselineMetrics = waitForIndexStatusMetrics(
         metricsDir,
@@ -36,9 +37,13 @@ function killBeforeVoteCommitSucceeds(rst, metricsDir) {
     );
 
     jsTestLog("Waiting for index build to start");
-    const createIdx = IndexBuildTest.startIndexBuild(primary, primaryColl.getFullName(), {a: 1}, null, [
-        ErrorCodes.OutOfDiskSpace,
-    ]);
+    const createIdx = IndexBuildTest.startIndexBuild(
+        primary,
+        primaryColl.getFullName(),
+        {a: 1},
+        null,
+        [ErrorCodes.OutOfDiskSpace],
+    );
     IndexBuildTest.waitForIndexBuildToStart(primaryDB, primaryColl.getName(), "a_1");
 
     // Ensure the index build is in an abortable state before the DiskSpaceMonitor runs.
@@ -46,7 +51,9 @@ function killBeforeVoteCommitSucceeds(rst, metricsDir) {
 
     // Default indexBuildMinAvailableDiskSpaceMB is 500 MB.
     // Simulate a remaining disk space of 450MB.
-    const simulateDiskSpaceFp = configureFailPoint(primaryDB, "simulateAvailableDiskSpace", {bytes: 450 * 1024 * 1024});
+    const simulateDiskSpaceFp = configureFailPoint(primaryDB, "simulateAvailableDiskSpace", {
+        bytes: 450 * 1024 * 1024,
+    });
 
     jsTestLog("Waiting for the disk space monitor to take action");
     assert.soon(() => {
@@ -96,11 +103,15 @@ function killAfterVoteCommitFails(rst, metricsDir) {
     primaryColl.drop();
     assert.commandWorked(primaryColl.insert({a: 1}));
 
-    const hangAfterVoteCommit = configureFailPoint(primaryDB, "hangIndexBuildAfterSignalPrimaryForCommitReadiness");
+    const hangAfterVoteCommit = configureFailPoint(
+        primaryDB,
+        "hangIndexBuildAfterSignalPrimaryForCommitReadiness",
+    );
 
     let serverStatus = primaryDB.serverStatus();
     const tookActionCountBefore = serverStatus.metrics.diskSpaceMonitor.tookAction;
-    const killedDueToInsufficientDiskSpaceBefore = serverStatus.indexBuilds.killedDueToInsufficientDiskSpace;
+    const killedDueToInsufficientDiskSpaceBefore =
+        serverStatus.indexBuilds.killedDueToInsufficientDiskSpace;
     const baselineStart = new Date();
     const baselineMetrics = waitForIndexStatusMetrics(
         metricsDir,
@@ -118,7 +129,9 @@ function killAfterVoteCommitFails(rst, metricsDir) {
 
     // Default indexBuildMinAvailableDiskSpaceMB is 500 MB.
     // Simulate a remaining disk space of 450MB.
-    const simulateDiskSpaceFp = configureFailPoint(primaryDB, "simulateAvailableDiskSpace", {bytes: 450 * 1024 * 1024});
+    const simulateDiskSpaceFp = configureFailPoint(primaryDB, "simulateAvailableDiskSpace", {
+        bytes: 450 * 1024 * 1024,
+    });
 
     jsTestLog("Waiting for the disk space monitor to take action");
     assert.soon(() => {

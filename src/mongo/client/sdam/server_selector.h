@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
@@ -68,6 +42,8 @@ public:
     void filterTags(std::vector<ServerDescriptionPtr>* servers, const TagSet& tagSet);
 
 private:
+    static PseudoRandom& _random();
+
     void _getCandidateServers(std::vector<ServerDescriptionPtr>* result,
                               TopologyDescriptionPtr topologyDescription,
                               ReadPreferenceSetting effectiveCriteria,
@@ -141,8 +117,16 @@ private:
 
     bool recencyFilter(const ReadPreferenceSetting& readPref, const ServerDescriptionPtr& s);
 
-    static bool excludedHostsFilter(const std::vector<HostAndPort>& excludedHosts,
-                                    const ServerDescriptionPtr& s) {
+    // Returns true when the server is allowed to be selected. Rejects:
+    //   - servers in the caller-provided excludedHosts list (e.g. retry blocklists), and
+    //   - servers tagged as injectors (_internalProcessType: INJECTOR), which belong to a standby
+    //     cluster's replica set and are kept in the topology for replication/heartbeat
+    //     tracking but must never receive client commands.
+    static bool passesExclusionFilters(const std::vector<HostAndPort>& excludedHosts,
+                                       const ServerDescriptionPtr& s) {
+        if (s->isInjector()) {
+            return false;
+        }
         return std::find(excludedHosts.begin(), excludedHosts.end(), s->getAddress()) ==
             excludedHosts.end();
     }
@@ -155,11 +139,14 @@ private:
     using SelectionFilter = unique_function<std::function<bool(const ServerDescriptionPtr&)>(
         const ReadPreferenceSetting&, const std::vector<HostAndPort>&)>;
 
+    // Note that each replica-set filter below delegates to passesExclusionFilters(), so it will
+    // always skip injector-tagged servers. See ServerDescription::isInjector for additional
+    // details.
     const SelectionFilter secondaryFilter = [this](const ReadPreferenceSetting& readPref,
                                                    const std::vector<HostAndPort>& excludedHosts) {
         return [&](const ServerDescriptionPtr& s) {
             return (s->getType() == ServerType::kRSSecondary) && recencyFilter(readPref, s) &&
-                excludedHostsFilter(excludedHosts, s);
+                passesExclusionFilters(excludedHosts, s);
         };
     };
 
@@ -167,7 +154,7 @@ private:
                                                  const std::vector<HostAndPort>& excludedHosts) {
         return [&](const ServerDescriptionPtr& s) {
             return (s->getType() == ServerType::kRSPrimary) && recencyFilter(readPref, s) &&
-                excludedHostsFilter(excludedHosts, s);
+                passesExclusionFilters(excludedHosts, s);
         };
     };
 
@@ -176,7 +163,7 @@ private:
         return [&](const ServerDescriptionPtr& s) {
             return (s->getType() == ServerType::kRSPrimary ||
                     s->getType() == ServerType::kRSSecondary) &&
-                recencyFilter(readPref, s) && excludedHostsFilter(excludedHosts, s);
+                recencyFilter(readPref, s) && passesExclusionFilters(excludedHosts, s);
         };
     };
 
@@ -188,7 +175,6 @@ private:
     };
 
     SdamConfiguration _config;
-    static thread_local PseudoRandom _random;
 };
 
 // This is used to filter out servers based on their current latency measurements.

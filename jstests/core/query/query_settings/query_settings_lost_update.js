@@ -12,10 +12,8 @@
  *   command_not_supported_in_serverless,
  *   directly_against_shardsvrs_incompatible,
  *   uses_parallel_shell,
- *   # This test assumes 'querySettings' cluster-wide parameter is not modified outside of the test.
- *   # This is not true when running in FCV upgrade/downgrade suite, which involves 'querySettings'
- *   # migration.
- *   # TODO: SERVER-94927 Remove Feature Flag for SPM-3684.
+ *   # Query settings commands hold the FCV region while paused on the fail-point, so a concurrent
+ *   # setFCV would block the second command behind it and hang the test.
  *   cannot_run_during_upgrade_downgrade,
  *   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
  *   transitioning_replicaset_incompatible,
@@ -90,7 +88,9 @@ describe("QuerySettings", function () {
     }) {
         // Set the query settings state to one defined by 'initialConfiguration'.
         for (const {settings, representativeQuery} of initialConfiguration) {
-            assert.commandWorked(db.adminCommand({setQuerySettings: representativeQuery, settings: settings}));
+            assert.commandWorked(
+                db.adminCommand({setQuerySettings: representativeQuery, settings: settings}),
+            );
         }
 
         // Configure a fail-point to block the query settings modification command
@@ -163,7 +163,9 @@ describe("QuerySettings", function () {
                 commandToPass: qsutils.makeSetQuerySettingsCommand(
                     qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
                 ),
-                finalConfiguration: [qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2)],
+                finalConfiguration: [
+                    qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
+                ],
             });
         });
 
@@ -176,7 +178,9 @@ describe("QuerySettings", function () {
                 commandToPass: qsutils.makeSetQuerySettingsCommand(
                     qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
                 ),
-                finalConfiguration: [qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2)],
+                finalConfiguration: [
+                    qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
+                ],
             });
         });
     });
@@ -191,7 +195,9 @@ describe("QuerySettings", function () {
                 commandToPass: qsutils.makeSetQuerySettingsCommand(
                     qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
                 ),
-                finalConfiguration: [qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2)],
+                finalConfiguration: [
+                    qsutils.makeQueryShapeConfiguration(querySettingsC, queryAInstance2),
+                ],
             });
         });
 

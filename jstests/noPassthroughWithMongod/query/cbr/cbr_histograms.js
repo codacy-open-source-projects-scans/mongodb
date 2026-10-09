@@ -1,5 +1,9 @@
 /**
  * Ensure that the analyze command produces histograms which cost-based ranking is able to use.
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 
 import {getRejectedPlans, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
@@ -57,7 +61,12 @@ function assertQueryUsesHistograms({query, expectedCE}) {
 try {
     // Use histogram CE
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
     const testCases = [
         // IndexScan should use histogram
@@ -65,8 +74,10 @@ try {
         {query: {a: 90}, expectedCE: 46},
         {query: {a: {$gt: 5}}, expectedCE: 4372},
         {query: {a: {$lt: 5}}, expectedCE: 486},
-        // Check non existing value (max value in dataset: 98)
-        {query: {a: 250}, expectedCE: 0},
+        // Check non existing value (max value in dataset: 98).
+        // An approximate-source (Histogram) zero is clamped to 1 by
+        // CardinalityEstimator::clampZeroEstimates.
+        {query: {a: 250}, expectedCE: 1},
         // CollScan with sargable filter should use histogram
         {query: {b: 4}, expectedCE: 1030},
         {query: {b: {$gt: 3}}, expectedCE: 1030},
@@ -84,7 +95,7 @@ try {
         // Negations
         {query: {a: {$lt: 5, $ne: 6}}, expectedCE: 485.99},
         // not equal: (total size: 4952, max value: 98)
-        {query: {a: {$ne: -1}}, expectedCE: 4952},
+        {query: {a: {$ne: 5}}, expectedCE: 4858},
         {query: {a: {$ne: 90}}, expectedCE: 4906},
     ];
     testCases.forEach((tc) => assertQueryUsesHistograms(tc));
@@ -99,13 +110,32 @@ try {
     histogramColl.drop();
     assert.commandWorked(coll.createIndex({a: 1}));
     assert.commandWorked(
-        coll.insertMany([{a: null, b: 0}, {a: null, b: 1}, {a: null, b: 2}, {a: null, b: 3}, {b: 4}, {b: 5}, {b: 6}]),
+        coll.insertMany([
+            {a: null, b: 0},
+            {a: null, b: 1},
+            {a: null, b: 2},
+            {a: null, b: 3},
+            {b: 4},
+            {b: 5},
+            {b: 6},
+            // These won't match the predicate {b: {$lte: 6}}, to ensure that the histogram estimate
+            // will deterministically be used instead of the collection cardinality.
+            {a: null, b: 7},
+            {a: null, b: 8},
+            {a: null, b: 9},
+        ]),
     );
     assert.commandWorked(coll.runCommand({analyze: collName, key: "a", numberBuckets: 10}));
+    assert.commandWorked(coll.runCommand({analyze: collName, key: "b", numberBuckets: 10}));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
-    const explain = coll.find({a: null}).explain();
+    const explain = coll.find({a: null, b: {$lte: 6}}).explain();
     [getWinningPlanFromExplain(explain), ...getRejectedPlans(explain)].forEach((plan) => {
         assert.eq(plan.estimatesMetadata.ceSource, "Histogram", plan);
         assert.close(plan.cardinalityEstimate, 7);
@@ -129,7 +159,12 @@ try {
     assert.commandWorked(coll.createIndex({a: 1}));
     assert.commandWorked(coll.runCommand({analyze: collName, key: "a", numberBuckets: 10}));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
 
     const query = {a: {$gt: 10, $lt: 20}};
@@ -173,7 +208,12 @@ try {
     assert.commandWorked(coll.runCommand({analyze: collName, key: "a", numberBuckets: 10}));
     assert.commandWorked(coll.runCommand({analyze: collName, key: "b", numberBuckets: 10}));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "histogramCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "histogramCE",
+        }),
     );
 
     const testCases = [
@@ -182,9 +222,8 @@ try {
         {query: {a: {$gt: 20, $lt: 40}}, expectedCE: 18.8},
         {query: {a: 20, b: 20}, expectedCE: 0.1},
         {query: {a: 20, b: {$gt: 20}}, expectedCE: 0.9},
-        // TODO SERVER-100611: re-enable these tests.
-        // {query: {a: {$gt: 20}, b: 20}, expectedCE: 0.9},
-        // {query: {a: {$gt: 20}, b: {$gt: 20}}, expectedCE: 70.8},
+        {query: {a: {$gt: 20}, b: 20}, expectedCE: 0.9},
+        {query: {a: {$gt: 20}, b: {$gt: 20}}, expectedCE: 70.8},
     ];
     testCases.forEach((tc) => assertQueryUsesHistograms(tc));
 } finally {
@@ -202,14 +241,16 @@ try {
         }),
     );
     assert.commandWorked(coll.createIndex({loc: "2dsphere"}));
-    assert.commandWorked(coll.insert({t: new Date(), meta: {s: 1}, loc: {type: "Point", coordinates: [0, 0]}}));
+    assert.commandWorked(
+        coll.insert({t: new Date(), meta: {s: 1}, loc: {type: "Point", coordinates: [0, 0]}}),
+    );
 
     assert.commandWorked(
         db.adminCommand({
             setParameter: 1,
             featureFlagCostBasedRanker: true,
-            internalQueryCBRCEMode: "automaticCE",
-            automaticCEPlanRankingStrategy: "HistogramCEWithHeuristicFallback",
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "heuristicCE",
         }),
     );
 

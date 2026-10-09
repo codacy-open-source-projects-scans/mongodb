@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/initial_sync/collection_cloner.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/client/dbclient_base.h"
@@ -39,6 +12,7 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/primary_driven/enabled.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string_util.h"
 #include "mongo/db/operation_context.h"
@@ -49,13 +23,11 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/ddl/list_indexes_gen.h"
 #include "mongo/db/shard_role/shard_catalog/clustered_collection_util.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
@@ -70,6 +42,7 @@
 #include <cstdint>
 #include <list>
 #include <mutex>
+#include <string_view>
 
 #include <absl/container/node_hash_map.h>
 #include <boost/cstdint.hpp>
@@ -82,6 +55,7 @@
 
 namespace mongo {
 namespace repl {
+using namespace std::literals::string_view_literals;
 
 // Failpoint which causes initial sync to hang when it has cloned 'numDocsToClone' documents to
 // collection 'namespace'.
@@ -107,7 +81,7 @@ void waitWhileFailPointEnabled(FailPoint* failPoint,
             }
         },
         [&](const BSONObj& data) {
-            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"_sd);
+            const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"sv);
             // Only hang when cloning the specified collection, or if no collection was specified.
             return fpNss.isEmpty() || fpNss == sourceNss;
         });
@@ -124,7 +98,7 @@ CollectionCloner::CollectionCloner(const NamespaceString& sourceNss,
                                    bool recordIdsReplicated,
                                    std::shared_ptr<InitialSyncSummaryStats> summaryStats)
     : InitialSyncBaseCloner(
-          "CollectionCloner"_sd, sharedData, source, client, storageInterface, dbPool),
+          "CollectionCloner"sv, sharedData, source, client, storageInterface, dbPool),
       _sourceNss(sourceNss),
       _collectionOptions(collectionOptions),
       _recordIdsReplicated(recordIdsReplicated),
@@ -393,11 +367,9 @@ BaseCloner::AfterStageBehavior CollectionCloner::setupIndexBuildersForUnfinished
         // This spawns a new thread and returns immediately once the index build has been
         // registered with the IndexBuildsCoordinator.
         try {
-            const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
             auto indexBuildMethod =
-                ((fcvSnapshot.isVersionInitialized() &&
-                  mongo::feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
-                      VersionContext::getDecoration(opCtx.get()), fcvSnapshot))
+                (index_builds::primary_driven::enabled(
+                     opCtx.get(), serverGlobalParams.featureCompatibility.acquireFCVSnapshot())
                      ? IndexBuildMethodEnum::kPrimaryDriven
                      : IndexBuildMethodEnum::kHybrid);
 
@@ -562,11 +534,12 @@ void CollectionCloner::insertDocumentsCallback(const executor::TaskExecutor::Cal
         _progressMeter.hit(int(docs.size()));
         invariant(_collLoader);
 
-        CollectionBulkLoader::ParseRecordIdAndDocFunc fn = (_recordIdsReplicated)
-            ? ([](const BSONObj& doc) {
-                  return std::make_pair(RecordId(doc["r"].Long()), doc["d"].Obj());
-              })
-            : ([](const BSONObj& doc) { return std::make_pair(RecordId(0), doc); });
+        auto fn = [recordIdsReplicated =
+                       _recordIdsReplicated](const BSONObj& doc) -> std::pair<RecordId, BSONObj> {
+            if (recordIdsReplicated)
+                return {RecordId(doc["r"].Long()), doc["d"].Obj()};
+            return {RecordId(0), doc};
+        };
         // The insert must be done within the lock, because CollectionBulkLoader is not
         // thread safe.
         uassertStatusOK(_collLoader->insertDocuments(docs, fn));
@@ -589,7 +562,7 @@ void CollectionCloner::insertDocumentsCallback(const executor::TaskExecutor::Cal
 }
 
 bool CollectionCloner::isMyFailPoint(const BSONObj& data) const {
-    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"_sd);
+    const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "nss"sv);
     return (fpNss.isEmpty() || fpNss == _sourceNss) && BaseCloner::isMyFailPoint(data);
 }
 

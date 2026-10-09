@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_union_with.h"
 
@@ -38,6 +12,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_comparator.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_facet.h"
@@ -56,8 +31,9 @@
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
+#include "mongo/transport/mock_session.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
 
@@ -71,6 +47,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using MockMongoInterface = StubLookupSingleDocumentProcessInterface;
 
@@ -196,75 +173,6 @@ TEST_F(DocumentSourceUnionWithTest, SerializeAndParseWithPipeline) {
     ASSERT(unionWith->isInstanceOf<DocumentSourceUnionWith>());
 }
 
-TEST_F(DocumentSourceUnionWithTest, SerializeAndParseWithForeignDB) {
-    auto expCtx = getExpCtx();
-    NamespaceString nsToUnionWith =
-        NamespaceString::createNamespaceString_forTest(boost::none, "crossDB", "coll");
-    expCtx->setResolvedNamespaces(
-        ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>()}}});
-    auto bson = BSON("$unionWith" << BSON("db" << "crossDB"
-                                               << "coll" << nsToUnionWith.coll() << "pipeline"
-                                               << BSONArray()));
-    auto unionWith = DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx);
-    ASSERT(unionWith->isInstanceOf<DocumentSourceUnionWith>());
-    std::vector<Value> serializedArray;
-    unionWith->serializeToArray(serializedArray);
-    auto serializedBson = serializedArray[0].getDocument().toBson();
-    ASSERT_BSONOBJ_EQ(serializedBson, bson);
-    unionWith = DocumentSourceUnionWith::createFromBson(serializedBson.firstElement(), expCtx);
-    ASSERT(unionWith != nullptr);
-    ASSERT(unionWith->isInstanceOf<DocumentSourceUnionWith>());
-}
-
-TEST_F(DocumentSourceUnionWithTest, SerializeAndParseWithForeignDBAndPipeline) {
-    auto expCtx = getExpCtx();
-    NamespaceString nsToUnionWith =
-        NamespaceString::createNamespaceString_forTest(boost::none, "crossDB", "coll");
-    expCtx->setResolvedNamespaces(
-        ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>()}}});
-    auto bson =
-        BSON("$unionWith" << BSON(
-                 "db" << "crossDB"
-                      << "coll" << nsToUnionWith.coll() << "pipeline"
-                      << BSON_ARRAY(BSON("$addFields" << BSON("a" << BSON("$const" << 3))))));
-    auto unionWith = DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx);
-    ASSERT(unionWith->isInstanceOf<DocumentSourceUnionWith>());
-    std::vector<Value> serializedArray;
-    unionWith->serializeToArray(serializedArray);
-    auto serializedBson = serializedArray[0].getDocument().toBson();
-    ASSERT_BSONOBJ_EQ(serializedBson, bson);
-    unionWith = DocumentSourceUnionWith::createFromBson(serializedBson.firstElement(), expCtx);
-    ASSERT(unionWith != nullptr);
-    ASSERT(unionWith->isInstanceOf<DocumentSourceUnionWith>());
-}
-
-TEST_F(DocumentSourceUnionWithTest, QueryStatsSerializeWithForeignDBIncludesDbField) {
-    auto expCtx = getExpCtx();
-    NamespaceString nsToUnionWith =
-        NamespaceString::createNamespaceString_forTest(boost::none, "crossDB", "coll");
-    expCtx->setResolvedNamespaces(
-        ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>()}}});
-    auto bson =
-        BSON("$unionWith" << BSON("db" << "crossDB"
-                                       << "coll" << nsToUnionWith.coll() << "pipeline"
-                                       << BSON_ARRAY(BSON("$addFields" << BSON("a" << 3)))));
-    auto unionWith = DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx);
-
-    // Serialize with query stats options that transform identifiers.
-    auto opts = SerializationOptions::kMarkIdentifiers_FOR_TEST;
-    std::vector<Value> serializedArray;
-    unionWith->serializeToArray(serializedArray, opts);
-    auto serializedBson = serializedArray[0].getDocument().toBson();
-
-    // The serialized output must include the "db" field for cross-database $unionWith.
-    auto unionWithSpec = serializedBson["$unionWith"].Obj();
-    ASSERT_TRUE(unionWithSpec.hasField("db")) << "Expected 'db' field in query stats "
-                                                 "serialization for cross-database $unionWith: "
-                                              << serializedBson;
-    ASSERT_EQ(unionWithSpec["db"].String(), "HASH<crossDB>");
-    ASSERT_EQ(unionWithSpec["coll"].String(), "HASH<coll>");
-}
-
 TEST_F(DocumentSourceUnionWithTest, QueryStatsSerializeWithSameDBOmitsDbField) {
     auto expCtx = getExpCtx();
     NamespaceString nsToUnionWith = NamespaceString::createNamespaceString_forTest(
@@ -277,7 +185,7 @@ TEST_F(DocumentSourceUnionWithTest, QueryStatsSerializeWithSameDBOmitsDbField) {
     auto unionWith = DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx);
 
     // Serialize with query stats options that transform identifiers.
-    auto opts = SerializationOptions::kMarkIdentifiers_FOR_TEST;
+    auto opts = query_shape::SerializationOptions::kMarkIdentifiers_FOR_TEST;
     std::vector<Value> serializedArray;
     unionWith->serializeToArray(serializedArray, opts);
     auto serializedBson = serializedArray[0].getDocument().toBson();
@@ -397,42 +305,32 @@ TEST_F(DocumentSourceUnionWithTest, ParseErrors) {
                            getExpCtx()),
                        AssertionException,
                        ErrorCodes::TypeMismatch);
-    // $unionWith db is not allowed within a view definition.
-    expCtx->setIsParsingViewDefinition(true);
+}
+
+TEST_F(DocumentSourceUnionWithTest, RejectsUserSuppliedIsHybridSearchWhenExtensionsFlagOn) {
+    // When featureFlagExtensionsInsideHybridSearch is on, the stage-params dispatch path is taken
+    // instead of createFromBson, and must equally reject a user-supplied $_internalIsHybridSearch.
+    auto ifrCtx = IncrementalFeatureRolloutContext::forTest(std::vector<IFRFlagWireEntry>{
+        IFRFlagWireEntry{"featureFlagExtensionsInsideHybridSearch", true}});
+
+    // A client with a transport session and no internal tag is an external (user) client.
+    auto client = getServiceContext()->getService()->makeClient(
+        "external", transport::MockSession::create(/*transportLayer=*/nullptr));
+    auto opCtx = client->makeOperationContext();
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .ns(getExpCtx()->getNamespaceString())
+                      .ifrContext(ifrCtx)
+                      .build();
+
+    const std::vector<BSONObj> rawPipeline = {
+        BSON("$unionWith" << BSON("coll" << "coll" << "pipeline" << BSONArray()
+                                         << "$_internalIsHybridSearch" << true))};
+    LiteParsedPipeline liteParsedPipeline(
+        expCtx->getNamespaceString(), rawPipeline, false, LiteParserOptions{.ifrContext = ifrCtx});
     ASSERT_THROWS_CODE(
-        DocumentSourceUnionWith::createFromBson(
-            BSON("$unionWith" << BSON("db" << nsToUnionWith.dbName().toString_forTest() << "coll"
-                                           << nsToUnionWith.coll()))
-                .firstElement(),
-            expCtx),
-        AssertionException,
-        ErrorCodes::FailedToParse);
+        Pipeline::parseFromLiteParsed(liteParsedPipeline, expCtx), AssertionException, 5491300);
 }
-
-TEST_F(DocumentSourceUnionWithTest, CrossDBNotAllowedOnMongos) {
-    auto expCtx = getExpCtx();
-    expCtx->setFromRouter(true);
-    // Test that we fail with an unresolved namespace, if it is in a different database.
-    ASSERT_THROWS_CODE(DocumentSourceUnionWith::createFromBson(
-                           BSON("$unionWith" << BSON("db" << "some_db" << "coll"
-                                                          << "some_coll"))
-                               .firstElement(),
-                           expCtx),
-                       AssertionException,
-                       ErrorCodes::FailedToParse);
-
-    expCtx->setFromRouter(false);
-    expCtx->setInRouter(true);
-    // Test that we fail with an unresolved namespace, if it is in a different database.
-    ASSERT_THROWS_CODE(DocumentSourceUnionWith::createFromBson(
-                           BSON("$unionWith" << BSON("db" << "some_db" << "coll"
-                                                          << "some_coll"))
-                               .firstElement(),
-                           expCtx),
-                       AssertionException,
-                       ErrorCodes::FailedToParse);
-}
-
 
 TEST_F(DocumentSourceUnionWithTest, PropagatePauses) {
     const auto mock =
@@ -517,6 +415,64 @@ TEST_F(DocumentSourceUnionWithTest, DependencyAnalysisReportsReferencedFieldsBef
     ASSERT_FALSE(deps.needWholeDocument);
 }
 
+class MockMongoInterfaceWithQueryExecution : public StubMongoProcessInterface {
+public:
+    explicit MockMongoInterfaceWithQueryExecution(
+        std::deque<DocumentSource::GetNextResult> mockResults)
+        : _mockResults(std::move(mockResults)) {}
+
+    bool isExpectedToExecuteQueries() override {
+        return true;
+    }
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
+        std::unique_ptr<Pipeline> pipeline,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) override {
+        pipeline->addInitialSource(
+            DocumentSourceMock::createForTest(_mockResults, pipeline->getContext()));
+        return pipeline;
+    }
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none) override {
+        return attachCursorSourceToPipelineForLocalRead(std::move(pipeline));
+    }
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const AggregateCommandRequest& aggRequest,
+        std::unique_ptr<Pipeline> pipeline,
+        boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) override {
+        return attachCursorSourceToPipelineForLocalRead(std::move(pipeline));
+    }
+
+    std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) override {
+        if (optimizePipeline) {
+            optimizePipeline(pipeline.get());
+        }
+        if (attachCursorAfterOptimizing) {
+            return attachCursorSourceToPipelineForLocalRead(std::move(pipeline));
+        }
+        return pipeline;
+    }
+
+private:
+    std::deque<DocumentSource::GetNextResult> _mockResults;
+};
+
 TEST_F(DocumentSourceUnionWithTest, RespectsViewDefinition) {
     auto expCtx = getExpCtx();
     NamespaceString nsToUnionWith = NamespaceString::createNamespaceString_forTest(
@@ -529,10 +485,10 @@ TEST_F(DocumentSourceUnionWithTest, RespectsViewDefinition) {
     std::deque<DocumentSource::GetNextResult> mockForeignContents{Document{{"_id", 1}},
                                                                   Document{{"_id", 2}}};
     expCtx->setMongoProcessInterface(
-        std::make_shared<MockMongoInterface>(std::move(mockForeignContents)));
+        std::make_shared<MockMongoInterfaceWithQueryExecution>(std::move(mockForeignContents)));
 
     const auto localMock =
-        exec::agg::MockStage::createForTest({Document{{"_id"_sd, "local"_sd}}}, getExpCtx());
+        exec::agg::MockStage::createForTest({Document{{"_id"sv, "local"sv}}}, getExpCtx());
     auto bson = BSON("$unionWith" << nsToUnionWith.coll());
     auto unionWith =
         exec::agg::buildStage(DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx));
@@ -540,11 +496,11 @@ TEST_F(DocumentSourceUnionWithTest, RespectsViewDefinition) {
 
     auto result = unionWith->getNext();
     ASSERT_TRUE(result.isAdvanced());
-    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, "local"_sd}}));
+    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"sv, "local"sv}}));
 
     result = unionWith->getNext();
     ASSERT_TRUE(result.isAdvanced());
-    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, 2}}));
+    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"sv, 2}}));
 
     ASSERT_TRUE(unionWith->getNext().isEOF());
 
@@ -565,10 +521,10 @@ TEST_F(DocumentSourceUnionWithTest, ConcatenatesViewDefinitionToPipeline) {
     std::deque<DocumentSource::GetNextResult> mockForeignContents{Document{{"_id", 1}},
                                                                   Document{{"_id", 2}}};
     expCtx->setMongoProcessInterface(
-        std::make_shared<MockMongoInterface>(std::move(mockForeignContents)));
+        std::make_shared<MockMongoInterfaceWithQueryExecution>(std::move(mockForeignContents)));
 
     const auto localMock =
-        exec::agg::MockStage::createForTest({Document{{"_id"_sd, "local"_sd}}}, getExpCtx());
+        exec::agg::MockStage::createForTest({Document{{"_id"sv, "local"sv}}}, getExpCtx());
     auto bson = BSON("$unionWith" << BSON(
                          "coll" << viewNsToUnionWith.coll() << "pipeline"
                                 << BSON_ARRAY(fromjson(
@@ -579,13 +535,13 @@ TEST_F(DocumentSourceUnionWithTest, ConcatenatesViewDefinitionToPipeline) {
 
     auto result = unionWith->getNext();
     ASSERT_TRUE(result.isAdvanced());
-    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, "local"_sd}}));
+    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"sv, "local"sv}}));
 
     result = unionWith->getNext();
     ASSERT_TRUE(result.isAdvanced());
     // Assert we get the document that originally had an even _id. Note this proves that the view
     // definition was _prepended_ on the pipeline, which is important.
-    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"_sd, 3}, {"originalId"_sd, 2}}));
+    ASSERT_DOCUMENT_EQ(result.getDocument(), (Document{{"_id"sv, 3}, {"originalId"sv, 2}}));
 
     ASSERT_TRUE(unionWith->getNext().isEOF());
 
@@ -616,7 +572,7 @@ TEST_F(DocumentSourceUnionWithTest, ConstraintsWithoutPipelineAreCorrect) {
                   Pipeline::create(std::list<boost::intrusive_ptr<DocumentSource>>{}, getExpCtx()));
     StageConstraints defaultConstraints(StageConstraints::StreamType::kStreaming,
                                         StageConstraints::PositionRequirement::kNone,
-                                        StageConstraints::HostTypeRequirement::kAnyShard,
+                                        StageConstraints::HostTypeRequirement::kTargetedShards,
                                         StageConstraints::DiskUseRequirement::kNoDiskUse,
                                         StageConstraints::FacetRequirement::kAllowed,
                                         StageConstraints::TransactionRequirement::kNotAllowed,
@@ -629,7 +585,7 @@ TEST_F(DocumentSourceUnionWithTest, ConstraintsWithMixedSubPipelineAreCorrect) {
     const auto mock = DocumentSourceMock::createForTest({}, getExpCtx());
     StageConstraints stricterConstraint(StageConstraints::StreamType::kStreaming,
                                         StageConstraints::PositionRequirement::kNone,
-                                        StageConstraints::HostTypeRequirement::kAnyShard,
+                                        StageConstraints::HostTypeRequirement::kTargetedShards,
                                         StageConstraints::DiskUseRequirement::kNoDiskUse,
                                         StageConstraints::FacetRequirement::kNotAllowed,
                                         StageConstraints::TransactionRequirement::kNotAllowed,
@@ -647,7 +603,7 @@ TEST_F(DocumentSourceUnionWithTest, ConstraintsWithStrictSubPipelineAreCorrect) 
     StageConstraints constraintTmpDataFacetLookupNotAllowedNoFieldMod(
         StageConstraints::StreamType::kStreaming,
         StageConstraints::PositionRequirement::kNone,
-        StageConstraints::HostTypeRequirement::kAnyShard,
+        StageConstraints::HostTypeRequirement::kTargetedShards,
         StageConstraints::DiskUseRequirement::kWritesTmpData,
         StageConstraints::FacetRequirement::kNotAllowed,
         StageConstraints::TransactionRequirement::kAllowed,
@@ -682,7 +638,7 @@ TEST_F(DocumentSourceUnionWithTest, ConstraintsWithStrictSubPipelineAreCorrect) 
             getExpCtx()));
     StageConstraints strict(StageConstraints::StreamType::kStreaming,
                             StageConstraints::PositionRequirement::kNone,
-                            StageConstraints::HostTypeRequirement::kAnyShard,
+                            StageConstraints::HostTypeRequirement::kTargetedShards,
                             StageConstraints::DiskUseRequirement::kWritesPersistentData,
                             StageConstraints::FacetRequirement::kNotAllowed,
                             StageConstraints::TransactionRequirement::kNotAllowed,
@@ -695,7 +651,7 @@ TEST_F(DocumentSourceUnionWithTest, StricterConstraintsFromSubSubPipelineAreInhe
     const auto mock = DocumentSourceMock::createForTest({}, getExpCtx());
     StageConstraints strictConstraint(StageConstraints::StreamType::kStreaming,
                                       StageConstraints::PositionRequirement::kNone,
-                                      StageConstraints::HostTypeRequirement::kAnyShard,
+                                      StageConstraints::HostTypeRequirement::kTargetedShards,
                                       StageConstraints::DiskUseRequirement::kNoDiskUse,
                                       StageConstraints::FacetRequirement::kAllowed,
                                       StageConstraints::TransactionRequirement::kNotAllowed,
@@ -711,7 +667,7 @@ TEST_F(DocumentSourceUnionWithTest, StricterConstraintsFromSubSubPipelineAreInhe
         Pipeline::create(std::list<boost::intrusive_ptr<DocumentSource>>{facetStage}, getExpCtx()));
     StageConstraints expectedConstraints(StageConstraints::StreamType::kStreaming,
                                          StageConstraints::PositionRequirement::kNone,
-                                         StageConstraints::HostTypeRequirement::kAnyShard,
+                                         StageConstraints::HostTypeRequirement::kTargetedShards,
                                          StageConstraints::DiskUseRequirement::kNoDiskUse,
                                          StageConstraints::FacetRequirement::kNotAllowed,
                                          StageConstraints::TransactionRequirement::kNotAllowed,
@@ -723,7 +679,7 @@ TEST_F(DocumentSourceUnionWithTest, StricterConstraintsFromSubSubPipelineAreInhe
 TEST_F(DocumentSourceUnionWithTest, IncrementNestedAggregateOpCounterOnCreateButNotOnCopy) {
     auto testOpCounter = [&](const NamespaceString& nss, const int expectedIncrease) {
         auto resolvedNss = ResolvedNamespaceMap{{nss, {nss, std::vector<BSONObj>()}}};
-        auto countBeforeCreate = globalOpCounters().getNestedAggregate()->load();
+        auto countBeforeCreate = globalOpCounters().nestedAggregates->value();
 
         // Create a DocumentSourceUnionWith and verify that the counter increases by the expected
         // amount.
@@ -735,14 +691,14 @@ TEST_F(DocumentSourceUnionWithTest, IncrementNestedAggregateOpCounterOnCreateBut
                 .firstElement(),
             originalExpCtx);
         auto originalUnionWith = static_cast<DocumentSourceUnionWith*>(docSource.get());
-        auto countAfterCreate = globalOpCounters().getNestedAggregate()->load();
+        auto countAfterCreate = globalOpCounters().nestedAggregates->value();
         ASSERT_EQ(countAfterCreate - countBeforeCreate, expectedIncrease);
 
         // Copy the DocumentSourceUnionWith and verify that the counter doesn't increase.
         auto newExpCtx = make_intrusive<ExpressionContextForTest>(getOpCtx(), nss);
         newExpCtx->setResolvedNamespaces(resolvedNss);
         DocumentSourceUnionWith newUnionWith{*originalUnionWith, newExpCtx};
-        auto countAfterCopy = globalOpCounters().getNestedAggregate()->load();
+        auto countAfterCopy = globalOpCounters().nestedAggregates->value();
         ASSERT_EQ(countAfterCopy - countAfterCreate, 0);
     };
 
@@ -765,30 +721,6 @@ TEST_F(DocumentSourceUnionWithTest, RedactsCorrectlyBasic) {
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "$unionWith": {
-                "coll": "HASH<coll>",
-                "pipeline": []
-            }
-        })",
-        redact(*docSource));
-}
-
-TEST_F(DocumentSourceUnionWithTest, RedactsCorrectlyCrossDB) {
-    auto expCtx = getExpCtx();
-    auto nsToUnionWith =
-        NamespaceString::createNamespaceString_forTest(boost::none, "crossDB", "coll");
-    expCtx->setResolvedNamespaces(
-        ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>()}}});
-
-    auto docSource = DocumentSourceUnionWith::createFromBson(
-        BSON("$unionWith" << BSON("db" << "crossDB"
-                                       << "coll" << nsToUnionWith.coll()))
-            .firstElement(),
-        expCtx);
-
-    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({
-            "$unionWith": {
-                "db": "HASH<crossDB>",
                 "coll": "HASH<coll>",
                 "pipeline": []
             }
@@ -839,7 +771,7 @@ using DocumentSourceUnionWithServerlessTest = ServerlessAggregationContextFixtur
 
 TEST_F(DocumentSourceUnionWithServerlessTest,
        LiteParsedDocumentSourceLookupContainsExpectedNamespacesInServerless) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     auto tenantId = TenantId(OID::gen());
     NamespaceString nss =
@@ -868,7 +800,7 @@ TEST_F(DocumentSourceUnionWithServerlessTest,
 
 TEST_F(DocumentSourceUnionWithServerlessTest,
        CreateFromBSONContainsExpectedNamespacesInServerless) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     auto expCtx = getExpCtx();
     ASSERT(expCtx->getNamespaceString().tenantId());
@@ -915,12 +847,11 @@ TEST_F(DocumentSourceUnionWithTest, StageParamsCarriesParsedData) {
         ASSERT_EQ(params->unionNss.coll(), "target_coll");
         ASSERT_EQ(params->unionNss.dbName(), nss.dbName());
         ASSERT_EQ(params->pipeline.size(), 1U);
-        ASSERT_FALSE(params->hasForeignDB);
-        ASSERT_TRUE(params->liteParsedPipeline.has_value());
-        ASSERT_EQ(params->liteParsedPipeline->getStages().size(), 1U);
+        ASSERT_TRUE(params->subpipelineStageParams.has_value());
+        ASSERT_EQ(params->subpipelineStageParams->size(), 1U);
     }
 
-    // String spec (collection name only): no LPP since there's no subpipeline.
+    // String spec (collection name only): no subpipelineStageParams since there's no subpipeline.
     {
         auto bson = BSON("$unionWith" << "target_coll");
         auto liteParsed = LiteParsedUnionWith::parse(nss, bson.firstElement(), LiteParserOptions{});
@@ -929,31 +860,7 @@ TEST_F(DocumentSourceUnionWithTest, StageParamsCarriesParsedData) {
         ASSERT(params);
         ASSERT_EQ(params->unionNss.coll(), "target_coll");
         ASSERT_TRUE(params->pipeline.empty());
-        ASSERT_FALSE(params->hasForeignDB);
-        ASSERT_FALSE(params->liteParsedPipeline.has_value());
-    }
-
-    // Foreign DB sets hasForeignDB, even if it matches the current DB.
-    {
-        auto bson = BSON("$unionWith" << BSON("db" << "other_db"
-                                                   << "coll" << "target_coll"
-                                                   << "pipeline" << BSONArray()));
-        auto liteParsed = LiteParsedUnionWith::parse(nss, bson.firstElement(), LiteParserOptions{});
-        auto stageParams = liteParsed->getStageParams();
-        auto* params = dynamic_cast<UnionWithStageParams*>(stageParams.get());
-        ASSERT(params);
-        ASSERT_EQ(params->unionNss.dbName().db(OmitTenant{}), "other_db");
-        ASSERT_TRUE(params->hasForeignDB);
-    }
-    {
-        auto bson = BSON("$unionWith" << BSON("db" << nss.dbName().db(OmitTenant{}) << "coll"
-                                                   << "target_coll"
-                                                   << "pipeline" << BSONArray()));
-        auto liteParsed = LiteParsedUnionWith::parse(nss, bson.firstElement(), LiteParserOptions{});
-        auto stageParams = liteParsed->getStageParams();
-        auto* params = dynamic_cast<UnionWithStageParams*>(stageParams.get());
-        ASSERT(params);
-        ASSERT_TRUE(params->hasForeignDB);
+        ASSERT_FALSE(params->subpipelineStageParams.has_value());
     }
 
     // Object spec with empty pipeline: LPP present but has zero stages.
@@ -964,11 +871,11 @@ TEST_F(DocumentSourceUnionWithTest, StageParamsCarriesParsedData) {
         auto stageParams = liteParsed->getStageParams();
         auto* params = dynamic_cast<UnionWithStageParams*>(stageParams.get());
         ASSERT(params);
-        ASSERT_TRUE(params->liteParsedPipeline.has_value());
-        ASSERT_EQ(params->liteParsedPipeline->getStages().size(), 0U);
+        ASSERT_TRUE(params->subpipelineStageParams.has_value());
+        ASSERT_TRUE(params->subpipelineStageParams->empty());
     }
 
-    // Multi-stage pipeline: LPP carries all stages.
+    // Multi-stage pipeline: subpipelineStageParams carries all stages.
     {
         auto bson = BSON("$unionWith"
                          << BSON("coll" << "target_coll"
@@ -979,66 +886,8 @@ TEST_F(DocumentSourceUnionWithTest, StageParamsCarriesParsedData) {
         auto stageParams = liteParsed->getStageParams();
         auto* params = dynamic_cast<UnionWithStageParams*>(stageParams.get());
         ASSERT(params);
-        ASSERT_TRUE(params->liteParsedPipeline.has_value());
-        ASSERT_EQ(params->liteParsedPipeline->getStages().size(), 2U);
-    }
-}
-
-TEST_F(DocumentSourceUnionWithTest, BuilderRejectsForeignDBInViewAndRouter) {
-    auto expCtx = getExpCtx();
-    NamespaceString nss = expCtx->getNamespaceString();
-    auto foreignDBSpec = BSON("$unionWith" << BSON("db" << "other_db"
-                                                        << "coll" << "target_coll"
-                                                        << "pipeline" << BSONArray()));
-
-    // Rejected in view definitions.
-    {
-        auto viewExpCtx = getExpCtx();
-        viewExpCtx->setIsParsingViewDefinition(true);
-        auto liteParsed =
-            LiteParsedUnionWith::parse(nss, foreignDBSpec.firstElement(), LiteParserOptions{});
-        ASSERT_THROWS_CODE(buildDocumentSource(*liteParsed, viewExpCtx),
-                           AssertionException,
-                           ErrorCodes::FailedToParse);
-    }
-
-    // Rejected when fromRouter is set.
-    {
-        auto routerExpCtx = getExpCtx();
-        routerExpCtx->setFromRouter(true);
-        auto liteParsed =
-            LiteParsedUnionWith::parse(nss, foreignDBSpec.firstElement(), LiteParserOptions{});
-        ASSERT_THROWS_CODE(buildDocumentSource(*liteParsed, routerExpCtx),
-                           AssertionException,
-                           ErrorCodes::FailedToParse);
-    }
-
-    // Rejected when inRouter is set.
-    {
-        auto routerExpCtx = getExpCtx();
-        routerExpCtx->setInRouter(true);
-        auto liteParsed =
-            LiteParsedUnionWith::parse(nss, foreignDBSpec.firstElement(), LiteParserOptions{});
-        ASSERT_THROWS_CODE(buildDocumentSource(*liteParsed, routerExpCtx),
-                           AssertionException,
-                           ErrorCodes::FailedToParse);
-    }
-
-    // Same-DB without explicit db field is allowed even in view definitions.
-    {
-        auto viewExpCtx = getExpCtx();
-        NamespaceString nsToUnionWith = NamespaceString::createNamespaceString_forTest(
-            viewExpCtx->getNamespaceString().dbName(), "target_coll");
-        viewExpCtx->setResolvedNamespaces(
-            ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>()}}});
-        viewExpCtx->setIsParsingViewDefinition(true);
-
-        auto sameDBSpec = BSON("$unionWith" << BSON("coll" << "target_coll"
-                                                           << "pipeline" << BSONArray()));
-        auto liteParsed = LiteParsedUnionWith::parse(
-            viewExpCtx->getNamespaceString(), sameDBSpec.firstElement(), LiteParserOptions{});
-        auto docSources = buildDocumentSource(*liteParsed, viewExpCtx);
-        ASSERT_EQ(docSources.size(), 1U);
+        ASSERT_TRUE(params->subpipelineStageParams.has_value());
+        ASSERT_EQ(params->subpipelineStageParams->size(), 2U);
     }
 }
 
@@ -1085,16 +934,6 @@ TEST_F(DocumentSourceUnionWithTest, BuilderRoundTripMatchesCreateFromBson) {
         auto nsToUnionWith = NamespaceString::createNamespaceString_forTest(
             expCtx->getNamespaceString().dbName(), "target_coll");
         verifyRoundTrip(BSON("$unionWith" << "target_coll"), nsToUnionWith);
-    }
-
-    // With foreign DB.
-    {
-        auto nsToUnionWith =
-            NamespaceString::createNamespaceString_forTest(boost::none, "crossDB", "target_coll");
-        verifyRoundTrip(BSON("$unionWith" << BSON("db" << "crossDB"
-                                                       << "coll" << "target_coll"
-                                                       << "pipeline" << BSONArray())),
-                        nsToUnionWith);
     }
 }
 

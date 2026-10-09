@@ -1,38 +1,12 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/search/lite_parsed_internal_search_id_lookup.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/views/pipeline_resolver.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -45,8 +19,8 @@ const NamespaceString kResolvedNss =
     NamespaceString::createNamespaceString_forTest("unittests.resolved_coll");
 
 /**
- * Tests for LiteParsed::bindViewInfo() and LiteParsed::getStageParams() to verify that
- * bindViewInfo correctly stores view pipeline BSON for use in desugaring.
+ * Tests for LiteParsed::bindResolvedNamespace() and LiteParsed::getStageParams() to verify that
+ * bindResolvedNamespace correctly stores view pipeline BSON for use in desugaring.
  */
 class LiteParsedInternalSearchIdLookUpTest : public unittest::Test {};
 
@@ -60,7 +34,7 @@ TEST_F(LiteParsedInternalSearchIdLookUpTest, GetFirstStageViewApplicationPolicyR
               FirstStageViewApplicationPolicy::kDoNothing);
 }
 
-TEST_F(LiteParsedInternalSearchIdLookUpTest, BindViewInfoStoresViewPipelineBson) {
+TEST_F(LiteParsedInternalSearchIdLookUpTest, BindResolvedNamespaceStoresViewPipelineBson) {
     BSONObj spec = BSON(LiteParsedInternalSearchIdLookUp::kStageName << BSON("limit" << 100LL));
     auto liteParsed =
         LiteParsedInternalSearchIdLookUp::parse(kTestNss, spec.firstElement(), LiteParserOptions{});
@@ -68,9 +42,9 @@ TEST_F(LiteParsedInternalSearchIdLookUpTest, BindViewInfoStoresViewPipelineBson)
     // Create a view pipeline with a $match and $project stage.
     std::vector<BSONObj> viewPipeline = {BSON("$match" << BSON("status" << "active")),
                                          BSON("$project" << BSON("name" << 1 << "status" << 1))};
-    ViewInfo viewInfo(kViewNss, kResolvedNss, viewPipeline);
+    auto view = ResolvedNamespace::makeForView(kViewNss, kResolvedNss, viewPipeline);
 
-    liteParsed->bindViewInfo(viewInfo, {});
+    liteParsed->bindResolvedNamespace(view, {});
 
     // Now getStageParams should return params with the view pipeline BSON.
     auto stageParams = liteParsed->getStageParams();
@@ -96,7 +70,7 @@ TEST_F(LiteParsedInternalSearchIdLookUpTest, GetStageParamsReturnsLimitFromSpec)
     // Verify the limit was extracted correctly from the spec.
     ASSERT(typedParams->ownedSpec.getLimit());
     ASSERT_EQ(typedParams->ownedSpec.getLimit().get(), 42);
-    // Without bindViewInfo call, the view pipeline should be empty.
+    // Without bindResolvedNamespace call, the view pipeline should be empty.
     ASSERT_FALSE(typedParams->ownedSpec.getViewPipeline());
 }
 
@@ -113,15 +87,15 @@ TEST_F(LiteParsedInternalSearchIdLookUpTest, GetStageParamsReturnsNothingWhenNot
     ASSERT_FALSE(typedParams->ownedSpec.getViewPipeline());
 }
 
-TEST_F(LiteParsedInternalSearchIdLookUpTest, BindViewInfoWithEmptyViewPipeline) {
+TEST_F(LiteParsedInternalSearchIdLookUpTest, BindResolvedNamespaceWithEmptyViewPipeline) {
     BSONObj spec = BSON(LiteParsedInternalSearchIdLookUp::kStageName << BSON("limit" << 10LL));
     auto liteParsed =
         LiteParsedInternalSearchIdLookUp::parse(kTestNss, spec.firstElement(), LiteParserOptions{});
 
     // Create an empty view pipeline.
-    ViewInfo viewInfo(kViewNss, kResolvedNss, {});
+    auto view = ResolvedNamespace::makeForView(kViewNss, kResolvedNss, {});
 
-    liteParsed->bindViewInfo(viewInfo, {});
+    liteParsed->bindResolvedNamespace(view, {});
 
     auto stageParams = liteParsed->getStageParams();
     auto* typedParams = dynamic_cast<InternalSearchIdLookupStageParams*>(stageParams.get());
@@ -186,27 +160,31 @@ TEST_F(LiteParsedInternalSearchIdLookUpTest, GetSpecReturnsConsistentReference) 
 }
 
 TEST_F(LiteParsedInternalSearchIdLookUpTest,
-       ApplyViewToLiteParsedStoresDesugaredViewPipelineInIdLookup) {
+       ResolveInvolvedNamespacesStoresDesugaredViewPipelineInIdLookup) {
     // Build a user pipeline consisting of a single $_internalSearchIdLookup stage.
     BSONObj idLookupSpec =
         BSON(LiteParsedInternalSearchIdLookUp::kStageName << BSON("limit" << 100LL));
     LiteParsedPipeline pipeline(kTestNss, std::vector<BSONObj>{idLookupSpec});
 
-    // Create a ResolvedView with a two-stage view pipeline.
+    // Create a ResolvedView with a two-stage view pipeline and register it in the namespace map.
     std::vector<BSONObj> viewPipeline = {BSON("$match" << BSON("status" << "active")),
                                          BSON("$project" << BSON("name" << 1 << "status" << 1))};
-    const ResolvedView resolvedView{kResolvedNss, viewPipeline, BSONObj()};
+    const ResolvedNamespace resolvedView{kResolvedNss, kResolvedNss, viewPipeline, BSONObj()};
 
-    // Call applyViewToLiteParsed() which desugars the view pipeline and invokes handleView().
-    PipelineResolver::applyViewToLiteParsed(
-        &pipeline, resolvedView, kViewNss, ResolvedNamespaceMap{});
+    ResolvedNamespaceMap resolvedNamespaces;
+    PipelineResolver::insertTopLevelViewEntry(resolvedNamespaces, kTestNss, resolvedView);
+
+    // resolveInvolvedNamespacesOnLiteParsedPipeline desugars the view pipeline and invokes
+    // handleView().
+    PipelineResolver::resolveInvolvedNamespacesOnLiteParsedPipeline(
+        &pipeline, kTestNss, resolvedNamespaces);
 
     // IdLookup has a kDoNothing policy so the view pipeline should NOT be prepended.
     const auto& stages = pipeline.getStages();
     ASSERT_EQ(stages.size(), 1U);
     ASSERT_EQ(stages[0]->getParseTimeName(), LiteParsedInternalSearchIdLookUp::kStageName);
 
-    // The IdLookup stage should now carry the desugared view pipeline via bindViewInfo().
+    // The IdLookup stage should now carry the desugared view pipeline via bindResolvedNamespace().
     auto* idLookup = dynamic_cast<LiteParsedInternalSearchIdLookUp*>(stages[0].get());
     ASSERT_TRUE(idLookup != nullptr);
 

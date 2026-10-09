@@ -1,4 +1,13 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+
+function calculatePaddedLength(byteLen) {
+    const BSON_OVERHEAD = 5;
+    // See
+    // https://github.com/10gen/mongo/blob/master/src/mongo/db/modules/enterprise/docs/fle/fle_string_search.md#strencode-suffix-and-prefix
+    // for an explanation of this calculation.
+    return Math.ceil((byteLen + BSON_OVERHEAD + 1) / 16) * 16 - BSON_OVERHEAD;
+}
+
 class TextFieldBase {
     constructor(lb, ub, caseSensitive, diacriticSensitive, maxContention, forcePreview = false) {
         this._lb = NumberInt(lb);
@@ -22,7 +31,10 @@ class TextFieldBase {
 export class SuffixField extends TextFieldBase {
     createQueryTypeDescriptor(db) {
         let queryType = "suffix";
-        if (this._forcePreview || (db && !FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "QEPrefixSuffixSearch"))) {
+        if (
+            this._forcePreview ||
+            (db && !FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "QEPrefixSuffixSearch"))
+        ) {
             queryType = "suffixPreview";
         }
         return Object.assign({"queryType": queryType}, super.createQueryTypeDescriptor());
@@ -33,10 +45,7 @@ export class SuffixField extends TextFieldBase {
         assert.gte(this._ub, this._lb);
         assert.gte(byte_len, 0);
 
-        // See
-        // https://github.com/10gen/mongo/blob/master/src/mongo/db/modules/enterprise/docs/fle/fle_string_search.md#strencode-suffix-and-prefix
-        // for an explanation of this calculation.
-        const padded_len = Math.ceil((byte_len + 5) / 16) * 16 - 5;
+        const padded_len = calculatePaddedLength(byte_len);
         if (this._lb > padded_len) {
             return 1; // 1 is for just the exact match string
         }
@@ -48,10 +57,14 @@ export class SuffixField extends TextFieldBase {
         const uniqueStrs = new Set(strs);
         const paddedStrs = new Set();
         for (const str of strs) {
-            for (let affix_len = this._lb; affix_len <= Math.min(this._ub, str.length); affix_len++) {
+            for (
+                let affix_len = this._lb;
+                affix_len <= Math.min(this._ub, str.length);
+                affix_len++
+            ) {
                 affixSet.add(str.slice(-affix_len));
             }
-            const padded_len = Math.ceil((str.length + 5) / 16) * 16 - 5;
+            const padded_len = calculatePaddedLength(str.length);
             if (str.length !== padded_len && str.length < this._ub) {
                 // This string needs padding.
                 paddedStrs.add(str);
@@ -68,7 +81,10 @@ export class PrefixField extends SuffixField {
     createQueryTypeDescriptor(db) {
         let spec = super.createQueryTypeDescriptor(db);
         spec.queryType = "prefix";
-        if (this._forcePreview || (db && !FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "QEPrefixSuffixSearch"))) {
+        if (
+            this._forcePreview ||
+            (db && !FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "QEPrefixSuffixSearch"))
+        ) {
             spec.queryType = "prefixPreview";
         }
         return spec;
@@ -79,10 +95,14 @@ export class PrefixField extends SuffixField {
         const uniqueStrs = new Set(strs);
         const paddedStrs = new Set();
         for (const str of strs) {
-            for (let affix_len = this._lb; affix_len <= Math.min(this._ub, str.length); affix_len++) {
+            for (
+                let affix_len = this._lb;
+                affix_len <= Math.min(this._ub, str.length);
+                affix_len++
+            ) {
                 affixSet.add(str.slice(0, affix_len));
             }
-            const padded_len = Math.ceil((str.length + 5) / 16) * 16 - 5;
+            const padded_len = calculatePaddedLength(str.length);
             if (str.length !== padded_len && str.length < this._ub) {
                 // This string needs padding.
                 paddedStrs.add(str);
@@ -96,14 +116,27 @@ export class PrefixField extends SuffixField {
 }
 
 export class SubstringField extends TextFieldBase {
-    constructor(mlen, lb, ub, caseSensitive, diacriticSensitive, maxContention, forcePreview = false) {
+    constructor(
+        mlen,
+        lb,
+        ub,
+        caseSensitive,
+        diacriticSensitive,
+        maxContention,
+        forcePreview = false,
+    ) {
         super(lb, ub, caseSensitive, diacriticSensitive, maxContention, forcePreview);
         this._mlen = NumberInt(mlen);
     }
 
     createQueryTypeDescriptor(db) {
+        const queryType =
+            this._forcePreview ||
+            (db && !FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "QESubstringSearch"))
+                ? "substringPreview"
+                : "substring";
         return Object.assign(
-            {"queryType": "substringPreview", "strMaxLength": this._mlen},
+            {"queryType": queryType, "strMaxLength": this._mlen},
             super.createQueryTypeDescriptor(),
         );
     }
@@ -114,10 +147,7 @@ export class SubstringField extends TextFieldBase {
         assert.gte(this._ub, this._lb);
         assert.gte(this._mlen, this._ub);
 
-        // See
-        // https://github.com/10gen/mongo/blob/master/src/mongo/db/modules/enterprise/docs/fle/fle_string_search.md#strencode-substring
-        // for an explanation of this calculation.
-        const padded_len = Math.ceil((byte_len + 5) / 16) * 16 - 5;
+        const padded_len = calculatePaddedLength(byte_len);
         if (byte_len > this._mlen || this._lb > padded_len) {
             return 1; // 1 is for just the exact match string
         }
@@ -137,7 +167,11 @@ export class SubstringField extends TextFieldBase {
 
         for (const str of strs) {
             const strSubstringSet = new Set();
-            for (let substr_len = this._lb; substr_len <= Math.min(this._ub, str.length); substr_len++) {
+            for (
+                let substr_len = this._lb;
+                substr_len <= Math.min(this._ub, str.length);
+                substr_len++
+            ) {
                 for (let start = 0; start <= str.length - substr_len; start++) {
                     const sub = str.slice(start, start + substr_len);
                     substringSet.add(sub);
@@ -159,7 +193,16 @@ export class SubstringField extends TextFieldBase {
 }
 
 export class SuffixAndPrefixField {
-    constructor(sfxLb, sfxUb, pfxLb, pfxUb, caseSensitive, diacriticSensitive, maxContention, forcePreview = false) {
+    constructor(
+        sfxLb,
+        sfxUb,
+        pfxLb,
+        pfxUb,
+        caseSensitive,
+        diacriticSensitive,
+        maxContention,
+        forcePreview = false,
+    ) {
         this._suffixField = new SuffixField(
             sfxLb,
             sfxUb,
@@ -178,7 +221,10 @@ export class SuffixAndPrefixField {
         );
     }
     createQueryTypeDescriptor(db) {
-        return [this._suffixField.createQueryTypeDescriptor(db), this._prefixField.createQueryTypeDescriptor(db)];
+        return [
+            this._suffixField.createQueryTypeDescriptor(db),
+            this._prefixField.createQueryTypeDescriptor(db),
+        ];
     }
     calculateExpectedTagCount(byte_len) {
         // subtract 1 since the exact match string is doubly counted in the other call

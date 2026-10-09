@@ -4,12 +4,11 @@
  * @tags: [
  *   requires_fcv_90,
  *   requires_sbe,
- *   featureFlagPathArrayness
  * ]
  */
-import {linebreak, section, subSection} from "jstests/libs/query/pretty_md.js";
-import {prettyPrintWinningPlan, getWinningJoinOrderOneLine} from "jstests/query_golden/libs/pretty_plan.js";
-import {joinTestWrapper} from "jstests/libs/query/join_utils.js";
+import {linebreak, section, subSection, codeOneLine} from "jstests/libs/query/pretty_md.js";
+import {prettyPrintWinningPlan} from "jstests/query_golden/libs/pretty_plan.js";
+import {joinTestWrapper, runPipelineAndGetPlanSummary} from "jstests/libs/query/join_utils.js";
 
 const coll = db[jsTestName() + "_base"];
 coll.drop();
@@ -53,20 +52,19 @@ assert.commandWorked(
 assert.commandWorked(b.createIndex({dummy: 1, base: -1, a: 1, b: 1}));
 
 function runSingleTest(subtitle, pipeline, seen = undefined) {
-    let joinOrder = undefined;
-    const explain = coll.explain().aggregate(pipeline);
+    const {results, planSummary} = runPipelineAndGetPlanSummary(coll, pipeline);
     if (seen) {
-        joinOrder = getWinningJoinOrderOneLine(explain);
-        if (seen.has(joinOrder)) {
+        if (seen.has(planSummary)) {
             return undefined;
         }
-        seen.add(joinOrder);
+        seen.add(planSummary);
     }
     subSection(subtitle);
-    if (joinOrder) {
-        prettyPrintWinningPlan(explain);
+    if (seen) {
+        codeOneLine(planSummary);
+        prettyPrintWinningPlan(coll.explain().aggregate(pipeline));
     }
-    return coll.aggregate(pipeline).toArray();
+    return results;
 }
 
 function runRandomReorderTests(pipeline) {
@@ -87,7 +85,10 @@ function runRandomReorderTests(pipeline) {
         const res = runSingleTest(`Random reordering with seed ${seed}`, pipeline, seen);
         if (res !== undefined) {
             // Skip seed if we've seen this order before.
-            assert(_resultSetsEqualUnordered(baseRes, res), `Results differ between no join opt and seed ${seed}`);
+            assert(
+                _resultSetsEqualUnordered(baseRes, res),
+                `Results differ between no join opt and seed ${seed}`,
+            );
         }
         seed++;
     }
@@ -125,6 +126,32 @@ joinTestWrapper(db, () => {
         {$lookup: {from: b.getName(), as: "y", localField: "base", foreignField: "base"}},
         {$unwind: "$y"},
         {$project: {_id: 0, "x._id": 0, "y._id": 0}},
+    ]);
+
+    // A - BASE - B, with an exclusion projection & rename.
+    section("3-Node graph + intermediate exclusion projection & rename");
+    runRandomReorderTests([
+        {$project: {_id: 0, m: "$a", z: "$b"}},
+        {
+            $lookup: {
+                from: a.getName(),
+                as: "x",
+                localField: "m",
+                foreignField: "a",
+                pipeline: [{$project: {_id: 0, x: "$a"}}],
+            },
+        },
+        {$unwind: "$x"},
+        {
+            $lookup: {
+                from: b.getName(),
+                as: "y",
+                localField: "z",
+                foreignField: "b",
+                pipeline: [{$project: {_id: 0}}],
+            },
+        },
+        {$unwind: "$y"},
     ]);
 
     section("4-Node graph + potentially inferred edges & filters");

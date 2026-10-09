@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -237,49 +211,14 @@ void trace(JSTracer* trc, JSObject* obj) {
 }  // namespace smUtils
 
 template <typename T>
-class MONGO_MOD_PUB WrapType : public T {
+class [[MONGO_MOD_PUBLIC]] WrapType : public T {
 public:
-    WrapType(JSContext* context)
-        : _context(context),
-          _proto(),
-          _constructor(),
-          _jsclass({T::className,
-                    T::classFlags,
-                    &_jsclassOps,
-                    JS_NULL_CLASS_SPEC,
-                    JS_NULL_CLASS_EXT,
-                    &_jsoOps}),
-          _jsclassOps({T::addProperty != BaseInfo::addProperty ? smUtils::addProperty<T> : nullptr,
-                       T::delProperty != BaseInfo::delProperty ? smUtils::delProperty<T> : nullptr,
-                       nullptr,  // enumerate
-                       T::enumerate != BaseInfo::enumerate ? smUtils::enumerate<T>
-                                                           : nullptr,  // newEnumerate
-                       T::resolve != BaseInfo::resolve ? smUtils::resolve<T> : nullptr,
-                       T::mayResolve != BaseInfo::mayResolve ? T::mayResolve : nullptr,
-                       T::finalize != BaseInfo::finalize ? T::finalize : nullptr,
-                       T::call != BaseInfo::call ? smUtils::call<T> : nullptr,
-                       T::construct != BaseInfo::construct ? smUtils::construct<T> : nullptr,
-                       T::trace != BaseInfo::trace ? smUtils::trace<T> : nullptr}),
-          _jsoOps({
-              nullptr,  // lookupProperty
-              nullptr,  // defineProperty
-              nullptr,  // hasProperty
-              T::getProperty != BaseInfo::getProperty ? smUtils::getProperty<T>
-                                                      : nullptr,  // getProperty
-              T::setProperty != BaseInfo::setProperty ? smUtils::setProperty<T>
-                                                      : nullptr,  // setProperty
-              nullptr,                                            // getOwnPropertyDescriptor
-              nullptr,                                            // deleteProperty
-              nullptr,                                            // getElements
-              nullptr                                             // funToString
-          }) {
+    WrapType(JSContext* context) : _context(context), _proto(), _constructor() {
 
         // The global object is different.  We need it for basic setup
         // before the other types are installed.  Might as well just do it
         // in the constructor.
         if (T::classFlags & JSCLASS_GLOBAL_FLAGS) {
-            _jsclassOps.trace = JS_GlobalObjectTraceHook;
-
             JS::RootedObject proto(_context);
 
             JS::RealmOptions options;
@@ -296,7 +235,22 @@ public:
     }
 
     ~WrapType() {
-        // Persistent globals don't RAII, you have to reset() them manually
+        // Persistent globals don't RAII, you have to reset() them manually.
+        dropRoots();
+    }
+
+    /**
+     * Drops the persistent prototype/constructor roots without freeing this object (and
+     * therefore without freeing the JSClass it owns).
+     *
+     * This must be called while the JSContext is still alive: PersistentRooted::reset()
+     * unlinks from the runtime's root list. It lets an owner unroot the prototypes before
+     * JS_DestroyContext, yet keep the JSClass alive until *after* the shutdown GC has run
+     * every finalizer (finalizers read JSClass->finalize; freeing the class first is a
+     * use-after-free). Idempotent: reset() is a no-op once already unlinked, so the call in
+     * ~WrapType after JS_DestroyContext is safe.
+     */
+    void dropRoots() {
         _proto.reset();
         _constructor.reset();
     }
@@ -605,9 +559,42 @@ private:
     JSContext* _context;
     JS::PersistentRootedObject _proto;
     JS::PersistentRootedObject _constructor;
-    JSClass _jsclass;
-    JSClassOps _jsclassOps;
-    js::ObjectOps _jsoOps;
+
+    // _jsclassOps, _jsoOps, and _jsclass are static per template instantiation: all fields
+    // are initialised once from T's static members (never mutated after init).  Static lifetime
+    // prevents use-after-free when WrapType instances are destroyed while GC-managed JS objects
+    // still hold JSClass* or JSClass.ops* pointers into them (e.g. during realm reset where a new
+    // MozJSPrototypeInstaller is created before the old realm's objects are GC-collected).
+    // _jsclassOps and _jsoOps are declared before _jsclass to ensure they are initialized
+    // first (C++ inline-static members initialise in declaration order within a TU).
+    inline static JSClassOps _jsclassOps = {
+        T::addProperty != BaseInfo::addProperty ? smUtils::addProperty<T> : nullptr,
+        T::delProperty != BaseInfo::delProperty ? smUtils::delProperty<T> : nullptr,
+        nullptr,                                                                // enumerate
+        T::enumerate != BaseInfo::enumerate ? smUtils::enumerate<T> : nullptr,  // newEnumerate
+        T::resolve != BaseInfo::resolve ? smUtils::resolve<T> : nullptr,
+        T::mayResolve != BaseInfo::mayResolve ? T::mayResolve : nullptr,
+        T::finalize != BaseInfo::finalize ? T::finalize : nullptr,
+        T::call != BaseInfo::call ? smUtils::call<T> : nullptr,
+        T::construct != BaseInfo::construct ? smUtils::construct<T> : nullptr,
+        // Global objects require JS_GlobalObjectTraceHook (set here to avoid a data race
+        // from writing to the shared static in the constructor under concurrent init).
+        (T::classFlags& JSCLASS_GLOBAL_FLAGS)
+            ? JS_GlobalObjectTraceHook
+            : (T::trace != BaseInfo::trace ? smUtils::trace<T> : nullptr)};
+    inline static js::ObjectOps _jsoOps = {
+        nullptr,  // lookupProperty
+        nullptr,  // defineProperty
+        nullptr,  // hasProperty
+        T::getProperty != BaseInfo::getProperty ? smUtils::getProperty<T> : nullptr,
+        T::setProperty != BaseInfo::setProperty ? smUtils::setProperty<T> : nullptr,
+        nullptr,  // getOwnPropertyDescriptor
+        nullptr,  // deleteProperty
+        nullptr,  // getElements
+        nullptr   // funToString
+    };
+    inline static JSClass _jsclass = {
+        T::className, T::classFlags, &_jsclassOps, JS_NULL_CLASS_SPEC, JS_NULL_CLASS_EXT, &_jsoOps};
 };
 
 }  // namespace mozjs

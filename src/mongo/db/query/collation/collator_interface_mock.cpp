@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/collation/collator_interface_mock.h"
 
@@ -36,6 +10,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 
@@ -56,7 +31,7 @@ std::string mockTypeToString(CollatorInterfaceMock::MockType type) {
     MONGO_UNREACHABLE;
 }
 
-Collation makeCollation(StringData locale, StringData version) {
+Collation makeCollation(std::string_view locale, std::string_view version) {
     Collation collation(std::string{locale});
     // "backwards" is optional. The ICU collator always sets it to true/false based on the locale.
     collation.setBackwards(false);
@@ -78,15 +53,15 @@ std::shared_ptr<CollatorInterface> CollatorInterfaceMock::cloneShared() const {
     return std::make_shared<CollatorInterfaceMock>(_mockType);
 }
 
-int CollatorInterfaceMock::compare(StringData left, StringData right) const {
+int CollatorInterfaceMock::compare(std::string_view left, std::string_view right) const {
     switch (_mockType) {
         case MockType::kReverseString: {
             std::string leftString = std::string{left};
             std::string rightString = std::string{right};
             std::reverse(leftString.begin(), leftString.end());
             std::reverse(rightString.begin(), rightString.end());
-            StringData leftReversed(leftString);
-            StringData rightReversed(rightString);
+            std::string_view leftReversed(leftString);
+            std::string_view rightReversed(rightString);
             return leftReversed.compare(rightReversed);
         }
         case MockType::kToLowerString:
@@ -99,7 +74,7 @@ int CollatorInterfaceMock::compare(StringData left, StringData right) const {
 }
 
 CollatorInterface::ComparisonKey CollatorInterfaceMock::getComparisonKey(
-    StringData stringData) const {
+    std::string_view stringData) const {
     switch (_mockType) {
         case MockType::kReverseString: {
             std::string keyDataString = std::string{stringData};

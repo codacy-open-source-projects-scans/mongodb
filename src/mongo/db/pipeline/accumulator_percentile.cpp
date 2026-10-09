@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/accumulator_percentile.h"
 
@@ -38,17 +12,20 @@
 #include "mongo/db/pipeline/expression_from_accumulator_quantile.h"
 #include "mongo/db/pipeline/percentile_algo.h"
 #include "mongo/db/pipeline/percentile_algo_accurate.h"
+#include "mongo/db/query/query_knob_descriptors_execution.h"
 #include "mongo/db/version_context.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <type_traits>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 REGISTER_ACCUMULATOR(percentile, AccumulatorPercentile::parseArgs);
 REGISTER_STABLE_EXPRESSION(percentile, AccumulatorPercentile::parseExpression);
@@ -61,8 +38,9 @@ namespace {
 template <typename TAccumulator>
 Value evaluateAccumulatorQuantile(const ExpressionFromAccumulatorQuantile<TAccumulator>& expr,
                                   const Document& root,
-                                  Variables* variables) {
-    auto input = expr.getInput()->evaluate(root, variables);
+                                  Variables* variables,
+                                  const EvaluationContext& ctx) {
+    auto input = expr.getInput()->evaluate(root, variables, ctx);
     if (input.numeric()) {
         // On a scalar value, all percentiles are the same for all methods.
         return TAccumulator::formatFinalValue(
@@ -101,18 +79,18 @@ Value evaluateAccumulatorQuantile(const ExpressionFromAccumulatorQuantile<TAccum
 
 template <>
 Value ExpressionFromAccumulatorQuantile<AccumulatorPercentile>::evaluate(
-    const Document& root, Variables* variables) const {
-    return evaluateAccumulatorQuantile(*this, root, variables);
+    const Document& root, Variables* variables, const EvaluationContext& ctx) const {
+    return evaluateAccumulatorQuantile(*this, root, variables, ctx);
 }
 
 template <>
-Value ExpressionFromAccumulatorQuantile<AccumulatorMedian>::evaluate(const Document& root,
-                                                                     Variables* variables) const {
-    return evaluateAccumulatorQuantile(*this, root, variables);
+Value ExpressionFromAccumulatorQuantile<AccumulatorMedian>::evaluate(
+    const Document& root, Variables* variables, const EvaluationContext& ctx) const {
+    return evaluateAccumulatorQuantile(*this, root, variables, ctx);
 }
 
 namespace {
-PercentileMethodEnum methodNameToEnum(const VersionContext& vCtx, StringData method) {
+PercentileMethodEnum methodNameToEnum(const VersionContext& vCtx, std::string_view method) {
     uassert(ErrorCodes::BadValue,
             "Currently only 'approximate' can be used as a percentile 'method'.",
             feature_flags::gFeatureFlagAccuratePercentiles.isEnabled(
@@ -135,7 +113,7 @@ PercentileMethodEnum methodNameToEnum(const VersionContext& vCtx, StringData met
         "Currently only 'approximate', 'discrete', and 'continuous' percentiles are supported");
 }
 
-StringData percentileMethodEnumToString(PercentileMethodEnum method) {
+std::string_view percentileMethodEnumToString(PercentileMethodEnum method) {
     switch (method) {
         case PercentileMethodEnum::kApproximate:
             return AccumulatorPercentile::kApproximate;
@@ -161,8 +139,8 @@ std::vector<double> parseP(ExpressionContext* const expCtx,
             constExpr);
     Value pVals = constExpr->getValue();
 
-    constexpr StringData msg =
-        "The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: "_sd;
+    constexpr std::string_view msg =
+        "The $percentile 'p' field must be an array of numbers from [0.0, 1.0], but found: "sv;
     if (!pVals.isArray() || pVals.getArrayLength() == 0) {
         uasserted(7750301, str::stream() << msg << pVals.toString());
     }
@@ -174,7 +152,7 @@ std::vector<double> parseP(ExpressionContext* const expCtx,
             uasserted(7750302, str::stream() << msg << pVal.toString());
         }
         double p = pVal.coerceToDouble();
-        if (p < 0 || p > 1) {
+        if (!std::isfinite(p) || p < 0 || p > 1) {
             uasserted(7750303, str::stream() << msg << p);
         }
         ps.push_back(p);
@@ -209,7 +187,7 @@ AccumulationExpression AccumulatorPercentile::parseArgs(ExpressionContext* const
     return {ExpressionConstant::create(expCtx, Value(BSONNULL)) /*initializer*/,
             std::move(input) /*argument*/,
             std::move(factory),
-            "$percentile"_sd /*name*/};
+            "$percentile"sv /*name*/};
 }
 
 std::pair<std::vector<double> /*ps*/, PercentileMethodEnum>
@@ -248,7 +226,7 @@ void AccumulatorPercentile::processInternal(const Value& input, bool merging) {
         dynamic_cast<PartialPercentile<Value>*>(_algo.get())->combine(input);
 
         _memUsageTracker.set(sizeof(*this) + _algo->memUsageBytes());
-        if (!_memUsageTracker.withinMemoryLimit()) {
+        if (!_memUsageTracker.withinMemoryLimit(getExpressionContext()->getOperationContext())) {
             _algo->spill();
             _memUsageTracker.set(sizeof(*this) + _algo->memUsageBytes());
         }
@@ -299,9 +277,10 @@ std::unique_ptr<PercentileAlgorithm> AccumulatorPercentile::createPercentileAlgo
 AccumulatorPercentile::AccumulatorPercentile(ExpressionContext* const expCtx,
                                              const std::vector<double>& ps,
                                              PercentileMethodEnum method,
-                                             boost::optional<int> maxMemoryUsageBytes)
-    : AccumulatorState(
-          expCtx, maxMemoryUsageBytes.value_or(internalQueryMaxPercentileAccumulatorBytes.load())),
+                                             boost::optional<MemoryUsageLimit> maxMemoryUsageBytes)
+    : AccumulatorState(expCtx,
+                       maxMemoryUsageBytes.value_or(
+                           MemoryUsageLimit{query_knobs::kMaxPercentileAccumulatorBytes})),
       _percentiles(ps),
       _algo(createPercentileAlgorithm(method)),
       _method(method) {
@@ -321,7 +300,7 @@ void AccumulatorPercentile::reset() {
 
 Document AccumulatorPercentile::serialize(boost::intrusive_ptr<Expression> initializer,
                                           boost::intrusive_ptr<Expression> argument,
-                                          const SerializationOptions& options) const {
+                                          const query_shape::SerializationOptions& options) const {
     ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
     tassert(11294818, "Expecting initializer expression to be a constant", ec);
     tassert(11294817, "Expecting initializer expression to be nullish", ec->getValue().nullish());
@@ -333,7 +312,7 @@ Document AccumulatorPercentile::serialize(boost::intrusive_ptr<Expression> initi
 }
 
 void AccumulatorPercentile::serializeHelper(const boost::intrusive_ptr<Expression>& argument,
-                                            const SerializationOptions& options,
+                                            const query_shape::SerializationOptions& options,
                                             std::vector<double> percentiles,
                                             PercentileMethodEnum method,
                                             MutableDocument& md) {
@@ -368,7 +347,7 @@ AccumulationExpression AccumulatorMedian::parseArgs(ExpressionContext* const exp
     return {ExpressionConstant::create(expCtx, Value(BSONNULL)) /*initializer*/,
             std::move(input) /*argument*/,
             std::move(factory),
-            "$median"_sd /*name*/};
+            "$median"sv /*name*/};
 }
 
 std::pair<std::vector<double> /*ps*/, PercentileMethodEnum>
@@ -407,12 +386,11 @@ boost::intrusive_ptr<Expression> AccumulatorMedian::parseExpression(ExpressionCo
 AccumulatorMedian::AccumulatorMedian(ExpressionContext* expCtx,
                                      const std::vector<double>& /* unused */,
                                      PercentileMethodEnum method,
-                                     boost::optional<int> maxMemoryUsageBytes)
-    : AccumulatorPercentile(
-          expCtx,
-          {0.5} /* Median is equivalent to asking for the 50th percentile */,
-          method,
-          maxMemoryUsageBytes.value_or(internalQueryMaxPercentileAccumulatorBytes.load())) {}
+                                     boost::optional<MemoryUsageLimit> maxMemoryUsageBytes)
+    : AccumulatorPercentile(expCtx,
+                            {0.5} /* Median is equivalent to asking for the 50th percentile */,
+                            method,
+                            maxMemoryUsageBytes) {}
 
 Value AccumulatorMedian::formatFinalValue(int nPercentiles, const std::vector<double>& pctls) {
     if (pctls.empty()) {
@@ -438,7 +416,7 @@ Value AccumulatorMedian::getValue(bool toBeMerged) {
 
 Document AccumulatorMedian::serialize(boost::intrusive_ptr<Expression> initializer,
                                       boost::intrusive_ptr<Expression> argument,
-                                      const SerializationOptions& options) const {
+                                      const query_shape::SerializationOptions& options) const {
     ExpressionConstant const* ec = dynamic_cast<ExpressionConstant const*>(initializer.get());
     tassert(11294816, "Expecting initializer expression to be a constant", ec);
     tassert(11294815, "Expecting initializer expression to be nullish", ec->getValue().nullish());
@@ -450,7 +428,7 @@ Document AccumulatorMedian::serialize(boost::intrusive_ptr<Expression> initializ
 }
 
 void AccumulatorMedian::serializeHelper(const boost::intrusive_ptr<Expression>& argument,
-                                        const SerializationOptions& options,
+                                        const query_shape::SerializationOptions& options,
                                         std::vector<double> percentiles,
                                         PercentileMethodEnum method,
                                         MutableDocument& md) {

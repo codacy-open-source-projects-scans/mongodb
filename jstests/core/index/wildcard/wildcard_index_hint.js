@@ -1,6 +1,7 @@
 /**
  * Tests that $** indexes obey hinting.
  * @tags: [
+ *   uses_explain,
  *   assumes_read_concern_local,
  *   does_not_support_stepdowns,
  * ]
@@ -60,7 +61,9 @@ assertExpectedIndexAnswersQueryWithHint({"a": 1}, {"$**": 1}, "$**_1", [
 ]);
 
 // Hint a $** index with a competing _id index.
-assertExpectedIndexAnswersQueryWithHint({"a": 1, "_id": 10}, {"$**": 1}, "$**_1", [{a: 1, b: 1, c: {d: 1, e: 1}}]);
+assertExpectedIndexAnswersQueryWithHint({"a": 1, "_id": 10}, {"$**": 1}, "$**_1", [
+    {a: 1, b: 1, c: {d: 1, e: 1}},
+]);
 
 // Hint a regular index with a competing $** index.
 assertExpectedIndexAnswersQueryWithHint({"a": 1}, {"a": 1}, "a_1", [
@@ -96,7 +99,9 @@ assert.commandFailedWithCode(
 );
 
 // Hint a $** index on a query with compound fields.
-assertExpectedIndexAnswersQueryWithHint({"a": 1, "c.e": 1}, {"$**": 1}, "$**_1", [{a: 1, b: 1, c: {d: 1, e: 1}}]);
+assertExpectedIndexAnswersQueryWithHint({"a": 1, "c.e": 1}, {"$**": 1}, "$**_1", [
+    {a: 1, b: 1, c: {d: 1, e: 1}},
+]);
 
 // Hint a $** index by name.
 assertExpectedIndexAnswersQueryWithHint({"a": 1}, "$**_1", "$**_1", [

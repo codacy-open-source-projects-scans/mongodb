@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/transport/transport_layer_manager_impl.h"
@@ -34,6 +8,7 @@
 
 #ifdef __linux__
 #include <fstream>
+#include <string_view>
 #endif
 
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,12 +20,19 @@
 #include "mongo/transport/asio/asio_session_manager.h"
 #include "mongo/transport/asio/asio_transport_layer.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/version.h"
 
 #ifdef MONGO_CONFIG_GRPC
 #include "mongo/transport/grpc/grpc_feature_flag_gen.h"
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
+#endif
+
+#ifdef MONGO_CONFIG_CONNECTION_HANDOFF
+#include "mongo/transport/handoff/handoff_feature_flag_gen.h"
+#include "mongo/transport/handoff/handoff_session_manager.h"
+#include "mongo/transport/handoff/handoff_transport_layer.h"
 #endif
 
 #ifdef MONGO_CONFIG_SSL
@@ -61,6 +43,7 @@
 
 
 namespace mongo::transport {
+using namespace std::literals::string_view_literals;
 
 TransportLayerManagerImpl::TransportLayerManagerImpl(
     std::vector<std::unique_ptr<TransportLayer>> tls, TransportLayer* defaultEgressLayer)
@@ -179,8 +162,8 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::make(
     boost::optional<int> priorityPort;
     boost::optional<int> secondaryPort;
 
-    using PortMap = std::unordered_map<int, StringData>;
-    auto addUniquePort = [](PortMap& uniquePorts, int port, StringData role) {
+    using PortMap = std::unordered_map<int, std::string_view>;
+    auto addUniquePort = [](PortMap& uniquePorts, int port, std::string_view role) {
         auto [it, inserted] = uniquePorts.try_emplace(port, role);
         if (!inserted) {
             LOGV2_ERROR(11236000,
@@ -193,10 +176,10 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::make(
     };
 
     PortMap uniquePorts;
-    addUniquePort(uniquePorts, serverGlobalParams.port, "main"_sd);
+    addUniquePort(uniquePorts, serverGlobalParams.port, "main"sv);
 
     if (serverGlobalParams.secondaryPort) {
-        addUniquePort(uniquePorts, *serverGlobalParams.secondaryPort, "secondary"_sd);
+        addUniquePort(uniquePorts, *serverGlobalParams.secondaryPort, "secondary"sv);
         secondaryPort = serverGlobalParams.secondaryPort;
     }
 
@@ -204,14 +187,14 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::make(
         const auto loadBalancerPort = load_balancer_support::getLoadBalancerPort();
         if (loadBalancerPort) {
             proxyPort = loadBalancerPort;
-            addUniquePort(uniquePorts, *loadBalancerPort, "loadbalancer"_sd);
+            addUniquePort(uniquePorts, *loadBalancerPort, "loadbalancer"sv);
         }
     } else {
         // (Ignore FCV check): The proxy port needs to be open before the FCV is set.
         if (gFeatureFlagMongodProxyProtocolSupport.isEnabledAndIgnoreFCVUnsafe() &&
             serverGlobalParams.proxyPort) {
             proxyPort = *serverGlobalParams.proxyPort;
-            addUniquePort(uniquePorts, *proxyPort, "proxy"_sd);
+            addUniquePort(uniquePorts, *proxyPort, "proxy"sv);
         }
     }
 
@@ -223,13 +206,13 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::make(
             quickExit(ExitCode::badOptions);
         }
         priorityPort = serverGlobalParams.priorityPort;
-        addUniquePort(uniquePorts, *priorityPort, "priority"_sd);
+        addUniquePort(uniquePorts, *priorityPort, "priority"sv);
     }
 
     // Check ingress GRPC
 #ifdef MONGO_CONFIG_GRPC
     if (shouldGRPCIngressBeEnabled()) {
-        addUniquePort(uniquePorts, serverGlobalParams.grpcPort, "grpc"_sd);
+        addUniquePort(uniquePorts, serverGlobalParams.grpcPort, "grpc"sv);
     }
 #endif
 
@@ -294,6 +277,35 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::createWithConf
         retVector.push_back(std::move(tl));
     }
 
+#ifdef MONGO_CONFIG_CONNECTION_HANDOFF
+    // TODO(SERVER-130054): s2n-tls cannot initialize against an OpenSSL 1.x FIPS-capable libcrypto
+    // when FIPS is active (s2n_fips.c only supports OpenSSL 3.x FIPS). Skip HandoffTransportLayer
+    // entirely in that configuration.
+    bool inFIPSMode = false;
+#if defined(OPENSSL_FIPS)
+    inFIPSMode = sslGlobalParams.sslFIPSMode;
+#endif
+    if (feature_flags::gFeatureFlagTLSConnectionHandoff.isEnabled()) {
+        if (!inFIPSMode) {
+            retVector.push_back(
+                std::make_unique<HandoffTransportLayer>(HandoffTransportLayer::Params{
+                    .socketPrefix = config->proxySocketPrefix.empty() ? config->socket
+                                                                      : config->proxySocketPrefix,
+                    .port = config->port,
+                    .socketGroupID = config->proxySocketGid,
+                    .listenBacklog = serverGlobalParams.listenBacklog
+                        ? *serverGlobalParams.listenBacklog
+                        : ProcessInfo::getDefaultListenBacklog(),
+                    .sessionManager = std::make_unique<HandoffSessionManager>(svcCtx),
+                }));
+        } else {
+            LOGV2_WARNING(
+                12995201,
+                "TLS connection handoff disabled: Session handoff is not supported in FIPS mode");
+        }
+    }
+#endif
+
 #ifdef MONGO_CONFIG_GRPC
     using GRPCTL = grpc::GRPCTransportLayerImpl;
     grpc::GRPCTransportLayer::Options opts(*config);
@@ -323,7 +335,7 @@ std::unique_ptr<TransportLayerManager> TransportLayerManagerImpl::createWithConf
 #ifdef MONGO_CONFIG_SSL
 Status TransportLayerManagerImpl::rotateCertificates(std::shared_ptr<SSLManagerInterface> manager,
                                                      bool asyncOCSPStaple) {
-    std::vector<StringData> successfulRotations;
+    std::vector<std::string_view> successfulRotations;
     for (auto&& tl : _tls) {
         if (auto status = tl->rotateCertificates(manager, asyncOCSPStaple); !status.isOK()) {
             LOGV2_INFO(8074101,
@@ -337,7 +349,7 @@ Status TransportLayerManagerImpl::rotateCertificates(std::shared_ptr<SSLManagerI
                 failureMessage << " Before rotation failed for " << tl->getNameForLogging()
                                << ", other transport layer(s) succeeded and are currently "
                                   "using rotated certificates: [ ";
-                for (StringData s : successfulRotations) {
+                for (std::string_view s : successfulRotations) {
                     failureMessage << s << " ";
                 }
                 failureMessage << "]";

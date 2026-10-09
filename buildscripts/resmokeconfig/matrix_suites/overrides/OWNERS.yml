@@ -15,6 +15,12 @@ filters:
   - "networking.yml":
     approvers:
       - 10gen/server-networking-and-observability
+  - "qemp_ifr_batch1.yml":
+    approvers:
+      - 10gen/query-execution
+  - "qemp_ifr_no_nlm_transform.yml":
+    approvers:
+      - 10gen/query-execution
   - "query_settings.yml":
     approvers:
       - 10gen/query-execution-query-settings
@@ -76,9 +82,15 @@ filters:
   - "kill_primary.yml":
     approvers:
       - 10gen/server-replication-reviewers
+  - "replica_sets_stepdown_selector.yml":
+    approvers:
+      - 10gen/server-replication-reviewers
   - "minimum_batch_size.yml":
     approvers:
       - 10gen/query-execution
   - "encryption.yml":
     approvers:
       - 10gen/server-security
+  - "with_mongot_extension*":
+    approvers:
+      - 10gen/query-integration-extensions-api

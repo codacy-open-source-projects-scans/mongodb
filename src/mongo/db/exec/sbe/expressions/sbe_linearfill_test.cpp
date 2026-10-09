@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -48,18 +22,18 @@ public:
     std::pair<value::TypeTags, value::Value> initState() {
         auto [stateTag, stateVal] = value::makeNewArray();
         auto state = value::getArrayView(stateVal);
-        state->push_back(value::TypeTags::Null, 0);
-        state->push_back(value::TypeTags::Null, 0);
-        state->push_back(value::TypeTags::Null, 0);
-        state->push_back(value::TypeTags::Null, 0);
-        state->push_back(value::TypeTags::Null, 0);
-        state->push_back(value::TypeTags::NumberInt64, 0);
+        state->push_back_raw(value::TypeTags::Null, 0);
+        state->push_back_raw(value::TypeTags::Null, 0);
+        state->push_back_raw(value::TypeTags::Null, 0);
+        state->push_back_raw(value::TypeTags::Null, 0);
+        state->push_back_raw(value::TypeTags::Null, 0);
+        state->push_back_raw(value::TypeTags::NumberInt64, 0);
         return {stateTag, stateVal};
     }
 
-    void runAndAssertExpression(std::vector<std::pair<value::TypeTags, value::Value>>& inputValues,
-                                std::vector<std::pair<value::TypeTags, value::Value>>& sortByValues,
-                                std::vector<std::pair<value::TypeTags, value::Value>>& expValues) {
+    void runAndAssertExpression(const std::vector<value::TagValueOwned>& inputValues,
+                                const std::vector<value::TagValueOwned>& sortByValues,
+                                const std::vector<value::TagValueOwned>& expValues) {
         value::ViewOfValueAccessor inputAccessor;
         auto inputSlot = bindAccessor(&inputAccessor);
 
@@ -99,30 +73,25 @@ public:
                     break;
                 }
 
-                inputAccessor.reset(inputValues[idx].first, inputValues[idx].second);
-                sortByAccessor.reset(sortByValues[idx].first, sortByValues[idx].second);
+                inputAccessor.reset(inputValues[idx].tag(), inputValues[idx].value());
+                sortByAccessor.reset(sortByValues[idx].tag(), sortByValues[idx].value());
                 std::tie(runTag, runVal) = runCompiledExpression(compiledLinearFillAdd.get());
                 aggAccessor.reset(runTag, runVal);
                 idx++;
             }
 
-            sortByAccessor.reset(sortByValues[i].first, sortByValues[i].second);
+            sortByAccessor.reset(sortByValues[i].tag(), sortByValues[i].value());
             auto out = runCompiledExpression(compiledLinearFillFinalize.get());
+            value::TagValueOwned outOwned = value::TagValueOwned::fromRaw(out);
 
-            ASSERT_EQ(out.first, expValues[i].first);
-            ASSERT_THAT(out, ValueEq(expValues[i]));
-
-            value::releaseValue(out.first, out.second);
-            value::releaseValue(expValues[i].first, expValues[i].second);
-
-            value::releaseValue(inputValues[i].first, inputValues[i].second);
-            value::releaseValue(sortByValues[i].first, sortByValues[i].second);
+            ASSERT_EQ(outOwned.tag(), expValues[i].tag());
+            ASSERT_THAT(out, ValueEq(expValues[i].view()));
         }
     }
 };
 
 TEST_F(SBELinearFillTest, LinearFillSortedByDate) {
-    std::vector<std::pair<value::TypeTags, value::Value>> inputValues = {
+    auto inputValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(2)},
         {value::TypeTags::Null, 0},
@@ -133,9 +102,9 @@ TEST_F(SBELinearFillTest, LinearFillSortedByDate) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(9)},
         {value::TypeTags::Null, 0},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> sortByValues = {
+    auto sortByValues = makeOwnedVector({
         {value::TypeTags::Date, 1589811030000LL},
         {value::TypeTags::Date, 1589811060000LL},
         {value::TypeTags::Date, 1589811090000LL},
@@ -146,9 +115,9 @@ TEST_F(SBELinearFillTest, LinearFillSortedByDate) {
         {value::TypeTags::Date, 1589811240000LL},
         {value::TypeTags::Date, 1589811270000LL},
         {value::TypeTags::Date, 1589811300000LL},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> expValues = {
+    auto expValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(2)},
         {value::TypeTags::NumberDouble, value::bitcastFrom<double>(3.0)},
@@ -159,13 +128,13 @@ TEST_F(SBELinearFillTest, LinearFillSortedByDate) {
         {value::TypeTags::NumberDouble, value::bitcastFrom<double>(8.0)},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(9)},
         {value::TypeTags::Null, 0},
-    };
+    });
 
     runAndAssertExpression(inputValues, sortByValues, expValues);
 }
 
 TEST_F(SBELinearFillTest, LinearFillSortedByNumericType) {
-    std::vector<std::pair<value::TypeTags, value::Value>> inputValues = {
+    auto inputValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(2)},
         {value::TypeTags::Null, 0},
@@ -176,9 +145,9 @@ TEST_F(SBELinearFillTest, LinearFillSortedByNumericType) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberDecimal, value::makeCopyDecimal(Decimal128{9.0}).second},
         {value::TypeTags::Null, 0},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> sortByValues = {
+    auto sortByValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1LL},
         {value::TypeTags::NumberInt64, 2LL},
         {value::TypeTags::NumberInt64, 3LL},
@@ -189,9 +158,9 @@ TEST_F(SBELinearFillTest, LinearFillSortedByNumericType) {
         {value::TypeTags::NumberInt64, 8LL},
         {value::TypeTags::NumberInt64, 9LL},
         {value::TypeTags::NumberInt64, 10LL},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> expValues = {
+    auto expValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(2)},
         {value::TypeTags::NumberDouble, value::bitcastFrom<double>(3.0)},
@@ -202,13 +171,13 @@ TEST_F(SBELinearFillTest, LinearFillSortedByNumericType) {
         {value::TypeTags::NumberDecimal, value::makeCopyDecimal(Decimal128{8.0}).second},
         {value::TypeTags::NumberDecimal, value::makeCopyDecimal(Decimal128{9.0}).second},
         {value::TypeTags::Null, 0},
-    };
+    });
 
     runAndAssertExpression(inputValues, sortByValues, expValues);
 }
 
 TEST_F(SBELinearFillTest, LinearFillAllNull) {
-    std::vector<std::pair<value::TypeTags, value::Value>> inputValues = {
+    auto inputValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
@@ -219,9 +188,9 @@ TEST_F(SBELinearFillTest, LinearFillAllNull) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> sortByValues = {
+    auto sortByValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1LL},
         {value::TypeTags::NumberInt64, 2LL},
         {value::TypeTags::NumberInt64, 3LL},
@@ -232,9 +201,9 @@ TEST_F(SBELinearFillTest, LinearFillAllNull) {
         {value::TypeTags::NumberInt64, 8LL},
         {value::TypeTags::NumberInt64, 9LL},
         {value::TypeTags::NumberInt64, 10LL},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> expValues = {
+    auto expValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
@@ -245,13 +214,13 @@ TEST_F(SBELinearFillTest, LinearFillAllNull) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
-    };
+    });
 
     runAndAssertExpression(inputValues, sortByValues, expValues);
 }
 
 TEST_F(SBELinearFillTest, LinearFillAllNonNull) {
-    std::vector<std::pair<value::TypeTags, value::Value>> inputValues = {
+    auto inputValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1},
         {value::TypeTags::NumberInt64, 2},
         {value::TypeTags::NumberInt64, 3},
@@ -262,9 +231,9 @@ TEST_F(SBELinearFillTest, LinearFillAllNonNull) {
         {value::TypeTags::NumberInt64, 8},
         {value::TypeTags::NumberInt64, 9},
         {value::TypeTags::NumberInt64, 10},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> sortByValues = {
+    auto sortByValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1LL},
         {value::TypeTags::NumberInt64, 2LL},
         {value::TypeTags::NumberInt64, 3LL},
@@ -275,9 +244,9 @@ TEST_F(SBELinearFillTest, LinearFillAllNonNull) {
         {value::TypeTags::NumberInt64, 8LL},
         {value::TypeTags::NumberInt64, 9LL},
         {value::TypeTags::NumberInt64, 10LL},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> expValues = {
+    auto expValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1},
         {value::TypeTags::NumberInt64, 2},
         {value::TypeTags::NumberInt64, 3},
@@ -288,13 +257,13 @@ TEST_F(SBELinearFillTest, LinearFillAllNonNull) {
         {value::TypeTags::NumberInt64, 8},
         {value::TypeTags::NumberInt64, 9},
         {value::TypeTags::NumberInt64, 10},
-    };
+    });
 
     runAndAssertExpression(inputValues, sortByValues, expValues);
 }
 
 TEST_F(SBELinearFillTest, LinearFillOnlyOneNonNull) {
-    std::vector<std::pair<value::TypeTags, value::Value>> inputValues = {
+    auto inputValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
@@ -305,9 +274,9 @@ TEST_F(SBELinearFillTest, LinearFillOnlyOneNonNull) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> sortByValues = {
+    auto sortByValues = makeOwnedVector({
         {value::TypeTags::NumberInt64, 1LL},
         {value::TypeTags::NumberInt64, 2LL},
         {value::TypeTags::NumberInt64, 3LL},
@@ -318,9 +287,9 @@ TEST_F(SBELinearFillTest, LinearFillOnlyOneNonNull) {
         {value::TypeTags::NumberInt64, 8LL},
         {value::TypeTags::NumberInt64, 9LL},
         {value::TypeTags::NumberInt64, 10LL},
-    };
+    });
 
-    std::vector<std::pair<value::TypeTags, value::Value>> expValues = {
+    auto expValues = makeOwnedVector({
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
@@ -331,7 +300,7 @@ TEST_F(SBELinearFillTest, LinearFillOnlyOneNonNull) {
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
         {value::TypeTags::Null, 0},
-    };
+    });
 
     runAndAssertExpression(inputValues, sortByValues, expValues);
 }

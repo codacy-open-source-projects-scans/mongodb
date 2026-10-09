@@ -2,9 +2,6 @@
  * Confirms that background index builds on a primary are not aborted when the node steps down between
  * the initialization and collection scan phases.
  * @tags: [
- *   # This scenario won't be testable until primary driven index builds restart
- *   # on step up.
- *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   requires_replication,
  * ]
  */
@@ -32,7 +29,9 @@ const coll = testDB.getCollection("test");
 
 assert.commandWorked(coll.insert({a: 1}));
 
-assert.commandWorked(primary.adminCommand({configureFailPoint: "hangAfterInitializingIndexBuild", mode: "alwaysOn"}));
+assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "hangAfterInitializingIndexBuild", mode: "alwaysOn"}),
+);
 
 const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1});
 
@@ -47,7 +46,9 @@ try {
     // Step down the primary.
     assert.commandWorked(primary.adminCommand({replSetStepDown: 60, force: true}));
 } finally {
-    assert.commandWorked(primary.adminCommand({configureFailPoint: "hangAfterInitializingIndexBuild", mode: "off"}));
+    assert.commandWorked(
+        primary.adminCommand({configureFailPoint: "hangAfterInitializingIndexBuild", mode: "off"}),
+    );
 }
 
 // Wait for the index build to stop.

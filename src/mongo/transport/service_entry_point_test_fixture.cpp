@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/transport/service_entry_point_test_fixture.h"
@@ -43,11 +17,14 @@
 #include "mongo/db/storage/storage_engine_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/traces/sampler/sampler.h"
 #include "mongo/otel/traces/telemetry_context_serialization.h"
+#include "mongo/otel/traces/traces_test_util.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/legacy_reply.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/telemetry_context_section_gen.h"
 #include "mongo/transport/service_entry_point.h"
 
 #ifdef MONGO_CONFIG_OTEL
@@ -55,6 +32,9 @@
 #endif
 
 namespace mongo {
+
+using ::testing::Contains;
+using ::testing::IsEmpty;
 
 MONGO_REGISTER_COMMAND(TestCmdSucceeds).testOnly().forRouter().forShard();
 MONGO_REGISTER_COMMAND(TestCmdFailsRunInvocationWithResponse).testOnly().forRouter().forShard();
@@ -74,6 +54,7 @@ MONGO_REGISTER_COMMAND(TestCmdSupportsWriteConcern).testOnly().forRouter().forSh
 WriteConcernOptions TestCmdSupportsWriteConcern::expectedWriteConcern;
 
 void ServiceEntryPointTestFixture::setUp() {
+    ServiceContextTest::setUp();
     // Minimal set up necessary for ServiceEntryPoint.
     auto service = getGlobalServiceContext();
     service->setStorageEngine(std::make_unique<StorageEngineMock>());
@@ -296,16 +277,16 @@ void ServiceEntryPointTestFixture::testHelpField() {
 }
 
 void ServiceEntryPointTestFixture::testCommandServiceCounters(ClusterRole serviceRole) {
-    auto initialCommandCounter = globalOpCounters().getCommand()->load();
-    auto initialQueryCounter = globalOpCounters().getQuery()->load();
+    auto initialCommandCounter = globalOpCounters().commands->value();
+    auto initialQueryCounter = globalOpCounters().queries->value();
 
     // Test that when commands that return false for `shouldAffect(Query/Command)Counter` are
     // run, the global command and query counters do not increment.
     {
         runCommandTestWithResponse(BSON(TestCmdSucceeds::kCommandName << 1));
 
-        ASSERT_EQ(globalOpCounters().getCommand()->load(), initialCommandCounter);
-        ASSERT_EQ(globalOpCounters().getQuery()->load(), initialQueryCounter);
+        ASSERT_EQ(globalOpCounters().commands->value(), initialCommandCounter);
+        ASSERT_EQ(globalOpCounters().queries->value(), initialQueryCounter);
     }
 
     // Test that when commands that return true for `shouldAffectCommandCounter` are run, the global
@@ -313,8 +294,8 @@ void ServiceEntryPointTestFixture::testCommandServiceCounters(ClusterRole servic
     {
         runCommandTestWithResponse(BSON(TestCmdSucceedsAffectsCommandCounters::kCommandName << 1));
 
-        ASSERT_EQ(globalOpCounters().getCommand()->load(), initialCommandCounter + 1);
-        ASSERT_EQ(globalOpCounters().getQuery()->load(), initialQueryCounter);
+        ASSERT_EQ(globalOpCounters().commands->value(), initialCommandCounter + 1);
+        ASSERT_EQ(globalOpCounters().queries->value(), initialQueryCounter);
     }
 
     // Test that when commands that return true for `shouldAffectQueryCounter` are run, the global
@@ -322,8 +303,8 @@ void ServiceEntryPointTestFixture::testCommandServiceCounters(ClusterRole servic
     {
         runCommandTestWithResponse(BSON(TestCmdSucceedsAffectsQueryCounters::kCommandName << 1));
 
-        ASSERT_EQ(globalOpCounters().getCommand()->load(), initialCommandCounter + 1);
-        ASSERT_EQ(globalOpCounters().getQuery()->load(), initialQueryCounter + 1);
+        ASSERT_EQ(globalOpCounters().commands->value(), initialCommandCounter + 1);
+        ASSERT_EQ(globalOpCounters().queries->value(), initialQueryCounter + 1);
     }
 }
 
@@ -572,41 +553,81 @@ void ServiceEntryPointTestFixture::runWriteConcernTestExpectClusterDefault(
     ASSERT_EQ(logs.countTextContaining("Applying default writeConcern"), 1);
 }
 
-#ifdef MONGO_CONFIG_OTEL
-void ServiceEntryPointTestFixture::testTelemetryContextDeserializedFromRequest() {
+void ServiceEntryPointTestFixture::testTelemetryContextDeserializedFromSection() {
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        GTEST_SKIP() << "OTel not configured";
+    }
+    otel::traces::OtelTracesCapturer capturer;
+    auto guard = otel::traces::setTraceSamplingFnForTest(
+        [](std::string_view, double) { return true; }, [] { return true; });
+
     auto opCtx = makeOperationContext();
 
-    // "traceparent" format: version-traceid-spanid-traceflags. "tracestate" can be any string.
-    BSONObjBuilder traceCtxBuilder;
-    traceCtxBuilder.append("traceparent",
-                           "00-11111111111111111111111111111111-1111111111111111-01");
-    traceCtxBuilder.append("tracestate", "dummystring");
+    const static HostAndPort kTestTargetHost = {HostAndPort("FakeHost", 12345)};
+    auto request = executor::RemoteCommandRequest{kTestTargetHost,
+                                                  DatabaseName::kAdmin,
+                                                  BSON(TestCmdSucceeds::kCommandName << 1),
+                                                  opCtx.get()};
+    auto opMsgRequest = static_cast<OpMsgRequest>(request);
+    opMsgRequest.telemetryContext = TelemetryContextSection{
+        OtelContextSection{"00-11111111111111111111111111111111-1111111111111111-01"}};
+    auto msg = opMsgRequest.serialize();
 
-    BSONObjBuilder cmdBuilder;
-    cmdBuilder.append(TestCmdSucceeds::kCommandName, 1);
-    cmdBuilder.append("$traceCtx", traceCtxBuilder.obj());
-
-    runCommandTestWithResponse(cmdBuilder.obj(), opCtx.get());
+    auto swDbResponse = handleRequest(msg, opCtx.get());
+    EXPECT_EQ(Status::OK(), swDbResponse);
 
     auto& holder = otel::TelemetryContextHolder::getDecoration(opCtx.get());
     auto retrievedCtx = holder.getTelemetryContext();
-    ASSERT_NE(retrievedCtx, nullptr);
+    EXPECT_NE(retrievedCtx, nullptr);
 
-    auto spanCtx = std::dynamic_pointer_cast<otel::traces::SpanTelemetryContextImpl>(retrievedCtx);
-    ASSERT_NE(spanCtx, nullptr);
-    auto span = spanCtx->getSpan();
-    ASSERT_TRUE(span->GetContext().IsValid());
+    EXPECT_THAT(capturer.getSpans(TestCmdSucceeds::kCommandName), Not(IsEmpty()));
 }
 
-void ServiceEntryPointTestFixture::testTelemetryContextNotSetWhenNotInRequest() {
-    auto opCtx = makeOperationContext();
+void ServiceEntryPointTestFixture::testSpanNotCreatedWhenTelemetryContextNotSetInRequest() {
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        GTEST_SKIP() << "OTel not configured";
+    }
+    otel::traces::OtelTracesCapturer capturer;
+    // We want the sampler to return false so that the only reason the span would be kept is that
+    // the telemetry context is set to include a parent span.
+    auto samplerGuard = otel::traces::setTraceSamplingFnForTest(
+        [](std::string_view, double) { return false; }, [] { return true; });
 
+    auto opCtx = makeOperationContext();
     runCommandTestWithResponse(BSON(TestCmdSucceeds::kCommandName << 1), opCtx.get());
 
-    auto& holder = otel::TelemetryContextHolder::getDecoration(opCtx.get());
-    auto retrievedCtx = holder.getTelemetryContext();
-    ASSERT_EQ(retrievedCtx, nullptr);
+    EXPECT_THAT(capturer.getSpans(TestCmdSucceeds::kCommandName), IsEmpty());
 }
-#endif  // MONGO_CONFIG_OTEL
+
+void ServiceEntryPointTestFixture::testIngressSpanHasServerKind() {
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        GTEST_SKIP() << "OTel not configured";
+    }
+    otel::traces::OtelTracesCapturer capturer;
+
+    auto opCtx = makeOperationContext();
+    runCommandTestWithResponse(BSON(TestCmdSucceeds::kCommandName << 1), opCtx.get());
+
+    EXPECT_THAT(capturer.getSpans(TestCmdSucceeds::kCommandName),
+                Contains(otel::traces::HasKind(otel::traces::SpanKind::kServer)));
+}
+
+void ServiceEntryPointTestFixture::testIngressSpanHasConsumerKindForMoreToCome() {
+    if (!otel::traces::OtelTracesCapturer::canReadSpans()) {
+        GTEST_SKIP() << "OTel not configured";
+    }
+    otel::traces::OtelTracesCapturer capturer;
+
+    auto opCtx = makeOperationContext();
+    // A request with the moreToCome flag set is fire-and-forget; the ingress span should be marked
+    // as a consumer span rather than a server span.
+    auto msg = constructMessage(BSON(TestCmdSucceeds::kCommandName << 1), opCtx.get());
+    OpMsg::setFlag(&msg, OpMsg::kMoreToCome);
+    auto swDbResponse = handleRequest(msg, opCtx.get());
+    ASSERT_OK(swDbResponse);
+
+    EXPECT_THAT(capturer.getSpans(TestCmdSucceeds::kCommandName),
+                Contains(otel::traces::HasKind(otel::traces::SpanKind::kConsumer)));
+}
 
 }  // namespace mongo

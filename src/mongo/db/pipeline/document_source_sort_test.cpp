@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_sort.h"
 
@@ -45,12 +19,16 @@
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/pipeline/pipeline_split_state.h"
 #include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
@@ -69,6 +47,7 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 using boost::intrusive_ptr;
 using std::deque;
@@ -127,8 +106,8 @@ private:
     }
     intrusive_ptr<DocumentSource> _sort;
 
-    RAIIServerParameterControllerForTest _featureFlagController;
-    RAIIServerParameterControllerForTest _curopWriteThreshold;
+    unittest::ServerParameterGuard _featureFlagController;
+    unittest::ServerParameterGuard _curopWriteThreshold;
 };
 
 
@@ -203,7 +182,8 @@ TEST_F(DocumentSourceSortTest, SortWithLimit) {
 }
 
 TEST_F(DocumentSourceSortTest, ParseableSerialization) {
-    // Test that SerializationOptions.serializeForCloning works as expected for $sort stage.
+    // Test that query_shape::SerializationOptions.serializeForCloning works as expected for $sort
+    // stage.
     auto expCtx = getExpCtx();
     createSort(BSON("a" << 1));
 
@@ -217,7 +197,7 @@ TEST_F(DocumentSourceSortTest, ParseableSerialization) {
     ASSERT_EQUALS(*sort()->getLimit(), 2);
 
     vector<Value> arr;
-    sort()->serializeToArray(arr, SerializationOptions{.serializeForCloning = true});
+    sort()->serializeToArray(arr, query_shape::SerializationOptions{.serializeForCloning = true});
     ASSERT_EQUALS(arr.size(), 1U);
     ASSERT_VALUE_EQ(arr[0], Value(fromjson("{$sort: {a: 1, $_internalLimit: 2}}")));
 
@@ -230,7 +210,7 @@ TEST_F(DocumentSourceSortTest, ParseableSerialization) {
     ASSERT_EQUALS(*sort2->getLimit(), 2);
 
     arr.clear();
-    sort2->serializeToArray(arr, SerializationOptions{.serializeForCloning = true});
+    sort2->serializeToArray(arr, query_shape::SerializationOptions{.serializeForCloning = true});
     ASSERT_EQUALS(arr.size(), 1U);
     ASSERT_VALUE_EQ(arr[0], Value(fromjson("{$sort: {a: 1, $_internalLimit: 2}}")));
 }
@@ -241,7 +221,8 @@ TEST_F(DocumentSourceSortTest, QueryShapeSerializationOmitsInternalField) {
     auto sort = DocumentSourceSort::create(
         expCtx, {BSON("a" << 1), expCtx}, {.outputSortKeyMetadata = true});
     vector<Value> arr;
-    sort->serializeToArray(arr, SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
+    sort->serializeToArray(
+        arr, query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
     ASSERT_VALUE_EQ(arr[0], Value{fromjson("{$sort: {a: 1}}")});
 }
 
@@ -249,7 +230,7 @@ TEST_F(DocumentSourceSortTest, DoesNotPushProjectBeforeSelf) {
     DocumentSourceContainer container;
     createSort(BSON("_id" << 1));
     auto project =
-        DocumentSourceProject::create(BSON("fullDocument" << true), getExpCtx(), "$project"_sd);
+        DocumentSourceProject::create(BSON("fullDocument" << true), getExpCtx(), "$project"sv);
 
     container.push_back(sort());
     container.push_back(project);
@@ -332,14 +313,14 @@ public:
             }
             ASSERT_GT(_sortStage->getMemoryTracker_forTest().peakTrackedMemoryBytes(), 0);
 
-            // To avoid perf regressions, sort chunks its writes to CurOp. CurOp's reported value <=
-            // actual usage < reported value + chunksize.
+            // To avoid perf regressions, sort rate-limits its writes to CurOp to chunk-boundary
+            // crossings, but reports the exact in-use total at each crossing. Between crossings
+            // CurOp holds a recent exact sample, so it stays within the same chunk as the actual
+            // usage.
             int64_t curopUsage = curop->getInUseTrackedMemoryBytes();
-            ASSERT_EQ(curopUsage % chunkSize, 0);
-            ASSERT_LTE(curopUsage, actualUsage);
-            ASSERT_LT(actualUsage, curopUsage + chunkSize)
-                << "Actual usage (" << actualUsage << ") should be < reported (" << curopUsage
-                << ") + chunk size (" << chunkSize << ")";
+            ASSERT_EQ(curopUsage / chunkSize, actualUsage / chunkSize)
+                << "CurOp usage (" << curopUsage << ") and actual usage (" << actualUsage
+                << ") should be in the same chunk (size " << chunkSize << ")";
         }
         assertEOF();
 
@@ -432,7 +413,7 @@ TEST_F(DocumentSourceSortExecutionTest, CompoundSortSpecAlternateOrderSecondFiel
 /** Sorting different types is not supported. */
 TEST_F(DocumentSourceSortExecutionTest, InconsistentTypeSort) {
     createSort(BSON("a" << 1));
-    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"_sd}}},
+    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"sv}}},
                  sort(),
                  "[{_id:0,a:1},{_id:1,a:\"foo\"}]");
 }
@@ -494,7 +475,7 @@ public:
           _chunkController("internalQueryMaxWriteToCurOpMemoryUsageBytes", ChunkSize) {}
 
 private:
-    RAIIServerParameterControllerForTest _chunkController;
+    unittest::ServerParameterGuard _chunkController;
 };
 
 using DocumentSourceSortExecutionLargeChunkTest = DocumentSourceSortExecutionChunkTest<1000000>;
@@ -609,8 +590,9 @@ TEST_F(DocumentSourceSortExecutionTest, ExtractArrayValues) {
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ParseableSerialization) {
-    // Test that the serialized spec created with SerializationOptions.serializeForCloning option
-    // can be parsed to construct a clone of the DocumentSourceSort instance.
+    // Test that the serialized spec created with
+    // query_shape::SerializationOptions.serializeForCloning option can be parsed to construct a
+    // clone of the DocumentSourceSort instance.
     auto expCtx = getExpCtx();
 
     BSONObj spec = fromjson("{$sort: {a: 1, $_internalLimit: 2}}");
@@ -624,7 +606,7 @@ TEST_F(DocumentSourceSortExecutionTest, ParseableSerialization) {
                  "[{_id:0,a:1},{_id:1,a:2}]");
 
     vector<Value> arr;
-    sort()->serializeToArray(arr, SerializationOptions{.serializeForCloning = true});
+    sort()->serializeToArray(arr, query_shape::SerializationOptions{.serializeForCloning = true});
     ASSERT_EQUALS(arr.size(), 1U);
     ASSERT_VALUE_EQ(arr[0], Value(fromjson("{$sort: {a: 1, $_internalLimit: 2}}")));
 }
@@ -777,8 +759,8 @@ initSpillingTestForBoundedSort(boost::intrusive_ptr<ExpressionContext> expCtx,
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) {
     unittest::TempDir tempDir("DocumentSourceSortTest");
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", 1000000};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   1000000};
     auto [mock, sort, sortStage] = initSpillingTest(getExpCtx(), tempDir, 1000000);
 
     // There were 2 pauses, so we should expect 2 paused results before any results can be
@@ -801,8 +783,8 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) 
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToManuallySpillBeforeReturningFirstDocument) {
     unittest::TempDir tempDir("DocumentSourceSortTest");
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", 1000000};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   1000000};
     auto [mock, sort, sortStage] = initSpillingTest(getExpCtx(), tempDir, 10);
 
     ASSERT_TRUE(sortStage->getNext().isPaused());
@@ -824,8 +806,8 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToManuallySpillBeforeReturni
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToManuallySpillAfterReturningFirstDocument) {
     unittest::TempDir tempDir("DocumentSourceSortTest");
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", 1000000};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   1000000};
     auto [mock, sort, sortStage] = initSpillingTest(getExpCtx(), tempDir, 10);
 
     ASSERT_TRUE(sortStage->getNext().isPaused());
@@ -908,8 +890,8 @@ TEST_F(DocumentSourceSortExecutionTest,
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToReportSpillingStatsInBoundedSort) {
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", 3 * 1024};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   3 * 1024};
 
     unittest::TempDir tempDir("DocumentSourceSortTest");
     auto expCtx = getExpCtx();
@@ -968,8 +950,8 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToReportSpillingStatsInBound
 
 TEST_F(DocumentSourceSortExecutionTest,
        ShouldBeAbleToReportSpillingStatsInBoundedSortWithSortKeyMetadata) {
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", 3 * 1024};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   3 * 1024};
 
     unittest::TempDir tempDir("DocumentSourceSortTest");
     auto expCtx = getExpCtx();
@@ -1035,8 +1017,8 @@ TEST_F(DocumentSourceSortExecutionTest,
     auto expCtx = getExpCtx();
     expCtx->setAllowDiskUse(false);
     const size_t maxMemoryUsageBytes = 1000;
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", int(maxMemoryUsageBytes)};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   int(maxMemoryUsageBytes)};
 
     auto sort = DocumentSourceSort::create(expCtx, {BSON("_id" << -1), expCtx});
 
@@ -1055,8 +1037,8 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPa
     auto expCtx = getExpCtx();
     expCtx->setAllowDiskUse(false);
     const size_t maxMemoryUsageBytes = 1000;
-    RAIIServerParameterControllerForTest sortMemoryLimit{
-        "internalQueryMaxBlockingSortMemoryUsageBytes", int(maxMemoryUsageBytes)};
+    unittest::ServerParameterGuard sortMemoryLimit{"internalQueryMaxBlockingSortMemoryUsageBytes",
+                                                   int(maxMemoryUsageBytes)};
 
     auto sort = DocumentSourceSort::create(expCtx, {BSON("_id" << -1), expCtx});
 
@@ -1083,8 +1065,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPa
 }
 
 TEST_F(DocumentSourceSortTest, RedactionWithoutMemoryTracking) {
-    RAIIServerParameterControllerForTest featureFlagController{"featureFlagQueryMemoryTracking",
-                                                               false};
+    unittest::ServerParameterGuard featureFlagController{"featureFlagQueryMemoryTracking", false};
     createSort(BSON("a" << 1));
     auto boundedSort = DocumentSourceSort::createBoundedSort(
         sort()->getSortPattern(), DocumentSourceSort::kMin, 1337, 10, false, getExpCtx());
@@ -1165,8 +1146,7 @@ TEST_F(DocumentSourceSortTest, RedactionWithoutMemoryTracking) {
 }
 
 TEST_F(DocumentSourceSortTest, RedactionWithSortKeyMetadata) {
-    RAIIServerParameterControllerForTest featureFlagController{"featureFlagQueryMemoryTracking",
-                                                               false};
+    unittest::ServerParameterGuard featureFlagController{"featureFlagQueryMemoryTracking", false};
     createSort(BSON("a" << 1));
     auto boundedSort = DocumentSourceSort::createBoundedSort(
         sort()->getSortPattern(), DocumentSourceSort::kMin, 1337, 10, true, getExpCtx());
@@ -1247,8 +1227,7 @@ TEST_F(DocumentSourceSortTest, RedactionWithSortKeyMetadata) {
 }
 
 TEST_F(DocumentSourceSortTest, RedactionWithMemoryTracking) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
-                                                               true);
+    unittest::ServerParameterGuard featureFlagController("featureFlagQueryMemoryTracking", true);
     createSort(BSON("a" << 1));
     createSortStage();
     auto boundedSort = DocumentSourceSort::createBoundedSort(
@@ -1387,6 +1366,63 @@ TEST_F(DocumentSourceSortExecutionTest, OutputSortKeyHoldsUpOverSerialization) {
     }();
     auto reparsed = DocumentSourceSort::createFromBson(serializedBson.firstElement(), expCtx);
     assertProducesSortKeyMetadata(expCtx, reparsed);
+}
+
+// ---------------------------------------------------------------------------
+// DocumentSourceSort::optimizeAt() — adjacent-sort coalescing tests
+// ---------------------------------------------------------------------------
+
+class DocumentSourceSortOptimizeAtTest : public DocumentSourceSortTest {
+protected:
+    std::vector<BSONObj> optimizeStages(std::vector<BSONObj> stages) {
+        auto pipeline =
+            pipeline_factory::makePipeline(stages, getExpCtx(), pipeline_factory::kOptionsMinimal);
+        pipeline_optimization::optimizePipeline(*pipeline);
+        return pipeline->serializeToBson();
+    }
+};
+
+// Adjacent $sorts with no limit: $sort is not guaranteed stable, so the first sort's ordering
+// is destroyed by any subsequent sort. optimizeAt() erases the first sort unconditionally.
+// REDUNDANT_SORT_REMOVAL does not fire (direction mismatch: {a:1} is not an extension of {a:-1}).
+// [$sort{a:1}, $sort{a:-1}] -> [$sort{a:-1}]
+TEST_F(DocumentSourceSortOptimizeAtTest, AdjacentOppositeDirectionSorts_ErasesFirstSort) {
+    auto result = optimizeStages({fromjson("{$sort: {a: 1}}"), fromjson("{$sort: {a: -1}}")});
+    ASSERT_EQ(result.size(), 1U);
+    ASSERT_BSONOBJ_EQ(result[0], fromjson("{$sort: {a: -1}}"));
+}
+
+// Adjacent $sorts on unrelated fields with no limit: first sort's ordering is destroyed by the
+// second (unstable sort). optimizeAt() erases the first sort unconditionally.
+// REDUNDANT_SORT_REMOVAL does not fire ({a:1} is not an extension of {b:1}).
+// [$sort{a:1}, $sort{b:1}] -> [$sort{b:1}]
+TEST_F(DocumentSourceSortOptimizeAtTest, AdjacentUnrelatedFieldSorts_ErasesFirstSort) {
+    auto result = optimizeStages({fromjson("{$sort: {a: 1}}"), fromjson("{$sort: {b: 1}}")});
+    ASSERT_EQ(result.size(), 1U);
+    ASSERT_BSONOBJ_EQ(result[0], fromjson("{$sort: {b: 1}}"));
+}
+
+// Adjacent $sorts where the first is a superset of the second, but in the wrong prefix order:
+// {a,b} does not cover {b} because the leading field differs, so REDUNDANT_SORT_REMOVAL does not
+// fire. optimizeAt() still erases the first sort (no limit, unstable sort assumption).
+// [$sort{a:1,b:1}, $sort{b:1}] -> [$sort{b:1}]
+TEST_F(DocumentSourceSortOptimizeAtTest, AdjacentSortsFirstIsSupersetButWrongPrefix_ErasesFirst) {
+    auto result = optimizeStages({fromjson("{$sort: {a: 1, b: 1}}"), fromjson("{$sort: {b: 1}}")});
+    ASSERT_EQ(result.size(), 1U);
+    ASSERT_BSONOBJ_EQ(result[0], fromjson("{$sort: {b: 1}}"));
+}
+
+// A $limit between two opposite-direction sorts blocks coalescing: optimizeAt() absorbs $limit{3}
+// into $sort{a:1}, then sees a direction mismatch with $sort{a:-1} and leaves both sorts.
+// REDUNDANT_SORT_REMOVAL also does not fire ({a:1} is not an extension of {a:-1}).
+// [$sort{a:1}, $limit{3}, $sort{a:-1}] -> [$sort{a:1}, $limit{3}, $sort{a:-1}]
+TEST_F(DocumentSourceSortOptimizeAtTest, AdjacentOppositeDirectionSortsWithLimit_KeepsBoth) {
+    auto result = optimizeStages(
+        {fromjson("{$sort: {a: 1}}"), fromjson("{$limit: 3}"), fromjson("{$sort: {a: -1}}")});
+    ASSERT_EQ(result.size(), 3U);
+    ASSERT_BSONOBJ_EQ(result[0], fromjson("{$sort: {a: 1}}"));
+    ASSERT_BSONOBJ_EQ(result[1], fromjson("{$limit: 3}"));
+    ASSERT_BSONOBJ_EQ(result[2], fromjson("{$sort: {a: -1}}"));
 }
 
 }  // namespace

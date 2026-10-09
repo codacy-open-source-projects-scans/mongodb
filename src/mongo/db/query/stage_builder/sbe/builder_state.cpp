@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/stage_builder/sbe/builder_state.h"
 
@@ -34,8 +8,45 @@
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/query/stage_builder/sbe/sbe_stage_blueprint.h"
 
 namespace mongo::stage_builder {
+
+StageBuilderState::StageBuilderState(OperationContext* opCtx,
+                                     Environment& env,
+                                     PlanStageStaticData* data,
+                                     const Variables& variables,
+                                     PlanYieldPolicySBE* yieldPolicy,
+                                     sbe::value::SlotIdGenerator* slotIdGenerator,
+                                     sbe::value::FrameIdGenerator* frameIdGenerator,
+                                     sbe::value::SpoolIdGenerator* spoolIdGenerator,
+                                     InListsMap* inListsMap,
+                                     CollatorsMap* collatorsMap,
+                                     SortSpecMap* sortSpecMap,
+                                     boost::intrusive_ptr<ExpressionContext> expCtx,
+                                     bool needsMerge,
+                                     bool allowDiskUse,
+                                     IncrementalFeatureRolloutContext& ifrContext)
+    : slotIdGenerator{slotIdGenerator},
+      frameIdGenerator{frameIdGenerator},
+      spoolIdGenerator{spoolIdGenerator},
+      inListsMap{inListsMap},
+      collatorsMap{collatorsMap},
+      sortSpecMap{sortSpecMap},
+      opCtx{opCtx},
+      env{env},
+      data{data},
+      variables{variables},
+      yieldPolicy{yieldPolicy},
+      expCtx{expCtx},
+      needsMerge{needsMerge},
+      allowDiskUse{allowDiskUse},
+      legacyDottedPathNullSemantics{internalQueryLegacyDottedPathNullSemantics.loadRelaxed()},
+      ifrContext(ifrContext),
+      _blueprint(std::make_unique<SbBlueprint>()) {}
+
+StageBuilderState::~StageBuilderState() = default;
+using namespace std::literals::string_view_literals;
 sbe::value::SlotId StageBuilderState::getGlobalVariableSlot(Variables::Id variableId) {
     if (auto it = data->variableIdToSlotMap.find(variableId);
         it != data->variableIdToSlotMap.end()) {
@@ -134,28 +145,6 @@ sbe::value::SlotId StageBuilderState::getSortSpecSlot(const AccumulationStatemen
     return slot;
 }
 
-sbe::value::SlotId StageBuilderState::getSortSpecSlot(const WindowFunctionStatement* wf) {
-    tassert(8679707, "Expected non-null WindowFunctionStatement", wf != nullptr);
-    const void* key = static_cast<const void*>(wf);
-
-    auto it = sortSpecMap->find(key);
-    if (it != sortSpecMap->end()) {
-        auto slot = it->second;
-        return slot;
-    }
-
-    // If we don't have a SortSpec for this WindowFunctionStatement yet, create one
-    // and add it the map and return it.
-    auto sortSpec = makeSortSpecFromSortPattern(getSortPattern(*wf));
-
-    auto tag = sbe::value::TypeTags::sortSpec;
-    auto val = sbe::value::bitcastFrom<sbe::SortSpec*>(sortSpec.release());
-    auto slot = env->registerSlot(tag, val, true, slotIdGenerator);
-
-    (*sortSpecMap)[key] = slot;
-    return slot;
-}
-
 sbe::value::SlotId StageBuilderState::registerInputParamSlot(
     MatchExpression::InputParamId paramId) {
     auto it = data->inputParamToSlotMap.find(paramId);
@@ -188,23 +177,23 @@ bool StageBuilderState::isNothingSlot(sbe::value::SlotId slot) {
 }
 
 sbe::value::SlotId StageBuilderState::getEmptyObjSlot() {
-    auto slotId = env->getSlotIfExists("emptyObj"_sd);
+    auto slotId = env->getSlotIfExists("emptyObj"sv);
 
     if (!slotId) {
         auto tag = sbe::value::TypeTags::bsonObject;
         auto val = sbe::value::bitcastFrom<const char*>(BSONObj::kEmptyObject.objdata());
-        return env->registerSlot("emptyObj"_sd, tag, val, false, slotIdGenerator);
+        return env->registerSlot("emptyObj"sv, tag, val, false, slotIdGenerator);
     }
 
     return *slotId;
 }
 
 boost::optional<sbe::value::SlotId> StageBuilderState::getTimeZoneDBSlot() {
-    auto slotId = env->getSlotIfExists("timeZoneDB"_sd);
+    auto slotId = env->getSlotIfExists("timeZoneDB"sv);
 
     if (!slotId) {
         return env->registerSlot(
-            "timeZoneDB"_sd,
+            "timeZoneDB"sv,
             sbe::value::TypeTags::timeZoneDB,
             sbe::value::bitcastFrom<const TimeZoneDatabase*>(getTimeZoneDatabase(opCtx)),
             false,
@@ -215,11 +204,11 @@ boost::optional<sbe::value::SlotId> StageBuilderState::getTimeZoneDBSlot() {
 }
 
 boost::optional<sbe::value::SlotId> StageBuilderState::getCollatorSlot() {
-    auto slotId = env->getSlotIfExists("collator"_sd);
+    auto slotId = env->getSlotIfExists("collator"sv);
 
     if (!slotId && data != nullptr) {
         if (auto coll = data->queryCollator.get()) {
-            return env->registerSlot("collator"_sd,
+            return env->registerSlot("collator"sv,
                                      sbe::value::TypeTags::collator,
                                      sbe::value::bitcastFrom<const CollatorInterface*>(coll),
                                      false,
@@ -231,11 +220,11 @@ boost::optional<sbe::value::SlotId> StageBuilderState::getCollatorSlot() {
 }
 
 boost::optional<sbe::value::SlotId> StageBuilderState::getOplogTsSlot() {
-    auto slotId = env->getSlotIfExists("oplogTs"_sd);
+    auto slotId = env->getSlotIfExists("oplogTs"sv);
 
     if (!slotId) {
         return env->registerSlot(
-            "oplogTs"_sd, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
+            "oplogTs"sv, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
     }
 
     return slotId;

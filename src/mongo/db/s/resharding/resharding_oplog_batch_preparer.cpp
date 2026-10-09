@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/resharding/resharding_oplog_batch_preparer.h"
 
@@ -43,7 +17,7 @@
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -76,14 +50,17 @@ bool shouldUpdateTxnTable(const repl::OplogEntry& op) {
     }
 
     if (op.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
-        // This applyOps oplog entry is guaranteed to correspond to a committed transaction since
-        // the resharding aggregation pipeline does not output applyOps oplog entries for aborted
-        // transactions (i.e. it only outputs the abortTransaction oplog entry).
+        // The resharding aggregation pipeline does not output applyOps oplog entries for aborted
+        // transactions (it outputs the abortTransaction oplog entry instead), so any applyOps
+        // entry here is a retryable write or a committed transaction, never an aborted one.
 
-        if (isInternalSessionForRetryableWrite(*op.getSessionId())) {
-            // For a retryable internal transaction, we need to update the config.transactions
-            // collection upon writing the noop oplog entries for retryable operations contained
-            // within each applyOps oplog entry.
+        if (isInternalSessionForRetryableWrite(*op.getSessionId()) ||
+            op.applyOpsIsMarkedRetryable()) {
+            // For a retryable internal transaction or a retryable-write applyOps, we need to
+            // update the config.transactions collection upon writing the noop oplog entries for
+            // the retryable operations contained within each applyOps oplog entry. A
+            // retryable-write chain can carry a stmtId on a non-terminal (partialTxn) entry, so
+            // every entry must be checked, not just the terminal one.
             return true;
         }
 
@@ -92,7 +69,6 @@ bool shouldUpdateTxnTable(const repl::OplogEntry& op) {
         // config.transactions collection upon seeing the final applyOps oplog entry.
         return !op.isPartialTransaction();
     }
-
     return false;
 }
 
@@ -282,7 +258,7 @@ WriterVectors ReshardingOplogBatchPreparer::makeSessionOpWriterVectors(
 
             const auto& sessionId = *op.getSessionId();
 
-            if (op.getMultiOpType() == repl::MultiOplogEntryType::kApplyOpsAppliedSeparately) {
+            if (op.applyOpsIsMarkedRetryable()) {
                 unrollApplyOpsAndUpdateSessionTracker(
                     sessionTracker, derivedOps, op, sessionId, *op.getTxnNumber());
             } else if (isInternalSessionForRetryableWrite(sessionId) &&

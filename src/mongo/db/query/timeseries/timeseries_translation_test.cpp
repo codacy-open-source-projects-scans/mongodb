@@ -1,36 +1,10 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/timeseries/timeseries_translation.h"
 
 #include "mongo/bson/json.h"
-#include "mongo/db/index/s2_common.h"
+#include "mongo/db/index/geo/s2_common.h"
 #include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
@@ -44,14 +18,17 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_test_util.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 struct DefaultTranslationParams {
-    const StringData timeField = "time"_sd;
-    const boost::optional<StringData> metaField = boost::none;
+    const std::string_view timeField = "time"sv;
+    const boost::optional<std::string_view> metaField = boost::none;
     const boost::optional<std::int32_t> bucketMaxSpanSeconds = 3600;
     const bool assumeNoMixedSchemaData = {false};
     const bool timeseriesBucketsAreFixed = {false};
@@ -62,7 +39,7 @@ protected:
     void setUp() override {
         timeseries::TimeseriesTestFixture::setUp();
         expCtx = make_intrusive<ExpressionContextForTest>(_opCtx, nss);
-        RAIIServerParameterControllerForTest featureFlagController(
+        unittest::ServerParameterGuard featureFlagController(
             "featureFlagCreateViewlessTimeseriesCollections", true);
 
         // Create a viewless timeseries collection.
@@ -276,14 +253,14 @@ TEST_F(TimeseriesRewritesTest, EnsureStageIsGeneratedInReturnedPipeline) {
 
 TEST_F(TimeseriesRewritesTest, ValidateFieldCombinations) {
     const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({
-        .metaField = "foo"_sd,
+        .metaField = "foo"sv,
         .bucketMaxSpanSeconds = 42,
         .assumeNoMixedSchemaData = true,
         .timeseriesBucketsAreFixed = true,
     });
     ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                           << BSONArray() << timeseries::kTimeFieldName << "time"_sd
-                           << timeseries::kMetaFieldName << "foo"_sd
+                           << BSONArray() << timeseries::kTimeFieldName << "time"sv
+                           << timeseries::kMetaFieldName << "foo"sv
                            << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 42
                            << DocumentSourceInternalUnpackBucket::kAssumeNoMixedSchemaData << true
                            << DocumentSourceInternalUnpackBucket::kFixedBuckets << true),
@@ -295,7 +272,7 @@ TEST_F(TimeseriesRewritesTest, ValidateTimeField) {
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper();
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -303,10 +280,10 @@ TEST_F(TimeseriesRewritesTest, ValidateTimeField) {
     // Non-default value for timeField.
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({
-            .timeField = "readingTimestamp"_sd,
+            .timeField = "readingTimestamp"sv,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "readingTimestamp"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "readingTimestamp"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -314,10 +291,10 @@ TEST_F(TimeseriesRewritesTest, ValidateTimeField) {
     // Empty string value for timeField.
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({
-            .timeField = ""_sd,
+            .timeField = ""sv,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << ""_sd
+                               << BSONArray() << timeseries::kTimeFieldName << ""sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -329,7 +306,7 @@ TEST_F(TimeseriesRewritesTest, ValidateMetaField) {
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper();
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -337,11 +314,11 @@ TEST_F(TimeseriesRewritesTest, ValidateMetaField) {
     // Meta field should be included if present.
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({
-            .metaField = "foo"_sd,
+            .metaField = "foo"sv,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
-                               << timeseries::kMetaFieldName << "foo"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
+                               << timeseries::kMetaFieldName << "foo"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -349,11 +326,11 @@ TEST_F(TimeseriesRewritesTest, ValidateMetaField) {
     // Empty string.
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({
-            .metaField = ""_sd,
+            .metaField = ""sv,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
-                               << timeseries::kMetaFieldName << ""_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
+                               << timeseries::kMetaFieldName << ""sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -366,7 +343,7 @@ TEST_F(TimeseriesRewritesTest, ValidateAssumeNoMixedSchemaDataField) {
             .assumeNoMixedSchemaData = true,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600
                                << DocumentSourceInternalUnpackBucket::kAssumeNoMixedSchemaData
                                << true),
@@ -378,7 +355,7 @@ TEST_F(TimeseriesRewritesTest, ValidateBucketMaxSpanSecondsField) {
     {
         const auto [alteredPipeline, firstStage] = prependUnpackStageHelper({});
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds
                                << 3600),
                           firstStage);
@@ -388,7 +365,7 @@ TEST_F(TimeseriesRewritesTest, ValidateBucketMaxSpanSecondsField) {
             .bucketMaxSpanSeconds = 43,
         });
         ASSERT_BSONOBJ_EQ(BSON(DocumentSourceInternalUnpackBucket::kExclude
-                               << BSONArray() << timeseries::kTimeFieldName << "time"_sd
+                               << BSONArray() << timeseries::kTimeFieldName << "time"sv
                                << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 43),
                           firstStage);
     }

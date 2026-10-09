@@ -2,6 +2,11 @@
  * @tags: [
  *   requires_persistence,
  *   requires_fcv_83,
+ *   # The test exercises replicaSetConfigShardMaintenanceMode and FCV transitions, both of
+ *   # which require all participating binaries to be 8.3+. In multiversion suites with mixed
+ *   # binaries the FCV after initiate() is driven down to lastLTSFCV, making these scenarios
+ *   # impossible to validate.
+ *   multiversion_incompatible,
  * ]
  */
 import {afterEach, before, beforeEach, describe, it} from "jstests/libs/mochalite.js";
@@ -336,7 +341,9 @@ describe("transitions", function () {
         });
 
         let mongos = MongoRunner.runMongos({configdb: this.rs.getURL()});
-        assert.commandWorked(mongos.getDB("admin").runCommand({"transitionFromDedicatedConfigServer": 1}));
+        assert.commandWorked(
+            mongos.getDB("admin").runCommand({"transitionFromDedicatedConfigServer": 1}),
+        );
 
         this.doRollingRestart(this.rs, {
             replSet: "replica_set_to_csrs_promotion",
@@ -371,13 +378,14 @@ describe("operations during rolling restart", function () {
                     waitPid: true,
                 },
             );
+            let restartedSecondary;
             assert.doesNotThrow(() => {
-                rs.start(id, {
+                restartedSecondary = rs.start(id, {
                     ...startupFlags,
                     remember: false,
                 });
             });
-            rs.stepUp(secondary);
+            rs.stepUp(restartedSecondary);
         };
 
         this.restartAllSecondaries = (rs, startupFlags) => {

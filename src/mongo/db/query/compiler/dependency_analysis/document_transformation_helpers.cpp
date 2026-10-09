@@ -1,45 +1,24 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/dependency_analysis/document_transformation_helpers.h"
 
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/util/assert_util.h"
+
+#include <string_view>
 
 namespace mongo::document_transformation {
 
 /**
  * Modify path which defines the new value using an Expression.
+ * These are emitted exclusively by projection executors ($set/$addFields/$project), which
+ * traverse prefix arrays element-by-element, so sibling subpaths are preserved.
  */
 class ExpressionModifyPath final : public ModifyPath {
 public:
-    ExpressionModifyPath(StringData path, boost::intrusive_ptr<Expression> expr)
-        : ModifyPath(path), _expr(expr) {}
+    ExpressionModifyPath(std::string_view path, boost::intrusive_ptr<Expression> expr)
+        : ModifyPath(path, ModifiedPrefixPolicy::kPreserveArrays), _expr(expr) {}
 
     bool isRemoved() const override {
         return false;
@@ -50,6 +29,12 @@ public:
     boost::intrusive_ptr<Expression> getExpression() const override {
         return _expr;
     }
+    bool canLeafBeArray() const override {
+        if (const auto* c = dynamic_cast<const ExpressionConstant*>(_expr.get())) {
+            return c->getValue().isArray();
+        }
+        return true;
+    }
 
 private:
     const boost::intrusive_ptr<Expression> _expr;
@@ -57,10 +42,13 @@ private:
 
 /**
  * A simple path removal, not a modification to $$REMOVE.
+ * Emitted exclusively by exclusion projection executors, which traverse prefix arrays
+ * element-by-element, so sibling subpaths are preserved.
  */
 class RemovePath final : public ModifyPath {
 public:
-    explicit RemovePath(StringData path) : ModifyPath(path) {}
+    explicit RemovePath(std::string_view path)
+        : ModifyPath(path, ModifiedPrefixPolicy::kPreserveArrays) {}
 
     bool isRemoved() const override {
         return true;
@@ -75,7 +63,9 @@ public:
 
 namespace detail {
 
-void describeProjectedPath(DocumentOperationVisitor& visitor, StringData path, bool isInclusion) {
+void describeProjectedPath(DocumentOperationVisitor& visitor,
+                           std::string_view path,
+                           bool isInclusion) {
     if (isInclusion) {
         visitor(document_transformation::PreservePath{path});
     } else {
@@ -90,12 +80,13 @@ void describeProjectedPath(DocumentOperationVisitor& visitor, StringData path, b
  * If the Expression type is not supported, isOK() returns false, and the DocumentOperationVisitor
  * is not called.
  */
-class SpecializedExpressionOperationVisitor : public SelectiveConstExpressionVisitorBase {
+class SpecializedExpressionOperationVisitor
+    : public SelectiveConstExpressionVisitorBase<SpecializedExpressionOperationVisitor> {
 public:
-    using SelectiveConstExpressionVisitorBase::visit;
+    using SelectiveConstExpressionVisitorBase<SpecializedExpressionOperationVisitor>::visit;
 
     explicit SpecializedExpressionOperationVisitor(DocumentOperationVisitor& visitor,
-                                                   StringData path,
+                                                   std::string_view path,
                                                    BSONDepthIndex depth)
         : _visitor(visitor), _path(path), _depth(depth) {}
 
@@ -115,7 +106,7 @@ public:
             return;
         }
         _handled = true;
-        StringData oldPath = oldFieldPath.tailPath();
+        std::string_view oldPath = oldFieldPath.tailPath();
         BSONDepthIndex oldPathMaxArrayTraversals = std::count(oldPath.begin(), oldPath.end(), '.');
         _visitor(RenamePathWithFixedArrayness{_path, oldPath, _depth, oldPathMaxArrayTraversals});
     }
@@ -135,7 +126,7 @@ public:
 
 private:
     DocumentOperationVisitor& _visitor;
-    const StringData _path;
+    const std::string_view _path;
     const BSONDepthIndex _depth;
     bool _handled{false};
 };
@@ -169,8 +160,8 @@ void describeComputedPath(DocumentOperationVisitor& visitor,
     }
 }
 
-RenamePathWithFixedArrayness::RenamePathWithFixedArrayness(StringData newPath,
-                                                           StringData oldPath,
+RenamePathWithFixedArrayness::RenamePathWithFixedArrayness(std::string_view newPath,
+                                                           std::string_view oldPath,
                                                            BSONDepthIndex newPathMaxArrayTraversals,
                                                            BSONDepthIndex oldPathMaxArrayTraversals)
     : RenamePath(newPath, oldPath),
@@ -207,7 +198,7 @@ void describeGetModPathsReturn(DocumentOperationVisitor& visitor,
         } else if (!complexRenames.contains(path)) {
             // The DocumentOperationVisitor does not see complexRenames as modifications.
             // Instead, it will see them as a RenamePath operation with the appropriate flags.
-            visitor(ModifyPath{path});
+            visitor(ModifyPath{path, ModifiedPrefixPolicy::kNotSupported});
         }
     }
     for (const auto& [newPath, oldPath] : renames) {

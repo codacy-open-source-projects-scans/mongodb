@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This file contains tests for mongo/db/query/plan_cache/plan_cache.h
@@ -33,7 +7,6 @@
 
 #include "mongo/db/query/plan_cache/plan_cache.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -62,6 +35,7 @@
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration_test_util.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -74,6 +48,7 @@
 #include "mongo/db/shard_role/shard_role_mock.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
@@ -323,10 +298,7 @@ TEST_F(PlanCacheTest, ShouldNotCacheQueryTriviallyFalse) {
 }
 
 TEST_F(PlanCacheTest, ShouldNotCacheIfCachingDisabled) {
-    bool oldDisablePlanCache = internalQueryDisablePlanCache.load();
-    ON_BLOCK_EXIT(
-        [oldDisablePlanCache] { internalQueryDisablePlanCache.store(oldDisablePlanCache); });
-    internalQueryDisablePlanCache.store(true);
+    QueryKnobGuardForTest disablePlanCache(opCtx(), "internalQueryDisablePlanCache", true);
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     assertShouldNotCacheQuery(*cq);
 }
@@ -945,50 +917,50 @@ protected:
         addIndex(BSON("_id" << 1), std::string{IndexConstants::kIdIndexName});
     }
 
-    void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey = false) {
-        params.mainCollectionInfo.indexes.push_back(
-            IndexEntry(keyPattern,
-                       IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                       IndexConfig::kLatestIndexVersion,
-                       multikey,
-                       {},
-                       {},
-                       false,
-                       false,
-                       IndexEntry::Identifier{indexName},
-                       BSONObj(),
-                       nullptr));
-    }
-
-    void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey, bool sparse) {
-        params.mainCollectionInfo.indexes.push_back(
-            IndexEntry(keyPattern,
-                       IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                       IndexConfig::kLatestIndexVersion,
-                       multikey,
-                       {},
-                       {},
-                       sparse,
-                       false,
-                       IndexEntry::Identifier{indexName},
-                       BSONObj(),
-                       nullptr));
-    }
-
-    void addIndex(BSONObj keyPattern, const std::string& indexName, CollatorInterface* collator) {
+    void addIndexEntry(BSONObj keyPattern,
+                       const std::string& indexName,
+                       bool multikey,
+                       MultikeyPaths multikeyPaths,
+                       bool sparse,
+                       const CollatorInterface* collator) {
         IndexEntry entry(keyPattern,
                          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
                          IndexConfig::kLatestIndexVersion,
-                         false,
+                         multikey,
+                         std::move(multikeyPaths),
                          {},
-                         {},
-                         false,
+                         sparse,
                          false,
                          IndexEntry::Identifier{indexName},
                          BSONObj(),
                          nullptr);
         entry.collator = collator;
-        params.mainCollectionInfo.indexes.push_back(entry);
+        params.mainCollectionInfo.indexes.push_back(std::move(entry));
+    }
+
+    void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey = false) {
+        addIndexEntry(keyPattern, indexName, multikey, {}, false /*sparse*/, nullptr /*collator*/);
+    }
+
+    // Adds an index with path-level multikey info. The multikey flag is derived from it.
+    void addIndex(BSONObj keyPattern,
+                  const std::string& indexName,
+                  const MultikeyPaths& multikeyPaths) {
+        invariant(multikeyPaths.size() == static_cast<size_t>(keyPattern.nFields()));
+        const bool multikey =
+            std::any_of(multikeyPaths.cbegin(),
+                        multikeyPaths.cend(),
+                        [](const MultikeyComponents& components) { return !components.empty(); });
+        addIndexEntry(
+            keyPattern, indexName, multikey, multikeyPaths, false /*sparse*/, nullptr /*collator*/);
+    }
+
+    void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey, bool sparse) {
+        addIndexEntry(keyPattern, indexName, multikey, {}, sparse, nullptr /*collator*/);
+    }
+
+    void addIndex(BSONObj keyPattern, const std::string& indexName, CollatorInterface* collator) {
+        addIndexEntry(keyPattern, indexName, false /*multikey*/, {}, false /*sparse*/, collator);
     }
 
     //
@@ -1623,7 +1595,7 @@ TEST_F(CachePlanSelectionTest, CachedPlanForCompoundMultikeyIndexCanCompoundBoun
 TEST_F(CachePlanSelectionTest,
        CachedPlanForSelfIntersectionOfMultikeyIndexPointRangesCannotIntersectBounds) {
     // Enable a merge sort based index intersection plan to be generated.
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
+    unittest::ServerParameterGuard truncateFeatureFlag{
         "internalQueryPlannerEnableSortIndexIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
@@ -1645,11 +1617,8 @@ TEST_F(CachePlanSelectionTest,
        CachedPlanForSelfIntersectionOfMultikeyIndexNonPointRangesCannotIntersectBounds) {
     // Enable a hash-based index intersection plan to be generated because we are scanning a
     // non-point range on the "a" field.
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
-    ON_BLOCK_EXIT([oldEnableHashIntersection] {
-        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
-    });
-    internalQueryPlannerEnableHashIntersection.store(true);
+    unittest::ServerParameterGuard enableHashIntersection{
+        "internalQueryPlannerEnableHashIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
@@ -1669,7 +1638,7 @@ TEST_F(CachePlanSelectionTest,
 
 TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionOfMultikeyIndexesWhenUsingElemMatch) {
     // Enable a merge sort based index intersection plan to be generated.
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
+    unittest::ServerParameterGuard truncateFeatureFlag{
         "internalQueryPlannerEnableSortIndexIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
@@ -1691,11 +1660,8 @@ TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionOfMultikeyIndexesWhenUsi
 TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionWithNonMultikeyIndexCanIntersectBounds) {
     // Enable a hash-based index intersection plan to be generated because we are scanning a
     // non-point range on the "a.c" field.
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
-    ON_BLOCK_EXIT([oldEnableHashIntersection] {
-        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
-    });
-    internalQueryPlannerEnableHashIntersection.store(true);
+    unittest::ServerParameterGuard enableHashIntersection{
+        "internalQueryPlannerEnableHashIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
@@ -1833,11 +1799,8 @@ TEST_F(CachePlanSelectionTest, ContainedOr) {
 }
 
 TEST_F(CachePlanSelectionTest, ContainedOrAndIntersection) {
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
-    ON_BLOCK_EXIT([oldEnableHashIntersection] {
-        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
-    });
-    internalQueryPlannerEnableHashIntersection.store(true);
+    unittest::ServerParameterGuard enableHashIntersection{
+        "internalQueryPlannerEnableHashIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::INCLUDE_COLLSCAN | QueryPlannerParams::INDEX_INTERSECTION;
     addIndex(BSON("a" << 1 << "b" << 1), "a_1_b_1");
@@ -1853,6 +1816,25 @@ TEST_F(CachePlanSelectionTest, ContainedOrAndIntersection) {
         "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}]}},"
         "{ixscan: {pattern: {a: 1, b: 1}, bounds: {a: [[5, 5, true, true]], b: [['MinKey', "
         "'MaxKey', true, true]]}}}"
+        "]}}}}");
+}
+
+// Verify the PlanCacheIndexTree::OrPushdown for this shape survives the cache round trip, so the
+// recovered plan keeps the compounded 'arr.b' bounds.
+TEST_F(CachePlanSelectionTest, ContainedOrWithNegationUnderSameElemMatch) {
+    addIndex(BSON("arr.a" << 1 << "arr.b" << 1), "arr.a_1_arr.b_1", MultikeyPaths{{0U}, {0U}});
+    BSONObj query =
+        fromjson("{arr: {$elemMatch: {a: {$ne: 1}, $or: [{b: {$lt: 2}}, {b: {$gt: 3}}]}}}");
+    runQuery(query);
+    assertPlanCacheRecoversSolution(
+        query,
+        "{fetch: {node: {or: {nodes: ["
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[-Infinity, 2, true, false]]}}},"
+        "{ixscan: {pattern: {'arr.a': 1, 'arr.b': 1}, bounds: "
+        "{'arr.a': [['MinKey', 1, true, false], [1, 'MaxKey', false, true]],"
+        " 'arr.b': [[3, Infinity, false, true]]}}}"
         "]}}}}");
 }
 
@@ -2292,10 +2274,5 @@ TEST_F(SbePlanCacheTest, SBEPlanCacheKeyMakeAndCompare) {
     ASSERT_NE(sbeKey1.planCacheKeyHash(), sbeKey2.planCacheKeyHash());
 }
 
-TEST_F(SbePlanCacheTest, SBEPlanCacheUpdateSize) {
-    ASSERT_OK(plan_cache_util::onPlanCacheSizeUpdate("10%"));
-    ASSERT_OK(plan_cache_util::onPlanCacheSizeUpdate("5MB"));
-    ASSERT_NOT_OK(plan_cache_util::onPlanCacheSizeUpdate("10&"));
-}
 }  // namespace
 }  // namespace mongo

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -129,6 +103,19 @@ public:
         const std::vector<ShardId>& shardIds) = 0;
 
     /**
+     * Returns a map from each recipient shard id to the change in the number of documents in the
+     * temporary resharding collection since the cloning phase started, as reported by the
+     * recipient's change stream monitor.
+     */
+    virtual std::map<ShardId, int64_t> getDocumentsDeltaFromRecipients(
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::TaskExecutor>& executor,
+        CancellationToken token,
+        const UUID& reshardingUUID,
+        const NamespaceString& nss,
+        const std::vector<ShardId>& shardIds) = 0;
+
+    /**
      * To be called before transitioning to the "applying" state to verify the temporary collection
      * after cloning by asserting that:
      * - The total number of documents to copy is equal to the total number of documents copied.
@@ -151,19 +138,22 @@ public:
      * To be called during the "initializing" state to set allowMigrations to preventing new chunk
      * migrations from starting and aborting any in-progress migrations on the source collection.
      */
-    virtual void stopMigrations(OperationContext* opCtx,
-                                const NamespaceString& nss,
-                                const UUID& expectedCollectionUUID,
-                                const OperationSessionInfo& osi) = 0;
+    virtual void stopMigrations(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const UUID& expectedCollectionUUID,
+        ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+        std::function<OperationSessionInfo()> osiGenerator) = 0;
 
     /**
      * To be called on completion (both success and abort) to unset allowMigrations, re-enabling
      * chunk migrations on the source collection.
      */
-    virtual void resumeMigrations(OperationContext* opCtx,
-                                  const NamespaceString& nss,
-                                  const UUID& expectedCollectionUUID,
-                                  const OperationSessionInfo& osi) = 0;
+    virtual void resumeMigrations(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+        std::function<OperationSessionInfo()> osiGenerator) = 0;
     /**
      * Builds a CausalityBarrier for the given participant shards, which is used to perform a no-op
      * retryable write on each shard.
@@ -228,6 +218,14 @@ public:
         const NamespaceString& nss,
         const std::vector<ShardId>& shardIds) override;
 
+    std::map<ShardId, int64_t> getDocumentsDeltaFromRecipients(
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::TaskExecutor>& executor,
+        CancellationToken token,
+        const UUID& reshardingUUID,
+        const NamespaceString& nss,
+        const std::vector<ShardId>& shardIds) override;
+
     void verifyClonedCollection(OperationContext* opCtx,
                                 const std::shared_ptr<executor::TaskExecutor>& executor,
                                 CancellationToken token,
@@ -239,12 +237,13 @@ public:
     void stopMigrations(OperationContext* opCtx,
                         const NamespaceString& nss,
                         const UUID& expectedCollectionUUID,
-                        const OperationSessionInfo& osi) override;
+                        ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+                        std::function<OperationSessionInfo()> osiGenerator) override;
 
     void resumeMigrations(OperationContext* opCtx,
                           const NamespaceString& nss,
-                          const UUID& expectedCollectionUUID,
-                          const OperationSessionInfo& osi) override;
+                          ReshardingAuthoritativeMetadataAccessLevelEnum authoritativeMetadataLevel,
+                          std::function<OperationSessionInfo()> osiGenerator) override;
 
     std::unique_ptr<CausalityBarrier> buildCausalityBarrier(
         std::vector<ShardId> participants,

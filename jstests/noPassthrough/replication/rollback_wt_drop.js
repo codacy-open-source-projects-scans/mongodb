@@ -108,24 +108,25 @@ RollbackOps(rollbackNode);
     const op = ops[0];
     assert(op.hasOwnProperty("o2"), "expected o2 field in drop oplog entry: " + tojson(op));
     assert(op.o2.hasOwnProperty("numRecords"), "expected count in drop oplog entry: " + tojson(op));
-    // TODO SERVER-124178: Revist disabling this assertion.
-    if (!FeatureFlagUtil.isEnabled(rollbackTest.getPrimary(), "featureFlagReplicatedFastCount")) {
-        assert.eq(2, op.o2.numRecords, "incorrect count in drop oplog entry: " + tojson(op));
-    }
+    assert.eq(2, op.o2.numRecords, "incorrect count in drop oplog entry: " + tojson(op));
 }
 
 // Check collection rename oplog entry.
 {
     const replTest = rollbackTest.getTestFixture();
-    const ops = replTest.dumpOplog(rollbackNode, {ns: "test.$cmd", "o.renameCollection": "test.z", "o.to": "test.x"});
+    const ops = replTest.dumpOplog(rollbackNode, {
+        ns: "test.$cmd",
+        "o.renameCollection": "test.z",
+        "o.to": "test.x",
+    });
     assert.eq(1, ops.length);
     const op = ops[0];
     assert(op.hasOwnProperty("o2"), "expected o2 field in rename oplog entry: " + tojson(op));
-    assert(op.o2.hasOwnProperty("numRecords"), "expected count in rename oplog entry: " + tojson(op));
-    // TODO SERVER-124178: Revist disabling this assertion.
-    if (!FeatureFlagUtil.isEnabled(rollbackTest.getPrimary(), "featureFlagReplicatedFastCount")) {
-        assert.eq(4, op.o2.numRecords, "incorrect count in rename oplog entry: " + tojson(op));
-    }
+    assert(
+        op.o2.hasOwnProperty("numRecords"),
+        "expected count in rename oplog entry: " + tojson(op),
+    );
+    assert.eq(4, op.o2.numRecords, "incorrect count in rename oplog entry: " + tojson(op));
 }
 
 // Wait for rollback to finish.

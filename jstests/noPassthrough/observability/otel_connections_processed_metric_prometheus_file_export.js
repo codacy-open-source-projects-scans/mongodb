@@ -16,8 +16,8 @@ import {
     createMetricsDirectory,
     extractPrometheusMetricIntValue,
     extractPrometheusMetricTime,
-    findMetricsFiles,
-} from "jstests/noPassthrough/observability/libs/otel_file_export_helpers.js";
+    findOtelFilesWithSuffix,
+} from "jstests/noPassthrough/observability/libs/otel_metrics_file_export_helpers.js";
 
 /**
  * Gets the current total value of the network.connections_processed metric from the metrics file in the given directory
@@ -27,7 +27,7 @@ function getConnectionsMetricValue(metricsDir, metricsFileName, afterDate) {
     let metricsText;
     assert.soon(
         () => {
-            let files = findMetricsFiles(metricsDir, metricsFileName);
+            let files = findOtelFilesWithSuffix(metricsDir, metricsFileName);
             if (files.length === 0) {
                 jsTest.log.info(`No metrics files found in ${metricsDir}`);
                 return false;
@@ -41,7 +41,7 @@ function getConnectionsMetricValue(metricsDir, metricsFileName, afterDate) {
         1000,
     );
 
-    return extractPrometheusMetricIntValue(metricsText, "network.connections_processed");
+    return extractPrometheusMetricIntValue(metricsText, "mongodb.serverStatus.network.numRequests");
 }
 
 /**
@@ -70,10 +70,13 @@ function runConnectionsTest(mongod, metricsDir, metricsFileName) {
         () => {
             // This may be greater than the expected total because of the initial connection we
             // made and background processes that may be creating connections.
-            return getConnectionsMetricValue(metricsDir, metricsFileName, testCaseStartDate) >= expectedTotal;
+            return (
+                getConnectionsMetricValue(metricsDir, metricsFileName, testCaseStartDate) >=
+                expectedTotal
+            );
         },
-        `mongod network.connections_processed counter should have recorded at least ` +
-            `${newConnections} new connections (initial: ${initialValue}, expected total: ${expectedTotal})`,
+        `mongod serverStatus.network.numRequests counter should have recorded at least ` +
+            `${newConnections} new requests (initial: ${initialValue}, expected total: ${expectedTotal})`,
         30000,
         300,
     );
@@ -120,7 +123,11 @@ describe("OTel Prometheus file export using openTelemetryPrometheusMetricsDirect
     });
 
     it("should correctly track new connections to mongod", function () {
-        runConnectionsTest(this.mongod, this.metricsDir, /*metricsFileName=*/ "mongodb-prometheus-metrics.txt");
+        runConnectionsTest(
+            this.mongod,
+            this.metricsDir,
+            /*metricsFileName=*/ "mongodb-prometheus-metrics.txt",
+        );
     });
 });
 

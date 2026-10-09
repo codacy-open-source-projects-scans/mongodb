@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/repl/isself.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -54,6 +27,8 @@
 
 #include <algorithm>
 #include <exception>
+#include <memory>
+#include <utility>
 
 #include <boost/none.hpp>
 
@@ -89,6 +64,7 @@ namespace repl {
 
 MONGO_FAIL_POINT_DEFINE(failIsSelfCheck);
 MONGO_FAIL_POINT_DEFINE(transientDNSErrorInFastPath);
+MONGO_FAIL_POINT_DEFINE(skipGetaddrinfoCall);
 
 OID instanceId;
 
@@ -106,6 +82,10 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
                                          const int port,
                                          const bool ipv6enabled) {
     addrinfo* addrs = nullptr;
+    // RAII wrapper ensures freeaddrinfo is called exactly once, preventing double-free
+    // when getaddrinfo fails on retry after a transient EAI_AGAIN error.
+    auto addrsGuard = std::unique_ptr<addrinfo, decltype(&freeaddrinfo)>(nullptr, freeaddrinfo);
+
     addrinfo hints = {0};
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_family = (ipv6enabled ? AF_UNSPEC : AF_INET);
@@ -117,7 +97,14 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
     int maxAttempts = 4;
 
     while (true) {
-        err = getaddrinfo(iporhost.c_str(), portNum.c_str(), &hints, &addrs);
+        // When active, skip the real getaddrinfo call to simulate a DNS lookup failure
+        // that does not update addrs, leaving it as a stale/dangling pointer.
+        if (MONGO_unlikely(skipGetaddrinfoCall.shouldFail())) {
+            err = EAI_NONAME;
+        } else {
+            err = getaddrinfo(iporhost.c_str(), portNum.c_str(), &hints, &addrs);
+        }
+        addrsGuard.reset(std::exchange(addrs, nullptr));
 
         // We do not sleep for as long in tests.
         auto waitCoefficient = 1.0;
@@ -133,9 +120,7 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
             break;
         }
 
-        // Free what we have ahead of the next getaddrinfo call.
-        freeaddrinfo(addrs);
-
+        addrsGuard.reset();
         // Wait 1, 2, 4, 8 seconds (and a tenth of that in tests).
         sleepmillis(std::pow(2, attempts++) * 1000 * waitCoefficient);
     }
@@ -149,13 +134,10 @@ std::vector<std::string> getAddrsForHost(const std::string& iporhost,
                       "host"_attr = iporhost,
                       "error"_attr = errorMessage(ec),
                       "timedOut"_attr = (attempts == maxAttempts));
-        freeaddrinfo(addrs);
         return out;
     }
 
-    ON_BLOCK_EXIT([&] { freeaddrinfo(addrs); });
-
-    for (addrinfo* addr = addrs; addr != nullptr; addr = addr->ai_next) {
+    for (addrinfo* addr = addrsGuard.get(); addr != nullptr; addr = addr->ai_next) {
         int family = addr->ai_family;
         char host[NI_MAXHOST];
 

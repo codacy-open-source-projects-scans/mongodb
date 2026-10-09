@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/coll_mod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
@@ -88,7 +61,7 @@
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
@@ -100,6 +73,7 @@
 #include <list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -135,24 +109,25 @@ struct ParsedCollModRequest {
     // TODO(SERVER-101423): Remove once 9.0 becomes last LTS.
     boost::optional<bool> _removeLegacyTimeseriesBucketingParametersHaveChanged;
     boost::optional<bool> recordIdsReplicated;
+    boost::optional<bool> prepareConstraintValidationLevel;
 };
 
-Status getNotSupportedOnViewError(StringData fieldName) {
+Status getNotSupportedOnViewError(std::string_view fieldName) {
     return {ErrorCodes::InvalidOptions,
             str::stream() << "option not supported on a view: " << fieldName};
 }
 
-Status getOnlySupportedOnViewError(StringData fieldName) {
+Status getOnlySupportedOnViewError(std::string_view fieldName) {
     return {ErrorCodes::InvalidOptions,
             str::stream() << "option only supported on a view: " << fieldName};
 }
 
-Status getNotSupportedOnTimeseriesError(StringData fieldName) {
+Status getNotSupportedOnTimeseriesError(std::string_view fieldName) {
     return {ErrorCodes::InvalidOptions,
             str::stream() << "option not supported on a time-series collection: " << fieldName};
 }
 
-Status getOnlySupportedOnTimeseriesError(StringData fieldName) {
+Status getOnlySupportedOnTimeseriesError(std::string_view fieldName) {
     return {ErrorCodes::InvalidOptions,
             str::stream() << "option only supported on a time-series collection: " << fieldName};
 }
@@ -204,6 +179,11 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
     }
 
     if (cmr.getCappedSize() || cmr.getCappedMax()) {
+        if (isView) {
+            return getNotSupportedOnViewError(cmr.getCappedSize() ? CollMod::kCappedSizeFieldName
+                                                                  : CollMod::kCappedMaxFieldName);
+        }
+        invariant(coll);
         if (!coll->isCapped()) {
             return {ErrorCodes::InvalidOptions, "Collection must be capped."};
         } else if (coll->ns().isOplog()) {
@@ -238,7 +218,7 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
             return getNotSupportedOnViewError(CollMod::kIndexFieldName);
         }
         const auto& cmdIndex = *index;
-        StringData indexName;
+        std::string_view indexName;
         BSONObj keyPattern;
 
         if (cmdIndex.getName() && cmdIndex.getKeyPattern()) {
@@ -298,7 +278,8 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
                     "for the collection's clusteredIndex",
                     indexSpec.getName());
 
-            if ((!indexName.empty() && indexName == StringData(indexSpec.getName().value())) ||
+            if ((!indexName.empty() &&
+                 indexName == std::string_view(indexSpec.getName().value())) ||
                 keyPattern.woCompare(indexSpec.getKey()) == 0) {
                 // The indexName or keyPattern match the collection's clusteredIndex.
                 return {ErrorCodes::Error(6011800),
@@ -491,7 +472,17 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
             cmd.kCommandName, parsed.collValidator->validatorDoc, parsed.collValidator->isOK());
 
         if (!parsed.collValidator->isOK()) {
-            return parsed.collValidator->getStatus();
+            // Do not enforce an OK result during oplog application: as at startup, the
+            // validator may have been well formed on the version that wrote it. Keeping it
+            // rejects writes to the collection (fail closed) rather than allowing them
+            // unvalidated (SERVER-134863).
+            if (opCtx->writesAreReplicated()) {
+                return parsed.collValidator->getStatus();
+            }
+            LOGV2_WARNING(13486301,
+                          "Applying collMod with a malformed collection validator",
+                          logAttrs(nss),
+                          "validatorStatus"_attr = parsed.collValidator->getStatus());
         }
         oplogEntryBuilder.append(CollMod::kValidatorFieldName, validatorObj);
     }
@@ -650,6 +641,20 @@ StatusWith<std::pair<ParsedCollModRequest, BSONObj>> parseCollModRequest(
     if (const auto& dryRun = cmr.getDryRun()) {
         parsed.dryRun = *dryRun;
         // The dry run option should never be included in a collMod oplog entry.
+    }
+
+    if (auto prepareConstraint = cmr.getPrepareConstraintValidationLevel()) {
+        if (isView) {
+            return getNotSupportedOnViewError(CollMod::kPrepareConstraintValidationLevelFieldName);
+        }
+        if (isTimeseries) {
+            return getNotSupportedOnTimeseriesError(
+                CollMod::kPrepareConstraintValidationLevelFieldName);
+        }
+        parsed.numModifications++;
+        parsed.prepareConstraintValidationLevel = prepareConstraint;
+        oplogEntryBuilder.append(CollMod::kPrepareConstraintValidationLevelFieldName,
+                                 *prepareConstraint);
     }
 
     // Currently disallows the use of 'indexPrepareUnique' with other collMod options.
@@ -961,11 +966,6 @@ Status _collModInternal(OperationContext* opCtx,
 
         const CollectionOptions& oldCollOptions = coll->getCollectionOptions();
 
-        // Writing invalidates the collection pointer until commit. Snapshot the relevant old
-        // collections settings needed before committing.
-        const auto timeseriesBucketingParametersHaveChanged =
-            coll->timeseriesBucketingParametersHaveChanged();
-
         auto collWriter = [&] {
             if (acquisition) {
                 return CollectionWriter{opCtx, acquisition};
@@ -1014,12 +1014,14 @@ Status _collModInternal(OperationContext* opCtx,
         processCollModIndexRequest(
             opCtx, writableColl, cmrNew.indexRequest, &indexCollModInfo, result, mode);
 
-        if (cmrNew.collValidationLevel || cmrNew.collValidationAction || cmrNew.collValidator) {
+        if (cmrNew.collValidationLevel || cmrNew.collValidationAction || cmrNew.collValidator ||
+            cmrNew.prepareConstraintValidationLevel) {
             uassertStatusOKWithContext(
                 writableColl->setValidationOptions(opCtx,
                                                    cmrNew.collValidationLevel,
                                                    cmrNew.collValidationAction,
-                                                   cmrNew.collValidator),
+                                                   cmrNew.collValidator,
+                                                   cmrNew.prepareConstraintValidationLevel),
                 "Failed to set validation options");
         }
 
@@ -1037,25 +1039,10 @@ Status _collModInternal(OperationContext* opCtx,
             auto [newOptions, changed] = res.getValue();
             if (changed) {
                 writableColl->setTimeseriesOptions(opCtx, newOptions);
-                if (feature_flags::gTSBucketingParametersUnchanged.isEnabled(
-                        VersionContext::getDecoration(opCtx), fcvSnapshot)) {
-                    writableColl->setTimeseriesBucketingParametersChanged(opCtx, true);
-                };
             }
         }
 
         const auto version = fcvSnapshot.getVersion();
-        // We involve an empty collMod command during a setFCV downgrade to clean timeseries
-        // bucketing parameters in the catalog. So if the FCV is in downgrading or downgraded stage,
-        // remove time-series bucketing parameters flag, as nodes older than 7.1 cannot understand
-        // this flag.
-        // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-        // TODO SERVER-80003 remove special version handling when LTS becomes 8.0.
-        if (cmrNew.numModifications == 0 && timeseriesBucketingParametersHaveChanged &&
-            version == multiversion::GenericFCV::kDowngradingFromLatestToLastLTS) {
-            writableColl->setTimeseriesBucketingParametersChanged(opCtx, boost::none);
-        }
-
         const auto isUpgrading = [&]() {
             if (!ServerGlobalParams::FCVSnapshot::isUpgradingOrDowngrading(version)) {
                 return false;

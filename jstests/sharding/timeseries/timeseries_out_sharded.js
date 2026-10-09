@@ -14,7 +14,9 @@ import {
     areViewlessTimeseriesEnabled,
     getTimeseriesBucketsColl,
     getTimeseriesCollForDDLOps,
+    isViewlessTimeseriesOnlySuite,
 } from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 
@@ -27,7 +29,12 @@ const dbName = jsTestName();
 const testDB = st.s.getDB(dbName);
 assert.commandWorked(testDB.adminCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
 
-let [inColl, observerInColl] = TimeseriesAggTests.prepareInputCollections(numHosts, numIterations, true, testDB);
+let [inColl, observerInColl] = TimeseriesAggTests.prepareInputCollections(
+    numHosts,
+    numIterations,
+    true,
+    testDB,
+);
 
 // Split the data over 2 shards. The test data has tags uniformly distributed from 1-10, so for half
 // the data to be on each shard, we will split at tags = 5.
@@ -53,6 +60,27 @@ st.shardColl(observerInColl.getName(), {"tags": 1}, {"tags": splitPoint}, true, 
 const outColl = testDB.out_coll;
 // Observer coll for the $out without timeseries.
 const observerOutColl = testDB.observer_out_coll;
+
+// Returns the expected timeseries options after '$out' stage execution, given raw timeseries
+// options (e.g. collectionInfo["options"]["timeseries"] or a manually-built options object).
+function getExpectedTSOptions(tsOptions) {
+    const result = {...tsOptions};
+    if (
+        isViewlessTimeseriesOnlySuite(testDB) &&
+        FeatureFlagUtil.isPresentAndEnabled(testDB, "FixedBucketingCatalog")
+    ) {
+        // In suites where viewless timeseries are the only possible kind of timeseries (i.e., the
+        // feature is enabled and there are no FCV transitions), '$out' always produces a timeseries
+        // with 'fixedBucketing: true'.
+        result.fixedBucketing = true;
+    } else {
+        // In suites that can change FCV in the background, 'fixedBucketing' can change
+        // unpredictably during the test (a downgrade strips it, and a re-upgrade re-adds it set to
+        // false). Remove it from expected options so that validateCollectionOptions() ignores it.
+        delete result.fixedBucketing;
+    }
+    return result;
+}
 
 function runOutAndCompareResults({
     observer: observerPipeline,
@@ -90,7 +118,11 @@ function runOutAndCompareResults({
     // Make sure we only have 1 collection - either created if it didn't exist, or replaced the
     // existing one.
     const collections = outputDB.getCollectionInfos({name: outColl.getName()});
-    assert.eq(collections.length, 1, `$out should replace the existing collection ${JSON.stringify(collections)}`);
+    assert.eq(
+        collections.length,
+        1,
+        `$out should replace the existing collection ${JSON.stringify(collections)}`,
+    );
 
     if (expectedTSOptions) {
         // Make sure the output collection is a timeseries collection.
@@ -121,8 +153,9 @@ function runOutAndCompareResults({
             // Both paths return the same format, keyed by the same index name.
             const rawColl = getTimeseriesCollForRawOps(outputDB, outColl.getName());
             const rawSpec = getRawOperationSpec(outputDB);
-            const indexes = assert.commandWorked(outputDB.runCommand({listIndexes: rawColl, ...rawSpec})).cursor
-                .firstBatch;
+            const indexes = assert.commandWorked(
+                outputDB.runCommand({listIndexes: rawColl, ...rawSpec}),
+            ).cursor.firstBatch;
             const expectedName = timeseriesDefaultIndex().name;
             const containsDefaultIndex = indexes.some((idx) => idx.name === expectedName);
 
@@ -231,9 +264,15 @@ function timeseriesDefaultIndex() {
     const tsOptions = {timeField: "time", metaField: "tags"};
     // Having the timeseries option should cause the result $out collection to be a timeseries
     // collection.
-    const timeseriesPipeline = [{$out: {db: dbName, coll: outColl.getName(), timeseries: tsOptions}}];
+    const timeseriesPipeline = [
+        {$out: {db: dbName, coll: outColl.getName(), timeseries: tsOptions}},
+    ];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: tsOptions});
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: getExpectedTSOptions(tsOptions),
+    });
 })();
 
 (function testSourceTimeseriesOutToTimeseriesCollection() {
@@ -250,13 +289,22 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    // Get the original timeseries options, these should stay the same post $out.
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
+    // For the '$out' spec, use the original timeseries options, but strip the 'fixedBucketing' field which is not allowed in '$out' spec.
+    const outSpecOptions = {...collections[0]["options"]["timeseries"]};
+    delete outSpecOptions.fixedBucketing;
 
     const observerPipeline = [{$out: {db: dbName, coll: observerOutColl.getName()}}];
-    const timeseriesPipeline = [{$out: {db: dbName, coll: outColl.getName(), timeseries: expectedTSOptions}}];
+    const timeseriesPipeline = [
+        {$out: {db: dbName, coll: outColl.getName(), timeseries: outSpecOptions}},
+    ];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: expectedTSOptions});
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
+
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: expectedTSOptions,
+    });
 })();
 
 (function testTimeseriesOutToTimeseriesCollectionWithoutOptions() {
@@ -273,9 +321,6 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    // Get the original timeseries options, these should stay the same post $out.
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
-
     // Change the "time" field in the pipeline, so we can confirm the value is changed in the
     // result.
     const newDate = new Date();
@@ -287,7 +332,13 @@ function timeseriesDefaultIndex() {
     // Both inColl and outColl are timeseries collections. We want to make sure that a timeseries
     // collection can write to another timeseries collection without the timeseriesOptions, so we
     // don't specify those here.
-    const timeseriesPipeline = [{$set: {"time": newDate}}, {$out: {db: testDB.getName(), coll: outColl.getName()}}];
+    const timeseriesPipeline = [
+        {$set: {"time": newDate}},
+        {$out: {db: testDB.getName(), coll: outColl.getName()}},
+    ];
+
+    // Derive expected timeseries options from the original ones.
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
 
     runOutAndCompareResults({
         observer: observerPipeline,
@@ -310,12 +361,17 @@ function timeseriesDefaultIndex() {
     const collections = testDB.getCollectionInfos({name: outColl.getName()});
     assert.eq(collections.length, 1, collections);
 
-    const expectedTSOptions = collections[0]["options"]["timeseries"];
-
     const observerPipeline = [{$out: {db: testDB.getName(), coll: observerOutColl.getName()}}];
     const timeseriesPipeline = [{$out: {db: testDB.getName(), coll: outColl.getName()}}];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, options: expectedTSOptions});
+    // Derive expected timeseries options from the original ones.
+    const expectedTSOptions = getExpectedTSOptions(collections[0]["options"]["timeseries"]);
+
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        options: expectedTSOptions,
+    });
 
     // Make sure the secondary index was maintained.
     const indexSpecs = testDB[outColl].getIndexes();
@@ -332,14 +388,16 @@ function timeseriesDefaultIndex() {
 
     const tsOptions = timeseriesOptions();
 
-    const timeseriesPipeline = [{$out: {db: destDB.getName(), coll: outColl.getName(), timeseries: tsOptions}}];
+    const timeseriesPipeline = [
+        {$out: {db: destDB.getName(), coll: outColl.getName(), timeseries: tsOptions}},
+    ];
 
     const observerPipeline = [{$out: {db: destDB.getName(), coll: observerOutColl.getName()}}];
 
     runOutAndCompareResults({
         observer: observerPipeline,
         timeseries: timeseriesPipeline,
-        options: tsOptions,
+        options: getExpectedTSOptions(tsOptions),
         outputDB: destDB,
         checkForDefaultIndex: true,
     });
@@ -357,7 +415,11 @@ function timeseriesDefaultIndex() {
 
     const observerPipeline = [{$out: {db: destDB.getName(), coll: observerOutColl.getName()}}];
 
-    runOutAndCompareResults({observer: observerPipeline, timeseries: timeseriesPipeline, outputDB: destDB});
+    runOutAndCompareResults({
+        observer: observerPipeline,
+        timeseries: timeseriesPipeline,
+        outputDB: destDB,
+    });
 })();
 
 (function testCannotCreateTimeseriesCollFromNonTimeseriesColl() {
@@ -369,7 +431,11 @@ function timeseriesDefaultIndex() {
 
     const pipeline = [
         {
-            $out: {db: testDB.getName(), coll: observerOutColl.getName(), timeseries: {timeField: "time"}},
+            $out: {
+                db: testDB.getName(),
+                coll: observerOutColl.getName(),
+                timeseries: {timeField: "time"},
+            },
         },
     ];
 
@@ -405,7 +471,11 @@ function timeseriesDefaultIndex() {
     // Timeseries options attempt to change the timeField, which is not allowed.
     const pipeline = [
         {
-            $out: {db: testDB.getName(), coll: outColl.getName(), timeseries: {timeField: "invalidTime"}},
+            $out: {
+                db: testDB.getName(),
+                coll: outColl.getName(),
+                timeseries: {timeField: "invalidTime"},
+            },
         },
     ];
 
@@ -449,7 +519,11 @@ function timeseriesDefaultIndex() {
             $out: {
                 db: testDB.getName(),
                 coll: outColl.getName(),
-                timeseries: {timeField: "time", bucketMaxSpanSeconds: 330, bucketRoundingSeconds: 330},
+                timeseries: {
+                    timeField: "time",
+                    bucketMaxSpanSeconds: 330,
+                    bucketRoundingSeconds: 330,
+                },
             },
         },
     ];
@@ -484,11 +558,19 @@ function timeseriesDefaultIndex() {
 (function testCannotHaveConflictingViews() {
     // Tests that an error is raised if a conflicting view exists.
     assert.commandWorked(testDB.createCollection("view_out", {viewOn: "out"}));
-    const pipeline = [{$out: {db: testDB.getName(), coll: "view_out", timeseries: {timeField: "time"}}}];
+    const pipeline = [
+        {$out: {db: testDB.getName(), coll: "view_out", timeseries: {timeField: "time"}}},
+    ];
     // TODO SERVER-111600: Remove 7268700 error code once 9.0 becomes last LTS.
     // This error was thrown by older versions when $out used timeseries options with the out collection being a non-timeseries view.
-    assert.throwsWithCode(() => inColl.aggregate(pipeline), [ErrorCodes.CommandNotSupportedOnView, 7268700]);
-    assert.throwsWithCode(() => observerInColl.aggregate(pipeline), [ErrorCodes.CommandNotSupportedOnView, 7268700]);
+    assert.throwsWithCode(
+        () => inColl.aggregate(pipeline),
+        [ErrorCodes.CommandNotSupportedOnView, 7268700],
+    );
+    assert.throwsWithCode(
+        () => observerInColl.aggregate(pipeline),
+        [ErrorCodes.CommandNotSupportedOnView, 7268700],
+    );
 })();
 
 (function testCannotRunWithRawData() {

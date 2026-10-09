@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/sharding_catalog_client_impl.h"
 
@@ -76,7 +50,7 @@
 #include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
@@ -88,6 +62,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <iterator>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 
@@ -103,6 +78,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const ReadPreferenceSetting kConfigNearestReadPreference(ReadPreference::Nearest, TagSet{});
 const ReadPreferenceSetting kConfigPrimaryPreferredReadPreference(ReadPreference::PrimaryPreferred,
@@ -166,18 +142,61 @@ void toBatchError(const Status& status, BatchedCommandResponse* response) {
     response->setStatus(status);
 }
 
-AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opCtx,
-                                                           const NamespaceString& nss,
-                                                           const ChunkVersion& sinceVersion) {
+/**
+ * Returns keys for the given purpose and have an expiresAt value greater than newerThanThis on the
+ * given shard.
+ */
+template <typename KeyDocumentType>
+StatusWith<std::vector<KeyDocumentType>> _getNewKeys(OperationContext* opCtx,
+                                                     std::shared_ptr<Shard> shard,
+                                                     const NamespaceString& nss,
+                                                     std::string_view purpose,
+                                                     const LogicalTime& newerThanThis,
+                                                     repl::ReadConcernArgs readConcern) {
+    BSONObjBuilder queryBuilder;
+    queryBuilder.append("purpose", purpose);
+    queryBuilder.append("expiresAt", BSON("$gt" << newerThanThis.asTimestamp()));
+
+    auto findStatus = shard->exhaustiveFindOnConfig(opCtx,
+                                                    getConfigReadPreference(opCtx),
+                                                    readConcern,
+                                                    nss,
+                                                    queryBuilder.obj(),
+                                                    BSON("expiresAt" << 1),
+                                                    boost::none);
+    if (!findStatus.isOK()) {
+        return findStatus.getStatus();
+    }
+    const auto& objs = findStatus.getValue().docs;
+
+    std::vector<KeyDocumentType> keyDocs;
+    keyDocs.reserve(objs.size());
+    for (auto&& obj : objs) {
+        try {
+            keyDocs.push_back(KeyDocumentType::parse(obj, IDLParserContext("keyDoc")));
+        } catch (...) {
+            return exceptionToStatus();
+        }
+    }
+    return keyDocs;
+}
+
+}  // namespace
+
+AggregateCommandRequest makeCollectionAndChunksAggregation(
+    OperationContext* opCtx,
+    const NamespaceString& collectionsNss,
+    const NamespaceString& chunksNss,
+    const NamespaceString& nss,
+    const ChunkVersion& sinceVersion,
+    const boost::optional<ExpiredHistoryFilter>& expiredFilter) {
     ResolvedNamespaceMap resolvedNamespaces;
-    resolvedNamespaces[NamespaceString::kConfigsvrCollectionsNamespace] = {
-        NamespaceString::kConfigsvrCollectionsNamespace, std::vector<BSONObj>()};
-    resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace] = {
-        NamespaceString::kConfigsvrChunksNamespace, std::vector<BSONObj>()};
+    resolvedNamespaces[collectionsNss] = {collectionsNss, std::vector<BSONObj>()};
+    resolvedNamespaces[chunksNss] = {chunksNss, std::vector<BSONObj>()};
 
     auto expCtx = ExpressionContextBuilder{}
                       .opCtx(opCtx)
-                      .ns(NamespaceString::kConfigsvrCollectionsNamespace)
+                      .ns(collectionsNss)
                       .resolvedNamespace(std::move(resolvedNamespaces))
                       .build();
     using Doc = Document;
@@ -234,6 +253,13 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //                                 },
     //                             }
     //                         },
+    //                         // Only when expiredHistoryFilter is set
+    //                         {
+    //                           $match: { $or : [
+    //                             { shard: <shardId> },
+    //                             { onCurrentShardSince: { $gt: <oldest WT timestamp> } }
+    //                           ] }
+    //                         },
     //                         { $match: { lastmod: { $gte: <sinceVersion> } } },
     //                         {
     //                             $sort: {
@@ -273,6 +299,13 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
     //                                 },
     //                             }
     //                         },
+    //                         // Only when expiredHistoryFilter is set
+    //                         {
+    //                           $match: { $or : [
+    //                             { shard: <shardId> },
+    //                             { onCurrentShardSince: { $gt: <oldest WT timestamp> } }
+    //                           ] }
+    //                         },
     //                         {
     //                             $sort: {
     //                                 lastmod: 1
@@ -298,17 +331,28 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
         const auto letExpr = Doc{{"local_uuid", "$" + std::string{CollectionType::kUuidFieldName}}};
 
         const auto uuidExpr =
-            Arr{Value{"$" + ChunkType::collectionUUID.name()}, Value{"$$local_uuid"_sd}};
+            Arr{Value{"$" + ChunkType::collectionUUID.name()}, Value{"$$local_uuid"sv}};
 
-        constexpr auto chunksLookupOutputFieldName = "chunks"_sd;
+        const auto expiredFilterExpr = expiredFilter
+            ? Value{Doc{
+                  {"$match",
+                   Doc{{"$or",
+                        Value{Arr{Value{Doc{{ChunkType::shard.name(),
+                                             expiredFilter->shardId.toString()}}},
+                                  Value{Doc{{ChunkType::onCurrentShardSince.name(),
+                                             Doc{{"$gt", expiredFilter->oldestTimestamp}}}}}}}}}}}}
+            : Value{/*noop*/};
+
+        constexpr auto chunksLookupOutputFieldName = "chunks"sv;
 
         const auto lookupPipeline = [&]() {
             return Doc{
-                {"from", NamespaceString::kConfigsvrChunksNamespace.coll()},
+                {"from", chunksNss.coll()},
                 {"as", chunksLookupOutputFieldName},
                 {"let", letExpr},
                 {"pipeline",
                  Arr{Value{Doc{{"$match", Doc{{"$expr", Doc{{"$eq", uuidExpr}}}}}}},
+                     expiredFilterExpr,
                      incremental
                          ? Value{Doc{{"$match",
                                       Doc{{ChunkType::lastmod.name(),
@@ -318,7 +362,7 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
         }();
 
         return Doc{
-            {"coll", NamespaceString::kConfigsvrCollectionsNamespace.coll()},
+            {"coll", collectionsNss.coll()},
             {"pipeline",
              Arr{Value{Doc{{"$match",
                             Doc{{CollectionType::kNssFieldName,
@@ -352,122 +396,8 @@ AggregateCommandRequest makeCollectionAndChunksAggregation(OperationContext* opC
 
     auto pipeline = Pipeline::create(std::move(stages), expCtx);
     auto serializedPipeline = pipeline->serializeToBson();
-    return AggregateCommandRequest(NamespaceString::kConfigsvrCollectionsNamespace,
-                                   std::move(serializedPipeline));
+    return AggregateCommandRequest(collectionsNss, std::move(serializedPipeline));
 }
-
-AggregateCommandRequest makeUnsplittableCollectionsDataShardAggregation(
-    OperationContext* opCtx,
-    const DatabaseName& dbName,
-    const std::vector<ShardId>& excludedShards) {
-    ResolvedNamespaceMap resolvedNamespaces;
-    resolvedNamespaces[NamespaceString::kConfigsvrCollectionsNamespace] = {
-        NamespaceString::kConfigsvrCollectionsNamespace, std::vector<BSONObj>()};
-    resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace] = {
-        NamespaceString::kConfigsvrChunksNamespace, std::vector<BSONObj>()};
-    auto expCtx = ExpressionContextBuilder{}
-                      .opCtx(opCtx)
-                      .ns(NamespaceString::kConfigsvrCollectionsNamespace)
-                      .resolvedNamespace(std::move(resolvedNamespaces))
-                      .build();
-    using Doc = Document;
-    using Arr = std::vector<Value>;
-
-    DocumentSourceContainer stages;
-
-    // 1. Match config.collections entries with database name = dbName
-    // {
-    //     $match: {
-    //         _id: {$regex: dbName.*, unsplittable: true}
-    //     }
-    // }
-    const auto db =
-        DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest());
-    stages.emplace_back(DocumentSourceMatch::create(
-        BSON(CollectionType::kNssFieldName
-             << BSON("$regex" << fmt::format("^{}\\.", pcre_util::quoteMeta(db)))
-             << CollectionType::kUnsplittableFieldName << true),
-        expCtx));
-
-    // 2. Retrieve config.chunks entries with the same uuid as the one from the
-    // config.collections document.
-    //
-    // The $lookup stage gets the config.chunks documents and puts them in a field called
-    // "chunks" in the document produced during stage 1.
-    //
-    // {
-    //      $lookup: {
-    //          from: "chunks",
-    //          as: "chunks",
-    //          localField: "uuid",
-    //          foreignField: "uuid"
-    //      }
-    // }
-    const Doc lookupPipeline{{"from", NamespaceString::kConfigsvrChunksNamespace.coll()},
-                             {"as", "chunks"_sd},
-                             {"localField", CollectionType::kUuidFieldName},
-                             {"foreignField", CollectionType::kUuidFieldName}};
-
-    stages.emplace_back(DocumentSourceLookUp::createFromBson(
-        Doc{{"$lookup", lookupPipeline}}.toBson().firstElement(), expCtx));
-
-    // 3. Filter only the collection entries where the chunk has the shard field equal to shardId.
-    // {
-    //      $match: {
-    //          chunks.shard: {$nin: <excludedShards>}
-    //      }
-    // }
-    BSONObjBuilder ninBuilder;
-    ninBuilder.append("$nin", excludedShards);
-    stages.emplace_back(
-        DocumentSourceMatch::create(Doc{{"chunks.shard", ninBuilder.obj()}}.toBson(), expCtx));
-
-    auto pipeline = Pipeline::create(std::move(stages), expCtx);
-    auto serializedPipeline = pipeline->serializeToBson();
-    return AggregateCommandRequest(NamespaceString::kConfigsvrCollectionsNamespace,
-                                   std::move(serializedPipeline));
-}
-
-/**
- * Returns keys for the given purpose and have an expiresAt value greater than newerThanThis on the
- * given shard.
- */
-template <typename KeyDocumentType>
-StatusWith<std::vector<KeyDocumentType>> _getNewKeys(OperationContext* opCtx,
-                                                     std::shared_ptr<Shard> shard,
-                                                     const NamespaceString& nss,
-                                                     StringData purpose,
-                                                     const LogicalTime& newerThanThis,
-                                                     repl::ReadConcernLevel readConcernLevel) {
-    BSONObjBuilder queryBuilder;
-    queryBuilder.append("purpose", purpose);
-    queryBuilder.append("expiresAt", BSON("$gt" << newerThanThis.asTimestamp()));
-
-    auto findStatus = shard->exhaustiveFindOnConfig(opCtx,
-                                                    getConfigReadPreference(opCtx),
-                                                    readConcernLevel,
-                                                    nss,
-                                                    queryBuilder.obj(),
-                                                    BSON("expiresAt" << 1),
-                                                    boost::none);
-    if (!findStatus.isOK()) {
-        return findStatus.getStatus();
-    }
-    const auto& objs = findStatus.getValue().docs;
-
-    std::vector<KeyDocumentType> keyDocs;
-    keyDocs.reserve(objs.size());
-    for (auto&& obj : objs) {
-        try {
-            keyDocs.push_back(KeyDocumentType::parse(obj, IDLParserContext("keyDoc")));
-        } catch (...) {
-            return exceptionToStatus();
-        }
-    }
-    return keyDocs;
-}
-
-}  // namespace
 
 ShardingCatalogClientImpl::ShardingCatalogClientImpl(std::shared_ptr<Shard> overrideConfigShard)
     : _overrideConfigShard(std::move(overrideConfigShard)) {}
@@ -476,7 +406,7 @@ ShardingCatalogClientImpl::~ShardingCatalogClientImpl() = default;
 
 DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
                                                     const DatabaseName& dbName,
-                                                    repl::ReadConcernLevel readConcernLevel) {
+                                                    repl::ReadConcernArgs readConcern) {
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << dbName.toStringForErrorMsg() << " is not a valid db name",
             DatabaseName::isValid(dbName, DatabaseName::DollarInDbNameBehavior::Allow));
@@ -501,7 +431,7 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
     }
 
     auto result =
-        _fetchDatabaseMetadata(opCtx, dbName, getConfigReadPreference(opCtx), readConcernLevel);
+        _fetchDatabaseMetadata(opCtx, dbName, getConfigReadPreference(opCtx), readConcern);
     if (result == ErrorCodes::NamespaceNotFound) {
         // If we failed to find the database metadata on the 'nearest' config server, try again
         // against the primary, in case the database was recently created.
@@ -509,7 +439,7 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
                    _fetchDatabaseMetadata(opCtx,
                                           dbName,
                                           ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                          readConcernLevel))
+                                          readConcern))
             .value;
     }
 
@@ -518,7 +448,7 @@ DatabaseType ShardingCatalogClientImpl::getDatabase(OperationContext* opCtx,
 
 std::vector<DatabaseType> ShardingCatalogClientImpl::getAllDBs(
     OperationContext* opCtx,
-    repl::ReadConcernLevel readConcern,
+    repl::ReadConcernArgs readConcern,
     const boost::optional<ReadPreferenceSetting>& readPref) {
     auto dbs =
         uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
@@ -543,13 +473,13 @@ StatusWith<repl::OpTimeWith<DatabaseType>> ShardingCatalogClientImpl::_fetchData
     OperationContext* opCtx,
     const DatabaseName& dbName,
     const ReadPreferenceSetting& readPref,
-    repl::ReadConcernLevel readConcernLevel) {
+    repl::ReadConcernArgs readConcern) {
     invariant(!dbName.isAdminDB() && !dbName.isConfigDB());
 
     auto findStatus =
         _exhaustiveFindOnConfig(opCtx,
                                 readPref,
-                                readConcernLevel,
+                                readConcern,
                                 NamespaceString::kConfigDatabasesNamespace,
                                 BSON(DatabaseType::kDbNameFieldName << DatabaseNameUtil::serialize(
                                          dbName, SerializationContext::stateCommandRequest())),
@@ -580,7 +510,8 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
     OperationContext* opCtx,
     AggregateCommandRequest& aggRequest,
     const repl::ReadConcernArgs& readConcern,
-    const Milliseconds& maxTimeout) {
+    const Milliseconds& maxTimeout,
+    Shard::RetryPolicy retryPolicy) {
     // Reads on the config server may run on any node in its replica set. Such reads use the config
     // time as an afterClusterTime token, but config time is only inclusive of majority committed
     // data, so we should not use a weaker read concern. Note if the local node is a config server,
@@ -603,26 +534,22 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
 
     aggRequest.setUnwrappedReadPref(readPref.toContainingBSON());
 
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        // Don't use a timeout on the config server to guarantee it can always refresh.
-        const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(), maxTimeout);
-        aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
-    }
+    const Milliseconds maxTimeMS = std::min(opCtx->getRemainingMaxTimeMillis(), maxTimeout);
+    aggRequest.setMaxTimeMS(durationCount<Milliseconds>(maxTimeMS));
 
     // Run the aggregation
     const auto configShard = _getConfigShard(opCtx);
-    return uassertStatusOK(
-        configShard->runAggregationWithResult(opCtx, aggRequest, Shard::RetryPolicy::kIdempotent));
+    return uassertStatusOK(configShard->runAggregationWithResult(opCtx, aggRequest, retryPolicy));
 }
 
 CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
                                                         const NamespaceString& nss,
-                                                        repl::ReadConcernLevel readConcernLevel) {
+                                                        repl::ReadConcernArgs readConcern) {
     auto collDoc =
         uassertStatusOK(_exhaustiveFindOnConfig(
                             opCtx,
                             getConfigReadPreference(opCtx),
-                            readConcernLevel,
+                            readConcern,
                             NamespaceString::kConfigsvrCollectionsNamespace,
                             BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
                                      nss, SerializationContext::stateDefault())),
@@ -639,11 +566,11 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
 
 CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
                                                         const UUID& uuid,
-                                                        repl::ReadConcernLevel readConcernLevel) {
+                                                        repl::ReadConcernArgs readConcern) {
     auto collDoc =
         uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                 getConfigReadPreference(opCtx),
-                                                readConcernLevel,
+                                                readConcern,
                                                 NamespaceString::kConfigsvrCollectionsNamespace,
                                                 BSON(CollectionType::kUuidFieldName << uuid),
                                                 BSONObj(),
@@ -658,7 +585,7 @@ CollectionType ShardingCatalogClientImpl::getCollection(OperationContext* opCtx,
 std::vector<CollectionType> ShardingCatalogClientImpl::getShardedCollections(
     OperationContext* opCtx,
     const DatabaseName& dbName,
-    repl::ReadConcernLevel readConcernLevel,
+    repl::ReadConcernArgs readConcern,
     const BSONObj& sort) {
     BSONObjBuilder b;
     if (!dbName.isEmpty()) {
@@ -673,7 +600,7 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getShardedCollections(
     auto collDocs =
         uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                 getConfigReadPreference(opCtx),
-                                                readConcernLevel,
+                                                readConcern,
                                                 NamespaceString::kConfigsvrCollectionsNamespace,
                                                 b.obj(),
                                                 sort,
@@ -690,7 +617,7 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getShardedCollections(
 std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
     OperationContext* opCtx,
     const DatabaseName& dbName,
-    repl::ReadConcernLevel readConcernLevel,
+    repl::ReadConcernArgs readConcern,
     const BSONObj& sort) {
     BSONObjBuilder b;
     if (!dbName.isEmpty()) {
@@ -703,7 +630,7 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
     auto collDocs =
         uassertStatusOK(_exhaustiveFindOnConfig(opCtx,
                                                 getConfigReadPreference(opCtx),
-                                                readConcernLevel,
+                                                readConcern,
                                                 NamespaceString::kConfigsvrCollectionsNamespace,
                                                 b.obj(),
                                                 sort,
@@ -720,7 +647,7 @@ std::vector<CollectionType> ShardingCatalogClientImpl::getCollections(
 std::vector<NamespaceString> ShardingCatalogClientImpl::getShardedCollectionNamespacesForDb(
     OperationContext* opCtx,
     const DatabaseName& dbName,
-    repl::ReadConcernLevel readConcern,
+    repl::ReadConcernArgs readConcern,
     const BSONObj& sort) {
     BSONObjBuilder b;
     const auto db =
@@ -752,7 +679,7 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getShardedCollectionName
 std::vector<NamespaceString> ShardingCatalogClientImpl::getCollectionNamespacesForDb(
     OperationContext* opCtx,
     const DatabaseName& dbName,
-    repl::ReadConcernLevel readConcern,
+    repl::ReadConcernArgs readConcern,
     const BSONObj& sort) {
     auto collectionsOnConfig = getCollections(opCtx, dbName, readConcern, sort);
 
@@ -768,7 +695,7 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getCollectionNamespacesF
 std::vector<NamespaceString> ShardingCatalogClientImpl::getUnsplittableCollectionNamespacesForDb(
     OperationContext* opCtx,
     const DatabaseName& dbName,
-    repl::ReadConcernLevel readConcern,
+    repl::ReadConcernArgs readConcern,
     const BSONObj& sort) {
     BSONObjBuilder b;
     const auto db =
@@ -797,32 +724,11 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getUnsplittableCollectio
     return collections;
 }
 
-std::vector<NamespaceString>
-ShardingCatalogClientImpl::getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-    OperationContext* opCtx,
-    const DatabaseName& dbName,
-    const std::vector<ShardId>& excludedShards,
-    repl::ReadConcernLevel readConcern) {
-    auto aggRequest =
-        makeUnsplittableCollectionsDataShardAggregation(opCtx, dbName, excludedShards);
-    std::vector<BSONObj> collectionEntries =
-        Grid::get(opCtx)->catalogClient()->runCatalogAggregation(
-            opCtx, aggRequest, repl::ReadConcernArgs(readConcern));
-    std::vector<NamespaceString> collectionNames;
-    collectionNames.reserve(collectionEntries.size());
-    for (const auto& coll : collectionEntries) {
-        auto nssField = coll.getField(CollectionType::kNssFieldName);
-        collectionNames.push_back(NamespaceStringUtil::deserialize(
-            boost::none, nssField.String(), SerializationContext::stateDefault()));
-    }
-    return collectionNames;
-}
-
 StatusWith<BSONObj> ShardingCatalogClientImpl::getGlobalSettings(OperationContext* opCtx,
-                                                                 StringData key) {
+                                                                 std::string_view key) {
     auto findStatus = _exhaustiveFindOnConfig(opCtx,
                                               getConfigReadPreference(opCtx),
-                                              repl::ReadConcernLevel::kMajorityReadConcern,
+                                              repl::ReadConcernArgs::kMajority,
                                               NamespaceString::kConfigSettingsNamespace,
                                               BSON("_id" << key),
                                               BSONObj(),
@@ -842,7 +748,7 @@ StatusWith<BSONObj> ShardingCatalogClientImpl::getGlobalSettings(OperationContex
 }
 
 StatusWith<VersionType> ShardingCatalogClientImpl::getConfigVersion(
-    OperationContext* opCtx, repl::ReadConcernLevel readConcern) {
+    OperationContext* opCtx, repl::ReadConcernArgs readConcern) {
     auto findStatus =
         _getConfigShard(opCtx)->exhaustiveFindOnConfig(opCtx,
                                                        getConfigReadPreference(opCtx),
@@ -882,7 +788,7 @@ StatusWith<std::vector<DatabaseName>> ShardingCatalogClientImpl::getDatabasesFor
     auto findStatus =
         _exhaustiveFindOnConfig(opCtx,
                                 getConfigReadPreference(opCtx),
-                                repl::ReadConcernLevel::kMajorityReadConcern,
+                                repl::ReadConcernArgs::kMajority,
                                 NamespaceString::kConfigDatabasesNamespace,
                                 BSON(DatabaseType::kPrimaryFieldName << shardId.toString()),
                                 BSONObj(),
@@ -916,11 +822,11 @@ StatusWith<std::vector<ChunkType>> ShardingCatalogClientImpl::getChunks(
     repl::OpTime* opTime,
     const OID& epoch,
     const Timestamp& timestamp,
-    repl::ReadConcernLevel readConcern,
+    repl::ReadConcernArgs readConcern,
     const boost::optional<BSONObj>& hint) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
-              readConcern == repl::ReadConcernLevel::kMajorityReadConcern ||
-              readConcern == repl::ReadConcernLevel::kSnapshotReadConcern);
+              readConcern.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern ||
+              readConcern.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern);
 
     // Convert boost::optional<int> to boost::optional<long long>.
     auto longLimit = limit ? boost::optional<long long>(*limit) : boost::none;
@@ -971,7 +877,12 @@ std::pair<CollectionType, std::vector<ChunkType>> ShardingCatalogClientImpl::get
                                    "https://dochub.mongodb.org/core/mongos-config-only-mode/");
     }
 
-    auto aggRequest = makeCollectionAndChunksAggregation(opCtx, nss, sinceVersion);
+    auto aggRequest =
+        makeCollectionAndChunksAggregation(opCtx,
+                                           NamespaceString::kConfigsvrCollectionsNamespace,
+                                           NamespaceString::kConfigsvrChunksNamespace,
+                                           nss,
+                                           sinceVersion);
 
     std::vector<BSONObj> aggResult = runCatalogAggregation(
         opCtx, aggRequest, readConcern, Milliseconds(gFindChunksOnConfigTimeoutMS.load()));
@@ -1029,7 +940,7 @@ StatusWith<std::vector<TagsType>> ShardingCatalogClientImpl::getTagsForCollectio
     OperationContext* opCtx, const NamespaceString& nss, boost::optional<long long> limit) {
     auto findStatus = _exhaustiveFindOnConfig(opCtx,
                                               getConfigReadPreference(opCtx),
-                                              repl::ReadConcernLevel::kMajorityReadConcern,
+                                              repl::ReadConcernArgs::kMajority,
                                               TagsType::ConfigNS,
                                               BSON(TagsType::ns(NamespaceStringUtil::serialize(
                                                   nss, SerializationContext::stateDefault()))),
@@ -1115,7 +1026,7 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
 }
 
 repl::OpTimeWith<std::vector<ShardType>> ShardingCatalogClientImpl::getAllShards(
-    OperationContext* opCtx, repl::ReadConcernLevel readConcern, BSONObj filter) {
+    OperationContext* opCtx, repl::ReadConcernArgs readConcern, BSONObj filter) {
     if (MONGO_unlikely(serverGlobalParams.configOnly)) {
         uasserted(
             12319006,
@@ -1150,7 +1061,7 @@ repl::OpTimeWith<std::vector<ShardType>> ShardingCatalogClientImpl::getAllShards
 }
 
 Status ShardingCatalogClientImpl::runUserManagementWriteCommand(OperationContext* opCtx,
-                                                                StringData commandName,
+                                                                std::string_view commandName,
                                                                 const DatabaseName& dbname,
                                                                 const BSONObj& cmdObj,
                                                                 BSONObjBuilder* result) {
@@ -1304,7 +1215,7 @@ Status ShardingCatalogClientImpl::insertConfigDocument(OperationContext* opCtx,
             auto fetchDuplicate =
                 _exhaustiveFindOnConfig(opCtx,
                                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                        repl::ReadConcernLevel::kMajorityReadConcern,
+                                        repl::ReadConcernArgs::kMajority,
                                         nss,
                                         idField.eoo() ? doc : idField.wrap(),
                                         BSONObj(),
@@ -1433,7 +1344,7 @@ Status ShardingCatalogClientImpl::removeConfigDocuments(OperationContext* opCtx,
 StatusWith<repl::OpTimeWith<std::vector<BSONObj>>>
 ShardingCatalogClientImpl::_exhaustiveFindOnConfig(OperationContext* opCtx,
                                                    const ReadPreferenceSetting& readPref,
-                                                   const repl::ReadConcernLevel& readConcern,
+                                                   const repl::ReadConcernArgs& readConcern,
                                                    const NamespaceString& nss,
                                                    const BSONObj& query,
                                                    const BSONObj& sort,
@@ -1451,28 +1362,28 @@ ShardingCatalogClientImpl::_exhaustiveFindOnConfig(OperationContext* opCtx,
 
 StatusWith<std::vector<KeysCollectionDocument>> ShardingCatalogClientImpl::getNewInternalKeys(
     OperationContext* opCtx,
-    StringData purpose,
+    std::string_view purpose,
     const LogicalTime& newerThanThis,
-    repl::ReadConcernLevel readConcernLevel) {
+    repl::ReadConcernArgs readConcern) {
     return _getNewKeys<KeysCollectionDocument>(opCtx,
                                                _getConfigShard(opCtx),
                                                NamespaceString::kKeysCollectionNamespace,
                                                purpose,
                                                newerThanThis,
-                                               readConcernLevel);
+                                               readConcern);
 }
 
 StatusWith<std::vector<ExternalKeysCollectionDocument>>
 ShardingCatalogClientImpl::getAllExternalKeys(OperationContext* opCtx,
-                                              StringData purpose,
-                                              repl::ReadConcernLevel readConcernLevel) {
+                                              std::string_view purpose,
+                                              repl::ReadConcernArgs readConcern) {
     return _getNewKeys<ExternalKeysCollectionDocument>(
         opCtx,
         _getConfigShard(opCtx),
         NamespaceString::kExternalKeysCollectionNamespace,
         purpose,
         LogicalTime(),
-        readConcernLevel);
+        readConcern);
 }
 
 bool ShardingCatalogClientImpl::anyShardRemovedSince(OperationContext* opCtx,
@@ -1481,7 +1392,7 @@ bool ShardingCatalogClientImpl::anyShardRemovedSince(OperationContext* opCtx,
         uassertStatusOK(
             _exhaustiveFindOnConfig(opCtx,
                                     kConfigPrimaryPreferredReadPreference,
-                                    repl::ReadConcernLevel::kMajorityReadConcern,
+                                    repl::ReadConcernArgs::kMajority,
                                     NamespaceString::kConfigsvrShardRemovalLogNamespace,
                                     BSON("_id" << ShardingCatalogClient::kLatestShardRemovalLogId
                                                << RemoveShardEventType::kTimestampFieldName

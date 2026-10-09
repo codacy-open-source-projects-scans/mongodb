@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -83,6 +56,7 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/replication_recovery_mock.h"
+#include "mongo/db/repl/set_multikey_metadata_oplog_entry_gen.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/timestamp_block.h"
@@ -103,6 +77,7 @@
 #include "mongo/db/shard_role/shard_catalog/collection_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/create_collection.h"
 #include "mongo/db/shard_role/shard_catalog/database.h"
+#include "mongo/db/shard_role/shard_catalog/database_holder.h"
 #include "mongo/db/shard_role/shard_catalog/document_validation.h"
 #include "mongo/db/shard_role/shard_catalog/drop_database.h"
 #include "mongo/db/shard_role/shard_catalog/drop_indexes.h"
@@ -111,6 +86,7 @@
 #include "mongo/db/shard_role/shard_catalog/index_catalog.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/shard_role/shard_catalog/index_descriptor.h"
+#include "mongo/db/shard_role/shard_catalog/set_multikey_metadata_oplog_helpers.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/db/storage/damage_vector.h"
@@ -154,6 +130,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -164,6 +141,7 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 namespace {
 CollectionAcquisition acquireCollForRead(OperationContext* opCtx, const NamespaceString& nss) {
     return acquireCollection(
@@ -233,13 +211,14 @@ private:
 const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 
 void assertIndexMetaDataMissing(std::shared_ptr<durable_catalog::CatalogEntryMetaData> collMetaData,
-                                StringData indexName) {
+                                std::string_view indexName) {
     const auto idxOffset = collMetaData->findIndexOffset(indexName);
     ASSERT_EQUALS(-1, idxOffset) << indexName << ". Collection Metdata: " << collMetaData->toBSON();
 }
 
 durable_catalog::CatalogEntryMetaData::IndexMetaData getIndexMetaData(
-    std::shared_ptr<durable_catalog::CatalogEntryMetaData> collMetaData, StringData indexName) {
+    std::shared_ptr<durable_catalog::CatalogEntryMetaData> collMetaData,
+    std::string_view indexName) {
     const auto idxOffset = collMetaData->findIndexOffset(indexName);
     ASSERT_GT(idxOffset, -1) << indexName;
     return collMetaData->indexes[idxOffset];
@@ -347,7 +326,6 @@ public:
             shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
                 RecoveryUnit::ReadSource::kNoTimestamp);
             shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
-            AutoGetDb autoDb(_opCtx, nss.dbName(), MODE_IX);
             auto coll1 = acquireCollection(_opCtx,
                                            CollectionAcquisitionRequest::fromOpCtx(
                                                _opCtx, nss, AcquisitionPrerequisites::kWrite),
@@ -360,7 +338,7 @@ public:
                                              CollectionAcquisitionRequest::fromOpCtx(
                                                  _opCtx, nss, AcquisitionPrerequisites::kWrite),
                                              MODE_IX);
-            auto db = autoDb.ensureDbExists(_opCtx);
+            auto db = DatabaseHolder::get(_opCtx)->openDb(_opCtx, nss.dbName());
             WriteUnitOfWork wunit(_opCtx);
             if (_opCtx->writesAreReplicated() &&
                 shard_role_details::getRecoveryUnit(_opCtx)->getCommitTimestamp().isNull()) {
@@ -602,14 +580,19 @@ public:
      * provided timestamp.
      */
     void assertNamespaceInIdents(NamespaceString nss, Timestamp ts, bool shouldExpect) {
-        OneOffRead oor(_opCtx, ts);
-        AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_IS);
+        auto acq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kRead),
+            LockMode::MODE_IS);
 
         // getCollectionIdent() returns the ident for the given namespace in the MDBCatalog.
         // getAllIdents() actually looks in the RecordStore for a list of all idents, and is thus
         // versioned by timestamp. We can expect a namespace to have a consistent ident across
         // timestamps, provided the collection does not get renamed.
-        auto expectedIdent = MDBCatalog::get(_opCtx)->getEntry(autoColl->getCatalogId()).ident;
+        auto expectedIdent =
+            MDBCatalog::get(_opCtx)->getEntry(acq.getCollectionPtr()->getCatalogId()).ident;
+
+        OneOffRead oor(_opCtx, ts);
         auto idents = MDBCatalog::get(_opCtx)->getAllIdents(_opCtx);
         auto found = std::find(idents.begin(), idents.end(), expectedIdent);
 
@@ -738,8 +721,8 @@ public:
     }
 
     void assertIdentsExistAtTimestamp(MDBCatalog* mdbCatalog,
-                                      StringData collIdent,
-                                      StringData indexIdent,
+                                      std::string_view collIdent,
+                                      std::string_view indexIdent,
                                       Timestamp timestamp) {
         OneOffRead oor(_opCtx, timestamp);
 
@@ -756,8 +739,8 @@ public:
     }
 
     void assertIdentsMissingAtTimestamp(MDBCatalog* mdbCatalog,
-                                        StringData collIdent,
-                                        StringData indexIdent,
+                                        std::string_view collIdent,
+                                        std::string_view indexIdent,
                                         Timestamp timestamp) {
         OneOffRead oor(_opCtx, timestamp);
         auto allIdents = mdbCatalog->getAllIdents(_opCtx);
@@ -788,7 +771,7 @@ public:
 
     void assertMultikeyPaths(OperationContext* _opCtx,
                              const CollectionPtr& collection,
-                             StringData indexName,
+                             std::string_view indexName,
                              Timestamp ts,
                              bool shouldBeMultikey,
                              const MultikeyPaths& expectedMultikeyPaths) {
@@ -894,9 +877,8 @@ TEST_F(StorageTimestampTest, SecondaryInsertTimes) {
                                     BSON("ts" << firstInsertTime.addTicks(idx).asTimestamp() << "t"
                                               << 1LL << "v" << 2 << "op"
                                               << "i"
-                                              << "ns" << nss.ns_forTest() << "ui"
-                                              << collAcq.getCollectionPtr()->uuid() << "wall"
-                                              << Date_t() << "o" << BSON("_id" << idx))
+                                              << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid()
+                                              << "wall" << Date_t() << "o" << BSON("_id" << idx))
                                     << BSON("ts" << firstInsertTime.addTicks(idx).asTimestamp()
                                                  << "t" << 1LL << "op"
                                                  << "c"
@@ -940,8 +922,8 @@ TEST_F(StorageTimestampTest, SecondaryArrayInsertTimes) {
             MODE_IX);
         oplogCommonBuilder << "v" << 2 << "op"
                            << "i"
-                           << "ns" << nss.ns_forTest() << "ui" << collAcq.getCollectionPtr()->uuid()
-                           << "wall" << Date_t();
+                           << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid() << "wall"
+                           << Date_t();
     }
     auto oplogCommon = oplogCommonBuilder.done();
 
@@ -1017,9 +999,8 @@ TEST_F(StorageTimestampTest, SecondaryDeleteTimes) {
                              {BSON("ts" << startDeleteTime.addTicks(num).asTimestamp() << "t" << 0LL
                                         << "v" << 2 << "op"
                                         << "d"
-                                        << "ns" << nss.ns_forTest() << "ui"
-                                        << collAcq.getCollectionPtr()->uuid() << "wall" << Date_t()
-                                        << "o" << BSON("_id" << num))})
+                                        << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid()
+                                        << "wall" << Date_t() << "o" << BSON("_id" << num))})
                       .getStatus());
     }
 
@@ -1093,9 +1074,9 @@ TEST_F(StorageTimestampTest, SecondaryUpdateTimes) {
                              {BSON("ts" << firstUpdateTime.addTicks(idx).asTimestamp() << "t" << 0LL
                                         << "v" << 2 << "op"
                                         << "u"
-                                        << "ns" << nss.ns_forTest() << "ui"
-                                        << collAcq.getCollectionPtr()->uuid() << "wall" << Date_t()
-                                        << "o2" << BSON("_id" << 0) << "o" << updates[idx].first)})
+                                        << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid()
+                                        << "wall" << Date_t() << "o2" << BSON("_id" << 0) << "o"
+                                        << updates[idx].first)})
                       .getStatus());
     }
 
@@ -1130,16 +1111,16 @@ TEST_F(StorageTimestampTest, SecondaryInsertToUpsert) {
     // on the same collection with `{_id: 0}`. It's expected for this second insert to be
     // turned into an upsert. The goal document does not contain `field: 0`.
     BSONObjBuilder resultBuilder;
-    auto result = unittest::assertGet(doApplyOps(
-        nss.dbName(),
-        {BSON("ts" << insertTime.asTimestamp() << "t" << 1LL << "op"
-                   << "i"
-                   << "ns" << nss.ns_forTest() << "ui" << collAcq.getCollectionPtr()->uuid()
-                   << "wall" << Date_t() << "o" << BSON("_id" << 0 << "field" << 0)),
-         BSON("ts" << insertTime.addTicks(1).asTimestamp() << "t" << 1LL << "op"
-                   << "i"
-                   << "ns" << nss.ns_forTest() << "ui" << collAcq.getCollectionPtr()->uuid()
-                   << "wall" << Date_t() << "o" << BSON("_id" << 0))}));
+    auto result = unittest::assertGet(
+        doApplyOps(nss.dbName(),
+                   {BSON("ts" << insertTime.asTimestamp() << "t" << 1LL << "op"
+                              << "i"
+                              << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid() << "wall"
+                              << Date_t() << "o" << BSON("_id" << 0 << "field" << 0)),
+                    BSON("ts" << insertTime.addTicks(1).asTimestamp() << "t" << 1LL << "op"
+                              << "i"
+                              << "ns" << nss.ns_forTest() << "ui" << collAcq.uuid() << "wall"
+                              << Date_t() << "o" << BSON("_id" << 0))}));
 
     ASSERT_EQ(2, result.getIntField("applied"));
     ASSERT(result["results"].Array()[0].Bool());
@@ -1274,22 +1255,22 @@ TEST_F(StorageTimestampTest, SecondaryCreateCollectionBetweenInserts) {
         ASSERT_FALSE(acquireCollForRead(_opCtx, nss2).exists());
 
         BSONObjBuilder resultBuilder;
-        auto swResult = doApplyOps(
-            DatabaseName::createDatabaseName_forTest(boost::none, dbName),
-            {
-                BSON("ts" << _presentTs << "t" << 1LL << "op"
-                          << "i"
-                          << "ns" << nss1.ns_forTest() << "ui" << collAcq.getCollectionPtr()->uuid()
-                          << "wall" << Date_t() << "o" << doc1),
-                BSON("ts" << _futureTs << "t" << 1LL << "op"
-                          << "c"
-                          << "ui" << uuid2 << "ns" << nss2.getCommandNS().ns_forTest() << "wall"
-                          << Date_t() << "o" << BSON("create" << nss2.coll())),
-                BSON("ts" << insert2Ts << "t" << 1LL << "op"
-                          << "i"
-                          << "ns" << nss2.ns_forTest() << "ui" << uuid2 << "wall" << Date_t() << "o"
-                          << doc2),
-            });
+        auto swResult =
+            doApplyOps(DatabaseName::createDatabaseName_forTest(boost::none, dbName),
+                       {
+                           BSON("ts" << _presentTs << "t" << 1LL << "op"
+                                     << "i"
+                                     << "ns" << nss1.ns_forTest() << "ui" << collAcq.uuid()
+                                     << "wall" << Date_t() << "o" << doc1),
+                           BSON("ts" << _futureTs << "t" << 1LL << "op"
+                                     << "c"
+                                     << "ui" << uuid2 << "ns" << nss2.getCommandNS().ns_forTest()
+                                     << "wall" << Date_t() << "o" << BSON("create" << nss2.coll())),
+                           BSON("ts" << insert2Ts << "t" << 1LL << "op"
+                                     << "i"
+                                     << "ns" << nss2.ns_forTest() << "ui" << uuid2 << "wall"
+                                     << Date_t() << "o" << doc2),
+                       });
         ASSERT_OK(swResult);
     }
 
@@ -1373,7 +1354,7 @@ TEST_F(StorageTimestampTest, SecondarySetIndexMultikeyOnInsert) {
             _opCtx,
             CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
             MODE_IX);
-        uuid = collAcq.getCollectionPtr()->uuid();
+        uuid = collAcq.uuid();
     }
     auto indexName = "a_1";
     auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
@@ -1424,8 +1405,9 @@ TEST_F(StorageTimestampTest, SecondarySetIndexMultikeyOnInsert) {
         MODE_IX);
     assertMultikeyPaths(
         _opCtx, collAcq.getCollectionPtr(), indexName, pastTime.asTimestamp(), false, {{}});
+    // The first op in the batch (op0 at insertTime0) does not make the index multikey.
     assertMultikeyPaths(
-        _opCtx, collAcq.getCollectionPtr(), indexName, insertTime0.asTimestamp(), true, {{0}});
+        _opCtx, collAcq.getCollectionPtr(), indexName, insertTime0.asTimestamp(), false, {{}});
     assertMultikeyPaths(
         _opCtx, collAcq.getCollectionPtr(), indexName, insertTime1.asTimestamp(), true, {{0}});
     assertMultikeyPaths(
@@ -1451,7 +1433,7 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnInsert) {
             _opCtx,
             CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
             MODE_IX);
-        return collAcq.getCollectionPtr()->uuid();
+        return collAcq.uuid();
     }();
 
     auto indexName = "a_1";
@@ -1512,32 +1494,29 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnInsert) {
         // WiredTiger transactions that can contain the data written by op1.
         OneOffRead oor(_opCtx, insertTime1.asTimestamp());
         MultikeyMetadataAccessStats stats;
-        std::set<FieldRef> paths = getWildcardMultikeyPathSet(_opCtx, entry, fieldSet, &stats);
+        std::set<FieldRef> paths = getWildcardMultikeyPathSet(
+            _opCtx, collAcq.getCollectionPtr()->uuid(), entry, fieldSet, &stats);
         ASSERT_EQUALS(1, paths.size());
         ASSERT_EQUALS("a", paths.begin()->dottedField());
     }
     {
-        // Oplog application conservatively uses the first optime in the batch, insertTime0, as
-        // the point at which the index became multikey, despite the fact that the earliest op
-        // which caused the index to become multikey did not occur until insertTime1. This works
-        // because if we construct a query plan that incorrectly believes a particular path to
-        // be multikey, the plan will still be correct (if possibly sub-optimal). Conversely, if
-        // we were to construct a query plan that incorrectly believes a path is NOT multikey,
-        // it could produce incorrect results.
+        // The first op in the batch (op0 at insertTime0) does not make the index multikey, so
+        // the deferred catalog write must be timestamped at the timestamp of the actual op that
+        // contributed multikey paths -- not at insertTime0. Reads at insertTime0 must observe
+        // the index as not yet multikey, matching the primary's behavior.
         OneOffRead oor(_opCtx, insertTime0.asTimestamp());
         MultikeyMetadataAccessStats stats;
-        std::set<FieldRef> paths = getWildcardMultikeyPathSet(_opCtx, entry, fieldSet, &stats);
-        ASSERT_EQUALS(1, paths.size());
-        ASSERT_EQUALS("a", paths.begin()->dottedField());
+        std::set<FieldRef> paths = getWildcardMultikeyPathSet(
+            _opCtx, collAcq.getCollectionPtr()->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
     }
 }
 
-TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnUpdate) {
-    // Pretend to be a secondary.
+TEST_F(StorageTimestampTest, SecondarySetIndexMultikeyOnUpdate) {
     repl::UnreplicatedWritesBlock uwb(_opCtx);
 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(
-        "unittests.SecondarySetWildcardIndexMultikeyOnUpdate");
+        "unittests.SecondarySetIndexMultikeyOnUpdate");
     create(nss);
     UUID uuid = UUID::gen();
     {
@@ -1545,43 +1524,36 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnUpdate) {
             _opCtx,
             CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
             MODE_IX);
-        uuid = collAcq.getCollectionPtr()->uuid();
+        uuid = collAcq.uuid();
     }
     auto indexName = "a_1";
-    auto indexSpec = BSON("name" << indexName << "key" << BSON("$**" << 1) << "v"
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
                                  << static_cast<int>(kIndexVersion));
     ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
 
     _coordinatorMock->alwaysAllowWrites(false);
 
     const LogicalTime insertTime0 = _clock->tickClusterTime(1);
-    const LogicalTime updateTime1 = _clock->tickClusterTime(1);
+    const LogicalTime insertTime1 = _clock->tickClusterTime(1);
     const LogicalTime updateTime2 = _clock->tickClusterTime(1);
 
-    BSONObj doc0 = fromjson("{_id: 0, a: 3}");
-    BSONObj doc1 = fromjson("{$v: 2, diff: {u: {a: [1,2]}}}");
-    BSONObj doc2 = fromjson("{$v: 2, diff: {u: {a: [1,2]}}}");
+    BSONObj doc0 = BSON("_id" << 0 << "a" << 3);
+    BSONObj doc1 = BSON("_id" << 1 << "a" << 7);
+    BSONObj updateDoc = fromjson("{$v: 2, diff: {u: {a: [1,2]}}}");
     auto op0 = repl::OplogEntry(BSON(
         "ts" << insertTime0.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
              << "i"
              << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o" << doc0));
-    auto op1 =
-        repl::OplogEntry(BSON("ts" << updateTime1.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
-                                   << "u"
-                                   << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t()
-                                   << "o" << doc1 << "o2" << BSON("_id" << 0)));
+    auto op1 = repl::OplogEntry(BSON(
+        "ts" << insertTime1.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+             << "i"
+             << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o" << doc1));
     auto op2 =
         repl::OplogEntry(BSON("ts" << updateTime2.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
                                    << "u"
                                    << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t()
-                                   << "o" << doc2 << "o2" << BSON("_id" << 0)));
-
-    // Coerce oplog application to apply op2 before op1. This does not guarantee the actual
-    // order of application however, because the oplog applier applies these operations in
-    // parallel across several threads. The test accepts the possibility of a false negative
-    // (test passes when it should fail) in favor of occasionally finding a true positive (test
-    // fails as intended).
-    std::vector<repl::OplogEntry> ops = {op0, op2, op1};
+                                   << "o" << updateDoc << "o2" << BSON("_id" << 0)));
+    std::vector<repl::OplogEntry> ops = {op0, op1, op2};
 
     DoNothingOplogApplierObserver observer;
     auto storageInterface = repl::StorageInterface::get(_opCtx);
@@ -1593,38 +1565,245 @@ TEST_F(StorageTimestampTest, SecondarySetWildcardIndexMultikeyOnUpdate) {
         _coordinatorMock,
         _consistencyMarkers,
         storageInterface,
-        repl::OplogApplier::Options(repl::OplogApplication::Mode::kStableRecovering),
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
         workerPool.get());
+    ASSERT_EQUALS(op2.getOpTime(), unittest::assertGet(oplogApplier.applyOplogBatch(_opCtx, ops)));
 
-    uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
+    auto collAcq = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, insertTime0.asTimestamp(), false, {{}});
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, insertTime1.asTimestamp(), false, {{}});
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, updateTime2.asTimestamp(), true, {{0}});
+}
 
-    const auto collAcq = acquireCollForRead(_opCtx, nss);
-    stdx::unordered_set<std::string> fieldSet =
-        collectAllFieldNamesFromDocuments(collAcq.getCollectionPtr());
-    auto entry = collAcq.getCollectionPtr()->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+TEST_F(StorageTimestampTest, SecondaryScalarNoOpUpdateDoesNotMoveMultikeyTimestampEarlier) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryScalarNoOpUpdateDoesNotMoveMultikeyTimestampEarlier");
+    create(nss);
+    UUID uuid = UUID::gen();
     {
-        // Verify that, even though op2 was applied first, the multikey state is observed in all
-        // WiredTiger transactions that can contain the data written by op1.
-        OneOffRead oor(_opCtx, updateTime1.asTimestamp());
-        MultikeyMetadataAccessStats stats;
-        std::set<FieldRef> paths = getWildcardMultikeyPathSet(_opCtx, entry, fieldSet, &stats);
-        ASSERT_EQUALS(1, paths.size());
-        ASSERT_EQUALS("a", paths.begin()->dottedField());
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        uuid = collAcq.getCollectionPtr()->uuid();
     }
+    auto indexName = "a_1";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const LogicalTime insertTime = _clock->tickClusterTime(1);
+    const LogicalTime noopUpdateTime = _clock->tickClusterTime(1);
+    const LogicalTime multikeyUpdateTime = _clock->tickClusterTime(1);
+
+    BSONObj doc = BSON("_id" << 0 << "a" << 3);
+    BSONObj noopUpdateDoc = fromjson("{$v: 2, diff: {u: {a: 3}}}");
+    BSONObj multikeyUpdateDoc = fromjson("{$v: 2, diff: {u: {a: [1,2]}}}");
+    auto insertOp = repl::OplogEntry(
+        BSON("ts" << insertTime.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                  << "i"
+                  << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o" << doc));
+    auto noopUpdateOp =
+        repl::OplogEntry(BSON("ts" << noopUpdateTime.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                                   << "u"
+                                   << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t()
+                                   << "o" << noopUpdateDoc << "o2" << BSON("_id" << 0)));
+    auto multikeyUpdateOp = repl::OplogEntry(
+        BSON("ts" << multikeyUpdateTime.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                  << "u"
+                  << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o"
+                  << multikeyUpdateDoc << "o2" << BSON("_id" << 0)));
+    std::vector<repl::OplogEntry> ops = {insertOp, noopUpdateOp, multikeyUpdateOp};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,  // task executor. not required for applyOplogBatch().
+        nullptr,  // oplog buffer. not required for applyOplogBatch().
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    ASSERT_EQUALS(multikeyUpdateOp.getOpTime(),
+                  unittest::assertGet(oplogApplier.applyOplogBatch(_opCtx, ops)));
+
+    auto collAcq = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, noopUpdateTime.asTimestamp(), false, {{}});
+    assertMultikeyPaths(_opCtx,
+                        collAcq.getCollectionPtr(),
+                        indexName,
+                        multikeyUpdateTime.asTimestamp(),
+                        true,
+                        {{0}});
+}
+
+// When a secondary applies a batch [T1: irrelevant op, T2: insert that flips an
+// index multikey], the deferred catalog write that marks the index multikey must be timestamped
+// at T2 (matching the primary's behavior), not at T1 (the first timestamp in the batch).
+TEST_F(StorageTimestampTest, SecondaryMultikeyTimestampMatchesTriggeringOp) {
+    // Pretend to be a secondary.
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryMultikeyTimestampMatchesTriggeringOp");
+    create(nss);
+    UUID uuid = UUID::gen();
     {
-        // Oplog application conservatively uses the first optime in the batch, insertTime0, as
-        // the point at which the index became multikey, despite the fact that the earliest op
-        // which caused the index to become multikey did not occur until updateTime1. This works
-        // because if we construct a query plan that incorrectly believes a particular path to
-        // be multikey, the plan will still be correct (if possibly sub-optimal). Conversely, if
-        // we were to construct a query plan that incorrectly believes a path is NOT multikey,
-        // it could produce incorrect results.
-        OneOffRead oor(_opCtx, insertTime0.asTimestamp());
-        MultikeyMetadataAccessStats stats;
-        std::set<FieldRef> paths = getWildcardMultikeyPathSet(_opCtx, entry, fieldSet, &stats);
-        ASSERT_EQUALS(1, paths.size());
-        ASSERT_EQUALS("a", paths.begin()->dottedField());
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        uuid = collAcq.getCollectionPtr()->uuid();
     }
+    auto indexName = "a_1";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const LogicalTime t1 = _clock->tickClusterTime(1);
+    const LogicalTime t2 = _clock->tickClusterTime(1);
+
+    // Op at T1 is an "irrelevant" insert that does not make the index multikey. The op at T2 is
+    // the insert that flips the index to multikey.
+    BSONObj docT1 = BSON("_id" << 0 << "a" << 3);
+    BSONObj docT2 = BSON("_id" << 1 << "a" << BSON_ARRAY(1 << 2));
+    auto opT1 = repl::OplogEntry(BSON("ts" << t1.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                                           << "i"
+                                           << "ns" << nss.ns_forTest() << "ui" << uuid << "wall"
+                                           << Date_t() << "o" << docT1));
+    auto opT2 = repl::OplogEntry(BSON("ts" << t2.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                                           << "i"
+                                           << "ns" << nss.ns_forTest() << "ui" << uuid << "wall"
+                                           << Date_t() << "o" << docT2));
+    std::vector<repl::OplogEntry> ops = {opT1, opT2};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,  // task executor. not required for applyOplogBatch().
+        nullptr,  // oplog buffer. not required for applyOplogBatch().
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    ASSERT_EQUALS(opT2.getOpTime(), unittest::assertGet(oplogApplier.applyOplogBatch(_opCtx, ops)));
+
+    auto collAcq = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    // At T1 the index must NOT yet be multikey -- the prior bug would have set it multikey here
+    // because T1 was the first timestamp in the batch.
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, t1.asTimestamp(), false, {{}});
+    // At T2 the index must be multikey, matching what a primary would write.
+    assertMultikeyPaths(
+        _opCtx, collAcq.getCollectionPtr(), indexName, t2.asTimestamp(), true, {{0}});
+}
+
+TEST_F(StorageTimestampTest, SecondarySetSameIndexMultikeyPathsFromUpdatesAtDifferentTimestamps) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondarySetSameIndexMultikeyPathsFromUpdatesAtDifferentTimestamps");
+    create(nss);
+    UUID uuid = UUID::gen();
+    {
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        uuid = collAcq.getCollectionPtr()->uuid();
+    }
+    auto indexName = "a_1_b_1";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1 << "b" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const LogicalTime seedTime0 = _clock->tickClusterTime(1);
+    const LogicalTime seedTime1 = _clock->tickClusterTime(1);
+    const LogicalTime firstPathTime = _clock->tickClusterTime(1);
+    const LogicalTime secondPathTime = _clock->tickClusterTime(1);
+
+    BSONObj doc0 = BSON("_id" << 0 << "a" << 1 << "b" << 1);
+    BSONObj doc1 = BSON("_id" << 1 << "a" << 1 << "b" << 1);
+    BSONObj firstPathUpdateDoc = fromjson("{$v: 2, diff: {u: {a: [1, 2]}}}");
+    BSONObj secondPathUpdateDoc = fromjson("{$v: 2, diff: {u: {b: [1, 2]}}}");
+    auto seedOp0 = repl::OplogEntry(BSON(
+        "ts" << seedTime0.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+             << "i"
+             << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o" << doc0));
+    auto seedOp1 = repl::OplogEntry(BSON(
+        "ts" << seedTime1.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+             << "i"
+             << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t() << "o" << doc1));
+    auto firstPathOp =
+        repl::OplogEntry(BSON("ts" << firstPathTime.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                                   << "u"
+                                   << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t()
+                                   << "o" << firstPathUpdateDoc << "o2" << BSON("_id" << 0)));
+    auto secondPathOp =
+        repl::OplogEntry(BSON("ts" << secondPathTime.asTimestamp() << "t" << 1LL << "v" << 2 << "op"
+                                   << "u"
+                                   << "ns" << nss.ns_forTest() << "ui" << uuid << "wall" << Date_t()
+                                   << "o" << secondPathUpdateDoc << "o2" << BSON("_id" << 1)));
+    std::vector<repl::OplogEntry> ops = {seedOp0, seedOp1, firstPathOp, secondPathOp};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,  // task executor. not required for applyOplogBatch().
+        nullptr,  // oplog buffer. not required for applyOplogBatch().
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    ASSERT_EQUALS(secondPathOp.getOpTime(),
+                  unittest::assertGet(oplogApplier.applyOplogBatch(_opCtx, ops)));
+
+    auto collAcq = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    assertMultikeyPaths(_opCtx,
+                        collAcq.getCollectionPtr(),
+                        indexName,
+                        firstPathTime.asTimestamp(),
+                        true,
+                        {{0}, {}});
+    assertMultikeyPaths(_opCtx,
+                        collAcq.getCollectionPtr(),
+                        indexName,
+                        secondPathTime.asTimestamp(),
+                        true,
+                        {{0}, {0}});
 }
 
 TEST_F(StorageTimestampTest, PrimarySetIndexMultikeyOnInsert) {
@@ -1780,6 +1959,612 @@ TEST_F(StorageTimestampTest, PrimarySetsMultikeyInsideMultiDocumentTransaction) 
     assertMultikeyPaths(_opCtx, collPtr, indexName, _nullTs, true /* shouldBeMultikey */, {{0}});
 }
 
+TEST_F(StorageTimestampTest, PrimarySetsWildcardMultikeyInsideMultiDocumentTransaction) {
+    auto service = _opCtx->getServiceContext();
+    auto sessionCatalog = SessionCatalog::get(service);
+    sessionCatalog->reset_forTest();
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+    mongoDSessionCatalog->onStepUp(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.PrimarySetsWildcardMultikeyInsideMultiDocumentTransaction");
+    create(nss);
+
+    auto indexName = "wildcard";
+    auto indexSpec = BSON("name" << indexName << "ns" << nss.ns_forTest() << "key"
+                                 << BSON("$**" << 1) << "v" << static_cast<int>(kIndexVersion));
+    auto doc = BSON("_id" << 1 << "a" << BSON_ARRAY(1 << 2));
+
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+
+    auto storageEngine = cc().getServiceContext()->getStorageEngine();
+    storageEngine->getSnapshotManager()->setLastApplied(presentTs);
+
+    const auto beforeTxnTime = _clock->tickClusterTime(1);
+    auto beforeTxnTs = beforeTxnTime.asTimestamp();
+
+    const auto sessionId = makeLogicalSessionIdForTest();
+    _opCtx->setLogicalSessionId(sessionId);
+    _opCtx->setTxnNumber(1);
+    _opCtx->setInMultiDocumentTransaction();
+
+    auto ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
+    auto txnParticipant = TransactionParticipant::get(_opCtx);
+    ASSERT(txnParticipant);
+
+    txnParticipant.beginOrContinue(_opCtx,
+                                   {*_opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
+    txnParticipant.unstashTransactionResources(_opCtx, "insert");
+    {
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        insertDocument(collAcq.getCollectionPtr(), InsertStatement(doc));
+    }
+
+    txnParticipant.commitUnpreparedTransaction(_opCtx);
+    txnParticipant.stashTransactionResources(_opCtx);
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    // Verify the document was committed.
+    assertDocumentAtTimestamp(collPtr, presentTs, BSONObj());
+    assertDocumentAtTimestamp(collPtr, _nullTs, doc);
+
+    // Verify the catalog multikey flag is set at the latest timestamp.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, presentTs, false /* shouldBeMultikey */, {});
+    assertMultikeyPaths(_opCtx, collPtr, indexName, _nullTs, true /* shouldBeMultikey */, {});
+
+    // Verify the wildcard metadata keys are present at the latest timestamp.
+    // The field "a" is an array, so it should be recorded as a multikey path.
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a"};
+    {
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(1, paths.size());
+        ASSERT_EQUALS("a", paths.begin()->dottedField());
+    }
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+
+    // Before the transaction, the catalog multikey flag should not be set.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {});
+}
+
+TEST_F(StorageTimestampTest,
+       PrimarySetsWildcardMultikeyInsideMultiDocumentTransactionMultiplePaths) {
+    auto service = _opCtx->getServiceContext();
+    auto sessionCatalog = SessionCatalog::get(service);
+    sessionCatalog->reset_forTest();
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+    mongoDSessionCatalog->onStepUp(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.PrimarySetsWildcardMultikeyInsideMultiDocTxnMultiplePaths");
+    create(nss);
+
+    auto indexName = "wildcard";
+    auto indexSpec = BSON("name" << indexName << "ns" << nss.ns_forTest() << "key"
+                                 << BSON("$**" << 1) << "v" << static_cast<int>(kIndexVersion));
+
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+
+    auto storageEngine = cc().getServiceContext()->getStorageEngine();
+    storageEngine->getSnapshotManager()->setLastApplied(presentTs);
+
+    const auto beforeTxnTime = _clock->tickClusterTime(1);
+    auto beforeTxnTs = beforeTxnTime.asTimestamp();
+
+    const auto sessionId = makeLogicalSessionIdForTest();
+    _opCtx->setLogicalSessionId(sessionId);
+    _opCtx->setTxnNumber(1);
+    _opCtx->setInMultiDocumentTransaction();
+
+    auto ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
+    auto txnParticipant = TransactionParticipant::get(_opCtx);
+    ASSERT(txnParticipant);
+
+    txnParticipant.beginOrContinue(_opCtx,
+                                   {*_opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
+    txnParticipant.unstashTransactionResources(_opCtx, "insert");
+    {
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        // Insert documents that make multiple paths multikey.
+        insertDocument(collAcq.getCollectionPtr(),
+                       InsertStatement(BSON("_id" << 1 << "a" << BSON_ARRAY(1 << 2))));
+        insertDocument(collAcq.getCollectionPtr(),
+                       InsertStatement(BSON("_id" << 2 << "b" << BSON_ARRAY(3 << 4))));
+        insertDocument(collAcq.getCollectionPtr(),
+                       InsertStatement(BSON("_id" << 3 << "c" << BSON_ARRAY(5 << 6))));
+    }
+
+    txnParticipant.commitUnpreparedTransaction(_opCtx);
+    txnParticipant.stashTransactionResources(_opCtx);
+
+    // Verify all three multikey paths are present in the wildcard index.
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+
+    stdx::unordered_set<std::string> fieldSet = {"a", "b", "c"};
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+    {
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(3, paths.size());
+        std::set<std::string> pathStrings;
+        for (const auto& p : paths) {
+            pathStrings.insert(std::string(p.dottedField()));
+        }
+        ASSERT(pathStrings.count("a"));
+        ASSERT(pathStrings.count("b"));
+        ASSERT(pathStrings.count("c"));
+    }
+}
+
+TEST_F(StorageTimestampTest, PrimarySetsWildcardMultikeyInsideMultiDocumentTransactionPrepared) {
+    auto service = _opCtx->getServiceContext();
+    auto sessionCatalog = SessionCatalog::get(service);
+    sessionCatalog->reset_forTest();
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+    mongoDSessionCatalog->onStepUp(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.PrimarySetsWildcardMultikeyInsideMultiDocTxnPrepared");
+    create(nss);
+
+    auto indexName = "wildcard";
+    auto indexSpec = BSON("name" << indexName << "ns" << nss.ns_forTest() << "key"
+                                 << BSON("$**" << 1) << "v" << static_cast<int>(kIndexVersion));
+    auto doc = BSON("_id" << 1 << "a" << BSON_ARRAY(1 << 2));
+
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+
+    auto storageEngine = cc().getServiceContext()->getStorageEngine();
+    storageEngine->getSnapshotManager()->setLastApplied(presentTs);
+
+    const auto beforeTxnTime = _clock->tickClusterTime(1);
+    auto beforeTxnTs = beforeTxnTime.asTimestamp();
+
+    const auto sessionId = makeLogicalSessionIdForTest();
+    _opCtx->setLogicalSessionId(sessionId);
+    _opCtx->setTxnNumber(1);
+    _opCtx->setInMultiDocumentTransaction();
+
+    auto ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
+    auto txnParticipant = TransactionParticipant::get(_opCtx);
+    ASSERT(txnParticipant);
+
+    txnParticipant.beginOrContinue(_opCtx,
+                                   {*_opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
+    txnParticipant.unstashTransactionResources(_opCtx, "insert");
+    {
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        insertDocument(collAcq.getCollectionPtr(), InsertStatement(doc));
+    }
+
+    // Prepare the transaction.
+    txnParticipant.prepareTransaction(_opCtx, {});
+    txnParticipant.stashTransactionResources(_opCtx);
+
+    // Commit the prepared transaction.
+    const auto commitTime = _clock->getTime();
+    const auto commitClusterTime = commitTime.clusterTime();
+    const auto commitTs = commitClusterTime.addTicks(1).asTimestamp();
+    txnParticipant.unstashTransactionResources(_opCtx, "commitTransaction");
+    {
+        FailPointEnableBlock failPointBlock("skipCommitTxnCheckPrepareMajorityCommitted");
+        txnParticipant.commitPreparedTransaction(_opCtx, commitTs, {});
+    }
+    txnParticipant.stashTransactionResources(_opCtx);
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    // Verify the document was committed.
+    assertDocumentAtTimestamp(collPtr, _nullTs, doc);
+
+    // Verify the catalog multikey flag is set at the latest timestamp.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, _nullTs, true /* shouldBeMultikey */, {});
+    // Before the transaction, multikey should not be set.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {});
+
+    // Verify the wildcard metadata keys are present at the latest timestamp.
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a"};
+    {
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(1, paths.size());
+        ASSERT_EQUALS("a", paths.begin()->dottedField());
+    }
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+}
+
+TEST_F(StorageTimestampTest, PrimarySetsCompoundWildcardMultikeyInsideMultiDocumentTransaction) {
+    auto service = _opCtx->getServiceContext();
+    auto sessionCatalog = SessionCatalog::get(service);
+    sessionCatalog->reset_forTest();
+    auto mongoDSessionCatalog = MongoDSessionCatalog::get(_opCtx);
+    mongoDSessionCatalog->onStepUp(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.PrimarySetsCompoundWildcardMultikeyInsideMultiDocTxn");
+    create(nss);
+
+    auto indexName = "compound_wildcard";
+    auto indexSpec =
+        BSON("name" << indexName << "ns" << nss.ns_forTest() << "key"
+                    << BSON("x" << 1 << "$**" << 1) << "v" << static_cast<int>(kIndexVersion));
+    auto doc = BSON("_id" << 1 << "x" << 5 << "a" << BSON_ARRAY(1 << 2));
+
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+
+    auto storageEngine = cc().getServiceContext()->getStorageEngine();
+    storageEngine->getSnapshotManager()->setLastApplied(presentTs);
+
+    const auto beforeTxnTime = _clock->tickClusterTime(1);
+    auto beforeTxnTs = beforeTxnTime.asTimestamp();
+
+    const auto sessionId = makeLogicalSessionIdForTest();
+    _opCtx->setLogicalSessionId(sessionId);
+    _opCtx->setTxnNumber(1);
+    _opCtx->setInMultiDocumentTransaction();
+
+    auto ocs = mongoDSessionCatalog->checkOutSession(_opCtx);
+    auto txnParticipant = TransactionParticipant::get(_opCtx);
+    ASSERT(txnParticipant);
+
+    txnParticipant.beginOrContinue(_opCtx,
+                                   {*_opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
+    txnParticipant.unstashTransactionResources(_opCtx, "insert");
+    {
+        auto collAcq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        insertDocument(collAcq.getCollectionPtr(), InsertStatement(doc));
+    }
+
+    txnParticipant.commitUnpreparedTransaction(_opCtx);
+    txnParticipant.stashTransactionResources(_opCtx);
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    assertMultikeyPaths(_opCtx, collPtr, indexName, _nullTs, true /* shouldBeMultikey */, {});
+
+    // Before the transaction, the catalog multikey flag should not be set.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {});
+
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a"};
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+    {
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(1, paths.size());
+        ASSERT_EQUALS("a", paths.begin()->dottedField());
+    }
+}
+
+// Builds a setMultikeyMetadata op:'c' oplog entry that mirrors what
+// OpObserverImpl::onSetMultikeyMetadata writes on the primary.
+namespace {
+repl::OplogEntry makeSetMultikeyMetadataOplogEntry(const NamespaceString& nss,
+                                                   const std::string& indexName,
+                                                   const BSONObj& paths,
+                                                   Timestamp ts,
+                                                   long long term = 1) {
+    SetMultikeyMetadataOplogEntry objectEntry(nss, indexName, paths);
+    return repl::OplogEntry(BSON("ts" << ts << "t" << term << "v" << 2 << "op"
+                                      << "c"
+                                      << "ns" << nss.getCommandNS().ns_forTest() << "wall"
+                                      << Date_t() << "o" << objectEntry.toBSON()));
+}
+}  // namespace
+
+TEST_F(StorageTimestampTest, SecondaryAppliesWildcardMultikeyMetadataFromTransaction) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryAppliesWildcardMultikeyMetadataFromTransaction");
+    ASSERT_OK(createCollection(_opCtx, nss.dbName(), BSON("create" << nss.coll())));
+
+    auto indexName = "wildcard";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("$**" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+    cc().getServiceContext()->getStorageEngine()->getSnapshotManager()->setLastApplied(presentTs);
+    const auto beforeTxnTs = _clock->tickClusterTime(1).asTimestamp();
+    const auto applyTs = _clock->tickClusterTime(1).asTimestamp();
+
+    auto setMkOp = makeSetMultikeyMetadataOplogEntry(
+        nss, indexName, set_multikey_metadata_oplog_helpers::fieldPathsToBSON({"a"}), applyTs);
+
+    std::vector<repl::OplogEntry> ops = {setMkOp};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,
+        nullptr,
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    // Catalog flag set after apply, not before.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, applyTs, true /* shouldBeMultikey */, {});
+    assertMultikeyPaths(_opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {});
+
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a"};
+    {
+        // At the apply timestamp, the regenerated metadata keys are visible.
+        OneOffRead oor(_opCtx, applyTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(1, paths.size());
+        ASSERT_EQUALS("a", paths.begin()->dottedField());
+    }
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+}
+
+TEST_F(StorageTimestampTest, SecondaryAppliesWildcardMultikeyMetadataFromTransactionMultiplePaths) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryAppliesWildcardMkMetaFromTxnMultiplePaths");
+    ASSERT_OK(createCollection(_opCtx, nss.dbName(), BSON("create" << nss.coll())));
+
+    auto indexName = "wildcard";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("$**" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+    cc().getServiceContext()->getStorageEngine()->getSnapshotManager()->setLastApplied(presentTs);
+    const auto beforeTxnTs = _clock->tickClusterTime(1).asTimestamp();
+    const auto applyTs = _clock->tickClusterTime(1).asTimestamp();
+
+    // A single setMultikeyMetadata entry carries all multikey paths from one insert.
+    auto setMkOp = makeSetMultikeyMetadataOplogEntry(
+        nss,
+        indexName,
+        set_multikey_metadata_oplog_helpers::fieldPathsToBSON({"a", "b", "c"}),
+        applyTs);
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,
+        nullptr,
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, {setMkOp}));
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a", "b", "c"};
+    {
+        // At the apply timestamp, all three regenerated metadata keys are visible.
+        OneOffRead oor(_opCtx, applyTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(3, paths.size());
+        std::set<std::string> pathStrings;
+        for (const auto& p : paths) {
+            pathStrings.insert(std::string(p.dottedField()));
+        }
+        ASSERT(pathStrings.count("a"));
+        ASSERT(pathStrings.count("b"));
+        ASSERT(pathStrings.count("c"));
+    }
+    {
+        // Before the transaction started, no metadata keys should be visible.
+        OneOffRead oor(_opCtx, beforeTxnTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(0, paths.size());
+    }
+}
+
+TEST_F(StorageTimestampTest, SecondaryAppliesCompoundWildcardMultikeyMetadataFromTransaction) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryAppliesCompoundWildcardMkMetaFromTxn");
+    ASSERT_OK(createCollection(_opCtx, nss.dbName(), BSON("create" << nss.coll())));
+
+    auto indexName = "compound_wildcard";
+    auto indexSpec = BSON("name" << indexName << "key" << BSON("x" << 1 << "$**" << 1) << "v"
+                                 << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+    cc().getServiceContext()->getStorageEngine()->getSnapshotManager()->setLastApplied(presentTs);
+    const auto beforeTxnTs = _clock->tickClusterTime(1).asTimestamp();
+    const auto applyTs = _clock->tickClusterTime(1).asTimestamp();
+
+    auto setMkOp = makeSetMultikeyMetadataOplogEntry(
+        nss, indexName, set_multikey_metadata_oplog_helpers::fieldPathsToBSON({"a"}), applyTs);
+
+    std::vector<repl::OplogEntry> ops = {setMkOp};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,
+        nullptr,
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    assertMultikeyPaths(_opCtx, collPtr, indexName, applyTs, true /* shouldBeMultikey */, {});
+    assertMultikeyPaths(_opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {});
+
+    auto entry = collPtr->getIndexCatalog()->findIndexByName(_opCtx, indexName);
+    ASSERT(entry);
+    stdx::unordered_set<std::string> fieldSet = {"a"};
+    {
+        // At the apply timestamp, the regenerated metadata key is visible.
+        OneOffRead oor(_opCtx, applyTs);
+        MultikeyMetadataAccessStats stats;
+        auto paths = getWildcardMultikeyPathSet(_opCtx, collPtr->uuid(), entry, fieldSet, &stats);
+        ASSERT_EQUALS(1, paths.size());
+        ASSERT_EQUALS("a", paths.begin()->dottedField());
+    }
+}
+
+TEST_F(StorageTimestampTest, SecondaryAppliesRegularMultikeyMetadataFromTransaction) {
+    repl::UnreplicatedWritesBlock uwb(_opCtx);
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(
+        "unittests.SecondaryAppliesRegularMkMetaFromTxn");
+    ASSERT_OK(createCollection(_opCtx, nss.dbName(), BSON("create" << nss.coll())));
+
+    auto indexName = "a_1";
+    auto keyPattern = BSON("a" << 1);
+    auto indexSpec =
+        BSON("name" << indexName << "key" << keyPattern << "v" << static_cast<int>(kIndexVersion));
+    ASSERT_OK(createIndexFromSpec(_opCtx, _clock, nss.ns_forTest(), indexSpec));
+
+    _coordinatorMock->alwaysAllowWrites(false);
+
+    const auto currentTime = _clock->getTime();
+    const auto presentTs = currentTime.clusterTime().asTimestamp();
+    cc().getServiceContext()->getStorageEngine()->getSnapshotManager()->setLastApplied(presentTs);
+    const auto beforeTxnTs = _clock->tickClusterTime(1).asTimestamp();
+    const auto applyTs = _clock->tickClusterTime(1).asTimestamp();
+
+    // Regular index uses multikeyPaths bitset (per-field array of multikey component indexes)
+    // instead of wildcard's field-path list.
+    auto setMkOp = makeSetMultikeyMetadataOplogEntry(
+        nss, indexName, multikey_paths::serialize(keyPattern, {{0}}), applyTs);
+
+    std::vector<repl::OplogEntry> ops = {setMkOp};
+
+    DoNothingOplogApplierObserver observer;
+    auto storageInterface = repl::StorageInterface::get(_opCtx);
+    auto workerPool = repl::makeReplWorkerPool();
+    repl::OplogApplierImpl oplogApplier(
+        nullptr,
+        nullptr,
+        &observer,
+        _coordinatorMock,
+        _consistencyMarkers,
+        storageInterface,
+        repl::OplogApplier::Options(repl::OplogApplication::Mode::kSecondary),
+        workerPool.get());
+    uassertStatusOK(oplogApplier.applyOplogBatch(_opCtx, ops));
+
+    const auto collAcq = acquireCollForRead(_opCtx, nss);
+    const auto& collPtr = collAcq.getCollectionPtr();
+
+    // Regular index: catalog flag set + multikey path component is recorded.
+    assertMultikeyPaths(_opCtx, collPtr, indexName, applyTs, true /* shouldBeMultikey */, {{0}});
+    assertMultikeyPaths(
+        _opCtx, collPtr, indexName, beforeTxnTs, false /* shouldBeMultikey */, {{}});
+}
+
 TEST_F(StorageTimestampTest, InitializeMinValid) {
     NamespaceString nss = NamespaceString::kDefaultMinValidNamespace;
     create(nss);
@@ -1914,9 +2699,12 @@ public:
 
         {
             // Drop/rename `kvDropDatabase`. `system.profile` does not get dropped/renamed.
-            AutoGetCollection coll(_opCtx, nss, LockMode::MODE_X);
+            auto coll = acquireCollection(_opCtx,
+                                          CollectionAcquisitionRequest::fromOpCtx(
+                                              _opCtx, nss, AcquisitionPrerequisites::kWrite),
+                                          LockMode::MODE_X);
             WriteUnitOfWork wuow(_opCtx);
-            Database* db = coll.getDb();
+            Database* db = DatabaseHolder::get(_opCtx)->getDb(_opCtx, nss.dbName());
             ASSERT_OK(db->dropCollection(_opCtx, nss));
             wuow.commit();
         }
@@ -1994,10 +2782,13 @@ public:
             NamespaceString::createNamespaceString_forTest("unittests.timestampIndexBuilds");
         create(nss);
 
-        AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
-        CollectionWriter coll(_opCtx, autoColl);
+        auto acq = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
+            LockMode::MODE_X);
+        CollectionWriter coll(_opCtx, &acq);
 
-        RecordId catalogId = autoColl->getCatalogId();
+        RecordId catalogId = acq.getCollectionPtr()->getCatalogId();
 
         const LogicalTime insertTimestamp = _clock->tickClusterTime(1);
         {
@@ -2007,7 +2798,7 @@ public:
                                            insertTimestamp.asTimestamp(),
                                            _presentTerm));
             wuow.commit();
-            ASSERT_EQ(1, itCount(*autoColl));
+            ASSERT_EQ(1, itCount(acq.getCollectionPtr()));
         }
 
         const std::string indexIdent = "index-ident";
@@ -2036,13 +2827,13 @@ public:
                                                           << "key" << BSON("a" << 1)),
                                                  indexIdent,
                                                  *storageEngine);
-            auto swIndexInfoObj =
-                indexer.init(_opCtx,
-                             coll,
-                             {indexBuildInfo},
-                             MultiIndexBlock::makeTimestampedIndexOnInitFn(_opCtx, *autoColl),
-                             MultiIndexBlock::InitMode::SteadyState,
-                             boost::none);
+            auto swIndexInfoObj = indexer.init(
+                _opCtx,
+                coll,
+                {indexBuildInfo},
+                MultiIndexBlock::makeTimestampedIndexOnInitFn(_opCtx, acq.getCollectionPtr()),
+                MultiIndexBlock::InitMode::SteadyState,
+                boost::none);
             ASSERT_OK(swIndexInfoObj.getStatus());
             indexInfoObj = std::move(swIndexInfoObj.getValue()[0]);
         }
@@ -2052,7 +2843,7 @@ public:
         // Inserting all the documents has the side-effect of setting internal state on the index
         // builder that the index is multikey.
         ASSERT_OK(indexer.insertAllDocumentsInCollection(_opCtx, nss));
-        ASSERT_OK(indexer.checkConstraints(_opCtx, *autoColl));
+        ASSERT_OK(indexer.checkConstraints(_opCtx, coll.get()));
 
         {
             WriteUnitOfWork wuow(_opCtx);
@@ -2307,6 +3098,7 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
     // Save the pre-state idents so we can capture the specific ident related to index
     // creation.
     std::vector<std::string> origIdents = mdbCatalog->getAllIdents(_opCtx);
+    shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
 
     // Rename collection.
     BSONObj renameResult;
@@ -2833,7 +3625,7 @@ TEST_F(StorageTimestampTest, TimestampIndexOplogApplicationOnPrimary) {
             _opCtx,
             CollectionAcquisitionRequest::fromOpCtx(_opCtx, nss, AcquisitionPrerequisites::kWrite),
             MODE_IX);
-        collUUID = collAcq.getCollectionPtr()->uuid();
+        collUUID = collAcq.uuid();
         WriteUnitOfWork wuow(_opCtx);
         insertDocument(collAcq.getCollectionPtr(),
                        InsertStatement(doc, setupStart.asTimestamp(), _presentTerm));
@@ -2894,8 +3686,7 @@ TEST_F(StorageTimestampTest, TimestampIndexOplogApplicationOnPrimary) {
 
             // We cannot use the OperationContext to wait for the thread to reach the fail point
             // because it also uses the ClockSourceMock.
-            fpb->waitForTimesEntered(Interruptible::notInterruptible(),
-                                     fpb.initialTimesEntered() + 1);
+            fpb.waitForOneNewEntry(Interruptible::notInterruptible());
         }
 
         auto mdbCatalog = _opCtx->getServiceContext()->getStorageEngine()->getMDBCatalog();
@@ -3158,7 +3949,7 @@ TEST_F(StorageTimestampTest, MultipleTimestampsForMultikeyWrites) {
 
 class RetryableFindAndModifyTest : public StorageTimestampTest {
 public:
-    const StringData dbName = "unittest"_sd;
+    const std::string_view dbName = "unittest"sv;
     const BSONObj oldObj = BSON("_id" << 0 << "a" << 1);
 
     RetryableFindAndModifyTest()
@@ -3393,7 +4184,7 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyDelete) {
 
 class MultiDocumentTransactionTest : public StorageTimestampTest {
 public:
-    const StringData dbName = "unittest"_sd;
+    const std::string_view dbName = "unittest"sv;
     const BSONObj doc = BSON("_id" << 1 << "TestValue" << 1);
     const BSONObj docKey = BSON("_id" << 1);
 

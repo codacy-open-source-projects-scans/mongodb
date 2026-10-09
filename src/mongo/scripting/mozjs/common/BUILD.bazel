@@ -32,8 +32,24 @@ TYPES_SRCS = [
 ]
 
 mongo_cc_library(
+    name = "hex_md5",
+    srcs = [
+        "hex_md5.cpp",
+    ],
+    hdrs = [
+        "hex_md5.h",
+    ],
+    deps = [
+        "//src/mongo/util:md5",
+    ],
+)
+
+mongo_cc_library(
     name = "mozjs_common",
-    srcs = glob(["*.cpp"]) + TYPES_SRCS,
+    srcs = glob(
+        ["*.cpp"],
+        exclude = ["hex_md5.cpp"],
+    ) + TYPES_SRCS,
     copts = select({
         "@platforms//os:windows": [
             # The default MSVC preprocessor elides commas in some cases as a
@@ -66,12 +82,14 @@ mongo_cc_library(
         "//bazel/config:wasi": [
             # WASI builds don't need scripting_common (avoids networking/SSL dependencies)
             # and use SpiderMonkey headers from @spidermonkey_wasi, not //src/third_party/mozjs
+            "//src/mongo/bson:bson_validate",
             "//src/mongo/util:buildinfo",
             "@spidermonkey_wasi//:headers",
             "//src/mongo/scripting/mozjs/wasm/engine:headers",
             "//src/mongo/scripting/mozjs/shared:mozjs_shared_types",
         ],
         "//conditions:default": [
+            "//src/mongo/bson:bson_validate",
             "//src/mongo/scripting:scripting_common",
             "//src/mongo/util:buildinfo",
             "//src/third_party/mozjs",

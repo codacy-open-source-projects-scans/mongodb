@@ -60,7 +60,9 @@ function runTest({findFunc, assertFunc}) {
         ])
         .toArray();
     assert.eq(noIdle.length, 0, tojson(noIdle));
-    const noFlag = adminDB.aggregate([{$currentOp: {allUsers: false}}, {$match: {type: "idleCursor"}}]).toArray();
+    const noFlag = adminDB
+        .aggregate([{$currentOp: {allUsers: false}}, {$match: {type: "idleCursor"}}])
+        .toArray();
 
     assert.eq(noIdle.length, 0, tojson(noFlag));
 }
@@ -68,12 +70,14 @@ function runTest({findFunc, assertFunc}) {
 // Basic test with default values.
 runTest({
     findFunc: function () {
-        return assert.commandWorked(db.runCommand({find: "jstests_currentop_cursors", batchSize: 2})).cursor.id;
+        return assert.commandWorked(
+            db.runCommand({find: "jstests_currentop_cursors", batchSize: 2}),
+        ).cursor.id;
     },
     assertFunc: function (cursorId, result) {
         assert.eq(result.length, 1, result);
         // Plan summary does not exist on mongos, so skip this test on mongos.
-        if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
+        if (!FixtureHelpers.isMongos(db)) {
             assert.eq(result[0].planSummary, "COLLSCAN", result);
         } else {
             assert(!result[0].hasOwnProperty("planSummary"), result);
@@ -127,20 +131,27 @@ runTest({
 // Test that dates are set correctly.
 runTest({
     findFunc: function () {
-        return assert.commandWorked(db.runCommand({find: "jstests_currentop_cursors", batchSize: 2})).cursor.id;
+        return assert.commandWorked(
+            db.runCommand({find: "jstests_currentop_cursors", batchSize: 2}),
+        ).cursor.id;
     },
     assertFunc: function (cursorId, result) {
         const adminDB = db.getSiblingDB("admin");
         // Make sure the two cursors have different creation times.
         assert.soon(() => {
-            const secondCursor = assert.commandWorked(db.runCommand({find: "jstests_currentop_cursors", batchSize: 2}));
+            const secondCursor = assert.commandWorked(
+                db.runCommand({find: "jstests_currentop_cursors", batchSize: 2}),
+            );
 
             const secondResult = adminDB
                 .aggregate([
                     {$currentOp: {localOps: true, allUsers: false, idleCursors: true}},
                     {
                         $match: {
-                            $and: [{type: "idleCursor"}, {"cursor.cursorId": secondCursor.cursor.id}],
+                            $and: [
+                                {type: "idleCursor"},
+                                {"cursor.cursorId": secondCursor.cursor.id},
+                            ],
                         },
                     },
                 ])
@@ -170,12 +181,20 @@ runTest({
 // Test batchSize and nDocs are incremented correctly.
 runTest({
     findFunc: function () {
-        return assert.commandWorked(db.runCommand({find: "jstests_currentop_cursors", batchSize: 2})).cursor.id;
+        return assert.commandWorked(
+            db.runCommand({find: "jstests_currentop_cursors", batchSize: 2}),
+        ).cursor.id;
     },
     assertFunc: function (cursorId, result) {
         const adminDB = db.getSiblingDB("admin");
         const originalAccess = result[0].cursor.lastAccessDate;
-        assert.commandWorked(db.runCommand({getMore: cursorId, collection: "jstests_currentop_cursors", batchSize: 2}));
+        assert.commandWorked(
+            db.runCommand({
+                getMore: cursorId,
+                collection: "jstests_currentop_cursors",
+                batchSize: 2,
+            }),
+        );
         result = adminDB
             .aggregate([
                 {$currentOp: {localOps: true, allUsers: false, idleCursors: true}},
@@ -190,7 +209,11 @@ runTest({
         // creation.
         assert.soon(() => {
             assert.commandWorked(
-                db.runCommand({getMore: cursorId, collection: "jstests_currentop_cursors", batchSize: 2}),
+                db.runCommand({
+                    getMore: cursorId,
+                    collection: "jstests_currentop_cursors",
+                    batchSize: 2,
+                }),
             );
             result = adminDB
                 .aggregate([
@@ -199,18 +222,25 @@ runTest({
                 ])
                 .toArray();
             idleCursor = result[0].cursor;
-            return idleCursor.createdDate < idleCursor.lastAccessDate && originalAccess < idleCursor.lastAccessDate;
+            return (
+                idleCursor.createdDate < idleCursor.lastAccessDate &&
+                originalAccess < idleCursor.lastAccessDate
+            );
         });
     },
 });
 
 // planSummary does not exist on Mongos, so skip this test.
-if (!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) {
+if (!FixtureHelpers.isMongos(db)) {
     runTest({
         findFunc: function () {
             assert.commandWorked(coll.createIndex({"val": 1}));
             return assert.commandWorked(
-                db.runCommand({find: "jstests_currentop_cursors", filter: {"val": {$gt: 2}}, batchSize: 2}),
+                db.runCommand({
+                    find: "jstests_currentop_cursors",
+                    filter: {"val": {$gt: 2}},
+                    batchSize: 2,
+                }),
             ).cursor.id;
         },
         assertFunc: function (cursorId, result) {
@@ -224,7 +254,9 @@ const session = db.getMongo().startSession();
 runTest({
     findFunc: function () {
         const sessionDB = session.getDatabase("test");
-        return assert.commandWorked(sessionDB.runCommand({find: "jstests_currentop_cursors", batchSize: 2})).cursor.id;
+        return assert.commandWorked(
+            sessionDB.runCommand({find: "jstests_currentop_cursors", batchSize: 2}),
+        ).cursor.id;
     },
     assertFunc: function (cursorId, result) {
         assert.eq(result.length, 1, result);

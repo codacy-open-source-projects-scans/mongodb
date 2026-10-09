@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -34,6 +8,8 @@
 #include "mongo/db/extension/sdk/log_util.h"
 #include "mongo/db/extension/sdk/test_extension_factory.h"
 #include "mongo/db/extension/shared/get_next_result.h"
+
+#include <string_view>
 namespace sdk = mongo::extension::sdk;
 using namespace mongo;
 
@@ -112,8 +88,8 @@ public:
         mongo::BSONObjBuilder bob;
         mongo::BSONObjBuilder stageBuilder;
         stageBuilder.appendElements(_arguments);
-        // Include view name in serialization if it was set via bindViewInfo() so that the shard
-        // receives BSON with the view info after the view has been handled on the router.
+        // Include view name in serialization if it was set via bindResolvedNamespace() so that the
+        // shard receives BSON with the view info after the view has been handled on the router.
         if (!_viewName.empty()) {
             stageBuilder.append("_viewName", _viewName);
         }
@@ -166,8 +142,8 @@ public:
         }
     }
 
-    void bindViewInfo(const sdk::ViewInfo& viewInfo) override {
-        _viewName = std::string(viewInfo.viewName());
+    void bindResolvedNamespace(const sdk::ResolvedNamespace& resolvedNamespace) override {
+        _viewName = std::string(resolvedNamespace.viewName());
     }
 
     MongoExtensionFirstStageViewApplicationPolicy getFirstStageViewApplicationPolicy()
@@ -175,7 +151,7 @@ public:
         return MongoExtensionFirstStageViewApplicationPolicy::kDoNothing;
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<AddViewNameLogicalStage>(getName(), _arguments, _viewName);
     }
@@ -209,7 +185,7 @@ public:
         return MongoExtensionFirstStageViewApplicationPolicy::kDoNothing;
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<DoNothingViewPolicyLogicalStage>(getName(), _arguments);
     }

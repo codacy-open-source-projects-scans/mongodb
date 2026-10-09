@@ -31,6 +31,8 @@ const sessionDB2 = session.getDatabase(dbName2);
 const sessionCollA = sessionDB1[collNameA];
 const sessionCollB = sessionDB2[collNameB];
 
+const shardsAreAuthoritative = FeatureFlagUtil.isPresentAndEnabled(db, "AuthoritativeShardsCRUD");
+
 //
 // A transaction with snapshot read concern cannot write to a collection that has been dropped
 // since the transaction started.
@@ -52,26 +54,41 @@ withAbortAndRetryOnTransientTxnError(session, () => {
     sessionOutsideTxn.advanceClusterTime(session.getClusterTime());
     assert.commandWorked(testDB2.runCommand({drop: collNameB, writeConcern: {w: "majority"}}));
 
-    // This test cause a StaleConfig error on sharding so no command will succeed.
-    if (!session.getClient().isMongos() && !TestData.testingReplicaSetEndpoint) {
+    if (!session.getClient().isMongos()) {
         // We can perform reads on the dropped collection as it existed when we started the
         // transaction.
         assert.commandWorked(sessionDB2.runCommand({find: sessionCollB.getName()}));
 
         // However, trying to perform a write will cause a write conflict.
         assert.commandFailedWithCode(
-            sessionDB2.runCommand({findAndModify: sessionCollB.getName(), update: {a: 1}, upsert: true}),
+            sessionDB2.runCommand({
+                findAndModify: sessionCollB.getName(),
+                update: {a: 1},
+                upsert: true,
+            }),
             ErrorCodes.WriteConflict,
         );
     } else {
         // TODO (SERVER-39704): See if we can match the replicaset behaviour.
+        // On a sharded cluster the snapshot read of the dropped collection does not return the
+        // pre-drop data like a replica set does; it fails the snapshot/placement check (StaleConfig
+        // when non-authoritative, SnapshotUnavailable when authoritative). So we only assert on the
+        // write. With authoritative shards the critical section release no longer clears the
+        // filtering metadata, so the write fails with WriteConflict rather than StaleConfig.
         assert.commandFailedWithCode(
-            sessionDB2.runCommand({findAndModify: sessionCollB.getName(), update: {a: 1}, upsert: true}),
-            ErrorCodes.StaleConfig,
+            sessionDB2.runCommand({
+                findAndModify: sessionCollB.getName(),
+                update: {a: 1},
+                upsert: true,
+            }),
+            shardsAreAuthoritative ? ErrorCodes.WriteConflict : ErrorCodes.StaleConfig,
         );
     }
 
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(
+        session.abortTransaction_forTesting(),
+        ErrorCodes.NoSuchTransaction,
+    );
 });
 
 //
@@ -98,7 +115,9 @@ if (!db.getMongo().isCausalConsistency()) {
         // Start the transaction with a write to collection A. Use an explicit atClusterTime
         // with a timestamp at which collectionB existed and contained one document.
         sessionOutsideTxn.advanceClusterTime(session.getClusterTime());
-        session.startTransaction({readConcern: {level: "snapshot", atClusterTime: txnReadTimestamp}});
+        session.startTransaction({
+            readConcern: {level: "snapshot", atClusterTime: txnReadTimestamp},
+        });
 
         // Expect a conflict to be thrown, because the collection was dropped at a logical
         // timestamp greater than the one the transaction is reading at.
@@ -106,7 +125,10 @@ if (!db.getMongo().isCausalConsistency()) {
             sessionDB2.runCommand({findAndModify: sessionCollB.getName(), update: {a: 1}}),
             ErrorCodes.WriteConflict,
         );
-        assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
+        assert.commandFailedWithCode(
+            session.abortTransaction_forTesting(),
+            ErrorCodes.NoSuchTransaction,
+        );
     });
 }
 
@@ -134,14 +156,13 @@ withAbortAndRetryOnTransientTxnError(session, () => {
     // collection on this namespace (even as it exist at latest). A collection will be
     // implicitly created and we will fail to commit this transaction with a WriteConflict
     // error.
-    const expectedErrorCodes = [ErrorCodes.WriteConflict];
-    if (!FeatureFlagUtil.isPresentAndEnabled(db, "CreateCollectionInPreparedTransactions")) {
-        // If collection A and collection B live on different shards, this transaction would
-        // require two phase commit. And if this feature flag is not enabled, the transaction
-        // would fail with a OperationNotSupportedInTransaction error instead of a WriteConflict
-        // error.
-        expectedErrorCodes.push(ErrorCodes.OperationNotSupportedInTransaction);
-    }
+    // If collection A and collection B live on different shards, this transaction would
+    // require two phase commit and would fail with a OperationNotSupportedInTransaction error
+    // instead of a WriteConflict error.
+    const expectedErrorCodes = [
+        ErrorCodes.WriteConflict,
+        ErrorCodes.OperationNotSupportedInTransaction,
+    ];
 
     assert.commandWorked(sessionCollB.insert({}));
     assert.commandFailedWithCode(session.commitTransaction_forTesting(), expectedErrorCodes);

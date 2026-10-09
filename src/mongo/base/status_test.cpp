@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
 
@@ -34,11 +8,13 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/demangle.h"
 #include "mongo/util/str.h"
 
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #include <boost/exception/exception.hpp>
 #include <boost/optional/optional.hpp>
@@ -70,15 +46,6 @@ struct CanStringExplicit {
     }
 };
 
-struct CanStringOrStringData {
-    operator StringData() const {
-        return "bad choice"_sd;
-    }
-    operator std::string() const {
-        return "good choice";
-    }
-};
-
 struct CanStringRef {
     operator const std::string&() const {
         return kReasonString;
@@ -94,23 +61,21 @@ TEST(Status, ReasonStrings) {
     checkReason(kReasonString);
     checkReason(std::string_view{kReason});  // NOLINT
     checkReason(std::string{kReason});
-    checkReason(StringData{kReason});
+    checkReason(std::string_view{kReason});
     checkReason(str::stream{} << kReason);
-    checkReason(CanStringOrStringData{}, "good choice");
     checkReason(CanStringRef{});
 
     ASSERT((usableStatusArgs<ErrorCodes::Error, std::string>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, std::string&>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, const std::string&>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, std::string&&>));
-    ASSERT((usableStatusArgs<ErrorCodes::Error, StringData>));
-    ASSERT((usableStatusArgs<ErrorCodes::Error, StringData&>));
-    ASSERT((usableStatusArgs<ErrorCodes::Error, const StringData&>));
-    ASSERT((usableStatusArgs<ErrorCodes::Error, StringData&&>));
+    ASSERT((usableStatusArgs<ErrorCodes::Error, std::string_view>));
+    ASSERT((usableStatusArgs<ErrorCodes::Error, std::string_view&>));
+    ASSERT((usableStatusArgs<ErrorCodes::Error, const std::string_view&>));
+    ASSERT((usableStatusArgs<ErrorCodes::Error, std::string_view&&>));
     ASSERT((!usableStatusArgs<ErrorCodes::Error, boost::optional<std::string>>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, CanString>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, CanStringExplicit>));
-    ASSERT((usableStatusArgs<ErrorCodes::Error, CanStringOrStringData>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, CanStringRef>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, std::reference_wrapper<std::string>>));
     ASSERT((usableStatusArgs<ErrorCodes::Error, std::reference_wrapper<const std::string>>));
@@ -358,14 +323,13 @@ TEST(ErrorExtraInfo, StatusCtorExtraAndReason) {
     ASSERT((usableStatusArgs<Extra, std::string&>));
     ASSERT((usableStatusArgs<Extra, const std::string&>));
     ASSERT((usableStatusArgs<Extra, std::string&&>));
-    ASSERT((usableStatusArgs<Extra, StringData>));
-    ASSERT((usableStatusArgs<Extra, StringData&>));
-    ASSERT((usableStatusArgs<Extra, const StringData&>));
-    ASSERT((usableStatusArgs<Extra, StringData&&>));
+    ASSERT((usableStatusArgs<Extra, std::string_view>));
+    ASSERT((usableStatusArgs<Extra, std::string_view&>));
+    ASSERT((usableStatusArgs<Extra, const std::string_view&>));
+    ASSERT((usableStatusArgs<Extra, std::string_view&&>));
     ASSERT((!usableStatusArgs<Extra, boost::optional<std::string>>));
     ASSERT((usableStatusArgs<Extra, CanString>));
     ASSERT((usableStatusArgs<Extra, CanStringExplicit>));
-    ASSERT((usableStatusArgs<Extra, CanStringOrStringData>));
     ASSERT((usableStatusArgs<Extra, CanStringRef>));
     ASSERT((usableStatusArgs<Extra, std::reference_wrapper<std::string>>));
     ASSERT((usableStatusArgs<Extra, std::reference_wrapper<const std::string>>));

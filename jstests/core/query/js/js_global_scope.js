@@ -11,10 +11,9 @@
 //   # Uses $where operator
 //   requires_scripting,
 //   requires_getmore,
-//   # TODO SERVER-116052: Add support for $function.
-//   # TODO SERVER-116054: Add support for $where.
-//   mozjs_wasm_unsupported,
 // ]
+import {isMozjsWasm} from "jstests/libs/js_engine_util.js";
+
 // Note: It's important to use our own database here to avoid sharing a javascript execution context
 // (Scope) with other tests which could pollute the global scope. This context is cached and shared
 // per database in a pool for every operation using JS in the same database.
@@ -24,7 +23,7 @@ coll.drop();
 
 assert.commandWorked(coll.insert({_id: 0, a: 1}));
 
-const expectedGlobalVars = [
+let expectedGlobalVars = [
     "AggregateError",
     "Array",
     "ArrayBuffer",
@@ -59,7 +58,6 @@ const expectedGlobalVars = [
     "Math",
     "MaxKey",
     "MinKey",
-    "MongoURI",
     "NaN",
     "Number",
     "NumberDecimal",
@@ -72,7 +70,6 @@ const expectedGlobalVars = [
     "RangeError",
     "ReferenceError",
     "RegExp",
-    "ResumeTokenDataUtility",
     "Set",
     "String",
     "Symbol",
@@ -88,7 +85,6 @@ const expectedGlobalVars = [
     "WeakMap",
     "WeakRef",
     "WeakSet",
-    "__lastres__",
     "assert",
     "bsonBinaryEqual",
     "bsonGetImmutable",
@@ -97,7 +93,6 @@ const expectedGlobalVars = [
     "bsonUnorderedFieldsCompare",
     "bsonWoCompare",
     "buildInfo",
-    "decodeResumeToken",
     "decodeURI",
     "decodeURIComponent",
     "doassert",
@@ -105,14 +100,12 @@ const expectedGlobalVars = [
     "encodeURIComponent",
     "escape",
     "eval",
-    "eventResumeTokenType",
     "formatErrorMsg",
     "gc",
     "getJSHeapLimitMB",
     "globalThis",
     "hex_md5",
     "isFinite",
-    "highWaterMarkResumeTokenType",
     "isNaN",
     "isNumber",
     "isObject",
@@ -121,13 +114,10 @@ const expectedGlobalVars = [
     "parseInt",
     "print",
     "printjson",
-    "printjsononeline",
     "sleep",
-    "sortDoc",
     "tojson",
     "tojsonObject",
     "tojsononeline",
-    "tostrictjson",
     "toJsonForLog",
     "undefined",
     "unescape",
@@ -140,7 +130,46 @@ const optionalGlobalVars = [
     // Not all platforms support WebAssembly, and it is possible to compile the JavaScript engine
     // without WebAssembly included, in which case, this "WebAssembly" symbol will be missing.
     "WebAssembly",
+    // In WAsm, __returnValue is set on the global by the engine after invokeFunction to communicate
+    // the return value back to the caller. It is not present on the first invocation but may appear
+    // on subsequent ones if a Scope is reused.
+    "__returnValue",
 ];
+
+const globalVarsNative = [
+    // __lastres__ is not used by the WAsm engine.
+    "__lastres__",
+    // The WAsm engine runs in a sandboxed environment without MongoDB client-side networking
+    // dependencies, so MongoURI (which requires MongoURI::parse from the client library) is
+    // not available.
+    "MongoURI",
+    // ResumeTokenDataUtility and its associated globals depend on server-side pipeline code
+    // (ResumeToken::parse) that is not available in the WAsm engine.
+    "ResumeTokenDataUtility",
+    "decodeResumeToken",
+    "eventResumeTokenType",
+    "highWaterMarkResumeTokenType",
+    // sortDoc and tostrictjson are not available in the WAsm engine.
+    "sortDoc",
+    "tostrictjson",
+];
+
+const globalVarsWasm = [
+    // Internal assert helpers exposed as globals in the WAsm engine's assert library due to
+    // it not using modules.
+    "_buildAssertionMessage",
+    "_doassert",
+    "_isEq",
+    "_processMsg",
+    "assertThrowsHelper",
+    "friendlyEqual",
+];
+
+if (isMozjsWasm()) {
+    expectedGlobalVars = expectedGlobalVars.concat(globalVarsWasm);
+} else {
+    expectedGlobalVars = expectedGlobalVars.concat(globalVarsNative);
+}
 
 // Note: it is important that this is sorted to compare to sorted variable names below.
 expectedGlobalVars.sort();
@@ -188,7 +217,8 @@ assert.lte(
 assert.lte(
     props.length,
     expectedGlobalVars.length,
-    () => `Found extra global properties during JS execution: ${tojson(props.slice(expectedGlobalVars.length))}`,
+    () =>
+        `Found extra global properties during JS execution: ${tojson(props.slice(expectedGlobalVars.length))}`,
 );
 
 // Now test the same properties appear in a $where. We have two additional expected properties which
@@ -200,8 +230,8 @@ assert.eq(
         .find({
             $where:
                 "const global = function() { return this; }();\n" +
-                "printjsononeline(Object.getOwnPropertyNames(global));\n" +
-                `printjsononeline(${tojsononeline(expectedVarsInWhere)});\n` +
+                "print(tojsononeline(Object.getOwnPropertyNames(global)));\n" +
+                `print(tojsononeline(${tojsononeline(expectedVarsInWhere)}));\n` +
                 `const optional = ${tojsononeline(optionalGlobalVars)};\n` +
                 "const found = new Set(Object.getOwnPropertyNames(global)\n" +
                 "  .filter(varName => !optional.includes(varName)));\n" +

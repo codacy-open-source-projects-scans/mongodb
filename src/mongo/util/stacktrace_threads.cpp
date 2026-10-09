@@ -1,66 +1,14 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/stacktrace.h"
 
 #if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
 
-#include <atomic>
-#include <cerrno>
-#include <csignal>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <ctime>
-#include <map>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/filesystem/directory.hpp>
-#include <boost/filesystem/fstream.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/iterator/iterator_facade.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include <syscall.h>
-// IWYU pragma: no_include "bits/types/siginfo_t.h"
-
 #include "mongo/base/parse_number.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -74,6 +22,30 @@
 #include "mongo/util/stacktrace_details.h"
 #include "mongo/util/stacktrace_somap.h"
 
+#include <atomic>
+#include <cerrno>
+#include <csignal>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <ctime>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/fstream.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <fmt/format.h>
+
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
 #endif
@@ -84,10 +56,11 @@ namespace mongo {
 namespace stacktrace_details {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr StringData kTaskDir = "/proc/self/task"_sd;
+constexpr std::string_view kTaskDir = "/proc/self/task"sv;
 
-StringData getBaseName(StringData path) {
+std::string_view getBaseName(std::string_view path) {
     size_t lastSlash = path.rfind('/');
     if (lastSlash == std::string::npos)
         return path;
@@ -109,7 +82,7 @@ public:
             return _base;
         }
 
-        StringData id() const {
+        std::string_view id() const {
             return _id;
         }
 
@@ -129,7 +102,7 @@ public:
         uintptr_t base() const {
             return _base;
         }
-        StringData name() const {
+        std::string_view name() const {
             return _name;
         }
 
@@ -415,24 +388,31 @@ void State::collectStacks(std::vector<ThreadBacktrace>& messageStorage,
     }
     LOGV2(23396, "Signalled threads", "numThreads"_attr = pendingTids.size());
 
-    size_t napMicros = 0;
+    const auto startTime = Date_t::now();
+    Milliseconds requestedNap{0};
     while (!pendingTids.empty()) {
         if (ThreadBacktrace* message = collection.results.tryPop(); message) {
-            napMicros = 0;
+            requestedNap = Milliseconds{0};
             if (pendingTids.erase(message->tid) != 0) {
                 received.push_back(message);
             } else {
                 collection.pool.push(message);
             }
-        } else if (napMicros < 50'000) {
+        } else if (requestedNap < Milliseconds{50}) {
             // Results queue is dry and we haven't napped enough to justify a reap.
-            napMicros += 1'000;
-            sleepMicros(1'000);
+            static constexpr Milliseconds napInterval{1};
+            requestedNap += napInterval;
+            sleepFor(napInterval);
         } else {
-            napMicros = 0;
+            requestedNap = Milliseconds{0};
             // Prune dead threads from the pendingTids set before retrying.
             for (auto iter = pendingTids.begin(); iter != pendingTids.end();) {
                 if (!stacktrace_details::tidExists(*iter)) {
+                    const Milliseconds elapsed = Date_t::now() - startTime;
+                    LOGV2(13424301,
+                          "Thread exited while attempting stack collection, skipping",
+                          "tid"_attr = *iter,
+                          "waited"_attr = elapsed);
                     missedTids.push_back(*iter);
                     iter = pendingTids.erase(iter);
                 } else {
@@ -526,21 +506,21 @@ void State::printToEmitter(AbstractEmitter& emitter) {
     {
         BSONObjBuilder prologue;
         if (!missedTids.empty()) {
-            BSONArrayBuilder tidArray(prologue.subarrayStart("missedThreadIds"_sd));
+            BSONArrayBuilder tidArray(prologue.subarrayStart("missedThreadIds"sv));
             for (int tid : missedTids)
                 tidArray.append(tid);
         }
         {
-            BSONObjBuilder procInfo(prologue.subobjStart("processInfo"_sd));
+            BSONObjBuilder procInfo(prologue.subobjStart("processInfo"sv));
             for (const BSONElement& be : bsonProcInfo) {
-                StringData key = be.fieldNameStringData();
+                std::string_view key = be.fieldNameStringData();
 
                 // Handle 'somap' specially. Pass everything else through.
-                if (be.type() == BSONType::array && key == "somap"_sd) {
+                if (be.type() == BSONType::array && key == "somap"sv) {
                     BSONArrayBuilder soMapArr(procInfo.subarrayStart(key));
                     for (const BSONElement& ae : be.Array()) {
                         BSONObj bRec = ae.embeddedObject();
-                        uintptr_t soBase = Hex::fromHex(bRec.getStringField("b"_sd));
+                        uintptr_t soBase = Hex::fromHex(bRec.getStringField("b"sv));
 
                         // Skip any files that aren't present in the metaGen.
                         const auto* file = metaGen.findFile(soBase);
@@ -550,8 +530,8 @@ void State::printToEmitter(AbstractEmitter& emitter) {
 
                         // Replace "b" with the `file->id()`. Pass everything else through.
                         for (auto&& be : bRec) {
-                            if (be.fieldNameStringData() == "b"_sd) {
-                                outLibrary.append("b"_sd, file->id());
+                            if (be.fieldNameStringData() == "b"sv) {
+                                outLibrary.append("b"sv, file->id());
                             } else {
                                 outLibrary.append(be);
                             }
@@ -568,23 +548,23 @@ void State::printToEmitter(AbstractEmitter& emitter) {
     for (ThreadBacktrace* msg : received) {
         BSONObjBuilder threadRecord;
         if (auto threadName = stacktrace_details::readThreadName(msg->tid); !threadName.empty()) {
-            threadRecord.append("name"_sd, threadName);
+            threadRecord.append("name"sv, threadName);
         }
-        threadRecord.append("tid"_sd, msg->tid);
+        threadRecord.append("tid"sv, msg->tid);
         {
-            BSONArrayBuilder backtrace(threadRecord.subarrayStart("backtrace"_sd));
+            BSONArrayBuilder backtrace(threadRecord.subarrayStart("backtrace"sv));
             for (void* const addrPtr : msg->addrRange()) {
                 const auto& meta = metaGen.load(addrPtr);
                 const uintptr_t addr = reinterpret_cast<uintptr_t>(addrPtr);
                 BSONObjBuilder frame(backtrace.subobjStart());
                 if (const auto& mf = meta.file(); mf) {
-                    StringData base = mf->id();  // really a made-up id string
-                    frame.append("b"_sd, base);
-                    frame.append("o"_sd, Hex(offsetFromBase(mf->base(), addr)));
+                    std::string_view base = mf->id();  // really a made-up id string
+                    frame.append("b"sv, base);
+                    frame.append("o"sv, Hex(offsetFromBase(mf->base(), addr)));
                 }
                 if (const auto& sym = meta.symbol(); sym) {
-                    frame.append("s"_sd, sym->name());
-                    frame.append("s+"_sd, Hex(offsetFromBase(sym->base(), addr)));
+                    frame.append("s"sv, sym->name());
+                    frame.append("s+"sv, Hex(offsetFromBase(sym->base(), addr)));
                 }
             }
         }
@@ -680,3 +660,5 @@ void markAsStackTraceProcessingThread() {
 
 }  // namespace mongo
 #endif  // !defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
+// IWYU pragma: no_include <syscall.h>
+// IWYU pragma: no_include "bits/types/siginfo_t.h"

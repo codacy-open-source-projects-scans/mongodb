@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/transaction/transaction_history_iterator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -834,5 +807,77 @@ TEST_F(SessionHistoryIteratorTest, RetryableWritesApplyOps) {
         ASSERT_FALSE(iter.hasNext());
     }
 }
+
+
+namespace {
+
+// A fake iterator with a fixed number of remaining steps, to exercise walkApplyOpsChain's budget
+// logic without an oplog.
+class CountingHistoryIterator : public TransactionHistoryIteratorBase {
+public:
+    explicit CountingHistoryIterator(int stepsAvailable) : _stepsAvailable(stepsAvailable) {}
+
+    bool hasNext() const override {
+        return _stepsAvailable > 0;
+    }
+    repl::OplogEntry next(OperationContext*) override {
+        // These tests drive the walk through nextOpTime().
+        MONGO_UNREACHABLE;
+    }
+    repl::OpTime nextOpTime(OperationContext*) override {
+        --_stepsAvailable;
+        return {};
+    }
+
+private:
+    int _stepsAvailable;
+};
+
+TEST(WalkApplyOpsChainTest, NoBudgetWalksToEndOfChain) {
+    CountingHistoryIterator iter(3);
+    int steps = 0;
+    walkApplyOpsChain(iter, boost::none, [&] {
+        iter.nextOpTime(nullptr);
+        ++steps;
+        return std::size_t{1};
+    });
+    ASSERT_EQ(3, steps);
+}
+
+TEST(WalkApplyOpsChainTest, BudgetStopsOnceOperationsCollected) {
+    // A budget of four operations, consumed two at a time, stops after two steps.
+    CountingHistoryIterator iter(100);
+    int steps = 0;
+    walkApplyOpsChain(iter, std::size_t{4}, [&] {
+        iter.nextOpTime(nullptr);
+        ++steps;
+        return std::size_t{2};
+    });
+    ASSERT_EQ(2, steps);
+}
+
+TEST(WalkApplyOpsChainTest, ZeroBudgetDoesNotStep) {
+    CountingHistoryIterator iter(3);
+    int steps = 0;
+    walkApplyOpsChain(iter, std::size_t{0}, [&] {
+        ++steps;
+        return std::size_t{1};
+    });
+    ASSERT_EQ(0, steps);
+}
+
+TEST(WalkApplyOpsChainTest, BudgetStopsEvenWhenLargerThanChain) {
+    // A budget larger than the chain still stops at the end of the chain rather than overrunning.
+    CountingHistoryIterator iter(2);
+    int steps = 0;
+    walkApplyOpsChain(iter, std::size_t{10}, [&] {
+        iter.nextOpTime(nullptr);
+        ++steps;
+        return std::size_t{1};
+    });
+    ASSERT_EQ(2, steps);
+}
+
+}  // namespace
 
 }  // namespace mongo

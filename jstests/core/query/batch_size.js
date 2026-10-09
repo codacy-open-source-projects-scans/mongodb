@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   requires_getmore,
 //   # Time series collections (as views) have specific limitations on aggregation stages
@@ -140,7 +141,10 @@ explain = coll
     .explain("executionStats");
 if (FixtureHelpers.isMongos(db)) {
     // If we're talking to a mongos, we expect at most one batch from each shard.
-    assert.gte(FixtureHelpers.numberOfShardsForCollection(coll) * 6, explain.executionStats.nReturned);
+    assert.gte(
+        FixtureHelpers.numberOfShardsForCollection(coll) * 6,
+        explain.executionStats.nReturned,
+    );
 } else {
     assert.eq(6, explain.executionStats.nReturned);
 }
@@ -157,7 +161,10 @@ assert.lte(explain.executionStats.totalKeysExamined, 60);
 assert.lte(explain.executionStats.totalDocsExamined, 60);
 if (FixtureHelpers.isMongos(db)) {
     // If we're talking to a mongos, we expect at most one batch from each shard.
-    assert.gte(FixtureHelpers.numberOfShardsForCollection(coll) * 6, explain.executionStats.nReturned);
+    assert.gte(
+        FixtureHelpers.numberOfShardsForCollection(coll) * 6,
+        explain.executionStats.nReturned,
+    );
 } else {
     assert.eq(6, explain.executionStats.nReturned);
 }
@@ -171,11 +178,9 @@ while (bigStr.length < 1000000) {
 
 // Insert enough documents to exceed the 32 MB in-memory sort limit.
 const nDocs = 40 * FixtureHelpers.numberOfShardsForCollection(coll);
-docsToInsert = [];
 for (let i = 0; i < nDocs; i++) {
-    docsToInsert.push({x: 1, y: 1, z: i, big: bigStr});
+    assert.commandWorked(coll.insertOne({x: 1, y: 1, z: i, big: bigStr}));
 }
-assert.commandWorked(coll.insert(docsToInsert));
 
 // Two indices needed in order to trigger plan ranking. Neither index provides the sort order.
 assert.commandWorked(coll.createIndex({x: 1}));

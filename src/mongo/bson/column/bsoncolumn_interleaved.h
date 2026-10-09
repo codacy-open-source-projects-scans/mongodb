@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -36,6 +10,7 @@
 
 #include <algorithm>
 #include <span>
+#include <string_view>
 
 namespace mongo::bsoncolumn::internal {
 
@@ -103,7 +78,7 @@ private:
                                        BSONType type,
                                        int64_t value,
                                        BSONElement lastLiteral,
-                                       StringData fieldName) const;
+                                       std::string_view fieldName) const;
 
             template <class Buffer>
             void appendToBuffers(BufferVector<Buffer*>& buffers,
@@ -114,7 +89,10 @@ private:
             boost::optional<int64_t> lastEncodedValue;
             Simple8b<uint64_t>::Iterator pos;
             int64_t lastEncodedValueForDeltaOfDelta = 0;
-            uint8_t scaleIndex;
+            // Only meaningful for doubles, set when loading a Simple-8b control byte. Left
+            // invalid until then so that an accidental read is caught rather than indexing out
+            // of bounds in Simple8bTypeUtil::decodeDouble().
+            uint8_t scaleIndex = bsoncolumn::kInvalidScaleIndex;
             bool deltaOfDelta = false;
         };
 
@@ -126,7 +104,7 @@ private:
                                        BSONType type,
                                        int128_t value,
                                        BSONElement lastLiteral,
-                                       StringData fieldName) const;
+                                       std::string_view fieldName) const;
 
             template <class Buffer>
             void appendToBuffers(BufferVector<Buffer*>& buffers,
@@ -204,7 +182,7 @@ private:
     const char* decompressFast(
         absl::flat_hash_map<const void*, BufferVector<Buffer*>>&& elemToBuffer);
 
-    void writeToElementStorage(BSONElement bsonElem, StringData fieldName);
+    void writeToElementStorage(BSONElement bsonElem, std::string_view fieldName);
 
     template <class Buffer>
     static void appendToBuffers(BufferVector<Buffer*>& buffers, BSONElement bsonElem);
@@ -273,7 +251,7 @@ const char* BlockBasedInterleavedDecompressor::decompress(
         BSONObjTraversal findScalar{
             _traverseArrays,
             _rootType,
-            [](StringData fieldName, const BSONObj& obj, BSONType type) { return true; },
+            [](std::string_view fieldName, const BSONObj& obj, BSONType type) { return true; },
             [&scalarElems](const BSONElement& elem) {
                 scalarElems.insert(elem.value());
                 // keep traversing to find every scalar field.
@@ -374,7 +352,7 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
         BSONObjTraversal trInit{
             _traverseArrays,
             _rootType,
-            [&](StringData fieldName, const BSONObj& obj, BSONType type) {
+            [&](std::string_view fieldName, const BSONObj& obj, BSONType type) {
                 if (auto it = elemToBuffer.find(obj.objdata()); it != elemToBuffer.end()) {
                     if constexpr (Buffer::kCollectsPositionInfo) {
                         for (auto&& buf : it->second) {
@@ -438,7 +416,7 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
     BSONObjTraversal trDecompress{
         _traverseArrays,
         _rootType,
-        [&](StringData fieldName, const BSONObj& obj, BSONType type) -> OptionalSOAlloc {
+        [&](std::string_view fieldName, const BSONObj& obj, BSONType type) -> OptionalSOAlloc {
             auto& buffers = posToBuffers[nodeIdx];
             ++nodeIdx;
 
@@ -944,7 +922,7 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
         case BSONType::string:
             for (auto&& buffer : state._buffers) {
                 ptr = BSONColumnBlockDecompressHelpers::
-                    decompressAllDelta<StringData, int128_t, Buffer>(
+                    decompressAllDelta<std::string_view, int128_t, Buffer>(
                         control,
                         end,
                         *buffer,
@@ -953,7 +931,8 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         state._refElem,
                         [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
                             auto string = Simple8bTypeUtil::decodeString(v);
-                            buffer.append(StringData((const char*)string.str.data(), string.size));
+                            buffer.append(
+                                std::string_view((const char*)string.str.data(), string.size));
                         },
                         finish128);
             }
@@ -998,8 +977,8 @@ void BlockBasedInterleavedDecompressor::dispatchDecompressionForType(
                         state._refElem,
                         [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
                             auto string = Simple8bTypeUtil::decodeString(v);
-                            buffer.append(
-                                BSONCode(StringData((const char*)string.str.data(), string.size)));
+                            buffer.append(BSONCode(
+                                std::string_view((const char*)string.str.data(), string.size)));
                         },
                         finish128);
             }
@@ -1063,7 +1042,7 @@ const char* BlockBasedInterleavedDecompressor::decompressFast(
     BSONObjTraversal trInit{
         _traverseArrays,
         _rootType,
-        [&](StringData fieldName, const BSONObj& obj, BSONType type) { return true; },
+        [&](std::string_view fieldName, const BSONObj& obj, BSONType type) { return true; },
         [&](const BSONElement& elem) {
             if (auto it = elemToBuffer.find(elem.value()); it != elemToBuffer.end()) {
                 heap.emplace_back(scalarIdx, elem, std::move(it->second));
@@ -1161,6 +1140,8 @@ void BlockBasedInterleavedDecompressor::DecodingState::Decoder64::appendToBuffer
             appendEncodedToBuffers<Buffer, Date_t>(buffers, Date_t::fromMillisSinceEpoch(value));
             break;
         case BSONType::numberDouble:
+            invariant(scaleIndex != bsoncolumn::kInvalidScaleIndex,
+                      "materializing a double before a control byte set the scale index");
             appendEncodedToBuffers<Buffer, double>(
                 buffers, Simple8bTypeUtil::decodeDouble(value, scaleIndex));
             break;
@@ -1192,13 +1173,13 @@ void BlockBasedInterleavedDecompressor::DecodingState::Decoder128::appendToBuffe
     switch (type) {
         case BSONType::string: {
             auto string = Simple8bTypeUtil::decodeString(value);
-            appendEncodedToBuffers<Buffer, StringData>(
-                buffers, StringData((const char*)string.str.data(), string.size));
+            appendEncodedToBuffers<Buffer, std::string_view>(
+                buffers, std::string_view((const char*)string.str.data(), string.size));
         } break;
         case BSONType::code: {
             auto string = Simple8bTypeUtil::decodeString(value);
             appendEncodedToBuffers<Buffer, BSONCode>(
-                buffers, BSONCode(StringData((const char*)string.str.data(), string.size)));
+                buffers, BSONCode(std::string_view((const char*)string.str.data(), string.size)));
         } break;
         case BSONType::binData: {
             char data[16];

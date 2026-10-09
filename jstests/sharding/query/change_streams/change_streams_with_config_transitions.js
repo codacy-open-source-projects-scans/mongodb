@@ -22,7 +22,10 @@ const kTransitionType = Object.freeze({
 });
 
 // Enum for the types of collection that may defined on test setup.
-const kCollSetupType = Object.freeze({unsharded: "unsharded collection", sharded: "sharded collection"});
+const kCollSetupType = Object.freeze({
+    unsharded: "unsharded collection",
+    sharded: "sharded collection",
+});
 
 // Initial cluster topology.
 const st = new ShardingTest({
@@ -33,11 +36,12 @@ const st = new ShardingTest({
 });
 
 const configShardName = "config";
-const otherShardName = st.shard0.shardName === configShardName ? st.shard1.shardName : st.shard0.shardName;
+const otherShardName =
+    st.shard0.shardName === configShardName ? st.shard1.shardName : st.shard0.shardName;
 
-function runTransitionTestCases(transitionType, watchMode, collSetupType) {
-    jsTest.log(
-        `Testing ${transitionType} against changestreams of mode ${watchMode} on a cluster with a ${collSetupType}.`,
+function runTransitionTestCases(transitionType, collSetupType) {
+    jsTest.log.info(
+        `Testing ${transitionType} against changestreams on a cluster with a ${collSetupType}.`,
     );
 
     // Setup the collection.
@@ -48,8 +52,11 @@ function runTransitionTestCases(transitionType, watchMode, collSetupType) {
 
     const db = st.s.getDB(dbName);
     assert.commandWorked(db.dropDatabase());
-    const primaryShardId = transitionType === kTransitionType.toDedicatedConfigServer ? "config" : otherShardName;
-    assert.commandWorked(db.adminCommand({enableSharding: db.getName(), primaryShard: primaryShardId}));
+    const primaryShardId =
+        transitionType === kTransitionType.toDedicatedConfigServer ? "config" : otherShardName;
+    assert.commandWorked(
+        db.adminCommand({enableSharding: db.getName(), primaryShard: primaryShardId}),
+    );
 
     const coll = assertDropAndRecreateCollection(db, collName);
     if (collSetupType === kCollSetupType.sharded) {
@@ -63,11 +70,11 @@ function runTransitionTestCases(transitionType, watchMode, collSetupType) {
         );
     }
 
-    const cst = new ChangeStreamTest(ChangeStreamTest.getDBForChangeStream(watchMode, db));
+    const cst = new ChangeStreamTest(db);
 
     // Test case 1: verify that a the CSRS transition does not impact an already opened change
     // stream.
-    let csCursor = cst.getChangeStream({watchMode: watchMode, coll: coll});
+    let csCursor = cst.getChangeStream({watchMode: ChangeStreamWatchMode.kCollection, coll: coll});
 
     // Write some documents (and encode the related expected event); We ensure that in case of
     // sharded collection all shards get targeted by one or more ops.
@@ -110,21 +117,30 @@ function runTransitionTestCases(transitionType, watchMode, collSetupType) {
     assert.commandWorked(bulk.execute({w: "majority"}));
 
     // Ensure that all the events occurred before and after the transition can be collected.
-    let observedEvents = cst.assertNextChangesEqualUnordered({cursor: csCursor, expectedChanges: expectedEvents});
+    let observedEvents = cst.assertNextChangesEqualUnordered({
+        cursor: csCursor,
+        expectedChanges: expectedEvents,
+    });
 
     // Test case 2: verify the expected output of a change stream resumed at a PIT that precedes
     // the transition (we use the first event by the previous test case as resume point).
     csCursor = null;
     const resumePoint = observedEvents[0]._id;
+    const resumeId = observedEvents[0].fullDocument._id;
 
     try {
-        csCursor = cst.getChangeStream({watchMode: watchMode, coll: coll, resumeAfter: resumePoint});
+        csCursor = cst.getChangeStream({
+            watchMode: ChangeStreamWatchMode.kCollection,
+            coll: coll,
+            resumeAfter: resumePoint,
+        });
     } catch (err) {
         // A "resume change stream before a transition to dedicated config server" request is
         // expected to be rejected, due to the execution of a removeShard() behind the scenes that
         // makes part of the events potentially inaccessible.
         assert(
-            transitionType === kTransitionType.toDedicatedConfigServer && ErrorCodes.ChangeStreamHistoryLost,
+            transitionType === kTransitionType.toDedicatedConfigServer &&
+                ErrorCodes.ChangeStreamHistoryLost,
             `Unexpected error ${tojson(err)} while attempting to resume a change stream`,
         );
         cst.cleanUp();
@@ -133,15 +149,19 @@ function runTransitionTestCases(transitionType, watchMode, collSetupType) {
 
     // On the other hand, a change stream resumed before a "transition from dedicated config server"
     // is expected to retrieve all the subsequent events.
-    cst.assertNextChangesEqualUnordered({cursor: csCursor, expectedChanges: expectedEvents.slice(1)});
+    //
+    // We exclude the event we resumed from (observedEvents[0]) rather than always slicing
+    // expectedEvents at index 0. In a sharded cluster the change stream delivers events in
+    // cluster-time order, which can differ from insertion order, so the first observed event
+    // may not be expectedEvents[0].
+    const resumedExpected = expectedEvents.filter((e) => e.fullDocument._id !== resumeId);
+    cst.assertNextChangesEqualUnordered({cursor: csCursor, expectedChanges: resumedExpected});
     cst.cleanUp();
 }
 
-for (let watchMode of Object.values(ChangeStreamWatchMode)) {
-    for (let collSetupType of Object.values(kCollSetupType)) {
-        runTransitionTestCases(kTransitionType.toDedicatedConfigServer, watchMode, collSetupType);
-        runTransitionTestCases(kTransitionType.fromDedicatedConfigServer, watchMode, collSetupType);
-    }
+for (let collSetupType of Object.values(kCollSetupType)) {
+    runTransitionTestCases(kTransitionType.toDedicatedConfigServer, collSetupType);
+    runTransitionTestCases(kTransitionType.fromDedicatedConfigServer, collSetupType);
 }
 
 st.stop();

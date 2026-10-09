@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -40,13 +14,14 @@
 #include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -140,7 +115,7 @@ public:
         } else {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
             auto [tag, val] = value::getPoisonValue();
-            accessor.reset(false, tag, val);
+            accessor.reset(value::TagValueView{tag, val});
 #endif
         }
     }
@@ -158,7 +133,7 @@ public:
         } else {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
             auto [tag, val] = value::getPoisonValue();
-            accessor.reset(false, tag, val);
+            accessor.reset(value::TagValueView{tag, val});
 #endif
         }
     }
@@ -175,7 +150,7 @@ public:
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
             auto [tag, val] = value::getPoisonValue();
             for (size_t idx = 0; idx < row.size(); idx++) {
-                row.reset(idx, false, tag, val);
+                row.reset(idx, value::TagValueView{tag, val});
             }
 #endif
         }
@@ -269,7 +244,6 @@ protected:
             return false;
         }
         switch (tag) {
-            case value::TypeTags::NumberDecimal:
             case value::TypeTags::StringBig:
             case value::TypeTags::Array:
             case value::TypeTags::ArraySet:
@@ -323,7 +297,7 @@ public:
     // Bit mask to accumulate what stats are tracked when a TrialRunTracker is attached.
     using TrialRunTrackingTypeMask = uint32_t;
 
-    CanTrackStats(StringData stageType,
+    CanTrackStats(std::string_view stageType,
                   PlanNodeId nodeId,
                   bool participateInTrialRunTracking,
                   TrialRunTrackingType trackingType)
@@ -592,6 +566,13 @@ private:
 };
 
 /**
+ * Evaluates the query-memory load-shedding decision. This is deliberately *not* inlined here:
+ * stages.h is included widely, and inlining the call would force every includer to depend on the
+ * query_memory_load_shedding library.
+ */
+void checkForQueryMemoryLoadShedding(OperationContext* opCtx);
+
+/**
  * Provides a method which can be used to check if the current operation has been interrupted.
  * Maintains an internal state to maintain the interrupt check period. Also responsible for
  * triggering yields if this object has been configured with a yield policy.
@@ -665,6 +646,9 @@ public:
         if (--_interruptCounter == 0) {
             _interruptCounter = kInterruptCheckPeriod;
             opCtx->checkForInterrupt();
+            // Evaluate the query-memory load shedding decision. We also do this in
+            // PlanYieldPolicy::yieldOrInterrupt for the yielding path.
+            checkForQueryMemoryLoadShedding(opCtx);
         }
     }
 
@@ -697,7 +681,7 @@ class PlanStage : public CanSwitchOperationContext<PlanStage>,
 public:
     using Vector = absl::InlinedVector<std::unique_ptr<PlanStage>, 2>;
 
-    PlanStage(StringData stageType,
+    PlanStage(std::string_view stageType,
               PlanYieldPolicySBE* yieldPolicy,
               PlanNodeId nodeId,
               bool participateInTrialRunTracking,
@@ -733,6 +717,10 @@ public:
      * When reOpen flag is true then the plan stage should reinitizalize already acquired resources
      * (e.g. re-hash, re-sort, re-seek, etc), but it can avoid reinitializing things that do not
      * contain state and are not destroyed by close(), since close() is not called before a reopen.
+     *
+     * open() is not all-or-nothing. If open() throws, the plan stage may be left in a "partially
+     * open" state. The only legal operations on a partially-open stage are to destroy it (let the
+     * destructor run), or to call close() and then destroy it.
      */
     virtual void open(bool reOpen) = 0;
 
@@ -750,13 +738,6 @@ public:
         }
     }
 
-    void attachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
-        doAttachCollectionAcquisition(mca);
-        for (auto&& child : _children) {
-            child->attachCollectionAcquisition(mca);
-        }
-    }
-
     /**
      * Moves to the next position. If the end is reached then return EOF otherwise ADVANCED. Callers
      * are not required to call getNext until EOF. They can stop consuming results at any time. Once
@@ -765,7 +746,13 @@ public:
     virtual PlanState getNext() = 0;
 
     /**
-     * The mirror method to open(). It releases any acquired resources.
+     * Releases any resources acquired by open(). This method is idempotent: it is safe to call
+     * close() multiple times, and safe to call close() on a stage that was never opened. Callers
+     * are not required to call close() before destroying a plan stage, but are encouraged to do so
+     * whenever they have a plan that is no longer actively executing and want to release runtime
+     * resources (e.g. storage-engine cursors, memory buffers) without destroying the plan tree
+     * itself (for example, call close() before collecting explain output so that runtime resources
+     * are released while the plan tree remains available for inspection).
      */
     virtual void close() = 0;
 
@@ -815,6 +802,19 @@ public:
     friend class CanTrackStats<PlanStage>;
     friend class CanInterrupt<PlanStage>;
 
+    /**
+     * Returns this stage's children.
+     *
+     * This accessor is intended for plan construction / rewrites prior to execution. Callers must
+     * not add/remove children or move ownership out of the returned container.
+     */
+    const Vector& children() const {
+        return _children;
+    }
+    Vector& children() {
+        return _children;
+    }
+
 private:
     /**
      * Spills the stage's data to disk. Stages that can spill their own data need to override this
@@ -828,13 +828,6 @@ protected:
     virtual void doRestoreState() {}
     virtual void doDetachFromOperationContext() {}
     virtual void doAttachToOperationContext(OperationContext* opCtx) {}
-
-    /**
-     * Allows collection accessing stages to obtain a reference to the collection acquisition. This
-     * should be a no-op for non-collection accessing stages, and needs to be implemented by
-     * collection accessing stages like scan and ixscan.
-     */
-    virtual void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) = 0;
 
     Vector _children;
 };

@@ -1,39 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <algorithm>
+#include "mongo/util/time_support.h"
 
-#include <boost/move/utility_core.hpp>
-#include <fmt/compile.h>
-#include <fmt/format.h>
-#include <sys/types.h>
-// IWYU pragma: no_include "bits/types/struct_tm.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/parse_number.h"
@@ -43,12 +12,18 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <thread>
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/compile.h>
+#include <fmt/format.h>
+#include <sys/types.h>
 
 #if defined(_WIN32)
 #include "mongo/util/system_tick_source.h"
@@ -72,10 +47,11 @@
  */
 #define PCRE2_CODE_UNIT_WIDTH 8  // Select 8-bit PCRE2 library.
 #include <pcre2.h>
+// IWYU pragma: no_include "bits/types/struct_tm.h"
 
 namespace mongo {
 
-AtomicWord<long long> Date_t::lastNowVal;
+Atomic<long long> Date_t::lastNowVal;
 
 Date_t Date_t::now() {
     decltype(lastNowVal)::WordType curTime = curTimeMillis64();
@@ -282,6 +258,7 @@ DateStringBuffer& DateStringBuffer::ctime(Date_t date) {
 }
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 #if defined(_WIN32)
 
@@ -309,7 +286,7 @@ class QuickAndDirtyRegex {
 public:
     class Match {
     public:
-        Match(const pcre2_code* code, StringData input)
+        Match(const pcre2_code* code, std::string_view input)
             : _m{pcre2_match_data_create_from_pattern(code, nullptr)},
               _input{input},
               _rc{pcre2_match(code,
@@ -331,19 +308,19 @@ public:
             return _rc;
         }
 
-        StringData operator[](size_t i) const {
+        std::string_view operator[](size_t i) const {
             iassert(ErrorCodes::NoSuchKey, "Match capture", i < pcre2_get_ovector_count(&*_m));
             size_t* p = pcre2_get_ovector_pointer(&*_m) + 2 * i;
-            return p[0] == PCRE2_UNSET ? StringData{} : _input.substr(p[0], p[1] - p[0]);
+            return p[0] == PCRE2_UNSET ? std::string_view{} : _input.substr(p[0], p[1] - p[0]);
         }
 
     private:
         pcre2_match_data* _m;
-        StringData _input;
+        std::string_view _input;
         int _rc;
     };
 
-    explicit QuickAndDirtyRegex(StringData pattern)
+    explicit QuickAndDirtyRegex(std::string_view pattern)
         : _code{[&] {
               int err;
               size_t errPos;
@@ -364,7 +341,7 @@ public:
         pcre2_code_free(_code);
     }
 
-    Match match(StringData input) const {
+    Match match(std::string_view input) const {
         return Match{_code, input};
     }
 
@@ -378,7 +355,7 @@ struct ParsedTm {
     Seconds tzAdj;
 };
 
-ParsedTm parseTm(StringData dateString) {
+ParsedTm parseTm(std::string_view dateString) {
     static const auto& re = *new QuickAndDirtyRegex{R"re((?x)
         ^
         (\d{4})-(\d{2})-(\d{2})        # mandatory YYYY-MM-DD
@@ -395,15 +372,15 @@ ParsedTm parseTm(StringData dateString) {
             ([+-]) (\d{2}) :? (\d{2})
         )
         $
-    )re"_sd};
+    )re"sv};
     auto m = re.match(dateString);
     iassert(ErrorCodes::BadValue, fmt::format("failed match \'{}\'", dateString), m.rc() >= 0);
     ParsedTm result{};
     auto cap = [&](int i) {
-        return i <= m.rc() ? m[i] : StringData{};
+        return i <= m.rc() ? m[i] : std::string_view{};
     };
 
-    auto s2i = [](StringData s, StringData name, int min, int max) {
+    auto s2i = [](std::string_view s, std::string_view name, int min, int max) {
         int i = 0;
         iassert(NumberParser().base(10)(s, &i));
         iassert(ErrorCodes::BadValue,
@@ -436,7 +413,7 @@ ParsedTm parseTm(StringData dateString) {
 
 }  // namespace
 
-StatusWith<Date_t> dateFromISOString(StringData dateString) {
+StatusWith<Date_t> dateFromISOString(std::string_view dateString) {
     ParsedTm parsed{};
     try {
         parsed = parseTm(dateString);
@@ -686,13 +663,13 @@ std::string dateToCtimeString(Date_t date) {
 }
 
 void outputDateAsISOStringUTC(std::ostream& os, Date_t date) {
-    os << StringData{DateStringBuffer{}.iso8601(date, false)};
+    os << std::string_view{DateStringBuffer{}.iso8601(date, false)};
 }
 void outputDateAsISOStringLocal(std::ostream& os, Date_t date) {
-    os << StringData{DateStringBuffer{}.iso8601(date, true)};
+    os << std::string_view{DateStringBuffer{}.iso8601(date, true)};
 }
 void outputDateAsCtime(std::ostream& os, Date_t date) {
-    os << StringData{DateStringBuffer{}.ctime(date)};
+    os << std::string_view{DateStringBuffer{}.ctime(date)};
 }
 
 }  // namespace mongo

@@ -1,44 +1,19 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/stage_builder/sbe/type_checker.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/algebra/polyvalue.h"
 #include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 namespace mongo::stage_builder {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using namespace abt;
 
@@ -152,6 +127,25 @@ TEST(TypeCheckerTest, FoldFillEmptyInComplexCheck) {
     ASSERT(tree.is<BinaryOp>() && tree.cast<BinaryOp>()->op() == Operations::And);
 }
 
+TEST(TypeCheckerTest, FoldIsNullishInComplexNaryCheck) {
+    // Run both IsNullish+Exists and IsString as part of an And, and expect that the resulting
+    // expression replaced IsString with a constant (because IsNullish+Exists would have excluded
+    // the possibility that the variable is a string).
+    auto tree = make<If>(
+        make<NaryOp>(Operations::And,
+                     makeSeq(make<FunctionCall>("isNullish", makeSeq(make<Variable>("inputVar"))),
+                             make<FunctionCall>("exists", makeSeq(make<Variable>("inputVar"))),
+                             make<FunctionCall>("isString", makeSeq(make<Variable>("inputVar"))))),
+        Constant::str("impossible"),
+        Constant::boolean(true));
+
+    TypeChecker{}.typeCheck(tree);
+
+    ASSERT(tree.is<If>() && tree.cast<If>()->getCondChild().is<NaryOp>() &&
+           tree.cast<If>()->getCondChild().cast<NaryOp>()->op() == Operations::And &&
+           tree.cast<If>()->getCondChild().cast<NaryOp>()->nodes().back().is<Constant>());
+}
+
 TEST(TypeCheckerTest, FoldFillEmptyInComplexNaryCheck) {
     // Run both exists and typeMatch as part of an n-ary And, and expect that the resulting
     // expression is guaranteed to never be Nothing (hence, FillEmpty can be safely removed).
@@ -229,9 +223,9 @@ TEST(TypeCheckerTest, TypeCheckSwitch2) {
                   make<FunctionCall>("dateAdd",
                                      makeSeq(make<Variable>("timezoneVar"),
                                              make<Variable>("inputVar"),
-                                             Constant::str("hour"_sd),
+                                             Constant::str("hour"sv),
                                              Constant::int32(8),
-                                             Constant::str("UTC"_sd))),
+                                             Constant::str("UTC"sv))),
                   Constant::null()});
 
     TypeSignature sign = TypeChecker{}.typeCheck(tree);
@@ -586,12 +580,12 @@ TEST(TypeCheckerTest, NotOnNonBooleanCanReturnNothing) {
             .typesMask);
 }
 
-// The FunctionCall(StringData, ABTVector) constructor must resolve the string name to its EFn
+// The FunctionCall(std::string_view, ABTVector) constructor must resolve the string name to its EFn
 // value at construction time so that fn() returns the enum and name() returns the canonical string.
 TEST(TypeCheckerTest, FunctionCallStringConstructorResolvesEFn) {
     auto node = make<FunctionCall>("abs", ABTVector{});
     ASSERT_EQUALS(sbe::EFn::kAbs, node.cast<FunctionCall>()->fn());
-    ASSERT_EQUALS("abs"_sd, node.cast<FunctionCall>()->name());
+    ASSERT_EQUALS("abs"sv, node.cast<FunctionCall>()->name());
 }
 
 }  // namespace

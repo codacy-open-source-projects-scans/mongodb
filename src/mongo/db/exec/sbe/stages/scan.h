@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 #include "mongo/db/exec/plan_stats.h"
@@ -47,7 +20,7 @@
 #include "mongo/db/shard_role/shard_catalog/collection.h"
 #include "mongo/db/shard_role/shard_catalog/index_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/string_listset.h"
 #include "mongo/util/string_map.h"
@@ -57,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/inlined_vector.h>
@@ -188,7 +162,6 @@ protected:
     value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
     void closeShared();
     void debugPrintShared(std::vector<DebugPrinter::Block>& ret) const;
-    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override;
     // Shared logic for getNext()
     inline void handleInterruptAndSlotAccess() {
         // We are about to call next() on a storage cursor so do not bother saving our internal
@@ -202,10 +175,10 @@ protected:
     };
 
     // Shared logic for getNext()
-    inline void handleEOF(const boost::optional<Record>& nextRecord) {
+    inline void handleEOF() {
         if (_state->recordIdSlot) {
-            auto [tag, val] = sbe::value::makeCopyRecordId(RecordId());
-            _recordIdAccessor.reset(true, tag, val);
+            _recordIdAccessor.reset(
+                value::TagValueOwned::fromRaw(sbe::value::makeCopyRecordId(RecordId())));
         }
     };
 
@@ -213,14 +186,14 @@ protected:
     // Helper to reset record ID if a `recordIdSlot` is present and to track end bounds.
     inline void resetRecordId(const boost::optional<Record>& nextRecord) {
         if (_state->recordSlot) {
-            _recordAccessor.reset(false,
-                                  value::TypeTags::bsonObject,
-                                  value::bitcastFrom<const char*>(nextRecord->data.data()));
+            _recordAccessor.reset(
+                value::TagValueView{value::TypeTags::bsonObject,
+                                    value::bitcastFrom<const char*>(nextRecord->data.data())});
         }
     };
 
     MONGO_COMPILER_ALWAYS_INLINE
-    value::OwnedValueAccessor* getFieldAccessor(StringData name) {
+    value::OwnedValueAccessor* getFieldAccessor(std::string_view name) {
         if (size_t pos = _state->scanFieldNames.findPos(name); pos != StringListSet::npos) {
             return &_scanFieldAccessors[pos];
         }
@@ -308,6 +281,7 @@ protected:
     void doRestoreState() override;
     void doDetachFromOperationContext() override;
     void doAttachToOperationContext(OperationContext* opCtx) override;
+    PlanState getNext() final;
 
 private:
     /**
@@ -321,6 +295,11 @@ private:
     }
 };
 
+/**
+ * Scan stage for a clustered collection scan over a single contiguous RecordId range (or an
+ * unbounded scan with a known direction). Use MultiRangeClusteredScanStage for non-contiguous
+ * (multi-range) clustered scans.
+ */
 class ScanStage final : public ScanStageBaseImpl<ScanStage> {
     friend class ScanStageBaseImpl<ScanStage>;
 
@@ -360,7 +339,6 @@ public:
               bool includeScanEndRecordId);
 
     std::unique_ptr<PlanStage> clone() const final;
-    PlanState getNext() final;
     void prepare(CompileCtx& ctx) final;
     void close() final;
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
@@ -372,6 +350,11 @@ private:
         return _cursor.get();
     }
     void scanResetState(bool reOpen);
+    void getNextHangFailPoint();
+    bool pastEnd() const {
+        return _havePassedScanEndRecordId;
+    }
+    boost::optional<Record> getNextInternal();
 
     // Only for a clustered collection scan, this sets '_minRecordId' to the lower scan bound.
     void setMinRecordId();
@@ -380,6 +363,7 @@ private:
     void setMaxRecordId();
 
     std::unique_ptr<SeekableRecordCursor> _cursor;
+
     // Only for clustered collection scans: must ScanStageBase::getNext() include the starting
     // bound?
     bool _includeScanStartRecordId = true;
@@ -393,17 +377,20 @@ private:
     // Only for clustered collection scans: have we crossed the scan end bound if there is one?
     bool _havePassedScanEndRecordId = false;
 
-    // Only for clustered collection scans, holds the minimum record ID of the scan, if applicable.
+    // Only for clustered collection scans, holds the maximum record ID of the scan, if applicable.
     boost::optional<value::SlotId> _maxRecordIdSlot;
     value::SlotAccessor* _minRecordIdAccessor{nullptr};
     RecordId _minRecordId;
 
-    // Only for clustered collection scans, holds the maximum record ID of the scan, if applicable.
+    // Only for clustered collection scans, holds the minimum record ID of the scan, if applicable.
     boost::optional<value::SlotId> _minRecordIdSlot;
     value::SlotAccessor* _maxRecordIdAccessor{nullptr};
     RecordId _maxRecordId;
-    // Only care about whether first call of getNext() if clustered scan because we need to seek
+    // Only care about whether first call of getNext() if clustered scan because we need to seek.
     bool _firstGetNext{false};
 };  // class ScanStage
+
+extern FailPoint hangScanGetNext;
+
 }  // namespace sbe
 }  // namespace mongo

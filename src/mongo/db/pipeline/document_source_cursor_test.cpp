@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/document_source_cursor.h"
@@ -46,6 +20,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -96,9 +71,8 @@ private:
  */
 class MockPlanExplainer : public PlanExplainer {
 public:
-    const ExplainVersion& getVersion() const override {
-        static const ExplainVersion version = "mock";  // or any default value you prefer
-        return version;
+    bool isSbeExplainer() const override {
+        return false;  // Assuming classic engine for this mock
     }
 
     bool areThereRejectedPlansToExplain() const override {
@@ -121,7 +95,6 @@ public:
         return {};
     }
 };
-
 
 /**
  * Base class for a MockPlanExecutor that returns BSON objects from a pre-canned vector.
@@ -228,7 +201,7 @@ public:
         return _mockExplainer;
     }
 
-    boost::optional<StringData> getExecutorType() const override {
+    boost::optional<std::string_view> getExecutorType() const override {
         return boost::none;
     }
 
@@ -238,12 +211,12 @@ public:
 
 private:
     OperationContext* _opCtx;
-
-    std::vector<BSONObj> _data;
-    size_t _idx = 0;
-
     MockPlanExplainer _mockExplainer;
     bool _isDisposed = false;
+
+protected:
+    std::vector<BSONObj> _data;
+    size_t _idx = 0;
 };
 
 /**
@@ -398,5 +371,66 @@ TEST_F(DSCursorTest, TestSaveAndRestoreThrowing) {
               "testsThatDidNotThrow"_attr = testsThatDidNotThrow);
     }
 }
+
+/**
+ * MockPlanExecutor instance used for count-only queries.
+ */
+class MockPlanExecutorForCount : public MockPlanExecutorBase {
+public:
+    MockPlanExecutorForCount(OperationContext* opCtx,
+                             std::vector<BSONObj> data,
+                             std::shared_ptr<bool> calledGetNextWithoutOutput)
+        : MockPlanExecutorBase(opCtx, std::move(data)),
+          _calledGetNextWithoutOutput(std::move(calledGetNextWithoutOutput)) {}
+
+    ExecState getNext(BSONObj* out, RecordId* dlOut) override {
+        if (_idx >= _data.size()) {
+            return ExecState::IS_EOF;
+        }
+        invariant(out == nullptr);
+        *_calledGetNextWithoutOutput = true;
+        ++_idx;
+        return ExecState::ADVANCED;
+    }
+
+    void saveState() override {}
+
+    void restoreState(const RestoreContext& context) override {}
+
+    void detachFromOperationContext() override {}
+
+    void reattachToOperationContext(OperationContext* opCtx) override {}
+
+private:
+    std::shared_ptr<bool> _calledGetNextWithoutOutput;
+};
+
+TEST_F(DSCursorTest, EmptyDocumentsUsesCountOnlyPlanExecutorInterface) {
+    std::vector<BSONObj> bsons = {BSON("foo" << 1), BSON("foo" << 2), BSON("foo" << 3)};
+    auto calledGetNextWithoutOutput = std::make_shared<bool>(false);
+    auto exec =
+        std::make_unique<MockPlanExecutorForCount>(getOpCtx(), bsons, calledGetNextWithoutOutput);
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> execWithDeleter(
+        std::move(exec).release(), PlanExecutor::Deleter{getOpCtx()});
+
+    MultipleCollectionAccessor collections;
+    auto stasher = make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
+    auto cursor = DocumentSourceCursor::create(
+        std::move(execWithDeleter), getExpCtx(), DocumentSourceCursor::CursorType::kEmptyDocuments);
+    cursor->bindCatalogInfo(collections, stasher);
+    cursor->setCatalogResourceHandle_forTest(
+        make_intrusive<MockDSCursorCatalogResourceHandle>(std::make_shared<bool>(false)));
+
+    auto cursorStage = exec::agg::buildStage(cursor);
+    for (size_t i = 0; i < bsons.size(); ++i) {
+        auto next = cursorStage->getNext();
+        ASSERT(next.isAdvanced());
+        ASSERT(next.getDocument().toBson().isEmpty());
+    }
+    ASSERT(cursorStage->getNext().isEOF());
+    ASSERT(*calledGetNextWithoutOutput);
+    cursorStage->dispose();
+}
+
 }  // namespace
 }  // namespace mongo

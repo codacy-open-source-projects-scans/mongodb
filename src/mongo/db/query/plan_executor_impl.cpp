@@ -1,36 +1,13 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/plan_executor_impl.h"
 
+#include "mongo/base/counter.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/classic/cached_plan.h"
 #include "mongo/db/exec/classic/collection_scan.h"
@@ -47,7 +24,10 @@
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_insert_listener.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/plan_yield_policy_impl.h"
+#include "mongo/db/query/query_execution_knobs_gen.h"
+#include "mongo/db/query/write_conflict_backoff.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/shard_catalog/shard_filtering_util.h"
@@ -56,6 +36,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 
@@ -63,6 +44,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -71,11 +53,19 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 const BSONObj kEmptyPBRT;
 const std::vector<NamespaceStringOrUUID> kEmptyNssVector;
+
+// Avoid logging the same message about long-running collection scans from different queries too
+// frequently.
+logv2::SeveritySuppressor longCollectionScanLogSeveritySuppressor{
+    Seconds(300), logv2::LogSeverity::Info(), logv2::LogSeverity::Debug(3)};
+
 }  // namespace
+
 
 const OperationContext::Decoration<boost::optional<repl::OpTime>> clientsLastKnownCommittedOpTime =
     OperationContext::declareDecoration<boost::optional<repl::OpTime>>();
@@ -98,16 +88,48 @@ PlanExecutorImpl::PlanExecutorImpl(OperationContext* opCtx,
                                    PlanYieldPolicy::YieldPolicy yieldPolicy,
                                    boost::optional<size_t> cachedPlanHash,
                                    boost::optional<std::string> replanReason,
-                                   boost::optional<PlanExplainerData> maybeExplainData)
+                                   boost::optional<PlanExplainerData> maybeExplainData,
+                                   boost::optional<PlanSelectionStrategy> planSelectionStrategy)
     : _opCtx(opCtx),
       _cq(std::move(cq)),
       _expCtx(_cq ? _cq->getExpCtx() : expCtx),
       _workingSet(std::move(ws)),
       _qs(std::move(qs)),
       _root(std::move(rt)),
-      _planExplainer(plan_explainer_factory::make(
-          _root.get(), cachedPlanHash, std::move(replanReason), std::move(maybeExplainData))),
+      _planExplainer(
+          plan_explainer_factory::make(_root.get(),
+                                       cachedPlanHash,
+                                       std::move(replanReason),
+                                       std::move(maybeExplainData),
+                                       _cq && _cq->getExplain().has_value() /* isExplain */,
+                                       planSelectionStrategy)),
       _mustReturnOwnedBson(returnOwnedBson),
+      _mustSetRecordIdMetadata(_cq && _cq->metadataDeps()[DocumentMetadataFields::kRecordId]),
+      // Read value of 'operationResponseMaxMS' query knob once, here at construction, where the
+      // knob configuration is resolved and available. The knob is fixed for the query's lifetime,
+      // so the value is cached and reused rather than re-read on every reattach (see header).
+      _operationResponseMaxMS(QueryKnobConfiguration::get(opCtx).getOperationResponseMaxMS()),
+      _responseDeadlineType([&]() -> ResponseDeadlineType {
+          // Determine response deadline type for change stream queries.
+          if (_expCtx && _expCtx->getChangeStreamSpec().has_value()) {
+              if (_operationResponseMaxMS > 0) {
+                  // Use the response deadline to periodically interrupt the executor after a
+                  // user-configurable time period of performing work. This allows us to return
+                  // an updated PBRT to the consumer and check for interrupts more frequently during
+                  // long-running operations.
+                  return ResponseDeadlineType::kInterruptWork;
+              }
+              // Use the response deadline to log an info message about long-running operations that
+              // exceed 'kLongOperationResponseLogInfoDeadline'.
+              // This allows end users to discover that long-running operations can be interrupted
+              // via configuration. Currently only used for change stream queries.
+              return ResponseDeadlineType::kLogInfoMessage;
+          }
+
+          // No response deadline.
+          return ResponseDeadlineType::kNone;
+      }()),
+      _responseDeadlineValue(_calculateResponseDeadlineValue()),
       _nss(std::move(nss)) {
     invariant(!_expCtx || _expCtx->getOperationContext() == _opCtx);
     invariant(!_cq || !_expCtx || _cq->getExpCtx() == _expCtx);
@@ -243,6 +265,10 @@ void PlanExecutorImpl::restoreStateWithoutRetrying(const RestoreContext& context
 
 void PlanExecutorImpl::detachFromOperationContext() {
     invariant(_currentState == kSaved);
+
+    // Reset response deadline because the request is over.
+    _responseDeadlineValue.reset();
+
     _opCtx = nullptr;
     _root->detachFromOperationContext();
     if (_expCtx) {
@@ -264,6 +290,12 @@ void PlanExecutorImpl::reattachToOperationContext(OperationContext* opCtx) {
     if (_expCtx) {
         _expCtx->setOperationContext(opCtx);
     }
+
+    // The response deadline value needs to be (re)computed here on every invocation, because
+    // the same plan executor instance can be used to service multiple getMore requests.
+    _responseDeadlineValue = _calculateResponseDeadlineValue();
+    _interrupted = false;
+
     _currentState = kSaved;
 }
 
@@ -274,7 +306,7 @@ namespace {
 void hangBeforeShouldWaitForInsertsIfFailpointEnabled(PlanExecutorImpl* exec) {
     if (MONGO_unlikely(
             planExecutorHangBeforeShouldWaitForInserts.shouldFail([exec](const BSONObj& data) {
-                auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"_sd);
+                auto fpNss = NamespaceStringUtil::parseFailPointData(data, "namespace"sv);
                 return fpNss.isEmpty() || fpNss == exec->nss();
             }))) {
         LOGV2(20946,
@@ -293,8 +325,8 @@ void PlanExecutorImpl::logWriteConflictAndBackoff(size_t numAttempts) {
     if (MONGO_unlikely(planExecutorHangBeforeLogAndBackoff.shouldFail())) {
         planExecutorHangBeforeLogAndBackoff.pauseWhileSet(_opCtx);
     }
-    mongo::logWriteConflictAndBackoff(
-        numAttempts, "plan execution", ""_sd, NamespaceStringOrUUID(_nss));
+    write_conflict_backoff::logAndBackoff(
+        _opCtx, numAttempts, "plan execution", ""sv, NamespaceStringOrUUID(_nss));
 }
 
 /**
@@ -304,7 +336,7 @@ void PlanExecutorImpl::doWaitDuringYield() {
     // If we yielded because we encountered a sharding critical section, wait for the critical
     // section to end before continuing. By waiting for the critical section to be exited we avoid
     // busy spinning immediately and encountering the same critical section again. It is important
-    // that this wait happens after having released the lock hierarchy -- otherwise deadlocks could
+    // that this wait happens after having released the lock hierarchy - otherwise deadlocks could
     // happen, or the very least, locks would be unnecessarily held while waiting.
     const auto& shardingCriticalSection = planExecutorShardingState(_opCtx).criticalSectionFuture;
     if (shardingCriticalSection) {
@@ -354,7 +386,8 @@ void PlanExecutorImpl::_waitForAllEarlierOplogWritesToBeVisible() {
 }
 
 PlanExecutor::ExecState PlanExecutorImpl::getNext(BSONObj* objOut, RecordId* dlOut) {
-    ExecState state = _getNextImpl(&_docOutput, dlOut);
+    auto* docOut = objOut ? &_docOutput : nullptr;
+    ExecState state = _getNextImpl(docOut, dlOut);
 
     if (objOut && state == ExecState::ADVANCED) {
         const bool includeMetadata = _expCtx && _expCtx->getNeedsMerge();
@@ -383,19 +416,27 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
         return PlanExecutor::ADVANCED;
     }
 
-    // The below are incremented on every WriteConflict or TemporarilyUnavailable error accordingly,
-    // and reset to 0 on any successful call to _root->work.
-    size_t writeConflictsInARow = 0;
-    size_t tempUnavailErrorsInARow = 0;
+    // Per-call retry state: streak counters incremented on every WriteConflict or
+    // TemporarilyUnavailable error accordingly, and reset to 0 on any successful call to
+    // _root->work.
+    WriteConflictRetryState retryState;
 
-    // Capped insert data; declared outside the loop so we hold a shared pointer to the capped
-    // insert notifier the entire time we are in the loop.  Holding a shared pointer to the
-    // capped insert notifier is necessary for the notifierVersion to advance.
-    auto notifier = makeNotifier();
+    // Capped insert notifier; declared outside the loop so that it (and thus the capped-insert
+    // version tracking) persists across the two-EOF wait handshake in _handleEOFAndExit(). It is
+    // created lazily on the first EOF that actually needs to wait, rather than on every call, to
+    // avoid allocating a notifier on the common path where _getNextImpl returns a document without
+    // ever waiting. Holding the shared pointer while we wait is what allows the notifier version
+    // to advance; that requirement is only relevant once we are blocking.
+    std::unique_ptr<insert_listener::Notifier> notifier;
 
     // This callback is used by the yielding code once all storage resources are released.
     const auto afterSnapshotAndLocksRelinquishedCb = [&]() {
         doWaitDuringYield();
+
+        if (_responseDeadlineType != ResponseDeadlineType::kNone) {
+            // May set '_interrupted' to true if the response deadline is reached.
+            _handleResponseDeadline();
+        }
     };
 
     for (;;) {
@@ -409,19 +450,22 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
                                                            afterSnapshotAndLocksRelinquishedCb,
                                                            RestoreContext::RestoreType::kYield,
                                                            _afterSnapshotAbandonFn));
+            if (_interrupted) {
+                return PlanExecutor::IS_EOF;
+            }
         }
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         PlanStage::StageState code = _root->work(&id);
 
         if (code != PlanStage::NEED_YIELD) {
-            writeConflictsInARow = 0;
-            tempUnavailErrorsInARow = 0;
+            retryState.writeConflictsInARow = 0;
+            retryState.tempUnavailErrorsInARow = 0;
         }
 
         if (PlanStage::ADVANCED == code) {
             WorkingSetMember* member = _workingSet->get(id);
-            if (_cq && _cq->metadataDeps()[DocumentMetadataFields::kRecordId]) {
+            if (_mustSetRecordIdMetadata) {
                 member->metadata().setRecordId(member->recordId);
             }
             bool hasRequestedData = true;
@@ -435,7 +479,8 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
                         *objOut = Document{member->keyData[0].keyData};
                     }
                 } else if (member->hasObj()) {
-                    std::swap(*objOut, member->doc.value());
+                    using std::swap;
+                    swap(*objOut, member->doc.value());
                 } else {
                     _workingSet->free(id);
                     hasRequestedData = false;
@@ -450,8 +495,8 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
             if (hasRequestedData) {
                 // transfer the metadata from the WSM to Document.
                 if (objOut) {
-                    if (_mustReturnOwnedBson) {
-                        *objOut = objOut->getOwned();
+                    if (_mustReturnOwnedBson && !objOut->isOwned()) {
+                        *objOut = std::move(*objOut).getOwned();
                     }
 
                     if (member->metadata()) {
@@ -466,7 +511,7 @@ PlanExecutor::ExecState PlanExecutorImpl::_getNextImpl(Document* objOut, RecordI
             // This result didn't have the data the caller wanted, try again.
 
         } else if (PlanStage::NEED_YIELD == code) {
-            _handleNeedYield(writeConflictsInARow, tempUnavailErrorsInARow);
+            _handleNeedYield(retryState);
 
         } else if (PlanStage::NEED_TIME == code) {
             // Fall through to yield check at end of large conditional.
@@ -489,16 +534,73 @@ BSONObj makeBsonWithMetadata(Document& doc, WorkingSetMember* member) {
 }
 }  // namespace
 
-std::unique_ptr<insert_listener::Notifier> PlanExecutorImpl::makeNotifier() {
-    if (insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
-        // We always construct the insert_listener::Notifier for awaitData cursors.
-        return insert_listener::getCappedInsertNotifier(_opCtx, _collection, _yieldPolicy.get());
+boost::optional<Date_t> PlanExecutorImpl::_calculateResponseDeadlineValue() const {
+    if (_responseDeadlineType == ResponseDeadlineType::kNone || !_opCtx) {
+        // No response deadline configured, or no operation to compute one against (e.g. recomputed
+        // during disposal, which reattaches the executor to a foreign or null opCtx).
+        return boost::none;
     }
-    return nullptr;
+
+    auto now = _opCtx->getServiceContext()->getPreciseClockSource()->now();
+    if (_responseDeadlineType == ResponseDeadlineType::kInterruptWork) {
+        tassert(
+            10290002,
+            "Expected 'operationResponseMaxMS' to be set to a value > 0 if response deadline type "
+            "is 'kInterruptWork'",
+            _operationResponseMaxMS > 0);
+
+        // Use configured operation response timeout as the response deadline. If the
+        // response deadline is reached, the executor will return whatever results it has
+        // accumulated plus an updated PBRT to the consumer.
+        return now + Milliseconds(_operationResponseMaxMS);
+    }
+
+    // Use hard-coded response deadline to inform the user about a long-running oplog scan at
+    // most once per change stream query.
+    tassert(10290003,
+            "Expected response deadline type to be 'kLogInfoMessage'",
+            _responseDeadlineType == ResponseDeadlineType::kLogInfoMessage);
+    return now + kLongOperationResponseLogInfoDeadline;
 }
 
-void PlanExecutorImpl::_handleNeedYield(size_t& writeConflictsInARow,
-                                        size_t& tempUnavailErrorsInARow) {
+void PlanExecutorImpl::_handleResponseDeadline() {
+    tassert(10290004,
+            "expecting response deadline type to be set",
+            _responseDeadlineType != ResponseDeadlineType::kNone);
+    tassert(10290005,
+            "expecting response deadline value to be set",
+            _responseDeadlineValue.has_value());
+
+    if (auto now = _opCtx->getServiceContext()->getPreciseClockSource()->now();
+        now < *_responseDeadlineValue) {
+        // There is a response deadline, but it has not been reached.
+        return;
+    }
+
+    if (_responseDeadlineType == ResponseDeadlineType::kInterruptWork) {
+        // Mark as softly interrupted so we exit the work loop directly after yielding. Also cancel
+        // any outstanding awaitData waits.
+        _interrupted = true;
+        awaitDataState(_opCtx).shouldWaitForInserts = false;
+
+        LOGV2_DEBUG(
+            10290000, 3, "Interrupting long-running collection scan after configured deadline");
+    } else if (_responseDeadlineType == ResponseDeadlineType::kLogInfoMessage) {
+        // Avoid logging the same message again for this executor.
+        _responseDeadlineType = ResponseDeadlineType::kNone;
+        _responseDeadlineValue.reset();
+        LOGV2_DEBUG(10290001,
+                    longCollectionScanLogSeveritySuppressor().toInt(),
+                    "Long-running collection scan detected for query. This message will only be "
+                    "logged once per query. Set the value of the 'operationResponseMaxMS' "
+                    "server parameter to periodically return updates from long-running operations "
+                    "and prevent timeouts. See the documentation for more details: "
+                    "https://docs.mongodb.com/manual/reference/parameters/"
+                    "#param.operationResponseMaxMS");
+    }
+}
+
+void PlanExecutorImpl::_handleNeedYield(WriteConflictRetryState& retryState) {
     invariant(shard_role_details::getRecoveryUnit(_opCtx));
 
     if (_expCtx->getTemporarilyUnavailableException()) {
@@ -511,16 +613,16 @@ void PlanExecutorImpl::_handleNeedYield(size_t& writeConflictsInARow,
                 "auto-yield");
         }
 
-        tempUnavailErrorsInARow++;
+        retryState.tempUnavailErrorsInARow++;
         handleTemporarilyUnavailableException(
             _opCtx,
-            tempUnavailErrorsInARow,
+            retryState.tempUnavailErrorsInARow,
             "plan executor",
             NamespaceStringOrUUID(_nss),
             Status(ErrorCodes::TemporarilyUnavailable, "temporarily unavailable"),
-            writeConflictsInARow);
+            retryState.writeConflictsInARow);
     } else if (!_oplogWaitConfig || !_oplogWaitConfig->waitedForOplogVisiblity()) {
-        // If we didn't wait for oplog visiblity, then we must be yielding because of a
+        // If we didn't wait for oplog visibility, then we must be yielding because of a
         // WriteConflictException.
         if (!_yieldPolicy->canAutoYield() ||
             MONGO_unlikely(skipWriteConflictRetries.shouldFail())) {
@@ -529,16 +631,22 @@ void PlanExecutorImpl::_handleNeedYield(size_t& writeConflictsInARow,
                 "disabled.");
         }
 
-        writeConflictsInARow++;
+        retryState.writeConflictsInARow++;
 
-        // Set this member variable to indicate that when we yield, after resources are
-        // relinquished, we should log and backoff.
-        if (internalQueryEnableWriteConflictBackoffWithoutTicket.load()) {
+        if (internalQueryEnableWriteConflictBackoffWithoutTicket.loadRelaxed()) {
             // Defer the logAndBackoff() call to the yield handler.
-            _writeConflictsInARowToLog = writeConflictsInARow;
+            _writeConflictsInARowToLog = retryState.writeConflictsInARow;
         } else {
-            // Do the log and backoff immediately, while we're holding the ticket.
-            logWriteConflictAndBackoff(writeConflictsInARow);
+            // Log and backoff immediately, while holding the ticket. Use the legacy stepped
+            // schedule here: the exponential ramp sleeps up to ~2x capMs, far too long to
+            // hold a ticket through.
+            if (MONGO_unlikely(planExecutorHangBeforeLogAndBackoff.shouldFail())) {
+                planExecutorHangBeforeLogAndBackoff.pauseWhileSet(_opCtx);
+            }
+            mongo::logWriteConflictAndBackoff(retryState.writeConflictsInARow,
+                                              "plan execution",
+                                              ""sv,
+                                              NamespaceStringOrUUID(_nss));
         }
     }
 
@@ -559,15 +667,26 @@ bool PlanExecutorImpl::_handleEOFAndExit(PlanStage::StageState code,
             PlanStage::IS_EOF == code);
     hangBeforeShouldWaitForInsertsIfFailpointEnabled(this);
 
-    // The !notifier check is necessary because shouldWaitForInserts can return 'true' when
-    // shouldListenForInserts returned 'false' (above) in the case of a deadline becoming
-    // "unexpired" due to the system clock going backwards.
-    if (!notifier ||
-        !insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
+    if (!insert_listener::shouldListenForInserts(_opCtx, _cq.get())) {
+        return true;
+    }
+
+    if (!insert_listener::shouldWaitForInserts(_opCtx, _cq.get(), _yieldPolicy.get())) {
         // Time to exit.
         return true;
     }
 
+    // Create the notifier lazily the first time we are about to wait, and reuse it on subsequent
+    // EOFs within this call so the two-EOF version comparison works. Because shouldWaitForInserts
+    // implies shouldListenForInserts, makeNotifier() is guaranteed to return a non-null notifier
+    // here, so the previous separate !notifier guard (which existed only to handle construction
+    // and the wait-decision happening at different times) is no longer needed.
+    if (!notifier) {
+        notifier =
+            insert_listener::getCappedInsertNotifier(_opCtx, _collection, _yieldPolicy.get());
+    }
+
+    invariant(notifier);
     insert_listener::waitForInserts(_opCtx, _yieldPolicy.get(), notifier);
     return false;
 }
@@ -586,14 +705,17 @@ size_t PlanExecutorImpl::getNextBatch(size_t batchSize, AppendBSONObjFn append) 
     const auto whileYieldingFn = [this]() {
         return doWaitDuringYield();
     };
-    auto notifier = makeNotifier();
+
+    // Capped insert notifier; created lazily in _handleEOFAndExit() the first time we actually
+    // need to wait, rather than on every call. See the comment in _getNextImpl().
+    std::unique_ptr<insert_listener::Notifier> notifier;
 
     WorkingSetID id = WorkingSet::INVALID_ID;
 
-    // The below are incremented on every WriteConflict or TemporarilyUnavailable error
-    // accordingly, and reset to 0 on any successful call to _root->work.
-    size_t writeConflictsInARow = 0;
-    size_t tempUnavailErrorsInARow = 0;
+    // Per-call retry state: streak counters incremented on every WriteConflict or
+    // TemporarilyUnavailable error accordingly, and reset to 0 on any successful call to
+    // _root->work.
+    WriteConflictRetryState retryState;
 
     size_t numResults = 0;
     BSONObj objOut;
@@ -614,8 +736,8 @@ size_t PlanExecutorImpl::getNextBatch(size_t batchSize, AppendBSONObjFn append) 
         PlanStage::StageState code = _root->work(&id);
 
         if (code != PlanStage::NEED_YIELD) {
-            writeConflictsInARow = 0;
-            tempUnavailErrorsInARow = 0;
+            retryState.writeConflictsInARow = 0;
+            retryState.tempUnavailErrorsInARow = 0;
         }
 
         if (code == PlanStage::ADVANCED) {
@@ -661,7 +783,7 @@ size_t PlanExecutorImpl::getNextBatch(size_t batchSize, AppendBSONObjFn append) 
             _checkIfKilled();
 
         } else if (code == PlanStage::NEED_YIELD) {
-            _handleNeedYield(writeConflictsInARow, tempUnavailErrorsInARow);
+            _handleNeedYield(retryState);
 
         } else if (code == PlanStage::NEED_TIME) {
             // Do nothing except reset counters; need more time.

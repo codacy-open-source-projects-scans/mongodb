@@ -6,7 +6,7 @@
  *
  * @tags: [
  *   requires_timeseries,
- *   # Requires all nodes to be running the latest binary.
+ *   # setFCV requires all nodes on the latest binary.
  *   multiversion_incompatible,
  *   # TODO (SERVER-104171) Remove the 'assumes_balancer_off' tag
  *   assumes_balancer_off,
@@ -19,6 +19,7 @@
 import {uniformDistTransitions} from "jstests/concurrency/fsm_workload_helpers/state_transition_utils.js";
 import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
 import {isShardedTimeseries} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {setFCVWithRetryOnBackgroundOpInProgress} from "jstests/libs/set_fcv_helpers.js";
 
 export const $config = (function () {
     const indexSpec = {temp: 1};
@@ -31,7 +32,9 @@ export const $config = (function () {
             const targetFCV = fcvValues[Random.randInt(2)];
             jsTest.log.info("Executing FCV state, setting to:" + targetFCV);
             try {
-                assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
+                assert.commandWorked(
+                    db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}),
+                );
             } catch (e) {
                 if (handleRandomSetFCVErrors(e, targetFCV)) return;
                 throw e;
@@ -71,11 +74,14 @@ export const $config = (function () {
 
     const setup = function (db, collName, cluster) {
         db[collName].drop();
-        assert.commandWorked(db.createCollection(collName, {timeseries: {timeField: "t", metaField: "m"}}));
+        assert.commandWorked(
+            db.createCollection(collName, {timeseries: {timeField: "t", metaField: "m"}}),
+        );
         assert.commandWorked(db[collName].insert({t: new Date(), temp: 42}));
     };
     const teardown = function (db, collName, cluster) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+        // TODO(SERVER-114573): Remove once v9.0 is last LTS and viewless timeseries upgrade/downgrade doesn't happen.
+        setFCVWithRetryOnBackgroundOpInProgress(db, latestFCV);
     };
 
     return {

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/classic/multi_plan.h"
@@ -47,6 +20,7 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_insert_listener.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/restore_context.h"
@@ -63,6 +37,7 @@
 
 #include <deque>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional.hpp>
@@ -81,7 +56,7 @@ namespace mongo {
  */
 template <typename F, typename H>
 [[nodiscard]] PlanStage::StageState handlePlanStageYield(ExpressionContext* expCtx,
-                                                         StringData opStr,
+                                                         std::string_view opStr,
                                                          F&& f,
                                                          H&& yieldHandler) {
     auto opCtx = expCtx->getOperationContext();
@@ -134,6 +109,7 @@ class CappedInsertNotifier;
 class CollectionScan;
 struct CappedInsertNotifierData;
 
+
 class PlanExecutorImpl : public PlanExecutor {
     PlanExecutorImpl(const PlanExecutorImpl&) = delete;
     PlanExecutorImpl& operator=(const PlanExecutorImpl&) = delete;
@@ -156,7 +132,8 @@ public:
                      PlanYieldPolicy::YieldPolicy yieldPolicy,
                      boost::optional<size_t> cachedPlanHash,
                      boost::optional<std::string> replanReason,
-                     boost::optional<PlanExplainerData> maybeExplainData);
+                     boost::optional<PlanExplainerData> maybeExplainData,
+                     boost::optional<PlanSelectionStrategy> planSelectionStrategy = boost::none);
 
     ~PlanExecutorImpl() override;
     CanonicalQuery* getCanonicalQuery() const final;
@@ -227,7 +204,53 @@ public:
         return soln && soln->root()->hasNode(STAGE_DISTINCT_SCAN);
     }
 
+    /**
+     * Type of response deadlines, after which the executor should perform a specific task inside a
+     * lengthy getNext() operation. This can be used to interrupt lengthy getNext() operations
+     * without terminating the entire query. Currently only used for change stream queries. This
+     * type of deadline is softer than maxTimeMS, which will terminate the entire query when
+     * reached.
+     */
+    enum class ResponseDeadlineType {
+        // No special deadline for producing the getNext() response. Note that a maxTimeMS deadline
+        // will still be applied.
+        kNone,
+
+        // When set, interrupts the executor inside a lengthy getNext() operation when the deadline
+        // is reached, and returns its current response to the caller. This is used when the query
+        // knob 'operationResponseMaxMS' is set to a value > 0.
+        kInterruptWork,
+
+        // When set, logs an info message about a long-running execution when the deadline is
+        // reached. This is used for change stream queries when the query knob
+        // 'operationResponseMaxMS' is set to a value > 0. Once the message is logged, the
+        // deadline type is changed to kNone to avoid logging the message again for the
+        // same query.
+        kLogInfoMessage,
+    };
+
+    /**
+     * Period of time after which a change stream query will log a warning about a lengthy operation
+     * if the query knob 'operationResponseMaxMS' is set to a value > 0. The log message is
+     * currently only emitted for change stream queries, and at most once per query.
+     */
+    static constexpr auto kLongOperationResponseLogInfoDeadline = Seconds(90);
+
+    /**
+     * Returns the type of the currently installed response deadline for lengthy getNext()
+     * operations.
+     */
+    ResponseDeadlineType getResponseDeadlineType_forTest() const {
+        return _responseDeadlineType;
+    }
+
 private:
+    // Co-locates per-call state passed between the two work loops and _handleNeedYield.
+    struct WriteConflictRetryState {
+        size_t writeConflictsInARow = 0;
+        size_t tempUnavailErrorsInARow = 0;
+    };
+
     const QuerySolution* getQuerySolution() const {
         if (_qs) {
             return _qs.get();
@@ -240,8 +263,17 @@ private:
 
     ExecState _getNextImpl(Document* objOut, RecordId* dlOut);
 
+    // Calculates the value for the response deadline to be used. Returns boost::none if no
+    // response deadline is active.
+    boost::optional<Date_t> _calculateResponseDeadlineValue() const;
+
+    // Handles the configured response deadline. Expected '_responseDeadlineType' to be set to a
+    // value other than 'ResponseDeadlineType::kNone'. Can set '_interrupted' to true if the
+    // deadline is reached.
+    void _handleResponseDeadline();
+
     // Helper for handling the NEED_YIELD stage state.
-    void _handleNeedYield(size_t& writeConflictsInARow, size_t& tempUnavailErrorsInARow);
+    void _handleNeedYield(WriteConflictRetryState& retryState);
 
     // Helper for handling the EOF stage state. Returns whether or not to stop doing work().
     bool _handleEOFAndExit(PlanStage::StageState code,
@@ -276,8 +308,6 @@ private:
     void doWaitDuringYield();
     void logWriteConflictAndBackoff(size_t numAttempts);
 
-    std::unique_ptr<insert_listener::Notifier> makeNotifier();
-
     // The OperationContext that we're executing within. This can be updated if necessary by using
     // detachFromOperationContext() and reattachToOperationContext().
     OperationContext* _opCtx;
@@ -302,6 +332,27 @@ private:
 
     // Whether the executor must return owned BSON.
     bool _mustReturnOwnedBson;
+
+    // Whether the query requested recordId metadata. Fixed once planning completes.
+    const bool _mustSetRecordIdMetadata;
+
+    // If the current operation was "softly" interrupted. Will be set if a configured response
+    // deadline is reached. Cleared upon every 'reattachToOperationContext()' call.
+    bool _interrupted = false;
+
+    // The 'operationResponseMaxMS' knob value captured at construction. The knob is fixed for the
+    // query's lifetime, so it is cached here rather than re-read on every
+    // 'reattachToOperationContext' call, where the current opCtx may be foreign or absent (e.g.
+    // during cursor disposal).
+    long long _operationResponseMaxMS = 0;
+
+    // The currently used response deadline type.
+    ResponseDeadlineType _responseDeadlineType = ResponseDeadlineType::kNone;
+
+    // The date/time at which the executor should interrupts its work or logs a message about a
+    // lengthy operation ongoing. This currently only has an effect for change stream queries, but
+    // not for other queries.
+    boost::optional<Date_t> _responseDeadlineValue;
 
     // What namespace are we operating over?
     NamespaceString _nss;

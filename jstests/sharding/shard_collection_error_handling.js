@@ -3,13 +3,19 @@
  * needed to rollback or continue the operation.
  *
  * @tags: [
- *    requires_fcv_80
+ *    requires_fcv_80,
+ *    requires_persistence,
+ *    resource_intensive,
  * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
+
+// Dropping an untracked collection leaves an UNTRACKED CSS entry.
+// TODO (SERVER-133353): Remove this once UNTRACKED is dropped from CSS in direct connections.
+TestData.skipCheckMetadataConsistency = true;
 
 // Configure initial sharding cluster
 const st = new ShardingTest({
@@ -23,7 +29,9 @@ const st = new ShardingTest({
 
 const dbName = jsTestName();
 
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+);
 
 function testNonRetriableErrorInsideCommitPhase(createAsUnsharded) {
     const collName = "collA_" + (createAsUnsharded ? "createAsUnsharded" : "implicitCreate");
@@ -54,7 +62,9 @@ function testNonRetriableErrorInsideCommitPhase(createAsUnsharded) {
     // shardCollection request. This addZone is concurrent with the shardCollection, and it will be
     // effective before committing the new collection to the sharding catalog.
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "A_1"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {y: 0}, max: {y: 10}, zone: "A_1"}));
+    assert.commandWorked(
+        st.s.adminCommand({updateZoneKeyRange: ns, min: {y: 0}, max: {y: 10}, zone: "A_1"}),
+    );
 
     // Force a stepdown to make the coordinator being re-executed and calculate again all non
     // persisted variables, i.e. chunk distribution.
@@ -110,7 +120,10 @@ function testRetriableErrorWithoutInvolvingDBPrimaryShardAtSecondExecution(creat
     const collName = "collB_" + (createAsUnsharded ? "createAsUnsharded" : "implicitCreate");
     const ns = dbName + "." + collName;
 
-    jsTestLog("Testing retriable error without involving the db primary shard at second execution for " + ns);
+    jsTestLog(
+        "Testing retriable error without involving the db primary shard at second execution for " +
+            ns,
+    );
 
     if (createAsUnsharded) {
         st.s.getDB(dbName).createCollection(collName);
@@ -120,9 +133,13 @@ function testRetriableErrorWithoutInvolvingDBPrimaryShardAtSecondExecution(creat
 
     // Add a zone associated to each shard.
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "A_2"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "A_2"}));
+    assert.commandWorked(
+        st.s.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "A_2"}),
+    );
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard1.shardName, zone: "B_2"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "B_2"}));
+    assert.commandWorked(
+        st.s.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "B_2"}),
+    );
 
     // Start creating a new sharded collection in a parallel shell and hang before committing.
     const awaitShardCollection = startParallelShell(
@@ -140,7 +157,9 @@ function testRetriableErrorWithoutInvolvingDBPrimaryShardAtSecondExecution(creat
     // Remove the zone associated to the db primary shard, so on second execution it will not
     // receive any chunk.
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard1.shardName, zone: "A_2"}));
-    assert.commandWorked(st.s.adminCommand({removeShardFromZone: st.shard0.shardName, zone: "A_2"}));
+    assert.commandWorked(
+        st.s.adminCommand({removeShardFromZone: st.shard0.shardName, zone: "A_2"}),
+    );
 
     // Force a stepdown to make the coordinator being re-executed and calculate again all non
     // persisted variables, i.e. chunk distribution.
@@ -186,7 +205,10 @@ function testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(cre
     const collName = "collC_" + (createAsUnsharded ? "createAsUnsharded" : "implicitCreate");
     const ns = dbName + "." + collName;
 
-    jsTestLog("Testing retriable error without involving participant shards at second execution for " + ns);
+    jsTestLog(
+        "Testing retriable error without involving participant shards at second execution for " +
+            ns,
+    );
 
     if (createAsUnsharded) {
         st.s.getDB(dbName).createCollection(collName);
@@ -196,9 +218,13 @@ function testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(cre
 
     // Add a zone associated to each shard.
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "A_3"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "A_3"}));
+    assert.commandWorked(
+        st.s.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: 0}, zone: "A_3"}),
+    );
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard1.shardName, zone: "B_3"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "B_3"}));
+    assert.commandWorked(
+        st.s.adminCommand({updateZoneKeyRange: ns, min: {x: 0}, max: {x: MaxKey}, zone: "B_3"}),
+    );
 
     // Start creating a new sharded collection in a parallel shell and hang before committing.
     const awaitShardCollection = startParallelShell(
@@ -216,7 +242,9 @@ function testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(cre
     // Remove the zone associated to the db primary shard, so on second execution it will not
     // receive any chunk.
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "B_3"}));
-    assert.commandWorked(st.s.adminCommand({removeShardFromZone: st.shard1.shardName, zone: "B_3"}));
+    assert.commandWorked(
+        st.s.adminCommand({removeShardFromZone: st.shard1.shardName, zone: "B_3"}),
+    );
 
     // Force a stepdown to make the coordinator being re-executed and calculate again all non
     // persisted variables, i.e. chunk distribution.
@@ -266,7 +294,10 @@ testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(false /* cre
     assert.commandWorked(st.shard1.getCollection(ns).insert({x: "foo"}));
 
     // Validate that shardCollection will fail when trying to create the participant collection.
-    assert.commandFailedWithCode(st.s.adminCommand({shardCollection: ns, key: {x: "hashed"}}), ErrorCodes.InvalidUUID);
+    assert.commandFailedWithCode(
+        st.s.adminCommand({shardCollection: ns, key: {x: "hashed"}}),
+        ErrorCodes.InvalidUUID,
+    );
 
     // Validate that the collection still exists on shard1 because the shardCollection rollback has
     // not drop it.
@@ -278,7 +309,8 @@ testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(false /* cre
     );
     assert.eq(1, rs1Collections.cursor.firstBatch.length);
 
-    // Manually drop the collection to pass the metadata inconsistency hook.
+    // Manually drop the collection to pass the metadata inconsistency hook. Dropping an untracked
+    // collection leaves an UNTRACKED CSS entry.
     assert(st.shard1.getCollection(ns).drop());
 })();
 
@@ -286,16 +318,28 @@ testRetriableErrorWithoutInvolvingParticipantShardAtSecondExecution(false /* cre
     const collName = "collE";
     const ns = dbName + "." + collName;
 
-    jsTestLog("Testing shard collection living outside dbPrimary without chunks on the data shard for " + ns);
+    jsTestLog(
+        "Testing shard collection living outside dbPrimary without chunks on the data shard for " +
+            ns,
+    );
 
     // Create an unsplittable collection living outside the dbPrimary
     assert.commandWorked(
-        st.s.getDB(dbName).runCommand({createUnsplittableCollection: collName, dataShard: st.shard1.shardName}),
+        st.s
+            .getDB(dbName)
+            .runCommand({createUnsplittableCollection: collName, dataShard: st.shard1.shardName}),
     );
 
     // Create zones that will force the entire collection onto shard 0 (dbPrimary)
     assert.commandWorked(st.s.adminCommand({addShardToZone: st.shard0.shardName, zone: "E_1"}));
-    assert.commandWorked(st.s.adminCommand({updateZoneKeyRange: ns, min: {x: MinKey}, max: {x: MaxKey}, zone: "E_1"}));
+    assert.commandWorked(
+        st.s.adminCommand({
+            updateZoneKeyRange: ns,
+            min: {x: MinKey},
+            max: {x: MaxKey},
+            zone: "E_1",
+        }),
+    );
 
     // Shard the collection
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));

@@ -1,4 +1,9 @@
-import {getCBRConfig, setCBRConfig} from "jstests/libs/query/cbr_utils.js";
+/**
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
+ */
+import {getPlanRankerConfig, setPlanRankerConfig} from "jstests/libs/query/cbr_utils.js";
 
 const coll = db[jsTestName()];
 
@@ -35,6 +40,10 @@ function triviallyFalse() {
     if ("estimatesMetadata" in winningPlan) {
         assert.eq(winningPlan.estimatesMetadata.ceSource, "Code");
         assert.eq(winningPlan.cardinalityEstimate, 0);
+        // The EOF stage has a Code-sourced zero CE that clampZeroEstimates leaves at 0, so all
+        // costs collapse to zero. The additive per-stage minimum in the cost model still
+        // guarantees a strictly positive cost for the plan.
+        assert.gt(winningPlan.costEstimate, 0, winningPlan);
     }
     const res = coll.find({$expr: false}).toArray();
     assert.eq(res.length, 0);
@@ -48,7 +57,10 @@ function multiKey() {
     const query = () => coll.find().sort({a: 1});
     const winningPlan = query().explain("executionStats").queryPlanner.winningPlan;
     if ("estimatesMetadata" in winningPlan) {
-        assert.eq(winningPlan.estimatesMetadata.ceSource, "Sampling");
+        // With only one document in the collection the sampler observes every document, so
+        // SamplingEstimatorImpl::makeScaledEstimate tags the CE as 'Code' (authoritative)
+        // rather than 'Sampling'.
+        assert.eq(winningPlan.estimatesMetadata.ceSource, "Code");
         assert.eq(winningPlan.cardinalityEstimate, 1);
         assert.eq(winningPlan.stage, "FETCH");
         assert.eq(winningPlan.inputStage.numKeysEstimate, 2);
@@ -58,18 +70,25 @@ function multiKey() {
     assert.eq(res.length, 1);
 }
 
-const oldCBRConfig = getCBRConfig(db);
+const oldCBRConfig = getPlanRankerConfig(db);
 
 try {
-    for (const mode of ["automaticCE", "samplingCE"]) {
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: mode}),
-        );
+    const configs = [
+        {featureFlagCostBasedRanker: true, internalQueryPlanRanker: "mixed"},
+        {
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "samplingCE",
+        },
+    ];
+
+    for (const config of configs) {
+        setPlanRankerConfig(db, config);
 
         triviallyTrue();
         triviallyFalse();
         multiKey();
     }
 } finally {
-    setCBRConfig(db, oldCBRConfig);
+    setPlanRankerConfig(db, oldCBRConfig);
 }

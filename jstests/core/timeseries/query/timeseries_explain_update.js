@@ -2,6 +2,7 @@
  * Tests whether the explain works for a single update operation on a timeseries collection.
  *
  * @tags: [
+ *   uses_explain,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   featureFlagTimeseriesUpdatesSupport,
@@ -22,7 +23,11 @@ import {
 } from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {getExecutionStages, getPlanStage} from "jstests/libs/query/analyze_plan.js";
+import {
+    getExecutionStages,
+    getPlanStage,
+    getWinningPlanFromExplain,
+} from "jstests/libs/query/analyze_plan.js";
 
 const dateTime = ISODate("2021-07-12T16:00:00Z");
 
@@ -63,10 +68,18 @@ function testUpdateExplain({
     const innerUpdateCommand = {update: coll.getName(), updates: [singleUpdateOp]};
     const updateExplainPlanCommand = {explain: innerUpdateCommand, verbosity: "queryPlanner"};
     let explain = assert.commandWorked(testDB.runCommand(updateExplainPlanCommand));
-    const updateStage = getPlanStage(explain.queryPlanner.winningPlan, expectedUpdateStageName);
-    assert.neq(null, updateStage, `${expectedUpdateStageName} stage not found in the plan: ${tojson(explain)}`);
+    const updateStage = getPlanStage(getWinningPlanFromExplain(explain), expectedUpdateStageName);
+    assert.neq(
+        null,
+        updateStage,
+        `${expectedUpdateStageName} stage not found in the plan: ${tojson(explain)}`,
+    );
     if (expectedUpdateStageName === "TS_MODIFY") {
-        assert.eq(expectedOpType, updateStage.opType, `TS_MODIFY opType is wrong: ${tojson(updateStage)}`);
+        assert.eq(
+            expectedOpType,
+            updateStage.opType,
+            `TS_MODIFY opType is wrong: ${tojson(updateStage)}`,
+        );
         assert.eq(
             expectedBucketFilter,
             updateStage.bucketFilter,
@@ -78,14 +91,22 @@ function testUpdateExplain({
             `TS_MODIFY residualFilter is wrong: ${tojson(updateStage)}`,
         );
     } else {
-        const collScanStage = getPlanStage(explain.queryPlanner.winningPlan, "COLLSCAN");
+        const collScanStage = getPlanStage(getWinningPlanFromExplain(explain), "COLLSCAN");
         assert.neq(null, collScanStage, `COLLSCAN stage not found in the plan: ${tojson(explain)}`);
-        assert.eq(expectedBucketFilter, collScanStage.filter, `COLLSCAN filter is wrong: ${tojson(collScanStage)}`);
+        assert.eq(
+            expectedBucketFilter,
+            collScanStage.filter,
+            `COLLSCAN filter is wrong: ${tojson(collScanStage)}`,
+        );
     }
 
     if (expectedUsedIndexName) {
-        const ixscanStage = getPlanStage(explain.queryPlanner.winningPlan, "IXSCAN");
-        assert.eq(expectedUsedIndexName, ixscanStage.indexName, `Wrong index used: ${tojson(ixscanStage)}`);
+        const ixscanStage = getPlanStage(getWinningPlanFromExplain(explain), "IXSCAN");
+        assert.eq(
+            expectedUsedIndexName,
+            ixscanStage.indexName,
+            `Wrong index used: ${tojson(ixscanStage)}`,
+        );
     }
 
     // Verifies the TS_MODIFY stage in the execution stats.
@@ -120,11 +141,23 @@ function testUpdateExplain({
             `Got wrong nBucketsUnpacked: ${tojson(execStages[0])}`,
         );
     } else {
-        assert.eq(expectedNumUpdated, execStages[0].nWouldModify, `Got wrong nWouldModify: ${tojson(execStages[0])}`);
-        assert.eq(expectedNumMatched, execStages[0].nMatched, `Got wrong nMatched: ${tojson(execStages[0])}`);
+        assert.eq(
+            expectedNumUpdated,
+            execStages[0].nWouldModify,
+            `Got wrong nWouldModify: ${tojson(execStages[0])}`,
+        );
+        assert.eq(
+            expectedNumMatched,
+            execStages[0].nMatched,
+            `Got wrong nMatched: ${tojson(execStages[0])}`,
+        );
     }
 
-    assert.sameMembers(docs, coll.find().toArray(), "Explain command must not touch documents in the collection");
+    assert.sameMembers(
+        docs,
+        coll.find().toArray(),
+        "Explain command must not touch documents in the collection",
+    );
 }
 
 (function testUpdateManyWithEmptyQuery() {
@@ -154,7 +187,10 @@ function testUpdateExplain({
         },
         expectedUpdateStageName: "TS_MODIFY",
         expectedOpType: "updateMany",
-        expectedBucketFilter: makeBucketFilter({meta: {$eq: 2}}, {"control.max._id": {$_internalExprGte: 3}}),
+        expectedBucketFilter: makeBucketFilter(
+            {meta: {$eq: 2}},
+            {"control.max._id": {$_internalExprGte: 3}},
+        ),
         expectedResidualFilter: {_id: {$gte: 3}},
         expectedNumUpdated: 0,
         expectedNumMatched: 2,
@@ -177,7 +213,10 @@ function testUpdateExplain({
         expectedBucketFilter: makeBucketFilter(
             {meta: {$eq: 2}},
             {
-                $and: [{"control.min._id": {$_internalExprLte: 3}}, {"control.max._id": {$_internalExprGte: 3}}],
+                $and: [
+                    {"control.min._id": {$_internalExprLte: 3}},
+                    {"control.max._id": {$_internalExprGte: 3}},
+                ],
             },
         ),
         expectedResidualFilter: {_id: {$eq: 3}},
@@ -188,7 +227,7 @@ function testUpdateExplain({
 })();
 
 // Skip upsert tests in sharding as the query has to be on the shard key field.
-if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
+if (!db.getMongo().isMongos()) {
     (function testUpsert() {
         testUpdateExplain({
             singleUpdateOp: {
@@ -240,7 +279,10 @@ if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
         expectedUpdateStageName: "TS_MODIFY",
         expectedOpType: "updateOne",
         expectedBucketFilter: makeBucketFilter({
-            $and: [{"control.min._id": {$_internalExprLte: 3}}, {"control.max._id": {$_internalExprGte: 3}}],
+            $and: [
+                {"control.min._id": {$_internalExprLte: 3}},
+                {"control.max._id": {$_internalExprGte: 3}},
+            ],
         }),
         expectedResidualFilter: {_id: {$eq: 3}},
         expectedNumUpdated: 1,
@@ -259,7 +301,10 @@ if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
         },
         expectedUpdateStageName: "TS_MODIFY",
         expectedOpType: "updateOne",
-        expectedBucketFilter: makeBucketFilter({meta: {$eq: 2}}, {"control.max._id": {$_internalExprGte: 1}}),
+        expectedBucketFilter: makeBucketFilter(
+            {meta: {$eq: 2}},
+            {"control.max._id": {$_internalExprGte: 1}},
+        ),
         expectedResidualFilter: {_id: {$gte: 1}},
         expectedNumUpdated: 1,
         expectedNumUnpacked: 1,
@@ -278,7 +323,10 @@ if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
         },
         expectedUpdateStageName: "TS_MODIFY",
         expectedOpType: "updateOne",
-        expectedBucketFilter: makeBucketFilter({meta: {$eq: 2}}, {"control.max._id": {$_internalExprGte: 1}}),
+        expectedBucketFilter: makeBucketFilter(
+            {meta: {$eq: 2}},
+            {"control.max._id": {$_internalExprGte: 1}},
+        ),
         expectedResidualFilter: {_id: {$gte: 1}},
         expectedNumUpdated: 1,
         expectedNumUnpacked: 1,

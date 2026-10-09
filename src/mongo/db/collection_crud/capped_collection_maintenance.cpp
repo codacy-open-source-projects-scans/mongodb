@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/collection_crud/capped_collection_maintenance.h"
 
@@ -120,36 +94,8 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
     invariant(shard_role_details::getLocker(opCtx)->getLockMode(
                   ResourceId(RESOURCE_METADATA, nss)) == MODE_X);
 
-    long long currentDataSize;
-    long long currentNumRecords;
-
-    const bool latestSizeCountEnabled =
-        gFeatureFlagReplicatedFastCountDurability.isEnabledUseLatestFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    // TODO(SERVER-125506): Remove latestSizeCountEnabled, the entire if-else statement, and the
-    // declaration of currentDataSize and currentNumRecords. See SERVER-123334 for the concise
-    // version of this code.
-    if (latestSizeCountEnabled && isReplicatedFastCountEnabled(opCtx)) {
-        // When writes are batched, the capped collection insert is not written to the oplog until
-        // the top-level WriteUnitOfWork commits. When writes are not batched, the capped collection
-        // insert is written to the oplog immediately. latestSizeCount() scans the oplog to compute
-        // the latest collection size/count, so it misses the latest insert when writes are batched.
-        // To correctly compute currentDataSize and currentNumRecords, we include the uncommitted
-        // size/count changes if and only if writes are batched.
-        const bool batched = BatchedWriteContext::get(opCtx).writesAreBatched();
-        const CollectionSizeCount uncommittedChanges = (batched)
-            ? UncommittedFastCountChange::getForRead(opCtx).find(collection->uuid())
-            : CollectionSizeCount{.size = 0, .count = 0};
-
-        const auto [latestSize, latestCount] = collection->latestSizeCount(opCtx);
-
-        currentDataSize = latestSize + uncommittedChanges.size;
-        currentNumRecords = latestCount + uncommittedChanges.count;
-    } else {
-        currentDataSize = collection->dataSize(opCtx);
-        currentNumRecords = collection->numRecords(opCtx);
-    }
+    const long long currentDataSize = collection->dataSize(opCtx);
+    const long long currentNumRecords = collection->numRecords(opCtx);
 
     const auto cappedMaxSize = collection->getCollectionOptions().cappedSize;
     const long long sizeOverCap =
@@ -241,8 +187,13 @@ void cappedDeleteUntilBelowConfiguredMaximum(OperationContext* opCtx,
     }
 
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChange::getForWrite(opCtx).record(
-            collection->ns(), collection->uuid(), -docsRemoved, -sizeSaved);
+        UncommittedFastCountChanges::getForWrite(opCtx).record(
+            collection->ns(),
+            collection->uuid(),
+            UncommittedFastCountChange{
+                .delta = {.size = -sizeSaved, .count = -docsRemoved},
+                .recordStore = collection->getRecordStore(),
+            });
     }
 
     // Update the next record to be deleted. The next record must exist as we're using the same

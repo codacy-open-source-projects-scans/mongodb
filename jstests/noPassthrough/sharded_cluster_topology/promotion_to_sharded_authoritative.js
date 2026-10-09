@@ -3,9 +3,7 @@
  *   # This test is incompatible with 'config shard' as it creates a cluster with 0 shards in order
  *   # to be able to add shard with data on it (which is only allowed on the first shard).
  *   config_shard_incompatible,
- *   featureFlagShardAuthoritativeDbMetadataDDL,
- *   featureFlagShardAuthoritativeDbMetadataCRUD,
- *   requires_replicated_fast_count_recovery,
+ *   requires_fcv_90,
  *   # This test restarts the server and requires that data persists across restarts.
  *   requires_persistence,
  * ]
@@ -37,7 +35,10 @@ describe("Promote replica set to shard adds authoritative data", function () {
         };
 
         this.getDbMetadataFromShardCatalog = function (dbName) {
-            return this.rs1.getPrimary().getDB("config").shard.catalog.databases.findOne({_id: dbName});
+            return this.rs1
+                .getPrimary()
+                .getDB("config")
+                .shard.catalog.databases.findOne({_id: dbName});
         };
 
         this.validateShardCatalogCache = function (dbName, shard, expectedDbMetadata) {
@@ -61,6 +62,14 @@ describe("Promote replica set to shard adds authoritative data", function () {
         const configMeta = this.getDbMetadataFromGlobalCatalog("TestDB");
         assert.neq({}, dbMeta);
         assert.eq(dbMeta, configMeta);
+    });
+
+    it("check shard-local authoritative catalog exists after promotion", () => {
+        const configDB = this.rs1.getPrimary().getDB("config");
+        const colls = configDB.getCollectionNames();
+        assert.contains("shard.catalog.collections", colls);
+        assert.contains("shard.catalog.chunks", colls);
+        assert.gt(configDB["shard.catalog.chunks"].getIndexes().length, 1);
     });
 
     it("check shard catalog cache", () => {
@@ -114,6 +123,10 @@ describe("Promote replica set to embedded config server adds authoritative data"
                         remember: false,
                     });
                 });
+                // Wait for this secondary to complete initial sync before stopping the next.
+                // Otherwise both secondaries can get stuck waiting for the primary's stable
+                // timestamp to advance while the primary no longer has a majority.
+                rs.awaitSecondaryNodes(rs.timeoutMS, [rs.nodes[id]]);
             }
             const primaryId = rs.getNodeId(rs.getPrimary());
             const secondary = rs.getSecondary();
@@ -170,7 +183,9 @@ describe("Promote replica set to embedded config server adds authoritative data"
 
         this.mongos = MongoRunner.runMongos({configdb: this.configRS.getURL()});
 
-        assert.commandWorked(this.mongos.getDB("admin").runCommand({"transitionFromDedicatedConfigServer": 1}));
+        assert.commandWorked(
+            this.mongos.getDB("admin").runCommand({"transitionFromDedicatedConfigServer": 1}),
+        );
         this.configRS.awaitReplication();
 
         this.getDbMetadataFromGlobalCatalog = function (dbName) {
@@ -178,7 +193,10 @@ describe("Promote replica set to embedded config server adds authoritative data"
         };
 
         this.getDbMetadataFromShardCatalog = function (dbName) {
-            return this.configRS.getPrimary().getDB("config").shard.catalog.databases.findOne({_id: dbName});
+            return this.configRS
+                .getPrimary()
+                .getDB("config")
+                .shard.catalog.databases.findOne({_id: dbName});
         };
 
         this.validateShardCatalogCache = function (dbName, shard, expectedDbMetadata) {

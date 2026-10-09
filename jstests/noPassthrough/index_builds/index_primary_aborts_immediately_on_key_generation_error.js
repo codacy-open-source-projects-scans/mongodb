@@ -14,7 +14,7 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
-import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_file_export_helpers.js";
+import {otelFileExportParams} from "jstests/noPassthrough/observability/libs/otel_metrics_file_export_helpers.js";
 import {waitForIndexStatusMetrics} from "jstests/noPassthrough/index_builds/libs/index_build_otel_utils.js";
 
 const {metricsDir, otelParams} = otelFileExportParams(jsTestName());
@@ -72,14 +72,20 @@ const baselineMetrics = waitForIndexStatusMetrics(
 // Set the failpoint after the collection scan phase. It is expected that we never hit this
 // failpoint due to the immediate index build failure. If this is hit, it will hang the test
 // indefinitely.
-const failpointHangAfterScan = configureFailPoint(testDB, "hangAfterIndexBuildDumpsInsertsFromBulk");
+const failpointHangAfterScan = configureFailPoint(
+    testDB,
+    "hangAfterIndexBuildDumpsInsertsFromBulk",
+);
 
 // Block the primary from actually aborting and replicating the 'abortIndexBuild', to give time for
 // the secondary to finish the scan.
 const failpointBeforeAbort = configureFailPoint(testDB, "hangIndexBuildBeforeAbortCleanUp");
 
 // The secondary should continue to the next index build phase after suppressing the error.
-const failpointHangAfterScanSecondary = configureFailPoint(secondaryDB, "hangAfterIndexBuildDumpsInsertsFromBulk");
+const failpointHangAfterScanSecondary = configureFailPoint(
+    secondaryDB,
+    "hangAfterIndexBuildDumpsInsertsFromBulk",
+);
 
 // Create the index and start the build.
 const createIdx = IndexBuildTest.startIndexBuild(
@@ -87,7 +93,7 @@ const createIdx = IndexBuildTest.startIndexBuild(
     coll.getFullName(),
     {geometry: "2dsphere"},
     {},
-    [16755],
+    [ErrorCodes.GeoKeyExtractionFailed],
     /*commitQuorum: */ 2,
 );
 

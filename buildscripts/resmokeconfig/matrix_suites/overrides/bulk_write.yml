@@ -1,6 +1,6 @@
 - name: single_op_override
   value:
-    eval: await import('jstests/libs/override_methods/single_crud_op_as_bulk_write.js');
+    eval: await import('jstests/libs/override_methods/query/single_crud_op_as_bulk_write.js');
 
 - name: causal_consistency
   value:
@@ -28,11 +28,17 @@
       - jstests/core/testing/failcommand_failpoint.js
       # This test adds unknown fields to insert/update/delete ops which we ignore
       - jstests/core/query/parsing/write_commands_reject_unknown_fields.js
+      # These assert the insert command's writeError shape, which bulkWrite does not produce.
+      - jstests/core/index/geo/geo_key_extraction_failure.js
+      - jstests/core/timeseries/geo/geo_key_extraction_failure_timeseries.js
       # Expects explain to fail for using UUID instead of collection name.
       - jstests/core/query/explain/explain_uuid.js
       # Checks for specific name in the command that was executed that we override.
       - jstests/core/query/explain/explain_includes_command.js
       - jstests/core/query/distinct/distinct_collator.js
+      # TODO(SERVER-93922): enable this test once bulkWrite trims
+      # the overhead it introduces in the command object.
+      - jstests/core/query/bson_size_limit_agg.js
 
 - name: single_op_txns_excluded_files
   value:
@@ -57,14 +63,6 @@
       # This file is an end to end test for both CSFLE and QE. CSFLE is not supported in bulk_write mode,
       # and any writes performed are simply for setting up the test collection.
       - src/mongo/db/modules/enterprise/jstests/fle2/query/aggregate_lookupMultiSchema.js
-
-# TODO (SERVER-121474) - Remove this override once bulkWrite attaches errorLabels for transient
-# transaction errors in FLE operations.
-- name: sharding_temporarily_enforce_1_mongos
-  value:
-    executor:
-      fixture:
-        num_mongos: 1
 
 - name: txn_passthrough_runner_selftest
   value:

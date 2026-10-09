@@ -1,44 +1,73 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/remove_shard_commit_coordinator.h"
 
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_gen.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/namespace_string_util.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/collection_sharding_state.h"
+#include "mongo/db/shard_role/shard_catalog/commit_collection_metadata_locally.h"
+#include "mongo/db/shard_role/shard_catalog/commit_database_metadata_locally.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_runtime.h"
+#include "mongo/db/shard_role/shard_catalog/database_sharding_state.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/db/topology/remove_shard_exception.h"
 #include "mongo/db/topology/topology_change_helpers.h"
+#include "mongo/util/serialization_context.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
+
+namespace {
+
+void deleteAllDocumentsFromCollection(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      BSONObj filter = BSONObj()) {
+    DBDirectClient client(opCtx);
+    write_ops::DeleteCommandRequest deleteOp(nss);
+    deleteOp.setDeletes({[&] {
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(std::move(filter));
+        entry.setMulti(true);
+        return entry;
+    }()});
+    deleteOp.setWriteConcern(defaultMajorityWriteConcern());
+    write_ops::checkWriteErrors(client.remove(std::move(deleteOp)));
+}
+
+void dropShardCatalogMetadata(OperationContext* opCtx,
+                              AuthoritativeMetadataAccessLevelEnum accessLevel) {
+    LOGV2(9194400, "Dropping shard catalog metadata before shard removal");
+
+    const auto& sessionsNss = NamespaceString::kLogicalSessionsNamespace;
+    const auto sessionsNssSerialized =
+        NamespaceStringUtil::serialize(sessionsNss, SerializationContext::stateDefault());
+    const BSONObj allButSessionsNssFilter =
+        BSON(CollectionType::kNssFieldName << BSON("$ne" << sessionsNssSerialized));
+
+    deleteAllDocumentsFromCollection(opCtx, NamespaceString::kConfigShardCatalogDatabasesNamespace);
+    // Excluding config.system.sessions collection entries from being removed from shard catalog
+    // since removing them, can cause config server to enter invalid state after transitioning
+    // to dedicated and back to embedded, marking it as kUnknown, while still the DB primary shard.
+    deleteAllDocumentsFromCollection(
+        opCtx, NamespaceString::kConfigShardCatalogCollectionsNamespace, allButSessionsNssFilter);
+    deleteAllDocumentsFromCollection(opCtx, NamespaceString::kConfigShardCatalogChunksNamespace);
+
+    if (accessLevel >= AuthoritativeMetadataAccessLevelEnum::kWritesAllowed) {
+        shard_catalog_commit::commitInvalidateAllDatabaseMetadata(opCtx);
+        shard_catalog_commit::commitInvalidateAllCollectionMetadata(opCtx);
+    }
+}
+
+}  // namespace
 
 ExecutorFuture<void> RemoveShardCommitCoordinator::_runImpl(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
@@ -138,13 +167,19 @@ void RemoveShardCommitCoordinator::_setReplicaSetNameOnDocument(OperationContext
 void RemoveShardCommitCoordinator::_joinMigrationsAndCheckRangeDeletions(OperationContext* opCtx) {
     topology_change_helpers::joinMigrations(opCtx);
     // The config server may be added as a shard again, so we locally drop its drained
-    // sharded collections to enable that without user intervention. We only wait for
-    // orphanCleanupDelaySecs as a best effort since creation of latest non pending range deletion
-    // task. Any ongoing queries on primary or secondary from older chunk metadata will throw with
-    // QueryPlanKilled error and can be retried by the user.
-    auto task = topology_change_helpers::getLatestNonProcessingRangeDeletionTask(opCtx);
-    if (task) {
-        topology_change_helpers::checkOrphanCleanupDelayElapsed(opCtx, *task);
+    // sharded collections to enable that without user intervention. But we have to wait for
+    // the range deleter to quiesce to give queries and stale routers time to discover the
+    // migration, to match the usual probabilistic guarantees for migrations.
+    auto pendingRangeDeletions = topology_change_helpers::getRangeDeletionCount(opCtx);
+    if (pendingRangeDeletions > 0) {
+        LOGV2(9782400,
+              "removeShard: waiting for range deletions",
+              "pendingRangeDeletions"_attr = pendingRangeDeletions);
+        RemoveShardProgress progress(ShardDrainingStateEnum::kPendingDataCleanup);
+        progress.setPendingRangeDeletions(pendingRangeDeletions);
+        uasserted(
+            RemoveShardDrainingInfo(progress),
+            "Range deletions must complete before transitioning to a dedicated config server.");
     }
 }
 
@@ -183,7 +218,7 @@ void RemoveShardCommitCoordinator::_checkShardIsEmpty(OperationContext* opCtx) {
 
 void RemoveShardCommitCoordinator::_dropLocalCollections(OperationContext* opCtx) {
     auto trackedDbs = ShardingCatalogManager::get(opCtx)->localCatalogClient()->getAllDBs(
-        opCtx, repl::ReadConcernLevel::kLocalReadConcern);
+        opCtx, repl::ReadConcernArgs::kLocal);
 
     if (auto pendingCleanupState = topology_change_helpers::dropLocalCollectionsAndDatabases(
             opCtx, trackedDbs, _doc.getShardId().toString())) {
@@ -192,18 +227,18 @@ void RemoveShardCommitCoordinator::_dropLocalCollections(OperationContext* opCtx
     }
 
     DBDirectClient client(opCtx);
-    BSONObj sessionsResult;
+    BSONObj result;
     if (!client.dropCollection(NamespaceString::kLogicalSessionsNamespace,
                                ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-                               &sessionsResult)) {
-        uassertStatusOK(getStatusFromCommandResult(sessionsResult));
+                               &result)) {
+        uassertStatusOK(getStatusFromCommandResult(result));
     }
 
-    BSONObj rangeDeletionsResult;
-    if (!client.dropCollection(NamespaceString::kRangeDeletionNamespace,
-                               ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-                               &rangeDeletionsResult)) {
-        uassertStatusOK(getStatusFromCommandResult(rangeDeletionsResult));
+    if (_doc.getIsTransitionToDedicated()) {
+        // Once the config server is no longer a shard, its local shard catalog must not retain
+        // authoritative ownership metadata. Clear both durable metadata and in-memory CSR/DSR state
+        // so stale entries cannot be reused if the config server is later re-added as a shard.
+        dropShardCatalogMetadata(opCtx, _doc.getAuthoritativeMetadataAccessLevel());
     }
 }
 

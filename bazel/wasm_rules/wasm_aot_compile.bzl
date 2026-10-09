@@ -1,4 +1,4 @@
-"""Rule to AOT-compile a WASM component using the wasmtime CLI by default.
+"""Rule to AOT-compile a WASM component using the wasmtime CLI.
 
 The wasmtime serialized format embeds engine configuration metadata. The tool
 that produces the .cwasm must be built with the same wasmtime library build
@@ -8,6 +8,12 @@ Default tool is the wasmtime CLI from the wasmtime-cli crate (see MODULE.bazel).
 The rule passes --target <triple> to wasmtime compile, where the triple comes
 from the Rust toolchain's target_triple (the platform we are building for).
 If you do not pass --target it will only work on the current machine you run it on.
+
+The CLI is built with all Cranelift architectures enabled, so IBM cross builds
+can compile the s390x target from an x86_64/ARM execution platform. That action
+is remote-first with a persistent-container fallback (see
+bazel/wrapper_hook/hermetic_container/cross/linux.py); the foreign-architecture
+CLI is never executed on an IBM host.
 """
 
 def _aot_compile_wasm_impl(ctx):
@@ -32,22 +38,21 @@ def _aot_compile_wasm_impl(ctx):
             "-o",
             output_file.path,
             "-C",
-            "cache=no",
+            "cache=no,cranelift-opt-level=speed",
             # -W sets wasmtime runtime options.
-            # Thes options must match the options we pass at
+            # These options must match the options we pass at
             # startup or else starting the module will throw.
             "-W",
-            "epoch-interruption=y",
+            "epoch-interruption=y,exceptions=y",
         ],
         mnemonic = "WasmAotCompile",
         progress_message = "AOT compiling %s" % input_file.short_path,
     )
 
-aot_compile_wasm = rule(
+_aot_compile_wasm_rule = rule(
     implementation = _aot_compile_wasm_impl,
     attrs = {
         "tool": attr.label(
-            default = Label("@crates//:wasmtime-cli__wasmtime"),
             executable = True,
             cfg = "exec",
             doc = "Executable that performs AOT compile (default: wasmtime CLI). Built for exec platform.",
@@ -64,3 +69,11 @@ aot_compile_wasm = rule(
     },
     toolchains = ["@rules_rust//rust:toolchain_type"],
 )
+
+def aot_compile_wasm(name, tool = "@crates//:wasmtime-cli__wasmtime", **kwargs):
+    """AOT compile with the Wasmtime CLI from the execution platform."""
+    _aot_compile_wasm_rule(
+        name = name,
+        tool = tool,
+        **kwargs
+    )

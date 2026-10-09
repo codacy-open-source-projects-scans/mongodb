@@ -1,38 +1,11 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/write_ops/parsed_update.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -53,6 +26,7 @@
 
 #include <map>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -83,6 +57,7 @@ const UpdateDriver* ParsedUpdate::getDriver() const {
 
 namespace parsed_update_command {
 namespace {
+using namespace std::literals::string_view_literals;
 
 Status parseQueryToParsedFindCommand(boost::intrusive_ptr<ExpressionContext> expCtx,
                                      ParsedUpdate& parsedUpdate) {
@@ -124,7 +99,6 @@ Status parseQuery(boost::intrusive_ptr<ExpressionContext> expCtx, ParsedUpdate& 
  */
 void parseUpdate(boost::intrusive_ptr<ExpressionContext> expCtx, ParsedUpdate& parsedUpdate) {
     parsedUpdate.driver->setCollator(expCtx->getCollator());
-    parsedUpdate.driver->setLogOp(true);
     parsedUpdate.driver->setFromOplogApplication(parsedUpdate.request->isFromOplogApplication());
 
     auto source = parsedUpdate.request->source();
@@ -170,7 +144,7 @@ Status parseRequest(boost::intrusive_ptr<ExpressionContext> expCtx, ParsedUpdate
                 str::stream() << "the parameter '"
                               << write_ops::UpdateOpEntry::kUpsertSuppliedFieldName
                               << "' is set to 'true', but no document was supplied",
-                constants && (*constants)["new"_sd].type() == BSONType::object);
+                constants && (*constants)["new"sv].type() == BSONType::object);
     }
 
     // It is invalid to request that a ProjectionStage be applied to the UpdateStage if the
@@ -188,7 +162,7 @@ Status parseRequest(boost::intrusive_ptr<ExpressionContext> expCtx, ParsedUpdate
         return statusWithArrayFilters.getStatus();
     }
     parsedUpdate.arrayFilters =
-        std::make_unique<std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>>>(
+        std::make_unique<std::map<std::string_view, std::unique_ptr<ExpressionWithPlaceholder>>>(
             std::move(statusWithArrayFilters.getValue()));
 
     expCtx->startExpressionCounters();

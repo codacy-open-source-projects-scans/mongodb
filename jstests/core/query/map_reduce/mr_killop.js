@@ -25,17 +25,21 @@ assert.commandWorked(db.adminCommand({configureFailPoint: "mr_killop_test_fp", m
 
 /** @return op code for map reduce op created by spawned shell. */
 function getOpCode() {
-    const inProg = db.currentOp().inprog;
+    let inProg;
+    // In add/remove shard suites, we use localOps to get the opId on the mongoS rather than the
+    // shard. This ensures that we don't end up with an opId for shard local operation on a shard
+    // that no longer exists.
+    if (TestData.hasRandomShardsAddedRemoved) {
+        inProg = db
+            .getSiblingDB("admin")
+            .aggregate([{$currentOp: {localOps: true}}])
+            .toArray();
+    } else {
+        inProg = db.currentOp().inprog;
+    }
 
     function isMapReduce(op) {
         if (!op.command) {
-            return false;
-        }
-
-        if (TestData.testingReplicaSetEndpoint && op.role == "ClusterRole{shard}") {
-            // On the replica set endpoint, currentOp reports both router and shard operations. To
-            // interrupt the mapReduce operation, the killOp command must be use the opId of the
-            // router mapReduce operation.
             return false;
         }
 
@@ -43,7 +47,8 @@ function getOpCode() {
         if (cmdBody.$truncated) {
             const stringifiedCmd = cmdBody.$truncated;
             return (
-                (stringifiedCmd.search("mapreduce") >= 0 || stringifiedCmd.search("aggregate") >= 0) &&
+                (stringifiedCmd.search("mapreduce") >= 0 ||
+                    stringifiedCmd.search("aggregate") >= 0) &&
                 stringifiedCmd.search(source.getName()) >= 0
             );
         }
@@ -86,7 +91,9 @@ function runTest(map, reduce, finalize, scope, wait) {
 
     // The assert below won't be caught by this test script, but it will cause error messages to be
     // printed.
-    const awaitShell = startParallelShell("assert.commandWorked( db.runCommand( " + stringifiedSpec + " ) );");
+    const awaitShell = startParallelShell(
+        "assert.commandWorked( db.runCommand( " + stringifiedSpec + " ) );",
+    );
 
     if (wait) {
         sleep(20);
@@ -102,7 +109,11 @@ function runTest(map, reduce, finalize, scope, wait) {
 
     // When the map reduce op is killed, the spawned shell will exit
     const exitCode = awaitShell({checkExitSuccess: false});
-    assert.neq(0, exitCode, "expected shell to exit abnormally due to map-reduce execution being terminated");
+    assert.neq(
+        0,
+        exitCode,
+        "expected shell to exit abnormally due to map-reduce execution being terminated",
+    );
     assert.eq(-1, getOpCode());
 }
 

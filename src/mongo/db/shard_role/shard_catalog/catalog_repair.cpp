@@ -1,43 +1,18 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/catalog_repair.h"
 
+#include "mongo/db/index_builds/primary_driven/enabled.h"
+#include "mongo/db/index_builds/resumable_index_builds_common.h"
+#include "mongo/db/shard_role/lock_manager/exception_util.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/db/shard_role/shard_catalog/durable_catalog.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/mdb_catalog.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/fail_point.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -45,9 +20,6 @@
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
 
 namespace mongo {
-
-MONGO_FAIL_POINT_DEFINE(failToParseResumeIndexInfo);
-
 namespace {
 /**
  * Returns whether the given ident is an internal ident and if it should be dropped or used to
@@ -82,41 +54,11 @@ bool identHandler(StorageEngine* engine,
     // When starting up after a clean shutdown and resumable index builds are supported, find the
     // internal idents that contain the relevant information to resume each index build and recover
     // the state.
-    auto rs = engine->getEngine()->getRecordStore(
-        opCtx, NamespaceString::kEmpty, ident, RecordStore::Options{}, boost::none /* uuid */);
-
-    auto cursor = rs->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
-    auto record = cursor->next();
-    if (record) {
-        auto doc = record.value().data.toBson();
-
-        // Parse the documents here so that we can restart the build if the document doesn't
-        // contain all the necessary information to be able to resume building the index.
-        ResumeIndexInfo resumeInfo;
-        try {
-            if (MONGO_unlikely(failToParseResumeIndexInfo.shouldFail())) {
-                uasserted(ErrorCodes::FailPointEnabled,
-                          "failToParseResumeIndexInfo fail point is enabled");
-            }
-
-            resumeInfo = ResumeIndexInfo::parse(doc, IDLParserContext("ResumeIndexInfo"));
-        } catch (const DBException& e) {
-            LOGV2(4916300, "Failed to parse resumable index info", "error"_attr = e.toStatus());
-
-            // Ignore the error so that we can restart the index build instead of resume it. We
-            // should drop the internal ident if we failed to parse.
-            return true;
-        }
-
-        LOGV2(4916301,
-              "Found unfinished index build to resume",
-              "buildUUID"_attr = resumeInfo.getBuildUUID(),
-              "collectionUUID"_attr = resumeInfo.getCollectionUUID(),
-              "phase"_attr = idl::serialize(resumeInfo.getPhase()));
-
+    auto resumeInfo = index_builds::readAndParseResumeIndexInfo(engine, opCtx, ident);
+    if (resumeInfo) {
         // Keep the tables that are needed to rebuild this index.
         // Note: the table that stores the rebuild metadata itself (i.e. |ident|) isn't kept.
-        for (const mongo::IndexStateInfo& idx : resumeInfo.getIndexes()) {
+        for (const mongo::IndexStateInfo& idx : resumeInfo->getIndexes()) {
             internalIdentsToKeep.insert(std::string{idx.getSideWritesTable()});
             if (idx.getDuplicateKeyTrackerTable()) {
                 internalIdentsToKeep.insert(std::string{*idx.getDuplicateKeyTrackerTable()});
@@ -126,7 +68,7 @@ bool identHandler(StorageEngine* engine,
             }
         }
 
-        reconcileResult->indexBuildsToResume.push_back(std::move(resumeInfo));
+        reconcileResult->indexBuildsToResume.push_back(std::move(*resumeInfo));
 
         return true;
     }
@@ -135,19 +77,24 @@ bool identHandler(StorageEngine* engine,
 }  // namespace
 
 namespace catalog_repair {
+using namespace std::literals::string_view_literals;
 
 /**
  * This method reconciles differences between idents the KVEngine is aware of and the
- * MDBCatalog. There are three differences to consider:
+ * MDBCatalog. There are four differences to consider:
  *
  * First, a KVEngine may know of an ident that the MDBCatalog does not. This method will drop
  * the ident from the KVEngine.
  *
  * Second, a MDBCatalog may have a collection ident that the KVEngine does not. This is an
- * illegal state and this method fasserts.
+ * illegal state and this method returns an error.
  *
- * Third, a MDBCatalog may have an index ident that the KVEngine does not. This method will
- * rebuild the index.
+ * Third, a MDBCatalog may have an index ident that the KVEngine does not. For ready indexes
+ * this method logs the inconsistency. Unfinished two-phase builds are returned to the caller
+ * for restart and other unfinished indexes are dropped, whether or not their idents exist.
+ *
+ * Fourth, a catalog entry may record no usable ident for an index it lists. This is an
+ * illegal state and this method returns an error.
  */
 StatusWith<StorageEngine::ReconcileResult> reconcileCatalogAndIdents(
     OperationContext* opCtx,
@@ -243,11 +190,9 @@ StatusWith<StorageEngine::ReconcileResult> reconcileCatalogAndIdents(
         }
     }
 
-    // Scan all indexes and return those in the catalog where the storage engine does not have the
-    // corresponding ident. The caller is expected to rebuild these indexes.
-    //
-    // Also, remove unfinished builds except those that were background index builds started on a
-    // secondary.
+    // Scan all indexes in the catalog. Every present index must record a usable ident.
+    // Unfinished two-phase builds are returned to the caller for restart; other unfinished
+    // indexes are dropped. A ready index whose ident the engine no longer has is logged.
     for (const MDBCatalog::EntryIdentifier& entry : catalogEntries) {
         const auto catalogEntry =
             durable_catalog::getParsedCatalogEntry(opCtx, entry.catalogId, mdbCatalog);
@@ -257,7 +202,36 @@ StatusWith<StorageEngine::ReconcileResult> reconcileCatalogAndIdents(
         std::vector<std::string> indexesToDrop;
         for (const auto& indexMetaData : md->indexes) {
             auto indexName = indexMetaData.nameStringData();
-            auto indexIdent = mdbCatalog->getIndexIdent(opCtx, entry.catalogId, indexName);
+            auto indexIdentElem = catalogEntry->indexIdents.getField(indexName);
+
+            // Every present index must have a non-empty ident. An empty string cannot be
+            // acted on by dropIdent or index build restart, so such an entry is corrupt
+            // and unsafe to start from (SERVER-128615).
+            if (!forRepair && indexMetaData.isPresent() &&
+                (indexIdentElem.type() != BSONType::string ||
+                 indexIdentElem.valueStringData().empty())) {
+                LOGV2_ERROR(12861500,
+                            "Index in catalog entry has no usable ident",
+                            logAttrs(md->nss),
+                            "index"_attr = indexName,
+                            "catalogId"_attr = entry.catalogId,
+                            "collectionIdent"_attr = entry.ident,
+                            "indexIdents"_attr = catalogEntry->indexIdents,
+                            "metadata"_attr = md->toBSON(),
+                            "lastShutdownState"_attr =
+                                (lastShutdownState == StorageEngine::LastShutdownState::kClean
+                                     ? "clean"sv
+                                     : "unclean"sv));
+                return {ErrorCodes::DataCorruptionDetected,
+                        str::stream()
+                            << "Expected index ident is missing from the catalog entry, "
+                               "indicating catalog corruption (SERVER-128725). Remediate by "
+                               "resyncing this node from a healthy replica set member or by "
+                               "restoring from a backup. Collection: "
+                            << md->nss.toStringForErrorMsg() << " Index: " << indexName};
+            }
+
+            const std::string indexIdent = indexIdentElem.str();
 
             // Warn in case of incorrect "multikeyPath" information in catalog documents. This is
             // the result of a concurrency bug which has since been fixed, but may persist in
@@ -343,18 +317,19 @@ StatusWith<StorageEngine::ReconcileResult> reconcileCatalogAndIdents(
                                     << md->nss.toStringForErrorMsg() << " Index: " << indexName);
         }
         if (indexesToDrop.size() > 0) {
-            WriteUnitOfWork wuow(opCtx);
-            CollectionWriter writer{opCtx, entry.nss};
-            auto collection = writer.getWritableCollection(opCtx);
-            invariant(collection->getCatalogId() == entry.catalogId);
-            collection->replaceMetadata(opCtx, std::move(md));
-            wuow.commit();
+            writeConflictRetry(opCtx, "dropUnfinishedIndexes", entry.nss, [&] {
+                WriteUnitOfWork wuow(opCtx);
+                CollectionWriter writer{opCtx, entry.nss};
+                auto collection = writer.getWritableCollection(opCtx);
+                invariant(collection->getCatalogId() == entry.catalogId);
+                collection->replaceMetadata(opCtx, md);
+                wuow.commit();
+            });
         }
     }
 
-    if (feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabledUseLastLTSFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+    if (index_builds::primary_driven::enabled(
+            opCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return reconcileResult;
     }
 

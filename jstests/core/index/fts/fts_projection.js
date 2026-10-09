@@ -1,5 +1,6 @@
 // Test $text with $textScore projection.
 // @tags: [
+//   uses_explain,
 //   assumes_read_concern_local,
 // ]
 
@@ -70,7 +71,9 @@ assert.throws(function () {
 // TODO: We can't project 'x.y':1 and 'x':1 (yet).
 
 // Clobber an existing field and behave nicely.
-results = t.find({$text: {$search: "textual content -irrelevant"}}, {b: {$meta: "textScore"}}).toArray();
+results = t
+    .find({$text: {$search: "textual content -irrelevant"}}, {b: {$meta: "textScore"}})
+    .toArray();
 assert.eq(2, results.length);
 for (var i = 0; i < results.length; ++i) {
     assert.close(
@@ -148,5 +151,11 @@ assert(!planHasStage(db, getWinningPlanFromExplain(explainOutput), "TEXT_OR"), e
 
 // Scores should exist.
 assert.eq(results.length, 2);
-assert(results[0].score, "invalid text score for " + tojson(results[0], "", true) + " when $text is in $or");
-assert(results[1].score, "invalid text score for " + tojson(results[0], "", true) + " when $text is in $or");
+assert(
+    results[0].score,
+    "invalid text score for " + tojson(results[0], "", true) + " when $text is in $or",
+);
+assert(
+    results[1].score,
+    "invalid text score for " + tojson(results[0], "", true) + " when $text is in $or",
+);

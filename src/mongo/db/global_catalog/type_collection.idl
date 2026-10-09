@@ -1,30 +1,5 @@
-# Copyright (C) 2020-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 
 global:
     cpp_namespace: "mongo"
@@ -119,6 +94,15 @@ structs:
 
                     If the flag is not present it defaults to true."
                 optional: true
+            allowChunkOperations:
+                type: bool
+                description:
+                    "Whether this collection allows running chunk operations, including migrations.
+                    It is required by almost all authoritative DDL operations in order to guarantee
+                    mutual exclusion between chunk operations and regular DDL operations.
+
+                    If the flag is not present it defaults to true."
+                optional: true
 
     CommonCollectionTypeBaseIncomparable:
         description:
@@ -128,28 +112,23 @@ structs:
             metadata verification.
         strict: false
         fields:
-            # TODO SERVER-124325: The resharding fields should ideally be stored exclusively in the global catalog.
-            reshardingFields:
-                type: TypeCollectionReshardingFields
-                description:
-                    "Resharding-related fields. Only set when this collection is either the
-                    original collection undergoing a resharding operation or this
-                    collection is the temporary resharding collection."
-                optional: true
-            # TODO SERVER-124326: The timeseries collection fields should ideally be stored exclusively in the global catalog.
+            # TODO (SERVER-128439): make TimeseriesOptions comparable via the IDL and move it to
+            # 'CommonCollectionTypeBase'.
             timeseriesFields:
                 type: TypeCollectionTimeseriesFields
                 description:
                     "Time-series collection fields. Only set when this is a time-series
                     buckets collection."
                 optional: true
-            # The time it was last updated at is never stored in memory, therefore making in-memory checks difficult if comparing
-            # against the durable state. We avoid using this for comparison purposes in consistency checks.
+            # The time it was last updated at is never stored in memory, therefore making in-memory
+            # checks difficult if comparing against the durable state.
+            # We avoid using this for comparison purposes in consistency checks.
             lastmod:
                 cpp_name: updatedAt
                 type: date
                 description: "Contains the time of when the collection was either created."
                 optional: false
+
     ShardCatalogCollectionTypeBase:
         description:
             "Represents the layout and contents of documents contained in the shard's
@@ -201,4 +180,11 @@ structs:
                     "DEPRECATED flag that determines wether this collection allows chunks to
                     move. This will only prevent migration from committing and new balancer
                     rounds, this flag will not be loaded by shards."
+                optional: true
+            reshardingFields:
+                type: TypeCollectionReshardingFields
+                description:
+                    "Resharding-related fields. Only set when this collection is either the
+                    original collection undergoing a resharding operation or this
+                    collection is the temporary resharding collection."
                 optional: true

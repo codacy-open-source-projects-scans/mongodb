@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 
 #include "mongo/bson/util/builder.h"
 
 #include <iosfwd>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 
@@ -43,18 +18,15 @@ RuntimeEnvironment::RuntimeEnvironment(const RuntimeEnvironment& other)
     }
 }
 
-RuntimeEnvironment::~RuntimeEnvironment() {
-    if (_state.use_count() == 1) {
-        for (size_t idx = 0; idx < _state->values.size(); ++idx) {
-            auto [owned, tag, val] = _state->values[idx];
-            if (owned) {
-                releaseValue(tag, val);
-            }
-        }
-    }
+void RuntimeEnvironment::registerSlot(value::TypeTags tag,
+                                      value::Value val,
+                                      bool owned,
+                                      value::SlotId slotId) {
+    emplaceAccessor(slotId, _state->pushSlot(slotId));
+    _accessors.at(slotId).reset(value::TagValueMaybeOwned::fromRaw(owned, tag, val));
 }
 
-value::SlotId RuntimeEnvironment::registerSlot(StringData name,
+value::SlotId RuntimeEnvironment::registerSlot(std::string_view name,
                                                value::TypeTags tag,
                                                value::Value val,
                                                bool owned,
@@ -70,18 +42,17 @@ value::SlotId RuntimeEnvironment::registerSlot(value::TypeTags tag,
                                                value::SlotIdGenerator* slotIdGenerator) {
     tassert(5645903, "Slot Id generator is null", slotIdGenerator);
     auto slot = slotIdGenerator->generate();
-    emplaceAccessor(slot, _state->pushSlot(slot));
-    _accessors.at(slot).reset(owned, tag, val);
+    registerSlot(tag, val, owned, slot);
     return slot;
 }
 
-value::SlotId RuntimeEnvironment::getSlot(StringData name) const {
+value::SlotId RuntimeEnvironment::getSlot(std::string_view name) const {
     auto slot = getSlotIfExists(name);
     uassert(4946305, str::stream() << "environment slot is not registered: " << name, slot);
     return *slot;
 }
 
-boost::optional<value::SlotId> RuntimeEnvironment::getSlotIfExists(StringData name) const {
+boost::optional<value::SlotId> RuntimeEnvironment::getSlotIfExists(std::string_view name) const {
     if (auto it = _state->namedSlots.find(name); it != _state->namedSlots.end()) {
         return it->second;
     }
@@ -97,7 +68,7 @@ void RuntimeEnvironment::resetSlot(value::SlotId slot,
     tassert(11093406, "Cannot reset slot because parallelism is enabled", !_isSmp);
 
     if (auto it = _accessors.find(slot); it != _accessors.end()) {
-        it->second.reset(owned, tag, val);
+        it->second.reset(value::TagValueMaybeOwned::fromRaw(owned, tag, val));
         return;
     }
 
@@ -156,7 +127,7 @@ void RuntimeEnvironment::debugString(StringBuilder* builder,
                                      boost::optional<size_t> lengthCap /*= boost::none*/) const {
     using namespace std::literals;
 
-    value::SlotMap<StringData> slotName;
+    value::SlotMap<std::string_view> slotName;
     for (const auto& [name, slot] : _state->namedSlots) {
         slotName[slot] = name;
     }

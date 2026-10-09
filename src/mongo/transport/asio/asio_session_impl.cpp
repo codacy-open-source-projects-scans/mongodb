@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/transport/asio/asio_session_impl.h"
@@ -35,36 +9,37 @@
 #include "mongo/config.h"
 #include "mongo/db/auth/auth_options_gen.h"
 #include "mongo/db/commands/server_status/server_status_metric.h"
-#include "mongo/db/connection_health_metrics_parameter_gen.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_severity_suppressor.h"
-#include "mongo/otel/metrics/metrics_histogram.h"
-#include "mongo/otel/metrics/metrics_service.h"
-#include "mongo/transport/asio/asio_session_manager.h"
 #include "mongo/transport/asio/asio_utils.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
+#include "mongo/transport/message_filter_hooks.h"
 #include "mongo/transport/proxy_protocol_header_parser.h"
 #include "mongo/transport/proxy_protocol_tlv_extraction.h"
+#include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/session_util.h"
 #include "mongo/transport/transport_options_gen.h"
 #include "mongo/util/active_exception_witness.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/net/connection_purpose.h"
 #include "mongo/util/net/socket_utils.h"
+
+#include <string_view>
 
 #include <asio/detail/socket_option.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 namespace mongo::transport {
+using namespace std::literals::string_view_literals;
 
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerShortOpportunisticReadWrite);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerSessionPauseBeforeSetSocketOption);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeOpportunisticRead);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerBlockBeforeAddSession);
-MONGO_FAIL_POINT_DEFINE(clientIsConnectedToLoadBalancerPort);
-MONGO_FAIL_POINT_DEFINE(clientIsLoadBalancedPeer);
 MONGO_FAIL_POINT_DEFINE(proxyUnixDomainSocketPeerCredentialValidationOverride);
 
 namespace {
@@ -154,15 +129,6 @@ std::string makeTLVString(const std::vector<ProxiedSupplementaryDataEntry>& tlvD
     return tlvString;
 };
 
-auto& totalIngressTLSConnections =  //
-    *MetricBuilder<Counter64>("network.totalIngressTLSConnections");
-auto& totalIngressTLSHandshakeTimeMillis =  //
-    *MetricBuilder<Counter64>("network.totalIngressTLSHandshakeTimeMillis");
-otel::metrics::Histogram<int64_t>& ingressTLSHandshakeTimesMillis =
-    otel::metrics::MetricsService::instance().createInt64Histogram(
-        otel::metrics::MetricNames::kIngressTLSHandshakeLatency,
-        "The latency of the TLS handshake when establishing a new ingress connection.",
-        otel::metrics::MetricUnit::kMilliseconds);
 auto& totalMessageSizeErrorsPreAuth =
     *MetricBuilder<Counter64>("network.totalMessageSizeErrorPreAuth");
 auto& totalMessageSizeErrorsPostAuth =
@@ -176,7 +142,7 @@ CommonAsioSession::CommonAsioSession(
     bool isIngressSession,
     Endpoint endpoint,
     std::shared_ptr<const SSLConnectionContext> transientSSLContext)
-    : _socket(std::move(socket)), _tl(tl), _isIngressSession(isIngressSession) {
+    : AsioSession(isIngressSession), _socket(std::move(socket)), _tl(tl) {
     auto sev = kDebugBuild ? logv2::LogSeverity::Info() : logv2::LogSeverity::Debug(3);
     try {
         auto localEndpoint = getLocalEndpoint(_socket, "AsioSession get local endpoint", sev);
@@ -259,23 +225,6 @@ CommonAsioSession::CommonAsioSession(
 #endif
 }
 
-bool CommonAsioSession::isConnectedToLoadBalancerPort() const {
-    return MONGO_unlikely(clientIsConnectedToLoadBalancerPort.shouldFail()) ||
-        _isConnectedToLoadBalancerPort;
-}
-
-bool CommonAsioSession::isConnectedToPriorityPort() const {
-    return _isConnectedToPriorityPort;
-}
-
-bool CommonAsioSession::isLoadBalancerPeer() const {
-    return MONGO_unlikely(clientIsLoadBalancedPeer.shouldFail()) || _isLoadBalancerPeer;
-}
-
-bool CommonAsioSession::isConnectedToProxyUnixSocket() const {
-    return _isConnectedToProxyUnixSocket;
-}
-
 #ifdef __APPLE__
 StatusWith<gid_t> getPeerGid(AsioSession::GenericSocket::native_handle_type handle) {
     [[maybe_unused]] uid_t remoteUid;
@@ -325,25 +274,6 @@ Status CommonAsioSession::validateProxyUnixSocketPeerPermissions() {
     MONGO_UNREACHABLE;
 }
 
-void CommonAsioSession::setisLoadBalancerPeer(bool helloHasLoadBalancedOption) {
-    tassert(ErrorCodes::BadValue,
-            "Client claimed to be from a loadBalancer, but is not on load balancer port",
-            isConnectedToLoadBalancerPort() || !helloHasLoadBalancedOption);
-
-    if (_isLoadBalancerPeer == helloHasLoadBalancedOption) {
-        return;
-    }
-    _isLoadBalancerPeer = helloHasLoadBalancedOption;
-
-    auto sessionManager = _tl->getSharedSessionManager();
-    if (auto asioSessionManager = checked_pointer_cast<AsioSessionManager>(sessionManager)) {
-        if (helloHasLoadBalancedOption) {
-            asioSessionManager->incrementLBConnections();
-        } else {
-            asioSessionManager->decrementLBConnections();
-        }
-    }
-}
 
 void CommonAsioSession::end() {
     std::error_code ec;
@@ -404,9 +334,9 @@ Future<void> CommonAsioSession::sinkMessageImpl(Message message, const BatonHand
     _asyncOpState.start();
     return write(asio::buffer(message.buf(), message.size()), baton)
         .then([this, message /*keep the buffer alive*/]() {
-            auto connectionType = _isIngressSession ? NetworkCounter::ConnectionType::kIngress
-                                                    : NetworkCounter::ConnectionType::kEgress;
-            networkCounter.hitPhysicalOut(connectionType, message.size());
+            auto connectionType = isIngress() ? NetworkCounter::ConnectionType::kIngress
+                                              : NetworkCounter::ConnectionType::kEgress;
+            globalNetworkCounter().hitPhysicalOut(connectionType, message.size());
         })
         .onCompletion([this](Status status) {
             _asyncOpState.complete();
@@ -440,7 +370,16 @@ bool CommonAsioSession::isConnected() {
     if (!getSocket().is_open())
         return false;
 
-    auto swPollEvents = pollASIOSocket(getSocket(), POLLIN, Milliseconds{0});
+    unsigned events = POLLIN;
+    unsigned disconnectedEvents = POLLERR | POLLHUP | POLLNVAL;
+#ifdef __linux__
+    // POLLRDHUP reports that the peer has shut down its write side. Without it, data the peer
+    // sent before disconnecting keeps POLLIN set and the peek below succeeding, so a session
+    // with buffered unread data would be reported as connected indefinitely.
+    events |= POLLRDHUP;
+    disconnectedEvents |= POLLRDHUP;
+#endif
+    auto swPollEvents = pollASIOSocket(getSocket(), events, Milliseconds{0});
     if (!swPollEvents.isOK()) {
         if (swPollEvents != ErrorCodes::NetworkTimeout) {
             LOGV2_WARNING(4615609,
@@ -452,21 +391,52 @@ bool CommonAsioSession::isConnected() {
     }
 
     auto revents = swPollEvents.getValue();
+    if (revents & disconnectedEvents) {
+        return false;
+    }
     if (revents & POLLIN) {
         try {
             char testByte;
             const auto bytesRead =
                 peekASIOStream(getSocket(), asio::buffer(&testByte, sizeof(testByte)));
-            uassert(ErrorCodes::SocketException,
-                    "Couldn't peek from underlying socket",
-                    bytesRead == sizeof(testByte));
-            return true;
+            // Nothing to peek after POLLIN means the peer has shut down its write side: a
+            // normal disconnect, not an error.
+            return bytesRead == sizeof(testByte);
         } catch (const DBException& e) {
             LOGV2_WARNING(4615610, "Failed to check socket connectivity", "error"_attr = e);
+            return false;
         }
     }
 
     return false;
+}
+
+bool CommonAsioSession::waitForPeerDisconnectUntil(Date_t deadline) {
+    invariant(
+        _blockingMode == sync,
+        "waitForPeerDisconnectUntil is only safe on a sync-mode session where the asio reactor "
+        "is not touching the socket");
+
+    if (!getSocket().is_open()) {
+        return true;
+    }
+
+    const auto remaining = deadline - Date_t::now();
+    if (remaining.count() <= 0) {
+        return false;
+    }
+
+    auto swPollEvents = pollASIOSocket(getSocket(), POLLRDHUP | POLLHUP, remaining);
+    if (!swPollEvents.isOK()) {
+        // A NetworkTimeout means the poll timed out without observing a disconnect, so the peer is
+        // still connected. Any other error indicates the socket itself is broken which we treat as
+        // a disconnect.
+        return swPollEvents != ErrorCodes::NetworkTimeout;
+    }
+    // The poll returned an event before the deadline. We only asked for POLLRDHUP|POLLHUP (plus the
+    // always-reported POLLERR/POLLNVAL), so any event here means the peer is gone or the socket
+    // is in error.
+    return true;
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -491,8 +461,7 @@ Status CommonAsioSession::buildSSLSocket(const HostAndPort& target) {
     return Status::OK();
 }
 
-Future<void> CommonAsioSession::handshakeSSLForEgress(const HostAndPort& target,
-                                                      const ReactorHandle& reactor) {
+Future<void> CommonAsioSession::handshakeSSLForEgress(const HostAndPort& target) {
     invariant(_sslSocket, "SSL Socket expected to be built");
     auto doHandshake = [&] {
         if (_blockingMode == sync) {
@@ -503,18 +472,26 @@ Future<void> CommonAsioSession::handshakeSSLForEgress(const HostAndPort& target,
             return _sslSocket->async_handshake(asio::ssl::stream_base::client, UseFuture{});
         }
     };
-    return doHandshake().then([this, target, reactor] {
-        _ranHandshake = true;
+    auto tlsPool = _tl->tlsHandshakePool();
+    return doHandshake()
+        .thenRunOn(tlsPool)
+        .then([this, target, tlsPool] {
+            _ranHandshake = true;
 
-        return getSSLManager()
-            ->parseAndValidatePeerCertificate(
-                _sslSocket->native_handle(), _sslSocket->get_sni(), target.host(), target, reactor)
-            .then([this](SSLPeerInfo info) {
-                auto& sslPeerInfo = SSLPeerInfo::forSession(shared_from_this());
-                tassert(10355701, "SSLPeerInfo is not empty during egress handshake", !sslPeerInfo);
-                sslPeerInfo = std::make_shared<SSLPeerInfo>(info);
-            });
-    });
+            return getSSLManager()
+                ->parseAndValidatePeerCertificate(_sslSocket->native_handle(),
+                                                  _sslSocket->get_sni(),
+                                                  target.host(),
+                                                  target,
+                                                  tlsPool)
+                .then([this](SSLPeerInfo info) {
+                    auto& sslPeerInfo = SSLPeerInfo::forSession(shared_from_this());
+                    tassert(
+                        10355701, "SSLPeerInfo is not empty during egress handshake", !sslPeerInfo);
+                    sslPeerInfo = std::make_shared<SSLPeerInfo>(info);
+                });
+        })
+        .unsafeToInlineFuture();
 }
 #endif
 
@@ -580,7 +557,7 @@ auto CommonAsioSession::getSocket() -> GenericSocket& {
 }
 
 ExecutorFuture<void> CommonAsioSession::parseProxyProtocolHeader(const ReactorHandle& reactor) {
-    invariant(_isIngressSession);
+    invariant(isIngress());
     invariant(reactor);
     const Backoff kExponentialBackoff(Milliseconds(gProxyProtocolMaximumWaitBackoffMillis.load()),
                                       Milliseconds::max());
@@ -595,8 +572,10 @@ ExecutorFuture<void> CommonAsioSession::parseProxyProtocolHeader(const ReactorHa
     return AsyncTry([this, buffer] {
                const auto bytesRead =
                    peekASIOStream(_socket, asio::buffer(buffer->data(), buffer->size()));
-               return transport::parseProxyProtocolHeader(StringData(buffer->data(), bytesRead),
-                                                          isConnectedToProxyUnixSocket());
+               MessageHooks::onProxyHeaderReceived(
+                   *this, buffer->data(), bytesRead, isConnectedToProxyUnixSocket());
+               return transport::parseProxyProtocolHeader(
+                   std::string_view(buffer->data(), bytesRead), isConnectedToProxyUnixSocket());
            })
         .until([deadline, proxyHeaderTimeout, reactor](
                    StatusWith<boost::optional<ParserResults>> sw) {
@@ -627,7 +606,7 @@ ExecutorFuture<void> CommonAsioSession::parseProxyProtocolHeader(const ReactorHa
                 // origin client IP addresses, then the session's auth restriction environment
                 // should be reset to apply against the source address advertised in the proxy
                 // protocol header.
-                if (clientSourceAuthenticationRestrictionMode == "origin"_sd) {
+                if (clientSourceAuthenticationRestrictionMode == "origin"sv) {
                     _restrictionEnvironment =
                         RestrictionEnvironment(_proxiedSrcRemoteAddr.value(), _localAddr);
                 }
@@ -683,9 +662,12 @@ Future<Message> CommonAsioSession::sourceMessageImpl(const BatonHandle& baton) {
     _asyncOpState.start();
     return read(asio::buffer(ptr, kHeaderSize), baton)
         .then([headerBuffer = std::move(headerBuffer), this, baton]() mutable {
+            if (isIngress())
+                MessageHooks::onHeaderReceived(*this, headerBuffer.get(), kHeaderSize);
+
             const auto msgLen = size_t(MSGHEADER::View(headerBuffer.get()).getMessageLength());
 
-            const size_t maxMessageSize = _restrictedMode
+            const size_t maxMessageSize = isPreauthIngress()
                 ? static_cast<size_t>(gPreAuthMaximumMessageSizeBytes.loadRelaxed())
                 : MaxMessageSizeBytes;
             if (msgLen < kHeaderSize || msgLen > maxMessageSize) {
@@ -699,7 +681,7 @@ Future<Message> CommonAsioSession::sourceMessageImpl(const BatonHandle& baton) {
                             "msgLen"_attr = msgLen,
                             "min"_attr = kHeaderSize,
                             "max"_attr = maxMessageSize);
-                if (_restrictedMode) {
+                if (isPreauthIngress()) {
                     totalMessageSizeErrorsPreAuth.increment();
                 } else {
                     totalMessageSizeErrorsPostAuth.increment();
@@ -708,11 +690,12 @@ Future<Message> CommonAsioSession::sourceMessageImpl(const BatonHandle& baton) {
                 return Future<Message>::makeReady(Status(ErrorCodes::ProtocolError, str));
             }
 
-            auto connectionType = _isIngressSession ? NetworkCounter::ConnectionType::kIngress
-                                                    : NetworkCounter::ConnectionType::kEgress;
+            auto connectionType = isIngress() ? NetworkCounter::ConnectionType::kIngress
+                                              : NetworkCounter::ConnectionType::kEgress;
             if (msgLen == kHeaderSize) {
                 // This probably isn't a real case since all (current) messages have bodies.
-                networkCounter.hitPhysicalIn(connectionType, msgLen);
+                globalNetworkCounter().hitPhysicalIn(
+                    connectionType, msgLen, getConnectionPurpose(this));
                 return Future<Message>::makeReady(Message(std::move(headerBuffer)));
             }
 
@@ -722,7 +705,8 @@ Future<Message> CommonAsioSession::sourceMessageImpl(const BatonHandle& baton) {
             MsgData::View msgView(buffer.get());
             return read(asio::buffer(msgView.data(), msgView.dataLen()), baton)
                 .then([this, buffer = std::move(buffer), connectionType, msgLen]() mutable {
-                    networkCounter.hitPhysicalIn(connectionType, msgLen);
+                    globalNetworkCounter().hitPhysicalIn(
+                        connectionType, msgLen, getConnectionPurpose(this));
                     return Message(std::move(buffer));
                 });
         })
@@ -949,7 +933,7 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
     }();
 
     if (maybeProxyProtocolHeader(
-            StringData(static_cast<const char*>(buffer.data()), buffer.size()))) {
+            std::string_view(static_cast<const char*>(buffer.data()), buffer.size()))) {
         // Protocol requirements mean that neither raw mongorpc nor TLS client hello will look
         // like Proxy.
         return Future<bool>::makeReady(
@@ -985,8 +969,9 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
                     asio::ssl::stream_base::server, buffer, UseFuture{});
             }
         };
-        auto startTimer = Timer();
-        return doHandshake().then([this, startTimer = std::move(startTimer)](size_t size) {
+        IngressHandshakeMetrics::get(*this).onTLSHandshakeStarted(
+            getGlobalServiceContext()->getTickSource());
+        return doHandshake().then([this](size_t size) {
             if (_sslSocket->get_sni()) {
                 auto sniName = _sslSocket->get_sni().value();
                 LOGV2_DEBUG(
@@ -994,16 +979,7 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
             } else {
                 LOGV2_DEBUG(4908001, 2, "Client connected without SNI extension");
             }
-            const auto handshakeDurationMillis = durationCount<Milliseconds>(startTimer.elapsed());
             IngressHandshakeMetrics::get(*this).onTLSHandshakeCompleted();
-            if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
-                LOGV2(6723804,
-                      "Ingress TLS handshake complete",
-                      "durationMillis"_attr = handshakeDurationMillis);
-            }
-            totalIngressTLSConnections.increment(1);
-            totalIngressTLSHandshakeTimeMillis.increment(handshakeDurationMillis);
-            ingressTLSHandshakeTimesMillis.record(handshakeDurationMillis);
             auto sslPeerInfo = SSLPeerInfo::forSession(shared_from_this());
             if (!sslPeerInfo) {
                 return getSSLManager()
@@ -1053,8 +1029,8 @@ Future<bool> CommonAsioSession::maybeHandshakeSSLForIngress(const MutableBufferS
 template <typename Buffer>
 bool CommonAsioSession::checkForHTTPRequest(const Buffer& buffers) {
     invariant(buffers.size() >= 4);
-    const StringData bufferAsStr(static_cast<const char*>(buffers.data()), 4);
-    return (bufferAsStr == "GET "_sd);
+    const std::string_view bufferAsStr(static_cast<const char*>(buffers.data()), 4);
+    return (bufferAsStr == "GET "sv);
 }
 
 bool CommonAsioSession::isExemptedByCIDRList(const CIDRList& exemptions) const {

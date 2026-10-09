@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/scripting/mozjs/shell/mongo.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -55,7 +28,9 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/otel/traces/traceparent.h"
 #include "mongo/rpc/metadata.h"
+#include "mongo/rpc/telemetry_context_section_gen.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/scripting/mozjs/common/internedstring.h"
 #include "mongo/scripting/mozjs/common/objectwrapper.h"
@@ -78,6 +53,7 @@
 #include <initializer_list>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -95,6 +71,7 @@
 
 namespace mongo {
 namespace mozjs {
+using namespace std::literals::string_view_literals;
 
 const JSFunctionSpec MongoBase::methods[] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(auth, MongoExternalInfo),
@@ -366,7 +343,8 @@ namespace {
 
 /**
  * Common implementation for:
- *   object Mongo._runCommandImpl(string dbname, object cmd, int options, object token)
+ *   object Mongo._runCommandImpl(string dbname, object cmd, int options, object token,
+ *                                string traceparent)
  *
  * Extra is for connection-wide metadata to pass with any given runCommand.
  */
@@ -390,6 +368,13 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
     auto arg = ValueWriter(cx, args.get(1)).toBSON();
 
     auto request = makeRequest(database, arg);
+    if (args.length() >= 5 && args.get(4).isString()) {
+        auto traceparent = ValueWriter(cx, args.get(4)).toString();
+        if (!traceparent.empty() && otel::traces::validateW3CTraceparent(traceparent).isOK()) {
+            request.telemetryContext =
+                TelemetryContextSection{OtelContextSection{std::move(traceparent)}};
+        }
+    }
     if (auto tokenArg = args.get(3); tokenArg.isString()) {
         if (auto token = ValueWriter(cx, tokenArg).toString(); !token.empty()) {
             request.validatedTenancyScope = auth::ValidatedTenancyScopeFactory::create(
@@ -413,7 +398,7 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
 
     auto reply = std::get<0>(res)->getCommandReply();
     if constexpr (Params::kHoistReply) {
-        constexpr auto kCommandReplyField = "commandReply"_sd;
+        constexpr auto kCommandReplyField = "commandReply"sv;
         reply = BSON(kCommandReplyField << reply);
     } else {
         // The returned object is not read only as some of our tests depend on modifying it.
@@ -438,12 +423,12 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
 
 struct RunCommandParams {
     static constexpr bool kHoistReply = false;
-    static constexpr auto kCommandName = "runCommand"_sd;
-    static constexpr auto kArg1Name = "cmdObj"_sd;
+    static constexpr auto kCommandName = "runCommand"sv;
+    static constexpr auto kArg1Name = "cmdObj"sv;
 };
 
 void MongoBase::Functions::_runCommandImpl::call(JSContext* cx, JS::CallArgs args) {
-    doRunCommand<RunCommandParams>(cx, args, [&](StringData database, BSONObj cmd) {
+    doRunCommand<RunCommandParams>(cx, args, [&](std::string_view database, BSONObj cmd) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "The options parameter to runCommand must be a number",
                 args.get(2).isNumber());
@@ -802,7 +787,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
 
         uassert(ErrorCodes::InvalidOptions,
                 "Authentication is not currently supported when gRPC mode is enabled",
-                cs.getUser().empty());
+                !cs.getCredential() || !cs.getCredential()->username);
     }
 #endif
 
@@ -932,7 +917,7 @@ void MongoBase::Functions::_setOIDCIdPAuthCallback::call(JSContext* cx, JS::Call
     // the function as a string, stash it into a lambda, and execute it directly when needed.
     std::string stringifiedFn = ValueWriter(cx, args.get(0)).toString();
     SaslOIDCClientConversation::setOIDCIdPAuthCallback(
-        [=](StringData userName, StringData idpEndpoint, StringData userCode) {
+        [=](std::string_view userName, std::string_view idpEndpoint, std::string_view userCode) {
             std::unique_ptr<Scope> jsScope{getGlobalScriptEngine()->newScope()};
             BSONObj authInfo = BSON("userName" << userName << "userCode" << userCode
                                                << "activationEndpoint" << idpEndpoint);

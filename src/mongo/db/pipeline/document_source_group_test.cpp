@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_group.h"
 
@@ -56,9 +30,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -71,6 +45,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -79,6 +54,8 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 namespace {
@@ -102,8 +79,9 @@ public:
     OwningDistributedPlanContext(std::unique_ptr<Pipeline> pipelinePrefix,
                                  std::unique_ptr<Pipeline> pipelineSuffix,
                                  boost::optional<OrderedPathSet> shardKeys)
-        : DocumentSourceGroup::DistributedPlanContext{
-              *pipelinePrefix, *pipelineSuffix, this->shardKeys},
+        : DocumentSourceGroup::DistributedPlanContext{*pipelinePrefix,
+                                                      *pipelineSuffix,
+                                                      this->shardKeys},
           pipelinePrefix(std::move(pipelinePrefix)),
           pipelineSuffix(std::move(pipelineSuffix)),
           shardKeys(std::move(shardKeys)) {}
@@ -115,7 +93,7 @@ public:
 // This provides access to getExpCtx(), but we'll use a different name for this test suite.
 class DocumentSourceGroupTest : public AggregationContextFixture {
 public:
-    auto makePlanCtx(StringData pipelineJson, OrderedPathSet shardKeys) {
+    auto makePlanCtx(std::string_view pipelineJson, OrderedPathSet shardKeys) {
         auto bson = fromjson(pipelineJson);
         std::vector<BSONObj> rawPipeline;
         for (const auto& element : bson) {
@@ -525,7 +503,7 @@ TEST_F(DocumentSourceGroupTest, CanHandleEmptyExpressionObject) {
     std::vector<AccumulationStatement> accumulationStatements;
     auto group =
         DocumentSourceGroup::create(getExpCtx(), idExpression, accumulationStatements, false);
-    auto mock = exec::agg::MockStage::createForTest({Document{{"_id"_sd, 0}}}, getExpCtx());
+    auto mock = exec::agg::MockStage::createForTest({Document{{"_id"sv, 0}}}, getExpCtx());
     auto groupStage = exec::agg::buildStageAndStitch(group, mock);
     auto next = groupStage->getNext();
     ASSERT(next.isAdvanced());
@@ -535,8 +513,8 @@ TEST_F(DocumentSourceGroupTest, CanHandleEmptyExpressionObject) {
 
 TEST_F(DocumentSourceGroupTest, CanOutputExecutionStatsExplainWithoutProcessingDocuments) {
     for (bool flagStatus : {false, true}) {
-        RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
-                                                                   flagStatus);
+        unittest::ServerParameterGuard featureFlagController("featureFlagQueryMemoryTracking",
+                                                             flagStatus);
 
         auto expCtx = getExpCtx();
         expCtx->setExplain(ExplainOptions::Verbosity::kExecStats);
@@ -561,7 +539,7 @@ TEST_F(DocumentSourceGroupTest, CanOutputExecutionStatsExplainWithoutProcessingD
             $willBeMerged: false
         }})");
 
-        SerializationOptions explainOpts;
+        query_shape::SerializationOptions explainOpts;
         explainOpts.verbosity = expCtx->getExplain();
         ASSERT_DOCUMENT_EQ(Document(expectedGroupSerializeOutput),
                            group->serialize(explainOpts).getDocument());
@@ -614,14 +592,14 @@ TEST_F(DocumentSourceGroupTest, CreateCorrectlyInheritsNeedsMergeValueFromExpCtx
 TEST_F(DocumentSourceGroupTest, CorrectlyReportsTriviallyReferencedExprsFromID) {
     // Verify that DocumentSourceGroupBase::getTriviallyReferencedPaths identifies paths which are
     // used directly, without further computation - "trivially" referenced.
-    const auto getTriviallyReferenced = [&](StringData idJsonStr) {
+    const auto getTriviallyReferenced = [&](std::string_view idJsonStr) {
         auto idExpr = fromjson(idJsonStr);
         auto spec = BSON("$group" << BSON("_id" << idExpr));
         auto group = boost::dynamic_pointer_cast<DocumentSourceGroup>(
             DocumentSourceGroup::createFromBson(spec.firstElement(), getExpCtx()));
         return group->getTriviallyReferencedPaths();
     };
-    const auto expect = [&](StringData idJsonStr, OrderedPathSet expected) {
+    const auto expect = [&](std::string_view idJsonStr, OrderedPathSet expected) {
         auto actual = getTriviallyReferenced(idJsonStr);
         ASSERT_EQ(actual, expected) << fmt::format(
             "_id:{}, [{}] != [{}]", idJsonStr, fmt::join(actual, ", "), fmt::join(expected, ", "));
@@ -660,7 +638,7 @@ TEST_F(DocumentSourceGroupTest, DistributedLogicRequiresMergeIfIdNotSupersetOfSh
 }
 
 TEST_F(DocumentSourceGroupTest, DistributedLogicDoesNotRequireMergeIfIdEqualToShardKey) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     auto spec = fromjson(R"({$group: {_id: {a: "$a", b: "$b", c: "$c"}}})");
     boost::intrusive_ptr<DocumentSourceGroup> group = dynamic_cast<DocumentSourceGroup*>(
         DocumentSourceGroup::createFromBson(spec.firstElement(), getExpCtx()).get());
@@ -670,7 +648,7 @@ TEST_F(DocumentSourceGroupTest, DistributedLogicDoesNotRequireMergeIfIdEqualToSh
 }
 
 TEST_F(DocumentSourceGroupTest, DistributedLogicDoesRequireMergeIfIdEqualToShardKeyButFFDisabled) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", false);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", false);
     auto spec = fromjson(R"({$group: {_id: {a: "$a", b: "$b", c: "$c"}}})");
     boost::intrusive_ptr<DocumentSourceGroup> group = dynamic_cast<DocumentSourceGroup*>(
         DocumentSourceGroup::createFromBson(spec.firstElement(), getExpCtx()).get());
@@ -680,7 +658,7 @@ TEST_F(DocumentSourceGroupTest, DistributedLogicDoesRequireMergeIfIdEqualToShard
 }
 
 TEST_F(DocumentSourceGroupTest, DistributedLogicDoesNotRequireMergeIfIdSupersetOfShardKey) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", true);
     auto spec = fromjson(R"({$group: {_id: {a: "$a", b: "$b", c: "$c"}}})");
     boost::intrusive_ptr<DocumentSourceGroup> group = dynamic_cast<DocumentSourceGroup*>(
         DocumentSourceGroup::createFromBson(spec.firstElement(), getExpCtx()).get());
@@ -691,7 +669,7 @@ TEST_F(DocumentSourceGroupTest, DistributedLogicDoesNotRequireMergeIfIdSupersetO
 
 TEST_F(DocumentSourceGroupTest,
        DistributedLogicDoesRequireMergeIfIdSupersetOfShardKeyButFFDisabled) {
-    RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", false);
+    unittest::ServerParameterGuard controller("featureFlagShardFilteringDistinctScan", false);
     auto spec = fromjson(R"({$group: {_id: {a: "$a", b: "$b", c: "$c"}}})");
     boost::intrusive_ptr<DocumentSourceGroup> group = dynamic_cast<DocumentSourceGroup*>(
         DocumentSourceGroup::createFromBson(spec.firstElement(), getExpCtx()).get());
@@ -704,19 +682,19 @@ TEST_F(DocumentSourceGroupTest, ShouldUpdateMemoryUsageTrackerDuringGroup) {
     auto expCtx = getExpCtx();
 
     for (bool flagStatus : {true, false}) {
-        RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
-                                                                   flagStatus);
+        unittest::ServerParameterGuard featureFlagController("featureFlagQueryMemoryTracking",
+                                                             flagStatus);
 
         // Pause between input docs so we have a chance to check memory tracking.
         auto mock = exec::agg::MockStage::createForTest(
             {
-                Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"_sd << "bar"_sd)}},
+                Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"sv << "bar"sv)}},
                 DocumentSource::GetNextResult::makePauseExecution(),
-                Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"_sd << "mongo"_sd)}},
+                Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"sv << "mongo"sv)}},
                 DocumentSource::GetNextResult::makePauseExecution(),
-                Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"_sd << "elephant"_sd)}},
+                Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"sv << "elephant"sv)}},
                 DocumentSource::GetNextResult::makePauseExecution(),
-                Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"_sd << "giraffe"_sd)}},
+                Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"sv << "giraffe"sv)}},
             },
             expCtx);
 
@@ -792,21 +770,20 @@ TEST_F(DocumentSourceGroupTest, ShouldUpdateMemoryUsageTrackerDuringGroup) {
  */
 TEST_F(DocumentSourceGroupTest, ShouldUpdateCurOpStatsDuringGroup) {
     auto expCtx = getExpCtx();
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
-                                                               true);
-    RAIIServerParameterControllerForTest curOpWriteBytes(
-        "internalQueryMaxWriteToCurOpMemoryUsageBytes", 64);
+    unittest::ServerParameterGuard featureFlagController("featureFlagQueryMemoryTracking", true);
+    unittest::ServerParameterGuard curOpWriteBytes("internalQueryMaxWriteToCurOpMemoryUsageBytes",
+                                                   64);
 
     // Pause between input docs so we have a chance to check memory tracking.
     auto mock = exec::agg::MockStage::createForTest(
         {
-            Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"_sd << "bar"_sd)}},
+            Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"sv << "bar"sv)}},
             DocumentSource::GetNextResult::makePauseExecution(),
-            Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"_sd << "mongo"_sd)}},
+            Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"sv << "mongo"sv)}},
             DocumentSource::GetNextResult::makePauseExecution(),
-            Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"_sd << "elephant"_sd)}},
+            Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"sv << "elephant"sv)}},
             DocumentSource::GetNextResult::makePauseExecution(),
-            Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"_sd << "giraffe"_sd)}},
+            Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"sv << "giraffe"sv)}},
         },
         expCtx);
 
@@ -898,16 +875,15 @@ TEST_F(DocumentSourceGroupTest, ShouldUpdateCurOpStatsDuringGroup) {
  */
 TEST_F(DocumentSourceGroupTest, CurOpStatsAreNotUpdatedIfFeatureFlagOff) {
     auto expCtx = getExpCtx();
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
-                                                               false);
+    unittest::ServerParameterGuard featureFlagController("featureFlagQueryMemoryTracking", false);
 
     // Pause between input docs so we have a chance to check memory tracking.
     auto mock = exec::agg::MockStage::createForTest(
         {
-            Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"_sd << "bar"_sd)}},
-            Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"_sd << "mongo"_sd)}},
-            Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"_sd << "elephant"_sd)}},
-            Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"_sd << "giraffe"_sd)}},
+            Document{{"_id", 0}, {"k", 10}, {"arr", BSON_ARRAY("foo"sv << "bar"sv)}},
+            Document{{"_id", 1}, {"k", 10}, {"arr", BSON_ARRAY("baz"sv << "mongo"sv)}},
+            Document{{"_id", 2}, {"k", 20}, {"arr", BSON_ARRAY("bird"sv << "elephant"sv)}},
+            Document{{"_id", 3}, {"k", 20}, {"arr", BSON_ARRAY("dog"sv << "giraffe"sv)}},
         },
         expCtx);
 
@@ -987,7 +963,7 @@ public:
           _groupStageType(groupStageType) {}
 
 protected:
-    StringData getStageName() const {
+    std::string_view getStageName() const {
         switch (_groupStageType) {
             case GroupStageType::Default:
                 return DocumentSourceGroup::kStageName;
@@ -1535,20 +1511,20 @@ class GroupNullUndefinedIds : public CheckResultsBase {
 /** A complex _id expression. */
 class ComplexId : public CheckResultsBase {
     std::deque<DocumentSource::GetNextResult> inputData() override {
-        return {DOC("a" << "de"_sd
+        return {DOC("a" << "de"sv
                         << "b"
-                        << "ad"_sd
+                        << "ad"sv
                         << "c"
-                        << "beef"_sd
+                        << "beef"sv
                         << "d"
-                        << ""_sd),
-                DOC("a" << "d"_sd
+                        << ""sv),
+                DOC("a" << "d"sv
                         << "b"
-                        << "eadbe"_sd
+                        << "eadbe"sv
                         << "c"
-                        << ""_sd
+                        << ""sv
                         << "d"
-                        << "ef"_sd)};
+                        << "ef"sv)};
     }
     BSONObj groupSpec() override {
         return BSON("_id" << BSON("$concat" << BSON_ARRAY("$a" << "$b"

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsontypes.h"
@@ -69,9 +43,12 @@ std::function<void()> getExpressionInterruptChecker(OperationContext* opCtx) {
 }  // namespace
 
 
-Value evaluate(const ExpressionMap& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionMap& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     // guaranteed at parse time that this isn't using our _varId
-    Value inputVal = expr.getInput()->evaluate(root, variables);
+    Value inputVal = expr.getInput()->evaluate(root, variables, ctx);
     if (inputVal.nullish()) {
         return Value(BSONNULL);
     }
@@ -101,7 +78,7 @@ Value evaluate(const ExpressionMap& expr, const Document& root, Variables* varia
             variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
         }
 
-        Value toInsert = expr.getEach()->evaluate(root, variables);
+        Value toInsert = expr.getEach()->evaluate(root, variables, ctx);
         if (toInsert.missing()) {
             toInsert = Value(BSONNULL);  // can't insert missing values into array
         }
@@ -117,8 +94,11 @@ Value evaluate(const ExpressionMap& expr, const Document& root, Variables* varia
     return Value(std::move(output));
 }
 
-Value evaluate(const ExpressionReduce& expr, const Document& root, Variables* variables) {
-    Value inputVal = expr.getInput()->evaluate(root, variables);
+Value evaluate(const ExpressionReduce& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    Value inputVal = expr.getInput()->evaluate(root, variables, ctx);
 
     if (inputVal.nullish()) {
         return Value(BSONNULL);
@@ -134,11 +114,11 @@ Value evaluate(const ExpressionReduce& expr, const Document& root, Variables* va
     mapReduceFilterWaitBeforeLoop(expr.getExpressionContext()->getOperationContext());
 
     size_t memLimit = internalQueryMaxMapFilterReduceBytes.load();
-    Value accumulatedValue = expr.getInitial()->evaluate(root, variables);
+    Value accumulatedValue = expr.getInitial()->evaluate(root, variables, ctx);
 
     int32_t prevDepth = -1;
     size_t interval = expr.getAccumulatedValueDepthCheckInterval();
-    auto input = inputVal.getArray();
+    const auto& input = inputVal.getArray();
     for (size_t i = 0; i < input.size(); ++i) {
         checkForInterrupt();
 
@@ -148,7 +128,7 @@ Value evaluate(const ExpressionReduce& expr, const Document& root, Variables* va
             variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
         }
 
-        accumulatedValue = expr.getIn()->evaluate(root, variables);
+        accumulatedValue = expr.getIn()->evaluate(root, variables, ctx);
         if ((interval > 0) && (i % interval) == 0 &&
             (accumulatedValue.isObject() || accumulatedValue.isArray())) {
             int32_t depth =
@@ -175,9 +155,12 @@ Value evaluate(const ExpressionReduce& expr, const Document& root, Variables* va
     return accumulatedValue;
 }
 
-Value evaluate(const ExpressionFilter& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionFilter& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     // We are guaranteed at parse time that this isn't using our _varId.
-    Value inputVal = expr.getInput()->evaluate(root, variables);
+    Value inputVal = expr.getInput()->evaluate(root, variables, ctx);
 
     if (inputVal.nullish()) {
         return Value(BSONNULL);
@@ -201,7 +184,7 @@ Value evaluate(const ExpressionFilter& expr, const Document& root, Variables* va
     auto approximateOutputSize = input.size();
     boost::optional<int> remainingLimitCounter;
     if (expr.hasLimit()) {
-        auto limitValue = (expr.getChildren()[*expr.getLimit()])->evaluate(root, variables);
+        auto limitValue = (expr.getChildren()[*expr.getLimit()])->evaluate(root, variables, ctx);
         // If the $filter query contains limit: null, we interpret the query as being "limit-less"
         // and therefore return all matching elements per doc.
         if (!limitValue.nullish()) {
@@ -235,7 +218,7 @@ Value evaluate(const ExpressionFilter& expr, const Document& root, Variables* va
             variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
         }
 
-        if (expr.getCond()->evaluate(root, variables).coerceToBool()) {
+        if (expr.getCond()->evaluate(root, variables, ctx).coerceToBool()) {
             output.push_back(input[i]);
             if (remainingLimitCounter && --*remainingLimitCounter == 0) {
                 return Value(std::move(output));

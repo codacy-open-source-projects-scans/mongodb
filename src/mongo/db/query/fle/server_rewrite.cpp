@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/fle/server_rewrite.h"
@@ -33,7 +7,6 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/crypto/fle_crypto.h"
@@ -164,11 +137,13 @@ BSONObj rewriteEncryptedFilterV2(FLETagQueryInterface* queryImpl,
                                  const NamespaceString& nssEsc,
                                  boost::intrusive_ptr<ExpressionContext> expCtx,
                                  BSONObj filter,
-                                 const std::map<NamespaceString, NamespaceString>& escMap,
-                                 EncryptedCollScanModeAllowed mode) {
+                                 const std::map<NamespaceString, EncryptedFieldConfig>& efcMap,
+                                 EncryptedCollScanModeAllowed mode,
+                                 const EncryptedFieldConfig* efc) {
 
-    if (auto rewritten =
-            QueryRewriter(expCtx, queryImpl, nssEsc, escMap, mode).rewriteMatchExpression(filter)) {
+    QueryRewriter rewriter(expCtx, queryImpl, nssEsc, efcMap, mode);
+    rewriter.setEncryptedFieldConfigForValidation(efc);
+    if (auto rewritten = rewriter.rewriteMatchExpression(filter)) {
         return rewritten.value();
     }
 
@@ -219,67 +194,80 @@ void doFLERewriteInTxn(OperationContext* opCtx,
 }
 
 NamespaceString getAndValidateEscNsFromSchema(const EncryptionInformation& encryptInfo,
-                                              const NamespaceString& nss,
-                                              bool allowEmptySchema) {
+                                              const NamespaceString& nss) {
     // In the case of PipelineRewrite, we must allow for unencrypted schemas alongside QE schemas,
     // which manifest as collections without schemas in the provided encryptionInformation.
-    if (allowEmptySchema &&
-        !encryptInfo.getSchema().hasField(nss.serializeWithoutTenantPrefix_UNSAFE())) {
+    if (!encryptInfo.getSchema().hasField(nss.serializeWithoutTenantPrefix_UNSAFE())) {
         return NamespaceString();
     }
     auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
     return NamespaceStringUtil::deserialize(nss.dbName(), std::string{*efc.getEscCollection()});
 }
 
-std::map<NamespaceString, NamespaceString> generateEncryptInfoEscMap(
-    const DatabaseName& dbName, const EncryptionInformation& encryptInfo) {
-    std::map<NamespaceString, NamespaceString> escMap;
-    if (feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled()) {
-        // Get the Esc collection namespace for every namespace in our encryption schema.
-        for (const auto& elem : encryptInfo.getSchema()) {
-            uassert(9775500,
-                    "Each namespace schema "
-                    "must be an object",
-                    elem.type() == BSONType::object);
-            auto schemaNs = NamespaceStringUtil::deserialize(
-                boost::none, elem.fieldNameStringData(), SerializationContext::stateDefault());
-            auto efc = EncryptionInformationHelpers::getAndValidateSchema(schemaNs, encryptInfo);
-
-            escMap.emplace(std::piecewise_construct,
-                           std::forward_as_tuple(std::move(schemaNs)),
-                           std::forward_as_tuple(NamespaceStringUtil::deserialize(
-                               dbName, std::string{*efc.getEscCollection()})));
-        }
+std::map<NamespaceString, EncryptedFieldConfig> generateEncryptInfoEfcMap(
+    const EncryptionInformation& encryptInfo) {
+    std::map<NamespaceString, EncryptedFieldConfig> efcMap;
+    if (!feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled()) {
+        return efcMap;
     }
-    return escMap;
+    // Get the EncryptedFieldConfig for every namespace in our encryption schema.
+    for (const auto& elem : encryptInfo.getSchema()) {
+        uassert(
+            9775500, "Each namespace schema must be an object", elem.type() == BSONType::object);
+        auto schemaNs = NamespaceStringUtil::deserialize(
+            boost::none, elem.fieldNameStringData(), SerializationContext::stateDefault());
+        auto efc = EncryptionInformationHelpers::getAndValidateSchema(schemaNs, encryptInfo);
+        efcMap.emplace(std::move(schemaNs), std::move(efc));
+    }
+    return efcMap;
 }
 }  // namespace
 
 RewriteBase::RewriteBase(boost::intrusive_ptr<ExpressionContext> expCtx,
                          const NamespaceString& nss,
-                         const EncryptionInformation& encryptInfo,
-                         bool allowEmptySchema)
-    : expCtx(expCtx),
-      nssEsc(getAndValidateEscNsFromSchema(encryptInfo, nss, allowEmptySchema)),
-      _escMap(generateEncryptInfoEscMap(nss.dbName(), encryptInfo)) {}
+                         const NamespaceString& escNss,
+                         const EncryptionInformation& encryptInfo)
+    : expCtx(expCtx), nssEsc(escNss), _efcMap(generateEncryptInfoEfcMap(encryptInfo)) {}
 
 FilterRewrite::FilterRewrite(boost::intrusive_ptr<ExpressionContext> expCtx,
                              const NamespaceString& nss,
                              const EncryptionInformation& encryptInfo,
                              BSONObj toRewrite,
-                             EncryptedCollScanModeAllowed mode)
-    : RewriteBase(expCtx, nss, encryptInfo, false), userFilter(toRewrite), _mode(mode) {}
+                             EncryptedCollScanModeAllowed mode,
+                             const EncryptedFieldConfig& validatedConfig)
+    : RewriteBase(expCtx,
+                  nss,
+                  NamespaceStringUtil::deserialize(
+                      nss.dbName(), std::string{*validatedConfig.getEscCollection()}),
+                  encryptInfo),
+      userFilter(toRewrite),
+      _mode(mode),
+      _efc(validatedConfig) {}
 
 void FilterRewrite::doRewrite(FLETagQueryInterface* queryImpl) {
     rewrittenFilter =
-        rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, userFilter, _escMap, _mode);
+        rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, userFilter, _efcMap, _mode, &_efc);
 }
+
+namespace {
+boost::optional<EncryptedFieldConfig> efcForPrimaryNss(const NamespaceString& nss,
+                                                       const EncryptionInformation& encryptInfo) {
+    if (!encryptInfo.getSchema().hasField(nss.serializeWithoutTenantPrefix_UNSAFE())) {
+        return boost::none;
+    }
+    return EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
+}
+}  // namespace
 
 PipelineRewrite::PipelineRewrite(const NamespaceString& nss,
                                  const EncryptionInformation& encryptInfo,
                                  std::unique_ptr<Pipeline> toRewrite)
-    : RewriteBase(toRewrite->getContext(), nss, encryptInfo, true),
-      _pipeline(std::move(toRewrite)) {}
+    : RewriteBase(toRewrite->getContext(),
+                  nss,
+                  getAndValidateEscNsFromSchema(encryptInfo, nss),
+                  encryptInfo),
+      _pipeline(std::move(toRewrite)),
+      _efc(efcForPrimaryNss(nss, encryptInfo)) {}
 
 void PipelineRewrite::doRewrite(FLETagQueryInterface* queryImpl) {
     auto rewriter = getQueryRewriterForEsc(queryImpl);
@@ -295,7 +283,11 @@ std::unique_ptr<Pipeline> PipelineRewrite::getPipeline() {
 }
 
 QueryRewriter PipelineRewrite::getQueryRewriterForEsc(FLETagQueryInterface* queryImpl) {
-    return QueryRewriter(expCtx, queryImpl, nssEsc, _escMap);
+    QueryRewriter rewriter(expCtx, queryImpl, nssEsc, _efcMap);
+    if (_efc) {
+        rewriter.setEncryptedFieldConfigForValidation(_efc.get_ptr());
+    }
+    return rewriter;
 }
 
 BSONObj rewriteEncryptedFilterInsideTxn(FLETagQueryInterface* queryImpl,
@@ -307,7 +299,7 @@ BSONObj rewriteEncryptedFilterInsideTxn(FLETagQueryInterface* queryImpl,
     NamespaceString nssEsc(
         NamespaceStringUtil::deserialize(nss.dbName(), efc.getEscCollection().value()));
 
-    return rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, filter, {{nss, nssEsc}}, mode);
+    return rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, filter, {{nss, efc}}, mode, &efc);
 }
 
 BSONObj rewriteQuery(OperationContext* opCtx,
@@ -316,8 +308,10 @@ BSONObj rewriteQuery(OperationContext* opCtx,
                      const EncryptionInformation& info,
                      BSONObj filter,
                      GetTxnCallback getTransaction,
-                     EncryptedCollScanModeAllowed mode) {
-    auto sharedBlock = std::make_shared<FilterRewrite>(expCtx, nss, info, filter, mode);
+                     EncryptedCollScanModeAllowed mode,
+                     const EncryptedFieldConfig& validatedEfc) {
+    auto sharedBlock =
+        std::make_shared<FilterRewrite>(expCtx, nss, info, filter, mode, validatedEfc);
     doFLERewriteInTxn(opCtx, sharedBlock, getTransaction);
     return sharedBlock->rewrittenFilter.getOwned();
 }
@@ -336,13 +330,19 @@ void processFindCommand(OperationContext* opCtx,
                       .ns(nss)
                       .build();
     expCtx->stopExpressionCounters();
+
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+        nss, findCommand->getEncryptionInformation().value());
+    FLEStatusSection::get().incrementFindCount(nss, efc);
+
     findCommand->setFilter(rewriteQuery(opCtx,
                                         expCtx,
                                         nss,
                                         findCommand->getEncryptionInformation().value(),
                                         findCommand->getFilter().getOwned(),
                                         getTransaction,
-                                        EncryptedCollScanModeAllowed::kAllow));
+                                        EncryptedCollScanModeAllowed::kAllow,
+                                        efc));
 
     findCommand->getEncryptionInformation()->setCrudProcessed(true);
 }
@@ -365,13 +365,17 @@ void processCountCommand(OperationContext* opCtx,
 
     expCtx->stopExpressionCounters();
 
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(
+        nss, countCommand->getEncryptionInformation().value());
+
     countCommand->setQuery(rewriteQuery(opCtx,
                                         expCtx,
                                         nss,
                                         countCommand->getEncryptionInformation().value(),
                                         countCommand->getQuery().getOwned(),
                                         getTxn,
-                                        EncryptedCollScanModeAllowed::kAllow));
+                                        EncryptedCollScanModeAllowed::kAllow,
+                                        efc));
 
     countCommand->getEncryptionInformation()->setCrudProcessed(true);
 }

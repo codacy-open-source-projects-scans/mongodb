@@ -17,6 +17,8 @@
 /.tmp
 !/.tmp/_placeholder_
 venv
+/buildscripts/copybara/copybara_path_rules.bara.sky
+/mfp_resmoke_install
 
 *~
 *.test_iwyu.h
@@ -54,6 +56,9 @@ venv
 .#*
 *.core
 iwyu.dat
+
+/bazel/hermetic_container/__pycache__/
+/bazel/hermetic_container/dist/
 
 /src/ipch
 /src/mongo/*/ipch
@@ -169,6 +174,7 @@ debian/mongodb
 
 # QtCreator
 *.config
+!.config
 *.creator
 *.creator.user
 *.files
@@ -231,6 +237,9 @@ codereview.rc
 python-venv*
 python3-venv*
 python2-venv*
+# uv's default project environment (created if uv sync runs without
+# UV_PROJECT_ENVIRONMENT / --active)
+.venv/
 
 # Generated resmoke configuration file
 resmoke.ini
@@ -358,6 +367,9 @@ src/mongo/shell/*_gen.d.ts
 
 # devcontainer uses pnpm which results in a large amount of environment files that aren't intended for git commits
 .pnpm-store
+
+# Rust/Cargo build artifacts (applies to all crates in the workspace)
+target
 
 # Claude Code local files
 .claude/settings.local.json

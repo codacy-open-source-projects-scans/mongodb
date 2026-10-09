@@ -5,13 +5,17 @@
  *
  * Tests that if a user fakes an internal event with a projection nothing crashes, so not valuable
  * to test with a config shard.
- * @tags: [assumes_read_preference_unchanged, config_shard_incompatible]
+ * @tags: [
+ *   assumes_read_preference_unchanged,
+ *   config_shard_incompatible,
+ * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {describe, it, before, after} from "jstests/libs/mochalite.js";
 import {assertCreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {ChangeStreamTest} from "jstests/libs/query/change_stream_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {getDBNameAndCollNameFromFullNamespace} from "jstests/libs/namespace_utils.js";
 
 describe("$changeStream", function () {
     const numShards = 2;
@@ -35,6 +39,7 @@ describe("$changeStream", function () {
     before(function () {
         st = new ShardingTest({
             shards: numShards,
+            config: 1,
             rs: {nodes: 1, setParameter: {writePeriodicNoops: true, periodicNoopIntervalSecs: 1}},
         });
 
@@ -86,6 +91,14 @@ describe("$changeStream", function () {
         // conforms to the specified arguments; it will return the expected events. Passing an empty array will confirm that we see no events in the stream. We
         // further confirm that the faked events do not cause additional cursors to be opened.
         function assertChangeStreamBehaviour(projection, expectedEvents) {
+            const isMultiversion =
+                TestData.useRandomBinVersionsWithinReplicaSet ||
+                TestData.mixedBinVersions ||
+                TestData.mongosBinVersion;
+            if (isMultiversion && bsonWoCompare(expectedEvents.v1, expectedEvents.v2) !== 0) {
+                return;
+            }
+
             // Generate a random ID for this stream.
             const commentID = `${Math.random()}`;
 
@@ -104,7 +117,9 @@ describe("$changeStream", function () {
                     assert.soon(() => csCursor.hasNext());
                     const nextEvent = csCursor.next();
                     for (let fieldName in expectedEvent) {
-                        assert.eq(expectedEvent[fieldName], nextEvent[fieldName], {expectedEvent, nextEvent});
+                        const expectedValue = expectedEvent[fieldName];
+                        const actualValue = nextEvent[fieldName];
+                        assert.docEq(expectedValue, actualValue, {expectedEvent, nextEvent});
                     }
                 }
             } else {
@@ -242,7 +257,9 @@ describe("$changeStream", function () {
     describe("Throws an exception when handling shard insertion document coming from the shard in invalid format", function () {
         function assertChangeStreamShouldThrowForV1(projection, expectedErrorCode) {
             const isMultiversion =
-                TestData.useRandomBinVersionsWithinReplicaSet || TestData.mixedBinVersions || TestData.mongosBinVersion;
+                TestData.useRandomBinVersionsWithinReplicaSet ||
+                TestData.mixedBinVersions ||
+                TestData.mongosBinVersion;
             if (isMultiversion) {
                 return;
             }
@@ -262,7 +279,15 @@ describe("$changeStream", function () {
                 let res = csCursor;
                 assert.soon(() => {
                     const cursorId = res._cursorid ?? res.cursor.id;
-                    res = assert.commandWorked(testDB.runCommand({getMore: cursorId, collection: "test"}));
+                    const cursorNs = res._ns ?? res.cursor.ns;
+                    const [cursorDbName, cursorCollName] =
+                        getDBNameAndCollNameFromFullNamespace(cursorNs);
+                    res = assert.commandWorked(
+                        testDB.getSiblingDB(cursorDbName).runCommand({
+                            getMore: cursorId,
+                            collection: cursorCollName,
+                        }),
+                    );
                 });
             }, [expectedErrorCode, undefined]);
         }

@@ -23,6 +23,8 @@
  * - skipMultiversion: If this is set to true then the test will be skipped for multiversion suites
  *   only. This is useful if the command was behind a feature flag in previous versions and is now
  *   enabled.
+ * - skipWCProvenanceCheck: [OPTIONAL] If true, skips asserting on writeConcern.provenance.
+ * - skipWCWtimeoutCheck: [OPTIONAL] If true, skips asserting on writeConcern.wtimeout.
  *
  * @tags: [
  *   does_not_support_stepdowns,
@@ -60,7 +62,10 @@ let validateTestCase = function (test) {
     if ("setUp" in test) {
         assert(typeof test.setUp === "function");
     }
-    assert("command" in test && (typeof test.command === "object" || typeof test.command === "function"));
+    assert(
+        "command" in test &&
+            (typeof test.command === "object" || typeof test.command === "function"),
+    );
     assert("checkReadConcern" in test && typeof test.checkReadConcern === "boolean");
     assert("checkWriteConcern" in test && typeof test.checkWriteConcern === "boolean");
     if ("db" in test) {
@@ -75,11 +80,16 @@ let validateTestCase = function (test) {
     if ("useLogs" in test) {
         assert(typeof test.useLogs === "boolean");
     }
+    if ("skipWCProvenanceCheck" in test) {
+        assert(typeof test.skipWCProvenanceCheck === "boolean");
+    }
+    if ("skipWCWtimeoutCheck" in test) {
+        assert(typeof test.skipWCWtimeoutCheck === "boolean");
+    }
 };
 
 let testCases = {
     _addShard: {skip: "internal command"},
-    _internalClearCollectionShardingMetadata: {skip: "internal command"},
     _cloneCollectionOptionsFromPrimaryShard: {skip: "internal command"},
     _clusterQueryWithoutShardKey: {skip: "internal command"},
     _clusterWriteWithoutShardKey: {skip: "internal command"},
@@ -98,25 +108,28 @@ let testCases = {
     _configsvrCommitChunkMigration: {skip: "internal command"},
     _configsvrCommitChunkSplit: {skip: "internal command"},
     _configsvrCommitMergeAllChunksOnShard: {skip: "internal command"},
+    _configsvrCommitMergeAllPrecomputedChunksOnShard: {skip: "internal command"},
+    _configsvrCommitMergeChunks: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"}, // Can be removed once 6.0 is last LTS
+    _configsvrCommitMoveRange: {skip: "internal command"},
     _configsvrCommitRefineCollectionShardKey: {skip: "internal command"},
     _configsvrCommitReshardCollection: {skip: "internal command"},
     _configsvrCommitShardRemoval: {skip: "internal command"},
+    _configsvrCommitSplitChunk: {skip: "internal command"},
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: "internal command"},
     _configsvrGetHistoricalPlacement: {skip: "internal command"},
     _configsvrMovePrimary: {skip: "internal command"}, // Can be removed once 6.0 is last LTS
     _configsvrMoveRange: {skip: "internal command"},
-    _configsvrRemoveChunks: {skip: "internal command"},
     _configsvrRemoveShard: {skip: "internal command"},
     _configsvrRemoveShardFromZone: {skip: "internal command"},
     _configsvrRemoveTags: {skip: "internal command"},
     _configsvrRenameCollection: {skip: "internal command"},
-    _configsvrRepairShardedCollectionChunksHistory: {skip: "internal command"},
     _configsvrResetPlacementHistory: {skip: "internal command"},
     _configsvrReshardCollection: {skip: "internal command"},
     _configsvrRunRestore: {skip: "internal command"},
+    _configsvrSetAllowChunkOperations: {skip: "internal command"},
     _configsvrSetAllowMigrations: {skip: "internal command"},
     _configsvrSetClusterParameter: {skip: "internal command"},
     _configsvrSetUserWriteBlockMode: {skip: "internal command"},
@@ -155,6 +168,7 @@ let testCases = {
     _shardsvrCloneCatalogData: {skip: "internal command"},
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
+    _shardsvrCheckMetadataConsistencySecondaryParticipant: {skip: "internal command"},
     _shardsvrCleanupStructuredEncryptionData: {skip: "internal command"},
     _shardsvrCommitCreateDatabaseMetadata: {skip: "internal command"},
     _shardsvrCommitDropDatabaseMetadata: {skip: "internal command"},
@@ -190,15 +204,22 @@ let testCases = {
     _shardsvrRecreateRangeDeletionTasksParticipant: {skip: "internal command"},
     _shardsvrRefineCollectionShardKey: {skip: "internal command"},
     _shardsvrCommitRefineCollectionShardKey: {skip: "internal command"},
+    _shardsvrCommitCollModCollectionMetadata: {skip: "internal command"},
+    _shardsvrCommitChunkOperationsMetadata: {skip: "internal command"},
     _shardsvrCommitDropCollectionMetadata: {skip: "internal command"},
     _shardsvrCommitCreateCollectionMetadata: {skip: "internal command"},
+    _shardsvrCommitCreateCollectionChunklessMetadata: {skip: "internal command"},
+    _shardsvrCommitRenameCollectionMetadata: {skip: "internal command"},
     _shardsvrRenameCollection: {skip: "internal command"},
     _shardsvrRenameCollectionParticipant: {skip: "internal command"},
     _shardsvrRenameCollectionParticipantUnblock: {skip: "internal command"},
     _shardsvrRenameIndexMetadata: {skip: "internal command"},
     _shardsvrReshardCollection: {skip: "internal command"},
+    _shardsvrReshardingDonorGetCloneCount: {skip: "internal command"},
     _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: "internal command"},
+    _shardsvrReshardingRecipientFetchFinalCollectionStats: {skip: "internal command"},
     _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: "internal command"},
+    _shardsvrReshardingStepDown: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
     _shardsvrReshardDonorInitialize: {skip: "internal command"},
     _shardsvrReshardDonorCriticalSectionStarted: {skip: "internal command"},
@@ -206,11 +227,14 @@ let testCases = {
     _shardsvrReshardRecipientInitialize: {skip: "internal command"},
     _shardsvrReshardRecipientClone: {skip: "internal command"},
     _shardsvrReshardRecipientCriticalSectionStarted: {skip: "internal command"},
+    _shardsvrReshardCleanupStaleChunks: {skip: "internal command"},
     _shardsvrResolveView: {skip: "internal command"},
     _shardsvrRunSearchIndexCommand: {skip: "internal command"},
+    _shardsvrSetAllowChunkOperations: {skip: "internal command"},
     _shardsvrSetAllowMigrations: {skip: "internal command"},
     _shardsvrSetClusterParameter: {skip: "internal command"},
     _shardsvrSetUserWriteBlockMode: {skip: "internal command"},
+    _shardsvrSplitChunk: {skip: "internal command"},
     _shardsvrValidateShardKeyCandidate: {skip: "internal command"},
     _shardsvrCollMod: {skip: "internal command"},
     _shardsvrCollModParticipant: {skip: "internal command"},
@@ -234,16 +258,24 @@ let testCases = {
     streams_writeCheckpoint: {skip: "internal command"},
     streams_sendEvent: {skip: "internal command"},
     streams_updateConnection: {skip: "internal command"},
+    streams_previewStream: {skip: "internal command"},
+    streams_getMorePreview: {skip: "internal command"},
+    streams_stopPreview: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     abortMoveCollection: {skip: "does not accept read or write concern"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
     abortRewriteCollection: {skip: "does not accept read or write concern"},
     abortTransaction: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: "majority"}}));
+            assert.commandWorked(
+                conn.getDB(db).runCommand({create: coll, writeConcern: {w: "majority"}}),
+            );
             // Ensure that the dbVersion is known.
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
-            assert.eq(1, conn.getCollection(nss).find({x: 1}).readConcern("local").limit(1).next().x);
+            assert.eq(
+                1,
+                conn.getCollection(nss).find({x: 1}).readConcern("local").limit(1).next().x,
+            );
             // Start the transaction.
             assert.commandWorked(
                 conn.getDB(db).runCommand({
@@ -257,7 +289,12 @@ let testCases = {
                 }),
             );
         },
-        command: () => ({abortTransaction: 1, txnNumber: NumberLong(0), autocommit: false, lsid: getLSID()}),
+        command: () => ({
+            abortTransaction: 1,
+            txnNumber: NumberLong(0),
+            autocommit: false,
+            lsid: getLSID(),
+        }),
         db: "admin",
         checkReadConcern: false,
         checkWriteConcern: true,
@@ -273,7 +310,9 @@ let testCases = {
         command: {aggregate: coll, pipeline: [{$match: {x: 1}}, {$out: "out"}], cursor: {}},
         checkReadConcern: true,
         checkWriteConcern: true,
-        // TODO SERVER-119827: Remove this once the issue is fixed.
+        // An aggregation may fail with QueryPlanKilled if the targeted collection is created
+        // concurrently while the aggregation is running. This is expected behavior by design
+        // (see SERVER-119827).
         expectedErrors: [ErrorCodes.QueryPlanKilled],
     },
     analyze: {skip: "TODO SERVER-67772"},
@@ -317,6 +356,7 @@ let testCases = {
     checkShardingIndex: {skip: "does not accept read or write concern"},
     cleanupOrphaned: {skip: "only on shard server"},
     cleanupStructuredEncryptionData: {skip: "does not accept read or write concern"},
+    clearJoinPlanCache: {skip: "does not accept read or write concern"},
     clearJumboFlag: {skip: "does not accept read or write concern"},
     clearLog: {skip: "does not accept read or write concern"},
     clone: {skip: "deprecated"},
@@ -352,10 +392,15 @@ let testCases = {
     commitShardRemoval: {skip: "does not accept read or write concern"},
     commitTransaction: {
         setUp: function (conn) {
-            assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: "majority"}}));
+            assert.commandWorked(
+                conn.getDB(db).runCommand({create: coll, writeConcern: {w: "majority"}}),
+            );
             // Ensure that the dbVersion is known.
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
-            assert.eq(1, conn.getCollection(nss).find({x: 1}).readConcern("local").limit(1).next().x);
+            assert.eq(
+                1,
+                conn.getCollection(nss).find({x: 1}).readConcern("local").limit(1).next().x,
+            );
             // Start the transaction.
             assert.commandWorked(
                 conn.getDB(db).runCommand({
@@ -369,7 +414,12 @@ let testCases = {
                 }),
             );
         },
-        command: () => ({commitTransaction: 1, txnNumber: NumberLong(0), autocommit: false, lsid: getLSID()}),
+        command: () => ({
+            commitTransaction: 1,
+            txnNumber: NumberLong(0),
+            autocommit: false,
+            lsid: getLSID(),
+        }),
         db: "admin",
         checkReadConcern: false,
         checkWriteConcern: true,
@@ -471,7 +521,12 @@ let testCases = {
     dropAllRolesFromDatabase: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
         },
         command: {dropAllRolesFromDatabase: 1},
@@ -483,7 +538,9 @@ let testCases = {
     dropAllUsersFromDatabase: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                conn
+                    .getDB(db)
+                    .runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
             );
         },
         command: {dropAllUsersFromDatabase: 1},
@@ -512,7 +569,12 @@ let testCases = {
     dropRole: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
         },
         command: {dropRole: "foo"},
@@ -525,7 +587,9 @@ let testCases = {
     dropUser: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                conn
+                    .getDB(db)
+                    .runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
             );
         },
         command: {dropUser: "foo"},
@@ -568,8 +632,10 @@ let testCases = {
     getDatabaseVersion: {skip: "does not accept read or write concern"},
     getDefaultRWConcern: {skip: "does not accept read or write concern"},
     getDiagnosticData: {skip: "does not accept read or write concern"},
+    getESECMKIdentifierListStatus: {skip: "does not accept read or write concern"},
     getESERotateActiveKEKStatus: {skip: "does not accept read or write concern"},
     getLog: {skip: "does not accept read or write concern"},
+    getMetricsFilteringAllowlist: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
     getQueryableEncryptionCountInfo: {skip: "not profiled or logged"},
@@ -581,7 +647,12 @@ let testCases = {
     grantPrivilegesToRole: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
         },
         command: {
@@ -596,10 +667,20 @@ let testCases = {
     grantRolesToRole: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "bar", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "bar",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
         },
         command: {grantRolesToRole: "foo", roles: [{role: "bar", db: db}]},
@@ -611,10 +692,17 @@ let testCases = {
     grantRolesToUser: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
             assert.commandWorked(
-                conn.getDB(db).runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                conn
+                    .getDB(db)
+                    .runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
             );
         },
         command: {grantRolesToUser: "foo", roles: [{role: "foo", db: db}]},
@@ -710,7 +798,14 @@ let testCases = {
         checkReadConcern: false,
         checkWriteConcern: true,
     },
-    repairShardedCollectionChunksHistory: {skip: "does not accept read or write concern"},
+    repairReplicatedMetadata: {
+        command: {repairReplicatedMetadata: 1, uuid: UUID(), metadata: {}},
+        checkReadConcern: false,
+        checkWriteConcern: true,
+        target: "replset",
+        db: "admin",
+        useLogs: true,
+    },
     replicateSearchIndexCommand: {skip: "internal command"},
     replSetAbortPrimaryCatchUp: {skip: "does not accept read or write concern"},
     replSetFreeze: {skip: "does not accept read or write concern"},
@@ -756,7 +851,12 @@ let testCases = {
     revokeRolesFromRole: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "bar", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "bar",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
             assert.commandWorked(
                 conn.getDB(db).runCommand({
@@ -776,7 +876,12 @@ let testCases = {
     revokeRolesFromUser: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
             assert.commandWorked(
                 conn.getDB(db).runCommand({
@@ -832,7 +937,7 @@ let testCases = {
     stopTrafficRecording: {skip: "does not accept read or write concern"},
     stopTransitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
     sysprofile: {skip: "internal command"},
-    testCommandFeatureFlaggedOnLatestFCV83: {skip: "internal command"},
+    testCommandFeatureFlaggedOnLatestFCV91: {skip: "internal command"},
     testDeprecation: {skip: "does not accept read or write concern"},
     testDeprecationInVersion2: {skip: "does not accept read or write concern"},
     testInternalTransactions: {skip: "internal command"},
@@ -840,7 +945,6 @@ let testCases = {
     testReshardCloneCollection: {skip: "internal command"},
     testVersions1And2: {skip: "does not accept read or write concern"},
     testVersion2: {skip: "does not accept read or write concern"},
-    timeseriesCatalogBucketParamsChanged: {skip: "internal command"},
     upgradeDowngradeViewlessTimeseries: {skip: "internal command"},
     top: {skip: "does not accept read or write concern"},
     transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
@@ -859,10 +963,17 @@ let testCases = {
         // use profiling.  In the meantime, use logs.
         useLogs: true,
     },
+    updateESECMKIdentifierList: {skip: "does not accept read or write concern"},
+    updateMetricsFilteringAllowlist: {skip: "does not accept read or write concern"},
     updateRole: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createRole: "foo", privileges: [], roles: [], writeConcern: {w: 1}}),
+                conn.getDB(db).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [],
+                    writeConcern: {w: 1},
+                }),
             );
         },
         command: {updateRole: "foo", privileges: []},
@@ -875,7 +986,9 @@ let testCases = {
     updateUser: {
         setUp: function (conn) {
             assert.commandWorked(
-                conn.getDB(db).runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
+                conn
+                    .getDB(db)
+                    .runCommand({createUser: "foo", pwd: "bar", roles: [], writeConcern: {w: 1}}),
             );
         },
         command: {updateUser: "foo", pwd: "bar2"},
@@ -895,6 +1008,7 @@ let testCases = {
     getShardingReady: {skip: "internal command"},
     whatsmysni: {skip: "does not accept read or write concern"},
     whatsmyuri: {skip: "internal command"},
+    wiredTigerRepair: {skip: "does not accept read or write concern"},
 };
 
 commandsRemovedFromMongodSinceLastLTS.forEach(function (cmd) {
@@ -918,7 +1032,10 @@ let setDefaultRWConcernActualTestCase = {
         if ("defaultWriteConcern" in currentDefaults) {
             res = Object.extend(res, {defaultWriteConcern: currentDefaults.defaultWriteConcern});
         }
-        if (!("defaultReadConcern" in currentDefaults) && !("defaultWriteConcern" in currentDefaults)) {
+        if (
+            !("defaultReadConcern" in currentDefaults) &&
+            !("defaultWriteConcern" in currentDefaults)
+        ) {
             res = Object.extend(res, {defaultWriteConcern: {w: 1}});
         }
         return res;
@@ -928,6 +1045,14 @@ let setDefaultRWConcernActualTestCase = {
     checkWriteConcern: true,
     shardedTargetsConfigServer: true,
     useLogs: true,
+    // setDefaultRWConcern forwards to the config server via appendMajorityWriteConcern on the
+    // original client cmdObj (TODO SERVER-91373), not via applyReadWriteConcern. When the client
+    // provides a WC field (partial or empty), appendMajorityWriteConcern builds the forwarded WC
+    // from the parsed client WC without inheriting provenance or wtimeout from the opCtx. The
+    // config server independently determines "clientSupplied" and wtimeout comes from the raw
+    // client WC (0 for empty, 9999999 for partial). We can only reliably verify w == "majority".
+    skipWCProvenanceCheck: true,
+    skipWCWtimeoutCheck: true,
 };
 
 // Example log line (broken over several lines), indicating the sections matched by the regex
@@ -939,16 +1064,89 @@ let setDefaultRWConcernActualTestCase = {
 //                                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //      writeConcern:{ w: "majority", wtimeout: 1234567 } storage:{} protocol:op_msg 275ms
 //     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-function createLogLineRegularExpressionForTestCase(test, targetId, explicitRWC) {
-    let expectedProvenance = explicitRWC ? "clientSupplied" : "customDefault";
-    let pattern = `"comment":"${targetId}"`;
+// Finds the slow-query log entry whose command has the given comment, parses it as JSON, and
+// asserts that the RC/WC fields satisfy the expected values. Preferred over regex matching because
+// it operates on the parsed object rather than the serialized string, which makes field access
+// straightforward and avoids fragility around field ordering and BSON value serialization.
+function checkLogEntryRWC(
+    checkConn,
+    targetId,
+    test,
+    explicitRWC,
+    {expectAfterClusterTime = false, expectedWtimeout = 1234567} = {},
+    testDesc,
+) {
+    // Some commands (e.g. bulkWrite, createRole) propagate the comment to inner write sub-ops,
+    // which are also logged with the same comment but without a top-level writeConcern/readConcern
+    // in the log attr. Slow in-progress query logs (SLOWPROG) can contain the same comment and a
+    // nested command.writeConcern before wait-for-WC has populated attr.writeConcern. Skip those
+    // in-progress entries unless applied attr.writeConcern.w is already present, and require the
+    // attr-level fields so we land on the completed outer command log otherwise.
+    const logs = checkLog.getGlobalLog(checkConn);
+    const logLine =
+        logs?.find((l) => {
+            if (!l.includes(targetId)) return false;
+            let entry;
+            try {
+                entry = JSON.parse(l);
+            } catch (e) {
+                return false;
+            }
+            const attr = entry.attr;
+            // Exclude Slow in-progress query unless it has already reported applied attr.writeConcern.w.
+            if (entry.msg === "Slow in-progress query" && attr?.writeConcern?.w === undefined) {
+                return false;
+            }
+            if (test.checkWriteConcern && attr?.writeConcern === undefined) return false;
+            if (test.checkReadConcern && attr?.readConcern === undefined) return false;
+            return true;
+        }) ?? null;
+    assert(
+        logLine !== null,
+        "No log entry found containing comment " + targetId + " for " + testDesc,
+    );
+
+    const entry = JSON.parse(logLine);
+    const attr = entry.attr;
+    const expectedProvenance = explicitRWC ? "clientSupplied" : "customDefault";
+
     if (test.checkReadConcern) {
-        pattern += `.*"readConcern":{"level":"majority","provenance":"${expectedProvenance}"}`;
+        assert.eq(attr.readConcern?.level, "majority", "RC level mismatch for " + testDesc, {
+            entry,
+        });
+        assert.eq(
+            attr.readConcern?.provenance,
+            expectedProvenance,
+            "RC provenance mismatch for " + testDesc,
+            {entry},
+        );
+        if (expectAfterClusterTime) {
+            assert(
+                attr.readConcern?.afterClusterTime !== undefined,
+                "afterClusterTime missing from RC for " + testDesc,
+                {entry},
+            );
+        }
     }
     if (test.checkWriteConcern) {
-        pattern += `.*"writeConcern":{"w":"majority","wtimeout":1234567,"provenance":"${expectedProvenance}"}`;
+        assert.eq(attr.writeConcern?.w, "majority", "WC w mismatch for " + testDesc, {entry});
+        if (!test.skipWCWtimeoutCheck) {
+            assert.eq(
+                attr.writeConcern?.wtimeout,
+                expectedWtimeout,
+                "WC wtimeout mismatch for " + testDesc,
+                {entry},
+            );
+        }
+        if (!test.skipWCProvenanceCheck) {
+            assert.eq(
+                attr.writeConcern?.provenance,
+                expectedProvenance,
+                "WC provenance mismatch for " + testDesc,
+                {entry},
+            );
+        }
     }
-    return new RegExp(pattern);
 }
 
 // Example profile document, indicating the fields matched by the filter generated by this function:
@@ -980,7 +1178,12 @@ function createLogLineRegularExpressionForTestCase(test, targetId, explicitRWC) 
 //     "planSummary" : "COLLSCAN",
 //      ...
 // }
-function createProfileFilterForTestCase(test, targetId, explicitRWC) {
+function createProfileFilterForTestCase(
+    test,
+    targetId,
+    explicitRWC,
+    {expectAfterClusterTime = false, expectedWtimeout = 1234567} = {},
+) {
     let expectedProvenance = explicitRWC ? "clientSupplied" : "customDefault";
     let commandProfile = {
         "command.comment": targetId,
@@ -992,12 +1195,15 @@ function createProfileFilterForTestCase(test, targetId, explicitRWC) {
             {"readConcern.level": "majority", "readConcern.provenance": expectedProvenance},
             commandProfile,
         );
+        if (expectAfterClusterTime) {
+            commandProfile["readConcern.afterClusterTime"] = {$exists: true};
+        }
     }
     if (test.checkWriteConcern) {
         commandProfile = Object.extend(
             {
                 "writeConcern.w": "majority",
-                "writeConcern.wtimeout": 1234567,
+                "writeConcern.wtimeout": expectedWtimeout,
                 "writeConcern.provenance": expectedProvenance,
             },
             commandProfile,
@@ -1006,7 +1212,20 @@ function createProfileFilterForTestCase(test, targetId, explicitRWC) {
     return commandProfile;
 }
 
-function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicitRWC, explicitProvenance = false}) {
+function runScenario(
+    desc,
+    conn,
+    regularCheckConn,
+    configSvrCheckConn,
+    {
+        explicitRWC,
+        explicitProvenance = false,
+        partialRC = false, // inject {readConcern:{afterClusterTime:T}}, expect level from CWRC
+        partialWC = false, // inject {writeConcern:{wtimeout:9999999}}, expect w from CWWC
+        emptyRC = false, // inject {readConcern:{}}, expect full RC from CWRC
+        emptyWC = false, // inject {writeConcern:{}}, expect full WC from CWWC
+    },
+) {
     let runCommandTest = function (cmdName, test) {
         // The emptycapped command was removed but breaks this test in multiversion. The same
         // applies for captrunc.
@@ -1016,7 +1235,10 @@ function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicit
             return;
         }
 
-        assert(test !== undefined, "coverage failure: must define a RWC defaults application test for " + cmdName);
+        assert(
+            test !== undefined,
+            "coverage failure: must define a RWC defaults application test for " + cmdName,
+        );
 
         if (test.skip !== undefined) {
             print("skipping " + cmdName + ": " + test.skip);
@@ -1073,7 +1295,10 @@ function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicit
         }
 
         // Get the command from the test case.
-        let actualCmd = typeof test.command === "function" ? test.command(conn) : Object.assign({}, test.command, {});
+        let actualCmd =
+            typeof test.command === "function"
+                ? test.command(conn)
+                : Object.assign({}, test.command, {});
         assert.eq("undefined", typeof actualCmd.readConcern);
         assert.eq("undefined", typeof actualCmd.writeConcern);
 
@@ -1101,6 +1326,29 @@ function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicit
                 }
                 actualCmd = Object.extend(actualCmd, {writeConcern: explicitWC});
             }
+        } else {
+            // Partial and empty RC/WC scenarios: inject a concern that is missing some fields so
+            // the router must fill them in from the cluster-wide defaults.
+            if (partialRC && test.checkReadConcern) {
+                // No level — the router must merge the level from CWRC.
+                const clusterTime =
+                    conn.getDB("admin").runCommand({hello: 1}).$clusterTime?.clusterTime ??
+                    Timestamp(1, 0);
+                actualCmd = Object.extend(actualCmd, {
+                    readConcern: {afterClusterTime: clusterTime},
+                });
+            }
+            if (partialWC && test.checkWriteConcern) {
+                // No 'w' — the router must merge 'w' from CWWC. Use a wtimeout that differs from
+                // the default (1234567) so a match in the profiler is unambiguous.
+                actualCmd = Object.extend(actualCmd, {writeConcern: {wtimeout: 9999999}});
+            }
+            if (emptyRC && test.checkReadConcern) {
+                actualCmd = Object.extend(actualCmd, {readConcern: {}});
+            }
+            if (emptyWC && test.checkWriteConcern) {
+                actualCmd = Object.extend(actualCmd, {writeConcern: {}});
+            }
         }
         if (!sharded) {
             actualCmd = Object.extend(actualCmd, {comment: targetId});
@@ -1109,7 +1357,6 @@ function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicit
         // Run the command.
         let res = conn.getDB("db" in test ? test.db : db).runCommand(actualCmd);
 
-        // TODO SERVER-119827: Remove expectedErrors check once the issue is fixed.
         if (!test.expectedErrors) {
             assert.commandWorked(res);
         } else {
@@ -1118,16 +1365,16 @@ function runScenario(desc, conn, regularCheckConn, configSvrCheckConn, {explicit
 
         if (res.ok) {
             // Check that the command applied the correct RWC.
+            const filterOpts = {
+                expectAfterClusterTime: partialRC && test.checkReadConcern,
+                expectedWtimeout: partialWC && test.checkWriteConcern ? 9999999 : 1234567,
+            };
             if (test.useLogs) {
-                let re = createLogLineRegularExpressionForTestCase(test, targetId, explicitRWC);
-                assert(
-                    checkLog.checkContainsOnce(checkConn, re),
-                    "unable to find pattern " + re + " in logs on " + checkConn + " for test " + thisTestDesc,
-                );
+                checkLogEntryRWC(checkConn, targetId, test, explicitRWC, filterOpts, thisTestDesc);
             } else {
                 profilerHasSingleMatchingEntryOrThrow({
                     profileDB: checkConn.getDB(db),
-                    filter: createProfileFilterForTestCase(test, targetId, explicitRWC),
+                    filter: createProfileFilterForTestCase(test, targetId, explicitRWC, filterOpts),
                 });
             }
         }
@@ -1179,9 +1426,15 @@ function runTests(conn, regularCheckConn, configSvrCheckConn) {
             defaultWriteConcern: {w: "majority", wtimeout: 1234567},
         }),
     );
-    runScenario("Scenario: RWC defaults set, explicit RWC absent", conn, regularCheckConn, configSvrCheckConn, {
-        explicitRWC: false,
-    });
+    runScenario(
+        "Scenario: RWC defaults set, explicit RWC absent",
+        conn,
+        regularCheckConn,
+        configSvrCheckConn,
+        {
+            explicitRWC: false,
+        },
+    );
 
     assert.commandWorked(
         conn.adminCommand({
@@ -1219,6 +1472,67 @@ function runTests(conn, regularCheckConn, configSvrCheckConn) {
         regularCheckConn,
         configSvrCheckConn,
         {explicitRWC: true, explicitProvenance: true},
+    );
+
+    // Partial RC: client sends {readConcern:{afterClusterTime:T}} with no level; the router must
+    // merge the level from CWRC so the shard receives {level:"majority", afterClusterTime:T}.
+    assert.commandWorked(
+        conn.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultReadConcern: {level: "majority"},
+            defaultWriteConcern: {w: "majority", wtimeout: 1234567},
+        }),
+    );
+    runScenario(
+        "Scenario: CWRC set, partial client RC (afterClusterTime only, no level)",
+        conn,
+        regularCheckConn,
+        configSvrCheckConn,
+        {explicitRWC: false, partialRC: true},
+    );
+
+    // Empty RC: client sends {readConcern:{}}; the router should treat this like absent RC and
+    // apply CWRC, so the shard receives {level:"majority"}.
+    runScenario(
+        "Scenario: CWRC set, empty client RC ({})",
+        conn,
+        regularCheckConn,
+        configSvrCheckConn,
+        {explicitRWC: false, emptyRC: true},
+    );
+
+    // Partial WC: client sends {writeConcern:{wtimeout:9999999}} with no 'w'; the router must
+    // merge 'w' from CWWC so the shard receives {w:"majority", wtimeout:9999999}. CWWC has no
+    // wtimeout so the client's value is unambiguously the one that arrives at the shard.
+    assert.commandWorked(
+        conn.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultReadConcern: {level: "majority"},
+            defaultWriteConcern: {w: "majority"},
+        }),
+    );
+    runScenario(
+        "Scenario: CWWC set, partial client WC (wtimeout only, no w)",
+        conn,
+        regularCheckConn,
+        configSvrCheckConn,
+        {explicitRWC: false, partialWC: true},
+    );
+
+    // Empty WC: client sends {writeConcern:{}}; the router should apply the full CWWC.
+    assert.commandWorked(
+        conn.adminCommand({
+            setDefaultRWConcern: 1,
+            defaultReadConcern: {level: "majority"},
+            defaultWriteConcern: {w: "majority", wtimeout: 1234567},
+        }),
+    );
+    runScenario(
+        "Scenario: CWWC set, empty client WC ({})",
+        conn,
+        regularCheckConn,
+        configSvrCheckConn,
+        {explicitRWC: false, emptyWC: true},
     );
 }
 

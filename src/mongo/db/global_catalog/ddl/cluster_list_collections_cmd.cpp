@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -61,6 +34,7 @@
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor_pool.h"
+#include "mongo/idl/idl_command_parser.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_requests_sender.h"
@@ -72,6 +46,7 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -82,23 +57,27 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto systemBucketsDot = "system.buckets."_sd;
+constexpr auto systemBucketsDot = "system.buckets."sv;
 
 /**
- * Removes 'recordIdsReplicated' from the 'info' sub-document of a single listCollections result
- * entry. The field is internal and can be inconsistent across shards, so it must not be exposed
- * via the router.
+ * Removes shard local fields from the 'info' sub-document of a single listCollections result entry.
+ * 'recordIdsReplicated' and 'fastCount' are shard local and can be inconsistent across shards (a
+ * router would only surface the DB-primary shard's values), so they must not be exposed via the
+ * router.
  */
-static BSONObj scrubRecordIdsReplicatedFromCollectionEntry(BSONObj entry) {
+static BSONObj scrubShardLocalFieldsFromCollectionEntry(BSONObj entry) {
     auto infoElem = entry["info"];
     if (infoElem.eoo() || infoElem.type() != BSONType::object) {
         return entry;
     }
     BSONObjBuilder entryBuilder;
     for (auto&& field : entry) {
-        if (field.fieldNameStringData() == "info"_sd) {
-            entryBuilder.append("info"_sd, infoElem.Obj().removeField("recordIdsReplicated"_sd));
+        if (field.fieldNameStringData() == "info"sv) {
+            entryBuilder.append(
+                "info"sv,
+                infoElem.Obj().removeFields(StringDataSet{"recordIdsReplicated"sv, "fastCount"sv}));
         } else {
             entryBuilder.append(field);
         }
@@ -178,7 +157,7 @@ BSONObj rewriteCommandForListingOwnCollections(OperationContext* opCtx,
     BSONArrayBuilder setBuilder(nameBuilder.subarrayStart("$in"));
 
     // Load the de-duplicated set into a BSON array
-    for (StringData collectionName : collectionNames) {
+    for (std::string_view collectionName : collectionNames) {
         setBuilder << collectionName;
     }
     setBuilder.done();
@@ -300,7 +279,7 @@ public:
                         Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
                         Grid::get(opCtx)->getCursorManager(),
                         privileges,
-                        scrubRecordIdsReplicatedFromCollectionEntry));
+                        scrubShardLocalFieldsFromCollectionEntry));
 
                     CommandHelpers::filterCommandReplyForPassthrough(transformedResponse, &output);
                     uassertStatusOK(getStatusFromCommandResult(output.asTempObj()));

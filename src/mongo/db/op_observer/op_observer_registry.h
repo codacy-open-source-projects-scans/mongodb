@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -57,13 +31,14 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 struct IndexBuildInfo;
 
@@ -224,7 +199,7 @@ public:
                    std::vector<InsertStatement>::const_iterator begin,
                    std::vector<InsertStatement>::const_iterator end,
                    const std::vector<RecordId>& recordIds,
-                   std::vector<bool> fromMigrate,
+                   const std::vector<bool>& fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override {
         ReservedTimes times{opCtx};
@@ -299,7 +274,7 @@ public:
     }
 
     void onContainerInsert(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            int64_t key,
                            std::span<const char> value) override {
         ReservedTimes times{opCtx};
@@ -309,7 +284,7 @@ public:
     }
 
     void onContainerInsert(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            std::span<const char> key,
                            std::span<const char> value) override {
         ReservedTimes times{opCtx};
@@ -318,8 +293,28 @@ public:
         }
     }
 
+    void onContainerInsert(OperationContext* opCtx,
+                           std::string_view ident,
+                           std::span<const std::span<const char>> keys,
+                           std::span<const char> value) override {
+        ReservedTimes times{opCtx};
+        for (auto&& observer : _observers) {
+            observer->onContainerInsert(opCtx, ident, keys, value);
+        }
+    }
+
+    void onContainerInsert(OperationContext* opCtx,
+                           std::string_view ident,
+                           int64_t key,
+                           std::span<const std::span<const char>> vals) override {
+        ReservedTimes times{opCtx};
+        for (auto&& observer : _observers) {
+            observer->onContainerInsert(opCtx, ident, key, vals);
+        }
+    }
+
     void onContainerUpdate(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            int64_t key,
                            std::span<const char> value) override {
         ReservedTimes times{opCtx};
@@ -329,7 +324,7 @@ public:
     }
 
     void onContainerUpdate(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
                            std::span<const char> key,
                            std::span<const char> value) override {
         ReservedTimes times{opCtx};
@@ -338,7 +333,7 @@ public:
         }
     }
 
-    void onContainerDelete(OperationContext* opCtx, StringData ident, int64_t key) override {
+    void onContainerDelete(OperationContext* opCtx, std::string_view ident, int64_t key) override {
         ReservedTimes times{opCtx};
         for (auto&& observer : _observers) {
             observer->onContainerDelete(opCtx, ident, key);
@@ -346,7 +341,16 @@ public:
     }
 
     void onContainerDelete(OperationContext* opCtx,
-                           StringData ident,
+                           std::string_view ident,
+                           std::span<const std::span<const char>> keys) override {
+        ReservedTimes times{opCtx};
+        for (auto&& observer : _observers) {
+            observer->onContainerDelete(opCtx, ident, keys);
+        }
+    }
+
+    void onContainerDelete(OperationContext* opCtx,
+                           std::string_view ident,
                            std::span<const char> key) override {
         ReservedTimes times{opCtx};
         for (auto&& observer : _observers) {
@@ -693,10 +697,32 @@ public:
             o->onDropDatabaseMetadata(opCtx, op);
     }
 
+    void onInvalidateAllCollectionMetadata(OperationContext* opCtx,
+                                           const repl::OplogEntry& op) override {
+        for (auto& o : _observers)
+            o->onInvalidateAllCollectionMetadata(opCtx, op);
+    }
+
+    void onInvalidateAllDatabaseMetadata(OperationContext* opCtx,
+                                         const repl::OplogEntry& op) override {
+        for (auto& o : _observers)
+            o->onInvalidateAllDatabaseMetadata(opCtx, op);
+    }
+
     void onInvalidateCollectionMetadata(OperationContext* opCtx,
                                         const repl::OplogEntry& op) override {
         for (auto& o : _observers)
             o->onInvalidateCollectionMetadata(opCtx, op);
+    }
+
+    void onSetAllowChunkOperations(OperationContext* opCtx, const repl::OplogEntry& op) override {
+        for (auto& o : _observers)
+            o->onSetAllowChunkOperations(opCtx, op);
+    }
+
+    void onUpdateCollectionMetadata(OperationContext* opCtx, const repl::OplogEntry& op) override {
+        for (auto& o : _observers)
+            o->onUpdateCollectionMetadata(opCtx, op);
     }
 
     void onTruncateRange(OperationContext* opCtx,
@@ -776,4 +802,4 @@ private:
     // observers must be registered before any callback fires.
     Atomic<bool> _sealed{false};
 };
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

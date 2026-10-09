@@ -8,6 +8,7 @@
  */
 
 import {after, before, describe, it} from "jstests/libs/mochalite.js";
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/query_integration_search/search.js";
 import {getShardNames} from "jstests/libs/cluster_helpers/sharded_cluster_fixture_helpers.js";
 
@@ -24,7 +25,9 @@ const setUp = function (shardColl = true) {
         coll.drop();
 
         // Enable sharding for the test DB (let the fixture choose the primary shard).
-        assert.commandWorked(testDb.adminCommand({enableSharding: testDb.getName(), primaryShard: shardNames[0]}));
+        assert.commandWorked(
+            testDb.adminCommand({enableSharding: testDb.getName(), primaryShard: shardNames[0]}),
+        );
 
         // Seed some data before sharding.
         assert.commandWorked(
@@ -42,8 +45,12 @@ const setUp = function (shardColl = true) {
 
         if (shardColl) {
             // Shard the collection on {_id: 1} to make it eligible for resharding.
-            assert.commandWorked(testDb.adminCommand({shardCollection: coll.getFullName(), key: {_id: 1}}));
-            assert.commandWorked(testDb.adminCommand({split: coll.getFullName(), middle: {_id: 10}}));
+            assert.commandWorked(
+                testDb.adminCommand({shardCollection: coll.getFullName(), key: {_id: 1}}),
+            );
+            assert.commandWorked(
+                testDb.adminCommand({split: coll.getFullName(), middle: {_id: 10}}),
+            );
             assert.commandWorked(
                 testDb.adminCommand({
                     moveChunk: coll.getFullName(),
@@ -67,10 +74,29 @@ const setUp = function (shardColl = true) {
     };
 };
 
-const testWithExpectedFailure = function (cmd) {
+const getSearchIndexAbortCount = function (sectionName) {
+    const topology = DiscoverTopology.findConnectedNodes(db.getMongo());
+    return topology.configsvr.nodes.reduce((total, nodeAddr) => {
+        const stats = new Mongo(nodeAddr).getDB("admin").serverStatus({}).shardingStatistics[
+            sectionName
+        ];
+        return total + ((stats && stats.countSearchIndexAborts) || 0);
+    }, 0);
+};
+
+const testWithExpectedFailure = function (cmd, sectionName) {
     return function () {
+        const countBefore = getSearchIndexAbortCount(sectionName);
+
         const res = testDb.adminCommand(cmd);
         assert.commandFailedWithCode(res, ErrorCodes.IllegalOperation);
+
+        assert.gte(
+            getSearchIndexAbortCount(sectionName),
+            countBefore + 1,
+            "countSearchIndexAborts should have incremented",
+            {countBefore},
+        );
     };
 };
 
@@ -131,12 +157,14 @@ const cmdsToTest = [
 for (const cmdObj of cmdsToTest) {
     const name = cmdObj.name;
     const cmd = cmdObj.cmd;
+    // reshardCollection metrics are reported under "resharding"; all others match the command name.
+    const sectionName = name === "reshardCollection" ? "resharding" : name;
     const shardColl = cmdObj.shardColl ?? true;
     describe(`${name} rejects collections with MongoDB Search indexes`, function () {
         before(setUp(shardColl));
         after(tearDown());
 
-        it(`fails ${name} when a search index exists`, testWithExpectedFailure(cmd));
+        it(`fails ${name} when a search index exists`, testWithExpectedFailure(cmd, sectionName));
         it(`allows ${name} after dropping the search index`, testAfterDroppingIndex(cmd));
     });
 }

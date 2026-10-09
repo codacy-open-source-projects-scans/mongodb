@@ -1,5 +1,6 @@
 /**
  * Test error conditions for the `$search` aggregation pipeline stages.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite.
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
@@ -61,9 +62,10 @@ assert.commandFailedWithCode(
 );
 
 // $search is not allowed in an update pipeline.
-assert.commandFailedWithCode(testDB.runCommand({"findandmodify": collName, "update": [{"$search": {}}]}), [
-    ErrorCodes.InvalidOptions,
-]);
+assert.commandFailedWithCode(
+    testDB.runCommand({"findandmodify": collName, "update": [{"$search": {}}]}),
+    [ErrorCodes.InvalidOptions],
+);
 
 // $search is not allowed in an update command pipeline.
 assert.commandFailedWithCode(
@@ -75,9 +77,10 @@ assert.commandFailedWithCode(
 );
 
 // $searchMeta is not allowed in an update pipeline.
-assert.commandFailedWithCode(testDB.runCommand({"findandmodify": collName, "update": [{"$searchMeta": {}}]}), [
-    ErrorCodes.InvalidOptions,
-]);
+assert.commandFailedWithCode(
+    testDB.runCommand({"findandmodify": collName, "update": [{"$searchMeta": {}}]}),
+    [ErrorCodes.InvalidOptions],
+);
 
 // $searchMeta is not allowed in an update command pipeline.
 assert.commandFailedWithCode(
@@ -93,21 +96,29 @@ assert.commandWorked(testDB.runCommand("ping"));
 
 // Assert the oversubscription factor cannot be configured to any value less than 1.
 assert.commandFailedWithCode(
-    testDB.adminCommand({setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: 0.9}}}),
+    testDB.adminCommand({
+        setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: 0.9}},
+    }),
     ErrorCodes.BadValue,
 );
 assert.commandFailedWithCode(
-    testDB.adminCommand({setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: 0}}}),
+    testDB.adminCommand({
+        setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: 0}},
+    }),
     ErrorCodes.BadValue,
 );
 assert.commandFailedWithCode(
-    testDB.adminCommand({setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: -5}}}),
+    testDB.adminCommand({
+        setClusterParameter: {internalSearchOptions: {oversubscriptionFactor: -5}},
+    }),
     ErrorCodes.BadValue,
 );
 
 // Assert the batchSize growth factor cannot be configured to any value less than 1.
 assert.commandFailedWithCode(
-    testDB.adminCommand({setClusterParameter: {internalSearchOptions: {batchSizeGrowthFactor: 0.9}}}),
+    testDB.adminCommand({
+        setClusterParameter: {internalSearchOptions: {batchSizeGrowthFactor: 0.9}},
+    }),
     ErrorCodes.BadValue,
 );
 assert.commandFailedWithCode(
@@ -115,7 +126,9 @@ assert.commandFailedWithCode(
     ErrorCodes.BadValue,
 );
 assert.commandFailedWithCode(
-    testDB.adminCommand({setClusterParameter: {internalSearchOptions: {batchSizeGrowthFactor: -5}}}),
+    testDB.adminCommand({
+        setClusterParameter: {internalSearchOptions: {batchSizeGrowthFactor: -5}},
+    }),
     ErrorCodes.BadValue,
 );
 

@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
@@ -44,14 +17,20 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings/query_settings.h"
+#include "mongo/db/query/query_utils.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/idl/idl_command_parser.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <string_view>
 
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
@@ -89,48 +68,23 @@ AggregateCommandRequest parseFromBSON(const BSONObj& cmdObj,
         request.setExplain(true);
     }
 
-    validate(request, cmdObj, request.getNamespace(), explainVerbosity);
+    validate(request, cmdObj, request.getNamespace());
 
     return request;
 }
 
 void addQuerySettingsToRequest(AggregateCommandRequest& request,
                                const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    const auto& querySettings = expCtx->getQuerySettings();
-    if (!querySettings.toBSON().isEmpty()) {
-        request.setQuerySettings(querySettings);
-    }
+    query_settings::addQuerySettingsToRequest(expCtx->getOperationContext(), request);
 }
 
-void addIfrFlagsToRequest(AggregateCommandRequest& request,
-                          std::shared_ptr<IncrementalFeatureRolloutContext> ifrContext) {
-    tassert(11565104, "IFRContext cannot be null", ifrContext);
-    auto flagsToSerialize = IncrementalRolloutFeatureFlag::getFlagsForOutgoingRequests();
-    if (!flagsToSerialize.empty()) {
-        request.setIfrFlags(ifrContext->serializeFlagValues(flagsToSerialize));
-    }
-}
-
-// TODO SERVER-119402: Change explainVerbosity parameter to bool.
 void validate(const AggregateCommandRequest& aggregate,
               const BSONObj& cmdObj,
               const NamespaceString& nss,
-              boost::optional<ExplainOptions::Verbosity> explainVerbosity) {
-    // True if the aggregate command itself included an 'explain' field.
-    bool hasExplainElem = aggregate.getExplain().has_value();
-
-    // True if this request is being explained, either via a top-level 'explain'
-    // command (via explainVerbosity) or via an inline 'explain' field in the
-    // aggregation command.
-    bool hasExplain = explainVerbosity.has_value() || hasExplainElem;
+              Client* client) {
+    bool hasExplain = aggregate.getExplain().has_value();
     bool hasFromRouterElem = getFromRouter(aggregate).has_value();
     bool hasNeedsMergeElem = aggregate.getNeedsMerge().has_value();
-
-    if (explainVerbosity) {
-        uassert(ErrorCodes::FailedToParse,
-                "The 'explain' option is illegal when a explain verbosity is also provided",
-                !cmdObj.hasField(AggregateCommandRequest::kExplainFieldName));
-    }
 
     uassert(ErrorCodes::InvalidNamespace,
             fmt::format("Invalid collection name specified '{}'",
@@ -138,17 +92,17 @@ void validate(const AggregateCommandRequest& aggregate,
             cmdObj.firstElement().valueStringDataSafe() !=
                 NamespaceString::kCollectionlessAggregateCollection);
 
-    // 'hasExplainElem' implies an aggregate command-level explain option, which does not require
-    // a cursor argument.
+    // Explain of an aggregation command does not require the 'cursor' field.
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "The '" << AggregateCommandRequest::kCursorFieldName
                           << "' option is required, except for aggregate with the explain argument",
-            hasExplainElem || cmdObj.hasField(AggregateCommandRequest::kCursorFieldName));
+            hasExplain || cmdObj.hasField(AggregateCommandRequest::kCursorFieldName));
 
     uassert(ErrorCodes::FailedToParse,
-            str::stream() << "Aggregation explain does not support the'"
+            str::stream() << "Aggregation explain does not support the '"
                           << WriteConcernOptions::kWriteConcernField << "' option",
-            !hasExplain || !aggregate.getWriteConcern().has_value());
+            !hasExplain || !aggregate.getWriteConcern().has_value() ||
+                (client && isInternalOrDirectClient(client)));
 
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "Cannot specify '" << AggregateCommandRequest::kNeedsMergeFieldName
@@ -178,6 +132,25 @@ void validate(const AggregateCommandRequest& aggregate,
                     SimpleBSONObjComparator::kInstance.evaluate(
                         hintElem.value() == BSON(query_request_helper::kNaturalSortField << 1)));
     }
+
+    if (aggregate.getResumeAfter() || aggregate.getStartAt()) {
+        uassert(12848200,
+                "$_resumeAfter is not supported for collectionless aggregations",
+                !nss.isCollectionlessAggregateNS());
+    }
+
+    if (client) {
+        assertInternalParamsAreSetByInternalClients(client, aggregate);
+
+        // '$_isHybridSearch' is set internally for a desugared $rankFusion/$scoreFusion pipeline by
+        // the router. It should be checked here against the request as it came off the wire, rather
+        // than in the generic command request validation checks as those are re-run by the router
+        // against potentially mutated requests, still under the user's own external client.
+        uassert(13212500,
+                str::stream() << "BSON field '" << AggregateCommandRequest::kIsHybridSearchFieldName
+                              << "' is an unknown field",
+                isInternalOrDirectClient(client) || !aggregate.getIsHybridSearch().has_value());
+    }
 }
 
 void validateRequestWithClient(const OperationContext* opCtx,
@@ -193,8 +166,20 @@ void validateRequestWithClient(const OperationContext* opCtx,
     //     - Does not have any transport session
     //     - The transport session tag is internal
     bool isInternalThreadOrClient = !client->session() || client->isInternalClient();
+
+    // Forbid fromRouter for non-internal clients. They can't actually be mongos.
+    uassert(ErrorCodes::BadValue,
+            "BSON field 'fromRouter' is an unknown field",
+            !getFromRouter(request) || isInternalThreadOrClient || client->isInDirectClient());
+
     // Checks that the 'exchange' or 'fromRouter' option can only be specified by the internal
     // client.
+    if (request.getExchange()) {
+        // Forbid exchange from external clients
+        uassert(ErrorCodes::BadValue,
+                "BSON field 'exchange' is an unknown field",
+                isInternalThreadOrClient || client->isInDirectClient());
+    }
     if ((request.getExchange() || getFromRouter(request)) && apiStrict && apiVersion == "1") {
         uassert(ErrorCodes::APIStrictError,
                 str::stream() << "'exchange' and 'fromRouter' option cannot be specified with "
@@ -203,17 +188,17 @@ void validateRequestWithClient(const OperationContext* opCtx,
                 isInternalThreadOrClient);
     }
 
-    // Forbid users from passing 'originalQueryShapeHash' explicitly.
-    if (request.getOriginalQueryShapeHash()) {
-        uassert(10742706,
-                "BSON field 'originalQueryShapeHash' is an unknown field",
-                isInternalThreadOrClient || client->isInDirectClient());
-    }
-
     // Forbid users from passing 'ifrFlags' explicitly.
     if (request.getIfrFlags()) {
         uassert(11516201,
                 "BSON field 'ifrFlags' is an unknown field",
+                isInternalThreadOrClient || client->isInDirectClient());
+    }
+
+    // Forbid users from passing '$_translatedForViewlessTimeseries' explicitly.
+    if (request.getTranslatedForViewlessTimeseries()) {
+        uassert(13088600,
+                "BSON field '$_translatedForViewlessTimeseries' is an unknown field",
                 isInternalThreadOrClient || client->isInDirectClient());
     }
 }
@@ -325,7 +310,9 @@ boost::optional<bool> parseExplainModeFromBSON(const BSONElement& explainElem) {
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-void serializeExplainToBSON(const bool& explain, StringData fieldName, BSONObjBuilder* builder) {
+void serializeExplainToBSON(const bool& explain,
+                            std::string_view fieldName,
+                            BSONObjBuilder* builder) {
     // Note that we do not serialize 'explain' field to the command object. This serializer only
     // serializes an empty cursor object for field 'cursor' when it is an explain command.
     builder->append(AggregateCommandRequest::kCursorFieldName, BSONObj());
@@ -361,7 +348,7 @@ mongo::SimpleCursorOptions parseAggregateCursorFromBSON(const BSONElement& curso
  * break because of it.
  */
 void serializeAggregateCursorToBSON(const mongo::SimpleCursorOptions& cursor,
-                                    StringData fieldName,
+                                    std::string_view fieldName,
                                     BSONObjBuilder* builder) {
     if (!builder->hasField(fieldName)) {
         builder->append(
@@ -373,3 +360,5 @@ void serializeAggregateCursorToBSON(const mongo::SimpleCursorOptions& cursor,
     return;
 }
 }  // namespace mongo
+
+

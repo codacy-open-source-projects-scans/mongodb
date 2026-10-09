@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This module implements the client side of SASL authentication in MongoDB, in terms of the Cyrus
@@ -39,9 +13,7 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -65,11 +37,13 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/password_digest.h"
+#include "mongo/util/str.h"
 
 #include <functional>
 #include <memory>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -80,12 +54,13 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto saslClientLogFieldName = "clientLogLevel"_sd;
+constexpr auto saslClientLogFieldName = "clientLogLevel"sv;
 
-int getSaslClientLogLevel(const BSONObj& saslParameters) {
+int getSaslClientLogLevel(const auth::Credential& credential) {
     int saslLogLevel = kSaslClientLogLevelDefault;
-    BSONElement saslLogElement = saslParameters[saslClientLogFieldName];
+    BSONElement saslLogElement = credential.mechanismProperties[saslClientLogFieldName];
 
     if (saslLogElement.trueValue()) {
         saslLogLevel = 1;
@@ -98,100 +73,68 @@ int getSaslClientLogLevel(const BSONObj& saslParameters) {
     return saslLogLevel;
 }
 
-/**
- * Gets the password data from "saslParameters" and stores it to "outPassword".
- *
- * If "digestPassword" indicates that the password needs to be "digested" via
- * mongo::createPasswordDigest(), this method takes care of that.
- * On success, the value of "*outPassword" is always the correct value to set
- * as the password on the SaslClientSession.
- *
- * Returns Status::OK() on success, and ErrorCodes::NoSuchKey if the password data is not
- * present in "saslParameters".  Other ErrorCodes returned indicate other errors.
- */
-Status extractPassword(const BSONObj& saslParameters,
-                       bool digestPassword,
-                       std::string* outPassword) {
-    std::string rawPassword;
-    Status status =
-        bsonExtractStringField(saslParameters, saslCommandPasswordFieldName, &rawPassword);
-    if (!status.isOK())
-        return status;
-
-    if (digestPassword) {
-        std::string user;
-        status = bsonExtractStringField(saslParameters, saslCommandUserFieldName, &user);
-        if (!status.isOK())
-            return status;
-
-        *outPassword = mongo::createPasswordDigest(user, rawPassword);
-    } else {
-        *outPassword = rawPassword;
-    }
-    return Status::OK();
-}
 }  // namespace
 
 Status saslConfigureSession(SaslClientSession* session,
                             const HostAndPort& hostname,
-                            StringData targetDatabase,
-                            const BSONObj& saslParameters) {
+                            const auth::Credential& credential) {
     // SERVER-59876 Ensure hostname is never empty. If it is empty, the client-side SCRAM cache will
     // not be used which creates performance problems.
     dassert(!hostname.empty());
 
-    std::string mechanism;
-    Status status =
-        bsonExtractStringField(saslParameters, saslCommandMechanismFieldName, &mechanism);
-    if (!status.isOK())
-        return status;
-    session->setParameter(SaslClientSession::parameterMechanism, mechanism);
+    const auto mechStr = toString(credential.mechanism);
+    session->setParameter(SaslClientSession::parameterMechanism, mechStr);
 
+    const auto& props = credential.mechanismProperties;
     std::string value;
-    status = bsonExtractStringFieldWithDefault(
-        saslParameters, saslCommandServiceNameFieldName, saslDefaultServiceName, &value);
+    Status status = bsonExtractStringFieldWithDefault(
+        props, saslCommandServiceNameFieldName, saslDefaultServiceName, &value);
     if (!status.isOK())
         return status;
     session->setParameter(SaslClientSession::parameterServiceName, value);
 
     status = bsonExtractStringFieldWithDefault(
-        saslParameters, saslCommandServiceHostnameFieldName, hostname.host(), &value);
+        props, saslCommandServiceHostnameFieldName, hostname.host(), &value);
     if (!status.isOK())
         return status;
     session->setParameter(SaslClientSession::parameterServiceHostname, value);
     session->setParameter(SaslClientSession::parameterServiceHostAndPort, hostname.toString());
 
-    status = bsonExtractStringField(saslParameters, saslCommandUserFieldName, &value);
-    if (status.isOK()) {
-        session->setParameter(SaslClientSession::parameterUser, value);
+    const auto targetDatabase = credential.db.value_or(std::string{saslDefaultDBName});
+    if (credential.username) {
+        session->setParameter(SaslClientSession::parameterUser, *credential.username);
     } else if ((targetDatabase != DatabaseName::kExternal.db(omitTenant)) ||
-               ((mechanism != auth::kMechanismMongoAWS) &&
-                (mechanism != auth::kMechanismMongoOIDC))) {
-        return status;
+               (credential.mechanism != auth::AuthMechanism::kMongoAWS &&
+                credential.mechanism != auth::AuthMechanism::kMongoOIDC)) {
+        return Status(ErrorCodes::AuthenticationFailed,
+                      str::stream() << "Username required for mechanism " << mechStr);
     }
 
-    const bool digestPasswordDefault = (mechanism == auth::kMechanismScramSha1);
-    bool digestPassword;
-    status = bsonExtractBooleanFieldWithDefault(
-        saslParameters, saslCommandDigestPasswordFieldName, digestPasswordDefault, &digestPassword);
-    if (!status.isOK())
-        return status;
+    if (credential.password) {
+        const bool digestPasswordDefault =
+            (credential.mechanism == auth::AuthMechanism::kScramSha1);
+        bool digestPassword = digestPasswordDefault;
+        status = bsonExtractBooleanFieldWithDefault(
+            props, saslCommandDigestPasswordFieldName, digestPasswordDefault, &digestPassword);
+        if (!status.isOK())
+            return status;
 
-    status = extractPassword(saslParameters, digestPassword, &value);
-    if (status.isOK()) {
-        session->setParameter(SaslClientSession::parameterPassword, value);
-    } else if (!(status == ErrorCodes::NoSuchKey &&
-                 targetDatabase == DatabaseName::kExternal.db(omitTenant))) {
-        // $external users do not have passwords, hence NoSuchKey is expected
-        return status;
+        std::string processedPassword = *credential.password;
+        if (digestPassword && credential.username) {
+            processedPassword =
+                mongo::createPasswordDigest(*credential.username, *credential.password);
+        }
+        session->setParameter(SaslClientSession::parameterPassword, processedPassword);
+    } else if (targetDatabase != DatabaseName::kExternal.db(omitTenant)) {
+        return Status(ErrorCodes::AuthenticationFailed, "Password required");
     }
 
-    status = bsonExtractStringField(saslParameters, saslCommandIamSessionToken, &value);
+    status = bsonExtractStringField(props, saslCommandIamSessionToken, &value);
     if (status.isOK()) {
         session->setParameter(SaslClientSession::parameterAWSSessionToken, value);
     }
 
-    status = bsonExtractStringField(saslParameters, saslCommandOIDCAccessToken, &value);
+    status = bsonExtractStringField(props, saslCommandOIDCAccessToken, &value);
     if (status.isOK()) {
         session->setParameter(SaslClientSession::parameterOIDCAccessToken, value);
     }
@@ -211,8 +154,6 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
     auto status = saslExtractPayload(inputObj, &payload, &type);
     if (!status.isOK())
         return status;
-
-    LOGV2_DEBUG(20197, saslLogLevel, "sasl client input", "payload"_attr = base64::encode(payload));
 
     // Create new payload for our response
     std::string responsePayload;
@@ -241,11 +182,6 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
     if (!status.isOK())
         return status;
 
-    LOGV2_DEBUG(20198,
-                saslLogLevel,
-                "sasl client output",
-                "payload"_attr = base64::encode(responsePayload));
-
     // Handle a done from the server which comes before the client is complete.
     const bool serverDone = inputObj[saslCommandDoneFieldName].trueValue();
     if (serverDone && responsePayload.empty() && session->isSuccess()) {
@@ -266,11 +202,8 @@ Future<void> asyncSaslConversation(auth::RunCommandHook runCommand,
     // Asynchronously continue the conversation
     const auto dbName = DatabaseNameUtil::deserialize(
         boost::none, targetDatabase, SerializationContext::stateDefault());
-    return runCommand(
-               OpMsgRequestBuilder::create(
-                   auth::ValidatedTenancyScope::kNotRequired /* TODO SERVER-86582 investigate */,
-                   dbName,
-                   commandBuilder.obj()))
+    return runCommand(OpMsgRequestBuilder::create(
+                          auth::ValidatedTenancyScope::kNotRequired, dbName, commandBuilder.obj()))
         .then([runCommand, session, targetDatabase, saslLogLevel](
                   BSONObj serverResponse) -> Future<void> {
             auto status = getStatusFromCommandResult(serverResponse);
@@ -304,36 +237,21 @@ namespace {
  */
 Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
                                         const HostAndPort& hostname,
-                                        const BSONObj& saslParameters) {
-    int saslLogLevel = getSaslClientLogLevel(saslParameters);
-    std::string targetDatabase;
-    try {
-        Status status = bsonExtractStringFieldWithDefault(
-            saslParameters, saslCommandUserDBFieldName, saslDefaultDBName, &targetDatabase);
-        if (!status.isOK())
-            return status;
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
+                                        const auth::Credential& credential) {
+    if (credential.mechanism == auth::AuthMechanism::kMongoDbCr)
+        return Status{ErrorCodes::AuthenticationFailed,
+                      "MONGODB-CR is deprecated and no longer supported. Use SCRAM for "
+                      "password-based authentication instead."};
 
-    std::string username;
-    Status status = bsonExtractStringFieldWithDefault(
-        saslParameters, saslCommandUserFieldName, ""_sd, &username);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    std::string mechanism;
-    status = bsonExtractStringField(saslParameters, saslCommandMechanismFieldName, &mechanism);
-    if (!status.isOK()) {
-        return status;
-    }
+    int saslLogLevel = getSaslClientLogLevel(credential);
+    const auto targetDatabase = credential.db.value_or(std::string{saslDefaultDBName});
+    const auto mechStr = toString(credential.mechanism);
 
     // NOTE: this must be a shared_ptr so that we can capture it in a lambda later on.
     // Come C++14, we should be able to do this in a nicer way.
-    std::shared_ptr<SaslClientSession> session(SaslClientSession::create(mechanism));
+    std::shared_ptr<SaslClientSession> session(SaslClientSession::create(std::string{mechStr}));
 
-    status = saslConfigureSession(session.get(), hostname, targetDatabase, saslParameters);
+    auto status = saslConfigureSession(session.get(), hostname, credential);
     if (!status.isOK())
         return status;
 
@@ -344,11 +262,11 @@ Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
 
     BSONObj inputObj = BSON(saslCommandPayloadFieldName << "");
 
-    auto mechCounter = authCounter.getEgressMechanismCounter(mechanism);
+    auto mechCounter = authCounter.getEgressMechanismCounter(mechStr);
     mechCounter.incAuthenticateSent();
 
-    auto argsBlock =
-        std::make_tuple(hostname, saslParameters, username, targetDatabase, mechanism, mechCounter);
+    const auto username = credential.username.value_or("");
+    auto argsBlock = std::make_tuple(hostname, username, targetDatabase, mechStr, mechCounter);
     auto sharedBlock = std::make_shared<decltype(argsBlock)>(std::move(argsBlock));
 
     session->metrics()->restart();
@@ -357,13 +275,11 @@ Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
                runCommand, session, saslFirstCommandPrefix, inputObj, targetDatabase, saslLogLevel)
         .onError([session, sharedBlock](Status status) {
             BSONObj metrics = session->metrics()->captureEgress();
-            auto [hostname, saslParameters, username, targetDatabase, mechanism, _] =
-                *sharedBlock.get();
+            auto [hostname, username, targetDatabase, mechanism, _] = *sharedBlock.get();
             if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
                 LOGV2(10748700,
                       "Authentication to remote host failed using SASL",
                       "hostname"_attr = hostname,
-                      "saslParameters"_attr = saslParameters,
                       "username"_attr = username,
                       "targetDatabase"_attr = targetDatabase,
                       "mechanism"_attr = mechanism,
@@ -375,14 +291,12 @@ Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
         })
         .then([session, sharedBlock]() {
             BSONObj metrics = session->metrics()->captureEgress();
-            auto [hostname, saslParameters, username, targetDatabase, mechanism, mechCounter] =
-                *sharedBlock.get();
+            auto [hostname, username, targetDatabase, mechanism, mechCounter] = *sharedBlock.get();
             mechCounter.incEgressAuthenticateSuccessful();
             if (gEnableDetailedConnectionHealthMetricLogLines.load()) {
                 LOGV2(10748701,
                       "Authentication to remote host succeeded using SASL",
                       "hostname"_attr = hostname,
-                      "saslParameters"_attr = saslParameters,
                       "username"_attr = username,
                       "targetDatabase"_attr = targetDatabase,
                       "mechanism"_attr = mechanism,
@@ -390,7 +304,6 @@ Future<void> saslClientAuthenticateImpl(auth::RunCommandHook runCommand,
                       "metrics"_attr = metrics);
             }
         });
-    ;
 }
 
 MONGO_INITIALIZER(SaslClientAuthenticateFunction)(InitializerContext* context) {

@@ -1,47 +1,27 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/client/retry_strategy.h"
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/client/retry_strategy_server_parameters_gen.h"
 #include "mongo/db/error_labels.h"
+#include "mongo/db/ifr_flag_retry_info.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/join_thread.h"
+#include "mongo/unittest/log_capture.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
 
 #include <span>
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 class RetryStrategyTest : public ServiceContextTest {
 public:
@@ -93,8 +73,10 @@ public:
 
     void exhaustRetryBudget() {
         auto strategy = _makeRetryStrategyNoIncrement();
-        while (strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded))
+        while (strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                            target1,
+                                                            errorLabelsSystemOverloaded,
+                                                            /*baseBackoffMS=*/boost::none))
             ;
     }
 
@@ -151,8 +133,10 @@ public:
         "capacity or lower");
 
     static bool acquireToken(AdaptiveRetryStrategy& strategy) {
-        return strategy.recordFailureAndEvaluateShouldRetry(
-            statusNonRetriable, target1, errorLabelsSystemOverloaded);
+        return strategy.recordFailureAndEvaluateShouldRetry(statusNonRetriable,
+                                                            target1,
+                                                            errorLabelsSystemOverloaded,
+                                                            /*baseBackoffMS=*/boost::none);
     }
 
     void retryCriteriaDontRetry() {
@@ -163,7 +147,7 @@ public:
         return _amountCallbackCalled.load();
     }
 
-    static constexpr auto kExampleResultValue = "result"_sd;
+    static constexpr auto kExampleResultValue = "result"sv;
 
 protected:
     AdaptiveRetryStrategy::RetryBudget _retryBudget;
@@ -194,21 +178,22 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyMaxRetry) {
     // Exhaust the amount of retry for this strategy.
     for (std::int32_t i = 0; i < kMaxNumberOfRetries; ++i) {
         ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, {}));
+            statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     }
 
     ASSERT_EQ(retryCriteriaCallCount(), kMaxNumberOfRetries);
 
     // Attempting to retry past the maximum amount of retry should fail and not call the callback.
-    ASSERT_FALSE(
-        strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
+    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(retryCriteriaCallCount(), kMaxNumberOfRetries);
 }
 
 TEST_F(RetryStrategyTest, DefaultRetryStrategyNoDelayNotOverloaded) {
     auto strategy = makeDefaultRetryStrategy();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
 
     // The retry delay should be zero since the system overloaded error label was not sent.
     ASSERT_EQ(strategy.getNextRetryDelay(), Milliseconds{0});
@@ -220,8 +205,8 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyCallbackNoRetry) {
 
     // The callback will return false, so the amount of calls should increment but the strategy
     // should return false.
-    ASSERT_FALSE(
-        strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
+    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(retryCriteriaCallCount(), 1);
 }
 
@@ -232,8 +217,10 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyHasDelay) {
 
     auto lastBackoff = Milliseconds{0};
     for (std::int32_t i = 0; i < kMaxNumberOfRetries; ++i) {
-        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                            target1,
+                                                            errorLabelsSystemOverloaded,
+                                                            /*baseBackoffMS=*/boost::none));
 
         const auto backoff = strategy.getNextRetryDelay();
 
@@ -246,29 +233,100 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyHasDelay) {
     }
 }
 
+TEST_F(RetryStrategyTest, DefaultRetryStrategyBaseBackoffMSScalesBackoffWhenOverloaded) {
+    auto strategy = makeDefaultRetryStrategy();
+    auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
+
+    constexpr auto kBaseBackoffMS = Milliseconds{500};
+
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded, kBaseBackoffMS));
+
+    ASSERT_EQ(strategy.getNextRetryDelay(), kBaseBackoffMS * 2);
+}
+
+TEST_F(RetryStrategyTest, DefaultRetryStrategyBaseBackoffMSIgnoredWhenNotOverloaded) {
+    auto strategy = makeDefaultRetryStrategy();
+    auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
+
+    constexpr auto kBaseBackoffMS = Milliseconds{500};
+
+    // 'errorLabelsRetriable' does not contain the SystemOverloadedError label, so the baseBackoffMS
+    // hint must be ignored entirely.
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, errorLabelsRetriable, kBaseBackoffMS));
+
+    ASSERT_EQ(strategy.getNextRetryDelay(), Milliseconds{0});
+}
+
 TEST_F(RetryStrategyTest, DefaultRetryStrategyDefaultCallbackStatusRetryable) {
     auto strategy = makeDefaultRetryStrategyDefaultCallback();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
-    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(statusNonRetriable, target1, {}));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
+    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
+        statusNonRetriable, target1, {}, /*baseBackoffMS=*/boost::none));
 }
 
 TEST_F(RetryStrategyTest, DefaultRetryStrategyDefaultCallbackErrorLabelRetryable) {
     auto strategy = makeDefaultRetryStrategyDefaultCallback();
 
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsRetriable,
+                                                        /*baseBackoffMS=*/boost::none));
     ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsRetriable));
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusNonRetriable, target1, errorLabelsRetriable));
+        statusNonRetriable, target1, errorLabelsRetriable, /*baseBackoffMS=*/boost::none));
 }
 
 TEST_F(RetryStrategyTest, DefaultRetryStrategyDefaultCallbackErrorLabelNonRetryable) {
     auto strategy = makeDefaultRetryStrategyDefaultCallback();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsNonRetriable));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsNonRetriable,
+                                                        /*baseBackoffMS=*/boost::none));
     ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
-        statusNonRetriable, target1, errorLabelsNonRetriable));
+        statusNonRetriable, target1, errorLabelsNonRetriable, /*baseBackoffMS=*/boost::none));
+}
+
+TEST_F(RetryStrategyTest, DefaultRetryCriteriaDoesNotRetryIFRFlagRetry) {
+    const Status ifrStatus{IFRFlagRetryInfo{"someFlag"}, "flag retry"};
+    ASSERT_FALSE(DefaultRetryStrategy::defaultRetryCriteria(ifrStatus, {}));
+}
+
+TEST_F(RetryStrategyTest, GetRetryParametersFromServerParametersUsesConfiguredValues) {
+    unittest::ServerParameterGuard baseBackoffGuard{"defaultClientBaseBackoffMillis", 250};
+    unittest::ServerParameterGuard maxBackoffGuard{"defaultClientMaxBackoffMillis", 4000};
+    unittest::ServerParameterGuard maxRetryAttemptsGuard{"defaultClientMaxRetryAttempts", 5};
+
+    const auto params = DefaultRetryStrategy::getRetryParametersFromServerParameters();
+    ASSERT_EQ(params.baseBackoff, Milliseconds{250});
+    ASSERT_EQ(params.maxBackoff, Milliseconds{4000});
+    ASSERT_EQ(params.maxRetryAttempts, 5);
+}
+
+TEST_F(RetryStrategyTest, GetRetryParametersFromServerParametersClampsBaseBackoffToMaxBackoff) {
+    unittest::ServerParameterGuard baseBackoffGuard{"defaultClientBaseBackoffMillis", 8000};
+    unittest::ServerParameterGuard maxBackoffGuard{"defaultClientMaxBackoffMillis", 3000};
+
+    unittest::LogCaptureGuard logs;
+
+    const auto params = DefaultRetryStrategy::getRetryParametersFromServerParameters();
+    ASSERT_EQ(params.baseBackoff, Milliseconds{3000});
+    ASSERT_EQ(params.maxBackoff, Milliseconds{3000});
+
+    for (int i = 0; i < 4; ++i) {
+        DefaultRetryStrategy::getRetryParametersFromServerParameters();
+    }
+
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("id" << 13238300)), 1);
+    ASSERT_EQ(logs.countBSONContainingSubset(
+                  BSON("attr" << BSON("defaultClientBaseBackoffMillis" << 8000))),
+              1);
+    ASSERT_EQ(logs.countBSONContainingSubset(
+                  BSON("attr" << BSON("defaultClientMaxBackoffMillis" << 3000))),
+              1);
 }
 
 TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataInitiallyEmpty) {
@@ -282,8 +340,10 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataNonRetryable) {
     auto strategy = makeDefaultRetryStrategyDefaultCallback();
     const auto& targetingMetadata = strategy.getTargetingMetadata();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsNonRetriable));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsNonRetriable,
+                                                        /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(targetingMetadata.deprioritizedServers.size(), 0);
 }
 
@@ -291,8 +351,10 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataRetryable) {
     auto strategy = makeDefaultRetryStrategyDefaultCallback();
     const auto& targetingMetadata = strategy.getTargetingMetadata();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsSystemOverloaded,
+                                                        /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(targetingMetadata.deprioritizedServers.size(), 1);
     ASSERT_NE(std::ranges::find(targetingMetadata.deprioritizedServers, target1),
               targetingMetadata.deprioritizedServers.end());
@@ -305,12 +367,14 @@ TEST_F(RetryStrategyTest, DefaultRetryStrategyTargetingMetadataRetryExhausted) {
     const auto& targetingMetadata = strategy.getTargetingMetadata();
 
     for (std::size_t i = 0; i < kMaxNumberOfRetries; ++i) {
-        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                            target1,
+                                                            errorLabelsSystemOverloaded,
+                                                            /*baseBackoffMS=*/boost::none));
     }
 
     ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
-        statusNonRetriable, target2, errorLabelsSystemOverloaded));
+        statusNonRetriable, target2, errorLabelsSystemOverloaded, /*baseBackoffMS=*/boost::none));
 
     // The amount of deprioritized server here stays to 1 because we don't need to deprioritize
     // servers if we stop the retry loop by returning false.
@@ -323,18 +387,34 @@ TEST_F(RetryStrategyTest, AdaptiveRetryStrategyNonZeroRetryDelay) {
     auto strategy = makeAdaptiveRetryStrategy();
     auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsSystemOverloaded,
+                                                        /*baseBackoffMS=*/boost::none));
 
     ASSERT_EQ(strategy.getNextRetryDelay(), Milliseconds{200});
+}
+
+TEST_F(RetryStrategyTest, AdaptiveRetryStrategyForwardsBaseBackoffMS) {
+    auto strategy = makeAdaptiveRetryStrategy();
+    auto _ = FailPointEnableBlock{"returnMaxBackoffDelay"};
+
+    constexpr auto kBaseBackoffMS = Milliseconds{500};
+
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded, kBaseBackoffMS));
+
+    ASSERT_EQ(strategy.getNextRetryDelay(), kBaseBackoffMS * 2);
 }
 
 TEST_F(RetryStrategyTest, AdaptiveRetryStrategyCallbackCalled) {
     auto strategy = makeAdaptiveRetryStrategy();
 
     for (std::int32_t i = 0; i < kBudgetCapacity; ++i) {
-        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+        ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                            target1,
+                                                            errorLabelsSystemOverloaded,
+                                                            /*baseBackoffMS=*/boost::none));
     }
 
     // Validate that each of the failures recorded have called the callback and depleted the budget.
@@ -346,8 +426,10 @@ TEST_F(RetryStrategyTest, AdaptiveRetryStrategyNoBudget) {
     auto strategy = makeAdaptiveRetryStrategy();
     exhaustRetryBudget();
 
-    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                              target1,
+                                                              errorLabelsSystemOverloaded,
+                                                              /*baseBackoffMS=*/boost::none));
 
     ASSERT_EQ(retryCriteriaCallCount(), 0);
 }
@@ -359,21 +441,25 @@ TEST_F(RetryStrategyTest, AdaptiveRetryStrategyFailNoReturnToken) {
     // Failing because of other reasons than system overloaded should replenish the budget by
     // returnRate. We do not return a whole token because no system overloaded failure were
     // recorded.
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(_retryBudget.getBalance_forTest(), kReturnRate);
 }
 
 TEST_F(RetryStrategyTest, AdaptiveRetryStrategyReturnWholeToken) {
     auto strategy = makeAdaptiveRetryStrategy();
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsSystemOverloaded,
+                                                        /*baseBackoffMS=*/boost::none));
 
     exhaustRetryBudget();
 
     // Since we failed with the system overloaded error label before exhausting the budget, a whole
     // token will be returned in addition of the return rate.
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory, target1, {}));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
+        statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     ASSERT_EQ(_retryBudget.getBalance_forTest(), kReturnRate + 1);
 }
 
@@ -397,13 +483,17 @@ TEST_F(RetryStrategyTest, AdaptiveRetryStrategyReplenishBudgetByError) {
     // We should have accumulated one token after non overloaded errors.
     for (std::int32_t i = 0; i < kAmountOfSuccessForOneReturnedToken; ++i) {
         ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-            statusRetriableErrorCategory, target1, {}));
+            statusRetriableErrorCategory, target1, {}, /*baseBackoffMS=*/boost::none));
     }
 
-    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
-    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(
-        statusRetriableErrorCategory, target1, errorLabelsSystemOverloaded));
+    ASSERT(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                        target1,
+                                                        errorLabelsSystemOverloaded,
+                                                        /*baseBackoffMS=*/boost::none));
+    ASSERT_FALSE(strategy.recordFailureAndEvaluateShouldRetry(statusRetriableErrorCategory,
+                                                              target1,
+                                                              errorLabelsSystemOverloaded,
+                                                              /*baseBackoffMS=*/boost::none));
 }
 
 TEST_F(RetryStrategyTest, RetryBudgetHighlyConcurrentAcquire) {
@@ -536,7 +626,7 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyWithRetry) {
     auto result =
         runWithRetryStrategy(opCtx(), strategy, [&](const TargetingMetadata& targetingMetadata) {
             // Always fail in this case to cause retries until we reach the maximum.
-            return RetryStrategy::Result<StringData>{statusRetriableErrorCategory, {}};
+            return RetryStrategy::Result<std::string_view>{statusRetriableErrorCategory, {}};
         });
 
     ASSERT_FALSE(result.isOK());
@@ -552,16 +642,16 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyTargetingMetadata) {
             // At the first try, there is no target1 in the list of deprioritized servers.
             if (std::ranges::find(targetingMetadata.deprioritizedServers, target1) ==
                 targetingMetadata.deprioritizedServers.end()) {
-                return RetryStrategy::Result<StringData>{
-                    statusNonRetriable, errorLabelsSystemOverloaded, target1};
+                return RetryStrategy::Result<std::string_view>{
+                    statusNonRetriable, errorLabelsSystemOverloaded, target1, boost::none};
             }
 
             // At the second try, there is target1, but no target2 in the list of deprioritized
             // servers.
             if (std::ranges::find(targetingMetadata.deprioritizedServers, target2) ==
                 targetingMetadata.deprioritizedServers.end()) {
-                return RetryStrategy::Result<StringData>{
-                    statusNonRetriable, errorLabelsSystemOverloaded, target2};
+                return RetryStrategy::Result<std::string_view>{
+                    statusNonRetriable, errorLabelsSystemOverloaded, target2, boost::none};
             }
 
             // At the third try, we return a success on target3.
@@ -580,7 +670,7 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyWithNonRetryableFailure) {
     // We expect run operation to not retry when the retry strategy returns false.
     auto result =
         runWithRetryStrategy(opCtx(), strategy, [](const TargetingMetadata& targetingMetadata) {
-            return RetryStrategy::Result<StringData>{statusNonRetriable, {}};
+            return RetryStrategy::Result<std::string_view>{statusNonRetriable, {}};
         });
 
     // Since there was no retry, we expect to get the same error code and we expect
@@ -598,7 +688,7 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyWithNonRetryableFailureException) 
     auto result = runWithRetryStrategy(
         opCtx(),
         strategy,
-        [](const TargetingMetadata& targetingMetadata) -> RetryStrategy::Result<StringData> {
+        [](const TargetingMetadata& targetingMetadata) -> RetryStrategy::Result<std::string_view> {
             uasserted(statusNonRetriable.code(), statusNonRetriable.reason());
         });
 
@@ -614,8 +704,8 @@ TEST_F(RetryStrategyTest, RunWithRetryStrategyWithArtificialDeadlineNow) {
         opCtx()->runWithDeadline(getClockSource()->now(), ErrorCodes::MaxTimeMSExpired, [&] {
             return runWithRetryStrategy(
                 opCtx(), strategy, [](const TargetingMetadata& targetingMetadata) {
-                    return RetryStrategy::Result<StringData>{statusNonRetriable,
-                                                             errorLabelsRetriable};
+                    return RetryStrategy::Result<std::string_view>{statusNonRetriable,
+                                                                   errorLabelsRetriable};
                 });
         });
 
@@ -678,23 +768,25 @@ TEST_F(RetryStrategyResultTest, nonDefaultConstructible) {
 }
 
 TEST_F(RetryStrategyResultTest, AssertionFormat) {
-    ASSERT_EQ(
-        unittest::stringify::invoke(RetryStrategy::Result<StringData>(statusNonRetriable, {})),
-        unittest::stringify::invoke(statusNonRetriable));
-    ASSERT_EQ(unittest::stringify::invoke(StatusWith<StringData>("foo")), "foo");
+    ASSERT_EQ(unittest::stringify::invoke(
+                  RetryStrategy::Result<std::string_view>(statusNonRetriable, {})),
+              unittest::stringify::invoke(statusNonRetriable));
+    ASSERT_EQ(unittest::stringify::invoke(StatusWith<std::string_view>("foo")), "foo");
 }
 
 TEST_F(RetryStrategyResultTest, ErrorLabels) {
-    auto rLabels = RetryStrategy::Result<StringData>{statusNonRetriable, errorLabelsRetriable};
+    auto rLabels =
+        RetryStrategy::Result<std::string_view>{statusNonRetriable, errorLabelsRetriable};
     ASSERT(std::ranges::equal(rLabels.getErrorLabels(), errorLabelsRetriable));
-    auto rNoLabels = RetryStrategy::Result<StringData>{statusNonRetriable, {}};
+    auto rNoLabels = RetryStrategy::Result<std::string_view>{statusNonRetriable, {}};
     ASSERT(std::ranges::equal(rNoLabels.getErrorLabels(), std::vector<std::string>{}));
 }
 
 TEST_F(RetryStrategyResultTest, OriginError) {
-    auto rWithOrigin = RetryStrategy::Result<StringData>{statusNonRetriable, {}, target1};
+    auto rWithOrigin =
+        RetryStrategy::Result<std::string_view>{statusNonRetriable, {}, target1, boost::none};
     ASSERT_EQ(rWithOrigin.getOrigin(), target1);
-    auto rNoOrigin = RetryStrategy::Result<StringData>{statusNonRetriable, {}};
+    auto rNoOrigin = RetryStrategy::Result<std::string_view>{statusNonRetriable, {}};
     ASSERT_EQ(rNoOrigin.getOrigin(), boost::none);
 }
 
@@ -724,8 +816,8 @@ TEST_F(RetryStrategyResultTest, ConvertingMoveOK) {
 }
 
 TEST_F(RetryStrategyResultTest, ConvertingCopyError) {
-    auto r1 =
-        RetryStrategy::Result<StringData>{statusNonRetriable, errorLabelsNonRetriable, target1};
+    auto r1 = RetryStrategy::Result<std::string_view>{
+        statusNonRetriable, errorLabelsNonRetriable, target1, boost::none};
     auto r2 = RetryStrategy::Result<std::string>{r1};
 
     ASSERT_FALSE(r2.isOK());
@@ -735,8 +827,8 @@ TEST_F(RetryStrategyResultTest, ConvertingCopyError) {
 }
 
 TEST_F(RetryStrategyResultTest, ConvertingMoveError) {
-    auto r1 =
-        RetryStrategy::Result<StringData>{statusNonRetriable, errorLabelsNonRetriable, target1};
+    auto r1 = RetryStrategy::Result<std::string_view>{
+        statusNonRetriable, errorLabelsNonRetriable, target1, boost::none};
     auto r2 = RetryStrategy::Result<std::string>{std::move(r1)};
 
     ASSERT_FALSE(r2.isOK());
@@ -746,7 +838,7 @@ TEST_F(RetryStrategyResultTest, ConvertingMoveError) {
 }
 
 TEST_F(RetryStrategyResultTest, ConvertingStatusWithCopy) {
-    auto r1 = RetryStrategy::Result<StringData>{statusNonRetriable, {}};
+    auto r1 = RetryStrategy::Result<std::string_view>{statusNonRetriable, {}};
     auto sw = StatusWith<std::string>{r1};
 
     ASSERT_FALSE(sw.isOK());
@@ -754,7 +846,7 @@ TEST_F(RetryStrategyResultTest, ConvertingStatusWithCopy) {
 }
 
 TEST_F(RetryStrategyResultTest, ConvertingStatusWithMove) {
-    auto r1 = RetryStrategy::Result<StringData>{statusNonRetriable, {}};
+    auto r1 = RetryStrategy::Result<std::string_view>{statusNonRetriable, {}};
     auto sw = StatusWith<std::string>{std::move(r1)};
 
     ASSERT_FALSE(sw.isOK());

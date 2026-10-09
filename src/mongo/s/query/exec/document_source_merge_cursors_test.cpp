@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 
 #include "mongo/base/checked_cast.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -69,8 +42,9 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
@@ -79,6 +53,7 @@
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -88,6 +63,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using ResponseStatus = executor::TaskExecutor::ResponseStatus;
 
@@ -99,7 +75,7 @@ const std::vector<HostAndPort> kTestShardHosts = {HostAndPort("FakeShard1Host", 
                                                   HostAndPort("FakeShard3Host", 12345)};
 
 const std::string kMergeCursorNsStr{"test.mergeCursors"};
-const HostAndPort kTestHost = HostAndPort("localhost:27017"_sd);
+const HostAndPort kTestHost = HostAndPort("localhost:27017"sv);
 
 const CursorId kExhaustedCursorID = 0;
 
@@ -273,6 +249,69 @@ TEST_F(DocumentSourceMergeCursorsTest, ShouldReportEOFWithNoCursors) {
     ASSERT_TRUE(stage->getNext().isEOF());
 }
 
+// Returns the shards registered by the fixture's setUp(), for answering the config.shards find that
+// getShard()'s forced reload issues.
+std::vector<ShardType> makeConfigShards() {
+    std::vector<ShardType> shards;
+    for (size_t i = 0; i < kTestShardIds.size(); i++) {
+        ShardType shardType;
+        shardType.setName(kTestShardIds[i].toString());
+        shardType.setHost(kTestShardHosts[i].toString());
+        shards.push_back(shardType);
+    }
+    return shards;
+}
+
+// Building the executable stage validates every remote's shardId against the ShardRegistry. A
+// remote on a shard the registry does not know about (even after a reload) must fail with
+// 'ShardNotFound'.
+TEST_F(DocumentSourceMergeCursorsTest, ShouldFailToBuildStageIfShardIsUnknown) {
+    auto expCtx = getExpCtx();
+    AsyncResultsMergerParams armParams;
+    armParams.setNss(getTenantIdNss());
+    std::vector<RemoteCursor> cursors;
+    cursors.emplace_back(
+        makeRemoteCursor(ShardId("NonExistentShard"),
+                         HostAndPort("NonExistentShardHost", 12345),
+                         CursorResponse(expCtx->getNamespaceString(), kExhaustedCursorID, {})));
+    armParams.setRemotes(std::move(cursors));
+    auto source = DocumentSourceMergeCursors::create(expCtx, std::move(armParams));
+
+    auto future = launchAsync([&] {
+        ASSERT_THROWS_CODE(
+            exec::agg::buildStage(source), AssertionException, ErrorCodes::ShardNotFound);
+    });
+    // Answer getShard()'s forced reload; the response omits the bogus shard, so it stays
+    // unresolved.
+    expectGetShards(makeConfigShards());
+    future.default_timed_get();
+}
+
+// The validation must fire even when only one of several remotes references an unknown shard.
+TEST_F(DocumentSourceMergeCursorsTest, ShouldFailToBuildStageIfAnyShardIsUnknown) {
+    auto expCtx = getExpCtx();
+    AsyncResultsMergerParams armParams;
+    armParams.setNss(getTenantIdNss());
+    std::vector<RemoteCursor> cursors;
+    cursors.emplace_back(
+        makeRemoteCursor(kTestShardIds[0],
+                         kTestShardHosts[0],
+                         CursorResponse(expCtx->getNamespaceString(), kExhaustedCursorID, {})));
+    cursors.emplace_back(
+        makeRemoteCursor(ShardId("NonExistentShard"),
+                         HostAndPort("NonExistentShardHost", 12345),
+                         CursorResponse(expCtx->getNamespaceString(), kExhaustedCursorID, {})));
+    armParams.setRemotes(std::move(cursors));
+    auto source = DocumentSourceMergeCursors::create(expCtx, std::move(armParams));
+
+    auto future = launchAsync([&] {
+        ASSERT_THROWS_CODE(
+            exec::agg::buildStage(source), AssertionException, ErrorCodes::ShardNotFound);
+    });
+    expectGetShards(makeConfigShards());
+    future.default_timed_get();
+}
+
 BSONObj cursorResponseObj(const NamespaceString& nss,
                           CursorId cursorId,
                           std::vector<BSONObj> batch) {
@@ -396,6 +435,32 @@ TEST_F(DocumentSourceMergeCursorsTest, ShouldKillCursorIfPartiallyIterated) {
     future.default_timed_get();
 }
 
+using DocumentSourceMergeCursorsDeathTest = DocumentSourceMergeCursorsTest;
+
+DEATH_TEST_F(DocumentSourceMergeCursorsDeathTest,
+             DisposeAfterDetachTripsAssert,
+             "requires a valid operation context") {
+    const auto& expCtx = getExpCtx();
+    AsyncResultsMergerParams armParams;
+    armParams.setNss(getTenantIdNss());
+    std::vector<RemoteCursor> cursors;
+    cursors.emplace_back(
+        makeRemoteCursor(kTestShardIds[0],
+                         kTestShardHosts[0],
+                         CursorResponse(expCtx->getNamespaceString(), kExhaustedCursorID, {})));
+    cursors.emplace_back(
+        makeRemoteCursor(kTestShardIds[1],
+                         kTestShardHosts[1],
+                         CursorResponse(expCtx->getNamespaceString(), kExhaustedCursorID, {})));
+    armParams.setRemotes(std::move(cursors));
+    auto pipeline = Pipeline::create({}, expCtx);
+    pipeline->addInitialSource(DocumentSourceMergeCursors::create(expCtx, std::move(armParams)));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
+
+    execPipeline->detachFromOperationContext();
+    execPipeline->dispose();
+}
+
 TEST_F(DocumentSourceMergeCursorsTest, ShouldEnforceSortSpecifiedViaARMParams) {
     auto expCtx = getExpCtx();
     auto pipeline = Pipeline::create({}, expCtx);
@@ -449,7 +514,7 @@ class DocumentSourceMergeCursorsMultiTenancyTest : public DocumentSourceMergeCur
 public:
     DocumentSourceMergeCursorsMultiTenancyTest()
         : _multitenancyController(
-              std::make_unique<RAIIServerParameterControllerForTest>("multitenancySupport", true)) {
+              std::make_unique<unittest::ServerParameterGuard>("multitenancySupport", true)) {
         _nss =
             NamespaceString::createNamespaceString_forTest(TenantId(OID::gen()), kMergeCursorNsStr);
     }
@@ -465,7 +530,7 @@ private:
         return ExpressionContextBuilder{}.opCtx(operationContext()).ns(_nss).build();
     }
 
-    std::unique_ptr<RAIIServerParameterControllerForTest> _multitenancyController;
+    std::unique_ptr<unittest::ServerParameterGuard> _multitenancyController;
 };
 
 TEST_F(DocumentSourceMergeCursorsMultiTenancyTest, ShouldBeAbleToParseSerializedARMParams) {
@@ -522,11 +587,11 @@ class DocumentSourceMergeCursorsMultiTenancyAndFeatureFlagTest
     : public DocumentSourceMergeCursorsMultiTenancyTest {
 public:
     DocumentSourceMergeCursorsMultiTenancyAndFeatureFlagTest()
-        : _featureFlagController(std::make_unique<RAIIServerParameterControllerForTest>(
+        : _featureFlagController(std::make_unique<unittest::ServerParameterGuard>(
               "featureFlagRequireTenantID", true)) {}
 
 private:
-    std::unique_ptr<RAIIServerParameterControllerForTest> _featureFlagController;
+    std::unique_ptr<unittest::ServerParameterGuard> _featureFlagController;
 };
 
 TEST_F(DocumentSourceMergeCursorsMultiTenancyAndFeatureFlagTest,
@@ -600,7 +665,6 @@ TEST_F(DocumentSourceMergeCursorsShapeTest, QueryShape) {
                 "compareWholeSortKey": "?bool",
                 "nss": "HASH<test.mergeCursors>",
                 "allowPartialResults": false,
-                "recordRemoteOpWaitTime": false,
                 "requestQueryStatsFromRemotes": false,
                 "remotes": []
             }
@@ -621,7 +685,6 @@ TEST_F(DocumentSourceMergeCursorsShapeTest, RepresentativeShapeIsReparseable) {
                 ],
                 "nss": "test.mergeCursors",
                 "allowPartialResults": false,
-                "recordRemoteOpWaitTime": false,
                 "requestQueryStatsFromRemotes": false
             }
         })");
@@ -630,7 +693,7 @@ TEST_F(DocumentSourceMergeCursorsShapeTest, RepresentativeShapeIsReparseable) {
     // There is no need for closing remote cursors within this unit-test.
     dynamic_cast<DocumentSourceMergeCursors*>(stage.get())->dismissCursorOwnership();
 
-    auto opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    auto opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
 
     std::vector<Value> serialization;
     stage->serializeToArray(serialization, opts);
@@ -645,4 +708,34 @@ TEST_F(DocumentSourceMergeCursorsShapeTest, RepresentativeShapeIsReparseable) {
     auto newRepresentativeShape = newSerialization[0].getDocument().toBson();
     ASSERT_BSONOBJ_EQ(representativeShape, newRepresentativeShape);
 }
+
+TEST_F(DocumentSourceMergeCursorsShapeTest, CanBeParsedDespiteRecordRemoteOpWaitTimeBeingSet) {
+    auto spec = fromjson(R"({
+            "$mergeCursors": {
+                "compareWholeSortKey": true,
+                "remotes": [
+                    {
+                        "shardId": "FakeShard1",
+                        "hostAndPort": "FakeShard1Host:12345",
+                        "cursorResponse": {ok: 1, cursor: {id: NumberLong(11111), ns: "test.mergeCursors", firstBatch: []}}
+                    }
+                ],
+                "nss": "test.mergeCursors",
+                "recordRemoteOpWaitTime": true
+            }
+        })");
+    auto stage = DocumentSourceMergeCursors::createFromBson(spec.firstElement(), getExpCtx());
+
+    // There is no need for closing remote cursors within this unit-test.
+    dynamic_cast<DocumentSourceMergeCursors*>(stage.get())->dismissCursorOwnership();
+
+    auto opts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    std::vector<Value> newSerialization;
+    stage->serializeToArray(newSerialization, opts);
+    auto newRepresentativeShape = newSerialization[0].getDocument().toBson();
+    ASSERT_TRUE(newRepresentativeShape["$mergeCursors"].isABSONObj());
+    ASSERT_FALSE(newRepresentativeShape["$mergeCursors"].embeddedObject().hasField(
+        "recordRemoteOpWaitTime"));
+}
+
 }  // namespace mongo

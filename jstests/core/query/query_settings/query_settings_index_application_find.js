@@ -13,10 +13,14 @@
 //   examines_sbe_cache,
 //   # TODO(SERVER-113800): Enable setClusterParameters with replicaset started with --shardsvr
 //   transitioning_replicaset_incompatible,
+//   assumes_query_settings_role
 // ]
 //
 
-import {assertDropAndRecreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertDropAndRecreateCollection,
+    assertDropCollection,
+} from "jstests/libs/collection_drop_recreate.js";
 import {QuerySettingsIndexHintsTests} from "jstests/libs/query/query_settings_index_hints_tests.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
 

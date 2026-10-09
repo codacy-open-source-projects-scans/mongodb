@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -45,6 +19,8 @@
 #include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 namespace mongo::cost_based_ranker {
 
@@ -76,7 +52,7 @@ public:
     CardinalityEstimator(const CollectionInfo& collInfo,
                          const ce::SamplingEstimator* samplingEstimator,
                          EstimateMap& qsnEstimates,
-                         QueryPlanRankerModeEnum rankerMode);
+                         QueryCBRCEModeEnum rankerMode);
 
     // Delete the copy and move constructors and assignment operator
     CardinalityEstimator(const CardinalityEstimator&) = delete;
@@ -84,15 +60,16 @@ public:
     CardinalityEstimator& operator=(const CardinalityEstimator&) = delete;
     CardinalityEstimator& operator=(CardinalityEstimator&&) = delete;
 
-    CEResult estimatePlan(const QuerySolution& plan) {
-        // Restore initial state so that the estimator can be reused for multiple plans.
-        _inputCard = _collCard;
-        _conjSels.clear();
+    CEResult estimatePlan(const QuerySolution& plan);
+    /**
+     * Estimate the cardinality of a standalone filter (no QuerySolution), scaled to the
+     * collection cardinality. Resets per-estimation state, so the estimator may be reused.
+     * Applies the same zero-clamping policy as estimatePlan(): an approximate-source zero
+     * ("not observed in the sample") is floored to kMinCE.
+     */
+    CEResult estimateFilter(const MatchExpression* filter);
 
-        return estimate(plan.root());
-    }
-
-private:
+protected:
     // QuerySolutionNodes
     CEResult estimate(const QuerySolutionNode* node);
     CEResult estimate(const CollectionScanNode* node);
@@ -132,6 +109,35 @@ private:
      */
     void propagateLimit(const QuerySolutionNode* node, size_t limit);
 
+    /**
+     * "At least one row" floor used by 'clampZeroEstimates' for approximate-source zeros.
+     */
+    static constexpr double kMinCE = 1.0;
+
+    /**
+     * Walk '_qsnEstimates' and replace zero-valued approximate-source cardinality estimates
+     * (Sampling / Histogram / Heuristics / Mixed) with a non-zero inferred value. A zero from
+     * an approximate source means "not observed" rather than "truly zero"; letting it reach
+     * the cost model causes structurally different plans to tie at the per-node minCost.
+     *
+     * Policy:
+     *   - Sampling, Histogram, Heuristics, Mixed -> kMinCE ("at least one row")
+     *   - Metadata, Code -> untouched (authoritative zeros)
+     *
+     * Authoritative zeros are deliberately preserved; the 'CostEstimator' handles them via an
+     * additive per-stage minimum so structurally different plans still receive distinct costs.
+     */
+    void clampZeroEstimates();
+
+    /**
+     * Apply the "at least one row" floor to a single estimate: zero-valued approximate-source
+     * (Sampling / Histogram / Heuristics / Mixed) estimates become 'kMinCE'; authoritative
+     * (Metadata / Code) zeros are returned untouched.
+     */
+    CardinalityEstimate clampZeroEstimate(CardinalityEstimate ce);
+
+    CEResult estimateIndexSeeks(const IndexBounds& bounds, bool multiKey);
+
     // Internal helper functions
 
     /**
@@ -147,7 +153,7 @@ private:
      * 'nodes' to an Interval, intersecting all the intervals and finally invoking histogram
      * estimation. This function assumes that 'path' is non-multikey.
      */
-    CEResult estimateConjWithHistogram(StringData path,
+    CEResult estimateConjWithHistogram(std::string_view path,
                                        const std::vector<const MatchExpression*>& nodes);
 
     CEResult scanCard(const QuerySolutionNode* node, const CardinalityEstimate& card);
@@ -216,9 +222,9 @@ private:
 
     // Get the path of the given node. This function consults the '_elemMatchPathStack' to check if
     // this node is under an $elemMatch, if so it will return that path.
-    StringData getPath(const MatchExpression* node);
+    std::string_view getPath(const MatchExpression* node);
 
-    const CardinalityEstimate _collCard;
+    CardinalityEstimate _collCard;
 
     // The input cardinality of the last complete conjunction. This conjunction may consist of a
     // chain of QSN nodes (an implicit conjunction) including all intervals and filter expressions
@@ -245,7 +251,7 @@ private:
     EstimateMap& _qsnEstimates;
 
     // The cardinality estimate mode we are using for estimates.
-    const QueryPlanRankerModeEnum _rankerMode;
+    const QueryCBRCEModeEnum _ceMode;
 
     // Set with the paths we know are multikey which is deduced from the catalog. Note that a field
     // may be multikey but not reflected in this set because there may not be an index over the
@@ -260,7 +266,7 @@ private:
     // Keep track of the path associated with the current node in $elemMatch contexts. For example,
     // ElemMatchValueMatchExpression may have a child which looks like GTMatchExpression with an
     // empty path.
-    std::stack<StringData> _elemMatchPathStack;
+    std::stack<std::string_view> _elemMatchPathStack;
 
     // Cache cardinality estimates of logically equivalent MatchExpressions and IndexBounds.
     CECache<false /* disable logging */> _ceCache;

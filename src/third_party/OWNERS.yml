@@ -99,16 +99,16 @@ filters:
       - 10gen/server-workload-resilience
   - "opentelemetry-cpp":
     approvers:
-      - 10gen/server-networking-and-observability
+      - 10gen/query-integration-observability
   - "opentelemetry-proto":
     approvers:
-      - 10gen/server-networking-and-observability
+      - 10gen/query-integration-observability
   - "pcre2":
     approvers:
       - 10gen/query-execution
   - "prometheus-cpp":
     approvers:
-      - 10gen/server-networking-and-observability
+      - 10gen/query-integration-observability
   - "protobuf":
     approvers:
       - 10gen/server-networking-and-observability
@@ -121,6 +121,9 @@ filters:
   - "s2":
     approvers:
       - 10gen/query-integration
+  - "s2n":
+    approvers:
+      - 10gen/server-security
   - "SafeInt":
     approvers:
       - 10gen/server-programmability
@@ -160,6 +163,9 @@ filters:
   - "wiredtiger":
     approvers:
       - 10gen/storage-engines
+  - "xxhash":
+    approvers:
+      - 10gen/server-collection-write-path
   - "yaml-cpp":
     approvers:
       - 10gen/server-security

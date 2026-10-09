@@ -22,6 +22,15 @@ printjson(stats);
 assert.commandWorked(stats);
 assert("replicaSets" in stats);
 assert("hosts" in stats);
+// This test is run on multiversion clusters but only newer versions have the "hello" stats.
+const mongosVersion = assert.commandWorked(st.s.adminCommand({buildInfo: 1})).version;
+if (MongoRunner.compareBinVersions(mongosVersion, "9.1") >= 0) {
+    assert("replicaSetMonitor" in stats);
+    assert("hello" in stats.replicaSetMonitor);
+    const helloStats = stats.replicaSetMonitor.hello;
+    assert("totalCalls" in helloStats);
+    assert("totalLatencyMicros" in helloStats);
+}
 assert("numClientConnections" in stats);
 assert("numAScopedConnections" in stats);
 assert("totalInUse" in stats);
@@ -97,9 +106,9 @@ function neverUsedMetricTest(kDbName = "test") {
     [1, 2, 3].forEach((v) => assert.commandWorked(mongosDB.test.insert({x: v})));
     st.rs0.awaitReplication();
 
-    const numPools = assert.commandWorked(mongos.adminCommand({"getParameter": 1, "taskExecutorPoolSize": 1}))[
-        "taskExecutorPoolSize"
-    ];
+    const numPools = assert.commandWorked(
+        mongos.adminCommand({"getParameter": 1, "taskExecutorPoolSize": 1}),
+    )["taskExecutorPoolSize"];
 
     // Bump up number of pooled connections to 15
     const poolMinSize = 15;
@@ -204,7 +213,11 @@ function connectionAcquisitionMetricsTest() {
         initialWaitTime,
         "totalConnectionAcquisitionWaitTimeMillis should not decrease after running queries",
     );
-    assert.gte(updatedWaitTime, 0, "totalConnectionAcquisitionWaitTimeMillis should be non-negative");
+    assert.gte(
+        updatedWaitTime,
+        0,
+        "totalConnectionAcquisitionWaitTimeMillis should be non-negative",
+    );
 
     // Verify per-host stats include acquisition metrics and sum to the top-level totals.
     let hostRequestsSum = 0;
@@ -269,7 +282,10 @@ function connectionAcquisitionMetricsTest() {
 connectionAcquisitionMetricsTest();
 
 // Enable the following fail point to refresh connections after every command.
-let refreshConnectionFailPoint = configureFailPoint(st.s.getDB("admin"), "refreshConnectionAfterEveryCommand");
+let refreshConnectionFailPoint = configureFailPoint(
+    st.s.getDB("admin"),
+    "refreshConnectionAfterEveryCommand",
+);
 
 let latestTotalRefreshed = stats["totalRefreshed"];
 

@@ -1,36 +1,13 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/expression/evaluate.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/pcre_util.h"
+
+#include <string_view>
 
 
 namespace mongo {
@@ -38,6 +15,7 @@ namespace mongo {
 namespace exec::expression {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Object to hold data that is required when evaluating Regex expressions.
@@ -105,7 +83,7 @@ void extractRegexAndOptions(const Value& regexPattern,
 
     // The 'regex' field can be a RegEx object and may have its own options...
     if (regexPattern.getType() == BSONType::regEx) {
-        StringData regexFlags = regexPattern.getRegexFlags();
+        std::string_view regexFlags = regexPattern.getRegexFlags();
         extractedPattern = regexPattern.getRegex();
         uassert(51107,
                 str::stream()
@@ -165,11 +143,12 @@ void compile(const boost::optional<std::string>& pattern,
 template <typename RegexExpression>
 RegexExecutionState buildInitialState(const RegexExpression& expr,
                                       const Document& root,
-                                      Variables* variables) {
-    Value textInput = expr.getInput()->evaluate(root, variables);
-    Value regexPattern = expr.getRegex()->evaluate(root, variables);
+                                      Variables* variables,
+                                      const EvaluationContext& ctx) {
+    Value textInput = expr.getInput()->evaluate(root, variables, ctx);
+    Value regexPattern = expr.getRegex()->evaluate(root, variables, ctx);
     Value regexOptions =
-        expr.getOptions() ? expr.getOptions()->evaluate(root, variables) : Value(BSONNULL);
+        expr.getOptions() ? expr.getOptions()->evaluate(root, variables, ctx) : Value(BSONNULL);
 
     RegexExecutionState executionState;
 
@@ -232,7 +211,7 @@ pcre::MatchData execute(RegexExecutionState* regexState, const std::string& opNa
     tassert(11103509, "Expected non-nullish regexState", !regexState->nullish());
     tassert(11103510, "Expected regexState to contain a valid pcrePtr", regexState->pcrePtr);
 
-    StringData in = *regexState->input;
+    std::string_view in = *regexState->input;
     auto m = regexState->pcrePtr->matchView(in, {}, regexState->startBytePos);
     uassert(51156,
             str::stream() << "Error occurred while executing the regular expression in " << opName
@@ -268,7 +247,7 @@ Value nextMatch(RegexExecutionState* regexState, const std::string& opName) {
     captures.reserve(m.captureCount());
 
     for (size_t i = 1; i < m.captureCount() + 1; ++i) {
-        if (StringData cap = m[i]; !cap.data()) {
+        if (std::string_view cap = m[i]; !cap.data()) {
             // Use BSONNULL placeholder for unmatched capture groups.
             captures.push_back(Value(BSONNULL));
         } else {
@@ -288,18 +267,18 @@ Value nextMatch(RegexExecutionState* regexState, const std::string& opName) {
  * 'regexState'. This function returns the matched MatchData object and the input substring
  * preceding the match.
  */
-std::pair<pcre::MatchData, StringData> nextMatchAndPrecedingString(RegexExecutionState* regexState,
-                                                                   const std::string& opName) {
+std::pair<pcre::MatchData, std::string_view> nextMatchAndPrecedingString(
+    RegexExecutionState* regexState, const std::string& opName) {
     auto m = execute(regexState, opName);
     if (!m) {
         // No match.
-        return {std::move(m), ""_sd};
+        return {std::move(m), ""sv};
     }
 
     const int matchPos = m[0].data() - m.input().data();
 
-    const StringData beforeMatch = m.input().substr(regexState->beforeMatchStrStart,
-                                                    matchPos - regexState->beforeMatchStrStart);
+    const std::string_view beforeMatch = m.input().substr(
+        regexState->beforeMatchStrStart, matchPos - regexState->beforeMatchStrStart);
 
     // Move indices for next match.
     regexState->beforeMatchStrStart += beforeMatch.size() + m[0].size();
@@ -334,21 +313,27 @@ ExpressionRegex::PrecompiledRegex precompileRegex(const Value& regex,
     return precompiledRegex;
 }
 
-Value evaluate(const ExpressionRegexFind& expr, const Document& root, Variables* variables) {
-    auto executionState = buildInitialState(expr, root, variables);
+Value evaluate(const ExpressionRegexFind& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto executionState = buildInitialState(expr, root, variables, ctx);
     if (executionState.nullish()) {
         return Value(BSONNULL);
     }
     return nextMatch(&executionState, expr.getOpName());
 }
 
-Value evaluate(const ExpressionRegexFindAll& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionRegexFindAll& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     std::vector<Value> output;
-    auto executionState = buildInitialState(expr, root, variables);
+    auto executionState = buildInitialState(expr, root, variables, ctx);
     if (executionState.nullish()) {
         return Value(std::move(output));
     }
-    StringData input = *(executionState.input);
+    std::string_view input = *(executionState.input);
     size_t totalDocSize = 0;
 
     // Using do...while loop because, when input is an empty string, we still want to see if there
@@ -394,8 +379,11 @@ Value evaluate(const ExpressionRegexFindAll& expr, const Document& root, Variabl
     return Value(std::move(output));
 }
 
-Value evaluate(const ExpressionRegexMatch& expr, const Document& root, Variables* variables) {
-    auto state = buildInitialState(expr, root, variables);
+Value evaluate(const ExpressionRegexMatch& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto state = buildInitialState(expr, root, variables, ctx);
     if (state.nullish()) {
         return Value(false);
     }
@@ -431,10 +419,13 @@ void validateSplitArguments(const ExpressionSplit& expr,
 }
 }  // namespace
 
-Value evaluate(const ExpressionSplit& expr, const Document& root, Variables* variables) {
+Value evaluate(const ExpressionSplit& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
     auto& children = expr.getChildren();
-    Value inputArg = children[0]->evaluate(root, variables);
-    Value separatorArg = children[1]->evaluate(root, variables);
+    Value inputArg = children[0]->evaluate(root, variables, ctx);
+    Value separatorArg = children[1]->evaluate(root, variables, ctx);
 
     if (inputArg.nullish() || separatorArg.nullish()) {
         return Value(BSONNULL);
@@ -445,8 +436,8 @@ Value evaluate(const ExpressionSplit& expr, const Document& root, Variables* var
 
     if (separatorArg.getType() == BSONType::string) {
         // Split using a string delimiter.
-        StringData input = inputArg.getStringData();
-        StringData separator = separatorArg.getStringData();
+        std::string_view input = inputArg.getStringData();
+        std::string_view separator = separatorArg.getStringData();
 
         uassert(40087, "$split requires a non-empty separator", !separator.empty());
 
@@ -458,13 +449,13 @@ Value evaluate(const ExpressionSplit& expr, const Document& root, Variables* var
         const char* it = remainingHaystack;
         while ((it = std::search(remainingHaystack, haystackEnd, needle, needleEnd)) !=
                haystackEnd) {
-            StringData sd(remainingHaystack, it - remainingHaystack);
+            std::string_view sd(remainingHaystack, it - remainingHaystack);
             output.push_back(Value(sd));
             remainingHaystack = it + separator.size();
         }
 
-        StringData splitString(remainingHaystack,
-                               input.size() - (remainingHaystack - input.data()));
+        std::string_view splitString(remainingHaystack,
+                                     input.size() - (remainingHaystack - input.data()));
         output.push_back(Value(splitString));
         return Value(std::move(output));
     }
@@ -494,7 +485,7 @@ Value evaluate(const ExpressionSplit& expr, const Document& root, Variables* var
             break;
         }
         output.push_back(Value(beforeMatch));
-        for (StringData subMatch : match.getCaptures()) {
+        for (std::string_view subMatch : match.getCaptures()) {
             output.push_back(Value(subMatch));
         }
     }
@@ -508,11 +499,12 @@ Value evaluateReplace(
     ExpressionReplace& expr,
     const Document& root,
     Variables* variables,
-    std::function<Value(StringData, StringData, StringData)> replaceOpStr,
-    std::function<Value(StringData, RegexExecutionState, StringData)> replaceOpRegEx) {
-    Value input = expr.getInput()->evaluate(root, variables);
-    Value find = expr.getFind()->evaluate(root, variables);
-    Value replacement = expr.getReplacement()->evaluate(root, variables);
+    const EvaluationContext& ctx,
+    std::function<Value(std::string_view, std::string_view, std::string_view)> replaceOpStr,
+    std::function<Value(std::string_view, RegexExecutionState, std::string_view)> replaceOpRegEx) {
+    Value input = expr.getInput()->evaluate(root, variables, ctx);
+    Value find = expr.getFind()->evaluate(root, variables, ctx);
+    Value replacement = expr.getReplacement()->evaluate(root, variables, ctx);
 
     uassert(10503904,
             str::stream() << expr.getOpName()
@@ -560,13 +552,18 @@ Value evaluateReplace(
     // find.getType() == BSONType::string
     return replaceOpStr(input.getStringData(), find.getStringData(), replacement.getStringData());
 }
+
 }  // namespace
 
-Value evaluate(const ExpressionReplaceOne& expr, const Document& root, Variables* variables) {
-    auto replaceOneOp = [](StringData input, StringData find, StringData replacement) -> Value {
+Value evaluate(const ExpressionReplaceOne& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto replaceOneOp =
+        [](std::string_view input, std::string_view find, std::string_view replacement) -> Value {
         size_t startIndex = input.find(find);
         if (startIndex == std::string::npos) {
-            return Value(StringData(input));
+            return Value(std::string_view(input));
         }
         // An empty string matches at every position, so replaceOne should insert the replacement
         // text at position 0. input.find correctly returns position 0 when 'find' is empty, so we
@@ -578,8 +575,9 @@ Value evaluate(const ExpressionReplaceOne& expr, const Document& root, Variables
         output << input.substr(endIndex);
         return Value(output.stringData());
     };
-    auto replaceOneOpRegEx =
-        [&](StringData input, RegexExecutionState executionState, StringData replacement) -> Value {
+    auto replaceOneOpRegEx = [&](std::string_view input,
+                                 RegexExecutionState executionState,
+                                 std::string_view replacement) -> Value {
         auto [match, beforeMatch] = nextMatchAndPrecedingString(&executionState, expr.getOpName());
         if (!match) {
             // No match.
@@ -589,15 +587,27 @@ Value evaluate(const ExpressionReplaceOne& expr, const Document& root, Variables
         output << beforeMatch << replacement << input.substr(executionState.beforeMatchStrStart);
         return Value(output.stringData());
     };
-    return evaluateReplace(expr, root, variables, replaceOneOp, replaceOneOpRegEx);
+    return evaluateReplace(expr, root, variables, ctx, replaceOneOp, replaceOneOpRegEx);
 }
 
-Value evaluate(const ExpressionReplaceAll& expr, const Document& root, Variables* variables) {
-    auto replaceAllOpStr = [](StringData input, StringData find, StringData replacement) -> Value {
+Value evaluate(const ExpressionReplaceAll& expr,
+               const Document& root,
+               Variables* variables,
+               const EvaluationContext& ctx) {
+    auto replaceAllOpStr =
+        [&](std::string_view input, std::string_view find, std::string_view replacement) -> Value {
+        BatchedExpressionMemoryCharger memCharger(expr, ctx);
+
         // An empty string matches at every position, so replaceAll should insert 'replacement'
         // at every position when 'find' is empty. Handling this as a special case lets us
         // assume 'find' is nonempty in the usual case.
         if (find.size() == 0) {
+            const int64_t inputSize = static_cast<int64_t>(input.size());
+            const int64_t replacementSize = static_cast<int64_t>(replacement.size());
+            const int64_t expectedSize = (inputSize + 1) * replacementSize + inputSize;
+            memCharger.setTotal(expectedSize);
+            memCharger.flush();
+
             StringBuilder output;
             for (char c : input) {
                 output << replacement << c;
@@ -617,14 +627,19 @@ Value evaluate(const ExpressionReplaceAll& expr, const Document& root, Variables
             size_t endIndex = startIndex + find.size();
             output << input.substr(0, startIndex);
             output << replacement;
+            memCharger.setTotal(output.len());
             // This step assumes 'find' is nonempty. If 'find' were empty then input.find would
             // always find a match at position 0, and the input would never shrink.
             input = input.substr(endIndex);
         }
+        memCharger.setTotal(output.len());
+        memCharger.flush();
         return Value(output.stringData());
     };
-    auto replaceAllOpRegEx =
-        [&](StringData input, RegexExecutionState executionState, StringData replacement) -> Value {
+    auto replaceAllOpRegEx = [&](std::string_view input,
+                                 RegexExecutionState executionState,
+                                 std::string_view replacement) -> Value {
+        BatchedExpressionMemoryCharger memCharger(expr, ctx);
         StringBuilder output;
 
         // Condition uses <= instead of < to also capture possible empty matches at the end of the
@@ -637,12 +652,15 @@ Value evaluate(const ExpressionReplaceAll& expr, const Document& root, Variables
                 break;
             }
             output << beforeMatch << replacement;
+            memCharger.setTotal(output.len());
         }
         output << input.substr(executionState.beforeMatchStrStart);
+        memCharger.setTotal(output.len());
+        memCharger.flush();
 
         return Value(output.stringData());
     };
-    return evaluateReplace(expr, root, variables, replaceAllOpStr, replaceAllOpRegEx);
+    return evaluateReplace(expr, root, variables, ctx, replaceAllOpStr, replaceAllOpRegEx);
 }
 
 }  // namespace exec::expression

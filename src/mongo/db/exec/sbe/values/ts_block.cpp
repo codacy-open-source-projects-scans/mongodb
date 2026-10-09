@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/values/ts_block.h"
 
@@ -45,6 +19,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <string_view>
 #include <tuple>
 #include <utility>
 
@@ -211,7 +186,7 @@ boost::optional<bsoncolumn::SBEPath> canUsePathBasedDecompression(const PathRequ
 }  // namespace
 
 TsBucketPathExtractor::TsBucketPathExtractor(std::vector<PathRequest> pathReqs,
-                                             StringData timeField)
+                                             std::string_view timeField)
     : _pathReqs(std::move(pathReqs)), _timeField(timeField) {
 
     size_t idx = 0;
@@ -219,7 +194,7 @@ TsBucketPathExtractor::TsBucketPathExtractor(std::vector<PathRequest> pathReqs,
         tassert(
             7796405, "Path must start with a Get operation", holds_alternative<Get>(req.path[0]));
 
-        StringData field = get<Get>(req.path[0]).field;
+        std::string_view field = get<Get>(req.path[0]).field;
         _topLevelFieldToIdxes[field].push_back(idx);
 
         if (req.path.size() > 2) {
@@ -245,8 +220,8 @@ TsBucketPathExtractor::ExtractResult TsBucketPathExtractor::extractCellBlocks(
                     count >= 0);
             return static_cast<size_t>(count);
         }
-        const int count =
-            timeseries::BucketUnpacker::computeMeasurementCount(bucketObj, StringData(_timeField));
+        const int count = timeseries::BucketUnpacker::computeMeasurementCount(
+            bucketObj, std::string_view(_timeField));
         tassert(
             12193301, "Measurement count in time-series bucket must be non-negative", count >= 0);
         return static_cast<size_t>(count);
@@ -494,12 +469,12 @@ TsBlock::TsBlock(size_t ncells,
                  bool isTimeField,
                  std::pair<TypeTags, Value> controlMin,
                  std::pair<TypeTags, Value> controlMax)
-    : _block({owned, blockTag, blockVal}),
+    : _block(owned, blockTag, blockVal),
       _count(ncells),
       _bucketVersion(bucketVersion),
       _isTimeField(isTimeField),
-      _controlMin(copyValue(controlMin.first, controlMin.second)),
-      _controlMax(copyValue(controlMax.first, controlMax.second)) {
+      _controlMin(TagValueOwned::fromRaw(copyValue(controlMin.first, controlMin.second))),
+      _controlMax(TagValueOwned::fromRaw(copyValue(controlMax.first, controlMax.second))) {
     tassert(11093604,
             "Expected bsonObject or bsonBinData tag type",
             blockTag == TypeTags::bsonObject || blockTag == TypeTags::bsonBinData);
@@ -611,6 +586,14 @@ std::unique_ptr<TsBlock> TsBlock::cloneStrongTyped() const {
     }
     cpy->_densenessCache = _densenessCache;
 
+    // _atCache and _atCacheAllocator are deliberately NOT copied. The
+    // allocator (BSONElementStorage) uses boost::thread_unsafe_counter
+    // refcounting, so sharing it across clones would be unsafe if they
+    // live on different threads. More fundamentally, this class's
+    // invariant (documented above on _block) is that cloned TsBlocks are
+    // fully owned with no pointers into outside data. Cloned blocks
+    // repopulate the cache on demand via the usual fast paths.
+
     return cpy;
 }
 
@@ -679,6 +662,12 @@ value::TagValueView TsBlock::tryMax() const {
     return {TypeTags::Nothing, Value{0u}};
 }
 
+void TsBlock::ensureAtCacheAllocator() {
+    if (!_atCacheAllocator) {
+        _atCacheAllocator = new BSONElementStorage();
+    }
+}
+
 void TsBlock::ensureDeblocked() {
     if (!_decompressedBlock) {
         if (_block.tag() == TypeTags::bsonObject) {
@@ -689,6 +678,88 @@ void TsBlock::ensureDeblocked() {
         tassert(
             8867300, "Decompressed block must be set after ensureDeblocked()", _decompressedBlock);
     }
+}
+
+boost::optional<size_t> TsBlock::argMin() {
+    if (_isTimeField && isTimeFieldSorted()) {
+        return 0;
+    }
+    if (_decompressedBlock) {
+        return _decompressedBlock->argMin();
+    }
+    if (_block.tag() == TypeTags::bsonObject) {
+        // v1 bucket — no BSONColumn fast path; fall through to existing behavior.
+        ensureDeblocked();
+        return _decompressedBlock->argMin();
+    }
+
+    ensureAtCacheAllocator();
+    // Passing comparator=nullptr is safe only because block processing in the SBE stage builder is
+    // disabled when a non-simple collator is in scope (see gen_group.cpp's _state.getCollatorSlot()
+    // check), so this path is never reached for queries that would require collation-aware string
+    // ordering. If that gate is ever relaxed, this call needs to thread an appropriate
+    // StringDataComparator through.
+    auto [elem, idx] = mongo::bsoncolumn::min<sbe::bsoncolumn::SBEColumnMaterializer>(
+        getBinData(), _atCacheAllocator, /*comparator=*/nullptr);
+    if (sbe::bsoncolumn::SBEColumnMaterializer::isMissing(elem)) {
+        return boost::none;
+    }
+    // Returned idx is the logical row position of the extreme element, which is
+    // by construction non-missing, so caching (idx, elem) is always consistent
+    // with what a subsequent at(idx) would materialize via ensureDeblocked.
+    _atCache.emplace(idx, value::rawToView(elem));
+    return idx;
+}
+
+boost::optional<size_t> TsBlock::argMax() {
+    if (_isTimeField && isTimeFieldSorted()) {
+        return _count - 1;
+    }
+    if (_decompressedBlock) {
+        return _decompressedBlock->argMax();
+    }
+    if (_block.tag() == TypeTags::bsonObject) {
+        // v1 bucket — no BSONColumn fast path; fall through to existing behavior.
+        ensureDeblocked();
+        return _decompressedBlock->argMax();
+    }
+
+    ensureAtCacheAllocator();
+    // See note in argMin() above: comparator=nullptr is safe because the SBE stage builder disables
+    // block processing when a non-simple collator is in scope.
+    auto [elem, idx] = mongo::bsoncolumn::max<sbe::bsoncolumn::SBEColumnMaterializer>(
+        getBinData(), _atCacheAllocator, /*comparator=*/nullptr);
+    if (sbe::bsoncolumn::SBEColumnMaterializer::isMissing(elem)) {
+        return boost::none;
+    }
+    _atCache.emplace(idx, value::rawToView(elem));
+    return idx;
+}
+
+value::TagValueView TsBlock::at(size_t idx) {
+    tassert(11422200, "TsBlock::at(idx) called on an empty block", _count > 0);
+    if (auto it = _atCache.find(idx); it != _atCache.end()) {
+        return it->second;
+    }
+    if (_decompressedBlock) {
+        return _decompressedBlock->at(idx);
+    }
+    if (_block.tag() != TypeTags::bsonObject && tryDense().get_value_or(false)) {
+        if (idx == 0) {
+            ensureAtCacheAllocator();
+            auto elem = mongo::bsoncolumn::first<sbe::bsoncolumn::SBEColumnMaterializer>(
+                getBinData(), _atCacheAllocator);
+            return _atCache.emplace(0u, value::rawToView(elem)).first->second;
+        }
+        if (idx == _count - 1) {
+            ensureAtCacheAllocator();
+            auto elem = mongo::bsoncolumn::last<sbe::bsoncolumn::SBEColumnMaterializer>(
+                getBinData(), _atCacheAllocator);
+            return _atCache.emplace(_count - 1, value::rawToView(elem)).first->second;
+        }
+    }
+    ensureDeblocked();
+    return _decompressedBlock->at(idx);
 }
 
 bool TsBlock::isTimeFieldSorted() const {
@@ -753,23 +824,22 @@ ValueBlock& TsCellBlockForTopLevelField::getValueBlock() {
 }
 
 std::unique_ptr<CellBlock> TsCellBlockForTopLevelField::clone() const {
-    auto precomputedCount = _unownedTsBlock->count();
     auto tsBlockClone = _unownedTsBlock->cloneStrongTyped();
 
     // Using raw new to access private constructor.
     return std::unique_ptr<TsCellBlockForTopLevelField>(
-        new TsCellBlockForTopLevelField(precomputedCount, std::move(tsBlockClone)));
+        new TsCellBlockForTopLevelField(std::move(tsBlockClone)));
 }
 
 TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(TsBlock* block) : _unownedTsBlock(block) {
-    // Position info of 1111...
-    _positionInfo.resize(block->count(), 1);
+    // We leave '_positionInfo' default-constructed (empty) here. Top-level fields are scalars (one
+    // value per row), so the position info is conceptually all 1s. We represent this with an empty
+    // vector by convention. This avoids materializing N int32_t entries per block (and the
+    // corresponding O(N) all-of check on every fold/extract) for a value that is statically known.
 }
 
-TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(size_t count,
-                                                         std::unique_ptr<TsBlock> tsBlock)
+TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(std::unique_ptr<TsBlock> tsBlock)
     : _ownedTsBlock(std::move(tsBlock)), _unownedTsBlock(_ownedTsBlock.get()) {
-    // Position info of 1111...
-    _positionInfo.resize(count, 1);
+    // See comment above: empty `_positionInfo` denotes "all-1's" by convention.
 }
 }  // namespace mongo::sbe::value

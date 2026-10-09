@@ -1,6 +1,7 @@
 // Cannot implicitly shard accessed collections because the explain output from a mongod when run
 // against a sharded collection is wrapped in a "shards" object with keys for each shard.
 // @tags: [
+//   uses_explain,
 //   assumes_unsharded_collection,
 //   does_not_support_stepdowns,
 //   requires_fcv_51,
@@ -84,11 +85,15 @@ const coll = db.index_partial_read_ops;
     //
 
     // Aggregate operation that should use index.
-    explain = getSingleNodeExplain(coll.aggregate([{$match: {x: {$gt: 1}, a: 1}}], {explain: true}));
+    explain = getSingleNodeExplain(
+        coll.aggregate([{$match: {x: {$gt: 1}, a: 1}}], {explain: true}),
+    );
     assert(isIxscan(db, getWinningPlanFromExplain(explain)));
 
     // Aggregate operation that should not use index.
-    explain = getSingleNodeExplain(coll.aggregate([{$match: {x: {$gt: 1}, a: 2}}], {explain: true}));
+    explain = getSingleNodeExplain(
+        coll.aggregate([{$match: {x: {$gt: 1}, a: 2}}], {explain: true}),
+    );
     assert(isCollscan(db, getWinningPlanFromExplain(explain)));
 
     //
@@ -123,9 +128,15 @@ const coll = db.index_partial_read_ops;
     assert.commandWorked(coll.dropIndexes());
     assert.commandWorked(coll.remove({}));
 
-    assert.commandWorked(coll.createIndex({a: 1}, {name: "index1", partialFilterExpression: {a: {$gte: 0}}}));
-    assert.commandWorked(coll.createIndex({a: 1}, {name: "index2", partialFilterExpression: {a: {$gte: 10}}}));
-    assert.commandWorked(coll.createIndex({a: 1}, {name: "index3", partialFilterExpression: {a: {$gte: 100}}}));
+    assert.commandWorked(
+        coll.createIndex({a: 1}, {name: "index1", partialFilterExpression: {a: {$gte: 0}}}),
+    );
+    assert.commandWorked(
+        coll.createIndex({a: 1}, {name: "index2", partialFilterExpression: {a: {$gte: 10}}}),
+    );
+    assert.commandWorked(
+        coll.createIndex({a: 1}, {name: "index3", partialFilterExpression: {a: {$gte: 100}}}),
+    );
 
     assert.commandWorked(coll.insert([{a: 1}, {a: 2}, {a: 3}]));
     assert.commandWorked(coll.insert([{a: 11}, {a: 12}, {a: 13}]));
@@ -214,7 +225,10 @@ const coll = db.index_partial_read_ops;
     assert(coll.drop());
 
     assert.commandWorked(
-        coll.createIndex({x: 1}, {partialFilterExpression: {$or: [{a: 3}, {$and: [{a: 5}, {b: 5}]}]}}),
+        coll.createIndex(
+            {x: 1},
+            {partialFilterExpression: {$or: [{a: 3}, {$and: [{a: 5}, {b: 5}]}]}},
+        ),
     );
     assert.commandWorked(coll.insert({x: 1, a: 1})); // Not in index.
     assert.commandWorked(coll.insert({x: 2, a: 5})); // Not in index.
@@ -226,7 +240,9 @@ const coll = db.index_partial_read_ops;
     explain = getSingleNodeExplain(coll.explain("executionStats").find({x: 4, a: 3}).finish());
     assert.eq(1, explain.executionStats.nReturned);
     assert(isIxscan(db, getWinningPlanFromExplain(explain)));
-    explain = getSingleNodeExplain(coll.explain("executionStats").find({x: 5, a: 5, b: 5}).finish());
+    explain = getSingleNodeExplain(
+        coll.explain("executionStats").find({x: 5, a: 5, b: 5}).finish(),
+    );
     assert.eq(1, explain.executionStats.nReturned);
     assert(isIxscan(db, getWinningPlanFromExplain(explain)), explain);
 
@@ -237,7 +253,9 @@ const coll = db.index_partial_read_ops;
     explain = getSingleNodeExplain(coll.explain("executionStats").find({x: 2, a: 5}).finish());
     assert.eq(1, explain.executionStats.nReturned);
     assert(isCollscan(db, getWinningPlanFromExplain(explain)));
-    explain = getSingleNodeExplain(coll.explain("executionStats").find({x: 3, a: 5, b: 1}).finish());
+    explain = getSingleNodeExplain(
+        coll.explain("executionStats").find({x: 3, a: 5, b: 1}).finish(),
+    );
     assert.eq(1, explain.executionStats.nReturned);
     assert(isCollscan(db, getWinningPlanFromExplain(explain)));
 })();

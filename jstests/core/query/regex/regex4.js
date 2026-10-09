@@ -1,4 +1,5 @@
 // @tags: [
+//   uses_explain,
 //   assumes_balancer_off,
 //   assumes_read_concern_local,
 //   # Ignore because the find command is rewritten for TS collections before reaching the failpoint.
@@ -14,12 +15,20 @@ assert.commandWorked(t.save({name: "bob"}));
 assert.commandWorked(t.save({name: "aaron"}));
 
 assert.eq(2, t.find({name: /^e.*/}).count(), "no index count");
-assert.eq(4, t.find({name: /^e.*/}).explain(true).executionStats.totalDocsExamined, "no index explain");
+assert.eq(
+    4,
+    t.find({name: /^e.*/}).explain(true).executionStats.totalDocsExamined,
+    "no index explain",
+);
 // assert.eq( 2 , t.find( { name : { $ne : /^e.*/ } } ).count() , "no index count ne" ); //
 // SERVER-251
 
 assert.commandWorked(t.createIndex({name: 1}));
 
 assert.eq(2, t.find({name: /^e.*/}).count(), "index count");
-assert.eq(2, t.find({name: /^e.*/}).explain(true).executionStats.totalKeysExamined, "index explain"); // SERVER-239
+assert.eq(
+    2,
+    t.find({name: /^e.*/}).explain(true).executionStats.totalKeysExamined,
+    "index explain",
+); // SERVER-239
 // assert.eq( 2 , t.find( { name : { $ne : /^e.*/ } } ).count() , "index count ne" ); // SERVER-251

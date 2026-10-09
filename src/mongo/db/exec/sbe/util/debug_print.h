@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
@@ -40,6 +13,7 @@
 
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
@@ -78,16 +52,16 @@ public:
         Command cmd;
         std::string str;
 
-        Block(StringData s) : cmd(cmdNone), str(s) {}
+        Block(std::string_view s) : cmd(cmdNone), str(s) {}
 
-        Block(Command c, StringData s) : cmd(c), str(s) {}
+        Block(Command c, std::string_view s) : cmd(c), str(s) {}
 
         Block(Command c) : cmd(c) {}
     };
 
     DebugPrinter(bool colorConsole = false) : _colorConsole(colorConsole) {}
 
-    static void addKeyword(std::vector<Block>& ret, StringData k) {
+    static void addKeyword(std::vector<Block>& ret, std::string_view k) {
         ret.emplace_back(Block::cmdColorCyan);
         ret.emplace_back(Block{Block::cmdNoneNoSpace, k});
         ret.emplace_back(Block::cmdColorNone);
@@ -110,7 +84,7 @@ public:
         ret.emplace_back(Block{Block::cmdNoneNoSpace, " "});
     }
 
-    static void addIdentifier(std::vector<Block>& ret, StringData k) {
+    static void addIdentifier(std::vector<Block>& ret, std::string_view k) {
         ret.emplace_back(Block::cmdColorGreen);
         ret.emplace_back(Block{Block::cmdNoneNoSpace, k});
         ret.emplace_back(Block::cmdColorNone);

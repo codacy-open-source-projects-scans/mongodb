@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -35,22 +9,22 @@
 
 #include <iosfwd>
 #include <string>
+#include <string_view>
 
 #include <boost/optional.hpp>
 #include <fmt/format.h>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class Status;
 template <typename T>
 class StatusWith;
-class StringData;
 
 /**
  * Validate that a string is either empty or is parseable to a HostAndPort. This is intended for use
  * as an IDL validator callback.
  */
-Status validateHostAndPort(const std::string& hostAndPortStr, const boost::optional<TenantId>&);
+Status validateHostAndPort(std::string_view hostAndPortStr, const boost::optional<TenantId>&);
 
 /**
  * Name of a process on the network.
@@ -64,12 +38,12 @@ struct HostAndPort {
      * Parses "text" to produce a HostAndPort.  Returns either that or an error status describing
      * the parse failure.
      */
-    static StatusWith<HostAndPort> parse(StringData text);
+    static StatusWith<HostAndPort> parse(std::string_view text);
 
     /**
      * A version of 'parse' that throws a UserException if a parsing error is encountered.
      */
-    static HostAndPort parseThrowing(StringData text) {
+    static HostAndPort parseThrowing(std::string_view text) {
         return uassertStatusOK(parse(text));
     }
 
@@ -82,14 +56,14 @@ struct HostAndPort {
      * Constructs a HostAndPort by parsing "text" of the form hostname[:portnumber]
      * Throws an AssertionException if bad config std::string or bad port #.
      */
-    explicit HostAndPort(StringData text);
+    explicit HostAndPort(std::string_view text);
 
     /**
      * Constructs a HostAndPort with the hostname "h" and port "p".
      *
      * If "p" is -1, port() returns ServerGlobalParams::DefaultDBPort.
      */
-    HostAndPort(const std::string& h, int p);
+    HostAndPort(std::string h, int p);
 
     /**
      * (Re-)initializes this HostAndPort by parsing "s".  Returns
@@ -97,7 +71,7 @@ struct HostAndPort {
      * after initialize() returns a non-OK status, though it is safe to
      * assign to it or re-initialize it.
      */
-    Status initialize(StringData s);
+    Status initialize(std::string_view s);
 
     bool operator<(const HostAndPort& r) const;
     bool operator==(const HostAndPort& r) const;
@@ -117,6 +91,11 @@ struct HostAndPort {
      * Returns true if the hostname is an IP matching the default route.
      */
     bool isDefaultRoute() const;
+
+    /**
+     * Returns true if the hostname is a Unix domain socket.
+     */
+    bool isUds() const;
 
     /**
      * Returns a string representation of "host:port".
@@ -146,7 +125,7 @@ private:
     friend struct fmt::formatter<HostAndPort>;
 
     struct AppendVisitor {
-        virtual void operator()(StringData v) = 0;
+        virtual void operator()(std::string_view v) = 0;
         virtual void operator()(std::uint16_t v) = 0;
         virtual ~AppendVisitor() = default;
     };
@@ -180,7 +159,7 @@ template <typename F>
 void HostAndPort::_appendToPolymorphicFunc(F f) const {
     struct Vis : AppendVisitor {
         explicit Vis(F f) : _f{std::move(f)} {}
-        void operator()(StringData v) override {
+        void operator()(std::string_view v) override {
             _f(v);
         }
         void operator()(std::uint16_t v) override {
@@ -192,7 +171,7 @@ void HostAndPort::_appendToPolymorphicFunc(F f) const {
     _appendToVisitor(visitor);
 }
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo
 
 namespace fmt {
 template <>

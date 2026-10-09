@@ -1,6 +1,8 @@
-load("@poetry//:dependencies.bzl", "dependency")
+load("@internal_platforms_do_not_use//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("@npm//:eslint/package_json.bzl", "bin")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("//bazel/uv:defs.bzl", "dependency")
 
 exports_files([
     "candle_wrapper.py",
@@ -45,15 +47,29 @@ py_binary(
     ],
 )
 
+py_library(
+    name = "multiversion_downloads_filter",
+    srcs = ["multiversion_downloads_filter.py"],
+    data = ["//src/mongo/util/version:releases.yml"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/resmokelib",
+    ],
+)
+
+py_library(
+    name = "build_system_options",
+    srcs = ["build_system_options.py"],
+    visibility = ["//visibility:public"],
+)
+
 py_binary(
     name = "mongosymb",
-    srcs = [
-        "build_system_options.py",
-        "mongosymb.py",
-    ],
+    srcs = ["mongosymb.py"],
     main = "mongosymb.py",
     visibility = ["//visibility:public"],
     deps = [
+        "//buildscripts:build_system_options",
         "//buildscripts/util",
         dependency(
             "requests",
@@ -76,12 +92,53 @@ py_binary(
         "//src/mongo/util/version:releases.yml",
     ],
     main = "resmoke.py",
+    target_compatible_with = select({
+        "@platforms//cpu:s390x": ["@platforms//:incompatible"],
+        "@platforms//cpu:ppc64le": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         "//buildscripts/resmokelib",
         dependency(
             "typer",
             group = "core",
+        ),
+    ],
+)
+
+# Build-time resmoke helper for actions that must execute on the invoking host
+# because they need its network and credentials. Keep this separate from the
+# normal resmoke target, whose execution platform may be a remote worker.
+py_binary(
+    name = "resmoke_local_host_tool",
+    srcs = ["resmoke.py"],
+    data = [
+        "//buildscripts/resmokeconfig:fully_disabled_feature_flags.yml",
+        "//buildscripts/resmokeconfig:resmoke_modules.yml",
+        "//buildscripts/resmokeconfig/loggers:all_files",
+        "//src/mongo/util/version:releases.yml",
+    ],
+    exec_compatible_with = HOST_CONSTRAINTS,
+    main = "resmoke.py",
+    visibility = ["//bazel/resmoke:__subpackages__"],
+    deps = [
+        "//buildscripts/resmokelib",
+        dependency(
+            "typer",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "setup_clang_tidy_lib",
+    srcs = ["setup_clang_tidy.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "bazel-runfiles",
+            group = "testing",
         ),
     ],
 )
@@ -159,6 +216,7 @@ py_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//bazel:bazelisk_lib",
         dependency(
             "typer",
             group = "core",
@@ -176,25 +234,8 @@ py_library(
     visibility = ["//visibility:public"],
     deps = [
         "mongo_toolchain",
+        "setup_clang_tidy_lib",
         "simple_report",
-    ],
-)
-
-py_binary(
-    name = "sbom_linter",
-    srcs = [
-        "sbom_linter.py",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        dependency(
-            "jsonschema",
-            group = "build-metrics",
-        ),
-        dependency(
-            "license-expression",
-            group = "lint",
-        ),
     ],
 )
 
@@ -222,6 +263,27 @@ py_binary(
             group = "testing",
         ),
     ],
+)
+
+py_library(
+    name = "cs_suggest_variants_lib",
+    srcs = ["cs_suggest_variants.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/ciconfig",
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_binary(
+    name = "cs_suggest_variants",
+    srcs = ["cs_suggest_variants.py"],
+    main = "cs_suggest_variants.py",
+    visibility = ["//visibility:public"],
+    deps = [":cs_suggest_variants_lib"],
 )
 
 py_binary(
@@ -264,8 +326,17 @@ sh_binary(
 )
 
 sh_binary(
-    name = "poetry_sync",
-    srcs = ["poetry_sync.sh"],
+    name = "wt_dump_catalog",
+    srcs = ["wt_dump_catalog_main.sh"],
+    data = ["wt_functions.sh"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "wt_dump_collection",
+    srcs = ["wt_dump_collection_main.sh"],
+    data = ["wt_functions.sh"],
+    visibility = ["//visibility:public"],
 )
 
 sh_binary(
@@ -291,13 +362,8 @@ py_binary(
     srcs = ["gather_failed_tests.py"],
     visibility = ["//visibility:public"],
     deps = [
-        "//buildscripts/util",
         dependency(
             "typer",
-            group = "core",
-        ),
-        dependency(
-            "pyyaml",
             group = "core",
         ),
     ],
@@ -311,11 +377,23 @@ py_binary(
         "//buildscripts/patch_builds",
         "//buildscripts/resmokelib",
         dependency(
-            "structlog",
+            "click",
             group = "evergreen",
         ),
         dependency(
             "gitpython",
+            group = "evergreen",
+        ),
+        dependency(
+            "pydantic",
+            group = "evergreen",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+        dependency(
+            "structlog",
             group = "evergreen",
         ),
     ],
@@ -343,10 +421,6 @@ py_binary(
 py_binary(
     name = "generate_result_tasks",
     srcs = ["generate_result_tasks.py"],
-    data = [
-        "@codeowners_binary//:codeowners",
-        "@mothra//:teams",
-    ],
     visibility = ["//visibility:public"],
     deps = [
         "//buildscripts/ciconfig",
@@ -360,8 +434,8 @@ py_binary(
             group = "testing",
         ),
         dependency(
-            "bazel-runfiles",
-            group = "testing",
+            "boto3",
+            group = "aws",
         ),
     ],
 )
@@ -407,20 +481,28 @@ py_binary(
 )
 
 py_binary(
-    name = "poetry_lock_check",
-    srcs = ["poetry_lock_check.py"],
+    name = "uv_lock_check",
+    srcs = ["uv_lock_check.py"],
     visibility = ["//visibility:public"],
     deps = [
         dependency(
-            "poetry",
+            "uv",
             group = "export",
         ),
     ],
 )
 
+sh_binary(
+    name = "uv_sync",
+    srcs = ["uv_sync.sh"],
+    data = ["uv_version.txt"],
+    visibility = ["//visibility:public"],
+)
+
 py_binary(
     name = "validate_evg_project_config",
     srcs = ["validate_evg_project_config.py"],
+    visibility = ["//visibility:public"],
     deps = [
         "//buildscripts/ciconfig",
         dependency(
@@ -434,6 +516,23 @@ py_binary(
         dependency(
             "structlog",
             group = "evergreen",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_binary(
+    name = "lint_resmoke_suite_tests",
+    srcs = ["lint_resmoke_suite_tests.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/util",
+        dependency(
+            "pyyaml",
+            group = "core",
         ),
     ],
 )
@@ -480,16 +579,31 @@ py_binary(
 py_binary(
     name = "archive_artifacts",
     srcs = ["archive_artifacts.py"],
+    # This target is invoked by `bazel run` after cross-compilation to package
+    # the source tree on the invoking Evergreen host.  Its launcher must use
+    # the host Python, not the foreign execution-platform Python selected for
+    # remote compile actions (for example, x86_64 Python on a PPC64LE host).
+    exec_compatible_with = HOST_CONSTRAINTS,
     deps = [
-        dependency(
-            "pyzstd",
-            group = "modules_poc",
-        ),
         dependency(
             "cffi",
             group = "modules_poc",
         ),
-    ],
+    ] + select({
+        # pyzstd has no s390x/ppc64le wheels and its sdist uses an
+        # in-tree PEP 517 build backend (pyzstd_pep517) that pycross
+        # can't invoke. archive_artifacts.py already handles pyzstd
+        # being unavailable at runtime (`try: from pyzstd ... except: pass`
+        # → falls back to pigz), so drop the Bazel-level dep on those
+        # platforms rather than fail the build.
+        "//bazel/config:ppc_or_s390x": [],
+        "//conditions:default": [
+            dependency(
+                "pyzstd",
+                group = "modules_poc",
+            ),
+        ],
+    }),
 )
 
 py_library(
@@ -497,6 +611,24 @@ py_library(
     srcs = ["local_rbe_container_url.py"],
     data = [
         "//bazel/platforms:remote_execution_containers.bzl",
+    ],
+    visibility = ["//buildscripts/tests:__pkg__"],
+)
+
+py_binary(
+    name = "podman_recovery",
+    srcs = ["podman_recovery.py"],
+    main = "podman_recovery.py",
+    visibility = ["//buildscripts/tests:__pkg__"],
+)
+
+py_binary(
+    name = "prepare_podman_for_bazel",
+    srcs = ["prepare_podman_for_bazel.py"],
+    main = "prepare_podman_for_bazel.py",
+    visibility = ["//buildscripts/tests:__pkg__"],
+    deps = [
+        "//bazel/wrapper_hook",
     ],
 )
 
@@ -543,7 +675,10 @@ py_binary(
 
 py_binary(
     name = "yamllinters",
-    srcs = ["yamllinters.py"],
+    srcs = [
+        "coverity_linter.py",
+        "yamllinters.py",
+    ],
     main = "yamllinters.py",
     visibility = ["//visibility:public"],
     deps = [
@@ -558,6 +693,31 @@ py_binary(
         dependency(
             "evergreen-py",
             group = "testing",
+        ),
+        dependency(
+            "jsonschema",
+            group = "build-metrics",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_binary(
+    name = "coverity_linter",
+    srcs = ["coverity_linter.py"],
+    main = "coverity_linter.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "jsonschema",
+            group = "build-metrics",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
         ),
     ],
 )
@@ -587,6 +747,302 @@ py_binary(
         dependency(
             "boto3",
             group = "aws",
+        ),
+    ],
+)
+
+py_library(
+    name = "benchmark_profiler",
+    srcs = ["benchmark_profiler.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "check_for_noexcept",
+    srcs = ["check_for_noexcept.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "gitpython",
+            group = "evergreen",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "typer",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "debugsymb_mapper",
+    srcs = ["debugsymb_mapper.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:build_system_options",
+        "//buildscripts/resmokelib",
+        "//buildscripts/util",
+        dependency(
+            "requests",
+            group = "core",
+        ),
+    ],
+)
+
+py_binary(
+    name = "evergreen_activate_gen_tasks",
+    srcs = ["evergreen_activate_gen_tasks.py"],
+    main = "evergreen_activate_gen_tasks.py",
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "evergreen_activate_result_tasks",
+    srcs = ["evergreen_activate_result_tasks.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:generate_result_tasks",
+        "//buildscripts/util",
+        dependency(
+            "typer",
+            group = "core",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
+    ],
+)
+
+py_library(
+    name = "stream_result_task_activation",
+    srcs = ["stream_result_task_activation.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:evergreen_activate_result_tasks",
+        "//buildscripts/util",
+        dependency(
+            "typer",
+            group = "core",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
+        dependency(
+            "boto3",
+            group = "aws",
+        ),
+    ],
+)
+
+py_library(
+    name = "evergreen_resmoke_job_count",
+    srcs = ["evergreen_resmoke_job_count.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "psutil",
+            group = "build-metrics",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "evergreen_task_tags",
+    srcs = ["evergreen_task_tags.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/ciconfig",
+    ],
+)
+
+py_library(
+    name = "feature_flag_tags_check",
+    srcs = ["feature_flag_tags_check.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/resmokelib",
+    ],
+)
+
+py_library(
+    name = "generate_version_expansions",
+    srcs = ["generate_version_expansions.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "jepsen_report",
+    srcs = ["jepsen_report.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:simple_report",
+        dependency(
+            "click",
+            group = "evergreen",
+        ),
+        dependency(
+            "typing-extensions",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "generate_bazel_spawn_pb2",
+    srcs = ["generate_bazel_spawn_pb2.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "bazel_spawn_pb2",
+    srcs = ["bazel_spawn_pb2.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "protobuf",
+            group = "testing",
+        ),
+    ],
+)
+
+py_library(
+    name = "packager",
+    srcs = [
+        "packager.py",
+        "packager_enterprise.py",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "gitpython",
+            group = "evergreen",
+        ),
+    ],
+)
+
+py_library(
+    name = "powercycle_sentinel",
+    srcs = ["powercycle_sentinel.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/util",
+        dependency(
+            "click",
+            group = "evergreen",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
+    ],
+)
+
+py_library(
+    name = "sort_backport_multiversion",
+    srcs = ["sort_backport_multiversion.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "jira_cve_links",
+    srcs = ["jira_cve_links.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "validate_commit_message",
+    srcs = ["validate_commit_message.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:jira_cve_links",
+        "@bazel_rules_mongo//utils:evergreen_git",
+        "@pypi//:pathspec",
+        dependency(
+            "requests",
+            group = "core",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
+        ),
+        dependency(
+            "typer",
+            group = "core",
+        ),
+        dependency(
+            "gitpython",
+            group = "evergreen",
+        ),
+        dependency(
+            "typing-extensions",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "todo_check",
+    srcs = ["todo_check.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:validate_commit_message",
+        dependency(
+            "click",
+            group = "evergreen",
+        ),
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
+    ],
+)
+
+py_library(
+    name = "validate_mongocryptd",
+    srcs = ["validate_mongocryptd.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/ciconfig",
+        dependency(
+            "pyyaml",
+            group = "core",
         ),
     ],
 )

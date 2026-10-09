@@ -1,37 +1,11 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/concurrency/with_lock.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/logv2/log.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 #include <mutex>
@@ -51,11 +25,11 @@ struct Beerp {
         _blerp(lk, i);
     }
     int bleep(char n) {
-        std::lock_guard<std::mutex> lk(_m);
+        std::lock_guard lk(_m);
         return _bloop(lk, n - '0');
     }
     int bleep(int i) {
-        std::unique_lock<std::mutex> lk(_m);
+        std::unique_lock lk(_m);
         return _bloop(lk, i);
     }
 
@@ -76,8 +50,48 @@ TEST(WithLockTest, OverloadSet) {
     ASSERT_EQ(2, b.bleep(2));
 
     std::mutex m;
-    std::lock_guard<std::mutex> lk(m);
+    std::lock_guard lk(m);
     Beerp(lk, 3);
+}
+
+int withLock(WithLock, int i) {
+    return i;
+}
+
+TEST(WithLockTest, WriteRarelyRWMutex) {
+    WriteRarelyRWMutex m;
+    ASSERT_EQ(withLock(m.writeLock(), 1), 1);
+    ASSERT_EQ(withLock(m.readLock(), 2), 2);
+}
+
+int recursiveMoveWithLock(WithLock lk, int i) {
+    return withLock(std::move(lk), i);
+}
+
+int recursiveWithLock(WithLock lk, int i) {
+    return recursiveMoveWithLock(lk, i);
+}
+
+TEST(WithLockTest, RecursiveWithLock) {
+    std::mutex m;
+    ASSERT_EQ(recursiveWithLock(std::lock_guard(m), 1), 1);
+}
+
+constexpr std::string_view kDeathTestExpectedMessage = "lock.owns_lock()";
+
+DEATH_TEST(WithLockDeathTest, UnlockedUniqueLock, kDeathTestExpectedMessage) {
+    std::mutex m;
+    std::unique_lock lk(m);
+    lk.unlock();
+    [[maybe_unused]] WithLock withLock{lk};  // should fail with invariant
+}
+
+DEATH_TEST(WithLockDeathTest, MovedFromWriteRarelyRWMutex, kDeathTestExpectedMessage) {
+    WriteRarelyRWMutex m;
+    auto lk = m.writeLock();
+    // Steal the lock from lk to check the invariant.
+    auto lk2 = std::move(lk);
+    [[maybe_unused]] WithLock withLock{lk};  // should fail with invariant
 }
 
 }  // namespace

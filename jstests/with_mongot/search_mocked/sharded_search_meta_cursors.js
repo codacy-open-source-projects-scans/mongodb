@@ -2,7 +2,7 @@
  * Test that if a mongod gets an aggregation command from a mongoS with a $search stage it will
  * return two cursors by default or when requiresSearchMetaCursor is explicitly true, and will
  * only return one cursor when requiresSearchMetaCursor is explicitly false.
- * @tags: [featureFlagRankFusionFull, requires_fcv_81]
+ * @tags: [requires_fcv_81]
  */
 
 import "jstests/libs/query/sbe_assert_error_override.js";
@@ -52,7 +52,10 @@ const mongos = st.s;
 const testDb = mongos.getDB(dbName);
 
 // TODO SERVER-87335 Make this work for SBE
-if (checkSbeRestrictedOrFullyEnabled(testDb) && FeatureFlagUtil.isPresentAndEnabled(testDb.getMongo(), "SearchInSbe")) {
+if (
+    checkSbeRestrictedOrFullyEnabled(testDb) &&
+    FeatureFlagUtil.isPresentAndEnabled(testDb.getMongo(), "SearchInSbe")
+) {
     jsTestLog("Skipping the test because it only applies to $search in classic engine.");
     stWithMock.stop();
     quit();
@@ -61,7 +64,9 @@ if (checkSbeRestrictedOrFullyEnabled(testDb) && FeatureFlagUtil.isPresentAndEnab
 const coll = testDb.getCollection(collName);
 const collNS = coll.getFullName();
 
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 // Shard the test collection.
 const splitPoint = 5;
 const docList = [];
@@ -272,9 +277,19 @@ expectedMetaResults = [{metaVal: 10}, {metaVal: 11}, {metaVal: 12}, {metaVal: 13
 const shardOneConn = makeInternalConn(st.rs1.getPrimary());
 const shardOneDB = shardOneConn.getDB(dbName);
 mockShardOne();
-runTestRequiresMetaCursorOnConn(shardOneDB, shardPipelineRequiresMetaCursorImplicit, expectedDocs, expectedMetaResults);
+runTestRequiresMetaCursorOnConn(
+    shardOneDB,
+    shardPipelineRequiresMetaCursorImplicit,
+    expectedDocs,
+    expectedMetaResults,
+);
 mockShardOne();
-runTestRequiresMetaCursorOnConn(shardOneDB, shardPipelineRequiresMetaCursorExplicit, expectedDocs, expectedMetaResults);
+runTestRequiresMetaCursorOnConn(
+    shardOneDB,
+    shardPipelineRequiresMetaCursorExplicit,
+    expectedDocs,
+    expectedMetaResults,
+);
 mockShardOne(/*metaCursorWillBeKilled*/ true);
 runTestNoMetaCursorOnConn(shardOneDB, expectedDocs);
 

@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/lookup_set_cache.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
@@ -39,9 +12,11 @@
 #include "mongo/unittest/unittest.h"
 
 #include <algorithm>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 bool vectorContains(const std::vector<Document>* vector, const Document& expectedDoc) {
     ASSERT_TRUE(vector);
@@ -176,18 +151,18 @@ TEST(LookupSetCacheTest, CacheKeysRespectCollation) {
     ValueComparator comparator{&collator};
     LookupSetCache cache(comparator);
 
-    cache.insert(Value("foo"_sd), intToDoc(1));
-    cache.insert(Value("FOO"_sd), intToDoc(2));
-    cache.insert(Value("FOOz"_sd), intToDoc(3));
+    cache.insert(Value("foo"sv), intToDoc(1));
+    cache.insert(Value("FOO"sv), intToDoc(2));
+    cache.insert(Value("FOOz"sv), intToDoc(3));
 
     {
-        auto fooResult = cache[Value("FoO"_sd)];
+        auto fooResult = cache[Value("FoO"sv)];
         ASSERT_TRUE(fooResult);
         ASSERT_EQ(2U, fooResult->size());
     }
 
     {
-        auto foozResult = cache[Value("fooZ"_sd)];
+        auto foozResult = cache[Value("fooZ"sv)];
         ASSERT_TRUE(foozResult);
         ASSERT_EQ(1U, foozResult->size());
     }
@@ -200,10 +175,10 @@ TEST(LookupSetCacheTest, CachedValuesDontRespectCollation) {
     ValueComparator comparator{&collator};
     LookupSetCache cache(comparator);
 
-    cache.insert(Value("foo"_sd), Document{{"foo", "bar"_sd}});
-    cache.insert(Value("foo"_sd), Document{{"foo", "BAR"_sd}});
+    cache.insert(Value("foo"sv), Document{{"foo", "bar"sv}});
+    cache.insert(Value("foo"sv), Document{{"foo", "BAR"sv}});
 
-    auto fooResult = cache[Value("foo"_sd)];
+    auto fooResult = cache[Value("foo"sv)];
     ASSERT_TRUE(fooResult);
     ASSERT_EQ(2U, fooResult->size());
 }
@@ -216,7 +191,7 @@ TEST(LookupSetCacheTest, DocumentWithStorageCachePopulated) {
     BSONObj input = BSON("a" << 1);
     const auto doc1 = Document(input);
     const auto sizeOfDoc1Before = doc1.getCurrentApproximateSize();
-    auto key = Value("foo"_sd);
+    auto key = Value("foo"sv);
 
     // Insert a cache entry and verify that both the key and the document are accounted for in the
     // cache size.

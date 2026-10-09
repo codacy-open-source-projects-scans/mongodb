@@ -32,7 +32,9 @@ st.shardColl(
     true,
 );
 
-assert.commandWorked(coll.insert(Array.from({length: 100}, (_, i) => ({_id: i, shard: (i % 2) + 1, x: i}))));
+assert.commandWorked(
+    coll.insert(Array.from({length: 100}, (_, i) => ({_id: i, shard: (i % 2) + 1, x: i}))),
+);
 
 // We want a pipeline that:
 // 1. Requires a mergerPart. Otherwise, the entire query might get passed through to one shard, and
@@ -93,7 +95,9 @@ cursor.next();
 cursor.hasNext();
 {
     const mongosLog = assert.commandWorked(st.s.adminCommand({getLog: "global"}));
-    const lines = [...iterateMatchingLogLines(mongosLog.log, {msg: "Slow query", comment: pipelineComment})];
+    const lines = [
+        ...iterateMatchingLogLines(mongosLog.log, {msg: "Slow query", comment: pipelineComment}),
+    ];
     const line = lines.find((line) => line.match(/command.{1,4}getMore/));
     assert(line, "Failed to find a getMore log line matching the comment");
     const remoteOpWait = getRemoteOpWait(line);
@@ -106,23 +110,25 @@ cursor.hasNext();
 // time to be less than or equal to the total execution duration.
 const watchComment = "example_watch_should_have_remote_op_wait";
 const csCursor = coll.watch([], {comment: watchComment});
-{
-    const mongosLog = assert.commandWorked(st.s.adminCommand({getLog: "global"}));
-    const line = findMatchingLogLine(mongosLog.log, {msg: "Slow query", comment: watchComment});
-    assert(line, "Failed to find a log line matching the comment");
-    const remoteOpWait = getRemoteOpWait(line);
-    const workingMillis = getWorkingMillis(line);
-    assert.lte(remoteOpWait, workingMillis);
-}
 
 // A $changeStream getMore may pause execution while awaiting data if no results are currently
 // available. In this case, it is possible for the total execution time to be less than the
 // remoteOpWait time.
-assert(!csCursor.hasNext());
-{
+assert.soonNoExcept(() => {
+    assert(!csCursor.hasNext());
     const mongosLog = assert.commandWorked(st.s.adminCommand({getLog: "global"}));
-    const line = findMatchingLogLine(mongosLog.log, {msg: "Slow query", comment: watchComment, command: "getMore"});
-    assert(line, "Failed to find a log line matching the comment");
+    // Under v2 change streams, the first getMores may fire before any remote cursors are opened
+    // and won't record remoteOpWaitMillis. Inspect the latest getMore; assert.soonNoExcept retries
+    // until V2 opens cursors and a subsequent getMore records the field.
+    const lines = [
+        ...iterateMatchingLogLines(mongosLog.log, {
+            msg: "Slow query",
+            comment: watchComment,
+            command: "getMore",
+        }),
+    ];
+    const line = lines[lines.length - 1];
+    assert(line, "Failed to find a getMore log line matching the comment");
     const remoteOpWait = getRemoteOpWait(line);
     const workingMillis = getWorkingMillis(line);
     assert.gte(remoteOpWait, 900);
@@ -132,7 +138,8 @@ assert(!csCursor.hasNext());
     // during testing.
     const isSanitizerEnabled = buildInfo.buildEnvironment.ccflags.includes("-fsanitize");
     assert.lte(workingMillis, isSanitizerEnabled ? 1000 : 30000);
-}
+    return true;
+});
 
 // A query that merges on a shard logs remoteOpWaitMillis on the shard.
 const pipeline2 = [{$sort: {x: 1}}, {$group: {_id: "$y"}}];
@@ -148,7 +155,12 @@ coll.aggregate(pipeline2, {allowDiskUse: true, comment: pipelineComment2}).next(
     const shard0Log = assert.commandWorked(st.shard0.adminCommand({getLog: "global"}));
     const shard1Log = assert.commandWorked(st.shard1.adminCommand({getLog: "global"}));
     const bothShardsLogLines = shard0Log.log.concat(shard1Log.log);
-    const lines = [...iterateMatchingLogLines(bothShardsLogLines, {msg: "Slow query", comment: pipelineComment2})];
+    const lines = [
+        ...iterateMatchingLogLines(bothShardsLogLines, {
+            msg: "Slow query",
+            comment: pipelineComment2,
+        }),
+    ];
     // The line we want is whichever had a $mergeCursors stage.
     const line = lines.find((line) => line.match(/mergeCursors/));
     assert(line, `Failed to find a log line mentioning 'mergeCursors': ${lines}`);

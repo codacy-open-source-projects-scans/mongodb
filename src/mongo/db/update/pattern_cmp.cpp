@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/pattern_cmp.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/dotted_path/dotted_path_support.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -79,17 +52,17 @@ Status checkSortClause(const BSONObj& sortObject) {
 PatternElementCmp::PatternElementCmp() = default;
 
 PatternElementCmp::PatternElementCmp(const BSONObj& pattern, const CollatorInterface* collator)
-    : sortPattern(pattern.copy()), useWholeValue(sortPattern.hasField("")), collator(collator) {}
+    : sortPattern(pattern.copy()),
+      useWholeValue(sortPattern.hasField("")),
+      descending(sortPattern.firstElement().number() < 0),
+      collator(collator) {}
 
 bool PatternElementCmp::operator()(const mutablebson::Element& lhs,
                                    const mutablebson::Element& rhs) const {
     namespace dps = ::mongo::bson;
     if (useWholeValue) {
         const int comparedValue = lhs.compareWithElement(rhs, collator, false);
-
-        const bool reversed = (sortPattern.firstElement().number() < 0);
-
-        return (reversed ? comparedValue > 0 : comparedValue < 0);
+        return (descending ? comparedValue > 0 : comparedValue < 0);
     } else {
         BSONObj lhsObj =
             lhs.getType() == BSONType::object ? lhs.getValueObject() : lhs.getValue().wrap("");
@@ -110,22 +83,25 @@ PatternValueCmp::PatternValueCmp(const BSONObj& pattern,
                                  const CollatorInterface* collator)
     : sortPattern(pattern.copy()),
       useWholeValue(sortPattern.hasField("")),
+      descending(sortPattern.firstElement().number() < 0),
       originalObj(BSONObj().addField(originalElement).copy()),
-      collator(collator) {}
+      collator(collator),
+      valueComparator(collator) {}
+
+BSONObj PatternValueCmp::extractSortKey(const Value& val) const {
+    namespace dps = ::mongo::bson;
+    return val.isObject()
+        ? dps::extractElementsBasedOnTemplate(val.getDocument().toBson(), sortPattern, true)
+        : dps::extractNullForAllFieldsBasedOnTemplate(sortPattern);
+}
 
 bool PatternValueCmp::operator()(const Value& lhs, const Value& rhs) const {
-    namespace dps = ::mongo::bson;
     if (useWholeValue) {
-        const bool descending = (sortPattern.firstElement().number() < 0);
-        return (descending ? ValueComparator(collator).getLessThan()(rhs, lhs)
-                           : ValueComparator(collator).getLessThan()(lhs, rhs));
+        return (descending ? valueComparator.getLessThan()(rhs, lhs)
+                           : valueComparator.getLessThan()(lhs, rhs));
     } else {
-        BSONObj lhsKey = lhs.isObject()
-            ? dps::extractElementsBasedOnTemplate(lhs.getDocument().toBson(), sortPattern, true)
-            : dps::extractNullForAllFieldsBasedOnTemplate(sortPattern);
-        BSONObj rhsKey = rhs.isObject()
-            ? dps::extractElementsBasedOnTemplate(rhs.getDocument().toBson(), sortPattern, true)
-            : dps::extractNullForAllFieldsBasedOnTemplate(sortPattern);
+        BSONObj lhsKey = extractSortKey(lhs);
+        BSONObj rhsKey = extractSortKey(rhs);
         return lhsKey.woCompare(rhsKey, sortPattern, false, collator) < 0;
     }
 }

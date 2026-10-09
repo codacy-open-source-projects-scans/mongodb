@@ -436,9 +436,9 @@ There are three locks used in the setFCV command:
     to the fully upgrade/downgraded state).
   - The lock creates a barrier for operations taking the global IX or X locks.
   - This is to ensure that the FCV does not _fully_ transition between the upgraded and downgraded
-    versions (or vice versa) during these other operations. This is because either: _ The global
-    IX/X locked operation will start after the FCV change, see the new FCV and act accordingly. _
-    The global IX/X locked operation began prior to the FCV change. The operation may proceed in the
+    versions (or vice versa) during these other operations. This is because either: _The global IX/X
+    locked operation will start after the FCV change, see the new FCV and act accordingly._ The
+    global IX/X locked operation began prior to the FCV change. The operation may proceed in the
     context of the old FCV, but setFCV waits for them to finish before upgrade/downgrade metadata
     cleanup procedures begin right after this barrier.
   - This also means that in order to make this barrier truly safe, if we want to ensure that the FCV
@@ -807,8 +807,8 @@ review.
   - Enable an IFR feature flag by changing the `incremental_rollout_phase` property in its
     specification from `in_development` to `rollout`, which will automatically make it enabled by
     default.
-    - After rollout completes, change this property to `released` on the master branch but not on
-      any release branches.
+    - After rollout completes, change this property to `release` on the master branch but not on any
+      release branches.
   - FCV-gated feature flags with default:true must have a specific release version associated in its
     definition.
   - **_We do not support disabling feature flags once they have been enabled via IDL in a release
@@ -827,14 +827,18 @@ review.
     configurations. (The `requires_fcv_yy` tag is enforced as of
     [SERVER-55858](https://jira.mongodb.org/browse/SERVER-55858)). See the
     [Feature Flag Test Tagging](#feature-flag-test-tagging) section for more details.
+    - Exception: for a test in an explicit multiversion suite (e.g. a test in
+      `jstests/multiVersion`), only remove the `featureFlagXX` tag. Do not add `requires_fcv_yy` -
+      those tests run in no other suite, so the tag stops the test from running anywhere. If the
+      test needs newer binaries, check the binary version inside the test instead.
   - After this point the feature flag is used for FCV gating to make upgrade/downgrade safe.
 
 - Removing the feature flag
   - Any projects/tickets that use and enable an FCV-gated feature flag **_must_** leave that feature
-    flag in the codebase at least until the next major release. _ For example, if a feature flag was
+    flag in the codebase at least until the next major release. _For example, if a feature flag was
     enabled by default in 5.1, it must remain in the codebase until 6.0 is branched. After that, the
-    feature flag can be removed. _ This is because the feature flag is used for FCV gating during
-    the upgrade/downgrade process. For example, if a feature is completed and the feature flag is
+    feature flag can be removed._ This is because the feature flag is used for FCV gating during the
+    upgrade/downgrade process. For example, if a feature is completed and the feature flag is
     enabled by default in FCV 5.1, then from binary versions 5.1, 5.2, 5.3, and 6.0, the server
     could have its FCV set to 5.0 during the downgrade process, where the feature is not supposed to
     be enabled. If the feature flag was removed earlier than 6.0 then the feature would still run
@@ -903,19 +907,19 @@ A feature flag has the following properties:
   - See
     [Determining if a feature flag should be binary-compatible or FCV-gated](#determining-which-style-of-feature-flag-to-use)
     for guidelines on when each type of feature flag should be used.
-- incremental_rollout_phase: (`not_for_incremental_rollout`|`in_development`|`rollout`|`released`)
+- incremental_rollout_phase: (`not_for_incremental_rollout`|`in_development`|`rollout`|`release`)
   - Optional. Use the default value `not_for_incremental_rollout` for FCV-gated and
     binary-compatible feature flags.
   - To define an IFR flag, specify a value other than the default.
     - `in_development`: The flag will be disabled by default in testing and production.
     - `rollout`: The flag will be enabled by default at startup. In production, the incremental
       rollout procedure may temporarily disable the feature.
-    - `released`: The flag will be enabled by default in testing and production.
+    - `release`: The flag will be enabled by default in testing and production.
   - Only the default value `not_for_incremental_rollout` is valid when `fcv_gated` is true. A
     feature flag cannot be both an IFR flag and an FCV-gated flag.
   - The `default` property is optional for IFR feature flags. It is an error to specify a `default`
     value that does not match the rollout phase (`false` for `in_development` and `true` for
-    `rollout` or `released`).
+    `rollout` or `release`).
 - enable_on_transitional_fcv_UNSAFE: boolean
   - Optional. Can only be specified for FCV-gated feature flags (`fcv_gated: true`). Default value
     is `false`.
@@ -937,7 +941,7 @@ A feature flag has the following properties:
       the fully downgraded FCV (`kVersion_X`).
     - Upon finishing a downgrade, an operation may have checked a feature flag as enabled, then the
       FCV may have transitioned to fully downgraded (`kVersion_X`). Persisting data such as oplog
-      entries in new formats after this can cause incompatibilites if the binaries are downgraded.
+      entries in new formats after this can cause incompatibilities if the binaries are downgraded.
     - Since the feature is enabled during the 'start' and 'prepare' phases of setFCV, if it creates
       incompatible user data such that setFCV could fail with `CannotUpgrade` or `CannotDowngrade`,
       it can trap the user in a transitional FCV without being able to neither complete the
@@ -1091,7 +1095,7 @@ MONGO_REGISTER_COMMAND(CommandOnlyEnabledWithToaster)
 
 **_IMPORTANT NOTE ABOUT INITIAL SYNC_**: `isEnabled` checks if the feature flag is enabled on the
 input FCV, which is usually the server's current FCV `serverGlobalParams.featureCompatibility`.
-However, during initial sync, we temporarily reset the FCV to be uninintialized.
+However, during initial sync, we temporarily reset the FCV to be uninitialized.
 
 **_`isEnabled` will invariant if the FCV is uninitialized._** Because of this, each feature team
 should think about whether the feature could be run during initial sync, for example:
@@ -1166,7 +1170,7 @@ when testing a specific codepath:
 ```c++
 // featureFlagToaster has the default value.
 {
-    RAIIServerParameterControllerForTest controller("featureFlagToaster", true);
+    unittest::ServerParameterGuard controller("featureFlagToaster", true);
     // Test things that should only happen when featureFlagToaster is enabled.
 }
 // featureFlagToaster has the default value.
@@ -1190,12 +1194,12 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "Toaster")) {
   ensures that the test will only be run on the "all feature flags" variants where the feature flag
   is enabled. This works by virtue of the feature flag being declared in the codebase with
   `default: false` which will cause resmoke to ignore tests tagged with the feature flag unless they
-  are enabled through the input arguments. _ Parallel test suite does not honor feature flag tags,
+  are enabled through the input arguments. _Parallel test suite does not honor feature flag tags,
   due to which some tests may be unexpectedly run in non-feature-flag build variants. If you want to
   skip such tests in parallel suite, please add them to the exclusion list
-  [here](https://github.com/mongodb/mongo/blob/eb75b6ccc62f7c8ea26a57c1b5eb96a41809396a/jstests/libs/parallelTester.js#L149).
-  _ Additionally, the featureFlagXX tags aren't considered by the jstests/core/selinux.js test. If
-  you want to skip a test, please use the `no_selinux` tag.
+  [here](https://github.com/mongodb/mongo/blob/eb75b6ccc62f7c8ea26a57c1b5eb96a41809396a/jstests/libs/parallelTester.js#L149)._
+  Additionally, the featureFlagXX tags aren't considered by the jstests/core/selinux.js test. If you
+  want to skip a test, please use the `no_selinux` tag.
 - If you have a JS test that is incompatible with a feature flag being enabled, tag with a tag of
   the same name as the feature flag appended with `_incompatible`in the format
   `featureFlagXX_incompatible` (for example, `featureFlagToaster_incompatible`). This ensures that
@@ -1209,11 +1213,14 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "Toaster")) {
   should also tag the test with the appropriate_**
   [multiversion test tags](https://github.com/mongodb/mongo/blob/a7a2c901882367a8e4a34a97b38acafe07a45566/buildscripts/evergreen_gen_multiversion_tests.py#L55).
   This ensures that the test will not be run in any incompatible multiversion configurations.  
-   _ For example, if your test depends on a feature that is only enabled in 6.1, tag the test with
-  `requires_fcv_61`. _ If your test should not be run in any multiversion configurations, tag it
-  with `multiversion_incompatible`
+   _For example, if your test depends on a feature that is only enabled in 6.1, tag the test with
+  `requires_fcv_61`._ If your test should not be run in any multiversion configurations, tag it with
+  `multiversion_incompatible`
 - Once the feature flag is enabled by default, you should remove the `featureFlagXX` tag from the
   test. However, you must keep the `requires_fcv_yy` tags.
+  - Tests in explicit multiversion suites (e.g. tests in `jstests/multiVersion`) must not carry a
+    `requires_fcv_yy` tag at all, since they run in no other suite and the tag would exclude them
+    from every run. Check the binary version inside the test instead.
 - Test configurations that are incompatible with the feature enabled should have a comment next to
   the tag describing exactly why the test is incompatible to minimize the chance of test coverage
   gaps.
@@ -1319,7 +1326,7 @@ runtime. Test coverage for `in-development` IFR flags is included by the "all fe
 variants. Additionally, the "all non-rollback feature flags" and "roll back incremental feature
 flags" variants run tests with `rollout` IFR flags _disabled_ to ensure that it remains safe to turn
 features back off in the event that an IFR deployment needs to be rolled back. The former variant
-tests the server with all non-`rollout` flags turned on, and the latter only turns on released
+tests the server with all non-`rollout` flags turned on, and the latter only turns on release
 features (IFR flags in the `release` state and non-IFR flags with `default: true`). There is no test
 coverage for disabling IFR flags in the `release` state, because that is not a supported
 configuration.
@@ -1360,4 +1367,6 @@ types of suites.
 - Feature flags should never be enabled in the period of time after branch cut but before FCV
   constants have been upgraded to the next version.
 - In general, tag tests that depend on a feature flag with `featureFlagXX` and `requires_fcv_yy`
-  tags, where `yy` is the FCV that the feature flag is/will be enabled by default on.
+  tags, where `yy` is the FCV that the feature flag is/will be enabled by default on. Tests in
+  explicit multiversion suites (e.g. tests in `jstests/multiVersion`) are the exception: they must
+  not carry a `requires_fcv_yy` tag, which would exclude them from every run.

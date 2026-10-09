@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #define LOGV2_FOR_RECOVERY(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
 
@@ -76,7 +50,7 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -133,8 +107,8 @@ public:
         return recoveryOplogApplier.obj();
     }
 
-    AtomicWord<size_t> numBatches{0};
-    AtomicWord<size_t> numOpsApplied{0};
+    Atomic<size_t> numBatches{0};
+    Atomic<size_t> numOpsApplied{0};
 };
 
 auto& recoveryOplogApplierSection =
@@ -541,6 +515,16 @@ boost::optional<Timestamp> ReplicationRecoveryImpl::recoverFromOplog(
                          "keyValue"_attr = redact(info->getDuplicatedKeyValue()),
                          "error"_attr = redact(e.reason()));
     std::terminate();
+} catch (const DBException& e) {
+    // If we are shutting down, allow the startup process to continue without the fatal assertion so
+    // we can exit cleanly.
+    if (ErrorCodes::isShutdownError(e.code())) {
+        throw;
+    }
+    LOGV2_FATAL_CONTINUE(9687402,
+                         "Caught exception during replication recovery",
+                         "error"_attr = exceptionToStatus());
+    std::terminate();
 } catch (...) {
     LOGV2_FATAL_CONTINUE(
         21570, "Caught exception during replication recovery", "error"_attr = exceptionToStatus());
@@ -596,11 +580,20 @@ void ReplicationRecoveryImpl::_recoverFromStableTimestamp(OperationContext* opCt
         if (startupRecoveryForRestore) {
             LOGV2_WARNING(5576600,
                           "Replication startup parameter 'startupRecoveryForRestore' is set, "
-                          "recovering without preserving history before top of oplog.");
+                          "recovering without preserving history before top of oplog and taking "
+                          "stable checkpoints during recovery",
+                          "stableTimestamp"_attr = stableTimestamp);
+            // The batch loop advances the stable timestamp after each batch, so pinning the
+            // initial data timestamp to the recovery checkpoint's stable timestamp makes the
+            // checkpoints taken during recovery stable.
+            _storageInterface->setInitialDataTimestamp(opCtx->getServiceContext(), stableTimestamp);
+        } else {
+            // Take unstable checkpoints for file copy-based initial sync. A crash mid-FCBIS
+            // restarts initial sync from scratch instead of resuming from these checkpoints, so
+            // there is no benefit to making them stable.
+            _storageInterface->setInitialDataTimestamp(
+                opCtx->getServiceContext(), Timestamp::kAllowUnstableCheckpointsSentinel);
         }
-        // Take only unstable checkpoints during the recovery process.
-        _storageInterface->setInitialDataTimestamp(opCtx->getServiceContext(),
-                                                   Timestamp::kAllowUnstableCheckpointsSentinel);
     }
     auto startPoint = _adjustStartPointIfNecessary(opCtx, stableTimestamp);
     _applyToEndOfOplog(opCtx, startPoint, topOfOplog.getTimestamp(), recoveryMode);
@@ -616,6 +609,18 @@ void ReplicationRecoveryImpl::_recoverFromStableTimestamp(OperationContext* opCt
         // _recoverFromUnstableCheckpoint for details.
         if (!gTakeUnstableCheckpointOnShutdown) {
             _consistencyMarkers->clearAppliedThrough(opCtx);
+        }
+
+        // _applyOplogOperations advances the stable and oldest timestamps to the
+        // top of the oplog after each applied batch. However, when there is no oplog to replay,
+        // that code path is never triggered and the oldest timestamp is left behind the initial
+        // data timestamp. During initial sync we must still advance them so that the oldest
+        // timestamp is aligned with the initial data timestamp.
+        if (_duringInitialSync) {
+            auto* replCoord = ReplicationCoordinator::get(opCtx);
+            replCoord->getServiceContext()->getStorageEngine()->setStableTimestamp(
+                topOfOplog.getTimestamp(), false /*force*/);
+            replCoord->setOldestTimestamp(topOfOplog.getTimestamp());
         }
     }
 }
@@ -648,9 +653,9 @@ void ReplicationRecoveryImpl::_recoverFromUnstableCheckpoint(OperationContext* o
             appliedThrough.getTimestamp(), false /*force*/);
 
         if (startupRecoveryForRestore) {
-            // When we're recovering for a restore, we may be recovering a large number of oplog
-            // entries, so we want to take unstable checkpoints to reduce cache pressure and allow
-            // resumption in case of a crash.
+            // This branch only runs when there is no stable checkpoint to recover from, so there is
+            // no stable timestamp to pin the initial data timestamp to like the way
+            // _recoverFromStableTimestamp does for restore. Keep the unstable-checkpoints sentinel.
             _storageInterface->setInitialDataTimestamp(
                 opCtx->getServiceContext(), Timestamp::kAllowUnstableCheckpointsSentinel);
         }

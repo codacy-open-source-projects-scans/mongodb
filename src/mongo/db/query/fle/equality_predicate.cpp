@@ -1,38 +1,12 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/fle/equality_predicate.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_tags.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -52,6 +26,7 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <string_view>
 
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
@@ -65,8 +40,10 @@ REGISTER_ENCRYPTED_MATCH_PREDICATE_REWRITE(MATCH_IN, EqualityPredicate);
 REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE(ExpressionCompare, EqualityPredicate);
 REGISTER_ENCRYPTED_AGG_PREDICATE_REWRITE(ExpressionIn, EqualityPredicate);
 
-std::vector<PrfBlock> EqualityPredicate::generateTags(BSONValue payload) const {
-    ParsedFindEqualityPayload tokens = parseFindPayload<ParsedFindEqualityPayload>(payload);
+std::vector<PrfBlock> EqualityPredicate::generateTags(BSONValue payload,
+                                                      std::string_view path) const {
+    ParsedFindEqualityPayload tokens = parseFindPayload<ParsedFindEqualityPayload>(
+        payload, path, _rewriter->getEncryptedFieldConfigForValidation());
 
     return readTags(_rewriter->getTagQueryInterface(),
                     _rewriter->getESCNss(),
@@ -84,7 +61,7 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToTagDisjunction(
             if (!isPayload(payload)) {
                 return nullptr;
             }
-            return makeTagDisjunction(toBSONArray(generateTags(payload)));
+            return makeTagDisjunction(toBSONArray(generateTags(payload, eqExpr->path())));
         }
         case MatchExpression::MATCH_IN: {
             auto inExpr = static_cast<InMatchExpression*>(expr);
@@ -105,7 +82,7 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToTagDisjunction(
             auto backingBSONBuilder = BSONArrayBuilder();
 
             for (auto& eq : inExpr->getEqualities()) {
-                auto obj = generateTags(eq);
+                auto obj = generateTags(eq, inExpr->path());
                 for (auto&& elt : obj) {
                     backingBSONBuilder.appendBinData(elt.size(), BinDataGeneral, elt.data());
                 }
@@ -122,10 +99,12 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToTagDisjunction(
 
 namespace {
 template <typename PayloadT>
-boost::intrusive_ptr<ExpressionInternalFLEEqual> generateFleEqualMatch(StringData path,
-                                                                       const PayloadT& ffp,
-                                                                       ExpressionContext* expCtx) {
-    auto tokens = ParsedFindEqualityPayload(ffp);
+boost::intrusive_ptr<ExpressionInternalFLEEqual> generateFleEqualMatch(
+    std::string_view path,
+    const PayloadT& ffp,
+    ExpressionContext* expCtx,
+    boost::optional<const EncryptedFieldConfig&> efc) {
+    auto tokens = ParsedFindEqualityPayload(ffp, path, efc);
 
     // Generate { $_internalFleEq: { field: "$field_name", server:  F_s[ f, 2, v, 2 ] }
     return make_intrusive<ExpressionInternalFLEEqual>(
@@ -137,10 +116,12 @@ boost::intrusive_ptr<ExpressionInternalFLEEqual> generateFleEqualMatch(StringDat
 
 
 template <typename PayloadT>
-std::unique_ptr<ExpressionInternalFLEEqual> generateFleEqualMatchUnique(StringData path,
-                                                                        const PayloadT& ffp,
-                                                                        ExpressionContext* expCtx) {
-    auto tokens = ParsedFindEqualityPayload(ffp);
+std::unique_ptr<ExpressionInternalFLEEqual> generateFleEqualMatchUnique(
+    std::string_view path,
+    const PayloadT& ffp,
+    ExpressionContext* expCtx,
+    boost::optional<const EncryptedFieldConfig&> efc) {
+    auto tokens = ParsedFindEqualityPayload(ffp, path, efc);
 
     // Generate { $_internalFleEq: { field: "$field_name", server:  F_s[ f, 2, v, 2 ] }
     return std::make_unique<ExpressionInternalFLEEqual>(
@@ -150,10 +131,12 @@ std::unique_ptr<ExpressionInternalFLEEqual> generateFleEqualMatchUnique(StringDa
         ServerZerosEncryptionToken::deriveFrom(tokens.serverDataDerivedToken));
 }
 
-std::unique_ptr<MatchExpression> generateFleEqualMatchAndExpr(StringData path,
-                                                              const BSONElement ffp,
-                                                              ExpressionContext* expCtx) {
-    auto fleEqualMatch = generateFleEqualMatch(path, ffp, expCtx);
+std::unique_ptr<MatchExpression> generateFleEqualMatchAndExpr(
+    std::string_view path,
+    const BSONElement ffp,
+    ExpressionContext* expCtx,
+    boost::optional<const EncryptedFieldConfig&> efc) {
+    auto fleEqualMatch = generateFleEqualMatch(path, ffp, expCtx, efc);
 
     return std::make_unique<ExprMatchExpression>(fleEqualMatch, expCtx);
 }
@@ -168,8 +151,10 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToRuntimeComparison(
             if (!isPayload(payload)) {
                 return nullptr;
             }
-            return generateFleEqualMatchAndExpr(
-                eqExpr->path(), payload, _rewriter->getExpressionContext());
+            return generateFleEqualMatchAndExpr(eqExpr->path(),
+                                                payload,
+                                                _rewriter->getExpressionContext(),
+                                                _rewriter->getEncryptedFieldConfigForValidation());
         }
         case MatchExpression::MATCH_IN: {
             auto inExpr = static_cast<InMatchExpression*>(expr);
@@ -190,8 +175,11 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToRuntimeComparison(
             matches.reserve(numFFPs);
 
             for (auto& eq : inExpr->getEqualities()) {
-                auto exprMatch = generateFleEqualMatchAndExpr(
-                    expr->path(), eq, _rewriter->getExpressionContext());
+                auto exprMatch =
+                    generateFleEqualMatchAndExpr(expr->path(),
+                                                 eq,
+                                                 _rewriter->getExpressionContext(),
+                                                 _rewriter->getEncryptedFieldConfigForValidation());
                 matches.push_back(std::move(exprMatch));
             }
 
@@ -208,12 +196,12 @@ std::unique_ptr<MatchExpression> EqualityPredicate::rewriteToRuntimeComparison(
  * Helper function for code shared between tag disjunction and runtime evaluation for the equality
  * case.
  */
-boost::optional<std::pair<ExpressionFieldPath*, ExpressionConstant*>>
-EqualityPredicate::extractDetailsFromComparison(ExpressionCompare* expr) const {
+boost::optional<std::pair<const ExpressionFieldPath*, const ExpressionConstant*>>
+EqualityPredicate::extractDetailsFromComparison(const ExpressionCompare* expr) const {
     auto& equalitiesList = expr->getChildren();
 
-    auto leftConstant = dynamic_cast<ExpressionConstant*>(equalitiesList[0].get());
-    auto rightConstant = dynamic_cast<ExpressionConstant*>(equalitiesList[1].get());
+    auto leftConstant = dynamic_cast<const ExpressionConstant*>(equalitiesList[0].get());
+    auto rightConstant = dynamic_cast<const ExpressionConstant*>(equalitiesList[1].get());
 
     bool isLeftFFP = leftConstant && isPayload(leftConstant->getValue());
     bool isRightFFP = rightConstant && isPayload(rightConstant->getValue());
@@ -227,8 +215,8 @@ EqualityPredicate::extractDetailsFromComparison(ExpressionCompare* expr) const {
         return boost::none;
     }
 
-    auto leftFieldPath = dynamic_cast<ExpressionFieldPath*>(equalitiesList[0].get());
-    auto rightFieldPath = dynamic_cast<ExpressionFieldPath*>(equalitiesList[1].get());
+    auto leftFieldPath = dynamic_cast<const ExpressionFieldPath*>(equalitiesList[0].get());
+    auto rightFieldPath = dynamic_cast<const ExpressionFieldPath*>(equalitiesList[1].get());
 
     uassert(6672413,
             "Queryable Encryption only supports comparisons between a field path and a constant",
@@ -244,14 +232,14 @@ EqualityPredicate::extractDetailsFromComparison(ExpressionCompare* expr) const {
  * cases.
  */
 boost::optional<const ExpressionFieldPath*> EqualityPredicate::validateIn(
-    ExpressionIn* inExpr, ExpressionArray* inList) const {
+    const ExpressionIn* inExpr, const ExpressionArray* inList) const {
     auto leftExpr = inExpr->getOperandList()[0].get();
     auto& equalitiesList = inList->getChildren();
     size_t numFFPs = 0;
 
     for (auto& equality : equalitiesList) {
         // For each expression representing a FleFindPayload...
-        if (auto constChild = dynamic_cast<ExpressionConstant*>(equality.get())) {
+        if (auto constChild = dynamic_cast<const ExpressionConstant*>(equality.get())) {
             if (!isPayload(constChild->getValue())) {
                 continue;
             }
@@ -288,11 +276,12 @@ std::unique_ptr<Expression> EqualityPredicate::rewriteToTagDisjunction(Expressio
         if (!details) {
             return nullptr;
         }
-        auto [_, constChild] = details.value();
+        auto [fp, constChild] = details.value();
 
         std::vector<boost::intrusive_ptr<Expression>> orListElems;
         auto payload = constChild->getValue();
-        auto tags = toValues(generateTags(std::ref(payload)));
+        auto tags = toValues(
+            generateTags(std::ref(payload), fp->getFieldPathWithoutCurrentPrefix().fullPath()));
         auto disjunction = makeTagDisjunction(_rewriter->getExpressionContext(), std::move(tags));
 
         if (eqExpr->getOp() == ExpressionCompare::NE) {
@@ -303,9 +292,11 @@ std::unique_ptr<Expression> EqualityPredicate::rewriteToTagDisjunction(Expressio
         return disjunction;
     } else if (auto inExpr = dynamic_cast<ExpressionIn*>(expr)) {
         if (auto inList = dynamic_cast<ExpressionArray*>(inExpr->getOperandList()[1].get())) {
-            if (!validateIn(inExpr, inList)) {
+            auto leftFp = validateIn(inExpr, inList);
+            if (!leftFp) {
                 return nullptr;
             }
+            const auto path = (*leftFp)->getFieldPathWithoutCurrentPrefix().fullPath();
             auto& equalitiesList = inList->getChildren();
             std::vector<Value> allTags;
             for (auto& equality : equalitiesList) {
@@ -313,7 +304,7 @@ std::unique_ptr<Expression> EqualityPredicate::rewriteToTagDisjunction(Expressio
                 if (auto constChild = dynamic_cast<ExpressionConstant*>(equality.get())) {
                     // ... rewrite the payload to a list of tags...
                     auto payload = constChild->getValue();
-                    auto tags = toValues(generateTags(std::ref(payload)));
+                    auto tags = toValues(generateTags(std::ref(payload), path));
                     allTags.insert(allTags.end(),
                                    std::make_move_iterator(tags.begin()),
                                    std::make_move_iterator(tags.end()));
@@ -339,7 +330,8 @@ std::unique_ptr<Expression> EqualityPredicate::rewriteToRuntimeComparison(Expres
         auto fleEqualExpr =
             generateFleEqualMatchUnique(fieldPath->getFieldPathWithoutCurrentPrefix().fullPath(),
                                         constChild->getValue(),
-                                        _rewriter->getExpressionContext());
+                                        _rewriter->getExpressionContext(),
+                                        _rewriter->getEncryptedFieldConfigForValidation());
         if (eqExpr->getOp() == ExpressionCompare::NE) {
             std::vector<boost::intrusive_ptr<Expression>> notChild{fleEqualExpr.release()};
             return std::make_unique<ExpressionNot>(_rewriter->getExpressionContext(),
@@ -359,7 +351,8 @@ std::unique_ptr<Expression> EqualityPredicate::rewriteToRuntimeComparison(Expres
                     auto fleEqExpr = generateFleEqualMatch(
                         leftFieldPath.value()->getFieldPathWithoutCurrentPrefix().fullPath(),
                         constChild->getValue(),
-                        _rewriter->getExpressionContext());
+                        _rewriter->getExpressionContext(),
+                        _rewriter->getEncryptedFieldConfigForValidation());
                     orListElems.push_back(fleEqExpr);
                 }
             }

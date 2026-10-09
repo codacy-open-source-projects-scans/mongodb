@@ -9,6 +9,7 @@
  * ]
  */
 
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {after, before, beforeEach, describe, it} from "jstests/libs/mochalite.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
@@ -39,7 +40,9 @@ describe("Test placementConflictTime", function () {
         st.s.getDB(dbName).dropDatabase();
 
         // Create the database db and define shard0 as the DBPrimary shard.
-        assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+        assert.commandWorked(
+            st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}),
+        );
 
         // Create a collection "collA".
         assert.commandWorked(st.s.getCollection(nsCollA).insert({_id: 0, x: 1}));
@@ -49,16 +52,24 @@ describe("Test placementConflictTime", function () {
         // shard1: [x: 0, x: +inf)
         assert.commandWorked(st.s.adminCommand({shardCollection: nsCollB, key: {x: 1}}));
         assert.commandWorked(st.s.adminCommand({split: nsCollB, middle: {x: 0}}));
-        assert.commandWorked(st.s.adminCommand({moveChunk: nsCollB, find: {x: -10}, to: st.shard0.shardName}));
-        assert.commandWorked(st.s.adminCommand({moveChunk: nsCollB, find: {x: 0}, to: st.shard1.shardName}));
+        assert.commandWorked(
+            st.s.adminCommand({moveChunk: nsCollB, find: {x: -10}, to: st.shard0.shardName}),
+        );
+        assert.commandWorked(
+            st.s.adminCommand({moveChunk: nsCollB, find: {x: 0}, to: st.shard1.shardName}),
+        );
 
         // Force refreshes to avoid getting stale config errors
-        assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: nsCollA}));
-        assert.commandWorked(st.shard1.adminCommand({_flushRoutingTableCacheUpdates: nsCollA}));
+        if (!FeatureFlagUtil.isPresentAndEnabled(st.shard0, "AuthoritativeShardsCRUD")) {
+            assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: nsCollA}));
+            assert.commandWorked(st.shard1.adminCommand({_flushRoutingTableCacheUpdates: nsCollA}));
+        }
         st.refreshCatalogCacheForNs(st.s, nsCollA);
 
-        assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: nsCollB}));
-        assert.commandWorked(st.shard1.adminCommand({_flushRoutingTableCacheUpdates: nsCollB}));
+        if (!FeatureFlagUtil.isPresentAndEnabled(st.shard0, "AuthoritativeShardsCRUD")) {
+            assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: nsCollB}));
+            assert.commandWorked(st.shard1.adminCommand({_flushRoutingTableCacheUpdates: nsCollB}));
+        }
         st.refreshCatalogCacheForNs(st.s, nsCollB);
     });
 
@@ -73,7 +84,9 @@ describe("Test placementConflictTime", function () {
         assert.eq(1, sessionDB.getCollection(nameCollA).find().itcount());
 
         // Move the sharded collection chunk to shard0 from shard1
-        assert.commandWorked(st.s.adminCommand({moveChunk: nsCollB, find: {x: 10}, to: st.shard0.shardName}));
+        assert.commandWorked(
+            st.s.adminCommand({moveChunk: nsCollB, find: {x: 10}, to: st.shard0.shardName}),
+        );
 
         if (shouldThrow) {
             let err = assert.throwsWithCode(() => {
@@ -107,7 +120,9 @@ describe("Test placementConflictTime", function () {
         const otherSessionDB = session.getDatabase(otherDb);
 
         // Create the database 'otherDb' and define shard1 as its DBPrimary shard.
-        assert.commandWorked(st.s.adminCommand({enableSharding: otherDb, primaryShard: st.shard1.shardName}));
+        assert.commandWorked(
+            st.s.adminCommand({enableSharding: otherDb, primaryShard: st.shard1.shardName}),
+        );
         st.s.getDB(otherDb).getCollection(otherColl).insert({x: 1});
 
         // Start transaction
@@ -152,15 +167,14 @@ describe("Test placementConflictTime", function () {
         st.s.getDB(otherDb).dropDatabase();
 
         const session = st.s.startSession();
-        const sessionDB = session.getDatabase(dbName);
 
         // Start the transaction
         session.startTransaction({readConcern: {level: "local"}});
 
-        // Start the txn with a random operation to setup the placementConflictTime for this txn.
-        assert.eq(1, sessionDB.getCollection(nameCollA).find().itcount());
-
-        // Create a database within the txn.
+        // There is no need to run a dummy statement to establish a placementConflictTime, this
+        // statement will do it. It's important to make sure that createCollection is the first
+        // statement of the txn, otherwise the transaction could be aborted by the StaleConfig
+        // thrown to recover the CollectionMetadata (which was set to UNKNOWN by the DB drop).
         const otherSessionDB = session.getDatabase(otherDb);
         assert.commandWorked(otherSessionDB.createCollection(otherColl));
 
@@ -173,7 +187,15 @@ describe("Test placementConflictTime", function () {
 
     // Verifies that a transaction gets aborted if a participant steps down.
     // This is important because the placementConflictTime is an in memory variable on each participant shard.
-    it.only("Verify transaction gets aborted if a participant steps down", () => {
+    it("Verify transaction gets aborted if a participant steps down", () => {
+        // TODO (SERVER-136017): Remove graceful stepdown gating.
+        if (
+            TestData.doesNotSupportGracefulPlannedStepdown ||
+            TestData.doesNotSupportGracefulUnplannedStepdown
+        ) {
+            return;
+        }
+
         const session = st.s.startSession();
         const sessionDB = session.getDatabase(dbName);
 

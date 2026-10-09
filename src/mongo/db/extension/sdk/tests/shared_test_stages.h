@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -44,9 +18,11 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 
+#include <string_view>
+
 namespace mongo::extension::sdk {
-inline StringData stringViewToStringData(std::string_view sv) {
-    return StringData{sv.data(), sv.size()};
+inline std::string_view stringViewToStringData(std::string_view sv) {
+    return std::string_view{sv.data(), sv.size()};
 }
 }  // namespace mongo::extension::sdk
 
@@ -117,11 +93,10 @@ private:
 
 class TestLogicalStageCompile : public sdk::TestLogicalStage<ValidExtensionExecAggStage> {
 public:
-    static constexpr StringData kStageName = "$testCompile";
-    static constexpr StringData kStageSpec = "mongodb";
+    static constexpr std::string_view kStageName = "$testCompile";
+    static constexpr std::string_view kStageSpec = "mongodb";
 
-    TestLogicalStageCompile()
-        : TestLogicalStage(toStdStringViewForInterop(kStageName), BSON(kStageSpec << "")) {}
+    TestLogicalStageCompile() : TestLogicalStage(kStageName, BSON(kStageSpec << "")) {}
 
     std::unique_ptr<extension::sdk::LogicalAggStage> clone() const override {
         return make();
@@ -139,11 +114,13 @@ public:
  * parse/ast nodes.
  * =========================================================
  */
-static constexpr std::string_view kExpandToExtAstName = "$expandToExtAst";
-static constexpr std::string_view kExpandToExtParseName = "$expandToExtParse";
-static constexpr std::string_view kExpandToHostParseName = "$expandToHostParse";
-static constexpr std::string_view kExpandToHostAstName = "$expandToHostAst";
-static constexpr std::string_view kExpandToMixedName = "$expandToMixed";
+// char arrays (rather than std::string_view) so they can be used as TestStageDescriptor's
+// StringLiteral template parameter.
+constexpr char kExpandToExtAstName[] = "$expandToExtAst";
+constexpr char kExpandToExtParseName[] = "$expandToExtParse";
+constexpr char kExpandToHostParseName[] = "$expandToHostParse";
+constexpr char kExpandToHostAstName[] = "$expandToHostAst";
+constexpr char kExpandToMixedName[] = "$expandToMixed";
 
 static const BSONObj kMatchSpec = BSON("$match" << BSON("a" << 1));
 static const BSONObj kIdLookupSpec = BSON("$_internalSearchIdLookup" << BSONObj());
@@ -180,13 +157,9 @@ public:
     }
 };
 
-class ExpandToExtAstDescriptor : public sdk::AggStageDescriptor {
+class ExpandToExtAstDescriptor
+    : public sdk::TestStageDescriptor<kExpandToExtAstName, ExpandToExtAstParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kExpandToExtAstName);
-    ExpandToExtAstDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<ExpandToExtAstParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<ExpandToExtAstDescriptor>();
     }
@@ -223,13 +196,9 @@ public:
 
 inline int ExpandToExtParseParseNode::expandCalls = 0;
 
-class ExpandToExtParseDescriptor : public sdk::AggStageDescriptor {
+class ExpandToExtParseDescriptor
+    : public sdk::TestStageDescriptor<kExpandToExtParseName, ExpandToExtParseParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kExpandToExtParseName);
-    ExpandToExtParseDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<ExpandToExtParseParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<ExpandToExtParseDescriptor>();
     }
@@ -270,13 +239,9 @@ public:
     }
 };
 
-class ExpandToHostParseDescriptor : public sdk::AggStageDescriptor {
+class ExpandToHostParseDescriptor
+    : public sdk::TestStageDescriptor<kExpandToHostParseName, ExpandToHostParseParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kExpandToHostParseName);
-    ExpandToHostParseDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<ExpandToHostParseParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<ExpandToHostParseDescriptor>();
     }
@@ -313,16 +278,9 @@ public:
     }
 };
 
-class ExpandToHostAstDescriptor : public sdk::AggStageDescriptor {
+class ExpandToHostAstDescriptor
+    : public sdk::TestStageDescriptor<kExpandToHostAstName, ExpandToHostAstParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kExpandToHostAstName);
-
-    ExpandToHostAstDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<ExpandToHostAstParseNode>();
-    }
-
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<ExpandToHostAstDescriptor>();
     }
@@ -361,71 +319,36 @@ public:
     }
 };
 
-class ExpandToMixedDescriptor : public sdk::AggStageDescriptor {
+class ExpandToMixedDescriptor
+    : public sdk::TestStageDescriptor<kExpandToMixedName, ExpandToMixedParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kExpandToMixedName);
-    ExpandToMixedDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<ExpandToMixedParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<ExpandToMixedDescriptor>();
     }
 };
 
-static constexpr std::string_view kTopName = "$top";
-static constexpr std::string_view kMidAName = "$midA";
-static constexpr std::string_view kMidBName = "$midB";
+constexpr char kTopName[] = "$top";
+constexpr char kMidAName[] = "$midA";
+constexpr char kMidBName[] = "$midB";
 static constexpr std::string_view kLeafAName = "$leafA";
 static constexpr std::string_view kLeafBName = "$leafB";
 static constexpr std::string_view kLeafCName = "$leafC";
 static constexpr std::string_view kLeafDName = "$leafD";
 
-class LeafAAstNode : public sdk::AggStageAstNode {
+/**
+ * Leaf ast node for the nested-expansion stages below. The only thing that distinguishes one leaf
+ * from another is its name (the tests assert on the post-expansion leaf names), so a single
+ * name-parameterized class covers all of them. Promotes to a default TransformLogicalAggStage.
+ */
+class LeafAstNode : public sdk::AggStageAstNode {
 public:
-    LeafAAstNode() : sdk::AggStageAstNode(kLeafAName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    explicit LeafAstNode(std::string_view name) : sdk::AggStageAstNode(name) {}
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         return std::make_unique<TransformLogicalAggStage>();
     }
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
-        return std::make_unique<LeafAAstNode>();
-    }
-};
-
-class LeafBAstNode : public sdk::AggStageAstNode {
-public:
-    LeafBAstNode() : sdk::AggStageAstNode(kLeafBName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind(
-        const ::MongoExtensionCatalogContext& catalogContext) const override {
-        return std::make_unique<TransformLogicalAggStage>();
-    }
-    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
-        return std::make_unique<LeafBAstNode>();
-    }
-};
-
-class LeafCAstNode : public sdk::AggStageAstNode {
-public:
-    LeafCAstNode() : sdk::AggStageAstNode(kLeafCName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind(
-        const ::MongoExtensionCatalogContext& catalogContext) const override {
-        return std::make_unique<TransformLogicalAggStage>();
-    }
-    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
-        return std::make_unique<LeafCAstNode>();
-    }
-};
-
-class LeafDAstNode : public sdk::AggStageAstNode {
-public:
-    LeafDAstNode() : sdk::AggStageAstNode(kLeafDName) {}
-    std::unique_ptr<sdk::LogicalAggStage> bind(
-        const ::MongoExtensionCatalogContext& catalogContext) const override {
-        return std::make_unique<TransformLogicalAggStage>();
-    }
-    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
-        return std::make_unique<LeafDAstNode>();
+        return std::make_unique<LeafAstNode>(getName());
     }
 };
 
@@ -440,9 +363,9 @@ public:
         std::vector<VariantNodeHandle> out;
         out.reserve(kExpansionSize);
         out.emplace_back(
-            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafAAstNode>()));
+            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafAstNode>(kLeafAName)));
         out.emplace_back(
-            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafBAstNode>()));
+            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafAstNode>(kLeafBName)));
         return out;
     }
     BSONObj getQueryShape(const QueryShapeOptsHandle&) const override {
@@ -453,13 +376,8 @@ public:
     }
 };
 
-class MidADescriptor : public sdk::AggStageDescriptor {
+class MidADescriptor : public sdk::TestStageDescriptor<kMidAName, MidAParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kMidAName);
-    MidADescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<MidAParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<MidADescriptor>();
     }
@@ -476,9 +394,9 @@ public:
         std::vector<VariantNodeHandle> out;
         out.reserve(kExpansionSize);
         out.emplace_back(
-            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafCAstNode>()));
+            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafAstNode>(kLeafCName)));
         out.emplace_back(
-            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafDAstNode>()));
+            new sdk::ExtensionAggStageAstNodeAdapter(std::make_unique<LeafAstNode>(kLeafDName)));
         return out;
     }
     BSONObj getQueryShape(const QueryShapeOptsHandle&) const override {
@@ -489,13 +407,8 @@ public:
     }
 };
 
-class MidBDescriptor : public sdk::AggStageDescriptor {
+class MidBDescriptor : public sdk::TestStageDescriptor<kMidBName, MidBParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kMidBName);
-    MidBDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<MidBParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<MidBDescriptor>();
     }
@@ -525,13 +438,8 @@ public:
     }
 };
 
-class TopDescriptor : public sdk::AggStageDescriptor {
+class TopDescriptor : public sdk::TestStageDescriptor<kTopName, TopParseNode> {
 public:
-    static inline const std::string kStageName = std::string(kTopName);
-    TopDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj) const override {
-        return std::make_unique<TopParseNode>();
-    }
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<TopDescriptor>();
     }
@@ -560,6 +468,56 @@ protected:
     BSONObj _properties;
 };
 
+/**
+ * A LogicalAggStage that overrides getDocsNeededBounds() with a configurable BSON return value.
+ * Used to test the DocsNeededBounds visitor.
+ */
+class CustomBoundsLogicalAggStage : public TransformLogicalAggStage {
+public:
+    CustomBoundsLogicalAggStage(BSONObj boundsInfo)
+        : TransformLogicalAggStage(), _boundsInfo(boundsInfo.getOwned()) {}
+
+    BSONObj getDocsNeededBounds() const override {
+        return _boundsInfo;
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> clone() const override {
+        return std::make_unique<CustomBoundsLogicalAggStage>(_boundsInfo);
+    }
+
+private:
+    BSONObj _boundsInfo;
+};
+
+/**
+ * An AstNode that creates a CustomBoundsLogicalAggStage with configurable bounds.
+ * Also accepts custom static properties for non-bounds-related testing.
+ */
+class CustomBoundsAstNode : public sdk::AggStageAstNode {
+public:
+    CustomBoundsAstNode(BSONObj properties, BSONObj boundsInfo)
+        : sdk::AggStageAstNode("$customBounds"),
+          _properties(properties.getOwned()),
+          _boundsInfo(boundsInfo.getOwned()) {}
+
+    BSONObj getProperties() const override {
+        return _properties;
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> promote(
+        const ::MongoExtensionCatalogContext& catalogContext) const override {
+        return std::make_unique<CustomBoundsLogicalAggStage>(_boundsInfo);
+    }
+
+    std::unique_ptr<sdk::AggStageAstNode> clone() const override {
+        return std::make_unique<CustomBoundsAstNode>(_properties, _boundsInfo);
+    }
+
+private:
+    BSONObj _properties;
+    BSONObj _boundsInfo;
+};
+
 static constexpr std::string_view kSearchLikeSourceStageName = "$searchLikeSource";
 
 class SearchLikeSourceAggStageAstNode : public sdk::TestAstNode<TransformLogicalAggStage> {
@@ -570,7 +528,7 @@ public:
     BSONObj getProperties() const override {
         return BSON("requiresInputDocSource"
                     << false << "position" << "first" << "hostType"
-                    << "anyShard"
+                    << "targetedShards"
                     << "requiredMetadataFields" << BSON_ARRAY("score") << "providedMetadataFields"
                     << BSON_ARRAY("searchHighlights") << "preservesUpstreamMetadata" << false);
     }
@@ -589,7 +547,7 @@ public:
     BSONObj getProperties() const override {
         return BSON("requiresInputDocSource"
                     << false << "position" << "first" << "hostType"
-                    << "anyShard"
+                    << "targetedShards"
                     << "requiredMetadataFields" << BSON_ARRAY("score") << "providedMetadataFields"
                     << BSON_ARRAY("searchHighlights") << "preservesUpstreamMetadata" << true);
     }
@@ -609,7 +567,7 @@ public:
     BSONObj getProperties() const override {
         return BSON("requiresInputDocSource"
                     << false << "position" << "first" << "hostType"
-                    << "anyShard"
+                    << "targetedShards"
                     << "requiredMetadataFields" << BSON_ARRAY("customSearchScore")
                     << "providedMetadataFields" << BSON_ARRAY("searchScore" << "searchHighlights"));
     }
@@ -629,7 +587,7 @@ public:
     BSONObj getProperties() const override {
         return BSON("requiresInputDocSource"
                     << false << "position" << "first" << "hostType"
-                    << "anyShard"
+                    << "targetedShards"
                     << "requiredMetadataFields" << BSON_ARRAY("searchScore")
                     << "providedMetadataFields"
                     << BSON_ARRAY("customSearchScore" << "searchHighlights"));
@@ -683,21 +641,16 @@ public:
     }
 };
 
-class CountingAst final : public sdk::AggStageAstNode {
+class CountingAst final : public sdk::TestAstNode<TransformLogicalAggStage> {
 public:
     static int alive;
 
-    CountingAst() : sdk::AggStageAstNode(kCountingName) {
+    CountingAst() : TestAstNode(kCountingName, BSONObj()) {
         ++alive;
     }
 
     ~CountingAst() override {
         --alive;
-    }
-
-    std::unique_ptr<sdk::LogicalAggStage> bind(
-        const ::MongoExtensionCatalogContext& catalogContext) const override {
-        return std::make_unique<TransformLogicalAggStage>();
     }
 
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -893,27 +846,9 @@ public:
     }
 };
 
-class NameMismatchParseNode : public sdk::AggStageParseNode {
+class NameMismatchParseNode : public sdk::TestParseNode<TransformAggStageAstNode> {
 public:
-    NameMismatchParseNode() : sdk::AggStageParseNode("$nameB") {}
-
-    static constexpr size_t kExpansionSize = 1;
-
-    size_t getExpandedSize() const override {
-        return kExpansionSize;
-    }
-
-    std::vector<VariantNodeHandle> expand() const override {
-        std::vector<VariantNodeHandle> expanded;
-        expanded.reserve(kExpansionSize);
-        expanded.emplace_back(
-            new sdk::ExtensionAggStageAstNodeAdapter(TransformAggStageAstNode::make()));
-        return expanded;
-    }
-
-    BSONObj getQueryShape(const QueryShapeOptsHandle& ctx) const override {
-        return BSONObj();
-    }
+    NameMismatchParseNode() : TestParseNode("$nameB", BSONObj()) {}
 
     std::unique_ptr<sdk::AggStageParseNode> clone() const override {
         return std::make_unique<NameMismatchParseNode>();
@@ -924,16 +859,11 @@ public:
     }
 };
 
-class NameMismatchStageDescriptor : public sdk::AggStageDescriptor {
+// parse() yields a parse node whose name ("$nameB") differs from the descriptor's ("$nameA") to
+// exercise the host's name-mismatch tripwire.
+class NameMismatchStageDescriptor
+    : public sdk::TestStageDescriptor<"$nameA", NameMismatchParseNode> {
 public:
-    static inline const std::string kStageName = std::string("$nameA");
-
-    NameMismatchStageDescriptor() : sdk::AggStageDescriptor(kStageName) {}
-
-    std::unique_ptr<sdk::AggStageParseNode> parse(BSONObj stageBson) const override {
-        return std::make_unique<NameMismatchParseNode>();
-    }
-
     static inline std::unique_ptr<sdk::AggStageDescriptor> make() {
         return std::make_unique<NameMismatchStageDescriptor>();
     }

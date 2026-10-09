@@ -112,6 +112,26 @@ const kShardLocalNonDeprioritizableCommands = [
             writeConcern: {w: "majority"},
         }),
     },
+    {
+        name: "SSCCL collection cache refresh",
+        description:
+            "Collection routing info refresh via ShardServerCatalogCacheLoader (reads from config server, persists to config.cache.collections/chunks).",
+        db: "admin",
+        command: () => ({
+            _flushRoutingTableCacheUpdates: "testDB.testColl",
+            syncFromConfig: true,
+        }),
+    },
+    {
+        name: "SSCCL database cache refresh",
+        description:
+            "Database routing info refresh via ShardServerCatalogCacheLoader (reads from config server, persists to config.cache.databases).",
+        db: "admin",
+        command: () => ({
+            _flushDatabaseCacheUpdates: "testDB",
+            syncFromConfig: true,
+        }),
+    },
     // Add more commands here as they get NonDeprioritizable protection:
     // {
     //     name: "Example command",
@@ -138,7 +158,11 @@ function testCommandIsNonDeprioritizable(shardConn, testCase) {
     // Check that the counter increased
     const afterCount = getTotalMarkedNonDeprioritizableCount(shardPrimary);
     jsTest.log.info(`  NonDeprioritizable count after: ${afterCount}`);
-    assert.gt(afterCount, beforeCount, `Command '${testCase.name}' should increment NonDeprioritizable counter`);
+    assert.gt(
+        afterCount,
+        beforeCount,
+        `Command '${testCase.name}' should increment NonDeprioritizable counter`,
+    );
 
     jsTest.log.info(`  PASSED: ${testCase.name}`);
 }
@@ -155,10 +179,17 @@ function runShardLocalTests() {
         "CreateViewlessTimeseriesCollections",
     );
 
+    const authoritativeShardsCRUDEnabled = FeatureFlagUtil.isPresentAndEnabled(
+        st.s.getDB("admin"),
+        "AuthoritativeShardsCRUD",
+    );
+
     /// TODO (SERVER-116499): Remove the following timeseries collections once 9.0 becomes last LTS.
     // Create both untracked and tracked timeseries collections to be used in the timeseries upgrade/downgrade commit test cases.
     const testDB = st.s.getDB("testDB");
-    assert.commandWorked(testDB.createCollection(kUntrackedTimeseriesColl, {timeseries: {timeField: "t"}}));
+    assert.commandWorked(
+        testDB.createCollection(kUntrackedTimeseriesColl, {timeseries: {timeField: "t"}}),
+    );
     assert.commandWorked(
         testDB.runCommand({
             createUnsplittableCollection: kTrackedTimeseriesColl,
@@ -190,6 +221,22 @@ function runShardLocalTests() {
                 );
                 continue;
             }
+            // _flushDatabaseCacheUpdates is deprecated and rejected when AuthoritativeShardsCRUD
+            // is enabled, because shards no longer rely on config.cache.databases in that mode
+            // _flushRoutingTableCacheUpdates triggers legacy non-authoritative refresh behavior
+            // and should not be used in that mode.
+            if (
+                authoritativeShardsCRUDEnabled &&
+                ["SSCCL database cache refresh", "SSCCL collection cache refresh"].includes(
+                    testCase.name,
+                )
+            ) {
+                jsTest.log.info(
+                    `Skipping '${testCase.name}' because AuthoritativeShardsCRUD is enabled`,
+                );
+                continue;
+            }
+
             testCommandIsNonDeprioritizable(st.shard0, testCase);
         }
     } finally {

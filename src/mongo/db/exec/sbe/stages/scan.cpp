@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/scan.h"
 
@@ -40,8 +14,8 @@
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/generic_scan.h"
+#include "mongo/db/exec/sbe/stages/multi_range_clustered_scan_stage.h"
 #include "mongo/db/exec/sbe/stages/random_scan.h"
-#include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/shard_role/transaction_resources.h"
 #include "mongo/platform/compiler.h"
@@ -54,12 +28,13 @@
 
 #include <boost/optional/optional.hpp>
 
-namespace {
-MONGO_FAIL_POINT_DEFINE(hangScanGetNext);
-}  // namespace
-
 namespace mongo {
 namespace sbe {
+// External linkage so other scan-stage translation units (e.g.
+// multi_range_clustered_scan_stage.cpp) can reuse the same failpoint name and registration.
+MONGO_FAIL_POINT_DEFINE(hangScanGetNext);
+
+using namespace std::literals::string_view_literals;
 /**
  * Regular constructor. Initializes static '_state' managed by a shared_ptr.
  */
@@ -79,7 +54,7 @@ ScanStageBase::ScanStageBase(UUID collUuid,
                              bool forward,
                              // Optional arguments:
                              bool participateInTrialRunTracking)
-    : PlanStage("scan"_sd,
+    : PlanStage("scan"sv,
                 yieldPolicy,
                 nodeId,
                 participateInTrialRunTracking,
@@ -104,7 +79,7 @@ ScanStageBase::ScanStageBase(std::shared_ptr<ScanStageBaseState> state,
                              PlanYieldPolicySBE* yieldPolicy,
                              PlanNodeId nodeId,
                              bool participateInTrialRunTracking)
-    : PlanStage("scan"_sd,
+    : PlanStage("scan"sv,
                 yieldPolicy,
                 nodeId,
                 participateInTrialRunTracking,
@@ -141,7 +116,7 @@ void ScanStageBase::prepareShared(CompileCtx& ctx) {
     }
 
     tassert(12546101, "MultipleCollectionAccessor must be set on CompileCtx", ctx.mca);
-    doAttachCollectionAcquisition(*ctx.mca);
+    _coll = ctx.mca->getCollectionAcquisitionFromUuid(_state->collUuid);
 }
 
 value::SlotAccessor* ScanStageBase::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -158,10 +133,6 @@ value::SlotAccessor* ScanStageBase::getAccessor(CompileCtx& ctx, value::SlotId s
     }
 
     return ctx.getAccessor(slot);
-}
-
-void ScanStageBase::doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
-    _coll = mca.getCollectionAcquisitionFromUuid(_state->collUuid);
 }
 
 void ScanStageBase::getStatsShared(BSONObjBuilder& bob) const {
@@ -266,6 +237,43 @@ void ScanStageBase::debugPrintShared(std::vector<DebugPrinter::Block>& ret) cons
     ret.emplace_back("@\"`");
     DebugPrinter::addIdentifier(ret, _state->collUuid.toString());
     ret.emplace_back("`\"");
+}
+
+template <typename Derived>
+PlanState ScanStageBaseImpl<Derived>::getNext() {
+    self()->getNextHangFailPoint();
+
+    auto optTimer(getOptTimer(_opCtx));
+
+    // A clustered collection scan may have an end bound we have already passed.
+    if (self()->pastEnd()) {
+        return trackPlanState(PlanState::IS_EOF);
+    }
+
+    handleInterruptAndSlotAccess();
+
+    boost::optional<Record> nextRecord = self()->getNextInternal();
+
+    if (!nextRecord) {
+        handleEOF();
+        return trackPlanState(PlanState::IS_EOF);
+    }
+
+    resetRecordId(nextRecord);
+
+    if (_state->recordIdSlot) {
+        _recordId = std::move(nextRecord->id);
+        _recordIdAccessor.reset(value::TagValueView{value::TypeTags::RecordId,
+                                                    value::bitcastFrom<RecordId*>(&_recordId)});
+    }
+
+    if (!_scanFieldAccessors.empty()) {
+        placeFieldsFromRecordInAccessors(*nextRecord, _state->scanFieldNames, _scanFieldAccessors);
+    }
+
+    ++_specificStats.numReads;
+    trackRead();
+    return trackPlanState(PlanState::ADVANCED);
 }
 
 template <typename Derived>
@@ -374,8 +382,14 @@ void ScanStage::scanResetState(bool reOpen) {
     }
 
     _firstGetNext = true;
-    _hasScanEndRecordId = _state->forward ? _maxRecordIdAccessor : _minRecordIdAccessor;
+    _hasScanEndRecordId = _state->forward ? !!_maxRecordIdAccessor : !!_minRecordIdAccessor;
     _havePassedScanEndRecordId = false;
+}
+
+void ScanStage::getNextHangFailPoint() {
+    if (MONGO_unlikely(hangScanGetNext.shouldFail())) {
+        hangScanGetNext.pauseWhileSet();
+    }
 }
 
 void ScanStage::setMinRecordId() {
@@ -459,7 +473,7 @@ ScanStageBaseImpl<Derived>::ScanStageBaseImpl(UUID collUuid,
                     scanOpenCallback,
                     forward,
                     // Optional arguments:
-                    participateInTrialRunTracking) {};
+                    participateInTrialRunTracking){};
 
 
 template <typename Derived>
@@ -467,7 +481,7 @@ ScanStageBaseImpl<Derived>::ScanStageBaseImpl(std::shared_ptr<ScanStageBaseState
                                               PlanYieldPolicySBE* yieldPolicy,
                                               PlanNodeId nodeId,
                                               bool participateInTrialRunTracking)
-    : ScanStageBase(std::move(state), yieldPolicy, nodeId, participateInTrialRunTracking) {};
+    : ScanStageBase(std::move(state), yieldPolicy, nodeId, participateInTrialRunTracking){};
 
 ScanStage::ScanStage(UUID collUuid,
                      DatabaseName dbName,
@@ -537,20 +551,7 @@ std::unique_ptr<PlanStage> ScanStage::clone() const {
                                        _includeScanEndRecordId);
 }
 
-PlanState ScanStage::getNext() {
-    if (MONGO_unlikely(hangScanGetNext.shouldFail())) {
-        hangScanGetNext.pauseWhileSet();
-    }
-
-    auto optTimer(getOptTimer(_opCtx));
-
-    // A clustered collection scan may have an end bound we have already passed.
-    if (_havePassedScanEndRecordId) {
-        return trackPlanState(PlanState::IS_EOF);
-    }
-
-    handleInterruptAndSlotAccess();
-
+boost::optional<Record> ScanStage::getNextInternal() {
     // Optimized so the most common case has as short a codepath as possible.
     // '_minRecordIdAccessor' and/or '_maxRecordIdAccessor' mean we are doing a bounded scan on
     // a clustered collection, and we will do a seek() to the start bound on the first call.
@@ -567,8 +568,6 @@ PlanState ScanStage::getNext() {
         _firstGetNext = false;
         if (_minRecordIdAccessor && _state->forward) {
             // The range may be exclusive of the start record.
-            // Find the first record equal to _minRecordId
-            // or, if exclusive, the first record "after" it.
             nextRecord = _cursor->seek(_minRecordId,
                                        _includeScanStartRecordId
                                            ? SeekableRecordCursor::BoundInclusion::kInclude
@@ -584,38 +583,25 @@ PlanState ScanStage::getNext() {
     }
 
     if (!nextRecord) {
-        // Indicate that the last recordId seen is null once EOF is hit.
-        handleEOF(nextRecord);
-        return trackPlanState(PlanState::IS_EOF);
+        return boost::none;
     }
 
-    resetRecordId(nextRecord);
-
-    if (_state->recordIdSlot) {
-        _recordId = std::move(nextRecord->id);
-        if (_hasScanEndRecordId) {
-            if (_includeScanEndRecordId) {
-                _havePassedScanEndRecordId =
-                    _state->forward ? (_recordId > _maxRecordId) : (_recordId < _minRecordId);
-            } else {
-                _havePassedScanEndRecordId =
-                    _state->forward ? (_recordId >= _maxRecordId) : (_recordId <= _minRecordId);
-            }
+    // End-bound check (only relevant when the caller cares about the recordId slot, which is what
+    // gates the bound enforcement on the original single-range code path).
+    if (_state->recordIdSlot && _hasScanEndRecordId) {
+        if (_includeScanEndRecordId) {
+            _havePassedScanEndRecordId =
+                _state->forward ? (nextRecord->id > _maxRecordId) : (nextRecord->id < _minRecordId);
+        } else {
+            _havePassedScanEndRecordId = _state->forward ? (nextRecord->id >= _maxRecordId)
+                                                         : (nextRecord->id <= _minRecordId);
         }
         if (_havePassedScanEndRecordId) {
-            return trackPlanState(PlanState::IS_EOF);
+            return boost::none;
         }
-        _recordIdAccessor.reset(
-            false, value::TypeTags::RecordId, value::bitcastFrom<RecordId*>(&_recordId));
     }
 
-    if (!_scanFieldAccessors.empty()) {
-        placeFieldsFromRecordInAccessors(*nextRecord, _state->scanFieldNames, _scanFieldAccessors);
-    }
-
-    ++_specificStats.numReads;
-    trackRead();
-    return trackPlanState(PlanState::ADVANCED);
+    return nextRecord;
 }
 
 void ScanStageBase::closeShared() {
@@ -635,11 +621,11 @@ void ScanStage::prepare(CompileCtx& ctx) {
     prepareShared(ctx);
 
     if (_minRecordIdSlot) {
-        _minRecordIdAccessor = ctx.getAccessor(*(_minRecordIdSlot));
+        _minRecordIdAccessor = ctx.getAccessor(*_minRecordIdSlot);
     }
 
     if (_maxRecordIdSlot) {
-        _maxRecordIdAccessor = ctx.getAccessor(*(_maxRecordIdSlot));
+        _maxRecordIdAccessor = ctx.getAccessor(*_maxRecordIdSlot);
     }
 }
 
@@ -651,10 +637,10 @@ std::unique_ptr<PlanStageStats> ScanStage::getStats(bool includeDebugInfo) const
         BSONObjBuilder bob;
         getStatsShared(bob);
         if (_minRecordIdSlot) {
-            bob.appendNumber("minRecordIdSlot", static_cast<long long>(*(_minRecordIdSlot)));
+            bob.appendNumber("minRecordIdSlot", static_cast<long long>(*_minRecordIdSlot));
         }
         if (_maxRecordIdSlot) {
-            bob.appendNumber("maxRecordIdSlot", static_cast<long long>(*(_maxRecordIdSlot)));
+            bob.appendNumber("maxRecordIdSlot", static_cast<long long>(*_maxRecordIdSlot));
         }
         ret->debugInfo = bob.obj();
     }
@@ -698,5 +684,6 @@ size_t ScanStageBase::estimateCompileTimeSize() const {
 }  // namespace mongo
 
 template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::ScanStage>;
+template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::MultiRangeClusteredScanStage>;
 template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::RandomScanStage>;
 template class mongo::sbe::ScanStageBaseImpl<mongo::sbe::GenericScanStage>;

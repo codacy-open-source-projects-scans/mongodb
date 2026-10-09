@@ -1,41 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/copyable_match_expression.h"
 #include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection_ast_visitor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -45,6 +14,7 @@
 #include <iterator>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -211,7 +181,7 @@ public:
         return cloneNode;
     }
 
-    ASTNode* getChild(StringData fieldName) const {
+    ASTNode* getChild(std::string_view fieldName) const {
         tassert(7858000,
                 "Expected the same number of field names as children, and either not using the "
                 "internal field name to child map or the map should have the same size.",
@@ -235,7 +205,7 @@ public:
         }
     }
 
-    void addChild(StringData fieldName, std::unique_ptr<ASTNode> node) {
+    void addChild(std::string_view fieldName, std::unique_ptr<ASTNode> node) {
         auto rawPtrNode = node.get();
         addChildToInternalVector(std::move(node));
         _fieldNames.push_back(std::string{fieldName});
@@ -258,7 +228,7 @@ public:
      * Remove a node which is a direct child of this tree. Returns true if anything was removed,
      * false otherwise.
      */
-    bool removeChild(StringData fieldName) {
+    bool removeChild(std::string_view fieldName) {
         if (auto it = std::find(_fieldNames.begin(), _fieldNames.end(), fieldName);
             it != _fieldNames.end()) {
             _children.erase(_children.begin() + std::distance(_fieldNames.begin(), it));
@@ -367,7 +337,8 @@ class ExpressionASTNode final : public ASTNode {
 public:
     ExpressionASTNode(boost::intrusive_ptr<Expression> expr) : _expr(std::move(expr)) {}
     ExpressionASTNode(const ExpressionASTNode& other) : ASTNode(other) {
-        _expr = other._expr->clone();
+        ExpressionContext* expCtx = other._expr->getExpressionContext();
+        _expr = other._expr->clone(*expCtx);
     }
 
     void acceptVisitor(ProjectionASTMutableVisitor* visitor) override {

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/index/sort_key_generator.h"
 
@@ -37,8 +11,8 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <memory>
@@ -48,6 +22,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 // A method to create mock ExpressionContexts with a specified collation
 std::unique_ptr<SortKeyGenerator> makeSortKeyGen(const BSONObj& sortSpec,
@@ -74,28 +49,28 @@ TEST(SortKeyGeneratorTest, ExtractNumberKeyFromDocWithSeveralFields) {
 TEST(SortKeyGeneratorTest, ExtractStringKeyNonCompoundNonNested) {
     auto sortKeyGen = makeSortKeyGen(BSON("a" << 1), nullptr);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
-        Document{{"_id", 0}, {"z", "thing1"_sd}, {"a", "thing2"_sd}, {"b", 16}});
-    ASSERT_VALUE_EQ(sortKey, Value{"thing2"_sd});
+        Document{{"_id", 0}, {"z", "thing1"sv}, {"a", "thing2"sv}, {"b", 16}});
+    ASSERT_VALUE_EQ(sortKey, Value{"thing2"sv});
 }
 
 TEST(SortKeyGeneratorTest, CompoundSortPattern) {
     auto sortKeyGen = makeSortKeyGen(BSON("a" << 1 << "b" << 1), nullptr);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
-        Document{{"_id", 0}, {"z", "thing1"_sd}, {"a", 99}, {"c", Document{{"a", 4}}}, {"b", 16}});
+        Document{{"_id", 0}, {"z", "thing1"sv}, {"a", 99}, {"c", Document{{"a", 4}}}, {"b", 16}});
     ASSERT_VALUE_EQ(sortKey, (Value{std::vector<Value>{Value{99}, Value{16}}}));
 }
 
 TEST(SortKeyGeneratorTest, CompoundSortPatternWithDottedPath) {
     auto sortKeyGen = makeSortKeyGen(BSON("c.a" << 1 << "b" << 1), nullptr);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
-        Document{{"_id", 0}, {"z", "thing1"_sd}, {"a", 99}, {"c", Document{{"a", 4}}}, {"b", 16}});
+        Document{{"_id", 0}, {"z", "thing1"sv}, {"a", 99}, {"c", Document{{"a", 4}}}, {"b", 16}});
     ASSERT_VALUE_EQ(sortKey, (Value{std::vector<Value>{Value{4}, Value{16}}}));
 }
 
 TEST(SortKeyGeneratorTest, CompoundPatternLeadingFieldIsArray) {
     auto sortKeyGen = makeSortKeyGen(BSON("c" << 1 << "b" << 1), nullptr);
-    auto sortKey = sortKeyGen->computeSortKeyFromDocument(Document{
-        {"_id", 0}, {"z", "thing1"_sd}, {"a", 99}, {"c", std::vector{2, 4, 1}}, {"b", 16}});
+    auto sortKey = sortKeyGen->computeSortKeyFromDocument(
+        Document{{"_id", 0}, {"z", "thing1"sv}, {"a", 99}, {"c", std::vector{2, 4, 1}}, {"b", 16}});
     ASSERT_VALUE_EQ(sortKey, (Value{std::vector<Value>{Value{1}, Value{16}}}));
 }
 
@@ -103,8 +78,8 @@ TEST(SortKeyGeneratorTest, ExtractStringSortKeyWithCollatorUsesComparisonKey) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     auto sortKeyGen = makeSortKeyGen(BSON("a" << 1), &collator);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
-        Document{{"_id", 0}, {"z", "thing1"_sd}, {"a", "thing2"_sd}, {"b", 16}});
-    ASSERT_VALUE_EQ(sortKey, Value{"2gniht"_sd});
+        Document{{"_id", 0}, {"z", "thing1"sv}, {"a", "thing2"sv}, {"b", 16}});
+    ASSERT_VALUE_EQ(sortKey, Value{"2gniht"sv});
 }
 
 TEST(SortKeyGeneratorTest, CollatorHasNoEffectWhenExtractingNonStringSortKey) {
@@ -126,8 +101,8 @@ TEST(SortKeyGeneratorTest, EnsureSortKeyGenerationForArraysRespectsCollation) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
     auto sortKeyGen = makeSortKeyGen(BSON("a" << 1), &collator);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
-        Document{{"_id", {0}}, {"a", {"aaz"_sd, "zza"_sd, "yya"_sd, "zzb"_sd}}});
-    ASSERT_VALUE_EQ(sortKey, Value{"ayy"_sd});
+        Document{{"_id", {0}}, {"a", {"aaz"sv, "zza"sv, "yya"sv, "zzb"sv}}});
+    ASSERT_VALUE_EQ(sortKey, Value{"ayy"sv});
 }
 
 TEST(SortKeyGeneratorTest, SortKeyGenerationForArraysRespectsCompoundOrdering) {
@@ -247,7 +222,6 @@ TEST(SortKeyGeneratorTest, CanGenerateKeysForGeoDistanceSort) {
 }
 
 TEST(SortKeyGeneratorTest, CanGenerateKeysForSearchScoreSort) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     auto sortKeyGen = makeSortKeyGen(BSON("a" << BSON("$meta" << "searchScore")), nullptr);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
         Document::fromBsonWithMetaData(BSON(Document::metaFieldSearchScore << 10.3)));
@@ -255,7 +229,6 @@ TEST(SortKeyGeneratorTest, CanGenerateKeysForSearchScoreSort) {
 }
 
 TEST(SortKeyGeneratorTest, CanGenerateKeysForVectorSearchScoreSort) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     auto sortKeyGen = makeSortKeyGen(BSON("a" << BSON("$meta" << "vectorSearchScore")), nullptr);
     auto sortKey = sortKeyGen->computeSortKeyFromDocument(
         Document::fromBsonWithMetaData(BSON(Document::metaFieldVectorSearchScore << 10.3)));
@@ -407,7 +380,7 @@ TEST_F(SortKeyGeneratorWorkingSetTest, CanGenerateSortKeyFromWSMInIndexKeyStateW
                               << ""
                               << "string2"));
     auto sortKey = sortKeyGen->computeSortKey(member());
-    ASSERT_VALUE_EQ(Value("1gnirts"_sd), sortKey);
+    ASSERT_VALUE_EQ(Value("1gnirts"sv), sortKey);
 }
 
 using SortKeyGeneratorWorkingSetTestDeathTest = SortKeyGeneratorWorkingSetTest;

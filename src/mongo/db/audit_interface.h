@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 /**
  * This module describes free functions for logging various operations of interest to a
@@ -36,7 +10,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
@@ -60,6 +33,7 @@
 #include <functional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -228,7 +202,7 @@ public:
     /**
      * Logs the result of an ApplicationMessage command.
      */
-    virtual void logApplicationMessage(Client* client, StringData msg) const = 0;
+    virtual void logApplicationMessage(Client* client, std::string_view msg) const = 0;
 
     /**
      * Logs the options associated with a startup event.
@@ -244,7 +218,7 @@ public:
      * Logs the users authenticated to a session before and after a logout command.
      */
     virtual void logLogout(Client* client,
-                           StringData reason,
+                           std::string_view reason,
                            const BSONArray& initialUsers,
                            const BSONArray& updatedUsers,
                            const boost::optional<Date_t>& loginTime) const = 0;
@@ -254,9 +228,9 @@ public:
      */
     virtual void logCreateIndex(Client* client,
                                 const BSONObj* indexSpec,
-                                StringData indexname,
+                                std::string_view indexname,
                                 const NamespaceString& nsname,
-                                StringData indexBuildState,
+                                std::string_view indexBuildState,
                                 ErrorCodes::Error result) const = 0;
 
     /**
@@ -288,7 +262,7 @@ public:
      * Logs the result of a dropIndex command.
      */
     virtual void logDropIndex(Client* client,
-                              StringData indexname,
+                              std::string_view indexname,
                               const NamespaceString& nsname) const = 0;
 
     /**
@@ -320,17 +294,19 @@ public:
     /**
      * Logs the result of a enableSharding command.
      */
-    virtual void logEnableSharding(Client* client, StringData dbname) const = 0;
+    virtual void logEnableSharding(Client* client, std::string_view dbname) const = 0;
 
     /**
      * Logs the result of a addShard command.
      */
-    virtual void logAddShard(Client* client, StringData name, const std::string& servers) const = 0;
+    virtual void logAddShard(Client* client,
+                             std::string_view name,
+                             const std::string& servers) const = 0;
 
     /**
      * Logs the result of a removeShard command.
      */
-    virtual void logRemoveShard(Client* client, StringData shardname) const = 0;
+    virtual void logRemoveShard(Client* client, std::string_view shardname) const = 0;
 
     /**
      * Logs the result of a shardCollection command.
@@ -422,7 +398,7 @@ public:
             return _obj;
         }
 
-        virtual StringData getTimestampFieldName() const = 0;
+        virtual std::string_view getTimestampFieldName() const = 0;
 
         ElementIterator* allocateIterator(const ElementPath* path) const final {
             if (_iteratorUsed) {
@@ -554,23 +530,23 @@ public:
                             const BSONObj* oldConfig,
                             const BSONObj* newConfig) const override {};
 
-    void logApplicationMessage(Client* client, StringData msg) const override {};
+    void logApplicationMessage(Client* client, std::string_view msg) const override {};
 
     void logStartupOptions(Client* client, const BSONObj& startupOptions) const override {};
 
     void logShutdown(Client* client) const override {};
 
     void logLogout(Client* client,
-                   StringData reason,
+                   std::string_view reason,
                    const BSONArray& initialUsers,
                    const BSONArray& updatedUsers,
                    const boost::optional<Date_t>& loginTime) const override {};
 
     void logCreateIndex(Client* client,
                         const BSONObj* indexSpec,
-                        StringData indexname,
+                        std::string_view indexname,
                         const NamespaceString& nsname,
-                        StringData indexBuildState,
+                        std::string_view indexBuildState,
                         ErrorCodes::Error result) const override {};
 
     void logCreateCollection(Client* client, const NamespaceString& nsname) const override {};
@@ -587,7 +563,7 @@ public:
 
 
     void logDropIndex(Client* client,
-                      StringData indexname,
+                      std::string_view indexname,
                       const NamespaceString& nsname) const override {};
 
     void logDropCollection(Client* client, const NamespaceString& nsname) const override {};
@@ -604,11 +580,13 @@ public:
                              const NamespaceString& source,
                              const NamespaceString& target) const override {};
 
-    void logEnableSharding(Client* client, StringData dbname) const override {};
+    void logEnableSharding(Client* client, std::string_view dbname) const override {};
 
-    void logAddShard(Client* client, StringData name, const std::string& servers) const override {};
+    void logAddShard(Client* client,
+                     std::string_view name,
+                     const std::string& servers) const override {};
 
-    void logRemoveShard(Client* client, StringData shardname) const override {};
+    void logRemoveShard(Client* client, std::string_view shardname) const override {};
 
     void logShardCollection(Client* client,
                             const NamespaceString& ns,

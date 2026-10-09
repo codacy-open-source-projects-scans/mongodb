@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/timeseries/bucket_compression.h"
 
@@ -34,7 +8,11 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/unittest/unittest.h"
 
+#include <string_view>
+
 #include <boost/optional/optional.hpp>
+
+using namespace std::literals::string_view_literals;
 
 namespace mongo {
 namespace {
@@ -119,24 +97,24 @@ const BSONObj bucketWithDuplicateIndexFieldNames = mongo::fromjson(R"({
 void assertNoDuplicateIndexFieldNames(const BSONObj& column) {
     size_t curIdx = 0;
     for (const auto elemIt : column) {
-        ASSERT_EQ(std::to_string(curIdx++), elemIt.fieldName());
+        EXPECT_EQ(std::to_string(curIdx++), elemIt.fieldName());
     }
 }
 
 TEST(TimeseriesBucketCompression, BasicRoundtrip) {
     auto compressed = timeseries::compressBucket(
-        sampleBucket, "t"_sd, NamespaceString::createNamespaceString_forTest("test.foo"), false);
+        sampleBucket, "t"sv, NamespaceString::createNamespaceString_forTest("test.foo"), false);
     ASSERT_TRUE(compressed.compressedBucket.has_value());
     auto decompressed = timeseries::decompressBucket(compressed.compressedBucket.value());
     ASSERT_TRUE(decompressed.has_value());
 
     // Compression will re-order data fields, moving the timeField to the front.
     UnorderedFieldsBSONObjComparator comparator;
-    ASSERT_EQ(0, comparator.compare(decompressed.value(), sampleBucket));
+    EXPECT_EQ(0, comparator.compare(decompressed.value(), sampleBucket));
 }
 
 TEST(TimeseriesBucketCompression, RoundtripWithDuplicateIndexFieldNames) {
-    const StringData timeFieldName("t");
+    const std::string_view timeFieldName("t");
     auto compressed =
         timeseries::compressBucket(bucketWithDuplicateIndexFieldNames,
                                    timeFieldName,
@@ -150,10 +128,10 @@ TEST(TimeseriesBucketCompression, RoundtripWithDuplicateIndexFieldNames) {
     UnorderedFieldsBSONObjComparator comparator;
 
     // Decompression rewrites index field names, so the objects will not match.
-    ASSERT_NE(0, comparator.compare(decompressed.value(), bucketWithDuplicateIndexFieldNames));
+    EXPECT_NE(0, comparator.compare(decompressed.value(), bucketWithDuplicateIndexFieldNames));
 
     // Check that we have 4 measurements in the decompressed bucket.
-    ASSERT_EQ(4,
+    EXPECT_EQ(4,
               decompressed->getObjectField(timeseries::kBucketDataFieldName)
                   .getObjectField(timeFieldName)
                   .nFields());
@@ -163,25 +141,61 @@ TEST(TimeseriesBucketCompression, RoundtripWithDuplicateIndexFieldNames) {
     }
 }
 
+TEST(TimeseriesBucketCompression, IgnoresExistingControlCountOnUncompressedBucket) {
+    // An uncompressed bucket has no legal 'control.count', but a direct bucket write that bypasses
+    // the strict bucket validator can stuff a value in there. Compression must discard it and
+    // derive the count from the measurements, rather than inheriting or duplicating it.
+    BSONObjBuilder bucketBuilder;
+    for (const auto& elem : sampleBucket) {
+        if (elem.fieldNameStringData() != timeseries::kBucketControlFieldName) {
+            bucketBuilder.append(elem);
+            continue;
+        }
+        BSONObjBuilder controlBuilder(
+            bucketBuilder.subobjStart(timeseries::kBucketControlFieldName));
+        controlBuilder.appendElements(elem.Obj());
+        controlBuilder.append(timeseries::kBucketControlCountFieldName, 999);
+    }
+
+    auto compressed =
+        timeseries::compressBucket(bucketBuilder.obj(),
+                                   "t"sv,
+                                   NamespaceString::createNamespaceString_forTest("test.foo"),
+                                   true);
+    ASSERT_TRUE(compressed.compressedBucket.has_value());
+
+    // Exactly one 'count' field, holding the number of measurements actually in the bucket.
+    const BSONObj control =
+        compressed.compressedBucket->getObjectField(timeseries::kBucketControlFieldName);
+    size_t numCountFields = 0;
+    for (const auto& controlField : control) {
+        if (controlField.fieldNameStringData() == timeseries::kBucketControlCountFieldName) {
+            ++numCountFields;
+        }
+    }
+    EXPECT_EQ(1, numCountFields);
+    EXPECT_EQ(5, control[timeseries::kBucketControlCountFieldName].Int());
+}
+
 TEST(TimeseriesBucketCompression, CannotDecompressUncompressedBucket) {
     auto decompressed = timeseries::decompressBucket(sampleBucket);
-    ASSERT_FALSE(decompressed.has_value());
+    EXPECT_FALSE(decompressed.has_value());
 }
 
 TEST(TimeseriesBucketCompression, CompressAlreadyCompressedBucket) {
     // Compressing an already compressed bucket is a noop, should return the same compressed bucket
     // untouched.
     auto compressed = timeseries::compressBucket(
-        sampleBucket, "t"_sd, NamespaceString::createNamespaceString_forTest("test.foo"), false);
+        sampleBucket, "t"sv, NamespaceString::createNamespaceString_forTest("test.foo"), false);
     ASSERT_TRUE(compressed.compressedBucket.has_value());
     auto res =
         timeseries::compressBucket(*compressed.compressedBucket,
-                                   "t"_sd,
+                                   "t"sv,
                                    NamespaceString::createNamespaceString_forTest("test.foo"),
                                    false);
     ASSERT_TRUE(res.compressedBucket.has_value());
-    ASSERT_EQ(compressed.compressedBucket->objsize(), res.compressedBucket->objsize());
-    ASSERT_EQ(memcmp(compressed.compressedBucket->objdata(),
+    EXPECT_EQ(compressed.compressedBucket->objsize(), res.compressedBucket->objsize());
+    EXPECT_EQ(memcmp(compressed.compressedBucket->objdata(),
                      res.compressedBucket->objdata(),
                      compressed.compressedBucket->objsize()),
               0);

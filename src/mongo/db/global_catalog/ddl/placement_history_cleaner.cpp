@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/placement_history_cleaner.h"
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -45,6 +18,7 @@
 #include "mongo/db/namespace_string_util.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/executor/remote_command_response.h"
@@ -69,9 +43,6 @@
 
 namespace mongo {
 namespace {
-
-static constexpr int kminPlacementHistoryEntries = 100 * 1000;  // 100k entries
-static constexpr Seconds kJobExecutionPeriod{60 * 60 * 24};     // 1 day
 
 const auto placementHistoryCleanerDecorator =
     ServiceContext::declareDecoration<PlacementHistoryCleaner>();
@@ -153,28 +124,31 @@ void PlacementHistoryCleaner::runOnce(Client* client, size_t minPlacementHistory
         auto earliestOplogTime = getEarliestOpLogTimestampAmongAllShards(opCtx);
         if (!earliestOplogTime) {
             LOGV2(7068802,
-                  "Skipping cleanup of config.placementHistory - no earliestOplogTime could "
-                  "be retrieved");
+                  "PlacementHistoryCleaner: skipping round - no earliestOplogTime could be "
+                  "retrieved");
             return;
         }
 
         // Check the latest initialization time is not greater than the earliestOpTime.
         // The clean-up must always move the new initialization time forward.
-        const auto match =
-            BSON(NamespacePlacementType::kNssFieldName
-                 << NamespaceStringUtil::serialize(
-                        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
-                        SerializationContext::stateDefault())
-                 << NamespacePlacementType::kTimestampFieldName
-                 << BSON("$gte" << earliestOplogTime->toBSON()));
+        const auto match = BSON(
+            NamespacePlacementType::kNssFieldName
+            << NamespaceStringUtil::serialize(
+                   ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker,
+                   SerializationContext::stateDefault())
+            << NamespacePlacementType::kTimestampFieldName << BSON("$gte" << *earliestOplogTime));
 
         if (store.count(opCtx, match) > 0) {
+            LOGV2(1099885,
+                  "PlacementHistoryCleaner: skipping round - earliestOplogTime is behind the "
+                  "timestamp of the latest initialization of config.placementHistory",
+                  "earliestOplogTime"_attr = earliestOplogTime);
             return;
         }
 
         ShardingCatalogManager::get(opCtx)->cleanUpPlacementHistory(opCtx, *earliestOplogTime);
     } catch (const DBException& e) {
-        LOGV2(7068804, "Periodic cleanup of config.placementHistory failed", "error"_attr = e);
+        LOGV2_WARNING(7068804, "PlacementHistoryCleaner: round failed", "error"_attr = e);
     }
 }
 
@@ -208,8 +182,8 @@ void PlacementHistoryCleaner::_start(OperationContext* opCtx, bool steppingUp) {
 
         PeriodicRunner::PeriodicJob placementHistoryCleanerJob(
             "PlacementHistoryCleanUpJob",
-            [](Client* client) { runOnce(client, kminPlacementHistoryEntries); },
-            kJobExecutionPeriod,
+            [](Client* client) { runOnce(client, placementHistoryCleanerMinEntries.load()); },
+            Seconds(placementHistoryCleanerJobIntervalSecs.load()),
             true);
 
         _anchor = periodicRunner->makeJob(std::move(placementHistoryCleanerJob));

@@ -27,6 +27,7 @@
  *    requires_profiling,
  * ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {
     buildCommandProfile,
     profilerHasSingleMatchingEntryOrThrow,
@@ -57,7 +58,6 @@ let validateTestCase = function(test) {
 
 let testCases = {
     _addShard: {skip: "primary only"},
-    _internalClearCollectionShardingMetadata: {skip: "internal command"},
     _shardsvrCloneCatalogData: {skip: "primary only"},
     _clusterQueryWithoutShardKey: {skip: "internal command"},
     _clusterWriteWithoutShardKey: {skip: "internal command"},
@@ -74,9 +74,12 @@ let testCases = {
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
     _configsvrCommitMergeAllChunksOnShard: {skip: "primary only"},
+    _configsvrCommitMergeAllPrecomputedChunksOnShard: {skip: "primary only"},
+    _configsvrCommitMergeChunks: {skip: "primary only"},
+    _configsvrCommitMoveRange: {skip: "primary only"},
+    _configsvrCommitSplitChunk: {skip: "primary only"},
     _configsvrConfigureCollectionBalancing: {skip: "primary only"},
     _configsvrMoveRange: {skip: "primary only"},
-    _configsvrRemoveChunks: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
     _configsvrRemoveTags: {skip: "primary only"},
     _configsvrResetPlacementHistory: {skip: "primary only"},
@@ -103,6 +106,7 @@ let testCases = {
     _shardsvrBeginMigrationBlockingOperation: {skip: "primary only"},
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
+    _shardsvrCheckMetadataConsistencySecondaryParticipant: {skip: "internal command"},
     _shardsvrCleanupStructuredEncryptionData: {skip: "primary only"},
     _shardsvrCloneAuthoritativeMetadata: {skip: "primary only"},
     _shardsvrCompactStructuredEncryptionData: {skip: "primary only"},
@@ -113,6 +117,7 @@ let testCases = {
     _shardsvrMovePrimaryEnterCriticalSection: {skip: "primary only"},
     _shardsvrMovePrimaryExitCriticalSection: {skip: "primary only"},
     _shardsvrMoveRange: {skip: "primary only"},
+    _shardsvrSplitChunk: {skip: "primary only"},
     _flushShardRegistry: {skip: "internal command"},
     _recvChunkAbort: {skip: "primary only"},
     _recvChunkCommit: {skip: "primary only"},
@@ -161,6 +166,7 @@ let testCases = {
     checkShardingIndex: {skip: "primary only"},
     cleanupOrphaned: {skip: "primary only"},
     cleanupStructuredEncryptionData: {skip: "does not return user data"},
+    clearJoinPlanCache: {skip: "does not return user data"},
     clearJumboFlag: {skip: "primary only"},
     clearLog: {skip: "does not return user data"},
     clone: {skip: "primary only"},
@@ -283,8 +289,10 @@ let testCases = {
     getDatabaseVersion: {skip: "does not return user data"},
     getDefaultRWConcern: {skip: "does not return user data"},
     getDiagnosticData: {skip: "does not return user data"},
+    getESECMKIdentifierListStatus: {skip: "does not return user data"},
     getESERotateActiveKEKStatus: {skip: "does not return user data"},
     getLog: {skip: "does not return user data"},
+    getMetricsFilteringAllowlist: {skip: "does not return user data"},
     getMore: {skip: "shard version already established"},
     getParameter: {skip: "does not return user data"},
     getQueryableEncryptionCountInfo: {skip: "primary only"},
@@ -440,7 +448,6 @@ let testCases = {
     removeShard: {skip: "primary only"},
     removeShardFromZone: {skip: "primary only"},
     renameCollection: {skip: "primary only"},
-    repairShardedCollectionChunksHistory: {skip: "does not return user data"},
     replicateSearchIndexCommand: {skip: "internal command"},
     replSetAbortPrimaryCatchUp: {skip: "does not return user data"},
     replSetFreeze: {skip: "does not return user data"},
@@ -492,7 +499,6 @@ let testCases = {
     shutdown: {skip: "does not return user data"},
     sleep: {skip: "does not return user data"},
     split: {skip: "primary only"},
-    splitChunk: {skip: "primary only"},
     splitVector: {skip: "primary only"},
     startRecordingTraffic: {skip: "Renamed to startTrafficRecording"},
     stopRecordingTraffic: {skip: "Renamed to stopTrafficRecording"},
@@ -518,6 +524,8 @@ let testCases = {
     unshardCollection: {skip: "primary only"},
     untrackUnshardedCollection: {skip: "primary only"},
     update: {skip: "primary only"},
+    updateESECMKIdentifierList: {skip: "does not return user data"},
+    updateMetricsFilteringAllowlist: {skip: "does not return user data"},
     updateRole: {skip: "primary only"},
     updateSearchIndex: {skip: "does not return user data"},
     updateUser: {skip: "primary only"},
@@ -528,6 +536,7 @@ let testCases = {
     waitForFailPoint: {skip: "does not return user data"},
     getShardingReady: {skip: "does not return user data"},
     whatsmyuri: {skip: "does not return user data"},
+    wiredTigerRepair: {skip: "does not return user data"},
 };
 
 commandsRemovedFromMongosSinceLastLTS.forEach(function(cmd) {
@@ -542,6 +551,19 @@ let donorShardPrimary = st.rs0.getPrimary();
 let recipientShardPrimary = st.rs1.getPrimary();
 let donorShardSecondary = st.rs0.getSecondary();
 let recipientShardSecondary = st.rs1.getSecondary();
+
+const authoritativeDDL =
+    FeatureFlagUtil.isPresentAndEnabled(st.s.getDB("admin"), "AuthoritativeShardsDDL");
+
+if (authoritativeDDL) {
+    // On the authoritative path, kShardCatalogCommit updates the donor secondary to version
+    // X+1 before moveChunk returns, so versioned reads return StaleConfig. mapReduce's
+    // internal retry logic then connects directly to the secondary host that returned
+    // StaleConfig; the shard registry only tracks primaries, so getShardForHostNoReload
+    // returns null and the retry fails with ShardNotFound.
+    testCases.mapReduce.skip = "ShardNotFound in mapReduce retry path on authoritative DDL " +
+        "path (secondary host not in shard registry)";
+}
 
 let freshMongos = st.s0;
 let staleMongos = st.s1;
@@ -653,7 +675,7 @@ for (let command of commands) {
                 {
                     "command.shardVersion": {"$exists": false},
                     "command.$readPreference": {$exists: false},
-                    "command.readConcern": {"level": "local"},
+                    "command.readConcern.level": "local",
                     "errCode": {"$exists": false},
                 },
                 commandProfile,
@@ -668,7 +690,7 @@ for (let command of commands) {
                 {
                     "command.shardVersion": {"$exists": true},
                     "command.$readPreference": {"mode": "secondary"},
-                    "command.readConcern": {"level": "available"},
+                    "command.readConcern.level": "available",
                     "errCode": {"$ne": ErrorCodes.StaleConfig},
                 },
                 commandProfile,
@@ -694,14 +716,17 @@ for (let command of commands) {
         });
 
         // Check that the recipient shard secondary received the request with local read concern
-        // and returned success, since the previous command refreshed the metadata.
+        // and returned success, since the previous command refreshed the metadata. Filter on
+        // provenance "clientSupplied" to distinguish this from an implicit-default retry that
+        // may have also landed on the recipient with the same readConcern.level.
         profilerHasSingleMatchingEntryOrThrow({
             profileDB: recipientShardSecondary.getDB(db),
             filter: Object.extend(
                 {
                     "command.shardVersion": {"$exists": true},
                     "command.$readPreference": {"mode": "secondary"},
-                    "command.readConcern": {"level": "local"},
+                    "command.readConcern.level": "local",
+                    "command.readConcern.provenance": "clientSupplied",
                     "errCode": {"$ne": ErrorCodes.StaleConfig},
                 },
                 commandProfile,

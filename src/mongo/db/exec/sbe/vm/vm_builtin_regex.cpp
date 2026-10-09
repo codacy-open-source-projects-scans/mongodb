@@ -1,34 +1,11 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/util/pcre.h"
+#include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -46,78 +23,73 @@ namespace {
  * - isMatch: Boolean flag to mark if the caller function is $regexMatch, in which case the result
  * returned is true/false.
  */
-FastTuple<bool, value::TypeTags, value::Value> pcreNextMatch(pcre::Regex* pcre,
-                                                             StringData inputString,
-                                                             uint32_t& startBytePos,
-                                                             uint32_t& codePointPos,
-                                                             bool isMatch) {
+value::TagValueMaybeOwned pcreNextMatch(pcre::Regex* pcre,
+                                        std::string_view inputString,
+                                        uint32_t& startBytePos,
+                                        uint32_t& codePointPos,
+                                        bool isMatch) {
     pcre::MatchData m = pcre->matchView(inputString, {}, startBytePos);
     if (!m && m.error() != pcre::Errc::ERROR_NOMATCH) {
         LOGV2_ERROR(5073414,
                     "Error occurred while executing regular expression.",
                     "execResult"_attr = redact(errorMessage(m.error())));
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     if (isMatch) {
         // $regexMatch returns true or false.
-        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(!!m)};
+        return value::TagValueMaybeOwned::boolean(!!m);
     }
     // $regexFind and $regexFindAll build result object or return null.
     if (!m) {
-        return {false, value::TypeTags::Null, 0};
+        return value::TagValueMaybeOwned::null();
     }
 
     // Create the result object {"match" : .., "idx" : ..., "captures" : ...}
     // from the pcre::MatchData.
-    auto [matchedTag, matchedVal] = value::makeNewString(m[0]);
-    value::ValueGuard matchedGuard{matchedTag, matchedVal};
+    auto matched = value::TagValueOwned::fromRaw(value::makeNewString(m[0]));
 
-    StringData precedesMatch = m.input().substr(m.startPos());
+    std::string_view precedesMatch = m.input().substr(m.startPos());
     precedesMatch = precedesMatch.substr(0, m[0].data() - precedesMatch.data());
     codePointPos += str::lengthInUTF8CodePoints(precedesMatch);
     startBytePos += precedesMatch.size();
 
-    auto [arrTag, arrVal] = value::makeNewArray();
-    value::ValueGuard arrGuard{arrTag, arrVal};
-    auto arrayView = value::getArrayView(arrVal);
+    auto arr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto arrayView = value::getArrayView(arr.value());
     arrayView->reserve(m.captureCount());
     for (size_t i = 0; i < m.captureCount(); ++i) {
-        StringData cap = m[i + 1];
+        std::string_view cap = m[i + 1];
         if (!cap.data()) {
-            arrayView->push_back(value::TypeTags::Null, 0);
+            arrayView->push_back_raw(value::TypeTags::Null, 0);
         } else {
             auto [tag, val] = value::makeNewString(cap);
-            arrayView->push_back(tag, val);
+            arrayView->push_back_raw(tag, val);
         }
     }
 
-    auto [resTag, resVal] = value::makeNewObject();
-    value::ValueGuard resGuard{resTag, resVal};
-    auto resObjectView = value::getObjectView(resVal);
+    auto res = value::TagValueOwned::fromRaw(value::makeNewObject());
+    auto resObjectView = value::getObjectView(res.value());
     resObjectView->reserve(3);
-    matchedGuard.reset();
-    resObjectView->push_back("match", matchedTag, matchedVal);
-    resObjectView->push_back(
+    auto [matchedTag, matchedVal] = matched.releaseToRaw();
+    resObjectView->push_back_raw("match", matchedTag, matchedVal);
+    resObjectView->push_back_raw(
         "idx", value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(codePointPos));
-    arrGuard.reset();
-    resObjectView->push_back("captures", arrTag, arrVal);
-    resGuard.reset();
-    return {true, resTag, resVal};
+    auto [arrTag, arrVal] = arr.releaseToRaw();
+    resObjectView->push_back_raw("captures", arrTag, arrVal);
+    return std::move(res);
 }
 
 /**
  * A helper function with common logic for $regexMatch and $regexFind functions. Both extract only
  * the first match to a regular expression, but return different result objects.
  */
-FastTuple<bool, value::TypeTags, value::Value> genericPcreRegexSingleMatch(
-    value::TypeTags typeTagPcreRegex,
-    value::Value valuePcreRegex,
-    value::TypeTags typeTagInputStr,
-    value::Value valueInputStr,
-    bool isMatch) {
+value::TagValueMaybeOwned genericPcreRegexSingleMatch(value::TypeTags typeTagPcreRegex,
+                                                      value::Value valuePcreRegex,
+                                                      value::TypeTags typeTagInputStr,
+                                                      value::Value valueInputStr,
+                                                      bool isMatch) {
     if (!value::isStringOrSymbol(typeTagInputStr) || !value::isPcreRegex(typeTagPcreRegex)) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
     auto inputString = value::getStringOrSymbolView(typeTagInputStr, valueInputStr);
@@ -130,107 +102,110 @@ FastTuple<bool, value::TypeTags, value::Value> genericPcreRegexSingleMatch(
 
 }  // namespace
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexCompile(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinRegexCompile(ArityType arity) {
     tassert(11080022, "Unexpected arity value", arity == 2);
 
-    auto [patternOwned, patternTypeTag, patternValue] = getFromStack(0);
-    auto [optionsOwned, optionsTypeTag, optionsValue] = getFromStack(1);
+    auto patternView = viewFromStack(0);
+    auto optionsView = viewFromStack(1);
 
-    if (!value::isString(patternTypeTag) || !value::isString(optionsTypeTag)) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (!value::isString(patternView.tag) || !value::isString(optionsView.tag)) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto pattern = value::getStringView(patternTypeTag, patternValue);
-    auto options = value::getStringView(optionsTypeTag, optionsValue);
+    auto pattern = value::getStringView(patternView.tag, patternView.value);
+    auto options = value::getStringView(optionsView.tag, optionsView.value);
 
     if (pattern.find('\0', 0) != std::string::npos || options.find('\0', 0) != std::string::npos) {
-        return {false, value::TypeTags::Nothing, 0};
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto [pcreTag, pcreValue] = makeNewPcreRegex(pattern, options);
-    return {true, pcreTag, pcreValue};
+    return makeNewPcreRegex(pattern, options);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexMatch(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinRegexMatch(ArityType arity) {
     tassert(11080021, "Unexpected arity value", arity == 2);
-    auto [ownedPcreRegex, tagPcreRegex, valPcreRegex] = getFromStack(0);
-    auto [ownedInputStr, tagInputStr, valInputStr] = getFromStack(1);
+    auto pcreRegexView = viewFromStack(0);
+    auto inputStrView = viewFromStack(1);
 
-    if (value::isArray(tagPcreRegex)) {
-        for (value::ArrayEnumerator ae(tagPcreRegex, valPcreRegex); !ae.atEnd(); ae.advance()) {
+    if (value::isArray(pcreRegexView.tag)) {
+        for (value::ArrayEnumerator ae(pcreRegexView.tag, pcreRegexView.value); !ae.atEnd();
+             ae.advance()) {
             auto [elemTag, elemVal] = ae.getViewOfValue();
-            auto [ownedResult, tagResult, valResult] =
-                genericPcreRegexSingleMatch(elemTag, elemVal, tagInputStr, valInputStr, true);
+            auto result = genericPcreRegexSingleMatch(
+                elemTag, elemVal, inputStrView.tag, inputStrView.value, true);
 
-            if (tagResult == value::TypeTags::Boolean && value::bitcastTo<bool>(valResult)) {
-                return {ownedResult, tagResult, valResult};
-            }
-
-            if (ownedResult) {
-                value::releaseValue(tagResult, valResult);
+            if (result.tag() == value::TypeTags::Boolean &&
+                value::bitcastTo<bool>(result.value())) {
+                return result;
             }
         }
 
-        return {false, value::TypeTags::Boolean, value::bitcastFrom<bool>(false)};
+        return value::TagValueMaybeOwned::boolean(false);
     }
-
-    return genericPcreRegexSingleMatch(tagPcreRegex, valPcreRegex, tagInputStr, valInputStr, true);
-}
-
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexFind(ArityType arity) {
-    tassert(11080020, "Unexpected arity value", arity == 2);
-    auto [ownedPcreRegex, typeTagPcreRegex, valuePcreRegex] = getFromStack(0);
-    auto [ownedInputStr, typeTagInputStr, valueInputStr] = getFromStack(1);
 
     return genericPcreRegexSingleMatch(
-        typeTagPcreRegex, valuePcreRegex, typeTagInputStr, valueInputStr, false);
+        pcreRegexView.tag, pcreRegexView.value, inputStrView.tag, inputStrView.value, true);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexFindAll(ArityType arity) {
-    tassert(11080019, "Unexpected arity value", arity == 2);
-    auto [ownedPcre, typeTagPcreRegex, valuePcreRegex] = getFromStack(0);
-    auto [ownedStr, typeTagInputStr, valueInputStr] = getFromStack(1);
+value::TagValueMaybeOwned ByteCode::builtinRegexFind(ArityType arity) {
+    tassert(11080020, "Unexpected arity value", arity == 2);
+    auto pcreRegexView = viewFromStack(0);
+    auto inputStrView = viewFromStack(1);
 
-    if (!value::isString(typeTagInputStr) || typeTagPcreRegex != value::TypeTags::pcreRegex) {
-        return {false, value::TypeTags::Nothing, 0};
+    return genericPcreRegexSingleMatch(
+        pcreRegexView.tag, pcreRegexView.value, inputStrView.tag, inputStrView.value, false);
+}
+
+value::TagValueMaybeOwned ByteCode::builtinRegexFindAll(ArityType arity) {
+    tassert(11080019, "Unexpected arity value", arity == 2);
+    auto pcreRegexView = viewFromStack(0);
+    auto inputStrView = viewFromStack(1);
+
+    if (!value::isString(inputStrView.tag) || pcreRegexView.tag != value::TypeTags::pcreRegex) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto inputString = value::getStringView(typeTagInputStr, valueInputStr);
-    auto pcre = value::getPcreRegexView(valuePcreRegex);
+    auto inputString = value::getStringView(inputStrView.tag, inputStrView.value);
+    auto pcre = value::getPcreRegexView(pcreRegexView.value);
 
     uint32_t startBytePos = 0;
     uint32_t codePointPos = 0;
 
     // Prepare the result array of matching objects.
-    auto [arrTag, arrVal] = value::makeNewArray();
-    value::ValueGuard arrGuard{arrTag, arrVal};
-    auto arrayView = value::getArrayView(arrVal);
+    value::TagValueOwned arr = value::TagValueOwned::fromRaw(value::makeNewArray());
+    auto arrayView = value::getArrayView(arr.value());
 
     int resultSize = 0;
     do {
-        auto [_, matchTag, matchVal] =
-            pcreNextMatch(pcre, inputString, startBytePos, codePointPos, false);
-        value::ValueGuard matchGuard{matchTag, matchVal};
+        auto match = pcreNextMatch(pcre, inputString, startBytePos, codePointPos, false);
 
-        if (matchTag == value::TypeTags::Null) {
+        if (match.tag() == value::TypeTags::Null) {
             break;
         }
-        if (matchTag != value::TypeTags::Object) {
-            return {false, value::TypeTags::Nothing, 0};
+        if (match.tag() != value::TypeTags::Object) {
+            return value::TagValueMaybeOwned::nothing();
         }
 
-        resultSize += getApproximateSize(matchTag, matchVal);
+        resultSize += getApproximateSize(match.tag(), match.value());
         uassert(5126606,
                 "$regexFindAll: the size of buffer to store output exceeded the 64MB limit",
                 resultSize <= mongo::BufferMaxSize);
 
-        matchGuard.reset();
-        arrayView->push_back(matchTag, matchVal);
+        auto [matchTag, matchVal] = match.raw();
+        match.disown();
+        arrayView->push_back_raw(matchTag, matchVal);
 
         // Move indexes after the current matched string to prepare for the next search.
         auto [mstrTag, mstrVal] = value::getObjectView(matchVal)->getField("match");
         auto matchString = value::getStringView(mstrTag, mstrVal);
         if (matchString.empty()) {
+            // The regex matched an empty string. If the empty match landed at the end of the
+            // input (e.g. pattern "$" or "a*" against ""), 'startBytePos' is already at
+            // 'inputString.size()' and there is no byte to advance over. Break out so we do not
+            // read past the end of the input.
+            if (startBytePos >= inputString.size()) {
+                break;
+            }
             startBytePos += str::getCodePointLength(inputString[startBytePos]);
             ++codePointPos;
         } else {
@@ -241,33 +216,32 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRegexFindAll(Ari
         }
     } while (startBytePos < inputString.size());
 
-    arrGuard.reset();
-    return {true, arrTag, arrVal};
+    return std::move(arr);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetRegexPattern(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinGetRegexPattern(ArityType arity) {
     tassert(11080018, "Unexpected arity value", arity == 1);
-    auto [regexOwned, regexType, regexValue] = getFromStack(0);
+    auto regexView = viewFromStack(0);
 
-    if (regexType != value::TypeTags::bsonRegex) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (regexView.tag != value::TypeTags::bsonRegex) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto regex = value::getBsonRegexView(regexValue);
+    auto regex = value::getBsonRegexView(regexView.value);
     auto [strType, strValue] = value::makeNewString(regex.pattern);
 
     return {true, strType, strValue};
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGetRegexFlags(ArityType arity) {
+value::TagValueMaybeOwned ByteCode::builtinGetRegexFlags(ArityType arity) {
     tassert(11080017, "Unexpected arity value", arity == 1);
-    auto [regexOwned, regexType, regexValue] = getFromStack(0);
+    auto regexView = viewFromStack(0);
 
-    if (regexType != value::TypeTags::bsonRegex) {
-        return {false, value::TypeTags::Nothing, 0};
+    if (regexView.tag != value::TypeTags::bsonRegex) {
+        return value::TagValueMaybeOwned::nothing();
     }
 
-    auto regex = value::getBsonRegexView(regexValue);
+    auto regex = value::getBsonRegexView(regexView.value);
     auto [strType, strValue] = value::makeNewString(regex.flags);
 
     return {true, strType, strValue};

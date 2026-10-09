@@ -13,7 +13,29 @@ import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
  * @class
  */
 export class DataGenerator {
-    static PROGRAM_PATH = "src/mongo/db/query/benchmark/data_generator/driver.py";
+    static RELATIVE_PROGRAM_PATH = "src/mongo/db/query/benchmark/data_generator/driver.py";
+
+    /**
+     * Returns a usable path to the data generator driver. The working directory is the repo root
+     * when running resmoke directly, but not when the suite runs under Bazel, so fall back to
+     * resolving against the MONGO_PATH roots (which include the resmoke root).
+     */
+    static programPath() {
+        if (fileExists(DataGenerator.RELATIVE_PROGRAM_PATH)) {
+            return DataGenerator.RELATIVE_PROGRAM_PATH;
+        }
+        for (const root of (_getEnv("MONGO_PATH") || "").split(":")) {
+            if (root === "") {
+                continue;
+            }
+            const candidate = root + "/" + DataGenerator.RELATIVE_PROGRAM_PATH;
+            if (fileExists(candidate)) {
+                return candidate;
+            }
+        }
+        return DataGenerator.RELATIVE_PROGRAM_PATH;
+    }
+
     constructor({db = null, module = null, seed = null} = {}) {
         if (db == null) {
             throw new Error("A db object must be provided to the DataGenerator constructor.");
@@ -29,7 +51,9 @@ export class DataGenerator {
         this.out = tmpDir + "/data_generator_" + randomUUID;
 
         if (module == null) {
-            throw new Error("A data generator module name must be provided to DataGenerator constructor.");
+            throw new Error(
+                "A data generator module name must be provided to DataGenerator constructor.",
+            );
         } else {
             this.module = module;
         }
@@ -37,10 +61,17 @@ export class DataGenerator {
         this.seed = seed;
     }
 
-    execute({spec = null, size = null, indexes = null, drop = true, analyze = false, serial_inserts = true} = {}) {
+    execute({
+        spec = null,
+        size = null,
+        indexes = null,
+        drop = true,
+        analyze = false,
+        serial_inserts = true,
+    } = {}) {
         let args = [
-            getPython3Binary(),
-            DataGenerator.PROGRAM_PATH,
+            (globalThis.withoutGoldenCapture ?? ((fn) => fn()))(getPython3Binary),
+            DataGenerator.programPath(),
             "--uri",
             this.uri,
             "--db",

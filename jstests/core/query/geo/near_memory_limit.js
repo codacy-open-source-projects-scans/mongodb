@@ -2,7 +2,9 @@
  * Test that verifies the behavior of NearStage when memory limit is set.
  *
  * @tags: [
+ *   uses_explain,
  *   assumes_stable_shard_list,
+ *   assumes_stable_collection_uuid,
  *   assumes_unsharded_collection,
  *   does_not_support_transactions,
  *   not_allowed_with_signed_security_token,
@@ -54,7 +56,11 @@ assert.gte(coll.aggregate(pipeline).itcount(), 0);
 // We measure the actual peak from explain and use half of it, which works for any RecordId
 // type (integer for regular collections, OID for clustered collections).
 const peakMem = nearStages[0].peakTrackedMemBytes;
-assert.gt(peakMem, 0, "Expected peakTrackedMemBytes in GEO_NEAR_2DSPHERE stage: " + tojson(explainRes));
+assert.gt(
+    peakMem,
+    0,
+    "Expected peakTrackedMemBytes in GEO_NEAR_2DSPHERE stage: " + tojson(explainRes),
+);
 const spillingLimit = Math.floor(peakMem / 2);
 
 const isSpillingEnabled = FeatureFlagUtil.isEnabled(db, "ExtendedAutoSpilling");
@@ -66,9 +72,10 @@ runWithParamsAllNonConfigNodes(db, {internalNearStageMaxMemoryBytes: spillingLim
         // in memory. Since spillingLimit > _seenDocuments, the query succeeds.
         assert.eq(kDocCount, coll.aggregate(pipeline).itcount());
     } else {
-        assert.commandFailedWithCode(db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}), [
-            12227900,
-        ]);
+        assert.commandFailedWithCode(
+            db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}),
+            [ErrorCodes.ExceededMemoryLimit],
+        );
     }
 });
 
@@ -76,8 +83,9 @@ if (isSpillingEnabled) {
     // With an extremely low limit, even after spilling the result buffer, _seenDocuments
     // alone (which cannot be spilled) exceeds the limit and the query fails.
     runWithParamsAllNonConfigNodes(db, {internalNearStageMaxMemoryBytes: 1000}, () => {
-        assert.commandFailedWithCode(db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}), [
-            12227900,
-        ]);
+        assert.commandFailedWithCode(
+            db.runCommand({aggregate: coll.getName(), pipeline: pipeline, cursor: {}}),
+            [ErrorCodes.ExceededMemoryLimit],
+        );
     });
 }

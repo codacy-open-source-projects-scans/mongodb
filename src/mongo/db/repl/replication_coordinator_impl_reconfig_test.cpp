@@ -1,40 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "cxxabi.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -60,10 +29,10 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -78,6 +47,11 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "cxxabi.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -222,7 +196,7 @@ TEST_F(ReplCoordTest,
 
 TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenReconfigReceivedWithInvalidConfig) {
     // start up, become primary, receive uninitializable config
-    RAIIServerParameterControllerForTest controller{"allowMultipleArbiters", true};
+    unittest::ServerParameterGuard controller{"allowMultipleArbiters", true};
     assertStartSuccess(BSON("_id" << "mySet"
                                   << "version" << 2 << "members"
                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
@@ -969,10 +943,10 @@ TEST_F(ReplCoordTest, ReconfigThatChangesIDWCWMajToW1WithCWWCSetPasses) {
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     hbArgs.setSenderId(3);
     hbArgs.setSenderHost(HostAndPort("node3", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     replyToReceivedHeartbeatV1();
     replyToReceivedHeartbeatV1();
     // As we have set the cluster-wide write concern, the reconfig should succeed.
@@ -1028,10 +1002,10 @@ TEST_F(ReplCoordTest, ReconfigThatChangesIDWCW1ToWMajWithCWWCSetPasses) {
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     hbArgs.setSenderId(3);
     hbArgs.setSenderHost(HostAndPort("node3", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     replyToReceivedHeartbeatV1();
     replyToReceivedHeartbeatV1();
     // As we have set the cluster-wide write concern, the reconfig should succeed.
@@ -1040,7 +1014,7 @@ TEST_F(ReplCoordTest, ReconfigThatChangesIDWCW1ToWMajWithCWWCSetPasses) {
 }
 
 TEST_F(ReplCoordTest, ReconfigThatKeepsIDWCAtW1WithoutCWWCSetPasses) {
-    RAIIServerParameterControllerForTest controller{"allowMultipleArbiters", true};
+    unittest::ServerParameterGuard controller{"allowMultipleArbiters", true};
     assertStartSuccess(BSON("_id" << "mySet"
                                   << "version" << 2 << "members"
                                   << BSON_ARRAY(BSON("_id" << 1 << "host"
@@ -1089,13 +1063,13 @@ TEST_F(ReplCoordTest, ReconfigThatKeepsIDWCAtW1WithoutCWWCSetPasses) {
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     hbArgs.setSenderId(3);
     hbArgs.setSenderHost(HostAndPort("node3", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     hbArgs.setSenderId(4);
     hbArgs.setSenderHost(HostAndPort("node4", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     replyToReceivedHeartbeatV1();
     replyToReceivedHeartbeatV1();
     replyToReceivedHeartbeatV1();
@@ -1145,10 +1119,10 @@ TEST_F(ReplCoordTest, ReconfigThatKeepsIDWCAtWMajWithoutCWWCSetPasses) {
     hbArgs.setSenderHost(HostAndPort("node2", 12345));
     hbArgs.setTerm(0);
     ReplSetHeartbeatResponse hbResp;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     hbArgs.setSenderId(3);
     hbArgs.setSenderHost(HostAndPort("node3", 12345));
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &hbResp));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &hbResp));
     replyToReceivedHeartbeatV1();
     replyToReceivedHeartbeatV1();
     reconfigThread.join();
@@ -2396,7 +2370,7 @@ TEST_F(ReplCoordReconfigTest, MultipleArbitersShouldFailWithoutServerParameter) 
 }
 
 TEST_F(ReplCoordReconfigTest, MultipleArbitersShouldSucceedWithServerParameter) {
-    RAIIServerParameterControllerForTest controller{"allowMultipleArbiters", true};
+    unittest::ServerParameterGuard controller{"allowMultipleArbiters", true};
     multipleArbiterTest(true);
 }
 
@@ -2432,7 +2406,7 @@ TEST_F(ReplCoordTest, StepUpReconfigConcurrentWithHeartbeatReconfig) {
     ASSERT(hbArgs.isInitialized());
 
     ReplSetHeartbeatResponse response;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &response));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &response));
 
     // No requests should have been scheduled.
     getNet()->enterNetwork();
@@ -2454,7 +2428,7 @@ TEST_F(ReplCoordTest, StepUpReconfigConcurrentWithHeartbeatReconfig) {
     hbArgs.setTerm(0);
     ASSERT(hbArgs.isInitialized());
 
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &response));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &response));
 
     // Schedule a response with a newer config.
     auto newerConfigVersion = 3;
@@ -2533,7 +2507,7 @@ TEST_F(ReplCoordTest, StepUpReconfigConcurrentWithForceHeartbeatReconfig) {
     ASSERT(hbArgs.isInitialized());
 
     ReplSetHeartbeatResponse response;
-    ASSERT_OK(getReplCoord()->processHeartbeatV1(hbArgs, &response));
+    ASSERT_OK(getReplCoord()->processHeartbeatV1(opCtx.get(), hbArgs, &response));
 
     // Schedule a response with a newer config.
     auto newerConfigVersion = 3;

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/query/canonical_query_encoder.h"
@@ -65,7 +39,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_knob_configuration.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -82,6 +56,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -119,6 +94,7 @@ bool isQueryNegatingEqualToNull(const mongo::MatchExpression* tree) {
 }
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * AppendChar provides the compiler with a type for a "appendChar(...)" member function.
@@ -132,13 +108,10 @@ using AppendChar = decltype(std::declval<BuilderType>().appendChar(std::declval<
  */
 template <typename BuilderType>
 inline constexpr auto hasAppendChar = stdx::is_detected_exact_v<void, AppendChar, BuilderType>;
+}  // namespace
 
-/**
- * Encode user-provided string. Cache key delimiters seen in the user string are escaped with a
- * backslash.
- */
 template <class BuilderType>
-void encodeUserString(StringData s, BuilderType* builder) {
+void encodeUserString(std::string_view s, BuilderType* builder) {
     for (size_t i = 0; i < s.size(); ++i) {
         char c = s[i];
         switch (c) {
@@ -167,6 +140,10 @@ void encodeUserString(StringData s, BuilderType* builder) {
     }
 }
 
+template void encodeUserString<StringBuilder>(std::string_view, StringBuilder*);
+template void encodeUserString<BufBuilder>(std::string_view, BufBuilder*);
+
+namespace {
 /**
  * String encoding of MatchExpression::MatchType.
  */
@@ -472,7 +449,7 @@ void encodeRegexFlagsForMatch(RegexIterator first, RegexIterator last, StringBui
             tassert(11320906,
                     fmt::format("Invalid regex flag {}", flag),
                     RegexMatchExpression::kValidRegexFlags.count(flag));
-            encodeUserString(StringData(&flag, 1), keyBuilder);
+            encodeUserString(std::string_view(&flag, 1), keyBuilder);
         }
         *keyBuilder << kEncodeRegexFlagsSeparator;
     }
@@ -534,7 +511,7 @@ void encodeKeyForMatch(const MatchExpression* tree, StringBuilder* keyBuilder) {
             const auto* inMatch = static_cast<const InMatchExpression*>(tree);
             if (!inMatch->getRegexes().empty()) {
                 // Append '_re' to distinguish an $in without regexes from an $in with regexes.
-                encodeUserString("_re"_sd, keyBuilder);
+                encodeUserString("_re"sv, keyBuilder);
                 encodeRegexFlagsForMatch(inMatch->getRegexes(), keyBuilder);
             }
             break;
@@ -721,6 +698,7 @@ void encodeKeyForDistinct(const boost::optional<CanonicalDistinct>& distinct,
     }
     encodeUserString(distinct->getKey(), keyBuilder);
     *keyBuilder << distinct->isDistinctScanDirectionFlipped();
+    *keyBuilder << distinct->unwindsArrays();
     if (distinct->getSortRequirement()) {
         const auto& sortPattern = distinct->getSortRequirement().get();
         auto delimiter = "";
@@ -750,35 +728,6 @@ void encodeKeyForPipelineStage(DocumentSource* docSource,
     }
 }
 
-/**
- * Approximate the number of documents to be processed into a small, medium or large category. Best
- * plans for limit: 10 and limit: 1000 may be different. This allows us to cache different plans for
- * different cases without unbounded growth of plan cache for each skip and limit value.
- */
-char getLimitSkipCategory(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          boost::optional<int64_t> skip,
-                          boost::optional<int64_t> limit) {
-    if (limit.value_or(0) == 1 && !skip) {
-        return '1';
-    }
-
-    size_t limitSkipSum;
-    bool hasOverflowed = overflow::add(static_cast<size_t>(skip.value_or(0)),
-                                       static_cast<size_t>(limit.value_or(0)),
-                                       &limitSkipSum);
-    if (hasOverflowed) {
-        return 'l';
-    }
-    size_t planEvaluationMaxResults =
-        expCtx->getQueryKnobConfiguration().getPlanEvaluationMaxResultsForOp();
-    if (limitSkipSum < planEvaluationMaxResults) {
-        return 's';
-    } else if (limitSkipSum < 10 * planEvaluationMaxResults) {
-        return 'm';
-    } else {
-        return 'l';
-    }
-}
 
 void encodeLimitSkip(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
     boost::optional<int64_t> skip = cq.getFindCommandRequest().getSkip();
@@ -786,16 +735,9 @@ void encodeLimitSkip(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
     if (!limit && !skip) {
         return;
     }
-    if (cq.shouldParameterizeLimitSkip()) {
-        bufBuilder->appendChar('p');
-        bufBuilder->appendChar(skip ? 1 : 0);
-        bufBuilder->appendChar(limit ? 1 : 0);
-        bufBuilder->appendChar(getLimitSkipCategory(cq.getExpCtx(), skip, limit));
-    } else {
-        bufBuilder->appendChar('c');
-        bufBuilder->appendNum(skip.value_or(0));
-        bufBuilder->appendNum(limit.value_or(0));
-    }
+    bufBuilder->appendChar('c');
+    bufBuilder->appendNum(skip.value_or(0));
+    bufBuilder->appendNum(limit.value_or(0));
 }
 
 void encodeFindCommandRequest(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
@@ -1146,7 +1088,7 @@ private:
      */
     void encodeRhs(const PathMatchExpression* expr) {
         // Call getSerializedRightHandSide() with 'inMatchExprSortAndDedupElements' set to false.
-        SerializationOptions opts;
+        query_shape::SerializationOptions opts;
         opts.inMatchExprSortAndDedupElements = false;
 
         encodeHelper(expr->getSerializedRightHandSide(opts));
@@ -1285,39 +1227,11 @@ CanonicalQuery::QueryShapeString encodePipeline(
     BufBuilder bufBuilder(bufferSize);
 
     canonical_query_encoder::encodePipeline(expCtx, pipelineStages, &bufBuilder);
-    return base64::encode(StringData(bufBuilder.buf(), bufBuilder.len()));
+    return base64::encode(std::string_view(bufBuilder.buf(), bufBuilder.len()));
 }
 
-CanonicalQuery::QueryShapeString encodeClassic(const CanonicalQuery& cq) {
-    StringBuilder keyBuilder;
-    encodeKeyForMatch(cq.getPrimaryMatchExpression(), &keyBuilder);
-    encodeKeyForSort(cq.getFindCommandRequest().getSort(), &keyBuilder);
-    encodeKeyForProj(cq.getProj(), &keyBuilder);
-    encodeCollation(cq.getCollator(), &keyBuilder);
-    encodeKeyForDistinct(cq.getDistinct(),
-                         &keyBuilder,
-                         cq.getExpCtx()->isFeatureFlagShardFilteringDistinctScanEnabled());
-
-
-    // The apiStrict flag can cause the query to see different set of indexes. For example, all
-    // sparse indexes will be ignored with apiStrict is used.
-    const bool apiStrict =
-        cq.getOpCtx() && APIParameters::get(cq.getOpCtx()).getAPIStrict().value_or(false);
-    keyBuilder << (apiStrict ? "t" : "f");
-
-    // In the deferred get_executor, we cannot encode the engine choice because it is not known
-    // during query optimization. We only encode whether the subplanner is used, to avoid the case
-    // under 'o' below, where cache entries created during subplanning do not have meaningful
-    // works/reads values.
-    if (MONGO_unlikely(feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice.isEnabled())) {
-        if (cq.forSubPlanner()) {
-            keyBuilder << "s";  // Subplanning code path
-        } else {
-            keyBuilder << "r";  // Regular code path
-        }
-        return keyBuilder.str();
-    }
-
+void encodeLegacyGetExecutorSubplanningData(const CanonicalQuery& cq, StringBuilder* keyBuilder) {
+    tassert(12499601, "Expected keyBuilder to be non-null", keyBuilder);
     // Encode a flag with three possible values:
     // 1 ('c'): The cache entry is intended to use the classic code path completely. In this case
     //            the entry stores 'works.'
@@ -1343,14 +1257,54 @@ CanonicalQuery::QueryShapeString encodeClassic(const CanonicalQuery& cq) {
 
     if (cq.isSbeCompatible()) {
         if (cq.forSubPlanner()) {
-            keyBuilder << "o";  // Case 3: 'o' for "OR."
+            *keyBuilder << "o";  // Case 3: 'o' for "OR."
         } else {
-            keyBuilder << "s";  // Case 2: 's' for "SBE."
+            *keyBuilder << "s";  // Case 2: 's' for "SBE."
         }
     } else {
-        keyBuilder << "c";  // Case 1: 'c' for "classic."
+        *keyBuilder << "c";  // Case 1: 'c' for "classic."
     }
+}
 
+void encodeDeferredGetExecutorSubplanningData(const CanonicalQuery& cq, StringBuilder* keyBuilder) {
+    tassert(12499600, "Expected keyBuilder to be non-null", keyBuilder);
+    // In the deferred get_executor, we cannot encode the engine choice because it is not known
+    // during query optimization. We only encode whether the subplanner is used, to avoid the case
+    // where cache entries created during subplanning do not have meaningful works/reads values.
+    if (cq.forSubPlanner()) {
+        *keyBuilder << "s";  // Subplanning code path
+    } else {
+        *keyBuilder << "r";  // Regular code path
+    }
+}
+
+CanonicalQuery::QueryShapeString encodeClassic(const CanonicalQuery& cq) {
+    StringBuilder keyBuilder;
+    encodeKeyForMatch(cq.getPrimaryMatchExpression(), &keyBuilder);
+    encodeKeyForSort(cq.getFindCommandRequest().getSort(), &keyBuilder);
+    encodeKeyForProj(cq.getProj(), &keyBuilder);
+    encodeCollation(cq.getCollator(), &keyBuilder);
+    encodeKeyForDistinct(cq.getDistinct(),
+                         &keyBuilder,
+                         cq.getExpCtx()->isFeatureFlagShardFilteringDistinctScanEnabled());
+
+
+    // The apiStrict flag can cause the query to see different set of indexes. For example, all
+    // sparse indexes will be ignored with apiStrict is used.
+    const bool apiStrict =
+        cq.getOpCtx() && APIParameters::get(cq.getOpCtx()).getAPIStrict().value_or(false);
+    keyBuilder << (apiStrict ? "t" : "f");
+
+    // Encode the deferred engine selection feature flag so that cache entries cannot be shared when
+    // the flag is changed. This could lead to unpredictable scenarios.
+    const bool deferredGetExecutorEnabled = cq.getExpCtx()->getIfrContext()->getSavedFlagValue(
+        feature_flags::gFeatureFlagGetExecutorDeferredEngineChoice);
+    keyBuilder << (deferredGetExecutorEnabled ? "t" : "f");
+    if (deferredGetExecutorEnabled) {
+        encodeDeferredGetExecutorSubplanningData(cq, &keyBuilder);
+    } else {
+        encodeLegacyGetExecutorSubplanningData(cq, &keyBuilder);
+    }
     return keyBuilder.str();
 }
 
@@ -1407,7 +1361,7 @@ std::string encodeSBE(const CanonicalQuery& cq, const bool requiresSbeCompatibil
 
     encodePipeline(cq.getExpCtx(), cq.cqPipeline(), &bufBuilder);
 
-    return base64::encode(StringData(bufBuilder.buf(), bufBuilder.len()));
+    return base64::encode(std::string_view(bufBuilder.buf(), bufBuilder.len()));
 }
 
 CanonicalQuery::PlanCacheCommandKey encodeForPlanCacheCommand(const CanonicalQuery& cq) {
@@ -1448,10 +1402,25 @@ CanonicalQuery::PlanCacheCommandKey encodeForPlanCacheCommand(const Pipeline& pi
     return key;
 }
 
-uint32_t computeHash(StringData key) {
+uint32_t computeHash(std::string_view key) {
     size_t seed = 0;
     simpleStringDataComparator.hash_combine(seed, key);
     return seed;
+}
+
+CanonicalQuery::QueryShapeString encodeCanonicalQueryForJoin(const CanonicalQuery& cq) {
+    tassert(
+        12926102, "join plan cache key: access path must not have a sort", !cq.getSortPattern());
+    tassert(12926103,
+            "join plan cache key: access path must not have a collation",
+            cq.getCollator() == nullptr);
+    tassert(
+        12926104, "join plan cache key: access path must not have a distinct", !cq.getDistinct());
+
+    StringBuilder keyBuilder;
+    encodeKeyForMatch(cq.getPrimaryMatchExpression(), &keyBuilder);
+    encodeKeyForProj(cq.getProj(), &keyBuilder);
+    return keyBuilder.str();
 }
 }  // namespace canonical_query_encoder
 }  // namespace mongo

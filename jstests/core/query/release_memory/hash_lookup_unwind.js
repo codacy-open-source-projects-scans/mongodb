@@ -2,6 +2,7 @@
 + * Tests releaseMemory in hash lookup.
 + *
  * @tags: [
+ *   uses_explain,
  *   requires_fcv_82,
  *   # We modify the value of a query knob. setParameter is not persistent.
  *   does_not_support_stepdowns,
@@ -51,6 +52,20 @@ const sbeIncreasedSpillingInitialValue = getServerParameter(sbeIncreasedSpilling
 // HashLookup in SBE might use HashAgg. We want to control spilling. Disable increased spilling.
 setServerParameter(sbeIncreasedSpillingKnob, "never");
 
+// When the $project after $lookup-$unwind isn't pushed to SBE, the agg CursorStage wraps the SBE
+// plan and would otherwise drain it to EOF (and dispose it) before releaseMemory runs, leaving
+// nothing to spill. Force the DSCursor to read one doc at a time so the SBE exec stays alive.
+// TODO SERVER-127608 set parameters with try/finally to avoid leaking changed values on failure
+const dsCursorKnobs = [
+    "internalDocumentSourceCursorInitialBatchSize",
+    "internalDocumentSourceCursorBatchSizeBytes",
+];
+const dsCursorKnobValues = [];
+for (const knob of dsCursorKnobs) {
+    dsCursorKnobValues.push(getServerParameter(knob));
+    setServerParameter(knob, 1);
+}
+
 // 'locations' is used as the foreign collection for $lookup.
 const locations = db[jsTestName() + "_locations"];
 locations.drop();
@@ -82,7 +97,12 @@ assert.commandWorked(animals.insertMany(animasDocs));
 
 const pipeline1 = [
     {
-        $lookup: {from: locations.getName(), localField: "locationName", foreignField: "name", as: "location"},
+        $lookup: {
+            from: locations.getName(),
+            localField: "locationName",
+            foreignField: "name",
+            as: "location",
+        },
     },
     {$unwind: "$location"},
     {
@@ -97,7 +117,12 @@ const pipeline1 = [
 
 const pipeline2 = [
     {
-        $lookup: {from: locations.getName(), localField: "locationName", foreignField: "name", as: "location"},
+        $lookup: {
+            from: locations.getName(),
+            localField: "locationName",
+            foreignField: "name",
+            as: "location",
+        },
     },
     {$unwind: {path: "$location", preserveNullAndEmptyArrays: true}},
     {
@@ -112,7 +137,12 @@ const pipeline2 = [
 
 const pipeline3 = [
     {
-        $lookup: {from: locations.getName(), localField: "locationName", foreignField: "name", as: "location"},
+        $lookup: {
+            from: locations.getName(),
+            localField: "locationName",
+            foreignField: "name",
+            as: "location",
+        },
     },
     {$unwind: {path: "$location", includeArrayIndex: "index"}},
     {
@@ -151,7 +181,10 @@ for (let pipeline of [pipeline1, pipeline2, pipeline3]) {
             let initialSpillCount = getSpillCounter();
 
             // Retrieve the first batch without spilling.
-            const cursor = animals.aggregate(pipeline, {"allowDiskUse": true, cursor: {batchSize: 1}});
+            const cursor = animals.aggregate(pipeline, {
+                "allowDiskUse": true,
+                cursor: {batchSize: 1},
+            });
             const cursorId = cursor.getId();
 
             // Assert it did not spill during the first batch.
@@ -185,7 +218,10 @@ for (let pipeline of [pipeline1, pipeline2, pipeline3]) {
             let initialSpillCount = getSpillCounter();
 
             // Retrieve the first batch.
-            const cursor = animals.aggregate(pipeline, {"allowDiskUse": true, cursor: {batchSize: 1}});
+            const cursor = animals.aggregate(pipeline, {
+                "allowDiskUse": true,
+                cursor: {batchSize: 1},
+            });
             const cursorId = cursor.getId();
 
             // Assert it spilt during the first batch.
@@ -215,7 +251,10 @@ for (let pipeline of [pipeline1, pipeline2, pipeline3]) {
         jsTest.log.info(`Running releaseMemory with no disk space available`);
 
         runReleaseMemoryTestWithRetries(() => {
-            const cursor = animals.aggregate(pipeline, {"allowDiskUse": true, cursor: {batchSize: 1}});
+            const cursor = animals.aggregate(pipeline, {
+                "allowDiskUse": true,
+                cursor: {batchSize: 1},
+            });
             const cursorId = cursor.getId();
 
             // Release memory (i.e., spill)
@@ -224,7 +263,11 @@ for (let pipeline of [pipeline1, pipeline2, pipeline3]) {
             jsTest.log.info("Running releaseMemory: ", releaseMemoryCmd);
             const releaseMemoryRes = db.runCommand(releaseMemoryCmd);
             assert.commandWorked(releaseMemoryRes);
-            assertReleaseMemoryFailedWithCode(releaseMemoryRes, cursorId, ErrorCodes.OutOfDiskSpace);
+            assertReleaseMemoryFailedWithCode(
+                releaseMemoryRes,
+                cursorId,
+                ErrorCodes.OutOfDiskSpace,
+            );
             setAvailableDiskSpaceMode(db.getSiblingDB("admin"), "off");
 
             jsTest.log.info("Running getMore");
@@ -234,3 +277,6 @@ for (let pipeline of [pipeline1, pipeline2, pipeline3]) {
 }
 
 setServerParameter(sbeIncreasedSpillingKnob, sbeIncreasedSpillingInitialValue);
+for (let i = 0; i < dsCursorKnobs.length; i++) {
+    setServerParameter(dsCursorKnobs[i], dsCursorKnobValues[i]);
+}

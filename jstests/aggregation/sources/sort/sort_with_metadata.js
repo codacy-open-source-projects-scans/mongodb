@@ -1,6 +1,6 @@
 // Test that the $sort stage properly errors on invalid $meta.
 // This test was adjusted as we start to allow sorting by "searchScore".
-// @tags: [featureFlagRankFusionFull, requires_fcv_83]
+// @tags: [requires_fcv_90]
 
 const kUnavailableMetadataErrCode = 40218;
 let coll = db.sort_with_metadata;
@@ -12,13 +12,33 @@ assert.commandWorked(coll.insert({_id: 4, text: "cantaloupe", words: 1}));
 
 assert.commandWorked(coll.createIndex({text: "text"}));
 
+// '$_internalLimit' and '$_internalOutputSortKeyMetadata' are internal fields that should be
+// rejected when supplied externally.
+const kNotAllowedInUserRequest = 5491300;
 assert.throwsWithCode(
-    () => coll.aggregate([{$match: {$text: {$search: "apple banana"}}}, {$sort: {textScore: {$meta: "searchScore"}}}]),
+    () => coll.aggregate([{$sort: {words: 1, $_internalLimit: 2}}]),
+    kNotAllowedInUserRequest,
+);
+assert.throwsWithCode(
+    () => coll.aggregate([{$sort: {words: 1, $_internalOutputSortKeyMetadata: true}}]),
+    kNotAllowedInUserRequest,
+);
+
+assert.throwsWithCode(
+    () =>
+        coll.aggregate([
+            {$match: {$text: {$search: "apple banana"}}},
+            {$sort: {textScore: {$meta: "searchScore"}}},
+        ]),
     kUnavailableMetadataErrCode,
 );
 
 assert.throwsWithCode(
-    () => coll.aggregate([{$match: {$text: {$search: "apple banana"}}}, {$set: {textScore: {$meta: "searchScore"}}}]),
+    () =>
+        coll.aggregate([
+            {$match: {$text: {$search: "apple banana"}}},
+            {$set: {textScore: {$meta: "searchScore"}}},
+        ]),
     kUnavailableMetadataErrCode,
 );
 
@@ -50,7 +70,10 @@ assert.throwsWithCode(
 );
 
 assert.throws(() =>
-    coll.aggregate([{$match: {$text: {$search: "apple banana"}}}, {$sort: {textScore: {$meta: "unknown"}}}]),
+    coll.aggregate([
+        {$match: {$text: {$search: "apple banana"}}},
+        {$sort: {textScore: {$meta: "unknown"}}},
+    ]),
 );
 
 const results = [
@@ -62,11 +85,19 @@ const results = [
 assert.eq(
     results,
     coll
-        .aggregate([{$match: {$text: {$search: "apple banana"}}}, {$sort: {textScore: {$meta: "textScore"}}}])
+        .aggregate([
+            {$match: {$text: {$search: "apple banana"}}},
+            {$sort: {textScore: {$meta: "textScore"}}},
+        ])
         .toArray(),
 );
 
 assert.sameMembers(
     results,
-    coll.aggregate([{$match: {$text: {$search: "apple banana"}}}, {$sort: {textScore: {$meta: "randVal"}}}]).toArray(),
+    coll
+        .aggregate([
+            {$match: {$text: {$search: "apple banana"}}},
+            {$sort: {textScore: {$meta: "randVal"}}},
+        ])
+        .toArray(),
 );

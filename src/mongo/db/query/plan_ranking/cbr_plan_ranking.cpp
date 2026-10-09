@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/plan_ranking/cbr_plan_ranking.h"
 
@@ -36,8 +10,11 @@
 #include "mongo/db/query/compiler/ce/exact/exact_cardinality_impl.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator.h"
 #include "mongo/db/query/compiler/ce/sampling/sampling_estimator_impl.h"
+#include "mongo/db/query/compiler/optimizer/cost_based_ranker/estimates.h"
+#include "mongo/db/query/plan_ranking/plan_ranker_reason.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -98,8 +75,16 @@ bool isTriviallyEstimable(const CanonicalQuery& cq) {
 
 namespace plan_ranking {
 
-StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(PlannerData& pd) {
-    return rankPlans(pd.opCtx, *pd.cq, *pd.plannerParams, pd.yieldPolicy, pd.collections);
+StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(PlannerData& pd,
+                                                                RankingContext& rctx) {
+    return rankPlans(pd.opCtx,
+                     *pd.cq,
+                     *pd.plannerParams,
+                     pd.yieldPolicy,
+                     pd.collections,
+                     std::move(rctx.solutions),
+                     std::move(rctx.topLevelSampleFieldNames),
+                     rctx.hasRelevantMultikeyIndex);
 }
 
 StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
@@ -107,31 +92,20 @@ StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
     CanonicalQuery& query,
     QueryPlannerParams& plannerParams,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
-    const MultipleCollectionAccessor& collections) const {
+    const MultipleCollectionAccessor& collections,
+    QuerySolutionVector solutions,
+    ce::TopLevelSampleFields topLevelSampleFieldNames,
+    bool hasRelevantMultikeyIndex) const {
     using namespace cost_based_ranker;
 
+    size_t numSolutions = solutions.size();
+
+    // Make sure to use samplingCE when called from Mixed plan ranker.
+    QueryCBRCEModeEnum ceMode = plannerParams.planRanker == QueryPlanRankerEnum::kMixed
+        ? QueryCBRCEModeEnum::kSamplingCE
+        : query.getExpCtx()->getQueryKnobConfiguration().getCBRCEMode();
+
     const bool isTrivialQuery = isTriviallyEstimable(query);
-
-    StringSet topLevelSampleFieldNames;
-    bool hasRelevantMultikeyIndex = false;
-
-    // Populating the 'topLevelSampleFields' requires 2 steps:
-    //  1. Extract the fields of the relevant indexes from the plan() function by passing in
-    //  the pointer to 'topLevelSampleFieldNames' as an output parameter.
-    //  We do this also for trivially estimable queries, as the presence of relevant multikey
-    //  indices prevent us from switching to heuristicCE.
-    //  2. Extract the set of top level fields from the filter, sort and project
-    //  components of the CanonicalQuery. We do this only for CE methods which might use sampling.
-    auto statusWithMultiPlanSolns = QueryPlanner::plan(
-        query,
-        plannerParams,
-        topLevelSampleFieldNames,
-        isTrivialQuery ? boost::optional<bool&>(hasRelevantMultikeyIndex) : boost::none);
-    if (!statusWithMultiPlanSolns.isOK()) {
-        return statusWithMultiPlanSolns.getStatus().withContext(
-            str::stream() << "error processing query: " << query.toStringForErrorMsg()
-                          << " planner returned error");
-    }
 
     if (isTrivialQuery && !hasRelevantMultikeyIndex) {
         // For trivially estimable queries, heuristic CE is sufficient.
@@ -139,17 +113,13 @@ StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
         // We restrict this optimization to plans with no relevant multikey
         // indices, as we cannot estimate the number of keys a multikey index
         // scan would scan without sampling.
-        plannerParams.planRankerMode = QueryPlanRankerModeEnum::kHeuristicCE;
+        ceMode = QueryCBRCEModeEnum::kHeuristicCE;
     }
 
-    if (plannerParams.planRankerMode == QueryPlanRankerModeEnum::kAutomaticCE ||
-        plannerParams.planRankerMode == QueryPlanRankerModeEnum::kSamplingCE) {
-        auto meTopLevelFields =
-            ce::extractTopLevelFieldsFromMatchExpression(query.getPrimaryMatchExpression());
-        topLevelSampleFieldNames.merge(meTopLevelFields);
+    if (ceMode == QueryCBRCEModeEnum::kSamplingCE) {
+        topLevelSampleFieldNames.merge(
+            ce::extractTopLevelFieldsFromMatchExpression(query.getPrimaryMatchExpression()));
     }
-
-    size_t numSolutions = statusWithMultiPlanSolns.getValue().size();
 
     // Start timer for server status metrics
     auto tickSource = opCtx->getServiceContext()->getTickSource();
@@ -159,24 +129,12 @@ StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
     numPlansTotal.increment(numSolutions);
     invocationCount.increment();
 
-    if (numSolutions == 1 &&
-        (!query.getExplain() ||
-         // TODO(SERVER-118659): Remove this disjunction once we support costing count_scan
-         QueryPlannerAnalysis::isCountScan(statusWithMultiPlanSolns.getValue()[0].get()))) {
-        // TODO SERVER-115496. Make sure this short circuit logic is also taken to main plan_ranking
-        // so it applies everywhere. Only one solution, no need to rank.
-        std::vector<std::unique_ptr<QuerySolution>> solns;
-        solns.push_back(std::move(statusWithMultiPlanSolns.getValue()[0]));
-        return PlanRankingResult{.solutions = std::move(solns)};
-    }
-
     std::unique_ptr<ce::SamplingEstimator> samplingEstimator{nullptr};
     std::unique_ptr<ce::ExactCardinalityEstimator> exactCardinality{nullptr};
-    if (plannerParams.planRankerMode == QueryPlanRankerModeEnum::kExactCE) {
+    if (ceMode == QueryCBRCEModeEnum::kExactCE) {
         exactCardinality = std::make_unique<ce::ExactCardinalityImpl>(
             collections.getMainCollectionAcquisition(), query, opCtx);
-    } else if (plannerParams.planRankerMode == QueryPlanRankerModeEnum::kAutomaticCE ||
-               plannerParams.planRankerMode == QueryPlanRankerModeEnum::kSamplingCE) {
+    } else if (ceMode == QueryCBRCEModeEnum::kSamplingCE) {
         samplingEstimator = ce::SamplingEstimatorImpl::makeDefaultSamplingEstimator(
             query,
             CardinalityEstimate{
@@ -191,10 +149,7 @@ StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
         // If we do not have any fields that we want to sample then we just include all the
         // fields in the sample. This can occur for primary match expressions which are
         // not trivially estimable yet have no top-level fields (eg. $geoNear or $expr).
-        samplingEstimator->generateSample(
-            topLevelSampleFieldNames.empty()
-                ? ce::ProjectionParams{ce::NoProjection{}}
-                : ce::TopLevelFieldsProjection{std::move(topLevelSampleFieldNames)});
+        samplingEstimator->generateSample(std::move(topLevelSampleFieldNames).toProjectionParams());
 
         auto samplingDurationMicros =
             tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startSamplingTicks);
@@ -206,17 +161,50 @@ StatusWith<PlanRankingResult> CBRPlanRankingStrategy::rankPlans(
         CurOp::get(opCtx)->debug().getAdditiveMetrics().nDocsSampled = static_cast<uint64_t>(n);
     }
 
-    auto planRankingResult =
-        QueryPlanner::planWithCostBasedRanking(plannerParams,
-                                               samplingEstimator.get(),
-                                               exactCardinality.get(),
-                                               std::move(statusWithMultiPlanSolns),
-                                               query.getExplain().has_value());
+    auto planRankingResult = QueryPlanner::planWithCostBasedRanking(plannerParams,
+                                                                    samplingEstimator.get(),
+                                                                    exactCardinality.get(),
+                                                                    std::move(solutions),
+                                                                    query,
+                                                                    ceMode);
 
     // Calculate duration for server status metrics
     auto durationMicros = tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startTicks);
     microsHistogram.increment(durationCount<Microseconds>(durationMicros));
     microsTotal.increment(durationMicros);
+
+    // planWithCostBasedRanking() sets planSelectionStrategy from whether CBR chose a winner among
+    // competing candidates; a sole candidate is kSinglePlan, as there was nothing to rank. Only the
+    // rankerChoice.reason is recorded here.
+    if (planRankingResult.isOK()) {
+        auto& result = planRankingResult.getValue();
+        if (result.needsWorksMeasuredForPlanCache) {
+            // CBR chose a single winning plan.
+            // When CBR choice was prescribed by configuration (planRanker == kCostBased) record
+            // that fact as rankerChoice.reason = kQueryPlanRankerKnob.
+            // When running as the inner engine of a mixed strategy (planRanker == kMixed, called
+            // via getBestCBRPlan) the config reason resolves to none and the calling strategy
+            // records the reason for its own decision.
+            if (result.maybeExplainData) {
+                const auto reason = plannerParams.getPlanRankerReasonFromConfig();
+                if (reason.has_value()) {
+                    result.maybeExplainData->planRankerReason = reason;
+                }
+            }
+        } else if (result.solutions.size() > 1) {
+            // CBR could not estimate all plans (a node rejected with UnsupportedCbrNode) and
+            // returned multiple solutions to be ranked by the multi-planner, so MP - not CBR -
+            // decides the winner.
+            // All three callers of this strategy - the strict costBased knob, and the two mixed
+            // strategies (NoMultiplanningResults, EstimateRankingEffort) calling via
+            // getBestCBRPlan - report the same reason for this outcome, so this inner site
+            // records it unconditionally; the callers leave it untouched when the multi-planner
+            // finishes ranking downstream.
+            if (result.maybeExplainData) {
+                result.maybeExplainData->planRankerReason = PlanRankerReason::kCBRInestimableNode;
+            }
+        }
+    }
 
     return planRankingResult;
 }

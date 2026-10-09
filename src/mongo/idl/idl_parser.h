@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/data_range.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -39,7 +12,6 @@
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
@@ -51,6 +23,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -76,20 +49,21 @@
 // clang-format off
 // jq '.[] | select((.loc | startswith("src/mongo/idl/idl_parser.h")) and (.display_name | startswith("IDLParserContext") | not)) | .used_from |= map((.locs |= map(select(test("^bazel-out/.*_gen\\.(h|cpp):") | not))) | select(.locs != [] and .mod != "core.idl")) | select(.used_from != [])' merged_decls.json
 // clang-format on
-MONGO_MOD_PUBLIC_FOR_TECHNICAL_REASONS;
+[[MONGO_MOD_PUBLIC_FOR_TECHNICAL_REASONS]];
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace idl {
 
 struct FieldMetadata {
-    StringData name;
+    std::string_view name;
     bool required;
 };
 
 template <const auto& fieldMeta>
-consteval std::array<StringData, fieldMeta.size()> extractNames() {
-    std::array<StringData, fieldMeta.size()> out;
+consteval std::array<std::string_view, fieldMeta.size()> extractNames() {
+    std::array<std::string_view, fieldMeta.size()> out;
     for (size_t i = 0; i != fieldMeta.size(); ++i)
         out[i] = fieldMeta[i].name;
     return out;
@@ -115,7 +89,7 @@ template <typename T>
 constexpr bool hasBSONSerialize = stdx::is_detected_v<HasBSONSerializeOp, T>;
 
 template <typename T>
-void idlSerialize(BSONObjBuilder* builder, StringData fieldName, T arg) {
+void idlSerialize(BSONObjBuilder* builder, std::string_view fieldName, T arg) {
     if constexpr (hasBSONSerialize<decltype(arg)>) {
         BSONObjBuilder subObj(builder->subobjStart(fieldName));
         arg.serialize(&subObj);
@@ -125,7 +99,7 @@ void idlSerialize(BSONObjBuilder* builder, StringData fieldName, T arg) {
 }
 
 template <typename T>
-void idlSerialize(BSONObjBuilder* builder, StringData fieldName, std::vector<T> arg) {
+void idlSerialize(BSONObjBuilder* builder, std::string_view fieldName, std::vector<T> arg) {
     BSONArrayBuilder arrayBuilder(builder->subarrayStart(fieldName));
     for (const auto& item : arg) {
         if constexpr (hasBSONSerialize<decltype(item)>) {
@@ -195,7 +169,7 @@ inline auto idlPreparsedValue(std::type_identity<multiversion::FeatureCompatibil
  * `type_identity<T>` argument.
  */
 template <typename T, typename... A>
-MONGO_MOD_NEEDS_REPLACEMENT T preparsedValue(A&&... args) {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] T preparsedValue(A&&... args) {
     using preparsed_value_adl_barrier::idlPreparsedValue;
     return idlPreparsedValue(std::type_identity<T>{}, std::forward<A>(args)...);
 }
@@ -250,12 +224,12 @@ void handleMissingRequiredFields(const auto& hasMembers,
         if (hasMembers.hasAllRequired())
             return;
         std::string msg = "Missing required fields: ";
-        StringData sep;
+        std::string_view sep;
         size_t reqIdx = 0;
         for (size_t i = 0; i < meta.size(); ++i) {
             auto&& [name, required] = meta[i];
             if (required && !hasMembers.get(reqIdx++)) {
-                msg += std::exchange(sep, ", "_sd);
+                msg += std::exchange(sep, ", "sv);
                 msg += name;
             }
         }
@@ -351,14 +325,14 @@ struct BasicOrderOps<boost::optional<T>> {
  * TODO(SERVER-122446): Split this class into the parts that should be public and the parts that are
  * only for internal use by generated code.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT IDLParserContext {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] IDLParserContext {
     IDLParserContext(const IDLParserContext&) = delete;
     IDLParserContext& operator=(const IDLParserContext&) = delete;
 
     template <typename T>
     friend void throwComparisonError(IDLParserContext& ctxt,
-                                     StringData fieldName,
-                                     StringData op,
+                                     std::string_view fieldName,
+                                     std::string_view op,
                                      T actualValue,
                                      T expectedValue);
 
@@ -366,17 +340,17 @@ public:
     /**
      * String constants for well-known IDL fields.
      */
-    static constexpr auto kOpMsgDollarDB = "$db"_sd;
-    static constexpr auto kOpMsgDollarDBDefault = "admin"_sd;
-    static constexpr auto kTenantIdField = "$tenant"_sd;
+    static constexpr auto kOpMsgDollarDB = "$db"sv;
+    static constexpr auto kOpMsgDollarDBDefault = "admin"sv;
+    static constexpr auto kTenantIdField = "$tenant"sv;
 
-    explicit IDLParserContext(StringData fieldName)
+    explicit IDLParserContext(std::string_view fieldName)
         : IDLParserContext{fieldName,
                            boost::optional<auth::ValidatedTenancyScope>{boost::none},
                            boost::optional<TenantId>{boost::none},
                            SerializationContext::stateDefault()} {}
 
-    IDLParserContext(StringData fieldName,
+    IDLParserContext(std::string_view fieldName,
                      const boost::optional<auth::ValidatedTenancyScope>& vts,
                      boost::optional<TenantId> tenantId,
                      const SerializationContext& serializationContext)
@@ -386,14 +360,14 @@ public:
           _predecessor(nullptr),
           _validatedTenancyScope(vts) {}
 
-    IDLParserContext(StringData fieldName, const IDLParserContext* predecessor)
+    IDLParserContext(std::string_view fieldName, const IDLParserContext* predecessor)
         : IDLParserContext(fieldName,
                            predecessor,
                            boost::optional<auth::ValidatedTenancyScope>{boost::none},
                            SerializationContext::stateDefault(),
                            boost::optional<TenantId>{boost::none}) {}
 
-    IDLParserContext(StringData fieldName,
+    IDLParserContext(std::string_view fieldName,
                      const IDLParserContext* predecessor,
                      const boost::optional<auth::ValidatedTenancyScope>& vts,
                      const SerializationContext& serializationContext,
@@ -457,28 +431,28 @@ public:
     /**
      * Throw an error message about the BSONElement being a duplicate field.
      */
-    MONGO_COMPILER_NORETURN void throwDuplicateField(StringData fieldName) const;
+    MONGO_COMPILER_NORETURN void throwDuplicateField(std::string_view fieldName) const;
 
     /**
      * Throw an error message about the required field missing from the document.
      */
-    MONGO_COMPILER_NORETURN void throwMissingField(StringData fieldName) const;
+    MONGO_COMPILER_NORETURN void throwMissingField(std::string_view fieldName) const;
 
     /**
      * Throw an error message about an unknown field in a document.
      */
-    MONGO_COMPILER_NORETURN void throwUnknownField(StringData fieldName) const;
+    MONGO_COMPILER_NORETURN void throwUnknownField(std::string_view fieldName) const;
 
     /**
      * Throw an error message about the array field name not being the next number in the sequence.
      */
-    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(StringData actualValue,
-                                                                  StringData expectedValue) const;
+    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(
+        std::string_view actualValue, std::string_view expectedValue) const;
 
     /**
      * Throw an error message about an unrecognized enum value.
      */
-    MONGO_COMPILER_NORETURN void throwBadEnumValue(StringData enumValue) const;
+    MONGO_COMPILER_NORETURN void throwBadEnumValue(std::string_view enumValue) const;
     MONGO_COMPILER_NORETURN void throwBadEnumValue(int enumValue) const;
 
     /**
@@ -491,14 +465,14 @@ public:
      * Check that the collection name in 'element' is valid. Throws an exception if not valid.
      * Returns the collection name otherwise.
      */
-    static StringData checkAndAssertCollectionName(const BSONElement& element,
-                                                   bool allowGlobalCollectionName);
+    static std::string_view checkAndAssertCollectionName(const BSONElement& element,
+                                                         bool allowGlobalCollectionName);
 
     /**
      * Check that the collection name or UUID in 'element' is valid. Throws an exception if not
      * valid. Returns either the collection name or UUID otherwise.
      */
-    static std::variant<UUID, StringData> checkAndAssertCollectionNameOrUUID(
+    static std::variant<UUID, std::string_view> checkAndAssertCollectionNameOrUUID(
         const BSONElement& element);
 
     const boost::optional<TenantId>& getTenantId() const;
@@ -517,7 +491,7 @@ private:
      * Return a dot seperated path to the specified field. For instance, if the code is parsing a
      * grandchild field that has an error, this will return "grandparent.parent.child".
      */
-    std::string getElementPath(StringData fieldName) const;
+    std::string getElementPath(std::string_view fieldName) const;
 
     /**
      * See comment on checkAndAssertType.
@@ -547,7 +521,7 @@ private:
     const SerializationContext _serializationContext;
 
     // Name of the current field that is being parsed.
-    const StringData _currentField;
+    const std::string_view _currentField;
 
     const boost::optional<TenantId> _tenantId;
 
@@ -563,7 +537,7 @@ private:
  * This class is used to record information about deserialization which a caller can later use to
  * perform extra parsing validation.
  */
-class MONGO_MOD_PUBLIC DeserializationContext {
+class [[MONGO_MOD_PUBLIC]] DeserializationContext {
 public:
     /**
      * Marks that an unstable struct field was parsed.
@@ -571,7 +545,7 @@ public:
      * This does not perform any validation whatsoever, including validating that this field is
      * unstable or that it had already been marked present.
      */
-    void markUnstableFieldPresent(StringData unstableFieldName) {
+    void markUnstableFieldPresent(std::string_view unstableFieldName) {
         _unstableField = unstableFieldName;
     }
 
@@ -588,40 +562,42 @@ public:
     }
 
 private:
-    boost::optional<StringData> _unstableField;
+    boost::optional<std::string_view> _unstableField;
 };
-
-/**
- * Throw an error when BSON validation fails during parse.
- */
-template <typename T>
-void throwComparisonError(
-    IDLParserContext& ctxt, StringData fieldName, StringData op, T actualValue, T expectedValue) {
-    std::string path = ctxt.getElementPath(fieldName);
-    throwComparisonError(path, op, actualValue, expectedValue);
-}
 
 /**
  * Throw an error when a user calls a setter and it fails the comparison.
  */
 template <typename T>
-MONGO_MOD_NEEDS_REPLACEMENT void throwComparisonError(StringData fieldName,
-                                                      StringData op,
-                                                      T actualValue,
-                                                      T expectedValue) {
+[[MONGO_MOD_NEEDS_REPLACEMENT]] void throwComparisonError(std::string_view fieldName,
+                                                          std::string_view op,
+                                                          T actualValue,
+                                                          T expectedValue) {
     uasserted(ErrorCodes::BadValue,
               str::stream() << "BSON field '" << fieldName << "' value must be " << op << " "
                             << expectedValue << ", actual value '" << actualValue << "'");
 }
 
+/**
+ * Throw an error when BSON validation fails during parse.
+ */
+template <typename T>
+void throwComparisonError(IDLParserContext& ctxt,
+                          std::string_view fieldName,
+                          std::string_view op,
+                          T actualValue,
+                          T expectedValue) {
+    std::string path = ctxt.getElementPath(fieldName);
+    throwComparisonError(path, op, actualValue, expectedValue);
+}
 
 /**
  * Transform a vector of input type to a vector of output type.
  *
  * Used by the IDL generated code to transform between vectors of view, and non-view types.
  */
-std::vector<StringData> transformVector(const std::vector<std::string>& input);
-std::vector<std::string> transformVector(const std::vector<StringData>& input);
+std::vector<std::string_view> transformVector(const std::vector<std::string>& input);
+std::vector<std::string> transformVector(const std::vector<std::string_view>& input);
 std::vector<ConstDataRange> transformVector(const std::vector<std::vector<std::uint8_t>>& input);
 std::vector<std::vector<std::uint8_t>> transformVector(const std::vector<ConstDataRange>& input);
 
@@ -629,42 +605,12 @@ std::vector<std::vector<std::uint8_t>> transformVector(const std::vector<ConstDa
  * Generated enums specialize this with their element count.
  */
 template <typename E>
-MONGO_MOD_PUBLIC constexpr inline size_t idlEnumCount = 0;
+[[MONGO_MOD_PUBLIC]] constexpr inline size_t idlEnumCount = 0;
 
 namespace idl {
-/**
- * Parse an IDL-defined command from a command request document.
- * If the request includes apiStrict: true along with any unstable fields, an exception will be
- * thrown.
- */
-template <typename T>
-MONGO_MOD_PUBLIC T parseCommandDocument(const BSONObj& cmdObj, const IDLParserContext& ctx) {
-    DeserializationContext dctx;
-    auto cmd = T::parse(cmdObj, ctx, &dctx);
-    if (cmd.getGenericArguments().getApiStrict().value_or(false)) {
-        dctx.validateApiStrict();
-    }
-    return cmd;
-}
-
-/**
- * Parse an IDL-defined command from a command request.
- * If the request includes apiStrict: true along with any unstable fields, an exception will be
- * thrown.
- */
-template <typename T>
-MONGO_MOD_PUBLIC T parseCommandRequest(const OpMsgRequest& req, const IDLParserContext& ctx) {
-    DeserializationContext dctx;
-    auto cmd = T::parse(req, ctx, &dctx);
-    if (cmd.getGenericArguments().getApiStrict().value_or(false)) {
-        dctx.validateApiStrict();
-    }
-    return cmd;
-}
-
 template <typename E>
 concept EnumWithStringSerializer = requires(E e) {
-    { idlSerialize(e) } -> std::same_as<StringData>;
+    { idlSerialize(e) } -> std::same_as<std::string_view>;
 };
 
 template <typename E>
@@ -673,9 +619,10 @@ concept EnumWithIntSerializer = requires(E e) {
 };
 
 template <typename E>
-concept EnumWithStringDeserializer = requires(E e, StringData sv, const IDLParserContext& ctxt) {
-    { idlDeserialize(e, sv, ctxt) } -> std::same_as<void>;
-};
+concept EnumWithStringDeserializer =
+    requires(E e, std::string_view sv, const IDLParserContext& ctxt) {
+        { idlDeserialize(e, sv, ctxt) } -> std::same_as<void>;
+    };
 
 template <typename E>
 concept EnumWithIntDeserializer = requires(E e, std::int32_t i, const IDLParserContext& ctxt) {
@@ -686,7 +633,7 @@ concept EnumWithIntDeserializer = requires(E e, std::int32_t i, const IDLParserC
  * Serialize an IDL-defined enum of type "string".
  */
 template <EnumWithStringSerializer E>
-MONGO_MOD_PUBLIC StringData serialize(E en) {
+[[MONGO_MOD_PUBLIC]] std::string_view serialize(E en) {
     return idlSerialize(en);
 }
 
@@ -694,7 +641,7 @@ MONGO_MOD_PUBLIC StringData serialize(E en) {
  * Serialize an IDL-defined enum of type "int".
  */
 template <EnumWithIntSerializer E>
-MONGO_MOD_PUBLIC std::int32_t serialize(E en) {
+[[MONGO_MOD_PUBLIC]] std::int32_t serialize(E en) {
     return idlSerialize(en);
 }
 
@@ -703,9 +650,9 @@ MONGO_MOD_PUBLIC std::int32_t serialize(E en) {
  * The default IDLParserContext is created with the type name of the enum as `fieldName`.
  */
 template <EnumWithStringDeserializer E>
-MONGO_MOD_PUBLIC E
-deserialize(StringData sd,
-            const IDLParserContext& ctxt = IDLParserContext(idlGetDefaultParserFieldName(E{}))) {
+[[MONGO_MOD_PUBLIC]] E deserialize(
+    std::string_view sd,
+    const IDLParserContext& ctxt = IDLParserContext(idlGetDefaultParserFieldName(E{}))) {
     E ret;
     idlDeserialize(ret, sd, ctxt);
     return ret;
@@ -716,9 +663,9 @@ deserialize(StringData sd,
  * The default IDLParserContext is created with the type name of the enum as `fieldName`.
  */
 template <EnumWithIntDeserializer E>
-MONGO_MOD_PUBLIC E
-deserialize(std::int32_t i,
-            const IDLParserContext& ctxt = IDLParserContext(idlGetDefaultParserFieldName(E{}))) {
+[[MONGO_MOD_PUBLIC]] E deserialize(
+    std::int32_t i,
+    const IDLParserContext& ctxt = IDLParserContext(idlGetDefaultParserFieldName(E{}))) {
     E ret;
     idlDeserialize(ret, i, ctxt);
     return ret;

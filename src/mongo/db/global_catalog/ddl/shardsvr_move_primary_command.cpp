@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -49,7 +23,6 @@
 #include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/topology/sharding_state.h"
 #include "mongo/util/assert_util.h"
@@ -102,25 +75,22 @@ public:
                 // The Operation FCV is currently propagated only for DDL operations,
                 // which cannot be nested. Therefore, the VersionContext shouldn't have an OFCV yet.
                 invariant(!VersionContext::getDecoration(opCtx).hasOperationFCV());
-                const auto authoritativeMetadataAccessLevel =
-                    sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
-                        VersionContext::getDecoration(opCtx), fcvRegion->acquireFCVSnapshot());
 
                 auto shardRegistry = Grid::get(opCtx)->shardRegistry();
                 // Ensure that the shard information is up-to-date as possible to catch the case
                 // where a shard with the same name, but with a different host, has been
                 // removed/re-added.
                 shardRegistry->reload(opCtx);
-                const auto toShard = uassertStatusOKWithContext(
-                    shardRegistry->getShard(opCtx, toShardId),
+                const auto resolvedToShardId = uassertStatusOKWithContext(
+                    shardRegistry->resolveShardId(
+                        opCtx, toShardId, true /* allowNonShardIdIdentifiers */),
                     fmt::format("requested primary shard {} does not exist", toShardId.toString()));
 
                 auto coordinatorDoc = [&] {
                     MovePrimaryCoordinatorDocument doc;
                     doc.setShardingCoordinatorMetadata(
                         {{dbNss, CoordinatorTypeEnum::kMovePrimary}});
-                    doc.setToShardId(toShard->getId());
-                    doc.setAuthoritativeMetadataAccessLevel(authoritativeMetadataAccessLevel);
+                    doc.setToShardId(resolvedToShardId);
                     return doc.toBSON();
                 }();
 

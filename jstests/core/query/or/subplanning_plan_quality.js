@@ -6,6 +6,7 @@
  * for queries on clustered collections.
  *
  * @tags: [
+ *   uses_explain,
  *   # Explain details will be different on sharded collections, and this test is focused on the
  *   # quality of the plan chosen, not the explain output.
  *   assumes_against_mongod_not_mongos,
@@ -20,7 +21,7 @@
  * ]
  */
 import {getPlanStages, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
-import {getPlanRankerMode} from "jstests/libs/query/cbr_utils.js";
+import {getPlanRanker} from "jstests/libs/query/cbr_utils.js";
 
 // Ensure that subplanning is enabled.
 if (
@@ -68,26 +69,32 @@ function indexesUsedByFindQuery(coll, query) {
     const indexesUsed = indexesUsedByFindQuery(coll, q);
     assert(
         indexesUsed.includes("a_1"),
-        "Expected index 'a_1' to be used in the winning plan, but it was not. Indexes used: " + tojson(indexesUsed),
+        "Expected index 'a_1' to be used in the winning plan, but it was not. Indexes used: " +
+            tojson(indexesUsed),
     );
     assert(
         indexesUsed.includes("b_1"),
-        "Expected index 'b_1' to be used in the winning plan, but it was not. Indexes used: " + tojson(indexesUsed),
+        "Expected index 'b_1' to be used in the winning plan, but it was not. Indexes used: " +
+            tojson(indexesUsed),
     );
 
     // Skip the subplanning-disabled test under CBR, because CBR does not suffer from the branch
     // bias issue.
-    if (getPlanRankerMode(db) === "multiPlanning") {
+    if (getPlanRanker(db) === "multiPlanning") {
         // Temporarily disable subplanning and show that the winning plan misses the ideal index "b"
         // on the second branch.
         try {
-            assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: false}));
+            assert.commandWorked(
+                db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: false}),
+            );
             assert(
                 !indexesUsedByFindQuery(coll, q).includes("b_1"),
                 "Without subplanning, we do not expect index 'b_1' to be used in the winning plan, due to planner limitations.",
             );
         } finally {
-            assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: true}));
+            assert.commandWorked(
+                db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: true}),
+            );
         }
     }
 }
@@ -139,17 +146,22 @@ function indexesUsedByFindQuery(coll, query) {
     }
     assert(
         indexesUsed.includes("j_1"),
-        "Expected index 'j_1' to be used in the winning plan, but it was not. Indexes used: " + indexesUsed.join(", "),
+        "Expected index 'j_1' to be used in the winning plan, but it was not. Indexes used: " +
+            indexesUsed.join(", "),
     );
 
     // Temporarily disable subplanning and show that the winning plan misses the ideal index "j".
     try {
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: false}));
+        assert.commandWorked(
+            db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: false}),
+        );
         assert(
             !indexesUsedByFindQuery(coll, q).includes("j_1"),
             "Without subplanning, we do not expect index 'j_1' to be used in the winning plan, due to planner limitations.",
         );
     } finally {
-        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: true}));
+        assert.commandWorked(
+            db.adminCommand({setParameter: 1, internalQueryPlanOrChildrenIndependently: true}),
+        );
     }
 }

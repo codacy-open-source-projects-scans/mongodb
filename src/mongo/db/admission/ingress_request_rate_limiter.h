@@ -1,58 +1,53 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/db/admission/rate_limiter.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/periodic_runner.h"
 
-#include <cstddef>
 #include <cstdint>
+#include <string_view>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
+namespace admission {
 
-class MONGO_MOD_PUBLIC IngressRequestRateLimiter {
+class [[MONGO_MOD_PUBLIC]] IngressRequestRateLimiter {
 public:
+    static constexpr std::string_view kRateLimiterName = "ingressRequestRateLimiter";
+
     IngressRequestRateLimiter();
     /**
      * Returns the reference to IngressRequestRateLimiter associated with the operation's service
      * context.
      */
-    static IngressRequestRateLimiter& get(ServiceContext* opCtx);
+    static IngressRequestRateLimiter& get(ServiceContext* svcCtx);
 
     /**
-     * Attempt to receive admission into the system. If the current rate of request admissions has
-     * exceeded the configured rate limit and consumed the burst size, the operation will be
-     * rejected with an error in the SystemOverloaded category.
+     * Attempts to admit a request into the system. Returns false if the rate limit and
+     * burst capacity are exceeded AND the queue is at capacity (if configured).
+     *
+     * If an admission is queued, a DeferredToken is stored on a client decoration which will be
+     * resolved later in the request pipeline.
      */
-    Status admitRequest(Client* client);
+    bool admitRequest(Client* client);
+
+    /**
+     * Returns the canonical rejection Status that `admitRequest` returns when the rate limit is
+     * exceeded. Exposed so that response-bytes builders and unit tests can reference the same
+     * Status without duplicating its error code or message string.
+     */
+    static const Status& rejectionStatus();
+
+    /**
+     * Waits for admission to be granted. If there is no deferred token then this is a no-op,
+     * otherwise it resolves the deferred token.
+     */
+    static Status waitForAdmission(OperationContext* opCtx);
 
     /**
      * Adjusts the refresh rate and burst capacity of the rate limiter.
@@ -60,16 +55,28 @@ public:
     void updateRateParameters(double refreshRatePerSec, double burstCapacitySecs);
 
     /**
+     * Sets the maximum number of requests that may be queued waiting for a token.
+     */
+    void updateMaxQueueDepth(std::int64_t maxQueueDepth);
+
+    /**
      * Called automatically when the value of the server parameter
      * ingressRequestAdmissionRatePerSec changes value.
      */
-    MONGO_MOD_PRIVATE static Status onUpdateAdmissionRatePerSec(std::int32_t refreshRatePerSec);
+    [[MONGO_MOD_PRIVATE]] static Status onUpdateAdmissionRatePerSec(std::int32_t refreshRatePerSec);
 
     /**
      * Called automatically when the value of the server parameter
      * ingressRequestAdmissionBurstCapacitySecs changes value.
      */
-    MONGO_MOD_PRIVATE static Status onUpdateAdmissionBurstCapacitySecs(double burstCapacitySecs);
+    [[MONGO_MOD_PRIVATE]] static Status onUpdateAdmissionBurstCapacitySecs(
+        double burstCapacitySecs);
+
+    /**
+     * Called automatically when the value of the server parameter
+     * ingressRequestAdmissionMaxQueueDepth changes value.
+     */
+    [[MONGO_MOD_PRIVATE]] static Status onUpdateAdmissionMaxQueueDepth(std::int64_t maxQueueDepth);
 
     /**
      * Reports the ingress admission rate limiter metrics.
@@ -77,17 +84,26 @@ public:
     void appendStats(BSONObjBuilder* bob) const;
 
     /**
-     * Returns true if the client's application or driver name matches the
-     * ingressRequestRateLimiterApplicationExemptions list. This is only for testing, but the
-     * module linter does not like a _forTest function being called from outside of the module.
-     *
-     * TODO(SERVER-114130): Remove this function once failpoint routes through regular rate limiter
-     * pathway.
+     * Starts the periodic job that samples this rate limiter's available-token gauge and pushes it
+     * to the installed metrics recorder. Intended to be called once during OTel metrics
+     * installation, after the ServiceContext's PeriodicRunner is available.
      */
-    static bool isAppNameExempted(Client* client);
+    void installOtelMetrics(ServiceContext* svcCtx);
+
+    /** Clears any pending deferred admission token stored on the client. */
+    static void clearDeferredAdmissionToken(Client* client);
+    /** Test-only helper to seed a pending DeferredToken on a client. */
+    static void setDeferredAdmissionToken_forTest(Client* client, RateLimiter::DeferredToken token);
+    /** Test-only helper to check if a client has a deferred admission token. */
+    static bool hasDeferredAdmissionToken_forTest(Client* client);
 
 private:
-    admission::RateLimiter _rateLimiter;
+    RateLimiter _rateLimiter;
+
+    // Owns the periodic available-token sampling job. Declared last so it is destroyed (and the job
+    // stopped) before `_rateLimiter` and its recorder, which the job touches, are torn down.
+    PeriodicRunner::JobAnchor _metricsSamplingJob;
 };
 
+}  // namespace admission
 }  // namespace mongo

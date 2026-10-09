@@ -1,37 +1,12 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/query/compiler/metadata/path_arrayness.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/shard_role/shard_catalog/collection.h"
@@ -41,6 +16,7 @@
 #include "mongo/util/uuid.h"
 
 #include <cstdint>
+#include <string_view>
 
 namespace mongo {
 
@@ -55,7 +31,7 @@ namespace mongo {
  */
 class RequiresCollectionStage : public PlanStage {
 public:
-    RequiresCollectionStage(const char* stageType,
+    RequiresCollectionStage(std::string_view stageType,
                             ExpressionContext* expCtx,
                             CollectionAcquisition coll)
         : PlanStage(stageType, expCtx),
@@ -63,7 +39,10 @@ public:
           _collectionPtr(&coll.getCollectionPtr()),
           _collectionUUID(coll.getCollectionPtr()->uuid()),
           _catalogEpoch(getCatalogEpoch()),
-          _nss(coll.getCollectionPtr()->ns()) {}
+          _nss(coll.getCollectionPtr()->ns()),
+          _pathArraynessChecker{.nonArrayPaths =
+                                    expCtx->nonArrayPathsForNss(coll.getCollectionPtr()->ns()),
+                                .prevEpoch = boost::none} {}
 
     ~RequiresCollectionStage() override = default;
 
@@ -110,12 +89,14 @@ private:
     // TODO SERVER-31695: The namespace will no longer be needed once queries can survive collection
     // renames.
     const NamespaceString _nss;
+
+    PathArraynessChecker _pathArraynessChecker;
 };
 
 // Type alias for use by PlanStages that write to a Collection.
 class RequiresWritableCollectionStage : public RequiresCollectionStage {
 public:
-    RequiresWritableCollectionStage(const char* stageType,
+    RequiresWritableCollectionStage(std::string_view stageType,
                                     ExpressionContext* expCtx,
                                     CollectionAcquisition coll)
         : RequiresCollectionStage(stageType, expCtx, coll), _collectionAcquisition(coll) {}

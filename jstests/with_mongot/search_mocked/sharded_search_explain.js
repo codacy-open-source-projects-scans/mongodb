@@ -1,7 +1,9 @@
 /**
  * Sharding tests for using "explain" with the $search aggregation stage for queries that do not
  * contain meaningful executionStats. This tests "queryPlanner" verbosity (no execution stats).
- *
+ * TODO SERVER-131069: Mocked-only coverage not in e2e: per-shard mongot
+ * commands, planShardedSearch metadata, primary-vs-secondary routing,
+ * injected explain payloads.
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
@@ -35,13 +37,18 @@ const st = stWithMock.st;
 
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
-if (checkSbeRestrictedOrFullyEnabled(testDB) && FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe")) {
+if (
+    checkSbeRestrictedOrFullyEnabled(testDB) &&
+    FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe")
+) {
     jsTestLog("Skipping the test because it only applies to $search in classic engine.");
     stWithMock.stop();
     quit();
 }
 
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 
 const coll = testDB.getCollection(collName);
 
@@ -128,7 +135,9 @@ function runExplainTest(verbosity) {
             },
         ];
         {
-            stWithMock.getMockConnectedToHost(stWithMock.st.s).setMockResponses(mergingPipelineHistory, cursorId);
+            stWithMock
+                .getMockConnectedToHost(stWithMock.st.s)
+                .setMockResponses(mergingPipelineHistory, cursorId);
 
             setUpMongotReturnExplain({
                 searchCmd,
@@ -149,7 +158,12 @@ function runExplainTest(verbosity) {
                 nReturnedList: [NumberLong(0), NumberLong(0)],
                 expectedExplainContents,
             });
-            verifyShardsPartExplainOutput({result, searchType: "$search", metaPipeline, protocolVersion});
+            verifyShardsPartExplainOutput({
+                result,
+                searchType: "$search",
+                metaPipeline,
+                protocolVersion,
+            });
         }
     }
     runTestOnPrimaries(testExplainCase);

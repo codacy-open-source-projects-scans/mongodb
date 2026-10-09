@@ -7,7 +7,9 @@ const dbName = testDB.getName();
 const collNames = ["coll1", "coll2", "coll3"];
 
 function listDatabases(options) {
-    return assert.commandWorked(db.adminCommand(Object.assign({listDatabases: 1, nameOnly: true}, options))).databases;
+    return assert.commandWorked(
+        db.adminCommand(Object.assign({listDatabases: 1, nameOnly: true}, options)),
+    ).databases;
 }
 
 function assertNamespacesDoNotExist() {
@@ -26,7 +28,11 @@ function assertNamespacesExist() {
         listDatabases({filter: {name: dbName}}).length,
         "database " + dbName + " not found in " + tojson(listDatabases()),
     );
-    const dbCollections = testDB.getCollectionNames();
+    let dbCollections = testDB.getCollectionNames();
+    if (TestData.runningWithBalancer) {
+        // Concurrent moveCollection can create temporary system.resharding.* collections.
+        dbCollections = dbCollections.filter((name) => !name.startsWith("system.resharding."));
+    }
     assert.sameMembers(dbCollections, collNames);
 }
 

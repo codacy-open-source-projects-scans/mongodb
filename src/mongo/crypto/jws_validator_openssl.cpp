@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/jws_validator.h"
 #include "mongo/crypto/jwt_types_gen.h"
@@ -42,6 +15,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -110,9 +84,10 @@ int ECDSA_SIG_set0(ECDSA_SIG* sig, BIGNUM* r, BIGNUM* s) {
 #endif
 
 namespace mongo::crypto {
+using namespace std::literals::string_view_literals;
 namespace {
 
-static void uassertOpenSSL(StringData context, bool success) {
+static void uassertOpenSSL(std::string_view context, bool success) {
     uassert(ErrorCodes::OperationFailed,
             str::stream() << context << ": "
                           << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()),
@@ -141,7 +116,7 @@ using UniqueBIGNUM = std::unique_ptr<BIGNUM, OpenSSLDeleter<decltype(BN_free), B
 
 class JWSValidatorOpenSSLRSA : public JWSValidator {
 public:
-    JWSValidatorOpenSSLRSA(StringData algorithm, const BSONObj& key) : _key(EVP_PKEY_new()) {
+    JWSValidatorOpenSSLRSA(std::string_view algorithm, const BSONObj& key) : _key(EVP_PKEY_new()) {
         uassert(7095402, "Unknown hashing algorithm", algorithm == "RSA");
 
         auto RSAKey = JWKRSA::parse(key, IDLParserContext("JWKRSA"));
@@ -170,7 +145,9 @@ public:
             .release();  // Now owned by _key, cast to void to explicitly ignore the return value.
     }
 
-    Status validate(StringData algorithm, StringData payload, StringData signature) const final {
+    Status validate(std::string_view algorithm,
+                    std::string_view payload,
+                    std::string_view signature) const final {
         const EVP_MD* alg = getHashingAlg(algorithm);
         uassert(7095403, str::stream() << "Unknown hashing algorithm: '" << algorithm << "'", alg);
 
@@ -210,12 +187,12 @@ public:
     }
 
 private:
-    static constexpr auto kRS256 = "RS256"_sd;
-    static constexpr auto kRS384 = "RS384"_sd;
-    static constexpr auto kRS512 = "RS512"_sd;
-    static constexpr auto kPS256 = "PS256"_sd;
+    static constexpr auto kRS256 = "RS256"sv;
+    static constexpr auto kRS384 = "RS384"sv;
+    static constexpr auto kRS512 = "RS512"sv;
+    static constexpr auto kPS256 = "PS256"sv;
 
-    static const EVP_MD* getHashingAlg(StringData alg) {
+    static const EVP_MD* getHashingAlg(std::string_view alg) {
         if (alg == kRS256 || alg == kPS256) {
             return EVP_sha256();
         }
@@ -233,7 +210,7 @@ private:
 
 class JWSValidatorOpenSSLEC : public JWSValidator {
 public:
-    JWSValidatorOpenSSLEC(StringData algorithm, const BSONObj& key) : _key(EVP_PKEY_new()) {
+    JWSValidatorOpenSSLEC(std::string_view algorithm, const BSONObj& key) : _key(EVP_PKEY_new()) {
         uassert(10858400, "Unknown EC hashing algorithm", algorithm == "EC");
 
         auto ECKey = JWKEC::parse(key, IDLParserContext("JWKEC"));
@@ -261,13 +238,15 @@ public:
         // Obtain the public key from the X and Y coordinates in EVP_PKEY format so that we can use
         // it for signature validation in EVP_DigestVerifyFinal
         EVP_PKEY* pkey = createECKeyFromCurveAndCoordinates(
-            ECKey.getCurve().data(), ECKey.getXcoordinate(), ECKey.getYcoordinate());
+            std::string{ECKey.getCurve()}.c_str(), ECKey.getXcoordinate(), ECKey.getYcoordinate());
         uassertOpenSSL("Failed to create EC EVP_PKEY from user data", pkey != nullptr);
         _key.reset(pkey);
         uassertOpenSSL("Failed to create EC EVP_PKEY from user data", _key != nullptr);
     }
 
-    Status validate(StringData algorithm, StringData payload, StringData signature) const final {
+    Status validate(std::string_view algorithm,
+                    std::string_view payload,
+                    std::string_view signature) const final {
 
         std::vector<unsigned char> der_sig = DEREncodeECSignature(signature);
         uassertOpenSSL("Failed to DER encode EC signature", der_sig.size() > 0);
@@ -301,13 +280,13 @@ public:
     }
 
 private:
-    static constexpr auto kES256 = "ES256"_sd;
-    static constexpr auto kES384 = "ES384"_sd;
+    static constexpr auto kES256 = "ES256"sv;
+    static constexpr auto kES384 = "ES384"sv;
 
     // Depending on the format of the JWT, the "alg" parameter can either be the algorithm (e.g.
     // ES256) or curve (e.g P-256). Not all JWT tokens have both values, so we accept either one
     // interchangeably
-    static const EVP_MD* getHashingAlg(StringData alg) {
+    static const EVP_MD* getHashingAlg(std::string_view alg) {
         if ((alg == kES256) || (alg == "P-256")) {
             return EVP_sha256();
         }
@@ -351,8 +330,8 @@ private:
 
     // Creates an EC public key from the curve name and the X and Y coordinates
     static EVP_PKEY* createECKeyFromCurveAndCoordinates(const std::string& curve,
-                                                        StringData xCoordinate,
-                                                        StringData yCoordinate) {
+                                                        std::string_view xCoordinate,
+                                                        std::string_view yCoordinate) {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
         EVP_PKEY* pkey = nullptr;
         const auto* xCoordinateData = reinterpret_cast<const unsigned char*>(xCoordinate.data());
@@ -434,7 +413,7 @@ private:
     // If the signature is invalid, returns an error status
     // If the signature is valid, returns a Status::OK()
     // The DER format is a binary format that is used to represent the ECDSA signature
-    static std::vector<unsigned char> DEREncodeECSignature(StringData signature) {
+    static std::vector<unsigned char> DEREncodeECSignature(std::string_view signature) {
         // The signature consists of the combined R and S components, and the R and S is the
         // same size. So, the length of the signature must be an even number. Split the
         // signature to get back R and S
@@ -476,15 +455,15 @@ private:
 };
 }  // namespace
 
-StatusWith<std::unique_ptr<JWSValidator>> JWSValidator::create(StringData algorithm,
+StatusWith<std::unique_ptr<JWSValidator>> JWSValidator::create(std::string_view algorithm,
                                                                const BSONObj& key) try {
-    if (algorithm == "RSA"_sd) {
+    if (algorithm == "RSA"sv) {
         return std::make_unique<JWSValidatorOpenSSLRSA>(algorithm, key);
-    } else if (algorithm == "EC"_sd) {
+    } else if (algorithm == "EC"sv) {
         return std::make_unique<JWSValidatorOpenSSLEC>(algorithm, key);
     }
     uasserted(ErrorCodes::UnsupportedFormat,
-              "Unknown signature algorithm" + std::string(algorithm.data()));
+              fmt::format("Unknown signature algorithm {}", algorithm));
 } catch (const DBException& e) {
     return e.toStatus();
 }

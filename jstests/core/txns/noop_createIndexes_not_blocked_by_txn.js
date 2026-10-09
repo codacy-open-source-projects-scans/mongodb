@@ -13,7 +13,7 @@ testDB.runCommand({drop: collName, writeConcern: {w: "majority"}});
 const session = db.getMongo().startSession({causalConsistency: false});
 const sessionDB = session.getDatabase(dbName);
 
-if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
+if (FixtureHelpers.isMongos(db)) {
     // Access the collection before creating indexes so it can be implicitly sharded.
     assert.eq(sessionDB[collName].find().itcount(), 0);
 }
@@ -50,7 +50,11 @@ withTxnAndAutoRetryOnMongos(session, () => {
     assert.commandFailedWithCode(res, ErrorCodes.IndexOptionsConflict);
 
     // This should block and time out because the index does not already exist.
-    res = testDB.runCommand({createIndexes: collName, indexes: [{key: {b: 1}, name: "b_1"}], maxTimeMS: 500});
+    res = testDB.runCommand({
+        createIndexes: collName,
+        indexes: [{key: {b: 1}, name: "b_1"}],
+        maxTimeMS: 500,
+    });
     assert(ErrorCodes.isExceededTimeLimitError(res.code));
 
     // This should block and time out because one of the indexes does not already exist.

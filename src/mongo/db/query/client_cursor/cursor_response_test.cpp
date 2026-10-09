@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/client_cursor/cursor_response.h"
 
@@ -36,10 +10,13 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/namespace_string_util.h"
 #include "mongo/db/pipeline/resume_token.h"
-#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/db/query/query_stats/plan_shape_counters/plan_shape_counts.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string_view>
 
 #include <boost/none.hpp>
 
@@ -68,6 +45,11 @@ static const BSONObj basicMetricsObj = fromjson(R"({
         "Code": {"$numberLong": "0"}
     },
     nDocsSampled: {"$numberLong": "4"},
+    planShapeCounts: {
+        patterns: {collscan: {"$numberLong": "2"}, ixscanFetch: {"$numberLong": "1"}},
+        nodes: {collscanWithFilter: {"$numberLong": "2"}},
+        accessPaths: {collscan: {"$numberLong": "2"}}
+    },
     cpuNanos: {"$numberLong": "18"},
     delinquentAcquisitions: {"$numberLong": "0"},
     totalAcquisitionDelinquencyMillis: {"$numberLong": "0"},
@@ -86,6 +68,8 @@ static const BSONObj basicMetricsObj = fromjson(R"({
     nModified: {"$numberLong": "0"},
     nDeleted: {"$numberLong": "0"},
     nInserted: {"$numberLong": "0"},
+    keysInserted: {"$numberLong": "0"},
+    keysDeleted: {"$numberLong": "0"},
     clusterPeakTrackedMemBytes: {"$numberLong": "4096"}
 })");
 
@@ -345,6 +329,19 @@ TEST(CursorResponseTest, parseFromBSONCursorMetrics) {
     ASSERT_EQ(ceMethods.getMetadata().value_or(0), 0);
     ASSERT_EQ(ceMethods.getCode().value_or(0), 0);
     ASSERT_EQ(metrics.getNDocsSampled(), 4);
+    ASSERT_TRUE(metrics.getPlanShapeCounts());
+    ASSERT_EQ(
+        metrics.getPlanShapeCounts()->getCount(plan_shape_counters::PlanShapeCounter::kCollscan),
+        2);
+    ASSERT_EQ(
+        metrics.getPlanShapeCounts()->getCount(plan_shape_counters::PlanShapeCounter::kIxscanFetch),
+        1);
+    ASSERT_EQ(metrics.getPlanShapeCounts()->getCount(
+                  plan_shape_counters::QsnNodeCounter::kCollscanWithFilter),
+              2);
+    ASSERT_EQ(
+        metrics.getPlanShapeCounts()->getCount(plan_shape_counters::AccessPathCounter::kCollscan),
+        2);
     ASSERT_EQ(metrics.getCpuNanos(), 18);
     ASSERT_EQ(metrics.getDelinquentAcquisitions(), 0);
     ASSERT_EQ(metrics.getTotalAcquisitionDelinquencyMillis(), 0);
@@ -391,12 +388,12 @@ TEST(CursorResponseTest, parseFromBSONCursorMetricsIncomplete) {
     // Remove each mandatory field and then check that the result is invalid.
     // Only the original metric fields are mandatory. Newer fields that are added should not be
     // mandatory for multiversion clusters.
-    std::vector<StringData> fields{CursorMetrics::kKeysExaminedFieldName,
-                                   CursorMetrics::kDocsExaminedFieldName,
-                                   CursorMetrics::kWorkingTimeMillisFieldName,
-                                   CursorMetrics::kHasSortStageFieldName,
-                                   CursorMetrics::kUsedDiskFieldName,
-                                   CursorMetrics::kFromMultiPlannerFieldName};
+    std::vector<std::string_view> fields{CursorMetrics::kKeysExaminedFieldName,
+                                         CursorMetrics::kDocsExaminedFieldName,
+                                         CursorMetrics::kWorkingTimeMillisFieldName,
+                                         CursorMetrics::kHasSortStageFieldName,
+                                         CursorMetrics::kUsedDiskFieldName,
+                                         CursorMetrics::kFromMultiPlannerFieldName};
     for (auto fieldName : fields) {
         auto badMetrics = metrics.copy().removeField(fieldName);
         auto badCursor = makeCursorBSON(badMetrics);
@@ -596,7 +593,7 @@ TEST(CursorResponseTest,
     TenantId tid(OID::gen());
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, defaultNssStr);
 
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     rpc::OpMsgReplyBuilder builder;
     BSONObj okStatus = BSON("ok" << 1);
@@ -739,11 +736,11 @@ TEST(CursorResponseTest, addToBSONInitialResponseWithTenantId) {
     TenantId tid(OID::gen());
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(tid, "testdb.testcoll");
 
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     for (bool flagStatus : {false, true}) {
-        RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID",
-                                                                   flagStatus);
+        unittest::ServerParameterGuard featureFlagController("featureFlagRequireTenantID",
+                                                             flagStatus);
 
         std::vector<BSONObj> batch = {BSON("_id" << 1), BSON("_id" << 2)};
         CursorResponse response(nss, CursorId(123), batch);
@@ -1078,6 +1075,7 @@ TEST(CursorResponseTest, parseFromBSONCursorMetricsToleratesMissingDefaultFields
     const auto& parsedCeMethods = metrics.getCardinalityEstimationMethods();
     ASSERT_EQ(parsedCeMethods.getHistogram().value_or(0), 0);
     ASSERT_EQ(metrics.getNDocsSampled(), 0);
+    ASSERT_FALSE(metrics.getPlanShapeCounts());
     ASSERT_EQ(metrics.getCpuNanos(), 0);
     ASSERT_EQ(metrics.getDelinquentAcquisitions(), 0);
     ASSERT_EQ(metrics.getTotalAcquisitionDelinquencyMillis(), 0);

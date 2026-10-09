@@ -1,39 +1,13 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/client/sasl_aws_protocol_common.h"
 #include "mongo/util/modules.h"
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
@@ -49,7 +23,7 @@ std::string generateClientFirst(std::vector<char>* clientNonce);
 /**
  * Parse AWS Auth server first message and generate client second.
  */
-std::string generateClientSecond(StringData serverFirst,
+std::string generateClientSecond(std::string_view serverFirst,
                                  const std::vector<char>& clientNonce,
                                  const AWSCredentials& credentials);
 
@@ -59,7 +33,7 @@ std::string generateClientSecond(StringData serverFirst,
  *
  * The input is expected to be a simple line that ends in a newline (\n).
  */
-std::string parseRoleFromEC2IamSecurityCredentials(StringData data);
+std::string parseRoleFromEC2IamSecurityCredentials(std::string_view data);
 
 /**
  * Get the AWS region from a DNS Name
@@ -72,7 +46,7 @@ std::string parseRoleFromEC2IamSecurityCredentials(StringData data);
  * first.second           second
  * first                  us-east-1
  */
-std::string getRegionFromHost(StringData host);
+std::string getRegionFromHost(std::string_view host);
 
 /**
  * Get a set of AWS Credentials from a request to
@@ -94,7 +68,7 @@ std::string getRegionFromHost(StringData host);
  *   "Expiration" : "EXPIRATION_DATE"
  * }
  */
-AWSCredentials parseCredentialsFromEC2IamSecurityCredentials(StringData data);
+AWSCredentials parseCredentialsFromEC2IamSecurityCredentials(std::string_view data);
 
 /**
  * Get a set of AWS Credentials from a request to
@@ -113,7 +87,7 @@ AWSCredentials parseCredentialsFromEC2IamSecurityCredentials(StringData data);
  *     "Token": "SECURITY_TOKEN_STRING"
  * }
  */
-AWSCredentials parseCredentialsFromECSTaskIamCredentials(StringData data);
+AWSCredentials parseCredentialsFromECSTaskIamCredentials(std::string_view data);
 
 }  // namespace awsIam
 }  // namespace mongo

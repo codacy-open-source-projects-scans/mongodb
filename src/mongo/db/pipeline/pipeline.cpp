@@ -1,41 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/pipeline/pipeline.h"
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/range/combine.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/exact_cast.h"
 #include "mongo/bson/bsontypes.h"
@@ -57,15 +25,17 @@
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/stage_params_to_document_source_registry.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/query/compiler/rewrites/matcher/expression_parameterization.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/explain_policy.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/db/query/query_execution_knobs_gen.h"
 #include "mongo/db/query/query_integration_knobs_gen.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
 #include "mongo/db/query/timeseries/timeseries_translation.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -77,7 +47,15 @@
 #include <exception>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/range/combine.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -85,6 +63,7 @@
 namespace mongo {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 /**
  * Performs validation checking specific to top-level pipelines. Throws an assertion if the
@@ -104,7 +83,7 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
         return;
     }
 
-    if ("$mergeCursors"_sd != sources.front()->getSourceName()) {
+    if ("$mergeCursors"sv != sources.front()->getSourceName()) {
         // The $mergeCursors stage can take {aggregate: 1} or a normal namespace. Aside from this,
         // {aggregate: 1} is only valid for collectionless sources, and vice-versa.
         const auto firstStageConstraints = sources.front()->constraints();
@@ -139,7 +118,7 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                                   << " can only be used in a $changeStream pipeline",
                     !(source->constraints().requiresChangeStream() && !isChangeStream));
             // Check whether this is a change stream split stage.
-            if ("$changeStreamSplitLargeEvent"_sd == source->getSourceName()) {
+            if ("$changeStreamSplitLargeEvent"sv == source->getSourceName()) {
                 hasChangeStreamSplitLargeEventStage = true;
             }
         }
@@ -253,6 +232,31 @@ std::unique_ptr<Pipeline> Pipeline::parseFromLiteParsed(
     return pipeline;
 }
 
+std::unique_ptr<Pipeline> Pipeline::parseFromStageParams(
+    StageParamsPipeline stageParams,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    PipelineValidatorCallback validator) {
+    uassert(12788402,
+            str::stream() << "Pipeline length must be no longer than "
+                          << internalPipelineLengthLimit.load() << " stages.",
+            static_cast<int>(stageParams.size()) <= internalPipelineLengthLimit.load());
+
+    DocumentSourceContainer stages;
+    for (auto& sp : stageParams) {
+        auto sources = buildDocumentSource(sp, expCtx);
+        stages.insert(stages.end(), sources.begin(), sources.end());
+    }
+
+    std::unique_ptr<Pipeline> pipeline(new Pipeline(std::move(stages), expCtx));
+
+    validateTopLevelPipeline(*pipeline);
+    if (validator) {
+        validator(*pipeline);
+    }
+    pipeline->validateCommon(/*alreadyOptimized=*/false);
+    return pipeline;
+}
+
 std::unique_ptr<Pipeline> Pipeline::create(DocumentSourceContainer stages,
                                            const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     std::unique_ptr<Pipeline> pipeline(new Pipeline(std::move(stages), expCtx));
@@ -269,7 +273,7 @@ void Pipeline::validateCommon(bool alreadyOptimized) const {
             static_cast<int>(_sources.size()) <= internalPipelineLengthLimit.load());
 
     // Keep track of stages which can only appear once.
-    std::set<StringData> singleUseStages;
+    std::set<std::string_view> singleUseStages;
 
     for (auto sourceIter = _sources.begin(); sourceIter != _sources.end(); ++sourceIter) {
         auto& stage = *sourceIter;
@@ -446,7 +450,7 @@ bool Pipeline::needsAllShardHosts() const {
 bool Pipeline::needsShard() const {
     return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
         auto hostType = stage->constraints().resolvedHostTypeRequirement(pCtx);
-        return (hostType == HostTypeRequirement::kAnyShard ||
+        return (hostType == HostTypeRequirement::kTargetedShards ||
                 hostType == HostTypeRequirement::kAllShardHosts);
     });
 }
@@ -498,14 +502,14 @@ std::vector<BSONObj> Pipeline::serializePipelineForLogging(const std::vector<BSO
 }
 
 std::vector<BSONObj> Pipeline::serializeForLogging(
-    const boost::optional<const SerializationOptions&>& opts) const {
+    const boost::optional<const query_shape::SerializationOptions&>& opts) const {
     std::vector<BSONObj> serialized = serializeToBson(opts);
     return serializePipelineForLogging(serialized);
 }
 
 std::vector<BSONObj> Pipeline::serializeContainerForLogging(
     const DocumentSourceContainer& container,
-    const boost::optional<const SerializationOptions&>& opts) {
+    const boost::optional<const query_shape::SerializationOptions&>& opts) {
     std::vector<Value> serialized = serializeContainer(container, opts);
     std::vector<BSONObj> redacted;
     redacted.reserve(serialized.size());
@@ -520,25 +524,26 @@ std::vector<BSONObj> Pipeline::serializeContainerForLogging(
 
 std::vector<Value> Pipeline::serializeContainer(
     const DocumentSourceContainer& container,
-    const boost::optional<const SerializationOptions&>& opts) {
+    const boost::optional<const query_shape::SerializationOptions&>& opts) {
     std::vector<Value> serializedSources;
     // This reserve may underestimate the number of elements needed for the target container, as
     // pipeline step serialization can add a variable number of results for specific
     // DocumentSources.
     serializedSources.reserve(container.size());
     for (auto&& source : container) {
-        source->serializeToArray(serializedSources, opts ? opts.get() : SerializationOptions());
+        source->serializeToArray(serializedSources,
+                                 opts ? opts.get() : query_shape::SerializationOptions());
     }
     return serializedSources;
 }
 
 std::vector<Value> Pipeline::serialize(
-    const boost::optional<const SerializationOptions&>& opts) const {
+    const boost::optional<const query_shape::SerializationOptions&>& opts) const {
     return serializeContainer(_sources, opts);
 }
 
 std::vector<BSONObj> Pipeline::serializeToBson(
-    const boost::optional<const SerializationOptions&>& opts) const {
+    const boost::optional<const query_shape::SerializationOptions&>& opts) const {
     const auto serialized = serialize(opts);
     std::vector<BSONObj> asBson;
     asBson.reserve(serialized.size());
@@ -551,17 +556,27 @@ std::vector<BSONObj> Pipeline::serializeToBson(
     return asBson;
 }
 
-std::vector<Value> Pipeline::writeExplainOps(const SerializationOptions& opts) const {
+std::vector<Value> Pipeline::writeExplainOps(const query_shape::SerializationOptions& opts) const {
     std::vector<Value> array;
     array.reserve(_sources.size());
+    const bool isExecStats = opts.verbosity && explainPolicyFor(*opts.verbosity).hasExecStats();
     for (auto&& stage : _sources) {
         auto beforeSize = array.size();
         stage->serializeToArray(array, opts);
-        auto afterSize = array.size();
-        tassert(11282934,
-                str::stream() << "Expecting stage " << stage->getSourceName()
-                              << " to serialize into a single BSONObject",
-                afterSize - beforeSize == 1u);
+        auto emitted = array.size() - beforeSize;
+        // If a stage lowers to multiple exec::agg stages at build time, it may emit more than one
+        // entry. Otherwise, each stage must emit exactly one entry.
+        if (isExecStats && stage->serializesToMultipleExecStatsExplainOps()) {
+            tassert(12922600,
+                    str::stream() << "Expecting stage " << stage->getSourceName()
+                                  << " to serialize into at least one BSONObject",
+                    emitted >= 1u);
+        } else {
+            tassert(11282934,
+                    str::stream() << "Expecting stage " << stage->getSourceName()
+                                  << " to serialize into a single BSONObject",
+                    emitted == 1u);
+        }
     }
     return array;
 }
@@ -727,7 +742,7 @@ Status Pipeline::canRunOnRouter() const {
         auto constraints = stage->constraints(_splitState);
         auto hostRequirement = constraints.resolvedHostTypeRequirement(pCtx);
 
-        const bool needsShard = (hostRequirement == HostTypeRequirement::kAnyShard ||
+        const bool needsShard = (hostRequirement == HostTypeRequirement::kTargetedShards ||
                                  hostRequirement == HostTypeRequirement::kAllShardHosts);
 
         const bool mustWriteToDisk =
@@ -802,7 +817,7 @@ DocumentSource* Pipeline::peekFront() const {
     return _sources.empty() ? nullptr : _sources.front().get();
 }
 
-boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithName(StringData targetStageName) {
+boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithName(std::string_view targetStageName) {
     tassert(10706507,
             "attempting to modify a frozen pipeline in 'Pipeline::popFrontWithName()'",
             !_frozen);

@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonmisc.h"
@@ -55,12 +28,14 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 
 namespace {
+using namespace std::literals::string_view_literals;
 using namespace mongo;
 
 TEST(BSONObjToString, EmptyArray) {
@@ -666,16 +641,16 @@ TEST(Looping, Cpp17StructuredBindings) {
 TEST(BSONObj, getFieldsWithEmbeddedNull) {
     // Test that getField() returns an eoo element when the field name contains an embedded null.
     // This should never happen, but we want to make sure we handle it correctly.
-    BSONObj obj = BSON("" << "foo"_sd
+    BSONObj obj = BSON("" << "foo"sv
                           << "bar" << 9 << "baz" << 4.5);
-    ASSERT_TRUE(obj.getField("\0"_sd).eoo());
-    ASSERT_TRUE(obj.getField("ba\0r"_sd).eoo());
-    ASSERT_TRUE(obj.getField("baz\0"_sd).eoo());
+    ASSERT_TRUE(obj.getField("\0"sv).eoo());
+    ASSERT_TRUE(obj.getField("ba\0r"sv).eoo());
+    ASSERT_TRUE(obj.getField("baz\0"sv).eoo());
 }
 
 TEST(BSONObj, getFields) {
     auto e = BSON("a" << 1 << "b" << 2 << "c" << 3 << "d" << 4 << "e" << 5 << "f" << 6);
-    std::array<StringData, 3> fieldNames{"c", "d", "f"};
+    std::array<std::string_view, 3> fieldNames{"c", "d", "f"};
     std::array<BSONElement, 3> fields;
     e.getFields(fieldNames, &fields);
     ASSERT_EQUALS(fields[0].type(), BSONType::numberInt);
@@ -690,7 +665,7 @@ TEST(BSONObj, getFieldsWithDuplicates) {
     auto e = BSON("a" << 2 << "b"
                       << "3"
                       << "a" << 9 << "b" << 10);
-    std::array<StringData, 2> fieldNames{"a", "b"};
+    std::array<std::string_view, 2> fieldNames{"a", "b"};
     std::array<BSONElement, 2> fields;
     e.getFields(fieldNames, &fields);
     ASSERT_EQUALS(fields[0].type(), BSONType::numberInt);
@@ -818,11 +793,11 @@ TEST(BSONObj, sizeChecks) {
 
 TEST(BSONObj, nullByteInStringBasic) {
     const size_t size = 3;
-    StringData str("b\0c", size);
+    std::string_view str("b\0c", size);
 
     // { "a": "b\0c" }
     BSONObjBuilder b;
-    b.append("a"_sd, str);
+    b.append("a"sv, str);
     BSONObj obj{b.obj()};
 
     ASSERT_EQ(str.size(), obj.getStringField("a").size());
@@ -831,11 +806,11 @@ TEST(BSONObj, nullByteInStringBasic) {
 
 TEST(BSONObj, nullByteInStringMulti) {
     const size_t size = 5;
-    StringData str("b\0c\0d", size);
+    std::string_view str("b\0c\0d", size);
 
     // { "a": "b\0c\0d" }
     BSONObjBuilder b;
-    b.append("a"_sd, str);
+    b.append("a"sv, str);
     BSONObj obj{b.obj()};
 
     ASSERT_EQ(str.size(), obj.getStringField("a").size());
@@ -844,11 +819,11 @@ TEST(BSONObj, nullByteInStringMulti) {
 
 TEST(BSONObj, nullByteInStringFull) {
     const size_t size = 9;
-    StringData str("\0\0\0\0\0\0\0\0\0", size);
+    std::string_view str("\0\0\0\0\0\0\0\0\0", size);
 
     // { "a": "\0\0\0\0\0\0\0\0\0" }
     BSONObjBuilder b;
-    b.append("a"_sd, str);
+    b.append("a"sv, str);
     BSONObj obj{b.obj()};
 
     ASSERT_EQ(str.size(), obj.getStringField("a").size());

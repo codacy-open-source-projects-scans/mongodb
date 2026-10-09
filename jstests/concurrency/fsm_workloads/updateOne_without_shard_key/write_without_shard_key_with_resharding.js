@@ -59,7 +59,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         return Math.random() > 0.5;
     };
 
-    $config.data.shouldSkipWriteResponseValidation = function shouldSkipWriteResponseValidation(res) {
+    $config.data.shouldSkipWriteResponseValidation = function shouldSkipWriteResponseValidation(
+        res,
+    ) {
         let shouldSkip = $super.data.shouldSkipWriteResponseValidation.apply(this, arguments);
 
         // This workload does in-place resharding so a retry that is sent
@@ -72,7 +74,9 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         return shouldSkip;
     };
 
+    $config.states.updateOne = ignoreQueryPlanKilled($super.states.updateOne);
     $config.states.deleteOne = ignoreQueryPlanKilled($super.states.deleteOne);
+    $config.states.updateOneWithId = ignoreQueryPlanKilled($super.states.updateOneWithId);
     $config.states.deleteOneWithId = ignoreQueryPlanKilled($super.states.deleteOneWithId);
     $config.states.findAndModify = ignoreQueryPlanKilled($super.states.findAndModify);
 
@@ -80,7 +84,11 @@ export const $config = extendWorkload($baseConfig, function ($config, $super) {
         executeReshardCollection(this, db, collName, connCache, false /*sameKeyResharding*/);
     };
 
-    $config.states.reshardCollectionSameKey = function reshardCollectionSameKey(db, collName, connCache) {
+    $config.states.reshardCollectionSameKey = function reshardCollectionSameKey(
+        db,
+        collName,
+        connCache,
+    ) {
         executeReshardCollection(this, db, collName, connCache, this._allowSameKeyResharding);
     };
 

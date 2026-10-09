@@ -3,6 +3,11 @@
  *
  * Creates, modifies and drops view namespaces concurrently. Each worker operates on their own view,
  * built on a shared underlying collection.
+ *
+ * @tags: [
+ *   # TODO SERVER-132934: Enable test on the sharded TSAN variant.
+ *   incompatible_disaggregated_storage_sharded_tsan,
+ * ]
  */
 export const $config = (function () {
     let data = {
@@ -16,7 +21,13 @@ export const $config = (function () {
             this.threadCollName = db[collName].getName();
             this.threadViewName = this.prefix + "_" + this.tid;
             this.counter = 0;
-            this.confirmViewDefinition = function confirmViewDefinition(db, viewName, collName, pipeline, counter) {
+            this.confirmViewDefinition = function confirmViewDefinition(
+                db,
+                viewName,
+                collName,
+                pipeline,
+                counter,
+            ) {
                 assert.eq({_id: counter}, db[collName].aggregate(pipeline).toArray()[0]);
                 assert.eq({_id: counter}, db[viewName].findOne());
                 const res = db.runCommand({listCollections: 1, filter: {name: viewName}});
@@ -46,7 +57,11 @@ export const $config = (function () {
             this.counter++;
             let pipeline = [{$match: {_id: this.counter}}];
             assert.commandWorked(
-                db.runCommand({collMod: this.threadViewName, viewOn: this.threadCollName, pipeline: pipeline}),
+                db.runCommand({
+                    collMod: this.threadViewName,
+                    viewOn: this.threadCollName,
+                    pipeline: pipeline,
+                }),
             );
             this.confirmViewDefinition(db, this.threadViewName, collName, pipeline, this.counter);
         }

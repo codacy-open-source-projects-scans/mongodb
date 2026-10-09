@@ -3,6 +3,7 @@
  * visibility status.
  *
  * @tags: [
+ *   uses_explain,
  *   not_allowed_with_signed_security_token,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
@@ -53,7 +54,9 @@ function setIndexVisibilityByKeyPattern(collectionName, keyPattern, hidden) {
 }
 
 function setIndexVisibilityByIndexName(collectionName, indexName, hidden) {
-    assert.commandWorked(db.runCommand({collMod: collectionName, index: {name: indexName, hidden}}));
+    assert.commandWorked(
+        db.runCommand({collMod: collectionName, index: {name: indexName, hidden}}),
+    );
 }
 
 function testCompoundWildcardIndexesHiding(cwiList, collectionName) {

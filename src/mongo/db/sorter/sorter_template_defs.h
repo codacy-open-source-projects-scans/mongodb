@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -93,7 +67,7 @@ inline void checkNoExternalSortOnMongos(bool spillerConfigured) {
               spillerConfigured));
 }
 
-MONGO_MOD_PUB inline SharedBufferFragmentBuilder makeMemPool() {
+[[MONGO_MOD_PUBLIC]] inline SharedBufferFragmentBuilder makeMemPool() {
     return SharedBufferFragmentBuilder(
         gOperationMemoryPoolBlockInitialSizeKB.loadRelaxed() * static_cast<size_t>(1024),
         SharedBufferFragmentBuilder::DoubleGrowStrategy(
@@ -461,6 +435,19 @@ public:
         setMaxMemoryUsageBytes();
     }
 
+    typename Sorter<Key, Value>::PersistedState getPersistedState() override {
+        this->_spiller->getStorage().keep();
+
+        auto& iters = this->_spiller->iterators();
+        std::vector<SorterRange> ranges;
+        ranges.reserve(iters.size());
+        std::transform(iters.begin(), iters.end(), std::back_inserter(ranges), [](auto&& it) {
+            return it->getRange();
+        });
+
+        return {this->_spiller->getStorage().getStorageIdentifier(), std::move(ranges)};
+    }
+
 protected:
     /**
      * An implementation of a k-way merge sort.
@@ -478,20 +465,20 @@ protected:
      */
     void _mergeSpills(std::size_t numTargetedSpills, std::size_t maxSpillsPerMerge) {
         if (numTargetedSpills == 0) {
-            numTargetedSpills = 1;
+            return;
         }
 
-        if (this->_iters.size() > numTargetedSpills) {
+        auto& iters = this->_spiller->iterators();
+        if (iters.size() > numTargetedSpills) {
             LOGV2_INFO(8203700,
                        "Merging spills",
-                       "currentNumSpills"_attr = this->_iters.size(),
+                       "currentNumSpills"_attr = iters.size(),
                        "targetNumSpills"_attr = numTargetedSpills,
                        "maxSpillsPerMerge"_attr = maxSpillsPerMerge);
 
             _spiller->mergeSpills(this->_opts,
                                   this->_settings,
                                   this->_stats,
-                                  this->_iters,
                                   _comp,
                                   numTargetedSpills,
                                   maxSpillsPerMerge);
@@ -545,7 +532,9 @@ protected:
             return;
         }
         _bufferSize = this->_spiller->getStorage().getBufferSize();
-        invariant(_bufferSize > 0);
+        if (_bufferSize == 0) {
+            return;
+        }
         _spillsNumToRespectMemoryLimits =
             std::max(this->_opts.maxMemoryUsageBytes / _bufferSize, static_cast<std::size_t>(2));
     }
@@ -603,21 +592,18 @@ public:
         : MergeableSorter<Key, Value, Comparator>(
               opts, storageIdentifier, comp, std::move(spiller), settings) {
         invariant(this->_spiller != nullptr);
+        uassert(ErrorCodes::BadValue, "Cannot resume sorter from empty ranges", !ranges.empty());
 
-        auto path = this->_spiller->getSpillDir() / storageIdentifier;
-        uassert(16815,
-                str::stream() << "Unexpected empty file: " << path.string(),
-                ranges.empty() || boost::filesystem::file_size(path) != 0);
-
-        this->_iters.reserve(ranges.size());
+        auto& iters = this->_spiller->iterators();
+        iters.reserve(ranges.size());
         std::transform(ranges.begin(),
                        ranges.end(),
-                       std::back_inserter(this->_iters),
+                       std::back_inserter(iters),
                        [this](const SorterRange& range) {
                            return this->_spiller->getStorage().getSortedIterator(range,
                                                                                  this->_settings);
                        });
-        this->_stats.setSpilledRanges(this->_iters.size());
+        this->_stats.setSpilledRanges(iters.size());
     }
 
     template <typename DataProducer>
@@ -636,9 +622,7 @@ public:
             this->_stats.incrementMemUsage(memUsage);
         }
 
-        if (this->_stats.memUsage() > this->_opts.maxMemoryUsageBytes) {
-            spill();
-        }
+        this->_spillIfOverBudget();
     }
 
     void add(const Key& key, const Value& val) override {
@@ -657,7 +641,7 @@ public:
     std::unique_ptr<Iterator> done() override {
         invariant(!std::exchange(_done, true));
 
-        if (this->_iters.empty()) {
+        if (!this->_spiller || this->_spiller->iterators().empty()) {
             sort();
             if (this->_opts.moveSortedDataIntoIterator) {
                 return std::make_unique<InMemIterator<Key, Value, Comparator>>(std::move(_data),
@@ -669,7 +653,7 @@ public:
         spill();
         this->_mergeSpills();
 
-        return sorter::merge<Key, Value>(this->_iters, this->_opts, this->_comp);
+        return sorter::merge<Key, Value>(this->_spiller->iterators(), this->_opts, this->_comp);
     }
 
     std::unique_ptr<Iterator> pause() override {
@@ -677,7 +661,9 @@ public:
         invariant(!_paused);
 
         _paused = true;
-        tassert(8248300, "Spilled sort cannot be paused", this->_iters.empty());
+        tassert(8248300,
+                "Spilled sort cannot be paused",
+                !this->_spiller || this->_spiller->iterators().empty());
         return std::make_unique<InMemReadOnlyIterator<Key, Value, std::vector<Data>>>(_data);
     }
 
@@ -687,16 +673,7 @@ public:
 
     typename Sorter<Key, Value>::PersistedState persistDataForShutdown() override {
         spill();
-        this->_spiller->getStorage().keep();
-
-        std::vector<SorterRange> ranges;
-        ranges.reserve(this->_iters.size());
-        std::transform(this->_iters.begin(),
-                       this->_iters.end(),
-                       std::back_inserter(ranges),
-                       [](auto&& it) { return it->getRange(); });
-
-        return {this->_spiller->getStorage().getStorageIdentifier(), ranges};
+        return this->getPersistedState();
     }
 
 private:
@@ -750,14 +727,13 @@ private:
 
         sort();
 
-        auto iterator = this->_spiller->spill(this->_opts, this->_settings, _data);
+        this->_spiller->spill(this->_opts, this->_settings, _data);
 
         this->_stats.incrementSpilledKeyValuePairs(_data.size());
         _data.clear();
         // _data may have grown very large. Even though it's clear()ed, we need to
         // free the excess memory.
         _data.shrink_to_fit();
-        this->_iters.push_back(iterator);
 
         auto& memPool = this->_memPool;
         if (memPool) {
@@ -771,9 +747,10 @@ private:
         this->_stats.incrementSpilledRanges();
 
         // Merge spills to remain below the `iteratorsMaxBytesSize` threshold.
-        if (this->_iters.size() >= this->iteratorsMaxNum) {
+        auto& iters = this->_spiller->iterators();
+        if (iters.size() >= this->iteratorsMaxNum) {
             this->updateSpillsNumToRespectMemoryLimits();
-            this->_mergeSpills(this->_iters.size() / 2, this->_spillsNumToRespectMemoryLimits);
+            this->_mergeSpills(iters.size() / 2, this->_spillsNumToRespectMemoryLimits);
         }
     }
 
@@ -908,8 +885,7 @@ public:
             if (_data.size() == this->_opts.limit)
                 std::make_heap(_data.begin(), _data.end(), less);
 
-            if (this->_stats.memUsage() > this->_opts.maxMemoryUsageBytes)
-                spill();
+            this->_spillIfOverBudget();
 
             return;
         }
@@ -935,8 +911,7 @@ public:
 
         std::push_heap(_data.begin(), _data.end(), less);
 
-        if (this->_stats.memUsage() > this->_opts.maxMemoryUsageBytes)
-            spill();
+        this->_spillIfOverBudget();
     }
 
     void add(const Key& key, const Value& val) override {
@@ -953,7 +928,7 @@ public:
     }
 
     std::unique_ptr<Iterator> done() override {
-        if (this->_iters.empty()) {
+        if (!this->_spiller || this->_spiller->iterators().empty()) {
             sort();
             if (this->_opts.moveSortedDataIntoIterator) {
                 return std::make_unique<InMemIterator<Key, Value, Comparator>>(std::move(_data),
@@ -966,7 +941,7 @@ public:
         this->_mergeSpills();
 
         _done = true;
-        return sorter::merge<Key, Value>(this->_iters, this->_opts, this->_comp);
+        return sorter::merge<Key, Value>(this->_spiller->iterators(), this->_opts, this->_comp);
     }
 
     std::unique_ptr<Iterator> pause() override {
@@ -974,7 +949,9 @@ public:
         invariant(!_paused);
         _paused = true;
 
-        tassert(8248301, "Spilled sort cannot be paused", this->_iters.empty());
+        tassert(8248301,
+                "Spilled sort cannot be paused",
+                !this->_spiller || this->_spiller->iterators().empty());
         return std::make_unique<InMemReadOnlyIterator<Key, Value, std::vector<Data>>>(_data);
     }
 
@@ -1106,7 +1083,7 @@ private:
         sort();
         updateCutoff();
 
-        auto iters = this->_spiller->spill(this->_opts, this->_settings, _data);
+        this->_spiller->spill(this->_opts, this->_settings, _data);
 
         this->_stats.incrementSpilledKeyValuePairs(_data.size());
         _data.clear();
@@ -1114,15 +1091,14 @@ private:
         // free the excess memory.
         _data.shrink_to_fit();
 
-        this->_iters.push_back(iters);
-
         this->_stats.resetMemUsage();
         this->_stats.incrementSpilledRanges();
 
         // Merge spills to remain below the `iteratorsMaxBytesSize` threshold.
-        if (this->_iters.size() >= this->iteratorsMaxNum) {
+        auto& iters = this->_spiller->iterators();
+        if (iters.size() >= this->iteratorsMaxNum) {
             this->updateSpillsNumToRespectMemoryLimits();
-            this->_mergeSpills(this->_iters.size() / 2, this->_spillsNumToRespectMemoryLimits);
+            this->_mergeSpills(iters.size() / 2, this->_spillsNumToRespectMemoryLimits);
         }
     }
 

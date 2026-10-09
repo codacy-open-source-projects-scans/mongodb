@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/query_request_conversion.h"
 
@@ -63,10 +37,6 @@ AggregateCommandRequest asAggregateCommandRequest(const FindCommandRequest& find
             str::stream() << "Option " << FindCommandRequest::kNoCursorTimeoutFieldName
                           << " not supported in aggregation.",
             !findCommand.getNoCursorTimeout());
-    uassert(ErrorCodes::InvalidPipelineOperator,
-            str::stream() << "Option " << FindCommandRequest::kAllowPartialResultsFieldName
-                          << " not supported in aggregation.",
-            !findCommand.getAllowPartialResults());
     uassert(ErrorCodes::InvalidPipelineOperator,
             str::stream() << "Sort option " << query_request_helper::kNaturalSortField
                           << " not supported in aggregation.",
@@ -121,8 +91,6 @@ AggregateCommandRequest asAggregateCommandRequest(const FindCommandRequest& find
         // above). If 'batchSize' is also 1, an open cursor will be returned, contradicting the
         // 'singleBatch' option. We set 'batchSize' to 2 as a workaround to ensure no cursor is
         // returned.
-        // TODO SERVER-83077 This workaround will be unnecessary if a full batch of size 1 doesn't
-        // open a cursor.
         if (findCommand.getSingleBatch() && *batchSize == 1LL) {
             cursor.setBatchSize(2);
         } else {
@@ -154,6 +122,7 @@ AggregateCommandRequest asAggregateCommandRequest(const FindCommandRequest& find
     if (findCommand.getAllowDiskUse().has_value()) {
         result.setAllowDiskUse(findCommand.getAllowDiskUse());
     }
+    result.setAllowPartialResults(findCommand.getAllowPartialResults());
     result.setLegacyRuntimeConstants(findCommand.getLegacyRuntimeConstants());
     if (findCommand.getLet()) {
         result.setLet(findCommand.getLet()->getOwned());
@@ -200,7 +169,11 @@ AggregateCommandRequest asAggregateCommandRequest(const CountCommandRequest& cou
         pipeline.push_back(BSON("$skip" << skip.value()));
     }
     if (auto limit = countCommand.getLimit()) {
-        pipeline.push_back(BSON("$limit" << limit.value()));
+        // The count command treats {limit: 0} as unlimited, but pipelines treat it
+        // as invalid, so don't add a $limit stage if the limit value is 0.
+        if (limit.value() != 0) {
+            pipeline.push_back(BSON("$limit" << limit.value()));
+        }
     }
     pipeline.push_back(BSON("$count" << "count"));
     result.setPipeline(std::move(pipeline));

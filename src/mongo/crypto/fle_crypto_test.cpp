@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/fle_crypto.h"
 
@@ -52,12 +26,12 @@
 #include "mongo/db/basic_types.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 #include "mongo/shell/kms_gen.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
@@ -70,6 +44,7 @@
 #include <iostream>
 #include <stack>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -80,8 +55,11 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
+using namespace std::literals::string_view_literals;
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
+using namespace std::literals::string_view_literals;
 namespace mongo {
 
 template <typename T>
@@ -97,12 +75,12 @@ std::string hexdump(const ConstDataRange& buf) {
     return hexdump(buf.data(), buf.length());
 }
 
-std::vector<char> decode(StringData sd) {
+std::vector<char> decode(std::string_view sd) {
     auto s = hexblob::decode(sd);
     return std::vector<char>(s.data(), s.data() + s.length());
 }
 
-PrfBlock blockToArray(StringData block) {
+PrfBlock blockToArray(std::string_view block) {
     PrfBlock data;
     ASSERT_EQ(block.size(), data.size());
     for (size_t i = 0; i < data.size(); ++i) {
@@ -111,7 +89,7 @@ PrfBlock blockToArray(StringData block) {
     return data;
 }
 
-PrfBlock decodePrf(StringData sd) {
+PrfBlock decodePrf(std::string_view sd) {
     auto s = hexblob::decode(sd);
     return blockToArray(s);
 }
@@ -129,10 +107,10 @@ std::basic_ostream<char>& operator<<(std::basic_ostream<char>& os, const FLEToke
     return os << "{" << right.name() << ": " << hexdump(right.asPrfBlock()) << "}";
 }
 
-constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
-constexpr auto kIndexKey2Id = "12345678-1234-9876-1234-123456789013"_sd;
-constexpr auto kIndexKey3Id = "12345678-1234-9876-1234-123456789014"_sd;
-constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
+constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"sv;
+constexpr auto kIndexKey2Id = "12345678-1234-9876-1234-123456789013"sv;
+constexpr auto kIndexKey3Id = "12345678-1234-9876-1234-123456789014"sv;
+constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"sv;
 static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId));
 static UUID indexKey2Id = uassertStatusOK(UUID::parse(kIndexKey2Id));
 static UUID indexKey3Id = uassertStatusOK(UUID::parse(kIndexKey3Id));
@@ -145,28 +123,28 @@ std::vector<char> testValue2 = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 
 
 const FLEIndexKey& getIndexKey() {
     static std::string indexVec = hexblob::decode(
-        "7dbfebc619aa68a659f64b8e23ccd21644ac326cb74a26840c3d2420176c40ae088294d00ad6cae9684237b21b754cf503f085c25cd320bf035c3417416e1e6fe3d9219f79586582112740b2add88e1030d91926ae8afc13ee575cfb8bb965b7"_sd);
+        "7dbfebc619aa68a659f64b8e23ccd21644ac326cb74a26840c3d2420176c40ae088294d00ad6cae9684237b21b754cf503f085c25cd320bf035c3417416e1e6fe3d9219f79586582112740b2add88e1030d91926ae8afc13ee575cfb8bb965b7"sv);
     static FLEIndexKey indexKey(KeyMaterial(indexVec.begin(), indexVec.end()));
     return indexKey;
 }
 
 const FLEIndexKey& getIndex2Key() {
     static std::string index2Vec = hexblob::decode(
-        "1f65c3223d5653cdbd73c11a8f85587aafcbd5be7e4c308d357b2f01bbcf76a9802930e5f233923bbc3f5ebd0be1db9807f04aa870c896092180dd8b05816b8f7568ff762a1a4efd35bbc02826394eb30f36cd8e0c646ae2f43df420e50a19eb"_sd);
+        "1f65c3223d5653cdbd73c11a8f85587aafcbd5be7e4c308d357b2f01bbcf76a9802930e5f233923bbc3f5ebd0be1db9807f04aa870c896092180dd8b05816b8f7568ff762a1a4efd35bbc02826394eb30f36cd8e0c646ae2f43df420e50a19eb"sv);
     static FLEIndexKey index2Key(KeyMaterial(index2Vec.begin(), index2Vec.end()));
     return index2Key;
 }
 
 const FLEIndexKey& getIndex3Key() {
     static std::string index3Vec = hexblob::decode(
-        "1f65c3223d5653cdbd73c11a8f85587aafcbd5be7e4c308d357b2f01bbcf76a9802930e5f233923bbc3f5ebd0be1db9807f04aa870c896092180dd8b05816b8f7568ff762a1a4efd35bbc02826394eb30f36cd8e0c646ae2f43df420e50a19eb"_sd);
+        "1f65c3223d5653cdbd73c11a8f85587aafcbd5be7e4c308d357b2f01bbcf76a9802930e5f233923bbc3f5ebd0be1db9807f04aa870c896092180dd8b05816b8f7568ff762a1a4efd35bbc02826394eb30f36cd8e0c646ae2f43df420e50a19eb"sv);
     static FLEIndexKey index3Key(KeyMaterial(index3Vec.begin(), index3Vec.end()));
     return index3Key;
 }
 
 const FLEUserKey& getUserKey() {
     static std::string userVec = hexblob::decode(
-        "a7ddbc4c8be00d51f68d9d8e485f351c8edc8d2206b24d8e0e1816d005fbe520e489125047d647b0d8684bfbdbf09c304085ed086aba6c2b2b1677ccc91ced8847a733bf5e5682c84b3ee7969e4a5fe0e0c21e5e3ee190595a55f83147d8de2a"_sd);
+        "a7ddbc4c8be00d51f68d9d8e485f351c8edc8d2206b24d8e0e1816d005fbe520e489125047d647b0d8684bfbdbf09c304085ed086aba6c2b2b1677ccc91ced8847a733bf5e5682c84b3ee7969e4a5fe0e0c21e5e3ee190595a55f83147d8de2a"sv);
     static FLEUserKey userKey(KeyMaterial(userVec.begin(), userVec.end()));
     return userKey;
 }
@@ -253,271 +231,271 @@ TEST_F(ServiceContextTest, FLETokens_TestVectors) {
     auto serverTokenDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
 
     ASSERT_EQUALS(CollectionsLevel1Token(decodePrf(
-                      "BD53ACAC665EDD01E0CA30CB648B2B8F4967544047FD4E7D12B1A9BF07339928"_sd)),
+                      "BD53ACAC665EDD01E0CA30CB648B2B8F4967544047FD4E7D12B1A9BF07339928"sv)),
                   collectionToken);
 
     ASSERT_EQUALS(ServerTokenDerivationLevel1Token(decodePrf(
-                      "C17FDF249DE234F9AB15CD95137EA7EC82AE4E5B51F6BFB0FC1B8FEB6800F74C"_sd)),
+                      "C17FDF249DE234F9AB15CD95137EA7EC82AE4E5B51F6BFB0FC1B8FEB6800F74C"sv)),
                   serverTokenDerivationToken);
 
     ASSERT_EQUALS(ServerDataEncryptionLevel1Token(decodePrf(
-                      "EB9A73F7912D86A4297E81D2F675AF742874E4057E3A890FEC651A23EEE3F3EC"_sd)),
+                      "EB9A73F7912D86A4297E81D2F675AF742874E4057E3A890FEC651A23EEE3F3EC"sv)),
                   ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey()));
 
     // Level 2
     auto edcToken = EDCToken::deriveFrom(collectionToken);
     ASSERT_EQUALS(
-        EDCToken(decodePrf("82B0AB0F8F1D31AEB6F4DBC915EF17CBA2FE21E36EC436984EB63BECEC173831"_sd)),
+        EDCToken(decodePrf("82B0AB0F8F1D31AEB6F4DBC915EF17CBA2FE21E36EC436984EB63BECEC173831"sv)),
         edcToken);
     auto escToken = ESCToken::deriveFrom(collectionToken);
     ASSERT_EQUALS(
-        ESCToken(decodePrf("279C575B52B73677EEF07D9C1126EBDF08C35369570A9B75E44A9AFDCCA96B6D"_sd)),
+        ESCToken(decodePrf("279C575B52B73677EEF07D9C1126EBDF08C35369570A9B75E44A9AFDCCA96B6D"sv)),
         escToken);
     ASSERT_EQUALS(
-        ECOCToken(decodePrf("9E837ED3926CB8ED680E0E7DCB2A481A3E398BE7851FA1CE4D738FA5E67FFCC9"_sd)),
+        ECOCToken(decodePrf("9E837ED3926CB8ED680E0E7DCB2A481A3E398BE7851FA1CE4D738FA5E67FFCC9"sv)),
         ECOCToken::deriveFrom(collectionToken));
 
     auto serverDataToken =
         ServerDerivedFromDataToken::deriveFrom(serverTokenDerivationToken, sampleValue);
     ASSERT_EQUALS(ServerDerivedFromDataToken(decodePrf(
-                      "EDBC92F3BFE4CCB3F088FED8D42379A83F26DC37F2B6D513D4F568A6F32C8C80"_sd)),
+                      "EDBC92F3BFE4CCB3F088FED8D42379A83F26DC37F2B6D513D4F568A6F32C8C80"sv)),
                   serverDataToken);
 
     // Level 3
     auto edcDataToken = EDCDerivedFromDataToken::deriveFrom(edcToken, sampleValue);
     ASSERT_EQUALS(EDCDerivedFromDataToken(decodePrf(
-                      "CEA098AA664E578D4E9CE05B50ADD15DF2F0316CD5CCB08E720C61D8C7580E2A"_sd)),
+                      "CEA098AA664E578D4E9CE05B50ADD15DF2F0316CD5CCB08E720C61D8C7580E2A"sv)),
                   edcDataToken);
 
     auto escDataToken = ESCDerivedFromDataToken::deriveFrom(escToken, sampleValue);
     ASSERT_EQUALS(ESCDerivedFromDataToken(decodePrf(
-                      "DE6A1AC292BC62094C33E94647B044B9B10514317B75F4128DDA2E0FB686704F"_sd)),
+                      "DE6A1AC292BC62094C33E94647B044B9B10514317B75F4128DDA2E0FB686704F"sv)),
                   escDataToken);
 
     ASSERT_EQUALS(ServerCountAndContentionFactorEncryptionToken(decodePrf(
-                      "2F30DBCC06B722B60BC1FF018FC28D5FAEE2F222496BE34A264EF3267E811DA0"_sd)),
+                      "2F30DBCC06B722B60BC1FF018FC28D5FAEE2F222496BE34A264EF3267E811DA0"sv)),
                   ServerCountAndContentionFactorEncryptionToken::deriveFrom(serverDataToken));
 
     ASSERT_EQUALS(ServerZerosEncryptionToken(decodePrf(
-                      "986F23F132FF7F14F748AC69373CFC982AD0AD4BAD25BE92008B83AB43E96029"_sd)),
+                      "986F23F132FF7F14F748AC69373CFC982AD0AD4BAD25BE92008B83AB43E96029"sv)),
                   ServerZerosEncryptionToken::deriveFrom(serverDataToken));
 
     // Level 4
     auto edcDataCounterToken =
         EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(edcDataToken, counter);
     ASSERT_EQUALS(EDCDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "D8CC38AE6A64BD1BF195A2D35734C13AF2B1729AD1052A81BE00BF29C67A696E"_sd)),
+                      "D8CC38AE6A64BD1BF195A2D35734C13AF2B1729AD1052A81BE00BF29C67A696E"sv)),
                   edcDataCounterToken);
 
 
     auto escDataCounterToken =
         ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDataToken, counter);
     ASSERT_EQUALS(ESCDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "8AAF04CBA6DC16BFB37CADBA43DCA66C183634CB3DA278DE174556AE6E17CEBB"_sd)),
+                      "8AAF04CBA6DC16BFB37CADBA43DCA66C183634CB3DA278DE174556AE6E17CEBB"sv)),
                   escDataCounterToken);
 
     // Level 5
     auto edcTwiceToken = EDCTwiceDerivedToken::deriveFrom(edcDataCounterToken);
     ASSERT_EQUALS(EDCTwiceDerivedToken(decodePrf(
-                      "B39A7EC33FD976EFB8EEBBBF3A265A933E2128D709BB88C77E3D42AA735F697C"_sd)),
+                      "B39A7EC33FD976EFB8EEBBBF3A265A933E2128D709BB88C77E3D42AA735F697C"sv)),
                   edcTwiceToken);
 
     auto escTwiceTagToken = ESCTwiceDerivedTagToken::deriveFrom(escDataCounterToken);
     ASSERT_EQUALS(ESCTwiceDerivedTagToken(decodePrf(
-                      "D6F76A9D4767E0889B709517C8CF0412D81874AEB6E6CEBFBDDFF7B013EB7154"_sd)),
+                      "D6F76A9D4767E0889B709517C8CF0412D81874AEB6E6CEBFBDDFF7B013EB7154"sv)),
                   escTwiceTagToken);
     auto escTwiceValueToken = ESCTwiceDerivedValueToken::deriveFrom(escDataCounterToken);
     ASSERT_EQUALS(ESCTwiceDerivedValueToken(decodePrf(
-                      "53F0A51A43447B9881D5E79BA4C5F78E80BC2BC6AA42B00C81079EBF4C9D5A7C"_sd)),
+                      "53F0A51A43447B9881D5E79BA4C5F78E80BC2BC6AA42B00C81079EBF4C9D5A7C"sv)),
                   escTwiceValueToken);
 
     // Anchor Padding
     auto anchorPaddingTokenRoot = AnchorPaddingRootToken::deriveFrom(escToken);
     ASSERT_EQUALS(AnchorPaddingRootToken(decodePrf(
-                      "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"_sd)),
+                      "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"sv)),
                   anchorPaddingTokenRoot);
 
     auto anchorPaddingTokenKey = AnchorPaddingKeyToken::deriveFrom(anchorPaddingTokenRoot);
     ASSERT_EQUALS(AnchorPaddingKeyToken(decodePrf(
-                      "EF6D80379C462FC724CE8C245DC177ED507154B4EBB04DED780FA0DDAF1A2247"_sd)),
+                      "EF6D80379C462FC724CE8C245DC177ED507154B4EBB04DED780FA0DDAF1A2247"sv)),
                   anchorPaddingTokenKey);
 
     auto anchorPaddingTokenValue = AnchorPaddingValueToken::deriveFrom(anchorPaddingTokenRoot);
     ASSERT_EQUALS(AnchorPaddingValueToken(decodePrf(
-                      "A3308597F3C5271D5BAB640F749E619E9272A2C33F4CD372680F55F84CC4DF7F"_sd)),
+                      "A3308597F3C5271D5BAB640F749E619E9272A2C33F4CD372680F55F84CC4DF7F"sv)),
                   anchorPaddingTokenValue);
 
     auto edcTextExactToken = EDCTextExactToken::deriveFrom(edcToken);
     ASSERT_EQUALS(EDCTextExactToken(decodePrf(
-                      "17dde6bd0c0d783aa2bf84e255b162b9362032e5ebd6d655d6b478c4d77dc077"_sd)),
+                      "17dde6bd0c0d783aa2bf84e255b162b9362032e5ebd6d655d6b478c4d77dc077"sv)),
                   edcTextExactToken);
     auto edcTextSubstringToken = EDCTextSubstringToken::deriveFrom(edcToken);
     ASSERT_EQUALS(EDCTextSubstringToken(decodePrf(
-                      "4dde679aa0568701a0fda6b1cae21e99da32500541e4ad832ea83db94497478f"_sd)),
+                      "4dde679aa0568701a0fda6b1cae21e99da32500541e4ad832ea83db94497478f"sv)),
                   edcTextSubstringToken);
     auto edcTextSuffixToken = EDCTextSuffixToken::deriveFrom(edcToken);
     ASSERT_EQUALS(EDCTextSuffixToken(decodePrf(
-                      "61fa8b8f02a5e7f3cfd2c3e58d3fb8c2d1bfe8a1acc32e43f26478a52944af78"_sd)),
+                      "61fa8b8f02a5e7f3cfd2c3e58d3fb8c2d1bfe8a1acc32e43f26478a52944af78"sv)),
                   edcTextSuffixToken);
     auto edcTextPrefixToken = EDCTextPrefixToken::deriveFrom(edcToken);
     ASSERT_EQUALS(EDCTextPrefixToken(decodePrf(
-                      "926e96d7142b2d187d10579a26a11499d6c30aac2e3fdd56eb1cd536875decfd"_sd)),
+                      "926e96d7142b2d187d10579a26a11499d6c30aac2e3fdd56eb1cd536875decfd"sv)),
                   edcTextPrefixToken);
 
     auto escTextExactToken = ESCTextExactToken::deriveFrom(escToken);
     ASSERT_EQUALS(ESCTextExactToken(decodePrf(
-                      "2fea10a92e84cce913ea0ffd7fd59964507e9e96cdffa4f1b861521f3e653260"_sd)),
+                      "2fea10a92e84cce913ea0ffd7fd59964507e9e96cdffa4f1b861521f3e653260"sv)),
                   escTextExactToken);
     auto escTextSubstringToken = ESCTextSubstringToken::deriveFrom(escToken);
     ASSERT_EQUALS(ESCTextSubstringToken(decodePrf(
-                      "d6a94cacc9f5dd10b2b980bd4c4044e16ff1b29ad50c692e603487c46cbe610e"_sd)),
+                      "d6a94cacc9f5dd10b2b980bd4c4044e16ff1b29ad50c692e603487c46cbe610e"sv)),
                   escTextSubstringToken);
     auto escTextSuffixToken = ESCTextSuffixToken::deriveFrom(escToken);
     ASSERT_EQUALS(ESCTextSuffixToken(decodePrf(
-                      "336f39da6fa984a3477261ea19147b77f02e843f82511c94a91ec77bd72dca68"_sd)),
+                      "336f39da6fa984a3477261ea19147b77f02e843f82511c94a91ec77bd72dca68"sv)),
                   escTextSuffixToken);
     auto escTextPrefixToken = ESCTextPrefixToken::deriveFrom(escToken);
     ASSERT_EQUALS(ESCTextPrefixToken(decodePrf(
-                      "2575c2a275e8135ec73093ae2edc793f6a3a0b8ed89767c3a8695ad93f1c6e9e"_sd)),
+                      "2575c2a275e8135ec73093ae2edc793f6a3a0b8ed89767c3a8695ad93f1c6e9e"sv)),
                   escTextPrefixToken);
 
     auto serverTextExactToken = ServerTextExactToken::deriveFrom(serverTokenDerivationToken);
     ASSERT_EQUALS(ServerTextExactToken(decodePrf(
-                      "2ae33773be27c9fe3522ff0459f621670e93a7423166e63e9a43687a503c7438"_sd)),
+                      "2ae33773be27c9fe3522ff0459f621670e93a7423166e63e9a43687a503c7438"sv)),
                   serverTextExactToken);
     auto serverTextSubstringToken =
         ServerTextSubstringToken::deriveFrom(serverTokenDerivationToken);
     ASSERT_EQUALS(ServerTextSubstringToken(decodePrf(
-                      "183ff338509675d5377d09978e9becd31b197458e2c8cd45b670c672ceb6dc53"_sd)),
+                      "183ff338509675d5377d09978e9becd31b197458e2c8cd45b670c672ceb6dc53"sv)),
                   serverTextSubstringToken);
     auto serverTextSuffixToken = ServerTextSuffixToken::deriveFrom(serverTokenDerivationToken);
     ASSERT_EQUALS(ServerTextSuffixToken(decodePrf(
-                      "baf7c9392bb37607c6aa1f04163f4db8628872e7e7122e754bcd72771934ccbd"_sd)),
+                      "baf7c9392bb37607c6aa1f04163f4db8628872e7e7122e754bcd72771934ccbd"sv)),
                   serverTextSuffixToken);
     auto serverTextPrefixToken = ServerTextPrefixToken::deriveFrom(serverTokenDerivationToken);
     ASSERT_EQUALS(ServerTextPrefixToken(decodePrf(
-                      "52387ea6942d9299a89f70a2a4d8a4209ea1dfe56e29f6c0e3182ca7818b5c9c"_sd)),
+                      "52387ea6942d9299a89f70a2a4d8a4209ea1dfe56e29f6c0e3182ca7818b5c9c"sv)),
                   serverTextPrefixToken);
 
     auto edcTextExactDerivedFromDataToken =
         EDCTextExactDerivedFromDataToken::deriveFrom(edcTextExactToken, sampleValue);
     ASSERT_EQUALS(EDCTextExactDerivedFromDataToken(decodePrf(
-                      "6006D61E9E985EE8F6490AEBF0BFD120BF7A94317646165584894DA6ECBF0E97"_sd)),
+                      "6006D61E9E985EE8F6490AEBF0BFD120BF7A94317646165584894DA6ECBF0E97"sv)),
                   edcTextExactDerivedFromDataToken);
     auto edcTextSubstringDerivedFromDataToken =
         EDCTextSubstringDerivedFromDataToken::deriveFrom(edcTextSubstringToken, sampleValue);
     ASSERT_EQUALS(EDCTextSubstringDerivedFromDataToken(decodePrf(
-                      "4DAB3B274AA5D5E99ECBD7F139CD420F25305C9F082B25AA96F1C9FE6E2122E3"_sd)),
+                      "4DAB3B274AA5D5E99ECBD7F139CD420F25305C9F082B25AA96F1C9FE6E2122E3"sv)),
                   edcTextSubstringDerivedFromDataToken);
     auto edcTextSuffixDerivedFromDataToken =
         EDCTextSuffixDerivedFromDataToken::deriveFrom(edcTextSuffixToken, sampleValue);
     ASSERT_EQUALS(EDCTextSuffixDerivedFromDataToken(decodePrf(
-                      "997F4A0B518F6C872951B65DCF26676D3886C98502FE0A7CC4F9C5EA4F30E94B"_sd)),
+                      "997F4A0B518F6C872951B65DCF26676D3886C98502FE0A7CC4F9C5EA4F30E94B"sv)),
                   edcTextSuffixDerivedFromDataToken);
     auto edcTextPrefixDerivedFromDataToken =
         EDCTextPrefixDerivedFromDataToken::deriveFrom(edcTextPrefixToken, sampleValue);
     ASSERT_EQUALS(EDCTextPrefixDerivedFromDataToken(decodePrf(
-                      "D3EBDD34BCACD11C5929A09D2A897EB7938ABD4756CAB805F46FF0F4AFFA7583"_sd)),
+                      "D3EBDD34BCACD11C5929A09D2A897EB7938ABD4756CAB805F46FF0F4AFFA7583"sv)),
                   edcTextPrefixDerivedFromDataToken);
 
     auto edcTextExactDerivedFromDataTokenAndContentionFactorToken =
         EDCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             edcTextExactDerivedFromDataToken, counter);
     ASSERT_EQUALS(EDCTextExactDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "3551507189d32cc7768390cdd83071deeb3055ca86c4756b16bb740024b23610"_sd)),
+                      "3551507189d32cc7768390cdd83071deeb3055ca86c4756b16bb740024b23610"sv)),
                   edcTextExactDerivedFromDataTokenAndContentionFactorToken);
     auto edcTextSubstringDerivedFromDataTokenAndContentionFactorToken =
         EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             edcTextSubstringDerivedFromDataToken, counter);
     ASSERT_EQUALS(EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "4b52f6daf3b688971eb5819820c3468b3c79ba45fd3e86134351f9baf203e0d1"_sd)),
+                      "4b52f6daf3b688971eb5819820c3468b3c79ba45fd3e86134351f9baf203e0d1"sv)),
                   edcTextSubstringDerivedFromDataTokenAndContentionFactorToken);
     auto edcTextSuffixDerivedFromDataTokenAndContentionFactorToken =
         EDCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             edcTextSuffixDerivedFromDataToken, counter);
     ASSERT_EQUALS(EDCTextSuffixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "c1f273913631a9a1b36fea884b3c8a3a141c9e21556981094ba15f262e540ac7"_sd)),
+                      "c1f273913631a9a1b36fea884b3c8a3a141c9e21556981094ba15f262e540ac7"sv)),
                   edcTextSuffixDerivedFromDataTokenAndContentionFactorToken);
     auto edcTextPrefixDerivedFromDataTokenAndContentionFactorToken =
         EDCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             edcTextPrefixDerivedFromDataToken, counter);
     ASSERT_EQUALS(EDCTextPrefixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "a8d68ebdb0e2d31754f693c56071b0b1d225e6ec5568aff875bd4f7c48c24f66"_sd)),
+                      "a8d68ebdb0e2d31754f693c56071b0b1d225e6ec5568aff875bd4f7c48c24f66"sv)),
                   edcTextPrefixDerivedFromDataTokenAndContentionFactorToken);
 
     auto escTextExactDerivedFromDataToken =
         ESCTextExactDerivedFromDataToken::deriveFrom(escTextExactToken, sampleValue);
     ASSERT_EQUALS(ESCTextExactDerivedFromDataToken(decodePrf(
-                      "6D3311B3DE0E32DBFE55A565327AD4B99D670474DDEF52AA200FC79D76B8C7C4"_sd)),
+                      "6D3311B3DE0E32DBFE55A565327AD4B99D670474DDEF52AA200FC79D76B8C7C4"sv)),
                   escTextExactDerivedFromDataToken);
     auto escTextSubstringDerivedFromDataToken =
         ESCTextSubstringDerivedFromDataToken::deriveFrom(escTextSubstringToken, sampleValue);
     ASSERT_EQUALS(ESCTextSubstringDerivedFromDataToken(decodePrf(
-                      "0E9D0F7C42658DD6894D3CBE34FFA0D39BE00BA72A21AC79BC3712B25783D247"_sd)),
+                      "0E9D0F7C42658DD6894D3CBE34FFA0D39BE00BA72A21AC79BC3712B25783D247"sv)),
                   escTextSubstringDerivedFromDataToken);
     auto escTextSuffixDerivedFromDataToken =
         ESCTextSuffixDerivedFromDataToken::deriveFrom(escTextSuffixToken, sampleValue);
     ASSERT_EQUALS(ESCTextSuffixDerivedFromDataToken(decodePrf(
-                      "A95860B4A08B39B002E5AEE557268786BE4E6D5A8552090DC397FBDB34374313"_sd)),
+                      "A95860B4A08B39B002E5AEE557268786BE4E6D5A8552090DC397FBDB34374313"sv)),
                   escTextSuffixDerivedFromDataToken);
     auto escTextPrefixDerivedFromDataToken =
         ESCTextPrefixDerivedFromDataToken::deriveFrom(escTextPrefixToken, sampleValue);
     ASSERT_EQUALS(ESCTextPrefixDerivedFromDataToken(decodePrf(
-                      "8DF7341DD42C1CEE8411657AFAEA424BFA818A539BF0668E1C355FC2A555E11A"_sd)),
+                      "8DF7341DD42C1CEE8411657AFAEA424BFA818A539BF0668E1C355FC2A555E11A"sv)),
                   escTextPrefixDerivedFromDataToken);
 
     auto escTextExactDerivedFromDataTokenAndContentionFactorToken =
         ESCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             escTextExactDerivedFromDataToken, counter);
     ASSERT_EQUALS(ESCTextExactDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "4cd82a4883ab0a6224a24937066f94827f5107e8bb2f0fa841e10aff8d49e8e4"_sd)),
+                      "4cd82a4883ab0a6224a24937066f94827f5107e8bb2f0fa841e10aff8d49e8e4"sv)),
                   escTextExactDerivedFromDataTokenAndContentionFactorToken);
     auto escTextSubstringDerivedFromDataTokenAndContentionFactorToken =
         ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             escTextSubstringDerivedFromDataToken, counter);
     ASSERT_EQUALS(ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "94f116183f14442e335902756e5b730683cd998c683b90d04dc9e8f48684bdb2"_sd)),
+                      "94f116183f14442e335902756e5b730683cd998c683b90d04dc9e8f48684bdb2"sv)),
                   escTextSubstringDerivedFromDataTokenAndContentionFactorToken);
     auto escTextSuffixDerivedFromDataTokenAndContentionFactorToken =
         ESCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             escTextSuffixDerivedFromDataToken, counter);
     ASSERT_EQUALS(ESCTextSuffixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "13390024c674c2d131771cf95af9787c8c7ef76b5d63078b3dc482cb4075a634"_sd)),
+                      "13390024c674c2d131771cf95af9787c8c7ef76b5d63078b3dc482cb4075a634"sv)),
                   escTextSuffixDerivedFromDataTokenAndContentionFactorToken);
     auto escTextPrefixDerivedFromDataTokenAndContentionFactorToken =
         ESCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
             escTextPrefixDerivedFromDataToken, counter);
     ASSERT_EQUALS(ESCTextPrefixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
-                      "9d0d5f84de779360c43be8e61710deb4b2705b6bf1e11ee41fba09fd4486b7c6"_sd)),
+                      "9d0d5f84de779360c43be8e61710deb4b2705b6bf1e11ee41fba09fd4486b7c6"sv)),
                   escTextPrefixDerivedFromDataTokenAndContentionFactorToken);
 
     auto serverTextExactDerivedFromDataToken =
         ServerTextExactDerivedFromDataToken::deriveFrom(serverTextExactToken, sampleValue);
     ASSERT_EQUALS(ServerTextExactDerivedFromDataToken(decodePrf(
-                      "ae210cd90c230bb8cb96a4e840c9cf88740ae156f3514260d3f1ce94b0bf941e"_sd)),
+                      "ae210cd90c230bb8cb96a4e840c9cf88740ae156f3514260d3f1ce94b0bf941e"sv)),
                   serverTextExactDerivedFromDataToken);
     auto serverTextSubstringDerivedFromDataToken =
         ServerTextSubstringDerivedFromDataToken::deriveFrom(serverTextSubstringToken, sampleValue);
     ASSERT_EQUALS(ServerTextSubstringDerivedFromDataToken(decodePrf(
-                      "7b514ede2cd6d364f2da2580bf173a4e68f9e0617c123aee8b9dda4d8d4b47d7"_sd)),
+                      "7b514ede2cd6d364f2da2580bf173a4e68f9e0617c123aee8b9dda4d8d4b47d7"sv)),
                   serverTextSubstringDerivedFromDataToken);
     auto serverTextSuffixDerivedFromDataToken =
         ServerTextSuffixDerivedFromDataToken::deriveFrom(serverTextSuffixToken, sampleValue);
     ASSERT_EQUALS(ServerTextSuffixDerivedFromDataToken(decodePrf(
-                      "3e242be8d4c8a5894e81aa5fe0729cf48355dbe219c5c6b5ceb8b0eef124ba40"_sd)),
+                      "3e242be8d4c8a5894e81aa5fe0729cf48355dbe219c5c6b5ceb8b0eef124ba40"sv)),
                   serverTextSuffixDerivedFromDataToken);
     auto serverTextPrefixDerivedFromDataToken =
         ServerTextPrefixDerivedFromDataToken::deriveFrom(serverTextPrefixToken, sampleValue);
     ASSERT_EQUALS(ServerTextPrefixDerivedFromDataToken(decodePrf(
-                      "8d8d41ac0618b0e98b086d662a2466f4aa1527d6536acdbcf220c724073331eb"_sd)),
+                      "8d8d41ac0618b0e98b086d662a2466f4aa1527d6536acdbcf220c724073331eb"sv)),
                   serverTextPrefixDerivedFromDataToken);
 }
 
 TEST_F(ServiceContextTest, FLETokens_TestVectorESCCollectionDecryptDocument) {
     ESCTwiceDerivedTagToken escTwiceTag(
-        decodePrf("B1C4E1C67F4AB83DE7632B801BDD198D65401B17EC633EB4D608DE97FAFCE02B"_sd));
+        decodePrf("B1C4E1C67F4AB83DE7632B801BDD198D65401B17EC633EB4D608DE97FAFCE02B"sv));
     ESCTwiceDerivedValueToken escTwiceValue(
-        decodePrf("E2E3F08343FD16BCB36927FFA39C7BCC6AA1E33E6E553DF9FE445ABB988D30D1"_sd));
+        decodePrf("E2E3F08343FD16BCB36927FFA39C7BCC6AA1E33E6E553DF9FE445ABB988D30D1"sv));
 
     BSONObj doc = fromjson(R"({
             "_id": {
@@ -623,7 +601,7 @@ TEST_F(ServiceContextTest, FLE_ESC_RoundTrip) {
 class TestDocumentCollection : public FLEStateCollectionReader {
 public:
     void insert(BSONObj& obj) {
-        dassert(obj.firstElement().fieldNameStringData() == "_id"_sd);
+        dassert(obj.firstElement().fieldNameStringData() == "_id"sv);
         _docs.push_back(obj);
         // shuffle?
         // std::sort(_docs.begin(), _docs.end());
@@ -1263,7 +1241,7 @@ TEST_F(ServiceContextTest, FLE_EDC_Range_Allowed_Types) {
 
 BSONObj transformBSON(
     const BSONObj& object,
-    const std::function<void(ConstDataRange, BSONObjBuilder*, StringData)>& doTransform) {
+    const std::function<void(ConstDataRange, BSONObjBuilder*, std::string_view)>& doTransform) {
     struct IteratorState {
         BSONObjIterator iter;
         BSONObjBuilder builder;
@@ -1328,7 +1306,10 @@ std::vector<uint8_t> toEncryptedVector(EncryptedBinDataType dt, ConstDataRange d
 }
 
 template <typename T>
-void toEncryptedBinData(StringData field, EncryptedBinDataType dt, T t, BSONObjBuilder* builder) {
+void toEncryptedBinData(std::string_view field,
+                        EncryptedBinDataType dt,
+                        T t,
+                        BSONObjBuilder* builder) {
     auto buf = toEncryptedVector(dt, t);
 
     builder->appendBinData(field, buf.size(), BinDataType::Encrypt, buf.data());
@@ -1353,7 +1334,7 @@ void disallowedEqualityPayloadType(BSONType type) {
     // we send an allowed type and then change the type to something that is not allowed
     result = transformBSON(
         result,
-        [type](ConstDataRange cdr, BSONObjBuilder* builder, StringData fieldNameToSerialize) {
+        [type](ConstDataRange cdr, BSONObjBuilder* builder, std::string_view fieldNameToSerialize) {
             auto [encryptedTypeBinding, subCdr] = fromEncryptedConstDataRange(cdr);
 
 
@@ -1570,55 +1551,6 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Equality_Payloads_V2_InvalidArgs) 
     ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iupayload, bogusTag, 0),
                        DBException,
                        9697302);
-}
-
-TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Payloads_V2_ParseInvalidInput) {
-    ConstDataRange empty(0, 0);
-    auto serverToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
-    ServerDerivedFromDataToken serverDataDerivedToken(serverToken.asPrfBlock());
-
-    // cipherTextSize minimum enforced by libmongocrypt is 17 (16 byte IV + 1 byte CTR)
-    constexpr size_t minCipherTextLen = 17;
-    constexpr size_t mblockSize = sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob);
-    constexpr size_t typeOffset = 1 + UUID::kNumBytes;
-    constexpr size_t edgeCountOffset = typeOffset + 1;
-
-    std::vector<uint8_t> equalityInput(1 + UUID::kNumBytes + 1 + minCipherTextLen + mblockSize);
-    equalityInput.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValueV2);
-    std::vector<uint8_t> rangeInput(1 + UUID::kNumBytes + 1 + 1 + minCipherTextLen + mblockSize);
-    rangeInput.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2RangeIndexedValueV2);
-    rangeInput.at(edgeCountOffset) = 1;
-
-    // first, test that the shortest valid buffers can be parsed successfully
-    ASSERT_DOES_NOT_THROW(FLE2IndexedEqualityEncryptedValueV2{equalityInput});
-    ASSERT_DOES_NOT_THROW(FLE2IndexedRangeEncryptedValueV2{rangeInput});
-
-    // test parsing equality as range fails
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2{equalityInput}, DBException, 9588706);
-
-    // test parsing range as equality fails
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2{rangeInput}, DBException, 9588708);
-
-    std::vector<size_t> truncatedLengths = {
-        0, 1, 10, typeOffset, /*edgeCountOffset, edgeCountOffset + 1,
-        edgeCountOffset + 1 + mblockSize*/};
-
-    // test short inputs for equality payload
-    for (auto& testLength : truncatedLengths) {
-        std::vector<uint8_t> testBuf(testLength);
-        std::copy(equalityInput.begin(), equalityInput.begin() + testLength, testBuf.begin());
-        ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2{testBuf},
-                           DBException,
-                           ErrorCodes::LibmongocryptError);
-    }
-
-    // test short inputs for range payload
-    for (auto& testLength : truncatedLengths) {
-        std::vector<uint8_t> testBuf(testLength);
-        std::copy(rangeInput.begin(), rangeInput.begin() + testLength, testBuf.begin());
-        ASSERT_THROWS_CODE(
-            FLE2IndexedRangeEncryptedValueV2{testBuf}, DBException, ErrorCodes::LibmongocryptError);
-    }
 }
 
 // Test correct encryption/decryption of metadata block
@@ -1924,7 +1856,7 @@ static FLE2InsertUpdatePayloadV2 generateTestIUPV2ForTextSearch(BSONElement elem
 }
 
 static void generateTextTokenSetsForIUPV2(FLE2InsertUpdatePayloadV2& iupayload,
-                                          const std::vector<StringData>& strings,
+                                          const std::vector<std::string_view>& strings,
                                           QueryTypeEnum type,
                                           uint32_t contention = 0) {
     if (!iupayload.getTextSearchTokenSets().has_value()) {
@@ -1944,7 +1876,7 @@ static void generateTextTokenSetsForIUPV2(FLE2InsertUpdatePayloadV2& iupayload,
         auto element = doc.firstElement();
         auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
 
-        if (type == QueryTypeEnum::SubstringPreview) {
+        if (type == QueryTypeEnum::Substring) {
             tsts.getSubstringTokenSets().push_back({});
             auto& ts = tsts.getSubstringTokenSets().back();
             auto edcDataDerivedToken = EDCTextSubstringDerivedFromDataToken::deriveFrom(
@@ -2043,20 +1975,20 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads) {
     EDCServerPayloadInfo payload;
     auto& iupayload = payload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
 
-    std::vector<StringData> substrs = {"s", "ss", "sss", "ssss"};
-    std::vector<StringData> suffixes = {"s", "ss"};
-    std::vector<StringData> prefixes = {"s", "ss", "sss"};
+    std::vector<std::string_view> substrs = {"s", "ss", "sss", "ssss"};
+    std::vector<std::string_view> suffixes = {"s", "ss"};
+    std::vector<std::string_view> prefixes = {"s", "ss", "sss"};
 
     // Append fake padding strings > 255 to ensure tag counts over 8 bits long are ok.
     for (int i = 1; i <= 300; i++) {
-        substrs.push_back("fake"_sd);
-        suffixes.push_back("fake"_sd);
-        prefixes.push_back("fake"_sd);
+        substrs.push_back("fake"sv);
+        suffixes.push_back("fake"sv);
+        prefixes.push_back("fake"sv);
     }
 
     const size_t tagCount = 1 + substrs.size() + suffixes.size() + prefixes.size();
 
-    generateTextTokenSetsForIUPV2(iupayload, substrs, QueryTypeEnum::SubstringPreview);
+    generateTextTokenSetsForIUPV2(iupayload, substrs, QueryTypeEnum::Substring);
     generateTextTokenSetsForIUPV2(iupayload, suffixes, QueryTypeEnum::Suffix);
     generateTextTokenSetsForIUPV2(iupayload, prefixes, QueryTypeEnum::Prefix);
 
@@ -2162,8 +2094,7 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
 
     EDCServerPayloadInfo payload;
     auto& iupayload = payload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
-    generateTextTokenSetsForIUPV2(
-        iupayload, {"s", "ss", "sss", "ssss"}, QueryTypeEnum::SubstringPreview);
+    generateTextTokenSetsForIUPV2(iupayload, {"s", "ss", "sss", "ssss"}, QueryTypeEnum::Substring);
     payload.counts = std::vector<uint64_t>(5);
 
     std::vector<PrfBlock> tags = EDCServerCollection::generateTagsForTextSearch(payload);
@@ -2214,8 +2145,8 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
         EDCServerPayloadInfo tmpPayload;
         tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
         generateTextTokenSetsForIUPV2(tmpPayload.payload,
-                                      std::vector<StringData>(84000, "s"_sd),
-                                      QueryTypeEnum::SubstringPreview);
+                                      std::vector<std::string_view>(84000, "s"sv),
+                                      QueryTypeEnum::Substring);
         tmpPayload.counts = std::vector<uint64_t>(84001);
         auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
         ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
@@ -2228,10 +2159,10 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
         EDCServerPayloadInfo tmpPayload;
         tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
         generateTextTokenSetsForIUPV2(tmpPayload.payload,
-                                      std::vector<StringData>(42000, "s"_sd),
-                                      QueryTypeEnum::SubstringPreview);
+                                      std::vector<std::string_view>(42000, "s"sv),
+                                      QueryTypeEnum::Substring);
         generateTextTokenSetsForIUPV2(
-            tmpPayload.payload, std::vector<StringData>(42000, "s"_sd), QueryTypeEnum::Suffix);
+            tmpPayload.payload, std::vector<std::string_view>(42000, "s"sv), QueryTypeEnum::Suffix);
         tmpPayload.counts = std::vector<uint64_t>(84001);
         auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
         ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
@@ -2244,12 +2175,12 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
         EDCServerPayloadInfo tmpPayload;
         tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
         generateTextTokenSetsForIUPV2(tmpPayload.payload,
-                                      std::vector<StringData>(28000, "s"_sd),
-                                      QueryTypeEnum::SubstringPreview);
+                                      std::vector<std::string_view>(28000, "s"sv),
+                                      QueryTypeEnum::Substring);
         generateTextTokenSetsForIUPV2(
-            tmpPayload.payload, std::vector<StringData>(28000, "s"_sd), QueryTypeEnum::Suffix);
+            tmpPayload.payload, std::vector<std::string_view>(28000, "s"sv), QueryTypeEnum::Suffix);
         generateTextTokenSetsForIUPV2(
-            tmpPayload.payload, std::vector<StringData>(28000, "s"_sd), QueryTypeEnum::Prefix);
+            tmpPayload.payload, std::vector<std::string_view>(28000, "s"sv), QueryTypeEnum::Prefix);
         tmpPayload.counts = std::vector<uint64_t>(84001);
         auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
         ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
@@ -2257,6 +2188,153 @@ TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
                            DBException,
                            9784106);
     }
+}
+
+static constexpr size_t kFLE2IEVHeaderSize = 1 + UUID::kNumBytes + 1;  // 18, common to IEV types
+static constexpr size_t kFLE2IEVMinCipherTextLen =
+    17;  // ciphertext size minimum enforced by libmongocrypt is 17 (16 byte IV + 1 byte CTR)
+static constexpr size_t kFLE2IEVMblockLen =
+    sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob);
+static constexpr size_t kFLE2TextSubstrCountOffset = kFLE2IEVHeaderSize + sizeof(uint32_t);
+static constexpr size_t kFLE2TextSuffixCountOffset = kFLE2TextSubstrCountOffset + sizeof(uint32_t);
+
+// Helper to write a little-endian uint32 into a byte vector at a given offset.
+static void writeU32LE(std::vector<uint8_t>& buf, size_t offset, uint32_t val) {
+    buf[offset + 0] = val & 0xFF;
+    buf[offset + 1] = (val >> 8) & 0xFF;
+    buf[offset + 2] = (val >> 16) & 0xFF;
+    buf[offset + 3] = (val >> 24) & 0xFF;
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_FLE2IndexedEqualityEncryptedValueV2_ParseErrors) {
+    // First, test the shortest valid buffer can be parsed successfully
+    auto validBuf =
+        std::vector<uint8_t>(kFLE2IEVHeaderSize + kFLE2IEVMinCipherTextLen + kFLE2IEVMblockLen);
+    validBuf.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValueV2);
+    ASSERT_DOES_NOT_THROW(FLE2IndexedEqualityEncryptedValueV2{validBuf});
+
+    // Test short inputs for equality payload
+    std::vector<size_t> truncatedLengths = {0,
+                                            kFLE2IEVHeaderSize - 1,
+                                            kFLE2IEVHeaderSize,
+                                            kFLE2IEVHeaderSize + 1,
+                                            kFLE2IEVHeaderSize + kFLE2IEVMblockLen,
+                                            validBuf.size() - 1};
+    for (auto& testLength : truncatedLengths) {
+        std::vector<uint8_t> buf(testLength);
+        std::copy(validBuf.begin(), validBuf.begin() + testLength, buf.begin());
+        ASSERT_THROWS_CODE(
+            FLE2IndexedEqualityEncryptedValueV2{buf}, DBException, ErrorCodes::LibmongocryptError);
+    }
+
+    // Test with invalid blob type
+    auto buf = validBuf;
+    buf[0] = 255;
+    ASSERT_THROWS_CODE(
+        FLE2IndexedEqualityEncryptedValueV2(buf), DBException, ErrorCodes::LibmongocryptError);
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_FLE2IndexedRangeEncryptedValueV2_ParseErrors) {
+    constexpr size_t kHeaderSize = kFLE2IEVHeaderSize + sizeof(uint8_t);
+
+    // First, test the shortest valid buffer can be parsed successfully
+    auto validBuf =
+        std::vector<uint8_t>(kHeaderSize + kFLE2IEVMinCipherTextLen + kFLE2IEVMblockLen);
+    validBuf.at(kFLE2IEVHeaderSize) = 1;  // total edge count
+    validBuf.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2RangeIndexedValueV2);
+    ASSERT_DOES_NOT_THROW(FLE2IndexedRangeEncryptedValueV2{validBuf});
+
+    // Test short inputs for range payload
+    std::vector<size_t> truncatedLengths = {0,
+                                            kHeaderSize - 1,
+                                            kHeaderSize,
+                                            kHeaderSize + 1,
+                                            kHeaderSize + kFLE2IEVMblockLen,
+                                            validBuf.size() - 1};
+    for (auto& testLength : truncatedLengths) {
+        std::vector<uint8_t> buf(testLength);
+        std::copy(validBuf.begin(), validBuf.begin() + testLength, buf.begin());
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2{buf}, DBException, ErrorCodes::LibmongocryptError);
+    }
+
+    // Test edge count is zero
+    auto buf = validBuf;
+    buf.at(kFLE2IEVHeaderSize) = 0;
+    ASSERT_THROWS_CODE(
+        FLE2IndexedRangeEncryptedValueV2(buf), DBException, ErrorCodes::LibmongocryptError);
+
+    // Test with invalid blob type
+    buf = validBuf;
+    buf[0] = 255;
+    ASSERT_THROWS_CODE(
+        FLE2IndexedRangeEncryptedValueV2(buf), DBException, ErrorCodes::LibmongocryptError);
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_FLE2IndexedTextEncryptedValue_ParseErrors) {
+    constexpr size_t kHeaderSize = kFLE2IEVHeaderSize + 3 * sizeof(uint32_t);
+
+    // First, test the shortest valid buffer can be parsed successfully
+    auto validBuf =
+        std::vector<uint8_t>(kHeaderSize + kFLE2IEVMinCipherTextLen + kFLE2IEVMblockLen);
+    validBuf.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2TextIndexedValue);
+    writeU32LE(validBuf, kFLE2IEVHeaderSize, 1);  // total edge count
+    writeU32LE(validBuf, kFLE2TextSubstrCountOffset, 0);
+    writeU32LE(validBuf, kFLE2TextSuffixCountOffset, 0);
+    ASSERT_DOES_NOT_THROW(FLE2IndexedTextEncryptedValue{validBuf});
+
+    // Test edge count exceeds limit
+    auto buf = validBuf;
+    writeU32LE(buf, kFLE2IEVHeaderSize, EncryptionInformationHelpers::kFLE2PerFieldTagLimit + 1);
+    ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue(buf), DBException, 12773701);
+
+    // Test edge count is zero
+    writeU32LE(buf, kFLE2IEVHeaderSize, 0);
+    ASSERT_THROWS_CODE(
+        FLE2IndexedTextEncryptedValue(buf), DBException, ErrorCodes::LibmongocryptError);
+
+    // Test input buffer less than kHeaderSize
+    std::vector<size_t> truncatedLengths = {0, kHeaderSize - 1};
+    for (auto& length : truncatedLengths) {
+        std::vector<uint8_t> shortBuf(length);
+        std::copy(validBuf.begin(), validBuf.begin() + length, shortBuf.begin());
+        ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue{shortBuf}, DBException, 12773700);
+    }
+
+    // Test with invalid blob type
+    buf = validBuf;
+    buf[0] = 255;
+    ASSERT_THROWS_CODE(
+        FLE2IndexedTextEncryptedValue(buf), DBException, ErrorCodes::LibmongocryptError);
+
+    // Test input buffers where total edge_count = 1, but the length after kHeaderSize is
+    // less than min ciphertext length & mblock length
+    truncatedLengths = {kHeaderSize, kHeaderSize + kFLE2IEVMblockLen, validBuf.size() - 1};
+
+    for (auto& length : truncatedLengths) {
+        std::vector<uint8_t> shortBuf(length);
+        std::copy(validBuf.begin(), validBuf.begin() + length, shortBuf.begin());
+        ASSERT_THROWS_CODE(
+            FLE2IndexedTextEncryptedValue{shortBuf}, DBException, ErrorCodes::LibmongocryptError);
+    }
+
+    // Test total tags > number of metadata blocks in buffer
+    buf = validBuf;
+    writeU32LE(buf, kFLE2IEVHeaderSize, 1024);
+    ASSERT_THROWS_CODE(
+        FLE2IndexedTextEncryptedValue{buf}, DBException, ErrorCodes::LibmongocryptError);
+
+    // substring + suffix overflow
+    // substr(UINT32_MAX) + suffix(1) + 1 wraps to 1 in uint32_t
+    // but equals 4294967297 in uint64_t, still exceeding edge_count(14).
+    buf = validBuf;
+    writeU32LE(buf, kFLE2IEVHeaderSize, 10);                    // set edge_count = 10
+    writeU32LE(buf, kFLE2TextSuffixCountOffset, 1);             // set suffix count = 1
+    buf.insert(buf.end(), kFLE2IEVMblockLen * 9, '\0');         // add 9 additional mblocks
+    ASSERT_DOES_NOT_THROW(FLE2IndexedTextEncryptedValue{buf});  // assert it works
+    writeU32LE(buf, kFLE2TextSubstrCountOffset, std::numeric_limits<uint32_t>::max());
+    ASSERT_THROWS_CODE(
+        FLE2IndexedTextEncryptedValue{buf}, DBException, ErrorCodes::LibmongocryptError);
 }
 
 TEST_F(ServiceContextTest, FLE_EDC_DuplicateSafeContent_CompatibleType) {
@@ -2345,7 +2423,7 @@ TEST_F(ServiceContextTest, FLE_EDC_RangeParamtersFlow_Find) {
 
     auto result = client.encryptPlaceholders(obj, markedDoc, keyVault);
 
-    auto rangePayload = ParsedFindRangePayload(result.firstElement());
+    auto rangePayload = ParsedFindRangePayload(result.firstElement(), ""sv, boost::none);
 
     ASSERT_EQ(rangePayload.precision.get(), 4);
     ASSERT_EQ(rangePayload.trimFactor.get(), 5);
@@ -2467,7 +2545,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagLimitsForTextSearch) {
         for (auto& qt : qtc) {
             auto lb = qt.getStrMinQueryLength().get();
             auto ub = qt.getStrMaxQueryLength().get();
-            actual += ((qt.getQueryType() == QueryTypeEnum::SubstringPreview)
+            actual += ((qt.getQueryType() == QueryTypeEnum::Substring)
                            ? maxTagsForSubstring(lb, ub, qt.getStrMaxLength().get())
                            : maxTagsForSuffixOrPrefix(lb, ub));
         }
@@ -2476,7 +2554,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagLimitsForTextSearch) {
     auto doOneFieldTest = [](const std::vector<QueryTypeConfig>& qtc, boost::optional<int> error) {
         EncryptedFieldConfig efc;
         EncryptedField field{UUID::gen(), "field"};
-        field.setBsonType("string"_sd);
+        field.setBsonType("string"sv);
         field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
         efc.setFields({field});
         if (error) {
@@ -2492,26 +2570,26 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagLimitsForTextSearch) {
 
     // substring field under limit
     std::vector<QueryTypeConfig> qtc = {
-        makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 10, 100, 900)};
+        makeTextQueryTypeConfig(QueryTypeEnum::Substring, 10, 100, 900)};
     assertExpectedMaxTags(qtc, 76987);
     doOneFieldTest(qtc, {});
 
     // substring field at limit
-    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, 1, 83'999);
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::Substring, 1, 1, 83'999);
     assertExpectedMaxTags(qtc, 84'000);
     doOneFieldTest(qtc, {});
 
-    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, 2, 42'000);
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::Substring, 1, 2, 42'000);
     assertExpectedMaxTags(qtc, 84'000);
     doOneFieldTest(qtc, {});
 
     // substring field over limit
-    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 10, 100, 1000);
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::Substring, 10, 100, 1000);
     assertExpectedMaxTags(qtc, 86'087);
     doOneFieldTest(qtc, 10384602);
 
     // overflow uint32_t
-    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, INT32_MAX, INT32_MAX);
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::Substring, 1, INT32_MAX, INT32_MAX);
     doOneFieldTest(qtc, 10384601);
 
     for (auto qtype : {QueryTypeEnum::Suffix, QueryTypeEnum::Prefix}) {
@@ -2579,7 +2657,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
             return qtc;
         };
     auto makeEncryptedFields =
-        [](int numFields, StringData bsonType, const std::vector<QueryTypeConfig>& qtc) {
+        [](int numFields, std::string_view bsonType, const std::vector<QueryTypeConfig>& qtc) {
             std::vector<EncryptedField> fields;
             for (int i = 0; i < numFields; i++) {
                 EncryptedField field{UUID::gen(), fmt::format("field_{}", i)};
@@ -2596,7 +2674,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
             FLEOverrideTagOverheadData tagOverheadOverride;
             tagOverheadOverride.setShouldOverride(true);
 
-            RAIIServerParameterControllerForTest overrideTagOverheadLimit(
+            unittest::ServerParameterGuard overrideTagOverheadLimit(
                 "fleAllowTotalTagOverheadToExceedBSONLimit", tagOverheadOverride);
             ASSERT_DOES_NOT_THROW(
                 EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc));
@@ -2618,57 +2696,57 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
 
     // equality above total tag storage limit
     EncryptedFieldConfig efc;
-    efc.setFields(makeEncryptedFields(131073, "string"_sd, {makeEqualityQueryTypeConfig()}));
+    efc.setFields(makeEncryptedFields(131073, "string"sv, {makeEqualityQueryTypeConfig()}));
     doMultipleFieldsTest(efc, 10431800);
 
     // equality within total tag storage limit
-    efc.setFields(makeEncryptedFields(131072, "string"_sd, {makeEqualityQueryTypeConfig()}));
+    efc.setFields(makeEncryptedFields(131072, "string"sv, {makeEqualityQueryTypeConfig()}));
     doMultipleFieldsTest(efc, {});
 
     // range above total tag storage limit
     efc.setFields(makeEncryptedFields(
-        11916, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
+        11916, "int"sv, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
     doMultipleFieldsTest(efc, 10431800);
 
     // range within total tag storage limit
     efc.setFields(makeEncryptedFields(
-        11915, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
+        11915, "int"sv, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
     doMultipleFieldsTest(efc, {});
 
     // substring above total tag storage limit
     efc.setFields(makeEncryptedFields(
-        37, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)}));
+        37, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Substring, 2, 10, 400)}));
     doMultipleFieldsTest(efc, 10431800);
 
     // substring within total tag storage limit
     efc.setFields(makeEncryptedFields(
-        36, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)}));
+        36, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Substring, 2, 10, 400)}));
     doMultipleFieldsTest(efc, {});
 
     // prefix above total tag storage limit
     efc.setFields(makeEncryptedFields(
-        1286, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})}));
+        1286, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})}));
     doMultipleFieldsTest(efc, 10431800);
 
     // prefix within total tag storage limit
     efc.setFields(makeEncryptedFields(
-        1285, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})}));
+        1285, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})}));
     doMultipleFieldsTest(efc, {});
 
     // suffix above total tag storage limit
     efc.setFields(makeEncryptedFields(
-        1286, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})}));
+        1286, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})}));
     doMultipleFieldsTest(efc, 10431800);
 
     // suffix within total tag storage limit
     efc.setFields(makeEncryptedFields(
-        1285, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})}));
+        1285, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})}));
     doMultipleFieldsTest(efc, {});
 
     // suffix+prefix above total tag storage limit
     efc.setFields(
         makeEncryptedFields(144,
-                            "string"_sd,
+                            "string"sv,
                             {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {}),
                              makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 90, 900, {})}));
     doMultipleFieldsTest(efc, 10431800);
@@ -2676,7 +2754,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
     // suffix+prefix within total tag storage limit
     efc.setFields(
         makeEncryptedFields(143,
-                            "string"_sd,
+                            "string"sv,
                             {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {}),
                              makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 90, 900, {})}));
     doMultipleFieldsTest(efc, {});
@@ -2684,11 +2762,11 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
     // mixture of substring, suffix, and prefix above total tag storage limit
     std::vector<EncryptedField> fields;
     auto substringFields = makeEncryptedFields(
-        36, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)});
+        36, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Substring, 2, 10, 400)});
     auto prefixFields = makeEncryptedFields(
-        15, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})});
+        15, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Prefix, 9, 109, {})});
     auto suffixFields = makeEncryptedFields(
-        15, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})});
+        15, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})});
     fields.insert(fields.end(), substringFields.begin(), substringFields.end());
     fields.insert(fields.end(), prefixFields.begin(), prefixFields.end());
     fields.insert(fields.end(), suffixFields.begin(), suffixFields.end());
@@ -2697,7 +2775,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
 
     // mixture of substring, suffix, and prefix within total tag storage limit
     suffixFields = makeEncryptedFields(
-        14, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})});
+        14, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Suffix, 9, 109, {})});
     fields.clear();
     fields.insert(fields.end(), substringFields.begin(), substringFields.end());
     fields.insert(fields.end(), prefixFields.begin(), prefixFields.end());
@@ -2707,10 +2785,10 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
 
     // mixture of substring, equality, and range above total tag storage limit
     substringFields = makeEncryptedFields(
-        14, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)});
-    auto equalityFields = makeEncryptedFields(6785, "string"_sd, {makeEqualityQueryTypeConfig()});
+        14, "string"sv, {makeTextQueryTypeConfig(QueryTypeEnum::Substring, 2, 10, 400)});
+    auto equalityFields = makeEncryptedFields(6785, "string"sv, {makeEqualityQueryTypeConfig()});
     auto rangeFields = makeEncryptedFields(
-        6800, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)});
+        6800, "int"sv, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)});
     fields.clear();
     fields.insert(fields.end(), substringFields.begin(), substringFields.end());
     fields.insert(fields.end(), equalityFields.begin(), equalityFields.end());
@@ -2719,7 +2797,7 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
     doMultipleFieldsTest(efc, 10431800);
 
     // mixture of substring, equality, and range within total tag storage limit
-    equalityFields = makeEncryptedFields(5000, "string"_sd, {makeEqualityQueryTypeConfig()});
+    equalityFields = makeEncryptedFields(5000, "string"sv, {makeEqualityQueryTypeConfig()});
     fields.clear();
     fields.insert(fields.end(), substringFields.begin(), substringFields.end());
     fields.insert(fields.end(), equalityFields.begin(), equalityFields.end());
@@ -2728,9 +2806,9 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
     doMultipleFieldsTest(efc, {});
 }
 
-TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringPreviewParameterLimits) {
+TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringParameterLimits) {
     auto makeQueryTypeConfig = [](int32_t lb, int32_t ub, int32_t mlen) {
-        QueryTypeConfig qtc{QueryTypeEnum::SubstringPreview};
+        QueryTypeConfig qtc{QueryTypeEnum::Substring};
         qtc.setStrMinQueryLength(lb);
         qtc.setStrMaxQueryLength(ub);
         qtc.setStrMaxLength(mlen);
@@ -2739,7 +2817,49 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringPreviewParameterLi
     auto doOneFieldTest = [](const std::vector<QueryTypeConfig>& qtc, boost::optional<int> error) {
         EncryptedFieldConfig efc;
         EncryptedField field{UUID::gen(), "field"};
-        field.setBsonType("string"_sd);
+        field.setBsonType("string"sv);
+        field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
+        efc.setFields({field});
+        if (error) {
+            ASSERT_THROWS_CODE(
+                EncryptionInformationHelpers::checkSubstringParameterLimitsNotExceeded(efc),
+                DBException,
+                *error);
+        } else {
+            ASSERT_DOES_NOT_THROW(
+                EncryptionInformationHelpers::checkSubstringParameterLimitsNotExceeded(efc));
+        }
+    };
+
+    // substring max length over upper limit
+    std::vector<QueryTypeConfig> qtc = {makeQueryTypeConfig(2, 6, 900)};
+    doOneFieldTest(qtc, 12860003);
+
+    // substring max query length over upper limit
+    qtc[0] = makeQueryTypeConfig(2, 60, 50);
+    doOneFieldTest(qtc, 12860002);
+
+    // substring min query length below lower limit
+    qtc[0] = makeQueryTypeConfig(1, 6, 50);
+    doOneFieldTest(qtc, 12860001);
+
+    // substring params all within limits
+    qtc[0] = makeQueryTypeConfig(2, 6, 50);
+    doOneFieldTest(qtc, {});
+}
+
+TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringPreviewParameterLimits) {
+    auto makeQueryTypeConfig = [](int32_t lb, int32_t ub, int32_t mlen) {
+        QueryTypeConfig qtc{QueryTypeEnum::SubstringPreviewDeprecated};
+        qtc.setStrMinQueryLength(lb);
+        qtc.setStrMaxQueryLength(ub);
+        qtc.setStrMaxLength(mlen);
+        return qtc;
+    };
+    auto doOneFieldTest = [](const std::vector<QueryTypeConfig>& qtc, boost::optional<int> error) {
+        EncryptedFieldConfig efc;
+        EncryptedField field{UUID::gen(), "field"};
+        field.setBsonType("string"sv);
         field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
         efc.setFields({field});
         if (error) {
@@ -2753,19 +2873,19 @@ TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringPreviewParameterLi
         }
     };
 
-    // substring max length over upper limit
+    // substringPreview max length over upper limit
     std::vector<QueryTypeConfig> qtc = {makeQueryTypeConfig(2, 10, 900)};
     doOneFieldTest(qtc, 10453202);
 
-    // substring max query length over upper limit
+    // substringPreview max query length over upper limit
     qtc[0] = makeQueryTypeConfig(2, 60, 60);
     doOneFieldTest(qtc, 10453201);
 
-    // substring min query length below lower limit
+    // substringPreview min query length below lower limit
     qtc[0] = makeQueryTypeConfig(1, 10, 60);
     doOneFieldTest(qtc, 10453200);
 
-    // substring params all within limtis
+    // substringPreview params all within limits
     qtc[0] = makeQueryTypeConfig(2, 10, 60);
     doOneFieldTest(qtc, {});
 }
@@ -2928,7 +3048,7 @@ TEST_F(ServiceContextTest, FLE1_EncryptAlreadyEncryptedDataLegacy) {
     builder.append("plainText", "sample");
 
     BSONObjBuilder builder1;
-    auto data = hexblob::decode("676172626167650a"_sd);
+    auto data = hexblob::decode("676172626167650a"sv);
     builder1.appendBinData("a", data.length(), BinDataType::Encrypt, data.data());
     auto doc = builder1.obj();
 
@@ -3166,11 +3286,11 @@ TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestEmpty)
 
 TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTest) {
     const ECOCToken token1(
-        decodePrf("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb347"_sd));
+        decodePrf("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb347"sv));
     const ECOCToken token2(
-        decodePrf("6ebfb347576b4be4fe585eed96d088a0c55f3c96b50069e8a230b852a05fb4be"_sd));
+        decodePrf("6ebfb347576b4be4fe585eed96d088a0c55f3c96b50069e8a230b852a05fb4be"sv));
     const AnchorPaddingRootToken anchor2(
-        decodePrf("7df988a08052e24dbe938c58b91ab00c812f58eabb3d4db1b047c3187d57f668"_sd));
+        decodePrf("7df988a08052e24dbe938c58b91ab00c812f58eabb3d4db1b047c3187d57f668"sv));
 
     for (const bool includePaddingToken : {false, true}) {
         BSONObjBuilder builder;
@@ -3220,7 +3340,7 @@ TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestInvali
 
 TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestTooShort) {
     const auto kBadToken =
-        hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb3"_sd);
+        hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb3"sv);
     constexpr auto kInvalidPrfLength = 9616300;
 
     BSONObjBuilder builder;
@@ -3231,7 +3351,7 @@ TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestTooSho
 
 TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestTooLong) {
     const auto kBadToken =
-        hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb34701"_sd);
+        hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb34701"sv);
     constexpr auto kInvalidPrfLength = 9616300;
 
     BSONObjBuilder builder;
@@ -3247,18 +3367,18 @@ TEST_F(ServiceContextTest, CompactionHelpersTest_validateCompactionOrCleanupToke
     for (auto& field : efc.getFields()) {
         // validate fails until all fields are present
         ASSERT_THROWS_CODE(CompactionHelpers::validateCompactionOrCleanupTokens(
-                               efc, builder.asTempObj(), "Compact"_sd),
+                               efc, builder.asTempObj(), "Compact"sv),
                            DBException,
                            7294900);
 
         // validate doesn't care about the value, so this is fine
         builder.append(field.getPath(), "foo");
     }
-    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.asTempObj(), "Compact"_sd);
+    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.asTempObj(), "Compact"sv);
 
     // validate OK if obj has extra fields
     builder.append("abc.xyz", "foo");
-    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.obj(), "Compact"_sd);
+    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.obj(), "Compact"sv);
 }
 
 TEST_F(ServiceContextTest, EDCServerCollectionTest_GenerateEDCTokens) {
@@ -3326,7 +3446,7 @@ TEST_F(ServiceContextTest, EdgeCalcTest_TrimFactorConstraints) {
     ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 5.0, 1, 1, 6), AssertionException, 8574105);
 }
 
-void doEdgeCalcTestIdentifyLeaf(std::unique_ptr<Edges> edges, StringData expectLeaf) {
+void doEdgeCalcTestIdentifyLeaf(std::unique_ptr<Edges> edges, std::string_view expectLeaf) {
     ASSERT_EQ(edges->getLeaf(), expectLeaf);
     auto edgeSet = edges->get();
     // sanity check edge set size vs edges->size()
@@ -3338,26 +3458,25 @@ void doEdgeCalcTestIdentifyLeaf(std::unique_ptr<Edges> edges, StringData expectL
 }
 
 TEST_F(ServiceContextTest, EdgeCalcTest_IdentifyLeaf) {
-    constexpr auto k42Leaf64 =
-        "1000000000000000000000000000000000000000000000000000000000101010"_sd;
+    constexpr auto k42Leaf64 = "1000000000000000000000000000000000000000000000000000000000101010"sv;
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 1, 0), k42Leaf64);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 7, 0), k42Leaf64);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 1, 10), k42Leaf64);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 7, 10), k42Leaf64);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 15, 10), k42Leaf64);
-    constexpr auto k42Leaf32 = "10000000000000000000000000101010"_sd;
+    constexpr auto k42Leaf32 = "10000000000000000000000000101010"sv;
     doEdgeCalcTestIdentifyLeaf(getEdgesInt32(42, {}, {}, 2, 0), k42Leaf32);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt32(42, {}, {}, 11, 0), k42Leaf32);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt32(42, {}, {}, 2, 9), k42Leaf32);
     doEdgeCalcTestIdentifyLeaf(getEdgesInt32(42, {}, {}, 11, 9), k42Leaf32);
     constexpr auto k42LeafDouble =
-        "1100000001000101000000000000000000000000000000000000000000000000"_sd;
+        "1100000001000101000000000000000000000000000000000000000000000000"sv;
     doEdgeCalcTestIdentifyLeaf(getEdgesDouble(42, {}, {}, {}, 3, 0), k42LeafDouble);
     doEdgeCalcTestIdentifyLeaf(getEdgesDouble(42, {}, {}, {}, 13, 0), k42LeafDouble);
     doEdgeCalcTestIdentifyLeaf(getEdgesDouble(42, {}, {}, {}, 3, 8), k42LeafDouble);
     doEdgeCalcTestIdentifyLeaf(getEdgesDouble(42, {}, {}, {}, 13, 8), k42LeafDouble);
     constexpr auto k42LeafDecimal128 =
-        "10101110001110011011100011110011101110001010011010111110001110010011001110111000101010110010100111111111111111111110100000000000"_sd;
+        "10101110001110011011100011110011101110001010011010111110001110010011001110111000101010110010100111111111111111111110100000000000"sv;
     doEdgeCalcTestIdentifyLeaf(getEdgesDecimal128(Decimal128(42), {}, {}, {}, 5, 0),
                                k42LeafDecimal128);
     doEdgeCalcTestIdentifyLeaf(getEdgesDecimal128(Decimal128(42), {}, {}, {}, 17, 0),
@@ -3391,6 +3510,12 @@ TEST_F(ServiceContextTest, EdgeCalcTest_SubstringTagCalculators) {
     ASSERT_THROWS_CODE(
         msizeForSubstring(INT32_MAX - 128, 1, INT32_MAX, INT32_MAX), DBException, 10384601);
 
+    // Boundary case: strLen + BSON overhead == 16.
+    // PKCS7: 16-byte aligned plaintext lengths should add an extra 16-byte padding.
+    ASSERT_EQ(3, msizeForSubstring(10, 10, 100, 200));    // below boundary, padlen=11
+    ASSERT_EQ(171, msizeForSubstring(11, 10, 100, 200));  // exact boundary, padlen=27
+    ASSERT_EQ(171, msizeForSubstring(12, 10, 100, 200));  // above boundary, padlen=27
+
     ASSERT_EQ(87815, maxTagsForSubstring(10, 100, 1019));    // lb < ub < mlen
     ASSERT_EQ(510555, maxTagsForSubstring(10, 1019, 1019));  // lb < ub == mlen
     ASSERT_EQ(1003, maxTagsForSubstring(17, 17, 1019));      // lb == ub < mlen
@@ -3406,6 +3531,12 @@ TEST_F(ServiceContextTest, EdgeCalcTest_SuffixPrefixTagCalculators) {
     ASSERT_EQ(136, msizeForSuffixOrPrefix(150, 20, 155));  // ub == (padlen=155)
     ASSERT_EQ(131, msizeForSuffixOrPrefix(150, 20, 150));  // ub < (padlen=155)
     ASSERT_THROWS_CODE(msizeForSuffixOrPrefix(INT32_MAX, 1, INT32_MAX), DBException, 10384600);
+
+    // Boundary case: strLen + BSON overhead == 16.
+    // PKCS7: 16-byte aligned plaintext lengths should add an extra 16-byte padding.
+    ASSERT_EQ(2, msizeForSuffixOrPrefix(10, 10, 100));   // below boundary, padlen=11
+    ASSERT_EQ(18, msizeForSuffixOrPrefix(11, 10, 100));  // exact boundary, padlen=27
+    ASSERT_EQ(18, msizeForSuffixOrPrefix(12, 10, 100));  // above boundary, padlen=27
 
     ASSERT_EQ(91, maxTagsForSuffixOrPrefix(10, 100));  // lb < ub
     ASSERT_EQ(1, maxTagsForSuffixOrPrefix(100, 100));  // lb == ub
@@ -4935,7 +5066,7 @@ public:
         // The actual size of edges should be equal to edges->size(). This is a sanity check.
         ASSERT_EQ(expect, edges->size());
         const auto calculated = getEdgesLength(
-            fieldType, "rangeField"_sd, makeRangeQueryTypeConfig(lb, ub, precision, sparsity));
+            fieldType, "rangeField"sv, makeRangeQueryTypeConfig(lb, ub, precision, sparsity));
         if (expect != calculated) {
             // Context for the exception we're about to throw.
             LOGV2(8574790,
@@ -5001,7 +5132,7 @@ public:
                             // by the test.
                             try {
                                 auto qtc = makeRangeQueryTypeConfig(lb, ub, precision, sparsity);
-                                validateRangeIndex(BSONType::numberDouble, "rangeField"_sd, qtc);
+                                validateRangeIndex(BSONType::numberDouble, "rangeField"sv, qtc);
                             } catch (DBException& e) {
                                 if (e.code() == 6966805 || e.code() == 6966806 ||
                                     e.code() == 9157100 || e.code() == 9178801 ||
@@ -5230,7 +5361,7 @@ TEST_F(EdgeTestFixture, getEdgesLengthDate) {
 class AnchorPaddingFixture : public ServiceContextTest {
 public:
     static constexpr auto kAnchorPaddingRootHex =
-        "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"_sd;
+        "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"sv;
 
     const AnchorPaddingRootToken _rootToken{decodePrf(kAnchorPaddingRootHex)};
     const AnchorPaddingKeyToken _keyToken = AnchorPaddingKeyToken::deriveFrom(_rootToken);
@@ -5247,10 +5378,10 @@ TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
     {
         // kHashOf042 = SHA256_HMAC(Key, 0 || 42), numbers as 64bit LE integers
         constexpr auto kHashOf042 =
-            "0564ba5c84f27f20dd5a0ed69cace035983c50ccb4fa94244a475ab7c1e891ee"_sd;
+            "0564ba5c84f27f20dd5a0ed69cace035983c50ccb4fa94244a475ab7c1e891ee"sv;
         auto expectId = decodePrf(kHashOf042);
 
-        auto idElem = doc["_id"_sd];
+        auto idElem = doc["_id"sv];
         ASSERT_EQ(idElem.type(), BSONType::binData);
         ASSERT_EQ(idElem.binDataType(), BinDataGeneral);
 
@@ -5258,13 +5389,13 @@ TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
         const char* actualIdPtr = idElem.binData(actualIdLen);
         ASSERT_EQ(actualIdLen, expectId.size());
 
-        PrfBlock actualId = blockToArray(StringData(actualIdPtr, actualIdLen));
+        PrfBlock actualId = blockToArray(std::string_view(actualIdPtr, actualIdLen));
         ASSERT(expectId == actualId);
     }
 
     // value := Enc(0 || 0)
     {
-        auto valueElem = doc["value"_sd];
+        auto valueElem = doc["value"sv];
         ASSERT_EQ(valueElem.type(), BSONType::binData);
         ASSERT_EQ(valueElem.binDataType(), BinDataGeneral);
         int len = 0;
@@ -5288,6 +5419,52 @@ TEST_F(ServiceContextTest, fleEncryptAndDecrypt) {
     auto decrypt2 = uassertStatusOK(FLEUtil::decryptData(key, encrypt2));
     ASSERT_EQ(decrypt1, decrypt2);
     ASSERT_EQ(decrypt1, plaintext);
+}
+
+namespace {
+QueryTypeConfig textQtcWithType(QueryTypeEnum qt) {
+    QueryTypeConfig q;
+    q.setQueryType(qt);
+    q.setContention(4);
+    return q;
+}
+
+EncryptedField fieldWithQueries(std::vector<QueryTypeConfig> qtcs) {
+    EncryptedField ef(UUID::gen(), "encrypted");
+    ef.setBsonType("string"sv);
+    ef.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{std::move(qtcs)});
+    return ef;
+}
+}  // namespace
+
+TEST(FLECrypto, GetQueryTypeMatchingReturnsFirstMatch) {
+    auto field = fieldWithQueries(
+        {textQtcWithType(QueryTypeEnum::Suffix), textQtcWithType(QueryTypeEnum::Prefix)});
+
+    auto suffixResult =
+        getQueryTypeMatching(field, [](QueryTypeEnum qt) { return qt == QueryTypeEnum::Suffix; });
+    ASSERT(suffixResult);
+    ASSERT(suffixResult->getQueryType() == QueryTypeEnum::Suffix);
+
+    auto prefixResult =
+        getQueryTypeMatching(field, [](QueryTypeEnum qt) { return qt == QueryTypeEnum::Prefix; });
+    ASSERT(prefixResult);
+    ASSERT(prefixResult->getQueryType() == QueryTypeEnum::Prefix);
+}
+
+TEST(FLECrypto, GetQueryTypeMatchingNoMatchReturnsNone) {
+    auto field = fieldWithQueries({textQtcWithType(QueryTypeEnum::Prefix)});
+    auto result =
+        getQueryTypeMatching(field, [](QueryTypeEnum qt) { return qt == QueryTypeEnum::Suffix; });
+    ASSERT_FALSE(result);
+}
+
+TEST(FLECrypto, GetQueryTypeMatchingNoQueriesReturnsNone) {
+    EncryptedField field(UUID::gen(), "encrypted");
+    field.setBsonType("int"sv);
+    auto result =
+        getQueryTypeMatching(field, [](QueryTypeEnum qt) { return qt == QueryTypeEnum::Suffix; });
+    ASSERT_FALSE(result);
 }
 
 }  // namespace mongo

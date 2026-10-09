@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/sbe/stages/block_to_row.h"
 
@@ -36,6 +10,7 @@
 #include "mongo/util/assert_util.h"
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
                                  value::SlotVector blocks,
                                  value::SlotVector valsOut,
@@ -43,7 +18,7 @@ BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
                                  PlanNodeId nodeId,
                                  PlanYieldPolicySBE* yieldPolicy,
                                  bool participateInTrialRunTracking)
-    : PlanStage("block_to_row"_sd, yieldPolicy, nodeId, participateInTrialRunTracking),
+    : PlanStage("block_to_row"sv, yieldPolicy, nodeId, participateInTrialRunTracking),
       _blockSlotIds(std::move(blocks)),
       _valsOutSlotIds(std::move(valsOut)),
       _bitmapSlotId(bitmapSlotId) {
@@ -54,14 +29,6 @@ BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
 }
 
 void BlockToRowStage::freeDeblockedValueRuns() {
-    if (_deblockedOwned) {
-        for (auto& run : _deblockedValueRuns) {
-            for (auto [t, v] : run) {
-                value::releaseValue(t, v);
-            }
-        }
-        _deblockedOwned = false;
-    }
     _deblockedValueRuns.clear();
 }
 
@@ -106,7 +73,6 @@ void BlockToRowStage::open(bool reOpen) {
 
     _commonStats.opens++;
     _children[0]->open(reOpen);
-    _childOpened = true;
 }
 
 PlanState BlockToRowStage::getNextFromDeblockedValues() {
@@ -115,8 +81,7 @@ PlanState BlockToRowStage::getNextFromDeblockedValues() {
     }
 
     for (size_t i = 0; i < _deblockedValueRuns.size(); ++i) {
-        auto [t, v] = _deblockedValueRuns[i][_curIdx];
-        _valsOutAccessors[i].reset(t, v);
+        _valsOutAccessors[i].reset(_deblockedValueRuns[i][_curIdx].view());
     }
 
     ++_curIdx;
@@ -165,14 +130,17 @@ void BlockToRowStage::prepareDeblock() {
                 selectivityVector.empty() || deblocked.count() == selectivityVector.size());
 
         // Apply the selectivity vector here, only taking the values which are included.
-        std::vector<std::pair<value::TypeTags, value::Value>> tvVec;
+        // The deblocked values are non-owning views into the block's buffer, which is held by
+        // the child stage and remains valid until the next child getNext(). doSaveState() copies
+        // them to owned values before a yield can invalidate the buffer.
+        std::vector<value::TagValueMaybeOwned> tvVec;
         tvVec.resize(onesInBitset.get_value_or(deblocked.count()));
 
         {
             size_t idxInTvVec = 0;
             for (size_t i = 0; i < deblocked.count(); ++i) {
                 if (selectivityVector.empty() || selectivityVector[i]) {
-                    tvVec[idxInTvVec++] = std::pair(deblocked[i].tag, deblocked[i].value);
+                    tvVec[idxInTvVec++] = value::TagValueMaybeOwned(deblocked[i]);
                 }
             }
         }
@@ -228,10 +196,7 @@ void BlockToRowStage::close() {
     auto optTimer(getOptTimer(_opCtx));
 
     trackClose();
-    if (_childOpened) {
-        _children[0]->close();
-        _childOpened = false;
-    }
+    _children[0]->close();
 }
 
 void BlockToRowStage::doSaveState() {
@@ -241,18 +206,15 @@ void BlockToRowStage::doSaveState() {
     // current one to be conservative. Note that copying the current value is not strictly necessary
     // when slotsAccessible() is false, but we do it anyway since it's a negligible fixed cost per
     // save/restore.
-    if (!_deblockedOwned) {
-        for (auto& run : _deblockedValueRuns) {
-            // Copy the values which have not yet been returned, starting at _curIdx.
-            for (size_t i = _curIdx; i < run.size(); ++i) {
-                auto [t, v] = run[i];
-                run[i - _curIdx] = value::copyValue(t, v);
-            }
-            run.resize(run.size() - _curIdx);
+    for (auto& run : _deblockedValueRuns) {
+        // Copy the values which have not yet been returned, starting at _curIdx.
+        for (size_t i = _curIdx; i < run.size(); ++i) {
+            run[i - _curIdx] = std::move(run[i]);
+            run[i - _curIdx].makeOwned();
         }
-        _deblockedOwned = true;
-        _curIdx = 0;
+        run.resize(run.size() - _curIdx);
     }
+    _curIdx = 0;
 }
 
 std::unique_ptr<PlanStageStats> BlockToRowStage::getStats(bool includeDebugInfo) const {

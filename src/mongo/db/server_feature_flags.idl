@@ -1,30 +1,5 @@
-# Copyright (C) 2021-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 
 global:
     cpp_namespace: "mongo"
@@ -54,6 +29,13 @@ feature_flags:
         cpp_varname: gFeatureFlagRecordIdsReplicated
         default: false
         fcv_gated: true
+    featureFlagClusteredCollectionOplogApplyFastPath:
+        description: >-
+            Enable bypassing the query system on oplog application for clustered-on-_id
+            collections by deriving the RecordId directly from the _id field.
+        cpp_varname: gFeatureFlagClusteredCollectionOplogApplyFastPath
+        default: false
+        fcv_gated: true
     featureFlagStreams:
         description: "Enable support for streams"
         cpp_varname: gFeatureFlagStreams
@@ -71,7 +53,14 @@ feature_flags:
             Feature flag to enable oplog truncation based on size and time for disagg,
             instead of oplog truncation only based on time.
         cpp_varname: gFeatureFlagSizeBasedOplogTruncationForDisagg
-        default: false
+        default: true
+        fcv_gated: false
+    featureFlagElegantStepDownForDisagg:
+        description: >-
+            Feature flag to enable elegant (in-process, graceful) step down for disaggregated
+            storage, instead of triggering a non-graceful shutdown on step down.
+        cpp_varname: gFeatureFlagElegantStepDownForDisagg
+        default: true
         fcv_gated: false
     featureFlagEndOfTransactionChangeEvent:
         description: "Feature flag to enable endOfTransaction oplog entry and change stream event"
@@ -124,7 +113,8 @@ feature_flags:
     featureFlagConstraintValidationLevel:
         description: "Enables the use of the constraint schema validation level."
         cpp_varname: gFeatureFlagConstraintValidationLevel
-        default: false
+        default: true
+        version: 9.0
         fcv_gated: true
     featureFlagDistinguishMetadataInconsistencyFromConflictingOperation:
         description: "Feature flag to distinguish ChunkMetadataInconsistency from ConflictingOperationInProgress error"
@@ -172,6 +162,14 @@ feature_flags:
         default: true
         version: 9.0
         fcv_gated: true
+    featureFlagFixedBucketingCatalog:
+        description: >-
+            Enables catalog support for the fixedBucketing timeseries option.
+        cpp_varname: gFeatureFlagFixedBucketingCatalog
+        default: true
+        version: 9.0
+        fcv_gated: true
+        check_against_fcv: operation_fcv_only
     featureFlagMongodProxyProtocolSupport:
         description: "Enables non-OCS proxy protocol connections on Mongos and Mongod"
         cpp_varname: gFeatureFlagMongodProxyProtocolSupport
@@ -202,16 +200,11 @@ feature_flags:
     featureFlagIntentRegistration:
         description: "Enables intent registration in place of RSTL acquisitions"
         cpp_varname: gFeatureFlagIntentRegistration
-        default: false
+        default: true
         fcv_gated: false
     featureFlagRecordDelinquentMetrics:
         description: "Enables delinquent metrics recording"
         cpp_varname: gFeatureFlagRecordDelinquentMetrics
-        default: true
-        fcv_gated: false
-    featureFlagRateLimitIngressConnectionEstablishment:
-        description: "Queues connection establishment after exceeding the maximum rate"
-        cpp_varname: gFeatureFlagRateLimitIngressConnectionEstablishment
         default: true
         fcv_gated: false
     featureFlagIngressRateLimiting:
@@ -249,13 +242,8 @@ feature_flags:
         fcv_gated: false
         incremental_rollout_phase: in_development
     featureFlagReplicatedFastCount:
-        description: "Track collection size and count in replicated internal collections"
+        description: "Track collection size and count in replicated internal containers"
         cpp_varname: gFeatureFlagReplicatedFastCount
-        default: false
-        fcv_gated: true
-    featureFlagReplicatedFastCountDurability:
-        description: "Changes to replicated fast count that modify persisted data should be guarded behind this flag"
-        cpp_varname: gFeatureFlagReplicatedFastCountDurability
         default: false
         fcv_gated: true
     featureFlagOtelMetrics:
@@ -271,11 +259,17 @@ feature_flags:
         check_against_fcv: operation_fcv_only
     # TODO (SERVER-122670) Remove this feature flag once the feature is fully rolled out.
     featureFlagCreateSupportsStorageTierOptions:
-        description: "Enables the catalog support for creating cold/hot collections and indexes for disaggregated storage"
+        description: "Enables the catalog support for creating cold/hot collections and indexes"
         cpp_varname: gFeatureFlagCreateSupportsStorageTierOptions
-        default: false
+        default: true
+        version: 9.1
         fcv_gated: true
         check_against_fcv: operation_fcv_only
+    featureFlagColdCollectionsRollout:
+        description: "Controls whether users are eligible to create cold collections and indexes"
+        cpp_varname: gFeatureFlagColdCollectionsRollout
+        default: false
+        fcv_gated: false
     featureFlagDisallowFindAndModifyImageCollection:
         description: "Disallow storing findAndModify pre/post-images to a side collection."
         cpp_varname: gFeatureFlagDisallowFindAndModifyImageCollection
@@ -328,6 +322,85 @@ feature_flags:
     featureFlagDSCLinearizableReadConcern:
         description: "Enable linearizable read concern for dsc."
         cpp_varname: gFeatureFlagDSCLinearizableReadConcern
+        default: true
+        fcv_gated: false
+    featureFlagKEKPushMode:
+        description: "Enable push mode for KEKs."
+        cpp_varname: gFeatureFlagKEKPushMode
+        default: true
+        fcv_gated: false
+    featureFlagCMKRotation:
+        description: "Enable rotation of the customer master key (CMK)."
+        cpp_varname: gFeatureFlagCMKRotation
+        default: true
+        fcv_gated: false
+        incremental_rollout_phase: release
+    featureFlagContinuousInternodeValidationPerDocument:
+        description: "Enable continuous internode validation per document for DSC nodes."
+        cpp_varname: gFeatureFlagContinuousInternodeValidationPerDocument
+        default: false
+        fcv_gated: true
+    featureFlagContinuousInternodeValidationPerDocumentDurability:
+        description: "Enable 64-bit hash size for continuous internode validation per document on DSC nodes."
+        cpp_varname: gFeatureFlagContinuousInternodeValidationPerDocumentDurability
+        default: false
+        fcv_gated: true
+    featureFlagContinuousInternodeValidationPerCollection:
+        description: "Enable continuous internode validation per collection for DSC nodes."
+        cpp_varname: gFeatureFlagContinuousInternodeValidationPerCollection
+        default: false
+        fcv_gated: true
+    featureFlagQESubstringSearch:
+        description: "Queryable Encryption encrypted substring search support"
+        cpp_varname: gFeatureFlagQESubstringSearch
+        default: true
+        version: 9.0
+        fcv_gated: true
+    # TODO (SERVER-76346): Remove this feature flag once parallel validation is the permanent default.
+    featureFlagParallelCollectionValidation:
+        description: "When enabled, collection validation will use a parallel execution model to validate records."
+        cpp_varname: gFeatureFlagParallelCollectionValidation
+        default: false
+        fcv_gated: false
+    featureFlagBatchedContainerWrites:
+        description: "When enabled, allows a batched container write format to support compact oplog entries."
+        cpp_varname: gFeatureFlagBatchedContainerWrites
+        default: true
+        version: 9.1
+        fcv_gated: true
+    featureFlagServerStatusMetricsFiltering:
+        description: "Enable metrics filtering for the serverStatus command."
+        cpp_varname: gFeatureFlagServerStatusMetricsFiltering
+        default: false
+        fcv_gated: false
+    featureFlagReplSetGetStatusMetricsFiltering:
+        description: "Enable metrics filtering for the replSetGetStatus command."
+        cpp_varname: gFeatureFlagReplSetGetStatusMetricsFiltering
+        default: false
+        fcv_gated: false
+    featureFlagCollStatsMetricsFiltering:
+        description: "Enable metrics filtering for the collStats command, the $collStats aggregation stage, and the dbStats command."
+        cpp_varname: gFeatureFlagCollStatsMetricsFiltering
+        default: false
+        fcv_gated: false
+    featureFlagMetricsFiltering:
+        description: "Enable metrics filtering."
+        cpp_varname: gFeatureFlagMetricsFiltering
+        default: false
+        fcv_gated: false
+    featureFlagEnableSchemaEpochs:
+        description: "Enable using WiredTiger schema epochs on supported platforms."
+        cpp_varname: gFeatureFlagEnableSchemaEpochs
+        default: true
+        fcv_gated: false
+    featureFlagPipelinedOplogApplier:
+        description: "Enable pipelined oplog applier."
+        cpp_varname: gFeatureFlagPipelinedOplogApplier
+        default: false
+        fcv_gated: false
+    featureFlagAllocationTimeMemoryTracking:
+        description: "Enable allocation time memory tracking."
+        cpp_varname: gFeatureFlagAllocationTimeMemoryTracking
         default: false
         fcv_gated: false
 
@@ -339,7 +412,7 @@ server_parameters:
             even when the feature flag is enabled. This parameter is intended as an
             emergency escape hatch.
         set_at: [startup, runtime]
-        cpp_vartype: AtomicWord<bool>
+        cpp_vartype: Atomic<bool>
         cpp_varname: allowDirectSystemBucketsAccess
         default: false
         redact: false

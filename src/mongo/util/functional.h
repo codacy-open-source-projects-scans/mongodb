@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -36,19 +10,20 @@
 #include <functional>
 #include <iosfwd>
 #include <memory>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
 
-namespace MONGO_MOD_PUB mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 template <typename Function>
 class function_ref;
 
 /**
  * A function_ref is a type-erased callable similar to std::function, however it does not own the
- * underlying object, similar to StringData vs std::string. It should generally only be used as a
- * parameter to functions that invoke their callback while running. It should generally not be put
- * in a variable or stashed for calling later.
+ * underlying object, similar to std::string_view vs std::string. It should generally only be used
+ * as a parameter to functions that invoke their callback while running. It should generally not be
+ * put in a variable or stashed for calling later.
  *
  * In the specific case of a function_ref constructed from a function or function pointer it will
  * store the function pointer directly rather than a pointer to the function pointer, so you do not
@@ -139,10 +114,10 @@ private:
     // the data pointer with the stored this pointer, since in most ABIs the implicit argument
     // parameter is treated as if it were the first argument.
     // There is also a trade-off of Args vs Args&&. The former is more efficient for trivially
-    // copiable types like int and StringData, but the latter is better for expensive-to-move types
-    // like std::string. I opted for the former so that this is cheap when doing cheap things and
-    // because you can always pass expensive-to-move types by reference if you want to, but if we
-    // added a reference here, you couldn't remove it.
+    // copiable types like int and std::string_view, but the latter is better for expensive-to-move
+    // types like std::string. I opted for the former so that this is cheap when doing cheap things
+    // and because you can always pass expensive-to-move types by reference if you want to, but if
+    // we added a reference here, you couldn't remove it.
     using Erased = RetType(const void*, Args...);
 
     const void* _target;
@@ -161,24 +136,9 @@ class unique_function;
  */
 template <typename RetType, typename... Args>
 class unique_function<RetType(Args...)> {
-private:
-    // `TagTypeBase` is used as a base for the `TagType` type, to prevent it from being an
-    // aggregate.
-    struct TagTypeBase {
-    protected:
-        TagTypeBase() = default;
-    };
-    // `TagType` is used as a placeholder type in parameter lists for `enable_if` clauses.  They
-    // have to be real parameters, not template parameters, due to MSVC limitations.
-    class TagType : TagTypeBase {
-        TagType() = default;
-        friend unique_function;
-    };
-
 public:
     using result_type = RetType;
 
-    ~unique_function() noexcept = default;
     unique_function() = default;
 
     unique_function(const unique_function&) = delete;
@@ -189,7 +149,7 @@ public:
 
     void swap(unique_function& that) noexcept {
         using std::swap;
-        swap(this->impl, that.impl);
+        swap(_impl, that._impl);
     }
 
     friend void swap(unique_function& a, unique_function& b) noexcept {
@@ -200,30 +160,20 @@ public:
     // `void *` accepting function object.  This will permit reusing the core impl object when
     // converting between related function types, such as
     // `int (std::string)` -> `void (const char *)`
-    template <typename Functor>
-    /* implicit */
-    unique_function(
-        Functor&& functor,
-        // The remaining arguments here are only for SFINAE purposes to enable this ctor when our
-        // requirements are met.  They must be concrete parameters not template parameters to work
-        // around bugs in some compilers that we presently use.  We may be able to revisit this
-        // design after toolchain upgrades for C++17.
-        std::enable_if_t<std::is_invocable_r<RetType, Functor, Args...>::value, TagType> =
-            makeTag(),
-        std::enable_if_t<std::is_move_constructible<Functor>::value, TagType> = makeTag(),
-        std::enable_if_t<!std::is_same<std::decay_t<Functor>, unique_function>::value, TagType> =
-            makeTag())
-        : impl(makeImpl(std::forward<Functor>(functor))) {}
+    template <typename F>
+    requires(!std::same_as<std::decay_t<F>, unique_function> &&
+             std::is_invocable_r_v<RetType, F, Args...> && std::move_constructible<F>)
+    explicit(false) unique_function(F&& f) : _impl(_makeImpl(std::forward<F>(f))) {}
 
-    unique_function(std::nullptr_t) noexcept {}
+    explicit(false) unique_function(std::nullptr_t) noexcept {}
 
     RetType operator()(Args... args) const {
         invariant(static_cast<bool>(*this));
-        return impl->call(std::forward<Args>(args)...);
+        return _impl->call(std::forward<Args>(args)...);
     }
 
     explicit operator bool() const noexcept {
-        return static_cast<bool>(this->impl);
+        return static_cast<bool>(_impl);
     }
 
     // Needed to make `std::is_convertible<mongo::unique_function<...>, std::function<...>>` be
@@ -240,22 +190,20 @@ public:
     template <typename Signature>
     operator std::function<Signature>() const = delete;
 
-private:
-    // The `TagType` type cannot be constructed as a default function-parameter in Clang.  So we use
-    // a static member function that initializes that default parameter.
-    static TagType makeTag() {
-        return {};
+    bool operator==(std::nullptr_t) const noexcept {
+        return !*this;
     }
 
+private:
     struct Impl {
-        virtual ~Impl() noexcept = default;
+        virtual ~Impl() = default;
         virtual RetType call(Args&&... args) = 0;
     };
 
-    template <typename Functor>
-    static auto makeImpl(Functor&& functor) {
+    template <typename F>
+    static auto _makeImpl(F&& f) {
         struct SpecificImpl : Impl {
-            explicit SpecificImpl(Functor&& func) : f(std::forward<Functor>(func)) {}
+            explicit SpecificImpl(F&& f) : f(std::forward<F>(f)) {}
 
             RetType call(Args&&... args) override {
                 if constexpr (std::is_void_v<RetType>) {
@@ -267,16 +215,16 @@ private:
                 }
             }
 
-            std::decay_t<Functor> f;
+            std::decay_t<F> f;
         };
 
-        return std::make_unique<SpecificImpl>(std::forward<Functor>(functor));
+        return std::make_unique<SpecificImpl>(std::forward<F>(f));
     }
 
-    std::unique_ptr<Impl> impl;
+    std::unique_ptr<Impl> _impl;
 };
 
-namespace MONGO_MOD_FILE_PRIVATE functional_details {
+namespace [[MONGO_MOD_FILE_PRIVATE]] functional_details {
 /**
  * Helper to pattern-match the signatures for all combinations of const and l-value-qualifed member
  * function pointers. We don't currently support r-value-qualified call operators.
@@ -286,12 +234,12 @@ struct UFDeductionHelper {};
 template <typename Class, typename Ret, typename... Args>
 struct UFDeductionHelper<Ret (Class::*)(Args...)> : std::type_identity<Ret(Args...)> {};
 template <typename Class, typename Ret, typename... Args>
-struct UFDeductionHelper<Ret (Class::*)(Args...) &> : std::type_identity<Ret(Args...)> {};
+struct UFDeductionHelper<Ret (Class::*)(Args...)&> : std::type_identity<Ret(Args...)> {};
 template <typename Class, typename Ret, typename... Args>
 struct UFDeductionHelper<Ret (Class::*)(Args...) const> : std::type_identity<Ret(Args...)> {};
 template <typename Class, typename Ret, typename... Args>
 struct UFDeductionHelper<Ret (Class::*)(Args...) const&> : std::type_identity<Ret(Args...)> {};
-}  // namespace MONGO_MOD_FILE_PRIVATE functional_details
+}  // namespace functional_details
 
 /**
  * Deduction guides for unique_function<Sig> that pluck the signature off of function pointers and
@@ -304,23 +252,4 @@ template <
     typename Sig = typename functional_details::UFDeductionHelper<decltype(&T::operator())>::type>
 unique_function(T) -> unique_function<Sig>;
 
-template <typename Signature>
-bool operator==(const unique_function<Signature>& lhs, std::nullptr_t) noexcept {
-    return !lhs;
-}
-
-template <typename Signature>
-bool operator!=(const unique_function<Signature>& lhs, std::nullptr_t) noexcept {
-    return static_cast<bool>(lhs);
-}
-
-template <typename Signature>
-bool operator==(std::nullptr_t, const unique_function<Signature>& rhs) noexcept {
-    return !rhs;
-}
-
-template <typename Signature>
-bool operator!=(std::nullptr_t, const unique_function<Signature>& rhs) noexcept {
-    return static_cast<bool>(rhs);
-}
-}  // namespace MONGO_MOD_PUB mongo
+}  // namespace mongo

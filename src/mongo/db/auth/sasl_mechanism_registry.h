@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/authentication_metrics.h"
@@ -56,6 +29,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <typeinfo>
@@ -128,7 +102,7 @@ private:
 class SaslServerCommonBase {
 public:
     virtual ~SaslServerCommonBase() = default;
-    virtual StringData mechanismName() const = 0;
+    virtual std::string_view mechanismName() const = 0;
     virtual SecurityPropertySet properties() const = 0;
 
     /**
@@ -169,7 +143,7 @@ public:
      * This method is virtual so more complex implementations can obtain this value from a
      * non-member.
      */
-    virtual StringData getPrincipalName() const {
+    virtual std::string_view getPrincipalName() const {
         return _principalName;
     }
 
@@ -194,7 +168,8 @@ public:
      * The standard rule in MongoDB is simple.  The authenticated user name must be the same as the
      * requested user name.
      */
-    virtual bool isAuthorizedToActAs(StringData requestedUser, StringData authenticatedUser) {
+    virtual bool isAuthorizedToActAs(std::string_view requestedUser,
+                                     std::string_view authenticatedUser) {
         return requestedUser == authenticatedUser;
     }
 
@@ -212,7 +187,7 @@ public:
      * Performs a single step of a SASL exchange. Takes an input provided by a client,
      * and either returns an error, or a response to be sent back.
      */
-    StatusWith<std::string> step(OperationContext* opCtx, StringData input) {
+    StatusWith<std::string> step(OperationContext* opCtx, std::string_view input) {
 
         auto result = stepImpl(opCtx, input);
         if (result.isOK()) {
@@ -234,7 +209,7 @@ public:
     }
 
     /** Returns which database contains the user which authentication is being performed against. */
-    StringData getAuthenticationDatabase() const;
+    std::string_view getAuthenticationDatabase() const;
 
     /**
      * Flexible bag of options for a saslStart command.
@@ -272,7 +247,7 @@ protected:
      * containing the server's response to the client.
      */
     virtual StatusWith<std::tuple<bool, std::string>> stepImpl(OperationContext* opCtx,
-                                                               StringData input) = 0;
+                                                               std::string_view input) = 0;
 
     bool _success = false;
     std::string _principalName;
@@ -313,7 +288,7 @@ public:
 
     using policy_type = Policy;
 
-    StringData mechanismName() const final {
+    std::string_view mechanismName() const final {
         return policy_type::getName();
     }
 
@@ -349,7 +324,7 @@ public:
         return new ServerMechanism(std::move(authenticationDatabase));
     }
 
-    StringData mechanismName() const final {
+    std::string_view mechanismName() const final {
         return policy_type::getName();
     }
 
@@ -372,7 +347,7 @@ public:
  * mechanism from. Also capable of producing a list of mechanisms which would be valid for a
  * particular user.
  */
-class MONGO_MOD_PUBLIC SASLServerMechanismRegistry {
+class [[MONGO_MOD_PUBLIC]] SASLServerMechanismRegistry {
 public:
     static SASLServerMechanismRegistry& get(Service* service);
     static void set(Service* service, std::unique_ptr<SASLServerMechanismRegistry> registry);
@@ -403,7 +378,7 @@ public:
      * "authenticationDatabase".
      */
     StatusWith<std::unique_ptr<ServerMechanismBase>> getServerMechanism(
-        StringData mechanismName, std::string authenticationDatabase);
+        std::string_view mechanismName, std::string authenticationDatabase);
 
     /**
      * Registers a factory T to produce a type of SASL mechanism.
@@ -441,7 +416,7 @@ public:
 private:
     using MechList = std::vector<std::unique_ptr<ServerFactoryBase>>;
 
-    MechList& _getMapRef(StringData dbName) {
+    MechList& _getMapRef(std::string_view dbName) {
         return _getMapRef(dbName != DatabaseName::kExternal.db(omitTenant));
     }
 
@@ -452,7 +427,7 @@ private:
         return _externalMechs;
     }
 
-    bool _mechanismSupportedByConfig(StringData mechName) const;
+    bool _mechanismSupportedByConfig(std::string_view mechName) const;
 
     Service* _service = nullptr;
 

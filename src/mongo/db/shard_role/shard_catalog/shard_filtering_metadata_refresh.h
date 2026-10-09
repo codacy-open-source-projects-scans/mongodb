@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/router_role/routing_cache/catalog_cache.h"
@@ -38,9 +11,13 @@
 #include "mongo/db/shard_role/shard_catalog/collection_metadata.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/util/cancellation.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
 #include "mongo/util/modules.h"
+#include "mongo/util/version/releases.h"
+
+#include <memory>
 
 #include <boost/optional/optional.hpp>
 
@@ -51,7 +28,7 @@ namespace mongo {
  * sharding metadata for a given database or collection, and provides the functionality to refresh
  * it when necessary.
  */
-class MONGO_MOD_NEEDS_REPLACEMENT FilteringMetadataCache {
+class [[MONGO_MOD_NEEDS_REPLACEMENT]] FilteringMetadataCache {
 public:
     FilteringMetadataCache() = default;
 
@@ -69,6 +46,10 @@ public:
      * Shuts down and joins the executors used by the internal components.
      */
     void shutDown();
+
+    // TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+    void interruptLoaderAfterAuthoritativeShardsTransition();
+    void waitForAllLoaderFlushes(OperationContext* opCtx);
 
     /**
      * Updates internal state so that the loader can start behaving like a secondary.
@@ -132,18 +113,18 @@ public:
      * execution state in the response. This is specifically problematic for write commands, which
      * are expected to return the set of write batch entries that succeeded.
      */
-    Status onCollectionPlacementVersionMismatch(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        boost::optional<ChunkVersion> chunkVersionReceived) noexcept;
+    Status onShardVersionMismatch(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  boost::optional<ChunkVersion> chunkVersionReceived) noexcept;
 
     /**
-     * Unconditionally causes the collection placement to be refreshed from the config server.
+     * Unconditionally causes the collection metadata to be refreshed from the config server.
      *
      * NOTE: Does network I/O and acquires collection lock on the specified namespace, so it must
      * not be called with a lock.
      */
-    void forceCollectionPlacementRefresh(OperationContext* opCtx, const NamespaceString& nss);
+    void forceCollectionMetadataRefresh_DEPRECATED(OperationContext* opCtx,
+                                                   const NamespaceString& nss);
 
     /**
      * Should be called when any client request on this shard generates a StaleDbVersion exception.
@@ -154,6 +135,20 @@ public:
     Status onDbVersionMismatch(OperationContext* opCtx,
                                const DatabaseName& dbName,
                                const DatabaseVersion& clientDbVersion) noexcept;
+
+
+    /**
+     * Clear out potentially dangerous metadata if performing an FCV upgrade that enables the
+     * authoritative shards model.
+     *
+     * This affects both database and collection sharding metadata. In particular:
+     * - Database metadata for which this shard isn't the primary shard will get cleared out
+     * - Collection metadata will be cleared out if it's for an untracked/unowned collection.
+     */
+    void fixPotentiallyStaleShardingStatesAfterUpgrade(
+        OperationContext* opCtx,
+        const multiversion::FeatureCompatibilityVersion& prevVersion,
+        const multiversion::FeatureCompatibilityVersion& newVersion);
 
     /**
      * Unconditionally causes the database metadata to be refreshed from the config server.
@@ -205,60 +200,18 @@ private:
                                                     const DatabaseName& dbName,
                                                     const CancellationToken& cancellationToken);
 
-    void _onDbVersionMismatch(OperationContext* opCtx,
-                              const DatabaseName& dbName,
-                              boost::optional<DatabaseVersion> receivedDbVersion);
-
-    void _onDbVersionMismatchAuthoritative(OperationContext* opCtx,
-                                           const DatabaseName& dbName,
-                                           const DatabaseVersion& receivedDbVersion);
-
     /**
-     * Creates a CollectionCacheRecoverer and drives a full metadata recovery from disk to
-     * completion. Retries if a critical section, concurrent refresh, or cancellation is
-     * encountered.
-     *
-     * This is the first step of the authoritative shard versioning protocol: unconditionally
-     * recover the shard's current state from the durable catalog so that subsequent version
-     * comparisons operate on up-to-date metadata.
+     * Result of one mismatch-handler attempt. Callers loop on kRetry at the top-level entry points.
      */
-    void _recoverCollectionMetadataFromDisk(OperationContext* opCtx, const NamespaceString& nss);
+    enum class MismatchAttemptResult {
+        kDone,
+        kRetry,
+    };
 
-    /**
-     * Joins any ongoing placement version operations and checks whether the shard's current shard
-     * version (wantedShardVersion) already satisfies the router's shard version
-     * (receivedShardVersion). Waits for any ongoing critical sections or refreshes before
-     * comparing.
-     *
-     * When both versions are comparable (both tracked or both untracked), the partial ordering
-     * determines whether the shard is up to date or the router is stale. Returns true in either
-     * case since the caller can return to the retry loop. Returns false when the versions are not
-     * comparable (one tracked, one untracked) or no metadata is known.
-     */
-    bool _isRecoveredShardVersionSufficient(OperationContext* opCtx,
-                                            const NamespaceString& nss,
-                                            const ChunkVersion& receivedShardVersion);
-
-    /**
-     * Sends a best-effort noop write to the primary to advance the majority commit point.
-     */
-    void _tryNoopWriteToAdvanceMajorityCommitPoint(OperationContext* opCtx);
-
-    /**
-     * Handles the case where router's shard version (receivedShardVersion) and shard's shard
-     * version (wantedShardVersion) are not directly comparable (e.g. one tracked, one untracked).
-     * Blocks until one of:
-     *   1. The shard version on the shard matches the router's version (via oplog application).
-     *   2. The node has replicated up to the router's configTime with majority read concern.
-     *
-     * configTime serves as an upper bound: if the shard reaches configTime without the version
-     * matching, the router is guaranteed to be stale since all DDL critical sections that could
-     * have changed the version have already been applied. On a primary this wait is an instant
-     * no-op since it has already applied all oplog entries.
-     */
-    void _waitForConfigTimeOrChunkVersionChange(OperationContext* opCtx,
-                                                const NamespaceString& nss,
-                                                const ChunkVersion& chunkVersion);
+    MismatchAttemptResult _onDbVersionMismatchNonAuthoritative(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        boost::optional<DatabaseVersion> receivedDbVersion);
 
     SharedSemiFuture<void> _recoverRefreshCollectionPlacementVersion(
         ServiceContext* serviceContext,
@@ -266,14 +219,10 @@ private:
         bool runRecover,
         CancellationToken cancellationToken);
 
-    void _onCollectionPlacementVersionMismatch(OperationContext* opCtx,
-                                               const NamespaceString& nss,
-                                               boost::optional<ChunkVersion> chunkVersionReceived);
-
-    void _onCollectionPlacementVersionMismatchAuthoritative(
+    MismatchAttemptResult _onShardVersionMismatchNonAuthoritative(
         OperationContext* opCtx,
         const NamespaceString& nss,
-        boost::optional<ChunkVersion> receivedShardVersion);
+        boost::optional<ChunkVersion> chunkVersionReceived);
 
     // TODO (SERVER-97261): remove the Grid's CatalogCache usages once 9.0 becomes last LTS.
     // If _cache is set, it will be used only for filtering; otherwise, the Grid's CatalogCache will
@@ -282,9 +231,9 @@ private:
     std::shared_ptr<ShardServerCatalogCacheLoader> _loader;
 };
 
-MONGO_MOD_NEEDS_REPLACEMENT extern FailPoint
+[[MONGO_MOD_NEEDS_REPLACEMENT]] extern FailPoint
     hangInRefreshFilteringMetadataUntilSuccessInterruptible;
-MONGO_MOD_NEEDS_REPLACEMENT extern FailPoint
+[[MONGO_MOD_NEEDS_REPLACEMENT]] extern FailPoint
     hangInRefreshFilteringMetadataUntilSuccessThenSimulateErrorUninterruptible;
 
 }  // namespace mongo

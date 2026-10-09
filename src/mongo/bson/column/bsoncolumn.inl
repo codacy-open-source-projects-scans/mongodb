@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/modules.h"
 
@@ -151,19 +125,19 @@ MONGO_COMPILER_ALWAYS_INLINE_GCC14 void BSONColumnBlockBased::decompress(Buffer&
                         });
                     break;
                 case BSONType::string:
-                    buffer.template append<StringData>(literal);
-                    ptr = BSONColumnBlockDecompressHelpers::decompressAllDelta<StringData,
-                                                                               int128_t,
-                                                                               Buffer>(
-                        ptr,
-                        end,
-                        buffer,
-                        Simple8bTypeUtil::encodeString(literal.valueStringData()).value_or(0),
-                        literal,
-                        [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
-                            auto string = Simple8bTypeUtil::decodeString(v);
-                            buffer.append(StringData((const char*)string.str.data(), string.size));
-                        });
+                    buffer.template append<std::string_view>(literal);
+                    ptr = BSONColumnBlockDecompressHelpers::
+                        decompressAllDelta<std::string_view, int128_t, Buffer>(
+                            ptr,
+                            end,
+                            buffer,
+                            Simple8bTypeUtil::encodeString(literal.valueStringData()).value_or(0),
+                            literal,
+                            [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
+                                auto string = Simple8bTypeUtil::decodeString(v);
+                                buffer.append(
+                                    std::string_view((const char*)string.str.data(), string.size));
+                            });
                     break;
                 case BSONType::binData: {
                     buffer.template append<BSONBinData>(literal);
@@ -190,19 +164,18 @@ MONGO_COMPILER_ALWAYS_INLINE_GCC14 void BSONColumnBlockBased::decompress(Buffer&
                 }
                 case BSONType::code:
                     buffer.template append<BSONCode>(literal);
-                    ptr = BSONColumnBlockDecompressHelpers::decompressAllDelta<BSONCode,
-                                                                               int128_t,
-                                                                               Buffer>(
-                        ptr,
-                        end,
-                        buffer,
-                        Simple8bTypeUtil::encodeString(literal.valueStringData()).value_or(0),
-                        literal,
-                        [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
-                            auto string = Simple8bTypeUtil::decodeString(v);
-                            buffer.append(
-                                BSONCode(StringData((const char*)string.str.data(), string.size)));
-                        });
+                    ptr = BSONColumnBlockDecompressHelpers::
+                        decompressAllDelta<BSONCode, int128_t, Buffer>(
+                            ptr,
+                            end,
+                            buffer,
+                            Simple8bTypeUtil::encodeString(literal.valueStringData()).value_or(0),
+                            literal,
+                            [](const int128_t v, const BSONElement& ref, Buffer& buffer) {
+                                auto string = Simple8bTypeUtil::decodeString(v);
+                                buffer.append(BSONCode(
+                                    std::string_view((const char*)string.str.data(), string.size)));
+                            });
                     break;
                 case BSONType::object:
                 case BSONType::array:

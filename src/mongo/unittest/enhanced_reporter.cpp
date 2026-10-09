@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/unittest/enhanced_reporter.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/logv2/composite_backend.h"
 #include "mongo/logv2/domain_filter.h"
 #include "mongo/logv2/json_formatter.h"
@@ -50,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -145,9 +119,9 @@ constexpr auto kSourceLocation = kDim | kUnderline;
 // When we have them, only print them if there are frames on top of `TestBody()`.
 // TODO(SERVER-124130): Once we have cpptrace stack traces, so we should print them if
 // there are frames on top of `TestBody()`.
-StringData stripMessage(StringData message) {
-    StringData s = message;
-    static constexpr StringData kMsgPrefix = "Succeeded\n";
+std::string_view stripMessage(std::string_view message) {
+    std::string_view s = message;
+    static constexpr std::string_view kMsgPrefix = "Succeeded\n";
     if (s.starts_with(kMsgPrefix)) {
         s.remove_prefix(kMsgPrefix.length());
     }
@@ -191,7 +165,7 @@ public:
 
     /** For failed system calls. */
     template <typename... Args>
-    SystemCallResult(std::error_code ec, StringData message) : _ec{ec} {
+    SystemCallResult(std::error_code ec, std::string_view message) : _ec{ec} {
         _size = message.copy(_message.data(), _message.size());
     }
 
@@ -215,8 +189,8 @@ public:
             return;
         }
 
-        static constexpr StringData header = "ERROR: Couldn't dump buffered logs: ";
-        static constexpr StringData footer = " failed";
+        static constexpr std::string_view header = "ERROR: Couldn't dump buffered logs: ";
+        static constexpr std::string_view footer = " failed";
 
         if (posix_compat::write(details::stdoutFileNo, header.data(), header.size()) <
             static_cast<ssize_t>(header.size())) {
@@ -251,7 +225,7 @@ SystemCallResult printFileToStdoutSignalHandlerSafe(const std::filesystem::path&
     int src = posix_compat::openReadOnly(pathStr);
     if (src < 0) {
         auto ec = lastSystemError();
-        constexpr StringData message = "open";
+        constexpr std::string_view message = "open";
         return SystemCallResult(ec, message);
     }
 
@@ -260,7 +234,7 @@ SystemCallResult printFileToStdoutSignalHandlerSafe(const std::filesystem::path&
         if (bytesRead < 0) {
             auto ec = lastSystemError();
             posix_compat::close(src);
-            constexpr StringData message = "read";
+            constexpr std::string_view message = "read";
             return SystemCallResult(ec, message);
         }
         if (bytesRead == 0) {
@@ -271,12 +245,12 @@ SystemCallResult printFileToStdoutSignalHandlerSafe(const std::filesystem::path&
         if (bytesWritten < 0) {
             auto ec = lastSystemError();
             posix_compat::close(src);
-            constexpr StringData message = "write";
+            constexpr std::string_view message = "write";
             return SystemCallResult(ec, message);
         }
         if (bytesRead != bytesWritten) {
             posix_compat::close(src);
-            constexpr StringData message = "write";
+            constexpr std::string_view message = "write";
             return SystemCallResult(systemError(0), message);
         }
     }
@@ -326,7 +300,6 @@ private:
             logv2::CompositeBackend<logv2::LogCaptureBackend, logv2::UserAssertSink>;
 
         explicit LogDiverter(EnhancedReporter::Impl* reporter) {
-            boost::log::core::get()->remove_all_sinks();
             auto sink = boost::make_shared<LogDiverterBackend>(
                 boost::make_shared<logv2::LogCaptureBackend>(std::make_unique<Listener>(reporter),
                                                              false),
@@ -342,6 +315,7 @@ private:
 #else
             _sink->set_formatter(logv2::JSONFormatter());
 #endif
+            boost::log::core::get()->remove_all_sinks();
             boost::log::core::get()->add_sink(_sink);
         }
 
@@ -375,7 +349,7 @@ private:
     };
 
     /** Throws a std::system_error based on the saved error of the last system call. */
-    void _throwLastSystemError(StringData expr) {
+    void _throwLastSystemError(std::string_view expr) {
         auto ec = lastSystemError();
         throw std::system_error(ec, fmt::format("{} failed: {}", expr, errorMessage(ec)));
     }
@@ -500,7 +474,7 @@ private:
 
 void EnhancedReporter::Impl::OnTestProgramStart(const testing::UnitTest& unitTest) {
     std::lock_guard lk(_mutex);
-    auto note = [&](StringData message) {
+    auto note = [&](std::string_view message) {
         fmt::println(_buffer, "{}{}", _style(kCyan, "NOTE: "), _style(kDim, message));
     };
 
@@ -543,7 +517,7 @@ void EnhancedReporter::Impl::OnTestStart(const testing::TestInfo& testInfo) {
 
     // Print the header
     static const auto bar = fmt::format("{:=>60}", "");
-    auto row = [&](StringData label, StringData value) {
+    auto row = [&](std::string_view label, std::string_view value) {
         static const int pad = 13;
         fmt::println(_buffer, "{: >{}}: {}", _style(kYellow, label), pad, value);
     };
@@ -563,7 +537,7 @@ void EnhancedReporter::Impl::OnTestStart(const testing::TestInfo& testInfo) {
     fmt::println(_buffer, "");
 
     if (!_options.showEachTest && _options.useSpinner) {
-        static constexpr StringData spinner = R"(|/-\)";
+        static constexpr std::string_view spinner = R"(|/-\)";
         // Note: adding \r rather than \n to seek to begining of line.
         // Anything printed after this will overwrite the spinner, so
         // keep it short so that it will be fully overwritten.

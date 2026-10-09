@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/sdk/aggregation_stage.h"
 
@@ -70,6 +44,7 @@
 namespace mongo::extension::sdk {
 
 namespace {
+using namespace std::literals::string_view_literals;
 
 template <class Variant>
 const extension::AggStageAstNodeHandle& asAst(const Variant& v) {
@@ -99,36 +74,6 @@ public:
 
     std::unique_ptr<host_connector::QueryExecutionContextAdapter> _execCtx;
     boost::intrusive_ptr<ExpressionContextForTest> _expCtx = new ExpressionContextForTest();
-};
-
-class ExpandToIdLookupNode : public extension::sdk::AggStageParseNode {
-public:
-    ExpandToIdLookupNode() : extension::sdk::AggStageParseNode("expandToIdLookup") {}
-
-    static constexpr size_t kExpansionSize = 1;
-
-    size_t getExpandedSize() const override {
-        return kExpansionSize;
-    }
-
-    std::vector<mongo::extension::VariantNodeHandle> expand() const override {
-        std::vector<mongo::extension::VariantNodeHandle> expanded;
-        auto spec = BSON("$_internalSearchIdLookup" << BSONObj());
-        expanded.emplace_back(extension::sdk::HostServicesAPI::getInstance()->createIdLookup(spec));
-        return expanded;
-    }
-
-    BSONObj getQueryShape(const sdk::QueryShapeOptsHandle&) const override {
-        return BSONObj();
-    }
-
-    std::unique_ptr<AggStageParseNode> clone() const override {
-        return std::make_unique<ExpandToIdLookupNode>();
-    }
-
-    static inline std::unique_ptr<extension::sdk::AggStageParseNode> make() {
-        return std::make_unique<ExpandToIdLookupNode>();
-    }
 };
 
 TEST_F(AggStageTest, CountingParseExpansionSucceedsTest) {
@@ -187,8 +132,9 @@ TEST_F(AggStageTest, ExpansionToHostParseNodeSucceeds) {
 }
 
 TEST_F(AggStageTest, ExpansionToIdLookupSucceeds) {
-    auto expandToIdLookupAstNode =
-        std::make_unique<ExtensionAggStageParseNodeAdapter>(ExpandToIdLookupNode::make());
+    // ExpandToHostAstParseNode expands to a host-allocated $_internalSearchIdLookup AST node.
+    auto expandToIdLookupAstNode = std::make_unique<ExtensionAggStageParseNodeAdapter>(
+        shared_test_stages::ExpandToHostAstParseNode::make());
 
     // Transfer ownership from the SDK-style unique_ptr to the OwnedHandle.
     auto handle = extension::AggStageParseNodeHandle{expandToIdLookupAstNode.release()};
@@ -283,10 +229,10 @@ TEST_F(AggStageTest, TransformAstNodeTest) {
     auto opCtx = testCtx.makeOperationContext();
     auto expCtx = make_intrusive<ExpressionContextForTest>(
         opCtx.get(),
-        NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd),
+        NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv),
         SerializationContext());
     const auto catalogContext = mongo::extension::host::CatalogContext(*expCtx);
-    [[maybe_unused]] auto logicalStageHandle = handle->bind(catalogContext.getAsBoundaryType());
+    [[maybe_unused]] auto logicalStageHandle = handle->promote(catalogContext.getAsBoundaryType());
 }
 
 TEST_F(AggStageTest, TransformAstNodeWithDefaultGetPropertiesSucceeds) {
@@ -390,7 +336,7 @@ TEST_F(AggStageTest, SearchLikeSourceAggStageAstNodeSucceeds) {
     auto handle = AggStageAstNodeHandle{astNode};
     auto props = handle->getProperties();
     ASSERT_EQ(props.getPosition(), MongoExtensionPositionRequirementEnum::kFirst);
-    ASSERT_EQ(props.getHostType(), MongoExtensionHostTypeRequirementEnum::kAnyShard);
+    ASSERT_EQ(props.getHostType(), MongoExtensionHostTypeRequirementEnum::kTargetedShards);
     ASSERT_FALSE(props.getRequiresInputDocSource());
     ASSERT_FALSE(props.getPreservesUpstreamMetadata());
 
@@ -455,12 +401,12 @@ TEST_F(AggStageTest, BadTypeRequiredPrivilegesAstNodeFails) {
 class SimpleSerializationLogicalStage
     : public sdk::TestLogicalStage<sdk::shared_test_stages::TransformExecAggStage> {
 public:
-    static constexpr StringData kStageName = "$simpleSerialization";
-    static constexpr StringData kStageSpec = "mongodb";
+    static constexpr std::string_view kStageName = "$simpleSerialization";
+    static constexpr std::string_view kStageSpec = "mongodb";
 
     SimpleSerializationLogicalStage()
-        : sdk::TestLogicalStage<sdk::shared_test_stages::TransformExecAggStage>(
-              toStdStringViewForInterop(kStageName), BSONObj()) {}
+        : sdk::TestLogicalStage<sdk::shared_test_stages::TransformExecAggStage>(kStageName,
+                                                                                BSONObj()) {}
 
     BSONObj serialize() const override {
         return BSON(kStageName << kStageSpec);
@@ -556,10 +502,10 @@ TEST(AggregationStageTest, ExplainExecutionStats) {
 
 class SimpleQueryShapeParseNode : public sdk::AggStageParseNode {
 public:
-    static constexpr StringData kStageName = "$simpleQueryShape";
-    static constexpr StringData kStageSpec = "mongodb";
+    static constexpr std::string_view kStageName = "$simpleQueryShape";
+    static constexpr std::string_view kStageSpec = "mongodb";
 
-    SimpleQueryShapeParseNode() : sdk::AggStageParseNode(toStdStringViewForInterop(kStageName)) {}
+    SimpleQueryShapeParseNode() : sdk::AggStageParseNode(kStageName) {}
 
     size_t getExpandedSize() const override {
         return 0;
@@ -587,7 +533,7 @@ TEST_F(AggStageTest, SimpleComputeQueryShapeSucceeds) {
         new extension::sdk::ExtensionAggStageParseNodeAdapter(SimpleQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
     ASSERT_BSONOBJ_EQ(
@@ -597,12 +543,11 @@ TEST_F(AggStageTest, SimpleComputeQueryShapeSucceeds) {
 
 class IdentifierQueryShapeParseNode : public sdk::AggStageParseNode {
 public:
-    static constexpr StringData kStageName = "$identifierQueryShape";
-    static constexpr StringData kIndexFieldName = "index";
-    static constexpr StringData kIndexValue = "identifier";
+    static constexpr std::string_view kStageName = "$identifierQueryShape";
+    static constexpr std::string_view kIndexFieldName = "index";
+    static constexpr std::string_view kIndexValue = "identifier";
 
-    IdentifierQueryShapeParseNode()
-        : sdk::AggStageParseNode(toStdStringViewForInterop(kStageName)) {}
+    IdentifierQueryShapeParseNode() : sdk::AggStageParseNode(kStageName) {}
 
     size_t getExpandedSize() const override {
         return 0;
@@ -628,7 +573,7 @@ public:
         return std::make_unique<IdentifierQueryShapeParseNode>();
     }
 
-    static std::string applyHmacForTest(StringData sd) {
+    static std::string applyHmacForTest(std::string_view sd) {
         return "REDACT_" + std::string{sd};
     }
 };
@@ -638,7 +583,7 @@ TEST_F(AggStageTest, SerializingIdentifierQueryShapeSucceedsWithNoTransformation
 
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
     ASSERT_BSONOBJ_EQ(BSON(IdentifierQueryShapeParseNode::kStageName
@@ -651,7 +596,8 @@ TEST_F(AggStageTest, SerializingIdentifierQueryShapeSucceedsWithTransformation) 
     auto parseNode = new ExtensionAggStageParseNodeAdapter(IdentifierQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     opts.transformIdentifiers = true;
     opts.transformIdentifiersCallback = IdentifierQueryShapeParseNode::applyHmacForTest;
 
@@ -693,12 +639,11 @@ TEST_F(AggStageTest, SourceStageParseTest) {
 
 class FieldPathQueryShapeParseNode : public sdk::AggStageParseNode {
 public:
-    static constexpr StringData kStageName = "$fieldPathQueryShape";
-    static constexpr StringData kSingleFieldPath = "simpleField";
-    static constexpr StringData kNestedFieldPath = "nested.Field.Path";
+    static constexpr std::string_view kStageName = "$fieldPathQueryShape";
+    static constexpr std::string_view kSingleFieldPath = "simpleField";
+    static constexpr std::string_view kNestedFieldPath = "nested.Field.Path";
 
-    FieldPathQueryShapeParseNode()
-        : sdk::AggStageParseNode(toStdStringViewForInterop(kStageName)) {}
+    FieldPathQueryShapeParseNode() : sdk::AggStageParseNode(kStageName) {}
 
     size_t getExpandedSize() const override {
         return 0;
@@ -727,7 +672,7 @@ public:
         return std::make_unique<FieldPathQueryShapeParseNode>();
     }
 
-    static std::string applyHmacForTest(StringData sd) {
+    static std::string applyHmacForTest(std::string_view sd) {
         return "REDACT_" + std::string{sd};
     }
 };
@@ -736,7 +681,7 @@ TEST_F(AggStageTest, SerializingFieldPathQueryShapeSucceedsWithNoTransformation)
     auto parseNode = new ExtensionAggStageParseNodeAdapter(FieldPathQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
 
@@ -752,7 +697,7 @@ TEST_F(AggStageTest, SerializingFieldPathQueryShapeSucceedsWithTransformation) {
     auto parseNode = new ExtensionAggStageParseNodeAdapter(FieldPathQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     opts.transformIdentifiers = true;
     opts.transformIdentifiersCallback = FieldPathQueryShapeParseNode::applyHmacForTest;
 
@@ -778,17 +723,17 @@ TEST_F(AggStageTest, SerializingFieldPathQueryShapeSucceedsWithTransformation) {
 
 class LiteralQueryShapeParseNode : public sdk::AggStageParseNode {
 public:
-    static constexpr StringData kStageName = "$literalQueryShape";
-    static constexpr StringData kStringField = "str";
-    static constexpr StringData kStringValue = "mongodb";
-    static constexpr StringData kNumberField = "num";
+    static constexpr std::string_view kStageName = "$literalQueryShape";
+    static constexpr std::string_view kStringField = "str";
+    static constexpr std::string_view kStringValue = "mongodb";
+    static constexpr std::string_view kNumberField = "num";
     static constexpr int kNumberValue = 5;
-    static constexpr StringData kObjectField = "obj";
+    static constexpr std::string_view kObjectField = "obj";
     static const BSONObj kObjectValue;
-    static constexpr StringData kDateField = "date";
+    static constexpr std::string_view kDateField = "date";
     static const Date_t kDateValue;
 
-    LiteralQueryShapeParseNode() : sdk::AggStageParseNode(toStdStringViewForInterop(kStageName)) {}
+    LiteralQueryShapeParseNode() : sdk::AggStageParseNode(kStageName) {}
 
     size_t getExpandedSize() const override {
         return 0;
@@ -826,7 +771,7 @@ public:
         return std::make_unique<LiteralQueryShapeParseNode>();
     }
 
-    static std::string applyHmacForTest(StringData sd) {
+    static std::string applyHmacForTest(std::string_view sd) {
         return "REDACT_" + std::string{sd};
     }
 };
@@ -838,7 +783,7 @@ TEST_F(AggStageTest, SerializingLiteralQueryShapeSucceedsWithNoTransformation) {
     auto parseNode = new ExtensionAggStageParseNodeAdapter(LiteralQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
 
@@ -860,7 +805,8 @@ TEST_F(AggStageTest, SerializingLiteralQueryShapeSucceedsWithDebugShape) {
     auto parseNode = new ExtensionAggStageParseNodeAdapter(LiteralQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts = SerializationOptions::kDebugQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kDebugQueryShapeSerializeOptions;
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
 
@@ -878,7 +824,8 @@ TEST_F(AggStageTest, SerializingLiteralQueryShapeSucceedsWithRepresentativeValue
     auto parseNode = new ExtensionAggStageParseNodeAdapter(LiteralQueryShapeParseNode::make());
     auto handle = extension::AggStageParseNodeHandle{parseNode};
 
-    SerializationOptions opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+    query_shape::SerializationOptions opts =
+        query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto queryShape = handle->getQueryShape(adapter);
 
@@ -974,7 +921,7 @@ TEST_F(AggStageTest, ValidateStructStateAfterConvertingStructToGetNextResult) {
         }(),
         AssertionException,
         [](const AssertionException& ex) {
-            ASSERT_EQ(ex.code(), 10956803);
+            ASSERT_EQ(ex.code(), ErrorCodes::ExtensionError);
             ASSERT_STRING_CONTAINS(
                 ex.reason(), str::stream() << "Invalid MongoExtensionGetNextResultCode: " << 10);
             assertionCount.tripwire.subtractAndFetch(1);
@@ -1055,7 +1002,7 @@ TEST(AggregationStageTest, GetMetricsExtensionExecAggStageSucceeds) {
     // Create a test expression context that can be wrapped by QueryExecutionContextAdapter.
     auto expCtx = make_intrusive<ExpressionContextForTest>(
         opCtx.get(),
-        NamespaceString::createNamespaceString_forTest("test"_sd, "namespace"_sd),
+        NamespaceString::createNamespaceString_forTest("test"sv, "namespace"sv),
         SerializationContext());
     std::unique_ptr<host::QueryExecutionContext> wrappedCtx =
         std::make_unique<host::QueryExecutionContext>(expCtx.get());
@@ -1531,7 +1478,7 @@ TEST_F(HostParseNodeCloneTest, CloneExtensionAllocatedParseNodePreservesQuerySha
     auto clonedHandle = handle->clone();
 
     // Verify query shape is preserved (CloneableExtensionParseNode returns _spec as query shape).
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     ASSERT_BSONOBJ_EQ(handle->getQueryShape(adapter), clonedHandle->getQueryShape(adapter));
 }
@@ -1587,7 +1534,7 @@ TEST_F(HostParseNodeCloneTest, ClonedParseNodeQueryShapeUnaffectedByExpandOnOthe
     auto clonedHandle = handle->clone();
 
     // Get query shape before expand.
-    SerializationOptions opts{};
+    query_shape::SerializationOptions opts{};
     extension::host_connector::QueryShapeOptsAdapter adapter{&opts, getExpCtx()};
     auto originalQueryShape = handle->getQueryShape(adapter);
     auto clonedQueryShape = clonedHandle->getQueryShape(adapter);
@@ -1611,7 +1558,7 @@ public:
         return _properties;
     }
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override{MONGO_UNIMPLEMENTED}
 
     std::unique_ptr<sdk::AggStageAstNode> clone() const override {
@@ -1685,7 +1632,7 @@ public:
     ConfigurableViewPolicyExtensionAstNode(MongoExtensionFirstStageViewApplicationPolicy viewPolicy)
         : sdk::AggStageAstNode("$configurableViewPolicy"), _viewPolicy(viewPolicy) {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         MONGO_UNIMPLEMENTED;
     }
@@ -1708,11 +1655,11 @@ private:
     MongoExtensionFirstStageViewApplicationPolicy _viewPolicy;
 };
 
-class ViewInfoBindingExtensionAstNode : public sdk::AggStageAstNode {
+class ResolvedNamespaceBindingExtensionAstNode : public sdk::AggStageAstNode {
 public:
-    ViewInfoBindingExtensionAstNode() : sdk::AggStageAstNode("$viewInfoBinding") {}
+    ResolvedNamespaceBindingExtensionAstNode() : sdk::AggStageAstNode("$viewInfoBinding") {}
 
-    std::unique_ptr<sdk::LogicalAggStage> bind(
+    std::unique_ptr<sdk::LogicalAggStage> promote(
         const ::MongoExtensionCatalogContext& catalogContext) const override {
         MONGO_UNIMPLEMENTED;
     }
@@ -1721,10 +1668,10 @@ public:
         MONGO_UNIMPLEMENTED;
     }
 
-    void bindViewInfo(const ViewInfo& viewInfo) override {
-        _boundDbName = std::string(viewInfo.dbName());
-        _boundViewName = std::string(viewInfo.viewName());
-        _boundPipeline = viewInfo.viewPipeline();
+    void bindResolvedNamespace(const ResolvedNamespace& resolvedNamespace) override {
+        _boundDbName = std::string(resolvedNamespace.dbName());
+        _boundViewName = std::string(resolvedNamespace.viewName());
+        _boundPipeline = resolvedNamespace.viewPipeline();
     }
 
     std::string_view getBoundDbName() const {
@@ -1740,7 +1687,7 @@ public:
     }
 
     static inline std::unique_ptr<sdk::AggStageAstNode> make() {
-        return std::make_unique<ViewInfoBindingExtensionAstNode>();
+        return std::make_unique<ResolvedNamespaceBindingExtensionAstNode>();
     }
 
 private:
@@ -1767,9 +1714,10 @@ TEST_F(AggStageTest, ExtensionAstNodeCanReturnDoNothingViewPolicy) {
     ASSERT_EQ(policy, MongoExtensionFirstStageViewApplicationPolicy::kDoNothing);
 }
 
-TEST_F(AggStageTest, ExtensionAstNodeCanBindViewInfo) {
-    auto astNodeImpl = ViewInfoBindingExtensionAstNode::make();
-    auto* astNodeImplPtr = static_cast<ViewInfoBindingExtensionAstNode*>(astNodeImpl.get());
+TEST_F(AggStageTest, ExtensionAstNodeCanBindResolvedNamespace) {
+    auto astNodeImpl = ResolvedNamespaceBindingExtensionAstNode::make();
+    auto* astNodeImplPtr =
+        static_cast<ResolvedNamespaceBindingExtensionAstNode*>(astNodeImpl.get());
     auto extensionAstNode = new sdk::ExtensionAggStageAstNodeAdapter(std::move(astNodeImpl));
     auto handle = AggStageAstNodeHandle{extensionAstNode};
 
@@ -1778,16 +1726,18 @@ TEST_F(AggStageTest, ExtensionAstNodeCanBindViewInfo) {
     ::MongoExtensionNamespaceString nss{stringViewAsByteView(dbName.c_str()),
                                         stringViewAsByteView(viewName.c_str())};
 
-    // Use a non-empty pipeline so we verify bindViewInfo receives and stores pipeline stages.
+    // Use a non-empty pipeline so we verify bindResolvedNamespace receives and stores pipeline
+    // stages.
     BSONObj stage1 = BSON("$match" << BSON("x" << 1));
     BSONObj stage2 = BSON("$addFields" << BSON("y" << 2));
     std::vector<MongoExtensionByteView> pipelineViews = {
         mongo::extension::objAsByteView(stage1),
         mongo::extension::objAsByteView(stage2),
     };
-    ::MongoExtensionViewInfo viewInfo{nss, pipelineViews.size(), pipelineViews.data()};
+    ::MongoExtensionResolvedNamespace resolvedNamespace{
+        nss, pipelineViews.size(), pipelineViews.data()};
 
-    handle->bindViewInfo(viewInfo);
+    handle->bindResolvedNamespace(resolvedNamespace);
 
     ASSERT_EQ(astNodeImplPtr->getBoundViewName(), viewName);
     ASSERT_EQ(astNodeImplPtr->getBoundDbName(), dbName);
@@ -1796,9 +1746,10 @@ TEST_F(AggStageTest, ExtensionAstNodeCanBindViewInfo) {
     ASSERT_BSONOBJ_EQ(astNodeImplPtr->getBoundPipeline()[1], stage2);
 }
 
-TEST_F(AggStageTest, ExtensionAstNodeCanBindViewInfoIdentityView) {
-    auto astNodeImpl = ViewInfoBindingExtensionAstNode::make();
-    auto* astNodeImplPtr = static_cast<ViewInfoBindingExtensionAstNode*>(astNodeImpl.get());
+TEST_F(AggStageTest, ExtensionAstNodeCanBindResolvedNamespaceIdentityView) {
+    auto astNodeImpl = ResolvedNamespaceBindingExtensionAstNode::make();
+    auto* astNodeImplPtr =
+        static_cast<ResolvedNamespaceBindingExtensionAstNode*>(astNodeImpl.get());
     auto extensionAstNode = new sdk::ExtensionAggStageAstNodeAdapter(std::move(astNodeImpl));
     auto handle = AggStageAstNodeHandle{extensionAstNode};
 
@@ -1806,9 +1757,9 @@ TEST_F(AggStageTest, ExtensionAstNodeCanBindViewInfoIdentityView) {
     std::string viewName = "testViewName";
     ::MongoExtensionNamespaceString nss{stringViewAsByteView(dbName.c_str()),
                                         stringViewAsByteView(viewName.c_str())};
-    ::MongoExtensionViewInfo viewInfo{nss, 0, nullptr};
+    ::MongoExtensionResolvedNamespace resolvedNamespace{nss, 0, nullptr};
 
-    handle->bindViewInfo(viewInfo);
+    handle->bindResolvedNamespace(resolvedNamespace);
 
     ASSERT_EQ(astNodeImplPtr->getBoundViewName(), viewName);
     ASSERT_EQ(astNodeImplPtr->getBoundDbName(), dbName);
@@ -1896,6 +1847,45 @@ TEST(AggregationStageTest, GetFilterReturnsFilterWhenOverridden) {
     auto handle = extension::LogicalAggStageHandle{logicalStage};
 
     ASSERT_BSONOBJ_EQ(FilteredLogicalStage::kFilter, handle->getFilter());
+}
+
+class SkipStreamRecordingStage
+    : public sdk::TestLogicalStage<sdk::shared_test_stages::TransformExecAggStage> {
+public:
+    boost::optional<::MongoExtensionStreamType> lastStreamType;
+
+    SkipStreamRecordingStage()
+        : sdk::TestLogicalStage<sdk::shared_test_stages::TransformExecAggStage>("$skipStreamStage",
+                                                                                BSONObj()) {}
+
+    void skipStream(::MongoExtensionStreamType streamType) override {
+        lastStreamType = streamType;
+    }
+
+    std::unique_ptr<sdk::LogicalAggStage> clone() const override {
+        return std::make_unique<SkipStreamRecordingStage>();
+    }
+};
+
+TEST(AggregationStageTest, SkipStreamOverrideIsCalledWithCorrectStreamType) {
+    auto skipStreamImpl = std::make_unique<SkipStreamRecordingStage>();
+    auto* skipStreamPtr = skipStreamImpl.get();
+    auto logicalStage =
+        new extension::sdk::ExtensionLogicalAggStageAdapter(std::move(skipStreamImpl));
+    auto handle = extension::LogicalAggStageHandle{logicalStage};
+
+    handle->skipStream(::MongoExtensionStreamType::kMongoExtensionStreamTypeMetaResult);
+
+    ASSERT_TRUE(skipStreamPtr->lastStreamType.has_value());
+    ASSERT_EQ(*skipStreamPtr->lastStreamType,
+              ::MongoExtensionStreamType::kMongoExtensionStreamTypeMetaResult);
+}
+
+TEST(AggregationStageTest, SkipStreamDefaultNoOpDoesNotCrash) {
+    auto logicalStage = new extension::sdk::ExtensionLogicalAggStageAdapter(
+        sdk::shared_test_stages::TransformLogicalAggStage::make());
+    auto handle = extension::LogicalAggStageHandle{logicalStage};
+    handle->skipStream(::MongoExtensionStreamType::kMongoExtensionStreamTypeDocResult);
 }
 
 }  // namespace

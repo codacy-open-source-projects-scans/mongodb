@@ -5,6 +5,7 @@
 // Must also set 'fromRouter: true' as otherwise 'runtimeConstants' is disallowed on mongod.
 // @tags: [
 //   assumes_against_mongod_not_mongos,
+//   assumes_read_preference_unchanged,
 //   requires_scripting,
 //   requires_fcv_81,
 // ]
@@ -27,7 +28,11 @@ function reduce(key, values) {
 const command = {
     aggregate: coll.getName(),
     cursor: {},
-    runtimeConstants: {localNow: new Date(), clusterTime: new Timestamp(0, 0), jsScope: {modulus: modulus}},
+    runtimeConstants: {
+        localNow: new Date(),
+        clusterTime: new Timestamp(0, 0),
+        jsScope: {modulus: modulus},
+    },
     pipeline: [
         {
             $group: {
@@ -42,6 +47,8 @@ const command = {
         },
     ],
     fromRouter: true,
+    readConcern: {},
+    writeConcern: {},
 };
 
 const expectedResults = [
@@ -50,5 +57,14 @@ const expectedResults = [
     {_id: "hi", wordCountMod: 1},
 ];
 
-const res = assert.commandWorked(db.runCommand(command));
+const internalConn = new Mongo(db.getMongo().host);
+assert.commandWorked(
+    internalConn.getDB("admin").runCommand({
+        hello: 1,
+        internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)},
+    }),
+);
+const internalDB = internalConn.getDB(db.getName());
+
+const res = assert.commandWorked(internalDB.runCommand(command));
 assert(resultsEq(res.cursor.firstBatch, expectedResults, res.cursor));

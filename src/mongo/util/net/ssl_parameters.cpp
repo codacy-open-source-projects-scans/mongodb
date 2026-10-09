@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/util/net/ssl_parameters.h"
@@ -38,6 +12,8 @@
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
@@ -47,8 +23,8 @@ namespace {
 template <typename T, typename U>
 StatusWith<SSLParams::SSLModes> checkTLSModeTransition(T modeToString,
                                                        U stringToMode,
-                                                       StringData parameterName,
-                                                       StringData strMode) {
+                                                       std::string_view parameterName,
+                                                       std::string_view strMode) {
     auto mode = stringToMode(strMode);
     if (!mode.isOK()) {
         return mode.getStatus();
@@ -74,21 +50,21 @@ std::once_flag warnForSSLMode;
 
 void SSLModeServerParameter::append(OperationContext*,
                                     BSONObjBuilder* builder,
-                                    StringData fieldName,
+                                    std::string_view fieldName,
                                     const boost::optional<TenantId>&) {
     builder->append(fieldName, SSLParams::sslModeFormat(sslGlobalParams.sslMode.load()));
 }
 
 void TLSModeServerParameter::append(OperationContext*,
                                     BSONObjBuilder* builder,
-                                    StringData fieldName,
+                                    std::string_view fieldName,
                                     const boost::optional<TenantId>&) {
     builder->append(
         fieldName,
         SSLParams::tlsModeFormat(static_cast<SSLParams::SSLModes>(sslGlobalParams.sslMode.load())));
 }
 
-void SSLModeServerParameter::warnIfDeprecated(StringData action) {
+void SSLModeServerParameter::warnIfDeprecated(std::string_view action) {
     std::call_once(warnForSSLMode, [&] {
         LOGV2_WARNING(23804,
                       "Use of deprecated server parameter 'sslMode', please use 'tlsMode' instead.",
@@ -96,7 +72,8 @@ void SSLModeServerParameter::warnIfDeprecated(StringData action) {
     });
 }
 
-Status SSLModeServerParameter::setFromString(StringData strMode, const boost::optional<TenantId>&) {
+Status SSLModeServerParameter::setFromString(std::string_view strMode,
+                                             const boost::optional<TenantId>&) {
     auto swNewMode = checkTLSModeTransition(
         SSLParams::sslModeFormat, SSLParams::sslModeParse, "sslMode", strMode);
     if (!swNewMode.isOK()) {
@@ -106,7 +83,8 @@ Status SSLModeServerParameter::setFromString(StringData strMode, const boost::op
     return Status::OK();
 }
 
-Status TLSModeServerParameter::setFromString(StringData strMode, const boost::optional<TenantId>&) {
+Status TLSModeServerParameter::setFromString(std::string_view strMode,
+                                             const boost::optional<TenantId>&) {
     auto swNewMode = checkTLSModeTransition(
         SSLParams::tlsModeFormat, SSLParams::tlsModeParse, "tlsMode", strMode);
     if (!swNewMode.isOK()) {
@@ -118,7 +96,7 @@ Status TLSModeServerParameter::setFromString(StringData strMode, const boost::op
 
 void TLSCATrustsSetParameter::append(OperationContext*,
                                      BSONObjBuilder* b,
-                                     StringData name,
+                                     std::string_view name,
                                      const boost::optional<TenantId>&) {
     if (!sslGlobalParams.tlsCATrusts) {
         b->appendNull(name);
@@ -203,7 +181,7 @@ Status TLSCATrustsSetParameter::set(const BSONElement& element,
     return exceptionToStatus();
 }
 
-Status TLSCATrustsSetParameter::setFromString(StringData json,
+Status TLSCATrustsSetParameter::setFromString(std::string_view json,
                                               const boost::optional<TenantId>&) try {
     return set(BSON("" << fromjson(json)).firstElement(), boost::none);
 } catch (...) {
@@ -212,14 +190,14 @@ Status TLSCATrustsSetParameter::setFromString(StringData json,
 
 void ClusterAuthX509OverrideParameter::append(OperationContext* opCtx,
                                               BSONObjBuilder* bob,
-                                              StringData name,
+                                              std::string_view name,
                                               const boost::optional<TenantId>&) {
     ClusterAuthX509Override currentValue;
     if (!sslGlobalParams.clusterAuthX509OverrideAttributes.empty()) {
         currentValue.setAttributes(sslGlobalParams.clusterAuthX509OverrideAttributes);
     } else if (!sslGlobalParams.clusterAuthX509OverrideExtensionValue.empty()) {
         currentValue.setExtensionValue(
-            StringData{sslGlobalParams.clusterAuthX509OverrideExtensionValue});
+            std::string_view{sslGlobalParams.clusterAuthX509OverrideExtensionValue});
     }
 
     BSONObjBuilder subObjBuilder(bob->subobjStart(name));
@@ -255,7 +233,7 @@ Status ClusterAuthX509OverrideParameter::set(const BSONElement& element,
     return exceptionToStatus();
 }
 
-Status ClusterAuthX509OverrideParameter::setFromString(StringData json,
+Status ClusterAuthX509OverrideParameter::setFromString(std::string_view json,
                                                        const boost::optional<TenantId>&) try {
     return set(BSON("" << fromjson(json)).firstElement(), boost::none);
 } catch (...) {

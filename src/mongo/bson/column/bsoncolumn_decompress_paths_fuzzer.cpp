@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
@@ -33,6 +7,8 @@
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/bson/column/bsoncolumn_test_util.h"
 #include "mongo/db/exec/sbe/values/value.h"
+
+#include <string_view>
 
 static bool isDataOnlyInterleaved(const char* binary, size_t size) {
     using namespace mongo;
@@ -75,7 +51,7 @@ static bool containsDuplicateFields(mongo::BSONObj obj) {
     using namespace mongo;
     StringDataSet fields;
     for (auto&& elem : obj) {
-        StringData fieldName = elem.fieldNameStringData();
+        std::string_view fieldName = elem.fieldNameStringData();
         if (fields.contains(fieldName)) {
             return true;
         }
@@ -275,14 +251,14 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
             invariant(
                 iteratorElem.first == blockElem.first ||
                     (blockElem.first == sbe::value::TypeTags::bsonString && iteratorTagIsAString),
-                str::stream() << "For the input: " << base64::encode(StringData(Data, Size))
+                str::stream() << "For the input: " << base64::encode(std::string_view(Data, Size))
                               << " For the path: " << (*blockBasedRes).first._pathRequest.toString()
                               << ". The types differ. Iterator API returned " << iteratorElem.first
                               << ". The block based API returned " << blockElem.first);
 
             invariant(bsoncolumn::areSBEBinariesEqual(blockElem, iteratorElem),
                       str::stream()
-                          << "For the input: " << base64::encode(StringData(Data, Size))
+                          << "For the input: " << base64::encode(std::string_view(Data, Size))
                           << " For the path: " << (*blockBasedRes).first._pathRequest.toString()
                           << ".  The values differ. Iterator API returned "
                           << sbe::value::print(iteratorElem) << ". The block based API returned "

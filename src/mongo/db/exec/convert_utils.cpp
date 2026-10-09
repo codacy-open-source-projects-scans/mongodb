@@ -1,46 +1,24 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/convert_utils.h"
 
 #include "mongo/bson/bson_depth.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/util/overloaded_visitor.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
 
 #include <cstdint>
 #include <stack>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
 namespace mongo::exec::expression::convert_utils {
 
 namespace {
+using namespace std::literals::string_view_literals;
 using json = nlohmann::json;
 
 class BsonSaxConsumer : public json::json_sax_t {
@@ -123,7 +101,7 @@ public:
     bool parse_error(std::size_t position,
                      const std::string& last_token,
                      const json::exception& ex) override {
-        uassertInvalidJson(""_sd, false);
+        uassertInvalidJson(""sv, false);
         return false;
     }
 
@@ -206,7 +184,7 @@ private:
         }
     }
 
-    void uassertInvalidJson(StringData reason, bool cond) const {
+    void uassertInvalidJson(std::string_view reason, bool cond) const {
         uassert(ErrorCodes::ConversionFailure,
                 str::stream() << "Input doesn't represent valid JSON"
                               << (reason.empty() ? "" : ": ") << reason,
@@ -222,7 +200,7 @@ private:
 };
 }  // namespace
 
-Value parseJson(StringData data, boost::optional<BSONType> expectedType) {
+Value parseJson(std::string_view data, boost::optional<BSONType> expectedType) {
     // The sax consumer handles errors by uasserting. It should never return false.
     BsonSaxConsumer sax{BSONObjMaxUserSize};
     tassert(10508706, "Unexpected parsing error", json::sax_parse(data, &sax));
@@ -308,6 +286,8 @@ std::vector<Value> convertBinDataVectorToArray(const Value& val, bool isLittleEn
 
     // The rest of the binData vector is the elements.
     std::vector<Value> results;
+    results.reserve(view->elementCount);
+
     const std::byte* dataPointer = view->data;
 
     for (int i = 0; i < view->dataLength;) {
@@ -352,6 +332,81 @@ std::vector<Value> convertBinDataVectorToArray(const Value& val, bool isLittleEn
         }
     }
     return results;
+}
+
+bool isValidUserDefinedBinDataType(int typeCode) {
+    static const auto smallestUserDefinedType = BinDataType::bdtCustom;
+    static const auto largestUserDefinedType = static_cast<BinDataType>(255);
+    return (smallestUserDefinedType <= typeCode) && (typeCode <= largestUserDefinedType);
+}
+
+void uassertValidUserConstructedBinData(const BSONBinData& binData, bool allowColumn) {
+    // User-defined subtypes are opaque and always allowed.
+    if (isValidUserDefinedBinDataType(binData.type)) {
+        return;
+    }
+
+    switch (binData.type) {
+        // These subtypes have no structure to validate.
+        case BinDataType::BinDataGeneral:
+        case BinDataType::Function:
+        case BinDataType::Sensitive:
+        // Encrypt payloads are validated by their FLE consumers.
+        case BinDataType::Encrypt:
+            break;
+        case BinDataType::bdtUUID:
+        case BinDataType::newUUID:
+        case BinDataType::MD5Type:
+            uassert(13016802,
+                    str::stream() << "BinData subtype " << static_cast<int>(binData.type)
+                                  << " requires exactly " << UUID::kNumBytes << " bytes",
+                    binData.length == UUID::kNumBytes);
+            break;
+        case BinDataType::ByteArrayDeprecated:
+            uassert(12978505,
+                    "BinData subtype ByteArrayDeprecated (2) requires a valid inner length prefix",
+                    binData.length >= 4 &&
+                        ConstDataView(static_cast<const char*>(binData.data))
+                                .read<LittleEndian<int32_t>>() == binData.length - 4);
+            break;
+        case BinDataType::Vector:
+            // 'parseBinDataVector()' uasserts that the header is well formed.
+            parseBinDataVector(binData);
+            break;
+        case BinDataType::Column:
+            uassert(12978506, "BinData subtype Column (7) is not allowed", allowColumn);
+            break;
+        default:
+            // Any unassigned or future subtype is rejected.
+            uasserted(12978507,
+                      str::stream() << "BinData subtype " << static_cast<int>(binData.type)
+                                    << " is not allowed");
+    }
+}
+
+void uassertValidUserConstructedBinData(const BSONElement& elem, bool allowColumn) {
+    switch (elem.type()) {
+        case BSONType::binData: {
+            int len = 0;
+            const char* data = elem.binData(len);
+            uassertValidUserConstructedBinData(BSONBinData(data, len, elem.binDataType()),
+                                               allowColumn);
+            break;
+        }
+        case BSONType::object:
+        case BSONType::array:
+            for (const auto& child : elem.embeddedObject()) {
+                uassertValidUserConstructedBinData(child, allowColumn);
+            }
+            break;
+        case BSONType::codeWScope:
+            for (const auto& child : elem.codeWScopeObject()) {
+                uassertValidUserConstructedBinData(child, allowColumn);
+            }
+            break;
+        default:
+            break;
+    }
 }
 
 }  // namespace mongo::exec::expression::convert_utils

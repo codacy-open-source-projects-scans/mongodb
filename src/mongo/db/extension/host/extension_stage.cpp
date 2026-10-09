@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/extension/host/extension_stage.h"
 
@@ -39,6 +13,8 @@
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/util/scoped_timer_metric.h"
 #include "mongo/db/stats/counters.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -80,7 +56,7 @@ REGISTER_AGG_STAGE_MAPPING(extensionStage,
                            DocumentSourceExtensionOptimizable::id,
                            documentSourceExtensionToStageFn);
 
-ExtensionStage::ExtensionStage(StringData name,
+ExtensionStage::ExtensionStage(std::string_view name,
                                const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                extension::ExecAggStageHandle execAggStageHandle)
     : Stage(name, pExpCtx),
@@ -120,12 +96,13 @@ GetNextResult ExtensionStage::doGetNext() {
 
     std::unique_ptr<host::QueryExecutionContext> wrappedCtx =
         std::make_unique<host::QueryExecutionContext>(pExpCtx.get());
-    host_connector::QueryExecutionContextAdapter ctxAdapter(std::move(wrappedCtx));
+    host_connector::QueryExecutionContextAdapter ctxAdapter(std::move(wrappedCtx),
+                                                            _dynamicBatchSize);
     tassert(11357601, "_execAggStageHandle is invalid", _execAggStageHandle.isValid());
     _lastGetNextResult = _execAggStageHandle->getNext(&ctxAdapter);
     switch (_lastGetNextResult.code) {
         case GetNextCode::kAdvanced: {
-            tassert(11357602,
+            tassert(ErrorCodes::ExtensionError,
                     "No result BSONObj returned even though the result is in the advanced state.",
                     _lastGetNextResult.resultDocument.has_value());
 
@@ -150,7 +127,7 @@ GetNextResult ExtensionStage::doGetNext() {
     }
 }
 
-Document ExtensionStage::getExplainOutput(const SerializationOptions& opts) const {
+Document ExtensionStage::getExplainOutput(const query_shape::SerializationOptions& opts) const {
     MutableDocument output(Stage::getExplainOutput(opts));
 
     std::unique_ptr<extension::host::QueryExecutionContext> wrappedCtx =

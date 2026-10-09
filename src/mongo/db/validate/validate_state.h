@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -56,6 +30,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -64,14 +39,14 @@
 
 namespace mongo {
 
-namespace CollectionValidation {
+namespace collection_validation {
 
 /**
  * Returns a scoped object, which holds the 'validateLock' in exclusive mode for
  * the given scope. It must only be used to coordinate validation with concurrent
  * oplog batch applications.
  */
-MONGO_MOD_PUBLIC Lock::ExclusiveLock obtainExclusiveValidationLock(OperationContext* opCtx);
+[[MONGO_MOD_PUBLIC]] Lock::ExclusiveLock obtainExclusiveValidationLock(OperationContext* opCtx);
 
 enum struct FastCountType {
     // The size storer table created by WiredTiger.
@@ -82,7 +57,7 @@ enum struct FastCountType {
     neither,
 };
 
-StringData toString(FastCountType unit);
+std::string_view toString(FastCountType unit);
 
 /**
  * Contains information about the collection being validated and the user provided validation
@@ -101,13 +76,71 @@ public:
     }
 
     /**
-     * Returns true if fast count and/or size is being validated, and the collection supports fast
-     * count. Certain internal collections are not supported by fast count.
-     * TODO SERVER-117326: Remove 'opCtx' parameter.
+     * Returns true if fast count is being validated, and the collection supports fast
+     * count.
+     *
+     * If the persistence provider uses replicated fast count, this will return true for any
+     * collection that is tracked by the replicated fast count system and is eligible to have its
+     * size and count validated.
+     *
+     * If the persistence provider does not use replicated fast count, this will return true if the
+     * collection is eligible to have its size and count validated and the parameter to enforce fast
+     * count validation is set.
+     *
+     * If the fast count type is both or neither, it will return false.
+     * TODO SERVER-128302: Validate fast count on eligible collections when the fast count type is
+     * both.
+     *
      */
-    bool shouldEnforceFastCount(OperationContext* opCtx) const;
+    bool shouldEnforceFastCount(OperationContext* opCtx, FastCountType type) const;
 
+    /**
+     * Returns true if fast size is being validated, and the collection supports fast
+     * size.
+     *
+     * If the persistence provider uses replicated fast count, this will return true for any
+     * collection that is tracked by the replicated fast count system and is eligible to have its
+     * size and count validated.
+     *
+     * If the persistence provider does not use replicated fast count, this will return true if the
+     * collection is eligible to have its size and count validated and the parameter to enforce fast
+     * size validation is set.
+     *
+     * If the fast count type is both or neither, it will return false.
+     * TODO SERVER-128302: Validate fast size on eligible collections when the fast count type is
+     * both.
+     *
+     */
+    bool shouldEnforceFastSize(OperationContext* opCtx, FastCountType type) const;
+
+    /**
+     * Returns the fast count type that is detected for this node.
+     */
     FastCountType getDetectedFastCountType(OperationContext* opCtx) const;
+
+    /**
+     * Returns true if the collection can be written to while foreground validation holds its
+     * collection X lock, so that record counts taken at different points during validation are
+     * allowed to disagree.
+     *
+     * Oplog writers only take a global IX lock, so the oplog can still be written to even during
+     * full validation despite its collection X lock. The oplog entries are also written to the
+     * change stream pre-images collection, so it is subject to the same races.
+     */
+    bool isConcurrentlyWritable() const {
+        return _nss.isOplog() || _nss.isChangeStreamPreImagesCollection();
+    }
+
+    /**
+     * Returns the fast count type that is expected for this node.
+     *
+     * If the persistence provider uses replicated fast count, returns FastCountType::replicated.
+     *
+     * If the persistence provider does not use replicated fast count, returns FastCountType::both
+     * if the replicated fast count feature flag is enabled and the oplog collection is present;
+     * otherwise, returns FastCountType::legacySizeStorer.
+     */
+    FastCountType getExpectedFastCountType(OperationContext* opCtx) const;
 
     BSONValidateModeEnum getBSONValidateMode() const {
         return isBSONConformanceValidation() ? BSONValidateModeEnum::kFull
@@ -135,7 +168,7 @@ public:
         return _indexCursors;
     }
 
-    const std::unique_ptr<SeekableRecordThrottleCursor>& getTraverseRecordStoreCursor() const {
+    std::shared_ptr<SeekableRecordThrottleCursor> getTraverseRecordStoreCursor() {
         return _traverseRecordStoreCursor;
     }
 
@@ -170,16 +203,22 @@ private:
     ValidateState() = delete;
 
     /**
-     * Checks if the fast count replicated collection exists by looking up the collection in the
-     * catalog. Returns Status::OK() if the collection exists and an error otherwise.
+     * Checks whether the replicated fast count container ident exists in the storage engine.
+     * Returns Status::OK() if the container exists and an error otherwise.
      */
-    Status _checkReplicatedFastCountCollectionExists(OperationContext* opCtx) const;
+    Status _checkReplicatedFastCountContainer(OperationContext* opCtx) const;
 
     /**
      * Checks if the underlying storage engine contains an internal size storer table. Returns
      * Status::OK() if the collection exists and an error otherwise.
      */
     Status _checkUnreplicatedFastCountCollectionExists(OperationContext* opCtx) const;
+
+    /**
+     * Returns true if the namespace is eligible to have its fast count and size validated when the
+     * size and count is stored in the size storer.
+     */
+    bool _isNSEligibleForSizeStorerValidation() const;
 
     // This lock needs to be obtained before the global lock. Initialise in the validation
     // constructor. Oplog Batch Applier takes this lock in exclusive mode when applying the batch.
@@ -202,7 +241,7 @@ private:
 
     // Shared cursors to be used during validation, created in 'initializeCursors()'.
     StringMap<std::unique_ptr<SortedDataInterfaceThrottleCursor>> _indexCursors;
-    std::unique_ptr<SeekableRecordThrottleCursor> _traverseRecordStoreCursor;
+    std::shared_ptr<SeekableRecordThrottleCursor> _traverseRecordStoreCursor;
     std::unique_ptr<SeekableRecordThrottleCursor> _seekRecordStoreCursor;
 
     RecordId _firstRecordId;
@@ -210,5 +249,5 @@ private:
     DataThrottle _dataThrottle;
 };
 
-}  // namespace CollectionValidation
+}  // namespace collection_validation
 }  // namespace mongo

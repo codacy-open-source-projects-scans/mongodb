@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/pipeline_executor.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/agg/queue_stage.h"
@@ -49,6 +22,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
 #include <typeinfo>
 
 #include <boost/optional/optional.hpp>
@@ -57,7 +31,8 @@
 namespace mongo {
 
 namespace {
-constexpr StringData kIdFieldName = "_id"_sd;
+using namespace std::literals::string_view_literals;
+constexpr std::string_view kIdFieldName = "_id"sv;
 }  // namespace
 
 PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -134,10 +109,13 @@ UpdateExecutor::ApplyResult PipelineExecutor::applyUpdate(ApplyParams applyParam
         if (applyParams.logMode == ApplyParams::LogMode::kGenerateOplogEntry) {
             // We're allowed to generate $v: 2 log entries. The $v:2 has certain meta-fields like
             // '$v', 'diff'. So we pad some additional byte while computing diff.
-            const auto diff = doc_diff::computeOplogDiff(
-                originalDoc, transformedDoc, update_oplog_entry::kSizeOfDeltaOplogEntryMetadata);
-            if (diff) {
+            if (auto diff =
+                    doc_diff::computeOplogDiff(originalDoc,
+                                               transformedDoc,
+                                               update_oplog_entry::kSizeOfDeltaOplogEntryMetadata);
+                diff) {
                 ret.oplogEntry = update_oplog_entry::makeDeltaOplogEntry(*diff);
+                ret.diff = std::move(diff);
                 return ret;
             }
         }
@@ -153,10 +131,10 @@ UpdateExecutor::ApplyResult PipelineExecutor::applyUpdate(ApplyParams applyParam
 }
 
 Value PipelineExecutor::serialize() const {
-    return serialize(SerializationOptions{});
+    return serialize(query_shape::SerializationOptions{});
 }
 
-Value PipelineExecutor::serialize(const SerializationOptions& opts) const {
+Value PipelineExecutor::serialize(const query_shape::SerializationOptions& opts) const {
     std::vector<Value> valueArray;
     for (const auto& stage : _pipeline->getSources()) {
         // The queue stage we add to adapt the pull-based '_pipeline' to our use case should not

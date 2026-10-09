@@ -2,8 +2,8 @@
  * Asserts behavior of engine selection given the feature flags and query knobs that are set.
  * Also asserts on which stages are pushed down to SBE, and which remain as document sources.
  *
- * TODO SERVER-120734 extend this test for time-series collections.
  * @tags: [
+ *   uses_explain,
  *   # Different versions may have different SBE components enabled.
  *   multiversion_incompatible,
  *   # Topology doesn't affect engine selection.
@@ -28,14 +28,24 @@ if (checkJoinOptimizationStatus(db)) {
     quit();
 }
 
-const frameworkControl = assert.commandWorked(db.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1}));
-const forceClassicEngineSet = frameworkControl.internalQueryFrameworkControl === "forceClassicEngine";
+const frameworkControl = assert.commandWorked(
+    db.adminCommand({getParameter: 1, internalQueryFrameworkControl: 1}),
+);
+const forceClassicEngineSet =
+    frameworkControl.internalQueryFrameworkControl === "forceClassicEngine";
 const trySbeEngineSet = frameworkControl.internalQueryFrameworkControl === "trySbeEngine";
 const ffSbeFull = FeatureFlagUtil.isPresentAndEnabled(db, "SbeFull");
 const ffSbeTransformStages = FeatureFlagUtil.isPresentAndEnabled(db, "SbeTransformStages");
 const ffSbeNonLeadingMatch = FeatureFlagUtil.isPresentAndEnabled(db, "SbeNonLeadingMatch");
-const ffSbeEqLookupUnwind = FeatureFlagUtil.isPresentAndEnabled(db, "SbeEqLookupUnwind");
-const ffGetExecutorDeferredEngineChoice = FeatureFlagUtil.isPresentAndEnabled(db, "GetExecutorDeferredEngineChoice");
+const ffGetExecutorDeferredEngineChoice = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "GetExecutorDeferredEngineChoice",
+);
+const ffSbeEqLookupUnwindHashJoin = FeatureFlagUtil.isPresentAndEnabled(
+    db,
+    "SbeEqLookupUnwindHashJoin",
+);
+const lookupUnwindPushesDown = ffGetExecutorDeferredEngineChoice && ffSbeEqLookupUnwindHashJoin;
 const sbeFullyEnabled = ffSbeFull || trySbeEngineSet;
 
 const coll = db.coll;
@@ -79,6 +89,7 @@ const ixScanUnionSortShape = [{$match: {$or: [{a: 1}, {b: 1}]}}, {$sort: {c: 1}}
 // but not in ascending order to satisfy the sort.
 const ixScanSortFetchShape = [{$match: {y: {$gt: 5}}}, {$sort: {z: 1}}];
 const ixScanSortSkipFetchShape = [{$match: {y: {$gt: 5}}}, {$sort: {z: 1}}, {$skip: 1}];
+const ixScanSortLimitFetchShape = [{$match: {y: {$gt: 5}}}, {$sort: {z: 1}}, {$limit: 1}];
 
 // SKIP shapes
 const ixScanSkipFetchShape = [{$match: {a: 1}}, {$skip: 1}];
@@ -95,6 +106,7 @@ const allShapes = [
     ixScanUnionSortShape,
     ixScanSortFetchShape,
     ixScanSortSkipFetchShape,
+    ixScanSortLimitFetchShape,
     ixScanSkipFetchShape,
 ];
 
@@ -104,20 +116,23 @@ const neutralProject = {$project: {array: 0}};
 const match = {$match: {array: 1}};
 // If $group doesn't depend on the whole document, a projection is inserted in the data access plan. So using $$CURRENT here prevents this stage from altering the plan shapes.
 const group = {$group: {_id: "$$CURRENT"}};
-const lookup = {$lookup: {from: foreignColl.getName(), as: "array", localField: "a", foreignField: "a"}};
+const lookup = {
+    $lookup: {from: foreignColl.getName(), as: "array", localField: "a", foreignField: "a"},
+};
 const lookupUnwind = [lookup, {$unwind: "$array"}];
 
 // The deferred exec path only enables certain LU plan shapes.
-const shapesThatTriggerLookupUnwind = ffGetExecutorDeferredEngineChoice
+const shapesThatTriggerLookupUnwind = lookupUnwindPushesDown
     ? allShapes.filter(
           (p) =>
               p !== collScanSortShape &&
               p !== ixScanFetchSortShape &&
               p !== ixScanUnionSortShape &&
               p !== ixScanSortSkipFetchShape &&
+              p !== ixScanSortLimitFetchShape &&
               p !== ixScanSkipFetchShape,
       )
-    : allShapes;
+    : [];
 
 // Our test cases. Each object contains an aggregation pipeline, and a field listing which plan
 // shapes would trigger SBE usage. The aggregation will be run with different plan shapes and use
@@ -194,37 +209,43 @@ const aggregationTests = [
         // together.
         agg: [lookupUnwind],
         planShapesThatTriggerSbe: shapesThatTriggerLookupUnwind,
-        pushDownPattern: [ffSbeEqLookupUnwind],
+        pushDownPattern: [lookupUnwindPushesDown],
     },
     {
         agg: [lookupUnwind, match],
         planShapesThatTriggerSbe: shapesThatTriggerLookupUnwind,
-        pushDownPattern: [ffSbeEqLookupUnwind, ffSbeNonLeadingMatch],
+        pushDownPattern: [lookupUnwindPushesDown, ffSbeNonLeadingMatch],
     },
     {
         agg: [lookupUnwind, neutralProject],
         planShapesThatTriggerSbe: shapesThatTriggerLookupUnwind,
-        pushDownPattern: [ffSbeEqLookupUnwind, ffSbeTransformStages],
+        pushDownPattern: [lookupUnwindPushesDown, ffSbeTransformStages],
     },
     {
         agg: [lookupUnwind, lookup],
         planShapesThatTriggerSbe: shapesThatTriggerLookupUnwind,
-        pushDownPattern: [ffSbeEqLookupUnwind, true],
+        pushDownPattern: [lookupUnwindPushesDown, true],
     },
     {
         agg: [lookupUnwind, group],
         planShapesThatTriggerSbe: shapesThatTriggerLookupUnwind,
-        pushDownPattern: [ffSbeEqLookupUnwind, true],
+        pushDownPattern: [lookupUnwindPushesDown, true],
     },
     {
         agg: [lookup, lookupUnwind],
         planShapesThatTriggerSbe: allShapes,
-        pushDownPattern: [true, (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape)],
+        pushDownPattern: [
+            true,
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
+        ],
     },
     {
         agg: [group, lookupUnwind],
         planShapesThatTriggerSbe: allShapes,
-        pushDownPattern: [true, (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape)],
+        pushDownPattern: [
+            true,
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
+        ],
     },
     {
         agg: [lookup, match, lookupUnwind],
@@ -232,7 +253,7 @@ const aggregationTests = [
         pushDownPattern: [
             true,
             ffSbeNonLeadingMatch,
-            (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape),
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
         ],
     },
     // This test case covers the scenario where the QSN cut has to remove 3 stages from the QSN instead of just one.
@@ -242,7 +263,7 @@ const aggregationTests = [
         pushDownPattern: [
             true,
             ffSbeNonLeadingMatch,
-            (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape),
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
             ffSbeTransformStages,
             true,
         ],
@@ -253,7 +274,7 @@ const aggregationTests = [
         pushDownPattern: [
             true,
             ffSbeTransformStages,
-            (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape),
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
         ],
     },
     {
@@ -262,7 +283,7 @@ const aggregationTests = [
         pushDownPattern: [
             true,
             ffSbeNonLeadingMatch,
-            (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape),
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
         ],
     },
     {
@@ -271,7 +292,7 @@ const aggregationTests = [
         pushDownPattern: [
             true,
             ffSbeTransformStages,
-            (shape) => ffSbeEqLookupUnwind && shapesThatTriggerLookupUnwind.includes(shape),
+            (shape) => lookupUnwindPushesDown && shapesThatTriggerLookupUnwind.includes(shape),
         ],
     },
 ];

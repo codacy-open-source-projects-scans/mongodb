@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -38,6 +12,8 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -70,9 +46,22 @@ public:
 
 private:
     BSONObj _produceNewDocumentForInsert();
-    void _performInsert(BSONObj newDocument);
+
+    // Performs the insert for the no-match-found branch of the upsert. Returns NEED_TIME once the
+    // insert has committed, or NEED_YIELD if handlePlanStageYield caught a retryable storage
+    // conflict (a WriteConflictException or similar), in which case the PlanExecutor will yield
+    // (releasing the storage snapshot, locks, and ticket), back off, restore, and re-drive
+    // doWork().
+    PlanStage::StageState _performInsert(const BSONObj& newDocument, WorkingSetID* out);
+
     void _assertDocumentToBeInsertedIsValid(const mutablebson::Document& document,
                                             const FieldRefSet& shardKeyPaths);
+
+    // The document to insert, produced once on the first insert attempt and reused across any
+    // WriteConflictException retries so that the generated _id/OID remains stable. Its presence
+    // also marks that doWork() is in the insert phase and should skip re-running
+    // UpdateStage::doWork().
+    boost::optional<BSONObj> _newDocumentToInsert;
 };
 
 }  // namespace mongo

@@ -1,41 +1,17 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/projection_executor.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/compiler/logical_model/projection/projection.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
@@ -43,6 +19,7 @@
 #include "mongo/util/string_map.h"
 
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -59,7 +36,7 @@ protected:
                     const BSONObj& projObj,
                     WorkingSet* ws,
                     std::unique_ptr<PlanStage> child,
-                    const char* stageType);
+                    std::string_view stageType);
 
 public:
     bool isEOF() const final;
@@ -72,6 +49,15 @@ public:
     }
 
 protected:
+    /**
+     * Returns the memory tracker used while evaluating the projection's expressions.
+     * Overridden by projection implementations that evaluate expressions and have expression
+     * memory tracking engaged.
+     */
+    virtual const SimpleMemoryUsageTracker* expressionMemoryTracker() const {
+        return nullptr;
+    }
+
     // The raw BSON projection used to populate projection stats. Optional, since it is required
     // only in explain mode.
     boost::optional<BSONObj> _projObj;
@@ -111,10 +97,22 @@ public:
 private:
     void transform(WorkingSetMember* member) const final;
 
+    const SimpleMemoryUsageTracker* expressionMemoryTracker() const final {
+        return _expressionEvalCtx.tracker;
+    }
+
     // Represents all metadata used in the projection.
     const QueryMetadataBitSet _requestedMetadata;
     const projection_ast::ProjectType _projectType;
     std::unique_ptr<projection_executor::ProjectionExecutor> _executor;
+
+    // Tracks memory used while evaluating the projection's expressions. Only engaged (reporting
+    // into the operation-wide memory tracker) when both memory-tracking feature flags are enabled.
+    SimpleMemoryUsageTracker _memoryTracker;
+
+    // Context threaded into every expression evaluation performed by this stage. Its tracker points
+    // to '_memoryTracker' when expression memory tracking is engaged, and is null otherwise.
+    EvaluationContext _expressionEvalCtx;
 };
 
 /**
@@ -153,7 +151,7 @@ private:
     std::vector<bool> _includeKey;
 
     // If the i-th entry of _includeKey is true this is the field name for the i-th key field.
-    std::vector<StringData> _keyFieldNames;
+    std::vector<std::string_view> _keyFieldNames;
 };
 
 /**
@@ -190,7 +188,30 @@ public:
     template <typename Container>
     static BSONObj transform(const BSONObj& doc,
                              const Container& fields,
-                             projection_ast::ProjectType projectType);
+                             projection_ast::ProjectType projectType) {
+        BSONObjBuilder bob;
+        auto nFieldsLeft = fields.size();
+
+        if (projectType == projection_ast::ProjectType::kInclusion) {
+            for (const auto& elt : doc) {
+                if (fields.count(elt.fieldNameStringData()) > 0) {
+                    bob.append(elt);
+                    if (--nFieldsLeft == 0) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            for (const auto& elt : doc) {
+                if (nFieldsLeft == 0 || fields.count(elt.fieldNameStringData()) == 0) {
+                    bob.append(elt);
+                } else {
+                    --nFieldsLeft;
+                }
+            }
+        }
+        return bob.obj();
+    }
 
 private:
     void transform(WorkingSetMember* member) const final;

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -36,10 +10,12 @@
 #include "mongo/db/index_builds/index_builds.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/storage/compact_options.h"
+#include "mongo/db/storage/flush_all_files_observer.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_tier_gen.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/str.h"
@@ -47,15 +23,18 @@
 #include <compare>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/filesystem.hpp>
 #include <boost/serialization/strong_typedef.hpp>
 
-MONGO_MOD_PUBLIC;
+[[MONGO_MOD_PUBLIC]];
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 class JournalListener;
 class KVBackupBlock;
@@ -72,8 +51,8 @@ struct StorageGlobalParams;
 
 // StorageEngine constants
 const NamespaceString kCatalogInfoNamespace = NamespaceString(DatabaseName::kMdbCatalog);
-const auto kResumableIndexIdentStem = "resumable-index-build-"_sd;
-const auto kIndexBuildIdentStem = "indexBuild"_sd;
+const auto kResumableIndexIdentStem = "resumable-index-build-"sv;
+const auto kIndexBuildIdentStem = "indexBuild"sv;
 
 /**
  * The StorageEngine class is the top level interface for creating a new storage engine. All
@@ -97,8 +76,6 @@ public:
     using OldestActiveTransactionTimestampResult = StatusWith<boost::optional<Timestamp>>;
     using OldestActiveTransactionTimestampCallback =
         std::function<OldestActiveTransactionTimestampResult(Timestamp stableTimestamp)>;
-
-    using DropIdentCallback = std::function<void()>;
 
     /**
      * Information on last storage engine shutdown state that is relevant to the recovery process.
@@ -133,7 +110,7 @@ public:
          * Implementations that change the value of the returned string can cause
          * data file incompatibilities.
          */
-        virtual StringData getCanonicalName() const = 0;
+        virtual std::string_view getCanonicalName() const = 0;
 
         /**
          * Validates creation options for a collection in the StorageEngine.
@@ -469,7 +446,7 @@ public:
      * belong to the same SpillTable. To call this method, the StorageEngine must be initialized
      * with a spill engine.
      */
-    virtual void dropSpillTable(RecoveryUnit& ru, StringData ident) = 0;
+    virtual void dropSpillTable(RecoveryUnit& ru, std::string_view ident) = 0;
 
     /**
      * Creates an internal RecordStore on the storage engine. On startup after an unclean shutdown,
@@ -477,7 +454,7 @@ public:
      * responsibility to drop the table when done.
      */
     virtual std::unique_ptr<RecordStore> makeInternalRecordStore(OperationContext* opCtx,
-                                                                 StringData ident,
+                                                                 std::string_view ident,
                                                                  KeyFormat keyFormat) = 0;
 
     /**
@@ -504,6 +481,19 @@ public:
      * This may only be set once.
      */
     virtual void setJournalListener(JournalListener* jl) = 0;
+
+    /**
+     * Sets the FlushAllFilesObserver, which the storage engine notifies while it flushes all of its
+     * data files to disk in flushAllFiles().
+     */
+    virtual void setFlushAllFilesObserver(FlushAllFilesObserver* observer) {}
+
+    /**
+     * Returns the registered FlushAllFilesObserver, or nullptr if none has been set.
+     */
+    virtual FlushAllFilesObserver* getFlushAllFilesObserver() const {
+        return nullptr;
+    }
 
     /**
      * Returns whether the storage engine supports "recover to stable timestamp". Returns true
@@ -535,13 +525,14 @@ public:
      * tracked as the reaper cannot distinguish "ident has already been dropped" from "ident was
      * never drop pending".
      */
-    virtual Status immediatelyCompletePendingDrop(OperationContext* opCtx, StringData ident) = 0;
+    virtual Status immediatelyCompletePendingDrop(OperationContext* opCtx,
+                                                  std::string_view ident) = 0;
 
     /**
      * Attempts to immediately drop the given ident. If the ident is still in use and cannot be
      * dropped now, adds it to the reaper to be dropped later.
      */
-    virtual void dropIdent(RecoveryUnit& ru, StringData ident) = 0;
+    virtual void dropIdent(RecoveryUnit& ru, std::string_view ident) = 0;
 
     /**
      * Performs a timestamped ident drop.
@@ -550,7 +541,7 @@ public:
      * dropped in checkpoints taken at or after 'timestamp'.
      */
     virtual void dropIdentTimestamped(OperationContext* opCtx,
-                                      StringData ident,
+                                      std::string_view ident,
                                       Timestamp timestamp) = 0;
 
     BOOST_STRONG_TYPEDEF(uint64_t, CheckpointIteration);
@@ -591,9 +582,7 @@ public:
      * - the 'dropTime' is sufficiently old to ensure no future data accesses
      * - and no holders of 'ident' remain (the index/collection is no longer in active use)
      */
-    virtual void addDropPendingIdent(const DropTime& dropTime,
-                                     std::shared_ptr<Ident> ident,
-                                     DropIdentCallback&& onDrop = nullptr) = 0;
+    virtual void addDropPendingIdent(const DropTime& dropTime, std::shared_ptr<Ident> ident) = 0;
 
     /**
      * Drops the data for the given ident which is not present in the catalog, but whose exact drop
@@ -603,7 +592,7 @@ public:
      */
     virtual void dropUnknownIdent(RecoveryUnit& ru,
                                   const Timestamp& stableTimestamp,
-                                  StringData ident) = 0;
+                                  std::string_view ident) = 0;
 
     /**
      * Marks the ident as in use and prevents the reaper from dropping the ident.
@@ -611,7 +600,7 @@ public:
      * Returns nullptr if the ident is not known to the reaper, is already being dropped, or is
      * already dropped.
      */
-    virtual std::shared_ptr<Ident> markIdentInUse(StringData ident) = 0;
+    virtual std::shared_ptr<Ident> markIdentInUse(std::string_view ident) = 0;
 
     /**
      * Accessor for this storage engine's timestamp monitor.
@@ -702,19 +691,24 @@ public:
     /**
      * Configures the specified checkpoint as the starting point for recovery.
      */
-    virtual void setRecoveryCheckpointMetadata(StringData checkpointMetadata) = 0;
+    virtual Status setRecoveryCheckpointMetadata(std::string_view checkpointMetadata) = 0;
 
     /**
      * Configures the storage engine as the leader, allowing it to flush checkpoints to remote
      * storage.
+     * Invariants on failure.
+     * This is NOT idempotent - it will invariant if the storage engine is already in
+     * leader mode.
      */
     virtual void promoteToLeader() = 0;
 
     /**
-     * Configures the storage engine as a standby. Inverse of promoteToLeader(). Must be safe to
-     * call even if we're already not a leader.
+     * Configures the storage engine as a follower. Inverse of promoteToLeader().
+     * Invariants on failure.
+     * This is NOT idempotent - it will invariant if the storage engine is already in
+     * follower mode.
      */
-    virtual void demoteFromLeader() = 0;
+    virtual void demoteToFollower() = 0;
 
     /**
      * Sets the highest timestamp at which the storage engine is allowed to take a checkpoint. This
@@ -738,6 +732,27 @@ public:
      * Returns the initial data timestamp.
      */
     virtual Timestamp getInitialDataTimestamp() const = 0;
+
+    /**
+     * Sets the cutover timestamp for a planned step-down of disaggregated storage. Only valid on a
+     * disaggregated leader that does not already have a step-down timestamp set; violating either
+     * precondition is fatal. The caller must hold the stepdown lock acquired via lockStepDown().
+     */
+    virtual void setStepDownTimestamp(WithLock, Timestamp stepDownTimestamp) = 0;
+
+    /**
+     * Returns the step-down (cutover) timestamp last set via setStepDownTimestamp(), or a null
+     * timestamp if none has been set.
+     */
+    virtual Timestamp getStepDownTimestamp() const = 0;
+
+    /**
+     * Returns a lock which must be held across operations which cannot be rolled back if a stepdown
+     * cutover is set concurrently with the operation. The stepdown lock must be acquired after
+     * GlobalLock if a global lock is also needed, and before the replication Optime lock if that
+     * is needed.
+     */
+    virtual std::unique_lock<std::mutex> lockStepDown() = 0;
 
     /**
      * Sets the oldest timestamp for which the storage engine must maintain snapshot history
@@ -822,15 +837,15 @@ public:
 
     virtual std::string generateNewCollectionIdent(
         const DatabaseName& dbName,
-        const boost::optional<StringData>& optIdentUniqueTag = boost::none) const = 0;
+        const boost::optional<std::string_view>& optIdentUniqueTag = boost::none) const = 0;
     virtual std::string generateNewIndexIdent(
         const DatabaseName& dbName,
-        const boost::optional<StringData>& optIdentUniqueTag = boost::none) const = 0;
+        const boost::optional<std::string_view>& optIdentUniqueTag = boost::none) const = 0;
 
-    virtual StringData getCollectionIdentUniqueTag(StringData ident,
-                                                   const DatabaseName& dbName) const = 0;
-    virtual StringData getIndexIdentUniqueTag(StringData ident,
-                                              const DatabaseName& dbName) const = 0;
+    virtual std::string_view getCollectionIdentUniqueTag(std::string_view ident,
+                                                         const DatabaseName& dbName) const = 0;
+    virtual std::string_view getIndexIdentUniqueTag(std::string_view ident,
+                                                    const DatabaseName& dbName) const = 0;
 
     /**
      * Generates a unique ident for an internal table that can be used to create a RecordStore
@@ -840,8 +855,8 @@ public:
         return ident::generateNewInternalIdent();
     }
 
-    std::string generateNewInternalIndexBuildIdent(StringData identStem,
-                                                   StringData indexIdent) const {
+    std::string generateNewInternalIndexBuildIdent(std::string_view identStem,
+                                                   std::string_view indexIdent) const {
         return ident::generateNewInternalIndexBuildIdent(identStem, indexIdent);
     }
 
@@ -861,7 +876,7 @@ public:
      */
     virtual bool storesFilesInDbPath() const = 0;
 
-    virtual int64_t getIdentSize(RecoveryUnit&, StringData ident) const = 0;
+    virtual int64_t getIdentSize(RecoveryUnit&, std::string_view ident) const = 0;
 
     virtual KVEngine* getEngine() = 0;
     virtual const KVEngine* getEngine() const = 0;
@@ -961,7 +976,7 @@ public:
      * TODO SERVER-92265 evaluate getting rid of this method.
      */
     virtual BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
-                                            StringData flagName,
+                                            std::string_view flagName,
                                             boost::optional<bool> flagValue) const = 0;
 
     /**
@@ -973,7 +988,7 @@ public:
      * TODO SERVER-92265 evaluate getting rid of this method.
      */
     virtual boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
-                                                            StringData flagName) const = 0;
+                                                            std::string_view flagName) const = 0;
 
     /**
      * Append `disaggregated.storage_tier` in the storage engine BSON object of a collection /
@@ -1010,6 +1025,33 @@ public:
     virtual Status autoCompact(RecoveryUnit&, const AutoCompactOptions& options) = 0;
 
     /**
+     * Runs WiredTiger's runtime repair interface (wiredtiger_repair()) and returns its diagnostic
+     * report. Caller must hold a global lock so the storage engine can't shut down mid-operation.
+     */
+    virtual StatusWith<std::string> wiredTigerRepair(const std::string& config) {
+        return {ErrorCodes::CommandNotSupported,
+                "The current storage engine does not support wiredTigerRepair"};
+    }
+
+    /**
+     * Recomputes and persists the disaggregated database size via a checkpoint. Requires a
+     * disaggregated leader connection.
+     */
+    virtual Status fixDatabaseSize() {
+        return {ErrorCodes::CommandNotSupported,
+                "The current storage engine does not support fixDatabaseSize"};
+    }
+
+    /**
+     * Pauses background auto-compaction for a replica set write block critical section transition.
+     * Pausing aborts any in-progress compaction rather than waiting for it to finish.
+     *
+     * A no-op on storage engines that don't support compaction. Failures are logged, not thrown,
+     * so a write block transition is never failed by auto-compaction reconfiguration.
+     */
+    virtual void pauseAutoCompactForReplicaSetWritesBlock(OperationContext* opCtx) {}
+
+    /**
      * Return true if the storage engine indicates that it is under cache pressure.
      */
     virtual bool underCachePressure(int concurrentOpOuts) {
@@ -1027,6 +1069,31 @@ public:
      * Returns whether the storage engine is currently trying to live-restore its database.
      */
     virtual bool hasOngoingLiveRestore() = 0;
+
+    /**
+     * Returns whether the storage engine is currently in leader mode.
+     */
+    virtual bool isInLeaderMode() = 0;
+
+    /**
+     * Returns the total logical size in bytes of the given index tables as recorded in the most
+     * recent checkpoint. 'indexIdents' are storage idents identifying the index tables to sum.
+     * Indexes that have not yet been checkpointed contribute zero. Returns 0 for storage engines
+     * that do not support this operation.
+     */
+    virtual StatusWith<int64_t> getIndexStorageSize(
+        OperationContext* opCtx, const std::vector<std::string>& indexIdents) const {
+        return 0;
+    }
+
+    /**
+     * Returns the compressed size of the shared history store table
+     * (`WiredTigerSharedHS.wt_stable`) as of the last checkpoint. Returns 0 if the engine does not
+     * support this operation, is not disaggregated, or the table is missing.
+     */
+    virtual StatusWith<int64_t> getSharedHistoryStoreStorageSize(OperationContext* opCtx) const {
+        return 0;
+    }
 };
 
 }  // namespace mongo

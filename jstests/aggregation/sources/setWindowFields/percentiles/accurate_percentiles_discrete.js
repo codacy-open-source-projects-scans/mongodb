@@ -8,10 +8,14 @@
  * ]
  */
 
-import {seedWithTickerData, testAccumAgainstGroup} from "jstests/aggregation/extras/window_function_helpers.js";
+import {
+    seedWithTickerData,
+    testAccumAgainstGroup,
+} from "jstests/aggregation/extras/window_function_helpers.js";
 import {
     assertResultEqToVal,
     runSetWindowStage,
+    testError,
 } from "jstests/aggregation/sources/setWindowFields/percentiles/percentile_util.js";
 
 const coll = db[jsTestName()];
@@ -41,7 +45,10 @@ try {
     for (let paramValue of paramValues) {
         // Set the percentile sorting threshold to test pre-sorting before calculating percentiles
         // as well sorting on each percentile calculation.
-        db.adminCommand({setParameter: 1, internalQueryPercentileExprSelectToSortThreshold: paramValue});
+        db.adminCommand({
+            setParameter: 1,
+            internalQueryPercentileExprSelectToSortThreshold: paramValue,
+        });
 
         jsTestLog("internalQueryPercentileExprSelectToSortThreshold value is now " + paramValue);
 
@@ -49,7 +56,11 @@ try {
 
         // Run the suite of partition and bounds tests against the $percentile function. Will run
         // tests with removable and non-removable windows.
-        testAccumAgainstGroup(coll, "$percentile", [null, null], {p: [0.1, 0.6], input: "$price", method: "discrete"});
+        testAccumAgainstGroup(coll, "$percentile", [null, null], {
+            p: [0.1, 0.6],
+            input: "$price",
+            method: "discrete",
+        });
         testAccumAgainstGroup(coll, "$median", null, {input: "$price", method: "discrete"});
 
         // Test that $median and $percentile return null for windows which do not contain numeric
@@ -70,7 +81,11 @@ try {
         );
         // Since our percentiles are 0.01 and 0.99 and our collection is small, we will always
         // return the minimum and maximum value in the collection.
-        assertResultEqToVal({resultArray: results, percentile: [minDoc.price, maxDoc.price], median: medianDoc.price});
+        assertResultEqToVal({
+            resultArray: results,
+            percentile: [minDoc.price, maxDoc.price],
+            median: medianDoc.price,
+        });
 
         // Test that an expression can be used for 'input'.
         results = runSetWindowStage(
@@ -95,7 +110,11 @@ try {
         );
         // Since our percentiles are 0.01 and 0.99 and our collection is small, we will always
         // return the minimum and maximum value in the collection.
-        assertResultEqToVal({resultArray: results, percentile: [minDoc.price, maxDoc.price], median: medianDoc.price});
+        assertResultEqToVal({
+            resultArray: results,
+            percentile: [minDoc.price, maxDoc.price],
+            median: medianDoc.price,
+        });
 
         // Test that a removable window calculates $percentile and $median correctly using a
         // discrete method.
@@ -119,5 +138,14 @@ try {
         }
     }
 } finally {
-    db.adminCommand({setParameter: 1, internalQueryPercentileExprSelectToSortThreshold: origParamValue});
+    db.adminCommand({
+        setParameter: 1,
+        internalQueryPercentileExprSelectToSortThreshold: origParamValue,
+    });
 }
+
+// A non-finite percentile must be rejected; see approximate_percentiles.js for context.
+testError(coll, {$percentile: {p: [NaN], input: "$price", method: "discrete"}}, 7750303);
+testError(coll, {$percentile: {p: [0.5, NaN], input: "$price", method: "discrete"}}, 7750303);
+testError(coll, {$percentile: {p: [Infinity], input: "$price", method: "discrete"}}, 7750303);
+testError(coll, {$percentile: {p: [-Infinity], input: "$price", method: "discrete"}}, 7750303);

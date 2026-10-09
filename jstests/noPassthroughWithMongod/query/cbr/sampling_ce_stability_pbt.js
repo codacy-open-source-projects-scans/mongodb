@@ -3,6 +3,7 @@
  * sampling-based plan ranking.
  *
  * @tags: [
+ *    requires_fcv_90,
  *    query_intensive_pbt,
  *    # Runs queries that may return many results, requiring getmores.
  *    requires_getmore,
@@ -34,9 +35,16 @@ const numQueriesPerRun = 30;
 const experimentColl = db[jsTestName()];
 
 try {
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: true}));
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "samplingCE"}),
+        db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: true}),
+    );
+    assert.commandWorked(
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "samplingCE",
+        }),
     );
     testProperty(
         createPlanStabilityProperty(experimentColl, true /* assertCeExists */),
@@ -46,6 +54,8 @@ try {
     );
 } finally {
     // Reset the plan ranker mode to its default value.
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: false}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQuerySamplingBySequentialScan: false}),
+    );
     assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: false}));
 }

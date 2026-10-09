@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
 
@@ -35,15 +9,19 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/graph_lookup_mock_mongo_interface.h"
 #include "mongo/db/pipeline/lite_parsed_graph_lookup.h"
+#include "mongo/db/pipeline/owned_lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/pipeline/serverless_aggregation_context_fixture.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -62,18 +40,68 @@ namespace {
 // This provides access to getExpCtx(), but we'll use a different name for this test suite.
 using DocumentSourceGraphLookUpTest = AggregationContextFixture;
 
-const NamespaceString kGraphLookupForeignNs =
+// For use when the foreign namespace doesn't matter much, or we're not explicitly testing view
+// resolution logic.
+const NamespaceString kForeignNs =
     NamespaceString::createNamespaceString_forTest(boost::none, "test", "foreign");
 
+constexpr std::string_view kViewName = "foreignView";
+const NamespaceString kViewNss =
+    NamespaceString::createNamespaceString_forTest(boost::none, "test", kViewName);
+constexpr std::string_view kBackingCollName = "actualColl";
+const NamespaceString kBackingNss =
+    NamespaceString::createNamespaceString_forTest(boost::none, "test", kBackingCollName);
+
 std::unique_ptr<LiteParsedGraphLookUp> parseLiteGraphLookup(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    auto stageSpec = BSON("$graphLookup" << BSON("from" << "foreign"
-                                                        << "startWith" << "$a"
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const std::string_view targetNs = kForeignNs.coll()) {
+    auto stageSpec = BSON("$graphLookup" << BSON("from" << targetNs << "startWith" << "$a"
                                                         << "connectFromField" << "b"
                                                         << "connectToField" << "c"
                                                         << "as" << "d"));
     return LiteParsedGraphLookUp::parse(
         expCtx->getNamespaceString(), stageSpec.firstElement(), LiteParserOptions{});
+}
+
+struct SerializeGraphLookupWithResolvedViewOptions {
+    bool flagEnabled = true;
+    query_shape::SerializationOptions serOpts =
+        query_shape::SerializationOptions{.isSerializingForRemoteDispatch = true};
+    bool inRouter = false;
+};
+
+BSONObj serializeGraphLookupWithResolvedView(
+    const boost::intrusive_ptr<ExpressionContext>& testExpCtx,
+    const SerializeGraphLookupWithResolvedViewOptions& options = {}) {
+    auto ifrCtx = IncrementalFeatureRolloutContext::forTest(std::vector<IFRFlagWireEntry>{
+        IFRFlagWireEntry{"featureFlagExtensionsInsideHybridSearch", options.flagEnabled}});
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(testExpCtx->getOperationContext())
+                      .ns(testExpCtx->getNamespaceString())
+                      .ifrContext(ifrCtx)
+                      .inRouter(options.inRouter)
+                      .build();
+
+    ResolvedNamespaceViewOptions viewOpts;
+    viewOpts.involvedNamespaceIsAView = true;
+    viewOpts.shouldParseLpp = true;
+    ResolvedNamespaceMap resolvedNss;
+    resolvedNss.emplace(kViewNss,
+                        ResolvedNamespace(kViewNss,
+                                          kBackingNss,
+                                          std::vector<BSONObj>{BSON("$match" << BSON("x" << 1))},
+                                          BSONObj{},
+                                          viewOpts));
+    expCtx->setResolvedNamespaces(std::move(resolvedNss));
+
+    auto spec = BSON("$graphLookup" << BSON("from" << kViewName << "startWith" << "$a"
+                                                   << "connectFromField" << "b"
+                                                   << "connectToField" << "c" << "as" << "d"));
+    auto ds = DocumentSourceGraphLookUp::createFromBson(spec.firstElement(), expCtx);
+    std::vector<Value> serialized;
+    ds->serializeToArray(serialized, options.serOpts);
+    ASSERT_EQ(1ul, serialized.size());
+    return serialized[0].getDocument().toBson();
 }
 
 //
@@ -138,7 +166,7 @@ TEST_F(DocumentSourceGraphLookUpTest, GraphLookupShouldReportFieldsModifiedByAbs
 TEST_F(DocumentSourceGraphLookUpTest, IncrementNestedAggregateOpCounterOnCreateButNotOnCopy) {
     auto testOpCounter = [&](const NamespaceString& nss, const int expectedIncrease) {
         auto resolvedNss = ResolvedNamespaceMap{{nss, {nss, std::vector<BSONObj>()}}};
-        auto countBeforeCreate = globalOpCounters().getNestedAggregate()->load();
+        auto countBeforeCreate = globalOpCounters().nestedAggregates->value();
 
         // Create a DocumentSourceGraphLookUp and verify that the counter increases by the expected
         // amount.
@@ -156,14 +184,14 @@ TEST_F(DocumentSourceGraphLookUpTest, IncrementNestedAggregateOpCounterOnCreateB
                 .firstElement(),
             originalExpCtx);
         auto originalGraphLookup = static_cast<DocumentSourceGraphLookUp*>(docSource.get());
-        auto countAfterCreate = globalOpCounters().getNestedAggregate()->load();
+        auto countAfterCreate = globalOpCounters().nestedAggregates->value();
         ASSERT_EQ(countAfterCreate - countBeforeCreate, expectedIncrease);
 
         // Copy the DocumentSourceGraphLookUp and verify that the counter doesn't increase.
         auto newExpCtx = make_intrusive<ExpressionContextForTest>(getOpCtx(), nss);
         newExpCtx->setResolvedNamespaces(resolvedNss);
         DocumentSourceGraphLookUp newGraphLookup{*originalGraphLookup, newExpCtx};
-        auto countAfterCopy = globalOpCounters().getNestedAggregate()->load();
+        auto countAfterCopy = globalOpCounters().nestedAggregates->value();
         ASSERT_EQ(countAfterCopy - countAfterCreate, 0);
     };
 
@@ -303,7 +331,7 @@ using DocumentSourceGraphLookupServerlessTest = ServerlessAggregationContextFixt
 
 TEST_F(DocumentSourceGraphLookupServerlessTest,
        LiteParsedDocumentSourceLookupStringExpectedNamespacesInServerless) {
-    RAIIServerParameterControllerForTest multitenancySupportController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancySupportController("multitenancySupport", true);
 
     auto expCtx = getExpCtx();
     auto originalBSON = BSON("$graphLookup" << BSON("from" << "foo"
@@ -329,7 +357,7 @@ TEST_F(DocumentSourceGraphLookupServerlessTest,
 
 TEST_F(DocumentSourceGraphLookupServerlessTest,
        CreateFromBSONContainsExpectedNamespacesInServerless) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
 
     auto expCtx = getExpCtx();
     auto tenantId = expCtx->getNamespaceString().tenantId();
@@ -399,7 +427,7 @@ TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupInvolvedNamespacesRet
     auto liteParsed = parseLiteGraphLookup(getExpCtx());
     auto nssSet = liteParsed->getInvolvedNamespaces();
     ASSERT_EQ(1ul, nssSet.size());
-    ASSERT_EQ(1ul, nssSet.count(kGraphLookupForeignNs));
+    ASSERT_EQ(1ul, nssSet.count(kForeignNs));
 }
 
 TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupForeignExecutionNamespacesIsEmpty) {
@@ -414,14 +442,270 @@ TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupRequiredPrivileges) {
     auto privileges = liteParsed->requiredPrivileges(/*isMongos*/ false,
                                                      /*bypassDocumentValidation*/ false);
     ASSERT_EQ(1ul, privileges.size());
-    ASSERT_EQ(privileges[0].getResourcePattern(),
-              ResourcePattern::forExactNamespace(kGraphLookupForeignNs));
+    ASSERT_EQ(privileges[0].getResourcePattern(), ResourcePattern::forExactNamespace(kForeignNs));
     ASSERT_TRUE(privileges[0].getActions().contains(ActionType::find));
 }
 
-TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupHasEmptySubPipelines) {
+TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupHasEmptySubPipelinesWithoutViewBinding) {
     auto liteParsed = parseLiteGraphLookup(getExpCtx());
-    ASSERT_TRUE(liteParsed->getMutableSubPipelines().empty());
+    ASSERT_TRUE(liteParsed->getMutableSubPipelines()->empty());
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, CreateFromBsonRejectsDuplicateFields) {
+    auto spec = BSON("$graphLookup" << BSON("from" << "coll"
+                                                   << "startWith"
+                                                   << "$x"
+                                                   << "connectFromField"
+                                                   << "id"
+                                                   << "connectToField"
+                                                   << "id"
+                                                   << "as"
+                                                   << "results"
+                                                   << "from"
+                                                   << "other_coll"));
+    ASSERT_THROWS_CODE(DocumentSourceGraphLookUp::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       12735700);
+}
+
+TEST_F(DocumentSourceGraphLookUpTest,
+       LiteParsedGraphLookupBindResolvedNamespacePopulatesPipelines) {
+    auto liteParsed = parseLiteGraphLookup(getExpCtx(), kViewName);
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kViewNss,
+                ResolvedNamespace(kViewNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("x" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    liteParsed->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    ASSERT_EQ(1ul, liteParsed->getMutableSubPipelines()->size());
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupBindResolvedNamespaceNoOpForNonView) {
+    auto liteParsed = parseLiteGraphLookup(getExpCtx());
+
+    // Map exists but marks the namespace as NOT a view.
+    ResolvedNamespaceMap map;
+    map.emplace(
+        kForeignNs,
+        ResolvedNamespace(
+            kForeignNs, std::vector<BSONObj>{}, boost::none, false /*involvedNamespaceIsAView*/));
+
+    liteParsed->bindResolvedNamespace(ResolvedNamespace{}, map);
+
+    ASSERT_TRUE(liteParsed->getMutableSubPipelines()->empty());
+}
+
+TEST_F(DocumentSourceGraphLookUpTest,
+       LiteParsedGraphLookupPopulatesSubPipelineFromInternalFromPipeline) {
+    auto spec =
+        BSON("$graphLookup" << BSON("from" << "foreign"
+                                           << "startWith" << "$a"
+                                           << "connectFromField" << "b"
+                                           << "connectToField" << "c"
+                                           << "as" << "d"
+                                           << "$_internalFromPipeline"
+                                           << BSON_ARRAY(BSON("$match" << BSON("x" << 1)))));
+    auto liteParsed = LiteParsedGraphLookUp::parse(
+        getExpCtx()->getNamespaceString(), spec.firstElement(), LiteParserOptions{});
+    ASSERT_EQ(1ul, liteParsed->getMutableSubPipelines()->size());
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupRejectsNonArrayInternalFromPipeline) {
+    auto spec = BSON("$graphLookup" << BSON("from" << "foreign"
+                                                   << "startWith" << "$a"
+                                                   << "connectFromField" << "b"
+                                                   << "connectToField" << "c"
+                                                   << "as" << "d"
+                                                   << "$_internalFromPipeline" << "notAnArray"));
+    ASSERT_THROWS_CODE(LiteParsedGraphLookUp::parse(getExpCtx()->getNamespaceString(),
+                                                    spec.firstElement(),
+                                                    LiteParserOptions{}),
+                       AssertionException,
+                       ErrorCodes::TypeMismatch);
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, LiteParsedGraphLookupRejectsDuplicateInternalFromPipeline) {
+    auto spec =
+        BSON("$graphLookup" << BSON("from" << "foreign"
+                                           << "startWith" << "$a"
+                                           << "connectFromField" << "b"
+                                           << "connectToField" << "c"
+                                           << "as" << "d"
+                                           << "$_internalFromPipeline"
+                                           << BSON_ARRAY(BSON("$match" << BSON("x" << 1)))
+                                           << "$_internalFromPipeline"
+                                           << BSON_ARRAY(BSON("$match" << BSON("y" << 2)))));
+    ASSERT_THROWS_CODE(LiteParsedGraphLookUp::parse(getExpCtx()->getNamespaceString(),
+                                                    spec.firstElement(),
+                                                    LiteParserOptions{}),
+                       AssertionException,
+                       ErrorCodes::IDLDuplicateField);
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, GraphLookUpStageParamsCarriesPipelineFromSubpipeline) {
+    auto liteParsed = parseLiteGraphLookup(getExpCtx(), kViewName);
+
+    ResolvedNamespaceViewOptions opts;
+    opts.involvedNamespaceIsAView = true;
+    opts.shouldParseLpp = true;
+    ResolvedNamespaceMap map;
+    map.emplace(kViewNss,
+                ResolvedNamespace(kViewNss,
+                                  kBackingNss,
+                                  std::vector<BSONObj>{BSON("$match" << BSON("x" << 1))},
+                                  BSONObj{},
+                                  opts));
+
+    liteParsed->bindResolvedNamespace(ResolvedNamespace{}, map);
+    ASSERT_EQ(1ul, liteParsed->getMutableSubPipelines()->size());
+
+    auto stageParams = liteParsed->getStageParams();
+    auto* typedParams = dynamic_cast<GraphLookUpStageParams*>(stageParams.get());
+    ASSERT_TRUE(typedParams != nullptr);
+    ASSERT_EQ(1ul, typedParams->liteParsedPipeline.value()->getStages().size());
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, CreateFromStageParamsUsesLiteParsedPipelineForFromPipeline) {
+    // Keep stageSpec alive for the entire test — BSONElements in the stage params alias into
+    // its buffer, and createFromStageParams reads them when parsing expressions.
+    auto stageSpec = BSON("$graphLookup" << BSON("from" << "foreign"
+                                                        << "startWith" << "$a"
+                                                        << "connectFromField"
+                                                        << "b"
+                                                        << "connectToField"
+                                                        << "c"
+                                                        << "as"
+                                                        << "d"));
+    auto liteParsed = LiteParsedGraphLookUp::parse(
+        getExpCtx()->getNamespaceString(), stageSpec.firstElement(), LiteParserOptions{});
+
+    // Bind a view so that getStageParams() produces a liteParsedPipeline with [{$match:{x:1}}].
+    ResolvedNamespaceViewOptions viewOpts;
+    viewOpts.involvedNamespaceIsAView = true;
+    viewOpts.shouldParseLpp = true;
+    ResolvedNamespaceMap bindMap;
+    bindMap.emplace(kForeignNs,
+                    ResolvedNamespace(kForeignNs,
+                                      kBackingNss,
+                                      std::vector<BSONObj>{BSON("$match" << BSON("x" << 1))},
+                                      BSONObj{},
+                                      viewOpts));
+    liteParsed->bindResolvedNamespace(ResolvedNamespace{}, bindMap);
+    ASSERT_EQ(1ul, liteParsed->getMutableSubPipelines()->size());
+
+    auto stageParams = liteParsed->getStageParams();
+    auto* typedParams = dynamic_cast<GraphLookUpStageParams*>(stageParams.get());
+    ASSERT_EQ(1ul, typedParams->liteParsedPipeline.value()->getStages().size());
+
+    // Set up expCtx with kForeignNs resolved to a simple (non-view) backing namespace.
+    // Its pipeline is empty so that any pipeline in the result must come from liteParsedPipeline.
+    auto expCtx = getExpCtx();
+    ResolvedNamespaceMap resolvedNss;
+    resolvedNss.emplace(kForeignNs, ResolvedNamespace(kForeignNs, {}, boost::none, false));
+    expCtx->setResolvedNamespaces(std::move(resolvedNss));
+
+    auto ds = DocumentSourceGraphLookUp::createFromStageParams(*typedParams, expCtx);
+    auto* glu = static_cast<DocumentSourceGraphLookUp*>(ds.get());
+
+    query_shape::SerializationOptions serOpts;
+    serOpts.isSerializingForRemoteDispatch = true;
+    std::vector<Value> serialized;
+    glu->serializeToArray(serialized, serOpts);
+    ASSERT_EQ(1ul, serialized.size());
+
+    // $_internalFromPipeline must carry exactly the one view stage.
+    BSONObj glBson = serialized[0].getDocument().toBson();
+    auto stages = glBson["$graphLookup"]["$_internalFromPipeline"].Array();
+    ASSERT_EQ(1ul, stages.size());
+    ASSERT_BSONOBJ_EQ(stages[0].Obj(), fromjson("{$match: {x: 1}}"));
+}
+
+// When featureFlagExtensionsInsideHybridSearch is disabled, serialize() must NOT emit
+// $_internalFromPipeline.
+TEST_F(DocumentSourceGraphLookUpTest,
+       SerializeOmitsInternalFromPipelineWhenExtensionsFlagDisabled) {
+    auto glBson = serializeGraphLookupWithResolvedView(getExpCtx(), {.flagEnabled = false});
+
+    // $_internalFromPipeline must be absent because the flag is disabled.
+    ASSERT_FALSE(glBson["$graphLookup"].Obj().hasField("$_internalFromPipeline"));
+
+    // Because the pipeline is suppressed, the receiver must re-resolve the view itself. That
+    // requires the view name ('foreignView'), not the backing collection ('actualColl'). Sending
+    // the backing namespace here would leave the receiver with a plain collection and no pipeline,
+    // silently dropping the view's [{$match:{x:1}}] stage. See SERVER-134439.
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kViewName);
+}
+
+// Symmetric counterpart to the flag-disabled test: when featureFlagExtensionsInsideHybridSearch is
+// enabled, serialize() for remote dispatch rewrites 'from' to the backing collection AND carries
+// $_internalFromPipeline. The receiver then reconstructs the view pipeline from
+// $_internalFromPipeline without re-resolving the view.
+TEST_F(DocumentSourceGraphLookUpTest,
+       SerializeSendsBackingNsAndInternalFromPipelineWhenExtensionsFlagEnabled) {
+    auto glBson = serializeGraphLookupWithResolvedView(getExpCtx(), {.flagEnabled = true});
+
+    // 'from' must be the backing collection so the receiver does not try to re-resolve the view.
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kBackingCollName);
+
+    // $_internalFromPipeline must carry exactly the one view stage.
+    auto stages = glBson["$graphLookup"]["$_internalFromPipeline"].Array();
+    ASSERT_EQ(1ul, stages.size());
+    ASSERT_BSONOBJ_EQ(stages[0].Obj(), fromjson("{$match: {x: 1}}"));
+}
+
+// When serializing for explain (even if on router or serializing for remote dispatch),
+// $_internalFromPipeline must be omitted and 'from' must remain the view namespace.
+TEST_F(DocumentSourceGraphLookUpTest, SerializeOmitsInternalFieldsAndPreservesViewNameForExplain) {
+    query_shape::SerializationOptions serOpts;
+    serOpts.verbosity = ExplainOptions::Verbosity::kQueryPlanner;
+    serOpts.isSerializingForRemoteDispatch = true;
+
+    // First check when inRouter = false.
+    auto glBson = serializeGraphLookupWithResolvedView(
+        getExpCtx(), {.flagEnabled = true, .serOpts = serOpts, .inRouter = false});
+
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kViewName);
+    ASSERT_FALSE(glBson["$graphLookup"].Obj().hasField("$_internalFromPipeline"));
+
+    // Then again with inRouter = true.
+    glBson = serializeGraphLookupWithResolvedView(
+        getExpCtx(), {.flagEnabled = true, .serOpts = serOpts, .inRouter = true});
+
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kViewName);
+    ASSERT_FALSE(glBson["$graphLookup"].Obj().hasField("$_internalFromPipeline"));
+}
+
+TEST_F(DocumentSourceGraphLookUpTest,
+       SerializeOmitsInternalFieldsAndPreservesViewNameForRepresentativeQueryShape) {
+    // When shapifying (e.g. for $queryStats or plan cache keys), internal fields such as
+    // $_internalFromPipeline must not be serialized, and 'from' must remain the view namespace.
+    auto glBson = serializeGraphLookupWithResolvedView(
+        getExpCtx(),
+        {.flagEnabled = true,
+         .serOpts = query_shape::SerializationOptions::kRepresentativeQueryShapeSerializeOptions,
+         .inRouter = true});
+
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kViewName);
+    ASSERT_FALSE(glBson["$graphLookup"].Obj().hasField("$_internalFromPipeline"));
+}
+
+TEST_F(DocumentSourceGraphLookUpTest, SerializeDefaultOmitsInternalFieldsAndPreservesViewName) {
+    // Default local serialization (non-remote dispatch, not on router) should never emit
+    // $_internalFromPipeline and should serialize 'from' as the view name.
+    auto glBson = serializeGraphLookupWithResolvedView(
+        getExpCtx(),
+        {.flagEnabled = true, .serOpts = query_shape::SerializationOptions{}, .inRouter = false});
+
+    ASSERT_EQ(glBson["$graphLookup"]["from"].String(), kViewName);
+    ASSERT_FALSE(glBson["$graphLookup"].Obj().hasField("$_internalFromPipeline"));
 }
 
 }  // namespace

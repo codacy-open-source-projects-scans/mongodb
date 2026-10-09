@@ -1,30 +1,5 @@
-# Copyright (C) 2018-present MongoDB, Inc.
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the Server Side Public License, version 1,
-# as published by MongoDB, Inc.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# Server Side Public License for more details.
-#
-# You should have received a copy of the Server Side Public License
-# along with this program. If not, see
-# <http://www.mongodb.com/licensing/server-side-public-license>.
-#
-# As a special exception, the copyright holders give permission to link the
-# code of portions of this program with the OpenSSL library under certain
-# conditions as described in each individual source file and distribute
-# linked combinations including the program with the OpenSSL library. You
-# must comply with the Server Side Public License in all respects for
-# all of the code used other than as permitted herein. If you modify file(s)
-# with this exception, you may extend this exception to your version of the
-# file(s), but you are not obligated to do so. If you do not wish to do so,
-# delete this exception statement from your version. If you delete this
-# exception statement from all source files in the program, then also delete
-# it in the license file.
-#
+# Copyright (c) MongoDB, Inc.
+# SPDX-License-Identifier: SSPL-1.0
 """IDL C++ Code Generator."""
 
 import hashlib
@@ -366,7 +341,7 @@ class _SlowFieldUsageChecker(_FastFieldUsageChecker):
         # type: (writer.IndentedTextWriter, List[ast.Field]) -> None
         super(_SlowFieldUsageChecker, self).__init__(indented_writer, fields)
 
-        self._writer.write_line("std::set<StringData> usedFieldSet;")
+        self._writer.write_line("std::set<std::string_view> usedFieldSet;")
 
 
 def _get_field_usage_checker(indented_writer, struct):
@@ -560,7 +535,7 @@ def make_mod_tag(vis: str):
     if vis is None:
         return ""
     tag, paren, rest = vis.partition("(")
-    return f"MONGO_MOD_{tag.upper()}{paren}{rest} "
+    return f"[[MONGO_MOD_{tag.upper()}{paren}{rest}]] "
 
 
 class _CppHeaderFileWriter(_CppFileWriterBase):
@@ -700,7 +675,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         body = cpp_type_info.get_getter_body(member_name)
         const_type = "const " if cpp_type_info.return_by_reference() else ""
 
-        # Generate a getter that disables xvalue for view types (i.e. StringData), constructed
+        # Generate a getter that disables xvalue for view types (i.e. std::string_view), constructed
         # optional types, and non-primitive types.
         if field.chained_struct_field:
             chained_struct_getter = _get_field_member_getter_name(field.chained_struct_field)
@@ -795,7 +770,8 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                     f"std::enable_if_t<std::is_convertible_v<T, {storage_type}>, int> = 0"
                 )
             with self._block(f"void {memfn}(const T& value) {{", "}"):
-                self._writer.write_line(f"{memfn}({storage_type}{{value}});")
+                # The lambda eliminates explicit conversions.
+                self._writer.write_line(f"{memfn}([&]() -> {storage_type} {{ return value; }}());")
 
     def gen_constexpr_getters(self):
         # type: () -> None
@@ -842,7 +818,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
     def gen_string_constants_declarations(self, struct):
         # type: (ast.Struct) -> None
-        """Generate a StringData constant for field name."""
+        """Generate a std::string_view constant for field name."""
 
         fields = [
             field
@@ -851,22 +827,22 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         ]
         for field in fields:
             self._writer.write_line(
-                f'static constexpr auto {_get_field_constant_name(field)} = "{field.name}"_sd;'
+                f'static constexpr std::string_view {_get_field_constant_name(field)} = "{field.name}";'
             )
 
         if isinstance(struct, ast.Command):
             self._writer.write_line(
-                f"static constexpr auto kCommandDescription = {_encaps(struct.description)}_sd;"
+                f"static constexpr std::string_view kCommandDescription = {_encaps(struct.description)};"
             )
 
             self._writer.write_line(
-                f'static constexpr auto kCommandName = "{struct.command_name}"_sd;'
+                f'static constexpr std::string_view kCommandName = "{struct.command_name}";'
             )
 
             # Initialize constexpr for command alias if specified in the IDL spec.
             if struct.command_alias:
                 self._writer.write_line(
-                    f'static constexpr auto kCommandAlias = "{struct.command_alias}"_sd;',
+                    f'static constexpr std::string_view kCommandAlias = "{struct.command_alias}";',
                 )
 
     def gen_field_enum(self, struct):
@@ -886,7 +862,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 for rf in required_field_names:
                     if rf == f.cpp_name:
                         req = "true"
-                self._writer.write_line(f'{{"{name}"_sd, {req}}},')
+                self._writer.write_line(f'{{"{name}", {req}}},')
         self._writer.write_line(
             "static constexpr std::array fieldNames = mongo::idl::extractNames<fieldMetadata>();"
         )
@@ -980,8 +956,8 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
     def gen_known_fields_declaration(self):
         # type: () -> None
         """Generate all the known fields vectors for a command."""
-        self._writer.write_line("static const std::vector<StringData> _knownBSONFields;")
-        self._writer.write_line("static const std::vector<StringData> _knownOP_MSGFields;")
+        self._writer.write_line("static const std::vector<std::string_view> _knownBSONFields;")
+        self._writer.write_line("static const std::vector<std::string_view> _knownOP_MSGFields;")
         self.write_empty_line()
 
     def gen_comparison_operators_declarations(self, struct):
@@ -1091,23 +1067,25 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
             if cls.override_ctor:
                 # Explicit custom constructor.
-                self._writer.write_line(cls.name + "(StringData name, ServerParameterType spt);")
+                self._writer.write_line(
+                    cls.name + "(std::string_view name, ServerParameterType spt);"
+                )
             else:
                 # Inherit base constructor.
                 self._writer.write_line("using ServerParameter::ServerParameter;")
             self.write_empty_line()
 
             self._writer.write_line(
-                "void append(OperationContext*, BSONObjBuilder*, StringData, const boost::optional<TenantId>&) final;"
+                "void append(OperationContext*, BSONObjBuilder*, std::string_view, const boost::optional<TenantId>&) final;"
             )
             if cls.override_set:
                 self._writer.write_line(
                     "Status set(const BSONElement&, const boost::optional<TenantId>&) final;"
                 )
             if cls.override_warn_if_deprecated:
-                self._writer.write_line("void warnIfDeprecated(StringData action) final;")
+                self._writer.write_line("void warnIfDeprecated(std::string_view action) final;")
             self._writer.write_line(
-                "Status setFromString(StringData, const boost::optional<TenantId>&) final;"
+                "Status setFromString(std::string_view, const boost::optional<TenantId>&) final;"
             )
 
             # If override_validate is set, provide an override definition. Otherwise, it will inherit
@@ -1295,6 +1273,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
             "boost/optional.hpp",
             "cstdint",
             "string",
+            "string_view",
             "tuple",
             "vector",
         ]
@@ -1308,13 +1287,11 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         # Generate user includes second
         header_list = [
-            "mongo/base/string_data.h",
             "mongo/base/data_range.h",
             "mongo/bson/bsonobj.h",
             "mongo/bson/bsonobjbuilder.h",
             "mongo/bson/simple_bsonobj_comparator.h",
             "mongo/idl/idl_parser.h",
-            "mongo/rpc/op_msg.h",
             "mongo/stdx/unordered_map.h",
             "mongo/util/decimal_counter.h",
             "mongo/util/serialization_context.h",
@@ -1322,6 +1299,9 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         if self.has_module_tag(spec):
             header_list.append("mongo/util/modules.h")
+
+        if spec.commands:
+            header_list.append("mongo/rpc/op_msg.h")
 
         if spec.configs:
             header_list.append("mongo/util/options_parser/option_description.h")
@@ -1486,7 +1466,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                         scp.name, "Default", scp.default, scp.condition, scp.mod_visibility
                     )
                 self._writer.write_line(
-                    f'{make_mod_tag(scp.mod_visibility)}constexpr inline auto {_get_constant(scp.name + "Name")} = "{scp.name}"_sd;'
+                    f'{make_mod_tag(scp.mod_visibility)}constexpr inline std::string_view {_get_constant(scp.name + "Name")} = "{scp.name}";'
                 )
                 self._gen_extern_declaration(
                     scp.cpp_vartype, scp.cpp_varname, scp.condition, scp.mod_visibility
@@ -1549,7 +1529,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 selected_fields = [x for x in filter(pred, struct.fields)]
                 self._writer.write_line("template <typename OnMatch, typename OnFail>")
                 with self._block(
-                    f"static auto {func}(StringData s, const OnMatch& onMatch, const OnFail& onFail) {{",
+                    f"static auto {func}(std::string_view s, const OnMatch& onMatch, const OnFail& onFail) {{",
                     "};",
                 ):
                     if len(selected_fields) == 0:
@@ -1607,7 +1587,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         if bson_cpp_type:
             # Call a static class method with the signature:
-            # Class Class::method(StringData value)
+            # Class Class::method(std::string_view value)
             # or
             # Class::method(const BSONObj& value)
             expression = bson_cpp_type.gen_deserializer_expression(self._writer, element_name)
@@ -1864,7 +1844,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             if not from_doc_seq:
                 operand += ".Obj()"
             key = operand + ".firstElement().fieldNameStringData()"
-            with self._block("[&](StringData s) {", f"}}({key});"):
+            with self._block("[&](std::string_view s) {", f"}}({key});"):
                 with self._block("auto onMatch = [&](int found) {", "};"):
                     with self._block("switch (found) {", "}"):
                         for idx, variant_type in enumerate(struct_types_list):
@@ -2175,6 +2155,14 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         if initializers:
             initializers_str = ": " + ", ".join(initializers)
 
+        if default_init:
+            # Required scalar fields are initialized to preparsedValue<T>() (e.g. -1 for
+            # integers), but Coverity cannot trace through the ADL template dispatch to confirm
+            # this. Optional fields are intentionally left in their default-constructed state.
+            # uninit_ctor suppresses the whole-constructor UNINIT_CTOR finding; uninit_member
+            # suppresses per-field UNINIT findings on the first read of those fields.
+            self._writer.write_line("// coverity[uninit_ctor]")
+            self._writer.write_line("// coverity[uninit_member]")
         with self._block("%s %s {" % (constructor.get_definition(), initializers_str), "}"):
             db_field = None
             for field in _get_required_fields(struct):
@@ -2450,7 +2438,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             self._writer.write_line(f"static const {param_type} rhs{{{_get_expression(limit)}}};")
             with self._block("if (!(value %s rhs)) {" % (op), "}"):
                 self._writer.write_line(
-                    'throwComparisonError<%s>(%s"%s", "%s"_sd, value, rhs);'
+                    'throwComparisonError<%s>(%s"%s", "%s", value, rhs);'
                     % (field.type.cpp_type, optional_param, field.name, op)
                 )
 
@@ -3126,9 +3114,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
     def _gen_known_fields_declaration(self, struct, name, include_op_msg_implicit):
         # type: (ast.Struct, str, bool) -> None
         """Generate the known fields declaration with specified name."""
-        block_name = (
-            f"const std::vector<StringData> {common.title_case(struct.cpp_name)}::_{name}Fields {{"
-        )
+        block_name = f"const std::vector<std::string_view> {common.title_case(struct.cpp_name)}::_{name}Fields {{"
         with self._block(block_name, "};"):
             sorted_fields = sorted(
                 [
@@ -3289,7 +3275,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         if param.redact:
             with self._block(
-                "void %s::append(OperationContext*, BSONObjBuilder* b, StringData name, const boost::optional<TenantId>& tenantId) {"
+                "void %s::append(OperationContext*, BSONObjBuilder* b, std::string_view name, const boost::optional<TenantId>& tenantId) {"
                 % (cls.name),
                 "}",
             ):
@@ -3299,7 +3285,7 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         # Specialized cluster parameters should also provide the implementation of setFromString().
         if is_cluster_param:
             with self._block(
-                "Status %s::setFromString(StringData str, const boost::optional<TenantId>& tenantId) {"
+                "Status %s::setFromString(std::string_view str, const boost::optional<TenantId>& tenantId) {"
                 % (cls.name),
                 "}",
             ):
@@ -3428,6 +3414,9 @@ return std::move({varname});""")
                             )
 
                     self._gen_server_parameter_deprecated_aliases(param_no, param)
+                    # coverity[resource_leak]: ownership is transferred into the global
+                    # ServerParameterSet registry; the parameter is intentionally not freed.
+                    self._writer.write_line("// coverity[resource_leak]")
                     self._writer.write_line(
                         "registerServerParameter(std::move(scp_%d));" % (param_no)
                     )

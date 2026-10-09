@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/update/modifier_table.h"
 
@@ -47,16 +21,18 @@
 #include <algorithm>
 #include <array>
 #include <memory>
+#include <string_view>
 #include <utility>
 
 namespace mongo::modifiertable {
 namespace {
+using namespace std::literals::string_view_literals;
 struct OrderByName {
-    constexpr StringData lens(StringData x) const {
+    constexpr std::string_view lens(std::string_view x) const {
         return x;
     }
     template <typename... T>
-    constexpr StringData lens(const std::pair<T...>& x) const {
+    constexpr std::string_view lens(const std::pair<T...>& x) const {
         return lens(x.first);
     }
 
@@ -66,28 +42,28 @@ struct OrderByName {
     }
 };
 
-constexpr auto names = std::to_array<std::pair<StringData, ModifierType>>({
-    {"$addToSet"_sd, MOD_ADD_TO_SET},
-    {"$bit"_sd, MOD_BIT},
-    {"$currentDate"_sd, MOD_CURRENTDATE},
-    {"$inc"_sd, MOD_INC},
-    {"$max"_sd, MOD_MAX},
-    {"$min"_sd, MOD_MIN},
-    {"$mul"_sd, MOD_MUL},
-    {"$pop"_sd, MOD_POP},
-    {"$pull"_sd, MOD_PULL},
-    {"$pullAll"_sd, MOD_PULL_ALL},
-    {"$push"_sd, MOD_PUSH},
-    {"$rename"_sd, MOD_RENAME},
-    {"$set"_sd, MOD_SET},
-    {"$setOnInsert"_sd, MOD_SET_ON_INSERT},
-    {"$unset"_sd, MOD_UNSET},
+constexpr auto names = std::to_array<std::pair<std::string_view, ModifierType>>({
+    {"$addToSet"sv, MOD_ADD_TO_SET},
+    {"$bit"sv, MOD_BIT},
+    {"$currentDate"sv, MOD_CURRENTDATE},
+    {"$inc"sv, MOD_INC},
+    {"$max"sv, MOD_MAX},
+    {"$min"sv, MOD_MIN},
+    {"$mul"sv, MOD_MUL},
+    {"$pop"sv, MOD_POP},
+    {"$pull"sv, MOD_PULL},
+    {"$pullAll"sv, MOD_PULL_ALL},
+    {"$push"sv, MOD_PUSH},
+    {"$rename"sv, MOD_RENAME},
+    {"$set"sv, MOD_SET},
+    {"$setOnInsert"sv, MOD_SET_ON_INSERT},
+    {"$unset"sv, MOD_UNSET},
 });
 static_assert(std::is_sorted(names.begin(), names.end(), OrderByName{}), "Must be sorted by name");
 
 }  // namespace
 
-ModifierType getType(StringData typeStr) {
+ModifierType getType(std::string_view typeStr) {
     auto [it1, it2] = std::equal_range(names.begin(), names.end(), typeStr, OrderByName{});
     return it1 == it2 ? MOD_UNKNOWN : it1->second;
 }

@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -53,11 +26,16 @@
 
 #include <cstdint>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <vector>
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
+
+// Default sort memory limit used when constructing SortNodes in these tests.
+constexpr uint64_t kSortMaxMemoryUsageBytes = 100 * 1024 * 1024;
 
 class SbeStageBuilderTest : public SbeStageBuilderTestFixture {
 protected:
@@ -364,7 +342,8 @@ TEST_F(GoldenSbeStageBuilderTest, TestSort) {
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
         BSON("a" << -1) /* pattern */,
         -1 /* limit */,
-        LimitSkipParameterization::Disabled);
+        LimitSkipParameterization::Disabled,
+        kSortMaxMemoryUsageBytes);
     runTest(std::move(sortNode), expected);
 }
 
@@ -379,7 +358,8 @@ TEST_F(GoldenSbeStageBuilderTest, TestSortLimit) {
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
         BSON("a" << -1) /* pattern */,
         1 /* limit */,
-        LimitSkipParameterization::Enabled);
+        LimitSkipParameterization::Enabled,
+        kSortMaxMemoryUsageBytes);
     runTest(std::move(sortNode), expected, {.limit = 1});
 }
 
@@ -394,7 +374,8 @@ TEST_F(GoldenSbeStageBuilderTest, TestSortLimitSkip) {
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
         BSON("a" << -1) /* pattern */,
         2 /* limit */,
-        LimitSkipParameterization::Enabled);
+        LimitSkipParameterization::Enabled,
+        kSortMaxMemoryUsageBytes);
 
     auto limitSkipNode = std::make_unique<LimitNode>(
         std::make_unique<SkipNode>(
@@ -446,7 +427,8 @@ TEST_F(GoldenSbeStageBuilderTest, TestSortCovered) {
         makeIdxScanNode(_nss, makeIndexEntry(indexKeyPattern), "a", 1, 3),
         BSON("a" << -1) /* pattern */,
         -1 /* limit */,
-        LimitSkipParameterization::Disabled);
+        LimitSkipParameterization::Disabled,
+        kSortMaxMemoryUsageBytes);
 
     // Build covered projection so that sort stage doesn't need to return whole document and becomes
     // covered sort.
@@ -527,7 +509,7 @@ TEST_F(GoldenSbeStageBuilderTest, TestUnwind) {
     boost::optional<FieldPath> fp = boost::none;
     auto unwindNode = std::make_unique<UnwindNode>(
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
-        UnwindNode::UnwindSpec{"a"_sd, true, fp});
+        UnwindNode::UnwindSpec{"a"sv, true, fp});
     runTest(std::move(unwindNode), BSON_ARRAY(BSON("a" << 1) << BSON("a" << 2) << BSON("a" << 3)));
 }
 
@@ -536,7 +518,7 @@ TEST_F(GoldenSbeStageBuilderTest, TestUnwindIndexPath) {
     boost::optional<FieldPath> fp = FieldPath("idx");
     auto unwindNode = std::make_unique<UnwindNode>(
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
-        UnwindNode::UnwindSpec{"a"_sd, true, fp});
+        UnwindNode::UnwindSpec{"a"sv, true, fp});
     runTest(std::move(unwindNode),
             BSON_ARRAY(BSON("a" << 1 << "idx" << 0)
                        << BSON("a" << 2 << "idx" << 1) << BSON("a" << 3 << "idx" << 2)));
@@ -548,7 +530,7 @@ TEST_F(GoldenSbeStageBuilderTest, TestUnwindIndexPathConflict) {
     boost::optional<FieldPath> fp = FieldPath("a.idx");
     auto unwindNode = std::make_unique<UnwindNode>(
         std::make_unique<VirtualScanNode>(docs, VirtualScanNode::ScanType::kCollScan, false),
-        UnwindNode::UnwindSpec{"a.val"_sd, true, fp});
+        UnwindNode::UnwindSpec{"a.val"sv, true, fp});
     runTest(std::move(unwindNode),
             BSON_ARRAY(BSON("a" << BSON("val" << 1 << "idx" << 0))
                        << BSON("a" << BSON("val" << 2 << "idx" << 1))
@@ -714,16 +696,16 @@ public:
 
         stage->open(false);
         // Execute the plan to verify explain output is correct.
-        auto [resultsTag, resultsVal] = getAllResults(stage.get(), resultAccessor);
-        sbe::value::ValueGuard resultGuard{resultsTag, resultsVal};
+        sbe::value::TagValueOwned results =
+            sbe::value::TagValueOwned::fromRaw(getAllResults(stage.get(), resultAccessor));
 
-        auto [expectedTag, expectedVal] = stage_builder::makeValue(expectedValue);
-        sbe::value::ValueGuard expectedGuard{expectedTag, expectedVal};
+        sbe::value::TagValueOwned expected =
+            sbe::value::TagValueOwned::fromRaw(stage_builder::makeValue(expectedValue));
 
-        ASSERT_TRUE(
-            PlanStageTestFixture::valueEquals(resultsTag, resultsVal, expectedTag, expectedVal))
-            << "expected: " << std::make_pair(expectedTag, expectedVal)
-            << " but got: " << std::make_pair(resultsTag, resultsVal);
+        ASSERT_TRUE(PlanStageTestFixture::valueEquals(
+            results.tag(), results.value(), expected.tag(), expected.value()))
+            << "expected: " << std::make_pair(expected.tag(), expected.value())
+            << " but got: " << std::make_pair(results.tag(), results.value());
     }
 
 protected:

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/storage/wiredtiger/spill_wiredtiger_kv_engine.h"
@@ -39,15 +13,19 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/processinfo.h"
 
 #include <memory>
+#include <string_view>
 
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
+
+MONGO_FAIL_POINT_DEFINE(hangOnSpillWiredTigerKVEngineCleanShutdown);
 
 namespace mongo {
 SpillWiredTigerKVEngine::SpillWiredTigerKVEngine(const std::string& canonicalName,
@@ -110,7 +88,7 @@ void SpillWiredTigerKVEngine::_openWiredTiger(const std::string& path,
 }
 
 std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::getInternalRecordStore(RecoveryUnit& ru,
-                                                                             StringData ident,
+                                                                             std::string_view ident,
                                                                              KeyFormat keyFormat) {
     WiredTigerRecordStore::Params params;
     params.uuid = boost::none;
@@ -127,9 +105,14 @@ std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::getInternalRecordStore(Rec
         this, WiredTigerRecoveryUnit::get(ru), std::move(params));
 }
 
-std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::makeInternalRecordStore(RecoveryUnit& ru,
-                                                                              StringData ident,
-                                                                              KeyFormat keyFormat) {
+std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::makeInternalRecordStore(
+    RecoveryUnit& ru, std::string_view ident, KeyFormat keyFormat) {
+
+    WiredTigerConnection::BlockShutdown blockShutdown(_connection.get());
+    iassert(ErrorCodes::ShutdownInProgress,
+            "Cannot create spill ident while engine is shutting down",
+            !blockShutdown.isShuttingDown());
+
     auto& session = *WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
 
     WiredTigerRecordStore::WiredTigerTableConfig wtTableConfig;
@@ -137,7 +120,7 @@ std::unique_ptr<RecordStore> SpillWiredTigerKVEngine::makeInternalRecordStore(Re
     // We don't log writes to spill tables.
     wtTableConfig.logEnabled = false;
     wtTableConfig.blockCompressor = gSpillWiredTigerBlockCompressor;
-    wtTableConfig.extraCreateOptions = _rsOptions;
+    wtTableConfig.serverParameterOptions = _rsOptions;
     std::string config =
         WiredTigerRecordStore::generateCreateString({} /* internal table */, wtTableConfig);
 
@@ -172,39 +155,56 @@ int64_t SpillWiredTigerKVEngine::storageSize(RecoveryUnit& ru) {
                            });
 }
 
-bool SpillWiredTigerKVEngine::hasIdent(RecoveryUnit& ru, StringData ident) const {
+bool SpillWiredTigerKVEngine::hasIdent(RecoveryUnit& ru, std::string_view ident) const {
+    WiredTigerConnection::BlockShutdown blockShutdown(_connection.get());
+    if (blockShutdown.isShuttingDown()) {
+        return false;
+    }
     return _wtHasUri(*WiredTigerRecoveryUnit::get(ru).getSession(),
                      WiredTigerUtil::buildTableUri(ident));
 }
 
-int64_t SpillWiredTigerKVEngine::getIdentSize(RecoveryUnit& ru, StringData ident) {
+int64_t SpillWiredTigerKVEngine::getIdentSize(RecoveryUnit& ru, std::string_view ident) {
+    WiredTigerConnection::BlockShutdown blockShutdown(_connection.get());
+    if (blockShutdown.isShuttingDown()) {
+        return 0;
+    }
     auto& session = *WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     return WiredTigerUtil::getIdentSize(session, WiredTigerUtil::buildTableUri(ident));
 }
 
 std::vector<std::string> SpillWiredTigerKVEngine::getAllIdents(RecoveryUnit& ru) const {
+    WiredTigerConnection::BlockShutdown blockShutdown(_connection.get());
+    if (blockShutdown.isShuttingDown()) {
+        return {};
+    }
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
     return _wtGetAllIdents(*wtRu.getSession());
 }
 
 Status SpillWiredTigerKVEngine::dropIdent(RecoveryUnit& ru,
-                                          StringData ident,
+                                          std::string_view ident,
                                           bool identHasSizeInfo,
-                                          const StorageEngine::DropIdentCallback& onDrop,
-                                          boost::optional<uint64_t> schemaEpoch) {
-    std::string uri = WiredTigerUtil::buildTableUri(ident);
+                                          boost::optional<uint64_t> schemaEpoch,
+                                          bool waitForLocks) {
+    invariant(waitForLocks);
+    WiredTigerConnection::BlockShutdown blockShutdown(_connection.get());
+    if (blockShutdown.isShuttingDown()) {
+        return Status(ErrorCodes::ShutdownInProgress,
+                      "shutdown in progress, dropping the ident is redundant");
+    }
+
+    const std::string uri = WiredTigerUtil::buildTableUri(ident);
 
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
     auto& session = *wtRu.getSessionNoTxn();
     session.closeAllCursors(uri);
 
-    int ret = session.drop(uri.c_str(), "checkpoint_wait=false,force=true");
-    Status status = Status::OK();
-    if (ret == 0 || ret == ENOENT) {
+    const int ret = session.drop(uri.c_str(), "checkpoint_wait=false,force=true");
+    Status status = (ret == 0 || ret == ENOENT)
         // If ident doesn't exist, it is effectively dropped.
-    } else {
-        status = wtRCToStatus(ret, session);
-    }
+        ? Status::OK()
+        : wtRCToStatus(ret, session);
     LOGV2_DEBUG(10327200, 1, "WT drop", "uri"_attr = uri, "status"_attr = status);
     return status;
 }
@@ -217,15 +217,15 @@ void SpillWiredTigerKVEngine::cleanShutdown(bool memLeakAllowed) {
     }
 
     _connection->shuttingDown(WiredTigerConnection::ShutdownReason::kCleanShutdown);
-
-    std::string closeConfig = "";
-    if (memLeakAllowed) {
-        closeConfig = "leak_memory=true,";
+    if (MONGO_unlikely(hangOnSpillWiredTigerKVEngineCleanShutdown.shouldFail())) {
+        hangOnSpillWiredTigerKVEngineCleanShutdown.pauseWhileSet();
     }
 
-    auto startTime = Date_t::now();
+    const char* closeConfig = memLeakAllowed ? "leak_memory=true," : "";
+
+    const auto startTime = Date_t::now();
     LOGV2(10158006, "Closing spill WiredTiger", "closeConfig"_attr = closeConfig);
-    invariantWTOK(_conn->close(_conn, closeConfig.c_str()), nullptr);
+    invariantWTOK(_conn->close(_conn, closeConfig), nullptr);
     LOGV2(10158007, "Closed spill WiredTiger ", "duration"_attr = Date_t::now() - startTime);
     _conn = nullptr;
 }

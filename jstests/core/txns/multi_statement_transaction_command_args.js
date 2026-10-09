@@ -88,6 +88,22 @@ res = assert.commandFailedWithCode(
 );
 assert(res.errmsg.includes("'startTransaction' field requires 'autocommit' field"));
 
+// autocommit -> startOrContinueTransaction
+jsTestLog("Try to begin a transaction with startOrContinueTransaction but no autocommit");
+txnNumber++;
+res = assert.commandFailedWithCode(
+    sessionDb.runCommand({
+        find: collName,
+        filter: {},
+        readConcern: {level: "snapshot"},
+        txnNumber: NumberLong(txnNumber),
+        // autocommit: false,
+        startOrContinueTransaction: true,
+    }),
+    ErrorCodes.InvalidOptions,
+);
+assert(res.errmsg.includes("'startOrContinueTransaction' field requires 'autocommit' field"));
+
 /***********************************************************************************************
  * Verify that the 'startTransaction' argument works correctly.
  **********************************************************************************************/
@@ -182,6 +198,39 @@ assert.commandFailedWithCode(
     ErrorCodes.InvalidOptions,
 );
 
+jsTestLog("Try to begin a transaction with startOrContinueTransaction=false and autocommit=false");
+txnNumber++;
+res = assert.commandFailedWithCode(
+    sessionDb.runCommand({
+        find: collName,
+        filter: {},
+        readConcern: {level: "snapshot"},
+        txnNumber: NumberLong(txnNumber),
+        startOrContinueTransaction: false,
+        autocommit: false,
+    }),
+    ErrorCodes.InvalidOptions,
+);
+assert(res.errmsg.includes("Specifying startOrContinueTransaction=false is not allowed."));
+
+jsTestLog("Try to begin a transaction with both startTransaction and startOrContinueTransaction");
+txnNumber++;
+res = assert.commandFailedWithCode(
+    sessionDb.runCommand({
+        find: collName,
+        filter: {},
+        readConcern: {level: "snapshot"},
+        txnNumber: NumberLong(txnNumber),
+        startTransaction: true,
+        startOrContinueTransaction: true,
+        autocommit: false,
+    }),
+    ErrorCodes.InvalidOptions,
+);
+assert(
+    res.errmsg.includes("Cannot specify both 'startTransaction' and 'startOrContinueTransaction'"),
+);
+
 /***********************************************************************************************
  * Setting autocommit=true or omitting autocommit on a transaction operation fails.
  **********************************************************************************************/
@@ -203,7 +252,7 @@ assert.commandFailedWithCode(
 
 // The command above was run with autocommit: true, and commit recovery on a router requires
 // "recoveryToken".
-if (!FixtureHelpers.isMongos(sessionDb) && !TestData.testingReplicaSetEndpoint) {
+if (!FixtureHelpers.isMongos(sessionDb)) {
     // Committing the transaction should fail.
     assert.commandFailedWithCode(
         sessionDb.adminCommand({
@@ -277,7 +326,12 @@ assert.commandWorked(sessionDb.runCommand({find: collName, filter: {}}));
 // invocation, which in turn will fail the check that only the first statement in a multi-document
 // transaction can specify a readConcern.
 assert.commandFailedWithCode(
-    sessionDb.runCommand({find: collName, filter: {}, txnNumber: NumberLong(txnNumber), autocommit: false}),
+    sessionDb.runCommand({
+        find: collName,
+        filter: {},
+        txnNumber: NumberLong(txnNumber),
+        autocommit: false,
+    }),
     [ErrorCodes.NoSuchTransaction, ErrorCodes.InvalidOptions],
 );
 
@@ -302,7 +356,11 @@ assert.commandWorked(
 
 // Committing the transaction should fail if 'autocommit' is omitted.
 assert.commandFailedWithCode(
-    sessionDb.adminCommand({commitTransaction: 1, txnNumber: NumberLong(txnNumber), writeConcern: {w: "majority"}}),
+    sessionDb.adminCommand({
+        commitTransaction: 1,
+        txnNumber: NumberLong(txnNumber),
+        writeConcern: {w: "majority"},
+    }),
     50768,
 );
 
@@ -343,15 +401,26 @@ assert.commandWorked(
 );
 
 // Aborting the transaction should fail if 'autocommit' is omitted.
-assert.commandFailedWithCode(sessionDb.adminCommand({abortTransaction: 1, txnNumber: NumberLong(txnNumber)}), 50768);
+assert.commandFailedWithCode(
+    sessionDb.adminCommand({abortTransaction: 1, txnNumber: NumberLong(txnNumber)}),
+    50768,
+);
 
 // Aborting the transaction should fail if autocommit=true.
 assert.commandFailedWithCode(
-    sessionDb.adminCommand({abortTransaction: 1, txnNumber: NumberLong(txnNumber), autocommit: true}),
+    sessionDb.adminCommand({
+        abortTransaction: 1,
+        txnNumber: NumberLong(txnNumber),
+        autocommit: true,
+    }),
     ErrorCodes.InvalidOptions,
 );
 
 // Aborting the transaction should succeed.
 assert.commandWorked(
-    sessionDb.adminCommand({abortTransaction: 1, txnNumber: NumberLong(txnNumber), autocommit: false}),
+    sessionDb.adminCommand({
+        abortTransaction: 1,
+        txnNumber: NumberLong(txnNumber),
+        autocommit: false,
+    }),
 );

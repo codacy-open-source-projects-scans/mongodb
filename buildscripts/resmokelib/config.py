@@ -38,12 +38,18 @@ MONGO_RUNNER_SUBDIR = "mongorunner"
 # The latter is set automatically as part of resmoke's option parsing on startup.
 ##
 
+# Plain binary base names. Unlike DEFAULT_MONGO*_EXECUTABLE (which may be resolved to an
+# absolute executable path), these always stay the bare names and are used when constructing
+# multiversion binary names such as "mongod-8.0".
+MONGOD_BIN_NAME = "mongod"
+MONGOS_BIN_NAME = "mongos"
+
 # We default to search for executables in the current working directory or in /data/multiversion
 # which are both part of the PATH.
 DEFAULT_DBTEST_EXECUTABLE = os.path.join(os.curdir, "dbtest")
 DEFAULT_MONGO_EXECUTABLE = "mongo"
-DEFAULT_MONGOD_EXECUTABLE = "mongod"
-DEFAULT_MONGOS_EXECUTABLE = "mongos"
+DEFAULT_MONGOD_EXECUTABLE = MONGOD_BIN_NAME
+DEFAULT_MONGOS_EXECUTABLE = MONGOS_BIN_NAME
 DEFAULT_MONGOT_EXECUTABLE = "mongot-localdev/mongot"
 DEFAULT_MONGOTEST_EXECUTABLE = "mongotest"
 
@@ -135,6 +141,7 @@ DEFAULTS = {
     "shard_index": None,
     "shell_conn_string": None,
     "historic_test_runtimes": None,
+    "tss_test_list": None,
     "shell_port": None,
     "shuffle": None,
     "stagger_jobs": None,
@@ -187,6 +194,7 @@ DEFAULTS = {
     "revision_order_id": None,
     "task_id": None,
     "task_name": None,
+    "display_task_name": None,
     "task_doc": None,
     "variant_name": None,
     "version_id": None,
@@ -236,6 +244,8 @@ DEFAULTS = {
     "load_all_extensions": False,
     # Avoids running hooks as part of the suite.
     "no_hooks": False,
+    # Loads the MFP plugin into every mongod/mongos process.
+    "message_filter_plugin": False,
     # Avoids performing signature verification on test extensions at load time.
     "skip_extensions_signature_verification": False,
     # Enable shell JS debugging
@@ -348,12 +358,13 @@ class MultiversionOptions(object):
 
     LAST_LTS = "last_lts"
     LAST_CONTINUOUS = "last_continuous"
+    LAST_PATCH = "last_patch"
 
     @classmethod
     def all_options(cls):
         """Return available version options for multiversion."""
 
-        return [cls.LAST_LTS, cls.LAST_CONTINUOUS]
+        return [cls.LAST_LTS, cls.LAST_CONTINUOUS, cls.LAST_PATCH]
 
 
 ##
@@ -429,11 +440,6 @@ ENABLE_EVERGREEN_API_TEST_SELECTION = False
 # If set, requests Evergreen to use the specified test selection strategies.
 EVERGREEN_TEST_SELECTION_STRATEGY = None
 
-# Boolean indicating if test selection service is enabled for this variant.
-# Read from the variant's 'tss_enabled' expansion in Evergreen YAML.
-# If None, test selection is disabled (default for local runs or variants without the expansion).
-TSS_ENABLED = None
-
 # Path to the YAML file containing the current `mongo_version`
 # Use RESMOKE_ROOT so it works when running from external directories
 MONGO_VERSION_FILE = os.path.join(RESMOKE_ROOT, ".resmoke_mongo_version.yml")
@@ -473,6 +479,10 @@ EVERGREEN_TASK_ID = None
 
 # The name of the Evergreen task that resmoke.py is being run for.
 EVERGREEN_TASK_NAME = None
+
+# The name of the Evergreen display task that the task resmoke.py is being run for rolls up to.
+# Unset when the task is not part of a display task.
+EVERGREEN_DISPLAY_TASK_NAME = None
 
 # The documentation that describes what Evergreen task does.
 EVERGREEN_TASK_DOC = None
@@ -784,6 +794,14 @@ SHARD_INDEX = None
 # JSON containing historic test runtimes
 HISTORIC_TEST_RUNTIMES = None
 
+# YAML file of tests chosen for this suite by Evergreen's test selection service, generated at
+# build time. Used in place of calling the selection endpoint from inside the suite.
+TSS_TEST_LIST = None
+
+# Strategies used when test selection is enabled but none were named. Shared with the bazel path,
+# which asks the same service with the same strategies (bazel/resmoke/generate_tss_test_list.py).
+DEFAULT_EVERGREEN_TEST_SELECTION_STRATEGY = ["ExcludeManuallyQuarantined"]
+
 # Shell debug options
 JSDBG = None
 
@@ -905,11 +923,6 @@ REQUIRES_WORKLOAD_CONTAINER_SETUP = False
 # Config fuzzer encryption options, this is only set when the fuzzer is run
 CONFIG_FUZZER_ENCRYPTION_OPTS = None
 
-# Indicates which JavaScript engine the tested binary was built with. Corresponds to the
-# "javascriptEngine" field returned by the buildInfo command (or --version). When set to
-# "mozjs-wasm", tests tagged with "mozjs_wasm_unsupported" will be excluded.
-JS_ENGINE = None
-
 # If resmoke is running on a build variant that specifies a mongo_mozjs_opts,
 # we need a way to provide the JS_GC_ZEAL setting provided as part of the mongo_mozjs_opts
 # exclusively to mongod/mongos.
@@ -928,8 +941,20 @@ LOAD_ALL_EXTENSIONS = False
 # Avoids running hooks as part of the suite.
 NO_HOOKS = False
 
+# When set, loads the MFP plugin into every mongod/mongos process.
+MESSAGE_FILTER_PLUGIN = False
+# Path where the plugin .so is staged at configure time (set when MESSAGE_FILTER_PLUGIN is true).
+MESSAGE_FILTER_PLUGIN_PATH = None
+
 # Whether ASAN (AddressSanitizer) is enabled, determined by the presence of ASAN_OPTIONS.
 IS_ASAN = bool(os.environ.get("ASAN_OPTIONS"))
+
+# Whether any sanitizer build is active (ASAN, TSAN, or UBSAN), which results in slower execution.
+IS_SAN = bool(
+    os.environ.get("ASAN_OPTIONS")
+    or os.environ.get("TSAN_OPTIONS")
+    or os.environ.get("UBSAN_OPTIONS")
+)
 
 # Skips signature verification for extensions loaded into the server. This option has no effect on release builds.
 SKIP_EXTENSIONS_SIGNATURE_VERIFICATION = False

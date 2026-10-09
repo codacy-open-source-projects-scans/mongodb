@@ -1,12 +1,22 @@
 // @tags: [
 //   requires_fast_memory,
 //   requires_scripting,
-//   # TODO SERVER-116054: Add support for $where.
-//   mozjs_wasm_unsupported,
 // ]
+import {isMozjsWasm} from "jstests/libs/js_engine_util.js";
+
 const conn = MongoRunner.runMongod({});
 assert.neq(null, conn, "unable to start mongod");
 const db = conn.getDB("memory_test");
+
+const wasmEngine = isMozjsWasm(db);
+if (wasmEngine) {
+    // Cap WASM linear memory so the $where OOM tests are caught by the Wasmtime store
+    // limiter (ExceededMemoryLimit) rather than the OS OOM killer. 100 MB JS heap +
+    // 300 MB store leaves room for the 1M-element non-OOM workload while ensuring the
+    // 1B-element allocation OOMs within WASM before physical RAM is exhausted.
+    assert.commandWorked(db.adminCommand({setParameter: 1, jsHeapLimitMB: 100}));
+    assert.commandWorked(db.adminCommand({setParameter: 1, wasmtimeStoreMemoryLimitMB: 300}));
+}
 
 let col = db.memoryTest;
 
@@ -44,7 +54,12 @@ function assertMemoryError(func) {
     try {
         func();
     } catch (e) {
-        if (e.message.includes("Out of memory") || e.message.includes("JavaScript execution interrupted")) {
+        if (
+            e.message.includes("Out of memory") ||
+            e.message.includes("JavaScript execution interrupted") ||
+            e.message.includes("out of memory") ||
+            e.message.includes("ExceededMemoryLimit") // WASM store limiter OOM
+        ) {
             return;
         }
         throw e;

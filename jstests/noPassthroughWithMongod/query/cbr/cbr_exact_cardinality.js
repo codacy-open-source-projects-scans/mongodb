@@ -1,5 +1,9 @@
 /**
  * Test exact cardinality mode of cost-based ranking.
+ *
+ * @tags: [
+ *   requires_fcv_90,
+ * ]
  */
 
 import {
@@ -69,8 +73,12 @@ function assertPlanEnumerated(query, stage) {
 function testAndHash() {
     // CBR might not choose the AND_HASH plan as the winning plan, so we check that this
     // plan is at least enumerated.
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: true}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: true}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: true}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: true}),
+    );
     assert(coll.drop());
     assert.commandWorked(coll.createIndex({a: 1}));
     assert.commandWorked(coll.createIndex({b: 1}));
@@ -107,15 +115,23 @@ function testAndHash() {
         assertPlanEnumerated(query, "AND_HASH");
         assertCorrectCardinality({query: query});
     });
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: false}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: false}),
+    );
 }
 
 function testAndSorted() {
     // CBR might not choose the AND_SORTED plan as the winning plan, so we check that this
     // plan is at least enumerated.
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: true}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: true}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: true}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: true}),
+    );
     assert(coll.drop());
     assert.commandWorked(coll.createIndex({a: 1}));
     assert.commandWorked(coll.createIndex({b: 1}));
@@ -131,8 +147,12 @@ function testAndSorted() {
     );
     assertPlanEnumerated({a: 1, b: 1}, "AND_SORTED");
     assertCorrectCardinality({a: 1, b: 1});
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: false}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: false}),
+    );
 }
 
 function testRootedOr() {
@@ -156,7 +176,9 @@ function testMergeSort() {
     );
 
     for (let i = 0; i < 100; i++) {
-        assert.commandWorked(coll.insert({a: randomInt(), b: randomInt(), c: randomInt(), d: randomInt()}));
+        assert.commandWorked(
+            coll.insert({a: randomInt(), b: randomInt(), c: randomInt(), d: randomInt()}),
+        );
     }
     assertCorrectCardinality({
         query: {
@@ -229,7 +251,12 @@ function testCoveredPlans() {
         assert.commandWorked(coll.insert({a: i, b: i}));
     }
     assert.commandWorked(coll.createIndex({a: 1}));
-    assert(isIndexOnly(db, getWinningPlanFromExplain(coll.find({a: {$lt: 5}}, {_id: 0, a: 1}).explain())));
+    assert(
+        isIndexOnly(
+            db,
+            getWinningPlanFromExplain(coll.find({a: {$lt: 5}}, {_id: 0, a: 1}).explain()),
+        ),
+    );
     assertCorrectCardinality({query: {a: {$lt: 5}}, project: {_id: 0, a: 1}});
 
     assert.commandWorked(coll.dropIndex({a: 1}));
@@ -238,7 +265,12 @@ function testCoveredPlans() {
         {query: {a: {$lt: 5}}, project: {a: 1, _id: 0}},
         {query: {a: {$lt: 5}, b: {$lt: 3}}, project: {a: 1, b: 1, _id: 0}},
     ].forEach((test) => {
-        assert(isIndexOnly(db, getWinningPlanFromExplain(coll.find(test.query, test.project).explain())));
+        assert(
+            isIndexOnly(
+                db,
+                getWinningPlanFromExplain(coll.find(test.query, test.project).explain()),
+            ),
+        );
         assertCorrectCardinality(test);
     });
 }
@@ -263,6 +295,19 @@ function testEof() {
     });
 }
 
+function testTailableCollScan() {
+    // Tailable collscans never reach permanent EOF. exactCE runs plans until EOF, so without
+    // the tailable short-circuit in PlanRanker::rankPlans this explain would hang forever.
+    assert(coll.drop());
+    assert.commandWorked(db.createCollection(coll.getName(), {capped: true, size: 1024}));
+    assert.commandWorked(coll.insert({_id: 1, a: 1}));
+    // The explain used to force costing before SERVER-132813, otherwise there is only one plan and no need to cost.
+    // Use addOption to set just the tailable flag (not awaitData, which would block).
+    assert.commandWorked(
+        coll.explain("executionStats").find({a: 1}).addOption(DBQuery.Option.tailable).finish(),
+    );
+}
+
 function testNodeUnsupportedByCBR() {
     assert(coll.drop());
     assert.commandWorked(coll.insert({}));
@@ -279,7 +324,12 @@ function testNodeUnsupportedByCBR() {
 
 try {
     assert.commandWorked(
-        db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: true, internalQueryCBRCEMode: "exactCE"}),
+        db.adminCommand({
+            setParameter: 1,
+            featureFlagCostBasedRanker: true,
+            internalQueryPlanRanker: "costBased",
+            internalQueryCBRCEMode: "exactCE",
+        }),
     );
     // Ensure we calculate the correct cardinality for collection/index scans.
     testCollIdxScan();
@@ -306,10 +356,18 @@ try {
     testEof();
     // Ensure that exactCE succeeds when it encounters a node not yet supported by CBR.
     testNodeUnsupportedByCBR();
+    // Ensure that exactCE does not hang on tailable collscans which never reach EOF.
+    testTailableCollScan();
 } finally {
     // Ensure that query knob doesn't leak into other testcases in the suite.
     assert.commandWorked(db.adminCommand({setParameter: 1, featureFlagCostBasedRanker: false}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: false}));
-    assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: false}));
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryForceIntersectionPlans: false}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableHashIntersection: false}),
+    );
+    assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQueryPlannerEnableSortIndexIntersection: false}),
+    );
 }

@@ -14,13 +14,8 @@ selector:
     # Query settings are not supported on standalone.
     - jstests/core/query/query_settings/**/*.js
 
-    # CBR does not currently add plans to the plan cache. These tests examine the plan cache.
-    - jstests/core/query/plan_cache/*.js
-    - jstests/core/query/explain/explain_plan_cache.js
-    - jstests/core/query/partial_index_logical.js
-    - jstests/core/index/index_filter_commands.js
-    - jstests/core/index/index_filter_commands_invalidate_plan_cache_entries.js
-    - jstests/core/timeseries/pbt/timeseries_cache_usage_pbt.js
+    # TODO SERVER-116684: Enable this test, it asserts on the length of creationExecStats.
+    - jstests/core/query/plan_cache/plan_cache_list_plans.js
 
     # Asserting on specific plan, CBR pick different one
     - jstests/core/query/agg_hint.js
@@ -48,7 +43,7 @@ selector:
     # TODO SERVER-99091 re-enable this test to get coverage of switching between plan ranker modes.
     - jstests/core/query/query_knob_correctness_pbt.js
 
-    # Shard level user writes block is not supported on standalone.
+    # Replica set write block is not supported on standalone.
     - jstests/core/administrative/block_replica_set_writes.js
 
   exclude_with_any_tags:
@@ -61,7 +56,6 @@ executor:
   config:
     shell_options:
       crashOnInvalidBSONError: ""
-      objcheck: ""
       eval: |
         await import("jstests/libs/override_methods/detect_spawning_own_mongod.js");
   fixture:
@@ -70,4 +64,5 @@ executor:
       set_parameters:
         enableTestCommands: 1
         featureFlagCostBasedRanker: true
+        internalQueryPlanRanker: "costBased"
         internalQueryCBRCEMode: "heuristicCE"

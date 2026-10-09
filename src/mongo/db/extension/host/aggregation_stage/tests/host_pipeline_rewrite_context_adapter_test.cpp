@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/extension/host/pipeline_rewrite_context.h"
@@ -36,8 +10,10 @@
 #include "mongo/db/extension/shared/handle/pipeline_rewrite_context_handle.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_mock_stages.h"
 #include "mongo/db/pipeline/document_source_skip.h"
+#include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/optimization/rule_based_rewriter.h"
 #include "mongo/unittest/unittest.h"
@@ -282,6 +258,102 @@ TEST(PipelineDependenciesAdapterTest, NeedsMetadataReturnsFalseForUnsetMetadataT
     // Do not set kSearchScore.
     auto adapter = host_connector::PipelineDependenciesAdapter(std::move(deps));
     ASSERT_FALSE(PipelineDependenciesHandle(&adapter)->needsMetadata("searchScore"));
+}
+
+TEST(PipelineDependenciesAdapterTest, GetNeededFieldsReturnsNullWhenNeedsWholeDocument) {
+    DepsTracker deps;
+    deps.needWholeDocument = true;
+    deps.fields.insert("a");
+    deps.fields.insert("b");
+    auto adapter = host_connector::PipelineDependenciesAdapter(std::move(deps));
+    auto result = PipelineDependenciesHandle(&adapter)->getNeededFields();
+    ASSERT_FALSE(result.has_value());
+}
+
+TEST(PipelineDependenciesAdapterTest, GetNeededFieldsReturnsEmptyArrayWhenNoFieldsNeeded) {
+    DepsTracker deps;
+    deps.needWholeDocument = false;
+    auto adapter = host_connector::PipelineDependenciesAdapter(std::move(deps));
+    auto result = PipelineDependenciesHandle(&adapter)->getNeededFields();
+    ASSERT_TRUE(result.has_value());
+    ASSERT_BSONOBJ_EQ(*result, BSONArray());
+}
+
+TEST(PipelineDependenciesAdapterTest, GetNeededFieldsReturnsFieldPaths) {
+    DepsTracker deps;
+    deps.needWholeDocument = false;
+    deps.fields.insert("x");
+    deps.fields.insert("a");
+    deps.fields.insert("a.b");
+    auto adapter = host_connector::PipelineDependenciesAdapter(std::move(deps));
+    auto result = PipelineDependenciesHandle(&adapter)->getNeededFields();
+    ASSERT_TRUE(result.has_value());
+    ASSERT_BSONOBJ_EQ(*result, BSON_ARRAY("a" << "a.b" << "x"));
+}
+
+
+TEST(PipelineRewriteContextAdapterTest, GetPipelineSuffixBoundsEmptySuffix) {
+    // When the current stage is the only stage, the suffix is empty and bounds are Unknown/Unknown.
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    DocumentSourceContainer container;
+    container.push_back(DocumentSourceLimit::create(expCtx, 10));
+
+    PipelineRewriteContext rbrCtx(*expCtx, container);
+    PipelineRewriteContextAdapter adapter(host::PipelineRewriteContext::make(&rbrCtx));
+
+    auto bounds = PipelineRewriteContextAPI(&adapter).getPipelineSuffixBounds();
+    ASSERT_EQUALS(kDocsNeededConstraintUnknown, bounds.minBounds.type);
+    ASSERT_EQUALS(kDocsNeededConstraintUnknown, bounds.maxBounds.type);
+}
+
+TEST(PipelineRewriteContextAdapterTest, GetPipelineSuffixBoundsWithLimit) {
+    // Suffix containing a $limit yields discrete bounds equal to that limit value.
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    DocumentSourceContainer container;
+    container.push_back(DocumentSourceLimit::create(expCtx, 10));  // current stage
+    container.push_back(DocumentSourceLimit::create(expCtx, 5));   // suffix
+
+    PipelineRewriteContext rbrCtx(*expCtx, container);
+    PipelineRewriteContextAdapter adapter(host::PipelineRewriteContext::make(&rbrCtx));
+
+    auto bounds = PipelineRewriteContextAPI(&adapter).getPipelineSuffixBounds();
+    ASSERT_EQUALS(kDocsNeededConstraintDiscrete, bounds.minBounds.type);
+    ASSERT_EQUALS(5u, bounds.minBounds.value);
+    ASSERT_EQUALS(kDocsNeededConstraintDiscrete, bounds.maxBounds.type);
+    ASSERT_EQUALS(5u, bounds.maxBounds.value);
+}
+
+TEST(PipelineRewriteContextAdapterTest, GetPipelineSuffixBoundsWithBlockingStage) {
+    // A blocking stage ($sort) in the suffix yields NeedAll/NeedAll bounds.
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    DocumentSourceContainer container;
+    container.push_back(DocumentSourceLimit::create(expCtx, 10));             // current stage
+    container.push_back(DocumentSourceSort::create(expCtx, BSON("a" << 1)));  // suffix
+
+    PipelineRewriteContext rbrCtx(*expCtx, container);
+    PipelineRewriteContextAdapter adapter(host::PipelineRewriteContext::make(&rbrCtx));
+
+    auto bounds = PipelineRewriteContextAPI(&adapter).getPipelineSuffixBounds();
+    ASSERT_EQUALS(kDocsNeededConstraintNeedAll, bounds.minBounds.type);
+    ASSERT_EQUALS(kDocsNeededConstraintNeedAll, bounds.maxBounds.type);
+}
+
+TEST(PipelineRewriteContextAdapterTest, GetPipelineSuffixBoundsWithMixedBounds) {
+    // Suffix [$match, $limit] yields min=discrete, max=unknown: $match has unknown selectivity
+    // so it resets the discrete max to Unknown while leaving the min bound intact.
+    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    DocumentSourceContainer container;
+    container.push_back(DocumentSourceLimit::create(expCtx, 10));              // current stage
+    container.push_back(DocumentSourceMatch::create(BSON("a" << 1), expCtx));  // start of suffix
+    container.push_back(DocumentSourceLimit::create(expCtx, 12));
+
+    PipelineRewriteContext rbrCtx(*expCtx, container);
+    PipelineRewriteContextAdapter adapter(host::PipelineRewriteContext::make(&rbrCtx));
+
+    auto bounds = PipelineRewriteContextAPI(&adapter).getPipelineSuffixBounds();
+    ASSERT_EQUALS(kDocsNeededConstraintDiscrete, bounds.minBounds.type);
+    ASSERT_EQUALS(12u, bounds.minBounds.value);
+    ASSERT_EQUALS(kDocsNeededConstraintUnknown, bounds.maxBounds.type);
 }
 
 }  // namespace

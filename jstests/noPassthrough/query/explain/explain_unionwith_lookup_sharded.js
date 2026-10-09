@@ -9,7 +9,15 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const dbName = "test";
 
-const st = new ShardingTest({shards: 2});
+// Non-deterministic query stats collection can to non-deterministic execution stats for subpipeline aggregations.
+const queryStatsDisabled = {internalQueryStatsRateLimit: 0, internalQueryStatsSampleRate: 0};
+const st = new ShardingTest({
+    shards: 2,
+    other: {
+        mongosOptions: {setParameter: queryStatsDisabled},
+        rsOptions: {setParameter: queryStatsDisabled},
+    },
+});
 const db = st.s.getDB(dbName);
 
 const outerColl = db["outer"];
@@ -126,7 +134,14 @@ stageExplain = explainStage(nestedUnionWithStage, "$unionWith");
 assert.eq(stageExplain.nReturned, 6, stageExplain);
 
 // Shard the outer collection.
-st.shardColl(outerColl.getName(), {_id: 1} /* shard key */, {_id: 2} /* split at */, {_id: 3} /* move */, dbName, true);
+st.shardColl(
+    outerColl.getName(),
+    {_id: 1} /* shard key */,
+    {_id: 2} /* split at */,
+    {_id: 3} /* move */,
+    dbName,
+    true,
+);
 
 // A variant of 'explainStage()' when the stage is expected to appear twice because it runs on
 // two shards.

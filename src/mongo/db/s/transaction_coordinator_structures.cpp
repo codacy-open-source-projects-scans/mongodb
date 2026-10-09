@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/s/transaction_coordinator_structures.h"
@@ -34,19 +8,22 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <string_view>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
 
 namespace mongo {
 namespace txn {
+using namespace std::literals::string_view_literals;
 namespace {
 
-constexpr auto kCommitDecision = "commit"_sd;
-constexpr auto kAbortDecision = "abort"_sd;
+constexpr auto kCommitDecision = "commit"sv;
+constexpr auto kAbortDecision = "abort"sv;
 
 }  // namespace
 
-CommitDecision readCommitDecisionEnumProperty(StringData decision) {
+CommitDecision readCommitDecisionEnumProperty(std::string_view decision) {
     // clang-format off
     if (decision == kCommitDecision) return CommitDecision::kCommit;
     if (decision == kAbortDecision)  return CommitDecision::kAbort;
@@ -56,7 +33,7 @@ CommitDecision readCommitDecisionEnumProperty(StringData decision) {
               str::stream() << "'" << decision << "' is not a valid decision");
 }
 
-StringData writeCommitDecisionEnumProperty(CommitDecision decision) {
+std::string_view writeCommitDecisionEnumProperty(CommitDecision decision) {
     // clang-format off
     switch (decision) {
         case CommitDecision::kCommit:     return kCommitDecision;
@@ -66,12 +43,12 @@ StringData writeCommitDecisionEnumProperty(CommitDecision decision) {
     MONGO_UNREACHABLE;
 }
 
-StringData toString(PrepareVote prepareVote) {
+std::string_view toString(PrepareVote prepareVote) {
     switch (prepareVote) {
         case txn::PrepareVote::kCommit:
-            return "kCommit"_sd;
+            return "kCommit"sv;
         case txn::PrepareVote::kAbort:
-            return "kAbort"_sd;
+            return "kAbort"sv;
     };
     MONGO_UNREACHABLE;
 }

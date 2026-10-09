@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/compiler/stats/max_diff.h"
 
@@ -400,7 +374,7 @@ ScalarHistogram genMaxDiffHistogram(const DataDistribution& dataDistrib,
         // Add a histogram bucket.
         const auto v = dataDistrib._bounds[startBucketIdx];
         const auto [copyTag, copyVal] = value::copyValue(v.getTag(), v.getValue());
-        bounds.push_back(copyTag, copyVal);
+        bounds.push_back_raw(copyTag, copyVal);
         buckets.emplace_back(freq, rangeFreq, cumulativeFreq, ndv, cumulativeNDV);
         startBucketIdx++;
     }
@@ -459,17 +433,17 @@ std::shared_ptr<const CEHistogram> createCEHistogram(const std::vector<SBEValue>
             // We only count types once per occurrence per array for histogram CE.
             std::set<value::TypeTags> perArrayTags;
             for (size_t i = 0; i < arrSize; i++) {
-                const auto [elemTag, elemVal] = arr->getAt(i);
+                const auto elemTagVal = arr->getAt(i);
 
-                perArrayTags.insert(elemTag);
-                if (!canEstimateTypeViaHistogram(elemTag)) {
+                perArrayTags.insert(elemTagVal.tag);
+                if (!canEstimateTypeViaHistogram(elemTagVal.tag)) {
                     // If the elements of this array are not histogrammable, then we can only update
                     // the array type counters; we cannot add this value to the histogram.
                     continue;
                 }
-                double doubleVal = valueToDouble(elemTag, elemVal);
+                double doubleVal = valueToDouble(elemTagVal.tag, elemTagVal.value);
                 if (std::isnan(doubleVal)) {
-                    if (!sbe::value::isNumber(elemTag)) {
+                    if (!sbe::value::isNumber(elemTagVal.tag)) {
                         uasserted(7280701,
                                   str::stream() << "Non numeric tag type"
                                                 << " is interpreted as NaN");
@@ -478,7 +452,7 @@ std::shared_ptr<const CEHistogram> createCEHistogram(const std::vector<SBEValue>
                     continue;
                 }
 
-                const auto [tagCopy, valCopy] = value::copyValue(elemTag, elemVal);
+                const auto [tagCopy, valCopy] = value::copyValue(elemTagVal.tag, elemTagVal.value);
                 arrayElements.emplace_back(tagCopy, valCopy);
             }
 

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
 #include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
@@ -41,9 +15,11 @@
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <algorithm>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional.hpp>
@@ -52,6 +28,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 const Timestamp kDawnOfTime(0, 1);
 
@@ -134,7 +111,7 @@ public:
     };
 
     void setUp() override {
-        ConfigServerTestFixture::setUp();
+        ConfigServerTestFixture::setUpAndInitializeConfigDb();
         operationContext()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
         DDLLockManager::get(getServiceContext())->setRecoverable(_recoverable.get());
 
@@ -221,8 +198,6 @@ public:
             ASSERT_OK(insertToConfigCollection(
                 opCtx, NamespaceString::kConfigsvrPlacementHistoryNamespace, initialDoc.toBSON()));
         }
-
-        ASSERT_OK(shardingCatalogManager().createIndexesForConfigPlacementHistory(opCtx));
     }
 
     ShardingCatalogManager& shardingCatalogManager() {
@@ -238,10 +213,9 @@ public:
         public:
             StaticCatalogClient(const std::vector<std::string>& shardIds) : _shardIds(shardIds) {}
 
-            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
-                OperationContext* opCtx,
-                repl::ReadConcernLevel readConcern,
-                BSONObj filter) override {
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
+                                                                  repl::ReadConcernArgs readConcern,
+                                                                  BSONObj filter) override {
 
                 std::vector<ShardType> shards;
                 for (const auto& shardId : _shardIds) {
@@ -284,7 +258,8 @@ public:
      * Retrieves the historical placement for the specified namespace and timestamp in
      * 'ignoreRemovedShards' mode.
      */
-    HistoricalPlacement getHistoricalPlacementIgnoreRemovedShards(StringData nss, Timestamp ts) {
+    HistoricalPlacement getHistoricalPlacementIgnoreRemovedShards(std::string_view nss,
+                                                                  Timestamp ts) {
         return shardingCatalogManager().getHistoricalPlacement(
             operationContext(),
             nss.empty() ? boost::optional<NamespaceString>()
@@ -296,7 +271,12 @@ public:
     }
 
     void disablePreciseTargetingFeatureFlag() {
+        // Release the previous "enabled" controller before installing the "disabled" one. RAII
+        // destruction of the inner controller would otherwise restore the flag to whatever was
+        // observed at the inner controller's construction time, which is no longer the default.
         _scopedFeatureFlagEnabled.reset();
+        _scopedFeatureFlagEnabled = std::make_unique<unittest::ServerParameterGuard>(
+            "featureFlagChangeStreamPreciseShardTargeting", false);
     }
 
 private:
@@ -312,7 +292,8 @@ private:
         for (int i = 1; i <= nShards; i++) {
             const std::string shardName = "shard" + std::to_string(i);
             const std::string shardHost = "localhost:" + std::to_string(30000 + i);
-            const auto& doc = BSON("_id" << shardName << "host" << shardHost << "state" << 1);
+            const auto& doc = BSON("_id" << shardName << "host" << shardHost << "state" << 1
+                                         << "uuid" << UUID::gen());
 
             configShardData.push_back(doc);
         }
@@ -334,8 +315,8 @@ private:
     // change stream readers to be enabled.
     // TODO (SERVER-98118): Delete this field once featureFlagChangeStreamPreciseShardTargeting
     // reaches last-lts.
-    std::unique_ptr<RAIIServerParameterControllerForTest> _scopedFeatureFlagEnabled =
-        std::make_unique<RAIIServerParameterControllerForTest>(
+    std::unique_ptr<unittest::ServerParameterGuard> _scopedFeatureFlagEnabled =
+        std::make_unique<unittest::ServerParameterGuard>(
             "featureFlagChangeStreamPreciseShardTargeting", true);
 };
 
@@ -844,7 +825,7 @@ TEST_F(GetHistoricalPlacementTestFixture,
     // Execute the specified callback function while capturing logs, and validate all query-related
     // log messages for the expected output.
     auto runWithLogCaptureAndValidateLogMessages = [&](const std::function<void()>& callback,
-                                                       StringData expectedNss,
+                                                       std::string_view expectedNss,
                                                        const BSONObj& expectedNssMatch) {
         auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kSharding,
                                                                   logv2::LogSeverity::Debug(3)};
@@ -868,7 +849,7 @@ TEST_F(GetHistoricalPlacementTestFixture,
         {
             const auto& logLine = logLines[0];
             const auto& pipeline = logLine["pipeline"].Array();
-            ASSERT_EQUALS("$facet"_sd, pipeline[0].Obj().firstElementFieldNameStringData());
+            ASSERT_EQUALS("$facet"sv, pipeline[0].Obj().firstElementFieldNameStringData());
         }
 
         // The query issued in ignoreRemovedShards mode by
@@ -923,7 +904,7 @@ TEST_F(GetHistoricalPlacementTestFixture,
                                       .value,
                                   historicalPlacement);
         },
-        "db.collection1"_sd,
+        "db.collection1"sv,
         BSON("$regex" << "^db(\\.collection1)?$"));
 
 
@@ -940,7 +921,7 @@ TEST_F(GetHistoricalPlacementTestFixture,
                                       .value,
                                   historicalPlacement);
         },
-        "db"_sd,
+        "db"sv,
         BSON("$regex" << "^db(\\..*)?$"));
 
     // Run placementHistory query for an all-databases placement.
@@ -4625,21 +4606,33 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Inva
 TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_CleanUp) {
     auto opCtx = operationContext();
 
+    setupConfigShard(opCtx, 5 /*nShards*/);
+    const std::vector<std::string> approximatedPlacement{
+        "shard1", "shard2", "shard3", "shard4", "shard5"};
+    const Timestamp oldInitializationTime(10, 0);
+
     // Insert the initial content
     setupConfigPlacementHistory(
         opCtx,
         {
+            // Original Initialization metadata docs - with "low"
+            {Timestamp(0, 1),
+             ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
+             approximatedPlacement},
+            {oldInitializationTime,
+             ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
+             {}},
             // One DB created before the time chosen for the cleanup
             {Timestamp(1, 0), "db", {"shard4"}},
             // One collection with entries before and after the chosen time of the cleanup
-            {Timestamp(10, 0), "db.collection1", {"shard1"}},
+            {oldInitializationTime, "db.collection1", {"shard1"}},
             {Timestamp(20, 0), "db.collection1", {"shard2", "shard3", "shard4"}},
             // One collection with multiple entries before the chosen time of the cleanup
             {Timestamp(11, 0), "db.collection2", {"shard2"}},
             {Timestamp(19, 0), "db.collection2", {"shard1", "shard4"}},
-        });
+        },
+        false /*generateInitDocumentAtDawnOfTime*/);
 
-    setupConfigShard(opCtx, 5 /*nShards*/);
 
     // Define the earliest cluster time that needs to be preserved, then run the cleanup.
     const auto earliestClusterTime = Timestamp(20, 0);
@@ -4648,12 +4641,13 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Clea
     // Verify the behaviour of the API after the cleanup.
     // - Any query referencing a time >= earliestClusterTime is expected to return accurate data
     // based on the content inserted during the setup.
-    // - Any query referencing a time < earliestClusterTime is expected to be answered with an
-    // approximated value.
-    const std::vector<std::string> approximatedPlacement{"shard1", "shard2", "shard3", "shard4"};
+    // - Any query referencing a time < earliestClusterTime is expected to be answered with the
+    // original approximated value persisted in the 'dawn of time' document.
 
     // db
-    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards(approximatedPlacement).value,
+    const std::vector<std::string> expectedAccurateDbPlacement{
+        "shard1", "shard2", "shard3", "shard4"};
+    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards(expectedAccurateDbPlacement).value,
                           shardingCatalogManager().getHistoricalPlacement(
                               opCtx,
                               NamespaceString::createNamespaceString_forTest("db"),
@@ -4669,7 +4663,8 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Clea
                               false /* ignoreRemovedShards */));
 
     // db.collection1
-    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards({"shard2", "shard3", "shard4"}).value,
+    const std::vector<std::string> expectedAccurateColl1Placement{"shard2", "shard3", "shard4"};
+    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards(expectedAccurateColl1Placement).value,
                           shardingCatalogManager().getHistoricalPlacement(
                               opCtx,
                               NamespaceString::createNamespaceString_forTest("db.collection1"),
@@ -4686,7 +4681,8 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Clea
                               false /* ignoreRemovedShards */));
 
     // db.collection2
-    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards({"shard1", "shard4"}).value,
+    const std::vector<std::string> expectedAccurateColl2Placement{"shard1", "shard4"};
+    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards(expectedAccurateColl2Placement).value,
                           shardingCatalogManager().getHistoricalPlacement(
                               opCtx,
                               NamespaceString::createNamespaceString_forTest("db.collection2"),
@@ -4703,8 +4699,10 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Clea
                               false /* ignoreRemovedShards */));
 
     // Whole cluster
+    const std::vector<std::string> expectedAccurateClusterPlacement{
+        "shard1", "shard2", "shard3", "shard4"};
     assertPlacementsEqual(
-        ExpectedResponseBuilder{}.setShards(approximatedPlacement).value,
+        ExpectedResponseBuilder{}.setShards(expectedAccurateClusterPlacement).value,
         shardingCatalogManager().getHistoricalPlacement(opCtx,
                                                         boost::none,
                                                         earliestClusterTime,
@@ -4718,56 +4716,6 @@ TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_Clea
                                                         Timestamp(11, 0),
                                                         true /* checkIfPointInTimeIsInFuture */,
                                                         false /* ignoreRemovedShards */));
-}
-
-TEST_F(GetHistoricalPlacementTestFixture, GetShardsThatOwnDataAtClusterTime_CleanUp_NewMarkers) {
-    auto opCtx = operationContext();
-    PlacementDescriptor startFcvMarker = {
-        Timestamp(1, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
-        {"shard1", "shard2", "shard3", "shard4"}};
-    PlacementDescriptor endFcvMarker = {
-        Timestamp(3, 0),
-        ShardingCatalogClient::kConfigPlacementHistoryInitializationMarker.toString_forTest(),
-        {}};
-
-    // initialization
-    setupConfigPlacementHistory(
-        opCtx,
-        {startFcvMarker,
-         endFcvMarker,
-         {Timestamp(10, 0), "db2", {"shard1"}},
-         {Timestamp(10, 0), "db.collection2", {"shard1", "shard2"}},
-         {Timestamp(10, 0), "db.collection1", {"shard1", "shard2"}},
-         {Timestamp(30, 0), "db.collection1", {"shard1", "shard2", "shard3"}}});
-
-    setupConfigShard(opCtx, 3 /*nShards*/);
-
-    // Initialization markers are replaced at the earliestClusterTime
-    const auto earliestClusterTime = Timestamp(20, 0);
-    auto historicalPlacement_coll1 = shardingCatalogManager().getHistoricalPlacement(
-        opCtx,
-        NamespaceString::createNamespaceString_forTest("db.collection1"),
-        earliestClusterTime - 1,
-        true /* checkIfPointInTimeIsInFuture */,
-        false /* ignoreRemovedShards */);
-
-    ShardingCatalogManager::get(opCtx)->cleanUpPlacementHistory(opCtx, earliestClusterTime);
-
-    auto historicalPlacement_cleanup_coll1 = shardingCatalogManager().getHistoricalPlacement(
-        opCtx,
-        NamespaceString::createNamespaceString_forTest("db.collection1"),
-        earliestClusterTime - 1,
-        true /* checkIfPointInTimeIsInFuture */,
-        false /* ignoreRemovedShards */);
-
-    // before cleanup
-    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards({"shard1", "shard2"}).value,
-                          historicalPlacement_coll1);
-
-    // after cleanup
-    assertPlacementsEqual(ExpectedResponseBuilder{}.setShards({"shard1", "shard2"}).value,
-                          historicalPlacement_cleanup_coll1);
 }
 
 TEST_F(GetHistoricalPlacementTestFixture,

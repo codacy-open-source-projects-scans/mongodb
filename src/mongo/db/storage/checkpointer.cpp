@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 // IWYU pragma: no_include "cxxabi.h"
 #include "mongo/db/storage/checkpointer.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
@@ -43,14 +16,12 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
 
 #include <chrono>
-#include <cstdint>
 #include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -93,29 +64,11 @@ void Checkpointer::run() {
 
         {
             std::unique_lock<std::mutex> lock(_mutex);
-            MONGO_IDLE_THREAD_BLOCK;
 
-            // Wait for 'storageGlobalParams.syncdelay' seconds; or until either shutdown is
-            // signaled or a checkpoint is triggered.
-            LOGV2_DEBUG(7702900,
-                        1,
-                        "Checkpoint thread sleeping",
-                        "duration"_attr =
-                            static_cast<std::int64_t>(storageGlobalParams.syncdelay.load()));
-            _sleepCV.wait_for(lock,
-                              std::chrono::seconds(
-                                  static_cast<std::int64_t>(storageGlobalParams.syncdelay.load())),
-                              [&] { return _shuttingDown || _triggerCheckpoint; });
-
-            // If the syncdelay is set to 0, that means we should skip checkpointing. However,
-            // syncdelay is adjustable by a runtime server parameter, so we need to wake up to check
-            // periodically. The wakeup to check period is arbitrary.
-            while (storageGlobalParams.syncdelay.load() == 0 && !_shuttingDown &&
-                   !_triggerCheckpoint) {
-                _sleepCV.wait_for(lock, std::chrono::seconds(static_cast<std::int64_t>(3)), [&] {
-                    return _shuttingDown || _triggerCheckpoint;
-                });
-            }
+            // Delegate the wait logic to the injected policy.
+            _policy->waitUntilReady(lock, _sleepCV, [&] {
+                return _shuttingDown || _triggerCheckpoint || _pauseRequested;
+            });
 
             if (_shuttingDown) {
                 invariant(!_shutdownReason.isOK());
@@ -127,6 +80,19 @@ void Checkpointer::run() {
                 return;
             }
 
+            if (_pauseRequested) {
+                // Don't allow checkpointer thread to run until resumeCheckpointing() is
+                // called.
+                _isPaused = true;
+                _waitForPauseCV.notify_all();
+                LOGV2(12887901,
+                      "Checkpointer thread is now blocked waiting for the first checkpoint to be "
+                      "taken after step-up.");
+                _sleepCV.wait(lock, [&] { return !_pauseRequested || _shuttingDown; });
+                _isPaused = false;
+                continue;
+            }
+
             // Clear the trigger so we do not immediately checkpoint again after this.
             _triggerCheckpoint = false;
         }
@@ -134,7 +100,9 @@ void Checkpointer::run() {
         pauseCheckpointThread.pauseWhileSet();
 
         const Date_t startTime = Date_t::now();
+
         opCtx->getServiceContext()->getStorageEngine()->checkpoint();
+
         if (isReplicatedFastCountEnabled(opCtx.get())) {
             replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
                 .flushAsync();
@@ -148,6 +116,26 @@ void Checkpointer::run() {
                         "secondsElapsed"_attr = secondsElapsed);
         }
     }
+}
+
+void Checkpointer::pauseCheckpointing() {
+    LOGV2(12887900, "Blocking checkpoint thread until the first checkpoint is taken after step-up");
+    std::unique_lock<std::mutex> lock(_mutex);
+    _pauseRequested = true;
+    _sleepCV.notify_one();
+    // A checkpointer thread cannot progress until resume is called.
+    _waitForPauseCV.wait(lock, [&] { return _isPaused || _shuttingDown; });
+}
+
+void Checkpointer::resumeCheckpointing() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    _pauseRequested = false;
+    _sleepCV.notify_one();
+}
+
+bool Checkpointer::isPauseRequested() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    return _pauseRequested;
 }
 
 void Checkpointer::triggerFirstStableCheckpoint(Timestamp prevStable,
@@ -183,10 +171,21 @@ void Checkpointer::shutdown(const Status& reason) {
         // Wake up the checkpoint thread early, to take a final checkpoint before shutting down, if
         // one has not coincidentally just been taken.
         _sleepCV.notify_one();
+        // Also wake any thread blocked in pauseCheckpointing() since it blocks on a separate CV
+        // which includes _shuttingDown, so it would otherwise miss this state change and hang.
+        _waitForPauseCV.notify_all();
     }
 
     wait();
     LOGV2(22323, "Finished shutting down checkpoint thread");
+}
+
+void Checkpointer::notifyOplogWrite(int64_t bytes) {
+    // accumulateOplogBytes() is lock-free. Returns true only the first time accumulated bytes
+    // cross the threshold in a given checkpoint cycle; notify_one() wakes Phase 2.
+    if (_policy->accumulateOplogBytes(bytes)) {
+        _sleepCV.notify_one();
+    }
 }
 
 }  // namespace mongo

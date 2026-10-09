@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/drop_database.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
@@ -68,6 +41,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -199,8 +173,11 @@ void DropDatabaseTest::tearDown() {
  */
 void _createCollection(OperationContext* opCtx, const NamespaceString& nss) {
     writeConflictRetry(opCtx, "testDropCollection", nss, [=] {
-        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_X);
-        auto db = autoDb.ensureDbExists(opCtx);
+        auto acq = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        auto db = DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName());
         ASSERT_TRUE(db);
 
         WriteUnitOfWork wuow(opCtx);
@@ -221,7 +198,7 @@ void _createCollection(OperationContext* opCtx, const NamespaceString& nss) {
 /**
  * Removes database from catalog, bypassing dropDatabase().
  */
-void _removeDatabaseFromCatalog(OperationContext* opCtx, StringData dbName) {
+void _removeDatabaseFromCatalog(OperationContext* opCtx, std::string_view dbName) {
     AutoGetDb autoDB(opCtx, DatabaseName::createDatabaseName_forTest(boost::none, dbName), MODE_X);
     auto db = autoDB.getDb();
     // dropDatabase can call awaitReplication more than once, so do not attempt to drop the database

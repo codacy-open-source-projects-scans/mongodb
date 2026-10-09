@@ -10,6 +10,8 @@
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
  *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   # Uses deleteMany on a time-series collection.
+ *   requires_multi_updates,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   # Uses parallel shell to wait on fail point
@@ -23,7 +25,10 @@ import {runningWithViewlessTimeseriesUpgradeDowngrade} from "jstests/core/timese
 import {waitForCurOpByFailPoint} from "jstests/libs/curop_helpers.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 
-if (runningWithViewlessTimeseriesUpgradeDowngrade(db) && !db.getSession().getOptions().shouldRetryWrites()) {
+if (
+    runningWithViewlessTimeseriesUpgradeDowngrade(db) &&
+    !db.getSession().getOptions().shouldRetryWrites()
+) {
     jsTest.log.info(
         "Skipping test using parallel shell & failpoints since in this suite it may get interrupted by viewless timeseries upgrade/downgrade (SERVER-122589).",
     );
@@ -73,14 +78,19 @@ const validateDeleteIndex = (
                 assert.commandWorked(coll.insert(docsToInsert));
 
                 assert.commandWorked(
-                    testDB.adminCommand({configureFailPoint: "hangBeforeChildRemoveOpFinishes", mode: "alwaysOn"}),
+                    testDB.adminCommand({
+                        configureFailPoint: "hangBeforeChildRemoveOpFinishes",
+                        mode: "alwaysOn",
+                    }),
                 );
                 const res = expectedErrorCode
                     ? assert.commandFailedWithCode(
                           testDB.runCommand({delete: coll.getName(), deletes: deleteQuery}),
                           expectedErrorCode,
                       )
-                    : assert.commandWorked(testDB.runCommand({delete: coll.getName(), deletes: deleteQuery}));
+                    : assert.commandWorked(
+                          testDB.runCommand({delete: coll.getName(), deletes: deleteQuery}),
+                      );
                 assert.eq(res["n"], expectedNRemoved);
                 assert.sameMembers(expectedRemainingDocs, coll.find({}, {_id: 0}).toArray());
                 assert(coll.drop());
@@ -99,7 +109,11 @@ const validateDeleteIndex = (
     );
 
     for (let childCount = 0; childCount < deleteQuery.length; ++childCount) {
-        const childCurOp = waitForCurOpByFailPoint(testDB, collNamespace, "hangBeforeChildRemoveOpFinishes")[0];
+        const childCurOp = waitForCurOpByFailPoint(
+            testDB,
+            collNamespace,
+            "hangBeforeChildRemoveOpFinishes",
+        )[0];
 
         // Assert the plan uses the expected index.
         if (!expectedErrorCode) {
@@ -107,20 +121,36 @@ const validateDeleteIndex = (
         }
 
         assert.commandWorked(
-            testDB.adminCommand({configureFailPoint: "hangBeforeChildRemoveOpIsPopped", mode: "alwaysOn"}),
+            testDB.adminCommand({
+                configureFailPoint: "hangBeforeChildRemoveOpIsPopped",
+                mode: "alwaysOn",
+            }),
         );
-        assert.commandWorked(testDB.adminCommand({configureFailPoint: "hangBeforeChildRemoveOpFinishes", mode: "off"}));
+        assert.commandWorked(
+            testDB.adminCommand({
+                configureFailPoint: "hangBeforeChildRemoveOpFinishes",
+                mode: "off",
+            }),
+        );
 
         waitForCurOpByFailPoint(testDB, collNamespace, "hangBeforeChildRemoveOpIsPopped");
 
         // Enable the hangBeforeChildRemoveOpFinishes fail point if this is not the last child.
         if (childCount + 1 < deleteQuery.length) {
             assert.commandWorked(
-                testDB.adminCommand({configureFailPoint: "hangBeforeChildRemoveOpFinishes", mode: "alwaysOn"}),
+                testDB.adminCommand({
+                    configureFailPoint: "hangBeforeChildRemoveOpFinishes",
+                    mode: "alwaysOn",
+                }),
             );
         }
 
-        assert.commandWorked(testDB.adminCommand({configureFailPoint: "hangBeforeChildRemoveOpIsPopped", mode: "off"}));
+        assert.commandWorked(
+            testDB.adminCommand({
+                configureFailPoint: "hangBeforeChildRemoveOpIsPopped",
+                mode: "off",
+            }),
+        );
     }
 
     // Wait for testDelete to finish.

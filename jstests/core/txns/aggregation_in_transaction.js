@@ -2,17 +2,6 @@
 // @tags: [uses_transactions, uses_snapshot_read_concern, references_foreign_collection]
 // TODO (SERVER-39704): Remove the following load after SERVER-39704 is completed
 import {withTxnAndAutoRetryOnMongos} from "jstests/libs/auto_retry_transaction_in_sharding.js"; // For isSharded.
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    FixtureHelpers.runCommandOnEachPrimary({
-        db: db.getSiblingDB("admin"),
-        cmdObj: {configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"},
-    });
-}
 
 const session = db.getMongo().startSession({causalConsistency: false});
 const testDB = session.getDatabase("test");
@@ -117,7 +106,9 @@ withTxnAndAutoRetryOnMongos(
         assert.eq(countRes.length, 1, tojson(countRes));
         assert.eq(countRes[0].count, 2, tojson(countRes));
 
-        assert.commandWorked(db.getSiblingDB(testDB.getName()).getCollection(coll.getName()).insert({a: 3}));
+        assert.commandWorked(
+            db.getSiblingDB(testDB.getName()).getCollection(coll.getName()).insert({a: 3}),
+        );
         countRes = coll.aggregate([{$count: "count"}]).toArray();
         assert.eq(countRes.length, 1, tojson(countRes));
         assert.eq(countRes[0].count, 2, tojson(countRes));
@@ -135,7 +126,9 @@ assert.throws(() => coll.aggregate({$currentOp: {allUsers: true, localOps: true}
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
 session.startTransaction({readConcern: {level: "snapshot"}});
-assert.throws(() => coll.aggregate({$collStats: {latencyStats: {histograms: true}, storageStats: {}}}).next());
+assert.throws(() =>
+    coll.aggregate({$collStats: {latencyStats: {histograms: true}, storageStats: {}}}).next(),
+);
 assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
 session.startTransaction({readConcern: {level: "snapshot"}});

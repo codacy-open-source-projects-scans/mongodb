@@ -1,37 +1,10 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/db/shard_role/shard_catalog/list_indexes.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -56,6 +29,7 @@
 #include <cstddef>
 #include <list>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -69,6 +43,7 @@
 MONGO_FAIL_POINT_DEFINE(hangBeforeListIndexes);
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 std::vector<BSONObj> listIndexesInLock(OperationContext* opCtx,
                                        const CollectionAcquisition& collectionAcquisition,
@@ -91,9 +66,10 @@ std::vector<BSONObj> listIndexesInLock(OperationContext* opCtx,
         collection->isTimeseriesCollection() && !isRawDataRequest;
 
     const bool expandSimpleCollation =
-        feature_flags::gFeatureFlagListIndexesAlwaysIncludesSimpleCollation.isEnabled(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+        feature_flags::gFeatureFlagListIndexesAlwaysIncludesSimpleCollation
+            .isEnabledUseLastLTSFCVWhenUninitialized(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 
     if (collection->isClustered() && !collection->isTimeseriesCollection()) {
         BSONObj collation;
@@ -106,7 +82,7 @@ std::vector<BSONObj> listIndexesInLock(OperationContext* opCtx,
             collection->getCollectionOptions().expireAfterSeconds,
             expandSimpleCollation);
         if (additionalInclude == ListIndexesInclude::kIndexBuildInfo) {
-            indexSpecs.push_back(BSON("spec"_sd << clusteredSpec));
+            indexSpecs.push_back(BSON("spec"sv << clusteredSpec));
         } else {
             indexSpecs.push_back(clusteredSpec);
         }
@@ -135,7 +111,7 @@ std::vector<BSONObj> listIndexesInLock(OperationContext* opCtx,
             case ListIndexesInclude::kBuildUUID:
                 if (inProgressInformationExists) {
                     indexSpecs.push_back(
-                        BSON("spec"_sd << spec << "buildUUID"_sd << *durableBuildUUID));
+                        BSON("spec"sv << spec << "buildUUID"sv << *durableBuildUUID));
                 } else {
                     indexSpecs.push_back(spec);
                 }
@@ -163,13 +139,13 @@ std::vector<BSONObj> listIndexesInLock(OperationContext* opCtx,
                     // gathered for an in-progress index build and is subject to change.
 
                     BSONObjBuilder builder;
-                    durableBuildUUID->appendToBuilder(&builder, "buildUUID"_sd);
+                    durableBuildUUID->appendToBuilder(&builder, "buildUUID"sv);
                     IndexBuildsCoordinator::get(opCtx)->appendBuildInfo(*durableBuildUUID,
                                                                         &builder);
                     indexSpecs.push_back(
-                        BSON("spec"_sd << spec << "indexBuildInfo"_sd << builder.obj()));
+                        BSON("spec"sv << spec << "indexBuildInfo"sv << builder.obj()));
                 } else {
-                    indexSpecs.push_back(BSON("spec"_sd << spec));
+                    indexSpecs.push_back(BSON("spec"sv << spec));
                 }
                 break;
             default:

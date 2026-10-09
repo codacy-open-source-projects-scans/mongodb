@@ -5,6 +5,7 @@ Utility to interact with golden data test outputs, produced by golden data test 
 For details on the golden data test framework see: docs/golden_data_test_framework.md.
 """
 
+import fnmatch
 import os
 import pathlib
 import platform
@@ -21,7 +22,7 @@ import click
 if __name__ == "__main__" and __package__ is None:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from buildscripts.util.fileops import read_yaml_file
+from buildscripts.util.golden_test_config import GoldenTestConfig
 
 assert sys.version_info >= (3, 7)
 
@@ -41,25 +42,6 @@ class AppError(Exception):
     """Application execution error."""
 
     pass
-
-
-class GoldenTestConfig(object):
-    """Represents the golden test configuration.
-
-    See: docs/golden_data_test_framework.md#appendix---config-file-reference
-    """
-
-    def __init__(self, iterable=(), **kwargs):
-        """Initialize the fields."""
-        self.__dict__.update(iterable, **kwargs)
-
-    outputRootPattern: str
-    diffCmd: str
-
-    @classmethod
-    def from_yaml_file(cls, path: str) -> "GoldenTestConfig":
-        """Read the golden test configuration from the given file."""
-        return cls(**read_yaml_file(path))
 
 
 class OutputPaths(object):
@@ -250,7 +232,7 @@ class GoldenTestApp(object):
 
     def setup_linux(self):
         # Create config file
-        config_path = os.path.join(os.path.expanduser("~"), ".golden_test_config.yml")
+        config_path = GoldenTestConfig.default_config_path()
         if not os.path.isfile(config_path):
             print(f"Creating {config_path}")
             config_contents = (
@@ -416,16 +398,52 @@ class GoldenTestApp(object):
         help="Runs tests in all suites they participate in and accepts all the results.",
     )
     @click.argument("tests", required=True, nargs=-1)
+    @click.option(
+        "-e",
+        "--exclude",
+        "exclude_patterns",
+        multiple=True,
+        metavar="PATTERN",
+        help=(
+            "Exclude suites whose names match PATTERN (fnmatch glob). May be given multiple times. "
+            "Any suite matching at least one pattern is dropped. "
+            "Cannot be combined with --include."
+        ),
+    )
+    @click.option(
+        "-i",
+        "--include",
+        "include_patterns",
+        multiple=True,
+        metavar="PATTERN",
+        help=(
+            "Only run suites whose names match PATTERN (fnmatch glob). May be given multiple times. "
+            "A suite is included if it matches at least one pattern. "
+            "Cannot be combined with --exclude."
+        ),
+    )
+    @click.option("-v", "--verbose", is_flag=True, help="Log suite and invocation information.")
+    @click.option(
+        "-n",
+        "--dry-run",
+        is_flag=True,
+        help="Print suites and resmoke invocations that would run without executing them.",
+    )
     @click.pass_obj
-    def command_clean_run_accept(self, tests):
+    def command_clean_run_accept(self, tests, exclude_patterns, include_patterns, verbose, dry_run):
+        if exclude_patterns and include_patterns:
+            raise click.UsageError("--exclude and --include cannot be combined.")
+        if verbose or dry_run:
+            self.verbose = True
+        if dry_run:
+            self.dry_run = True
         self.init_config()
 
         for test_name in tests:
-            self.clean_run_accept_test(test_name)
+            self.clean_run_accept_test(test_name, exclude_patterns, include_patterns)
 
-    def clean_run_accept_test(self, test_name):
+    def clean_run_accept_test(self, test_name, exclude_patterns=(), include_patterns=()):
         """Runs a jstest through all of its passthroughs and accepts the results."""
-
         self.clean()
 
         self.vprint(
@@ -437,18 +455,35 @@ class GoldenTestApp(object):
             .split()
         )
         assert len(suites) > 0, f"Failed to find any suites for test {test_name}"
-        self.vprint(f"Found suites {suites} for test {test_name}")
+        if include_patterns:
+            suites = [s for s in suites if any(fnmatch.fnmatch(s, p) for p in include_patterns)]
+            self.vprint(
+                f"Suites matching include patterns {list(include_patterns)}: {sorted(suites)}"
+            )
+            if not suites:
+                hints = [
+                    f"-i '*{p.removeprefix('*').removesuffix('*')}*'" for p in include_patterns
+                ]
+                msg = f"No suites for test {test_name} matched the include patterns {list(include_patterns)}."
+                if hints:
+                    msg += " Did you mean " + ", ".join(hints) + "?"
+                raise AssertionError(msg)
+        elif exclude_patterns:
+            excluded = {s for s in suites if any(fnmatch.fnmatch(s, p) for p in exclude_patterns)}
+            if excluded:
+                self.vprint(
+                    f"Excluding suites matching {list(exclude_patterns)}: {sorted(excluded)}"
+                )
+            suites = [s for s in suites if s not in excluded]
+            assert (
+                len(suites) > 0
+            ), f"All suites for test {test_name} were excluded by the given patterns"
+        self.vprint(f"Running suites for {test_name}: {suites}")
 
         resmoke_invocations = []
 
         for suite in suites:
             resmoke_args = ["--suite", suite]
-            if suite == "query_golden_join_optimization_plan_stability":
-                # This suite runs with --runAllFeatureFlagTests in evergreen, so should be run that way locally.
-                # There is currently no known way to detect this without calling `evergreen evaluate` and fishing
-                # in the output, so we are forced to match on the suite name here.
-                resmoke_args.append("--runAllFeatureFlagTests")
-
             resmoke_invocations.append(resmoke_args)
 
         if "query_golden_classic" in suites:
@@ -471,19 +506,19 @@ class GoldenTestApp(object):
                     "--additionalFeatureFlags=featureFlagSbeFull",
                     "--disableFeatureFlags=featureFlagGetExecutorDeferredEngineChoice",
                 ],
-                ["--additionalFeatureFlags=featureFlagSbeEqLookupUnwind"],
             ]:
                 resmoke_invocations.append(["--suite", suites[0], *flag])
 
         for resmoke_invocation in resmoke_invocations:
             self.vprint(f"Will run resmoke.py with arguments: {resmoke_invocation}")
 
-        for resmoke_invocation in resmoke_invocations:
-            try:
-                check_call(["buildscripts/resmoke.py", "run", *resmoke_invocation, test_name])
-            except CalledProcessError:
-                # Golden test failed, accept the new results
-                self.accept(None)
+        if not self.dry_run:
+            for resmoke_invocation in resmoke_invocations:
+                try:
+                    check_call(["buildscripts/resmoke.py", "run", *resmoke_invocation, test_name])
+                except CalledProcessError:
+                    # Golden test failed, accept the new results
+                    self.accept(None)
 
 
 def main():

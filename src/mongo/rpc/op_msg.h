@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -38,8 +11,9 @@
 #include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/database_name_util.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/message.h"
+#include "mongo/rpc/telemetry_context_section_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/serialization_context.h"
@@ -48,8 +22,9 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
-#include <utility>
+#include <string_view>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -57,7 +32,7 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 /**
  * OpMsg packets are made up of the following sequence of possible fields.
@@ -113,6 +88,10 @@ struct OpMsg {
         replaceFlags(message, flags(*message) & ~flag);
     }
 
+    // Size in bytes of the trailing CRC-32C checksum that follows the message body when the
+    // kChecksumPresent flag is set.
+    static constexpr size_t kCrc32Size = sizeof(uint32_t);
+
     /**
      * Retrieves the checksum stored at the end of the message.
      */
@@ -166,7 +145,7 @@ struct OpMsg {
     /**
      * Returns a pointer to the sequence with the given name or nullptr if there are none.
      */
-    const DocumentSequence* getSequence(StringData name) const {
+    const DocumentSequence* getSequence(std::string_view name) const {
         // Getting N sequences is technically O(N**2) but because there currently is at most 2
         // sequences, this does either 1 or 2 comparisons. Consider making sequences a StringMap if
         // there will be many sequences. This problem may also just go away with the IDL project.
@@ -179,6 +158,7 @@ struct OpMsg {
     std::vector<DocumentSequence> sequences;
 
     boost::optional<auth::ValidatedTenancyScope> validatedTenancyScope = boost::none;
+    boost::optional<TelemetryContextSection> telemetryContext;
 
     boost::optional<TenantId> getValidatedTenantId() const {
         if (!validatedTenancyScope) {
@@ -208,13 +188,13 @@ struct OpMsgRequest : public OpMsg {
      * No validation of the value is performed. This method should only be used for logging or
      * error messages, particularly in contexts where the command request has not been parsed yet.
      */
-    StringData readDatabaseForLogging() const {
+    std::string_view readDatabaseForLogging() const {
         return body["$db"].valueStringDataSafe();
     }
 
     DatabaseName parseDbName() const;
 
-    StringData getCommandName() const {
+    std::string_view getCommandName() const {
         return body.firstElementFieldName();
     }
 
@@ -246,7 +226,7 @@ public:
      * See the documentation for DocSequenceBuilder below.
      */
     class DocSequenceBuilder;
-    DocSequenceBuilder beginDocSequence(StringData name);
+    DocSequenceBuilder beginDocSequence(std::string_view name);
 
     /**
      * Returns an empty builder for the body.
@@ -271,7 +251,7 @@ public:
         resumeBody().appendElements(body);
     }
 
-    void setSecurityToken(StringData token);
+    void setTelemetryContext(const TelemetryContextSection& telemetryContext);
 
     /**
      * Finish building and return a Message ready to give to the networking layer for transmission.
@@ -305,7 +285,7 @@ public:
      * the server handles them. Is false by default, although the check only happens in debug
      * builds.
      */
-    MONGO_MOD_NEEDS_REPLACEMENT static AtomicWord<bool> disableDupeFieldCheck_forTest;
+    [[MONGO_MOD_NEEDS_REPLACEMENT]] static Atomic<bool> disableDupeFieldCheck_forTest;
 
     /**
      * Similar to finish, any calls on this object after are illegal.
@@ -436,4 +416,4 @@ public:
                                const BSONObj& extraFields = {});
 };
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

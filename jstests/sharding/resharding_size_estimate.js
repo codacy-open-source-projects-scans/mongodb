@@ -36,19 +36,6 @@ const maxShardBytesWithoutDataField = 256;
 const reshardingTest = new ReshardingTest({numDonors: 2, numRecipients: 2, reshardInPlace: true});
 reshardingTest.setup();
 
-// TODO (SERVER-124153): Remove the failpoint.
-const isMultiversion =
-    Boolean(jsTest.options().useRandomBinVersionsWithinReplicaSet) || Boolean(TestData.multiversionBinVersion);
-if (!isMultiversion) {
-    for (let i = 0; i < 2; i++) {
-        reshardingTest._st[`rs${i}`].nodes.forEach((node) => {
-            assert.commandWorked(
-                node.adminCommand({configureFailPoint: "useInMemoryReplicatedSizeCount", mode: "alwaysOn"}),
-            );
-        });
-    }
-}
-
 const donorShardNames = reshardingTest.donorShardNames;
 const inputCollection = reshardingTest.createShardedCollection({
     ns: ns,
@@ -101,7 +88,9 @@ reshardingTest.withReshardingInBackground(
             return coordinatorDoc !== null && coordinatorDoc.cloneTimestamp !== undefined;
         });
 
-        jsTest.log("Check size estimate on resharding coordinator document:\n" + tojson(coordinatorDoc));
+        jsTest.log(
+            "Check size estimate on resharding coordinator document:\n" + tojson(coordinatorDoc),
+        );
 
         const s0Estimate = getShardEstimate(coordinatorDoc, donorShardNames[0]);
         const s1Estimate = getShardEstimate(coordinatorDoc, "shard1");
@@ -117,7 +106,10 @@ reshardingTest.withReshardingInBackground(
 
         const verifyApproximateCopySizeForRecipients = (doc, s0Estimate, s1Estimate) => {
             const {approxBytesToCopy, approxDocumentsToCopy} = doc;
-            assert(approxBytesToCopy !== undefined, "Unable to find 'approxBytesToCopy' in the coordinator document");
+            assert(
+                approxBytesToCopy !== undefined,
+                "Unable to find 'approxBytesToCopy' in the coordinator document",
+            );
             assert(
                 approxDocumentsToCopy !== undefined,
                 "Unable to find 'approxDocumentsToCopy' in the coordinator document",
@@ -134,7 +126,8 @@ reshardingTest.withReshardingInBackground(
                 "Unexpected value for 'approxDocumentsToCopy' in the coordinator document",
             );
 
-            const expectedApproxBytesToCopy = (s0Estimate.bytesToClone + s1Estimate.bytesToClone) / numRecipients;
+            const expectedApproxBytesToCopy =
+                (s0Estimate.bytesToClone + s1Estimate.bytesToClone) / numRecipients;
             assert.eq(
                 approxBytesToCopy,
                 expectedApproxBytesToCopy,

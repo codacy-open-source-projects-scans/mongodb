@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/values/bson.h"
@@ -38,6 +11,8 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/modules.h"
+
+#include <string_view>
 
 #if defined(_MSC_VER)
 #define MONGO_COMPILER_ALWAYS_INLINE_WITH_INLINE_SPEC MONGO_COMPILER_ALWAYS_INLINE
@@ -97,7 +72,7 @@ public:
     MONGO_COMPILER_ALWAYS_INLINE explicit BsonObjWriter(UniqueBSONObjBuilder bob)
         : _bob(std::move(bob)) {}
 
-    MONGO_COMPILER_ALWAYS_INLINE void appendValue(StringData fieldName,
+    MONGO_COMPILER_ALWAYS_INLINE void appendValue(std::string_view fieldName,
                                                   value::TypeTags tag,
                                                   value::Value val) {
         bson::appendValueToBsonObj(_bob, fieldName, tag, val);
@@ -107,20 +82,20 @@ public:
         _bob.append(bsonElement);
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE BsonObjWriter startObj(StringData fieldName) {
+    MONGO_COMPILER_ALWAYS_INLINE BsonObjWriter startObj(std::string_view fieldName) {
         return BsonObjWriter(UniqueBSONObjBuilder(_bob.subobjStart(fieldName)));
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void finishObj(StringData, BsonObjWriter) {
+    MONGO_COMPILER_ALWAYS_INLINE void finishObj(std::string_view, BsonObjWriter) {
         // Do nothing. The BsonObjWriter class's destructor will perform any necessary finishing
         // steps.
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE BsonArrWriter startArr(StringData fieldName) {
+    MONGO_COMPILER_ALWAYS_INLINE BsonArrWriter startArr(std::string_view fieldName) {
         return BsonArrWriter(UniqueBSONArrayBuilder(_bob.subarrayStart(fieldName)));
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void finishArr(StringData, BsonArrWriter) {
+    MONGO_COMPILER_ALWAYS_INLINE void finishArr(std::string_view, BsonArrWriter) {
         // Do nothing. The BsonArrWriter class's destructor will perform any necessary finishing
         // steps.
     }
@@ -159,7 +134,7 @@ public:
 
     MONGO_COMPILER_ALWAYS_INLINE void appendValue(value::TypeTags tag, value::Value val) {
         auto [copyTag, copyVal] = value::copyValue(tag, val);
-        _arr->push_back(copyTag, copyVal);
+        _arr->push_back_raw(copyTag, copyVal);
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_WITH_INLINE_SPEC ObjectWriter startObj();
@@ -171,8 +146,8 @@ public:
     }
 
     MONGO_COMPILER_ALWAYS_INLINE void finishArr(ArrayWriter nestedWriter) {
-        _arr->push_back(value::TypeTags::Array,
-                        value::bitcastFrom<value::Array*>(nestedWriter._arr.release()));
+        _arr->push_back_raw(value::TypeTags::Array,
+                            value::bitcastFrom<value::Array*>(nestedWriter._arr.release()));
     }
 
     MONGO_COMPILER_ALWAYS_INLINE std::pair<value::TypeTags, value::Value> done() {
@@ -195,31 +170,33 @@ public:
         _obj = std::unique_ptr<value::Object>{value::bitcastTo<value::Object*>(val)};
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void appendValue(StringData fieldName,
+    MONGO_COMPILER_ALWAYS_INLINE void appendValue(std::string_view fieldName,
                                                   value::TypeTags tag,
                                                   value::Value val) {
         auto [copyTag, copyVal] = value::copyValue(tag, val);
-        _obj->push_back(fieldName, copyTag, copyVal);
+        _obj->push_back_raw(fieldName, copyTag, copyVal);
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE ObjectWriter startObj(StringData) {
+    MONGO_COMPILER_ALWAYS_INLINE ObjectWriter startObj(std::string_view) {
         return ObjectWriter();
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void finishObj(StringData fieldName, ObjectWriter nestedWriter) {
-        _obj->push_back(fieldName,
-                        value::TypeTags::Object,
-                        value::bitcastFrom<value::Object*>(nestedWriter._obj.release()));
+    MONGO_COMPILER_ALWAYS_INLINE void finishObj(std::string_view fieldName,
+                                                ObjectWriter nestedWriter) {
+        _obj->push_back_raw(fieldName,
+                            value::TypeTags::Object,
+                            value::bitcastFrom<value::Object*>(nestedWriter._obj.release()));
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE ArrayWriter startArr(StringData) {
+    MONGO_COMPILER_ALWAYS_INLINE ArrayWriter startArr(std::string_view) {
         return ArrayWriter();
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void finishArr(StringData fieldName, ArrayWriter nestedWriter) {
-        _obj->push_back(fieldName,
-                        value::TypeTags::Array,
-                        value::bitcastFrom<value::Array*>(nestedWriter._arr.release()));
+    MONGO_COMPILER_ALWAYS_INLINE void finishArr(std::string_view fieldName,
+                                                ArrayWriter nestedWriter) {
+        _obj->push_back_raw(fieldName,
+                            value::TypeTags::Array,
+                            value::bitcastFrom<value::Array*>(nestedWriter._arr.release()));
     }
 
     MONGO_COMPILER_ALWAYS_INLINE std::pair<value::TypeTags, value::Value> done() {
@@ -237,7 +214,7 @@ inline ObjectWriter ArrayWriter::startObj() {
 }
 
 inline void ArrayWriter::finishObj(ObjectWriter nestedWriter) {
-    _arr->push_back(value::TypeTags::Object,
-                    value::bitcastFrom<value::Object*>(nestedWriter._obj.release()));
+    _arr->push_back_raw(value::TypeTags::Object,
+                        value::bitcastFrom<value::Object*>(nestedWriter._obj.release()));
 }
 }  // namespace mongo::sbe::vm

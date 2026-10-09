@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
@@ -49,6 +22,8 @@
 #include "mongo/db/validate/validate_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <string_view>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -74,6 +49,8 @@
 namespace mongo {
 namespace {
 
+using namespace std::literals::string_view_literals;
+
 MONGO_FAIL_POINT_DEFINE(WTIndexUassertDuplicateRecordForKeyOnIdUnindex);
 MONGO_FAIL_POINT_DEFINE(WTIndexCreateUniqueIndexesInOldFormat);
 MONGO_FAIL_POINT_DEFINE(WTIndexInsertUniqueKeysInOldFormat);
@@ -85,6 +62,9 @@ static CompiledConfiguration lowerInclusiveBoundConfig("WT_CURSOR.bound",
 static CompiledConfiguration upperInclusiveBoundConfig("WT_CURSOR.bound",
                                                        "bound=upper,inclusive=true");
 static CompiledConfiguration clearBoundConfig("WT_CURSOR.bound", "action=clear");
+
+constexpr std::string_view kExactKeyWithRecordIdAlreadyExists =
+    "exact key, including RecordId, already exists in the index"sv;
 
 /**
  * Returns the logv2::LogOptions controlling the behaviour after logging a data corruption error.
@@ -161,14 +141,15 @@ std::string WiredTigerIndex::generateAppMetadataString(const IndexConfig& config
 StatusWith<std::string> WiredTigerIndex::generateCreateString(const std::string& engineName,
                                                               const std::string& sysIndexConfig,
                                                               const std::string& collIndexConfig,
-                                                              StringData tableName,
+                                                              const std::string& providerConfig,
+                                                              std::string_view tableName,
                                                               const IndexConfig& config,
                                                               bool isLogged) {
     str::stream ss;
 
     // Separate out a prefix and suffix in the default string. User configuration will override
     // values in the prefix, but not values in the suffix.
-    ss << "type=file,internal_page_max=16k,leaf_page_max=16k,";
+    ss << "internal_page_max=16k,leaf_page_max=16k,";
     ss << "checksum=on,";
     if (wiredTigerGlobalOptions.useIndexPrefixCompression) {
         ss << "prefix_compression=true,";
@@ -214,10 +195,13 @@ StatusWith<std::string> WiredTigerIndex::generateCreateString(const std::string&
     // Index metadata
     ss << generateAppMetadataString(config);
     if (isLogged) {
-        ss << "log=(enabled=true)";
+        ss << "log=(enabled=true),";
     } else {
-        ss << "log=(enabled=false)";
+        ss << "log=(enabled=false),";
     }
+
+    ss << "type=file,";
+    ss << providerConfig;
 
     LOGV2_DEBUG(51779, 3, "index create string", "str"_attr = ss.ss.str());
     return StatusWith<std::string>(ss);
@@ -238,7 +222,7 @@ WiredTigerIndex::WiredTigerIndex(OperationContext* ctx,
                                  RecoveryUnit& ru,
                                  const std::string& uri,
                                  const UUID& collectionUUID,
-                                 StringData ident,
+                                 std::string_view ident,
                                  KeyFormat rsKeyFormat,
                                  const IndexConfig& config,
                                  bool isLogged)
@@ -319,12 +303,12 @@ std::variant<Status, SortedDataInterface::DuplicateKey> WiredTigerIndex::insert(
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
     auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
-    // The _id index is excluded from blind writes: its duplicate-key detection depends on
-    // WT returning WT_DUPLICATE_KEY, which only happens with overwrite=false.
-    const bool allowOverwrite = !isIdIndex() &&
-        chooseBlindWriteOverwrite(/*defaultOverwrite=*/false,
-                                  pp.shouldUseBlindWriteWhenSafe(opCtx),
-                                  opCtx->getClient()->getPrng());
+    // On a standby the primary already validated uniqueness, so all indexes including _id can use
+    // blind writes to skip the stable-table lookup. Primaries always do non-blind writes for all
+    // indexes.
+    const bool allowOverwrite = chooseBlindWriteOverwrite(/*defaultOverwrite=*/false,
+                                                          pp.shouldUseBlindWriteWhenSafe(opCtx),
+                                                          opCtx->getClient()->getPrng());
     auto cursorParams = getWiredTigerCursorParams(wtRu, _container.tableId(), allowOverwrite);
     WiredTigerCursor curwrap(std::move(cursorParams), _container.uri(), *wtRu.getSession());
     wtRu.assertInActiveTxn();
@@ -343,12 +327,12 @@ void WiredTigerIndex::unindex(OperationContext* opCtx,
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
 
     auto& pp = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
-    // The _id index is excluded from blind writes: its duplicate-key detection depends on
-    // WT returning WT_DUPLICATE_KEY, which only happens with overwrite=false.
-    const bool allowOverwrite = !isIdIndex() &&
-        chooseBlindWriteOverwrite(/*defaultOverwrite=*/false,
-                                  pp.shouldUseBlindWriteWhenSafe(opCtx),
-                                  opCtx->getClient()->getPrng());
+    // On a standby the primary already validated uniqueness, so all indexes including _id can use
+    // blind writes to skip the stable-table lookup. Primaries always do non-blind writes for all
+    // indexes.
+    const bool allowOverwrite = chooseBlindWriteOverwrite(/*defaultOverwrite=*/false,
+                                                          pp.shouldUseBlindWriteWhenSafe(opCtx),
+                                                          opCtx->getClient()->getPrng());
     auto cursorParams = getWiredTigerCursorParams(wtRu, _container.tableId(), allowOverwrite);
     WiredTigerCursor curwrap(std::move(cursorParams), _container.uri(), *wtRu.getSession());
     wtRu.assertInActiveTxn();
@@ -368,11 +352,14 @@ boost::optional<RecordId> WiredTigerIndex::findLoc(OperationContext* opCtx,
 IndexValidateResults WiredTigerIndex::validate(
     OperationContext* opCtx,
     RecoveryUnit& ru,
-    const CollectionValidation::ValidationOptions& options) const {
+    const collection_validation::ValidationOptions& options) const {
     IndexValidateResults results;
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
-    WiredTigerUtil::validateTableLogging(
-        *wtRu.getSessionNoTxn(), _container.uri(), _isLogged, StringData{_indexName}, results);
+    WiredTigerUtil::validateTableLogging(*wtRu.getSessionNoTxn(),
+                                         _container.uri(),
+                                         _isLogged,
+                                         std::string_view{_indexName},
+                                         results);
 
     if (!options.isFullIndexValidation()) {
         invariant(!options.verifyConfigurationOverride().has_value());
@@ -434,6 +421,16 @@ bool WiredTigerIndex::isEmpty(OperationContext* opCtx, RecoveryUnit& ru) {
 void WiredTigerIndex::printIndexEntryMetadata(OperationContext* opCtx,
                                               RecoveryUnit& ru,
                                               const key_string::View& keyString) const {
+    if (!rss::ReplicatedStorageService::get(opCtx)
+             .getPersistenceProvider()
+             .supportsVersionCursor()) {
+        LOGV2_WARNING(13351202,
+                      "Skipping printing index entry metadata because the persistence provider "
+                      "does not support version cursors",
+                      "index"_attr = _indexName);
+        return;
+    }
+
     // Printing the index entry metadata requires a new session. We cannot open other cursors when
     // there are open history store cursors in the session. We also need to make sure that the
     // existing session has not written data to avoid potential deadlocks.
@@ -673,7 +670,7 @@ std::variant<bool, SortedDataInterface::DuplicateKey> WiredTigerIndex::_checkDup
 int WiredTigerIndex::_repairDataFormatVersion(OperationContext* opCtx,
                                               RecoveryUnit& ru,
                                               const std::string& uri,
-                                              StringData ident,
+                                              std::string_view ident,
                                               const IndexConfig& config,
                                               int dataFormatVersion) {
     auto indexVersion = config.version;
@@ -717,7 +714,7 @@ int WiredTigerIndex::_repairDataFormatVersion(OperationContext* opCtx,
 int WiredTigerIndex::_handleVersionInfo(OperationContext* ctx,
                                         RecoveryUnit& ru,
                                         const std::string& uri,
-                                        StringData ident,
+                                        std::string_view ident,
                                         const IndexConfig& config,
                                         bool isLogged) {
     auto& wtRu = WiredTigerRecoveryUnit::get(ru);
@@ -1170,6 +1167,9 @@ protected:
         _lastMoveSkippedKey = false;
 
         if (_eof) {
+            if (_forward && _cursor) {
+                _cursor->onScanComplete();
+            }
             // In the normal case, _id will be updated in updatePosition. Making this reset
             // unconditional affects performance noticeably.
             _id = RecordId();
@@ -1379,7 +1379,7 @@ WiredTigerIndexUnique::WiredTigerIndexUnique(OperationContext* ctx,
                                              RecoveryUnit& ru,
                                              const std::string& uri,
                                              const UUID& collectionUUID,
-                                             StringData ident,
+                                             std::string_view ident,
                                              KeyFormat rsKeyFormat,
                                              const IndexConfig& config,
                                              bool isLogged)
@@ -1448,7 +1448,7 @@ WiredTigerIdIndex::WiredTigerIdIndex(OperationContext* ctx,
                                      RecoveryUnit& ru,
                                      const std::string& uri,
                                      const UUID& collectionUUID,
-                                     StringData ident,
+                                     std::string_view ident,
                                      const IndexConfig& config,
                                      bool isLogged)
     : WiredTigerIndex(ctx, ru, uri, collectionUUID, ident, KeyFormat::Long, config, isLogged) {
@@ -1569,7 +1569,7 @@ std::variant<Status, SortedDataInterface::DuplicateKey> WiredTigerIndexUnique::_
         if (auto* duplicate = std::get_if<DuplicateKey>(&result)) {
             return *duplicate;
         } else if (std::get<bool>(result)) {
-            return Status::OK();
+            return Status(ErrorCodes::KeyExists, kExactKeyWithRecordIdAlreadyExists);
         }
     }
 
@@ -1605,9 +1605,12 @@ std::variant<Status, SortedDataInterface::DuplicateKey> WiredTigerIndexUnique::_
                       fmt::format("WiredTigerIndexUnique::_insert: duplicate: {}; uri: {}",
                                   _indexName,
                                   _container.uri()));
+        return Status::OK();
     }
 
-    return Status::OK();
+    // New-format unique indexes append the RecordId to the key, so WT_DUPLICATE_KEY here means the
+    // exact key and RecordId are already present.
+    return Status(ErrorCodes::KeyExists, kExactKeyWithRecordIdAlreadyExists);
 }
 
 void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
@@ -1779,7 +1782,7 @@ WiredTigerIndexStandard::WiredTigerIndexStandard(OperationContext* ctx,
                                                  RecoveryUnit& ru,
                                                  const std::string& uri,
                                                  const UUID& collectionUUID,
-                                                 StringData ident,
+                                                 std::string_view ident,
                                                  KeyFormat rsKeyFormat,
                                                  const IndexConfig& config,
                                                  bool isLogged)
@@ -1811,18 +1814,12 @@ std::variant<Status, SortedDataInterface::DuplicateKey> WiredTigerIndexStandard:
         if (auto* duplicate = std::get_if<DuplicateKey>(&result)) {
             return *duplicate;
         } else if (std::get<bool>(result)) {
-            return Status::OK();
+            return Status(ErrorCodes::KeyExists, kExactKeyWithRecordIdAlreadyExists);
         }
     }
 
     auto [key, value] = makeKeyValueForNonUniqueIndex(keyString);
     auto ret = _container.insert(wtRu, *c, key, value);
-
-    // If the record was already in the index, we return OK. This can happen, for example, when
-    // building a background index while documents are being written and reindexed.
-    if (!ret || ret == WT_DUPLICATE_KEY) {
-        return Status::OK();
-    }
 
     return wtRCToStatus(ret, c->session, [this]() {
         return fmt::format(

@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/admission/execution_control/execution_admission_context.h"
 
@@ -33,22 +7,24 @@
 #include "mongo/db/admission/execution_control/execution_admission_type_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/ensure_fcv.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <memory>
+#include <string_view>
 #include <variant>
 
 #include <boost/optional/optional.hpp>
 
 namespace mongo::admission::execution_control {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr StringData kFieldName = "executionAdmissionContextType"_sd;
+constexpr std::string_view kFieldName = "executionAdmissionContextType"sv;
 
 using TaskType = ExecutionAdmissionContext::TaskType;
 using ScopedTaskTypeVariant =
@@ -275,7 +251,7 @@ TEST_F(TaskTypeTest, SequentialDifferentTypes) {
 
 // TODO (SERVER-122847): Remove this test.
 TEST_F(TaskTypeTest, WriteMetadataNoFieldWhenFeatureFlagDisabled) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", false);
 
     auto opCtx = makeOperationContext();
@@ -290,7 +266,7 @@ TEST_F(TaskTypeTest, WriteMetadataNoFieldWhenFeatureFlagDisabled) {
 
 // TODO (SERVER-122847): Remove the feature flag controller from the following tests.
 TEST_F(TaskTypeTest, WriteMetadataNoFieldForNormalPriorityDefaultTaskType) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
 
@@ -301,7 +277,7 @@ TEST_F(TaskTypeTest, WriteMetadataNoFieldForNormalPriorityDefaultTaskType) {
 }
 
 TEST_F(TaskTypeTest, WriteMetadataLowPriority) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
     ScopedAdmissionPriority<ExecutionAdmissionContext> lowPriority(
@@ -316,7 +292,7 @@ TEST_F(TaskTypeTest, WriteMetadataLowPriority) {
 }
 
 TEST_F(TaskTypeTest, WriteMetadataExemptPriority) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
     ScopedAdmissionPriority<ExecutionAdmissionContext> exemptPriority(
@@ -331,7 +307,7 @@ TEST_F(TaskTypeTest, WriteMetadataExemptPriority) {
 }
 
 TEST_F(TaskTypeTest, WriteMetadataBackgroundTaskType) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
     ScopedTaskTypeBackground bg(opCtx.get());
@@ -345,7 +321,7 @@ TEST_F(TaskTypeTest, WriteMetadataBackgroundTaskType) {
 }
 
 TEST_F(TaskTypeTest, WriteMetadataNonDeprioritizableTaskType) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
     ScopedTaskTypeNonDeprioritizable nd(opCtx.get());
@@ -359,7 +335,7 @@ TEST_F(TaskTypeTest, WriteMetadataNonDeprioritizableTaskType) {
 }
 
 TEST_F(TaskTypeTest, WriteMetadataExemptPriorityTakesPrecedenceOverTaskType) {
-    RAIIServerParameterControllerForTest featureFlagDisabled(
+    unittest::ServerParameterGuard featureFlagDisabled(
         "featureFlagExecutionControlRemoteSpecification", true);
     auto opCtx = makeOperationContext();
     ScopedAdmissionPriority<ExecutionAdmissionContext> exemptPriority(
@@ -435,6 +411,143 @@ TEST_F(TaskTypeTest, SetFromMetadataSkipsInvariantForPriorityPortClient) {
     getAdmCtx(opCtx.get()).setFromMetadata(opCtx.get(), boost::none);
     ASSERT_EQ(getAdmCtx(opCtx.get()).getTaskType(), TaskType::NonDeprioritizable);
     ASSERT_EQ(getAdmCtx(opCtx.get()).getPriority(), AdmissionContext::Priority::kNormal);
+}
+
+using TicketAdmissionStatsTest = TaskTypeTest;
+
+TEST_F(TicketAdmissionStatsTest, RecorderAccumulatesAndForwardsEvents) {
+    auto opCtx = makeOperationContext();
+    auto& admCtx = getAdmCtx(opCtx.get());
+
+    TicketAdmissionStats forwarded;
+    int updates = 0;
+    ScopedTicketAdmissionStatsRecorder recorder(
+        opCtx.get(), [&](const TicketAdmissionStats& delta) {
+            forwarded.timeQueuedMicros += delta.timeQueuedMicros;
+            forwarded.timeProcessingMicros += delta.timeProcessingMicros;
+            forwarded.admissions += delta.admissions;
+            forwarded.lowPriorityAdmissions += delta.lowPriorityAdmissions;
+            forwarded.startedQueueing += delta.startedQueueing;
+            forwarded.finishedQueueing += delta.finishedQueueing;
+            ++updates;
+        });
+
+    ASSERT_EQ(admCtx.getTicketStatsRecorder(), &recorder);
+
+    admCtx.recordExecutionStartQueueing();
+
+    // While queued, startedQueueing - finishedQueueing is 1.
+    ASSERT_EQ(recorder.stats().startedQueueing - recorder.stats().finishedQueueing, 1);
+
+    admCtx.recordExecutionWaitedAcquisition(Microseconds{100},
+                                            ExecutionAdmissionContext::QueueType::kNormal);
+    admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kNormal,
+                                      ExecutionAdmissionContext::QueueType::kNormal);
+    admCtx.recordExecutionRelease(Microseconds{50});
+    admCtx.recordExecutionStartQueueing();
+    admCtx.recordExecutionWaitedAcquisition(Microseconds{30},
+                                            ExecutionAdmissionContext::QueueType::kLow);
+    admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kLow,
+                                      ExecutionAdmissionContext::QueueType::kLow);
+    admCtx.recordExecutionRelease(Microseconds{20});
+
+    ASSERT_EQ(updates, 8);
+    ASSERT_EQ(recorder.stats().timeQueuedMicros, 130);
+    ASSERT_EQ(recorder.stats().timeProcessingMicros, 70);
+    ASSERT_EQ(recorder.stats().admissions, 2);
+    ASSERT_EQ(recorder.stats().lowPriorityAdmissions, 1);
+    ASSERT_EQ(recorder.stats().startedQueueing, 2);
+    ASSERT_EQ(recorder.stats().finishedQueueing, 2);
+
+    // The forwarded deltas add up to the local stats.
+    ASSERT_EQ(forwarded.timeQueuedMicros, recorder.stats().timeQueuedMicros);
+    ASSERT_EQ(forwarded.timeProcessingMicros, recorder.stats().timeProcessingMicros);
+    ASSERT_EQ(forwarded.admissions, recorder.stats().admissions);
+    ASSERT_EQ(forwarded.lowPriorityAdmissions, recorder.stats().lowPriorityAdmissions);
+    ASSERT_EQ(forwarded.startedQueueing, recorder.stats().startedQueueing);
+    ASSERT_EQ(forwarded.finishedQueueing, recorder.stats().finishedQueueing);
+}
+
+TEST_F(TicketAdmissionStatsTest, RecorderDeregistersOnDestruction) {
+    auto opCtx = makeOperationContext();
+    auto& admCtx = getAdmCtx(opCtx.get());
+
+    int updates = 0;
+    {
+        ScopedTicketAdmissionStatsRecorder recorder(
+            opCtx.get(), [&](const TicketAdmissionStats&) { ++updates; });
+        admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kNormal,
+                                          ExecutionAdmissionContext::QueueType::kNormal);
+        ASSERT_EQ(updates, 1);
+    }
+
+    ASSERT_EQ(admCtx.getTicketStatsRecorder(), nullptr);
+    admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kNormal,
+                                      ExecutionAdmissionContext::QueueType::kNormal);
+    ASSERT_EQ(updates, 1);
+
+    // A new recorder can be registered afterwards and starts from zero.
+    ScopedTicketAdmissionStatsRecorder recorder(opCtx.get(), nullptr);
+    ASSERT_EQ(recorder.stats().admissions, 0);
+    admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kLow,
+                                      ExecutionAdmissionContext::QueueType::kLow);
+    ASSERT_EQ(recorder.stats().admissions, 1);
+    ASSERT_EQ(recorder.stats().lowPriorityAdmissions, 1);
+}
+
+TEST_F(TicketAdmissionStatsTest, RecorderIgnoresExemptAdmissions) {
+    auto opCtx = makeOperationContext();
+    auto& admCtx = getAdmCtx(opCtx.get());
+
+    ScopedTicketAdmissionStatsRecorder recorder(opCtx.get(), nullptr);
+
+    ScopedAdmissionPriority<ExecutionAdmissionContext> exemptPriority(
+        opCtx.get(), AdmissionContext::Priority::kExempt);
+    admCtx.recordExecutionStartQueueing();
+    admCtx.recordExecutionAcquisition(AdmissionContext::Priority::kExempt,
+                                      ExecutionAdmissionContext::QueueType::kNormal);
+    admCtx.recordExecutionWaitedAcquisition(Microseconds{100},
+                                            ExecutionAdmissionContext::QueueType::kNormal);
+    admCtx.recordExecutionRelease(Microseconds{50});
+
+    ASSERT_EQ(recorder.stats().admissions, 0);
+    ASSERT_EQ(recorder.stats().timeQueuedMicros, 0);
+    ASSERT_EQ(recorder.stats().timeProcessingMicros, 0);
+    ASSERT_EQ(recorder.stats().startedQueueing, 0);
+}
+
+TEST_F(TicketAdmissionStatsTest, StatsSubtraction) {
+    // Designated initializers so the test is independent of field declaration order.
+    const TicketAdmissionStats a{.startedQueueing = 4,
+                                 .finishedQueueing = 3,
+                                 .admissions = 5,
+                                 .releases = 4,
+                                 .lowPriorityAdmissions = 2,
+                                 .timeQueuedMicros = 100,
+                                 .timeProcessingMicros = 50};
+    const TicketAdmissionStats b{.startedQueueing = 2,
+                                 .finishedQueueing = 1,
+                                 .admissions = 2,
+                                 .releases = 1,
+                                 .lowPriorityAdmissions = 1,
+                                 .timeQueuedMicros = 40,
+                                 .timeProcessingMicros = 20};
+    const auto delta = a - b;
+    ASSERT_EQ(delta.timeQueuedMicros, 60);
+    ASSERT_EQ(delta.timeProcessingMicros, 30);
+    ASSERT_EQ(delta.admissions, 3);
+    ASSERT_EQ(delta.releases, 3);
+    ASSERT_EQ(delta.lowPriorityAdmissions, 1);
+    ASSERT_EQ(delta.startedQueueing, 2);
+    ASSERT_EQ(delta.finishedQueueing, 2);
+}
+
+using TicketAdmissionStatsDeathTest = TicketAdmissionStatsTest;
+
+DEATH_TEST_F(TicketAdmissionStatsDeathTest, CannotRegisterTwoRecorders, "Invariant failure") {
+    auto opCtx = makeOperationContext();
+    ScopedTicketAdmissionStatsRecorder first(opCtx.get(), nullptr);
+    ScopedTicketAdmissionStatsRecorder second(opCtx.get(), nullptr);
 }
 
 #ifdef MONGO_CONFIG_DEBUG_BUILD

@@ -77,7 +77,8 @@ const runTest = function ({
         assert.eq(
             coll.countDocuments({}),
             initialDocList.length,
-            "Collection count did not match expected after update: " + tojson(coll.find().toArray()),
+            "Collection count did not match expected after update: " +
+                tojson(coll.find().toArray()),
         );
     }
 };
@@ -98,7 +99,10 @@ const runTest = function ({
         query: {[metaFieldName]: "A"},
         update: {$set: {f: 110}},
         nModified: 1,
-        resultDocList: [{_id: 2, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(2), f: 110}, doc4_b_f103],
+        resultDocList: [
+            {_id: 2, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(2), f: 110},
+            doc4_b_f103,
+        ],
     });
 })();
 
@@ -133,7 +137,10 @@ const runTest = function ({
         query: {[timeFieldName]: generateTimeValue(2)},
         update: {$set: {f: 110}},
         nModified: 1,
-        resultDocList: [{_id: 2, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(2), f: 110}, doc4_b_f103],
+        resultDocList: [
+            {_id: 2, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(2), f: 110},
+            doc4_b_f103,
+        ],
     });
 })();
 
@@ -167,7 +174,10 @@ const runTest = function ({
         update: {[metaFieldName]: "C", [timeFieldName]: generateTimeValue(4), f: 110},
         replacement: true,
         nModified: 1,
-        resultDocList: [doc2_a_f101, {_id: 4, [metaFieldName]: "C", [timeFieldName]: generateTimeValue(4), f: 110}],
+        resultDocList: [
+            doc2_a_f101,
+            {_id: 4, [metaFieldName]: "C", [timeFieldName]: generateTimeValue(4), f: 110},
+        ],
         retryableWrite: true,
     });
 })();
@@ -179,7 +189,10 @@ const runTest = function ({
         update: {[metaFieldName]: "A", [timeFieldName]: generateTimeValue(4), f: 110},
         replacement: true,
         nModified: 1,
-        resultDocList: [doc2_a_f101, {_id: 4, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(4), f: 110}],
+        resultDocList: [
+            doc2_a_f101,
+            {_id: 4, [metaFieldName]: "A", [timeFieldName]: generateTimeValue(4), f: 110},
+        ],
         retryableWrite: true,
     });
 })();
@@ -203,6 +216,79 @@ const runTest = function ({
     });
 })();
 
+(function testTwoPhaseRetryableUpdateMetrics() {
+    const collName = getCallerName();
+    const coll = prepareShardedCollection({
+        collName: collName,
+        initialDocList: [
+            {
+                _id: 2,
+                [metaFieldName]: "A",
+                [timeFieldName]: generateTimeValue(2),
+                f: 101,
+                array: [1, 2],
+            },
+            {
+                _id: 4,
+                [metaFieldName]: "B",
+                [timeFieldName]: generateTimeValue(4),
+                f: 103,
+                array: [1, 2],
+            },
+            {
+                _id: 6,
+                [metaFieldName]: "C",
+                [timeFieldName]: generateTimeValue(6),
+                f: 105,
+                array: [1, 2],
+            },
+        ],
+    });
+    const session = coll.getDB().getMongo().startSession({retryWrites: true});
+    const updateField = TestData.runningWithBulkWriteOverride ? "bulkWrite" : "update";
+
+    let serverStatusBeforeUpdate = testDB.serverStatus();
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [{q: {f: {$gt: 100}}, u: [{$set: {f: 111}}], multi: false}],
+            lsid: session.getSessionId(),
+            txnNumber: NumberLong(1),
+        }),
+    );
+    let serverStatusAfterUpdate = testDB.serverStatus();
+    assert.eq(
+        serverStatusBeforeUpdate.metrics.commands[updateField].pipeline + 1,
+        serverStatusAfterUpdate.metrics.commands[updateField].pipeline,
+        `Before: ${tojson(serverStatusBeforeUpdate)}, after: ${tojson(serverStatusAfterUpdate)}`,
+    );
+
+    serverStatusBeforeUpdate = testDB.serverStatus();
+    assert.commandWorked(
+        testDB.runCommand({
+            update: collName,
+            updates: [
+                {
+                    q: {f: {$gt: 100}},
+                    u: {$set: {"array.$[element]": 20}},
+                    multi: false,
+                    arrayFilters: [{"element": {$gt: 1}}],
+                },
+            ],
+            lsid: session.getSessionId(),
+            txnNumber: NumberLong(2),
+        }),
+    );
+    serverStatusAfterUpdate = testDB.serverStatus();
+    assert.eq(
+        serverStatusBeforeUpdate.metrics.commands[updateField].arrayFilters + 1,
+        serverStatusAfterUpdate.metrics.commands[updateField].arrayFilters,
+        `Before: ${tojson(serverStatusBeforeUpdate)}, after: ${tojson(serverStatusAfterUpdate)}`,
+    );
+
+    session.endSession();
+})();
+
 (function testTwoPhaseUpdateNoMatches() {
     runTest({
         initialDocList: [doc2_a_f101, doc3_a_f102, doc4_b_f103, doc6_c_f105],
@@ -219,7 +305,10 @@ const runTest = function ({
         query: {_id: 4},
         update: {$set: {f: 110}},
         nModified: 1,
-        resultDocList: [doc2_a_f101, {_id: 4, [metaFieldName]: "B", [timeFieldName]: generateTimeValue(4), f: 110}],
+        resultDocList: [
+            doc2_a_f101,
+            {_id: 4, [metaFieldName]: "B", [timeFieldName]: generateTimeValue(4), f: 110},
+        ],
     });
 })();
 
@@ -229,7 +318,10 @@ const runTest = function ({
         query: {[timeFieldName]: generateTimeValue(4)},
         update: {$set: {f: 110}},
         nModified: 1,
-        resultDocList: [doc2_a_f101, {_id: 4, [metaFieldName]: "B", [timeFieldName]: generateTimeValue(4), f: 110}],
+        resultDocList: [
+            doc2_a_f101,
+            {_id: 4, [metaFieldName]: "B", [timeFieldName]: generateTimeValue(4), f: 110},
+        ],
     });
 })();
 

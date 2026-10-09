@@ -5,7 +5,10 @@
  *
  * @tags: [ featureFlagExtensionsAPI ]
  */
-import {getParameter, setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {
+    getParameter,
+    setParameterOnAllNonConfigNodes,
+} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {
     checkPlatformCompatibleWithExtensions,
@@ -91,7 +94,9 @@ function runViewVectorSearchTests(conn, mongotMock, featureFlagValue, shardingTe
         expectedLegacyDelta,
         queries: [
             () => {
-                assert.commandWorked(view.explain("executionStats").aggregate([{$vectorSearch: vectorSearchQuery}]));
+                assert.commandWorked(
+                    view.explain("executionStats").aggregate([{$vectorSearch: vectorSearchQuery}]),
+                );
             },
             () => {
                 view.aggregate([{$vectorSearch: vectorSearchQuery}]).toArray();
@@ -150,10 +155,16 @@ function runUnionWithVectorSearchTests({
 
     // Get the current feature flag value to determine if we expect retries.
     const expectRetry = getParameter(conn, "featureFlagVectorSearchExtension").value;
-    // If we are expecting retries, we should always have 1 per shard for the aggregate,
-    // and 1 for the explain, if we are running it.
-    // In sharded mode, the kickback retry happens on each shard.
-    let expectedUnionWithKickbackRetryDelta = expectRetry ? Number(shouldExplain) + 1 : 0;
+    // On the plain-collection path the kickback fires once for the aggregate, plus once for the
+    // explain if we run it. On the on-view path it fires only in sharded mode.
+    let expectedUnionWithKickbackRetryDelta;
+    if (!expectRetry) {
+        expectedUnionWithKickbackRetryDelta = 0;
+    } else if (viewName) {
+        expectedUnionWithKickbackRetryDelta = shardingTest ? 1 : 0;
+    } else {
+        expectedUnionWithKickbackRetryDelta = Number(shouldExplain) + 1;
+    }
 
     let cursorId = 123;
     if (shouldExplain) {
@@ -200,7 +211,9 @@ function runUnionWithVectorSearchTests({
             ...(shouldExplain
                 ? [
                       () => {
-                          assert.commandWorked(coll.explain("executionStats").aggregate([unionWithStage]));
+                          assert.commandWorked(
+                              coll.explain("executionStats").aggregate([unionWithStage]),
+                          );
                       },
                   ]
                 : []),
@@ -211,7 +224,12 @@ function runUnionWithVectorSearchTests({
     });
 }
 
-function runUnionWithOnViewVectorSearchTests(conn, mongotMock, featureFlagValue, shardingTest = null) {
+function runUnionWithOnViewVectorSearchTests(
+    conn,
+    mongotMock,
+    featureFlagValue,
+    shardingTest = null,
+) {
     // The test driver will set up the view for us. We just need to provide parameters to indicate that
     // we should use it. Skipping explain because $unionWith + a view + explain + legacy $vectorSearch
     // fails (SERVER-117879).
@@ -240,7 +258,9 @@ function runUnionWithOnViewWithVectorSearchInViewDefinitionTests(
     // resolution instead of during parsing.
     const vectorSearchViewPipeline = [{$vectorSearch: vectorSearchQuery}];
     const vectorSearchViewName = kTestViewName + "_vectorSearch";
-    assert.commandWorked(testDb.createView(vectorSearchViewName, kTestCollName, vectorSearchViewPipeline));
+    assert.commandWorked(
+        testDb.createView(vectorSearchViewName, kTestCollName, vectorSearchViewPipeline),
+    );
 
     const unionWithStage = {
         $unionWith: {

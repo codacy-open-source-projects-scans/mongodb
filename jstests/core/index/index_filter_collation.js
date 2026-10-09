@@ -2,6 +2,7 @@
  * Test that index filters are applied with the correct collation.
  *
  * @tags: [
+ *   uses_explain,
  *   # The test runs commands that are not allowed with security token: planCacheListFilters,
  *   # planCacheSetFilter.
  *   not_allowed_with_signed_security_token,
@@ -16,7 +17,11 @@
  *   assumes_balancer_off,
  * ]
  */
-import {getPlanStages, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
+import {
+    getPlanStages,
+    getShardsFromExplain,
+    getWinningPlanFromExplain,
+} from "jstests/libs/query/analyze_plan.js";
 
 const collName = "index_filter_collation";
 const coll = db[collName];
@@ -35,8 +40,10 @@ coll.drop();
 assert.commandWorked(db.createCollection(collName, {collation: caseInsensitive}));
 
 function checkIndexFilterSet(explain, shouldBeSet) {
-    if (explain.queryPlanner.winningPlan.shards) {
-        for (let shard of explain.queryPlanner.winningPlan.shards) {
+    // Null unless this is a mongos explain carrying per-shard plans.
+    const shards = getShardsFromExplain(explain);
+    if (shards) {
+        for (let shard of shards) {
             assert.eq(shard.indexFilterSet, shouldBeSet);
         }
     } else {
@@ -47,7 +54,9 @@ function checkIndexFilterSet(explain, shouldBeSet) {
 // Now create an index filter on a query with no collation specified. The index filter does not
 // inherit the collection's default collation.
 assert.commandWorked(coll.createIndexes([{x: 1}, {x: 1, y: 1}]));
-assert.commandWorked(db.runCommand({planCacheSetFilter: collName, query: {"x": 3}, indexes: [{x: 1, y: 1}]}));
+assert.commandWorked(
+    db.runCommand({planCacheSetFilter: collName, query: {"x": 3}, indexes: [{x: 1, y: 1}]}),
+);
 
 const listFilters = assert.commandWorked(db.runCommand({planCacheListFilters: collName}));
 assert.eq(listFilters.filters.length, 1);
@@ -102,7 +111,10 @@ assert(
 
 // The other should not have any collation, and allow the index {x: 1, y: 1}.
 assert(
-    res.filters.some((filter) => !filter.hasOwnProperty("collation") && friendlyEqual(filter.indexes, [{x: 1, y: 1}])),
+    res.filters.some(
+        (filter) =>
+            !filter.hasOwnProperty("collation") && friendlyEqual(filter.indexes, [{x: 1, y: 1}]),
+    ),
 );
 
 function assertIsIxScanOnIndex(winningPlan, keyPattern) {

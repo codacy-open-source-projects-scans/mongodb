@@ -1,34 +1,7 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/action_type.h"
@@ -47,7 +20,6 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role/ddl/ddl_lock_manager.h"
@@ -60,6 +32,7 @@
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -69,6 +42,7 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
 bool requestsShouldBeSerialized(OperationContext* opCtx,
                                 const ShardsvrCreateCollectionRequest& incomingOp,
@@ -246,35 +220,25 @@ public:
                     }
 
                     bool mustTrackOnMoveCollection =
-                        feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(
-                            (*optFixedFcvRegion)->acquireFCVSnapshot()) &&
                         request().getRegisterExistingCollectionInGlobalCatalog();
 
-                    if (!mustTrackOnMoveCollection && !isFromCreateUnsplittableCommand) {
+                    if (!mustTrackOnMoveCollection && !isFromCreateUnsplittableCommand &&
+                        (!request().getDataShard().has_value() ||
+                         request().getDataShard() == ShardingState::get(opCtx)->shardId())) {
                         optFixedFcvRegion.reset();
                         return _createUntrackedCollection(opCtx);
                     }
                 }
 
-                // Check whether we should create config.system.sessions from the config server on
-                // the first shard using dataShard. Will throw if the feature flag is enabled and
-                // we are on a shard server.
-                //
-                // TODO (SERVER-100309): remove once 9.0 becomes last LTS.
-                bool useNewCoordinatorPathForSessionsColl =
-                    _checkSessionsFeatureFlagAndClusterRole(opCtx, ns(), *optFixedFcvRegion);
-
-                // If we are in the old world (where the config.system.sessions coordinator is run
-                // on the first shard) we need to route the command to the first shard unless we
-                // are the first shard.
-                //
-                // TODO (SERVER-100309): remove once 9.0 becomes last LTS.
+                // Routers do not know FCV and can still follow the old behavior by sending
+                // config.system.sessions create requests to the config server. Until all routers
+                // have upgraded, route those requests to the first shard so they reach the
+                // coordinator. Once 9.0 becomes last LTS, only embedded config servers should reach
+                // this path and it can be removed.
+                // TODO (SERVER-127204): Remove once 9.0 becomes last LTS.
                 if (boost::optional<Response> remoteCreateResponse =
                         _routeSessionsCollectionCreateIfNeeded(
-                            opCtx,
-                            ns(),
-                            useNewCoordinatorPathForSessionsColl,
-                            request().getShardsvrCreateCollectionRequest()))
+                            opCtx, request().getShardsvrCreateCollectionRequest()))
                     return *remoteCreateResponse;
 
                 auto requestToForward = request().getShardsvrCreateCollectionRequest();
@@ -298,9 +262,6 @@ public:
                     auto doc = CreateCollectionCoordinatorDocument();
                     doc.setShardingCoordinatorMetadata({{ns(), coordType}});
                     doc.setShardsvrCreateCollectionRequest(requestToForward);
-                    if (useNewCoordinatorPathForSessionsColl) {
-                        doc.setCreateSessionsCollectionRemotelyOnFirstShard(true);
-                    }
                     return doc.toBSON();
                 }();
 
@@ -351,7 +312,7 @@ public:
             // access the collection outside of the critical section on the local
             // catalog to check the options. We need to serialize any create
             // collection/view to prevent wrong results
-            static constexpr StringData lockReason{"CreateCollectionUntracked"_sd};
+            static constexpr std::string_view lockReason{"CreateCollectionUntracked"sv};
             const DDLLockManager::ScopedCollectionDDLLock collDDLLock{
                 opCtx, ns(), lockReason, MODE_X};
             auto cmd = create_collection_util::makeCreateCommand(
@@ -360,40 +321,11 @@ public:
             return CreateCollectionResponse{ShardVersion::UNTRACKED()};
         }
 
-        // TODO (SERVER-100309): remove once 9.0 becomes last LTS.
-        bool _checkSessionsFeatureFlagAndClusterRole(OperationContext* opCtx,
-                                                     const NamespaceString& nss,
-                                                     const FixedFCVRegion& fixedFcvRegion) {
-            if (ns() != NamespaceString::kLogicalSessionsNamespace)
-                return false;
-
-            // If the feature flag is enabled, we must be running on the config server
-            // and we want to tell the coordinator that it must not create the
-            // collection locally.
-            auto clusterRole = ShardingState::get(opCtx)->pollClusterRole();
-            if (feature_flags::gSessionsCollectionCoordinatorOnConfigServer.isEnabled(
-                    VersionContext::getDecoration(opCtx), fixedFcvRegion->acquireFCVSnapshot())) {
-
-                uassert(ErrorCodes::CommandNotSupported,
-                        "Sessions collection can only be sharded on the config server",
-                        !clusterRole->hasExclusively(ClusterRole::ShardServer));
-                return true;
-            }
-            return false;
-        }
-
-        // TODO (SERVER-100309): remove once 9.0 becomes last LTS.
         boost::optional<Response> _routeSessionsCollectionCreateIfNeeded(
-            OperationContext* opCtx,
-            const NamespaceString& nss,
-            bool useNewPathForSessionsColl,
-            ShardsvrCreateCollectionRequest request) {
-            if (ns() != NamespaceString::kLogicalSessionsNamespace || useNewPathForSessionsColl)
+            OperationContext* opCtx, ShardsvrCreateCollectionRequest request) {
+            if (ns() != NamespaceString::kLogicalSessionsNamespace)
                 return boost::none;
-            // If the feature flag is disabled, we should check whether we are the first
-            // shard (which can be the case in embedded config scenarios). If so, we
-            // should run the coordinator normally. Otherwise we should route the
-            // command appropriately.
+
             auto clusterRole = ShardingState::get(opCtx)->pollClusterRole();
             if (clusterRole->has(ClusterRole::ConfigServer)) {
                 auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
@@ -403,7 +335,7 @@ public:
                     ShardsvrCreateCollection requestToForward(ns());
                     requestToForward.setShardsvrCreateCollectionRequest(request);
                     requestToForward.setDbName(ns().dbName());
-                    return cluster::createCollection(opCtx, std::move(requestToForward), true);
+                    return cluster::createCollection(opCtx, std::move(requestToForward));
                 }
             }
             return boost::none;

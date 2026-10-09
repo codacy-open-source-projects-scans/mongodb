@@ -1,5 +1,6 @@
 /**
  * Verify that `$searchBeta` works as an alias for `$search`.
+ * TODO (SERVER-131069): Remove this mocked test file now that this test has been migrated to an e2e suite. Note that the deprecation-warning log assertion below is not covered by the e2e version (the warning is emitted through a `Rarely` sampler, so log-based assertions are unreliable on shared e2e fixtures).
  */
 import {getMatchingLoglinesCount} from "jstests/libs/log.js";
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
@@ -70,7 +71,9 @@ const cursorId = NumberLong(123);
         },
     ];
 
-    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}));
+    assert.commandWorked(
+        mongotConn.adminCommand({setMockResponses: 1, cursorId: cursorId, history: history}),
+    );
 }
 
 // Verify that a $searchBeta query works end to end.
@@ -87,7 +90,9 @@ assert.eq(expected, cursor.toArray());
 
 // Verify that a deprecation warning was logged for $searchBeta usage.
 const globalLog = assert.commandWorked(db.adminCommand({getLog: "global"}));
-const count = getMatchingLoglinesCount(globalLog.log, {msg: "$searchBeta is deprecated. Use $search instead."});
+const count = getMatchingLoglinesCount(globalLog.log, {
+    msg: "$searchBeta is deprecated. Use $search instead.",
+});
 assert.eq(count, 1, "Expected exactly one deprecation warning for $searchBeta");
 
 MongoRunner.stopMongod(conn);

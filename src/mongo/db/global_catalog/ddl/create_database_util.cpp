@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2024-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/global_catalog/ddl/create_database_util.h"
 
@@ -33,6 +7,8 @@
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/util/pcre_util.h"
+
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -74,16 +50,16 @@ boost::optional<DatabaseType> checkDbNameConstraints(const DatabaseName& dbName)
 boost::optional<ShardId> resolvePrimaryShard(OperationContext* opCtx,
                                              const boost::optional<ShardId>& optPrimaryShard) {
     if (optPrimaryShard) {
-        const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
         uassert(ErrorCodes::BadValue,
                 str::stream() << "invalid shard name: " << *optPrimaryShard,
                 optPrimaryShard->isValid());
-        return uassertStatusOK(shardRegistry->getShard(opCtx, *optPrimaryShard))->getId();
+        return uassertStatusOK(Grid::get(opCtx)->shardRegistry()->resolveShardId(
+            opCtx, *optPrimaryShard, true /* allowNonShardIdIdentifiers */));
     }
     return boost::none;
 }
 
-BSONObj constructDbMatchFilterExact(StringData dbNameStr,
+BSONObj constructDbMatchFilterExact(std::string_view dbNameStr,
                                     const boost::optional<ShardId>& optResolvedPrimaryShard) {
     BSONObjBuilder filterBuilder;
     filterBuilder.append(DatabaseType::kDbNameFieldName, dbNameStr);
@@ -95,7 +71,7 @@ BSONObj constructDbMatchFilterExact(StringData dbNameStr,
 
 boost::optional<DatabaseType> findDatabaseExactMatch(
     OperationContext* opCtx,
-    StringData dbNameStr,
+    std::string_view dbNameStr,
     const boost::optional<ShardId>& optResolvedPrimaryShard) {
     const auto dbMatchFilterExact = constructDbMatchFilterExact(dbNameStr, optResolvedPrimaryShard);
 
@@ -109,7 +85,7 @@ boost::optional<DatabaseType> findDatabaseExactMatch(
     return boost::none;
 }
 
-BSONObj constructDbMatchFilterCaseInsensitive(StringData dbNameStr) {
+BSONObj constructDbMatchFilterCaseInsensitive(std::string_view dbNameStr) {
     BSONObjBuilder filterBuilder;
     filterBuilder.appendRegex(
         DatabaseType::kDbNameFieldName, fmt::format("^{}$", pcre_util::quoteMeta(dbNameStr)), "i");

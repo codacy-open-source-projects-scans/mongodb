@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/op_debug.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/admission/ticketing/ticketholder_queue_stats.h"
@@ -38,7 +11,10 @@
 #include "mongo/db/curop_bson_helpers.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_ranking/plan_selection_strategy.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_knobs/query_knob_configuration.h"
+#include "mongo/db/query/query_settings/query_settings.h"
 #include "mongo/db/query/query_stats/aggregated_metric.h"
 #include "mongo/db/repl/local_oplog_info.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -50,10 +26,12 @@
 #include "mongo/util/duration.h"
 
 #include <string>
+#include <string_view>
 
 namespace mongo {
 namespace {
-StringData getProtoString(int op) {
+using namespace std::literals::string_view_literals;
+std::string_view getProtoString(int op) {
     if (op == dbMsg) {
         return "op_msg";
     } else if (op == dbQuery) {
@@ -218,15 +196,13 @@ void OpDebug::report(OperationContext* opCtx,
     // OpDebug without an indicator from the command layer. Non-read commands handle views
     // differently (i.e. they don't resolve them in the same way), and should be logged
     // unconditionally.
-    // TODO SERVER-122926 Determine whether it is always correct to bypass setting/using
-    // collectionType for non-read commands and document accordingly.
     if (collectionType || curop.getReadWriteType() != Command::ReadWriteType::kRead) {
         pAttrs->addDeepCopy("collectionType", getCollectionTypeFromNamespaceString(curop.getNSS()));
     }
 
     if (client) {
         if (auto clientMetadata = ClientMetadata::get(client)) {
-            StringData appName = clientMetadata->getApplicationName();
+            std::string_view appName = clientMetadata->getApplicationName();
             if (!appName.empty()) {
                 pAttrs->add("appName", appName);
             }
@@ -241,9 +217,7 @@ void OpDebug::report(OperationContext* opCtx,
         if (iscommand) {
             const Command* curCommand = curop.getCommand();
             if (curCommand) {
-                mutablebson::Document cmdToLog(query, mutablebson::Document::kInPlaceDisabled);
-                curCommand->snipForLogging(&cmdToLog);
-                pAttrs->add("command", redact(cmdToLog.getObject()));
+                pAttrs->add("command", redact(snipCommandForLogging(curCommand, query)));
             } else {
                 // Should not happen but we need to handle curCommand == NULL gracefully.
                 // We don't know what the request payload is intended to be, so it might be
@@ -256,6 +230,9 @@ void OpDebug::report(OperationContext* opCtx,
         }
     }
     pAttrs->add("opid", opCtx->getOpID());
+
+    query_settings::addQuerySettingsToSlowLog(opCtx, *pAttrs);
+    QueryKnobConfiguration::get(opCtx).addToSlowLog(opCtx, *pAttrs);
 
     auto originatingCommand = curop.originatingCommand();
     if (!originatingCommand.isEmpty()) {
@@ -340,6 +317,12 @@ void OpDebug::report(OperationContext* opCtx,
     OPDEBUG_TOATTR_HELP_BOOL_NAMED("usedDisk", additiveMetrics.usedDisk);
     OPDEBUG_TOATTR_HELP_BOOL_NAMED("fromMultiPlanner", additiveMetrics.fromMultiPlanner);
     OPDEBUG_TOATTR_HELP_BOOL_NAMED("fromPlanCache", additiveMetrics.fromPlanCache.value_or(false));
+    OPDEBUG_TOATTR_HELP_BOOL_NAMED("usedJoinOptimization", usedJoinOptimization);
+    if (const auto& joinMetrics = joinOptimizationMetrics) {
+        if (const auto& reason = joinMetrics->fallbackReason) {
+            pAttrs->addDeepCopy("fallbackReason", join_ordering::toReasonName(*reason));
+        }
+    }
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_TOATTR_HELP_BOOL(replanned);
@@ -398,6 +381,10 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->addDeepCopy("planCacheKey", zeroPaddedHex(*planCacheKey));
     }
 
+    if (isChangeStreamQuery) {
+        pAttrs->add("changeStreams", changeStreamMetrics.toBSON());
+    }
+
     switch (queryFramework) {
         case PlanExecutor::QueryFramework::kClassicOnly:
         case PlanExecutor::QueryFramework::kClassicHybrid:
@@ -410,6 +397,8 @@ void OpDebug::report(OperationContext* opCtx,
         case PlanExecutor::QueryFramework::kUnknown:
             break;
     }
+
+    pAttrs->add("planRanker", getPlanSelectionStrategyName(planSelectionStrategy));
 
     if (!errInfo.isOK()) {
         pAttrs->add("ok", 0);
@@ -643,6 +632,12 @@ void OpDebug::append(OperationContext* opCtx,
     OPDEBUG_APPEND_BOOL2(b, "fromMultiPlanner", additiveMetrics.fromMultiPlanner);
     OPDEBUG_APPEND_BOOL2(b, "failedPlanningWithQuerySettings", failedPlanningWithQuerySettings);
     OPDEBUG_APPEND_BOOL2(b, "fromPlanCache", additiveMetrics.fromPlanCache.value_or(false));
+    OPDEBUG_APPEND_BOOL2(b, "usedJoinOptimization", usedJoinOptimization);
+    if (const auto& joinMetrics = joinOptimizationMetrics) {
+        if (const auto& reason = joinMetrics->fallbackReason) {
+            b.append("fallbackReason", join_ordering::toReasonName(*reason));
+        }
+    }
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_APPEND_BOOL(b, replanned);
@@ -677,6 +672,20 @@ void OpDebug::append(OperationContext* opCtx,
     b.appendNumber("numYield", curop.numYields());
     OPDEBUG_APPEND_OPTIONAL(b, "nreturned", additiveMetrics.nreturned);
 
+    if (!curop.parent()) {
+        b.append("numInterruptChecks", opCtx->numInterruptChecks());
+
+        const bool reportAcquisitions = !opCtx->inMultiDocumentTransaction();
+        const auto& admCtx = ExecutionAdmissionContext::get(opCtx);
+        const auto* stats = opCtx->overdueInterruptCheckStats();
+        if ((reportAcquisitions && admCtx.getDelinquentAcquisitions() > 0) ||
+            (stats && stats->overdueInterruptChecks.loadRelaxed() > 0)) {
+            BSONObjBuilder sub;
+            appendDelinquentInfo(opCtx, sub, reportAcquisitions);
+            b.append("delinquencyInfo", sub.obj());
+        }
+    }
+
     addSpillingStats(spillingStatsPerStage,
                      sortTotalDataSizeBytes,
                      [&](const auto& name, const auto& value) { b.append(name, value); });
@@ -694,6 +703,10 @@ void OpDebug::append(OperationContext* opCtx,
         b.append("queryShapeHash", queryShapeHash->toHexString());
     }
 
+    if (isChangeStreamQuery) {
+        b.append("changeStreams", changeStreamMetrics.toBSON());
+    }
+
     switch (queryFramework) {
         case PlanExecutor::QueryFramework::kClassicOnly:
         case PlanExecutor::QueryFramework::kClassicHybrid:
@@ -706,6 +719,8 @@ void OpDebug::append(OperationContext* opCtx,
         case PlanExecutor::QueryFramework::kUnknown:
             break;
     }
+
+    b.append("planRanker", getPlanSelectionStrategyName(planSelectionStrategy));
 
     {
         BSONObjBuilder locks(b.subobjStart("locks"));
@@ -721,7 +736,7 @@ void OpDebug::append(OperationContext* opCtx,
         }
 
         if (userAcquisitionStats->shouldReportLDAPOperationStats()) {
-            BSONObjBuilder ldapOperationStatsBuilder;
+            BSONObjBuilder ldapOperationStatsBuilder(b.subobjStart("LDAPOperations"));
             userAcquisitionStats->reportLdapOperationStats(
                 &ldapOperationStatsBuilder, opCtx->getServiceContext()->getTickSource());
         }
@@ -787,10 +802,16 @@ void OpDebug::append(OperationContext* opCtx,
         b.appendNumber("cpuNanos", durationCount<Nanoseconds>(cpuTime));
     }
 
-    // millis should always be present for any operation
+    // Extract admission and execution control queueing stats from AdmissionContext stored on opCtx
+    b.append("queues", TicketHolderQueueStats(opCtx).toBson());
+
+    // millis/micros should always be present for any operation
     b.appendNumber(
         "millis",
         durationCount<Milliseconds>(additiveMetrics.executionTime.value_or(Microseconds{0})));
+    b.appendNumber(
+        "micros",
+        durationCount<Microseconds>(additiveMetrics.executionTime.value_or(Microseconds{0})));
 
     if (!curop.getPlanSummary().empty()) {
         b.append("planSummary", curop.getPlanSummary());
@@ -1003,6 +1024,16 @@ std::function<BSONObj(OpDebug::AppendArgs)> OpDebug::appendStaged(OperationConte
     addIfNeeded("fromPlanCache", [](auto field, auto args, auto& b) {
         OPDEBUG_APPEND_BOOL2(b, field, args.op.getAdditiveMetrics().fromPlanCache.value_or(false));
     });
+    addIfNeeded("usedJoinOptimization", [](auto field, auto args, auto& b) {
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.usedJoinOptimization);
+    });
+    addIfNeeded("fallbackReason", [](auto field, auto args, auto& b) {
+        if (const auto& joinMetrics = args.op.joinOptimizationMetrics) {
+            if (const auto& reason = joinMetrics->fallbackReason) {
+                b.append(field, join_ordering::toReasonName(*reason));
+            }
+        }
+    });
     addIfNeeded("replanned", [](auto field, auto args, auto& b) {
         if (args.op.replanReason) {
             OPDEBUG_APPEND_BOOL2(b, field, true);
@@ -1077,6 +1108,24 @@ std::function<BSONObj(OpDebug::AppendArgs)> OpDebug::appendStaged(OperationConte
     addIfNeeded("nreturned", [](auto field, auto args, auto& b) {
         OPDEBUG_APPEND_OPTIONAL(b, field, args.op.getAdditiveMetrics().nreturned);
     });
+    addIfNeeded("numInterruptChecks", [](auto field, auto args, auto& b) {
+        if (!args.curop.parent()) {
+            b.append(field, args.opCtx->numInterruptChecks());
+        }
+    });
+    addIfNeeded("delinquencyInfo", [](auto field, auto args, auto& b) {
+        if (!args.curop.parent()) {
+            const bool reportAcquisitions = !args.opCtx->inMultiDocumentTransaction();
+            const auto& admCtx = ExecutionAdmissionContext::get(args.opCtx);
+            const auto* stats = args.opCtx->overdueInterruptCheckStats();
+            if ((reportAcquisitions && admCtx.getDelinquentAcquisitions() > 0) ||
+                (stats && stats->overdueInterruptChecks.loadRelaxed() > 0)) {
+                BSONObjBuilder sub;
+                appendDelinquentInfo(args.opCtx, sub, reportAcquisitions);
+                b.append(field, sub.obj());
+            }
+        }
+    });
 
     addIfNeeded("planCacheShapeHash", [](auto field, auto args, auto& b) {
         if (args.op.planCacheShapeHash) {
@@ -1115,6 +1164,10 @@ std::function<BSONObj(OpDebug::AppendArgs)> OpDebug::appendStaged(OperationConte
         }
     });
 
+    addIfNeeded("planRanker", [](auto field, auto args, auto& b) {
+        b.append("planRanker", getPlanSelectionStrategyName(args.op.planSelectionStrategy));
+    });
+
     addIfNeeded("locks", [](auto field, auto args, auto& b) {
         auto lockerInfo =
             shard_role_details::getLocker(args.opCtx)->getLockerInfo(args.curop.getLockStatsBase());
@@ -1130,7 +1183,10 @@ std::function<BSONObj(OpDebug::AppendArgs)> OpDebug::appendStaged(OperationConte
                 &userCacheAcquisitionStatsBuilder,
                 args.opCtx->getServiceContext()->getTickSource());
         }
+    });
 
+    addIfNeeded("LDAPOperations", [](auto field, auto args, auto& b) {
+        auto userAcquisitionStats = args.curop.getUserAcquisitionStats();
         if (userAcquisitionStats->shouldReportLDAPOperationStats()) {
             BSONObjBuilder ldapOperationStatsBuilder(b.subobjStart(field));
             userAcquisitionStats->reportLdapOperationStats(
@@ -1206,14 +1262,24 @@ std::function<BSONObj(OpDebug::AppendArgs)> OpDebug::appendStaged(OperationConte
         }
     });
 
+    addIfNeeded("queues", [](auto field, auto args, auto& b) {
+        b.append(field, TicketHolderQueueStats(args.opCtx).toBson());
+    });
+
     // millis and durationMillis are the same thing. This is one of the few inconsistencies between
     // the profiler (OpDebug::append) and the log file (OpDebug::report), so for the profile filter
-    // we support both names.
+    // we support both names. Similarly, micros and durationMicros are both supported.
     addIfNeeded("millis", [](auto field, auto args, auto& b) {
         b.appendNumber(field, durationCount<Milliseconds>(args.curop.elapsedTimeTotal()));
     });
     addIfNeeded("durationMillis", [](auto field, auto args, auto& b) {
         b.appendNumber(field, durationCount<Milliseconds>(args.curop.elapsedTimeTotal()));
+    });
+    addIfNeeded("micros", [](auto field, auto args, auto& b) {
+        b.appendNumber(field, durationCount<Microseconds>(args.curop.elapsedTimeTotal()));
+    });
+    addIfNeeded("durationMicros", [](auto field, auto args, auto& b) {
+        b.appendNumber(field, durationCount<Microseconds>(args.curop.elapsedTimeTotal()));
     });
 
     addIfNeeded("workingMillis", [](auto field, auto args, auto& b) {
@@ -1309,6 +1375,12 @@ void OpDebug::setPlanSummaryMetrics(PlanSummaryStats&& planSummaryStats) {
 
     replanReason = std::move(planSummaryStats.replanReason);
     indexesUsed = std::move(planSummaryStats.indexesUsed);
+
+    if (planSummaryStats.planSelectionStrategy) {
+        planSelectionStrategy = planSummaryStats.planSelectionStrategy;
+    }
+
+    usedJoinOptimization = usedJoinOptimization || planSummaryStats.usedJoinOptimization;
 }
 
 BSONObj OpDebug::makeFlowControlObject(FlowControlTicketholder::CurOp stats) {
@@ -1425,6 +1497,8 @@ CursorMetrics OpDebug::getCursorMetrics(size_t opIndex) const {
     metrics.setNInserted(additiveMetrics.ninserted.value_or(0));
     metrics.setNDeleted(additiveMetrics.ndeleted.value_or(0));
     metrics.setNUpserted(additiveMetrics.nUpserted.value_or(0));
+    metrics.setKeysInserted(additiveMetrics.keysInserted.value_or(0));
+    metrics.setKeysDeleted(additiveMetrics.keysDeleted.value_or(0));
 
     metrics.setPlanningTimeMicros(additiveMetrics.planningTime.value_or(Microseconds(0)).count());
 
@@ -1451,6 +1525,10 @@ CursorMetrics OpDebug::getCursorMetrics(size_t opIndex) const {
     metrics.setCardinalityEstimationMethods(ceMethods);
 
     metrics.setNDocsSampled(additiveMetrics.nDocsSampled.value_or(0));
+
+    if (!additiveMetrics.planShapeCounts.empty()) {
+        metrics.setPlanShapeCounts(additiveMetrics.planShapeCounts);
+    }
     // Only report clusterPeakTrackedMemBytes on the final response so the router won't double count
     // remote shard peaks.
     bool isFinalResponse = cursorExhausted || cursorid == -1;
@@ -1580,6 +1658,7 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     ndeleted = addOptionals(ndeleted, otherMetrics.ndeleted);
     nUpserted = addOptionals(nUpserted, otherMetrics.nUpserted);
     nUpdateOps = nUpdateOps.has_value() ? nUpdateOps : otherMetrics.nUpdateOps;
+    nDeleteOps = nDeleteOps.has_value() ? nDeleteOps : otherMetrics.nDeleteOps;
     keysInserted = addOptionals(keysInserted, otherMetrics.keysInserted);
     keysDeleted = addOptionals(keysDeleted, otherMetrics.keysDeleted);
     readingTime = addOptionals(readingTime, otherMetrics.readingTime);
@@ -1647,6 +1726,7 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     peakTrackedMemBytes = maxOptionals(peakTrackedMemBytes, otherMetrics.peakTrackedMemBytes);
     clusterPeakTrackedMemBytes =
         maxOptionals(clusterPeakTrackedMemBytes, otherMetrics.clusterPeakTrackedMemBytes);
+    planShapeCounts.add(otherMetrics.planShapeCounts);
 }
 
 void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
@@ -1662,6 +1742,8 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
     ninserted = ninserted.value_or(0) + metrics.nInserted;
     ndeleted = ndeleted.value_or(0) + metrics.nDeleted;
     nUpserted = nUpserted.value_or(0) + metrics.nUpserted;
+    keysInserted = keysInserted.value_or(0) + metrics.keysInserted;
+    keysDeleted = keysDeleted.value_or(0) + metrics.keysDeleted;
 
     delinquentAcquisitions = delinquentAcquisitions.value_or(0) + metrics.delinquentAcquisitions;
     totalAcquisitionDelinquency =
@@ -1717,6 +1799,7 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
         cardinalityEstimationMethods.getCode().value_or(0) +
         metrics.cardinalityEstimationMethods.getCode().value_or(0));
     nDocsSampled = nDocsSampled.value_or(0) + metrics.nDocsSampled;
+    planShapeCounts.add(metrics.planShapeCounts);
     clusterPeakTrackedMemBytes =
         clusterPeakTrackedMemBytes.value_or(0) + metrics.clusterPeakTrackedMemBytes;
 }
@@ -1730,37 +1813,44 @@ void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
 
 void OpDebug::AdditiveMetrics::aggregateCursorMetrics(const CursorMetrics& metrics) {
     aggregateDataBearingNodeMetrics(query_stats::DataBearingNodeMetrics{
-        static_cast<uint64_t>(metrics.getKeysExamined()),
-        static_cast<uint64_t>(metrics.getDocsExamined()),
-        static_cast<uint64_t>(metrics.getBytesRead()),
-        Microseconds(metrics.getReadingTimeMicros()),
-        Milliseconds(metrics.getWorkingTimeMillis()),
-        Nanoseconds(metrics.getCpuNanos()),
-        static_cast<uint64_t>(metrics.getDelinquentAcquisitions()),
-        Milliseconds(metrics.getTotalAcquisitionDelinquencyMillis()),
-        Milliseconds(metrics.getMaxAcquisitionDelinquencyMillis()),
-        static_cast<uint64_t>(metrics.getNumInterruptChecks()),
-        Milliseconds(metrics.getOverdueInterruptApproxMaxMillis()),
-        metrics.getHasSortStage(),
-        metrics.getUsedDisk(),
-        metrics.getFromMultiPlanner(),
-        metrics.getFromPlanCache(),
-        static_cast<uint64_t>(metrics.getNMatched()),
-        static_cast<uint64_t>(metrics.getNUpserted()),
-        static_cast<uint64_t>(metrics.getNModified()),
-        static_cast<uint64_t>(metrics.getNDeleted()),
-        static_cast<uint64_t>(metrics.getNInserted()),
-        Microseconds(metrics.getTotalTimeQueuedMicros()),
-        static_cast<uint64_t>(metrics.getTotalAdmissions()),
-        static_cast<uint64_t>(metrics.getTotalNormalPriorityAdmissions()),
-        static_cast<uint64_t>(metrics.getTotalLowPriorityAdmissions()),
-        metrics.getWasLoadShed(),
-        metrics.getWasDeprioritized(),
-        metrics.getWasMarkedNonDeprioritizable(),
-        Microseconds(metrics.getPlanningTimeMicros()),
-        metrics.getCardinalityEstimationMethods(),
-        static_cast<uint64_t>(metrics.getNDocsSampled()),
-        static_cast<uint64_t>(metrics.getClusterPeakTrackedMemBytes())});
+        .keysExamined = static_cast<uint64_t>(metrics.getKeysExamined()),
+        .docsExamined = static_cast<uint64_t>(metrics.getDocsExamined()),
+        .bytesRead = static_cast<uint64_t>(metrics.getBytesRead()),
+        .readingTime = Microseconds(metrics.getReadingTimeMicros()),
+        .clusterWorkingTime = Milliseconds(metrics.getWorkingTimeMillis()),
+        .cpuNanos = Nanoseconds(metrics.getCpuNanos()),
+        .delinquentAcquisitions = static_cast<uint64_t>(metrics.getDelinquentAcquisitions()),
+        .totalAcquisitionDelinquency = Milliseconds(metrics.getTotalAcquisitionDelinquencyMillis()),
+        .maxAcquisitionDelinquency = Milliseconds(metrics.getMaxAcquisitionDelinquencyMillis()),
+        .numInterruptChecks = static_cast<uint64_t>(metrics.getNumInterruptChecks()),
+        .overdueInterruptApproxMax = Milliseconds(metrics.getOverdueInterruptApproxMaxMillis()),
+        .hasSortStage = metrics.getHasSortStage(),
+        .usedDisk = metrics.getUsedDisk(),
+        .fromMultiPlanner = metrics.getFromMultiPlanner(),
+        .fromPlanCache = metrics.getFromPlanCache(),
+        .nMatched = static_cast<uint64_t>(metrics.getNMatched()),
+        .nUpserted = static_cast<uint64_t>(metrics.getNUpserted()),
+        .nModified = static_cast<uint64_t>(metrics.getNModified()),
+        .nDeleted = static_cast<uint64_t>(metrics.getNDeleted()),
+        .nInserted = static_cast<uint64_t>(metrics.getNInserted()),
+        .keysInserted = static_cast<uint64_t>(metrics.getKeysInserted()),
+        .keysDeleted = static_cast<uint64_t>(metrics.getKeysDeleted()),
+        .totalTimeQueuedMicros = Microseconds(metrics.getTotalTimeQueuedMicros()),
+        .totalAdmissions = static_cast<uint64_t>(metrics.getTotalAdmissions()),
+        .totalNormalPriorityAdmissions =
+            static_cast<uint64_t>(metrics.getTotalNormalPriorityAdmissions()),
+        .totalLowPriorityAdmissions =
+            static_cast<uint64_t>(metrics.getTotalLowPriorityAdmissions()),
+        .wasLoadShed = metrics.getWasLoadShed(),
+        .wasDeprioritized = metrics.getWasDeprioritized(),
+        .wasMarkedNonDeprioritizable = metrics.getWasMarkedNonDeprioritizable(),
+        .planningTime = Microseconds(metrics.getPlanningTimeMicros()),
+        .cardinalityEstimationMethods = metrics.getCardinalityEstimationMethods(),
+        .nDocsSampled = static_cast<uint64_t>(metrics.getNDocsSampled()),
+        .planShapeCounts =
+            metrics.getPlanShapeCounts().value_or(plan_shape_counters::PlanShapeCounts{}),
+        .clusterPeakTrackedMemBytes =
+            static_cast<uint64_t>(metrics.getClusterPeakTrackedMemBytes())});
 }
 
 void OpDebug::AdditiveMetrics::aggregateStorageStats(const StorageStats& stats) {
@@ -1768,6 +1858,7 @@ void OpDebug::AdditiveMetrics::aggregateStorageStats(const StorageStats& stats) 
     readingTime = readingTime.value_or(Microseconds(0)) + stats.readingTime();
 }
 
+// TODO SERVER-130797 investigate if all metrics need to be reset in AdditiveMetrics::reset
 void OpDebug::AdditiveMetrics::reset() {
     keysExamined = boost::none;
     docsExamined = boost::none;
@@ -1782,10 +1873,13 @@ void OpDebug::AdditiveMetrics::reset() {
     keysDeleted = boost::none;
     executionTime = boost::none;
     nUpdateOps = boost::none;
+    nDeleteOps = boost::none;
     peakTrackedMemBytes = boost::none;
     clusterPeakTrackedMemBytes = boost::none;
+    planShapeCounts = {};
 }
 
+// TODO SERVER-130797 investigate if all metrics need to be compared in AdditiveMetrics::equals
 bool OpDebug::AdditiveMetrics::equals(const AdditiveMetrics& otherMetrics) const {
     return keysExamined == otherMetrics.keysExamined && docsExamined == otherMetrics.docsExamined &&
         nMatched == otherMetrics.nMatched && nreturned == otherMetrics.nreturned &&
@@ -1793,7 +1887,7 @@ bool OpDebug::AdditiveMetrics::equals(const AdditiveMetrics& otherMetrics) const
         ninserted == otherMetrics.ninserted && ndeleted == otherMetrics.ndeleted &&
         nUpserted == otherMetrics.nUpserted && keysInserted == otherMetrics.keysInserted &&
         keysDeleted == otherMetrics.keysDeleted && executionTime == otherMetrics.executionTime &&
-        nUpdateOps == otherMetrics.nUpdateOps;
+        nUpdateOps == otherMetrics.nUpdateOps && nDeleteOps == otherMetrics.nDeleteOps;
 }
 
 void OpDebug::AdditiveMetrics::incrementKeysInserted(long long n) {
@@ -1861,6 +1955,7 @@ std::string OpDebug::AdditiveMetrics::report() const {
     OPDEBUG_TOSTRING_HELP_OPTIONAL("keysDeleted", keysDeleted);
     if (executionTime) {
         s << " durationMillis:" << durationCount<Milliseconds>(*executionTime);
+        s << " durationMicros:" << durationCount<Microseconds>(*executionTime);
     }
 
     return s.str();
@@ -1880,6 +1975,7 @@ void OpDebug::AdditiveMetrics::report(logv2::DynamicAttributes* pAttrs) const {
     OPDEBUG_TOATTR_HELP_OPTIONAL("keysDeleted", keysDeleted);
     if (executionTime) {
         pAttrs->add("durationMillis", durationCount<Milliseconds>(*executionTime));
+        pAttrs->add("durationMicros", durationCount<Microseconds>(*executionTime));
     }
 }
 
@@ -1898,6 +1994,7 @@ BSONObj OpDebug::AdditiveMetrics::reportBSON() const {
     OPDEBUG_APPEND_OPTIONAL(b, "keysDeleted", keysDeleted);
     if (executionTime) {
         b.appendNumber("durationMillis", durationCount<Milliseconds>(*executionTime));
+        b.appendNumber("durationMicros", durationCount<Microseconds>(*executionTime));
     }
     return b.obj();
 }

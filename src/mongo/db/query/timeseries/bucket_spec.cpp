@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/timeseries/bucket_spec.h"
 
@@ -52,6 +26,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string_view>
 
 #include <s2cellid.h>
 
@@ -66,7 +41,7 @@ namespace mongo::timeseries {
 
 using IneligiblePredicatePolicy = BucketSpec::IneligiblePredicatePolicy;
 
-bool BucketSpec::fieldIsComputed(StringData field) const {
+bool BucketSpec::fieldIsComputed(std::string_view field) const {
     return std::any_of(
         _computedMetaProjFields.begin(), _computedMetaProjFields.end(), [&](auto& s) {
             return s == field || expression::isPathPrefixOf(field, s) ||
@@ -111,7 +86,7 @@ std::unique_ptr<MatchExpression> createTightExprTimeFieldPredicate(
 
 BucketSpec::BucketPredicate BucketSpec::handleIneligible(IneligiblePredicatePolicy policy,
                                                          const MatchExpression* matchExpr,
-                                                         StringData message) {
+                                                         std::string_view message) {
     switch (policy) {
         case IneligiblePredicatePolicy::kError:
             uasserted(
@@ -151,7 +126,7 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
     // {$or: [ {a: 5}, {meta.b: 5} ]} can't be split, and can't be metadata-only, so we have to
     // handle it here.
     const auto matchExprPath = matchExpr->path();
-    if (!matchExprPath.empty() && bucketSpec.metaField() &&
+    if (matchExpr->fieldRef() && bucketSpec.metaField() &&
         (matchExprPath == bucketSpec.metaField().value() ||
          expression::isPathPrefixOf(bucketSpec.metaField().value(), matchExprPath))) {
 
@@ -324,10 +299,10 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
         if (assumeNoMixedSchemaData) {
             // We know that every field that appears in an event will also appear in the min/max.
             auto result = std::make_unique<AndMatchExpression>();
-            result->add(std::make_unique<ExistsMatchExpression>(StringData(
-                std::string{kControlMinFieldNamePrefix} + std::string{matchExpr->path()})));
-            result->add(std::make_unique<ExistsMatchExpression>(StringData(
-                std::string{kControlMaxFieldNamePrefix} + std::string{matchExpr->path()})));
+            result->add(std::make_unique<ExistsMatchExpression>(std::string_view(
+                fmt::format("{}{}", kControlMinFieldNamePrefix, matchExpr->path()))));
+            result->add(std::make_unique<ExistsMatchExpression>(std::string_view(
+                fmt::format("{}{}", kControlMaxFieldNamePrefix, matchExpr->path()))));
             return {std::move(result), nullptr};
         } else {
             // At time of writing, we only pass 'kError' when creating a partial index, and
@@ -424,7 +399,7 @@ std::pair<bool, BSONObj> BucketSpec::pushdownPredicate(
 
 std::pair<std::unique_ptr<MatchExpression>, std::unique_ptr<MatchExpression>>
 BucketSpec::splitOutMetaOnlyPredicate(std::unique_ptr<MatchExpression> expr,
-                                      boost::optional<StringData> metaField) {
+                                      boost::optional<std::string_view> metaField) {
     if (!metaField) {
         // If there's no metadata field, then none of the predicates are metadata-only
         // predicates.
@@ -461,12 +436,13 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
     if (residualPred) {
         BucketSpec bucketSpec{
             std::string{tsOptions.getTimeField()},
-            metaField.map([](StringData s) { return std::string{s}; }),
+            metaField.map([](std::string_view s) { return std::string{s}; }),
             // Since we are operating on a collection, not a query-result,
             // there are no inclusion/exclusion projections we need to apply
             // to the buckets before unpacking. So we can use default values
             // for the rest of the arguments.
         };
+        bucketSpec.setUsesExtendedRange(expCtx->getRequiresTimeseriesExtendedRangeSupport());
         auto bucketPredicate =
             createPredicatesOnBucketLevelField(residualPred.get(),
                                                bucketSpec,

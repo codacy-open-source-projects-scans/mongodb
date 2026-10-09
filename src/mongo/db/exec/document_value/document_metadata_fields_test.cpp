@@ -1,45 +1,22 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+using namespace std::literals::string_view_literals;
+
+using namespace std::literals::string_view_literals;
 namespace mongo {
 
 TEST(DocumentMetadataFieldsTest, AllMetadataRoundtripsThroughSerialization) {
@@ -50,7 +27,7 @@ TEST(DocumentMetadataFieldsTest, AllMetadataRoundtripsThroughSerialization) {
     metadata.setGeoNearDistance(3.2);
     metadata.setGeoNearPoint(Value{BSON_ARRAY(1 << 2)});
     metadata.setSearchScore(5.4);
-    metadata.setSearchHighlights(Value{"foo"_sd});
+    metadata.setSearchHighlights(Value{"foo"sv});
     metadata.setIndexKey(BSON("b" << 1));
     metadata.setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
@@ -76,7 +53,7 @@ TEST(DocumentMetadataFieldsTest, AllMetadataRoundtripsThroughSerialization) {
     ASSERT_EQ(deserialized.getGeoNearDistance(), 3.2);
     ASSERT_VALUE_EQ(deserialized.getGeoNearPoint(), Value{BSON_ARRAY(1 << 2)});
     ASSERT_EQ(deserialized.getSearchScore(), 5.4);
-    ASSERT_VALUE_EQ(deserialized.getSearchHighlights(), Value{"foo"_sd});
+    ASSERT_VALUE_EQ(deserialized.getSearchHighlights(), Value{"foo"sv});
     ASSERT_BSONOBJ_EQ(deserialized.getIndexKey(), BSON("b" << 1));
     ASSERT_BSONOBJ_EQ(deserialized.getSearchScoreDetails(), BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(deserialized.getSearchSortValues(), BSON("a" << 1));
@@ -147,7 +124,7 @@ TEST(DocumentMetadataFieldsTest, HasMethodsReturnTrueForInitializedMetadata) {
     ASSERT_TRUE(metadata.hasSearchScore());
 
     ASSERT_FALSE(metadata.hasSearchHighlights());
-    metadata.setSearchHighlights(Value{"foo"_sd});
+    metadata.setSearchHighlights(Value{"foo"sv});
     ASSERT_TRUE(metadata.hasSearchHighlights());
 
     ASSERT_FALSE(metadata.hasIndexKey());
@@ -184,7 +161,7 @@ TEST(DocumentMetadataFieldsTest, MoveConstructor) {
     metadata.setGeoNearDistance(3.2);
     metadata.setGeoNearPoint(Value{BSON_ARRAY(1 << 2)});
     metadata.setSearchScore(5.4);
-    metadata.setSearchHighlights(Value{"foo"_sd});
+    metadata.setSearchHighlights(Value{"foo"sv});
     metadata.setIndexKey(BSON("b" << 1));
     metadata.setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
@@ -204,7 +181,7 @@ TEST(DocumentMetadataFieldsTest, MoveConstructor) {
     ASSERT_EQ(moveConstructed.getGeoNearDistance(), 3.2);
     ASSERT_VALUE_EQ(moveConstructed.getGeoNearPoint(), Value{BSON_ARRAY(1 << 2)});
     ASSERT_EQ(moveConstructed.getSearchScore(), 5.4);
-    ASSERT_VALUE_EQ(moveConstructed.getSearchHighlights(), Value{"foo"_sd});
+    ASSERT_VALUE_EQ(moveConstructed.getSearchHighlights(), Value{"foo"sv});
     ASSERT_BSONOBJ_EQ(moveConstructed.getIndexKey(), BSON("b" << 1));
     ASSERT_BSONOBJ_EQ(moveConstructed.getSearchScoreDetails(), BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(moveConstructed.getSearchSortValues(), BSON("a" << 1));
@@ -225,7 +202,7 @@ TEST(DocumentMetadataFieldsTest, MoveAssignmentOperator) {
     metadata.setGeoNearDistance(3.2);
     metadata.setGeoNearPoint(Value{BSON_ARRAY(1 << 2)});
     metadata.setSearchScore(5.4);
-    metadata.setSearchHighlights(Value{"foo"_sd});
+    metadata.setSearchHighlights(Value{"foo"sv});
     metadata.setIndexKey(BSON("b" << 1));
     metadata.setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     metadata.setSearchSortValues(BSON("a" << 1));
@@ -248,7 +225,7 @@ TEST(DocumentMetadataFieldsTest, MoveAssignmentOperator) {
     ASSERT_EQ(moveAssigned.getGeoNearDistance(), 3.2);
     ASSERT_VALUE_EQ(moveAssigned.getGeoNearPoint(), Value{BSON_ARRAY(1 << 2)});
     ASSERT_EQ(moveAssigned.getSearchScore(), 5.4);
-    ASSERT_VALUE_EQ(moveAssigned.getSearchHighlights(), Value{"foo"_sd});
+    ASSERT_VALUE_EQ(moveAssigned.getSearchHighlights(), Value{"foo"sv});
     ASSERT_BSONOBJ_EQ(moveAssigned.getIndexKey(), BSON("b" << 1));
     ASSERT_BSONOBJ_EQ(moveAssigned.getSearchScoreDetails(), BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(moveAssigned.getSearchSortValues(), BSON("a" << 1));
@@ -358,7 +335,7 @@ TEST(DocumentMetadataFieldsTest, MetadataIsMarkedModifiedOnSetMetadataField) {
     testFieldSetter(
         [](DocumentMetadataFields& md) { md.setGeoNearPoint(Value{BSON_ARRAY(1 << 2)}); });
     testFieldSetter([](DocumentMetadataFields& md) { md.setSearchScore(50.0); });
-    testFieldSetter([](DocumentMetadataFields& md) { md.setSearchHighlights(Value{"foo"_sd}); });
+    testFieldSetter([](DocumentMetadataFields& md) { md.setSearchHighlights(Value{"foo"sv}); });
     testFieldSetter([](DocumentMetadataFields& md) { md.setIndexKey(BSON("b" << 1)); });
     testFieldSetter([](DocumentMetadataFields& md) { md.setRecordId(RecordId{6}); });
     testFieldSetter([](DocumentMetadataFields& md) {
@@ -491,7 +468,6 @@ TEST(DocumentMetadataFieldsTest, MetadataIsMarkedModifiedOnMergeWith) {
 TEST(DocumentMetadataFieldsTest, ScoreMetadataSetOnOtherMetadataTest) {
     // Tests that for certain types of metadata fields, related to a score,
     // the 'score' metadata is also set.
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
 
     // 'searchScore'
     {
@@ -521,32 +497,7 @@ TEST(DocumentMetadataFieldsTest, ScoreMetadataSetOnOtherMetadataTest) {
     }
 }
 
-// TODO SERVER-85426 Remove this test when the feature flag is removed.
-TEST(DocumentMetadataFieldsTest, FFGatedFieldsNotSetWithoutFlag) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", false);
-
-    DocumentMetadataFields metadata;
-    metadata.setScore(10);
-    metadata.setScoreDetails(Value(BSON("foo" << "bar")));
-    metadata.setScoreAndScoreDetails(Value(BSON("value" << 2)));
-    metadata.setVectorSearchScore(15);
-    metadata.setSearchScore(7);
-    metadata.setTextScore(5);
-    metadata.setSearchScoreDetails(BSON("search" << "details"));
-
-    ASSERT_TRUE(metadata.hasSearchScore());
-    ASSERT_TRUE(metadata.hasVectorSearchScore());
-    ASSERT_TRUE(metadata.hasTextScore());
-    ASSERT_TRUE(metadata.hasSearchScoreDetails());
-
-    // 'score' and 'scoreDetails' are flag-gated so should not be set.
-    ASSERT_FALSE(metadata.hasScoreDetails());
-    ASSERT_FALSE(metadata.hasScore());
-}
-
 TEST(DocumentMetadataFieldsTest, ScoreDetailsWithScoreMetadataTest) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
-
     DocumentMetadataFields metadata;
     ASSERT_FALSE(metadata.hasScoreDetails());
     ASSERT_FALSE(metadata.hasScore());
@@ -568,7 +519,6 @@ TEST(DocumentMetadataFieldsTest, ScoreDetailsWithScoreMetadataTest) {
 TEST(DocumentMetadataFieldsTest, ScoreDetailsMetadataSetOnOtherMetadataTest) {
     // Tests that setting "searchScoreDetails" also sets "scoreDetails" but does not set "score" or
     // "searchScore".
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
 
     DocumentMetadataFields metadata;
     ASSERT_FALSE(metadata.hasSearchScoreDetails());
@@ -586,7 +536,6 @@ TEST(DocumentMetadataFieldsTest, ScoreDetailsMetadataSetOnOtherMetadataTest) {
 }
 
 TEST(DocumentMetadataFieldsTest, ScoreDetailsAloneMetadataTest) {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     {
         DocumentMetadataFields metadata;
         metadata.setScoreDetails(Value(BSON("value" << 5 << "otherDetails" << 10)));
@@ -664,7 +613,6 @@ TEST(DocumentMetadataFieldsTest, ScoreDetailsAloneMetadataTest) {
 TEST(DocumentMetadataFieldsTest, SettingScoreDetailsWithScoreOverridesScore) {
     // Tests that setting "searchScoreDetails" also sets "scoreDetails" but does not set "score" or
     // "searchScore".
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
 
     DocumentMetadataFields metadata;
     ASSERT_FALSE(metadata.hasScoreDetails());
@@ -682,7 +630,6 @@ TEST(DocumentMetadataFieldsTest, SettingScoreDetailsWithScoreOverridesScore) {
 DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  ScoreDetailsWithScoreMetadataFailsIfScoreValueIsNonNumeric,
                  "Tripwire assertion.*9679300") {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     DocumentMetadataFields metadata;
     metadata.setScoreAndScoreDetails(Value(BSON("value" << "string")));
 }
@@ -690,7 +637,6 @@ DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
 DEATH_TEST_REGEX(DocumentMetadataFieldsTestDeathTest,
                  ScoreDetailsWithScoreMetadataFailsIfScoreValueIsMissing,
                  "Tripwire assertion.*9679300") {
-    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     DocumentMetadataFields metadata;
     metadata.setScoreAndScoreDetails(Value(BSON("non-value" << "string")));
 }
@@ -775,7 +721,7 @@ TEST(DocumentMetadataFieldsTest, EqualityOperatorWithAllFields) {
         meta.setGeoNearPoint(
             Value(BSON("type" << "Point" << "coordinates" << BSON_ARRAY(1.0 << 2.0))));
         meta.setSearchScore(3.5);
-        meta.setSearchHighlights(Value{"foo"_sd});
+        meta.setSearchHighlights(Value{"foo"sv});
         meta.setIndexKey(BSON("b" << 1));
         meta.setRecordId(RecordId{6});
         meta.setSearchScoreDetails(BSON("scoreDetails" << "foo"));
@@ -785,11 +731,11 @@ TEST(DocumentMetadataFieldsTest, EqualityOperatorWithAllFields) {
         meta.setTimeseriesBucketMaxTime(time);
         meta.setSearchSortValues(BSON("a" << 1));
         meta.setVectorSearchScore(7.6);
-        meta.setSearchSequenceToken(Value("token1"_sd));
+        meta.setSearchSequenceToken(Value("token1"sv));
         meta.setScore(2.5);
         meta.setScoreDetails(Value(BSON("value" << 3 << "otherDetails"
                                                 << "foo")));
-        meta.setStream(Value("topic-stream"_sd));
+        meta.setStream(Value("topic-stream"sv));
         return meta;
     };
     DocumentMetadataFields meta1 = generateMeta();
@@ -802,7 +748,7 @@ TEST(DocumentMetadataFieldsTest, IsScoreProducingMetaTypeReturnsTrueForScoreMeta
     const std::vector<std::string> scoreMetadataFields = {
         "score", "searchScore", "vectorSearchScore", "textScore"};
     for (const auto& field : scoreMetadataFields) {
-        ASSERT_TRUE(DocumentMetadataFields::isScoreProducingMetaType(StringData{field}))
+        ASSERT_TRUE(DocumentMetadataFields::isScoreProducingMetaType(std::string_view{field}))
             << "Expected isScoreProducingMetaType to return true for: " << field;
     }
 }
@@ -822,13 +768,13 @@ TEST(DocumentMetadataFieldsTest, IsScoreProducingMetaTypeReturnsFalseForNonScore
                                                              "stream",
                                                              "changeStreamControlEvent"};
     for (const auto& field : nonScoreMetadataFields) {
-        ASSERT_FALSE(DocumentMetadataFields::isScoreProducingMetaType(StringData{field}))
+        ASSERT_FALSE(DocumentMetadataFields::isScoreProducingMetaType(std::string_view{field}))
             << "Expected isScoreProducingMetaType to return false for: " << field;
     }
 }
 
 TEST(DocumentMetadataFieldsTest, IsScoreProducingMetaTypeThrowsForUnsupportedMetaField) {
-    ASSERT_THROWS_CODE(DocumentMetadataFields::isScoreProducingMetaType("unsupportedField"_sd),
+    ASSERT_THROWS_CODE(DocumentMetadataFields::isScoreProducingMetaType("unsupportedField"sv),
                        AssertionException,
                        17308);
 }

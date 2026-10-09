@@ -1,49 +1,7 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/shard_role/shard_catalog/collection_impl.h"
-
-#include <mutex>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/container/flat_set.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -116,22 +74,41 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/string_map.h"
 
+#include <mutex>
+#include <string_view>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
+
+// This fail point allows collections to be given malformed validators. With parseValidator: true,
+// the collection stores the parse error and rejects writes instead of bypassing the parser.
+MONGO_FAIL_POINT_DEFINE(allowSettingMalformedCollectionValidators);
+
 namespace {
 
-// This fail point allows collections to be given malformed validator. A malformed validator
-// will not (and cannot) be enforced but it will be persisted.
-MONGO_FAIL_POINT_DEFINE(allowSettingMalformedCollectionValidators);
-MONGO_FAIL_POINT_DEFINE(timeseriesBucketingParametersChangedInputValue);
 MONGO_FAIL_POINT_DEFINE(skipCappedDeletes);
 // Simulate the behavior of mixed-schema flag of MongoDB versions without SERVER-91195:
 // Only set the legacy time-series mixed-schema flag at the top level of the catalog,
 // and clear the new durable flag which is stored inside the collection options.
 MONGO_FAIL_POINT_DEFINE(simulateLegacyTimeseriesMixedSchemaFlag);
 
-bool indexTypeSupportsPathLevelMultikeyTracking(StringData accessMethod) {
+bool indexTypeSupportsPathLevelMultikeyTracking(std::string_view accessMethod) {
     return accessMethod == IndexNames::BTREE || accessMethod == IndexNames::GEO_2DSPHERE;
 }
 
@@ -178,7 +155,7 @@ StatusWith<bool> doesMinMaxHaveMixedSchemaData(const BSONObj& min, const BSONObj
 StatusWith<std::shared_ptr<Ident>> findSharedIdentForIndex(OperationContext* opCtx,
                                                            StorageEngine* storageEngine,
                                                            const Collection* collection,
-                                                           StringData ident) {
+                                                           std::string_view ident) {
     // First check the index catalog of the existing collection for the index entry.
     auto latestEntry = [&]() -> std::shared_ptr<Ident> {
         if (!collection)
@@ -410,8 +387,8 @@ void CollectionImpl::_initCommon(OperationContext* opCtx) {
     uassertStatusOK(_checkValidatorCanBeUsed(validatorDoc));
 
     // Make sure validationAction and validationLevel are allowed on this collection
-    uassertStatusOK(
-        checkValidationOptionsCanBeUsed(collectionOptions, boost::none, boost::none, boost::none));
+    uassertStatusOK(checkValidationOptionsCanBeUsed(
+        collectionOptions, boost::none, boost::none, boost::none, boost::none));
 
     // Make sure to copy the action and level before parsing MatchExpression, since certain features
     // are not supported with certain combinations of action and level.
@@ -436,27 +413,7 @@ void CollectionImpl::_initCommon(OperationContext* opCtx) {
 
 void CollectionImpl::_setMetadata(
     OperationContext* opCtx, std::shared_ptr<durable_catalog::CatalogEntryMetaData>&& metadata) {
-    if (metadata->options.timeseries) {
-        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-
-        // If present, reuse the storageEngine options to work around the issue described in
-        // SERVER-91194.
-        metadata->_durableTimeseriesBucketsMayHaveMixedSchemaData =
-            storageEngine->getFlagFromStorageOptions(
-                metadata->options.storageEngine,
-                backwards_compatible_collection_options::kTimeseriesBucketsMayHaveMixedSchemaData);
-        if (metadata->_durableTimeseriesBucketsMayHaveMixedSchemaData.has_value()) {
-            metadata->timeseriesBucketsMayHaveMixedSchemaData =
-                *metadata->_durableTimeseriesBucketsMayHaveMixedSchemaData;
-        }
-
-        // If present, reuse storageEngine options to work around the issue described in
-        // SERVER-91193
-        metadata->_durableTimeseriesBucketingParametersHaveChanged =
-            storageEngine->getFlagFromStorageOptions(
-                metadata->options.storageEngine,
-                backwards_compatible_collection_options::kTimeseriesBucketingParametersHaveChanged);
-    }
+    durable_catalog::sanitizeTimeseriesOptions(opCtx, *metadata);
     _metadata = std::move(metadata);
 }
 
@@ -508,7 +465,7 @@ bool CollectionImpl::requiresIdIndex() const {
     }
 
     if (_ns.isSystem()) {
-        StringData shortName = _ns.coll().substr(_ns.coll().find('.') + 1);
+        std::string_view shortName = _ns.coll().substr(_ns.coll().find('.') + 1);
         if (shortName == "indexes" || shortName == "namespaces" || shortName == "profile") {
             return false;
         }
@@ -556,49 +513,62 @@ Status CollectionImpl::checkValidatorAPIVersionCompatability(OperationContext* o
     return Status::OK();
 }
 
-std::pair<Collection::SchemaValidationResult, Status> CollectionImpl::checkValidation(
+std::pair<Collection::DocumentValidationResult, Status> CollectionImpl::checkValidation(
     OperationContext* opCtx, const BSONObj& document) const {
+    using DVR = DocumentValidationResult;
+    using SVR = SchemaValidationResult;
+    using NCR = DocumentValidationResult::NonComplianceReason;
+
     if (!_validator.isOK()) {
-        return {SchemaValidationResult::kError, _validator.getStatus()};
+        return {DVR{SVR::kError, NCR::kValidatorError}, _validator.getStatus()};
     }
 
     const auto* const validatorMatchExpr = _validator.filter.getValue().get();
     if (!validatorMatchExpr)
-        return {SchemaValidationResult::kPass, Status::OK()};
+        return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
 
     if (validationLevelOrDefault(_metadata->options.validationLevel) == ValidationLevelEnum::off)
-        return {SchemaValidationResult::kPass, Status::OK()};
+        return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
 
     if (DocumentValidationSettings::get(opCtx).isSchemaValidationDisabledForInternalOp()) {
-        return {SchemaValidationResult::kPass, Status::OK()};
+        return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
     }
 
     if (DocumentValidationSettings::get(opCtx).isSchemaValidationDisabled()) {
+        if (_metadata->options.prepareConstraintValidationLevel) {
+            return {DVR{SVR::kError, NCR::kBypassProhibitedWithPrepareConstraintLevel},
+                    Status(ErrorCodes::BadValue,
+                           str::stream()
+                               << "bypassDocumentValidation is not permitted while "
+                                  "prepareConstraintValidationLevel is set. To allow "
+                                  "bypassDocumentValidation, first run: db.runCommand({collMod: \""
+                               << ns().coll() << "\", prepareConstraintValidationLevel: false})")};
+        }
         if (_metadata->options.validationLevel == ValidationLevelEnum::constraint) {
             return {
-                SchemaValidationResult::kError,
+                DVR{SVR::kError, NCR::kBypassProhibitedWithConstraintLevel},
                 Status(
                     ErrorCodes::BadValue,
                     "bypassDocumentValidation is not permitted with 'constraint' validationLevel")};
         }
         if (isTimeseriesCollection()) {
-            return {SchemaValidationResult::kError,
+            return {DVR{SVR::kError, NCR::kBypassProhibitedForTimeseries},
                     Status(ErrorCodes::BadValue,
                            "bypassDocumentValidation is not permitted on timeseries collections")};
         }
-        return {SchemaValidationResult::kPass, Status::OK()};
+        return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
     }
 
     if (ns().isTemporaryReshardingCollection()) {
         // In resharding, the donor shard primary is responsible for performing document validation
         // and the recipient should not perform validation on documents inserted into the temporary
         // resharding collection.
-        return {SchemaValidationResult::kPass, Status::OK()};
+        return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
     }
 
     auto status = checkValidatorAPIVersionCompatability(opCtx);
     if (!status.isOK()) {
-        return {SchemaValidationResult::kError, status};
+        return {DVR{SVR::kError, NCR::kApiVersionIncompatible}, status};
     }
 
     // Regular schema validation for everything except timeseries collections which uses a stricter
@@ -606,14 +576,14 @@ std::pair<Collection::SchemaValidationResult, Status> CollectionImpl::checkValid
     if (!isTimeseriesCollection() || gTimeseriesDisableStrictBucketValidator.load()) {
         try {
             if (exec::matcher::matchesBSON(validatorMatchExpr, document)) {
-                return {SchemaValidationResult::kPass, Status::OK()};
+                return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
             }
         } catch (DBException&) {
         };
 
         BSONObj generatedError = doc_validation_error::generateError(*validatorMatchExpr, document);
 
-        static constexpr auto kValidationFailureErrorStr = "Document failed validation"_sd;
+        static constexpr auto kValidationFailureErrorStr = "Document failed validation"sv;
         status = Status(doc_validation_error::DocumentValidationFailureInfo(generatedError),
                         kValidationFailureErrorStr);
 
@@ -622,36 +592,39 @@ std::pair<Collection::SchemaValidationResult, Status> CollectionImpl::checkValid
                 if (validationLevelOrDefault(_metadata->options.validationLevel) ==
                     ValidationLevelEnum::constraint) {
                     // Warn is prohibited for constraint validationLevel.
-                    return {SchemaValidationResult::kError, status};
+                    return {DVR{SVR::kError, NCR::kSchemaViolationWarnConstraintLevel}, status};
                 }
-                return {SchemaValidationResult::kWarn, status};
+                return {DVR{SVR::kWarn, NCR::kSchemaViolation}, status};
             case ValidationActionEnum::error:
-                return {SchemaValidationResult::kError, status};
+                return {DVR{SVR::kError, NCR::kSchemaViolation}, status};
             case ValidationActionEnum::errorAndLog:
-                return {SchemaValidationResult::kErrorAndLog, status};
+                return {DVR{SVR::kErrorAndLog, NCR::kSchemaViolation}, status};
         }
         MONGO_UNREACHABLE_TASSERT(7488702);
     }
 
     // Strict validation for bucket documents in timeseries collections
-    try {
-        timeseries::validateBucketConsistency(this, document);
-        return {SchemaValidationResult::kPass, Status::OK()};
-    } catch (DBException& ex) {
+    {
+        using BCV = DVR::BucketConsistencyViolation;
+        const BCV violation = timeseries::validateBucketConsistency(this, document);
+        if (violation == BCV::kNone) {
+            return {DVR{SVR::kPass, NCR::kNone}, Status::OK()};
+        }
         // For strict timeseries validation we ensure that we only return kError or kErrorAndLog.
-        return {validationActionOrDefault(_metadata->options.validationAction) ==
-                        ValidationActionEnum::errorAndLog
-                    ? SchemaValidationResult::kErrorAndLog
-                    : SchemaValidationResult::kError,
+        const SVR svr = validationActionOrDefault(_metadata->options.validationAction) ==
+                ValidationActionEnum::errorAndLog
+            ? SVR::kErrorAndLog
+            : SVR::kError;
+        return {DVR{svr, NCR::kTimeseriesSchemaViolation, violation},
                 Status(doc_validation_error::DocumentValidationFailureInfo(document),
-                       ex.toStatus().toString())};
-    };
+                       "Time-series bucket document failed consistency check")};
+    }
 }
 
 Status CollectionImpl::checkValidationAndParseResult(OperationContext* opCtx,
                                                      const BSONObj& document) const {
-    std::pair<SchemaValidationResult, Status> result = checkValidation(opCtx, document);
-    switch (result.first) {
+    auto result = checkValidation(opCtx, document);
+    switch (result.first.result) {
         case SchemaValidationResult::kPass:
             return Status::OK();
         case SchemaValidationResult::kWarn:
@@ -660,9 +633,9 @@ Status CollectionImpl::checkValidationAndParseResult(OperationContext* opCtx,
                 "Document would fail validation",
                 logAttrs(ns()),
                 "document"_attr = redact(document),
-                "errInfo"_attr =
+                "errInfo"_attr = redact(
                     result.second.extraInfo<doc_validation_error::DocumentValidationFailureInfo>()
-                        ->getDetails());
+                        ->getDetails()));
             return Status::OK();
         case SchemaValidationResult::kErrorAndLog:
             LOGV2_WARNING(
@@ -670,9 +643,9 @@ Status CollectionImpl::checkValidationAndParseResult(OperationContext* opCtx,
                 "Document failed validation",
                 logAttrs(ns()),
                 "document"_attr = redact(document),
-                "errInfo"_attr =
+                "errInfo"_attr = redact(
                     result.second.extraInfo<doc_validation_error::DocumentValidationFailureInfo>()
-                        ->getDetails());
+                        ->getDetails()));
             return result.second;
         case SchemaValidationResult::kError:
             return result.second;
@@ -684,7 +657,8 @@ Collection::Validator CollectionImpl::parseValidator(
     OperationContext* opCtx,
     const BSONObj& validator,
     MatchExpressionParser::AllowedFeatureSet allowedFeatures) const {
-    if (MONGO_unlikely(allowSettingMalformedCollectionValidators.shouldFail())) {
+    if (MONGO_unlikely(allowSettingMalformedCollectionValidators.shouldFail(
+            [](const BSONObj& data) { return !data.getBoolField("parseValidator"); }))) {
         return {validator, nullptr, nullptr};
     }
 
@@ -799,43 +773,12 @@ bool CollectionImpl::isCappedAndNeedsDelete(OperationContext* opCtx) const {
         return false;
     }
 
-    long long currentDataSize;
-    long long currentNumRecords;
-
-    // TODO(SERVER-125506): Remove latestSizeCountEnabled, the entire if-else statement, and the
-    // declaration of currentDataSize and currentNumRecords. See SERVER-123334 for the concise
-    // version of this code.
-    const bool latestSizeCountEnabled =
-        gFeatureFlagReplicatedFastCountDurability.isEnabledUseLatestFCVWhenUninitialized(
-            VersionContext::getDecoration(opCtx),
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    if (latestSizeCountEnabled && isReplicatedFastCountEnabled(opCtx)) {
-        // When writes are batched, the capped collection insert is not written to the oplog until
-        // the top-level WriteUnitOfWork commits. When writes are not batched, the capped collection
-        // insert is written to the oplog immediately. latestSizeCount() scans the oplog to compute
-        // the latest collection size/count, so it misses the latest insert when writes are batched.
-        // To correctly compute currentDataSize and currentNumRecords, we include the uncommitted
-        // size/count changes if and only if writes are batched.
-        const bool batched = BatchedWriteContext::get(opCtx).writesAreBatched();
-        const CollectionSizeCount uncommittedChanges = (batched)
-            ? UncommittedFastCountChange::getForRead(opCtx).find(uuid())
-            : CollectionSizeCount{.size = 0, .count = 0};
-
-        const auto [latestSize, latestCount] = latestSizeCount(opCtx);
-
-        currentDataSize = latestSize + uncommittedChanges.size;
-        currentNumRecords = latestCount + uncommittedChanges.count;
-    } else {
-        currentDataSize = dataSize(opCtx);
-        currentNumRecords = numRecords(opCtx);
-    }
-
-    if (currentDataSize > getCollectionOptions().cappedSize) {
+    if (dataSize(opCtx) > getCollectionOptions().cappedSize) {
         return true;
     }
 
     const auto cappedMaxDocs = getCollectionOptions().cappedMaxDocs;
-    if ((cappedMaxDocs != 0) && (currentNumRecords > cappedMaxDocs)) {
+    if ((cappedMaxDocs != 0) && (numRecords(opCtx) > cappedMaxDocs)) {
         return true;
     }
 
@@ -888,43 +831,6 @@ timeseries::MixedSchemaBucketsState CollectionImpl::getTimeseriesMixedSchemaBuck
     invariant(!_metadata->_durableTimeseriesBucketsMayHaveMixedSchemaData.value_or(true) ||
               !_metadata->timeseriesBucketsMayHaveMixedSchemaData.value_or(true));
     return timeseries::MixedSchemaBucketsState::NoMixedSchemaBuckets;
-}
-
-boost::optional<bool> CollectionImpl::timeseriesBucketingParametersHaveChanged() const {
-    if (!getTimeseriesOptions()) {
-        return boost::none;
-    }
-
-    if (auto sfp = timeseriesBucketingParametersChangedInputValue.scoped();
-        MONGO_unlikely(sfp.isActive())) {
-        const auto& data = sfp.getData();
-        return data["value"].Bool();
-    }
-
-    // Offline validation doesn't initialize FCV in order to validate older MongoDB instances
-    // TODO(SERVER-96993) Re-evaluate if true makes sense as default for older versions
-    if (storageGlobalParams.validate) {
-        return true;
-    }
-
-    return _metadata->_durableTimeseriesBucketingParametersHaveChanged;
-}
-
-void CollectionImpl::setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
-                                                             boost::optional<bool> value) {
-    tassert(7625800, "This is not a time-series collection", _metadata->options.timeseries);
-
-    // TODO SERVER-92265 properly set this catalog option
-    _writeMetadata(opCtx, [&](durable_catalog::CatalogEntryMetaData& md) {
-        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-
-        // Reuse storageEngine options to work around the issue described in SERVER-91193
-        md._durableTimeseriesBucketingParametersHaveChanged = value;
-        md.options.storageEngine = storageEngine->setFlagToStorageOptions(
-            md.options.storageEngine,
-            backwards_compatible_collection_options::kTimeseriesBucketingParametersHaveChanged,
-            value);
-    });
 }
 
 bool CollectionImpl::shouldRemoveLegacyTimeseriesBucketingParametersHaveChanged() const {
@@ -1006,15 +912,6 @@ void CollectionImpl::setRequiresTimeseriesExtendedRangeSupport(OperationContext*
     }
 }
 
-bool CollectionImpl::areTimeseriesBucketsFixed() const {
-    if (const auto& optTsOptions = getTimeseriesOptions(); optTsOptions) {
-        // Assume parameters have changed unless otherwise specified.
-        const auto parametersChanged = timeseriesBucketingParametersHaveChanged().value_or(true);
-        return timeseries::areTimeseriesBucketsFixed(optTsOptions.get(), parametersChanged);
-    }
-    return false;
-}
-
 bool CollectionImpl::isClustered() const {
     return getClusteredInfo().has_value();
 }
@@ -1054,7 +951,7 @@ Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
             return status;
         }
         if (auto truncateMarkers = LocalOplogInfo::get(opCtx)->getTruncateMarkers()) {
-            truncateMarkers->adjust(*newCappedSize);
+            truncateMarkers->adjust(*_shared->_recordStore);
         }
     }
 
@@ -1137,37 +1034,37 @@ long long CollectionImpl::getCappedMaxSize() const {
 }
 
 long long CollectionImpl::numRecords(OperationContext* opCtx) const {
-    return (isReplicatedFastCountEnabled(opCtx) && isReplicatedFastCountEligible(_ns))
-        ? replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
-                .find(uuid())
-                .count +
-            UncommittedFastCountChange::getForRead(opCtx).find(uuid()).count
+    return (shouldReadFromReplicatedFastCount(opCtx, _ns))
+        ? _shared->_recordStore->accurateNumRecords() +
+            UncommittedFastCountChanges::getForRead(opCtx).find(uuid()).count
         : _shared->_recordStore->numRecords();
 }
 
 long long CollectionImpl::dataSize(OperationContext* opCtx) const {
-    return (isReplicatedFastCountEnabled(opCtx) && isReplicatedFastCountEligible(_ns))
-        ? replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
-                .find(uuid())
-                .size +
-            UncommittedFastCountChange::getForRead(opCtx).find(uuid()).size
+    return (shouldReadFromReplicatedFastCount(opCtx, _ns))
+        ? _shared->_recordStore->accurateDataSize() +
+            UncommittedFastCountChanges::getForRead(opCtx).find(uuid()).size
         : _shared->_recordStore->dataSize();
 }
 
 CollectionSizeCount CollectionImpl::latestSizeCount(OperationContext* opCtx) const {
-    return (isReplicatedFastCountEnabled(opCtx) && isReplicatedFastCountEligible(_ns))
-        ? replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
-              .findLatest(opCtx, uuid())
-        : CollectionSizeCount{_shared->_recordStore->dataSize(),
-                              _shared->_recordStore->numRecords()};
+    return {.size = dataSize(opCtx), .count = numRecords(opCtx)};
 }
 
 CollectionSizeCount CollectionImpl::persistedSizeCount(OperationContext* opCtx) const {
-    return (isReplicatedFastCountEnabled(opCtx) && isReplicatedFastCountEligible(_ns))
-        ? replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
-              .findPersisted(opCtx, uuid())
-        : CollectionSizeCount{_shared->_recordStore->dataSize(),
-                              _shared->_recordStore->numRecords()};
+    if (!shouldReadFromReplicatedFastCount(opCtx, _ns)) {
+        return CollectionSizeCount{_shared->_recordStore->dataSize(),
+                                   _shared->_recordStore->numRecords()};
+    }
+
+    auto persisted =
+        replicated_fast_count::ReplicatedFastCountManager::get(opCtx->getServiceContext())
+            .findPersisted(opCtx, uuid());
+    massert(12793500,
+            fmt::format("Expected the size/count store to contain an entry for UUID={}",
+                        uuid().toString()),
+            persisted.has_value());
+    return persisted->first.sizeCount;
 }
 
 int64_t CollectionImpl::sizeOnDisk(OperationContext* opCtx,
@@ -1256,13 +1153,15 @@ Status CollectionImpl::truncate(OperationContext* opCtx) {
     return Status::OK();
 }
 
-Status CollectionImpl::setValidationOptions(OperationContext* opCtx,
-                                            boost::optional<ValidationLevelEnum> newLevel,
-                                            boost::optional<ValidationActionEnum> newAction,
-                                            boost::optional<Validator> newValidator) {
+Status CollectionImpl::setValidationOptions(
+    OperationContext* opCtx,
+    boost::optional<ValidationLevelEnum> newLevel,
+    boost::optional<ValidationActionEnum> newAction,
+    boost::optional<Validator> newValidator,
+    boost::optional<bool> newPrepareConstraintValidationLevel) {
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(ns(), MODE_X));
-    auto status =
-        checkValidationOptionsCanBeUsed(_metadata->options, newLevel, newAction, newValidator);
+    auto status = checkValidationOptionsCanBeUsed(
+        _metadata->options, newLevel, newAction, newValidator, newPrepareConstraintValidationLevel);
     if (!status.isOK()) {
         return status;
     }
@@ -1277,7 +1176,18 @@ Status CollectionImpl::setValidationOptions(OperationContext* opCtx,
         mustReparse) {
         _validator = parseValidator(opCtx, _validator.validatorDoc, allowedFeatures);
         if (!_validator.isOK()) {
-            return _validator.getStatus();
+            // Do not enforce an OK result during oplog application: as at startup, the
+            // validator may have been well formed on the version that wrote it. Keeping it
+            // rejects writes to the collection (fail closed) rather than allowing them
+            // unvalidated (SERVER-134863).
+            if (opCtx->writesAreReplicated()) {
+                return _validator.getStatus();
+            }
+            LOGV2_WARNING(13486300,
+                          "Re-parsing of a malformed collection validator failed during oplog "
+                          "application, keeping it",
+                          logAttrs(ns()),
+                          "validatorStatus"_attr = _validator.getStatus());
         }
     }
 
@@ -1285,6 +1195,11 @@ Status CollectionImpl::setValidationOptions(OperationContext* opCtx,
         md.options.validator = _validator.validatorDoc;
         md.options.validationLevel = validationLevel;
         md.options.validationAction = validationAction;
+        if (validationLevel == ValidationLevelEnum::constraint) {
+            md.options.prepareConstraintValidationLevel = false;
+        } else if (newPrepareConstraintValidationLevel) {
+            md.options.prepareConstraintValidationLevel = *newPrepareConstraintValidationLevel;
+        }
     });
     return Status::OK();
 }
@@ -1297,6 +1212,7 @@ boost::optional<ValidationActionEnum> CollectionImpl::getValidationAction() cons
     return _metadata->options.validationAction;
 }
 
+
 Status CollectionImpl::updateValidator(OperationContext* opCtx,
                                        BSONObj newValidatorDoc,
                                        boost::optional<ValidationLevelEnum> newLevel,
@@ -1306,7 +1222,13 @@ Status CollectionImpl::updateValidator(OperationContext* opCtx,
     auto validationLevel = validationLevelOrCurrent(_metadata->options, newLevel);
     if (validationLevel == ValidationLevelEnum::constraint) {
         return Status(ErrorCodes::BadValue,
-                      "Validator can not be changed with 'constraint' validationLevel");
+                      "Validator cannot be changed when validationLevel is 'constraint'");
+    }
+    if (_metadata->options.prepareConstraintValidationLevel) {
+        return Status(ErrorCodes::BadValue,
+                      "Validator cannot be changed while prepareConstraintValidationLevel is set. "
+                      "To make validator changes, first run: db.runCommand({collMod: "
+                      "\"<collection>\", prepareConstraintValidationLevel: false})");
     }
     tassert(11738200,
             fmt::format("Illegal attempt to set a non-empty validator on viewless timeseries "
@@ -1321,8 +1243,8 @@ Status CollectionImpl::updateValidator(OperationContext* opCtx,
         return newValidator.getStatus();
     }
 
-    if (auto status =
-            checkValidationOptionsCanBeUsed(_metadata->options, newLevel, newAction, newValidator);
+    if (auto status = checkValidationOptionsCanBeUsed(
+            _metadata->options, newLevel, newAction, newValidator, boost::none);
         !status.isOK()) {
         return status;
     }
@@ -1515,7 +1437,7 @@ StatusWith<int> CollectionImpl::checkMetaDataForIndex(const std::string& indexNa
 }
 
 void CollectionImpl::updateTTLSetting(OperationContext* opCtx,
-                                      StringData idxName,
+                                      std::string_view idxName,
                                       long long newExpireSeconds) {
     int offset = _metadata->findIndexOffset(idxName);
     invariant(offset >= 0,
@@ -1526,7 +1448,9 @@ void CollectionImpl::updateTTLSetting(OperationContext* opCtx,
     });
 }
 
-void CollectionImpl::updateHiddenSetting(OperationContext* opCtx, StringData idxName, bool hidden) {
+void CollectionImpl::updateHiddenSetting(OperationContext* opCtx,
+                                         std::string_view idxName,
+                                         bool hidden) {
     int offset = _metadata->findIndexOffset(idxName);
     invariant(offset >= 0);
 
@@ -1535,7 +1459,9 @@ void CollectionImpl::updateHiddenSetting(OperationContext* opCtx, StringData idx
     });
 }
 
-void CollectionImpl::updateUniqueSetting(OperationContext* opCtx, StringData idxName, bool unique) {
+void CollectionImpl::updateUniqueSetting(OperationContext* opCtx,
+                                         std::string_view idxName,
+                                         bool unique) {
     int offset = _metadata->findIndexOffset(idxName);
     invariant(offset >= 0);
 
@@ -1545,7 +1471,7 @@ void CollectionImpl::updateUniqueSetting(OperationContext* opCtx, StringData idx
 }
 
 void CollectionImpl::updatePrepareUniqueSetting(OperationContext* opCtx,
-                                                StringData idxName,
+                                                std::string_view idxName,
                                                 bool prepareUnique) {
     int offset = _metadata->findIndexOffset(idxName);
     invariant(offset >= 0);
@@ -1592,7 +1518,7 @@ void CollectionImpl::setIsTemp(OperationContext* opCtx, bool isTemp) {
                    [&](durable_catalog::CatalogEntryMetaData& md) { md.options.temp = isTemp; });
 }
 
-void CollectionImpl::removeIndex(OperationContext* opCtx, StringData indexName) {
+void CollectionImpl::removeIndex(OperationContext* opCtx, std::string_view indexName) {
     if (_metadata->findIndexOffset(indexName) < 0)
         return;  // never had the index so nothing to do.
 
@@ -1602,7 +1528,7 @@ void CollectionImpl::removeIndex(OperationContext* opCtx, StringData indexName) 
 
 Status CollectionImpl::prepareForIndexBuild(OperationContext* opCtx,
                                             const IndexDescriptor* spec,
-                                            StringData ident,
+                                            std::string_view ident,
                                             boost::optional<UUID> buildUUID) {
     durable_catalog::CatalogEntryMetaData::IndexMetaData imd;
     imd.spec = spec->infoObj();
@@ -1661,7 +1587,7 @@ Status CollectionImpl::prepareForIndexBuild(OperationContext* opCtx,
     return status;
 }
 
-boost::optional<UUID> CollectionImpl::getIndexBuildUUID(StringData indexName) const {
+boost::optional<UUID> CollectionImpl::getIndexBuildUUID(std::string_view indexName) const {
     int offset = _metadata->findIndexOffset(indexName);
     invariant(offset >= 0,
               str::stream() << "cannot get build UUID for index " << indexName << " @ "
@@ -1670,7 +1596,7 @@ boost::optional<UUID> CollectionImpl::getIndexBuildUUID(StringData indexName) co
 }
 
 bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
-                                     StringData indexName,
+                                     std::string_view indexName,
                                      MultikeyPaths* multikeyPaths,
                                      int indexOffset) const {
     int offset = indexOffset;
@@ -1736,11 +1662,8 @@ bool CollectionImpl::isIndexMultikey(OperationContext* opCtx,
     return index.multikey;
 }
 
-bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
-                                        StringData indexName,
-                                        const MultikeyPaths& multikeyPaths,
-                                        int indexOffset) const {
-
+int CollectionImpl::_getIndexOffsetForMultikeyUpdate(std::string_view indexName,
+                                                     int indexOffset) const {
     int offset = indexOffset;
     if (offset < 0) {
         offset = _metadata->findIndexOffset(indexName);
@@ -1760,56 +1683,98 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
                                 << " ; actual : " << _metadata->findIndexOffset(indexName));
     }
 
-    auto setMultikey = [offset,
-                        multikeyPaths](const durable_catalog::CatalogEntryMetaData& metadata) {
-        auto* index = &metadata.indexes[offset];
-        std::lock_guard lock(index->multikeyMutex);
+    return offset;
+}
 
-        auto tracksPathLevelMultikeyInfo = !index->multikeyPaths.empty();
-        if (!tracksPathLevelMultikeyInfo) {
-            invariant(multikeyPaths.empty());
+int64_t CollectionImpl::_setIndexIsMultikeyInMetadata(
+    const durable_catalog::CatalogEntryMetaData& metadata,
+    int offset,
+    const MultikeyPaths& multikeyPaths) const {
+    auto& index = metadata.indexes[offset];
+    std::lock_guard lock(index.multikeyMutex);
 
-            if (index->multikey) {
-                // The index is already set as multikey and we aren't tracking path-level
-                // multikey information for it. We return false to indicate that the index
-                // metadata is unchanged.
-                return false;
-            }
-            index->multikey = true;
-            return true;
+    auto tracksPathLevelMultikeyInfo = !index.multikeyPaths.empty();
+    if (!tracksPathLevelMultikeyInfo) {
+        invariant(multikeyPaths.empty());
+
+        if (index.multikey) {
+            // The index is already set as multikey and we aren't tracking path-level multikey
+            // information for it. We return 0 to indicate that the index metadata is unchanged.
+            return 0;
         }
+        // The index is becoming multikey for the first time. We return 1 to count this metadata
+        // change even though no path components are tracked in the catalog for this index.
+        index.multikey = true;
+        return 1;
+    }
 
-        // We are tracking path-level multikey information for this index.
-        invariant(!multikeyPaths.empty());
-        invariant(multikeyPaths.size() == index->multikeyPaths.size());
+    // We are tracking path-level multikey information for this index.
+    invariant(!multikeyPaths.empty());
+    invariant(multikeyPaths.size() == index.multikeyPaths.size());
 
-        index->multikey = true;
+    index.multikey = true;
 
-        bool newPathIsMultikey = false;
-        bool somePathIsMultikey = false;
+    int64_t newPathComponents = 0;
+    bool somePathIsMultikey = false;
 
-        // Store new path components that cause this index to be multikey in catalog's
-        // index metadata.
-        for (size_t i = 0; i < multikeyPaths.size(); ++i) {
-            auto& indexMultikeyComponents = index->multikeyPaths[i];
-            for (const auto multikeyComponent : multikeyPaths[i]) {
-                auto result = indexMultikeyComponents.insert(multikeyComponent);
-                newPathIsMultikey = newPathIsMultikey || result.second;
-                somePathIsMultikey = true;
-            }
+    // Store new path components that cause this index to be multikey in catalog's index metadata.
+    for (size_t i = 0; i < multikeyPaths.size(); ++i) {
+        auto& indexMultikeyComponents = index.multikeyPaths[i];
+        for (const auto multikeyComponent : multikeyPaths[i]) {
+            auto result = indexMultikeyComponents.insert(multikeyComponent);
+            newPathComponents += result.second;
+            somePathIsMultikey = true;
         }
+    }
 
-        // If all of the sets in the multikey paths vector were empty, then no component
-        // of any indexed field caused the index to be multikey. setIndexIsMultikey()
-        // therefore shouldn't have been called.
-        invariant(somePathIsMultikey);
+    // If all of the sets in the multikey paths vector were empty, then no component of any indexed
+    // field caused the index to be multikey. setIndexIsMultikey() therefore shouldn't have been
+    // called.
+    invariant(somePathIsMultikey);
 
-        if (!newPathIsMultikey) {
-            // We return false to indicate that the index metadata is unchanged.
-            return false;
-        }
-        return true;
-    };
+    return newPathComponents;
+}
+
+int64_t CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
+                                           std::string_view indexName,
+                                           const MultikeyPaths& multikeyPaths,
+                                           int indexOffset) const {
+    if (CollectionCatalog::isWritableCollection(opCtx, this)) {
+        // Scenarios this covers:
+        // 1. Multi-document transaction that exclusively owns this collection (created in this WUOW
+        // under MODE_IX).
+        // 2. DDL operation that exclusively owns this collection (e.g. createIndexes, collMod)
+        // under MODE_X and has a writable copy.
+        //
+        // The collection has a writable clone already installed in
+        // CollectionCatalog::_pendingCommitNamespaces by the DDL that created it. Mutate that
+        // writable directly so the pending Collection is consistent with the durable catalog at
+        // preCommit, instead of deferring the in-memory update to onCommit.
+        //
+        // Scenarios NOT covered:
+        // 1. Other paths with exclusive access (e.g. foreground validate-repair under MODE_X) which
+        // do NOT have a writable clone installed, but still attempt to set multikey information.
+
+        // We rely on the correctness of the CollectionCatalog. If there is a writable collection,
+        // then it must have been returned during collection acquisition. If this is the writable
+        // collection, it is safe to cast.
+        auto writable = const_cast<CollectionImpl*>(this);
+        return writable->_setIndexIsMultikeyWithExclusiveAccess(
+            opCtx, indexName, multikeyPaths, indexOffset);
+    }
+
+    return _setIndexIsMultikeyWithSharedAccess(opCtx, indexName, multikeyPaths, indexOffset);
+}
+
+int64_t CollectionImpl::_setIndexIsMultikeyWithSharedAccess(OperationContext* opCtx,
+                                                            std::string_view indexName,
+                                                            const MultikeyPaths& multikeyPaths,
+                                                            int indexOffset) const {
+    const auto offset = _getIndexOffsetForMultikeyUpdate(indexName, indexOffset);
+    auto setMultikey =
+        [this, offset, multikeyPaths](const durable_catalog::CatalogEntryMetaData& metadata) {
+            return _setIndexIsMultikeyInMetadata(metadata, offset, multikeyPaths);
+        };
 
     // Make a copy that is safe to read without locks that we insert in the durable catalog, we only
     // update the stored metadata on successful commit. The pending update is stored as a decoration
@@ -1820,11 +1785,13 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
     }
     durable_catalog::CatalogEntryMetaData* metadata = nullptr;
     bool hasSetMultikey = false;
+    int64_t newPathComponents = 0;
 
     auto mdbCatalog = MDBCatalog::get(opCtx);
     if (auto it = uncommittedMultikeys->find(this); it != uncommittedMultikeys->end()) {
         metadata = &it->second;
-        hasSetMultikey = setMultikey(*metadata);
+        newPathComponents = setMultikey(*metadata);
+        hasSetMultikey = newPathComponents > 0;
     } else {
         // First time this OperationContext needs to change multikey information for this
         // collection. We cannot use the cached metadata in this collection as we may have just
@@ -1848,14 +1815,15 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
             }
         }
 
-        hasSetMultikey = setMultikey(metadataLocal);
+        newPathComponents = setMultikey(metadataLocal);
+        hasSetMultikey = newPathComponents > 0;
         if (hasSetMultikey) {
             metadata = &uncommittedMultikeys->emplace(this, std::move(metadataLocal)).first->second;
         }
     }
 
     if (!hasSetMultikey)
-        return false;
+        return 0;
 
     shard_role_details::getRecoveryUnit(opCtx)->onRollback(
         [this, uncommittedMultikeys](OperationContext*) { uncommittedMultikeys->erase(this); });
@@ -1909,7 +1877,22 @@ bool CollectionImpl::setIndexIsMultikey(OperationContext* opCtx,
             uncommittedMultikeys->erase(this);
         });
 
-    return true;
+    return newPathComponents;
+}
+
+int64_t CollectionImpl::_setIndexIsMultikeyWithExclusiveAccess(OperationContext* opCtx,
+                                                               std::string_view indexName,
+                                                               const MultikeyPaths& multikeyPaths,
+                                                               int indexOffset) {
+    const auto offset = _getIndexOffsetForMultikeyUpdate(indexName, indexOffset);
+    auto metadata = _copyMetadataForWrite(opCtx);
+    const auto newPathComponents = _setIndexIsMultikeyInMetadata(*metadata, offset, multikeyPaths);
+    if (!newPathComponents)
+        return 0;
+
+    durable_catalog::putMetaData(opCtx, getCatalogId(), *metadata, MDBCatalog::get(opCtx));
+    _metadata = std::move(metadata);
+    return newPathComponents;
 }
 
 void CollectionImpl::forceSetIndexIsMultikey(OperationContext* opCtx,
@@ -1982,7 +1965,7 @@ int CollectionImpl::getCompletedIndexCount() const {
     return num;
 }
 
-BSONObj CollectionImpl::getIndexSpec(StringData indexName, bool expandSimpleCollation) const {
+BSONObj CollectionImpl::getIndexSpec(std::string_view indexName, bool expandSimpleCollation) const {
     int offset = _metadata->findIndexOffset(indexName);
     invariant(offset >= 0,
               str::stream() << "cannot get index spec for " << indexName << " @ " << getCatalogId()
@@ -2038,12 +2021,12 @@ void CollectionImpl::getReadyIndexes(std::vector<std::string>* names) const {
     }
 }
 
-bool CollectionImpl::isIndexPresent(StringData indexName) const {
+bool CollectionImpl::isIndexPresent(std::string_view indexName) const {
     int offset = _metadata->findIndexOffset(indexName);
     return offset >= 0;
 }
 
-bool CollectionImpl::isIndexReady(StringData indexName) const {
+bool CollectionImpl::isIndexReady(std::string_view indexName) const {
     int offset = _metadata->findIndexOffset(indexName);
     invariant(offset >= 0,
               str::stream() << "cannot get ready status for index " << indexName << " @ "
@@ -2059,6 +2042,10 @@ void CollectionImpl::replaceMetadata(OperationContext* opCtx,
 
 bool CollectionImpl::isMetadataEqual(const BSONObj& otherMetadata) const {
     return !_metadata->toBSON().woCompare(otherMetadata);
+}
+
+std::shared_ptr<const durable_catalog::CatalogEntryMetaData> CollectionImpl::getMetadata() const {
+    return _metadata;
 }
 
 std::shared_ptr<durable_catalog::CatalogEntryMetaData> CollectionImpl::_copyMetadataForWrite(

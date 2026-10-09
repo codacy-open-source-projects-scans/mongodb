@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/pipeline/document_source_sort.h"
 
@@ -43,6 +17,7 @@
 #include "mongo/db/pipeline/skip_and_limit.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/explain_policy.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/sorter/file_based_spiller.h"
@@ -52,9 +27,11 @@
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <array>
 #include <iterator>
 #include <list>
 #include <memory>
+#include <string_view>
 #include <tuple>
 
 #include <boost/cstdint.hpp>
@@ -65,6 +42,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 namespace {
 struct BoundMakerMin {
@@ -76,9 +54,9 @@ struct BoundMakerMin {
             doc.metadata().getTimeseriesBucketMinTime().toMillisSinceEpoch() + offset)};
     }
 
-    Document serialize(const SerializationOptions& opts) const {
+    Document serialize(const query_shape::SerializationOptions& opts) const {
         // Convert from millis to seconds.
-        return Document{{{"base"_sd, DocumentSourceSort::kMin},
+        return Document{{{"base"sv, DocumentSourceSort::kMin},
                          {DocumentSourceSort::kOffset, opts.serializeLiteral(offset / 1000)}}};
     }
 };
@@ -92,9 +70,9 @@ struct BoundMakerMax {
             doc.metadata().getTimeseriesBucketMaxTime().toMillisSinceEpoch() + offset)};
     }
 
-    Document serialize(const SerializationOptions& opts) const {
+    Document serialize(const query_shape::SerializationOptions& opts) const {
         // Convert from millis to seconds.
-        return Document{{{"base"_sd, DocumentSourceSort::kMax},
+        return Document{{{"base"sv, DocumentSourceSort::kMax},
                          {DocumentSourceSort::kOffset, opts.serializeLiteral(offset / 1000)}}};
     }
 };
@@ -134,8 +112,12 @@ const DocumentSourceSort::SortStageOptions DocumentSourceSort::kDefaultOptions =
 DocumentSourceSort::DocumentSourceSort(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                        const SortPattern& sortOrder,
                                        SortStageOptions options)
-    : DocumentSource(kStageName, pExpCtx),
+    // sortOrder is intentionally stored twice: _sortExecutor has always owned its own SortPattern
+    // copy, and DocumentSource::_sortPattern was introduced later to support the getSortPattern()
+    // API. Both fields are const, so they remain in sync for the lifetime of the object.
+    : DocumentSource(kStageName, pExpCtx, sortOrder),
       _sortExecutor(std::make_shared<SortExecutor<Document>>(
+          pExpCtx->getOperationContext(),
           sortOrder,
           options.limit,
           loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes),
@@ -147,6 +129,25 @@ DocumentSourceSort::DocumentSourceSort(const boost::intrusive_ptr<ExpressionCont
             !_sortExecutor->sortPattern().empty());
 }
 
+
+std::unique_ptr<SortLiteParsed> SortLiteParsed::parse(const NamespaceString& nss,
+                                                      const BSONElement& spec,
+                                                      const LiteParserOptions& options) {
+    // '$_internalLimit' and '$_internalOutputSortKeyMetadata' are internal fields that should be
+    // rejected if supplied from an external client.
+    if (options.opCtx && spec.type() == BSONType::object) {
+        static constexpr std::array kInternalFieldNames{DocumentSourceSort::kInternalLimit,
+                                                        DocumentSourceSort::kInternalOutputSortKey};
+        const auto specObj = spec.embeddedObject();
+        for (const auto& field : kInternalFieldNames) {
+            if (specObj.hasField(field)) {
+                assertAllowedInternalIfRequired(
+                    options.opCtx, field, AllowedWithClientType::kInternal);
+            }
+        }
+    }
+    return std::make_unique<SortLiteParsed>(spec);
+}
 
 REGISTER_LITE_PARSED_DOCUMENT_SOURCE(sort, SortLiteParsed::parse, AllowedWithApiStrict::kAlways);
 
@@ -175,8 +176,8 @@ REGISTER_STAGE_PARAMS_TO_DOCUMENT_SOURCE_MAPPING(_internalBoundedSort,
                                                  InternalBoundedSortStageParams::id,
                                                  _internalBoundedSortStageParamsToDocumentSourceFn)
 
-void DocumentSourceSort::serializeForBoundedSort(std::vector<Value>& array,
-                                                 const SerializationOptions& opts) const {
+void DocumentSourceSort::serializeForBoundedSort(
+    std::vector<Value>& array, const query_shape::SerializationOptions& opts) const {
     tassert(9028700, "_timeSorter is nullptr", _timeSorter);
     tassert(
         6369900, "$_internalBoundedSort should not absorb a $limit", !_sortExecutor->hasLimit());
@@ -186,14 +187,14 @@ void DocumentSourceSort::serializeForBoundedSort(std::vector<Value>& array,
         SortPattern::SortKeySerialization::kForPipelineSerialization, opts);
 
     MutableDocument mutDoc{Document{{
-        {"$_internalBoundedSort"_sd,
+        {"$_internalBoundedSort"sv,
          Document{
-             {{"sortKey"_sd, std::move(sortKey)},
-              {"bound"_sd, _timeSorter->serializeBound(opts)},
-              {"limit"_sd, opts.serializeLiteral(static_cast<long long>(_timeSorter->limit()))}}}},
+             {{"sortKey"sv, std::move(sortKey)},
+              {"bound"sv, _timeSorter->serializeBound(opts)},
+              {"limit"sv, opts.serializeLiteral(static_cast<long long>(_timeSorter->limit()))}}}},
     }}};
 
-    if (opts.verbosity >= ExplainOptions::Verbosity::kExecStats) {
+    if (opts.verbosity && explainPolicyFor(*opts.verbosity).hasExecStats()) {
         auto& stats = _timeSorter->stats();
 
         mutDoc["totalDataSizeSortedBytesEstimate"] =
@@ -212,7 +213,7 @@ void DocumentSourceSort::serializeForBoundedSort(std::vector<Value>& array,
 }
 
 void DocumentSourceSort::serializeForCloning(std::vector<Value>& array,
-                                             const SerializationOptions& opts) const {
+                                             const query_shape::SerializationOptions& opts) const {
     MutableDocument mutDoc(_sortExecutor->sortPattern().serialize(
         SortPattern::SortKeySerialization::kForPipelineSerialization, opts));
     if (_sortExecutor->hasLimit()) {
@@ -225,9 +226,9 @@ void DocumentSourceSort::serializeForCloning(std::vector<Value>& array,
     array.push_back(Value(DOC(kStageName << mutDoc.freeze())));
 }
 
-void DocumentSourceSort::serializeWithVerbosity(std::vector<Value>& array,
-                                                const SerializationOptions& opts) const {
-    tassert(9028701, "SerializationOptions do not specify verbosity", opts.verbosity);
+void DocumentSourceSort::serializeWithVerbosity(
+    std::vector<Value>& array, const query_shape::SerializationOptions& opts) const {
+    tassert(9028701, "query_shape::SerializationOptions do not specify verbosity", opts.verbosity);
     uint64_t limit = _sortExecutor->getLimit();
     MutableDocument mutDoc(
         DOC(kStageName << DOC(
@@ -243,7 +244,7 @@ void DocumentSourceSort::serializeWithVerbosity(std::vector<Value>& array,
                                               : Value())
                 << "outputSortKeyMetadata" << (_outputSortKeyMetadata ? Value(true) : Value()))));
 
-    if (opts.verbosity >= ExplainOptions::Verbosity::kExecStats) {
+    if (opts.verbosity && explainPolicyFor(*opts.verbosity).hasExecStats()) {
         auto& stats = _sortExecutor->stats();
 
         mutDoc["totalDataSizeSortedBytesEstimate"] =
@@ -262,7 +263,7 @@ void DocumentSourceSort::serializeWithVerbosity(std::vector<Value>& array,
 }
 
 void DocumentSourceSort::serializeToArray(std::vector<Value>& array,
-                                          const SerializationOptions& opts) const {
+                                          const query_shape::SerializationOptions& opts) const {
     if (_timeSorter) {
         serializeForBoundedSort(array, opts);
     } else if (opts.isSerializingForExplain()) {
@@ -321,8 +322,7 @@ DocumentSourceContainer::iterator DocumentSourceSort::optimizeAt(
         } else {
             // If there's a limit between two adjacent sorts with the same key pattern it's safe to
             // merge the two sorts and take the minimum of the limits.
-            if (dynamic_cast<DocumentSourceSort*>((*itr).get())->getSortPattern() ==
-                nextSort->getSortPattern()) {
+            if (getSortPattern() == nextSort->getSortPattern()) {
                 // When coalescing subsequent $sort stages, the existing/lower limit is retained in
                 // 'setLimit'.
                 nextSort->_sortExecutor->setLimit(*limit);
@@ -412,7 +412,7 @@ auto makeSorter(const ExpressionContext& expCtx,
 
 boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
     SortPattern pat,
-    StringData boundBase,
+    std::string_view boundBase,
     long long boundOffset,
     boost::optional<long long> limit,
     bool outputSortKeyMetadata,
@@ -421,7 +421,8 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::createBoundedSort(
 
     SortOptions opts;
     opts.maxMemoryUsageBytes =
-        loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes);
+        loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes)
+            .get(expCtx->getOperationContext());
 
     if (limit) {
         opts.Limit(limit.value());
@@ -501,7 +502,7 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
     uassert(6460201,
             "$_internalBoundedSort bound.base must be a string",
             boundBaseElem && boundBaseElem.type() == BSONType::string);
-    StringData boundBase = boundBaseElem.valueStringData();
+    std::string_view boundBase = boundBaseElem.valueStringData();
     uassert(6460202,
             str::stream() << "$_internalBoundedSort bound.base must be '" << kMin << "' or '"
                           << kMax << "'",
@@ -510,8 +511,8 @@ boost::intrusive_ptr<DocumentSourceSort> DocumentSourceSort::parseBoundedSort(
     auto ds = DocumentSourceSort::create(expCtx, pat);
 
     SortOptions opts;
-    opts.MaxMemoryUsageBytes(
-        loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes));
+    opts.MaxMemoryUsageBytes(loadMemoryLimit(StageMemoryLimit::QueryMaxBlockingSortMemoryUsageBytes)
+                                 .get(expCtx->getOperationContext()));
     if (BSONElement limitElem = args["limit"]) {
         uassert(6588100,
                 "$_internalBoundedSort limit must be a non-negative number if specified",

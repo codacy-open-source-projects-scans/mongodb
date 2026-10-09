@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -34,9 +8,12 @@
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/memory_tracking/query_memory_load_shedding.h"
 #include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
+#include "mongo/db/pipeline/resolved_namespace.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/find_command.h"
@@ -56,7 +33,6 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/shard_role/shard_catalog/raw_data_operation.h"
 #include "mongo/db/timeseries/timeseries_request_util.h"
-#include "mongo/db/views/resolved_view.h"
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -66,9 +42,12 @@
 #include "mongo/s/query/shard_targeting_helpers.h"
 #include "mongo/util/modules.h"
 
+#include <string_view>
+
 #include <boost/optional.hpp>
 
 namespace mongo {
+using namespace std::literals::string_view_literals;
 
 /**
  * Implements the find command for a router.
@@ -79,7 +58,7 @@ public:
     using TC = TypedCommand<ClusterFindCmdBase<Impl>>;
     using Request = typename Impl::Request;
 
-    static constexpr StringData kTermField = "term"_sd;
+    static constexpr std::string_view kTermField = "term"sv;
 
     ClusterFindCmdBase() : TC(Impl::kCommandName) {}
 
@@ -124,6 +103,10 @@ public:
     }
 
     bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
+    bool supportsQuerySettings() const override {
         return true;
     }
 
@@ -188,6 +171,7 @@ public:
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
             Impl::checkCanExplainHere(opCtx);
+            setReadWriteConcern(opCtx, request(), true /* setRC */, false /* setWC */);
 
             auto curOp = CurOp::get(opCtx);
             curOp->debug().getQueryStatsInfo().disableForSubqueryExecution = true;
@@ -202,10 +186,8 @@ public:
                 auto nss = ns();
                 // We create a mutable copy and apply mutations inside the lambda rather
                 // than before it to avoid an extra copy, since this lambda may be retried
-                // on stale router cache. Setting readConcern and applying FLE rewrite are
-                // idempotent operations so it is safe to do in a loop.
+                // on stale router cache.
                 auto cmdRequest = query_request_helper::makeFromFindCommand(request());
-                setReadConcern(opCtx, *cmdRequest);
                 doFLERewriteIfNeeded(opCtx, *cmdRequest);
                 bool cmdShouldBeTranslatedForRawData = false;
                 const auto targeter = CollectionRoutingInfoTargeter(opCtx, ns());
@@ -318,7 +300,7 @@ public:
                         result,
                         *cmdRequestForShards,
                         query->getExpCtx()->getQuerySettings(),
-                        *ex.extraInfo<ResolvedView>(),
+                        *ex.extraInfo<ResolvedNamespace>(),
                         // An empty PrivilegeVector is acceptable because these privileges
                         // are only checked on getMore and explain will not open a cursor.
                         {},
@@ -328,7 +310,7 @@ public:
 
             try {
                 sharding::router::CollectionRouter router(opCtx, ns());
-                router.routeWithRoutingContext("explain find"_sd, findBodyFn);
+                router.routeWithRoutingContext("explain find"sv, findBodyFn);
 
             } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                 auto bodyBuilder = result->getBodyBuilder();
@@ -350,9 +332,10 @@ public:
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
             Impl::checkCanRunHere(opCtx);
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+            markOperationQueryMemorySheddingEligible(opCtx);
+            setReadWriteConcern(opCtx, request(), true /* setRC */, false /* setWC */);
 
             auto cmdRequest = query_request_helper::makeFromFindCommand(request());
-            setReadConcern(opCtx, *cmdRequest);
             doFLERewriteIfNeeded(opCtx, *cmdRequest);
 
             ClusterFind::runQuery(opCtx,
@@ -370,7 +353,7 @@ public:
             rpc::ReplyBuilderInterface* result,
             const FindCommandRequest& findCommand,
             const query_settings::QuerySettings& querySettings,
-            const ResolvedView& resolvedView,
+            const ResolvedNamespace& resolvedView,
             const PrivilegeVector& privileges,
             boost::optional<mongo::ExplainOptions::Verbosity> verbosity = boost::none) {
             auto bodyBuilder = result->getBodyBuilder();
@@ -385,18 +368,6 @@ public:
 
             uassertStatusOK(ClusterAggregate::retryOnViewOrIFRKickbackError(
                 opCtx, aggRequestOnView, resolvedView, ns(), privileges, verbosity, &bodyBuilder));
-        }
-
-        void setReadConcern(OperationContext* opCtx, FindCommandRequest& cmdRequest) {
-            if (cmdRequest.getReadConcern() ||
-                (opCtx->inMultiDocumentTransaction() &&
-                 !opCtx->isStartingMultiDocumentTransaction())) {
-                return;
-            }
-
-            // Use the readConcern from the opCtx (which may be a cluster-wide default).
-            const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-            cmdRequest.setReadConcern(readConcernArgs);
         }
 
         void doFLERewriteIfNeeded(OperationContext* opCtx, FindCommandRequest& cmdRequest) {

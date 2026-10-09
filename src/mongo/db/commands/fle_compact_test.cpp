@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/secure_allocator.h"
 #include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -76,6 +49,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -90,13 +64,14 @@
 
 namespace mongo {
 namespace {
+using namespace std::literals::string_view_literals;
 
-constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
+constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"sv;
 static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
 
 const FLEUserKey& getUserKey() {
     static std::string userVec = hexblob::decode(
-        "cbebdf05fe16099fef502a6d045c1cbb77d29d2fe19f51aec5079a81008305d8868358845d2e3ab38e4fa9cbffcd651a0fc07201d7c9ed9ca3279bfa7cd673ec37b362a0aaa92f95062405a999afd49e4b1f7f818f766c49715407011ac37fa9"_sd);
+        "cbebdf05fe16099fef502a6d045c1cbb77d29d2fe19f51aec5079a81008305d8868358845d2e3ab38e4fa9cbffcd651a0fc07201d7c9ed9ca3279bfa7cd673ec37b362a0aaa92f95062405a999afd49e4b1f7f818f766c49715407011ac37fa9"sv);
     static FLEUserKey userKey(KeyMaterial(userVec.begin(), userVec.end()));
     return userKey;
 }
@@ -175,7 +150,7 @@ BSONObj TestKeyVault::getEncryptedKey(const UUID& uuid) {
     return makeKeyStoreRecord(uuid, ciphertext).toBSON();
 }
 
-UUID fieldNameToUUID(StringData field) {
+UUID fieldNameToUUID(std::string_view field) {
     std::array<char, UUID::kNumBytes> buf;
     murmur3(field, 123456 /*seed*/, buf);
     return UUID::fromCDR(buf);
@@ -229,10 +204,10 @@ protected:
     void doSingleInsert(int id, BSONObj encryptedFieldsObj);
 
     template <typename Container>
-    void insertFieldValues(StringData fieldName, Container& values);
+    void insertFieldValues(std::string_view fieldName, Container& values);
 
     template <typename Container>
-    void doInsertAndCompactCycles(StringData fieldName,
+    void doInsertAndCompactCycles(std::string_view fieldName,
                                   Container& values,
                                   bool compactOnLastCycle,
                                   uint64_t cycles,
@@ -320,7 +295,7 @@ void FleCompactTest::assertESCNonAnchorDocument(BSONObj obj, bool exists, uint64
         _namespaces.escNss,
         ESCCollection::generateNonAnchorId(&hmacCtx, tokens.twiceDerivedTag, cpos));
     ASSERT_EQ(doc.isEmpty(), !exists);
-    ASSERT(!doc.hasField("value"_sd));
+    ASSERT(!doc.hasField("value"sv));
 }
 
 void FleCompactTest::assertESCAnchorDocument(
@@ -390,7 +365,7 @@ EncryptedFieldConfig FleCompactTest::generateEncryptedFieldConfig(
         EncryptedField ef;
         ef.setKeyId(fieldNameToUUID(field));
         ef.setPath(field);
-        ef.setBsonType("string"_sd);
+        ef.setBsonType("string"sv);
         QueryTypeConfig q(QueryTypeEnum::Equality);
         auto x = ef.getQueries();
         x = std::move(q);
@@ -438,7 +413,7 @@ void FleCompactTest::doSingleInsert(int id, BSONObj encryptedFieldsObj) {
 }
 
 template <typename Container>
-void FleCompactTest::insertFieldValues(StringData field, Container& values) {
+void FleCompactTest::insertFieldValues(std::string_view field, Container& values) {
     static int insertId = 1;
 
     for (auto& [value, state] : values) {
@@ -455,7 +430,7 @@ void FleCompactTest::insertFieldValues(StringData field, Container& values) {
 }
 
 template <typename Container>
-void FleCompactTest::doInsertAndCompactCycles(StringData fieldName,
+void FleCompactTest::doInsertAndCompactCycles(std::string_view fieldName,
                                               Container& values,
                                               bool compactOnLastCycle,
                                               uint64_t cycles,
@@ -557,7 +532,7 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
                                                       const boost::optional<std::uint32_t>& msize) {
     ECStats escStats;
     std::map<Value, InsertionState> values;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf, msize);
     const bool isRange = isLeaf != boost::none;
@@ -598,7 +573,7 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
         compactOneRangeFieldPad(_queryImpl.get(),
                                 &hmacCtx,
                                 _namespaces.escNss,
-                                "rangeField"_sd,
+                                "rangeField"sv,
                                 BSONType::numberLong,
                                 rangeQueryTypeConfig,
                                 0.42,
@@ -611,7 +586,7 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
         compactOneTextSearchFieldPad(_queryImpl.get(),
                                      &hmacCtx,
                                      _namespaces.escNss,
-                                     "textSearchField"_sd,
+                                     "textSearchField"sv,
                                      *msize,
                                      1,
                                      *ecocDoc.anchorPaddingRootToken,
@@ -640,7 +615,7 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
         compactOneRangeFieldPad(_queryImpl.get(),
                                 &hmacCtx,
                                 _namespaces.escNss,
-                                "rangeField"_sd,
+                                "rangeField"sv,
                                 BSONType::numberLong,
                                 rangeQueryTypeConfig,
                                 0.42,
@@ -653,7 +628,7 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
         compactOneTextSearchFieldPad(_queryImpl.get(),
                                      &hmacCtx,
                                      _namespaces.escNss,
-                                     "textSearchField"_sd,
+                                     "textSearchField"sv,
                                      *msize,
                                      1,
                                      *ecocDoc.anchorPaddingRootToken,
@@ -695,7 +670,7 @@ void FleCompactTest::testCompactValueV2_WithNullAnchor(
     const boost::optional<bool>& isLeaf,
     const boost::optional<std::uint32_t>& msize) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf, msize);
     std::map<Value, InsertionState> values = {{value, {}}};
@@ -783,7 +758,7 @@ TEST_F(FleCompactTest, CompactValueV2_WithNullAnchor_TextSearch) {
 
 TEST_F(FleCompactTest, RandomESCNonAnchorDeletions) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     const std::string value = "roger";
     std::map<std::string, InsertionState> values;
     size_t deleteCount = 150;
@@ -864,7 +839,7 @@ TEST_F(FleCompactTest, CleanupValueV2_EmptyESC) {
 // No regular anchors exist during cleanup.
 TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_NoAnchors) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     const std::string value = "roger";
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
@@ -923,7 +898,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_NoAnchors) {
 // Regular anchors exist during cleanup.
 TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_WithAnchors) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     const std::string value = "roger";
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
@@ -980,7 +955,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_WithAnchors) {
 // Tests case (F) in cleanup algorithm, where apos = 0 and (cpos > 0)
 TEST_F(FleCompactTest, CleanupValue_NoAnchorsExist) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     const std::string value = "roger";
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
@@ -1015,7 +990,7 @@ TEST_F(FleCompactTest, CleanupValue_NoAnchorsExist) {
 // Tests case (G) in cleanup algorithm, where apos > 0 and (cpos = null or cpos > 0)
 TEST_F(FleCompactTest, CleanupValue_NewAnchorsExist) {
     ECStats escStats;
-    constexpr auto key = "first"_sd;
+    constexpr auto key = "first"sv;
     const std::string value = "roger";
     auto testPair = BSON(key << value);
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
@@ -1081,7 +1056,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MaximizeUniqueTokens) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1102,7 +1077,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MaximizeUniqueTokens) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1129,7 +1104,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MinimizeUniqueTokens) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1150,7 +1125,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MinimizeUniqueTokens) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1176,7 +1151,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_TinyDomainSize) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1197,7 +1172,7 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_TinyDomainSize) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
@@ -1220,7 +1195,7 @@ TEST_F(FleCompactTest, InjectManyAnchorPadding) {
     compactOneRangeFieldPad(_queryImpl.get(),
                             &hmacCtx,
                             _namespaces.escNss,
-                            "a.b.c"_sd,
+                            "a.b.c"sv,
                             BSONType::numberLong,
                             queryTypeConfig,
                             1,

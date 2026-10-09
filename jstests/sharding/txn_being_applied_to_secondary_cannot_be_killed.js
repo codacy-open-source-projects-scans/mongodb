@@ -6,6 +6,7 @@
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {checkDecisionIs} from "jstests/sharding/libs/txn_two_phase_commit_util.js";
@@ -35,20 +36,28 @@ const participant2 = st.shard2;
 // shard0: [-inf, 0)
 // shard1: [0, 10)
 // shard2: [10, +inf)
-assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: coordinator.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({enableSharding: dbName, primaryShard: coordinator.shardName}),
+);
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {_id: 1}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 0}}));
 assert.commandWorked(st.s.adminCommand({split: ns, middle: {_id: 10}}));
-assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: participant1.shardName}));
-assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: participant2.shardName}));
+assert.commandWorked(
+    st.s.adminCommand({moveChunk: ns, find: {_id: 0}, to: participant1.shardName}),
+);
+assert.commandWorked(
+    st.s.adminCommand({moveChunk: ns, find: {_id: 10}, to: participant2.shardName}),
+);
 st.refreshCatalogCacheForNs(st.s, ns);
 
 // These forced refreshes are not strictly necessary; they just prevent extra TXN log lines
 // from the shards starting, aborting, and restarting the transaction due to needing to
 // refresh after the transaction has started.
-assert.commandWorked(coordinator.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-assert.commandWorked(participant1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
-assert.commandWorked(participant2.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+if (!FeatureFlagUtil.isPresentAndEnabled(coordinator, "AuthoritativeShardsCRUD")) {
+    assert.commandWorked(coordinator.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+    assert.commandWorked(participant1.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+    assert.commandWorked(participant2.adminCommand({_flushRoutingTableCacheUpdates: ns}));
+}
 
 // Start a new session and start a transaction on that session.
 const session = st.s.startSession();

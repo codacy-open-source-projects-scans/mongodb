@@ -1,35 +1,12 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/query/query_settings/query_settings_hash.h"
 
 #include "mongo/db/basic_types.h"
+
+#include <type_traits>
+#include <variant>
 
 #include <absl/container/inlined_vector.h>
 #include <boost/container_hash/hash.hpp>
@@ -60,6 +37,23 @@ std::size_t hash_value(const optional<T>& v) {
 }  // namespace boost
 
 namespace mongo {
+size_t hash_value(const QueryKnobId& id) {
+    return boost::hash_value(id.value);
+}
+
+size_t hash_value(const QueryKnobValue& val) {
+    size_t seed = boost::hash_value(val.index());
+    std::visit(
+        [&seed](const auto& v) {
+            using V = std::decay_t<decltype(v)>;
+            if constexpr (!std::is_same_v<V, DeleteQueryKnobOverride>) {
+                boost::hash_combine(seed, v);
+            }
+        },
+        val);
+    return seed;
+}
+
 size_t hash_value(const OptionalBool& v) {
     // OptionalBool hash needs to be consistent with equality. OptionalBool currently relies on
     // implicit conversion to bool for ==. Thus, OptionalBool() == OptionalBool(false).
@@ -77,6 +71,18 @@ size_t hash_value(const NamespaceSpec& ns) {
 }  // namespace mongo
 
 namespace mongo::query_settings {
+size_t hash_value(const QuerySettingsKnobOverrides::Entry& e) {
+    size_t seed = 0;
+    boost::hash_combine(seed, e.id);
+    boost::hash_combine(seed, e.value);
+    return seed;
+}
+
+size_t hash_value(const QuerySettingsKnobOverrides& overrides) {
+    auto e = overrides.entries();
+    return boost::hash_range(e.begin(), e.end());
+}
+
 size_t hash_value(const IndexHintSpec& v) {
     const auto& indexes = v.getAllowedIndexes();
     size_t hash = boost::hash_range(indexes.begin(), indexes.end());
@@ -85,8 +91,9 @@ size_t hash_value(const IndexHintSpec& v) {
 }
 
 size_t hash_value(const QuerySettings& querySettings) {
-    // The 'serialization_context' and 'comment' fields are not significant.
-    static_assert(QuerySettings::fieldNames.size() == 5,
+    // The 'serialization_context', 'comment', and 'maxTimeMS' fields are not significant.
+    // 'maxTimeMS' affects operation deadline, not plan selection.
+    static_assert(QuerySettings::fieldNames.size() == 7,
                   "A new field has been added to the QuerySettings structure, adjust the hash "
                   "function accordingly");
 
@@ -94,6 +101,7 @@ size_t hash_value(const QuerySettings& querySettings) {
     boost::hash_combine(hash, querySettings.getQueryFramework());
     boost::hash_combine(hash, querySettings.getIndexHints());
     boost::hash_combine(hash, querySettings.getReject());
+    boost::hash_combine(hash, querySettings.getQueryKnobs());
     return hash;
 }
 

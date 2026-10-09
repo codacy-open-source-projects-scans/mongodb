@@ -6,7 +6,6 @@
  * 'ephemeralForTest' storage engines that do not support queryable backup (read-only) mode.
  * @tags: [
  *   requires_persistence,
- *   requires_replicated_fast_count_recovery,
  *   requires_replication,
  *   requires_scripting
  * ]
@@ -35,14 +34,22 @@ function runTest(conn, allowDiskUseByDefault) {
     const view = testDb.largeView;
 
     function assertFailed(cmdObject) {
-        assert.commandFailedWithCode(testDb.runCommand(cmdObject), ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed);
+        assert.commandFailedWithCode(
+            testDb.runCommand(cmdObject),
+            ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed,
+        );
     }
 
-    assert.commandWorked(testDb.adminCommand({setParameter: 1, allowDiskUseByDefault: allowDiskUseByDefault}));
+    assert.commandWorked(
+        testDb.adminCommand({setParameter: 1, allowDiskUseByDefault: allowDiskUseByDefault}),
+    );
 
     // The 'aggregate' pipelines running within the memory limit must pass.
     assert.eq(1, coll.aggregate([{$match: {x: 1}}]).itcount());
-    assert.eq(1, coll.aggregate([{$match: {x: 1}}], {allowDiskUse: !allowDiskUseByDefault}).itcount());
+    assert.eq(
+        1,
+        coll.aggregate([{$match: {x: 1}}], {allowDiskUse: !allowDiskUseByDefault}).itcount(),
+    );
 
     // The 'aggregate' grouping exceeding the memory limit must fail.
     assertFailed({

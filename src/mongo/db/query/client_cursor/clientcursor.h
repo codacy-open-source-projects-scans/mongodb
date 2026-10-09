@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/api_parameters.h"
@@ -45,8 +18,10 @@
 #include "mongo/db/query/client_cursor/generic_cursor_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/query_lifespan.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_stats/supplemental_metrics_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
@@ -67,12 +42,14 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 
-namespace MONGO_MOD_PUBLIC mongo {
+namespace [[MONGO_MOD_PUBLIC]] mongo {
 
 class CursorManager;
 class RecoveryUnit;
@@ -128,6 +105,13 @@ struct ClientCursorParams {
     TailableModeEnum tailableMode;
     BSONObj originatingCommandObj;
     PrivilegeVector originatingPrivileges;
+
+    // True if this cursor may hold execution state backed by the mongot task executor. Such idle
+    // cursors must be disposed before shutting down the mongot task executor, otherwise their
+    // shared_ptr references can keep the executor alive. Note this is inferred from the pipeline
+    // structure (and from whether a mongot cursor was established), so it may over- or
+    // under-approximate the executor's actual ownership.
+    bool mayHoldMongotTaskExecutor = false;
 };
 
 /**
@@ -191,17 +175,39 @@ public:
         return _rawData;
     }
 
-    bool getQueryStatsWillNeverExhaust() const {
-        return _queryStatsWillNeverExhaust;
-    }
-
     bool isChangeStreamQuery() const {
         return _isChangeStreamQuery;
+    }
+
+    bool usesOptimizedUpdateLookup() const {
+        return _usesOptimizedUpdateLookup;
+    }
+
+    bool mayHoldMongotTaskExecutor() const {
+        return _mayHoldMongotTaskExecutor;
+    }
+
+    void setMayHoldMongotTaskExecutor() {
+        _mayHoldMongotTaskExecutor = true;
     }
 
     std::unique_ptr<query_stats::Key> takeKey() {
         return std::move(_queryStatsKey);
     }
+
+    /**
+     * Captures supplemental query stats metrics from the planning operation's OpDebug and stashes
+     * them on the cursor. Later flushed by takeSupplementalMetrics() when the cursor is disposed
+     * or when query stats are first written for change streams.
+     */
+    void captureSupplementalMetricsIfNeeded(const OpDebug& opDebug);
+
+    /**
+     * Returns the stashed supplemental metrics, leaving the stash empty. The optional stays engaged
+     * (see _supplementalMetrics) so re-capture on getMores is still guarded. Used to attach the
+     * metrics captured during planning to the final writeQueryStats() call for this cursor.
+     */
+    std::vector<std::unique_ptr<query_stats::SupplementalStatsEntry>> takeSupplementalMetrics();
 
     /**
      * Returns a pointer to the underlying query plan executor. All cursors manage a PlanExecutor,
@@ -228,7 +234,8 @@ public:
     }
 
     /**
-     * Returns the original command object which created this cursor.
+     * Returns the original command object which created this cursor, with sensitive information
+     * redacted, if necessary.
      */
     const BSONObj& getOriginatingCommandObj() const {
         return _originatingCommand;
@@ -250,12 +257,36 @@ public:
         _metrics.incrementNreturned(n);
     }
 
-    void incrementCursorMetrics(const OpDebug::AdditiveMetrics& newMetrics) {
+    /**
+     * Updates additive cursor metrics every time the cursor is unpinned.
+     */
+    void updateMetricsOnUnpin(const OpDebug::AdditiveMetrics& newMetrics) {
         _metrics.add(newMetrics);
         if (!_firstResponseExecutionTime) {
             _firstResponseExecutionTime = _metrics.executionTime;
         }
     }
+
+    /**
+     * Updates cursor metrics specific to change streams every time the cursor is unpinned.
+     */
+    void updateMetricsOnUnpin(const ChangeStreamCursorMetrics& csMetrics);
+
+    /**
+     * Updates all per-batch cursor metrics from 'opDebug' every time the cursor is unpinned.
+     *
+     * Note: Supplemental metrics are not included here because they are a one-time planning
+     * capture. See captureSupplementalMetricsIfNeeded().
+     */
+    void updateMetricsOnUnpin(const OpDebug& opDebug) {
+        updateMetricsOnUnpin(opDebug.getAdditiveMetrics());
+        updateMetricsOnUnpin(opDebug.changeStreamMetrics);
+    }
+
+    /**
+     * Updates the cursor metrics on cursor disposal. Only supposed to be called once per cursor.
+     */
+    void updateMetricsOnDispose(boost::optional<Date_t> now);
 
     /**
      * Returns the number of batches returned by this cursor so far.
@@ -283,8 +314,8 @@ public:
         _planSummary = std::move(ps);
     }
 
-    StringData getPlanSummary() const {
-        return StringData(_planSummary);
+    std::string_view getPlanSummary() const {
+        return std::string_view(_planSummary);
     }
 
     /**
@@ -327,12 +358,6 @@ public:
         _lastKnownCommittedOpTime = std::move(lastCommittedOpTime);
     }
 
-    boost::optional<Timestamp> getChangeStreamsCursorOptime() const {
-        return _changeStreamsCursorOptime;
-    }
-
-    void setChangeStreamsCursorOptime(Timestamp ts);
-
     friend std::size_t partitionOf(const ClientCursor* cursor) {
         return cursor->cursorid();
     }
@@ -372,6 +397,18 @@ public:
 
     void stashTransactionResources(StashedTransactionResources resources) override {
         _transactionResources = std::move(resources);
+    }
+
+    /**
+     * Binds this cursor's query lifespan onto 'opCtx', making the originating query's resolved
+     * state (query settings, knob configuration) available while the returned guard is alive, and
+     * restoring the opCtx's previous lifespan when it goes out of scope. Called when a getMore
+     * adopts the cursor; hold the returned guard for the duration of the operation.
+     */
+    [[nodiscard]] QueryLifespan::AlternativeQueryRegion bindQueryLifespan(
+        OperationContext* opCtx) const {
+        tassert(13020603, "ClientCursor should always have a QueryLifespan", _queryLifespan);
+        return QueryLifespan::AlternativeQueryRegion(opCtx, _queryLifespan);
     }
 
 private:
@@ -417,11 +454,6 @@ private:
     bool isNoTimeout() const {
         return _isNoTimeout;
     }
-
-    /**
-     * Updates the cursor metrics on cursor shutdown. Only supposed to be called once per cursor.
-     */
-    void updateCursorMetrics(boost::optional<Date_t> now);
 
     // The ID of the ClientCursor. A value of 0 is used to mean that no cursor id has been assigned.
     const CursorId _cursorid = 0;
@@ -504,10 +536,6 @@ private:
     // oplog fetching.
     boost::optional<repl::OpTime> _lastKnownCommittedOpTime;
 
-    // Oplog timestamp of the last document read by this change stream cursor. Only set for
-    // change stream cursors.
-    boost::optional<Timestamp> _changeStreamsCursorOptime;
-
     // Passed along from the original query so that it can be logged if necessary in getMore
     // requests.
     boost::optional<uint32_t> _planCacheKey;
@@ -523,14 +551,26 @@ private:
     // Useful for diagnostics like queryStats.
     OpDebug::AdditiveMetrics _metrics;
 
+    // Metrics specific to change stream cursors, updated on each cursor unpin (e.g., in the getMore
+    // command stack).
+    boost::optional<ChangeStreamCursorMetrics> _changeStreamMetrics;
+
     // The Key used by query stats to generate the query stats store key.
     std::unique_ptr<query_stats::Key> _queryStatsKey;
 
-    // Flag for query stats on if the current cursor is used for a tailable or change stream query.
-    bool _queryStatsWillNeverExhaust{false};
+    // Supplemental query stats metrics captured during planning from OpDebug on the initial batch.
+    // boost::none means "not yet captured". After being captured and moved out, the optional still
+    // holds a non-none value so has_value() keeps guarding against re-capturing on getMores.
+    boost::optional<std::vector<std::unique_ptr<query_stats::SupplementalStatsEntry>>>
+        _supplementalMetrics;
 
     // Flag if the current cursor is used for a change stream query.
     bool _isChangeStreamQuery{false};
+
+    // True iff this cursor's updateLookup stage was wired on the optimized (Express/SBE) path. Used
+    // by the getMore precondition to kill-and-resume the cursor if the optimization flag is later
+    // turned off.
+    bool _usesOptimizedUpdateLookup{false};
 
     // Flag to decide if diagnostic information should be omitted.
     bool _shouldOmitDiagnosticInformation{false};
@@ -541,10 +581,16 @@ private:
     // Flag indicating that a client has requested to kill the cursor.
     bool _killPending = false;
 
+    // True if this cursor may hold execution state backed by the mongot task executor.
+    bool _mayHoldMongotTaskExecutor = false;
+
     // The execution time collected from the initial operation prior to any getMore requests.
     boost::optional<Microseconds> _firstResponseExecutionTime;
 
-    std::unique_ptr<OperationMemoryUsageTracker> _memoryUsageTracker;
+    // Co-owning reference to the operation's memory tracker.
+    std::shared_ptr<OperationMemoryUsageTracker> _memoryUsageTracker;
+
+    QueryLifespan::Handle _queryLifespan;
 };
 
 /**
@@ -696,7 +742,7 @@ public:
         _makeStat("lifespan.greaterThanOrEqual10Minutes")};
 
 private:
-    static Counter64& _makeStat(StringData name);
+    static Counter64& _makeStat(std::string_view name);
 };
 
 /*
@@ -706,4 +752,4 @@ private:
 void incrementCursorLifespanMetric(Date_t birth, Date_t death);
 CursorStats& cursorStats();
 
-}  // namespace MONGO_MOD_PUBLIC mongo
+}  // namespace mongo

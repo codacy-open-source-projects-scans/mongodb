@@ -7,6 +7,9 @@ filters:
   - "*access_method*":
     approvers:
       - 10gen/server-index-builds
+  - "index_bulk_builder_metrics*":
+    approvers:
+      - 10gen/server-index-builds
   - "index_constants.h":
     approvers:
       - 10gen/server-index-builds
@@ -31,6 +34,9 @@ filters:
   - "wildcard_key_generator*":
     approvers:
       - 10gen/query-execution-write-exec
+  - "wildcard_metadata_key*":
+    approvers:
+      - 10gen/query-execution-write-exec
   - "expression_keys*":
     approvers:
       - 10gen/query-execution-write-exec
@@ -43,12 +49,6 @@ filters:
   - "multikey_paths*":
     approvers:
       - 10gen/query-execution-write-exec
-  - "2d_*":
-    approvers:
-      - 10gen/query-integration-features
-  - "s2_*":
-    approvers:
-      - 10gen/query-integration-features
   - "wildcard_access_method*":
     approvers:
       - 10gen/query-execution-write-exec

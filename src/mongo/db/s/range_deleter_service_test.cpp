@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/s/range_deleter_service.h"
 
@@ -52,10 +26,10 @@
 #include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/versioning_protocol/database_version.h"
-#include "mongo/idl/server_parameter_test_controller.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
@@ -157,8 +131,7 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
         return CollectionMetadata(std::move(cm), ShardId("this"));
     }();
 
-    CollectionShardingRuntime::acquireExclusive(opCtx, nss)
-        ->setFilteringMetadata_nonAuthoritative(opCtx, metadata);
+    CollectionShardingRuntime::acquireExclusive(opCtx, nss)->setCollectionMetadata(opCtx, metadata);
 }
 
 /**
@@ -622,7 +595,7 @@ TEST_F(RangeDeleterServiceTest, TotalNumOfRegisteredTasks) {
 }
 
 TEST_F(RangeDeleterServiceTest, RegisterTaskWithDisableResumableRangeDeleterFlagEnabled) {
-    RAIIServerParameterControllerForTest disableRangeDeleter{"disableResumableRangeDeleter", true};
+    unittest::ServerParameterGuard disableRangeDeleter{"disableResumableRangeDeleter", true};
 
     auto rds = RangeDeleterService::get(opCtx);
     auto taskWithOngoingQueries = rangeDeletionTask0ForCollA;
@@ -657,7 +630,7 @@ TEST_F(RangeDeleterServiceTest,
         uuidCollA, taskWithOngoingQueries->getTask().getRange());
     ASSERT(!overlappingRangeFuture.isReady());
 
-    RAIIServerParameterControllerForTest disableRangeDeleter{"disableResumableRangeDeleter", true};
+    unittest::ServerParameterGuard disableRangeDeleter{"disableResumableRangeDeleter", true};
     auto overlappingRangeFutureWhenDisabled = rds->getOverlappingRangeDeletionsFuture(
         uuidCollA, taskWithOngoingQueries->getTask().getRange());
     ASSERT(overlappingRangeFutureWhenDisabled.isReady());
@@ -942,8 +915,7 @@ TEST_F(RangeDeleterServiceTest, ProcessingFlagIsSetWhenRangeDeletionExecutionSta
         // Mark ongoing queries as drained and check the `ongoing` flag is present
         taskWithOngoingQueries->drainOngoingQueries();
 
-        hangBeforeDoingDeletionFp->waitForTimesEntered(
-            hangBeforeDoingDeletionFp.initialTimesEntered() + 1);
+        hangBeforeDoingDeletionFp.waitForOneNewEntry();
         verifyProcessingFlag(opCtx,
                              uuidCollA,
                              rangeDeletionTask0ForCollA->getTask().getRange(),
@@ -975,7 +947,7 @@ TEST_F(RangeDeleterServiceTest, ServiceUpFutureFulfilledOnStepdown) {
     rds->onStepDown();
     const auto term = kStartingTerm + 1;
     rds->onStepUpBegin(opCtx, term);
-    rds->registerRecoveryJob(term);
+    rds->registerRecoveryJob(term, RecoveryJob::kLegacyMigration);
     rds->onStepUpComplete(opCtx, term);
 
     auto future = rds->getServiceUpFuture();
@@ -1005,7 +977,7 @@ TEST_F(RangeDeleterServiceTest, TermInitializationReadyBeforeServiceUp) {
     rds->onStepDown();
     const auto term = kStartingTerm + 1;
     rds->onStepUpBegin(opCtx, term);
-    rds->registerRecoveryJob(term);
+    rds->registerRecoveryJob(term, RecoveryJob::kLegacyMigration);
     rds->onStepUpComplete(opCtx, term);
 
     auto termInitFuture = rds->getTermInitializationFuture();
@@ -1014,7 +986,7 @@ TEST_F(RangeDeleterServiceTest, TermInitializationReadyBeforeServiceUp) {
     ASSERT_OK(termInitFuture.getNoThrow(opCtx));
     ASSERT(!serviceUpFuture.isReady());
 
-    rds->notifyRecoveryJobComplete(term);
+    rds->notifyRecoveryJobComplete(term, RecoveryJob::kLegacyMigration);
 
     ASSERT_OK(serviceUpFuture.getNoThrow(opCtx));
 }
@@ -1024,7 +996,7 @@ TEST_F(RangeDeleterServiceTest, RegisterTaskSucceedsDuringRecoveryPhase) {
     rds->onStepDown();
     const auto term = kStartingTerm + 1;
     rds->onStepUpBegin(opCtx, term);
-    rds->registerRecoveryJob(term);
+    rds->registerRecoveryJob(term, RecoveryJob::kLegacyMigration);
     rds->onStepUpComplete(opCtx, term);
 
     ASSERT_OK(rds->getTermInitializationFuture().getNoThrow());
@@ -1034,7 +1006,7 @@ TEST_F(RangeDeleterServiceTest, RegisterTaskSucceedsDuringRecoveryPhase) {
     auto ignore = rds->registerTask(
         task, SemiFuture<void>::makeReady(), RangeDeleterService::TaskPending::kPending);
 
-    rds->notifyRecoveryJobComplete(term);
+    rds->notifyRecoveryJobComplete(term, RecoveryJob::kLegacyMigration);
     ASSERT_OK(rds->getServiceUpFuture().getNoThrow(opCtx));
 
     ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
@@ -1290,7 +1262,7 @@ TEST_F(RangeDeleterServiceTest, OverlappingTasksWithSameTimestampOneWaitsForOthe
                                         BSON(kShardKey << 0),
                                         BSON(kShardKey << 10),
                                         CleanWhenEnum::kNow,
-                                        /*pending=*/false);
+                                        /*pending=*/true);
     rdt0.setTimestamp(sameTimestamp);
     auto task0 = std::make_shared<RangeDeletionWithOngoingQueries>(rdt0);
 
@@ -1298,15 +1270,17 @@ TEST_F(RangeDeleterServiceTest, OverlappingTasksWithSameTimestampOneWaitsForOthe
                                         BSON(kShardKey << 5),
                                         BSON(kShardKey << 15),
                                         CleanWhenEnum::kNow,
-                                        /*pending=*/false);
+                                        /*pending=*/true);
     rdt1.setTimestamp(sameTimestamp);
     auto task1 = std::make_shared<RangeDeletionWithOngoingQueries>(rdt1);
 
-    // Register both tasks
-    auto completionFuture0 =
-        registerAndCreatePersistentTask(opCtx, task0->getTask(), task0->getOngoingQueriesFuture());
-    auto completionFuture1 =
-        registerAndCreatePersistentTask(opCtx, task1->getTask(), task1->getOngoingQueriesFuture());
+    // Register both tasks as pending before starting either of them. Registering and starting task0
+    // in one step would let it run its overlap check before task1 has been registered, so
+    // it would find nothing to wait for and the overlap ordering under test would go unexercised.
+    auto completionFuture0 = registerAndCreatePersistentTask(
+        opCtx, task0->getTask(), task0->getOngoingQueriesFuture(), /*ready=*/false);
+    auto completionFuture1 = registerAndCreatePersistentTask(
+        opCtx, task1->getTask(), task1->getOngoingQueriesFuture(), /*ready=*/false);
 
     ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
 
@@ -1318,9 +1292,17 @@ TEST_F(RangeDeleterServiceTest, OverlappingTasksWithSameTimestampOneWaitsForOthe
     auto& firstFuture = task0GoesFirst ? completionFuture0 : completionFuture1;
     auto& secondFuture = task0GoesFirst ? completionFuture1 : completionFuture0;
 
+    // Start both tasks now that they are both registered.
+    removePendingField(opCtx, rdt0.getId());
+    removePendingField(opCtx, rdt1.getId());
+
     // Drain the SECOND task's ongoing queries first.
     // It should still be blocked waiting for the first task to complete.
+    //
+    // Draining only hands the task off to the service's executor, so sleep to give a task that is
+    // not actually blocked the time to complete.
     secondTask->drainOngoingQueries();
+    sleepmillis(100);
     ASSERT_FALSE(secondFuture.isReady());
 
     // Now drain the first task's ongoing queries - it should complete.

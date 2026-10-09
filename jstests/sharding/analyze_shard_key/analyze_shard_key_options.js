@@ -2,6 +2,7 @@
  * Tests that the analyzeShardKey command supports analyzing the characteristics of the shard
  * key and/or the read and write distribution.
  */
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {AnalyzeShardKeyUtil} from "jstests/sharding/analyze_shard_key/libs/analyze_shard_key_util.js";
@@ -23,12 +24,17 @@ function runTest(conn) {
     }
     assert.commandWorked(coll.insert(docs, {writeConcern}));
     assert.commandWorked(coll.createIndex({x: 1}));
+    if (!FixtureHelpers.isStandalone(db)) {
+        FixtureHelpers.awaitReplication(db);
+    }
 
     const res0 = assert.commandWorked(conn.adminCommand({analyzeShardKey: ns, key: {x: 1}}));
     AnalyzeShardKeyUtil.assertContainKeyCharacteristicsMetrics(res0);
     AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(res0);
 
-    const res1 = assert.commandWorked(conn.adminCommand({analyzeShardKey: ns, key: {x: 1}, keyCharacteristics: false}));
+    const res1 = assert.commandWorked(
+        conn.adminCommand({analyzeShardKey: ns, key: {x: 1}, keyCharacteristics: false}),
+    );
     AnalyzeShardKeyUtil.assertNotContainKeyCharacteristicsMetrics(res1);
     AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(res1);
 
@@ -39,7 +45,12 @@ function runTest(conn) {
     AnalyzeShardKeyUtil.assertNotContainReadWriteDistributionMetrics(res2);
 
     const res3 = assert.commandWorked(
-        conn.adminCommand({analyzeShardKey: ns, key: {x: 1}, keyCharacteristics: true, readWriteDistribution: true}),
+        conn.adminCommand({
+            analyzeShardKey: ns,
+            key: {x: 1},
+            keyCharacteristics: true,
+            readWriteDistribution: true,
+        }),
     );
     AnalyzeShardKeyUtil.assertContainKeyCharacteristicsMetrics(res3);
     AnalyzeShardKeyUtil.assertContainReadWriteDistributionMetrics(res3);
@@ -67,7 +78,10 @@ function runTest(conn) {
         }),
         ErrorCodes.IllegalOperation,
     );
-    assert.eq(res4.errmsg, "Cannot analyze the characteristics of a shard key that does not have a supporting index");
+    assert.eq(
+        res4.errmsg,
+        "Cannot analyze the characteristics of a shard key that does not have a supporting index",
+    );
 
     assert(coll.drop());
 }

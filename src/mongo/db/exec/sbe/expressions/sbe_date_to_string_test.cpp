@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2021-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/sbe_fn_names.h"
@@ -40,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 #include <ostream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -87,15 +61,15 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
 
     // Setup timezone database.
     auto timezoneDatabase = std::make_unique<TimeZoneDatabase>();
-    timezoneDBAccessor.reset(false,
-                             value::TypeTags::timeZoneDB,
-                             value::bitcastFrom<TimeZoneDatabase*>(timezoneDatabase.get()));
+    timezoneDBAccessor.reset(
+        value::TagValueView{value::TypeTags::timeZoneDB,
+                            value::bitcastFrom<TimeZoneDatabase*>(timezoneDatabase.get())});
 
     struct TestCase {
         std::pair<value::TypeTags, value::Value> timezone;
         std::pair<value::TypeTags, value::Value> date;
         std::pair<value::TypeTags, value::Value> format;
-        StringData expectedValue;  // Output.
+        std::string_view expectedValue;  // Output.
     };
 
     const std::pair<value::TypeTags, value::Value> kNothing{value::TypeTags::Nothing, 0};
@@ -107,14 +81,14 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
             value::makeNewString("UTC"),
             kDate,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData("08/14/2023, 12:24:36"),
+            std::string_view("08/14/2023, 12:24:36"),
         },
         {
             // America/New York is 4 hours behind UTC.
             value::makeNewString("America/New_York"),
             kDate,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData("08/14/2023, 08:24:36"),
+            std::string_view("08/14/2023, 08:24:36"),
         },
         {
             // Try a weirder format string.
@@ -124,7 +98,7 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
                 "The %dth day of the %mth month of the year %Y, in the %Sth "
                 "second of the %Mth minute of the %Hth hour with timezone offset %z is the %wnd "
                 "day of the %Urd week of the year, and the %jth day of the year."),
-            StringData(
+            std::string_view(
                 "The 14th day of the 08th month of the year 2023, in the 36th "
                 "second of the 24th minute of the 12th hour with timezone offset +0000 is the 2nd "
                 "day of the 33rd week of the year, and the 226th day of the year."),
@@ -136,63 +110,63 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
             kNothing,
             kDate,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'timezone' is not a valid type.
             {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0)},
             kDate,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'timezone' is not a recognized value.
             value::makeNewString("Arctic/North_Pole"),
             kDate,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'date' is Nothing.
             value::makeNewString("UTC"),
             kNothing,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'date' is Null.
             value::makeNewString("UTC"),
             kNull,
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'date' is not a valid type.
             value::makeNewString("UTC"),
             {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0)},
             value::makeNewString("%m/%d/%Y, %H:%M:%S"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'format' is Nothing.
             value::makeNewString("UTC"),
             kDate,
             kNothing,
-            StringData(),
+            std::string_view(),
         },
         {
             //'format' is a valid string, but not a valid format.
             value::makeNewString("UTC"),
             kDate,
             value::makeNewString("Random String%"),
-            StringData(),
+            std::string_view(),
         },
         {
             //'format' is not a valid type.
             value::makeNewString("UTC"),
             kDate,
             {value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0)},
-            StringData(),
+            std::string_view(),
         },
     };
 
@@ -203,16 +177,15 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
         formatAccessor.reset(testCase.format.first, testCase.format.second);
 
         // Execute the "DateToString" function.
-        auto result = runCompiledExpression(compiledDateToString.get());
-        auto [resultTag, resultValue] = result;
-        value::ValueGuard resultGuard(resultTag, resultValue);
+        value::TagValueOwned resultString =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledDateToString.get()));
 
-        ASSERT(value::isString(resultTag))
-            << "Failed test #" << testNumber << ", result tag: " << resultTag
+        ASSERT(value::isString(resultString.tag()))
+            << "Failed test #" << testNumber << ", result tag: " << resultString.tag()
             << ", expected a string";
-        auto resultString = value::getStringView(resultTag, resultValue);
-        ASSERT_EQUALS(resultString, testCase.expectedValue)
-            << "Failed test #" << testNumber << ", result: " << resultString
+        auto resultStringView = value::getStringView(resultString.tag(), resultString.value());
+        ASSERT_EQUALS(resultStringView, testCase.expectedValue)
+            << "Failed test #" << testNumber << ", result: " << resultStringView
             << ", expected: " << testCase.expectedValue;
         ++testNumber;
     }
@@ -222,12 +195,12 @@ TEST_F(SBEDateToStringTest, BasicDateToString) {
         formatAccessor.reset(testCase.format.first, testCase.format.second);
 
         // Execute the "DateToString" function.
-        auto result = runCompiledExpression(compiledDateToString.get());
-        auto [resultTag, resultValue] = result;
-        value::ValueGuard resultGuard(resultTag, resultValue);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledDateToString.get()));
 
-        ASSERT_EQUALS(resultTag, value::TypeTags::Nothing)
-            << "Failed test #" << testNumber << ", result: " << result << ", expected Nothing";
+        ASSERT_EQUALS(result.tag(), value::TypeTags::Nothing)
+            << "Failed test #" << testNumber << ", result: " << result.tag()
+            << ", expected Nothing";
         ++testNumber;
     }
 }

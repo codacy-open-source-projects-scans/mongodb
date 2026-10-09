@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/projection_executor.h"
@@ -45,10 +18,12 @@
 #include "mongo/util/string_map.h"
 
 #include <cstddef>
+#include <limits>
 #include <list>
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
@@ -107,13 +82,18 @@ public:
 
     /**
      * Applies all projections and expressions, if applicable, and returns the resulting document.
+     * The 'ctx' parameter carries evaluation state (see EvaluationContext); when it holds a memory
+     * tracker, memory usage observed while evaluating any expressions in the projection is
+     * accumulated against it.
      */
-    virtual Document applyToDocument(const Document& inputDoc) const;
+    virtual Document applyToDocument(const Document& inputDoc, const EvaluationContext& ctx) const;
 
     /**
      * Recursively evaluates all expressions in the projection, writing the results to 'outputDoc'.
      */
-    void applyExpressions(const Document& root, MutableDocument* outputDoc) const;
+    void applyExpressions(const Document& root,
+                          MutableDocument* outputDoc,
+                          const EvaluationContext& ctx) const;
 
     /**
      * Reports dependencies on any fields that are required by this projection.
@@ -164,9 +144,9 @@ public:
 
     void optimize();
 
-    Document serialize(const SerializationOptions& options) const;
+    Document serialize(const query_shape::SerializationOptions& options) const;
 
-    void serialize(MutableDocument* output, const SerializationOptions& options) const;
+    void serialize(MutableDocument* output, const query_shape::SerializationOptions& options) const;
 
     /**
      * Append the variables referred to by this projection to the set 'refs', without clearing any
@@ -214,7 +194,9 @@ protected:
     virtual Value transformSkippedValueForOutput(const Value&) const = 0;
 
     // Writes the given value to the output doc, replacing the existing value of 'field' if present.
-    virtual void outputProjectedField(StringData field, Value val, MutableDocument* outDoc) const;
+    virtual void outputProjectedField(std::string_view field,
+                                      Value val,
+                                      MutableDocument* outDoc) const;
 
     // Used to determine if the node is an inclusion or exclusion node.
     virtual bool isIncluded() const = 0;
@@ -260,7 +242,9 @@ private:
 
     // Helpers for the 'applyProjections' and 'applyExpressions' methods. Applies the transformation
     // recursively to each element of any arrays, and ensures primitives are handled appropriately.
-    Value applyExpressionsToValue(const Document& root, Value inputVal) const;
+    Value applyExpressionsToValue(const Document& root,
+                                  Value inputVal,
+                                  const EvaluationContext& ctx) const;
     Value applyProjectionsToValue(Value inputVal) const;
 
     // Adds a new ProjectionNode as a child. 'field' cannot be dotted.
@@ -275,7 +259,7 @@ private:
      * node added).
      */
     void makeOptimizationsStale() {
-        _maxFieldsToProject = boost::none;
+        _maxFieldsToProject = kUnlimitedFieldsToProject;
     }
 
     /**
@@ -288,9 +272,14 @@ private:
      */
     void _addProjectionForPath(const FieldPath& path);
 
+    /**
+     * Sentinel value for '_maxFieldsToProject'.
+     */
+    static constexpr size_t kUnlimitedFieldsToProject = std::numeric_limits<size_t>::max();
+
     // Maximum number of fields that need to be projected. This allows for an "early" return
     // optimization which means we don't have to iterate over an entire document. The value is
     // stored here to avoid re-computation for each document.
-    boost::optional<size_t> _maxFieldsToProject;
+    size_t _maxFieldsToProject = kUnlimitedFieldsToProject;
 };
 }  // namespace mongo::projection_executor

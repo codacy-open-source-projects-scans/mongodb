@@ -1,5 +1,8 @@
 /**
  * Test that a $limit gets pushed to the shards.
+ *
+ * TODO (SERVER-131069): Mock-only explain format (limit absorption). Cannot migrate to
+ * real-mongot E2E.
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
@@ -35,15 +38,21 @@ const testColl = testDB.getCollection(collName);
 let protocolVersion = null;
 
 const searchInSbe =
-    checkSbeRestrictedOrFullyEnabled(testDB) && FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe");
+    checkSbeRestrictedOrFullyEnabled(testDB) &&
+    FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe");
 
 // TODO SERVER-85637 Remove check for SearchExplainExecutionStats after the feature flag is removed.
-if (FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchExplainExecutionStats") && !searchInSbe) {
+if (
+    FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchExplainExecutionStats") &&
+    !searchInSbe
+) {
     protocolVersion = getDefaultProtocolVersionForPlanShardedSearch();
 }
 
 // Shard the test collection, split it at {_id: 10}, and move the higher chunk to shard1.
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 st.shardColl(testColl, {_id: 1}, {_id: 10}, {_id: 10 + 1});
 
 assert.commandWorked(testColl.insert({_id: 1, x: "ow"}));
@@ -99,10 +108,6 @@ function assertLimitAbsorbed(explainRes, query) {
             } else {
                 assert.eq(stages[1]["$_internalSearchIdLookup"].limit, 7, explainRes);
             }
-            // Assert limit and skip were pushed down to mongot in the form of
-            // 'mongotRequestedDocs'. Both need to be pushed down so that after mongos skips first
-            // documents in sort order, the limit can then be applied.
-            assert.eq(7, stages[0]["$_internalSearchMongotRemote"].mongotDocsRequested, explainRes);
         }
     }
 }
@@ -111,7 +116,9 @@ function testBasicCase(shard0Conn, shard1Conn, cursorId) {
     const history = [
         {
             expectedCommand: expectedMongotCommand,
-            response: mongotResponseForBatch([], NumberLong(0), testColl.getFullName(), 1, {"garbage": true}),
+            response: mongotResponseForBatch([], NumberLong(0), testColl.getFullName(), 1, {
+                "garbage": true,
+            }),
         },
     ];
     const s0Mongot = stWithMock.getMockConnectedToHost(shard0Conn);

@@ -1,44 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -68,6 +33,7 @@
 #include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/global_catalog/ddl/shardsvr_join_migrations_request_gen.h"
+#include "mongo/db/global_catalog/index_on_config.h"
 #include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
@@ -106,9 +72,7 @@
 #include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
-#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/sharding_environment/sharding_logging.h"
-#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/topology/add_shard_gen.h"
 #include "mongo/db/topology/cluster_parameters/cluster_server_parameter_cmds_gen.h"
@@ -121,7 +85,7 @@
 #include "mongo/db/topology/topology_change_helpers.h"
 #include "mongo/db/topology/user_write_block/set_user_write_block_mode_gen.h"
 #include "mongo/db/topology/user_write_block/user_writes_critical_section_document_gen.h"
-#include "mongo/db/topology/user_write_block/user_writes_recoverable_critical_section_service.h"
+#include "mongo/db/topology/user_write_block/writes_recoverable_critical_section_service.h"
 #include "mongo/db/topology/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/versioning_protocol/database_version.h"
@@ -133,7 +97,7 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/atomic.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -161,9 +125,19 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -280,10 +254,40 @@ StatusWith<std::vector<DatabaseName>> ShardingCatalogManager::_getDBNamesListFro
     }
 }
 
+Status ShardingCatalogManager::createIndexOnUuidForConfigShards(OperationContext* opCtx) {
+    const auto performCreation =
+        feature_flags::gFeatureFlagAssignUUIDToShard.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+    if (performCreation) {
+        const bool unique = true;
+        const auto result = sharding_util::createIndexesOnCollectionAtStepUp(
+            opCtx,
+            NamespaceString::kConfigsvrShardsNamespace,
+            {IndexSpec_ForCatalog{BSON(ShardType::uuid() << 1), unique}});
+        if (!result.isOK()) {
+            return result.withContext("couldn't create uuid_1 index on config.shards");
+        }
+    }
+
+    return Status::OK();
+}
+
+
 void ShardingCatalogManager::installConfigShardIdentityDocument(OperationContext* opCtx,
                                                                 bool deferShardingInitialization) {
+    // Note that we can check the feature flag here without a fixed FCV region because the caller
+    // is part of onStepUpComplete in which the primary is not yet writable, thus setFCV cannot run.
+    // TODO (SERVER-126212): Always generate a UUID for the config server.
+    const bool generateShardUuid = feature_flags::gFeatureFlagAssignUUIDToShard.isEnabled(
+        VersionContext::getDecoration(opCtx),
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     invariant(!ShardingState::get(opCtx)->enabled());
-    auto identity = topology_change_helpers::createShardIdentity(opCtx, ShardId::kConfigServerId);
+    auto identity = topology_change_helpers::createShardIdentity(
+        opCtx,
+        ShardId::kConfigServerId,
+        generateShardUuid ? boost::make_optional(ShardType::kConfigServerUuid) : boost::none);
     if (deferShardingInitialization) {
         identity.setDeferShardingInitialization(true);
     }
@@ -371,7 +375,8 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
             return topology_change_helpers::getExistingShard(
                 opCtx,
                 shardConnectionString,
-                shardProposedName ? boost::optional<StringData>(*shardProposedName) : boost::none,
+                shardProposedName ? boost::optional<std::string_view>(*shardProposedName)
+                                  : boost::none,
                 *_localCatalogClient);
         } catch (const DBException& ex) {
             return ex.toStatus();
@@ -422,7 +427,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
             opCtx,
             *targeter,
             isConfigShard,
-            shardProposedName ? boost::optional<StringData>(*shardProposedName) : boost::none,
+            shardProposedName ? boost::optional<std::string_view>(*shardProposedName) : boost::none,
             _executorForAddShard);
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -438,8 +443,8 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
 
     for (const auto& dbName : dbNamesStatus.getValue()) {
         try {
-            auto dbt = _localCatalogClient->getDatabase(
-                opCtx, dbName, repl::ReadConcernLevel::kLocalReadConcern);
+            auto dbt =
+                _localCatalogClient->getDatabase(opCtx, dbName, repl::ReadConcernArgs::kLocal);
             return Status(ErrorCodes::OperationFailed,
                           str::stream()
                               << "can't add shard "
@@ -450,10 +455,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
         }
     }
 
-    // Check that the shard candidate does not have a local config.system.sessions collection. We do
-    // not want to drop this once featureFlagSessionsCollectionCoordinatorOnConfigServer is enabled
-    // but we do not have stability yet. We optimistically do not drop it here and then double check
-    // later under the fixed FCV region.
+    // Check that the shard candidate does not have a local config.system.sessions collection.
     if (!isConfigShard) {
         auto res = _dropSessionsCollection(opCtx, targeter);
         if (!res.isOK()) {
@@ -496,9 +498,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
               currentFCV == multiversion::GenericFCV::kLastContinuous ||
               currentFCV == multiversion::GenericFCV::kLastLTS);
 
-    if (isConfigShard &&
-        !feature_flags::gSessionsCollectionCoordinatorOnConfigServer.isEnabled(
-            VersionContext::getDecoration(opCtx), fcvSnapshot)) {
+    if (isConfigShard) {
         auto res = _dropSessionsCollection(opCtx, targeter);
         if (!res.isOK()) {
             return res.withContext(
@@ -808,14 +808,12 @@ RemoveShardProgress ShardingCatalogManager::checkDrainingProgress(OperationConte
     }
 
     if (shardId == ShardId::kConfigServerId) {
-        auto task = topology_change_helpers::getLatestNonProcessingRangeDeletionTask(opCtx);
-        if (task) {
-            try {
-                topology_change_helpers::checkOrphanCleanupDelayElapsed(opCtx, *task);
-            } catch (const ExceptionFor<ErrorCodes::RemoveShardDrainingInProgress>& ex) {
-                const auto drainingProgress = ex.extraInfo<RemoveShardDrainingInfo>();
-                return drainingProgress->getProgress();
-            }
+        // Wait for range deletions to complete
+        auto pendingRangeDeletions = topology_change_helpers::getRangeDeletionCount(opCtx);
+        if (pendingRangeDeletions > 0) {
+            RemoveShardProgress progress(ShardDrainingStateEnum::kPendingDataCleanup);
+            progress.setPendingRangeDeletions(pendingRangeDeletions);
+            return progress;
         }
     }
 
@@ -857,17 +855,17 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
     if (shardId == ShardId::kConfigServerId) {
         topology_change_helpers::joinMigrations(opCtx);
         // The config server may be added as a shard again, so we locally drop its drained
-        // sharded collections to enable that without user intervention. We wait for
-        // orphanCleanupDelaySecs as a best effort since creation of latest non pending range
-        // deletion task.
-        auto task = topology_change_helpers::getLatestNonProcessingRangeDeletionTask(opCtx);
-        if (task) {
-            try {
-                topology_change_helpers::checkOrphanCleanupDelayElapsed(opCtx, *task);
-            } catch (const ExceptionFor<ErrorCodes::RemoveShardDrainingInProgress>& ex) {
-                const auto drainingProgress = ex.extraInfo<RemoveShardDrainingInfo>();
-                return drainingProgress->getProgress();
-            }
+        // sharded collections to enable that without user intervention. But we have to wait for
+        // the range deleter to quiesce to give queries and stale routers time to discover the
+        // migration, to match the usual probabilistic guarantees for migrations.
+        auto pendingRangeDeletions = topology_change_helpers::getRangeDeletionCount(opCtx);
+        if (pendingRangeDeletions > 0) {
+            LOGV2(7564600,
+                  "removeShard: waiting for range deletions",
+                  "pendingRangeDeletions"_attr = pendingRangeDeletions);
+            RemoveShardProgress progress(ShardDrainingStateEnum::kPendingDataCleanup);
+            progress.setPendingRangeDeletions(pendingRangeDeletions);
+            return progress;
         }
     }
 
@@ -921,8 +919,7 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
         FixedFCVRegion fcvRegion(opCtx);
 
         if (shardId == ShardId::kConfigServerId) {
-            auto trackedDBs =
-                _localCatalogClient->getAllDBs(opCtx, repl::ReadConcernLevel::kLocalReadConcern);
+            auto trackedDBs = _localCatalogClient->getAllDBs(opCtx, repl::ReadConcernArgs::kLocal);
 
             if (auto pendingCleanupState =
                     topology_change_helpers::dropLocalCollectionsAndDatabases(
@@ -931,29 +928,14 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
             }
 
             // Also drop the sessions collection, which we assume is the only sharded collection in
-            // the config database. Only do this if
-            // featureFlagSessionsCollectionCoordinatorOnConfigServer is disabled. We don't have
-            // synchronization with setFCV here, so it is still possible for rare interleavings to
-            // drop the collection when they shouldn't, but the create coordinator will re-create it
-            // on the next periodic refresh.
-            if (!feature_flags::gSessionsCollectionCoordinatorOnConfigServer.isEnabled(
-                    VersionContext::getDecoration(opCtx), fcvRegion->acquireFCVSnapshot())) {
-                DBDirectClient client(opCtx);
-                BSONObj result;
-                if (!client.dropCollection(
-                        NamespaceString::kLogicalSessionsNamespace,
-                        ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-                        &result)) {
-                    uassertStatusOK(getStatusFromCommandResult(result));
-                }
-            }
+            // the config database.
             DBDirectClient client(opCtx);
-            BSONObj rangeDeletionsResult;
+            BSONObj result;
             if (!client.dropCollection(
-                    NamespaceString::kRangeDeletionNamespace,
+                    NamespaceString::kLogicalSessionsNamespace,
                     ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-                    &rangeDeletionsResult)) {
-                uassertStatusOK(getStatusFromCommandResult(rangeDeletionsResult));
+                    &result)) {
+                uassertStatusOK(getStatusFromCommandResult(result));
             }
         }
 
@@ -1131,7 +1113,7 @@ void ShardingCatalogManager::_standardizeClusterParameters(OperationContext* opC
     auto shardsDocs = uassertStatusOK(_localConfigShard->exhaustiveFindOnConfig(
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        repl::ReadConcernLevel::kLocalReadConcern,
+        repl::ReadConcernArgs::kLocal,
         NamespaceString::kConfigsvrShardsNamespace,
         BSONObj(),
         BSONObj(),

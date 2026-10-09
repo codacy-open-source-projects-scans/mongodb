@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2025-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/exec/agg/current_op_stage.h"
 
@@ -33,13 +7,16 @@
 #include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/pipeline/document_source_current_op.h"
 
+#include <string_view>
+
 namespace mongo {
 
 namespace {
-const StringData kOpIdFieldName = "opid"_sd;
-const StringData kClientFieldName = "client"_sd;
-const StringData kMongosClientFieldName = "client_s"_sd;
-const StringData kShardFieldName = "shard"_sd;
+using namespace std::literals::string_view_literals;
+const std::string_view kOpIdFieldName = "opid"sv;
+const std::string_view kClientFieldName = "client"sv;
+const std::string_view kMongosClientFieldName = "client_s"sv;
+const std::string_view kShardFieldName = "shard"sv;
 }  // namespace
 
 boost::intrusive_ptr<exec::agg::Stage> documentSourceCurrentOpToStageFn(
@@ -114,14 +91,14 @@ GetNextResult CurrentOpStage::doGetNext() {
         doc.addField(kShardFieldName, Value(_shardName));
 
         if (mongo::lockedForWriting()) {
-            doc.addField(StringData("fsyncLock"), Value(true));
+            doc.addField(std::string_view("fsyncLock"), Value(true));
         }
 
         // For operations on a shard, we change the opid from the raw numeric form to
         // 'shardname:opid'. We also change the fieldname 'client' to 'client_s' to indicate
         // that the IP is that of the mongos which initiated this request.
         for (auto&& elt : op) {
-            StringData fieldName = elt.fieldNameStringData();
+            std::string_view fieldName = elt.fieldNameStringData();
 
             if (fieldName == kOpIdFieldName) {
                 uassert(ErrorCodes::TypeMismatch,

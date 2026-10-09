@@ -1,39 +1,13 @@
-/**
- *    Copyright (C) 2023-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
+#include <string_view>
 #include <type_traits>
 
 #include <grpcpp/security/server_credentials.h>
@@ -41,6 +15,7 @@
 
 namespace mongo::transport::grpc::util {
 namespace constants {
+using namespace std::literals::string_view_literals;
 /**
  * Wire version constant corresponding to the first wire version that supports using gRPC.
  */
@@ -52,22 +27,22 @@ static constexpr auto kUnauthenticatedCommandStreamMethodName =
     "/mongodb.CommandService/UnauthenticatedCommandStream";
 
 // Server-provided metadata keys.
-// This is defined as a std::string instead of StringData to avoid having to copy it when passing to
-// gRPC APIs that expect a const std::string&.
+// This is defined as a std::string instead of std::string_view to avoid having to copy it when
+// passing to gRPC APIs that expect a const std::string&.
 extern const std::string kClusterMaxWireVersionKey;
 
 // Client-provided metadata keys.
-static constexpr StringData kAuthenticationTokenKey = "authorization"_sd;
-static constexpr StringData kClientIdKey = "mongodb-clientid"_sd;
-static constexpr StringData kClientMetadataKey = "mongodb-client"_sd;
-static constexpr StringData kWireVersionKey = "mongodb-wireversion"_sd;
+static constexpr std::string_view kAuthenticationTokenKey = "authorization"sv;
+static constexpr std::string_view kClientIdKey = "mongodb-clientid"sv;
+static constexpr std::string_view kClientMetadataKey = "mongodb-client"sv;
+static constexpr std::string_view kWireVersionKey = "mongodb-wireversion"sv;
 }  // namespace constants
 
 /**
  * Parse a PEM-encoded file that contains a single certificate and its associated private key
  * into a PemKeyCertPair.
  */
-::grpc::SslServerCredentialsOptions::PemKeyCertPair parsePEMKeyFile(StringData filePath);
+::grpc::SslServerCredentialsOptions::PemKeyCertPair parsePEMKeyFile(std::string_view filePath);
 
 /**
  * Converts a Mongo URI into a gRPC formatted string.
@@ -75,7 +50,7 @@ static constexpr StringData kWireVersionKey = "mongodb-wireversion"_sd;
 std::string toGRPCFormattedURI(const HostAndPort& address);
 
 // See: https://grpc.github.io/grpc/cpp/md_doc_naming.html
-inline bool isUnixSchemeGRPCFormattedURI(StringData uri) {
+inline bool isUnixSchemeGRPCFormattedURI(std::string_view uri) {
     return uri.starts_with("unix:");
 }
 
@@ -83,12 +58,12 @@ inline bool isUnixSchemeGRPCFormattedURI(StringData uri) {
  * Parses a gRPC-formatted URI to a HostAndPort, throwing an exception on failure.
  * See: https://grpc.github.io/grpc/cpp/md_doc_naming.html
  */
-HostAndPort parseGRPCFormattedURI(StringData uri);
+HostAndPort parseGRPCFormattedURI(std::string_view uri);
 
 /**
  * Converts a gRPC status code into its corresponding MongoDB error code.
  */
-MONGO_MOD_PUBLIC ErrorCodes::Error statusToErrorCode(::grpc::StatusCode statusCode);
+[[MONGO_MOD_PUBLIC]] ErrorCodes::Error statusToErrorCode(::grpc::StatusCode statusCode);
 
 /**
  * Converts a MongoDB error code into its corresponding gRPC status code.

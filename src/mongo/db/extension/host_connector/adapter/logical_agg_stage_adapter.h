@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #pragma once
 
 #include "mongo/db/extension/host/aggregation_stage/executable_agg_stage.h"
@@ -141,16 +115,6 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _hostIsStageSortedByVectorSearchScore(
-        const ::MongoExtensionLogicalAggStage* logicalStage,
-        bool* outIsSortedByVectorSearchScore) noexcept {
-        return wrapCXXAndConvertExceptionToStatus([]() {
-            tasserted(12303705,
-                      "_hostIsStageSortedByVectorSearchScore should not be called on a "
-                      "host-allocated logical stage.");
-        });
-    }
-
     static ::MongoExtensionStatus* _hostSetVectorSearchLimitForOptimization(
         ::MongoExtensionLogicalAggStage* logicalStage, long long* extractedLimitVal) noexcept {
         return wrapCXXAndConvertExceptionToStatus([]() {
@@ -160,27 +124,28 @@ private:
         });
     }
 
-    static ::MongoExtensionStatus* _hostEvaluateRulePrecondition(
+    static ::MongoExtensionStatus* _hostEvaluatePipelineRewriteRulePrecondition(
         const ::MongoExtensionLogicalAggStage* logicalStage,
         ::MongoExtensionByteView ruleName,
         const ::MongoExtensionPipelineRewriteContext* ctx,
         bool* result) noexcept {
         return wrapCXXAndConvertExceptionToStatus([]() {
             tasserted(12303707,
-                      "_hostEvaluateRulePrecondition should not be called on a host-allocated "
-                      "logical stage.");
+                      "_hostEvaluatePipelineRewriteRulePrecondition should not be called on a "
+                      "host-allocated logical stage.");
         });
     }
 
-    static ::MongoExtensionStatus* _hostEvaluateRuleTransform(
+    static ::MongoExtensionStatus* _hostEvaluatePipelineRewriteRuleTransform(
         ::MongoExtensionLogicalAggStage* logicalStage,
         ::MongoExtensionByteView ruleName,
         ::MongoExtensionPipelineRewriteContext* ctx,
         bool* result) noexcept {
         return wrapCXXAndConvertExceptionToStatus([]() {
             tasserted(12303708,
-                      "_hostEvaluateRuleTransform should not be called on a host-allocated logical "
-                      "stage.");
+                      "_hostEvaluatePipelineRewriteRuleTransform should not be called on a "
+                      "host-allocated "
+                      "logical stage.");
         });
     }
 
@@ -199,11 +164,30 @@ private:
     }
 
     static ::MongoExtensionStatus* _hostGetSortPattern(
-        ::MongoExtensionLogicalAggStage* logicalStage, ::MongoExtensionByteBuf** output) noexcept {
+        const ::MongoExtensionLogicalAggStage* logicalStage,
+        ::MongoExtensionByteBuf** output) noexcept {
         return wrapCXXAndConvertExceptionToStatus([&]() {
             tasserted(
                 12327101,
                 "_hostGetSortPattern should not be called on a host-allocated logical stage.");
+        });
+    }
+
+    static ::MongoExtensionStatus* _hostSkipStream(::MongoExtensionLogicalAggStage* logicalStage,
+                                                   ::MongoExtensionStreamType streamType) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([]() {
+            tasserted(12601401,
+                      "_hostSkipStream should not be called on a host-allocated logical stage.");
+        });
+    }
+
+    static ::MongoExtensionStatus* _hostGetDocsNeededBounds(
+        const ::MongoExtensionLogicalAggStage* logicalStage,
+        ::MongoExtensionByteBuf** output) noexcept {
+        return wrapCXXAndConvertExceptionToStatus([]() {
+            tasserted(
+                11842301,
+                "_hostGetDocsNeededBounds should not be called on a host-allocated logical stage.");
         });
     }
 
@@ -215,17 +199,18 @@ private:
         .compile = &_hostCompile,
         .get_distributed_plan_logic = &_hostGetDistributedPlanLogic,
         .clone = &_hostClone,
-        .is_stage_sorted_by_vector_search_score_deprecated = &_hostIsStageSortedByVectorSearchScore,
         .set_vector_search_limit_for_optimization_deprecated =
             &_hostSetVectorSearchLimitForOptimization,
-        .evaluate_rule_precondition = &_hostEvaluateRulePrecondition,
-        .evaluate_rule_transform = &_hostEvaluateRuleTransform,
+        .evaluate_pipeline_rewrite_rule_precondition =
+            &_hostEvaluatePipelineRewriteRulePrecondition,
+        .evaluate_pipeline_rewrite_rule_transform = &_hostEvaluatePipelineRewriteRuleTransform,
         .get_filter = &_hostGetFilter,
         .apply_pipeline_suffix_dependencies = &_hostApplyPipelineSuffixDependencies,
         .get_sort_pattern = &_hostGetSortPattern,
+        .skip_stream = &_hostSkipStream,
+        .get_docs_needed_bounds = &_hostGetDocsNeededBounds,
     };
 
     std::unique_ptr<host::LogicalAggStage> _logicalAggStage;
 };
-
 };  // namespace mongo::extension::host_connector

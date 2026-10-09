@@ -1,35 +1,8 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/util/str.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
@@ -39,12 +12,14 @@
 #include <algorithm>
 #include <bitset>
 #include <limits>
+#include <string_view>
 
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 
 namespace mongo::str {
 namespace {
+using namespace std::literals::string_view_literals;
 
 using std::string;
 
@@ -52,7 +27,7 @@ TEST(StringUtilsTest, Simple1) {
     ASSERT_EQUALS(0, LexNumCmp::cmp("a.b.c", "a.b.c", false));
 }
 
-void assertCmp(int expected, StringData s1, StringData s2, bool lexOnly = false) {
+void assertCmp(int expected, std::string_view s1, std::string_view s2, bool lexOnly = false) {
     LexNumCmp cmp(lexOnly);
     ASSERT_EQUALS(expected, cmp.cmp(s1, s2, lexOnly));
     ASSERT_EQUALS(expected, cmp.cmp(s1, s2));
@@ -162,12 +137,12 @@ TEST(StringUtilsTest, LexOnly) {
 
 TEST(StringUtilsTest, Substring1) {
     assertCmp(0, "1234", "1234", false);
-    assertCmp(0, StringData("1234"), StringData("1234"), false);
-    assertCmp(0, StringData("1234", 4), StringData("1234", 4), false);
-    assertCmp(-1, StringData("123", 3), StringData("1234", 4), false);
+    assertCmp(0, std::string_view("1234"), std::string_view("1234"), false);
+    assertCmp(0, std::string_view("1234", 4), std::string_view("1234", 4), false);
+    assertCmp(-1, std::string_view("123", 3), std::string_view("1234", 4), false);
 
 
-    assertCmp(0, StringData("0001", 3), StringData("0000", 3), false);
+    assertCmp(0, std::string_view("0001", 3), std::string_view("0000", 3), false);
 }
 
 TEST(StringUtilsTest, UnsignedHex) {
@@ -272,39 +247,39 @@ TEST(StringUtilsTest, ConvertDoubleToStringWithProperPrecision) {
 }
 
 TEST(StringUtilsTest, EqualCaseInsensitive) {
-    ASSERT(str::equalCaseInsensitive(StringData("abc"), "abc"));
-    ASSERT(str::equalCaseInsensitive(StringData("abc"), "ABC"));
-    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "abc"));
-    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "ABC"));
-    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "AbC"));
-    ASSERT(!str::equalCaseInsensitive(StringData("ABC"), "AbCd"));
-    ASSERT(!str::equalCaseInsensitive(StringData("ABC"), "AdC"));
+    ASSERT(str::equalCaseInsensitive(std::string_view("abc"), "abc"));
+    ASSERT(str::equalCaseInsensitive(std::string_view("abc"), "ABC"));
+    ASSERT(str::equalCaseInsensitive(std::string_view("ABC"), "abc"));
+    ASSERT(str::equalCaseInsensitive(std::string_view("ABC"), "ABC"));
+    ASSERT(str::equalCaseInsensitive(std::string_view("ABC"), "AbC"));
+    ASSERT(!str::equalCaseInsensitive(std::string_view("ABC"), "AbCd"));
+    ASSERT(!str::equalCaseInsensitive(std::string_view("ABC"), "AdC"));
 }
 
 TEST(StringUtilsTest, UTF8SafeTruncation) {
     // Empty string and ASCII works like normal truncation
-    ASSERT_EQUALS(UTF8SafeTruncation(""_sd, 10), ""_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("abcdefg"_sd, 5), "abcde"_sd);
+    ASSERT_EQUALS(UTF8SafeTruncation(""sv, 10), ""sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("abcdefg"sv, 5), "abcde"sv);
 
     // Valid 2 Octet sequences, LATIN SMALL LETTER N WITH TILDE
-    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"_sd, 1), ""_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"_sd, 4), "\u00f1\u00f1"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"_sd, 5), "\u00f1\u00f1"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"_sd, 6), "\u00f1\u00f1\u00f1"_sd);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"sv, 1), ""sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"sv, 4), "\u00f1\u00f1"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"sv, 5), "\u00f1\u00f1"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u00f1\u00f1\u00f1"sv, 6), "\u00f1\u00f1\u00f1"sv);
 
     // Valid 3 Octet sequences, RUNIC LETTER TIWAZ TIR TYR T
-    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"_sd, 2), ""_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"_sd, 3), "\u16cf"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"_sd, 4), "\u16cf"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"_sd, 5), "\u16cf"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"_sd, 6), "\u16cf\u16cf"_sd);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"sv, 2), ""sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"sv, 3), "\u16cf"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"sv, 4), "\u16cf"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"sv, 5), "\u16cf"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\u16cf\u16cf"sv, 6), "\u16cf\u16cf"sv);
 
     // Valid 4 Octet sequences, GOTHIC LETTER MANNA
-    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"_sd, 4), "\U0001033c"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"_sd, 5), "\U0001033c"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"_sd, 6), "\U0001033c"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"_sd, 7), "\U0001033c"_sd);
-    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"_sd, 8), "\U0001033c\U0001033c"_sd);
+    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"sv, 4), "\U0001033c"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"sv, 5), "\U0001033c"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"sv, 6), "\U0001033c"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"sv, 7), "\U0001033c"sv);
+    ASSERT_EQUALS(UTF8SafeTruncation("\U0001033c\U0001033c"sv, 8), "\U0001033c\U0001033c"sv);
 }
 
 TEST(StringUtilsTest, GetCodePointLength) {
@@ -323,15 +298,15 @@ TEST(StringUtilsTest, GetCodePointLength) {
 TEST(StringUtilsTest, UassertNoEmbeddedNulBytes) {
     // These shouldn't throw.
     uassertNoEmbeddedNulBytes({nullptr, 0});
-    uassertNoEmbeddedNulBytes(""_sd);
-    uassertNoEmbeddedNulBytes("hello"_sd);
-    uassertNoEmbeddedNulBytes("hello\0"_sd.substr(0, 5));
+    uassertNoEmbeddedNulBytes(""sv);
+    uassertNoEmbeddedNulBytes("hello"sv);
+    uassertNoEmbeddedNulBytes("hello\0"sv.substr(0, 5));
 
     // These should throw.
-    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("\0"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("\0hello"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("hello\0"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("hello\0world"_sd), DBException, 9527900);
+    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("\0"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("\0hello"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("hello\0"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(uassertNoEmbeddedNulBytes("hello\0world"sv), DBException, 9527900);
 }
 
 TEST(StringUtilsTest, CopyAsCString) {
@@ -341,27 +316,27 @@ TEST(StringUtilsTest, CopyAsCString) {
     auto ptr = [](const char* p) {
         return static_cast<const void*>(p);
     };
-    auto testValid = [&](StringData noNul, int line) {
+    auto testValid = [&](std::string_view noNul, int line) {
         // Make sure we write a nul byte. Without this, the test could pass if dest happened to have
         // uninitialized zero bytes.
         std::fill_n(dest, sizeof(dest), 0xff);
 
         ASSERT_EQ(ptr(copyAsCString(dest, noNul)), ptr(dest + noNul.size() + 1)) << "line:" << line;
         ASSERT_EQ(dest[noNul.size()], '\0') << "line:" << line;
-        ASSERT_EQ(StringData(dest, noNul.size()), noNul) << "line:" << line;
+        ASSERT_EQ(std::string_view(dest, noNul.size()), noNul) << "line:" << line;
     };
 
     // These shouldn't throw.
     testValid({nullptr, 0}, __LINE__);
-    testValid(""_sd, __LINE__);
-    testValid("hello"_sd, __LINE__);
-    testValid("hello world"_sd.substr(0, 5), __LINE__);
+    testValid(""sv, __LINE__);
+    testValid("hello"sv, __LINE__);
+    testValid("hello world"sv.substr(0, 5), __LINE__);
 
     // These should throw.
-    ASSERT_THROWS_CODE(copyAsCString(dest, "\0"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(copyAsCString(dest, "\0hello"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(copyAsCString(dest, "hello\0"_sd), DBException, 9527900);
-    ASSERT_THROWS_CODE(copyAsCString(dest, "hello\0world"_sd), DBException, 9527900);
+    ASSERT_THROWS_CODE(copyAsCString(dest, "\0"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(copyAsCString(dest, "\0hello"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(copyAsCString(dest, "hello\0"sv), DBException, 9527900);
+    ASSERT_THROWS_CODE(copyAsCString(dest, "hello\0world"sv), DBException, 9527900);
 }
 
 /**
@@ -371,7 +346,7 @@ TEST(StringUtilsTest, CopyAsCString) {
 const std::string replacementCharacter = u8"\ufffd"_as_char_ptr;
 
 /** Repeat the `s` string, `x` times. */
-std::string repeat(StringData s, size_t x) {
+std::string repeat(std::string_view s, size_t x) {
     std::string result;
     result.reserve(x * s.size());
     auto it = std::back_inserter(result);
@@ -471,6 +446,106 @@ TEST(StringEscapeTest, ValidUTF8) {
         ASSERT(!str::validUTF8(pair.first));
     }
 }
+
+namespace detail {
+template <typename T>
+struct assert_helper {
+    template <typename U>
+    static boost::optional<T> to_optional(U value) {
+        return boost::optional<T>(T(value));
+    }
+
+    template <typename U>
+    static boost::optional<T> to_optional(boost::optional<U> value) {
+        return value.map([](auto s) { return T(s); });
+    }
+
+    static boost::optional<T> to_optional(boost::none_t) {
+        return boost::none;
+    }
+};
+}  // namespace detail
+
+#define EXPECT_OPTEQ(lhs, rhs)                                        \
+    EXPECT_EQ(detail::assert_helper<std::string>::to_optional((lhs)), \
+              detail::assert_helper<std::string>::to_optional((rhs)))
+
+TEST(SplitTest, Example) {
+    auto it = split_iter("one.two.three.four", '.');
+    EXPECT_OPTEQ("one", it.next());
+    EXPECT_OPTEQ("two", it.next());
+    EXPECT_OPTEQ("three", it.next());
+    EXPECT_OPTEQ("four", it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+}
+
+TEST(SplitTest, Empty) {
+    auto it = split_iter("", '.');
+    EXPECT_OPTEQ(boost::none, it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+}
+
+TEST(SplitTest, DelimiterNotFound) {
+    auto it = split_iter("one.two.three.four", '$');
+    EXPECT_OPTEQ("one.two.three.four", it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+}
+
+TEST(SplitTest, DelimOnly) {
+    auto it = split_iter(".", '.');
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+
+    it = split_iter("...", '.');
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ("", it.next());
+    EXPECT_OPTEQ(boost::none, it.next());
+}
+
+TEST(SplitTest, SplitStringDelimEquivalence) {
+    auto splitStringDelimCollect = [](std::string_view input, char delim) {
+        std::vector<std::string> splitVec;
+        splitStringDelim(std::string(input), &splitVec, delim);
+        return splitVec;
+    };
+
+    auto splitIterCollect = [](std::string_view input, char delim) {
+        const auto views = split_iter(input, delim).collect();
+        std::vector<std::string> owned;
+        for (const auto& view : views) {
+            owned.push_back(std::string(view));
+        }
+        return owned;
+    };
+
+#define INSTANCE(input, delim) \
+    ASSERT_EQ((splitStringDelimCollect((input), (delim))), (splitIterCollect((input), (delim))))
+
+    INSTANCE("", '$');
+    INSTANCE("", '/');
+    INSTANCE("one.two.three.four", '.');
+    INSTANCE("one.two.three.four", '$');
+    INSTANCE("one/two/three$four", '$');
+    INSTANCE("one/two/three$four", '/');
+    INSTANCE("one/two/three$four", '-');
+    INSTANCE("one/two/three$four", 'o');
+    INSTANCE("one/two/three$four", 'r');
+    INSTANCE("one/two/three$four", '-');
+}
+
+TEST(SplitTest, Collect) {
+    EXPECT_EQ(std::vector<std::string_view>{}, split_iter("", '.').collect());
+    EXPECT_EQ(std::vector<std::string_view>{"foo"}, split_iter("foo", '.').collect());
+    EXPECT_EQ((std::vector<std::string_view>{"", ""}), split_iter(".", '.').collect());
+    EXPECT_EQ((std::vector<std::string_view>{"one", "two", "three", "four"}),
+              split_iter("one.two.three.four", '.').collect());
+}
+
 
 }  // namespace
 }  // namespace mongo::str

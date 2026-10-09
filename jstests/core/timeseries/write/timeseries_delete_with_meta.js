@@ -3,9 +3,12 @@
  * bucket document by targeting them with their meta field value.
  *
  * @tags: [
+ *   uses_explain,
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
  *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   # This test uses multi-deletes (limit: 0), which cannot be retried during FCV time-series transformations.
+ *   requires_multi_updates,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  * ]
@@ -55,10 +58,16 @@ TimeseriesTest.run((insert) => {
                 testDB.runCommand({explain: deleteCommand, verbosity: "executionStats"}),
             );
             jsTestLog(tojson(explain));
+            // Check the executed plan rather than the winning query plan: when the delete is
+            // multi-planned, the V3 explain shape shows the candidates' find-shaped trial trees
+            // in the query planner section, and the write stage root appears only in the
+            // execution section (where it is present in the legacy shape too).
+            const executionStages = explain.executionStats.executionStages;
             assert(
-                planHasStage(testDB, explain.queryPlanner.winningPlan, "BATCHED_DELETE") ||
-                    planHasStage(testDB, explain.queryPlanner.winningPlan, "DELETE") ||
-                    planHasStage(testDB, explain.queryPlanner.winningPlan, "TS_MODIFY"),
+                planHasStage(testDB, executionStages, "BATCHED_DELETE") ||
+                    planHasStage(testDB, executionStages, "DELETE") ||
+                    planHasStage(testDB, executionStages, "TS_MODIFY"),
+                explain,
             );
         }
 
@@ -73,9 +82,15 @@ TimeseriesTest.run((insert) => {
 
     /******************** Tests deleting from a collection with a metaField **********************/
     // Query on a single field that is the metaField.
-    testDelete([{[timeFieldName]: ISODate(), [metaFieldName]: "A"}], [], 1, [{q: {[metaFieldName]: "A"}, limit: 0}]);
+    testDelete([{[timeFieldName]: ISODate(), [metaFieldName]: "A"}], [], 1, [
+        {q: {[metaFieldName]: "A"}, limit: 0},
+    ]);
 
-    const objA = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {a: "A"}};
+    const objA = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {a: "A"},
+    };
 
     // Query on a single field that is the metaField using dot notation.
     testDelete([objA], [], 1, [{q: {[metaFieldName + ".a"]: "A"}, limit: 0}]);
@@ -86,8 +101,16 @@ TimeseriesTest.run((insert) => {
         {q: {"$and": [{[metaFieldName + ".a"]: "A"}, {[metaFieldName + ".b"]: "B"}]}, limit: 0},
     ]);
 
-    const objB = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {b: "B"}};
-    const objC = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {d: "D"}};
+    const objB = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {b: "B"},
+    };
+    const objC = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {d: "D"},
+    };
 
     // Multiple queries on a single field that is the metaField.
     testDelete([objA, objB, objC], [objB], 2, [
@@ -95,9 +118,21 @@ TimeseriesTest.run((insert) => {
         {q: {"$or": [{[metaFieldName]: {d: "D"}}, {[metaFieldName]: {c: "C"}}]}, limit: 0},
     ]);
 
-    const nestedObjA = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {a: {b: "B"}}};
-    const nestedObjB = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {b: {a: "A"}}};
-    const nestedObjC = {[timeFieldName]: ISODate(), "measurement": {"A": "cpu"}, [metaFieldName]: {d: "D"}};
+    const nestedObjA = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {a: {b: "B"}},
+    };
+    const nestedObjB = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {b: {a: "A"}},
+    };
+    const nestedObjC = {
+        [timeFieldName]: ISODate(),
+        "measurement": {"A": "cpu"},
+        [metaFieldName]: {d: "D"},
+    };
 
     // Query on a single nested field that is the metaField.
     testDelete([nestedObjA, nestedObjB, nestedObjC], [nestedObjB, nestedObjC], 1, [
@@ -105,7 +140,9 @@ TimeseriesTest.run((insert) => {
     ]);
 
     // Query on a single nested field that is the metaField using dot notation.
-    testDelete([nestedObjB, nestedObjC], [nestedObjC], 1, [{q: {[metaFieldName + ".b.a"]: "A"}, limit: 0}]);
+    testDelete([nestedObjB, nestedObjC], [nestedObjC], 1, [
+        {q: {[metaFieldName + ".b.a"]: "A"}, limit: 0},
+    ]);
 
     const objACollation = {[timeFieldName]: ISODate(), [metaFieldName]: "Günter"};
     const objBCollation = {[timeFieldName]: ISODate(), [metaFieldName]: "Gunter"};
@@ -154,7 +191,10 @@ TimeseriesTest.run((insert) => {
             q: {
                 "$and": [
                     {
-                        "$or": [{[metaFieldName]: {"$ne": "B"}}, {[metaFieldName]: {"a": {"$eq": "B"}}}],
+                        "$or": [
+                            {[metaFieldName]: {"$ne": "B"}},
+                            {[metaFieldName]: {"a": {"$eq": "B"}}},
+                        ],
                     },
                     {[metaFieldName]: {"a": "A"}},
                 ],

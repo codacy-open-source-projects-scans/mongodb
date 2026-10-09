@@ -10,10 +10,6 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {ShardVersioningUtil} from "jstests/sharding/libs/shard_versioning_util.js";
 
-// This test requires running commands directly against the shard since 'requestGossipRoutingCache'
-// is a shard-only field.
-TestData.replicaSetEndpointIncompatible = true;
-
 const st = new ShardingTest({shards: 1});
 
 const dbName = "test";
@@ -79,8 +75,12 @@ const ns2CollectionVersion = getExpectedCollectionVersion(ns2);
 
     // Run $lookup with each namespace as secondary collection. The shard will need to route for
     // that collection, so it will refresh its routing cache.
-    coll1.aggregate([{$lookup: {from: coll2.getName(), localField: "x", foreignField: "x", as: "out"}}]);
-    coll2.aggregate([{$lookup: {from: coll1.getName(), localField: "x", foreignField: "x", as: "out"}}]);
+    coll1.aggregate([
+        {$lookup: {from: coll2.getName(), localField: "x", foreignField: "x", as: "out"}},
+    ]);
+    coll2.aggregate([
+        {$lookup: {from: coll1.getName(), localField: "x", foreignField: "x", as: "out"}},
+    ]);
 }
 
 // Check that when no gossip is requested to the shard, then the shard does not gossip back

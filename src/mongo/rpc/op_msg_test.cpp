@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 
 #include "mongo/rpc/op_msg_test.h"
@@ -59,9 +33,11 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
+#include "mongo/rpc/telemetry_context_section_gen.h"
+#include "mongo/unittest/log_capture.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
@@ -71,6 +47,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <absl/container/node_hash_map.h>
@@ -83,26 +60,7 @@
 
 
 namespace mongo {
-
-class AuthorizationSessionImplTestHelper {
-public:
-    /**
-     * Synthesize a user with the useTenant privilege and add them to the authorization session.
-     */
-    static void grantUseTenant(Client& client) {
-        User user(
-            std::make_unique<UserRequestGeneral>(UserName("useTenant", "admin"), boost::none));
-        user.setPrivileges(
-            {Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant)});
-        auto* as = dynamic_cast<AuthorizationSessionImpl*>(AuthorizationSession::get(client));
-        if (as->_authenticatedUser != boost::none) {
-            as->logoutAllDatabases("AuthorizationSessionImplTestHelper"_sd);
-        }
-        as->_authenticatedUser = std::move(user);
-        as->_authenticationMode = AuthorizationSession::AuthenticationMode::kConnection;
-        as->_updateInternalAuthorizationState();
-    }
-};
+using namespace std::literals::string_view_literals;
 
 namespace rpc {
 namespace test {
@@ -281,6 +239,41 @@ TEST_F(OpMsgParser, FailsIfNoBody) {
     };
 
     ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::MissingOpMsgBodySection);
+}
+
+TEST_F(OpMsgParser, FailsIfNoBodyAndEmitsMsgParseLog) {
+    // The parse-failure log (id 22632) is rate-limited by a process-global SeveritySuppressor.
+    // Raise the component to Debug(2) so the single failure below is always emitted (and captured)
+    // regardless of the order in which the tests run.
+    unittest::MinimumLoggedSeverityGuard severityGuard{logv2::LogComponent::kNetwork,
+                                                       logv2::LogSeverity::Debug(2)};
+
+    unittest::LogCaptureGuard logs;
+
+    auto msg = OpMsgBytes{
+        kNoFlags,
+    };
+
+    ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::MissingOpMsgBodySection);
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("c" << "OP_MSG" << "id" << 22632)), 1);
+    ASSERT_EQ(logs.countBSONContainingSubset(BSON("c" << "NETWORK" << "id" << 22632)), 0);
+}
+
+TEST_F(OpMsgParser, RateLimitsParseFailureLog) {
+    // Ensure that OP_MSG parsing failure logs (id 22632) can only emit one log at Debug(1)
+    // verbosity per suppression period. Every subsequent log should be Debug(2), so in this
+    // test, we should see 1 log in the capture guard even though 5 errors happened.
+    unittest::LogCaptureGuard logs;
+
+    for (int i = 0; i < 5; ++i) {
+        auto msg = OpMsgBytes{
+            kNoFlags,
+        };
+
+        ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::MissingOpMsgBodySection);
+    }
+
+    ASSERT_LTE(logs.countBSONContainingSubset(BSON("c" << "OP_MSG" << "id" << 22632)), 1);
 }
 
 TEST_F(OpMsgParser, FailsIfNoBodyEvenWithSequence) {
@@ -591,8 +584,8 @@ void testSerializer(const Message& fromSerializer, OpMsgBytes&& expected) {
     ASSERT_EQ(fromSerializer.operation(), dbMsg);
     // Ignoring request and reply ids since they aren't handled by OP_MSG code.
 
-    auto gotSD = StringData(fromSerializer.singleData().data(), fromSerializer.dataSize());
-    auto expectedSD = StringData(expectedMsg.singleData().data(), expectedMsg.dataSize());
+    auto gotSD = std::string_view(fromSerializer.singleData().data(), fromSerializer.dataSize());
+    auto expectedSD = std::string_view(expectedMsg.singleData().data(), expectedMsg.dataSize());
     if (gotSD == expectedSD)
         return;
 
@@ -691,6 +684,150 @@ TEST(OpMsgSerializer, BodyAndTwoSequences) {
                        kBodySection,
                        fromjson("{ping: 1}"),
                    });
+}
+
+namespace {
+constexpr auto kValidTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+BSONObj makeTelemetryBson(std::string_view traceparent) {
+    return BSON("otel" << BSON("traceparent" << traceparent));
+}
+
+BSONObj makeTelemetryBsonOfSize(std::string_view traceparent, int targetSize) {
+    auto base = BSON("otel" << BSON("traceparent" << traceparent) << "padding" << "");
+    const int padding = std::max(0, targetSize - base.objsize());
+    return BSON("otel" << BSON("traceparent" << traceparent) << "padding"
+                       << std::string(padding, 'x'));
+}
+}  // namespace
+
+TEST(OpMsgSerializer, OtelTelemetryContext) {
+    auto msg = OpMsg{};
+    msg.body = fromjson("{ping: 1}");
+    msg.telemetryContext = TelemetryContextSection::parse(makeTelemetryBson(kValidTraceparent));
+
+    testSerializer(msg.serialize(),
+                   OpMsgBytes{
+                       kNoFlags,
+                       kTelemetrySection,
+                       makeTelemetryBson(kValidTraceparent),
+                       kBodySection,
+                       fromjson("{ping: 1}"),
+                   });
+}
+
+TEST_F(OpMsgParser, SucceedsWithTelemetryContext) {
+    auto msg =
+        OpMsgBytes{
+            kNoFlags,
+            kTelemetrySection,
+            makeTelemetryBson(kValidTraceparent),
+            kBodySection,
+            fromjson("{ping: 1}"),
+        }
+            .parse();
+
+    ASSERT_BSONOBJ_EQ(msg.body, fromjson("{ping: 1}"));
+    ASSERT(msg.telemetryContext);
+    ASSERT_EQ(msg.telemetryContext->getOtel().getTraceparent(), kValidTraceparent);
+}
+
+TEST_F(OpMsgParser, SucceedsWithBodyThenTelemetryContext) {
+    auto msg =
+        OpMsgBytes{
+            kNoFlags,
+            kBodySection,
+            fromjson("{ping: 1}"),
+            kTelemetrySection,
+            makeTelemetryBson(kValidTraceparent),
+        }
+            .parse();
+
+    ASSERT_BSONOBJ_EQ(msg.body, fromjson("{ping: 1}"));
+    ASSERT(msg.telemetryContext);
+    ASSERT_EQ(msg.telemetryContext->getOtel().getTraceparent(), kValidTraceparent);
+}
+
+TEST_F(OpMsgParser, NoTelemetryContextWhenAbsent) {
+    auto msg =
+        OpMsgBytes{
+            kNoFlags,
+            kBodySection,
+            fromjson("{ping: 1}"),
+        }
+            .parse();
+
+    ASSERT_FALSE(msg.telemetryContext);
+}
+
+TEST_F(OpMsgParser, FailsWithInvalidTraceparent) {
+    auto msg = OpMsgBytes{
+        kNoFlags,
+        kTelemetrySection,
+        makeTelemetryBson("not-a-valid-traceparent"),
+        kBodySection,
+        fromjson("{ping: 1}"),
+    };
+
+    ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::BadValue);
+}
+
+TEST_F(OpMsgParser, FailsWhenTelemetryContextExceedsMaxSize) {
+    auto msg = OpMsgBytes{
+        kNoFlags,
+        kTelemetrySection,
+        makeTelemetryBsonOfSize(kValidTraceparent, 8 * 1024),
+        kBodySection,
+        fromjson("{ping: 1}"),
+    };
+
+    ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::BSONObjectTooLarge);
+}
+
+TEST_F(OpMsgParser, SucceedsWithTelemetryContextNearMaxSize) {
+    auto msg =
+        OpMsgBytes{
+            kNoFlags,
+            kTelemetrySection,
+            makeTelemetryBsonOfSize(kValidTraceparent, 2 * 1024),
+            kBodySection,
+            fromjson("{ping: 1}"),
+        }
+            .parse();
+
+    ASSERT_BSONOBJ_EQ(msg.body, fromjson("{ping: 1}"));
+    ASSERT(msg.telemetryContext);
+    EXPECT_EQ(msg.telemetryContext->getOtel().getTraceparent(), kValidTraceparent);
+}
+
+TEST_F(OpMsgParser, FailsWithMultipleTelemetryContexts) {
+    auto msg = OpMsgBytes{
+        kNoFlags,
+        kTelemetrySection,
+        makeTelemetryBson(kValidTraceparent),
+        kTelemetrySection,
+        makeTelemetryBson(kValidTraceparent),
+        kBodySection,
+        fromjson("{ping: 1}"),
+    };
+
+    ASSERT_THROWS_WITH_CHECK(msg.parse(), AssertionException, [](const AssertionException& ex) {
+        ASSERT_EQ(ex.code(), ErrorCodes::BadValue);
+        ASSERT_STRING_CONTAINS(ex.reason(), "Multiple telemetry context sections in message");
+    });
+}
+
+TEST_F(OpMsgParser, FailsWithMalformedTelemetryBson) {
+    auto msg = OpMsgBytes{
+        kNoFlags,
+        kTelemetrySection,
+        int32_t{5},  // BSON object size: 4-byte length + 1-byte terminator.
+        '\x01',      // Not the required 0x00 EOO terminator, so this is not valid BSON.
+        kBodySection,
+        fromjson("{ping: 1}"),
+    };
+
+    ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::InvalidBSON);
 }
 
 TEST(OpMsgSerializer, BodyAndSequenceInPlace) {
@@ -840,92 +977,6 @@ protected:
     ServiceContext::UniqueClient client;
 };
 
-TEST_F(OpMsgWithAuth, ParseValidatedTenancyScopeFromSecurityToken) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
-
-    const auto kTenantId = TenantId(OID::gen());
-    const auto token = std::string{auth::ValidatedTenancyScopeFactory::create(
-                                       UserName("user", "admin", kTenantId),
-                                       "secret"_sd,
-                                       auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                                       auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
-                                       .getOriginalToken()};
-    auto msg =
-        OpMsgBytes{
-            kNoFlags,  //
-            kBodySection,
-            fromjson("{ping: 1}"),
-
-            kDocSequenceSection,
-            Sized{
-                "docs",  //
-                fromjson("{a: 1}"),
-                fromjson("{a: 2}"),
-            },
-
-            kSecurityTokenSection,
-            token,
-        }
-            .parse(client.get());
-
-    auto body = BSON("ping" << 1);
-
-    ASSERT(msg.validatedTenancyScope);
-    ASSERT_EQ(msg.validatedTenancyScope->tenantId(), kTenantId);
-}
-
-TEST_F(OpMsgWithAuth, ValidatedTenancyScopeShouldNotBeSerialized) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
-
-    const auto kTenantId = TenantId(OID::gen());
-
-    const auto token = std::string{auth::ValidatedTenancyScopeFactory::create(
-                                       kTenantId,
-                                       auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy,
-                                       auth::ValidatedTenancyScopeFactory::TenantForTestingTag{})
-                                       .getOriginalToken()};
-
-    const auto body = BSON("ping" << 1);
-    auto msgBytes = OpMsgBytes{
-        kNoFlags,  //
-        kSecurityTokenSection,
-        token,
-
-        kDocSequenceSection,
-        Sized{
-            "docs",  //
-            fromjson("{a: 1}"),
-            fromjson("{a: 2}"),
-        },
-        kBodySection,
-        body,
-    };
-    auto msg = msgBytes.parse(client.get());
-    ASSERT(msg.validatedTenancyScope);
-
-    auto serializedMsg = msg.serialize();
-    testSerializer(serializedMsg,
-                   OpMsgBytes{
-                       kNoFlags,  //
-                       kSecurityTokenSection,
-                       token,
-
-                       kDocSequenceSection,
-                       Sized{
-                           "docs",  //
-                           fromjson("{a: 1}"),
-                           fromjson("{a: 2}"),
-                       },
-                       kBodySection,
-                       body,
-                   });
-}
-
 TEST(OpMsgRequest, GetDatabaseWorks) {
     OpMsgRequest msg;
     msg.body = fromjson("{$db: 'foo'}");
@@ -954,19 +1005,18 @@ TEST(OpMsgRequest, GetDatabaseThrowsMissing) {
 }
 
 TEST(OpMsgRequestBuilder, WithVTS) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     const TenantId tenantId(OID::gen());
     const auto vts = auth::ValidatedTenancyScopeFactory::create(
         UserName("user", "admin", tenantId),
-        "secret"_sd,
+        "secret"sv,
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
-    const StringData dbString = "testDb";
+    const std::string_view dbString = "testDb";
     auto const body = fromjson("{ping: 1}");
 
     OpMsgRequest msg = OpMsgRequestBuilder::create(
@@ -977,13 +1027,12 @@ TEST(OpMsgRequestBuilder, WithVTS) {
 }
 
 TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     const TenantId tenantId(OID::gen());
-    const StringData dbString = "testDb";
+    const std::string_view dbString = "testDb";
     const std::string dbStringWithTid = str::stream() << tenantId.toString() << "_" << dbString;
     auto const body = fromjson("{ping: 1}");
 
@@ -991,7 +1040,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
 
     auth::ValidatedTenancyScope vts = auth::ValidatedTenancyScopeFactory::create(
         UserName("user", "admin", tenantId),
-        "secret"_sd,
+        "secret"sv,
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
@@ -1000,66 +1049,6 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
     ASSERT(msg.validatedTenancyScope);
     ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
     ASSERT_EQ(msg.parseDbName().toString_forTest(), dbString);
-}
-
-void CheckVtsSetsPrefix(Client* client, bool simulateAtlasProxyTenantProtocol) {
-    const auto kTenantId = TenantId(OID::gen());
-    const auto token =
-        std::string{auth::ValidatedTenancyScopeFactory::create(
-                        UserName("user", "admin", kTenantId),
-                        "secret"_sd,
-                        simulateAtlasProxyTenantProtocol
-                            ? auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy
-                            : auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                        auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
-                        .getOriginalToken()};
-    auto msg =
-        OpMsgBytes{
-            kNoFlags,  //
-            kBodySection,
-            fromjson("{ping: 1}"),
-
-            kDocSequenceSection,
-            Sized{
-                "docs",  //
-                fromjson("{a: 1}"),
-                fromjson("{a: 2}"),
-            },
-
-            kSecurityTokenSection,
-            token,
-        }
-            .parse(client);
-    auth::ValidatedTenancyScope vts = msg.validatedTenancyScope.value();
-    ASSERT_TRUE(vts.isFromAtlasProxy() == simulateAtlasProxyTenantProtocol);
-
-    auto serializedMsg = msg.serialize();
-    auto request = OpMsgRequest::parse(serializedMsg, client);
-    ASSERT(request.validatedTenancyScope);
-    ASSERT_EQ(request.getValidatedTenantId().value(), vts.tenantId());
-    ASSERT_TRUE(request.validatedTenancyScope->isFromAtlasProxy() ==
-                simulateAtlasProxyTenantProtocol);
-    ASSERT_EQ(request.getSerializationContext().getPrefix(),
-              simulateAtlasProxyTenantProtocol ? SerializationContext::Prefix::IncludePrefix
-                                               : SerializationContext::Prefix::ExcludePrefix);
-}
-
-TEST_F(OpMsgWithAuth, TestVTSSetsPrefixStateFalse) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
-
-    CheckVtsSetsPrefix(client.get(), false);
-}
-
-TEST_F(OpMsgWithAuth, TestVTSSetsPrefixStateTrue) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
-
-    CheckVtsSetsPrefix(client.get(), true);
 }
 
 void CheckCommandMsgIdlParsingForOpMsgRequest(bool simulateAtlasProxyTenantProtocol) {
@@ -1083,31 +1072,28 @@ void CheckCommandMsgIdlParsingForOpMsgRequest(bool simulateAtlasProxyTenantProto
 }
 
 TEST_F(OpMsgWithAuth, TestExpectPrefixTrueParsedInMsg) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     CheckCommandMsgIdlParsingForOpMsgRequest(true);
 }
 
 TEST_F(OpMsgWithAuth, TestExpectPrefixFalseParsedInMsg) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     CheckCommandMsgIdlParsingForOpMsgRequest(false);
 }
 
 TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixFalse) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     const TenantId tenantId(OID::gen());
-    const StringData dbString = "testDb";
+    const std::string_view dbString = "testDb";
     const std::string dbStringWithTid = str::stream() << tenantId.toString() << "_" << dbString;
     auto const body = fromjson("{ping: 1}");
 
@@ -1115,7 +1101,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixFalse) {
 
     auth::ValidatedTenancyScope vts = auth::ValidatedTenancyScopeFactory::create(
         UserName("user", "admin", tenantId),
-        "secret"_sd,
+        "secret"sv,
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
@@ -1127,13 +1113,12 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixFalse) {
 }
 
 TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
     const TenantId tenantId(OID::gen());
-    const StringData dbString = "testDb";
+    const std::string_view dbString = "testDb";
     const std::string dbStringWithTid = str::stream() << tenantId.toString() << "_" << dbString;
     auto const body = fromjson("{ping: 1}");
 
@@ -1141,7 +1126,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
 
     auth::ValidatedTenancyScope vts = auth::ValidatedTenancyScopeFactory::create(
         UserName("user", "admin", tenantId),
-        "secret"_sd,
+        "secret"sv,
         auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
@@ -1153,19 +1138,17 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
 }
 
 TEST(OpMsgRequestBuilder, CreateDoesNotCopy) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    RAIIServerParameterControllerForTest requireTenantIdController("featureFlagRequireTenantID",
-                                                                   true);
-    RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
-    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
-                                                          "secret");
+    unittest::ServerParameterGuard multitenancyController("multitenancySupport", true);
+    unittest::ServerParameterGuard requireTenantIdController("featureFlagRequireTenantID", true);
+    unittest::ServerParameterGuard securityTokenController("featureFlagSecurityToken", true);
+    unittest::ServerParameterGuard secretController("testOnlyValidatedTenancyScopeKey", "secret");
 
 
     const TenantId tenantId(OID::gen());
 
     auth::ValidatedTenancyScope vts = auth::ValidatedTenancyScopeFactory::create(
         UserName("user", "admin", tenantId),
-        "secret"_sd,
+        "secret"sv,
         auth::ValidatedTenancyScope::TenantProtocol::kDefault,
         auth::ValidatedTenancyScopeFactory::TokenForTestingTag{});
 
@@ -1200,96 +1183,6 @@ TEST(OpMsgTest, EmptyMessageWithChecksumFlag) {
     // but no checksum was included.
     auto msg = OpMsgBytes{OpMsg::kChecksumPresent};
     ASSERT_THROWS_CODE(msg.parse(), AssertionException, ErrorCodes::InvalidOpMsgSize);
-}
-
-TEST_F(OpMsgWithAuth, GetDbNameWithVTS) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
-
-    const auto kTenantId = TenantId(OID::gen());
-    std::string db = "myDb";
-    BSONObjBuilder builder;
-    builder.append("ping", 1).append("$db", db);
-
-    const auto token = std::string{auth::ValidatedTenancyScopeFactory::create(
-                                       kTenantId,
-                                       auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-                                       auth::ValidatedTenancyScopeFactory::TenantForTestingTag{})
-                                       .getOriginalToken()};
-
-    const auto body = builder.obj();
-    OpMsg msg =
-        OpMsgBytes{
-            kNoFlags,
-            kBodySection,
-            body,
-            kDocSequenceSection,
-            Sized{
-                "docs",
-                fromjson("{a: 1}"),
-                fromjson("{a: 2}"),
-            },
-            kSecurityTokenSection,
-            token,
-        }
-            .parse(client.get());
-
-
-    const DatabaseName expectedTenantDbName =
-        DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
-    using SC = SerializationContext;
-
-    // Test the request which has tenant prefix.
-    OpMsgRequest request = OpMsgRequest(std::move(msg));
-    ASSERT_EQ(request.getSerializationContext(),
-              SerializationContext(
-                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::ExcludePrefix));
-    ASSERT_EQ(request.parseDbName(), expectedTenantDbName);
-}
-
-TEST_F(OpMsgWithAuth, GetDbNameWithVTSIncludePrefix) {
-    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
-    AuthorizationSessionImplTestHelper::grantUseTenant(*(client.get()));
-
-    const auto kTenantId = TenantId(OID::gen());
-    std::string db = kTenantId.toString() + "_myDb";
-    BSONObjBuilder builder;
-    builder.append("ping", 1).append("$db", db);
-
-    const auto token = std::string{auth::ValidatedTenancyScopeFactory::create(
-                                       kTenantId,
-                                       auth::ValidatedTenancyScope::TenantProtocol::kAtlasProxy,
-                                       auth::ValidatedTenancyScopeFactory::TenantForTestingTag{})
-                                       .getOriginalToken()};
-
-    const auto body = builder.obj();
-    OpMsg msg =
-        OpMsgBytes{
-            kNoFlags,  //
-            kBodySection,
-            body,
-            kDocSequenceSection,
-            Sized{
-                "docs",  //
-                fromjson("{a: 1}"),
-                fromjson("{a: 2}"),
-            },
-            kSecurityTokenSection,
-            token,
-        }
-            .parse(client.get());
-
-    const DatabaseName expectedTenantDbName =
-        DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
-    using SC = SerializationContext;
-
-    // Test the request which does not have tenant prefix.
-    const DatabaseName expectedDbName = DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
-    OpMsgRequest request{std::move(msg)};
-    ASSERT_EQ(request.getSerializationContext(),
-              SerializationContext(
-                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::IncludePrefix));
-    ASSERT_EQ(request.parseDbName(), expectedDbName);
 }
 
 }  // namespace

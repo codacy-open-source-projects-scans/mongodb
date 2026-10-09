@@ -9,7 +9,7 @@
  *   does_not_support_config_fuzzer,
  *   # This will fail if using transactions because the FSM will attempt to call getMore on a cursor
  *   # that's been created outside of the transaction.
- *   does_not_support_transactions
+ *   does_not_support_transactions,
  * ]
  */
 
@@ -29,7 +29,12 @@ export const $config = (function () {
     function runGetMoreOnCursor(db, collName, cursorIndex, batchSize, cursorIds, sessionId) {
         // See comment at the end of setup() for why we need eval().
         const cursorId = eval(cursorIds[cursorIndex]);
-        const res = db.runCommand({getMore: cursorId, collection: collName, batchSize, lsid: {id: eval(sessionId)}});
+        const res = db.runCommand({
+            getMore: cursorId,
+            collection: collName,
+            batchSize,
+            lsid: {id: eval(sessionId)},
+        });
 
         // If the getMore was successful, assert we have enough results returned; otherwise, it
         // should have because another worker thread has that cursor in use.
@@ -47,7 +52,14 @@ export const $config = (function () {
     let states = (function () {
         function makeConsumerCallback(consumerId) {
             return function consumerCallback(db, collName) {
-                return runGetMoreOnCursor(db, collName, consumerId, this.batchSize, this.cursorIds, this.sessionId);
+                return runGetMoreOnCursor(
+                    db,
+                    collName,
+                    consumerId,
+                    this.batchSize,
+                    this.cursorIds,
+                    this.sessionId,
+                );
             };
         }
 
@@ -62,7 +74,14 @@ export const $config = (function () {
         };
     })();
 
-    let allStatesEqual = {init: 0, consumer0: 0.2, consumer1: 0.2, consumer2: 0.2, consumer3: 0.2, consumer4: 0.2};
+    let allStatesEqual = {
+        init: 0,
+        consumer0: 0.2,
+        consumer1: 0.2,
+        consumer2: 0.2,
+        consumer3: 0.2,
+        consumer4: 0.2,
+    };
     let transitions = {
         init: allStatesEqual,
         consumer0: allStatesEqual,
@@ -73,9 +92,22 @@ export const $config = (function () {
     };
 
     function setup(db, collName, cluster) {
+        // Exchange requires an internal client connection. Create one by sending hello with
+        // internalClient.
+        const internalConn = (() => {
+            const conn = new Mongo(db.getMongo().host);
+            assert.commandWorked(
+                conn.getDB("admin").runCommand({
+                    hello: 1,
+                    internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)},
+                }),
+            );
+            return conn;
+        })();
+
         // Start a session so we can pass the sessionId from when we retrieved the cursors to the
         // getMores where we want to iterate the cursors.
-        const session = db.getMongo().startSession();
+        const session = internalConn.startSession();
 
         // Load data.
         const bulk = db[collName].initializeUnorderedBulkOp();
@@ -98,12 +130,15 @@ export const $config = (function () {
                     bufferSize: NumberInt(this.bufferSize),
                 },
                 cursor: {batchSize: 0},
+                readConcern: {},
+                writeConcern: {},
             }),
         );
 
         // Save the cursor ids to $config.data so each of the worker threads has access to the
         // cursors, as well as the sessionId.
         assert.eq(this.numConsumers, res.cursors.length);
+        this.internalConn = internalConn;
         this.sessionId = tojson(session.getSessionId()["id"]);
         this.cursorIds = [];
         for (const cursor of res.cursors) {

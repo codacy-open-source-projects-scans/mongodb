@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/topology/vector_clock/vector_clock.h"
 
@@ -101,7 +75,11 @@ void VectorClock::registerVectorClockOnServiceContext(ServiceContext* service,
 }
 
 VectorClock::VectorClock() {
-    ObservableMutexRegistry::get().add("VectorClock::_mutex", _mutex);
+    ObservableMutexRegistry::get().add("vectorClockMutex", _mutex);
+    const auto initialRaw = kInitialComponentTime.asTimestamp().asULL();
+    for (auto& slot : _vectorTimeShadow) {
+        slot.storeRelaxed(initialRaw);
+    }
 }
 
 VectorClock::~VectorClock() = default;
@@ -143,12 +121,24 @@ void VectorClock::_ensurePassesRateLimiter(ServiceContext* service,
 void VectorClock::_advanceTime(LogicalTimeArray&& newTime) {
     _ensurePassesRateLimiter(_service, newTime);
 
+    bool needsAdvance = false;
+    for (size_t i = 0; i < static_cast<size_t>(Component::_kNumComponents); ++i) {
+        auto component = static_cast<Component>(i);
+        if (newTime[component].asTimestamp().asULL() > _vectorTimeShadow[component].loadRelaxed()) {
+            needsAdvance = true;
+            break;
+        }
+    }
+    if (!needsAdvance) {
+        return;
+    }
+
     std::lock_guard lock(_mutex);
-    auto it = _vectorTime.begin();
-    auto newIt = newTime.begin();
-    for (; it != _vectorTime.end() && newIt != newTime.end(); ++it, ++newIt) {
-        if (*newIt > *it) {
-            *it = std::move(*newIt);
+    for (size_t i = 0; i < static_cast<size_t>(Component::_kNumComponents); ++i) {
+        auto component = static_cast<Component>(i);
+        if (newTime[component] > _vectorTime[component]) {
+            _vectorTime[component] = std::move(newTime[component]);
+            _vectorTimeShadow[component].storeRelaxed(_vectorTime[component].asTimestamp().asULL());
         }
     }
 }
@@ -445,6 +435,11 @@ void VectorClock::resetVectorClock_forTest() {
     auto it = _vectorTime.begin();
     for (; it != _vectorTime.end(); ++it) {
         *it = VectorClock::kInitialComponentTime;
+    }
+    // Reset the shadow alongside _vectorTime so the _advanceTime precheck sees fresh values.
+    const auto initialRaw = kInitialComponentTime.asTimestamp().asULL();
+    for (auto& slot : _vectorTimeShadow) {
+        slot.storeRelaxed(initialRaw);
     }
     _isEnabled.store(true);
 }

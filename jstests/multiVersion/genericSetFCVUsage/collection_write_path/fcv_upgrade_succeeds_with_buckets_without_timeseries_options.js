@@ -14,15 +14,8 @@ const dbpath = MongoRunner.dataPath + testName;
 const dbName = `db_${testName}`;
 const bucketCollName = "system.buckets.coll";
 
-function testUpgradeFromFCV(conn, fromFCV) {
+function testUpgradeFromFCV(conn, fromFCV, awaitReplicationFn) {
     const db = conn.getDB(dbName);
-
-    for (const node of DiscoverTopology.findNonConfigNodes(conn)) {
-        const nodeConn = new Mongo(node);
-        if (!FixtureHelpers.isMongos(nodeConn.getDB("admin"))) {
-            configureFailPoint(nodeConn, "skipCreateTimeseriesBucketsWithoutOptionsCheck");
-        }
-    }
 
     // Downgrade to fromFCV version
     assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: fromFCV, confirm: true}));
@@ -31,12 +24,41 @@ function testUpgradeFromFCV(conn, fromFCV) {
     assert.commandWorked(db.createCollection("normalColl"));
 
     // Create bucket collection without timeseries options
-    assert.commandWorked(db.createCollection(bucketCollName));
+    // Those can not be created on newer versions, but customers may inherit them from older versions.
+    function disableSystemBucketsCreationGuardrails(skip) {
+        for (const node of DiscoverTopology.findNonConfigNodes(conn)) {
+            const conn = new Mongo(node);
+            if (FixtureHelpers.isMongos(conn.getDB("admin"))) {
+                continue;
+            }
+            assert.commandWorked(
+                conn.adminCommand({setParameter: 1, allowDirectSystemBucketsAccess: skip}),
+            );
+            configureFailPoint(
+                conn,
+                "skipCreateTimeseriesBucketsWithoutOptionsCheck",
+                {},
+                skip ? "alwaysOn" : "off",
+            );
+            configureFailPoint(
+                conn,
+                "skipCreateTimeseriesVersionMismatchCheck",
+                {},
+                skip ? "alwaysOn" : "off",
+            );
+        }
+    }
 
+    disableSystemBucketsCreationGuardrails(true);
+    assert.commandWorked(db.createCollection(bucketCollName));
     assert.commandWorked(db[bucketCollName].insertOne({doc: 1}));
+    awaitReplicationFn();
+    disableSystemBucketsCreationGuardrails(false);
 
     // Upgrade succeeds even though we have an invalid bucket collection
-    assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    assert.commandWorked(
+        db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}),
+    );
 
     // verify collection still exists after upgrade
     assert.eq(1, db.getCollectionInfos({name: bucketCollName}).length);
@@ -49,7 +71,7 @@ function testAllTopologies(fromFCV) {
         jsTest.log("Testing upgrade with standalone");
         let conn = MongoRunner.runMongod({dbpath: dbpath});
 
-        testUpgradeFromFCV(conn, fromFCV);
+        testUpgradeFromFCV(conn, fromFCV, () => {});
 
         MongoRunner.stopMongod(conn);
     }
@@ -60,7 +82,9 @@ function testAllTopologies(fromFCV) {
         rst.startSet();
         rst.initiate();
 
-        testUpgradeFromFCV(rst.getPrimary(), fromFCV);
+        testUpgradeFromFCV(rst.getPrimary(), fromFCV, () => {
+            rst.awaitReplication();
+        });
         rst.stopSet();
     }
 
@@ -68,7 +92,9 @@ function testAllTopologies(fromFCV) {
         jsTest.log("Testing upgrade with sharded cluster");
         const st = new ShardingTest({shards: 2});
 
-        testUpgradeFromFCV(st.s, fromFCV);
+        testUpgradeFromFCV(st.s, fromFCV, () => {
+            st.awaitReplicationOnShards();
+        });
 
         st.stop();
     }

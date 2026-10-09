@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2022-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -41,10 +14,12 @@
 
 #include <memory>
 #include <ostream>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 class SBEPrimBinaryTest : public GoldenEExpressionTestFixture {
 public:
@@ -64,7 +39,7 @@ public:
 
     void runBinaryOpTest(std::ostream& os,
                          EPrimBinary::Op op,
-                         std::vector<TypedValue>& testValues) {
+                         const std::vector<value::TagValueOwned>& testValues) {
         value::ViewOfValueAccessor lhsAccessor;
         value::ViewOfValueAccessor rhsAccessor;
         auto lhsSlot = bindAccessor(&lhsAccessor);
@@ -78,18 +53,18 @@ public:
         printCompiledExpression(os, *compiledExpr);
 
         // Verify the operator table
-        for (auto lhs : testValues)
-            for (auto rhs : testValues) {
-                lhsAccessor.reset(lhs.first, lhs.second);
-                rhsAccessor.reset(rhs.first, rhs.second);
+        for (const auto& lhs : testValues)
+            for (const auto& rhs : testValues) {
+                lhsAccessor.reset(lhs.tag(), lhs.value());
+                rhsAccessor.reset(rhs.tag(), rhs.value());
                 executeAndPrintVariation(os, *compiledExpr);
             }
     }
 
     void runBinaryOpCollationTest(std::ostream& os,
                                   EPrimBinary::Op op,
-                                  std::vector<TypedValue>& testValues,
-                                  std::vector<TypedValue>& collValues) {
+                                  const std::vector<value::TagValueOwned>& testValues,
+                                  const std::vector<value::TagValueOwned>& collValues) {
         value::ViewOfValueAccessor lhsAccessor;
         value::ViewOfValueAccessor rhsAccessor;
         value::ViewOfValueAccessor collAccessor;
@@ -106,52 +81,51 @@ public:
         printCompiledExpression(os, *compiledExpr);
 
         // Verify the operator table.
-        for (auto lhs : testValues)
-            for (auto rhs : testValues)
-                for (auto coll : collValues) {
-                    lhsAccessor.reset(lhs.first, lhs.second);
-                    rhsAccessor.reset(rhs.first, rhs.second);
-                    collAccessor.reset(coll.first, coll.second);
+        for (const auto& lhs : testValues)
+            for (const auto& rhs : testValues)
+                for (const auto& coll : collValues) {
+                    lhsAccessor.reset(lhs.tag(), lhs.value());
+                    rhsAccessor.reset(rhs.tag(), rhs.value());
+                    collAccessor.reset(coll.tag(), coll.value());
                     executeAndPrintVariation(os, *compiledExpr);
                 }
     }
 
 protected:
-    std::vector<TypedValue> boolTestValues = {makeNothing(), makeBool(false), makeBool(true)};
-    ValueVectorGuard boolTestValuesGuard{boolTestValues};
+    std::vector<value::TagValueOwned> boolTestValues =
+        makeOwnedVector({makeNothing(), makeBool(false), makeBool(true)});
 
-    std::vector<TypedValue> numericTestValues = {makeNothing(),
-                                                 makeInt32(12),
-                                                 makeInt32(23),
-                                                 makeInt64(123),
-                                                 makeDouble(123.5),
-                                                 value::makeCopyDecimal(Decimal128(223.5))};
-    ValueVectorGuard numericTestValuesGuard{numericTestValues};
+    std::vector<value::TagValueOwned> numericTestValues =
+        makeOwnedVector({makeNothing(),
+                         makeInt32(12),
+                         makeInt32(23),
+                         makeInt64(123),
+                         makeDouble(123.5),
+                         value::makeCopyDecimal(Decimal128(223.5))});
 
-    std::vector<TypedValue> mixedTestValues = {makeNothing(),
-                                               makeNull(),
-                                               makeBool(false),
-                                               makeBool(true),
-                                               makeInt32(12),
-                                               value::makeCopyDecimal(Decimal128(223.5)),
-                                               value::makeNewString("abc"_sd),
-                                               makeTimestamp(Timestamp(1668792433))};
-    ValueVectorGuard mixedTestValuesGuard{mixedTestValues};
+    std::vector<value::TagValueOwned> mixedTestValues =
+        makeOwnedVector({makeNothing(),
+                         makeNull(),
+                         makeBool(false),
+                         makeBool(true),
+                         makeInt32(12),
+                         value::makeCopyDecimal(Decimal128(223.5)),
+                         value::makeNewString("abc"sv),
+                         makeTimestamp(Timestamp(1668792433))});
 
-    std::vector<TypedValue> stringTestValues = {makeNothing(),
-                                                value::makeNewString("abc"),
-                                                value::makeNewString("ABC"),
-                                                value::makeNewString("abcdefghijkop"),
-                                                value::makeNewString("ABCDEFGHIJKOP")};
-    ValueVectorGuard stringTestValuesGuard{stringTestValues};
+    std::vector<value::TagValueOwned> stringTestValues =
+        makeOwnedVector({makeNothing(),
+                         value::makeNewString("abc"),
+                         value::makeNewString("ABC"),
+                         value::makeNewString("abcdefghijkop"),
+                         value::makeNewString("ABCDEFGHIJKOP")});
 
-    std::vector<TypedValue> collTestValues = {
-        makeNothing(),
-        value::makeCopyCollator(
-            CollatorInterfaceMock(CollatorInterfaceMock::MockType::kAlwaysEqual)),
-        value::makeCopyCollator(
-            CollatorInterfaceMock(CollatorInterfaceMock::MockType::kToLowerString))};
-    ValueVectorGuard collTestValuesGuard{collTestValues};
+    std::vector<value::TagValueOwned> collTestValues =
+        makeOwnedVector({makeNothing(),
+                         value::makeCopyCollator(
+                             CollatorInterfaceMock(CollatorInterfaceMock::MockType::kAlwaysEqual)),
+                         value::makeCopyCollator(CollatorInterfaceMock(
+                             CollatorInterfaceMock::MockType::kToLowerString))});
 };
 
 /* Logic Operators */
@@ -188,22 +162,22 @@ TEST_F(SBEPrimBinaryTest, BalancedAnd) {
 
     // All values are true.
     {
-        auto [tag, val] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, val);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
         TypedValue expected = makeBool(true);
-        ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+        ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
     }
 
     // One of the values is false.
     for (int falsePosition = 0; falsePosition < numSlots; falsePosition++) {
         accessors[falsePosition]->reset(value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
 
-        auto [tag, val] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, val);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
         TypedValue expected = makeBool(false);
-        ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+        ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
 
         accessors[falsePosition]->reset(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
     }
@@ -219,11 +193,11 @@ TEST_F(SBEPrimBinaryTest, BalancedAnd) {
                                             value::bitcastFrom<bool>(false));
 
 
-            auto [tag, val] = runCompiledExpression(compiledExpr.get());
-            value::ValueGuard guard(tag, val);
+            value::TagValueOwned result =
+                value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
             TypedValue expected = nothingPosition < falsePosition ? makeNothing() : makeBool(false);
-            ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+            ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
 
             accessors[falsePosition]->reset(value::TypeTags::Boolean,
                                             value::bitcastFrom<bool>(true));
@@ -256,22 +230,22 @@ TEST_F(SBEPrimBinaryTest, BalancedOr) {
 
     // All values are false.
     {
-        auto [tag, val] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, val);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
         TypedValue expected = makeBool(false);
-        ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+        ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
     }
 
     // One of the values is true.
     for (int truePosition = 0; truePosition < numSlots; truePosition++) {
         accessors[truePosition]->reset(value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
 
-        auto [tag, val] = runCompiledExpression(compiledExpr.get());
-        value::ValueGuard guard(tag, val);
+        value::TagValueOwned result =
+            value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
         TypedValue expected = makeBool(true);
-        ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+        ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
 
         accessors[truePosition]->reset(value::TypeTags::Boolean, value::bitcastFrom<bool>(false));
     }
@@ -287,11 +261,11 @@ TEST_F(SBEPrimBinaryTest, BalancedOr) {
                                            value::bitcastFrom<bool>(true));
 
 
-            auto [tag, val] = runCompiledExpression(compiledExpr.get());
-            value::ValueGuard guard(tag, val);
+            value::TagValueOwned result =
+                value::TagValueOwned::fromRaw(runCompiledExpression(compiledExpr.get()));
 
             TypedValue expected = nothingPosition < truePosition ? makeNothing() : makeBool(true);
-            ASSERT_THAT(std::make_pair(tag, val), ValueEq(expected));
+            ASSERT_THAT(std::make_pair(result.tag(), result.value()), ValueEq(expected));
 
             accessors[truePosition]->reset(value::TypeTags::Boolean,
                                            value::bitcastFrom<bool>(false));
@@ -459,34 +433,32 @@ TEST_F(SBEPrimBinaryTest, Cmp3wString) {
 
 TEST_F(SBEPrimBinaryTest, FillEmpty) {
     auto& os = gctx->outStream();
-    std::vector<TypedValue> testValues = {
-        makeNothing(), makeNull(), makeBool(false), makeBool(true)};
+    auto testValues = makeOwnedVector({makeNothing(), makeNull(), makeBool(false), makeBool(true)});
     runBinaryOpTest(os, EPrimBinary::Op::fillEmpty, testValues);
 }
 
 TEST_F(SBEPrimBinaryTest, FillEmptyWithConstant) {
     auto& os = gctx->outStream();
 
-    std::vector<TypedValue> testValues = {
-        makeNothing(), makeNull(), makeBool(true), makeBool(true)};
-    for (auto rhs : testValues) {
+    auto testValues = makeOwnedVector({makeNothing(), makeNull(), makeBool(true), makeBool(true)});
+    for (const auto& rhs : testValues) {
 
-        os << "== VARIATION rhs constant: " << rhs << std::endl;
+        os << "== VARIATION rhs constant: " << rhs.view() << std::endl;
 
         value::ViewOfValueAccessor lhsAccessor;
         auto lhsSlot = bindAccessor(&lhsAccessor);
 
         auto expr = sbe::makeE<EPrimBinary>(
-            EPrimBinary::Op::fillEmpty, makeE<EVariable>(lhsSlot), makeC(rhs));
+            EPrimBinary::Op::fillEmpty, makeE<EVariable>(lhsSlot), makeC(rhs.tag(), rhs.value()));
         printInputExpression(os, *expr);
 
         auto compiledExpr = compileExpression(*expr);
         printCompiledExpression(os, *compiledExpr);
 
         // Verify the combination table.
-        for (auto lhs : testValues) {
+        for (const auto& lhs : testValues) {
 
-            lhsAccessor.reset(lhs.first, lhs.second);
+            lhsAccessor.reset(lhs.tag(), lhs.value());
             executeAndPrintVariation(os, *compiledExpr);
         }
     }

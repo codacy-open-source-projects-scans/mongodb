@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2020-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 #include "mongo/client/streamable_replica_set_monitor_error_handler.h"
 
 #include "mongo/base/error_codes.h"
@@ -42,10 +16,10 @@
 
 
 namespace mongo {
+
 SdamErrorHandler::ErrorActions SdamErrorHandler::computeErrorActions(const HostAndPort& host,
                                                                      const Status& status,
-                                                                     HandshakeStage handshakeStage,
-                                                                     bool isApplicationOperation,
+                                                                     TriggerEvent triggerEvent,
                                                                      BSONObj bson) {
     // Initial state: don't drop connections, no immediate check, and don't generate an error server
     // description.
@@ -54,13 +28,20 @@ SdamErrorHandler::ErrorActions SdamErrorHandler::computeErrorActions(const HostA
         if (result.helloOutcome)
             _clearConsecutiveErrorsWithoutHelloOutcome(host);
 
-        LOGV2(4712102,
-              "Host failed in replica set",
-              "replicaSet"_attr = _setName,
-              "host"_attr = host,
-              "error"_attr = status,
-              "action"_attr = result);
+        if (auto severity = _hostFailedLogSeverity(host);
+            shouldLog(MONGO_LOGV2_DEFAULT_COMPONENT, severity)) {
+            LOGV2_DEBUG(4712102,
+                        severity.toInt(),
+                        "Host failed in replica set",
+                        "replicaSet"_attr = _setName,
+                        "host"_attr = host,
+                        "error"_attr = status,
+                        "action"_attr = result);
+        }
     });
+
+    bool isApplicationOperation = isApplicationEvent(triggerEvent);
+    bool isFailedRemoteCheck = _isRemoteError(bson) && !isApplicationOperation;
 
     // Helpers to mutate the actions
     const auto setCreateServerDescriptionAction = [this, &result, &host, &status, bson]() {
@@ -73,25 +54,28 @@ SdamErrorHandler::ErrorActions SdamErrorHandler::computeErrorActions(const HostA
         result.dropConnections = true;
     };
 
-    if (!_isNetworkError(status) && !_isNotMasterOrNodeRecovering(status)) {
+    // If the failure is not retriable, then signal to create a new server description. Currently,
+    // all NotPrimary and Network errors are retriable so they are redundant here, but we include
+    // them just in case that ever changes in the future.
+    if (!_isRetriableError(status) && !_isNotPrimaryError(status) && !_isNetworkError(status)) {
         setCreateServerDescriptionAction();
         return result;
     }
 
-    if (isApplicationOperation) {
+    if (isFailedRemoteCheck) {
+        setCreateServerDescriptionAction();
+    } else if (isApplicationOperation) {
         if (_isNetworkError(status)) {
-            switch (handshakeStage) {
-                case HandshakeStage::kPreHandshake:
-                    setCreateServerDescriptionAction();
-                    break;
-                case HandshakeStage::kPostHandshake:
-                    if (!_isNetworkTimeout(status)) {
-                        setCreateServerDescriptionAction();
-                    }
-                    break;
+            if (isPreHandshakeEvent(triggerEvent)) {
+                setCreateServerDescriptionAction();
+            } else if (isPostHandshakeEvent(triggerEvent) && !_isNetworkTimeout(status)) {
+                setCreateServerDescriptionAction();
             }
             setDropConnectionsAction();
-        } else if (_isNotMasterOrNodeRecovering(status)) {
+        }
+        // Currently, all NotPrimary errors are retriable so it's redundant here, but we include it
+        // just in case that ever changes in the future.
+        else if (_isRetriableError(status) || _isNotPrimaryError(status)) {
             setCreateServerDescriptionAction();
             setImmediateCheckAction();
             if (_isNodeShuttingDown(status)) {
@@ -99,19 +83,16 @@ SdamErrorHandler::ErrorActions SdamErrorHandler::computeErrorActions(const HostA
             }
         }
     } else if (_isNetworkError(status)) {
-        switch (handshakeStage) {
-            case HandshakeStage::kPreHandshake:
+        if (isPreHandshakeEvent(triggerEvent)) {
+            setCreateServerDescriptionAction();
+        } else if (isPostHandshakeEvent(triggerEvent)) {
+            int errorCount = _getConsecutiveErrorsWithoutHelloOutcome(host);
+            if (errorCount == 1) {
                 setCreateServerDescriptionAction();
-                break;
-            case HandshakeStage::kPostHandshake:
-                int errorCount = _getConsecutiveErrorsWithoutHelloOutcome(host);
-                if (errorCount == 1) {
-                    setCreateServerDescriptionAction();
-                } else {
-                    setImmediateCheckAction();
-                    _incrementConsecutiveErrorsWithoutHelloOutcome(host);
-                }
-                break;
+            } else {
+                setImmediateCheckAction();
+                _incrementConsecutiveErrorsWithoutHelloOutcome(host);
+            }
         }
         setDropConnectionsAction();
     }
@@ -129,7 +110,7 @@ BSONObj StreamableReplicaSetMonitorErrorHandler::ErrorActions::toBSON() const {
     return builder.obj();
 }
 
-bool SdamErrorHandler::_isNodeRecovering(const Status& status) const {
+bool SdamErrorHandler::_isRetriableError(const Status& status) const {
     return ErrorCodes::isA<ErrorCategory::RetriableError>(status.code());
 }
 
@@ -145,12 +126,13 @@ bool SdamErrorHandler::_isNetworkError(const Status& status) const {
     return ErrorCodes::isA<ErrorCategory::NetworkError>(status.code());
 }
 
-bool SdamErrorHandler::_isNotMasterOrNodeRecovering(const Status& status) const {
-    return _isNodeRecovering(status) || _isNotMaster(status);
+bool SdamErrorHandler::_isNotPrimaryError(const Status& status) const {
+    return ErrorCodes::isA<ErrorCategory::NotPrimaryError>(status.code());
 }
 
-bool SdamErrorHandler::_isNotMaster(const Status& status) const {
-    return ErrorCodes::isA<ErrorCategory::NotPrimaryError>(status.code());
+bool SdamErrorHandler::_isRemoteError(const BSONObj& bson) const {
+    const auto codeElem = bson["ok"];
+    return !codeElem.eoo() && !codeElem.trueValue();
 }
 
 int SdamErrorHandler::_getConsecutiveErrorsWithoutHelloOutcome(const HostAndPort& host) const {

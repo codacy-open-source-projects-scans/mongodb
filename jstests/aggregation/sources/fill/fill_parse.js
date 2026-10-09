@@ -6,7 +6,6 @@
  *   # This feature flag adjusts the desugaring a bit - requesting 'outputSortKeyMetadata' from the
  *   # $sort stage.
  *   requires_fcv_81,
- *   featureFlagRankFusionBasic,
  * ]
  */
 
@@ -30,7 +29,10 @@ assert.commandFailedWithCode(buildAndRunCommand({$fill: {}}), ErrorCodes.IDLFail
 assert.commandFailedWithCode(buildAndRunCommand({$fill: {output: {}}}), 6050203);
 
 // Fail on invalid method.
-assert.commandFailedWithCode(buildAndRunCommand({$fill: {output: {test: {method: "random"}}}}), 6050202);
+assert.commandFailedWithCode(
+    buildAndRunCommand({$fill: {output: {test: {method: "random"}}}}),
+    6050202,
+);
 
 // Fail on invalid fill specification.
 assert.commandFailedWithCode(buildAndRunCommand({$fill: {output: {test: "random"}}}), 6050200);
@@ -52,7 +54,10 @@ assert.commandFailedWithCode(
 );
 
 // Fail if 'sortBy' is invalid when using 'output.test.value'.
-assert.commandFailedWithCode(buildAndRunCommand({$fill: {output: {test: {value: "foo"}}, sortBy: {"$obj": 1}}}), 16410);
+assert.commandFailedWithCode(
+    buildAndRunCommand({$fill: {output: {test: {value: "foo"}}, sortBy: {"$obj": 1}}}),
+    16410,
+);
 
 // Fail if 'partitionBy' is invalid when using 'output.test.value'.
 assert.commandFailedWithCode(
@@ -69,7 +74,10 @@ assert.commandFailedWithCode(
 // Fail if linearFill does not receive a sortBy field.
 assert.commandFailedWithCode(
     buildAndRunCommand({
-        $fill: {output: {test: {method: "linear"}}, partitionBy: {part: "$part", partTwo: "$partTwo"}},
+        $fill: {
+            output: {test: {method: "linear"}},
+            partitionBy: {part: "$part", partTwo: "$partTwo"},
+        },
     }),
     605001,
 );
@@ -89,13 +97,24 @@ let testCases = [
         [
             {"$sort": {"sortKey": {"key": 1}, "outputSortKeyMetadata": true}},
             {
-                "$_internalSetWindowFields": {"sortBy": {"key": 1}, "output": {"val": {"$linearFill": "$val"}}},
+                "$_internalSetWindowFields": {
+                    "sortBy": {"key": 1},
+                    "output": {"val": {"$linearFill": "$val"}},
+                },
             },
         ],
         [],
     ], // 1
-    [{$fill: {output: {val: {value: 5}}}}, [{"$addFields": {"val": {$ifNull: ["$val", {"$const": 5}]}}}], []], // 2
-    [{$fill: {output: {val: {value: "$test"}}}}, [{"$addFields": {"val": {$ifNull: ["$val", "$test"]}}}], []], // 3
+    [
+        {$fill: {output: {val: {value: 5}}}},
+        [{"$addFields": {"val": {$ifNull: ["$val", {"$const": 5}]}}}],
+        [],
+    ], // 2
+    [
+        {$fill: {output: {val: {value: "$test"}}}},
+        [{"$addFields": {"val": {$ifNull: ["$val", "$test"]}}}],
+        [],
+    ], // 3
     [
         {$fill: {output: {val: {value: "$test"}, second: {method: "locf"}}}},
         [
@@ -136,7 +155,10 @@ let testCases = [
             {"$addFields": {"UUIDPLACEHOLDER": {"part": "$part", "partTwo": "$partTwo"}}},
             {"$sort": {"sortKey": {"UUIDPLACEHOLDER": 1}, "outputSortKeyMetadata": true}},
             {
-                "$_internalSetWindowFields": {"partitionBy": "$UUIDPLACEHOLDER", "output": {"val": {"$locf": "$val"}}},
+                "$_internalSetWindowFields": {
+                    "partitionBy": "$UUIDPLACEHOLDER",
+                    "output": {"val": {"$locf": "$val"}},
+                },
             },
             {"$project": {"UUIDPLACEHOLDER": false, "_id": true}},
         ],
@@ -149,13 +171,19 @@ let testCases = [
     ], // 6
     [
         {
-            $fill: {output: {val: {method: "locf"}}, partitionBy: {part: "$part", partTwo: "$partTwo"}},
+            $fill: {
+                output: {val: {method: "locf"}},
+                partitionBy: {part: "$part", partTwo: "$partTwo"},
+            },
         },
         [
             {"$addFields": {"UUIDPLACEHOLDER": {"part": "$part", "partTwo": "$partTwo"}}},
             {"$sort": {"sortKey": {"UUIDPLACEHOLDER": 1}, "outputSortKeyMetadata": true}},
             {
-                "$_internalSetWindowFields": {"partitionBy": "$UUIDPLACEHOLDER", "output": {"val": {"$locf": "$val"}}},
+                "$_internalSetWindowFields": {
+                    "partitionBy": "$UUIDPLACEHOLDER",
+                    "output": {"val": {"$locf": "$val"}},
+                },
             },
             {"$project": {"UUIDPLACEHOLDER": false, "_id": true}},
         ],
@@ -262,7 +290,7 @@ function modifyObjectAtPath(orig, path) {
 
 // TODO(SERVER-18047): Remove database creation once explain behavior is unified between replica
 // sets and sharded clusters for non-existent dbs.
-if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
+if (FixtureHelpers.isMongos(db)) {
     // Create database
     assert.commandWorked(db.adminCommand({"enableSharding": db.getName()}));
 }
@@ -279,6 +307,12 @@ for (let i = 0; i < testCases.length; i++) {
 
     assert(
         anyEq(result, testCases[i][1], false, null, "UUIDPLACEHOLDER"),
-        "Test case " + i + " failed.\n" + "Expected:\n" + tojson(testCases[i][1]) + "\nGot:\n" + tojson(result),
+        "Test case " +
+            i +
+            " failed.\n" +
+            "Expected:\n" +
+            tojson(testCases[i][1]) +
+            "\nGot:\n" +
+            tojson(result),
     );
 }

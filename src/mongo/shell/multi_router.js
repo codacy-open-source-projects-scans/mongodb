@@ -198,16 +198,29 @@ function assertIsSupportedCommand(cmd) {
         }
     }
     if (cmd.getShardVersion) {
-        throwCommandNotSupportedError("getShardVersion", "It targets a specific mongos instance", cmd);
+        throwCommandNotSupportedError(
+            "getShardVersion",
+            "It targets a specific mongos instance",
+            cmd,
+        );
     }
     if (cmd.getDatabaseVersion) {
-        throwCommandNotSupportedError("getDatabaseVersion", "It targets a specific mongos instance", cmd);
+        throwCommandNotSupportedError(
+            "getDatabaseVersion",
+            "It targets a specific mongos instance",
+            cmd,
+        );
     }
     if (cmd.getLog) {
         throwCommandNotSupportedError("getLog", "It targets a specific mongos instance", cmd);
     }
     if (cmd.configureFailPoint) {
-        throwCommandNotSupportedError("configureFailPoint", "It targets a specific mongos instance", cmd);
+        throw Error(
+            "Command configureFailPoint is not supported with random mongos dispatching given " +
+                "it targets a specific mongos instance. " +
+                "Please either disable mongos dispatching for this test via TestData.pinToSingleMongos = true or helpers from fail_point_util.js to broadcast the failpoint on every mongos. Command: " +
+                tojson(cmd),
+        );
     }
 }
 
@@ -269,7 +282,9 @@ function toConnectionsList(mongouri) {
                   .join("&")
             : "";
 
-    return mongouri.servers.map((s) => `mongodb://${s.server}/${mongouri.database}${optionsString}`);
+    return mongouri.servers.map(
+        (s) => `mongodb://${s.server}/${mongouri.database}${optionsString}`,
+    );
 }
 
 /**
@@ -309,9 +324,15 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
     });
 
     for (const mongo of this._mongoConnections) {
-        const res = assert.commandWorked(mongo._getDefaultSession().getClient().adminCommand("ismaster"));
+        const res = assert.commandWorked(
+            mongo._getDefaultSession().getClient().adminCommand("ismaster"),
+        );
         if ("isdbgrid" !== res.msg) {
-            throw Error("Multi-Router Mongo connector failed. Connection against " + mongo.host + "is not a mongos");
+            throw Error(
+                "Multi-Router Mongo connector failed. Connection against " +
+                    mongo.host +
+                    "is not a mongos",
+            );
         }
     }
 
@@ -332,7 +353,9 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
     this.isMultiRouter = true;
     this.uri = uri;
 
-    this.log("Established a Multi-Router Mongo connector. Mongos connections list: " + individualURIs);
+    this.log(
+        "Established a Multi-Router Mongo connector. Mongos connections list: " + individualURIs,
+    );
 
     // ============================================================================
     // State tracking (cursors and sessions)
@@ -383,10 +406,10 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
     // ============================================================================
 
     // Broadcast the command to all mongoses and returns error if any returns error.
-    this.broadcast = function (dbName, cmd, options, secToken) {
+    this.broadcast = function (dbName, cmd, options, secToken, traceparent) {
         let res;
         for (const mongo of this._mongoConnections) {
-            res = mongo._runCommandImpl(dbName, cmd, options, secToken);
+            res = mongo._runCommandImpl(dbName, cmd, options, secToken, traceparent);
             if (!res.ok) {
                 return res;
             }
@@ -429,7 +452,9 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
             const mongoForSession = this._sessionToMongoMap.get(cmd.lsid, cmd.txnNumber);
             if (!mongoForSession) {
                 let sessionInfo = {sessionId: cmd.lsid, txnNumber: cmd.txnNumber};
-                this.log("Found no mongo for the multi-document transaction: " + tojson(sessionInfo));
+                this.log(
+                    "Found no mongo for the multi-document transaction: " + tojson(sessionInfo),
+                );
                 if (!selectedMongo) {
                     selectedMongo = this._getNextMongo();
                 }
@@ -449,14 +474,14 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
         return selectedMongo;
     };
 
-    this._runCommandImpl = function (dbname, cmd, options, secToken) {
+    this._runCommandImpl = function (dbname, cmd, options, secToken, traceparent) {
         // Ensure we call this overridden _runCommandImpl if pinToSingleMongos is undefined or disabled.
         assert.neq(TestData.pinToSingleMongos, true);
 
         assertIsSupportedCommand(cmd);
 
         if (requiresBroadcast(cmd)) {
-            return this.broadcast(dbname, cmd, options, secToken);
+            return this.broadcast(dbname, cmd, options, secToken, traceparent);
         }
 
         const mongo = this.selectMongo(cmd);
@@ -471,12 +496,15 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
         // For strict concurrency suites this can cause tests to fail.
         if (cmd.$clusterTime) {
             const latest = this.primaryMongo.getClusterTime();
-            if (latest && bsonWoCompare({_: latest.clusterTime}, {_: cmd.$clusterTime.clusterTime}) > 0) {
+            if (
+                latest &&
+                bsonWoCompare({_: latest.clusterTime}, {_: cmd.$clusterTime.clusterTime}) > 0
+            ) {
                 cmd.$clusterTime = latest;
             }
         }
 
-        let result = mongo._runCommandImpl(dbname, cmd, options, secToken);
+        let result = mongo._runCommandImpl(dbname, cmd, options, secToken, traceparent);
 
         // Ensure the multi-router carries the latest clusterTime for the next command.
         if (result?.$clusterTime) {
@@ -509,6 +537,8 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
 
         return result;
     };
+
+    this.withoutTelemetryContext = Mongo.prototype.withoutTelemetryContext;
 
     this.adminCommand = function (cmd) {
         return Mongo.prototype.adminCommand.call(this, cmd);
@@ -580,7 +610,9 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
 
     this.isConnectedToMongos = function () {
         // Assert the primary Mongo is connected to a mongos
-        const res = assert.commandWorked(this.primaryMongo._getDefaultSession().getClient().adminCommand("ismaster"));
+        const res = assert.commandWorked(
+            this.primaryMongo._getDefaultSession().getClient().adminCommand("ismaster"),
+        );
         return "isdbgrid" === res.msg;
     };
 
@@ -603,11 +635,15 @@ function MultiRouterMongo(uri, encryptedDBClientCallback, apiParameters) {
     this.hasPrimaryMongoRefreshed = false;
     this.refreshPrimaryMongoIfNeeded = function () {
         if (!this.hasPrimaryMongoRefreshed) {
-            assert.commandWorked(this.primaryMongo._runCommandImpl("admin", {flushRouterConfig: 1}, 0, undefined));
+            assert.commandWorked(
+                this.primaryMongo._runCommandImpl("admin", {flushRouterConfig: 1}, 0, undefined),
+            );
 
             // Ensure the primary mongos has the latest topology time.
             // TODO (SERVER-60746) remove this once the issue is fixed.
-            assert.commandWorked(this.primaryMongo._runCommandImpl("config", {find: "shards"}, 0, undefined));
+            assert.commandWorked(
+                this.primaryMongo._runCommandImpl("config", {find: "shards"}, 0, undefined),
+            );
 
             this.hasPrimaryMongoRefreshed = true;
         }

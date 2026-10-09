@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/audit.h"
@@ -40,7 +14,6 @@
 #include "mongo/db/global_catalog/ddl/create_database_util.h"
 #include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
-#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
 #include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -113,11 +86,11 @@ public:
                 // get rid of this code before it hits production. The reason we take the DDL lock
                 // here is to respect the acquisition order DDL Lock -> FCV Lock, and avoid
                 // deadlocks. This is a pessimization, and thus we only do this if
-                // ShardAuthoritativeDbMetadataDDL is active in this binary.
+                // AuthoritativeShardsDDL is active in this binary.
                 // (Ignore FCV check): We need to know if the feature flag is active in any version.
                 // TODO (SERVER-102647): Remove this code.
                 boost::optional<DDLLockManager::ScopedBaseDDLLock> ddlLock;
-                if (feature_flags::gShardAuthoritativeDbMetadataDDL.isEnabledAndIgnoreFCVUnsafe()) {
+                if (feature_flags::gAuthoritativeShardsDDL.isEnabledAndIgnoreFCVUnsafe()) {
                     ddlLock.emplace(
                         opCtx,
                         shard_role_details::getLocker(opCtx),
@@ -138,9 +111,6 @@ public:
                 const auto createDatabaseDDLCoordinatorFeatureFlagEnabled =
                     feature_flags::gCreateDatabaseDDLCoordinator.isEnabled(
                         VersionContext::getDecoration(opCtx), fcvSnapshot);
-                const auto authoritativeMetadataAccessLevel =
-                    sharding_ddl_util::getGrantedAuthoritativeMetadataAccessLevel(
-                        VersionContext::getDecoration(opCtx), fcvSnapshot);
 
                 if (!createDatabaseDDLCoordinatorFeatureFlagEnabled) {
                     // (Ignore FCV check): The use isEnabledAndIgnoreFCVUnsafe is intentional, we
@@ -149,8 +119,7 @@ public:
                     // to guarantee that all in-flight legacy commands are drained after
                     // transitioning to kUpgrading during FCV upgrade.
                     // TODO (SERVER-102647): unconditionally exit the FixedFCVRegion here
-                    if (!feature_flags::gShardAuthoritativeDbMetadataDDL
-                             .isEnabledAndIgnoreFCVUnsafe()) {
+                    if (!feature_flags::gAuthoritativeShardsDDL.isEnabledAndIgnoreFCVUnsafe()) {
                         fixedFcvRegion.reset();
                     }
 
@@ -167,8 +136,6 @@ public:
                         {{NamespaceString(dbName), CoordinatorTypeEnum::kCreateDatabase}});
                     coordinatorDoc.setPrimaryShard(optResolvedPrimaryShard);
                     coordinatorDoc.setUserSelectedPrimary(optResolvedPrimaryShard.is_initialized());
-                    coordinatorDoc.setAuthoritativeMetadataAccessLevel(
-                        authoritativeMetadataAccessLevel);
                     auto createDatabaseCoordinator =
                         checked_pointer_cast<CreateDatabaseCoordinator>(
                             ShardingCoordinatorService::getService(opCtx)->getOrCreateInstance(

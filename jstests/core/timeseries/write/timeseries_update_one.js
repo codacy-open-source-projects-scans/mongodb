@@ -36,10 +36,26 @@ if (
  * Tests op-style updates.
  */
 {
-    const doc_m1_a_b = {[timeFieldName]: ISODate("2023-02-06T19:19:01Z"), [metaFieldName]: 1, _id: 1, a: 1, b: 1};
+    const doc_m1_a_b = {
+        [timeFieldName]: ISODate("2023-02-06T19:19:01Z"),
+        [metaFieldName]: 1,
+        _id: 1,
+        a: 1,
+        b: 1,
+    };
     const doc_a_b = {[timeFieldName]: ISODate("2023-02-06T19:19:01Z"), _id: 1, a: 1, b: 1};
-    const doc_m1_b = {[timeFieldName]: ISODate("2023-02-06T19:19:01Z"), [metaFieldName]: 1, _id: 1, b: 1};
-    const doc_m2_b = {[timeFieldName]: ISODate("2023-02-06T19:19:01Z"), [metaFieldName]: 2, _id: 1, b: 1};
+    const doc_m1_b = {
+        [timeFieldName]: ISODate("2023-02-06T19:19:01Z"),
+        [metaFieldName]: 1,
+        _id: 1,
+        b: 1,
+    };
+    const doc_m2_b = {
+        [timeFieldName]: ISODate("2023-02-06T19:19:01Z"),
+        [metaFieldName]: 2,
+        _id: 1,
+        b: 1,
+    };
     const doc_m1_arrayA_b = {
         [timeFieldName]: ISODate("2023-02-06T19:19:01Z"),
         [metaFieldName]: 1,
@@ -54,7 +70,13 @@ if (
         a: 1,
         b: 1,
     };
-    const doc_m1_c_d = {[timeFieldName]: ISODate("2023-02-06T19:19:02Z"), [metaFieldName]: 1, _id: 2, c: 1, d: 1};
+    const doc_m1_c_d = {
+        [timeFieldName]: ISODate("2023-02-06T19:19:02Z"),
+        [metaFieldName]: 1,
+        _id: 2,
+        c: 1,
+        d: 1,
+    };
     const query_m1_a1 = {a: {$eq: 1}, [metaFieldName]: {$eq: 1}};
     const query_m1_b1 = {b: {$eq: 1}, [metaFieldName]: {$eq: 1}};
 
@@ -224,11 +246,17 @@ if (
     const timestamp2023 = ISODate("2023-02-06T19:19:00Z");
     const timestamp2022 = ISODate("2022-02-06T19:19:00Z");
     const doc_2023_m1_a1 = {[timeFieldName]: timestamp2023, [metaFieldName]: 1, _id: 1, a: 1};
-    const doc_2022_m2_a1_newField = {[timeFieldName]: timestamp2022, [metaFieldName]: 2, _id: 1, a: 1, "newField": 42};
+    const doc_2022_m2_a1_newField = {
+        [timeFieldName]: timestamp2022,
+        [metaFieldName]: 2,
+        _id: 1,
+        a: 1,
+        "newField": 42,
+    };
 
     // Update timeField, metaField and add a new field.
     // Skip tests changing the shard key value in sharding.
-    if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
+    if (!db.getMongo().isMongos()) {
         (function testPipelineUpdateSetMultipleFields() {
             testUpdateOne({
                 initialDocList: [doc_2023_m1_a1],
@@ -278,7 +306,7 @@ if (
     const doc_t2022_m2_noId_a2 = {[timeFieldName]: timestamp2022, [metaFieldName]: 2, a: 2};
 
     // Skip tests changing the shard key value in sharding.
-    if (!db.getMongo().isMongos() && !TestData.testingReplicaSetEndpoint) {
+    if (!db.getMongo().isMongos()) {
         // Full measurement replacement: update every field in the document, including the _id.
         (function testReplacementUpdateChangeId() {
             testUpdateOne({
@@ -524,7 +552,11 @@ if (
     while (batchNum < 4) {
         let batch = [];
         for (let i = 0; i < 30; i++) {
-            const doc = {_id: i, [timeFieldName]: ISODate("2023-07-13T17:00:00Z"), value: "a".repeat(1000)};
+            const doc = {
+                _id: i,
+                [timeFieldName]: ISODate("2023-07-13T17:00:00Z"),
+                value: "a".repeat(1000),
+            };
             batch.push(doc);
         }
 
@@ -533,7 +565,11 @@ if (
     }
 
     // Update any of the measurements with a document which will exceed the 128000 byte threshold.
-    const chunkyDoc = {_id: 128000, [timeFieldName]: ISODate("2023-07-13T17:00:00Z"), value: "a".repeat(10000)};
+    const chunkyDoc = {
+        _id: 128000,
+        [timeFieldName]: ISODate("2023-07-13T17:00:00Z"),
+        value: "a".repeat(10000),
+    };
 
     const updateCommand = {update: collName, updates: [{q: {}, u: chunkyDoc, multi: false}]};
     const res = assert.commandWorked(testDB.runCommand(updateCommand));

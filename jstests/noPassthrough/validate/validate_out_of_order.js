@@ -17,15 +17,30 @@ for (let i = 0; i < 5; i++) {
 }
 
 // Test record store out-of-order detection.
-assert.commandWorked(primary.adminCommand({configureFailPoint: "failRecordStoreTraversal", mode: "alwaysOn"}));
+assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "failRecordStoreTraversal", mode: "alwaysOn"}),
+);
 let res = assert.commandWorked(coll.validate());
 assert(!res.valid);
-assert.commandWorked(primary.adminCommand({configureFailPoint: "failRecordStoreTraversal", mode: "off"}));
+// The out-of-order record store error must be disambiguated with the log id (12890000) of the
+// entry that carries the offending record details.
+assert(
+    res.errors.some((e) => e.includes("out-of-order") && e.includes("12890000")),
+    "Expected disambiguated out-of-order error referencing log id 12890000",
+    {errors: res.errors},
+);
+assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "failRecordStoreTraversal", mode: "off"}),
+);
 
 // Test index entry out-of-order detection.
-assert.commandWorked(primary.adminCommand({configureFailPoint: "failIndexKeyOrdering", mode: "alwaysOn"}));
+assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "failIndexKeyOrdering", mode: "alwaysOn"}),
+);
 res = assert.commandWorked(coll.validate());
 assert(!res.valid);
-assert.commandWorked(primary.adminCommand({configureFailPoint: "failIndexKeyOrdering", mode: "off"}));
+assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "failIndexKeyOrdering", mode: "off"}),
+);
 
 rst.stopSet();

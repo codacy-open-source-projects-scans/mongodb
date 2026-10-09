@@ -1,37 +1,13 @@
-/**
- *    Copyright (C) 2026-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/crypto/fle_crypto_test_utils.h"
 
 #include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/encryption_fields_validation.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
+
+#include <string_view>
 
 namespace mongo {
 
@@ -50,7 +26,8 @@ EncryptedFieldHelper::EncryptedFieldHelper(EncryptedField fieldSchema) {
             case QueryTypeEnum::Range:
                 _algorithm = Fle2AlgorithmInt::kRange;
                 break;
-            case QueryTypeEnum::SubstringPreview:
+            case QueryTypeEnum::SubstringPreviewDeprecated:
+            case QueryTypeEnum::Substring:
             case QueryTypeEnum::SuffixPreviewDeprecated:
             case QueryTypeEnum::Suffix:
             case QueryTypeEnum::PrefixPreviewDeprecated:
@@ -70,7 +47,7 @@ EncryptedFieldHelper::EncryptedFieldHelper(EncryptedField fieldSchema) {
 }
 
 EncryptedFieldHelper::EncryptedFieldHelper(Fle2AlgorithmInt alg,
-                                           StringData path,
+                                           std::string_view path,
                                            UUID keyId,
                                            BSONType type)
     : _algorithm(alg), _ef(keyId, std::string(path)) {
@@ -128,7 +105,8 @@ std::vector<char> EncryptedFieldHelper::generatePlaceholder(BSONElement value,
             auto lb = qtc.getStrMinQueryLength().value();
             auto ub = qtc.getStrMaxQueryLength().value();
             switch (qtc.getQueryType()) {
-                case QueryTypeEnum::SubstringPreview: {
+                case QueryTypeEnum::SubstringPreviewDeprecated:
+                case QueryTypeEnum::Substring: {
                     auto mlen = qtc.getStrMaxLength().value();
                     spec.setSubstringSpec(FLE2SubstringInsertSpec(mlen, ub, lb));
                     break;
@@ -163,13 +141,13 @@ std::vector<char> EncryptedFieldHelper::generatePlaceholder(BSONElement value,
 }
 
 
-EncryptedFieldHelper EncryptedFieldHelper::makeUnindexed(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makeUnindexed(std::string_view path,
                                                          BSONType type,
                                                          UUID indexKeyId) {
     return EncryptedFieldHelper(Fle2AlgorithmInt::kUnindexed, path, indexKeyId, type);
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makeEquality(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makeEquality(std::string_view path,
                                                         BSONType type,
                                                         UUID indexKeyId,
                                                         boost::optional<int64_t> contention) {
@@ -183,7 +161,7 @@ EncryptedFieldHelper EncryptedFieldHelper::makeEquality(StringData path,
     return res;
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makeRange(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makeRange(std::string_view path,
                                                      BSONType type,
                                                      UUID indexKeyId,
                                                      boost::optional<Value> min,
@@ -210,7 +188,7 @@ EncryptedFieldHelper EncryptedFieldHelper::makeRange(StringData path,
     return res;
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makeSuffix(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makeSuffix(std::string_view path,
                                                       BSONType type,
                                                       UUID indexKeyId,
                                                       int lb,
@@ -232,7 +210,7 @@ EncryptedFieldHelper EncryptedFieldHelper::makeSuffix(StringData path,
     return res;
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makePrefix(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makePrefix(std::string_view path,
                                                       BSONType type,
                                                       UUID indexKeyId,
                                                       int lb,
@@ -247,7 +225,7 @@ EncryptedFieldHelper EncryptedFieldHelper::makePrefix(StringData path,
     return res;
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makeSubstring(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makeSubstring(std::string_view path,
                                                          BSONType type,
                                                          UUID indexKeyId,
                                                          int lb,
@@ -258,13 +236,13 @@ EncryptedFieldHelper EncryptedFieldHelper::makeSubstring(StringData path,
                                                          boost::optional<int64_t> contention) {
     auto res =
         makeSuffix(path, type, indexKeyId, lb, ub, caseSensitive, diacriticSensitive, contention);
-    res._queries.back().setQueryType(QueryTypeEnum::SubstringPreview);
+    res._queries.back().setQueryType(QueryTypeEnum::Substring);
     res._queries.back().setStrMaxLength(mlen);
     res._ef.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{res._queries});
     return res;
 }
 
-EncryptedFieldHelper EncryptedFieldHelper::makePrefixSuffix(StringData path,
+EncryptedFieldHelper EncryptedFieldHelper::makePrefixSuffix(std::string_view path,
                                                             BSONType type,
                                                             UUID indexKeyId,
                                                             int lb,

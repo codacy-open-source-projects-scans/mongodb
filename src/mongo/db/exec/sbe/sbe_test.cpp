@@ -1,33 +1,6 @@
-/**
- *    Copyright (C) 2019-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,20 +20,22 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <string_view>
 
 
 namespace mongo::sbe {
+using namespace std::literals::string_view_literals;
 
 TEST(SBEValues, Basic) {
     {
-        const auto [tag, val] = value::makeNewString("small"_sd);
+        const auto [tag, val] = value::makeNewString("small"sv);
         ASSERT_EQUALS(tag, value::TypeTags::StringSmall);
 
         value::releaseValue(tag, val);
     }
 
     {
-        const auto [tag, val] = value::makeNewString("not so small string"_sd);
+        const auto [tag, val] = value::makeNewString("not so small string"sv);
         ASSERT_EQUALS(tag, value::TypeTags::StringBig);
 
         value::releaseValue(tag, val);
@@ -69,11 +44,11 @@ TEST(SBEValues, Basic) {
         const auto [tag, val] = value::makeNewObject();
         auto obj = value::getObjectView(val);
 
-        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"_sd);
-        obj->push_back("field"_sd, fieldTag, fieldVal);
+        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"sv);
+        obj->push_back_raw("field"sv, fieldTag, fieldVal);
 
         ASSERT_EQUALS(obj->size(), 1);
-        const auto [checkTag, checkVal] = obj->getField("field"_sd);
+        const auto [checkTag, checkVal] = obj->getField("field"sv);
 
         ASSERT_EQUALS(fieldTag, checkTag);
         ASSERT_EQUALS(fieldVal, checkVal);
@@ -84,8 +59,8 @@ TEST(SBEValues, Basic) {
         const auto [tag, val] = value::makeNewArray();
         auto obj = value::getArrayView(val);
 
-        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"_sd);
-        obj->push_back(fieldTag, fieldVal);
+        const auto [fieldTag, fieldVal] = value::makeNewString("not so small string"sv);
+        obj->push_back_raw(fieldTag, fieldVal);
 
         ASSERT_EQUALS(obj->size(), 1);
         const auto [checkTag, checkVal] = obj->getAt(0);
@@ -130,11 +105,11 @@ TEST(SBEValues, Hash) {
         auto tagDouble = value::TypeTags::NumberDouble;
         auto valDouble = value::bitcastFrom<double>(doubleValue);
 
-        auto [tagDecimal, valDecimal] = value::makeCopyDecimal(mongo::Decimal128(decimalValue));
-        value::ValueGuard guard{tagDecimal, valDecimal};
+        value::TagValueOwned decimalVal =
+            value::TagValueOwned::fromRaw(value::makeCopyDecimal(mongo::Decimal128(decimalValue)));
 
         ASSERT_EQUALS(value::hashValue(tagDouble, valDouble),
-                      value::hashValue(tagDecimal, valDecimal));
+                      value::hashValue(decimalVal.tag(), decimalVal.value()));
     };
 
     // Test bitwise identical NaNs.
@@ -213,15 +188,15 @@ TEST(SBEValues, HashCompound) {
     {
         auto [tag1, val1] = value::makeNewArray();
         auto arr1 = value::getArrayView(val1);
-        arr1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
-        arr1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
-        arr1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
+        arr1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
+        arr1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
+        arr1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
 
         auto [tag2, val2] = value::makeNewArray();
         auto arr2 = value::getArrayView(val2);
-        arr2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
-        arr2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
-        arr2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
+        arr2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
+        arr2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
+        arr2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
 
         ASSERT_EQUALS(value::hashValue(tag1, val1), value::hashValue(tag2, val2));
 
@@ -231,15 +206,15 @@ TEST(SBEValues, HashCompound) {
     {
         auto [tag1, val1] = value::makeNewObject();
         auto obj1 = value::getObjectView(val1);
-        obj1->push_back("a"_sd, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
-        obj1->push_back("b"_sd, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
-        obj1->push_back("c"_sd, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
+        obj1->push_back_raw("a"sv, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
+        obj1->push_back_raw("b"sv, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
+        obj1->push_back_raw("c"sv, value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
 
         auto [tag2, val2] = value::makeNewObject();
         auto obj2 = value::getObjectView(val2);
-        obj2->push_back("a"_sd, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
-        obj2->push_back("b"_sd, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
-        obj2->push_back("c"_sd, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
+        obj2->push_back_raw("a"sv, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
+        obj2->push_back_raw("b"sv, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
+        obj2->push_back_raw("c"sv, value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
 
         ASSERT_EQUALS(value::hashValue(tag1, val1), value::hashValue(tag2, val2));
 
@@ -250,15 +225,15 @@ TEST(SBEValues, HashCompound) {
     {
         auto [tag1, val1] = value::makeNewArraySet();
         auto set1 = value::getArraySetView(val1);
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
 
         auto [tag2, val2] = value::makeNewArraySet();
         auto set2 = value::getArraySetView(val2);
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
 
 
         ASSERT_EQUALS(value::hashValue(tag1, val1), value::hashValue(tag2, val2));
@@ -270,17 +245,17 @@ TEST(SBEValues, HashCompound) {
     {
         auto [tag1, val1] = value::makeNewArrayMultiSet();
         auto set1 = value::getArrayMultiSetView(val1);
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
-        set1->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-5));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-6));
+        set1->push_back_raw(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(-7));
 
         auto [tag2, val2] = value::makeNewArrayMultiSet();
         auto set2 = value::getArrayMultiSetView(val2);
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
-        set2->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-7.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-6.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
+        set2->push_back_raw(value::TypeTags::NumberDouble, value::bitcastFrom<double>(-5.0));
 
         ASSERT_EQUALS(value::hashValue(tag1, val1), value::hashValue(tag2, val2));
 
@@ -467,7 +442,7 @@ TEST(SBEVM, ConvertBinDataToBsonObj) {
     value::Array array;
     auto [binDataTag, binDataVal] = value::copyValue(
         value::TypeTags::bsonBinData, value::bitcastFrom<const char*>(originalBinData[0].value()));
-    array.push_back(binDataTag, binDataVal);
+    array.push_back_raw(binDataTag, binDataVal);
 
     BSONArrayBuilder builder;
     bson::convertToBsonArr(builder, &array);
@@ -503,12 +478,12 @@ TEST(SBEVM, CodeFragmentPrintStable) {
     code.appendTraverseP(0xAA, 1, vm::Instruction::Nothing);
     code.appendTraverseP(0xAA, 1, vm::Instruction::Int32One);
     code.appendTraverseF(0xBB, 1, vm::Instruction::True);
-    code.appendGetField({}, "Hello world!"_sd);
+    code.appendGetField({}, "Hello world!"sv);
     code.appendAdd({}, {});
 
     TimeZoneDatabase timezoneDB;
     code.appendDateTrunc(
-        TimeUnit::day, 1, timezoneDB.getTimeZone("America/New_York"_sd), DayOfWeek::monday);
+        TimeUnit::day, 1, timezoneDB.getTimeZone("America/New_York"sv), DayOfWeek::monday);
 
     vm::CodeFragmentPrinter printer(vm::CodeFragment::PrintFormat::Stable);
     printer.print(os, code);
@@ -561,5 +536,84 @@ TEST(SBESmallString, Length) {
         fillSmallStringTail(val, ~char(0));
         ASSERT_EQ(length, value::getStringLength(tag, val));
     }
+}
+
+// The bounded 'bson::fieldNameAndLength()' scans a word at a time rather than calling the shared
+// library 'strlen()', so cover the boundaries around the word size and an empty name.
+TEST(SBEBson, FieldNameAndLength) {
+    std::vector<std::string> names{
+        "",
+        "a",
+        "abcdefg",            // 7: one below the word size.
+        "abcdefgh",           // 8: exactly the word size.
+        "abcdefghi",          // 9: one above the word size.
+        "abcdefghijklmno",    // 15: one below two words.
+        "abcdefghijklmnop",   // 16: exactly two words.
+        "abcdefghijklmnopq",  // 17: one above two words.
+        std::string(255, 'x'),
+        // Field names are UTF-8, so bytes >= 0x80 are legal. The word-at-a-time zero-byte test
+        // relies on an '& ~word' term to keep high-bit bytes from registering as terminators, so
+        // exercise a name made entirely of them, at a length that spans a full word and a tail.
+        std::string(11, char(0xFF)),
+        "\xc3\xa9\xc3\xa8\xc3\xaa",  // "ééê" in UTF-8: six bytes, all >= 0x80.
+    };
+
+    for (const auto& name : names) {
+        BSONObj obj = BSON(name << 1);
+
+        // Skip the leading 4-byte object length to land on the first element.
+        const char* be = obj.objdata() + 4;
+        const char* end = obj.objdata() + obj.objsize();
+        auto view = bson::fieldNameAndLength(be, end);
+
+        ASSERT_EQ(name.size(), view.size()) << "name: '" << name << "'";
+        ASSERT_EQ(name, std::string(view)) << "name: '" << name << "'";
+
+        // libc is a direct oracle for the bounded scan.
+        ASSERT_EQ(std::string_view(be + 1, std::strlen(be + 1)), view) << "name: '" << name << "'";
+
+        // 'BSONElement' is the independent oracle for both the name and where the value starts,
+        // which is what 'getValue()' derives from the same length.
+        BSONElement elem = obj.firstElement();
+        ASSERT_EQ(std::string_view{elem.fieldName()}, view);
+        ASSERT_EQ(elem.value(), bson::getValue(be, end));
+    }
+}
+
+// The word-at-a-time load is only safe because it stops at 'end'. The tightest case is a short name
+// in a small object.
+TEST(SBEBson, FieldNameAndLengthStopsAtEnd) {
+    // {"a": null} is about as small as a one-field object gets: a null value occupies no bytes, so
+    // only the NUL terminator and the EOO byte follow the name.
+    BSONObj obj = BSON("a" << BSONNULL);
+
+    const char* be = obj.objdata() + 4;
+    const char* end = obj.objdata() + obj.objsize();
+    ASSERT_LT(end - (be + 1), 8) << "test no longer exercises the partial-word tail";
+
+    auto view = bson::fieldNameAndLength(be, end);
+    ASSERT_EQ("a", view);
+    ASSERT_EQ(std::string_view{obj.firstElement().fieldName()}, view);
+}
+
+// A document with several short field names walks the same path the collection scan uses when the
+// plan asks for two or more fields, so assert every name in a multi-field object round-trips.
+TEST(SBEBson, FieldNameAndLengthAcrossMultipleFields) {
+    BSONObj obj = BSON("_id" << 0 << "zero" << 0 << "hello" << "hellohellohellohellobye"
+                             << "randomInt" << 3);
+
+    const char* be = obj.objdata() + 4;
+    const char* end = obj.objdata() + obj.objsize();
+    const char* last = end - 1;
+
+    std::vector<std::string> seen;
+    while (be != last) {
+        auto view = bson::fieldNameAndLength(be, end);
+        seen.emplace_back(view);
+        be = bson::advance(be, view.size());
+    }
+
+    std::vector<std::string> expected{"_id", "zero", "hello", "randomInt"};
+    ASSERT_EQ(expected, seen);
 }
 }  // namespace mongo::sbe

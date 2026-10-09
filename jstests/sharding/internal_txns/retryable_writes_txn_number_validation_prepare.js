@@ -14,9 +14,6 @@ import {
 } from "jstests/sharding/libs/sharded_transactions_helpers.js";
 
 let numNodes = 2;
-if (TestData.doesNotSupportRestartingSecondaryWithPreparedTxn) {
-    numNodes = 1;
-}
 const rst = new ReplSetTest({nodes: numNodes});
 rst.startSet();
 rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
@@ -36,21 +33,17 @@ const kTestMode = {
     kFailoverNewPrimary: 4,
 };
 
-if (TestData.doesNotSupportGracefulStepdown) {
+if (TestData.doesNotSupportGracefulPlannedStepdown) {
     delete kTestMode.kFailoverOldPrimary;
     delete kTestMode.kFailoverNewPrimary;
 }
 
 function setUpTestMode(mode) {
     if (mode == kTestMode.kRestart) {
-        if (TestData.doesNotSupportRestartingSecondaryWithPreparedTxn) {
-            // Ensure the latest changes are checkpointed and sent to the SLS backend before the
-            // restart.
-            // TODO SERVER-115355: Remove this.
-            assert.commandWorked(rst.getPrimary().adminCommand({fsync: 1}));
-        }
-
-        rst.stopSet(null /* signal */, true /*forRestart */, {skipValidation: true, skipCheckDBHashes: true});
+        rst.stopSet(null /* signal */, true /*forRestart */, {
+            skipValidation: true,
+            skipCheckDBHashes: true,
+        });
         rst.startSet({restart: true});
         primary = rst.getPrimary();
     } else if (mode == kTestMode.kFailoverOldPrimary) {
@@ -58,7 +51,9 @@ function setUpTestMode(mode) {
         const oldSecondary = rst.getSecondary();
 
         assert.commandWorked(oldSecondary.adminCommand({replSetFreeze: ReplSetTest.kForeverSecs}));
-        assert.commandWorked(oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}));
+        assert.commandWorked(
+            oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
+        );
         assert.commandWorked(oldPrimary.adminCommand({replSetFreeze: 0}));
 
         const newPrimary = rst.getPrimary();
@@ -69,7 +64,9 @@ function setUpTestMode(mode) {
         const oldSecondary = rst.getSecondary();
 
         assert.commandWorked(oldSecondary.adminCommand({replSetFreeze: 0}));
-        assert.commandWorked(oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}));
+        assert.commandWorked(
+            oldPrimary.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true}),
+        );
 
         const newPrimary = rst.getPrimary();
         assert.neq(oldPrimary, newPrimary);
@@ -117,7 +114,9 @@ function testTxnNumberValidationStartNewTxnNumberWhilePreviousIsInPrepare(
     rst.awaitLastOpCommitted();
 
     let runNewTxnNumber = async function (primaryHost, parentSessionUUIDString, dbName, collName) {
-        const {makeCommitTransactionCmdObj} = await import("jstests/sharding/libs/sharded_transactions_helpers.js");
+        const {makeCommitTransactionCmdObj} = await import(
+            "jstests/sharding/libs/sharded_transactions_helpers.js"
+        );
         const {withRetryOnTransientTxnErrorIncrementTxnNum} = await import(
             "jstests/libs/auto_retry_transaction_in_sharding.js"
         );

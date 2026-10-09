@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
@@ -37,6 +11,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
@@ -63,13 +38,13 @@ inline ElementType findElement(ElementType first, Predicate predicate) {
 /** A predicate for findElement that matches on the field name of Elements. */
 struct FieldNameEquals {
     // The lifetime of this object must be a subset of the lifetime of 'fieldName'.
-    explicit FieldNameEquals(StringData fieldName) : fieldName(fieldName) {}
+    explicit FieldNameEquals(std::string_view fieldName) : fieldName(fieldName) {}
 
     bool operator()(const ConstElement& element) const {
         return (fieldName == element.getFieldName());
     }
 
-    StringData fieldName;
+    std::string_view fieldName;
 };
 
 /** An overload of findElement that delegates to the special implementation
@@ -82,7 +57,8 @@ inline ElementType findElement(ElementType first, FieldNameEquals predicate) {
 
 /** A convenience wrapper around findElement<ElementType, FieldNameEquals>. */
 template <typename ElementType>
-MONGO_MOD_PUBLIC inline ElementType findElementNamed(ElementType first, StringData fieldName) {
+[[MONGO_MOD_PUBLIC]] inline ElementType findElementNamed(ElementType first,
+                                                         std::string_view fieldName) {
     return findElement(first, FieldNameEquals(fieldName));
 }
 
@@ -106,7 +82,8 @@ inline ElementType findFirstChild(ElementType parent, FieldNameEquals predicate)
  *  Element is found, the returned Element's 'ok' method will return false.
  */
 template <typename ElementType>
-MONGO_MOD_PUBLIC inline ElementType findFirstChildNamed(ElementType parent, StringData fieldName) {
+[[MONGO_MOD_PUBLIC]] inline ElementType findFirstChildNamed(ElementType parent,
+                                                            std::string_view fieldName) {
     return findFirstChild(parent, FieldNameEquals(fieldName));
 }
 
@@ -284,7 +261,7 @@ std::size_t countChildren(ElementType element) {
 /** Return the full (path) name of this element separating each name with the delim string. */
 template <typename ElementType>
 std::string getFullName(ElementType element, char delim = '.') {
-    std::vector<StringData> names;
+    std::vector<std::string_view> names;
     ElementType curr = element;
     while (curr.ok() && curr.parent().ok()) {
         names.push_back(curr.getFieldName());
@@ -293,7 +270,8 @@ std::string getFullName(ElementType element, char delim = '.') {
 
     str::stream name;
     bool first = true;
-    for (std::vector<StringData>::reverse_iterator it = names.rbegin(); it != names.rend(); ++it) {
+    for (std::vector<std::string_view>::reverse_iterator it = names.rbegin(); it != names.rend();
+         ++it) {
         if (!first)
             name << delim;
         name << *it;

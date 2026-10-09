@@ -1,31 +1,5 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #include "mongo/db/router_role/cluster_commands_helpers.h"
 
@@ -478,8 +452,8 @@ void appendShardVersion(BSONObjBuilder& cmd, ShardVersion version) {
 }
 
 BSONObj applyReadWriteConcern(OperationContext* opCtx,
-                              bool appendRC,
-                              bool appendWC,
+                              bool setRC,
+                              bool setWC,
                               const BSONObj& cmdObj) {
     if (TransactionRouter::get(opCtx)) {
         // When running in a transaction, the rules are:
@@ -492,7 +466,7 @@ BSONObj applyReadWriteConcern(OperationContext* opCtx,
             return cmdObj;
         }
 
-        if (!appendRC) {
+        if (!setRC) {
             // First operation in transaction, but the caller has not requested readConcern be
             // applied, so there's nothing to do.
             return cmdObj;
@@ -500,38 +474,30 @@ BSONObj applyReadWriteConcern(OperationContext* opCtx,
 
         // First operation in transaction, so ensure that writeConcern is not applied, then continue
         // and apply the readConcern.
-        appendWC = false;
+        setWC = false;
     }
 
-    // Append all original fields to the new command.
+    // Append all original fields to the new command, dropping any existing read/write concern that
+    // will be overwritten below.
     BSONObjBuilder output;
-    bool seenReadConcern = false;
-    bool seenWriteConcern = false;
-    const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
     for (const auto& elem : cmdObj) {
         const auto name = elem.fieldNameStringData();
-        if (appendRC && name == repl::ReadConcernArgs::kReadConcernFieldName) {
-            seenReadConcern = true;
+        if (setRC && name == repl::ReadConcernArgs::kReadConcernFieldName) {
+            continue;
         }
-        if (appendWC && name == WriteConcernOptions::kWriteConcernField) {
-            seenWriteConcern = true;
+        if (setWC && name == WriteConcernOptions::kWriteConcernField) {
+            continue;
         }
-        if (!output.hasField(name)) {
-            // If mongos selected atClusterTime, forward it to the shard.
-            if (name == repl::ReadConcernArgs::kReadConcernFieldName &&
-                readConcernArgs.wasAtClusterTimeSelected()) {
-                output.appendElements(readConcernArgs.toBSON());
-            } else {
-                output.append(elem);
-            }
-        }
+
+        output.append(elem);
     }
 
-    // Finally, add the new read/write concern.
-    if (appendRC && !seenReadConcern) {
-        output.appendElements(readConcernArgs.toBSON());
+    // Unconditionally set the read/write concern from opCtx, overwriting whatever the caller
+    // provided.
+    if (setRC) {
+        output.appendElements(repl::ReadConcernArgs::get(opCtx).toBSON());
     }
-    if (appendWC && !seenWriteConcern) {
+    if (setWC) {
         output.append(WriteConcernOptions::kWriteConcernField, opCtx->getWriteConcern().toBSON());
     }
 
@@ -567,13 +533,21 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
     const DatabaseName& dbName,
     const BSONObj& cmdObj,
     const ReadPreferenceSetting& readPref,
-    Shard::RetryPolicy retryPolicy) {
+    Shard::RetryPolicy retryPolicy,
+    std::shared_ptr<executor::TaskExecutor> executor) {
     std::vector<AsyncRequestsSender::Request> requests;
     for (auto&& shardId : Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx)) {
         requests.emplace_back(std::move(shardId), cmdObj);
     }
 
-    return gatherResponses(opCtx, dbName, NamespaceString(dbName), readPref, retryPolicy, requests);
+    return gatherResponses(opCtx,
+                           dbName,
+                           NamespaceString(dbName),
+                           readPref,
+                           retryPolicy,
+                           requests,
+                           nullptr /* routingCtx */,
+                           executor);
 }
 
 std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetConfigServerAndShards(
@@ -1042,8 +1016,10 @@ StatusWith<Shard::QueryResponse> loadIndexesFromAuthoritativeShard(OperationCont
                 // For viewless timeseries collections, fetch the raw indexes instead of
                 // user-visible ones. (Note that for all other collection types, this parameter has
                 // no effect.) This is hardcoded, since all current callers of this function expect
-                // raw indexes.
-                if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+                // raw indexes. If isRawDataOperation is set, the caller already decided to use
+                // rawData, so follow that decision instead of checking over a new FCV snapshot.
+                if (isRawDataOperation(opCtx) ||
+                    gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
                         VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                     listIndexesCmd.setRawData(true);

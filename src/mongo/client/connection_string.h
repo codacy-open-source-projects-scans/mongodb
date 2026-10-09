@@ -1,36 +1,9 @@
-/**
- *    Copyright (C) 2018-present MongoDB, Inc.
- *
- *    This program is free software: you can redistribute it and/or modify
- *    it under the terms of the Server Side Public License, version 1,
- *    as published by MongoDB, Inc.
- *
- *    This program is distributed in the hope that it will be useful,
- *    but WITHOUT ANY WARRANTY; without even the implied warranty of
- *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    Server Side Public License for more details.
- *
- *    You should have received a copy of the Server Side Public License
- *    along with this program. If not, see
- *    <http://www.mongodb.com/licensing/server-side-public-license>.
- *
- *    As a special exception, the copyright holders give permission to link the
- *    code of portions of this program with the OpenSSL library under certain
- *    conditions as described in each individual source file and distribute
- *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the Server Side Public License in all respects for
- *    all of the code used other than as permitted herein. If you modify file(s)
- *    with this exception, you may extend this exception to your version of the
- *    file(s), but you are not obligated to do so. If you do not wish to do so,
- *    delete this exception statement from your version. If you delete this
- *    exception statement from all source files in the program, then also delete
- *    it in the license file.
- */
+// Copyright (c) MongoDB, Inc.
+// SPDX-License-Identifier: SSPL-1.0
 
 #pragma once
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/util/assert_util.h"
@@ -42,6 +15,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mongo {
@@ -64,7 +38,7 @@ class TransientSSLParams;
  * std::string errmsg;
  * DBClientBase * conn = cs.connect( errmsg );
  */
-class MONGO_MOD_PUBLIC ConnectionString {
+class [[MONGO_MOD_PUBLIC]] ConnectionString {
 public:
     enum class ConnectionType { kInvalid = 0, kStandalone, kReplicaSet, kCustom, kLocal };
 
@@ -73,7 +47,7 @@ public:
     /**
      * Constructs a connection string representing a replica set.
      */
-    static ConnectionString forReplicaSet(StringData replicaSetName,
+    static ConnectionString forReplicaSet(std::string_view replicaSetName,
                                           std::vector<HostAndPort> servers);
 
     /**
@@ -150,7 +124,7 @@ public:
     bool operator!=(const ConnectionString& other) const;
 
     StatusWith<std::unique_ptr<DBClientBase>> connect(
-        StringData applicationName,
+        std::string_view applicationName,
         double socketTimeout = 0,
         const MongoURI* uri = nullptr,
         const ClientAPIVersionParameters* apiParameters = nullptr,
@@ -162,7 +136,7 @@ public:
      * Deserialize a ConnectionString object from a string. Used by the IDL parser for the
      * connectionstring type. Essentially just a throwing wrapper around ConnectionString::parse.
      */
-    static ConnectionString deserialize(StringData url);
+    static ConnectionString deserialize(std::string_view url);
 
     static std::string typeToString(ConnectionType type);
 
@@ -207,7 +181,7 @@ private:
     /**
      * Creates a replica set connection string with the specified name and servers.
      */
-    ConnectionString(StringData replicaSetName, std::vector<HostAndPort> servers);
+    ConnectionString(std::string_view replicaSetName, std::vector<HostAndPort> servers);
 
     /**
      * Creates a connection string with the specified type.

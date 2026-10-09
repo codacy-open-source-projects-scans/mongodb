@@ -26,7 +26,11 @@ function checkResponseFields(command, commandType) {
     );
 
     if (commandType === "hello") {
-        assert.eq("boolean", typeof res.isWritablePrimary, "isWritablePrimary field is not a boolean" + tojson(res));
+        assert.eq(
+            "boolean",
+            typeof res.isWritablePrimary,
+            "isWritablePrimary field is not a boolean" + tojson(res),
+        );
         assert(res.isWritablePrimary === true, "isWritablePrimary field is false" + tojson(res));
     } else {
         assert.eq("boolean", typeof res.ismaster, "ismaster field is not a boolean" + tojson(res));
@@ -35,7 +39,7 @@ function checkResponseFields(command, commandType) {
     assert(res.localTime, "localTime possibly missing:" + tojson(res));
     assert(res.connectionId, "connectionId missing or false" + tojson(res));
 
-    if (!testingReplication && !TestData.testingReplicaSetEndpoint) {
+    if (!testingReplication) {
         let badFields = [];
         let unwantedReplSetFields = [
             "setName",

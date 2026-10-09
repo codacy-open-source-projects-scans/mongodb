@@ -1,6 +1,9 @@
 /**
  * Sharding tests where $search with a sort is invoked as part of a subpipeline.
  *
+ * TODO (SERVER-131069): Mock-only PSS routing for sort in sub-pipelines. Cannot migrate to
+ * real-mongot E2E.
+ *
  * @tags: [
  *     requires_fcv_70
  * ]
@@ -38,7 +41,9 @@ const st = stWithMock.st;
 
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
-assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(
+    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}),
+);
 
 const shardedColl = testDB.getCollection(shardedCollName);
 
@@ -140,7 +145,14 @@ function mockMongotShardResponses(mongotQuery) {
 
     const mongotQuery = {sort: {a: 1}};
     const sortSpec = {"$searchSortValues.a": 1};
-    mockPlanShardedSearchResponseOnConn(shardedCollName, mongotQuery, dbName, sortSpec, stWithMock, shard0Conn);
+    mockPlanShardedSearchResponseOnConn(
+        shardedCollName,
+        mongotQuery,
+        dbName,
+        sortSpec,
+        stWithMock,
+        shard0Conn,
+    );
     mockMongotShardResponses(mongotQuery);
 
     const result = unshardedColl
@@ -156,7 +168,10 @@ function mockMongotShardResponses(mongotQuery) {
         ])
         .toArray();
 
-    assert.sameMembers([{b: 1}, {b: 2}, {a: 0}, {a: 3}, {a: 5}, {a: 10}, {a: 15}, {a: 20}, {a: 22}, {a: 50}], result);
+    assert.sameMembers(
+        [{b: 1}, {b: 2}, {a: 0}, {a: 3}, {a: 5}, {a: 10}, {a: 15}, {a: 20}, {a: 22}, {a: 50}],
+        result,
+    );
 })();
 
 (function testLookupUnshardedLocalShardedForeign() {
@@ -165,7 +180,14 @@ function mockMongotShardResponses(mongotQuery) {
     // Mock PSS on primary shard's mongotmock.
     // The primary shard ends up sending planShardedSearch to its mongotmock during $lookup's
     // getNext() implementation which parses the subpipeline on each invocation.
-    mockPlanShardedSearchResponseOnConn(shardedCollName, mongotQuery, dbName, sortSpec, stWithMock, shard0Conn);
+    mockPlanShardedSearchResponseOnConn(
+        shardedCollName,
+        mongotQuery,
+        dbName,
+        sortSpec,
+        stWithMock,
+        shard0Conn,
+    );
     mockMongotShardResponses(mongotQuery);
     const result = unshardedColl
         .aggregate([
@@ -174,7 +196,11 @@ function mockMongotShardResponses(mongotQuery) {
             {
                 $lookup: {
                     from: shardedCollName,
-                    pipeline: [{$search: {sort: {a: 1}}}, {$match: {a: {$lt: 4}}}, {$project: {_id: 0}}],
+                    pipeline: [
+                        {$search: {sort: {a: 1}}},
+                        {$match: {a: {$lt: 4}}},
+                        {$project: {_id: 0}},
+                    ],
                     as: "out",
                 },
             },
@@ -187,8 +213,22 @@ function mockMongotShardResponses(mongotQuery) {
     const mongotQuery = {sort: {a: 1}};
     const sortSpec = {"$searchSortValues.a": 1};
     // Mock PSS for both shards. It is invoked during the execution of $lookup.
-    mockPlanShardedSearchResponseOnConn(shardedCollName, mongotQuery, dbName, sortSpec, stWithMock, shard0Conn);
-    mockPlanShardedSearchResponseOnConn(shardedCollName, mongotQuery, dbName, sortSpec, stWithMock, shard1Conn);
+    mockPlanShardedSearchResponseOnConn(
+        shardedCollName,
+        mongotQuery,
+        dbName,
+        sortSpec,
+        stWithMock,
+        shard0Conn,
+    );
+    mockPlanShardedSearchResponseOnConn(
+        shardedCollName,
+        mongotQuery,
+        dbName,
+        sortSpec,
+        stWithMock,
+        shard1Conn,
+    );
     // Mock search result for both shards twice. Each shard will execute the subpipeline which
     // requires it to get search results for itself and the other shard.
     for (let i = 0; i < 2; i++) {
@@ -210,7 +250,11 @@ function mockMongotShardResponses(mongotQuery) {
             {
                 $lookup: {
                     from: shardedCollName,
-                    pipeline: [{$search: {sort: {a: 1}}}, {$match: {a: {$lt: 4}}}, {$project: {_id: 0}}],
+                    pipeline: [
+                        {$search: {sort: {a: 1}}},
+                        {$match: {a: {$lt: 4}}},
+                        {$project: {_id: 0}},
+                    ],
                     as: "out",
                 },
             },
